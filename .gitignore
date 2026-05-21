@@ -1,0 +1,6 @@
+.build/
+dist/
+*.dSYM/
+.DS_Store
+build/ClipSlots.app/
+build/ClipSlots.iconset/
