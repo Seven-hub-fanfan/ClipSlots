@@ -10,7 +10,10 @@ struct ClipSlotsApp: App {
         WindowGroup {
             ContentView(store: store)
                 .frame(minWidth: 460, minHeight: 360)
-                .onAppear { appDelegate.store = store }
+                .onAppear {
+                    appDelegate.store = store
+                    appDelegate.setupHotKeys()
+                }
         }
         .windowStyle(.titleBar)
         .windowToolbarStyle(.unified)
@@ -48,6 +51,7 @@ struct ClipSlotsApp: App {
 final class SlotStoreObservable: ObservableObject {
     @Published var config = AppConfig.load()
     @Published var slots: [Int: SlotContent] = [:]
+    @Published var labels: [Int: String] = [:]
     @Published var refreshTrigger = UUID()
 
     private let storage = SlotStorage.shared
@@ -63,11 +67,16 @@ final class SlotStoreObservable: ObservableObject {
 
     func loadSlots() {
         var result: [Int: SlotContent] = [:]
+        var labelMap: [Int: String] = [:]
         for slot in 1...config.slots {
             result[slot] = storage.get(slot)
+            if let label = storage.getLabel(slot), !label.isEmpty {
+                labelMap[slot] = label
+            }
         }
         DispatchQueue.main.async {
             self.slots = result
+            self.labels = labelMap
             self.refreshTrigger = UUID()
         }
     }
@@ -104,6 +113,11 @@ final class SlotStoreObservable: ObservableObject {
         let content = storage.get(slot)
         guard !content.isEmpty else { return }
         _ = clipboard.restore(content)
+    }
+
+    func setLabel(_ slot: Int, label: String?) {
+        storage.setLabel(slot, label: label)
+        loadSlots()
     }
 
     func updateConfig(_ newConfig: AppConfig) {

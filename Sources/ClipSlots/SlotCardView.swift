@@ -3,10 +3,15 @@ import SwiftUI
 struct SlotCardView: View {
     let slot: Int
     let content: SlotContent
+    var label: String = ""
     var onPaste: () -> Void
     var onCopy: () -> Void
     var onSave: () -> Void
     var onClear: () -> Void
+    var onSetLabel: (String) -> Void
+
+    @State private var editingLabel = false
+    @State private var labelText = ""
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -21,8 +26,21 @@ struct SlotCardView: View {
                         .foregroundColor(content.isEmpty ? .secondary : .white)
                 }
 
-                Text("槽位 \(slot)")
-                    .font(.headline)
+                if editingLabel {
+                    TextField("标签", text: $labelText, onCommit: {
+                        editingLabel = false
+                        onSetLabel(labelText.trimmingCharacters(in: .whitespaces))
+                    })
+                    .textFieldStyle(.roundedBorder)
+                    .frame(width: 80)
+                } else {
+                    Text(displayTitle)
+                        .font(.headline)
+                        .onTapGesture(count: 1) {
+                            labelText = label
+                            editingLabel = true
+                        }
+                }
 
                 Spacer()
 
@@ -98,6 +116,11 @@ struct SlotCardView: View {
             RoundedRectangle(cornerRadius: 12)
                 .stroke(content.isEmpty ? Color.secondary.opacity(0.1) : Color.accentColor.opacity(0.2), lineWidth: 1)
         )
+    }
+
+    private var displayTitle: String {
+        if label.isEmpty { return "槽位 \(slot)" }
+        return label
     }
 
     private var contentPreview: some View {

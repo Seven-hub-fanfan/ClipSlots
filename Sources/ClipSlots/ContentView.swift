@@ -21,10 +21,14 @@ struct ContentView: View {
                         SlotCardView(
                             slot: slot,
                             content: store.slots[slot] ?? SlotContent(),
+                            label: store.labels[slot] ?? "",
                             onPaste: { store.pasteSlot(slot) },
                             onCopy: { store.copySlot(slot) },
                             onSave: { store.saveToSlot(slot) },
-                            onClear: { store.clearSlot(slot) }
+                            onClear: { store.clearSlot(slot) },
+                            onSetLabel: { newLabel in
+                                store.setLabel(slot, label: newLabel.isEmpty ? nil : newLabel)
+                            }
                         )
                     }
                 }

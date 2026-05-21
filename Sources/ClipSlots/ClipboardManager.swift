@@ -8,6 +8,7 @@ struct PasteboardItem: Codable {
 struct SlotContent: Codable {
     var items: [[PasteboardItem]] = []
     var timestamp: Date = Date()
+    var label: String? = nil
 
     var isEmpty: Bool { items.isEmpty }
 
