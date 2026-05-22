@@ -75,6 +75,7 @@ struct ClipSlotsApp: App {
         Settings {
             SettingsView(config: store.config) { newConfig in
                 store.updateConfig(newConfig)
+                appDelegate.reloadHotkeys()
             }
         }
     }
