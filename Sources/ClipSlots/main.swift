@@ -45,6 +45,9 @@ struct ClipSlotsApp: App {
                 .frame(minWidth: 460, minHeight: 360)
                 .onAppear {
                     appDelegate.store = store
+                    store.onConfigChanged = { [weak appDelegate] in
+                        appDelegate?.reloadHotkeys()
+                    }
                     appDelegate.setupHotKeys()
                 }
         }
@@ -83,6 +86,8 @@ final class SlotStoreObservable: ObservableObject {
     @Published var slots: [Int: SlotContent] = [:]
     @Published var labels: [Int: String] = [:]
     @Published var refreshTrigger = UUID()
+
+    var onConfigChanged: (() -> Void)?
 
     private let storage = SlotStorage.shared
     private let clipboard = ClipboardManager.shared
@@ -167,5 +172,6 @@ final class SlotStoreObservable: ObservableObject {
         if newConfig.slots != slots.count {
             loadSlots()
         }
+        onConfigChanged?()
     }
 }
