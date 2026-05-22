@@ -146,6 +146,9 @@ final class SlotStoreObservable: ObservableObject {
         let content = clipboard.capture()
         storage.set(slot, content: content)
         NSLog("[ClipSlots] SAVE slot=\(slot) preview=\(content.preview)")
+        // Update UI immediately before async disk write completes
+        slots[slot] = content
+        refreshTrigger = UUID()
         loadSlots()
     }
 
