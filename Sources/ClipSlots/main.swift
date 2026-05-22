@@ -109,11 +109,8 @@ final class SlotStoreObservable: ObservableObject {
                 labelMap[slot] = label
             }
         }
-        DispatchQueue.main.async {
-            self.slots = result
-            self.labels = labelMap
-            self.refreshTrigger = UUID()
-        }
+        slots = result
+        labels = labelMap
     }
 
     func pasteSlot(_ slot: Int) {
