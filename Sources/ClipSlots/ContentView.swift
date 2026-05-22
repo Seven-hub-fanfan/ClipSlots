@@ -65,6 +65,7 @@ struct ContentView: View {
         .popover(isPresented: $showingSettings) {
             SettingsView(config: store.config) { newConfig in
                 store.updateConfig(newConfig)
+                (NSApp.delegate as? AppDelegate)?.reloadHotkeys()
                 showingSettings = false
             }
             .frame(width: 400, height: 440)
