@@ -17,6 +17,7 @@ fileprivate func carbonEventHandler(_ handler: EventHandlerCallRef?, _ event: Ev
                       &hotKeyID)
     let slot = Int(hotKeyID.id)
     let isPaste = hotKeyID.signature == 1
+    NSLog("[ClipSlots] Hotkey event: signature=\(hotKeyID.signature) slot=\(slot) action=\(isPaste ? "PASTE" : "SAVE")")
     DispatchQueue.main.async {
         if isPaste {
             gOnPaste?(slot)
@@ -65,26 +66,39 @@ final class HotKeyManager {
             eventClass: OSType(kEventClassKeyboard),
             eventKind: OSType(kEventHotKeyPressed)
         )
-        InstallEventHandler(
+        let installStatus = InstallEventHandler(
             GetApplicationEventTarget(),
             carbonEventHandler,
             1, &eventType, nil, &eventHandlerRef
         )
+        if installStatus != noErr {
+            NSLog("[ClipSlots] ERROR: InstallEventHandler failed (status: \(installStatus))")
+        }
 
         for slot in 1...config.slots {
             // Paste hotkey: signature=1
             if let (modifiers, keyCode) = parseKeybind(config.pasteKey, slot: slot) {
                 let id = EventHotKeyID(signature: 1, id: UInt32(slot))
                 var ref: EventHotKeyRef?
-                RegisterEventHotKey(UInt32(keyCode), UInt32(modifiers), id, GetApplicationEventTarget(), 0, &ref)
-                if let ref = ref { hotKeyRefs.append(ref) }
+                let status = RegisterEventHotKey(UInt32(keyCode), UInt32(modifiers), id, GetApplicationEventTarget(), 0, &ref)
+                if status == noErr, let ref = ref {
+                    hotKeyRefs.append(ref)
+                    NSLog("[ClipSlots] PASTE hotkey registered: slot=\(slot) mod=\(modifiers) key=\(keyCode)")
+                } else {
+                    NSLog("[ClipSlots] ERROR: PASTE hotkey FAILED slot=\(slot) mod=\(modifiers) key=\(keyCode) status=\(status)")
+                }
             }
             // Save hotkey: signature=2
             if let (modifiers, keyCode) = parseKeybind(config.saveKey, slot: slot) {
                 let id = EventHotKeyID(signature: 2, id: UInt32(slot))
                 var ref: EventHotKeyRef?
-                RegisterEventHotKey(UInt32(keyCode), UInt32(modifiers), id, GetApplicationEventTarget(), 0, &ref)
-                if let ref = ref { hotKeyRefs.append(ref) }
+                let status = RegisterEventHotKey(UInt32(keyCode), UInt32(modifiers), id, GetApplicationEventTarget(), 0, &ref)
+                if status == noErr, let ref = ref {
+                    hotKeyRefs.append(ref)
+                    NSLog("[ClipSlots] SAVE hotkey registered: slot=\(slot) mod=\(modifiers) key=\(keyCode)")
+                } else {
+                    NSLog("[ClipSlots] ERROR: SAVE hotkey FAILED slot=\(slot) mod=\(modifiers) key=\(keyCode) status=\(status)")
+                }
             }
         }
     }
@@ -119,5 +133,6 @@ final class HotKeyManager {
         }
         gOnPaste = nil
         gOnSave = nil
+        NSLog("[ClipSlots] All hotkeys unregistered")
     }
 }

@@ -6,7 +6,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.regular)
-        setupHotKeys()
+        NSLog("[ClipSlots] App launched, awaiting window for hotkey registration")
     }
 
     func applicationWillTerminate(_ notification: Notification) {

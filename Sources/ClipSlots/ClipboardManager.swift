@@ -17,20 +17,11 @@ struct SlotContent: Codable {
             for item in itemList {
                 if item.type == "public.utf8-plain-text" || item.type == "NSStringPboardType" {
                     if let str = String(data: item.data, encoding: .utf8) {
-                        let trimmed = str.trimmingCharacters(in: .whitespacesAndNewlines)
-                        return String(trimmed.prefix(50))
+                        return String(str.trimmingCharacters(in: .whitespacesAndNewlines).prefix(50))
                     }
                 }
-                if item.type == "public.rtf" {
-                    if let rtf = String(data: item.data, encoding: .utf8) {
-                        let stripped = rtf.replacingOccurrences(of: "\\[\\\\a-z0-9]+[ ]?", with: "", options: .regularExpression)
-                        let text = String(stripped.filter { !$0.isNewline && $0 != "\\" && $0 != "{" && $0 != "}" }.prefix(50))
-                        if !text.trimmingCharacters(in: .whitespaces).isEmpty {
-                            return "[富文本] " + text
-                        }
-                    }
-                    return "[富文本]"
-                }
+                if item.type == "public.rtf" { return "[富文本]" }
+                if item.type == "public.html" { return "[HTML]" }
                 if item.type == "public.file-url" {
                     if let urlStr = String(data: item.data, encoding: .utf8), let url = URL(string: urlStr) {
                         return "[文件] " + url.lastPathComponent
@@ -80,6 +71,8 @@ final class ClipboardManager {
             if !items.isEmpty { allItems.append(items) }
         }
         content.items = allItems
+        let types = allItems.flatMap { $0.map { $0.type } }
+        NSLog("[ClipSlots] CLIPBOARD capture: \(pbItems.count) items, types: \(types)")
         return content
     }
 
@@ -90,12 +83,19 @@ final class ClipboardManager {
         for itemList in content.items {
             let pbItem = NSPasteboardItem()
             for item in itemList {
-                pbItem.setData(item.data, forType: NSPasteboard.PasteboardType(item.type))
+                let type = NSPasteboard.PasteboardType(item.type)
+                let ok = pbItem.setData(item.data, forType: type)
+                if !ok {
+                    NSLog("[ClipSlots] WARNING: setData failed for type \(item.type) (\(item.data.count) bytes)")
+                }
             }
             pbItems.append(pbItem)
         }
         guard !pbItems.isEmpty else { return false }
-        return pasteboard.writeObjects(pbItems)
+        let result = pasteboard.writeObjects(pbItems)
+        let types = content.items.flatMap { $0.map { $0.type } }
+        NSLog("[ClipSlots] CLIPBOARD restore: \(content.items.count) groups, types: \(types), result: \(result)")
+        return result
     }
 
     func restorePlainText(_ content: SlotContent) -> Bool {
@@ -104,6 +104,29 @@ final class ClipboardManager {
             return pasteboard.setString(text, forType: .string)
         }
         return restore(content)
+    }
+
+    /// Poll pasteboard changeCount to detect when the target app has consumed content after Cmd+V.
+    /// Calls completion after consumption or timeout (5s).
+    func waitForPasteCompletion(timeout: TimeInterval = 5.0, completion: @escaping () -> Void) {
+        let startCount = pasteboard.changeCount
+        let deadline = DispatchTime.now() + timeout
+        let checkInterval: TimeInterval = 0.05
+
+        func check() {
+            guard DispatchTime.now() < deadline else {
+                NSLog("[ClipSlots] Paste completion timed out after \(timeout)s")
+                completion()
+                return
+            }
+            if pasteboard.changeCount != startCount {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { completion() }
+                return
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + checkInterval) { check() }
+        }
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { check() }
     }
 
     var changeCount: Int { pasteboard.changeCount }

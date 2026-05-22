@@ -1,5 +1,38 @@
 import SwiftUI
 import Cocoa
+import Carbon
+
+/// Resolve the virtual key code that produces the letter 'v' on the current keyboard layout.
+/// Falls back to 9 (US QWERTY) if the lookup fails.
+fileprivate func virtualKeyForCharacterV() -> CGKeyCode {
+    guard let inputSource = TISCopyCurrentKeyboardLayoutInputSource()?.takeRetainedValue() else {
+        return 9
+    }
+    guard let layoutDataPtr = TISGetInputSourceProperty(inputSource, kTISPropertyUnicodeKeyLayoutData) else {
+        return 9
+    }
+    let layoutData = Unmanaged<CFData>.fromOpaque(layoutDataPtr).takeUnretainedValue() as Data
+    guard let keyboardLayout = layoutData.withUnsafeBytes({ $0.bindMemory(to: UCKeyboardLayout.self).baseAddress }) else {
+        return 9
+    }
+
+    var deadKeyState: UInt32 = 0
+    let maxLen = 4
+    var actualLen = 0
+    var unicodeString = [UniChar](repeating: 0, count: maxLen)
+
+    for keyCode in UInt16(0)..<128 {
+        let result = UCKeyTranslate(
+            keyboardLayout, keyCode, UInt16(kUCKeyActionDisplay),
+            0, UInt32(LMGetKbdType()), OptionBits(kUCKeyTranslateNoDeadKeysBit),
+            &deadKeyState, maxLen, &actualLen, &unicodeString
+        )
+        if result == noErr, actualLen == 1, unicodeString[0] == 0x0076 { // 'v'
+            return CGKeyCode(keyCode)
+        }
+    }
+    return 9
+}
 
 @main
 struct ClipSlotsApp: App {
@@ -34,9 +67,7 @@ struct ClipSlotsApp: App {
                 }
             }
         }
-        .onChange(of: NSApplication.shared.keyWindow?.title) { _ in
-            // Keep app responsive
-        }
+        .onChange(of: NSApplication.shared.keyWindow?.title) { _ in }
 
         Settings {
             SettingsView(config: store.config) { newConfig in
@@ -47,7 +78,6 @@ struct ClipSlotsApp: App {
     }
 }
 
-// Observable object to bridge AppDelegate and SwiftUI
 final class SlotStoreObservable: ObservableObject {
     @Published var config = AppConfig.load()
     @Published var slots: [Int: SlotContent] = [:]
@@ -84,34 +114,46 @@ final class SlotStoreObservable: ObservableObject {
     func pasteSlot(_ slot: Int) {
         let content = storage.get(slot)
         guard !content.isEmpty else { return }
+
+        let types = content.items.flatMap { $0.map { $0.type } }
+        NSLog("[ClipSlots] PASTE slot=\(slot) preview=\(content.preview) types=\(types)")
+
         let previous = clipboard.capture()
         _ = clipboard.restore(content)
 
+        let vKey = virtualKeyForCharacterV()
         let src = CGEventSource(stateID: .hidSystemState)
-        let down = CGEvent(keyboardEventSource: src, virtualKey: 9, keyDown: true)
-        let up = CGEvent(keyboardEventSource: src, virtualKey: 9, keyDown: false)
+        let down = CGEvent(keyboardEventSource: src, virtualKey: vKey, keyDown: true)
+        let up = CGEvent(keyboardEventSource: src, virtualKey: vKey, keyDown: false)
         down?.flags = .maskCommand; up?.flags = .maskCommand
         down?.post(tap: .cghidEventTap); up?.post(tap: .cghidEventTap)
 
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in
-            _ = self?.clipboard.restore(previous)
+        clipboard.waitForPasteCompletion { [weak self] in
+            guard let self = self else { return }
+            let restored = self.clipboard.restore(previous)
+            if !restored {
+                NSLog("[ClipSlots] WARNING: Failed to restore previous clipboard after paste from slot \(slot)")
+            }
         }
     }
 
     func saveToSlot(_ slot: Int) {
         let content = clipboard.capture()
         storage.set(slot, content: content)
+        NSLog("[ClipSlots] SAVE slot=\(slot) preview=\(content.preview)")
         loadSlots()
     }
 
     func clearSlot(_ slot: Int) {
         storage.clear(slot)
+        NSLog("[ClipSlots] CLEAR slot=\(slot)")
         loadSlots()
     }
 
     func copySlot(_ slot: Int) {
         let content = storage.get(slot)
         guard !content.isEmpty else { return }
+        NSLog("[ClipSlots] COPY slot=\(slot) preview=\(content.preview)")
         _ = clipboard.restore(content)
     }
 
