@@ -23,7 +23,7 @@ draw.rounded_rectangle(
 sf = Image.open("/Users/bytedance/Cursor/ClipSlotsApp/build/sf_symbol.png")
 # SF is 2048px but we need to paste it at RENDER=4096 scale
 # Scale SF symbol to fit inside the squircle
-sf_zone = int(RENDER * 1.20)  # 120% - bleed past squircle
+sf_zone = int(RENDER * 1.35)  # 135% - bleed past squircle
 sf_resized = sf.resize((sf_zone, sf_zone), Image.LANCZOS)
 
 # Center and paste
