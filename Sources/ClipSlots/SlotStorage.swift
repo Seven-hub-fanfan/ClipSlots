@@ -44,9 +44,11 @@ final class SlotStorage {
     }
 
     func set(_ slot: Int, content: SlotContent) {
+        queue.sync { [weak self] in
+            self?.cache[slot] = content
+        }
         queue.async { [weak self] in
             guard let self = self else { return }
-            self.cache[slot] = content
             self.writeSlotContent(content, to: slot)
             self.updateManifest()
         }
