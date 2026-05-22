@@ -17,14 +17,15 @@ struct SlotContent: Codable {
             for item in itemList {
                 if item.type == "public.utf8-plain-text" || item.type == "NSStringPboardType" {
                     if let str = String(data: item.data, encoding: .utf8) {
-                        return String(str.trimmingCharacters(in: .whitespacesAndNewlines).prefix(50))
+                        let t = str.trimmingCharacters(in: .whitespacesAndNewlines)
+                        return t.count > 30 ? String(t.prefix(30)) + "…" : t
                     }
                 }
-                if item.type == "public.rtf" { return "[富文本]" }
+                if item.type == "public.rtf" { return "[RTF]" }
                 if item.type == "public.html" { return "[HTML]" }
                 if item.type == "public.file-url" {
                     if let urlStr = String(data: item.data, encoding: .utf8), let url = URL(string: urlStr) {
-                        return "[文件] " + url.lastPathComponent
+                        return "[文件]" + url.lastPathComponent
                     }
                     return "[文件]"
                 }
@@ -32,6 +33,11 @@ struct SlotContent: Codable {
                     return "[图片 \(item.data.count / 1024)KB]"
                 }
             }
+        }
+        // Fallback: show first type name
+        if let firstType = items.first?.first?.type {
+            let short = firstType.replacingOccurrences(of: "public.", with: "")
+            return "[\(short)]"
         }
         return "(空)"
     }
