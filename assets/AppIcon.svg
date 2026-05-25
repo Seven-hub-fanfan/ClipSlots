@@ -1,43 +1,27 @@
 <svg width="1024" height="1024" viewBox="0 0 1024 1024" fill="none" xmlns="http://www.w3.org/2000/svg">
   <defs>
-    <linearGradient id="baseBg" x1="128" y1="96" x2="896" y2="928" gradientUnits="userSpaceOnUse">
-      <stop offset="0" stop-color="#1A1C24"/>
-      <stop offset="1" stop-color="#0A0B10"/>
-    </linearGradient>
-    <linearGradient id="brandGrad" x1="280" y1="280" x2="744" y2="744" gradientUnits="userSpaceOnUse">
+    <linearGradient id="brandGrad" x1="4" y1="4" x2="1020" y2="1020" gradientUnits="userSpaceOnUse">
       <stop offset="0" stop-color="#7C8CFF"/>
       <stop offset="0.52" stop-color="#5E7CFF"/>
       <stop offset="1" stop-color="#8B5CFF"/>
     </linearGradient>
-    <filter id="brandShadow" x="220" y="220" width="584" height="584" filterUnits="userSpaceOnUse">
-      <feDropShadow dx="0" dy="16" stdDeviation="28" flood-color="#5E7CFF" flood-opacity="0.40"/>
-    </filter>
   </defs>
 
-  <!-- macOS dark base -->
-  <rect x="96" y="96" width="832" height="832" rx="210" fill="url(#baseBg)"/>
+  <!-- Full-size brand rounded rect — no border, no extra ring -->
+  <rect x="0" y="0" width="1024" height="1024" rx="224" fill="url(#brandGrad)"/>
 
-  <!-- Brand logo: rounded rect matching the UI header logo -->
-  <g filter="url(#brandShadow)">
-    <rect x="276" y="276" width="472" height="472" rx="108" fill="url(#brandGrad)"/>
-  </g>
+  <!-- rectangle.stack.fill: three stacked white cards -->
+  <rect x="400" y="560" width="224" height="152" rx="36" fill="white" fill-opacity="0.24"/>
+  <rect x="380" y="476" width="264" height="152" rx="40" fill="white" fill-opacity="0.64"/>
+  <rect x="360" y="392" width="304" height="152" rx="44" fill="white"/>
 
-  <!-- Top highlight on the logo -->
-  <path d="M338 410C358 340 400 322 512 322C624 322 682 346 712 402C672 352 618 336 516 336C414 336 364 348 338 410Z" fill="white" fill-opacity="0.16"/>
+  <!-- Slot lines on top card -->
+  <rect x="410" y="436" width="120" height="18" rx="9" fill="#DDE5FF"/>
+  <rect x="410" y="474" width="156" height="18" rx="9" fill="#DDE5FF" opacity="0.55"/>
+  <rect x="410" y="512" width="84" height="18" rx="9" fill="#DDE5FF" opacity="0.3"/>
 
-  <!-- rectangle.stack.fill symbol: three stacked cards -->
-  <!-- Bottom card -->
-  <rect x="396" y="546" width="232" height="158" rx="38" fill="white" fill-opacity="0.23"/>
-  <!-- Middle card -->
-  <rect x="382" y="468" width="260" height="158" rx="40" fill="white" fill-opacity="0.62"/>
-  <!-- Top card -->
-  <rect x="368" y="390" width="288" height="158" rx="42" fill="white"/>
-  <!-- Top card inner lines (slots) -->
-  <rect x="410" y="432" width="120" height="18" rx="9" fill="#DDE5FF"/>
-  <rect x="410" y="470" width="156" height="18" rx="9" fill="#DDE5FF" opacity="0.55"/>
-  <rect x="410" y="508" width="84" height="18" rx="9" fill="#DDE5FF" opacity="0.3"/>
-  <!-- Top card dots -->
-  <circle cx="396" cy="441" r="8" fill="#8B5CFF"/>
-  <circle cx="396" cy="479" r="8" fill="#7C8CFF"/>
-  <circle cx="396" cy="517" r="8" fill="#8B5CFF" opacity="0.6"/>
+  <!-- Slot dots -->
+  <circle cx="394" cy="445" r="8" fill="#8B5CFF"/>
+  <circle cx="394" cy="483" r="8" fill="#7C8CFF"/>
+  <circle cx="394" cy="521" r="8" fill="#8B5CFF" opacity="0.6"/>
 </svg>
