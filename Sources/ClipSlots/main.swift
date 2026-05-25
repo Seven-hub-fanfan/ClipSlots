@@ -81,14 +81,16 @@ final class SlotStoreObservable: ObservableObject {
 
     let storage = SlotStorage.shared
     private let clipboard = ClipboardManager.shared
+    private var timer: Timer?
+
+    /// Cancellable delayed clipboard restore to prevent race with copy/save.
+    private var pendingClipboardRestore: DispatchWorkItem?
 
     init() {
         loadSlots()
-        // Timer disabled to avoid overwriting UI state with stale disk data.
-        // Re-enable after verifying saveToSlot stability.
-        // timer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
-        //     self?.loadSlots()
-        // }
+        timer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
+            self?.loadSlots()
+        }
     }
 
     func loadSlots() {
@@ -111,12 +113,16 @@ final class SlotStoreObservable: ObservableObject {
         return app.bundleIdentifier == Bundle.main.bundleIdentifier
     }
 
+    private func cancelPendingClipboardRestore() {
+        pendingClipboardRestore?.cancel()
+        pendingClipboardRestore = nil
+    }
+
     private func promptAccessibilityPermissionIfNeeded() {
         let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary
         _ = AXIsProcessTrustedWithOptions(options)
     }
 
-    /// Poll until targetApp becomes frontmost or timeout.
     private func waitUntilFrontmost(
         _ app: NSRunningApplication,
         timeout: TimeInterval = 1.2,
@@ -124,7 +130,6 @@ final class SlotStoreObservable: ObservableObject {
         completion: @escaping (Bool) -> Void
     ) {
         let deadline = Date().addingTimeInterval(timeout)
-
         func check() {
             let frontmost = NSWorkspace.shared.frontmostApplication
             if frontmost?.processIdentifier == app.processIdentifier {
@@ -140,88 +145,9 @@ final class SlotStoreObservable: ObservableObject {
         check()
     }
 
-    // MARK: - Unified Paste
+    // MARK: - Send Keystroke
 
-    func pasteSlot(_ slot: Int, activate targetApp: NSRunningApplication? = nil) {
-        let content = storage.get(slot)
-        guard !content.isEmpty else {
-            NSLog("[ClipSlots] pasteSlot ignored: slot \(slot) is empty")
-            return
-        }
-
-        // Filter out self
-        let cleanTargetApp: NSRunningApplication?
-        if isSelfApp(targetApp) {
-            cleanTargetApp = lastNonClipSlotsApp
-        } else {
-            cleanTargetApp = targetApp ?? lastNonClipSlotsApp
-        }
-
-        let types = content.items.flatMap { $0.map { $0.type } }
-        NSLog("[ClipSlots] PASTE requested slot=\(slot) preview=\(content.preview) types=\(types) targetApp=\(cleanTargetApp?.localizedName ?? "nil")")
-
-        guard AXIsProcessTrusted() else {
-            NSLog("[ClipSlots] Accessibility permission not granted. Cannot paste.")
-            promptAccessibilityPermissionIfNeeded()
-            return
-        }
-
-        let previous = clipboard.capture()
-
-        let doPasteAfterActivation = { [weak self] in
-            guard let self = self else { return }
-
-            let restored = self.clipboard.restore(content)
-            guard restored else {
-                NSLog("[ClipSlots] pasteSlot failed: restore slot \(slot) to clipboard failed")
-                return
-            }
-
-            NSLog("[ClipSlots] Clipboard restored for slot \(slot), sending Cmd+V soon")
-
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) {
-                self.sendPasteKeystroke()
-
-                // Fixed delay to recover previous clipboard (instead of unreliable changeCount polling)
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.80) {
-                    _ = self.clipboard.restore(previous)
-                    NSLog("[ClipSlots] Restored previous clipboard after paste")
-                }
-            }
-        }
-
-        if let app = cleanTargetApp {
-            NSLog("[ClipSlots] Activating target app: \(app.localizedName ?? "unknown") pid=\(app.processIdentifier)")
-            app.activate(options: [.activateIgnoringOtherApps])
-
-            waitUntilFrontmost(app, timeout: 1.2) { success in
-                let current = NSWorkspace.shared.frontmostApplication
-                NSLog("[ClipSlots] waitUntilFrontmost result=\(success), current=\(current?.localizedName ?? "nil")")
-
-                if success {
-                    doPasteAfterActivation()
-                } else {
-                    NSLog("[ClipSlots] Target app did not become frontmost in time; trying paste anyway")
-                    doPasteAfterActivation()
-                }
-            }
-        } else {
-            NSLog("[ClipSlots] No target app, pasting into current frontmost app")
-            doPasteAfterActivation()
-        }
-    }
-
-    /// Fallback: if no target app, copy to clipboard instead of pasting to self
-    func pasteSlotFromUI(_ slot: Int) {
-        guard let target = lastNonClipSlotsApp else {
-            NSLog("[ClipSlots] UI paste has no target app, fallback to copy slot \(slot)")
-            copySlot(slot)
-            return
-        }
-        pasteSlot(slot, activate: target)
-    }
-
-    /// Send explicit Cmd+V keystroke: Cmd down → V down → V up → Cmd up
+    /// Explicit Cmd down → V down → V up → Cmd up
     func sendPasteKeystroke() {
         guard AXIsProcessTrusted() else {
             NSLog("[ClipSlots] Accessibility permission not granted. Cannot send Cmd+V.")
@@ -249,48 +175,157 @@ final class SlotStoreObservable: ObservableObject {
         NSLog("[ClipSlots] Sent explicit Cmd+V keystroke, vKey=\(vKey)")
     }
 
-    // MARK: - Save
+    // MARK: - Save (lightweight, synchronous)
 
     func saveToSlot(_ slot: Int) {
-        NSLog("[ClipSlots] saveToSlot requested slot=\(slot)")
+        cancelPendingClipboardRestore()
 
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.10) { [weak self] in
+        let content = clipboard.capture()
+        guard !content.isEmpty else {
+            NSLog("[ClipSlots] SAVE ignored: clipboard empty slot=\(slot)")
+            return
+        }
+
+        storage.set(slot, content: content)
+
+        var newSlots = slots
+        newSlots[slot] = content
+        slots = newSlots
+        refreshTrigger = UUID()
+
+        NSLog("[ClipSlots] SAVE slot=\(slot) preview=\(content.preview)")
+    }
+
+    // MARK: - Copy (lightweight)
+
+    func copySlot(_ slot: Int) {
+        cancelPendingClipboardRestore()
+
+        let content = storage.get(slot)
+        guard !content.isEmpty else {
+            NSLog("[ClipSlots] COPY ignored: slot \(slot) empty")
+            return
+        }
+
+        _ = clipboard.restore(content)
+        NSLog("[ClipSlots] COPY slot=\(slot) preview=\(content.preview)")
+    }
+
+    // MARK: - Simple Paste (hotkeys, menu)
+
+    func pasteSlot(_ slot: Int) {
+        let content = storage.get(slot)
+        guard !content.isEmpty else {
+            NSLog("[ClipSlots] pasteSlot ignored: slot \(slot) empty")
+            return
+        }
+
+        guard AXIsProcessTrusted() else {
+            NSLog("[ClipSlots] Accessibility permission not granted.")
+            promptAccessibilityPermissionIfNeeded()
+            return
+        }
+
+        cancelPendingClipboardRestore()
+
+        let previous = clipboard.capture()
+        guard clipboard.restore(content) else {
+            NSLog("[ClipSlots] pasteSlot restore failed slot=\(slot)")
+            return
+        }
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) { [weak self] in
             guard let self = self else { return }
+            self.sendPasteKeystroke()
 
-            let content = self.clipboard.capture()
-            let types = content.items.flatMap { $0.map { $0.type } }
-
-            NSLog("[ClipSlots] saveToSlot captured slot=\(slot), empty=\(content.isEmpty), preview=\(content.preview), types=\(types)")
-
-            guard !content.isEmpty else {
-                NSLog("[ClipSlots] saveToSlot ignored: clipboard is empty")
-                return
+            let restoreWorkItem = DispatchWorkItem { [weak self] in
+                guard let self = self else { return }
+                _ = self.clipboard.restore(previous)
+                self.pendingClipboardRestore = nil
             }
-
-            self.storage.set(slot, content: content)
-
-            DispatchQueue.main.async {
-                var newSlots = self.slots
-                newSlots[slot] = content
-                self.slots = newSlots
-                self.refreshTrigger = UUID()
-
-                NSLog("[ClipSlots] saveToSlot updated UI slot=\(slot) preview=\(content.preview)")
-            }
+            self.pendingClipboardRestore = restoreWorkItem
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.8, execute: restoreWorkItem)
         }
     }
 
+    // MARK: - Radial Paste (targetApp activation + waitUntilFrontmost)
+
+    func pasteSlotToApp(_ slot: Int, targetApp: NSRunningApplication?) {
+        let content = storage.get(slot)
+        guard !content.isEmpty else {
+            NSLog("[ClipSlots] radial paste ignored: slot \(slot) empty")
+            return
+        }
+
+        guard AXIsProcessTrusted() else {
+            NSLog("[ClipSlots] Accessibility permission not granted.")
+            promptAccessibilityPermissionIfNeeded()
+            return
+        }
+
+        cancelPendingClipboardRestore()
+
+        let cleanTarget: NSRunningApplication?
+        if isSelfApp(targetApp) {
+            cleanTarget = lastNonClipSlotsApp
+        } else {
+            cleanTarget = targetApp ?? lastNonClipSlotsApp
+        }
+
+        NSLog("[ClipSlots] PASTE radial slot=\(slot) preview=\(content.preview) targetApp=\(cleanTarget?.localizedName ?? "nil")")
+
+        let previous = clipboard.capture()
+
+        let performPaste = { [weak self] in
+            guard let self = self else { return }
+
+            guard self.clipboard.restore(content) else {
+                NSLog("[ClipSlots] radial paste restore failed slot=\(slot)")
+                return
+            }
+
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) { [weak self] in
+                guard let self = self else { return }
+                self.sendPasteKeystroke()
+
+                let restoreWorkItem = DispatchWorkItem { [weak self] in
+                    guard let self = self else { return }
+                    _ = self.clipboard.restore(previous)
+                    self.pendingClipboardRestore = nil
+                }
+                self.pendingClipboardRestore = restoreWorkItem
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.8, execute: restoreWorkItem)
+            }
+        }
+
+        if let app = cleanTarget {
+            app.activate(options: [.activateIgnoringOtherApps])
+            waitUntilFrontmost(app, timeout: 1.2) { success in
+                NSLog("[ClipSlots] radial waitUntilFrontmost success=\(success)")
+                performPaste()
+            }
+        } else {
+            performPaste()
+        }
+    }
+
+    /// UI paste button fallback
+    func pasteSlotFromUI(_ slot: Int) {
+        guard let target = lastNonClipSlotsApp else {
+            NSLog("[ClipSlots] UI paste has no target app, fallback to copy slot \(slot)")
+            copySlot(slot)
+            return
+        }
+        pasteSlotToApp(slot, targetApp: target)
+    }
+
+    // MARK: - Clear
+
     func clearSlot(_ slot: Int) {
+        cancelPendingClipboardRestore()
         storage.clear(slot)
         NSLog("[ClipSlots] CLEAR slot=\(slot)")
         loadSlots()
-    }
-
-    func copySlot(_ slot: Int) {
-        let content = storage.get(slot)
-        guard !content.isEmpty else { return }
-        NSLog("[ClipSlots] COPY slot=\(slot) preview=\(content.preview)")
-        _ = clipboard.restore(content)
     }
 
     // MARK: - Label

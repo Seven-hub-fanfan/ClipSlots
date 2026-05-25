@@ -38,7 +38,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         hotkeyManager.register(
             config: store.config,
             onPaste: { [weak self] slot in
-                self?.store?.pasteSlot(slot)
+                self?.store?.pasteSlot(slot)  // simple paste — user is already in target app
             },
             onSave: { [weak self] slot in
                 self?.store?.saveToSlot(slot)
@@ -84,7 +84,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 self.radialMenuController.dismiss()
 
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
-                    self.store?.pasteSlot(slot, activate: previousApp ?? self.store?.lastNonClipSlotsApp)
+                    self.store?.pasteSlotToApp(slot, targetApp: previousApp ?? self.store?.lastNonClipSlotsApp)
                 }
             },
             onDismiss: { [weak self] in
