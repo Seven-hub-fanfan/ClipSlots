@@ -58,6 +58,7 @@ final class RadialMenuWindowController {
         p.collectionBehavior = [.canJoinAllSpaces, .stationary, .transient]
         p.isMovableByWindowBackground = false
         p.ignoresMouseEvents = false
+        p.acceptsMouseMovedEvents = true
         p.contentView = hosting
         p.orderFrontRegardless()
 

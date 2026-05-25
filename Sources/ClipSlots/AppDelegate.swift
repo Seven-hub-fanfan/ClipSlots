@@ -52,7 +52,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             slotCount: store.config.slots,
             onSelect: { [weak self] slot in
                 self?.radialMenuController.dismiss()
-                self?.store?.pasteSlot(slot)
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+                    self?.store?.pasteSlot(slot)
+                }
             },
             onDismiss: { [weak self] in
                 self?.radialMenuController.dismiss()
