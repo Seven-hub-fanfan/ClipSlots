@@ -6,12 +6,10 @@ struct ContentView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            // Header
             headerView
 
             Divider()
 
-            // Slot cards
             ScrollView {
                 LazyVGrid(
                     columns: [GridItem(.adaptive(minimum: 200, maximum: 260), spacing: 12)],
@@ -22,10 +20,22 @@ struct ContentView: View {
                             slot: slot,
                             content: store.slots[slot] ?? SlotContent(),
                             label: store.labels[slot] ?? "",
-                            onPaste: { store.pasteSlot(slot, activate: store.lastNonClipSlotsApp) },
-                            onCopy: { store.copySlot(slot) },
-                            onSave: { store.saveToSlot(slot) },
-                            onClear: { store.clearSlot(slot) },
+                            onPaste: {
+                                NSLog("[ClipSlots] UI paste button clicked slot=\(slot)")
+                                store.pasteSlotFromUI(slot)
+                            },
+                            onCopy: {
+                                NSLog("[ClipSlots] UI copy button clicked slot=\(slot)")
+                                store.copySlot(slot)
+                            },
+                            onSave: {
+                                NSLog("[ClipSlots] UI save/overwrite button clicked slot=\(slot)")
+                                store.saveToSlot(slot)
+                            },
+                            onClear: {
+                                NSLog("[ClipSlots] UI clear button clicked slot=\(slot)")
+                                store.clearSlot(slot)
+                            },
                             onSetLabel: { newLabel in
                                 store.setLabel(slot, label: newLabel.isEmpty ? nil : newLabel)
                             }
@@ -38,7 +48,6 @@ struct ContentView: View {
 
             Divider()
 
-            // Bottom toolbar
             bottomBar
         }
     }

@@ -8,7 +8,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.regular)
 
-        // Monitor frontmost app switches to track paste target
         NSWorkspace.shared.notificationCenter.addObserver(
             forName: NSWorkspace.didActivateApplicationNotification,
             object: nil,
@@ -59,8 +58,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard let store = store else { return }
 
         let mouseLocation = NSEvent.mouseLocation
-        let previousApp = NSWorkspace.shared.frontmostApplication
-        NSLog("[ClipSlots] RADIAL show menu, previousApp=\(previousApp?.localizedName ?? "nil")")
+        let frontmost = NSWorkspace.shared.frontmostApplication
+
+        // Filter out ClipSlots itself
+        let previousApp: NSRunningApplication?
+        if frontmost?.bundleIdentifier == Bundle.main.bundleIdentifier {
+            previousApp = store.lastNonClipSlotsApp
+        } else {
+            previousApp = frontmost
+            if let frontmost = frontmost {
+                store.lastNonClipSlotsApp = frontmost
+            }
+        }
+
+        NSLog("[ClipSlots] RADIAL show menu, previousApp=\(previousApp?.localizedName ?? "nil"), frontmost=\(frontmost?.localizedName ?? "nil")")
 
         radialMenuController.show(
             at: mouseLocation,
@@ -69,6 +80,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             slotCount: store.config.slots,
             onSelect: { [weak self] slot in
                 guard let self = self else { return }
+                NSLog("[ClipSlots] RADIAL selected slot=\(slot)")
                 self.radialMenuController.dismiss()
 
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
