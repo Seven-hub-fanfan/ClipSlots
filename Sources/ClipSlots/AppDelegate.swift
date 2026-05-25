@@ -3,6 +3,7 @@ import Cocoa
 final class AppDelegate: NSObject, NSApplicationDelegate {
     weak var store: SlotStoreObservable?
     private let hotkeyManager = HotKeyManager.shared
+    private let radialMenuController = RadialMenuWindowController()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.regular)
@@ -11,6 +12,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationWillTerminate(_ notification: Notification) {
         hotkeyManager.unregisterAll()
+        radialMenuController.dismiss()
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
@@ -26,6 +28,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             },
             onSave: { [weak self] slot in
                 self?.store?.saveToSlot(slot)
+            },
+            onRadial: { [weak self] in
+                self?.showRadialMenu()
             }
         )
     }
@@ -33,5 +38,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func reloadHotkeys() {
         hotkeyManager.unregisterAll()
         setupHotKeys()
+    }
+
+    private func showRadialMenu() {
+        guard let store = store else { return }
+
+        let mouseLocation = NSEvent.mouseLocation
+
+        radialMenuController.show(
+            at: mouseLocation,
+            slots: store.slots,
+            labels: store.labels,
+            slotCount: store.config.slots,
+            onSelect: { [weak self] slot in
+                self?.radialMenuController.dismiss()
+                self?.store?.pasteSlot(slot)
+            },
+            onDismiss: { [weak self] in
+                self?.radialMenuController.dismiss()
+            }
+        )
     }
 }

@@ -7,6 +7,7 @@ struct SettingsView: View {
     @State private var slots: Double
     @State private var saveKey: String
     @State private var pasteKey: String
+    @State private var radialKey: String
     @Environment(\.dismiss) private var dismiss
 
     init(config: AppConfig, onSave: @escaping (AppConfig) -> Void) {
@@ -15,6 +16,7 @@ struct SettingsView: View {
         _slots = State(initialValue: Double(config.slots))
         _saveKey = State(initialValue: config.saveKey)
         _pasteKey = State(initialValue: config.pasteKey)
+        _radialKey = State(initialValue: config.radialKey)
     }
 
     var body: some View {
@@ -53,14 +55,24 @@ struct SettingsView: View {
                     .foregroundColor(.secondary)
             }
 
+            VStack(alignment: .leading, spacing: 4) {
+                Text("圆盘菜单快捷键:")
+                    .font(.subheadline)
+                TextField("例如: ctrl+space", text: $radialKey)
+                    .textFieldStyle(.roundedBorder)
+                Text("按下此快捷键在鼠标位置弹出圆盘菜单")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+
             VStack(alignment: .leading, spacing: 2) {
                 Text("可用修饰键: ctrl, option, cmd, shift")
                     .font(.caption)
                     .foregroundColor(.secondary)
-                Text("可用键位: 0-9, a-z, f1-f12")
+                Text("可用键位: 0-9, a-z, f1-f12, space, tab, 方向键")
                     .font(.caption)
                     .foregroundColor(.secondary)
-                Text("{n} 代表槽位编号")
+                Text("{n} 代表槽位编号（圆盘菜单不需要）")
                     .font(.caption)
                     .foregroundColor(.secondary)
             }
@@ -72,6 +84,7 @@ struct SettingsView: View {
                     slots = 5
                     saveKey = "ctrl+option+{n}"
                     pasteKey = "ctrl+{n}"
+                    radialKey = "ctrl+space"
                 }
                 Spacer()
                 Button("取消") { dismiss() }
@@ -81,6 +94,7 @@ struct SettingsView: View {
                     newConfig.slots = Int(slots)
                     newConfig.saveKey = saveKey
                     newConfig.pasteKey = pasteKey
+                    newConfig.radialKey = radialKey
                     newConfig.save()
                     onSave(newConfig)
                     dismiss()

@@ -4,6 +4,7 @@ import Cocoa
 // Global callback storage for Carbon event handler (C function pointer requirement)
 fileprivate var gOnPaste: ((Int) -> Void)?
 fileprivate var gOnSave: ((Int) -> Void)?
+fileprivate var gOnRadial: (() -> Void)?
 
 fileprivate func carbonEventHandler(_ handler: EventHandlerCallRef?, _ event: EventRef?, _ userData: UnsafeMutableRawPointer?) -> OSStatus {
     guard let event = event else { return noErr }
@@ -16,10 +17,17 @@ fileprivate func carbonEventHandler(_ handler: EventHandlerCallRef?, _ event: Ev
                       nil,
                       &hotKeyID)
     let slot = Int(hotKeyID.id)
+    let isRadial = hotKeyID.signature == 3
     let isPaste = hotKeyID.signature == 1
-    NSLog("[ClipSlots] Hotkey event: signature=\(hotKeyID.signature) slot=\(slot) action=\(isPaste ? "PASTE" : "SAVE")")
+    if isRadial {
+        NSLog("[ClipSlots] Hotkey event: RADIAL MENU")
+    } else {
+        NSLog("[ClipSlots] Hotkey event: signature=\(hotKeyID.signature) slot=\(slot) action=\(isPaste ? "PASTE" : "SAVE")")
+    }
     DispatchQueue.main.async {
-        if isPaste {
+        if isRadial {
+            gOnRadial?()
+        } else if isPaste {
             gOnPaste?(slot)
         } else {
             gOnSave?(slot)
@@ -32,6 +40,7 @@ final class HotKeyManager {
     static let shared = HotKeyManager()
     private var hotKeyRefs: [EventHotKeyRef] = []
     private var eventHandlerRef: EventHandlerRef?
+    private var radialHotKeyRef: EventHotKeyRef?
 
     private let keyCodeMap: [String: Int] = [
         "0": 29, "1": 18, "2": 19, "3": 20, "4": 21, "5": 23,
@@ -44,6 +53,8 @@ final class HotKeyManager {
         "f1": 122, "f2": 120, "f3": 99, "f4": 118, "f5": 96,
         "f6": 97, "f7": 98, "f8": 100, "f9": 101, "f10": 109,
         "f11": 103, "f12": 111,
+        "space": 49, "tab": 48, "return": 36, "escape": 53,
+        "left": 123, "right": 124, "up": 126, "down": 125,
     ]
 
     private let modifierMap: [String: Int] = [
@@ -56,11 +67,12 @@ final class HotKeyManager {
         "shift": shiftKey,
     ]
 
-    func register(config: AppConfig, onPaste: @escaping (Int) -> Void, onSave: @escaping (Int) -> Void) {
+    func register(config: AppConfig, onPaste: @escaping (Int) -> Void, onSave: @escaping (Int) -> Void, onRadial: @escaping () -> Void) {
         unregisterAll()
 
         gOnPaste = onPaste
         gOnSave = onSave
+        gOnRadial = onRadial
 
         var eventType = EventTypeSpec(
             eventClass: OSType(kEventClassKeyboard),
@@ -73,6 +85,20 @@ final class HotKeyManager {
         )
         if installStatus != noErr {
             NSLog("[ClipSlots] ERROR: InstallEventHandler failed (status: \(installStatus))")
+        }
+
+        // Radial menu hotkey: signature=3, single keybind (no {n} placeholder)
+        if let (modifiers, keyCode) = parseSimpleKeybind(config.radialKey) {
+            let id = EventHotKeyID(signature: 3, id: 0)
+            var ref: EventHotKeyRef?
+            let status = RegisterEventHotKey(UInt32(keyCode), UInt32(modifiers), id, GetApplicationEventTarget(), 0, &ref)
+            if status == noErr, let ref = ref {
+                radialHotKeyRef = ref
+                hotKeyRefs.append(ref)
+                NSLog("[ClipSlots] RADIAL hotkey registered: mod=\(modifiers) key=\(keyCode)")
+            } else {
+                NSLog("[ClipSlots] ERROR: RADIAL hotkey FAILED mod=\(modifiers) key=\(keyCode) status=\(status)")
+            }
         }
 
         for slot in 1...config.slots {
@@ -105,7 +131,11 @@ final class HotKeyManager {
 
     private func parseKeybind(_ pattern: String, slot: Int) -> (modifiers: Int, keyCode: Int)? {
         let expanded = pattern.replacingOccurrences(of: "{n}", with: String(slot))
-        let parts = expanded.lowercased().split(separator: "+").map { String($0).trimmingCharacters(in: .whitespaces) }
+        return parseSimpleKeybind(expanded)
+    }
+
+    private func parseSimpleKeybind(_ pattern: String) -> (modifiers: Int, keyCode: Int)? {
+        let parts = pattern.lowercased().split(separator: "+").map { String($0).trimmingCharacters(in: .whitespaces) }
 
         var modifiers: Int = 0
         var keyCode: Int?
@@ -127,12 +157,14 @@ final class HotKeyManager {
             UnregisterEventHotKey(ref)
         }
         hotKeyRefs.removeAll()
+        radialHotKeyRef = nil
         if let ref = eventHandlerRef {
             RemoveEventHandler(ref)
             eventHandlerRef = nil
         }
         gOnPaste = nil
         gOnSave = nil
+        gOnRadial = nil
         NSLog("[ClipSlots] All hotkeys unregistered")
     }
 }

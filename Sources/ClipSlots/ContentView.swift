@@ -67,7 +67,7 @@ struct ContentView: View {
                 store.updateConfig(newConfig)
                 showingSettings = false
             }
-            .frame(width: 400, height: 440)
+            .frame(width: 400, height: 520)
         }
     }
 

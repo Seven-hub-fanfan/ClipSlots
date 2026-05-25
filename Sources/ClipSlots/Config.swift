@@ -5,6 +5,7 @@ struct AppConfig: Codable {
     var verbose: Bool = true
     var saveKey: String = "ctrl+option+{n}"
     var pasteKey: String = "ctrl+{n}"
+    var radialKey: String = "ctrl+space"
 
     private static let configURL = FileManager.default.homeDirectoryForCurrentUser
         .appendingPathComponent(".config/clipslots/config.toml")
@@ -42,6 +43,7 @@ struct AppConfig: Codable {
             "[keybinds]",
             "save = \"\(saveKey)\"",
             "paste = \"\(pasteKey)\"",
+            "radial = \"\(radialKey)\"",
         ]
         let content = lines.joined(separator: "\n") + "\n"
         try? content.write(to: Self.configURL, atomically: true, encoding: .utf8)
@@ -74,6 +76,7 @@ struct AppConfig: Codable {
             if inKeybinds {
                 if key == "save" { config.saveKey = value }
                 else if key == "paste" { config.pasteKey = value }
+                else if key == "radial" { config.radialKey = value }
             } else {
                 if key == "slots", let v = Int(value) { config.slots = max(1, min(10, v)) }
                 else if key == "verbose" { config.verbose = value.lowercased() == "true" }
