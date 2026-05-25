@@ -175,6 +175,97 @@ final class SlotStoreObservable: ObservableObject {
         NSLog("[ClipSlots] Sent explicit Cmd+V keystroke, vKey=\(vKey)")
     }
 
+    /// Send explicit Cmd+C keystroke to copy current selection in frontmost app.
+    func sendCopyKeystroke() {
+        guard AXIsProcessTrusted() else {
+            NSLog("[ClipSlots] Accessibility permission not granted. Cannot send Cmd+C.")
+            promptAccessibilityPermissionIfNeeded()
+            return
+        }
+
+        let cKey: CGKeyCode = 8
+        let commandKey: CGKeyCode = 55
+        let src = CGEventSource(stateID: .hidSystemState)
+
+        let cmdDown = CGEvent(keyboardEventSource: src, virtualKey: commandKey, keyDown: true)
+        let cDown   = CGEvent(keyboardEventSource: src, virtualKey: cKey, keyDown: true)
+        let cUp     = CGEvent(keyboardEventSource: src, virtualKey: cKey, keyDown: false)
+        let cmdUp   = CGEvent(keyboardEventSource: src, virtualKey: commandKey, keyDown: false)
+
+        cDown?.flags = .maskCommand
+        cUp?.flags   = .maskCommand
+
+        cmdDown?.post(tap: .cghidEventTap)
+        cDown?.post(tap: .cghidEventTap)
+        cUp?.post(tap: .cghidEventTap)
+        cmdUp?.post(tap: .cghidEventTap)
+
+        NSLog("[ClipSlots] Sent explicit Cmd+C keystroke")
+    }
+
+    /// Poll until clipboard changeCount differs from `changeCount` or timeout.
+    private func waitForClipboardChangeOrDelay(
+        from changeCount: Int,
+        timeout: TimeInterval = 0.35,
+        interval: TimeInterval = 0.03,
+        completion: @escaping (Bool) -> Void
+    ) {
+        let deadline = Date().addingTimeInterval(timeout)
+
+        func check() {
+            if NSPasteboard.general.changeCount != changeCount {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { completion(true) }
+                return
+            }
+            if Date() >= deadline {
+                completion(false)
+                return
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + interval) { check() }
+        }
+        check()
+    }
+
+    /// For global save hotkey: send Cmd+C to copy current selection, wait for clipboard update, then save.
+    func captureSelectionAndSaveToSlot(_ slot: Int) {
+        cancelPendingClipboardRestore()
+
+        guard AXIsProcessTrusted() else {
+            NSLog("[ClipSlots] Accessibility permission not granted. Cannot capture selection.")
+            promptAccessibilityPermissionIfNeeded()
+            return
+        }
+
+        let beforeChangeCount = NSPasteboard.general.changeCount
+        NSLog("[ClipSlots] captureSelectionAndSaveToSlot requested slot=\(slot), beforeChangeCount=\(beforeChangeCount)")
+
+        sendCopyKeystroke()
+
+        waitForClipboardChangeOrDelay(from: beforeChangeCount, timeout: 0.35, interval: 0.03) { [weak self] changed in
+            guard let self = self else { return }
+
+            guard changed else {
+                NSLog("[ClipSlots] captureSelectionAndSaveToSlot ignored: clipboard did not change slot=\(slot)")
+                return
+            }
+
+            let content = self.clipboard.capture()
+            guard !content.isEmpty else {
+                NSLog("[ClipSlots] captureSelectionAndSaveToSlot ignored: empty capture slot=\(slot)")
+                return
+            }
+
+            self.storage.set(slot, content: content)
+
+            var newSlots = self.slots
+            newSlots[slot] = content
+            self.slots = newSlots
+            self.refreshTrigger = UUID()
+
+            NSLog("[ClipSlots] CAPTURE_SELECTION_SAVE slot=\(slot) preview=\(content.preview)")
+        }
+    }
+
     // MARK: - Save (lightweight, synchronous)
 
     func saveToSlot(_ slot: Int) {

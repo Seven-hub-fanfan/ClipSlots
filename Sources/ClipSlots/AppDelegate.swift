@@ -41,7 +41,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 self?.store?.pasteSlot(slot)  // simple paste — user is already in target app
             },
             onSave: { [weak self] slot in
-                self?.store?.saveToSlot(slot)
+                self?.store?.captureSelectionAndSaveToSlot(slot)
             },
             onRadial: { [weak self] in
                 self?.showRadialMenu()
