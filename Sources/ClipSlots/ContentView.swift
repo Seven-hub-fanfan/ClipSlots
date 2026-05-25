@@ -161,7 +161,7 @@ struct ContentView: View {
 
             Spacer()
 
-            Text("v2.1.6")
+            Text("v2.1.7")
                 .font(.caption2)
                 .foregroundColor(Color.secondary.opacity(0.65))
         }

@@ -4,3 +4,12 @@ dist/
 .DS_Store
 build/ClipSlots.app/
 build/ClipSlots.iconset/
+# App icon generated temp files
+assets/AppIcon.iconset/
+
+# macOS
+.DS_Store
+
+# SwiftPM
+.build/
+.swiftpm/
