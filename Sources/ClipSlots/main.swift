@@ -30,10 +30,16 @@ struct ClipSlotsApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
     @StateObject private var store = SlotStoreObservable()
 
+    @AppStorage("appearanceMode") private var appearanceModeRaw = ThemeMode.system.rawValue
+    private var appearanceMode: ThemeMode {
+        ThemeMode(rawValue: appearanceModeRaw) ?? .system
+    }
+
     var body: some Scene {
         WindowGroup {
             ContentView(store: store)
                 .frame(minWidth: 460, minHeight: 360)
+                .preferredColorScheme(appearanceMode.preferredColorScheme)
                 .onAppear {
                     appDelegate.store = store
                     store.onConfigChanged = { [weak appDelegate] in

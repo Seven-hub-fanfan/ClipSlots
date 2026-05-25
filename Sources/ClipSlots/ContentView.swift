@@ -5,6 +5,14 @@ struct ContentView: View {
     @State private var showingSettings = false
     @Environment(\.colorScheme) private var colorScheme
 
+    @AppStorage("appearanceMode") private var appearanceModeRaw = ThemeMode.system.rawValue
+    private var appearanceModeBinding: Binding<ThemeMode> {
+        Binding(
+            get: { ThemeMode(rawValue: appearanceModeRaw) ?? .system },
+            set: { appearanceModeRaw = $0.rawValue }
+        )
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             headerView
@@ -64,6 +72,18 @@ struct ContentView: View {
             Text("\(filledSlotCount) / \(store.config.slots) 个槽位已使用")
                 .font(.caption)
                 .foregroundColor(.secondary)
+            Menu {
+                Picker("外观", selection: appearanceModeBinding) {
+                    ForEach(ThemeMode.allCases) { mode in
+                        Label(mode.title, systemImage: mode.icon).tag(mode)
+                    }
+                }
+            } label: {
+                Image(systemName: (ThemeMode(rawValue: appearanceModeRaw) ?? .system).icon)
+            }
+            .menuStyle(.borderlessButton)
+            .help("外观")
+
             Button { showingSettings = true } label: {
                 Image(systemName: "gearshape.fill")
             }

@@ -49,12 +49,17 @@ struct RadialMenuView: View {
                     .background(AppTheme.radialMaterial(colorScheme), in: Circle())
                     .shadow(color: AppTheme.radialShadow(colorScheme), radius: 25, y: 8)
 
-                // Divider lines
+                // Divider lines (centered correctly)
                 ForEach(0..<slotCount, id: \.self) { i in
                     let segmentAngle = 360.0 / Double(slotCount)
                     let a = Angle(degrees: Double(i) * segmentAngle - 90)
-                    dividerLine(angle: a, innerRadius: deadZoneRadius + 2, outerRadius: outerRadius - 2)
-                        .stroke(AppTheme.radialDivider(colorScheme), lineWidth: 1)
+                    dividerLine(
+                        center: center,
+                        angle: a,
+                        innerRadius: deadZoneRadius + 2,
+                        outerRadius: outerRadius - 2
+                    )
+                    .stroke(AppTheme.radialDivider(colorScheme), lineWidth: 1)
                 }
 
                 // Segments
@@ -68,13 +73,12 @@ struct RadialMenuView: View {
                     ZStack {
                         PieSegmentShape(startAngle: startAngle, endAngle: endAngle, innerRadius: deadZoneRadius, outerRadius: outerRadius)
                             .fill(AppTheme.radialSegment(colorScheme, isEmpty: content.isEmpty, isHovered: hoveredSlot == slot))
-                            .overlay(
-                                PieSegmentShape(startAngle: startAngle, endAngle: endAngle, innerRadius: deadZoneRadius, outerRadius: outerRadius)
-                                    .stroke(
-                                        AppTheme.radialStroke(colorScheme, isHovered: hoveredSlot == slot),
-                                        lineWidth: hoveredSlot == slot ? 2 : 1
-                                    )
-                            )
+
+                        // Only stroke hovered segment (dividers handle the rest)
+                        if hoveredSlot == slot {
+                            PieSegmentShape(startAngle: startAngle, endAngle: endAngle, innerRadius: deadZoneRadius, outerRadius: outerRadius)
+                                .stroke(AppTheme.radialStroke(colorScheme, isHovered: true), lineWidth: 2)
+                        }
 
                         segmentLabel(
                             slot: slot, content: content,
@@ -164,11 +168,25 @@ struct RadialMenuView: View {
         .animation(.easeOut(duration: 0.1), value: isHovered)
     }
 
-    private func dividerLine(angle: Angle, innerRadius: CGFloat, outerRadius: CGFloat) -> Path {
+    /// Divider line from inner to outer radius at a given angle, relative to center.
+    private func dividerLine(
+        center: CGPoint,
+        angle: Angle,
+        innerRadius: CGFloat,
+        outerRadius: CGFloat
+    ) -> Path {
         let rad = CGFloat(angle.radians)
+        let start = CGPoint(
+            x: center.x + innerRadius * cos(rad),
+            y: center.y + innerRadius * sin(rad)
+        )
+        let end = CGPoint(
+            x: center.x + outerRadius * cos(rad),
+            y: center.y + outerRadius * sin(rad)
+        )
         var path = Path()
-        path.move(to: CGPoint(x: innerRadius * cos(rad), y: innerRadius * sin(rad)))
-        path.addLine(to: CGPoint(x: outerRadius * cos(rad), y: outerRadius * sin(rad)))
+        path.move(to: start)
+        path.addLine(to: end)
         return path
     }
 }

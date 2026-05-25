@@ -54,6 +54,10 @@ final class RadialMenuWindowController {
         self.onSelectCallback = onSelect
         self.onDismissCallback = onDismiss
 
+        // Read theme mode so radial menu matches main window appearance
+        let modeRaw = UserDefaults.standard.string(forKey: "appearanceMode") ?? ThemeMode.system.rawValue
+        let themeMode = ThemeMode(rawValue: modeRaw) ?? .system
+
         let radialView = RadialMenuView(
             slots: slots,
             labels: labels,
@@ -61,6 +65,7 @@ final class RadialMenuWindowController {
             onSelect: { _ in },
             onDismiss: { onDismiss() }
         )
+        .preferredColorScheme(themeMode.preferredColorScheme)
 
         let hosting = NSHostingView(rootView: radialView)
         hosting.frame = NSRect(x: 0, y: 0, width: menuSize, height: menuSize)

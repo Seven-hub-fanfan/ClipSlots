@@ -10,6 +10,14 @@ struct SettingsView: View {
     @State private var radialKey: String
     @Environment(\.dismiss) private var dismiss
 
+    @AppStorage("appearanceMode") private var appearanceModeRaw = ThemeMode.system.rawValue
+    private var appearanceModeBinding: Binding<ThemeMode> {
+        Binding(
+            get: { ThemeMode(rawValue: appearanceModeRaw) ?? .system },
+            set: { appearanceModeRaw = $0.rawValue }
+        )
+    }
+
     init(config: AppConfig, onSave: @escaping (AppConfig) -> Void) {
         self.config = config
         self.onSave = onSave
@@ -23,6 +31,22 @@ struct SettingsView: View {
         VStack(alignment: .leading, spacing: 16) {
             Text("ClipSlots 设置")
                 .font(.headline)
+
+            Divider()
+
+            VStack(alignment: .leading, spacing: 6) {
+                Text("外观")
+                    .font(.subheadline)
+                Picker("外观", selection: appearanceModeBinding) {
+                    ForEach(ThemeMode.allCases) { mode in
+                        Label(mode.title, systemImage: mode.icon).tag(mode)
+                    }
+                }
+                .pickerStyle(.segmented)
+                Text("选择应用外观，默认跟随系统设置")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
 
             Divider()
 
