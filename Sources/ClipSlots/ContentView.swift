@@ -6,6 +6,7 @@ struct ContentView: View {
     @Environment(\.colorScheme) private var colorScheme
 
     @AppStorage("appearanceMode") private var appearanceModeRaw = ThemeMode.system.rawValue
+
     private var appearanceModeBinding: Binding<ThemeMode> {
         Binding(
             get: { ThemeMode(rawValue: appearanceModeRaw) ?? .system },
@@ -17,18 +18,20 @@ struct ContentView: View {
         VStack(spacing: 0) {
             headerView
 
-            Divider()
-
             ScrollView {
                 LazyVGrid(
-                    columns: [GridItem(.adaptive(minimum: 200, maximum: 260), spacing: 12)],
-                    spacing: 12
+                    columns: [
+                        GridItem(.adaptive(minimum: 220, maximum: 280), spacing: 14)
+                    ],
+                    spacing: 14
                 ) {
                     ForEach(1...store.config.slots, id: \.self) { slot in
                         SlotCardView(
                             slot: slot,
                             content: store.slots[slot] ?? SlotContent(),
                             label: store.labels[slot] ?? "",
+                            saveShortcut: shortcutPreview(store.config.saveKey, slot: slot),
+                            pasteShortcut: shortcutPreview(store.config.pasteKey, slot: slot),
                             onPaste: {
                                 NSLog("[ClipSlots] UI paste button clicked slot=\(slot)")
                                 store.pasteSlotFromUI(slot)
@@ -51,78 +54,135 @@ struct ContentView: View {
                         )
                     }
                 }
-                .padding(16)
+                .padding(AppTheme.pagePadding)
             }
             .background(AppTheme.windowBackground(colorScheme))
 
-            Divider()
-
             bottomBar
         }
+        .background(AppTheme.windowBackground(colorScheme))
     }
 
     private var headerView: some View {
-        HStack {
-            Image(systemName: "tray.and.arrow.down.fill")
-                .font(.title2)
-                .foregroundColor(.accentColor)
-            Text("ClipSlots")
-                .font(.title2.bold())
-            Spacer()
-            Text("\(filledSlotCount) / \(store.config.slots) 个槽位已使用")
-                .font(.caption)
-                .foregroundColor(.secondary)
-            Menu {
-                Picker("外观", selection: appearanceModeBinding) {
-                    ForEach(ThemeMode.allCases) { mode in
-                        Label(mode.title, systemImage: mode.icon).tag(mode)
-                    }
-                }
-            } label: {
-                Image(systemName: (ThemeMode(rawValue: appearanceModeRaw) ?? .system).icon)
-            }
-            .menuStyle(.borderlessButton)
-            .help("外观")
+        VStack(spacing: 0) {
+            HStack(spacing: 14) {
+                ZStack {
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .fill(AppTheme.brandGradient(colorScheme))
+                        .frame(width: 44, height: 44)
+                        .shadow(color: Color.accentColor.opacity(0.25), radius: 10, y: 4)
 
-            Button { showingSettings = true } label: {
-                Image(systemName: "gearshape.fill")
+                    Image(systemName: "rectangle.stack.fill")
+                        .font(.system(size: 20, weight: .semibold))
+                        .foregroundColor(.white)
+                }
+
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("ClipSlots")
+                        .font(.system(size: 22, weight: .bold, design: .rounded))
+
+                    Text("快速保存、调用和粘贴你的常用剪贴板内容")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+
+                Spacer()
+
+                statPill(
+                    title: "已使用",
+                    value: "\(filledSlotCount)/\(store.config.slots)",
+                    icon: "checkmark.circle.fill",
+                    color: AppTheme.success
+                )
+
+                Menu {
+                    Picker("外观", selection: appearanceModeBinding) {
+                        ForEach(ThemeMode.allCases) { mode in
+                            Label(mode.title, systemImage: mode.icon).tag(mode)
+                        }
+                    }
+                } label: {
+                    Image(systemName: (ThemeMode(rawValue: appearanceModeRaw) ?? .system).icon)
+                        .font(.system(size: 15, weight: .semibold))
+                        .frame(width: 30, height: 30)
+                }
+                .menuStyle(.borderlessButton)
+                .help("外观")
+
+                Button { showingSettings = true } label: {
+                    Image(systemName: "gearshape.fill")
+                        .font(.system(size: 15, weight: .semibold))
+                        .frame(width: 30, height: 30)
+                }
+                .buttonStyle(.borderless)
+                .help("设置")
             }
-            .buttonStyle(.borderless)
-            .help("设置")
+            .padding(.horizontal, AppTheme.pagePadding)
+            .padding(.vertical, 16)
+
+            Divider()
         }
-        .padding(.horizontal, 20)
-        .padding(.vertical, 12)
+        .background(.regularMaterial)
         .popover(isPresented: $showingSettings) {
             SettingsView(config: store.config) { newConfig in
                 store.updateConfig(newConfig)
                 showingSettings = false
             }
-            .frame(width: 400, height: 520)
+            .frame(width: 460, height: 610)
         }
     }
 
+    private func statPill(title: String, value: String, icon: String, color: Color) -> some View {
+        HStack(spacing: 7) {
+            Image(systemName: icon)
+                .foregroundColor(color)
+            VStack(alignment: .leading, spacing: 0) {
+                Text(title)
+                    .font(.system(size: 10))
+                    .foregroundColor(.secondary)
+                Text(value)
+                    .font(.system(size: 12, weight: .semibold, design: .rounded))
+            }
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 7)
+        .background(Capsule().fill(AppTheme.chipBackground(colorScheme)))
+    }
+
     private var bottomBar: some View {
-        HStack {
-            Text("全局快捷键：")
+        HStack(spacing: 10) {
+            Text("快捷键")
                 .font(.caption)
                 .foregroundColor(.secondary)
-            Label("\(store.config.saveKey) 保存", systemImage: "square.and.arrow.down")
-                .font(.caption2)
-                .padding(.horizontal, 8)
-                .padding(.vertical, 4)
-                .background(Capsule().fill(Color.accentColor.opacity(colorScheme == .dark ? 0.16 : 0.10)))
-            Label("\(store.config.pasteKey) 粘贴", systemImage: "square.and.arrow.up")
-                .font(.caption2)
-                .padding(.horizontal, 8)
-                .padding(.vertical, 4)
-                .background(Capsule().fill(Color.accentColor.opacity(colorScheme == .dark ? 0.16 : 0.10)))
+
+            keyChip("\(store.config.saveKey) 保存", icon: "square.and.arrow.down")
+            keyChip("\(store.config.pasteKey) 粘贴", icon: "square.and.arrow.up")
+            keyChip("\(store.config.radialKey) 圆盘", icon: "circle.grid.cross")
+
             Spacer()
-            Text("ClipSlots 2.0")
+
+            Text("v2.1.6")
                 .font(.caption2)
-                .foregroundColor(Color.secondary.opacity(0.5))
+                .foregroundColor(Color.secondary.opacity(0.65))
         }
-        .padding(.horizontal, 20)
-        .padding(.vertical, 10)
+        .padding(.horizontal, AppTheme.pagePadding)
+        .padding(.vertical, 11)
+        .background(.regularMaterial)
+        .overlay(alignment: .top) {
+            Divider()
+        }
+    }
+
+    private func keyChip(_ text: String, icon: String) -> some View {
+        Label(text, systemImage: icon)
+            .font(.caption2)
+            .padding(.horizontal, 9)
+            .padding(.vertical, 5)
+            .background(Capsule().fill(AppTheme.chipBackground(colorScheme)))
+    }
+
+    private func shortcutPreview(_ template: String, slot: Int) -> String {
+        template.replacingOccurrences(of: "{n}", with: "\(slot)")
     }
 
     private var filledSlotCount: Int {

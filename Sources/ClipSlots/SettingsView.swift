@@ -8,9 +8,14 @@ struct SettingsView: View {
     @State private var saveKey: String
     @State private var pasteKey: String
     @State private var radialKey: String
+    @State private var verbose: Bool
+    @State private var showingResetConfirm = false
+
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.colorScheme) private var colorScheme
 
     @AppStorage("appearanceMode") private var appearanceModeRaw = ThemeMode.system.rawValue
+
     private var appearanceModeBinding: Binding<ThemeMode> {
         Binding(
             get: { ThemeMode(rawValue: appearanceModeRaw) ?? .system },
@@ -25,109 +30,221 @@ struct SettingsView: View {
         _saveKey = State(initialValue: config.saveKey)
         _pasteKey = State(initialValue: config.pasteKey)
         _radialKey = State(initialValue: config.radialKey)
+        _verbose = State(initialValue: config.verbose)
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            Text("ClipSlots 设置")
-                .font(.headline)
+        VStack(spacing: 0) {
+            header
 
-            Divider()
+            ScrollView {
+                VStack(spacing: 18) {
+                    appearanceSection
+                    slotSection
+                    shortcutSection
+                    advancedSection
+                    helpSection
+                }
+                .padding(20)
+            }
 
-            VStack(alignment: .leading, spacing: 6) {
-                Text("外观")
-                    .font(.subheadline)
+            footer
+        }
+        .background(AppTheme.windowBackground(colorScheme))
+        .confirmationDialog("恢复默认设置？", isPresented: $showingResetConfirm, titleVisibility: .visible) {
+            Button("恢复默认", role: .destructive) { resetDefaults() }
+            Button("取消", role: .cancel) {}
+        } message: {
+            Text("槽位数量、快捷键和日志设置将恢复为默认值。")
+        }
+    }
+
+    private var header: some View {
+        HStack(spacing: 12) {
+            ZStack {
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .fill(AppTheme.brandGradient(colorScheme))
+                    .frame(width: 38, height: 38)
+                Image(systemName: "gearshape.fill")
+                    .font(.system(size: 17, weight: .semibold))
+                    .foregroundColor(.white)
+            }
+            VStack(alignment: .leading, spacing: 2) {
+                Text("ClipSlots 设置")
+                    .font(.system(size: 18, weight: .bold, design: .rounded))
+                Text("配置外观、槽位和全局快捷键")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+            Spacer()
+        }
+        .padding(.horizontal, 20)
+        .padding(.vertical, 16)
+        .background(.regularMaterial)
+        .overlay(alignment: .bottom) { Divider() }
+    }
+
+    private var appearanceSection: some View {
+        settingsSection(title: "外观", icon: "paintbrush.fill") {
+            VStack(alignment: .leading, spacing: 10) {
                 Picker("外观", selection: appearanceModeBinding) {
                     ForEach(ThemeMode.allCases) { mode in
                         Label(mode.title, systemImage: mode.icon).tag(mode)
                     }
                 }
                 .pickerStyle(.segmented)
-                Text("选择应用外观，默认跟随系统设置")
+                Text("默认跟随系统设置，也可以强制使用浅色或深色模式。")
                     .font(.caption)
                     .foregroundColor(.secondary)
-            }
-
-            Divider()
-
-            HStack(spacing: 12) {
-                Text("槽位数量:")
-                    .frame(width: 80, alignment: .leading)
-                Slider(value: $slots, in: 1...10, step: 1)
-                Text("\(Int(slots))")
-                    .frame(width: 24)
-                    .font(.system(.body, design: .monospaced))
-            }
-
-            VStack(alignment: .leading, spacing: 4) {
-                Text("保存快捷键:")
-                    .font(.subheadline)
-                TextField("例如: ctrl+option+{n}", text: $saveKey)
-                    .textFieldStyle(.roundedBorder)
-                Text("按下此快捷键将当前剪贴板内容保存到槽位")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-            }
-
-            VStack(alignment: .leading, spacing: 4) {
-                Text("粘贴快捷键:")
-                    .font(.subheadline)
-                TextField("例如: ctrl+{n}", text: $pasteKey)
-                    .textFieldStyle(.roundedBorder)
-                Text("按下此快捷键从槽位粘贴内容")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-            }
-
-            VStack(alignment: .leading, spacing: 4) {
-                Text("圆盘菜单快捷键:")
-                    .font(.subheadline)
-                TextField("例如: ctrl+space", text: $radialKey)
-                    .textFieldStyle(.roundedBorder)
-                Text("按下此快捷键在鼠标位置弹出圆盘菜单")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-            }
-
-            VStack(alignment: .leading, spacing: 2) {
-                Text("可用修饰键: ctrl, option, cmd, shift")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-                Text("可用键位: 0-9, a-z, f1-f12, space, tab, 方向键")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-                Text("{n} 代表槽位编号（圆盘菜单不需要）")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-            }
-
-            Divider()
-
-            HStack {
-                Button("重置默认") {
-                    slots = 5
-                    saveKey = "ctrl+option+{n}"
-                    pasteKey = "ctrl+{n}"
-                    radialKey = "ctrl+space"
-                }
-                Spacer()
-                Button("取消") { dismiss() }
-                    .keyboardShortcut(.escape)
-                Button("保存") {
-                    var newConfig = config
-                    newConfig.slots = Int(slots)
-                    newConfig.saveKey = saveKey
-                    newConfig.pasteKey = pasteKey
-                    newConfig.radialKey = radialKey
-                    newConfig.save()
-                    onSave(newConfig)
-                    dismiss()
-                }
-                .buttonStyle(.borderedProminent)
-                .keyboardShortcut(.return)
             }
         }
-        .padding(24)
-        .frame(width: 400)
+    }
+
+    private var slotSection: some View {
+        settingsSection(title: "槽位", icon: "rectangle.stack.fill") {
+            VStack(alignment: .leading, spacing: 12) {
+                HStack {
+                    Text("槽位数量")
+                        .font(.subheadline)
+                    Spacer()
+                    Text("\(Int(slots))")
+                        .font(.system(size: 13, weight: .semibold, design: .rounded))
+                        .padding(.horizontal, 9)
+                        .padding(.vertical, 4)
+                        .background(Capsule().fill(AppTheme.chipBackground(colorScheme)))
+                }
+                Slider(value: $slots, in: 1...10, step: 1)
+                Text("建议设置为 5～9 个槽位。槽位越多，圆盘菜单可读性越低。")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+        }
+    }
+
+    private var shortcutSection: some View {
+        settingsSection(title: "快捷键", icon: "keyboard.fill") {
+            VStack(spacing: 14) {
+                shortcutInput(title: "保存快捷键", subtitle: "将当前剪贴板内容保存到指定槽位", placeholder: "ctrl+option+{n}", text: $saveKey, preview: saveKey.replacingOccurrences(of: "{n}", with: "1"))
+                shortcutInput(title: "粘贴快捷键", subtitle: "从指定槽位粘贴内容", placeholder: "ctrl+{n}", text: $pasteKey, preview: pasteKey.replacingOccurrences(of: "{n}", with: "1"))
+                shortcutInput(title: "圆盘菜单快捷键", subtitle: "在鼠标位置弹出圆盘选择器", placeholder: "ctrl+space", text: $radialKey, preview: radialKey)
+            }
+        }
+    }
+
+    private var advancedSection: some View {
+        settingsSection(title: "高级", icon: "slider.horizontal.3") {
+            Toggle(isOn: $verbose) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("输出详细日志")
+                        .font(.subheadline)
+                    Text("用于调试保存、粘贴、快捷键注册等问题。")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+            }
+            .toggleStyle(.switch)
+        }
+    }
+
+    private var helpSection: some View {
+        settingsSection(title: "快捷键格式", icon: "info.circle.fill") {
+            VStack(alignment: .leading, spacing: 6) {
+                helpRow("修饰键", "ctrl, option, cmd, shift")
+                helpRow("普通键", "0-9, a-z, f1-f12, space, tab, 方向键")
+                helpRow("槽位占位符", "{n} 代表槽位编号，例如 ctrl+{n}")
+            }
+        }
+    }
+
+    private var footer: some View {
+        HStack {
+            Button("恢复默认") { showingResetConfirm = true }
+            Spacer()
+            Button("取消") { dismiss() }
+                .keyboardShortcut(.escape)
+            Button("保存") { save() }
+                .buttonStyle(.borderedProminent)
+                .keyboardShortcut(.return)
+        }
+        .padding(.horizontal, 20)
+        .padding(.vertical, 14)
+        .background(.regularMaterial)
+        .overlay(alignment: .top) { Divider() }
+    }
+
+    private func settingsSection<Content: View>(title: String, icon: String, @ViewBuilder content: () -> Content) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 8) {
+                Image(systemName: icon)
+                    .foregroundColor(.accentColor)
+                    .frame(width: 18)
+                Text(title)
+                    .font(.system(size: 14, weight: .semibold))
+            }
+            content()
+        }
+        .padding(14)
+        .background(
+            RoundedRectangle(cornerRadius: AppTheme.cornerRadius, style: .continuous)
+                .fill(AppTheme.elevatedBackground(colorScheme))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: AppTheme.cornerRadius, style: .continuous)
+                .stroke(AppTheme.subtleBorder(colorScheme), lineWidth: 1)
+        )
+    }
+
+    private func shortcutInput(title: String, subtitle: String, placeholder: String, text: Binding<String>, preview: String) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(title).font(.subheadline)
+                    Text(subtitle).font(.caption).foregroundColor(.secondary)
+                }
+                Spacer()
+                Text(preview.isEmpty ? "未设置" : preview)
+                    .font(.system(size: 11, weight: .medium, design: .monospaced))
+                    .foregroundColor(.secondary)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 4)
+                    .background(Capsule().fill(AppTheme.chipBackground(colorScheme)))
+            }
+            TextField(placeholder, text: text)
+                .textFieldStyle(.roundedBorder)
+                .font(.system(.body, design: .monospaced))
+        }
+    }
+
+    private func helpRow(_ title: String, _ value: String) -> some View {
+        HStack(alignment: .top, spacing: 10) {
+            Text(title)
+                .font(.caption)
+                .foregroundColor(.secondary)
+                .frame(width: 76, alignment: .leading)
+            Text(value)
+                .font(.caption)
+                .foregroundColor(.secondary)
+                .textSelection(.enabled)
+        }
+    }
+
+    private func resetDefaults() {
+        slots = 9
+        saveKey = "ctrl+option+{n}"
+        pasteKey = "ctrl+{n}"
+        radialKey = "ctrl+space"
+        verbose = true
+    }
+
+    private func save() {
+        var newConfig = config
+        newConfig.slots = Int(slots)
+        newConfig.saveKey = saveKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        newConfig.pasteKey = pasteKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        newConfig.radialKey = radialKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        newConfig.verbose = verbose
+        newConfig.save()
+        onSave(newConfig)
+        dismiss()
     }
 }
