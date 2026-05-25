@@ -89,7 +89,7 @@ final class SlotStoreObservable: ObservableObject {
 
     var onConfigChanged: (() -> Void)?
 
-    private let storage = SlotStorage.shared
+    let storage = SlotStorage.shared
     private let clipboard = ClipboardManager.shared
     private var timer: Timer?
 
@@ -137,6 +137,16 @@ final class SlotStoreObservable: ObservableObject {
                 NSLog("[ClipSlots] WARNING: Failed to restore previous clipboard after paste from slot \(slot)")
             }
         }
+    }
+
+    func sendPasteKeystroke() {
+        let vKey = virtualKeyForCharacterV()
+        let src = CGEventSource(stateID: .hidSystemState)
+        let down = CGEvent(keyboardEventSource: src, virtualKey: vKey, keyDown: true)
+        let up = CGEvent(keyboardEventSource: src, virtualKey: vKey, keyDown: false)
+        down?.flags = .maskCommand; up?.flags = .maskCommand
+        down?.post(tap: .cghidEventTap); up?.post(tap: .cghidEventTap)
+        NSLog("[ClipSlots] Sent Cmd+V keystroke")
     }
 
     func saveToSlot(_ slot: Int) {

@@ -1,5 +1,4 @@
 import SwiftUI
-import AppKit
 
 // MARK: - Pie Segment Shape
 
@@ -23,76 +22,6 @@ struct PieSegmentShape: Shape {
     }
 }
 
-// MARK: - AppKit Mouse Tracking View
-
-private final class MouseTrackingView: NSView {
-    var onHover: ((CGPoint) -> Void)?
-    var onClick: (() -> Void)?
-    var onMouseEntered: (() -> Void)?
-    var onMouseExited: (() -> Void)?
-
-    override func updateTrackingAreas() {
-        super.updateTrackingAreas()
-        for area in trackingAreas {
-            removeTrackingArea(area)
-        }
-        let area = NSTrackingArea(
-            rect: bounds,
-            options: [.activeAlways, .mouseMoved, .mouseEnteredAndExited, .enabledDuringMouseDrag],
-            owner: self,
-            userInfo: nil
-        )
-        addTrackingArea(area)
-    }
-
-    override func mouseMoved(with event: NSEvent) {
-        let point = convert(event.locationInWindow, from: nil)
-        onHover?(point)
-    }
-
-    override func mouseDragged(with event: NSEvent) {
-        let point = convert(event.locationInWindow, from: nil)
-        onHover?(point)
-    }
-
-    override func mouseDown(with event: NSEvent) {
-        onClick?()
-    }
-
-    override func mouseEntered(with event: NSEvent) {
-        onMouseEntered?()
-        let point = convert(event.locationInWindow, from: nil)
-        onHover?(point)
-    }
-
-    override func mouseExited(with event: NSEvent) {
-        onMouseExited?()
-    }
-}
-
-private struct MouseTrackingOverlay: NSViewRepresentable {
-    var onHover: (CGPoint) -> Void
-    var onClick: () -> Void
-    var onMouseEntered: () -> Void
-    var onMouseExited: () -> Void
-
-    func makeNSView(context: Context) -> MouseTrackingView {
-        let view = MouseTrackingView()
-        view.onHover = onHover
-        view.onClick = onClick
-        view.onMouseEntered = onMouseEntered
-        view.onMouseExited = onMouseExited
-        return view
-    }
-
-    func updateNSView(_ nsView: MouseTrackingView, context: Context) {
-        nsView.onHover = onHover
-        nsView.onClick = onClick
-        nsView.onMouseEntered = onMouseEntered
-        nsView.onMouseExited = onMouseExited
-    }
-}
-
 // MARK: - Radial Menu View
 
 struct RadialMenuView: View {
@@ -103,116 +32,108 @@ struct RadialMenuView: View {
     var onDismiss: () -> Void
 
     @State private var hoveredSlot: Int? = nil
-    @State private var mouseLocation: CGPoint = .zero
 
     private let menuSize: CGFloat = 340
 
     var body: some View {
-        let outerRadius = menuSize / 2
-        let deadZoneRadius = outerRadius * 0.22
-        let center = CGPoint(x: menuSize / 2, y: menuSize / 2)
+        GeometryReader { geo in
+            let center = CGPoint(x: geo.size.width / 2, y: geo.size.height / 2)
+            let outerRadius = min(geo.size.width, geo.size.height) / 2
+            let deadZoneRadius = outerRadius * 0.22
 
-        ZStack {
-            // Background circle
-            Circle()
-                .fill(Color.black.opacity(0.85))
-                .background(.ultraThinMaterial, in: Circle())
-                .environment(\.colorScheme, .dark)
-                .shadow(color: .black.opacity(0.5), radius: 25, y: 8)
+            ZStack {
+                // Background
+                Circle()
+                    .fill(Color.black.opacity(0.85))
+                    .background(.ultraThinMaterial, in: Circle())
+                    .environment(\.colorScheme, .dark)
+                    .shadow(color: .black.opacity(0.5), radius: 25, y: 8)
 
-            // Divider lines
-            ForEach(0..<slotCount, id: \.self) { i in
-                let segmentAngle = 360.0 / Double(slotCount)
-                let a = Angle(degrees: Double(i) * segmentAngle - 90)
-                dividerLine(angle: a, innerRadius: deadZoneRadius + 2, outerRadius: outerRadius - 2)
-                    .stroke(Color.white.opacity(0.12), lineWidth: 1)
-            }
-
-            // Segments
-            ForEach(1...slotCount, id: \.self) { slot in
-                let content = slots[slot] ?? SlotContent()
-                let segmentAngle = 360.0 / Double(slotCount)
-                let startAngle = Angle(degrees: Double(slot - 1) * segmentAngle - 90)
-                let endAngle = Angle(degrees: Double(slot) * segmentAngle - 90)
-                let midAngle = Angle(degrees: (Double(slot - 1) + 0.5) * segmentAngle - 90)
-
-                ZStack {
-                    PieSegmentShape(startAngle: startAngle, endAngle: endAngle, innerRadius: deadZoneRadius, outerRadius: outerRadius)
-                        .fill(segmentFill(slot: slot, content: content))
-                        .overlay(
-                            PieSegmentShape(startAngle: startAngle, endAngle: endAngle, innerRadius: deadZoneRadius, outerRadius: outerRadius)
-                                .stroke(
-                                    hoveredSlot == slot ? Color.accentColor : Color.white.opacity(0.15),
-                                    lineWidth: hoveredSlot == slot ? 2 : 1
-                                )
-                        )
-
-                    segmentLabel(
-                        slot: slot, content: content,
-                        angle: midAngle,
-                        midRadius: (deadZoneRadius + outerRadius) / 2
-                    )
+                // Divider lines
+                ForEach(0..<slotCount, id: \.self) { i in
+                    let segmentAngle = 360.0 / Double(slotCount)
+                    let a = Angle(degrees: Double(i) * segmentAngle - 90)
+                    dividerLine(angle: a, innerRadius: deadZoneRadius + 2, outerRadius: outerRadius - 2)
+                        .stroke(Color.white.opacity(0.12), lineWidth: 1)
                 }
-            }
 
-            // Inner ring
-            Circle()
-                .stroke(Color.white.opacity(0.1), lineWidth: 1)
-                .frame(width: deadZoneRadius * 2 + 4, height: deadZoneRadius * 2 + 4)
+                // Segments
+                ForEach(1...slotCount, id: \.self) { slot in
+                    let content = slots[slot] ?? SlotContent()
+                    let segmentAngle = 360.0 / Double(slotCount)
+                    let startAngle = Angle(degrees: Double(slot - 1) * segmentAngle - 90)
+                    let endAngle = Angle(degrees: Double(slot) * segmentAngle - 90)
+                    let midAngle = Angle(degrees: (Double(slot - 1) + 0.5) * segmentAngle - 90)
 
-            // Center dead zone
-            Circle()
-                .fill(Color.black.opacity(0.75))
-                .frame(width: deadZoneRadius * 2, height: deadZoneRadius * 2)
-                .overlay(
-                    Circle()
-                        .stroke(Color.white.opacity(0.1), lineWidth: 1)
-                )
+                    ZStack {
+                        PieSegmentShape(startAngle: startAngle, endAngle: endAngle, innerRadius: deadZoneRadius, outerRadius: outerRadius)
+                            .fill(segmentFill(slot: slot, content: content))
+                            .overlay(
+                                PieSegmentShape(startAngle: startAngle, endAngle: endAngle, innerRadius: deadZoneRadius, outerRadius: outerRadius)
+                                    .stroke(
+                                        hoveredSlot == slot ? Color.accentColor : Color.white.opacity(0.15),
+                                        lineWidth: hoveredSlot == slot ? 2 : 1
+                                    )
+                            )
 
-            // Center icon
-            Image(systemName: "tray.and.arrow.down.fill")
-                .font(.system(size: 20))
-                .foregroundColor(.white.opacity(0.55))
-
-            // Mouse tracking overlay (transparent, on top of everything)
-            MouseTrackingOverlay(
-                onHover: { location in
-                    mouseLocation = location
-                    updateHoveredSlot(location: location, center: center, deadZoneRadius: deadZoneRadius)
-                },
-                onClick: {
-                    if let slot = hoveredSlot, let content = slots[slot], !content.isEmpty {
-                        onSelect(slot)
-                    } else {
-                        onDismiss()
+                        segmentLabel(
+                            slot: slot, content: content,
+                            angle: midAngle,
+                            midRadius: (deadZoneRadius + outerRadius) / 2
+                        )
                     }
-                },
-                onMouseEntered: {},
-                onMouseExited: {
+                }
+
+                // Inner ring
+                Circle()
+                    .stroke(Color.white.opacity(0.1), lineWidth: 1)
+                    .frame(width: deadZoneRadius * 2 + 4, height: deadZoneRadius * 2 + 4)
+
+                // Center dead zone
+                Circle()
+                    .fill(Color.black.opacity(0.75))
+                    .frame(width: deadZoneRadius * 2, height: deadZoneRadius * 2)
+                    .overlay(
+                        Circle()
+                            .stroke(Color.white.opacity(0.1), lineWidth: 1)
+                    )
+
+                // Center icon
+                Image(systemName: "tray.and.arrow.down.fill")
+                    .font(.system(size: 20))
+                    .foregroundColor(.white.opacity(0.55))
+            }
+            .frame(width: outerRadius * 2, height: outerRadius * 2)
+            .contentShape(Circle())
+            .onContinuousHover(coordinateSpace: .local) { phase in
+                switch phase {
+                case .active(let location):
+                    let dx = location.x - center.x
+                    let dy = location.y - center.y
+                    let distance = sqrt(dx * dx + dy * dy)
+
+                    if distance < deadZoneRadius {
+                        hoveredSlot = nil
+                    } else {
+                        var angle = atan2(dy, dx) * 180 / .pi + 90
+                        if angle < 0 { angle += 360 }
+                        let segmentAngle = 360.0 / Double(slotCount)
+                        let index = Int(angle / segmentAngle)
+                        hoveredSlot = min(index + 1, slotCount)
+                    }
+                case .ended:
                     hoveredSlot = nil
                 }
-            )
-            .frame(width: menuSize, height: menuSize)
-            .allowsHitTesting(true)
+            }
+            .onTapGesture {
+                if let slot = hoveredSlot, let content = slots[slot], !content.isEmpty {
+                    onSelect(slot)
+                } else {
+                    onDismiss()
+                }
+            }
         }
         .frame(width: menuSize, height: menuSize)
-        .clipShape(Circle())
-    }
-
-    private func updateHoveredSlot(location: CGPoint, center: CGPoint, deadZoneRadius: CGFloat) {
-        let dx = location.x - center.x
-        let dy = location.y - center.y
-        let distance = sqrt(dx * dx + dy * dy)
-
-        if distance < deadZoneRadius {
-            hoveredSlot = nil
-        } else {
-            var angle = atan2(dy, dx) * 180 / .pi + 90
-            if angle < 0 { angle += 360 }
-            let segmentAngle = 360.0 / Double(slotCount)
-            let index = Int(angle / segmentAngle)
-            hoveredSlot = min(index + 1, slotCount)
-        }
     }
 
     private func segmentFill(slot: Int, content: SlotContent) -> Color {

@@ -44,6 +44,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard let store = store else { return }
 
         let mouseLocation = NSEvent.mouseLocation
+        // Remember which app is active before showing the menu
+        let previousApp = NSWorkspace.shared.frontmostApplication
 
         radialMenuController.show(
             at: mouseLocation,
@@ -52,8 +54,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             slotCount: store.config.slots,
             onSelect: { [weak self] slot in
                 self?.radialMenuController.dismiss()
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
-                    self?.store?.pasteSlot(slot)
+                // Restore clipboard content immediately
+                let content = store.storage.snapshot()[slot] ?? SlotContent()
+                guard !content.isEmpty else { return }
+                _ = ClipboardManager.shared.restore(content)
+
+                // Activate the previous app, then send Cmd+V after a short delay
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                    previousApp?.activate(options: .activateIgnoringOtherApps)
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                        store.sendPasteKeystroke()
+                    }
                 }
             },
             onDismiss: { [weak self] in
