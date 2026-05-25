@@ -7,6 +7,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.regular)
+
+        // Monitor frontmost app switches to track paste target
+        NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didActivateApplicationNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] notification in
+            guard let self = self,
+                  let app = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication,
+                  app.bundleIdentifier != Bundle.main.bundleIdentifier else {
+                return
+            }
+            self.store?.lastNonClipSlotsApp = app
+        }
+
         NSLog("[ClipSlots] App launched, awaiting window for hotkey registration")
     }
 
@@ -45,7 +60,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         let mouseLocation = NSEvent.mouseLocation
         let previousApp = NSWorkspace.shared.frontmostApplication
-        NSLog("[ClipSlots] RADIAL show menu at (\(mouseLocation.x), \(mouseLocation.y)), previousApp=\(previousApp?.localizedName ?? "nil")")
+        NSLog("[ClipSlots] RADIAL show menu, previousApp=\(previousApp?.localizedName ?? "nil")")
 
         radialMenuController.show(
             at: mouseLocation,
@@ -53,31 +68,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             labels: store.labels,
             slotCount: store.config.slots,
             onSelect: { [weak self] slot in
-                NSLog("[ClipSlots] RADIAL onSelect slot=\(slot)")
-                self?.radialMenuController.dismiss()
+                guard let self = self else { return }
+                self.radialMenuController.dismiss()
 
-                let content = store.storage.snapshot()[slot] ?? SlotContent()
-                guard !content.isEmpty else {
-                    NSLog("[ClipSlots] RADIAL slot \(slot) is empty, aborting")
-                    return
-                }
-
-                let restored = ClipboardManager.shared.restore(content)
-                NSLog("[ClipSlots] RADIAL clipboard restore slot=\(slot) preview=\(content.preview) ok=\(restored)")
-
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
-                    let frontmost = NSWorkspace.shared.frontmostApplication
-                    NSLog("[ClipSlots] RADIAL current frontmost=\(frontmost?.localizedName ?? "nil"), activating=\(previousApp?.localizedName ?? "nil")")
-                    previousApp?.activate(options: .activateIgnoringOtherApps)
-
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-                        NSLog("[ClipSlots] RADIAL sending Cmd+V")
-                        store.sendPasteKeystroke()
-                    }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+                    self.store?.pasteSlot(slot, activate: previousApp ?? self.store?.lastNonClipSlotsApp)
                 }
             },
             onDismiss: { [weak self] in
-                NSLog("[ClipSlots] RADIAL onDismiss")
                 self?.radialMenuController.dismiss()
             }
         )

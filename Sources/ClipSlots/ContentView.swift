@@ -22,7 +22,7 @@ struct ContentView: View {
                             slot: slot,
                             content: store.slots[slot] ?? SlotContent(),
                             label: store.labels[slot] ?? "",
-                            onPaste: { store.pasteSlot(slot) },
+                            onPaste: { store.pasteSlot(slot, activate: store.lastNonClipSlotsApp) },
                             onCopy: { store.copySlot(slot) },
                             onSave: { store.saveToSlot(slot) },
                             onClear: { store.clearSlot(slot) },

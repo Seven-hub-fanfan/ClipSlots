@@ -143,7 +143,11 @@ final class SlotStorage {
 
         for item in items {
             let typeFile = itemDir.appendingPathComponent("\(item.type).bin")
-            try? item.data.write(to: typeFile, options: .atomic)
+            do {
+                try item.data.write(to: typeFile, options: .atomic)
+            } catch {
+                NSLog("[ClipSlots] Failed to write pasteboard type \(item.type): \(error)")
+            }
         }
     }
 

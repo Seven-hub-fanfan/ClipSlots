@@ -86,6 +86,7 @@ final class SlotStoreObservable: ObservableObject {
     @Published var slots: [Int: SlotContent] = [:]
     @Published var labels: [Int: String] = [:]
     @Published var refreshTrigger = UUID()
+    var lastNonClipSlotsApp: NSRunningApplication?
 
     var onConfigChanged: (() -> Void)?
 
@@ -113,33 +114,58 @@ final class SlotStoreObservable: ObservableObject {
         labels = labelMap
     }
 
-    func pasteSlot(_ slot: Int) {
+    // MARK: - Unified Paste
+
+    /// Paste from a slot. If `targetApp` is provided, activate it before sending Cmd+V.
+    /// This is the single entry point for all paste operations (radial menu, UI button, hotkey).
+    func pasteSlot(_ slot: Int, activate targetApp: NSRunningApplication? = nil) {
         let content = storage.get(slot)
-        guard !content.isEmpty else { return }
+        guard !content.isEmpty else {
+            NSLog("[ClipSlots] pasteSlot ignored: slot \(slot) is empty")
+            return
+        }
 
         let types = content.items.flatMap { $0.map { $0.type } }
-        NSLog("[ClipSlots] PASTE slot=\(slot) preview=\(content.preview) types=\(types)")
+        NSLog("[ClipSlots] PASTE slot=\(slot) preview=\(content.preview) types=\(types) targetApp=\(targetApp?.localizedName ?? "nil")")
 
         let previous = clipboard.capture()
-        _ = clipboard.restore(content)
 
-        let vKey = virtualKeyForCharacterV()
-        let src = CGEventSource(stateID: .hidSystemState)
-        let down = CGEvent(keyboardEventSource: src, virtualKey: vKey, keyDown: true)
-        let up = CGEvent(keyboardEventSource: src, virtualKey: vKey, keyDown: false)
-        down?.flags = .maskCommand; up?.flags = .maskCommand
-        down?.post(tap: .cghidEventTap); up?.post(tap: .cghidEventTap)
-
-        clipboard.waitForPasteCompletion { [weak self] in
+        let performPaste = { [weak self] in
             guard let self = self else { return }
-            let restored = self.clipboard.restore(previous)
-            if !restored {
-                NSLog("[ClipSlots] WARNING: Failed to restore previous clipboard after paste from slot \(slot)")
+
+            let restored = self.clipboard.restore(content)
+            guard restored else {
+                NSLog("[ClipSlots] pasteSlot failed: restore slot \(slot) to clipboard failed")
+                return
             }
+
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) {
+                self.sendPasteKeystroke()
+
+                self.clipboard.waitForPasteCompletion { [weak self] in
+                    guard let self = self else { return }
+                    _ = self.clipboard.restore(previous)
+                }
+            }
+        }
+
+        if let targetApp = targetApp {
+            targetApp.activate(options: .activateIgnoringOtherApps)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.20) {
+                performPaste()
+            }
+        } else {
+            performPaste()
         }
     }
 
+    /// Send Cmd+V keystroke via CGEvent. Checks Accessibility permission first.
     func sendPasteKeystroke() {
+        guard AXIsProcessTrusted() else {
+            NSLog("[ClipSlots] Accessibility permission not granted. Cannot send Cmd+V.")
+            return
+        }
+
         let vKey = virtualKeyForCharacterV()
         let src = CGEventSource(stateID: .hidSystemState)
         let down = CGEvent(keyboardEventSource: src, virtualKey: vKey, keyDown: true)
@@ -149,15 +175,27 @@ final class SlotStoreObservable: ObservableObject {
         NSLog("[ClipSlots] Sent Cmd+V keystroke")
     }
 
+    // MARK: - Save
+
     func saveToSlot(_ slot: Int) {
-        let content = clipboard.capture()
-        storage.set(slot, content: content)
-        NSLog("[ClipSlots] SAVE slot=\(slot) preview=\(content.preview)")
-        // Force UI update: new dict triggers @Published
-        var newSlots = slots
-        newSlots[slot] = content
-        slots = newSlots
-        loadSlots()
+        // Delay to allow macOS pasteboard to settle (especially for Finder file copies)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.10) { [weak self] in
+            guard let self = self else { return }
+
+            let content = self.clipboard.capture()
+            guard !content.isEmpty else {
+                NSLog("[ClipSlots] saveToSlot ignored: clipboard is empty")
+                return
+            }
+
+            self.storage.set(slot, content: content)
+
+            var newSlots = self.slots
+            newSlots[slot] = content
+            self.slots = newSlots
+
+            NSLog("[ClipSlots] SAVE slot=\(slot) preview=\(content.preview)")
+        }
     }
 
     func clearSlot(_ slot: Int) {
@@ -173,9 +211,20 @@ final class SlotStoreObservable: ObservableObject {
         _ = clipboard.restore(content)
     }
 
+    // MARK: - Label
+
     func setLabel(_ slot: Int, label: String?) {
         storage.setLabel(slot, label: label)
-        loadSlots()
+
+        var newLabels = labels
+        if let label = label, !label.isEmpty {
+            newLabels[slot] = label
+        } else {
+            newLabels.removeValue(forKey: slot)
+        }
+        labels = newLabels
+
+        NSLog("[ClipSlots] setLabel slot=\(slot) label=\(label ?? "")")
     }
 
     func updateConfig(_ newConfig: AppConfig) {

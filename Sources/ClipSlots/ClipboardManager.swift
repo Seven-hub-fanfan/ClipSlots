@@ -78,7 +78,7 @@ final class ClipboardManager {
         }
         content.items = allItems
         let types = allItems.flatMap { $0.map { $0.type } }
-        NSLog("[ClipSlots] CLIPBOARD capture: \(pbItems.count) items, types: \(types)")
+        NSLog("[ClipSlots] CLIPBOARD capture: changeCount=\(pasteboard.changeCount) items=\(pbItems.count), types: \(types), preview=\(content.preview)")
         return content
     }
 
