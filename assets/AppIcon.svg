@@ -1,75 +1,43 @@
 <svg width="1024" height="1024" viewBox="0 0 1024 1024" fill="none" xmlns="http://www.w3.org/2000/svg">
   <defs>
-    <linearGradient id="bg" x1="210" y1="120" x2="860" y2="900" gradientUnits="userSpaceOnUse">
-      <stop offset="0" stop-color="#20222A"/>
-      <stop offset="0.48" stop-color="#101116"/>
-      <stop offset="1" stop-color="#050507"/>
+    <linearGradient id="baseBg" x1="128" y1="96" x2="896" y2="928" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#1A1C24"/>
+      <stop offset="1" stop-color="#0A0B10"/>
     </linearGradient>
-    <linearGradient id="innerPanel" x1="260" y1="180" x2="800" y2="860" gradientUnits="userSpaceOnUse">
-      <stop offset="0" stop-color="#262832"/>
-      <stop offset="0.45" stop-color="#121319"/>
-      <stop offset="1" stop-color="#060609"/>
+    <linearGradient id="brandGrad" x1="280" y1="280" x2="744" y2="744" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#7C8CFF"/>
+      <stop offset="0.52" stop-color="#5E7CFF"/>
+      <stop offset="1" stop-color="#8B5CFF"/>
     </linearGradient>
-    <linearGradient id="clipboardBody" x1="350" y1="310" x2="660" y2="720" gradientUnits="userSpaceOnUse">
-      <stop offset="0" stop-color="#FFFFFF"/>
-      <stop offset="0.45" stop-color="#F1F1F1"/>
-      <stop offset="1" stop-color="#C8C8C8"/>
-    </linearGradient>
-    <linearGradient id="clipboardShadow" x1="360" y1="400" x2="650" y2="720" gradientUnits="userSpaceOnUse">
-      <stop offset="0" stop-color="#D8D8D8"/>
-      <stop offset="1" stop-color="#8D8D8D"/>
-    </linearGradient>
-    <linearGradient id="paper" x1="380" y1="350" x2="620" y2="630" gradientUnits="userSpaceOnUse">
-      <stop offset="0" stop-color="#FFFFFF"/>
-      <stop offset="1" stop-color="#E8E8E8"/>
-    </linearGradient>
-    <filter id="whiteGlow" x="180" y="160" width="690" height="720" filterUnits="userSpaceOnUse">
-      <feDropShadow dx="0" dy="0" stdDeviation="34" flood-color="#FFFFFF" flood-opacity="0.28"/>
-      <feDropShadow dx="0" dy="24" stdDeviation="36" flood-color="#000000" flood-opacity="0.52"/>
+    <filter id="brandShadow" x="220" y="220" width="584" height="584" filterUnits="userSpaceOnUse">
+      <feDropShadow dx="0" dy="16" stdDeviation="28" flood-color="#5E7CFF" flood-opacity="0.40"/>
     </filter>
-    <radialGradient id="topHighlight" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse" gradientTransform="translate(690 325) rotate(129.806) scale(210 160)">
-      <stop offset="0" stop-color="#FFFFFF" stop-opacity="0.66"/>
-      <stop offset="0.38" stop-color="#FFFFFF" stop-opacity="0.18"/>
-      <stop offset="1" stop-color="#FFFFFF" stop-opacity="0"/>
-    </radialGradient>
-    <radialGradient id="bottomGlow" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse" gradientTransform="translate(680 720) rotate(135) scale(190 180)">
-      <stop offset="0" stop-color="#FFFFFF" stop-opacity="0.22"/>
-      <stop offset="0.45" stop-color="#FFFFFF" stop-opacity="0.08"/>
-      <stop offset="1" stop-color="#FFFFFF" stop-opacity="0"/>
-    </radialGradient>
-    <linearGradient id="glassShade" x1="310" y1="190" x2="760" y2="560" gradientUnits="userSpaceOnUse">
-      <stop offset="0" stop-color="#FFFFFF" stop-opacity="0.16"/>
-      <stop offset="0.34" stop-color="#FFFFFF" stop-opacity="0.04"/>
-      <stop offset="1" stop-color="#FFFFFF" stop-opacity="0"/>
-    </linearGradient>
-    <linearGradient id="lineGray" x1="410" y1="510" x2="610" y2="610" gradientUnits="userSpaceOnUse">
-      <stop offset="0" stop-color="#A8A8A8"/>
-      <stop offset="1" stop-color="#FFFFFF"/>
-    </linearGradient>
   </defs>
 
-  <rect x="128" y="128" width="768" height="768" rx="178" fill="url(#bg)"/>
-  <circle cx="690" cy="730" r="200" fill="url(#bottomGlow)"/>
-  <rect x="170" y="164" width="684" height="684" rx="158" fill="url(#innerPanel)"/>
-  <path d="M248 356C292 240 390 198 520 198C680 198 788 282 826 432C764 328 666 282 526 282C394 282 304 306 248 356Z" fill="url(#glassShade)"/>
-  <ellipse cx="684" cy="336" rx="178" ry="128" transform="rotate(-24 684 336)" fill="url(#topHighlight)"/>
+  <!-- macOS dark base -->
+  <rect x="96" y="96" width="832" height="832" rx="210" fill="url(#baseBg)"/>
 
-  <g filter="url(#whiteGlow)">
-    <rect x="312" y="326" width="400" height="408" rx="92" fill="#FFFFFF" fill-opacity="0.12"/>
-    <rect x="334" y="350" width="356" height="356" rx="88" fill="url(#clipboardShadow)"/>
-    <rect x="354" y="370" width="316" height="316" rx="72" fill="url(#clipboardBody)"/>
-    <rect x="402" y="424" width="220" height="210" rx="34" fill="url(#paper)"/>
-    <rect x="452" y="392" width="120" height="58" rx="29" fill="#F8F8F8"/>
-    <rect x="478" y="374" width="68" height="34" rx="17" fill="#DCDCDC"/>
-    <circle cx="438" cy="496" r="9" fill="#6E6E6E"/>
-    <circle cx="438" cy="546" r="9" fill="#8A8A8A"/>
-    <circle cx="438" cy="596" r="9" fill="#A0A0A0"/>
-    <rect x="472" y="486" width="104" height="15" rx="7.5" fill="url(#lineGray)" opacity="0.72"/>
-    <rect x="472" y="536" width="126" height="15" rx="7.5" fill="url(#lineGray)" opacity="0.82"/>
-    <rect x="472" y="586" width="88" height="15" rx="7.5" fill="url(#lineGray)" opacity="0.62"/>
+  <!-- Brand logo: rounded rect matching the UI header logo -->
+  <g filter="url(#brandShadow)">
+    <rect x="276" y="276" width="472" height="472" rx="108" fill="url(#brandGrad)"/>
   </g>
 
-  <ellipse cx="512" cy="500" rx="196" ry="184" fill="#FFFFFF" fill-opacity="0.08"/>
-  <rect x="129.5" y="129.5" width="765" height="765" rx="176.5" stroke="#FFFFFF" stroke-opacity="0.06" stroke-width="3"/>
-  <rect x="171.5" y="165.5" width="681" height="681" rx="156.5" stroke="#FFFFFF" stroke-opacity="0.08" stroke-width="3"/>
+  <!-- Top highlight on the logo -->
+  <path d="M338 410C358 340 400 322 512 322C624 322 682 346 712 402C672 352 618 336 516 336C414 336 364 348 338 410Z" fill="white" fill-opacity="0.16"/>
+
+  <!-- rectangle.stack.fill symbol: three stacked cards -->
+  <!-- Bottom card -->
+  <rect x="396" y="546" width="232" height="158" rx="38" fill="white" fill-opacity="0.23"/>
+  <!-- Middle card -->
+  <rect x="382" y="468" width="260" height="158" rx="40" fill="white" fill-opacity="0.62"/>
+  <!-- Top card -->
+  <rect x="368" y="390" width="288" height="158" rx="42" fill="white"/>
+  <!-- Top card inner lines (slots) -->
+  <rect x="410" y="432" width="120" height="18" rx="9" fill="#DDE5FF"/>
+  <rect x="410" y="470" width="156" height="18" rx="9" fill="#DDE5FF" opacity="0.55"/>
+  <rect x="410" y="508" width="84" height="18" rx="9" fill="#DDE5FF" opacity="0.3"/>
+  <!-- Top card dots -->
+  <circle cx="396" cy="441" r="8" fill="#8B5CFF"/>
+  <circle cx="396" cy="479" r="8" fill="#7C8CFF"/>
+  <circle cx="396" cy="517" r="8" fill="#8B5CFF" opacity="0.6"/>
 </svg>
