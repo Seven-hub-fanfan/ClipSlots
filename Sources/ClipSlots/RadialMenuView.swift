@@ -32,6 +32,7 @@ struct RadialMenuView: View {
     var onDismiss: () -> Void
 
     @State private var hoveredSlot: Int? = nil
+    @Environment(\.colorScheme) private var colorScheme
 
     private let menuSize: CGFloat = 340
 
@@ -44,17 +45,16 @@ struct RadialMenuView: View {
             ZStack {
                 // Background
                 Circle()
-                    .fill(Color.black.opacity(0.85))
-                    .background(.ultraThinMaterial, in: Circle())
-                    .environment(\.colorScheme, .dark)
-                    .shadow(color: .black.opacity(0.5), radius: 25, y: 8)
+                    .fill(AppTheme.radialBackground(colorScheme))
+                    .background(AppTheme.radialMaterial(colorScheme), in: Circle())
+                    .shadow(color: AppTheme.radialShadow(colorScheme), radius: 25, y: 8)
 
                 // Divider lines
                 ForEach(0..<slotCount, id: \.self) { i in
                     let segmentAngle = 360.0 / Double(slotCount)
                     let a = Angle(degrees: Double(i) * segmentAngle - 90)
                     dividerLine(angle: a, innerRadius: deadZoneRadius + 2, outerRadius: outerRadius - 2)
-                        .stroke(Color.white.opacity(0.12), lineWidth: 1)
+                        .stroke(AppTheme.radialDivider(colorScheme), lineWidth: 1)
                 }
 
                 // Segments
@@ -67,11 +67,11 @@ struct RadialMenuView: View {
 
                     ZStack {
                         PieSegmentShape(startAngle: startAngle, endAngle: endAngle, innerRadius: deadZoneRadius, outerRadius: outerRadius)
-                            .fill(segmentFill(slot: slot, content: content))
+                            .fill(AppTheme.radialSegment(colorScheme, isEmpty: content.isEmpty, isHovered: hoveredSlot == slot))
                             .overlay(
                                 PieSegmentShape(startAngle: startAngle, endAngle: endAngle, innerRadius: deadZoneRadius, outerRadius: outerRadius)
                                     .stroke(
-                                        hoveredSlot == slot ? Color.accentColor : Color.white.opacity(0.15),
+                                        AppTheme.radialStroke(colorScheme, isHovered: hoveredSlot == slot),
                                         lineWidth: hoveredSlot == slot ? 2 : 1
                                     )
                             )
@@ -86,22 +86,22 @@ struct RadialMenuView: View {
 
                 // Inner ring
                 Circle()
-                    .stroke(Color.white.opacity(0.1), lineWidth: 1)
+                    .stroke(AppTheme.radialDivider(colorScheme), lineWidth: 1)
                     .frame(width: deadZoneRadius * 2 + 4, height: deadZoneRadius * 2 + 4)
 
                 // Center dead zone
                 Circle()
-                    .fill(Color.black.opacity(0.75))
+                    .fill(AppTheme.radialCenterBackground(colorScheme))
                     .frame(width: deadZoneRadius * 2, height: deadZoneRadius * 2)
                     .overlay(
                         Circle()
-                            .stroke(Color.white.opacity(0.1), lineWidth: 1)
+                            .stroke(AppTheme.radialDivider(colorScheme), lineWidth: 1)
                     )
 
                 // Center icon
                 Image(systemName: "tray.and.arrow.down.fill")
                     .font(.system(size: 20))
-                    .foregroundColor(.white.opacity(0.55))
+                    .foregroundColor(AppTheme.radialSecondaryText(colorScheme, isHovered: false))
             }
             .frame(width: outerRadius * 2, height: outerRadius * 2)
             .contentShape(Circle())
@@ -111,7 +111,6 @@ struct RadialMenuView: View {
                     let dx = location.x - center.x
                     let dy = location.y - center.y
                     let distance = sqrt(dx * dx + dy * dy)
-
                     if distance < deadZoneRadius {
                         hoveredSlot = nil
                     } else {
@@ -136,16 +135,6 @@ struct RadialMenuView: View {
         .frame(width: menuSize, height: menuSize)
     }
 
-    private func segmentFill(slot: Int, content: SlotContent) -> Color {
-        if content.isEmpty {
-            return Color.white.opacity(0.04)
-        }
-        if hoveredSlot == slot {
-            return Color.accentColor.opacity(0.75)
-        }
-        return Color.white.opacity(0.08)
-    }
-
     @ViewBuilder
     private func segmentLabel(slot: Int, content: SlotContent, angle: Angle, midRadius: CGFloat) -> some View {
         let rad = CGFloat(angle.radians)
@@ -156,19 +145,19 @@ struct RadialMenuView: View {
         VStack(spacing: 2) {
             Text("\(slot)")
                 .font(.system(size: 20, weight: .bold, design: .rounded))
-                .foregroundColor(isHovered ? .white : .white.opacity(content.isEmpty ? 0.25 : 0.85))
+                .foregroundColor(AppTheme.radialPrimaryText(colorScheme, isHovered: isHovered, isEmpty: content.isEmpty))
 
             if !content.isEmpty {
                 Text(content.preview)
                     .font(.system(size: 9))
-                    .foregroundColor(isHovered ? .white.opacity(0.85) : .white.opacity(0.4))
+                    .foregroundColor(AppTheme.radialSecondaryText(colorScheme, isHovered: isHovered))
                     .lineLimit(1)
                     .truncationMode(.tail)
                     .frame(width: midRadius * 0.75)
             } else {
                 Text("空")
                     .font(.system(size: 9))
-                    .foregroundColor(.white.opacity(0.2))
+                    .foregroundColor(AppTheme.radialEmptyText(colorScheme))
             }
         }
         .offset(x: x, y: y)

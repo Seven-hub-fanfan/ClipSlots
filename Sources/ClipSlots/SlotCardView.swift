@@ -12,6 +12,7 @@ struct SlotCardView: View {
 
     @State private var editingLabel = false
     @State private var labelText = ""
+    @Environment(\.colorScheme) private var colorScheme
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -57,12 +58,12 @@ struct SlotCardView: View {
                 .frame(height: 44)
                 .padding(10)
                 .background(
-                    RoundedRectangle(cornerRadius: 8)
-                        .fill(Color(NSColor.textBackgroundColor))
+                    RoundedRectangle(cornerRadius: AppTheme.smallCornerRadius)
+                        .fill(AppTheme.previewBackground(colorScheme))
                 )
                 .overlay(
-                    RoundedRectangle(cornerRadius: 8)
-                        .stroke(Color.secondary.opacity(0.15), lineWidth: 1)
+                    RoundedRectangle(cornerRadius: AppTheme.smallCornerRadius)
+                        .stroke(AppTheme.subtleBorder(colorScheme), lineWidth: 1)
                 )
 
             // Action buttons
@@ -106,15 +107,22 @@ struct SlotCardView: View {
         }
         .padding(14)
         .background(
-            RoundedRectangle(cornerRadius: 12)
-                .fill(content.isEmpty
-                    ? Color(NSColor.controlBackgroundColor).opacity(0.5)
-                    : Color(NSColor.controlBackgroundColor))
-                .shadow(color: .black.opacity(content.isEmpty ? 0.02 : 0.06), radius: 4, y: 2)
+            RoundedRectangle(cornerRadius: AppTheme.cornerRadius)
+                .fill(AppTheme.cardBackground(colorScheme, isEmpty: content.isEmpty))
+                .shadow(
+                    color: AppTheme.cardShadow(colorScheme, isEmpty: content.isEmpty),
+                    radius: content.isEmpty ? 3 : 5,
+                    y: 2
+                )
         )
         .overlay(
-            RoundedRectangle(cornerRadius: 12)
-                .stroke(content.isEmpty ? Color.secondary.opacity(0.1) : Color.accentColor.opacity(0.2), lineWidth: 1)
+            RoundedRectangle(cornerRadius: AppTheme.cornerRadius)
+                .stroke(
+                    content.isEmpty
+                        ? AppTheme.subtleBorder(colorScheme)
+                        : AppTheme.activeBorder(colorScheme),
+                    lineWidth: 1
+                )
         )
     }
 

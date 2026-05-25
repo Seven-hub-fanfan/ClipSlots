@@ -3,6 +3,7 @@ import SwiftUI
 struct ContentView: View {
     @ObservedObject var store: SlotStoreObservable
     @State private var showingSettings = false
+    @Environment(\.colorScheme) private var colorScheme
 
     var body: some View {
         VStack(spacing: 0) {
@@ -44,7 +45,7 @@ struct ContentView: View {
                 }
                 .padding(16)
             }
-            .background(Color(NSColor.controlBackgroundColor))
+            .background(AppTheme.windowBackground(colorScheme))
 
             Divider()
 
@@ -89,12 +90,12 @@ struct ContentView: View {
                 .font(.caption2)
                 .padding(.horizontal, 8)
                 .padding(.vertical, 4)
-                .background(Capsule().fill(Color.accentColor.opacity(0.1)))
+                .background(Capsule().fill(Color.accentColor.opacity(colorScheme == .dark ? 0.16 : 0.10)))
             Label("\(store.config.pasteKey) 粘贴", systemImage: "square.and.arrow.up")
                 .font(.caption2)
                 .padding(.horizontal, 8)
                 .padding(.vertical, 4)
-                .background(Capsule().fill(Color.accentColor.opacity(0.1)))
+                .background(Capsule().fill(Color.accentColor.opacity(colorScheme == .dark ? 0.16 : 0.10)))
             Spacer()
             Text("ClipSlots 2.0")
                 .font(.caption2)
