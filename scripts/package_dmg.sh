@@ -31,6 +31,9 @@ fi
 
 chmod +x "$APP_DIR/Contents/MacOS/$APP_NAME"
 
+echo "==> Re-sign app bundle (adhoc)"
+codesign --force --deep --sign - "$APP_DIR"
+
 echo "==> Validate app bundle"
 plutil -lint "$APP_DIR/Contents/Info.plist"
 file "$APP_DIR/Contents/MacOS/$APP_NAME"
