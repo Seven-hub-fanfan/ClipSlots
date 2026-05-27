@@ -326,14 +326,7 @@ final class SlotStoreObservable: ObservableObject {
                 return
             }
 
-            self.specialStorage.set(slot, content: content)
-
-            var newSlots = self.slots
-            newSlots[slot] = content
-            self.slots = newSlots
-            self.refreshTrigger = UUID()
-
-            NSLog("[ClipSlots] CAPTURE_SELECTION_SAVE slot=\(slot) preview=\(content.preview)")
+            self.handleCapturedContentForSave(content, targetSlot: slot)
         }
     }
 
@@ -348,14 +341,7 @@ final class SlotStoreObservable: ObservableObject {
             return
         }
 
-        specialStorage.set(slot, content: content)
-
-        var newSlots = slots
-        newSlots[slot] = content
-        slots = newSlots
-        refreshTrigger = UUID()
-
-        NSLog("[ClipSlots] SAVE slot=\(slot) preview=\(content.preview)")
+        handleCapturedContentForSave(content, targetSlot: slot)
     }
 
     // MARK: - Copy (lightweight)
@@ -512,5 +498,181 @@ final class SlotStoreObservable: ObservableObject {
             loadSlots()
         }
         onConfigChanged?()
+    }
+
+    // MARK: - Folder Import
+
+    private let folderImportService = FolderImportService()
+
+    func chooseFolderAndImportIntoCurrentSpecialSlot() {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.allowsMultipleSelection = false
+        panel.message = "选择要批量导入的文件夹"
+
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        importFolderIntoCurrentSpecialSlot(url)
+    }
+
+    func importFolderIntoCurrentSpecialSlot(_ folderURL: URL) {
+        let options = FolderImportOptions(
+            maxFiles: specialSlotSettings.maxChildSlotsPerSpecialSlot,
+            includeHiddenFiles: false,
+            recursive: false,
+            sortRule: specialSlotSettings.folderImportSortRule
+        )
+
+        do {
+            let preview = try folderImportService.preview(folderURL: folderURL, options: options)
+
+            guard preview.totalImportableCount > 0 else {
+                showAlert(message: "该文件夹中没有可导入文件")
+                return
+            }
+
+            // Overflow check
+            if preview.overflowed, !specialSlotSettings.suppressFolderOverflowWarning {
+                let decision = confirmFolderOverflow(count: preview.totalImportableCount, max: options.maxFiles)
+                switch decision {
+                case .cancel: return
+                case .confirm(let suppress):
+                    if suppress {
+                        try? specialStorage.updateSettings { $0.suppressFolderOverflowWarning = true }
+                        specialSlotSettings.suppressFolderOverflowWarning = true
+                    }
+                }
+            }
+
+            // Overwrite check
+            let hasContent = (1...config.slots).contains { !specialStorage.get($0).isEmpty }
+            if hasContent && specialSlotSettings.confirmBeforeOverwrite {
+                guard confirmOverwriteCurrentSpecialSlot() else { return }
+            }
+
+            // Clear and import
+            try specialStorage.clearAllSlotsInCurrentSpecialSlot()
+
+            for (idx, fileURL) in preview.willImportFiles.enumerated() {
+                let slotNumber = idx + 1
+                let content = folderImportService.makeSlotContent(for: fileURL)
+                specialStorage.set(slotNumber, content: content)
+            }
+
+            try specialStorage.updateCurrentSpecialSlotSource(
+                sourceType: .folderImport,
+                sourcePath: folderURL.path
+            )
+
+            reloadAll()
+            refreshTrigger = UUID()
+            showAlert(message: "已导入 \(preview.willImportFiles.count) 个文件到当前特殊槽位")
+
+        } catch {
+            NSLog("[ClipSlots] Folder import error: \(error)")
+            showAlert(message: "导入失败: \(error.localizedDescription)")
+        }
+    }
+
+    // MARK: - Dialogs
+
+    private func confirmFolderOverflow(count: Int, max: Int) -> FolderOverflowDecision {
+        let alert = NSAlert()
+        alert.messageText = "文件数量超过槽位上限"
+        alert.informativeText = "当前文件夹包含 \(count) 个可导入文件，但每个特殊槽位最多只能保存 \(max) 个子槽位。是否仅导入排序后的前 \(max) 个文件？"
+        alert.addButton(withTitle: "确认导入前 \(max) 个")
+        alert.addButton(withTitle: "取消")
+
+        let checkbox = NSButton(checkboxWithTitle: "不再提醒", target: nil, action: nil)
+        alert.accessoryView = checkbox
+
+        let response = alert.runModal()
+        if response == .alertFirstButtonReturn {
+            return .confirm(suppressFutureWarning: checkbox.state == .on)
+        }
+        return .cancel
+    }
+
+    private func confirmOverwriteCurrentSpecialSlot() -> Bool {
+        let alert = NSAlert()
+        alert.messageText = "是否覆盖当前槽位内容？"
+        alert.informativeText = "批量导入会清空当前特殊槽位下已有的子槽位内容。是否继续？"
+        alert.addButton(withTitle: "继续并覆盖")
+        alert.addButton(withTitle: "取消")
+        return alert.runModal() == .alertFirstButtonReturn
+    }
+
+    private func showAlert(message: String) {
+        let alert = NSAlert()
+        alert.messageText = message
+        alert.addButton(withTitle: "确定")
+        alert.runModal()
+    }
+
+    // MARK: - File Detection
+
+    func handleCapturedContentForSave(_ content: SlotContent, targetSlot: Int) {
+        let folderURLs = content.detectedFolderURLs
+
+        if folderURLs.count == 1 {
+            handleSingleFolderSave(folderURLs[0], targetSlot: targetSlot)
+            return
+        }
+        if folderURLs.count > 1 {
+            handleSingleFolderSave(folderURLs[0], targetSlot: targetSlot)
+            return
+        }
+
+        // Normal save
+        specialStorage.set(targetSlot, content: content)
+        var newSlots = slots
+        newSlots[targetSlot] = content
+        slots = newSlots
+        refreshTrigger = UUID()
+        NSLog("[ClipSlots] SAVE slot=\(targetSlot) preview=\(content.preview)")
+    }
+
+    private func handleSingleFolderSave(_ folderURL: URL, targetSlot: Int) {
+        let alert = NSAlert()
+        alert.messageText = "检测到文件夹"
+        alert.informativeText = "当前剪贴板内容是文件夹 (\(folderURL.lastPathComponent))。\n你想如何处理？"
+        alert.addButton(withTitle: "批量导入到当前特殊槽位")
+        alert.addButton(withTitle: "创建新的特殊槽位并导入")
+        alert.addButton(withTitle: "作为普通文件保存")
+        alert.addButton(withTitle: "取消")
+
+        let response = alert.runModal()
+        switch response {
+        case .alertFirstButtonReturn:
+            importFolderIntoCurrentSpecialSlot(folderURL)
+        case .alertSecondButtonReturn:
+            createSpecialSlotAndImportFolder(folderURL)
+        case .alertThirdButtonReturn:
+            let content = folderImportService.makeSlotContent(for: folderURL)
+            specialStorage.set(targetSlot, content: content)
+            var newSlots = slots
+            newSlots[targetSlot] = content
+            slots = newSlots
+            refreshTrigger = UUID()
+        default:
+            break
+        }
+    }
+
+    func createSpecialSlotAndImportFolder(_ folderURL: URL) {
+        do {
+            let name = folderURL.lastPathComponent
+            let slot = try specialStorage.createSpecialSlot(
+                name: name,
+                sourceType: .folderImport,
+                sourcePath: folderURL.path
+            )
+            try specialStorage.switchToSpecialSlot(id: slot.id)
+            reloadAll()
+            importFolderIntoCurrentSpecialSlot(folderURL)
+        } catch {
+            NSLog("[ClipSlots] createSpecialSlotAndImportFolder error: \(error)")
+            showAlert(message: "创建特殊槽位失败: \(error.localizedDescription)")
+        }
     }
 }

@@ -1,5 +1,12 @@
 import Foundation
 
+// MARK: - Folder Overflow Decision
+
+enum FolderOverflowDecision {
+    case confirm(suppressFutureWarning: Bool)
+    case cancel
+}
+
 // MARK: - Special Slot Model
 
 struct SpecialSlot: Codable, Identifiable, Equatable {

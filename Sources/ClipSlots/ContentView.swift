@@ -81,12 +81,59 @@ struct ContentView: View {
                     Text("ClipSlots")
                         .font(.system(size: 22, weight: .bold, design: .rounded))
 
-                    Text("快速保存、调用和粘贴你的常用剪贴板内容")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
+                    HStack(spacing: 6) {
+                        Text("快速保存、调用和粘贴你的常用剪贴板内容")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+
+                        Menu {
+                            ForEach(store.specialSlots) { special in
+                                Button {
+                                    store.switchSpecialSlot(id: special.id)
+                                } label: {
+                                    Label(
+                                        special.name,
+                                        systemImage: special.id == store.currentSpecialSlotId ? "checkmark" : "folder"
+                                    )
+                                }
+                            }
+                            Divider()
+                            Button("新建特殊槽位") { }
+                            Button("管理特殊槽位") { }
+                        } label: {
+                            HStack(spacing: 4) {
+                                Image(systemName: "folder.fill")
+                                    .font(.system(size: 9))
+                                Text(store.currentSpecialSlot?.name ?? "默认槽位")
+                                    .font(.system(size: 10, weight: .medium))
+                                Image(systemName: "chevron.down")
+                                    .font(.system(size: 7, weight: .bold))
+                            }
+                            .foregroundColor(.secondary)
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 4)
+                            .background(
+                                Capsule()
+                                    .strokeBorder(Color.secondary.opacity(0.2), lineWidth: 0.5)
+                                    .background(Capsule().fill(Color.primary.opacity(0.04)))
+                            )
+                        }
+                        .menuStyle(.borderlessButton)
+                        .fixedSize()
+                    }
                 }
 
                 Spacer()
+
+                Button {
+                    store.chooseFolderAndImportIntoCurrentSpecialSlot()
+                } label: {
+                    Image(systemName: "folder.badge.plus")
+                        .font(.system(size: 13, weight: .medium))
+                        .frame(width: 28, height: 28)
+                }
+                .buttonStyle(.borderless)
+                .help("导入文件夹到当前特殊槽位")
 
                 statPill(
                     title: "已使用",
@@ -161,7 +208,7 @@ struct ContentView: View {
 
             Spacer()
 
-            Text("v2.1.7")
+            Text("v2.2.0")
                 .font(.caption2)
                 .foregroundColor(Color.secondary.opacity(0.65))
         }
