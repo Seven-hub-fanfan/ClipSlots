@@ -81,11 +81,18 @@ final class SlotStoreObservable: ObservableObject {
     @Published var slots: [Int: SlotContent] = [:]
     @Published var labels: [Int: String] = [:]
     @Published var refreshTrigger = UUID()
+
+    // Special slot state
+    @Published var specialSlots: [SpecialSlot] = []
+    @Published var currentSpecialSlotId: String = "default"
+    @Published var currentSpecialSlot: SpecialSlot?
+    @Published var specialSlotSettings: SpecialSlotSettings = .default
+
     var lastNonClipSlotsApp: NSRunningApplication?
 
     var onConfigChanged: (() -> Void)?
 
-    let storage = SlotStorage.shared
+    let specialStorage = SpecialSlotStorage.shared
     private let clipboard = ClipboardManager.shared
     private var timer: Timer?
 
@@ -93,18 +100,76 @@ final class SlotStoreObservable: ObservableObject {
     private var pendingClipboardRestore: DispatchWorkItem?
 
     init() {
+        loadSpecialSlots()
         loadSlots()
         timer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
             self?.loadSlots()
         }
     }
 
+    // MARK: - Special Slots
+
+    func loadSpecialSlots() {
+        let index = specialStorage.loadIndex()
+        specialSlots = index.specialSlots
+        currentSpecialSlotId = index.currentSpecialSlotId
+        currentSpecialSlot = index.specialSlots.first { $0.id == index.currentSpecialSlotId }
+        specialSlotSettings = index.settings
+    }
+
+    func reloadAll() {
+        loadSpecialSlots()
+        loadSlots()
+    }
+
+    func switchSpecialSlot(id: String) {
+        do {
+            try specialStorage.switchToSpecialSlot(id: id)
+            reloadAll()
+            refreshTrigger = UUID()
+        } catch {
+            NSLog("[ClipSlots] switchSpecialSlot error: \(error)")
+        }
+    }
+
+    func createSpecialSlot(name: String) {
+        do {
+            let slot = try specialStorage.createSpecialSlot(name: name)
+            try specialStorage.switchToSpecialSlot(id: slot.id)
+            reloadAll()
+            refreshTrigger = UUID()
+        } catch {
+            NSLog("[ClipSlots] createSpecialSlot error: \(error)")
+        }
+    }
+
+    func deleteSpecialSlot(id: String) {
+        do {
+            try specialStorage.deleteSpecialSlot(id: id)
+            reloadAll()
+            refreshTrigger = UUID()
+        } catch {
+            NSLog("[ClipSlots] deleteSpecialSlot error: \(error)")
+        }
+    }
+
+    func renameSpecialSlot(id: String, name: String) {
+        do {
+            try specialStorage.renameSpecialSlot(id: id, name: name)
+            loadSpecialSlots()
+        } catch {
+            NSLog("[ClipSlots] renameSpecialSlot error: \(error)")
+        }
+    }
+
+    // MARK: - Slot Loading
+
     func loadSlots() {
         var result: [Int: SlotContent] = [:]
         var labelMap: [Int: String] = [:]
         for slot in 1...config.slots {
-            result[slot] = storage.get(slot)
-            if let label = storage.getLabel(slot), !label.isEmpty {
+            result[slot] = specialStorage.get(slot)
+            if let label = specialStorage.getLabel(slot), !label.isEmpty {
                 labelMap[slot] = label
             }
         }
@@ -261,7 +326,7 @@ final class SlotStoreObservable: ObservableObject {
                 return
             }
 
-            self.storage.set(slot, content: content)
+            self.specialStorage.set(slot, content: content)
 
             var newSlots = self.slots
             newSlots[slot] = content
@@ -283,7 +348,7 @@ final class SlotStoreObservable: ObservableObject {
             return
         }
 
-        storage.set(slot, content: content)
+        specialStorage.set(slot, content: content)
 
         var newSlots = slots
         newSlots[slot] = content
@@ -298,7 +363,7 @@ final class SlotStoreObservable: ObservableObject {
     func copySlot(_ slot: Int) {
         cancelPendingClipboardRestore()
 
-        let content = storage.get(slot)
+        let content = specialStorage.get(slot)
         guard !content.isEmpty else {
             NSLog("[ClipSlots] COPY ignored: slot \(slot) empty")
             return
@@ -311,7 +376,7 @@ final class SlotStoreObservable: ObservableObject {
     // MARK: - Simple Paste (hotkeys, menu)
 
     func pasteSlot(_ slot: Int) {
-        let content = storage.get(slot)
+        let content = specialStorage.get(slot)
         guard !content.isEmpty else {
             NSLog("[ClipSlots] pasteSlot ignored: slot \(slot) empty")
             return
@@ -348,7 +413,7 @@ final class SlotStoreObservable: ObservableObject {
     // MARK: - Radial Paste (targetApp activation + waitUntilFrontmost)
 
     func pasteSlotToApp(_ slot: Int, targetApp: NSRunningApplication?) {
-        let content = storage.get(slot)
+        let content = specialStorage.get(slot)
         guard !content.isEmpty else {
             NSLog("[ClipSlots] radial paste ignored: slot \(slot) empty")
             return
@@ -420,7 +485,7 @@ final class SlotStoreObservable: ObservableObject {
 
     func clearSlot(_ slot: Int) {
         cancelPendingClipboardRestore()
-        storage.clear(slot)
+        specialStorage.clear(slot)
         NSLog("[ClipSlots] CLEAR slot=\(slot)")
         loadSlots()
     }
@@ -428,7 +493,7 @@ final class SlotStoreObservable: ObservableObject {
     // MARK: - Label
 
     func setLabel(_ slot: Int, label: String?) {
-        storage.setLabel(slot, label: label)
+        specialStorage.setLabel(slot, label: label)
 
         var newLabels = labels
         if let label = label, !label.isEmpty {
