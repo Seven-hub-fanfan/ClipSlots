@@ -25,33 +25,17 @@ final class RadialMenuWindowController {
     private var panel: RadialPanel?
     private var localKeyMonitor: Any?
     private var globalClickMonitor: Any?
-
-    // Geometry for hit-testing
-    private var center: CGPoint = .zero
-    private var deadZoneRadius: CGFloat = 0
-    private var slotCount: Int = 9
-    private var onSelectCallback: ((Int) -> Void)?
     private var onDismissCallback: (() -> Void)?
 
     func show(
         at screenPoint: NSPoint,
-        slots: [Int: SlotContent],
-        labels: [Int: String],
-        slotCount: Int,
-        onSelect: @escaping (Int) -> Void,
+        store: SlotStoreObservable,
+        onSelectSlot: @escaping (Int) -> Void,
         onDismiss: @escaping () -> Void
     ) {
         dismiss()
 
         let menuSize: CGFloat = 340
-        let outerRadius = menuSize / 2
-        let deadZoneRadius = outerRadius * 0.22
-        let center = CGPoint(x: menuSize / 2, y: menuSize / 2)
-
-        self.center = center
-        self.deadZoneRadius = deadZoneRadius
-        self.slotCount = slotCount
-        self.onSelectCallback = onSelect
         self.onDismissCallback = onDismiss
 
         // Read theme mode so radial menu matches main window appearance
@@ -59,10 +43,8 @@ final class RadialMenuWindowController {
         let themeMode = ThemeMode(rawValue: modeRaw) ?? .system
 
         let radialView = RadialMenuView(
-            slots: slots,
-            labels: labels,
-            slotCount: slotCount,
-            onSelect: { _ in },
+            store: store,
+            onSelectSlot: onSelectSlot,
             onDismiss: { onDismiss() }
         )
         .preferredColorScheme(themeMode.preferredColorScheme)
@@ -96,11 +78,7 @@ final class RadialMenuWindowController {
         p.acceptsMouseMovedEvents = true
         p.contentView = hosting
 
-        // Handle clicks at window level
-        p.onMouseDown = { [weak self] localPoint in
-            self?.handleMenuClick(at: localPoint)
-        }
-
+        // Clicks are handled by SwiftUI .onTapGesture; window-level handler no longer needed
         p.orderFrontRegardless()
         self.panel = p
 
@@ -125,25 +103,6 @@ final class RadialMenuWindowController {
         }
     }
 
-    private func handleMenuClick(at point: NSPoint) {
-        let dx = point.x - center.x
-        let dy = point.y - center.y
-        let distance = sqrt(dx * dx + dy * dy)
-
-        if distance < deadZoneRadius {
-            onDismissCallback?()
-            return
-        }
-
-        var angle = atan2(dy, dx) * 180 / .pi + 90
-        if angle < 0 { angle += 360 }
-        let segmentAngle = 360.0 / Double(slotCount)
-        let index = Int(angle / segmentAngle)
-        let slot = min(index + 1, slotCount)
-
-        onSelectCallback?(slot)
-    }
-
     func dismiss() {
         if let monitor = localKeyMonitor {
             NSEvent.removeMonitor(monitor)
@@ -153,7 +112,6 @@ final class RadialMenuWindowController {
             NSEvent.removeMonitor(monitor)
             globalClickMonitor = nil
         }
-        onSelectCallback = nil
         onDismissCallback = nil
         panel?._dismissed = true
         panel?.onMouseDown = nil

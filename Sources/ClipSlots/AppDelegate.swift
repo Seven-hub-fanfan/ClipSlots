@@ -75,10 +75,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         radialMenuController.show(
             at: mouseLocation,
-            slots: store.slots,
-            labels: store.labels,
-            slotCount: store.config.slots,
-            onSelect: { [weak self] slot in
+            store: store,
+            onSelectSlot: { [weak self] slot in
                 guard let self = self else { return }
                 NSLog("[ClipSlots] RADIAL selected slot=\(slot)")
                 self.radialMenuController.dismiss()

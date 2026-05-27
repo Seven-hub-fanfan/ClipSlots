@@ -1,7 +1,7 @@
 import Foundation
 
 struct AppConfig: Codable {
-    var slots: Int = 9
+    var slots: Int = 10
     var verbose: Bool = true
     var saveKey: String = "ctrl+option+{n}"
     var pasteKey: String = "ctrl+{n}"

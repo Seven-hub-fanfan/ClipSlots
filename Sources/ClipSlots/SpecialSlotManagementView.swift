@@ -1,0 +1,241 @@
+import SwiftUI
+
+struct SpecialSlotManagementView: View {
+    @ObservedObject var store: SlotStoreObservable
+    @Environment(\.dismiss) private var dismiss
+    @Environment(\.colorScheme) private var colorScheme
+
+    @State private var selectedId: String = ""
+    @State private var showingNewDialog = false
+    @State private var showingRenameDialog = false
+    @State private var showingDeleteConfirm = false
+    @State private var newName = ""
+    @State private var renameText = ""
+
+    private var selected: SpecialSlot? {
+        store.specialSlots.first { $0.id == selectedId }
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            // Header
+            HStack(spacing: 12) {
+                ZStack {
+                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        .fill(AppTheme.brandGradient(colorScheme))
+                        .frame(width: 38, height: 38)
+                    Image(systemName: "folder.fill")
+                        .font(.system(size: 17, weight: .semibold))
+                        .foregroundColor(.white)
+                }
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("特殊槽位管理")
+                        .font(.system(size: 18, weight: .bold, design: .rounded))
+                    Text("创建、编辑和切换特殊槽位")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+                Spacer()
+                Button("完成") { dismiss() }
+            }
+            .padding(.horizontal, 20)
+            .padding(.vertical, 16)
+            .background(.regularMaterial)
+            .overlay(alignment: .bottom) { Divider() }
+
+            // Content
+            HStack(spacing: 0) {
+                // Left list
+                List(store.specialSlots) { special in
+                    HStack {
+                        Image(systemName: special.id == store.currentSpecialSlotId ? "folder.fill" : "folder")
+                            .foregroundColor(special.id == store.currentSpecialSlotId ? .accentColor : .secondary)
+                        Text(special.name)
+                            .font(.system(size: 13, weight: special.id == store.currentSpecialSlotId ? .semibold : .regular))
+                        Spacer()
+                        if special.id == store.currentSpecialSlotId {
+                            Text("当前")
+                                .font(.caption2)
+                                .foregroundColor(.accentColor)
+                                .padding(.horizontal, 6)
+                                .padding(.vertical, 2)
+                                .background(Capsule().fill(Color.accentColor.opacity(0.12)))
+                        }
+                    }
+                    .contentShape(Rectangle())
+                    .onTapGesture { selectedId = special.id }
+                }
+                .listStyle(.sidebar)
+                .frame(width: 160)
+
+                // Right detail
+                if let special = selected {
+                    specialDetail(special)
+                } else {
+                    VStack {
+                        Spacer()
+                        Text("请从左侧选择一个特殊槽位")
+                            .font(.subheadline)
+                            .foregroundColor(.secondary)
+                        Spacer()
+                    }
+                    .frame(maxWidth: .infinity)
+                }
+            }
+
+            // Bottom bar
+            HStack {
+                Button { showingNewDialog = true } label: {
+                    Label("新建", systemImage: "plus")
+                }
+                .disabled(store.specialSlots.count >= 10)
+
+                Button { showingRenameDialog = true } label: {
+                    Label("重命名", systemImage: "pencil")
+                }
+                .disabled(selectedId.isEmpty)
+
+                Button(role: .destructive) { showingDeleteConfirm = true } label: {
+                    Label("删除", systemImage: "trash")
+                }
+                .disabled(selectedId.isEmpty || store.specialSlots.count <= 1)
+
+                Spacer()
+
+                Button {
+                    store.chooseFolderAndImportIntoCurrentSpecialSlot()
+                } label: {
+                    Label("导入文件夹", systemImage: "folder.badge.plus")
+                }
+
+                Button {
+                    guard !selectedId.isEmpty else { return }
+                    store.switchSpecialSlot(id: selectedId)
+                } label: {
+                    Label("切换到此槽位", systemImage: "arrow.right.circle")
+                }
+                .disabled(selectedId.isEmpty || selectedId == store.currentSpecialSlotId)
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 10)
+            .background(.regularMaterial)
+            .overlay(alignment: .top) { Divider() }
+        }
+        .frame(width: 500, height: 380)
+        .background(AppTheme.windowBackground(colorScheme))
+        .onAppear { selectedId = store.currentSpecialSlotId }
+        .sheet(isPresented: $showingNewDialog) {
+            newSpecialSlotSheet()
+        }
+        .sheet(isPresented: $showingRenameDialog) {
+            renameSheet()
+        }
+        .confirmationDialog("确定删除吗？", isPresented: $showingDeleteConfirm, titleVisibility: .visible) {
+            Button("删除", role: .destructive) {
+                store.deleteSpecialSlot(id: selectedId)
+                selectedId = store.currentSpecialSlotId
+            }
+            Button("取消", role: .cancel) {}
+        } message: {
+            Text("删除特殊槽位「\(selected?.name ?? "")」会将其子槽位内容移至回收站。")
+        }
+    }
+
+    @ViewBuilder
+    private func specialDetail(_ special: SpecialSlot) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Image(systemName: "folder.fill")
+                    .font(.system(size: 28))
+                    .foregroundColor(.accentColor)
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(special.name).font(.title3).bold()
+                    Text(sourceDescription(for: special.sourceType)).font(.caption).foregroundColor(.secondary)
+                }
+            }
+
+            Divider()
+
+            infoRow("来源类型", sourceDescription(for: special.sourceType))
+            if let path = special.sourcePath {
+                infoRow("来源路径", path)
+            }
+            infoRow("创建时间", dateFormatter.string(from: special.createdAt))
+            if special.createdAt != special.updatedAt {
+                infoRow("最近更新", dateFormatter.string(from: special.updatedAt))
+            }
+
+            Spacer()
+        }
+        .padding(20)
+    }
+
+    @ViewBuilder
+    private func newSpecialSlotSheet() -> some View {
+        VStack(spacing: 16) {
+            Text("新建特殊槽位").font(.headline)
+            TextField("槽位名称", text: $newName)
+                .textFieldStyle(.roundedBorder)
+                .frame(width: 200)
+            HStack(spacing: 12) {
+                Button("取消") { showingNewDialog = false; newName = "" }
+                Button("创建") {
+                    guard !newName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+                    store.createSpecialSlot(name: newName)
+                    selectedId = store.currentSpecialSlotId
+                    showingNewDialog = false
+                    newName = ""
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(newName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            }
+        }
+        .padding(24)
+        .frame(width: 300, height: 160)
+    }
+
+    @ViewBuilder
+    private func renameSheet() -> some View {
+        VStack(spacing: 16) {
+            Text("重命名「\(selected?.name ?? "")」").font(.headline)
+            TextField("新名称", text: $renameText)
+                .textFieldStyle(.roundedBorder)
+                .frame(width: 200)
+            HStack(spacing: 12) {
+                Button("取消") { showingRenameDialog = false; renameText = "" }
+                Button("确认") {
+                    guard !renameText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+                    store.renameSpecialSlot(id: selectedId, name: renameText)
+                    showingRenameDialog = false
+                    renameText = ""
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(renameText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            }
+        }
+        .padding(24)
+        .frame(width: 300, height: 160)
+    }
+
+    private func sourceDescription(for type: SpecialSlotSourceType) -> String {
+        switch type {
+        case .manual: return "手动创建"
+        case .folderImport: return "文件夹导入"
+        case .migratedDefault: return "旧版本迁移"
+        }
+    }
+
+    private func infoRow(_ label: String, _ value: String) -> some View {
+        HStack(alignment: .top) {
+            Text(label).font(.caption).foregroundColor(.secondary).frame(width: 70, alignment: .leading)
+            Text(value).font(.caption).textSelection(.enabled)
+        }
+    }
+
+    private var dateFormatter: DateFormatter {
+        let f = DateFormatter()
+        f.dateStyle = .medium
+        f.timeStyle = .short
+        return f
+    }
+}

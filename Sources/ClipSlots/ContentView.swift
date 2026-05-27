@@ -3,6 +3,7 @@ import SwiftUI
 struct ContentView: View {
     @ObservedObject var store: SlotStoreObservable
     @State private var showingSettings = false
+    @State private var showingSpecialSlotManagement = false
     @Environment(\.colorScheme) private var colorScheme
 
     @AppStorage("appearanceMode") private var appearanceModeRaw = ThemeMode.system.rawValue
@@ -98,8 +99,12 @@ struct ContentView: View {
                                 }
                             }
                             Divider()
-                            Button("新建特殊槽位") { }
-                            Button("管理特殊槽位") { }
+                            Button("新建特殊槽位") {
+                                showingSpecialSlotManagement = true
+                            }
+                            Button("管理特殊槽位") {
+                                showingSpecialSlotManagement = true
+                            }
                         } label: {
                             HStack(spacing: 4) {
                                 Image(systemName: "folder.fill")
@@ -176,6 +181,9 @@ struct ContentView: View {
                 showingSettings = false
             }
             .frame(width: 460, height: 610)
+        }
+        .popover(isPresented: $showingSpecialSlotManagement) {
+            SpecialSlotManagementView(store: store)
         }
     }
 
