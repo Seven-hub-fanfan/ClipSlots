@@ -236,11 +236,13 @@ final class SpecialSlotStorage {
         currentStorage.get(slot)
     }
 
-    func set(_ slot: Int, content: SlotContent) {
+    @discardableResult
+    func set(_ slot: Int, content: SlotContent) -> Bool {
         var content = content
         content.timestamp = Date()
-        currentStorage.set(slot, content: content)
-        touchCurrentSpecialSlot()
+        let result = currentStorage.set(slot, content: content)
+        if result { touchCurrentSpecialSlot() }
+        return result
     }
 
     func clear(_ slot: Int) {

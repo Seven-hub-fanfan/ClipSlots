@@ -99,11 +99,19 @@ final class SlotStoreObservable: ObservableObject {
     /// Cancellable delayed clipboard restore to prevent race with copy/save.
     private var pendingClipboardRestore: DispatchWorkItem?
 
+    /// Prevents timer-triggered loadSlots from racing with async saves.
+    private var isWritingSlots = false
+
     init() {
         loadSpecialSlots()
         loadSlots()
         timer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
-            self?.loadSlots()
+            guard let self = self else { return }
+            guard !self.isWritingSlots else {
+                NSLog("[ClipSlots] timer skip loadSlots: writing in progress")
+                return
+            }
+            self.loadSlots()
         }
     }
 
@@ -550,13 +558,22 @@ final class SlotStoreObservable: ObservableObject {
                 guard confirmOverwriteCurrentSpecialSlot() else { return }
             }
 
-            // Clear and import
+            // Clear and import — block timer during writes
+            isWritingSlots = true
+            defer { isWritingSlots = false }
+
             try specialStorage.clearAllSlotsInCurrentSpecialSlot()
 
+            var successCount = 0
+            var failCount = 0
             for (idx, fileURL) in preview.willImportFiles.enumerated() {
                 let slotNumber = idx + 1
                 let content = folderImportService.makeSlotContent(for: fileURL)
-                specialStorage.set(slotNumber, content: content)
+                if specialStorage.set(slotNumber, content: content) {
+                    successCount += 1
+                } else {
+                    failCount += 1
+                }
             }
 
             try specialStorage.updateCurrentSpecialSlotSource(
@@ -566,7 +583,7 @@ final class SlotStoreObservable: ObservableObject {
 
             reloadAll()
             refreshTrigger = UUID()
-            showAlert(message: "已导入 \(preview.willImportFiles.count) 个文件到当前特殊槽位")
+            showAlert(message: "已导入 \(successCount) 个文件到当前特殊槽位" + (failCount > 0 ? "，\(failCount) 个失败" : ""))
 
         } catch {
             NSLog("[ClipSlots] Folder import error: \(error)")
@@ -624,12 +641,19 @@ final class SlotStoreObservable: ObservableObject {
         }
 
         // Normal save
-        specialStorage.set(targetSlot, content: content)
+        isWritingSlots = true
+        let success = specialStorage.set(targetSlot, content: content)
+        isWritingSlots = false
+
+        guard success else {
+            NSLog("[ClipSlots] SAVE FAIL slot=\(targetSlot)")
+            return
+        }
         var newSlots = slots
         newSlots[targetSlot] = content
         slots = newSlots
         refreshTrigger = UUID()
-        NSLog("[ClipSlots] SAVE slot=\(targetSlot) preview=\(content.preview)")
+        NSLog("[ClipSlots] SAVE OK slot=\(targetSlot) preview=\(content.preview)")
     }
 
     private func handleSingleFolderSave(_ folderURL: URL, targetSlot: Int) {
@@ -649,7 +673,13 @@ final class SlotStoreObservable: ObservableObject {
             createSpecialSlotAndImportFolder(folderURL)
         case .alertThirdButtonReturn:
             let content = folderImportService.makeSlotContent(for: folderURL)
-            specialStorage.set(targetSlot, content: content)
+            isWritingSlots = true
+            let success = specialStorage.set(targetSlot, content: content)
+            isWritingSlots = false
+            guard success else {
+                NSLog("[ClipSlots] save folder as normal FAIL slot=\(targetSlot)")
+                return
+            }
             var newSlots = slots
             newSlots[targetSlot] = content
             slots = newSlots

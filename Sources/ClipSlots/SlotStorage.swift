@@ -30,7 +30,11 @@ final class SlotStorage {
             baseURL = FileManager.default.homeDirectoryForCurrentUser
                 .appendingPathComponent(".local/share/clipslots/slots")
         }
-        try? FileManager.default.createDirectory(at: baseURL, withIntermediateDirectories: true)
+        do {
+            try FileManager.default.createDirectory(at: baseURL, withIntermediateDirectories: true)
+        } catch {
+            NSLog("[ClipSlots] SlotStorage init: failed to create base dir \(baseURL.path): \(error)")
+        }
     }
 
     // MARK: - Slot Content
@@ -46,34 +50,50 @@ final class SlotStorage {
         }
     }
 
-    func set(_ slot: Int, content: SlotContent) {
-        queue.sync { [weak self] in
-            self?.cache[slot] = content
-        }
-        queue.async { [weak self] in
-            guard let self = self else { return }
-            self.writeSlotContent(content, to: slot)
-            self.updateManifest()
+    @discardableResult
+    func set(_ slot: Int, content: SlotContent) -> Bool {
+        queue.sync {
+            do {
+                try writeSlotContent(content, to: slot)
+                cache[slot] = content
+                try updateManifest()
+                NSLog("[ClipSlots] SlotStorage.set OK slot=\(slot) preview=\(content.preview)")
+                return true
+            } catch {
+                NSLog("[ClipSlots] SlotStorage.set FAIL slot=\(slot) error=\(error)")
+                return false
+            }
         }
     }
 
     func clear(_ slot: Int) {
-        queue.async { [weak self] in
-            guard let self = self else { return }
-            self.cache[slot] = SlotContent()
-            let slotDir = self.baseURL.appendingPathComponent(String(slot))
-            try? FileManager.default.removeItem(at: slotDir)
-            self.updateManifest()
+        queue.sync {
+            cache[slot] = SlotContent()
+            let slotDir = baseURL.appendingPathComponent(String(slot))
+            do {
+                try FileManager.default.removeItem(at: slotDir)
+            } catch {
+                let nsErr = error as NSError
+                if nsErr.domain == NSCocoaErrorDomain && nsErr.code == 4 { /* file not found */ }
+                else { NSLog("[ClipSlots] SlotStorage.clear FAIL slot=\(slot): \(error)") }
+            }
+            do { try updateManifest() } catch {
+                NSLog("[ClipSlots] SlotStorage.clear manifest FAIL: \(error)")
+            }
         }
     }
 
     func clearAll() {
-        queue.async { [weak self] in
-            guard let self = self else { return }
-            self.cache.removeAll()
-            try? FileManager.default.removeItem(at: self.baseURL)
-            try? FileManager.default.createDirectory(at: self.baseURL, withIntermediateDirectories: true)
-            self.updateManifest()
+        queue.sync {
+            cache.removeAll()
+            do {
+                try FileManager.default.removeItem(at: baseURL)
+                try FileManager.default.createDirectory(at: baseURL, withIntermediateDirectories: true)
+                try updateManifest()
+                NSLog("[ClipSlots] SlotStorage.clearAll OK")
+            } catch {
+                NSLog("[ClipSlots] SlotStorage.clearAll FAIL: \(error)")
+            }
         }
     }
 
@@ -85,18 +105,33 @@ final class SlotStorage {
 
     func getLabel(_ slot: Int) -> String? {
         let labelFile = baseURL.appendingPathComponent(String(slot)).appendingPathComponent("label.txt")
-        return try? String(contentsOf: labelFile, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let content = try? String(contentsOf: labelFile, encoding: .utf8) else { return nil }
+        return content.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     func setLabel(_ slot: Int, label: String?) {
-        queue.async {
-            let slotDir = self.baseURL.appendingPathComponent(String(slot))
-            try? FileManager.default.createDirectory(at: slotDir, withIntermediateDirectories: true)
+        queue.sync {
+            let slotDir = baseURL.appendingPathComponent(String(slot))
+            do {
+                try FileManager.default.createDirectory(at: slotDir, withIntermediateDirectories: true)
+            } catch {
+                NSLog("[ClipSlots] setLabel: create dir FAIL slot=\(slot): \(error)")
+                return
+            }
             let labelFile = slotDir.appendingPathComponent("label.txt")
             if let label = label, !label.isEmpty {
-                try? label.write(to: labelFile, atomically: true, encoding: .utf8)
+                do {
+                    try label.write(to: labelFile, atomically: true, encoding: .utf8)
+                } catch {
+                    NSLog("[ClipSlots] setLabel: write FAIL slot=\(slot): \(error)")
+                }
             } else {
-                try? FileManager.default.removeItem(at: labelFile)
+                do { try FileManager.default.removeItem(at: labelFile) } catch {
+                    let nsErr = error as NSError
+                    if !(nsErr.domain == NSCocoaErrorDomain && nsErr.code == 4) {
+                        NSLog("[ClipSlots] setLabel: remove FAIL: \(error)")
+                    }
+                }
             }
         }
     }
@@ -107,23 +142,33 @@ final class SlotStorage {
         var content = SlotContent()
         let itemDir = slotDir.appendingPathComponent("item_0")
 
-        guard FileManager.default.fileExists(atPath: itemDir.path) else {
+        var isDir: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: itemDir.path, isDirectory: &isDir), isDir.boolValue else {
             return content
         }
 
-        // Use item directory modification date as timestamp
         if let attrs = try? FileManager.default.attributesOfItem(atPath: itemDir.path),
            let modDate = attrs[.modificationDate] as? Date {
             content.timestamp = modDate
         }
 
         var allItems: [PasteboardItem] = []
-        if let files = try? FileManager.default.contentsOfDirectory(at: itemDir, includingPropertiesForKeys: nil) {
-            for file in files where file.pathExtension == "bin" {
-                let typeName = file.deletingPathExtension().lastPathComponent
-                if let data = try? Data(contentsOf: file) {
-                    allItems.append(PasteboardItem(type: typeName, data: data))
-                }
+        let files: [URL]
+        do {
+            files = try FileManager.default.contentsOfDirectory(at: itemDir, includingPropertiesForKeys: nil)
+        } catch {
+            NSLog("[ClipSlots] readSlotContent read dir FAIL: \(error)")
+            return content
+        }
+
+        for file in files where file.pathExtension == "bin" {
+            let encodedType = file.deletingPathExtension().lastPathComponent
+            let typeName = decodeSafeFileName(encodedType)
+            do {
+                let data = try Data(contentsOf: file)
+                allItems.append(PasteboardItem(type: typeName, data: data))
+            } catch {
+                NSLog("[ClipSlots] readSlotContent read file FAIL type=\(typeName): \(error)")
             }
         }
 
@@ -134,24 +179,42 @@ final class SlotStorage {
         return content
     }
 
-    private func writeSlotContent(_ content: SlotContent, to slot: Int) {
+    private func writeSlotContent(_ content: SlotContent, to slot: Int) throws {
         let slotDir = baseURL.appendingPathComponent(String(slot))
         let itemDir = slotDir.appendingPathComponent("item_0")
 
         // Clean old items
         try? FileManager.default.removeItem(at: itemDir)
-        try? FileManager.default.createDirectory(at: itemDir, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: itemDir, withIntermediateDirectories: true)
 
-        guard !content.isEmpty, let items = content.items.first else { return }
+        guard !content.isEmpty else { return }
 
-        for item in items {
-            let typeFile = itemDir.appendingPathComponent("\(item.type).bin")
-            do {
+        // Write all item groups
+        for (groupIdx, items) in content.items.enumerated() {
+            let targetDir = groupIdx == 0 ? itemDir : slotDir.appendingPathComponent("item_\(groupIdx)")
+            if groupIdx > 0 {
+                try? FileManager.default.removeItem(at: targetDir)
+                try FileManager.default.createDirectory(at: targetDir, withIntermediateDirectories: true)
+            }
+
+            for item in items {
+                let safeName = encodeSafeFileName(item.type) + ".bin"
+                let typeFile = targetDir.appendingPathComponent(safeName)
                 try item.data.write(to: typeFile, options: .atomic)
-            } catch {
-                NSLog("[ClipSlots] Failed to write pasteboard type \(item.type): \(error)")
             }
         }
+    }
+
+    // MARK: - Safe Filename Encoding
+
+    private let slashPlaceholder = "$slash$"
+
+    private func encodeSafeFileName(_ raw: String) -> String {
+        raw.replacingOccurrences(of: "/", with: slashPlaceholder)
+    }
+
+    private func decodeSafeFileName(_ encoded: String) -> String {
+        encoded.replacingOccurrences(of: slashPlaceholder, with: "/")
     }
 
     // MARK: - Manifest
@@ -165,50 +228,60 @@ final class SlotStorage {
         return try decoder.decode(SlotManifest.self, from: data)
     }
 
-    private func updateManifest() {
+    private func updateManifest() throws {
         var entries: [SlotManifest.Entry] = []
 
         for slot in 1...10 {
             let slotDir = baseURL.appendingPathComponent(String(slot))
             let itemDir = slotDir.appendingPathComponent("item_0")
 
-            guard FileManager.default.fileExists(atPath: itemDir.path) else { continue }
+            var isDir: ObjCBool = false
+            guard FileManager.default.fileExists(atPath: itemDir.path, isDirectory: &isDir), isDir.boolValue else {
+                continue
+            }
 
             var types: [String] = []
             var totalBytes = 0
             var preview = "(empty)"
 
-            if let files = try? FileManager.default.contentsOfDirectory(at: itemDir, includingPropertiesForKeys: [.fileSizeKey]) {
-                for file in files where file.pathExtension == "bin" {
-                    let typeName = file.deletingPathExtension().lastPathComponent
-                    types.append(typeName)
-                    if let attrs = try? FileManager.default.attributesOfItem(atPath: file.path),
-                       let size = attrs[.size] as? Int {
-                        totalBytes += size
+            let files = try FileManager.default.contentsOfDirectory(at: itemDir, includingPropertiesForKeys: [.fileSizeKey])
+            for file in files where file.pathExtension == "bin" {
+                let encodedType = file.deletingPathExtension().lastPathComponent
+                let typeName = decodeSafeFileName(encodedType)
+                types.append(typeName)
+
+                let attrs = try FileManager.default.attributesOfItem(atPath: file.path)
+                if let size = attrs[.size] as? Int { totalBytes += size }
+
+                if typeName == "public.utf8-plain-text" || typeName == "NSStringPboardType" {
+                    if let data = try? Data(contentsOf: file),
+                       let str = String(data: data, encoding: .utf8) {
+                        let trimmed = str.trimmingCharacters(in: .whitespacesAndNewlines)
+                        preview = String(trimmed.prefix(37))
                     }
-                    // Generate preview from plain text
-                    if typeName == "public.utf8-plain-text" || typeName == "NSStringPboardType" {
-                        if let data = try? Data(contentsOf: file),
-                           let str = String(data: data, encoding: .utf8) {
-                            let trimmed = str.trimmingCharacters(in: .whitespacesAndNewlines)
-                            preview = String(trimmed.prefix(37))
-                        }
-                    } else if typeName == "public.rtf" {
-                        preview = "[Rich Text]"
-                    } else if typeName.contains("image") {
-                        preview = "[Image \(totalBytes / 1024)KB]"
-                    } else if typeName == "public.file-url" {
+                } else if typeName == "public.rtf" {
+                    preview = "[Rich Text]"
+                } else if typeName.contains("image") {
+                    preview = "[Image \(totalBytes / 1024)KB]"
+                } else if typeName == "public.file-url" {
+                    if let data = try? Data(contentsOf: file),
+                       let urlStr = String(data: data, encoding: .utf8),
+                       let url = URL(string: urlStr) {
+                        preview = "[File] \(url.lastPathComponent)"
+                    } else {
                         preview = "[File]"
                     }
                 }
             }
 
-            // Add label to preview if exists
             if let label = getLabel(slot), !label.isEmpty {
                 preview = "[\(label)] \(preview)"
             }
 
-            if preview.hasPrefix("[Rich Text]"), let data = try? Data(contentsOf: itemDir.appendingPathComponent("public.utf8-plain-text.bin")),
+            if preview.hasPrefix("[Rich Text]"),
+               let richTextFile = itemDir.appendingPathComponent(encodeSafeFileName("public.utf8-plain-text") + ".bin") as URL?,
+               FileManager.default.fileExists(atPath: richTextFile.path),
+               let data = try? Data(contentsOf: richTextFile),
                let text = String(data: data, encoding: .utf8) {
                 let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
                 let chars = trimmed.count
@@ -227,8 +300,7 @@ final class SlotStorage {
         }
 
         let manifest = SlotManifest(entries: entries, version: 1)
-        if let data = try? encoder.encode(manifest) {
-            try? data.write(to: manifestURL(), options: .atomic)
-        }
+        let data = try encoder.encode(manifest)
+        try data.write(to: manifestURL(), options: .atomic)
     }
 }
