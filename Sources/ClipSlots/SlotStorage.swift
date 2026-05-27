@@ -23,10 +23,13 @@ final class SlotStorage {
     private let encoder = JSONEncoder()
     private let decoder = JSONDecoder()
 
-    init() {
-        let appSupport = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent(".local/share/clipslots/slots")
-        baseURL = appSupport
+    init(slotsDir: URL? = nil) {
+        if let slotsDir {
+            baseURL = slotsDir
+        } else {
+            baseURL = FileManager.default.homeDirectoryForCurrentUser
+                .appendingPathComponent(".local/share/clipslots/slots")
+        }
         try? FileManager.default.createDirectory(at: baseURL, withIntermediateDirectories: true)
     }
 
