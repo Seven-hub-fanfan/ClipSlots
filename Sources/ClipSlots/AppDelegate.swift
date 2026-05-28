@@ -35,13 +35,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func setupHotKeys() {
         guard let store = store else { return }
+
+        NSLog("[ClipSlots] setupHotKeys storeInstanceID=\(store.instanceID) currentSpecialSlotId=\(store.currentSpecialSlotId)")
+
         hotkeyManager.register(
             config: store.config,
-            onPaste: { [weak self] slot in
-                self?.store?.pasteSlot(slot)  // simple paste — user is already in target app
+            onPaste: { [weak store] slot in
+                guard let store = store else { return }
+                NSLog("[ClipSlots] onPaste slot=\(slot) storeInstanceID=\(store.instanceID) currentSpecialSlotId=\(store.currentSpecialSlotId)")
+                store.pasteSlot(slot)
             },
-            onSave: { [weak self] slot in
-                self?.store?.captureSelectionAndSaveToSlot(slot)
+            onSave: { [weak store] slot in
+                guard let store = store else { return }
+                NSLog("[ClipSlots] onSave slot=\(slot) storeInstanceID=\(store.instanceID) currentSpecialSlotId=\(store.currentSpecialSlotId)")
+                store.captureSelectionAndSaveToSlot(slot)
             },
             onRadial: { [weak self] in
                 self?.showRadialMenu()

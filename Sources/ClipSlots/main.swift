@@ -29,6 +29,7 @@ fileprivate func virtualKeyForCharacterV() -> CGKeyCode {
 struct ClipSlotsApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
     @StateObject private var store = SlotStoreObservable()
+    @State private var didSetupHotKeys = false
 
     @AppStorage("appearanceMode") private var appearanceModeRaw = ThemeMode.system.rawValue
     private var appearanceMode: ThemeMode {
@@ -42,10 +43,14 @@ struct ClipSlotsApp: App {
                 .preferredColorScheme(appearanceMode.preferredColorScheme)
                 .onAppear {
                     appDelegate.store = store
-                    store.onConfigChanged = { [weak appDelegate] in
-                        appDelegate?.reloadHotkeys()
+
+                    if !didSetupHotKeys {
+                        didSetupHotKeys = true
+                        store.onConfigChanged = { [weak appDelegate] in
+                            appDelegate?.reloadHotkeys()
+                        }
+                        appDelegate.setupHotKeys()
                     }
-                    appDelegate.setupHotKeys()
                 }
         }
         .windowStyle(.titleBar)
@@ -77,6 +82,8 @@ struct ClipSlotsApp: App {
 }
 
 final class SlotStoreObservable: ObservableObject {
+    let instanceID = UUID().uuidString
+
     @Published var config = AppConfig.load()
     @Published var slots: [Int: SlotContent] = [:]
     @Published var labels: [Int: String] = [:]
@@ -103,6 +110,7 @@ final class SlotStoreObservable: ObservableObject {
     private var isWritingSlots = false
 
     init() {
+        NSLog("[ClipSlots] SlotStoreObservable init instanceID=\(instanceID)")
         loadSpecialSlots()
         loadSlots()
         timer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
@@ -137,7 +145,7 @@ final class SlotStoreObservable: ObservableObject {
         }
 
         do {
-            NSLog("[ClipSlots] switchSpecialSlot request from=\(currentSpecialSlotId) to=\(id)")
+            NSLog("[ClipSlots] switchSpecialSlot instanceID=\(instanceID) request from=\(currentSpecialSlotId) to=\(id)")
 
             try specialStorage.switchToSpecialSlot(id: id)
 
@@ -626,7 +634,7 @@ final class SlotStoreObservable: ObservableObject {
     // MARK: - Simple Paste (hotkeys, menu)
 
     func pasteSlot(_ slot: Int) {
-        NSLog("[ClipSlots] pasteSlot slot=\(slot) currentSpecialSlotId=\(currentSpecialSlotId) uiPreview=\(slots[slot]?.preview ?? "nil")")
+        NSLog("[ClipSlots] pasteSlot instanceID=\(instanceID) slot=\(slot) currentSpecialSlotId=\(currentSpecialSlotId) uiPreview=\(slots[slot]?.preview ?? "nil")")
         let content = contentForSlot(slot)
         guard !content.isEmpty else {
             NSLog("[ClipSlots] pasteSlot ignored: slot \(slot) empty")
