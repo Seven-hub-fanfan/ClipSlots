@@ -222,9 +222,16 @@ final class SpecialSlotStorage {
 
     // MARK: - Child Slot Operations (routed to current special slot)
 
+    private var storageCache: [String: SlotStorage] = [:]
+
     private func slotStorage(for specialSlotId: String) -> SlotStorage {
+        if let cached = storageCache[specialSlotId] {
+            return cached
+        }
         let dir = specialSlotDirectory(for: specialSlotId)
-        return SlotStorage(slotsDir: dir)
+        let storage = SlotStorage(slotsDir: dir)
+        storageCache[specialSlotId] = storage
+        return storage
     }
 
     private var currentStorage: SlotStorage {

@@ -140,62 +140,87 @@ final class SlotStorage {
 
     private func readSlotContent(from slotDir: URL) -> SlotContent {
         var content = SlotContent()
-        let itemDir = slotDir.appendingPathComponent("item_0")
 
-        var isDir: ObjCBool = false
-        guard FileManager.default.fileExists(atPath: itemDir.path, isDirectory: &isDir), isDir.boolValue else {
+        var isSlotDir: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: slotDir.path, isDirectory: &isSlotDir), isSlotDir.boolValue else {
             return content
         }
 
-        if let attrs = try? FileManager.default.attributesOfItem(atPath: itemDir.path),
+        if let attrs = try? FileManager.default.attributesOfItem(atPath: slotDir.path),
            let modDate = attrs[.modificationDate] as? Date {
             content.timestamp = modDate
         }
 
-        var allItems: [PasteboardItem] = []
-        let files: [URL]
+        // Enumerate all item_N directories, sorted
+        let itemDirs: [URL]
         do {
-            files = try FileManager.default.contentsOfDirectory(at: itemDir, includingPropertiesForKeys: nil)
+            itemDirs = try FileManager.default.contentsOfDirectory(at: slotDir, includingPropertiesForKeys: nil)
+                .filter { $0.lastPathComponent.hasPrefix("item_") }
+                .sorted { $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending }
         } catch {
-            NSLog("[ClipSlots] readSlotContent read dir FAIL: \(error)")
+            NSLog("[ClipSlots] readSlotContent list FAIL slotDir=\(slotDir.path): \(error)")
             return content
         }
 
-        for file in files where file.pathExtension == "bin" {
-            let encodedType = file.deletingPathExtension().lastPathComponent
-            let typeName = decodeSafeFileName(encodedType)
+        var groups: [[PasteboardItem]] = []
+
+        for itemDir in itemDirs {
+            var isDir: ObjCBool = false
+            guard FileManager.default.fileExists(atPath: itemDir.path, isDirectory: &isDir), isDir.boolValue else {
+                continue
+            }
+
+            let files: [URL]
             do {
-                let data = try Data(contentsOf: file)
-                allItems.append(PasteboardItem(type: typeName, data: data))
+                files = try FileManager.default.contentsOfDirectory(at: itemDir, includingPropertiesForKeys: nil)
             } catch {
-                NSLog("[ClipSlots] readSlotContent read file FAIL type=\(typeName): \(error)")
+                NSLog("[ClipSlots] readSlotContent read itemDir FAIL \(itemDir.path): \(error)")
+                continue
+            }
+
+            var items: [PasteboardItem] = []
+            for file in files where file.pathExtension == "bin" {
+                let encodedType = file.deletingPathExtension().lastPathComponent
+                let typeName = decodeSafeFileName(encodedType)
+                do {
+                    let data = try Data(contentsOf: file)
+                    items.append(PasteboardItem(type: typeName, data: data))
+                } catch {
+                    NSLog("[ClipSlots] readSlotContent read file FAIL type=\(typeName): \(error)")
+                }
+            }
+
+            if !items.isEmpty {
+                groups.append(items)
             }
         }
 
-        if !allItems.isEmpty {
-            content.items = [allItems]
-        }
-
+        content.items = groups
         return content
     }
 
     private func writeSlotContent(_ content: SlotContent, to slot: Int) throws {
         let slotDir = baseURL.appendingPathComponent(String(slot))
-        let itemDir = slotDir.appendingPathComponent("item_0")
 
-        // Clean old items
-        try? FileManager.default.removeItem(at: itemDir)
-        try FileManager.default.createDirectory(at: itemDir, withIntermediateDirectories: true)
+        // Preserve label before wiping
+        let existingLabel = getLabel(slot)
+
+        // Remove entire slot directory to avoid stale residues
+        if FileManager.default.fileExists(atPath: slotDir.path) {
+            try FileManager.default.removeItem(at: slotDir)
+        }
+        try FileManager.default.createDirectory(at: slotDir, withIntermediateDirectories: true)
+
+        // Restore label
+        if let label = existingLabel, !label.isEmpty {
+            try label.write(to: slotDir.appendingPathComponent("label.txt"), atomically: true, encoding: .utf8)
+        }
 
         guard !content.isEmpty else { return }
 
-        // Write all item groups
         for (groupIdx, items) in content.items.enumerated() {
-            let targetDir = groupIdx == 0 ? itemDir : slotDir.appendingPathComponent("item_\(groupIdx)")
-            if groupIdx > 0 {
-                try? FileManager.default.removeItem(at: targetDir)
-                try FileManager.default.createDirectory(at: targetDir, withIntermediateDirectories: true)
-            }
+            let targetDir = slotDir.appendingPathComponent("item_\(groupIdx)")
+            try FileManager.default.createDirectory(at: targetDir, withIntermediateDirectories: true)
 
             for item in items {
                 let safeName = encodeSafeFileName(item.type) + ".bin"
@@ -233,43 +258,56 @@ final class SlotStorage {
 
         for slot in 1...10 {
             let slotDir = baseURL.appendingPathComponent(String(slot))
-            let itemDir = slotDir.appendingPathComponent("item_0")
 
-            var isDir: ObjCBool = false
-            guard FileManager.default.fileExists(atPath: itemDir.path, isDirectory: &isDir), isDir.boolValue else {
+            var isSlotDir: ObjCBool = false
+            guard FileManager.default.fileExists(atPath: slotDir.path, isDirectory: &isSlotDir), isSlotDir.boolValue else {
                 continue
             }
+
+            // Find the first item_N directory
+            let itemDirs = try FileManager.default.contentsOfDirectory(at: slotDir, includingPropertiesForKeys: nil)
+                .filter { $0.lastPathComponent.hasPrefix("item_") }
+                .sorted { $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending }
+
+            guard !itemDirs.isEmpty, let firstItemDir = itemDirs.first else { continue }
 
             var types: [String] = []
             var totalBytes = 0
             var preview = "(empty)"
+            let itemCount = itemDirs.count
 
-            let files = try FileManager.default.contentsOfDirectory(at: itemDir, includingPropertiesForKeys: [.fileSizeKey])
-            for file in files where file.pathExtension == "bin" {
-                let encodedType = file.deletingPathExtension().lastPathComponent
-                let typeName = decodeSafeFileName(encodedType)
-                types.append(typeName)
+            // Read all item dirs for types and totals
+            for itemDir in itemDirs {
+                let files = try FileManager.default.contentsOfDirectory(at: itemDir, includingPropertiesForKeys: [.fileSizeKey])
+                for file in files where file.pathExtension == "bin" {
+                    let encodedType = file.deletingPathExtension().lastPathComponent
+                    let typeName = decodeSafeFileName(encodedType)
+                    types.append(typeName)
 
-                let attrs = try FileManager.default.attributesOfItem(atPath: file.path)
-                if let size = attrs[.size] as? Int { totalBytes += size }
+                    let attrs = try FileManager.default.attributesOfItem(atPath: file.path)
+                    if let size = attrs[.size] as? Int { totalBytes += size }
 
-                if typeName == "public.utf8-plain-text" || typeName == "NSStringPboardType" {
-                    if let data = try? Data(contentsOf: file),
-                       let str = String(data: data, encoding: .utf8) {
-                        let trimmed = str.trimmingCharacters(in: .whitespacesAndNewlines)
-                        preview = String(trimmed.prefix(37))
-                    }
-                } else if typeName == "public.rtf" {
-                    preview = "[Rich Text]"
-                } else if typeName.contains("image") {
-                    preview = "[Image \(totalBytes / 1024)KB]"
-                } else if typeName == "public.file-url" {
-                    if let data = try? Data(contentsOf: file),
-                       let urlStr = String(data: data, encoding: .utf8),
-                       let url = URL(string: urlStr) {
-                        preview = "[File] \(url.lastPathComponent)"
-                    } else {
-                        preview = "[File]"
+                    // Preview from the first item dir only
+                    if itemDir == firstItemDir {
+                        if typeName == "public.utf8-plain-text" || typeName == "NSStringPboardType" {
+                            if let data = try? Data(contentsOf: file),
+                               let str = String(data: data, encoding: .utf8) {
+                                let trimmed = str.trimmingCharacters(in: .whitespacesAndNewlines)
+                                preview = String(trimmed.prefix(37))
+                            }
+                        } else if typeName == "public.rtf" {
+                            preview = "[Rich Text]"
+                        } else if typeName.contains("image") {
+                            preview = "[Image \(totalBytes / 1024)KB]"
+                        } else if typeName == "public.file-url" {
+                            if let data = try? Data(contentsOf: file),
+                               let urlStr = String(data: data, encoding: .utf8),
+                               let url = URL(string: urlStr) {
+                                preview = "[File] \(url.lastPathComponent)"
+                            } else {
+                                preview = "[File]"
+                            }
+                        }
                     }
                 }
             }
@@ -279,7 +317,7 @@ final class SlotStorage {
             }
 
             if preview.hasPrefix("[Rich Text]"),
-               let richTextFile = itemDir.appendingPathComponent(encodeSafeFileName("public.utf8-plain-text") + ".bin") as URL?,
+               let richTextFile = firstItemDir.appendingPathComponent(encodeSafeFileName("public.utf8-plain-text") + ".bin") as URL?,
                FileManager.default.fileExists(atPath: richTextFile.path),
                let data = try? Data(contentsOf: richTextFile),
                let text = String(data: data, encoding: .utf8) {
@@ -291,7 +329,7 @@ final class SlotStorage {
 
             entries.append(SlotManifest.Entry(
                 description: preview,
-                itemCount: 1,
+                itemCount: itemCount,
                 slot: slot,
                 totalBytes: totalBytes,
                 types: types.sorted(),

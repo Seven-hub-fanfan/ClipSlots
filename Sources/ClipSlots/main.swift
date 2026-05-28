@@ -173,6 +173,7 @@ final class SlotStoreObservable: ObservableObject {
     // MARK: - Slot Loading
 
     func loadSlots() {
+        NSLog("[ClipSlots] loadSlots currentSpecialSlotId=\(currentSpecialSlotId)")
         var result: [Int: SlotContent] = [:]
         var labelMap: [Int: String] = [:]
         for slot in 1...config.slots {
@@ -186,6 +187,14 @@ final class SlotStoreObservable: ObservableObject {
     }
 
     // MARK: - Helpers
+
+    /// Returns slot content: in-memory state first, fallback to disk.
+    private func contentForSlot(_ slot: Int) -> SlotContent {
+        if let inMemory = slots[slot], !inMemory.isEmpty {
+            return inMemory
+        }
+        return specialStorage.get(slot)
+    }
 
     private func isSelfApp(_ app: NSRunningApplication?) -> Bool {
         guard let app = app else { return false }
@@ -357,7 +366,7 @@ final class SlotStoreObservable: ObservableObject {
     func copySlot(_ slot: Int) {
         cancelPendingClipboardRestore()
 
-        let content = specialStorage.get(slot)
+        let content = contentForSlot(slot)
         guard !content.isEmpty else {
             NSLog("[ClipSlots] COPY ignored: slot \(slot) empty")
             return
@@ -370,7 +379,8 @@ final class SlotStoreObservable: ObservableObject {
     // MARK: - Simple Paste (hotkeys, menu)
 
     func pasteSlot(_ slot: Int) {
-        let content = specialStorage.get(slot)
+        NSLog("[ClipSlots] pasteSlot slot=\(slot) currentSpecialSlotId=\(currentSpecialSlotId) uiPreview=\(slots[slot]?.preview ?? "nil")")
+        let content = contentForSlot(slot)
         guard !content.isEmpty else {
             NSLog("[ClipSlots] pasteSlot ignored: slot \(slot) empty")
             return
@@ -407,7 +417,7 @@ final class SlotStoreObservable: ObservableObject {
     // MARK: - Radial Paste (targetApp activation + waitUntilFrontmost)
 
     func pasteSlotToApp(_ slot: Int, targetApp: NSRunningApplication?) {
-        let content = specialStorage.get(slot)
+        let content = contentForSlot(slot)
         guard !content.isEmpty else {
             NSLog("[ClipSlots] radial paste ignored: slot \(slot) empty")
             return
