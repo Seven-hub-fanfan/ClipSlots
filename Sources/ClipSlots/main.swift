@@ -99,6 +99,12 @@ final class SlotStoreObservable: ObservableObject {
     private var pendingClipboardRestore: DispatchWorkItem?
     private var pendingClipboardRestoreContent: SlotContent?
 
+    /// Pending paste keystroke work item. Cancelled when switching special slots.
+    private var pendingPasteWorkItem: DispatchWorkItem?
+
+    /// The special slot id that current in-memory `slots` / `labels` belong to.
+    private var loadedSpecialSlotId: String?
+
     /// Prevents timer-triggered loadSlots from racing with async saves.
     private var isWritingSlots = false
 
@@ -138,7 +144,20 @@ final class SlotStoreObservable: ObservableObject {
         }
 
         do {
-            NSLog("[ClipSlots] switchSpecialSlot instanceID=\(instanceID) request from=\(currentSpecialSlotId) to=\(id)")
+            let oldId = currentSpecialSlotId
+            NSLog("[ClipSlots] switchSpecialSlot instanceID=\(instanceID) request from=\(oldId) to=\(id)")
+
+            // Cancel any delayed paste / clipboard restore that belongs to the old slot.
+            cancelPendingPasteOperations(restoreClipboard: true)
+
+            // Immediately invalidate in-memory cache before changing active id.
+            isWritingSlots = true
+            defer { isWritingSlots = false }
+
+            slots = [:]
+            labels = [:]
+            loadedSpecialSlotId = nil
+            refreshTrigger = UUID()
 
             try specialStorage.switchToSpecialSlot(id: id)
 
@@ -148,13 +167,10 @@ final class SlotStoreObservable: ObservableObject {
             currentSpecialSlot = index.specialSlots.first { $0.id == id }
             specialSlotSettings = index.settings
 
-            slots = [:]
-            labels = [:]
-
             loadSlots()
             refreshTrigger = UUID()
 
-            NSLog("[ClipSlots] switchSpecialSlot done current=\(currentSpecialSlotId)")
+            NSLog("[ClipSlots] switchSpecialSlot done old=\(oldId) current=\(currentSpecialSlotId)")
         } catch {
             NSLog("[ClipSlots] switchSpecialSlot error: \(error)")
         }
@@ -272,6 +288,7 @@ final class SlotStoreObservable: ObservableObject {
 
             slots = emptySlots
             labels = [:]
+            loadedSpecialSlotId = activeId
             refreshTrigger = UUID()
 
             NSLog("[ClipSlots] CLEAR ALL specialSlot=\(activeId)")
@@ -428,21 +445,23 @@ final class SlotStoreObservable: ObservableObject {
         }
         slots = result
         labels = labelMap
+        loadedSpecialSlotId = activeId
     }
 
     // MARK: - Helpers
 
-    /// Returns slot content: in-memory state first, fallback to disk.
+    /// Returns slot content: in-memory state first (only if it belongs to current special slot), fallback to disk.
     private func contentForSlot(_ slot: Int) -> SlotContent {
         let activeId = currentSpecialSlotId
 
-        if let inMemory = slots[slot], !inMemory.isEmpty {
+        // Only trust memory cache if it belongs to the currently active special slot.
+        if loadedSpecialSlotId == activeId, let inMemory = slots[slot], !inMemory.isEmpty {
             NSLog("[ClipSlots] contentForSlot memory specialSlot=\(activeId) slot=\(slot) preview=\(inMemory.preview)")
             return inMemory
         }
 
         let stored = specialStorage.get(slot, in: activeId)
-        NSLog("[ClipSlots] contentForSlot storage specialSlot=\(activeId) slot=\(slot) preview=\(stored.preview)")
+        NSLog("[ClipSlots] contentForSlot storage specialSlot=\(activeId) slot=\(slot) preview=\(stored.preview) loadedSpecialSlotId=\(loadedSpecialSlotId ?? "nil")")
         return stored
     }
 
@@ -451,13 +470,19 @@ final class SlotStoreObservable: ObservableObject {
         return app.bundleIdentifier == Bundle.main.bundleIdentifier
     }
 
-    private func cancelPendingClipboardRestore() {
-        if let content = pendingClipboardRestoreContent {
+    private func cancelPendingClipboardRestore(restoreImmediately: Bool = true) {
+        if restoreImmediately, let content = pendingClipboardRestoreContent {
             _ = clipboard.restore(content)
-            pendingClipboardRestoreContent = nil
         }
+        pendingClipboardRestoreContent = nil
         pendingClipboardRestore?.cancel()
         pendingClipboardRestore = nil
+    }
+
+    private func cancelPendingPasteOperations(restoreClipboard: Bool = true) {
+        pendingPasteWorkItem?.cancel()
+        pendingPasteWorkItem = nil
+        cancelPendingClipboardRestore(restoreImmediately: restoreClipboard)
     }
 
     private func promptAccessibilityPermissionIfNeeded() {
@@ -633,10 +658,15 @@ final class SlotStoreObservable: ObservableObject {
     // MARK: - Simple Paste (hotkeys, menu)
 
     func pasteSlot(_ slot: Int) {
-        NSLog("[ClipSlots] pasteSlot instanceID=\(instanceID) slot=\(slot) currentSpecialSlotId=\(currentSpecialSlotId) uiPreview=\(slots[slot]?.preview ?? "nil")")
-        let content = contentForSlot(slot)
+        let activeId = currentSpecialSlotId
+
+        NSLog("[ClipSlots] pasteSlot instanceID=\(instanceID) slot=\(slot) activeSpecialSlotId=\(activeId) loadedSpecialSlotId=\(loadedSpecialSlotId ?? "nil")")
+
+        // Global hotkey paste: always read directly from the current special slot on disk.
+        let content = specialStorage.get(slot, in: activeId)
+
         guard !content.isEmpty else {
-            NSLog("[ClipSlots] pasteSlot ignored: slot \(slot) empty")
+            NSLog("[ClipSlots] pasteSlot ignored: specialSlot=\(activeId) slot=\(slot) empty")
             return
         }
 
@@ -646,16 +676,25 @@ final class SlotStoreObservable: ObservableObject {
             return
         }
 
-        cancelPendingClipboardRestore()
+        cancelPendingPasteOperations(restoreClipboard: true)
 
         let previous = clipboard.capture()
         guard clipboard.restore(content) else {
-            NSLog("[ClipSlots] pasteSlot restore failed slot=\(slot)")
+            NSLog("[ClipSlots] pasteSlot restore failed specialSlot=\(activeId) slot=\(slot)")
             return
         }
 
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) { [weak self] in
+        let pasteWorkItem = DispatchWorkItem { [weak self] in
             guard let self = self else { return }
+
+            // If user switched special slot before Cmd+V fires, abort this stale paste.
+            guard self.currentSpecialSlotId == activeId else {
+                NSLog("[ClipSlots] pasteSlot abort stale paste requestedSpecialSlot=\(activeId) current=\(self.currentSpecialSlotId) slot=\(slot)")
+                _ = self.clipboard.restore(previous)
+                self.pendingPasteWorkItem = nil
+                return
+            }
+
             self.sendPasteKeystroke()
 
             let restoreWorkItem = DispatchWorkItem { [weak self] in
@@ -666,16 +705,26 @@ final class SlotStoreObservable: ObservableObject {
             }
             self.pendingClipboardRestoreContent = previous
             self.pendingClipboardRestore = restoreWorkItem
+            self.pendingPasteWorkItem = nil
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.8, execute: restoreWorkItem)
         }
+
+        self.pendingPasteWorkItem = pasteWorkItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.08, execute: pasteWorkItem)
+
+        NSLog("[ClipSlots] pasteSlot scheduled specialSlot=\(activeId) slot=\(slot) preview=\(content.preview)")
     }
 
     // MARK: - Radial Paste (targetApp activation + waitUntilFrontmost)
 
     func pasteSlotToApp(_ slot: Int, targetApp: NSRunningApplication?) {
-        let content = contentForSlot(slot)
+        let activeId = currentSpecialSlotId
+
+        // Always read from the currently active special slot on disk.
+        let content = specialStorage.get(slot, in: activeId)
+
         guard !content.isEmpty else {
-            NSLog("[ClipSlots] radial paste ignored: slot \(slot) empty")
+            NSLog("[ClipSlots] radial paste ignored: specialSlot=\(activeId) slot \(slot) empty")
             return
         }
 
@@ -694,20 +743,34 @@ final class SlotStoreObservable: ObservableObject {
             cleanTarget = targetApp ?? lastNonClipSlotsApp
         }
 
-        NSLog("[ClipSlots] PASTE radial slot=\(slot) preview=\(content.preview) targetApp=\(cleanTarget?.localizedName ?? "nil")")
+        NSLog("[ClipSlots] PASTE radial specialSlot=\(activeId) slot=\(slot) preview=\(content.preview) targetApp=\(cleanTarget?.localizedName ?? "nil")")
 
         let previous = clipboard.capture()
 
         let performPaste = { [weak self] in
             guard let self = self else { return }
 
+            // Abort if special slot changed while waiting for app activation.
+            guard self.currentSpecialSlotId == activeId else {
+                NSLog("[ClipSlots] radial paste abort stale paste requestedSpecialSlot=\(activeId) current=\(self.currentSpecialSlotId) slot=\(slot)")
+                _ = self.clipboard.restore(previous)
+                return
+            }
+
             guard self.clipboard.restore(content) else {
-                NSLog("[ClipSlots] radial paste restore failed slot=\(slot)")
+                NSLog("[ClipSlots] radial paste restore failed specialSlot=\(activeId) slot=\(slot)")
                 return
             }
 
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) { [weak self] in
                 guard let self = self else { return }
+
+                guard self.currentSpecialSlotId == activeId else {
+                    NSLog("[ClipSlots] radial paste abort stale keystroke requestedSpecialSlot=\(activeId) current=\(self.currentSpecialSlotId) slot=\(slot)")
+                    _ = self.clipboard.restore(previous)
+                    return
+                }
+
                 self.sendPasteKeystroke()
 
                 let restoreWorkItem = DispatchWorkItem { [weak self] in
@@ -759,6 +822,7 @@ final class SlotStoreObservable: ObservableObject {
         newLabels.removeValue(forKey: slot)
         labels = newLabels
 
+        loadedSpecialSlotId = activeId
         refreshTrigger = UUID()
         NSLog("[ClipSlots] CLEAR specialSlot=\(activeId) slot=\(slot)")
     }
@@ -808,6 +872,7 @@ final class SlotStoreObservable: ObservableObject {
             newLabels.removeValue(forKey: slot)
         }
         labels = newLabels
+        loadedSpecialSlotId = activeId
 
         NSLog("[ClipSlots] setLabel specialSlot=\(activeId) slot=\(slot) label=\(label ?? "")")
     }
@@ -966,6 +1031,7 @@ final class SlotStoreObservable: ObservableObject {
         var newSlots = slots
         newSlots[targetSlot] = content
         slots = newSlots
+        loadedSpecialSlotId = activeId
         refreshTrigger = UUID()
         NSLog("[ClipSlots] SAVE OK specialSlot=\(activeId) slot=\(targetSlot) preview=\(content.preview)")
     }
@@ -998,6 +1064,7 @@ final class SlotStoreObservable: ObservableObject {
             var newSlots = slots
             newSlots[targetSlot] = content
             slots = newSlots
+            loadedSpecialSlotId = activeId
             refreshTrigger = UUID()
         default:
             break
