@@ -43,8 +43,54 @@ struct SpecialSlotSettings: Codable {
     var suppressFolderOverflowWarning: Bool = false
     var folderImportSortRule: FolderImportSortRule = .naturalNameAscending
     var confirmBeforeOverwrite: Bool = true
+    var confirmBeforeClearAllSlots: Bool = true
+    var confirmBeforeDeleteSpecialSlot: Bool = true
+    var confirmBeforePasteAllSlots: Bool = true
 
     static let `default` = SpecialSlotSettings()
+
+    init(
+        maxSpecialSlots: Int = 10,
+        maxChildSlotsPerSpecialSlot: Int = 10,
+        suppressFolderOverflowWarning: Bool = false,
+        folderImportSortRule: FolderImportSortRule = .naturalNameAscending,
+        confirmBeforeOverwrite: Bool = true,
+        confirmBeforeClearAllSlots: Bool = true,
+        confirmBeforeDeleteSpecialSlot: Bool = true,
+        confirmBeforePasteAllSlots: Bool = true
+    ) {
+        self.maxSpecialSlots = maxSpecialSlots
+        self.maxChildSlotsPerSpecialSlot = maxChildSlotsPerSpecialSlot
+        self.suppressFolderOverflowWarning = suppressFolderOverflowWarning
+        self.folderImportSortRule = folderImportSortRule
+        self.confirmBeforeOverwrite = confirmBeforeOverwrite
+        self.confirmBeforeClearAllSlots = confirmBeforeClearAllSlots
+        self.confirmBeforeDeleteSpecialSlot = confirmBeforeDeleteSpecialSlot
+        self.confirmBeforePasteAllSlots = confirmBeforePasteAllSlots
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case maxSpecialSlots
+        case maxChildSlotsPerSpecialSlot
+        case suppressFolderOverflowWarning
+        case folderImportSortRule
+        case confirmBeforeOverwrite
+        case confirmBeforeClearAllSlots
+        case confirmBeforeDeleteSpecialSlot
+        case confirmBeforePasteAllSlots
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        maxSpecialSlots = try c.decodeIfPresent(Int.self, forKey: .maxSpecialSlots) ?? 10
+        maxChildSlotsPerSpecialSlot = try c.decodeIfPresent(Int.self, forKey: .maxChildSlotsPerSpecialSlot) ?? 10
+        suppressFolderOverflowWarning = try c.decodeIfPresent(Bool.self, forKey: .suppressFolderOverflowWarning) ?? false
+        folderImportSortRule = try c.decodeIfPresent(FolderImportSortRule.self, forKey: .folderImportSortRule) ?? .naturalNameAscending
+        confirmBeforeOverwrite = try c.decodeIfPresent(Bool.self, forKey: .confirmBeforeOverwrite) ?? true
+        confirmBeforeClearAllSlots = try c.decodeIfPresent(Bool.self, forKey: .confirmBeforeClearAllSlots) ?? true
+        confirmBeforeDeleteSpecialSlot = try c.decodeIfPresent(Bool.self, forKey: .confirmBeforeDeleteSpecialSlot) ?? true
+        confirmBeforePasteAllSlots = try c.decodeIfPresent(Bool.self, forKey: .confirmBeforePasteAllSlots) ?? true
+    }
 }
 
 enum FolderImportSortRule: String, Codable {

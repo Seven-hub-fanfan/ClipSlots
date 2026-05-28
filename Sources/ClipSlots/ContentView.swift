@@ -94,7 +94,7 @@ struct ContentView: View {
                                 } label: {
                                     Label(
                                         special.name,
-                                        systemImage: special.id == store.currentSpecialSlotId ? "checkmark" : "folder"
+                                        systemImage: special.id == store.currentSpecialSlotId ? "checkmark.circle.fill" : "folder.fill"
                                     )
                                 }
                             }
@@ -140,6 +140,28 @@ struct ContentView: View {
                 .buttonStyle(.borderless)
                 .help("导入文件夹到当前特殊槽位")
 
+                Menu {
+                    Button {
+                        store.pasteAllSlotsWithConfirmation()
+                    } label: {
+                        Label("按序粘贴全部", systemImage: "text.line.first.and.arrowtriangle.forward")
+                    }
+
+                    Divider()
+
+                    Button(role: .destructive) {
+                        store.clearAllSlotsInCurrentSpecialSlotWithConfirmation()
+                    } label: {
+                        Label("清空当前特殊槽位", systemImage: "trash")
+                    }
+                } label: {
+                    Image(systemName: "ellipsis.circle")
+                        .font(.system(size: 15, weight: .semibold))
+                        .frame(width: 30, height: 30)
+                }
+                .menuStyle(.borderlessButton)
+                .help("当前特殊槽位操作")
+
                 statPill(
                     title: "已使用",
                     value: "\(filledSlotCount)/\(store.config.slots)",
@@ -172,6 +194,10 @@ struct ContentView: View {
             .padding(.horizontal, AppTheme.pagePadding)
             .padding(.vertical, 16)
 
+            specialSlotTagBar
+                .padding(.horizontal, AppTheme.pagePadding)
+                .padding(.bottom, 10)
+
             Divider()
         }
         .background(.regularMaterial)
@@ -184,6 +210,54 @@ struct ContentView: View {
         }
         .popover(isPresented: $showingSpecialSlotManagement) {
             SpecialSlotManagementView(store: store)
+        }
+    }
+
+    private var specialSlotTagBar: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 8) {
+                ForEach(store.specialSlots) { special in
+                    Button {
+                        store.switchSpecialSlot(id: special.id)
+                    } label: {
+                        HStack(spacing: 5) {
+                            Image(systemName: special.id == store.currentSpecialSlotId ? "folder.fill" : "folder")
+                            Text(special.name)
+                        }
+                        .font(.caption)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 6)
+                        .background(
+                            Capsule()
+                                .fill(
+                                    special.id == store.currentSpecialSlotId
+                                    ? Color.accentColor.opacity(0.18)
+                                    : Color.primary.opacity(0.05)
+                                )
+                        )
+                        .overlay(
+                            Capsule()
+                                .stroke(
+                                    special.id == store.currentSpecialSlotId
+                                    ? Color.accentColor.opacity(0.45)
+                                    : Color.secondary.opacity(0.15),
+                                    lineWidth: 1
+                                )
+                        )
+                    }
+                    .buttonStyle(.plain)
+                }
+
+                Button {
+                    showingSpecialSlotManagement = true
+                } label: {
+                    Image(systemName: "plus")
+                        .font(.caption)
+                        .padding(7)
+                        .background(Circle().fill(Color.primary.opacity(0.05)))
+                }
+                .buttonStyle(.plain)
+            }
         }
     }
 

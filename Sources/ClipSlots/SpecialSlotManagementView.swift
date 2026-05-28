@@ -8,7 +8,6 @@ struct SpecialSlotManagementView: View {
     @State private var selectedId: String = ""
     @State private var showingNewDialog = false
     @State private var showingRenameDialog = false
-    @State private var showingDeleteConfirm = false
     @State private var newName = ""
     @State private var renameText = ""
 
@@ -63,7 +62,10 @@ struct SpecialSlotManagementView: View {
                         }
                     }
                     .contentShape(Rectangle())
-                    .onTapGesture { selectedId = special.id }
+                    .onTapGesture {
+                        selectedId = special.id
+                        store.switchSpecialSlot(id: special.id)
+                    }
                 }
                 .listStyle(.sidebar)
                 .frame(width: 160)
@@ -76,6 +78,9 @@ struct SpecialSlotManagementView: View {
                         Spacer()
                         Text("请从左侧选择一个特殊槽位")
                             .font(.subheadline)
+                            .foregroundColor(.secondary)
+                        Text("点击特殊槽位即可立即切换")
+                            .font(.caption)
                             .foregroundColor(.secondary)
                         Spacer()
                     }
@@ -95,7 +100,10 @@ struct SpecialSlotManagementView: View {
                 }
                 .disabled(selectedId.isEmpty)
 
-                Button(role: .destructive) { showingDeleteConfirm = true } label: {
+                Button(role: .destructive) {
+                    store.deleteSpecialSlotWithConfirmation(id: selectedId)
+                    selectedId = store.currentSpecialSlotId
+                } label: {
                     Label("删除", systemImage: "trash")
                 }
                 .disabled(selectedId.isEmpty || store.specialSlots.count <= 1)
@@ -129,15 +137,6 @@ struct SpecialSlotManagementView: View {
         }
         .sheet(isPresented: $showingRenameDialog) {
             renameSheet()
-        }
-        .confirmationDialog("确定删除吗？", isPresented: $showingDeleteConfirm, titleVisibility: .visible) {
-            Button("删除", role: .destructive) {
-                store.deleteSpecialSlot(id: selectedId)
-                selectedId = store.currentSpecialSlotId
-            }
-            Button("取消", role: .cancel) {}
-        } message: {
-            Text("删除特殊槽位「\(selected?.name ?? "")」会将其子槽位内容移至回收站。")
         }
     }
 

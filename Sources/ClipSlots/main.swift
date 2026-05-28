@@ -131,10 +131,29 @@ final class SlotStoreObservable: ObservableObject {
     }
 
     func switchSpecialSlot(id: String) {
+        guard id != currentSpecialSlotId else {
+            NSLog("[ClipSlots] switchSpecialSlot ignored: already current id=\(id)")
+            return
+        }
+
         do {
+            NSLog("[ClipSlots] switchSpecialSlot request from=\(currentSpecialSlotId) to=\(id)")
+
             try specialStorage.switchToSpecialSlot(id: id)
-            reloadAll()
+
+            let index = specialStorage.loadIndex()
+            currentSpecialSlotId = id
+            specialSlots = index.specialSlots
+            currentSpecialSlot = index.specialSlots.first { $0.id == id }
+            specialSlotSettings = index.settings
+
+            slots = [:]
+            labels = [:]
+
+            loadSlots()
             refreshTrigger = UUID()
+
+            NSLog("[ClipSlots] switchSpecialSlot done current=\(currentSpecialSlotId)")
         } catch {
             NSLog("[ClipSlots] switchSpecialSlot error: \(error)")
         }
@@ -167,6 +186,227 @@ final class SlotStoreObservable: ObservableObject {
             loadSpecialSlots()
         } catch {
             NSLog("[ClipSlots] renameSpecialSlot error: \(error)")
+        }
+    }
+
+    // MARK: - Delete Special Slot with Confirmation
+
+    func deleteSpecialSlotWithConfirmation(id: String) {
+        guard let target = specialSlots.first(where: { $0.id == id }) else { return }
+
+        if specialSlotSettings.confirmBeforeDeleteSpecialSlot {
+            let alert = NSAlert()
+            alert.messageText = "删除特殊槽位？"
+            alert.informativeText = "将删除特殊槽位「\(target.name)」及其全部槽位内容。此操作会移动到回收目录。"
+            alert.alertStyle = .warning
+            alert.addButton(withTitle: "删除")
+            alert.addButton(withTitle: "取消")
+
+            let checkbox = NSButton(checkboxWithTitle: "不再提醒", target: nil, action: nil)
+            alert.accessoryView = checkbox
+
+            let response = alert.runModal()
+            guard response == .alertFirstButtonReturn else { return }
+
+            if checkbox.state == .on {
+                do {
+                    try specialStorage.updateSettings { $0.confirmBeforeDeleteSpecialSlot = false }
+                    specialSlotSettings.confirmBeforeDeleteSpecialSlot = false
+                } catch {
+                    NSLog("[ClipSlots] update confirmBeforeDeleteSpecialSlot failed: \(error)")
+                }
+            }
+        }
+
+        deleteSpecialSlot(id: id)
+    }
+
+    // MARK: - Clear All Slots
+
+    func clearAllSlotsInCurrentSpecialSlotWithConfirmation() {
+        if !specialSlotSettings.confirmBeforeClearAllSlots {
+            clearAllSlotsInCurrentSpecialSlot()
+            return
+        }
+
+        let alert = NSAlert()
+        alert.messageText = "清空当前特殊槽位？"
+        alert.informativeText = "将清空「\(currentSpecialSlot?.name ?? "当前特殊槽位")」中的全部槽位内容。此操作不会删除特殊槽位本身。"
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "清空")
+        alert.addButton(withTitle: "取消")
+
+        let checkbox = NSButton(checkboxWithTitle: "不再提醒", target: nil, action: nil)
+        alert.accessoryView = checkbox
+
+        let response = alert.runModal()
+        guard response == .alertFirstButtonReturn else { return }
+
+        if checkbox.state == .on {
+            do {
+                try specialStorage.updateSettings { $0.confirmBeforeClearAllSlots = false }
+                specialSlotSettings.confirmBeforeClearAllSlots = false
+            } catch {
+                NSLog("[ClipSlots] update confirmBeforeClearAllSlots failed: \(error)")
+            }
+        }
+
+        clearAllSlotsInCurrentSpecialSlot()
+    }
+
+    func clearAllSlotsInCurrentSpecialSlot() {
+        let activeId = currentSpecialSlotId
+        cancelPendingClipboardRestore()
+
+        do {
+            isWritingSlots = true
+            defer { isWritingSlots = false }
+
+            try specialStorage.clearAllSlotsInCurrentSpecialSlot()
+
+            var emptySlots: [Int: SlotContent] = [:]
+            for slot in 1...config.slots {
+                emptySlots[slot] = SlotContent()
+            }
+
+            slots = emptySlots
+            labels = [:]
+            refreshTrigger = UUID()
+
+            NSLog("[ClipSlots] CLEAR ALL specialSlot=\(activeId)")
+        } catch {
+            NSLog("[ClipSlots] CLEAR ALL failed specialSlot=\(activeId) error=\(error)")
+            showAlert(message: "清空失败：\(error.localizedDescription)")
+        }
+    }
+
+    // MARK: - Paste All Slots
+
+    private func orderedNonEmptySlots() -> [(slot: Int, content: SlotContent)] {
+        (1...config.slots).compactMap { slot in
+            let content = contentForSlot(slot)
+            return content.isEmpty ? nil : (slot, content)
+        }
+    }
+
+    func pasteAllSlotsWithConfirmation() {
+        let items = orderedNonEmptySlots()
+
+        guard !items.isEmpty else {
+            showAlert(message: "当前特殊槽位没有可粘贴的内容")
+            return
+        }
+
+        if specialSlotSettings.confirmBeforePasteAllSlots {
+            let alert = NSAlert()
+            alert.messageText = "按序粘贴全部槽位？"
+            alert.informativeText = "将按 1 到 \(config.slots) 的顺序，粘贴「\(currentSpecialSlot?.name ?? currentSpecialSlotId)」中的 \(items.count) 个非空槽位。"
+            alert.addButton(withTitle: "开始粘贴")
+            alert.addButton(withTitle: "取消")
+
+            let checkbox = NSButton(checkboxWithTitle: "不再提醒", target: nil, action: nil)
+            alert.accessoryView = checkbox
+
+            let response = alert.runModal()
+            guard response == .alertFirstButtonReturn else { return }
+
+            if checkbox.state == .on {
+                do {
+                    try specialStorage.updateSettings { $0.confirmBeforePasteAllSlots = false }
+                    specialSlotSettings.confirmBeforePasteAllSlots = false
+                } catch {
+                    NSLog("[ClipSlots] update confirmBeforePasteAllSlots failed: \(error)")
+                }
+            }
+        }
+
+        pasteAllSlotsFromUI()
+    }
+
+    func pasteAllSlotsFromUI() {
+        guard let target = lastNonClipSlotsApp else {
+            showAlert(message: "没有可粘贴的目标应用。请先切换到目标应用后再试。")
+            return
+        }
+        pasteAllSlotsToApp(targetApp: target)
+    }
+
+    func pasteAllSlotsToApp(targetApp: NSRunningApplication?) {
+        let items = orderedNonEmptySlots()
+
+        guard !items.isEmpty else {
+            NSLog("[ClipSlots] pasteAll ignored: no content specialSlot=\(currentSpecialSlotId)")
+            return
+        }
+
+        guard AXIsProcessTrusted() else {
+            promptAccessibilityPermissionIfNeeded()
+            return
+        }
+
+        cancelPendingClipboardRestore()
+
+        let cleanTarget: NSRunningApplication?
+        if isSelfApp(targetApp) {
+            cleanTarget = lastNonClipSlotsApp
+        } else {
+            cleanTarget = targetApp ?? lastNonClipSlotsApp
+        }
+
+        let previous = clipboard.capture()
+
+        let startSequence = { [weak self] in
+            guard let self = self else { return }
+            self.pasteItemsSequentially(items, index: 0, previousClipboard: previous)
+        }
+
+        if let app = cleanTarget {
+            app.activate(options: [.activateIgnoringOtherApps])
+            waitUntilFrontmost(app, timeout: 1.2) { success in
+                NSLog("[ClipSlots] pasteAll waitUntilFrontmost success=\(success)")
+                startSequence()
+            }
+        } else {
+            startSequence()
+        }
+    }
+
+    private func pasteItemsSequentially(
+        _ items: [(slot: Int, content: SlotContent)],
+        index: Int,
+        previousClipboard: SlotContent
+    ) {
+        guard index < items.count else {
+            let restoreWorkItem = DispatchWorkItem { [weak self] in
+                guard let self = self else { return }
+                _ = self.clipboard.restore(previousClipboard)
+                self.pendingClipboardRestore = nil
+            }
+            pendingClipboardRestore = restoreWorkItem
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.8, execute: restoreWorkItem)
+            NSLog("[ClipSlots] pasteAll completed specialSlot=\(currentSpecialSlotId) count=\(items.count)")
+            return
+        }
+
+        let item = items[index]
+
+        guard clipboard.restore(item.content) else {
+            NSLog("[ClipSlots] pasteAll restore failed slot=\(item.slot)")
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) { [weak self] in
+                self?.pasteItemsSequentially(items, index: index + 1, previousClipboard: previousClipboard)
+            }
+            return
+        }
+
+        NSLog("[ClipSlots] pasteAll paste specialSlot=\(currentSpecialSlotId) slot=\(item.slot) index=\(index) preview=\(item.content.preview)")
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.10) { [weak self] in
+            guard let self = self else { return }
+            self.sendPasteKeystroke()
+
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { [weak self] in
+                self?.pasteItemsSequentially(items, index: index + 1, previousClipboard: previousClipboard)
+            }
         }
     }
 
