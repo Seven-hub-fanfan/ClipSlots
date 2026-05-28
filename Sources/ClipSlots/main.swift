@@ -29,7 +29,6 @@ fileprivate func virtualKeyForCharacterV() -> CGKeyCode {
 struct ClipSlotsApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
     @StateObject private var store = SlotStoreObservable()
-    @State private var didSetupHotKeys = false
 
     @AppStorage("appearanceMode") private var appearanceModeRaw = ThemeMode.system.rawValue
     private var appearanceMode: ThemeMode {
@@ -43,14 +42,7 @@ struct ClipSlotsApp: App {
                 .preferredColorScheme(appearanceMode.preferredColorScheme)
                 .onAppear {
                     appDelegate.store = store
-
-                    if !didSetupHotKeys {
-                        didSetupHotKeys = true
-                        store.onConfigChanged = { [weak appDelegate] in
-                            appDelegate?.reloadHotkeys()
-                        }
-                        appDelegate.setupHotKeys()
-                    }
+                    appDelegate.setupHotKeysAfterStoreReady()
                 }
         }
         .windowStyle(.titleBar)

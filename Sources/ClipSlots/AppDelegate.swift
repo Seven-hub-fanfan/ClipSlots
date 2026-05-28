@@ -4,6 +4,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     weak var store: SlotStoreObservable?
     private let hotkeyManager = HotKeyManager.shared
     private let radialMenuController = RadialMenuWindowController()
+    private var hotKeysReady = false
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.regular)
@@ -21,7 +22,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self.store?.lastNonClipSlotsApp = app
         }
 
-        NSLog("[ClipSlots] App launched, awaiting window for hotkey registration")
+        NSLog("[ClipSlots] App launched, will setup hotkeys after store is set")
+    }
+
+    /// Called by main.swift after store is assigned. Idempotent — only sets up once.
+    func setupHotKeysAfterStoreReady() {
+        guard !hotKeysReady else { return }
+        guard let store = store else {
+            NSLog("[ClipSlots] ERROR: setupHotKeysAfterStoreReady called but store is nil")
+            return
+        }
+
+        hotKeysReady = true
+
+        NSLog("[ClipSlots] setupHotKeys storeInstanceID=\(store.instanceID) currentSpecialSlotId=\(store.currentSpecialSlotId)")
+
+        store.onConfigChanged = { [weak self] in
+            self?.reloadHotkeys()
+        }
+
+        setupHotKeys()
     }
 
     func applicationWillTerminate(_ notification: Notification) {
@@ -35,8 +55,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func setupHotKeys() {
         guard let store = store else { return }
-
-        NSLog("[ClipSlots] setupHotKeys storeInstanceID=\(store.instanceID) currentSpecialSlotId=\(store.currentSpecialSlotId)")
 
         hotkeyManager.register(
             config: store.config,
