@@ -97,6 +97,7 @@ final class SlotStoreObservable: ObservableObject {
 
     /// Cancellable delayed clipboard restore to prevent race with copy/save.
     private var pendingClipboardRestore: DispatchWorkItem?
+    private var pendingClipboardRestoreContent: SlotContent?
 
     /// Prevents timer-triggered loadSlots from racing with async saves.
     private var isWritingSlots = false
@@ -381,7 +382,9 @@ final class SlotStoreObservable: ObservableObject {
                 guard let self = self else { return }
                 _ = self.clipboard.restore(previousClipboard)
                 self.pendingClipboardRestore = nil
+                self.pendingClipboardRestoreContent = nil
             }
+            pendingClipboardRestoreContent = previousClipboard
             pendingClipboardRestore = restoreWorkItem
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.8, execute: restoreWorkItem)
             NSLog("[ClipSlots] pasteAll completed specialSlot=\(currentSpecialSlotId) count=\(items.count)")
@@ -449,6 +452,10 @@ final class SlotStoreObservable: ObservableObject {
     }
 
     private func cancelPendingClipboardRestore() {
+        if let content = pendingClipboardRestoreContent {
+            _ = clipboard.restore(content)
+            pendingClipboardRestoreContent = nil
+        }
         pendingClipboardRestore?.cancel()
         pendingClipboardRestore = nil
     }
@@ -655,7 +662,9 @@ final class SlotStoreObservable: ObservableObject {
                 guard let self = self else { return }
                 _ = self.clipboard.restore(previous)
                 self.pendingClipboardRestore = nil
+                self.pendingClipboardRestoreContent = nil
             }
+            self.pendingClipboardRestoreContent = previous
             self.pendingClipboardRestore = restoreWorkItem
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.8, execute: restoreWorkItem)
         }
@@ -705,7 +714,9 @@ final class SlotStoreObservable: ObservableObject {
                     guard let self = self else { return }
                     _ = self.clipboard.restore(previous)
                     self.pendingClipboardRestore = nil
+                    self.pendingClipboardRestoreContent = nil
                 }
+                self.pendingClipboardRestoreContent = previous
                 self.pendingClipboardRestore = restoreWorkItem
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.8, execute: restoreWorkItem)
             }
