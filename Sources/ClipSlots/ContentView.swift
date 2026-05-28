@@ -47,7 +47,7 @@ struct ContentView: View {
                             },
                             onClear: {
                                 NSLog("[ClipSlots] UI clear button clicked slot=\(slot)")
-                                store.clearSlot(slot)
+                                store.clearSlotWithConfirmation(slot)
                             },
                             onSetLabel: { newLabel in
                                 store.setLabel(slot, label: newLabel.isEmpty ? nil : newLabel)

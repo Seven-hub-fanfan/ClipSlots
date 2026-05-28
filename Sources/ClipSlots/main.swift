@@ -262,7 +262,7 @@ final class SlotStoreObservable: ObservableObject {
             isWritingSlots = true
             defer { isWritingSlots = false }
 
-            try specialStorage.clearAllSlotsInCurrentSpecialSlot()
+            try specialStorage.clearAllSlots(in: activeId)
 
             var emptySlots: [Int: SlotContent] = [:]
             for slot in 1...config.slots {
@@ -413,12 +413,13 @@ final class SlotStoreObservable: ObservableObject {
     // MARK: - Slot Loading
 
     func loadSlots() {
-        NSLog("[ClipSlots] loadSlots currentSpecialSlotId=\(currentSpecialSlotId)")
+        let activeId = currentSpecialSlotId
+        NSLog("[ClipSlots] loadSlots activeSpecialSlotId=\(activeId)")
         var result: [Int: SlotContent] = [:]
         var labelMap: [Int: String] = [:]
         for slot in 1...config.slots {
-            result[slot] = specialStorage.get(slot)
-            if let label = specialStorage.getLabel(slot), !label.isEmpty {
+            result[slot] = specialStorage.get(slot, in: activeId)
+            if let label = specialStorage.getLabel(slot, in: activeId), !label.isEmpty {
                 labelMap[slot] = label
             }
         }
@@ -430,10 +431,16 @@ final class SlotStoreObservable: ObservableObject {
 
     /// Returns slot content: in-memory state first, fallback to disk.
     private func contentForSlot(_ slot: Int) -> SlotContent {
+        let activeId = currentSpecialSlotId
+
         if let inMemory = slots[slot], !inMemory.isEmpty {
+            NSLog("[ClipSlots] contentForSlot memory specialSlot=\(activeId) slot=\(slot) preview=\(inMemory.preview)")
             return inMemory
         }
-        return specialStorage.get(slot)
+
+        let stored = specialStorage.get(slot, in: activeId)
+        NSLog("[ClipSlots] contentForSlot storage specialSlot=\(activeId) slot=\(slot) preview=\(stored.preview)")
+        return stored
     }
 
     private func isSelfApp(_ app: NSRunningApplication?) -> Bool {
@@ -728,16 +735,60 @@ final class SlotStoreObservable: ObservableObject {
     // MARK: - Clear
 
     func clearSlot(_ slot: Int) {
+        let activeId = currentSpecialSlotId
+
         cancelPendingClipboardRestore()
-        specialStorage.clear(slot)
-        NSLog("[ClipSlots] CLEAR slot=\(slot)")
-        loadSlots()
+        specialStorage.clear(slot, in: activeId)
+
+        var newSlots = slots
+        newSlots[slot] = SlotContent()
+        slots = newSlots
+
+        var newLabels = labels
+        newLabels.removeValue(forKey: slot)
+        labels = newLabels
+
+        refreshTrigger = UUID()
+        NSLog("[ClipSlots] CLEAR specialSlot=\(activeId) slot=\(slot)")
+    }
+
+    func clearSlotWithConfirmation(_ slot: Int) {
+        if !specialSlotSettings.confirmBeforeClearSingleSlot {
+            clearSlot(slot)
+            return
+        }
+
+        let alert = NSAlert()
+        alert.messageText = "清空槽位 \(slot)？"
+        alert.informativeText = "该操作会删除当前槽位中的内容。"
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "清空")
+        alert.addButton(withTitle: "取消")
+
+        let checkbox = NSButton(checkboxWithTitle: "不再提醒", target: nil, action: nil)
+        alert.accessoryView = checkbox
+
+        let response = alert.runModal()
+        guard response == .alertFirstButtonReturn else { return }
+
+        if checkbox.state == .on {
+            do {
+                try specialStorage.updateSettings { $0.confirmBeforeClearSingleSlot = false }
+                specialSlotSettings.confirmBeforeClearSingleSlot = false
+            } catch {
+                NSLog("[ClipSlots] update confirmBeforeClearSingleSlot failed: \(error)")
+            }
+        }
+
+        clearSlot(slot)
     }
 
     // MARK: - Label
 
     func setLabel(_ slot: Int, label: String?) {
-        specialStorage.setLabel(slot, label: label)
+        let activeId = currentSpecialSlotId
+
+        specialStorage.setLabel(slot, label: label, in: activeId)
 
         var newLabels = labels
         if let label = label, !label.isEmpty {
@@ -747,7 +798,7 @@ final class SlotStoreObservable: ObservableObject {
         }
         labels = newLabels
 
-        NSLog("[ClipSlots] setLabel slot=\(slot) label=\(label ?? "")")
+        NSLog("[ClipSlots] setLabel specialSlot=\(activeId) slot=\(slot) label=\(label ?? "")")
     }
 
     func updateConfig(_ newConfig: AppConfig) {
@@ -774,6 +825,7 @@ final class SlotStoreObservable: ObservableObject {
     }
 
     func importFolderIntoCurrentSpecialSlot(_ folderURL: URL) {
+        let activeId = currentSpecialSlotId
         let options = FolderImportOptions(
             maxFiles: specialSlotSettings.maxChildSlotsPerSpecialSlot,
             includeHiddenFiles: false,
@@ -803,7 +855,7 @@ final class SlotStoreObservable: ObservableObject {
             }
 
             // Overwrite check
-            let hasContent = (1...config.slots).contains { !specialStorage.get($0).isEmpty }
+            let hasContent = (1...config.slots).contains { !specialStorage.get($0, in: activeId).isEmpty }
             if hasContent && specialSlotSettings.confirmBeforeOverwrite {
                 guard confirmOverwriteCurrentSpecialSlot() else { return }
             }
@@ -812,14 +864,14 @@ final class SlotStoreObservable: ObservableObject {
             isWritingSlots = true
             defer { isWritingSlots = false }
 
-            try specialStorage.clearAllSlotsInCurrentSpecialSlot()
+            try specialStorage.clearAllSlots(in: activeId)
 
             var successCount = 0
             var failCount = 0
             for (idx, fileURL) in preview.willImportFiles.enumerated() {
                 let slotNumber = idx + 1
                 let content = folderImportService.makeSlotContent(for: fileURL)
-                if specialStorage.set(slotNumber, content: content) {
+                if specialStorage.set(slotNumber, content: content, in: activeId) {
                     successCount += 1
                 } else {
                     failCount += 1
@@ -879,6 +931,7 @@ final class SlotStoreObservable: ObservableObject {
     // MARK: - File Detection
 
     func handleCapturedContentForSave(_ content: SlotContent, targetSlot: Int) {
+        let activeId = currentSpecialSlotId
         let folderURLs = content.detectedFolderURLs
 
         if folderURLs.count == 1 {
@@ -892,18 +945,18 @@ final class SlotStoreObservable: ObservableObject {
 
         // Normal save
         isWritingSlots = true
-        let success = specialStorage.set(targetSlot, content: content)
+        let success = specialStorage.set(targetSlot, content: content, in: activeId)
         isWritingSlots = false
 
         guard success else {
-            NSLog("[ClipSlots] SAVE FAIL slot=\(targetSlot)")
+            NSLog("[ClipSlots] SAVE FAIL specialSlot=\(activeId) slot=\(targetSlot)")
             return
         }
         var newSlots = slots
         newSlots[targetSlot] = content
         slots = newSlots
         refreshTrigger = UUID()
-        NSLog("[ClipSlots] SAVE OK slot=\(targetSlot) preview=\(content.preview)")
+        NSLog("[ClipSlots] SAVE OK specialSlot=\(activeId) slot=\(targetSlot) preview=\(content.preview)")
     }
 
     private func handleSingleFolderSave(_ folderURL: URL, targetSlot: Int) {
@@ -923,11 +976,12 @@ final class SlotStoreObservable: ObservableObject {
             createSpecialSlotAndImportFolder(folderURL)
         case .alertThirdButtonReturn:
             let content = folderImportService.makeSlotContent(for: folderURL)
+            let activeId = currentSpecialSlotId
             isWritingSlots = true
-            let success = specialStorage.set(targetSlot, content: content)
+            let success = specialStorage.set(targetSlot, content: content, in: activeId)
             isWritingSlots = false
             guard success else {
-                NSLog("[ClipSlots] save folder as normal FAIL slot=\(targetSlot)")
+                NSLog("[ClipSlots] save folder as normal FAIL specialSlot=\(activeId) slot=\(targetSlot)")
                 return
             }
             var newSlots = slots

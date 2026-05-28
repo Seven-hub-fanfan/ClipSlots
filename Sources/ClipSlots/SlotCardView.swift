@@ -15,7 +15,6 @@ struct SlotCardView: View {
     @State private var editingLabel = false
     @State private var labelText = ""
     @State private var isHovering = false
-    @State private var showClearConfirm = false
 
     @Environment(\.colorScheme) private var colorScheme
 
@@ -61,18 +60,6 @@ struct SlotCardView: View {
         .animation(.easeOut(duration: 0.14), value: isHovering)
         .onHover { hovering in
             isHovering = hovering
-        }
-        .confirmationDialog(
-            "清空槽位 \(slot)？",
-            isPresented: $showClearConfirm,
-            titleVisibility: .visible
-        ) {
-            Button("清空", role: .destructive) {
-                onClear()
-            }
-            Button("取消", role: .cancel) {}
-        } message: {
-            Text("该操作会删除当前槽位中的内容。")
         }
     }
 
@@ -189,7 +176,7 @@ struct SlotCardView: View {
                 .buttonStyle(.bordered)
                 .controlSize(.small)
 
-                Button { showClearConfirm = true } label: {
+                Button { onClear() } label: {
                     Image(systemName: "trash")
                         .frame(width: 24, height: 22)
                 }

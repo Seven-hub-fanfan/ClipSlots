@@ -46,6 +46,7 @@ struct SpecialSlotSettings: Codable {
     var confirmBeforeClearAllSlots: Bool = true
     var confirmBeforeDeleteSpecialSlot: Bool = true
     var confirmBeforePasteAllSlots: Bool = true
+    var confirmBeforeClearSingleSlot: Bool = true
 
     static let `default` = SpecialSlotSettings()
 
@@ -57,7 +58,8 @@ struct SpecialSlotSettings: Codable {
         confirmBeforeOverwrite: Bool = true,
         confirmBeforeClearAllSlots: Bool = true,
         confirmBeforeDeleteSpecialSlot: Bool = true,
-        confirmBeforePasteAllSlots: Bool = true
+        confirmBeforePasteAllSlots: Bool = true,
+        confirmBeforeClearSingleSlot: Bool = true
     ) {
         self.maxSpecialSlots = maxSpecialSlots
         self.maxChildSlotsPerSpecialSlot = maxChildSlotsPerSpecialSlot
@@ -67,6 +69,7 @@ struct SpecialSlotSettings: Codable {
         self.confirmBeforeClearAllSlots = confirmBeforeClearAllSlots
         self.confirmBeforeDeleteSpecialSlot = confirmBeforeDeleteSpecialSlot
         self.confirmBeforePasteAllSlots = confirmBeforePasteAllSlots
+        self.confirmBeforeClearSingleSlot = confirmBeforeClearSingleSlot
     }
 
     enum CodingKeys: String, CodingKey {
@@ -78,6 +81,7 @@ struct SpecialSlotSettings: Codable {
         case confirmBeforeClearAllSlots
         case confirmBeforeDeleteSpecialSlot
         case confirmBeforePasteAllSlots
+        case confirmBeforeClearSingleSlot
     }
 
     init(from decoder: Decoder) throws {
@@ -90,6 +94,7 @@ struct SpecialSlotSettings: Codable {
         confirmBeforeClearAllSlots = try c.decodeIfPresent(Bool.self, forKey: .confirmBeforeClearAllSlots) ?? true
         confirmBeforeDeleteSpecialSlot = try c.decodeIfPresent(Bool.self, forKey: .confirmBeforeDeleteSpecialSlot) ?? true
         confirmBeforePasteAllSlots = try c.decodeIfPresent(Bool.self, forKey: .confirmBeforePasteAllSlots) ?? true
+        confirmBeforeClearSingleSlot = try c.decodeIfPresent(Bool.self, forKey: .confirmBeforeClearSingleSlot) ?? true
     }
 }
 

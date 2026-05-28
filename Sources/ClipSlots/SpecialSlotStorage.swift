@@ -220,7 +220,7 @@ final class SpecialSlotStorage {
         try saveIndex(index)
     }
 
-    // MARK: - Child Slot Operations (routed to current special slot)
+    // MARK: - Child Slot Operations
 
     private var storageCache: [String: SlotStorage] = [:]
 
@@ -234,42 +234,42 @@ final class SpecialSlotStorage {
         return storage
     }
 
-    private var currentStorage: SlotStorage {
-        let index = loadIndex()
-        return slotStorage(for: index.currentSpecialSlotId)
-    }
+    // MARK: Explicit API — all callers must pass specialSlotId
 
-    func get(_ slot: Int) -> SlotContent {
-        currentStorage.get(slot)
+    func get(_ slot: Int, in specialSlotId: String) -> SlotContent {
+        slotStorage(for: specialSlotId).get(slot)
     }
 
     @discardableResult
-    func set(_ slot: Int, content: SlotContent) -> Bool {
+    func set(_ slot: Int, content: SlotContent, in specialSlotId: String) -> Bool {
         var content = content
         content.timestamp = Date()
-        let result = currentStorage.set(slot, content: content)
-        if result { touchCurrentSpecialSlot() }
+        let result = slotStorage(for: specialSlotId).set(slot, content: content)
+        if result { touchSpecialSlot(id: specialSlotId) }
         return result
     }
 
-    func clear(_ slot: Int) {
-        currentStorage.clear(slot)
+    func clear(_ slot: Int, in specialSlotId: String) {
+        slotStorage(for: specialSlotId).clear(slot)
+        touchSpecialSlot(id: specialSlotId)
     }
 
-    func clearAllSlotsInCurrentSpecialSlot() throws {
-        currentStorage.clearAll()
+    func clearAllSlots(in specialSlotId: String) throws {
+        try slotStorage(for: specialSlotId).clearAll()
+        touchSpecialSlot(id: specialSlotId)
     }
 
-    func getLabel(_ slot: Int) -> String? {
-        currentStorage.getLabel(slot)
+    func getLabel(_ slot: Int, in specialSlotId: String) -> String? {
+        slotStorage(for: specialSlotId).getLabel(slot)
     }
 
-    func setLabel(_ slot: Int, label: String?) {
-        currentStorage.setLabel(slot, label: label)
+    func setLabel(_ slot: Int, label: String?, in specialSlotId: String) {
+        slotStorage(for: specialSlotId).setLabel(slot, label: label)
+        touchSpecialSlot(id: specialSlotId)
     }
 
-    func snapshot() -> [Int: SlotContent] {
-        currentStorage.snapshot()
+    func snapshot(in specialSlotId: String) -> [Int: SlotContent] {
+        slotStorage(for: specialSlotId).snapshot()
     }
 
     // MARK: - Source Update
@@ -299,9 +299,9 @@ final class SpecialSlotStorage {
         baseDir.appendingPathComponent(id, isDirectory: true)
     }
 
-    private func touchCurrentSpecialSlot() {
+    private func touchSpecialSlot(id: String) {
         var index = loadIndex()
-        if let idx = index.specialSlots.firstIndex(where: { $0.id == index.currentSpecialSlotId }) {
+        if let idx = index.specialSlots.firstIndex(where: { $0.id == id }) {
             index.specialSlots[idx].updatedAt = Date()
             try? saveIndex(index)
         }
