@@ -35,7 +35,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         hotKeysReady = true
 
-        NSLog("[ClipSlots] setupHotKeys storeInstanceID=\(store.instanceID) currentSpecialSlotId=\(store.currentSpecialSlotId)")
+        NSLog("[ClipSlots] setupHotKeys storeInstanceID=\(store.instanceID) currentSpecialSlotId=\(store.currentSpecialSlotId) activeHotkeySpecialSlotId=\(store.activeHotkeySpecialSlotId)")
 
         store.onConfigChanged = { [weak self] in
             self?.reloadHotkeys()
@@ -60,12 +60,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             config: store.config,
             onPaste: { [weak store] slot in
                 guard let store = store else { return }
-                NSLog("[ClipSlots] onPaste slot=\(slot) storeInstanceID=\(store.instanceID) currentSpecialSlotId=\(store.currentSpecialSlotId)")
+                NSLog("[ClipSlots] onPaste slot=\(slot) storeInstanceID=\(store.instanceID) activeHotkeySpecialSlotId=\(store.activeHotkeySpecialSlotId)")
                 store.pasteSlot(slot)
             },
             onSave: { [weak store] slot in
                 guard let store = store else { return }
-                NSLog("[ClipSlots] onSave slot=\(slot) storeInstanceID=\(store.instanceID) currentSpecialSlotId=\(store.currentSpecialSlotId)")
+                NSLog("[ClipSlots] onSave slot=\(slot) storeInstanceID=\(store.instanceID) activeHotkeySpecialSlotId=\(store.activeHotkeySpecialSlotId)")
                 store.captureSelectionAndSaveToSlot(slot)
             },
             onRadial: { [weak self] in

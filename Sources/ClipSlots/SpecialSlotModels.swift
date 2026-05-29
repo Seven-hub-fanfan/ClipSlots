@@ -29,8 +29,10 @@ enum SpecialSlotSourceType: String, Codable {
 // MARK: - Special Slot Index
 
 struct SpecialSlotIndex: Codable {
-    var version: Int = 2
+    var version: Int = 3
     var currentSpecialSlotId: String
+    var selectedSpecialSlotId: String?
+    var activeHotkeySpecialSlotId: String?
     var specialSlots: [SpecialSlot]
     var settings: SpecialSlotSettings
 }

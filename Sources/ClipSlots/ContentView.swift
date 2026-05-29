@@ -90,11 +90,13 @@ struct ContentView: View {
                         Menu {
                             ForEach(store.specialSlots) { special in
                                 Button {
-                                    store.switchSpecialSlot(id: special.id)
+                                    store.selectAndActivateSpecialSlot(id: special.id)
                                 } label: {
                                     Label(
                                         special.name,
-                                        systemImage: special.id == store.currentSpecialSlotId ? "checkmark.circle.fill" : "folder.fill"
+                                        systemImage: special.id == store.currentSpecialSlotId && special.id == store.activeHotkeySpecialSlotId
+                                            ? "checkmark.circle.fill"
+                                            : (special.id == store.activeHotkeySpecialSlotId ? "keyboard.fill" : "folder.fill")
                                     )
                                 }
                             }
@@ -196,7 +198,11 @@ struct ContentView: View {
 
             specialSlotTagBar
                 .padding(.horizontal, AppTheme.pagePadding)
-                .padding(.bottom, 10)
+                .padding(.bottom, 6)
+
+            activeHotkeyLayerNotice
+                .padding(.horizontal, AppTheme.pagePadding)
+                .padding(.bottom, 6)
 
             Divider()
         }
@@ -213,15 +219,33 @@ struct ContentView: View {
         }
     }
 
+    private func specialSlotChipState(_ special: SpecialSlot) -> (icon: String, isPreview: Bool, isActive: Bool) {
+        let isPreview = special.id == store.currentSpecialSlotId
+        let isActive = special.id == store.activeHotkeySpecialSlotId
+        let icon: String
+        if isPreview && isActive {
+            icon = "keyboard.fill"
+        } else if isActive {
+            icon = "keyboard"
+        } else if isPreview {
+            icon = "folder.fill"
+        } else {
+            icon = "folder"
+        }
+        return (icon, isPreview, isActive)
+    }
+
     private var specialSlotTagBar: some View {
         ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 8) {
                 ForEach(store.specialSlots) { special in
+                    let state = specialSlotChipState(special)
+
                     Button {
-                        store.switchSpecialSlot(id: special.id)
+                        store.selectSpecialSlotForPreview(id: special.id)
                     } label: {
                         HStack(spacing: 5) {
-                            Image(systemName: special.id == store.currentSpecialSlotId ? "folder.fill" : "folder")
+                            Image(systemName: state.icon)
                             Text(special.name)
                         }
                         .font(.caption)
@@ -229,23 +253,43 @@ struct ContentView: View {
                         .padding(.vertical, 6)
                         .background(
                             Capsule()
-                                .fill(
-                                    special.id == store.currentSpecialSlotId
-                                    ? Color.accentColor.opacity(0.18)
-                                    : Color.primary.opacity(0.05)
-                                )
+                                .fill(chipBackgroundColor(state))
                         )
                         .overlay(
                             Capsule()
-                                .stroke(
-                                    special.id == store.currentSpecialSlotId
-                                    ? Color.accentColor.opacity(0.45)
-                                    : Color.secondary.opacity(0.15),
-                                    lineWidth: 1
-                                )
+                                .stroke(chipBorderColor(state), lineWidth: state.isActive ? 1.5 : 1)
                         )
                     }
                     .buttonStyle(.plain)
+                    .contextMenu {
+                        if !state.isActive {
+                            Button {
+                                store.activateSpecialSlotForHotkeys(id: special.id)
+                            } label: {
+                                Label("设为快捷键层", systemImage: "keyboard.fill")
+                            }
+                        }
+                        if !state.isPreview || !state.isActive {
+                            Button {
+                                store.selectAndActivateSpecialSlot(id: special.id)
+                            } label: {
+                                Label("切换并激活", systemImage: "arrow.forward.circle.fill")
+                            }
+                        }
+                        Divider()
+                        Button {
+                            renameSpecialSlot(id: special.id, currentName: special.name)
+                        } label: {
+                            Label("重命名", systemImage: "pencil")
+                        }
+                        if store.specialSlots.count > 1 {
+                            Button(role: .destructive) {
+                                store.deleteSpecialSlotWithConfirmation(id: special.id)
+                            } label: {
+                                Label("删除", systemImage: "trash")
+                            }
+                        }
+                    }
                 }
 
                 Button {
@@ -257,6 +301,102 @@ struct ContentView: View {
                         .background(Circle().fill(Color.primary.opacity(0.05)))
                 }
                 .buttonStyle(.plain)
+            }
+        }
+    }
+
+    private func chipBackgroundColor(_ state: (icon: String, isPreview: Bool, isActive: Bool)) -> Color {
+        if state.isPreview && state.isActive {
+            return Color.accentColor.opacity(0.22)
+        } else if state.isActive {
+            return Color.orange.opacity(0.12)
+        } else if state.isPreview {
+            return Color.accentColor.opacity(0.18)
+        } else {
+            return Color.primary.opacity(0.05)
+        }
+    }
+
+    private func chipBorderColor(_ state: (icon: String, isPreview: Bool, isActive: Bool)) -> Color {
+        if state.isPreview && state.isActive {
+            return Color.accentColor.opacity(0.55)
+        } else if state.isActive {
+            return Color.orange.opacity(0.50)
+        } else if state.isPreview {
+            return Color.accentColor.opacity(0.45)
+        } else {
+            return Color.secondary.opacity(0.15)
+        }
+    }
+
+    private var activeHotkeyLayerNotice: some View {
+        let isSynced = store.activeHotkeySpecialSlotId == store.currentSpecialSlotId
+        let hotkeyName = store.activeHotkeySpecialSlot?.name ?? "默认槽位"
+        let previewName = store.currentSpecialSlot?.name ?? "默认槽位"
+
+        return Group {
+            if isSynced {
+                HStack(spacing: 6) {
+                    Image(systemName: "keyboard.fill")
+                        .font(.system(size: 10))
+                        .foregroundColor(.accentColor)
+                    Text("Cmd+数字 当前使用：\(hotkeyName)")
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundColor(.secondary)
+                    Spacer()
+                }
+                .padding(.horizontal, 10)
+                .padding(.vertical, 5)
+                .background(
+                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        .fill(Color.accentColor.opacity(0.06))
+                )
+            } else {
+                HStack(spacing: 6) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .font(.system(size: 10))
+                        .foregroundColor(.orange)
+                    Text("Cmd+数字 绑定：\(hotkeyName)，预览：\(previewName)")
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundColor(.orange)
+                    Spacer()
+                    Button {
+                        store.activateSpecialSlotForHotkeys(id: store.currentSpecialSlotId)
+                    } label: {
+                        Text("激活当前预览")
+                            .font(.system(size: 9, weight: .semibold))
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 3)
+                            .background(Capsule().fill(Color.orange.opacity(0.2)))
+                    }
+                    .buttonStyle(.plain)
+                }
+                .padding(.horizontal, 10)
+                .padding(.vertical, 5)
+                .background(
+                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        .fill(Color.orange.opacity(0.08))
+                )
+            }
+        }
+    }
+
+    private func renameSpecialSlot(id: String, currentName: String) {
+        let alert = NSAlert()
+        alert.messageText = "重命名特殊槽位"
+        alert.addButton(withTitle: "确定")
+        alert.addButton(withTitle: "取消")
+
+        let textField = NSTextField(frame: NSRect(x: 0, y: 0, width: 240, height: 24))
+        textField.stringValue = currentName
+        textField.placeholderString = "输入新名称"
+        alert.accessoryView = textField
+
+        let response = alert.runModal()
+        if response == .alertFirstButtonReturn {
+            let newName = textField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !newName.isEmpty {
+                store.renameSpecialSlot(id: id, name: newName)
             }
         }
     }

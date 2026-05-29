@@ -133,6 +133,25 @@ final class SpecialSlotStorage {
             throw SpecialSlotError.specialSlotNotFound
         }
         index.currentSpecialSlotId = id
+        index.selectedSpecialSlotId = id
+        index.activeHotkeySpecialSlotId = id
+        try saveIndex(index)
+    }
+
+    func updateSelectedSpecialSlot(id: String) {
+        var index = loadIndex()
+        guard index.specialSlots.contains(where: { $0.id == id }) else { return }
+        index.selectedSpecialSlotId = id
+        index.currentSpecialSlotId = id
+        try? saveIndex(index)
+    }
+
+    func updateActiveHotkeySpecialSlot(id: String) throws {
+        var index = loadIndex()
+        guard index.specialSlots.contains(where: { $0.id == id }) else {
+            throw SpecialSlotError.specialSlotNotFound
+        }
+        index.activeHotkeySpecialSlotId = id
         try saveIndex(index)
     }
 
