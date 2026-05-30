@@ -90,6 +90,7 @@ final class SlotStoreObservable: ObservableObject {
     @Published var specialSlotSettings: SpecialSlotSettings = .default
     @Published var toastMessage: String?
     @Published var hotkeyRegistrationErrors: [String] = []
+    @Published var slotRenderTokens: [Int: UUID] = [:]
 
     var lastNonClipSlotsApp: NSRunningApplication?
 
@@ -97,7 +98,6 @@ final class SlotStoreObservable: ObservableObject {
 
     let specialStorage = SpecialSlotStorage.shared
     private let clipboard = ClipboardManager.shared
-    private var timer: Timer?
 
     /// Cancellable delayed clipboard restore to prevent race with copy/save.
     private var pendingClipboardRestore: DispatchWorkItem?
@@ -109,21 +109,10 @@ final class SlotStoreObservable: ObservableObject {
     /// The special slot id that current in-memory `slots` / `labels` belong to.
     private var loadedSpecialSlotId: String?
 
-    /// Prevents timer-triggered loadSlots from racing with async saves.
-    private var isWritingSlots = false
-
     init() {
         NSLog("[ClipSlots] SlotStoreObservable init instanceID=\(instanceID)")
         loadSpecialSlots()
         loadSlots()
-        timer = Timer.scheduledTimer(withTimeInterval: 10.0, repeats: true) { [weak self] _ in
-            guard let self = self else { return }
-            guard !self.isWritingSlots else {
-                NSLog("[ClipSlots] timer skip loadSlots: writing in progress")
-                return
-            }
-            self.loadSlots()
-        }
     }
 
     // MARK: - Special Slots
@@ -165,9 +154,6 @@ final class SlotStoreObservable: ObservableObject {
         NSLog("[ClipSlots] selectSpecialSlotForPreview from=\(oldId) to=\(id) activeHotkey=\(activeHotkeySpecialSlotId)")
 
         cancelPendingPasteOperations(restoreClipboard: true)
-
-        isWritingSlots = true
-        defer { isWritingSlots = false }
 
         slots = [:]
         labels = [:]
@@ -214,9 +200,6 @@ final class SlotStoreObservable: ObservableObject {
         NSLog("[ClipSlots] selectAndActivateSpecialSlot preview:\(oldPreview)->\(id) hotkey:\(oldActive)->\(id)")
 
         cancelPendingPasteOperations(restoreClipboard: true)
-
-        isWritingSlots = true
-        defer { isWritingSlots = false }
 
         slots = [:]
         labels = [:]
@@ -343,8 +326,8 @@ final class SlotStoreObservable: ObservableObject {
         cancelPendingClipboardRestore()
 
         do {
-            isWritingSlots = true
-            defer { isWritingSlots = false }
+            // write guard removed (no timer)
+            // defer removed (no timer)
 
             try specialStorage.clearAllSlots(in: activeId)
 
@@ -895,6 +878,7 @@ final class SlotStoreObservable: ObservableObject {
         var newSlots = slots
         newSlots[slot] = SlotContent()
         slots = newSlots
+        slotRenderTokens[slot] = UUID()
 
         var newLabels = labels
         newLabels.removeValue(forKey: slot)
@@ -1015,8 +999,8 @@ final class SlotStoreObservable: ObservableObject {
             }
 
             // Clear and import — block timer during writes
-            isWritingSlots = true
-            defer { isWritingSlots = false }
+            // write guard removed (no timer)
+            // defer removed (no timer)
 
             try specialStorage.clearAllSlots(in: activeId)
 
@@ -1098,9 +1082,9 @@ final class SlotStoreObservable: ObservableObject {
         }
 
         // Normal save
-        isWritingSlots = true
+        // write guard removed (no timer)
         let success = specialStorage.set(targetSlot, content: content, in: activeId)
-        isWritingSlots = false
+        // write guard removed
 
         guard success else {
             NSLog("[ClipSlots] SAVE FAIL specialSlot=\(activeId) slot=\(targetSlot)")
@@ -1109,6 +1093,7 @@ final class SlotStoreObservable: ObservableObject {
         var newSlots = slots
         newSlots[targetSlot] = content
         slots = newSlots
+        slotRenderTokens[targetSlot] = UUID()
         loadedSpecialSlotId = activeId
         refreshTrigger = UUID()
         NSLog("[ClipSlots] SAVE OK specialSlot=\(activeId) slot=\(targetSlot) preview=\(content.preview)")
@@ -1132,9 +1117,9 @@ final class SlotStoreObservable: ObservableObject {
         case .alertThirdButtonReturn:
             let content = folderImportService.makeSlotContent(for: folderURL)
             let activeId = currentSpecialSlotId
-            isWritingSlots = true
+            // write guard removed (no timer)
             let success = specialStorage.set(targetSlot, content: content, in: activeId)
-            isWritingSlots = false
+            // write guard removed
             guard success else {
                 NSLog("[ClipSlots] save folder as normal FAIL specialSlot=\(activeId) slot=\(targetSlot)")
                 return

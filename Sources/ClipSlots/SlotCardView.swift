@@ -23,25 +23,32 @@ struct SlotCardView: View {
         VStack(alignment: .leading, spacing: 12) {
             headerRow
 
-            SlotThumbnailView(content: content)
-                .clipShape(RoundedRectangle(cornerRadius: AppTheme.smallCornerRadius, style: .continuous))
-                .onTapGesture {
-                    if content.canPreview {
-                        showingPreview = true
+            // Thumbnail area — split empty vs filled to prevent @State image reuse
+            if content.isEmpty {
+                EmptySlotThumbnailView()
+            } else {
+                SlotThumbnailView(content: content)
+                    .clipShape(RoundedRectangle(cornerRadius: AppTheme.smallCornerRadius, style: .continuous))
+                    .onTapGesture {
+                        if content.canPreview {
+                            showingPreview = true
+                        }
                     }
-                }
-                .help(content.canPreview ? "点击查看大图" : "")
-
-            if !content.metadataSummary.isEmpty {
-                Text(content.metadataSummary)
-                    .font(.caption2)
-                    .foregroundColor(.secondary)
-                    .padding(.horizontal, 2)
+                    .help(content.canPreview ? "点击查看大图" : "")
             }
+
+            // Metadata — fixed single-line
+            Text(content.metadataSummary)
+                .font(.caption2)
+                .foregroundColor(.secondary)
+                .lineLimit(1)
+                .truncationMode(.middle)
+                .frame(height: 16, alignment: .leading)
+                .padding(.horizontal, 2)
 
             actionRow
         }
-        .frame(minHeight: 260)
+        .frame(height: 270)
         .padding(AppTheme.cardPadding)
         .background(
             RoundedRectangle(cornerRadius: AppTheme.cornerRadius, style: .continuous)
@@ -215,10 +222,10 @@ struct SlotCardView: View {
                 .controlSize(.regular)
                 .help(saveShortcut.isEmpty ? "保存当前剪贴板内容到槽位 \(slot)" : saveShortcut)
 
-                // Placeholder row to match the height of 2-row action buttons
-                Color.clear.frame(height: 30)
+                Color.clear
             }
         }
+        .frame(height: 66)
     }
 
     private func commitLabel() {
