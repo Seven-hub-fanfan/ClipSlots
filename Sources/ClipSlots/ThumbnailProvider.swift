@@ -4,19 +4,17 @@ import QuickLookThumbnailing
 final class ThumbnailProvider {
     static let shared = ThumbnailProvider()
 
-    private var cache: [URL: NSImage] = [:]
-    private let cacheQueue = DispatchQueue(label: "com.clipslots.thumbnail", qos: .userInitiated)
+    private var cache: [String: NSImage] = [:]
 
     func thumbnail(
         for url: URL,
+        cacheKey: String,
         size: CGSize = CGSize(width: 240, height: 160),
         completion: @escaping (NSImage?) -> Void
     ) {
-        cacheQueue.async { [weak self] in
-            if let cached = self?.cache[url] {
-                DispatchQueue.main.async { completion(cached) }
-                return
-            }
+        if let cached = cache[cacheKey] {
+            completion(cached)
+            return
         }
 
         let request = QLThumbnailGenerator.Request(
@@ -30,12 +28,9 @@ final class ThumbnailProvider {
             if let error = error {
                 NSLog("[ClipSlots] ThumbnailProvider failed for \(url.lastPathComponent): \(error.localizedDescription)")
             }
-
             let image = thumbnail?.nsImage
             if let image = image {
-                self?.cacheQueue.async {
-                    self?.cache[url] = image
-                }
+                self?.cache[cacheKey] = image
             }
             DispatchQueue.main.async {
                 completion(image)
@@ -44,8 +39,6 @@ final class ThumbnailProvider {
     }
 
     func clearCache() {
-        cacheQueue.async { [weak self] in
-            self?.cache.removeAll()
-        }
+        cache.removeAll()
     }
 }

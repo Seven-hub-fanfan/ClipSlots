@@ -12,6 +12,12 @@ struct SlotContent: Codable {
 
     var isEmpty: Bool { items.isEmpty }
 
+    /// Unique key that changes when content is overwritten. Used to invalidate thumbnail cache.
+    var contentHash: String {
+        let totalBytes = items.reduce(0) { $0 + $1.reduce(0) { $0 + $1.data.count } }
+        return "\(timestamp.timeIntervalSince1970)-\(totalBytes)"
+    }
+
     var preview: String {
         for itemList in items {
             for item in itemList {

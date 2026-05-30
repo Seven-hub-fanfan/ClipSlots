@@ -41,6 +41,7 @@ struct SlotCardView: View {
 
             actionRow
         }
+        .frame(minHeight: 260)
         .padding(AppTheme.cardPadding)
         .background(
             RoundedRectangle(cornerRadius: AppTheme.cornerRadius, style: .continuous)
@@ -213,6 +214,9 @@ struct SlotCardView: View {
                 .buttonStyle(.bordered)
                 .controlSize(.regular)
                 .help(saveShortcut.isEmpty ? "保存当前剪贴板内容到槽位 \(slot)" : saveShortcut)
+
+                // Placeholder row to match the height of 2-row action buttons
+                Color.clear.frame(height: 30)
             }
         }
     }

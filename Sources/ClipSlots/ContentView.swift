@@ -64,6 +64,7 @@ struct ContentView: View {
                     .padding(AppTheme.pagePadding)
                 }
                 .background(AppTheme.windowBackground(colorScheme))
+                .transaction { $0.animation = nil }
 
                 bottomBar
             }

@@ -1,90 +1,91 @@
 import SwiftUI
 
+enum ThumbnailState {
+    case idle
+    case loading
+    case loaded(NSImage)
+    case failed
+}
+
 struct SlotThumbnailView: View {
     let content: SlotContent
 
-    @State private var thumbnail: NSImage?
-    @State private var thumbnailLoaded = false
+    @State private var state: ThumbnailState = .idle
+    @State private var loadToken = UUID()
 
     var body: some View {
         ZStack {
             RoundedRectangle(cornerRadius: 10, style: .continuous)
                 .fill(Color.primary.opacity(0.04))
 
-            switch content.displayKind {
-            case .image:
-                if let image = thumbnail ?? content.inlineImage {
-                    Image(nsImage: image)
-                        .resizable()
-                        .aspectRatio(contentMode: .fit)
-                        .padding(4)
-                } else {
-                    thumbnailPlaceholder
-                }
-            case .file:
-                filePreview
-            case .text:
-                textPreview
-            case .empty:
-                emptyPreview
+            switch state {
+            case .idle:
+                idleView
+            case .loading:
+                loadingView
+            case .loaded(let image):
+                Image(nsImage: image)
+                    .resizable()
+                    .aspectRatio(contentMode: .fit)
+                    .padding(4)
+            case .failed:
+                fallbackView
             }
         }
         .frame(height: 140)
-        .onAppear { loadThumbnail() }
-        .onChange(of: content.preview) { _ in
-            thumbnail = nil
-            thumbnailLoaded = false
-            loadThumbnail()
+        .clipped()
+        .id(content.contentHash)
+        .onAppear { reloadThumbnail() }
+        .onChange(of: content.contentHash) { _ in
+            reloadThumbnail()
         }
     }
 
     // MARK: - Subviews
 
-    private var thumbnailPlaceholder: some View {
-        VStack(spacing: 6) {
-            Image(systemName: "photo")
-                .font(.system(size: 24))
-                .foregroundColor(.secondary.opacity(0.5))
-            Text("加载中…")
-                .font(.caption2)
-                .foregroundColor(.secondary)
-        }
+    private var loadingView: some View {
+        ProgressView()
+            .scaleEffect(0.7)
     }
 
-    private var filePreview: some View {
-        VStack(spacing: 8) {
-            Image(systemName: fileIconName)
-                .font(.system(size: 28))
-                .foregroundColor(.secondary)
-            Text(content.fileDisplayName ?? "文件")
-                .font(.caption)
-                .foregroundColor(.secondary)
-                .lineLimit(1)
-                .truncationMode(.middle)
-            Text(content.metadataSummary)
-                .font(.caption2)
-                .foregroundColor(.secondary.opacity(0.7))
-        }
+    private var idleView: some View {
+        fallbackView
     }
 
-    private var textPreview: some View {
-        Text(content.preview)
-            .font(.system(size: 11, design: .monospaced))
-            .foregroundColor(.primary.opacity(0.8))
-            .lineLimit(6)
-            .truncationMode(.tail)
-            .padding(8)
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-    }
-
-    private var emptyPreview: some View {
-        VStack(spacing: 6) {
-            Image(systemName: "tray")
-                .font(.system(size: 22))
-                .foregroundColor(.secondary.opacity(0.4))
-            Text("空槽位")
-                .font(.caption2)
-                .foregroundColor(.secondary)
+    private var fallbackView: some View {
+        Group {
+            if content.isEmpty {
+                VStack(spacing: 6) {
+                    Image(systemName: "tray")
+                        .font(.system(size: 22))
+                        .foregroundColor(.secondary.opacity(0.4))
+                    Text("空槽位")
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                }
+            } else if content.isFileContent {
+                VStack(spacing: 8) {
+                    Image(systemName: fileIconName)
+                        .font(.system(size: 28))
+                        .foregroundColor(.secondary)
+                    Text(content.fileDisplayName ?? "文件")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                    Text(content.metadataSummary)
+                        .font(.caption2)
+                        .foregroundColor(.secondary.opacity(0.7))
+                }
+            } else {
+                Text(content.preview)
+                    .font(.system(size: 11, design: .monospaced))
+                    .foregroundColor(.primary.opacity(0.8))
+                    .lineLimit(6)
+                    .truncationMode(.tail)
+                    .padding(8)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            }
         }
     }
 
@@ -96,44 +97,50 @@ struct SlotThumbnailView: View {
         if ["mp4", "mov", "avi", "mkv"].contains(ext) { return "film" }
         if ["mp3", "wav", "aac", "flac"].contains(ext) { return "music.note" }
         if content.isImageFile { return "photo" }
-        if ["svg", "sketch", "fig", "xd"].contains(ext) { return "paintpalette" }
         return "doc"
     }
 
-    // MARK: - Thumbnail Loading
+    // MARK: - Loading
 
-    private func loadThumbnail() {
-        guard !thumbnailLoaded else { return }
-        thumbnailLoaded = true
+    private func reloadThumbnail() {
+        let token = UUID()
+        loadToken = token
 
-        // Try inline image first
-        if let inline = content.inlineImage {
-            thumbnail = inline
+        guard !content.isEmpty else {
+            state = .failed
             return
         }
 
-        // Try QuickLook for file URLs
+        // Try inline image data first
+        if let image = content.inlineImage {
+            state = .loaded(image)
+            return
+        }
+
+        // Need a file URL for QuickLook
         guard let url = content.primaryFileURL, content.isImageFile || content.isFileContent else {
+            state = .failed
             return
         }
 
-        ThumbnailProvider.shared.thumbnail(for: url) { image in
-            thumbnail = image
-        }
-    }
-}
+        state = .loading
 
-struct SlotThumbnailView_Previews: PreviewProvider {
-    static var previews: some View {
-        VStack(spacing: 12) {
-            SlotThumbnailView(content: SlotContent())
-            SlotThumbnailView(content: {
-                var c = SlotContent()
-                c = c // text preview
-                return c
-            }())
+        ThumbnailProvider.shared.thumbnail(for: url, cacheKey: content.contentHash) { image in
+            guard loadToken == token else { return }
+            if let image = image {
+                state = .loaded(image)
+                return
+            } else {
+                state = .failed
+            }
         }
-        .padding()
-        .frame(width: 260)
+
+        // 3-second timeout
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) {
+            guard loadToken == token else { return }
+            if case .loading = state {
+                state = .failed
+            }
+        }
     }
 }

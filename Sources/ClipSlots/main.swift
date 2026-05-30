@@ -116,7 +116,7 @@ final class SlotStoreObservable: ObservableObject {
         NSLog("[ClipSlots] SlotStoreObservable init instanceID=\(instanceID)")
         loadSpecialSlots()
         loadSlots()
-        timer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
+        timer = Timer.scheduledTimer(withTimeInterval: 10.0, repeats: true) { [weak self] _ in
             guard let self = self else { return }
             guard !self.isWritingSlots else {
                 NSLog("[ClipSlots] timer skip loadSlots: writing in progress")

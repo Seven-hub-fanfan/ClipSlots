@@ -83,7 +83,7 @@ struct SlotPreviewView: View {
 
     private func loadLargeImage() {
         guard content.isImageFile, let url = content.primaryFileURL else { return }
-        ThumbnailProvider.shared.thumbnail(for: url, size: CGSize(width: 800, height: 600)) { image in
+        ThumbnailProvider.shared.thumbnail(for: url, cacheKey: "preview-\(url.absoluteString)", size: CGSize(width: 800, height: 600)) { image in
             largeImage = image
         }
     }
