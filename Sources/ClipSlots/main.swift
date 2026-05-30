@@ -88,6 +88,8 @@ final class SlotStoreObservable: ObservableObject {
     @Published var activeHotkeySpecialSlotId: String = "default"  // Cmd+number hotkey layer
     @Published var activeHotkeySpecialSlot: SpecialSlot?
     @Published var specialSlotSettings: SpecialSlotSettings = .default
+    @Published var toastMessage: String?
+    @Published var hotkeyRegistrationErrors: [String] = []
 
     var lastNonClipSlotsApp: NSRunningApplication?
 
@@ -178,6 +180,8 @@ final class SlotStoreObservable: ObservableObject {
 
         loadSlots()
         refreshTrigger = UUID()
+
+        showToast("已预览「\(currentSpecialSlot?.name ?? id)」")
     }
 
     /// Activate this special slot as the Cmd+number hotkey layer.
@@ -197,6 +201,7 @@ final class SlotStoreObservable: ObservableObject {
         try? specialStorage.updateActiveHotkeySpecialSlot(id: id)
 
         refreshTrigger = UUID()
+        showToast("Cmd+数字 已切换至「\(activeHotkeySpecialSlot?.name ?? id)」")
     }
 
     /// Preview AND activate: both UI and Cmd+number switch to this slot.
@@ -234,6 +239,8 @@ final class SlotStoreObservable: ObservableObject {
 
         loadSlots()
         refreshTrigger = UUID()
+
+        showToast("已切换至「\(currentSpecialSlot?.name ?? id)」")
     }
 
     func createSpecialSlot(name: String) {
@@ -509,6 +516,17 @@ final class SlotStoreObservable: ObservableObject {
     }
 
     // MARK: - Helpers
+
+    /// Show a transient toast message that auto-dismisses after 1.2s.
+    private func showToast(_ message: String) {
+        toastMessage = message
+        let captured = message
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { [weak self] in
+            if self?.toastMessage == captured {
+                self?.toastMessage = nil
+            }
+        }
+    }
 
     /// Returns slot content: in-memory state first (only if it belongs to current special slot), fallback to disk.
     private func contentForSlot(_ slot: Int) -> SlotContent {

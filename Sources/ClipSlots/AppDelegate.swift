@@ -56,7 +56,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func setupHotKeys() {
         guard let store = store else { return }
 
-        hotkeyManager.register(
+        let failures = hotkeyManager.register(
             config: store.config,
             onPaste: { [weak store] slot in
                 guard let store = store else { return }
@@ -72,6 +72,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 self?.showRadialMenu()
             }
         )
+
+        if !failures.isEmpty {
+            store.hotkeyRegistrationErrors = failures
+            NSLog("[ClipSlots] Hotkey registration failures: \(failures)")
+        } else {
+            store.hotkeyRegistrationErrors = []
+        }
     }
 
     func reloadHotkeys() {

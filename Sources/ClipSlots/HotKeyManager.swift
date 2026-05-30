@@ -67,8 +67,11 @@ final class HotKeyManager {
         "shift": shiftKey,
     ]
 
-    func register(config: AppConfig, onPaste: @escaping (Int) -> Void, onSave: @escaping (Int) -> Void, onRadial: @escaping () -> Void) {
+    @discardableResult
+    func register(config: AppConfig, onPaste: @escaping (Int) -> Void, onSave: @escaping (Int) -> Void, onRadial: @escaping () -> Void) -> [String] {
         unregisterAll()
+
+        var failures: [String] = []
 
         gOnPaste = onPaste
         gOnSave = onSave
@@ -85,6 +88,7 @@ final class HotKeyManager {
         )
         if installStatus != noErr {
             NSLog("[ClipSlots] ERROR: InstallEventHandler failed (status: \(installStatus))")
+            failures.append("系统事件处理器注册失败")
         }
 
         // Radial menu hotkey: signature=3, single keybind (no {n} placeholder)
@@ -98,6 +102,7 @@ final class HotKeyManager {
                 NSLog("[ClipSlots] RADIAL hotkey registered: mod=\(modifiers) key=\(keyCode)")
             } else {
                 NSLog("[ClipSlots] ERROR: RADIAL hotkey FAILED mod=\(modifiers) key=\(keyCode) status=\(status)")
+                failures.append("圆盘菜单快捷键 (\(config.radialKey)) 注册失败")
             }
         }
 
@@ -111,7 +116,9 @@ final class HotKeyManager {
                     hotKeyRefs.append(ref)
                     NSLog("[ClipSlots] PASTE hotkey registered: slot=\(slot) mod=\(modifiers) key=\(keyCode)")
                 } else {
+                    let keyStr = config.pasteKey.replacingOccurrences(of: "{n}", with: String(slot))
                     NSLog("[ClipSlots] ERROR: PASTE hotkey FAILED slot=\(slot) mod=\(modifiers) key=\(keyCode) status=\(status)")
+                    failures.append("粘贴快捷键 (\(keyStr)) 注册失败，可能被其他应用占用")
                 }
             }
             // Save hotkey: signature=2
@@ -123,10 +130,14 @@ final class HotKeyManager {
                     hotKeyRefs.append(ref)
                     NSLog("[ClipSlots] SAVE hotkey registered: slot=\(slot) mod=\(modifiers) key=\(keyCode)")
                 } else {
+                    let keyStr = config.saveKey.replacingOccurrences(of: "{n}", with: String(slot))
                     NSLog("[ClipSlots] ERROR: SAVE hotkey FAILED slot=\(slot) mod=\(modifiers) key=\(keyCode) status=\(status)")
+                    failures.append("保存快捷键 (\(keyStr)) 注册失败，可能被其他应用占用")
                 }
             }
         }
+
+        return failures
     }
 
     private func parseKeybind(_ pattern: String, slot: Int) -> (modifiers: Int, keyCode: Int)? {

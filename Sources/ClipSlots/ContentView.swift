@@ -16,52 +16,115 @@ struct ContentView: View {
     }
 
     var body: some View {
-        VStack(spacing: 0) {
-            headerView
+        ZStack(alignment: .top) {
+            VStack(spacing: 0) {
+                headerView
 
-            ScrollView {
-                LazyVGrid(
-                    columns: [
-                        GridItem(.adaptive(minimum: 220, maximum: 280), spacing: 14)
-                    ],
-                    spacing: 14
-                ) {
-                    ForEach(1...store.config.slots, id: \.self) { slot in
-                        SlotCardView(
-                            slot: slot,
-                            content: store.slots[slot] ?? SlotContent(),
-                            label: store.labels[slot] ?? "",
-                            saveShortcut: shortcutPreview(store.config.saveKey, slot: slot),
-                            pasteShortcut: shortcutPreview(store.config.pasteKey, slot: slot),
-                            onPaste: {
-                                NSLog("[ClipSlots] UI paste button clicked slot=\(slot)")
-                                store.pasteSlotFromUI(slot)
-                            },
-                            onCopy: {
-                                NSLog("[ClipSlots] UI copy button clicked slot=\(slot)")
-                                store.copySlot(slot)
-                            },
-                            onSave: {
-                                NSLog("[ClipSlots] UI save/overwrite button clicked slot=\(slot)")
-                                store.saveToSlot(slot)
-                            },
-                            onClear: {
-                                NSLog("[ClipSlots] UI clear button clicked slot=\(slot)")
-                                store.clearSlotWithConfirmation(slot)
-                            },
-                            onSetLabel: { newLabel in
-                                store.setLabel(slot, label: newLabel.isEmpty ? nil : newLabel)
-                            }
-                        )
-                    }
+                // Hotkey error banner
+                if !store.hotkeyRegistrationErrors.isEmpty {
+                    hotkeyErrorBanner
                 }
-                .padding(AppTheme.pagePadding)
+
+                ScrollView {
+                    LazyVGrid(
+                        columns: [
+                            GridItem(.adaptive(minimum: 220, maximum: 280), spacing: 14)
+                        ],
+                        spacing: 14
+                    ) {
+                        ForEach(1...store.config.slots, id: \.self) { slot in
+                            SlotCardView(
+                                slot: slot,
+                                content: store.slots[slot] ?? SlotContent(),
+                                label: store.labels[slot] ?? "",
+                                saveShortcut: shortcutPreview(store.config.saveKey, slot: slot),
+                                pasteShortcut: shortcutPreview(store.config.pasteKey, slot: slot),
+                                onPaste: {
+                                    NSLog("[ClipSlots] UI paste button clicked slot=\(slot)")
+                                    store.pasteSlotFromUI(slot)
+                                },
+                                onCopy: {
+                                    NSLog("[ClipSlots] UI copy button clicked slot=\(slot)")
+                                    store.copySlot(slot)
+                                },
+                                onSave: {
+                                    NSLog("[ClipSlots] UI save/overwrite button clicked slot=\(slot)")
+                                    store.saveToSlot(slot)
+                                },
+                                onClear: {
+                                    NSLog("[ClipSlots] UI clear button clicked slot=\(slot)")
+                                    store.clearSlotWithConfirmation(slot)
+                                },
+                                onSetLabel: { newLabel in
+                                    store.setLabel(slot, label: newLabel.isEmpty ? nil : newLabel)
+                                }
+                            )
+                        }
+                    }
+                    .padding(AppTheme.pagePadding)
+                }
+                .background(AppTheme.windowBackground(colorScheme))
+
+                bottomBar
             }
             .background(AppTheme.windowBackground(colorScheme))
 
-            bottomBar
+            // Toast overlay
+            if let message = store.toastMessage {
+                toastView(message)
+                    .transition(.move(edge: .top).combined(with: .opacity))
+                    .zIndex(100)
+            }
         }
-        .background(AppTheme.windowBackground(colorScheme))
+        .animation(.easeInOut(duration: 0.25), value: store.toastMessage != nil)
+    }
+
+    private var hotkeyErrorBanner: some View {
+        VStack(spacing: 4) {
+            ForEach(store.hotkeyRegistrationErrors, id: \.self) { error in
+                HStack(spacing: 6) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .font(.system(size: 10))
+                        .foregroundColor(.red)
+                    Text(error)
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundColor(.red)
+                    Spacer()
+                }
+            }
+            HStack(spacing: 4) {
+                Text("💡 建议在设置中尝试 Cmd+Option+数字 以避免冲突")
+                    .font(.system(size: 9))
+                    .foregroundColor(.secondary)
+                Spacer()
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 6)
+        .background(
+            RoundedRectangle(cornerRadius: 4, style: .continuous)
+                .fill(Color.red.opacity(0.08))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 4, style: .continuous)
+                        .stroke(Color.red.opacity(0.2), lineWidth: 0.5)
+                )
+        )
+        .padding(.horizontal, 12)
+        .padding(.vertical, 4)
+    }
+
+    private func toastView(_ message: String) -> some View {
+        Text(message)
+            .font(.system(size: 12, weight: .medium))
+            .foregroundColor(.primary)
+            .padding(.horizontal, 14)
+            .padding(.vertical, 8)
+            .background(
+                Capsule()
+                    .fill(.regularMaterial)
+                    .shadow(color: Color.black.opacity(0.12), radius: 6, y: 3)
+            )
+            .padding(.top, 8)
     }
 
     private var headerView: some View {

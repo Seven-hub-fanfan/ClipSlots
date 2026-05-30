@@ -52,19 +52,33 @@ struct SpecialSlotManagementView: View {
                         Text(special.name)
                             .font(.system(size: 13, weight: special.id == store.currentSpecialSlotId ? .semibold : .regular))
                         Spacer()
-                        if special.id == store.currentSpecialSlotId {
-                            Text("当前")
+                        if special.id == store.currentSpecialSlotId && special.id == store.activeHotkeySpecialSlotId {
+                            Text("快捷键槽位组")
                                 .font(.caption2)
                                 .foregroundColor(.accentColor)
                                 .padding(.horizontal, 6)
                                 .padding(.vertical, 2)
                                 .background(Capsule().fill(Color.accentColor.opacity(0.12)))
+                        } else if special.id == store.currentSpecialSlotId {
+                            Text("预览中")
+                                .font(.caption2)
+                                .foregroundColor(.secondary)
+                                .padding(.horizontal, 6)
+                                .padding(.vertical, 2)
+                                .background(Capsule().fill(Color.secondary.opacity(0.10)))
+                        } else if special.id == store.activeHotkeySpecialSlotId {
+                            Text("快捷键")
+                                .font(.caption2)
+                                .foregroundColor(.orange)
+                                .padding(.horizontal, 6)
+                                .padding(.vertical, 2)
+                                .background(Capsule().fill(Color.orange.opacity(0.12)))
                         }
                     }
                     .contentShape(Rectangle())
                     .onTapGesture {
                         selectedId = special.id
-                        store.switchSpecialSlot(id: special.id)
+                        store.selectAndActivateSpecialSlot(id: special.id)
                     }
                 }
                 .listStyle(.sidebar)
@@ -79,7 +93,7 @@ struct SpecialSlotManagementView: View {
                         Text("请从左侧选择一个特殊槽位")
                             .font(.subheadline)
                             .foregroundColor(.secondary)
-                        Text("点击特殊槽位即可立即切换")
+                        Text("点击槽位组即可切换 Cmd+数字对应内容")
                             .font(.caption)
                             .foregroundColor(.secondary)
                         Spacer()
@@ -115,14 +129,6 @@ struct SpecialSlotManagementView: View {
                 } label: {
                     Label("导入文件夹", systemImage: "folder.badge.plus")
                 }
-
-                Button {
-                    guard !selectedId.isEmpty else { return }
-                    store.switchSpecialSlot(id: selectedId)
-                } label: {
-                    Label("切换到此槽位", systemImage: "arrow.right.circle")
-                }
-                .disabled(selectedId.isEmpty || selectedId == store.currentSpecialSlotId)
             }
             .padding(.horizontal, 16)
             .padding(.vertical, 10)
