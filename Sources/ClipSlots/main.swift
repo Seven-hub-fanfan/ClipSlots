@@ -121,14 +121,20 @@ final class SlotStoreObservable: ObservableObject {
         let index = specialStorage.loadIndex()
         specialSlots = index.specialSlots
 
+        let fallbackId = index.specialSlots.first?.id ?? "default"
+
         let selectedId = index.selectedSpecialSlotId ?? index.currentSpecialSlotId
         let activeId = index.activeHotkeySpecialSlotId ?? index.currentSpecialSlotId
 
-        currentSpecialSlotId = selectedId
-        currentSpecialSlot = index.specialSlots.first { $0.id == selectedId }
+        // If the persisted id no longer exists (e.g. after a delete), fall back.
+        let validSelectedId = index.specialSlots.contains(where: { $0.id == selectedId }) ? selectedId : fallbackId
+        let validActiveId = index.specialSlots.contains(where: { $0.id == activeId }) ? activeId : fallbackId
 
-        activeHotkeySpecialSlotId = activeId
-        activeHotkeySpecialSlot = index.specialSlots.first { $0.id == activeId }
+        currentSpecialSlotId = validSelectedId
+        currentSpecialSlot = index.specialSlots.first { $0.id == validSelectedId }
+
+        activeHotkeySpecialSlotId = validActiveId
+        activeHotkeySpecialSlot = index.specialSlots.first { $0.id == validActiveId }
 
         specialSlotSettings = index.settings
     }
@@ -244,6 +250,20 @@ final class SlotStoreObservable: ObservableObject {
         } catch {
             NSLog("[ClipSlots] createSpecialSlot error: \(error)")
         }
+    }
+
+    /// Quick-create a special slot with an auto-numbered name and switch to it.
+    func createQuickSpecialSlot() {
+        let next = nextAvailableSpecialSlotNumber()
+        createSpecialSlot(name: "\(next)")
+    }
+
+    private func nextAvailableSpecialSlotNumber() -> Int {
+        let existing = Set(specialSlots.compactMap { Int($0.name) })
+        for i in 1...specialSlotSettings.maxSpecialSlots {
+            if !existing.contains(i) { return i }
+        }
+        return specialSlots.count + 1
     }
 
     func deleteSpecialSlot(id: String) {
@@ -1011,9 +1031,8 @@ final class SlotStoreObservable: ObservableObject {
                 guard confirmOverwriteCurrentSpecialSlot() else { return }
             }
 
-            // Clear and import — block timer during writes
-            // write guard removed (no timer)
-            // defer removed (no timer)
+            // Clear and import
+            ThumbnailProvider.shared.invalidateSpecialSlot(specialSlotId: activeId)
 
             try specialStorage.clearAllSlots(in: activeId)
 
@@ -1021,7 +1040,10 @@ final class SlotStoreObservable: ObservableObject {
             var failCount = 0
             for (idx, fileURL) in preview.willImportFiles.enumerated() {
                 let slotNumber = idx + 1
-                let content = folderImportService.makeSlotContent(for: fileURL)
+                var content = folderImportService.makeSlotContent(for: fileURL)
+                // Regenerate identity so thumbnails and SwiftUI views refresh.
+                content.contentId = UUID().uuidString
+                content.updatedAt = Date().timeIntervalSince1970
                 if specialStorage.set(slotNumber, content: content, in: activeId) {
                     successCount += 1
                 } else {

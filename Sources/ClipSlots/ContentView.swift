@@ -8,11 +8,13 @@ struct ContentView: View {
 
     @AppStorage("appearanceMode") private var appearanceModeRaw = ThemeMode.system.rawValue
 
-    private var appearanceModeBinding: Binding<ThemeMode> {
-        Binding(
-            get: { ThemeMode(rawValue: appearanceModeRaw) ?? .system },
-            set: { appearanceModeRaw = $0.rawValue }
-        )
+    private func cycleAppearanceMode() {
+        let current = ThemeMode(rawValue: appearanceModeRaw) ?? .system
+        switch current {
+        case .system: appearanceModeRaw = ThemeMode.light.rawValue
+        case .light:  appearanceModeRaw = ThemeMode.dark.rawValue
+        case .dark:   appearanceModeRaw = ThemeMode.system.rawValue
+        }
     }
 
     var body: some View {
@@ -198,19 +200,15 @@ struct ContentView: View {
                 color: AppTheme.success
             )
 
-            Menu {
-                Picker("外观", selection: appearanceModeBinding) {
-                    ForEach(ThemeMode.allCases) { mode in
-                        Label(mode.title, systemImage: mode.icon).tag(mode)
-                    }
-                }
+            Button {
+                cycleAppearanceMode()
             } label: {
                 Image(systemName: (ThemeMode(rawValue: appearanceModeRaw) ?? .system).icon)
                     .font(.system(size: 15, weight: .semibold))
                     .frame(width: 30, height: 30)
             }
-            .menuStyle(.borderlessButton)
-            .help("外观")
+            .buttonStyle(.borderless)
+            .help("外观：\((ThemeMode(rawValue: appearanceModeRaw) ?? .system).title)，点击切换")
 
             Button { showingSettings = true } label: {
                 Image(systemName: "gearshape.fill")
@@ -344,7 +342,7 @@ struct ContentView: View {
                 }
 
                 Button {
-                    showingSpecialSlotManagement = true
+                    store.createQuickSpecialSlot()
                 } label: {
                     Image(systemName: "plus")
                         .font(.caption)
@@ -352,6 +350,19 @@ struct ContentView: View {
                         .background(Circle().fill(Color.primary.opacity(0.05)))
                 }
                 .buttonStyle(.plain)
+                .disabled(store.specialSlots.count >= store.specialSlotSettings.maxSpecialSlots)
+                .help("新建槽位组")
+
+                Button {
+                    showingSpecialSlotManagement = true
+                } label: {
+                    Image(systemName: "slider.horizontal.3")
+                        .font(.caption)
+                        .padding(7)
+                        .background(Circle().fill(Color.primary.opacity(0.05)))
+                }
+                .buttonStyle(.plain)
+                .help("管理槽位组")
             }
         }
     }
@@ -429,7 +440,7 @@ struct ContentView: View {
 
             Spacer()
 
-            Text("v2.3.6")
+            Text("v2.3.7")
                 .font(.caption2)
                 .foregroundColor(Color.secondary.opacity(0.65))
         }

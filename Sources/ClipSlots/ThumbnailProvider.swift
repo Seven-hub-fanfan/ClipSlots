@@ -6,7 +6,9 @@ final class ThumbnailProvider {
 
     private let lock = NSLock()
     private var cache: [String: NSImage] = [:]
-    private var inFlight: Set<String> = []
+    /// Callback queue for in-flight requests. Multiple callers waiting on the same
+    /// key all get notified when the single QLThumbnailGenerator request completes.
+    private var pendingCompletions: [String: [(NSImage?, String) -> Void]] = [:]
 
     /// Generate (or return cached) thumbnail for the given URL.
     ///
@@ -31,12 +33,14 @@ final class ThumbnailProvider {
             return
         }
 
-        // Dedup: already loading this key
-        guard !inFlight.contains(cacheKey) else {
+        // Already loading — queue this caller instead of silently dropping.
+        if pendingCompletions[cacheKey] != nil {
+            pendingCompletions[cacheKey]?.append(completion)
             lock.unlock()
             return
         }
-        inFlight.insert(cacheKey)
+
+        pendingCompletions[cacheKey] = [completion]
         lock.unlock()
 
         let request = QLThumbnailGenerator.Request(
@@ -59,11 +63,14 @@ final class ThumbnailProvider {
             if let image = image {
                 self.cache[cacheKey] = image
             }
-            self.inFlight.remove(cacheKey)
+            let completions = self.pendingCompletions.removeValue(forKey: cacheKey) ?? []
             self.lock.unlock()
 
-            DispatchQueue.main.async {
-                completion(image, cacheKey)
+            // Fire all queued completions so no caller is left hanging.
+            for completion in completions {
+                DispatchQueue.main.async {
+                    completion(image, cacheKey)
+                }
             }
         }
     }
@@ -73,7 +80,7 @@ final class ThumbnailProvider {
         let prefix = "\(specialSlotId)::\(slot)::"
         lock.lock()
         cache = cache.filter { !$0.key.hasPrefix(prefix) }
-        inFlight = inFlight.filter { !$0.hasPrefix(prefix) }
+        pendingCompletions = pendingCompletions.filter { !$0.key.hasPrefix(prefix) }
         lock.unlock()
         NSLog("[ClipSlots] ThumbnailProvider invalidateSlot prefix=\(prefix)")
     }
@@ -83,7 +90,7 @@ final class ThumbnailProvider {
         let prefix = "\(specialSlotId)::"
         lock.lock()
         cache = cache.filter { !$0.key.hasPrefix(prefix) }
-        inFlight = inFlight.filter { !$0.hasPrefix(prefix) }
+        pendingCompletions = pendingCompletions.filter { !$0.key.hasPrefix(prefix) }
         lock.unlock()
         NSLog("[ClipSlots] ThumbnailProvider invalidateSpecialSlot prefix=\(prefix)")
     }
@@ -91,7 +98,7 @@ final class ThumbnailProvider {
     func clearCache() {
         lock.lock()
         cache.removeAll()
-        inFlight.removeAll()
+        pendingCompletions.removeAll()
         lock.unlock()
     }
 }

@@ -50,7 +50,7 @@ struct SlotCardView: View {
             actionRow
         }
         .frame(height: 270)
-        .id("\(specialSlotId)::\(slot)::\(content.contentId)")
+        .id(content.thumbnailKey(specialSlotId: specialSlotId, slot: slot))
         .padding(AppTheme.cardPadding)
         .background(
             RoundedRectangle(cornerRadius: AppTheme.cornerRadius, style: .continuous)
