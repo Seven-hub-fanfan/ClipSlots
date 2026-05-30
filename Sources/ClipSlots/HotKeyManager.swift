@@ -106,9 +106,10 @@ final class HotKeyManager {
             }
         }
 
+        let template = config.hotkeyTemplate
         for slot in 1...config.slots {
             // Paste hotkey: signature=1
-            if let (modifiers, keyCode) = parseKeybind(config.pasteKey, slot: slot) {
+            if let (modifiers, keyCode) = parseKeybind(config.pasteKey, slot: slot, template: template) {
                 let id = EventHotKeyID(signature: 1, id: UInt32(slot))
                 var ref: EventHotKeyRef?
                 let status = RegisterEventHotKey(UInt32(keyCode), UInt32(modifiers), id, GetApplicationEventTarget(), 0, &ref)
@@ -116,13 +117,13 @@ final class HotKeyManager {
                     hotKeyRefs.append(ref)
                     NSLog("[ClipSlots] PASTE hotkey registered: slot=\(slot) mod=\(modifiers) key=\(keyCode)")
                 } else {
-                    let keyStr = config.pasteKey.replacingOccurrences(of: "{n}", with: String(slot))
+                    let keyStr = config.pasteKey.replacingOccurrences(of: "{n}", with: keyToken(for: slot, template: template))
                     NSLog("[ClipSlots] ERROR: PASTE hotkey FAILED slot=\(slot) mod=\(modifiers) key=\(keyCode) status=\(status)")
                     failures.append("粘贴快捷键 (\(keyStr)) 注册失败，可能被其他应用占用")
                 }
             }
             // Save hotkey: signature=2
-            if let (modifiers, keyCode) = parseKeybind(config.saveKey, slot: slot) {
+            if let (modifiers, keyCode) = parseKeybind(config.saveKey, slot: slot, template: template) {
                 let id = EventHotKeyID(signature: 2, id: UInt32(slot))
                 var ref: EventHotKeyRef?
                 let status = RegisterEventHotKey(UInt32(keyCode), UInt32(modifiers), id, GetApplicationEventTarget(), 0, &ref)
@@ -130,7 +131,7 @@ final class HotKeyManager {
                     hotKeyRefs.append(ref)
                     NSLog("[ClipSlots] SAVE hotkey registered: slot=\(slot) mod=\(modifiers) key=\(keyCode)")
                 } else {
-                    let keyStr = config.saveKey.replacingOccurrences(of: "{n}", with: String(slot))
+                    let keyStr = config.saveKey.replacingOccurrences(of: "{n}", with: keyToken(for: slot, template: template))
                     NSLog("[ClipSlots] ERROR: SAVE hotkey FAILED slot=\(slot) mod=\(modifiers) key=\(keyCode) status=\(status)")
                     failures.append("保存快捷键 (\(keyStr)) 注册失败，可能被其他应用占用")
                 }
@@ -140,8 +141,12 @@ final class HotKeyManager {
         return failures
     }
 
-    private func parseKeybind(_ pattern: String, slot: Int) -> (modifiers: Int, keyCode: Int)? {
-        let expanded = pattern.replacingOccurrences(of: "{n}", with: String(slot))
+    private func keyToken(for slot: Int, template: HotkeyTemplate) -> String {
+        return template.keyToken(for: slot) ?? String(slot)
+    }
+
+    private func parseKeybind(_ pattern: String, slot: Int, template: HotkeyTemplate) -> (modifiers: Int, keyCode: Int)? {
+        let expanded = pattern.replacingOccurrences(of: "{n}", with: keyToken(for: slot, template: template))
         return parseSimpleKeybind(expanded)
     }
 

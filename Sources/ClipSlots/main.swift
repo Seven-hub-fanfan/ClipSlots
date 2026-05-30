@@ -762,7 +762,7 @@ final class SlotStoreObservable: ObservableObject {
     // MARK: - Simple Paste (hotkeys, menu)
 
     func pasteSlot(_ slot: Int) {
-        let activeId = currentSpecialSlotId
+        let activeId = activeHotkeySpecialSlotId
 
         NSLog("[ClipSlots] pasteSlot instanceID=\(instanceID) slot=\(slot) activeSpecialSlotId=\(activeId) loadedSpecialSlotId=\(loadedSpecialSlotId ?? "nil")")
 

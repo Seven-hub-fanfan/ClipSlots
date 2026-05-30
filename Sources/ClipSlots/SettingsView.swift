@@ -9,6 +9,7 @@ struct SettingsView: View {
     @State private var pasteKey: String
     @State private var radialKey: String
     @State private var verbose: Bool
+    @State private var hotkeyTemplateKind: HotkeyTemplateKind
     @State private var showingResetConfirm = false
 
     @Environment(\.dismiss) private var dismiss
@@ -31,6 +32,7 @@ struct SettingsView: View {
         _pasteKey = State(initialValue: config.pasteKey)
         _radialKey = State(initialValue: config.radialKey)
         _verbose = State(initialValue: config.verbose)
+        _hotkeyTemplateKind = State(initialValue: config.hotkeyTemplate.kind)
     }
 
     var body: some View {
@@ -124,6 +126,17 @@ struct SettingsView: View {
     private var shortcutSection: some View {
         settingsSection(title: "快捷键", icon: "keyboard.fill") {
             VStack(spacing: 14) {
+                // Template picker
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("快捷键模板").font(.subheadline)
+                    Picker("模板", selection: $hotkeyTemplateKind) {
+                        ForEach(HotkeyTemplateKind.allCases) { kind in
+                            Text(kind.title).tag(kind)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+                }
+
                 shortcutInput(title: "保存快捷键", subtitle: "将当前剪贴板内容保存到指定槽位", placeholder: "ctrl+option+{n}", text: $saveKey, preview: saveKey.replacingOccurrences(of: "{n}", with: "1"))
                 shortcutInput(title: "粘贴快捷键", subtitle: "从指定槽位粘贴内容", placeholder: "ctrl+{n}", text: $pasteKey, preview: pasteKey.replacingOccurrences(of: "{n}", with: "1"))
                 shortcutInput(title: "圆盘菜单快捷键", subtitle: "在鼠标位置弹出圆盘选择器", placeholder: "ctrl+space", text: $radialKey, preview: radialKey)
@@ -243,6 +256,7 @@ struct SettingsView: View {
         newConfig.pasteKey = pasteKey.trimmingCharacters(in: .whitespacesAndNewlines)
         newConfig.radialKey = radialKey.trimmingCharacters(in: .whitespacesAndNewlines)
         newConfig.verbose = verbose
+        newConfig.hotkeyTemplate.kind = hotkeyTemplateKind
         newConfig.save()
         onSave(newConfig)
         dismiss()

@@ -4,6 +4,7 @@ struct ContentView: View {
     @ObservedObject var store: SlotStoreObservable
     @State private var showingSettings = false
     @State private var showingSpecialSlotManagement = false
+    @State private var showingHotkeyTemplatePopover = false
     @Environment(\.colorScheme) private var colorScheme
 
     @AppStorage("appearanceMode") private var appearanceModeRaw = ThemeMode.system.rawValue
@@ -210,6 +211,26 @@ struct ContentView: View {
             .buttonStyle(.borderless)
             .help("外观：\((ThemeMode(rawValue: appearanceModeRaw) ?? .system).title)，点击切换")
 
+            Button {
+                showingHotkeyTemplatePopover = true
+            } label: {
+                Image(systemName: "keyboard")
+                    .font(.system(size: 15, weight: .semibold))
+                    .frame(width: 30, height: 30)
+            }
+            .buttonStyle(.borderless)
+            .help("快捷键模板：\(store.config.hotkeyTemplate.kind.title)")
+            .popover(isPresented: $showingHotkeyTemplatePopover) {
+                HotkeyTemplatePopover(
+                    config: store.config,
+                    onSave: { newConfig in
+                        store.updateConfig(newConfig)
+                        showingHotkeyTemplatePopover = false
+                    }
+                )
+                .frame(width: 360)
+            }
+
             Button { showingSettings = true } label: {
                 Image(systemName: "gearshape.fill")
                     .font(.system(size: 15, weight: .semibold))
@@ -373,7 +394,7 @@ struct ContentView: View {
             Image(systemName: "keyboard.fill")
                 .font(.system(size: 10))
                 .foregroundColor(.accentColor)
-            Text("当前槽位组：\(name) · Cmd+数字将粘贴该组内容")
+            Text("当前槽位组：\(name) · 粘贴快捷键：\(humanReadableShortcut(store.config.pasteKey))")
                 .font(.system(size: 10, weight: .medium))
                 .foregroundColor(.secondary)
             Spacer()
@@ -440,7 +461,7 @@ struct ContentView: View {
 
             Spacer()
 
-            Text("v2.3.7")
+            Text("v2.3.8")
                 .font(.caption2)
                 .foregroundColor(Color.secondary.opacity(0.65))
         }
@@ -461,10 +482,111 @@ struct ContentView: View {
     }
 
     private func shortcutPreview(_ template: String, slot: Int) -> String {
-        template.replacingOccurrences(of: "{n}", with: "\(slot)")
+        let token = store.config.hotkeyTemplate.keyToken(for: slot) ?? "\(slot)"
+        return template.replacingOccurrences(of: "{n}", with: token)
     }
 
     private var filledSlotCount: Int {
         store.slots.values.filter { !$0.isEmpty }.count
+    }
+}
+
+// MARK: - Hotkey Template Popover
+
+struct HotkeyTemplatePopover: View {
+    let config: AppConfig
+    var onSave: (AppConfig) -> Void
+
+    @State private var kind: HotkeyTemplateKind
+    @State private var customKeys: [String]
+
+    init(config: AppConfig, onSave: @escaping (AppConfig) -> Void) {
+        self.config = config
+        self.onSave = onSave
+        _kind = State(initialValue: config.hotkeyTemplate.kind)
+        _customKeys = State(initialValue: config.hotkeyTemplate.customKeys)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("快捷键模板")
+                .font(.headline)
+
+            Picker("模板", selection: $kind) {
+                ForEach(HotkeyTemplateKind.allCases) { k in
+                    Text(k.title).tag(k)
+                }
+            }
+            .pickerStyle(.segmented)
+
+            templatePreview
+
+            if kind == .custom {
+                customKeyGrid
+            }
+
+            Divider()
+
+            HStack {
+                Spacer()
+                Button("应用") {
+                    var newConfig = config
+                    newConfig.hotkeyTemplate.kind = kind
+                    newConfig.hotkeyTemplate.customKeys = customKeys
+                    newConfig.save()
+                    onSave(newConfig)
+                }
+                .buttonStyle(.borderedProminent)
+            }
+        }
+        .padding(16)
+    }
+
+    private var templatePreview: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("槽位映射")
+                .font(.subheadline)
+                .foregroundColor(.secondary)
+
+            LazyVGrid(columns: Array(repeating: GridItem(.flexible()), count: 5), spacing: 8) {
+                ForEach(1...10, id: \.self) { slot in
+                    let key = currentTemplate.keyToken(for: slot) ?? "-"
+                    VStack(spacing: 2) {
+                        Text("槽 \(slot)")
+                            .font(.caption2)
+                            .foregroundColor(.secondary)
+                        Text(key.uppercased())
+                            .font(.system(size: 14, weight: .semibold, design: .monospaced))
+                    }
+                    .padding(8)
+                    .background(RoundedRectangle(cornerRadius: 8).fill(Color.primary.opacity(0.06)))
+                }
+            }
+        }
+    }
+
+    private var currentTemplate: HotkeyTemplate {
+        HotkeyTemplate(kind: kind, customKeys: customKeys)
+    }
+
+    private var customKeyGrid: some View {
+        LazyVGrid(columns: Array(repeating: GridItem(.flexible()), count: 2), spacing: 8) {
+            ForEach(0..<10, id: \.self) { index in
+                HStack {
+                    Text("槽 \(index + 1)")
+                        .font(.caption)
+                    TextField("", text: Binding(
+                        get: { customKeys.indices.contains(index) ? customKeys[index] : "" },
+                        set: { v in
+                            let trimmed = String(v.prefix(1)).lowercased()
+                            guard customKeys.indices.contains(index) else { return }
+                            customKeys[index] = trimmed
+                        }
+                    ))
+                    .textFieldStyle(.roundedBorder)
+                    .frame(width: 48)
+                }
+            }
+        }
     }
 }

@@ -6,6 +6,7 @@ struct AppConfig: Codable {
     var saveKey: String = "ctrl+option+{n}"
     var pasteKey: String = "ctrl+{n}"
     var radialKey: String = "ctrl+space"
+    var hotkeyTemplate: HotkeyTemplate = HotkeyTemplate(kind: .numeric)
 
     private static let configURL = FileManager.default.homeDirectoryForCurrentUser
         .appendingPathComponent(".config/clipslots/config.toml")
@@ -21,6 +22,7 @@ struct AppConfig: Codable {
         let dir = Self.configURL.deletingLastPathComponent()
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
 
+        let customKeysStr = hotkeyTemplate.customKeys.joined(separator: ",")
         let lines = [
             "# ClipSlots Configuration",
             "",
@@ -44,6 +46,8 @@ struct AppConfig: Codable {
             "save = \"\(saveKey)\"",
             "paste = \"\(pasteKey)\"",
             "radial = \"\(radialKey)\"",
+            "template = \"\(hotkeyTemplate.kind.rawValue)\"",
+            "custom_keys = \"\(customKeysStr)\"",
         ]
         let content = lines.joined(separator: "\n") + "\n"
         try? content.write(to: Self.configURL, atomically: true, encoding: .utf8)
@@ -77,6 +81,11 @@ struct AppConfig: Codable {
                 if key == "save" { config.saveKey = value }
                 else if key == "paste" { config.pasteKey = value }
                 else if key == "radial" { config.radialKey = value }
+                else if key == "template" { config.hotkeyTemplate.kind = HotkeyTemplateKind(rawValue: value) ?? .numeric }
+                else if key == "custom_keys" {
+                    let keys = value.split(separator: ",").map { String($0).trimmingCharacters(in: .whitespaces).lowercased() }
+                    if keys.count == 10 { config.hotkeyTemplate.customKeys = keys }
+                }
             } else {
                 if key == "slots", let v = Int(value) { config.slots = max(1, min(10, v)) }
                 else if key == "verbose" { config.verbose = value.lowercased() == "true" }
