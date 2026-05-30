@@ -1,0 +1,145 @@
+import AppKit
+import Foundation
+
+extension SlotContent {
+
+    // MARK: - Image Detection
+
+    /// All image-related pasteboard types found in this content.
+    private var imageTypes: [String] {
+        let imageTypePatterns = ["public.png", "public.tiff", "public.jpeg", "public.image",
+                                 "com.apple.icns", "com.compuserve.gif", "public.heic",
+                                 "public.heif", "public.avci", "public.webp", "org.webmproject.webp"]
+        var found: Set<String> = []
+        for itemList in items {
+            for item in itemList {
+                let lower = item.type.lowercased()
+                for pattern in imageTypePatterns {
+                    if lower == pattern || lower.contains("image") {
+                        found.insert(item.type)
+                    }
+                }
+            }
+        }
+        return Array(found)
+    }
+
+    /// True if this content contains any image data.
+    var hasImage: Bool {
+        !imageTypes.isEmpty
+    }
+
+    /// Attempt to decode an NSImage from inline image data.
+    var inlineImage: NSImage? {
+        for itemList in items {
+            for item in itemList {
+                let lower = item.type.lowercased()
+                if lower.contains("image") || lower == "public.png" || lower == "public.tiff" || lower == "public.jpeg" {
+                    if let image = NSImage(data: item.data) {
+                        return image
+                    }
+                }
+            }
+        }
+        return nil
+    }
+
+    // MARK: - File URL Detection
+
+    /// First file URL found in pasteboard content.
+    var primaryFileURL: URL? {
+        for itemList in items {
+            for item in itemList where item.type == "public.file-url" {
+                if let urlString = String(data: item.data, encoding: .utf8)?
+                    .trimmingCharacters(in: .whitespacesAndNewlines),
+                   let url = URL(string: urlString) {
+                    return url
+                }
+            }
+        }
+        return nil
+    }
+
+    /// File name from file URL, if available.
+    var fileDisplayName: String? {
+        primaryFileURL?.lastPathComponent
+    }
+
+    /// Image file extensions.
+    private static let imageExtensions: Set<String> = [
+        "png", "jpg", "jpeg", "gif", "svg", "webp", "bmp",
+        "heic", "heif", "tiff", "tif", "ico", "icns", "avif"
+    ]
+
+    /// True if the file URL points to an image file (by extension).
+    var isImageFile: Bool {
+        guard let url = primaryFileURL else { return false }
+        return Self.imageExtensions.contains(url.pathExtension.lowercased())
+    }
+
+    /// True if this is a file reference (not inline data).
+    var isFileContent: Bool {
+        primaryFileURL != nil
+    }
+
+    // MARK: - Display Kind
+
+    enum SlotDisplayKind {
+        case image
+        case file
+        case text
+        case empty
+    }
+
+    var displayKind: SlotDisplayKind {
+        if hasImage || isImageFile { return .image }
+        if isFileContent { return .file }
+        if !preview.isEmpty && preview != "(空)" { return .text }
+        return .empty
+    }
+
+    // MARK: - Suggested Label
+
+    /// Suggest a label based on content: file name without extension, or timestamp for images.
+    var suggestedLabel: String? {
+        if let url = primaryFileURL {
+            return url.deletingPathExtension().lastPathComponent
+        }
+        if hasImage {
+            let formatter = DateFormatter()
+            formatter.dateFormat = "MM-dd HH:mm"
+            return "图片 \(formatter.string(from: Date()))"
+        }
+        return nil
+    }
+
+    // MARK: - Metadata
+
+    /// Summary string like "PNG · 512×512" or "PDF 文件".
+    var metadataSummary: String {
+        if let image = inlineImage {
+            let size = image.size
+            let w = Int(size.width)
+            let h = Int(size.height)
+            let typeName = imageTypes.first?.replacingOccurrences(of: "public.", with: "").uppercased() ?? "IMG"
+            return "\(typeName) · \(w)×\(h)"
+        }
+        if let url = primaryFileURL {
+            let ext = url.pathExtension.uppercased()
+            if ext.isEmpty { return "文件" }
+            return "\(ext) 文件"
+        }
+        if !preview.isEmpty {
+            let charCount = items.reduce(0) { $0 + $1.reduce(0) { $0 + $1.data.count } }
+            if charCount < 1024 { return "\(charCount) B 文本" }
+            if charCount < 1024 * 1024 { return "\(charCount / 1024) KB 文本" }
+            return "文本"
+        }
+        return ""
+    }
+
+    /// True if this content can show a visual preview.
+    var canPreview: Bool {
+        displayKind == .image || displayKind == .file
+    }
+}

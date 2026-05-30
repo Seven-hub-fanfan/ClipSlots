@@ -736,7 +736,7 @@ final class SlotStoreObservable: ObservableObject {
     // MARK: - Simple Paste (hotkeys, menu)
 
     func pasteSlot(_ slot: Int) {
-        let activeId = activeHotkeySpecialSlotId
+        let activeId = currentSpecialSlotId
 
         NSLog("[ClipSlots] pasteSlot instanceID=\(instanceID) slot=\(slot) activeSpecialSlotId=\(activeId) loadedSpecialSlotId=\(loadedSpecialSlotId ?? "nil")")
 
@@ -765,9 +765,9 @@ final class SlotStoreObservable: ObservableObject {
         let pasteWorkItem = DispatchWorkItem { [weak self] in
             guard let self = self else { return }
 
-            // If user switched hotkey layer before Cmd+V fires, abort this stale paste.
-            guard self.activeHotkeySpecialSlotId == activeId else {
-                NSLog("[ClipSlots] pasteSlot abort stale paste requestedSpecialSlot=\(activeId) currentHotkey=\(self.activeHotkeySpecialSlotId) slot=\(slot)")
+            // If user switched special slot before Cmd+V fires, abort this stale paste.
+            guard self.currentSpecialSlotId == activeId else {
+                NSLog("[ClipSlots] pasteSlot abort stale paste requestedSpecialSlot=\(activeId) current=\(self.currentSpecialSlotId) slot=\(slot)")
                 _ = self.clipboard.restore(previous)
                 self.pendingPasteWorkItem = nil
                 return
@@ -796,7 +796,7 @@ final class SlotStoreObservable: ObservableObject {
     // MARK: - Radial Paste (targetApp activation + waitUntilFrontmost)
 
     func pasteSlotToApp(_ slot: Int, targetApp: NSRunningApplication?) {
-        let activeId = activeHotkeySpecialSlotId
+        let activeId = currentSpecialSlotId
 
         // Always read from the currently active special slot on disk.
         let content = specialStorage.get(slot, in: activeId)
@@ -828,9 +828,9 @@ final class SlotStoreObservable: ObservableObject {
         let performPaste = { [weak self] in
             guard let self = self else { return }
 
-            // Abort if hotkey layer changed while waiting for app activation.
-            guard self.activeHotkeySpecialSlotId == activeId else {
-                NSLog("[ClipSlots] radial paste abort stale paste requestedSpecialSlot=\(activeId) currentHotkey=\(self.activeHotkeySpecialSlotId) slot=\(slot)")
+            // Abort if special slot changed while waiting for app activation.
+            guard self.currentSpecialSlotId == activeId else {
+                NSLog("[ClipSlots] radial paste abort stale paste requestedSpecialSlot=\(activeId) current=\(self.currentSpecialSlotId) slot=\(slot)")
                 _ = self.clipboard.restore(previous)
                 return
             }
@@ -843,8 +843,8 @@ final class SlotStoreObservable: ObservableObject {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) { [weak self] in
                 guard let self = self else { return }
 
-                guard self.activeHotkeySpecialSlotId == activeId else {
-                    NSLog("[ClipSlots] radial paste abort stale keystroke requestedSpecialSlot=\(activeId) currentHotkey=\(self.activeHotkeySpecialSlotId) slot=\(slot)")
+                guard self.currentSpecialSlotId == activeId else {
+                    NSLog("[ClipSlots] radial paste abort stale keystroke requestedSpecialSlot=\(activeId) current=\(self.currentSpecialSlotId) slot=\(slot)")
                     _ = self.clipboard.restore(previous)
                     return
                 }

@@ -15,6 +15,7 @@ struct SlotCardView: View {
     @State private var editingLabel = false
     @State private var labelText = ""
     @State private var isHovering = false
+    @State private var showingPreview = false
 
     @Environment(\.colorScheme) private var colorScheme
 
@@ -22,18 +23,21 @@ struct SlotCardView: View {
         VStack(alignment: .leading, spacing: 12) {
             headerRow
 
-            contentPreview
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .frame(height: 56)
-                .padding(10)
-                .background(
-                    RoundedRectangle(cornerRadius: AppTheme.smallCornerRadius, style: .continuous)
-                        .fill(AppTheme.previewBackground(colorScheme))
-                )
-                .overlay(
-                    RoundedRectangle(cornerRadius: AppTheme.smallCornerRadius, style: .continuous)
-                        .stroke(AppTheme.subtleBorder(colorScheme), lineWidth: 1)
-                )
+            SlotThumbnailView(content: content)
+                .clipShape(RoundedRectangle(cornerRadius: AppTheme.smallCornerRadius, style: .continuous))
+                .onTapGesture {
+                    if content.canPreview {
+                        showingPreview = true
+                    }
+                }
+                .help(content.canPreview ? "点击查看大图" : "")
+
+            if !content.metadataSummary.isEmpty {
+                Text(content.metadataSummary)
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
+                    .padding(.horizontal, 2)
+            }
 
             actionRow
         }
@@ -60,6 +64,10 @@ struct SlotCardView: View {
         .animation(.easeOut(duration: 0.14), value: isHovering)
         .onHover { hovering in
             isHovering = hovering
+        }
+        .sheet(isPresented: $showingPreview) {
+            SlotPreviewView(content: content)
+                .frame(width: 640, height: 500)
         }
     }
 
