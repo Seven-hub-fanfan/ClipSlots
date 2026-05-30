@@ -167,46 +167,53 @@ struct SlotCardView: View {
     }
 
     private var actionRow: some View {
-        HStack(spacing: 7) {
+        VStack(spacing: 8) {
             if !content.isEmpty {
-                Button { onPaste() } label: {
-                    Label("粘贴", systemImage: "arrow.up.doc")
-                        .frame(maxWidth: .infinity)
-                }
-                .buttonStyle(.borderedProminent)
-                .controlSize(.small)
-                .help(pasteShortcut.isEmpty ? "粘贴该槽位内容" : pasteShortcut)
+                HStack(spacing: 8) {
+                    Button { onPaste() } label: {
+                        Label("粘贴", systemImage: "arrow.up.doc.fill")
+                            .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.regular)
+                    .help(pasteShortcut.isEmpty ? "粘贴到目标应用" : pasteShortcut)
 
-                Button { onCopy() } label: {
-                    Label("复制", systemImage: "doc.on.doc")
+                    Button { onCopy() } label: {
+                        Label("复制", systemImage: "doc.on.doc")
+                            .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.regular)
+                    .help("复制到剪贴板")
+                }
+
+                HStack(spacing: 8) {
+                    Button { onSave() } label: {
+                        Label("覆盖", systemImage: "arrow.triangle.2.circlepath")
+                            .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.regular)
+                    .tint(.orange)
+                    .help(saveShortcut.isEmpty ? "用当前剪贴板覆盖此槽位" : saveShortcut)
+
+                    Button(role: .destructive) { onClear() } label: {
+                        Label("清空", systemImage: "trash")
+                            .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.regular)
+                    .help("清空槽位内容")
+                }
+            } else {
+                Button { onSave() } label: {
+                    Label("保存到槽位 \(slot)", systemImage: "square.and.arrow.down")
                         .frame(maxWidth: .infinity)
                 }
                 .buttonStyle(.bordered)
-                .controlSize(.small)
-
-                Button { onClear() } label: {
-                    Image(systemName: "trash")
-                        .frame(width: 24, height: 22)
-                }
-                .buttonStyle(.borderless)
-                .controlSize(.small)
-                .foregroundColor(AppTheme.danger.opacity(isHovering ? 0.95 : 0.65))
-                .help("清空")
+                .controlSize(.regular)
+                .help(saveShortcut.isEmpty ? "保存当前剪贴板内容到槽位 \(slot)" : saveShortcut)
             }
-
-            Button { onSave() } label: {
-                if content.isEmpty {
-                    Label("保存当前", systemImage: "square.and.arrow.down")
-                        .frame(maxWidth: .infinity)
-                } else {
-                    Label("覆盖", systemImage: "arrow.triangle.2.circlepath")
-                        .frame(maxWidth: .infinity)
-                }
-            }
-            .buttonStyle(.bordered)
-            .controlSize(.small)
-            .tint(content.isEmpty ? .accentColor : .orange)
-            .help(saveShortcut.isEmpty ? "保存当前剪贴板内容" : saveShortcut)
         }
     }
 

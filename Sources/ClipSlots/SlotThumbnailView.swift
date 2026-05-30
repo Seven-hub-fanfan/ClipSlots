@@ -29,7 +29,7 @@ struct SlotThumbnailView: View {
                 emptyPreview
             }
         }
-        .frame(height: 120)
+        .frame(height: 140)
         .onAppear { loadThumbnail() }
         .onChange(of: content.preview) { _ in
             thumbnail = nil
