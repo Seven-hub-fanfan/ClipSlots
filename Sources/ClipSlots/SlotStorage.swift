@@ -136,6 +136,13 @@ final class SlotStorage {
         }
     }
 
+    // MARK: - Content Metadata (persisted alongside item data)
+
+    private struct SlotContentMeta: Codable {
+        let contentId: String
+        let updatedAt: TimeInterval
+    }
+
     // MARK: - Internal Read/Write
 
     private func readSlotContent(from slotDir: URL) -> SlotContent {
@@ -196,6 +203,21 @@ final class SlotStorage {
         }
 
         content.items = groups
+
+        // Restore content identity from metadata file (v2.3.6+).
+        // Slots saved before v2.3.6 won't have this file — we generate new IDs
+        // so the first thumbnail load after upgrade is a one-time cache miss.
+        let metaURL = slotDir.appendingPathComponent("content.json")
+        if let metaData = try? Data(contentsOf: metaURL),
+           let meta = try? decoder.decode(SlotContentMeta.self, from: metaData) {
+            content.contentId = meta.contentId
+            content.updatedAt = meta.updatedAt
+        } else {
+            // Legacy slot: generate stable-ish IDs so restarts don't thrash.
+            content.contentId = UUID().uuidString
+            content.updatedAt = content.timestamp.timeIntervalSince1970
+        }
+
         return content
     }
 
@@ -228,6 +250,11 @@ final class SlotStorage {
                 try item.data.write(to: typeFile, options: .atomic)
             }
         }
+
+        // Persist content identity so thumbnail keys survive app restarts.
+        let meta = SlotContentMeta(contentId: content.contentId, updatedAt: content.updatedAt)
+        let metaData = try encoder.encode(meta)
+        try metaData.write(to: slotDir.appendingPathComponent("content.json"), options: .atomic)
     }
 
     // MARK: - Safe Filename Encoding

@@ -3,6 +3,7 @@ import SwiftUI
 struct SlotCardView: View {
     let slot: Int
     let content: SlotContent
+    let specialSlotId: String
     var label: String = ""
     var saveShortcut: String = ""
     var pasteShortcut: String = ""
@@ -27,7 +28,7 @@ struct SlotCardView: View {
             if content.isEmpty {
                 EmptySlotThumbnailView()
             } else {
-                SlotThumbnailView(content: content)
+                SlotThumbnailView(content: content, specialSlotId: specialSlotId, slot: slot)
                     .clipShape(RoundedRectangle(cornerRadius: AppTheme.smallCornerRadius, style: .continuous))
                     .onTapGesture {
                         if content.canPreview {
@@ -49,6 +50,7 @@ struct SlotCardView: View {
             actionRow
         }
         .frame(height: 270)
+        .id("\(specialSlotId)::\(slot)::\(content.contentId)")
         .padding(AppTheme.cardPadding)
         .background(
             RoundedRectangle(cornerRadius: AppTheme.cornerRadius, style: .continuous)

@@ -90,7 +90,7 @@ final class SlotStoreObservable: ObservableObject {
     @Published var specialSlotSettings: SpecialSlotSettings = .default
     @Published var toastMessage: String?
     @Published var hotkeyRegistrationErrors: [String] = []
-    @Published var slotRenderTokens: [Int: UUID] = [:]
+    @Published var slotRenderTokens: [String: UUID] = [:]
 
     var lastNonClipSlotsApp: NSRunningApplication?
 
@@ -155,6 +155,8 @@ final class SlotStoreObservable: ObservableObject {
 
         cancelPendingPasteOperations(restoreClipboard: true)
 
+        ThumbnailProvider.shared.invalidateSpecialSlot(specialSlotId: oldId)
+
         slots = [:]
         labels = [:]
         loadedSpecialSlotId = nil
@@ -181,6 +183,11 @@ final class SlotStoreObservable: ObservableObject {
 
         cancelPendingPasteOperations(restoreClipboard: true)
 
+        // The hotkey layer is now bound to a different special slot.
+        // Invalidate cached thumbnails for the old layer so stale async callbacks
+        // don't write into the wrong UI.
+        ThumbnailProvider.shared.invalidateSpecialSlot(specialSlotId: oldId)
+
         activeHotkeySpecialSlotId = id
         activeHotkeySpecialSlot = specialSlots.first { $0.id == id }
 
@@ -200,6 +207,8 @@ final class SlotStoreObservable: ObservableObject {
         NSLog("[ClipSlots] selectAndActivateSpecialSlot preview:\(oldPreview)->\(id) hotkey:\(oldActive)->\(id)")
 
         cancelPendingPasteOperations(restoreClipboard: true)
+
+        ThumbnailProvider.shared.invalidateSpecialSlot(specialSlotId: oldPreview)
 
         slots = [:]
         labels = [:]
@@ -324,6 +333,8 @@ final class SlotStoreObservable: ObservableObject {
     func clearAllSlotsInCurrentSpecialSlot() {
         let activeId = currentSpecialSlotId
         cancelPendingClipboardRestore()
+
+        ThumbnailProvider.shared.invalidateSpecialSlot(specialSlotId: activeId)
 
         do {
             // write guard removed (no timer)
@@ -875,10 +886,12 @@ final class SlotStoreObservable: ObservableObject {
         cancelPendingClipboardRestore()
         specialStorage.clear(slot, in: activeId)
 
+        ThumbnailProvider.shared.invalidateSlot(specialSlotId: activeId, slot: slot)
+
         var newSlots = slots
         newSlots[slot] = SlotContent()
         slots = newSlots
-        slotRenderTokens[slot] = UUID()
+        slotRenderTokens["\(activeId)::\(slot)"] = UUID()
 
         var newLabels = labels
         newLabels.removeValue(forKey: slot)
@@ -1081,22 +1094,26 @@ final class SlotStoreObservable: ObservableObject {
             return
         }
 
-        // Normal save
-        // write guard removed (no timer)
-        let success = specialStorage.set(targetSlot, content: content, in: activeId)
-        // write guard removed
+        // Normal save — regenerate identity so thumbnails and SwiftUI views refresh.
+        var savedContent = content
+        savedContent.contentId = UUID().uuidString
+        savedContent.updatedAt = Date().timeIntervalSince1970
+
+        ThumbnailProvider.shared.invalidateSlot(specialSlotId: activeId, slot: targetSlot)
+
+        let success = specialStorage.set(targetSlot, content: savedContent, in: activeId)
 
         guard success else {
             NSLog("[ClipSlots] SAVE FAIL specialSlot=\(activeId) slot=\(targetSlot)")
             return
         }
         var newSlots = slots
-        newSlots[targetSlot] = content
+        newSlots[targetSlot] = savedContent
         slots = newSlots
-        slotRenderTokens[targetSlot] = UUID()
+        slotRenderTokens["\(activeId)::\(targetSlot)"] = UUID()
         loadedSpecialSlotId = activeId
         refreshTrigger = UUID()
-        NSLog("[ClipSlots] SAVE OK specialSlot=\(activeId) slot=\(targetSlot) preview=\(content.preview)")
+        NSLog("[ClipSlots] SAVE OK specialSlot=\(activeId) slot=\(targetSlot) contentId=\(savedContent.contentId) preview=\(savedContent.preview)")
     }
 
     private func handleSingleFolderSave(_ folderURL: URL, targetSlot: Int) {
@@ -1115,11 +1132,12 @@ final class SlotStoreObservable: ObservableObject {
         case .alertSecondButtonReturn:
             createSpecialSlotAndImportFolder(folderURL)
         case .alertThirdButtonReturn:
-            let content = folderImportService.makeSlotContent(for: folderURL)
+            var content = folderImportService.makeSlotContent(for: folderURL)
+            content.contentId = UUID().uuidString
+            content.updatedAt = Date().timeIntervalSince1970
             let activeId = currentSpecialSlotId
-            // write guard removed (no timer)
+            ThumbnailProvider.shared.invalidateSlot(specialSlotId: activeId, slot: targetSlot)
             let success = specialStorage.set(targetSlot, content: content, in: activeId)
-            // write guard removed
             guard success else {
                 NSLog("[ClipSlots] save folder as normal FAIL specialSlot=\(activeId) slot=\(targetSlot)")
                 return
@@ -1127,6 +1145,7 @@ final class SlotStoreObservable: ObservableObject {
             var newSlots = slots
             newSlots[targetSlot] = content
             slots = newSlots
+            slotRenderTokens["\(activeId)::\(targetSlot)"] = UUID()
             loadedSpecialSlotId = activeId
             refreshTrigger = UUID()
         default:

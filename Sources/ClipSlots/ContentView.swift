@@ -36,6 +36,7 @@ struct ContentView: View {
                             SlotCardView(
                                 slot: slot,
                                 content: store.slots[slot] ?? SlotContent(),
+                                specialSlotId: store.currentSpecialSlotId,
                                 label: store.labels[slot] ?? "",
                                 saveShortcut: shortcutPreview(store.config.saveKey, slot: slot),
                                 pasteShortcut: shortcutPreview(store.config.pasteKey, slot: slot),
@@ -428,7 +429,7 @@ struct ContentView: View {
 
             Spacer()
 
-            Text("v2.3.3")
+            Text("v2.3.6")
                 .font(.caption2)
                 .foregroundColor(Color.secondary.opacity(0.65))
         }

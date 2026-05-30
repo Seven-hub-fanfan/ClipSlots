@@ -9,9 +9,18 @@ enum ThumbnailState {
 
 struct SlotThumbnailView: View {
     let content: SlotContent
+    let specialSlotId: String
+    let slot: Int
 
     @State private var state: ThumbnailState = .idle
     @State private var loadToken = UUID()
+
+    /// The composite key that uniquely identifies this slot version.
+    /// When any dimension changes (special slot, slot number, content, or overwrite),
+    /// this key changes and the view is force-rebuilt.
+    private var currentKey: String {
+        content.thumbnailKey(specialSlotId: specialSlotId, slot: slot)
+    }
 
     var body: some View {
         ZStack {
@@ -34,9 +43,12 @@ struct SlotThumbnailView: View {
         }
         .frame(height: 140)
         .clipped()
-        .id(content.contentHash)
+        .id(currentKey)
         .onAppear { reloadThumbnail() }
-        .onChange(of: content.contentHash) { _ in
+        .onChange(of: currentKey) { _ in
+            // Force-reset @State when the content identity changes (overwrite,
+            // special-slot switch, etc.). This is the key fix for stale thumbnails.
+            state = .idle
             reloadThumbnail()
         }
     }
@@ -103,6 +115,7 @@ struct SlotThumbnailView: View {
     // MARK: - Loading
 
     private func reloadThumbnail() {
+        let key = currentKey
         let token = UUID()
         loadToken = token
 
@@ -125,11 +138,16 @@ struct SlotThumbnailView: View {
 
         state = .loading
 
-        ThumbnailProvider.shared.thumbnail(for: url, cacheKey: content.contentHash) { image in
+        ThumbnailProvider.shared.thumbnail(for: url, cacheKey: key) { image, returnedKey in
+            // Discard stale callbacks: if the key changed while loading
+            // (special-slot switch, overwrite, etc.), don't update state.
+            guard returnedKey == currentKey else {
+                NSLog("[ClipSlots] SlotThumbnailView discard stale callback slot=\(slot) specialSlot=\(specialSlotId) returnedKey=\(returnedKey) currentKey=\(currentKey)")
+                return
+            }
             guard loadToken == token else { return }
             if let image = image {
                 state = .loaded(image)
-                return
             } else {
                 state = .failed
             }
@@ -138,6 +156,7 @@ struct SlotThumbnailView: View {
         // 3-second timeout
         DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) {
             guard loadToken == token else { return }
+            guard currentKey == key else { return }
             if case .loading = state {
                 state = .failed
             }

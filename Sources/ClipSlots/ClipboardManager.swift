@@ -10,12 +10,28 @@ struct SlotContent: Codable {
     var timestamp: Date = Date()
     var label: String? = nil
 
+    /// Unique content identity. Regenerated on every save/overwrite. Used as the
+    /// primary cache-breaker for thumbnails, SwiftUI View identity, and file paths.
+    var contentId: String = UUID().uuidString
+    /// Monotonic timestamp updated on every save/overwrite. Combined with contentId
+    /// to form the thumbnail cache key so that even same-contentId overwrites
+    /// (impossible in practice but defensive) still miss the cache.
+    var updatedAt: TimeInterval = Date().timeIntervalSince1970
+
     var isEmpty: Bool { items.isEmpty }
 
-    /// Unique key that changes when content is overwritten. Used to invalidate thumbnail cache.
+    /// Legacy hash — still available for diagnostics but no longer the primary
+    /// cache key. The new key is `thumbnailKey(specialSlotId:slot:)`.
     var contentHash: String {
         let totalBytes = items.reduce(0) { $0 + $1.reduce(0) { $0 + $1.data.count } }
         return "\(timestamp.timeIntervalSince1970)-\(totalBytes)"
+    }
+
+    /// Composite cache key that scopes a thumbnail by special-slot, slot number,
+    /// content identity, and save timestamp. Changing any dimension invalidates
+    /// the cached thumbnail.
+    func thumbnailKey(specialSlotId: String, slot: Int) -> String {
+        "\(specialSlotId)::\(slot)::\(contentId)::\(updatedAt)"
     }
 
     var preview: String {
