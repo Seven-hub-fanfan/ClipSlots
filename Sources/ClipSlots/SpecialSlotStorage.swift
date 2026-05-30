@@ -217,6 +217,12 @@ final class SpecialSlotStorage {
         if index.currentSpecialSlotId == id {
             index.currentSpecialSlotId = index.specialSlots.first?.id ?? "default"
         }
+        if index.selectedSpecialSlotId == id {
+            index.selectedSpecialSlotId = index.specialSlots.first?.id ?? "default"
+        }
+        if index.activeHotkeySpecialSlotId == id {
+            index.activeHotkeySpecialSlotId = index.specialSlots.first?.id ?? "default"
+        }
 
         try saveIndex(index)
     }
