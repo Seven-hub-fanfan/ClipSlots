@@ -12,7 +12,7 @@ struct SpecialSlotManagementView: View {
     @State private var renameText = ""
 
     private var selected: SpecialSlot? {
-        store.specialSlots.first { $0.id == selectedId }
+        store.currentPageSlotGroups.first { $0.id == selectedId }
     }
 
     var body: some View {
@@ -45,7 +45,7 @@ struct SpecialSlotManagementView: View {
             // Content
             HStack(spacing: 0) {
                 // Left list
-                List(store.specialSlots) { special in
+                List(store.currentPageSlotGroups) { special in
                     HStack {
                         Image(systemName: special.id == store.currentSpecialSlotId ? "folder.fill" : "folder")
                             .foregroundColor(special.id == store.currentSpecialSlotId ? .accentColor : .secondary)
@@ -107,7 +107,7 @@ struct SpecialSlotManagementView: View {
                 Button { showingNewDialog = true } label: {
                     Label("新建", systemImage: "plus")
                 }
-                .disabled(store.specialSlots.count >= 10)
+                .disabled(store.currentPageSlotGroups.count >= store.specialSlotSettings.maxSpecialSlots)
 
                 Button { showingRenameDialog = true } label: {
                     Label("重命名", systemImage: "pencil")
@@ -120,7 +120,7 @@ struct SpecialSlotManagementView: View {
                 } label: {
                     Label("删除", systemImage: "trash")
                 }
-                .disabled(selectedId.isEmpty || store.specialSlots.count <= 1)
+                .disabled(selectedId.isEmpty || store.currentPageSlotGroups.count <= 1)
 
                 Spacer()
 

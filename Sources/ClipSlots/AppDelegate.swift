@@ -70,6 +70,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             },
             onRadial: { [weak self] in
                 self?.showRadialMenu()
+            },
+            onPrevious: { [weak store] in
+                store?.switchToPreviousSlotGroup()
+            },
+            onNext: { [weak store] in
+                store?.switchToNextSlotGroup()
             }
         )
 

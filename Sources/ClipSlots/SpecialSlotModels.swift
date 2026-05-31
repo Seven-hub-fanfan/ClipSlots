@@ -193,10 +193,10 @@ enum SpecialSlotError: Error, LocalizedError {
 
     var errorDescription: String? {
         switch self {
-        case .cannotDeleteLastSpecialSlot: return "无法删除最后一个槽位组"
+        case .cannotDeleteLastSpecialSlot: return "无法删除当前页面的最后一个槽位组"
         case .specialSlotNotFound: return "槽位组不存在"
         case .invalidSpecialSlotName: return "槽位组名称无效"
-        case .maxSpecialSlotsReached: return "槽位组数量已达到上限 (10 个)"
+        case .maxSpecialSlotsReached: return "当前页面的槽位组数量已达到上限，最多 10 个"
         case .indexCorrupted: return "槽位组索引文件损坏"
         }
     }

@@ -5,6 +5,8 @@ import Cocoa
 fileprivate var gOnPaste: ((Int) -> Void)?
 fileprivate var gOnSave: ((Int) -> Void)?
 fileprivate var gOnRadial: (() -> Void)?
+fileprivate var gOnPrevious: (() -> Void)?
+fileprivate var gOnNext: (() -> Void)?
 
 fileprivate func carbonEventHandler(_ handler: EventHandlerCallRef?, _ event: EventRef?, _ userData: UnsafeMutableRawPointer?) -> OSStatus {
     guard let event = event else { return noErr }
@@ -17,20 +19,15 @@ fileprivate func carbonEventHandler(_ handler: EventHandlerCallRef?, _ event: Ev
                       nil,
                       &hotKeyID)
     let slot = Int(hotKeyID.id)
-    let isRadial = hotKeyID.signature == 3
-    let isPaste = hotKeyID.signature == 1
-    if isRadial {
-        NSLog("[ClipSlots] Hotkey event: RADIAL MENU")
-    } else {
-        NSLog("[ClipSlots] Hotkey event: signature=\(hotKeyID.signature) slot=\(slot) action=\(isPaste ? "PASTE" : "SAVE")")
-    }
+    // v2.4.1: switch on signature to prevent new signatures from falling through to save
     DispatchQueue.main.async {
-        if isRadial {
-            gOnRadial?()
-        } else if isPaste {
-            gOnPaste?(slot)
-        } else {
-            gOnSave?(slot)
+        switch hotKeyID.signature {
+        case 1: gOnPaste?(slot)
+        case 2: gOnSave?(slot)
+        case 3: gOnRadial?()
+        case 4: gOnPrevious?()
+        case 5: gOnNext?()
+        default: break
         }
     }
     return noErr
@@ -68,7 +65,12 @@ final class HotKeyManager {
     ]
 
     @discardableResult
-    func register(config: AppConfig, onPaste: @escaping (Int) -> Void, onSave: @escaping (Int) -> Void, onRadial: @escaping () -> Void) -> [String] {
+    func register(config: AppConfig,
+                  onPaste: @escaping (Int) -> Void,
+                  onSave: @escaping (Int) -> Void,
+                  onRadial: @escaping () -> Void,
+                  onPrevious: @escaping () -> Void = {},
+                  onNext: @escaping () -> Void = {}) -> [String] {
         unregisterAll()
 
         var failures: [String] = []
@@ -76,6 +78,8 @@ final class HotKeyManager {
         gOnPaste = onPaste
         gOnSave = onSave
         gOnRadial = onRadial
+        gOnPrevious = onPrevious
+        gOnNext = onNext
 
         var eventType = EventTypeSpec(
             eventClass: OSType(kEventClassKeyboard),
@@ -103,6 +107,32 @@ final class HotKeyManager {
             } else {
                 NSLog("[ClipSlots] ERROR: RADIAL hotkey FAILED mod=\(modifiers) key=\(keyCode) status=\(status)")
                 failures.append("圆盘菜单快捷键 (\(config.radialKey)) 注册失败")
+            }
+        }
+
+        // v2.4.1: slot group navigation — Cmd+Left / Cmd+Right
+        if let (mods, keyCode) = parseSimpleKeybind("cmd+left") {
+            let id = EventHotKeyID(signature: 4, id: 0)
+            var ref: EventHotKeyRef?
+            let status = RegisterEventHotKey(UInt32(keyCode), UInt32(mods), id, GetApplicationEventTarget(), 0, &ref)
+            if status == noErr, let ref = ref {
+                hotKeyRefs.append(ref)
+                NSLog("[ClipSlots] PREVIOUS hotkey registered: mod=\(mods) key=\(keyCode)")
+            } else {
+                NSLog("[ClipSlots] ERROR: PREVIOUS hotkey FAILED status=\(status)")
+                failures.append("切换上一个槽位组快捷键 (Cmd+Left) 注册失败")
+            }
+        }
+        if let (mods, keyCode) = parseSimpleKeybind("cmd+right") {
+            let id = EventHotKeyID(signature: 5, id: 0)
+            var ref: EventHotKeyRef?
+            let status = RegisterEventHotKey(UInt32(keyCode), UInt32(mods), id, GetApplicationEventTarget(), 0, &ref)
+            if status == noErr, let ref = ref {
+                hotKeyRefs.append(ref)
+                NSLog("[ClipSlots] NEXT hotkey registered: mod=\(mods) key=\(keyCode)")
+            } else {
+                NSLog("[ClipSlots] ERROR: NEXT hotkey FAILED status=\(status)")
+                failures.append("切换下一个槽位组快捷键 (Cmd+Right) 注册失败")
             }
         }
 
@@ -181,6 +211,8 @@ final class HotKeyManager {
         gOnPaste = nil
         gOnSave = nil
         gOnRadial = nil
+        gOnPrevious = nil
+        gOnNext = nil
         NSLog("[ClipSlots] All hotkeys unregistered")
     }
 }

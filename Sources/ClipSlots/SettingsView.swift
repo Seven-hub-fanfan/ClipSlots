@@ -165,6 +165,7 @@ struct SettingsView: View {
                 helpRow("修饰键", "ctrl, option, cmd, shift")
                 helpRow("普通键", "0-9, a-z, f1-f12, space, tab, 方向键")
                 helpRow("槽位占位符", "{n} 代表槽位编号，例如 ctrl+{n}")
+                helpRow("槽位组切换", "Cmd+← → 在当前页面内的槽位组间循环切换")
             }
         }
     }

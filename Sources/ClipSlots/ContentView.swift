@@ -379,8 +379,9 @@ struct ContentView: View {
                         .background(Circle().fill(Color.primary.opacity(0.05)))
                 }
                 .buttonStyle(.plain)
-                .disabled(store.specialSlots.count >= store.specialSlotSettings.maxSpecialSlots)
-                .help("新建槽位组")
+                .disabled(store.currentPageSlotGroups.count >= store.specialSlotSettings.maxSpecialSlots)
+                .help(store.currentPageSlotGroups.count >= store.specialSlotSettings.maxSpecialSlots
+                      ? "当前页面的槽位组数量已达到上限" : "新建槽位组")
 
                 Button {
                     showingSpecialSlotManagement = true
@@ -403,7 +404,7 @@ struct ContentView: View {
             Image(systemName: "keyboard.fill")
                 .font(.system(size: 10))
                 .foregroundColor(.accentColor)
-            Text("\(pageName) / \(groupName) · ⌘+1~0 粘贴当前组槽位")
+            Text("\(pageName) / \(groupName) · ⌘+1~0 粘贴 · ⌘+← → 切组")
                 .font(.system(size: 10, weight: .medium))
                 .foregroundColor(.secondary)
             Spacer()
@@ -523,10 +524,11 @@ struct ContentView: View {
             keyChip("保存 \(humanReadableShortcut(store.config.saveKey))", icon: "square.and.arrow.down")
             keyChip("粘贴 \(humanReadableShortcut(store.config.pasteKey))", icon: "square.and.arrow.up")
             keyChip("圆盘 \(humanReadableShortcut(store.config.radialKey))", icon: "circle.grid.cross")
+            keyChip("← → 切组", icon: "arrow.left.arrow.right")
 
             Spacer()
 
-            Text("v2.4.0")
+            Text("v2.4.1")
                 .font(.caption2)
                 .foregroundColor(Color.secondary.opacity(0.65))
         }

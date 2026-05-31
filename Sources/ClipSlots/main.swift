@@ -294,11 +294,12 @@ final class SlotStoreObservable: ObservableObject {
     }
 
     private func nextAvailableSpecialSlotNumber() -> Int {
-        let existing = Set(specialSlots.compactMap { Int($0.name) })
+        // v2.4.1: auto-number based on current page's slot groups only
+        let existing = Set(currentPageSlotGroups.compactMap { Int($0.name) })
         for i in 1...specialSlotSettings.maxSpecialSlots {
             if !existing.contains(i) { return i }
         }
-        return specialSlots.count + 1
+        return currentPageSlotGroups.count + 1
     }
 
     func deleteSpecialSlot(id: String) {
@@ -365,6 +366,33 @@ final class SlotStoreObservable: ObservableObject {
             }
         } catch {
             NSLog("[ClipSlots] switchToPage error: \(error)")
+        }
+    }
+
+    // v2.4.1: Cmd+Left / Cmd+Right — cycle through slot groups in current page
+    func switchToPreviousSlotGroup() {
+        do {
+            try specialStorage.switchToAdjacentSpecialSlot(direction: .previous)
+            reloadAll()
+            refreshTrigger = UUID()
+            if let name = currentSpecialSlot?.name {
+                showToast("已切换至「\(name)」")
+            }
+        } catch {
+            NSLog("[ClipSlots] switchToPreviousSlotGroup error: \(error)")
+        }
+    }
+
+    func switchToNextSlotGroup() {
+        do {
+            try specialStorage.switchToAdjacentSpecialSlot(direction: .next)
+            reloadAll()
+            refreshTrigger = UUID()
+            if let name = currentSpecialSlot?.name {
+                showToast("已切换至「\(name)」")
+            }
+        } catch {
+            NSLog("[ClipSlots] switchToNextSlotGroup error: \(error)")
         }
     }
 
