@@ -1,28 +1,22 @@
 import SwiftUI
-import AVKit
 
 struct SlotPreviewView: View {
     let content: SlotContent
 
     @Environment(\.dismiss) private var dismiss
     @State private var largeImage: NSImage?
-    @State private var player: AVPlayer?
 
     var body: some View {
         VStack(spacing: 0) {
             // Preview area
             ZStack {
                 if content.isVideoFile, let url = content.primaryFileURL {
-                    VideoPlayer(player: player)
-                        .padding(16)
-                        .onAppear {
-                            player = AVPlayer(url: url)
-                            player?.play()
-                        }
-                        .onDisappear {
-                            player?.pause()
-                            player = nil
-                        }
+                    if FileManager.default.fileExists(atPath: url.path) {
+                        VideoPreviewView(url: url)
+                            .padding(16)
+                    } else {
+                        unavailableFilePreview(url: url)
+                    }
                 } else if let image = largeImage ?? content.inlineImage {
                     Image(nsImage: image)
                         .resizable()
@@ -88,7 +82,9 @@ struct SlotPreviewView: View {
         }
         .frame(minWidth: 560, minHeight: 420)
         .onAppear {
-            loadLargeImage()
+            if content.isImageFile {
+                loadLargeImage()
+            }
         }
     }
 
@@ -100,6 +96,30 @@ struct SlotPreviewView: View {
                 .padding(20)
                 .textSelection(.enabled)
         }
+    }
+
+    private func unavailableFilePreview(url: URL) -> some View {
+        VStack(spacing: 12) {
+            Image(systemName: "exclamationmark.triangle")
+                .font(.system(size: 42))
+                .foregroundColor(.orange)
+
+            Text("视频文件无法访问")
+                .font(.headline)
+
+            Text(url.path)
+                .font(.caption)
+                .foregroundColor(.secondary)
+                .lineLimit(2)
+                .truncationMode(.middle)
+
+            Button {
+                NSWorkspace.shared.activateFileViewerSelecting([url])
+            } label: {
+                Label("在 Finder 中显示", systemImage: "finder")
+            }
+        }
+        .padding(24)
     }
 
     private func loadLargeImage() {
