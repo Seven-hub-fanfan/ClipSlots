@@ -12,8 +12,7 @@ struct SlotPreviewView: View {
             ZStack {
                 if content.isVideoFile, let url = content.primaryFileURL {
                     if FileManager.default.fileExists(atPath: url.path) {
-                        VideoPreviewView(url: url)
-                            .padding(16)
+                        videoFilePreview(url: url)
                     } else {
                         unavailableFilePreview(url: url)
                     }
@@ -84,19 +83,90 @@ struct SlotPreviewView: View {
         .onAppear {
             if content.isImageFile {
                 loadLargeImage()
+            } else if content.isVideoFile, let url = content.primaryFileURL {
+                loadVideoThumbnail(url: url)
             }
         }
     }
 
-    private var fallbackPreview: some View {
-        ScrollView {
-            Text(content.preview)
-                .font(.system(.body, design: .monospaced))
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(20)
-                .textSelection(.enabled)
+    // MARK: - Video Preview (no AVKit — stable)
+
+    private func videoFilePreview(url: URL) -> some View {
+        VStack(spacing: 16) {
+            ZStack {
+                if let image = largeImage {
+                    Image(nsImage: image)
+                        .resizable()
+                        .aspectRatio(contentMode: .fit)
+                        .frame(maxHeight: 320)
+                        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                } else {
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .fill(Color.black.opacity(0.08))
+                        .frame(height: 260)
+                        .overlay {
+                            VStack(spacing: 10) {
+                                ProgressView()
+                                Text("正在生成视频预览…")
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                            }
+                        }
+                }
+
+                Image(systemName: "play.circle.fill")
+                    .font(.system(size: 64))
+                    .foregroundColor(.white.opacity(0.92))
+                    .shadow(radius: 8)
+            }
+
+            VStack(spacing: 4) {
+                Text(url.lastPathComponent)
+                    .font(.headline)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+
+                Text("点击下方按钮使用系统播放器打开视频")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+
+            HStack(spacing: 10) {
+                Button {
+                    NSWorkspace.shared.open(url)
+                } label: {
+                    Label("打开视频", systemImage: "play.rectangle")
+                }
+                .buttonStyle(.borderedProminent)
+
+                Button {
+                    NSWorkspace.shared.activateFileViewerSelecting([url])
+                } label: {
+                    Label("在 Finder 中显示", systemImage: "finder")
+                }
+
+                Button {
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.writeObjects([url as NSURL])
+                } label: {
+                    Label("复制文件", systemImage: "doc.on.doc")
+                }
+            }
+        }
+        .padding(24)
+    }
+
+    private func loadVideoThumbnail(url: URL) {
+        ThumbnailProvider.shared.thumbnail(
+            for: url,
+            cacheKey: "video-preview-\(url.absoluteString)",
+            size: CGSize(width: 960, height: 540)
+        ) { image, _ in
+            largeImage = image
         }
     }
+
+    // MARK: - Unavailable File
 
     private func unavailableFilePreview(url: URL) -> some View {
         VStack(spacing: 12) {
@@ -120,6 +190,18 @@ struct SlotPreviewView: View {
             }
         }
         .padding(24)
+    }
+
+    // MARK: - Fallback & Image
+
+    private var fallbackPreview: some View {
+        ScrollView {
+            Text(content.preview)
+                .font(.system(.body, design: .monospaced))
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(20)
+                .textSelection(.enabled)
+        }
     }
 
     private func loadLargeImage() {
