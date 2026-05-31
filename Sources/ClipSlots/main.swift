@@ -104,6 +104,16 @@ final class SlotStoreObservable: ObservableObject {
     @Published var hotkeyRegistrationErrors: [String] = []
     @Published var slotRenderTokens: [String: UUID] = [:]
 
+    // v2.4 Page state
+    @Published var pages: [SlotPage] = []
+    @Published var currentPageId: String = "default_page"
+    @Published var currentPage: SlotPage?
+
+    /// Slot groups belonging to the current page, sorted by order.
+    var currentPageSlotGroups: [SpecialSlot] {
+        specialSlots.filter { $0.pageId == currentPageId }.sorted { $0.order < $1.order }
+    }
+
     var lastNonClipSlotsApp: NSRunningApplication?
 
     var onConfigChanged: (() -> Void)?
@@ -131,6 +141,12 @@ final class SlotStoreObservable: ObservableObject {
 
     func loadSpecialSlots() {
         let index = specialStorage.loadIndex()
+
+        // v2.4: load pages
+        pages = index.pages
+        currentPageId = index.currentPageId.isEmpty ? (index.pages.first?.id ?? "default_page") : index.currentPageId
+        currentPage = index.pages.first { $0.id == currentPageId }
+
         specialSlots = index.specialSlots
 
         let fallbackId = index.specialSlots.first?.id ?? "default"
@@ -216,6 +232,7 @@ final class SlotStoreObservable: ObservableObject {
     }
 
     /// Preview AND activate: both UI and Cmd+number switch to this slot.
+    /// v2.4: also switches to the page that owns this slot group.
     func selectAndActivateSpecialSlot(id: String) {
         guard id != currentSpecialSlotId || id != activeHotkeySpecialSlotId else { return }
         guard specialSlots.contains(where: { $0.id == id }) else { return }
@@ -240,6 +257,12 @@ final class SlotStoreObservable: ObservableObject {
         }
 
         let index = specialStorage.loadIndex()
+
+        // v2.4: sync page state
+        pages = index.pages
+        currentPageId = index.currentPageId
+        currentPage = index.pages.first { $0.id == currentPageId }
+
         currentSpecialSlotId = id
         currentSpecialSlot = index.specialSlots.first { $0.id == id }
         activeHotkeySpecialSlotId = id
@@ -297,6 +320,54 @@ final class SlotStoreObservable: ObservableObject {
         }
     }
 
+    // MARK: - Page Operations (v2.4)
+
+    func createPage(name: String) {
+        do {
+            let page = try specialStorage.createPage(name: name)
+            try specialStorage.switchToPage(id: page.id)
+            reloadAll()
+            showToast("已创建页面「\(page.name)」")
+        } catch {
+            NSLog("[ClipSlots] createPage error: \(error)")
+            showAlert(message: "创建页面失败: \(error.localizedDescription)")
+        }
+    }
+
+    func renamePage(id: String, name: String) {
+        do {
+            try specialStorage.renamePage(id: id, name: name)
+            loadSpecialSlots()
+            showToast("页面已重命名")
+        } catch {
+            NSLog("[ClipSlots] renamePage error: \(error)")
+            showAlert(message: "重命名失败: \(error.localizedDescription)")
+        }
+    }
+
+    func deletePage(id: String) {
+        do {
+            try specialStorage.deletePage(id: id)
+            reloadAll()
+            showToast("页面已删除")
+        } catch {
+            NSLog("[ClipSlots] deletePage error: \(error)")
+            showAlert(message: "删除页面失败: \(error.localizedDescription)")
+        }
+    }
+
+    func switchToPage(id: String) {
+        do {
+            try specialStorage.switchToPage(id: id)
+            reloadAll()
+            if let page = pages.first(where: { $0.id == id }) {
+                showToast("已切换至「\(page.name)」")
+            }
+        } catch {
+            NSLog("[ClipSlots] switchToPage error: \(error)")
+        }
+    }
+
     // MARK: - Delete Special Slot with Confirmation
 
     func deleteSpecialSlotWithConfirmation(id: String) {
@@ -304,8 +375,8 @@ final class SlotStoreObservable: ObservableObject {
 
         if specialSlotSettings.confirmBeforeDeleteSpecialSlot {
             let alert = NSAlert()
-            alert.messageText = "删除特殊槽位？"
-            alert.informativeText = "将删除特殊槽位「\(target.name)」及其全部槽位内容。此操作会移动到回收目录。"
+            alert.messageText = "删除槽位组？"
+            alert.informativeText = "将删除槽位组「\(target.name)」及其全部槽位内容。此操作会移动到回收目录。"
             alert.alertStyle = .warning
             alert.addButton(withTitle: "删除")
             alert.addButton(withTitle: "取消")
@@ -338,8 +409,8 @@ final class SlotStoreObservable: ObservableObject {
         }
 
         let alert = NSAlert()
-        alert.messageText = "清空当前特殊槽位？"
-        alert.informativeText = "将清空「\(currentSpecialSlot?.name ?? "当前特殊槽位")」中的全部槽位内容。此操作不会删除特殊槽位本身。"
+        alert.messageText = "清空当前槽位组？"
+        alert.informativeText = "将清空「\(currentSpecialSlot?.name ?? "当前槽位组")」中的全部槽位内容。此操作不会删除槽位组本身。"
         alert.alertStyle = .warning
         alert.addButton(withTitle: "清空")
         alert.addButton(withTitle: "取消")
@@ -404,7 +475,7 @@ final class SlotStoreObservable: ObservableObject {
         let items = orderedNonEmptySlots()
 
         guard !items.isEmpty else {
-            showAlert(message: "当前特殊槽位没有可粘贴的内容")
+            showAlert(message: "当前槽位组没有可粘贴的内容")
             return
         }
 
@@ -1070,7 +1141,7 @@ final class SlotStoreObservable: ObservableObject {
 
             reloadAll()
             refreshTrigger = UUID()
-            showAlert(message: "已导入 \(successCount) 个文件到当前特殊槽位" + (failCount > 0 ? "，\(failCount) 个失败" : ""))
+            showAlert(message: "已导入 \(successCount) 个文件到当前槽位组" + (failCount > 0 ? "，\(failCount) 个失败" : ""))
 
         } catch {
             NSLog("[ClipSlots] Folder import error: \(error)")
@@ -1083,7 +1154,7 @@ final class SlotStoreObservable: ObservableObject {
     private func confirmFolderOverflow(count: Int, max: Int) -> FolderOverflowDecision {
         let alert = NSAlert()
         alert.messageText = "文件数量超过槽位上限"
-        alert.informativeText = "当前文件夹包含 \(count) 个可导入文件，但每个特殊槽位最多只能保存 \(max) 个子槽位。是否仅导入排序后的前 \(max) 个文件？"
+        alert.informativeText = "当前文件夹包含 \(count) 个可导入文件，但每个槽位组最多只能保存 \(max) 个子槽位。是否仅导入排序后的前 \(max) 个文件？"
         alert.addButton(withTitle: "确认导入前 \(max) 个")
         alert.addButton(withTitle: "取消")
 
@@ -1100,7 +1171,7 @@ final class SlotStoreObservable: ObservableObject {
     private func confirmOverwriteCurrentSpecialSlot() -> Bool {
         let alert = NSAlert()
         alert.messageText = "是否覆盖当前槽位内容？"
-        alert.informativeText = "批量导入会清空当前特殊槽位下已有的子槽位内容。是否继续？"
+        alert.informativeText = "批量导入会清空当前槽位组下已有的子槽位内容。是否继续？"
         alert.addButton(withTitle: "继续并覆盖")
         alert.addButton(withTitle: "取消")
         return alert.runModal() == .alertFirstButtonReturn
@@ -1154,8 +1225,8 @@ final class SlotStoreObservable: ObservableObject {
         let alert = NSAlert()
         alert.messageText = "检测到文件夹"
         alert.informativeText = "当前剪贴板内容是文件夹 (\(folderURL.lastPathComponent))。\n你想如何处理？"
-        alert.addButton(withTitle: "批量导入到当前特殊槽位")
-        alert.addButton(withTitle: "创建新的特殊槽位并导入")
+        alert.addButton(withTitle: "批量导入到当前槽位组")
+        alert.addButton(withTitle: "创建新的槽位组并导入")
         alert.addButton(withTitle: "作为普通文件保存")
         alert.addButton(withTitle: "取消")
 
@@ -1200,7 +1271,7 @@ final class SlotStoreObservable: ObservableObject {
             importFolderIntoCurrentSpecialSlot(folderURL)
         } catch {
             NSLog("[ClipSlots] createSpecialSlotAndImportFolder error: \(error)")
-            showAlert(message: "创建特殊槽位失败: \(error.localizedDescription)")
+            showAlert(message: "创建槽位组失败: \(error.localizedDescription)")
         }
     }
 }

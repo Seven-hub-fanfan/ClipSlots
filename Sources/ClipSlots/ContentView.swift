@@ -241,29 +241,36 @@ struct ContentView: View {
         }
     }
 
-    // Layer 2: Current Slot + Actions
+    // Layer 2: Page Selector + Actions
     private var actionBar: some View {
         HStack(spacing: 10) {
-            // Slot selector dropdown
+            // Page selector dropdown (v2.4)
             Menu {
-                ForEach(store.specialSlots) { special in
+                ForEach(store.pages) { page in
                     Button {
-                        store.switchSpecialSlot(id: special.id)
+                        store.switchToPage(id: page.id)
                     } label: {
                         Label(
-                            special.name,
-                            systemImage: special.id == store.currentSpecialSlotId ? "checkmark.circle.fill" : "folder.fill"
+                            page.name,
+                            systemImage: page.id == store.currentPageId ? "checkmark.circle.fill" : "square.grid.2x2"
                         )
                     }
                 }
                 Divider()
-                Button("新建特殊槽位") { showingSpecialSlotManagement = true }
-                Button("管理特殊槽位") { showingSpecialSlotManagement = true }
+                Button("新建页面") { promptCreatePage() }
+                if store.pages.count > 1, let page = store.currentPage {
+                    Button("重命名当前页面") {
+                        promptRenamePage(id: page.id, currentName: page.name)
+                    }
+                    Button("删除当前页面", role: .destructive) {
+                        confirmDeletePage(id: page.id, name: page.name)
+                    }
+                }
             } label: {
                 HStack(spacing: 5) {
-                    Image(systemName: "folder.fill")
+                    Image(systemName: "square.grid.2x2")
                         .font(.system(size: 11))
-                    Text(store.currentSpecialSlot?.name ?? "默认槽位")
+                    Text(store.currentPage?.name ?? "默认页面")
                         .font(.system(size: 13, weight: .semibold))
                     Image(systemName: "chevron.down")
                         .font(.system(size: 8, weight: .bold))
@@ -311,18 +318,19 @@ struct ContentView: View {
         }
     }
 
+    // v2.4: renamed from specialSlotTagBar — shows only current page's slot groups
     private var specialSlotTagBar: some View {
         ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 8) {
-                ForEach(store.specialSlots) { special in
-                    let isCurrent = special.id == store.currentSpecialSlotId
+                ForEach(store.currentPageSlotGroups) { group in
+                    let isCurrent = group.id == store.currentSpecialSlotId
 
                     Button {
-                        store.switchSpecialSlot(id: special.id)
+                        store.switchSpecialSlot(id: group.id)
                     } label: {
                         HStack(spacing: 5) {
                             Image(systemName: isCurrent ? "folder.fill" : "folder")
-                            Text(special.name)
+                            Text(group.name)
                         }
                         .font(.caption)
                         .padding(.horizontal, 10)
@@ -348,13 +356,13 @@ struct ContentView: View {
                     .buttonStyle(.plain)
                     .contextMenu {
                         Button {
-                            renameSpecialSlot(id: special.id, currentName: special.name)
+                            renameSlotGroup(id: group.id, currentName: group.name)
                         } label: {
                             Label("重命名", systemImage: "pencil")
                         }
-                        if store.specialSlots.count > 1 {
+                        if store.currentPageSlotGroups.count > 1 {
                             Button(role: .destructive) {
-                                store.deleteSpecialSlotWithConfirmation(id: special.id)
+                                store.deleteSpecialSlotWithConfirmation(id: group.id)
                             } label: {
                                 Label("删除", systemImage: "trash")
                             }
@@ -389,12 +397,13 @@ struct ContentView: View {
     }
 
     private var activeHotkeyLayerNotice: some View {
-        let name = store.currentSpecialSlot?.name ?? "默认槽位"
+        let pageName = store.currentPage?.name ?? "默认页面"
+        let groupName = store.currentSpecialSlot?.name ?? "默认槽位组"
         return HStack(spacing: 6) {
             Image(systemName: "keyboard.fill")
                 .font(.system(size: 10))
                 .foregroundColor(.accentColor)
-            Text("当前槽位组：\(name) · 粘贴快捷键：\(humanReadableShortcut(store.config.pasteKey))")
+            Text("\(pageName) / \(groupName) · ⌘+1~0 粘贴当前组槽位")
                 .font(.system(size: 10, weight: .medium))
                 .foregroundColor(.secondary)
             Spacer()
@@ -407,9 +416,10 @@ struct ContentView: View {
         )
     }
 
-    private func renameSpecialSlot(id: String, currentName: String) {
+    // v2.4: renamed from renameSpecialSlot
+    private func renameSlotGroup(id: String, currentName: String) {
         let alert = NSAlert()
-        alert.messageText = "重命名特殊槽位"
+        alert.messageText = "重命名槽位组"
         alert.addButton(withTitle: "确定")
         alert.addButton(withTitle: "取消")
 
@@ -424,6 +434,61 @@ struct ContentView: View {
             if !newName.isEmpty {
                 store.renameSpecialSlot(id: id, name: newName)
             }
+        }
+    }
+
+    // MARK: - Page Dialog Helpers (v2.4)
+
+    private func promptCreatePage() {
+        let alert = NSAlert()
+        alert.messageText = "新建页面"
+        alert.addButton(withTitle: "确定")
+        alert.addButton(withTitle: "取消")
+
+        let textField = NSTextField(frame: NSRect(x: 0, y: 0, width: 240, height: 24))
+        textField.placeholderString = "输入页面名称"
+        alert.accessoryView = textField
+
+        let response = alert.runModal()
+        if response == .alertFirstButtonReturn {
+            let name = textField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !name.isEmpty {
+                store.createPage(name: name)
+            }
+        }
+    }
+
+    private func promptRenamePage(id: String, currentName: String) {
+        let alert = NSAlert()
+        alert.messageText = "重命名页面"
+        alert.addButton(withTitle: "确定")
+        alert.addButton(withTitle: "取消")
+
+        let textField = NSTextField(frame: NSRect(x: 0, y: 0, width: 240, height: 24))
+        textField.stringValue = currentName
+        textField.placeholderString = "输入新名称"
+        alert.accessoryView = textField
+
+        let response = alert.runModal()
+        if response == .alertFirstButtonReturn {
+            let newName = textField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !newName.isEmpty {
+                store.renamePage(id: id, name: newName)
+            }
+        }
+    }
+
+    private func confirmDeletePage(id: String, name: String) {
+        let alert = NSAlert()
+        alert.messageText = "删除页面？"
+        alert.informativeText = "将删除页面「\(name)」及其下所有槽位组和槽位内容。此操作不可撤销。"
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "删除")
+        alert.addButton(withTitle: "取消")
+
+        let response = alert.runModal()
+        if response == .alertFirstButtonReturn {
+            store.deletePage(id: id)
         }
     }
 
@@ -461,7 +526,7 @@ struct ContentView: View {
 
             Spacer()
 
-            Text("v2.3.11")
+            Text("v2.4.0")
                 .font(.caption2)
                 .foregroundColor(Color.secondary.opacity(0.65))
         }

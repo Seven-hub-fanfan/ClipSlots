@@ -28,9 +28,9 @@ struct SpecialSlotManagementView: View {
                         .foregroundColor(.white)
                 }
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("特殊槽位管理")
+                    Text("槽位组管理")
                         .font(.system(size: 18, weight: .bold, design: .rounded))
-                    Text("创建、编辑和切换特殊槽位")
+                    Text("创建、编辑和切换槽位组")
                         .font(.caption)
                         .foregroundColor(.secondary)
                 }
@@ -90,7 +90,7 @@ struct SpecialSlotManagementView: View {
                 } else {
                     VStack {
                         Spacer()
-                        Text("请从左侧选择一个特殊槽位")
+                        Text("请从左侧选择一个槽位组")
                             .font(.subheadline)
                             .foregroundColor(.secondary)
                         Text("点击槽位组即可切换 Cmd+数字对应内容")
@@ -178,7 +178,7 @@ struct SpecialSlotManagementView: View {
     @ViewBuilder
     private func newSpecialSlotSheet() -> some View {
         VStack(spacing: 16) {
-            Text("新建特殊槽位").font(.headline)
+            Text("新建槽位组").font(.headline)
             TextField("槽位名称", text: $newName)
                 .textFieldStyle(.roundedBorder)
                 .frame(width: 200)
