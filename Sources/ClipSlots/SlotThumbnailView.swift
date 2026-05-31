@@ -33,10 +33,19 @@ struct SlotThumbnailView: View {
             case .loading:
                 loadingView
             case .loaded(let image):
-                Image(nsImage: image)
-                    .resizable()
-                    .aspectRatio(contentMode: .fit)
-                    .padding(4)
+                ZStack {
+                    Image(nsImage: image)
+                        .resizable()
+                        .aspectRatio(contentMode: .fit)
+                        .padding(4)
+
+                    if content.isVideoFile {
+                        Image(systemName: "play.circle.fill")
+                            .font(.system(size: 36))
+                            .foregroundColor(.white.opacity(0.9))
+                            .shadow(radius: 4)
+                    }
+                }
             case .failed:
                 fallbackView
             }

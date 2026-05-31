@@ -1,16 +1,29 @@
 import SwiftUI
+import AVKit
 
 struct SlotPreviewView: View {
     let content: SlotContent
 
     @Environment(\.dismiss) private var dismiss
     @State private var largeImage: NSImage?
+    @State private var player: AVPlayer?
 
     var body: some View {
         VStack(spacing: 0) {
             // Preview area
             ZStack {
-                if let image = largeImage ?? content.inlineImage {
+                if content.isVideoFile, let url = content.primaryFileURL {
+                    VideoPlayer(player: player)
+                        .padding(16)
+                        .onAppear {
+                            player = AVPlayer(url: url)
+                            player?.play()
+                        }
+                        .onDisappear {
+                            player?.pause()
+                            player = nil
+                        }
+                } else if let image = largeImage ?? content.inlineImage {
                     Image(nsImage: image)
                         .resizable()
                         .aspectRatio(contentMode: .fit)
@@ -48,6 +61,14 @@ struct SlotPreviewView: View {
                 }
 
                 Spacer()
+
+                if content.isVideoFile, let url = content.primaryFileURL {
+                    Button {
+                        NSWorkspace.shared.open(url)
+                    } label: {
+                        Label("打开文件", systemImage: "play.rectangle")
+                    }
+                }
 
                 Button {
                     _ = ClipboardManager.shared.restore(content)

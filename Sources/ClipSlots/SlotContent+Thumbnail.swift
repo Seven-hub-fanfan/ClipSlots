@@ -82,10 +82,22 @@ extension SlotContent {
         primaryFileURL != nil
     }
 
+    // MARK: - Video Detection
+
+    private static let videoExtensions: Set<String> = [
+        "mp4", "mov", "m4v", "avi", "mkv", "webm", "flv", "wmv"
+    ]
+
+    var isVideoFile: Bool {
+        guard let url = primaryFileURL else { return false }
+        return Self.videoExtensions.contains(url.pathExtension.lowercased())
+    }
+
     // MARK: - Display Kind
 
     enum SlotDisplayKind {
         case image
+        case video
         case file
         case text
         case empty
@@ -93,6 +105,7 @@ extension SlotContent {
 
     var displayKind: SlotDisplayKind {
         if hasImage || isImageFile { return .image }
+        if isVideoFile { return .video }
         if isFileContent { return .file }
         if !preview.isEmpty && preview != "(空)" { return .text }
         return .empty
@@ -127,6 +140,7 @@ extension SlotContent {
         if let url = primaryFileURL {
             let ext = url.pathExtension.uppercased()
             if ext.isEmpty { return "文件" }
+            if isVideoFile { return "\(ext) 视频" }
             return "\(ext) 文件"
         }
         if !preview.isEmpty {
@@ -140,6 +154,6 @@ extension SlotContent {
 
     /// True if this content can show a visual preview.
     var canPreview: Bool {
-        displayKind == .image || displayKind == .file
+        displayKind == .image || displayKind == .video || displayKind == .file
     }
 }

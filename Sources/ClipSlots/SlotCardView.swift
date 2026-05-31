@@ -245,6 +245,7 @@ struct SlotCardView: View {
         let text = content.preview
         if text.hasPrefix("[富文本]") { return "doc.richtext" }
         if text.hasPrefix("[图片") { return "photo" }
+        if content.isVideoFile { return "film" }
         if text.hasPrefix("[文件") { return "doc" }
         if text.hasPrefix("http://") || text.hasPrefix("https://") { return "link" }
         return "doc.text"
@@ -254,6 +255,7 @@ struct SlotCardView: View {
         let text = content.preview
         if text.hasPrefix("[富文本]") { return "富文本" }
         if text.hasPrefix("[图片") { return "图片" }
+        if content.isVideoFile { return "视频" }
         if text.hasPrefix("[文件") { return "文件" }
         if text.hasPrefix("http://") || text.hasPrefix("https://") { return "链接" }
         return "文本"
