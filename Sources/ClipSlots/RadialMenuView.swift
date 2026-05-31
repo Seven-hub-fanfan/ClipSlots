@@ -29,7 +29,7 @@ struct PieSegmentShape: Shape {
     }
 }
 
-// MARK: - Radial Menu View
+// MARK: - Radial Menu View (v2.4.2: page selector + group switcher)
 
 struct RadialMenuView: View {
     @ObservedObject var store: SlotStoreObservable
@@ -41,69 +41,182 @@ struct RadialMenuView: View {
     @State private var mode: RadialMenuMode = .childSlots
     @Environment(\.colorScheme) private var colorScheme
 
-    private let menuSize: CGFloat = 360
+    private let menuSize: CGFloat = 340
 
     private var displayCount: Int {
-        mode == .childSlots ? store.config.slots : store.specialSlots.count
+        mode == .childSlots ? store.config.slots : store.currentPageSlotGroups.count
+    }
+
+    private var canSwitchGroup: Bool {
+        store.currentPageSlotGroups.count > 1
     }
 
     var body: some View {
-        GeometryReader { geo in
-            let center = CGPoint(x: geo.size.width / 2, y: geo.size.height / 2)
-            let outerRadius = min(geo.size.width, geo.size.height) / 2
-            let deadZoneRadius = outerRadius * 0.24
+        VStack(spacing: 0) {
+            // v2.4.2: Page selector
+            pageSelector
 
+            // Current scope
+            scopeLabel
+                .padding(.top, 6)
+
+            // Radial circle
             ZStack {
-                Circle()
-                    .fill(AppTheme.radialBackground(colorScheme))
-                    .background(AppTheme.radialMaterial(colorScheme), in: Circle())
-                    .shadow(color: AppTheme.radialShadow(colorScheme), radius: 26, y: 9)
+                GeometryReader { geo in
+                    let center = CGPoint(x: geo.size.width / 2, y: geo.size.height / 2)
+                    let outerRadius = min(geo.size.width, geo.size.height) / 2
+                    let deadZoneRadius = outerRadius * 0.24
 
-                if displayCount > 0 {
-                    ForEach(0..<displayCount, id: \.self) { i in
-                        let segmentAngle = 360.0 / Double(displayCount)
-                        let a = Angle(degrees: Double(i) * segmentAngle - 90)
-                        dividerLine(
-                            center: center,
-                            angle: a,
-                            innerRadius: deadZoneRadius + 2,
-                            outerRadius: outerRadius - 3
-                        )
-                        .stroke(AppTheme.radialDivider(colorScheme), lineWidth: 1)
+                    ZStack {
+                        Circle()
+                            .fill(AppTheme.radialBackground(colorScheme))
+                            .background(AppTheme.radialMaterial(colorScheme), in: Circle())
+                            .shadow(color: AppTheme.radialShadow(colorScheme), radius: 26, y: 9)
+
+                        if displayCount > 0 {
+                            ForEach(0..<displayCount, id: \.self) { i in
+                                let segmentAngle = 360.0 / Double(displayCount)
+                                let a = Angle(degrees: Double(i) * segmentAngle - 90)
+                                dividerLine(
+                                    center: center,
+                                    angle: a,
+                                    innerRadius: deadZoneRadius + 2,
+                                    outerRadius: outerRadius - 3
+                                )
+                                .stroke(AppTheme.radialDivider(colorScheme), lineWidth: 1)
+                            }
+                        }
+
+                        if mode == .childSlots {
+                            childSlotSegments(center: center, outerRadius: outerRadius, deadZoneRadius: deadZoneRadius)
+                        } else {
+                            specialSlotSegments(center: center, outerRadius: outerRadius, deadZoneRadius: deadZoneRadius)
+                        }
+
+                        Circle()
+                            .stroke(AppTheme.radialDivider(colorScheme), lineWidth: 1)
+                            .frame(width: deadZoneRadius * 2 + 4, height: deadZoneRadius * 2 + 4)
+
+                        centerView(deadZoneRadius: deadZoneRadius)
+                    }
+                    .frame(width: outerRadius * 2, height: outerRadius * 2)
+                    .contentShape(Circle())
+                    .scaleEffect(appeared ? 1 : 0.92)
+                    .opacity(appeared ? 1 : 0)
+                    .animation(.spring(response: 0.22, dampingFraction: 0.82), value: appeared)
+                    .onAppear { appeared = true }
+                    .onContinuousHover(coordinateSpace: .local) { phase in
+                        switch phase {
+                        case .active(let location):
+                            updateHover(location: location, center: center, deadZoneRadius: deadZoneRadius)
+                        case .ended:
+                            hoveredIndex = nil
+                        }
+                    }
+                    .onTapGesture {
+                        handleTap()
                     }
                 }
-
-                if mode == .childSlots {
-                    childSlotSegments(center: center, outerRadius: outerRadius, deadZoneRadius: deadZoneRadius)
-                } else {
-                    specialSlotSegments(center: center, outerRadius: outerRadius, deadZoneRadius: deadZoneRadius)
-                }
-
-                Circle()
-                    .stroke(AppTheme.radialDivider(colorScheme), lineWidth: 1)
-                    .frame(width: deadZoneRadius * 2 + 4, height: deadZoneRadius * 2 + 4)
-
-                centerView(deadZoneRadius: deadZoneRadius)
             }
-            .frame(width: outerRadius * 2, height: outerRadius * 2)
-            .contentShape(Circle())
-            .scaleEffect(appeared ? 1 : 0.92)
-            .opacity(appeared ? 1 : 0)
-            .animation(.spring(response: 0.22, dampingFraction: 0.82), value: appeared)
-            .onAppear { appeared = true }
-            .onContinuousHover(coordinateSpace: .local) { phase in
-                switch phase {
-                case .active(let location):
-                    updateHover(location: location, center: center, deadZoneRadius: deadZoneRadius)
-                case .ended:
-                    hoveredIndex = nil
-                }
-            }
-            .onTapGesture {
-                handleTap()
-            }
+            .frame(width: menuSize, height: menuSize)
+
+            // v2.4.2: Slot group switcher
+            groupSwitcher
+                .padding(.top, 8)
+                .padding(.bottom, 6)
         }
-        .frame(width: menuSize, height: menuSize)
+        .frame(width: menuSize)
+        .padding(.vertical, 8)
+    }
+
+    // MARK: - Page Selector (v2.4.2)
+
+    private var pageSelector: some View {
+        Menu {
+            ForEach(store.pages) { page in
+                Button {
+                    store.switchToPage(id: page.id)
+                } label: {
+                    if page.id == store.currentPageId {
+                        Label(page.name, systemImage: "checkmark")
+                    } else {
+                        Text(page.name)
+                    }
+                }
+            }
+        } label: {
+            HStack(spacing: 4) {
+                Image(systemName: "square.grid.2x2")
+                    .font(.system(size: 10))
+                Text(store.currentPage?.name ?? "默认页面")
+                    .font(.system(size: 11, weight: .semibold))
+                    .lineLimit(1)
+                Image(systemName: "chevron.down")
+                    .font(.system(size: 7, weight: .bold))
+            }
+            .foregroundColor(.primary)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 4)
+            .background(
+                RoundedRectangle(cornerRadius: 5, style: .continuous)
+                    .fill(Color.primary.opacity(0.06))
+            )
+        }
+        .menuStyle(.borderlessButton)
+        .fixedSize()
+    }
+
+    // MARK: - Scope Label (v2.4.2)
+
+    private var scopeLabel: some View {
+        HStack(spacing: 4) {
+            Image(systemName: "folder")
+                .font(.system(size: 9))
+                .foregroundColor(.secondary)
+            Text(store.currentSpecialSlot?.name ?? "默认槽位组")
+                .font(.system(size: 10, weight: .medium))
+                .lineLimit(1)
+                .foregroundColor(.secondary)
+        }
+    }
+
+    // MARK: - Group Switcher (v2.4.2)
+
+    private var groupSwitcher: some View {
+        HStack(spacing: 0) {
+            Button {
+                store.switchToPreviousSlotGroup()
+            } label: {
+                Image(systemName: "chevron.left")
+                    .font(.system(size: 12, weight: .semibold))
+                    .frame(width: 30, height: 24)
+            }
+            .buttonStyle(.borderless)
+            .disabled(!canSwitchGroup)
+            .opacity(canSwitchGroup ? 1 : 0.3)
+
+            Spacer()
+
+            Text(store.currentSpecialSlot?.name ?? "默认槽位组")
+                .font(.system(size: 10, weight: .medium))
+                .lineLimit(1)
+                .truncationMode(.middle)
+                .frame(maxWidth: 160)
+
+            Spacer()
+
+            Button {
+                store.switchToNextSlotGroup()
+            } label: {
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 12, weight: .semibold))
+                    .frame(width: 30, height: 24)
+            }
+            .buttonStyle(.borderless)
+            .disabled(!canSwitchGroup)
+            .opacity(canSwitchGroup ? 1 : 0.3)
+        }
+        .padding(.horizontal, 24)
     }
 
     // MARK: - Child Slot Segments
@@ -135,14 +248,14 @@ struct RadialMenuView: View {
         }
     }
 
-    // MARK: - Special Slot Segments
+    // MARK: - Special Slot Segments (v2.4.2: current page only)
 
     @ViewBuilder
     private func specialSlotSegments(center: CGPoint, outerRadius: CGFloat, deadZoneRadius: CGFloat) -> some View {
-        let count = store.specialSlots.count
-        ForEach(0..<count, id: \.self) { i in
-            let special = store.specialSlots[i]
-            let segmentAngle = 360.0 / Double(count)
+        let groups = store.currentPageSlotGroups  // v2.4.2: per-page instead of global
+
+        ForEach(Array(groups.enumerated()), id: \.element.id) { i, special in
+            let segmentAngle = 360.0 / Double(groups.count)
             let startAngle = Angle(degrees: Double(i) * segmentAngle - 90)
             let endAngle = Angle(degrees: Double(i + 1) * segmentAngle - 90)
             let midAngle = Angle(degrees: (Double(i) + 0.5) * segmentAngle - 90)
@@ -194,8 +307,10 @@ struct RadialMenuView: View {
             if content.isEmpty { onDismiss(); return }
             onSelectSlot(slot)
         } else {
-            // special slots mode: switch to selected
-            let special = store.specialSlots[idx]
+            // v2.4.2: switch to selected slot group in current page
+            let groups = store.currentPageSlotGroups
+            guard idx < groups.count else { return }
+            let special = groups[idx]
             store.switchSpecialSlot(id: special.id)
             mode = .childSlots
             hoveredIndex = nil
@@ -236,32 +351,33 @@ struct RadialMenuView: View {
                 VStack(spacing: 4) {
                     if mode == .childSlots {
                         Image(systemName: idx != nil ? "arrow.up.doc.fill" : "folder.fill")
-                            .font(.system(size: 19, weight: .semibold))
+                            .font(.system(size: 18, weight: .semibold))
                             .foregroundColor(idx != nil ? .accentColor : .secondary)
 
                         if let slot = idx {
                             Text("槽位 \(slot)")
-                                .font(.system(size: 11, weight: .semibold))
+                                .font(.system(size: 10, weight: .semibold))
                             Text("点击粘贴")
-                                .font(.system(size: 9))
+                                .font(.system(size: 8))
                                 .foregroundColor(.secondary)
                         } else {
-                            Text(store.currentSpecialSlot?.name ?? "默认槽位")
-                                .font(.system(size: 10, weight: .semibold))
+                            Text(store.currentSpecialSlot?.name ?? "默认槽位组")
+                                .font(.system(size: 9, weight: .semibold))
                                 .lineLimit(1)
-                            Text("点击切换")
-                                .font(.system(size: 9))
+                                .frame(width: deadZoneRadius * 1.5)
+                            Text("点击切组")
+                                .font(.system(size: 8))
                                 .foregroundColor(.secondary)
                         }
                     } else {
                         Image(systemName: "arrow.uturn.backward")
-                            .font(.system(size: 19, weight: .semibold))
+                            .font(.system(size: 18, weight: .semibold))
                             .foregroundColor(.accentColor)
 
                         Text("返回")
-                            .font(.system(size: 11, weight: .semibold))
+                            .font(.system(size: 10, weight: .semibold))
                         Text("子槽位")
-                            .font(.system(size: 9))
+                            .font(.system(size: 8))
                             .foregroundColor(.secondary)
                     }
                 }
