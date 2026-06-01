@@ -29,6 +29,47 @@ struct PieSegmentShape: Shape {
     }
 }
 
+// MARK: - Radial Glass Pill (v2.4.5)
+
+private struct RadialGlassPill<Content: View>: View {
+    @Environment(\.colorScheme) private var colorScheme
+    let horizontalPadding: CGFloat
+    let verticalPadding: CGFloat
+    let content: Content
+
+    init(
+        horizontalPadding: CGFloat = 10,
+        verticalPadding: CGFloat = 5,
+        @ViewBuilder content: () -> Content
+    ) {
+        self.horizontalPadding = horizontalPadding
+        self.verticalPadding = verticalPadding
+        self.content = content()
+    }
+
+    var body: some View {
+        content
+            .foregroundColor(AppTheme.radialGlassButtonText(colorScheme))
+            .padding(.horizontal, horizontalPadding)
+            .padding(.vertical, verticalPadding)
+            .background(
+                Capsule()
+                    .fill(AppTheme.radialGlassButtonTint(colorScheme))
+                    .background(.thinMaterial, in: Capsule())
+            )
+            .overlay(
+                Capsule()
+                    .stroke(AppTheme.radialGlassButtonStroke(colorScheme), lineWidth: 0.7)
+            )
+            .overlay(
+                Capsule()
+                    .stroke(AppTheme.radialGlassButtonInnerStroke(colorScheme), lineWidth: 0.4)
+                    .padding(0.6)
+            )
+            .shadow(color: AppTheme.radialGlassButtonShadow(colorScheme), radius: 3, x: 0, y: 1)
+    }
+}
+
 // MARK: - Radial Menu View (v2.4.2: page selector + group switcher)
 
 struct RadialMenuView: View {
@@ -169,56 +210,53 @@ struct RadialMenuView: View {
     // MARK: - Scope Label (v2.4.2)
 
     private var scopeLabel: some View {
-        HStack(spacing: 4) {
-            Image(systemName: "folder")
-                .font(.system(size: 9))
-            Text(store.currentSpecialSlot?.name ?? "默认槽位组")
-                .font(.system(size: 10, weight: .medium))
-                .lineLimit(1)
+        RadialGlassPill(horizontalPadding: 10, verticalPadding: 4) {
+            HStack(spacing: 5) {
+                Image(systemName: "folder")
+                    .font(.system(size: 10, weight: .semibold))
+
+                Text(store.currentSpecialSlot?.name ?? "默认槽位组")
+                    .font(.system(size: 11, weight: .semibold))
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            }
         }
-        .foregroundColor(AppTheme.radialOverlaySubtext(colorScheme))
-        .shadow(color: AppTheme.radialOverlayTextShadow(colorScheme), radius: 2, x: 0, y: 1)
     }
 
     // MARK: - Group Switcher (v2.4.2)
 
     private var groupSwitcher: some View {
-        HStack(spacing: 0) {
-            Button {
-                store.switchToPreviousSlotGroup()
-            } label: {
-                Image(systemName: "chevron.left")
+        RadialGlassPill(horizontalPadding: 10, verticalPadding: 5) {
+            HStack(spacing: 10) {
+                Button {
+                    store.switchToPreviousSlotGroup()
+                } label: {
+                    Image(systemName: "chevron.left")
+                        .font(.system(size: 12, weight: .bold))
+                        .frame(width: 22, height: 20)
+                }
+                .buttonStyle(.plain)
+                .disabled(!canSwitchGroup)
+                .opacity(canSwitchGroup ? 1 : 0.35)
+
+                Text(store.currentSpecialSlot?.name ?? "默认槽位组")
                     .font(.system(size: 12, weight: .semibold))
-                    .frame(width: 30, height: 24)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .frame(maxWidth: 140)
+
+                Button {
+                    store.switchToNextSlotGroup()
+                } label: {
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 12, weight: .bold))
+                        .frame(width: 22, height: 20)
+                }
+                .buttonStyle(.plain)
+                .disabled(!canSwitchGroup)
+                .opacity(canSwitchGroup ? 1 : 0.35)
             }
-            .buttonStyle(.borderless)
-            .disabled(!canSwitchGroup)
-            .opacity(canSwitchGroup ? 1 : 0.3)
-
-            Spacer()
-
-            Text(store.currentSpecialSlot?.name ?? "默认槽位组")
-                .font(.system(size: 10, weight: .medium))
-                .lineLimit(1)
-                .truncationMode(.middle)
-                .frame(maxWidth: 160)
-
-            Spacer()
-
-            Button {
-                store.switchToNextSlotGroup()
-            } label: {
-                Image(systemName: "chevron.right")
-                    .font(.system(size: 12, weight: .semibold))
-                    .frame(width: 30, height: 24)
-            }
-            .buttonStyle(.borderless)
-            .disabled(!canSwitchGroup)
-            .opacity(canSwitchGroup ? 1 : 0.3)
         }
-        .foregroundColor(AppTheme.radialOverlayText(colorScheme))
-        .shadow(color: AppTheme.radialOverlayTextShadow(colorScheme), radius: 2, x: 0, y: 1)
-        .padding(.horizontal, 24)
     }
 
     // MARK: - Child Slot Segments

@@ -205,4 +205,36 @@ enum AppTheme {
     static func radialOverlayTextShadow(_ scheme: ColorScheme) -> Color {
         Color.black.opacity(0.78)
     }
+
+    // MARK: - Radial Menu Glass Button (v2.4.5)
+
+    static func radialGlassButtonTint(_ scheme: ColorScheme) -> Color {
+        scheme == .dark
+            ? Color.black.opacity(0.28)
+            : Color.white.opacity(0.42)
+    }
+
+    static func radialGlassButtonStroke(_ scheme: ColorScheme) -> Color {
+        scheme == .dark
+            ? Color.white.opacity(0.18)
+            : Color.white.opacity(0.72)
+    }
+
+    static func radialGlassButtonInnerStroke(_ scheme: ColorScheme) -> Color {
+        scheme == .dark
+            ? Color.black.opacity(0.18)
+            : Color.black.opacity(0.05)
+    }
+
+    static func radialGlassButtonText(_ scheme: ColorScheme) -> Color {
+        scheme == .dark
+            ? Color.white.opacity(0.92)
+            : Color.black.opacity(0.78)
+    }
+
+    static func radialGlassButtonShadow(_ scheme: ColorScheme) -> Color {
+        scheme == .dark
+            ? Color.black.opacity(0.22)
+            : Color.black.opacity(0.08)
+    }
 }
