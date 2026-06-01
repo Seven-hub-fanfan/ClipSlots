@@ -94,12 +94,9 @@ struct RadialMenuView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            // v2.4.2: Page selector
-            pageSelector
-
-            // Current scope
-            scopeLabel
-                .padding(.top, 6)
+            // v2.4.6: Merged page + scope
+            topNavigationBar
+                .padding(.bottom, 6)
 
             // Radial circle
             ZStack {
@@ -173,9 +170,9 @@ struct RadialMenuView: View {
         .padding(.vertical, 8)
     }
 
-    // MARK: - Page Selector (v2.4.2)
+    // MARK: - Top Navigation Bar (v2.4.6: merged page + scope)
 
-    private var pageSelector: some View {
+    private var pageSelectorInline: some View {
         Menu {
             ForEach(store.pages) { page in
                 Button {
@@ -191,34 +188,41 @@ struct RadialMenuView: View {
         } label: {
             HStack(spacing: 4) {
                 Image(systemName: "square.grid.2x2")
-                    .font(.system(size: 10))
+                    .font(.system(size: 11, weight: .semibold))
+
                 Text(store.currentPage?.name ?? "默认页面")
-                    .font(.system(size: 11, weight: .semibold))
-                    .lineLimit(1)
-                Image(systemName: "chevron.down")
-                    .font(.system(size: 7, weight: .bold))
-            }
-            .foregroundColor(AppTheme.radialOverlayText(colorScheme))
-            .shadow(color: AppTheme.radialOverlayTextShadow(colorScheme), radius: 2, x: 0, y: 1)
-            .padding(.horizontal, 10)
-            .padding(.vertical, 4)
-        }
-        .menuStyle(.borderlessButton)
-        .fixedSize()
-    }
-
-    // MARK: - Scope Label (v2.4.2)
-
-    private var scopeLabel: some View {
-        RadialGlassPill(horizontalPadding: 10, verticalPadding: 4) {
-            HStack(spacing: 5) {
-                Image(systemName: "folder")
-                    .font(.system(size: 10, weight: .semibold))
-
-                Text(store.currentSpecialSlot?.name ?? "默认槽位组")
-                    .font(.system(size: 11, weight: .semibold))
+                    .font(.system(size: 12, weight: .semibold))
                     .lineLimit(1)
                     .truncationMode(.middle)
+                    .frame(maxWidth: 120)
+
+                Image(systemName: "chevron.down")
+                    .font(.system(size: 8, weight: .bold))
+            }
+        }
+        .menuStyle(.borderlessButton)
+        .buttonStyle(.plain)
+    }
+
+    private var topNavigationBar: some View {
+        RadialGlassPill(horizontalPadding: 10, verticalPadding: 5) {
+            HStack(spacing: 8) {
+                pageSelectorInline
+
+                Text("\u{00B7}")
+                    .font(.system(size: 11, weight: .semibold))
+                    .opacity(0.55)
+
+                HStack(spacing: 4) {
+                    Image(systemName: "folder")
+                        .font(.system(size: 10, weight: .semibold))
+
+                    Text(store.currentSpecialSlot?.name ?? "默认槽位组")
+                        .font(.system(size: 11, weight: .semibold))
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                        .frame(maxWidth: 90)
+                }
             }
         }
     }
