@@ -35,9 +35,9 @@ final class RadialMenuWindowController {
     ) {
         dismiss()
 
-        // v2.4.4: compact window, just enough to fit the disc + controls
-        let menuWidth: CGFloat = 260
-        let menuHeight: CGFloat = 310
+        // v2.4.3: wider window with more breathing room
+        let menuWidth: CGFloat = 380
+        let menuHeight: CGFloat = 500
         self.onDismissCallback = onDismiss
 
         // Read theme mode so radial menu matches main window appearance
@@ -54,7 +54,7 @@ final class RadialMenuWindowController {
         let hosting = NSHostingView(rootView: radialView)
         hosting.frame = NSRect(x: 0, y: 0, width: menuWidth, height: menuHeight)
         hosting.wantsLayer = true
-        hosting.layer?.backgroundColor = NSColor.clear.cgColor
+        hosting.layer?.cornerRadius = 28
         hosting.layer?.masksToBounds = false
 
         let windowOrigin = NSRect(
