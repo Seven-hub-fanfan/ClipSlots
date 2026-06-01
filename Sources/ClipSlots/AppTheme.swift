@@ -237,4 +237,44 @@ enum AppTheme {
             ? Color.black.opacity(0.22)
             : Color.black.opacity(0.08)
     }
+
+    // MARK: - Search Field (v2.5)
+
+    static func searchFieldBackground(_ scheme: ColorScheme) -> Color {
+        scheme == .dark
+            ? Color.white.opacity(0.06)
+            : Color.black.opacity(0.04)
+    }
+
+    static func searchFieldStroke(_ scheme: ColorScheme) -> Color {
+        scheme == .dark
+            ? Color.white.opacity(0.10)
+            : Color.black.opacity(0.08)
+    }
+
+    // MARK: - Filter Chips (v2.5)
+
+    static func filterChipBackground(_ scheme: ColorScheme) -> Color {
+        scheme == .dark
+            ? Color.white.opacity(0.05)
+            : Color.black.opacity(0.04)
+    }
+
+    static func filterChipSelectedBackground(_ scheme: ColorScheme) -> Color {
+        scheme == .dark
+            ? Color.accentColor.opacity(0.28)
+            : Color.accentColor.opacity(0.16)
+    }
+
+    static func filterChipText(_ scheme: ColorScheme) -> Color {
+        scheme == .dark
+            ? Color.white.opacity(0.72)
+            : Color.black.opacity(0.66)
+    }
+
+    static func filterChipSelectedText(_ scheme: ColorScheme) -> Color {
+        scheme == .dark
+            ? Color.white.opacity(0.96)
+            : Color.accentColor
+    }
 }

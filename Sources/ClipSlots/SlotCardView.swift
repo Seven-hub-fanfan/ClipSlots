@@ -79,6 +79,10 @@ struct SlotCardView: View {
             SlotPreviewView(content: content)
                 .frame(width: 640, height: 500)
         }
+        .contextMenu {
+            // v2.5: Type-specific actions
+            typeSpecificMenuItems
+        }
     }
 
     private var headerRow: some View {
@@ -259,6 +263,51 @@ struct SlotCardView: View {
         if text.hasPrefix("[文件") { return "文件" }
         if text.hasPrefix("http://") || text.hasPrefix("https://") { return "链接" }
         return "文本"
+    }
+
+    // MARK: - Context Menu (v2.5)
+
+    @ViewBuilder
+    private var typeSpecificMenuItems: some View {
+        if let fileURL = content.primaryFileURL {
+            Divider()
+
+            let exists = SlotTypeActions.fileExists(fileURL)
+
+            Button("打开文件") {
+                SlotTypeActions.openFile(fileURL)
+            }
+            .disabled(!exists)
+
+            Button("在 Finder 中显示") {
+                SlotTypeActions.revealInFinder(fileURL)
+            }
+            .disabled(!exists)
+
+            Button("复制文件路径") {
+                SlotTypeActions.copyFilePath(fileURL)
+            }
+
+            Button("复制文件名") {
+                SlotTypeActions.copyFileName(fileURL)
+            }
+        }
+
+        if let webURL = content.detectedWebURL {
+            Divider()
+
+            Button("打开链接") {
+                SlotTypeActions.openWebURL(webURL)
+            }
+
+            Button("复制链接") {
+                SlotTypeActions.copyString(webURL.absoluteString)
+            }
+
+            Button("复制 Markdown 链接") {
+                SlotTypeActions.copyMarkdownLink(webURL)
+            }
+        }
     }
 
     private var timeAgo: String {

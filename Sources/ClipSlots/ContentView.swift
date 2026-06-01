@@ -9,6 +9,10 @@ struct ContentView: View {
 
     @AppStorage("appearanceMode") private var appearanceModeRaw = ThemeMode.system.rawValue
 
+    // v2.5: Search state
+    @State private var searchText: String = ""
+    @State private var selectedFilter: SlotFilterType = .all
+
     private func cycleAppearanceMode() {
         let current = ThemeMode(rawValue: appearanceModeRaw) ?? .system
         switch current {
@@ -28,7 +32,18 @@ struct ContentView: View {
                     hotkeyErrorBanner
                 }
 
+                // v2.5: Search bar
+                searchSection
+                    .padding(.horizontal, AppTheme.pagePadding)
+                    .padding(.vertical, 8)
+
                 ScrollView {
+                    // v2.5: No results hint
+                    if isSearchActive && matchedSlotCount == 0 {
+                        noResultsView
+                            .padding(.top, 32)
+                    }
+
                     LazyVGrid(
                         columns: [
                             GridItem(.adaptive(minimum: 240, maximum: 300), spacing: 14)
@@ -36,11 +51,15 @@ struct ContentView: View {
                         spacing: 14
                     ) {
                         ForEach(1...store.config.slots, id: \.self) { slot in
+                            let content = store.slots[slot] ?? SlotContent()
+                            let label = store.labels[slot] ?? ""
+                            let isMatched = slotMatched(slot)
+
                             SlotCardView(
                                 slot: slot,
-                                content: store.slots[slot] ?? SlotContent(),
+                                content: content,
                                 specialSlotId: store.currentSpecialSlotId,
-                                label: store.labels[slot] ?? "",
+                                label: label,
                                 saveShortcut: shortcutPreview(store.config.saveKey, slot: slot),
                                 pasteShortcut: shortcutPreview(store.config.pasteKey, slot: slot),
                                 onPaste: {
@@ -63,6 +82,9 @@ struct ContentView: View {
                                     store.setLabel(slot, label: newLabel.isEmpty ? nil : newLabel)
                                 }
                             )
+                            .opacity(!isSearchActive || isMatched ? 1.0 : 0.22)
+                            .saturation(!isSearchActive || isMatched ? 1.0 : 0.35)
+                            .allowsHitTesting(!isSearchActive || isMatched)
                         }
                     }
                     .padding(AppTheme.pagePadding)
@@ -528,7 +550,7 @@ struct ContentView: View {
 
             Spacer()
 
-            Text("v2.4.8")
+            Text("v2.5.0")
                 .font(.caption2)
                 .foregroundColor(Color.secondary.opacity(0.65))
         }
@@ -555,6 +577,60 @@ struct ContentView: View {
 
     private var filledSlotCount: Int {
         store.slots.values.filter { !$0.isEmpty }.count
+    }
+
+    // MARK: - Search (v2.5)
+
+    private var searchSection: some View {
+        VStack(spacing: 4) {
+            SlotSearchBar(searchText: $searchText, selectedFilter: $selectedFilter)
+
+            if isSearchActive {
+                Text(matchedSlotCount == 0
+                     ? "未找到匹配槽位"
+                     : "找到 \(matchedSlotCount) 个匹配槽位")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                    .padding(.top, 2)
+            }
+        }
+    }
+
+    private var noResultsView: some View {
+        VStack(spacing: 8) {
+            Image(systemName: "magnifyingglass")
+                .font(.system(size: 28))
+                .foregroundColor(.secondary.opacity(0.5))
+            Text("未找到匹配槽位")
+                .font(.subheadline)
+                .foregroundColor(.secondary)
+            Button("清除搜索") {
+                searchText = ""
+                selectedFilter = .all
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.small)
+        }
+    }
+
+    private var isSearchActive: Bool {
+        SlotSearchMatcher.isActive(query: searchText, filter: selectedFilter)
+    }
+
+    private var matchedSlotCount: Int {
+        (1...store.config.slots).filter { slotMatched($0) }.count
+    }
+
+    private func slotMatched(_ slot: Int) -> Bool {
+        let content = store.slots[slot] ?? SlotContent()
+        let label = store.labels[slot] ?? ""
+        return SlotSearchMatcher.matches(
+            slot: slot,
+            content: content,
+            label: label,
+            query: searchText,
+            filter: selectedFilter
+        )
     }
 }
 
