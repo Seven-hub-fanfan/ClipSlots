@@ -193,10 +193,10 @@ struct RadialMenuView: View {
                 }
             }
         } label: {
-            RadialGlassPill(horizontalPadding: 11, verticalPadding: 5) {
-                HStack(spacing: 6) {
+            RadialGlassPill(horizontalPadding: 12, verticalPadding: 5) {
+                HStack(spacing: 8) {
                     Image(systemName: "square.grid.2x2")
-                        .font(.system(size: 12, weight: .semibold))
+                        .font(.system(size: 13, weight: .semibold))
 
                     Text(store.currentPage?.name ?? "默认页面")
                         .font(.system(size: 13, weight: .semibold))
@@ -205,7 +205,7 @@ struct RadialMenuView: View {
                         .frame(maxWidth: 150)
 
                     Image(systemName: "chevron.down")
-                        .font(.system(size: 8, weight: .bold))
+                        .font(.system(size: 9, weight: .bold))
                 }
             }
         }
