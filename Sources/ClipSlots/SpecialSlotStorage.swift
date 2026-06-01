@@ -619,7 +619,7 @@ final class SpecialSlotStorage {
 
     private var storageCache: [String: SlotStorage] = [:]
 
-    private func slotStorage(for specialSlotId: String) -> SlotStorage {
+    func slotStorage(for specialSlotId: String) -> SlotStorage {
         if let cached = storageCache[specialSlotId] {
             return cached
         }

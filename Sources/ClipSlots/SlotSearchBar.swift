@@ -1,15 +1,16 @@
 import SwiftUI
 
-// MARK: - Slot Search Bar (v2.5)
+// MARK: - Slot Search Bar (v2.5.1)
 
 struct SlotSearchBar: View {
     @Binding var searchText: String
     @Binding var selectedFilter: SlotFilterType
+    @Binding var searchScope: SlotSearchScope
     @Environment(\.colorScheme) private var colorScheme
 
     var body: some View {
         VStack(spacing: 6) {
-            // Search field
+            // Search field + scope picker
             HStack(spacing: 8) {
                 Image(systemName: "magnifyingglass")
                     .foregroundColor(.secondary)
@@ -30,6 +31,16 @@ struct SlotSearchBar: View {
                     .buttonStyle(.plain)
                     .contentShape(Rectangle())
                 }
+
+                // Scope picker
+                Picker("", selection: $searchScope) {
+                    ForEach(SlotSearchScope.allCases) { scope in
+                        Label(scope.title, systemImage: scope.systemImage)
+                            .tag(scope)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .frame(width: 110)
             }
             .padding(.horizontal, 10)
             .padding(.vertical, 7)

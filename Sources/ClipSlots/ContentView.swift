@@ -12,6 +12,7 @@ struct ContentView: View {
     // v2.5: Search state
     @State private var searchText: String = ""
     @State private var selectedFilter: SlotFilterType = .all
+    @State private var searchScope: SlotSearchScope = .currentGroup
 
     private func cycleAppearanceMode() {
         let current = ThemeMode(rawValue: appearanceModeRaw) ?? .system
@@ -39,7 +40,7 @@ struct ContentView: View {
 
                 ScrollView {
                     // v2.5: No results hint
-                    if isSearchActive && matchedSlotCount == 0 {
+                    if searchScope == .currentGroup && isSearchActive && matchedSlotCount == 0 {
                         noResultsView
                             .padding(.top, 32)
                     }
@@ -550,7 +551,7 @@ struct ContentView: View {
 
             Spacer()
 
-            Text("v2.5.0")
+            Text("v2.5.1")
                 .font(.caption2)
                 .foregroundColor(Color.secondary.opacity(0.65))
         }
@@ -579,19 +580,78 @@ struct ContentView: View {
         store.slots.values.filter { !$0.isEmpty }.count
     }
 
-    // MARK: - Search (v2.5)
+    // MARK: - Search (v2.5.1)
 
     private var searchSection: some View {
         VStack(spacing: 4) {
-            SlotSearchBar(searchText: $searchText, selectedFilter: $selectedFilter)
+            SlotSearchBar(
+                searchText: $searchText,
+                selectedFilter: $selectedFilter,
+                searchScope: $searchScope
+            )
 
             if isSearchActive {
-                Text(matchedSlotCount == 0
-                     ? "未找到匹配槽位"
-                     : "找到 \(matchedSlotCount) 个匹配槽位")
+                if searchScope == .currentGroup {
+                    Text(matchedSlotCount == 0
+                         ? "组内未找到匹配槽位"
+                         : "组内找到 \(matchedSlotCount) 个匹配槽位")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                        .padding(.top, 2)
+                } else {
+                    globalSearchSummary
+                        .padding(.top, 2)
+                }
+            }
+        }
+    }
+
+    private var globalSearchSummary: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                Image(systemName: "globe")
+                    .font(.system(size: 11))
+                Text(globalSearchResults.isEmpty
+                     ? "全局未找到匹配槽位"
+                     : "全局找到 \(globalSearchResults.count) 个匹配槽位")
                     .font(.caption)
                     .foregroundColor(.secondary)
-                    .padding(.top, 2)
+                Spacer()
+            }
+
+            ForEach(globalSearchResults.prefix(5)) { result in
+                Button {
+                    jumpToSearchResult(result)
+                } label: {
+                    HStack(spacing: 8) {
+                        Text("槽位 \(result.slot)")
+                            .font(.caption.weight(.semibold))
+                            .foregroundColor(.accentColor)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(result.title)
+                                .font(.caption)
+                                .lineLimit(1)
+                            Text(result.subtitle)
+                                .font(.caption2)
+                                .foregroundColor(.secondary)
+                                .lineLimit(1)
+                        }
+                        Spacer()
+                    }
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 5)
+                    .background(
+                        RoundedRectangle(cornerRadius: 6)
+                            .fill(Color.primary.opacity(0.04))
+                    )
+                }
+                .buttonStyle(.plain)
+            }
+
+            if globalSearchResults.count > 5 {
+                Text("还有 \(globalSearchResults.count - 5) 个结果，请继续细化关键词")
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
             }
         }
     }
@@ -631,6 +691,28 @@ struct ContentView: View {
             query: searchText,
             filter: selectedFilter
         )
+    }
+
+    // MARK: - Global Search (v2.5.1)
+
+    private var globalSearchResults: [SlotGlobalSearchResult] {
+        guard searchScope == .global, isSearchActive else { return [] }
+
+        return store.allSearchableSlots().filter { result in
+            SlotSearchMatcher.matches(
+                slot: result.slot,
+                content: result.content,
+                label: result.label,
+                query: searchText,
+                filter: selectedFilter
+            )
+        }
+    }
+
+    private func jumpToSearchResult(_ result: SlotGlobalSearchResult) {
+        store.switchToPage(id: result.pageId)
+        store.switchSpecialSlot(id: result.groupId)
+        searchScope = .currentGroup
     }
 }
 

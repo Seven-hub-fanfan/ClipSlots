@@ -1302,4 +1302,33 @@ final class SlotStoreObservable: ObservableObject {
             showAlert(message: "创建槽位组失败: \(error.localizedDescription)")
         }
     }
+
+    // MARK: - Global Search (v2.5.1)
+
+    /// Return all searchable slots across all pages and groups (read-only).
+    func allSearchableSlots() -> [SlotGlobalSearchResult] {
+        var results: [SlotGlobalSearchResult] = []
+
+        for page in pages {
+            let groups = specialSlots.filter { $0.pageId == page.id }.sorted { $0.order < $1.order }
+            for group in groups {
+                let storage = specialStorage.slotStorage(for: group.id)
+                let snapshot = storage.snapshot()
+                for (slot, content) in snapshot {
+                    let label = storage.getLabel(slot) ?? ""
+                    results.append(SlotGlobalSearchResult(
+                        pageId: page.id,
+                        pageName: page.name,
+                        groupId: group.id,
+                        groupName: group.name,
+                        slot: slot,
+                        content: content,
+                        label: label
+                    ))
+                }
+            }
+        }
+
+        return results
+    }
 }
