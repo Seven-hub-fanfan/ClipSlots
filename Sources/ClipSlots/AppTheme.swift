@@ -210,8 +210,8 @@ enum AppTheme {
 
     static func radialGlassButtonTint(_ scheme: ColorScheme) -> Color {
         scheme == .dark
-            ? Color.black.opacity(0.28)
-            : Color.white.opacity(0.42)
+            ? Color.black.opacity(0.34)
+            : Color.white.opacity(0.62)
     }
 
     static func radialGlassButtonStroke(_ scheme: ColorScheme) -> Color {

@@ -193,23 +193,39 @@ struct RadialMenuView: View {
                 }
             }
         } label: {
-            RadialGlassPill(horizontalPadding: 12, verticalPadding: 5) {
-                HStack(spacing: 8) {
-                    Image(systemName: "square.grid.2x2")
-                        .font(.system(size: 13, weight: .semibold))
+            HStack(spacing: 8) {
+                Image(systemName: "square.grid.2x2")
+                    .font(.system(size: 13, weight: .semibold))
 
-                    Text(store.currentPage?.name ?? "默认页面")
-                        .font(.system(size: 13, weight: .semibold))
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                        .frame(maxWidth: 150)
+                Text(store.currentPage?.name ?? "默认页面")
+                    .font(.system(size: 13, weight: .semibold))
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .frame(maxWidth: 150)
 
-                    Image(systemName: "chevron.down")
-                        .font(.system(size: 9, weight: .bold))
-                }
+                Image(systemName: "chevron.down")
+                    .font(.system(size: 9, weight: .bold))
             }
+            .foregroundColor(AppTheme.radialGlassButtonText(colorScheme))
+            .padding(.horizontal, 12)
+            .padding(.vertical, 5)
+            .background(
+                Capsule()
+                    .fill(AppTheme.radialGlassButtonTint(colorScheme))
+                    .background(.thinMaterial, in: Capsule())
+            )
+            .overlay(
+                Capsule()
+                    .stroke(AppTheme.radialGlassButtonStroke(colorScheme), lineWidth: 0.7)
+            )
+            .overlay(
+                Capsule()
+                    .stroke(AppTheme.radialGlassButtonInnerStroke(colorScheme), lineWidth: 0.4)
+                    .padding(0.6)
+            )
+            .shadow(color: AppTheme.radialGlassButtonShadow(colorScheme), radius: 3, x: 0, y: 1)
+            .contentShape(Capsule())
         }
-        .menuStyle(.borderlessButton)
         .buttonStyle(.plain)
         .fixedSize()
     }
