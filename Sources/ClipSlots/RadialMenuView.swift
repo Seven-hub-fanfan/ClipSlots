@@ -71,7 +71,10 @@ struct RadialMenuView: View {
                         Circle()
                             .fill(AppTheme.radialBackground(colorScheme))
                             .background(AppTheme.radialMaterial(colorScheme), in: Circle())
-                            .shadow(color: AppTheme.radialShadow(colorScheme), radius: 26, y: 9)
+                            .overlay(
+                                Circle()
+                                    .stroke(Color.white.opacity(0.15), lineWidth: 0.6)
+                            )
 
                         if displayCount > 0 {
                             ForEach(0..<displayCount, id: \.self) { i in
@@ -154,13 +157,10 @@ struct RadialMenuView: View {
                 Image(systemName: "chevron.down")
                     .font(.system(size: 7, weight: .bold))
             }
-            .foregroundColor(.primary)
+            .foregroundColor(AppTheme.radialOverlayText(colorScheme))
+            .shadow(color: AppTheme.radialOverlayTextShadow(colorScheme), radius: 2, x: 0, y: 1)
             .padding(.horizontal, 10)
             .padding(.vertical, 4)
-            .background(
-                RoundedRectangle(cornerRadius: 5, style: .continuous)
-                    .fill(Color.primary.opacity(0.06))
-            )
         }
         .menuStyle(.borderlessButton)
         .fixedSize()
@@ -172,12 +172,12 @@ struct RadialMenuView: View {
         HStack(spacing: 4) {
             Image(systemName: "folder")
                 .font(.system(size: 9))
-                .foregroundColor(.secondary)
             Text(store.currentSpecialSlot?.name ?? "默认槽位组")
                 .font(.system(size: 10, weight: .medium))
                 .lineLimit(1)
-                .foregroundColor(.secondary)
         }
+        .foregroundColor(AppTheme.radialOverlaySubtext(colorScheme))
+        .shadow(color: AppTheme.radialOverlayTextShadow(colorScheme), radius: 2, x: 0, y: 1)
     }
 
     // MARK: - Group Switcher (v2.4.2)
@@ -216,6 +216,8 @@ struct RadialMenuView: View {
             .disabled(!canSwitchGroup)
             .opacity(canSwitchGroup ? 1 : 0.3)
         }
+        .foregroundColor(AppTheme.radialOverlayText(colorScheme))
+        .shadow(color: AppTheme.radialOverlayTextShadow(colorScheme), radius: 2, x: 0, y: 1)
         .padding(.horizontal, 24)
     }
 

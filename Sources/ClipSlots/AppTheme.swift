@@ -191,4 +191,18 @@ enum AppTheme {
     static func radialMaterial(_ scheme: ColorScheme) -> Material {
         scheme == .dark ? .ultraThinMaterial : .regularMaterial
     }
+
+    // MARK: - Radial Menu HUD Overlay Text (v2.4.4)
+
+    static func radialOverlayText(_ scheme: ColorScheme) -> Color {
+        Color.white.opacity(0.94)
+    }
+
+    static func radialOverlaySubtext(_ scheme: ColorScheme) -> Color {
+        Color.white.opacity(0.82)
+    }
+
+    static func radialOverlayTextShadow(_ scheme: ColorScheme) -> Color {
+        Color.black.opacity(0.78)
+    }
 }

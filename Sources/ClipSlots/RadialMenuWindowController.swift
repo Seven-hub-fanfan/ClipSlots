@@ -54,8 +54,9 @@ final class RadialMenuWindowController {
         let hosting = NSHostingView(rootView: radialView)
         hosting.frame = NSRect(x: 0, y: 0, width: menuWidth, height: menuHeight)
         hosting.wantsLayer = true
-        hosting.layer?.cornerRadius = 20
-        hosting.layer?.masksToBounds = true
+        hosting.layer?.backgroundColor = NSColor.clear.cgColor
+        hosting.layer?.cornerRadius = 0
+        hosting.layer?.masksToBounds = false
 
         let windowOrigin = NSRect(
             x: screenPoint.x - menuWidth / 2,
@@ -72,7 +73,7 @@ final class RadialMenuWindowController {
         )
         p.isOpaque = false
         p.backgroundColor = .clear
-        p.hasShadow = true
+        p.hasShadow = false
         p.level = .floating
         p.collectionBehavior = [.canJoinAllSpaces, .stationary, .transient]
         p.isMovableByWindowBackground = false
