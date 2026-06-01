@@ -94,8 +94,8 @@ struct RadialMenuView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            // v2.4.6: Merged page + scope
-            topNavigationBar
+            // v2.4.6: Vertical two-tier page + scope
+            topNavigationStack
                 .padding(.bottom, 6)
 
             // Radial circle
@@ -170,9 +170,16 @@ struct RadialMenuView: View {
         .padding(.vertical, 8)
     }
 
-    // MARK: - Top Navigation Bar (v2.4.6: merged page + scope)
+    // MARK: - Top Navigation (v2.4.6: vertical two-tier)
 
-    private var pageSelectorInline: some View {
+    private var topNavigationStack: some View {
+        VStack(spacing: 4) {
+            pageSelectorGlass
+            scopeLabelGlass
+        }
+    }
+
+    private var pageSelectorGlass: some View {
         Menu {
             ForEach(store.pages) { page in
                 Button {
@@ -186,44 +193,41 @@ struct RadialMenuView: View {
                 }
             }
         } label: {
-            HStack(spacing: 4) {
-                Image(systemName: "square.grid.2x2")
-                    .font(.system(size: 11, weight: .semibold))
+            RadialGlassPill(horizontalPadding: 11, verticalPadding: 5) {
+                HStack(spacing: 6) {
+                    Image(systemName: "square.grid.2x2")
+                        .font(.system(size: 12, weight: .semibold))
 
-                Text(store.currentPage?.name ?? "默认页面")
-                    .font(.system(size: 12, weight: .semibold))
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-                    .frame(maxWidth: 120)
+                    Text(store.currentPage?.name ?? "默认页面")
+                        .font(.system(size: 13, weight: .semibold))
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                        .frame(maxWidth: 150)
 
-                Image(systemName: "chevron.down")
-                    .font(.system(size: 8, weight: .bold))
+                    Image(systemName: "chevron.down")
+                        .font(.system(size: 8, weight: .bold))
+                }
             }
         }
         .menuStyle(.borderlessButton)
         .buttonStyle(.plain)
+        .fixedSize()
     }
 
-    private var topNavigationBar: some View {
-        RadialGlassPill(horizontalPadding: 10, verticalPadding: 5) {
-            HStack(spacing: 8) {
-                pageSelectorInline
+    private var scopeLabelGlass: some View {
+        RadialGlassPill(horizontalPadding: 9, verticalPadding: 4) {
+            HStack(spacing: 5) {
+                Image(systemName: "folder")
+                    .font(.system(size: 10, weight: .semibold))
+                    .opacity(0.82)
 
-                Text("\u{00B7}")
+                Text(store.currentSpecialSlot?.name ?? "默认槽位组")
                     .font(.system(size: 11, weight: .semibold))
-                    .opacity(0.55)
-
-                HStack(spacing: 4) {
-                    Image(systemName: "folder")
-                        .font(.system(size: 10, weight: .semibold))
-
-                    Text(store.currentSpecialSlot?.name ?? "默认槽位组")
-                        .font(.system(size: 11, weight: .semibold))
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                        .frame(maxWidth: 90)
-                }
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .frame(maxWidth: 120)
             }
+            .opacity(0.88)
         }
     }
 
@@ -243,11 +247,17 @@ struct RadialMenuView: View {
                 .disabled(!canSwitchGroup)
                 .opacity(canSwitchGroup ? 1 : 0.35)
 
-                Text(store.currentSpecialSlot?.name ?? "默认槽位组")
-                    .font(.system(size: 12, weight: .semibold))
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-                    .frame(maxWidth: 140)
+                HStack(spacing: 5) {
+                    Image(systemName: "folder")
+                        .font(.system(size: 11, weight: .semibold))
+                        .opacity(0.82)
+
+                    Text(store.currentSpecialSlot?.name ?? "默认槽位组")
+                        .font(.system(size: 12, weight: .semibold))
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                        .frame(maxWidth: 140)
+                }
 
                 Button {
                     store.switchToNextSlotGroup()
