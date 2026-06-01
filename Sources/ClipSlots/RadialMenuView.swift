@@ -41,7 +41,7 @@ struct RadialMenuView: View {
     @State private var mode: RadialMenuMode = .childSlots
     @Environment(\.colorScheme) private var colorScheme
 
-    private let menuSize: CGFloat = 304
+    private let menuSize: CGFloat = 230
 
     private var displayCount: Int {
         mode == .childSlots ? store.config.slots : store.currentPageSlotGroups.count
@@ -52,12 +52,10 @@ struct RadialMenuView: View {
     }
 
     var body: some View {
-        VStack(spacing: 10) {
-            // v2.4.3: Page selector (capsule)
+        VStack(spacing: 6) {
+            // v2.4.4: Compact page selector
             pageSelector
-
-            // Current scope
-            scopeLabel
+                .padding(.top, 4)
 
             // Radial circle
             ZStack {
@@ -72,9 +70,8 @@ struct RadialMenuView: View {
                             .background(AppTheme.radialMaterial(colorScheme), in: Circle())
                             .overlay(
                                 Circle()
-                                    .stroke(AppTheme.radialOuterStroke(colorScheme), lineWidth: 0.8)
+                                    .stroke(AppTheme.radialOuterStroke(colorScheme), lineWidth: 0.6)
                             )
-                            .shadow(color: AppTheme.radialCircleShadow(colorScheme), radius: 10, x: 0, y: 5)
 
                         if displayCount > 0 {
                             ForEach(0..<displayCount, id: \.self) { i in
@@ -123,23 +120,10 @@ struct RadialMenuView: View {
             }
             .frame(width: menuSize, height: menuSize)
 
-            // v2.4.3: Slot group switcher (capsule)
+            // v2.4.4: Compact group switcher
             groupSwitcher
         }
-        .frame(width: 340)
-        .padding(16)
-        .background(
-            RoundedRectangle(cornerRadius: 28, style: .continuous)
-                .fill(AppTheme.radialPanelBackground(colorScheme))
-                .background(AppTheme.radialPanelMaterial(colorScheme), in: RoundedRectangle(cornerRadius: 28, style: .continuous))
-                .overlay(
-                    RoundedRectangle(cornerRadius: 28, style: .continuous)
-                        .stroke(AppTheme.radialPanelStroke(colorScheme), lineWidth: 1)
-                )
-                .shadow(color: AppTheme.radialShadowSoft(colorScheme), radius: 20, x: 0, y: 10)
-                .shadow(color: AppTheme.radialShadowAmbient(colorScheme), radius: 42, x: 0, y: 20)
-        )
-        .padding(10)
+        .padding(4)
     }
 
     // MARK: - Page Selector (v2.4.2)
@@ -158,26 +142,16 @@ struct RadialMenuView: View {
                 }
             }
         } label: {
-            HStack(spacing: 6) {
+            HStack(spacing: 4) {
                 Image(systemName: "square.grid.2x2")
-                    .font(.system(size: 11))
+                    .font(.system(size: 10))
                 Text(store.currentPage?.name ?? "默认页面")
-                    .font(.system(size: 12, weight: .semibold))
+                    .font(.system(size: 12, weight: .medium))
                     .lineLimit(1)
                 Image(systemName: "chevron.down")
                     .font(.system(size: 7, weight: .bold))
             }
-            .foregroundColor(.primary)
-            .padding(.horizontal, 12)
-            .padding(.vertical, 7)
-            .background(
-                Capsule()
-                    .fill(AppTheme.radialControlBackground(colorScheme))
-            )
-            .overlay(
-                Capsule()
-                    .stroke(AppTheme.radialControlStroke(colorScheme), lineWidth: 1)
-            )
+            .foregroundColor(AppTheme.radialSecondaryText(colorScheme, isHovered: false))
         }
         .menuStyle(.borderlessButton)
         .fixedSize()
@@ -195,7 +169,7 @@ struct RadialMenuView: View {
     // MARK: - Group Switcher (v2.4.2)
 
     private var groupSwitcher: some View {
-        HStack(spacing: 14) {
+        HStack(spacing: 12) {
             Button {
                 store.switchToPreviousSlotGroup()
             } label: {
@@ -204,13 +178,13 @@ struct RadialMenuView: View {
             }
             .buttonStyle(.borderless)
             .disabled(!canSwitchGroup)
-            .opacity(canSwitchGroup ? 1 : 0.35)
+            .opacity(canSwitchGroup ? 1 : 0.3)
 
             Text(store.currentSpecialSlot?.name ?? "默认槽位组")
                 .font(.system(size: 11, weight: .medium))
                 .lineLimit(1)
                 .truncationMode(.middle)
-                .frame(maxWidth: 160)
+                .frame(maxWidth: 140)
 
             Button {
                 store.switchToNextSlotGroup()
@@ -220,18 +194,10 @@ struct RadialMenuView: View {
             }
             .buttonStyle(.borderless)
             .disabled(!canSwitchGroup)
-            .opacity(canSwitchGroup ? 1 : 0.35)
+            .opacity(canSwitchGroup ? 1 : 0.3)
         }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 8)
-        .background(
-            Capsule()
-                .fill(AppTheme.radialControlBackground(colorScheme))
-        )
-        .overlay(
-            Capsule()
-                .stroke(AppTheme.radialControlStroke(colorScheme), lineWidth: 1)
-        )
+        .foregroundColor(AppTheme.radialSecondaryText(colorScheme, isHovered: false))
+        .padding(.bottom, 4)
     }
 
     // MARK: - Child Slot Segments
@@ -374,11 +340,9 @@ struct RadialMenuView: View {
 
         Circle()
             .fill(AppTheme.radialCenterBackground(colorScheme))
-            .background(AppTheme.radialPanelMaterial(colorScheme), in: Circle())
             .overlay(
-                Circle().stroke(AppTheme.radialOuterStroke(colorScheme), lineWidth: 0.8)
+                Circle().stroke(AppTheme.radialOuterStroke(colorScheme), lineWidth: 0.6)
             )
-            .shadow(color: AppTheme.radialCircleShadow(colorScheme), radius: 8, x: 0, y: 4)
             .frame(width: deadZoneRadius * 2, height: deadZoneRadius * 2)
             .overlay {
                 VStack(spacing: 4) {
