@@ -1303,7 +1303,7 @@ final class SlotStoreObservable: ObservableObject {
         }
     }
 
-    // MARK: - Global Search (v2.5.1)
+    // MARK: - Global Search (v2.5.2)
 
     /// Return all searchable slots across all pages and groups (read-only).
     func allSearchableSlots() -> [SlotGlobalSearchResult] {
@@ -1323,7 +1323,9 @@ final class SlotStoreObservable: ObservableObject {
                         groupName: group.name,
                         slot: slot,
                         content: content,
-                        label: label
+                        label: label,
+                        pageOrder: page.order,
+                        groupOrder: group.order
                     ))
                 }
             }
