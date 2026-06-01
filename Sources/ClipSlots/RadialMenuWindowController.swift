@@ -35,9 +35,9 @@ final class RadialMenuWindowController {
     ) {
         dismiss()
 
-        // v2.4.2: taller window to accommodate page selector + group switcher
-        let menuWidth: CGFloat = 360
-        let menuHeight: CGFloat = 460
+        // v2.4.3: wider window with more breathing room
+        let menuWidth: CGFloat = 380
+        let menuHeight: CGFloat = 500
         self.onDismissCallback = onDismiss
 
         // Read theme mode so radial menu matches main window appearance
@@ -54,8 +54,8 @@ final class RadialMenuWindowController {
         let hosting = NSHostingView(rootView: radialView)
         hosting.frame = NSRect(x: 0, y: 0, width: menuWidth, height: menuHeight)
         hosting.wantsLayer = true
-        hosting.layer?.cornerRadius = 20
-        hosting.layer?.masksToBounds = true
+        hosting.layer?.cornerRadius = 28
+        hosting.layer?.masksToBounds = false
 
         let windowOrigin = NSRect(
             x: screenPoint.x - menuWidth / 2,
@@ -72,7 +72,7 @@ final class RadialMenuWindowController {
         )
         p.isOpaque = false
         p.backgroundColor = .clear
-        p.hasShadow = true
+        p.hasShadow = false
         p.level = .floating
         p.collectionBehavior = [.canJoinAllSpaces, .stationary, .transient]
         p.isMovableByWindowBackground = false

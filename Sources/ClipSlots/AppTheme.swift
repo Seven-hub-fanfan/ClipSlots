@@ -120,8 +120,8 @@ enum AppTheme {
 
     static func radialBackground(_ scheme: ColorScheme) -> Color {
         scheme == .dark
-            ? Color(red: 0.07, green: 0.075, blue: 0.09).opacity(0.90)
-            : Color.white.opacity(0.90)
+            ? Color.white.opacity(0.045)
+            : Color.white.opacity(0.34)
     }
 
     static func radialCenterBackground(_ scheme: ColorScheme) -> Color {
@@ -132,16 +132,16 @@ enum AppTheme {
 
     static func radialSegment(_ scheme: ColorScheme, isEmpty: Bool, isHovered: Bool) -> Color {
         if isHovered {
-            return Color.accentColor.opacity(scheme == .dark ? 0.78 : 0.68)
+            return Color.accentColor.opacity(scheme == .dark ? 0.32 : 0.18)
         }
         if isEmpty {
             return scheme == .dark
-                ? Color.white.opacity(0.035)
-                : Color.black.opacity(0.030)
+                ? Color.white.opacity(0.018)
+                : Color.white.opacity(0.12)
         }
         return scheme == .dark
-            ? Color.white.opacity(0.085)
-            : Color.black.opacity(0.052)
+            ? Color.white.opacity(0.040)
+            : Color.white.opacity(0.24)
     }
 
     static func radialStroke(_ scheme: ColorScheme, isHovered: Bool) -> Color {
@@ -153,8 +153,8 @@ enum AppTheme {
 
     static func radialDivider(_ scheme: ColorScheme) -> Color {
         scheme == .dark
-            ? Color.white.opacity(0.11)
-            : Color.black.opacity(0.085)
+            ? Color.white.opacity(0.075)
+            : Color.black.opacity(0.045)
     }
 
     static func radialPrimaryText(_ scheme: ColorScheme, isHovered: Bool, isEmpty: Bool) -> Color {
@@ -184,11 +184,112 @@ enum AppTheme {
 
     static func radialShadow(_ scheme: ColorScheme) -> Color {
         scheme == .dark
-            ? Color.black.opacity(0.62)
-            : Color.black.opacity(0.20)
+            ? Color.black.opacity(0.38)
+            : Color.black.opacity(0.08)
     }
 
     static func radialMaterial(_ scheme: ColorScheme) -> Material {
         scheme == .dark ? .ultraThinMaterial : .regularMaterial
+    }
+
+    // MARK: - Radial Menu (v2.4.3 new)
+
+    static func radialPanelBackground(_ scheme: ColorScheme) -> Color {
+        scheme == .dark
+            ? Color(red: 0.075, green: 0.078, blue: 0.090).opacity(0.82)
+            : Color.white.opacity(0.72)
+    }
+
+    static func radialPanelMaterial(_ scheme: ColorScheme) -> Material {
+        scheme == .dark ? .ultraThinMaterial : .thinMaterial
+    }
+
+    static func radialPanelStroke(_ scheme: ColorScheme) -> Color {
+        scheme == .dark
+            ? Color.white.opacity(0.10)
+            : Color.white.opacity(0.70)
+    }
+
+    static func radialOuterStroke(_ scheme: ColorScheme) -> Color {
+        scheme == .dark
+            ? Color.white.opacity(0.10)
+            : Color.white.opacity(0.60)
+    }
+
+    static func radialCircleShadow(_ scheme: ColorScheme) -> Color {
+        scheme == .dark
+            ? Color.black.opacity(0.22)
+            : Color.black.opacity(0.045)
+    }
+
+    static func radialShadowSoft(_ scheme: ColorScheme) -> Color {
+        scheme == .dark
+            ? Color.black.opacity(0.34)
+            : Color.black.opacity(0.075)
+    }
+
+    static func radialShadowAmbient(_ scheme: ColorScheme) -> Color {
+        scheme == .dark
+            ? Color.black.opacity(0.18)
+            : Color.black.opacity(0.04)
+    }
+
+    static func radialControlBackground(_ scheme: ColorScheme) -> Color {
+        scheme == .dark
+            ? Color.white.opacity(0.070)
+            : Color.white.opacity(0.62)
+    }
+
+    static func radialControlStroke(_ scheme: ColorScheme) -> Color {
+        scheme == .dark
+            ? Color.white.opacity(0.10)
+            : Color.black.opacity(0.055)
+    }
+
+    // MARK: - Settings (v2.4.3)
+
+    static func settingsWindowBackground(_ scheme: ColorScheme) -> Color {
+        scheme == .dark
+            ? Color(red: 0.075, green: 0.078, blue: 0.090)
+            : Color(red: 0.965, green: 0.968, blue: 0.975)
+    }
+
+    static func settingsCardBackground(_ scheme: ColorScheme) -> Color {
+        scheme == .dark
+            ? Color.white.opacity(0.055)
+            : Color.white.opacity(0.82)
+    }
+
+    static func settingsCardStroke(_ scheme: ColorScheme) -> Color {
+        scheme == .dark
+            ? Color.white.opacity(0.09)
+            : Color.black.opacity(0.075)
+    }
+
+    static func settingsInputBackground(_ scheme: ColorScheme) -> Color {
+        scheme == .dark
+            ? Color.white.opacity(0.055)
+            : Color.black.opacity(0.045)
+    }
+
+    static func settingsInputStroke(_ scheme: ColorScheme, isFocused: Bool) -> Color {
+        if isFocused {
+            return Color.accentColor.opacity(scheme == .dark ? 0.70 : 0.65)
+        }
+        return scheme == .dark
+            ? Color.white.opacity(0.09)
+            : Color.black.opacity(0.065)
+    }
+
+    static func settingsFooterBackground(_ scheme: ColorScheme) -> Color {
+        scheme == .dark
+            ? Color.black.opacity(0.20)
+            : Color.black.opacity(0.035)
+    }
+
+    static func settingsBadgeBackground(_ scheme: ColorScheme) -> Color {
+        scheme == .dark
+            ? Color.white.opacity(0.08)
+            : Color.black.opacity(0.055)
     }
 }
