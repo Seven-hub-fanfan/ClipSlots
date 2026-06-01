@@ -173,10 +173,7 @@ struct RadialMenuView: View {
     // MARK: - Top Navigation (v2.4.6: vertical two-tier)
 
     private var topNavigationStack: some View {
-        VStack(spacing: 4) {
-            pageSelectorGlass
-            scopeLabelGlass
-        }
+        pageSelectorGlass
     }
 
     private var pageSelectorGlass: some View {
@@ -228,23 +225,6 @@ struct RadialMenuView: View {
         }
         .buttonStyle(.plain)
         .fixedSize()
-    }
-
-    private var scopeLabelGlass: some View {
-        RadialGlassPill(horizontalPadding: 9, verticalPadding: 4) {
-            HStack(spacing: 5) {
-                Image(systemName: "folder")
-                    .font(.system(size: 10, weight: .semibold))
-                    .opacity(0.82)
-
-                Text(store.currentSpecialSlot?.name ?? "默认槽位组")
-                    .font(.system(size: 11, weight: .semibold))
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-                    .frame(maxWidth: 120)
-            }
-            .opacity(0.88)
-        }
     }
 
     // MARK: - Group Switcher (v2.4.2)
