@@ -125,7 +125,7 @@ struct SpecialSlotManagementView: View {
                 Spacer()
 
                 Button {
-                    store.chooseFolderAndImportIntoCurrentSpecialSlot()
+                    store.startToolbarImport()
                 } label: {
                     Label("导入文件夹", systemImage: "folder.badge.plus")
                 }

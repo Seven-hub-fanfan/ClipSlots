@@ -339,13 +339,13 @@ struct ContentView: View {
 
             // Action buttons
             Button {
-                store.chooseFolderAndImportIntoCurrentSpecialSlot()
+                store.startToolbarImport()
             } label: {
                 Label("导入", systemImage: "folder.badge.plus")
             }
             .buttonStyle(.bordered)
             .controlSize(.regular)
-            .help("导入文件夹到当前槽位组")
+            .help("导入文件或文件夹到当前槽位组")
 
             Button {
                 store.pasteAllSlotsWithConfirmation()
@@ -577,7 +577,7 @@ struct ContentView: View {
 
             Spacer()
 
-            Text("v2.6.3")
+            Text("v2.6.4")
                 .font(.caption2)
                 .foregroundColor(Color.secondary.opacity(0.65))
         }

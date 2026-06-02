@@ -1191,15 +1191,116 @@ final class SlotStoreObservable: ObservableObject {
     private let folderImportService = FolderImportService()
     private let batchImportService = BatchImportService()
 
-    func chooseFolderAndImportIntoCurrentSpecialSlot() {
-        let panel = NSOpenPanel()
-        panel.canChooseFiles = false
-        panel.canChooseDirectories = true
-        panel.allowsMultipleSelection = false
-        panel.message = "选择要批量导入的文件夹"
+    // MARK: - Toolbar Import (v2.6.4)
 
-        guard panel.runModal() == .OK, let url = panel.url else { return }
-        importFolderIntoCurrentSpecialSlot(url)
+    /// Opens NSOpenPanel for multi-select files + folders, then shows import options.
+    func startToolbarImport() {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = true
+        panel.allowsMultipleSelection = true
+        panel.canCreateDirectories = false
+        panel.message = "选择要导入的文件或文件夹（可多选）"
+
+        guard panel.runModal() == .OK, !panel.urls.isEmpty else { return }
+        presentImportOptions(for: panel.urls)
+    }
+
+    /// Show import mode picker for the selected URLs, then execute.
+    func presentImportOptions(for urls: [URL]) {
+        // Classify selection
+        var folderCount = 0
+        var fileCount = 0
+        for url in urls {
+            guard let values = try? url.resourceValues(forKeys: [.isDirectoryKey, .isRegularFileKey]) else { continue }
+            if values.isDirectory == true { folderCount += 1 }
+            else if values.isRegularFile == true { fileCount += 1 }
+        }
+
+        let totalItems = fileCount + folderCount
+        guard totalItems > 0 else {
+            showFloatingNotice(FloatingNotice(
+                title: "没有可导入的文件",
+                iconName: "tray", kind: .warning))
+            return
+        }
+
+        // Single file: import directly without options
+        if fileCount == 1 && folderCount == 0, let fileURL = urls.first {
+            executeToolbarImport(urls: [fileURL], mode: .allTotal, sortRule: specialSlotSettings.folderImportSortRule)
+            return
+        }
+
+        let availableModes = ImportLimitMode.availableModes(folderCount: folderCount, fileCount: fileCount)
+        let defaultMode = ImportLimitMode.defaultMode(folderCount: folderCount, fileCount: fileCount)
+
+        // Build NSAlert with accessoryView radio buttons
+        let alert = NSAlert()
+        alert.messageText = "批量导入选项"
+        alert.alertStyle = .informational
+
+        var infoLines: [String] = []
+        if folderCount > 0 { infoLines.append("\(folderCount) 个文件夹") }
+        if fileCount > 0 { infoLines.append("\(fileCount) 个文件") }
+        alert.informativeText = "已选择：" + infoLines.joined(separator: "，")
+
+        // Popup button for mode selection
+        let stackView = NSStackView()
+        stackView.orientation = .vertical
+        stackView.spacing = 6
+
+        let headerLabel = NSTextField(labelWithString: "导入方式：")
+        headerLabel.font = NSFont.systemFont(ofSize: 12, weight: .semibold)
+        stackView.addArrangedSubview(headerLabel)
+
+        let modePopup = NSPopUpButton(frame: NSRect(x: 0, y: 0, width: 340, height: 24), pullsDown: false)
+        for mode in availableModes {
+            modePopup.addItem(withTitle: mode.title)
+        }
+        modePopup.selectItem(withTitle: defaultMode.title)
+        stackView.addArrangedSubview(modePopup)
+
+        // Estimate count
+        let expansion = folderImportService.expandSelection(urls: urls, mode: defaultMode, sortRule: specialSlotSettings.folderImportSortRule)
+        let estimateLabel = NSTextField(labelWithString: "预计导入：\(expansion.items.count) 个文件")
+        estimateLabel.font = NSFont.systemFont(ofSize: 11)
+        estimateLabel.textColor = .secondaryLabelColor
+        stackView.addArrangedSubview(estimateLabel)
+
+        alert.accessoryView = stackView
+        alert.addButton(withTitle: "开始导入")
+        alert.addButton(withTitle: "取消")
+
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+
+        // Read selected mode
+        let selectedIdx = modePopup.indexOfSelectedItem
+        let selectedMode = (selectedIdx >= 0 && selectedIdx < availableModes.count)
+            ? availableModes[selectedIdx]
+            : defaultMode
+
+        executeToolbarImport(urls: urls, mode: selectedMode, sortRule: specialSlotSettings.folderImportSortRule)
+    }
+
+    /// Expand URLs using the given mode and delegate to handleBatchSave.
+    func executeToolbarImport(urls: [URL], mode: ImportLimitMode, sortRule: FolderImportSortRule) {
+        let expansion = folderImportService.expandSelection(urls: urls, mode: mode, sortRule: sortRule)
+
+        guard !expansion.items.isEmpty else {
+            showFloatingNotice(FloatingNotice(
+                title: "没有可导入的文件",
+                subtitle: expansion.folderCount > 0 ? "文件夹为空或无可读取文件" : "",
+                iconName: "tray",
+                kind: .warning
+            ))
+            return
+        }
+
+        handleBatchSave(
+            items: expansion.items,
+            startSlot: 1,
+            expansion: expansion
+        )
     }
 
     func importFolderIntoCurrentSpecialSlot(_ folderURL: URL) {
@@ -1320,14 +1421,10 @@ final class SlotStoreObservable: ObservableObject {
         let activeId = currentSpecialSlotId
         let folderURLs = content.detectedFolderURLs
 
-        // v2.6.1: Route multi-folder to batch save instead of single-folder handler
+        // v2.6.4: Route multi-folder to import mode picker
         if folderURLs.count > 1 {
-            // Let batch detection expand all folders
-            if let batchItems = batchImportService.detectBatchItems(from: content),
-               batchItems.count > 1 {
-                handleBatchSave(items: batchItems, startSlot: targetSlot)
-                return
-            }
+            presentImportModePickerForFolder(folderURLs, startSlot: targetSlot)
+            return
         }
         if folderURLs.count == 1 {
             handleSingleFolderSave(folderURLs[0], targetSlot: targetSlot)
@@ -1394,7 +1491,11 @@ final class SlotStoreObservable: ObservableObject {
 
     private let maxAutoCreatePages: Int = 20
 
-    private func handleBatchSave(items: [BatchImportItem], startSlot: Int) {
+    private func handleBatchSave(
+        items: [BatchImportItem],
+        startSlot: Int,
+        expansion: BatchImportExpansionResult? = nil
+    ) {
         // v2.6.2: Safety guards
         guard !isBatchSaving else {
             showFloatingNotice(FloatingNotice(
@@ -1594,6 +1695,18 @@ final class SlotStoreObservable: ObservableObject {
         if folderSourceCount > 0 { parts.append("来自 \(folderSourceCount) 个文件夹") }
         if failedCount > 0 { parts.append("\(failedCount) 个失败") }
 
+        // v2.6.4: Include expansion context when available
+        if let exp = expansion, exp.limitedByMode {
+            switch exp.mode {
+            case .firstTenTotal:
+                parts.append("已按设置只导入前 10 个")
+            case .firstTenPerFolder:
+                parts.append("每个文件夹前 10 个")
+            default:
+                break
+            }
+        }
+
         let toast = parts.joined(separator: "，")
         if UserDefaults.standard.showSaveToast {
             let iconName = failedCount > 0 ? "exclamationmark.triangle.fill" : "checkmark.circle.fill"
@@ -1724,18 +1837,16 @@ final class SlotStoreObservable: ObservableObject {
         let alert = NSAlert()
         alert.messageText = "检测到文件夹"
         alert.informativeText = "当前剪贴板内容是文件夹 (\(folderURL.lastPathComponent))。\n你想如何处理？"
-        alert.addButton(withTitle: "批量导入到当前槽位组")
-        alert.addButton(withTitle: "创建新的槽位组并导入")
+        alert.addButton(withTitle: "批量导入文件...")
         alert.addButton(withTitle: "作为普通文件保存")
         alert.addButton(withTitle: "取消")
 
         let response = alert.runModal()
         switch response {
         case .alertFirstButtonReturn:
-            importFolderIntoCurrentSpecialSlot(folderURL)
+            // v2.6.4: Show import mode picker (first 10 / all)
+            presentImportModePickerForFolder([folderURL], startSlot: targetSlot)
         case .alertSecondButtonReturn:
-            createSpecialSlotAndImportFolder(folderURL)
-        case .alertThirdButtonReturn:
             var content = folderImportService.makeSlotContent(for: folderURL)
             content.contentId = UUID().uuidString
             content.updatedAt = Date().timeIntervalSince1970
@@ -1752,9 +1863,76 @@ final class SlotStoreObservable: ObservableObject {
             slotRenderTokens["\(activeId)::\(targetSlot)"] = UUID()
             loadedSpecialSlotId = activeId
             refreshTrigger = UUID()
+            let summary = content.noticeSummary
+            showFloatingNotice(FloatingNotice(
+                title: "已保存到槽位 \(targetSlot)",
+                subtitle: "\(summary.typeTitle) · \(summary.detail)",
+                iconName: summary.iconName,
+                kind: .success
+            ))
         default:
             break
         }
+    }
+
+    /// Show import mode picker for single-folder hotkey import (v2.6.4).
+    private func presentImportModePickerForFolder(_ folderURLs: [URL], startSlot: Int) {
+        let folderCount = folderURLs.count
+
+        let alert = NSAlert()
+        alert.messageText = "批量导入选项"
+        alert.alertStyle = .informational
+        alert.informativeText = folderCount > 1
+            ? "已选择 \(folderCount) 个文件夹"
+            : "已选择文件夹：\(folderURLs.first?.lastPathComponent ?? "")"
+
+        let modes: [ImportLimitMode] = folderCount > 1
+            ? [.firstTenTotal, .allTotal, .firstTenPerFolder, .allPerFolder]
+            : [.firstTenTotal, .allTotal]
+        let defaultMode: ImportLimitMode = folderCount > 1 ? .allPerFolder : .allTotal
+
+        let stackView = NSStackView()
+        stackView.orientation = .vertical
+        stackView.spacing = 6
+        let headerLabel = NSTextField(labelWithString: "导入方式：")
+        headerLabel.font = NSFont.systemFont(ofSize: 12, weight: .semibold)
+        stackView.addArrangedSubview(headerLabel)
+
+        let modePopup = NSPopUpButton(frame: NSRect(x: 0, y: 0, width: 300, height: 24), pullsDown: false)
+        for mode in modes {
+            modePopup.addItem(withTitle: mode.title)
+        }
+        modePopup.selectItem(withTitle: defaultMode.title)
+        stackView.addArrangedSubview(modePopup)
+
+        alert.accessoryView = stackView
+        alert.addButton(withTitle: "开始导入")
+        alert.addButton(withTitle: "取消")
+
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+
+        let selectedIdx = modePopup.indexOfSelectedItem
+        let selectedMode = (selectedIdx >= 0 && selectedIdx < modes.count)
+            ? modes[selectedIdx]
+            : defaultMode
+
+        let expansion = folderImportService.expandSelection(
+            urls: folderURLs,
+            mode: selectedMode,
+            sortRule: specialSlotSettings.folderImportSortRule
+        )
+
+        guard !expansion.items.isEmpty else {
+            showFloatingNotice(FloatingNotice(
+                title: "没有可导入的文件",
+                subtitle: "文件夹为空或无可读取文件",
+                iconName: "tray",
+                kind: .warning
+            ))
+            return
+        }
+
+        handleBatchSave(items: expansion.items, startSlot: startSlot, expansion: expansion)
     }
 
     func createSpecialSlotAndImportFolder(_ folderURL: URL) {
