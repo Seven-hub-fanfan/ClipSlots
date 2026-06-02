@@ -799,6 +799,10 @@ final class SlotStoreObservable: ObservableObject {
 
     /// For global save hotkey: send Cmd+C to copy current selection, wait for clipboard update, then save.
     func captureSelectionAndSaveToSlot(_ slot: Int) {
+        guard !isBatchSaving else {
+            showToast("正在批量保存，请稍候")
+            return
+        }
         cancelPendingClipboardRestore()
 
         guard AXIsProcessTrusted() else {
@@ -824,6 +828,29 @@ final class SlotStoreObservable: ObservableObject {
             guard !content.isEmpty else {
                 NSLog("[ClipSlots] captureSelectionAndSaveToSlot ignored: empty capture slot=\(slot)")
                 return
+            }
+
+            // v2.6.1: Overwrite confirmation (was bypassed in v2.6.0)
+            let existing = self.contentForSlot(slot)
+            if !existing.isEmpty && !UserDefaults.standard.skipOverwriteConfirmation {
+                let alert = NSAlert()
+                alert.messageText = "覆盖槽位 \(slot)？"
+                alert.informativeText = "槽位 \(slot) 已有内容，继续保存会替换原内容。"
+                alert.addButton(withTitle: "覆盖")
+                alert.addButton(withTitle: "取消")
+
+                let checkbox = NSButton(checkboxWithTitle: "以后覆盖时不再提醒", target: nil, action: nil)
+                alert.accessoryView = checkbox
+
+                let response = alert.runModal()
+                guard response == .alertFirstButtonReturn else {
+                    NSLog("[ClipSlots] SAVE cancelled by user slot=\(slot)")
+                    return
+                }
+
+                if checkbox.state == .on {
+                    UserDefaults.standard.set(true, forKey: UserPreferenceKeys.skipOverwriteConfirmation)
+                }
             }
 
             self.handleCapturedContentForSave(content, targetSlot: slot)
@@ -1260,11 +1287,16 @@ final class SlotStoreObservable: ObservableObject {
         let activeId = currentSpecialSlotId
         let folderURLs = content.detectedFolderURLs
 
-        if folderURLs.count == 1 {
-            handleSingleFolderSave(folderURLs[0], targetSlot: targetSlot)
-            return
-        }
+        // v2.6.1: Route multi-folder to batch save instead of single-folder handler
         if folderURLs.count > 1 {
+            // Let batch detection expand all folders
+            if let batchItems = batchImportService.detectBatchItems(from: content),
+               batchItems.count > 1 {
+                handleBatchSave(items: batchItems, startSlot: targetSlot)
+                return
+            }
+        }
+        if folderURLs.count == 1 {
             handleSingleFolderSave(folderURLs[0], targetSlot: targetSlot)
             return
         }
@@ -1316,12 +1348,15 @@ final class SlotStoreObservable: ObservableObject {
         }
     }
 
-    // MARK: - Batch Save (v2.6.0)
+    // MARK: - Batch Save (v2.6.1)
+
+    private let maxAutoCreatePages: Int = 20
 
     private func handleBatchSave(items: [BatchImportItem], startSlot: Int) {
         let activeId = currentSpecialSlotId
-        let pageId = currentPageId
+        let originalPageId = currentPageId
         let pageGroups = currentPageSlotGroups
+        let allPages = pages
 
         // Build target slot list: [(specialSlotId, slot)]
         var targets: [(specialSlotId: String, slot: Int)] = []
@@ -1341,30 +1376,41 @@ final class SlotStoreObservable: ObservableObject {
             }
         }
 
-        // Calculate new groups needed
+        // Capacity: groups in current page + new groups we can create
         let existingCount = pageGroups.count
-        let maxNew = max(0, specialSlotSettings.maxSpecialSlots - existingCount)
-        let remainingItems = max(0, items.count - targets.count)
-        let newGroupsNeeded = min(maxNew, (remainingItems + config.slots - 1) / config.slots)
+        let maxNewGroupsInPage = max(0, specialSlotSettings.maxSpecialSlots - existingCount)
+        let newGroupsNeededInPage = min(maxNewGroupsInPage,
+            max(0, (items.count - targets.count + config.slots - 1) / config.slots))
+
+        // Calculate page-level capacity
+        let capacityInPage = targets.count + newGroupsNeededInPage * config.slots
+        var remainingAfterPage = max(0, items.count - capacityInPage)
+        let pagesNeeded = min(maxAutoCreatePages,
+            (remainingAfterPage + specialSlotSettings.maxSpecialSlots * config.slots - 1)
+                / (specialSlotSettings.maxSpecialSlots * config.slots))
+
+        let totalCapacity = capacityInPage + pagesNeeded * specialSlotSettings.maxSpecialSlots * config.slots
 
         let plan = BatchSavePlan(
             items: items,
             startSlot: startSlot,
             willOverwriteCount: countOverwrites(targets: targets.prefix(items.count)),
-            needsNewGroups: newGroupsNeeded,
+            needsNewGroups: newGroupsNeededInPage + pagesNeeded * specialSlotSettings.maxSpecialSlots,
             skippedFolderCount: 0,
             skippedUnsupportedCount: 0,
-            availableCapacity: targets.count + newGroupsNeeded * config.slots
+            availableCapacity: totalCapacity
         )
 
-        // Show confirmation
+        // Show confirmation (updated to include page info)
         if !UserDefaults.standard.skipBatchSaveConfirmation || plan.willOverwriteCount > 0 {
-            guard confirmBatchSave(plan, currentGroupName: currentSpecialSlot?.name ?? "槽位组") else {
+            guard confirmBatchSaveV2(plan,
+                currentGroupName: currentSpecialSlot?.name ?? "槽位组",
+                pagesNeeded: pagesNeeded) else {
                 return
             }
         }
 
-        // Check if we can save all
+        // Check capacity
         if plan.willSkipCount > 0 {
             guard confirmPartialBatchSave(plan) else {
                 return
@@ -1378,15 +1424,14 @@ final class SlotStoreObservable: ObservableObject {
         var failedCount = 0
         var overwrittenCount = 0
         var createdGroupCount = 0
+        var createdPageCount = 0
         let itemsToSave = plan.willSaveCount
 
-        // Create new groups if needed (before saving)
-        var newGroupIds: [String] = []
-        for n in 1...newGroupsNeeded {
+        // Create new groups in current page
+        for n in 1...newGroupsNeededInPage {
             let groupName = uniqueImportGroupName(existingNames: Set(pageGroups.map { $0.name }), startNumber: n)
             do {
-                let newGroup = try specialStorage.createSpecialSlot(name: groupName, pageId: pageId)
-                newGroupIds.append(newGroup.id)
+                let newGroup = try specialStorage.createSpecialSlot(name: groupName, pageId: originalPageId)
                 for s in 1...config.slots {
                     targets.append((newGroup.id, s))
                 }
@@ -1397,10 +1442,43 @@ final class SlotStoreObservable: ObservableObject {
             }
         }
 
-        // Refresh special slots
-        if createdGroupCount > 0 {
-            specialSlots = specialStorage.loadIndex().specialSlots
+        // Create new pages if needed
+        remainingAfterPage = max(0, itemsToSave - targets.count)
+        let actualPagesNeeded = min(pagesNeeded,
+            (remainingAfterPage + specialSlotSettings.maxSpecialSlots * config.slots - 1)
+                / (specialSlotSettings.maxSpecialSlots * config.slots))
+
+        let existingPageNames = Set(allPages.map { $0.name })
+        for pn in 1...actualPagesNeeded {
+            let pageName = uniqueImportPageName(existingNames: existingPageNames, startNumber: pn + createdPageCount)
+            do {
+                let newPage = try specialStorage.createPage(name: pageName)
+                createdPageCount += 1
+                // Create groups in the new page (up to maxSpecialSlots)
+                let groupsNeededInPage = min(specialSlotSettings.maxSpecialSlots,
+                    max(0, (itemsToSave - targets.count + config.slots - 1) / config.slots))
+                for gn in 1...groupsNeededInPage {
+                    let groupName = "导入 \(gn)"
+                    do {
+                        let newGroup = try specialStorage.createSpecialSlot(name: groupName, pageId: newPage.id)
+                        for s in 1...config.slots {
+                            targets.append((newGroup.id, s))
+                        }
+                        createdGroupCount += 1
+                    } catch {
+                        NSLog("[ClipSlots] Batch save: failed to create group in page '\(pageName)': \(error)")
+                        break
+                    }
+                }
+            } catch {
+                NSLog("[ClipSlots] Batch save: failed to create page: \(error)")
+                break
+            }
         }
+
+        // Refresh state
+        specialSlots = specialStorage.loadIndex().specialSlots
+        pages = specialStorage.loadIndex().pages
 
         // Save items to targets
         for (index, item) in items.enumerated() {
@@ -1426,14 +1504,25 @@ final class SlotStoreObservable: ObservableObject {
             }
         }
 
+        // Switch back to original page if we navigated away
+        if pagesNeeded > 0 {
+            try? specialStorage.switchToPage(id: originalPageId)
+        }
+
         // Reload current slots and show toast
         reloadAll()
         refreshTrigger = UUID()
 
+        // Count source folders
+        let sourceFolderNames = Set(items.prefix(itemsToSave).compactMap { $0.sourceFolderName })
+        let folderSourceCount = sourceFolderNames.count
+
         var parts: [String] = []
         parts.append("已保存 \(savedCount) 个文件")
         if overwrittenCount > 0 { parts.append("覆盖 \(overwrittenCount) 个槽位") }
+        if createdPageCount > 0 { parts.append("新建 \(createdPageCount) 个页面") }
         if createdGroupCount > 0 { parts.append("新建 \(createdGroupCount) 个槽位组") }
+        if folderSourceCount > 0 { parts.append("来自 \(folderSourceCount) 个文件夹") }
         if failedCount > 0 { parts.append("\(failedCount) 个失败") }
 
         let toast = parts.joined(separator: "，")
@@ -1457,6 +1546,55 @@ final class SlotStoreObservable: ObservableObject {
             if !existingNames.contains(name) { return name }
             n += 1
         }
+    }
+
+    private func uniqueImportPageName(existingNames: Set<String>, startNumber: Int) -> String {
+        var n = startNumber
+        while true {
+            let name = "导入页面 \(n)"
+            if !existingNames.contains(name) { return name }
+            n += 1
+        }
+    }
+
+    private func confirmBatchSaveV2(_ plan: BatchSavePlan, currentGroupName: String, pagesNeeded: Int) -> Bool {
+        let alert = NSAlert()
+        alert.messageText = "批量保存文件？"
+        alert.alertStyle = .informational
+
+        var lines: [String] = []
+        lines.append("即将保存 \(plan.items.count) 个文件。")
+        lines.append("")
+        let pageName = currentPage?.name ?? "页面"
+        lines.append("起点：页面「\(pageName)」/ \(currentGroupName) / 槽位 \(plan.startSlot)")
+        if pagesNeeded > 0 {
+            lines.append("将新建：\(pagesNeeded) 个页面")
+        }
+        if plan.needsNewGroups > 0 {
+            lines.append("将新建：\(plan.needsNewGroups) 个槽位组")
+        }
+        if plan.willOverwriteCount > 0 {
+            lines.append("将覆盖：\(plan.willOverwriteCount) 个已有槽位")
+        }
+
+        alert.informativeText = lines.joined(separator: "\n")
+        alert.addButton(withTitle: "开始保存")
+        alert.addButton(withTitle: "取消")
+
+        if plan.willOverwriteCount > 0 {
+            let checkbox = NSButton(checkboxWithTitle: "以后覆盖时不再提醒", target: nil, action: nil)
+            alert.accessoryView = checkbox
+            let response = alert.runModal()
+            if response == .alertFirstButtonReturn {
+                if checkbox.state == .on {
+                    UserDefaults.standard.set(true, forKey: UserPreferenceKeys.skipOverwriteConfirmation)
+                }
+                return true
+            }
+            return false
+        }
+
+        return alert.runModal() == .alertFirstButtonReturn
     }
 
     private func confirmBatchSave(_ plan: BatchSavePlan, currentGroupName: String) -> Bool {

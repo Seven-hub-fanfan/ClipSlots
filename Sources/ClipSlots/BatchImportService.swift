@@ -52,9 +52,11 @@ final class BatchImportService {
         }
 
         // Expand folders (non-recursive, one level only)
+        lastSkippedSubfolderCount = 0
         for folderURL in folders {
             let expanded = expandFolder(folderURL)
-            items.append(contentsOf: expanded)
+            items.append(contentsOf: expanded.items)
+            lastSkippedSubfolderCount += expanded.skippedSubfolderCount
         }
 
         // Single file → not batch
@@ -67,26 +69,40 @@ final class BatchImportService {
 
     // MARK: - Folder expansion (non-recursive)
 
-    private func expandFolder(_ folderURL: URL) -> [BatchImportItem] {
+    private func expandFolder(_ folderURL: URL) -> (items: [BatchImportItem], skippedSubfolderCount: Int) {
         let folderName = folderURL.lastPathComponent
 
         guard let children = try? FileManager.default.contentsOfDirectory(
             at: folderURL,
-            includingPropertiesForKeys: [.isRegularFileKey, .isHiddenKey],
+            includingPropertiesForKeys: [.isRegularFileKey, .isDirectoryKey, .isHiddenKey],
             options: [.skipsPackageDescendants, .skipsHiddenFiles]
         ) else {
-            return []
+            return ([], 0)
         }
 
-        return children.compactMap { url in
-            guard let values = try? url.resourceValues(forKeys: [.isRegularFileKey, .isHiddenKey]),
-                  values.isRegularFile == true,
+        var items: [BatchImportItem] = []
+        var skippedSubfolders = 0
+
+        for url in children {
+            guard let values = try? url.resourceValues(forKeys: [.isRegularFileKey, .isDirectoryKey, .isHiddenKey]),
                   values.isHidden != true else {
-                return nil
+                continue
             }
-            return BatchImportItem(fileURL: url, sourceFolderName: folderName)
+
+            if values.isDirectory == true {
+                skippedSubfolders += 1
+                continue
+            }
+
+            if values.isRegularFile == true {
+                items.append(BatchImportItem(fileURL: url, sourceFolderName: folderName))
+            }
         }
+
+        return (items, skippedSubfolders)
     }
+
+    var lastSkippedSubfolderCount: Int = 0
 
     // MARK: - Capacity Calculation
 

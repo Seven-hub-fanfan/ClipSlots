@@ -143,17 +143,31 @@ struct ContentView: View {
     }
 
     private func toastView(_ message: String) -> some View {
-        Text(message)
-            .font(.system(size: 12, weight: .medium))
-            .foregroundColor(.primary)
-            .padding(.horizontal, 14)
-            .padding(.vertical, 8)
-            .background(
-                Capsule()
-                    .fill(.regularMaterial)
-                    .shadow(color: Color.black.opacity(0.12), radius: 6, y: 3)
-            )
-            .padding(.top, 8)
+        HStack(spacing: 6) {
+            Image(systemName: toastIcon(for: message))
+                .font(.system(size: 11, weight: .semibold))
+            Text(message)
+                .font(.system(size: 12, weight: .medium))
+                .foregroundColor(.primary)
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 8)
+        .background(
+            Capsule()
+                .fill(.regularMaterial)
+                .shadow(color: Color.black.opacity(0.12), radius: 6, y: 3)
+        )
+        .padding(.top, 8)
+    }
+
+    private func toastIcon(for message: String) -> String {
+        if message.contains("覆盖") { return "arrow.triangle.2.circlepath" }
+        if message.contains("已保存") || message.contains("保存") { return "checkmark.circle.fill" }
+        if message.contains("已复制") || message.contains("复制") { return "doc.on.doc" }
+        if message.contains("为空") { return "tray" }
+        if message.contains("正在批量") { return "hourglass" }
+        if message.contains("失败") { return "xmark.circle.fill" }
+        return "info.circle.fill"
     }
 
     // MARK: - Header Layers
@@ -552,7 +566,7 @@ struct ContentView: View {
 
             Spacer()
 
-            Text("v2.6.0")
+            Text("v2.6.1")
                 .font(.caption2)
                 .foregroundColor(Color.secondary.opacity(0.65))
         }
