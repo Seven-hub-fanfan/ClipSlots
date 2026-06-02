@@ -104,6 +104,11 @@ struct ContentView: View {
                     .transition(.move(edge: .top).combined(with: .opacity))
                     .zIndex(100)
             }
+            if let notice = store.floatingNotice {
+                floatingNoticeView(notice)
+                    .transition(.opacity)
+                    .zIndex(101)
+            }
         }
         .animation(.easeInOut(duration: 0.25), value: store.toastMessage != nil)
     }
@@ -140,6 +145,35 @@ struct ContentView: View {
         )
         .padding(.horizontal, 12)
         .padding(.vertical, 4)
+    }
+
+    private func floatingNoticeView(_ notice: FloatingNotice) -> some View {
+        VStack(spacing: 6) {
+            Image(systemName: notice.iconName)
+                .font(.system(size: 24, weight: .semibold))
+                .foregroundColor(.accentColor)
+
+            Text(notice.title)
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundColor(.primary)
+
+            if !notice.subtitle.isEmpty {
+                Text(notice.subtitle)
+                    .font(.system(size: 11))
+                    .foregroundColor(.secondary)
+                    .lineLimit(2)
+                    .multilineTextAlignment(.center)
+            }
+        }
+        .padding(.horizontal, 20)
+        .padding(.vertical, 16)
+        .background(
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .fill(.regularMaterial)
+        )
+        .shadow(color: Color.black.opacity(0.15), radius: 12, y: 6)
+        .allowsHitTesting(false)
+        .padding(.top, 8)
     }
 
     private func toastView(_ message: String) -> some View {
@@ -566,7 +600,7 @@ struct ContentView: View {
 
             Spacer()
 
-            Text("v2.6.1")
+            Text("v2.6.2")
                 .font(.caption2)
                 .foregroundColor(Color.secondary.opacity(0.65))
         }

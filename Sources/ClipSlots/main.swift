@@ -101,6 +101,7 @@ final class SlotStoreObservable: ObservableObject {
     @Published var activeHotkeySpecialSlot: SpecialSlot?
     @Published var specialSlotSettings: SpecialSlotSettings = .default
     @Published var toastMessage: String?
+    @Published var floatingNotice: FloatingNotice?
     @Published var hotkeyRegistrationErrors: [String] = []
     @Published var slotRenderTokens: [String: UUID] = [:]
     @Published var isBatchSaving: Bool = false
@@ -654,6 +655,17 @@ final class SlotStoreObservable: ObservableObject {
         }
     }
 
+    /// v2.6.2: Show a floating notice with icon/title/subtitle, auto-dismiss.
+    func showFloatingNotice(_ notice: FloatingNotice, duration: TimeInterval = 1.8) {
+        floatingNotice = notice
+        let noticeId = notice.id
+        DispatchQueue.main.asyncAfter(deadline: .now() + duration) { [weak self] in
+            if self?.floatingNotice?.id == noticeId {
+                self?.floatingNotice = nil
+            }
+        }
+    }
+
     /// Returns slot content: in-memory state first (only if it belongs to current special slot), fallback to disk.
     private func contentForSlot(_ slot: Int) -> SlotContent {
         let activeId = currentSpecialSlotId
@@ -916,13 +928,12 @@ final class SlotStoreObservable: ObservableObject {
         NSLog("[ClipSlots] COPY slot=\(slot) preview=\(content.preview)")
 
         if UserDefaults.standard.showCopyToast {
-            if let fileName = content.primaryFileURL?.lastPathComponent {
-                showToast("已复制：\(fileName)")
-            } else if content.detectedWebURL != nil {
-                showToast("已复制链接")
-            } else {
-                showToast("已复制槽位 \(slot)")
-            }
+            let summary = content.noticeSummary
+            showFloatingNotice(FloatingNotice(
+                title: "已复制槽位 \(slot)",
+                subtitle: "\(summary.typeTitle) · \(summary.detail)",
+                iconName: summary.iconName
+            ))
         }
     }
 
@@ -1238,7 +1249,12 @@ final class SlotStoreObservable: ObservableObject {
 
             reloadAll()
             refreshTrigger = UUID()
-            showAlert(message: "已导入 \(successCount) 个文件到当前槽位组" + (failCount > 0 ? "，\(failCount) 个失败" : ""))
+            // v2.6.2: Floating notice instead of blocking alert
+            showFloatingNotice(FloatingNotice(
+                title: "已导入 \(successCount) 个文件",
+                subtitle: failCount > 0 ? "\(failCount) 个失败" : "当前槽位组",
+                iconName: failCount > 0 ? "exclamationmark.triangle.fill" : "checkmark.circle.fill"
+            ))
 
         } catch {
             NSLog("[ClipSlots] Folder import error: \(error)")
@@ -1338,13 +1354,15 @@ final class SlotStoreObservable: ObservableObject {
 
         NSLog("[ClipSlots] SAVE OK specialSlot=\(activeId) slot=\(targetSlot) contentId=\(savedContent.contentId) preview=\(savedContent.preview)")
 
-        // Toast
+        // v2.6.2: Floating notice with content summary
         if UserDefaults.standard.showSaveToast {
-            if !existingBeforeSave.isEmpty {
-                showToast("已覆盖槽位 \(targetSlot)")
-            } else {
-                showToast("已保存到槽位 \(targetSlot)")
-            }
+            let summary = savedContent.noticeSummary
+            let isOverwrite = !existingBeforeSave.isEmpty
+            showFloatingNotice(FloatingNotice(
+                title: isOverwrite ? "已覆盖槽位 \(targetSlot)" : "已保存到槽位 \(targetSlot)",
+                subtitle: "\(summary.typeTitle) · \(summary.detail)",
+                iconName: summary.iconName
+            ))
         }
     }
 
@@ -1353,6 +1371,31 @@ final class SlotStoreObservable: ObservableObject {
     private let maxAutoCreatePages: Int = 20
 
     private func handleBatchSave(items: [BatchImportItem], startSlot: Int) {
+        // v2.6.2: Safety guards
+        guard !isBatchSaving else {
+            showFloatingNotice(FloatingNotice(
+                title: "正在批量保存，请稍候", iconName: "hourglass"))
+            return
+        }
+
+        guard !items.isEmpty else {
+            showFloatingNotice(FloatingNotice(
+                title: "没有可保存的文件", iconName: "tray"))
+            return
+        }
+
+        guard (1...config.slots).contains(startSlot) else {
+            showFloatingNotice(FloatingNotice(
+                title: "起始槽位无效", iconName: "exclamationmark.triangle.fill"))
+            return
+        }
+
+        guard currentPage != nil, currentSpecialSlot != nil else {
+            showFloatingNotice(FloatingNotice(
+                title: "页面或槽位组不存在", iconName: "exclamationmark.triangle.fill"))
+            return
+        }
+
         let activeId = currentSpecialSlotId
         let originalPageId = currentPageId
         let pageGroups = currentPageSlotGroups
@@ -1449,6 +1492,7 @@ final class SlotStoreObservable: ObservableObject {
                 / (specialSlotSettings.maxSpecialSlots * config.slots))
 
         let existingPageNames = Set(allPages.map { $0.name })
+        if actualPagesNeeded > 0 {
         for pn in 1...actualPagesNeeded {
             let pageName = uniqueImportPageName(existingNames: existingPageNames, startNumber: pn + createdPageCount)
             do {
@@ -1475,6 +1519,7 @@ final class SlotStoreObservable: ObservableObject {
                 break
             }
         }
+        } // end if actualPagesNeeded > 0
 
         // Refresh state
         specialSlots = specialStorage.loadIndex().specialSlots
@@ -1527,7 +1572,12 @@ final class SlotStoreObservable: ObservableObject {
 
         let toast = parts.joined(separator: "，")
         if UserDefaults.standard.showSaveToast {
-            showToast(toast)
+            let iconName = failedCount > 0 ? "exclamationmark.triangle.fill" : "checkmark.circle.fill"
+            showFloatingNotice(FloatingNotice(
+                title: "已批量保存 \(savedCount) 个文件",
+                subtitle: parts.dropFirst().joined(separator: "，"),
+                iconName: iconName
+            ), duration: 2.0)
         }
 
         NSLog("[ClipSlots] Batch save complete: \(toast)")
