@@ -1244,21 +1244,30 @@ final class SlotStoreObservable: ObservableObject {
         if fileCount > 0 { infoLines.append("\(fileCount) 个文件") }
         alert.informativeText = "已选择：" + infoLines.joined(separator: "，")
 
-        // Popup button for mode selection
+        // Radio buttons for mode selection (v2.6.6: replaced NSPopUpButton)
         let stackView = NSStackView()
         stackView.orientation = .vertical
-        stackView.spacing = 6
+        stackView.spacing = 4
 
-        let headerLabel = NSTextField(labelWithString: "导入方式：")
+        let headerLabel = NSTextField(labelWithString: "导入方式")
         headerLabel.font = NSFont.systemFont(ofSize: 12, weight: .semibold)
         stackView.addArrangedSubview(headerLabel)
 
-        let modePopup = NSPopUpButton(frame: NSRect(x: 0, y: 0, width: 340, height: 24), pullsDown: false)
+        var radioButtons: [NSButton] = []
         for mode in availableModes {
-            modePopup.addItem(withTitle: mode.title)
+            let btn = NSButton(radioButtonWithTitle: mode.title, target: nil, action: nil)
+            btn.state = (mode == defaultMode) ? .on : .off
+            radioButtons.append(btn)
+            stackView.addArrangedSubview(btn)
+
+            // Description label
+            let desc = NSTextField(labelWithString: mode.description)
+            desc.font = NSFont.systemFont(ofSize: 10)
+            desc.textColor = .secondaryLabelColor
+            desc.lineBreakMode = .byWordWrapping
+            desc.preferredMaxLayoutWidth = 360
+            stackView.addArrangedSubview(desc)
         }
-        modePopup.selectItem(withTitle: defaultMode.title)
-        stackView.addArrangedSubview(modePopup)
 
         // Estimate count
         let expansion = folderImportService.expandSelection(urls: urls, mode: defaultMode, sortRule: specialSlotSettings.folderImportSortRule)
@@ -1273,11 +1282,14 @@ final class SlotStoreObservable: ObservableObject {
 
         guard alert.runModal() == .alertFirstButtonReturn else { return }
 
-        // Read selected mode
-        let selectedIdx = modePopup.indexOfSelectedItem
-        let selectedMode = (selectedIdx >= 0 && selectedIdx < availableModes.count)
-            ? availableModes[selectedIdx]
-            : defaultMode
+        // Read selected mode from radio buttons
+        var selectedMode = defaultMode
+        for (idx, btn) in radioButtons.enumerated() {
+            if btn.state == .on, idx < availableModes.count {
+                selectedMode = availableModes[idx]
+                break
+            }
+        }
 
         executeToolbarImport(urls: urls, mode: selectedMode, sortRule: specialSlotSettings.folderImportSortRule)
     }
@@ -1897,17 +1909,25 @@ final class SlotStoreObservable: ObservableObject {
 
         let stackView = NSStackView()
         stackView.orientation = .vertical
-        stackView.spacing = 6
-        let headerLabel = NSTextField(labelWithString: "导入方式：")
+        stackView.spacing = 4
+        let headerLabel = NSTextField(labelWithString: "导入方式")
         headerLabel.font = NSFont.systemFont(ofSize: 12, weight: .semibold)
         stackView.addArrangedSubview(headerLabel)
 
-        let modePopup = NSPopUpButton(frame: NSRect(x: 0, y: 0, width: 300, height: 24), pullsDown: false)
+        var radioButtons: [NSButton] = []
         for mode in modes {
-            modePopup.addItem(withTitle: mode.title)
+            let btn = NSButton(radioButtonWithTitle: mode.title, target: nil, action: nil)
+            btn.state = (mode == defaultMode) ? .on : .off
+            radioButtons.append(btn)
+            stackView.addArrangedSubview(btn)
+
+            let desc = NSTextField(labelWithString: mode.description)
+            desc.font = NSFont.systemFont(ofSize: 10)
+            desc.textColor = .secondaryLabelColor
+            desc.lineBreakMode = .byWordWrapping
+            desc.preferredMaxLayoutWidth = 340
+            stackView.addArrangedSubview(desc)
         }
-        modePopup.selectItem(withTitle: defaultMode.title)
-        stackView.addArrangedSubview(modePopup)
 
         alert.accessoryView = stackView
         alert.addButton(withTitle: "开始导入")
@@ -1915,10 +1935,13 @@ final class SlotStoreObservable: ObservableObject {
 
         guard alert.runModal() == .alertFirstButtonReturn else { return }
 
-        let selectedIdx = modePopup.indexOfSelectedItem
-        let selectedMode = (selectedIdx >= 0 && selectedIdx < modes.count)
-            ? modes[selectedIdx]
-            : defaultMode
+        var selectedMode = defaultMode
+        for (idx, btn) in radioButtons.enumerated() {
+            if btn.state == .on, idx < modes.count {
+                selectedMode = modes[idx]
+                break
+            }
+        }
 
         let expansion = folderImportService.expandSelection(
             urls: folderURLs,
