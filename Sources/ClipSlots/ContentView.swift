@@ -148,32 +148,9 @@ struct ContentView: View {
     }
 
     private func floatingNoticeView(_ notice: FloatingNotice) -> some View {
-        VStack(spacing: 6) {
-            Image(systemName: notice.iconName)
-                .font(.system(size: 24, weight: .semibold))
-                .foregroundColor(.accentColor)
-
-            Text(notice.title)
-                .font(.system(size: 13, weight: .semibold))
-                .foregroundColor(.primary)
-
-            if !notice.subtitle.isEmpty {
-                Text(notice.subtitle)
-                    .font(.system(size: 11))
-                    .foregroundColor(.secondary)
-                    .lineLimit(2)
-                    .multilineTextAlignment(.center)
-            }
-        }
-        .padding(.horizontal, 20)
-        .padding(.vertical, 16)
-        .background(
-            RoundedRectangle(cornerRadius: 16, style: .continuous)
-                .fill(.regularMaterial)
-        )
-        .shadow(color: Color.black.opacity(0.15), radius: 12, y: 6)
-        .allowsHitTesting(false)
-        .padding(.top, 8)
+        FloatingNoticeView(notice: notice)
+            .allowsHitTesting(false)
+            .padding(.top, 8)
     }
 
     private func toastView(_ message: String) -> some View {
@@ -600,7 +577,7 @@ struct ContentView: View {
 
             Spacer()
 
-            Text("v2.6.2")
+            Text("v2.6.3")
                 .font(.caption2)
                 .foregroundColor(Color.secondary.opacity(0.65))
         }

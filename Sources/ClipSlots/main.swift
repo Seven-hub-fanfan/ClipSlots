@@ -656,8 +656,11 @@ final class SlotStoreObservable: ObservableObject {
     }
 
     /// v2.6.2: Show a floating notice with icon/title/subtitle, auto-dismiss.
-    func showFloatingNotice(_ notice: FloatingNotice, duration: TimeInterval = 1.8) {
+    func showFloatingNotice(_ notice: FloatingNotice, duration: TimeInterval = 2.0) {
         floatingNotice = notice
+        // v2.6.3: Also show global HUD so the notice is visible when
+        // ClipSlots main window is not in front (e.g. hotkey save from Finder).
+        FloatingNoticeWindowController.shared.show(notice: notice, duration: duration)
         let noticeId = notice.id
         DispatchQueue.main.asyncAfter(deadline: .now() + duration) { [weak self] in
             if self?.floatingNotice?.id == noticeId {
@@ -833,12 +836,24 @@ final class SlotStoreObservable: ObservableObject {
 
             guard changed else {
                 NSLog("[ClipSlots] captureSelectionAndSaveToSlot ignored: clipboard did not change slot=\(slot)")
+                self.showFloatingNotice(FloatingNotice(
+                    title: "保存失败",
+                    subtitle: "没有捕获到内容，请先复制",
+                    iconName: "xmark.circle.fill",
+                    kind: .error
+                ), duration: 2.5)
                 return
             }
 
             let content = self.clipboard.capture()
             guard !content.isEmpty else {
                 NSLog("[ClipSlots] captureSelectionAndSaveToSlot ignored: empty capture slot=\(slot)")
+                self.showFloatingNotice(FloatingNotice(
+                    title: "保存失败",
+                    subtitle: "没有可保存的内容",
+                    iconName: "xmark.circle.fill",
+                    kind: .error
+                ), duration: 2.5)
                 return
             }
 
@@ -932,7 +947,8 @@ final class SlotStoreObservable: ObservableObject {
             showFloatingNotice(FloatingNotice(
                 title: "已复制槽位 \(slot)",
                 subtitle: "\(summary.typeTitle) · \(summary.detail)",
-                iconName: summary.iconName
+                iconName: summary.iconName,
+                kind: .info
             ))
         }
     }
@@ -1253,7 +1269,8 @@ final class SlotStoreObservable: ObservableObject {
             showFloatingNotice(FloatingNotice(
                 title: "已导入 \(successCount) 个文件",
                 subtitle: failCount > 0 ? "\(failCount) 个失败" : "当前槽位组",
-                iconName: failCount > 0 ? "exclamationmark.triangle.fill" : "checkmark.circle.fill"
+                iconName: failCount > 0 ? "exclamationmark.triangle.fill" : "checkmark.circle.fill",
+                kind: failCount > 0 ? .warning : .success
             ))
 
         } catch {
@@ -1338,6 +1355,12 @@ final class SlotStoreObservable: ObservableObject {
 
         guard success else {
             NSLog("[ClipSlots] SAVE FAIL specialSlot=\(activeId) slot=\(targetSlot)")
+            showFloatingNotice(FloatingNotice(
+                title: "保存失败",
+                subtitle: "槽位 \(targetSlot) 写入失败，请重试",
+                iconName: "xmark.circle.fill",
+                kind: .error
+            ), duration: 2.5)
             return
         }
         var newSlots = slots
@@ -1361,7 +1384,8 @@ final class SlotStoreObservable: ObservableObject {
             showFloatingNotice(FloatingNotice(
                 title: isOverwrite ? "已覆盖槽位 \(targetSlot)" : "已保存到槽位 \(targetSlot)",
                 subtitle: "\(summary.typeTitle) · \(summary.detail)",
-                iconName: summary.iconName
+                iconName: summary.iconName,
+                kind: .success
             ))
         }
     }
@@ -1374,25 +1398,25 @@ final class SlotStoreObservable: ObservableObject {
         // v2.6.2: Safety guards
         guard !isBatchSaving else {
             showFloatingNotice(FloatingNotice(
-                title: "正在批量保存，请稍候", iconName: "hourglass"))
+                title: "正在批量保存，请稍候", iconName: "hourglass", kind: .info))
             return
         }
 
         guard !items.isEmpty else {
             showFloatingNotice(FloatingNotice(
-                title: "没有可保存的文件", iconName: "tray"))
+                title: "没有可保存的文件", iconName: "tray", kind: .warning))
             return
         }
 
         guard (1...config.slots).contains(startSlot) else {
             showFloatingNotice(FloatingNotice(
-                title: "起始槽位无效", iconName: "exclamationmark.triangle.fill"))
+                title: "起始槽位无效", iconName: "exclamationmark.triangle.fill", kind: .error))
             return
         }
 
         guard currentPage != nil, currentSpecialSlot != nil else {
             showFloatingNotice(FloatingNotice(
-                title: "页面或槽位组不存在", iconName: "exclamationmark.triangle.fill"))
+                title: "页面或槽位组不存在", iconName: "exclamationmark.triangle.fill", kind: .error))
             return
         }
 
@@ -1576,8 +1600,9 @@ final class SlotStoreObservable: ObservableObject {
             showFloatingNotice(FloatingNotice(
                 title: "已批量保存 \(savedCount) 个文件",
                 subtitle: parts.dropFirst().joined(separator: "，"),
-                iconName: iconName
-            ), duration: 2.0)
+                iconName: iconName,
+                kind: failedCount > 0 ? .warning : .success
+            ), duration: 2.5)
         }
 
         NSLog("[ClipSlots] Batch save complete: \(toast)")
