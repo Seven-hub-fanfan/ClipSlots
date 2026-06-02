@@ -1,6 +1,6 @@
 import SwiftUI
 
-// MARK: - Global Search Results View (v2.5.2)
+// MARK: - Global Search Results View (v2.5.3)
 
 struct GlobalSearchResultsView: View {
     let results: [SlotGlobalSearchResult]
@@ -8,23 +8,13 @@ struct GlobalSearchResultsView: View {
     let currentGroupId: String
     var onJump: (SlotGlobalSearchResult) -> Void
 
-    @State private var isExpanded = false
-    @State private var hoveredResultId: String?
-    @State private var pinnedPreviewId: String?
+    @State private var selectedResultId: String?
     @Environment(\.colorScheme) private var colorScheme
 
-    private var visibleResults: [SlotGlobalSearchResult] {
-        Array(results.prefix(isExpanded ? 20 : 5))
-    }
-
     private var previewResult: SlotGlobalSearchResult? {
-        if let id = pinnedPreviewId,
-           let pinned = results.first(where: { $0.id == id }) {
-            return pinned
-        }
-        if let id = hoveredResultId,
-           let hovered = results.first(where: { $0.id == id }) {
-            return hovered
+        if let id = selectedResultId,
+           let selected = results.first(where: { $0.id == id }) {
+            return selected
         }
         return results.first
     }
@@ -43,8 +33,6 @@ struct GlobalSearchResultsView: View {
                     previewPanel
                         .frame(width: 260)
                 }
-
-                footer
             }
         }
         .padding(10)
@@ -94,36 +82,37 @@ struct GlobalSearchResultsView: View {
 
     private var resultList: some View {
         ScrollView(.vertical, showsIndicators: true) {
-            VStack(spacing: 5) {
-                ForEach(visibleResults) { result in
+            LazyVStack(spacing: 6) {
+                ForEach(results) { result in
                     resultRow(result)
                 }
             }
+            .padding(.trailing, 4)
         }
-        .frame(maxHeight: isExpanded ? 300 : 150)
+        .frame(minHeight: 120, maxHeight: 260)
     }
 
     private func resultRow(_ result: SlotGlobalSearchResult) -> some View {
         let isCurrent = result.pageId == currentPageId && result.groupId == currentGroupId
-        let isPinned = pinnedPreviewId == result.id
+        let isSelected = selectedResultId == result.id
 
-        return HStack(spacing: 8) {
+        return HStack(spacing: 10) {
             // Slot badge
             Text("\(result.slot)")
                 .font(.system(size: 11, weight: .bold, design: .rounded))
                 .foregroundColor(.white)
-                .frame(width: 22, height: 22)
+                .frame(width: 24, height: 24)
                 .background(Circle().fill(Color.accentColor))
 
             // Info
-            VStack(alignment: .leading, spacing: 2) {
-                HStack(spacing: 5) {
+            VStack(alignment: .leading, spacing: 3) {
+                HStack(spacing: 6) {
                     if isCurrent {
                         Text("当前")
                             .font(.system(size: 9, weight: .semibold))
-                            .padding(.horizontal, 5)
+                            .padding(.horizontal, 6)
                             .padding(.vertical, 2)
-                            .background(Capsule().fill(Color.accentColor.opacity(0.16)))
+                            .background(Capsule().fill(Color.accentColor.opacity(0.18)))
                             .foregroundColor(.accentColor)
                     }
 
@@ -139,44 +128,33 @@ struct GlobalSearchResultsView: View {
             }
 
             Spacer()
-
-            // Eye button
-            Button {
-                if pinnedPreviewId == result.id {
-                    pinnedPreviewId = nil
-                } else {
-                    pinnedPreviewId = result.id
-                }
-            } label: {
-                Image(systemName: isPinned ? "eye.fill" : "eye")
-                    .font(.system(size: 11, weight: .semibold))
-            }
-            .buttonStyle(.plain)
-            .help(isPinned ? "取消固定预览" : "固定预览")
-
-            // Jump button
-            Button {
-                onJump(result)
-            } label: {
-                Image(systemName: "arrow.right.circle")
-                    .font(.system(size: 12, weight: .semibold))
-            }
-            .buttonStyle(.plain)
-            .help("跳转到该槽位")
         }
-        .padding(.horizontal, 8)
-        .padding(.vertical, 6)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 7)
         .background(
-            RoundedRectangle(cornerRadius: 7, style: .continuous)
-                .fill(isPinned ? Color.accentColor.opacity(0.10) : Color.primary.opacity(0.035))
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .fill(isSelected ? Color.accentColor.opacity(0.10) : Color.primary.opacity(0.035))
         )
         .overlay(
-            RoundedRectangle(cornerRadius: 7, style: .continuous)
-                .stroke(isCurrent ? Color.accentColor.opacity(0.3) : Color.secondary.opacity(0.10), lineWidth: 1)
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .stroke(
+                    isSelected
+                    ? Color.accentColor.opacity(0.50)
+                    : Color.secondary.opacity(0.10),
+                    lineWidth: 1
+                )
         )
+        .contentShape(Rectangle())
         .onHover { hovering in
-            hoveredResultId = hovering ? result.id : nil
+            if hovering {
+                selectedResultId = result.id
+            }
         }
+        .onTapGesture {
+            selectedResultId = result.id
+            onJump(result)
+        }
+        .help("点击跳转到该槽位")
     }
 
     // MARK: - Preview Panel (Right)
@@ -198,7 +176,7 @@ struct GlobalSearchResultsView: View {
                 actionButtons(for: result)
             } else {
                 Spacer(minLength: 0)
-                Text("悬停结果可预览")
+                Text("暂无预览")
                     .font(.caption)
                     .foregroundColor(.secondary)
                     .frame(maxWidth: .infinity, alignment: .center)
@@ -206,47 +184,80 @@ struct GlobalSearchResultsView: View {
             }
         }
         .padding(10)
-        .frame(maxHeight: isExpanded ? 300 : 150, alignment: .topLeading)
+        .frame(minHeight: 120, maxHeight: 260, alignment: .topLeading)
         .background(
             RoundedRectangle(cornerRadius: 8, style: .continuous)
                 .fill(Color.primary.opacity(0.035))
         )
     }
 
+    // MARK: - Preview Content (v2.5.3: real thumbnail support)
+
     @ViewBuilder
     private func previewContent(for result: SlotGlobalSearchResult) -> some View {
-        if let fileURL = result.content.primaryFileURL {
-            VStack(alignment: .leading, spacing: 4) {
-                Image(systemName: result.content.isImageFile ? "photo" : "doc")
-                    .font(.system(size: 24))
+        // Try real image preview first
+        if let nsImage = previewImage(for: result) {
+            Image(nsImage: nsImage)
+                .resizable()
+                .scaledToFit()
+                .frame(maxWidth: .infinity, maxHeight: 120)
+                .background(Color.black.opacity(0.06))
+                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+        } else if let webURL = result.content.detectedWebURL {
+            VStack(spacing: 6) {
+                Image(systemName: "link")
+                    .font(.system(size: 28))
                     .foregroundColor(.secondary)
-
+                Text(webURL.host ?? webURL.absoluteString)
+                    .font(.caption2)
+                    .lineLimit(1)
+                    .foregroundColor(.secondary)
+                Text(webURL.absoluteString)
+                    .font(.caption2)
+                    .lineLimit(2)
+                    .foregroundColor(.secondary)
+            }
+            .frame(maxWidth: .infinity, minHeight: 90)
+        } else if let fileURL = result.content.primaryFileURL {
+            VStack(spacing: 6) {
+                Image(systemName: result.previewIconName)
+                    .font(.system(size: 30))
+                    .foregroundColor(.secondary)
                 Text(fileURL.lastPathComponent)
                     .font(.caption2)
                     .lineLimit(2)
                     .foregroundColor(.secondary)
             }
-            .frame(maxWidth: .infinity, minHeight: 60, alignment: .topLeading)
-        } else if let webURL = result.content.detectedWebURL {
-            VStack(alignment: .leading, spacing: 4) {
-                Image(systemName: "link")
-                    .font(.system(size: 20))
-                    .foregroundColor(.secondary)
-
-                Text(webURL.absoluteString)
-                    .font(.caption2)
-                    .lineLimit(3)
-                    .foregroundColor(.secondary)
-            }
-            .frame(maxWidth: .infinity, minHeight: 60, alignment: .topLeading)
+            .frame(maxWidth: .infinity, minHeight: 90)
         } else {
             Text(result.content.preview)
                 .font(.caption2)
                 .foregroundColor(.secondary)
-                .lineLimit(5)
-                .frame(maxWidth: .infinity, minHeight: 60, alignment: .topLeading)
+                .lineLimit(6)
+                .frame(maxWidth: .infinity, minHeight: 90, alignment: .topLeading)
         }
     }
+
+    // MARK: - Preview Image Helper
+
+    private func previewImage(for result: SlotGlobalSearchResult) -> NSImage? {
+        // 1. Inline image data from pasteboard
+        if let inline = result.content.inlineImage {
+            return inline
+        }
+
+        // 2. Image file: load from file path
+        if let fileURL = result.content.primaryFileURL,
+           result.content.isImageFile,
+           FileManager.default.fileExists(atPath: fileURL.path),
+           let image = NSImage(contentsOf: fileURL) {
+            return image
+        }
+
+        return nil
+    }
+
+    // MARK: - Action Buttons
 
     @ViewBuilder
     private func actionButtons(for result: SlotGlobalSearchResult) -> some View {
@@ -323,32 +334,6 @@ struct GlobalSearchResultsView: View {
                         .frame(maxWidth: .infinity, alignment: .leading)
                 }
                 .buttonStyle(.plain)
-            }
-        }
-    }
-
-    // MARK: - Footer
-
-    private var footer: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            if results.count > 5 {
-                Button {
-                    isExpanded.toggle()
-                } label: {
-                    Label(
-                        isExpanded ? "收起" : "展开更多 \(results.count - 5) 个结果",
-                        systemImage: isExpanded ? "chevron.up" : "chevron.down"
-                    )
-                    .font(.caption)
-                }
-                .buttonStyle(.plain)
-                .foregroundColor(.accentColor)
-            }
-
-            if isExpanded && results.count > 20 {
-                Text("还有 \(results.count - 20) 个结果未显示，请继续细化关键词")
-                    .font(.caption2)
-                    .foregroundColor(.secondary)
             }
         }
     }

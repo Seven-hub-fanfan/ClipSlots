@@ -55,4 +55,18 @@ struct SlotGlobalSearchResult: Identifiable {
         if content.hasImage { return "图片" }
         return "文本"
     }
+
+    // MARK: - Preview icon (v2.5.3)
+
+    var previewIconName: String {
+        if content.detectedWebURL != nil { return "link" }
+        if content.isImageFile || content.hasImage { return "photo" }
+        if content.isVideoFile { return "play.rectangle" }
+        if let ext = content.primaryFileURL?.pathExtension.lowercased(), ext == "pdf" {
+            return "doc.richtext"
+        }
+        if content.primaryFileURL != nil { return "doc" }
+        if content.isEmpty { return "circle.dashed" }
+        return "text.alignleft"
+    }
 }
