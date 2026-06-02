@@ -1596,6 +1596,7 @@ final class SlotStoreObservable: ObservableObject {
         let itemsToSave = plan.willSaveCount
 
         // Create new groups in current page
+        if newGroupsNeededInPage > 0 {
         for n in 1...newGroupsNeededInPage {
             let groupName = uniqueImportGroupName(existingNames: Set(pageGroups.map { $0.name }), startNumber: n)
             do {
@@ -1609,6 +1610,7 @@ final class SlotStoreObservable: ObservableObject {
                 break
             }
         }
+        } // end if newGroupsNeededInPage > 0
 
         // Create new pages if needed
         remainingAfterPage = max(0, itemsToSave - targets.count)
@@ -1626,6 +1628,7 @@ final class SlotStoreObservable: ObservableObject {
                 // Create groups in the new page (up to maxSpecialSlots)
                 let groupsNeededInPage = min(specialSlotSettings.maxSpecialSlots,
                     max(0, (itemsToSave - targets.count + config.slots - 1) / config.slots))
+                if groupsNeededInPage > 0 {
                 for gn in 1...groupsNeededInPage {
                     let groupName = "导入 \(gn)"
                     do {
@@ -1639,6 +1642,7 @@ final class SlotStoreObservable: ObservableObject {
                         break
                     }
                 }
+                } // end if groupsNeededInPage > 0
             } catch {
                 NSLog("[ClipSlots] Batch save: failed to create page: \(error)")
                 break

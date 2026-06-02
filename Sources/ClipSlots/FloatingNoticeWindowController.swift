@@ -72,7 +72,7 @@ final class FloatingNoticeWindowController {
 
         panel.isOpaque = false
         panel.backgroundColor = .clear
-        panel.hasShadow = false
+        panel.hasShadow = false  // v2.6.5: ensure no shadow
         panel.level = .floating
         panel.ignoresMouseEvents = true
         panel.hidesOnDeactivate = false

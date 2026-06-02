@@ -42,40 +42,32 @@ struct FloatingNotice: Identifiable, Equatable {
 // MARK: - Floating Notice View (v2.6.3)
 
 /// Standalone view used by both the ContentView overlay and the global HUD window.
+/// v2.6.5: Removed background, shadow, border — minimal text-only HUD.
 struct FloatingNoticeView: View {
     let notice: FloatingNotice
 
     var body: some View {
-        HStack(spacing: 14) {
+        HStack(spacing: 8) {
             Image(systemName: notice.iconName)
-                .font(.system(size: 26, weight: .semibold))
+                .font(.system(size: 18, weight: .semibold))
                 .foregroundColor(notice.kind.iconColor)
-                .frame(width: 30)
 
-            VStack(alignment: .leading, spacing: 4) {
+            VStack(alignment: .leading, spacing: 2) {
                 Text(notice.title)
-                    .font(.system(size: 15, weight: .semibold))
+                    .font(.system(size: 13, weight: .semibold))
                     .foregroundColor(.primary)
 
                 if !notice.subtitle.isEmpty {
                     Text(notice.subtitle)
-                        .font(.system(size: 13, weight: .medium))
+                        .font(.system(size: 12, weight: .medium))
                         .foregroundColor(.secondary)
-                        .lineLimit(2)
-                        .truncationMode(.tail)
+                        .lineLimit(1)
                 }
             }
         }
-        .frame(maxWidth: 420, alignment: .leading)
-        .padding(.horizontal, 20)
-        .padding(.vertical, 16)
-        .background(.ultraThickMaterial)
-        .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: 18, style: .continuous)
-                .stroke(Color.primary.opacity(0.12), lineWidth: 1)
-        )
-        .shadow(color: Color.black.opacity(0.28), radius: 18, y: 8)
+        .padding(.horizontal, 8)
+        .padding(.vertical, 4)
+        .allowsHitTesting(false)
     }
 }
 
