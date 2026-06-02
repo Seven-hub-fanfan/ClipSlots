@@ -69,4 +69,14 @@ struct SlotGlobalSearchResult: Identifiable {
         if content.isEmpty { return "circle.dashed" }
         return "text.alignleft"
     }
+
+    // MARK: - Sort helpers (v2.6.0)
+
+    var contentTypeOrder: Int {
+        if content.isEmpty { return 4 }
+        if content.detectedWebURL != nil { return 3 }
+        if content.primaryFileURL != nil { return 2 }
+        if content.hasImage { return 1 }
+        return 0  // text
+    }
 }

@@ -12,6 +12,12 @@ struct SettingsView: View {
     @State private var hotkeyTemplateKind: HotkeyTemplateKind
     @State private var showingResetConfirm = false
 
+    // v2.6.0: Notification preferences
+    @State private var skipOverwriteConfirmation: Bool
+    @State private var skipBatchSaveConfirmation: Bool
+    @State private var showSaveToast: Bool
+    @State private var showCopyToast: Bool
+
     @Environment(\.dismiss) private var dismiss
     @Environment(\.colorScheme) private var colorScheme
 
@@ -33,6 +39,10 @@ struct SettingsView: View {
         _radialKey = State(initialValue: config.radialKey)
         _verbose = State(initialValue: config.verbose)
         _hotkeyTemplateKind = State(initialValue: config.hotkeyTemplate.kind)
+        _skipOverwriteConfirmation = State(initialValue: UserDefaults.standard.skipOverwriteConfirmation)
+        _skipBatchSaveConfirmation = State(initialValue: UserDefaults.standard.skipBatchSaveConfirmation)
+        _showSaveToast = State(initialValue: UserDefaults.standard.showSaveToast)
+        _showCopyToast = State(initialValue: UserDefaults.standard.showCopyToast)
     }
 
     var body: some View {
@@ -45,6 +55,7 @@ struct SettingsView: View {
                     slotSection
                     shortcutSection
                     advancedSection
+                    notificationPreferencesSection
                     helpSection
                 }
                 .padding(20)
@@ -159,6 +170,67 @@ struct SettingsView: View {
         }
     }
 
+    private var notificationPreferencesSection: some View {
+        settingsSection(title: "提示与确认", icon: "bell.fill") {
+            VStack(spacing: 12) {
+                Toggle(isOn: Binding(
+                    get: { !skipOverwriteConfirmation },
+                    set: { skipOverwriteConfirmation = !$0 }
+                )) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("覆盖槽位前询问")
+                            .font(.subheadline)
+                        Text("保存时若目标槽位已有内容，弹窗确认是否覆盖。")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                }
+                .toggleStyle(.switch)
+
+                Toggle(isOn: Binding(
+                    get: { !skipBatchSaveConfirmation },
+                    set: { skipBatchSaveConfirmation = !$0 }
+                )) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("批量保存前询问")
+                            .font(.subheadline)
+                        Text("批量保存文件时，弹窗确认保存计划。")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                }
+                .toggleStyle(.switch)
+
+                Toggle(isOn: $showSaveToast) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("保存成功后显示提示")
+                            .font(.subheadline)
+                        Text("保存/覆盖槽位后显示轻提示。")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                }
+                .toggleStyle(.switch)
+
+                Toggle(isOn: $showCopyToast) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("复制成功后显示提示")
+                            .font(.subheadline)
+                        Text("复制槽位内容后显示轻提示。")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                }
+                .toggleStyle(.switch)
+
+                Button("重置提示偏好") {
+                    resetNotificationPreferences()
+                }
+                .controlSize(.small)
+            }
+        }
+    }
+
     private var helpSection: some View {
         settingsSection(title: "快捷键格式", icon: "info.circle.fill") {
             VStack(alignment: .leading, spacing: 6) {
@@ -259,7 +331,25 @@ struct SettingsView: View {
         newConfig.verbose = verbose
         newConfig.hotkeyTemplate.kind = hotkeyTemplateKind
         newConfig.save()
+
+        // v2.6.0: persist notification preferences
+        UserDefaults.standard.set(skipOverwriteConfirmation, forKey: UserPreferenceKeys.skipOverwriteConfirmation)
+        UserDefaults.standard.set(skipBatchSaveConfirmation, forKey: UserPreferenceKeys.skipBatchSaveConfirmation)
+        UserDefaults.standard.set(showSaveToast, forKey: UserPreferenceKeys.showSaveToast)
+        UserDefaults.standard.set(showCopyToast, forKey: UserPreferenceKeys.showCopyToast)
+
         onSave(newConfig)
         dismiss()
+    }
+
+    private func resetNotificationPreferences() {
+        UserDefaults.standard.removeObject(forKey: UserPreferenceKeys.skipOverwriteConfirmation)
+        UserDefaults.standard.removeObject(forKey: UserPreferenceKeys.skipBatchSaveConfirmation)
+        UserDefaults.standard.removeObject(forKey: UserPreferenceKeys.showSaveToast)
+        UserDefaults.standard.removeObject(forKey: UserPreferenceKeys.showCopyToast)
+        skipOverwriteConfirmation = false
+        skipBatchSaveConfirmation = false
+        showSaveToast = true
+        showCopyToast = true
     }
 }

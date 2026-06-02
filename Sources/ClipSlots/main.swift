@@ -103,6 +103,7 @@ final class SlotStoreObservable: ObservableObject {
     @Published var toastMessage: String?
     @Published var hotkeyRegistrationErrors: [String] = []
     @Published var slotRenderTokens: [String: UUID] = [:]
+    @Published var isBatchSaving: Bool = false
 
     // v2.4 Page state
     @Published var pages: [SlotPage] = []
@@ -832,12 +833,39 @@ final class SlotStoreObservable: ObservableObject {
     // MARK: - Save (lightweight, synchronous)
 
     func saveToSlot(_ slot: Int) {
+        guard !isBatchSaving else {
+            showToast("正在批量保存，请稍候")
+            return
+        }
         cancelPendingClipboardRestore()
 
         let content = clipboard.capture()
         guard !content.isEmpty else {
             NSLog("[ClipSlots] SAVE ignored: clipboard empty slot=\(slot)")
             return
+        }
+
+        // Check for overwrite confirmation
+        let existing = contentForSlot(slot)
+        if !existing.isEmpty && !UserDefaults.standard.skipOverwriteConfirmation {
+            let alert = NSAlert()
+            alert.messageText = "覆盖槽位 \(slot)？"
+            alert.informativeText = "槽位 \(slot) 已有内容，继续保存会替换原内容。"
+            alert.addButton(withTitle: "覆盖")
+            alert.addButton(withTitle: "取消")
+
+            let checkbox = NSButton(checkboxWithTitle: "以后覆盖时不再提醒", target: nil, action: nil)
+            alert.accessoryView = checkbox
+
+            let response = alert.runModal()
+            guard response == .alertFirstButtonReturn else {
+                NSLog("[ClipSlots] SAVE cancelled by user slot=\(slot)")
+                return
+            }
+
+            if checkbox.state == .on {
+                UserDefaults.standard.set(true, forKey: UserPreferenceKeys.skipOverwriteConfirmation)
+            }
         }
 
         handleCapturedContentForSave(content, targetSlot: slot)
@@ -851,11 +879,24 @@ final class SlotStoreObservable: ObservableObject {
         let content = contentForSlot(slot)
         guard !content.isEmpty else {
             NSLog("[ClipSlots] COPY ignored: slot \(slot) empty")
+            if UserDefaults.standard.showCopyToast {
+                showToast("槽位 \(slot) 为空")
+            }
             return
         }
 
         _ = clipboard.restore(content)
         NSLog("[ClipSlots] COPY slot=\(slot) preview=\(content.preview)")
+
+        if UserDefaults.standard.showCopyToast {
+            if let fileName = content.primaryFileURL?.lastPathComponent {
+                showToast("已复制：\(fileName)")
+            } else if content.detectedWebURL != nil {
+                showToast("已复制链接")
+            } else {
+                showToast("已复制槽位 \(slot)")
+            }
+        }
     }
 
     // MARK: - Simple Paste (hotkeys, menu)
@@ -1094,6 +1135,7 @@ final class SlotStoreObservable: ObservableObject {
     // MARK: - Folder Import
 
     private let folderImportService = FolderImportService()
+    private let batchImportService = BatchImportService()
 
     func chooseFolderAndImportIntoCurrentSpecialSlot() {
         let panel = NSOpenPanel()
@@ -1227,6 +1269,16 @@ final class SlotStoreObservable: ObservableObject {
             return
         }
 
+        // v2.6.0: Detect batch file save
+        if let batchItems = batchImportService.detectBatchItems(from: content),
+           batchItems.count > 1 {
+            handleBatchSave(items: batchItems, startSlot: targetSlot)
+            return
+        }
+
+        // Check if overwriting (before save)
+        let existingBeforeSave = specialStorage.get(targetSlot, in: activeId)
+
         // Normal save — regenerate identity so thumbnails and SwiftUI views refresh.
         var savedContent = content
         savedContent.contentId = UUID().uuidString
@@ -1246,7 +1298,213 @@ final class SlotStoreObservable: ObservableObject {
         slotRenderTokens["\(activeId)::\(targetSlot)"] = UUID()
         loadedSpecialSlotId = activeId
         refreshTrigger = UUID()
+
+        // Update label to file name if present
+        if let fileURL = savedContent.primaryFileURL {
+            setLabel(targetSlot, label: fileURL.lastPathComponent)
+        }
+
         NSLog("[ClipSlots] SAVE OK specialSlot=\(activeId) slot=\(targetSlot) contentId=\(savedContent.contentId) preview=\(savedContent.preview)")
+
+        // Toast
+        if UserDefaults.standard.showSaveToast {
+            if !existingBeforeSave.isEmpty {
+                showToast("已覆盖槽位 \(targetSlot)")
+            } else {
+                showToast("已保存到槽位 \(targetSlot)")
+            }
+        }
+    }
+
+    // MARK: - Batch Save (v2.6.0)
+
+    private func handleBatchSave(items: [BatchImportItem], startSlot: Int) {
+        let activeId = currentSpecialSlotId
+        let pageId = currentPageId
+        let pageGroups = currentPageSlotGroups
+
+        // Build target slot list: [(specialSlotId, slot)]
+        var targets: [(specialSlotId: String, slot: Int)] = []
+
+        // Current group from startSlot
+        for s in startSlot...config.slots {
+            targets.append((activeId, s))
+        }
+
+        // Find current group index
+        let currentGroupIdx = pageGroups.firstIndex(where: { $0.id == activeId }) ?? 0
+
+        // Subsequent existing groups in this page
+        for i in (currentGroupIdx + 1)..<pageGroups.count {
+            for s in 1...config.slots {
+                targets.append((pageGroups[i].id, s))
+            }
+        }
+
+        // Calculate new groups needed
+        let existingCount = pageGroups.count
+        let maxNew = max(0, specialSlotSettings.maxSpecialSlots - existingCount)
+        let remainingItems = max(0, items.count - targets.count)
+        let newGroupsNeeded = min(maxNew, (remainingItems + config.slots - 1) / config.slots)
+
+        let plan = BatchSavePlan(
+            items: items,
+            startSlot: startSlot,
+            willOverwriteCount: countOverwrites(targets: targets.prefix(items.count)),
+            needsNewGroups: newGroupsNeeded,
+            skippedFolderCount: 0,
+            skippedUnsupportedCount: 0,
+            availableCapacity: targets.count + newGroupsNeeded * config.slots
+        )
+
+        // Show confirmation
+        if !UserDefaults.standard.skipBatchSaveConfirmation || plan.willOverwriteCount > 0 {
+            guard confirmBatchSave(plan, currentGroupName: currentSpecialSlot?.name ?? "槽位组") else {
+                return
+            }
+        }
+
+        // Check if we can save all
+        if plan.willSkipCount > 0 {
+            guard confirmPartialBatchSave(plan) else {
+                return
+            }
+        }
+
+        isBatchSaving = true
+        defer { isBatchSaving = false }
+
+        var savedCount = 0
+        var failedCount = 0
+        var overwrittenCount = 0
+        var createdGroupCount = 0
+        let itemsToSave = plan.willSaveCount
+
+        // Create new groups if needed (before saving)
+        var newGroupIds: [String] = []
+        for n in 1...newGroupsNeeded {
+            let groupName = uniqueImportGroupName(existingNames: Set(pageGroups.map { $0.name }), startNumber: n)
+            do {
+                let newGroup = try specialStorage.createSpecialSlot(name: groupName, pageId: pageId)
+                newGroupIds.append(newGroup.id)
+                for s in 1...config.slots {
+                    targets.append((newGroup.id, s))
+                }
+                createdGroupCount += 1
+            } catch {
+                NSLog("[ClipSlots] Batch save: failed to create group '\(groupName)': \(error)")
+                break
+            }
+        }
+
+        // Refresh special slots
+        if createdGroupCount > 0 {
+            specialSlots = specialStorage.loadIndex().specialSlots
+        }
+
+        // Save items to targets
+        for (index, item) in items.enumerated() {
+            guard index < itemsToSave, index < targets.count else { break }
+
+            let target = targets[index]
+            var content = batchImportService.makeSlotContent(for: item.fileURL)
+            content.contentId = UUID().uuidString
+            content.updatedAt = Date().timeIntervalSince1970
+
+            // Check if overwriting
+            let existing = specialStorage.get(target.slot, in: target.specialSlotId)
+            let isOverwrite = !existing.isEmpty
+
+            let ok = specialStorage.set(target.slot, content: content, in: target.specialSlotId)
+            if ok {
+                if isOverwrite { overwrittenCount += 1 }
+                // Set label to file name
+                specialStorage.setLabel(target.slot, label: item.fileName, in: target.specialSlotId)
+                savedCount += 1
+            } else {
+                failedCount += 1
+            }
+        }
+
+        // Reload current slots and show toast
+        reloadAll()
+        refreshTrigger = UUID()
+
+        var parts: [String] = []
+        parts.append("已保存 \(savedCount) 个文件")
+        if overwrittenCount > 0 { parts.append("覆盖 \(overwrittenCount) 个槽位") }
+        if createdGroupCount > 0 { parts.append("新建 \(createdGroupCount) 个槽位组") }
+        if failedCount > 0 { parts.append("\(failedCount) 个失败") }
+
+        let toast = parts.joined(separator: "，")
+        if UserDefaults.standard.showSaveToast {
+            showToast(toast)
+        }
+
+        NSLog("[ClipSlots] Batch save complete: \(toast)")
+    }
+
+    private func countOverwrites(targets: ArraySlice<(specialSlotId: String, slot: Int)>) -> Int {
+        targets.filter { target in
+            !specialStorage.get(target.slot, in: target.specialSlotId).isEmpty
+        }.count
+    }
+
+    private func uniqueImportGroupName(existingNames: Set<String>, startNumber: Int) -> String {
+        var n = startNumber
+        while true {
+            let name = "导入 \(n)"
+            if !existingNames.contains(name) { return name }
+            n += 1
+        }
+    }
+
+    private func confirmBatchSave(_ plan: BatchSavePlan, currentGroupName: String) -> Bool {
+        let alert = NSAlert()
+        alert.messageText = "批量保存文件？"
+        alert.alertStyle = .informational
+
+        var lines: [String] = []
+        lines.append("即将保存 \(plan.items.count) 个文件。")
+        lines.append("")
+        let pageName = currentPage?.name ?? "页面"
+        lines.append("起点：页面「\(pageName)」/ \(currentGroupName) / 槽位 \(plan.startSlot)")
+        if plan.needsNewGroups > 0 {
+            lines.append("将新建：\(plan.needsNewGroups) 个槽位组")
+        }
+        if plan.willOverwriteCount > 0 {
+            lines.append("将覆盖：\(plan.willOverwriteCount) 个已有槽位")
+        }
+
+        alert.informativeText = lines.joined(separator: "\n")
+        alert.addButton(withTitle: "开始保存")
+        alert.addButton(withTitle: "取消")
+
+        if plan.willOverwriteCount > 0 {
+            let checkbox = NSButton(checkboxWithTitle: "以后覆盖时不再提醒", target: nil, action: nil)
+            alert.accessoryView = checkbox
+            let response = alert.runModal()
+            if response == .alertFirstButtonReturn {
+                if checkbox.state == .on {
+                    UserDefaults.standard.set(true, forKey: UserPreferenceKeys.skipOverwriteConfirmation)
+                }
+                return true
+            }
+            return false
+        }
+
+        return alert.runModal() == .alertFirstButtonReturn
+    }
+
+    private func confirmPartialBatchSave(_ plan: BatchSavePlan) -> Bool {
+        let alert = NSAlert()
+        alert.messageText = "只能保存部分文件"
+        alert.informativeText = "当前可用容量只能保存前 \(plan.willSaveCount) 个文件，剩余 \(plan.willSkipCount) 个文件无法保存。\n\n原因：当前页面的槽位组数量已达到上限（\(specialSlotSettings.maxSpecialSlots) 个）。"
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "保存可用部分")
+        alert.addButton(withTitle: "取消")
+
+        return alert.runModal() == .alertFirstButtonReturn
     }
 
     private func handleSingleFolderSave(_ folderURL: URL, targetSlot: Int) {

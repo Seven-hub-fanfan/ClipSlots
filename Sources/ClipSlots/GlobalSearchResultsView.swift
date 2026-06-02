@@ -7,6 +7,7 @@ struct GlobalSearchResultsView: View {
     let currentPageId: String
     let currentGroupId: String
     var onJump: (SlotGlobalSearchResult) -> Void
+    @Binding var sortRule: SlotSearchSortRule
 
     @State private var selectedResultId: String?
     @Environment(\.colorScheme) private var colorScheme
@@ -61,6 +62,17 @@ struct GlobalSearchResultsView: View {
                 .foregroundColor(.secondary)
 
             Spacer()
+
+            if !results.isEmpty {
+                Picker("排序", selection: $sortRule) {
+                    ForEach(SlotSearchSortRule.allCases) { rule in
+                        Text(rule.title).tag(rule)
+                    }
+                }
+                .pickerStyle(.menu)
+                .controlSize(.small)
+                .help("结果排序方式")
+            }
         }
     }
 

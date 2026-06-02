@@ -13,6 +13,7 @@ struct ContentView: View {
     @State private var searchText: String = ""
     @State private var selectedFilter: SlotFilterType = .all
     @State private var searchScope: SlotSearchScope = .currentGroup
+    @State private var globalSearchSortRule: SlotSearchSortRule = .smart
 
     private func cycleAppearanceMode() {
         let current = ThemeMode(rawValue: appearanceModeRaw) ?? .system
@@ -551,7 +552,7 @@ struct ContentView: View {
 
             Spacer()
 
-            Text("v2.5.3")
+            Text("v2.6.0")
                 .font(.caption2)
                 .foregroundColor(Color.secondary.opacity(0.65))
         }
@@ -603,7 +604,8 @@ struct ContentView: View {
                         results: globalSearchResults,
                         currentPageId: store.currentPageId,
                         currentGroupId: store.currentSpecialSlotId,
-                        onJump: jumpToSearchResult
+                        onJump: jumpToSearchResult,
+                        sortRule: $globalSearchSortRule
                     )
                     .padding(.top, 2)
                 }
@@ -653,7 +655,7 @@ struct ContentView: View {
     private var globalSearchResults: [SlotGlobalSearchResult] {
         guard searchScope == .global, isSearchActive else { return [] }
 
-        return store.allSearchableSlots()
+        let filtered = store.allSearchableSlots()
             .filter { result in
                 SlotSearchMatcher.matches(
                     slot: result.slot,
@@ -663,34 +665,50 @@ struct ContentView: View {
                     filter: selectedFilter
                 )
             }
-            .sorted { lhs, rhs in
-                // Current page first
+
+        switch globalSearchSortRule {
+        case .smart:
+            return filtered.sorted { lhs, rhs in
                 let lhsCurrentPage = lhs.pageId == store.currentPageId
                 let rhsCurrentPage = rhs.pageId == store.currentPageId
-                if lhsCurrentPage != rhsCurrentPage {
-                    return lhsCurrentPage
-                }
-
-                // Current group first
+                if lhsCurrentPage != rhsCurrentPage { return lhsCurrentPage }
                 let lhsCurrentGroup = lhs.groupId == store.currentSpecialSlotId
                 let rhsCurrentGroup = rhs.groupId == store.currentSpecialSlotId
-                if lhsCurrentGroup != rhsCurrentGroup {
-                    return lhsCurrentGroup
-                }
-
-                // Page order
-                if lhs.pageOrder != rhs.pageOrder {
-                    return lhs.pageOrder < rhs.pageOrder
-                }
-
-                // Group order
-                if lhs.groupOrder != rhs.groupOrder {
-                    return lhs.groupOrder < rhs.groupOrder
-                }
-
-                // Slot number
+                if lhsCurrentGroup != rhsCurrentGroup { return lhsCurrentGroup }
+                if lhs.pageOrder != rhs.pageOrder { return lhs.pageOrder < rhs.pageOrder }
+                if lhs.groupOrder != rhs.groupOrder { return lhs.groupOrder < rhs.groupOrder }
                 return lhs.slot < rhs.slot
             }
+        case .slotOrder:
+            return filtered.sorted { lhs, rhs in
+                if lhs.slot != rhs.slot { return lhs.slot < rhs.slot }
+                if lhs.pageOrder != rhs.pageOrder { return lhs.pageOrder < rhs.pageOrder }
+                return lhs.groupOrder < rhs.groupOrder
+            }
+        case .nameAscending:
+            return filtered.sorted {
+                $0.displayTitle.localizedStandardCompare($1.displayTitle) == .orderedAscending
+            }
+        case .nameDescending:
+            return filtered.sorted {
+                $0.displayTitle.localizedStandardCompare($1.displayTitle) == .orderedDescending
+            }
+        case .typeOrder:
+            return filtered.sorted { lhs, rhs in
+                if lhs.contentTypeOrder != rhs.contentTypeOrder {
+                    return lhs.contentTypeOrder < rhs.contentTypeOrder
+                }
+                if lhs.pageOrder != rhs.pageOrder { return lhs.pageOrder < rhs.pageOrder }
+                if lhs.groupOrder != rhs.groupOrder { return lhs.groupOrder < rhs.groupOrder }
+                return lhs.slot < rhs.slot
+            }
+        case .pageGroupSlot:
+            return filtered.sorted { lhs, rhs in
+                if lhs.pageOrder != rhs.pageOrder { return lhs.pageOrder < rhs.pageOrder }
+                if lhs.groupOrder != rhs.groupOrder { return lhs.groupOrder < rhs.groupOrder }
+                return lhs.slot < rhs.slot
+            }
+        }
     }
 
     private func jumpToSearchResult(_ result: SlotGlobalSearchResult) {
