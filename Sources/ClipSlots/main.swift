@@ -109,6 +109,11 @@ final class SlotStoreObservable: ObservableObject {
     // v2.6.7: import options sheet
     @Published var pendingImportSelection: PendingImportSelection?
 
+    // v2.6.8: slot connection system
+    @Published var currentConnections: SlotConnectionMap = SlotConnectionMap()
+    @Published var connectionMode: Bool = false
+    @Published var connectionSourceSlot: Int? = nil
+
     // v2.4 Page state
     @Published var pages: [SlotPage] = []
     @Published var currentPageId: String = "default_page"
@@ -175,6 +180,7 @@ final class SlotStoreObservable: ObservableObject {
     func reloadAll() {
         loadSpecialSlots()
         loadSlots()
+        loadConnections()
     }
 
     func switchSpecialSlot(id: String) {
@@ -206,6 +212,7 @@ final class SlotStoreObservable: ObservableObject {
         specialStorage.updateSelectedSpecialSlot(id: id)
 
         loadSlots()
+        loadConnections()
         refreshTrigger = UUID()
 
         showToast("已预览「\(currentSpecialSlot?.name ?? id)」")
@@ -961,6 +968,14 @@ final class SlotStoreObservable: ObservableObject {
     func pasteSlot(_ slot: Int) {
         let activeId = activeHotkeySpecialSlotId
 
+        // v2.6.8: If this slot starts a chain, paste the whole chain
+        let connections = SlotConnectionStorage.shared.load(for: activeId)
+        let chain = connections.chainStarting(from: slot)
+        if chain.count > 1 {
+            pasteSlotChain(chain, specialSlotId: activeId)
+            return
+        }
+
         NSLog("[ClipSlots] pasteSlot instanceID=\(instanceID) slot=\(slot) activeSpecialSlotId=\(activeId) loadedSpecialSlotId=\(loadedSpecialSlotId ?? "nil")")
 
         // Global hotkey paste: always read directly from the current special slot on disk.
@@ -1020,6 +1035,14 @@ final class SlotStoreObservable: ObservableObject {
 
     func pasteSlotToApp(_ slot: Int, targetApp: NSRunningApplication?) {
         let activeId = currentSpecialSlotId
+
+        // v2.6.8: If this slot starts a chain, paste the whole chain
+        let connections = SlotConnectionStorage.shared.load(for: activeId)
+        let chain = connections.chainStarting(from: slot)
+        if chain.count > 1 {
+            pasteSlotChainToApp(chain, specialSlotId: activeId, targetApp: targetApp)
+            return
+        }
 
         // Always read from the currently active special slot on disk.
         let content = specialStorage.get(slot, in: activeId)
@@ -1095,6 +1118,223 @@ final class SlotStoreObservable: ObservableObject {
         } else {
             performPaste()
         }
+    }
+
+    // MARK: - Chain Paste (v2.6.8)
+
+    /// Classification result for chain content.
+    private enum ChainPasteClassification {
+        case empty
+        case textOnly(mergedText: String, slotCount: Int)
+        case fileOnly(urls: [URL], slotCount: Int)
+        case unsupported(slot: Int, reason: String)
+    }
+
+    /// Examine chain slots and classify their combined content.
+    private func classifyChain(_ chain: [Int], specialSlotId: String) -> ChainPasteClassification {
+        var allText: [String] = []
+        var allFileURLs: [URL] = []
+
+        for slot in chain {
+            let content = specialStorage.get(slot, in: specialSlotId)
+            if content.isEmpty { continue }
+
+            switch content.contentType {
+            case .empty:
+                continue
+            case .textOnly:
+                if let text = content.plainText { allText.append(text) }
+            case .filesOnly:
+                allFileURLs.append(contentsOf: content.detectedRegularFileURLs)
+            case .image:
+                return .unsupported(slot: slot, reason: "槽位 \(slot) 包含图片内容")
+            case .mixed:
+                return .unsupported(slot: slot, reason: "槽位 \(slot) 包含混合内容类型")
+            }
+        }
+
+        if !allText.isEmpty && allFileURLs.isEmpty {
+            return .textOnly(mergedText: allText.joined(separator: "\n\n"), slotCount: allText.count)
+        }
+        if allText.isEmpty && !allFileURLs.isEmpty {
+            return .fileOnly(urls: allFileURLs, slotCount: allFileURLs.count)
+        }
+        if allText.isEmpty && allFileURLs.isEmpty {
+            return .empty
+        }
+        return .unsupported(slot: chain.first ?? 0, reason: "串联包含不同内容类型")
+    }
+
+    /// Hotkey-initiated chain paste.
+    private func pasteSlotChain(_ chain: [Int], specialSlotId: String) {
+        let classification = classifyChain(chain, specialSlotId: specialSlotId)
+
+        switch classification {
+        case .empty:
+            return
+        case .textOnly(let mergedText, let slotCount):
+            var content = SlotContent()
+            content.contentId = UUID().uuidString
+            content.updatedAt = Date().timeIntervalSince1970
+            let item = PasteboardItem(type: "public.utf8-plain-text", data: mergedText.data(using: .utf8)!)
+            content.items = [[item]]
+            pasteChainContent(content, chain: chain, slotCount: slotCount, specialSlotId: specialSlotId)
+        case .fileOnly(let urls, let slotCount):
+            var content = SlotContent()
+            content.contentId = UUID().uuidString
+            content.updatedAt = Date().timeIntervalSince1970
+            content.items = urls.map { url in
+                let item = PasteboardItem(type: "public.file-url", data: url.absoluteString.data(using: .utf8)!)
+                return [item]
+            }
+            pasteChainContent(content, chain: chain, slotCount: slotCount, specialSlotId: specialSlotId)
+        case .unsupported(_, let reason):
+            showFloatingNotice(FloatingNotice(
+                title: "不支持串联粘贴",
+                subtitle: reason,
+                iconName: "exclamationmark.triangle.fill", kind: .warning
+            ))
+        }
+    }
+
+    /// Shared chain paste engine for hotkey path.
+    private func pasteChainContent(_ content: SlotContent, chain: [Int], slotCount: Int, specialSlotId: String) {
+        guard AXIsProcessTrusted() else {
+            promptAccessibilityPermissionIfNeeded()
+            return
+        }
+
+        cancelPendingPasteOperations(restoreClipboard: true)
+
+        let previous = clipboard.capture()
+        guard clipboard.restore(content) else {
+            NSLog("[ClipSlots] chain paste restore failed specialSlot=\(specialSlotId)")
+            return
+        }
+
+        let pasteWorkItem = DispatchWorkItem { [weak self] in
+            guard let self = self else { return }
+            guard self.currentSpecialSlotId == specialSlotId else {
+                NSLog("[ClipSlots] chain paste abort stale specialSlot=\(specialSlotId)")
+                _ = self.clipboard.restore(previous)
+                self.pendingPasteWorkItem = nil
+                return
+            }
+            self.sendPasteKeystroke()
+
+            let restoreWorkItem = DispatchWorkItem { [weak self] in
+                guard let self = self else { return }
+                _ = self.clipboard.restore(previous)
+                self.pendingClipboardRestore = nil
+                self.pendingClipboardRestoreContent = nil
+            }
+            self.pendingClipboardRestoreContent = previous
+            self.pendingClipboardRestore = restoreWorkItem
+            self.pendingPasteWorkItem = nil
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.8, execute: restoreWorkItem)
+        }
+
+        self.pendingPasteWorkItem = pasteWorkItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.08, execute: pasteWorkItem)
+
+        let chainDesc = chain.map { "\($0)" }.joined(separator: "→")
+        showFloatingNotice(FloatingNotice(
+            title: "串联粘贴 \(slotCount) 个槽位",
+            subtitle: chainDesc,
+            iconName: "arrow.triangle.turn.up.right.diamond.fill", kind: .info
+        ), duration: 1.5)
+    }
+
+    /// Radial-menu-initiated chain paste (includes targetApp activation).
+    private func pasteSlotChainToApp(_ chain: [Int], specialSlotId: String, targetApp: NSRunningApplication?) {
+        let classification = classifyChain(chain, specialSlotId: specialSlotId)
+
+        switch classification {
+        case .empty:
+            return
+        case .unsupported(_, let reason):
+            showFloatingNotice(FloatingNotice(
+                title: "不支持串联粘贴",
+                subtitle: reason,
+                iconName: "exclamationmark.triangle.fill", kind: .warning
+            ))
+            return
+        case .textOnly(let mergedText, let slotCount):
+            var content = SlotContent()
+            content.contentId = UUID().uuidString
+            content.updatedAt = Date().timeIntervalSince1970
+            content.items = [[PasteboardItem(type: "public.utf8-plain-text", data: mergedText.data(using: .utf8)!)]]
+            pasteChainContentToApp(content, chain: chain, slotCount: slotCount, specialSlotId: specialSlotId, targetApp: targetApp)
+        case .fileOnly(let urls, let slotCount):
+            var content = SlotContent()
+            content.contentId = UUID().uuidString
+            content.updatedAt = Date().timeIntervalSince1970
+            content.items = urls.map { url in
+                [PasteboardItem(type: "public.file-url", data: url.absoluteString.data(using: .utf8)!)]
+            }
+            pasteChainContentToApp(content, chain: chain, slotCount: slotCount, specialSlotId: specialSlotId, targetApp: targetApp)
+        }
+    }
+
+    /// Shared chain paste engine for radial path.
+    private func pasteChainContentToApp(_ content: SlotContent, chain: [Int], slotCount: Int, specialSlotId: String, targetApp: NSRunningApplication?) {
+        guard AXIsProcessTrusted() else {
+            promptAccessibilityPermissionIfNeeded()
+            return
+        }
+
+        cancelPendingClipboardRestore()
+
+        let cleanTarget: NSRunningApplication?
+        if isSelfApp(targetApp) {
+            cleanTarget = lastNonClipSlotsApp
+        } else {
+            cleanTarget = targetApp ?? lastNonClipSlotsApp
+        }
+
+        let previous = clipboard.capture()
+
+        let performPaste = { [weak self] in
+            guard let self = self else { return }
+            guard self.currentSpecialSlotId == specialSlotId else {
+                _ = self.clipboard.restore(previous)
+                return
+            }
+            guard self.clipboard.restore(content) else { return }
+
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) { [weak self] in
+                guard let self = self else { return }
+                guard self.currentSpecialSlotId == specialSlotId else {
+                    _ = self.clipboard.restore(previous)
+                    return
+                }
+                self.sendPasteKeystroke()
+
+                let restoreWorkItem = DispatchWorkItem { [weak self] in
+                    guard let self = self else { return }
+                    _ = self.clipboard.restore(previous)
+                    self.pendingClipboardRestore = nil
+                    self.pendingClipboardRestoreContent = nil
+                }
+                self.pendingClipboardRestoreContent = previous
+                self.pendingClipboardRestore = restoreWorkItem
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.8, execute: restoreWorkItem)
+            }
+        }
+
+        if let app = cleanTarget {
+            app.activate(options: [.activateIgnoringOtherApps])
+            waitUntilFrontmost(app, timeout: 1.2) { _ in performPaste() }
+        } else {
+            performPaste()
+        }
+
+        let chainDesc = chain.map { "\($0)" }.joined(separator: "→")
+        showFloatingNotice(FloatingNotice(
+            title: "串联粘贴 \(slotCount) 个槽位",
+            subtitle: chainDesc,
+            iconName: "arrow.triangle.turn.up.right.diamond.fill", kind: .info
+        ), duration: 1.5)
     }
 
     /// UI paste button fallback
@@ -1899,6 +2139,114 @@ final class SlotStoreObservable: ObservableObject {
             NSLog("[ClipSlots] createSpecialSlotAndImportFolder error: \(error)")
             showAlert(message: "创建槽位组失败: \(error.localizedDescription)")
         }
+    }
+
+    // MARK: - Slot Connections (v2.6.8)
+
+    func loadConnections() {
+        currentConnections = SlotConnectionStorage.shared.load(for: currentSpecialSlotId)
+    }
+
+    private func saveConnections() {
+        SlotConnectionStorage.shared.save(currentConnections, for: currentSpecialSlotId)
+    }
+
+    /// Try to connect source → target. Returns true on success.
+    @discardableResult
+    func connectSlot(from source: Int, to target: Int) -> Bool {
+        let maxSlot = config.slots
+        guard (1...maxSlot).contains(source), (1...maxSlot).contains(target) else {
+            return false
+        }
+        guard source != target else {
+            showFloatingNotice(FloatingNotice(
+                title: "无法连接", subtitle: "不能连接到自身",
+                iconName: "exclamationmark.triangle.fill", kind: .warning
+            ))
+            return false
+        }
+        if let exist = currentConnections.downstream[source] {
+            showFloatingNotice(FloatingNotice(
+                title: "无法连接",
+                subtitle: "槽位 \(source) 已连接到槽位 \(exist)",
+                iconName: "exclamationmark.triangle.fill", kind: .warning
+            ))
+            return false
+        }
+        if let up = currentConnections.upstream(of: target) {
+            showFloatingNotice(FloatingNotice(
+                title: "无法连接",
+                subtitle: "槽位 \(target) 已是槽位 \(up) 的下游",
+                iconName: "exclamationmark.triangle.fill", kind: .warning
+            ))
+            return false
+        }
+        if currentConnections.wouldCreateCycle(from: source, to: target) {
+            showFloatingNotice(FloatingNotice(
+                title: "无法连接",
+                subtitle: "\(source)→\(target) 会形成循环",
+                iconName: "xmark.circle.fill", kind: .error
+            ))
+            return false
+        }
+
+        currentConnections.downstream[source] = target
+        saveConnections()
+        showFloatingNotice(FloatingNotice(
+            title: "已连接 \(source)→\(target)",
+            iconName: "link.circle.fill", kind: .success
+        ))
+        return true
+    }
+
+    func disconnectSlot(_ slot: Int) {
+        let wasSource = currentConnections.downstream.removeValue(forKey: slot) != nil
+        if let up = currentConnections.upstream(of: slot) {
+            currentConnections.downstream.removeValue(forKey: up)
+        }
+        if wasSource || currentConnections.isSlotInAnyChain(slot) {
+            saveConnections()
+            refreshTrigger = UUID()
+            showFloatingNotice(FloatingNotice(
+                title: "已断开槽位 \(slot)",
+                iconName: "link.badge.minus", kind: .info
+            ))
+        }
+    }
+
+    func clearAllConnections() {
+        guard currentConnections.hasAnyConnections else { return }
+        currentConnections = SlotConnectionMap()
+        saveConnections()
+        refreshTrigger = UUID()
+        showFloatingNotice(FloatingNotice(
+            title: "已清除全部连接",
+            iconName: "trash.circle", kind: .info
+        ))
+    }
+
+    /// Returns [slot: colorIndex] for all slots in the current connections.
+    /// Same chain → same colorIndex.
+    func chainColorMap() -> [Int: Int] {
+        var result: [Int: Int] = [:]
+        let allSlots = Set(currentConnections.downstream.keys)
+            .union(currentConnections.downstream.values)
+        var visited = Set<Int>()
+        var colorIndex = 0
+
+        for slot in 1...config.slots {
+            guard !visited.contains(slot), allSlots.contains(slot) else { continue }
+            var queue = [slot]
+            while let node = queue.popLast() {
+                if visited.contains(node) { continue }
+                visited.insert(node)
+                result[node] = colorIndex
+                if let next = currentConnections.downstream[node] { queue.append(next) }
+                if let prev = currentConnections.upstream(of: node) { queue.append(prev) }
+            }
+            colorIndex += 1
+        }
+        return result
     }
 
     // MARK: - Global Search (v2.5.2)

@@ -24,6 +24,63 @@ struct ContentView: View {
         }
     }
 
+    // v2.6.8: Chain color palette
+    private static let chainPalette: [Color] = [.blue, .orange, .green, .purple, .pink, .cyan, .mint, .teal]
+
+    private var chainColor: [Int: Color] {
+        let map = store.chainColorMap()
+        var result: [Int: Color] = [:]
+        for (slot, idx) in map {
+            result[slot] = Self.chainPalette[idx % Self.chainPalette.count]
+        }
+        return result
+    }
+
+    private func handleConnectTap(slot: Int) {
+        guard store.connectionMode else { return }
+        if let source = store.connectionSourceSlot {
+            if source == slot {
+                store.connectionSourceSlot = nil
+            } else {
+                store.connectSlot(from: source, to: slot)
+                store.connectionSourceSlot = nil
+            }
+        } else {
+            store.connectionSourceSlot = slot
+        }
+    }
+
+    // v2.6.8: Extracted slot card builder to avoid type-check timeout
+    @ViewBuilder
+    private func slotCardView(slot: Int) -> some View {
+        let content = store.slots[slot] ?? SlotContent()
+        let label = store.labels[slot] ?? ""
+        let isMatched = slotMatched(slot)
+
+        SlotCardView(
+            slot: slot,
+            content: content,
+            specialSlotId: store.currentSpecialSlotId,
+            label: label,
+            saveShortcut: shortcutPreview(store.config.saveKey, slot: slot),
+            pasteShortcut: shortcutPreview(store.config.pasteKey, slot: slot),
+            onPaste: { store.pasteSlotFromUI(slot) },
+            onCopy: { store.copySlot(slot) },
+            onSave: { store.saveToSlot(slot) },
+            onClear: { store.clearSlotWithConfirmation(slot) },
+            onSetLabel: { newLabel in
+                store.setLabel(slot, label: newLabel.isEmpty ? nil : newLabel)
+            },
+            connectionDotColor: chainColor[slot],
+            isConnectionMode: store.connectionMode,
+            isConnectionSource: store.connectionSourceSlot == slot,
+            onConnectTap: { handleConnectTap(slot: slot) }
+        )
+        .opacity(!isSearchActive || isMatched ? 1.0 : 0.22)
+        .saturation(!isSearchActive || isMatched ? 1.0 : 0.35)
+        .allowsHitTesting(!isSearchActive || isMatched)
+    }
+
     var body: some View {
         ZStack(alignment: .top) {
             VStack(spacing: 0) {
@@ -53,40 +110,7 @@ struct ContentView: View {
                         spacing: 14
                     ) {
                         ForEach(1...store.config.slots, id: \.self) { slot in
-                            let content = store.slots[slot] ?? SlotContent()
-                            let label = store.labels[slot] ?? ""
-                            let isMatched = slotMatched(slot)
-
-                            SlotCardView(
-                                slot: slot,
-                                content: content,
-                                specialSlotId: store.currentSpecialSlotId,
-                                label: label,
-                                saveShortcut: shortcutPreview(store.config.saveKey, slot: slot),
-                                pasteShortcut: shortcutPreview(store.config.pasteKey, slot: slot),
-                                onPaste: {
-                                    NSLog("[ClipSlots] UI paste button clicked slot=\(slot)")
-                                    store.pasteSlotFromUI(slot)
-                                },
-                                onCopy: {
-                                    NSLog("[ClipSlots] UI copy button clicked slot=\(slot)")
-                                    store.copySlot(slot)
-                                },
-                                onSave: {
-                                    NSLog("[ClipSlots] UI save/overwrite button clicked slot=\(slot)")
-                                    store.saveToSlot(slot)
-                                },
-                                onClear: {
-                                    NSLog("[ClipSlots] UI clear button clicked slot=\(slot)")
-                                    store.clearSlotWithConfirmation(slot)
-                                },
-                                onSetLabel: { newLabel in
-                                    store.setLabel(slot, label: newLabel.isEmpty ? nil : newLabel)
-                                }
-                            )
-                            .opacity(!isSearchActive || isMatched ? 1.0 : 0.22)
-                            .saturation(!isSearchActive || isMatched ? 1.0 : 0.35)
-                            .allowsHitTesting(!isSearchActive || isMatched)
+                            slotCardView(slot: slot)
                         }
                     }
                     .padding(AppTheme.pagePadding)
@@ -592,7 +616,37 @@ struct ContentView: View {
 
             Spacer()
 
-            Text("v2.6.7")
+            // v2.6.8: Connection controls
+            if store.currentConnections.hasAnyConnections {
+                Button {
+                    store.clearAllConnections()
+                } label: {
+                    Label("清除连接", systemImage: "trash")
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .tint(.orange)
+            }
+
+            Button {
+                store.connectionMode.toggle()
+                if !store.connectionMode { store.connectionSourceSlot = nil }
+            } label: {
+                Label(store.connectionMode ? "完成" : "连接",
+                      systemImage: store.connectionMode ? "link.circle.fill" : "link")
+            }
+            .buttonStyle(.borderless)
+            .controlSize(.small)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 4)
+            .background(
+                store.connectionMode
+                ? Capsule().fill(Color.accentColor)
+                : Capsule().fill(AppTheme.chipBackground(colorScheme))
+            )
+            .foregroundColor(store.connectionMode ? .white : .primary)
+
+            Text("v2.6.8")
                 .font(.caption2)
                 .foregroundColor(Color.secondary.opacity(0.65))
         }

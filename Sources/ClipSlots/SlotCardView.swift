@@ -13,6 +13,12 @@ struct SlotCardView: View {
     var onClear: () -> Void
     var onSetLabel: (String) -> Void
 
+    // v2.6.8: Connection state
+    var connectionDotColor: Color? = nil
+    var isConnectionMode: Bool = false
+    var isConnectionSource: Bool = false
+    var onConnectTap: (() -> Void)? = nil
+
     @State private var editingLabel = false
     @State private var labelText = ""
     @State private var isHovering = false
@@ -87,14 +93,42 @@ struct SlotCardView: View {
 
     private var headerRow: some View {
         HStack(spacing: 10) {
-            ZStack {
-                Circle()
-                    .fill(AppTheme.slotBadgeBackground(colorScheme, isEmpty: content.isEmpty))
-                    .frame(width: 30, height: 30)
+            // v2.6.8: Connection-aware slot badge
+            Button {
+                if isConnectionMode { onConnectTap?() }
+            } label: {
+                    ZStack {
+                        Circle()
+                            .fill(isConnectionSource
+                                  ? AnyShapeStyle(Color.accentColor)
+                                  : AnyShapeStyle(AppTheme.slotBadgeBackground(colorScheme, isEmpty: content.isEmpty)))
+                            .frame(width: 30, height: 30)
 
-                Text("\(slot)")
-                    .font(.system(size: 14, weight: .bold, design: .rounded))
-                    .foregroundColor(content.isEmpty ? .secondary : .white)
+                        if isConnectionMode {
+                            Circle()
+                                .stroke(Color.accentColor.opacity(0.5), lineWidth: 2)
+                                .frame(width: 30, height: 30)
+                        }
+
+                        if isConnectionMode {
+                            Text(isConnectionSource ? "→" : "+")
+                                .font(.system(size: 14, weight: .bold, design: .rounded))
+                                .foregroundColor(.white)
+                        } else {
+                            Text("\(slot)")
+                                .font(.system(size: 14, weight: .bold, design: .rounded))
+                                .foregroundColor(content.isEmpty ? .secondary : .white)
+                        }
+                    }
+            }
+            .buttonStyle(.plain)
+            .disabled(!isConnectionMode)
+
+            // v2.6.8: Chain color dot
+            if let dotColor = connectionDotColor {
+                Circle()
+                    .fill(dotColor)
+                    .frame(width: 8, height: 8)
             }
 
             VStack(alignment: .leading, spacing: 2) {
