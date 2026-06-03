@@ -106,6 +106,9 @@ final class SlotStoreObservable: ObservableObject {
     @Published var slotRenderTokens: [String: UUID] = [:]
     @Published var isBatchSaving: Bool = false
 
+    // v2.6.7: import options sheet
+    @Published var pendingImportSelection: PendingImportSelection?
+
     // v2.4 Page state
     @Published var pages: [SlotPage] = []
     @Published var currentPageId: String = "default_page"
@@ -1206,7 +1209,7 @@ final class SlotStoreObservable: ObservableObject {
         presentImportOptions(for: panel.urls)
     }
 
-    /// Show import mode picker for the selected URLs, then execute.
+    /// Show import mode picker for the selected URLs, then execute. (v2.6.7: SwiftUI sheet)
     func presentImportOptions(for urls: [URL]) {
         // Classify selection
         var folderCount = 0
@@ -1231,67 +1234,40 @@ final class SlotStoreObservable: ObservableObject {
             return
         }
 
-        let availableModes = ImportLimitMode.availableModes(folderCount: folderCount, fileCount: fileCount)
-        let defaultMode = ImportLimitMode.defaultMode(folderCount: folderCount, fileCount: fileCount)
+        // v2.6.7: Show SwiftUI sheet instead of NSAlert
+        let summary = ImportSelectionSummary(fileCount: fileCount, folderCount: folderCount)
+        pendingImportSelection = PendingImportSelection(
+            urls: urls,
+            summary: summary,
+            startSlot: 1,
+            source: .toolbar
+        )
+    }
 
-        // Build NSAlert with accessoryView radio buttons
-        let alert = NSAlert()
-        alert.messageText = "批量导入选项"
-        alert.alertStyle = .informational
+    /// Called when user confirms import options from the sheet. (v2.6.7)
+    func executeImportSelection(_ selection: PendingImportSelection, choice: ImportChoiceMode) {
+        let mode = resolveExpansionMode(choice: choice, summary: selection.summary)
+        let expansion = folderImportService.expandSelection(
+            urls: selection.urls,
+            mode: mode,
+            sortRule: specialSlotSettings.folderImportSortRule
+        )
 
-        var infoLines: [String] = []
-        if folderCount > 0 { infoLines.append("\(folderCount) 个文件夹") }
-        if fileCount > 0 { infoLines.append("\(fileCount) 个文件") }
-        alert.informativeText = "已选择：" + infoLines.joined(separator: "，")
-
-        // Radio buttons for mode selection (v2.6.6: replaced NSPopUpButton)
-        let stackView = NSStackView()
-        stackView.orientation = .vertical
-        stackView.spacing = 4
-
-        let headerLabel = NSTextField(labelWithString: "导入方式")
-        headerLabel.font = NSFont.systemFont(ofSize: 12, weight: .semibold)
-        stackView.addArrangedSubview(headerLabel)
-
-        var radioButtons: [NSButton] = []
-        for mode in availableModes {
-            let btn = NSButton(radioButtonWithTitle: mode.title, target: nil, action: nil)
-            btn.state = (mode == defaultMode) ? .on : .off
-            radioButtons.append(btn)
-            stackView.addArrangedSubview(btn)
-
-            // Description label
-            let desc = NSTextField(labelWithString: mode.description)
-            desc.font = NSFont.systemFont(ofSize: 10)
-            desc.textColor = .secondaryLabelColor
-            desc.lineBreakMode = .byWordWrapping
-            desc.preferredMaxLayoutWidth = 360
-            stackView.addArrangedSubview(desc)
+        guard !expansion.items.isEmpty else {
+            showFloatingNotice(FloatingNotice(
+                title: "没有可导入的文件",
+                subtitle: expansion.folderCount > 0 ? "文件夹为空或无可读取文件" : "",
+                iconName: "tray",
+                kind: .warning
+            ))
+            return
         }
 
-        // Estimate count
-        let expansion = folderImportService.expandSelection(urls: urls, mode: defaultMode, sortRule: specialSlotSettings.folderImportSortRule)
-        let estimateLabel = NSTextField(labelWithString: "预计导入：\(expansion.items.count) 个文件")
-        estimateLabel.font = NSFont.systemFont(ofSize: 11)
-        estimateLabel.textColor = .secondaryLabelColor
-        stackView.addArrangedSubview(estimateLabel)
-
-        alert.accessoryView = stackView
-        alert.addButton(withTitle: "开始导入")
-        alert.addButton(withTitle: "取消")
-
-        guard alert.runModal() == .alertFirstButtonReturn else { return }
-
-        // Read selected mode from radio buttons
-        var selectedMode = defaultMode
-        for (idx, btn) in radioButtons.enumerated() {
-            if btn.state == .on, idx < availableModes.count {
-                selectedMode = availableModes[idx]
-                break
-            }
-        }
-
-        executeToolbarImport(urls: urls, mode: selectedMode, sortRule: specialSlotSettings.folderImportSortRule)
+        handleBatchSave(
+            items: expansion.items,
+            startSlot: selection.startSlot,
+            expansion: expansion
+        )
     }
 
     /// Expand URLs using the given mode and delegate to handleBatchSave.
@@ -1891,75 +1867,21 @@ final class SlotStoreObservable: ObservableObject {
         }
     }
 
-    /// Show import mode picker for single-folder hotkey import (v2.6.4).
+    /// Show import mode picker for hotkey-sourced folder import. (v2.6.7: SwiftUI sheet)
     private func presentImportModePickerForFolder(_ folderURLs: [URL], startSlot: Int) {
         let folderCount = folderURLs.count
-
-        let alert = NSAlert()
-        alert.messageText = "批量导入选项"
-        alert.alertStyle = .informational
-        alert.informativeText = folderCount > 1
-            ? "已选择 \(folderCount) 个文件夹"
-            : "已选择文件夹：\(folderURLs.first?.lastPathComponent ?? "")"
-
-        let modes: [ImportLimitMode] = folderCount > 1
-            ? [.firstTenTotal, .allTotal, .firstTenPerFolder, .allPerFolder]
-            : [.firstTenTotal, .allTotal]
-        let defaultMode: ImportLimitMode = folderCount > 1 ? .allPerFolder : .allTotal
-
-        let stackView = NSStackView()
-        stackView.orientation = .vertical
-        stackView.spacing = 4
-        let headerLabel = NSTextField(labelWithString: "导入方式")
-        headerLabel.font = NSFont.systemFont(ofSize: 12, weight: .semibold)
-        stackView.addArrangedSubview(headerLabel)
-
-        var radioButtons: [NSButton] = []
-        for mode in modes {
-            let btn = NSButton(radioButtonWithTitle: mode.title, target: nil, action: nil)
-            btn.state = (mode == defaultMode) ? .on : .off
-            radioButtons.append(btn)
-            stackView.addArrangedSubview(btn)
-
-            let desc = NSTextField(labelWithString: mode.description)
-            desc.font = NSFont.systemFont(ofSize: 10)
-            desc.textColor = .secondaryLabelColor
-            desc.lineBreakMode = .byWordWrapping
-            desc.preferredMaxLayoutWidth = 340
-            stackView.addArrangedSubview(desc)
+        let summary = ImportSelectionSummary(fileCount: 0, folderCount: folderCount)
+        // v2.6.7: Bring window forward so the sheet is visible
+        if let window = NSApp.windows.first(where: { !($0 is NSPanel) }) {
+            window.makeKeyAndOrderFront(nil)
         }
-
-        alert.accessoryView = stackView
-        alert.addButton(withTitle: "开始导入")
-        alert.addButton(withTitle: "取消")
-
-        guard alert.runModal() == .alertFirstButtonReturn else { return }
-
-        var selectedMode = defaultMode
-        for (idx, btn) in radioButtons.enumerated() {
-            if btn.state == .on, idx < modes.count {
-                selectedMode = modes[idx]
-                break
-            }
-        }
-
-        let expansion = folderImportService.expandSelection(
+        NSApp.activate(ignoringOtherApps: true)
+        pendingImportSelection = PendingImportSelection(
             urls: folderURLs,
-            mode: selectedMode,
-            sortRule: specialSlotSettings.folderImportSortRule
+            summary: summary,
+            startSlot: startSlot,
+            source: .hotkey
         )
-
-        guard !expansion.items.isEmpty else {
-            showFloatingNotice(FloatingNotice(
-                title: "没有可导入的文件",
-                subtitle: "文件夹为空或无可读取文件",
-                iconName: "tray",
-                kind: .warning
-            ))
-            return
-        }
-
-        handleBatchSave(items: expansion.items, startSlot: startSlot, expansion: expansion)
     }
 
     func createSpecialSlotAndImportFolder(_ folderURL: URL) {

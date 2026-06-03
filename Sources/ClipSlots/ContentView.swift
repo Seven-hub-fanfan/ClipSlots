@@ -111,6 +111,21 @@ struct ContentView: View {
             }
         }
         .animation(.easeInOut(duration: 0.25), value: store.toastMessage != nil)
+        // v2.6.7: Import options sheet
+        .sheet(item: $store.pendingImportSelection) { selection in
+            ImportOptionsSheet(
+                selection: selection,
+                onCancel: {
+                    store.pendingImportSelection = nil
+                },
+                onConfirm: { choice in
+                    store.pendingImportSelection = nil
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) {
+                        store.executeImportSelection(selection, choice: choice)
+                    }
+                }
+            )
+        }
     }
 
     private var hotkeyErrorBanner: some View {
@@ -577,7 +592,7 @@ struct ContentView: View {
 
             Spacer()
 
-            Text("v2.6.6")
+            Text("v2.6.7")
                 .font(.caption2)
                 .foregroundColor(Color.secondary.opacity(0.65))
         }

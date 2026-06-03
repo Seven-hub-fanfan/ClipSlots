@@ -18,8 +18,23 @@ final class FloatingNoticeWindowController {
         DispatchQueue.main.async {
             self.dismissWorkItem?.cancel()
 
+            // v2.6.7: Pass App colorScheme to the independent HUD panel
+            let modeRaw = UserDefaults.standard.string(forKey: "appearanceMode") ?? ThemeMode.system.rawValue
+            let themeMode = ThemeMode(rawValue: modeRaw) ?? .system
+            let effectiveColorScheme: ColorScheme = {
+                if let preferred = themeMode.preferredColorScheme {
+                    return preferred
+                }
+                let appearance = NSApp.effectiveAppearance
+                if appearance.name == .darkAqua || appearance.name == .vibrantDark {
+                    return .dark
+                }
+                return .light
+            }()
+
             let hostingView = NSHostingView(
                 rootView: FloatingNoticeView(notice: notice)
+                    .environment(\.colorScheme, effectiveColorScheme)
                     .padding(1)
             )
 
@@ -72,6 +87,7 @@ final class FloatingNoticeWindowController {
 
         panel.isOpaque = false
         panel.backgroundColor = .clear
+        panel.alphaValue = 1.0   // v2.6.7: ensure no transparency
         panel.hasShadow = false  // v2.6.5: ensure no shadow
         panel.level = .floating
         panel.ignoresMouseEvents = true
