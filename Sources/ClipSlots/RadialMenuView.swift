@@ -405,24 +405,11 @@ struct RadialMenuView: View {
                             .foregroundColor(idx != nil ? .accentColor : .secondary)
 
                         if let slot = idx {
-                            // v2.6.8: Show chain info if connected
-                            let chain = store.currentConnections.chainStarting(from: slot)
-                            if chain.count > 1 {
-                                Text("槽位 \(slot)")
-                                    .font(.system(size: 10, weight: .semibold))
-                                Text("串联 \(chain.count) 个槽位")
-                                    .font(.system(size: 8, weight: .semibold))
-                                    .foregroundColor(chainDotColor(for: slot) ?? .accentColor)
-                                Text(chain.map { "\($0)" }.joined(separator: "→"))
-                                    .font(.system(size: 7))
-                                    .foregroundColor(.secondary)
-                            } else {
-                                Text("槽位 \(slot)")
-                                    .font(.system(size: 10, weight: .semibold))
-                                Text("点击粘贴")
-                                    .font(.system(size: 8))
-                                    .foregroundColor(.secondary)
-                            }
+                            Text("槽位 \(slot)")
+                                .font(.system(size: 10, weight: .semibold))
+                            Text("点击粘贴")
+                                .font(.system(size: 8))
+                                .foregroundColor(.secondary)
                         } else {
                             Text(store.currentSpecialSlot?.name ?? "默认槽位组")
                                 .font(.system(size: 9, weight: .semibold))
@@ -447,15 +434,6 @@ struct RadialMenuView: View {
             }
     }
 
-    // v2.6.8: Chain color helper
-    private static let chainPalette: [Color] = [.blue, .orange, .green, .purple, .pink, .cyan, .mint, .teal]
-
-    private func chainDotColor(for slot: Int) -> Color? {
-        let map = store.chainColorMap()
-        guard let idx = map[slot] else { return nil }
-        return Self.chainPalette[idx % Self.chainPalette.count]
-    }
-
     @ViewBuilder
     private func segmentLabel(slot: Int, content: SlotContent, label: String, angle: Angle, midRadius: CGFloat) -> some View {
         let rad = CGFloat(angle.radians)
@@ -464,17 +442,9 @@ struct RadialMenuView: View {
         let isHovered = hoveredIndex == slot
 
         VStack(spacing: 3) {
-            // v2.6.8: Show slot number with optional chain dot
-            HStack(spacing: 3) {
-                Text("\(slot)")
-                    .font(.system(size: 20, weight: .bold, design: .rounded))
-                    .foregroundColor(AppTheme.radialPrimaryText(colorScheme, isHovered: isHovered, isEmpty: content.isEmpty))
-                if let color = chainDotColor(for: slot) {
-                    Circle()
-                        .fill(color)
-                        .frame(width: 6, height: 6)
-                }
-            }
+            Text("\(slot)")
+                .font(.system(size: 20, weight: .bold, design: .rounded))
+                .foregroundColor(AppTheme.radialPrimaryText(colorScheme, isHovered: isHovered, isEmpty: content.isEmpty))
 
             if !content.isEmpty {
                 Text(label.isEmpty ? content.preview : label)
