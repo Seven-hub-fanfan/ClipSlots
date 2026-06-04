@@ -142,7 +142,7 @@ struct NodeCanvasSheet: View {
                     showingClearConfirmSheet = true
                 }
             } label: {
-                Label("清除连接", systemImage: "trash")
+                Label("清除", systemImage: "trash")
                     .foregroundStyle(.red)
             }
             Button("完成") { dismiss() }
@@ -166,14 +166,16 @@ struct NodeCanvasSheet: View {
                 Spacer()
             }
 
-            HStack(spacing: 10) {
+            HStack(spacing: 8) {
                 Button { store.applyBuiltInFullChainTemplate() } label: { Label("本组全联", systemImage: "link") }
                 Button { store.applyFullChainToCurrentPage() } label: { Label("本页全联", systemImage: "square.grid.2x2") }
-                Button(role: .destructive) { store.clearCurrentConnectionsWithoutConfirm() } label: { Label("清空本组", systemImage: "trash") }
-                Button(role: .destructive) { store.clearCurrentPageConnections() } label: { Label("清空本页", systemImage: "trash.slash") }
+                Spacer()
+                Button(role: .destructive) { store.clearCurrentConnectionsWithoutConfirm() } label: { Label("清本组", systemImage: "trash") }
+                Button(role: .destructive) { store.clearCurrentPageConnections() } label: { Label("清本页", systemImage: "trash.slash") }
                 Spacer()
             }
             .font(.caption)
+            .buttonStyle(.bordered)
         }
         .font(.caption)
         .padding(.horizontal, 14)

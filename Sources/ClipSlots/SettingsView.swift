@@ -166,71 +166,38 @@ struct SettingsView: View {
 
     private var advancedSection: some View {
         settingsSection(title: "高级", icon: "slider.horizontal.3") {
-            Toggle(isOn: $verbose) {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("输出详细日志")
-                        .font(.subheadline)
-                    Text("用于调试保存、粘贴、快捷键注册等问题。")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                }
-            }
-            .toggleStyle(.switch)
+            settingsToggleRow(
+                title: "输出详细日志",
+                subtitle: "用于调试保存、粘贴、快捷键注册等问题。",
+                isOn: $verbose
+            )
         }
     }
 
     private var notificationPreferencesSection: some View {
         settingsSection(title: "提示与确认", icon: "bell.fill") {
             VStack(spacing: 12) {
-                Toggle(isOn: Binding(
-                    get: { !skipOverwriteConfirmation },
-                    set: { skipOverwriteConfirmation = !$0 }
-                )) {
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("覆盖槽位前询问")
-                            .font(.subheadline)
-                        Text("保存时若目标槽位已有内容，弹窗确认是否覆盖。")
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-                    }
-                }
-                .toggleStyle(.switch)
+                settingsToggleRow(
+                    title: "覆盖槽位前询问",
+                    subtitle: "保存时若目标槽位已有内容，弹窗确认是否覆盖。",
+                    isOn: Binding(
+                        get: { !skipOverwriteConfirmation },
+                        set: { skipOverwriteConfirmation = !$0 }
+                    )
+                )
 
-                Toggle(isOn: Binding(
-                    get: { !skipBatchSaveConfirmation },
-                    set: { skipBatchSaveConfirmation = !$0 }
-                )) {
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("批量保存前询问")
-                            .font(.subheadline)
-                        Text("批量保存文件时，弹窗确认保存计划。")
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-                    }
-                }
-                .toggleStyle(.switch)
+                settingsToggleRow(
+                    title: "批量保存前询问",
+                    subtitle: "批量保存文件时，弹窗确认保存计划。",
+                    isOn: Binding(
+                        get: { !skipBatchSaveConfirmation },
+                        set: { skipBatchSaveConfirmation = !$0 }
+                    )
+                )
 
-                Toggle(isOn: $showSaveToast) {
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("保存成功后显示提示")
-                            .font(.subheadline)
-                        Text("保存/覆盖槽位后显示轻提示。")
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-                    }
-                }
-                .toggleStyle(.switch)
+                settingsToggleRow(title: "保存成功后显示提示", subtitle: "保存 / 覆盖槽位后显示轻提示。", isOn: $showSaveToast)
 
-                Toggle(isOn: $showCopyToast) {
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("复制成功后显示提示")
-                            .font(.subheadline)
-                        Text("复制槽位内容后显示轻提示。")
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-                    }
-                }
-                .toggleStyle(.switch)
+                settingsToggleRow(title: "复制成功后显示提示", subtitle: "复制槽位内容后显示轻提示。", isOn: $showCopyToast)
 
                 Button("重置提示偏好") {
                     resetNotificationPreferences()
@@ -243,16 +210,7 @@ struct SettingsView: View {
     // v2.7.0: Slot connection toggle
     private var connectionSection: some View {
         settingsSection(title: "槽位连接", icon: "point.3.connected.trianglepath.dotted") {
-            Toggle(isOn: $enableSlotConnection) {
-                VStack(alignment: .leading, spacing: 3) {
-                    Text("启用槽位连接")
-                        .font(.subheadline)
-                    Text("关闭后不显示连接点、连接线和串联粘贴功能，但连接数据会保留")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                }
-            }
-            .toggleStyle(.switch)
+            settingsToggleRow(title: "启用槽位连接", subtitle: "关闭后隐藏连接编辑与串联粘贴；连接数据保留。", isOn: $enableSlotConnection)
         }
     }
 
@@ -339,6 +297,27 @@ struct SettingsView: View {
                 .foregroundColor(.secondary)
                 .textSelection(.enabled)
         }
+    }
+
+    private func settingsToggleRow(title: String, subtitle: String, isOn: Binding<Bool>) -> some View {
+        HStack(alignment: .center, spacing: 18) {
+            VStack(alignment: .leading, spacing: 3) {
+                Text(title)
+                    .font(.subheadline)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                Text(subtitle)
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            Spacer(minLength: 24)
+            Toggle("", isOn: isOn)
+                .toggleStyle(.switch)
+                .labelsHidden()
+                .frame(width: 64, alignment: .trailing)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     private func resetDefaults() {

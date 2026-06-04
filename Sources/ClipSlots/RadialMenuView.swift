@@ -83,7 +83,7 @@ struct RadialMenuView: View {
     @State private var mode: RadialMenuMode = .childSlots
     @Environment(\.colorScheme) private var colorScheme
 
-    private let menuSize: CGFloat = 340
+    private let menuSize: CGFloat = 372
 
     private var displayCount: Int {
         mode == .childSlots ? store.config.slots : store.currentPageSlotGroups.count
@@ -161,14 +161,16 @@ struct RadialMenuView: View {
                 }
             }
             .frame(width: menuSize, height: menuSize)
+            .clipped(antialiased: false)
 
             // v2.4.2: Slot group switcher
             groupSwitcher
                 .padding(.top, 8)
                 .padding(.bottom, 6)
         }
-        .frame(width: menuSize)
-        .padding(.vertical, 8)
+        .frame(width: menuSize + 56)
+        .padding(.horizontal, 28)
+        .padding(.vertical, 10)
     }
 
     // MARK: - Top Navigation (v2.4.6: vertical two-tier)
