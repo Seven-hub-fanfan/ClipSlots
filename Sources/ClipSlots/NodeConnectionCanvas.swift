@@ -36,6 +36,8 @@ struct NodeConnectionCanvas: View {
             end = drag.currentPoint
             endPort = drag.fromPort.opposite
         }
+        // v2.7.3: avoid drawing a long line from the canvas edge when frames are not ready.
+        guard start.x.isFinite, start.y.isFinite, end.x.isFinite, end.y.isFinite else { return }
         let path = nodeConnectionPath(start: start, startPort: drag.fromPort, end: end, endPort: endPort)
         context.stroke(path, with: .color(.accentColor), style: StrokeStyle(lineWidth: 2.2, lineCap: .round, lineJoin: .round))
     }
