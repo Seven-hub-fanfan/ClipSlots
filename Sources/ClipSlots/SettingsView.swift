@@ -55,7 +55,7 @@ struct SettingsView: View {
             header
 
             ScrollView {
-                VStack(spacing: 18) {
+                VStack(spacing: 20) {
                     appearanceSection
                     slotSection
                     shortcutSection
@@ -64,7 +64,10 @@ struct SettingsView: View {
                     connectionSection
                     helpSection
                 }
-                .padding(20)
+                .frame(maxWidth: 600)
+                .padding(.horizontal, 24)
+                .padding(.vertical, 22)
+                .frame(maxWidth: .infinity)
             }
 
             footer
@@ -97,8 +100,8 @@ struct SettingsView: View {
             }
             Spacer()
         }
-        .padding(.horizontal, 20)
-        .padding(.vertical, 16)
+        .padding(.horizontal, 24)
+        .padding(.vertical, 18)
         .background(.regularMaterial)
         .overlay(alignment: .bottom) { Divider() }
     }
@@ -265,7 +268,7 @@ struct SettingsView: View {
     }
 
     private var footer: some View {
-        HStack {
+        HStack(spacing: 12) {
             Button("恢复默认") { showingResetConfirm = true }
             Spacer()
             Button("取消") { dismiss() }
@@ -274,36 +277,38 @@ struct SettingsView: View {
                 .buttonStyle(.borderedProminent)
                 .keyboardShortcut(.return)
         }
-        .padding(.horizontal, 20)
-        .padding(.vertical, 14)
+        .padding(.horizontal, 24)
+        .padding(.vertical, 16)
+        .frame(height: 72)
         .background(.regularMaterial)
         .overlay(alignment: .top) { Divider() }
     }
 
     private func settingsSection<Content: View>(title: String, icon: String, @ViewBuilder content: () -> Content) -> some View {
-        VStack(alignment: .leading, spacing: 12) {
+        VStack(alignment: .leading, spacing: 14) {
             HStack(spacing: 8) {
                 Image(systemName: icon)
                     .foregroundColor(.accentColor)
-                    .frame(width: 18)
+                    .frame(width: 20)
                 Text(title)
-                    .font(.system(size: 14, weight: .semibold))
+                    .font(.system(size: 16, weight: .semibold))
             }
             content()
         }
-        .padding(14)
+        .padding(18)
+        .frame(maxWidth: 560, alignment: .leading)
         .background(
-            RoundedRectangle(cornerRadius: AppTheme.cornerRadius, style: .continuous)
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
                 .fill(AppTheme.elevatedBackground(colorScheme))
         )
         .overlay(
-            RoundedRectangle(cornerRadius: AppTheme.cornerRadius, style: .continuous)
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
                 .stroke(AppTheme.subtleBorder(colorScheme), lineWidth: 1)
         )
     }
 
     private func shortcutInput(title: String, subtitle: String, placeholder: String, text: Binding<String>, preview: String) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
+        VStack(alignment: .leading, spacing: 8) {
             HStack {
                 VStack(alignment: .leading, spacing: 2) {
                     Text(title).font(.subheadline)
@@ -324,7 +329,7 @@ struct SettingsView: View {
     }
 
     private func helpRow(_ title: String, _ value: String) -> some View {
-        HStack(alignment: .top, spacing: 10) {
+        HStack(alignment: .top, spacing: 12) {
             Text(title)
                 .font(.caption)
                 .foregroundColor(.secondary)

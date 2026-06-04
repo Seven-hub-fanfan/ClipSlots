@@ -18,14 +18,14 @@ struct ConnectionExportScopeSheet: View {
     let onExportAll: () -> Void
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
+        VStack(alignment: .leading, spacing: 18) {
             Text("导出连接模板")
                 .font(.system(size: 18, weight: .semibold))
             Text("请选择要导出的连接范围。导出内容只包含连接结构，不包含槽位内容、图片或文件。")
                 .font(.callout)
                 .foregroundColor(.secondary)
 
-            VStack(spacing: 10) {
+            VStack(spacing: 12) {
                 Button("导出当前槽位组") { onExportCurrentGroup() }
                     .buttonStyle(.borderedProminent)
                 Button("导出当前页面全部槽位组") { onExportCurrentPage() }
@@ -40,7 +40,7 @@ struct ConnectionExportScopeSheet: View {
 
             HStack { Spacer(); Button("取消") { onCancel() } }
         }
-        .padding(18)
+        .padding(24)
     }
 }
 

@@ -126,15 +126,15 @@ struct NodeCanvasSheet: View {
                     .foregroundColor(.secondary)
             }
             Spacer()
-            Button("十槽位全串联") { store.applyBuiltInFullChainTemplate() }
-            Button("导出模板") {
+            Button { store.applyBuiltInFullChainTemplate() } label: { Label("十槽位全串联", systemImage: "link") }
+            Button {
                 if suppressExportConnectionsPanel {
                     store.exportConnectionTemplate(scope: .currentGroup)
                 } else {
                     showingExportScopeSheet = true
                 }
-            }
-            Button("导入模板") { store.importConnectionTemplate() }
+            } label: { Label("导出模板", systemImage: "square.and.arrow.up") }
+            Button { store.importConnectionTemplate() } label: { Label("导入模板", systemImage: "square.and.arrow.down") }
             Button(role: .destructive) {
                 if suppressClearConnectionsConfirm {
                     store.clearCurrentConnectionsWithoutConfirm()

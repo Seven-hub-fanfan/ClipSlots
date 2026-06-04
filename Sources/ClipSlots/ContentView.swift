@@ -616,16 +616,7 @@ struct ContentView: View {
                     Label("清除当前连接", systemImage: "trash")
                 }
             } label: {
-                Label("连接", systemImage: "point.3.connected.trianglepath.dotted")
-                    .font(.caption2)
-                    .padding(.horizontal, 9)
-                    .padding(.vertical, 5)
-                    .background(
-                        Capsule()
-                            .fill(store.isConnectionModeEnabled
-                                  ? Color.accentColor.opacity(0.18)
-                                  : AppTheme.chipBackground(colorScheme))
-                    )
+                connectionMenuLabel
             }
             .menuStyle(.borderlessButton)
             .fixedSize()
@@ -642,6 +633,28 @@ struct ContentView: View {
         .overlay(alignment: .top) {
             Divider()
         }
+    }
+
+    // v2.7.9: prominent connection button with current-group state.
+    private var connectionMenuLabel: some View {
+        let edgeCount = store.currentConnectionMap.edges.count
+        let hasConnections = edgeCount > 0
+        return HStack(spacing: 6) {
+            Image(systemName: hasConnections ? "link.circle.fill" : "point.3.connected.trianglepath.dotted")
+                .font(.system(size: 11, weight: .semibold))
+            Text(hasConnections ? "连接 · \(edgeCount)" : "连接")
+                .font(.caption2.weight(.semibold))
+        }
+        .foregroundColor(hasConnections ? .accentColor : .primary)
+        .padding(.horizontal, 11)
+        .padding(.vertical, 6)
+        .background(
+            Capsule().fill(hasConnections ? Color.accentColor.opacity(0.16) : AppTheme.chipBackground(colorScheme))
+        )
+        .overlay(
+            Capsule().stroke(hasConnections ? Color.accentColor.opacity(0.55) : Color.secondary.opacity(0.16), lineWidth: 1)
+        )
+        .help(hasConnections ? "当前槽位组已有 \(edgeCount) 条连接" : "打开节点连接工具")
     }
 
     private func keyChip(_ text: String, icon: String) -> some View {

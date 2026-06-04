@@ -115,7 +115,7 @@ struct SlotCardView: View {
                 HStack(spacing: 4) {
                     Circle().fill(dotColor).frame(width: 6, height: 6)
                     Image(systemName: "link")
-                        .font(.system(size: 8, weight: .semibold))
+                        .font(.system(size: 8, weight: .bold))
                         .foregroundColor(dotColor)
                 }
                 .padding(.horizontal, 5)
