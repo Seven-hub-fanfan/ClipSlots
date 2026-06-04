@@ -331,6 +331,18 @@ enum ChainPasteKind {
     case empty
 }
 
+// MARK: - Slot Connection Map Extensions
+
+extension SlotConnectionMap {
+    /// v2.7.2: Returns the set of ports currently connected for a given slot.
+    func connectedPorts(for slot: Int) -> Set<SlotPort> {
+        var result = Set<SlotPort>()
+        if let edge = edgeFrom(slot: slot) { result.insert(edge.fromPort) }
+        if let edge = edgeTo(slot: slot) { result.insert(edge.toPort) }
+        return result
+    }
+}
+
 // MARK: - Slot Connection Template
 
 struct SlotConnectionTemplate: Codable, Identifiable {

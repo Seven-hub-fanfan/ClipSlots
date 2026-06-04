@@ -17,6 +17,8 @@ struct ContentView: View {
 
     // v2.7.1: stable connection sheet replaces broken node-canvas UI.
     @State private var showingConnectionManagement = false
+    // v2.7.2: Independent node canvas (does NOT draw lines on the main grid).
+    @State private var showingNodeCanvas = false
 
     private func cycleAppearanceMode() {
         let current = ThemeMode(rawValue: appearanceModeRaw) ?? .system
@@ -101,6 +103,11 @@ struct ContentView: View {
         .sheet(isPresented: $showingConnectionManagement) {
             ConnectionManagementSheet(store: store)
                 .frame(width: 540, height: 620)
+        }
+        // v2.7.2: Independent node canvas. Do NOT draw connection lines on the main slot grid.
+        .sheet(isPresented: $showingNodeCanvas) {
+            NodeCanvasSheet(store: store)
+                .frame(minWidth: 980, minHeight: 680)
         }
     }
 
@@ -568,6 +575,13 @@ struct ContentView: View {
 
             // v2.7.0: Connection menu
             Menu {
+                // v2.7.2: Independent node canvas
+                Button {
+                    showingNodeCanvas = true
+                } label: {
+                    Label("打开节点画布…", systemImage: "point.3.connected.trianglepath.dotted")
+                }
+
                 Button {
                     showingConnectionManagement = true
                 } label: {

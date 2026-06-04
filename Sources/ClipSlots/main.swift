@@ -691,6 +691,11 @@ final class SlotStoreObservable: ObservableObject {
         }
     }
 
+    /// v2.7.2: Public accessor for node canvas.
+    func slotContent(for slot: Int) -> SlotContent {
+        contentForSlot(slot)
+    }
+
     /// Returns slot content: in-memory state first (only if it belongs to current special slot), fallback to disk.
     private func contentForSlot(_ slot: Int) -> SlotContent {
         let activeId = currentSpecialSlotId
