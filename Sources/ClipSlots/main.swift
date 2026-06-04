@@ -1874,6 +1874,152 @@ final class SlotStoreObservable: ObservableObject {
         return alert.runModal() == .alertFirstButtonReturn
     }
 
+    // MARK: - v2.7.7 Bulk Export / Clear
+
+    func exportConnectionTemplate(scope: ConnectionExportScope) {
+        switch scope {
+        case .currentGroup:
+            exportConnectionTemplate()
+        case .currentPage:
+            var entries: [SlotConnectionTemplateBundleEntry] = []
+            for group in currentPageSlotGroups {
+                let map = SlotConnectionStorage.shared.load(pageId: currentPageId, groupId: group.id)
+                if !map.edges.isEmpty {
+                    entries.append(SlotConnectionTemplateBundleEntry(
+                        pageId: currentPageId,
+                        groupId: group.id,
+                        groupName: group.name,
+                        map: map
+                    ))
+                }
+            }
+            guard !entries.isEmpty else {
+                showFloatingNotice(FloatingNotice(
+                    title: "没有可导出的连接",
+                    subtitle: "当前页面没有连接数据",
+                    iconName: "exclamationmark.triangle.fill",
+                    kind: .warning
+                ))
+                return
+            }
+            let panel = NSSavePanel()
+            let df = DateFormatter(); df.dateFormat = "yyyyMMdd"
+            panel.nameFieldStringValue = "ClipSlots页面模板-\(df.string(from: Date())).clipslotslink"
+            panel.canCreateDirectories = true
+            if #available(macOS 12.0, *) {
+                panel.allowedContentTypes = [UTType(filenameExtension: "clipslotslink") ?? .json]
+            } else {
+                panel.allowedFileTypes = ["clipslotslink", "json"]
+            }
+            guard panel.runModal() == .OK, let url = panel.url else { return }
+            do {
+                let appVersion = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "2.7.7"
+                let bundle = SlotConnectionTemplateService.makeBundleTemplate(from: entries, name: "ClipSlots 页面连接模板", appVersion: appVersion)
+                let data = try JSONEncoder().encode(bundle)
+                try data.write(to: url, options: [.atomic])
+                showFloatingNotice(FloatingNotice(
+                    title: "已导出页面连接模板",
+                    subtitle: "包含 \(entries.count) 个槽位组",
+                    iconName: "square.and.arrow.up.fill",
+                    kind: .success
+                ))
+            } catch {
+                showFloatingNotice(FloatingNotice(title: "导出失败", subtitle: error.localizedDescription, iconName: "xmark.circle.fill", kind: .error))
+            }
+        case .all:
+            let allMaps = SlotConnectionStorage.shared.allCachedMaps()
+            var entries: [SlotConnectionTemplateBundleEntry] = []
+            for (key, map) in allMaps where !map.edges.isEmpty {
+                let parts = key.components(separatedBy: "::")
+                entries.append(SlotConnectionTemplateBundleEntry(
+                    pageId: parts.first ?? "",
+                    groupId: parts.last ?? "",
+                    groupName: parts.last ?? "",
+                    map: map
+                ))
+            }
+            guard !entries.isEmpty else {
+                showFloatingNotice(FloatingNotice(title: "没有可导出的连接", subtitle: "没有找到连接数据", iconName: "exclamationmark.triangle.fill", kind: .warning))
+                return
+            }
+            let panel = NSSavePanel()
+            let df = DateFormatter(); df.dateFormat = "yyyyMMdd"
+            panel.nameFieldStringValue = "ClipSlots全部模板-\(df.string(from: Date())).clipslotslink"
+            panel.canCreateDirectories = true
+            if #available(macOS 12.0, *) {
+                panel.allowedContentTypes = [UTType(filenameExtension: "clipslotslink") ?? .json]
+            } else {
+                panel.allowedFileTypes = ["clipslotslink", "json"]
+            }
+            guard panel.runModal() == .OK, let url = panel.url else { return }
+            do {
+                let appVersion = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "2.7.7"
+                let bundle = SlotConnectionTemplateService.makeBundleTemplate(from: entries, name: "ClipSlots 全部连接模板", appVersion: appVersion)
+                let data = try JSONEncoder().encode(bundle)
+                try data.write(to: url, options: [.atomic])
+                showFloatingNotice(FloatingNotice(
+                    title: "已导出全部连接模板",
+                    subtitle: "包含 \(entries.count) 个槽位组",
+                    iconName: "square.and.arrow.up.fill",
+                    kind: .success
+                ))
+            } catch {
+                showFloatingNotice(FloatingNotice(title: "导出失败", subtitle: error.localizedDescription, iconName: "xmark.circle.fill", kind: .error))
+            }
+        }
+    }
+
+    func clearCurrentConnectionsWithoutConfirm() {
+        currentConnectionMap = .empty
+        saveConnectionMapForCurrentGroup()
+        showFloatingNotice(FloatingNotice(
+            title: "已清除当前槽位组连接",
+            subtitle: "槽位内容未受影响",
+            iconName: "trash.fill",
+            kind: .success
+        ))
+    }
+
+    func clearCurrentPageConnections() {
+        for group in currentPageSlotGroups {
+            SlotConnectionStorage.shared.save(.empty, pageId: currentPageId, groupId: group.id)
+        }
+        currentConnectionMap = .empty
+        showFloatingNotice(FloatingNotice(
+            title: "已清除当前页面连接",
+            subtitle: "槽位内容未受影响",
+            iconName: "trash.fill",
+            kind: .success
+        ))
+    }
+
+    func clearAllConnections() {
+        SlotConnectionStorage.shared.deleteAll { _, _ in true }
+        currentConnectionMap = .empty
+        showFloatingNotice(FloatingNotice(
+            title: "已清除全部连接",
+            subtitle: "槽位内容未受影响",
+            iconName: "trash.fill",
+            kind: .success
+        ))
+    }
+
+    func applyFullChainToCurrentPage() {
+        let appVersion = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "2.7.7"
+        let template = SlotConnectionTemplateService.makeFullTenSlotChainTemplate(appVersion: appVersion)
+        let map = SlotConnectionMap(edges: template.edges)
+        for group in currentPageSlotGroups {
+            SlotConnectionStorage.shared.save(map, pageId: currentPageId, groupId: group.id)
+        }
+        currentConnectionMap = map
+        showFloatingNotice(FloatingNotice(
+            title: "已应用到当前页面全部槽位组",
+            subtitle: "粘贴槽位 1 时会串联粘贴整条链",
+            iconName: "link.circle.fill",
+            kind: .success
+        ))
+    }
+
     // MARK: - v2.7.1 Stable Connection Management
 
     func connectionChainSummaries() -> [[Int]] {

@@ -70,4 +70,33 @@ enum SlotConnectionTemplateService {
             edges: map.edges
         )
     }
+
+    // v2.7.7: export a bundle containing multiple slot groups / pages.
+    static func makeBundleTemplate(from entries: [SlotConnectionTemplateBundleEntry], name: String, appVersion: String) -> SlotConnectionTemplateBundle {
+        SlotConnectionTemplateBundle(
+            name: name,
+            appVersion: appVersion,
+            entries: entries
+        )
+    }
+}
+
+// MARK: - v2.7.7 Template Bundle
+
+struct SlotConnectionTemplateBundle: Codable, Identifiable {
+    static let currentVersion = 1
+    var id: UUID = UUID()
+    var name: String
+    var version: Int = SlotConnectionTemplateBundle.currentVersion
+    var appVersion: String
+    var createdAt: Date = Date()
+    var entries: [SlotConnectionTemplateBundleEntry]
+}
+
+struct SlotConnectionTemplateBundleEntry: Codable, Identifiable {
+    var id: UUID = UUID()
+    var pageId: String
+    var groupId: String
+    var groupName: String
+    var map: SlotConnectionMap
 }

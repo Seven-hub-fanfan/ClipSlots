@@ -3,15 +3,18 @@ import SwiftUI
 struct NodeCanvasSheet: View {
     @ObservedObject var store: SlotStoreObservable
     @Environment(\.dismiss) private var dismiss
+    @AppStorage("suppressClearConnectionsConfirm") private var suppressClearConnectionsConfirm = false
+    @AppStorage("suppressExportConnectionsPanel") private var suppressExportConnectionsPanel = false
     @State private var activeDrag: NodeCanvasDrag?
     @State private var hoveredNode: Int?
     @State private var hoveredTarget: SlotPortTarget?
+    @State private var showingExportScopeSheet = false
+    @State private var showingClearConfirmSheet = false
 
     private let canvasWidth: CGFloat = 920
     private let canvasHeight: CGFloat = 520
     private let nodeSize = CGSize(width: 150, height: 96)
 
-    // v2.7.4: deterministic rects from fixed layout.
     private var nodeFrames: [Int: CGRect] {
         Dictionary(uniqueKeysWithValues: (1...10).map { slot in
             let center = position(for: slot)
@@ -25,7 +28,6 @@ struct NodeCanvasSheet: View {
         })
     }
 
-    // v2.7.6: Always show all ports in the dedicated editing canvas.
     private var visiblePortSlots: Set<Int> { Set(1...10) }
 
     var body: some View {
@@ -55,7 +57,6 @@ struct NodeCanvasSheet: View {
                         .onHover { inside in hoveredNode = inside ? slot : (hoveredNode == slot ? nil : hoveredNode) }
                     }
 
-                    // v2.7.5: Ports managed at canvas level, not inside SlotNodeView.
                     NodePortOverlay(
                         nodeFrames: nodeFrames,
                         // v2.7.6: In the dedicated node canvas, show all ports by default.
@@ -75,6 +76,44 @@ struct NodeCanvasSheet: View {
             }
             footer
         }
+        .sheet(isPresented: $showingExportScopeSheet) {
+            ConnectionExportScopeSheet(
+                suppressNextTime: $suppressExportConnectionsPanel,
+                onCancel: { showingExportScopeSheet = false },
+                onExportCurrentGroup: {
+                    showingExportScopeSheet = false
+                    store.exportConnectionTemplate(scope: .currentGroup)
+                },
+                onExportCurrentPage: {
+                    showingExportScopeSheet = false
+                    store.exportConnectionTemplate(scope: .currentPage)
+                },
+                onExportAll: {
+                    showingExportScopeSheet = false
+                    store.exportConnectionTemplate(scope: .all)
+                }
+            )
+            .frame(width: 420)
+        }
+        .sheet(isPresented: $showingClearConfirmSheet) {
+            ConnectionClearConfirmSheet(
+                suppressNextTime: $suppressClearConnectionsConfirm,
+                onCancel: { showingClearConfirmSheet = false },
+                onClearCurrentGroup: {
+                    showingClearConfirmSheet = false
+                    store.clearCurrentConnectionsWithoutConfirm()
+                },
+                onClearCurrentPage: {
+                    showingClearConfirmSheet = false
+                    store.clearCurrentPageConnections()
+                },
+                onClearAll: {
+                    showingClearConfirmSheet = false
+                    store.clearAllConnections()
+                }
+            )
+            .frame(width: 440)
+        }
     }
 
     private var toolbar: some View {
@@ -88,9 +127,21 @@ struct NodeCanvasSheet: View {
             }
             Spacer()
             Button("十槽位全串联") { store.applyBuiltInFullChainTemplate() }
-            Button("导出模板") { store.exportConnectionTemplate() }
+            Button("导出模板") {
+                if suppressExportConnectionsPanel {
+                    store.exportConnectionTemplate(scope: .currentGroup)
+                } else {
+                    showingExportScopeSheet = true
+                }
+            }
             Button("导入模板") { store.importConnectionTemplate() }
-            Button("清除连接", role: .destructive) { store.confirmAndClearCurrentConnections() }
+            Button("清除连接", role: .destructive) {
+                if suppressClearConnectionsConfirm {
+                    store.clearCurrentConnectionsWithoutConfirm()
+                } else {
+                    showingClearConfirmSheet = true
+                }
+            }
             Button("完成") { dismiss() }
                 .buttonStyle(.borderedProminent)
         }
@@ -98,17 +149,28 @@ struct NodeCanvasSheet: View {
     }
 
     private var footer: some View {
-        HStack {
-            let chains = store.connectionChainSummaries()
-            if chains.isEmpty {
-                Text("暂无连接。拖拽节点边缘端口建立连接。")
-                    .foregroundColor(.secondary)
-            } else {
-                Text("当前链路：" + chains.map { compactChainDescription($0) }.joined(separator: "    "))
-                    .lineLimit(1)
-                    .foregroundColor(.secondary)
+        VStack(spacing: 8) {
+            HStack {
+                let chains = store.connectionChainSummaries()
+                if chains.isEmpty {
+                    Text("暂无连接。拖拽节点边缘端口建立连接。")
+                        .foregroundColor(.secondary)
+                } else {
+                    Text("当前链路：" + chains.map { compactChainDescription($0) }.joined(separator: "    "))
+                        .lineLimit(1)
+                        .foregroundColor(.secondary)
+                }
+                Spacer()
             }
-            Spacer()
+
+            HStack(spacing: 10) {
+                Button("当前槽位组全联") { store.applyBuiltInFullChainTemplate() }
+                Button("当前页面全联") { store.applyFullChainToCurrentPage() }
+                Button("清空本组") { store.clearCurrentConnectionsWithoutConfirm() }
+                Button("清空本页") { store.clearCurrentPageConnections() }
+                Spacer()
+            }
+            .font(.caption)
         }
         .font(.caption)
         .padding(.horizontal, 14)
@@ -126,7 +188,6 @@ struct NodeCanvasSheet: View {
         activeDrag = NodeCanvasDrag(fromSlot: slot, fromPort: port, currentPoint: point)
     }
 
-    // v2.7.5: fromSlot removed — port handles know their own slot.
     private func updateDrag(point: CGPoint) {
         guard var drag = activeDrag else { return }
         drag.currentPoint = point

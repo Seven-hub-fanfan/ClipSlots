@@ -71,6 +71,14 @@ final class SlotConnectionStorage {
         }
     }
 
+    // v2.7.7: Bulk access helpers for page/all export and clear.
+    func allCachedMaps() -> [String: SlotConnectionMap] { cache }
+
+    func deleteAll(where shouldDelete: @escaping (_ key: String, _ map: SlotConnectionMap) -> Bool) {
+        let targetKeys = cache.filter { shouldDelete($0.key, $0.value) }.map(\.key)
+        for k in targetKeys { cache.removeValue(forKey: k) }
+    }
+
     private func persistMap(_ map: SlotConnectionMap, groupId: String) {
         let url = fileURL(for: groupId)
         queue.async {
