@@ -1455,12 +1455,9 @@ final class SlotStoreObservable: ObservableObject {
             ))
 
         case .unsupported:
-            showFloatingNotice(FloatingNotice(
-                title: "串联粘贴失败",
-                subtitle: "暂不支持混合类型，请只连接文本槽位或只连接文件槽位",
-                iconName: "exclamationmark.triangle.fill",
-                kind: .warning
-            ))
+            // v2.7.4: Instead of rejecting mixed content chains, paste each item
+            // sequentially in order (text → Cmd+V → image → Cmd+V → ...).
+            pasteSlotChainSequentially(slots)
 
         case .empty:
             showFloatingNotice(FloatingNotice(
@@ -1620,17 +1617,19 @@ final class SlotStoreObservable: ObservableObject {
     private func payloadForSlot(_ slot: Int) -> ChainPastePayload {
         let content = slots[slot] ?? SlotContent()
         guard !content.isEmpty else {
-            return ChainPastePayload(sourceSlot: slot, text: nil, fileURLs: [], isImage: false, isEmpty: true)
+            return ChainPastePayload(sourceSlot: slot, text: nil, fileURLs: [], isImage: false, isEmpty: true, image: nil)
         }
         let text = content.plainText
         let fileURLs = content.detectedRegularFileURLs
         let isImage = content.hasImage || content.isImageFile
+        let image = content.inlineImage
         return ChainPastePayload(
             sourceSlot: slot,
             text: text,
             fileURLs: fileURLs,
             isImage: isImage,
-            isEmpty: false
+            isEmpty: false,
+            image: image
         )
     }
 
@@ -1646,6 +1645,69 @@ final class SlotStoreObservable: ObservableObject {
         if hasText { return .text }
         if hasFiles { return .files }
         return .empty
+    }
+
+    // MARK: - v2.7.4 Mixed Chain Sequential Paste
+
+    func pasteSlotChainSequentially(_ slots: [Int]) {
+        let payloads = slots.compactMap { slot -> ChainPastePayload? in
+            let payload = payloadForSlot(slot)
+            return payload.isEmpty ? nil : payload
+        }
+
+        guard !payloads.isEmpty else {
+            showFloatingNotice(FloatingNotice(
+                title: "串联粘贴失败",
+                subtitle: "链路中没有可粘贴内容",
+                iconName: "exclamationmark.triangle.fill",
+                kind: .warning
+            ))
+            return
+        }
+
+        pasteNextPayloadSequentially(payloads, index: 0) { [weak self] in
+            guard let self else { return }
+            self.showFloatingNotice(FloatingNotice(
+                title: "已串联粘贴 \(payloads.count) 段内容",
+                subtitle: compactChainDescription(slots),
+                iconName: "link.circle.fill",
+                kind: .success
+            ))
+        }
+    }
+
+    private func pasteNextPayloadSequentially(_ payloads: [ChainPastePayload], index: Int, completion: @escaping () -> Void) {
+        guard index < payloads.count else {
+            completion()
+            return
+        }
+
+        writePayloadToPasteboard(payloads[index])
+        sendPasteKeystroke()
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.18) { [weak self] in
+            self?.pasteNextPayloadSequentially(payloads, index: index + 1, completion: completion)
+        }
+    }
+
+    private func writePayloadToPasteboard(_ payload: ChainPastePayload) {
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+
+        if let text = payload.text, !text.isEmpty {
+            pasteboard.setString(text, forType: .string)
+            return
+        }
+
+        if !payload.fileURLs.isEmpty {
+            pasteboard.writeObjects(payload.fileURLs as [NSURL])
+            return
+        }
+
+        if let image = payload.image {
+            pasteboard.writeObjects([image])
+            return
+        }
     }
 
     private func showChainPasteSuccess(slots: [Int], pastedCount: Int, skippedEmptyCount: Int) {

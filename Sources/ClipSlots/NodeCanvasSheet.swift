@@ -3,7 +3,6 @@ import SwiftUI
 struct NodeCanvasSheet: View {
     @ObservedObject var store: SlotStoreObservable
     @Environment(\.dismiss) private var dismiss
-    @State private var nodeFrames: [Int: CGRect] = [:]
     @State private var activeDrag: NodeCanvasDrag?
     @State private var hoveredNode: Int?
     @State private var hoveredTarget: SlotPortTarget?
@@ -12,6 +11,20 @@ struct NodeCanvasSheet: View {
     private let canvasWidth: CGFloat = 920
     private let canvasHeight: CGFloat = 520
     private let nodeSize = CGSize(width: 150, height: 96)
+
+    // v2.7.4: deterministic rects from fixed layout. No PreferenceKey needed.
+    private var nodeFrames: [Int: CGRect] {
+        Dictionary(uniqueKeysWithValues: (1...10).map { slot in
+            let center = position(for: slot)
+            let rect = CGRect(
+                x: center.x - nodeSize.width / 2,
+                y: center.y - nodeSize.height / 2,
+                width: nodeSize.width,
+                height: nodeSize.height
+            )
+            return (slot, rect)
+        })
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -29,20 +42,18 @@ struct NodeCanvasSheet: View {
                     )
                     .allowsHitTesting(false)
                     ForEach(1...10, id: \.self) { slot in
-                        NodeMeasuredView(slot: slot) {
-                            SlotNodeView(
-                                slot: slot,
-                                content: store.slotContent(for: slot),
-                                colorId: store.currentConnectionMap.colorId(for: slot),
-                                // v2.7.3: during a drag all node ports should be visible.
-                                isHovered: hoveredNode == slot || activeDrag != nil,
-                                connectedPorts: store.currentConnectionMap.connectedPorts(for: slot),
-                                highlightedPort: hoveredTarget?.slot == slot ? hoveredTarget?.port : nil,
-                                onBeginDrag: { port, point in beginDrag(slot: slot, port: port, point: point) },
-                                onUpdateDrag: { point in updateDrag(point: point, fromSlot: slot) },
-                                onEndDrag: { endDrag() }
-                            )
-                        }
+                        SlotNodeView(
+                            slot: slot,
+                            content: store.slotContent(for: slot),
+                            colorId: store.currentConnectionMap.colorId(for: slot),
+                            // v2.7.4: during a drag all node ports should be visible.
+                            isHovered: hoveredNode == slot || activeDrag != nil,
+                            connectedPorts: store.currentConnectionMap.connectedPorts(for: slot),
+                            highlightedPort: hoveredTarget?.slot == slot ? hoveredTarget?.port : nil,
+                            onBeginDrag: { port, point in beginDrag(slot: slot, port: port, point: point) },
+                            onUpdateDrag: { point in updateDrag(point: point, fromSlot: slot) },
+                            onEndDrag: { endDrag() }
+                        )
                         .frame(width: nodeSize.width, height: nodeSize.height)
                         .position(position(for: slot))
                         .onHover { inside in hoveredNode = inside ? slot : (hoveredNode == slot ? nil : hoveredNode) }
@@ -50,7 +61,6 @@ struct NodeCanvasSheet: View {
                 }
                 .frame(width: canvasWidth, height: canvasHeight)
                 .coordinateSpace(name: "nodeCanvas")
-                .onPreferenceChange(NodeFramePreferenceKey.self) { nodeFrames = $0 }
                 .padding(18)
             }
             footer
@@ -101,9 +111,6 @@ struct NodeCanvasSheet: View {
         return CGPoint(x: 115 + col * 175, y: 130 + row * 190)
     }
 
-    // v2.7.3: DragGesture.onChanged fires repeatedly. Starting a new drag every
-    // tick resets the state and causes only the last node to show ports / no
-    // connection to be created. Begin only once per gesture.
     private func beginDrag(slot: Int, port: SlotPort, point: CGPoint) {
         guard activeDrag == nil else { return }
         dragStarted = true
@@ -113,7 +120,6 @@ struct NodeCanvasSheet: View {
     private func updateDrag(point: CGPoint, fromSlot: Int) {
         guard var drag = activeDrag else { return }
         drag.currentPoint = point
-        // v2.7.3: Use drag.fromSlot, not the view slot captured by the updating node.
         let target = nearestNodePortTarget(to: point, nodeFrames: nodeFrames, excluding: drag.fromSlot)
         hoveredTarget = target
         drag.hoverTarget = target
@@ -134,39 +140,6 @@ struct NodeCanvasDrag: Equatable {
     let fromPort: SlotPort
     var currentPoint: CGPoint
     var hoverTarget: SlotPortTarget?
-}
-
-// MARK: - Node Frame Preference Key
-
-struct NodeFramePreferenceKey: PreferenceKey {
-    static var defaultValue: [Int: CGRect] = [:]
-    static func reduce(value: inout [Int: CGRect], nextValue: () -> [Int: CGRect]) {
-        value.merge(nextValue(), uniquingKeysWith: { _, new in new })
-    }
-}
-
-// v2.7.3: use a dedicated overlay reader instead of attaching GeometryReader as
-// a sibling background after position. This prevents frames from collapsing to
-// the last node or being measured in the wrong layer.
-struct NodeMeasuredView<Content: View>: View {
-    let slot: Int
-    let content: Content
-
-    init(slot: Int, @ViewBuilder content: () -> Content) {
-        self.slot = slot
-        self.content = content()
-    }
-
-    var body: some View {
-        content.background(
-            GeometryReader { proxy in
-                Color.clear.preference(
-                    key: NodeFramePreferenceKey.self,
-                    value: [slot: proxy.frame(in: .named("nodeCanvas"))]
-                )
-            }
-        )
-    }
 }
 
 // MARK: - Node Canvas Helpers

@@ -320,6 +320,7 @@ struct ChainPastePayload {
     var fileURLs: [URL]
     var isImage: Bool
     var isEmpty: Bool
+    var image: NSImage?
 }
 
 // MARK: - Chain Paste Kind

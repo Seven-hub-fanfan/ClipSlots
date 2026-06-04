@@ -70,6 +70,9 @@ struct SlotNodeView: View {
             port(.bottom).position(x: 75, y: 96)
             port(.left).position(x: 0, y: 48)
         }
+        // v2.7.4: only consume hit testing when ports are visible,
+        // so the port layer doesn't block neighbouring nodes.
+        .allowsHitTesting(shouldShowPorts)
     }
 
     private func port(_ port: SlotPort) -> some View {
