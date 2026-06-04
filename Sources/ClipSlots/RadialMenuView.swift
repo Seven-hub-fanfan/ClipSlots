@@ -84,6 +84,11 @@ struct RadialMenuView: View {
     @Environment(\.colorScheme) private var colorScheme
 
     private let menuSize: CGFloat = 372
+    // v2.7.12: keep hover segments safely inside the radial disk.
+    // Previous hover style scaled the whole sector and used outerRadius directly,
+    // causing blue sectors to protrude outside the white circle at 1/5/6/8 etc.
+    private let segmentOuterInset: CGFloat = 8
+    private let segmentInnerInset: CGFloat = 1.5
 
     private var displayCount: Int {
         mode == .childSlots ? store.config.slots : store.currentPageSlotGroups.count
@@ -104,7 +109,9 @@ struct RadialMenuView: View {
                 GeometryReader { geo in
                     let center = CGPoint(x: geo.size.width / 2, y: geo.size.height / 2)
                     let outerRadius = min(geo.size.width, geo.size.height) / 2
+                    let segmentOuterRadius = outerRadius - segmentOuterInset
                     let deadZoneRadius = outerRadius * 0.24
+                    let segmentInnerRadius = deadZoneRadius + segmentInnerInset
 
                     ZStack {
                         Circle()
@@ -123,16 +130,16 @@ struct RadialMenuView: View {
                                     center: center,
                                     angle: a,
                                     innerRadius: deadZoneRadius + 2,
-                                    outerRadius: outerRadius - 3
+                                    outerRadius: segmentOuterRadius
                                 )
                                 .stroke(AppTheme.radialDivider(colorScheme), lineWidth: 1)
                             }
                         }
 
                         if mode == .childSlots {
-                            childSlotSegments(center: center, outerRadius: outerRadius, deadZoneRadius: deadZoneRadius)
+                            childSlotSegments(center: center, outerRadius: segmentOuterRadius, deadZoneRadius: segmentInnerRadius)
                         } else {
-                            specialSlotSegments(center: center, outerRadius: outerRadius, deadZoneRadius: deadZoneRadius)
+                            specialSlotSegments(center: center, outerRadius: segmentOuterRadius, deadZoneRadius: segmentInnerRadius)
                         }
 
                         Circle()
@@ -142,6 +149,7 @@ struct RadialMenuView: View {
                         centerView(deadZoneRadius: deadZoneRadius)
                     }
                     .frame(width: outerRadius * 2, height: outerRadius * 2)
+                    .clipShape(Circle())
                     .contentShape(Circle())
                     .scaleEffect(appeared ? 1 : 0.92)
                     .opacity(appeared ? 1 : 0)
@@ -163,7 +171,7 @@ struct RadialMenuView: View {
                 }
             }
             .frame(width: menuSize, height: menuSize)
-            .clipped(antialiased: false)
+            .compositingGroup()
 
             // v2.4.2: Slot group switcher
             groupSwitcher
@@ -298,7 +306,8 @@ struct RadialMenuView: View {
 
                 segmentLabel(slot: slot, content: content, label: store.labels[slot] ?? "", angle: midAngle, midRadius: (deadZoneRadius + outerRadius) / 2)
             }
-            .scaleEffect(isHovered ? 1.018 : 1.0)
+            // v2.7.12: do not scale the sector. Scaling pushes arc edges outside
+            // the circular disk and creates the visible broken blue caps.
             .animation(.easeOut(duration: 0.10), value: isHovered)
         }
     }
@@ -328,7 +337,7 @@ struct RadialMenuView: View {
 
                 specialSlotLabel(name: special.name, index: i + 1, isCurrent: isCurrent, angle: midAngle, midRadius: (deadZoneRadius + outerRadius) / 2)
             }
-            .scaleEffect(isHovered ? 1.018 : 1.0)
+            // v2.7.12: no sector scaling; keep highlight clipped inside disk.
             .animation(.easeOut(duration: 0.10), value: isHovered)
         }
     }
