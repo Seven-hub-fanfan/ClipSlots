@@ -22,7 +22,13 @@ struct RadialPreviewPanel: View {
                 Spacer()
                 Button { scale = max(0.75, scale - 0.1) } label: { Image(systemName: "minus.magnifyingglass") }
                 Button { scale = min(1.8, scale + 0.1) } label: { Image(systemName: "plus.magnifyingglass") }
-                Button { isPinned.toggle() } label: { Image(systemName: isPinned ? "pin.fill" : "pin") }
+                Button { isPinned.toggle() } label: {
+                    Image(systemName: isPinned ? "pin.fill" : "pin")
+                        .foregroundColor(isPinned ? .accentColor : .secondary)
+                        .padding(6)
+                        .background(Circle().fill(isPinned ? Color.accentColor.opacity(0.16) : Color.clear))
+                }
+                .help(isPinned ? "已置顶：拖到哪里就固定到哪里" : "置顶预览窗")
             }
             .buttonStyle(.plain)
             .padding(.horizontal, 14)
