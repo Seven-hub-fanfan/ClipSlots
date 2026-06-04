@@ -93,3 +93,47 @@ Hotkey semantics must be preserved: Cmd+1~0 = paste, Ctrl+Option+1~0 = save. Sea
 - `handleBatchSave` in `main.swift`: NEVER use `for n in 1...X` without guarding `X > 0` — Swift traps on `1...0`
 - Never use `assertionFailure`/`fatalError`/`precondition` in user-triggerable code paths — replace with HUD notice + return
 - Never force-unwrap `currentPage!`/`currentGroup!` — guard with HUD
+
+## Collaboration Workflow (v2.7+)
+
+### Task Delivery Formats
+
+User delivers tasks in two formats. Always check the user's message for these patterns:
+
+**Format A — Feishu Document Links:**
+```
+https://bytedance.sg.larkoffice.com/docx/...  执行
+```
+→ Fetch ALL documents with lark-cli, read them thoroughly, then implement.
+
+**Format B — Downloaded Files:**
+```
+'/path/to/说明.md'  '/path/to/patch'  '/path/to/main.swift'  执行
+```
+→ Read ALL files (说明.md first, then patch, then main.swift for reference), then implement.
+
+### Execution Pipeline (MANDATORY — NEVER skip any step)
+
+After implementing all changes, execute this exact sequence. Each step is required:
+
+1. **Build**: `swift build` — fix real errors, ignore SourceKit "Cannot find type 'X'" spurious errors
+2. **Sign**: `codesign --force --deep --sign - .build/debug/ClipSlots`
+3. **Install**: `cp -f .build/debug/ClipSlots /Applications/ClipSlots.app/Contents/MacOS/ClipSlots`
+4. **Launch**: `killall ClipSlots 2>/dev/null; open /Applications/ClipSlots.app`
+5. **Version number**: Update `Text("vX.Y.Z")` in `ContentView.swift` → MUST do this before commit
+6. **Commit**: `git add -A && git commit -m "vX.Y.Z: <description>"`
+7. **Push**: `git push origin main`
+8. **Tag**: `git tag -a vX.Y.Z -m "..." && git push origin vX.Y.Z`
+9. **DMG**: `hdiutil create -fs HFS+ -srcfolder /Applications/ClipSlots.app -volname "ClipSlots vX.Y.Z" ClipSlots_vX.Y.Z.dmg`
+10. **Release**: `gh release create vX.Y.Z --title "..." --notes "..." ClipSlots_vX.Y.Z.dmg`
+11. **Clean DMG**: `rm -f ClipSlots_vX.Y.Z.dmg` (do NOT commit DMG files)
+
+### Critical Rules
+
+- **Never skip the push step.** After commit, always `git push origin main`.
+- **Never skip the version number.** Always update `ContentView.swift` version string before commit.
+- **Never skip the release.** Every version gets a DMG + GitHub Release.
+- **Always replace the computer's running version.** Step 3-4 ensures this.
+- **SourceKit errors are almost always false positives** in this project. If `swift build` succeeds, ignore them and proceed.
+- **Do NOT commit DMG files.** They are build artifacts, not source code.
+- **After /compact or context restoration**, re-read CLAUDE.md and pick up from where you left off without asking questions.
