@@ -6,13 +6,12 @@ struct NodeCanvasSheet: View {
     @State private var activeDrag: NodeCanvasDrag?
     @State private var hoveredNode: Int?
     @State private var hoveredTarget: SlotPortTarget?
-    @State private var dragStarted = false
 
     private let canvasWidth: CGFloat = 920
     private let canvasHeight: CGFloat = 520
     private let nodeSize = CGSize(width: 150, height: 96)
 
-    // v2.7.4: deterministic rects from fixed layout. No PreferenceKey needed.
+    // v2.7.4: deterministic rects from fixed layout.
     private var nodeFrames: [Int: CGRect] {
         Dictionary(uniqueKeysWithValues: (1...10).map { slot in
             let center = position(for: slot)
@@ -24,6 +23,22 @@ struct NodeCanvasSheet: View {
             )
             return (slot, rect)
         })
+    }
+
+    // v2.7.5: slots whose ports should be drawn.
+    private var visiblePortSlots: Set<Int> {
+        if activeDrag != nil { return Set(1...10) }
+
+        var slots = Set<Int>()
+        if let hoveredNode { slots.insert(hoveredNode) }
+        if let hoveredTarget { slots.insert(hoveredTarget.slot) }
+
+        for slot in 1...10 {
+            if !store.currentConnectionMap.connectedPorts(for: slot).isEmpty {
+                slots.insert(slot)
+            }
+        }
+        return slots
     }
 
     var body: some View {
@@ -46,18 +61,25 @@ struct NodeCanvasSheet: View {
                             slot: slot,
                             content: store.slotContent(for: slot),
                             colorId: store.currentConnectionMap.colorId(for: slot),
-                            // v2.7.4: during a drag all node ports should be visible.
-                            isHovered: hoveredNode == slot || activeDrag != nil,
-                            connectedPorts: store.currentConnectionMap.connectedPorts(for: slot),
-                            highlightedPort: hoveredTarget?.slot == slot ? hoveredTarget?.port : nil,
-                            onBeginDrag: { port, point in beginDrag(slot: slot, port: port, point: point) },
-                            onUpdateDrag: { point in updateDrag(point: point, fromSlot: slot) },
-                            onEndDrag: { endDrag() }
+                            isHovered: hoveredNode == slot
                         )
                         .frame(width: nodeSize.width, height: nodeSize.height)
                         .position(position(for: slot))
                         .onHover { inside in hoveredNode = inside ? slot : (hoveredNode == slot ? nil : hoveredNode) }
                     }
+
+                    // v2.7.5: Ports managed at canvas level, not inside SlotNodeView.
+                    NodePortOverlay(
+                        nodeFrames: nodeFrames,
+                        visibleSlots: visiblePortSlots,
+                        connectedPortsProvider: { store.currentConnectionMap.connectedPorts(for: $0) },
+                        colorProvider: { slot in SlotConnectionColor.color(for: store.currentConnectionMap.colorId(for: slot)) },
+                        highlightedTarget: hoveredTarget,
+                        onBeginDrag: { slot, port, point in beginDrag(slot: slot, port: port, point: point) },
+                        onUpdateDrag: { point in updateDrag(point: point) },
+                        onEndDrag: { endDrag() }
+                    )
+                    .zIndex(10)
                 }
                 .frame(width: canvasWidth, height: canvasHeight)
                 .coordinateSpace(name: "nodeCanvas")
@@ -113,11 +135,11 @@ struct NodeCanvasSheet: View {
 
     private func beginDrag(slot: Int, port: SlotPort, point: CGPoint) {
         guard activeDrag == nil else { return }
-        dragStarted = true
         activeDrag = NodeCanvasDrag(fromSlot: slot, fromPort: port, currentPoint: point)
     }
 
-    private func updateDrag(point: CGPoint, fromSlot: Int) {
+    // v2.7.5: fromSlot removed — port handles know their own slot.
+    private func updateDrag(point: CGPoint) {
         guard var drag = activeDrag else { return }
         drag.currentPoint = point
         let target = nearestNodePortTarget(to: point, nodeFrames: nodeFrames, excluding: drag.fromSlot)
@@ -127,7 +149,7 @@ struct NodeCanvasSheet: View {
     }
 
     private func endDrag() {
-        defer { activeDrag = nil; hoveredTarget = nil; dragStarted = false }
+        defer { activeDrag = nil; hoveredTarget = nil }
         guard let drag = activeDrag, let target = drag.hoverTarget else { return }
         store.connectSlots(fromSlot: drag.fromSlot, fromPort: drag.fromPort, toSlot: target.slot, toPort: target.port)
     }
