@@ -23,6 +23,7 @@ private final class RadialPanel: NSPanel {
 
 final class RadialMenuWindowController {
     private var panel: RadialPanel?
+    private var previewPanel: NSPanel?
     private var localKeyMonitor: Any?
     private var globalClickMonitor: Any?
     private var onDismissCallback: (() -> Void)?
@@ -38,10 +39,10 @@ final class RadialMenuWindowController {
     ) {
         dismiss()
 
-        // v2.4.2: taller window to accommodate page selector + group switcher
-        // v2.7.10: wider window for preview panel
-        let menuWidth: CGFloat = 440
-        let menuHeight: CGFloat = 480
+        // v2.7.11: radial window only contains the radial menu again.
+        // Its center must equal the mouse point used by ctrl+space.
+        let menuWidth: CGFloat = 460
+        let menuHeight: CGFloat = 500
         self.onDismissCallback = onDismiss
         self.isPreviewPinned = false
 
@@ -49,33 +50,24 @@ final class RadialMenuWindowController {
         let modeRaw = UserDefaults.standard.string(forKey: "appearanceMode") ?? ThemeMode.system.rawValue
         let themeMode = ThemeMode(rawValue: modeRaw) ?? .system
 
-        // v2.7.10: wrapper that includes preview panel alongside radial menu
-        let wrapper = RadialMenuWithPreview(
+        let radialView = RadialMenuView(
             store: store,
             onSelectSlot: { [weak self] slot in
                 onSelectSlot(slot)
-                if self?.isPreviewPinned != true {
-                    self?.dismiss()
-                    onDismiss()
-                }
+                self?.dismissRadialOnly()
+                if self?.isPreviewPinned != true { self?.dismissPreviewPanel() }
+                onDismiss()
             },
             onDismiss: { [weak self] in
-                if self?.isPreviewPinned == true {
-                    // Don't call the real dismiss — just let SwiftUI hide radial menu
-                } else {
-                    self?.dismiss()
-                    onDismiss()
-                }
+                self?.dismissRadialOnly()
+                if self?.isPreviewPinned != true { self?.dismissPreviewPanel() }
+                onDismiss()
             },
-            connectionMap: store.currentConnectionMap,
-            isPinned: Binding<Bool>(
-                get: { self.isPreviewPinned },
-                set: { self.isPreviewPinned = $0 }
-            )
+            connectionMap: store.currentConnectionMap
         )
         .preferredColorScheme(themeMode.preferredColorScheme)
 
-        let hosting = NSHostingView(rootView: wrapper)
+        let hosting = NSHostingView(rootView: radialView)
         hosting.frame = NSRect(x: 0, y: 0, width: menuWidth, height: menuHeight)
         hosting.wantsLayer = true
         hosting.layer?.backgroundColor = NSColor.clear.cgColor
@@ -109,13 +101,13 @@ final class RadialMenuWindowController {
         p.orderFrontRegardless()
         self.panel = p
 
+        showPreviewPanel(store: store, near: screenPoint, themeMode: themeMode)
+
         // Escape key dismiss
         localKeyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
             if event.keyCode == 53 {
-                if self?.isPreviewPinned == true {
-                    return nil  // ignore escape when preview is pinned
-                }
-                self?.dismiss()
+                self?.dismissRadialOnly()
+                if self?.isPreviewPinned != true { self?.dismissPreviewPanel() }
                 onDismiss()
                 return nil
             }
@@ -127,13 +119,69 @@ final class RadialMenuWindowController {
             guard let self = self, let panel = self.panel else { return }
             let clickLocation = NSEvent.mouseLocation
             if !panel.frame.contains(clickLocation) {
-                if self.isPreviewPinned {
-                    return  // don't dismiss when preview is pinned
-                }
-                self.dismiss()
+                self.dismissRadialOnly()
+                if !self.isPreviewPinned { self.dismissPreviewPanel() }
                 onDismiss()
             }
         }
+    }
+
+    private func showPreviewPanel(store: SlotStoreObservable, near screenPoint: NSPoint, themeMode: ThemeMode) {
+        dismissPreviewPanel()
+
+        let screenFrame = NSScreen.main?.visibleFrame ?? NSScreen.screens.first?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
+        let defaultSize = NSSize(width: 360, height: 420)
+        let origin = NSPoint(
+            x: screenFrame.maxX - defaultSize.width - 24,
+            y: screenFrame.maxY - defaultSize.height - 24
+        )
+
+        let preview = RadialPreviewPanel(
+            title: store.currentSpecialSlot?.name ?? "默认槽位组",
+            subtitle: "悬停圆盘槽位实时预览",
+            content: AnyView(RadialLivePreviewContent(store: store)),
+            isPinned: Binding<Bool>(
+                get: { self.isPreviewPinned },
+                set: { self.isPreviewPinned = $0 }
+            )
+        )
+        .preferredColorScheme(themeMode.preferredColorScheme)
+
+        let hosting = NSHostingView(rootView: preview)
+        hosting.frame = NSRect(origin: .zero, size: defaultSize)
+        hosting.wantsLayer = true
+        hosting.layer?.backgroundColor = NSColor.clear.cgColor
+        hosting.layer?.masksToBounds = false
+
+        let previewPanel = NSPanel(
+            contentRect: NSRect(origin: origin, size: defaultSize),
+            styleMask: [.titled, .resizable, .nonactivatingPanel],
+            backing: .buffered,
+            defer: false
+        )
+        previewPanel.isOpaque = false
+        previewPanel.backgroundColor = .clear
+        previewPanel.hasShadow = true
+        previewPanel.level = .floating
+        previewPanel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+        previewPanel.isMovableByWindowBackground = true
+        previewPanel.minSize = NSSize(width: 260, height: 220)
+        previewPanel.maxSize = NSSize(width: min(900, screenFrame.width - 80), height: min(900, screenFrame.height - 80))
+        previewPanel.contentView = hosting
+        previewPanel.orderFrontRegardless()
+        self.previewPanel = previewPanel
+    }
+
+    private func dismissRadialOnly() {
+        panel?._dismissed = true
+        panel?.onMouseDown = nil
+        panel?.close()
+        panel = nil
+    }
+
+    private func dismissPreviewPanel() {
+        previewPanel?.close()
+        previewPanel = nil
     }
 
     func dismiss() {
@@ -146,64 +194,7 @@ final class RadialMenuWindowController {
             globalClickMonitor = nil
         }
         onDismissCallback = nil
-        panel?._dismissed = true
-        panel?.onMouseDown = nil
-        panel?.close()
-        panel = nil
-    }
-}
-
-// MARK: - v2.7.10 Radial Menu + Preview Wrapper
-
-private struct RadialMenuWithPreview: View {
-    @ObservedObject var store: SlotStoreObservable
-    var onSelectSlot: (Int) -> Void
-    var onDismiss: () -> Void
-    var connectionMap: SlotConnectionMap
-    @Binding var isPinned: Bool
-
-    @State private var showRadialMenu = true
-
-    var body: some View {
-        ZStack {
-            // v2.7.10: Preview panel on the left alongside radial menu
-            HStack(spacing: 0) {
-                RadialPreviewPanel(
-                    title: store.currentSpecialSlot?.name ?? "预览",
-                    subtitle: "槽位内容预览",
-                    content: AnyView(
-                        VStack(spacing: 6) {
-                            Image(systemName: "eye")
-                                .font(.system(size: 32))
-                                .foregroundColor(.secondary)
-                            Text("悬停槽位查看预览")
-                                .font(.caption)
-                                .foregroundColor(.secondary)
-                        }
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    ),
-                    isPinned: $isPinned
-                )
-                .opacity(showRadialMenu || isPinned ? 1 : 0)
-
-                if showRadialMenu {
-                    RadialMenuView(
-                        store: store,
-                        onSelectSlot: { slot in
-                            onSelectSlot(slot)
-                            if !isPinned { onDismiss() }
-                        },
-                        onDismiss: {
-                            if isPinned {
-                                showRadialMenu = false
-                            } else {
-                                onDismiss()
-                            }
-                        },
-                        connectionMap: connectionMap
-                    )
-                }
-            }
-        }
+        dismissRadialOnly()
+        if !isPreviewPinned { dismissPreviewPanel() }
     }
 }

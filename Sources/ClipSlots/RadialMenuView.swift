@@ -151,8 +151,10 @@ struct RadialMenuView: View {
                         switch phase {
                         case .active(let location):
                             updateHover(location: location, center: center, deadZoneRadius: deadZoneRadius)
+                            NotificationCenter.default.post(name: .radialMenuHoveredSlotChanged, object: hoveredIndex)
                         case .ended:
                             hoveredIndex = nil
+                            NotificationCenter.default.post(name: .radialMenuHoveredSlotChanged, object: nil)
                         }
                     }
                     .onTapGesture {
@@ -520,4 +522,8 @@ struct RadialMenuView: View {
         path.addLine(to: end)
         return path
     }
+}
+
+extension Notification.Name {
+    static let radialMenuHoveredSlotChanged = Notification.Name("ClipSlots.radialMenuHoveredSlotChanged")
 }
