@@ -76,6 +76,7 @@ struct RadialMenuView: View {
     @ObservedObject var store: SlotStoreObservable
     var onSelectSlot: (Int) -> Void
     var onDismiss: () -> Void
+    var connectionMap: SlotConnectionMap = .empty
 
     @State private var hoveredIndex: Int? = nil
     @State private var appeared = false
@@ -405,11 +406,24 @@ struct RadialMenuView: View {
                             .foregroundColor(idx != nil ? .accentColor : .secondary)
 
                         if let slot = idx {
-                            Text("槽位 \(slot)")
-                                .font(.system(size: 10, weight: .semibold))
-                            Text("点击粘贴")
-                                .font(.system(size: 8))
-                                .foregroundColor(.secondary)
+                            let chain = connectionMap.chainSlots(startingAt: slot)
+                            if chain.count > 1 {
+                                Text("槽位 \(slot)")
+                                    .font(.system(size: 10, weight: .semibold))
+                                Text("串联 \(chain.count) 个槽位")
+                                    .font(.system(size: 8))
+                                    .foregroundColor(.secondary)
+                                Text(compactChainDescription(chain))
+                                    .font(.system(size: 7))
+                                    .foregroundColor(.secondary)
+                                    .lineLimit(1)
+                            } else {
+                                Text("槽位 \(slot)")
+                                    .font(.system(size: 10, weight: .semibold))
+                                Text("点击粘贴")
+                                    .font(.system(size: 8))
+                                    .foregroundColor(.secondary)
+                            }
                         } else {
                             Text(store.currentSpecialSlot?.name ?? "默认槽位组")
                                 .font(.system(size: 9, weight: .semibold))
@@ -442,9 +456,18 @@ struct RadialMenuView: View {
         let isHovered = hoveredIndex == slot
 
         VStack(spacing: 3) {
-            Text("\(slot)")
-                .font(.system(size: 20, weight: .bold, design: .rounded))
-                .foregroundColor(AppTheme.radialPrimaryText(colorScheme, isHovered: isHovered, isEmpty: content.isEmpty))
+            // v2.7.0: Slot number + connection dot
+            HStack(spacing: 4) {
+                Text("\(slot)")
+                    .font(.system(size: 20, weight: .bold, design: .rounded))
+                    .foregroundColor(AppTheme.radialPrimaryText(colorScheme, isHovered: isHovered, isEmpty: content.isEmpty))
+
+                if let colorId = connectionMap.colorId(for: slot) {
+                    Circle()
+                        .fill(SlotConnectionColor.color(for: colorId))
+                        .frame(width: 6, height: 6)
+                }
+            }
 
             if !content.isEmpty {
                 Text(label.isEmpty ? content.preview : label)

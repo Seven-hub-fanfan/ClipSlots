@@ -18,6 +18,9 @@ struct SettingsView: View {
     @State private var showSaveToast: Bool
     @State private var showCopyToast: Bool
 
+    // v2.7.0: Slot connection preference
+    @State private var enableSlotConnection: Bool
+
     @Environment(\.dismiss) private var dismiss
     @Environment(\.colorScheme) private var colorScheme
 
@@ -43,6 +46,8 @@ struct SettingsView: View {
         _skipBatchSaveConfirmation = State(initialValue: UserDefaults.standard.skipBatchSaveConfirmation)
         _showSaveToast = State(initialValue: UserDefaults.standard.showSaveToast)
         _showCopyToast = State(initialValue: UserDefaults.standard.showCopyToast)
+        _enableSlotConnection = State(initialValue: UserDefaults.standard.object(forKey: UserPreferenceKeys.enableSlotConnection) == nil
+            ? true : UserDefaults.standard.bool(forKey: UserPreferenceKeys.enableSlotConnection))
     }
 
     var body: some View {
@@ -56,6 +61,7 @@ struct SettingsView: View {
                     shortcutSection
                     advancedSection
                     notificationPreferencesSection
+                    connectionSection
                     helpSection
                 }
                 .padding(20)
@@ -231,6 +237,22 @@ struct SettingsView: View {
         }
     }
 
+    // v2.7.0: Slot connection toggle
+    private var connectionSection: some View {
+        settingsSection(title: "槽位连接", icon: "point.3.connected.trianglepath.dotted") {
+            Toggle(isOn: $enableSlotConnection) {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("启用槽位连接")
+                        .font(.subheadline)
+                    Text("关闭后不显示连接点、连接线和串联粘贴功能，但连接数据会保留")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+            }
+            .toggleStyle(.switch)
+        }
+    }
+
     private var helpSection: some View {
         settingsSection(title: "快捷键格式", icon: "info.circle.fill") {
             VStack(alignment: .leading, spacing: 6) {
@@ -337,6 +359,7 @@ struct SettingsView: View {
         UserDefaults.standard.set(skipBatchSaveConfirmation, forKey: UserPreferenceKeys.skipBatchSaveConfirmation)
         UserDefaults.standard.set(showSaveToast, forKey: UserPreferenceKeys.showSaveToast)
         UserDefaults.standard.set(showCopyToast, forKey: UserPreferenceKeys.showCopyToast)
+        UserDefaults.standard.set(enableSlotConnection, forKey: UserPreferenceKeys.enableSlotConnection)
 
         onSave(newConfig)
         dismiss()

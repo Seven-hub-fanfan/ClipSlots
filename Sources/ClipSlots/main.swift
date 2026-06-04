@@ -1,6 +1,7 @@
 import SwiftUI
 import Cocoa
 import Carbon
+import UniformTypeIdentifiers
 
 /// Resolve the virtual key code that produces the letter 'v' on the current keyboard layout.
 fileprivate func virtualKeyForCharacterV() -> CGKeyCode {
@@ -114,6 +115,21 @@ final class SlotStoreObservable: ObservableObject {
     @Published var currentPageId: String = "default_page"
     @Published var currentPage: SlotPage?
 
+    // v2.7.0: Slot connection state
+    @Published var currentConnectionMap: SlotConnectionMap = .empty
+    @Published var isConnectionModeEnabled: Bool = false
+    @Published var hoveredSlot: Int? = nil
+    @Published var activeDragConnection: ActiveDragConnection? = nil
+    @Published var hoveredPortTarget: SlotPortTarget? = nil
+
+    /// v2.7.0: Whether slot connection feature is enabled in settings
+    var isSlotConnectionEnabled: Bool {
+        if UserDefaults.standard.object(forKey: UserPreferenceKeys.enableSlotConnection) == nil {
+            return true // default enabled
+        }
+        return UserDefaults.standard.bool(forKey: UserPreferenceKeys.enableSlotConnection)
+    }
+
     /// Slot groups belonging to the current page, sorted by order.
     var currentPageSlotGroups: [SpecialSlot] {
         specialSlots.filter { $0.pageId == currentPageId }.sorted { $0.order < $1.order }
@@ -175,6 +191,7 @@ final class SlotStoreObservable: ObservableObject {
     func reloadAll() {
         loadSpecialSlots()
         loadSlots()
+        loadConnectionMapForCurrentGroup()
     }
 
     func switchSpecialSlot(id: String) {
@@ -206,6 +223,7 @@ final class SlotStoreObservable: ObservableObject {
         specialStorage.updateSelectedSpecialSlot(id: id)
 
         loadSlots()
+        loadConnectionMapForCurrentGroup()
         refreshTrigger = UUID()
 
         showToast("已预览「\(currentSpecialSlot?.name ?? id)」")
@@ -276,6 +294,7 @@ final class SlotStoreObservable: ObservableObject {
         specialSlotSettings = index.settings
 
         loadSlots()
+        loadConnectionMapForCurrentGroup()
         refreshTrigger = UUID()
 
         showToast("已切换至「\(currentSpecialSlot?.name ?? id)」")
@@ -963,6 +982,16 @@ final class SlotStoreObservable: ObservableObject {
 
         NSLog("[ClipSlots] pasteSlot instanceID=\(instanceID) slot=\(slot) activeSpecialSlotId=\(activeId) loadedSpecialSlotId=\(loadedSpecialSlotId ?? "nil")")
 
+        // v2.7.0: Chain paste check (hotkey path)
+        if isSlotConnectionEnabled {
+            let chain = currentConnectionMap.chainSlots(startingAt: slot)
+            if chain.count > 1 {
+                NSLog("[ClipSlots] pasteSlot chain detected, chain=\(chain)")
+                pasteSlotChain(chain)
+                return
+            }
+        }
+
         // Global hotkey paste: always read directly from the current special slot on disk.
         let content = specialStorage.get(slot, in: activeId)
 
@@ -1020,6 +1049,16 @@ final class SlotStoreObservable: ObservableObject {
 
     func pasteSlotToApp(_ slot: Int, targetApp: NSRunningApplication?) {
         let activeId = currentSpecialSlotId
+
+        // v2.7.0: Chain paste check (radial menu / UI path)
+        if isSlotConnectionEnabled {
+            let chain = currentConnectionMap.chainSlots(startingAt: slot)
+            if chain.count > 1 {
+                NSLog("[ClipSlots] pasteSlotToApp chain detected, chain=\(chain)")
+                pasteSlotChainToApp(chain, targetApp: targetApp)
+                return
+            }
+        }
 
         // Always read from the currently active special slot on disk.
         let content = specialStorage.get(slot, in: activeId)
@@ -1105,6 +1144,667 @@ final class SlotStoreObservable: ObservableObject {
             return
         }
         pasteSlotToApp(slot, targetApp: target)
+    }
+
+    // MARK: - v2.7.0 Connection Map
+
+    func loadConnectionMapForCurrentGroup() {
+        guard let pageId = currentPage?.id ?? Optional(currentPageId),
+              !pageId.isEmpty else {
+            currentConnectionMap = .empty
+            return
+        }
+        let groupId = currentSpecialSlotId
+        currentConnectionMap = SlotConnectionStorage.shared.load(pageId: pageId, groupId: groupId)
+        NSLog("[ClipSlots] loadConnectionMap edges=\(currentConnectionMap.edges.count) pageId=\(pageId) groupId=\(groupId)")
+    }
+
+    func saveConnectionMapForCurrentGroup() {
+        guard let pageId = currentPage?.id ?? Optional(currentPageId),
+              !pageId.isEmpty else { return }
+        SlotConnectionStorage.shared.save(currentConnectionMap, pageId: pageId, groupId: currentSpecialSlotId)
+    }
+
+    // MARK: - v2.7.0 Connect / Disconnect
+
+    func connectSlots(fromSlot: Int, fromPort: SlotPort, toSlot: Int, toPort: SlotPort) {
+        do {
+            var map = currentConnectionMap
+            try map.connect(fromSlot: fromSlot, fromPort: fromPort, toSlot: toSlot, toPort: toPort)
+            currentConnectionMap = map
+            saveConnectionMapForCurrentGroup()
+
+            let chain = map.fullChain(containing: fromSlot)
+            showFloatingNotice(FloatingNotice(
+                title: "已连接槽位 \(fromSlot) → \(toSlot)",
+                subtitle: "当前链路：\(compactChainDescription(chain))",
+                iconName: "link.circle.fill",
+                kind: .success
+            ))
+        } catch let error as SlotConnectionError {
+            showFloatingNotice(FloatingNotice(
+                title: error.noticeTitle,
+                subtitle: error.localizedDescription,
+                iconName: "exclamationmark.triangle.fill",
+                kind: .warning
+            ))
+        } catch {
+            showFloatingNotice(FloatingNotice(
+                title: "连接失败",
+                subtitle: error.localizedDescription,
+                iconName: "xmark.circle.fill",
+                kind: .error
+            ))
+        }
+    }
+
+    func disconnectConnectionInvolving(slot: Int, port: SlotPort) {
+        var map = currentConnectionMap
+        map.disconnectInvolving(slot: slot, port: port)
+        currentConnectionMap = map
+        saveConnectionMapForCurrentGroup()
+
+        showFloatingNotice(FloatingNotice(
+            title: "已断开连接",
+            subtitle: "槽位内容未受影响",
+            iconName: "link.badge.minus",
+            kind: .info
+        ))
+    }
+
+    func confirmAndClearCurrentConnections() {
+        guard !currentConnectionMap.edges.isEmpty else {
+            showFloatingNotice(FloatingNotice(
+                title: "没有可清除的连接",
+                subtitle: "当前槽位组没有连接",
+                iconName: "info.circle.fill",
+                kind: .info
+            ))
+            return
+        }
+
+        let alert = NSAlert()
+        alert.messageText = "清除当前槽位组所有连接？"
+        alert.informativeText = "这只会清除连接关系，不会删除槽位内容。"
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "清除连接")
+        alert.addButton(withTitle: "取消")
+
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+
+        currentConnectionMap = .empty
+        saveConnectionMapForCurrentGroup()
+
+        showFloatingNotice(FloatingNotice(
+            title: "已清除连接",
+            subtitle: "槽位内容未受影响",
+            iconName: "trash.fill",
+            kind: .success
+        ))
+    }
+
+    func toggleConnectionMode() {
+        isConnectionModeEnabled.toggle()
+        if !isConnectionModeEnabled {
+            activeDragConnection = nil
+            hoveredPortTarget = nil
+        }
+    }
+
+    // MARK: - v2.7.0 Port Helpers
+
+    func portColor(for slot: Int) -> Color? {
+        guard let colorId = currentConnectionMap.colorId(for: slot) else { return nil }
+        return SlotConnectionColor.color(for: colorId)
+    }
+
+    func connectedPorts(for slot: Int) -> Set<SlotPort> {
+        var result = Set<SlotPort>()
+        if let outgoing = currentConnectionMap.edgeFrom(slot: slot) {
+            result.insert(outgoing.fromPort)
+        }
+        if let incoming = currentConnectionMap.edgeTo(slot: slot) {
+            result.insert(incoming.toPort)
+        }
+        return result
+    }
+
+    func shouldShowPorts(for slot: Int) -> Bool {
+        guard isSlotConnectionEnabled else { return false }
+        return isConnectionModeEnabled
+            || hoveredSlot == slot
+            || activeDragConnection?.fromSlot == slot
+            || activeDragConnection?.hoverTarget?.slot == slot
+            || currentConnectionMap.colorId(for: slot) != nil
+    }
+
+    // MARK: - v2.7.0 Drag Connection
+
+    func beginConnectionDrag(fromSlot: Int, fromPort: SlotPort, startPoint: CGPoint) {
+        activeDragConnection = ActiveDragConnection(
+            fromSlot: fromSlot,
+            fromPort: fromPort,
+            currentPoint: startPoint,
+            hoverTarget: nil
+        )
+    }
+
+    func updateConnectionDrag(currentPoint: CGPoint, hoverTarget: SlotPortTarget?) {
+        guard var active = activeDragConnection else { return }
+        active.currentPoint = currentPoint
+        active.hoverTarget = hoverTarget
+        activeDragConnection = active
+        hoveredPortTarget = hoverTarget
+    }
+
+    func endConnectionDrag(target: SlotPortTarget?) {
+        guard let active = activeDragConnection else { return }
+        defer {
+            activeDragConnection = nil
+            hoveredPortTarget = nil
+        }
+
+        guard let target = target else {
+            showFloatingNotice(FloatingNotice(
+                title: "连接已取消",
+                subtitle: "未选择目标槽位",
+                iconName: "xmark.circle.fill",
+                kind: .info
+            ))
+            return
+        }
+
+        connectSlots(
+            fromSlot: active.fromSlot,
+            fromPort: active.fromPort,
+            toSlot: target.slot,
+            toPort: target.port
+        )
+    }
+
+    // MARK: - v2.7.0 Chain Paste
+
+    func pasteSlotConsideringConnections(_ slot: Int) {
+        guard isSlotConnectionEnabled else {
+            pasteSlot(slot)
+            return
+        }
+
+        let chain = currentConnectionMap.chainSlots(startingAt: slot)
+        guard chain.count > 1 else {
+            pasteSlot(slot)
+            return
+        }
+
+        pasteSlotChain(chain)
+    }
+
+    func pasteSlotChain(_ slots: [Int]) {
+        let activeId = activeHotkeySpecialSlotId
+
+        let payloads = slots.map { payloadForSlot($0) }
+        let nonEmptyPayloads = payloads.filter { !$0.isEmpty }
+        let skippedEmptyCount = payloads.count - nonEmptyPayloads.count
+
+        guard !nonEmptyPayloads.isEmpty else {
+            showFloatingNotice(FloatingNotice(
+                title: "串联粘贴失败",
+                subtitle: "链路中没有可粘贴内容",
+                iconName: "exclamationmark.triangle.fill",
+                kind: .warning
+            ))
+            return
+        }
+
+        guard AXIsProcessTrusted() else {
+            promptAccessibilityPermissionIfNeeded()
+            return
+        }
+
+        let kind = chainPasteKind(for: nonEmptyPayloads)
+
+        switch kind {
+        case .text:
+            let merged = nonEmptyPayloads.compactMap(\.text).joined(separator: "\n\n")
+            guard !merged.isEmpty else {
+                showFloatingNotice(FloatingNotice(
+                    title: "串联粘贴失败",
+                    subtitle: "没有可粘贴文本",
+                    iconName: "exclamationmark.triangle.fill",
+                    kind: .warning
+                ))
+                return
+            }
+
+            cancelPendingPasteOperations(restoreClipboard: true)
+            let previous = clipboard.capture()
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(merged, forType: .string)
+
+            let pasteWorkItem = DispatchWorkItem { [weak self] in
+                guard let self = self else { return }
+                guard self.currentSpecialSlotId == activeId else {
+                    _ = self.clipboard.restore(previous)
+                    return
+                }
+                self.sendPasteKeystroke()
+                let restoreWorkItem = DispatchWorkItem { [weak self] in
+                    guard let self = self else { return }
+                    _ = self.clipboard.restore(previous)
+                    self.pendingClipboardRestore = nil
+                    self.pendingClipboardRestoreContent = nil
+                }
+                self.pendingClipboardRestoreContent = previous
+                self.pendingClipboardRestore = restoreWorkItem
+                self.pendingPasteWorkItem = nil
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.8, execute: restoreWorkItem)
+            }
+            self.pendingPasteWorkItem = pasteWorkItem
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.08, execute: pasteWorkItem)
+
+            showChainPasteSuccess(slots: slots, pastedCount: nonEmptyPayloads.count, skippedEmptyCount: skippedEmptyCount)
+
+        case .files:
+            let urls = nonEmptyPayloads.flatMap(\.fileURLs)
+            guard !urls.isEmpty else {
+                showFloatingNotice(FloatingNotice(
+                    title: "串联粘贴失败",
+                    subtitle: "没有可粘贴文件",
+                    iconName: "exclamationmark.triangle.fill",
+                    kind: .warning
+                ))
+                return
+            }
+
+            cancelPendingPasteOperations(restoreClipboard: true)
+            let previous = clipboard.capture()
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.writeObjects(urls as [NSURL])
+
+            let pasteWorkItem = DispatchWorkItem { [weak self] in
+                guard let self = self else { return }
+                guard self.currentSpecialSlotId == activeId else {
+                    _ = self.clipboard.restore(previous)
+                    return
+                }
+                self.sendPasteKeystroke()
+                let restoreWorkItem = DispatchWorkItem { [weak self] in
+                    guard let self = self else { return }
+                    _ = self.clipboard.restore(previous)
+                    self.pendingClipboardRestore = nil
+                    self.pendingClipboardRestoreContent = nil
+                }
+                self.pendingClipboardRestoreContent = previous
+                self.pendingClipboardRestore = restoreWorkItem
+                self.pendingPasteWorkItem = nil
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.8, execute: restoreWorkItem)
+            }
+            self.pendingPasteWorkItem = pasteWorkItem
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.08, execute: pasteWorkItem)
+
+            showFloatingNotice(FloatingNotice(
+                title: "已串联粘贴 \(urls.count) 个文件",
+                subtitle: compactChainDescription(slots),
+                iconName: "link.circle.fill",
+                kind: .success
+            ))
+
+        case .unsupported:
+            showFloatingNotice(FloatingNotice(
+                title: "串联粘贴失败",
+                subtitle: "暂不支持混合类型，请只连接文本槽位或只连接文件槽位",
+                iconName: "exclamationmark.triangle.fill",
+                kind: .warning
+            ))
+
+        case .empty:
+            showFloatingNotice(FloatingNotice(
+                title: "串联粘贴失败",
+                subtitle: "链路中没有可粘贴内容",
+                iconName: "exclamationmark.triangle.fill",
+                kind: .warning
+            ))
+        }
+    }
+
+    func pasteSlotChainToApp(_ slots: [Int], targetApp: NSRunningApplication?) {
+        let activeId = currentSpecialSlotId
+
+        let payloads = slots.map { payloadForSlot($0) }
+        let nonEmptyPayloads = payloads.filter { !$0.isEmpty }
+        let skippedEmptyCount = payloads.count - nonEmptyPayloads.count
+
+        guard !nonEmptyPayloads.isEmpty else {
+            showFloatingNotice(FloatingNotice(
+                title: "串联粘贴失败",
+                subtitle: "链路中没有可粘贴内容",
+                iconName: "exclamationmark.triangle.fill",
+                kind: .warning
+            ))
+            return
+        }
+
+        guard AXIsProcessTrusted() else {
+            promptAccessibilityPermissionIfNeeded()
+            return
+        }
+
+        let kind = chainPasteKind(for: nonEmptyPayloads)
+
+        switch kind {
+        case .text:
+            let merged = nonEmptyPayloads.compactMap(\.text).joined(separator: "\n\n")
+            guard !merged.isEmpty else {
+                showFloatingNotice(FloatingNotice(
+                    title: "串联粘贴失败",
+                    subtitle: "没有可粘贴文本",
+                    iconName: "exclamationmark.triangle.fill",
+                    kind: .warning
+                ))
+                return
+            }
+
+            cancelPendingClipboardRestore()
+            let cleanTarget: NSRunningApplication?
+            if isSelfApp(targetApp) { cleanTarget = lastNonClipSlotsApp }
+            else { cleanTarget = targetApp ?? lastNonClipSlotsApp }
+
+            let previous = clipboard.capture()
+            let performPaste = { [weak self] in
+                guard let self = self else { return }
+                guard self.currentSpecialSlotId == activeId else {
+                    _ = self.clipboard.restore(previous); return
+                }
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(merged, forType: .string)
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) { [weak self] in
+                    guard let self = self else { return }
+                    guard self.currentSpecialSlotId == activeId else {
+                        _ = self.clipboard.restore(previous); return
+                    }
+                    self.sendPasteKeystroke()
+                    let restoreWorkItem = DispatchWorkItem { [weak self] in
+                        guard let self = self else { return }
+                        _ = self.clipboard.restore(previous)
+                        self.pendingClipboardRestore = nil
+                        self.pendingClipboardRestoreContent = nil
+                    }
+                    self.pendingClipboardRestoreContent = previous
+                    self.pendingClipboardRestore = restoreWorkItem
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.8, execute: restoreWorkItem)
+                }
+            }
+            if let app = cleanTarget {
+                app.activate(options: [.activateIgnoringOtherApps])
+                waitUntilFrontmost(app, timeout: 1.2) { _ in performPaste() }
+            } else {
+                performPaste()
+            }
+            showChainPasteSuccess(slots: slots, pastedCount: nonEmptyPayloads.count, skippedEmptyCount: skippedEmptyCount)
+
+        case .files:
+            let urls = nonEmptyPayloads.flatMap(\.fileURLs)
+            guard !urls.isEmpty else {
+                showFloatingNotice(FloatingNotice(
+                    title: "串联粘贴失败",
+                    subtitle: "没有可粘贴文件",
+                    iconName: "exclamationmark.triangle.fill",
+                    kind: .warning
+                ))
+                return
+            }
+            cancelPendingClipboardRestore()
+            let cleanTarget: NSRunningApplication?
+            if isSelfApp(targetApp) { cleanTarget = lastNonClipSlotsApp }
+            else { cleanTarget = targetApp ?? lastNonClipSlotsApp }
+            let previous = clipboard.capture()
+            let performPaste = { [weak self] in
+                guard let self = self else { return }
+                guard self.currentSpecialSlotId == activeId else {
+                    _ = self.clipboard.restore(previous); return
+                }
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.writeObjects(urls as [NSURL])
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) { [weak self] in
+                    guard let self = self else { return }
+                    guard self.currentSpecialSlotId == activeId else {
+                        _ = self.clipboard.restore(previous); return
+                    }
+                    self.sendPasteKeystroke()
+                    let restoreWorkItem = DispatchWorkItem { [weak self] in
+                        guard let self = self else { return }
+                        _ = self.clipboard.restore(previous)
+                        self.pendingClipboardRestore = nil
+                        self.pendingClipboardRestoreContent = nil
+                    }
+                    self.pendingClipboardRestoreContent = previous
+                    self.pendingClipboardRestore = restoreWorkItem
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.8, execute: restoreWorkItem)
+                }
+            }
+            if let app = cleanTarget {
+                app.activate(options: [.activateIgnoringOtherApps])
+                waitUntilFrontmost(app, timeout: 1.2) { _ in performPaste() }
+            } else {
+                performPaste()
+            }
+            showFloatingNotice(FloatingNotice(
+                title: "已串联粘贴 \(urls.count) 个文件",
+                subtitle: compactChainDescription(slots),
+                iconName: "link.circle.fill",
+                kind: .success
+            ))
+
+        case .unsupported:
+            showFloatingNotice(FloatingNotice(
+                title: "串联粘贴失败",
+                subtitle: "暂不支持混合类型",
+                iconName: "exclamationmark.triangle.fill",
+                kind: .warning
+            ))
+        case .empty:
+            showFloatingNotice(FloatingNotice(
+                title: "串联粘贴失败",
+                subtitle: "链路中没有可粘贴内容",
+                iconName: "exclamationmark.triangle.fill",
+                kind: .warning
+            ))
+        }
+    }
+
+    private func payloadForSlot(_ slot: Int) -> ChainPastePayload {
+        let content = slots[slot] ?? SlotContent()
+        guard !content.isEmpty else {
+            return ChainPastePayload(sourceSlot: slot, text: nil, fileURLs: [], isImage: false, isEmpty: true)
+        }
+        let text = content.plainText
+        let fileURLs = content.detectedRegularFileURLs
+        let isImage = content.hasImage || content.isImageFile
+        return ChainPastePayload(
+            sourceSlot: slot,
+            text: text,
+            fileURLs: fileURLs,
+            isImage: isImage,
+            isEmpty: false
+        )
+    }
+
+    private func chainPasteKind(for payloads: [ChainPastePayload]) -> ChainPasteKind {
+        let hasText = payloads.contains { $0.text != nil && !($0.text?.isEmpty ?? true) }
+        let hasFiles = payloads.contains { !$0.fileURLs.isEmpty }
+        let hasImage = payloads.contains { $0.isImage }
+
+        // Image in chain: unsupported for MVP
+        if hasImage { return .unsupported }
+        // Mixed text + files: unsupported
+        if hasText && hasFiles { return .unsupported }
+        if hasText { return .text }
+        if hasFiles { return .files }
+        return .empty
+    }
+
+    private func showChainPasteSuccess(slots: [Int], pastedCount: Int, skippedEmptyCount: Int) {
+        let subtitle: String
+        if skippedEmptyCount > 0 {
+            subtitle = "\(compactChainDescription(slots))，跳过 \(skippedEmptyCount) 个空槽位"
+        } else {
+            subtitle = compactChainDescription(slots)
+        }
+        showFloatingNotice(FloatingNotice(
+            title: "已串联粘贴 \(pastedCount) 个槽位",
+            subtitle: subtitle,
+            iconName: "link.circle.fill",
+            kind: .success
+        ))
+    }
+
+    // MARK: - v2.7.0 Template Export / Import
+
+    func exportConnectionTemplate() {
+        guard !currentConnectionMap.edges.isEmpty else {
+            showFloatingNotice(FloatingNotice(
+                title: "没有可导出的连接",
+                subtitle: "请先建立槽位连接",
+                iconName: "exclamationmark.triangle.fill",
+                kind: .warning
+            ))
+            return
+        }
+
+        let panel = NSSavePanel()
+        let df = DateFormatter()
+        df.dateFormat = "yyyyMMdd"
+        panel.nameFieldStringValue = "ClipSlots连接模板-\(df.string(from: Date())).clipslotslink"
+        panel.canCreateDirectories = true
+        panel.isExtensionHidden = false
+
+        if #available(macOS 12.0, *) {
+            panel.allowedContentTypes = [UTType(filenameExtension: "clipslotslink") ?? .json]
+        } else {
+            panel.allowedFileTypes = ["clipslotslink", "json"]
+        }
+
+        let response = panel.runModal()
+        guard response == .OK, let url = panel.url else { return }
+
+        do {
+            let appVersion = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "2.7.0"
+            let template = SlotConnectionTemplateService.makeTemplate(
+                from: currentConnectionMap,
+                name: "ClipSlots 连接模板",
+                appVersion: appVersion
+            )
+            let data = try SlotConnectionTemplateService.encode(template)
+            try data.write(to: url, options: [.atomic])
+
+            let slotCount = Set(currentConnectionMap.edges.flatMap { [$0.fromSlot, $0.toSlot] }).count
+            showFloatingNotice(FloatingNotice(
+                title: "已导出连接模板",
+                subtitle: "包含 \(currentConnectionMap.edges.count) 个连接，\(slotCount) 个槽位",
+                iconName: "square.and.arrow.up.fill",
+                kind: .success
+            ))
+        } catch {
+            showFloatingNotice(FloatingNotice(
+                title: "导出失败",
+                subtitle: error.localizedDescription,
+                iconName: "xmark.circle.fill",
+                kind: .error
+            ))
+        }
+    }
+
+    func importConnectionTemplate() {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = false
+
+        if #available(macOS 12.0, *) {
+            panel.allowedContentTypes = [UTType(filenameExtension: "clipslotslink") ?? .json]
+        } else {
+            panel.allowedFileTypes = ["clipslotslink", "json"]
+        }
+
+        let response = panel.runModal()
+        guard response == .OK, let url = panel.url else { return }
+
+        do {
+            let data = try Data(contentsOf: url)
+            let template = try SlotConnectionTemplateService.decode(data)
+            let importedMap = SlotConnectionMap(edges: template.edges)
+            try validateConnectionMap(importedMap)
+
+            if !currentConnectionMap.edges.isEmpty {
+                guard confirmReplaceCurrentConnections() else { return }
+            }
+
+            currentConnectionMap = importedMap
+            saveConnectionMapForCurrentGroup()
+
+            let slotCount = Set(importedMap.edges.flatMap { [$0.fromSlot, $0.toSlot] }).count
+            showFloatingNotice(FloatingNotice(
+                title: "已导入连接模板",
+                subtitle: "包含 \(importedMap.edges.count) 个连接，\(slotCount) 个槽位",
+                iconName: "square.and.arrow.down.fill",
+                kind: .success
+            ))
+        } catch let error as SlotConnectionError {
+            showFloatingNotice(FloatingNotice(
+                title: error.noticeTitle,
+                subtitle: error.localizedDescription,
+                iconName: "xmark.circle.fill",
+                kind: .error
+            ))
+        } catch {
+            showFloatingNotice(FloatingNotice(
+                title: "导入失败",
+                subtitle: "模板格式无效",
+                iconName: "xmark.circle.fill",
+                kind: .error
+            ))
+        }
+    }
+
+    func applyBuiltInFullChainTemplate() {
+        let appVersion = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "2.7.0"
+        let template = SlotConnectionTemplateService.makeFullTenSlotChainTemplate(appVersion: appVersion)
+        let map = SlotConnectionMap(edges: template.edges)
+
+        do {
+            try validateConnectionMap(map)
+
+            if !currentConnectionMap.edges.isEmpty {
+                guard confirmReplaceCurrentConnections() else { return }
+            }
+
+            currentConnectionMap = map
+            saveConnectionMapForCurrentGroup()
+
+            showFloatingNotice(FloatingNotice(
+                title: "已应用十槽位全串联",
+                subtitle: "粘贴槽位 1 时会串联 1 → 2 → 3 → … → 10",
+                iconName: "link.circle.fill",
+                kind: .success
+            ))
+        } catch {
+            showFloatingNotice(FloatingNotice(
+                title: "应用失败",
+                subtitle: error.localizedDescription,
+                iconName: "xmark.circle.fill",
+                kind: .error
+            ))
+        }
+    }
+
+    private func confirmReplaceCurrentConnections() -> Bool {
+        let alert = NSAlert()
+        alert.messageText = "替换当前连接？"
+        alert.informativeText = "当前槽位组已有连接。导入模板会替换现有连接，但不会修改槽位内容。"
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "替换连接")
+        alert.addButton(withTitle: "取消")
+        return alert.runModal() == .alertFirstButtonReturn
     }
 
     // MARK: - Clear

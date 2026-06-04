@@ -7,6 +7,7 @@ enum UserPreferenceKeys {
     static let skipBatchSaveConfirmation = "skipBatchSaveConfirmation"
     static let showSaveToast = "showSaveToast"
     static let showCopyToast = "showCopyToast"
+    static let enableSlotConnection = "enableSlotConnection"
 }
 
 extension UserDefaults {

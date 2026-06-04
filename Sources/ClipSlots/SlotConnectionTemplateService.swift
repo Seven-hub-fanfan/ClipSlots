@@ -1,0 +1,73 @@
+import Foundation
+import UniformTypeIdentifiers
+
+// MARK: - Slot Connection Template Service
+
+enum SlotConnectionTemplateService {
+    static let fileExtension = "clipslotslink"
+    static let currentVersion = SlotConnectionTemplate.currentVersion
+
+    // MARK: - Encode / Decode
+
+    static func encode(_ template: SlotConnectionTemplate) throws -> Data {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        encoder.dateEncodingStrategy = .iso8601
+        return try encoder.encode(template)
+    }
+
+    static func decode(_ data: Data) throws -> SlotConnectionTemplate {
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        let template = try decoder.decode(SlotConnectionTemplate.self, from: data)
+
+        guard template.version <= currentVersion else {
+            throw SlotConnectionError.unsupportedTemplateVersion
+        }
+        guard template.slotCount <= 10 else {
+            throw SlotConnectionError.invalidTemplate
+        }
+
+        let map = SlotConnectionMap(edges: template.edges)
+        try validateConnectionMap(map)
+
+        return template
+    }
+
+    // MARK: - Built-in Template: Full 10-Slot Chain
+
+    static func makeFullTenSlotChainTemplate(appVersion: String) -> SlotConnectionTemplate {
+        let edges: [SlotConnectionEdge] = [
+            SlotConnectionEdge(fromSlot: 1, fromPort: .right, toSlot: 2, toPort: .left, colorId: 0),
+            SlotConnectionEdge(fromSlot: 2, fromPort: .right, toSlot: 3, toPort: .left, colorId: 0),
+            SlotConnectionEdge(fromSlot: 3, fromPort: .right, toSlot: 4, toPort: .left, colorId: 0),
+            SlotConnectionEdge(fromSlot: 4, fromPort: .right, toSlot: 5, toPort: .left, colorId: 0),
+            SlotConnectionEdge(fromSlot: 5, fromPort: .bottom, toSlot: 6, toPort: .top, colorId: 0),
+            SlotConnectionEdge(fromSlot: 6, fromPort: .right, toSlot: 7, toPort: .left, colorId: 0),
+            SlotConnectionEdge(fromSlot: 7, fromPort: .right, toSlot: 8, toPort: .left, colorId: 0),
+            SlotConnectionEdge(fromSlot: 8, fromPort: .right, toSlot: 9, toPort: .left, colorId: 0),
+            SlotConnectionEdge(fromSlot: 9, fromPort: .right, toSlot: 10, toPort: .left, colorId: 0),
+        ]
+
+        return SlotConnectionTemplate(
+            name: "十槽位全串联",
+            description: "将 1 到 10 号槽位按数字顺序串联，粘贴槽位 1 时自动粘贴全部槽位内容。适合多段 Prompt 组合、邮件模板、代码片段组合。",
+            appVersion: appVersion,
+            tags: ["官方", "全串联", "prompt", "10-slots"],
+            edges: edges
+        )
+    }
+
+    // MARK: - Make Template from Current Map
+
+    static func makeTemplate(from map: SlotConnectionMap, name: String, appVersion: String) -> SlotConnectionTemplate {
+        let slotCount = Set(map.edges.flatMap { [$0.fromSlot, $0.toSlot] }).count
+        return SlotConnectionTemplate(
+            name: name,
+            description: "ClipSlots 槽位连接模板",
+            appVersion: appVersion,
+            slotCount: max(slotCount, 2),
+            edges: map.edges
+        )
+    }
+}

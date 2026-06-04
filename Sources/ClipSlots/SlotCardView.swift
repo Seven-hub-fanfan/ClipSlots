@@ -13,6 +13,16 @@ struct SlotCardView: View {
     var onClear: () -> Void
     var onSetLabel: (String) -> Void
 
+    // v2.7.0: Connection props
+    var connectionDotColor: Color? = nil
+    var isConnectionMode: Bool = false
+    var connectedPorts: Set<SlotPort> = []
+    var highlightedPort: SlotPort? = nil
+    var isPortVisible: Bool = false
+    var onBeginDrag: ((SlotPort, CGPoint) -> Void)?
+    var onUpdateDrag: ((CGPoint) -> Void)?
+    var onEndDrag: (() -> Void)?
+
     @State private var editingLabel = false
     @State private var labelText = ""
     @State private var isHovering = false
@@ -70,6 +80,8 @@ struct SlotCardView: View {
                     lineWidth: isHovering ? 1.4 : 1
                 )
         )
+        // v2.7.0: Connection port layer
+        .overlay { portOverlay }
         .scaleEffect(isHovering ? 1.012 : 1.0)
         .animation(.easeOut(duration: 0.14), value: isHovering)
         .onHover { hovering in
@@ -95,6 +107,13 @@ struct SlotCardView: View {
                 Text("\(slot)")
                     .font(.system(size: 14, weight: .bold, design: .rounded))
                     .foregroundColor(content.isEmpty ? .secondary : .white)
+            }
+
+            // v2.7.0: Connection color dot
+            if let dotColor = connectionDotColor {
+                Circle()
+                    .fill(dotColor)
+                    .frame(width: 8, height: 8)
             }
 
             VStack(alignment: .leading, spacing: 2) {
@@ -316,4 +335,23 @@ struct SlotCardView: View {
         if interval < 3600 { return "\(Int(interval / 60)) 分钟前" }
         if interval < 86400 { return "\(Int(interval / 3600)) 小时前" }
         return "\(Int(interval / 86400)) 天前" }
+
+    // MARK: - v2.7.0 Port Overlay
+
+    @ViewBuilder
+    private var portOverlay: some View {
+        if isPortVisible || !connectedPorts.isEmpty {
+            SlotPortLayer(
+                slot: slot,
+                size: CGSize(width: 250, height: 270),
+                color: connectionDotColor ?? .accentColor,
+                isVisible: isPortVisible,
+                connectedPorts: connectedPorts,
+                highlightedPort: highlightedPort,
+                onBeginDrag: onBeginDrag ?? { _, _ in },
+                onUpdateDrag: onUpdateDrag ?? { _ in },
+                onEndDrag: onEndDrag ?? {}
+            )
+        }
     }
+}

@@ -47,7 +47,8 @@ final class RadialMenuWindowController {
         let radialView = RadialMenuView(
             store: store,
             onSelectSlot: onSelectSlot,
-            onDismiss: { onDismiss() }
+            onDismiss: { onDismiss() },
+            connectionMap: store.currentConnectionMap
         )
         .preferredColorScheme(themeMode.preferredColorScheme)
 
