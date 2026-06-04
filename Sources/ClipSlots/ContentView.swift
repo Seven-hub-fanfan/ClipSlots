@@ -15,8 +15,8 @@ struct ContentView: View {
     @State private var searchScope: SlotSearchScope = .currentGroup
     @State private var globalSearchSortRule: SlotSearchSortRule = .smart
 
-    // v2.7.0: Connection state
-    @State private var slotFrames: [Int: CGRect] = [:]
+    // v2.7.1: stable connection sheet replaces broken node-canvas UI.
+    @State private var showingConnectionManagement = false
 
     private func cycleAppearanceMode() {
         let current = ThemeMode(rawValue: appearanceModeRaw) ?? .system
@@ -49,13 +49,6 @@ struct ContentView: View {
                             .padding(.top, 32)
                     }
 
-                    // v2.7.0: Connection mode bar
-                    if store.isConnectionModeEnabled {
-                        connectionModeBar
-                            .padding(.horizontal, AppTheme.pagePadding)
-                            .padding(.top, 8)
-                    }
-
                     LazyVGrid(
                         columns: [
                             GridItem(.adaptive(minimum: 240, maximum: 300), spacing: 14)
@@ -66,12 +59,8 @@ struct ContentView: View {
                             slotCardView(slot: slot)
                         }
                     }
-                    .onPreferenceChange(SlotFramePreferenceKey.self) { frames in
-                        slotFrames = frames
-                    }
                     .padding(AppTheme.pagePadding)
                 }
-                .coordinateSpace(name: "slotGrid")
                 .background(AppTheme.windowBackground(colorScheme))
                 .transaction { $0.animation = nil }
 
@@ -91,17 +80,6 @@ struct ContentView: View {
                     .zIndex(101)
             }
 
-            // v2.7.0: Connection Canvas overlay
-            if store.isSlotConnectionEnabled && (!store.currentConnectionMap.edges.isEmpty || store.activeDragConnection != nil) {
-                SlotConnectionCanvas(
-                    map: store.currentConnectionMap,
-                    slotFrames: slotFrames,
-                    activeDrag: store.activeDragConnection,
-                    isConnectionModeEnabled: store.isConnectionModeEnabled,
-                    hoveredSlot: store.hoveredSlot
-                )
-                .zIndex(102)
-            }
         }
         .animation(.easeInOut(duration: 0.25), value: store.toastMessage != nil)
         // v2.6.7: Import options sheet
@@ -118,6 +96,11 @@ struct ContentView: View {
                     }
                 }
             )
+        }
+        // v2.7.1: stable connection manager replaces broken node-canvas UI.
+        .sheet(isPresented: $showingConnectionManagement) {
+            ConnectionManagementSheet(store: store)
+                .frame(width: 540, height: 620)
         }
     }
 
@@ -586,12 +569,9 @@ struct ContentView: View {
             // v2.7.0: Connection menu
             Menu {
                 Button {
-                    store.toggleConnectionMode()
+                    showingConnectionManagement = true
                 } label: {
-                    Label(
-                        store.isConnectionModeEnabled ? "退出连接模式" : "进入连接模式",
-                        systemImage: store.isConnectionModeEnabled ? "link.circle.fill" : "link"
-                    )
+                    Label("连接管理…", systemImage: "link")
                 }
 
                 Divider()
@@ -638,7 +618,7 @@ struct ContentView: View {
 
             Spacer()
 
-            Text("v2.7.0")
+            Text("v2.7.1")
                 .font(.caption2)
                 .foregroundColor(Color.secondary.opacity(0.65))
         }
@@ -665,66 +645,9 @@ struct ContentView: View {
 
     // MARK: - v2.7.0 Connection Mode Bar
 
+    // v2.7.1: connection mode bar disabled — use ConnectionManagementSheet instead.
     private var connectionModeBar: some View {
-        HStack(spacing: 10) {
-            Label("连接模式", systemImage: "link")
-                .font(.system(size: 12, weight: .semibold))
-
-            Text("拖拽槽位边缘连接点到另一个槽位")
-                .font(.system(size: 12))
-                .foregroundColor(.secondary)
-
-            Spacer()
-
-            Button("十槽位串联") { store.applyBuiltInFullChainTemplate() }
-                .buttonStyle(.bordered)
-                .controlSize(.small)
-
-            Menu {
-                Button {
-                    store.exportConnectionTemplate()
-                } label: {
-                    Label("导出连接模板", systemImage: "square.and.arrow.up")
-                }
-                Button {
-                    store.importConnectionTemplate()
-                } label: {
-                    Label("导入连接模板", systemImage: "square.and.arrow.down")
-                }
-                Divider()
-                Button(role: .destructive) {
-                    store.confirmAndClearCurrentConnections()
-                } label: {
-                    Label("清除当前连接", systemImage: "trash")
-                }
-            } label: {
-                Label("模板", systemImage: "ellipsis.circle")
-            }
-            .buttonStyle(.bordered)
-            .controlSize(.small)
-            .menuStyle(.borderlessButton)
-
-            Button("完成") { store.toggleConnectionMode() }
-                .buttonStyle(.borderedProminent)
-                .controlSize(.small)
-        }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 8)
-        .background(
-            colorScheme == .dark
-                ? Color(red: 0.12, green: 0.12, blue: 0.13)
-                : Color(red: 0.97, green: 0.97, blue: 0.98)
-        )
-        .clipShape(RoundedRectangle(cornerRadius: 10))
-        .overlay(
-            RoundedRectangle(cornerRadius: 10)
-                .stroke(
-                    colorScheme == .dark
-                        ? Color(red: 0.24, green: 0.24, blue: 0.26)
-                        : Color(red: 0.84, green: 0.84, blue: 0.86),
-                    lineWidth: 1
-                )
-        )
+        EmptyView()
     }
 
     // MARK: - v2.7.0 Slot Card Helper
@@ -748,28 +671,13 @@ struct ContentView: View {
             onClear: { store.clearSlotWithConfirmation(slot) },
             onSetLabel: { newLabel in store.setLabel(slot, label: newLabel.isEmpty ? nil : newLabel) },
             connectionDotColor: store.portColor(for: slot),
-            isConnectionMode: store.isConnectionModeEnabled,
-            connectedPorts: store.connectedPorts(for: slot),
-            highlightedPort: store.hoveredPortTarget?.slot == slot ? store.hoveredPortTarget?.port : nil,
-            isPortVisible: store.shouldShowPorts(for: slot),
-            onBeginDrag: { port, point in
-                store.beginConnectionDrag(fromSlot: slot, fromPort: port, startPoint: point)
-            },
-            onUpdateDrag: { point in
-                let target = nearestPortTarget(to: point, slotFrames: slotFrames, excluding: slot, threshold: 32)
-                store.updateConnectionDrag(currentPoint: point, hoverTarget: target)
-            },
-            onEndDrag: {
-                store.endConnectionDrag(target: store.hoveredPortTarget)
-            }
-        )
-        .background(
-            GeometryReader { proxy in
-                Color.clear.preference(
-                    key: SlotFramePreferenceKey.self,
-                    value: [slot: proxy.frame(in: .named("slotGrid"))]
-                )
-            }
+            isConnectionMode: false,
+            connectedPorts: [],
+            highlightedPort: nil,
+            isPortVisible: false,
+            onBeginDrag: nil,
+            onUpdateDrag: nil,
+            onEndDrag: nil
         )
         .opacity(!isSearchActive || isMatched ? 1.0 : 0.22)
         .saturation(!isSearchActive || isMatched ? 1.0 : 0.35)

@@ -80,8 +80,9 @@ struct SlotCardView: View {
                     lineWidth: isHovering ? 1.4 : 1
                 )
         )
-        // v2.7.0: Connection port layer
-        .overlay { portOverlay }
+        // v2.7.1: Do not render node-canvas ports on the main card grid.
+        // The v2.7.0 port overlay polluted the normal UI with permanent blue handles.
+        // Keep only a tiny chain-color dot in the header.
         .scaleEffect(isHovering ? 1.012 : 1.0)
         .animation(.easeOut(duration: 0.14), value: isHovering)
         .onHover { hovering in
@@ -109,11 +110,12 @@ struct SlotCardView: View {
                     .foregroundColor(content.isEmpty ? .secondary : .white)
             }
 
-            // v2.7.0: Connection color dot
+            // v2.7.1: Connection color dot (6px, subtle)
             if let dotColor = connectionDotColor {
                 Circle()
                     .fill(dotColor)
-                    .frame(width: 8, height: 8)
+                    .frame(width: 6, height: 6)
+                    .help("此槽位属于串联链路")
             }
 
             VStack(alignment: .leading, spacing: 2) {

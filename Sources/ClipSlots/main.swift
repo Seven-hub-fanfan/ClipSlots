@@ -1807,6 +1807,52 @@ final class SlotStoreObservable: ObservableObject {
         return alert.runModal() == .alertFirstButtonReturn
     }
 
+    // MARK: - v2.7.1 Stable Connection Management
+
+    func connectionChainSummaries() -> [[Int]] {
+        currentConnectionMap.chainStarts()
+            .map { currentConnectionMap.chainSlots(startingAt: $0) }
+            .filter { $0.count > 1 }
+    }
+
+    func addManagedConnection(fromSlot: Int, toSlot: Int) {
+        connectSlots(
+            fromSlot: fromSlot,
+            fromPort: defaultFromPort(from: fromSlot, to: toSlot),
+            toSlot: toSlot,
+            toPort: defaultToPort(from: fromSlot, to: toSlot)
+        )
+    }
+
+    func deleteManagedConnection(_ edgeId: UUID) {
+        var map = currentConnectionMap
+        map.disconnect(edgeId: edgeId)
+        currentConnectionMap = map
+        saveConnectionMapForCurrentGroup()
+        showFloatingNotice(FloatingNotice(
+            title: "已删除连接",
+            subtitle: "槽位内容未受影响",
+            iconName: "link.badge.minus",
+            kind: .info
+        ))
+    }
+
+    private func defaultFromPort(from: Int, to: Int) -> SlotPort {
+        if to == from + 1 { return .right }
+        if to == from - 1 { return .left }
+        if to == from + 5 { return .bottom }
+        if to == from - 5 { return .top }
+        return .right
+    }
+
+    private func defaultToPort(from: Int, to: Int) -> SlotPort {
+        if to == from + 1 { return .left }
+        if to == from - 1 { return .right }
+        if to == from + 5 { return .top }
+        if to == from - 5 { return .bottom }
+        return .left
+    }
+
     // MARK: - Clear
 
     func clearSlot(_ slot: Int) {
