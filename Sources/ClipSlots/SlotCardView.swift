@@ -110,12 +110,19 @@ struct SlotCardView: View {
                     .foregroundColor(content.isEmpty ? .secondary : .white)
             }
 
-            // v2.7.1: Connection color dot (6px, subtle)
+            // v2.7.9: Connection indicator with capsule badge
             if let dotColor = connectionDotColor {
-                Circle()
-                    .fill(dotColor)
-                    .frame(width: 6, height: 6)
-                    .help("此槽位属于串联链路")
+                HStack(spacing: 4) {
+                    Circle().fill(dotColor).frame(width: 6, height: 6)
+                    Image(systemName: "link")
+                        .font(.system(size: 8, weight: .semibold))
+                        .foregroundColor(dotColor)
+                }
+                .padding(.horizontal, 5)
+                .padding(.vertical, 3)
+                .background(Capsule().fill(dotColor.opacity(0.14)))
+                .overlay(Capsule().stroke(dotColor.opacity(0.35), lineWidth: 0.8))
+                .help("此槽位属于串联链路")
             }
 
             VStack(alignment: .leading, spacing: 2) {

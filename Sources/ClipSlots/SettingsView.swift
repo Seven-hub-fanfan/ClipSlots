@@ -376,3 +376,24 @@ struct SettingsView: View {
         showCopyToast = true
     }
 }
+
+// MARK: - v2.7.9 Settings Section Card
+
+struct SettingsSectionCard<Content: View>: View {
+    let title: String
+    let systemImage: String
+    @ViewBuilder var content: Content
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Label(title, systemImage: systemImage)
+                .font(.system(size: 16, weight: .semibold))
+                .foregroundStyle(.primary)
+            content
+        }
+        .padding(18)
+        .frame(maxWidth: 560, alignment: .leading)
+        .background(RoundedRectangle(cornerRadius: 18).fill(Color(NSColor.controlBackgroundColor)))
+        .overlay(RoundedRectangle(cornerRadius: 18).stroke(Color.white.opacity(0.08), lineWidth: 1))
+    }
+}

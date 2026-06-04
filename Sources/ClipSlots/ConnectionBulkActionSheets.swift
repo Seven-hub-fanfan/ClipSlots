@@ -54,14 +54,14 @@ struct ConnectionClearConfirmSheet: View {
     let onClearAll: () -> Void
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
+        VStack(alignment: .leading, spacing: 18) {
             Text("清除连接")
                 .font(.system(size: 18, weight: .semibold))
             Text("清除操作只会删除连接关系，不会删除槽位内容。请选择清除范围。")
                 .font(.callout)
                 .foregroundColor(.secondary)
 
-            VStack(spacing: 10) {
+            VStack(spacing: 12) {
                 Button("清除当前槽位组连接", role: .destructive) { onClearCurrentGroup() }
                     .buttonStyle(.borderedProminent)
                 Button("清除当前页面全部槽位组连接", role: .destructive) { onClearCurrentPage() }
@@ -76,6 +76,6 @@ struct ConnectionClearConfirmSheet: View {
 
             HStack { Spacer(); Button("取消") { onCancel() } }
         }
-        .padding(18)
+        .padding(24)
     }
 }

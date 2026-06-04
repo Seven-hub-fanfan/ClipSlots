@@ -63,10 +63,12 @@ struct NodePortHandle: View {
 
     var body: some View {
         Circle()
-            .fill(isHighlighted || isConnected ? color : Color(NSColor.windowBackgroundColor))
-            .overlay(Circle().stroke(color, lineWidth: 2))
-            .frame(width: isHighlighted ? 16 : 12, height: isHighlighted ? 16 : 12)
-            .frame(width: 30, height: 30)
+            .fill(isHighlighted || isConnected ? color : Color(NSColor.windowBackgroundColor).opacity(0.92))
+            .overlay(Circle().stroke(color.opacity(isConnected ? 1 : 0.78), lineWidth: isHighlighted ? 2.6 : 1.8))
+            .overlay(Circle().stroke(Color.white.opacity(isHighlighted ? 0.35 : 0), lineWidth: 1))
+            .shadow(color: color.opacity(isHighlighted ? 0.55 : 0.18), radius: isHighlighted ? 7 : 3, x: 0, y: 0)
+            .frame(width: isHighlighted ? 15 : 10, height: isHighlighted ? 15 : 10)
+            .frame(width: 28, height: 28)
             .opacity(isVisible ? 1 : 0.92)
             .scaleEffect(isHighlighted ? 1.08 : 1)
             .animation(.easeOut(duration: 0.10), value: isHighlighted)

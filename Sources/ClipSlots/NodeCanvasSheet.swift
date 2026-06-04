@@ -135,12 +135,15 @@ struct NodeCanvasSheet: View {
                 }
             }
             Button("导入模板") { store.importConnectionTemplate() }
-            Button("清除连接", role: .destructive) {
+            Button(role: .destructive) {
                 if suppressClearConnectionsConfirm {
                     store.clearCurrentConnectionsWithoutConfirm()
                 } else {
                     showingClearConfirmSheet = true
                 }
+            } label: {
+                Label("清除连接", systemImage: "trash")
+                    .foregroundStyle(.red)
             }
             Button("完成") { dismiss() }
                 .buttonStyle(.borderedProminent)
@@ -164,10 +167,10 @@ struct NodeCanvasSheet: View {
             }
 
             HStack(spacing: 10) {
-                Button("当前槽位组全联") { store.applyBuiltInFullChainTemplate() }
-                Button("当前页面全联") { store.applyFullChainToCurrentPage() }
-                Button("清空本组") { store.clearCurrentConnectionsWithoutConfirm() }
-                Button("清空本页") { store.clearCurrentPageConnections() }
+                Button { store.applyBuiltInFullChainTemplate() } label: { Label("本组全联", systemImage: "link") }
+                Button { store.applyFullChainToCurrentPage() } label: { Label("本页全联", systemImage: "square.grid.2x2") }
+                Button(role: .destructive) { store.clearCurrentConnectionsWithoutConfirm() } label: { Label("清空本组", systemImage: "trash") }
+                Button(role: .destructive) { store.clearCurrentPageConnections() } label: { Label("清空本页", systemImage: "trash.slash") }
                 Spacer()
             }
             .font(.caption)

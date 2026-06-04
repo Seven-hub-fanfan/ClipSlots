@@ -19,7 +19,7 @@ struct SlotNodeView: View {
                     .foregroundColor(.white)
                     .frame(width: 24, height: 24)
                     .background(Circle().fill(SlotConnectionColor.color(for: colorId) == .clear ? .accentColor : SlotConnectionColor.color(for: colorId)))
-                Text(nodeTitle)
+                Text(slotDisplayName)
                     .font(.system(size: 13, weight: .semibold))
                     .lineLimit(1)
                 Spacer()
@@ -39,12 +39,8 @@ struct SlotNodeView: View {
         .shadow(color: .black.opacity(0.08), radius: 8, x: 0, y: 3)
     }
 
-    private var nodeTitle: String {
-        guard let content else { return "空槽位" }
-        let text = content.plainText ?? ""
-        if text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return "槽位内容" }
-        return text.components(separatedBy: .newlines).first ?? "槽位内容"
-    }
+    // v2.7.9: Node title shows slot name, not content preview.
+    private var slotDisplayName: String { "槽位 \(slot)" }
 
     private var nodePreview: String {
         guard let content else { return "拖拽端口建立连接" }
