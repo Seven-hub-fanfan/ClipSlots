@@ -25,21 +25,8 @@ struct NodeCanvasSheet: View {
         })
     }
 
-    // v2.7.5: slots whose ports should be drawn.
-    private var visiblePortSlots: Set<Int> {
-        if activeDrag != nil { return Set(1...10) }
-
-        var slots = Set<Int>()
-        if let hoveredNode { slots.insert(hoveredNode) }
-        if let hoveredTarget { slots.insert(hoveredTarget.slot) }
-
-        for slot in 1...10 {
-            if !store.currentConnectionMap.connectedPorts(for: slot).isEmpty {
-                slots.insert(slot)
-            }
-        }
-        return slots
-    }
+    // v2.7.6: Always show all ports in the dedicated editing canvas.
+    private var visiblePortSlots: Set<Int> { Set(1...10) }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -71,7 +58,8 @@ struct NodeCanvasSheet: View {
                     // v2.7.5: Ports managed at canvas level, not inside SlotNodeView.
                     NodePortOverlay(
                         nodeFrames: nodeFrames,
-                        visibleSlots: visiblePortSlots,
+                        // v2.7.6: In the dedicated node canvas, show all ports by default.
+                        visibleSlots: Set(1...10),
                         connectedPortsProvider: { store.currentConnectionMap.connectedPorts(for: $0) },
                         colorProvider: { slot in SlotConnectionColor.color(for: store.currentConnectionMap.colorId(for: slot)) },
                         highlightedTarget: hoveredTarget,

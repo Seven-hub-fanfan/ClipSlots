@@ -20,7 +20,8 @@ struct NodePortOverlay: View {
                 if let rect = nodeFrames[slot] {
                     ForEach(SlotPort.allCases) { port in
                         let connectedPorts = connectedPortsProvider(slot)
-                        let isVisible = visibleSlots.contains(slot) || connectedPorts.contains(port)
+                        // v2.7.6: ports are always visible in the dedicated editor.
+                        let isVisible = true
                         let isHighlighted = highlightedTarget?.slot == slot && highlightedTarget?.port == port
                         NodePortHandle(
                             slot: slot,
@@ -38,6 +39,7 @@ struct NodePortOverlay: View {
                 }
             }
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
     private func normalizedPortColor(_ color: Color) -> Color {
@@ -65,12 +67,12 @@ struct NodePortHandle: View {
             .overlay(Circle().stroke(color, lineWidth: 2))
             .frame(width: isHighlighted ? 16 : 12, height: isHighlighted ? 16 : 12)
             .frame(width: 30, height: 30)
-            .opacity(isVisible ? 1 : 0)
-            .scaleEffect(isVisible ? 1 : 0.7)
-            .animation(.easeOut(duration: 0.12), value: isVisible)
+            .opacity(isVisible ? 1 : 0.92)
+            .scaleEffect(isHighlighted ? 1.08 : 1)
+            .animation(.easeOut(duration: 0.10), value: isHighlighted)
             .contentShape(Rectangle())
             .position(point)
-            .allowsHitTesting(isVisible)
+            .allowsHitTesting(true)
             .gesture(
                 DragGesture(minimumDistance: 2, coordinateSpace: .named("nodeCanvas"))
                     .onChanged { value in
