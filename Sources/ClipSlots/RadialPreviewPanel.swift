@@ -201,7 +201,7 @@ private struct RadialVideoPreview: View {
     var body: some View {
         ZStack {
             if let player {
-                VideoPlayer(player: player)
+                SafeAVPlayerView(player: player)
                     .onAppear { player.play() }
                     .onDisappear { player.pause() }
             } else {
@@ -232,6 +232,33 @@ private struct RadialVideoPreview: View {
             }
         }
         .onDisappear { player?.pause() }
+    }
+}
+
+// MARK: - v2.7.22 Safe AVPlayerView Bridge
+// Do NOT use SwiftUI.VideoPlayer here. On macOS 15.7.x the private
+// _AVKit_SwiftUI framework can abort while instantiating generic metadata.
+// Using AppKit AVPlayerView avoids the crashing SwiftUI wrapper.
+private struct SafeAVPlayerView: NSViewRepresentable {
+    let player: AVPlayer
+
+    func makeNSView(context: Context) -> AVPlayerView {
+        let view = AVPlayerView()
+        view.controlsStyle = .floating
+        view.videoGravity = .resizeAspect
+        view.player = player
+        return view
+    }
+
+    func updateNSView(_ nsView: AVPlayerView, context: Context) {
+        if nsView.player !== player {
+            nsView.player = player
+        }
+    }
+
+    static func dismantleNSView(_ nsView: AVPlayerView, coordinator: ()) {
+        nsView.player?.pause()
+        nsView.player = nil
     }
 }
 
