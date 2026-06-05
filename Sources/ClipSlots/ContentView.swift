@@ -12,7 +12,8 @@ struct ContentView: View {
     // v2.5: Search state
     @State private var searchText: String = ""
     @State private var selectedFilter: SlotFilterType = .all
-    @State private var searchScope: SlotSearchScope = .currentGroup
+    // v2.7.23: global search is the default. Users can still switch back to group scope.
+@State private var searchScope: SlotSearchScope = .global
     @State private var globalSearchSortRule: SlotSearchSortRule = .smart
 
     // v2.7.1: stable connection sheet replaces broken node-canvas UI.
@@ -455,7 +456,7 @@ struct ContentView: View {
             ShortcutBadge(title: "粘贴", shortcut: shortcutDisplay(store.config.pasteKey, slotToken: "数字"), icon: "square.and.arrow.up")
             ShortcutBadge(title: "保存", shortcut: shortcutDisplay(store.config.saveKey, slotToken: "数字"), icon: "square.and.arrow.down")
             ShortcutBadge(title: "圆盘", shortcut: shortcutDisplay(store.config.radialKey), icon: "circle.grid.cross")
-            ShortcutBadge(title: "切组", shortcut: "← / →", icon: "arrow.left.arrow.right")
+            ShortcutBadge(title: "切组", shortcut: "⌘ ← / ⌘ →", icon: "arrow.left.arrow.right")
             Spacer(minLength: 0)
         }
         .padding(.horizontal, 10)
@@ -593,7 +594,7 @@ struct ContentView: View {
             ShortcutBadge(title: "保存", shortcut: shortcutDisplay(store.config.saveKey, slotToken: "数字"), icon: "square.and.arrow.down")
             ShortcutBadge(title: "粘贴", shortcut: shortcutDisplay(store.config.pasteKey, slotToken: "数字"), icon: "square.and.arrow.up")
             ShortcutBadge(title: "圆盘", shortcut: shortcutDisplay(store.config.radialKey), icon: "circle.grid.cross")
-            ShortcutBadge(title: "切组", shortcut: "← / →", icon: "arrow.left.arrow.right")
+            ShortcutBadge(title: "切组", shortcut: "⌘ ← / ⌘ →", icon: "arrow.left.arrow.right")
 
             // v2.7.0: Connection menu
             Menu {
@@ -645,7 +646,7 @@ struct ContentView: View {
 
             Spacer()
 
-            Text("v2.7.22")
+            Text("v2.7.23")
                 .font(.caption2)
                 .foregroundColor(Color.secondary.opacity(0.65))
         }

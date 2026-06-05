@@ -157,9 +157,9 @@ struct SettingsView: View {
                     .pickerStyle(.segmented)
                 }
 
-                shortcutInput(title: "保存快捷键", subtitle: "将当前剪贴板内容保存到指定槽位", placeholder: "ctrl+option+{n}", text: $saveKey, preview: saveKey.replacingOccurrences(of: "{n}", with: "1"))
-                shortcutInput(title: "粘贴快捷键", subtitle: "从指定槽位粘贴内容", placeholder: "ctrl+{n}", text: $pasteKey, preview: pasteKey.replacingOccurrences(of: "{n}", with: "1"))
-                shortcutInput(title: "圆盘菜单快捷键", subtitle: "在鼠标位置弹出圆盘选择器", placeholder: "ctrl+space", text: $radialKey, preview: radialKey)
+                shortcutInput(title: "保存快捷键", subtitle: "将当前剪贴板内容保存到指定槽位", placeholder: "cmd+option+{n}", text: $saveKey, preview: saveKey.replacingOccurrences(of: "{n}", with: "1"))
+                shortcutInput(title: "粘贴快捷键", subtitle: "从指定槽位粘贴内容", placeholder: "cmd+{n}", text: $pasteKey, preview: pasteKey.replacingOccurrences(of: "{n}", with: "1"))
+                shortcutInput(title: "圆盘菜单快捷键", subtitle: "在鼠标位置弹出圆盘选择器", placeholder: "cmd+space", text: $radialKey, preview: radialKey)
             }
         }
     }
@@ -217,7 +217,7 @@ struct SettingsView: View {
     private var helpSection: some View {
         settingsSection(title: "快捷键格式", icon: "info.circle.fill") {
             VStack(alignment: .leading, spacing: 6) {
-                helpRow("修饰键", "ctrl, option, cmd, shift")
+                helpRow("修饰键", "cmd, option, ctrl, shift")
                 helpRow("普通键", "0-9, a-z, f1-f12, space, tab, 方向键")
                 helpRow("槽位占位符", "{n} 代表槽位编号，例如 ctrl+{n}")
                 helpRow("槽位组切换", "Cmd+← → 在当前页面内的槽位组间循环切换")
@@ -322,9 +322,9 @@ struct SettingsView: View {
 
     private func resetDefaults() {
         slots = 9
-        saveKey = "ctrl+option+{n}"
-        pasteKey = "ctrl+{n}"
-        radialKey = "ctrl+space"
+        saveKey = "cmd+option+{n}"
+        pasteKey = "cmd+{n}"
+        radialKey = "cmd+space"
         verbose = true
     }
 

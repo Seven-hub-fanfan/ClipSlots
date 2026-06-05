@@ -1,4 +1,5 @@
 import SwiftUI
+import AVKit
 
 struct SlotCardView: View {
     let slot: Int
@@ -37,6 +38,9 @@ struct SlotCardView: View {
             // Thumbnail area — split empty vs filled to prevent @State image reuse
             if content.isEmpty {
                 EmptySlotThumbnailView()
+            } else if content.isVideoFile, let url = content.primaryFileURL {
+                InlineSlotVideoPreview(url: url)
+                    .clipShape(RoundedRectangle(cornerRadius: AppTheme.smallCornerRadius, style: .continuous))
             } else {
                 SlotThumbnailView(content: content, specialSlotId: specialSlotId, slot: slot)
                     .clipShape(RoundedRectangle(cornerRadius: AppTheme.smallCornerRadius, style: .continuous))
@@ -362,5 +366,63 @@ struct SlotCardView: View {
                 onEndDrag: onEndDrag ?? {}
             )
         }
+    }
+}
+
+// MARK: - v2.7.23 Inline Video Preview
+
+private struct InlineSlotVideoPreview: View {
+    let url: URL
+    @State private var player: AVPlayer?
+
+    var body: some View {
+        ZStack {
+            Color.black.opacity(0.92)
+            if let player {
+                SafeInlineAVPlayerView(player: player)
+            } else {
+                VStack(spacing: 8) {
+                    Image(systemName: "play.rectangle.fill")
+                        .font(.system(size: 30, weight: .semibold))
+                        .foregroundColor(.white.opacity(0.9))
+                    Text("视频预览")
+                        .font(.caption)
+                        .foregroundColor(.white.opacity(0.72))
+                }
+            }
+        }
+        .frame(maxWidth: .infinity)
+        .frame(height: 120)
+        .onAppear {
+            guard player == nil else { player?.play(); return }
+            let p = AVPlayer(url: url)
+            p.isMuted = true
+            player = p
+            p.play()
+        }
+        .onDisappear {
+            player?.pause()
+        }
+    }
+}
+
+private struct SafeInlineAVPlayerView: NSViewRepresentable {
+    let player: AVPlayer
+
+    func makeNSView(context: Context) -> AVPlayerView {
+        let view = AVPlayerView()
+        view.controlsStyle = .none
+        view.videoGravity = .resizeAspectFill
+        view.player = player
+        return view
+    }
+
+    func updateNSView(_ nsView: AVPlayerView, context: Context) {
+        if nsView.player !== player { nsView.player = player }
+    }
+
+    static func dismantleNSView(_ nsView: AVPlayerView, coordinator: ()) {
+        nsView.player?.pause()
+        nsView.player = nil
     }
 }
