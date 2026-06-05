@@ -39,10 +39,9 @@ struct RadialPreviewPanel: View {
             Divider()
 
             ZStack {
-                // v2.7.16: immediate readable surface. No animation, no transparent
-                // overlay. Text/file previews need an opaque panel so the browser or
-                // document behind the floating window cannot reduce readability.
-                Color(NSColor.textBackgroundColor)
+                // v2.7.17: smart background. Only show opaque background when there
+                // is actual content to preview. Empty state / image preview remain
+                // transparent / unobtrusive.
                 content
                     .scaleEffect(scale)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -50,9 +49,9 @@ struct RadialPreviewPanel: View {
             }
         }
         .frame(minWidth: 260, minHeight: 220)
-        // v2.7.16: keep the window borderless/shadowless, but do not keep the content
-        // transparent. A solid background is required for readable text preview.
-        .background(Color(NSColor.textBackgroundColor))
+        // v2.7.17: window remains transparent. Background is only drawn inside the
+        // individual text/file preview cards, not the entire window.
+        .background(Color.clear)
     }
 }
 
@@ -70,8 +69,9 @@ struct RadialLivePreviewContent: View {
                 RadialUniversalPreview(content: content)
                     .id(slot)
             } else {
-                // v2.7.16: remove the watermark-like empty placeholder completely.
-                Color(NSColor.textBackgroundColor)
+                // v2.7.17: empty state remains fully transparent. No background, no watermark,
+                // no placeholder text. Only the toolbar is visible.
+                Color.clear
             }
         }
         .onReceive(NotificationCenter.default.publisher(for: .radialMenuHoveredSlotChanged)) { note in
@@ -136,6 +136,8 @@ private struct RadialTextPreview: View {
     let text: String
 
     var body: some View {
+        // v2.7.17: text preview gets its own adaptive background card.
+        // The card size fits the text content, not the full window.
         ScrollView {
             Text(text.isEmpty ? "空文本" : text)
                 .font(.system(size: 14, weight: .regular, design: .monospaced))
@@ -146,6 +148,10 @@ private struct RadialTextPreview: View {
                 .padding(16)
         }
         .background(Color(NSColor.textBackgroundColor))
+        .cornerRadius(12)
+        .shadow(color: .black.opacity(0.12), radius: 10, x: 0, y: 4)
+        .padding(14)
+        .animation(.easeOut(duration: 0.12), value: text)
     }
 }
 
@@ -176,7 +182,12 @@ private struct RadialFileCardPreview: View {
         }
         .padding(18)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        // v2.7.17: file preview also gets its own adaptive card.
         .background(Color(NSColor.textBackgroundColor))
+        .cornerRadius(12)
+        .shadow(color: .black.opacity(0.12), radius: 10, x: 0, y: 4)
+        .padding(14)
+        .animation(.easeOut(duration: 0.12), value: url)
     }
 }
 
