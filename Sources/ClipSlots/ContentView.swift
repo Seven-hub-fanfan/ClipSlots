@@ -653,7 +653,7 @@ struct ContentView: View {
 
             Spacer()
 
-            Text("v2.7.32")
+            Text("v2.7.33")
                 .font(.caption2)
                 .foregroundColor(Color.secondary.opacity(0.65))
         }
@@ -728,6 +728,7 @@ struct ContentView: View {
             onClear: { store.clearSlotWithConfirmation(slot) },
             onSetLabel: { newLabel in store.setLabel(slot, label: newLabel.isEmpty ? nil : newLabel) },
             onEditText: { newText in store.updateTextSlot(slot, text: newText) },
+            onEditHTML: { html in store.updateHTMLSlot(slot, html: html) },
             onDropFiles: { urls in store.importDroppedFiles(urls, toSlot: slot) },
             connectionDotColor: store.portColor(for: slot),
             isConnectionMode: false,

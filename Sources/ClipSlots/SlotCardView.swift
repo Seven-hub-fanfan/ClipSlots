@@ -14,6 +14,7 @@ struct SlotCardView: View {
     var onClear: () -> Void
     var onSetLabel: (String) -> Void
     var onEditText: ((String) -> Void)? = nil
+    var onEditHTML: ((String) -> Void)? = nil
     var onDropFiles: (([URL]) -> Void)? = nil
 
     // v2.7.0: Connection props
@@ -31,6 +32,7 @@ struct SlotCardView: View {
     @State private var isHovering = false
     @State private var showingPreview = false
     @State private var showingTextEditor = false
+    @State private var showingHTMLEditor = false
     @State private var editingText = ""
     @State private var isDropTargeted = false
 
@@ -132,6 +134,26 @@ struct SlotCardView: View {
                     Button("保存") {
                         onEditText?(editingText)
                         showingTextEditor = false
+                    }
+                    .buttonStyle(.borderedProminent)
+                }
+            }
+            .padding(18)
+        }
+        .sheet(isPresented: $showingHTMLEditor) {
+            VStack(alignment: .leading, spacing: 12) {
+                Text("编辑槽位 \(slot) HTML")
+                    .font(.headline)
+                TextEditor(text: $editingText)
+                    .font(.system(size: 13, design: .monospaced))
+                    .frame(minWidth: 620, minHeight: 360)
+                    .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.secondary.opacity(0.2)))
+                HStack {
+                    Spacer()
+                    Button("取消") { showingHTMLEditor = false }
+                    Button("保存") {
+                        onEditHTML?(editingText)
+                        showingHTMLEditor = false
                     }
                     .buttonStyle(.borderedProminent)
                 }
@@ -276,7 +298,18 @@ struct SlotCardView: View {
                 }
 
                 HStack(spacing: 8) {
-                    if content.isPlainEditableText {
+                    if content.isHTMLContent {
+                        Button {
+                            editingText = content.htmlEditableValue
+                            showingHTMLEditor = true
+                        } label: {
+                            Label("编辑HTML", systemImage: "chevron.left.forwardslash.chevron.right")
+                                .frame(maxWidth: .infinity)
+                        }
+                        .buttonStyle(.bordered)
+                        .controlSize(.regular)
+                        .help("编辑 HTML 原文")
+                    } else if content.isPlainEditableText {
                         Button {
                             editingText = content.editableTextValue
                             showingTextEditor = true
@@ -454,8 +487,15 @@ struct SlotCardView: View {
 // MARK: - v2.7.27 SlotContent Text Edit Helpers
 
 private extension SlotContent {
+    var isHTMLContent: Bool {
+        if let htmlSource, !htmlSource.isEmpty { return true }
+        if let url = primaryFileURL, ["html", "htm"].contains(url.pathExtension.lowercased()) { return true }
+        let raw = (plainText ?? preview).lowercased()
+        return raw.contains("<html") || raw.contains("<!doctype html") || raw.contains("<body")
+    }
+    var htmlEditableValue: String { htmlSource ?? plainText ?? preview }
     var isPlainEditableText: Bool {
-        primaryFileURL == nil && inlineImage == nil && !preview.hasPrefix("[图片") && !preview.hasPrefix("[文件") && !preview.hasPrefix("[富文本]")
+        primaryFileURL == nil && inlineImage == nil && !isHTMLContent && !preview.hasPrefix("[图片") && !preview.hasPrefix("[文件") && !preview.hasPrefix("[富文本]")
     }
     var editableTextValue: String { plainText ?? preview }
 }

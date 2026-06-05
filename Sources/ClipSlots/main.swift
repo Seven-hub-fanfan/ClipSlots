@@ -26,17 +26,8 @@ fileprivate func virtualKeyForCharacterV() -> CGKeyCode {
     return 9
 }
 
-/// Safe keyboard-shortcut helper: slot 10 maps to "0", slot > 10 has no shortcut.
-fileprivate extension View {
-    @ViewBuilder
-    func keyboardShortcut(slot: Int, modifiers: SwiftUI.EventModifiers) -> some View {
-        if slot < 10 {
-            self.keyboardShortcut(KeyEquivalent(Character("\(slot)")), modifiers: modifiers)
-        } else if slot == 10 {
-            self.keyboardShortcut("0", modifiers: modifiers)
-        }
-    }
-}
+// v2.7.33: Do not define slot keyboardShortcut helpers for foreground menu actions.
+// All save/paste shortcuts must be owned by AppConfig + RegisterEventHotKey only.
 
 @main
 struct ClipSlotsApp: App {
@@ -534,6 +525,28 @@ final class SlotStoreObservable: ObservableObject {
         for (slot, label) in labels {
             specialStorage.setLabel(slot, label: label, in: activeId)
         }
+    }
+
+    // MARK: - v2.7.33 HTML Source Preservation
+    // public.html copied from Feishu/Lark is rich HTML. Previous versions stored
+    // only '[HTML]' preview + extracted plain text, so preview/edit could never
+    // render the original button/chip UI again. Store original HTML separately.
+    func saveHTMLToSlot(_ slot: Int, html: String, plainText: String? = nil) {
+        guard !html.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        var content = SlotContent(text: plainText?.isEmpty == false ? plainText! : html)
+        content.htmlSource = html
+        slots[slot] = content
+        persistCurrentSpecialSlotData()
+        refreshTrigger = UUID()
+        showFloatingNotice(FloatingNotice(title: "已保存 HTML", subtitle: "槽位 \(slot)", iconName: "doc.richtext", kind: .success))
+    }
+
+    func updateHTMLSlot(_ slot: Int, html: String) {
+        var content = slots[slot] ?? SlotContent(text: html)
+        content.htmlSource = html
+        slots[slot] = content
+        persistCurrentSpecialSlotData()
+        refreshTrigger = UUID()
     }
 
     // MARK: - v2.7.27 Text Edit / Drag File Import
@@ -2323,13 +2336,14 @@ final class SlotStoreObservable: ObservableObject {
     // When config changes, remove old hotkeys before registering new ones.
     // Otherwise previous ctrl+option+number shortcuts can still fire and show HUD.
     func updateConfig(_ newConfig: AppConfig) {
-        // v2.7.30: atomic live hotkey switch. Draft settings never reach this method.
-        // Once called, old hotkeys are fully removed before new hotkeys can work.
+        // v2.7.33: atomic replacement. Settings draft must not be active before
+        // Save; after Save, no old hotkey reference may survive.
         HotKeyManager.shared.unregisterAll()
         hotkeyRegistrationErrors.removeAll()
-        config = newConfig
+        config = newConfig.normalizedForRuntime()
         config.save()
         onConfigChanged?()
+        refreshTrigger = UUID()
         installLocalHotkeyGuardIfNeeded()
         objectWillChange.send()
     }
@@ -3075,5 +3089,31 @@ final class SlotStoreObservable: ObservableObject {
         }
 
         return results
+    }
+}
+
+// MARK: - v2.7.33 HTML Text Extractor
+
+private enum HTMLTextExtractor {
+    static func plainText(from html: String) -> String {
+        guard let data = html.data(using: .utf8),
+              let attr = try? NSAttributedString(
+                data: data,
+                options: [.documentType: NSAttributedString.DocumentType.html, .characterEncoding: String.Encoding.utf8.rawValue],
+                documentAttributes: nil
+              ) else { return html }
+        return attr.string
+    }
+}
+
+// MARK: - v2.7.33 Config Normalizer
+
+private extension AppConfig {
+    func normalizedForRuntime() -> AppConfig {
+        var copy = self
+        copy.saveKey = HotkeyTemplateNormalizer.normalizedShortcut(saveKey, allowsSlotPlaceholder: true)
+        copy.pasteKey = HotkeyTemplateNormalizer.normalizedShortcut(pasteKey, allowsSlotPlaceholder: true)
+        copy.radialKey = HotkeyTemplateNormalizer.normalizedShortcut(radialKey, allowsSlotPlaceholder: false)
+        return copy
     }
 }

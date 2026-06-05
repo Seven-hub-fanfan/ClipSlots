@@ -85,7 +85,7 @@ struct SlotThumbnailView: View {
                         .font(.caption2)
                         .foregroundColor(.secondary)
                 }
-            } else if content.isHTMLDocument, let html = content.htmlDocumentSource {
+            } else if let html = content.preferredHTMLSourceForPreview {
                 HTMLCardPreview(html: html)
             } else if content.isHTMLDocument {
                 htmlUnavailableView
@@ -234,6 +234,20 @@ private struct HTMLWebPreview: NSViewRepresentable {
         let baseURL: URL?
         init(baseURL: URL?) { self.baseURL = baseURL }
         func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction, decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) { decisionHandler(.allow) }
+    }
+}
+
+// MARK: - v2.7.33 HTML Source Priority
+
+private extension SlotContent {
+    var preferredHTMLSourceForPreview: String? {
+        if let htmlSource, !htmlSource.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return htmlSource }
+        if let url = primaryFileURL, ["html", "htm"].contains(url.pathExtension.lowercased()),
+           let html = try? String(contentsOf: url, encoding: .utf8) { return html }
+        let raw = plainText ?? preview
+        let lower = raw.lowercased()
+        if lower.contains("<html") || lower.contains("<!doctype html") || lower.contains("<body") { return raw }
+        return nil
     }
 }
 

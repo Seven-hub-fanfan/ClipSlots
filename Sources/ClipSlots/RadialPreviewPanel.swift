@@ -95,7 +95,7 @@ private struct RadialUniversalPreview: View {
                 RadialImageFilePreview(url: url)
             } else if content.isVideoFile, let url = content.primaryFileURL {
                 RadialVideoPreview(url: url)
-            } else if content.isHTMLDocument, let html = content.htmlDocumentSource {
+            } else if let html = content.preferredHTMLSourceForPreview {
                 RadialHTMLPreview(html: html)
             } else if content.isHTMLDocument {
                 RadialFileCardPreview(url: content.primaryFileURL ?? URL(fileURLWithPath: "/"), icon: "exclamationmark.triangle.fill", title: "HTML 原文缺失")
@@ -325,6 +325,20 @@ private struct HTMLWebLivePreview: NSViewRepresentable {
         <!doctype html><html><head><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><style>html,body{margin:0;padding:12px;background:transparent;font:14px -apple-system,BlinkMacSystemFont,sans-serif;} img,video{max-width:100%;height:auto;} *{box-sizing:border-box;}</style></head><body>\(html)</body></html>
         """
         nsView.loadHTMLString(wrapped, baseURL: nil)
+    }
+}
+
+// MARK: - v2.7.33 HTML Source Priority
+
+private extension SlotContent {
+    var preferredHTMLSourceForPreview: String? {
+        if let htmlSource, !htmlSource.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return htmlSource }
+        if let url = primaryFileURL, ["html", "htm"].contains(url.pathExtension.lowercased()),
+           let html = try? String(contentsOf: url, encoding: .utf8) { return html }
+        let raw = plainText ?? preview
+        let lower = raw.lowercased()
+        if lower.contains("<html") || lower.contains("<!doctype html") || lower.contains("<body") { return raw }
+        return nil
     }
 }
 

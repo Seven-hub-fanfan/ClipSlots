@@ -440,6 +440,10 @@ private struct ShortcutCaptureField: NSViewRepresentable {
 
     func updateNSView(_ nsView: ShortcutCaptureTextField, context: Context) {
         nsView.allowsSlotPlaceholder = allowsSlotPlaceholder
+        // v2.7.33: Do not overwrite the recorder display while it is focused.
+        // SwiftUI updateNSView was resetting "ctrl+option+{n}" back to the old
+        // binding during modifier/key transitions, making it look unsaved.
+        guard !nsView.isRecording else { return }
         if nsView.stringValue != shortcut { nsView.stringValue = shortcut }
     }
 }
@@ -447,7 +451,7 @@ private struct ShortcutCaptureField: NSViewRepresentable {
 private final class ShortcutCaptureTextField: NSTextField {
     var onShortcut: ((String) -> Void)?
     var allowsSlotPlaceholder = false
-    private var isRecording = false
+    var isRecording = false
     private var pendingShortcut: String?
 
     override var acceptsFirstResponder: Bool { true }

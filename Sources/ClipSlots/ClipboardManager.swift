@@ -9,6 +9,7 @@ struct SlotContent: Codable {
     var items: [[PasteboardItem]] = []
     var timestamp: Date = Date()
     var label: String? = nil
+    var htmlSource: String? = nil
 
     /// Unique content identity. Regenerated on every save/overwrite. Used as the
     /// primary cache-breaker for thumbnails, SwiftUI View identity, and file paths.
@@ -158,6 +159,17 @@ final class ClipboardManager {
     }
 
     var changeCount: Int { pasteboard.changeCount }
+}
+
+// MARK: - v2.7.33 SlotContent Convenience Init
+
+extension SlotContent {
+    init(text: String) {
+        let data = text.data(using: .utf8)!
+        let item = PasteboardItem(type: "public.utf8-plain-text", data: data)
+        self.items = [[item]]
+        self.timestamp = Date()
+    }
 }
 
 // MARK: - v2.7.32 HTML Detection
