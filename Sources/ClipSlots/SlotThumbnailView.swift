@@ -85,8 +85,10 @@ struct SlotThumbnailView: View {
                         .font(.caption2)
                         .foregroundColor(.secondary)
                 }
-            } else if content.isHTMLLike {
-                HTMLCardPreview(html: content.htmlPreviewSource)
+            } else if content.isHTMLDocument, let html = content.htmlDocumentSource {
+                HTMLCardPreview(html: html)
+            } else if content.isHTMLDocument {
+                htmlUnavailableView
             } else if content.isFileContent {
                 VStack(spacing: 8) {
                     Image(systemName: fileIconName)
@@ -145,7 +147,7 @@ struct SlotThumbnailView: View {
         // v2.7.30: HTML must render as WebView, not fall into QuickLook/file thumbnail.
         // The previous condition treated .html as file content first, so the HTML branch
         // was never reached after thumbnail loading failed.
-        if content.isHTMLLike {
+        if content.isHTMLDocument {
             state = .failed
             return
         }
@@ -235,27 +237,17 @@ private struct HTMLWebPreview: NSViewRepresentable {
     }
 }
 
-private extension SlotContent {
-    var isHTMLLike: Bool {
-        let lower = preview.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        if primaryFileURL?.pathExtension.lowercased() == "html" || primaryFileURL?.pathExtension.lowercased() == "htm" { return true }
-        return lower.hasPrefix("<html") || lower.contains("<body") || lower.contains("<!doctype html") || lower.contains("</")
+private var htmlUnavailableView: some View {
+    VStack(spacing: 8) {
+        Image(systemName: "exclamationmark.triangle.fill")
+            .foregroundColor(.orange)
+        Text("HTML 原文缺失")
+            .font(.caption)
+            .fontWeight(.semibold)
+        Text("请重新拖入 .html 文件或重新保存网页内容")
+            .font(.caption2)
+            .foregroundColor(.secondary)
+            .multilineTextAlignment(.center)
     }
-    var htmlPreviewSource: String {
-        if let url = primaryFileURL,
-           ["html", "htm"].contains(url.pathExtension.lowercased()),
-           let text = try? String(contentsOf: url, encoding: .utf8) {
-            return text
-        }
-        if let url = primaryFileURL,
-           ["html", "htm"].contains(url.pathExtension.lowercased()),
-           let text = try? String(contentsOf: url) {
-            return text
-        }
-        let p = preview.trimmingCharacters(in: .whitespacesAndNewlines)
-        if p == "[HTML]" || p.lowercased() == "html" {
-            return "<html><body><p>无法读取 HTML 原文</p></body></html>"
-        }
-        return p
-    }
+    .padding(10)
 }

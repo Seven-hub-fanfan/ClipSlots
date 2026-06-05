@@ -74,12 +74,15 @@ struct ClipSlotsApp: App {
                 }
                 .keyboardShortcut("z", modifiers: [.control])
             }
+            // v2.7.32: Do NOT register hard-coded SwiftUI menu shortcuts here.
+            // These keyboardShortcut modifiers bypass AppConfig and remain active
+            // inside the app window even after global hotkeys are changed.
+            // That is the real reason ctrl+option+number kept saving/HUD while the
+            // configured shortcut was cmd+option+number.
             CommandMenu("槽位") {
                 ForEach(1...store.config.slots, id: \.self) { slot in
                     Button("粘贴槽位 \(slot)") { store.pasteSlot(slot) }
-                        .keyboardShortcut(slot: slot, modifiers: [.control])
                     Button("保存到槽位 \(slot)") { store.saveToSlot(slot) }
-                        .keyboardShortcut(slot: slot, modifiers: [.control, .option])
                 }
             }
         }

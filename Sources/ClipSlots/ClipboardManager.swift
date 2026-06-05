@@ -159,3 +159,28 @@ final class ClipboardManager {
 
     var changeCount: Int { pasteboard.changeCount }
 }
+
+// MARK: - v2.7.32 HTML Detection
+
+extension SlotContent {
+    var isHTMLFileURL: Bool {
+        guard let url = primaryFileURL else { return false }
+        return ["html", "htm"].contains(url.pathExtension.lowercased())
+    }
+
+    var isHTMLDocument: Bool {
+        if isHTMLFileURL { return true }
+        let raw = (plainText ?? preview).trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        return raw.hasPrefix("<!doctype html") || raw.hasPrefix("<html") || raw.contains("<body") || raw.contains("</html>")
+    }
+
+    var htmlDocumentSource: String? {
+        if let url = primaryFileURL, isHTMLFileURL {
+            if let text = try? String(contentsOf: url, encoding: .utf8) { return text }
+            if let text = try? String(contentsOf: url) { return text }
+        }
+        let raw = (plainText ?? preview).trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !raw.isEmpty, raw != "[HTML]" else { return nil }
+        return raw
+    }
+}

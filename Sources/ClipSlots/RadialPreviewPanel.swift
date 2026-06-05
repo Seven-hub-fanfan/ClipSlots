@@ -95,8 +95,10 @@ private struct RadialUniversalPreview: View {
                 RadialImageFilePreview(url: url)
             } else if content.isVideoFile, let url = content.primaryFileURL {
                 RadialVideoPreview(url: url)
-            } else if content.isHTMLLikeForPreview {
-                RadialHTMLPreview(html: content.htmlPreviewSourceForPreview)
+            } else if content.isHTMLDocument, let html = content.htmlDocumentSource {
+                RadialHTMLPreview(html: html)
+            } else if content.isHTMLDocument {
+                RadialFileCardPreview(url: content.primaryFileURL ?? URL(fileURLWithPath: "/"), icon: "exclamationmark.triangle.fill", title: "HTML 原文缺失")
             } else if let url = content.primaryFileURL {
                 RadialFileCardPreview(url: url, icon: content.isDirectoryLike ? "folder.fill" : "doc.fill", title: content.isDirectoryLike ? "文件夹" : "文件")
             } else {
@@ -329,30 +331,6 @@ private struct HTMLWebLivePreview: NSViewRepresentable {
 // MARK: - SlotContent Helper
 
 private extension SlotContent {
-    var isHTMLLikeForPreview: Bool {
-        let lower = preview.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        if primaryFileURL?.pathExtension.lowercased() == "html" || primaryFileURL?.pathExtension.lowercased() == "htm" { return true }
-        return lower.hasPrefix("<html") || lower.hasPrefix("<") || lower.contains("<body") || lower.contains("<!doctype html") || lower.contains("</")
-    }
-
-    var htmlPreviewSourceForPreview: String {
-        if let url = primaryFileURL,
-           ["html", "htm"].contains(url.pathExtension.lowercased()),
-           let text = try? String(contentsOf: url, encoding: .utf8) {
-            return text
-        }
-        if let url = primaryFileURL,
-           ["html", "htm"].contains(url.pathExtension.lowercased()),
-           let text = try? String(contentsOf: url) {
-            return text
-        }
-        let p = preview.trimmingCharacters(in: .whitespacesAndNewlines)
-        if p == "[HTML]" || p.lowercased() == "html" {
-            return "<html><body><p>无法读取 HTML 原文</p></body></html>"
-        }
-        return p
-    }
-
     var isImageLikeForRadialPreview: Bool {
         inlineImage != nil || isImageFile
     }

@@ -402,6 +402,13 @@ private func shortcutRecorder(title: String, subtitle: String, text: Binding<Str
 
         ShortcutCaptureField(shortcut: text, allowsSlotPlaceholder: allowsSlotPlaceholder)
             .frame(height: 38)
+            .overlay(alignment: .trailing) {
+                Text("录入后需点击右下角「保存」才生效")
+                    .font(.system(size: 9))
+                    .foregroundColor(.secondary)
+                    .padding(.trailing, 8)
+                    .allowsHitTesting(false)
+            }
     }
 }
 
