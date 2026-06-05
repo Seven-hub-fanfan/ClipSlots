@@ -39,7 +39,7 @@ struct SlotCardView: View {
     @Environment(\.colorScheme) private var colorScheme
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
+        VStack(alignment: .leading, spacing: 8) {
             headerRow
 
             // Thumbnail area — split empty vs filled to prevent @State image reuse
@@ -82,9 +82,9 @@ struct SlotCardView: View {
 
             actionRow
         }
-        .frame(height: 270)
+        .frame(height: 222)
         .id(content.thumbnailKey(specialSlotId: specialSlotId, slot: slot))
-        .padding(AppTheme.cardPadding)
+        .padding(10)
         .background(
             RoundedRectangle(cornerRadius: AppTheme.cornerRadius, style: .continuous)
                 .fill(AppTheme.cardBackground(colorScheme, isEmpty: content.isEmpty))
@@ -179,14 +179,14 @@ struct SlotCardView: View {
     }
 
     private var headerRow: some View {
-        HStack(spacing: 10) {
+        HStack(spacing: 8) {
             ZStack {
                 Circle()
                     .fill(AppTheme.slotBadgeBackground(colorScheme, isEmpty: content.isEmpty))
-                    .frame(width: 30, height: 30)
+                    .frame(width: 26, height: 26)
 
                 Text("\(slot)")
-                    .font(.system(size: 14, weight: .bold, design: .rounded))
+                    .font(.system(size: 13, weight: .bold, design: .rounded))
                     .foregroundColor(content.isEmpty ? .secondary : .white)
             }
 
@@ -216,7 +216,7 @@ struct SlotCardView: View {
                 } else {
                     HStack(spacing: 5) {
                         Text(displayTitle)
-                            .font(.system(size: 14, weight: .semibold))
+                            .font(.system(size: 13, weight: .semibold))
                             .lineLimit(1)
 
                         Image(systemName: "pencil")
@@ -242,8 +242,8 @@ struct SlotCardView: View {
                 Text(timeAgo)
                     .font(.caption2)
                     .foregroundColor(.secondary)
-                    .padding(.horizontal, 7)
-                    .padding(.vertical, 4)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 3)
                     .background(Capsule().fill(AppTheme.chipBackground(colorScheme)))
             }
         }
@@ -363,7 +363,7 @@ struct SlotCardView: View {
                 Color.clear
             }
         }
-        .frame(height: 66)
+        .frame(height: 56)
     }
 
     private func commitLabel() {
@@ -559,7 +559,7 @@ private struct InlineSlotVideoPreview: View {
             }
         }
         .frame(maxWidth: .infinity)
-        .frame(height: 120)
+        .frame(height: 96)
         .onAppear {
             loadPosterIfNeeded()
             guard player == nil else { player?.play(); return }
@@ -638,7 +638,7 @@ private struct DropImportOverlay: View {
                     Text("松开导入到槽位 \(slot)")
                         .font(.system(size: 13, weight: .semibold))
                         .foregroundColor(.primary)
-                    Text("支持图片、视频、PDF、文件夹与多文件连续填充")
+                    Text("图片、视频、PDF、文件夹")
                         .font(.caption2)
                         .foregroundColor(.secondary)
                         .multilineTextAlignment(.center)

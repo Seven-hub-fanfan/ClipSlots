@@ -54,15 +54,18 @@ struct ContentView: View {
 
                     LazyVGrid(
                         columns: [
-                            GridItem(.adaptive(minimum: 240, maximum: 300), spacing: 14)
+                            // v2.7.36: make 10 slots fit in one screen on common 1440/1492px windows.
+                            // Five columns x two rows is the target; the card itself is also shorter.
+                            GridItem(.adaptive(minimum: 218, maximum: 252), spacing: 10)
                         ],
-                        spacing: 14
+                        spacing: 10
                     ) {
                         ForEach(1...store.config.slots, id: \.self) { slot in
                             slotCardView(slot: slot)
                         }
                     }
-                    .padding(AppTheme.pagePadding)
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 12)
                 }
                 .background(AppTheme.windowBackground(colorScheme))
                 .transaction { $0.animation = nil }
@@ -200,7 +203,7 @@ struct ContentView: View {
 
             activeHotkeyLayerNotice
                 .padding(.horizontal, AppTheme.pagePadding)
-                .padding(.bottom, 8)
+                .padding(.bottom, 0)
 
             Divider()
         }
@@ -598,67 +601,18 @@ struct ContentView: View {
 
     private var bottomBar: some View {
         HStack(spacing: 10) {
-            ShortcutBadge(title: "保存", shortcut: shortcutDisplay(store.config.saveKey, slotToken: "数字"), icon: "square.and.arrow.down")
-            ShortcutBadge(title: "粘贴", shortcut: shortcutDisplay(store.config.pasteKey, slotToken: "数字"), icon: "square.and.arrow.up")
-            ShortcutBadge(title: "圆盘", shortcut: shortcutDisplay(store.config.radialKey), icon: "circle.grid.cross")
-            ShortcutBadge(title: "切组", shortcut: "⌘ ← / ⌘ →", icon: "arrow.left.arrow.right")
-
-            // v2.7.0: Connection menu
-            Menu {
-                // v2.7.2: Independent node canvas
-                Button {
-                    showingNodeCanvas = true
-                } label: {
-                    Label("打开节点画布…", systemImage: "point.3.connected.trianglepath.dotted")
-                }
-
-                Button {
-                    showingConnectionManagement = true
-                } label: {
-                    Label("连接管理…", systemImage: "link")
-                }
-
-                Divider()
-
-                Button {
-                    store.applyBuiltInFullChainTemplate()
-                } label: {
-                    Label("应用十槽位全串联模板", systemImage: "list.number")
-                }
-
-                Button {
-                    store.exportConnectionTemplate()
-                } label: {
-                    Label("导出连接模板", systemImage: "square.and.arrow.up")
-                }
-
-                Button {
-                    store.importConnectionTemplate()
-                } label: {
-                    Label("导入连接模板", systemImage: "square.and.arrow.down")
-                }
-
-                Divider()
-
-                Button(role: .destructive) {
-                    store.confirmAndClearCurrentConnections()
-                } label: {
-                    Label("清除当前连接", systemImage: "trash")
-                }
-            } label: {
-                connectionMenuLabel
-            }
-            .menuStyle(.borderlessButton)
-            .fixedSize()
+            // v2.7.36: remove duplicated shortcut bar. Keep only the better looking top
+            // shortcut notice and move connection tools into an independent primary action.
+            connectionToolButton
 
             Spacer()
 
-            Text("v2.7.35")
+            Text("v2.7.36")
                 .font(.caption2)
                 .foregroundColor(Color.secondary.opacity(0.65))
         }
         .padding(.horizontal, AppTheme.pagePadding)
-        .padding(.vertical, 11)
+        .padding(.vertical, 8)
         .background(.regularMaterial)
         .overlay(alignment: .top) {
             Divider()
@@ -666,24 +620,87 @@ struct ContentView: View {
     }
 
     // v2.7.9: prominent connection button with current-group state.
+    // v2.7.36: standalone connection button, not mixed with shortcut chips.
+    private var connectionToolButton: some View {
+        Menu {
+            // v2.7.2: Independent node canvas
+            Button {
+                showingNodeCanvas = true
+            } label: {
+                Label("打开节点画布…", systemImage: "point.3.connected.trianglepath.dotted")
+            }
+
+            Button {
+                showingConnectionManagement = true
+            } label: {
+                Label("连接管理…", systemImage: "link")
+            }
+
+            Divider()
+
+            Button {
+                store.applyBuiltInFullChainTemplate()
+            } label: {
+                Label("应用十槽位全串联模板", systemImage: "list.number")
+            }
+
+            Button {
+                store.exportConnectionTemplate()
+            } label: {
+                Label("导出连接模板", systemImage: "square.and.arrow.up")
+            }
+
+            Button {
+                store.importConnectionTemplate()
+            } label: {
+                Label("导入连接模板", systemImage: "square.and.arrow.down")
+            }
+
+            Divider()
+
+            Button(role: .destructive) {
+                store.confirmAndClearCurrentConnections()
+            } label: {
+                Label("清除当前连接", systemImage: "trash")
+            }
+        } label: {
+            connectionMenuLabel
+        }
+        .menuStyle(.borderlessButton)
+        .fixedSize()
+    }
+
     private var connectionMenuLabel: some View {
         let edgeCount = store.currentConnectionMap.edges.count
         let hasConnections = edgeCount > 0
-        return HStack(spacing: 6) {
-            Image(systemName: hasConnections ? "link.circle.fill" : "point.3.connected.trianglepath.dotted")
-                .font(.system(size: 11, weight: .semibold))
-            Text(hasConnections ? "连接 · \(edgeCount)" : "连接")
-                .font(.caption2.weight(.semibold))
+        return HStack(spacing: 8) {
+            ZStack {
+                Circle()
+                    .fill(hasConnections ? Color.accentColor.opacity(0.18) : Color.primary.opacity(0.06))
+                    .frame(width: 22, height: 22)
+                Image(systemName: hasConnections ? "link.circle.fill" : "point.3.connected.trianglepath.dotted")
+                    .font(.system(size: 12, weight: .semibold))
+            }
+            VStack(alignment: .leading, spacing: 1) {
+                Text("连接")
+                    .font(.system(size: 11, weight: .bold))
+                Text(hasConnections ? "当前组 \(edgeCount) 条" : "节点画布 / 模板")
+                    .font(.system(size: 9, weight: .medium))
+                    .foregroundColor(.secondary)
+            }
         }
         .foregroundColor(hasConnections ? .accentColor : .primary)
-        .padding(.horizontal, 11)
+        .padding(.horizontal, 10)
         .padding(.vertical, 6)
         .background(
-            Capsule().fill(hasConnections ? Color.accentColor.opacity(0.16) : AppTheme.chipBackground(colorScheme))
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .fill(hasConnections ? Color.accentColor.opacity(0.12) : AppTheme.chipBackground(colorScheme))
         )
         .overlay(
-            Capsule().stroke(hasConnections ? Color.accentColor.opacity(0.55) : Color.secondary.opacity(0.16), lineWidth: 1)
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .stroke(hasConnections ? Color.accentColor.opacity(0.45) : Color.secondary.opacity(0.14), lineWidth: 1)
         )
+        .shadow(color: hasConnections ? Color.accentColor.opacity(0.10) : Color.clear, radius: 6, y: 2)
         .help(hasConnections ? "当前槽位组已有 \(edgeCount) 条连接" : "打开节点连接工具")
     }
 
