@@ -39,7 +39,7 @@ struct SlotCardView: View {
     @Environment(\.colorScheme) private var colorScheme
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: 12) {
             headerRow
 
             // Thumbnail area — split empty vs filled to prevent @State image reuse
@@ -82,9 +82,9 @@ struct SlotCardView: View {
 
             actionRow
         }
-        .frame(height: 222)
+        .frame(height: 270)
         .id(content.thumbnailKey(specialSlotId: specialSlotId, slot: slot))
-        .padding(10)
+        .padding(AppTheme.cardPadding)
         .background(
             RoundedRectangle(cornerRadius: AppTheme.cornerRadius, style: .continuous)
                 .fill(AppTheme.cardBackground(colorScheme, isEmpty: content.isEmpty))
@@ -179,14 +179,14 @@ struct SlotCardView: View {
     }
 
     private var headerRow: some View {
-        HStack(spacing: 8) {
+        HStack(spacing: 10) {
             ZStack {
                 Circle()
                     .fill(AppTheme.slotBadgeBackground(colorScheme, isEmpty: content.isEmpty))
-                    .frame(width: 26, height: 26)
+                    .frame(width: 30, height: 30)
 
                 Text("\(slot)")
-                    .font(.system(size: 13, weight: .bold, design: .rounded))
+                    .font(.system(size: 14, weight: .bold, design: .rounded))
                     .foregroundColor(content.isEmpty ? .secondary : .white)
             }
 
@@ -216,7 +216,7 @@ struct SlotCardView: View {
                 } else {
                     HStack(spacing: 5) {
                         Text(displayTitle)
-                            .font(.system(size: 13, weight: .semibold))
+                            .font(.system(size: 14, weight: .semibold))
                             .lineLimit(1)
 
                         Image(systemName: "pencil")
@@ -242,8 +242,8 @@ struct SlotCardView: View {
                 Text(timeAgo)
                     .font(.caption2)
                     .foregroundColor(.secondary)
-                    .padding(.horizontal, 6)
-                    .padding(.vertical, 3)
+                    .padding(.horizontal, 7)
+                    .padding(.vertical, 4)
                     .background(Capsule().fill(AppTheme.chipBackground(colorScheme)))
             }
         }
@@ -363,7 +363,7 @@ struct SlotCardView: View {
                 Color.clear
             }
         }
-        .frame(height: 56)
+        .frame(height: 66)
     }
 
     private func commitLabel() {
@@ -559,7 +559,7 @@ private struct InlineSlotVideoPreview: View {
             }
         }
         .frame(maxWidth: .infinity)
-        .frame(height: 96)
+        .frame(height: 120)
         .onAppear {
             loadPosterIfNeeded()
             guard player == nil else { player?.play(); return }

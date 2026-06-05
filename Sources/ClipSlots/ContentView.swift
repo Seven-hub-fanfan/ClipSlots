@@ -54,18 +54,17 @@ struct ContentView: View {
 
                     LazyVGrid(
                         columns: [
-                            // v2.7.36: make 10 slots fit in one screen on common 1440/1492px windows.
-                            // Five columns x two rows is the target; the card itself is also shorter.
-                            GridItem(.adaptive(minimum: 218, maximum: 252), spacing: 10)
+                            // v2.7.37: rollback the over-compressed v2.7.36 grid.
+                            // The aggressive 218px cards caused text / thumbnails / buttons to overlap.
+                            GridItem(.adaptive(minimum: 240, maximum: 300), spacing: 14)
                         ],
-                        spacing: 10
+                        spacing: 14
                     ) {
                         ForEach(1...store.config.slots, id: \.self) { slot in
                             slotCardView(slot: slot)
                         }
                     }
-                    .padding(.horizontal, 16)
-                    .padding(.vertical, 12)
+                    .padding(AppTheme.pagePadding)
                 }
                 .background(AppTheme.windowBackground(colorScheme))
                 .transaction { $0.animation = nil }
@@ -201,9 +200,9 @@ struct ContentView: View {
                 .padding(.horizontal, AppTheme.pagePadding)
                 .padding(.bottom, 6)
 
-            activeHotkeyLayerNotice
-                .padding(.horizontal, AppTheme.pagePadding)
-                .padding(.bottom, 0)
+            // v2.7.37: remove the upper shortcut hint completely.
+            // It duplicated the bottom bar and consumed vertical space for slots.
+            // activeHotkeyLayerNotice intentionally not rendered here.
 
             Divider()
         }
@@ -601,18 +600,24 @@ struct ContentView: View {
 
     private var bottomBar: some View {
         HStack(spacing: 10) {
-            // v2.7.36: remove duplicated shortcut bar. Keep only the better looking top
-            // shortcut notice and move connection tools into an independent primary action.
-            connectionToolButton
+            // v2.7.37: keep the shortcut hint only in the bottom bar, because it is compact
+            // and leaves the top content area to the slot grid.
+            ShortcutBadge(title: "保存", shortcut: shortcutDisplay(store.config.saveKey, slotToken: "数字"), icon: "square.and.arrow.down")
+            ShortcutBadge(title: "粘贴", shortcut: shortcutDisplay(store.config.pasteKey, slotToken: "数字"), icon: "square.and.arrow.up")
+            ShortcutBadge(title: "圆盘", shortcut: shortcutDisplay(store.config.radialKey), icon: "circle.grid.cross")
+            ShortcutBadge(title: "切组", shortcut: "⌘ ← / ⌘ →", icon: "arrow.left.arrow.right")
 
             Spacer()
 
-            Text("v2.7.36")
+            // Connection stays as a separate tool and is moved to the right side.
+            connectionToolButton
+
+            Text("v2.7.37")
                 .font(.caption2)
                 .foregroundColor(Color.secondary.opacity(0.65))
         }
         .padding(.horizontal, AppTheme.pagePadding)
-        .padding(.vertical, 8)
+        .padding(.vertical, 11)
         .background(.regularMaterial)
         .overlay(alignment: .top) {
             Divider()
@@ -673,34 +678,21 @@ struct ContentView: View {
     private var connectionMenuLabel: some View {
         let edgeCount = store.currentConnectionMap.edges.count
         let hasConnections = edgeCount > 0
-        return HStack(spacing: 8) {
-            ZStack {
-                Circle()
-                    .fill(hasConnections ? Color.accentColor.opacity(0.18) : Color.primary.opacity(0.06))
-                    .frame(width: 22, height: 22)
-                Image(systemName: hasConnections ? "link.circle.fill" : "point.3.connected.trianglepath.dotted")
-                    .font(.system(size: 12, weight: .semibold))
-            }
-            VStack(alignment: .leading, spacing: 1) {
-                Text("连接")
-                    .font(.system(size: 11, weight: .bold))
-                Text(hasConnections ? "当前组 \(edgeCount) 条" : "节点画布 / 模板")
-                    .font(.system(size: 9, weight: .medium))
-                    .foregroundColor(.secondary)
-            }
+        return HStack(spacing: 6) {
+            Image(systemName: hasConnections ? "link.circle.fill" : "point.3.connected.trianglepath.dotted")
+                .font(.system(size: 11, weight: .semibold))
+            Text(hasConnections ? "连接 · \(edgeCount)" : "连接")
+                .font(.caption2.weight(.semibold))
         }
         .foregroundColor(hasConnections ? .accentColor : .primary)
-        .padding(.horizontal, 10)
+        .padding(.horizontal, 11)
         .padding(.vertical, 6)
         .background(
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .fill(hasConnections ? Color.accentColor.opacity(0.12) : AppTheme.chipBackground(colorScheme))
+            Capsule().fill(hasConnections ? Color.accentColor.opacity(0.16) : AppTheme.chipBackground(colorScheme))
         )
         .overlay(
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .stroke(hasConnections ? Color.accentColor.opacity(0.45) : Color.secondary.opacity(0.14), lineWidth: 1)
+            Capsule().stroke(hasConnections ? Color.accentColor.opacity(0.55) : Color.secondary.opacity(0.16), lineWidth: 1)
         )
-        .shadow(color: hasConnections ? Color.accentColor.opacity(0.10) : Color.clear, radius: 6, y: 2)
         .help(hasConnections ? "当前槽位组已有 \(edgeCount) 条连接" : "打开节点连接工具")
     }
 
