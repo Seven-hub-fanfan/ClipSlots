@@ -647,7 +647,7 @@ struct ContentView: View {
 
             Spacer()
 
-            Text("v2.7.26")
+            Text("v2.7.27")
                 .font(.caption2)
                 .foregroundColor(Color.secondary.opacity(0.65))
         }
@@ -721,6 +721,8 @@ struct ContentView: View {
             onSave: { store.saveToSlot(slot) },
             onClear: { store.clearSlotWithConfirmation(slot) },
             onSetLabel: { newLabel in store.setLabel(slot, label: newLabel.isEmpty ? nil : newLabel) },
+            onEditText: { newText in store.updateTextSlot(slot, text: newText) },
+            onDropFiles: { urls in store.importDroppedFiles(urls, toSlot: slot) },
             connectionDotColor: store.portColor(for: slot),
             isConnectionMode: false,
             connectedPorts: [],

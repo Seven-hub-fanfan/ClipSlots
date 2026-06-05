@@ -56,6 +56,7 @@ struct ClipSlotsApp: App {
                 .onAppear {
                     appDelegate.store = store
                     appDelegate.setupHotKeysAfterStoreReady()
+                    store.installLocalHotkeyGuardIfNeeded()
                 }
         }
         .windowStyle(.titleBar)
@@ -95,6 +96,29 @@ struct ClipSlotsApp: App {
 
 final class SlotStoreObservable: ObservableObject {
     let instanceID = UUID().uuidString
+
+    // MARK: - v2.7.27 Local Hotkey Guard
+    // Global hotkeys were fixed in v2.7.26, but the foreground app window can still
+    // receive legacy local key equivalents (Ctrl+Option+number) through SwiftUI/AppKit
+    // event handling. Install a local monitor that swallows only legacy shortcuts that
+    // are no longer equal to the current config.
+    private var localHotkeyMonitor: Any?
+
+    func installLocalHotkeyGuardIfNeeded() {
+        guard localHotkeyMonitor == nil else { return }
+        localHotkeyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            guard let self else { return event }
+            return self.shouldBlockLegacyLocalHotkey(event) ? nil : event
+        }
+    }
+
+    private func shouldBlockLegacyLocalHotkey(_ event: NSEvent) -> Bool {
+        let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        let isLegacySave = flags.contains(.control) && flags.contains(.option) && !flags.contains(.command)
+        let isNumber = Int(event.charactersIgnoringModifiers ?? "") != nil
+        guard isLegacySave && isNumber else { return false }
+        return !config.saveKey.lowercased().hasPrefix("ctrl+option+")
+    }
 
     @Published var config = AppConfig.load()
     @Published var slots: [Int: SlotContent] = [:]
@@ -494,6 +518,30 @@ final class SlotStoreObservable: ObservableObject {
         for (slot, label) in labels {
             specialStorage.setLabel(slot, label: label, in: activeId)
         }
+    }
+
+    // MARK: - v2.7.27 Text Edit / Drag File Import
+
+    func updateTextSlot(_ slot: Int, text: String) {
+        let data = text.data(using: .utf8)!
+        let item = PasteboardItem(type: "public.utf8-plain-text", data: data)
+        var content = SlotContent()
+        content.items = [[item]]
+        content.timestamp = Date()
+        slots[slot] = content
+        persistCurrentSpecialSlotData()
+        showFloatingNotice(FloatingNotice(title: "已更新文本", subtitle: "槽位 \(slot)", iconName: "pencil.circle.fill", kind: .success))
+    }
+
+    func importDroppedFiles(_ urls: [URL], toSlot slot: Int) {
+        guard let first = urls.first else { return }
+        for (offset, url) in urls.enumerated() {
+            let target = slot + offset
+            guard target <= config.slots else { break }
+            slots[target] = folderImportService.makeSlotContent(for: url)
+        }
+        persistCurrentSpecialSlotData()
+        showFloatingNotice(FloatingNotice(title: "已导入文件", subtitle: urls.count == 1 ? first.lastPathComponent : "\(urls.count) 个文件", iconName: "folder.badge.plus", kind: .success))
     }
 
     func clearAllSlotsInCurrentSpecialSlotWithConfirmation() {
@@ -2263,6 +2311,8 @@ final class SlotStoreObservable: ObservableObject {
         config = newConfig
         config.save()
         registerHotkeys()
+        // Keep foreground-window local shortcuts aligned as well.
+        installLocalHotkeyGuardIfNeeded()
         objectWillChange.send()
     }
 

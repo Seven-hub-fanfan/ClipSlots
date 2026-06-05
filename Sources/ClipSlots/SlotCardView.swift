@@ -13,6 +13,8 @@ struct SlotCardView: View {
     var onSave: () -> Void
     var onClear: () -> Void
     var onSetLabel: (String) -> Void
+    var onEditText: ((String) -> Void)? = nil
+    var onDropFiles: (([URL]) -> Void)? = nil
 
     // v2.7.0: Connection props
     var connectionDotColor: Color? = nil
@@ -28,6 +30,9 @@ struct SlotCardView: View {
     @State private var labelText = ""
     @State private var isHovering = false
     @State private var showingPreview = false
+    @State private var showingTextEditor = false
+    @State private var editingText = ""
+    @State private var isDropTargeted = false
 
     @Environment(\.colorScheme) private var colorScheme
 
@@ -92,9 +97,36 @@ struct SlotCardView: View {
         .onHover { hovering in
             isHovering = hovering
         }
+        .onDrop(of: [UTType.fileURL.identifier], isTargeted: $isDropTargeted) { providers in
+            handleFileDrop(providers)
+        }
+        .overlay(
+            RoundedRectangle(cornerRadius: AppTheme.cornerRadius, style: .continuous)
+                .stroke(isDropTargeted ? Color.accentColor : Color.clear, style: StrokeStyle(lineWidth: 2, dash: [6, 4]))
+        )
         .sheet(isPresented: $showingPreview) {
             SlotPreviewView(content: content)
                 .frame(width: 640, height: 500)
+        }
+        .sheet(isPresented: $showingTextEditor) {
+            VStack(alignment: .leading, spacing: 12) {
+                Text("编辑槽位 \(slot) 文本")
+                    .font(.headline)
+                TextEditor(text: $editingText)
+                    .font(.system(size: 13, design: .monospaced))
+                    .frame(minWidth: 520, minHeight: 320)
+                    .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.secondary.opacity(0.2)))
+                HStack {
+                    Spacer()
+                    Button("取消") { showingTextEditor = false }
+                    Button("保存") {
+                        onEditText?(editingText)
+                        showingTextEditor = false
+                    }
+                    .buttonStyle(.borderedProminent)
+                }
+            }
+            .padding(18)
         }
         .contextMenu {
             // v2.5: Type-specific actions
@@ -234,6 +266,19 @@ struct SlotCardView: View {
                 }
 
                 HStack(spacing: 8) {
+                    if content.isPlainEditableText {
+                        Button {
+                            editingText = content.editableTextValue
+                            showingTextEditor = true
+                        } label: {
+                            Label("编辑", systemImage: "pencil")
+                                .frame(maxWidth: .infinity)
+                        }
+                        .buttonStyle(.bordered)
+                        .controlSize(.regular)
+                        .help("直接编辑此文本槽位")
+                    }
+
                     Button { onSave() } label: {
                         Label("覆盖", systemImage: "arrow.triangle.2.circlepath")
                             .frame(maxWidth: .infinity)
@@ -367,6 +412,42 @@ struct SlotCardView: View {
             )
         }
     }
+
+    // MARK: - v2.7.27 File Drop
+
+    private func handleFileDrop(_ providers: [NSItemProvider]) -> Bool {
+        guard let onDropFiles else { return false }
+        var urls: [URL] = []
+        let group = DispatchGroup()
+
+        for provider in providers {
+            group.enter()
+            provider.loadItem(forTypeIdentifier: UTType.fileURL.identifier, options: nil) { item, _ in
+                defer { group.leave() }
+                if let data = item as? Data,
+                   let string = String(data: data, encoding: .utf8),
+                   let url = URL(string: string) {
+                    urls.append(url)
+                } else if let url = item as? URL {
+                    urls.append(url)
+                }
+            }
+        }
+
+        group.notify(queue: .main) {
+            if !urls.isEmpty { onDropFiles(urls) }
+        }
+        return true
+    }
+}
+
+// MARK: - v2.7.27 SlotContent Text Edit Helpers
+
+private extension SlotContent {
+    var isPlainEditableText: Bool {
+        primaryFileURL == nil && inlineImage == nil && !preview.hasPrefix("[图片") && !preview.hasPrefix("[文件") && !preview.hasPrefix("[富文本]")
+    }
+    var editableTextValue: String { plainText ?? preview }
 }
 
 // MARK: - v2.7.23 Inline Video Preview
