@@ -107,6 +107,13 @@ final class SlotStoreObservable: ObservableObject {
     func installLocalHotkeyGuardIfNeeded() {
         guard localHotkeyMonitor == nil else { return }
         localHotkeyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            // v2.7.28: never intercept while a shortcut recorder is focused.
+            // The previous fix was too broad and made ctrl+option+number impossible
+            // to set in Settings.
+            if let responder = NSApp.keyWindow?.firstResponder,
+               String(describing: type(of: responder)).contains("ShortcutCaptureTextField") {
+                return event
+            }
             guard let self else { return event }
             return self.shouldBlockLegacyLocalHotkey(event) ? nil : event
         }

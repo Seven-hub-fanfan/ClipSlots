@@ -454,13 +454,24 @@ private final class ShortcutCaptureTextField: NSTextField {
     }
     override func mouseDown(with event: NSEvent) {
         window?.makeFirstResponder(self)
-        if stringValue.isEmpty { stringValue = "按下组合键…" }
+        stringValue = "按下组合键…"
     }
     override func keyDown(with event: NSEvent) {
         let value = Self.shortcutString(from: event, allowsSlotPlaceholder: allowsSlotPlaceholder)
         guard !value.isEmpty else { return }
         stringValue = value
         onShortcut?(value)
+    }
+
+    override func flagsChanged(with event: NSEvent) {
+        // Give immediate feedback when user only presses modifiers first.
+        let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        var parts: [String] = []
+        if flags.contains(.command) { parts.append("cmd") }
+        if flags.contains(.control) { parts.append("ctrl") }
+        if flags.contains(.option) { parts.append("option") }
+        if flags.contains(.shift) { parts.append("shift") }
+        if !parts.isEmpty { stringValue = parts.joined(separator: "+") + "+…" }
     }
 
     private static func shortcutString(from event: NSEvent, allowsSlotPlaceholder: Bool) -> String {

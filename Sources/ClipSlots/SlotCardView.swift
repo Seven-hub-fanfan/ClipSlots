@@ -100,9 +100,19 @@ struct SlotCardView: View {
         .onDrop(of: [UTType.fileURL.identifier], isTargeted: $isDropTargeted) { providers in
             handleFileDrop(providers)
         }
+        .overlay(alignment: .center) {
+            if isDropTargeted {
+                DropImportOverlay(slot: slot)
+                    .transition(.opacity.combined(with: .scale(scale: 0.98)))
+                    .allowsHitTesting(false)
+            }
+        }
         .overlay(
             RoundedRectangle(cornerRadius: AppTheme.cornerRadius, style: .continuous)
-                .stroke(isDropTargeted ? Color.accentColor : Color.clear, style: StrokeStyle(lineWidth: 2, dash: [6, 4]))
+                .strokeBorder(
+                    isDropTargeted ? Color.accentColor.opacity(0.55) : Color.clear,
+                    lineWidth: isDropTargeted ? 1.2 : 0
+                )
         )
         .sheet(isPresented: $showingPreview) {
             SlotPreviewView(content: content)
@@ -505,5 +515,44 @@ private struct SafeInlineAVPlayerView: NSViewRepresentable {
     static func dismantleNSView(_ nsView: AVPlayerView, coordinator: ()) {
         nsView.player?.pause()
         nsView.player = nil
+    }
+}
+
+// MARK: - v2.7.28 Refined Drop UX
+
+private struct DropImportOverlay: View {
+    let slot: Int
+
+    var body: some View {
+        ZStack {
+            RoundedRectangle(cornerRadius: AppTheme.cornerRadius, style: .continuous)
+                .fill(.ultraThinMaterial)
+                .overlay(
+                    RoundedRectangle(cornerRadius: AppTheme.cornerRadius, style: .continuous)
+                        .fill(Color.accentColor.opacity(0.08))
+                )
+
+            VStack(spacing: 10) {
+                ZStack {
+                    Circle()
+                        .fill(Color.accentColor.opacity(0.16))
+                        .frame(width: 46, height: 46)
+                    Image(systemName: "tray.and.arrow.down.fill")
+                        .font(.system(size: 20, weight: .semibold))
+                        .foregroundColor(.accentColor)
+                }
+
+                VStack(spacing: 3) {
+                    Text("松开导入到槽位 \(slot)")
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundColor(.primary)
+                    Text("支持图片、视频、PDF、文件夹与多文件连续填充")
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                        .multilineTextAlignment(.center)
+                }
+            }
+            .padding(.horizontal, 18)
+        }
     }
 }
