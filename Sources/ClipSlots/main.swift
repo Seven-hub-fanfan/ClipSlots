@@ -1652,9 +1652,75 @@ final class SlotStoreObservable: ObservableObject {
     // the same proven path as the main toolbar button. This avoids accidentally using
     // node-connection chain paste and showing misleading "已串联粘贴" HUD.
 
+    // MARK: - v2.7.21 Fast Radial Paste All
+    // Radial menu paste-all should be faster than the safe mixed sequential path.
+    func pasteAllSlotsFastFromRadialMenu() {
+        let nonEmptySlots = (1...max(1, config.slots)).filter { slot in
+            !(slots[slot] ?? SlotContent()).isEmpty
+        }
+
+        guard !nonEmptySlots.isEmpty else {
+            showFloatingNotice(FloatingNotice(
+                title: "当前槽位组为空",
+                subtitle: "没有可粘贴内容",
+                iconName: "tray",
+                kind: .warning
+            ))
+            return
+        }
+
+        let contents = nonEmptySlots.compactMap { slots[$0] }
+        guard let target = lastNonClipSlotsApp else {
+            showFloatingNotice(FloatingNotice(
+                title: "没有可粘贴的目标应用",
+                subtitle: "请先切换到目标应用",
+                iconName: "exclamationmark.triangle.fill",
+                kind: .warning
+            ))
+            return
+        }
+
+        if contents.allSatisfy({ $0.primaryFileURL == nil && $0.inlineImage == nil }) {
+            let merged = contents.map { $0.preview }.filter { !$0.isEmpty }.joined(separator: "\n\n")
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(merged, forType: .string)
+            target.activate(options: [])
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) { [weak self] in
+                self?.sendPasteKeystroke()
+            }
+            showFloatingNotice(FloatingNotice(
+                title: "已全部粘贴 \(contents.count) 段文本",
+                subtitle: "当前槽位组",
+                iconName: "square.stack.3d.up.fill",
+                kind: .success
+            ))
+            return
+        }
+
+        let urls = contents.compactMap { $0.primaryFileURL }
+        if urls.count == contents.count {
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.writeObjects(urls as [NSURL])
+            target.activate(options: [])
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) { [weak self] in
+                self?.sendPasteKeystroke()
+            }
+            showFloatingNotice(FloatingNotice(
+                title: "已全部粘贴 \(urls.count) 个文件",
+                subtitle: "当前槽位组",
+                iconName: "square.stack.3d.up.fill",
+                kind: .success
+            ))
+            return
+        }
+
+        // Mixed text + image/file: correctness first, but avoid node-connection HUD wording.
+        pasteSlotChainSequentially(nonEmptySlots, noticeTitle: "已全部粘贴 \(contents.count) 段内容", noticeSubtitle: "当前槽位组")
+    }
+
     // MARK: - v2.7.4 Mixed Chain Sequential Paste
 
-    func pasteSlotChainSequentially(_ slots: [Int]) {
+    func pasteSlotChainSequentially(_ slots: [Int], noticeTitle: String? = nil, noticeSubtitle: String? = nil) {
         let payloads = slots.compactMap { slot -> ChainPastePayload? in
             let payload = payloadForSlot(slot)
             return payload.isEmpty ? nil : payload
@@ -1662,8 +1728,8 @@ final class SlotStoreObservable: ObservableObject {
 
         guard !payloads.isEmpty else {
             showFloatingNotice(FloatingNotice(
-                title: "串联粘贴失败",
-                subtitle: "链路中没有可粘贴内容",
+                title: noticeTitle ?? "串联粘贴失败",
+                subtitle: noticeSubtitle ?? "链路中没有可粘贴内容",
                 iconName: "exclamationmark.triangle.fill",
                 kind: .warning
             ))
@@ -1673,8 +1739,8 @@ final class SlotStoreObservable: ObservableObject {
         pasteNextPayloadSequentially(payloads, index: 0) { [weak self] in
             guard let self else { return }
             self.showFloatingNotice(FloatingNotice(
-                title: "已串联粘贴 \(payloads.count) 段内容",
-                subtitle: compactChainDescription(slots),
+                title: noticeTitle ?? "已串联粘贴 \(payloads.count) 段内容",
+                subtitle: noticeSubtitle ?? compactChainDescription(slots),
                 iconName: "link.circle.fill",
                 kind: .success
             ))

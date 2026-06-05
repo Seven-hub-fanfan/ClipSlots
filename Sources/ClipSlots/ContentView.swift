@@ -447,24 +447,24 @@ struct ContentView: View {
     private var activeHotkeyLayerNotice: some View {
         let pageName = store.currentPage?.name ?? "默认页面"
         let groupName = store.currentSpecialSlot?.name ?? "默认槽位组"
-        let pasteShortcut = humanReadableShortcut(store.config.pasteKey)
-        let saveShortcut = humanReadableShortcut(store.config.saveKey)
-        let radialShortcut = humanReadableShortcut(store.config.radialKey)
-        return HStack(spacing: 6) {
-            Image(systemName: "keyboard.fill")
-                .font(.system(size: 10))
-                .foregroundColor(.accentColor)
-            Text("\(pageName) / \(groupName) · 粘贴 \(pasteShortcut) · 保存 \(saveShortcut) · 圆盘 \(radialShortcut) · ← → 切组")
-                .font(.system(size: 10, weight: .medium))
+        return HStack(spacing: 8) {
+            Label("\(pageName) / \(groupName)", systemImage: "folder.fill")
+                .font(.system(size: 10, weight: .semibold))
                 .foregroundColor(.secondary)
-            Spacer()
+
+            ShortcutBadge(title: "粘贴", shortcut: shortcutDisplay(store.config.pasteKey, slotToken: "数字"), icon: "square.and.arrow.up")
+            ShortcutBadge(title: "保存", shortcut: shortcutDisplay(store.config.saveKey, slotToken: "数字"), icon: "square.and.arrow.down")
+            ShortcutBadge(title: "圆盘", shortcut: shortcutDisplay(store.config.radialKey), icon: "circle.grid.cross")
+            ShortcutBadge(title: "切组", shortcut: "← / →", icon: "arrow.left.arrow.right")
+            Spacer(minLength: 0)
         }
         .padding(.horizontal, 10)
-        .padding(.vertical, 5)
+        .padding(.vertical, 6)
         .background(
             RoundedRectangle(cornerRadius: 6, style: .continuous)
                 .fill(Color.accentColor.opacity(0.06))
         )
+        .id("\(store.config.saveKey)|\(store.config.pasteKey)|\(store.config.radialKey)|\(store.config.hotkeyTemplate.kind.rawValue)")
     }
 
     // v2.4: renamed from renameSpecialSlot
@@ -561,24 +561,39 @@ struct ContentView: View {
     }
 
     private func humanReadableShortcut(_ template: String) -> String {
-        template
-            .replacingOccurrences(of: "{n}", with: "数字")
-            .replacingOccurrences(of: "command", with: "⌘")
-            .replacingOccurrences(of: "cmd", with: "⌘")
-            .replacingOccurrences(of: "control", with: "⌃")
-            .replacingOccurrences(of: "ctrl", with: "⌃")
-            .replacingOccurrences(of: "alt", with: "⌥")
-            .replacingOccurrences(of: "option", with: "⌥")
-            .replacingOccurrences(of: "shift", with: "⇧")
-            .replacingOccurrences(of: "space", with: "Space")
+        shortcutDisplay(template, slotToken: "数字")
+    }
+
+    private func shortcutDisplay(_ template: String, slotToken: String = "") -> String {
+        let rawParts = template
+            .replacingOccurrences(of: "{n}", with: slotToken)
+            .split(separator: "+")
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }
+            .filter { !$0.isEmpty }
+
+        let mapped = rawParts.map { part -> String in
+            switch part {
+            case "cmd", "command", "⌘": return "⌘"
+            case "ctrl", "control", "⌃": return "⌃"
+            case "option", "opt", "alt", "⌥": return "⌥"
+            case "shift", "⇧": return "⇧"
+            case "space", "spacebar": return "Space"
+            case "left", "arrowleft", "←": return "←"
+            case "right", "arrowright", "→": return "→"
+            case "up", "arrowup", "↑": return "↑"
+            case "down", "arrowdown", "↓": return "↓"
+            default: return part.uppercased()
+            }
+        }
+        return mapped.joined(separator: " ")
     }
 
     private var bottomBar: some View {
         HStack(spacing: 10) {
-            keyChip("保存 \(humanReadableShortcut(store.config.saveKey))", icon: "square.and.arrow.down")
-            keyChip("粘贴 \(humanReadableShortcut(store.config.pasteKey))", icon: "square.and.arrow.up")
-            keyChip("圆盘 \(humanReadableShortcut(store.config.radialKey))", icon: "circle.grid.cross")
-            keyChip("← → 切组", icon: "arrow.left.arrow.right")
+            ShortcutBadge(title: "保存", shortcut: shortcutDisplay(store.config.saveKey, slotToken: "数字"), icon: "square.and.arrow.down")
+            ShortcutBadge(title: "粘贴", shortcut: shortcutDisplay(store.config.pasteKey, slotToken: "数字"), icon: "square.and.arrow.up")
+            ShortcutBadge(title: "圆盘", shortcut: shortcutDisplay(store.config.radialKey), icon: "circle.grid.cross")
+            ShortcutBadge(title: "切组", shortcut: "← / →", icon: "arrow.left.arrow.right")
 
             // v2.7.0: Connection menu
             Menu {
@@ -630,7 +645,7 @@ struct ContentView: View {
 
             Spacer()
 
-            Text("v2.7.20")
+            Text("v2.7.21")
                 .font(.caption2)
                 .foregroundColor(Color.secondary.opacity(0.65))
         }
@@ -856,6 +871,35 @@ struct ContentView: View {
         store.switchToPage(id: result.pageId)
         store.switchSpecialSlot(id: result.groupId)
         searchScope = .currentGroup
+    }
+}
+
+// MARK: - v2.7.21 Shortcut Badge
+
+private struct ShortcutBadge: View {
+    let title: String
+    let shortcut: String
+    let icon: String
+
+    var body: some View {
+        HStack(spacing: 5) {
+            Image(systemName: icon)
+                .font(.system(size: 9, weight: .semibold))
+                .foregroundColor(.secondary)
+            Text(title)
+                .font(.system(size: 10, weight: .medium))
+                .foregroundColor(.secondary)
+            Text(shortcut)
+                .font(.system(size: 10, weight: .semibold, design: .rounded))
+                .foregroundColor(.primary)
+                .padding(.horizontal, 5)
+                .padding(.vertical, 2)
+                .background(Capsule().fill(Color.primary.opacity(0.08)))
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 5)
+        .background(Capsule().fill(Color.primary.opacity(0.045)))
+        .overlay(Capsule().stroke(Color.secondary.opacity(0.14), lineWidth: 0.7))
     }
 }
 
