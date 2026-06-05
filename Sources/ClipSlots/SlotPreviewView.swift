@@ -1,10 +1,12 @@
 import SwiftUI
+import AVKit
 
 struct SlotPreviewView: View {
     let content: SlotContent
 
     @Environment(\.dismiss) private var dismiss
     @State private var largeImage: NSImage?
+    @State private var videoPlayer: AVPlayer?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -12,7 +14,7 @@ struct SlotPreviewView: View {
             ZStack {
                 if content.isVideoFile, let url = content.primaryFileURL {
                     if FileManager.default.fileExists(atPath: url.path) {
-                        videoFilePreview(url: url)
+                        VideoLargePreview(url: url, player: $videoPlayer)
                     } else {
                         unavailableFilePreview(url: url)
                     }
@@ -85,78 +87,27 @@ struct SlotPreviewView: View {
                 loadLargeImage()
             } else if content.isVideoFile, let url = content.primaryFileURL {
                 loadVideoThumbnail(url: url)
-            }
-        }
-    }
-
-    // MARK: - Video Preview (no AVKit — stable)
-
-    private func videoFilePreview(url: URL) -> some View {
-        VStack(spacing: 16) {
-            ZStack {
-                if let image = largeImage {
-                    Image(nsImage: image)
-                        .resizable()
-                        .aspectRatio(contentMode: .fit)
-                        .frame(maxHeight: 320)
-                        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-                } else {
-                    RoundedRectangle(cornerRadius: 12, style: .continuous)
-                        .fill(Color.black.opacity(0.08))
-                        .frame(height: 260)
-                        .overlay {
-                            VStack(spacing: 10) {
-                                ProgressView()
-                                Text("正在生成视频预览…")
-                                    .font(.caption)
-                                    .foregroundColor(.secondary)
-                            }
-                        }
-                }
-
-                Image(systemName: "play.circle.fill")
-                    .font(.system(size: 64))
-                    .foregroundColor(.white.opacity(0.92))
-                    .shadow(radius: 8)
-            }
-
-            VStack(spacing: 4) {
-                Text(url.lastPathComponent)
-                    .font(.headline)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-
-                Text("点击下方按钮使用系统播放器打开视频")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-            }
-
-            HStack(spacing: 10) {
-                Button {
-                    NSWorkspace.shared.open(url)
-                } label: {
-                    Label("打开视频", systemImage: "play.rectangle")
-                }
-                .buttonStyle(.borderedProminent)
-
-                Button {
-                    NSWorkspace.shared.activateFileViewerSelecting([url])
-                } label: {
-                    Label("在 Finder 中显示", systemImage: "finder")
-                }
-
-                Button {
-                    NSPasteboard.general.clearContents()
-                    NSPasteboard.general.writeObjects([url as NSURL])
-                } label: {
-                    Label("复制文件", systemImage: "doc.on.doc")
+                // v2.7.35: the preview sheet should play the video directly, like image large preview.
+                // No extra click, no jump to system player.
+                if videoPlayer == nil {
+                    let player = AVPlayer(url: url)
+                    player.isMuted = true
+                    videoPlayer = player
+                    player.play()
                 }
             }
         }
-        .padding(24)
+        .onDisappear {
+            videoPlayer?.pause()
+            videoPlayer = nil
+        }
     }
 
+    // MARK: - Video Large Preview (v2.7.35)
+
+    // Legacy video thumbnail still used as poster fallback
     private func loadVideoThumbnail(url: URL) {
+        guard largeImage == nil else { return }
         ThumbnailProvider.shared.thumbnail(
             for: url,
             cacheKey: "video-preview-\(url.absoluteString)",
@@ -209,5 +160,55 @@ struct SlotPreviewView: View {
         ThumbnailProvider.shared.thumbnail(for: url, cacheKey: "preview-\(url.absoluteString)", size: CGSize(width: 800, height: 600)) { image, _ in
             largeImage = image
         }
+    }
+}
+
+// MARK: - v2.7.35 Video Large Preview
+
+private struct VideoLargePreview: View {
+    let url: URL
+    @Binding var player: AVPlayer?
+
+    var body: some View {
+        ZStack {
+            Color(NSColor.controlBackgroundColor).opacity(0.55)
+            if let player {
+                SafePreviewAVPlayerView(player: player)
+                    .onAppear { player.play() }
+                    .onDisappear { player.pause() }
+            } else {
+                ProgressView()
+            }
+        }
+        .padding(16)
+        .overlay(alignment: .topLeading) {
+            Text(url.lastPathComponent)
+                .font(.caption)
+                .foregroundColor(.secondary)
+                .lineLimit(1)
+                .truncationMode(.middle)
+                .padding(10)
+        }
+    }
+}
+
+private struct SafePreviewAVPlayerView: NSViewRepresentable {
+    let player: AVPlayer
+
+    func makeNSView(context: Context) -> AVPlayerView {
+        let view = AVPlayerView()
+        view.controlsStyle = .floating
+        view.videoGravity = .resizeAspect
+        view.player = player
+        return view
+    }
+
+    func updateNSView(_ nsView: AVPlayerView, context: Context) {
+        if nsView.player !== player { nsView.player = player }
+    }
+
+    static func dismantleNSView(_ nsView: AVPlayerView, coordinator: ()) {
+        nsView.player?.pause()
+        nsView.player = nil
     }
 }

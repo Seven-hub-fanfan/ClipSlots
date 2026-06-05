@@ -49,10 +49,16 @@ struct SlotCardView: View {
                 InlineSlotVideoPreview(url: url)
                     .clipShape(RoundedRectangle(cornerRadius: AppTheme.smallCornerRadius, style: .continuous))
                     .contentShape(RoundedRectangle(cornerRadius: AppTheme.smallCornerRadius, style: .continuous))
-                    .onTapGesture {
-                        // v2.7.34: restore full-size preview for video cards.
-                        showingPreview = true
-                    }
+                    .overlay(
+                        RoundedRectangle(cornerRadius: AppTheme.smallCornerRadius, style: .continuous)
+                            .fill(Color.clear)
+                            .contentShape(RoundedRectangle(cornerRadius: AppTheme.smallCornerRadius, style: .continuous))
+                            .onTapGesture {
+                                // v2.7.35: AVPlayerView is an NSView and can swallow SwiftUI gestures.
+                                // Put the click layer above it so video behaves like image cards.
+                                showingPreview = true
+                            }
+                    )
                     .help("点击查看视频大图预览")
             } else {
                 SlotThumbnailView(content: content, specialSlotId: specialSlotId, slot: slot)
@@ -511,26 +517,51 @@ private extension SlotContent {
 private struct InlineSlotVideoPreview: View {
     let url: URL
     @State private var player: AVPlayer?
+    @State private var poster: NSImage?
 
     var body: some View {
         ZStack {
-            Color.black.opacity(0.92)
+            // v2.7.35: match image thumbnail background instead of hard black.
+            Color(NSColor.controlBackgroundColor).opacity(0.55)
+
             if let player {
                 SafeInlineAVPlayerView(player: player)
+                    .padding(0)
+            } else if let poster {
+                Image(nsImage: poster)
+                    .resizable()
+                    .aspectRatio(contentMode: .fit)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
                 VStack(spacing: 8) {
-                    Image(systemName: "play.rectangle.fill")
-                        .font(.system(size: 30, weight: .semibold))
-                        .foregroundColor(.white.opacity(0.9))
-                    Text("视频预览")
+                    Image(systemName: "film")
+                        .font(.system(size: 28, weight: .semibold))
+                        .foregroundColor(.secondary.opacity(0.85))
+                    Text("视频")
                         .font(.caption)
-                        .foregroundColor(.white.opacity(0.72))
+                        .foregroundColor(.secondary)
                 }
+            }
+
+            VStack {
+                Spacer()
+                HStack {
+                    Image(systemName: "play.fill")
+                        .font(.system(size: 9, weight: .bold))
+                    Text("点击预览")
+                        .font(.system(size: 10, weight: .semibold))
+                }
+                .foregroundColor(.white)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 4)
+                .background(Capsule().fill(Color.black.opacity(0.38)))
+                .padding(.bottom, 7)
             }
         }
         .frame(maxWidth: .infinity)
         .frame(height: 120)
         .onAppear {
+            loadPosterIfNeeded()
             guard player == nil else { player?.play(); return }
             let p = AVPlayer(url: url)
             p.isMuted = true
@@ -539,6 +570,17 @@ private struct InlineSlotVideoPreview: View {
         }
         .onDisappear {
             player?.pause()
+        }
+    }
+
+    private func loadPosterIfNeeded() {
+        guard poster == nil else { return }
+        ThumbnailProvider.shared.thumbnail(
+            for: url,
+            cacheKey: "video-card-poster-\(url.absoluteString)",
+            size: CGSize(width: 420, height: 240)
+        ) { image, _ in
+            poster = image
         }
     }
 }
@@ -552,6 +594,8 @@ private struct SafeInlineAVPlayerView: NSViewRepresentable {
         // v2.7.34: show the complete video composition in the card thumbnail.
         // resizeAspectFill cropped faces/edges and made the thumbnail look incomplete.
         view.videoGravity = .resizeAspect
+        view.wantsLayer = true
+        view.layer?.backgroundColor = NSColor.clear.cgColor
         view.player = player
         return view
     }
