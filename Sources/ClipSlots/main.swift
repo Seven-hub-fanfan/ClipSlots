@@ -107,14 +107,15 @@ final class SlotStoreObservable: ObservableObject {
     func installLocalHotkeyGuardIfNeeded() {
         guard localHotkeyMonitor == nil else { return }
         localHotkeyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
-            // v2.7.28: never intercept while a shortcut recorder is focused.
-            // The previous fix was too broad and made ctrl+option+number impossible
-            // to set in Settings.
+            guard let self else { return event }
+            // v2.7.30: settings UI is a safe zone. No save/paste/radial hotkey may fire
+            // while the user is editing shortcuts, even if the old global/local handler
+            // still receives keyDown.
+            if self.isSettingsPresented { return event }
             if let responder = NSApp.keyWindow?.firstResponder,
                String(describing: type(of: responder)).contains("ShortcutCaptureTextField") {
                 return event
             }
-            guard let self else { return event }
             return self.shouldBlockLegacyLocalHotkey(event) ? nil : event
         }
     }
@@ -146,6 +147,7 @@ final class SlotStoreObservable: ObservableObject {
     @Published var toastMessage: String?
     @Published var floatingNotice: FloatingNotice?
     @Published var hotkeyRegistrationErrors: [String] = []
+    @Published var isSettingsPresented: Bool = false
     @Published var slotRenderTokens: [String: UUID] = [:]
     @Published var isBatchSaving: Bool = false
 
@@ -2318,22 +2320,13 @@ final class SlotStoreObservable: ObservableObject {
     // When config changes, remove old hotkeys before registering new ones.
     // Otherwise previous ctrl+option+number shortcuts can still fire and show HUD.
     func updateConfig(_ newConfig: AppConfig) {
-        // v2.7.29: atomic hotkey swap. Draft shortcuts from Settings must never
-        // affect active behavior until the user presses Save.
-        let oldConfig = config
+        // v2.7.30: atomic live hotkey switch. Draft settings never reach this method.
+        // Once called, old hotkeys are fully removed before new hotkeys can work.
         HotKeyManager.shared.unregisterAll()
         hotkeyRegistrationErrors.removeAll()
-
         config = newConfig
         config.save()
         onConfigChanged?()
-
-        // If the new registration fails completely, the UI will show errors
-        // and the old shortcuts are already gone.
-        if !hotkeyRegistrationErrors.isEmpty {
-            NSLog("[ClipSlots] hotkey update had registration errors, oldConfig=\(oldConfig) newConfig=\(newConfig) errors=\(hotkeyRegistrationErrors)")
-        }
-        // Keep foreground-window local shortcuts aligned as well.
         installLocalHotkeyGuardIfNeeded()
         objectWillChange.send()
     }

@@ -331,9 +331,9 @@ struct SettingsView: View {
     private func save() {
         var newConfig = config
         newConfig.slots = Int(slots)
-        newConfig.saveKey = saveKey.trimmingCharacters(in: .whitespacesAndNewlines)
-        newConfig.pasteKey = pasteKey.trimmingCharacters(in: .whitespacesAndNewlines)
-        newConfig.radialKey = radialKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        newConfig.saveKey = HotkeyTemplateNormalizer.normalizedShortcut(saveKey, allowsSlotPlaceholder: true)
+        newConfig.pasteKey = HotkeyTemplateNormalizer.normalizedShortcut(pasteKey, allowsSlotPlaceholder: true)
+        newConfig.radialKey = HotkeyTemplateNormalizer.normalizedShortcut(radialKey, allowsSlotPlaceholder: false)
         newConfig.verbose = verbose
         newConfig.hotkeyTemplate.kind = hotkeyTemplateKind
         newConfig.save()
@@ -418,10 +418,8 @@ private struct ShortcutCaptureField: NSViewRepresentable {
         field.focusRingType = .none
         field.font = .monospacedSystemFont(ofSize: 14, weight: .medium)
         field.alignment = .left
-        field.onShortcut = { value in shortcut = value }
-        field.onCommitShortcut = { value in
-            // v2.7.29: commit on key-up, not while keys are still held down.
-            // This prevents unsaved draft shortcuts from firing actions in the main window.
+        field.onShortcut = { value in
+            // Only mutate local SettingsView draft binding. This does NOT affect live config.
             shortcut = value
         }
         field.allowsSlotPlaceholder = allowsSlotPlaceholder
@@ -441,7 +439,6 @@ private struct ShortcutCaptureField: NSViewRepresentable {
 
 private final class ShortcutCaptureTextField: NSTextField {
     var onShortcut: ((String) -> Void)?
-    var onCommitShortcut: ((String) -> Void)?
     var allowsSlotPlaceholder = false
     private var isRecording = false
     private var pendingShortcut: String?
@@ -477,7 +474,7 @@ private final class ShortcutCaptureTextField: NSTextField {
         guard let value = pendingShortcut else { return }
         pendingShortcut = nil
         stringValue = value
-        onCommitShortcut?(value)
+        onShortcut?(value)
     }
 
     override func flagsChanged(with event: NSEvent) {
@@ -523,5 +520,28 @@ private final class ShortcutCaptureTextField: NSTextField {
         default:
             return (event.charactersIgnoringModifiers ?? "").lowercased()
         }
+    }
+}
+
+// MARK: - v2.7.30 Hotkey Normalizer
+
+enum HotkeyTemplateNormalizer {
+    static func normalizedShortcut(_ raw: String, allowsSlotPlaceholder: Bool) -> String {
+        let parts = raw.split(separator: "+").map { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }.filter { !$0.isEmpty }
+        var modifiers: [String] = []
+        var key: String?
+        for p in parts {
+            switch p {
+            case "cmd", "command", "⌘": if !modifiers.contains("cmd") { modifiers.append("cmd") }
+            case "ctrl", "control", "⌃": if !modifiers.contains("ctrl") { modifiers.append("ctrl") }
+            case "option", "opt", "alt", "⌥": if !modifiers.contains("option") { modifiers.append("option") }
+            case "shift", "⇧": if !modifiers.contains("shift") { modifiers.append("shift") }
+            case "{n}", "n", "数字": key = allowsSlotPlaceholder ? "{n}" : "n"
+            default:
+                if allowsSlotPlaceholder, p.rangeOfCharacter(from: CharacterSet.alphanumerics) != nil { key = "{n}" } else { key = p }
+            }
+        }
+        let ordered = ["cmd", "ctrl", "option", "shift"].filter { modifiers.contains($0) }
+        return (ordered + [key ?? ""]).filter { !$0.isEmpty }.joined(separator: "+")
     }
 }

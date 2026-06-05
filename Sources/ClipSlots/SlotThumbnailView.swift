@@ -142,6 +142,14 @@ struct SlotThumbnailView: View {
             return
         }
 
+        // v2.7.30: HTML must render as WebView, not fall into QuickLook/file thumbnail.
+        // The previous condition treated .html as file content first, so the HTML branch
+        // was never reached after thumbnail loading failed.
+        if content.isHTMLLike {
+            state = .failed
+            return
+        }
+
         // Need a file URL for QuickLook
         guard let url = content.primaryFileURL, content.isImageFile || content.isFileContent else {
             state = .failed
@@ -199,13 +207,23 @@ private struct HTMLWebPreview: NSViewRepresentable {
     let html: String
     func makeNSView(context: Context) -> WKWebView {
         let config = WKWebViewConfiguration()
+        config.preferences.javaScriptEnabled = false
         config.preferences.javaScriptCanOpenWindowsAutomatically = false
         let webView = WKWebView(frame: .zero, configuration: config)
         webView.setValue(false, forKey: "drawsBackground")
+        webView.navigationDelegate = context.coordinator
+        webView.isHidden = false
         return webView
     }
     func updateNSView(_ nsView: WKWebView, context: Context) {
-        nsView.loadHTMLString(html, baseURL: nil)
+        let wrapped = """
+        <!doctype html><html><head><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><style>html,body{margin:0;padding:8px;background:transparent;font:13px -apple-system,BlinkMacSystemFont,sans-serif;overflow:hidden;} img,video{max-width:100%;height:auto;} *{box-sizing:border-box;}</style></head><body>\(html)</body></html>
+        """
+        nsView.loadHTMLString(wrapped, baseURL: nil)
+    }
+    func makeCoordinator() -> Coordinator { Coordinator() }
+    final class Coordinator: NSObject, WKNavigationDelegate {
+        func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction, decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) { decisionHandler(.allow) }
     }
 }
 

@@ -312,13 +312,17 @@ private struct HTMLWebLivePreview: NSViewRepresentable {
     let html: String
     func makeNSView(context: Context) -> WKWebView {
         let config = WKWebViewConfiguration()
+        config.preferences.javaScriptEnabled = false
         config.preferences.javaScriptCanOpenWindowsAutomatically = false
         let webView = WKWebView(frame: .zero, configuration: config)
         webView.setValue(false, forKey: "drawsBackground")
         return webView
     }
     func updateNSView(_ nsView: WKWebView, context: Context) {
-        nsView.loadHTMLString(html, baseURL: nil)
+        let wrapped = """
+        <!doctype html><html><head><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><style>html,body{margin:0;padding:12px;background:transparent;font:14px -apple-system,BlinkMacSystemFont,sans-serif;} img,video{max-width:100%;height:auto;} *{box-sizing:border-box;}</style></head><body>\(html)</body></html>
+        """
+        nsView.loadHTMLString(wrapped, baseURL: nil)
     }
 }
 
@@ -328,7 +332,7 @@ private extension SlotContent {
     var isHTMLLikeForPreview: Bool {
         let lower = preview.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         if primaryFileURL?.pathExtension.lowercased() == "html" || primaryFileURL?.pathExtension.lowercased() == "htm" { return true }
-        return lower.hasPrefix("<html") || lower.contains("<body") || lower.contains("<!doctype html") || lower.contains("</")
+        return lower.hasPrefix("<html") || lower.hasPrefix("<") || lower.contains("<body") || lower.contains("<!doctype html") || lower.contains("</")
     }
 
     var htmlPreviewSourceForPreview: String {
