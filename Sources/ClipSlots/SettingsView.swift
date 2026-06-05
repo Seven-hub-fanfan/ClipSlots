@@ -419,6 +419,11 @@ private struct ShortcutCaptureField: NSViewRepresentable {
         field.font = .monospacedSystemFont(ofSize: 14, weight: .medium)
         field.alignment = .left
         field.onShortcut = { value in shortcut = value }
+        field.onCommitShortcut = { value in
+            // v2.7.29: commit on key-up, not while keys are still held down.
+            // This prevents unsaved draft shortcuts from firing actions in the main window.
+            shortcut = value
+        }
         field.allowsSlotPlaceholder = allowsSlotPlaceholder
         field.stringValue = shortcut
         field.placeholderString = "点击后直接按组合键"
@@ -436,8 +441,10 @@ private struct ShortcutCaptureField: NSViewRepresentable {
 
 private final class ShortcutCaptureTextField: NSTextField {
     var onShortcut: ((String) -> Void)?
+    var onCommitShortcut: ((String) -> Void)?
     var allowsSlotPlaceholder = false
     private var isRecording = false
+    private var pendingShortcut: String?
 
     override var acceptsFirstResponder: Bool { true }
     override func becomeFirstResponder() -> Bool {
@@ -460,7 +467,17 @@ private final class ShortcutCaptureTextField: NSTextField {
         let value = Self.shortcutString(from: event, allowsSlotPlaceholder: allowsSlotPlaceholder)
         guard !value.isEmpty else { return }
         stringValue = value
-        onShortcut?(value)
+        pendingShortcut = value
+        // Important: only update visual text here. Do not call onShortcut yet.
+        // Mutating SwiftUI state during keyDown can re-render settings and leak draft
+        // shortcuts into active handlers before the user clicks Save.
+    }
+
+    override func keyUp(with event: NSEvent) {
+        guard let value = pendingShortcut else { return }
+        pendingShortcut = nil
+        stringValue = value
+        onCommitShortcut?(value)
     }
 
     override func flagsChanged(with event: NSEvent) {

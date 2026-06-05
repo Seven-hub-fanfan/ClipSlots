@@ -1,4 +1,5 @@
 import SwiftUI
+import WebKit
 
 enum ThumbnailState {
     case idle
@@ -84,6 +85,8 @@ struct SlotThumbnailView: View {
                         .font(.caption2)
                         .foregroundColor(.secondary)
                 }
+            } else if content.isHTMLLike {
+                HTMLCardPreview(html: content.htmlPreviewSource)
             } else if content.isFileContent {
                 VStack(spacing: 8) {
                     Image(systemName: fileIconName)
@@ -170,5 +173,54 @@ struct SlotThumbnailView: View {
                 state = .failed
             }
         }
+    }
+}
+
+// MARK: - v2.7.29 HTML Card Preview
+
+private struct HTMLCardPreview: View {
+    let html: String
+    var body: some View {
+        HTMLWebPreview(html: html)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .overlay(alignment: .topLeading) {
+                Text("HTML")
+                    .font(.system(size: 9, weight: .bold))
+                    .foregroundColor(.white)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 3)
+                    .background(Capsule().fill(Color.black.opacity(0.55)))
+                    .padding(6)
+            }
+    }
+}
+
+private struct HTMLWebPreview: NSViewRepresentable {
+    let html: String
+    func makeNSView(context: Context) -> WKWebView {
+        let config = WKWebViewConfiguration()
+        config.preferences.javaScriptCanOpenWindowsAutomatically = false
+        let webView = WKWebView(frame: .zero, configuration: config)
+        webView.setValue(false, forKey: "drawsBackground")
+        return webView
+    }
+    func updateNSView(_ nsView: WKWebView, context: Context) {
+        nsView.loadHTMLString(html, baseURL: nil)
+    }
+}
+
+private extension SlotContent {
+    var isHTMLLike: Bool {
+        let lower = preview.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if primaryFileURL?.pathExtension.lowercased() == "html" || primaryFileURL?.pathExtension.lowercased() == "htm" { return true }
+        return lower.hasPrefix("<html") || lower.contains("<body") || lower.contains("<!doctype html") || lower.contains("</")
+    }
+    var htmlPreviewSource: String {
+        if let url = primaryFileURL,
+           ["html", "htm"].contains(url.pathExtension.lowercased()),
+           let text = try? String(contentsOf: url) {
+            return text
+        }
+        return preview
     }
 }

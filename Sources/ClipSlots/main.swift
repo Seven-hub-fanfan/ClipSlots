@@ -120,11 +120,15 @@ final class SlotStoreObservable: ObservableObject {
     }
 
     private func shouldBlockLegacyLocalHotkey(_ event: NSEvent) -> Bool {
+        // v2.7.29: only active config decides behavior. Never infer from any
+        // Settings draft text. If current config actually is ctrl+option+{n},
+        // allow it; otherwise consume the legacy local event without action/HUD.
+        if config.saveKey.lowercased() == "ctrl+option+{n}" { return false }
         let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
         let isLegacySave = flags.contains(.control) && flags.contains(.option) && !flags.contains(.command)
         let isNumber = Int(event.charactersIgnoringModifiers ?? "") != nil
         guard isLegacySave && isNumber else { return false }
-        return !config.saveKey.lowercased().hasPrefix("ctrl+option+")
+        return true
     }
 
     @Published var config = AppConfig.load()
@@ -2314,22 +2318,24 @@ final class SlotStoreObservable: ObservableObject {
     // When config changes, remove old hotkeys before registering new ones.
     // Otherwise previous ctrl+option+number shortcuts can still fire and show HUD.
     func updateConfig(_ newConfig: AppConfig) {
-        unregisterAllHotkeys()
+        // v2.7.29: atomic hotkey swap. Draft shortcuts from Settings must never
+        // affect active behavior until the user presses Save.
+        let oldConfig = config
+        HotKeyManager.shared.unregisterAll()
+        hotkeyRegistrationErrors.removeAll()
+
         config = newConfig
         config.save()
-        registerHotkeys()
+        onConfigChanged?()
+
+        // If the new registration fails completely, the UI will show errors
+        // and the old shortcuts are already gone.
+        if !hotkeyRegistrationErrors.isEmpty {
+            NSLog("[ClipSlots] hotkey update had registration errors, oldConfig=\(oldConfig) newConfig=\(newConfig) errors=\(hotkeyRegistrationErrors)")
+        }
         // Keep foreground-window local shortcuts aligned as well.
         installLocalHotkeyGuardIfNeeded()
         objectWillChange.send()
-    }
-
-    private func unregisterAllHotkeys() {
-        HotKeyManager.shared.unregisterAll()
-        hotkeyRegistrationErrors.removeAll()
-    }
-
-    private func registerHotkeys() {
-        onConfigChanged?()
     }
 
     // MARK: - Folder Import

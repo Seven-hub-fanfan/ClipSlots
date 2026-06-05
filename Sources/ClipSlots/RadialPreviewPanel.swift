@@ -1,5 +1,6 @@
 import SwiftUI
 import AVKit
+import WebKit
 
 /// v2.7.13: clean image-only preview. No material background, no rounded container,
 /// no AppKit shadow. The HStack toolbar is the only top bar.
@@ -94,6 +95,8 @@ private struct RadialUniversalPreview: View {
                 RadialImageFilePreview(url: url)
             } else if content.isVideoFile, let url = content.primaryFileURL {
                 RadialVideoPreview(url: url)
+            } else if content.isHTMLLikeForPreview {
+                RadialHTMLPreview(html: content.htmlPreviewSourceForPreview)
             } else if let url = content.primaryFileURL {
                 RadialFileCardPreview(url: url, icon: content.isDirectoryLike ? "folder.fill" : "doc.fill", title: content.isDirectoryLike ? "文件夹" : "文件")
             } else {
@@ -292,9 +295,51 @@ private struct RadialImageOnlyPreview: View {
     }
 }
 
+// MARK: - v2.7.29 HTML Live Preview
+
+private struct RadialHTMLPreview: View {
+    let html: String
+    var body: some View {
+        HTMLWebLivePreview(html: html)
+            .background(Color(NSColor.textBackgroundColor))
+            .cornerRadius(12)
+            .shadow(color: .black.opacity(0.12), radius: 10, x: 0, y: 4)
+            .padding(14)
+    }
+}
+
+private struct HTMLWebLivePreview: NSViewRepresentable {
+    let html: String
+    func makeNSView(context: Context) -> WKWebView {
+        let config = WKWebViewConfiguration()
+        config.preferences.javaScriptCanOpenWindowsAutomatically = false
+        let webView = WKWebView(frame: .zero, configuration: config)
+        webView.setValue(false, forKey: "drawsBackground")
+        return webView
+    }
+    func updateNSView(_ nsView: WKWebView, context: Context) {
+        nsView.loadHTMLString(html, baseURL: nil)
+    }
+}
+
 // MARK: - SlotContent Helper
 
 private extension SlotContent {
+    var isHTMLLikeForPreview: Bool {
+        let lower = preview.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if primaryFileURL?.pathExtension.lowercased() == "html" || primaryFileURL?.pathExtension.lowercased() == "htm" { return true }
+        return lower.hasPrefix("<html") || lower.contains("<body") || lower.contains("<!doctype html") || lower.contains("</")
+    }
+
+    var htmlPreviewSourceForPreview: String {
+        if let url = primaryFileURL,
+           ["html", "htm"].contains(url.pathExtension.lowercased()),
+           let text = try? String(contentsOf: url) {
+            return text
+        }
+        return preview
+    }
+
     var isImageLikeForRadialPreview: Bool {
         inlineImage != nil || isImageFile
     }
