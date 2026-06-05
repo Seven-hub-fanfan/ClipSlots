@@ -2,6 +2,7 @@ import SwiftUI
 
 /// v2.7.13: clean image-only preview. No material background, no rounded container,
 /// no AppKit shadow. The HStack toolbar is the only top bar.
+/// v2.7.15: supports all storable types (text, image, file, folder, video).
 struct RadialPreviewPanel: View {
     let title: String
     let subtitle: String
@@ -17,7 +18,7 @@ struct RadialPreviewPanel: View {
                     .foregroundColor(.secondary)
                 VStack(alignment: .leading, spacing: 1) {
                     Text(title).font(.system(size: 13, weight: .semibold)).lineLimit(1)
-                    Text("图片实时预览").font(.caption2).foregroundColor(.secondary).lineLimit(1)
+                    Text("实时预览").font(.caption2).foregroundColor(.secondary).lineLimit(1)
                 }
                 Spacer()
                 Button { scale = max(0.75, scale - 0.1) } label: { Image(systemName: "minus.magnifyingglass") }
@@ -44,6 +45,8 @@ struct RadialPreviewPanel: View {
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                     .clipped()
             }
+            // v2.7.15: remove transparent watermark / placeholder overlay.
+            .background(Color.clear)
         }
         .frame(minWidth: 260, minHeight: 220)
         // v2.7.13: no material background, no rounded container, no shadow.
@@ -51,7 +54,7 @@ struct RadialPreviewPanel: View {
     }
 }
 
-// MARK: - v2.7.11 Live Preview Content (v2.7.13: image-only)
+// MARK: - v2.7.15 Live Preview Content (all storable types)
 
 struct RadialLivePreviewContent: View {
     @ObservedObject var store: SlotStoreObservable
@@ -61,16 +64,15 @@ struct RadialLivePreviewContent: View {
         Group {
             if let slot = hoveredSlot,
                let content = store.slots[slot],
-               !content.isEmpty,
-               content.isImageLikeForRadialPreview {
-                RadialImageOnlyPreview(content: content)
+               !content.isEmpty {
+                RadialUniversalPreview(content: content)
                     .id(slot)
             } else {
                 VStack(spacing: 8) {
-                    Image(systemName: "photo")
-                        .font(.system(size: 34))
-                        .foregroundColor(.secondary)
-                    Text("悬停图片槽位查看预览")
+                    Image(systemName: "eye")
+                        .font(.system(size: 30))
+                        .foregroundColor(.secondary.opacity(0.72))
+                    Text("悬停槽位查看预览")
                         .font(.caption)
                         .foregroundColor(.secondary)
                 }
@@ -83,7 +85,104 @@ struct RadialLivePreviewContent: View {
     }
 }
 
-// MARK: - v2.7.13 Image-Only Preview
+// MARK: - v2.7.15 Universal Preview
+
+private struct RadialUniversalPreview: View {
+    let content: SlotContent
+
+    var body: some View {
+        Group {
+            if let image = content.inlineImage {
+                RadialImagePreview(image: image)
+            } else if content.isImageFile, let url = content.primaryFileURL {
+                RadialImageFilePreview(url: url)
+            } else if content.isVideoFile, let url = content.primaryFileURL {
+                RadialFileCardPreview(url: url, icon: "play.rectangle.fill", title: "视频文件")
+            } else if let url = content.primaryFileURL {
+                RadialFileCardPreview(url: url, icon: content.isDirectoryLike ? "folder.fill" : "doc.fill", title: content.isDirectoryLike ? "文件夹" : "文件")
+            } else {
+                RadialTextPreview(text: content.preview)
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+}
+
+private struct RadialImagePreview: View {
+    let image: NSImage
+
+    var body: some View {
+        Image(nsImage: image)
+            .resizable()
+            .aspectRatio(contentMode: .fit)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+}
+
+private struct RadialImageFilePreview: View {
+    let url: URL
+    @State private var image: NSImage?
+
+    var body: some View {
+        ZStack {
+            if let image {
+                RadialImagePreview(image: image)
+            } else {
+                ProgressView().controlSize(.small)
+            }
+        }
+        .onAppear {
+            if image == nil { image = NSImage(contentsOf: url) }
+        }
+    }
+}
+
+private struct RadialTextPreview: View {
+    let text: String
+
+    var body: some View {
+        ScrollView {
+            Text(text.isEmpty ? "空文本" : text)
+                .font(.system(size: 13, design: .monospaced))
+                .foregroundColor(.primary)
+                .textSelection(.enabled)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(14)
+        }
+    }
+}
+
+private struct RadialFileCardPreview: View {
+    let url: URL
+    let icon: String
+    let title: String
+
+    var body: some View {
+        VStack(spacing: 10) {
+            Image(systemName: icon)
+                .font(.system(size: 42, weight: .semibold))
+                .foregroundColor(.accentColor)
+            Text(title)
+                .font(.system(size: 13, weight: .semibold))
+            Text(url.lastPathComponent)
+                .font(.caption)
+                .foregroundColor(.secondary)
+                .lineLimit(2)
+                .multilineTextAlignment(.center)
+                .truncationMode(.middle)
+            Text(url.deletingLastPathComponent().path)
+                .font(.caption2)
+                .foregroundColor(.secondary.opacity(0.75))
+                .lineLimit(2)
+                .multilineTextAlignment(.center)
+                .truncationMode(.middle)
+        }
+        .padding(18)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+}
+
+// MARK: - Deprecated image-only preview kept for compatibility
 
 private struct RadialImageOnlyPreview: View {
     let content: SlotContent
@@ -118,5 +217,11 @@ private struct RadialImageOnlyPreview: View {
 private extension SlotContent {
     var isImageLikeForRadialPreview: Bool {
         inlineImage != nil || isImageFile
+    }
+
+    var isDirectoryLike: Bool {
+        guard let url = primaryFileURL else { return false }
+        var isDir: ObjCBool = false
+        return FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir) && isDir.boolValue
     }
 }
