@@ -299,7 +299,7 @@ struct ContentView: View {
 
     // Layer 2: Page Selector + Actions
     private var actionBar: some View {
-        HStack(spacing: 10) {
+        HStack(alignment: .center, spacing: 10) {
             // Page selector dropdown (v2.4)
             Menu {
                 ForEach(store.pages) { page in
@@ -344,35 +344,45 @@ struct ContentView: View {
 
             Spacer()
 
-            // Action buttons
-            Button {
-                store.startToolbarImport()
-            } label: {
-                Label("导入", systemImage: "folder.badge.plus")
-            }
-            .buttonStyle(.bordered)
-            .controlSize(.regular)
+            toolbarActions
+        }
+        .frame(minHeight: 44, alignment: .center)
+    }
+
+    // v2.7.39: keep the top-right action group vertically centered and easier to hit.
+    // The previous system Button styles had inconsistent intrinsic heights, making the
+    // group look stuck to the top of the row.
+    private var toolbarActions: some View {
+        HStack(alignment: .center, spacing: 8) {
+            ToolbarActionButton(
+                title: "导入",
+                icon: "folder.badge.plus",
+                role: .normal,
+                prominent: false,
+                action: { store.startToolbarImport() }
+            )
             .help("导入文件或文件夹到当前槽位组")
 
-            Button {
-                store.pasteAllSlotsWithConfirmation()
-            } label: {
-                Label("全部粘贴", systemImage: "text.line.first.and.arrowtriangle.forward")
-            }
-            .buttonStyle(.borderedProminent)
-            .controlSize(.regular)
+            ToolbarActionButton(
+                title: "全部粘贴",
+                icon: "text.line.first.and.arrowtriangle.forward",
+                role: .accent,
+                prominent: true,
+                action: { store.pasteAllSlotsWithConfirmation() }
+            )
             .help("按顺序粘贴当前槽位组中的全部内容")
 
-            Button(role: .destructive) {
-                store.clearAllSlotsInCurrentSpecialSlotWithConfirmation()
-            } label: {
-                Label("清空", systemImage: "trash")
-            }
-            .buttonStyle(.borderedProminent)
-            .tint(.red)
-            .controlSize(.regular)
+            ToolbarActionButton(
+                title: "清空",
+                icon: "trash",
+                role: .destructive,
+                prominent: true,
+                action: { store.clearAllSlotsInCurrentSpecialSlotWithConfirmation() }
+            )
             .help("清空当前槽位组中的全部槽位")
         }
+        .frame(height: 44, alignment: .center)
+        .padding(.horizontal, 2)
     }
 
     // v2.4: renamed from specialSlotTagBar — shows only current page's slot groups
@@ -612,7 +622,7 @@ struct ContentView: View {
             // Connection stays as a separate tool and is moved to the right side.
             connectionToolButton
 
-            Text("v2.7.38")
+            Text("v2.7.39")
                 .font(.caption2)
                 .foregroundColor(Color.secondary.opacity(0.65))
         }
@@ -920,6 +930,99 @@ private struct ShortcutBadge: View {
         .padding(.vertical, 5)
         .background(Capsule().fill(Color.primary.opacity(0.045)))
         .overlay(Capsule().stroke(Color.secondary.opacity(0.14), lineWidth: 0.7))
+    }
+}
+
+// MARK: - v2.7.39 Toolbar Action Button
+
+private struct ToolbarActionButton: View {
+    enum Role {
+        case normal
+        case accent
+        case destructive
+    }
+
+    let title: String
+    let icon: String
+    let role: Role
+    let prominent: Bool
+    let action: () -> Void
+
+    @Environment(\.colorScheme) private var colorScheme
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 6) {
+                Image(systemName: icon)
+                    .font(.system(size: 12, weight: .semibold))
+                Text(title)
+                    .font(.system(size: 12, weight: .semibold))
+            }
+            .frame(minWidth: minWidth, minHeight: 30)
+            .padding(.horizontal, 10)
+            .contentShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+        }
+        .buttonStyle(.plain)
+        .foregroundColor(foregroundColor)
+        .background(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .fill(backgroundColor)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .stroke(borderColor, lineWidth: 0.8)
+        )
+        .shadow(color: shadowColor, radius: prominent ? 4 : 0, x: 0, y: prominent ? 1 : 0)
+    }
+
+    private var minWidth: CGFloat {
+        switch role {
+        case .normal: return 70
+        case .accent: return 92
+        case .destructive: return 66
+        }
+    }
+
+    private var foregroundColor: Color {
+        switch role {
+        case .normal:
+            return .primary
+        case .accent, .destructive:
+            return .white
+        }
+    }
+
+    private var backgroundColor: Color {
+        switch role {
+        case .normal:
+            return Color.primary.opacity(colorScheme == .dark ? 0.12 : 0.07)
+        case .accent:
+            return Color.accentColor
+        case .destructive:
+            return Color.red
+        }
+    }
+
+    private var borderColor: Color {
+        switch role {
+        case .normal:
+            return Color.secondary.opacity(0.16)
+        case .accent:
+            return Color.white.opacity(0.22)
+        case .destructive:
+            return Color.white.opacity(0.20)
+        }
+    }
+
+    private var shadowColor: Color {
+        switch role {
+        case .normal:
+            return .clear
+        case .accent:
+            return Color.accentColor.opacity(0.20)
+        case .destructive:
+            return Color.red.opacity(0.18)
+        }
     }
 }
 
