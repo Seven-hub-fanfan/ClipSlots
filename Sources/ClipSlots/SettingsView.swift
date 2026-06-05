@@ -421,6 +421,10 @@ private struct ShortcutCaptureField: NSViewRepresentable {
         field.onShortcut = { value in shortcut = value }
         field.allowsSlotPlaceholder = allowsSlotPlaceholder
         field.stringValue = shortcut
+        field.placeholderString = "点击后直接按组合键"
+        field.bezelStyle = .roundedBezel
+        field.isBezeled = true
+        field.drawsBackground = true
         return field
     }
 
@@ -433,10 +437,24 @@ private struct ShortcutCaptureField: NSViewRepresentable {
 private final class ShortcutCaptureTextField: NSTextField {
     var onShortcut: ((String) -> Void)?
     var allowsSlotPlaceholder = false
+    private var isRecording = false
 
     override var acceptsFirstResponder: Bool { true }
+    override func becomeFirstResponder() -> Bool {
+        isRecording = true
+        layer?.borderColor = NSColor.controlAccentColor.cgColor
+        layer?.borderWidth = 1.5
+        layer?.cornerRadius = 7
+        return super.becomeFirstResponder()
+    }
+    override func resignFirstResponder() -> Bool {
+        isRecording = false
+        layer?.borderWidth = 0
+        return super.resignFirstResponder()
+    }
     override func mouseDown(with event: NSEvent) {
         window?.makeFirstResponder(self)
+        if stringValue.isEmpty { stringValue = "按下组合键…" }
     }
     override func keyDown(with event: NSEvent) {
         let value = Self.shortcutString(from: event, allowsSlotPlaceholder: allowsSlotPlaceholder)
@@ -455,7 +473,10 @@ private final class ShortcutCaptureTextField: NSTextField {
 
         let key = normalizedKey(event)
         guard !key.isEmpty else { return "" }
-        if allowsSlotPlaceholder, key.rangeOfCharacter(from: .decimalDigits) != nil {
+        // v2.7.26: for save/paste shortcuts, any letter or number means slot placeholder.
+        // Users press cmd+1 or cmd+a to express the slot token; registering a literal
+        // number/letter would create one shortcut only and fail for other slots.
+        if allowsSlotPlaceholder, key.rangeOfCharacter(from: CharacterSet.alphanumerics) != nil {
             parts.append("{n}")
         } else {
             parts.append(key)

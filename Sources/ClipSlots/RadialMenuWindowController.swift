@@ -76,7 +76,10 @@ final class RadialMenuWindowController {
                 if self?.isPreviewPinned != true { self?.dismissPreviewPanel() } else { self?.persistPreviewFrame() }
                 onDismiss()
             },
-            connectionMap: store.currentConnectionMap
+            // v2.7.26: bind to store directly. Passing a copied connectionMap freezes
+            // connection colors for the whole radial-menu session. Switching slot group inside
+            // the radial menu must refresh colors immediately.
+            connectionMap: .empty
         )
         .preferredColorScheme(themeMode.preferredColorScheme)
 

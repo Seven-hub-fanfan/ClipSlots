@@ -79,6 +79,12 @@ struct RadialMenuView: View {
     var onDismiss: () -> Void
     var connectionMap: SlotConnectionMap = .empty
 
+    private var liveConnectionMap: SlotConnectionMap {
+        // v2.7.26: always prefer the store's live currentConnectionMap.
+        // The fallback keeps compatibility with older callers.
+        store.currentConnectionMap.edges.isEmpty ? connectionMap : store.currentConnectionMap
+    }
+
     @State private var hoveredIndex: Int? = nil
     @State private var appeared = false
     @State private var mode: RadialMenuMode = .childSlots
@@ -394,8 +400,9 @@ struct RadialMenuView: View {
             guard idx < groups.count else { return }
             let special = groups[idx]
             store.switchSpecialSlot(id: special.id)
-            mode = .childSlots
+            // Force radial menu to redraw labels / connection dots immediately after group switch.
             hoveredIndex = nil
+            mode = .childSlots
         }
     }
 
@@ -437,7 +444,7 @@ struct RadialMenuView: View {
                             .foregroundColor(idx != nil ? .accentColor : .secondary)
 
                         if let slot = idx {
-                            let chain = connectionMap.chainSlots(startingAt: slot)
+                            let chain = liveConnectionMap.chainSlots(startingAt: slot)
                             if chain.count > 1 {
                                 Text("槽位 \(slot)")
                                     .font(.system(size: 10, weight: .semibold))
@@ -493,7 +500,7 @@ struct RadialMenuView: View {
                     .font(.system(size: 20, weight: .bold, design: .rounded))
                     .foregroundColor(AppTheme.radialPrimaryText(colorScheme, isHovered: isHovered, isEmpty: content.isEmpty))
 
-                if let colorId = connectionMap.colorId(for: slot) {
+                if let colorId = liveConnectionMap.colorId(for: slot) {
                     Circle()
                         .fill(SlotConnectionColor.color(for: colorId))
                         .frame(width: 6, height: 6)

@@ -66,6 +66,13 @@ struct ClipSlotsApp: App {
             CommandGroup(replacing: .appInfo) {
                 Button("关于 ClipSlots") { NSApp.orderFrontStandardAboutPanel(nil) }
             }
+            // v2.7.26: Ctrl+Z undo for clear/delete operations
+            CommandGroup(after: .undoRedo) {
+                Button("撤销清空/删除") {
+                    store.undoLastClearIfPossible()
+                }
+                .keyboardShortcut("z", modifiers: [.control])
+            }
             CommandMenu("槽位") {
                 ForEach(1...store.config.slots, id: \.self) { slot in
                     Button("粘贴槽位 \(slot)") { store.pasteSlot(slot) }
@@ -79,8 +86,8 @@ struct ClipSlotsApp: App {
 
         Settings {
             SettingsView(config: store.config) { newConfig in
+                // v2.7.26: updateConfig now handles hotkey unregister/reregister internally
                 store.updateConfig(newConfig)
-                appDelegate.reloadHotkeys()
             }
         }
     }
@@ -112,7 +119,6 @@ final class SlotStoreObservable: ObservableObject {
 
     // v2.4 Page state
     @Published var pages: [SlotPage] = []
-    @Published private(set) var lastClearedSlotsSnapshot: [Int: SlotContent] = [:]
     @Published var currentPageId: String = "default_page"
     @Published var currentPage: SlotPage?
 
@@ -455,38 +461,43 @@ final class SlotStoreObservable: ObservableObject {
 
     // MARK: - Clear All Slots
 
-    // MARK: - v2.7.25 Undo
+    // MARK: - v2.7.26 Undo Clear
+
+    private struct SlotUndoSnapshot {
+        let slots: [Int: SlotContent]
+        let labels: [Int: String]
+        let title: String
+    }
+    private var lastClearSnapshot: SlotUndoSnapshot?
+
+    private func captureUndoSnapshot(title: String) {
+        lastClearSnapshot = SlotUndoSnapshot(slots: slots, labels: labels, title: title)
+    }
 
     func undoLastClearIfPossible() {
-        guard !lastClearedSlotsSnapshot.isEmpty else { return }
-        for (slot, content) in lastClearedSlotsSnapshot {
-            slots[slot] = content
+        guard let snapshot = lastClearSnapshot else {
+            showFloatingNotice(FloatingNotice(title: "没有可撤销操作", subtitle: "最近没有清空或删除槽位", iconName: "arrow.uturn.backward", kind: .warning))
+            return
         }
+        slots = snapshot.slots
+        labels = snapshot.labels
+        persistCurrentSpecialSlotData()
+        lastClearSnapshot = nil
+        showFloatingNotice(FloatingNotice(title: "已撤销", subtitle: snapshot.title, iconName: "arrow.uturn.backward.circle.fill", kind: .success))
+    }
+
+    private func persistCurrentSpecialSlotData() {
         let activeId = currentSpecialSlotId
-        for (slot, content) in lastClearedSlotsSnapshot {
+        for (slot, content) in slots {
             specialStorage.set(slot, content: content, in: activeId)
         }
-        showFloatingNotice(FloatingNotice(title: "已撤回删除", subtitle: "恢复 \(lastClearedSlotsSnapshot.count) 个槽位", iconName: "arrow.uturn.backward", kind: .success))
-        lastClearedSlotsSnapshot.removeAll()
-    }
-
-    private func rememberForUndo(slot: Int) {
-        let content = slots[slot] ?? SlotContent()
-        guard !content.isEmpty else { return }
-        lastClearedSlotsSnapshot = [slot: content]
-    }
-
-    private func rememberForUndo(slots slotIds: [Int]) {
-        var snapshot: [Int: SlotContent] = [:]
-        for slot in slotIds {
-            let content = slots[slot] ?? SlotContent()
-            if !content.isEmpty { snapshot[slot] = content }
+        for (slot, label) in labels {
+            specialStorage.setLabel(slot, label: label, in: activeId)
         }
-        lastClearedSlotsSnapshot = snapshot
     }
 
     func clearAllSlotsInCurrentSpecialSlotWithConfirmation() {
-        rememberForUndo(slots: Array(1...max(1, config.slots)))
+        captureUndoSnapshot(title: "清空槽位组「\(currentSpecialSlot?.name ?? currentSpecialSlotId)」")
         if !specialSlotSettings.confirmBeforeClearAllSlots {
             clearAllSlotsInCurrentSpecialSlot()
             return
@@ -2194,7 +2205,7 @@ final class SlotStoreObservable: ObservableObject {
     }
 
     func clearSlotWithConfirmation(_ slot: Int) {
-        rememberForUndo(slot: slot)
+        captureUndoSnapshot(title: "清空槽位 \(slot)")
         if !specialSlotSettings.confirmBeforeClearSingleSlot {
             clearSlot(slot)
             return
@@ -2244,11 +2255,23 @@ final class SlotStoreObservable: ObservableObject {
         NSLog("[ClipSlots] setLabel specialSlot=\(activeId) slot=\(slot) label=\(label ?? "")")
     }
 
+    // MARK: - v2.7.26 Hotkey Generation Guard
+    // When config changes, remove old hotkeys before registering new ones.
+    // Otherwise previous ctrl+option+number shortcuts can still fire and show HUD.
     func updateConfig(_ newConfig: AppConfig) {
+        unregisterAllHotkeys()
         config = newConfig
-        if newConfig.slots != slots.count {
-            loadSlots()
-        }
+        config.save()
+        registerHotkeys()
+        objectWillChange.send()
+    }
+
+    private func unregisterAllHotkeys() {
+        HotKeyManager.shared.unregisterAll()
+        hotkeyRegistrationErrors.removeAll()
+    }
+
+    private func registerHotkeys() {
         onConfigChanged?()
     }
 
