@@ -447,11 +447,14 @@ struct ContentView: View {
     private var activeHotkeyLayerNotice: some View {
         let pageName = store.currentPage?.name ?? "默认页面"
         let groupName = store.currentSpecialSlot?.name ?? "默认槽位组"
+        let pasteShortcut = humanReadableShortcut(store.config.pasteKey)
+        let saveShortcut = humanReadableShortcut(store.config.saveKey)
+        let radialShortcut = humanReadableShortcut(store.config.radialKey)
         return HStack(spacing: 6) {
             Image(systemName: "keyboard.fill")
                 .font(.system(size: 10))
                 .foregroundColor(.accentColor)
-            Text("\(pageName) / \(groupName) · ⌘+1~0 粘贴 · ⌘+← → 切组")
+            Text("\(pageName) / \(groupName) · 粘贴 \(pasteShortcut) · 保存 \(saveShortcut) · 圆盘 \(radialShortcut) · ← → 切组")
                 .font(.system(size: 10, weight: .medium))
                 .foregroundColor(.secondary)
             Spacer()
@@ -560,10 +563,14 @@ struct ContentView: View {
     private func humanReadableShortcut(_ template: String) -> String {
         template
             .replacingOccurrences(of: "{n}", with: "数字")
+            .replacingOccurrences(of: "command", with: "⌘")
             .replacingOccurrences(of: "cmd", with: "⌘")
+            .replacingOccurrences(of: "control", with: "⌃")
             .replacingOccurrences(of: "ctrl", with: "⌃")
+            .replacingOccurrences(of: "alt", with: "⌥")
             .replacingOccurrences(of: "option", with: "⌥")
             .replacingOccurrences(of: "shift", with: "⇧")
+            .replacingOccurrences(of: "space", with: "Space")
     }
 
     private var bottomBar: some View {
@@ -623,7 +630,7 @@ struct ContentView: View {
 
             Spacer()
 
-            Text("v2.7.19")
+            Text("v2.7.20")
                 .font(.caption2)
                 .foregroundColor(Color.secondary.opacity(0.65))
         }

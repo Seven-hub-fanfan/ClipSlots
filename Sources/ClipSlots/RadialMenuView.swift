@@ -541,12 +541,15 @@ struct RadialMenuView: View {
     }
 
     private func handlePasteAll() {
+        // v2.7.20: "全部粘贴" must use the current slot group paste-all flow,
+        // not node-connection chain paste. Also avoid double dismiss: the controller
+        // handles dismissal after paste-all completes/starts.
         if let onPasteAll {
             onPasteAll()
         } else {
             NotificationCenter.default.post(name: .radialMenuPasteAllRequested, object: nil)
+            onDismiss()
         }
-        onDismiss()
     }
 
     private func dividerLine(center: CGPoint, angle: Angle, innerRadius: CGFloat, outerRadius: CGFloat) -> Path {

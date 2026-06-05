@@ -64,7 +64,10 @@ final class RadialMenuWindowController {
                 onDismiss()
             },
             onPasteAll: { [weak self] in
-                store.pasteAllSlotsInCurrentGroup()
+                // v2.7.20: reuse the already working toolbar "全部粘贴" behavior.
+                // Do NOT route through node connection chain paste, otherwise the
+                // HUD says "已串联粘贴 …" and content order/behavior may be wrong.
+                store.pasteAllSlotsWithConfirmation()
                 self?.dismissRadialOnly()
                 if self?.isPreviewPinned != true { self?.dismissPreviewPanel() }
                 onDismiss()
