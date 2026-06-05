@@ -1647,9 +1647,8 @@ final class SlotStoreObservable: ObservableObject {
         return .empty
     }
 
-    // MARK: - v2.7.18 Paste All Slots In Current Group
+    // MARK: - v2.7.19 Paste All Slots In Current Group
     // Paste all non-empty slots in the current slot group in slot order.
-    // This is triggered from the radial menu bottom pill "全部粘贴".
     func pasteAllSlotsInCurrentGroup() {
         let maxSlot = max(1, config.slots)
         let nonEmptySlots = (1...maxSlot).filter { slot in
@@ -1666,7 +1665,7 @@ final class SlotStoreObservable: ObservableObject {
             return
         }
 
-        // Prefer existing chain-aware sequential paste if available.
+        // Reuse the existing mixed-content sequential paste path.
         pasteSlotChainSequentially(nonEmptySlots)
     }
 

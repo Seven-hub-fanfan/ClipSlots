@@ -1,4 +1,5 @@
 import SwiftUI
+import AVKit
 
 /// v2.7.13: clean image-only preview. No material background, no rounded container,
 /// no AppKit shadow. The HStack toolbar is the only top bar.
@@ -92,7 +93,7 @@ private struct RadialUniversalPreview: View {
             } else if content.isImageFile, let url = content.primaryFileURL {
                 RadialImageFilePreview(url: url)
             } else if content.isVideoFile, let url = content.primaryFileURL {
-                RadialFileCardPreview(url: url, icon: "play.rectangle.fill", title: "视频文件")
+                RadialVideoPreview(url: url)
             } else if let url = content.primaryFileURL {
                 RadialFileCardPreview(url: url, icon: content.isDirectoryLike ? "folder.fill" : "doc.fill", title: content.isDirectoryLike ? "文件夹" : "文件")
             } else {
@@ -188,6 +189,49 @@ private struct RadialFileCardPreview: View {
         .shadow(color: .black.opacity(0.12), radius: 10, x: 0, y: 4)
         .padding(14)
         .animation(.easeOut(duration: 0.12), value: url)
+    }
+}
+
+// MARK: - v2.7.19 Video Preview
+
+private struct RadialVideoPreview: View {
+    let url: URL
+    @State private var player: AVPlayer?
+
+    var body: some View {
+        ZStack {
+            if let player {
+                VideoPlayer(player: player)
+                    .onAppear { player.play() }
+                    .onDisappear { player.pause() }
+            } else {
+                VStack(spacing: 10) {
+                    Image(systemName: "play.rectangle.fill")
+                        .font(.system(size: 42, weight: .semibold))
+                        .foregroundColor(.accentColor)
+                    Text("视频预览")
+                        .font(.system(size: 13, weight: .semibold))
+                    Text(url.lastPathComponent)
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                        .lineLimit(2)
+                        .multilineTextAlignment(.center)
+                        .truncationMode(.middle)
+                }
+                .padding(18)
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(Color.black.opacity(0.92))
+        .onAppear {
+            if player == nil {
+                let p = AVPlayer(url: url)
+                player = p
+                p.isMuted = true
+                p.play()
+            }
+        }
+        .onDisappear { player?.pause() }
     }
 }
 

@@ -44,10 +44,10 @@ final class RadialMenuWindowController {
     ) {
         dismiss()
 
-        // v2.7.18: larger transparent hit surface for the advanced outer preview ring.
-        // The mouse point still stays at the radial disk center.
-        let menuWidth: CGFloat = 540
-        let menuHeight: CGFloat = 580
+        // v2.7.11: radial window only contains the radial menu again.
+        // Its center must equal the mouse point used by ctrl+space.
+        let menuWidth: CGFloat = 460
+        let menuHeight: CGFloat = 500
         self.onDismissCallback = onDismiss
         // Do not reset pin state here. Pinned preview must survive radial menu sessions.
 
@@ -64,9 +64,10 @@ final class RadialMenuWindowController {
                 onDismiss()
             },
             onPasteAll: { [weak self] in
-                if let store = self?.previewStore ?? Optional(store) {
-                    store.pasteAllSlotsInCurrentGroup()
-                }
+                store.pasteAllSlotsInCurrentGroup()
+                self?.dismissRadialOnly()
+                if self?.isPreviewPinned != true { self?.dismissPreviewPanel() }
+                onDismiss()
             },
             onDismiss: { [weak self] in
                 self?.dismissRadialOnly()

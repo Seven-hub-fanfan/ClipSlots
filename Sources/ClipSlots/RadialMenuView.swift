@@ -85,8 +85,9 @@ struct RadialMenuView: View {
     @Environment(\.colorScheme) private var colorScheme
 
     private let menuSize: CGFloat = 372
-    private let previewRingExtraRadius: CGFloat = 34
     // v2.7.12: keep hover segments safely inside the radial disk.
+    // Previous hover style scaled the whole sector and used outerRadius directly,
+    // causing blue sectors to protrude outside the white circle at 1/5/6/8 etc.
     private let segmentOuterInset: CGFloat = 8
     private let segmentInnerInset: CGFloat = 1.5
 
@@ -104,7 +105,7 @@ struct RadialMenuView: View {
             topNavigationStack
                 .padding(.bottom, 6)
 
-            // Radial circle + advanced outer preview ring
+            // Radial circle
             ZStack {
                 GeometryReader { geo in
                     let center = CGPoint(x: geo.size.width / 2, y: geo.size.height / 2)
@@ -114,51 +115,42 @@ struct RadialMenuView: View {
                     let segmentInnerRadius = deadZoneRadius + segmentInnerInset
 
                     ZStack {
-                        if mode == .childSlots {
-                            outerPreviewRing(center: center, radius: outerRadius + previewRingExtraRadius)
-                                .allowsHitTesting(false)
-                                .zIndex(0)
-                        }
+                        Circle()
+                            .fill(AppTheme.radialBackground(colorScheme))
+                            .background(AppTheme.radialMaterial(colorScheme), in: Circle())
+                            .overlay(
+                                Circle()
+                                    .stroke(Color.white.opacity(0.15), lineWidth: 0.6)
+                            )
 
-                        ZStack {
-                            Circle()
-                                .fill(AppTheme.radialBackground(colorScheme))
-                                .background(AppTheme.radialMaterial(colorScheme), in: Circle())
-                                .overlay(
-                                    Circle()
-                                        .stroke(Color.white.opacity(0.15), lineWidth: 0.6)
+                        if displayCount > 0 {
+                            ForEach(0..<displayCount, id: \.self) { i in
+                                let segmentAngle = 360.0 / Double(displayCount)
+                                let a = Angle(degrees: Double(i) * segmentAngle - 90)
+                                dividerLine(
+                                    center: center,
+                                    angle: a,
+                                    innerRadius: deadZoneRadius + 2,
+                                    outerRadius: segmentOuterRadius
                                 )
-
-                            if displayCount > 0 {
-                                ForEach(0..<displayCount, id: \.self) { i in
-                                    let segmentAngle = 360.0 / Double(displayCount)
-                                    let a = Angle(degrees: Double(i) * segmentAngle - 90)
-                                    dividerLine(
-                                        center: center,
-                                        angle: a,
-                                        innerRadius: deadZoneRadius + 2,
-                                        outerRadius: segmentOuterRadius
-                                    )
-                                    .stroke(AppTheme.radialDivider(colorScheme), lineWidth: 1)
-                                }
-                            }
-
-                            if mode == .childSlots {
-                                childSlotSegments(center: center, outerRadius: segmentOuterRadius, deadZoneRadius: segmentInnerRadius)
-                            } else {
-                                specialSlotSegments(center: center, outerRadius: segmentOuterRadius, deadZoneRadius: segmentInnerRadius)
-                            }
-
-                            Circle()
                                 .stroke(AppTheme.radialDivider(colorScheme), lineWidth: 1)
-                                .frame(width: deadZoneRadius * 2 + 4, height: deadZoneRadius * 2 + 4)
-
-                            centerView(deadZoneRadius: deadZoneRadius)
+                            }
                         }
-                        .clipShape(Circle())
-                        .zIndex(1)
+
+                        if mode == .childSlots {
+                            childSlotSegments(center: center, outerRadius: segmentOuterRadius, deadZoneRadius: segmentInnerRadius)
+                        } else {
+                            specialSlotSegments(center: center, outerRadius: segmentOuterRadius, deadZoneRadius: segmentInnerRadius)
+                        }
+
+                        Circle()
+                            .stroke(AppTheme.radialDivider(colorScheme), lineWidth: 1)
+                            .frame(width: deadZoneRadius * 2 + 4, height: deadZoneRadius * 2 + 4)
+
+                        centerView(deadZoneRadius: deadZoneRadius)
                     }
-                    .frame(width: geo.size.width, height: geo.size.height)
+                    .frame(width: outerRadius * 2, height: outerRadius * 2)
+                    .clipShape(Circle())
                     .contentShape(Circle())
                     .scaleEffect(appeared ? 1 : 0.92)
                     .opacity(appeared ? 1 : 0)
@@ -179,7 +171,7 @@ struct RadialMenuView: View {
                     }
                 }
             }
-            .frame(width: menuSize + previewRingExtraRadius * 2, height: menuSize + previewRingExtraRadius * 2)
+            .frame(width: menuSize, height: menuSize)
             .compositingGroup()
 
             // v2.4.2: Slot group switcher
@@ -249,7 +241,7 @@ struct RadialMenuView: View {
         .fixedSize()
     }
 
-    // MARK: - Group Switcher (v2.4.2, v2.7.18: paste-all button)
+    // MARK: - Group Switcher (v2.4.2)
 
     private var groupSwitcher: some View {
         RadialGlassPill(horizontalPadding: 10, verticalPadding: 5) {
@@ -292,7 +284,7 @@ struct RadialMenuView: View {
                     .overlay(Capsule().stroke(Color.accentColor.opacity(0.35), lineWidth: 0.8))
                 }
                 .buttonStyle(.plain)
-                .help("粘贴当前槽位组内全部非空内容")
+                .help("粘贴当前槽位组全部非空内容")
 
                 Button {
                     store.switchToNextSlotGroup()
@@ -548,6 +540,15 @@ struct RadialMenuView: View {
         .animation(.easeOut(duration: 0.1), value: isHovered)
     }
 
+    private func handlePasteAll() {
+        if let onPasteAll {
+            onPasteAll()
+        } else {
+            NotificationCenter.default.post(name: .radialMenuPasteAllRequested, object: nil)
+        }
+        onDismiss()
+    }
+
     private func dividerLine(center: CGPoint, angle: Angle, innerRadius: CGFloat, outerRadius: CGFloat) -> Path {
         let rad = CGFloat(angle.radians)
         let start = CGPoint(x: center.x + innerRadius * cos(rad), y: center.y + innerRadius * sin(rad))
@@ -557,124 +558,9 @@ struct RadialMenuView: View {
         path.addLine(to: end)
         return path
     }
-
-    // MARK: - v2.7.18 Outer Preview Ring
-
-    @ViewBuilder
-    private func outerPreviewRing(center: CGPoint, radius: CGFloat) -> some View {
-        let slotCount = store.config.slots
-        ForEach(1...slotCount, id: \.self) { slot in
-            let content = store.slots[slot] ?? SlotContent()
-            let segmentAngle = 360.0 / Double(slotCount)
-            let angle = Angle(degrees: (Double(slot - 1) + 0.5) * segmentAngle - 90)
-            let rad = CGFloat(angle.radians)
-            let x = radius * cos(rad)
-            let y = radius * sin(rad)
-            let isHovered = hoveredIndex == slot
-
-            RadialOuterPreviewChip(
-                slot: slot,
-                title: store.labels[slot]?.isEmpty == false ? (store.labels[slot] ?? "") : content.radialPreviewTitle,
-                subtitle: content.radialPreviewSubtitle,
-                symbol: content.radialPreviewSymbol,
-                isEmpty: content.isEmpty,
-                isHovered: isHovered,
-                chainColor: connectionMap.colorId(for: slot).map { SlotConnectionColor.color(for: $0) }
-            )
-            .position(x: center.x + x, y: center.y + y)
-        }
-    }
-
-    private func handlePasteAll() {
-        if let onPasteAll {
-            onPasteAll()
-        } else {
-            NotificationCenter.default.post(name: .radialMenuPasteAllRequested, object: nil)
-        }
-        onDismiss()
-    }
 }
 
 extension Notification.Name {
     static let radialMenuHoveredSlotChanged = Notification.Name("ClipSlots.radialMenuHoveredSlotChanged")
     static let radialMenuPasteAllRequested = Notification.Name("ClipSlots.radialMenuPasteAllRequested")
-}
-
-// MARK: - v2.7.18 Outer Preview Chip
-
-private struct RadialOuterPreviewChip: View {
-    let slot: Int
-    let title: String
-    let subtitle: String
-    let symbol: String
-    let isEmpty: Bool
-    let isHovered: Bool
-    let chainColor: Color?
-
-    var body: some View {
-        HStack(spacing: 6) {
-            ZStack {
-                Circle()
-                    .fill((chainColor ?? .accentColor).opacity(isEmpty ? 0.08 : 0.16))
-                    .frame(width: 20, height: 20)
-                Image(systemName: symbol)
-                    .font(.system(size: 9, weight: .semibold))
-                    .foregroundColor(isEmpty ? .secondary.opacity(0.55) : (chainColor ?? .accentColor))
-            }
-
-            VStack(alignment: .leading, spacing: 1) {
-                Text("\(slot) · \(title)")
-                    .font(.system(size: 9, weight: .semibold))
-                    .foregroundColor(isEmpty ? .secondary.opacity(0.65) : .primary)
-                    .lineLimit(1)
-                    .truncationMode(.tail)
-                if !subtitle.isEmpty {
-                    Text(subtitle)
-                        .font(.system(size: 8, weight: .medium))
-                        .foregroundColor(.secondary)
-                        .lineLimit(1)
-                        .truncationMode(.tail)
-                }
-            }
-        }
-        .padding(.horizontal, 8)
-        .padding(.vertical, 5)
-        .frame(width: isHovered ? 116 : 104, alignment: .leading)
-        .background(
-            Capsule()
-                .fill(Color(NSColor.windowBackgroundColor).opacity(isHovered ? 0.94 : 0.78))
-        )
-        .overlay(
-            Capsule()
-                .stroke((chainColor ?? .white).opacity(isHovered ? 0.55 : 0.18), lineWidth: isHovered ? 1.2 : 0.8)
-        )
-        .shadow(color: .black.opacity(isHovered ? 0.20 : 0.08), radius: isHovered ? 10 : 5, x: 0, y: 3)
-    }
-}
-
-// MARK: - v2.7.18 SlotContent Preview Helpers
-
-private extension SlotContent {
-    var radialPreviewTitle: String {
-        if isEmpty { return "空" }
-        if let url = primaryFileURL { return url.deletingPathExtension().lastPathComponent }
-        let value = preview.trimmingCharacters(in: .whitespacesAndNewlines)
-        return value.isEmpty ? "内容" : value
-    }
-
-    var radialPreviewSubtitle: String {
-        if isEmpty { return "" }
-        if isImageFile { return "图片" }
-        if isVideoFile { return "视频" }
-        if primaryFileURL != nil { return "文件" }
-        return "文本"
-    }
-
-    var radialPreviewSymbol: String {
-        if isEmpty { return "circle.dashed" }
-        if inlineImage != nil || isImageFile { return "photo" }
-        if isVideoFile { return "play.rectangle" }
-        if primaryFileURL != nil { return "doc" }
-        return "text.alignleft"
-    }
 }
