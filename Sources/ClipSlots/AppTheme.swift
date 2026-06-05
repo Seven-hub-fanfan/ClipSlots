@@ -119,46 +119,47 @@ enum AppTheme {
     // MARK: - Radial Menu
 
     static func radialBackground(_ scheme: ColorScheme) -> Color {
+        // v2.7.38: glassmorphism radial surface. Avoid the old heavy black/white disk.
         scheme == .dark
-            ? Color(red: 0.07, green: 0.075, blue: 0.09).opacity(0.90)
-            : Color.white.opacity(0.90)
+            ? Color(red: 0.12, green: 0.13, blue: 0.16).opacity(0.46)
+            : Color.white.opacity(0.40)
     }
 
     static func radialCenterBackground(_ scheme: ColorScheme) -> Color {
         scheme == .dark
-            ? Color.black.opacity(0.35)
-            : Color.white.opacity(0.76)
+            ? Color.black.opacity(0.22)
+            : Color.white.opacity(0.54)
     }
 
     static func radialSegment(_ scheme: ColorScheme, isEmpty: Bool, isHovered: Bool) -> Color {
         if isHovered {
-            return Color.accentColor.opacity(scheme == .dark ? 0.78 : 0.68)
+            return Color.accentColor.opacity(scheme == .dark ? 0.42 : 0.30)
         }
         if isEmpty {
             return scheme == .dark
-                ? Color.white.opacity(0.035)
-                : Color.black.opacity(0.030)
+                ? Color.white.opacity(0.018)
+                : Color.white.opacity(0.10)
         }
         return scheme == .dark
-            ? Color.white.opacity(0.085)
-            : Color.black.opacity(0.052)
+            ? Color.white.opacity(0.045)
+            : Color.white.opacity(0.18)
     }
 
     static func radialStroke(_ scheme: ColorScheme, isHovered: Bool) -> Color {
-        if isHovered { return Color.accentColor.opacity(0.95) }
+        if isHovered { return Color.accentColor.opacity(0.70) }
         return scheme == .dark
-            ? Color.white.opacity(0.14)
-            : Color.black.opacity(0.09)
+            ? Color.white.opacity(0.16)
+            : Color.white.opacity(0.50)
     }
 
     static func radialDivider(_ scheme: ColorScheme) -> Color {
         scheme == .dark
-            ? Color.white.opacity(0.11)
-            : Color.black.opacity(0.085)
+            ? Color.white.opacity(0.075)
+            : Color.white.opacity(0.44)
     }
 
     static func radialPrimaryText(_ scheme: ColorScheme, isHovered: Bool, isEmpty: Bool) -> Color {
-        if isHovered { return .white }
+        if isHovered { return scheme == .dark ? .white : Color.black.opacity(0.82) }
         if isEmpty {
             return scheme == .dark
                 ? Color.white.opacity(0.28)
@@ -170,7 +171,7 @@ enum AppTheme {
     }
 
     static func radialSecondaryText(_ scheme: ColorScheme, isHovered: Bool) -> Color {
-        if isHovered { return .white.opacity(0.88) }
+        if isHovered { return scheme == .dark ? .white.opacity(0.88) : Color.black.opacity(0.58) }
         return scheme == .dark
             ? Color.white.opacity(0.48)
             : Color.black.opacity(0.52)
@@ -184,12 +185,24 @@ enum AppTheme {
 
     static func radialShadow(_ scheme: ColorScheme) -> Color {
         scheme == .dark
-            ? Color.black.opacity(0.62)
-            : Color.black.opacity(0.20)
+            ? Color.black.opacity(0.34)
+            : Color.black.opacity(0.13)
     }
 
     static func radialMaterial(_ scheme: ColorScheme) -> Material {
-        scheme == .dark ? .ultraThinMaterial : .regularMaterial
+        scheme == .dark ? .thinMaterial : .ultraThinMaterial
+    }
+
+    static func radialOuterStroke(_ scheme: ColorScheme) -> Color {
+        scheme == .dark ? Color.white.opacity(0.18) : Color.white.opacity(0.70)
+    }
+
+    static func radialOuterGlow(_ scheme: ColorScheme) -> Color {
+        scheme == .dark ? Color.white.opacity(0.045) : Color.white.opacity(0.55)
+    }
+
+    static func radialInnerShadow(_ scheme: ColorScheme) -> Color {
+        scheme == .dark ? Color.black.opacity(0.24) : Color.black.opacity(0.06)
     }
 
     // MARK: - Radial Menu HUD Overlay Text (v2.4.4)
@@ -210,14 +223,14 @@ enum AppTheme {
 
     static func radialGlassButtonTint(_ scheme: ColorScheme) -> Color {
         scheme == .dark
-            ? Color.black.opacity(0.34)
-            : Color.white.opacity(0.62)
+            ? Color.black.opacity(0.22)
+            : Color.white.opacity(0.46)
     }
 
     static func radialGlassButtonStroke(_ scheme: ColorScheme) -> Color {
         scheme == .dark
-            ? Color.white.opacity(0.18)
-            : Color.white.opacity(0.72)
+            ? Color.white.opacity(0.20)
+            : Color.white.opacity(0.78)
     }
 
     static func radialGlassButtonInnerStroke(_ scheme: ColorScheme) -> Color {

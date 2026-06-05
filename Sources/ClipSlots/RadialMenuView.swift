@@ -55,7 +55,7 @@ private struct RadialGlassPill<Content: View>: View {
             .background(
                 Capsule()
                     .fill(AppTheme.radialGlassButtonTint(colorScheme))
-                    .background(.thinMaterial, in: Capsule())
+                    .background(AppTheme.radialMaterial(colorScheme), in: Capsule())
             )
             .overlay(
                 Capsule()
@@ -126,7 +126,19 @@ struct RadialMenuView: View {
                             .background(AppTheme.radialMaterial(colorScheme), in: Circle())
                             .overlay(
                                 Circle()
-                                    .stroke(Color.white.opacity(0.15), lineWidth: 0.6)
+                                    .stroke(AppTheme.radialOuterStroke(colorScheme), lineWidth: 0.9)
+                            )
+                            .overlay(
+                                Circle()
+                                    .stroke(AppTheme.radialOuterGlow(colorScheme), lineWidth: 1.2)
+                                    .blur(radius: 0.6)
+                                    .padding(1.2)
+                            )
+                            .overlay(
+                                Circle()
+                                    .stroke(AppTheme.radialInnerShadow(colorScheme), lineWidth: 7)
+                                    .blur(radius: 5)
+                                    .padding(6)
                             )
 
                         if displayCount > 0 {
@@ -178,6 +190,7 @@ struct RadialMenuView: View {
                 }
             }
             .frame(width: menuSize, height: menuSize)
+            .shadow(color: AppTheme.radialShadow(colorScheme), radius: 18, x: 0, y: 10)
             .compositingGroup()
 
             // v2.4.2: Slot group switcher
@@ -229,7 +242,7 @@ struct RadialMenuView: View {
             .background(
                 Capsule()
                     .fill(AppTheme.radialGlassButtonTint(colorScheme))
-                    .background(.thinMaterial, in: Capsule())
+                    .background(AppTheme.radialMaterial(colorScheme), in: Capsule())
             )
             .overlay(
                 Capsule()
@@ -326,6 +339,11 @@ struct RadialMenuView: View {
                 if isHovered {
                     PieSegmentShape(startAngle: startAngle, endAngle: endAngle, innerRadius: deadZoneRadius, outerRadius: outerRadius)
                         .stroke(AppTheme.radialStroke(colorScheme, isHovered: true), lineWidth: 2)
+                        .background(
+                            PieSegmentShape(startAngle: startAngle, endAngle: endAngle, innerRadius: deadZoneRadius, outerRadius: outerRadius)
+                                .fill(Color.white.opacity(colorScheme == .dark ? 0.045 : 0.22))
+                                .blur(radius: 0.4)
+                        )
                 }
 
                 segmentLabel(slot: slot, content: content, label: store.labels[slot] ?? "", angle: midAngle, midRadius: (deadZoneRadius + outerRadius) / 2)
@@ -357,6 +375,11 @@ struct RadialMenuView: View {
                 if isHovered {
                     PieSegmentShape(startAngle: startAngle, endAngle: endAngle, innerRadius: deadZoneRadius, outerRadius: outerRadius)
                         .stroke(AppTheme.radialStroke(colorScheme, isHovered: true), lineWidth: 2)
+                        .background(
+                            PieSegmentShape(startAngle: startAngle, endAngle: endAngle, innerRadius: deadZoneRadius, outerRadius: outerRadius)
+                                .fill(Color.white.opacity(colorScheme == .dark ? 0.045 : 0.22))
+                                .blur(radius: 0.4)
+                        )
                 }
 
                 specialSlotLabel(name: special.name, index: i + 1, isCurrent: isCurrent, angle: midAngle, midRadius: (deadZoneRadius + outerRadius) / 2)
@@ -432,10 +455,12 @@ struct RadialMenuView: View {
 
         Circle()
             .fill(AppTheme.radialCenterBackground(colorScheme))
+            .background(AppTheme.radialMaterial(colorScheme), in: Circle())
             .frame(width: deadZoneRadius * 2, height: deadZoneRadius * 2)
             .overlay(
-                Circle().stroke(AppTheme.radialDivider(colorScheme), lineWidth: 1)
+                Circle().stroke(AppTheme.radialOuterStroke(colorScheme), lineWidth: 0.8)
             )
+            .shadow(color: AppTheme.radialShadow(colorScheme), radius: 8, x: 0, y: 4)
             .overlay {
                 VStack(spacing: 4) {
                     if mode == .childSlots {
