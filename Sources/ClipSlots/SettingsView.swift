@@ -464,17 +464,13 @@ private final class ShortcutCaptureTextField: NSTextField {
         let value = Self.shortcutString(from: event, allowsSlotPlaceholder: allowsSlotPlaceholder)
         guard !value.isEmpty else { return }
         stringValue = value
-        pendingShortcut = value
-        // Important: only update visual text here. Do not call onShortcut yet.
-        // Mutating SwiftUI state during keyDown can re-render settings and leak draft
-        // shortcuts into active handlers before the user clicks Save.
+        pendingShortcut = nil
+        onShortcut?(value)
     }
 
     override func keyUp(with event: NSEvent) {
-        guard let value = pendingShortcut else { return }
-        pendingShortcut = nil
-        stringValue = value
-        onShortcut?(value)
+        // v2.7.31: no-op. Some key combinations never deliver keyUp to NSTextField
+        // reliably while modifiers are involved, which made shortcut saving impossible.
     }
 
     override func flagsChanged(with event: NSEvent) {

@@ -338,10 +338,19 @@ private extension SlotContent {
     var htmlPreviewSourceForPreview: String {
         if let url = primaryFileURL,
            ["html", "htm"].contains(url.pathExtension.lowercased()),
+           let text = try? String(contentsOf: url, encoding: .utf8) {
+            return text
+        }
+        if let url = primaryFileURL,
+           ["html", "htm"].contains(url.pathExtension.lowercased()),
            let text = try? String(contentsOf: url) {
             return text
         }
-        return preview
+        let p = preview.trimmingCharacters(in: .whitespacesAndNewlines)
+        if p == "[HTML]" || p.lowercased() == "html" {
+            return "<html><body><p>无法读取 HTML 原文</p></body></html>"
+        }
+        return p
     }
 
     var isImageLikeForRadialPreview: Bool {

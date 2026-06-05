@@ -205,9 +205,6 @@ struct ContentView: View {
             Divider()
         }
         .background(.regularMaterial)
-        .onChange(of: showingSettings) { showing in
-            store.isSettingsPresented = showing
-        }
         .popover(isPresented: $showingSettings) {
             SettingsView(config: store.config) { newConfig in
                 store.updateConfig(newConfig)
@@ -215,6 +212,11 @@ struct ContentView: View {
                 store.isSettingsPresented = false
             }
             .frame(width: 460, height: 610)
+        }
+        .onChange(of: showingSettings) { isPresented in
+            // v2.7.31: Settings popover is a modal hotkey-editing context.
+            // Business hotkeys must not fire while it is open.
+            store.isSettingsPresented = isPresented
         }
         .popover(isPresented: $showingSpecialSlotManagement) {
             SpecialSlotManagementView(store: store)
@@ -651,7 +653,7 @@ struct ContentView: View {
 
             Spacer()
 
-            Text("v2.7.30")
+            Text("v2.7.31")
                 .font(.caption2)
                 .foregroundColor(Color.secondary.opacity(0.65))
         }

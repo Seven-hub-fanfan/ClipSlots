@@ -216,13 +216,21 @@ private struct HTMLWebPreview: NSViewRepresentable {
         return webView
     }
     func updateNSView(_ nsView: WKWebView, context: Context) {
-        let wrapped = """
-        <!doctype html><html><head><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><style>html,body{margin:0;padding:8px;background:transparent;font:13px -apple-system,BlinkMacSystemFont,sans-serif;overflow:hidden;} img,video{max-width:100%;height:auto;} *{box-sizing:border-box;}</style></head><body>\(html)</body></html>
-        """
-        nsView.loadHTMLString(wrapped, baseURL: nil)
+        let source = html.trimmingCharacters(in: .whitespacesAndNewlines)
+        let finalHTML: String
+        if source.lowercased().contains("<html") || source.lowercased().contains("<!doctype") {
+            finalHTML = source
+        } else {
+            finalHTML = """
+            <!doctype html><html><head><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><style>html,body{margin:0;padding:8px;background:transparent;font:13px -apple-system,BlinkMacSystemFont,sans-serif;overflow:hidden;} img,video{max-width:100%;height:auto;} *{box-sizing:border-box;}</style></head><body>\(source)</body></html>
+            """
+        }
+        nsView.loadHTMLString(finalHTML, baseURL: context.coordinator.baseURL)
     }
-    func makeCoordinator() -> Coordinator { Coordinator() }
+    func makeCoordinator() -> Coordinator { Coordinator(baseURL: nil) }
     final class Coordinator: NSObject, WKNavigationDelegate {
+        let baseURL: URL?
+        init(baseURL: URL?) { self.baseURL = baseURL }
         func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction, decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) { decisionHandler(.allow) }
     }
 }
@@ -236,9 +244,18 @@ private extension SlotContent {
     var htmlPreviewSource: String {
         if let url = primaryFileURL,
            ["html", "htm"].contains(url.pathExtension.lowercased()),
+           let text = try? String(contentsOf: url, encoding: .utf8) {
+            return text
+        }
+        if let url = primaryFileURL,
+           ["html", "htm"].contains(url.pathExtension.lowercased()),
            let text = try? String(contentsOf: url) {
             return text
         }
-        return preview
+        let p = preview.trimmingCharacters(in: .whitespacesAndNewlines)
+        if p == "[HTML]" || p.lowercased() == "html" {
+            return "<html><body><p>无法读取 HTML 原文</p></body></html>"
+        }
+        return p
     }
 }
