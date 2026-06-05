@@ -143,8 +143,10 @@ struct NodeCanvasSheet: View {
                 }
             } label: {
                 Label("清除", systemImage: "trash")
-                    .foregroundStyle(.red)
+                    .frame(minWidth: 70)
             }
+            .buttonStyle(.borderedProminent)
+            .tint(.red)
             Button("完成") { dismiss() }
                 .buttonStyle(.borderedProminent)
         }
@@ -170,8 +172,10 @@ struct NodeCanvasSheet: View {
                 Button { store.applyBuiltInFullChainTemplate() } label: { Label("本组全联", systemImage: "link") }
                 Button { store.applyFullChainToCurrentPage() } label: { Label("本页全联", systemImage: "square.grid.2x2") }
                 Spacer()
-                Button(role: .destructive) { store.clearCurrentConnectionsWithoutConfirm() } label: { Label("清本组", systemImage: "trash") }
-                Button(role: .destructive) { store.clearCurrentPageConnections() } label: { Label("清本页", systemImage: "trash.slash") }
+                Button(role: .destructive) { store.clearCurrentConnectionsWithoutConfirm() } label: { Label("清本组", systemImage: "trash").frame(minWidth: 72) }
+                .buttonStyle(.borderedProminent).tint(.red)
+                Button(role: .destructive) { store.clearCurrentPageConnections() } label: { Label("清本页", systemImage: "trash.slash").frame(minWidth: 72) }
+                .buttonStyle(.borderedProminent).tint(.red)
                 Spacer()
             }
             .font(.caption)

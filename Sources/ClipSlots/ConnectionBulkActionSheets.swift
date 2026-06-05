@@ -57,17 +57,19 @@ struct ConnectionClearConfirmSheet: View {
         VStack(alignment: .leading, spacing: 18) {
             Text("清除连接")
                 .font(.system(size: 18, weight: .semibold))
-            Text("清除操作只会删除连接关系，不会删除槽位内容。请选择清除范围。")
+                .frame(maxWidth: .infinity, alignment: .leading)
+            Text("只删除连接关系，不删除槽位内容。")
                 .font(.callout)
                 .foregroundColor(.secondary)
+                .frame(maxWidth: .infinity, alignment: .leading)
 
             VStack(spacing: 12) {
-                Button("清除当前槽位组连接", role: .destructive) { onClearCurrentGroup() }
-                    .buttonStyle(.borderedProminent)
-                Button("清除当前页面全部槽位组连接", role: .destructive) { onClearCurrentPage() }
-                    .buttonStyle(.bordered)
-                Button("清除全部页面 / 全部槽位组连接", role: .destructive) { onClearAll() }
-                    .buttonStyle(.bordered)
+                Button(role: .destructive) { onClearCurrentGroup() } label: { Text("清当前组").frame(maxWidth: .infinity, alignment: .leading) }
+                .buttonStyle(.borderedProminent).tint(.red)
+                Button(role: .destructive) { onClearCurrentPage() } label: { Text("清当前页").frame(maxWidth: .infinity, alignment: .leading) }
+                .buttonStyle(.bordered).tint(.red)
+                Button(role: .destructive) { onClearAll() } label: { Text("清全部").frame(maxWidth: .infinity, alignment: .leading) }
+                .buttonStyle(.bordered).tint(.red)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
 
@@ -77,5 +79,6 @@ struct ConnectionClearConfirmSheet: View {
             HStack { Spacer(); Button("取消") { onCancel() } }
         }
         .padding(24)
+        .frame(width: 390, alignment: .leading)
     }
 }

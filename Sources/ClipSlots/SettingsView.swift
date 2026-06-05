@@ -157,9 +157,9 @@ struct SettingsView: View {
                     .pickerStyle(.segmented)
                 }
 
-                shortcutInput(title: "保存快捷键", subtitle: "将当前剪贴板内容保存到指定槽位", placeholder: "cmd+option+{n}", text: $saveKey, preview: saveKey.replacingOccurrences(of: "{n}", with: "1"))
-                shortcutInput(title: "粘贴快捷键", subtitle: "从指定槽位粘贴内容", placeholder: "cmd+{n}", text: $pasteKey, preview: pasteKey.replacingOccurrences(of: "{n}", with: "1"))
-                shortcutInput(title: "圆盘菜单快捷键", subtitle: "在鼠标位置弹出圆盘选择器", placeholder: "cmd+space", text: $radialKey, preview: radialKey)
+                shortcutRecorder(title: "保存快捷键", subtitle: "按下组合键，支持槽位编号占位 {n}", text: $saveKey, preview: saveKey.replacingOccurrences(of: "{n}", with: "1"), allowsSlotPlaceholder: true)
+                shortcutRecorder(title: "粘贴快捷键", subtitle: "按下组合键，支持槽位编号占位 {n}", text: $pasteKey, preview: pasteKey.replacingOccurrences(of: "{n}", with: "1"), allowsSlotPlaceholder: true)
+                shortcutRecorder(title: "圆盘菜单快捷键", subtitle: "默认 Ctrl+Space；按组合键即可修改", text: $radialKey, preview: radialKey, allowsSlotPlaceholder: false)
             }
         }
     }
@@ -219,7 +219,7 @@ struct SettingsView: View {
             VStack(alignment: .leading, spacing: 6) {
                 helpRow("修饰键", "cmd, option, ctrl, shift")
                 helpRow("普通键", "0-9, a-z, f1-f12, space, tab, 方向键")
-                helpRow("槽位占位符", "{n} 代表槽位编号，例如 ctrl+{n}")
+                helpRow("槽位占位符", "{n} 代表槽位编号，例如 cmd+{n}。录入保存/粘贴快捷键时按数字键会自动转成 {n}。")
                 helpRow("槽位组切换", "Cmd+← → 在当前页面内的槽位组间循环切换")
             }
         }
@@ -324,7 +324,7 @@ struct SettingsView: View {
         slots = 9
         saveKey = "cmd+option+{n}"
         pasteKey = "cmd+{n}"
-        radialKey = "cmd+space"
+        radialKey = "ctrl+space"
         verbose = true
     }
 
@@ -379,5 +379,100 @@ struct SettingsSectionCard<Content: View>: View {
         .frame(maxWidth: 560, alignment: .leading)
         .background(RoundedRectangle(cornerRadius: 18).fill(Color(NSColor.controlBackgroundColor)))
         .overlay(RoundedRectangle(cornerRadius: 18).stroke(Color.white.opacity(0.08), lineWidth: 1))
+    }
+}
+
+// MARK: - v2.7.25 Shortcut Recorder
+
+private func shortcutRecorder(title: String, subtitle: String, text: Binding<String>, preview: String, allowsSlotPlaceholder: Bool) -> some View {
+    VStack(alignment: .leading, spacing: 8) {
+        HStack(alignment: .center, spacing: 12) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title).font(.subheadline)
+                Text(subtitle).font(.caption).foregroundColor(.secondary)
+            }
+            Spacer()
+            Text(preview.isEmpty ? "未设置" : preview)
+                .font(.system(size: 11, weight: .medium, design: .monospaced))
+                .foregroundColor(.secondary)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 4)
+                .background(Capsule().fill(Color(NSColor.controlBackgroundColor)))
+        }
+
+        ShortcutCaptureField(shortcut: text, allowsSlotPlaceholder: allowsSlotPlaceholder)
+            .frame(height: 38)
+    }
+}
+
+private struct ShortcutCaptureField: NSViewRepresentable {
+    @Binding var shortcut: String
+    let allowsSlotPlaceholder: Bool
+
+    func makeNSView(context: Context) -> ShortcutCaptureTextField {
+        let field = ShortcutCaptureTextField()
+        field.isEditable = false
+        field.isSelectable = false
+        field.isBordered = false
+        field.backgroundColor = .controlBackgroundColor
+        field.focusRingType = .none
+        field.font = .monospacedSystemFont(ofSize: 14, weight: .medium)
+        field.alignment = .left
+        field.onShortcut = { value in shortcut = value }
+        field.allowsSlotPlaceholder = allowsSlotPlaceholder
+        field.stringValue = shortcut
+        return field
+    }
+
+    func updateNSView(_ nsView: ShortcutCaptureTextField, context: Context) {
+        nsView.allowsSlotPlaceholder = allowsSlotPlaceholder
+        if nsView.stringValue != shortcut { nsView.stringValue = shortcut }
+    }
+}
+
+private final class ShortcutCaptureTextField: NSTextField {
+    var onShortcut: ((String) -> Void)?
+    var allowsSlotPlaceholder = false
+
+    override var acceptsFirstResponder: Bool { true }
+    override func mouseDown(with event: NSEvent) {
+        window?.makeFirstResponder(self)
+    }
+    override func keyDown(with event: NSEvent) {
+        let value = Self.shortcutString(from: event, allowsSlotPlaceholder: allowsSlotPlaceholder)
+        guard !value.isEmpty else { return }
+        stringValue = value
+        onShortcut?(value)
+    }
+
+    private static func shortcutString(from event: NSEvent, allowsSlotPlaceholder: Bool) -> String {
+        var parts: [String] = []
+        let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        if flags.contains(.command) { parts.append("cmd") }
+        if flags.contains(.control) { parts.append("ctrl") }
+        if flags.contains(.option) { parts.append("option") }
+        if flags.contains(.shift) { parts.append("shift") }
+
+        let key = normalizedKey(event)
+        guard !key.isEmpty else { return "" }
+        if allowsSlotPlaceholder, key.rangeOfCharacter(from: .decimalDigits) != nil {
+            parts.append("{n}")
+        } else {
+            parts.append(key)
+        }
+        return parts.joined(separator: "+")
+    }
+
+    private static func normalizedKey(_ event: NSEvent) -> String {
+        switch Int(event.keyCode) {
+        case 49: return "space"
+        case 48: return "tab"
+        case 123: return "left"
+        case 124: return "right"
+        case 125: return "down"
+        case 126: return "up"
+        default:
+            return (event.charactersIgnoringModifiers ?? "").lowercased()
+        }
     }
 }

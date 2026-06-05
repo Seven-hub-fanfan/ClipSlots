@@ -112,6 +112,7 @@ final class SlotStoreObservable: ObservableObject {
 
     // v2.4 Page state
     @Published var pages: [SlotPage] = []
+    @Published private(set) var lastClearedSlotsSnapshot: [Int: SlotContent] = [:]
     @Published var currentPageId: String = "default_page"
     @Published var currentPage: SlotPage?
 
@@ -454,7 +455,38 @@ final class SlotStoreObservable: ObservableObject {
 
     // MARK: - Clear All Slots
 
+    // MARK: - v2.7.25 Undo
+
+    func undoLastClearIfPossible() {
+        guard !lastClearedSlotsSnapshot.isEmpty else { return }
+        for (slot, content) in lastClearedSlotsSnapshot {
+            slots[slot] = content
+        }
+        let activeId = currentSpecialSlotId
+        for (slot, content) in lastClearedSlotsSnapshot {
+            specialStorage.set(slot, content: content, in: activeId)
+        }
+        showFloatingNotice(FloatingNotice(title: "已撤回删除", subtitle: "恢复 \(lastClearedSlotsSnapshot.count) 个槽位", iconName: "arrow.uturn.backward", kind: .success))
+        lastClearedSlotsSnapshot.removeAll()
+    }
+
+    private func rememberForUndo(slot: Int) {
+        let content = slots[slot] ?? SlotContent()
+        guard !content.isEmpty else { return }
+        lastClearedSlotsSnapshot = [slot: content]
+    }
+
+    private func rememberForUndo(slots slotIds: [Int]) {
+        var snapshot: [Int: SlotContent] = [:]
+        for slot in slotIds {
+            let content = slots[slot] ?? SlotContent()
+            if !content.isEmpty { snapshot[slot] = content }
+        }
+        lastClearedSlotsSnapshot = snapshot
+    }
+
     func clearAllSlotsInCurrentSpecialSlotWithConfirmation() {
+        rememberForUndo(slots: Array(1...max(1, config.slots)))
         if !specialSlotSettings.confirmBeforeClearAllSlots {
             clearAllSlotsInCurrentSpecialSlot()
             return
@@ -2162,6 +2194,7 @@ final class SlotStoreObservable: ObservableObject {
     }
 
     func clearSlotWithConfirmation(_ slot: Int) {
+        rememberForUndo(slot: slot)
         if !specialSlotSettings.confirmBeforeClearSingleSlot {
             clearSlot(slot)
             return

@@ -6,7 +6,7 @@ struct AppConfig: Codable {
     // v2.7.23: default shortcuts use Cmd. Users can still change them in Settings.
     var saveKey: String = "cmd+option+{n}"
     var pasteKey: String = "cmd+{n}"
-    var radialKey: String = "cmd+space"
+    var radialKey: String = "ctrl+space"
     var hotkeyTemplate: HotkeyTemplate = HotkeyTemplate(kind: .numeric)
 
     private static let configURL = FileManager.default.homeDirectoryForCurrentUser

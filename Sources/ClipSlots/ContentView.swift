@@ -360,7 +360,8 @@ struct ContentView: View {
             } label: {
                 Label("清空", systemImage: "trash")
             }
-            .buttonStyle(.bordered)
+            .buttonStyle(.borderedProminent)
+            .tint(.red)
             .controlSize(.regular)
             .help("清空当前槽位组中的全部槽位")
         }
@@ -646,7 +647,7 @@ struct ContentView: View {
 
             Spacer()
 
-            Text("v2.7.24")
+            Text("v2.7.25")
                 .font(.caption2)
                 .foregroundColor(Color.secondary.opacity(0.65))
         }
