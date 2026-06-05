@@ -39,18 +39,20 @@ struct RadialPreviewPanel: View {
             Divider()
 
             ZStack {
-                Color.clear
+                // v2.7.16: immediate readable surface. No animation, no transparent
+                // overlay. Text/file previews need an opaque panel so the browser or
+                // document behind the floating window cannot reduce readability.
+                Color(NSColor.textBackgroundColor)
                 content
                     .scaleEffect(scale)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                     .clipped()
             }
-            // v2.7.15: remove transparent watermark / placeholder overlay.
-            .background(Color.clear)
         }
         .frame(minWidth: 260, minHeight: 220)
-        // v2.7.13: no material background, no rounded container, no shadow.
-        .background(Color.clear)
+        // v2.7.16: keep the window borderless/shadowless, but do not keep the content
+        // transparent. A solid background is required for readable text preview.
+        .background(Color(NSColor.textBackgroundColor))
     }
 }
 
@@ -68,15 +70,8 @@ struct RadialLivePreviewContent: View {
                 RadialUniversalPreview(content: content)
                     .id(slot)
             } else {
-                VStack(spacing: 8) {
-                    Image(systemName: "eye")
-                        .font(.system(size: 30))
-                        .foregroundColor(.secondary.opacity(0.72))
-                    Text("悬停槽位查看预览")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                // v2.7.16: remove the watermark-like empty placeholder completely.
+                Color(NSColor.textBackgroundColor)
             }
         }
         .onReceive(NotificationCenter.default.publisher(for: .radialMenuHoveredSlotChanged)) { note in
@@ -143,12 +138,14 @@ private struct RadialTextPreview: View {
     var body: some View {
         ScrollView {
             Text(text.isEmpty ? "空文本" : text)
-                .font(.system(size: 13, design: .monospaced))
-                .foregroundColor(.primary)
+                .font(.system(size: 14, weight: .regular, design: .monospaced))
+                .foregroundColor(Color(NSColor.labelColor))
+                .lineSpacing(4)
                 .textSelection(.enabled)
                 .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(14)
+                .padding(16)
         }
+        .background(Color(NSColor.textBackgroundColor))
     }
 }
 
@@ -179,6 +176,7 @@ private struct RadialFileCardPreview: View {
         }
         .padding(18)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(Color(NSColor.textBackgroundColor))
     }
 }
 
