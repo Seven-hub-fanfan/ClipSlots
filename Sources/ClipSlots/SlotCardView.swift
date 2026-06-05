@@ -48,6 +48,12 @@ struct SlotCardView: View {
             } else if content.isVideoFile, let url = content.primaryFileURL {
                 InlineSlotVideoPreview(url: url)
                     .clipShape(RoundedRectangle(cornerRadius: AppTheme.smallCornerRadius, style: .continuous))
+                    .contentShape(RoundedRectangle(cornerRadius: AppTheme.smallCornerRadius, style: .continuous))
+                    .onTapGesture {
+                        // v2.7.34: restore full-size preview for video cards.
+                        showingPreview = true
+                    }
+                    .help("点击查看视频大图预览")
             } else {
                 SlotThumbnailView(content: content, specialSlotId: specialSlotId, slot: slot)
                     .clipShape(RoundedRectangle(cornerRadius: AppTheme.smallCornerRadius, style: .continuous))
@@ -543,7 +549,9 @@ private struct SafeInlineAVPlayerView: NSViewRepresentable {
     func makeNSView(context: Context) -> AVPlayerView {
         let view = AVPlayerView()
         view.controlsStyle = .none
-        view.videoGravity = .resizeAspectFill
+        // v2.7.34: show the complete video composition in the card thumbnail.
+        // resizeAspectFill cropped faces/edges and made the thumbnail look incomplete.
+        view.videoGravity = .resizeAspect
         view.player = player
         return view
     }

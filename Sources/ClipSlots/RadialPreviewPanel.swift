@@ -102,7 +102,7 @@ private struct RadialUniversalPreview: View {
             } else if let url = content.primaryFileURL {
                 RadialFileCardPreview(url: url, icon: content.isDirectoryLike ? "folder.fill" : "doc.fill", title: content.isDirectoryLike ? "文件夹" : "文件")
             } else {
-                RadialTextPreview(text: content.preview)
+                RadialTextPreview(text: content.bestTextForPreview)
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -146,12 +146,13 @@ private struct RadialTextPreview: View {
         // The card size fits the text content, not the full window.
         ScrollView {
             Text(text.isEmpty ? "空文本" : text)
-                .font(.system(size: 14, weight: .regular, design: .monospaced))
+                .font(.system(size: 13, weight: .regular, design: .monospaced))
                 .foregroundColor(Color(NSColor.labelColor))
-                .lineSpacing(4)
+                .lineSpacing(3)
+                .fixedSize(horizontal: false, vertical: true)
                 .textSelection(.enabled)
                 .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(16)
+                .padding(14)
         }
         .background(Color(NSColor.textBackgroundColor))
         .cornerRadius(12)
@@ -345,6 +346,19 @@ private extension SlotContent {
 // MARK: - SlotContent Helper
 
 private extension SlotContent {
+    var bestTextForPreview: String {
+        // v2.7.34: radial menu should preview the real stored text, not only the
+        // short card summary. This fixes previews showing only "1. ... 2..."
+        // or "[HTML]" when the underlying plainText/htmlSource exists.
+        if let htmlSource, !htmlSource.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return htmlSource.strippingHTMLTagsForClipSlotsPreview()
+        }
+        if let plainText, !plainText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return plainText
+        }
+        return preview
+    }
+
     var isImageLikeForRadialPreview: Bool {
         inlineImage != nil || isImageFile
     }
@@ -353,5 +367,19 @@ private extension SlotContent {
         guard let url = primaryFileURL else { return false }
         var isDir: ObjCBool = false
         return FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir) && isDir.boolValue
+    }
+}
+
+// MARK: - v2.7.34 String HTML Stripping
+
+private extension String {
+    func strippingHTMLTagsForClipSlotsPreview() -> String {
+        replacingOccurrences(of: "<[^>]+>", with: " ", options: .regularExpression)
+            .replacingOccurrences(of: "&nbsp;", with: " ")
+            .replacingOccurrences(of: "&lt;", with: "<")
+            .replacingOccurrences(of: "&gt;", with: ">")
+            .replacingOccurrences(of: "&amp;", with: "&")
+            .replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 }

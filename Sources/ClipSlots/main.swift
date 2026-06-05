@@ -3117,3 +3117,23 @@ private extension AppConfig {
         return copy
     }
 }
+
+// MARK: - v2.7.34 HTML String Helpers
+
+private extension String {
+    func clipSlotsPlainTextFromHTML() -> String {
+        replacingOccurrences(of: "<[^>]+>", with: " ", options: .regularExpression)
+            .replacingOccurrences(of: "&nbsp;", with: " ")
+            .replacingOccurrences(of: "&lt;", with: "<")
+            .replacingOccurrences(of: "&gt;", with: ">")
+            .replacingOccurrences(of: "&amp;", with: "&")
+            .replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    func clipSlotsHTMLPreviewSummary(fallback: String) -> String {
+        let text = clipSlotsPlainTextFromHTML()
+        if !text.isEmpty { return text }
+        return fallback.isEmpty ? "[HTML]" : fallback
+    }
+}
