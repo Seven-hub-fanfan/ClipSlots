@@ -1647,6 +1647,29 @@ final class SlotStoreObservable: ObservableObject {
         return .empty
     }
 
+    // MARK: - v2.7.18 Paste All Slots In Current Group
+    // Paste all non-empty slots in the current slot group in slot order.
+    // This is triggered from the radial menu bottom pill "全部粘贴".
+    func pasteAllSlotsInCurrentGroup() {
+        let maxSlot = max(1, config.slots)
+        let nonEmptySlots = (1...maxSlot).filter { slot in
+            !(slots[slot] ?? SlotContent()).isEmpty
+        }
+
+        guard !nonEmptySlots.isEmpty else {
+            showFloatingNotice(FloatingNotice(
+                title: "当前槽位组为空",
+                subtitle: "没有可粘贴内容",
+                iconName: "tray",
+                kind: .warning
+            ))
+            return
+        }
+
+        // Prefer existing chain-aware sequential paste if available.
+        pasteSlotChainSequentially(nonEmptySlots)
+    }
+
     // MARK: - v2.7.4 Mixed Chain Sequential Paste
 
     func pasteSlotChainSequentially(_ slots: [Int]) {
