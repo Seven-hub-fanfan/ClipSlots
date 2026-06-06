@@ -71,6 +71,14 @@ final class RadialMenuWindowController {
                 if self?.isPreviewPinned != true { self?.dismissPreviewPanel() }
                 onDismiss()
             },
+            onOrderedPaste: { [weak self] in
+                // v2.7.49: sequential paste for spreadsheet cells.
+                // Confirmation is handled inside pasteOrderedSlotsWithConfirmation.
+                store.pasteOrderedSlotsWithConfirmation()
+                self?.dismissRadialOnly()
+                if self?.isPreviewPinned != true { self?.dismissPreviewPanel() }
+                onDismiss()
+            },
             onDismiss: { [weak self] in
                 self?.dismissRadialOnly()
                 if self?.isPreviewPinned != true { self?.dismissPreviewPanel() } else { self?.persistPreviewFrame() }

@@ -643,6 +643,179 @@ final class SlotStoreObservable: ObservableObject {
         }
     }
 
+    // MARK: - v2.7.49 Ordered Paste across groups/pages
+
+    private struct OrderedPasteUnit {
+        let pageId: String
+        let pageName: String
+        let groupId: String
+        let groupName: String
+        let slot: Int
+        let content: SlotContent
+        let chainDescription: String?
+    }
+
+    private func orderedPasteUnitsAcrossPages(startingAtPageId: String? = nil, startingAtGroupId: String? = nil) -> [OrderedPasteUnit] {
+        let sortedPages = pages.sorted { $0.order < $1.order }
+        guard !sortedPages.isEmpty else { return [] }
+        let startPageId = startingAtPageId ?? currentPageId
+        let startPageIndex = sortedPages.firstIndex { $0.id == startPageId } ?? 0
+        var units: [OrderedPasteUnit] = []
+
+        for pageOffset in 0..<sortedPages.count {
+            let page = sortedPages[(startPageIndex + pageOffset) % sortedPages.count]
+            let pageGroups = specialSlots
+                .filter { $0.pageId == page.id }
+                .sorted { $0.order < $1.order }
+            guard !pageGroups.isEmpty else { continue }
+
+            let groupStartIndex: Int
+            if page.id == startPageId, let startingAtGroupId {
+                groupStartIndex = pageGroups.firstIndex { $0.id == startingAtGroupId } ?? 0
+            } else {
+                groupStartIndex = 0
+            }
+
+            for groupOffset in 0..<pageGroups.count {
+                let group = pageGroups[(groupStartIndex + groupOffset) % pageGroups.count]
+                units.append(contentsOf: orderedPasteUnitsForGroup(page: page, group: group))
+            }
+        }
+        return units
+    }
+
+    private func orderedPasteUnitsForGroup(page: SlotPage, group: SpecialSlot) -> [OrderedPasteUnit] {
+        let connectionMap = SlotConnectionStorage.shared.load(pageId: page.id, groupId: group.id)
+        if isSlotConnectionEnabled, !connectionMap.edges.isEmpty {
+            let starts = orderedChainStartSlots(connectionMap: connectionMap)
+            let chained = starts.flatMap { start -> [OrderedPasteUnit] in
+                connectionMap.chainSlots(startingAt: start).compactMap { slot -> OrderedPasteUnit? in
+                    let content = specialStorage.get(slot, in: group.id)
+                    guard !content.isEmpty else { return nil }
+                    return OrderedPasteUnit(
+                        pageId: page.id,
+                        pageName: page.name,
+                        groupId: group.id,
+                        groupName: group.name,
+                        slot: slot,
+                        content: content,
+                        chainDescription: compactChainDescription(connectionMap.chainSlots(startingAt: start))
+                    )
+                }
+            }
+            if !chained.isEmpty { return chained }
+        }
+
+        return (1...config.slots).compactMap { slot -> OrderedPasteUnit? in
+            let content = specialStorage.get(slot, in: group.id)
+            guard !content.isEmpty else { return nil }
+            return OrderedPasteUnit(
+                pageId: page.id,
+                pageName: page.name,
+                groupId: group.id,
+                groupName: group.name,
+                slot: slot,
+                content: content,
+                chainDescription: nil
+            )
+        }
+    }
+
+    private func orderedChainStartSlots(connectionMap: SlotConnectionMap) -> [Int] {
+        let fromSlots = Set(connectionMap.edges.map { $0.fromSlot })
+        let toSlots = Set(connectionMap.edges.map { $0.toSlot })
+        let starts = fromSlots.subtracting(toSlots).sorted()
+        return starts.isEmpty ? fromSlots.sorted() : starts
+    }
+
+    func pasteOrderedSlotsWithConfirmation() {
+        let units = orderedPasteUnitsAcrossPages(startingAtPageId: currentPageId, startingAtGroupId: currentSpecialSlotId)
+        guard !units.isEmpty else {
+            showAlert(message: "没有可按序粘贴的内容")
+            return
+        }
+
+        let connectedGroups = Set(units.compactMap { $0.chainDescription == nil ? nil : $0.groupId }).count
+        let alert = NSAlert()
+        alert.messageText = "按序粘贴到表格选区？"
+        alert.informativeText = "将从当前槽位组开始，按页面/槽位组顺序粘贴 \(units.count) 个内容；有节点连接的槽位组会自动按节点链展开。\(connectedGroups > 0 ? "\n检测到 \(connectedGroups) 个节点槽位组。" : "")\n\n请先在飞书表格或 Excel 中选中一行/一列/多行多列区域。"
+        alert.addButton(withTitle: "开始按序粘贴")
+        alert.addButton(withTitle: "取消")
+        let response = alert.runModal()
+        guard response == .alertFirstButtonReturn else { return }
+        pasteOrderedSlotsFromUI()
+    }
+
+    func pasteOrderedSlotsFromUI() {
+        guard let target = lastNonClipSlotsApp else {
+            showAlert(message: "没有可粘贴的目标应用。请先切换到飞书表格或 Excel，选中区域后再打开圆盘菜单。")
+            return
+        }
+        pasteOrderedSlotsToApp(targetApp: target)
+    }
+
+    func pasteOrderedSlotsToApp(targetApp: NSRunningApplication?) {
+        let units = orderedPasteUnitsAcrossPages(startingAtPageId: currentPageId, startingAtGroupId: currentSpecialSlotId)
+        guard !units.isEmpty else { return }
+        guard AXIsProcessTrusted() else { promptAccessibilityPermissionIfNeeded(); return }
+        cancelPendingClipboardRestore()
+        let cleanTarget: NSRunningApplication? = isSelfApp(targetApp) ? lastNonClipSlotsApp : (targetApp ?? lastNonClipSlotsApp)
+        let previous = clipboard.capture()
+        let startSequence = { [weak self] in
+            guard let self else { return }
+            self.pasteOrderedUnitsSequentially(units, index: 0, previousClipboard: previous)
+        }
+        if let app = cleanTarget {
+            app.activate(options: [.activateIgnoringOtherApps])
+            waitUntilFrontmost(app, timeout: 1.2) { _ in startSequence() }
+        } else {
+            startSequence()
+        }
+    }
+
+    private func pasteOrderedUnitsSequentially(_ units: [OrderedPasteUnit], index: Int, previousClipboard: SlotContent) {
+        guard index < units.count else {
+            let restoreWorkItem = DispatchWorkItem { [weak self] in
+                guard let self else { return }
+                _ = self.clipboard.restore(previousClipboard)
+                self.pendingClipboardRestore = nil
+                self.pendingClipboardRestoreContent = nil
+                self.showFloatingNotice(FloatingNotice(title: "按序粘贴完成", subtitle: "已粘贴 \(units.count) 个内容", iconName: "tablecells.fill", kind: .success))
+            }
+            pendingClipboardRestoreContent = previousClipboard
+            pendingClipboardRestore = restoreWorkItem
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.8, execute: restoreWorkItem)
+            return
+        }
+
+        let unit = units[index]
+        guard clipboard.restore(unit.content) else {
+            NSLog("[ClipSlots] orderedPaste restore failed page=\(unit.pageId) group=\(unit.groupId) slot=\(unit.slot)")
+            pasteOrderedUnitsSequentially(units, index: index + 1, previousClipboard: previousClipboard)
+            return
+        }
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.075) { [weak self] in
+            guard let self else { return }
+            self.sendPasteKeystroke()
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.11) { [weak self] in
+                guard let self else { return }
+                self.moveToNextSpreadsheetCell()
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.035) { [weak self] in
+                    self?.pasteOrderedUnitsSequentially(units, index: index + 1, previousClipboard: previousClipboard)
+                }
+            }
+        }
+    }
+
+    private func moveToNextSpreadsheetCell() {
+        let source = CGEventSource(stateID: .hidSystemState)
+        let tabDown = CGEvent(keyboardEventSource: source, virtualKey: 48, keyDown: true)
+        let tabUp = CGEvent(keyboardEventSource: source, virtualKey: 48, keyDown: false)
+        tabDown?.post(tap: .cghidEventTap)
+        tabUp?.post(tap: .cghidEventTap)
+    }
+
     func pasteAllSlotsWithConfirmation() {
         let items = orderedNonEmptySlots()
 
