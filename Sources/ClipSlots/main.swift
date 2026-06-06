@@ -2055,6 +2055,40 @@ final class SlotStoreObservable: ObservableObject {
         }
     }
 
+    // MARK: - v2.7.52 Batch Apply Full-Chain Template
+
+    func applyFullChainTemplateToAllGroupsInCurrentPage() {
+        let appVersion = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "2.7.52"
+        let template = SlotConnectionTemplateService.makeFullTenSlotChainTemplate(appVersion: appVersion)
+        let map = SlotConnectionMap(edges: template.edges)
+        let groups = currentPageSlotGroups
+        guard !groups.isEmpty else {
+            showToast("当前页面没有槽位组")
+            return
+        }
+        for group in groups {
+            SlotConnectionStorage.shared.save(map, pageId: currentPageId, groupId: group.id)
+        }
+        currentConnectionMap = map
+        showToast("已批量应用到本页 \(groups.count) 个槽位组")
+    }
+
+    func applyFullChainTemplateToAllPagesAndGroups() {
+        let appVersion = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "2.7.52"
+        let template = SlotConnectionTemplateService.makeFullTenSlotChainTemplate(appVersion: appVersion)
+        let map = SlotConnectionMap(edges: template.edges)
+        var count = 0
+        for page in pages {
+            let groups = specialSlots.filter { $0.pageId == page.id }
+            for group in groups {
+                SlotConnectionStorage.shared.save(map, pageId: page.id, groupId: group.id)
+                count += 1
+            }
+        }
+        currentConnectionMap = map
+        showToast("已批量应用到全部页面 \(count) 个槽位组")
+    }
+
     private func confirmReplaceCurrentConnections() -> Bool {
         let alert = NSAlert()
         alert.messageText = "替换当前连接？"

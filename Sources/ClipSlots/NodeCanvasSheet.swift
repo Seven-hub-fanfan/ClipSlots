@@ -176,6 +176,22 @@ struct NodeCanvasSheet: View {
                 .buttonStyle(.borderedProminent).tint(.red)
                 Button(role: .destructive) { store.clearCurrentPageConnections() } label: { Label("清本页", systemImage: "trash.slash").frame(minWidth: 72) }
                 .buttonStyle(.borderedProminent).tint(.red)
+                Menu {
+                    Button {
+                        store.applyFullChainTemplateToAllGroupsInCurrentPage()
+                    } label: {
+                        Label("批量应用于全部组", systemImage: "folder.badge.gearshape")
+                    }
+                    Button {
+                        store.applyFullChainTemplateToAllPagesAndGroups()
+                    } label: {
+                        Label("批量应用于全部页", systemImage: "square.grid.3x3.topleft.filled")
+                    }
+                } label: {
+                    Label("批量应用", systemImage: "wand.and.stars")
+                }
+                .menuStyle(.borderlessButton)
+                .buttonStyle(.borderedProminent)
                 Spacer()
             }
             .font(.caption)
