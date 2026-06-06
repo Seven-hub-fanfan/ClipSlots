@@ -10,7 +10,10 @@ struct ContentView: View {
     @State private var waterRipplePoint: CGPoint = .zero
     @Environment(\.colorScheme) private var colorScheme
 
-    @AppStorage("appearanceMode") private var appearanceModeRaw = ThemeMode.system.rawValue
+    // v2.7.47: new installs should open in dark mode by default.
+// AppStorage's default only applies when UserDefaults has no value, so existing
+// users who already selected system/light/dark are not overwritten.
+@AppStorage("appearanceMode") private var appearanceModeRaw = ThemeMode.dark.rawValue
 
     // v2.5: Search state
     @State private var searchText: String = ""
@@ -649,7 +652,7 @@ struct ContentView: View {
             // Connection stays as a separate tool and is moved to the right side.
             connectionToolButton
 
-            Text("v2.7.46")
+            Text("v2.7.47")
                 .font(.caption2)
                 .foregroundColor(Color.secondary.opacity(0.65))
         }

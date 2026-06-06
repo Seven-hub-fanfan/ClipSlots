@@ -24,7 +24,9 @@ struct SettingsView: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(\.colorScheme) private var colorScheme
 
-    @AppStorage("appearanceMode") private var appearanceModeRaw = ThemeMode.system.rawValue
+    // v2.7.47: align Settings with first-launch default dark mode.
+    // Existing persisted appearanceMode remains unchanged.
+    @AppStorage("appearanceMode") private var appearanceModeRaw = ThemeMode.dark.rawValue
 
     private var appearanceModeBinding: Binding<ThemeMode> {
         Binding(
@@ -115,7 +117,7 @@ struct SettingsView: View {
                     }
                 }
                 .pickerStyle(.segmented)
-                Text("默认跟随系统设置，也可以强制使用浅色或深色模式。")
+                Text("首次安装默认使用深色模式；也可以改为浅色或跟随系统。")
                     .font(.caption)
                     .foregroundColor(.secondary)
             }
