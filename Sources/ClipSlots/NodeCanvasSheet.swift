@@ -178,17 +178,17 @@ struct NodeCanvasSheet: View {
                 .buttonStyle(.borderedProminent).tint(.red)
                 Menu {
                     Button {
-                        store.applyFullChainTemplateToAllGroupsInCurrentPage()
+                        store.applyCurrentConnectionMapToAllGroupsInCurrentPage()
                     } label: {
                         Label("批量应用于全部组", systemImage: "folder.badge.gearshape")
                     }
                     Button {
-                        store.applyFullChainTemplateToAllPagesAndGroups()
+                        store.applyCurrentConnectionMapToAllPagesAndGroups()
                     } label: {
                         Label("批量应用于全部页", systemImage: "square.grid.3x3.topleft.filled")
                     }
                 } label: {
-                    Label("批量应用", systemImage: "wand.and.stars")
+                    Label("批量应用当前连接", systemImage: "wand.and.stars")
                 }
                 .menuStyle(.borderlessButton)
                 .buttonStyle(.borderedProminent)
