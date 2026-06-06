@@ -6,8 +6,9 @@ struct ContentView: View {
     @State private var showingSpecialSlotManagement = false
     @State private var showingHotkeyTemplatePopover = false
     @State private var showingConnectionFullscreen = false
-    @State private var themeRippleActive = false
-    @State private var themeRipplePoint: CGPoint = .zero
+    @State private var fluidTransitionActive = false
+    @State private var fluidTransitionSeed = UUID()
+    @State private var fluidTransitionPoint: CGPoint = .zero
     @Environment(\.colorScheme) private var colorScheme
 
     @AppStorage("appearanceMode") private var appearanceModeRaw = ThemeMode.system.rawValue
@@ -25,8 +26,9 @@ struct ContentView: View {
     @State private var showingNodeCanvas = false
 
     private func cycleAppearanceMode(from point: CGPoint = CGPoint(x: 1180, y: 54)) {
-        themeRipplePoint = point
-        withAnimation(.easeOut(duration: 0.18)) { themeRippleActive = true }
+        fluidTransitionPoint = point
+        fluidTransitionSeed = UUID()
+        withAnimation(.easeOut(duration: 0.16)) { fluidTransitionActive = true }
         let current = ThemeMode(rawValue: appearanceModeRaw) ?? .system
         switch current {
         // v2.7.41: toolbar theme switch only toggles light/dark.
@@ -35,8 +37,8 @@ struct ContentView: View {
         case .light:  appearanceModeRaw = ThemeMode.dark.rawValue
         case .dark:   appearanceModeRaw = ThemeMode.light.rawValue
         }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.72) {
-            withAnimation(.easeInOut(duration: 0.22)) { themeRippleActive = false }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.18) {
+            withAnimation(.easeInOut(duration: 0.26)) { fluidTransitionActive = false }
         }
     }
 
@@ -83,7 +85,11 @@ struct ContentView: View {
             }
             .background(AppTheme.windowBackground(colorScheme))
 
-            ThemeRippleOverlay(isActive: themeRippleActive, origin: themeRipplePoint)
+            JantFluidThemeTransition(
+                isActive: fluidTransitionActive,
+                origin: fluidTransitionPoint,
+                seed: fluidTransitionSeed
+            )
                 .allowsHitTesting(false)
                 .zIndex(90)
 
@@ -646,7 +652,7 @@ struct ContentView: View {
             // Connection stays as a separate tool and is moved to the right side.
             connectionToolButton
 
-            Text("v2.7.41")
+            Text("v2.7.42")
                 .font(.caption2)
                 .foregroundColor(Color.secondary.opacity(0.65))
         }
@@ -1174,70 +1180,140 @@ struct SlotFramePreferenceKey: PreferenceKey {
     }
 }
 
-// MARK: - v2.7.40 Theme Ripple Overlay
+// MARK: - v2.7.42 Jant-like Fluid Theme Transition
 
-private struct ThemeRippleOverlay: View {
+private struct JantFluidThemeTransition: View {
     let isActive: Bool
     let origin: CGPoint
+    let seed: UUID
     @Environment(\.colorScheme) private var colorScheme
 
     var body: some View {
-        GeometryReader { proxy in
-            let maxRadius = hypot(proxy.size.width, proxy.size.height)
-            ZStack {
-                ForEach(0..<4, id: \.self) { index in
-                    let delay = Double(index) * 0.055
-                    let progressScale = isActive ? (1.0 + CGFloat(index) * 0.18) : 0.02
-                    Circle()
-                        .strokeBorder(rippleStroke(index), lineWidth: index == 0 ? 2.2 : 1.25)
-                        .background(
-                            Circle().fill(rippleFill(index))
-                        )
-                        .frame(width: maxRadius * progressScale, height: maxRadius * progressScale)
-                        .blur(radius: CGFloat(index) * 1.4)
-                        .opacity(isActive ? max(0.0, 0.68 - Double(index) * 0.12) : 0)
-                        .animation(.interpolatingSpring(stiffness: 62, damping: 18).delay(delay), value: isActive)
-                }
+        TimelineView(.animation(minimumInterval: 1.0 / 45.0)) { timeline in
+            GeometryReader { proxy in
+                let maxRadius = hypot(proxy.size.width, proxy.size.height)
+                let t = timeline.date.timeIntervalSinceReferenceDate
+                ZStack {
+                    FluidMeshBackdrop(isActive: isActive, time: t, palette: palette)
+                        .opacity(isActive ? 0.92 : 0)
+                        .blur(radius: 18)
+                        .scaleEffect(isActive ? 1.06 : 0.96, anchor: .center)
 
-                Circle()
-                    .fill(
-                        RadialGradient(
-                            colors: haloColors,
-                            center: .center,
-                            startRadius: 0,
-                            endRadius: maxRadius * 0.42
+                    ForEach(0..<9, id: \.self) { index in
+                        FluidBlob(
+                            index: index,
+                            time: t,
+                            origin: origin,
+                            canvasSize: proxy.size,
+                            maxRadius: maxRadius,
+                            color: palette[index % palette.count],
+                            active: isActive
                         )
+                    }
+
+                    FluidVortexRings(
+                        isActive: isActive,
+                        origin: origin,
+                        maxRadius: maxRadius,
+                        palette: palette
                     )
-                    .frame(width: isActive ? maxRadius * 1.45 : 0, height: isActive ? maxRadius * 1.45 : 0)
-                    .opacity(isActive ? 0.52 : 0)
-                    .blur(radius: 14)
-                    .animation(.easeOut(duration: 0.74), value: isActive)
+                }
+                .position(origin)
+                .frame(width: proxy.size.width, height: proxy.size.height)
+                .clipped()
             }
-            .position(origin)
         }
     }
 
-    private var haloColors: [Color] {
-        if colorScheme == .dark {
-            return [Color.cyan.opacity(0.26), Color.blue.opacity(0.14), Color.clear]
-        } else {
-            return [Color.orange.opacity(0.20), Color.yellow.opacity(0.14), Color.clear]
-        }
+    private var palette: [Color] {
+        colorScheme == .dark
+            ? [Color.cyan, Color.blue, Color.indigo, Color.purple, Color.mint]
+            : [Color.orange, Color.yellow, Color.pink, Color.cyan, Color.white]
     }
+}
 
-    private func rippleStroke(_ index: Int) -> Color {
-        if colorScheme == .dark {
-            return [Color.cyan.opacity(0.55), Color.blue.opacity(0.42), Color.purple.opacity(0.30), Color.white.opacity(0.20)][index]
-        } else {
-            return [Color.orange.opacity(0.52), Color.yellow.opacity(0.42), Color.white.opacity(0.56), Color.black.opacity(0.10)][index]
+private struct FluidMeshBackdrop: View {
+    let isActive: Bool
+    let time: TimeInterval
+    let palette: [Color]
+
+    var body: some View {
+        ZStack {
+            LinearGradient(
+                colors: [palette[0].opacity(0.20), palette[2].opacity(0.16), Color.clear],
+                startPoint: UnitPoint(x: 0.18 + 0.04 * sin(time), y: 0.1),
+                endPoint: UnitPoint(x: 0.9, y: 0.86 + 0.05 * cos(time * 0.7))
+            )
+            AngularGradient(
+                colors: palette.map { $0.opacity(0.20) } + [palette[0].opacity(0.20)],
+                center: .center,
+                angle: .degrees(time * 18)
+            )
+            .blendMode(.screen)
         }
+        .ignoresSafeArea()
     }
+}
 
-    private func rippleFill(_ index: Int) -> Color {
-        if colorScheme == .dark {
-            return [Color.cyan.opacity(0.055), Color.blue.opacity(0.040), Color.purple.opacity(0.030), Color.clear][index]
-        } else {
-            return [Color.orange.opacity(0.050), Color.yellow.opacity(0.045), Color.white.opacity(0.080), Color.clear][index]
+private struct FluidBlob: View {
+    let index: Int
+    let time: TimeInterval
+    let origin: CGPoint
+    let canvasSize: CGSize
+    let maxRadius: CGFloat
+    let color: Color
+    let active: Bool
+
+    var body: some View {
+        let phase = Double(index) * 0.73
+        let driftX = CGFloat(cos(time * (0.42 + Double(index) * 0.03) + phase)) * maxRadius * 0.22
+        let driftY = CGFloat(sin(time * (0.36 + Double(index) * 0.04) + phase)) * maxRadius * 0.16
+        let spread = active ? maxRadius * (0.34 + CGFloat(index) * 0.055) : 18
+        let size = maxRadius * (0.32 + CGFloat(index % 4) * 0.07)
+
+        Ellipse()
+            .fill(
+                RadialGradient(
+                    colors: [color.opacity(0.34), color.opacity(0.08), .clear],
+                    center: .center,
+                    startRadius: 0,
+                    endRadius: size * 0.58
+                )
+            )
+            .frame(width: size * 1.35, height: size * 0.86)
+            .rotationEffect(.degrees(time * (8 + Double(index)) + Double(index) * 31))
+            .offset(
+                x: (active ? cos(CGFloat(index) * 0.9) * spread : 0) + driftX,
+                y: (active ? sin(CGFloat(index) * 1.1) * spread : 0) + driftY
+            )
+            .blur(radius: 16 + CGFloat(index % 3) * 7)
+            .opacity(active ? 0.95 : 0)
+            .blendMode(.plusLighter)
+            .animation(.interpolatingSpring(stiffness: 46, damping: 16).delay(Double(index) * 0.035), value: active)
+    }
+}
+
+private struct FluidVortexRings: View {
+    let isActive: Bool
+    let origin: CGPoint
+    let maxRadius: CGFloat
+    let palette: [Color]
+
+    var body: some View {
+        ZStack {
+            ForEach(0..<5, id: \.self) { index in
+                // v2.7.42: use RoundedRectangle for macOS 13 compatibility.
+                // UnevenRoundedRectangle requires macOS 14.
+                RoundedRectangle(cornerRadius: 90 + CGFloat(index * 18), style: .continuous)
+                    .stroke(palette[index % palette.count].opacity(0.34), lineWidth: index == 0 ? 2.4 : 1.35)
+                    .frame(width: isActive ? maxRadius * (0.68 + CGFloat(index) * 0.18) : 8,
+                           height: isActive ? maxRadius * (0.42 + CGFloat(index) * 0.13) : 8)
+                    .rotationEffect(.degrees(isActive ? Double(index) * 42 + 28 : Double(index) * -20))
+                    .blur(radius: CGFloat(index) * 1.2)
+                    .opacity(isActive ? 0.58 - Double(index) * 0.08 : 0)
+                    .blendMode(.plusLighter)
+                    .animation(.interpolatingSpring(stiffness: 58, damping: 14).delay(Double(index) * 0.05), value: isActive)
+            }
         }
     }
 }
