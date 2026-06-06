@@ -148,6 +148,7 @@ final class SlotStoreObservable: ObservableObject {
     // v2.7.50: ordered paste state
     @Published var orderedPasteIsRunning: Bool = false
     private var orderedPasteCancelRequested = false
+    private var orderedPasteSuppressAlerts = false
 
     // v2.6.7: import options sheet
     @Published var pendingImportSelection: PendingImportSelection?
@@ -678,6 +679,7 @@ final class SlotStoreObservable: ObservableObject {
 
         orderedPasteIsRunning = true
         orderedPasteCancelRequested = false
+        orderedPasteSuppressAlerts = true
         showToast("按序粘贴 \(pasteLimit) 个，Esc 可中断")
 
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
@@ -688,7 +690,7 @@ final class SlotStoreObservable: ObservableObject {
                 if self.orderedPasteCancelRequested { break }
                 let item = orderedItems[index]
                 DispatchQueue.main.sync {
-                    self.copySlotContentToPasteboard(item.content)
+                    self.preparePasteboardForOrderedPaste(item.content)
                 }
                 self.performSystemPaste()
                 Thread.sleep(forTimeInterval: 0.12)
@@ -706,6 +708,7 @@ final class SlotStoreObservable: ObservableObject {
                 let cancelled = self.orderedPasteCancelRequested
                 self.orderedPasteIsRunning = false
                 self.orderedPasteCancelRequested = false
+                self.orderedPasteSuppressAlerts = false
                 self.showToast(cancelled ? "已停止按序粘贴" : "按序粘贴完成：\(pasteLimit) 个")
             }
         }
@@ -718,6 +721,7 @@ final class SlotStoreObservable: ObservableObject {
 
     private func buildOrderedPasteItems() -> [OrderedPasteItem] {
         var result: [OrderedPasteItem] = []
+        var seen = Set<String>()
         for page in pages {
             let pageGroups = specialSlots.filter { $0.pageId == page.id }.sorted { $0.order < $1.order }
             for group in pageGroups {
@@ -729,6 +733,9 @@ final class SlotStoreObservable: ObservableObject {
                 let orderedSlots = orderedSlotsForSequentialPaste(slots: groupSlots, connectionMap: connectionMap)
                 for slot in orderedSlots {
                     guard let content = groupSlots[slot], !content.isEmpty else { continue }
+                    let key = "\(page.id)|\(group.id)|\(slot)"
+                    guard !seen.contains(key) else { continue }
+                    seen.insert(key)
                     result.append(OrderedPasteItem(pageId: page.id, groupId: group.id, slot: slot, content: content))
                 }
             }
@@ -747,9 +754,9 @@ final class SlotStoreObservable: ObservableObject {
                     sequence.append(slot)
                 }
             }
-            for slot in slots.keys.sorted() where !used.contains(slot) {
-                sequence.append(slot)
-            }
+            // v2.7.51: In node mode, paste only connected node chains.
+            // Do not append unrelated slots, otherwise multi-row/multi-column node paste
+            // duplicates content and appears to run outside the intended chain.
             return sequence
         }
         return slots.keys.sorted()
@@ -807,17 +814,40 @@ final class SlotStoreObservable: ObservableObject {
         CGEvent(keyboardEventSource: src, virtualKey: keyCode, keyDown: false)?.post(tap: .cghidEventTap)
     }
 
-    private func copySlotContentToPasteboard(_ content: SlotContent) {
+    private func preparePasteboardForOrderedPaste(_ content: SlotContent) {
         let pb = NSPasteboard.general
         pb.clearContents()
+        // v2.7.51: Never downgrade image/file/video slots into plain text like
+        // "[文件]xxx" or file:// paths. Use the same rich pasteboard formats as
+        // regular single-slot paste as much as possible.
+        if let inlineImage = content.inlineImage {
+            pb.writeObjects([inlineImage])
+            return
+        }
+        let detectedFiles = content.detectedFileURLs
+        if !detectedFiles.isEmpty {
+            pb.writeObjects(detectedFiles as [NSURL])
+            return
+        }
         if let html = content.htmlSource, !html.isEmpty {
             pb.setString(html, forType: .html)
             pb.setString(content.plainText ?? content.preview, forType: .string)
-        } else if let text = content.plainText, !text.isEmpty {
-            pb.setString(text, forType: .string)
-        } else {
-            pb.setString(content.preview, forType: .string)
+            return
         }
+        if let text = content.plainText, !text.isEmpty {
+            pb.setString(text, forType: .string)
+            return
+        }
+        pb.setString(content.preview, forType: .string)
+    }
+
+    private func showAlertUnlessOrderedPaste(_ message: String) {
+        if orderedPasteSuppressAlerts {
+            NSLog("[ClipSlots] suppress alert during ordered paste: \(message)")
+            showToast(message)
+            return
+        }
+        showAlert(message: message)
     }
 
     func pasteAllSlotsWithConfirmation() {
