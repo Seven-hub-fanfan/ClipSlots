@@ -76,7 +76,6 @@ struct RadialMenuView: View {
     @ObservedObject var store: SlotStoreObservable
     var onSelectSlot: (Int) -> Void
     var onPasteAll: (() -> Void)? = nil
-    var onOrderedPaste: (() -> Void)? = nil
     var onDismiss: () -> Void
     var connectionMap: SlotConnectionMap = .empty
 
@@ -305,23 +304,6 @@ struct RadialMenuView: View {
                 }
                 .buttonStyle(.plain)
                 .help("粘贴当前槽位组全部非空内容")
-
-                Button {
-                    handleOrderedPaste()
-                } label: {
-                    HStack(spacing: 4) {
-                        Image(systemName: "tablecells")
-                            .font(.system(size: 10, weight: .semibold))
-                        Text("按序粘贴")
-                            .font(.system(size: 11, weight: .bold))
-                    }
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 4)
-                    .background(Capsule().fill(Color.accentColor.opacity(0.16)))
-                    .overlay(Capsule().stroke(Color.accentColor.opacity(0.35), lineWidth: 0.8))
-                }
-                .buttonStyle(.plain)
-                .help("按表格选区顺序粘贴：当前组不足时自动顺延到后续槽位组和页面；有节点连接时按节点链展开")
 
                 Button {
                     store.switchToNextSlotGroup()
@@ -602,16 +584,6 @@ struct RadialMenuView: View {
         }
     }
 
-    private func handleOrderedPaste() {
-        // v2.7.49: Spreadsheet/Excel sequential paste.
-        if let onOrderedPaste {
-            onOrderedPaste()
-        } else {
-            NotificationCenter.default.post(name: .radialMenuOrderedPasteRequested, object: nil)
-            onDismiss()
-        }
-    }
-
     private func dividerLine(center: CGPoint, angle: Angle, innerRadius: CGFloat, outerRadius: CGFloat) -> Path {
         let rad = CGFloat(angle.radians)
         let start = CGPoint(x: center.x + innerRadius * cos(rad), y: center.y + innerRadius * sin(rad))
@@ -626,5 +598,4 @@ struct RadialMenuView: View {
 extension Notification.Name {
     static let radialMenuHoveredSlotChanged = Notification.Name("ClipSlots.radialMenuHoveredSlotChanged")
     static let radialMenuPasteAllRequested = Notification.Name("ClipSlots.radialMenuPasteAllRequested")
-    static let radialMenuOrderedPasteRequested = Notification.Name("ClipSlots.radialMenuOrderedPasteRequested")
 }
