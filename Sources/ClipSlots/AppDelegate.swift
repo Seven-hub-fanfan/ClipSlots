@@ -120,7 +120,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 self.radialMenuController.dismiss()
 
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
-                    self.store?.pasteSlotToApp(slot, targetApp: previousApp ?? self.store?.lastNonClipSlotsApp)
+                    if let previousApp = previousApp ?? self.store?.lastNonClipSlotsApp {
+                        self.store?.lastNonClipSlotsApp = previousApp
+                    }
+                    self.store?.pasteSlot(slot)
                 }
             },
             onDismiss: { [weak self] in
