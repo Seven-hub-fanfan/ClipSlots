@@ -6,8 +6,7 @@ struct ContentView: View {
     @State private var showingSpecialSlotManagement = false
     @State private var showingHotkeyTemplatePopover = false
     @State private var showingConnectionFullscreen = false
-    @State private var waterRippleActive = false
-    @State private var waterRipplePoint: CGPoint = .zero
+    @State private var themeFadeActive = false
     @Environment(\.colorScheme) private var colorScheme
 
     @AppStorage("appearanceMode") private var appearanceModeRaw = ThemeMode.system.rawValue
@@ -25,8 +24,7 @@ struct ContentView: View {
     @State private var showingNodeCanvas = false
 
     private func cycleAppearanceMode(from point: CGPoint = CGPoint(x: 1180, y: 54)) {
-        waterRipplePoint = point
-        withAnimation(.easeOut(duration: 0.12)) { waterRippleActive = true }
+        withAnimation(.easeOut(duration: 0.18)) { themeFadeActive = true }
         let current = ThemeMode(rawValue: appearanceModeRaw) ?? .system
         switch current {
         // v2.7.41: toolbar theme switch only toggles light/dark.
@@ -35,8 +33,8 @@ struct ContentView: View {
         case .light:  appearanceModeRaw = ThemeMode.dark.rawValue
         case .dark:   appearanceModeRaw = ThemeMode.light.rawValue
         }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.92) {
-            withAnimation(.easeInOut(duration: 0.24)) { waterRippleActive = false }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.52) {
+            withAnimation(.easeInOut(duration: 0.30)) { themeFadeActive = false }
         }
     }
 
@@ -86,7 +84,7 @@ struct ContentView: View {
                     .ignoresSafeArea()
             )
 
-            WaterRippleThemeTransition(isActive: waterRippleActive, origin: waterRipplePoint)
+            ThemeGlassFadeTransition(isActive: themeFadeActive)
                 .allowsHitTesting(false)
                 .zIndex(90)
 
@@ -649,7 +647,7 @@ struct ContentView: View {
             // Connection stays as a separate tool and is moved to the right side.
             connectionToolButton
 
-            Text("v2.7.45")
+            Text("v2.7.46")
                 .font(.caption2)
                 .foregroundColor(Color.secondary.opacity(0.65))
         }
@@ -1177,144 +1175,115 @@ struct SlotFramePreferenceKey: PreferenceKey {
     }
 }
 
-// MARK: - v2.7.45 Water Ripple Theme Transition
+// MARK: - v2.7.46 Premium Glass Theme Fade
 
-private struct WaterRippleThemeTransition: View {
+private struct ThemeGlassFadeTransition: View {
     let isActive: Bool
-    let origin: CGPoint
     @Environment(\.colorScheme) private var colorScheme
 
     var body: some View {
         GeometryReader { proxy in
-            let maxRadius = hypot(proxy.size.width, proxy.size.height)
             ZStack {
-                // soft fill: a transparent water sheet, not a heavy color wash
-                Circle()
-                    .fill(
-                        RadialGradient(
-                            colors: [waterFill.opacity(0.20), waterFill.opacity(0.075), .clear],
-                            center: .center,
-                            startRadius: 0,
-                            endRadius: maxRadius * 0.58
-                        )
-                    )
-                    .frame(width: isActive ? maxRadius * 1.58 : 0, height: isActive ? maxRadius * 1.58 : 0)
-                    .position(origin)
-                    .blur(radius: 8)
+                PremiumGlassAmbientBackground()
+                    .opacity(isActive ? 0.34 : 0)
+                    .scaleEffect(isActive ? 1.012 : 0.992)
+                    .blur(radius: isActive ? 2 : 10)
+
+                Rectangle()
+                    .fill(Color.white.opacity(colorScheme == .dark ? 0.04 : 0.18))
                     .opacity(isActive ? 1 : 0)
-                    .animation(.easeOut(duration: 0.78), value: isActive)
-
-                // main refractive ripple edge
-                ForEach(0..<5, id: \.self) { index in
-                    WaterRippleRing(
-                        index: index,
-                        origin: origin,
-                        maxRadius: maxRadius,
-                        isActive: isActive,
-                        color: ringColor(index),
-                        lineWidth: index == 0 ? 2.6 : 1.2,
-                        delay: Double(index) * 0.055
-                    )
-                }
-
-                // subtle diagonal glint, like a water surface caustic
-                Capsule()
-                    .fill(
-                        LinearGradient(
-                            colors: [.clear, glintColor.opacity(0.42), .clear],
-                            startPoint: .leading,
-                            endPoint: .trailing
-                        )
-                    )
-                    .frame(width: isActive ? maxRadius * 0.92 : 0, height: 7)
-                    .rotationEffect(.degrees(-18))
-                    .position(x: origin.x + maxRadius * 0.16, y: origin.y - maxRadius * 0.08)
-                    .opacity(isActive ? 0.72 : 0)
-                    .blur(radius: 1.8)
                     .blendMode(.screen)
-                    .animation(.easeOut(duration: 0.62).delay(0.10), value: isActive)
             }
+            .frame(width: proxy.size.width, height: proxy.size.height)
+            .animation(.easeInOut(duration: 0.54), value: isActive)
         }
-    }
-
-    private var waterFill: Color { colorScheme == .dark ? Color(red: 0.55, green: 0.72, blue: 1.0) : Color(red: 0.64, green: 0.82, blue: 1.0) }
-    private var glintColor: Color { colorScheme == .dark ? Color.cyan : Color.white }
-    private func ringColor(_ index: Int) -> Color {
-        let dark = [Color.cyan, Color.blue, Color.white, Color.mint, Color.indigo]
-        let light = [Color.white, Color(red: 0.52, green: 0.76, blue: 1.0), Color(red: 0.38, green: 0.62, blue: 0.95), Color.cyan, Color.gray]
-        return (colorScheme == .dark ? dark : light)[index]
-    }
-}
-
-private struct WaterRippleRing: View {
-    let index: Int
-    let origin: CGPoint
-    let maxRadius: CGFloat
-    let isActive: Bool
-    let color: Color
-    let lineWidth: CGFloat
-    let delay: Double
-
-    var body: some View {
-        let width = isActive ? maxRadius * (0.36 + CGFloat(index) * 0.18) : 24
-        let height = width * (0.74 + CGFloat(index % 2) * 0.08)
-        // v2.7.45: use RoundedRectangle for macOS 13 compatibility.
-        RoundedRectangle(cornerRadius: width * 0.44, style: .continuous)
-            .stroke(color.opacity(0.58 - Double(index) * 0.07), lineWidth: lineWidth)
-            .frame(width: width, height: height)
-            .rotationEffect(.degrees(Double(index) * 17 - 9))
-            .position(origin)
-            .blur(radius: CGFloat(index) * 0.9)
-            .opacity(isActive ? 0.86 - Double(index) * 0.10 : 0)
-            .blendMode(.screen)
-            .animation(.interpolatingSpring(stiffness: 72, damping: 18).delay(delay), value: isActive)
     }
 }
 
 // MARK: - v2.7.43 Always-on Poster Ambient Background
 
 private struct RetroPosterAmbientBackground: View {
+    var body: some View { PremiumGlassAmbientBackground() }
+}
+
+// MARK: - v2.7.46 Premium Frosted Glass Background
+
+private struct PremiumGlassAmbientBackground: View {
     @Environment(\.colorScheme) private var colorScheme
 
     var body: some View {
         ZStack {
-            AppTheme.windowBackground(colorScheme)
+            base
 
-            Circle()
-                .fill(colorScheme == .dark ? Color(red: 0.22, green: 0.27, blue: 0.48).opacity(0.24) : Color(red: 0.70, green: 0.75, blue: 0.88).opacity(0.46))
-                .frame(width: 820, height: 820)
-                .offset(x: 130, y: -40)
-                .blur(radius: 1.5)
+            ColorBloom(color: Color(red: 1.0, green: 0.22, blue: 0.14), opacity: colorScheme == .dark ? 0.13 : 0.24, size: 620, offset: CGSize(width: -410, height: -210), blur: 76)
+            ColorBloom(color: Color(red: 0.45, green: 0.55, blue: 1.0), opacity: colorScheme == .dark ? 0.16 : 0.28, size: 760, offset: CGSize(width: 330, height: -130), blur: 88)
+            ColorBloom(color: Color(red: 0.20, green: 1.0, blue: 0.92), opacity: colorScheme == .dark ? 0.08 : 0.18, size: 640, offset: CGSize(width: 520, height: 210), blur: 96)
+            ColorBloom(color: Color(red: 1.0, green: 0.58, blue: 0.18), opacity: colorScheme == .dark ? 0.08 : 0.20, size: 520, offset: CGSize(width: -80, height: 270), blur: 92)
 
-            RadialGradient(colors: [Color.red.opacity(colorScheme == .dark ? 0.28 : 0.22), Color.red.opacity(colorScheme == .dark ? 0.12 : 0.08), .clear], center: .center, startRadius: 0, endRadius: 460)
-                .frame(width: 720, height: 580)
-                .offset(x: -470, y: -230)
-                .blur(radius: 50)
-                .blendMode(.screen)
+            GlassCardPlane()
+                .opacity(colorScheme == .dark ? 0.22 : 0.46)
+                .offset(x: -230, y: 20)
 
-            RadialGradient(colors: [Color.white.opacity(colorScheme == .dark ? 0.18 : 0.48), Color.orange.opacity(colorScheme == .dark ? 0.18 : 0.16), .clear], center: .center, startRadius: 0, endRadius: 520)
-                .frame(width: 760, height: 580)
-                .offset(x: 560, y: -250)
-                .blur(radius: 58)
-                .blendMode(.screen)
+            RefractiveLineField()
+                .opacity(colorScheme == .dark ? 0.17 : 0.34)
 
-            Rectangle()
-                .fill(LinearGradient(colors: [.clear, Color.white.opacity(colorScheme == .dark ? 0.055 : 0.26), .clear], startPoint: .leading, endPoint: .trailing))
-                .frame(height: 130)
-                .rotationEffect(.degrees(-2.5))
-                .offset(y: -210)
-                .blur(radius: 32)
-                .blendMode(.screen)
+            RetroPosterGrain(opacity: colorScheme == .dark ? 0.035 : 0.030)
+        }
+    }
 
-            Rectangle()
-                .fill(LinearGradient(colors: [.clear, Color.red.opacity(colorScheme == .dark ? 0.08 : 0.06), .clear], startPoint: .leading, endPoint: .trailing))
-                .frame(height: 220)
-                .rotationEffect(.degrees(5))
-                .offset(y: 110)
-                .blur(radius: 58)
-                .blendMode(.screen)
+    private var base: some View {
+        LinearGradient(
+            colors: colorScheme == .dark
+                ? [Color(red: 0.08, green: 0.09, blue: 0.11), Color(red: 0.12, green: 0.14, blue: 0.18), Color(red: 0.08, green: 0.09, blue: 0.12)]
+                : [Color(red: 0.93, green: 0.96, blue: 0.96), Color(red: 0.91, green: 0.94, blue: 0.98), Color(red: 0.97, green: 0.95, blue: 0.93)],
+            startPoint: .topLeading,
+            endPoint: .bottomTrailing
+        )
+    }
+}
 
-            RetroPosterGrain(opacity: colorScheme == .dark ? 0.060 : 0.050)
+private struct ColorBloom: View {
+    let color: Color
+    let opacity: Double
+    let size: CGFloat
+    let offset: CGSize
+    let blur: CGFloat
+
+    var body: some View {
+        Circle()
+            .fill(RadialGradient(colors: [color.opacity(opacity), color.opacity(opacity * 0.36), .clear], center: .center, startRadius: 0, endRadius: size * 0.48))
+            .frame(width: size, height: size)
+            .offset(offset)
+            .blur(radius: blur)
+            .blendMode(.screen)
+    }
+}
+
+private struct GlassCardPlane: View {
+    var body: some View {
+        RoundedRectangle(cornerRadius: 24, style: .continuous)
+            .fill(Color.white.opacity(0.36))
+            .frame(width: 560, height: 230)
+            .rotationEffect(.degrees(-14))
+            .overlay(
+                RoundedRectangle(cornerRadius: 24, style: .continuous)
+                    .stroke(Color.white.opacity(0.62), lineWidth: 1.2)
+            )
+            .blur(radius: 0.4)
+    }
+}
+
+private struct RefractiveLineField: View {
+    var body: some View {
+        ZStack {
+            ForEach(0..<5, id: \.self) { index in
+                Capsule()
+                    .stroke(Color.white.opacity(0.48), lineWidth: 1)
+                    .frame(width: 520 + CGFloat(index) * 80, height: 160 + CGFloat(index) * 48)
+                    .rotationEffect(.degrees(-18 + Double(index) * 7))
+                    .offset(x: CGFloat(index) * 110 - 240, y: CGFloat(index) * 34 - 110)
+                    .blur(radius: CGFloat(index) * 0.35)
+            }
         }
     }
 }
