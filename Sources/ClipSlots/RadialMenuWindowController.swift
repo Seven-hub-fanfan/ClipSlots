@@ -72,9 +72,8 @@ final class RadialMenuWindowController {
                 onDismiss()
             },
             onOrderedPaste: { [weak self] in
-                // v2.7.49: sequential paste for spreadsheet cells.
-                // Confirmation is handled inside pasteOrderedSlotsWithConfirmation.
-                store.pasteOrderedSlotsWithConfirmation()
+                // v2.7.50: ordered paste with selection limit and cancel support.
+                store.pasteOrderedSlotsWithSelectionLimit()
                 self?.dismissRadialOnly()
                 if self?.isPreviewPinned != true { self?.dismissPreviewPanel() }
                 onDismiss()
