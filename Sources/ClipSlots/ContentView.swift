@@ -6,9 +6,8 @@ struct ContentView: View {
     @State private var showingSpecialSlotManagement = false
     @State private var showingHotkeyTemplatePopover = false
     @State private var showingConnectionFullscreen = false
-    @State private var fluidTransitionActive = false
-    @State private var fluidTransitionSeed = UUID()
-    @State private var fluidTransitionPoint: CGPoint = .zero
+    @State private var posterTransitionActive = false
+    @State private var posterTransitionPoint: CGPoint = .zero
     @Environment(\.colorScheme) private var colorScheme
 
     @AppStorage("appearanceMode") private var appearanceModeRaw = ThemeMode.system.rawValue
@@ -26,9 +25,8 @@ struct ContentView: View {
     @State private var showingNodeCanvas = false
 
     private func cycleAppearanceMode(from point: CGPoint = CGPoint(x: 1180, y: 54)) {
-        fluidTransitionPoint = point
-        fluidTransitionSeed = UUID()
-        withAnimation(.easeOut(duration: 0.16)) { fluidTransitionActive = true }
+        posterTransitionPoint = point
+        withAnimation(.easeOut(duration: 0.18)) { posterTransitionActive = true }
         let current = ThemeMode(rawValue: appearanceModeRaw) ?? .system
         switch current {
         // v2.7.41: toolbar theme switch only toggles light/dark.
@@ -37,8 +35,8 @@ struct ContentView: View {
         case .light:  appearanceModeRaw = ThemeMode.dark.rawValue
         case .dark:   appearanceModeRaw = ThemeMode.light.rawValue
         }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.18) {
-            withAnimation(.easeInOut(duration: 0.26)) { fluidTransitionActive = false }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.05) {
+            withAnimation(.easeInOut(duration: 0.28)) { posterTransitionActive = false }
         }
     }
 
@@ -83,13 +81,12 @@ struct ContentView: View {
 
                 bottomBar
             }
-            .background(AppTheme.windowBackground(colorScheme))
-
-            JantFluidThemeTransition(
-                isActive: fluidTransitionActive,
-                origin: fluidTransitionPoint,
-                seed: fluidTransitionSeed
+            .background(
+                RetroPosterAmbientBackground()
+                    .ignoresSafeArea()
             )
+
+            RetroPosterThemeTransition(isActive: posterTransitionActive, origin: posterTransitionPoint)
                 .allowsHitTesting(false)
                 .zIndex(90)
 
@@ -652,7 +649,7 @@ struct ContentView: View {
             // Connection stays as a separate tool and is moved to the right side.
             connectionToolButton
 
-            Text("v2.7.42")
+            Text("v2.7.43")
                 .font(.caption2)
                 .foregroundColor(Color.secondary.opacity(0.65))
         }
@@ -1180,141 +1177,114 @@ struct SlotFramePreferenceKey: PreferenceKey {
     }
 }
 
-// MARK: - v2.7.42 Jant-like Fluid Theme Transition
+// MARK: - v2.7.43 Retro Poster Theme Transition
 
-private struct JantFluidThemeTransition: View {
+private struct RetroPosterThemeTransition: View {
     let isActive: Bool
     let origin: CGPoint
-    let seed: UUID
     @Environment(\.colorScheme) private var colorScheme
 
     var body: some View {
-        TimelineView(.animation(minimumInterval: 1.0 / 45.0)) { timeline in
-            GeometryReader { proxy in
-                let maxRadius = hypot(proxy.size.width, proxy.size.height)
-                let t = timeline.date.timeIntervalSinceReferenceDate
-                ZStack {
-                    FluidMeshBackdrop(isActive: isActive, time: t, palette: palette)
-                        .opacity(isActive ? 0.92 : 0)
-                        .blur(radius: 18)
-                        .scaleEffect(isActive ? 1.06 : 0.96, anchor: .center)
+        GeometryReader { proxy in
+            let maxRadius = hypot(proxy.size.width, proxy.size.height)
+            ZStack {
+                // large geometric disk, inspired by the reference poster composition
+                Circle()
+                    .fill(diskColor)
+                    .frame(width: isActive ? maxRadius * 1.35 : 80, height: isActive ? maxRadius * 1.35 : 80)
+                    .position(x: proxy.size.width * 0.53, y: proxy.size.height * 0.48)
+                    .opacity(isActive ? 0.72 : 0)
+                    .blur(radius: 0.8)
+                    .animation(.interpolatingSpring(stiffness: 42, damping: 18), value: isActive)
 
-                    ForEach(0..<9, id: \.self) { index in
-                        FluidBlob(
-                            index: index,
-                            time: t,
-                            origin: origin,
-                            canvasSize: proxy.size,
-                            maxRadius: maxRadius,
-                            color: palette[index % palette.count],
-                            active: isActive
-                        )
-                    }
+                // red / warm spotlight from left
+                RadialGradient(colors: [warmSpot.opacity(0.78), warmSpot.opacity(0.26), .clear], center: .center, startRadius: 20, endRadius: maxRadius * 0.52)
+                    .frame(width: maxRadius * 0.88, height: maxRadius * 0.62)
+                    .position(x: origin.x - maxRadius * 0.10, y: origin.y + maxRadius * 0.02)
+                    .opacity(isActive ? 1 : 0)
+                    .blur(radius: 18)
+                    .blendMode(.screen)
+                    .animation(.easeOut(duration: 0.82), value: isActive)
 
-                    FluidVortexRings(
-                        isActive: isActive,
-                        origin: origin,
-                        maxRadius: maxRadius,
-                        palette: palette
+                // cool spotlight from right
+                RadialGradient(colors: [coolSpot.opacity(0.72), coolSpot.opacity(0.22), .clear], center: .center, startRadius: 20, endRadius: maxRadius * 0.48)
+                    .frame(width: maxRadius * 0.80, height: maxRadius * 0.54)
+                    .position(x: proxy.size.width * 0.92, y: proxy.size.height * 0.28)
+                    .opacity(isActive ? 0.95 : 0)
+                    .blur(radius: 22)
+                    .blendMode(.screen)
+                    .animation(.easeOut(duration: 0.96).delay(0.05), value: isActive)
+
+                // horizontal film flare, not a cheap circle glow
+                Rectangle()
+                    .fill(
+                        LinearGradient(colors: [.clear, Color.white.opacity(colorScheme == .dark ? 0.24 : 0.34), .clear], startPoint: .leading, endPoint: .trailing)
                     )
+                    .frame(width: maxRadius * 1.25, height: 96)
+                    .rotationEffect(.degrees(-4))
+                    .position(x: proxy.size.width * 0.50, y: proxy.size.height * 0.30)
+                    .opacity(isActive ? 0.70 : 0)
+                    .blur(radius: 18)
+                    .blendMode(.screen)
+                    .animation(.easeOut(duration: 0.76).delay(0.10), value: isActive)
+
+                RetroPosterGrain(opacity: isActive ? 0.13 : 0)
+            }
+        }
+    }
+
+    private var diskColor: Color { colorScheme == .dark ? Color(red: 0.28, green: 0.32, blue: 0.48).opacity(0.52) : Color(red: 0.74, green: 0.78, blue: 0.86).opacity(0.64) }
+    private var warmSpot: Color { colorScheme == .dark ? Color(red: 1.0, green: 0.10, blue: 0.08) : Color(red: 1.0, green: 0.20, blue: 0.12) }
+    private var coolSpot: Color { colorScheme == .dark ? Color(red: 0.62, green: 0.68, blue: 1.0) : Color(red: 0.86, green: 0.88, blue: 1.0) }
+}
+
+// MARK: - v2.7.43 Always-on Poster Ambient Background
+
+private struct RetroPosterAmbientBackground: View {
+    @Environment(\.colorScheme) private var colorScheme
+
+    var body: some View {
+        ZStack {
+            AppTheme.windowBackground(colorScheme)
+
+            Circle()
+                .fill(colorScheme == .dark ? Color(red: 0.22, green: 0.26, blue: 0.42).opacity(0.20) : Color(red: 0.76, green: 0.80, blue: 0.88).opacity(0.28))
+                .frame(width: 760, height: 760)
+                .offset(x: 160, y: -80)
+                .blur(radius: 1.5)
+
+            RadialGradient(colors: [Color.red.opacity(colorScheme == .dark ? 0.20 : 0.14), .clear], center: .center, startRadius: 0, endRadius: 420)
+                .frame(width: 620, height: 520)
+                .offset(x: -520, y: -250)
+                .blur(radius: 42)
+                .blendMode(.screen)
+
+            RadialGradient(colors: [Color.orange.opacity(colorScheme == .dark ? 0.16 : 0.10), .clear], center: .center, startRadius: 0, endRadius: 480)
+                .frame(width: 680, height: 560)
+                .offset(x: 620, y: -240)
+                .blur(radius: 54)
+                .blendMode(.screen)
+
+            RetroPosterGrain(opacity: colorScheme == .dark ? 0.050 : 0.035)
+        }
+    }
+}
+
+private struct RetroPosterGrain: View {
+    let opacity: Double
+    var body: some View {
+        Canvas { context, size in
+            let step: CGFloat = 3
+            for x in stride(from: CGFloat(0), through: size.width, by: step) {
+                for y in stride(from: CGFloat(0), through: size.height, by: step) {
+                    let value = abs(sin(Double(x * 12.9898 + y * 78.233)))
+                    let alpha = opacity * (0.35 + value * 0.65)
+                    context.fill(Path(CGRect(x: x, y: y, width: 1, height: 1)), with: .color(Color.white.opacity(alpha)))
                 }
-                .position(origin)
-                .frame(width: proxy.size.width, height: proxy.size.height)
-                .clipped()
             }
         }
-    }
-
-    private var palette: [Color] {
-        colorScheme == .dark
-            ? [Color.cyan, Color.blue, Color.indigo, Color.purple, Color.mint]
-            : [Color.orange, Color.yellow, Color.pink, Color.cyan, Color.white]
-    }
-}
-
-private struct FluidMeshBackdrop: View {
-    let isActive: Bool
-    let time: TimeInterval
-    let palette: [Color]
-
-    var body: some View {
-        ZStack {
-            LinearGradient(
-                colors: [palette[0].opacity(0.20), palette[2].opacity(0.16), Color.clear],
-                startPoint: UnitPoint(x: 0.18 + 0.04 * sin(time), y: 0.1),
-                endPoint: UnitPoint(x: 0.9, y: 0.86 + 0.05 * cos(time * 0.7))
-            )
-            AngularGradient(
-                colors: palette.map { $0.opacity(0.20) } + [palette[0].opacity(0.20)],
-                center: .center,
-                angle: .degrees(time * 18)
-            )
-            .blendMode(.screen)
-        }
-        .ignoresSafeArea()
-    }
-}
-
-private struct FluidBlob: View {
-    let index: Int
-    let time: TimeInterval
-    let origin: CGPoint
-    let canvasSize: CGSize
-    let maxRadius: CGFloat
-    let color: Color
-    let active: Bool
-
-    var body: some View {
-        let phase = Double(index) * 0.73
-        let driftX = CGFloat(cos(time * (0.42 + Double(index) * 0.03) + phase)) * maxRadius * 0.22
-        let driftY = CGFloat(sin(time * (0.36 + Double(index) * 0.04) + phase)) * maxRadius * 0.16
-        let spread = active ? maxRadius * (0.34 + CGFloat(index) * 0.055) : 18
-        let size = maxRadius * (0.32 + CGFloat(index % 4) * 0.07)
-
-        Ellipse()
-            .fill(
-                RadialGradient(
-                    colors: [color.opacity(0.34), color.opacity(0.08), .clear],
-                    center: .center,
-                    startRadius: 0,
-                    endRadius: size * 0.58
-                )
-            )
-            .frame(width: size * 1.35, height: size * 0.86)
-            .rotationEffect(.degrees(time * (8 + Double(index)) + Double(index) * 31))
-            .offset(
-                x: (active ? cos(CGFloat(index) * 0.9) * spread : 0) + driftX,
-                y: (active ? sin(CGFloat(index) * 1.1) * spread : 0) + driftY
-            )
-            .blur(radius: 16 + CGFloat(index % 3) * 7)
-            .opacity(active ? 0.95 : 0)
-            .blendMode(.plusLighter)
-            .animation(.interpolatingSpring(stiffness: 46, damping: 16).delay(Double(index) * 0.035), value: active)
-    }
-}
-
-private struct FluidVortexRings: View {
-    let isActive: Bool
-    let origin: CGPoint
-    let maxRadius: CGFloat
-    let palette: [Color]
-
-    var body: some View {
-        ZStack {
-            ForEach(0..<5, id: \.self) { index in
-                // v2.7.42: use RoundedRectangle for macOS 13 compatibility.
-                // UnevenRoundedRectangle requires macOS 14.
-                RoundedRectangle(cornerRadius: 90 + CGFloat(index * 18), style: .continuous)
-                    .stroke(palette[index % palette.count].opacity(0.34), lineWidth: index == 0 ? 2.4 : 1.35)
-                    .frame(width: isActive ? maxRadius * (0.68 + CGFloat(index) * 0.18) : 8,
-                           height: isActive ? maxRadius * (0.42 + CGFloat(index) * 0.13) : 8)
-                    .rotationEffect(.degrees(isActive ? Double(index) * 42 + 28 : Double(index) * -20))
-                    .blur(radius: CGFloat(index) * 1.2)
-                    .opacity(isActive ? 0.58 - Double(index) * 0.08 : 0)
-                    .blendMode(.plusLighter)
-                    .animation(.interpolatingSpring(stiffness: 58, damping: 14).delay(Double(index) * 0.05), value: isActive)
-            }
-        }
+        .blendMode(.overlay)
+        .allowsHitTesting(false)
     }
 }
 
