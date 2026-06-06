@@ -6,8 +6,8 @@ struct ContentView: View {
     @State private var showingSpecialSlotManagement = false
     @State private var showingHotkeyTemplatePopover = false
     @State private var showingConnectionFullscreen = false
-    @State private var posterTransitionActive = false
-    @State private var posterTransitionPoint: CGPoint = .zero
+    @State private var waterRippleActive = false
+    @State private var waterRipplePoint: CGPoint = .zero
     @Environment(\.colorScheme) private var colorScheme
 
     @AppStorage("appearanceMode") private var appearanceModeRaw = ThemeMode.system.rawValue
@@ -25,8 +25,8 @@ struct ContentView: View {
     @State private var showingNodeCanvas = false
 
     private func cycleAppearanceMode(from point: CGPoint = CGPoint(x: 1180, y: 54)) {
-        posterTransitionPoint = point
-        withAnimation(.easeOut(duration: 0.18)) { posterTransitionActive = true }
+        waterRipplePoint = point
+        withAnimation(.easeOut(duration: 0.12)) { waterRippleActive = true }
         let current = ThemeMode(rawValue: appearanceModeRaw) ?? .system
         switch current {
         // v2.7.41: toolbar theme switch only toggles light/dark.
@@ -35,8 +35,8 @@ struct ContentView: View {
         case .light:  appearanceModeRaw = ThemeMode.dark.rawValue
         case .dark:   appearanceModeRaw = ThemeMode.light.rawValue
         }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.05) {
-            withAnimation(.easeInOut(duration: 0.28)) { posterTransitionActive = false }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.92) {
+            withAnimation(.easeInOut(duration: 0.24)) { waterRippleActive = false }
         }
     }
 
@@ -86,7 +86,7 @@ struct ContentView: View {
                     .ignoresSafeArea()
             )
 
-            RetroPosterThemeTransition(isActive: posterTransitionActive, origin: posterTransitionPoint)
+            WaterRippleThemeTransition(isActive: waterRippleActive, origin: waterRipplePoint)
                 .allowsHitTesting(false)
                 .zIndex(90)
 
@@ -649,7 +649,7 @@ struct ContentView: View {
             // Connection stays as a separate tool and is moved to the right side.
             connectionToolButton
 
-            Text("v2.7.44")
+            Text("v2.7.45")
                 .font(.caption2)
                 .foregroundColor(Color.secondary.opacity(0.65))
         }
@@ -1177,9 +1177,9 @@ struct SlotFramePreferenceKey: PreferenceKey {
     }
 }
 
-// MARK: - v2.7.43 Retro Poster Theme Transition
+// MARK: - v2.7.45 Water Ripple Theme Transition
 
-private struct RetroPosterThemeTransition: View {
+private struct WaterRippleThemeTransition: View {
     let isActive: Bool
     let origin: CGPoint
     @Environment(\.colorScheme) private var colorScheme
@@ -1188,68 +1188,87 @@ private struct RetroPosterThemeTransition: View {
         GeometryReader { proxy in
             let maxRadius = hypot(proxy.size.width, proxy.size.height)
             ZStack {
-                // v2.7.44: poster-style transition should sweep like stage light,
-                // not expand as a cheap ripple. Keep geometry but animate as a horizontal
-                // cinematic lighting pass.
+                // soft fill: a transparent water sheet, not a heavy color wash
                 Circle()
-                    .fill(diskColor)
-                    .frame(width: maxRadius * 0.82, height: maxRadius * 0.82)
-                    .position(x: proxy.size.width * 0.56, y: proxy.size.height * 0.50)
-                    .opacity(isActive ? 0.86 : 0)
-                    .blur(radius: 0.8)
-                    .scaleEffect(isActive ? 1.08 : 0.92)
-                    .animation(.interpolatingSpring(stiffness: 46, damping: 20), value: isActive)
-
-                // red / warm spotlight sweep from left edge
-                RadialGradient(colors: [warmSpot.opacity(0.78), warmSpot.opacity(0.26), .clear], center: .center, startRadius: 20, endRadius: maxRadius * 0.52)
-                    .frame(width: maxRadius * 0.78, height: maxRadius * 0.56)
-                    .position(x: isActive ? proxy.size.width * 0.18 : -maxRadius * 0.10, y: proxy.size.height * 0.20)
-                    .opacity(isActive ? 1 : 0)
-                    .blur(radius: 28)
-                    .blendMode(.screen)
-                    .animation(.easeOut(duration: 0.88), value: isActive)
-
-                // cool spotlight sweep from right edge
-                RadialGradient(colors: [coolSpot.opacity(0.72), coolSpot.opacity(0.22), .clear], center: .center, startRadius: 20, endRadius: maxRadius * 0.48)
-                    .frame(width: maxRadius * 0.82, height: maxRadius * 0.56)
-                    .position(x: isActive ? proxy.size.width * 0.86 : proxy.size.width + maxRadius * 0.08, y: proxy.size.height * 0.24)
-                    .opacity(isActive ? 0.95 : 0)
-                    .blur(radius: 30)
-                    .blendMode(.screen)
-                    .animation(.easeOut(duration: 0.96).delay(0.05), value: isActive)
-
-                // horizontal film flare sweeps from left
-                Rectangle()
                     .fill(
-                        LinearGradient(colors: [.clear, Color.white.opacity(colorScheme == .dark ? 0.30 : 0.42), Color.white.opacity(colorScheme == .dark ? 0.16 : 0.22), .clear], startPoint: .leading, endPoint: .trailing)
+                        RadialGradient(
+                            colors: [waterFill.opacity(0.20), waterFill.opacity(0.075), .clear],
+                            center: .center,
+                            startRadius: 0,
+                            endRadius: maxRadius * 0.58
+                        )
                     )
-                    .frame(width: maxRadius * 1.40, height: 118)
-                    .rotationEffect(.degrees(-3))
-                    .position(x: isActive ? proxy.size.width * 0.55 : -maxRadius * 0.50, y: proxy.size.height * 0.30)
-                    .opacity(isActive ? 0.82 : 0)
-                    .blur(radius: 20)
-                    .blendMode(.screen)
-                    .animation(.easeOut(duration: 1.02).delay(0.08), value: isActive)
+                    .frame(width: isActive ? maxRadius * 1.58 : 0, height: isActive ? maxRadius * 1.58 : 0)
+                    .position(origin)
+                    .blur(radius: 8)
+                    .opacity(isActive ? 1 : 0)
+                    .animation(.easeOut(duration: 0.78), value: isActive)
 
-                // red diagonal beam
-                Rectangle()
-                    .fill(LinearGradient(colors: [.clear, Color.red.opacity(colorScheme == .dark ? 0.18 : 0.12), .clear], startPoint: .leading, endPoint: .trailing))
-                    .frame(width: maxRadius * 1.20, height: 180)
-                    .rotationEffect(.degrees(7))
-                    .position(x: isActive ? proxy.size.width * 0.45 : proxy.size.width + maxRadius * 0.3, y: proxy.size.height * 0.58)
+                // main refractive ripple edge
+                ForEach(0..<5, id: \.self) { index in
+                    WaterRippleRing(
+                        index: index,
+                        origin: origin,
+                        maxRadius: maxRadius,
+                        isActive: isActive,
+                        color: ringColor(index),
+                        lineWidth: index == 0 ? 2.6 : 1.2,
+                        delay: Double(index) * 0.055
+                    )
+                }
+
+                // subtle diagonal glint, like a water surface caustic
+                Capsule()
+                    .fill(
+                        LinearGradient(
+                            colors: [.clear, glintColor.opacity(0.42), .clear],
+                            startPoint: .leading,
+                            endPoint: .trailing
+                        )
+                    )
+                    .frame(width: isActive ? maxRadius * 0.92 : 0, height: 7)
+                    .rotationEffect(.degrees(-18))
+                    .position(x: origin.x + maxRadius * 0.16, y: origin.y - maxRadius * 0.08)
                     .opacity(isActive ? 0.72 : 0)
-                    .blur(radius: 36)
+                    .blur(radius: 1.8)
                     .blendMode(.screen)
-                    .animation(.easeOut(duration: 1.06).delay(0.02), value: isActive)
-
-                RetroPosterGrain(opacity: isActive ? 0.13 : 0)
+                    .animation(.easeOut(duration: 0.62).delay(0.10), value: isActive)
             }
         }
     }
 
-    private var diskColor: Color { colorScheme == .dark ? Color(red: 0.32, green: 0.36, blue: 0.56).opacity(0.58) : Color(red: 0.72, green: 0.76, blue: 0.88).opacity(0.72) }
-    private var warmSpot: Color { colorScheme == .dark ? Color(red: 1.0, green: 0.08, blue: 0.06) : Color(red: 1.0, green: 0.16, blue: 0.10) }
-    private var coolSpot: Color { colorScheme == .dark ? Color(red: 0.70, green: 0.74, blue: 1.0) : Color(red: 0.74, green: 0.78, blue: 0.96) }
+    private var waterFill: Color { colorScheme == .dark ? Color(red: 0.55, green: 0.72, blue: 1.0) : Color(red: 0.64, green: 0.82, blue: 1.0) }
+    private var glintColor: Color { colorScheme == .dark ? Color.cyan : Color.white }
+    private func ringColor(_ index: Int) -> Color {
+        let dark = [Color.cyan, Color.blue, Color.white, Color.mint, Color.indigo]
+        let light = [Color.white, Color(red: 0.52, green: 0.76, blue: 1.0), Color(red: 0.38, green: 0.62, blue: 0.95), Color.cyan, Color.gray]
+        return (colorScheme == .dark ? dark : light)[index]
+    }
+}
+
+private struct WaterRippleRing: View {
+    let index: Int
+    let origin: CGPoint
+    let maxRadius: CGFloat
+    let isActive: Bool
+    let color: Color
+    let lineWidth: CGFloat
+    let delay: Double
+
+    var body: some View {
+        let width = isActive ? maxRadius * (0.36 + CGFloat(index) * 0.18) : 24
+        let height = width * (0.74 + CGFloat(index % 2) * 0.08)
+        // v2.7.45: use RoundedRectangle for macOS 13 compatibility.
+        RoundedRectangle(cornerRadius: width * 0.44, style: .continuous)
+            .stroke(color.opacity(0.58 - Double(index) * 0.07), lineWidth: lineWidth)
+            .frame(width: width, height: height)
+            .rotationEffect(.degrees(Double(index) * 17 - 9))
+            .position(origin)
+            .blur(radius: CGFloat(index) * 0.9)
+            .opacity(isActive ? 0.86 - Double(index) * 0.10 : 0)
+            .blendMode(.screen)
+            .animation(.interpolatingSpring(stiffness: 72, damping: 18).delay(delay), value: isActive)
+    }
 }
 
 // MARK: - v2.7.43 Always-on Poster Ambient Background
