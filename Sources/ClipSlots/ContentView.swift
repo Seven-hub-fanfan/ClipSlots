@@ -649,7 +649,7 @@ struct ContentView: View {
             // Connection stays as a separate tool and is moved to the right side.
             connectionToolButton
 
-            Text("v2.7.43")
+            Text("v2.7.44")
                 .font(.caption2)
                 .foregroundColor(Color.secondary.opacity(0.65))
         }
@@ -1188,54 +1188,68 @@ private struct RetroPosterThemeTransition: View {
         GeometryReader { proxy in
             let maxRadius = hypot(proxy.size.width, proxy.size.height)
             ZStack {
-                // large geometric disk, inspired by the reference poster composition
+                // v2.7.44: poster-style transition should sweep like stage light,
+                // not expand as a cheap ripple. Keep geometry but animate as a horizontal
+                // cinematic lighting pass.
                 Circle()
                     .fill(diskColor)
-                    .frame(width: isActive ? maxRadius * 1.35 : 80, height: isActive ? maxRadius * 1.35 : 80)
-                    .position(x: proxy.size.width * 0.53, y: proxy.size.height * 0.48)
-                    .opacity(isActive ? 0.72 : 0)
+                    .frame(width: maxRadius * 0.82, height: maxRadius * 0.82)
+                    .position(x: proxy.size.width * 0.56, y: proxy.size.height * 0.50)
+                    .opacity(isActive ? 0.86 : 0)
                     .blur(radius: 0.8)
-                    .animation(.interpolatingSpring(stiffness: 42, damping: 18), value: isActive)
+                    .scaleEffect(isActive ? 1.08 : 0.92)
+                    .animation(.interpolatingSpring(stiffness: 46, damping: 20), value: isActive)
 
-                // red / warm spotlight from left
+                // red / warm spotlight sweep from left edge
                 RadialGradient(colors: [warmSpot.opacity(0.78), warmSpot.opacity(0.26), .clear], center: .center, startRadius: 20, endRadius: maxRadius * 0.52)
-                    .frame(width: maxRadius * 0.88, height: maxRadius * 0.62)
-                    .position(x: origin.x - maxRadius * 0.10, y: origin.y + maxRadius * 0.02)
+                    .frame(width: maxRadius * 0.78, height: maxRadius * 0.56)
+                    .position(x: isActive ? proxy.size.width * 0.18 : -maxRadius * 0.10, y: proxy.size.height * 0.20)
                     .opacity(isActive ? 1 : 0)
-                    .blur(radius: 18)
+                    .blur(radius: 28)
                     .blendMode(.screen)
-                    .animation(.easeOut(duration: 0.82), value: isActive)
+                    .animation(.easeOut(duration: 0.88), value: isActive)
 
-                // cool spotlight from right
+                // cool spotlight sweep from right edge
                 RadialGradient(colors: [coolSpot.opacity(0.72), coolSpot.opacity(0.22), .clear], center: .center, startRadius: 20, endRadius: maxRadius * 0.48)
-                    .frame(width: maxRadius * 0.80, height: maxRadius * 0.54)
-                    .position(x: proxy.size.width * 0.92, y: proxy.size.height * 0.28)
+                    .frame(width: maxRadius * 0.82, height: maxRadius * 0.56)
+                    .position(x: isActive ? proxy.size.width * 0.86 : proxy.size.width + maxRadius * 0.08, y: proxy.size.height * 0.24)
                     .opacity(isActive ? 0.95 : 0)
-                    .blur(radius: 22)
+                    .blur(radius: 30)
                     .blendMode(.screen)
                     .animation(.easeOut(duration: 0.96).delay(0.05), value: isActive)
 
-                // horizontal film flare, not a cheap circle glow
+                // horizontal film flare sweeps from left
                 Rectangle()
                     .fill(
-                        LinearGradient(colors: [.clear, Color.white.opacity(colorScheme == .dark ? 0.24 : 0.34), .clear], startPoint: .leading, endPoint: .trailing)
+                        LinearGradient(colors: [.clear, Color.white.opacity(colorScheme == .dark ? 0.30 : 0.42), Color.white.opacity(colorScheme == .dark ? 0.16 : 0.22), .clear], startPoint: .leading, endPoint: .trailing)
                     )
-                    .frame(width: maxRadius * 1.25, height: 96)
-                    .rotationEffect(.degrees(-4))
-                    .position(x: proxy.size.width * 0.50, y: proxy.size.height * 0.30)
-                    .opacity(isActive ? 0.70 : 0)
-                    .blur(radius: 18)
+                    .frame(width: maxRadius * 1.40, height: 118)
+                    .rotationEffect(.degrees(-3))
+                    .position(x: isActive ? proxy.size.width * 0.55 : -maxRadius * 0.50, y: proxy.size.height * 0.30)
+                    .opacity(isActive ? 0.82 : 0)
+                    .blur(radius: 20)
                     .blendMode(.screen)
-                    .animation(.easeOut(duration: 0.76).delay(0.10), value: isActive)
+                    .animation(.easeOut(duration: 1.02).delay(0.08), value: isActive)
+
+                // red diagonal beam
+                Rectangle()
+                    .fill(LinearGradient(colors: [.clear, Color.red.opacity(colorScheme == .dark ? 0.18 : 0.12), .clear], startPoint: .leading, endPoint: .trailing))
+                    .frame(width: maxRadius * 1.20, height: 180)
+                    .rotationEffect(.degrees(7))
+                    .position(x: isActive ? proxy.size.width * 0.45 : proxy.size.width + maxRadius * 0.3, y: proxy.size.height * 0.58)
+                    .opacity(isActive ? 0.72 : 0)
+                    .blur(radius: 36)
+                    .blendMode(.screen)
+                    .animation(.easeOut(duration: 1.06).delay(0.02), value: isActive)
 
                 RetroPosterGrain(opacity: isActive ? 0.13 : 0)
             }
         }
     }
 
-    private var diskColor: Color { colorScheme == .dark ? Color(red: 0.28, green: 0.32, blue: 0.48).opacity(0.52) : Color(red: 0.74, green: 0.78, blue: 0.86).opacity(0.64) }
-    private var warmSpot: Color { colorScheme == .dark ? Color(red: 1.0, green: 0.10, blue: 0.08) : Color(red: 1.0, green: 0.20, blue: 0.12) }
-    private var coolSpot: Color { colorScheme == .dark ? Color(red: 0.62, green: 0.68, blue: 1.0) : Color(red: 0.86, green: 0.88, blue: 1.0) }
+    private var diskColor: Color { colorScheme == .dark ? Color(red: 0.32, green: 0.36, blue: 0.56).opacity(0.58) : Color(red: 0.72, green: 0.76, blue: 0.88).opacity(0.72) }
+    private var warmSpot: Color { colorScheme == .dark ? Color(red: 1.0, green: 0.08, blue: 0.06) : Color(red: 1.0, green: 0.16, blue: 0.10) }
+    private var coolSpot: Color { colorScheme == .dark ? Color(red: 0.70, green: 0.74, blue: 1.0) : Color(red: 0.74, green: 0.78, blue: 0.96) }
 }
 
 // MARK: - v2.7.43 Always-on Poster Ambient Background
@@ -1248,24 +1262,40 @@ private struct RetroPosterAmbientBackground: View {
             AppTheme.windowBackground(colorScheme)
 
             Circle()
-                .fill(colorScheme == .dark ? Color(red: 0.22, green: 0.26, blue: 0.42).opacity(0.20) : Color(red: 0.76, green: 0.80, blue: 0.88).opacity(0.28))
-                .frame(width: 760, height: 760)
-                .offset(x: 160, y: -80)
+                .fill(colorScheme == .dark ? Color(red: 0.22, green: 0.27, blue: 0.48).opacity(0.24) : Color(red: 0.70, green: 0.75, blue: 0.88).opacity(0.46))
+                .frame(width: 820, height: 820)
+                .offset(x: 130, y: -40)
                 .blur(radius: 1.5)
 
-            RadialGradient(colors: [Color.red.opacity(colorScheme == .dark ? 0.20 : 0.14), .clear], center: .center, startRadius: 0, endRadius: 420)
-                .frame(width: 620, height: 520)
-                .offset(x: -520, y: -250)
-                .blur(radius: 42)
+            RadialGradient(colors: [Color.red.opacity(colorScheme == .dark ? 0.28 : 0.22), Color.red.opacity(colorScheme == .dark ? 0.12 : 0.08), .clear], center: .center, startRadius: 0, endRadius: 460)
+                .frame(width: 720, height: 580)
+                .offset(x: -470, y: -230)
+                .blur(radius: 50)
                 .blendMode(.screen)
 
-            RadialGradient(colors: [Color.orange.opacity(colorScheme == .dark ? 0.16 : 0.10), .clear], center: .center, startRadius: 0, endRadius: 480)
-                .frame(width: 680, height: 560)
-                .offset(x: 620, y: -240)
-                .blur(radius: 54)
+            RadialGradient(colors: [Color.white.opacity(colorScheme == .dark ? 0.18 : 0.48), Color.orange.opacity(colorScheme == .dark ? 0.18 : 0.16), .clear], center: .center, startRadius: 0, endRadius: 520)
+                .frame(width: 760, height: 580)
+                .offset(x: 560, y: -250)
+                .blur(radius: 58)
                 .blendMode(.screen)
 
-            RetroPosterGrain(opacity: colorScheme == .dark ? 0.050 : 0.035)
+            Rectangle()
+                .fill(LinearGradient(colors: [.clear, Color.white.opacity(colorScheme == .dark ? 0.055 : 0.26), .clear], startPoint: .leading, endPoint: .trailing))
+                .frame(height: 130)
+                .rotationEffect(.degrees(-2.5))
+                .offset(y: -210)
+                .blur(radius: 32)
+                .blendMode(.screen)
+
+            Rectangle()
+                .fill(LinearGradient(colors: [.clear, Color.red.opacity(colorScheme == .dark ? 0.08 : 0.06), .clear], startPoint: .leading, endPoint: .trailing))
+                .frame(height: 220)
+                .rotationEffect(.degrees(5))
+                .offset(y: 110)
+                .blur(radius: 58)
+                .blendMode(.screen)
+
+            RetroPosterGrain(opacity: colorScheme == .dark ? 0.060 : 0.050)
         }
     }
 }
