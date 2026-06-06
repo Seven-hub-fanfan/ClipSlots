@@ -35,6 +35,7 @@ struct SlotCardView: View {
     @State private var showingHTMLEditor = false
     @State private var editingText = ""
     @State private var isDropTargeted = false
+    @State private var isPressed = false
 
     @Environment(\.colorScheme) private var colorScheme
 
@@ -106,11 +107,17 @@ struct SlotCardView: View {
         // v2.7.1: Do not render node-canvas ports on the main card grid.
         // The v2.7.0 port overlay polluted the normal UI with permanent blue handles.
         // Keep only a tiny chain-color dot in the header.
-        .scaleEffect(isHovering ? 1.012 : 1.0)
-        .animation(.easeOut(duration: 0.14), value: isHovering)
+        .scaleEffect(isPressed ? 0.98 : (isHovering ? 1.012 : 1.0))
+        .animation(.spring(response: 0.28, dampingFraction: 0.82), value: isHovering)
+        .animation(.spring(response: 0.18, dampingFraction: 0.70), value: isPressed)
         .onHover { hovering in
             isHovering = hovering
         }
+        .simultaneousGesture(
+            DragGesture(minimumDistance: 0)
+                .onChanged { _ in isPressed = true }
+                .onEnded { _ in isPressed = false }
+        )
         .onDrop(of: [UTType.fileURL.identifier], isTargeted: $isDropTargeted) { providers in
             handleFileDrop(providers)
         }

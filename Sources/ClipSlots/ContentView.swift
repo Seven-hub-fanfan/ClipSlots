@@ -5,6 +5,9 @@ struct ContentView: View {
     @State private var showingSettings = false
     @State private var showingSpecialSlotManagement = false
     @State private var showingHotkeyTemplatePopover = false
+    @State private var showingConnectionFullscreen = false
+    @State private var themeRippleActive = false
+    @State private var themeRipplePoint: CGPoint = .zero
     @Environment(\.colorScheme) private var colorScheme
 
     @AppStorage("appearanceMode") private var appearanceModeRaw = ThemeMode.system.rawValue
@@ -21,12 +24,17 @@ struct ContentView: View {
     // v2.7.2: Independent node canvas (does NOT draw lines on the main grid).
     @State private var showingNodeCanvas = false
 
-    private func cycleAppearanceMode() {
+    private func cycleAppearanceMode(from point: CGPoint = CGPoint(x: 1180, y: 54)) {
+        themeRipplePoint = point
+        withAnimation(.easeOut(duration: 0.18)) { themeRippleActive = true }
         let current = ThemeMode(rawValue: appearanceModeRaw) ?? .system
         switch current {
         case .system: appearanceModeRaw = ThemeMode.light.rawValue
         case .light:  appearanceModeRaw = ThemeMode.dark.rawValue
         case .dark:   appearanceModeRaw = ThemeMode.system.rawValue
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.72) {
+            withAnimation(.easeInOut(duration: 0.22)) { themeRippleActive = false }
         }
     }
 
@@ -73,6 +81,10 @@ struct ContentView: View {
             }
             .background(AppTheme.windowBackground(colorScheme))
 
+            ThemeRippleOverlay(isActive: themeRippleActive, origin: themeRipplePoint)
+                .allowsHitTesting(false)
+                .zIndex(90)
+
             // Toast overlay
             if let message = store.toastMessage {
                 toastView(message)
@@ -111,6 +123,15 @@ struct ContentView: View {
         .sheet(isPresented: $showingNodeCanvas) {
             NodeCanvasSheet(store: store)
                 .frame(minWidth: 980, minHeight: 680)
+        }
+        .sheet(isPresented: $showingConnectionFullscreen) {
+            ConnectionFullscreenView(
+                store: store,
+                onClose: { showingConnectionFullscreen = false },
+                onOpenNodeCanvas: { showingNodeCanvas = true; showingConnectionFullscreen = false },
+                onOpenManager: { showingConnectionManagement = true; showingConnectionFullscreen = false }
+            )
+                .frame(minWidth: 720, minHeight: 560)
         }
     }
 
@@ -622,7 +643,7 @@ struct ContentView: View {
             // Connection stays as a separate tool and is moved to the right side.
             connectionToolButton
 
-            Text("v2.7.39")
+            Text("v2.7.40")
                 .font(.caption2)
                 .foregroundColor(Color.secondary.opacity(0.65))
         }
@@ -638,6 +659,14 @@ struct ContentView: View {
     // v2.7.36: standalone connection button, not mixed with shortcut chips.
     private var connectionToolButton: some View {
         Menu {
+            Button {
+                showingConnectionFullscreen = true
+            } label: {
+                Label("全屏连接模式", systemImage: "arrow.up.left.and.arrow.down.right")
+            }
+
+            Divider()
+
             // v2.7.2: Independent node canvas
             Button {
                 showingNodeCanvas = true
@@ -698,11 +727,13 @@ struct ContentView: View {
         .padding(.horizontal, 11)
         .padding(.vertical, 6)
         .background(
-            Capsule().fill(hasConnections ? Color.accentColor.opacity(0.16) : AppTheme.chipBackground(colorScheme))
+            Capsule().fill(hasConnections ? Color.accentColor.opacity(0.18) : AppTheme.chipBackground(colorScheme))
         )
         .overlay(
             Capsule().stroke(hasConnections ? Color.accentColor.opacity(0.55) : Color.secondary.opacity(0.16), lineWidth: 1)
         )
+        .scaleEffect(hasConnections ? 1.015 : 1.0)
+        .animation(.spring(response: 0.32, dampingFraction: 0.78), value: edgeCount)
         .help(hasConnections ? "当前槽位组已有 \(edgeCount) 条连接" : "打开节点连接工具")
     }
 
@@ -947,6 +978,7 @@ private struct ToolbarActionButton: View {
     let role: Role
     let prominent: Bool
     let action: () -> Void
+    @State private var isHovering = false
 
     @Environment(\.colorScheme) private var colorScheme
 
@@ -973,6 +1005,9 @@ private struct ToolbarActionButton: View {
                 .stroke(borderColor, lineWidth: 0.8)
         )
         .shadow(color: shadowColor, radius: prominent ? 4 : 0, x: 0, y: prominent ? 1 : 0)
+        .scaleEffect(isHovering ? 1.035 : 1.0)
+        .animation(.spring(response: 0.22, dampingFraction: 0.72), value: isHovering)
+        .onHover { isHovering = $0 }
     }
 
     private var minWidth: CGFloat {
@@ -1133,5 +1168,152 @@ struct SlotFramePreferenceKey: PreferenceKey {
 
     static func reduce(value: inout [Int: CGRect], nextValue: () -> [Int: CGRect]) {
         value.merge(nextValue(), uniquingKeysWith: { _, new in new })
+    }
+}
+
+// MARK: - v2.7.40 Theme Ripple Overlay
+
+private struct ThemeRippleOverlay: View {
+    let isActive: Bool
+    let origin: CGPoint
+    @Environment(\.colorScheme) private var colorScheme
+
+    var body: some View {
+        GeometryReader { proxy in
+            let maxRadius = hypot(proxy.size.width, proxy.size.height)
+            Circle()
+                .fill(
+                    RadialGradient(
+                        colors: [
+                            (colorScheme == .dark ? Color.white.opacity(0.18) : Color.black.opacity(0.10)),
+                            Color.clear
+                        ],
+                        center: .center,
+                        startRadius: 0,
+                        endRadius: maxRadius * 0.58
+                    )
+                )
+                .frame(width: isActive ? maxRadius * 2 : 0, height: isActive ? maxRadius * 2 : 0)
+                .position(origin)
+                .opacity(isActive ? 1 : 0)
+                .blur(radius: 10)
+                .animation(.easeOut(duration: 0.68), value: isActive)
+        }
+    }
+}
+
+// MARK: - v2.7.40 Fullscreen Connection Mode
+
+private struct ConnectionFullscreenView: View {
+    @ObservedObject var store: SlotStoreObservable
+    var onClose: () -> Void
+    var onOpenNodeCanvas: () -> Void
+    var onOpenManager: () -> Void
+    @Environment(\.colorScheme) private var colorScheme
+
+    var body: some View {
+        ZStack {
+            LinearGradient(
+                colors: [
+                    AppTheme.windowBackground(colorScheme),
+                    Color.accentColor.opacity(colorScheme == .dark ? 0.16 : 0.08),
+                    AppTheme.windowBackground(colorScheme)
+                ],
+                startPoint: .topLeading,
+                endPoint: .bottomTrailing
+            )
+            .ignoresSafeArea()
+
+            VStack(spacing: 18) {
+                HStack(spacing: 14) {
+                    Image(systemName: "point.3.connected.trianglepath.dotted")
+                        .font(.system(size: 28, weight: .semibold))
+                        .foregroundColor(.accentColor)
+                        .frame(width: 54, height: 54)
+                        .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+                        .overlay(RoundedRectangle(cornerRadius: 18).stroke(Color.white.opacity(0.18), lineWidth: 1))
+
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("连接模式")
+                            .font(.system(size: 28, weight: .bold, design: .rounded))
+                        Text("为当前槽位组规划串联路径、模板与批量粘贴顺序")
+                            .font(.system(size: 13, weight: .medium))
+                            .foregroundColor(.secondary)
+                    }
+
+                    Spacer()
+
+                    Button("完成") { onClose() }
+                        .keyboardShortcut(.escape, modifiers: [])
+                        .buttonStyle(.borderedProminent)
+                }
+                .padding(.horizontal, 34)
+                .padding(.top, 28)
+
+                HStack(spacing: 14) {
+                    ConnectionMetricCard(title: "当前连接", value: "\(store.currentConnectionMap.edges.count)", icon: "link.circle.fill")
+                    ConnectionMetricCard(title: "槽位数量", value: "\(store.config.slots)", icon: "rectangle.grid.2x2.fill")
+                    ConnectionMetricCard(title: "当前组", value: store.currentSpecialSlot?.name ?? "默认", icon: "folder.fill")
+                }
+                .padding(.horizontal, 34)
+
+                HStack(spacing: 16) {
+                    ConnectionFullscreenAction(title: "打开节点画布", subtitle: "可视化拖拽连接槽位", icon: "point.3.connected.trianglepath.dotted", tint: .accentColor, action: onOpenNodeCanvas)
+                    ConnectionFullscreenAction(title: "连接管理", subtitle: "查看、编辑和清理链路", icon: "slider.horizontal.3", tint: .blue, action: onOpenManager)
+                    ConnectionFullscreenAction(title: "应用全串联模板", subtitle: "一键生成 1→2→3…", icon: "list.number", tint: .orange, action: { store.applyBuiltInFullChainTemplate() })
+                }
+                .padding(.horizontal, 34)
+
+                Spacer()
+            }
+        }
+    }
+}
+
+private struct ConnectionMetricCard: View {
+    let title: String
+    let value: String
+    let icon: String
+    var body: some View {
+        HStack(spacing: 10) {
+            Image(systemName: icon).foregroundColor(.accentColor)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title).font(.caption).foregroundColor(.secondary)
+                Text(value).font(.system(size: 16, weight: .bold, design: .rounded)).lineLimit(1)
+            }
+            Spacer()
+        }
+        .padding(14)
+        .frame(maxWidth: .infinity)
+        .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 16).stroke(Color.white.opacity(0.14), lineWidth: 1))
+    }
+}
+
+private struct ConnectionFullscreenAction: View {
+    let title: String
+    let subtitle: String
+    let icon: String
+    let tint: Color
+    let action: () -> Void
+    @State private var hovering = false
+    var body: some View {
+        Button(action: action) {
+            VStack(alignment: .leading, spacing: 12) {
+                Image(systemName: icon)
+                    .font(.system(size: 24, weight: .semibold))
+                    .foregroundColor(tint)
+                Text(title).font(.system(size: 17, weight: .bold))
+                Text(subtitle).font(.caption).foregroundColor(.secondary)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(18)
+            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: 20).stroke(tint.opacity(hovering ? 0.45 : 0.18), lineWidth: 1))
+            .scaleEffect(hovering ? 1.025 : 1)
+        }
+        .buttonStyle(.plain)
+        .onHover { hovering = $0 }
+        .animation(.spring(response: 0.28, dampingFraction: 0.76), value: hovering)
     }
 }
