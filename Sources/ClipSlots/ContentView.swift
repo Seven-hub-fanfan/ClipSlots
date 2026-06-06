@@ -29,9 +29,11 @@ struct ContentView: View {
         withAnimation(.easeOut(duration: 0.18)) { themeRippleActive = true }
         let current = ThemeMode(rawValue: appearanceModeRaw) ?? .system
         switch current {
-        case .system: appearanceModeRaw = ThemeMode.light.rawValue
+        // v2.7.41: toolbar theme switch only toggles light/dark.
+        // Keep "follow system" only in Settings to avoid confusing three-state cycling.
+        case .system: appearanceModeRaw = ThemeMode.dark.rawValue
         case .light:  appearanceModeRaw = ThemeMode.dark.rawValue
-        case .dark:   appearanceModeRaw = ThemeMode.system.rawValue
+        case .dark:   appearanceModeRaw = ThemeMode.light.rawValue
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.72) {
             withAnimation(.easeInOut(duration: 0.22)) { themeRippleActive = false }
@@ -209,17 +211,18 @@ struct ContentView: View {
         VStack(spacing: 0) {
             titleBar
                 .padding(.horizontal, AppTheme.pagePadding)
-                .padding(.vertical, 14)
+                .padding(.vertical, 12)
 
             Divider()
 
             actionBar
                 .padding(.horizontal, AppTheme.pagePadding)
-                .padding(.vertical, 10)
+                .padding(.top, 6)
+                .padding(.bottom, 4)
 
             specialSlotTagBar
                 .padding(.horizontal, AppTheme.pagePadding)
-                .padding(.bottom, 6)
+                .padding(.bottom, 4)
 
             // v2.7.37: remove the upper shortcut hint completely.
             // It duplicated the bottom bar and consumed vertical space for slots.
@@ -353,8 +356,8 @@ struct ContentView: View {
                         .font(.system(size: 8, weight: .bold))
                 }
                 .foregroundColor(.primary)
-                .padding(.horizontal, 10)
-                .padding(.vertical, 6)
+                .padding(.horizontal, 9)
+                .padding(.vertical, 5)
                 .background(
                     RoundedRectangle(cornerRadius: 6, style: .continuous)
                         .fill(Color.primary.opacity(0.06))
@@ -367,7 +370,7 @@ struct ContentView: View {
 
             toolbarActions
         }
-        .frame(minHeight: 44, alignment: .center)
+        .frame(minHeight: 36, alignment: .center)
     }
 
     // v2.7.39: keep the top-right action group vertically centered and easier to hit.
@@ -402,14 +405,14 @@ struct ContentView: View {
             )
             .help("清空当前槽位组中的全部槽位")
         }
-        .frame(height: 44, alignment: .center)
+        .frame(height: 36, alignment: .center)
         .padding(.horizontal, 2)
     }
 
     // v2.4: renamed from specialSlotTagBar — shows only current page's slot groups
     private var specialSlotTagBar: some View {
         ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 8) {
+            HStack(spacing: 7) {
                 ForEach(store.currentPageSlotGroups) { group in
                     let isCurrent = group.id == store.currentSpecialSlotId
 
@@ -421,8 +424,8 @@ struct ContentView: View {
                             Text(group.name)
                         }
                         .font(.caption)
-                        .padding(.horizontal, 10)
-                        .padding(.vertical, 6)
+                        .padding(.horizontal, 9)
+                        .padding(.vertical, 5)
                         .background(
                             Capsule()
                                 .fill(
@@ -463,7 +466,7 @@ struct ContentView: View {
                 } label: {
                     Image(systemName: "plus")
                         .font(.caption)
-                        .padding(7)
+                        .padding(6)
                         .background(Circle().fill(Color.primary.opacity(0.05)))
                 }
                 .buttonStyle(.plain)
@@ -476,7 +479,7 @@ struct ContentView: View {
                 } label: {
                     Image(systemName: "slider.horizontal.3")
                         .font(.caption)
-                        .padding(7)
+                        .padding(6)
                         .background(Circle().fill(Color.primary.opacity(0.05)))
                 }
                 .buttonStyle(.plain)
@@ -643,7 +646,7 @@ struct ContentView: View {
             // Connection stays as a separate tool and is moved to the right side.
             connectionToolButton
 
-            Text("v2.7.40")
+            Text("v2.7.41")
                 .font(.caption2)
                 .foregroundColor(Color.secondary.opacity(0.65))
         }
@@ -991,7 +994,7 @@ private struct ToolbarActionButton: View {
                     .font(.system(size: 12, weight: .semibold))
             }
             .frame(minWidth: minWidth, minHeight: 30)
-            .padding(.horizontal, 10)
+            .padding(.horizontal, 9)
             .contentShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
         }
         .buttonStyle(.plain)
@@ -1181,23 +1184,60 @@ private struct ThemeRippleOverlay: View {
     var body: some View {
         GeometryReader { proxy in
             let maxRadius = hypot(proxy.size.width, proxy.size.height)
-            Circle()
-                .fill(
-                    RadialGradient(
-                        colors: [
-                            (colorScheme == .dark ? Color.white.opacity(0.18) : Color.black.opacity(0.10)),
-                            Color.clear
-                        ],
-                        center: .center,
-                        startRadius: 0,
-                        endRadius: maxRadius * 0.58
+            ZStack {
+                ForEach(0..<4, id: \.self) { index in
+                    let delay = Double(index) * 0.055
+                    let progressScale = isActive ? (1.0 + CGFloat(index) * 0.18) : 0.02
+                    Circle()
+                        .strokeBorder(rippleStroke(index), lineWidth: index == 0 ? 2.2 : 1.25)
+                        .background(
+                            Circle().fill(rippleFill(index))
+                        )
+                        .frame(width: maxRadius * progressScale, height: maxRadius * progressScale)
+                        .blur(radius: CGFloat(index) * 1.4)
+                        .opacity(isActive ? max(0.0, 0.68 - Double(index) * 0.12) : 0)
+                        .animation(.interpolatingSpring(stiffness: 62, damping: 18).delay(delay), value: isActive)
+                }
+
+                Circle()
+                    .fill(
+                        RadialGradient(
+                            colors: haloColors,
+                            center: .center,
+                            startRadius: 0,
+                            endRadius: maxRadius * 0.42
+                        )
                     )
-                )
-                .frame(width: isActive ? maxRadius * 2 : 0, height: isActive ? maxRadius * 2 : 0)
-                .position(origin)
-                .opacity(isActive ? 1 : 0)
-                .blur(radius: 10)
-                .animation(.easeOut(duration: 0.68), value: isActive)
+                    .frame(width: isActive ? maxRadius * 1.45 : 0, height: isActive ? maxRadius * 1.45 : 0)
+                    .opacity(isActive ? 0.52 : 0)
+                    .blur(radius: 14)
+                    .animation(.easeOut(duration: 0.74), value: isActive)
+            }
+            .position(origin)
+        }
+    }
+
+    private var haloColors: [Color] {
+        if colorScheme == .dark {
+            return [Color.cyan.opacity(0.26), Color.blue.opacity(0.14), Color.clear]
+        } else {
+            return [Color.orange.opacity(0.20), Color.yellow.opacity(0.14), Color.clear]
+        }
+    }
+
+    private func rippleStroke(_ index: Int) -> Color {
+        if colorScheme == .dark {
+            return [Color.cyan.opacity(0.55), Color.blue.opacity(0.42), Color.purple.opacity(0.30), Color.white.opacity(0.20)][index]
+        } else {
+            return [Color.orange.opacity(0.52), Color.yellow.opacity(0.42), Color.white.opacity(0.56), Color.black.opacity(0.10)][index]
+        }
+    }
+
+    private func rippleFill(_ index: Int) -> Color {
+        if colorScheme == .dark {
+            return [Color.cyan.opacity(0.055), Color.blue.opacity(0.040), Color.purple.opacity(0.030), Color.clear][index]
+        } else {
+            return [Color.orange.opacity(0.050), Color.yellow.opacity(0.045), Color.white.opacity(0.080), Color.clear][index]
         }
     }
 }
