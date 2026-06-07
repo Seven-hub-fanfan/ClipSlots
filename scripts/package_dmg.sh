@@ -29,48 +29,27 @@ verify_app_bundle() {
   plutil -lint "$app/Contents/Info.plist" >/dev/null
   codesign --verify --deep --strict --verbose=2 "$app"
 }
+export BACKGROUND_PNG
 create_dmg_background() {
 mkdir -p "$BACKGROUND_DIR"
-python3 - <<PY
+python3 - <<'PY'
 from pathlib import Path
-try:
-    from PIL import Image, ImageDraw, ImageFont
-except Exception:
-    raise SystemExit(0)
-out = Path("$BACKGROUND_PNG")
+import os, struct, zlib
+out = Path(os.environ["BACKGROUND_PNG"])
 W,H = 640,360
-img = Image.new("RGB", (W,H), (246,247,249))
-d = ImageDraw.Draw(img)
-# clean macOS style background, close to classic drag-to-Applications DMG
+def chunk(t, data):
+    return struct.pack('>I', len(data)) + t + data + struct.pack('>I', zlib.crc32(t + data) & 0xffffffff)
+rows=[]
 for y in range(H):
-    t = y / H
-    r = int(248 - t * 8)
-    g = int(249 - t * 9)
-    b = int(251 - t * 7)
-    d.line([(0,y),(W,y)], fill=(r,g,b))
-
-# subtle rounded panel
-d.rounded_rectangle([34,28,606,322], radius=28, fill=(255,255,255), outline=(226,228,232), width=1)
-
-# soft app / Applications landing circles
-d.ellipse([73,92,227,246], fill=(241,244,248), outline=(218,222,228), width=1)
-d.ellipse([413,92,567,246], fill=(241,244,248), outline=(218,222,228), width=1)
-
-# center arrow line
-d.line([(255,169),(382,169)], fill=(168,174,184), width=5)
-d.polygon([(382,169),(360,154),(360,184)], fill=(168,174,184))
-d.line([(255,170),(382,170)], fill=(255,255,255), width=1)
-
-# small installation hint
-try:
-    font = ImageFont.truetype("/System/Library/Fonts/Supplemental/Arial Unicode.ttf", 17)
-    small = ImageFont.truetype("/System/Library/Fonts/Supplemental/Arial Unicode.ttf", 12)
-except Exception:
-    font = small = None
-d.text((216,255), "拖动 ClipSlots 到 Applications", fill=(80,84,92), font=font)
-d.text((270,282), "Drag to install", fill=(132,138,148), font=small)
-img.save(out)
-
+    t=y/H
+    r=int(248-t*8); g=int(249-t*9); b=int(251-t*7)
+    row=bytearray([0])
+    for x in range(W):
+        row.extend((r,g,b))
+    rows.append(bytes(row))
+raw=b''.join(rows)
+png=b'\x89PNG\r\n\x1a\n'+chunk(b'IHDR', struct.pack('>IIBBBBB', W,H,8,2,0,0,0))+chunk(b'IDAT', zlib.compress(raw,9))+chunk(b'IEND', b'')
+out.write_bytes(png)
 PY
 }
 
@@ -116,6 +95,7 @@ ditto "$APP_DIR" "$STAGING_DIR/$APP_NAME.app"
 ensure_applications_symlink "$STAGING_DIR"
 xattr -cr "$STAGING_DIR" 2>/dev/null || true
 verify_app_bundle "$STAGING_DIR/$APP_NAME.app"
+export BACKGROUND_PNG
 create_dmg_background
 
 echo "==> Create and layout DMG"
