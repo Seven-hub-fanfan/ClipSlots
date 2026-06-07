@@ -14,6 +14,19 @@ DMG_SIZE="220m"
 
 die() { echo "ERROR: $*" >&2; exit 1; }
 detach_if_mounted() { hdiutil detach "$1" 2>/dev/null || true; }
+ensure_applications_symlink() {
+  local dir="$1"
+  rm -rf "$dir/Applications"
+  ln -s /Applications "$dir/Applications"
+  test -L "$dir/Applications" || die "Applications symlink missing in $dir"
+}
+verify_app_bundle() {
+  local app="$1"
+  test -d "$app" || die "$app missing"
+  test -x "$app/Contents/MacOS/$APP_NAME" || die "$APP_NAME executable missing or not executable"
+  plutil -lint "$app/Contents/Info.plist" >/dev/null
+  codesign --verify --deep --strict --verbose=2 "$app"
+}
 
 echo "==> Clean"
 detach_if_mounted "/Volumes/$VOLUME_NAME"
@@ -44,8 +57,8 @@ echo "==> Remove quarantine / stale extended attributes from app before DMG"
 xattr -cr "$APP_DIR" 2>/dev/null || true
 
 echo "==> Re-sign app bundle (adhoc) after xattr cleanup"
-codesign --force --deep --timestamp=none --options runtime --sign - "$APP_DIR"
-codesign --verify --deep --strict --verbose=2 "$APP_DIR"
+codesign --force --deep --timestamp=none --sign - "$APP_DIR"
+verify_app_bundle "$APP_DIR"
 
 echo "==> Validate app bundle"
 plutil -lint "$APP_DIR/Contents/Info.plist"
@@ -54,8 +67,9 @@ file "$APP_DIR/Contents/MacOS/$APP_NAME"
 echo "==> Prepare DMG staging"
 mkdir -p "$STAGING_DIR"
 ditto "$APP_DIR" "$STAGING_DIR/$APP_NAME.app"
-ln -s /Applications "$STAGING_DIR/Applications"
+ensure_applications_symlink "$STAGING_DIR"
 xattr -cr "$STAGING_DIR" 2>/dev/null || true
+verify_app_bundle "$STAGING_DIR/$APP_NAME.app"
 
 echo "==> Create and layout DMG"
 # Ensure no stale mount
@@ -75,10 +89,10 @@ hdiutil attach "$TMP_DMG" -readwrite -noverify -noautoopen -mountpoint "$MNTPNT"
 
 echo "==> Copy app and Applications link into mounted DMG"
 ditto "$APP_DIR" "$MNTPNT/$APP_NAME.app"
-rm -f "$MNTPNT/Applications"
-ln -s /Applications "$MNTPNT/Applications"
+ensure_applications_symlink "$MNTPNT"
 xattr -cr "$MNTPNT/$APP_NAME.app" 2>/dev/null || true
-codesign --verify --deep --strict --verbose=2 "$MNTPNT/$APP_NAME.app"
+codesign --force --deep --timestamp=none --sign - "$MNTPNT/$APP_NAME.app"
+verify_app_bundle "$MNTPNT/$APP_NAME.app"
 
 test -d "$MNTPNT/$APP_NAME.app" || die "$APP_NAME.app missing before layout"
 test -L "$MNTPNT/Applications" || die "Applications symlink missing before layout"
@@ -112,7 +126,7 @@ end tell
 " 2>/dev/null || true
 
 sleep 2
-hdiutil detach "$MNTPNT"
+hdiutil detach "$MNTPNT" || { sleep 2; hdiutil detach "$MNTPNT" -force; }
 sleep 1
 
 echo "==> Convert to compressed DMG"
@@ -130,12 +144,17 @@ hdiutil verify "$DMG_PATH"
 echo "==> Verify DMG contents include app and Applications symlink"
 VERIFY_MOUNT="/Volumes/${VOLUME_NAME}_verify"
 detach_if_mounted "$VERIFY_MOUNT"
-hdiutil attach "$DMG_PATH" -readonly -noverify -noautoopen -mountpoint "$VERIFY_MOUNT" 2>/dev/null || true
-test -d "$VERIFY_MOUNT/$APP_NAME.app" || { echo "ERROR: $APP_NAME.app missing in DMG"; exit 1; }
-test -L "$VERIFY_MOUNT/Applications" || { echo "ERROR: Applications symlink missing in DMG"; exit 1; }
-codesign --verify --deep --strict --verbose=2 "$VERIFY_MOUNT/$APP_NAME.app" || { echo "ERROR: codesign verify failed inside DMG"; exit 1; }
+hdiutil attach "$DMG_PATH" -readonly -noverify -noautoopen -mountpoint "$VERIFY_MOUNT" >/dev/null
+test -d "$VERIFY_MOUNT/$APP_NAME.app" || die "$APP_NAME.app missing in DMG"
+test -L "$VERIFY_MOUNT/Applications" || die "Applications symlink missing in DMG"
+verify_app_bundle "$VERIFY_MOUNT/$APP_NAME.app" || die "codesign verify failed inside DMG"
 echo "  OK: app and Applications symlink present"
 hdiutil detach "$VERIFY_MOUNT" 2>/dev/null || true
+
+echo "==> Optional deep verification"
+if [ -x "$ROOT_DIR/scripts/verify_release_dmg.sh" ]; then
+  "$ROOT_DIR/scripts/verify_release_dmg.sh" "$DMG_PATH"
+fi
 
 echo "==> Gatekeeper note"
 echo "  This DMG is ad-hoc signed, not Developer ID notarized."
