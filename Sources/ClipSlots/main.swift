@@ -645,8 +645,8 @@ final class SlotStoreObservable: ObservableObject {
         }
     }
 
-    // v2.7.57: radial group-hover preview support.
-    func firstPreviewContent(pageId: String, specialSlotId: String) -> SlotContent? {
+    // v2.7.58: radial group-hover preview support.
+    func firstNonEmptySlotContent(pageId: String, specialSlotId: String) -> SlotContent? {
         for slot in 1...config.slots {
             let content = specialStorage.get(slot, in: specialSlotId)
             if !content.isEmpty { return content }

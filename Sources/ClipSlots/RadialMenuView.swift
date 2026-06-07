@@ -85,6 +85,27 @@ struct RadialMenuView: View {
         store.currentConnectionMap.edges.isEmpty ? connectionMap : store.currentConnectionMap
     }
 
+    private var hoveredPreviewContent: SlotContent? {
+        guard let idx = hoveredIndex else { return nil }
+        if mode == .childSlots {
+            return store.slots[idx]
+        }
+        let groups = store.currentPageSlotGroups
+        guard idx >= 0, idx < groups.count else { return nil }
+        let targetGroup = groups[idx]
+        // v2.7.58: when hovering a slot group in radial menu, preview the target
+        // group's first non-empty slot, not the current group's current slot content.
+        return store.firstNonEmptySlotContent(pageId: store.currentPageId, specialSlotId: targetGroup.id)
+    }
+
+    private var previewTitle: String {
+        guard let idx = hoveredIndex else { return "实时预览" }
+        if mode == .childSlots { return store.labels[idx] ?? "槽位 \(idx)" }
+        let groups = store.currentPageSlotGroups
+        guard idx >= 0, idx < groups.count else { return "实时预览" }
+        return "\(groups[idx].name) · 预览"
+    }
+
     @State private var hoveredIndex: Int? = nil
     @State private var appeared = false
     @State private var mode: RadialMenuMode = .childSlots
