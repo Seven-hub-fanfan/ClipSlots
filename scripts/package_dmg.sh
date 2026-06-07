@@ -39,21 +39,38 @@ except Exception:
     raise SystemExit(0)
 out = Path("$BACKGROUND_PNG")
 W,H = 640,360
-img = Image.new("RGB", (W,H), (250,250,248))
+img = Image.new("RGB", (W,H), (246,247,249))
 d = ImageDraw.Draw(img)
-for x in range(W):
-    c = int(250 - x/W*10)
-    d.line([(x,0),(x,H)], fill=(c,c,c+2))
-d.rounded_rectangle([250,120,390,205], radius=42, outline=(185,185,185), width=3)
-d.polygon([(382,162),(360,148),(360,176)], fill=(185,185,185))
+# clean macOS style background, close to classic drag-to-Applications DMG
+for y in range(H):
+    t = y / H
+    r = int(248 - t * 8)
+    g = int(249 - t * 9)
+    b = int(251 - t * 7)
+    d.line([(0,y),(W,y)], fill=(r,g,b))
+
+# subtle rounded panel
+d.rounded_rectangle([34,28,606,322], radius=28, fill=(255,255,255), outline=(226,228,232), width=1)
+
+# soft app / Applications landing circles
+d.ellipse([73,92,227,246], fill=(241,244,248), outline=(218,222,228), width=1)
+d.ellipse([413,92,567,246], fill=(241,244,248), outline=(218,222,228), width=1)
+
+# center arrow line
+d.line([(255,169),(382,169)], fill=(168,174,184), width=5)
+d.polygon([(382,169),(360,154),(360,184)], fill=(168,174,184))
+d.line([(255,170),(382,170)], fill=(255,255,255), width=1)
+
+# small installation hint
 try:
-    font = ImageFont.truetype("/System/Library/Fonts/Supplemental/Arial Unicode.ttf", 18)
-    small = ImageFont.truetype("/System/Library/Fonts/Supplemental/Arial Unicode.ttf", 13)
+    font = ImageFont.truetype("/System/Library/Fonts/Supplemental/Arial Unicode.ttf", 17)
+    small = ImageFont.truetype("/System/Library/Fonts/Supplemental/Arial Unicode.ttf", 12)
 except Exception:
     font = small = None
-d.text((238,232), "拖动 ClipSlots 到 Applications", fill=(90,90,90), font=font)
-d.text((252,258), "Drag to install", fill=(135,135,135), font=small)
+d.text((216,255), "拖动 ClipSlots 到 Applications", fill=(80,84,92), font=font)
+d.text((270,282), "Drag to install", fill=(132,138,148), font=small)
 img.save(out)
+
 PY
 }
 
@@ -145,12 +162,12 @@ tell application \"Finder\"
     set the bounds of container window to {360, 180, 1000, 540}
     set viewOptions to the icon view options of container window
     set arrangement of viewOptions to not arranged
-    set icon size of viewOptions to 96
+    set icon size of viewOptions to 112
     try
     set background picture of viewOptions to file ".background:background.png"
     end try
-    set position of item \"$APP_NAME.app\" to {145, 170}
-    set position of item \"Applications\" to {495, 170}
+    set position of item \"$APP_NAME.app\" to {150, 176}
+    set position of item \"Applications\" to {490, 176}
     set label position of viewOptions to bottom
     close
     open
