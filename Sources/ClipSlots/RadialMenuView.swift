@@ -106,6 +106,33 @@ struct RadialMenuView: View {
         return "\(groups[idx].name) · 预览"
     }
 
+    private var hoveredPreviewPayload: RadialHoverPreviewPayload? {
+        guard let idx = hoveredIndex else { return nil }
+        if mode == .childSlots {
+            guard let content = store.slots[idx], !content.isEmpty else { return nil }
+            return RadialHoverPreviewPayload(
+                title: store.labels[idx] ?? "槽位 \(idx)",
+                subtitle: "实时预览",
+                content: content,
+                pageId: store.currentPageId,
+                specialSlotId: store.currentSpecialSlotId,
+                slot: idx
+            )
+        }
+        let groups = store.currentPageSlotGroups
+        guard idx >= 0, idx < groups.count else { return nil }
+        let targetGroup = groups[idx]
+        guard let snapshot = store.firstNonEmptySlotSnapshot(pageId: store.currentPageId, specialSlotId: targetGroup.id) else { return nil }
+        return RadialHoverPreviewPayload(
+            title: targetGroup.name,
+            subtitle: "第 \(snapshot.slot) 槽 · 实时预览",
+            content: snapshot.content,
+            pageId: store.currentPageId,
+            specialSlotId: targetGroup.id,
+            slot: snapshot.slot
+        )
+    }
+
     @State private var hoveredIndex: Int? = nil
     @State private var appeared = false
     @State private var mode: RadialMenuMode = .childSlots
@@ -199,10 +226,11 @@ struct RadialMenuView: View {
                         switch phase {
                         case .active(let location):
                             updateHover(location: location, center: center, deadZoneRadius: deadZoneRadius)
-                            NotificationCenter.default.post(name: .radialMenuHoveredSlotChanged, object: hoveredIndex)
                         case .ended:
-                            hoveredIndex = nil
-                            NotificationCenter.default.post(name: .radialMenuHoveredSlotChanged, object: nil)
+                            if hoveredIndex != nil {
+                                hoveredIndex = nil
+                                postHoverPreviewPayload()
+                            }
                         }
                     }
                     .onTapGesture {
@@ -457,7 +485,10 @@ struct RadialMenuView: View {
         let cnt = displayCount
 
         if distance < deadZoneRadius || cnt == 0 {
-            hoveredIndex = nil
+            if hoveredIndex != nil {
+                hoveredIndex = nil
+                postHoverPreviewPayload()
+            }
             return
         }
 
@@ -467,7 +498,23 @@ struct RadialMenuView: View {
         let index = Int(angle / segmentAngle)
         let capped = min(index + 1, cnt)
 
-        hoveredIndex = mode == .childSlots ? capped : index
+        let nextHoveredIndex = mode == .childSlots ? capped : index
+        if hoveredIndex != nextHoveredIndex {
+            hoveredIndex = nextHoveredIndex
+            postHoverPreviewPayload()
+        }
+    }
+
+    private func postHoverPreviewPayload() {
+        NotificationCenter.default.post(
+            name: .radialMenuHoveredSlotChanged,
+            object: nil,
+            userInfo: [
+                "mode": mode == .childSlots ? "childSlots" : "specialSlots",
+                "slot": hoveredIndex as Any,
+                "preview": hoveredPreviewPayload as Any
+            ]
+        )
     }
 
     @ViewBuilder
@@ -619,4 +666,13 @@ struct RadialMenuView: View {
 extension Notification.Name {
     static let radialMenuHoveredSlotChanged = Notification.Name("ClipSlots.radialMenuHoveredSlotChanged")
     static let radialMenuPasteAllRequested = Notification.Name("ClipSlots.radialMenuPasteAllRequested")
+}
+
+struct RadialHoverPreviewPayload {
+    let title: String
+    let subtitle: String
+    let content: SlotContent
+    let pageId: String
+    let specialSlotId: String
+    let slot: Int
 }

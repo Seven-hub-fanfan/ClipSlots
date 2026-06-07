@@ -654,6 +654,15 @@ final class SlotStoreObservable: ObservableObject {
         return nil
     }
 
+    // v2.7.59: right-top realtime preview needs both content and its original slot.
+    func firstNonEmptySlotSnapshot(pageId: String, specialSlotId: String) -> (slot: Int, content: SlotContent)? {
+        for slot in 1...config.slots {
+            let content = specialStorage.get(slot, in: specialSlotId)
+            if !content.isEmpty { return (slot, content) }
+        }
+        return nil
+    }
+
     func pasteAllSlotsWithConfirmation() {
         let items = orderedNonEmptySlots()
 

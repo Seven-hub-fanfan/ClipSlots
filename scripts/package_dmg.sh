@@ -21,6 +21,7 @@ ensure_applications_symlink() {
   rm -rf "$dir/Applications"
   ln -s /Applications "$dir/Applications"
   test -L "$dir/Applications" || die "Applications symlink missing in $dir"
+  test "$(readlink "$dir/Applications")" = "/Applications" || die "Applications symlink target invalid in $dir"
 }
 verify_app_bundle() {
   local app="$1"

@@ -11,6 +11,8 @@ struct RadialPreviewPanel: View {
     let content: AnyView
     @Binding var isPinned: Bool
     @State private var scale: CGFloat = 1
+    @State private var dynamicTitle: String = ""
+    @State private var dynamicSubtitle: String = ""
 
     var body: some View {
         VStack(spacing: 0) {
@@ -19,8 +21,10 @@ struct RadialPreviewPanel: View {
                 Image(systemName: "eye")
                     .foregroundColor(.secondary)
                 VStack(alignment: .leading, spacing: 1) {
-                    Text(title).font(.system(size: 13, weight: .semibold)).lineLimit(1)
-                    Text("实时预览").font(.caption2).foregroundColor(.secondary).lineLimit(1)
+                    Text(dynamicTitle.isEmpty ? title : dynamicTitle)
+                        .font(.system(size: 13, weight: .semibold)).lineLimit(1)
+                    Text(dynamicSubtitle.isEmpty ? "实时预览" : dynamicSubtitle)
+                        .font(.caption2).foregroundColor(.secondary).lineLimit(1)
                 }
                 Spacer()
                 Button { scale = max(0.75, scale - 0.1) } label: { Image(systemName: "minus.magnifyingglass") }
@@ -54,6 +58,15 @@ struct RadialPreviewPanel: View {
         // v2.7.17: window remains transparent. Background is only drawn inside the
         // individual text/file preview cards, not the entire window.
         .background(Color.clear)
+        .onReceive(NotificationCenter.default.publisher(for: .radialMenuHoveredSlotChanged)) { note in
+            if let payload = note.userInfo?["preview"] as? RadialHoverPreviewPayload {
+                dynamicTitle = payload.title
+                dynamicSubtitle = payload.subtitle
+            } else {
+                dynamicTitle = ""
+                dynamicSubtitle = ""
+            }
+        }
     }
 }
 
@@ -62,12 +75,19 @@ struct RadialPreviewPanel: View {
 struct RadialLivePreviewContent: View {
     @ObservedObject var store: SlotStoreObservable
     @State private var hoveredSlot: Int?
+    @State private var previewPayload: RadialHoverPreviewPayload?
 
     var body: some View {
         Group {
-            if let slot = hoveredSlot,
-               let content = store.slots[slot],
-               !content.isEmpty {
+            if let payload = previewPayload {
+                // v2.7.59: when hovering a slot group in radial menu, use the
+                // payload's content from the target group, not store.slots[slot]
+                // which always reads from the current group.
+                RadialUniversalPreview(content: payload.content)
+                    .id("payload-\(payload.specialSlotId)-\(payload.slot)")
+            } else if let slot = hoveredSlot,
+                      let content = store.slots[slot],
+                      !content.isEmpty {
                 RadialUniversalPreview(content: content)
                     .id(slot)
             } else {
@@ -77,7 +97,13 @@ struct RadialLivePreviewContent: View {
             }
         }
         .onReceive(NotificationCenter.default.publisher(for: .radialMenuHoveredSlotChanged)) { note in
-            hoveredSlot = note.object as? Int
+            if let payload = note.userInfo?["preview"] as? RadialHoverPreviewPayload {
+                previewPayload = payload
+                hoveredSlot = nil
+            } else {
+                previewPayload = nil
+                hoveredSlot = note.object as? Int
+            }
         }
     }
 }
