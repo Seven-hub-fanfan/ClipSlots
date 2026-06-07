@@ -10,7 +10,9 @@ STAGING_DIR="$BUILD_DIR/dmg_staging"
 TMP_DMG="$BUILD_DIR/tmp.dmg"
 VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$ROOT_DIR/Info.plist" 2>/dev/null || echo "dev")"
 VOLUME_NAME="$APP_NAME v$VERSION"
-DMG_SIZE="220m"
+DMG_SIZE="260m"
+BACKGROUND_DIR="$BUILD_DIR/dmg_background"
+BACKGROUND_PNG="$BACKGROUND_DIR/background.png"
 
 die() { echo "ERROR: $*" >&2; exit 1; }
 detach_if_mounted() { hdiutil detach "$1" 2>/dev/null || true; }
@@ -27,10 +29,37 @@ verify_app_bundle() {
   plutil -lint "$app/Contents/Info.plist" >/dev/null
   codesign --verify --deep --strict --verbose=2 "$app"
 }
+create_dmg_background() {
+mkdir -p "$BACKGROUND_DIR"
+python3 - <<PY
+from pathlib import Path
+try:
+    from PIL import Image, ImageDraw, ImageFont
+except Exception:
+    raise SystemExit(0)
+out = Path("$BACKGROUND_PNG")
+W,H = 640,360
+img = Image.new("RGB", (W,H), (250,250,248))
+d = ImageDraw.Draw(img)
+for x in range(W):
+    c = int(250 - x/W*10)
+    d.line([(x,0),(x,H)], fill=(c,c,c+2))
+d.rounded_rectangle([250,120,390,205], radius=42, outline=(185,185,185), width=3)
+d.polygon([(382,162),(360,148),(360,176)], fill=(185,185,185))
+try:
+    font = ImageFont.truetype("/System/Library/Fonts/Supplemental/Arial Unicode.ttf", 18)
+    small = ImageFont.truetype("/System/Library/Fonts/Supplemental/Arial Unicode.ttf", 13)
+except Exception:
+    font = small = None
+d.text((238,232), "拖动 ClipSlots 到 Applications", fill=(90,90,90), font=font)
+d.text((252,258), "Drag to install", fill=(135,135,135), font=small)
+img.save(out)
+PY
+}
 
 echo "==> Clean"
 detach_if_mounted "/Volumes/$VOLUME_NAME"
-rm -rf "$APP_DIR" "$STAGING_DIR"
+rm -rf "$APP_DIR" "$STAGING_DIR" "$BACKGROUND_DIR"
 rm -f "$DMG_PATH" "$TMP_DMG" "$TMP_DMG.dmg"
 
 echo "==> Build release"
@@ -70,6 +99,7 @@ ditto "$APP_DIR" "$STAGING_DIR/$APP_NAME.app"
 ensure_applications_symlink "$STAGING_DIR"
 xattr -cr "$STAGING_DIR" 2>/dev/null || true
 verify_app_bundle "$STAGING_DIR/$APP_NAME.app"
+create_dmg_background
 
 echo "==> Create and layout DMG"
 # Ensure no stale mount
@@ -99,6 +129,9 @@ test -L "$MNTPNT/Applications" || die "Applications symlink missing before layou
 
 # Make sure Finder metadata is writable and volume has a place for custom window layout.
 mkdir -p "$MNTPNT/.background"
+if [ -f "$BACKGROUND_PNG" ]; then
+  cp "$BACKGROUND_PNG" "$MNTPNT/.background/background.png"
+fi
 touch "$MNTPNT/.metadata_never_index" 2>/dev/null || true
 
 # Set up Finder view via AppleScript
@@ -109,12 +142,15 @@ tell application \"Finder\"
     set current view of container window to icon view
     set toolbar visible of container window to false
     set statusbar visible of container window to false
-    set the bounds of container window to {420, 220, 920, 560}
+    set the bounds of container window to {360, 180, 1000, 540}
     set viewOptions to the icon view options of container window
     set arrangement of viewOptions to not arranged
     set icon size of viewOptions to 96
-    set position of item \"$APP_NAME.app\" to {130, 155}
-    set position of item \"Applications\" to {370, 155}
+    try
+    set background picture of viewOptions to file ".background:background.png"
+    end try
+    set position of item \"$APP_NAME.app\" to {145, 170}
+    set position of item \"Applications\" to {495, 170}
     set label position of viewOptions to bottom
     close
     open
@@ -124,6 +160,13 @@ tell application \"Finder\"
   end tell
 end tell
 " 2>/dev/null || true
+
+echo "==> Re-open mounted DMG to confirm Finder-visible installer items"
+test -d "$MNTPNT/$APP_NAME.app" || die "$APP_NAME.app missing after layout"
+test -L "$MNTPNT/Applications" || die "Applications symlink missing after layout"
+if [ -f "$BACKGROUND_PNG" ]; then
+  test -f "$MNTPNT/.background/background.png" || die "DMG background missing after layout"
+fi
 
 sleep 2
 hdiutil detach "$MNTPNT" || { sleep 2; hdiutil detach "$MNTPNT" -force; }
@@ -147,6 +190,10 @@ detach_if_mounted "$VERIFY_MOUNT"
 hdiutil attach "$DMG_PATH" -readonly -noverify -noautoopen -mountpoint "$VERIFY_MOUNT" >/dev/null
 test -d "$VERIFY_MOUNT/$APP_NAME.app" || die "$APP_NAME.app missing in DMG"
 test -L "$VERIFY_MOUNT/Applications" || die "Applications symlink missing in DMG"
+test "$(readlink "$VERIFY_MOUNT/Applications")" = "/Applications" || die "Applications symlink target invalid"
+if [ -f "$BACKGROUND_PNG" ]; then
+  test -f "$VERIFY_MOUNT/.background/background.png" || die "DMG background missing in final image"
+fi
 verify_app_bundle "$VERIFY_MOUNT/$APP_NAME.app" || die "codesign verify failed inside DMG"
 echo "  OK: app and Applications symlink present"
 hdiutil detach "$VERIFY_MOUNT" 2>/dev/null || true
