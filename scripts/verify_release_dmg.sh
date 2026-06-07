@@ -26,10 +26,20 @@ echo "==> verify contents"
 test -d "$MOUNT_POINT/$APP_NAME.app" || die "$APP_NAME.app missing"
 test -L "$MOUNT_POINT/Applications" || die "Applications symlink missing"
 test "$(readlink "$MOUNT_POINT/Applications")" = "/Applications" || die "Applications symlink target invalid"
+test -f "$MOUNT_POINT/.background/background.png" || die "DMG background missing"
 
 echo "==> verify app bundle"
 test -x "$MOUNT_POINT/$APP_NAME.app/Contents/MacOS/$APP_NAME" || die "executable missing"
 plutil -lint "$MOUNT_POINT/$APP_NAME.app/Contents/Info.plist" >/dev/null
+test -f "$MOUNT_POINT/$APP_NAME.app/Contents/Resources/AppIcon.icns" || die "AppIcon.icns missing"
+/usr/libexec/PlistBuddy -c 'Print :CFBundleIconFile' "$MOUNT_POINT/$APP_NAME.app/Contents/Info.plist" >/dev/null || die "CFBundleIconFile missing"
 codesign --verify --deep --strict --verbose=2 "$MOUNT_POINT/$APP_NAME.app"
+
+echo "==> optional Gatekeeper assess"
+if spctl --assess --type execute --verbose "$MOUNT_POINT/$APP_NAME.app" >/dev/null 2>&1; then
+  echo "Gatekeeper app assessment passed"
+else
+  echo "WARN: Gatekeeper app assessment did not pass. For public release, use Developer ID + notarization."
+fi
 
 echo "OK: DMG contains app + Applications symlink and app signature verifies"

@@ -13,6 +13,9 @@ VOLUME_NAME="$APP_NAME v$VERSION"
 DMG_SIZE="260m"
 BACKGROUND_DIR="$BUILD_DIR/dmg_background"
 BACKGROUND_PNG="$BACKGROUND_DIR/background.png"
+SIGN_IDENTITY="${SIGN_IDENTITY:-}"
+NOTARY_PROFILE="${NOTARY_PROFILE:-}"
+SKIP_NOTARIZE="${SKIP_NOTARIZE:-0}"
 
 die() { echo "ERROR: $*" >&2; exit 1; }
 detach_if_mounted() { hdiutil detach "$1" 2>/dev/null || true; }
@@ -28,7 +31,36 @@ verify_app_bundle() {
   test -d "$app" || die "$app missing"
   test -x "$app/Contents/MacOS/$APP_NAME" || die "$APP_NAME executable missing or not executable"
   plutil -lint "$app/Contents/Info.plist" >/dev/null
+  test -f "$app/Contents/Resources/AppIcon.icns" || die "AppIcon.icns missing in app bundle"
+  /usr/libexec/PlistBuddy -c 'Print :CFBundleIconFile' "$app/Contents/Info.plist" >/dev/null || die "CFBundleIconFile missing"
   codesign --verify --deep --strict --verbose=2 "$app"
+}
+sign_app_bundle() {
+  local app="$1"
+  if [ -n "$SIGN_IDENTITY" ]; then
+    echo "==> Sign app with Developer ID: $SIGN_IDENTITY"
+    codesign --force --deep --timestamp --options runtime --sign "$SIGN_IDENTITY" "$app"
+  else
+    echo "==> Sign app adhoc (set SIGN_IDENTITY for Gatekeeper-safe release)"
+    codesign --force --deep --timestamp=none --sign - "$app"
+  fi
+  verify_app_bundle "$app"
+}
+notarize_and_staple_if_configured() {
+  local dmg="$1"
+  if [ "$SKIP_NOTARIZE" = "1" ]; then
+    echo "==> Skip notarization by SKIP_NOTARIZE=1"
+    return
+  fi
+  if [ -z "$SIGN_IDENTITY" ] || [ -z "$NOTARY_PROFILE" ]; then
+    die "Release DMG is not notarized. Set SIGN_IDENTITY='Developer ID Application: ...' and NOTARY_PROFILE='...' or explicitly set SKIP_NOTARIZE=1 for local-only testing."
+  fi
+  echo "==> Notarize DMG"
+  xcrun notarytool submit "$dmg" --keychain-profile "$NOTARY_PROFILE" --wait
+  echo "==> Staple DMG"
+  xcrun stapler staple "$dmg"
+  echo "==> Gatekeeper assess"
+  spctl --assess --type open --context context:primary-signature --verbose "$dmg"
 }
 export BACKGROUND_PNG
 create_dmg_background() {
@@ -74,17 +106,17 @@ if [ -f "$ROOT_DIR/assets/AppIcon.icns" ]; then
 elif [ -f "$ROOT_DIR/build/AppIcon.icns" ]; then
   cp "$ROOT_DIR/build/AppIcon.icns" "$APP_DIR/Contents/Resources/AppIcon.icns"
 else
-  echo "Warning: AppIcon.icns not found"
+  die "AppIcon.icns not found; release would lose app icon"
 fi
+test -s "$APP_DIR/Contents/Resources/AppIcon.icns" || die "AppIcon.icns is empty"
 
 chmod +x "$APP_DIR/Contents/MacOS/$APP_NAME"
 
 echo "==> Remove quarantine / stale extended attributes from app before DMG"
 xattr -cr "$APP_DIR" 2>/dev/null || true
 
-echo "==> Re-sign app bundle (adhoc) after xattr cleanup"
-codesign --force --deep --timestamp=none --sign - "$APP_DIR"
-verify_app_bundle "$APP_DIR"
+echo "==> Sign app bundle after xattr cleanup"
+sign_app_bundle "$APP_DIR"
 
 echo "==> Validate app bundle"
 plutil -lint "$APP_DIR/Contents/Info.plist"
@@ -119,8 +151,7 @@ echo "==> Copy app and Applications link into mounted DMG"
 ditto "$APP_DIR" "$MNTPNT/$APP_NAME.app"
 ensure_applications_symlink "$MNTPNT"
 xattr -cr "$MNTPNT/$APP_NAME.app" 2>/dev/null || true
-codesign --force --deep --timestamp=none --sign - "$MNTPNT/$APP_NAME.app"
-verify_app_bundle "$MNTPNT/$APP_NAME.app"
+sign_app_bundle "$MNTPNT/$APP_NAME.app"
 
 test -d "$MNTPNT/$APP_NAME.app" || die "$APP_NAME.app missing before layout"
 test -L "$MNTPNT/Applications" || die "Applications symlink missing before layout"
@@ -150,6 +181,8 @@ tell application \"Finder\"
     set position of item \"$APP_NAME.app\" to {150, 176}
     set position of item \"Applications\" to {490, 176}
     set label position of viewOptions to bottom
+    update without registering applications
+    delay 2
     close
     open
     update without registering applications
@@ -179,6 +212,8 @@ echo "==> Remove quarantine from generated DMG if present"
 xattr -cr "$DMG_PATH" 2>/dev/null || true
 xattr -d com.apple.quarantine "$DMG_PATH" 2>/dev/null || true
 
+notarize_and_staple_if_configured "$DMG_PATH"
+
 echo "==> Verify dmg"
 hdiutil verify "$DMG_PATH"
 
@@ -192,6 +227,7 @@ test "$(readlink "$VERIFY_MOUNT/Applications")" = "/Applications" || die "Applic
 if [ -f "$BACKGROUND_PNG" ]; then
   test -f "$VERIFY_MOUNT/.background/background.png" || die "DMG background missing in final image"
 fi
+test -f "$VERIFY_MOUNT/$APP_NAME.app/Contents/Resources/AppIcon.icns" || die "AppIcon.icns missing in final DMG"
 verify_app_bundle "$VERIFY_MOUNT/$APP_NAME.app" || die "codesign verify failed inside DMG"
 echo "  OK: app and Applications symlink present"
 hdiutil detach "$VERIFY_MOUNT" 2>/dev/null || true
