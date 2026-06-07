@@ -106,6 +106,9 @@ struct ContentView: View {
             }
 
         }
+        .onAppear {
+            AppearanceDefaults.ensureDefaultDarkIfNeeded()
+        }
         .animation(.easeInOut(duration: 0.25), value: store.toastMessage != nil)
         // v2.6.7: Import options sheet
         .sheet(item: $store.pendingImportSelection) { selection in
@@ -652,7 +655,7 @@ struct ContentView: View {
             // Connection stays as a separate tool and is moved to the right side.
             connectionToolButton
 
-            Text("v2.7.53")
+            Text("v2.7.54")
                 .font(.caption2)
                 .foregroundColor(Color.secondary.opacity(0.65))
         }

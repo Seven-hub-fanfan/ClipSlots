@@ -36,6 +36,7 @@ struct SettingsView: View {
     }
 
     init(config: AppConfig, onSave: @escaping (AppConfig) -> Void) {
+        AppearanceDefaults.ensureDefaultDarkIfNeeded()
         self.config = config
         self.onSave = onSave
         _slots = State(initialValue: Double(config.slots))

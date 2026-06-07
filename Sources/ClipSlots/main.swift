@@ -34,10 +34,11 @@ struct ClipSlotsApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
     @StateObject private var store = SlotStoreObservable()
 
-    @AppStorage("appearanceMode") private var appearanceModeRaw = ThemeMode.system.rawValue
-    private var appearanceMode: ThemeMode {
-        ThemeMode(rawValue: appearanceModeRaw) ?? .system
-    }
+    // v2.7.54: startup entry must also default to dark.
+    // v2.7.47 changed ContentView/SettingsView, but App root still defaulted to
+    // system, so first launch could render as light before ContentView appeared.
+    @AppStorage("appearanceMode") private var appearanceModeRaw = ThemeMode.dark.rawValue
+    private var appearanceMode: ThemeMode { ThemeMode(rawValue: appearanceModeRaw) ?? .dark }
 
     var body: some Scene {
         WindowGroup {
@@ -45,6 +46,7 @@ struct ClipSlotsApp: App {
                 .frame(minWidth: 460, minHeight: 360)
                 .preferredColorScheme(appearanceMode.preferredColorScheme)
                 .onAppear {
+                    AppearanceDefaults.ensureDefaultDarkIfNeeded()
                     appDelegate.store = store
                     appDelegate.setupHotKeysAfterStoreReady()
                     store.installLocalHotkeyGuardIfNeeded()
@@ -3171,5 +3173,13 @@ private extension String {
         let text = clipSlotsPlainTextFromHTML()
         if !text.isEmpty { return text }
         return fallback.isEmpty ? "[HTML]" : fallback
+    }
+}
+
+enum AppearanceDefaults {
+    static func ensureDefaultDarkIfNeeded() {
+        let defaults = UserDefaults.standard
+        guard defaults.object(forKey: "appearanceMode") == nil else { return }
+        defaults.set(ThemeMode.dark.rawValue, forKey: "appearanceMode")
     }
 }
