@@ -1152,8 +1152,7 @@ final class SlotStoreObservable: ObservableObject {
             return
         }
 
-        // Global hotkey paste: always read directly from the current special slot on disk.
-        let content = specialStorage.get(slot, in: activeId)
+        // Global hotkey paste: uses content already read above for attachments check.
 
         guard !content.isEmpty else {
             NSLog("[ClipSlots] pasteSlot ignored: specialSlot=\(activeId) slot=\(slot) empty")
@@ -2024,16 +2023,37 @@ final class SlotStoreObservable: ObservableObject {
 
         do {
             let data = try Data(contentsOf: url)
+            
+            // 先尝试解码为 Bundle 格式（多组/多页模板）
+            if let bundle = try? JSONDecoder().decode(SlotConnectionTemplateBundle.self, from: data) {
+                // v2.7.62: 导入 Bundle 模板时创建多个新槽位组
+                var importedCount = 0
+                for entry in bundle.entries {
+                    let newGroup = try specialStorage.createSpecialSlot(name: entry.groupName, pageId: currentPageId)
+                    SlotConnectionStorage.shared.save(entry.map, pageId: currentPageId, groupId: newGroup.id)
+                    importedCount += 1
+                }
+                
+                showFloatingNotice(FloatingNotice(
+                    title: "已导入连接模板",
+                    subtitle: "包含 \(importedCount) 个槽位组",
+                    iconName: "square.and.arrow.down.fill",
+                    kind: .success
+                ))
+                return
+            }
+            
+            // 否则解码为单组模板
             let template = try SlotConnectionTemplateService.decode(data)
             let importedMap = SlotConnectionMap(edges: template.edges)
             try validateConnectionMap(importedMap)
 
             // v2.7.61: Import always creates a new slot group, never overwrites current
-            let newGroup = createNewSpecialSlotGroup(name: "导入 \(template.name.prefix(12))")
+            let newGroup = try specialStorage.createSpecialSlot(name: "导入 \(template.name.prefix(12))", pageId: currentPageId)
             SlotConnectionStorage.shared.save(importedMap, pageId: currentPageId, groupId: newGroup.id)
             
             // Switch to the new group
-            activateSpecialSlot(newGroup.id)
+            selectAndActivateSpecialSlot(id: newGroup.id)
 
             let slotCount = Set(importedMap.edges.flatMap { [$0.fromSlot, $0.toSlot] }).count
             showFloatingNotice(FloatingNotice(
