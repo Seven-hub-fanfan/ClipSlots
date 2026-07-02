@@ -1136,6 +1136,21 @@ final class SlotStoreObservable: ObservableObject {
                 return
             }
         }
+        
+        // v2.7.61: Slot attachments auto-chain
+        // If slot has attachments, automatically paste main content + all attachments in order
+        let content = specialStorage.get(slot, in: activeId)
+        if !content.attachments.isEmpty {
+            // Create a temporary chain: main slot first, then all attachments
+            // Attachments are handled as virtual slots in the paste chain
+            var chain: [Int] = [slot]
+            // Append attachment indices as negative values to distinguish from real slots
+            for i in 0..<content.attachments.count {
+                chain.append(-(i + 1))
+            }
+            pasteSlotChain(chain)
+            return
+        }
 
         // Global hotkey paste: always read directly from the current special slot on disk.
         let content = specialStorage.get(slot, in: activeId)
@@ -2013,12 +2028,12 @@ final class SlotStoreObservable: ObservableObject {
             let importedMap = SlotConnectionMap(edges: template.edges)
             try validateConnectionMap(importedMap)
 
-            if !currentConnectionMap.edges.isEmpty {
-                guard confirmReplaceCurrentConnections() else { return }
-            }
-
-            currentConnectionMap = importedMap
-            saveConnectionMapForCurrentGroup()
+            // v2.7.61: Import always creates a new slot group, never overwrites current
+            let newGroup = createNewSpecialSlotGroup(name: "导入 \(template.name.prefix(12))")
+            SlotConnectionStorage.shared.save(importedMap, pageId: currentPageId, groupId: newGroup.id)
+            
+            // Switch to the new group
+            activateSpecialSlot(newGroup.id)
 
             let slotCount = Set(importedMap.edges.flatMap { [$0.fromSlot, $0.toSlot] }).count
             showFloatingNotice(FloatingNotice(

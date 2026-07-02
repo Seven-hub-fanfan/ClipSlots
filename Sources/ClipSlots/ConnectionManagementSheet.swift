@@ -135,7 +135,7 @@ struct ConnectionManagementSheet: View {
     private var footer: some View {
         HStack {
             Button("十槽位全串联") { store.applyBuiltInFullChainTemplate() }
-            Button("导出模板") { store.exportConnectionTemplate() }
+            Button("导出模板") { showingExportScopeSheet = true }
             Button("导入模板") { store.importConnectionTemplate() }
             Spacer()
             Button("清除连接", role: .destructive) { store.confirmAndClearCurrentConnections() }

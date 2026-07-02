@@ -670,59 +670,12 @@ struct ContentView: View {
     // v2.7.9: prominent connection button with current-group state.
     // v2.7.36: standalone connection button, not mixed with shortcut chips.
     private var connectionToolButton: some View {
-        Menu {
-            Button {
-                showingConnectionFullscreen = true
-            } label: {
-                Label("全屏连接模式", systemImage: "arrow.up.left.and.arrow.down.right")
-            }
-
-            Divider()
-
-            // v2.7.2: Independent node canvas
-            Button {
-                showingNodeCanvas = true
-            } label: {
-                Label("打开节点画布…", systemImage: "point.3.connected.trianglepath.dotted")
-            }
-
-            Button {
-                showingConnectionManagement = true
-            } label: {
-                Label("连接管理…", systemImage: "link")
-            }
-
-            Divider()
-
-            Button {
-                store.applyBuiltInFullChainTemplate()
-            } label: {
-                Label("应用十槽位全串联模板", systemImage: "list.number")
-            }
-
-            Button {
-                store.exportConnectionTemplate()
-            } label: {
-                Label("导出连接模板", systemImage: "square.and.arrow.up")
-            }
-
-            Button {
-                store.importConnectionTemplate()
-            } label: {
-                Label("导入连接模板", systemImage: "square.and.arrow.down")
-            }
-
-            Divider()
-
-            Button(role: .destructive) {
-                store.confirmAndClearCurrentConnections()
-            } label: {
-                Label("清除当前连接", systemImage: "trash")
-            }
+        Button {
+            showingConnectionFullscreen = true
         } label: {
             connectionMenuLabel
         }
-        .menuStyle(.borderlessButton)
+        .buttonStyle(.borderless)
         .fixedSize()
     }
 
@@ -1400,7 +1353,6 @@ private struct ConnectionFullscreenView: View {
 
                 HStack(spacing: 16) {
                     ConnectionFullscreenAction(title: "打开节点画布", subtitle: "可视化拖拽连接槽位", icon: "point.3.connected.trianglepath.dotted", tint: .accentColor, action: onOpenNodeCanvas)
-                    ConnectionFullscreenAction(title: "连接管理", subtitle: "查看、编辑和清理链路", icon: "slider.horizontal.3", tint: .blue, action: onOpenManager)
                     ConnectionFullscreenAction(title: "应用全串联模板", subtitle: "一键生成 1→2→3…", icon: "list.number", tint: .orange, action: { store.applyBuiltInFullChainTemplate() })
                 }
                 .padding(.horizontal, 34)

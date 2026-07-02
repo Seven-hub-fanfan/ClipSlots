@@ -60,7 +60,8 @@ final class RadialMenuWindowController {
             onSelectSlot: { [weak self] slot in
                 onSelectSlot(slot)
                 self?.dismissRadialOnly()
-                if self?.isPreviewPinned != true { self?.dismissPreviewPanel() } else { self?.persistPreviewFrame() }
+                // v2.7.61: Always dismiss preview after slot selection, even when pinned
+                self?.dismissPreviewPanel()
                 onDismiss()
             },
             onPasteAll: { [weak self] in

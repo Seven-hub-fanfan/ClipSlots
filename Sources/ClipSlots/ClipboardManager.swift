@@ -10,6 +10,30 @@ struct SlotContent: Codable {
     var timestamp: Date = Date()
     var label: String? = nil
     var htmlSource: String? = nil
+    // v2.7.61: Slot attachments - only visible and editable in node canvas
+    // Empty array = disabled, no change to existing behavior
+    var attachments: [SlotAttachment] = []
+}
+
+// MARK: - Slot Attachment
+
+struct SlotAttachment: Codable, Identifiable {
+    var id: UUID = UUID()
+    var name: String
+    var type: AttachmentType
+    var path: String?
+    var url: String?
+    var data: Data?
+    var createdAt: Date = Date()
+}
+
+enum AttachmentType: String, Codable {
+    case image
+    case file
+    case text
+    case url
+    case reference
+}
 
     /// Unique content identity. Regenerated on every save/overwrite. Used as the
     /// primary cache-breaker for thumbnails, SwiftUI View identity, and file paths.
