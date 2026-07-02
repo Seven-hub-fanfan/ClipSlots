@@ -27,6 +27,8 @@ final class RadialMenuWindowController {
     private var previewStore: SlotStoreObservable?
     private var previewThemeMode: ThemeMode = .system
     private var localKeyMonitor: Any?
+    private var globalKeyMonitor: Any?
+    private var localClickMonitor: Any?
     private var globalClickMonitor: Any?
     private var onDismissCallback: (() -> Void)?
 
@@ -132,11 +134,17 @@ final class RadialMenuWindowController {
         }
         
         localKeyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown, handler: dismissOnEscape)
-        NSEvent.addGlobalMonitorForEvents(matching: .keyDown, handler: { _ = dismissOnEscape($0) })
+        globalKeyMonitor = NSEvent.addGlobalMonitorForEvents(matching: .keyDown, handler: { _ = dismissOnEscape($0) })
 
         // Click outside dismiss: 同时监听全局和本地点击，解决在 App 自身窗口点击不关闭的问题
         let dismissIfOutside: (NSPoint) -> Void = { [weak self] clickLocation in
             guard let self = self, let panel = self.panel else { return }
+            
+            // 点击预览窗不关闭圆盘菜单，否则置顶/缩放按钮会被外部点击监听提前吞掉
+            if let previewPanel = self.previewPanel, previewPanel.frame.contains(clickLocation) {
+                return
+            }
+            
             if !panel.frame.contains(clickLocation) {
                 self.dismissRadialOnly()
                 if !self.isPreviewPinned { self.dismissPreviewPanel() } else { self.persistPreviewFrame() }
@@ -150,7 +158,7 @@ final class RadialMenuWindowController {
         }
         
         // 本地点击：本 App 自身窗口
-        NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { event in
+        localClickMonitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { event in
             dismissIfOutside(NSEvent.mouseLocation)
             return event
         }
@@ -268,6 +276,14 @@ final class RadialMenuWindowController {
         if let monitor = localKeyMonitor {
             NSEvent.removeMonitor(monitor)
             localKeyMonitor = nil
+        }
+        if let monitor = globalKeyMonitor {
+            NSEvent.removeMonitor(monitor)
+            globalKeyMonitor = nil
+        }
+        if let monitor = localClickMonitor {
+            NSEvent.removeMonitor(monitor)
+            localClickMonitor = nil
         }
         if let monitor = globalClickMonitor {
             NSEvent.removeMonitor(monitor)
