@@ -13,27 +13,42 @@ struct SlotContent: Codable {
     // v2.7.61: Slot attachments - only visible and editable in node canvas
     // Empty array = disabled, no change to existing behavior
     var attachments: [SlotAttachment] = []
-}
+    
+    // 向后兼容：旧模板没有 attachments 字段时自动填充空数组
+    enum CodingKeys: String, CodingKey {
+        case items, timestamp, label, htmlSource, attachments, contentId, updatedAt
+    }
+    
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        items = try container.decode([[PasteboardItem]].self, forKey: .items)
+        timestamp = try container.decode(Date.self, forKey: .timestamp)
+        label = try container.decodeIfPresent(String.self, forKey: .label)
+        htmlSource = try container.decodeIfPresent(String.self, forKey: .htmlSource)
+        attachments = try container.decodeIfPresent([SlotAttachment].self, forKey: .attachments) ?? []
+        contentId = try container.decode(String.self, forKey: .contentId)
+        updatedAt = try container.decode(TimeInterval.self, forKey: .updatedAt)
+    }
 
-// MARK: - Slot Attachment
+    // MARK: - Slot Attachment
 
-struct SlotAttachment: Codable, Identifiable {
-    var id: UUID = UUID()
-    var name: String
-    var type: AttachmentType
-    var path: String?
-    var url: String?
-    var data: Data?
-    var createdAt: Date = Date()
-}
+    struct SlotAttachment: Codable, Identifiable {
+        var id: UUID = UUID()
+        var name: String
+        var type: AttachmentType
+        var path: String?
+        var url: String?
+        var data: Data?
+        var createdAt: Date = Date()
+    }
 
-enum AttachmentType: String, Codable {
-    case image
-    case file
-    case text
-    case url
-    case reference
-}
+    enum AttachmentType: String, Codable {
+        case image
+        case file
+        case text
+        case url
+        case reference
+    }
 
     /// Unique content identity. Regenerated on every save/overwrite. Used as the
     /// primary cache-breaker for thumbnails, SwiftUI View identity, and file paths.
