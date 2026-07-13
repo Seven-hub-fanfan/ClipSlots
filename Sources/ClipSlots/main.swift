@@ -1553,8 +1553,146 @@ final class SlotStoreObservable: ObservableObject {
         pasteSlotChain(chain)
     }
 
+    // MARK: - v2.7.80 Chain paste with per-slot attachments
+
+    /// True if any slot in the chain carries attachments.
+    private func chainHasAttachments(_ chain: [Int]) -> Bool {
+        chain.contains { !((slots[$0] ?? SlotContent()).attachments.isEmpty) }
+    }
+
+    /// v2.7.80: Expands a connection chain into an ordered payload list where each
+    /// slot contributes its main content first, then its attachments
+    /// (content → attachments → next slot's content → …). Multiple image
+    /// attachments of a single slot are coalesced into ONE Finder-style multi-file
+    /// URL payload so targets like 即梦AI accept them as a batch, while a single
+    /// image keeps its inline-bitmap payload (WeChat / rich-text compatibility).
+    ///
+    /// Each slot's attachments are materialised against a *per-slot*
+    /// `pendingAttachmentContext` that is set and cleared inside the same iteration,
+    /// so multi-slot chains never contaminate one another's negative-index lookups.
+    private func expandedChainPayloads(for chain: [Int]) -> [ChainPastePayload] {
+        var result: [ChainPastePayload] = []
+        for slot in chain {
+            // 1) Main content of the slot.
+            let contentPayload = payloadForSlot(slot)
+            if !contentPayload.isEmpty { result.append(contentPayload) }
+
+            // 2) Attachments belonging to THIS slot only.
+            let attachments = (slots[slot] ?? SlotContent()).attachments
+            guard !attachments.isEmpty else { continue }
+
+            // Publish a per-slot context; cleared before leaving the iteration so the
+            // next slot resolves its own attachments and never inherits this one's.
+            pendingAttachmentContext = attachments
+
+            let imageIndices = attachments.indices.filter { attachments[$0].type == .image }
+
+            // 2a) Non-image attachments in original order.
+            for i in attachments.indices where attachments[i].type != .image {
+                let p = payloadForAttachment(index: i)
+                if !p.isEmpty { result.append(p) }
+            }
+
+            // 2b) Image attachments: single → inline bitmap; ≥2 → one file-URL batch.
+            if imageIndices.count == 1 {
+                let p = payloadForAttachment(index: imageIndices[0])
+                if !p.isEmpty { result.append(p) }
+            } else if imageIndices.count >= 2 {
+                let urls = imageIndices.compactMap { fileURLForImageAttachment(attachments[$0]) }
+                if !urls.isEmpty {
+                    result.append(ChainPastePayload(
+                        sourceSlot: slot,
+                        text: nil,
+                        fileURLs: urls,
+                        isImage: false,
+                        isEmpty: false,
+                        image: nil
+                    ))
+                }
+            }
+
+            // Done materialising this slot's payloads; drop the transient context.
+            pendingAttachmentContext = []
+        }
+        return result
+    }
+
+    /// v2.7.80: Sequentially pastes a pre-materialised chain payload list, first
+    /// activating `targetApp` (radial / UI path) so keystrokes land in the target.
+    private func pasteExpandedChainToApp(_ chain: [Int], payloads: [ChainPastePayload], targetApp: NSRunningApplication?) {
+        guard !payloads.isEmpty else {
+            showFloatingNotice(FloatingNotice(
+                title: "串联粘贴失败",
+                subtitle: "链路中没有可粘贴内容",
+                iconName: "exclamationmark.triangle.fill",
+                kind: .warning
+            ))
+            return
+        }
+        guard AXIsProcessTrusted() else {
+            promptAccessibilityPermissionIfNeeded()
+            return
+        }
+
+        cancelPendingClipboardRestore()
+        let cleanTarget: NSRunningApplication?
+        if isSelfApp(targetApp) { cleanTarget = lastNonClipSlotsApp }
+        else { cleanTarget = targetApp ?? lastNonClipSlotsApp }
+
+        let attachmentTotal = chain.reduce(0) { $0 + (slots[$1] ?? SlotContent()).attachments.count }
+        let run = { [weak self] in
+            guard let self else { return }
+            self.pasteNextPayloadSequentially(payloads, index: 0) { [weak self] in
+                self?.showFloatingNotice(FloatingNotice(
+                    title: "已串联粘贴 \(payloads.count) 段内容",
+                    subtitle: "含 \(attachmentTotal) 个附件 · \(compactChainDescription(chain))",
+                    iconName: "link.circle.fill",
+                    kind: .success
+                ))
+            }
+        }
+
+        if let app = cleanTarget {
+            app.activate(options: [.activateIgnoringOtherApps])
+            waitUntilFrontmost(app, timeout: 1.2) { _ in run() }
+        } else {
+            run()
+        }
+    }
+
     func pasteSlotChain(_ slots: [Int]) {
         let activeId = activeHotkeySpecialSlotId
+
+        // v2.7.80: if any slot in the chain has attachments, expand each slot into
+        // content → attachments and paste sequentially so attachments are no longer
+        // dropped. Attachment-free chains keep the original fast merged behavior.
+        if chainHasAttachments(slots) {
+            let payloads = expandedChainPayloads(for: slots)
+            guard !payloads.isEmpty else {
+                showFloatingNotice(FloatingNotice(
+                    title: "串联粘贴失败",
+                    subtitle: "链路中没有可粘贴内容",
+                    iconName: "exclamationmark.triangle.fill",
+                    kind: .warning
+                ))
+                return
+            }
+            guard AXIsProcessTrusted() else {
+                promptAccessibilityPermissionIfNeeded()
+                return
+            }
+            let attachmentTotal = slots.reduce(0) { $0 + (self.slots[$1] ?? SlotContent()).attachments.count }
+            let chainForNotice = slots
+            pasteNextPayloadSequentially(payloads, index: 0) { [weak self] in
+                self?.showFloatingNotice(FloatingNotice(
+                    title: "已串联粘贴 \(payloads.count) 段内容",
+                    subtitle: "含 \(attachmentTotal) 个附件 · \(compactChainDescription(chainForNotice))",
+                    iconName: "link.circle.fill",
+                    kind: .success
+                ))
+            }
+            return
+        }
 
         let payloads = slots.map { payloadForSlot($0) }
         let nonEmptyPayloads = payloads.filter { !$0.isEmpty }
@@ -1680,6 +1818,14 @@ final class SlotStoreObservable: ObservableObject {
 
     func pasteSlotChainToApp(_ slots: [Int], targetApp: NSRunningApplication?) {
         let activeId = currentSpecialSlotId
+
+        // v2.7.80: expand slots into content → attachments when any slot has
+        // attachments, so the radial / UI chain paste no longer drops them.
+        if chainHasAttachments(slots) {
+            let expanded = expandedChainPayloads(for: slots)
+            pasteExpandedChainToApp(slots, payloads: expanded, targetApp: targetApp)
+            return
+        }
 
         let payloads = slots.map { payloadForSlot($0) }
         let nonEmptyPayloads = payloads.filter { !$0.isEmpty }
@@ -2114,7 +2260,13 @@ final class SlotStoreObservable: ObservableObject {
         writePayloadToPasteboard(payloads[index])
         sendPasteKeystroke()
 
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.18) { [weak self] in
+        // v2.7.80: image / file payloads need more time to be ingested (and to keep
+        // the clipboard stable) before the next item overwrites it; plain text is fast.
+        let payload = payloads[index]
+        let isHeavy = payload.isImage || payload.image != nil || !payload.fileURLs.isEmpty
+        let delay = isHeavy ? 0.55 : 0.18
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
             self?.pasteNextPayloadSequentially(payloads, index: index + 1, completion: completion)
         }
     }
