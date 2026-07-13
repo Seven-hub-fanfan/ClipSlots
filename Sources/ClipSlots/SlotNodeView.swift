@@ -83,6 +83,15 @@ struct NodeAttachmentButton: View {
     @ObservedObject var store: SlotStoreObservable
     @State private var showingAttachments = false
     @State private var showingClearConfirm = false
+    // v2.7.75: local mirror of the "不再提醒" toggle inside the confirm popover.
+    @State private var suppressConfirmToggle = false
+
+    // v2.7.75: persisted preference — when true, the red ✕ clears attachments
+    // immediately without showing the confirm popover. Shared across all nodes.
+    private static let suppressClearConfirmKey = "suppressAttachmentClearConfirm"
+    private var suppressClearConfirm: Bool {
+        UserDefaults.standard.bool(forKey: Self.suppressClearConfirmKey)
+    }
 
     private var attachmentCount: Int { store.attachments(for: slot).count }
 
@@ -108,7 +117,13 @@ struct NodeAttachmentButton: View {
 
             if attachmentCount > 0 {
                 Button {
-                    showingClearConfirm = true
+                    // v2.7.75: honor the persisted "不再提醒" preference.
+                    if suppressClearConfirm {
+                        store.setAttachments([], for: slot)
+                    } else {
+                        suppressConfirmToggle = false
+                        showingClearConfirm = true
+                    }
                 } label: {
                     Image(systemName: "xmark.circle.fill")
                         .font(.system(size: 13, weight: .bold))
@@ -120,18 +135,50 @@ struct NodeAttachmentButton: View {
                 .buttonStyle(.plain)
                 .help("清空该槽位全部附件")
                 .offset(x: 5, y: -6)
-                .confirmationDialog(
-                    "清空该槽位的全部附件？",
-                    isPresented: $showingClearConfirm,
-                    titleVisibility: .visible
-                ) {
-                    Button("清空 \(attachmentCount) 个附件", role: .destructive) {
-                        store.setAttachments([], for: slot)
-                    }
-                    Button("取消", role: .cancel) {}
+                .popover(isPresented: $showingClearConfirm, arrowEdge: .top) {
+                    clearConfirmPopover
                 }
             }
         }
+    }
+
+    // v2.7.75: custom confirm popover carrying a "不再提醒" toggle.
+    private var clearConfirmPopover: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 8) {
+                Image(systemName: "trash.circle.fill")
+                    .font(.system(size: 18))
+                    .foregroundColor(.red)
+                Text("清空该槽位的全部附件？")
+                    .font(.system(size: 13, weight: .semibold))
+            }
+            Text("将删除该槽位当前的 \(attachmentCount) 个附件，此操作无法撤销。")
+                .font(.caption)
+                .foregroundColor(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            Toggle("不再提醒", isOn: $suppressConfirmToggle)
+                .toggleStyle(.checkbox)
+                .font(.caption)
+
+            HStack(spacing: 8) {
+                Spacer()
+                Button("取消") { showingClearConfirm = false }
+                    .keyboardShortcut(.cancelAction)
+                Button(role: .destructive) {
+                    if suppressConfirmToggle {
+                        UserDefaults.standard.set(true, forKey: Self.suppressClearConfirmKey)
+                    }
+                    store.setAttachments([], for: slot)
+                    showingClearConfirm = false
+                } label: {
+                    Text("清空 \(attachmentCount) 个附件")
+                }
+                .keyboardShortcut(.defaultAction)
+            }
+        }
+        .padding(16)
+        .frame(width: 260)
     }
 
     private var pill: some View {
