@@ -10,6 +10,13 @@ struct SlotNodeView: View {
     let content: SlotContent?
     let colorId: Int?
     let isHovered: Bool
+    // v2.7.65: store is optional so existing pure-display call sites keep working;
+    // when provided, the 📎 attachment entry + popover are shown.
+    var store: SlotStoreObservable? = nil
+
+    @State private var showingAttachments = false
+
+    private var attachmentCount: Int { store?.attachments(for: slot).count ?? 0 }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -23,6 +30,9 @@ struct SlotNodeView: View {
                     .font(.system(size: 13, weight: .semibold))
                     .lineLimit(1)
                 Spacer()
+                if store != nil {
+                    attachmentButton
+                }
                 if let colorId {
                     Circle().fill(SlotConnectionColor.color(for: colorId)).frame(width: 7, height: 7)
                 }
@@ -38,6 +48,38 @@ struct SlotNodeView: View {
         .overlay(RoundedRectangle(cornerRadius: 14).stroke(SlotConnectionColor.color(for: colorId).opacity(colorId == nil ? 0.18 : 0.8), lineWidth: colorId == nil ? 1 : 2))
         .shadow(color: .black.opacity(0.08), radius: 8, x: 0, y: 3)
     }
+
+    // v2.7.65: 📎 attachment entry, shown top-right of the title row (clear of ports).
+    @ViewBuilder
+    private var attachmentButton: some View {
+        if let store {
+            Button {
+                showingAttachments = true
+            } label: {
+                ZStack(alignment: .topTrailing) {
+                    Image(systemName: attachmentCount > 0 ? "paperclip.circle.fill" : "paperclip")
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundColor(attachmentCount > 0 ? .accentColor : .secondary)
+                        .frame(width: 20, height: 20)
+                    if attachmentCount > 0 {
+                        Text("\(attachmentCount)")
+                            .font(.system(size: 9, weight: .bold))
+                            .foregroundColor(.white)
+                            .frame(width: 14, height: 14)
+                            .background(Circle().fill(AppTheme.brandGradient(.light)))
+                            .offset(x: 6, y: -6)
+                            .contentTransition(.numericText())
+                    }
+                }
+            }
+            .buttonStyle(.plain)
+            .help(attachmentCount > 0 ? "附件：\(attachmentCount) 个，点击管理" : "添加附件")
+            .popover(isPresented: $showingAttachments, arrowEdge: .top) {
+                AttachmentManagerPopover(slot: slot, store: store)
+            }
+        }
+    }
+
 
     // v2.7.9: Node title shows slot name, not content preview.
     private var slotDisplayName: String { "槽位 \(slot)" }

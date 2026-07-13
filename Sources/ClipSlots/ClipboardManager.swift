@@ -30,6 +30,18 @@ struct SlotContent: Codable {
         updatedAt = try container.decode(TimeInterval.self, forKey: .updatedAt)
     }
 
+    init() {}
+
+    init(items: [[PasteboardItem]] = [], timestamp: Date = Date(), label: String? = nil, htmlSource: String? = nil, attachments: [SlotAttachment] = [], contentId: String = UUID().uuidString, updatedAt: TimeInterval = Date().timeIntervalSince1970) {
+        self.items = items
+        self.timestamp = timestamp
+        self.label = label
+        self.htmlSource = htmlSource
+        self.attachments = attachments
+        self.contentId = contentId
+        self.updatedAt = updatedAt
+    }
+
     // MARK: - Slot Attachment
 
     struct SlotAttachment: Codable, Identifiable {

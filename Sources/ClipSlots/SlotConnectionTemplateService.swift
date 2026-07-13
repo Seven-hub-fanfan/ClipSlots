@@ -34,6 +34,32 @@ enum SlotConnectionTemplateService {
         return template
     }
 
+    // MARK: - Bundle Encode / Decode
+
+    // v2.7.65: Bundle encoding now routes through the service with the SAME
+    // ISO8601 date strategy as single templates, fixing the previous asymmetry
+    // where bundles used a raw JSONEncoder (deferredToDate) while single
+    // templates used ISO8601. `decodeBundle` stays backward compatible by
+    // falling back to the legacy (default) date strategy for old files.
+    static func encodeBundle(_ bundle: SlotConnectionTemplateBundle) throws -> Data {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        encoder.dateEncodingStrategy = .iso8601
+        return try encoder.encode(bundle)
+    }
+
+    static func decodeBundle(_ data: Data) throws -> SlotConnectionTemplateBundle {
+        // Prefer the new ISO8601 format.
+        let isoDecoder = JSONDecoder()
+        isoDecoder.dateDecodingStrategy = .iso8601
+        if let bundle = try? isoDecoder.decode(SlotConnectionTemplateBundle.self, from: data) {
+            return bundle
+        }
+        // Backward compatibility: bundles exported before v2.7.65 used the
+        // default (deferredToDate) date strategy.
+        return try JSONDecoder().decode(SlotConnectionTemplateBundle.self, from: data)
+    }
+
     // MARK: - Built-in Template: Full 10-Slot Chain
 
     static func makeFullTenSlotChainTemplate(appVersion: String) -> SlotConnectionTemplate {

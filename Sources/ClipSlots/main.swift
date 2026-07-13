@@ -851,6 +851,26 @@ final class SlotStoreObservable: ObservableObject {
         return stored
     }
 
+    // MARK: - v2.7.65 Slot Attachments (node canvas)
+
+    /// Attachments of a slot in the currently active group.
+    func attachments(for slot: Int) -> [SlotContent.SlotAttachment] {
+        specialStorage.get(slot, in: currentSpecialSlotId).attachments
+    }
+
+    /// Persist the attachment list for a slot in the currently active group and
+    /// refresh in-memory state so the node canvas updates immediately.
+    func setAttachments(_ attachments: [SlotContent.SlotAttachment], for slot: Int) {
+        let activeId = currentSpecialSlotId
+        var content = specialStorage.get(slot, in: activeId)
+        content.attachments = attachments
+        _ = specialStorage.set(slot, content: content, in: activeId)
+        if loadedSpecialSlotId == activeId {
+            slots[slot] = content
+        }
+        refreshTrigger = UUID()
+    }
+
     private func isSelfApp(_ app: NSRunningApplication?) -> Bool {
         guard let app = app else { return false }
         return app.bundleIdentifier == Bundle.main.bundleIdentifier
@@ -1141,14 +1161,25 @@ final class SlotStoreObservable: ObservableObject {
         // If slot has attachments, automatically paste main content + all attachments in order
         let content = specialStorage.get(slot, in: activeId)
         if !content.attachments.isEmpty {
-            // Create a temporary chain: main slot first, then all attachments
-            // Attachments are handled as virtual slots in the paste chain
+            // v2.7.65 BUGFIX: previously the chain of negative indices (-1, -2, …)
+            // was fed to `pasteSlotChain`, whose `payloadForSlot` looked them up in
+            // the `slots` dictionary (`slots[-1]` == nil) and silently dropped every
+            // attachment. We now (1) publish the attachment array as the resolution
+            // context and (2) use `pasteSlotChainSequentially`, which supports mixed
+            // text / file / image payloads (plain `pasteSlotChain` rejects images).
+            pendingAttachmentContext = content.attachments
             var chain: [Int] = [slot]
-            // Append attachment indices as negative values to distinguish from real slots
             for i in 0..<content.attachments.count {
                 chain.append(-(i + 1))
             }
-            pasteSlotChain(chain)
+            pasteSlotChainSequentially(
+                chain,
+                noticeTitle: "已粘贴主内容 + \(content.attachments.count) 个附件",
+                noticeSubtitle: "主内容与附件已依次粘贴"
+            )
+            // Payloads are materialised synchronously at the start of the sequential
+            // paste, so it is safe to clear the context immediately afterwards.
+            pendingAttachmentContext = []
             return
         }
 
@@ -1768,7 +1799,17 @@ final class SlotStoreObservable: ObservableObject {
         }
     }
 
+    /// v2.7.65: Transient attachment context for the current attachment auto-chain.
+    /// `payloadForSlot` resolves negative slot indices (-1, -2, …) against this array.
+    /// It is populated right before a sequential attachment paste and cleared right
+    /// after the payloads are materialised.
+    private var pendingAttachmentContext: [SlotContent.SlotAttachment] = []
+
     private func payloadForSlot(_ slot: Int) -> ChainPastePayload {
+        // v2.7.65: negative indices address attachments of the slot currently being pasted.
+        if slot < 0 {
+            return payloadForAttachment(index: -slot - 1)
+        }
         let content = slots[slot] ?? SlotContent()
         guard !content.isEmpty else {
             return ChainPastePayload(sourceSlot: slot, text: nil, fileURLs: [], isImage: false, isEmpty: true, image: nil)
@@ -1785,6 +1826,41 @@ final class SlotStoreObservable: ObservableObject {
             isEmpty: false,
             image: image
         )
+    }
+
+    /// v2.7.65: Builds a paste payload for an attachment in `pendingAttachmentContext`.
+    private func payloadForAttachment(index: Int) -> ChainPastePayload {
+        let empty = ChainPastePayload(sourceSlot: -(index + 1), text: nil, fileURLs: [], isImage: false, isEmpty: true, image: nil)
+        guard index >= 0, index < pendingAttachmentContext.count else { return empty }
+        let att = pendingAttachmentContext[index]
+        let source = -(index + 1)
+
+        switch att.type {
+        case .text:
+            let text = att.data.flatMap { String(data: $0, encoding: .utf8) } ?? att.name
+            return ChainPastePayload(sourceSlot: source, text: text, fileURLs: [], isImage: false, isEmpty: text.isEmpty, image: nil)
+        case .url:
+            let text = att.url ?? att.name
+            return ChainPastePayload(sourceSlot: source, text: text, fileURLs: [], isImage: false, isEmpty: text.isEmpty, image: nil)
+        case .file:
+            guard let path = att.path, !path.isEmpty else { return empty }
+            return ChainPastePayload(sourceSlot: source, text: nil, fileURLs: [URL(fileURLWithPath: path)], isImage: false, isEmpty: false, image: nil)
+        case .image:
+            if let data = att.data, let image = NSImage(data: data) {
+                return ChainPastePayload(sourceSlot: source, text: nil, fileURLs: [], isImage: true, isEmpty: false, image: image)
+            }
+            if let path = att.path, !path.isEmpty {
+                return ChainPastePayload(sourceSlot: source, text: nil, fileURLs: [URL(fileURLWithPath: path)], isImage: false, isEmpty: false, image: nil)
+            }
+            return empty
+        case .reference:
+            // A reference stores the target slot number as a string in `path`.
+            if let path = att.path, let refSlot = Int(path) {
+                return payloadForSlot(refSlot)
+            }
+            let text = att.url ?? att.name
+            return ChainPastePayload(sourceSlot: source, text: text, fileURLs: [], isImage: false, isEmpty: text.isEmpty, image: nil)
+        }
     }
 
     private func chainPasteKind(for payloads: [ChainPastePayload]) -> ChainPasteKind {
@@ -2025,18 +2101,42 @@ final class SlotStoreObservable: ObservableObject {
             let data = try Data(contentsOf: url)
             
             // 先尝试解码为 Bundle 格式（多组/多页模板）
-            if let bundle = try? JSONDecoder().decode(SlotConnectionTemplateBundle.self, from: data) {
+            // v2.7.65: route through the service (ISO8601 + legacy fallback) and
+            // require non-empty entries so a single-group template never gets
+            // mis-detected as an (empty) bundle.
+            if let bundle = try? SlotConnectionTemplateService.decodeBundle(data), !bundle.entries.isEmpty {
                 // v2.7.62: 导入 Bundle 模板时创建多个新槽位组
                 var importedCount = 0
+                var firstGroupId: String?
                 for entry in bundle.entries {
+                    guard !entry.map.edges.isEmpty else { continue }
+                    try validateConnectionMap(entry.map)
                     let newGroup = try specialStorage.createSpecialSlot(name: entry.groupName, pageId: currentPageId)
                     SlotConnectionStorage.shared.save(entry.map, pageId: currentPageId, groupId: newGroup.id)
+                    if firstGroupId == nil { firstGroupId = newGroup.id }
                     importedCount += 1
                 }
-                
+
+                guard importedCount > 0, let firstGroupId else {
+                    showFloatingNotice(FloatingNotice(
+                        title: "导入失败",
+                        subtitle: "模板中没有有效的连接数据",
+                        iconName: "exclamationmark.triangle.fill",
+                        kind: .warning
+                    ))
+                    return
+                }
+
+                // v2.7.65 BUGFIX: the previous implementation created the groups on
+                // disk but never refreshed the in-memory @Published state, so the
+                // imported groups stayed invisible until the app restarted (the
+                // "导入用不了" symptom). Switching to the first imported group reloads
+                // the index, published arrays and the connection map for the canvas.
+                selectAndActivateSpecialSlot(id: firstGroupId)
+
                 showFloatingNotice(FloatingNotice(
                     title: "已导入连接模板",
-                    subtitle: "包含 \(importedCount) 个槽位组",
+                    subtitle: "包含 \(importedCount) 个槽位组，已切换至首个组",
                     iconName: "square.and.arrow.down.fill",
                     kind: .success
                 ))
@@ -2197,7 +2297,7 @@ final class SlotStoreObservable: ObservableObject {
             do {
                 let appVersion = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "2.7.7"
                 let bundle = SlotConnectionTemplateService.makeBundleTemplate(from: entries, name: "ClipSlots 页面连接模板", appVersion: appVersion)
-                let data = try JSONEncoder().encode(bundle)
+                let data = try SlotConnectionTemplateService.encodeBundle(bundle)
                 try data.write(to: url, options: [.atomic])
                 showFloatingNotice(FloatingNotice(
                     title: "已导出页面连接模板",
@@ -2213,10 +2313,18 @@ final class SlotStoreObservable: ObservableObject {
             var entries: [SlotConnectionTemplateBundleEntry] = []
             for (key, map) in allMaps where !map.edges.isEmpty {
                 let parts = key.components(separatedBy: "::")
+                let pageId = parts.first ?? ""
+                let groupId = parts.count > 1 ? parts[1] : (parts.last ?? "")
+                // v2.7.65 BUGFIX: previously used `parts.last` (the groupId / UUID)
+                // as the display name, so imported groups were named with raw UUIDs.
+                // Resolve the real group name from specialSlots, falling back to a
+                // friendly label instead of the opaque id.
+                let resolvedName = specialSlots.first { $0.id == groupId }?.name
+                    ?? "导入组 \(entries.count + 1)"
                 entries.append(SlotConnectionTemplateBundleEntry(
-                    pageId: parts.first ?? "",
-                    groupId: parts.last ?? "",
-                    groupName: parts.last ?? "",
+                    pageId: pageId,
+                    groupId: groupId,
+                    groupName: resolvedName,
                     map: map
                 ))
             }
@@ -2237,7 +2345,7 @@ final class SlotStoreObservable: ObservableObject {
             do {
                 let appVersion = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "2.7.7"
                 let bundle = SlotConnectionTemplateService.makeBundleTemplate(from: entries, name: "ClipSlots 全部连接模板", appVersion: appVersion)
-                let data = try JSONEncoder().encode(bundle)
+                let data = try SlotConnectionTemplateService.encodeBundle(bundle)
                 try data.write(to: url, options: [.atomic])
                 showFloatingNotice(FloatingNotice(
                     title: "已导出全部连接模板",

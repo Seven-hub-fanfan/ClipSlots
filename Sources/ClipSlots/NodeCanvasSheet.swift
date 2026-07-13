@@ -50,7 +50,8 @@ struct NodeCanvasSheet: View {
                             slot: slot,
                             content: store.slotContent(for: slot),
                             colorId: store.currentConnectionMap.colorId(for: slot),
-                            isHovered: hoveredNode == slot
+                            isHovered: hoveredNode == slot,
+                            store: store
                         )
                         .frame(width: nodeSize.width, height: nodeSize.height)
                         .position(position(for: slot))

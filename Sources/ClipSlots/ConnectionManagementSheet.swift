@@ -7,6 +7,8 @@ struct ConnectionManagementSheet: View {
 
     @State private var fromSlot: Int = 1
     @State private var toSlot: Int = 2
+    @State private var showingExportScopeSheet = false
+    @AppStorage("suppressExportConnectionsPanel") private var suppressExportConnectionsPanel = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -19,6 +21,25 @@ struct ConnectionManagementSheet: View {
             footer
         }
         .padding(18)
+        .sheet(isPresented: $showingExportScopeSheet) {
+            ConnectionExportScopeSheet(
+                suppressNextTime: $suppressExportConnectionsPanel,
+                onCancel: { showingExportScopeSheet = false },
+                onExportCurrentGroup: {
+                    showingExportScopeSheet = false
+                    store.exportConnectionTemplate(scope: .currentGroup)
+                },
+                onExportCurrentPage: {
+                    showingExportScopeSheet = false
+                    store.exportConnectionTemplate(scope: .currentPage)
+                },
+                onExportAll: {
+                    showingExportScopeSheet = false
+                    store.exportConnectionTemplate(scope: .all)
+                }
+            )
+            .frame(width: 420)
+        }
     }
 
     private var header: some View {
