@@ -71,6 +71,24 @@ struct NodeCanvasSheet: View {
                         onEndDrag: { endDrag() }
                     )
                     .zIndex(10)
+
+                    // v2.7.69: interactive attachment buttons live in their OWN
+                    // layer at the highest zIndex (above NodePortOverlay), so no
+                    // port hit area or card layer can swallow their taps. Placed
+                    // over each card's reserved bottom bar, leading-aligned to keep
+                    // clear of the bottom-center port.
+                    ForEach(1...10, id: \.self) { slot in
+                        if let rect = nodeFrames[slot] {
+                            HStack(spacing: 0) {
+                                NodeAttachmentButton(slot: slot, store: store)
+                                Spacer(minLength: 0)
+                            }
+                            .padding(.horizontal, 10)
+                            .frame(width: rect.width, height: SlotNodeLayout.attachmentBarHeight)
+                            .position(x: rect.midX, y: rect.maxY - SlotNodeLayout.attachmentBarHeight / 2)
+                        }
+                    }
+                    .zIndex(30)
                 }
                 .frame(width: canvasWidth, height: canvasHeight)
                 .coordinateSpace(name: "nodeCanvas")

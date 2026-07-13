@@ -40,17 +40,13 @@ struct SlotNodeView: View {
             }
             .padding(12)
 
-            // v2.7.68: bottom attachment bar, present for every node when a store
-            // is available. Button is leading-aligned so it never overlaps the
-            // bottom port (which sits at the card's bottom-edge center).
-            if let store {
+            // v2.7.69: reserve the bottom bar space here (divider + fixed height)
+            // for layout, but the INTERACTIVE attachment button is rendered by a
+            // dedicated canvas-level overlay (NodeAttachmentBarOverlay) at the
+            // highest zIndex so its taps are never swallowed by NodePortOverlay.
+            if store != nil {
                 Divider()
-                HStack(spacing: 6) {
-                    NodeAttachmentButton(slot: slot, store: store)
-                    Spacer(minLength: 0)
-                }
-                .padding(.horizontal, 10)
-                .frame(height: 30)
+                Color.clear.frame(height: SlotNodeLayout.attachmentBarHeight)
             }
         }
         .background(RoundedRectangle(cornerRadius: 14).fill(Color(NSColor.controlBackgroundColor)))
@@ -74,10 +70,14 @@ struct SlotNodeView: View {
 
 // MARK: - Attachment Button (canvas-level overlay)
 
-// v2.7.66: Rendered ABOVE NodePortOverlay at the canvas level so the 📎 button
-// always receives clicks (previously it lived inside SlotNodeView, which sits
-// below the port overlay's zIndex and could have its taps swallowed). The entry
-// is always available so users can add the first attachment on an empty slot.
+// Shared layout constants so the card reserves exactly the space the overlay
+// button occupies.
+enum SlotNodeLayout {
+    static let attachmentBarHeight: CGFloat = 30
+}
+
+// v2.7.69: A labelled 📎「附件」pill. Rendered by NodeAttachmentBarOverlay at the
+// canvas level ABOVE NodePortOverlay so its taps are never swallowed.
 struct NodeAttachmentButton: View {
     let slot: Int
     @ObservedObject var store: SlotStoreObservable
@@ -85,27 +85,34 @@ struct NodeAttachmentButton: View {
 
     private var attachmentCount: Int { store.attachments(for: slot).count }
 
+    private var label: String {
+        attachmentCount > 0 ? "附件 \(attachmentCount)" : "附件"
+    }
+
     var body: some View {
         Button {
+            NSLog("[ClipSlots] attachment button tapped slot=\(slot) count=\(attachmentCount)")
             showingAttachments = true
         } label: {
-            ZStack(alignment: .topTrailing) {
+            HStack(spacing: 4) {
                 Image(systemName: attachmentCount > 0 ? "paperclip.circle.fill" : "paperclip")
-                    .font(.system(size: 13, weight: .semibold))
-                    .foregroundColor(attachmentCount > 0 ? .accentColor : .secondary)
-                    .frame(width: 22, height: 22)
-                    .background(Circle().fill(Color(NSColor.controlBackgroundColor)))
-                    .contentShape(Circle())
-                if attachmentCount > 0 {
-                    Text("\(attachmentCount)")
-                        .font(.system(size: 9, weight: .bold))
-                        .foregroundColor(.white)
-                        .frame(width: 14, height: 14)
-                        .background(Circle().fill(AppTheme.brandGradient(.light)))
-                        .offset(x: 6, y: -6)
-                        .contentTransition(.numericText())
-                }
+                    .font(.system(size: 12, weight: .semibold))
+                Text(label)
+                    .font(.system(size: 11, weight: .semibold))
+                    .lineLimit(1)
             }
+            .foregroundColor(attachmentCount > 0 ? .white : .secondary)
+            .padding(.horizontal, 8)
+            .frame(height: 22)
+            .background(
+                Capsule().fill(
+                    attachmentCount > 0
+                        ? AnyShapeStyle(AppTheme.brandGradient(.light))
+                        : AnyShapeStyle(Color(NSColor.controlBackgroundColor))
+                )
+            )
+            .overlay(Capsule().stroke(Color.secondary.opacity(attachmentCount > 0 ? 0 : 0.35), lineWidth: 1))
+            .contentShape(Capsule())
         }
         .buttonStyle(.plain)
         .help(attachmentCount > 0 ? "附件：\(attachmentCount) 个，点击管理" : "添加附件")
