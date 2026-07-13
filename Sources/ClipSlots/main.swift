@@ -2209,13 +2209,21 @@ final class SlotStoreObservable: ObservableObject {
             // drops) still need the files after the paste lands. changeCount polling is
             // unreliable here (our own restore bumps changeCount), so a conservative
             // fixed delay is the safest option.
-            if tempFiles.isEmpty {
-                if self.pasteSequenceGeneration == gen { self.inFlightSequenceTempFiles = [] }
-            } else {
+            //
+            // v2.8.2 (P1-A): the sequence has SUCCEEDED, so detach its temp files from
+            // the in-flight bookkeeping immediately. Otherwise a superseding sequence
+            // that starts within this 3s protection window would call
+            // abortInFlightSequence and delete these files out from under the target
+            // app while it is still reading them asynchronously. Cleanup of these
+            // now-orphaned files is owned solely by the delayed work item below, which
+            // captures the local `tempFiles` array and is never touched by abort.
+            if self.pasteSequenceGeneration == gen {
+                self.inFlightSequenceTempFiles = []
+            }
+            if !tempFiles.isEmpty {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) { [weak self] in
                     guard let self else { return }
                     self.cleanupTempFiles(tempFiles)
-                    if self.pasteSequenceGeneration == gen { self.inFlightSequenceTempFiles = [] }
                 }
             }
         }

@@ -59,6 +59,8 @@ struct AttachmentManagerPopover: View {
     @State private var inlineEditor: InlineEditorKind?
     @State private var draftName: String = ""
     @State private var draftValue: String = ""
+    // v2.8.2 (P2-2): inline validation message shown under the editor field.
+    @State private var inlineError: String? = nil
 
     enum InlineEditorKind: Equatable { case text, url, reference }
 
@@ -170,6 +172,11 @@ struct AttachmentManagerPopover: View {
                 .textFieldStyle(.plain)
                 .padding(8)
                 .background(RoundedRectangle(cornerRadius: 8).fill(AppTheme.searchFieldBackground(scheme)))
+            if let inlineError {
+                Text(inlineError)
+                    .font(.caption2)
+                    .foregroundColor(.red)
+            }
             HStack {
                 Spacer()
                 Button("取消") { cancelInline() }
@@ -229,12 +236,14 @@ struct AttachmentManagerPopover: View {
     private func openInline(_ kind: InlineEditorKind) {
         draftName = ""
         draftValue = ""
+        inlineError = nil
         withAnimation(.spring(response: 0.32, dampingFraction: 0.82)) {
             inlineEditor = kind
         }
     }
 
     private func cancelInline() {
+        inlineError = nil
         withAnimation(.spring(response: 0.32, dampingFraction: 0.82)) {
             inlineEditor = nil
         }
@@ -252,9 +261,17 @@ struct AttachmentManagerPopover: View {
         case .url:
             att = SlotContent.SlotAttachment(name: name.isEmpty ? value : name, type: .url, url: value)
         case .reference:
-            att = SlotContent.SlotAttachment(name: name.isEmpty ? "引用槽位 \(value)" : name,
-                                             type: .reference, path: value)
+            // v2.8.2 (P2-2): validate the referenced slot index is an integer in
+            // 1...10 instead of silently accepting arbitrary text that would later
+            // resolve to an empty payload at paste time.
+            guard let index = Int(value), (1...10).contains(index) else {
+                inlineError = "请输入 1-10 之间的槽位序号"
+                return
+            }
+            att = SlotContent.SlotAttachment(name: name.isEmpty ? "引用槽位 \(index)" : name,
+                                             type: .reference, path: String(index))
         }
+        inlineError = nil
         withAnimation(.spring(response: 0.32, dampingFraction: 0.82)) {
             var current = store.attachments(for: slot)
             current.append(att)

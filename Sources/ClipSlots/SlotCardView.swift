@@ -93,7 +93,9 @@ struct SlotCardView: View {
                     NodeAttachmentButton(slot: slot, store: store)
                 }
             }
-            .frame(height: 18, alignment: .leading)
+            // v2.8.2 (P2-5): use minHeight so the row can grow to fit the 22pt
+            // NodeAttachmentButton pill instead of clipping it / shrinking its hit area.
+            .frame(minHeight: 22, alignment: .leading)
             .padding(.horizontal, 2)
 
             actionRow

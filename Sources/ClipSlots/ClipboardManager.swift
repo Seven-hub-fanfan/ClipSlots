@@ -21,8 +21,11 @@ struct SlotContent: Codable {
     
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
-        items = try container.decode([[PasteboardItem]].self, forKey: .items)
-        timestamp = try container.decode(Date.self, forKey: .timestamp)
+        // v2.8.2 (P1-B): decode leniently so a corrupt / partial / legacy payload
+        // (e.g. missing items or timestamp) still loads with sensible defaults
+        // instead of throwing and dropping the whole slot.
+        items = try container.decodeIfPresent([[PasteboardItem]].self, forKey: .items) ?? []
+        timestamp = try container.decodeIfPresent(Date.self, forKey: .timestamp) ?? Date()
         label = try container.decodeIfPresent(String.self, forKey: .label)
         htmlSource = try container.decodeIfPresent(String.self, forKey: .htmlSource)
         attachments = try container.decodeIfPresent([SlotAttachment].self, forKey: .attachments) ?? []
