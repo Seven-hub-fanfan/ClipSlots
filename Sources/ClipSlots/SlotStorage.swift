@@ -235,6 +235,17 @@ final class SlotStorage {
             content.updatedAt = content.timestamp.timeIntervalSince1970
         }
 
+        // v2.8.3 (fix): restore slot attachments persisted alongside item data.
+        // Prior to v2.8.3 attachments lived only in SlotStorage's in-memory cache
+        // and were never serialized, so they vanished on the next app launch
+        // (cold cache → disk read reconstructed SlotContent without attachments).
+        // Missing/legacy file → keep the default empty array (fully backward compatible).
+        let attachmentsURL = slotDir.appendingPathComponent("attachments.json")
+        if let attData = try? Data(contentsOf: attachmentsURL),
+           let atts = try? decoder.decode([SlotContent.SlotAttachment].self, from: attData) {
+            content.attachments = atts
+        }
+
         return content
     }
 
@@ -255,7 +266,10 @@ final class SlotStorage {
             try label.write(to: slotDir.appendingPathComponent("label.txt"), atomically: true, encoding: .utf8)
         }
 
-        guard !content.isEmpty else { return }
+        // v2.8.3 (fix): a slot may carry attachments even when its main content is
+        // empty (attachments are added independently in the node canvas). Persist
+        // if EITHER items or attachments exist so attachments are never dropped.
+        guard !content.isEmpty || !content.attachments.isEmpty else { return }
 
         for (groupIdx, items) in content.items.enumerated() {
             let targetDir = slotDir.appendingPathComponent("item_\(groupIdx)")
@@ -272,6 +286,15 @@ final class SlotStorage {
         let meta = SlotContentMeta(contentId: content.contentId, updatedAt: content.updatedAt)
         let metaData = try encoder.encode(meta)
         try metaData.write(to: slotDir.appendingPathComponent("content.json"), options: .atomic)
+
+        // v2.8.3 (fix): persist slot attachments alongside item data so they
+        // survive app restarts. The whole slot dir was wiped above, so when the
+        // attachment list is empty we simply skip writing the file (a fresh read
+        // will fall back to the default empty array).
+        if !content.attachments.isEmpty {
+            let attData = try encoder.encode(content.attachments)
+            try attData.write(to: slotDir.appendingPathComponent("attachments.json"), options: .atomic)
+        }
     }
 
     // MARK: - Safe Filename Encoding
