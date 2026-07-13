@@ -62,9 +62,16 @@ final class RadialMenuWindowController {
             onSelectSlot: { [weak self] slot in
                 onSelectSlot(slot)
                 self?.dismissRadialOnly()
-                // v2.7.70: keep the preview open after paste when pinned (persisting
-                // its frame) so users can paste repeatedly; only dismiss when unpinned.
-                if self?.isPreviewPinned != true { self?.dismissPreviewPanel() } else { self?.persistPreviewFrame() }
+                // v2.7.71: when pinned, keep the preview window on screen but reset
+                // it to the blank default state (clear the big preview) so it no
+                // longer obscures the screen; the next slot hover re-populates it.
+                // When unpinned, keep the original behavior (dismiss after paste).
+                if self?.isPreviewPinned != true {
+                    self?.dismissPreviewPanel()
+                } else {
+                    self?.clearPreviewContent()
+                    self?.persistPreviewFrame()
+                }
                 onDismiss()
             },
             onPasteAll: { [weak self] in
@@ -240,6 +247,18 @@ final class RadialMenuWindowController {
         hosting.layer?.backgroundColor = NSColor.clear.cgColor
         hosting.layer?.masksToBounds = false
         return hosting
+    }
+
+    // v2.7.71: reset the live preview back to its blank default state (narrow
+    // title bar + empty area) without closing the window. Posting the hover
+    // notification with no payload and a nil object clears RadialLivePreviewContent's
+    // previewPayload/hoveredSlot; the next real slot hover repopulates it.
+    private func clearPreviewContent() {
+        NotificationCenter.default.post(
+            name: .radialMenuHoveredSlotChanged,
+            object: nil,
+            userInfo: nil
+        )
     }
 
     private func persistPreviewFrame() {
