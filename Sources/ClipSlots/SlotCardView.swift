@@ -76,14 +76,25 @@ struct SlotCardView: View {
                     .help(content.canPreview ? "点击查看大图" : "")
             }
 
-            // Metadata — fixed single-line
-            Text(content.metadataSummary)
-                .font(.caption2)
-                .foregroundColor(.secondary)
-                .lineLimit(1)
-                .truncationMode(.middle)
-                .frame(height: 16, alignment: .leading)
-                .padding(.horizontal, 2)
+            // Metadata — fixed single-line, with the attachment button pinned on the right.
+            // v2.7.76: moved the attachment button off the header row (it squeezed the slot
+            // title) down here just above the action buttons. It's a plain Button, so it
+            // won't trigger the card's paste/edit/hover/drag.
+            HStack(spacing: 6) {
+                Text(content.metadataSummary)
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+
+                Spacer(minLength: 4)
+
+                if let store = store {
+                    NodeAttachmentButton(slot: slot, store: store)
+                }
+            }
+            .frame(height: 18, alignment: .leading)
+            .padding(.horizontal, 2)
 
             actionRow
         }
@@ -248,12 +259,6 @@ struct SlotCardView: View {
             }
 
             Spacer()
-
-            // v2.7.76: reuse the node-canvas attachment button on the main grid card.
-            // It's a plain Button, so it won't trigger the card's paste/edit/hover/drag.
-            if let store = store {
-                NodeAttachmentButton(slot: slot, store: store)
-            }
 
             if !content.isEmpty {
                 Text(timeAgo)
