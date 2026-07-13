@@ -82,6 +82,7 @@ struct NodeAttachmentButton: View {
     let slot: Int
     @ObservedObject var store: SlotStoreObservable
     @State private var showingAttachments = false
+    @State private var showingClearConfirm = false
 
     private var attachmentCount: Int { store.attachments(for: slot).count }
 
@@ -90,34 +91,68 @@ struct NodeAttachmentButton: View {
     }
 
     var body: some View {
-        Button {
-            NSLog("[ClipSlots] attachment button tapped slot=\(slot) count=\(attachmentCount)")
-            showingAttachments = true
-        } label: {
-            HStack(spacing: 4) {
-                Image(systemName: attachmentCount > 0 ? "paperclip.circle.fill" : "paperclip")
-                    .font(.system(size: 12, weight: .semibold))
-                Text(label)
-                    .font(.system(size: 11, weight: .semibold))
-                    .lineLimit(1)
+        // v2.7.74: pill (open manager) + red ✕ clear entry as SIBLING buttons in the
+        // same top-most (zIndex 30) overlay layer, so both taps land reliably.
+        ZStack(alignment: .topTrailing) {
+            Button {
+                NSLog("[ClipSlots] attachment button tapped slot=\(slot) count=\(attachmentCount)")
+                showingAttachments = true
+            } label: {
+                pill
             }
-            .foregroundColor(attachmentCount > 0 ? .white : .secondary)
-            .padding(.horizontal, 8)
-            .frame(height: 22)
-            .background(
-                Capsule().fill(
-                    attachmentCount > 0
-                        ? AnyShapeStyle(AppTheme.brandGradient(.light))
-                        : AnyShapeStyle(Color(NSColor.controlBackgroundColor))
-                )
+            .buttonStyle(.plain)
+            .help(attachmentCount > 0 ? "附件：\(attachmentCount) 个，点击管理" : "添加附件")
+            .popover(isPresented: $showingAttachments, arrowEdge: .top) {
+                AttachmentManagerPopover(slot: slot, store: store)
+            }
+
+            if attachmentCount > 0 {
+                Button {
+                    showingClearConfirm = true
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.system(size: 13, weight: .bold))
+                        .symbolRenderingMode(.palette)
+                        .foregroundStyle(Color.white, Color.red)
+                        .background(Circle().fill(Color.white).frame(width: 10, height: 10))
+                        .contentShape(Circle())
+                }
+                .buttonStyle(.plain)
+                .help("清空该槽位全部附件")
+                .offset(x: 5, y: -6)
+                .confirmationDialog(
+                    "清空该槽位的全部附件？",
+                    isPresented: $showingClearConfirm,
+                    titleVisibility: .visible
+                ) {
+                    Button("清空 \(attachmentCount) 个附件", role: .destructive) {
+                        store.setAttachments([], for: slot)
+                    }
+                    Button("取消", role: .cancel) {}
+                }
+            }
+        }
+    }
+
+    private var pill: some View {
+        HStack(spacing: 4) {
+            Image(systemName: attachmentCount > 0 ? "paperclip.circle.fill" : "paperclip")
+                .font(.system(size: 12, weight: .semibold))
+            Text(label)
+                .font(.system(size: 11, weight: .semibold))
+                .lineLimit(1)
+        }
+        .foregroundColor(attachmentCount > 0 ? .white : .secondary)
+        .padding(.horizontal, 8)
+        .frame(height: 22)
+        .background(
+            Capsule().fill(
+                attachmentCount > 0
+                    ? AnyShapeStyle(AppTheme.brandGradient(.light))
+                    : AnyShapeStyle(Color(NSColor.controlBackgroundColor))
             )
-            .overlay(Capsule().stroke(Color.secondary.opacity(attachmentCount > 0 ? 0 : 0.35), lineWidth: 1))
-            .contentShape(Capsule())
-        }
-        .buttonStyle(.plain)
-        .help(attachmentCount > 0 ? "附件：\(attachmentCount) 个，点击管理" : "添加附件")
-        .popover(isPresented: $showingAttachments, arrowEdge: .top) {
-            AttachmentManagerPopover(slot: slot, store: store)
-        }
+        )
+        .overlay(Capsule().stroke(Color.secondary.opacity(attachmentCount > 0 ? 0 : 0.35), lineWidth: 1))
+        .contentShape(Capsule())
     }
 }

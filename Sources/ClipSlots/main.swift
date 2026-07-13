@@ -537,6 +537,8 @@ final class SlotStoreObservable: ObservableObject {
         guard !html.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
         var content = SlotContent(text: plainText?.isEmpty == false ? plainText! : html)
         content.htmlSource = html
+        // v2.7.74: preserve existing attachments when updating slot content.
+        content.attachments = slots[slot]?.attachments ?? []
         slots[slot] = content
         persistCurrentSpecialSlotData()
         refreshTrigger = UUID()
@@ -559,6 +561,10 @@ final class SlotStoreObservable: ObservableObject {
         var content = SlotContent()
         content.items = [[item]]
         content.timestamp = Date()
+        // v2.7.74 BUGFIX: editing a slot's text used to build a fresh SlotContent()
+        // and overwrite the whole record, silently dropping the slot's attachments.
+        // Carry the existing attachments over so editing content keeps them.
+        content.attachments = slots[slot]?.attachments ?? []
         slots[slot] = content
         persistCurrentSpecialSlotData()
         showFloatingNotice(FloatingNotice(title: "已更新文本", subtitle: "槽位 \(slot)", iconName: "pencil.circle.fill", kind: .success))
@@ -569,7 +575,10 @@ final class SlotStoreObservable: ObservableObject {
         for (offset, url) in urls.enumerated() {
             let target = slot + offset
             guard target <= config.slots else { break }
-            slots[target] = folderImportService.makeSlotContent(for: url)
+            var newContent = folderImportService.makeSlotContent(for: url)
+            // v2.7.74: preserve existing attachments when replacing slot content.
+            newContent.attachments = slots[target]?.attachments ?? []
+            slots[target] = newContent
         }
         persistCurrentSpecialSlotData()
         showFloatingNotice(FloatingNotice(title: "已导入文件", subtitle: urls.count == 1 ? first.lastPathComponent : "\(urls.count) 个文件", iconName: "folder.badge.plus", kind: .success))
@@ -2916,6 +2925,9 @@ final class SlotStoreObservable: ObservableObject {
         var savedContent = content
         savedContent.contentId = UUID().uuidString
         savedContent.updatedAt = Date().timeIntervalSince1970
+        // v2.7.74: overwriting a slot's main content should keep its attachments,
+        // which belong to the slot rather than the captured clipboard payload.
+        savedContent.attachments = existingBeforeSave.attachments
 
         ThumbnailProvider.shared.invalidateSlot(specialSlotId: activeId, slot: targetSlot)
 
