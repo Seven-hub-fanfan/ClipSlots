@@ -1161,6 +1161,21 @@ final class SlotStoreObservable: ObservableObject {
         // If slot has attachments, automatically paste main content + all attachments in order
         let content = specialStorage.get(slot, in: activeId)
         if !content.attachments.isEmpty {
+            let attachments = content.attachments
+            let imageIndices = attachments.indices.filter { attachments[$0].type == .image }
+
+            // v2.7.73: some targets (e.g. 即梦AI) do not accept images pasted one
+            // at a time (only the last/first survives), but DO accept a Finder-style
+            // multi-file paste (many file URLs in ONE pasteboard, ONE Cmd+V). So when
+            // there are ≥2 image attachments we pull them out of the sequential chain
+            // and paste them together as a batch of file URLs. A single image keeps
+            // the original per-item path to avoid regressions in targets that expect
+            // an inline bitmap (WeChat / rich text fields).
+            if imageIndices.count >= 2 {
+                pasteAttachmentsBatchingImages(mainSlot: slot, attachments: attachments, imageIndices: imageIndices)
+                return
+            }
+
             // v2.7.65 BUGFIX: previously the chain of negative indices (-1, -2, …)
             // was fed to `pasteSlotChain`, whose `payloadForSlot` looked them up in
             // the `slots` dictionary (`slots[-1]` == nil) and silently dropped every
@@ -1975,6 +1990,110 @@ final class SlotStoreObservable: ObservableObject {
                 kind: .success
             ))
         }
+    }
+
+    // MARK: - v2.7.73 Finder-style multi-image attachment paste
+
+    /// Pastes a slot's main content + non-image attachments sequentially, then
+    /// pastes ALL image attachments together as a single Finder-style multi-file
+    /// clipboard write (one `writeObjects([NSURL])` + one Cmd+V), which targets
+    /// like 即梦AI accept as a batch of images.
+    private func pasteAttachmentsBatchingImages(mainSlot: Int, attachments: [SlotContent.SlotAttachment], imageIndices: [Int]) {
+        // Publish context so negative indices resolve while we materialise payloads.
+        pendingAttachmentContext = attachments
+
+        // Non-image chain: main slot + every non-image attachment (original order).
+        var chain: [Int] = [mainSlot]
+        for i in attachments.indices where attachments[i].type != .image {
+            chain.append(-(i + 1))
+        }
+        let nonImagePayloads = chain.compactMap { p -> ChainPastePayload? in
+            let payload = payloadForSlot(p)
+            return payload.isEmpty ? nil : payload
+        }
+
+        // Materialise image file URLs (from disk path or by spilling data to temp).
+        let imageURLs = imageIndices.compactMap { fileURLForImageAttachment(attachments[$0]) }
+
+        // Payloads / URLs are now materialised; safe to clear the transient context.
+        pendingAttachmentContext = []
+
+        let imageCount = imageURLs.count
+        let totalAttachments = attachments.count
+        let batchImages: () -> Void = { [weak self] in
+            guard let self else { return }
+            self.pasteImageURLsAsBatch(imageURLs)
+            self.showFloatingNotice(FloatingNotice(
+                title: "已粘贴主内容 + \(totalAttachments) 个附件",
+                subtitle: "\(imageCount) 张图片已一次性粘贴",
+                iconName: "photo.on.rectangle.angled",
+                kind: .success
+            ))
+        }
+
+        if nonImagePayloads.isEmpty {
+            batchImages()
+        } else {
+            // Give the last sequential (text/file) paste time to land before the
+            // clipboard is replaced with the image batch.
+            pasteNextPayloadSequentially(nonImagePayloads, index: 0) {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { batchImages() }
+            }
+        }
+    }
+
+    /// Writes multiple image file URLs into ONE pasteboard and sends a single
+    /// Cmd+V, mimicking a Finder multi-file paste.
+    private func pasteImageURLsAsBatch(_ urls: [URL]) {
+        guard !urls.isEmpty else { return }
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        pasteboard.writeObjects(urls as [NSURL])
+        sendPasteKeystroke()
+        NSLog("[ClipSlots] pasted \(urls.count) image attachments as a single file-URL batch")
+    }
+
+    /// Resolves a usable on-disk file URL for an image attachment. If the
+    /// attachment references an existing file, that path is used; otherwise its
+    /// in-memory bitmap `data` is spilled to a temp file with the correct
+    /// extension. Temp files are intentionally NOT deleted here so the target app
+    /// can read them after the paste; the OS reclaims the temp directory later.
+    private func fileURLForImageAttachment(_ att: SlotContent.SlotAttachment) -> URL? {
+        if let path = att.path, !path.isEmpty, FileManager.default.fileExists(atPath: path) {
+            return URL(fileURLWithPath: path)
+        }
+        guard let data = att.data, !data.isEmpty else { return nil }
+
+        let ext = imageFileExtension(forName: att.name, data: data)
+        let baseName = (att.name as NSString).deletingPathExtension
+        let safeBase = baseName.isEmpty ? "clipslots-image" : baseName
+            .replacingOccurrences(of: "/", with: "_")
+            .replacingOccurrences(of: ":", with: "_")
+        let fileName = "clipslots-\(UUID().uuidString.prefix(8))-\(safeBase).\(ext)"
+        let url = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent(fileName)
+        do {
+            try data.write(to: url, options: .atomic)
+            return url
+        } catch {
+            NSLog("[ClipSlots] failed to spill image attachment to temp file: \(error)")
+            return nil
+        }
+    }
+
+    /// Determines an image file extension from the attachment name, falling back
+    /// to sniffing the data's magic bytes, then to png.
+    private func imageFileExtension(forName name: String, data: Data) -> String {
+        let nameExt = (name as NSString).pathExtension.lowercased()
+        let allowed: Set<String> = ["png", "jpg", "jpeg", "gif", "tiff", "tif", "bmp", "heic", "webp"]
+        if allowed.contains(nameExt) { return nameExt == "jpeg" ? "jpg" : nameExt }
+
+        let bytes = [UInt8](data.prefix(12))
+        if bytes.count >= 8, bytes[0] == 0x89, bytes[1] == 0x50, bytes[2] == 0x4E, bytes[3] == 0x47 { return "png" }
+        if bytes.count >= 3, bytes[0] == 0xFF, bytes[1] == 0xD8, bytes[2] == 0xFF { return "jpg" }
+        if bytes.count >= 6, bytes[0] == 0x47, bytes[1] == 0x49, bytes[2] == 0x46 { return "gif" }
+        if bytes.count >= 2, bytes[0] == 0x42, bytes[1] == 0x4D { return "bmp" }
+        if bytes.count >= 4, (bytes[0] == 0x49 && bytes[1] == 0x49) || (bytes[0] == 0x4D && bytes[1] == 0x4D) { return "tiff" }
+        return "png"
     }
 
     private func pasteNextPayloadSequentially(_ payloads: [ChainPastePayload], index: Int, completion: @escaping () -> Void) {
