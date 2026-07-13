@@ -745,6 +745,7 @@ struct ContentView: View {
             onEditText: { newText in store.updateTextSlot(slot, text: newText) },
             onEditHTML: { html in store.updateHTMLSlot(slot, html: html) },
             onDropFiles: { urls in store.importDroppedFiles(urls, toSlot: slot) },
+            store: store,
             connectionDotColor: store.portColor(for: slot),
             isConnectionMode: false,
             connectedPorts: [],

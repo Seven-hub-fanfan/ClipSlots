@@ -17,6 +17,10 @@ struct SlotCardView: View {
     var onEditHTML: ((String) -> Void)? = nil
     var onDropFiles: (([URL]) -> Void)? = nil
 
+    // v2.7.76: shared store so the main-grid card can host the same attachment
+    // button used on the node canvas, reading/writing the same SlotContent.attachments.
+    var store: SlotStoreObservable? = nil
+
     // v2.7.0: Connection props
     var connectionDotColor: Color? = nil
     var isConnectionMode: Bool = false
@@ -244,6 +248,12 @@ struct SlotCardView: View {
             }
 
             Spacer()
+
+            // v2.7.76: reuse the node-canvas attachment button on the main grid card.
+            // It's a plain Button, so it won't trigger the card's paste/edit/hover/drag.
+            if let store = store {
+                NodeAttachmentButton(slot: slot, store: store)
+            }
 
             if !content.isEmpty {
                 Text(timeAgo)
