@@ -426,22 +426,32 @@ struct AttachmentRow: View {
             .onHover { deleteHovered = $0 }
             .help("删除附件")
 
-            // v2.8.7: pure DragGesture handle. Only this handle starts a drag,
-            // so the rest of the row keeps hover-preview behaviour. No system
-            // drag payload / ghost image is produced.
+            // v2.8.8: AppKit-backed drag handle. The manager lives inside an
+            // NSPopover launched from a sheet; when that popover window is not
+            // key yet, a SwiftUI DragGesture loses its first mouseDown (it is
+            // consumed only to make the window key, because the backing
+            // NSHostingView returns acceptsFirstMouse == false), so the first
+            // drag "does nothing" and the user has to press again. This handle
+            // overrides acceptsFirstMouse == true, so the very first press is
+            // delivered regardless of key state; routing events through a
+            // dedicated NSView also keeps the enclosing ScrollView from
+            // stealing the drag. Only this handle starts a reorder, so the rest
+            // of the row keeps its hover-preview behaviour, and no system drag
+            // payload / ghost image is produced.
             Image(systemName: "line.3.horizontal")
                 .font(.system(size: 13, weight: .semibold))
                 .foregroundColor(.secondary)
                 .frame(width: 24, height: 36)
                 .contentShape(Rectangle())
                 .help("拖动排序")
-                .gesture(
-                    DragGesture(minimumDistance: 2, coordinateSpace: .named("attachmentList"))
-                        .onChanged { value in
+                .overlay(
+                    FirstMouseDragHandle(
+                        onChanged: { dy in
                             showPreview = false
-                            onDragChanged(value.translation.height)
-                        }
-                        .onEnded { _ in onDragEnded() }
+                            onDragChanged(dy)
+                        },
+                        onEnded: { onDragEnded() }
+                    )
                 )
         }
         .padding(.horizontal, 12)
@@ -752,5 +762,63 @@ private struct AsyncPreviewImage<Fallback: View>: View {
                 loaded = true
             }
         }
+    }
+}
+
+
+// v2.8.8: AppKit-backed drag handle that accepts the first mouse.
+//
+// SwiftUI's DragGesture relies on the backing NSHostingView receiving the
+// initial mouseDown. Inside an NSPopover that is not yet the key window (this
+// manager is presented from a sheet / the main window), the first click is
+// swallowed just to make the window key, so a SwiftUI gesture never starts and
+// the user has to press twice. This transparent overlay view overrides
+// acceptsFirstMouse -> true and drives the reorder callbacks directly from the
+// AppKit mouse events, so the very first press works and the enclosing
+// ScrollView cannot steal the drag. It is scoped to the handle only and never
+// touches the host window or focus.
+private struct FirstMouseDragHandle: NSViewRepresentable {
+    let onChanged: (CGFloat) -> Void
+    let onEnded: () -> Void
+
+    func makeNSView(context: Context) -> DragHandleNSView {
+        let view = DragHandleNSView()
+        view.onChanged = onChanged
+        view.onEnded = onEnded
+        return view
+    }
+
+    func updateNSView(_ nsView: DragHandleNSView, context: Context) {
+        nsView.onChanged = onChanged
+        nsView.onEnded = onEnded
+    }
+}
+
+final class DragHandleNSView: NSView {
+    var onChanged: ((CGFloat) -> Void)?
+    var onEnded: (() -> Void)?
+    private var startY: CGFloat = 0
+
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+
+    override func resetCursorRects() {
+        addCursorRect(bounds, cursor: .openHand)
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        startY = event.locationInWindow.y
+        onChanged?(0)
+    }
+
+    override func mouseDragged(with event: NSEvent) {
+        // SwiftUI DragGesture translation.height is positive downward (top-left
+        // origin). NSEvent window coordinates are bottom-left origin (positive
+        // upward), so downward motion == startY - currentY.
+        let dy = startY - event.locationInWindow.y
+        onChanged?(dy)
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        onEnded?()
     }
 }
