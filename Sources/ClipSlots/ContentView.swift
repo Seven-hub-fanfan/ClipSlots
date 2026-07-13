@@ -21,6 +21,13 @@ struct ContentView: View {
     // v2.7.23: global search is the default. Users can still switch back to group scope.
 @State private var searchScope: SlotSearchScope = .global
     @State private var globalSearchSortRule: SlotSearchSortRule = .smart
+    // v2.8.0 (perf M1/M2): debounced + cached global search. `searchText` changes on
+    // every keystroke, but the expensive cross-page/group scan should only run after
+    // the user pauses typing (debounce), and its result is cached in state so that
+    // unrelated view re-renders (e.g. thumbnails finishing load) no longer re-run the
+    // whole scan+sort on the main thread.
+    @State private var globalSearchResultsCache: [SlotGlobalSearchResult] = []
+    @State private var searchDebounceWorkItem: DispatchWorkItem?
 
     // v2.7.1: stable connection sheet replaces broken node-canvas UI.
     @State private var showingConnectionManagement = false
@@ -256,6 +263,12 @@ struct ContentView: View {
         .popover(isPresented: $showingSpecialSlotManagement) {
             SpecialSlotManagementView(store: store)
         }
+        // v2.8.0 (perf M1/M2): drive the cached global-search results from explicit
+        // input changes instead of recomputing inside the view body on every render.
+        .onChange(of: searchText) { _ in scheduleGlobalSearchRecompute(debounced: true) }
+        .onChange(of: selectedFilter) { _ in scheduleGlobalSearchRecompute(debounced: false) }
+        .onChange(of: searchScope) { _ in scheduleGlobalSearchRecompute(debounced: false) }
+        .onChange(of: globalSearchSortRule) { _ in scheduleGlobalSearchRecompute(debounced: false) }
     }
 
     // Layer 1: Title + Stats + Settings
@@ -655,7 +668,7 @@ struct ContentView: View {
             // Connection stays as a separate tool and is moved to the right side.
             connectionToolButton
 
-            Text("v2.7.60")
+            Text("v2.8.0")
                 .font(.caption2)
                 .foregroundColor(Color.secondary.opacity(0.65))
         }
@@ -784,7 +797,7 @@ struct ContentView: View {
                         .padding(.top, 2)
                 } else {
                     GlobalSearchResultsView(
-                        results: globalSearchResults,
+                        results: globalSearchResultsCache,
                         currentPageId: store.currentPageId,
                         currentGroupId: store.currentSpecialSlotId,
                         onJump: jumpToSearchResult,
@@ -835,7 +848,35 @@ struct ContentView: View {
 
     // MARK: - Global Search (v2.5.1)
 
-    private var globalSearchResults: [SlotGlobalSearchResult] {
+    /// v2.8.0 (perf M1/M2): recompute the debounced/cached global search results.
+    /// Called only when a search input actually changes (text, filter, scope, sort),
+    /// not on every view re-render. Text changes are debounced by the caller.
+    private func recomputeGlobalSearchResults() {
+        globalSearchResultsCache = computeGlobalSearchResults()
+    }
+
+    /// Schedule a global-search recompute. Keystroke-driven changes are debounced so
+    /// the cross-page scan runs once after the user pauses typing; structural changes
+    /// (filter/scope/sort) recompute immediately.
+    private func scheduleGlobalSearchRecompute(debounced: Bool) {
+        searchDebounceWorkItem?.cancel()
+        searchDebounceWorkItem = nil
+
+        guard searchScope == .global, isSearchActive else {
+            globalSearchResultsCache = []
+            return
+        }
+
+        if debounced {
+            let work = DispatchWorkItem { recomputeGlobalSearchResults() }
+            searchDebounceWorkItem = work
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.2, execute: work)
+        } else {
+            recomputeGlobalSearchResults()
+        }
+    }
+
+    private func computeGlobalSearchResults() -> [SlotGlobalSearchResult] {
         guard searchScope == .global, isSearchActive else { return [] }
 
         let filtered = store.allSearchableSlots()

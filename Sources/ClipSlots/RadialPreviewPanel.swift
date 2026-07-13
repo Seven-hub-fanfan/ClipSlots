@@ -159,7 +159,14 @@ private struct RadialImageFilePreview: View {
             }
         }
         .onAppear {
-            if image == nil { image = NSImage(contentsOf: url) }
+            // v2.8.0 (perf M4): decode the on-disk image on a background queue so
+            // hovering a radial slot that points at an image file no longer blocks
+            // the main thread while a full-resolution NSImage decodes.
+            guard image == nil else { return }
+            DispatchQueue.global(qos: .userInitiated).async {
+                let decoded = NSImage(contentsOf: url)
+                DispatchQueue.main.async { image = decoded }
+            }
         }
     }
 }
@@ -320,7 +327,11 @@ private struct RadialImageOnlyPreview: View {
         guard image == nil else { return }
         if let inline = content.inlineImage { image = inline; return }
         guard content.isImageFile, let url = content.primaryFileURL else { return }
-        if let img = NSImage(contentsOf: url) { image = img }
+        // v2.8.0 (perf M4): decode off the main thread.
+        DispatchQueue.global(qos: .userInitiated).async {
+            let decoded = NSImage(contentsOf: url)
+            DispatchQueue.main.async { if decoded != nil { image = decoded } }
+        }
     }
 }
 

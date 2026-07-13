@@ -29,13 +29,34 @@ extension SlotContent {
         !imageTypes.isEmpty
     }
 
+    /// Process-wide cache of decoded inline images, keyed by `contentId::updatedAt`.
+    /// v2.8.0 (perf H1): `inlineImage` was previously re-decoding the raw image
+    /// data via `NSImage(data:)` on *every* access. Because this property is read
+    /// inside SwiftUI View bodies (search preview, radial preview, HUD, metadata),
+    /// the original full-resolution image was decoded on the main thread on every
+    /// re-render. Decoding once per content version and caching the result removes
+    /// that repeated main-thread work. Keyed by the stable content identity so an
+    /// overwrite (new contentId/updatedAt) still misses the cache.
+    private static let inlineImageCache: NSCache<NSString, NSImage> = {
+        let cache = NSCache<NSString, NSImage>()
+        cache.countLimit = 64
+        return cache
+    }()
+
     /// Attempt to decode an NSImage from inline image data.
     var inlineImage: NSImage? {
+        let cacheKey: NSString? = contentId.isEmpty ? nil : "\(contentId)::\(updatedAt)" as NSString
+        if let cacheKey, let cached = Self.inlineImageCache.object(forKey: cacheKey) {
+            return cached
+        }
         for itemList in items {
             for item in itemList {
                 let lower = item.type.lowercased()
                 if lower.contains("image") || lower == "public.png" || lower == "public.tiff" || lower == "public.jpeg" {
                     if let image = NSImage(data: item.data) {
+                        if let cacheKey {
+                            Self.inlineImageCache.setObject(image, forKey: cacheKey)
+                        }
                         return image
                     }
                 }

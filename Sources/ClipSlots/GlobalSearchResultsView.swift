@@ -207,11 +207,11 @@ struct GlobalSearchResultsView: View {
 
     @ViewBuilder
     private func previewContent(for result: SlotGlobalSearchResult) -> some View {
-        // Try real image preview first
-        if let nsImage = previewImage(for: result) {
-            Image(nsImage: nsImage)
-                .resizable()
-                .scaledToFit()
+        // Try real image preview first (v2.8.0 perf H4: the image branch now loads
+        // any on-disk image asynchronously instead of decoding it on the main thread
+        // inside the view body).
+        if hasImagePreview(for: result) {
+            SearchResultPreviewImage(content: result.content)
                 .frame(maxWidth: .infinity, maxHeight: 120)
                 .background(Color.black.opacity(0.06))
                 .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
@@ -252,21 +252,18 @@ struct GlobalSearchResultsView: View {
 
     // MARK: - Preview Image Helper
 
-    private func previewImage(for result: SlotGlobalSearchResult) -> NSImage? {
-        // 1. Inline image data from pasteboard
-        if let inline = result.content.inlineImage {
-            return inline
-        }
-
-        // 2. Image file: load from file path
+    /// Whether this result should render an image preview. Cheap and synchronous:
+    /// `inlineImage` is cached (v2.8.0 H1) and the file branch only checks existence,
+    /// never decodes. The actual pixel load happens asynchronously in
+    /// `SearchResultPreviewImage`.
+    private func hasImagePreview(for result: SlotGlobalSearchResult) -> Bool {
+        if result.content.inlineImage != nil { return true }
         if let fileURL = result.content.primaryFileURL,
            result.content.isImageFile,
-           FileManager.default.fileExists(atPath: fileURL.path),
-           let image = NSImage(contentsOf: fileURL) {
-            return image
+           FileManager.default.fileExists(atPath: fileURL.path) {
+            return true
         }
-
-        return nil
+        return false
     }
 
     // MARK: - Action Buttons
@@ -347,6 +344,42 @@ struct GlobalSearchResultsView: View {
                 }
                 .buttonStyle(.plain)
             }
+        }
+    }
+}
+
+// MARK: - Async Preview Image (v2.8.0 perf H4)
+
+/// Renders the selected search result's image preview. Inline (pasteboard) images
+/// come from the cached `inlineImage` (v2.8.0 H1) and appear immediately; on-disk
+/// image files are decoded on a background queue and swapped in when ready, so
+/// selecting an image-file result no longer stalls the main thread while a
+/// full-resolution `NSImage(contentsOf:)` decodes.
+private struct SearchResultPreviewImage: View {
+    let content: SlotContent
+    @State private var fileImage: NSImage?
+
+    var body: some View {
+        ZStack {
+            if let image = content.inlineImage ?? fileImage {
+                Image(nsImage: image)
+                    .resizable()
+                    .scaledToFit()
+            } else {
+                ProgressView()
+                    .controlSize(.small)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
+        }
+        .onAppear(perform: loadFileImageIfNeeded)
+    }
+
+    private func loadFileImageIfNeeded() {
+        guard content.inlineImage == nil, fileImage == nil,
+              let url = content.primaryFileURL, content.isImageFile else { return }
+        DispatchQueue.global(qos: .userInitiated).async {
+            let image = NSImage(contentsOf: url)
+            DispatchQueue.main.async { self.fileImage = image }
         }
     }
 }
