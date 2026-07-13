@@ -1,5 +1,6 @@
 import SwiftUI
 import AppKit
+import AVFoundation
 import UniformTypeIdentifiers
 
 // v2.7.65: Attachment management UI for the node canvas.
@@ -120,12 +121,18 @@ struct AttachmentManagerPopover: View {
             } else {
                 ScrollView {
                     VStack(spacing: 8) {
-                        ForEach(attachments) { att in
-                            AttachmentRow(attachment: att, scheme: scheme) {
-                                remove(att)
-                            }
+                        let items = attachments
+                        ForEach(Array(items.enumerated()), id: \.element.id) { index, att in
+                            AttachmentRow(
+                                attachment: att,
+                                scheme: scheme,
+                                isFirst: index == 0,
+                                isLast: index == items.count - 1,
+                                onDelete: { remove(att) },
+                                onMoveUp: { moveUp(index) },
+                                onMoveDown: { moveDown(index) }
+                            )
                         }
-                        .onMove(perform: move)
 
                         if let kind = inlineEditor {
                             inlineEditorView(kind)
@@ -315,6 +322,26 @@ struct AttachmentManagerPopover: View {
         current.move(fromOffsets: offsets, toOffset: destination)
         store.setAttachments(current, for: slot)
     }
+
+    // v2.8.5: explicit up/down reorder buttons per row. Display order == paste
+    // order == add order, so reordering here directly rewrites the stored array.
+    private func moveUp(_ index: Int) {
+        var current = store.attachments(for: slot)
+        guard current.indices.contains(index), index > 0 else { return }
+        withAnimation(.spring(response: 0.28, dampingFraction: 0.85)) {
+            current.swapAt(index, index - 1)
+            store.setAttachments(current, for: slot)
+        }
+    }
+
+    private func moveDown(_ index: Int) {
+        var current = store.attachments(for: slot)
+        guard current.indices.contains(index), index < current.count - 1 else { return }
+        withAnimation(.spring(response: 0.28, dampingFraction: 0.85)) {
+            current.swapAt(index, index + 1)
+            store.setAttachments(current, for: slot)
+        }
+    }
 }
 
 // MARK: - Attachment Row
@@ -322,21 +349,23 @@ struct AttachmentManagerPopover: View {
 struct AttachmentRow: View {
     let attachment: SlotContent.SlotAttachment
     let scheme: ColorScheme
+    let isFirst: Bool
+    let isLast: Bool
     let onDelete: () -> Void
+    let onMoveUp: () -> Void
+    let onMoveDown: () -> Void
 
     @State private var isHovered = false
     @State private var deleteHovered = false
+    // v2.8.5: hover preview popover, opened after a short dwell so scrolling past
+    // rows does not flash previews. Closed immediately when the pointer leaves.
+    @State private var showPreview = false
+    @State private var hoverToken = 0
 
     var body: some View {
         HStack(spacing: 10) {
-            ZStack {
-                RoundedRectangle(cornerRadius: 8)
-                    .fill(attachment.type.accentColor.opacity(0.15))
-                Image(systemName: attachment.type.iconName)
-                    .font(.system(size: 14, weight: .medium))
-                    .foregroundColor(attachment.type.accentColor)
-            }
-            .frame(width: 32, height: 32)
+            AttachmentThumbnail(attachment: attachment)
+                .frame(width: 32, height: 32)
 
             VStack(alignment: .leading, spacing: 2) {
                 Text(attachment.name)
@@ -349,6 +378,31 @@ struct AttachmentRow: View {
             }
 
             Spacer(minLength: 4)
+
+            // v2.8.5: reorder controls. First row cannot move up, last cannot down.
+            VStack(spacing: 2) {
+                Button(action: onMoveUp) {
+                    Image(systemName: "chevron.up")
+                        .font(.system(size: 9, weight: .bold))
+                        .frame(width: 18, height: 14)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .foregroundColor(isFirst ? .secondary.opacity(0.3) : .secondary)
+                .disabled(isFirst)
+                .help("上移")
+
+                Button(action: onMoveDown) {
+                    Image(systemName: "chevron.down")
+                        .font(.system(size: 9, weight: .bold))
+                        .frame(width: 18, height: 14)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .foregroundColor(isLast ? .secondary.opacity(0.3) : .secondary)
+                .disabled(isLast)
+                .help("下移")
+            }
 
             Button(action: onDelete) {
                 Image(systemName: "xmark.circle.fill")
@@ -367,7 +421,23 @@ struct AttachmentRow: View {
             RoundedRectangle(cornerRadius: AppTheme.smallCornerRadius)
                 .stroke(isHovered ? attachment.type.accentColor.opacity(0.5) : AppTheme.subtleBorder(scheme), lineWidth: 1)
         )
-        .onHover { isHovered = $0 }
+        .contentShape(Rectangle())
+        .onHover { hovering in
+            isHovered = hovering
+            if hovering {
+                hoverToken += 1
+                let token = hoverToken
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+                    if isHovered && token == hoverToken { showPreview = true }
+                }
+            } else {
+                showPreview = false
+            }
+        }
+        .popover(isPresented: $showPreview, arrowEdge: .trailing) {
+            AttachmentPreviewContent(attachment: attachment, scheme: scheme)
+                .frame(width: 340, height: 300)
+        }
     }
 
     private var subtitle: String {
@@ -381,6 +451,273 @@ struct AttachmentRow: View {
             return String(text.prefix(30))
         case .reference:
             return attachment.path.map { "→ 槽位 \($0)" } ?? "引用"
+        }
+    }
+}
+
+// MARK: - Thumbnail
+
+/// v2.8.5: real thumbnail for the left leading cell. Images render their pixels,
+/// videos render the first frame, other files render the Finder icon, and
+/// text/url/reference fall back to the semantic accent icon. All heavy work runs
+/// off the main thread and degrades gracefully to the icon on any failure.
+private struct AttachmentThumbnail: View {
+    let attachment: SlotContent.SlotAttachment
+    @State private var image: NSImage?
+
+    var body: some View {
+        ZStack {
+            RoundedRectangle(cornerRadius: 8)
+                .fill(attachment.type.accentColor.opacity(0.15))
+            if let image {
+                Image(nsImage: image)
+                    .resizable()
+                    .aspectRatio(contentMode: .fill)
+                    .frame(width: 32, height: 32)
+                    .clipShape(RoundedRectangle(cornerRadius: 8))
+            } else {
+                Image(systemName: attachment.type.iconName)
+                    .font(.system(size: 14, weight: .medium))
+                    .foregroundColor(attachment.type.accentColor)
+            }
+        }
+        .frame(width: 32, height: 32)
+        .task(id: attachment.id) {
+            let att = attachment
+            let loaded = await Task.detached(priority: .utility) {
+                AttachmentThumbnailProvider.thumbnail(for: att, maxPixel: 64)
+            }.value
+            if !Task.isCancelled { image = loaded }
+        }
+    }
+}
+
+enum AttachmentThumbnailProvider {
+    /// Returns a small NSImage suitable as a leading cell, or nil to fall back to
+    /// the semantic icon. `maxPixel` bounds the longest edge for memory safety.
+    static func thumbnail(for att: SlotContent.SlotAttachment, maxPixel: CGFloat) -> NSImage? {
+        switch att.type {
+        case .image:
+            if let path = att.path, !path.isEmpty, let img = NSImage(contentsOfFile: path) {
+                return resized(img, maxPixel: maxPixel)
+            }
+            if let data = att.data, let img = NSImage(data: data) {
+                return resized(img, maxPixel: maxPixel)
+            }
+            return nil
+        case .file:
+            guard let path = att.path, !path.isEmpty else { return nil }
+            let url = URL(fileURLWithPath: path)
+            if isVideo(url), let frame = videoFrame(url: url, maxPixel: maxPixel) {
+                return frame
+            }
+            // Finder icon is always available even for missing files.
+            let icon = NSWorkspace.shared.icon(forFile: path)
+            icon.size = NSSize(width: maxPixel, height: maxPixel)
+            return icon
+        default:
+            return nil
+        }
+    }
+
+    static func fullImage(for att: SlotContent.SlotAttachment) -> NSImage? {
+        switch att.type {
+        case .image:
+            if let path = att.path, !path.isEmpty, let img = NSImage(contentsOfFile: path) { return img }
+            if let data = att.data, let img = NSImage(data: data) { return img }
+            return nil
+        case .file:
+            guard let path = att.path, !path.isEmpty else { return nil }
+            let url = URL(fileURLWithPath: path)
+            if isVideo(url) { return videoFrame(url: url, maxPixel: 640) }
+            return nil
+        default:
+            return nil
+        }
+    }
+
+    static func isVideo(_ url: URL) -> Bool {
+        if let type = UTType(filenameExtension: url.pathExtension) {
+            return type.conforms(to: .movie) || type.conforms(to: .video)
+        }
+        return false
+    }
+
+    static func videoFrame(url: URL, maxPixel: CGFloat) -> NSImage? {
+        guard FileManager.default.fileExists(atPath: url.path) else { return nil }
+        let asset = AVURLAsset(url: url)
+        let generator = AVAssetImageGenerator(asset: asset)
+        generator.appliesPreferredTrackTransform = true
+        generator.maximumSize = CGSize(width: maxPixel, height: maxPixel)
+        let time = CMTime(seconds: 0.1, preferredTimescale: 600)
+        guard let cg = try? generator.copyCGImage(at: time, actualTime: nil) else { return nil }
+        return NSImage(cgImage: cg, size: NSSize(width: cg.width, height: cg.height))
+    }
+
+    private static func resized(_ image: NSImage, maxPixel: CGFloat) -> NSImage {
+        let size = image.size
+        guard size.width > 0, size.height > 0 else { return image }
+        let scale = min(maxPixel / size.width, maxPixel / size.height, 1)
+        let target = NSSize(width: size.width * scale, height: size.height * scale)
+        let out = NSImage(size: target)
+        out.lockFocus()
+        image.draw(in: NSRect(origin: .zero, size: target),
+                   from: NSRect(origin: .zero, size: size),
+                   operation: .copy, fraction: 1)
+        out.unlockFocus()
+        return out
+    }
+}
+
+// MARK: - Hover Preview Content
+
+/// v2.8.5: rich hover preview. Mirrors the visual language of RadialPreviewPanel
+/// (large image, video first-frame card, adaptive text/file cards) but is a
+/// standalone lightweight view so it never depends on the radial menu internals.
+private struct AttachmentPreviewContent: View {
+    let attachment: SlotContent.SlotAttachment
+    let scheme: ColorScheme
+
+    var body: some View {
+        VStack(spacing: 0) {
+            content
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+        .padding(14)
+        .background(AppTheme.elevatedBackground(scheme))
+    }
+
+    @ViewBuilder
+    private var content: some View {
+        switch attachment.type {
+        case .image:
+            imageOrFallback
+        case .file:
+            fileContent
+        case .text:
+            textCard(bodyText)
+        case .url:
+            textCard(attachment.url ?? attachment.name)
+        case .reference:
+            referenceCard
+        }
+    }
+
+    // Image / file first-frame preview
+    @ViewBuilder
+    private var imageOrFallback: some View {
+        AsyncPreviewImage(attachment: attachment) {
+            fileCard(icon: "photo", title: "图片缺失")
+        }
+    }
+
+    @ViewBuilder
+    private var fileContent: some View {
+        if let path = attachment.path, !path.isEmpty,
+           AttachmentThumbnailProvider.isVideo(URL(fileURLWithPath: path)) {
+            AsyncPreviewImage(attachment: attachment) {
+                fileCard(icon: "play.rectangle.fill", title: "视频")
+            }
+        } else {
+            fileCard(icon: "doc.fill", title: "文件")
+        }
+    }
+
+    private var bodyText: String {
+        attachment.data.flatMap { String(data: $0, encoding: .utf8) } ?? attachment.name
+    }
+
+    private func textCard(_ text: String) -> some View {
+        ScrollView {
+            Text(text.isEmpty ? "空内容" : text)
+                .font(.system(size: 13, design: .monospaced))
+                .foregroundColor(Color(NSColor.labelColor))
+                .lineSpacing(3)
+                .fixedSize(horizontal: false, vertical: true)
+                .textSelection(.enabled)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(12)
+        }
+        .background(Color(NSColor.textBackgroundColor))
+        .cornerRadius(10)
+    }
+
+    private var referenceCard: some View {
+        VStack(spacing: 10) {
+            Image(systemName: "arrow.triangle.branch")
+                .font(.system(size: 40, weight: .semibold))
+                .foregroundColor(SlotContent.AttachmentType.reference.accentColor)
+            Text("引用槽位")
+                .font(.system(size: 13, weight: .semibold))
+            Text(attachment.path.map { "→ 槽位 \($0)" } ?? attachment.name)
+                .font(.callout)
+                .foregroundColor(.secondary)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(Color(NSColor.textBackgroundColor))
+        .cornerRadius(10)
+    }
+
+    private func fileCard(icon: String, title: String) -> some View {
+        VStack(spacing: 10) {
+            Image(systemName: icon)
+                .font(.system(size: 40, weight: .semibold))
+                .foregroundColor(.accentColor)
+            Text(title)
+                .font(.system(size: 13, weight: .semibold))
+            Text(attachment.path.map { URL(fileURLWithPath: $0).lastPathComponent } ?? attachment.name)
+                .font(.caption)
+                .foregroundColor(.secondary)
+                .lineLimit(2)
+                .multilineTextAlignment(.center)
+                .truncationMode(.middle)
+            if let path = attachment.path, !path.isEmpty {
+                Text(URL(fileURLWithPath: path).deletingLastPathComponent().path)
+                    .font(.caption2)
+                    .foregroundColor(.secondary.opacity(0.75))
+                    .lineLimit(2)
+                    .multilineTextAlignment(.center)
+                    .truncationMode(.middle)
+            }
+        }
+        .padding(16)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(Color(NSColor.textBackgroundColor))
+        .cornerRadius(10)
+    }
+}
+
+/// Loads a large preview image (or video first frame) asynchronously, showing a
+/// spinner while loading and the provided fallback on failure.
+private struct AsyncPreviewImage<Fallback: View>: View {
+    let attachment: SlotContent.SlotAttachment
+    @ViewBuilder let fallback: () -> Fallback
+
+    @State private var image: NSImage?
+    @State private var loaded = false
+
+    var body: some View {
+        ZStack {
+            if let image {
+                Image(nsImage: image)
+                    .resizable()
+                    .aspectRatio(contentMode: .fit)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else if loaded {
+                fallback()
+            } else {
+                ProgressView().controlSize(.small)
+            }
+        }
+        .task(id: attachment.id) {
+            let att = attachment
+            let img = await Task.detached(priority: .userInitiated) {
+                AttachmentThumbnailProvider.fullImage(for: att)
+            }.value
+            if !Task.isCancelled {
+                image = img
+                loaded = true
+            }
         }
     }
 }
