@@ -417,14 +417,20 @@ struct AttachmentRow: View {
 
             Spacer(minLength: 4)
 
-            Button(action: onDelete) {
-                Image(systemName: "xmark.circle.fill")
-                    .font(.system(size: 13))
-                    .foregroundColor(deleteHovered ? Color(red: 1.0, green: 0.27, blue: 0.23) : .secondary)
-            }
-            .buttonStyle(.plain)
-            .onHover { deleteHovered = $0 }
-            .help("删除附件")
+            // v2.8.9: the delete affordance is a plain visual whose click is
+            // driven by a first-mouse AppKit overlay. Inside an NSPopover that
+            // is not yet the key window, a SwiftUI Button swallows its first
+            // mouseDown just to make the window key, so users had to click the
+            // red × several times. The overlay overrides acceptsFirstMouse so
+            // the very first press deletes reliably.
+            Image(systemName: "xmark.circle.fill")
+                .font(.system(size: 13))
+                .foregroundColor(deleteHovered ? Color(red: 1.0, green: 0.27, blue: 0.23) : .secondary)
+                .frame(width: 22, height: 22)
+                .contentShape(Rectangle())
+                .onHover { deleteHovered = $0 }
+                .help("删除附件")
+                .overlay(FirstMouseClickHandle(action: onDelete))
 
             // v2.8.8: AppKit-backed drag handle. The manager lives inside an
             // NSPopover launched from a sheet; when that popover window is not
@@ -554,6 +560,13 @@ enum AttachmentThumbnailProvider {
             if isVideo(url), let frame = videoFrame(url: url, maxPixel: maxPixel) {
                 return frame
             }
+            // v2.8.9: many attachments arrive as `.file` even though they are
+            // actually images (e.g. dragged / spilled PNGs). Decode the real
+            // pixels so they render a true thumbnail instead of the generic
+            // Finder "PNG" document icon.
+            if isImage(url), let img = NSImage(contentsOfFile: path) {
+                return resized(img, maxPixel: maxPixel)
+            }
             // Finder icon is always available even for missing files.
             let icon = NSWorkspace.shared.icon(forFile: path)
             icon.size = NSSize(width: maxPixel, height: maxPixel)
@@ -573,10 +586,19 @@ enum AttachmentThumbnailProvider {
             guard let path = att.path, !path.isEmpty else { return nil }
             let url = URL(fileURLWithPath: path)
             if isVideo(url) { return videoFrame(url: url, maxPixel: 640) }
+            // v2.8.9: image files stored as `.file` still get a rich preview.
+            if isImage(url), let img = NSImage(contentsOfFile: path) { return img }
             return nil
         default:
             return nil
         }
+    }
+
+    static func isImage(_ url: URL) -> Bool {
+        if let type = UTType(filenameExtension: url.pathExtension) {
+            return type.conforms(to: .image)
+        }
+        return false
     }
 
     static func isVideo(_ url: URL) -> Bool {
@@ -660,6 +682,11 @@ private struct AttachmentPreviewContent: View {
            AttachmentThumbnailProvider.isVideo(URL(fileURLWithPath: path)) {
             AsyncPreviewImage(attachment: attachment) {
                 fileCard(icon: "play.rectangle.fill", title: "视频")
+            }
+        } else if let path = attachment.path, !path.isEmpty,
+                  AttachmentThumbnailProvider.isImage(URL(fileURLWithPath: path)) {
+            AsyncPreviewImage(attachment: attachment) {
+                fileCard(icon: "photo", title: "图片")
             }
         } else {
             fileCard(icon: "doc.fill", title: "文件")
@@ -766,6 +793,42 @@ private struct AsyncPreviewImage<Fallback: View>: View {
 }
 
 
+// v2.8.9: transparent first-mouse click overlay. Overrides acceptsFirstMouse
+// so a single tap fires even while the enclosing NSPopover window is not yet
+// key (otherwise SwiftUI's Button eats the first click just to make the window
+// key). Fires `action` on mouseUp when released inside bounds, and shows the
+// pointing-hand cursor. Scoped to the control it overlays only.
+private struct FirstMouseClickHandle: NSViewRepresentable {
+    let action: () -> Void
+
+    func makeNSView(context: Context) -> ClickHandleNSView {
+        let view = ClickHandleNSView()
+        view.action = action
+        return view
+    }
+
+    func updateNSView(_ nsView: ClickHandleNSView, context: Context) {
+        nsView.action = action
+    }
+}
+
+final class ClickHandleNSView: NSView {
+    var action: (() -> Void)?
+
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+
+    override func resetCursorRects() {
+        addCursorRect(bounds, cursor: .pointingHand)
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        let point = convert(event.locationInWindow, from: nil)
+        if bounds.contains(point) {
+            action?()
+        }
+    }
+}
+
 // v2.8.8: AppKit-backed drag handle that accepts the first mouse.
 //
 // SwiftUI's DragGesture relies on the backing NSHostingView receiving the
@@ -797,7 +860,6 @@ private struct FirstMouseDragHandle: NSViewRepresentable {
 final class DragHandleNSView: NSView {
     var onChanged: ((CGFloat) -> Void)?
     var onEnded: (() -> Void)?
-    private var startY: CGFloat = 0
 
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 
@@ -805,20 +867,41 @@ final class DragHandleNSView: NSView {
         addCursorRect(bounds, cursor: .openHand)
     }
 
+    // v2.8.9: drive the whole drag from a single modal event-tracking loop
+    // started in mouseDown. Previously we relied on AppKit delivering the
+    // follow-up mouseDragged / mouseUp to this same view, but each reorder
+    // rebuilds the SwiftUI ForEach and recreates this NSView, which severed the
+    // event stream mid-drag and made the handle feel unstable / "sticky". By
+    // pumping events with nextEvent(matching:) inside mouseDown, the drag stays
+    // owned by this call frame until the mouse is released, independent of any
+    // SwiftUI view rebuild triggered by the live reordering.
     override func mouseDown(with event: NSEvent) {
-        startY = event.locationInWindow.y
+        guard let window = self.window else { return }
+        let startY = event.locationInWindow.y
         onChanged?(0)
-    }
 
-    override func mouseDragged(with event: NSEvent) {
-        // SwiftUI DragGesture translation.height is positive downward (top-left
-        // origin). NSEvent window coordinates are bottom-left origin (positive
-        // upward), so downward motion == startY - currentY.
-        let dy = startY - event.locationInWindow.y
-        onChanged?(dy)
-    }
+        // Switch to the closed-hand "grabbing" cursor for the drag duration.
+        NSCursor.closedHand.push()
+        defer { NSCursor.pop() }
 
-    override func mouseUp(with event: NSEvent) {
+        var dragging = true
+        while dragging {
+            guard let e = window.nextEvent(matching: [.leftMouseDragged, .leftMouseUp]) else {
+                continue
+            }
+            switch e.type {
+            case .leftMouseDragged:
+                // SwiftUI DragGesture translation.height is positive downward
+                // (top-left origin). NSEvent window coordinates are bottom-left
+                // origin (positive upward), so downward motion == startY - y.
+                let dy = startY - e.locationInWindow.y
+                onChanged?(dy)
+            case .leftMouseUp:
+                dragging = false
+            default:
+                break
+            }
+        }
         onEnded?()
     }
 }
