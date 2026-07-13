@@ -13,7 +13,8 @@ struct NodeCanvasSheet: View {
 
     private let canvasWidth: CGFloat = 920
     private let canvasHeight: CGFloat = 520
-    private let nodeSize = CGSize(width: 150, height: 96)
+    // v2.7.68: card height grew from 96 to 128 to host the bottom attachment bar.
+    private let nodeSize = CGSize(width: 150, height: 128)
 
     private var nodeFrames: [Int: CGRect] {
         Dictionary(uniqueKeysWithValues: (1...10).map { slot in
@@ -70,16 +71,6 @@ struct NodeCanvasSheet: View {
                         onEndDrag: { endDrag() }
                     )
                     .zIndex(10)
-
-                    // v2.7.67: 附件入口改为显示在每条连线的中点，管理源节点
-                    // (fromSlot) 的附件。zIndex 高于连线与端口 overlay，确保点击必达。
-                    ForEach(store.currentConnectionMap.edges) { edge in
-                        if let point = edgeMidpoint(edge) {
-                            NodeAttachmentButton(slot: edge.fromSlot, store: store)
-                                .position(point)
-                        }
-                    }
-                    .zIndex(20)
                 }
                 .frame(width: canvasWidth, height: canvasHeight)
                 .coordinateSpace(name: "nodeCanvas")
@@ -217,16 +208,6 @@ struct NodeCanvasSheet: View {
         let col = CGFloat((slot - 1) % 5)
         let row = CGFloat((slot - 1) / 5)
         return CGPoint(x: 115 + col * 175, y: 130 + row * 190)
-    }
-
-    // v2.7.67: 连线两端口锚点的中点，用于放置连线上的附件按钮。
-    private func edgeMidpoint(_ edge: SlotConnectionEdge) -> CGPoint? {
-        guard let fromRect = nodeFrames[edge.fromSlot], let toRect = nodeFrames[edge.toSlot] else { return nil }
-        let start = nodeAnchorPoint(for: edge.fromPort, in: fromRect)
-        let end = nodeAnchorPoint(for: edge.toPort, in: toRect)
-        let point = CGPoint(x: (start.x + end.x) / 2, y: (start.y + end.y) / 2)
-        guard point.x.isFinite, point.y.isFinite else { return nil }
-        return point
     }
 
     private func beginDrag(slot: Int, port: SlotPort, point: CGPoint) {
