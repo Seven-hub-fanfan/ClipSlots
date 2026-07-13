@@ -17,6 +17,10 @@ struct SlotCardView: View {
     var onEditHTML: ((String) -> Void)? = nil
     var onDropFiles: (([URL]) -> Void)? = nil
 
+    // v2.7.76: shared store so the main-grid card can host the same attachment
+    // button used on the node canvas, reading/writing the same SlotContent.attachments.
+    var store: SlotStoreObservable? = nil
+
     // v2.7.0: Connection props
     var connectionDotColor: Color? = nil
     var isConnectionMode: Bool = false
@@ -72,14 +76,27 @@ struct SlotCardView: View {
                     .help(content.canPreview ? "点击查看大图" : "")
             }
 
-            // Metadata — fixed single-line
-            Text(content.metadataSummary)
-                .font(.caption2)
-                .foregroundColor(.secondary)
-                .lineLimit(1)
-                .truncationMode(.middle)
-                .frame(height: 16, alignment: .leading)
-                .padding(.horizontal, 2)
+            // Metadata — fixed single-line, with the attachment button pinned on the right.
+            // v2.7.76: moved the attachment button off the header row (it squeezed the slot
+            // title) down here just above the action buttons. It's a plain Button, so it
+            // won't trigger the card's paste/edit/hover/drag.
+            HStack(spacing: 6) {
+                Text(content.metadataSummary)
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+
+                Spacer(minLength: 4)
+
+                if let store = store {
+                    NodeAttachmentButton(slot: slot, store: store)
+                }
+            }
+            // v2.8.2 (P2-5): use minHeight so the row can grow to fit the 22pt
+            // NodeAttachmentButton pill instead of clipping it / shrinking its hit area.
+            .frame(minHeight: 22, alignment: .leading)
+            .padding(.horizontal, 2)
 
             actionRow
         }

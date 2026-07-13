@@ -52,11 +52,10 @@ final class SlotStorage {
 
     @discardableResult
     func set(_ slot: Int, content: SlotContent) -> Bool {
-        queue.sync {
+        let ok: Bool = queue.sync {
             do {
                 try writeSlotContent(content, to: slot)
                 cache[slot] = content
-                try updateManifest()
                 NSLog("[ClipSlots] SlotStorage.set OK slot=\(slot) preview=\(content.preview)")
                 return true
             } catch {
@@ -64,6 +63,14 @@ final class SlotStorage {
                 return false
             }
         }
+        // v2.8.0 (perf H2): manifest.json is a write-only diagnostic file (never
+        // read back for correctness — `readManifest()` has no callers). Regenerating
+        // it walks all 10 slot directories off disk, which previously ran inside the
+        // synchronous save path and blocked the caller (usually the main thread) on
+        // every save. Move it to the serial background queue so `set` returns as soon
+        // as the slot itself is persisted and the in-memory cache is updated.
+        if ok { scheduleManifestUpdate() }
+        return ok
     }
 
     func clear(_ slot: Int) {
@@ -77,10 +84,8 @@ final class SlotStorage {
                 if nsErr.domain == NSCocoaErrorDomain && nsErr.code == 4 { /* file not found */ }
                 else { NSLog("[ClipSlots] SlotStorage.clear FAIL slot=\(slot): \(error)") }
             }
-            do { try updateManifest() } catch {
-                NSLog("[ClipSlots] SlotStorage.clear manifest FAIL: \(error)")
-            }
         }
+        scheduleManifestUpdate()
     }
 
     func clearAll() {
@@ -89,10 +94,22 @@ final class SlotStorage {
             do {
                 try FileManager.default.removeItem(at: baseURL)
                 try FileManager.default.createDirectory(at: baseURL, withIntermediateDirectories: true)
-                try updateManifest()
                 NSLog("[ClipSlots] SlotStorage.clearAll OK")
             } catch {
                 NSLog("[ClipSlots] SlotStorage.clearAll FAIL: \(error)")
+            }
+        }
+        scheduleManifestUpdate()
+    }
+
+    /// v2.8.0 (perf H2): regenerate the diagnostic manifest asynchronously on the
+    /// serial storage queue so it never blocks the save/clear critical path.
+    private func scheduleManifestUpdate() {
+        queue.async { [weak self] in
+            do {
+                try self?.updateManifest()
+            } catch {
+                NSLog("[ClipSlots] SlotStorage manifest update FAIL: \(error)")
             }
         }
     }

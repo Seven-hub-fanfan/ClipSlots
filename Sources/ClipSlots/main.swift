@@ -189,6 +189,17 @@ final class SlotStoreObservable: ObservableObject {
     /// Pending paste keystroke work item. Cancelled when switching special slots.
     private var pendingPasteWorkItem: DispatchWorkItem?
 
+    /// v2.8.1 (P0-1): monotonically increasing token identifying the current
+    /// sequential-paste run. Each scheduled recursion step captures the token it
+    /// was started with; if a newer sequence (or a cancel) bumps this value, the
+    /// stale step becomes a no-op, so two sequences can never interleave keystrokes.
+    private var pasteSequenceGeneration = 0
+    /// Clipboard snapshot captured for the in-flight sequence, so a superseding
+    /// sequence / cancel can restore it before starting fresh.
+    private var inFlightSequencePrevious: SlotContent?
+    /// Temp image files spilled for the in-flight sequence, cleaned on supersede.
+    private var inFlightSequenceTempFiles: [URL] = []
+
     /// The special slot id that current in-memory `slots` / `labels` belong to.
     private var loadedSpecialSlotId: String?
 
@@ -537,6 +548,8 @@ final class SlotStoreObservable: ObservableObject {
         guard !html.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
         var content = SlotContent(text: plainText?.isEmpty == false ? plainText! : html)
         content.htmlSource = html
+        // v2.7.74: preserve existing attachments when updating slot content.
+        content.attachments = slots[slot]?.attachments ?? []
         slots[slot] = content
         persistCurrentSpecialSlotData()
         refreshTrigger = UUID()
@@ -546,6 +559,9 @@ final class SlotStoreObservable: ObservableObject {
     func updateHTMLSlot(_ slot: Int, html: String) {
         var content = slots[slot] ?? SlotContent(text: html)
         content.htmlSource = html
+        // v2.8.0 (P1-1): explicitly carry over existing attachments so editing the
+        // HTML source of a slot never silently drops its attachments.
+        content.attachments = slots[slot]?.attachments ?? content.attachments
         slots[slot] = content
         persistCurrentSpecialSlotData()
         refreshTrigger = UUID()
@@ -559,6 +575,10 @@ final class SlotStoreObservable: ObservableObject {
         var content = SlotContent()
         content.items = [[item]]
         content.timestamp = Date()
+        // v2.7.74 BUGFIX: editing a slot's text used to build a fresh SlotContent()
+        // and overwrite the whole record, silently dropping the slot's attachments.
+        // Carry the existing attachments over so editing content keeps them.
+        content.attachments = slots[slot]?.attachments ?? []
         slots[slot] = content
         persistCurrentSpecialSlotData()
         showFloatingNotice(FloatingNotice(title: "已更新文本", subtitle: "槽位 \(slot)", iconName: "pencil.circle.fill", kind: .success))
@@ -569,7 +589,10 @@ final class SlotStoreObservable: ObservableObject {
         for (offset, url) in urls.enumerated() {
             let target = slot + offset
             guard target <= config.slots else { break }
-            slots[target] = folderImportService.makeSlotContent(for: url)
+            var newContent = folderImportService.makeSlotContent(for: url)
+            // v2.7.74: preserve existing attachments when replacing slot content.
+            newContent.attachments = slots[target]?.attachments ?? []
+            slots[target] = newContent
         }
         persistCurrentSpecialSlotData()
         showFloatingNotice(FloatingNotice(title: "已导入文件", subtitle: urls.count == 1 ? first.lastPathComponent : "\(urls.count) 个文件", iconName: "folder.badge.plus", kind: .success))
@@ -851,6 +874,26 @@ final class SlotStoreObservable: ObservableObject {
         return stored
     }
 
+    // MARK: - v2.7.65 Slot Attachments (node canvas)
+
+    /// Attachments of a slot in the currently active group.
+    func attachments(for slot: Int) -> [SlotContent.SlotAttachment] {
+        specialStorage.get(slot, in: currentSpecialSlotId).attachments
+    }
+
+    /// Persist the attachment list for a slot in the currently active group and
+    /// refresh in-memory state so the node canvas updates immediately.
+    func setAttachments(_ attachments: [SlotContent.SlotAttachment], for slot: Int) {
+        let activeId = currentSpecialSlotId
+        var content = specialStorage.get(slot, in: activeId)
+        content.attachments = attachments
+        _ = specialStorage.set(slot, content: content, in: activeId)
+        if loadedSpecialSlotId == activeId {
+            slots[slot] = content
+        }
+        refreshTrigger = UUID()
+    }
+
     private func isSelfApp(_ app: NSRunningApplication?) -> Bool {
         guard let app = app else { return false }
         return app.bundleIdentifier == Bundle.main.bundleIdentifier
@@ -868,7 +911,23 @@ final class SlotStoreObservable: ObservableObject {
     private func cancelPendingPasteOperations(restoreClipboard: Bool = true) {
         pendingPasteWorkItem?.cancel()
         pendingPasteWorkItem = nil
+        abortInFlightSequence(restoreClipboard: restoreClipboard)
         cancelPendingClipboardRestore(restoreImmediately: restoreClipboard)
+    }
+
+    /// v2.8.1 (P0-1): synchronously supersede any in-flight sequential paste. Bumps
+    /// the generation token (so scheduled recursion steps become no-ops), optionally
+    /// restores that sequence's captured clipboard, and cleans its temp image files.
+    private func abortInFlightSequence(restoreClipboard: Bool) {
+        pasteSequenceGeneration &+= 1
+        if let prev = inFlightSequencePrevious {
+            if restoreClipboard { _ = clipboard.restore(prev) }
+            inFlightSequencePrevious = nil
+        }
+        if !inFlightSequenceTempFiles.isEmpty {
+            cleanupTempFiles(inFlightSequenceTempFiles)
+            inFlightSequenceTempFiles = []
+        }
     }
 
     private func promptAccessibilityPermissionIfNeeded() {
@@ -1136,9 +1195,29 @@ final class SlotStoreObservable: ObservableObject {
                 return
             }
         }
-
-        // Global hotkey paste: always read directly from the current special slot on disk.
+        
+        // v2.8.0 (P0-1/P1-2): Slot attachments auto-chain. If the slot has
+        // attachments, paste main content + all attachments in order through the
+        // shared central executor, which batches multiple images, restores the
+        // original clipboard afterwards, guards against group / app switches, and
+        // cleans up any spilled temp image files.
         let content = specialStorage.get(slot, in: activeId)
+        if !content.attachments.isEmpty {
+            var tempFiles: [URL] = []
+            let payloads = slotContentPayloads(slot: slot, activeId: activeId, tempFiles: &tempFiles)
+            let attachCount = content.attachments.count
+            runSequentialPaste(payloads, activeId: activeId, targetApp: nil, tempFiles: tempFiles) { [weak self] in
+                self?.showFloatingNotice(FloatingNotice(
+                    title: "已粘贴主内容 + \(attachCount) 个附件",
+                    subtitle: "主内容与附件已依次粘贴",
+                    iconName: "paperclip.circle.fill",
+                    kind: .success
+                ))
+            }
+            return
+        }
+
+        // Global hotkey paste: uses content already read above for attachments check.
 
         guard !content.isEmpty else {
             NSLog("[ClipSlots] pasteSlot ignored: specialSlot=\(activeId) slot=\(slot) empty")
@@ -1207,6 +1286,23 @@ final class SlotStoreObservable: ObservableObject {
 
         // Always read from the currently active special slot on disk.
         let content = specialStorage.get(slot, in: activeId)
+
+        // v2.8.0 (P1-2): radial / UI single-slot paste now carries attachments too,
+        // via the same central executor used by the hotkey path.
+        if !content.attachments.isEmpty {
+            var tempFiles: [URL] = []
+            let payloads = slotContentPayloads(slot: slot, activeId: activeId, tempFiles: &tempFiles)
+            let attachCount = content.attachments.count
+            runSequentialPaste(payloads, activeId: activeId, targetApp: targetApp, tempFiles: tempFiles) { [weak self] in
+                self?.showFloatingNotice(FloatingNotice(
+                    title: "已粘贴主内容 + \(attachCount) 个附件",
+                    subtitle: "主内容与附件已依次粘贴",
+                    iconName: "paperclip.circle.fill",
+                    kind: .success
+                ))
+            }
+            return
+        }
 
         guard !content.isEmpty else {
             NSLog("[ClipSlots] radial paste ignored: specialSlot=\(activeId) slot \(slot) empty")
@@ -1484,8 +1580,112 @@ final class SlotStoreObservable: ObservableObject {
         pasteSlotChain(chain)
     }
 
+    // MARK: - v2.7.80 Chain paste with per-slot attachments
+
+    /// True if any slot in the chain carries attachments (read from `activeId`).
+    private func chainHasAttachments(_ chain: [Int], activeId: String) -> Bool {
+        chain.contains { !specialStorage.get($0, in: activeId).attachments.isEmpty }
+    }
+
+    /// v2.8.0: Materialises `content → attachments` payloads for a SINGLE slot,
+    /// read from the given group (`activeId`). Multiple image attachments are
+    /// coalesced into ONE Finder-style multi-file URL payload (即梦AI batch), while
+    /// a single image keeps its inline-bitmap payload (WeChat / rich-text). Any temp
+    /// files spilled to disk for in-memory images are appended to `tempFiles` so the
+    /// caller can clean them up after the paste (P1-4).
+    private func slotContentPayloads(slot: Int, activeId: String, tempFiles: inout [URL]) -> [ChainPastePayload] {
+        var result: [ChainPastePayload] = []
+
+        // 1) Main content of the slot.
+        let contentPayload = mainContentPayload(slot: slot, activeId: activeId)
+        if !contentPayload.isEmpty { result.append(contentPayload) }
+
+        // 2) Attachments belonging to THIS slot only.
+        let attachments = specialStorage.get(slot, in: activeId).attachments
+        guard !attachments.isEmpty else { return result }
+
+        // v2.8.2: ALL file-like attachments (images + .file videos/documents/…) are
+        // now unified. Indices are file-like when they can be resolved to a file URL
+        // (image with path/data, or .file with a path); everything else (.text /
+        // .url / .reference) is a non-file attachment pasted individually in order.
+        let fileLikeIndices = attachments.indices.filter { idx in
+            let att = attachments[idx]
+            switch att.type {
+            case .file:
+                return (att.path?.isEmpty == false)
+            case .image:
+                return (att.path?.isEmpty == false) || (att.data?.isEmpty == false)
+            default:
+                return false
+            }
+        }
+
+        // 2a) Non-file attachments (.text / .url / .reference) in original order.
+        for i in attachments.indices where !fileLikeIndices.contains(i) {
+            let p = payloadForAttachment(attachments[i], activeId: activeId)
+            if !p.isEmpty { result.append(p) }
+        }
+
+        // 2b) File-like attachments:
+        //   • exactly one → keep the original single-item payload (inline bitmap for
+        //     a lone image → WeChat / rich-text compatibility; a single file URL for
+        //     a lone .file), preserving prior proven behaviour.
+        //   • two or more → coalesce into ONE Finder-style multi-file URL payload
+        //     (single Cmd+V), preserving the original attachment order. Only images
+        //     spilled from in-memory data are added to `tempFiles` for cleanup; the
+        //     user's original files are never touched.
+        if fileLikeIndices.count == 1 {
+            let p = payloadForAttachment(attachments[fileLikeIndices[0]], activeId: activeId)
+            if !p.isEmpty { result.append(p) }
+        } else if fileLikeIndices.count >= 2 {
+            let urls = fileLikeIndices.compactMap { fileURLForFileLikeAttachment(attachments[$0], tempFiles: &tempFiles) }
+            if !urls.isEmpty {
+                result.append(ChainPastePayload(
+                    sourceSlot: slot,
+                    text: nil,
+                    fileURLs: urls,
+                    isImage: false,
+                    isEmpty: false,
+                    image: nil
+                ))
+            }
+        }
+        return result
+    }
+
+    /// v2.8.0: Expands a connection chain into an ordered payload list
+    /// (content → attachments → next slot's content → …) read from `activeId`.
+    private func expandedChainPayloads(for chain: [Int], activeId: String, tempFiles: inout [URL]) -> [ChainPastePayload] {
+        var result: [ChainPastePayload] = []
+        for slot in chain {
+            result.append(contentsOf: slotContentPayloads(slot: slot, activeId: activeId, tempFiles: &tempFiles))
+        }
+        return result
+    }
+
     func pasteSlotChain(_ slots: [Int]) {
         let activeId = activeHotkeySpecialSlotId
+
+        // v2.8.0: if any slot in the chain has attachments, expand each slot into
+        // content → attachments and paste sequentially through the central executor
+        // (unified clipboard restore + abort guard + temp cleanup). Attachment-free
+        // chains keep the original fast merged behavior below.
+        if chainHasAttachments(slots, activeId: activeId) {
+            var tempFiles: [URL] = []
+            let payloads = expandedChainPayloads(for: slots, activeId: activeId, tempFiles: &tempFiles)
+            let attachmentTotal = slots.reduce(0) { $0 + specialStorage.get($1, in: activeId).attachments.count }
+            let chainForNotice = slots
+            let count = payloads.count
+            runSequentialPaste(payloads, activeId: activeId, targetApp: nil, tempFiles: tempFiles) { [weak self] in
+                self?.showFloatingNotice(FloatingNotice(
+                    title: "已串联粘贴 \(count) 段内容",
+                    subtitle: "含 \(attachmentTotal) 个附件 · \(compactChainDescription(chainForNotice))",
+                    iconName: "link.circle.fill",
+                    kind: .success
+                ))
+            }
+            return
+        }
 
         let payloads = slots.map { payloadForSlot($0) }
         let nonEmptyPayloads = payloads.filter { !$0.isEmpty }
@@ -1597,7 +1797,7 @@ final class SlotStoreObservable: ObservableObject {
         case .unsupported:
             // v2.7.4: Instead of rejecting mixed content chains, paste each item
             // sequentially in order (text → Cmd+V → image → Cmd+V → ...).
-            pasteSlotChainSequentially(slots)
+            pasteSlotChainSequentially(slots, activeId: activeId)
 
         case .empty:
             showFloatingNotice(FloatingNotice(
@@ -1611,6 +1811,26 @@ final class SlotStoreObservable: ObservableObject {
 
     func pasteSlotChainToApp(_ slots: [Int], targetApp: NSRunningApplication?) {
         let activeId = currentSpecialSlotId
+
+        // v2.8.0: expand slots into content → attachments when any slot has
+        // attachments, so the radial / UI chain paste no longer drops them, routed
+        // through the central executor (clipboard restore + abort + temp cleanup).
+        if chainHasAttachments(slots, activeId: activeId) {
+            var tempFiles: [URL] = []
+            let payloads = expandedChainPayloads(for: slots, activeId: activeId, tempFiles: &tempFiles)
+            let attachmentTotal = slots.reduce(0) { $0 + specialStorage.get($1, in: activeId).attachments.count }
+            let chainForNotice = slots
+            let count = payloads.count
+            runSequentialPaste(payloads, activeId: activeId, targetApp: targetApp, tempFiles: tempFiles) { [weak self] in
+                self?.showFloatingNotice(FloatingNotice(
+                    title: "已串联粘贴 \(count) 段内容",
+                    subtitle: "含 \(attachmentTotal) 个附件 · \(compactChainDescription(chainForNotice))",
+                    iconName: "link.circle.fill",
+                    kind: .success
+                ))
+            }
+            return
+        }
 
         let payloads = slots.map { payloadForSlot($0) }
         let nonEmptyPayloads = payloads.filter { !$0.isEmpty }
@@ -1759,18 +1979,65 @@ final class SlotStoreObservable: ObservableObject {
         guard !content.isEmpty else {
             return ChainPastePayload(sourceSlot: slot, text: nil, fileURLs: [], isImage: false, isEmpty: true, image: nil)
         }
-        let text = content.plainText
-        let fileURLs = content.detectedRegularFileURLs
-        let isImage = content.hasImage || content.isImageFile
-        let image = content.inlineImage
         return ChainPastePayload(
             sourceSlot: slot,
-            text: text,
-            fileURLs: fileURLs,
-            isImage: isImage,
+            text: content.plainText,
+            fileURLs: content.detectedRegularFileURLs,
+            isImage: content.hasImage || content.isImageFile,
             isEmpty: false,
-            image: image
+            image: content.inlineImage
         )
+    }
+
+    /// v2.8.0 (P0-2): main-content payload read from a *specific* group on disk so
+    /// every paste path resolves against the same authoritative data source rather
+    /// than mixing the in-memory `slots` dictionary with the active hotkey group.
+    private func mainContentPayload(slot: Int, activeId: String) -> ChainPastePayload {
+        let content = specialStorage.get(slot, in: activeId)
+        guard !content.isEmpty else {
+            return ChainPastePayload(sourceSlot: slot, text: nil, fileURLs: [], isImage: false, isEmpty: true, image: nil)
+        }
+        return ChainPastePayload(
+            sourceSlot: slot,
+            text: content.plainText,
+            fileURLs: content.detectedRegularFileURLs,
+            isImage: content.hasImage || content.isImageFile,
+            isEmpty: false,
+            image: content.inlineImage
+        )
+    }
+
+    /// v2.8.0 (P1-3): builds a paste payload for an *explicit* attachment value.
+    /// This replaces the previous shared `pendingAttachmentContext` mutable state,
+    /// so concurrent / nested materialisation can never contaminate each other.
+    private func payloadForAttachment(_ att: SlotContent.SlotAttachment, activeId: String) -> ChainPastePayload {
+        let empty = ChainPastePayload(sourceSlot: 0, text: nil, fileURLs: [], isImage: false, isEmpty: true, image: nil)
+        switch att.type {
+        case .text:
+            let text = att.data.flatMap { String(data: $0, encoding: .utf8) } ?? att.name
+            return ChainPastePayload(sourceSlot: 0, text: text, fileURLs: [], isImage: false, isEmpty: text.isEmpty, image: nil)
+        case .url:
+            let text = att.url ?? att.name
+            return ChainPastePayload(sourceSlot: 0, text: text, fileURLs: [], isImage: false, isEmpty: text.isEmpty, image: nil)
+        case .file:
+            guard let path = att.path, !path.isEmpty else { return empty }
+            return ChainPastePayload(sourceSlot: 0, text: nil, fileURLs: [URL(fileURLWithPath: path)], isImage: false, isEmpty: false, image: nil)
+        case .image:
+            if let data = att.data, let image = NSImage(data: data) {
+                return ChainPastePayload(sourceSlot: 0, text: nil, fileURLs: [], isImage: true, isEmpty: false, image: image)
+            }
+            if let path = att.path, !path.isEmpty {
+                return ChainPastePayload(sourceSlot: 0, text: nil, fileURLs: [URL(fileURLWithPath: path)], isImage: false, isEmpty: false, image: nil)
+            }
+            return empty
+        case .reference:
+            // A reference stores the target slot number as a string in `path`.
+            if let path = att.path, let refSlot = Int(path) {
+                return mainContentPayload(slot: refSlot, activeId: activeId)
+            }
+            let text = att.url ?? att.name
+            return ChainPastePayload(sourceSlot: 0, text: text, fileURLs: [], isImage: false, isEmpty: text.isEmpty, image: nil)
+        }
     }
 
     private func chainPasteKind(for payloads: [ChainPastePayload]) -> ChainPasteKind {
@@ -1855,31 +2122,22 @@ final class SlotStoreObservable: ObservableObject {
         }
 
         // Mixed text + image/file: correctness first, but avoid node-connection HUD wording.
-        pasteSlotChainSequentially(nonEmptySlots, noticeTitle: "已全部粘贴 \(contents.count) 段内容", noticeSubtitle: "当前槽位组")
+        pasteSlotChainSequentially(nonEmptySlots, noticeTitle: "已全部粘贴 \(contents.count) 段内容", noticeSubtitle: "当前槽位组", targetApp: target)
     }
 
     // MARK: - v2.7.4 Mixed Chain Sequential Paste
 
-    func pasteSlotChainSequentially(_ slots: [Int], noticeTitle: String? = nil, noticeSubtitle: String? = nil) {
+    func pasteSlotChainSequentially(_ slots: [Int], noticeTitle: String? = nil, noticeSubtitle: String? = nil, activeId: String? = nil, targetApp: NSRunningApplication? = nil) {
+        let group = activeId ?? currentSpecialSlotId
         let payloads = slots.compactMap { slot -> ChainPastePayload? in
             let payload = payloadForSlot(slot)
             return payload.isEmpty ? nil : payload
         }
-
-        guard !payloads.isEmpty else {
-            showFloatingNotice(FloatingNotice(
-                title: noticeTitle ?? "串联粘贴失败",
-                subtitle: noticeSubtitle ?? "链路中没有可粘贴内容",
-                iconName: "exclamationmark.triangle.fill",
-                kind: .warning
-            ))
-            return
-        }
-
-        pasteNextPayloadSequentially(payloads, index: 0) { [weak self] in
+        let count = payloads.count
+        runSequentialPaste(payloads, activeId: group, targetApp: targetApp, tempFiles: []) { [weak self] in
             guard let self else { return }
             self.showFloatingNotice(FloatingNotice(
-                title: noticeTitle ?? "已串联粘贴 \(payloads.count) 段内容",
+                title: noticeTitle ?? "已串联粘贴 \(count) 段内容",
                 subtitle: noticeSubtitle ?? compactChainDescription(slots),
                 iconName: "link.circle.fill",
                 kind: .success
@@ -1887,17 +2145,282 @@ final class SlotStoreObservable: ObservableObject {
         }
     }
 
-    private func pasteNextPayloadSequentially(_ payloads: [ChainPastePayload], index: Int, completion: @escaping () -> Void) {
+    // MARK: - v2.8.0 Central sequential paste executor
+
+    /// v2.8.0: The single entry point every attachment / chain / multi-image paste
+    /// funnels through. It (1) captures the current clipboard ONCE, (2) optionally
+    /// activates the target app, (3) pastes each materialised payload in order while
+    /// guarding against special-slot-group switches AND frontmost-app changes, then
+    /// (4) restores the original clipboard ~0.8s after the last paste, and finally
+    /// (5) deletes any temp image files that were spilled to disk.
+    ///
+    /// `targetApp == nil` = paste into whatever app is currently frontmost (the
+    /// global-hotkey path); a non-nil target is activated first (radial / UI path).
+    private func runSequentialPaste(
+        _ payloads: [ChainPastePayload],
+        activeId: String,
+        targetApp: NSRunningApplication?,
+        tempFiles: [URL],
+        onSuccess: @escaping () -> Void
+    ) {
+        let nonEmpty = payloads.filter { !$0.isEmpty }
+        guard !nonEmpty.isEmpty else {
+            cleanupTempFiles(tempFiles)
+            showFloatingNotice(FloatingNotice(
+                title: "粘贴失败",
+                subtitle: "没有可粘贴内容",
+                iconName: "exclamationmark.triangle.fill",
+                kind: .warning
+            ))
+            return
+        }
+        guard AXIsProcessTrusted() else {
+            cleanupTempFiles(tempFiles)
+            promptAccessibilityPermissionIfNeeded()
+            return
+        }
+
+        // Cancel any in-flight paste/restore (restores its clipboard + cleans its
+        // temp files + bumps the generation token) and snapshot the clipboard.
+        cancelPendingPasteOperations(restoreClipboard: true)
+        let previous = clipboard.capture()
+        // v2.8.1 (P0-1): claim a fresh generation token for this run and publish the
+        // in-flight bookkeeping so a later sequence / cancel can supersede us cleanly.
+        pasteSequenceGeneration &+= 1
+        let gen = pasteSequenceGeneration
+        inFlightSequencePrevious = previous
+        inFlightSequenceTempFiles = tempFiles
+
+        // Resolve the concrete target: nil means "current frontmost" (hotkey path).
+        let cleanTarget: NSRunningApplication?
+        if targetApp == nil {
+            cleanTarget = nil
+        } else if isSelfApp(targetApp) {
+            cleanTarget = lastNonClipSlotsApp
+        } else {
+            cleanTarget = targetApp ?? lastNonClipSlotsApp
+        }
+
+        let onAbort: () -> Void = { [weak self] in
+            guard let self else { return }
+            _ = self.clipboard.restore(previous)
+            self.cleanupTempFiles(tempFiles)
+            if self.pasteSequenceGeneration == gen {
+                self.inFlightSequencePrevious = nil
+                self.inFlightSequenceTempFiles = []
+            }
+        }
+
+        let onFinish: () -> Void = { [weak self] in
+            guard let self else { return }
+            onSuccess()
+            let restoreWorkItem = DispatchWorkItem { [weak self] in
+                guard let self else { return }
+                _ = self.clipboard.restore(previous)
+                self.pendingClipboardRestore = nil
+                self.pendingClipboardRestoreContent = nil
+                if self.pasteSequenceGeneration == gen { self.inFlightSequencePrevious = nil }
+            }
+            self.pendingClipboardRestoreContent = previous
+            self.pendingClipboardRestore = restoreWorkItem
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.8, execute: restoreWorkItem)
+
+            // v2.8.1 (P1-4): defer temp-file cleanup well past the clipboard restore.
+            // Targets that read spilled image files asynchronously (即梦 / Finder-style
+            // drops) still need the files after the paste lands. changeCount polling is
+            // unreliable here (our own restore bumps changeCount), so a conservative
+            // fixed delay is the safest option.
+            //
+            // v2.8.2 (P1-A): the sequence has SUCCEEDED, so detach its temp files from
+            // the in-flight bookkeeping immediately. Otherwise a superseding sequence
+            // that starts within this 3s protection window would call
+            // abortInFlightSequence and delete these files out from under the target
+            // app while it is still reading them asynchronously. Cleanup of these
+            // now-orphaned files is owned solely by the delayed work item below, which
+            // captures the local `tempFiles` array and is never touched by abort.
+            if self.pasteSequenceGeneration == gen {
+                self.inFlightSequenceTempFiles = []
+            }
+            if !tempFiles.isEmpty {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) { [weak self] in
+                    guard let self else { return }
+                    self.cleanupTempFiles(tempFiles)
+                }
+            }
+        }
+
+        let run: () -> Void = { [weak self] in
+            guard let self else { return }
+            // Expected target = the app we activated, else whatever is frontmost now.
+            let expectedPid = cleanTarget?.processIdentifier
+                ?? NSWorkspace.shared.frontmostApplication?.processIdentifier
+            self.pasteNextPayloadSequentially(
+                nonEmpty,
+                index: 0,
+                activeId: activeId,
+                generation: gen,
+                expectedPid: expectedPid,
+                onAbort: onAbort,
+                completion: onFinish
+            )
+        }
+
+        if let app = cleanTarget {
+            app.activate(options: [.activateIgnoringOtherApps])
+            waitUntilFrontmost(app, timeout: 1.2) { [weak self] ok in
+                guard let self else { return }
+                // v2.8.1 (P1-3): if activation failed, abort safely instead of
+                // firing keystrokes at the wrong app. Restore clipboard + clean up
+                // and surface a warning so the user knows nothing was pasted.
+                guard ok else {
+                    onAbort()
+                    self.showFloatingNotice(FloatingNotice(
+                        title: "粘贴失败",
+                        subtitle: "目标应用未能激活，请重试",
+                        iconName: "exclamationmark.triangle.fill",
+                        kind: .warning
+                    ))
+                    return
+                }
+                run()
+            }
+        } else {
+            run()
+        }
+    }
+
+    /// v2.8.0 (P1-4): removes temp image files spilled to disk for a paste.
+    private func cleanupTempFiles(_ urls: [URL]) {
+        guard !urls.isEmpty else { return }
+        for url in urls { try? FileManager.default.removeItem(at: url) }
+        NSLog("[ClipSlots] cleaned up \(urls.count) temp image file(s)")
+    }
+
+    /// Resolves a usable on-disk file URL for an image attachment. If the
+    /// attachment references an existing file, that path is used; otherwise its
+    /// in-memory bitmap `data` is spilled to a temp file with the correct
+    /// extension. v2.8.0 (P1-4): any temp file created is appended to `tempFiles`
+    /// so the caller can delete it once the paste has landed and the clipboard has
+    /// been restored (files referencing an existing on-disk path are NOT tracked).
+    /// v2.8.2: Resolves ANY file-like attachment (image OR .file) into a file URL
+    /// suitable for a Finder-style multi-file paste.
+    ///   • `.file` with an existing path → the user's ORIGINAL file (never appended
+    ///     to `tempFiles`, so it is never deleted after paste).
+    ///   • `.image` with an existing path → the original file (not a temp).
+    ///   • `.image` with in-memory data only → spilled to a temp file that IS added
+    ///     to `tempFiles` for post-paste cleanup.
+    /// Returns nil for non-file-like attachments or unresolvable ones.
+    private func fileURLForFileLikeAttachment(_ att: SlotContent.SlotAttachment, tempFiles: inout [URL]) -> URL? {
+        switch att.type {
+        case .file:
+            guard let path = att.path, !path.isEmpty else { return nil }
+            return URL(fileURLWithPath: path)
+        case .image:
+            if let path = att.path, !path.isEmpty, FileManager.default.fileExists(atPath: path) {
+                return URL(fileURLWithPath: path)
+            }
+            guard let data = att.data, !data.isEmpty else { return nil }
+            return spillImageDataToTempFile(att, data: data, tempFiles: &tempFiles)
+        default:
+            return nil
+        }
+    }
+
+    /// Writes in-memory image data to a temp file and records it in `tempFiles`.
+    private func spillImageDataToTempFile(_ att: SlotContent.SlotAttachment, data: Data, tempFiles: inout [URL]) -> URL? {
+
+        let ext = imageFileExtension(forName: att.name, data: data)
+        let baseName = (att.name as NSString).deletingPathExtension
+        let safeBase = baseName.isEmpty ? "clipslots-image" : baseName
+            .replacingOccurrences(of: "/", with: "_")
+            .replacingOccurrences(of: ":", with: "_")
+        let fileName = "clipslots-\(UUID().uuidString.prefix(8))-\(safeBase).\(ext)"
+        let url = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent(fileName)
+        do {
+            try data.write(to: url, options: .atomic)
+            tempFiles.append(url)
+            return url
+        } catch {
+            NSLog("[ClipSlots] failed to spill image attachment to temp file: \(error)")
+            return nil
+        }
+    }
+
+    /// Determines an image file extension from the attachment name, falling back
+    /// to sniffing the data's magic bytes, then to png.
+    private func imageFileExtension(forName name: String, data: Data) -> String {
+        let nameExt = (name as NSString).pathExtension.lowercased()
+        let allowed: Set<String> = ["png", "jpg", "jpeg", "gif", "tiff", "tif", "bmp", "heic", "webp"]
+        if allowed.contains(nameExt) { return nameExt == "jpeg" ? "jpg" : nameExt }
+
+        let bytes = [UInt8](data.prefix(12))
+        if bytes.count >= 8, bytes[0] == 0x89, bytes[1] == 0x50, bytes[2] == 0x4E, bytes[3] == 0x47 { return "png" }
+        if bytes.count >= 3, bytes[0] == 0xFF, bytes[1] == 0xD8, bytes[2] == 0xFF { return "jpg" }
+        if bytes.count >= 6, bytes[0] == 0x47, bytes[1] == 0x49, bytes[2] == 0x46 { return "gif" }
+        if bytes.count >= 2, bytes[0] == 0x42, bytes[1] == 0x4D { return "bmp" }
+        if bytes.count >= 4, (bytes[0] == 0x49 && bytes[1] == 0x49) || (bytes[0] == 0x4D && bytes[1] == 0x4D) { return "tiff" }
+        return "png"
+    }
+
+    /// v2.8.0: Pastes the payload at `index`, then recurses after a per-payload
+    /// delay. Before each step it re-checks the abort conditions (special-slot group
+    /// switch or frontmost-app change); on abort it calls `onAbort` (which restores
+    /// the clipboard + cleans temp files) and stops. `expectedPid == nil` disables
+    /// the app-change guard (kept for completeness; callers always pass a pid).
+    private func pasteNextPayloadSequentially(
+        _ payloads: [ChainPastePayload],
+        index: Int,
+        activeId: String,
+        generation: Int,
+        expectedPid: pid_t?,
+        onAbort: @escaping () -> Void,
+        completion: @escaping () -> Void
+    ) {
+        // v2.8.1 (P0-1): bail out if a newer sequence (or a cancel) has superseded
+        // us. The superseding path already restored the clipboard / cleaned temp
+        // files, so this stale step must do nothing (no keystroke, no restore).
+        guard generation == pasteSequenceGeneration else {
+            NSLog("[ClipSlots] sequential paste superseded (gen \(generation) != \(pasteSequenceGeneration)) at step \(index)")
+            return
+        }
         guard index < payloads.count else {
             completion()
+            return
+        }
+
+        // Abort if the user switched special-slot group before this step lands.
+        if currentSpecialSlotId != activeId {
+            NSLog("[ClipSlots] sequential paste abort: group changed \(activeId) -> \(currentSpecialSlotId) at step \(index)")
+            onAbort()
+            return
+        }
+        // Abort if the frontmost target app changed mid-sequence.
+        if let expectedPid,
+           NSWorkspace.shared.frontmostApplication?.processIdentifier != expectedPid {
+            NSLog("[ClipSlots] sequential paste abort: frontmost app changed at step \(index)")
+            onAbort()
             return
         }
 
         writePayloadToPasteboard(payloads[index])
         sendPasteKeystroke()
 
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.18) { [weak self] in
-            self?.pasteNextPayloadSequentially(payloads, index: index + 1, completion: completion)
+        // v2.7.80: image / file payloads need more time to be ingested (and to keep
+        // the clipboard stable) before the next item overwrites it; plain text is fast.
+        let payload = payloads[index]
+        let isHeavy = payload.isImage || payload.image != nil || !payload.fileURLs.isEmpty
+        let delay = isHeavy ? 0.55 : 0.18
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+            self?.pasteNextPayloadSequentially(
+                payloads,
+                index: index + 1,
+                activeId: activeId,
+                generation: generation,
+                expectedPid: expectedPid,
+                onAbort: onAbort,
+                completion: completion
+            )
         }
     }
 
@@ -1963,7 +2486,8 @@ final class SlotStoreObservable: ObservableObject {
         }
 
         let response = panel.runModal()
-        guard response == .OK, let url = panel.url else { return }
+        guard response == .OK, let rawURL = panel.url else { return }
+        let url = SlotConnectionTemplateService.sanitizedExportURL(rawURL)
 
         do {
             let appVersion = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "2.7.0"
@@ -2009,16 +2533,61 @@ final class SlotStoreObservable: ObservableObject {
 
         do {
             let data = try Data(contentsOf: url)
+            
+            // 先尝试解码为 Bundle 格式（多组/多页模板）
+            // v2.7.65: route through the service (ISO8601 + legacy fallback) and
+            // require non-empty entries so a single-group template never gets
+            // mis-detected as an (empty) bundle.
+            if let bundle = try? SlotConnectionTemplateService.decodeBundle(data), !bundle.entries.isEmpty {
+                // v2.7.62: 导入 Bundle 模板时创建多个新槽位组
+                var importedCount = 0
+                var firstGroupId: String?
+                for entry in bundle.entries {
+                    guard !entry.map.edges.isEmpty else { continue }
+                    try validateConnectionMap(entry.map)
+                    let newGroup = try specialStorage.createSpecialSlot(name: entry.groupName, pageId: currentPageId)
+                    SlotConnectionStorage.shared.save(entry.map, pageId: currentPageId, groupId: newGroup.id)
+                    if firstGroupId == nil { firstGroupId = newGroup.id }
+                    importedCount += 1
+                }
+
+                guard importedCount > 0, let firstGroupId else {
+                    showFloatingNotice(FloatingNotice(
+                        title: "导入失败",
+                        subtitle: "模板中没有有效的连接数据",
+                        iconName: "exclamationmark.triangle.fill",
+                        kind: .warning
+                    ))
+                    return
+                }
+
+                // v2.7.65 BUGFIX: the previous implementation created the groups on
+                // disk but never refreshed the in-memory @Published state, so the
+                // imported groups stayed invisible until the app restarted (the
+                // "导入用不了" symptom). Switching to the first imported group reloads
+                // the index, published arrays and the connection map for the canvas.
+                selectAndActivateSpecialSlot(id: firstGroupId)
+
+                showFloatingNotice(FloatingNotice(
+                    title: "已导入连接模板",
+                    subtitle: "包含 \(importedCount) 个槽位组，已切换至首个组",
+                    iconName: "square.and.arrow.down.fill",
+                    kind: .success
+                ))
+                return
+            }
+            
+            // 否则解码为单组模板
             let template = try SlotConnectionTemplateService.decode(data)
             let importedMap = SlotConnectionMap(edges: template.edges)
             try validateConnectionMap(importedMap)
 
-            if !currentConnectionMap.edges.isEmpty {
-                guard confirmReplaceCurrentConnections() else { return }
-            }
-
-            currentConnectionMap = importedMap
-            saveConnectionMapForCurrentGroup()
+            // v2.7.61: Import always creates a new slot group, never overwrites current
+            let newGroup = try specialStorage.createSpecialSlot(name: "导入 \(template.name.prefix(12))", pageId: currentPageId)
+            SlotConnectionStorage.shared.save(importedMap, pageId: currentPageId, groupId: newGroup.id)
+            
+            // Switch to the new group
+            selectAndActivateSpecialSlot(id: newGroup.id)
 
             let slotCount = Set(importedMap.edges.flatMap { [$0.fromSlot, $0.toSlot] }).count
             showFloatingNotice(FloatingNotice(
@@ -2035,9 +2604,12 @@ final class SlotStoreObservable: ObservableObject {
                 kind: .error
             ))
         } catch {
+            // v2.7.66: surface the underlying decode error instead of silently
+            // collapsing every failure to a generic "模板格式无效".
+            NSLog("[ClipSlots] importConnectionTemplate decode failed: \(error)")
             showFloatingNotice(FloatingNotice(
                 title: "导入失败",
-                subtitle: "模板格式无效",
+                subtitle: "模板格式无效：\(error.localizedDescription)",
                 iconName: "xmark.circle.fill",
                 kind: .error
             ))
@@ -2158,11 +2730,12 @@ final class SlotStoreObservable: ObservableObject {
             } else {
                 panel.allowedFileTypes = ["clipslotslink", "json"]
             }
-            guard panel.runModal() == .OK, let url = panel.url else { return }
+            guard panel.runModal() == .OK, let rawURL = panel.url else { return }
+            let url = SlotConnectionTemplateService.sanitizedExportURL(rawURL)
             do {
                 let appVersion = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "2.7.7"
                 let bundle = SlotConnectionTemplateService.makeBundleTemplate(from: entries, name: "ClipSlots 页面连接模板", appVersion: appVersion)
-                let data = try JSONEncoder().encode(bundle)
+                let data = try SlotConnectionTemplateService.encodeBundle(bundle)
                 try data.write(to: url, options: [.atomic])
                 showFloatingNotice(FloatingNotice(
                     title: "已导出页面连接模板",
@@ -2178,10 +2751,18 @@ final class SlotStoreObservable: ObservableObject {
             var entries: [SlotConnectionTemplateBundleEntry] = []
             for (key, map) in allMaps where !map.edges.isEmpty {
                 let parts = key.components(separatedBy: "::")
+                let pageId = parts.first ?? ""
+                let groupId = parts.count > 1 ? parts[1] : (parts.last ?? "")
+                // v2.7.65 BUGFIX: previously used `parts.last` (the groupId / UUID)
+                // as the display name, so imported groups were named with raw UUIDs.
+                // Resolve the real group name from specialSlots, falling back to a
+                // friendly label instead of the opaque id.
+                let resolvedName = specialSlots.first { $0.id == groupId }?.name
+                    ?? "导入组 \(entries.count + 1)"
                 entries.append(SlotConnectionTemplateBundleEntry(
-                    pageId: parts.first ?? "",
-                    groupId: parts.last ?? "",
-                    groupName: parts.last ?? "",
+                    pageId: pageId,
+                    groupId: groupId,
+                    groupName: resolvedName,
                     map: map
                 ))
             }
@@ -2198,11 +2779,12 @@ final class SlotStoreObservable: ObservableObject {
             } else {
                 panel.allowedFileTypes = ["clipslotslink", "json"]
             }
-            guard panel.runModal() == .OK, let url = panel.url else { return }
+            guard panel.runModal() == .OK, let rawURL = panel.url else { return }
+            let url = SlotConnectionTemplateService.sanitizedExportURL(rawURL)
             do {
                 let appVersion = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "2.7.7"
                 let bundle = SlotConnectionTemplateService.makeBundleTemplate(from: entries, name: "ClipSlots 全部连接模板", appVersion: appVersion)
-                let data = try JSONEncoder().encode(bundle)
+                let data = try SlotConnectionTemplateService.encodeBundle(bundle)
                 try data.write(to: url, options: [.atomic])
                 showFloatingNotice(FloatingNotice(
                     title: "已导出全部连接模板",
@@ -2648,6 +3230,9 @@ final class SlotStoreObservable: ObservableObject {
         var savedContent = content
         savedContent.contentId = UUID().uuidString
         savedContent.updatedAt = Date().timeIntervalSince1970
+        // v2.7.74: overwriting a slot's main content should keep its attachments,
+        // which belong to the slot rather than the captured clipboard payload.
+        savedContent.attachments = existingBeforeSave.attachments
 
         ThumbnailProvider.shared.invalidateSlot(specialSlotId: activeId, slot: targetSlot)
 

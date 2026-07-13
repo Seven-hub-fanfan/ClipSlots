@@ -10,30 +10,45 @@ struct SlotNodeView: View {
     let content: SlotContent?
     let colorId: Int?
     let isHovered: Bool
+    // v2.7.65: store is optional so existing pure-display call sites keep working.
+    // v2.7.68: when store is provided, a bottom attachment bar (📎 + count) is
+    // shown inside the card; the canvas-level bottom port sits just below it.
+    var store: SlotStoreObservable? = nil
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack(spacing: 8) {
-                Text("\(slot)")
-                    .font(.system(size: 13, weight: .bold))
-                    .foregroundColor(.white)
-                    .frame(width: 24, height: 24)
-                    .background(Circle().fill(SlotConnectionColor.color(for: colorId) == .clear ? .accentColor : SlotConnectionColor.color(for: colorId)))
-                Text(slotDisplayName)
-                    .font(.system(size: 13, weight: .semibold))
-                    .lineLimit(1)
-                Spacer()
-                if let colorId {
-                    Circle().fill(SlotConnectionColor.color(for: colorId)).frame(width: 7, height: 7)
+        VStack(alignment: .leading, spacing: 0) {
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(spacing: 8) {
+                    Text("\(slot)")
+                        .font(.system(size: 13, weight: .bold))
+                        .foregroundColor(.white)
+                        .frame(width: 24, height: 24)
+                        .background(Circle().fill(SlotConnectionColor.color(for: colorId) == .clear ? .accentColor : SlotConnectionColor.color(for: colorId)))
+                    Text(slotDisplayName)
+                        .font(.system(size: 13, weight: .semibold))
+                        .lineLimit(1)
+                    Spacer()
+                    if let colorId {
+                        Circle().fill(SlotConnectionColor.color(for: colorId)).frame(width: 7, height: 7)
+                    }
                 }
+                Text(nodePreview)
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                    .lineLimit(2)
+                Spacer(minLength: 0)
             }
-            Text(nodePreview)
-                .font(.caption)
-                .foregroundColor(.secondary)
-                .lineLimit(2)
-            Spacer()
+            .padding(12)
+
+            // v2.7.69: reserve the bottom bar space here (divider + fixed height)
+            // for layout, but the INTERACTIVE attachment button is rendered by a
+            // dedicated canvas-level overlay (NodeAttachmentBarOverlay) at the
+            // highest zIndex so its taps are never swallowed by NodePortOverlay.
+            if store != nil {
+                Divider()
+                Color.clear.frame(height: SlotNodeLayout.attachmentBarHeight)
+            }
         }
-        .padding(12)
         .background(RoundedRectangle(cornerRadius: 14).fill(Color(NSColor.controlBackgroundColor)))
         .overlay(RoundedRectangle(cornerRadius: 14).stroke(SlotConnectionColor.color(for: colorId).opacity(colorId == nil ? 0.18 : 0.8), lineWidth: colorId == nil ? 1 : 2))
         .shadow(color: .black.opacity(0.08), radius: 8, x: 0, y: 3)
@@ -50,5 +65,141 @@ struct SlotNodeView: View {
         if content.hasImage || content.isImageFile { return "[图片]" }
         if content.isFileContent { return "[文件] \(content.fileDisplayName ?? "")" }
         return content.preview
+    }
+}
+
+// MARK: - Attachment Button (canvas-level overlay)
+
+// Shared layout constants so the card reserves exactly the space the overlay
+// button occupies.
+enum SlotNodeLayout {
+    static let attachmentBarHeight: CGFloat = 30
+}
+
+// v2.7.69: A labelled 📎「附件」pill. Rendered by NodeAttachmentBarOverlay at the
+// canvas level ABOVE NodePortOverlay so its taps are never swallowed.
+struct NodeAttachmentButton: View {
+    let slot: Int
+    @ObservedObject var store: SlotStoreObservable
+    @State private var showingAttachments = false
+    @State private var showingClearConfirm = false
+    // v2.7.75: local mirror of the "不再提醒" toggle inside the confirm popover.
+    @State private var suppressConfirmToggle = false
+
+    // v2.7.75: persisted preference — when true, the red ✕ clears attachments
+    // immediately without showing the confirm popover. Shared across all nodes.
+    private static let suppressClearConfirmKey = "suppressAttachmentClearConfirm"
+    private var suppressClearConfirm: Bool {
+        UserDefaults.standard.bool(forKey: Self.suppressClearConfirmKey)
+    }
+
+    private var attachmentCount: Int { store.attachments(for: slot).count }
+
+    private var label: String {
+        attachmentCount > 0 ? "附件 \(attachmentCount)" : "附件"
+    }
+
+    var body: some View {
+        // v2.7.74: pill (open manager) + red ✕ clear entry as SIBLING buttons in the
+        // same top-most (zIndex 30) overlay layer, so both taps land reliably.
+        ZStack(alignment: .topTrailing) {
+            Button {
+                NSLog("[ClipSlots] attachment button tapped slot=\(slot) count=\(attachmentCount)")
+                showingAttachments = true
+            } label: {
+                pill
+            }
+            .buttonStyle(.plain)
+            .help(attachmentCount > 0 ? "附件：\(attachmentCount) 个，点击管理" : "添加附件")
+            .popover(isPresented: $showingAttachments, arrowEdge: .top) {
+                AttachmentManagerPopover(slot: slot, store: store)
+            }
+
+            if attachmentCount > 0 {
+                Button {
+                    // v2.7.75: honor the persisted "不再提醒" preference.
+                    if suppressClearConfirm {
+                        store.setAttachments([], for: slot)
+                    } else {
+                        suppressConfirmToggle = false
+                        showingClearConfirm = true
+                    }
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.system(size: 13, weight: .bold))
+                        .symbolRenderingMode(.palette)
+                        .foregroundStyle(Color.white, Color.red)
+                        .background(Circle().fill(Color.white).frame(width: 10, height: 10))
+                        .contentShape(Circle())
+                }
+                .buttonStyle(.plain)
+                .help("清空该槽位全部附件")
+                .offset(x: 5, y: -6)
+                .popover(isPresented: $showingClearConfirm, arrowEdge: .top) {
+                    clearConfirmPopover
+                }
+            }
+        }
+    }
+
+    // v2.7.75: custom confirm popover carrying a "不再提醒" toggle.
+    private var clearConfirmPopover: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 8) {
+                Image(systemName: "trash.circle.fill")
+                    .font(.system(size: 18))
+                    .foregroundColor(.red)
+                Text("清空该槽位的全部附件？")
+                    .font(.system(size: 13, weight: .semibold))
+            }
+            Text("将删除该槽位当前的 \(attachmentCount) 个附件，此操作无法撤销。")
+                .font(.caption)
+                .foregroundColor(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            Toggle("不再提醒", isOn: $suppressConfirmToggle)
+                .toggleStyle(.checkbox)
+                .font(.caption)
+
+            HStack(spacing: 8) {
+                Spacer()
+                Button("取消") { showingClearConfirm = false }
+                    .keyboardShortcut(.cancelAction)
+                Button(role: .destructive) {
+                    if suppressConfirmToggle {
+                        UserDefaults.standard.set(true, forKey: Self.suppressClearConfirmKey)
+                    }
+                    store.setAttachments([], for: slot)
+                    showingClearConfirm = false
+                } label: {
+                    Text("清空 \(attachmentCount) 个附件")
+                }
+                .keyboardShortcut(.defaultAction)
+            }
+        }
+        .padding(16)
+        .frame(width: 260)
+    }
+
+    private var pill: some View {
+        HStack(spacing: 4) {
+            Image(systemName: attachmentCount > 0 ? "paperclip.circle.fill" : "paperclip")
+                .font(.system(size: 12, weight: .semibold))
+            Text(label)
+                .font(.system(size: 11, weight: .semibold))
+                .lineLimit(1)
+        }
+        .foregroundColor(attachmentCount > 0 ? .white : .secondary)
+        .padding(.horizontal, 8)
+        .frame(height: 22)
+        .background(
+            Capsule().fill(
+                attachmentCount > 0
+                    ? AnyShapeStyle(AppTheme.brandGradient(.light))
+                    : AnyShapeStyle(Color(NSColor.controlBackgroundColor))
+            )
+        )
+        .overlay(Capsule().stroke(Color.secondary.opacity(attachmentCount > 0 ? 0 : 0.35), lineWidth: 1))
+        .contentShape(Capsule())
     }
 }

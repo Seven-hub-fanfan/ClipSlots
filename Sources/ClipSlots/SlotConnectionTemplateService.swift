@@ -16,10 +16,41 @@ enum SlotConnectionTemplateService {
         return try encoder.encode(template)
     }
 
+    // v2.7.66: Normalize an export URL so the file extension is never
+    // duplicated (e.g. "foo.clipslotslink.clipslotslink"). NSSavePanel appends
+    // the allowed content type extension, so a default name that already ends
+    // with `.clipslotslink` would otherwise produce a double extension.
+    static func sanitizedExportURL(_ url: URL) -> URL {
+        var last = url.lastPathComponent
+        let suffix = ".\(fileExtension)"
+        let dupSuffix = suffix + suffix
+        while last.hasSuffix(dupSuffix) {
+            last = String(last.dropLast(suffix.count))
+        }
+        // Ensure exactly one extension.
+        if !last.hasSuffix(suffix) {
+            last += suffix
+        }
+        return url.deletingLastPathComponent().appendingPathComponent(last)
+    }
+
+    // v2.7.66: Decode robustly by trying multiple date strategies. The export
+    // path uses ISO8601, but older files (and some hand-edited ones) may use the
+    // default (deferredToDate / numeric reference-date) strategy. Trying both
+    // prevents a spurious "模板格式无效" when only the date format differs.
+    private static func decodeTemplate(_ data: Data) throws -> SlotConnectionTemplate {
+        let iso = JSONDecoder()
+        iso.dateDecodingStrategy = .iso8601
+        if let template = try? iso.decode(SlotConnectionTemplate.self, from: data) {
+            return template
+        }
+        // Fallback: default (deferredToDate) date strategy. Let this throw the
+        // real decoding error if it also fails, so callers can surface details.
+        return try JSONDecoder().decode(SlotConnectionTemplate.self, from: data)
+    }
+
     static func decode(_ data: Data) throws -> SlotConnectionTemplate {
-        let decoder = JSONDecoder()
-        decoder.dateDecodingStrategy = .iso8601
-        let template = try decoder.decode(SlotConnectionTemplate.self, from: data)
+        let template = try decodeTemplate(data)
 
         guard template.version <= currentVersion else {
             throw SlotConnectionError.unsupportedTemplateVersion
@@ -32,6 +63,32 @@ enum SlotConnectionTemplateService {
         try validateConnectionMap(map)
 
         return template
+    }
+
+    // MARK: - Bundle Encode / Decode
+
+    // v2.7.65: Bundle encoding now routes through the service with the SAME
+    // ISO8601 date strategy as single templates, fixing the previous asymmetry
+    // where bundles used a raw JSONEncoder (deferredToDate) while single
+    // templates used ISO8601. `decodeBundle` stays backward compatible by
+    // falling back to the legacy (default) date strategy for old files.
+    static func encodeBundle(_ bundle: SlotConnectionTemplateBundle) throws -> Data {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        encoder.dateEncodingStrategy = .iso8601
+        return try encoder.encode(bundle)
+    }
+
+    static func decodeBundle(_ data: Data) throws -> SlotConnectionTemplateBundle {
+        // Prefer the new ISO8601 format.
+        let isoDecoder = JSONDecoder()
+        isoDecoder.dateDecodingStrategy = .iso8601
+        if let bundle = try? isoDecoder.decode(SlotConnectionTemplateBundle.self, from: data) {
+            return bundle
+        }
+        // Backward compatibility: bundles exported before v2.7.65 used the
+        // default (deferredToDate) date strategy.
+        return try JSONDecoder().decode(SlotConnectionTemplateBundle.self, from: data)
     }
 
     // MARK: - Built-in Template: Full 10-Slot Chain

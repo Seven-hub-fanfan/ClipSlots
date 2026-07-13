@@ -21,6 +21,13 @@ struct ContentView: View {
     // v2.7.23: global search is the default. Users can still switch back to group scope.
 @State private var searchScope: SlotSearchScope = .global
     @State private var globalSearchSortRule: SlotSearchSortRule = .smart
+    // v2.8.0 (perf M1/M2): debounced + cached global search. `searchText` changes on
+    // every keystroke, but the expensive cross-page/group scan should only run after
+    // the user pauses typing (debounce), and its result is cached in state so that
+    // unrelated view re-renders (e.g. thumbnails finishing load) no longer re-run the
+    // whole scan+sort on the main thread.
+    @State private var globalSearchResultsCache: [SlotGlobalSearchResult] = []
+    @State private var searchDebounceWorkItem: DispatchWorkItem?
 
     // v2.7.1: stable connection sheet replaces broken node-canvas UI.
     @State private var showingConnectionManagement = false
@@ -256,6 +263,12 @@ struct ContentView: View {
         .popover(isPresented: $showingSpecialSlotManagement) {
             SpecialSlotManagementView(store: store)
         }
+        // v2.8.0 (perf M1/M2): drive the cached global-search results from explicit
+        // input changes instead of recomputing inside the view body on every render.
+        .onChange(of: searchText) { _ in scheduleGlobalSearchRecompute(debounced: true) }
+        .onChange(of: selectedFilter) { _ in scheduleGlobalSearchRecompute(debounced: false) }
+        .onChange(of: searchScope) { _ in scheduleGlobalSearchRecompute(debounced: false) }
+        .onChange(of: globalSearchSortRule) { _ in scheduleGlobalSearchRecompute(debounced: false) }
     }
 
     // Layer 1: Title + Stats + Settings
@@ -655,7 +668,7 @@ struct ContentView: View {
             // Connection stays as a separate tool and is moved to the right side.
             connectionToolButton
 
-            Text("v2.7.60")
+            Text("v2.8.0")
                 .font(.caption2)
                 .foregroundColor(Color.secondary.opacity(0.65))
         }
@@ -670,59 +683,12 @@ struct ContentView: View {
     // v2.7.9: prominent connection button with current-group state.
     // v2.7.36: standalone connection button, not mixed with shortcut chips.
     private var connectionToolButton: some View {
-        Menu {
-            Button {
-                showingConnectionFullscreen = true
-            } label: {
-                Label("全屏连接模式", systemImage: "arrow.up.left.and.arrow.down.right")
-            }
-
-            Divider()
-
-            // v2.7.2: Independent node canvas
-            Button {
-                showingNodeCanvas = true
-            } label: {
-                Label("打开节点画布…", systemImage: "point.3.connected.trianglepath.dotted")
-            }
-
-            Button {
-                showingConnectionManagement = true
-            } label: {
-                Label("连接管理…", systemImage: "link")
-            }
-
-            Divider()
-
-            Button {
-                store.applyBuiltInFullChainTemplate()
-            } label: {
-                Label("应用十槽位全串联模板", systemImage: "list.number")
-            }
-
-            Button {
-                store.exportConnectionTemplate()
-            } label: {
-                Label("导出连接模板", systemImage: "square.and.arrow.up")
-            }
-
-            Button {
-                store.importConnectionTemplate()
-            } label: {
-                Label("导入连接模板", systemImage: "square.and.arrow.down")
-            }
-
-            Divider()
-
-            Button(role: .destructive) {
-                store.confirmAndClearCurrentConnections()
-            } label: {
-                Label("清除当前连接", systemImage: "trash")
-            }
+        Button {
+            showingConnectionFullscreen = true
         } label: {
             connectionMenuLabel
         }
-        .menuStyle(.borderlessButton)
+        .buttonStyle(.borderless)
         .fixedSize()
     }
 
@@ -792,6 +758,7 @@ struct ContentView: View {
             onEditText: { newText in store.updateTextSlot(slot, text: newText) },
             onEditHTML: { html in store.updateHTMLSlot(slot, html: html) },
             onDropFiles: { urls in store.importDroppedFiles(urls, toSlot: slot) },
+            store: store,
             connectionDotColor: store.portColor(for: slot),
             isConnectionMode: false,
             connectedPorts: [],
@@ -830,7 +797,7 @@ struct ContentView: View {
                         .padding(.top, 2)
                 } else {
                     GlobalSearchResultsView(
-                        results: globalSearchResults,
+                        results: globalSearchResultsCache,
                         currentPageId: store.currentPageId,
                         currentGroupId: store.currentSpecialSlotId,
                         onJump: jumpToSearchResult,
@@ -881,7 +848,35 @@ struct ContentView: View {
 
     // MARK: - Global Search (v2.5.1)
 
-    private var globalSearchResults: [SlotGlobalSearchResult] {
+    /// v2.8.0 (perf M1/M2): recompute the debounced/cached global search results.
+    /// Called only when a search input actually changes (text, filter, scope, sort),
+    /// not on every view re-render. Text changes are debounced by the caller.
+    private func recomputeGlobalSearchResults() {
+        globalSearchResultsCache = computeGlobalSearchResults()
+    }
+
+    /// Schedule a global-search recompute. Keystroke-driven changes are debounced so
+    /// the cross-page scan runs once after the user pauses typing; structural changes
+    /// (filter/scope/sort) recompute immediately.
+    private func scheduleGlobalSearchRecompute(debounced: Bool) {
+        searchDebounceWorkItem?.cancel()
+        searchDebounceWorkItem = nil
+
+        guard searchScope == .global, isSearchActive else {
+            globalSearchResultsCache = []
+            return
+        }
+
+        if debounced {
+            let work = DispatchWorkItem { recomputeGlobalSearchResults() }
+            searchDebounceWorkItem = work
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.2, execute: work)
+        } else {
+            recomputeGlobalSearchResults()
+        }
+    }
+
+    private func computeGlobalSearchResults() -> [SlotGlobalSearchResult] {
         guard searchScope == .global, isSearchActive else { return [] }
 
         let filtered = store.allSearchableSlots()
@@ -1400,7 +1395,6 @@ private struct ConnectionFullscreenView: View {
 
                 HStack(spacing: 16) {
                     ConnectionFullscreenAction(title: "打开节点画布", subtitle: "可视化拖拽连接槽位", icon: "point.3.connected.trianglepath.dotted", tint: .accentColor, action: onOpenNodeCanvas)
-                    ConnectionFullscreenAction(title: "连接管理", subtitle: "查看、编辑和清理链路", icon: "slider.horizontal.3", tint: .blue, action: onOpenManager)
                     ConnectionFullscreenAction(title: "应用全串联模板", subtitle: "一键生成 1→2→3…", icon: "list.number", tint: .orange, action: { store.applyBuiltInFullChainTemplate() })
                 }
                 .padding(.horizontal, 34)

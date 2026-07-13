@@ -27,6 +27,8 @@ final class RadialMenuWindowController {
     private var previewStore: SlotStoreObservable?
     private var previewThemeMode: ThemeMode = .system
     private var localKeyMonitor: Any?
+    private var globalKeyMonitor: Any?
+    private var localClickMonitor: Any?
     private var globalClickMonitor: Any?
     private var onDismissCallback: (() -> Void)?
 
@@ -60,7 +62,16 @@ final class RadialMenuWindowController {
             onSelectSlot: { [weak self] slot in
                 onSelectSlot(slot)
                 self?.dismissRadialOnly()
-                if self?.isPreviewPinned != true { self?.dismissPreviewPanel() } else { self?.persistPreviewFrame() }
+                // v2.7.71: when pinned, keep the preview window on screen but reset
+                // it to the blank default state (clear the big preview) so it no
+                // longer obscures the screen; the next slot hover re-populates it.
+                // When unpinned, keep the original behavior (dismiss after paste).
+                if self?.isPreviewPinned != true {
+                    self?.dismissPreviewPanel()
+                } else {
+                    self?.clearPreviewContent()
+                    self?.persistPreviewFrame()
+                }
                 onDismiss()
             },
             onPasteAll: { [weak self] in
@@ -119,8 +130,8 @@ final class RadialMenuWindowController {
 
         showPreviewPanel(store: store, near: screenPoint, themeMode: themeMode)
 
-        // Escape key dismiss
-        localKeyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+        // Escape key dismiss: 同时监听本地和全局 ESC 事件
+        let dismissOnEscape: (NSEvent) -> NSEvent? = { [weak self] event in
             if event.keyCode == 53 {
                 self?.dismissRadialOnly()
                 if self?.isPreviewPinned != true { self?.dismissPreviewPanel() } else { self?.persistPreviewFrame() }
@@ -129,16 +140,35 @@ final class RadialMenuWindowController {
             }
             return event
         }
+        
+        localKeyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown, handler: dismissOnEscape)
+        globalKeyMonitor = NSEvent.addGlobalMonitorForEvents(matching: .keyDown, handler: { _ = dismissOnEscape($0) })
 
-        // Click outside dismiss
-        globalClickMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] _ in
+        // Click outside dismiss: 同时监听全局和本地点击，解决在 App 自身窗口点击不关闭的问题
+        let dismissIfOutside: (NSPoint) -> Void = { [weak self] clickLocation in
             guard let self = self, let panel = self.panel else { return }
-            let clickLocation = NSEvent.mouseLocation
+            
+            // 点击预览窗不关闭圆盘菜单，否则置顶/缩放按钮会被外部点击监听提前吞掉
+            if let previewPanel = self.previewPanel, previewPanel.frame.contains(clickLocation) {
+                return
+            }
+            
             if !panel.frame.contains(clickLocation) {
                 self.dismissRadialOnly()
                 if !self.isPreviewPinned { self.dismissPreviewPanel() } else { self.persistPreviewFrame() }
                 onDismiss()
             }
+        }
+        
+        // 全局点击：其他应用窗口
+        globalClickMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { _ in
+            dismissIfOutside(NSEvent.mouseLocation)
+        }
+        
+        // 本地点击：本 App 自身窗口
+        localClickMonitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { event in
+            dismissIfOutside(NSEvent.mouseLocation)
+            return event
         }
     }
 
@@ -219,6 +249,18 @@ final class RadialMenuWindowController {
         return hosting
     }
 
+    // v2.7.71: reset the live preview back to its blank default state (narrow
+    // title bar + empty area) without closing the window. Posting the hover
+    // notification with no payload and a nil object clears RadialLivePreviewContent's
+    // previewPayload/hoveredSlot; the next real slot hover repopulates it.
+    private func clearPreviewContent() {
+        NotificationCenter.default.post(
+            name: .radialMenuHoveredSlotChanged,
+            object: nil,
+            userInfo: nil
+        )
+    }
+
     private func persistPreviewFrame() {
         guard let frame = previewPanel?.frame else { return }
         UserDefaults.standard.set(NSStringFromRect(frame), forKey: "radialPreviewFrame")
@@ -254,6 +296,14 @@ final class RadialMenuWindowController {
         if let monitor = localKeyMonitor {
             NSEvent.removeMonitor(monitor)
             localKeyMonitor = nil
+        }
+        if let monitor = globalKeyMonitor {
+            NSEvent.removeMonitor(monitor)
+            globalKeyMonitor = nil
+        }
+        if let monitor = localClickMonitor {
+            NSEvent.removeMonitor(monitor)
+            localClickMonitor = nil
         }
         if let monitor = globalClickMonitor {
             NSEvent.removeMonitor(monitor)

@@ -10,6 +10,62 @@ struct SlotContent: Codable {
     var timestamp: Date = Date()
     var label: String? = nil
     var htmlSource: String? = nil
+    // v2.7.61: Slot attachments - only visible and editable in node canvas
+    // Empty array = disabled, no change to existing behavior
+    var attachments: [SlotAttachment] = []
+    
+    // 向后兼容：旧模板没有 attachments 字段时自动填充空数组
+    enum CodingKeys: String, CodingKey {
+        case items, timestamp, label, htmlSource, attachments, contentId, updatedAt
+    }
+    
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        // v2.8.2 (P1-B): decode leniently so a corrupt / partial / legacy payload
+        // (e.g. missing items or timestamp) still loads with sensible defaults
+        // instead of throwing and dropping the whole slot.
+        items = try container.decodeIfPresent([[PasteboardItem]].self, forKey: .items) ?? []
+        timestamp = try container.decodeIfPresent(Date.self, forKey: .timestamp) ?? Date()
+        label = try container.decodeIfPresent(String.self, forKey: .label)
+        htmlSource = try container.decodeIfPresent(String.self, forKey: .htmlSource)
+        attachments = try container.decodeIfPresent([SlotAttachment].self, forKey: .attachments) ?? []
+        // v2.8.1 (P1-1): older persisted payloads predate contentId/updatedAt.
+        // Decode leniently with sensible defaults so legacy data still loads.
+        contentId = try container.decodeIfPresent(String.self, forKey: .contentId) ?? UUID().uuidString
+        updatedAt = try container.decodeIfPresent(TimeInterval.self, forKey: .updatedAt) ?? timestamp.timeIntervalSince1970
+    }
+
+    init() {}
+
+    init(items: [[PasteboardItem]] = [], timestamp: Date = Date(), label: String? = nil, htmlSource: String? = nil, attachments: [SlotAttachment] = [], contentId: String = UUID().uuidString, updatedAt: TimeInterval = Date().timeIntervalSince1970) {
+        self.items = items
+        self.timestamp = timestamp
+        self.label = label
+        self.htmlSource = htmlSource
+        self.attachments = attachments
+        self.contentId = contentId
+        self.updatedAt = updatedAt
+    }
+
+    // MARK: - Slot Attachment
+
+    struct SlotAttachment: Codable, Identifiable {
+        var id: UUID = UUID()
+        var name: String
+        var type: AttachmentType
+        var path: String?
+        var url: String?
+        var data: Data?
+        var createdAt: Date = Date()
+    }
+
+    enum AttachmentType: String, Codable {
+        case image
+        case file
+        case text
+        case url
+        case reference
+    }
 
     /// Unique content identity. Regenerated on every save/overwrite. Used as the
     /// primary cache-breaker for thumbnails, SwiftUI View identity, and file paths.
@@ -18,6 +74,13 @@ struct SlotContent: Codable {
     /// to form the thumbnail cache key so that even same-contentId overwrites
     /// (impossible in practice but defensive) still miss the cache.
     var updatedAt: TimeInterval = Date().timeIntervalSince1970
+
+    /// v2.8.1 (P1-2): true when this snapshot was produced by `capture()` from an
+    /// actually empty system pasteboard (vs. a default/never-captured value). Lets
+    /// `restore()` know it should clear the pasteboard rather than no-op, so an
+    /// injected paste payload is not left behind when the original clipboard was empty.
+    /// Not persisted (absent from CodingKeys).
+    var capturedEmpty: Bool = false
 
     var isEmpty: Bool { items.isEmpty }
 
@@ -86,6 +149,7 @@ final class ClipboardManager {
         content.timestamp = Date()
 
         guard let pbItems = pasteboard.pasteboardItems, !pbItems.isEmpty else {
+            content.capturedEmpty = true
             return content
         }
 
@@ -106,7 +170,18 @@ final class ClipboardManager {
     }
 
     func restore(_ content: SlotContent) -> Bool {
-        guard !content.items.isEmpty else { return false }
+        guard !content.items.isEmpty else {
+            // v2.8.1 (P1-2): the original clipboard was genuinely empty — clear the
+            // pasteboard so an injected paste payload isn't left behind. A non-empty
+            // capturedEmpty=false snapshot means "never captured / unknown", so we
+            // leave the pasteboard untouched to avoid wiping real user content.
+            if content.capturedEmpty {
+                pasteboard.clearContents()
+                NSLog("[ClipSlots] CLIPBOARD restore: original was empty, cleared pasteboard")
+                return true
+            }
+            return false
+        }
         pasteboard.clearContents()
         var pbItems: [NSPasteboardItem] = []
         for itemList in content.items {
