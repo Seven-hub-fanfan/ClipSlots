@@ -395,10 +395,17 @@ struct AttachmentRow: View {
 
     @State private var isHovered = false
     @State private var deleteHovered = false
-    // v2.8.5: hover preview popover, opened after a short dwell so scrolling past
-    // rows does not flash previews. Closed immediately when the pointer leaves.
-    @State private var showPreview = false
+    // v2.7.86: hover preview now lives in a non-activating, mouse-transparent
+    // floating panel (see AttachmentPreviewWindowController) instead of a nested
+    // SwiftUI `.popover`. A nested transient popover installed a local mouseDown
+    // monitor that dismissed itself on the next press and SWALLOWED that press,
+    // so the first click on the × delete control / drag handle while the preview
+    // was up did nothing (the residual "click/drag twice" bug). A panel that
+    // ignores mouse events is not a popover and never participates in event
+    // routing, so the first press always reaches the AppKit first-mouse overlays.
     @State private var hoverToken = 0
+    // Backing NSView anchor so the preview panel can be positioned next to the row.
+    @State private var anchor = AttachmentRowAnchor()
 
     var body: some View {
         HStack(spacing: 10) {
@@ -453,7 +460,8 @@ struct AttachmentRow: View {
                 .overlay(
                     FirstMouseDragHandle(
                         onChanged: { dy in
-                            showPreview = false
+                            hoverToken += 1
+                            AttachmentPreviewWindowController.shared.hide()
                             onDragChanged(dy)
                         },
                         onEnded: { onDragEnded() }
@@ -472,21 +480,28 @@ struct AttachmentRow: View {
         .scaleEffect(isDragging ? 1.02 : 1)
         .offset(y: dragOffset)
         .contentShape(Rectangle())
+        .background(WindowAnchorView(holder: anchor))
         .onHover { hovering in
             isHovered = hovering
             if hovering && !dragActive {
                 hoverToken += 1
                 let token = hoverToken
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
-                    if isHovered && token == hoverToken && !dragActive { showPreview = true }
+                    guard isHovered, token == hoverToken, !dragActive,
+                          let rect = anchor.screenRect() else { return }
+                    AttachmentPreviewWindowController.shared.show(
+                        attachment: attachment, scheme: scheme, anchor: rect
+                    )
                 }
             } else {
-                showPreview = false
+                hoverToken += 1
+                AttachmentPreviewWindowController.shared.hide(for: attachment.id)
             }
         }
-        .popover(isPresented: $showPreview, arrowEdge: .trailing) {
-            AttachmentPreviewContent(attachment: attachment, scheme: scheme)
-                .frame(width: 340, height: 300)
+        // Hide the floating preview if the row/popover goes away while shown.
+        .onDisappear {
+            hoverToken += 1
+            AttachmentPreviewWindowController.shared.hide(for: attachment.id)
         }
     }
 
@@ -903,5 +918,140 @@ final class DragHandleNSView: NSView {
             }
         }
         onEnded?()
+    }
+}
+
+// MARK: - Hover Preview Floating Panel (v2.7.86)
+//
+// Why this exists — the residual "click/drag twice" root cause:
+// The hover preview used to be a nested SwiftUI `.popover`, i.e. an NSPopover
+// with `.transient` behaviour. A transient popover installs a local mouseDown
+// monitor; the next press ANYWHERE outside its content closes it and CONSUMES
+// that press. Because the × delete control and the drag handle sit on the very
+// row that anchored the preview, the pointer was over them while the preview
+// was up, so the first press was eaten by the dismissal and the user had to act
+// twice. The AppKit acceptsFirstMouse overlays (v2.7.84/85) could not help —
+// the event never reached them, it was swallowed at the window/monitor level.
+// Rendering the preview in a non-activating, mouse-transparent floating panel
+// removes it from event routing entirely, so the first press always lands.
+
+/// Weak holder for a row's backing NSView so the preview panel can be anchored
+/// to the row's on-screen rect.
+final class AttachmentRowAnchor {
+    weak var view: NSView?
+
+    /// Row rect in screen coordinates (bottom-left origin), or nil if detached.
+    func screenRect() -> NSRect? {
+        guard let view, let window = view.window else { return nil }
+        let inWindow = view.convert(view.bounds, to: nil)
+        return window.convertToScreen(inWindow)
+    }
+}
+
+/// Transparent, zero-cost background view that records the row's backing NSView.
+private struct WindowAnchorView: NSViewRepresentable {
+    let holder: AttachmentRowAnchor
+
+    func makeNSView(context: Context) -> NSView {
+        let view = NSView()
+        holder.view = view
+        return view
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {
+        holder.view = nsView
+    }
+}
+
+/// Panel that can never become key/main so it never steals focus from the
+/// attachment-manager popover or the main window.
+private final class AttachmentPreviewPanel: NSPanel {
+    override var canBecomeKey: Bool { false }
+    override var canBecomeMain: Bool { false }
+}
+
+/// Shows the attachment hover preview in a floating, mouse-transparent panel.
+/// Because the panel ignores mouse events and is not a popover, it never
+/// consumes clicks aimed at the row's delete / drag controls, so a single
+/// click / drag always works even while the preview is visible.
+final class AttachmentPreviewWindowController {
+    static let shared = AttachmentPreviewWindowController()
+
+    private var panel: AttachmentPreviewPanel?
+    private var currentID: UUID?
+    private let previewSize = NSSize(width: 340, height: 300)
+
+    private init() {}
+
+    func show(attachment: SlotContent.SlotAttachment, scheme: ColorScheme, anchor: NSRect) {
+        let hosting = NSHostingView(
+            rootView: AttachmentPreviewContent(attachment: attachment, scheme: scheme)
+                .frame(width: previewSize.width, height: previewSize.height)
+                .clipShape(RoundedRectangle(cornerRadius: 12))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 12)
+                        .stroke(Color.primary.opacity(0.12), lineWidth: 1)
+                )
+                .environment(\.colorScheme, scheme)
+        )
+
+        let panel = self.panel ?? makePanel()
+        panel.contentView = hosting
+        panel.setContentSize(previewSize)
+        position(panel, anchor: anchor)
+        panel.orderFrontRegardless()
+
+        self.panel = panel
+        self.currentID = attachment.id
+    }
+
+    /// Hide only if the given row still owns the visible preview. Prevents a
+    /// delayed hover-out from row A from closing a freshly-shown preview for row B.
+    func hide(for id: UUID) {
+        guard currentID == id else { return }
+        hide()
+    }
+
+    func hide() {
+        currentID = nil
+        panel?.orderOut(nil)
+    }
+
+    private func makePanel() -> AttachmentPreviewPanel {
+        let panel = AttachmentPreviewPanel(
+            contentRect: NSRect(origin: .zero, size: previewSize),
+            styleMask: [.borderless, .nonactivatingPanel],
+            backing: .buffered,
+            defer: false
+        )
+        panel.isOpaque = false
+        panel.backgroundColor = .clear
+        panel.hasShadow = true
+        panel.level = .popUpMenu           // above the attachment-manager popover
+        panel.ignoresMouseEvents = true    // never intercept clicks -> no swallow
+        panel.hidesOnDeactivate = false
+        panel.becomesKeyOnlyIfNeeded = false
+        panel.collectionBehavior = [.canJoinAllSpaces, .transient, .ignoresCycle, .fullScreenAuxiliary]
+        return panel
+    }
+
+    /// Prefer the trailing side of the row; fall back to the leading side, then
+    /// clamp inside the screen's visible frame.
+    private func position(_ panel: NSPanel, anchor: NSRect) {
+        let size = previewSize
+        let gap: CGFloat = 10
+        let screen = NSScreen.screens.first { $0.frame.intersects(anchor) } ?? NSScreen.main
+        let visible = screen?.visibleFrame ?? anchor
+
+        var x = anchor.maxX + gap
+        if x + size.width > visible.maxX {
+            x = anchor.minX - gap - size.width
+        }
+        x = min(max(x, visible.minX + 4), visible.maxX - size.width - 4)
+
+        var y = anchor.midY - size.height / 2
+        y = min(max(y, visible.minY + 4), visible.maxY - size.height - 4)
+
+        panel.setFrameOrigin(NSPoint(x: x, y: y))
     }
 }
