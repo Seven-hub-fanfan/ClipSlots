@@ -62,6 +62,8 @@ struct AttachmentManagerPopover: View {
     @State private var draftValue: String = ""
     // v2.8.2 (P2-2): inline validation message shown under the editor field.
     @State private var inlineError: String? = nil
+    // v2.8.6: id of the attachment currently being dragged for reordering.
+    @State private var draggingId: UUID? = nil
 
     enum InlineEditorKind: Equatable { case text, url, reference }
 
@@ -122,16 +124,8 @@ struct AttachmentManagerPopover: View {
                 ScrollView {
                     VStack(spacing: 8) {
                         let items = attachments
-                        ForEach(Array(items.enumerated()), id: \.element.id) { index, att in
-                            AttachmentRow(
-                                attachment: att,
-                                scheme: scheme,
-                                isFirst: index == 0,
-                                isLast: index == items.count - 1,
-                                onDelete: { remove(att) },
-                                onMoveUp: { moveUp(index) },
-                                onMoveDown: { moveDown(index) }
-                            )
+                        ForEach(items, id: \.id) { att in
+                            attachmentRow(for: att)
                         }
 
                         if let kind = inlineEditor {
@@ -143,6 +137,25 @@ struct AttachmentManagerPopover: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    @ViewBuilder
+    private func attachmentRow(for att: SlotContent.SlotAttachment) -> some View {
+        AttachmentRow(
+            attachment: att,
+            scheme: scheme,
+            isDragging: draggingId == att.id,
+            onDelete: { remove(att) },
+            onBeginDrag: { draggingId = att.id }
+        )
+        .onDrop(
+            of: [UTType.text],
+            delegate: AttachmentReorderDropDelegate(
+                targetId: att.id,
+                draggingId: $draggingId,
+                reorder: reorder
+            )
+        )
     }
 
     private var emptyState: some View {
@@ -317,28 +330,25 @@ struct AttachmentManagerPopover: View {
         }
     }
 
-    private func move(from offsets: IndexSet, to destination: Int) {
+    // v2.8.6: drag-and-drop reorder. Display order == paste order == add order,
+    // so moving a row directly rewrites the stored array. Called by the drop
+    // delegate as the dragged row hovers over another row's handle/body.
+    private func reorder(fromId: UUID, toId: UUID) {
+        guard fromId != toId else { return }
         var current = store.attachments(for: slot)
-        current.move(fromOffsets: offsets, toOffset: destination)
-        store.setAttachments(current, for: slot)
-    }
-
-    // v2.8.5: explicit up/down reorder buttons per row. Display order == paste
-    // order == add order, so reordering here directly rewrites the stored array.
-    private func moveUp(_ index: Int) {
-        var current = store.attachments(for: slot)
-        guard current.indices.contains(index), index > 0 else { return }
-        withAnimation(.spring(response: 0.28, dampingFraction: 0.85)) {
-            current.swapAt(index, index - 1)
+        guard let from = current.firstIndex(where: { $0.id == fromId }),
+              let to = current.firstIndex(where: { $0.id == toId }) else { return }
+        let movingDown = from < to
+        let moved = current.remove(at: from)
+        // Recompute the target index after removal shifted things.
+        guard let targetIndex = current.firstIndex(where: { $0.id == toId }) else {
+            current.insert(moved, at: min(from, current.count))
             store.setAttachments(current, for: slot)
+            return
         }
-    }
-
-    private func moveDown(_ index: Int) {
-        var current = store.attachments(for: slot)
-        guard current.indices.contains(index), index < current.count - 1 else { return }
+        let dest = movingDown ? targetIndex + 1 : targetIndex
         withAnimation(.spring(response: 0.28, dampingFraction: 0.85)) {
-            current.swapAt(index, index + 1)
+            current.insert(moved, at: min(dest, current.count))
             store.setAttachments(current, for: slot)
         }
     }
@@ -349,11 +359,9 @@ struct AttachmentManagerPopover: View {
 struct AttachmentRow: View {
     let attachment: SlotContent.SlotAttachment
     let scheme: ColorScheme
-    let isFirst: Bool
-    let isLast: Bool
+    let isDragging: Bool
     let onDelete: () -> Void
-    let onMoveUp: () -> Void
-    let onMoveDown: () -> Void
+    let onBeginDrag: () -> Void
 
     @State private var isHovered = false
     @State private var deleteHovered = false
@@ -379,31 +387,6 @@ struct AttachmentRow: View {
 
             Spacer(minLength: 4)
 
-            // v2.8.5: reorder controls. First row cannot move up, last cannot down.
-            VStack(spacing: 2) {
-                Button(action: onMoveUp) {
-                    Image(systemName: "chevron.up")
-                        .font(.system(size: 9, weight: .bold))
-                        .frame(width: 18, height: 14)
-                        .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .foregroundColor(isFirst ? .secondary.opacity(0.3) : .secondary)
-                .disabled(isFirst)
-                .help("上移")
-
-                Button(action: onMoveDown) {
-                    Image(systemName: "chevron.down")
-                        .font(.system(size: 9, weight: .bold))
-                        .frame(width: 18, height: 14)
-                        .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .foregroundColor(isLast ? .secondary.opacity(0.3) : .secondary)
-                .disabled(isLast)
-                .help("下移")
-            }
-
             Button(action: onDelete) {
                 Image(systemName: "xmark.circle.fill")
                     .font(.system(size: 13))
@@ -412,10 +395,26 @@ struct AttachmentRow: View {
             .buttonStyle(.plain)
             .onHover { deleteHovered = $0 }
             .help("删除附件")
+
+            // v2.8.6: drag handle. Only this handle starts a drag, so the rest of
+            // the row keeps its hover-preview behaviour without triggering a drag.
+            // Providing the attachment id as the drag payload lets the drop
+            // delegate match rows regardless of index shifts.
+            Image(systemName: "line.3.horizontal")
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundColor(.secondary)
+                .frame(width: 24, height: 36)
+                .contentShape(Rectangle())
+                .help("拖动排序")
+                .onDrag {
+                    onBeginDrag()
+                    return NSItemProvider(object: attachment.id.uuidString as NSString)
+                }
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
         .frame(height: 56)
+        .opacity(isDragging ? 0.4 : 1)
         .background(RoundedRectangle(cornerRadius: AppTheme.smallCornerRadius).fill(AppTheme.cardBackground(scheme)))
         .overlay(
             RoundedRectangle(cornerRadius: AppTheme.smallCornerRadius)
@@ -455,8 +454,32 @@ struct AttachmentRow: View {
     }
 }
 
-// MARK: - Thumbnail
+// MARK: - Reorder Drop Delegate
 
+/// v2.8.6: handles drops onto a row while dragging by attachment id. Reordering
+/// runs live as the dragged handle passes over other rows (dropEntered), so the
+/// list rearranges under the pointer; the drop just clears the drag state.
+private struct AttachmentReorderDropDelegate: DropDelegate {
+    let targetId: UUID
+    @Binding var draggingId: UUID?
+    let reorder: (UUID, UUID) -> Void
+
+    func dropEntered(info: DropInfo) {
+        guard let dragging = draggingId, dragging != targetId else { return }
+        reorder(dragging, targetId)
+    }
+
+    func dropUpdated(info: DropInfo) -> DropProposal? {
+        DropProposal(operation: .move)
+    }
+
+    func performDrop(info: DropInfo) -> Bool {
+        draggingId = nil
+        return true
+    }
+}
+
+// MARK: - Thumbnail
 /// v2.8.5: real thumbnail for the left leading cell. Images render their pixels,
 /// videos render the first frame, other files render the Finder icon, and
 /// text/url/reference fall back to the semantic accent icon. All heavy work runs
