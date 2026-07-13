@@ -1604,20 +1604,41 @@ final class SlotStoreObservable: ObservableObject {
         let attachments = specialStorage.get(slot, in: activeId).attachments
         guard !attachments.isEmpty else { return result }
 
-        let imageIndices = attachments.indices.filter { attachments[$0].type == .image }
+        // v2.8.2: ALL file-like attachments (images + .file videos/documents/…) are
+        // now unified. Indices are file-like when they can be resolved to a file URL
+        // (image with path/data, or .file with a path); everything else (.text /
+        // .url / .reference) is a non-file attachment pasted individually in order.
+        let fileLikeIndices = attachments.indices.filter { idx in
+            let att = attachments[idx]
+            switch att.type {
+            case .file:
+                return (att.path?.isEmpty == false)
+            case .image:
+                return (att.path?.isEmpty == false) || (att.data?.isEmpty == false)
+            default:
+                return false
+            }
+        }
 
-        // 2a) Non-image attachments in original order.
-        for i in attachments.indices where attachments[i].type != .image {
+        // 2a) Non-file attachments (.text / .url / .reference) in original order.
+        for i in attachments.indices where !fileLikeIndices.contains(i) {
             let p = payloadForAttachment(attachments[i], activeId: activeId)
             if !p.isEmpty { result.append(p) }
         }
 
-        // 2b) Image attachments: single → inline bitmap; ≥2 → one file-URL batch.
-        if imageIndices.count == 1 {
-            let p = payloadForAttachment(attachments[imageIndices[0]], activeId: activeId)
+        // 2b) File-like attachments:
+        //   • exactly one → keep the original single-item payload (inline bitmap for
+        //     a lone image → WeChat / rich-text compatibility; a single file URL for
+        //     a lone .file), preserving prior proven behaviour.
+        //   • two or more → coalesce into ONE Finder-style multi-file URL payload
+        //     (single Cmd+V), preserving the original attachment order. Only images
+        //     spilled from in-memory data are added to `tempFiles` for cleanup; the
+        //     user's original files are never touched.
+        if fileLikeIndices.count == 1 {
+            let p = payloadForAttachment(attachments[fileLikeIndices[0]], activeId: activeId)
             if !p.isEmpty { result.append(p) }
-        } else if imageIndices.count >= 2 {
-            let urls = imageIndices.compactMap { fileURLForImageAttachment(attachments[$0], tempFiles: &tempFiles) }
+        } else if fileLikeIndices.count >= 2 {
+            let urls = fileLikeIndices.compactMap { fileURLForFileLikeAttachment(attachments[$0], tempFiles: &tempFiles) }
             if !urls.isEmpty {
                 result.append(ChainPastePayload(
                     sourceSlot: slot,
@@ -2281,11 +2302,32 @@ final class SlotStoreObservable: ObservableObject {
     /// extension. v2.8.0 (P1-4): any temp file created is appended to `tempFiles`
     /// so the caller can delete it once the paste has landed and the clipboard has
     /// been restored (files referencing an existing on-disk path are NOT tracked).
-    private func fileURLForImageAttachment(_ att: SlotContent.SlotAttachment, tempFiles: inout [URL]) -> URL? {
-        if let path = att.path, !path.isEmpty, FileManager.default.fileExists(atPath: path) {
+    /// v2.8.2: Resolves ANY file-like attachment (image OR .file) into a file URL
+    /// suitable for a Finder-style multi-file paste.
+    ///   • `.file` with an existing path → the user's ORIGINAL file (never appended
+    ///     to `tempFiles`, so it is never deleted after paste).
+    ///   • `.image` with an existing path → the original file (not a temp).
+    ///   • `.image` with in-memory data only → spilled to a temp file that IS added
+    ///     to `tempFiles` for post-paste cleanup.
+    /// Returns nil for non-file-like attachments or unresolvable ones.
+    private func fileURLForFileLikeAttachment(_ att: SlotContent.SlotAttachment, tempFiles: inout [URL]) -> URL? {
+        switch att.type {
+        case .file:
+            guard let path = att.path, !path.isEmpty else { return nil }
             return URL(fileURLWithPath: path)
+        case .image:
+            if let path = att.path, !path.isEmpty, FileManager.default.fileExists(atPath: path) {
+                return URL(fileURLWithPath: path)
+            }
+            guard let data = att.data, !data.isEmpty else { return nil }
+            return spillImageDataToTempFile(att, data: data, tempFiles: &tempFiles)
+        default:
+            return nil
         }
-        guard let data = att.data, !data.isEmpty else { return nil }
+    }
+
+    /// Writes in-memory image data to a temp file and records it in `tempFiles`.
+    private func spillImageDataToTempFile(_ att: SlotContent.SlotAttachment, data: Data, tempFiles: inout [URL]) -> URL? {
 
         let ext = imageFileExtension(forName: att.name, data: data)
         let baseName = (att.name as NSString).deletingPathExtension
