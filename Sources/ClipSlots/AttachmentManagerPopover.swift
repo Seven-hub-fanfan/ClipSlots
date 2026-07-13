@@ -51,7 +51,11 @@ struct AttachmentManagerPopover: View {
     @ObservedObject var store: SlotStoreObservable
     @Environment(\.colorScheme) private var scheme
 
-    @State private var attachments: [SlotContent.SlotAttachment]
+    // v2.8.0 (P1-5): the attachment list is derived live from the store instead of
+    // an init-time snapshot, so external mutations (e.g. the red-x clear on the
+    // node card, or another popover) are reflected immediately. All writes are
+    // read-modify-write against the latest store state so they never clobber a
+    // concurrent change made elsewhere.
     @State private var inlineEditor: InlineEditorKind?
     @State private var draftName: String = ""
     @State private var draftValue: String = ""
@@ -61,7 +65,11 @@ struct AttachmentManagerPopover: View {
     init(slot: Int, store: SlotStoreObservable) {
         self.slot = slot
         self.store = store
-        _attachments = State(initialValue: store.attachments(for: slot))
+    }
+
+    /// Live view of this slot's attachments straight from the store.
+    private var attachments: [SlotContent.SlotAttachment] {
+        store.attachments(for: slot)
     }
 
     var body: some View {
@@ -248,10 +256,11 @@ struct AttachmentManagerPopover: View {
                                              type: .reference, path: value)
         }
         withAnimation(.spring(response: 0.32, dampingFraction: 0.82)) {
-            attachments.append(att)
+            var current = store.attachments(for: slot)
+            current.append(att)
+            store.setAttachments(current, for: slot)
             inlineEditor = nil
         }
-        persist()
     }
 
     private func pickFile(imagesOnly: Bool) {
@@ -263,6 +272,7 @@ struct AttachmentManagerPopover: View {
             panel.allowedContentTypes = [.image]
         }
         guard panel.runModal() == .OK else { return }
+        var current = store.attachments(for: slot)
         for url in panel.urls {
             let type: SlotContent.AttachmentType = imagesOnly ? .image : .file
             let att = SlotContent.SlotAttachment(
@@ -270,25 +280,23 @@ struct AttachmentManagerPopover: View {
                 type: type,
                 path: url.path
             )
-            attachments.append(att)
+            current.append(att)
         }
-        persist()
+        store.setAttachments(current, for: slot)
     }
 
     private func remove(_ att: SlotContent.SlotAttachment) {
         withAnimation(.spring(response: 0.32, dampingFraction: 0.82)) {
-            attachments.removeAll { $0.id == att.id }
+            var current = store.attachments(for: slot)
+            current.removeAll { $0.id == att.id }
+            store.setAttachments(current, for: slot)
         }
-        persist()
     }
 
     private func move(from offsets: IndexSet, to destination: Int) {
-        attachments.move(fromOffsets: offsets, toOffset: destination)
-        persist()
-    }
-
-    private func persist() {
-        store.setAttachments(attachments, for: slot)
+        var current = store.attachments(for: slot)
+        current.move(fromOffsets: offsets, toOffset: destination)
+        store.setAttachments(current, for: slot)
     }
 }
 
