@@ -62,8 +62,15 @@ struct AttachmentManagerPopover: View {
     @State private var draftValue: String = ""
     // v2.8.2 (P2-2): inline validation message shown under the editor field.
     @State private var inlineError: String? = nil
-    // v2.8.6: id of the attachment currently being dragged for reordering.
+    // v2.8.7: pure DragGesture reordering (no system drag ghost image).
+    // draggingId marks the row under the finger, dragTranslation is the raw
+    // vertical delta, and dragStartIndex pins the origin so the target index
+    // can be derived from the fixed step height.
     @State private var draggingId: UUID? = nil
+    @State private var dragTranslation: CGFloat = 0
+    @State private var dragStartIndex: Int? = nil
+    // Row height (56) + VStack spacing (8) == vertical distance between rows.
+    private let rowStep: CGFloat = 64
 
     enum InlineEditorKind: Equatable { case text, url, reference }
 
@@ -134,28 +141,36 @@ struct AttachmentManagerPopover: View {
                     }
                     .padding(12)
                 }
+                .coordinateSpace(name: "attachmentList")
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
+    // v2.8.7: offset applied to the row currently being dragged so it tracks the
+    // finger. Because live reordering shifts the dragged row between slots, we
+    // subtract the slots already crossed (cur - start) * step from the raw
+    // translation, keeping the row visually glued to the pointer.
+    private var liveDragOffset: CGFloat {
+        guard let id = draggingId, let start = dragStartIndex,
+              let cur = attachments.firstIndex(where: { $0.id == id }) else { return 0 }
+        return dragTranslation - CGFloat(cur - start) * rowStep
+    }
+
     @ViewBuilder
     private func attachmentRow(for att: SlotContent.SlotAttachment) -> some View {
+        let isDragging = draggingId == att.id
         AttachmentRow(
             attachment: att,
             scheme: scheme,
-            isDragging: draggingId == att.id,
+            isDragging: isDragging,
+            dragActive: draggingId != nil,
+            dragOffset: isDragging ? liveDragOffset : 0,
             onDelete: { remove(att) },
-            onBeginDrag: { draggingId = att.id }
+            onDragChanged: { translation in handleDragChanged(att.id, translation) },
+            onDragEnded: { handleDragEnded() }
         )
-        .onDrop(
-            of: [UTType.text],
-            delegate: AttachmentReorderDropDelegate(
-                targetId: att.id,
-                draggingId: $draggingId,
-                reorder: reorder
-            )
-        )
+        .zIndex(isDragging ? 1 : 0)
     }
 
     private var emptyState: some View {
@@ -330,26 +345,35 @@ struct AttachmentManagerPopover: View {
         }
     }
 
-    // v2.8.6: drag-and-drop reorder. Display order == paste order == add order,
-    // so moving a row directly rewrites the stored array. Called by the drop
-    // delegate as the dragged row hovers over another row's handle/body.
-    private func reorder(fromId: UUID, toId: UUID) {
-        guard fromId != toId else { return }
-        var current = store.attachments(for: slot)
-        guard let from = current.firstIndex(where: { $0.id == fromId }),
-              let to = current.firstIndex(where: { $0.id == toId }) else { return }
-        let movingDown = from < to
-        let moved = current.remove(at: from)
-        // Recompute the target index after removal shifted things.
-        guard let targetIndex = current.firstIndex(where: { $0.id == toId }) else {
-            current.insert(moved, at: min(from, current.count))
-            store.setAttachments(current, for: slot)
-            return
+    // v2.8.7: pure DragGesture reordering. Display order == paste order == add
+    // order, so rearranging rows directly rewrites the stored array. The gesture
+    // lives on the handle only; the rest of the row keeps hover/preview.
+    private func handleDragChanged(_ id: UUID, _ translation: CGFloat) {
+        if draggingId != id {
+            draggingId = id
+            dragStartIndex = attachments.firstIndex(where: { $0.id == id })
         }
-        let dest = movingDown ? targetIndex + 1 : targetIndex
+        dragTranslation = translation
+        guard let start = dragStartIndex else { return }
+        var current = store.attachments(for: slot)
+        guard let cur = current.firstIndex(where: { $0.id == id }) else { return }
+        // Target index derived from the fixed origin plus whole steps crossed.
+        let steps = Int((translation / rowStep).rounded())
+        let target = max(0, min(current.count - 1, start + steps))
+        if target != cur {
+            let moved = current.remove(at: cur)
+            current.insert(moved, at: target)
+            withAnimation(.spring(response: 0.28, dampingFraction: 0.85)) {
+                store.setAttachments(current, for: slot)
+            }
+        }
+    }
+
+    private func handleDragEnded() {
         withAnimation(.spring(response: 0.28, dampingFraction: 0.85)) {
-            current.insert(moved, at: min(dest, current.count))
-            store.setAttachments(current, for: slot)
+            draggingId = nil
+            dragTranslation = 0
+            dragStartIndex = nil
         }
     }
 }
@@ -360,8 +384,14 @@ struct AttachmentRow: View {
     let attachment: SlotContent.SlotAttachment
     let scheme: ColorScheme
     let isDragging: Bool
+    // v2.8.7: true when any row in the list is being dragged, used to suppress
+    // hover previews for every row during a reorder.
+    let dragActive: Bool
+    // v2.8.7: vertical offset so the dragged row follows the finger.
+    let dragOffset: CGFloat
     let onDelete: () -> Void
-    let onBeginDrag: () -> Void
+    let onDragChanged: (CGFloat) -> Void
+    let onDragEnded: () -> Void
 
     @State private var isHovered = false
     @State private var deleteHovered = false
@@ -396,38 +426,43 @@ struct AttachmentRow: View {
             .onHover { deleteHovered = $0 }
             .help("删除附件")
 
-            // v2.8.6: drag handle. Only this handle starts a drag, so the rest of
-            // the row keeps its hover-preview behaviour without triggering a drag.
-            // Providing the attachment id as the drag payload lets the drop
-            // delegate match rows regardless of index shifts.
+            // v2.8.7: pure DragGesture handle. Only this handle starts a drag,
+            // so the rest of the row keeps hover-preview behaviour. No system
+            // drag payload / ghost image is produced.
             Image(systemName: "line.3.horizontal")
                 .font(.system(size: 13, weight: .semibold))
                 .foregroundColor(.secondary)
                 .frame(width: 24, height: 36)
                 .contentShape(Rectangle())
                 .help("拖动排序")
-                .onDrag {
-                    onBeginDrag()
-                    return NSItemProvider(object: attachment.id.uuidString as NSString)
-                }
+                .gesture(
+                    DragGesture(minimumDistance: 2, coordinateSpace: .named("attachmentList"))
+                        .onChanged { value in
+                            showPreview = false
+                            onDragChanged(value.translation.height)
+                        }
+                        .onEnded { _ in onDragEnded() }
+                )
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
         .frame(height: 56)
-        .opacity(isDragging ? 0.4 : 1)
         .background(RoundedRectangle(cornerRadius: AppTheme.smallCornerRadius).fill(AppTheme.cardBackground(scheme)))
         .overlay(
             RoundedRectangle(cornerRadius: AppTheme.smallCornerRadius)
                 .stroke(isHovered ? attachment.type.accentColor.opacity(0.5) : AppTheme.subtleBorder(scheme), lineWidth: 1)
         )
+        .shadow(color: .black.opacity(isDragging ? 0.25 : 0), radius: isDragging ? 8 : 0, y: isDragging ? 4 : 0)
+        .scaleEffect(isDragging ? 1.02 : 1)
+        .offset(y: dragOffset)
         .contentShape(Rectangle())
         .onHover { hovering in
             isHovered = hovering
-            if hovering {
+            if hovering && !dragActive {
                 hoverToken += 1
                 let token = hoverToken
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
-                    if isHovered && token == hoverToken { showPreview = true }
+                    if isHovered && token == hoverToken && !dragActive { showPreview = true }
                 }
             } else {
                 showPreview = false
@@ -451,31 +486,6 @@ struct AttachmentRow: View {
         case .reference:
             return attachment.path.map { "→ 槽位 \($0)" } ?? "引用"
         }
-    }
-}
-
-// MARK: - Reorder Drop Delegate
-
-/// v2.8.6: handles drops onto a row while dragging by attachment id. Reordering
-/// runs live as the dragged handle passes over other rows (dropEntered), so the
-/// list rearranges under the pointer; the drop just clears the drag state.
-private struct AttachmentReorderDropDelegate: DropDelegate {
-    let targetId: UUID
-    @Binding var draggingId: UUID?
-    let reorder: (UUID, UUID) -> Void
-
-    func dropEntered(info: DropInfo) {
-        guard let dragging = draggingId, dragging != targetId else { return }
-        reorder(dragging, targetId)
-    }
-
-    func dropUpdated(info: DropInfo) -> DropProposal? {
-        DropProposal(operation: .move)
-    }
-
-    func performDrop(info: DropInfo) -> Bool {
-        draggingId = nil
-        return true
     }
 }
 
