@@ -10,13 +10,11 @@ struct SlotNodeView: View {
     let content: SlotContent?
     let colorId: Int?
     let isHovered: Bool
-    // v2.7.65: store is optional so existing pure-display call sites keep working;
-    // when provided, the 📎 attachment entry + popover are shown.
+    // v2.7.65: store is optional so existing pure-display call sites keep working.
+    // v2.7.66: the attachment entry is now rendered by NodeAttachmentButtonOverlay
+    // at canvas level (above NodePortOverlay) so it always receives clicks; this
+    // view stays a pure card display again.
     var store: SlotStoreObservable? = nil
-
-    @State private var showingAttachments = false
-
-    private var attachmentCount: Int { store?.attachments(for: slot).count ?? 0 }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -30,8 +28,10 @@ struct SlotNodeView: View {
                     .font(.system(size: 13, weight: .semibold))
                     .lineLimit(1)
                 Spacer()
+                // v2.7.66: leave room on the top-right for the canvas-level
+                // attachment button overlay so it never overlaps the color dot.
                 if store != nil {
-                    attachmentButton
+                    Color.clear.frame(width: 20, height: 20)
                 }
                 if let colorId {
                     Circle().fill(SlotConnectionColor.color(for: colorId)).frame(width: 7, height: 7)
@@ -49,38 +49,6 @@ struct SlotNodeView: View {
         .shadow(color: .black.opacity(0.08), radius: 8, x: 0, y: 3)
     }
 
-    // v2.7.65: 📎 attachment entry, shown top-right of the title row (clear of ports).
-    @ViewBuilder
-    private var attachmentButton: some View {
-        if let store {
-            Button {
-                showingAttachments = true
-            } label: {
-                ZStack(alignment: .topTrailing) {
-                    Image(systemName: attachmentCount > 0 ? "paperclip.circle.fill" : "paperclip")
-                        .font(.system(size: 13, weight: .semibold))
-                        .foregroundColor(attachmentCount > 0 ? .accentColor : .secondary)
-                        .frame(width: 20, height: 20)
-                    if attachmentCount > 0 {
-                        Text("\(attachmentCount)")
-                            .font(.system(size: 9, weight: .bold))
-                            .foregroundColor(.white)
-                            .frame(width: 14, height: 14)
-                            .background(Circle().fill(AppTheme.brandGradient(.light)))
-                            .offset(x: 6, y: -6)
-                            .contentTransition(.numericText())
-                    }
-                }
-            }
-            .buttonStyle(.plain)
-            .help(attachmentCount > 0 ? "附件：\(attachmentCount) 个，点击管理" : "添加附件")
-            .popover(isPresented: $showingAttachments, arrowEdge: .top) {
-                AttachmentManagerPopover(slot: slot, store: store)
-            }
-        }
-    }
-
-
     // v2.7.9: Node title shows slot name, not content preview.
     private var slotDisplayName: String { "槽位 \(slot)" }
 
@@ -92,5 +60,48 @@ struct SlotNodeView: View {
         if content.hasImage || content.isImageFile { return "[图片]" }
         if content.isFileContent { return "[文件] \(content.fileDisplayName ?? "")" }
         return content.preview
+    }
+}
+
+// MARK: - Attachment Button (canvas-level overlay)
+
+// v2.7.66: Rendered ABOVE NodePortOverlay at the canvas level so the 📎 button
+// always receives clicks (previously it lived inside SlotNodeView, which sits
+// below the port overlay's zIndex and could have its taps swallowed). The entry
+// is always available so users can add the first attachment on an empty slot.
+struct NodeAttachmentButton: View {
+    let slot: Int
+    @ObservedObject var store: SlotStoreObservable
+    @State private var showingAttachments = false
+
+    private var attachmentCount: Int { store.attachments(for: slot).count }
+
+    var body: some View {
+        Button {
+            showingAttachments = true
+        } label: {
+            ZStack(alignment: .topTrailing) {
+                Image(systemName: attachmentCount > 0 ? "paperclip.circle.fill" : "paperclip")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundColor(attachmentCount > 0 ? .accentColor : .secondary)
+                    .frame(width: 22, height: 22)
+                    .background(Circle().fill(Color(NSColor.controlBackgroundColor)))
+                    .contentShape(Circle())
+                if attachmentCount > 0 {
+                    Text("\(attachmentCount)")
+                        .font(.system(size: 9, weight: .bold))
+                        .foregroundColor(.white)
+                        .frame(width: 14, height: 14)
+                        .background(Circle().fill(AppTheme.brandGradient(.light)))
+                        .offset(x: 6, y: -6)
+                        .contentTransition(.numericText())
+                }
+            }
+        }
+        .buttonStyle(.plain)
+        .help(attachmentCount > 0 ? "附件：\(attachmentCount) 个，点击管理" : "添加附件")
+        .popover(isPresented: $showingAttachments, arrowEdge: .top) {
+            AttachmentManagerPopover(slot: slot, store: store)
+        }
     }
 }

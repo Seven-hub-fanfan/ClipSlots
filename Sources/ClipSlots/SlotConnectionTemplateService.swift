@@ -16,10 +16,41 @@ enum SlotConnectionTemplateService {
         return try encoder.encode(template)
     }
 
+    // v2.7.66: Normalize an export URL so the file extension is never
+    // duplicated (e.g. "foo.clipslotslink.clipslotslink"). NSSavePanel appends
+    // the allowed content type extension, so a default name that already ends
+    // with `.clipslotslink` would otherwise produce a double extension.
+    static func sanitizedExportURL(_ url: URL) -> URL {
+        var last = url.lastPathComponent
+        let suffix = ".\(fileExtension)"
+        let dupSuffix = suffix + suffix
+        while last.hasSuffix(dupSuffix) {
+            last = String(last.dropLast(suffix.count))
+        }
+        // Ensure exactly one extension.
+        if !last.hasSuffix(suffix) {
+            last += suffix
+        }
+        return url.deletingLastPathComponent().appendingPathComponent(last)
+    }
+
+    // v2.7.66: Decode robustly by trying multiple date strategies. The export
+    // path uses ISO8601, but older files (and some hand-edited ones) may use the
+    // default (deferredToDate / numeric reference-date) strategy. Trying both
+    // prevents a spurious "模板格式无效" when only the date format differs.
+    private static func decodeTemplate(_ data: Data) throws -> SlotConnectionTemplate {
+        let iso = JSONDecoder()
+        iso.dateDecodingStrategy = .iso8601
+        if let template = try? iso.decode(SlotConnectionTemplate.self, from: data) {
+            return template
+        }
+        // Fallback: default (deferredToDate) date strategy. Let this throw the
+        // real decoding error if it also fails, so callers can surface details.
+        return try JSONDecoder().decode(SlotConnectionTemplate.self, from: data)
+    }
+
     static func decode(_ data: Data) throws -> SlotConnectionTemplate {
-        let decoder = JSONDecoder()
-        decoder.dateDecodingStrategy = .iso8601
-        let template = try decoder.decode(SlotConnectionTemplate.self, from: data)
+        let template = try decodeTemplate(data)
 
         guard template.version <= currentVersion else {
             throw SlotConnectionError.unsupportedTemplateVersion

@@ -2053,7 +2053,8 @@ final class SlotStoreObservable: ObservableObject {
         }
 
         let response = panel.runModal()
-        guard response == .OK, let url = panel.url else { return }
+        guard response == .OK, let rawURL = panel.url else { return }
+        let url = SlotConnectionTemplateService.sanitizedExportURL(rawURL)
 
         do {
             let appVersion = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "2.7.0"
@@ -2170,9 +2171,12 @@ final class SlotStoreObservable: ObservableObject {
                 kind: .error
             ))
         } catch {
+            // v2.7.66: surface the underlying decode error instead of silently
+            // collapsing every failure to a generic "模板格式无效".
+            NSLog("[ClipSlots] importConnectionTemplate decode failed: \(error)")
             showFloatingNotice(FloatingNotice(
                 title: "导入失败",
-                subtitle: "模板格式无效",
+                subtitle: "模板格式无效：\(error.localizedDescription)",
                 iconName: "xmark.circle.fill",
                 kind: .error
             ))
@@ -2293,7 +2297,8 @@ final class SlotStoreObservable: ObservableObject {
             } else {
                 panel.allowedFileTypes = ["clipslotslink", "json"]
             }
-            guard panel.runModal() == .OK, let url = panel.url else { return }
+            guard panel.runModal() == .OK, let rawURL = panel.url else { return }
+            let url = SlotConnectionTemplateService.sanitizedExportURL(rawURL)
             do {
                 let appVersion = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "2.7.7"
                 let bundle = SlotConnectionTemplateService.makeBundleTemplate(from: entries, name: "ClipSlots 页面连接模板", appVersion: appVersion)
@@ -2341,7 +2346,8 @@ final class SlotStoreObservable: ObservableObject {
             } else {
                 panel.allowedFileTypes = ["clipslotslink", "json"]
             }
-            guard panel.runModal() == .OK, let url = panel.url else { return }
+            guard panel.runModal() == .OK, let rawURL = panel.url else { return }
+            let url = SlotConnectionTemplateService.sanitizedExportURL(rawURL)
             do {
                 let appVersion = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "2.7.7"
                 let bundle = SlotConnectionTemplateService.makeBundleTemplate(from: entries, name: "ClipSlots 全部连接模板", appVersion: appVersion)
