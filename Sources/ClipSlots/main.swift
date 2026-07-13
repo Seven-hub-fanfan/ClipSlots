@@ -189,6 +189,17 @@ final class SlotStoreObservable: ObservableObject {
     /// Pending paste keystroke work item. Cancelled when switching special slots.
     private var pendingPasteWorkItem: DispatchWorkItem?
 
+    /// v2.8.1 (P0-1): monotonically increasing token identifying the current
+    /// sequential-paste run. Each scheduled recursion step captures the token it
+    /// was started with; if a newer sequence (or a cancel) bumps this value, the
+    /// stale step becomes a no-op, so two sequences can never interleave keystrokes.
+    private var pasteSequenceGeneration = 0
+    /// Clipboard snapshot captured for the in-flight sequence, so a superseding
+    /// sequence / cancel can restore it before starting fresh.
+    private var inFlightSequencePrevious: SlotContent?
+    /// Temp image files spilled for the in-flight sequence, cleaned on supersede.
+    private var inFlightSequenceTempFiles: [URL] = []
+
     /// The special slot id that current in-memory `slots` / `labels` belong to.
     private var loadedSpecialSlotId: String?
 
@@ -900,7 +911,23 @@ final class SlotStoreObservable: ObservableObject {
     private func cancelPendingPasteOperations(restoreClipboard: Bool = true) {
         pendingPasteWorkItem?.cancel()
         pendingPasteWorkItem = nil
+        abortInFlightSequence(restoreClipboard: restoreClipboard)
         cancelPendingClipboardRestore(restoreImmediately: restoreClipboard)
+    }
+
+    /// v2.8.1 (P0-1): synchronously supersede any in-flight sequential paste. Bumps
+    /// the generation token (so scheduled recursion steps become no-ops), optionally
+    /// restores that sequence's captured clipboard, and cleans its temp image files.
+    private func abortInFlightSequence(restoreClipboard: Bool) {
+        pasteSequenceGeneration &+= 1
+        if let prev = inFlightSequencePrevious {
+            if restoreClipboard { _ = clipboard.restore(prev) }
+            inFlightSequencePrevious = nil
+        }
+        if !inFlightSequenceTempFiles.isEmpty {
+            cleanupTempFiles(inFlightSequenceTempFiles)
+            inFlightSequenceTempFiles = []
+        }
     }
 
     private func promptAccessibilityPermissionIfNeeded() {
@@ -2132,9 +2159,16 @@ final class SlotStoreObservable: ObservableObject {
             return
         }
 
-        // Cancel any in-flight paste/restore and snapshot the clipboard to restore.
+        // Cancel any in-flight paste/restore (restores its clipboard + cleans its
+        // temp files + bumps the generation token) and snapshot the clipboard.
         cancelPendingPasteOperations(restoreClipboard: true)
         let previous = clipboard.capture()
+        // v2.8.1 (P0-1): claim a fresh generation token for this run and publish the
+        // in-flight bookkeeping so a later sequence / cancel can supersede us cleanly.
+        pasteSequenceGeneration &+= 1
+        let gen = pasteSequenceGeneration
+        inFlightSequencePrevious = previous
+        inFlightSequenceTempFiles = tempFiles
 
         // Resolve the concrete target: nil means "current frontmost" (hotkey path).
         let cleanTarget: NSRunningApplication?
@@ -2150,6 +2184,10 @@ final class SlotStoreObservable: ObservableObject {
             guard let self else { return }
             _ = self.clipboard.restore(previous)
             self.cleanupTempFiles(tempFiles)
+            if self.pasteSequenceGeneration == gen {
+                self.inFlightSequencePrevious = nil
+                self.inFlightSequenceTempFiles = []
+            }
         }
 
         let onFinish: () -> Void = { [weak self] in
@@ -2160,11 +2198,26 @@ final class SlotStoreObservable: ObservableObject {
                 _ = self.clipboard.restore(previous)
                 self.pendingClipboardRestore = nil
                 self.pendingClipboardRestoreContent = nil
-                self.cleanupTempFiles(tempFiles)
+                if self.pasteSequenceGeneration == gen { self.inFlightSequencePrevious = nil }
             }
             self.pendingClipboardRestoreContent = previous
             self.pendingClipboardRestore = restoreWorkItem
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.8, execute: restoreWorkItem)
+
+            // v2.8.1 (P1-4): defer temp-file cleanup well past the clipboard restore.
+            // Targets that read spilled image files asynchronously (即梦 / Finder-style
+            // drops) still need the files after the paste lands. changeCount polling is
+            // unreliable here (our own restore bumps changeCount), so a conservative
+            // fixed delay is the safest option.
+            if tempFiles.isEmpty {
+                if self.pasteSequenceGeneration == gen { self.inFlightSequenceTempFiles = [] }
+            } else {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) { [weak self] in
+                    guard let self else { return }
+                    self.cleanupTempFiles(tempFiles)
+                    if self.pasteSequenceGeneration == gen { self.inFlightSequenceTempFiles = [] }
+                }
+            }
         }
 
         let run: () -> Void = { [weak self] in
@@ -2176,6 +2229,7 @@ final class SlotStoreObservable: ObservableObject {
                 nonEmpty,
                 index: 0,
                 activeId: activeId,
+                generation: gen,
                 expectedPid: expectedPid,
                 onAbort: onAbort,
                 completion: onFinish
@@ -2184,7 +2238,23 @@ final class SlotStoreObservable: ObservableObject {
 
         if let app = cleanTarget {
             app.activate(options: [.activateIgnoringOtherApps])
-            waitUntilFrontmost(app, timeout: 1.2) { _ in run() }
+            waitUntilFrontmost(app, timeout: 1.2) { [weak self] ok in
+                guard let self else { return }
+                // v2.8.1 (P1-3): if activation failed, abort safely instead of
+                // firing keystrokes at the wrong app. Restore clipboard + clean up
+                // and surface a warning so the user knows nothing was pasted.
+                guard ok else {
+                    onAbort()
+                    self.showFloatingNotice(FloatingNotice(
+                        title: "粘贴失败",
+                        subtitle: "目标应用未能激活，请重试",
+                        iconName: "exclamationmark.triangle.fill",
+                        kind: .warning
+                    ))
+                    return
+                }
+                run()
+            }
         } else {
             run()
         }
@@ -2251,10 +2321,18 @@ final class SlotStoreObservable: ObservableObject {
         _ payloads: [ChainPastePayload],
         index: Int,
         activeId: String,
+        generation: Int,
         expectedPid: pid_t?,
         onAbort: @escaping () -> Void,
         completion: @escaping () -> Void
     ) {
+        // v2.8.1 (P0-1): bail out if a newer sequence (or a cancel) has superseded
+        // us. The superseding path already restored the clipboard / cleaned temp
+        // files, so this stale step must do nothing (no keystroke, no restore).
+        guard generation == pasteSequenceGeneration else {
+            NSLog("[ClipSlots] sequential paste superseded (gen \(generation) != \(pasteSequenceGeneration)) at step \(index)")
+            return
+        }
         guard index < payloads.count else {
             completion()
             return
@@ -2288,6 +2366,7 @@ final class SlotStoreObservable: ObservableObject {
                 payloads,
                 index: index + 1,
                 activeId: activeId,
+                generation: generation,
                 expectedPid: expectedPid,
                 onAbort: onAbort,
                 completion: completion

@@ -26,8 +26,10 @@ struct SlotContent: Codable {
         label = try container.decodeIfPresent(String.self, forKey: .label)
         htmlSource = try container.decodeIfPresent(String.self, forKey: .htmlSource)
         attachments = try container.decodeIfPresent([SlotAttachment].self, forKey: .attachments) ?? []
-        contentId = try container.decode(String.self, forKey: .contentId)
-        updatedAt = try container.decode(TimeInterval.self, forKey: .updatedAt)
+        // v2.8.1 (P1-1): older persisted payloads predate contentId/updatedAt.
+        // Decode leniently with sensible defaults so legacy data still loads.
+        contentId = try container.decodeIfPresent(String.self, forKey: .contentId) ?? UUID().uuidString
+        updatedAt = try container.decodeIfPresent(TimeInterval.self, forKey: .updatedAt) ?? timestamp.timeIntervalSince1970
     }
 
     init() {}
@@ -69,6 +71,13 @@ struct SlotContent: Codable {
     /// to form the thumbnail cache key so that even same-contentId overwrites
     /// (impossible in practice but defensive) still miss the cache.
     var updatedAt: TimeInterval = Date().timeIntervalSince1970
+
+    /// v2.8.1 (P1-2): true when this snapshot was produced by `capture()` from an
+    /// actually empty system pasteboard (vs. a default/never-captured value). Lets
+    /// `restore()` know it should clear the pasteboard rather than no-op, so an
+    /// injected paste payload is not left behind when the original clipboard was empty.
+    /// Not persisted (absent from CodingKeys).
+    var capturedEmpty: Bool = false
 
     var isEmpty: Bool { items.isEmpty }
 
@@ -137,6 +146,7 @@ final class ClipboardManager {
         content.timestamp = Date()
 
         guard let pbItems = pasteboard.pasteboardItems, !pbItems.isEmpty else {
+            content.capturedEmpty = true
             return content
         }
 
@@ -157,7 +167,18 @@ final class ClipboardManager {
     }
 
     func restore(_ content: SlotContent) -> Bool {
-        guard !content.items.isEmpty else { return false }
+        guard !content.items.isEmpty else {
+            // v2.8.1 (P1-2): the original clipboard was genuinely empty — clear the
+            // pasteboard so an injected paste payload isn't left behind. A non-empty
+            // capturedEmpty=false snapshot means "never captured / unknown", so we
+            // leave the pasteboard untouched to avoid wiping real user content.
+            if content.capturedEmpty {
+                pasteboard.clearContents()
+                NSLog("[ClipSlots] CLIPBOARD restore: original was empty, cleared pasteboard")
+                return true
+            }
+            return false
+        }
         pasteboard.clearContents()
         var pbItems: [NSPasteboardItem] = []
         for itemList in content.items {
