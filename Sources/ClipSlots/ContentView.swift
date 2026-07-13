@@ -668,7 +668,7 @@ struct ContentView: View {
             // Connection stays as a separate tool and is moved to the right side.
             connectionToolButton
 
-            Text("v2.8.3")
+            Text("v2.8.4")
                 .font(.caption2)
                 .foregroundColor(Color.secondary.opacity(0.65))
         }
@@ -1317,24 +1317,59 @@ private struct RetroPosterAmbientBackground: View {
 
             RetroPosterGrain(opacity: colorScheme == .dark ? 0.060 : 0.050)
         }
+        // v2.8.4 (perf): flatten the whole poster background (base fill + 4 large
+        // blur/`.screen` gradient layers + grain) into ONE offscreen GPU texture.
+        // Previously CoreAnimation had to composite ~7 blurred/blended layers every
+        // frame while the window resized/zoomed, which contributed to the dropped-frame
+        // feel. drawingGroup keeps the identical look (screen blends still composite
+        // against the base fill inside the group) but collapses the overdraw into a
+        // single Metal pass, off the main thread.
+        .drawingGroup()
     }
 }
 
 private struct RetroPosterGrain: View {
     let opacity: Double
+
+    // v2.8.4 (perf): the grain used to be a full-window `Canvas` that ran a nested
+    // per-pixel loop (step=3) over the ENTIRE window on EVERY redraw. During live
+    // window resize / title-bar double-click zoom this fired dozens of times per
+    // second on the main thread (a maximized window = 200k+ fill() calls per frame),
+    // stalling the run loop so the frame lagged behind the mouse and dropped frames.
+    // The grain is a purely decorative, static noise texture, so we now rasterize a
+    // single tile ONCE (cached) and tile it across the window — resize/zoom becomes a
+    // near-free bitmap stretch/tile instead of a main-thread pixel loop.
     var body: some View {
-        Canvas { context, size in
-            let step: CGFloat = 3
-            for x in stride(from: CGFloat(0), through: size.width, by: step) {
-                for y in stride(from: CGFloat(0), through: size.height, by: step) {
-                    let value = abs(sin(Double(x * 12.9898 + y * 78.233)))
-                    let alpha = opacity * (0.35 + value * 0.65)
-                    context.fill(Path(CGRect(x: x, y: y, width: 1, height: 1)), with: .color(Color.white.opacity(alpha)))
-                }
+        Image(nsImage: RetroPosterGrain.tileImage)
+            .resizable(resizingMode: .tile)
+            .opacity(opacity)
+            .blendMode(.overlay)
+            .allowsHitTesting(false)
+    }
+
+    /// Deterministic noise tile, generated exactly once on first access and reused
+    /// for the lifetime of the process. Alpha per pixel matches the old formula
+    /// (0.35 + value*0.65); the per-theme `opacity` is applied on the Image so one
+    /// tile serves both light and dark modes.
+    private static let tileImage: NSImage = makeTile(side: 240, step: 3)
+
+    private static func makeTile(side: CGFloat, step: CGFloat) -> NSImage {
+        let image = NSImage(size: NSSize(width: side, height: side))
+        image.lockFocus()
+        var x: CGFloat = 0
+        while x <= side {
+            var y: CGFloat = 0
+            while y <= side {
+                let value = abs(sin(Double(x * 12.9898 + y * 78.233)))
+                let alpha = 0.35 + value * 0.65
+                NSColor(white: 1, alpha: alpha).setFill()
+                NSBezierPath(rect: NSRect(x: x, y: y, width: 1, height: 1)).fill()
+                y += step
             }
+            x += step
         }
-        .blendMode(.overlay)
-        .allowsHitTesting(false)
+        image.unlockFocus()
+        return image
     }
 }
 

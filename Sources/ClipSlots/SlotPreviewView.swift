@@ -23,16 +23,13 @@ struct SlotPreviewView: View {
                         .resizable()
                         .aspectRatio(contentMode: .fit)
                         .padding(16)
-                } else if content.isImageFile, let url = content.primaryFileURL {
-                    if let image = NSImage(contentsOf: url) {
-                        Image(nsImage: image)
-                            .resizable()
-                            .aspectRatio(contentMode: .fit)
-                            .padding(16)
-                            .onAppear { largeImage = image }
-                    } else {
-                        fallbackPreview
-                    }
+                } else if content.isImageFile, content.primaryFileURL != nil {
+                    // v2.8.4 (perf): previously this branch called NSImage(contentsOf:)
+                    // synchronously inside body, decoding the FULL-resolution image on the
+                    // main thread — opening the preview stalled/dropped frames for large
+                    // images. loadLargeImage() (onAppear) now performs the decode off the
+                    // main thread via ThumbnailProvider; show a spinner until it lands.
+                    ProgressView()
                 } else {
                     fallbackPreview
                 }
