@@ -22,6 +22,9 @@ struct SettingsView: View {
     // v2.7.0: Slot connection preference
     @State private var enableSlotConnection: Bool
 
+    // v2.9.6: CLI install management
+    @StateObject private var cliManager = CLIInstallManager()
+
     @Environment(\.dismiss) private var dismiss
     @Environment(\.colorScheme) private var colorScheme
 
@@ -66,6 +69,7 @@ struct SettingsView: View {
                     advancedSection
                     notificationPreferencesSection
                     connectionSection
+                    cliSection
                     helpSection
                 }
                 .frame(maxWidth: 600)
@@ -77,6 +81,7 @@ struct SettingsView: View {
             footer
         }
         .background(AppTheme.windowBackground(colorScheme))
+        .onAppear { cliManager.refreshState() }
         .confirmationDialog("恢复默认设置？", isPresented: $showingResetConfirm, titleVisibility: .visible) {
             Button("恢复默认", role: .destructive) { resetDefaults() }
             Button("取消", role: .cancel) {}
@@ -215,6 +220,114 @@ struct SettingsView: View {
     private var connectionSection: some View {
         settingsSection(title: "槽位连接", icon: "point.3.connected.trianglepath.dotted") {
             settingsToggleRow(title: "启用槽位连接", subtitle: "关闭后隐藏连接编辑与串联粘贴；连接数据保留。", isOn: $enableSlotConnection)
+        }
+    }
+
+    // v2.9.6: CLI install management
+    private var cliSection: some View {
+        settingsSection(title: "命令行工具 (CLI)", icon: "terminal.fill") {
+            VStack(alignment: .leading, spacing: 12) {
+                // Status row
+                HStack(spacing: 10) {
+                    Circle()
+                        .fill(cliStatusColor)
+                        .frame(width: 9, height: 9)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(cliStatusTitle)
+                            .font(.subheadline)
+                            .fontWeight(.medium)
+                        Text(cliStatusSubtitle)
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                            .textSelection(.enabled)
+                    }
+                    Spacer()
+                }
+
+                Text("安装后可在终端或智能体中直接调用 `clipslots` 命令，路径为 \(CLIInstallManager.targetPath)。")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                // Action buttons
+                HStack(spacing: 10) {
+                    Button(action: { cliManager.install() }) {
+                        Label(cliPrimaryButtonTitle, systemImage: cliPrimaryButtonIcon)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(cliManager.isBusy)
+
+                    if cliIsInstalled {
+                        Button(role: .destructive, action: { cliManager.uninstall() }) {
+                            Label("卸载 CLI", systemImage: "trash")
+                        }
+                        .disabled(cliManager.isBusy)
+                    }
+
+                    if cliManager.isBusy {
+                        ProgressView()
+                            .controlSize(.small)
+                    }
+                    Spacer()
+                }
+
+                if let message = cliManager.lastMessage {
+                    Text(message)
+                        .font(.caption)
+                        .foregroundColor(cliManager.lastMessageIsError ? .red : .green)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+        }
+    }
+
+    private var cliIsInstalled: Bool {
+        switch cliManager.state {
+        case .notInstalled: return false
+        case .installed, .outdated: return true
+        }
+    }
+
+    private var cliStatusColor: Color {
+        switch cliManager.state {
+        case .notInstalled: return .secondary
+        case .installed: return .green
+        case .outdated: return .orange
+        }
+    }
+
+    private var cliStatusTitle: String {
+        switch cliManager.state {
+        case .notInstalled: return "未安装"
+        case .installed(let version): return "已安装 · v\(version)"
+        case .outdated(let installed, _): return "已安装（旧版本 v\(installed)）"
+        }
+    }
+
+    private var cliStatusSubtitle: String {
+        switch cliManager.state {
+        case .notInstalled:
+            return "尚未安装命令行工具。"
+        case .installed:
+            return CLIInstallManager.targetPath
+        case .outdated(_, let bundled):
+            return "可更新至 v\(bundled)"
+        }
+    }
+
+    private var cliPrimaryButtonTitle: String {
+        switch cliManager.state {
+        case .notInstalled: return "安装 CLI"
+        case .installed: return "重新安装 CLI"
+        case .outdated: return "更新 CLI"
+        }
+    }
+
+    private var cliPrimaryButtonIcon: String {
+        switch cliManager.state {
+        case .notInstalled: return "arrow.down.circle"
+        case .installed: return "arrow.clockwise"
+        case .outdated: return "arrow.up.circle"
         }
     }
 

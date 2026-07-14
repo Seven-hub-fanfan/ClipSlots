@@ -32,6 +32,10 @@ cp -f .build/debug/ClipSlotsCLI ~/bin/clipslots   # canonical path agents call
 
 ⚠️ **Case-insensitive filesystem gotcha:** macOS APFS/HFS+ is case-INSENSITIVE. Do NOT copy the CLI into the app bundle as `Contents/MacOS/clipslots` — it collides with the GUI binary `Contents/MacOS/ClipSlots` (same file!) and silently overwrites the GUI, causing launch crashes. If bundling the CLI, use a distinct name: `Contents/MacOS/clipslots-cli`.
 
+### In-App CLI Install (v2.9.6+)
+
+The Settings page ("命令行工具 (CLI)" section, `CLIInstallManager.swift`) lets users install/update/uninstall the CLI. It bundles the CLI inside the app as `Contents/MacOS/clipslots-cli` and symlinks `/usr/local/bin/clipslots` → that bundled binary (via a macOS admin-auth `do shell script ... with administrator privileges` dialog). Status (installed/outdated/not-installed) is derived by comparing `clipslots version` at the target path vs the bundled binary. **Release pipeline must bundle the CLI**: after building, `cp -f .build/debug/ClipSlotsCLI /Applications/ClipSlots.app/Contents/MacOS/clipslots-cli && codesign --force --sign - /Applications/ClipSlots.app/Contents/MacOS/clipslots-cli`.
+
 ## Architecture
 
 **ClipSlots** is a macOS clipboard manager with 10-slot groups ("槽位组"), organized into pages. Global hotkeys (Carbon) save/copy/paste clipboard content across apps.
