@@ -1,6 +1,17 @@
 import Foundation
 
 extension SlotContent {
+    /// Canonical list of file extensions treated as images across the whole app
+    /// (GUI thumbnailing + CLI attachment typing/classification). This lives in
+    /// the shared ClipSlotsKit layer so both the GUI (`ClipSlots`) and the CLI
+    /// (`ClipSlotsCLI`) reference ONE source of truth and can no longer drift.
+    /// (v2.9.7 R2: previously duplicated in ClipSlotsCLI/main.swift `IMAGE_EXTS`
+    /// and ClipSlots/SlotContent+Thumbnail.swift `imageExtensions`.)
+    public static let imageFileExtensions: Set<String> = [
+        "png", "jpg", "jpeg", "gif", "svg", "webp", "bmp",
+        "heic", "heif", "tiff", "tif", "ico", "icns", "avif"
+    ]
+
     public var detectedFileURLs: [URL] {
         var urls: [URL] = []
         for itemGroup in items {

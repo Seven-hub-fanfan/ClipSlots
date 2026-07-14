@@ -12,12 +12,15 @@ import ClipSlotsKit
 //   success: {"ok": true, ...}
 //   error:   {"ok": false, "error": "message"}  (exit code 1)
 
-let CLI_VERSION = "2.9.6"
+let CLI_VERSION = "2.9.7"
 let DEFAULT_GROUP = "default"
 let DEFAULT_PAGE = "default_page"
 
 // Extensions treated as images (attachment typing + content classification).
-let IMAGE_EXTS: Set<String> = ["png", "jpg", "jpeg", "gif", "svg", "webp", "bmp", "heic", "heif", "tiff", "tif", "ico", "icns", "avif"]
+// v2.9.7 (R2): single source of truth now lives in ClipSlotsKit
+// (`SlotContent.imageFileExtensions`); both GUI and CLI reference it so the two
+// lists can no longer drift out of sync.
+let IMAGE_EXTS: Set<String> = SlotContent.imageFileExtensions
 
 // MARK: - JSON output helpers
 
@@ -176,7 +179,7 @@ let COMMANDS: [[String: Any]] = [
     ["name": "help", "description": "列出所有命令、说明与参数（无参数时也返回此内容）。", "flags": [] as [String]],
     ["name": "groups", "description": "列出所有槽位组（SpecialSlot）。", "flags": [] as [String]],
     ["name": "pages", "description": "列出所有页面（SlotPage）。", "flags": ["--group <id> (可选,当前实现忽略,页面为全局)"]],
-    ["name": "list", "description": "列出某个槽位组内 1..N 号槽位的摘要。", "flags": ["--group <id> (默认 default)", "--page <id> (可选,仅回显)"]],
+    ["name": "list", "description": "列出某个槽位组内 1..N 号槽位的摘要。支持分页：传 --page-size 后按页返回并附带 pagination 元信息。", "flags": ["--group <id> (默认 default)", "--page <id> (可选,仅回显页面 id)", "--page-size <N> (可选,每页槽位数,>0 时启用分页)", "--page-num <N> (可选,第几页,从 1 开始,默认 1,需配合 --page-size)"]],
     ["name": "read", "description": "读取单个槽位的完整内容（纯文本、HTML源、类型、附件数等）。", "flags": ["<slot> (位置参数,1..N)", "--group <id> (默认 default)", "--page <id> (可选,仅回显)"]],
     ["name": "write", "description": "向槽位写入纯文本内容（保留已有附件），可选设置标签。", "flags": ["<slot> (位置参数,1..N)", "--text <string> (必填, 传 - 表示从 stdin 读取)", "--group <id> (默认 default)", "--page <id> (可选,仅回显)", "--label <string> (可选)"]],
     ["name": "search", "description": "在槽位预览/文本/标签中做大小写不敏感子串搜索。", "flags": ["<query> (位置参数)", "--group <id> (默认 default)", "--all-groups (在所有槽位组内搜索)", "--limit <N> (默认 50)"]],
@@ -188,6 +191,44 @@ let COMMANDS: [[String: Any]] = [
     ["name": "delete-page", "description": "删除一个页面及其下所有槽位组(软删除)。相关数据目录会被移动到 .trash，可恢复；.trash 会自动清理(默认保留最近 30 天/最多 50 条)。id 不存在会返回错误。", "flags": ["<id> (位置参数,页面 id)"]],
     ["name": "write-attachment", "description": "向某槽位追加一个或多个文件作为附件（按顺序），不改动槽位主体内容。图片扩展名归为 image 类型，其余为 file。", "flags": ["<slot> (位置参数,1..N)", "<file> [file ...] (位置参数,一个或多个文件路径,支持 ~ 与相对路径)", "--group <id> (默认 default)", "--replace (先清空该槽位已有附件再写入)", "--label <string> (可选)"]]
 ]
+
+// v2.9.7 (R1): allowed flag names per command. Any flag not in this set is
+// rejected with a clear error instead of being silently ignored, so agents
+// catch typos (e.g. `--lable` instead of `--label`). `help`/`h` are always
+// allowed (handled separately as per-command help). Positional args are not
+// validated here — only `--flags`.
+let COMMAND_ALLOWED_FLAGS: [String: Set<String>] = [
+    "version": [],
+    "help": [],
+    "groups": [],
+    "pages": ["group"],
+    "list": ["group", "page", "page-size", "page-num"],
+    "read": ["group", "page"],
+    "write": ["group", "page", "text", "label"],
+    "search": ["group", "all-groups", "limit"],
+    "paste": ["group", "page"],
+    "clear": ["group"],
+    "create-group": ["page"],
+    "create-page": [],
+    "delete-group": [],
+    "delete-page": [],
+    "write-attachment": ["group", "replace", "label"]
+]
+
+// v2.9.7 (R1): validate that every --flag passed to a known command is
+// recognized. Called once from the entry point before dispatch.
+func validateFlags(_ args: ParsedArgs) {
+    guard let allowed = COMMAND_ALLOWED_FLAGS[args.command] else { return }
+    let alwaysOK: Set<String> = ["help", "h"]
+    var keys = Set(args.flags.keys)
+    keys.formUnion(args.boolFlags)
+    for key in keys.sorted() where !allowed.contains(key) && !alwaysOK.contains(key) {
+        let hint = allowed.isEmpty
+            ? "command '\(args.command)' takes no flags"
+            : "allowed flags: \(allowed.sorted().map { "--\($0)" }.joined(separator: ", "))"
+        fail("unknown flag: --\(key) for command '\(args.command)' (\(hint); run 'clipslots \(args.command) --help')")
+    }
+}
 
 func cmdHelp() -> Never {
     success([
@@ -265,6 +306,37 @@ func cmdList(_ args: ParsedArgs) -> Never {
             "empty": isTrulyEmpty(content)
         ])
     }
+
+    // v2.9.7 (S2): optional pagination. When --page-size is provided we return
+    // only that slice plus a `pagination` object so agents can page through long
+    // output instead of parsing the whole array. Without --page-size behaviour is
+    // unchanged (full list, no pagination field) for backward compatibility.
+    if let psRaw = args.flag("page-size") {
+        guard let pageSize = Int(psRaw), pageSize > 0 else {
+            fail("--page-size must be a positive integer (got '\(psRaw)')")
+        }
+        let pageNum = Int(args.flag("page-num") ?? "1") ?? 1
+        guard pageNum >= 1 else {
+            fail("--page-num must be >= 1 (got '\(args.flag("page-num") ?? "")')")
+        }
+        let total = slots.count
+        let totalPages = max(1, (total + pageSize - 1) / pageSize)
+        let start = (pageNum - 1) * pageSize
+        let pageSlots = start < total ? Array(slots[start..<min(start + pageSize, total)]) : []
+        success([
+            "group": group,
+            "page": page,
+            "slots": pageSlots,
+            "pagination": [
+                "pageNum": pageNum,
+                "pageSize": pageSize,
+                "total": total,
+                "totalPages": totalPages,
+                "hasMore": pageNum < totalPages
+            ]
+        ])
+    }
+
     success(["group": group, "page": page, "slots": slots])
 }
 
@@ -612,6 +684,11 @@ if parsed.command != "help", parsed.command != "version",
    parsed.boolFlags.contains("help") || parsed.boolFlags.contains("h") {
     cmdCommandHelp(parsed.command)
 }
+
+// v2.9.7 (R1): reject unknown flags for known commands (typo protection) before
+// dispatch, so `--lable`/`--pagesize` etc. surface a clear error instead of being
+// silently ignored.
+validateFlags(parsed)
 
 switch parsed.command {
 case "version", "--version", "-v":

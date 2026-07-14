@@ -73,10 +73,7 @@ extension SlotContent {
     // file URLs without importing AppKit/UI code.
 
     /// Image file extensions.
-    private static let imageExtensions: Set<String> = [
-        "png", "jpg", "jpeg", "gif", "svg", "webp", "bmp",
-        "heic", "heif", "tiff", "tif", "ico", "icns", "avif"
-    ]
+    private static let imageExtensions: Set<String> = SlotContent.imageFileExtensions
 
     /// True if the file URL points to an image file (by extension).
     var isImageFile: Bool {

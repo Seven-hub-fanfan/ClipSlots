@@ -1,13 +1,17 @@
 ---
 name: clipslots-manager
-version: 0.6 (draft)
+version: 0.7 (draft)
 used_when: 当需要以编程方式读取、写入、检索、加载或整理 macOS 剪贴板槽位管理器 ClipSlots 中的内容时使用（把文本/文件存进槽位、读出内容、搜索历史、把内容放到系统剪贴板、批量整理文件夹素材到槽位组/页面、删除槽位组/页面等）。
-requires: macOS + 已安装 ClipSlots v2.9.5+（CLI 位于 `~/bin/clipslots`）
+requires: macOS + 已安装 ClipSlots v2.9.7+（CLI 位于 `~/bin/clipslots`）
 ---
 
 # ClipSlots CLI 使用技能（草稿）
 
+> 正式可安装版见 `skills/clipslots-manager/SKILL.md`；本文件为工作草稿，两者内容保持同步。
+
 `clipslots` 是 ClipSlots.app 的命令行接口，与 GUI **共享同一份磁盘数据**（`ClipSlotsKit` 库），CLI 的读写会实时反映到 GUI，反之亦然。所有命令输出**单个 JSON 对象**到 stdout，专为智能体调用设计。
+
+> **v2.9.7 新增**：(1) **未知 flag 报错（R1）**——任一命令传入其不认识的 `--flag` 时，不再静默忽略，而是返回 `{"ok":false,"error":"unknown flag: --xxx for command '...' (allowed flags: ...)"}` 并退出码 1，帮助发现拼写错误（如 `--lable`→`--label`）。位置参数不受此校验影响。(2) **`list` 支持分页（S2）**——传 `--page-size <N>` 即按页返回，并附带 `pagination:{pageNum,pageSize,total,totalPages,hasMore}`；可选 `--page-num <N>`（从 1 开始，默认 1）。不传 `--page-size` 时行为不变（返回全部，无 pagination 字段）。(3) **`write` / `write-attachment` 支持 `--label`（S3）**——写入槽位时可同时设置标签，省去一次额外调用。
 
 > **v2.9.5 新增**：(1) `.trash` **自动清理**——`delete-group`/`delete-page` 的软删除数据不再无限堆积，删除时及启动时自动清理（默认保留最近 30 天、最多 50 条，超出的最旧条目被物理删除）；30 天内、条数在上限内的删除仍可人工恢复。(2) **子命令级 `--help`/`-h`**——任意子命令加 `--help` 或 `-h` 即返回该命令的用法与参数说明（`{command,description,flags,usage}`），无需查顶层 `help`。
 
@@ -21,7 +25,8 @@ requires: macOS + 已安装 ClipSlots v2.9.5+（CLI 位于 `~/bin/clipslots`）
 - 数据模型三层：`页面(page) → 槽位组(group) → 槽位(slot)`。
   - 默认组 id：`default`；默认页 id：`default_page`；每组固定 `1..10` 共 10 个槽位。
   - **每个页面最多 10 个槽位组**；槽位组数超限需新建页面。
-- 省略 `--group` 默认操作 `default` 组；`--page` 目前仅用于回显。
+- 省略 `--group` 默认操作 `default` 组；`--page` 目前仅用于回显（**注意**：`list` 的分页参数是 `--page-size`/`--page-num`，与 `--page` 是两回事）。
+- **未知 flag 会报错（v2.9.7）**：给某命令传它不支持的 `--flag` 会返回 `ok:false`（`unknown flag: --xxx ...`），请以 `--help` 输出的 flags 为准；位置参数不受影响。
 - 每个槽位包含：**主体内容（items，文本/图片/文件）** + **附件列表（attachments，按顺序）** + 标签(label)。主体与附件相互独立，主体可为空而只有附件。
 - **空槽判定（重要）**：
   - 一个槽位"为空"当且仅当【主体内容(items)为空 AND 附件列表为空】。
@@ -38,7 +43,7 @@ clipslots version                                  # {"ok":true,"version":"2.9.4
 clipslots help                                     # 命令清单 + version/defaultGroup/defaultPage/slotCount
 clipslots groups                                   # 所有槽位组，返回对象 {groups:[{id,name,pageId,pageName,pageCount,slotCount,current}]}
 clipslots pages                                    # 所有页面，返回对象 {pages:[{id,name,current}]}
-clipslots list [--group <id>] [--page <id>]        # 返回顶层对象 {group,page,slots:[{slot,label,preview,type,attachmentCount,empty}]}（注意 slots 是对象里的字段，不是裸数组）；empty 表示主体与附件都为空（v2.9.3+），每槽含 attachmentCount 字段
+clipslots list [--group <id>] [--page <id>] [--page-size <N>] [--page-num <N>]   # 返回顶层对象 {group,page,slots:[{slot,label,preview,type,attachmentCount,empty}]}（注意 slots 是对象里的字段，不是裸数组）；empty 表示主体与附件都为空（v2.9.3+），每槽含 attachmentCount 字段。传 --page-size 后按页返回并附带 pagination:{pageNum,pageSize,total,totalPages,hasMore}（v2.9.7）
 clipslots read <slot> [--group <id>]               # 单槽完整内容 {slot,label,preview,text,htmlSource,types,attachmentCount,empty}；empty 表示主体与附件都为空（v2.9.3+）
 clipslots search <query> [--group <id>] [--all-groups] [--limit 50]   # 子串搜索（不分大小写），返回 {query,results:[{group,page,pageName,slot,label,preview}]}；命中范围含预览/正文/标签/附件文件名（v2.9.3+）
 ```
@@ -88,9 +93,12 @@ clipslots delete-group -h
 
 > 说明：`write-attachment` 的文件路径支持 `~` 与相对路径；图片扩展名归 `image` 类型，其余归 `file`。
 
-### 已知能力 / 限制（v2.9.5）
+### 已知能力 / 限制（v2.9.7）
 
-- ✅ **子命令级 `--help` / `-h`**（v2.9.5 新增）：任意子命令加 `--help` 或 `-h` 返回该命令的独立说明（`{command,description,flags,usage}`），不必再解析顶层 `help` 的整表。
+- ✅ **未知 flag 报错**（v2.9.7 R1）：命令收到它不支持的 `--flag` 会返回 `ok:false`（`unknown flag: --xxx for command '...' (allowed flags: ...)`），便于发现拼写错误；不确定某命令支持哪些 flag 时先跑 `<cmd> --help`。仅校验 `--flag`，位置参数不受影响。
+- ✅ **`list` 分页**（v2.9.7 S2）：传 `--page-size <N>`（>0）按页返回该组槽位并附带 `pagination:{pageNum,pageSize,total,totalPages,hasMore}`，可用 `--page-num <N>`（从 1 开始）翻页；不传 `--page-size` 则返回全部（无 pagination 字段，向后兼容）。注意与仅回显的 `--page <id>` 区分。
+- ✅ **`write` / `write-attachment` 支持 `--label`**（S3）：写入槽位主体或追加附件时可同时设置标签，减少一次额外的调用往返。
+- ✅ **子命令级 `--help` / `-h`**（v2.9.5）：任意子命令加 `--help` 或 `-h` 返回该命令的独立说明（`{command,description,flags,usage}`），不必再解析顶层 `help` 的整表。
 - ✅ **`.trash` 自动清理**（v2.9.5 新增）：`delete-group`/`delete-page` 的软删除数据会在删除时与 app/CLI 启动时自动清理，默认保留最近 30 天、最多 50 条，超出的最旧条目被物理删除。删除仍是"先移动到 `.trash`"，30 天内且未超上限的条目仍可人工恢复，因此删除依旧可安全用于整理。
 - ✅ **`delete-group` / `delete-page` 软删除**（v2.9.4 新增）：删除是"移动到 `.trash`"而非物理抹除，可人工恢复；因此可安全用于整理。删除不存在的 id 返回 `ok:false`（`group/page <id> not found`），不会误删。
 - ✅ **`create-group` 同页去重**（v2.9.4 新增）：同一页面内不允许出现同名槽位组，冲突返回 `a group named '<name>' already exists on this page`；不同页面之间允许同名。批量导入/自动建组时遇冲突请改名或加 `-2`/`-3` 后缀。
