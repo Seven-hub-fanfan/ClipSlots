@@ -108,7 +108,26 @@ struct SlotContent: Codable {
                     }
                 }
                 if item.type == "public.rtf" { return "[RTF]" }
-                if item.type == "public.html" { return "[HTML]" }
+                if item.type == "public.html" {
+                    // v2.8.6: show the real readable text (HTML tags stripped) so an
+                    // HTML slot looks exactly like a plain-text slot, instead of the
+                    // bare "[HTML]" placeholder. A plain-text item, when present, is
+                    // matched earlier in this loop and takes priority.
+                    if let str = String(data: item.data, encoding: .utf8) ?? String(data: item.data, encoding: .utf16) {
+                        let stripped = str
+                            .replacingOccurrences(of: "<[^>]+>", with: " ", options: .regularExpression)
+                            .replacingOccurrences(of: "&nbsp;", with: " ")
+                            .replacingOccurrences(of: "&lt;", with: "<")
+                            .replacingOccurrences(of: "&gt;", with: ">")
+                            .replacingOccurrences(of: "&amp;", with: "&")
+                            .replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
+                            .trimmingCharacters(in: .whitespacesAndNewlines)
+                        if !stripped.isEmpty {
+                            return stripped.count > 30 ? String(stripped.prefix(30)) + "…" : stripped
+                        }
+                    }
+                    return "[HTML]"
+                }
                 if item.type == "public.file-url" {
                     if let urlStr = String(data: item.data, encoding: .utf8), let url = URL(string: urlStr) {
                         return "[文件]" + url.lastPathComponent
@@ -255,33 +274,14 @@ extension SlotContent {
         return ["html", "htm"].contains(url.pathExtension.lowercased())
     }
 
-    /// v2.8.5: raw HTML string extracted from a `public.html` pasteboard item stored
-    /// inside `items`. Normal clipboard capture (Cmd+C from a webpage / Feishu / Lark)
-    /// keeps the rich HTML bytes here, but the v2.7.33 rich-paste field `htmlSource`
-    /// stays nil and `plainText`/`preview` only expose the plain-text fallback or the
-    /// "[HTML]" placeholder. Previously NO code read this item, so an HTML clip could
-    /// never find its source and the card showed the literal text "[HTML]" instead of
-    /// a rendered preview. Reading it here is the single source of truth that lets the
-    /// WKWebView card/radial preview render the real HTML.
-    var htmlPasteboardSource: String? {
-        for itemList in items {
-            for item in itemList where item.type == "public.html" {
-                for encoding in [String.Encoding.utf8, .utf16, .isoLatin1] {
-                    if let s = String(data: item.data, encoding: encoding),
-                       !s.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                        return s
-                    }
-                }
-            }
-        }
-        return nil
-    }
-
+    /// v2.8.6: HTML captured to a slot is now presented as plain text everywhere
+    /// (see `preview`), so we no longer surface the raw `public.html` bytes as a
+    /// render source. Only genuine rich-paste (`htmlSource`) or `.html` files are
+    /// treated as HTML documents.
     var isHTMLDocument: Bool {
         if isHTMLFileURL { return true }
-        if htmlPasteboardSource != nil { return true }
-        let raw = (plainText ?? preview).trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        return raw.hasPrefix("<!doctype html") || raw.hasPrefix("<html") || raw.contains("<body") || raw.contains("</html>")
+        if let htmlSource, !htmlSource.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return true }
+        return false
     }
 
     var htmlDocumentSource: String? {
@@ -289,9 +289,7 @@ extension SlotContent {
             if let text = try? String(contentsOf: url, encoding: .utf8) { return text }
             if let text = try? String(contentsOf: url) { return text }
         }
-        if let html = htmlPasteboardSource { return html }
-        let raw = (plainText ?? preview).trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !raw.isEmpty, raw != "[HTML]" else { return nil }
-        return raw
+        if let htmlSource, !htmlSource.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return htmlSource }
+        return nil
     }
 }

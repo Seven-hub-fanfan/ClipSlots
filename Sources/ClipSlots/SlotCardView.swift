@@ -526,13 +526,10 @@ private extension SlotContent {
     var isHTMLContent: Bool {
         if let htmlSource, !htmlSource.isEmpty { return true }
         if let url = primaryFileURL, ["html", "htm"].contains(url.pathExtension.lowercased()) { return true }
-        // v2.8.5: recognize HTML stored as a `public.html` clipboard item so the card
-        // exposes "编辑HTML" and edits the real source instead of the plain-text fallback.
-        if htmlPasteboardSource != nil { return true }
         let raw = (plainText ?? preview).lowercased()
         return raw.contains("<html") || raw.contains("<!doctype html") || raw.contains("<body")
     }
-    var htmlEditableValue: String { htmlSource ?? htmlPasteboardSource ?? plainText ?? preview }
+    var htmlEditableValue: String { htmlSource ?? plainText ?? preview }
     var isPlainEditableText: Bool {
         primaryFileURL == nil && inlineImage == nil && !isHTMLContent && !preview.hasPrefix("[图片") && !preview.hasPrefix("[文件") && !preview.hasPrefix("[富文本]")
     }

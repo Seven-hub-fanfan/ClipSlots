@@ -85,10 +85,6 @@ struct SlotThumbnailView: View {
                         .font(.caption2)
                         .foregroundColor(.secondary)
                 }
-            } else if let html = content.preferredHTMLSourceForPreview {
-                HTMLCardPreview(html: html)
-            } else if content.isHTMLDocument {
-                htmlUnavailableView
             } else if content.isFileContent {
                 VStack(spacing: 8) {
                     Image(systemName: fileIconName)
@@ -104,6 +100,10 @@ struct SlotThumbnailView: View {
                         .foregroundColor(.secondary.opacity(0.7))
                 }
             } else {
+                // v2.8.6: HTML slots now show the plain-text preview here (identical
+                // font/style to every other text slot), instead of an inconsistent
+                // "HTML" chip + WKWebView render. The HTML tags are stripped upstream
+                // in `SlotContent.preview`.
                 Text(content.preview)
                     .font(.system(size: 11, design: .monospaced))
                     .foregroundColor(.primary.opacity(0.8))
@@ -244,9 +244,6 @@ private extension SlotContent {
         if let htmlSource, !htmlSource.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return htmlSource }
         if let url = primaryFileURL, ["html", "htm"].contains(url.pathExtension.lowercased()),
            let html = try? String(contentsOf: url, encoding: .utf8) { return html }
-        // v2.8.5: HTML captured via normal clipboard copy lives as a `public.html`
-        // item inside `items` (htmlSource stays nil), so read it here to render.
-        if let html = htmlPasteboardSource { return html }
         let raw = plainText ?? preview
         let lower = raw.lowercased()
         if lower.contains("<html") || lower.contains("<!doctype html") || lower.contains("<body") { return raw }
