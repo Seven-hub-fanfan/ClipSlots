@@ -1,4 +1,5 @@
 import Foundation
+import ClipSlotsKit
 import SwiftUI
 
 // MARK: - Floating Notice Kind (v2.6.3)

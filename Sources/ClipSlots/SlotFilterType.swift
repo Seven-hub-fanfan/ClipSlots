@@ -1,4 +1,5 @@
 import Foundation
+import ClipSlotsKit
 
 // MARK: - Slot Filter Type (v2.5)
 

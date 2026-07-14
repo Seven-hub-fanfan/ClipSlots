@@ -1,4 +1,5 @@
 import SwiftUI
+import ClipSlotsKit
 
 /// A fixed-height empty slot placeholder that never has any @State image to leak.
 struct EmptySlotThumbnailView: View {

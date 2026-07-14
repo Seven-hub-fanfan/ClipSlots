@@ -1,25 +1,27 @@
 import Foundation
 
-struct AppConfig: Codable {
-    var slots: Int = 10
-    var verbose: Bool = true
+public struct AppConfig: Codable {
+    public var slots: Int = 10
+    public var verbose: Bool = true
     // v2.7.23: default shortcuts use Cmd. Users can still change them in Settings.
-    var saveKey: String = "cmd+option+{n}"
-    var pasteKey: String = "cmd+{n}"
-    var radialKey: String = "ctrl+space"
-    var hotkeyTemplate: HotkeyTemplate = HotkeyTemplate(kind: .numeric)
+    public var saveKey: String = "cmd+option+{n}"
+    public var pasteKey: String = "cmd+{n}"
+    public var radialKey: String = "ctrl+space"
+    public var hotkeyTemplate: HotkeyTemplate = HotkeyTemplate(kind: .numeric)
+
+    public init() {}
 
     private static let configURL = FileManager.default.homeDirectoryForCurrentUser
         .appendingPathComponent(".config/clipslots/config.toml")
 
-    static func load() -> AppConfig {
+    public static func load() -> AppConfig {
         guard let content = try? String(contentsOf: Self.configURL, encoding: .utf8) else {
             return AppConfig()
         }
         return parseTOML(content)
     }
 
-    func save() {
+    public func save() {
         let dir = Self.configURL.deletingLastPathComponent()
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
 

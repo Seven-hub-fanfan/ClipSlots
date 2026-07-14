@@ -1,4 +1,5 @@
 import Foundation
+import ClipSlotsKit
 import UniformTypeIdentifiers
 
 // MARK: - Slot Connection Template Service

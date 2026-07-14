@@ -1,4 +1,5 @@
 import SwiftUI
+import ClipSlotsKit
 
 struct NodeConnectionCanvas: View {
     let map: SlotConnectionMap

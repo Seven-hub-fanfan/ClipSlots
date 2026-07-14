@@ -1,4 +1,5 @@
 import SwiftUI
+import ClipSlotsKit
 
 // MARK: - Import Options Sheet (v2.6.7)
 

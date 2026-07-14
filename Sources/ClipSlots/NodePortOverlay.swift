@@ -1,4 +1,5 @@
 import SwiftUI
+import ClipSlotsKit
 
 // v2.7.5: Unified port overlay at canvas level.
 // Previously each SlotNodeView had its own portLayer, causing the last-

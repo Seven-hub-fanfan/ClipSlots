@@ -1,4 +1,5 @@
 import SwiftUI
+import ClipSlotsKit
 
 // v2.7.5: SlotNodeView is now a pure card display. All port handles and
 // drag logic have been moved to NodePortOverlay at the canvas level, fixing

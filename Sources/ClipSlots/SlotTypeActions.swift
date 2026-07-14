@@ -1,4 +1,5 @@
 import AppKit
+import ClipSlotsKit
 import Foundation
 
 // MARK: - Slot Type Actions (v2.5)

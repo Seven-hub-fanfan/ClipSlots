@@ -1,4 +1,5 @@
 import SwiftUI
+import ClipSlotsKit
 
 struct NodeCanvasSheet: View {
     @ObservedObject var store: SlotStoreObservable

@@ -1,4 +1,5 @@
 import SwiftUI
+import ClipSlotsKit
 
 struct SpecialSlotManagementView: View {
     @ObservedObject var store: SlotStoreObservable

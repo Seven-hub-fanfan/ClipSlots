@@ -1,4 +1,5 @@
 import Carbon
+import ClipSlotsKit
 import Cocoa
 
 // Global callback storage for Carbon event handler (C function pointer requirement)

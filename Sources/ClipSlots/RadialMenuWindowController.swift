@@ -1,4 +1,5 @@
 import AppKit
+import ClipSlotsKit
 import SwiftUI
 
 // MARK: - Radial Panel (intercepts mouseDown at window level)

@@ -1,4 +1,5 @@
 import Foundation
+import ClipSlotsKit
 
 // MARK: - Slot Global Search Result (v2.5.2)
 

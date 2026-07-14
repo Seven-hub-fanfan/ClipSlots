@@ -1,4 +1,5 @@
 import SwiftUI
+import ClipSlotsKit
 import AppKit
 
 // MARK: - Global HUD Window Controller (v2.6.3)

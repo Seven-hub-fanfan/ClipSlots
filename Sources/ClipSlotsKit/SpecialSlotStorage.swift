@@ -2,13 +2,13 @@ import Foundation
 
 // MARK: - Slot Group Direction (v2.4.1)
 
-enum SlotGroupDirection {
+public enum SlotGroupDirection {
     case previous
     case next
 }
 
-final class SpecialSlotStorage {
-    static let shared = SpecialSlotStorage()
+public final class SpecialSlotStorage {
+    public static let shared = SpecialSlotStorage()
 
     private let baseDir: URL
     private let indexURL: URL
@@ -16,7 +16,7 @@ final class SpecialSlotStorage {
     private let decoder = JSONDecoder()
     private let queue = DispatchQueue(label: "com.clipslots.specialstorage", qos: .utility)
 
-    init() {
+    public init() {
         let appSupport = FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent(".local/share/clipslots/special_slots")
         baseDir = appSupport
@@ -271,7 +271,7 @@ final class SpecialSlotStorage {
 
     // MARK: - Index Operations
 
-    func loadIndex() -> SpecialSlotIndex {
+    public func loadIndex() -> SpecialSlotIndex {
         queue.sync {
             do {
                 let data = try Data(contentsOf: indexURL)
@@ -294,14 +294,14 @@ final class SpecialSlotStorage {
         }
     }
 
-    func saveIndex(_ index: SpecialSlotIndex) throws {
+    public func saveIndex(_ index: SpecialSlotIndex) throws {
         let data = try encoder.encode(index)
         try data.write(to: indexURL, options: .atomic)
     }
 
     // MARK: - Current Special Slot
 
-    func currentSpecialSlot() throws -> SpecialSlot {
+    public func currentSpecialSlot() throws -> SpecialSlot {
         let index = loadIndex()
         guard let current = index.specialSlots.first(where: { $0.id == index.currentSpecialSlotId }) else {
             // Auto-fix: switch to first available
@@ -316,7 +316,7 @@ final class SpecialSlotStorage {
         return current
     }
 
-    func switchToSpecialSlot(id: String) throws {
+    public func switchToSpecialSlot(id: String) throws {
         var index = loadIndex()
         guard let slot = index.specialSlots.first(where: { $0.id == id }) else {
             throw SpecialSlotError.specialSlotNotFound
@@ -330,7 +330,7 @@ final class SpecialSlotStorage {
     }
 
     // v2.4.1: cycle through slot groups within the current page
-    func switchToAdjacentSpecialSlot(direction: SlotGroupDirection) throws {
+    public func switchToAdjacentSpecialSlot(direction: SlotGroupDirection) throws {
         var index = loadIndex()
 
         let groupsInPage = index.specialSlots
@@ -365,7 +365,7 @@ final class SpecialSlotStorage {
         NSLog("[ClipSlots] switchToAdjacentSpecialSlot direction=\(direction) to=\(target.id) name=\(target.name)")
     }
 
-    func updateSelectedSpecialSlot(id: String) {
+    public func updateSelectedSpecialSlot(id: String) {
         var index = loadIndex()
         guard index.specialSlots.contains(where: { $0.id == id }) else { return }
         index.selectedSpecialSlotId = id
@@ -373,7 +373,7 @@ final class SpecialSlotStorage {
         try? saveIndex(index)
     }
 
-    func updateActiveHotkeySpecialSlot(id: String) throws {
+    public func updateActiveHotkeySpecialSlot(id: String) throws {
         var index = loadIndex()
         guard index.specialSlots.contains(where: { $0.id == id }) else {
             throw SpecialSlotError.specialSlotNotFound
@@ -384,7 +384,7 @@ final class SpecialSlotStorage {
 
     // MARK: - CRUD Special Slots
 
-    func createSpecialSlot(
+    public func createSpecialSlot(
         name: String,
         pageId: String? = nil,
         sourceType: SpecialSlotSourceType = .manual,
@@ -430,7 +430,7 @@ final class SpecialSlotStorage {
         return slot
     }
 
-    func deleteSpecialSlot(id: String) throws {
+    public func deleteSpecialSlot(id: String) throws {
         var index = loadIndex()
 
         guard let targetSlot = index.specialSlots.first(where: { $0.id == id }) else {
@@ -472,7 +472,7 @@ final class SpecialSlotStorage {
         try saveIndex(index)
     }
 
-    func renameSpecialSlot(id: String, name: String) throws {
+    public func renameSpecialSlot(id: String, name: String) throws {
         var index = loadIndex()
 
         guard let idx = index.specialSlots.firstIndex(where: { $0.id == id }) else {
@@ -492,7 +492,7 @@ final class SpecialSlotStorage {
 
     // MARK: - Page CRUD (v2.4)
 
-    func createPage(name: String) throws -> SlotPage {
+    public func createPage(name: String) throws -> SlotPage {
         var index = loadIndex()
 
         let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -520,7 +520,7 @@ final class SpecialSlotStorage {
         return page
     }
 
-    func renamePage(id: String, name: String) throws {
+    public func renamePage(id: String, name: String) throws {
         var index = loadIndex()
         guard let idx = index.pages.firstIndex(where: { $0.id == id }) else {
             throw PageError.pageNotFound
@@ -540,7 +540,7 @@ final class SpecialSlotStorage {
         NSLog("[ClipSlots] Page renamed to: \(trimmed)")
     }
 
-    func deletePage(id: String) throws {
+    public func deletePage(id: String) throws {
         var index = loadIndex()
 
         guard index.pages.count > 1 else {
@@ -574,7 +574,7 @@ final class SpecialSlotStorage {
         NSLog("[ClipSlots] Page deleted: \(id)")
     }
 
-    func switchToPage(id: String) throws {
+    public func switchToPage(id: String) throws {
         var index = loadIndex()
         guard index.pages.contains(where: { $0.id == id }) else {
             throw PageError.pageNotFound
@@ -619,7 +619,7 @@ final class SpecialSlotStorage {
 
     private var storageCache: [String: SlotStorage] = [:]
 
-    func slotStorage(for specialSlotId: String) -> SlotStorage {
+    public func slotStorage(for specialSlotId: String) -> SlotStorage {
         if let cached = storageCache[specialSlotId] {
             return cached
         }
@@ -631,12 +631,12 @@ final class SpecialSlotStorage {
 
     // MARK: Explicit API — all callers must pass specialSlotId
 
-    func get(_ slot: Int, in specialSlotId: String) -> SlotContent {
+    public func get(_ slot: Int, in specialSlotId: String) -> SlotContent {
         slotStorage(for: specialSlotId).get(slot)
     }
 
     @discardableResult
-    func set(_ slot: Int, content: SlotContent, in specialSlotId: String) -> Bool {
+    public func set(_ slot: Int, content: SlotContent, in specialSlotId: String) -> Bool {
         var content = content
         content.timestamp = Date()
         let result = slotStorage(for: specialSlotId).set(slot, content: content)
@@ -644,32 +644,32 @@ final class SpecialSlotStorage {
         return result
     }
 
-    func clear(_ slot: Int, in specialSlotId: String) {
+    public func clear(_ slot: Int, in specialSlotId: String) {
         slotStorage(for: specialSlotId).clear(slot)
         touchSpecialSlot(id: specialSlotId)
     }
 
-    func clearAllSlots(in specialSlotId: String) throws {
+    public func clearAllSlots(in specialSlotId: String) throws {
         try slotStorage(for: specialSlotId).clearAll()
         touchSpecialSlot(id: specialSlotId)
     }
 
-    func getLabel(_ slot: Int, in specialSlotId: String) -> String? {
+    public func getLabel(_ slot: Int, in specialSlotId: String) -> String? {
         slotStorage(for: specialSlotId).getLabel(slot)
     }
 
-    func setLabel(_ slot: Int, label: String?, in specialSlotId: String) {
+    public func setLabel(_ slot: Int, label: String?, in specialSlotId: String) {
         slotStorage(for: specialSlotId).setLabel(slot, label: label)
         touchSpecialSlot(id: specialSlotId)
     }
 
-    func snapshot(in specialSlotId: String) -> [Int: SlotContent] {
+    public func snapshot(in specialSlotId: String) -> [Int: SlotContent] {
         slotStorage(for: specialSlotId).snapshot()
     }
 
     // MARK: - Source Update
 
-    func updateCurrentSpecialSlotSource(sourceType: SpecialSlotSourceType, sourcePath: String?) throws {
+    public func updateCurrentSpecialSlotSource(sourceType: SpecialSlotSourceType, sourcePath: String?) throws {
         var index = loadIndex()
         guard let idx = index.specialSlots.firstIndex(where: { $0.id == index.currentSpecialSlotId }) else {
             throw SpecialSlotError.specialSlotNotFound
@@ -682,7 +682,7 @@ final class SpecialSlotStorage {
 
     // MARK: - Settings
 
-    func updateSettings(_ transform: (inout SpecialSlotSettings) -> Void) throws {
+    public func updateSettings(_ transform: (inout SpecialSlotSettings) -> Void) throws {
         var index = loadIndex()
         transform(&index.settings)
         try saveIndex(index)

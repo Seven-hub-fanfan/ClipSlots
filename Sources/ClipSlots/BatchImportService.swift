@@ -1,4 +1,5 @@
 import Foundation
+import ClipSlotsKit
 import AppKit
 
 // MARK: - Batch Import Models (v2.6.0)

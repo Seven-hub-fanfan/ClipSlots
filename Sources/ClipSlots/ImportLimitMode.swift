@@ -1,4 +1,5 @@
 import Foundation
+import ClipSlotsKit
 
 // MARK: - Import Limit Mode (v2.6.4)
 

@@ -1,5 +1,6 @@
 import AppKit
 import Foundation
+import ClipSlotsKit
 
 extension SlotContent {
 
@@ -67,24 +68,9 @@ extension SlotContent {
 
     // MARK: - File URL Detection
 
-    /// First file URL found in pasteboard content.
-    var primaryFileURL: URL? {
-        for itemList in items {
-            for item in itemList where item.type == "public.file-url" {
-                if let urlString = String(data: item.data, encoding: .utf8)?
-                    .trimmingCharacters(in: .whitespacesAndNewlines),
-                   let url = URL(string: urlString) {
-                    return url
-                }
-            }
-        }
-        return nil
-    }
-
-    /// File name from file URL, if available.
-    var fileDisplayName: String? {
-        primaryFileURL?.lastPathComponent
-    }
+    // `primaryFileURL` / `fileDisplayName` moved to ClipSlotsKit
+    // (SlotContent+FileDetection.swift) so the shared data layer can resolve
+    // file URLs without importing AppKit/UI code.
 
     /// Image file extensions.
     private static let imageExtensions: Set<String> = [

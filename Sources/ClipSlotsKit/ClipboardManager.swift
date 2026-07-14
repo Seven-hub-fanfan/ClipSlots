@@ -1,25 +1,30 @@
 import AppKit
 
-struct PasteboardItem: Codable {
-    let type: String
-    let data: Data
+public struct PasteboardItem: Codable {
+    public let type: String
+    public let data: Data
+
+    public init(type: String, data: Data) {
+        self.type = type
+        self.data = data
+    }
 }
 
-struct SlotContent: Codable {
-    var items: [[PasteboardItem]] = []
-    var timestamp: Date = Date()
-    var label: String? = nil
-    var htmlSource: String? = nil
+public struct SlotContent: Codable {
+    public var items: [[PasteboardItem]] = []
+    public var timestamp: Date = Date()
+    public var label: String? = nil
+    public var htmlSource: String? = nil
     // v2.7.61: Slot attachments - only visible and editable in node canvas
     // Empty array = disabled, no change to existing behavior
-    var attachments: [SlotAttachment] = []
+    public var attachments: [SlotAttachment] = []
     
     // 向后兼容：旧模板没有 attachments 字段时自动填充空数组
     enum CodingKeys: String, CodingKey {
         case items, timestamp, label, htmlSource, attachments, contentId, updatedAt
     }
     
-    init(from decoder: Decoder) throws {
+    public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         // v2.8.2 (P1-B): decode leniently so a corrupt / partial / legacy payload
         // (e.g. missing items or timestamp) still loads with sensible defaults
@@ -35,9 +40,9 @@ struct SlotContent: Codable {
         updatedAt = try container.decodeIfPresent(TimeInterval.self, forKey: .updatedAt) ?? timestamp.timeIntervalSince1970
     }
 
-    init() {}
+    public init() {}
 
-    init(items: [[PasteboardItem]] = [], timestamp: Date = Date(), label: String? = nil, htmlSource: String? = nil, attachments: [SlotAttachment] = [], contentId: String = UUID().uuidString, updatedAt: TimeInterval = Date().timeIntervalSince1970) {
+    public init(items: [[PasteboardItem]] = [], timestamp: Date = Date(), label: String? = nil, htmlSource: String? = nil, attachments: [SlotAttachment] = [], contentId: String = UUID().uuidString, updatedAt: TimeInterval = Date().timeIntervalSince1970) {
         self.items = items
         self.timestamp = timestamp
         self.label = label
@@ -49,17 +54,27 @@ struct SlotContent: Codable {
 
     // MARK: - Slot Attachment
 
-    struct SlotAttachment: Codable, Identifiable {
-        var id: UUID = UUID()
-        var name: String
-        var type: AttachmentType
-        var path: String?
-        var url: String?
-        var data: Data?
-        var createdAt: Date = Date()
+    public struct SlotAttachment: Codable, Identifiable {
+        public var id: UUID = UUID()
+        public var name: String
+        public var type: AttachmentType
+        public var path: String?
+        public var url: String?
+        public var data: Data?
+        public var createdAt: Date = Date()
+
+        public init(id: UUID = UUID(), name: String, type: AttachmentType, path: String? = nil, url: String? = nil, data: Data? = nil, createdAt: Date = Date()) {
+            self.id = id
+            self.name = name
+            self.type = type
+            self.path = path
+            self.url = url
+            self.data = data
+            self.createdAt = createdAt
+        }
     }
 
-    enum AttachmentType: String, Codable {
+    public enum AttachmentType: String, Codable {
         case image
         case file
         case text
@@ -69,24 +84,24 @@ struct SlotContent: Codable {
 
     /// Unique content identity. Regenerated on every save/overwrite. Used as the
     /// primary cache-breaker for thumbnails, SwiftUI View identity, and file paths.
-    var contentId: String = UUID().uuidString
+    public var contentId: String = UUID().uuidString
     /// Monotonic timestamp updated on every save/overwrite. Combined with contentId
     /// to form the thumbnail cache key so that even same-contentId overwrites
     /// (impossible in practice but defensive) still miss the cache.
-    var updatedAt: TimeInterval = Date().timeIntervalSince1970
+    public var updatedAt: TimeInterval = Date().timeIntervalSince1970
 
     /// v2.8.1 (P1-2): true when this snapshot was produced by `capture()` from an
     /// actually empty system pasteboard (vs. a default/never-captured value). Lets
     /// `restore()` know it should clear the pasteboard rather than no-op, so an
     /// injected paste payload is not left behind when the original clipboard was empty.
     /// Not persisted (absent from CodingKeys).
-    var capturedEmpty: Bool = false
+    public var capturedEmpty: Bool = false
 
-    var isEmpty: Bool { items.isEmpty }
+    public var isEmpty: Bool { items.isEmpty }
 
     /// Legacy hash — still available for diagnostics but no longer the primary
     /// cache key. The new key is `thumbnailKey(specialSlotId:slot:)`.
-    var contentHash: String {
+    public var contentHash: String {
         let totalBytes = items.reduce(0) { $0 + $1.reduce(0) { $0 + $1.data.count } }
         return "\(timestamp.timeIntervalSince1970)-\(totalBytes)"
     }
@@ -94,11 +109,11 @@ struct SlotContent: Codable {
     /// Composite cache key that scopes a thumbnail by special-slot, slot number,
     /// content identity, and save timestamp. Changing any dimension invalidates
     /// the cached thumbnail.
-    func thumbnailKey(specialSlotId: String, slot: Int) -> String {
+    public func thumbnailKey(specialSlotId: String, slot: Int) -> String {
         "\(specialSlotId)::\(slot)::\(contentId)::\(updatedAt)"
     }
 
-    var preview: String {
+    public var preview: String {
         for itemList in items {
             for item in itemList {
                 if item.type == "public.utf8-plain-text" || item.type == "NSStringPboardType" {
@@ -149,7 +164,7 @@ struct SlotContent: Codable {
         return "(空)"
     }
 
-    var plainText: String? {
+    public var plainText: String? {
         for itemList in items {
             for item in itemList {
                 if item.type == "public.utf8-plain-text" || item.type == "NSStringPboardType" {
@@ -162,11 +177,13 @@ struct SlotContent: Codable {
     }
 }
 
-final class ClipboardManager {
-    static let shared = ClipboardManager()
+public final class ClipboardManager {
+    public static let shared = ClipboardManager()
     private let pasteboard = NSPasteboard.general
 
-    func capture() -> SlotContent {
+    public init() {}
+
+    public func capture() -> SlotContent {
         var content = SlotContent()
         content.timestamp = Date()
 
@@ -191,7 +208,7 @@ final class ClipboardManager {
         return content
     }
 
-    func restore(_ content: SlotContent) -> Bool {
+    public func restore(_ content: SlotContent) -> Bool {
         guard !content.items.isEmpty else {
             // v2.8.1 (P1-2): the original clipboard was genuinely empty — clear the
             // pasteboard so an injected paste payload isn't left behind. A non-empty
@@ -224,7 +241,7 @@ final class ClipboardManager {
         return result
     }
 
-    func restorePlainText(_ content: SlotContent) -> Bool {
+    public func restorePlainText(_ content: SlotContent) -> Bool {
         if let text = content.plainText {
             pasteboard.clearContents()
             return pasteboard.setString(text, forType: .string)
@@ -234,7 +251,7 @@ final class ClipboardManager {
 
     /// Poll pasteboard changeCount to detect when the target app has consumed content after Cmd+V.
     /// Calls completion after consumption or timeout (5s).
-    func waitForPasteCompletion(timeout: TimeInterval = 5.0, completion: @escaping () -> Void) {
+    public func waitForPasteCompletion(timeout: TimeInterval = 5.0, completion: @escaping () -> Void) {
         let startCount = pasteboard.changeCount
         let deadline = DispatchTime.now() + timeout
         let checkInterval: TimeInterval = 0.05
@@ -255,13 +272,13 @@ final class ClipboardManager {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { check() }
     }
 
-    var changeCount: Int { pasteboard.changeCount }
+    public var changeCount: Int { pasteboard.changeCount }
 }
 
 // MARK: - v2.7.33 SlotContent Convenience Init
 
 extension SlotContent {
-    init(text: String) {
+    public init(text: String) {
         let data = text.data(using: .utf8) ?? Data()
         let item = PasteboardItem(type: "public.utf8-plain-text", data: data)
         self.items = [[item]]
@@ -272,7 +289,7 @@ extension SlotContent {
 // MARK: - v2.7.32 HTML Detection
 
 extension SlotContent {
-    var isHTMLFileURL: Bool {
+    public var isHTMLFileURL: Bool {
         guard let url = primaryFileURL else { return false }
         return ["html", "htm"].contains(url.pathExtension.lowercased())
     }
@@ -281,13 +298,13 @@ extension SlotContent {
     /// (see `preview`), so we no longer surface the raw `public.html` bytes as a
     /// render source. Only genuine rich-paste (`htmlSource`) or `.html` files are
     /// treated as HTML documents.
-    var isHTMLDocument: Bool {
+    public var isHTMLDocument: Bool {
         if isHTMLFileURL { return true }
         if let htmlSource, !htmlSource.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return true }
         return false
     }
 
-    var htmlDocumentSource: String? {
+    public var htmlDocumentSource: String? {
         if let url = primaryFileURL, isHTMLFileURL {
             if let text = try? String(contentsOf: url, encoding: .utf8) { return text }
             if let text = try? String(contentsOf: url) { return text }

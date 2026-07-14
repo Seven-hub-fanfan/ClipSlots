@@ -1,4 +1,5 @@
 import SwiftUI
+import ClipSlotsKit
 
 // MARK: - Slot Connection Canvas
 

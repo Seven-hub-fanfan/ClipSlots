@@ -1,4 +1,5 @@
 import Foundation
+import ClipSlotsKit
 
 // MARK: - Search Sort Rule (v2.6.0)
 

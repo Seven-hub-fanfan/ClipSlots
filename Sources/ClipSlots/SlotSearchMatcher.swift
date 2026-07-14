@@ -1,4 +1,5 @@
 import Foundation
+import ClipSlotsKit
 
 // MARK: - Slot Search Matcher (v2.5)
 

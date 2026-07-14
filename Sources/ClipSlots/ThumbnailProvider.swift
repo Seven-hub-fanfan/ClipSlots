@@ -1,4 +1,5 @@
 import AppKit
+import ClipSlotsKit
 import QuickLookThumbnailing
 
 final class ThumbnailProvider {

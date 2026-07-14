@@ -2,7 +2,7 @@ import Foundation
 
 // MARK: - Folder Overflow Decision
 
-enum FolderOverflowDecision {
+public enum FolderOverflowDecision {
     case confirm(suppressFutureWarning: Bool)
     case cancel
 }
@@ -11,31 +11,39 @@ enum FolderOverflowDecision {
 
 /// Page 是最高级工作区，用于区分大的使用场景。
 /// 每个 Page 下包含多个 SlotGroup（即 SpecialSlot）。
-struct SlotPage: Codable, Identifiable, Equatable {
-    var id: String            // "default_page" 或 "page_<UUID>"
-    var name: String
-    var order: Int
-    var createdAt: Date
-    var updatedAt: Date
+public struct SlotPage: Codable, Identifiable, Equatable {
+    public var id: String            // "default_page" 或 "page_<UUID>"
+    public var name: String
+    public var order: Int
+    public var createdAt: Date
+    public var updatedAt: Date
+
+    public init(id: String, name: String, order: Int, createdAt: Date, updatedAt: Date) {
+        self.id = id
+        self.name = name
+        self.order = order
+        self.createdAt = createdAt
+        self.updatedAt = updatedAt
+    }
 }
 
 // MARK: - Special Slot Model (v2.4 renamed to SlotGroup in UI)
 
 /// SpecialSlot 在 v2.4 UI 中称为「槽位组」(SlotGroup)。
 /// 每个 SpecialSlot 属于一个 Page，包含固定 10 个子槽位。
-struct SpecialSlot: Codable, Identifiable, Equatable {
-    var id: String
-    var name: String
-    var icon: String = "folder"
-    var colorHex: String?
-    var sourceType: SpecialSlotSourceType
-    var sourcePath: String?
-    var pageId: String = "default_page"   // v2.4: 所属页面 ID
-    var order: Int = 0                    // v2.4: 页面内的排序
-    var createdAt: Date
-    var updatedAt: Date
+public struct SpecialSlot: Codable, Identifiable, Equatable {
+    public var id: String
+    public var name: String
+    public var icon: String = "folder"
+    public var colorHex: String?
+    public var sourceType: SpecialSlotSourceType
+    public var sourcePath: String?
+    public var pageId: String = "default_page"   // v2.4: 所属页面 ID
+    public var order: Int = 0                    // v2.4: 页面内的排序
+    public var createdAt: Date
+    public var updatedAt: Date
 
-    init(id: String, name: String, icon: String = "folder", colorHex: String? = nil,
+    public init(id: String, name: String, icon: String = "folder", colorHex: String? = nil,
          sourceType: SpecialSlotSourceType, sourcePath: String? = nil,
          pageId: String = "default_page", order: Int = 0,
          createdAt: Date, updatedAt: Date) {
@@ -52,7 +60,7 @@ struct SpecialSlot: Codable, Identifiable, Equatable {
     }
 
     // Custom decoder for backward compatibility with pre-v2.4 JSON
-    init(from decoder: Decoder) throws {
+    public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         id = try c.decode(String.self, forKey: .id)
         name = try c.decode(String.self, forKey: .name)
@@ -67,7 +75,7 @@ struct SpecialSlot: Codable, Identifiable, Equatable {
     }
 }
 
-enum SpecialSlotSourceType: String, Codable {
+public enum SpecialSlotSourceType: String, Codable {
     case manual
     case folderImport
     case migratedDefault
@@ -75,18 +83,18 @@ enum SpecialSlotSourceType: String, Codable {
 
 // MARK: - Special Slot Index
 
-struct SpecialSlotIndex: Codable {
-    var schemaVersion: Int = 1              // v2.4: 数据格式版本，2 = Page/Group/Slot 三级结构。默认 1 确保旧数据触发迁移
-    var version: Int = 4                    // 内部版本号
-    var currentPageId: String = "default_page"  // v2.4: 当前选中的页面 ID
-    var pages: [SlotPage] = []             // v2.4: 所有页面
-    var currentSpecialSlotId: String
-    var selectedSpecialSlotId: String?
-    var activeHotkeySpecialSlotId: String?
-    var specialSlots: [SpecialSlot]
-    var settings: SpecialSlotSettings
+public struct SpecialSlotIndex: Codable {
+    public var schemaVersion: Int = 1              // v2.4: 数据格式版本，2 = Page/Group/Slot 三级结构。默认 1 确保旧数据触发迁移
+    public var version: Int = 4                    // 内部版本号
+    public var currentPageId: String = "default_page"  // v2.4: 当前选中的页面 ID
+    public var pages: [SlotPage] = []             // v2.4: 所有页面
+    public var currentSpecialSlotId: String
+    public var selectedSpecialSlotId: String?
+    public var activeHotkeySpecialSlotId: String?
+    public var specialSlots: [SpecialSlot]
+    public var settings: SpecialSlotSettings
 
-    init(schemaVersion: Int = 1, version: Int = 4, currentPageId: String = "default_page",
+    public init(schemaVersion: Int = 1, version: Int = 4, currentPageId: String = "default_page",
          pages: [SlotPage] = [], currentSpecialSlotId: String, selectedSpecialSlotId: String? = nil,
          activeHotkeySpecialSlotId: String? = nil, specialSlots: [SpecialSlot], settings: SpecialSlotSettings) {
         self.schemaVersion = schemaVersion
@@ -101,7 +109,7 @@ struct SpecialSlotIndex: Codable {
     }
 
     // Custom decoder for backward compatibility with pre-v2.4 JSON
-    init(from decoder: Decoder) throws {
+    public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         schemaVersion = try c.decodeIfPresent(Int.self, forKey: .schemaVersion) ?? 1
         version = try c.decodeIfPresent(Int.self, forKey: .version) ?? 3
@@ -117,20 +125,20 @@ struct SpecialSlotIndex: Codable {
 
 // MARK: - Special Slot Settings
 
-struct SpecialSlotSettings: Codable {
-    var maxSpecialSlots: Int = 10
-    var maxChildSlotsPerSpecialSlot: Int = 10
-    var suppressFolderOverflowWarning: Bool = false
-    var folderImportSortRule: FolderImportSortRule = .naturalNameAscending
-    var confirmBeforeOverwrite: Bool = true
-    var confirmBeforeClearAllSlots: Bool = true
-    var confirmBeforeDeleteSpecialSlot: Bool = true
-    var confirmBeforePasteAllSlots: Bool = true
-    var confirmBeforeClearSingleSlot: Bool = true
+public struct SpecialSlotSettings: Codable {
+    public var maxSpecialSlots: Int = 10
+    public var maxChildSlotsPerSpecialSlot: Int = 10
+    public var suppressFolderOverflowWarning: Bool = false
+    public var folderImportSortRule: FolderImportSortRule = .naturalNameAscending
+    public var confirmBeforeOverwrite: Bool = true
+    public var confirmBeforeClearAllSlots: Bool = true
+    public var confirmBeforeDeleteSpecialSlot: Bool = true
+    public var confirmBeforePasteAllSlots: Bool = true
+    public var confirmBeforeClearSingleSlot: Bool = true
 
-    static let `default` = SpecialSlotSettings()
+    public static let `default` = SpecialSlotSettings()
 
-    init(
+    public init(
         maxSpecialSlots: Int = 10,
         maxChildSlotsPerSpecialSlot: Int = 10,
         suppressFolderOverflowWarning: Bool = false,
@@ -164,7 +172,7 @@ struct SpecialSlotSettings: Codable {
         case confirmBeforeClearSingleSlot
     }
 
-    init(from decoder: Decoder) throws {
+    public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         maxSpecialSlots = try c.decodeIfPresent(Int.self, forKey: .maxSpecialSlots) ?? 10
         maxChildSlotsPerSpecialSlot = try c.decodeIfPresent(Int.self, forKey: .maxChildSlotsPerSpecialSlot) ?? 10
@@ -178,20 +186,20 @@ struct SpecialSlotSettings: Codable {
     }
 }
 
-enum FolderImportSortRule: String, Codable {
+public enum FolderImportSortRule: String, Codable {
     case naturalNameAscending
 }
 
 // MARK: - Errors
 
-enum SpecialSlotError: Error, LocalizedError {
+public enum SpecialSlotError: Error, LocalizedError {
     case cannotDeleteLastSpecialSlot
     case specialSlotNotFound
     case invalidSpecialSlotName
     case maxSpecialSlotsReached
     case indexCorrupted
 
-    var errorDescription: String? {
+    public var errorDescription: String? {
         switch self {
         case .cannotDeleteLastSpecialSlot: return "无法删除当前页面的最后一个槽位组"
         case .specialSlotNotFound: return "槽位组不存在"
@@ -204,13 +212,13 @@ enum SpecialSlotError: Error, LocalizedError {
 
 // MARK: - Page Errors (v2.4)
 
-enum PageError: Error, LocalizedError {
+public enum PageError: Error, LocalizedError {
     case cannotDeleteLastPage
     case pageNotFound
     case duplicateName
     case emptyName
 
-    var errorDescription: String? {
+    public var errorDescription: String? {
         switch self {
         case .cannotDeleteLastPage: return "至少需要保留一个页面"
         case .pageNotFound: return "页面不存在"

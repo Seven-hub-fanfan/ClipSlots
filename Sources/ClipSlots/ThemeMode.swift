@@ -1,4 +1,5 @@
 import SwiftUI
+import ClipSlotsKit
 
 enum ThemeMode: String, CaseIterable, Identifiable {
     case system

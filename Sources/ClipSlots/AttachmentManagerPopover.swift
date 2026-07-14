@@ -1,4 +1,5 @@
 import SwiftUI
+import ClipSlotsKit
 import AppKit
 import AVFoundation
 import UniformTypeIdentifiers

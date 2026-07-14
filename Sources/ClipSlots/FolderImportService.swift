@@ -1,4 +1,5 @@
 import Foundation
+import ClipSlotsKit
 import AppKit
 
 // MARK: - Options & Results

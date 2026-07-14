@@ -1,4 +1,5 @@
 import Cocoa
+import ClipSlotsKit
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
     weak var store: SlotStoreObservable?

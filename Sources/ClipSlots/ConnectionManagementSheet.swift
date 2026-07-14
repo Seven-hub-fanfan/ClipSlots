@@ -1,4 +1,5 @@
 import SwiftUI
+import ClipSlotsKit
 
 struct ConnectionManagementSheet: View {
     @ObservedObject var store: SlotStoreObservable

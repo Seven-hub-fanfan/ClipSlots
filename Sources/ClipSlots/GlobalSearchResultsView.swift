@@ -1,4 +1,5 @@
 import SwiftUI
+import ClipSlotsKit
 
 // MARK: - Global Search Results View (v2.5.3)
 

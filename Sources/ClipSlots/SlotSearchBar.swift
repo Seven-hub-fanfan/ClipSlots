@@ -1,4 +1,5 @@
 import SwiftUI
+import ClipSlotsKit
 
 // MARK: - Slot Search Bar (v2.5.1)
 

@@ -1,4 +1,5 @@
 import SwiftUI
+import ClipSlotsKit
 
 struct SettingsView: View {
     @State var config: AppConfig

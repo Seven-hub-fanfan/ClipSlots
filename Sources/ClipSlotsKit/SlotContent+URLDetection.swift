@@ -5,7 +5,7 @@ import Foundation
 extension SlotContent {
 
     /// Detected web URL if the content is a plain http/https URL.
-    var detectedWebURL: URL? {
+    public var detectedWebURL: URL? {
         // Try plainText first (full text of first text item)
         for itemList in items {
             for item in itemList {

@@ -1,4 +1,5 @@
 import SwiftUI
+import ClipSlotsKit
 import AVKit
 
 /// Safe video preview that only renders VideoPlayer after the AVPlayer is created.

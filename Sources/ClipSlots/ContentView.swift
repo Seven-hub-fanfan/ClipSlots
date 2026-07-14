@@ -1,4 +1,5 @@
 import SwiftUI
+import ClipSlotsKit
 
 struct ContentView: View {
     @ObservedObject var store: SlotStoreObservable
@@ -668,7 +669,7 @@ struct ContentView: View {
             // Connection stays as a separate tool and is moved to the right side.
             connectionToolButton
 
-            Text("v2.8.7")
+            Text("v2.9.0")
                 .font(.caption2)
                 .foregroundColor(Color.secondary.opacity(0.65))
         }

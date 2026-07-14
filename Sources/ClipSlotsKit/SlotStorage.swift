@@ -14,8 +14,8 @@ struct SlotManifest: Codable {
     var version: Int = 1
 }
 
-final class SlotStorage {
-    static let shared = SlotStorage()
+public final class SlotStorage {
+    public static let shared = SlotStorage()
 
     private let baseURL: URL
     private var cache: [Int: SlotContent] = [:]
@@ -23,7 +23,7 @@ final class SlotStorage {
     private let encoder = JSONEncoder()
     private let decoder = JSONDecoder()
 
-    init(slotsDir: URL? = nil) {
+    public init(slotsDir: URL? = nil) {
         if let slotsDir {
             baseURL = slotsDir
         } else {
@@ -39,7 +39,7 @@ final class SlotStorage {
 
     // MARK: - Slot Content
 
-    func get(_ slot: Int) -> SlotContent {
+    public func get(_ slot: Int) -> SlotContent {
         queue.sync {
             if let cached = cache[slot] { return cached }
 
@@ -51,7 +51,7 @@ final class SlotStorage {
     }
 
     @discardableResult
-    func set(_ slot: Int, content: SlotContent) -> Bool {
+    public func set(_ slot: Int, content: SlotContent) -> Bool {
         let ok: Bool = queue.sync {
             do {
                 try writeSlotContent(content, to: slot)
@@ -73,7 +73,7 @@ final class SlotStorage {
         return ok
     }
 
-    func clear(_ slot: Int) {
+    public func clear(_ slot: Int) {
         queue.sync {
             cache[slot] = SlotContent()
             let slotDir = baseURL.appendingPathComponent(String(slot))
@@ -88,7 +88,7 @@ final class SlotStorage {
         scheduleManifestUpdate()
     }
 
-    func clearAll() {
+    public func clearAll() {
         queue.sync {
             cache.removeAll()
             do {
@@ -114,19 +114,19 @@ final class SlotStorage {
         }
     }
 
-    func snapshot() -> [Int: SlotContent] {
+    public func snapshot() -> [Int: SlotContent] {
         queue.sync { cache }
     }
 
     // MARK: - Label
 
-    func getLabel(_ slot: Int) -> String? {
+    public func getLabel(_ slot: Int) -> String? {
         let labelFile = baseURL.appendingPathComponent(String(slot)).appendingPathComponent("label.txt")
         guard let content = try? String(contentsOf: labelFile, encoding: .utf8) else { return nil }
         return content.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
-    func setLabel(_ slot: Int, label: String?) {
+    public func setLabel(_ slot: Int, label: String?) {
         queue.sync {
             let slotDir = baseURL.appendingPathComponent(String(slot))
             do {
