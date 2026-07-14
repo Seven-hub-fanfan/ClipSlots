@@ -11,9 +11,12 @@ import ClipSlotsKit
 //   success: {"ok": true, ...}
 //   error:   {"ok": false, "error": "message"}  (exit code 1)
 
-let CLI_VERSION = "2.9.0"
+let CLI_VERSION = "2.9.1"
 let DEFAULT_GROUP = "default"
 let DEFAULT_PAGE = "default_page"
+
+// Extensions treated as images (attachment typing + content classification).
+let IMAGE_EXTS: Set<String> = ["png", "jpg", "jpeg", "gif", "svg", "webp", "bmp", "heic", "heif", "tiff", "tif", "ico", "icns", "avif"]
 
 // MARK: - JSON output helpers
 
@@ -101,9 +104,8 @@ func classify(_ c: SlotContent) -> String {
     if types.contains("public.file-url") {
         if let url = c.primaryFileURL {
             let ext = url.pathExtension.lowercased()
-            let imageExts: Set<String> = ["png", "jpg", "jpeg", "gif", "svg", "webp", "bmp", "heic", "heif", "tiff", "tif", "ico", "icns", "avif"]
             let videoExts: Set<String> = ["mp4", "mov", "m4v", "avi", "mkv", "webm", "flv", "wmv"]
-            if imageExts.contains(ext) { return "image-file" }
+            if IMAGE_EXTS.contains(ext) { return "image-file" }
             if videoExts.contains(ext) { return "video-file" }
         }
         return "file"
@@ -158,7 +160,11 @@ func cmdHelp() -> Never {
         ["name": "read", "description": "读取单个槽位的完整内容（纯文本、HTML源、类型、附件数等）。", "flags": ["<slot> (位置参数,1..N)", "--group <id> (默认 default)", "--page <id> (可选,仅回显)"]],
         ["name": "write", "description": "向槽位写入纯文本内容（保留已有附件），可选设置标签。", "flags": ["<slot> (位置参数,1..N)", "--text <string> (必填, 传 - 表示从 stdin 读取)", "--group <id> (默认 default)", "--page <id> (可选,仅回显)", "--label <string> (可选)"]],
         ["name": "search", "description": "在槽位预览/文本/标签中做大小写不敏感子串搜索。", "flags": ["<query> (位置参数)", "--group <id> (默认 default)", "--all-groups (在所有槽位组内搜索)", "--limit <N> (默认 50)"]],
-        ["name": "paste", "description": "把某槽位的内容加载到系统剪贴板(NSPasteboard)，不模拟按键。", "flags": ["<slot> (位置参数,1..N)", "--group <id> (默认 default)", "--page <id> (可选,仅回显)"]]
+        ["name": "paste", "description": "把某槽位的内容加载到系统剪贴板(NSPasteboard)，不模拟按键。", "flags": ["<slot> (位置参数,1..N)", "--group <id> (默认 default)", "--page <id> (可选,仅回显)"]],
+        ["name": "clear", "description": "清空某个槽位（内容、标签、附件全部移除）。", "flags": ["<slot> (位置参数,1..N)", "--group <id> (默认 default)"]],
+        ["name": "create-group", "description": "在指定页面新建一个槽位组，返回其 id。页面已满(10组)会返回错误，此时应先 create-page。", "flags": ["<name> (位置参数,组名)", "--page <id> (可选,默认当前页面)"]],
+        ["name": "create-page", "description": "新建一个页面，返回其 id。页面名不可重复。", "flags": ["<name> (位置参数,页面名)"]],
+        ["name": "write-attachment", "description": "向某槽位追加一个或多个文件作为附件（按顺序），不改动槽位主体内容。图片扩展名归为 image 类型，其余为 file。", "flags": ["<slot> (位置参数,1..N)", "<file> [file ...] (位置参数,一个或多个文件路径,支持 ~ 与相对路径)", "--group <id> (默认 default)", "--replace (先清空该槽位已有附件再写入)", "--label <string> (可选)"]]
     ]
     success([
         "version": CLI_VERSION,
@@ -324,6 +330,95 @@ func cmdPaste(_ args: ParsedArgs) -> Never {
     success(["slot": n, "action": "copied-to-clipboard"])
 }
 
+func cmdCreateGroup(_ args: ParsedArgs) -> Never {
+    guard let name = args.positionals.first, !name.trimmingCharacters(in: .whitespaces).isEmpty else {
+        fail("missing group name (usage: create-group <name> [--page <id>])")
+    }
+    let page = args.flag("page")
+    do {
+        let slot = try storage.createSpecialSlot(name: name, pageId: page)
+        success(["group": ["id": slot.id, "name": slot.name, "pageId": slot.pageId]])
+    } catch let e as SpecialSlotError {
+        // maxSpecialSlotsReached → the caller should create a new page (see skill rules).
+        fail(e.errorDescription ?? "failed to create group")
+    } catch {
+        fail("failed to create group: \(error.localizedDescription)")
+    }
+}
+
+func cmdCreatePage(_ args: ParsedArgs) -> Never {
+    guard let name = args.positionals.first, !name.trimmingCharacters(in: .whitespaces).isEmpty else {
+        fail("missing page name (usage: create-page <name>)")
+    }
+    do {
+        let page = try storage.createPage(name: name)
+        success(["page": ["id": page.id, "name": page.name, "order": page.order]])
+    } catch let e as PageError {
+        fail(e.errorDescription ?? "failed to create page")
+    } catch {
+        fail("failed to create page: \(error.localizedDescription)")
+    }
+}
+
+func cmdWriteAttachment(_ args: ParsedArgs) -> Never {
+    let group = resolveGroup(args)
+    guard let slotRaw = args.positionals.first else {
+        fail("missing slot number (usage: write-attachment <slot> <file> [file ...] [--group <id>] [--replace])")
+    }
+    let n = parseSlot(slotRaw)
+    let fileArgs = Array(args.positionals.dropFirst())
+    guard !fileArgs.isEmpty else {
+        fail("no files given (usage: write-attachment <slot> <file> [file ...])")
+    }
+
+    // Resolve + validate each path, build SlotAttachment mirroring the GUI
+    // (name = last path component, type by extension, path = absolute path).
+    let cwd = FileManager.default.currentDirectoryPath
+    var newAtts: [SlotContent.SlotAttachment] = []
+    var added: [String] = []
+    for raw in fileArgs {
+        let expanded = (raw as NSString).expandingTildeInPath
+        let url = expanded.hasPrefix("/")
+            ? URL(fileURLWithPath: expanded)
+            : URL(fileURLWithPath: cwd).appendingPathComponent(expanded)
+        var isDir: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir), !isDir.boolValue else {
+            fail("file not found or is a directory: \(url.path)")
+        }
+        let ext = url.pathExtension.lowercased()
+        let type: SlotContent.AttachmentType = IMAGE_EXTS.contains(ext) ? .image : .file
+        newAtts.append(SlotContent.SlotAttachment(name: url.lastPathComponent, type: type, path: url.path))
+        added.append(url.lastPathComponent)
+    }
+
+    var content = storage.get(n, in: group)
+    if args.hasFlag("replace") {
+        content.attachments = newAtts
+    } else {
+        content.attachments.append(contentsOf: newAtts)
+    }
+    let ok = storage.set(n, content: content, in: group)
+    guard ok else { fail("failed to write attachments to slot \(n) in group \(group)") }
+
+    if let label = args.flag("label") {
+        storage.setLabel(n, label: label, in: group)
+    }
+    success([
+        "slot": n,
+        "group": group,
+        "added": added,
+        "attachmentCount": content.attachments.count,
+        "slotBodyEmpty": content.isEmpty
+    ])
+}
+
+func cmdClear(_ args: ParsedArgs) -> Never {
+    let group = resolveGroup(args)
+    let n = parseSlot(args.positionals.first)
+    storage.clear(n, in: group)
+    success(["slot": n, "group": group, "action": "cleared"])
+}
+
 // MARK: - Entry point
 
 let parsed = parseArgs(CommandLine.arguments.dropFirst().map { $0 })
@@ -347,6 +442,14 @@ case "search":
     cmdSearch(parsed)
 case "paste":
     cmdPaste(parsed)
+case "clear":
+    cmdClear(parsed)
+case "create-group":
+    cmdCreateGroup(parsed)
+case "create-page":
+    cmdCreatePage(parsed)
+case "write-attachment":
+    cmdWriteAttachment(parsed)
 default:
     fail("unknown command: \(parsed.command) (run 'clipslots help')")
 }

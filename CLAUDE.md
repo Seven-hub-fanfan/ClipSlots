@@ -18,6 +18,20 @@ DMG: `hdiutil create -fs HFS+ -srcfolder /Applications/ClipSlots.app -volname "C
 
 Release: `gh release create vX.Y.Z --title "..." --notes "..." ClipSlots_vX.Y.Z.dmg`
 
+## CLI (`clipslots`) — v2.9.0+
+
+A standalone command-line tool for agents lives in target **`ClipSlotsCLI`** (`Sources/ClipSlotsCLI/main.swift`). It reuses the exact data layer via the shared library target **`ClipSlotsKit`** (moved data files: `ClipboardManager`, `SlotStorage`, `SpecialSlotStorage`, `SpecialSlotModels`, `Config`, `HotkeyTemplate`, `SlotContent+*Detection`). Both `ClipSlots` (GUI) and `ClipSlotsCLI` depend on `ClipSlotsKit`.
+
+Commands: `version help groups pages list read write search paste clear create-group create-page write-attachment`. All output a single JSON object (`{"ok":true,...}` / `{"ok":false,"error":...}`). See `docs/clipslots-cli-skill-draft.md` for the agent usage skill + storage rules.
+
+Install (built product is `.build/debug/ClipSlotsCLI`):
+```bash
+codesign --force --sign - .build/debug/ClipSlotsCLI
+cp -f .build/debug/ClipSlotsCLI ~/bin/clipslots   # canonical path agents call
+```
+
+⚠️ **Case-insensitive filesystem gotcha:** macOS APFS/HFS+ is case-INSENSITIVE. Do NOT copy the CLI into the app bundle as `Contents/MacOS/clipslots` — it collides with the GUI binary `Contents/MacOS/ClipSlots` (same file!) and silently overwrites the GUI, causing launch crashes. If bundling the CLI, use a distinct name: `Contents/MacOS/clipslots-cli`.
+
 ## Architecture
 
 **ClipSlots** is a macOS clipboard manager with 10-slot groups ("槽位组"), organized into pages. Global hotkeys (Carbon) save/copy/paste clipboard content across apps.
