@@ -11,7 +11,7 @@ import ClipSlotsKit
 //   success: {"ok": true, ...}
 //   error:   {"ok": false, "error": "message"}  (exit code 1)
 
-let CLI_VERSION = "2.9.1"
+let CLI_VERSION = "2.9.2"
 let DEFAULT_GROUP = "default"
 let DEFAULT_PAGE = "default_page"
 
@@ -95,6 +95,13 @@ func pageId(forGroup groupId: String, in index: SpecialSlotIndex) -> String {
 }
 
 /// Classify a slot's content into a coarse, agent-friendly type string.
+// A slot is truly empty ONLY when its main body (items) AND its attachment
+// list are both empty. Body content OR attachments => not empty. This is the
+// canonical "empty slot" definition agents rely on when scanning for a free slot.
+func isTrulyEmpty(_ c: SlotContent) -> Bool {
+    c.isEmpty && c.attachments.isEmpty
+}
+
 func classify(_ c: SlotContent) -> String {
     if c.isEmpty {
         return c.attachments.isEmpty ? "empty" : "attachment"
@@ -219,7 +226,8 @@ func cmdList(_ args: ParsedArgs) -> Never {
             "label": jsonValue(label),
             "preview": content.preview,
             "type": classify(content),
-            "empty": content.isEmpty
+            "attachmentCount": content.attachments.count,
+            "empty": isTrulyEmpty(content)
         ])
     }
     success(["group": group, "page": page, "slots": slots])
@@ -238,7 +246,7 @@ func cmdRead(_ args: ParsedArgs) -> Never {
         "htmlSource": jsonValue(content.htmlSource),
         "types": uniqueTypes(content),
         "attachmentCount": content.attachments.count,
-        "empty": content.isEmpty
+        "empty": isTrulyEmpty(content)
     ])
 }
 
