@@ -15,6 +15,10 @@ public final class SpecialSlotStorage {
     private let encoder = JSONEncoder()
     private let decoder = JSONDecoder()
     private let queue = DispatchQueue(label: "com.clipslots.specialstorage", qos: .utility)
+    /// v2.9.4 (#4): cross-process advisory lock. Acquired OUTSIDE `queue` (never
+    /// dispatched onto it) so `flock` acquisition can never deadlock with the
+    /// serial `queue.sync` used inside `loadIndex`.
+    private let storageLock = StorageLock.shared
 
     public init() {
         let appSupport = FileManager.default.homeDirectoryForCurrentUser
@@ -347,69 +351,78 @@ public final class SpecialSlotStorage {
     }
 
     public func switchToSpecialSlot(id: String) throws {
-        var index = loadIndex()
-        guard let slot = index.specialSlots.first(where: { $0.id == id }) else {
-            throw SpecialSlotError.specialSlotNotFound
+        try storageLock.withLock {
+            var index = loadIndex()
+            guard let slot = index.specialSlots.first(where: { $0.id == id }) else {
+                throw SpecialSlotError.specialSlotNotFound
+            }
+            // v2.4: also switch to the page that owns this slot group
+            index.currentPageId = slot.pageId
+            index.currentSpecialSlotId = id
+            index.selectedSpecialSlotId = id
+            index.activeHotkeySpecialSlotId = id
+            try saveIndex(index)
         }
-        // v2.4: also switch to the page that owns this slot group
-        index.currentPageId = slot.pageId
-        index.currentSpecialSlotId = id
-        index.selectedSpecialSlotId = id
-        index.activeHotkeySpecialSlotId = id
-        try saveIndex(index)
     }
 
     // v2.4.1: cycle through slot groups within the current page
     public func switchToAdjacentSpecialSlot(direction: SlotGroupDirection) throws {
-        var index = loadIndex()
+        try storageLock.withLock {
+            var index = loadIndex()
 
-        let groupsInPage = index.specialSlots
-            .filter { $0.pageId == index.currentPageId }
-            .sorted { $0.order < $1.order }
+            let groupsInPage = index.specialSlots
+                .filter { $0.pageId == index.currentPageId }
+                .sorted { $0.order < $1.order }
 
-        guard !groupsInPage.isEmpty else {
-            throw SpecialSlotError.specialSlotNotFound
-        }
-
-        let currentId = index.currentSpecialSlotId
-        let currentIdx = groupsInPage.firstIndex(where: { $0.id == currentId })
-
-        let targetIdx: Int
-        if let currentIdx = currentIdx {
-            switch direction {
-            case .previous:
-                targetIdx = currentIdx == 0 ? groupsInPage.count - 1 : currentIdx - 1
-            case .next:
-                targetIdx = currentIdx >= groupsInPage.count - 1 ? 0 : currentIdx + 1
+            guard !groupsInPage.isEmpty else {
+                throw SpecialSlotError.specialSlotNotFound
             }
-        } else {
-            // Current not in this page — pick first
-            targetIdx = 0
-        }
 
-        let target = groupsInPage[targetIdx]
-        index.currentSpecialSlotId = target.id
-        index.selectedSpecialSlotId = target.id
-        index.activeHotkeySpecialSlotId = target.id
-        try saveIndex(index)
-        NSLog("[ClipSlots] switchToAdjacentSpecialSlot direction=\(direction) to=\(target.id) name=\(target.name)")
+            let currentId = index.currentSpecialSlotId
+            let currentIdx = groupsInPage.firstIndex(where: { $0.id == currentId })
+
+            let targetIdx: Int
+            if let currentIdx = currentIdx {
+                switch direction {
+                case .previous:
+                    targetIdx = currentIdx == 0 ? groupsInPage.count - 1 : currentIdx - 1
+                case .next:
+                    targetIdx = currentIdx >= groupsInPage.count - 1 ? 0 : currentIdx + 1
+                }
+            } else {
+                // Current not in this page — pick first
+                targetIdx = 0
+            }
+
+            let target = groupsInPage[targetIdx]
+            index.currentSpecialSlotId = target.id
+            index.selectedSpecialSlotId = target.id
+            index.activeHotkeySpecialSlotId = target.id
+            try saveIndex(index)
+            NSLog("[ClipSlots] switchToAdjacentSpecialSlot direction=\(direction) to=\(target.id) name=\(target.name)")
+        }
     }
 
     public func updateSelectedSpecialSlot(id: String) {
-        var index = loadIndex()
-        guard index.specialSlots.contains(where: { $0.id == id }) else { return }
-        index.selectedSpecialSlotId = id
-        index.currentSpecialSlotId = id
-        try? saveIndex(index)
+        // v2.9.4 (#4): non-throwing — swallow lock timeout via try?.
+        try? storageLock.withLock {
+            var index = loadIndex()
+            guard index.specialSlots.contains(where: { $0.id == id }) else { return }
+            index.selectedSpecialSlotId = id
+            index.currentSpecialSlotId = id
+            try? saveIndex(index)
+        }
     }
 
     public func updateActiveHotkeySpecialSlot(id: String) throws {
-        var index = loadIndex()
-        guard index.specialSlots.contains(where: { $0.id == id }) else {
-            throw SpecialSlotError.specialSlotNotFound
+        try storageLock.withLock {
+            var index = loadIndex()
+            guard index.specialSlots.contains(where: { $0.id == id }) else {
+                throw SpecialSlotError.specialSlotNotFound
+            }
+            index.activeHotkeySpecialSlotId = id
+            try saveIndex(index)
         }
-        index.activeHotkeySpecialSlotId = id
-        try saveIndex(index)
     }
 
     // MARK: - CRUD Special Slots
@@ -420,229 +433,251 @@ public final class SpecialSlotStorage {
         sourceType: SpecialSlotSourceType = .manual,
         sourcePath: String? = nil
     ) throws -> SpecialSlot {
-        var index = loadIndex()
+        try storageLock.withLock {
+            var index = loadIndex()
 
-        // v2.4.1: per-page limit instead of global limit
-        let targetPageId = pageId ?? index.currentPageId
-        let existingInPage = index.specialSlots.filter { $0.pageId == targetPageId }
+            // v2.4.1: per-page limit instead of global limit
+            let targetPageId = pageId ?? index.currentPageId
+            let existingInPage = index.specialSlots.filter { $0.pageId == targetPageId }
 
-        guard existingInPage.count < index.settings.maxSpecialSlots else {
-            throw SpecialSlotError.maxSpecialSlotsReached
+            guard existingInPage.count < index.settings.maxSpecialSlots else {
+                throw SpecialSlotError.maxSpecialSlotsReached
+            }
+
+            let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else {
+                throw SpecialSlotError.invalidSpecialSlotName
+            }
+
+            // v2.9.4 (Feature #4): reject a duplicate (trimmed) name WITHIN the same
+            // target page (mirrors createPage's duplicate guard). A group name may
+            // still repeat across DIFFERENT pages — only same-page collisions fail.
+            let finalName = String(trimmed.prefix(30))
+            guard !existingInPage.contains(where: { $0.name == finalName }) else {
+                throw SpecialSlotError.duplicateName
+            }
+
+            let maxOrder = existingInPage.map { $0.order }.max() ?? (-1)
+            let nextOrder = maxOrder + 1
+
+            let slot = SpecialSlot(
+                id: "special_\(UUID().uuidString)",
+                name: finalName,
+                icon: "folder",
+                colorHex: nil,
+                sourceType: sourceType,
+                sourcePath: sourcePath,
+                pageId: targetPageId,
+                order: nextOrder,
+                createdAt: Date(),
+                updatedAt: Date()
+            )
+
+            let dir = specialSlotDirectory(for: slot.id)
+            try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+
+            index.specialSlots.append(slot)
+            try saveIndex(index)
+
+            return slot
         }
-
-        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else {
-            throw SpecialSlotError.invalidSpecialSlotName
-        }
-
-        let maxOrder = existingInPage.map { $0.order }.max() ?? (-1)
-        let nextOrder = maxOrder + 1
-
-        let slot = SpecialSlot(
-            id: "special_\(UUID().uuidString)",
-            name: String(trimmed.prefix(30)),
-            icon: "folder",
-            colorHex: nil,
-            sourceType: sourceType,
-            sourcePath: sourcePath,
-            pageId: targetPageId,
-            order: nextOrder,
-            createdAt: Date(),
-            updatedAt: Date()
-        )
-
-        let dir = specialSlotDirectory(for: slot.id)
-        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-
-        index.specialSlots.append(slot)
-        try saveIndex(index)
-
-        return slot
     }
 
     public func deleteSpecialSlot(id: String) throws {
-        var index = loadIndex()
+        try storageLock.withLock {
+            var index = loadIndex()
 
-        guard let targetSlot = index.specialSlots.first(where: { $0.id == id }) else {
-            throw SpecialSlotError.specialSlotNotFound
+            guard let targetSlot = index.specialSlots.first(where: { $0.id == id }) else {
+                throw SpecialSlotError.specialSlotNotFound
+            }
+
+            // v2.4.1: check per-page — cannot delete the last slot group in its page
+            let groupsInSamePage = index.specialSlots.filter { $0.pageId == targetSlot.pageId }
+            guard groupsInSamePage.count > 1 else {
+                throw SpecialSlotError.cannotDeleteLastSpecialSlot
+            }
+
+            // Move to trash first
+            let dir = specialSlotDirectory(for: id)
+            let trashDir = baseDir.appendingPathComponent(".trash")
+            try? FileManager.default.createDirectory(at: trashDir, withIntermediateDirectories: true)
+            let trashTarget = trashDir.appendingPathComponent("deleted_\(id)_\(Int(Date().timeIntervalSince1970))")
+            try? FileManager.default.moveItem(at: dir, to: trashTarget)
+
+            // Update index — use page-scoped fallback
+            index.specialSlots.removeAll { $0.id == id }
+
+            let fallbackInPage = index.specialSlots
+                .filter { $0.pageId == targetSlot.pageId }
+                .sorted { $0.order < $1.order }
+                .first
+            let fallbackId = fallbackInPage?.id ?? index.specialSlots.first?.id ?? "default"
+
+            if index.currentSpecialSlotId == id {
+                index.currentSpecialSlotId = fallbackId
+            }
+            if index.selectedSpecialSlotId == id {
+                index.selectedSpecialSlotId = fallbackId
+            }
+            if index.activeHotkeySpecialSlotId == id {
+                index.activeHotkeySpecialSlotId = fallbackId
+            }
+
+            try saveIndex(index)
         }
-
-        // v2.4.1: check per-page — cannot delete the last slot group in its page
-        let groupsInSamePage = index.specialSlots.filter { $0.pageId == targetSlot.pageId }
-        guard groupsInSamePage.count > 1 else {
-            throw SpecialSlotError.cannotDeleteLastSpecialSlot
-        }
-
-        // Move to trash first
-        let dir = specialSlotDirectory(for: id)
-        let trashDir = baseDir.appendingPathComponent(".trash")
-        try? FileManager.default.createDirectory(at: trashDir, withIntermediateDirectories: true)
-        let trashTarget = trashDir.appendingPathComponent("deleted_\(id)_\(Int(Date().timeIntervalSince1970))")
-        try? FileManager.default.moveItem(at: dir, to: trashTarget)
-
-        // Update index — use page-scoped fallback
-        index.specialSlots.removeAll { $0.id == id }
-
-        let fallbackInPage = index.specialSlots
-            .filter { $0.pageId == targetSlot.pageId }
-            .sorted { $0.order < $1.order }
-            .first
-        let fallbackId = fallbackInPage?.id ?? index.specialSlots.first?.id ?? "default"
-
-        if index.currentSpecialSlotId == id {
-            index.currentSpecialSlotId = fallbackId
-        }
-        if index.selectedSpecialSlotId == id {
-            index.selectedSpecialSlotId = fallbackId
-        }
-        if index.activeHotkeySpecialSlotId == id {
-            index.activeHotkeySpecialSlotId = fallbackId
-        }
-
-        try saveIndex(index)
     }
 
     public func renameSpecialSlot(id: String, name: String) throws {
-        var index = loadIndex()
+        try storageLock.withLock {
+            var index = loadIndex()
 
-        guard let idx = index.specialSlots.firstIndex(where: { $0.id == id }) else {
-            throw SpecialSlotError.specialSlotNotFound
+            guard let idx = index.specialSlots.firstIndex(where: { $0.id == id }) else {
+                throw SpecialSlotError.specialSlotNotFound
+            }
+
+            let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else {
+                throw SpecialSlotError.invalidSpecialSlotName
+            }
+
+            index.specialSlots[idx].name = String(trimmed.prefix(30))
+            index.specialSlots[idx].updatedAt = Date()
+
+            try saveIndex(index)
         }
-
-        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else {
-            throw SpecialSlotError.invalidSpecialSlotName
-        }
-
-        index.specialSlots[idx].name = String(trimmed.prefix(30))
-        index.specialSlots[idx].updatedAt = Date()
-
-        try saveIndex(index)
     }
 
     // MARK: - Page CRUD (v2.4)
 
     public func createPage(name: String) throws -> SlotPage {
-        var index = loadIndex()
+        try storageLock.withLock {
+            var index = loadIndex()
 
-        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else {
-            throw PageError.emptyName
-        }
-
-        // Check for duplicate name
-        guard !index.pages.contains(where: { $0.name == trimmed }) else {
-            throw PageError.duplicateName
-        }
-
-        let maxOrder = index.pages.map { $0.order }.max() ?? (-1)
-        let page = SlotPage(
-            id: "page_\(UUID().uuidString)",
-            name: String(trimmed.prefix(30)),
-            order: maxOrder + 1,
-            createdAt: Date(),
-            updatedAt: Date()
-        )
-
-        index.pages.append(page)
-        try saveIndex(index)
-        NSLog("[ClipSlots] Page created: \(page.name)")
-        return page
-    }
-
-    public func renamePage(id: String, name: String) throws {
-        var index = loadIndex()
-        guard let idx = index.pages.firstIndex(where: { $0.id == id }) else {
-            throw PageError.pageNotFound
-        }
-
-        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else {
-            throw PageError.emptyName
-        }
-        guard !index.pages.contains(where: { $0.id != id && $0.name == trimmed }) else {
-            throw PageError.duplicateName
-        }
-
-        index.pages[idx].name = String(trimmed.prefix(30))
-        index.pages[idx].updatedAt = Date()
-        try saveIndex(index)
-        NSLog("[ClipSlots] Page renamed to: \(trimmed)")
-    }
-
-    public func deletePage(id: String) throws {
-        var index = loadIndex()
-
-        guard index.pages.count > 1 else {
-            throw PageError.cannotDeleteLastPage
-        }
-        guard index.pages.contains(where: { $0.id == id }) else {
-            throw PageError.pageNotFound
-        }
-
-        // v2.4.1: truly delete the page's slot groups (move data to .trash)
-        let groupsInPage = index.specialSlots.filter { $0.pageId == id }
-        if !groupsInPage.isEmpty {
-            let trashDir = baseDir.appendingPathComponent(".trash")
-            try? FileManager.default.createDirectory(at: trashDir, withIntermediateDirectories: true)
-            for group in groupsInPage {
-                let dir = specialSlotDirectory(for: group.id)
-                let trashTarget = trashDir.appendingPathComponent("page_deleted_\(group.id)_\(Int(Date().timeIntervalSince1970))")
-                try? FileManager.default.moveItem(at: dir, to: trashTarget)
+            let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else {
+                throw PageError.emptyName
             }
-            index.specialSlots.removeAll { $0.pageId == id }
-            NSLog("[ClipSlots] Page delete: \(groupsInPage.count) slot groups moved to .trash")
-        }
 
-        // If deleting current page, switch to another
-        if index.currentPageId == id {
-            index.currentPageId = index.pages.first(where: { $0.id != id })?.id ?? "default_page"
-        }
+            // Check for duplicate name
+            guard !index.pages.contains(where: { $0.name == trimmed }) else {
+                throw PageError.duplicateName
+            }
 
-        index.pages.removeAll { $0.id == id }
-        try saveIndex(index)
-        NSLog("[ClipSlots] Page deleted: \(id)")
-    }
-
-    public func switchToPage(id: String) throws {
-        var index = loadIndex()
-        guard index.pages.contains(where: { $0.id == id }) else {
-            throw PageError.pageNotFound
-        }
-
-        index.currentPageId = id
-
-        // Switch to the first slot group in this page, or create a default one
-        let groupsInPage = index.specialSlots.filter { $0.pageId == id }
-        if let firstGroup = groupsInPage.sorted(by: { $0.order < $1.order }).first {
-            index.currentSpecialSlotId = firstGroup.id
-            index.selectedSpecialSlotId = firstGroup.id
-            index.activeHotkeySpecialSlotId = firstGroup.id
-        } else {
-            // Create a default slot group for this page
-            let maxOrder = groupsInPage.map { $0.order }.max() ?? (-1)
-            let defaultGroup = SpecialSlot(
-                id: "special_\(UUID().uuidString)",
-                name: "默认槽位组",
-                icon: "folder",
-                colorHex: nil,
-                sourceType: .manual,
-                sourcePath: nil,
-                pageId: id,
+            let maxOrder = index.pages.map { $0.order }.max() ?? (-1)
+            let page = SlotPage(
+                id: "page_\(UUID().uuidString)",
+                name: String(trimmed.prefix(30)),
                 order: maxOrder + 1,
                 createdAt: Date(),
                 updatedAt: Date()
             )
-            let dir = specialSlotDirectory(for: defaultGroup.id)
-            try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-            index.specialSlots.append(defaultGroup)
-            index.currentSpecialSlotId = defaultGroup.id
-            index.selectedSpecialSlotId = defaultGroup.id
-            index.activeHotkeySpecialSlotId = defaultGroup.id
-        }
 
-        try saveIndex(index)
-        NSLog("[ClipSlots] Switched to page: \(id)")
+            index.pages.append(page)
+            try saveIndex(index)
+            NSLog("[ClipSlots] Page created: \(page.name)")
+            return page
+        }
+    }
+
+    public func renamePage(id: String, name: String) throws {
+        try storageLock.withLock {
+            var index = loadIndex()
+            guard let idx = index.pages.firstIndex(where: { $0.id == id }) else {
+                throw PageError.pageNotFound
+            }
+
+            let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else {
+                throw PageError.emptyName
+            }
+            guard !index.pages.contains(where: { $0.id != id && $0.name == trimmed }) else {
+                throw PageError.duplicateName
+            }
+
+            index.pages[idx].name = String(trimmed.prefix(30))
+            index.pages[idx].updatedAt = Date()
+            try saveIndex(index)
+            NSLog("[ClipSlots] Page renamed to: \(trimmed)")
+        }
+    }
+
+    public func deletePage(id: String) throws {
+        try storageLock.withLock {
+            var index = loadIndex()
+
+            guard index.pages.count > 1 else {
+                throw PageError.cannotDeleteLastPage
+            }
+            guard index.pages.contains(where: { $0.id == id }) else {
+                throw PageError.pageNotFound
+            }
+
+            // v2.4.1: truly delete the page's slot groups (move data to .trash)
+            let groupsInPage = index.specialSlots.filter { $0.pageId == id }
+            if !groupsInPage.isEmpty {
+                let trashDir = baseDir.appendingPathComponent(".trash")
+                try? FileManager.default.createDirectory(at: trashDir, withIntermediateDirectories: true)
+                for group in groupsInPage {
+                    let dir = specialSlotDirectory(for: group.id)
+                    let trashTarget = trashDir.appendingPathComponent("page_deleted_\(group.id)_\(Int(Date().timeIntervalSince1970))")
+                    try? FileManager.default.moveItem(at: dir, to: trashTarget)
+                }
+                index.specialSlots.removeAll { $0.pageId == id }
+                NSLog("[ClipSlots] Page delete: \(groupsInPage.count) slot groups moved to .trash")
+            }
+
+            // If deleting current page, switch to another
+            if index.currentPageId == id {
+                index.currentPageId = index.pages.first(where: { $0.id != id })?.id ?? "default_page"
+            }
+
+            index.pages.removeAll { $0.id == id }
+            try saveIndex(index)
+            NSLog("[ClipSlots] Page deleted: \(id)")
+        }
+    }
+
+    public func switchToPage(id: String) throws {
+        try storageLock.withLock {
+            var index = loadIndex()
+            guard index.pages.contains(where: { $0.id == id }) else {
+                throw PageError.pageNotFound
+            }
+
+            index.currentPageId = id
+
+            // Switch to the first slot group in this page, or create a default one
+            let groupsInPage = index.specialSlots.filter { $0.pageId == id }
+            if let firstGroup = groupsInPage.sorted(by: { $0.order < $1.order }).first {
+                index.currentSpecialSlotId = firstGroup.id
+                index.selectedSpecialSlotId = firstGroup.id
+                index.activeHotkeySpecialSlotId = firstGroup.id
+            } else {
+                // Create a default slot group for this page
+                let maxOrder = groupsInPage.map { $0.order }.max() ?? (-1)
+                let defaultGroup = SpecialSlot(
+                    id: "special_\(UUID().uuidString)",
+                    name: "默认槽位组",
+                    icon: "folder",
+                    colorHex: nil,
+                    sourceType: .manual,
+                    sourcePath: nil,
+                    pageId: id,
+                    order: maxOrder + 1,
+                    createdAt: Date(),
+                    updatedAt: Date()
+                )
+                let dir = specialSlotDirectory(for: defaultGroup.id)
+                try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+                index.specialSlots.append(defaultGroup)
+                index.currentSpecialSlotId = defaultGroup.id
+                index.selectedSpecialSlotId = defaultGroup.id
+                index.activeHotkeySpecialSlotId = defaultGroup.id
+            }
+
+            try saveIndex(index)
+            NSLog("[ClipSlots] Switched to page: \(id)")
+        }
     }
 
     // MARK: - Child Slot Operations
@@ -700,22 +735,26 @@ public final class SpecialSlotStorage {
     // MARK: - Source Update
 
     public func updateCurrentSpecialSlotSource(sourceType: SpecialSlotSourceType, sourcePath: String?) throws {
-        var index = loadIndex()
-        guard let idx = index.specialSlots.firstIndex(where: { $0.id == index.currentSpecialSlotId }) else {
-            throw SpecialSlotError.specialSlotNotFound
+        try storageLock.withLock {
+            var index = loadIndex()
+            guard let idx = index.specialSlots.firstIndex(where: { $0.id == index.currentSpecialSlotId }) else {
+                throw SpecialSlotError.specialSlotNotFound
+            }
+            index.specialSlots[idx].sourceType = sourceType
+            index.specialSlots[idx].sourcePath = sourcePath
+            index.specialSlots[idx].updatedAt = Date()
+            try saveIndex(index)
         }
-        index.specialSlots[idx].sourceType = sourceType
-        index.specialSlots[idx].sourcePath = sourcePath
-        index.specialSlots[idx].updatedAt = Date()
-        try saveIndex(index)
     }
 
     // MARK: - Settings
 
     public func updateSettings(_ transform: (inout SpecialSlotSettings) -> Void) throws {
-        var index = loadIndex()
-        transform(&index.settings)
-        try saveIndex(index)
+        try storageLock.withLock {
+            var index = loadIndex()
+            transform(&index.settings)
+            try saveIndex(index)
+        }
     }
 
     // MARK: - Utilities
@@ -725,10 +764,14 @@ public final class SpecialSlotStorage {
     }
 
     private func touchSpecialSlot(id: String) {
-        var index = loadIndex()
-        if let idx = index.specialSlots.firstIndex(where: { $0.id == id }) {
-            index.specialSlots[idx].updatedAt = Date()
-            try? saveIndex(index)
+        // v2.9.4 (#4): touchSpecialSlot is non-throwing; swallow a lock timeout
+        // via try? so a busy lock degrades to "not touched" rather than crashing.
+        try? storageLock.withLock {
+            var index = loadIndex()
+            if let idx = index.specialSlots.firstIndex(where: { $0.id == id }) {
+                index.specialSlots[idx].updatedAt = Date()
+                try? saveIndex(index)
+            }
         }
     }
 }

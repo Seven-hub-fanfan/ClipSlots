@@ -197,6 +197,7 @@ public enum SpecialSlotError: Error, LocalizedError {
     case specialSlotNotFound
     case invalidSpecialSlotName
     case maxSpecialSlotsReached
+    case duplicateName
     case indexCorrupted
 
     public var errorDescription: String? {
@@ -205,6 +206,7 @@ public enum SpecialSlotError: Error, LocalizedError {
         case .specialSlotNotFound: return "槽位组不存在"
         case .invalidSpecialSlotName: return "槽位组名称无效"
         case .maxSpecialSlotsReached: return "当前页面的槽位组数量已达到上限，最多 10 个"
+        case .duplicateName: return "当前页面已存在同名槽位组"
         case .indexCorrupted: return "槽位组索引文件损坏"
         }
     }

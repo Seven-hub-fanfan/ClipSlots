@@ -204,10 +204,72 @@ final class SlotStoreObservable: ObservableObject {
     /// The special slot id that current in-memory `slots` / `labels` belong to.
     private var loadedSpecialSlotId: String?
 
+    // MARK: - v2.9.4 (Feature #2) Live disk refresh
+    /// FSEvents watcher on the storage base dir. External (CLI / other GUI) writes
+    /// trigger a debounced `reloadAll()` so the UI reflects disk changes without a
+    /// manual group switch or restart.
+    private var storageWatcher: StorageDirectoryWatcher?
+    /// Debounces bursts of FSEvents into a single reload.
+    private var watcherDebounceWorkItem: DispatchWorkItem?
+    /// Self-write suppression: bumped to `now + 0.6s` right before every
+    /// GUI-initiated disk write. If the debounced watcher handler fires while
+    /// `Date() < ignoreWatcherUntil`, the reload is skipped — this prevents a
+    /// reload loop/storm from the GUI's OWN writes while still reacting promptly
+    /// to genuinely external writes.
+    private var ignoreWatcherUntil: Date = .distantPast
+
     init() {
         NSLog("[ClipSlots] SlotStoreObservable init instanceID=\(instanceID)")
         loadSpecialSlots()
         loadSlots()
+        setupStorageWatcher()
+    }
+
+    deinit {
+        storageWatcher?.stop()
+        storageWatcher = nil
+    }
+
+    // MARK: - v2.9.4 Storage Watcher (Feature #2)
+
+    private func setupStorageWatcher() {
+        let base = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".local/share/clipslots/special_slots")
+        try? FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
+        let watcher = StorageDirectoryWatcher(path: base.path) { [weak self] in
+            self?.handleStorageChange()
+        }
+        watcher.start()
+        storageWatcher = watcher
+    }
+
+    /// Called on the watcher's background queue for every FSEvents batch.
+    /// Debounces ~300ms, then reloads on the main queue (unless self-write suppressed).
+    private func handleStorageChange() {
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.watcherDebounceWorkItem?.cancel()
+            let work = DispatchWorkItem { [weak self] in
+                guard let self else { return }
+                if Date() < self.ignoreWatcherUntil {
+                    NSLog("[ClipSlots] watcher fired → suppressed (self-write)")
+                    return
+                }
+                NSLog("[ClipSlots] watcher fired → reloadAll")
+                self.reloadAll()
+                self.refreshTrigger = UUID()
+            }
+            self.watcherDebounceWorkItem = work
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3, execute: work)
+        }
+    }
+
+    /// Bump the suppression window right before a GUI-initiated disk write so the
+    /// resulting FSEvents callback does not trigger a redundant `reloadAll()`.
+    /// A single timestamp (rather than per-method bool flags) is simpler and safe
+    /// as long as it is bumped at every GUI write entry point.
+    func suppressWatcher(_ interval: TimeInterval = 0.6) {
+        ignoreWatcherUntil = Date().addingTimeInterval(interval)
     }
 
     // MARK: - Special Slots
@@ -272,6 +334,7 @@ final class SlotStoreObservable: ObservableObject {
         currentSpecialSlotId = id
         currentSpecialSlot = specialSlots.first { $0.id == id }
 
+        suppressWatcher() // v2.9.4 (#2): self-write
         specialStorage.updateSelectedSpecialSlot(id: id)
 
         loadSlots()
@@ -300,6 +363,7 @@ final class SlotStoreObservable: ObservableObject {
         activeHotkeySpecialSlotId = id
         activeHotkeySpecialSlot = specialSlots.first { $0.id == id }
 
+        suppressWatcher() // v2.9.4 (#2): self-write
         try? specialStorage.updateActiveHotkeySpecialSlot(id: id)
 
         refreshTrigger = UUID()
@@ -325,6 +389,7 @@ final class SlotStoreObservable: ObservableObject {
         loadedSpecialSlotId = nil
         refreshTrigger = UUID()
 
+        suppressWatcher() // v2.9.4 (#2): self-write
         do {
             try specialStorage.switchToSpecialSlot(id: id)
         } catch {
@@ -353,13 +418,30 @@ final class SlotStoreObservable: ObservableObject {
     }
 
     func createSpecialSlot(name: String) {
+        suppressWatcher() // v2.9.4 (#2): self-write
         do {
             let slot = try specialStorage.createSpecialSlot(name: name)
             try specialStorage.switchToSpecialSlot(id: slot.id)
             reloadAll()
             refreshTrigger = UUID()
+        } catch SpecialSlotError.duplicateName {
+            // v2.9.4 (Feature #4): same-page duplicate names are rejected. Show a
+            // non-fatal HUD instead of crashing / force-unwrapping.
+            NSLog("[ClipSlots] createSpecialSlot rejected: duplicate name '\(name)'")
+            showFloatingNotice(FloatingNotice(
+                title: "名称重复",
+                subtitle: "当前页面已存在「\(name.trimmingCharacters(in: .whitespacesAndNewlines))」，请换个名字",
+                iconName: "exclamationmark.triangle.fill",
+                kind: .warning
+            ))
         } catch {
             NSLog("[ClipSlots] createSpecialSlot error: \(error)")
+            showFloatingNotice(FloatingNotice(
+                title: "创建槽位组失败",
+                subtitle: error.localizedDescription,
+                iconName: "exclamationmark.triangle.fill",
+                kind: .warning
+            ))
         }
     }
 
@@ -379,6 +461,7 @@ final class SlotStoreObservable: ObservableObject {
     }
 
     func deleteSpecialSlot(id: String) {
+        suppressWatcher() // v2.9.4 (#2): self-write
         do {
             try specialStorage.deleteSpecialSlot(id: id)
             reloadAll()
@@ -389,6 +472,7 @@ final class SlotStoreObservable: ObservableObject {
     }
 
     func renameSpecialSlot(id: String, name: String) {
+        suppressWatcher() // v2.9.4 (#2): self-write
         do {
             try specialStorage.renameSpecialSlot(id: id, name: name)
             loadSpecialSlots()
@@ -400,6 +484,7 @@ final class SlotStoreObservable: ObservableObject {
     // MARK: - Page Operations (v2.4)
 
     func createPage(name: String) {
+        suppressWatcher() // v2.9.4 (#2): self-write
         do {
             let page = try specialStorage.createPage(name: name)
             try specialStorage.switchToPage(id: page.id)
@@ -412,6 +497,7 @@ final class SlotStoreObservable: ObservableObject {
     }
 
     func renamePage(id: String, name: String) {
+        suppressWatcher() // v2.9.4 (#2): self-write
         do {
             try specialStorage.renamePage(id: id, name: name)
             loadSpecialSlots()
@@ -423,6 +509,7 @@ final class SlotStoreObservable: ObservableObject {
     }
 
     func deletePage(id: String) {
+        suppressWatcher() // v2.9.4 (#2): self-write
         do {
             try specialStorage.deletePage(id: id)
             reloadAll()
@@ -434,6 +521,7 @@ final class SlotStoreObservable: ObservableObject {
     }
 
     func switchToPage(id: String) {
+        suppressWatcher() // v2.9.4 (#2): self-write
         do {
             try specialStorage.switchToPage(id: id)
             reloadAll()
@@ -447,6 +535,7 @@ final class SlotStoreObservable: ObservableObject {
 
     // v2.4.1: Cmd+Left / Cmd+Right — cycle through slot groups in current page
     func switchToPreviousSlotGroup() {
+        suppressWatcher() // v2.9.4 (#2): self-write
         do {
             try specialStorage.switchToAdjacentSpecialSlot(direction: .previous)
             reloadAll()
@@ -460,6 +549,7 @@ final class SlotStoreObservable: ObservableObject {
     }
 
     func switchToNextSlotGroup() {
+        suppressWatcher() // v2.9.4 (#2): self-write
         do {
             try specialStorage.switchToAdjacentSpecialSlot(direction: .next)
             reloadAll()
@@ -541,6 +631,7 @@ final class SlotStoreObservable: ObservableObject {
     }
 
     private func persistCurrentSpecialSlotData() {
+        suppressWatcher() // v2.9.4 (#2): our own write — don't let it trigger a reload
         let activeId = currentSpecialSlotId
         for (slot, content) in slots {
             specialStorage.set(slot, content: content, in: activeId)
@@ -645,6 +736,7 @@ final class SlotStoreObservable: ObservableObject {
 
     func clearAllSlotsInCurrentSpecialSlot() {
         let activeId = currentSpecialSlotId
+        suppressWatcher() // v2.9.4 (#2): self-write
         cancelPendingClipboardRestore()
 
         ThumbnailProvider.shared.invalidateSpecialSlot(specialSlotId: activeId)
@@ -898,6 +990,7 @@ final class SlotStoreObservable: ObservableObject {
     /// refresh in-memory state so the node canvas updates immediately.
     func setAttachments(_ attachments: [SlotContent.SlotAttachment], for slot: Int) {
         let activeId = currentSpecialSlotId
+        suppressWatcher() // v2.9.4 (#2): self-write
         var content = specialStorage.get(slot, in: activeId)
         content.attachments = attachments
         _ = specialStorage.set(slot, content: content, in: activeId)
@@ -2557,6 +2650,7 @@ final class SlotStoreObservable: ObservableObject {
         let response = panel.runModal()
         guard response == .OK, let url = panel.url else { return }
 
+        suppressWatcher() // v2.9.4 (#2): self-write (template import creates groups on disk)
         do {
             let data = try Data(contentsOf: url)
             
@@ -2926,6 +3020,7 @@ final class SlotStoreObservable: ObservableObject {
     func clearSlot(_ slot: Int) {
         let activeId = currentSpecialSlotId
 
+        suppressWatcher() // v2.9.4 (#2): self-write
         cancelPendingClipboardRestore()
         specialStorage.clear(slot, in: activeId)
 
@@ -2982,6 +3077,7 @@ final class SlotStoreObservable: ObservableObject {
     func setLabel(_ slot: Int, label: String?) {
         let activeId = currentSpecialSlotId
 
+        suppressWatcher() // v2.9.4 (#2): self-write
         specialStorage.setLabel(slot, label: label, in: activeId)
 
         var newLabels = labels
@@ -3115,6 +3211,7 @@ final class SlotStoreObservable: ObservableObject {
     }
 
     func importFolderIntoCurrentSpecialSlot(_ folderURL: URL) {
+        suppressWatcher() // v2.9.4 (#2): self-write
         let activeId = currentSpecialSlotId
         let options = FolderImportOptions(
             maxFiles: specialSlotSettings.maxChildSlotsPerSpecialSlot,
@@ -3153,6 +3250,7 @@ final class SlotStoreObservable: ObservableObject {
             // Clear and import
             ThumbnailProvider.shared.invalidateSpecialSlot(specialSlotId: activeId)
 
+            suppressWatcher() // v2.9.4 (#2): re-bump after any modal so the write burst below stays suppressed
             try specialStorage.clearAllSlots(in: activeId)
 
             var successCount = 0
@@ -3229,6 +3327,7 @@ final class SlotStoreObservable: ObservableObject {
     // MARK: - File Detection
 
     func handleCapturedContentForSave(_ content: SlotContent, targetSlot: Int) {
+        suppressWatcher() // v2.9.4 (#2): self-write (covers all save/import sub-paths below)
         let activeId = currentSpecialSlotId
         let folderURLs = content.detectedFolderURLs
 
@@ -3310,6 +3409,7 @@ final class SlotStoreObservable: ObservableObject {
         startSlot: Int,
         expansion: BatchImportExpansionResult? = nil
     ) {
+        suppressWatcher() // v2.9.4 (#2): self-write (batch); re-bumped in the loop below
         // v2.6.2: Safety guards
         guard !isBatchSaving else {
             showFloatingNotice(FloatingNotice(
@@ -3402,6 +3502,8 @@ final class SlotStoreObservable: ObservableObject {
         isBatchSaving = true
         defer { isBatchSaving = false }
 
+        suppressWatcher() // v2.9.4 (#2): re-bump after confirmation modals, before the create/write burst
+
         var savedCount = 0
         var failedCount = 0
         var overwrittenCount = 0
@@ -3471,7 +3573,7 @@ final class SlotStoreObservable: ObservableObject {
         // Save items to targets
         for (index, item) in items.enumerated() {
             guard index < itemsToSave, index < targets.count else { break }
-
+            suppressWatcher() // v2.9.4 (#2): keep the self-write window fresh during a long batch
             let target = targets[index]
             var content = batchImportService.makeSlotContent(for: item.fileURL)
             content.contentId = UUID().uuidString
@@ -3670,6 +3772,7 @@ final class SlotStoreObservable: ObservableObject {
             content.updatedAt = Date().timeIntervalSince1970
             let activeId = currentSpecialSlotId
             ThumbnailProvider.shared.invalidateSlot(specialSlotId: activeId, slot: targetSlot)
+            suppressWatcher() // v2.9.4 (#2): self-write (bump right before the write, after the modal)
             let success = specialStorage.set(targetSlot, content: content, in: activeId)
             guard success else {
                 NSLog("[ClipSlots] save folder as normal FAIL specialSlot=\(activeId) slot=\(targetSlot)")
@@ -3711,6 +3814,7 @@ final class SlotStoreObservable: ObservableObject {
     }
 
     func createSpecialSlotAndImportFolder(_ folderURL: URL) {
+        suppressWatcher() // v2.9.4 (#2): self-write (creates + switches group, then imports)
         do {
             let name = folderURL.lastPathComponent
             let slot = try specialStorage.createSpecialSlot(

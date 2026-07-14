@@ -1,13 +1,15 @@
 ---
 name: clipslots-manager
-version: 0.4 (draft)
-used_when: 当需要以编程方式读取、写入、检索、加载或整理 macOS 剪贴板槽位管理器 ClipSlots 中的内容时使用（把文本/文件存进槽位、读出内容、搜索历史、把内容放到系统剪贴板、批量整理文件夹素材到槽位组/页面等）。
-requires: macOS + 已安装 ClipSlots v2.9.3+（CLI 位于 `~/bin/clipslots`）
+version: 0.5 (draft)
+used_when: 当需要以编程方式读取、写入、检索、加载或整理 macOS 剪贴板槽位管理器 ClipSlots 中的内容时使用（把文本/文件存进槽位、读出内容、搜索历史、把内容放到系统剪贴板、批量整理文件夹素材到槽位组/页面、删除槽位组/页面等）。
+requires: macOS + 已安装 ClipSlots v2.9.4+（CLI 位于 `~/bin/clipslots`）
 ---
 
 # ClipSlots CLI 使用技能（草稿）
 
 `clipslots` 是 ClipSlots.app 的命令行接口，与 GUI **共享同一份磁盘数据**（`ClipSlotsKit` 库），CLI 的读写会实时反映到 GUI，反之亦然。所有命令输出**单个 JSON 对象**到 stdout，专为智能体调用设计。
+
+> **v2.9.4 跨进程并发安全（重要）**：CLI 与 GUI 是两个独立进程，共享同一份磁盘数据。v2.9.4 起所有写操作都通过一把基于 `flock()` 的跨进程文件锁串行化（锁文件 `~/.local/share/clipslots/special_slots/.storage.lock`），CLI 与 GUI 的并发写不会再互相覆盖。锁为非阻塞重试、约 5 秒超时；若另一进程长时间占用锁，命令会返回 `{"ok":false,"error":"storage is busy (lock timeout)"}`（退出码 1）——此时**稍等片刻重试即可**，不要当作数据错误。GUI 端对 CLI 的改动会通过文件监听自动刷新界面（约 300ms 去抖），无需手动切组或重启。
 
 ## 0. 调用方式与通用约定
 
@@ -26,11 +28,11 @@ requires: macOS + 已安装 ClipSlots v2.9.3+（CLI 位于 `~/bin/clipslots`）
 
 **首选工作流**：动手前先 `clipslots help` / `groups` / `list` 了解现状，再执行读写；写入前优先选空槽，避免覆盖。
 
-## 1. 命令参考（v2.9.3，共 13 个）
+## 1. 命令参考（v2.9.4，共 15 个）
 
 ### 只读
 ```bash
-clipslots version                                  # {"ok":true,"version":"2.9.3"}
+clipslots version                                  # {"ok":true,"version":"2.9.4"}
 clipslots help                                     # 命令清单 + version/defaultGroup/defaultPage/slotCount
 clipslots groups                                   # 所有槽位组，返回对象 {groups:[{id,name,pageId,pageName,pageCount,slotCount,current}]}
 clipslots pages                                    # 所有页面，返回对象 {pages:[{id,name,current}]}
@@ -58,16 +60,32 @@ clipslots paste <slot> [--group <id>]
 clipslots clear <slot> [--group <id>]
 
 # 新建槽位组（返回 id）；页面已满(10组)会报错 → 先 create-page
+# v2.9.4: 同一页面内不允许重名（大小写/去空格后完全相同即冲突）；冲突时返回
+#   {"ok":false,"error":"a group named '<name>' already exists on this page"}
+#   → 改个名或加 -2/-3 后缀重试。不同页面允许同名。
 clipslots create-group <name> [--page <id>]
 
 # 新建页面（返回 id）；页面名不可重复
 clipslots create-page <name>
+
+# 删除一个槽位组（软删除）；其数据目录移动到 .trash（可人工恢复）
+# 成功返回 {"ok":true,"deleted":"<id>","movedToTrash":true}
+# id 不存在返回 {"ok":false,"error":"group <id> not found"}
+clipslots delete-group <id>
+
+# 删除一个页面及其下所有槽位组（软删除）；相关数据目录移动到 .trash（可人工恢复）
+# 成功返回 {"ok":true,"deleted":"<id>","movedToTrash":true}
+# id 不存在返回 {"ok":false,"error":"page <id> not found"}
+clipslots delete-page <id>
 ```
 
 > 说明：`write-attachment` 的文件路径支持 `~` 与相对路径；图片扩展名归 `image` 类型，其余归 `file`。
 
-### 已知能力 / 限制（v2.9.3）
+### 已知能力 / 限制（v2.9.4）
 
+- ✅ **`delete-group` / `delete-page` 软删除**（v2.9.4 新增）：删除是"移动到 `.trash`"而非物理抹除，可人工恢复；因此可安全用于整理。删除不存在的 id 返回 `ok:false`（`group/page <id> not found`），不会误删。
+- ✅ **`create-group` 同页去重**（v2.9.4 新增）：同一页面内不允许出现同名槽位组，冲突返回 `a group named '<name>' already exists on this page`；不同页面之间允许同名。批量导入/自动建组时遇冲突请改名或加 `-2`/`-3` 后缀。
+- ✅ **跨进程写锁**（v2.9.4 新增）：CLI 与 GUI 的并发写通过 `flock()` 串行化，不再互相覆盖；锁争用超时（约 5s）返回 `storage is busy (lock timeout)`，稍后重试即可。
 - ✅ **`paste` 支持纯附件槽位**：主体为空、仅有附件的槽位，`paste` 会把附件的文件 URL 写入系统剪贴板（`clearContents` 后 `writeObjects([NSURL])`），返回 `attachmentsCopied`（无法解析出文件路径的附件会被跳过并计入 `attachmentsSkipped`）。旧版"纯附件槽位无法 paste"的限制已在 v2.9.3 修复。
 - ✅ **`search` 命中附件文件名**：搜索的匹配范围已扩展到"预览 + 正文 + 标签 + 附件文件名"，因此模式C（纯附件）槽位可通过文件名被搜到。旧版"搜索不覆盖附件名"的限制已在 v2.9.3 修复。
 - ⚠️ **`write` 仅写纯文本主体**：`--text` 必填，仅接受 UTF-8 文本；`--text -` 从 stdin 读取时若不是合法 UTF-8（二进制）会返回 `ok:false` 且**不清空槽位**。把图片/文件放入槽位请用 `write-attachment`（或走 GUI）。

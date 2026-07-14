@@ -12,7 +12,7 @@ import ClipSlotsKit
 //   success: {"ok": true, ...}
 //   error:   {"ok": false, "error": "message"}  (exit code 1)
 
-let CLI_VERSION = "2.9.3"
+let CLI_VERSION = "2.9.4"
 let DEFAULT_GROUP = "default"
 let DEFAULT_PAGE = "default_page"
 
@@ -175,8 +175,10 @@ func cmdHelp() -> Never {
         ["name": "search", "description": "在槽位预览/文本/标签中做大小写不敏感子串搜索。", "flags": ["<query> (位置参数)", "--group <id> (默认 default)", "--all-groups (在所有槽位组内搜索)", "--limit <N> (默认 50)"]],
         ["name": "paste", "description": "把某槽位的内容加载到系统剪贴板(NSPasteboard)，不模拟按键。", "flags": ["<slot> (位置参数,1..N)", "--group <id> (默认 default)", "--page <id> (可选,仅回显)"]],
         ["name": "clear", "description": "清空某个槽位（内容、标签、附件全部移除）。", "flags": ["<slot> (位置参数,1..N)", "--group <id> (默认 default)"]],
-        ["name": "create-group", "description": "在指定页面新建一个槽位组，返回其 id。页面已满(10组)会返回错误，此时应先 create-page。", "flags": ["<name> (位置参数,组名)", "--page <id> (可选,默认当前页面)"]],
+        ["name": "create-group", "description": "在指定页面新建一个槽位组，返回其 id。页面已满(10组)会返回错误，此时应先 create-page。v2.9.4: 同页面内不允许重名(会返回错误)，冲突时请改名或加 -2 后缀。", "flags": ["<name> (位置参数,组名)", "--page <id> (可选,默认当前页面)"]],
         ["name": "create-page", "description": "新建一个页面，返回其 id。页面名不可重复。", "flags": ["<name> (位置参数,页面名)"]],
+        ["name": "delete-group", "description": "删除一个槽位组(软删除)。其数据目录会被移动到 .trash，可恢复。id 不存在会返回错误。", "flags": ["<id> (位置参数,槽位组 id)"]],
+        ["name": "delete-page", "description": "删除一个页面及其下所有槽位组(软删除)。相关数据目录会被移动到 .trash，可恢复。id 不存在会返回错误。", "flags": ["<id> (位置参数,页面 id)"]],
         ["name": "write-attachment", "description": "向某槽位追加一个或多个文件作为附件（按顺序），不改动槽位主体内容。图片扩展名归为 image 类型，其余为 file。", "flags": ["<slot> (位置参数,1..N)", "<file> [file ...] (位置参数,一个或多个文件路径,支持 ~ 与相对路径)", "--group <id> (默认 default)", "--replace (先清空该槽位已有附件再写入)", "--label <string> (可选)"]]
     ]
     success([
@@ -278,20 +280,32 @@ func cmdWrite(_ args: ParsedArgs) -> Never {
 
     // Mirror the GUI's updateTextSlot: build a public.utf8-plain-text item and
     // PRESERVE any existing attachments on the slot (v2.8.7 fix).
-    let existing = storage.get(n, in: group)
-    let data = text.data(using: .utf8) ?? Data()
-    let item = PasteboardItem(type: "public.utf8-plain-text", data: data)
-    var content = SlotContent()
-    content.items = [[item]]
-    content.timestamp = Date()
-    content.attachments = existing.attachments
+    // v2.9.4 (#4): perform the read-modify-write as ONE cross-process critical
+    // section so a concurrent CLI/GUI write cannot clobber it. A lock timeout is
+    // surfaced as a clear "storage is busy" error (exit non-zero) instead of a hang.
+    let ok: Bool
+    do {
+        ok = try StorageLock.shared.withLock { () -> Bool in
+            let existing = storage.get(n, in: group)
+            let data = text.data(using: .utf8) ?? Data()
+            let item = PasteboardItem(type: "public.utf8-plain-text", data: data)
+            var content = SlotContent()
+            content.items = [[item]]
+            content.timestamp = Date()
+            content.attachments = existing.attachments
 
-    let ok = storage.set(n, content: content, in: group)
-    guard ok else { fail("failed to write slot \(n) in group \(group)") }
-
-    if let label = args.flag("label") {
-        storage.setLabel(n, label: label, in: group)
+            let wrote = storage.set(n, content: content, in: group)
+            if wrote, let label = args.flag("label") {
+                storage.setLabel(n, label: label, in: group)
+            }
+            return wrote
+        }
+    } catch let e as StorageLockError {
+        fail(e.errorDescription ?? "storage is busy (lock timeout)")
+    } catch {
+        fail("failed to write slot \(n) in group \(group): \(error.localizedDescription)")
     }
+    guard ok else { fail("failed to write slot \(n) in group \(group)") }
     success(["slot": n, "group": group])
 }
 
@@ -402,6 +416,14 @@ func cmdCreateGroup(_ args: ParsedArgs) -> Never {
     do {
         let slot = try storage.createSpecialSlot(name: name, pageId: page)
         success(["group": ["id": slot.id, "name": slot.name, "pageId": slot.pageId]])
+    } catch SpecialSlotError.duplicateName {
+        // v2.9.4 (Feature #4): same-page duplicate name is rejected. Agents should
+        // rename or add a `-2` suffix on conflict (see skill doc).
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        fail("a group named '\(trimmed)' already exists on this page")
+    } catch let e as StorageLockError {
+        // v2.9.4 (#4): cross-process lock contention timeout.
+        fail(e.errorDescription ?? "storage is busy (lock timeout)")
     } catch let e as SpecialSlotError {
         // maxSpecialSlotsReached → the caller should create a new page (see skill rules).
         fail(e.errorDescription ?? "failed to create group")
@@ -417,6 +439,8 @@ func cmdCreatePage(_ args: ParsedArgs) -> Never {
     do {
         let page = try storage.createPage(name: name)
         success(["page": ["id": page.id, "name": page.name, "order": page.order]])
+    } catch let e as StorageLockError {
+        fail(e.errorDescription ?? "storage is busy (lock timeout)")
     } catch let e as PageError {
         fail(e.errorDescription ?? "failed to create page")
     } catch {
@@ -455,34 +479,99 @@ func cmdWriteAttachment(_ args: ParsedArgs) -> Never {
         added.append(url.lastPathComponent)
     }
 
-    var content = storage.get(n, in: group)
-    if args.hasFlag("replace") {
-        content.attachments = newAtts
-    } else {
-        content.attachments.append(contentsOf: newAtts)
+    // v2.9.4 (#4): perform read-modify-write under the cross-process lock.
+    let result: (ok: Bool, attachmentCount: Int, bodyEmpty: Bool)
+    do {
+        result = try StorageLock.shared.withLock { () -> (Bool, Int, Bool) in
+            var content = storage.get(n, in: group)
+            if args.hasFlag("replace") {
+                content.attachments = newAtts
+            } else {
+                content.attachments.append(contentsOf: newAtts)
+            }
+            let wrote = storage.set(n, content: content, in: group)
+            if wrote, let label = args.flag("label") {
+                storage.setLabel(n, label: label, in: group)
+            }
+            return (wrote, content.attachments.count, content.items.isEmpty)
+        }
+    } catch let e as StorageLockError {
+        fail(e.errorDescription ?? "storage is busy (lock timeout)")
+    } catch {
+        fail("failed to write attachments to slot \(n) in group \(group): \(error.localizedDescription)")
     }
-    let ok = storage.set(n, content: content, in: group)
-    guard ok else { fail("failed to write attachments to slot \(n) in group \(group)") }
+    guard result.ok else { fail("failed to write attachments to slot \(n) in group \(group)") }
 
-    if let label = args.flag("label") {
-        storage.setLabel(n, label: label, in: group)
-    }
     success([
         "slot": n,
         "group": group,
         "added": added,
-        "attachmentCount": content.attachments.count,
+        "attachmentCount": result.attachmentCount,
         // v2.9.3: report whether the slot BODY (items) is empty. content.isEmpty now
         // also considers attachments (which we just wrote), so use items.isEmpty here.
-        "slotBodyEmpty": content.items.isEmpty
+        "slotBodyEmpty": result.bodyEmpty
     ])
 }
 
 func cmdClear(_ args: ParsedArgs) -> Never {
     let group = resolveGroup(args)
     let n = parseSlot(args.positionals.first)
-    storage.clear(n, in: group)
+    // v2.9.4 (#4): cross-process lock around the clear write.
+    do {
+        try StorageLock.shared.withLock {
+            storage.clear(n, in: group)
+        }
+    } catch let e as StorageLockError {
+        fail(e.errorDescription ?? "storage is busy (lock timeout)")
+    } catch {
+        fail("failed to clear slot \(n) in group \(group): \(error.localizedDescription)")
+    }
     success(["slot": n, "group": group, "action": "cleared"])
+}
+
+// v2.9.4 (Feature #3): delete a whole slot group. The data layer moves the
+// group's directory to `.trash` (recoverable), so this is a soft delete.
+func cmdDeleteGroup(_ args: ParsedArgs) -> Never {
+    guard let id = args.positionals.first, !id.trimmingCharacters(in: .whitespaces).isEmpty else {
+        fail("missing group id (usage: delete-group <id>)")
+    }
+    // Validate existence first for a clear, agent-friendly error.
+    let index = storage.loadIndex()
+    guard index.specialSlots.contains(where: { $0.id == id }) else {
+        fail("group \(id) not found")
+    }
+    do {
+        try storage.deleteSpecialSlot(id: id)
+        success(["deleted": id, "movedToTrash": true])
+    } catch let e as StorageLockError {
+        fail(e.errorDescription ?? "storage is busy (lock timeout)")
+    } catch let e as SpecialSlotError {
+        fail(e.errorDescription ?? "failed to delete group")
+    } catch {
+        fail("failed to delete group: \(error.localizedDescription)")
+    }
+}
+
+// v2.9.4 (Feature #3): delete a whole page (and its slot groups). The data layer
+// moves the affected group directories to `.trash` (recoverable).
+func cmdDeletePage(_ args: ParsedArgs) -> Never {
+    guard let id = args.positionals.first, !id.trimmingCharacters(in: .whitespaces).isEmpty else {
+        fail("missing page id (usage: delete-page <id>)")
+    }
+    let index = storage.loadIndex()
+    guard index.pages.contains(where: { $0.id == id }) else {
+        fail("page \(id) not found")
+    }
+    do {
+        try storage.deletePage(id: id)
+        success(["deleted": id, "movedToTrash": true])
+    } catch let e as StorageLockError {
+        fail(e.errorDescription ?? "storage is busy (lock timeout)")
+    } catch let e as PageError {
+        fail(e.errorDescription ?? "failed to delete page")
+    } catch {
+        fail("failed to delete page: \(error.localizedDescription)")
+    }
 }
 
 // MARK: - Entry point
@@ -514,6 +603,10 @@ case "create-group":
     cmdCreateGroup(parsed)
 case "create-page":
     cmdCreatePage(parsed)
+case "delete-group":
+    cmdDeleteGroup(parsed)
+case "delete-page":
+    cmdDeletePage(parsed)
 case "write-attachment":
     cmdWriteAttachment(parsed)
 default:

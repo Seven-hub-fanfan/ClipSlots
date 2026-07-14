@@ -52,54 +52,67 @@ public final class SlotStorage {
 
     @discardableResult
     public func set(_ slot: Int, content: SlotContent) -> Bool {
-        let ok: Bool = queue.sync {
-            do {
-                try writeSlotContent(content, to: slot)
-                cache[slot] = content
-                NSLog("[ClipSlots] SlotStorage.set OK slot=\(slot) preview=\(content.preview)")
-                return true
-            } catch {
-                NSLog("[ClipSlots] SlotStorage.set FAIL slot=\(slot) error=\(error)")
-                return false
+        // v2.9.4 (#4): wrap the whole write in the cross-process lock so a CLI and
+        // the GUI cannot clobber each other. flock is acquired OUTSIDE `queue`
+        // (StorageLock uses its own NSRecursiveLock), never dispatched onto the
+        // serial `queue`, so no queue.sync self-deadlock is possible. A lock
+        // timeout degrades to a failed write (returns false) rather than a hang.
+        return (try? StorageLock.shared.withLock {
+            let ok: Bool = queue.sync {
+                do {
+                    try writeSlotContent(content, to: slot)
+                    cache[slot] = content
+                    NSLog("[ClipSlots] SlotStorage.set OK slot=\(slot) preview=\(content.preview)")
+                    return true
+                } catch {
+                    NSLog("[ClipSlots] SlotStorage.set FAIL slot=\(slot) error=\(error)")
+                    return false
+                }
             }
-        }
-        // v2.8.0 (perf H2): manifest.json is a write-only diagnostic file (never
-        // read back for correctness — `readManifest()` has no callers). Regenerating
-        // it walks all 10 slot directories off disk, which previously ran inside the
-        // synchronous save path and blocked the caller (usually the main thread) on
-        // every save. Move it to the serial background queue so `set` returns as soon
-        // as the slot itself is persisted and the in-memory cache is updated.
-        if ok { scheduleManifestUpdate() }
-        return ok
+            // v2.8.0 (perf H2): manifest.json is a write-only diagnostic file (never
+            // read back for correctness — `readManifest()` has no callers). Regenerating
+            // it walks all 10 slot directories off disk, which previously ran inside the
+            // synchronous save path and blocked the caller (usually the main thread) on
+            // every save. Move it to the serial background queue so `set` returns as soon
+            // as the slot itself is persisted and the in-memory cache is updated.
+            if ok { scheduleManifestUpdate() }
+            return ok
+        }) ?? false
     }
 
     public func clear(_ slot: Int) {
-        queue.sync {
-            cache[slot] = SlotContent()
-            let slotDir = baseURL.appendingPathComponent(String(slot))
-            do {
-                try FileManager.default.removeItem(at: slotDir)
-            } catch {
-                let nsErr = error as NSError
-                if nsErr.domain == NSCocoaErrorDomain && nsErr.code == 4 { /* file not found */ }
-                else { NSLog("[ClipSlots] SlotStorage.clear FAIL slot=\(slot): \(error)") }
+        // v2.9.4 (#4): cross-process lock around the delete write.
+        try? StorageLock.shared.withLock {
+            queue.sync {
+                cache[slot] = SlotContent()
+                let slotDir = baseURL.appendingPathComponent(String(slot))
+                do {
+                    try FileManager.default.removeItem(at: slotDir)
+                } catch {
+                    let nsErr = error as NSError
+                    if nsErr.domain == NSCocoaErrorDomain && nsErr.code == 4 { /* file not found */ }
+                    else { NSLog("[ClipSlots] SlotStorage.clear FAIL slot=\(slot): \(error)") }
+                }
             }
+            scheduleManifestUpdate()
         }
-        scheduleManifestUpdate()
     }
 
     public func clearAll() {
-        queue.sync {
-            cache.removeAll()
-            do {
-                try FileManager.default.removeItem(at: baseURL)
-                try FileManager.default.createDirectory(at: baseURL, withIntermediateDirectories: true)
-                NSLog("[ClipSlots] SlotStorage.clearAll OK")
-            } catch {
-                NSLog("[ClipSlots] SlotStorage.clearAll FAIL: \(error)")
+        // v2.9.4 (#4): cross-process lock around the wipe-and-recreate.
+        try? StorageLock.shared.withLock {
+            queue.sync {
+                cache.removeAll()
+                do {
+                    try FileManager.default.removeItem(at: baseURL)
+                    try FileManager.default.createDirectory(at: baseURL, withIntermediateDirectories: true)
+                    NSLog("[ClipSlots] SlotStorage.clearAll OK")
+                } catch {
+                    NSLog("[ClipSlots] SlotStorage.clearAll FAIL: \(error)")
+                }
             }
+            scheduleManifestUpdate()
         }
-        scheduleManifestUpdate()
     }
 
     /// v2.8.0 (perf H2): regenerate the diagnostic manifest asynchronously on the
@@ -127,26 +140,29 @@ public final class SlotStorage {
     }
 
     public func setLabel(_ slot: Int, label: String?) {
-        queue.sync {
-            let slotDir = baseURL.appendingPathComponent(String(slot))
-            do {
-                try FileManager.default.createDirectory(at: slotDir, withIntermediateDirectories: true)
-            } catch {
-                NSLog("[ClipSlots] setLabel: create dir FAIL slot=\(slot): \(error)")
-                return
-            }
-            let labelFile = slotDir.appendingPathComponent("label.txt")
-            if let label = label, !label.isEmpty {
+        // v2.9.4 (#4): cross-process lock around the label write.
+        try? StorageLock.shared.withLock {
+            queue.sync {
+                let slotDir = baseURL.appendingPathComponent(String(slot))
                 do {
-                    try label.write(to: labelFile, atomically: true, encoding: .utf8)
+                    try FileManager.default.createDirectory(at: slotDir, withIntermediateDirectories: true)
                 } catch {
-                    NSLog("[ClipSlots] setLabel: write FAIL slot=\(slot): \(error)")
+                    NSLog("[ClipSlots] setLabel: create dir FAIL slot=\(slot): \(error)")
+                    return
                 }
-            } else {
-                do { try FileManager.default.removeItem(at: labelFile) } catch {
-                    let nsErr = error as NSError
-                    if !(nsErr.domain == NSCocoaErrorDomain && nsErr.code == 4) {
-                        NSLog("[ClipSlots] setLabel: remove FAIL: \(error)")
+                let labelFile = slotDir.appendingPathComponent("label.txt")
+                if let label = label, !label.isEmpty {
+                    do {
+                        try label.write(to: labelFile, atomically: true, encoding: .utf8)
+                    } catch {
+                        NSLog("[ClipSlots] setLabel: write FAIL slot=\(slot): \(error)")
+                    }
+                } else {
+                    do { try FileManager.default.removeItem(at: labelFile) } catch {
+                        let nsErr = error as NSError
+                        if !(nsErr.domain == NSCocoaErrorDomain && nsErr.code == 4) {
+                            NSLog("[ClipSlots] setLabel: remove FAIL: \(error)")
+                        }
                     }
                 }
             }
