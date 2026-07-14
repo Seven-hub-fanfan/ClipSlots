@@ -255,8 +255,31 @@ extension SlotContent {
         return ["html", "htm"].contains(url.pathExtension.lowercased())
     }
 
+    /// v2.8.5: raw HTML string extracted from a `public.html` pasteboard item stored
+    /// inside `items`. Normal clipboard capture (Cmd+C from a webpage / Feishu / Lark)
+    /// keeps the rich HTML bytes here, but the v2.7.33 rich-paste field `htmlSource`
+    /// stays nil and `plainText`/`preview` only expose the plain-text fallback or the
+    /// "[HTML]" placeholder. Previously NO code read this item, so an HTML clip could
+    /// never find its source and the card showed the literal text "[HTML]" instead of
+    /// a rendered preview. Reading it here is the single source of truth that lets the
+    /// WKWebView card/radial preview render the real HTML.
+    var htmlPasteboardSource: String? {
+        for itemList in items {
+            for item in itemList where item.type == "public.html" {
+                for encoding in [String.Encoding.utf8, .utf16, .isoLatin1] {
+                    if let s = String(data: item.data, encoding: encoding),
+                       !s.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                        return s
+                    }
+                }
+            }
+        }
+        return nil
+    }
+
     var isHTMLDocument: Bool {
         if isHTMLFileURL { return true }
+        if htmlPasteboardSource != nil { return true }
         let raw = (plainText ?? preview).trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         return raw.hasPrefix("<!doctype html") || raw.hasPrefix("<html") || raw.contains("<body") || raw.contains("</html>")
     }
@@ -266,6 +289,7 @@ extension SlotContent {
             if let text = try? String(contentsOf: url, encoding: .utf8) { return text }
             if let text = try? String(contentsOf: url) { return text }
         }
+        if let html = htmlPasteboardSource { return html }
         let raw = (plainText ?? preview).trimmingCharacters(in: .whitespacesAndNewlines)
         guard !raw.isEmpty, raw != "[HTML]" else { return nil }
         return raw

@@ -244,6 +244,9 @@ private extension SlotContent {
         if let htmlSource, !htmlSource.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return htmlSource }
         if let url = primaryFileURL, ["html", "htm"].contains(url.pathExtension.lowercased()),
            let html = try? String(contentsOf: url, encoding: .utf8) { return html }
+        // v2.8.5: HTML captured via normal clipboard copy lives as a `public.html`
+        // item inside `items` (htmlSource stays nil), so read it here to render.
+        if let html = htmlPasteboardSource { return html }
         let raw = plainText ?? preview
         let lower = raw.lowercased()
         if lower.contains("<html") || lower.contains("<!doctype html") || lower.contains("<body") { return raw }
