@@ -1,13 +1,15 @@
 ---
 name: clipslots-manager
-version: 0.5 (draft)
+version: 0.6 (draft)
 used_when: 当需要以编程方式读取、写入、检索、加载或整理 macOS 剪贴板槽位管理器 ClipSlots 中的内容时使用（把文本/文件存进槽位、读出内容、搜索历史、把内容放到系统剪贴板、批量整理文件夹素材到槽位组/页面、删除槽位组/页面等）。
-requires: macOS + 已安装 ClipSlots v2.9.4+（CLI 位于 `~/bin/clipslots`）
+requires: macOS + 已安装 ClipSlots v2.9.5+（CLI 位于 `~/bin/clipslots`）
 ---
 
 # ClipSlots CLI 使用技能（草稿）
 
 `clipslots` 是 ClipSlots.app 的命令行接口，与 GUI **共享同一份磁盘数据**（`ClipSlotsKit` 库），CLI 的读写会实时反映到 GUI，反之亦然。所有命令输出**单个 JSON 对象**到 stdout，专为智能体调用设计。
+
+> **v2.9.5 新增**：(1) `.trash` **自动清理**——`delete-group`/`delete-page` 的软删除数据不再无限堆积，删除时及启动时自动清理（默认保留最近 30 天、最多 50 条，超出的最旧条目被物理删除）；30 天内、条数在上限内的删除仍可人工恢复。(2) **子命令级 `--help`/`-h`**——任意子命令加 `--help` 或 `-h` 即返回该命令的用法与参数说明（`{command,description,flags,usage}`），无需查顶层 `help`。
 
 > **v2.9.4 跨进程并发安全（重要）**：CLI 与 GUI 是两个独立进程，共享同一份磁盘数据。v2.9.4 起所有写操作都通过一把基于 `flock()` 的跨进程文件锁串行化（锁文件 `~/.local/share/clipslots/special_slots/.storage.lock`），CLI 与 GUI 的并发写不会再互相覆盖。锁为非阻塞重试、约 5 秒超时；若另一进程长时间占用锁，命令会返回 `{"ok":false,"error":"storage is busy (lock timeout)"}`（退出码 1）——此时**稍等片刻重试即可**，不要当作数据错误。GUI 端对 CLI 的改动会通过文件监听自动刷新界面（约 300ms 去抖），无需手动切组或重启。
 
@@ -28,7 +30,7 @@ requires: macOS + 已安装 ClipSlots v2.9.4+（CLI 位于 `~/bin/clipslots`）
 
 **首选工作流**：动手前先 `clipslots help` / `groups` / `list` 了解现状，再执行读写；写入前优先选空槽，避免覆盖。
 
-## 1. 命令参考（v2.9.4，共 15 个）
+## 1. 命令参考（v2.9.5，共 15 个；每个子命令均支持 `--help`/`-h`）
 
 ### 只读
 ```bash
@@ -68,21 +70,28 @@ clipslots create-group <name> [--page <id>]
 # 新建页面（返回 id）；页面名不可重复
 clipslots create-page <name>
 
-# 删除一个槽位组（软删除）；其数据目录移动到 .trash（可人工恢复）
+# 删除一个槽位组（软删除）；其数据目录移动到 .trash（可人工恢复，v2.9.5 起 .trash 自动清理）
 # 成功返回 {"ok":true,"deleted":"<id>","movedToTrash":true}
 # id 不存在返回 {"ok":false,"error":"group <id> not found"}
 clipslots delete-group <id>
 
-# 删除一个页面及其下所有槽位组（软删除）；相关数据目录移动到 .trash（可人工恢复）
+# 删除一个页面及其下所有槽位组（软删除）；相关数据目录移动到 .trash（可人工恢复，v2.9.5 起 .trash 自动清理）
 # 成功返回 {"ok":true,"deleted":"<id>","movedToTrash":true}
 # id 不存在返回 {"ok":false,"error":"page <id> not found"}
 clipslots delete-page <id>
+
+# 任意子命令加 --help / -h 返回该命令的用法与参数说明（v2.9.5）
+# 返回 {"ok":true,"command":"write","description":"...","flags":[...],"usage":"clipslots write ..."}
+clipslots write --help
+clipslots delete-group -h
 ```
 
 > 说明：`write-attachment` 的文件路径支持 `~` 与相对路径；图片扩展名归 `image` 类型，其余归 `file`。
 
-### 已知能力 / 限制（v2.9.4）
+### 已知能力 / 限制（v2.9.5）
 
+- ✅ **子命令级 `--help` / `-h`**（v2.9.5 新增）：任意子命令加 `--help` 或 `-h` 返回该命令的独立说明（`{command,description,flags,usage}`），不必再解析顶层 `help` 的整表。
+- ✅ **`.trash` 自动清理**（v2.9.5 新增）：`delete-group`/`delete-page` 的软删除数据会在删除时与 app/CLI 启动时自动清理，默认保留最近 30 天、最多 50 条，超出的最旧条目被物理删除。删除仍是"先移动到 `.trash`"，30 天内且未超上限的条目仍可人工恢复，因此删除依旧可安全用于整理。
 - ✅ **`delete-group` / `delete-page` 软删除**（v2.9.4 新增）：删除是"移动到 `.trash`"而非物理抹除，可人工恢复；因此可安全用于整理。删除不存在的 id 返回 `ok:false`（`group/page <id> not found`），不会误删。
 - ✅ **`create-group` 同页去重**（v2.9.4 新增）：同一页面内不允许出现同名槽位组，冲突返回 `a group named '<name>' already exists on this page`；不同页面之间允许同名。批量导入/自动建组时遇冲突请改名或加 `-2`/`-3` 后缀。
 - ✅ **跨进程写锁**（v2.9.4 新增）：CLI 与 GUI 的并发写通过 `flock()` 串行化，不再互相覆盖；锁争用超时（约 5s）返回 `storage is busy (lock timeout)`，稍后重试即可。

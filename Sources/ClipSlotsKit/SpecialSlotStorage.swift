@@ -28,6 +28,9 @@ public final class SpecialSlotStorage {
 
         try? FileManager.default.createDirectory(at: baseDir, withIntermediateDirectories: true)
         ensureInitialized()
+        // v2.9.5 (Feature #1): opportunistic trash cleanup at startup so a long-idle
+        // install still shrinks accumulated `.trash` even without a new delete.
+        cleanupTrash()
     }
 
     // MARK: - Init / Migration
@@ -524,6 +527,10 @@ public final class SpecialSlotStorage {
             }
 
             try saveIndex(index)
+
+            // v2.9.5 (Feature #1): prune old trash after adding a fresh entry so
+            // repeated deletes cannot let `.trash` grow without bound.
+            cleanupTrash()
         }
     }
 
@@ -634,6 +641,9 @@ public final class SpecialSlotStorage {
             index.pages.removeAll { $0.id == id }
             try saveIndex(index)
             NSLog("[ClipSlots] Page deleted: \(id)")
+
+            // v2.9.5 (Feature #1): prune old trash after page delete too.
+            cleanupTrash()
         }
     }
 
@@ -754,6 +764,69 @@ public final class SpecialSlotStorage {
             var index = loadIndex()
             transform(&index.settings)
             try saveIndex(index)
+        }
+    }
+
+    // MARK: - Trash Auto-Cleanup (v2.9.5, Feature #1)
+
+    /// Retention policy for `.trash` entries produced by delete-group / delete-page.
+    /// An entry is removed when it is older than `trashRetentionDays`; after that,
+    /// if more than `trashMaxEntries` still remain, the oldest surplus entries are
+    /// removed too. Bounding BOTH age and count keeps the trash from growing without
+    /// limit while still giving the user a generous recovery window.
+    public static let trashRetentionDays = 30
+    public static let trashMaxEntries = 50
+
+    /// Extract the unix-second timestamp embedded in a trash entry directory name
+    /// ("deleted_<id>_<ts>" / "page_deleted_<id>_<ts>"). Falls back to the entry's
+    /// filesystem modification date, then `.distantPast` for un-parseable names.
+    private func trashEntryDate(_ url: URL) -> Date {
+        let name = url.lastPathComponent
+        if let tsStr = name.split(separator: "_").last, let ts = TimeInterval(tsStr) {
+            return Date(timeIntervalSince1970: ts)
+        }
+        if let mod = (try? FileManager.default.attributesOfItem(atPath: url.path)[.modificationDate]) as? Date {
+            return mod
+        }
+        return .distantPast
+    }
+
+    /// Prune stale entries from `.trash`. Never throws — a cleanup failure must not
+    /// break the delete that triggered it. Runs on delete and at startup.
+    public func cleanupTrash(retentionDays: Int = SpecialSlotStorage.trashRetentionDays,
+                             maxEntries: Int = SpecialSlotStorage.trashMaxEntries) {
+        let fm = FileManager.default
+        let trashDir = baseDir.appendingPathComponent(".trash")
+        guard let entries = try? fm.contentsOfDirectory(
+            at: trashDir, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles]) else {
+            return
+        }
+
+        // 1. Age-based pruning: drop anything older than the retention window.
+        let cutoff = Date().addingTimeInterval(-Double(retentionDays) * 86_400)
+        var survivors: [(url: URL, date: Date)] = []
+        var removed = 0
+        for url in entries {
+            let date = trashEntryDate(url)
+            if date < cutoff {
+                try? fm.removeItem(at: url)
+                removed += 1
+            } else {
+                survivors.append((url, date))
+            }
+        }
+
+        // 2. Count-based pruning: keep only the newest `maxEntries` survivors.
+        if survivors.count > maxEntries {
+            let sorted = survivors.sorted { $0.date > $1.date } // newest first
+            for entry in sorted.dropFirst(maxEntries) {
+                try? fm.removeItem(at: entry.url)
+                removed += 1
+            }
+        }
+
+        if removed > 0 {
+            NSLog("[ClipSlots] Trash auto-cleanup: removed \(removed) stale entr\(removed == 1 ? "y" : "ies")")
         }
     }
 

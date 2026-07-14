@@ -12,7 +12,7 @@ import ClipSlotsKit
 //   success: {"ok": true, ...}
 //   error:   {"ok": false, "error": "message"}  (exit code 1)
 
-let CLI_VERSION = "2.9.4"
+let CLI_VERSION = "2.9.5"
 let DEFAULT_GROUP = "default"
 let DEFAULT_PAGE = "default_page"
 
@@ -66,7 +66,13 @@ func parseArgs(_ raw: [String]) -> ParsedArgs {
     var i = 1
     while i < raw.count {
         let token = raw[i]
-        if token.hasPrefix("--") {
+        if token == "-h" {
+            // v2.9.5 (Feature #2): recognize the short help flag as a bool flag so
+            // `clipslots <cmd> -h` works the same as `--help`. (A bare "-" is left
+            // as a positional/value so `write --text -` stdin marker still works.)
+            boolFlags.insert("h")
+            i += 1
+        } else if token.hasPrefix("--") {
             let key = String(token.dropFirst(2))
             let next = (i + 1 < raw.count) ? raw[i + 1] : nil
             if let next, !next.hasPrefix("--") {
@@ -163,30 +169,51 @@ func cmdVersion() -> Never {
     success(["version": CLI_VERSION])
 }
 
+// v2.9.5 (Feature #2): single source of truth for command metadata. Both the
+// top-level `help` command and per-subcommand `--help`/`-h` render from this.
+let COMMANDS: [[String: Any]] = [
+    ["name": "version", "description": "打印 CLI 版本号。", "flags": [] as [String]],
+    ["name": "help", "description": "列出所有命令、说明与参数（无参数时也返回此内容）。", "flags": [] as [String]],
+    ["name": "groups", "description": "列出所有槽位组（SpecialSlot）。", "flags": [] as [String]],
+    ["name": "pages", "description": "列出所有页面（SlotPage）。", "flags": ["--group <id> (可选,当前实现忽略,页面为全局)"]],
+    ["name": "list", "description": "列出某个槽位组内 1..N 号槽位的摘要。", "flags": ["--group <id> (默认 default)", "--page <id> (可选,仅回显)"]],
+    ["name": "read", "description": "读取单个槽位的完整内容（纯文本、HTML源、类型、附件数等）。", "flags": ["<slot> (位置参数,1..N)", "--group <id> (默认 default)", "--page <id> (可选,仅回显)"]],
+    ["name": "write", "description": "向槽位写入纯文本内容（保留已有附件），可选设置标签。", "flags": ["<slot> (位置参数,1..N)", "--text <string> (必填, 传 - 表示从 stdin 读取)", "--group <id> (默认 default)", "--page <id> (可选,仅回显)", "--label <string> (可选)"]],
+    ["name": "search", "description": "在槽位预览/文本/标签中做大小写不敏感子串搜索。", "flags": ["<query> (位置参数)", "--group <id> (默认 default)", "--all-groups (在所有槽位组内搜索)", "--limit <N> (默认 50)"]],
+    ["name": "paste", "description": "把某槽位的内容加载到系统剪贴板(NSPasteboard)，不模拟按键。", "flags": ["<slot> (位置参数,1..N)", "--group <id> (默认 default)", "--page <id> (可选,仅回显)"]],
+    ["name": "clear", "description": "清空某个槽位（内容、标签、附件全部移除）。", "flags": ["<slot> (位置参数,1..N)", "--group <id> (默认 default)"]],
+    ["name": "create-group", "description": "在指定页面新建一个槽位组，返回其 id。页面已满(10组)会返回错误，此时应先 create-page。v2.9.4: 同页面内不允许重名(会返回错误)，冲突时请改名或加 -2 后缀。", "flags": ["<name> (位置参数,组名)", "--page <id> (可选,默认当前页面)"]],
+    ["name": "create-page", "description": "新建一个页面，返回其 id。页面名不可重复。", "flags": ["<name> (位置参数,页面名)"]],
+    ["name": "delete-group", "description": "删除一个槽位组(软删除)。其数据目录会被移动到 .trash，可恢复；.trash 会自动清理(默认保留最近 30 天/最多 50 条)。id 不存在会返回错误。", "flags": ["<id> (位置参数,槽位组 id)"]],
+    ["name": "delete-page", "description": "删除一个页面及其下所有槽位组(软删除)。相关数据目录会被移动到 .trash，可恢复；.trash 会自动清理(默认保留最近 30 天/最多 50 条)。id 不存在会返回错误。", "flags": ["<id> (位置参数,页面 id)"]],
+    ["name": "write-attachment", "description": "向某槽位追加一个或多个文件作为附件（按顺序），不改动槽位主体内容。图片扩展名归为 image 类型，其余为 file。", "flags": ["<slot> (位置参数,1..N)", "<file> [file ...] (位置参数,一个或多个文件路径,支持 ~ 与相对路径)", "--group <id> (默认 default)", "--replace (先清空该槽位已有附件再写入)", "--label <string> (可选)"]]
+]
+
 func cmdHelp() -> Never {
-    let commands: [[String: Any]] = [
-        ["name": "version", "description": "打印 CLI 版本号。", "flags": [] as [String]],
-        ["name": "help", "description": "列出所有命令、说明与参数（无参数时也返回此内容）。", "flags": [] as [String]],
-        ["name": "groups", "description": "列出所有槽位组（SpecialSlot）。", "flags": [] as [String]],
-        ["name": "pages", "description": "列出所有页面（SlotPage）。", "flags": ["--group <id> (可选,当前实现忽略,页面为全局)"]],
-        ["name": "list", "description": "列出某个槽位组内 1..N 号槽位的摘要。", "flags": ["--group <id> (默认 default)", "--page <id> (可选,仅回显)"]],
-        ["name": "read", "description": "读取单个槽位的完整内容（纯文本、HTML源、类型、附件数等）。", "flags": ["<slot> (位置参数,1..N)", "--group <id> (默认 default)", "--page <id> (可选,仅回显)"]],
-        ["name": "write", "description": "向槽位写入纯文本内容（保留已有附件），可选设置标签。", "flags": ["<slot> (位置参数,1..N)", "--text <string> (必填, 传 - 表示从 stdin 读取)", "--group <id> (默认 default)", "--page <id> (可选,仅回显)", "--label <string> (可选)"]],
-        ["name": "search", "description": "在槽位预览/文本/标签中做大小写不敏感子串搜索。", "flags": ["<query> (位置参数)", "--group <id> (默认 default)", "--all-groups (在所有槽位组内搜索)", "--limit <N> (默认 50)"]],
-        ["name": "paste", "description": "把某槽位的内容加载到系统剪贴板(NSPasteboard)，不模拟按键。", "flags": ["<slot> (位置参数,1..N)", "--group <id> (默认 default)", "--page <id> (可选,仅回显)"]],
-        ["name": "clear", "description": "清空某个槽位（内容、标签、附件全部移除）。", "flags": ["<slot> (位置参数,1..N)", "--group <id> (默认 default)"]],
-        ["name": "create-group", "description": "在指定页面新建一个槽位组，返回其 id。页面已满(10组)会返回错误，此时应先 create-page。v2.9.4: 同页面内不允许重名(会返回错误)，冲突时请改名或加 -2 后缀。", "flags": ["<name> (位置参数,组名)", "--page <id> (可选,默认当前页面)"]],
-        ["name": "create-page", "description": "新建一个页面，返回其 id。页面名不可重复。", "flags": ["<name> (位置参数,页面名)"]],
-        ["name": "delete-group", "description": "删除一个槽位组(软删除)。其数据目录会被移动到 .trash，可恢复。id 不存在会返回错误。", "flags": ["<id> (位置参数,槽位组 id)"]],
-        ["name": "delete-page", "description": "删除一个页面及其下所有槽位组(软删除)。相关数据目录会被移动到 .trash，可恢复。id 不存在会返回错误。", "flags": ["<id> (位置参数,页面 id)"]],
-        ["name": "write-attachment", "description": "向某槽位追加一个或多个文件作为附件（按顺序），不改动槽位主体内容。图片扩展名归为 image 类型，其余为 file。", "flags": ["<slot> (位置参数,1..N)", "<file> [file ...] (位置参数,一个或多个文件路径,支持 ~ 与相对路径)", "--group <id> (默认 default)", "--replace (先清空该槽位已有附件再写入)", "--label <string> (可选)"]]
-    ]
     success([
         "version": CLI_VERSION,
         "defaultGroup": DEFAULT_GROUP,
         "defaultPage": DEFAULT_PAGE,
         "slotCount": slotCount,
-        "commands": commands
+        "commands": COMMANDS
+    ])
+}
+
+// v2.9.5 (Feature #2): per-subcommand help. Triggered when a known command is
+// invoked with `--help` or `-h` (e.g. `clipslots write --help`). Outputs that
+// single command's usage + parameter descriptions.
+func cmdCommandHelp(_ name: String) -> Never {
+    guard let entry = COMMANDS.first(where: { ($0["name"] as? String) == name }) else {
+        fail("unknown command: \(name) (run 'clipslots help')")
+    }
+    let flags = (entry["flags"] as? [String]) ?? []
+    // Build a compact usage line from the flag descriptions.
+    let usage = "clipslots \(name)" + (flags.isEmpty ? "" : " " + flags.joined(separator: " "))
+    success([
+        "command": name,
+        "description": entry["description"] ?? NSNull(),
+        "flags": flags,
+        "usage": usage
     ])
 }
 
@@ -577,6 +604,14 @@ func cmdDeletePage(_ args: ParsedArgs) -> Never {
 // MARK: - Entry point
 
 let parsed = parseArgs(CommandLine.arguments.dropFirst().map { $0 })
+
+// v2.9.5 (Feature #2): if a known subcommand is invoked with --help/-h, show
+// that command's own usage instead of running it. The bare `help`/`version`
+// commands are handled by the switch below.
+if parsed.command != "help", parsed.command != "version",
+   parsed.boolFlags.contains("help") || parsed.boolFlags.contains("h") {
+    cmdCommandHelp(parsed.command)
+}
 
 switch parsed.command {
 case "version", "--version", "-v":

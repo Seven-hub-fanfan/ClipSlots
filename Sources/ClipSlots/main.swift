@@ -222,6 +222,7 @@ final class SlotStoreObservable: ObservableObject {
         NSLog("[ClipSlots] SlotStoreObservable init instanceID=\(instanceID)")
         loadSpecialSlots()
         loadSlots()
+        loadPersistedUndoSnapshot() // v2.9.5 (Feature #3): restore pending undo across restarts
         setupStorageWatcher()
     }
 
@@ -598,7 +599,9 @@ final class SlotStoreObservable: ObservableObject {
 
     // MARK: - v2.7.26 Undo Clear
 
-    private struct SlotUndoSnapshot {
+    // v2.9.5 (Feature #3): the clear/delete undo snapshot is now Codable and
+    // persisted to disk so a pending undo survives an app restart.
+    private struct SlotUndoSnapshot: Codable {
         let slots: [Int: SlotContent]
         let labels: [Int: String]
         let title: String
@@ -608,8 +611,46 @@ final class SlotStoreObservable: ObservableObject {
     }
     private var lastClearSnapshot: SlotUndoSnapshot?
 
+    // v2.9.5 (Feature #3): on-disk location for the persisted undo snapshot. Lives
+    // alongside the special-slot storage so it shares the same lifecycle/backups.
+    private var undoSnapshotURL: URL {
+        FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".local/share/clipslots/special_slots/.undo/clear_snapshot.json")
+    }
+
+    /// Write (or, when nil, delete) the persisted undo snapshot. Never throws — a
+    /// persistence failure must not break the clear/undo operation itself.
+    private func persistUndoSnapshot(_ snapshot: SlotUndoSnapshot?) {
+        let url = undoSnapshotURL
+        let fm = FileManager.default
+        guard let snapshot else {
+            try? fm.removeItem(at: url)
+            return
+        }
+        do {
+            try fm.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+            let data = try JSONEncoder().encode(snapshot)
+            try data.write(to: url, options: .atomic)
+        } catch {
+            NSLog("[ClipSlots] persist undo snapshot failed: \(error)")
+        }
+    }
+
+    /// Load a previously persisted undo snapshot into memory at launch, so the
+    /// most recent clear/delete remains undoable after a restart.
+    private func loadPersistedUndoSnapshot() {
+        guard let data = try? Data(contentsOf: undoSnapshotURL),
+              let snapshot = try? JSONDecoder().decode(SlotUndoSnapshot.self, from: data) else {
+            return
+        }
+        lastClearSnapshot = snapshot
+        NSLog("[ClipSlots] restored persisted undo snapshot: \(snapshot.title)")
+    }
+
     private func captureUndoSnapshot(title: String) {
         lastClearSnapshot = SlotUndoSnapshot(slots: slots, labels: labels, title: title, specialSlotId: currentSpecialSlotId)
+        // v2.9.5 (Feature #3): persist immediately so the undo survives a restart.
+        persistUndoSnapshot(lastClearSnapshot)
     }
 
     func undoLastClearIfPossible() {
@@ -627,6 +668,9 @@ final class SlotStoreObservable: ObservableObject {
         labels = snapshot.labels
         persistCurrentSpecialSlotData()
         lastClearSnapshot = nil
+        // v2.9.5 (Feature #3): consume the persisted snapshot so it cannot be
+        // replayed after the next restart.
+        persistUndoSnapshot(nil)
         showFloatingNotice(FloatingNotice(title: "已撤销", subtitle: snapshot.title, iconName: "arrow.uturn.backward.circle.fill", kind: .success))
     }
 
