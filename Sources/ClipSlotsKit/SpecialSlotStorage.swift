@@ -277,7 +277,37 @@ public final class SpecialSlotStorage {
                 let data = try Data(contentsOf: indexURL)
                 return try decoder.decode(SpecialSlotIndex.self, from: data)
             } catch {
-                NSLog("[ClipSlots] ERROR decoding index.json: \(error)")
+                // NOTE (round 1 data-loss fix): loadIndex() intentionally does NOT throw.
+                // It is called in ~30 places and converting it to `throws` is out of scope
+                // for round 1. The risk is that this empty fallback index, once returned,
+                // will be persisted by the next `saveIndex` mutation and permanently
+                // overwrite the real index.json (losing all groups/pages).
+                //
+                // Mitigation: if the index file physically exists on disk, this is a real
+                // corruption (not a first-run missing file). Before returning the empty
+                // fallback, copy the corrupt bytes to a single stable backup so the user's
+                // original data can be recovered even after a later save clobbers index.json.
+                if FileManager.default.fileExists(atPath: indexURL.path) {
+                    let backupURL = indexURL.deletingLastPathComponent()
+                        .appendingPathComponent("index.json.corrupt.bak")
+                    do {
+                        // Overwrite the single backup if it already exists — loadIndex is
+                        // called many times, so we must NOT create timestamped duplicates.
+                        if FileManager.default.fileExists(atPath: backupURL.path) {
+                            try FileManager.default.removeItem(at: backupURL)
+                        }
+                        try FileManager.default.copyItem(at: indexURL, to: backupURL)
+                        NSLog("[ClipSlots] ERROR: index.json failed to decode (\(error)). "
+                            + "The corrupt file was backed up to \(backupURL.path) before "
+                            + "falling back to an empty index. Recover your data from that backup.")
+                    } catch {
+                        NSLog("[ClipSlots] ERROR: index.json failed to decode AND the backup "
+                            + "to index.json.corrupt.bak failed: \(error). Falling back to empty index.")
+                    }
+                } else {
+                    // File missing = normal first run. Just fall back quietly, no scary log.
+                    NSLog("[ClipSlots] index.json not found — treating as first run, creating empty index.")
+                }
                 // Return a minimal index with schemaVersion=0 so migration is forced.
                 // This fallback has NO slots — if saved it would create a clean slate,
                 // so the migration code must detect and back up the original file first.

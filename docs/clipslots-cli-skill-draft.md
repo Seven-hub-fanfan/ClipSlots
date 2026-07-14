@@ -1,8 +1,8 @@
 ---
 name: clipslots-manager
-version: 0.3 (draft)
+version: 0.4 (draft)
 used_when: 当需要以编程方式读取、写入、检索、加载或整理 macOS 剪贴板槽位管理器 ClipSlots 中的内容时使用（把文本/文件存进槽位、读出内容、搜索历史、把内容放到系统剪贴板、批量整理文件夹素材到槽位组/页面等）。
-requires: macOS + 已安装 ClipSlots v2.9.2+（CLI 位于 `~/bin/clipslots`）
+requires: macOS + 已安装 ClipSlots v2.9.3+（CLI 位于 `~/bin/clipslots`）
 ---
 
 # ClipSlots CLI 使用技能（草稿）
@@ -22,32 +22,36 @@ requires: macOS + 已安装 ClipSlots v2.9.2+（CLI 位于 `~/bin/clipslots`）
 - **空槽判定（重要）**：
   - 一个槽位"为空"当且仅当【主体内容(items)为空 AND 附件列表为空】。
   - 有主体内容 = 非空；主体为空但有附件 = 非空；两者都为空才是空槽。
-  - Agent 扫描空槽时必须同时检查主体与附件。CLI 已按此定义：`read`/`list` 的 `empty` 字段（v2.9.2+）表示"主体与附件都为空"；`list` 每个槽位还返回 `attachmentCount`。判断空槽直接用 `empty:true` 即可（它已包含附件检查）。
+  - Agent 扫描空槽时必须同时检查主体与附件。CLI 已按此定义：`read`/`list` 的 `empty` 字段（v2.9.3+）表示"主体与附件都为空"；`list` 每个槽位还返回 `attachmentCount`。判断空槽直接用 `empty:true` 即可（它已包含附件检查）。
 
 **首选工作流**：动手前先 `clipslots help` / `groups` / `list` 了解现状，再执行读写；写入前优先选空槽，避免覆盖。
 
-## 1. 命令参考（v2.9.2，共 13 个）
+## 1. 命令参考（v2.9.3，共 13 个）
 
 ### 只读
 ```bash
-clipslots version                                  # {"ok":true,"version":"2.9.2"}
+clipslots version                                  # {"ok":true,"version":"2.9.3"}
 clipslots help                                     # 命令清单 + version/defaultGroup/defaultPage/slotCount
-clipslots groups                                   # 所有槽位组 [{id,name,pageId,pageName,pageCount,slotCount,current}]
-clipslots pages                                    # 所有页面 [{id,name,current}]
-clipslots list [--group <id>]                      # 某组 1..10 槽位摘要 [{slot,label,preview,type,attachmentCount,empty}]；empty 表示主体与附件都为空（v2.9.2+），每槽新增 attachmentCount 字段
-clipslots read <slot> [--group <id>]               # 单槽完整内容 {slot,label,preview,text,htmlSource,types,attachmentCount,empty}；empty 表示主体与附件都为空（v2.9.2+）
-clipslots search <query> [--group <id>] [--all-groups] [--limit 50]   # 子串搜索（不分大小写）
+clipslots groups                                   # 所有槽位组，返回对象 {groups:[{id,name,pageId,pageName,pageCount,slotCount,current}]}
+clipslots pages                                    # 所有页面，返回对象 {pages:[{id,name,current}]}
+clipslots list [--group <id>] [--page <id>]        # 返回顶层对象 {group,page,slots:[{slot,label,preview,type,attachmentCount,empty}]}（注意 slots 是对象里的字段，不是裸数组）；empty 表示主体与附件都为空（v2.9.3+），每槽含 attachmentCount 字段
+clipslots read <slot> [--group <id>]               # 单槽完整内容 {slot,label,preview,text,htmlSource,types,attachmentCount,empty}；empty 表示主体与附件都为空（v2.9.3+）
+clipslots search <query> [--group <id>] [--all-groups] [--limit 50]   # 子串搜索（不分大小写），返回 {query,results:[{group,page,pageName,slot,label,preview}]}；命中范围含预览/正文/标签/附件文件名（v2.9.3+）
 ```
+
+> `type` 字段可能取值（由 CLI `classify` 生成）：`empty`（主体+附件都为空）、`attachment`（主体空但有附件）、`image`（含图片数据）、`image-file`（图片文件）、`video-file`（视频文件）、`file`（其他文件）、`html`（富文本/HTML 源）、`text`（纯文本）、`rtf`（RTF）、`other`（其余）。
 
 ### 写入 / 变更
 ```bash
-# 写纯文本进【槽位主体】，保留已有附件；--text - 表示从 stdin 读；--label 可选
+# 写纯文本进【槽位主体】，保留已有附件；--text 必填（缺失即报错）；--text - 从 stdin 读取（必须是 UTF-8 文本，二进制会报错且不清空槽位）；--label 可选
 clipslots write <slot> --text "内容" [--group <id>] [--label "标签"]
 
 # 向【槽位附件】追加一个或多个文件（按顺序），不改动主体；--replace 先清空旧附件
+# 返回 {slot,group,added:[文件名...],attachmentCount,slotBodyEmpty}
 clipslots write-attachment <slot> <file> [file ...] [--group <id>] [--replace] [--label "标签"]
 
 # 把某槽位内容加载到系统剪贴板（NSPasteboard），不模拟按键（之后用户/工具再 Cmd+V）
+# 主体非空 → 送主体；主体空但有附件 → 送附件文件 URL，返回 {slot,action,attachmentsCopied[,attachmentsSkipped]}
 clipslots paste <slot> [--group <id>]
 
 # 清空某槽位（内容+标签+附件全部移除）
@@ -61,6 +65,12 @@ clipslots create-page <name>
 ```
 
 > 说明：`write-attachment` 的文件路径支持 `~` 与相对路径；图片扩展名归 `image` 类型，其余归 `file`。
+
+### 已知能力 / 限制（v2.9.3）
+
+- ✅ **`paste` 支持纯附件槽位**：主体为空、仅有附件的槽位，`paste` 会把附件的文件 URL 写入系统剪贴板（`clearContents` 后 `writeObjects([NSURL])`），返回 `attachmentsCopied`（无法解析出文件路径的附件会被跳过并计入 `attachmentsSkipped`）。旧版"纯附件槽位无法 paste"的限制已在 v2.9.3 修复。
+- ✅ **`search` 命中附件文件名**：搜索的匹配范围已扩展到"预览 + 正文 + 标签 + 附件文件名"，因此模式C（纯附件）槽位可通过文件名被搜到。旧版"搜索不覆盖附件名"的限制已在 v2.9.3 修复。
+- ⚠️ **`write` 仅写纯文本主体**：`--text` 必填，仅接受 UTF-8 文本；`--text -` 从 stdin 读取时若不是合法 UTF-8（二进制）会返回 `ok:false` 且**不清空槽位**。把图片/文件放入槽位请用 `write-attachment`（或走 GUI）。
 
 ## 2. 存入位置决策流（决定存到哪个页面/组）
 
@@ -139,12 +149,12 @@ clipslots create-page <name>
 ## 7. 智能体使用规则
 
 1. **先读后写**：改槽位前先 `read`/`list`，优先写 `empty:true` 空槽，批量覆盖前与用户确认。
-2. **空槽判定**（详见第 0 节"空槽判定"）：一个槽位为空当且仅当**主体内容与附件列表都为空**；有主体或有附件都算非空。扫描空槽必须同时检查主体与附件——直接用 `empty:true` 判定即可（v2.9.2+ 的 `empty` 已含附件检查，`list` 另有 `attachmentCount`），不要只看主体。
+2. **空槽判定**（详见第 0 节"空槽判定"）：一个槽位为空当且仅当**主体内容与附件列表都为空**；有主体或有附件都算非空。扫描空槽必须同时检查主体与附件——直接用 `empty:true` 判定即可（v2.9.3+ 的 `empty` 已含附件检查，`list` 另有 `attachmentCount`），不要只看主体。
 3. **存入位置**：先按第 2 节"存入位置决策流"决定存到哪个页面/组（默认最保守：只新建、不碰已有数据；冲突时给选项不自作主张），再按第 3 节判定模式A/B/C。
 4. **以 `ok` 判断成败**，`ok:false` 读 `error`；不要只看退出码文案。
 5. **槽位范围** 1..10，越界返回 `ok:false`。
 6. **主体 vs 附件**：`write` 改主体（保留附件）；`write-attachment` 只加附件（不动主体）；二者配合实现模式A/B/C。
-7. **paste 语义**：只送入剪贴板，不自动粘贴；需要真正粘贴时提示用户 Cmd+V。
+7. **paste 语义**：只送入剪贴板，不自动粘贴；需要真正粘贴时提示用户 Cmd+V。纯附件槽位（主体空）也可 `paste`，会把附件文件 URL 送入剪贴板（v2.9.3+）。
 8. **多组/多页**：涉及非默认组先 `groups`/`pages` 拿真实 id，不要臆测。
 9. **容量与命名**：严格按第 4、5 节；溢出用 `-2/-3` 或新页面，命名遵守字数上限与阿拉伯数字序号。
 10. **富文本**：`read` 的 `htmlSource` 非空表示有 HTML 源；CLI `write` 只写纯文本，需保 HTML 走 GUI。

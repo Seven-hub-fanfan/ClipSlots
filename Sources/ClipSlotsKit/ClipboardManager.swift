@@ -97,7 +97,12 @@ public struct SlotContent: Codable {
     /// Not persisted (absent from CodingKeys).
     public var capturedEmpty: Bool = false
 
-    public var isEmpty: Bool { items.isEmpty }
+    /// v2.9.3: unified empty-slot semantics. A slot is only empty when it has
+    /// neither body items NOR attachments. Previously this was `items.isEmpty`,
+    /// which made attachment-only slots (mode-C) look "empty" in GUI stats /
+    /// thumbnails (ghost slots) and blocked CLI `paste`. Note `restore(_:)` still
+    /// guards on `content.items.isEmpty` directly, so it is unaffected by this.
+    public var isEmpty: Bool { items.isEmpty && attachments.isEmpty }
 
     /// Legacy hash — still available for diagnostics but no longer the primary
     /// cache key. The new key is `thumbnailKey(specialSlotId:slot:)`.

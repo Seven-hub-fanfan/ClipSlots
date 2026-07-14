@@ -1170,7 +1170,12 @@ final class SlotStoreObservable: ObservableObject {
         cancelPendingClipboardRestore()
 
         let content = contentForSlot(slot)
-        guard !content.isEmpty else {
+        // v2.9.3: copySlot only ever restores the slot BODY (items) to the pasteboard
+        // via clipboard.restore, which itself guards on items.isEmpty. Guard on
+        // items.isEmpty here (not the unified content.isEmpty) so an attachment-only
+        // slot is not falsely reported as "已复制" while restore() actually clears the
+        // clipboard. This preserves the exact pre-v2.9.3 body-copy behavior.
+        guard !content.items.isEmpty else {
             NSLog("[ClipSlots] COPY ignored: slot \(slot) empty")
             if UserDefaults.standard.showCopyToast {
                 showToast("槽位 \(slot) 为空")
@@ -1989,7 +1994,11 @@ final class SlotStoreObservable: ObservableObject {
 
     private func payloadForSlot(_ slot: Int) -> ChainPastePayload {
         let content = slots[slot] ?? SlotContent()
-        guard !content.isEmpty else {
+        // v2.9.3: this builds the slot BODY payload only (attachments are appended
+        // separately in slotContentPayloads). Guard on items.isEmpty (not the unified
+        // content.isEmpty) so an attachment-only slot does not inject a spurious empty
+        // body payload that would clear the clipboard and paste nothing.
+        guard !content.items.isEmpty else {
             return ChainPastePayload(sourceSlot: slot, text: nil, fileURLs: [], isImage: false, isEmpty: true, image: nil)
         }
         return ChainPastePayload(
@@ -2007,7 +2016,11 @@ final class SlotStoreObservable: ObservableObject {
     /// than mixing the in-memory `slots` dictionary with the active hotkey group.
     private func mainContentPayload(slot: Int, activeId: String) -> ChainPastePayload {
         let content = specialStorage.get(slot, in: activeId)
-        guard !content.isEmpty else {
+        // v2.9.3: builds the slot BODY payload only (attachments handled separately in
+        // slotContentPayloads). Guard on items.isEmpty (not the unified content.isEmpty)
+        // so an attachment-only slot does not produce a non-empty-but-contentless payload
+        // that would clear the clipboard and paste nothing during a chain/attachment paste.
+        guard !content.items.isEmpty else {
             return ChainPastePayload(sourceSlot: slot, text: nil, fileURLs: [], isImage: false, isEmpty: true, image: nil)
         }
         return ChainPastePayload(

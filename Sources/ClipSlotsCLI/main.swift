@@ -1,4 +1,5 @@
 import Foundation
+import AppKit
 import ClipSlotsKit
 
 // clipslots — standalone command-line interface for the ClipSlots data layer.
@@ -11,7 +12,7 @@ import ClipSlotsKit
 //   success: {"ok": true, ...}
 //   error:   {"ok": false, "error": "message"}  (exit code 1)
 
-let CLI_VERSION = "2.9.2"
+let CLI_VERSION = "2.9.3"
 let DEFAULT_GROUP = "default"
 let DEFAULT_PAGE = "default_page"
 
@@ -98,12 +99,17 @@ func pageId(forGroup groupId: String, in index: SpecialSlotIndex) -> String {
 // A slot is truly empty ONLY when its main body (items) AND its attachment
 // list are both empty. Body content OR attachments => not empty. This is the
 // canonical "empty slot" definition agents rely on when scanning for a free slot.
+// v2.9.3: SlotContent.isEmpty now already means `items.isEmpty && attachments.isEmpty`,
+// so this simply forwards to it. Kept for readability at call sites.
 func isTrulyEmpty(_ c: SlotContent) -> Bool {
-    c.isEmpty && c.attachments.isEmpty
+    c.isEmpty
 }
 
 func classify(_ c: SlotContent) -> String {
-    if c.isEmpty {
+    // v2.9.3: distinguish body-empty from fully-empty using items.isEmpty directly.
+    // (content.isEmpty now also considers attachments, so it can no longer be used
+    // to detect "body empty but has attachments" == the "attachment" type.)
+    if c.items.isEmpty {
         return c.attachments.isEmpty ? "empty" : "attachment"
     }
     let types = c.items.flatMap { $0.map { $0.type } }
@@ -258,7 +264,16 @@ func cmdWrite(_ args: ParsedArgs) -> Never {
     }
     if text == "-" {
         let data = FileHandle.standardInput.readDataToEndOfFile()
-        text = String(data: data, encoding: .utf8) ?? ""
+        // v2.9.3 (Fix #5): reject non-UTF8 / binary stdin instead of silently
+        // decoding to "" and CLEARING the slot. `write` only accepts text.
+        // A stream is treated as binary if it fails UTF-8 decoding OR contains a
+        // NUL byte (0x00) — the canonical binary marker used by git/grep. NUL is
+        // technically valid UTF-8 but never appears in real text, so bytes like
+        // 0x00 0x01 0x02 are correctly rejected here.
+        guard let decoded = String(data: data, encoding: .utf8), !data.contains(0) else {
+            fail("stdin is not valid UTF-8 text; write only accepts text (got \(data.count) bytes of binary)")
+        }
+        text = decoded
     }
 
     // Mirror the GUI's updateTextSlot: build a public.utf8-plain-text item and
@@ -307,9 +322,15 @@ func cmdSearch(_ args: ParsedArgs) -> Never {
     outer: for g in targetGroups {
         for n in 1...slotCount {
             let content = storage.get(n, in: g.id)
-            if content.isEmpty && content.attachments.isEmpty { continue }
+            // v2.9.3: SlotContent.isEmpty already covers `items && attachments`, so the
+            // old `content.isEmpty && content.attachments.isEmpty` is redundant.
+            if content.isEmpty { continue }
             let label = storage.getLabel(n, in: g.id) ?? content.label ?? ""
-            let haystack = [content.preview, content.plainText ?? "", label].joined(separator: "\n").lowercased()
+            // v2.9.3: also search attachment file names so mode-C (attachment-only)
+            // slots become findable by filename.
+            let attachmentNames = content.attachments.map { $0.name }.joined(separator: "\n")
+            let haystack = [content.preview, content.plainText ?? "", label, attachmentNames]
+                .joined(separator: "\n").lowercased()
             if haystack.contains(needle) {
                 results.append([
                     "group": g.id,
@@ -333,9 +354,44 @@ func cmdPaste(_ args: ParsedArgs) -> Never {
     guard !content.isEmpty else {
         fail("slot \(n) in group \(group) is empty; nothing to copy")
     }
-    let ok = ClipboardManager.shared.restore(content)
-    guard ok else { fail("failed to load slot \(n) onto the clipboard") }
-    success(["slot": n, "action": "copied-to-clipboard"])
+
+    // v2.9.3 (Fix #2): if the slot has body items, restore them to the pasteboard as
+    // before. Otherwise it is an attachment-only slot — restore() would fail because
+    // it only writes items — so place the attachment file URLs on the clipboard
+    // directly (mirroring the GUI's SlotAttachment.path resolution in
+    // slotContentPayloads / payloadForAttachment).
+    if !content.items.isEmpty {
+        let ok = ClipboardManager.shared.restore(content)
+        guard ok else { fail("failed to load slot \(n) onto the clipboard") }
+        success(["slot": n, "action": "copied-to-clipboard"])
+    } else {
+        var urls: [NSURL] = []
+        var skipped = 0
+        for att in content.attachments {
+            // Only .file / .image attachments resolve to an on-disk file path; other
+            // types (text/url/reference) or path-less attachments are skipped.
+            if let path = att.path, !path.isEmpty,
+               FileManager.default.fileExists(atPath: path) {
+                urls.append(URL(fileURLWithPath: path) as NSURL)
+            } else {
+                skipped += 1
+            }
+        }
+        guard !urls.isEmpty else {
+            fail("slot \(n) in group \(group) has \(content.attachments.count) attachment(s) but none resolve to an existing file path")
+        }
+        let pb = NSPasteboard.general
+        pb.clearContents()
+        let ok = pb.writeObjects(urls)
+        guard ok else { fail("failed to write attachment file URLs to the clipboard") }
+        var out: [String: Any] = [
+            "slot": n,
+            "action": "copied-to-clipboard",
+            "attachmentsCopied": urls.count
+        ]
+        if skipped > 0 { out["attachmentsSkipped"] = skipped }
+        success(out)
+    }
 }
 
 func cmdCreateGroup(_ args: ParsedArgs) -> Never {
@@ -416,7 +472,9 @@ func cmdWriteAttachment(_ args: ParsedArgs) -> Never {
         "group": group,
         "added": added,
         "attachmentCount": content.attachments.count,
-        "slotBodyEmpty": content.isEmpty
+        // v2.9.3: report whether the slot BODY (items) is empty. content.isEmpty now
+        // also considers attachments (which we just wrote), so use items.isEmpty here.
+        "slotBodyEmpty": content.items.isEmpty
     ])
 }
 
