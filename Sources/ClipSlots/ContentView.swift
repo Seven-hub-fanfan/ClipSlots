@@ -6,6 +6,10 @@ struct ContentView: View {
     @State private var showingSettings = false
     @State private var showingSpecialSlotManagement = false
     @State private var showingHotkeyTemplatePopover = false
+    // v2.9.8: plugins page popover.
+    @State private var showingPlugins = false
+    // v2.9.8: update checker.
+    @ObservedObject private var updateChecker = UpdateChecker.shared
     @State private var showingConnectionFullscreen = false
     @State private var waterRippleActive = false
     @State private var waterRipplePoint: CGPoint = .zero
@@ -295,6 +299,32 @@ struct ContentView: View {
                     .foregroundColor(.secondary)
             }
 
+            // v2.9.8: 检查更新入口（标题右侧空白区，月亮图标左边那一排）
+            Button {
+                updateChecker.checkForUpdates()
+            } label: {
+                HStack(spacing: 5) {
+                    if updateChecker.isChecking {
+                        ProgressView()
+                            .controlSize(.small)
+                            .scaleEffect(0.7)
+                    } else {
+                        Image(systemName: "arrow.triangle.2.circlepath")
+                            .font(.system(size: 12, weight: .semibold))
+                    }
+                    Text(updateChecker.isChecking ? "检查中…" : "检查更新")
+                        .font(.system(size: 12, weight: .medium))
+                }
+                .padding(.horizontal, 10)
+                .padding(.vertical, 5)
+                .background(Color.accentColor.opacity(0.12))
+                .foregroundColor(.accentColor)
+                .clipShape(Capsule())
+            }
+            .buttonStyle(.borderless)
+            .disabled(updateChecker.isChecking)
+            .help("检查是否有新版本")
+
             Spacer()
 
             statPill(
@@ -313,6 +343,22 @@ struct ContentView: View {
             }
             .buttonStyle(.borderless)
             .help("外观：\((ThemeMode(rawValue: appearanceModeRaw) ?? .system).title)，点击切换")
+
+            // v2.9.8: 插件入口（月亮与键盘图标之间）
+            Button {
+                showingPlugins = true
+            } label: {
+                Image(systemName: "puzzlepiece.extension")
+                    .font(.system(size: 15, weight: .semibold))
+                    .frame(width: 30, height: 30)
+            }
+            .buttonStyle(.borderless)
+            .help("插件")
+            .popover(isPresented: $showingPlugins) {
+                PluginsView {
+                    showingPlugins = false
+                }
+            }
 
             Button {
                 showingHotkeyTemplatePopover = true
@@ -669,7 +715,7 @@ struct ContentView: View {
             // Connection stays as a separate tool and is moved to the right side.
             connectionToolButton
 
-            Text("v2.9.7")
+            Text("v2.9.8")
                 .font(.caption2)
                 .foregroundColor(Color.secondary.opacity(0.65))
         }

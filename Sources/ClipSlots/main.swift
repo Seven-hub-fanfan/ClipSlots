@@ -51,6 +51,8 @@ struct ClipSlotsApp: App {
                     appDelegate.store = store
                     appDelegate.setupHotKeysAfterStoreReady()
                     store.installLocalHotkeyGuardIfNeeded()
+                    // v2.9.8: 方案 Y — 每次启动检测辅助功能权限并引导。
+                    AccessibilityPermissionGuide.checkAndGuideOnLaunch()
                 }
         }
         .windowStyle(.titleBar)
