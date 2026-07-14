@@ -668,7 +668,7 @@ struct ContentView: View {
             // Connection stays as a separate tool and is moved to the right side.
             connectionToolButton
 
-            Text("v2.8.6")
+            Text("v2.8.7")
                 .font(.caption2)
                 .foregroundColor(Color.secondary.opacity(0.65))
         }
@@ -851,8 +851,47 @@ struct ContentView: View {
     /// v2.8.0 (perf M1/M2): recompute the debounced/cached global search results.
     /// Called only when a search input actually changes (text, filter, scope, sort),
     /// not on every view re-render. Text changes are debounced by the caller.
+    /// v2.8.7 (F): the cross-page scan (`allSearchableSlots()` reads every group's disk
+    /// snapshot) used to run synchronously on the main thread, causing typing lag on
+    /// large libraries. It now runs off the main thread; results are applied back on the
+    /// main thread and only if the search inputs are still current (stale-query guard).
     private func recomputeGlobalSearchResults() {
-        globalSearchResultsCache = computeGlobalSearchResults()
+        // Capture the current inputs on the main thread.
+        let query = searchText
+        let filter = selectedFilter
+        let scope = searchScope
+        let sortRule = globalSearchSortRule
+
+        guard scope == .global, SlotSearchMatcher.isActive(query: query, filter: filter) else {
+            globalSearchResultsCache = []
+            return
+        }
+
+        let store = self.store
+        let currentPageId = store.currentPageId
+        let currentSpecialSlotId = store.currentSpecialSlotId
+
+        DispatchQueue.global(qos: .userInitiated).async {
+            // Heavy cross-page scan + filter + sort runs off the main thread.
+            let all = store.allSearchableSlots()
+            let results = ContentView.filterAndSortGlobalSearch(
+                all: all,
+                query: query,
+                filter: filter,
+                sortRule: sortRule,
+                currentPageId: currentPageId,
+                currentSpecialSlotId: currentSpecialSlotId
+            )
+            DispatchQueue.main.async {
+                // Stale-query guard: only apply if the inputs haven't changed since
+                // this background work was scheduled.
+                guard self.searchText == query,
+                      self.selectedFilter == filter,
+                      self.searchScope == scope,
+                      self.globalSearchSortRule == sortRule else { return }
+                self.globalSearchResultsCache = results
+            }
+        }
     }
 
     /// Schedule a global-search recompute. Keystroke-driven changes are debounced so
@@ -876,28 +915,35 @@ struct ContentView: View {
         }
     }
 
-    private func computeGlobalSearchResults() -> [SlotGlobalSearchResult] {
-        guard searchScope == .global, isSearchActive else { return [] }
-
-        let filtered = store.allSearchableSlots()
+    /// Pure filter + sort over an already-collected slot list. Static so it can run on a
+    /// background thread without touching `@State`/view state (v2.8.7 F).
+    private static func filterAndSortGlobalSearch(
+        all: [SlotGlobalSearchResult],
+        query: String,
+        filter: SlotFilterType,
+        sortRule: SlotSearchSortRule,
+        currentPageId: String,
+        currentSpecialSlotId: String
+    ) -> [SlotGlobalSearchResult] {
+        let filtered = all
             .filter { result in
                 SlotSearchMatcher.matches(
                     slot: result.slot,
                     content: result.content,
                     label: result.label,
-                    query: searchText,
-                    filter: selectedFilter
+                    query: query,
+                    filter: filter
                 )
             }
 
-        switch globalSearchSortRule {
+        switch sortRule {
         case .smart:
             return filtered.sorted { lhs, rhs in
-                let lhsCurrentPage = lhs.pageId == store.currentPageId
-                let rhsCurrentPage = rhs.pageId == store.currentPageId
+                let lhsCurrentPage = lhs.pageId == currentPageId
+                let rhsCurrentPage = rhs.pageId == currentPageId
                 if lhsCurrentPage != rhsCurrentPage { return lhsCurrentPage }
-                let lhsCurrentGroup = lhs.groupId == store.currentSpecialSlotId
-                let rhsCurrentGroup = rhs.groupId == store.currentSpecialSlotId
+                let lhsCurrentGroup = lhs.groupId == currentSpecialSlotId
+                let rhsCurrentGroup = rhs.groupId == currentSpecialSlotId
                 if lhsCurrentGroup != rhsCurrentGroup { return lhsCurrentGroup }
                 if lhs.pageOrder != rhs.pageOrder { return lhs.pageOrder < rhs.pageOrder }
                 if lhs.groupOrder != rhs.groupOrder { return lhs.groupOrder < rhs.groupOrder }

@@ -511,16 +511,25 @@ final class SlotStoreObservable: ObservableObject {
         let slots: [Int: SlotContent]
         let labels: [Int: String]
         let title: String
+        // v2.8.7 (D): remember which group the snapshot belongs to so Undo cannot
+        // restore into a different (wrong) group after the user switches groups.
+        let specialSlotId: String
     }
     private var lastClearSnapshot: SlotUndoSnapshot?
 
     private func captureUndoSnapshot(title: String) {
-        lastClearSnapshot = SlotUndoSnapshot(slots: slots, labels: labels, title: title)
+        lastClearSnapshot = SlotUndoSnapshot(slots: slots, labels: labels, title: title, specialSlotId: currentSpecialSlotId)
     }
 
     func undoLastClearIfPossible() {
         guard let snapshot = lastClearSnapshot else {
             showFloatingNotice(FloatingNotice(title: "没有可撤销操作", subtitle: "最近没有清空或删除槽位", iconName: "arrow.uturn.backward", kind: .warning))
+            return
+        }
+        // v2.8.7 (D): the snapshot must be restored into the same group it was
+        // captured from; otherwise Undo would corrupt whatever group is now active.
+        guard snapshot.specialSlotId == currentSpecialSlotId else {
+            showFloatingNotice(FloatingNotice(title: "无法撤销", subtitle: "请切回原分组后再撤销", iconName: "arrow.uturn.backward", kind: .warning))
             return
         }
         slots = snapshot.slots
@@ -549,7 +558,8 @@ final class SlotStoreObservable: ObservableObject {
         var content = SlotContent(text: plainText?.isEmpty == false ? plainText! : html)
         content.htmlSource = html
         // v2.7.74: preserve existing attachments when updating slot content.
-        content.attachments = slots[slot]?.attachments ?? []
+        // v2.8.7 (A): read via contentForSlot so disk-backed attachments survive a cache miss.
+        content.attachments = contentForSlot(slot).attachments
         slots[slot] = content
         persistCurrentSpecialSlotData()
         refreshTrigger = UUID()
@@ -561,7 +571,8 @@ final class SlotStoreObservable: ObservableObject {
         content.htmlSource = html
         // v2.8.0 (P1-1): explicitly carry over existing attachments so editing the
         // HTML source of a slot never silently drops its attachments.
-        content.attachments = slots[slot]?.attachments ?? content.attachments
+        // v2.8.7 (A): read via contentForSlot so disk-backed attachments survive a cache miss.
+        content.attachments = contentForSlot(slot).attachments
         slots[slot] = content
         persistCurrentSpecialSlotData()
         refreshTrigger = UUID()
@@ -570,7 +581,7 @@ final class SlotStoreObservable: ObservableObject {
     // MARK: - v2.7.27 Text Edit / Drag File Import
 
     func updateTextSlot(_ slot: Int, text: String) {
-        let data = text.data(using: .utf8)!
+        let data = text.data(using: .utf8) ?? Data()
         let item = PasteboardItem(type: "public.utf8-plain-text", data: data)
         var content = SlotContent()
         content.items = [[item]]
@@ -578,7 +589,8 @@ final class SlotStoreObservable: ObservableObject {
         // v2.7.74 BUGFIX: editing a slot's text used to build a fresh SlotContent()
         // and overwrite the whole record, silently dropping the slot's attachments.
         // Carry the existing attachments over so editing content keeps them.
-        content.attachments = slots[slot]?.attachments ?? []
+        // v2.8.7 (A): read via contentForSlot so disk-backed attachments survive a cache miss.
+        content.attachments = contentForSlot(slot).attachments
         slots[slot] = content
         persistCurrentSpecialSlotData()
         showFloatingNotice(FloatingNotice(title: "已更新文本", subtitle: "槽位 \(slot)", iconName: "pencil.circle.fill", kind: .success))

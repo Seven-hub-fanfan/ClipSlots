@@ -102,7 +102,9 @@ struct SlotContent: Codable {
         for itemList in items {
             for item in itemList {
                 if item.type == "public.utf8-plain-text" || item.type == "NSStringPboardType" {
-                    if let str = String(data: item.data, encoding: .utf8) {
+                    // v2.8.7 (B): legacy NSStringPboardType is often UTF-16, so fall
+                    // back to utf16 when utf8 decode fails, otherwise preview is empty.
+                    if let str = String(data: item.data, encoding: .utf8) ?? String(data: item.data, encoding: .utf16) {
                         let t = str.trimmingCharacters(in: .whitespacesAndNewlines)
                         return t.count > 30 ? String(t.prefix(30)) + "…" : t
                     }
@@ -151,7 +153,8 @@ struct SlotContent: Codable {
         for itemList in items {
             for item in itemList {
                 if item.type == "public.utf8-plain-text" || item.type == "NSStringPboardType" {
-                    return String(data: item.data, encoding: .utf8)
+                    // v2.8.7 (B): legacy NSStringPboardType is often UTF-16.
+                    return String(data: item.data, encoding: .utf8) ?? String(data: item.data, encoding: .utf16)
                 }
             }
         }
@@ -259,7 +262,7 @@ final class ClipboardManager {
 
 extension SlotContent {
     init(text: String) {
-        let data = text.data(using: .utf8)!
+        let data = text.data(using: .utf8) ?? Data()
         let item = PasteboardItem(type: "public.utf8-plain-text", data: data)
         self.items = [[item]]
         self.timestamp = Date()

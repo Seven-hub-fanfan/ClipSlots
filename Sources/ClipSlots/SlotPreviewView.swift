@@ -7,6 +7,9 @@ struct SlotPreviewView: View {
     @Environment(\.dismiss) private var dismiss
     @State private var largeImage: NSImage?
     @State private var videoPlayer: AVPlayer?
+    // v2.8.7 (E): track that the async image load has finished but produced no image
+    // (broken / missing file) so the preview shows a fallback instead of spinning forever.
+    @State private var imageLoadFailed = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -29,7 +32,13 @@ struct SlotPreviewView: View {
                     // main thread — opening the preview stalled/dropped frames for large
                     // images. loadLargeImage() (onAppear) now performs the decode off the
                     // main thread via ThumbnailProvider; show a spinner until it lands.
-                    ProgressView()
+                    // v2.8.7 (E): if the async load finished with no image (broken/missing
+                    // file), stop spinning and show a fallback instead of hanging forever.
+                    if imageLoadFailed {
+                        brokenImagePreview
+                    } else {
+                        ProgressView()
+                    }
                 } else {
                     fallbackPreview
                 }
@@ -152,10 +161,32 @@ struct SlotPreviewView: View {
         }
     }
 
+    // v2.8.7 (E): shown when an image slot's file can't be decoded/loaded.
+    private var brokenImagePreview: some View {
+        VStack(spacing: 12) {
+            Image(systemName: "exclamationmark.triangle")
+                .font(.system(size: 42))
+                .foregroundColor(.orange)
+            Text("图片无法加载")
+                .font(.headline)
+            if let url = content.primaryFileURL {
+                Text(url.path)
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                    .lineLimit(2)
+                    .truncationMode(.middle)
+            }
+        }
+        .padding(24)
+    }
+
     private func loadLargeImage() {
         guard content.isImageFile, let url = content.primaryFileURL else { return }
         ThumbnailProvider.shared.thumbnail(for: url, cacheKey: "preview-\(url.absoluteString)", size: CGSize(width: 800, height: 600)) { image, _ in
+            // v2.8.7 (E): always terminate the loading state; if no image came back,
+            // flag the failure so the view shows a fallback instead of spinning forever.
             largeImage = image
+            imageLoadFailed = (image == nil)
         }
     }
 }
