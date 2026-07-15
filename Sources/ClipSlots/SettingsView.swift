@@ -182,6 +182,9 @@ struct SettingsView: View {
                 RoundedRectangle(cornerRadius: 8, style: .continuous)
                     .fill(isSelected ? Color.accentColor.opacity(0.16) : Color.clear)
             )
+            // v2.9.13: make the entire row (incl. blank area right of the text)
+            // clickable, not just the text/icon glyphs.
+            .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .padding(.horizontal, 8)
