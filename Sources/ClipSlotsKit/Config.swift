@@ -3,8 +3,8 @@ import Foundation
 public struct AppConfig: Codable {
     public var slots: Int = 10
     public var verbose: Bool = true
-    // v2.7.23: default shortcuts use Cmd. Users can still change them in Settings.
-    public var saveKey: String = "cmd+option+{n}"
+    // v2.9.10: default save shortcut is Option+{n} (no Cmd). Users can still change them in Settings.
+    public var saveKey: String = "option+{n}"
     public var pasteKey: String = "cmd+{n}"
     public var radialKey: String = "ctrl+space"
     public var hotkeyTemplate: HotkeyTemplate = HotkeyTemplate(kind: .numeric)

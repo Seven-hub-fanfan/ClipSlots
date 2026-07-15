@@ -3,7 +3,6 @@ import ClipSlotsKit
 
 struct ContentView: View {
     @ObservedObject var store: SlotStoreObservable
-    @State private var showingSettings = false
     @State private var showingSpecialSlotManagement = false
     @State private var showingHotkeyTemplatePopover = false
     // v2.9.8: plugins page popover.
@@ -252,19 +251,6 @@ struct ContentView: View {
             Divider()
         }
         .background(.regularMaterial)
-        .popover(isPresented: $showingSettings) {
-            SettingsView(config: store.config) { newConfig in
-                store.updateConfig(newConfig)
-                showingSettings = false
-                store.isSettingsPresented = false
-            }
-            .frame(width: 460, height: 610)
-        }
-        .onChange(of: showingSettings) { isPresented in
-            // v2.7.31: Settings popover is a modal hotkey-editing context.
-            // Business hotkeys must not fire while it is open.
-            store.isSettingsPresented = isPresented
-        }
         .popover(isPresented: $showingSpecialSlotManagement) {
             SpecialSlotManagementView(store: store)
         }
@@ -380,7 +366,15 @@ struct ContentView: View {
                 .frame(width: 360)
             }
 
-            Button { showingSettings = true } label: {
+            Button {
+                // v2.9.10: open the independent native Settings window instead of a popover.
+                NSApp.activate(ignoringOtherApps: true)
+                if NSApp.responds(to: Selector(("showSettingsWindow:"))) {
+                    NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil)
+                } else {
+                    NSApp.sendAction(Selector(("showPreferencesWindow:")), to: nil, from: nil)
+                }
+            } label: {
                 Image(systemName: "gearshape.fill")
                     .font(.system(size: 15, weight: .semibold))
                     .frame(width: 30, height: 30)

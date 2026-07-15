@@ -89,6 +89,10 @@ struct ClipSlotsApp: App {
                 // v2.7.26: updateConfig now handles hotkey unregister/reregister internally
                 store.updateConfig(newConfig)
             }
+            // v2.9.10: settings now open as an independent native window.
+            // Mark the hotkey-editing safe zone while the window is visible.
+            .onAppear { store.isSettingsPresented = true }
+            .onDisappear { store.isSettingsPresented = false }
         }
     }
 }

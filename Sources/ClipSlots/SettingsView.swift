@@ -438,8 +438,8 @@ struct SettingsView: View {
     }
 
     private func resetDefaults() {
-        slots = 9
-        saveKey = "cmd+option+{n}"
+        slots = 10
+        saveKey = "option+{n}"
         pasteKey = "cmd+{n}"
         radialKey = "ctrl+space"
         verbose = true
