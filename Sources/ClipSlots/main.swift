@@ -265,6 +265,13 @@ final class SlotStoreObservable: ObservableObject {
                     return
                 }
                 NSLog("[ClipSlots] watcher fired → reloadAll")
+                // v2.9.15 (fix): an external write (the `clipslots` CLI) changed
+                // slot bodies on disk. SlotStorage.get() is cache-backed and would
+                // otherwise keep returning the stale in-memory SlotContent, so the
+                // body stayed "空槽位 0 B" even though the label (read from disk
+                // directly) updated. Drop the content caches so reloadAll re-reads
+                // the freshly written bodies from disk.
+                self.specialStorage.invalidateContentCaches()
                 self.reloadAll()
                 self.refreshTrigger = UUID()
             }

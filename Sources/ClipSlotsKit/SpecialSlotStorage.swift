@@ -742,6 +742,19 @@ public final class SpecialSlotStorage {
         slotStorage(for: specialSlotId).snapshot()
     }
 
+    /// v2.9.15 (fix): invalidate the in-memory SlotContent caches of every open
+    /// per-group SlotStorage so the next read re-loads from disk. Call this when an
+    /// EXTERNAL process (the `clipslots` CLI) may have changed slot bodies on disk;
+    /// otherwise the GUI keeps serving stale cached content (labels updated but body
+    /// stuck at "空槽位 0 B", because getLabel reads disk directly while get() is
+    /// cached). Invalidating ALL cached groups — not just the active one — also fixes
+    /// the case where the user later switches to a group the CLI wrote to.
+    public func invalidateContentCaches() {
+        for storage in storageCache.values {
+            storage.invalidateCache()
+        }
+    }
+
     // MARK: - Source Update
 
     public func updateCurrentSpecialSlotSource(sourceType: SpecialSlotSourceType, sourcePath: String?) throws {

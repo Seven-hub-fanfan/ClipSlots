@@ -131,6 +131,18 @@ public final class SlotStorage {
         queue.sync { cache }
     }
 
+    /// v2.9.15 (fix): drop the in-memory SlotContent cache so the next `get(_:)`
+    /// re-reads from disk. `get(_:)` serves cached SlotContent and never notices a
+    /// change made by ANOTHER process (the `clipslots` CLI). Labels bypass this
+    /// cache (getLabel reads label.txt directly every call), which is exactly why a
+    /// CLI `write` used to surface the new label while the body still showed the
+    /// stale "空槽位 0 B". The GUI's FSEvents watcher now calls this before reloading
+    /// so external writes are reflected. (The body was always correctly persisted to
+    /// disk — this was a read-cache staleness bug, not a write bug.)
+    public func invalidateCache() {
+        queue.sync { cache.removeAll() }
+    }
+
     // MARK: - Label
 
     public func getLabel(_ slot: Int) -> String? {
