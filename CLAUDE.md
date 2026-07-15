@@ -36,6 +36,10 @@ cp -f .build/debug/ClipSlotsCLI ~/bin/clipslots   # canonical path agents call
 
 The Settings page ("命令行工具 (CLI)" section, `CLIInstallManager.swift`) lets users install/update/uninstall the CLI. It bundles the CLI inside the app as `Contents/MacOS/clipslots-cli` and symlinks `/usr/local/bin/clipslots` → that bundled binary (via a macOS admin-auth `do shell script ... with administrator privileges` dialog). Status (installed/outdated/not-installed) is derived by comparing `clipslots version` at the target path vs the bundled binary. **Release pipeline must bundle the CLI**: after building, `cp -f .build/debug/ClipSlotsCLI /Applications/ClipSlots.app/Contents/MacOS/clipslots-cli && codesign --force --sign - /Applications/ClipSlots.app/Contents/MacOS/clipslots-cli`.
 
+### In-App "Install to Agent" (v2.9.14+)
+
+The Plugins page ("ClipSlots Skill" section, `AgentSkillInstallManager.swift`) lets users one-click install the skill into detected agent environments (Claude Code `~/.claude`, Cursor `~/.cursor`, Codex `~/.codex`, Gemini CLI `~/.gemini`). Install = create a **symlink** `<agent>/skills/clipslots-manager` → the bundled skill dir `ClipSlots.app/Contents/Resources/skills/clipslots-manager`, so App upgrades of SKILL.md auto-sync to agents. Symlink is tried without privilege first (home dir is writable); falls back to a macOS admin-auth dialog on permission error. **Release pipeline must bundle the skill**: after building, `mkdir -p /Applications/ClipSlots.app/Contents/Resources/skills && rm -rf .../skills/clipslots-manager && cp -R skills/clipslots-manager /Applications/ClipSlots.app/Contents/Resources/skills/clipslots-manager`.
+
 ## Architecture
 
 **ClipSlots** is a macOS clipboard manager with 10-slot groups ("槽位组"), organized into pages. Global hotkeys (Carbon) save/copy/paste clipboard content across apps.

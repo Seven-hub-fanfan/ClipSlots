@@ -15,6 +15,9 @@ struct PluginsView: View {
 
     @State private var showingAddPluginNotice = false
 
+    // v2.9.14: 一键安装到 Agent。
+    @StateObject private var agentInstaller = AgentSkillInstallManager()
+
     // 官方 Skill 元信息（对应 skills/clipslots-manager/SKILL.md）
     private let skillName = "ClipSlots Skill"
     private let skillIdentifier = "clipslots-manager"
@@ -136,9 +139,148 @@ struct PluginsView: View {
                         .foregroundColor(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
+
+                Divider()
+
+                agentInstallSection
             }
             .padding(14)
             .background(cardBackground)
+        }
+        .onAppear { agentInstaller.refresh() }
+    }
+
+    // MARK: - 安装到 Agent（v2.9.14）
+
+    private var agentInstallSection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 6) {
+                Image(systemName: "square.and.arrow.down.on.square")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundColor(.accentColor)
+                Text("安装到 Agent")
+                    .font(.system(size: 13, weight: .semibold))
+                Spacer()
+                Button {
+                    agentInstaller.refresh()
+                } label: {
+                    Image(systemName: "arrow.clockwise")
+                        .font(.system(size: 11))
+                }
+                .buttonStyle(.borderless)
+                .foregroundColor(.secondary)
+                .help("重新扫描本机 Agent")
+            }
+
+            Text("检测到已安装的 Agent 后，可一键把本 Skill 以软链接方式安装进去。App 升级时 Agent 侧自动同步。")
+                .font(.caption2)
+                .foregroundColor(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            if agentInstaller.detectedAgents.isEmpty {
+                HStack(spacing: 8) {
+                    Image(systemName: "magnifyingglass")
+                        .font(.system(size: 12))
+                        .foregroundColor(.secondary)
+                    Text("未检测到已安装的 Agent（Claude Code / Cursor / Codex / Gemini CLI）")
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .padding(10)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .fill(Color.secondary.opacity(0.06))
+                )
+            } else {
+                VStack(spacing: 8) {
+                    ForEach(agentInstaller.detectedAgents) { agent in
+                        agentRow(agent)
+                    }
+                }
+            }
+
+            if let msg = agentInstaller.lastMessage {
+                HStack(alignment: .top, spacing: 6) {
+                    Image(systemName: agentInstaller.lastMessageIsError
+                          ? "exclamationmark.triangle.fill" : "checkmark.circle.fill")
+                        .font(.system(size: 11))
+                    Text(msg)
+                        .font(.caption2)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .foregroundColor(agentInstaller.lastMessageIsError ? .orange : .green)
+            }
+        }
+    }
+
+    private func agentRow(_ agent: AgentSkillInstallManager.Agent) -> some View {
+        let state = agentInstaller.states[agent.id] ?? .notInstalled
+        let isBusy = agentInstaller.busyAgentID == agent.id
+        return HStack(spacing: 10) {
+            Image(systemName: agent.iconSystemName)
+                .font(.system(size: 14, weight: .semibold))
+                .foregroundColor(.accentColor)
+                .frame(width: 26, height: 26)
+                .background(Color.accentColor.opacity(0.12))
+                .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(agent.displayName)
+                    .font(.system(size: 13, weight: .medium))
+                if case .installed = state {
+                    Text(agent.skillTargetPath)
+                        .font(.system(size: 10, design: .monospaced))
+                        .foregroundColor(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+            }
+
+            Spacer()
+
+            if isBusy {
+                ProgressView()
+                    .scaleEffect(0.6)
+                    .frame(width: 70)
+            } else {
+                agentActionButton(agent: agent, state: state)
+            }
+        }
+        .padding(10)
+        .background(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .fill(Color.secondary.opacity(0.06))
+        )
+    }
+
+    @ViewBuilder
+    private func agentActionButton(agent: AgentSkillInstallManager.Agent,
+                                   state: AgentSkillInstallManager.InstallState) -> some View {
+        switch state {
+        case .installed:
+            HStack(spacing: 4) {
+                Image(systemName: "checkmark.seal.fill")
+                    .font(.system(size: 10))
+                Text("已安装")
+                    .font(.system(size: 11, weight: .medium))
+            }
+            .foregroundColor(.green)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 4)
+            .background(Color.green.opacity(0.12))
+            .clipShape(Capsule())
+        case .needsUpdate:
+            Button("可更新") { agentInstaller.install(agent) }
+                .font(.system(size: 11, weight: .medium))
+                .buttonStyle(.borderedProminent)
+                .controlSize(.small)
+        case .notInstalled:
+            Button("安装") { agentInstaller.install(agent) }
+                .font(.system(size: 11, weight: .medium))
+                .buttonStyle(.bordered)
+                .controlSize(.small)
         }
     }
 
