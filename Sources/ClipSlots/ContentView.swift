@@ -11,8 +11,6 @@ struct ContentView: View {
     // v2.9.8: update checker.
     @ObservedObject private var updateChecker = UpdateChecker.shared
     @State private var showingConnectionFullscreen = false
-    @State private var waterRippleActive = false
-    @State private var waterRipplePoint: CGPoint = .zero
     @Environment(\.colorScheme) private var colorScheme
 
     // v2.7.47: new installs should open in dark mode by default.
@@ -39,9 +37,9 @@ struct ContentView: View {
     // v2.7.2: Independent node canvas (does NOT draw lines on the main grid).
     @State private var showingNodeCanvas = false
 
-    private func cycleAppearanceMode(from point: CGPoint = CGPoint(x: 1180, y: 54)) {
-        waterRipplePoint = point
-        withAnimation(.easeOut(duration: 0.12)) { waterRippleActive = true }
+    // v2.9.17: theme switch now takes effect instantly with no transition effect.
+    // The previous water-ripple overlay (v2.7.45) was removed per product request.
+    private func cycleAppearanceMode() {
         let current = ThemeMode(rawValue: appearanceModeRaw) ?? .system
         switch current {
         // v2.7.41: toolbar theme switch only toggles light/dark.
@@ -49,9 +47,6 @@ struct ContentView: View {
         case .system: appearanceModeRaw = ThemeMode.dark.rawValue
         case .light:  appearanceModeRaw = ThemeMode.dark.rawValue
         case .dark:   appearanceModeRaw = ThemeMode.light.rawValue
-        }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.92) {
-            withAnimation(.easeInOut(duration: 0.24)) { waterRippleActive = false }
         }
     }
 
@@ -71,7 +66,16 @@ struct ContentView: View {
                         store.updateConfig(newConfig)
                         closeSettings()
                     },
-                    onClose: { closeSettings() }
+                    onClose: { closeSettings() },
+                    // v2.9.17: sidebar「插件市场」→ close settings, open the
+                    // independent plugin marketplace popover (anchored on toolbar).
+                    onOpenPlugins: {
+                        showingSettings = false
+                        store.isSettingsPresented = false
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+                            showingPlugins = true
+                        }
+                    }
                 )
                 // Fill the main window with small insets so it reads as an in-app
                 // panel (like Obsidian), while staying usable in small windows.
@@ -134,10 +138,6 @@ struct ContentView: View {
                 RetroPosterAmbientBackground()
                     .ignoresSafeArea()
             )
-
-            WaterRippleThemeTransition(isActive: waterRippleActive, origin: waterRipplePoint)
-                .allowsHitTesting(false)
-                .zIndex(90)
 
             // Toast overlay
             if let message = store.toastMessage {
@@ -1309,100 +1309,6 @@ struct SlotFramePreferenceKey: PreferenceKey {
 
     static func reduce(value: inout [Int: CGRect], nextValue: () -> [Int: CGRect]) {
         value.merge(nextValue(), uniquingKeysWith: { _, new in new })
-    }
-}
-
-// MARK: - v2.7.45 Water Ripple Theme Transition
-
-private struct WaterRippleThemeTransition: View {
-    let isActive: Bool
-    let origin: CGPoint
-    @Environment(\.colorScheme) private var colorScheme
-
-    var body: some View {
-        GeometryReader { proxy in
-            let maxRadius = hypot(proxy.size.width, proxy.size.height)
-            ZStack {
-                // soft fill: a transparent water sheet, not a heavy color wash
-                Circle()
-                    .fill(
-                        RadialGradient(
-                            colors: [waterFill.opacity(0.20), waterFill.opacity(0.075), .clear],
-                            center: .center,
-                            startRadius: 0,
-                            endRadius: maxRadius * 0.58
-                        )
-                    )
-                    .frame(width: isActive ? maxRadius * 1.58 : 0, height: isActive ? maxRadius * 1.58 : 0)
-                    .position(origin)
-                    .blur(radius: 8)
-                    .opacity(isActive ? 1 : 0)
-                    .animation(.easeOut(duration: 0.78), value: isActive)
-
-                // main refractive ripple edge
-                ForEach(0..<5, id: \.self) { index in
-                    WaterRippleRing(
-                        index: index,
-                        origin: origin,
-                        maxRadius: maxRadius,
-                        isActive: isActive,
-                        color: ringColor(index),
-                        lineWidth: index == 0 ? 2.6 : 1.2,
-                        delay: Double(index) * 0.055
-                    )
-                }
-
-                // subtle diagonal glint, like a water surface caustic
-                Capsule()
-                    .fill(
-                        LinearGradient(
-                            colors: [.clear, glintColor.opacity(0.42), .clear],
-                            startPoint: .leading,
-                            endPoint: .trailing
-                        )
-                    )
-                    .frame(width: isActive ? maxRadius * 0.92 : 0, height: 7)
-                    .rotationEffect(.degrees(-18))
-                    .position(x: origin.x + maxRadius * 0.16, y: origin.y - maxRadius * 0.08)
-                    .opacity(isActive ? 0.72 : 0)
-                    .blur(radius: 1.8)
-                    .blendMode(.screen)
-                    .animation(.easeOut(duration: 0.62).delay(0.10), value: isActive)
-            }
-        }
-    }
-
-    private var waterFill: Color { colorScheme == .dark ? Color(red: 0.55, green: 0.72, blue: 1.0) : Color(red: 0.64, green: 0.82, blue: 1.0) }
-    private var glintColor: Color { colorScheme == .dark ? Color.cyan : Color.white }
-    private func ringColor(_ index: Int) -> Color {
-        let dark = [Color.cyan, Color.blue, Color.white, Color.mint, Color.indigo]
-        let light = [Color.white, Color(red: 0.52, green: 0.76, blue: 1.0), Color(red: 0.38, green: 0.62, blue: 0.95), Color.cyan, Color.gray]
-        return (colorScheme == .dark ? dark : light)[index]
-    }
-}
-
-private struct WaterRippleRing: View {
-    let index: Int
-    let origin: CGPoint
-    let maxRadius: CGFloat
-    let isActive: Bool
-    let color: Color
-    let lineWidth: CGFloat
-    let delay: Double
-
-    var body: some View {
-        let width = isActive ? maxRadius * (0.36 + CGFloat(index) * 0.18) : 24
-        let height = width * (0.74 + CGFloat(index % 2) * 0.08)
-        // v2.7.45: use RoundedRectangle for macOS 13 compatibility.
-        RoundedRectangle(cornerRadius: width * 0.44, style: .continuous)
-            .stroke(color.opacity(0.58 - Double(index) * 0.07), lineWidth: lineWidth)
-            .frame(width: width, height: height)
-            .rotationEffect(.degrees(Double(index) * 17 - 9))
-            .position(origin)
-            .blur(radius: CGFloat(index) * 0.9)
-            .opacity(isActive ? 0.86 - Double(index) * 0.10 : 0)
-            .blendMode(.screen)
-            .animation(.interpolatingSpring(stiffness: 72, damping: 18).delay(delay), value: isActive)
     }
 }
 

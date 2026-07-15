@@ -38,6 +38,9 @@ struct SettingsView: View {
     // v2.9.12: optional close handler used by the in-app overlay presentation.
     // Falls back to the SwiftUI dismiss action when nil (legacy window path).
     var onClose: (() -> Void)? = nil
+    // v2.9.17: open the independent plugin marketplace popover from the sidebar.
+    // The marketplace stays a separate floating layer (not embedded here).
+    var onOpenPlugins: (() -> Void)? = nil
     @State private var selectedCategory: SettingsCategory = .appearance
 
     @State private var slots: Double
@@ -74,11 +77,12 @@ struct SettingsView: View {
         )
     }
 
-    init(config: AppConfig, onSave: @escaping (AppConfig) -> Void, onClose: (() -> Void)? = nil) {
+    init(config: AppConfig, onSave: @escaping (AppConfig) -> Void, onClose: (() -> Void)? = nil, onOpenPlugins: (() -> Void)? = nil) {
         AppearanceDefaults.ensureDefaultDarkIfNeeded()
         self.config = config
         self.onSave = onSave
         self.onClose = onClose
+        self.onOpenPlugins = onOpenPlugins
         _slots = State(initialValue: Double(config.slots))
         _saveKey = State(initialValue: config.saveKey)
         _pasteKey = State(initialValue: config.pasteKey)
@@ -155,6 +159,15 @@ struct SettingsView: View {
             ForEach(SettingsCategory.allCases) { category in
                 sidebarRow(category)
             }
+
+            // v2.9.17: plugin marketplace entry — placed after 高级/命令行工具.
+            // Clicking it opens the independent marketplace popover; it does NOT
+            // embed into the settings window.
+            Divider()
+                .padding(.horizontal, 20)
+                .padding(.vertical, 6)
+            pluginMarketRow
+
             Spacer()
         }
         .frame(width: 196)
@@ -188,6 +201,36 @@ struct SettingsView: View {
         }
         .buttonStyle(.plain)
         .padding(.horizontal, 8)
+    }
+
+    // v2.9.17: special sidebar entry that launches the plugin marketplace popover.
+    private var pluginMarketRow: some View {
+        Button {
+            onOpenPlugins?()
+        } label: {
+            HStack(spacing: 10) {
+                Image(systemName: "square.grid.2x2")
+                    .font(.system(size: 13))
+                    .frame(width: 20)
+                Text("插件市场")
+                    .font(.system(size: 13, weight: .medium))
+                Spacer(minLength: 0)
+                Image(systemName: "arrow.up.forward")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundColor(.secondary)
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+            .foregroundColor(.primary)
+            .background(
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .fill(Color.clear)
+            )
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .padding(.horizontal, 8)
+        .help("打开插件市场（独立弹窗）")
     }
 
     // v2.9.12: content header with the × close button (no window titlebar).

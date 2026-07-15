@@ -130,6 +130,24 @@ final class AgentSkillInstallManager: ObservableObject {
         return (base as NSString).appendingPathComponent(dest)
     }
 
+    // MARK: - Aggregate state (v2.9.17)
+
+    /// Card-level rollup across all detected agents, used by the marketplace badge.
+    /// - installed:    at least one agent has an up-to-date symlink and none pending.
+    /// - needsUpdate:  at least one agent has a stale/foreign install.
+    /// - notInstalled: no agent has it (or no agents detected).
+    var aggregateState: InstallState {
+        let values = detectedAgents.compactMap { states[$0.id] }
+        if values.contains(.needsUpdate) { return .needsUpdate }
+        if values.contains(.installed) { return .installed }
+        return .notInstalled
+    }
+
+    /// Count of agents where this Skill is currently installed (up-to-date).
+    var installedAgentCount: Int {
+        detectedAgents.reduce(0) { $0 + ((states[$1.id] == .installed) ? 1 : 0) }
+    }
+
     private func standardized(_ path: String) -> String {
         (path as NSString).standardizingPath
     }

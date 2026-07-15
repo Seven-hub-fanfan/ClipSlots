@@ -1,156 +1,424 @@
 import SwiftUI
 
-// v2.9.8: 插件页面（C+ 方案）
-// 三个区域：
-//   1. ClipSlots Skill（官方）— 展示 skills/clipslots-manager/SKILL.md，可启用/禁用
-//   2. 官方插件 — 预留占位
-//   3. 第三方插件 — 预留占位 +「添加插件」按钮（本期仅提示，格式规范制定中）
+// v2.9.17: Plugin marketplace (Obsidian community-plugins style).
+//
+// Replaces the old stacked-text plugin panel. Structure:
+//   - Toolbar: 搜索框 + 排序按钮 + 「仅显示已安装」开关
+//   - 分类 Tab：官方 Skill / 官方插件 / 社区插件（社区暂为占位）
+//   - 主列表：卡片网格（图标/emoji + 名称 + 来源 + 一句描述 + 安装状态徽章）
+//   - 详情页：点击卡片后展示完整描述 + 安装到 Agent 操作
+//
+// Data-driven via `PluginCatalog`, so新增官方 Skill 只需扩充 catalog。
+// Stays an independent popover (NOT embedded into the settings window).
 struct PluginsView: View {
     var onClose: () -> Void
 
-    // Skill 标记状态持久化。
-    // v2.9.9 降级说明：该开关目前仅作为「标记」，不联动 CLI 的实际行为（CLI 与 GUI 共享磁盘数据，
-    // 始终可用）。因此本期改为纯展示 + 说明文案，避免给用户「关掉开关即可禁用 CLI」的错误预期。
-    @AppStorage("skill_clipslots_manager_enabled") private var skillEnabled = true
-
-    @State private var showingAddPluginNotice = false
+    @Environment(\.colorScheme) private var scheme
 
     // v2.9.14: 一键安装到 Agent。
     @StateObject private var agentInstaller = AgentSkillInstallManager()
 
-    // 官方 Skill 元信息（对应 skills/clipslots-manager/SKILL.md）
-    private let skillName = "ClipSlots Skill"
-    private let skillIdentifier = "clipslots-manager"
-    // v2.9.9: 动态读取自 Info.plist，与 App 版本保持同源。
-    private let skillVersion = AppVersion.current
-    private let skillDescription = "通过命令行工具 clipslots 以编程方式操作 ClipSlots：读取/写入/检索槽位内容、把内容加载到系统剪贴板、批量整理素材到「页面→槽位组→槽位」三层结构、创建/删除页面与槽位组。专为智能体（Agent）调用设计，输出结构化 JSON。"
+    // 保留旧标记键以兼容历史用户（当前仅作展示，不联动 CLI）。
+    @AppStorage("skill_clipslots_manager_enabled") private var skillEnabled = true
+
+    @State private var searchText = ""
+    @State private var sort: PluginMarketSort = .recommended
+    @State private var onlyInstalled = false
+    @State private var selectedCategory: PluginMarketCategory = .officialSkill
+    @State private var selectedItemID: String? = nil
+
+    private var selectedItem: PluginMarketItem? {
+        guard let id = selectedItemID else { return nil }
+        return PluginCatalog.allItems.first { $0.id == id }
+    }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            header
-
-            Divider()
-
-            ScrollView {
-                VStack(alignment: .leading, spacing: 20) {
-                    officialSkillSection
-                    officialPluginsSection
-                    thirdPartyPluginsSection
-                }
-                .padding(18)
+        Group {
+            if let item = selectedItem {
+                detailView(item)
+            } else {
+                marketView
             }
         }
-        .frame(width: 460, height: 520)
-        .alert("敬请期待", isPresented: $showingAddPluginNotice) {
-            Button("好的", role: .cancel) {}
-        } message: {
-            Text("插件格式规范（.clipslot-plugin）制定中，敬请期待。下个版本将支持安装第三方插件。")
+        .frame(width: 560, height: 588)
+        .background(AppTheme.windowBackground(scheme))
+        .onAppear { agentInstaller.refresh() }
+    }
+
+    // MARK: - Market (list) view
+
+    private var marketView: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            header
+            Divider()
+            toolbar
+            categoryTabs
+            Divider()
+            listScroll
         }
     }
 
-    // MARK: - Header
-
     private var header: some View {
         HStack(spacing: 10) {
-            Image(systemName: "puzzlepiece.extension.fill")
-                .font(.system(size: 18, weight: .semibold))
-                .foregroundColor(.accentColor)
-            VStack(alignment: .leading, spacing: 2) {
-                Text("插件")
-                    .font(.system(size: 17, weight: .bold))
-                Text("管理 ClipSlots 的 Skill 与插件扩展")
+            ZStack {
+                RoundedRectangle(cornerRadius: 9, style: .continuous)
+                    .fill(AppTheme.brandGradient(scheme))
+                    .frame(width: 32, height: 32)
+                Image(systemName: "square.grid.2x2.fill")
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundColor(.white)
+            }
+            VStack(alignment: .leading, spacing: 1) {
+                Text("插件市场")
+                    .font(.system(size: 15, weight: .bold, design: .rounded))
+                Text("发现并安装 Skill 与插件扩展")
                     .font(.caption)
                     .foregroundColor(.secondary)
             }
             Spacer()
-            Button {
-                onClose()
-            } label: {
-                Image(systemName: "xmark.circle.fill")
-                    .font(.system(size: 16))
-                    .foregroundColor(.secondary)
+            Button { onClose() } label: {
+                Image(systemName: "xmark")
+                    .font(.system(size: 12, weight: .bold))
+                    .frame(width: 26, height: 26)
+                    .background(Circle().fill(AppTheme.chipBackground(scheme)))
+                    .contentShape(Circle())
             }
-            .buttonStyle(.borderless)
+            .buttonStyle(.plain)
+            .help("关闭")
         }
         .padding(.horizontal, 18)
         .padding(.vertical, 14)
     }
 
-    // MARK: - Section 1: Official Skill
+    // MARK: Toolbar (search + sort + toggle)
 
-    private var officialSkillSection: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            sectionTitle("ClipSlots Skill", subtitle: "官方")
-
-            VStack(alignment: .leading, spacing: 10) {
-                HStack(alignment: .top, spacing: 12) {
-                    Image(systemName: "sparkles")
-                        .font(.system(size: 20, weight: .semibold))
-                        .foregroundColor(.accentColor)
-                        .frame(width: 34, height: 34)
-                        .background(Color.accentColor.opacity(0.12))
-                        .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
-
-                    VStack(alignment: .leading, spacing: 4) {
-                        HStack(spacing: 8) {
-                            Text(skillName)
-                                .font(.system(size: 15, weight: .semibold))
-                            Text("v\(skillVersion)")
-                                .font(.caption2)
-                                .foregroundColor(.secondary)
-                                .padding(.horizontal, 6)
-                                .padding(.vertical, 2)
-                                .background(Color.secondary.opacity(0.12))
-                                .clipShape(Capsule())
-                        }
-                        Text(skillIdentifier)
-                            .font(.system(size: 11, design: .monospaced))
-                            .foregroundColor(.secondary)
-                    }
-
-                    Spacer()
-
-                    // v2.9.9: 降级为纯展示标记，不再是可交互开关。
-                    HStack(spacing: 5) {
-                        Image(systemName: "checkmark.seal.fill")
-                            .font(.system(size: 11))
-                        Text("已启用")
-                            .font(.system(size: 11, weight: .medium))
-                    }
-                    .foregroundColor(.green)
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 4)
-                    .background(Color.green.opacity(0.12))
-                    .clipShape(Capsule())
-                }
-
-                Text(skillDescription)
+    private var toolbar: some View {
+        HStack(spacing: 10) {
+            HStack(spacing: 6) {
+                Image(systemName: "magnifyingglass")
                     .font(.system(size: 12))
                     .foregroundColor(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-
-                // v2.9.9: 说明文案 —— 该标记不联动 CLI 的实际行为。
-                HStack(alignment: .top, spacing: 6) {
-                    Image(systemName: "info.circle")
-                        .font(.system(size: 11))
-                        .foregroundColor(.secondary)
-                    Text("此标记暂不影响 CLI（clipslots）的实际行为，仅作展示。CLI 与 App 共享本地数据，安装后始终可被智能体调用。")
-                        .font(.caption2)
-                        .foregroundColor(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
+                TextField("搜索 Skill 或插件…", text: $searchText)
+                    .textFieldStyle(.plain)
+                    .font(.system(size: 13))
+                if !searchText.isEmpty {
+                    Button { searchText = "" } label: {
+                        Image(systemName: "xmark.circle.fill")
+                            .font(.system(size: 12))
+                            .foregroundColor(.secondary)
+                    }
+                    .buttonStyle(.plain)
                 }
-
-                Divider()
-
-                agentInstallSection
             }
-            .padding(14)
-            .background(cardBackground)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 7)
+            .background(
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .fill(AppTheme.searchFieldBackground(scheme))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .stroke(AppTheme.searchFieldStroke(scheme), lineWidth: 1)
+            )
+
+            Menu {
+                ForEach(PluginMarketSort.allCases) { option in
+                    Button {
+                        sort = option
+                    } label: {
+                        Label(option.title, systemImage: sort == option ? "checkmark" : option.iconName)
+                    }
+                }
+            } label: {
+                Image(systemName: "arrow.up.arrow.down")
+                    .font(.system(size: 13, weight: .medium))
+                    .frame(width: 30, height: 30)
+                    .background(
+                        RoundedRectangle(cornerRadius: 8, style: .continuous)
+                            .fill(AppTheme.softButtonBackground(scheme))
+                    )
+            }
+            .menuStyle(.borderlessButton)
+            .menuIndicator(.hidden)
+            .frame(width: 30)
+            .help("排序：\(sort.title)")
+
+            Toggle(isOn: $onlyInstalled) {
+                Text("仅显示已安装")
+                    .font(.system(size: 12, weight: .medium))
+            }
+            .toggleStyle(.switch)
+            .controlSize(.mini)
+            .fixedSize()
         }
-        .onAppear { agentInstaller.refresh() }
+        .padding(.horizontal, 18)
+        .padding(.top, 12)
+        .padding(.bottom, 10)
     }
 
-    // MARK: - 安装到 Agent（v2.9.14）
+    // MARK: Category tabs
+
+    private var categoryTabs: some View {
+        HStack(spacing: 8) {
+            ForEach(PluginMarketCategory.allCases) { category in
+                categoryTab(category)
+            }
+            Spacer()
+        }
+        .padding(.horizontal, 18)
+        .padding(.bottom, 12)
+    }
+
+    private func categoryTab(_ category: PluginMarketCategory) -> some View {
+        let isSelected = selectedCategory == category
+        return Button {
+            selectedCategory = category
+        } label: {
+            HStack(spacing: 5) {
+                Text(category.title)
+                    .font(.system(size: 12, weight: .medium))
+                if category.comingSoon {
+                    Text("即将开放")
+                        .font(.system(size: 9, weight: .medium))
+                        .padding(.horizontal, 5)
+                        .padding(.vertical, 1)
+                        .background(Capsule().fill(Color.secondary.opacity(0.15)))
+                }
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 6)
+            .foregroundColor(isSelected ? .white : .secondary)
+            .background(
+                Capsule().fill(isSelected ? Color.accentColor : AppTheme.chipBackground(scheme))
+            )
+            .contentShape(Capsule())
+        }
+        .buttonStyle(.plain)
+    }
+
+    // MARK: List
+
+    private var listScroll: some View {
+        ScrollView {
+            let items = filteredItems
+            if items.isEmpty {
+                emptyState
+            } else {
+                LazyVGrid(columns: [GridItem(.flexible(), spacing: 12),
+                                    GridItem(.flexible(), spacing: 12)],
+                          spacing: 12) {
+                    ForEach(items) { item in
+                        card(item)
+                    }
+                }
+                .padding(18)
+            }
+        }
+    }
+
+    private var emptyState: some View {
+        let placeholder = selectedCategory.emptyPlaceholder
+        return VStack(spacing: 10) {
+            Image(systemName: placeholder.icon)
+                .font(.system(size: 30))
+                .foregroundColor(.secondary.opacity(0.5))
+            Text(searchText.isEmpty ? placeholder.text : "未找到匹配「\(searchText)」的结果")
+                .font(.system(size: 13))
+                .foregroundColor(.secondary)
+            if selectedCategory.comingSoon && searchText.isEmpty {
+                Text("敬请期待，下个版本将支持第三方/社区插件。")
+                    .font(.caption2)
+                    .foregroundColor(.secondary.opacity(0.75))
+            }
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.top, 70)
+    }
+
+    // MARK: Card
+
+    private func card(_ item: PluginMarketItem) -> some View {
+        Button {
+            selectedItemID = item.id
+        } label: {
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(spacing: 10) {
+                    itemIcon(item, size: 36, corner: 9)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(item.name)
+                            .font(.system(size: 13.5, weight: .semibold))
+                            .lineLimit(1)
+                        Text(item.source)
+                            .font(.system(size: 10.5))
+                            .foregroundColor(.secondary)
+                            .lineLimit(1)
+                    }
+                    Spacer(minLength: 0)
+                }
+
+                Text(item.summary)
+                    .font(.system(size: 11.5))
+                    .foregroundColor(.secondary)
+                    .lineLimit(2)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+
+                HStack {
+                    if !item.version.isEmpty {
+                        Text("v\(item.version)")
+                            .font(.system(size: 10))
+                            .foregroundColor(.secondary)
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 2)
+                            .background(Capsule().fill(Color.secondary.opacity(0.12)))
+                    }
+                    Spacer()
+                    statusBadge(for: item)
+                }
+            }
+            .padding(13)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .fill(AppTheme.elevatedBackground(scheme))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .stroke(AppTheme.subtleBorder(scheme), lineWidth: 1)
+            )
+            .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        }
+        .buttonStyle(.plain)
+    }
+
+    @ViewBuilder
+    private func itemIcon(_ item: PluginMarketItem, size: CGFloat, corner: CGFloat) -> some View {
+        ZStack {
+            RoundedRectangle(cornerRadius: corner, style: .continuous)
+                .fill(Color.accentColor.opacity(0.12))
+                .frame(width: size, height: size)
+            if let emoji = item.emoji {
+                Text(emoji)
+                    .font(.system(size: size * 0.5))
+            } else {
+                Image(systemName: item.iconSystemName)
+                    .font(.system(size: size * 0.42, weight: .semibold))
+                    .foregroundColor(.accentColor)
+            }
+        }
+    }
+
+    // 卡片状态徽章：仅对可安装到 Agent 的 Skill 反映聚合状态。
+    @ViewBuilder
+    private func statusBadge(for item: PluginMarketItem) -> some View {
+        if item.installsToAgent {
+            switch agentInstaller.aggregateState {
+            case .installed:
+                badge(text: "已安装", icon: "checkmark.seal.fill", color: .green)
+            case .needsUpdate:
+                badge(text: "可更新", icon: "arrow.triangle.2.circlepath", color: .orange)
+            case .notInstalled:
+                badge(text: "安装", icon: "square.and.arrow.down", color: .accentColor)
+            }
+        } else {
+            badge(text: "内置", icon: "shippingbox.fill", color: .secondary)
+        }
+    }
+
+    private func badge(text: String, icon: String, color: Color) -> some View {
+        HStack(spacing: 4) {
+            Image(systemName: icon).font(.system(size: 9))
+            Text(text).font(.system(size: 10.5, weight: .medium))
+        }
+        .foregroundColor(color)
+        .padding(.horizontal, 8)
+        .padding(.vertical, 3)
+        .background(Capsule().fill(color.opacity(0.14)))
+    }
+
+    // MARK: - Detail view
+
+    private func detailView(_ item: PluginMarketItem) -> some View {
+        VStack(alignment: .leading, spacing: 0) {
+            // Detail header with back button.
+            HStack(spacing: 10) {
+                Button {
+                    selectedItemID = nil
+                } label: {
+                    HStack(spacing: 4) {
+                        Image(systemName: "chevron.left")
+                            .font(.system(size: 12, weight: .semibold))
+                        Text("市场")
+                            .font(.system(size: 13, weight: .medium))
+                    }
+                    .foregroundColor(.accentColor)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                Spacer()
+                Button { onClose() } label: {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 12, weight: .bold))
+                        .frame(width: 26, height: 26)
+                        .background(Circle().fill(AppTheme.chipBackground(scheme)))
+                        .contentShape(Circle())
+                }
+                .buttonStyle(.plain)
+                .help("关闭")
+            }
+            .padding(.horizontal, 18)
+            .padding(.vertical, 12)
+
+            Divider()
+
+            ScrollView {
+                VStack(alignment: .leading, spacing: 16) {
+                    // Title block
+                    HStack(alignment: .top, spacing: 14) {
+                        itemIcon(item, size: 52, corner: 12)
+                        VStack(alignment: .leading, spacing: 5) {
+                            HStack(spacing: 8) {
+                                Text(item.name)
+                                    .font(.system(size: 18, weight: .bold))
+                                if !item.version.isEmpty {
+                                    Text("v\(item.version)")
+                                        .font(.caption2)
+                                        .foregroundColor(.secondary)
+                                        .padding(.horizontal, 6)
+                                        .padding(.vertical, 2)
+                                        .background(Capsule().fill(Color.secondary.opacity(0.12)))
+                                }
+                            }
+                            Text(item.source)
+                                .font(.system(size: 12))
+                                .foregroundColor(.secondary)
+                        }
+                        Spacer()
+                        statusBadge(for: item)
+                    }
+
+                    // Full description
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("介绍")
+                            .font(.system(size: 13, weight: .semibold))
+                        Text(item.detail)
+                            .font(.system(size: 12.5))
+                            .foregroundColor(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .lineSpacing(3)
+                    }
+
+                    if item.installsToAgent {
+                        Divider()
+                        agentInstallSection
+                    }
+                }
+                .padding(18)
+            }
+        }
+    }
+
+    // MARK: - 安装到 Agent（迁移自旧版，保持功能）
 
     private var agentInstallSection: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -284,104 +552,41 @@ struct PluginsView: View {
         }
     }
 
-    // MARK: - Section 2: Official plugins
+    // MARK: - Filtering & sorting
 
-    private var officialPluginsSection: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            sectionTitle("官方插件", subtitle: nil)
-            placeholderCard(icon: "shippingbox", text: "暂无官方插件")
-        }
-    }
+    private var filteredItems: [PluginMarketItem] {
+        var items = PluginCatalog.items(in: selectedCategory)
 
-    // MARK: - Section 3: Third-party plugins
-
-    private var thirdPartyPluginsSection: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            sectionTitle("第三方插件", subtitle: nil)
-
-            VStack(spacing: 12) {
-                placeholderCard(icon: "puzzlepiece", text: "暂无第三方插件")
-
-                Button {
-                    presentAddPluginPanel()
-                } label: {
-                    HStack(spacing: 6) {
-                        Image(systemName: "plus.circle.fill")
-                        Text("添加插件")
-                    }
-                    .font(.system(size: 13, weight: .medium))
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 9)
-                }
-                .buttonStyle(.borderless)
-                .background(Color.accentColor.opacity(0.12))
-                .foregroundColor(.accentColor)
-                .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
-
-                Text("支持拖入 .clipslot-plugin 格式的插件包（格式规范制定中）。")
-                    .font(.caption2)
-                    .foregroundColor(.secondary)
+        // 搜索过滤（名称 / 来源 / 描述）。
+        let query = searchText.trimmingCharacters(in: .whitespaces).lowercased()
+        if !query.isEmpty {
+            items = items.filter {
+                $0.name.lowercased().contains(query)
+                || $0.source.lowercased().contains(query)
+                || $0.summary.lowercased().contains(query)
+                || $0.detail.lowercased().contains(query)
             }
         }
-    }
 
-    // 弹出文件选择器（本期：选择后统一提示"格式规范制定中"）。
-    private func presentAddPluginPanel() {
-        let panel = NSOpenPanel()
-        panel.title = "选择插件包"
-        panel.prompt = "选择"
-        panel.allowsMultipleSelection = false
-        panel.canChooseDirectories = false
-        panel.canChooseFiles = true
-        panel.allowedContentTypes = []
-        panel.message = "选择 .clipslot-plugin 插件包"
-
-        let result = panel.runModal()
-        // 无论是否选择文件，本期都提示格式规范制定中。
-        _ = result
-        showingAddPluginNotice = true
-    }
-
-    // MARK: - Reusable pieces
-
-    private func sectionTitle(_ title: String, subtitle: String?) -> some View {
-        HStack(spacing: 6) {
-            Text(title)
-                .font(.system(size: 14, weight: .bold))
-            if let subtitle {
-                Text(subtitle)
-                    .font(.caption2)
-                    .foregroundColor(.accentColor)
-                    .padding(.horizontal, 6)
-                    .padding(.vertical, 2)
-                    .background(Color.accentColor.opacity(0.12))
-                    .clipShape(Capsule())
-            }
-            Spacer()
+        // 仅显示已安装。
+        if onlyInstalled {
+            items = items.filter { isInstalled($0) }
         }
-    }
 
-    private func placeholderCard(icon: String, text: String) -> some View {
-        HStack(spacing: 10) {
-            Image(systemName: icon)
-                .font(.system(size: 16))
-                .foregroundColor(.secondary)
-            Text(text)
-                .font(.system(size: 13))
-                .foregroundColor(.secondary)
-            Spacer()
+        // 排序。
+        switch sort {
+        case .recommended:
+            break
+        case .nameAscending:
+            items.sort { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+        case .installedFirst:
+            items.sort { isInstalled($0) && !isInstalled($1) }
         }
-        .padding(14)
-        .frame(maxWidth: .infinity)
-        .background(cardBackground)
+        return items
     }
 
-    private var cardBackground: some View {
-        RoundedRectangle(cornerRadius: 12, style: .continuous)
-            .fill(Color.secondary.opacity(0.07))
-            .overlay(
-                RoundedRectangle(cornerRadius: 12, style: .continuous)
-                    .strokeBorder(Color.secondary.opacity(0.12), lineWidth: 1)
-            )
+    private func isInstalled(_ item: PluginMarketItem) -> Bool {
+        guard item.installsToAgent else { return false }
+        return agentInstaller.aggregateState == .installed
     }
 }

@@ -70,6 +70,9 @@ struct AttachmentManagerPopover: View {
     @State private var draggingId: UUID? = nil
     @State private var dragTranslation: CGFloat = 0
     @State private var dragStartIndex: Int? = nil
+    // v2.9.17: drag-and-drop / click upload target highlight. True while a file
+    // drag hovers the dropzone (empty state) or the compact bottom dropzone.
+    @State private var isDropTargeted = false
     // Row height (56) + VStack spacing (8) == vertical distance between rows.
     private let rowStep: CGFloat = 64
 
@@ -90,6 +93,11 @@ struct AttachmentManagerPopover: View {
             header
             Divider()
             listArea
+            // v2.9.17: keep the drag/click hot zone available once attachments
+            // exist (empty state already IS a full dropzone).
+            if !attachments.isEmpty {
+                compactDropzone
+            }
             Divider()
             addBar
         }
@@ -174,19 +182,80 @@ struct AttachmentManagerPopover: View {
         .zIndex(isDragging ? 1 : 0)
     }
 
+    // v2.9.17: empty state is now an interactive dropzone. Click anywhere to open
+    // a multi-select file picker; drag files onto it to add them directly. The
+    // dashed border + upload glyph make the hot zone obvious.
     private var emptyState: some View {
-        VStack(spacing: 8) {
-            Image(systemName: "paperclip")
-                .font(.system(size: 28))
-                .foregroundColor(.secondary.opacity(0.4))
-            Text("还没有附件")
-                .font(.callout)
-                .foregroundColor(.secondary)
-            Text("从下方添加，粘贴时会一起带出")
-                .font(.caption)
-                .foregroundColor(.secondary.opacity(0.7))
+        VStack(spacing: 12) {
+            Image(systemName: isDropTargeted ? "square.and.arrow.down.fill" : "square.and.arrow.down")
+                .font(.system(size: 34, weight: .regular))
+                .foregroundColor(isDropTargeted ? .accentColor : .secondary.opacity(0.55))
+            VStack(spacing: 4) {
+                Text(isDropTargeted ? "松开以添加附件" : "拖拽文件到这里")
+                    .font(.callout.weight(.medium))
+                    .foregroundColor(isDropTargeted ? .accentColor : .secondary)
+                Text("或点击此区域选择文件（可多选）")
+                    .font(.caption)
+                    .foregroundColor(.secondary.opacity(0.75))
+            }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .contentShape(Rectangle())
+        .padding(16)
+        .background(
+            RoundedRectangle(cornerRadius: AppTheme.cornerRadius, style: .continuous)
+                .fill(isDropTargeted ? Color.accentColor.opacity(0.08) : Color.clear)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: AppTheme.cornerRadius, style: .continuous)
+                .strokeBorder(
+                    isDropTargeted ? Color.accentColor : AppTheme.subtleBorder(scheme),
+                    style: StrokeStyle(lineWidth: isDropTargeted ? 2 : 1.5, dash: [7, 5])
+                )
+        )
+        .padding(16)
+        .onTapGesture { pickFilesForDropzone() }
+        .onDrop(of: [.fileURL], isTargeted: $isDropTargeted) { providers in
+            handleDrop(providers)
+        }
+        .animation(.easeOut(duration: 0.15), value: isDropTargeted)
+    }
+
+    // v2.9.17: compact dropzone shown above the add bar when attachments exist,
+    // so the drag hot zone stays available without dominating the list. Clicking
+    // it also opens the multi-select picker.
+    private var compactDropzone: some View {
+        HStack(spacing: 8) {
+            Image(systemName: isDropTargeted ? "square.and.arrow.down.fill" : "square.and.arrow.down")
+                .font(.system(size: 13, weight: .medium))
+                .foregroundColor(isDropTargeted ? .accentColor : .secondary)
+            Text(isDropTargeted ? "松开以添加附件" : "拖拽文件到此，或点击选择（可多选）")
+                .font(.caption)
+                .foregroundColor(isDropTargeted ? .accentColor : .secondary)
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .frame(maxWidth: .infinity)
+        .contentShape(Rectangle())
+        .background(
+            RoundedRectangle(cornerRadius: AppTheme.smallCornerRadius, style: .continuous)
+                .fill(isDropTargeted ? Color.accentColor.opacity(0.08) : Color.clear)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: AppTheme.smallCornerRadius, style: .continuous)
+                .strokeBorder(
+                    isDropTargeted ? Color.accentColor : AppTheme.subtleBorder(scheme),
+                    style: StrokeStyle(lineWidth: 1, dash: [6, 4])
+                )
+        )
+        .padding(.horizontal, 12)
+        .padding(.top, 10)
+        .onTapGesture { pickFilesForDropzone() }
+        .onDrop(of: [.fileURL], isTargeted: $isDropTargeted) { providers in
+            handleDrop(providers)
+        }
+        .animation(.easeOut(duration: 0.15), value: isDropTargeted)
     }
 
     // MARK: Inline editor (text / url / reference)
@@ -336,6 +405,81 @@ struct AttachmentManagerPopover: View {
             current.append(att)
         }
         store.setAttachments(current, for: slot)
+    }
+
+    // v2.9.17: multi-select picker used by the dropzone (empty state + compact).
+    // Unlike the type-specific 图片/文件 buttons, it accepts anything and
+    // classifies each file as image-or-file automatically via `addFileURLs`.
+    private func pickFilesForDropzone() {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = true
+        panel.prompt = "添加"
+        panel.message = "选择要作为附件添加的文件（可多选）"
+        guard panel.runModal() == .OK else { return }
+        addFileURLs(panel.urls)
+    }
+
+    // v2.9.17: shared file-adding core for drag-drop and the dropzone picker.
+    // Reuses the exact SlotAttachment shape as `pickFile`, classifying each URL
+    // as an image or a generic file so image thumbnails/previews still work.
+    private func addFileURLs(_ urls: [URL]) {
+        let fileURLs = urls.filter { $0.isFileURL }
+        guard !fileURLs.isEmpty else { return }
+        withAnimation(.spring(response: 0.32, dampingFraction: 0.82)) {
+            var current = store.attachments(for: slot)
+            for url in fileURLs {
+                let att = SlotContent.SlotAttachment(
+                    name: url.lastPathComponent,
+                    type: attachmentType(for: url),
+                    path: url.path
+                )
+                current.append(att)
+            }
+            store.setAttachments(current, for: slot)
+        }
+    }
+
+    private func attachmentType(for url: URL) -> SlotContent.AttachmentType {
+        if #available(macOS 11.0, *),
+           let type = UTType(filenameExtension: url.pathExtension),
+           type.conforms(to: .image) {
+            return .image
+        }
+        return .file
+    }
+
+    // v2.9.17: resolve dropped file-URL providers to on-disk URLs, then add them.
+    private func handleDrop(_ providers: [NSItemProvider]) -> Bool {
+        let fileURLType = UTType.fileURL.identifier
+        let relevant = providers.filter { $0.hasItemConformingToTypeIdentifier(fileURLType) }
+        guard !relevant.isEmpty else { return false }
+
+        let group = DispatchGroup()
+        let lock = NSLock()
+        var collected: [URL] = []
+
+        for provider in relevant {
+            group.enter()
+            provider.loadItem(forTypeIdentifier: fileURLType, options: nil) { item, _ in
+                defer { group.leave() }
+                var url: URL?
+                if let data = item as? Data {
+                    url = URL(dataRepresentation: data, relativeTo: nil)
+                } else if let u = item as? URL {
+                    url = u
+                }
+                if let url, url.isFileURL {
+                    lock.lock(); collected.append(url); lock.unlock()
+                }
+            }
+        }
+
+        group.notify(queue: .main) {
+            addFileURLs(collected)
+        }
+        return true
     }
 
     private func remove(_ att: SlotContent.SlotAttachment) {
