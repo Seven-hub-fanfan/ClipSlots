@@ -3,6 +3,7 @@ import ClipSlotsKit
 
 struct ContentView: View {
     @ObservedObject var store: SlotStoreObservable
+    @State private var showingSettings = false
     @State private var showingSpecialSlotManagement = false
     @State private var showingHotkeyTemplatePopover = false
     // v2.9.8: plugins page popover.
@@ -52,6 +53,40 @@ struct ContentView: View {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.92) {
             withAnimation(.easeInOut(duration: 0.24)) { waterRippleActive = false }
         }
+    }
+
+    // v2.9.12: Obsidian-style in-app settings overlay. Dimmed backdrop + centered
+    // two-pane panel. Lives inside the main window ZStack, so it follows the window.
+    private var settingsOverlay: some View {
+        GeometryReader { geo in
+            ZStack {
+                Color.black.opacity(0.38)
+                    .ignoresSafeArea()
+                    .contentShape(Rectangle())
+                    .onTapGesture { closeSettings() }
+
+                SettingsView(
+                    config: store.config,
+                    onSave: { newConfig in
+                        store.updateConfig(newConfig)
+                        closeSettings()
+                    },
+                    onClose: { closeSettings() }
+                )
+                // Fill the main window with small insets so it reads as an in-app
+                // panel (like Obsidian), while staying usable in small windows.
+                .frame(
+                    width: min(max(geo.size.width - 32, 480), 880),
+                    height: min(max(geo.size.height - 32, 380), 660)
+                )
+                .shadow(color: .black.opacity(0.35), radius: 30, y: 12)
+            }
+            .frame(width: geo.size.width, height: geo.size.height)
+        }
+    }
+
+    private func closeSettings() {
+        withAnimation(.easeInOut(duration: 0.2)) { showingSettings = false }
     }
 
     var body: some View {
@@ -116,11 +151,27 @@ struct ContentView: View {
                     .zIndex(101)
             }
 
+            // v2.9.12: in-app settings overlay (Obsidian-style two-pane).
+            // Rendered inside the main window's ZStack so it stays attached to the
+            // window and moves together when the window is dragged.
+            if showingSettings {
+                settingsOverlay
+                    .transition(.opacity)
+                    .zIndex(200)
+            }
+
         }
         .onAppear {
             AppearanceDefaults.ensureDefaultDarkIfNeeded()
         }
         .animation(.easeInOut(duration: 0.25), value: store.toastMessage != nil)
+        // v2.9.12: settings overlay is a modal hotkey-editing safe zone; keep the
+        // store flag in sync so business hotkeys don't fire while it is open.
+        .onChange(of: showingSettings) { store.isSettingsPresented = $0 }
+        // v2.9.12: Cmd+, / "设置…" menu opens the in-app overlay.
+        .onReceive(NotificationCenter.default.publisher(for: .openInAppSettings)) { _ in
+            withAnimation(.easeInOut(duration: 0.2)) { showingSettings = true }
+        }
         // v2.6.7: Import options sheet
         .sheet(item: $store.pendingImportSelection) { selection in
             ImportOptionsSheet(
@@ -366,28 +417,14 @@ struct ContentView: View {
                 .frame(width: 360)
             }
 
-            // v2.9.11: open the independent native Settings window reliably.
-            // v2.9.10 bug: NSApp.responds(to: "showSettingsWindow:") is always false
-            // (NSApplication doesn't implement it — it's handled by an internal menu
-            // responder), so the button fell through and did nothing. Use SettingsLink
-            // (the officially supported trigger) on macOS 14+, selector fallback on 13.
-            Group {
-                if #available(macOS 14.0, *) {
-                    SettingsLink {
-                        Image(systemName: "gearshape.fill")
-                            .font(.system(size: 15, weight: .semibold))
-                            .frame(width: 30, height: 30)
-                    }
-                } else {
-                    Button {
-                        NSApp.activate(ignoringOtherApps: true)
-                        NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil)
-                    } label: {
-                        Image(systemName: "gearshape.fill")
-                            .font(.system(size: 15, weight: .semibold))
-                            .frame(width: 30, height: 30)
-                    }
-                }
+            // v2.9.12: settings now open as an in-app overlay (Obsidian-style),
+            // embedded in the main window so it follows the window when dragged.
+            Button {
+                withAnimation(.easeInOut(duration: 0.2)) { showingSettings = true }
+            } label: {
+                Image(systemName: "gearshape.fill")
+                    .font(.system(size: 15, weight: .semibold))
+                    .frame(width: 30, height: 30)
             }
             .buttonStyle(.borderless)
             .help("设置")

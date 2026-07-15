@@ -30,6 +30,11 @@ fileprivate func virtualKeyForCharacterV() -> CGKeyCode {
 // v2.7.33: Do not define slot keyboardShortcut helpers for foreground menu actions.
 // All save/paste shortcuts must be owned by AppConfig + RegisterEventHotKey only.
 
+// v2.9.12: request to open the in-app settings overlay (Cmd+, / menu).
+extension Notification.Name {
+    static let openInAppSettings = Notification.Name("com.clipslots.openInAppSettings")
+}
+
 @main
 struct ClipSlotsApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
@@ -63,6 +68,14 @@ struct ClipSlotsApp: App {
             CommandGroup(replacing: .appInfo) {
                 Button("关于 ClipSlots") { NSApp.orderFrontStandardAboutPanel(nil) }
             }
+            // v2.9.12: settings are now an in-app overlay (not a separate window).
+            // Keep Cmd+, working by broadcasting a request the main window observes.
+            CommandGroup(replacing: .appSettings) {
+                Button("设置…") {
+                    NotificationCenter.default.post(name: .openInAppSettings, object: nil)
+                }
+                .keyboardShortcut(",", modifiers: .command)
+            }
             // v2.7.26: Ctrl+Z undo for clear/delete operations
             CommandGroup(after: .undoRedo) {
                 Button("撤销清空/删除") {
@@ -83,17 +96,6 @@ struct ClipSlotsApp: App {
             }
         }
         .onChange(of: NSApplication.shared.keyWindow?.title) { _ in }
-
-        Settings {
-            SettingsView(config: store.config) { newConfig in
-                // v2.7.26: updateConfig now handles hotkey unregister/reregister internally
-                store.updateConfig(newConfig)
-            }
-            // v2.9.10: settings now open as an independent native window.
-            // Mark the hotkey-editing safe zone while the window is visible.
-            .onAppear { store.isSettingsPresented = true }
-            .onDisappear { store.isSettingsPresented = false }
-        }
     }
 }
 

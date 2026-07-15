@@ -1,9 +1,44 @@
 import SwiftUI
 import ClipSlotsKit
 
+// v2.9.12: in-app settings categories for the Obsidian-style two-pane layout.
+enum SettingsCategory: String, CaseIterable, Identifiable {
+    case appearance, slot, shortcut, notification, connection, advanced, cli
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .appearance: return "外观"
+        case .slot: return "槽位"
+        case .shortcut: return "快捷键"
+        case .notification: return "提示与确认"
+        case .connection: return "槽位连接"
+        case .advanced: return "高级"
+        case .cli: return "命令行工具"
+        }
+    }
+
+    var icon: String {
+        switch self {
+        case .appearance: return "paintbrush.fill"
+        case .slot: return "rectangle.stack.fill"
+        case .shortcut: return "keyboard.fill"
+        case .notification: return "bell.fill"
+        case .connection: return "point.3.connected.trianglepath.dotted"
+        case .advanced: return "slider.horizontal.3"
+        case .cli: return "terminal.fill"
+        }
+    }
+}
+
 struct SettingsView: View {
     @State var config: AppConfig
     var onSave: (AppConfig) -> Void
+    // v2.9.12: optional close handler used by the in-app overlay presentation.
+    // Falls back to the SwiftUI dismiss action when nil (legacy window path).
+    var onClose: (() -> Void)? = nil
+    @State private var selectedCategory: SettingsCategory = .appearance
 
     @State private var slots: Double
     @State private var saveKey: String
@@ -39,10 +74,11 @@ struct SettingsView: View {
         )
     }
 
-    init(config: AppConfig, onSave: @escaping (AppConfig) -> Void) {
+    init(config: AppConfig, onSave: @escaping (AppConfig) -> Void, onClose: (() -> Void)? = nil) {
         AppearanceDefaults.ensureDefaultDarkIfNeeded()
         self.config = config
         self.onSave = onSave
+        self.onClose = onClose
         _slots = State(initialValue: Double(config.slots))
         _saveKey = State(initialValue: config.saveKey)
         _pasteKey = State(initialValue: config.pasteKey)
@@ -58,35 +94,142 @@ struct SettingsView: View {
     }
 
     var body: some View {
-        VStack(spacing: 0) {
-            header
-
-            ScrollView {
-                VStack(spacing: 20) {
-                    appearanceSection
-                    slotSection
-                    shortcutSection
-                    advancedSection
-                    notificationPreferencesSection
-                    connectionSection
-                    cliSection
-                    helpSection
+        HStack(spacing: 0) {
+            sidebar
+            Divider()
+            VStack(spacing: 0) {
+                overlayHeader
+                Divider()
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 20) {
+                        sectionContent(for: selectedCategory)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 24)
+                    .padding(.vertical, 22)
                 }
-                .frame(maxWidth: 600)
-                .padding(.horizontal, 24)
-                .padding(.vertical, 22)
-                .frame(maxWidth: .infinity)
+                Divider()
+                footer
             }
-
-            footer
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(AppTheme.windowBackground(colorScheme))
+        .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .stroke(AppTheme.subtleBorder(colorScheme), lineWidth: 1)
+        )
         .onAppear { cliManager.refreshState() }
         .confirmationDialog("恢复默认设置？", isPresented: $showingResetConfirm, titleVisibility: .visible) {
             Button("恢复默认", role: .destructive) { resetDefaults() }
             Button("取消", role: .cancel) {}
         } message: {
             Text("槽位数量、快捷键和日志设置将恢复为默认值。")
+        }
+    }
+
+    // v2.9.12: left category navigation sidebar (Obsidian-style).
+    private var sidebar: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            HStack(spacing: 10) {
+                ZStack {
+                    RoundedRectangle(cornerRadius: 9, style: .continuous)
+                        .fill(AppTheme.brandGradient(colorScheme))
+                        .frame(width: 32, height: 32)
+                    Image(systemName: "gearshape.fill")
+                        .font(.system(size: 15, weight: .semibold))
+                        .foregroundColor(.white)
+                }
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("ClipSlots")
+                        .font(.system(size: 14, weight: .bold, design: .rounded))
+                    Text("设置")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+            }
+            .padding(.horizontal, 14)
+            .padding(.top, 18)
+            .padding(.bottom, 14)
+
+            ForEach(SettingsCategory.allCases) { category in
+                sidebarRow(category)
+            }
+            Spacer()
+        }
+        .frame(width: 196)
+        .frame(maxHeight: .infinity)
+        .background(AppTheme.elevatedBackground(colorScheme))
+    }
+
+    private func sidebarRow(_ category: SettingsCategory) -> some View {
+        let isSelected = selectedCategory == category
+        return Button {
+            selectedCategory = category
+        } label: {
+            HStack(spacing: 10) {
+                Image(systemName: category.icon)
+                    .font(.system(size: 13))
+                    .frame(width: 20)
+                Text(category.title)
+                    .font(.system(size: 13, weight: .medium))
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+            .foregroundColor(isSelected ? .accentColor : .primary)
+            .background(
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .fill(isSelected ? Color.accentColor.opacity(0.16) : Color.clear)
+            )
+        }
+        .buttonStyle(.plain)
+        .padding(.horizontal, 8)
+    }
+
+    // v2.9.12: content header with the × close button (no window titlebar).
+    private var overlayHeader: some View {
+        HStack {
+            Text(selectedCategory.title)
+                .font(.system(size: 16, weight: .semibold))
+            Spacer()
+            Button { closeAction() } label: {
+                Image(systemName: "xmark")
+                    .font(.system(size: 12, weight: .bold))
+                    .frame(width: 26, height: 26)
+                    .background(
+                        Circle().fill(AppTheme.chipBackground(colorScheme))
+                    )
+                    .contentShape(Circle())
+            }
+            .buttonStyle(.plain)
+            .help("关闭")
+        }
+        .padding(.horizontal, 20)
+        .padding(.vertical, 14)
+    }
+
+    @ViewBuilder
+    private func sectionContent(for category: SettingsCategory) -> some View {
+        switch category {
+        case .appearance: appearanceSection
+        case .slot: slotSection
+        case .shortcut:
+            shortcutSection
+            helpSection
+        case .notification: notificationPreferencesSection
+        case .connection: connectionSection
+        case .advanced: advancedSection
+        case .cli: cliSection
+        }
+    }
+
+    // v2.9.12: unified close that prefers the in-app overlay handler.
+    private func closeAction() {
+        if let onClose {
+            onClose()
+        } else {
+            dismiss()
         }
     }
 
@@ -346,7 +489,7 @@ struct SettingsView: View {
         HStack(spacing: 12) {
             Button("恢复默认") { showingResetConfirm = true }
             Spacer()
-            Button("取消") { dismiss() }
+            Button("取消") { closeAction() }
                 .keyboardShortcut(.escape)
             Button("保存") { save() }
                 .buttonStyle(.borderedProminent)
@@ -463,7 +606,7 @@ struct SettingsView: View {
         UserDefaults.standard.set(enableSlotConnection, forKey: UserPreferenceKeys.enableSlotConnection)
 
         onSave(newConfig)
-        dismiss()
+        closeAction()
     }
 
     private func resetNotificationPreferences() {
