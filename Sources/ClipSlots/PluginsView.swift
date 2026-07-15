@@ -8,7 +8,9 @@ import SwiftUI
 struct PluginsView: View {
     var onClose: () -> Void
 
-    // Skill 启用状态持久化。
+    // Skill 标记状态持久化。
+    // v2.9.9 降级说明：该开关目前仅作为「标记」，不联动 CLI 的实际行为（CLI 与 GUI 共享磁盘数据，
+    // 始终可用）。因此本期改为纯展示 + 说明文案，避免给用户「关掉开关即可禁用 CLI」的错误预期。
     @AppStorage("skill_clipslots_manager_enabled") private var skillEnabled = true
 
     @State private var showingAddPluginNotice = false
@@ -16,7 +18,8 @@ struct PluginsView: View {
     // 官方 Skill 元信息（对应 skills/clipslots-manager/SKILL.md）
     private let skillName = "ClipSlots Skill"
     private let skillIdentifier = "clipslots-manager"
-    private let skillVersion = "2.9.8"
+    // v2.9.9: 动态读取自 Info.plist，与 App 版本保持同源。
+    private let skillVersion = AppVersion.current
     private let skillDescription = "通过命令行工具 clipslots 以编程方式操作 ClipSlots：读取/写入/检索槽位内容、把内容加载到系统剪贴板、批量整理素材到「页面→槽位组→槽位」三层结构、创建/删除页面与槽位组。专为智能体（Agent）调用设计，输出结构化 JSON。"
 
     var body: some View {
@@ -104,9 +107,18 @@ struct PluginsView: View {
 
                     Spacer()
 
-                    Toggle("", isOn: $skillEnabled)
-                        .toggleStyle(.switch)
-                        .labelsHidden()
+                    // v2.9.9: 降级为纯展示标记，不再是可交互开关。
+                    HStack(spacing: 5) {
+                        Image(systemName: "checkmark.seal.fill")
+                            .font(.system(size: 11))
+                        Text("已启用")
+                            .font(.system(size: 11, weight: .medium))
+                    }
+                    .foregroundColor(.green)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 4)
+                    .background(Color.green.opacity(0.12))
+                    .clipShape(Capsule())
                 }
 
                 Text(skillDescription)
@@ -114,13 +126,15 @@ struct PluginsView: View {
                     .foregroundColor(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
 
-                HStack(spacing: 6) {
-                    Circle()
-                        .fill(skillEnabled ? Color.green : Color.secondary.opacity(0.5))
-                        .frame(width: 7, height: 7)
-                    Text(skillEnabled ? "已启用" : "已禁用")
-                        .font(.caption)
-                        .foregroundColor(skillEnabled ? .green : .secondary)
+                // v2.9.9: 说明文案 —— 该标记不联动 CLI 的实际行为。
+                HStack(alignment: .top, spacing: 6) {
+                    Image(systemName: "info.circle")
+                        .font(.system(size: 11))
+                        .foregroundColor(.secondary)
+                    Text("此标记暂不影响 CLI（clipslots）的实际行为，仅作展示。CLI 与 App 共享本地数据，安装后始终可被智能体调用。")
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
             }
             .padding(14)

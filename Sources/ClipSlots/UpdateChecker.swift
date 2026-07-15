@@ -10,8 +10,9 @@ final class UpdateChecker: ObservableObject {
 
     static let shared = UpdateChecker()
 
-    /// Current running app version. Keep in sync with the release pipeline / ContentView version label.
-    static let currentVersion = "2.9.8"
+    /// Current running app version. v2.9.9: dynamically read from Info.plist (CFBundleShortVersionString)
+    /// via `AppVersion.current` — no longer hardcoded.
+    static var currentVersion: String { AppVersion.current }
 
     private static let latestAPI = URL(string: "https://api.github.com/repos/Seven-hub-fanfan/ClipSlots/releases/latest")!
     private static let releasesPage = "https://github.com/Seven-hub-fanfan/ClipSlots/releases/latest"

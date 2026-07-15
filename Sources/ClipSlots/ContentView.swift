@@ -715,7 +715,7 @@ struct ContentView: View {
             // Connection stays as a separate tool and is moved to the right side.
             connectionToolButton
 
-            Text("v2.9.8")
+            Text("v\(AppVersion.current)")
                 .font(.caption2)
                 .foregroundColor(Color.secondary.opacity(0.65))
         }
