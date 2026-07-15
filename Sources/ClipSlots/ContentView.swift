@@ -366,18 +366,28 @@ struct ContentView: View {
                 .frame(width: 360)
             }
 
-            Button {
-                // v2.9.10: open the independent native Settings window instead of a popover.
-                NSApp.activate(ignoringOtherApps: true)
-                if NSApp.responds(to: Selector(("showSettingsWindow:"))) {
-                    NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil)
+            // v2.9.11: open the independent native Settings window reliably.
+            // v2.9.10 bug: NSApp.responds(to: "showSettingsWindow:") is always false
+            // (NSApplication doesn't implement it — it's handled by an internal menu
+            // responder), so the button fell through and did nothing. Use SettingsLink
+            // (the officially supported trigger) on macOS 14+, selector fallback on 13.
+            Group {
+                if #available(macOS 14.0, *) {
+                    SettingsLink {
+                        Image(systemName: "gearshape.fill")
+                            .font(.system(size: 15, weight: .semibold))
+                            .frame(width: 30, height: 30)
+                    }
                 } else {
-                    NSApp.sendAction(Selector(("showPreferencesWindow:")), to: nil, from: nil)
+                    Button {
+                        NSApp.activate(ignoringOtherApps: true)
+                        NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil)
+                    } label: {
+                        Image(systemName: "gearshape.fill")
+                            .font(.system(size: 15, weight: .semibold))
+                            .frame(width: 30, height: 30)
+                    }
                 }
-            } label: {
-                Image(systemName: "gearshape.fill")
-                    .font(.system(size: 15, weight: .semibold))
-                    .frame(width: 30, height: 30)
             }
             .buttonStyle(.borderless)
             .help("设置")
