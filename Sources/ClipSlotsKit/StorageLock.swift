@@ -4,11 +4,13 @@ import Foundation
 
 public enum StorageLockError: Error, LocalizedError {
     /// The cross-process lock could not be acquired within the allotted time.
-    case timeout
+    /// `detail` carries a human-readable reason (incl. the current lock holder's
+    /// PID when known) so callers can surface an accurate, non-misleading message.
+    case timeout(detail: String)
 
     public var errorDescription: String? {
         switch self {
-        case .timeout: return "storage is busy (lock timeout)"
+        case .timeout(let detail): return detail
         }
     }
 }
@@ -40,6 +42,12 @@ public enum StorageLockError: Error, LocalizedError {
 public final class StorageLock {
     public static let shared = StorageLock()
 
+    /// v2.9.16 (#6): when true, ALL lock acquisition is skipped and writes proceed
+    /// without the cross-process guarantee. Set by the CLI `--force` flag. A
+    /// one-time warning is emitted to stderr. Use only when you are certain no
+    /// other ClipSlots process is running (data races become possible).
+    public static var forceUnlocked = false
+
     private let lockURL: URL
     /// In-process serialization + reentrancy. Held for the entire critical
     /// section so same-process threads serialize even though they share one fd.
@@ -50,6 +58,9 @@ public final class StorageLock {
     /// file could not be opened — in that degraded case we proceed WITHOUT the
     /// cross-process guarantee rather than hang or crash).
     private var holdsFlock = false
+    /// v2.9.16 (#6): emit the "degraded to lockless" warning at most once per
+    /// process so we don't spam stderr on every write.
+    private var didWarnLockless = false
 
     public init(lockURL: URL? = nil) {
         if let lockURL {
@@ -86,6 +97,18 @@ public final class StorageLock {
 
     // MARK: - Private
 
+    /// Emit a one-time stderr warning explaining we are running without the
+    /// cross-process lock (sandbox EPERM, unopenable lock file, or `--force`).
+    private func warnLocklessOnce(_ reason: String) {
+        guard !didWarnLockless else { return }
+        didWarnLockless = true
+        FileHandle.standardError.write(Data(
+            "[ClipSlots] WARNING: proceeding WITHOUT cross-process lock (\(reason)). "
+            .utf8))
+        FileHandle.standardError.write(Data(
+            "Concurrent writes from another ClipSlots process could clobber data.\n".utf8))
+    }
+
     private func openFDIfNeeded() -> Int32 {
         if fd >= 0 { return fd }
         // Create the lock file (and, defensively, its directory) if missing.
@@ -98,11 +121,49 @@ public final class StorageLock {
         return fd
     }
 
+    /// v2.9.16 (#1): record the current PID as the lock holder inside the lock
+    /// file, so a subsequent waiter can identify (and, if the holder is dead,
+    /// reclaim) a stale lock.
+    private func writeHolderPID() {
+        guard fd >= 0 else { return }
+        let pidStr = "\(getpid())\n"
+        ftruncate(fd, 0)
+        lseek(fd, 0, SEEK_SET)
+        _ = pidStr.withCString { cstr in
+            write(fd, cstr, strlen(cstr))
+        }
+    }
+
+    /// v2.9.16 (#1): read the PID currently stored in the lock file (0 if none).
+    private func readHolderPID() -> Int32 {
+        guard let data = try? Data(contentsOf: lockURL),
+              let str = String(data: data, encoding: .utf8),
+              let pid = Int32(str.trimmingCharacters(in: .whitespacesAndNewlines)) else {
+            return 0
+        }
+        return pid
+    }
+
+    /// True if a process with `pid` currently exists (kill(pid, 0) probe).
+    private func isProcessAlive(_ pid: Int32) -> Bool {
+        guard pid > 0 else { return false }
+        if kill(pid, 0) == 0 { return true }
+        return errno == EPERM // exists but owned by another user
+    }
+
     private func acquireFlock(timeout: TimeInterval) throws {
+        // v2.9.16 (#6): `--force` bypasses the OS lock entirely.
+        if StorageLock.forceUnlocked {
+            warnLocklessOnce("--force")
+            holdsFlock = false
+            return
+        }
+
         let handle = openFDIfNeeded()
         guard handle >= 0 else {
             // Degraded mode: cannot open lock file. Do NOT hang — proceed without
             // the cross-process guarantee (in-process NSRecursiveLock still holds).
+            warnLocklessOnce("lock file could not be opened")
             holdsFlock = false
             return
         }
@@ -110,16 +171,44 @@ public final class StorageLock {
         while true {
             if flock(handle, LOCK_EX | LOCK_NB) == 0 {
                 holdsFlock = true
+                writeHolderPID()
                 return
             }
             let err = errno
+            // v2.9.16 (#6): sandbox / unsupported filesystem returns EPERM (or
+            // other non-would-block errors) for flock. Degrade to lockless with a
+            // clear warning instead of failing the write.
             if err != EWOULDBLOCK && err != EAGAIN {
-                NSLog("[ClipSlots] StorageLock: unexpected flock error errno=\(err); proceeding without cross-process lock")
+                let reason = (err == EPERM)
+                    ? "flock() EPERM — sandboxed or unsupported filesystem"
+                    : "flock() errno=\(err)"
+                NSLog("[ClipSlots] StorageLock: \(reason); proceeding without cross-process lock")
+                warnLocklessOnce(reason)
                 holdsFlock = false
                 return
             }
             if Date() >= deadline {
-                throw StorageLockError.timeout
+                // v2.9.16 (#1 + #4): the lock is genuinely held by someone. If the
+                // recorded holder PID is dead, treat it as a stale lock and try one
+                // final acquisition (flock normally auto-releases on process exit,
+                // but this also covers odd states). Otherwise surface an ACCURATE
+                // "busy" error naming the live holder — never a misleading
+                // "permission" message.
+                let holder = readHolderPID()
+                if holder > 0, !isProcessAlive(holder) {
+                    NSLog("[ClipSlots] StorageLock: stale lock from dead PID \(holder); reclaiming")
+                    if flock(handle, LOCK_EX | LOCK_NB) == 0 {
+                        holdsFlock = true
+                        writeHolderPID()
+                        return
+                    }
+                }
+                let who = holder > 0
+                    ? "held by process pid \(holder) (\(isProcessAlive(holder) ? "alive" : "dead"))"
+                    : "no holder PID recorded"
+                throw StorageLockError.timeout(
+                    detail: "storage is busy: lock \(who) not released within \(Int(timeout))s; "
+                        + "another ClipSlots process is writing — retry shortly")
             }
             usleep(20_000) // 20ms between retries
         }

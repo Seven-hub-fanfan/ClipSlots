@@ -12,7 +12,7 @@ import ClipSlotsKit
 //   success: {"ok": true, ...}
 //   error:   {"ok": false, "error": "message"}  (exit code 1)
 
-let CLI_VERSION = "2.9.15"
+let CLI_VERSION = "2.9.16"
 let DEFAULT_GROUP = "default"
 let DEFAULT_PAGE = "default_page"
 
@@ -152,8 +152,21 @@ func uniqueTypes(_ c: SlotContent) -> [String] {
 }
 
 /// Resolve a group id from flags, honoring the documented default.
+/// v2.9.16 (#2): supports referencing a group by NAME, not just id:
+///   • `--group-name "导入1"` → matches SpecialSlot.name exactly (errors if none).
+///   • `--group <val>` → tries id match first (backward compatible); if no id
+///     matches, falls back to a name match; otherwise passes the literal value
+///     through (e.g. the bare `default` group that may only exist on disk).
 func resolveGroup(_ args: ParsedArgs) -> String {
-    args.flag("group") ?? DEFAULT_GROUP
+    let index = storage.loadIndex()
+    if let name = args.flag("group-name") {
+        if let g = index.specialSlots.first(where: { $0.name == name }) { return g.id }
+        fail("no group found with name '\(name)' (run 'clipslots groups' to list names)")
+    }
+    let raw = args.flag("group") ?? DEFAULT_GROUP
+    if index.specialSlots.contains(where: { $0.id == raw }) { return raw }
+    if let g = index.specialSlots.first(where: { $0.name == raw }) { return g.id }
+    return raw
 }
 
 func parseSlot(_ raw: String?) -> Int {
@@ -164,6 +177,60 @@ func parseSlot(_ raw: String?) -> Int {
         fail("slot out of range: \(n) (valid 1...\(slotCount))")
     }
     return n
+}
+
+// v2.9.16 (#5): a short, agent-friendly preview of what was written (first 100
+// chars) so callers don't need a follow-up `read` to confirm the content.
+func previewText(_ s: String) -> String {
+    let flat = s.replacingOccurrences(of: "\n", with: " ")
+    return flat.count > 100 ? String(flat.prefix(100)) + "…" : flat
+}
+
+// v2.9.16 (#4): classify a caught write error into an ACCURATE message.
+// The old code funnelled everything through `error.localizedDescription`, which
+// for a Cocoa write-permission failure reads "You don't have permission to save
+// index.json" — misleading when the true root cause is a lock timeout. We now
+// separate the two:
+//   • StorageLockError  → "storage is busy …" (lock contention, retry works)
+//   • Cocoa write/permission errors → clear filesystem message naming the dir
+//   • anything else → generic, still tagged as an IO error not a lock error
+func describeWriteError(_ error: Error, context: String) -> String {
+    if let lockErr = error as? StorageLockError {
+        return lockErr.errorDescription ?? "storage is busy (lock timeout)"
+    }
+    let ns = error as NSError
+    if ns.domain == NSCocoaErrorDomain {
+        // 513 = NSFileWriteNoPermissionError, 640 = NSFileWriteOutOfSpaceError,
+        // 642 = NSFileWriteVolumeReadOnlyError.
+        switch ns.code {
+        case 513:
+            return "filesystem permission error while \(context): the ClipSlots data "
+                + "directory (~/.local/share/clipslots) is not writable by this user. "
+                + "This is NOT a lock conflict. Check directory ownership/permissions."
+        case 640:
+            return "no space left on device while \(context)"
+        case 642:
+            return "read-only filesystem while \(context)"
+        default:
+            break
+        }
+    }
+    return "I/O error while \(context): \(error.localizedDescription) "
+        + "(not a lock conflict; check disk/permissions)"
+}
+
+// v2.9.16 (#4): when `storage.set` returns false it has already swallowed the
+// underlying error. Probe the data directory writability so we can still tell a
+// genuine permission problem apart from a transient failure.
+func writeFailureDiagnostic(context: String) -> String {
+    let dir = FileManager.default.homeDirectoryForCurrentUser
+        .appendingPathComponent(".local/share/clipslots").path
+    if !FileManager.default.isWritableFile(atPath: dir) {
+        return "failed \(context): the ClipSlots data directory (\(dir)) is not "
+            + "writable. This is a filesystem permission issue, not a lock conflict."
+    }
+    return "failed \(context) (data directory is writable; the write was rejected "
+        + "by the storage layer — check logs / disk space)"
 }
 
 // MARK: - Commands
@@ -179,17 +246,17 @@ let COMMANDS: [[String: Any]] = [
     ["name": "help", "description": "列出所有命令、说明与参数（无参数时也返回此内容）。", "flags": [] as [String]],
     ["name": "groups", "description": "列出所有槽位组（SpecialSlot）。", "flags": [] as [String]],
     ["name": "pages", "description": "列出所有页面（SlotPage）。", "flags": ["--group <id> (可选,当前实现忽略,页面为全局)"]],
-    ["name": "list", "description": "列出某个槽位组内 1..N 号槽位的摘要。支持分页：传 --page-size 后按页返回并附带 pagination 元信息。", "flags": ["--group <id> (默认 default)", "--page <id> (可选,仅回显页面 id)", "--page-size <N> (可选,每页槽位数,>0 时启用分页)", "--page-num <N> (可选,第几页,从 1 开始,默认 1,需配合 --page-size)"]],
-    ["name": "read", "description": "读取单个槽位的完整内容（纯文本、HTML源、类型、附件数等）。", "flags": ["<slot> (位置参数,1..N)", "--group <id> (默认 default)", "--page <id> (可选,仅回显)"]],
-    ["name": "write", "description": "向槽位写入纯文本内容（保留已有附件），可选设置标签。", "flags": ["<slot> (位置参数,1..N)", "--text <string> (必填, 传 - 表示从 stdin 读取)", "--group <id> (默认 default)", "--page <id> (可选,仅回显)", "--label <string> (可选)"]],
-    ["name": "search", "description": "在槽位预览/文本/标签中做大小写不敏感子串搜索。", "flags": ["<query> (位置参数)", "--group <id> (默认 default)", "--all-groups (在所有槽位组内搜索)", "--limit <N> (默认 50)"]],
-    ["name": "paste", "description": "把某槽位的内容加载到系统剪贴板(NSPasteboard)，不模拟按键。", "flags": ["<slot> (位置参数,1..N)", "--group <id> (默认 default)", "--page <id> (可选,仅回显)"]],
-    ["name": "clear", "description": "清空某个槽位（内容、标签、附件全部移除）。", "flags": ["<slot> (位置参数,1..N)", "--group <id> (默认 default)"]],
+    ["name": "list", "description": "列出某个槽位组内 1..N 号槽位的摘要。支持分页：传 --page-size 后按页返回并附带 pagination 元信息。", "flags": ["--group <id|name> (默认 default;可传 id 或组名)", "--group-name <name> (按组名精确匹配,优先于 --group)", "--page <id> (可选,仅回显页面 id)", "--page-size <N> (可选,每页槽位数,>0 时启用分页)", "--page-num <N> (可选,第几页,从 1 开始,默认 1,需配合 --page-size)"]],
+    ["name": "read", "description": "读取单个槽位的完整内容（纯文本、HTML源、类型、附件数等）。", "flags": ["<slot> (位置参数,1..N)", "--group <id|name> (默认 default;可传 id 或组名)", "--group-name <name> (按组名精确匹配)", "--page <id> (可选,仅回显)"]],
+    ["name": "write", "description": "向槽位写入纯文本内容（保留已有附件），可选设置标签。成功返回里含 preview 字段(前100字符)，无需再 read 确认。支持 --batch 从 stdin 传入 JSON 数组一次写多条。", "flags": ["<slot> (位置参数,1..N;--batch 时省略)", "--text <string> (必填, 传 - 表示从 stdin 读取;--batch 时省略)", "--batch (从 stdin 读取 JSON 数组批量写入,见下)", "--group <id|name> (默认 default;可传 id 或组名)", "--group-name <name> (按组名精确匹配)", "--page <id> (可选,仅回显)", "--label <string> (可选)", "--force (跳过跨进程锁,风险自负)"]],
+    ["name": "search", "description": "在槽位预览/文本/标签中做大小写不敏感子串搜索。", "flags": ["<query> (位置参数)", "--group <id|name> (默认 default;可传 id 或组名)", "--group-name <name> (按组名精确匹配)", "--all-groups (在所有槽位组内搜索)", "--limit <N> (默认 50)"]],
+    ["name": "paste", "description": "把某槽位的内容加载到系统剪贴板(NSPasteboard)，不模拟按键。", "flags": ["<slot> (位置参数,1..N)", "--group <id|name> (默认 default;可传 id 或组名)", "--group-name <name> (按组名精确匹配)", "--page <id> (可选,仅回显)"]],
+    ["name": "clear", "description": "清空某个槽位（内容、标签、附件全部移除）。", "flags": ["<slot> (位置参数,1..N)", "--group <id|name> (默认 default;可传 id 或组名)", "--group-name <name> (按组名精确匹配)", "--force (跳过跨进程锁,风险自负)"]],
     ["name": "create-group", "description": "在指定页面新建一个槽位组，返回其 id。页面已满(10组)会返回错误，此时应先 create-page。v2.9.4: 同页面内不允许重名(会返回错误)，冲突时请改名或加 -2 后缀。", "flags": ["<name> (位置参数,组名)", "--page <id> (可选,默认当前页面)"]],
     ["name": "create-page", "description": "新建一个页面，返回其 id。页面名不可重复。", "flags": ["<name> (位置参数,页面名)"]],
     ["name": "delete-group", "description": "删除一个槽位组(软删除)。其数据目录会被移动到 .trash，可恢复；.trash 会自动清理(默认保留最近 30 天/最多 50 条)。id 不存在会返回错误。", "flags": ["<id> (位置参数,槽位组 id)"]],
     ["name": "delete-page", "description": "删除一个页面及其下所有槽位组(软删除)。相关数据目录会被移动到 .trash，可恢复；.trash 会自动清理(默认保留最近 30 天/最多 50 条)。id 不存在会返回错误。", "flags": ["<id> (位置参数,页面 id)"]],
-    ["name": "write-attachment", "description": "向某槽位追加一个或多个文件作为附件（按顺序），不改动槽位主体内容。图片扩展名归为 image 类型，其余为 file。", "flags": ["<slot> (位置参数,1..N)", "<file> [file ...] (位置参数,一个或多个文件路径,支持 ~ 与相对路径)", "--group <id> (默认 default)", "--replace (先清空该槽位已有附件再写入)", "--label <string> (可选)"]]
+    ["name": "write-attachment", "description": "向某槽位追加一个或多个文件作为附件（按顺序），不改动槽位主体内容。图片扩展名归为 image 类型，其余为 file。", "flags": ["<slot> (位置参数,1..N)", "<file> [file ...] (位置参数,一个或多个文件路径,支持 ~ 与相对路径)", "--group <id|name> (默认 default;可传 id 或组名)", "--group-name <name> (按组名精确匹配)", "--replace (先清空该槽位已有附件再写入)", "--label <string> (可选)", "--force (跳过跨进程锁,风险自负)"]]
 ]
 
 // v2.9.7 (R1): allowed flag names per command. Any flag not in this set is
@@ -201,18 +268,18 @@ let COMMAND_ALLOWED_FLAGS: [String: Set<String>] = [
     "version": [],
     "help": [],
     "groups": [],
-    "pages": ["group"],
-    "list": ["group", "page", "page-size", "page-num"],
-    "read": ["group", "page"],
-    "write": ["group", "page", "text", "label"],
-    "search": ["group", "all-groups", "limit"],
-    "paste": ["group", "page"],
-    "clear": ["group"],
-    "create-group": ["page"],
-    "create-page": [],
-    "delete-group": [],
-    "delete-page": [],
-    "write-attachment": ["group", "replace", "label"]
+    "pages": ["group", "group-name"],
+    "list": ["group", "group-name", "page", "page-size", "page-num"],
+    "read": ["group", "group-name", "page"],
+    "write": ["group", "group-name", "page", "text", "label", "batch", "force"],
+    "search": ["group", "group-name", "all-groups", "limit"],
+    "paste": ["group", "group-name", "page"],
+    "clear": ["group", "group-name", "force"],
+    "create-group": ["page", "force"],
+    "create-page": ["force"],
+    "delete-group": ["force"],
+    "delete-page": ["force"],
+    "write-attachment": ["group", "group-name", "replace", "label", "force"]
 ]
 
 // v2.9.7 (R1): validate that every --flag passed to a known command is
@@ -357,55 +424,148 @@ func cmdRead(_ args: ParsedArgs) -> Never {
     ])
 }
 
+// v2.9.16: a plain error carrying an already-formatted, agent-friendly message
+// (used when `storage.set` returns false and we've probed the reason).
+struct WriteFailure: Error { let message: String }
+
+// v2.9.16 (#2, batch): resolve a group literal (id OR name) to a group id.
+func resolveGroupLiteral(_ raw: String) -> String {
+    let index = storage.loadIndex()
+    if index.specialSlots.contains(where: { $0.id == raw }) { return raw }
+    if let g = index.specialSlots.first(where: { $0.name == raw }) { return g.id }
+    return raw
+}
+
+// v2.9.16 (#5): shared text-write core used by both `write` and `write --batch`.
+// Returns a short preview of the written text; throws StorageLockError on lock
+// contention or WriteFailure with a diagnosed reason on IO failure.
+func performTextWrite(slot n: Int, text: String, group: String, label: String?) throws -> String {
+    // Mirror the GUI's updateTextSlot: build a public.utf8-plain-text item and
+    // PRESERVE any existing attachments on the slot (v2.8.7 fix). Read-modify-write
+    // runs as ONE cross-process critical section (v2.9.4 #4).
+    let wrote = try StorageLock.shared.withLock { () -> Bool in
+        let existing = storage.get(n, in: group)
+        let data = text.data(using: .utf8) ?? Data()
+        let item = PasteboardItem(type: "public.utf8-plain-text", data: data)
+        var content = SlotContent()
+        content.items = [[item]]
+        content.timestamp = Date()
+        content.attachments = existing.attachments
+        let ok = storage.set(n, content: content, in: group)
+        if ok, let label { storage.setLabel(n, label: label, in: group) }
+        return ok
+    }
+    guard wrote else {
+        throw WriteFailure(message: writeFailureDiagnostic(context: "to write slot \(n) in group \(group)"))
+    }
+    return previewText(text)
+}
+
 func cmdWrite(_ args: ParsedArgs) -> Never {
+    // v2.9.16 (#3): batch mode dispatches to a separate handler.
+    if args.hasFlag("batch") { cmdWriteBatch(args) }
+
     let group = resolveGroup(args)
     let n = parseSlot(args.positionals.first)
     guard var text = args.flag("text") else {
-        fail("missing --text <string> (use --text - to read from stdin)")
+        fail("missing --text <string> (use --text - to read from stdin, or --batch for bulk)")
     }
     if text == "-" {
         let data = FileHandle.standardInput.readDataToEndOfFile()
         // v2.9.3 (Fix #5): reject non-UTF8 / binary stdin instead of silently
         // decoding to "" and CLEARING the slot. `write` only accepts text.
-        // A stream is treated as binary if it fails UTF-8 decoding OR contains a
-        // NUL byte (0x00) — the canonical binary marker used by git/grep. NUL is
-        // technically valid UTF-8 but never appears in real text, so bytes like
-        // 0x00 0x01 0x02 are correctly rejected here.
         guard let decoded = String(data: data, encoding: .utf8), !data.contains(0) else {
             fail("stdin is not valid UTF-8 text; write only accepts text (got \(data.count) bytes of binary)")
         }
         text = decoded
     }
 
-    // Mirror the GUI's updateTextSlot: build a public.utf8-plain-text item and
-    // PRESERVE any existing attachments on the slot (v2.8.7 fix).
-    // v2.9.4 (#4): perform the read-modify-write as ONE cross-process critical
-    // section so a concurrent CLI/GUI write cannot clobber it. A lock timeout is
-    // surfaced as a clear "storage is busy" error (exit non-zero) instead of a hang.
-    let ok: Bool
     do {
-        ok = try StorageLock.shared.withLock { () -> Bool in
-            let existing = storage.get(n, in: group)
-            let data = text.data(using: .utf8) ?? Data()
-            let item = PasteboardItem(type: "public.utf8-plain-text", data: data)
-            var content = SlotContent()
-            content.items = [[item]]
-            content.timestamp = Date()
-            content.attachments = existing.attachments
-
-            let wrote = storage.set(n, content: content, in: group)
-            if wrote, let label = args.flag("label") {
-                storage.setLabel(n, label: label, in: group)
-            }
-            return wrote
-        }
+        // v2.9.16 (#5): return `preview` so the agent needn't re-read to confirm.
+        let preview = try performTextWrite(slot: n, text: text, group: group, label: args.flag("label"))
+        success(["slot": n, "group": group, "preview": preview])
     } catch let e as StorageLockError {
+        // v2.9.16 (#4): lock contention — accurate, retryable message.
         fail(e.errorDescription ?? "storage is busy (lock timeout)")
+    } catch let e as WriteFailure {
+        fail(e.message)
     } catch {
-        fail("failed to write slot \(n) in group \(group): \(error.localizedDescription)")
+        // v2.9.16 (#4): genuine IO/permission error, NOT a lock conflict.
+        fail(describeWriteError(error, context: "writing slot \(n) in group \(group)"))
     }
-    guard ok else { fail("failed to write slot \(n) in group \(group)") }
-    success(["slot": n, "group": group])
+}
+
+// v2.9.16 (#3): batch write. Reads a JSON array from stdin, each element an
+// object {"slot":Int, "text":String, "group"?:String(id|name), "label"?:String}.
+// Writes are attempted per-entry; a failure on one entry does NOT abort the rest.
+// Returns {"ok":true,"batch":true,"total","written","failed","results":[...]}.
+func cmdWriteBatch(_ args: ParsedArgs) -> Never {
+    let data = FileHandle.standardInput.readDataToEndOfFile()
+    guard !data.isEmpty else {
+        fail("--batch expects a JSON array on stdin, got empty input "
+            + "(e.g. echo '[{\"slot\":1,\"text\":\"a\"}]' | clipslots write --batch)")
+    }
+    let json: Any
+    do {
+        json = try JSONSerialization.jsonObject(with: data)
+    } catch {
+        fail("--batch stdin is not valid JSON: \(error.localizedDescription)")
+    }
+    guard let arr = json as? [[String: Any]] else {
+        fail("--batch expects a JSON ARRAY of objects, e.g. [{\"slot\":1,\"text\":\"...\"}]")
+    }
+    guard !arr.isEmpty else { fail("--batch array is empty; nothing to write") }
+
+    // Group/label from top-level flags act as defaults for entries that omit them.
+    let defaultGroup = resolveGroup(args)
+    let defaultLabel = args.flag("label")
+
+    var results: [[String: Any]] = []
+    var written = 0
+    for (idx, entry) in arr.enumerated() {
+        // slot (accept Int or numeric string).
+        let slotNum: Int?
+        if let s = entry["slot"] as? Int { slotNum = s }
+        else if let s = entry["slot"] as? String { slotNum = Int(s) }
+        else if let s = entry["slot"] as? NSNumber { slotNum = s.intValue }
+        else { slotNum = nil }
+        guard let n = slotNum else {
+            results.append(["index": idx, "ok": false, "error": "missing or invalid 'slot'"])
+            continue
+        }
+        guard (1...slotCount).contains(n) else {
+            results.append(["index": idx, "slot": n, "ok": false,
+                            "error": "slot out of range (valid 1...\(slotCount))"])
+            continue
+        }
+        guard let text = entry["text"] as? String else {
+            results.append(["index": idx, "slot": n, "ok": false,
+                            "error": "missing or invalid 'text' (must be a string)"])
+            continue
+        }
+        let group = (entry["group"] as? String).map(resolveGroupLiteral) ?? defaultGroup
+        let label = (entry["label"] as? String) ?? defaultLabel
+        do {
+            let preview = try performTextWrite(slot: n, text: text, group: group, label: label)
+            results.append(["index": idx, "slot": n, "group": group, "ok": true, "preview": preview])
+            written += 1
+        } catch let e as StorageLockError {
+            results.append(["index": idx, "slot": n, "group": group, "ok": false,
+                            "error": e.errorDescription ?? "storage is busy (lock timeout)"])
+        } catch let e as WriteFailure {
+            results.append(["index": idx, "slot": n, "group": group, "ok": false, "error": e.message])
+        } catch {
+            results.append(["index": idx, "slot": n, "group": group, "ok": false,
+                            "error": describeWriteError(error, context: "writing slot \(n)")])
+        }
+    }
+    success([
+        "batch": true,
+        "total": arr.count,
+        "written": written,
+        "failed": arr.count - written,
+        "results": results
+    ])
 }
 
 func cmdSearch(_ args: ParsedArgs) -> Never {
@@ -527,7 +687,7 @@ func cmdCreateGroup(_ args: ParsedArgs) -> Never {
         // maxSpecialSlotsReached → the caller should create a new page (see skill rules).
         fail(e.errorDescription ?? "failed to create group")
     } catch {
-        fail("failed to create group: \(error.localizedDescription)")
+        fail(describeWriteError(error, context: "creating group"))
     }
 }
 
@@ -543,7 +703,7 @@ func cmdCreatePage(_ args: ParsedArgs) -> Never {
     } catch let e as PageError {
         fail(e.errorDescription ?? "failed to create page")
     } catch {
-        fail("failed to create page: \(error.localizedDescription)")
+        fail(describeWriteError(error, context: "creating page"))
     }
 }
 
@@ -597,9 +757,9 @@ func cmdWriteAttachment(_ args: ParsedArgs) -> Never {
     } catch let e as StorageLockError {
         fail(e.errorDescription ?? "storage is busy (lock timeout)")
     } catch {
-        fail("failed to write attachments to slot \(n) in group \(group): \(error.localizedDescription)")
+        fail(describeWriteError(error, context: "writing attachments to slot \(n) in group \(group)"))
     }
-    guard result.ok else { fail("failed to write attachments to slot \(n) in group \(group)") }
+    guard result.ok else { fail(writeFailureDiagnostic(context: "to write attachments to slot \(n) in group \(group)")) }
 
     success([
         "slot": n,
@@ -623,7 +783,7 @@ func cmdClear(_ args: ParsedArgs) -> Never {
     } catch let e as StorageLockError {
         fail(e.errorDescription ?? "storage is busy (lock timeout)")
     } catch {
-        fail("failed to clear slot \(n) in group \(group): \(error.localizedDescription)")
+        fail(describeWriteError(error, context: "clearing slot \(n) in group \(group)"))
     }
     success(["slot": n, "group": group, "action": "cleared"])
 }
@@ -647,7 +807,7 @@ func cmdDeleteGroup(_ args: ParsedArgs) -> Never {
     } catch let e as SpecialSlotError {
         fail(e.errorDescription ?? "failed to delete group")
     } catch {
-        fail("failed to delete group: \(error.localizedDescription)")
+        fail(describeWriteError(error, context: "deleting group"))
     }
 }
 
@@ -669,7 +829,7 @@ func cmdDeletePage(_ args: ParsedArgs) -> Never {
     } catch let e as PageError {
         fail(e.errorDescription ?? "failed to delete page")
     } catch {
-        fail("failed to delete page: \(error.localizedDescription)")
+        fail(describeWriteError(error, context: "deleting page"))
     }
 }
 
@@ -689,6 +849,13 @@ if parsed.command != "help", parsed.command != "version",
 // dispatch, so `--lable`/`--pagesize` etc. surface a clear error instead of being
 // silently ignored.
 validateFlags(parsed)
+
+// v2.9.16 (#6): global `--force` bypasses the cross-process lock for this run.
+// Only allowed on mutating commands (validated above). A one-time warning is
+// emitted to stderr from StorageLock when the bypass actually takes effect.
+if parsed.hasFlag("force") {
+    StorageLock.forceUnlocked = true
+}
 
 switch parsed.command {
 case "version", "--version", "-v":
