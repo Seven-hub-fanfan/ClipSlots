@@ -213,7 +213,8 @@ struct GlobalSearchResultsView: View {
         // inside the view body).
         if hasImagePreview(for: result) {
             SearchResultPreviewImage(content: result.content)
-                .frame(maxWidth: .infinity, maxHeight: 120)
+                // v2.9.18: 预览图最大高度由 120 放大到 160，提升缩略图可读性。
+                .frame(maxWidth: .infinity, maxHeight: 160)
                 .background(Color.black.opacity(0.06))
                 .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
         } else if let webURL = result.content.detectedWebURL {

@@ -609,7 +609,9 @@ struct RadialMenuView: View {
                     .truncationMode(.tail)
                     .frame(width: midRadius * 0.78)
             } else {
-                Text("空")
+                // v2.9.18: 空槽占位由"空"文字改为更克制的圆点符号，减少圆盘文字噪音
+                //（纯 UI 占位替换，字号/颜色 token/位置计算均保持不变，不触碰任何交互逻辑）。
+                Image(systemName: "circle.dotted")
                     .font(.system(size: 9))
                     .foregroundColor(AppTheme.radialEmptyText(colorScheme))
             }

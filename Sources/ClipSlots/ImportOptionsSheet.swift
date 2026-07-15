@@ -18,7 +18,8 @@ struct ImportOptionsSheet: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             Text("批量导入")
-                .font(.system(size: 17, weight: .semibold))
+                // v2.9.18: 主标题统一到 AppTheme.Fonts.title（18pt），消除 17/18 摇摆。
+                .font(AppTheme.Fonts.title)
 
             Text(summary.displayText)
                 .font(.system(size: 13))
@@ -110,7 +111,8 @@ struct ImportChoiceRow: View {
                         .foregroundColor(.primary)
 
                     Text(subtitle)
-                        .font(.system(size: 11))
+                        // v2.9.18: 11pt 说明字上调到 AppTheme.Fonts.caption（12pt），保证可读。
+                        .font(AppTheme.Fonts.caption)
                         .foregroundColor(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
                 }

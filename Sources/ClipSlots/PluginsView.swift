@@ -227,12 +227,14 @@ struct PluginsView: View {
                 .foregroundColor(.secondary)
             if selectedCategory.comingSoon && searchText.isEmpty {
                 Text("敬请期待，下个版本将支持第三方/社区插件。")
-                    .font(.caption2)
+                    // v2.9.18: 空状态说明字上调到 AppTheme.Fonts.caption（12pt），提升可读。
+                    .font(AppTheme.Fonts.caption)
                     .foregroundColor(.secondary.opacity(0.75))
             }
         }
         .frame(maxWidth: .infinity)
-        .padding(.top, 70)
+        // v2.9.18: 空状态硬编码 .padding(.top, 70) 改为自适应的 AppTheme.spacingLarge，避免大片留白。
+        .padding(.top, AppTheme.spacingLarge)
     }
 
     // MARK: Card

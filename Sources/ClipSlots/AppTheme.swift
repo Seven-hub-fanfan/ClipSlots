@@ -10,6 +10,42 @@ enum AppTheme {
     static let cardPadding: CGFloat = 14
     static let pagePadding: CGFloat = 20
 
+    // MARK: - Spacing (v2.9.18 — 收敛硬编码间距到统一 token)
+
+    /// 紧凑元素间距（图标↔文字、chip 间隔等）。
+    static let spacingTight: CGFloat = 4
+    /// 常规元素间距。
+    static let spacingSmall: CGFloat = 8
+    /// 区块内成组元素间距。
+    static let spacingMedium: CGFloat = 12
+    /// 弹窗内各区块之间的间距。
+    static let spacingLarge: CGFloat = 16
+    /// 弹窗统一内边距（取代 18/20/24 等散落值）。
+    static let sheetPadding: CGFloat = 20
+
+    // MARK: - Sheet Width (v2.9.18 — 消除弹窗宽度在 390/420/440 间跳变)
+
+    static let sheetWidthSmall: CGFloat = 400
+    static let sheetWidthMedium: CGFloat = 480
+    static let sheetWidthLarge: CGFloat = 560
+
+    // MARK: - Fonts (v2.9.18 — 统一字体 token，最小可读字号 12pt)
+
+    enum Fonts {
+        /// 弹窗/页面主标题，统一 18pt semibold（消除 17/18 摇摆）。
+        static let title = Font.system(size: 18, weight: .semibold)
+        /// 次级标题 / 卡片标题，15pt semibold。
+        static let headline = Font.system(size: 15, weight: .semibold)
+        /// 小节标题，13pt medium。
+        static let subheadline = Font.system(size: 13, weight: .medium)
+        /// 正文，13pt。
+        static let body = Font.system(size: 13)
+        /// 说明文字，12pt（此前 11pt 副标题上调至此）。
+        static let caption = Font.system(size: 12)
+        /// 最小可读辅助文字，12pt（此前裸写的 9pt/11pt 全部上调至此，保证非视网膜屏可读）。
+        static let footnote = Font.system(size: 12)
+    }
+
     // MARK: - Brand
 
     static func brandGradient(_ scheme: ColorScheme) -> LinearGradient {
@@ -38,6 +74,30 @@ enum AppTheme {
 
     static var danger: Color {
         Color(red: 1.00, green: 0.27, blue: 0.23)
+    }
+
+    /// 位于彩色 / 品牌渐变背景上的文字色（此前各视图裸写 `.white`，v2.9.18 收敛于此）。
+    static let onAccentText: Color = .white
+
+    // MARK: - Floating Notice (v2.9.18 — 收敛 FloatingNotice 此前自实现的一套 RGB 到主题)
+    // 悬浮提示需要不透明实心底色，AppTheme 其余 background 都是半透明，故单列 opaque token。
+
+    static func noticeBackground(_ scheme: ColorScheme) -> Color {
+        scheme == .dark
+            ? Color(red: 0.12, green: 0.12, blue: 0.13)
+            : Color(red: 0.97, green: 0.97, blue: 0.98)
+    }
+
+    static func noticeBorder(_ scheme: ColorScheme) -> Color {
+        scheme == .dark
+            ? Color(red: 0.24, green: 0.24, blue: 0.26)
+            : Color(red: 0.84, green: 0.84, blue: 0.86)
+    }
+
+    static func noticeSubtitle(_ scheme: ColorScheme) -> Color {
+        scheme == .dark
+            ? Color(red: 0.72, green: 0.72, blue: 0.75)
+            : Color(red: 0.38, green: 0.38, blue: 0.42)
     }
 
     // MARK: - Window

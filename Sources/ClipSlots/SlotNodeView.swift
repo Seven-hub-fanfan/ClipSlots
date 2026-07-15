@@ -22,7 +22,8 @@ struct SlotNodeView: View {
                 HStack(spacing: 8) {
                     Text("\(slot)")
                         .font(.system(size: 13, weight: .bold))
-                        .foregroundColor(.white)
+                        // v2.9.18: 彩色圆底上的编号文字统一到 AppTheme.onAccentText。
+                        .foregroundColor(AppTheme.onAccentText)
                         .frame(width: 24, height: 24)
                         .background(Circle().fill(SlotConnectionColor.color(for: colorId) == .clear ? .accentColor : SlotConnectionColor.color(for: colorId)))
                     Text(slotDisplayName)
@@ -50,8 +51,9 @@ struct SlotNodeView: View {
                 Color.clear.frame(height: SlotNodeLayout.attachmentBarHeight)
             }
         }
-        .background(RoundedRectangle(cornerRadius: 14).fill(Color(NSColor.controlBackgroundColor)))
-        .overlay(RoundedRectangle(cornerRadius: 14).stroke(SlotConnectionColor.color(for: colorId).opacity(colorId == nil ? 0.18 : 0.8), lineWidth: colorId == nil ? 1 : 2))
+        // v2.9.18: 卡片圆角硬编码 14 收敛到 AppTheme.cornerRadius（不改布局尺寸逻辑）。
+        .background(RoundedRectangle(cornerRadius: AppTheme.cornerRadius).fill(Color(NSColor.controlBackgroundColor)))
+        .overlay(RoundedRectangle(cornerRadius: AppTheme.cornerRadius).stroke(SlotConnectionColor.color(for: colorId).opacity(colorId == nil ? 0.18 : 0.8), lineWidth: colorId == nil ? 1 : 2))
         .shadow(color: .black.opacity(0.08), radius: 8, x: 0, y: 3)
     }
 
@@ -129,7 +131,8 @@ struct NodeAttachmentButton: View {
                     Image(systemName: "xmark.circle.fill")
                         .font(.system(size: 13, weight: .bold))
                         .symbolRenderingMode(.palette)
-                        .foregroundStyle(Color.white, Color.red)
+                        // v2.9.18: 裸写 .white/.red 收敛到 AppTheme.onAccentText / AppTheme.danger。
+                        .foregroundStyle(AppTheme.onAccentText, AppTheme.danger)
                         .background(Circle().fill(Color.white).frame(width: 10, height: 10))
                         .contentShape(Circle())
                 }
@@ -149,7 +152,8 @@ struct NodeAttachmentButton: View {
             HStack(spacing: 8) {
                 Image(systemName: "trash.circle.fill")
                     .font(.system(size: 18))
-                    .foregroundColor(.red)
+                    // v2.9.18: 裸写 .red 收敛到 AppTheme.danger。
+                    .foregroundColor(AppTheme.danger)
                 Text("清空该槽位的全部附件？")
                     .font(.system(size: 13, weight: .semibold))
             }
@@ -190,7 +194,8 @@ struct NodeAttachmentButton: View {
                 .font(.system(size: 11, weight: .semibold))
                 .lineLimit(1)
         }
-        .foregroundColor(attachmentCount > 0 ? .white : .secondary)
+        // v2.9.18: 品牌渐变胶囊上的文字统一到 AppTheme.onAccentText。
+        .foregroundColor(attachmentCount > 0 ? AppTheme.onAccentText : .secondary)
         .padding(.horizontal, 8)
         .frame(height: 22)
         .background(

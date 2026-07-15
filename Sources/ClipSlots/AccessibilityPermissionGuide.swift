@@ -48,17 +48,15 @@ enum AccessibilityPermissionGuide {
     private static func presentGuideAlert() {
         let alert = NSAlert()
         alert.messageText = "需要开启「辅助功能」权限"
+        // v2.9.18: 精简多步骤说明文案，保留关键指引，去掉啰嗦句（不改弹窗触发/跳转逻辑）。
         alert.informativeText = """
         ClipSlots 需要「辅助功能」权限才能注册全局快捷键、模拟复制/粘贴。
 
-        点击下方「打开设置」后，请按以下步骤操作：
+        点击「打开设置」后：
+        1. 在「隐私与安全性 → 辅助功能」中找到 ClipSlots，打开右侧开关
+        2. 若列表里没有，点「+」添加 /Applications/ClipSlots.app
 
-        1. 在「隐私与安全性 → 辅助功能」列表中找到 ClipSlots
-        2. 打开 ClipSlots 右侧的开关（勾选启用）
-        3. 若列表里没有 ClipSlots，点击「+」手动添加 /Applications/ClipSlots.app
-        4. 完成后无需重启，快捷键即可恢复使用
-
-        （每次更新 App 后，macOS 可能会重置该权限，需重新勾选。）
+        无需重启即可生效。每次更新 App 后可能需重新勾选。
         """
         alert.alertStyle = .warning
         alert.addButton(withTitle: "打开设置")

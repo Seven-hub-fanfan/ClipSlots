@@ -62,8 +62,9 @@ struct NodeCanvasSheet: View {
 
                     NodePortOverlay(
                         nodeFrames: nodeFrames,
-                        // v2.7.6: In the dedicated node canvas, show all ports by default.
-                        visibleSlots: Set(1...10),
+                        // v2.9.18: 端口按需显示——只把当前 hover 的节点传入 visibleSlots，
+                        // 未 hover 且无连接的端口在 overlay 内弱化，减少常显圆点噪音（连接/拖拽目标仍实心）。
+                        visibleSlots: hoveredNode.map { [$0] } ?? [],
                         connectedPortsProvider: { store.currentConnectionMap.connectedPorts(for: $0) },
                         colorProvider: { slot in SlotConnectionColor.color(for: store.currentConnectionMap.colorId(for: slot)) },
                         highlightedTarget: hoveredTarget,
@@ -138,24 +139,31 @@ struct NodeCanvasSheet: View {
     }
 
     private var toolbar: some View {
-        HStack(spacing: 10) {
+        // v2.9.18: 工具栏按钮间距收敛到 AppTheme.spacingSmall。
+        HStack(spacing: AppTheme.spacingSmall) {
             VStack(alignment: .leading, spacing: 2) {
                 Text("节点画布")
-                    .font(.system(size: 18, weight: .semibold))
+                    // v2.9.18: 标题统一到 AppTheme.Fonts.title（18pt）。
+                    .font(AppTheme.Fonts.title)
                 Text("独立画布内编辑连接；主界面继续保持干净，只显示色点提醒。")
-                    .font(.caption)
+                    // v2.9.18: 说明小字统一 AppTheme.Fonts.caption。
+                    .font(AppTheme.Fonts.caption)
                     .foregroundColor(.secondary)
             }
             Spacer()
-            Button { store.applyBuiltInFullChainTemplate() } label: { Label("十槽位全串联", systemImage: "link") }
+            // v2.9.18: 精简按钮文字（去掉"模板/十槽位"等冗余词），完整语义由 systemImage + help 承载。
+            Button { store.applyBuiltInFullChainTemplate() } label: { Label("全串联", systemImage: "link") }
+                .help("十槽位全串联")
             Button {
                 if suppressExportConnectionsPanel {
                     store.exportConnectionTemplate(scope: .currentGroup)
                 } else {
                     showingExportScopeSheet = true
                 }
-            } label: { Label("导出模板", systemImage: "square.and.arrow.up") }
-            Button { store.importConnectionTemplate() } label: { Label("导入模板", systemImage: "square.and.arrow.down") }
+            } label: { Label("导出", systemImage: "square.and.arrow.up") }
+                .help("导出连接模板")
+            Button { store.importConnectionTemplate() } label: { Label("导入", systemImage: "square.and.arrow.down") }
+                .help("导入连接模板")
             Button(role: .destructive) {
                 if suppressClearConnectionsConfirm {
                     store.clearCurrentConnectionsWithoutConfirm()
@@ -167,7 +175,8 @@ struct NodeCanvasSheet: View {
                     .frame(minWidth: 70)
             }
             .buttonStyle(.borderedProminent)
-            .tint(.red)
+            .tint(AppTheme.danger)
+            .help("清除连接")
             Button("完成") { dismiss() }
                 .buttonStyle(.borderedProminent)
         }
@@ -189,14 +198,15 @@ struct NodeCanvasSheet: View {
                 Spacer()
             }
 
-            HStack(spacing: 8) {
+            HStack(spacing: AppTheme.spacingSmall) {
                 Button { store.applyBuiltInFullChainTemplate() } label: { Label("本组全联", systemImage: "link") }
                 Button { store.applyFullChainToCurrentPage() } label: { Label("本页全联", systemImage: "square.grid.2x2") }
                 Spacer()
+                // v2.9.18: 清除类危险按钮 tint 统一到 AppTheme.danger。
                 Button(role: .destructive) { store.clearCurrentConnectionsWithoutConfirm() } label: { Label("清本组", systemImage: "trash").frame(minWidth: 72) }
-                .buttonStyle(.borderedProminent).tint(.red)
+                .buttonStyle(.borderedProminent).tint(AppTheme.danger)
                 Button(role: .destructive) { store.clearCurrentPageConnections() } label: { Label("清本页", systemImage: "trash.slash").frame(minWidth: 72) }
-                .buttonStyle(.borderedProminent).tint(.red)
+                .buttonStyle(.borderedProminent).tint(AppTheme.danger)
                 Menu {
                     Button {
                         store.applyCurrentConnectionMapToAllGroupsInCurrentPage()
@@ -209,10 +219,12 @@ struct NodeCanvasSheet: View {
                         Label("批量应用于全部页", systemImage: "square.grid.3x3.topleft.filled")
                     }
                 } label: {
-                    Label("批量应用当前连接", systemImage: "wand.and.stars")
+                    // v2.9.18: 精简为"批量应用"，完整语义由图标 + help 承载。
+                    Label("批量应用", systemImage: "wand.and.stars")
                 }
                 .menuStyle(.borderlessButton)
                 .buttonStyle(.borderedProminent)
+                .help("批量应用当前连接")
                 Spacer()
             }
             .font(.caption)

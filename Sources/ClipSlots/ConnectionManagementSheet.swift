@@ -12,7 +12,8 @@ struct ConnectionManagementSheet: View {
     @AppStorage("suppressExportConnectionsPanel") private var suppressExportConnectionsPanel = false
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
+        // v2.9.18: 主 VStack 区块间距统一到 AppTheme.spacingLarge。
+        VStack(alignment: .leading, spacing: AppTheme.spacingLarge) {
             header
             Divider()
             chainSummarySection
@@ -21,7 +22,8 @@ struct ConnectionManagementSheet: View {
             Divider()
             footer
         }
-        .padding(18)
+        // v2.9.18: 外层内边距统一到 AppTheme.sheetPadding（取代 18）。
+        .padding(AppTheme.sheetPadding)
         .sheet(isPresented: $showingExportScopeSheet) {
             ConnectionExportScopeSheet(
                 suppressNextTime: $suppressExportConnectionsPanel,
@@ -47,9 +49,11 @@ struct ConnectionManagementSheet: View {
         HStack {
             VStack(alignment: .leading, spacing: 4) {
                 Text("连接管理")
-                    .font(.system(size: 18, weight: .semibold))
-                Text("v2.7.1 先使用稳定列表管理连接，主界面只保留色点提醒。")
-                    .font(.caption)
+                    // v2.9.18: 标题统一到 AppTheme.Fonts.title（18pt）。
+                    .font(AppTheme.Fonts.title)
+                Text("使用稳定列表管理连接，主界面仅保留色点提醒。")
+                    // v2.9.18: 精简冗余版本备注文案，说明字统一 AppTheme.Fonts.caption。
+                    .font(AppTheme.Fonts.caption)
                     .foregroundColor(.secondary)
             }
             Spacer()
@@ -69,7 +73,7 @@ struct ConnectionManagementSheet: View {
                     .foregroundColor(.secondary)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(12)
-                    .background(RoundedRectangle(cornerRadius: 10).fill(Color.secondary.opacity(0.08)))
+                    .background(RoundedRectangle(cornerRadius: AppTheme.smallCornerRadius).fill(Color.secondary.opacity(0.08)))
             } else {
                 ForEach(chains, id: \.self) { chain in
                     HStack(spacing: 8) {
@@ -84,7 +88,7 @@ struct ConnectionManagementSheet: View {
                             .foregroundColor(.secondary)
                     }
                     .padding(10)
-                    .background(RoundedRectangle(cornerRadius: 10).fill(Color.secondary.opacity(0.08)))
+                    .background(RoundedRectangle(cornerRadius: AppTheme.smallCornerRadius).fill(Color.secondary.opacity(0.08)))
                 }
             }
         }
@@ -146,7 +150,7 @@ struct ConnectionManagementSheet: View {
                                 .buttonStyle(.borderless)
                             }
                             .padding(10)
-                            .background(RoundedRectangle(cornerRadius: 10).fill(Color.secondary.opacity(0.08)))
+                            .background(RoundedRectangle(cornerRadius: AppTheme.smallCornerRadius).fill(Color.secondary.opacity(0.08)))
                         }
                     }
                 }

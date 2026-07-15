@@ -758,7 +758,8 @@ struct ContentView: View {
 
             Text("v\(AppVersion.current)")
                 .font(.caption2)
-                .foregroundColor(Color.secondary.opacity(0.65))
+                // v2.9.18: 版本号过淡，opacity 由 0.65 微调到 0.8 提升可读。
+                .foregroundColor(Color.secondary.opacity(0.8))
         }
         .padding(.horizontal, AppTheme.pagePadding)
         .padding(.vertical, 11)

@@ -12,10 +12,10 @@ enum FloatingNoticeKind {
 
     var iconColor: Color {
         switch self {
-        case .success: return .green
+        case .success: return AppTheme.success
         case .info:    return .accentColor
-        case .warning: return .orange
-        case .error:   return .red
+        case .warning: return AppTheme.warning
+        case .error:   return AppTheme.danger
         }
     }
 }
@@ -79,37 +79,26 @@ struct FloatingNoticeView: View {
         .allowsHitTesting(false)
     }
 
-    // MARK: - Colors (v2.6.7: solid, opaque, no material/opacity)
+    // MARK: - Colors (v2.9.18: 收敛到 AppTheme.notice* / 语义色，不再自实现一套 RGB)
 
     private var cardBackground: Color {
-        colorScheme == .dark
-            ? Color(red: 0.12, green: 0.12, blue: 0.13)
-            : Color(red: 0.97, green: 0.97, blue: 0.98)
+        AppTheme.noticeBackground(colorScheme)
     }
 
     private var titleColor: Color {
-        colorScheme == .dark ? .white : .black
+        .primary
     }
 
     private var subtitleColor: Color {
-        colorScheme == .dark
-            ? Color(red: 0.72, green: 0.72, blue: 0.75)
-            : Color(red: 0.38, green: 0.38, blue: 0.42)
+        AppTheme.noticeSubtitle(colorScheme)
     }
 
     private var borderColor: Color {
-        colorScheme == .dark
-            ? Color(red: 0.24, green: 0.24, blue: 0.26)
-            : Color(red: 0.84, green: 0.84, blue: 0.86)
+        AppTheme.noticeBorder(colorScheme)
     }
 
     private var iconColor: Color {
-        switch notice.kind {
-        case .success: return .green
-        case .info:    return .accentColor
-        case .warning: return .orange
-        case .error:   return .red
-        }
+        notice.kind.iconColor
     }
 }
 

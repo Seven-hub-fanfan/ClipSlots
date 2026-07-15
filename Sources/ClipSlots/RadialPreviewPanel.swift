@@ -77,6 +77,8 @@ struct RadialLivePreviewContent: View {
     @ObservedObject var store: SlotStoreObservable
     @State private var hoveredSlot: Int?
     @State private var previewPayload: RadialHoverPreviewPayload?
+    // v2.9.18: 空态占位需要按深浅色取浅底，引入 colorScheme。
+    @Environment(\.colorScheme) private var colorScheme
 
     var body: some View {
         Group {
@@ -92,9 +94,21 @@ struct RadialLivePreviewContent: View {
                 RadialUniversalPreview(content: content)
                     .id(slot)
             } else {
-                // v2.7.17: empty state remains fully transparent. No background, no watermark,
-                // no placeholder text. Only the toolbar is visible.
-                Color.clear
+                // v2.9.18: 空态由完全透明的 Color.clear 改为克制的浅底 + 提示图标，避免大片空白
+                //（仅 UI 占位，不影响任何预览数据/悬停逻辑）。
+                RoundedRectangle(cornerRadius: AppTheme.smallCornerRadius, style: .continuous)
+                    .fill(AppTheme.previewBackground(colorScheme))
+                    .overlay(
+                        VStack(spacing: AppTheme.spacingSmall) {
+                            Image(systemName: "eye")
+                                .font(.system(size: 22))
+                                .foregroundColor(.secondary.opacity(0.5))
+                            Text("悬停槽位查看预览")
+                                .font(AppTheme.Fonts.caption)
+                                .foregroundColor(.secondary)
+                        }
+                    )
+                    .padding(AppTheme.spacingMedium)
             }
         }
         .onReceive(NotificationCenter.default.publisher(for: .radialMenuHoveredSlotChanged)) { note in

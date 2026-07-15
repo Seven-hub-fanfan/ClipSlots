@@ -62,7 +62,9 @@ struct ClipSlotsApp: App {
         }
         .windowStyle(.titleBar)
         .windowToolbarStyle(.unified)
-        .defaultSize(width: 540, height: 420)
+        // v2.9.18: 默认窗口 540×420 装不下 10 个卡片（开箱即需滚动）。放大到 1320×820，
+        // 配合自适应网格可一屏 5 列 × 2 行完整显示 10 个槽位，无需滚动。
+        .defaultSize(width: 1320, height: 820)
         .commands {
             CommandGroup(replacing: .newItem) {}
             CommandGroup(replacing: .appInfo) {

@@ -580,7 +580,8 @@ struct SettingsView: View {
                 }
                 Spacer()
                 Text(preview.isEmpty ? "未设置" : preview)
-                    .font(.system(size: 11, weight: .medium, design: .monospaced))
+                    // v2.9.18: 快捷键预览由 11pt 提升到 12pt（保留 monospaced 以对齐键位显示），改善可读。
+                    .font(.system(size: 12, weight: .medium, design: .monospaced))
                     .foregroundColor(.secondary)
                     .padding(.horizontal, 8)
                     .padding(.vertical, 4)
@@ -699,7 +700,8 @@ private func shortcutRecorder(title: String, subtitle: String, text: Binding<Str
             }
             Spacer()
             Text(preview.isEmpty ? "未设置" : preview)
-                .font(.system(size: 11, weight: .medium, design: .monospaced))
+                // v2.9.18: 快捷键预览由 11pt 提升到 12pt（保留 monospaced 以对齐键位显示），改善可读。
+                .font(.system(size: 12, weight: .medium, design: .monospaced))
                 .foregroundColor(.secondary)
                 .padding(.horizontal, 8)
                 .padding(.vertical, 4)
@@ -710,7 +712,8 @@ private func shortcutRecorder(title: String, subtitle: String, text: Binding<Str
             .frame(height: 38)
             .overlay(alignment: .trailing) {
                 Text("录入后需点击右下角「保存」才生效")
-                    .font(.system(size: 9))
+                    // v2.9.18: 9pt 提示字上调到 AppTheme.Fonts.footnote（12pt），提升到可读范围。
+                    .font(AppTheme.Fonts.footnote)
                     .foregroundColor(.secondary)
                     .padding(.trailing, 8)
                     .allowsHitTesting(false)

@@ -116,13 +116,14 @@ struct AttachmentManagerPopover: View {
                     Text("附件")
                         .font(.system(size: 15, weight: .semibold))
                 }
-                Text("粘贴槽位 \(slot) 时依次带出")
+                Text("粘贴槽位 \(slot) 时会依次带出这些附件")
                     .font(.caption)
                     .foregroundColor(.secondary)
             }
             Spacer()
             Text("\(attachments.count) 项")
-                .font(.system(size: 11, weight: .medium))
+                // v2.9.18: 计数徽章由 11pt 提升到 12pt（保留 medium 字重），改善可读。
+                .font(.system(size: 12, weight: .medium))
                 .padding(.horizontal, 8)
                 .padding(.vertical, 3)
                 .background(RoundedRectangle(cornerRadius: 8).fill(AppTheme.chipBackground(scheme)))

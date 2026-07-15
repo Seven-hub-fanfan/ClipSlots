@@ -10,9 +10,11 @@ struct SlotSearchBar: View {
     @Environment(\.colorScheme) private var colorScheme
 
     var body: some View {
-        VStack(spacing: 6) {
+        // v2.9.18: 搜索行与筛选行的散落 spacing 统一收敛到 AppTheme.spacingSmall。
+        VStack(spacing: AppTheme.spacingSmall) {
             // Search field + scope picker
-            HStack(spacing: 8) {
+            // v2.9.18: 显式声明 .center，确保放大镜、输入框、清除按钮、scope picker 垂直居中对齐。
+            HStack(alignment: .center, spacing: AppTheme.spacingSmall) {
                 Image(systemName: "magnifyingglass")
                     .foregroundColor(.secondary)
                     .font(.system(size: 12))
@@ -56,7 +58,8 @@ struct SlotSearchBar: View {
 
             // Filter chips
             ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 6) {
+                // v2.9.18: chip 间距收敛到 AppTheme.spacingSmall，与搜索行保持一致节奏。
+                HStack(spacing: AppTheme.spacingSmall) {
                     ForEach(SlotFilterType.allCases) { filter in
                         filterChip(filter)
                     }
@@ -71,7 +74,8 @@ struct SlotSearchBar: View {
         return Button {
             selectedFilter = filter
         } label: {
-            HStack(spacing: 4) {
+            // v2.9.18: chip 内图标↔文字间距收敛到 AppTheme.spacingTight。
+            HStack(spacing: AppTheme.spacingTight) {
                 Image(systemName: filter.systemImage)
                     .font(.system(size: 10, weight: .semibold))
 

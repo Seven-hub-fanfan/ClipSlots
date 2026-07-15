@@ -26,7 +26,7 @@ struct SlotThumbnailView: View {
 
     var body: some View {
         ZStack {
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
+            RoundedRectangle(cornerRadius: AppTheme.smallCornerRadius, style: .continuous)
                 .fill(Color.primary.opacity(0.04))
 
             switch state {
@@ -52,7 +52,8 @@ struct SlotThumbnailView: View {
                 fallbackView
             }
         }
-        .frame(height: 140)
+        // v2.9.18: 缩略图改自适应高度，随卡片撑高填满灰框，减少下方留白（截图问题③）。
+        .frame(minHeight: 120, idealHeight: 160, maxHeight: .infinity)
         .clipped()
         .id(currentKey)
         .onAppear { reloadThumbnail() }
@@ -106,12 +107,17 @@ struct SlotThumbnailView: View {
                 // "HTML" chip + WKWebView render. The HTML tags are stripped upstream
                 // in `SlotContent.preview`.
                 Text(content.preview)
-                    .font(.system(size: 11, design: .monospaced))
+                    .font(.system(size: 12, design: .monospaced))
                     .foregroundColor(.primary.opacity(0.8))
-                    .lineLimit(6)
+                    .lineLimit(14)
                     .truncationMode(.tail)
                     .padding(8)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                    // v2.9.18: 放宽 lineLimit 让预览尽量充满灰框；短文本垂直居中避免下方大片留白（截图问题③/🟡）。
+                    .frame(
+                        maxWidth: .infinity,
+                        maxHeight: .infinity,
+                        alignment: content.preview.count <= 60 ? .center : .topLeading
+                    )
             }
         }
     }

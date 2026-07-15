@@ -83,7 +83,8 @@ struct SpecialSlotManagementView: View {
                     }
                 }
                 .listStyle(.sidebar)
-                .frame(width: 160)
+                // v2.9.18: 侧栏由固定宽度改为弹性宽度，长槽位组名更从容（不破坏整体布局）。
+                .frame(minWidth: 160, idealWidth: 180)
 
                 // Right detail
                 if let special = selected {

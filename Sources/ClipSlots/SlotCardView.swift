@@ -45,7 +45,7 @@ struct SlotCardView: View {
     @Environment(\.colorScheme) private var colorScheme
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
+        VStack(alignment: .leading, spacing: AppTheme.spacingMedium) {
             headerRow
 
             // Thumbnail area — split empty vs filled to prevent @State image reuse
@@ -81,12 +81,13 @@ struct SlotCardView: View {
             // v2.7.76: moved the attachment button off the header row (it squeezed the slot
             // title) down here just above the action buttons. It's a plain Button, so it
             // won't trigger the card's paste/edit/hover/drag.
-            HStack(spacing: 6) {
+            HStack(alignment: .lastTextBaseline, spacing: 6) {
                 Text(content.metadataSummary)
                     .font(.caption2)
                     .foregroundColor(.secondary)
                     .lineLimit(1)
                     .truncationMode(.middle)
+                    .help(content.metadataSummary)
 
                 Spacer(minLength: 4)
 
@@ -101,7 +102,9 @@ struct SlotCardView: View {
 
             actionRow
         }
-        .frame(height: 270)
+        // v2.9.18: 解除 270px 硬高度，改自适应 minHeight，让预览区能撑开、
+        // 标题/基线不再被压缩（同时缓解截图问题 ①②③⑤）。
+        .frame(minHeight: 280, alignment: .top)
         .id(content.thumbnailKey(specialSlotId: specialSlotId, slot: slot))
         .padding(AppTheme.cardPadding)
         .background(
@@ -212,7 +215,7 @@ struct SlotCardView: View {
 
                 Text("\(slot)")
                     .font(.system(size: 14, weight: .bold, design: .rounded))
-                    .foregroundColor(content.isEmpty ? .secondary : .white)
+                    .foregroundColor(content.isEmpty ? .secondary : AppTheme.onAccentText)
             }
 
             // v2.7.9: Connection indicator with capsule badge
@@ -230,7 +233,7 @@ struct SlotCardView: View {
                 .help("此槽位属于串联链路")
             }
 
-            VStack(alignment: .leading, spacing: 2) {
+            VStack(alignment: .leading, spacing: AppTheme.spacingTight) {
                 if editingLabel {
                     TextField("标签", text: $labelText, onCommit: commitLabel)
                         .textFieldStyle(.roundedBorder)
@@ -256,22 +259,25 @@ struct SlotCardView: View {
                     .help("点击编辑标签")
                 }
 
-                Text(content.isEmpty ? "空槽位" : contentTypeTitle)
-                    .font(.caption2)
-                    .foregroundColor(.secondary)
+                // v2.9.18: 类型文字与缩略图/元数据信息冗余；有内容时隐藏，只在空槽提示。
+                if content.isEmpty {
+                    Text("空槽位")
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                }
             }
 
             Spacer()
 
             if !content.isEmpty {
+                // v2.9.18: 密集 header 里去掉时间戳胶囊背景，改纯灰文字更克制。
                 Text(timeAgo)
                     .font(.caption2)
                     .foregroundColor(.secondary)
-                    .padding(.horizontal, 7)
-                    .padding(.vertical, 4)
-                    .background(Capsule().fill(AppTheme.chipBackground(colorScheme)))
             }
         }
+        // v2.9.18: header 顶部留出呼吸空间，数字气泡不再紧贴卡片大圆角上沿（截图问题①）。
+        .padding(.top, AppTheme.spacingTight)
     }
 
     private var contentPreview: some View {
@@ -365,7 +371,7 @@ struct SlotCardView: View {
                     }
                     .buttonStyle(.bordered)
                     .controlSize(.regular)
-                    .tint(.orange)
+                    .tint(AppTheme.warning)
                     .help(saveShortcut.isEmpty ? "用当前剪贴板覆盖此槽位" : saveShortcut)
 
                     Button(role: .destructive) { onClear() } label: {
@@ -572,11 +578,11 @@ private struct InlineSlotVideoPreview: View {
                 Spacer()
                 HStack {
                     Image(systemName: "play.fill")
-                        .font(.system(size: 9, weight: .bold))
+                        .font(.system(size: 11, weight: .bold))
                     Text("点击预览")
-                        .font(.system(size: 10, weight: .semibold))
+                        .font(.system(size: 11, weight: .semibold))
                 }
-                .foregroundColor(.white)
+                .foregroundColor(AppTheme.onAccentText)
                 .padding(.horizontal, 8)
                 .padding(.vertical, 4)
                 .background(Capsule().fill(Color.black.opacity(0.38)))
@@ -584,7 +590,8 @@ private struct InlineSlotVideoPreview: View {
             }
         }
         .frame(maxWidth: .infinity)
-        .frame(height: 120)
+        // v2.9.18: 与图片/文本缩略图一致，视频预览也改自适应高度填满灰框。
+        .frame(minHeight: 120, idealHeight: 160, maxHeight: .infinity)
         .onAppear {
             loadPosterIfNeeded()
             guard player == nil else { player?.play(); return }

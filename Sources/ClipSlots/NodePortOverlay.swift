@@ -21,9 +21,10 @@ struct NodePortOverlay: View {
                 if let rect = nodeFrames[slot] {
                     ForEach(SlotPort.allCases) { port in
                         let connectedPorts = connectedPortsProvider(slot)
-                        // v2.7.6: ports are always visible in the dedicated editor.
-                        let isVisible = true
                         let isHighlighted = highlightedTarget?.slot == slot && highlightedTarget?.port == port
+                        // v2.9.18: 端口按需显示——仅当该端口已有连接、所属节点被 hover，
+                        // 或正作为拖拽目标高亮时才实心显示；其余情况大幅弱化（保留命中区域，不影响拖拽建连）。
+                        let isVisible = connectedPorts.contains(port) || visibleSlots.contains(slot) || isHighlighted
                         NodePortHandle(
                             slot: slot,
                             port: port,
@@ -70,7 +71,9 @@ struct NodePortHandle: View {
             .shadow(color: color.opacity(isHighlighted ? 0.55 : 0.18), radius: isHighlighted ? 7 : 3, x: 0, y: 0)
             .frame(width: isHighlighted ? 15 : 10, height: isHighlighted ? 15 : 10)
             .frame(width: 28, height: 28)
-            .opacity(isVisible ? 1 : 0.92)
+            // v2.9.18: 未连接且未 hover 的端口大幅弱化到 0.12（此前恒为 0.92），减少 40 个圆点常显的噪音；
+            // 命中区域保留不变，拖拽建连不受影响。
+            .opacity(isVisible ? 1 : 0.12)
             .scaleEffect(isHighlighted ? 1.08 : 1)
             .animation(.easeOut(duration: 0.10), value: isHighlighted)
             .contentShape(Rectangle())
