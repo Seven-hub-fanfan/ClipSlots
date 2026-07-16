@@ -4,11 +4,19 @@
 
 ## 当前版本
 
-- **当前版本：v2.9.19**
+- **当前版本：v2.9.20**
 - 平台：macOS（Swift / SwiftUI，SPM 构建，macOS 13+）
 - 单一版本号事实来源：`Info.plist` 的 `CFBundleShortVersionString`（`AppVersion.current` 动态读取，`AppVersion.fallback` 为编译期兜底）。CLI 版本号见 `Sources/ClipSlotsCLI/main.swift` 的 `CLI_VERSION`。
 
 ## 版本要点（近期）
+
+### v2.9.20
+- **节点画布连接交互全面优化**（仅动节点画布相关文件，不改槽位数据层/其他功能；连线数据结构不变；深浅色自适应）：
+  - **端口三级常显模型**（`NodePortOverlay`）：从"隐藏/显示二态"改为静默（8px、opacity 0.35 低调常驻）/ 就绪（所属节点 hover 放大到 12px + 高亮描边）/ 高亮（拖拽吸附目标 16px 填色 + 外发光）。从根源消除"看不清连接点在哪"的死循环。
+  - **命中区与可见性彻底解耦**：端口恒 `allowsHitTesting(true)`，不再随状态翻转；命中区从 28×28 收窄到 18×18，减少对卡片中心 hover 的拦截，根治鼠标在卡片边缘时端口忽隐忽现的边界抖动。
+  - **消灭重绘抖动**（`NodeCanvasSheet`）：`nodeFrames` 从计算属性改为 `@State` 缓存，仅在 `onAppear` 计算一次，不再每帧重建视图身份，端口/连线不再"跳一下"。
+  - **"连得上"体验**（`NodeCanvasSheet` + `NodeConnectionCanvas`）：吸附半径 `nearestNodePortTarget` 从 32 扩大到 44px；拖拽吸附命中时预览线加粗为实线 + 方向箭头，未吸附时为细虚线。
+  - **连线可读性**（`NodeConnectionCanvas`）：连线终点补方向箭头（output→input）；连线中点 hover 显示红色 × 删除入口（`EdgeConnectionDeleteHandle`），hover 时整条连线变红，点击断开（新增 store 方法 `disconnectEdge(id:)`）。
 
 ### v2.9.19
 - **修复节点画布 hover 交互两个问题**（仅动 hover 相关代码，不改数据层/其他视图）：

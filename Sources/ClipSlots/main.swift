@@ -1625,6 +1625,21 @@ final class SlotStoreObservable: ObservableObject {
         ))
     }
 
+    // v2.9.20: 按连线 id 断开单条连线（节点画布连线中点 hover 删除入口调用）。
+    func disconnectEdge(id: UUID) {
+        var map = currentConnectionMap
+        map.disconnect(edgeId: id)
+        currentConnectionMap = map
+        saveConnectionMapForCurrentGroup()
+
+        showFloatingNotice(FloatingNotice(
+            title: "已断开连接",
+            subtitle: "槽位内容未受影响",
+            iconName: "link.badge.minus",
+            kind: .info
+        ))
+    }
+
     func confirmAndClearCurrentConnections() {
         guard !currentConnectionMap.edges.isEmpty else {
             showFloatingNotice(FloatingNotice(

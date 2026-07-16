@@ -9,6 +9,7 @@ struct NodeCanvasSheet: View {
     @State private var activeDrag: NodeCanvasDrag?
     @State private var hoveredNode: Int?
     @State private var hoveredTarget: SlotPortTarget?
+    @State private var hoveredEdgeId: UUID?
     @State private var showingExportScopeSheet = false
     @State private var showingClearConfirmSheet = false
 
@@ -17,7 +18,12 @@ struct NodeCanvasSheet: View {
     // v2.7.68: card height grew from 96 to 128 to host the bottom attachment bar.
     private let nodeSize = CGSize(width: 150, height: 128)
 
-    private var nodeFrames: [Int: CGRect] {
+    // v2.9.20: nodeFrames 从计算属性改为 @State 缓存。此前每次 body 求值都重建 10 个
+    // CGRect 字典并喂给连线层 / 端口层 / 附件层，SwiftUI 每帧 diff 时视图身份不稳定，
+    // 表现为端口和连线在重绘瞬间"跳一下"。节点几何仅由常量决定，只需在出现时算一次。
+    @State private var nodeFrames: [Int: CGRect] = [:]
+
+    private func computeNodeFrames() -> [Int: CGRect] {
         Dictionary(uniqueKeysWithValues: (1...10).map { slot in
             let center = position(for: slot)
             let rect = CGRect(
@@ -44,9 +50,31 @@ struct NodeCanvasSheet: View {
                         map: store.currentConnectionMap,
                         nodeFrames: nodeFrames,
                         activeDrag: activeDrag,
-                        hoveredTarget: hoveredTarget
+                        hoveredTarget: hoveredTarget,
+                        hoveredEdgeId: hoveredEdgeId
                     )
                     .allowsHitTesting(false)
+                    // v2.9.20: 连线中点的 hover 删除入口。默认只有透明命中区，hover 时该连线
+                    // 变红（见 NodeConnectionCanvas）并在中点显示红色 × 按钮，点击断开该连线。
+                    ForEach(store.currentConnectionMap.edges) { edge in
+                        if let fromRect = nodeFrames[edge.fromSlot], let toRect = nodeFrames[edge.toSlot] {
+                            let start = nodeAnchorPoint(for: edge.fromPort, in: fromRect)
+                            let end = nodeAnchorPoint(for: edge.toPort, in: toRect)
+                            EdgeConnectionDeleteHandle(
+                                isHovered: hoveredEdgeId == edge.id,
+                                onHover: { inside in
+                                    if inside { hoveredEdgeId = edge.id }
+                                    else if hoveredEdgeId == edge.id { hoveredEdgeId = nil }
+                                },
+                                onDelete: {
+                                    hoveredEdgeId = nil
+                                    store.disconnectEdge(id: edge.id)
+                                }
+                            )
+                            .position(x: (start.x + end.x) / 2, y: (start.y + end.y) / 2)
+                        }
+                    }
+                    .zIndex(5)
                     ForEach(1...10, id: \.self) { slot in
                         SlotNodeView(
                             slot: slot,
@@ -110,6 +138,9 @@ struct NodeCanvasSheet: View {
                 }
                 .frame(width: canvasWidth, height: canvasHeight)
                 .coordinateSpace(name: "nodeCanvas")
+                .onAppear {
+                    if nodeFrames.isEmpty { nodeFrames = computeNodeFrames() }
+                }
                 .padding(18)
             }
             footer
@@ -289,7 +320,7 @@ struct NodeCanvasDrag: Equatable {
 
 // MARK: - Node Canvas Helpers
 
-func nearestNodePortTarget(to point: CGPoint, nodeFrames: [Int: CGRect], excluding fromSlot: Int, threshold: CGFloat = 32) -> SlotPortTarget? {
+func nearestNodePortTarget(to point: CGPoint, nodeFrames: [Int: CGRect], excluding fromSlot: Int, threshold: CGFloat = 44) -> SlotPortTarget? {
     var best: (SlotPortTarget, CGFloat)?
     for (slot, rect) in nodeFrames where slot != fromSlot {
         for port in SlotPort.allCases {
@@ -313,5 +344,41 @@ func nodeAnchorPoint(for port: SlotPort, in rect: CGRect) -> CGPoint {
     case .right: return CGPoint(x: rect.maxX, y: rect.midY)
     case .bottom: return CGPoint(x: rect.midX, y: rect.maxY)
     case .left: return CGPoint(x: rect.minX, y: rect.midY)
+    }
+}
+
+// MARK: - Edge Delete Handle
+
+// v2.9.20: 连线中点的删除入口。默认只提供透明命中区（供 hover 检测），
+// hover 时中点浮现红色 × 按钮，点击断开该连线。
+struct EdgeConnectionDeleteHandle: View {
+    let isHovered: Bool
+    let onHover: (Bool) -> Void
+    let onDelete: () -> Void
+
+    var body: some View {
+        ZStack {
+            Color.clear
+                .frame(width: 26, height: 26)
+                .contentShape(Circle())
+            if isHovered {
+                Button(action: onDelete) {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 9, weight: .bold))
+                        .foregroundColor(.white)
+                        .frame(width: 18, height: 18)
+                        .background(Circle().fill(Color.red))
+                        .overlay(Circle().stroke(Color.white.opacity(0.85), lineWidth: 1))
+                        .shadow(color: Color.black.opacity(0.25), radius: 2, x: 0, y: 1)
+                }
+                .buttonStyle(.plain)
+                .help("断开此连线")
+                .transition(.opacity)
+            }
+        }
+        .frame(width: 26, height: 26)
+        .contentShape(Circle())
+        .onHover { onHover($0) }
+        .animation(.easeOut(duration: 0.12), value: isHovered)
     }
 }
