@@ -108,23 +108,32 @@ struct SlotThumbnailView: View {
                 // font/style to every other text slot), instead of an inconsistent
                 // "HTML" chip + WKWebView render. The HTML tags are stripped upstream
                 // in `SlotContent.preview`.
-                Text(content.preview)
+                Text(multilinePreview)
                     .font(.system(size: 12, design: .monospaced))
                     .foregroundColor(.primary.opacity(0.8))
-                    // v2.9.25 hotfix2: lineLimit(4) 只是上限，Text 无 minHeight 时会收缩到 2 行内容高再居中，
-                    // 导致"只显示 2 行"。给文本区显式 minHeight 76（≈4 行×18pt 行高）强制预留 4 行竖向空间：
-                    // 长文本铺满 4 行，短文本在 4 行高的区域内居中。
+                    // v2.9.25 hotfix3: 根因是 content.preview 上游被截断为 30 字符（ClipboardManager.preview），
+                    // 无论怎么调框高都只有约 2 行。改用 plainText 全文（截到 240 字符）+ lineLimit(4)，
+                    // 才能真正显示约 4 行；padding 8→4 让净内容区更大，minHeight 80 强制文本区撑到 4 行高。
                     .lineLimit(4)
                     .truncationMode(.tail)
-                    .padding(8)
+                    .padding(4)
                     .frame(
                         maxWidth: .infinity,
-                        minHeight: 76,
+                        minHeight: 80,
                         maxHeight: .infinity,
-                        alignment: content.preview.count <= 60 ? .center : .topLeading
+                        alignment: multilinePreview.count <= 60 ? .center : .topLeading
                     )
             }
         }
+    }
+
+    // v2.9.25 hotfix3: 卡片文本预览专用的多行文本源。content.preview 会被上游截断为 30 字符，
+    // 只能显示约 2 行；这里用 plainText 全文（截到 240 字符足够铺满 4 行），非纯文本槽回退到 preview。
+    private var multilinePreview: String {
+        if let text = content.plainText?.trimmingCharacters(in: .whitespacesAndNewlines), !text.isEmpty {
+            return text.count > 240 ? String(text.prefix(240)) + "…" : text
+        }
+        return content.preview
     }
 
     private var fileIconName: String {
