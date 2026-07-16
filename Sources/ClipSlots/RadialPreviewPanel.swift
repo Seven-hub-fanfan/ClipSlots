@@ -58,6 +58,9 @@ struct RadialPreviewPanel: View {
             }
         }
         .frame(minWidth: 260, minHeight: 220)
+        // v2.9.25 hotfix5: 固定填满整个窗口并顶部对齐，工具栏钉在顶部，
+        // 内容区始终占据剩余空间，空态/悬停态切换时工具栏不再跳动。
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         // v2.7.17: window remains transparent. Background is only drawn inside the
         // individual text/file preview cards, not the entire window.
         .background(Color.clear)
@@ -96,11 +99,13 @@ struct RadialLivePreviewContent: View {
                 RadialUniversalPreview(content: content)
                     .id(slot)
             } else {
-                // v2.9.25: 删除空态占位（眼睛图标 + 「悬停槽位查看预览」 + 灰色容器）。
-                // 无悬停时预览窗只保留顶部工具栏那一行，工具栏下方不再显示任何内容区。
-                EmptyView()
+                // v2.9.25 hotfix5: 空态改为填满剩余空间的透明占位，保证内容区高度恒定，
+                // 工具栏不会因为空态/悬停态切换而位移。视觉上保持空白（无图标、无文字）。
+                Color.clear
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
         .onReceive(NotificationCenter.default.publisher(for: .radialMenuHoveredSlotChanged)) { note in
             if let payload = note.userInfo?["preview"] as? RadialHoverPreviewPayload {
                 previewPayload = payload

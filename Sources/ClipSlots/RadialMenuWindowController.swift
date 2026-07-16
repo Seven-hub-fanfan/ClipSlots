@@ -191,8 +191,8 @@ final class RadialMenuWindowController {
         if !isPreviewPinned { dismissPreviewPanel() }
 
         let screenFrame = NSScreen.main?.visibleFrame ?? NSScreen.screens.first?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
-        // v2.9.25 hotfix4: 预览窗固定放大为原来的两倍（360×420 → 720×840），不折叠、不 resize。
-        let defaultSize = NSSize(width: 720, height: 840)
+        // v2.9.25 hotfix5: 预览窗尺寸从误设的 720×840 改回固定 360×480，不折叠、不 resize。
+        let defaultSize = NSSize(width: 360, height: 480)
         let savedFrame = restoredPreviewFrame(defaultSize: defaultSize, screenFrame: screenFrame)
         let origin = savedFrame.origin
         let size = savedFrame.size
