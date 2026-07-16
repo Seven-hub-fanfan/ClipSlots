@@ -84,6 +84,10 @@ struct NodeCanvasSheet: View {
                             store: store
                         )
                         .frame(width: nodeSize.width, height: nodeSize.height)
+                        // v2.9.21: 端口圆点位于卡片四边外侧（上/下/左/右）。此前 hover 命中区仅为卡片本体，
+                        // 鼠标从卡片主体移向任一边的端口时会离开 hover 区，导致端口从就绪态缩回/消失，
+                        // 用户"刚要点就找不到"。这里在卡片外扩 12px（四向）hover 命中区，覆盖四边端口圆点。
+                        .padding(12)
                         // v2.9.19: onHover 必须作用在"卡片尺寸"的视图上，且要在 .position 之前。
                         // 此前 onHover 加在 .position 之后——而 .position 会让返回的视图占满整个画布
                         // （内容居中于指定点），于是 10 个节点的 hover 区域都变成"整块画布"。
@@ -108,7 +112,9 @@ struct NodeCanvasSheet: View {
                         nodeFrames: nodeFrames,
                         // v2.9.18: 端口按需显示——只把当前 hover 的节点传入 visibleSlots，
                         // 未 hover 且无连接的端口在 overlay 内弱化，减少常显圆点噪音（连接/拖拽目标仍实心）。
-                        visibleSlots: hoveredNode.map { [$0] } ?? [],
+                        // v2.9.21: 一旦进入拖拽连线模式（activeDrag != nil），所有节点端口保持就绪态，
+                        // 无论 hover 与否，直到连线完成或取消——避免拖拽途中目标端口缩回/消失。
+                        visibleSlots: activeDrag != nil ? Set(1...10) : (hoveredNode.map { [$0] } ?? []),
                         connectedPortsProvider: { store.currentConnectionMap.connectedPorts(for: $0) },
                         colorProvider: { slot in SlotConnectionColor.color(for: store.currentConnectionMap.colorId(for: slot)) },
                         highlightedTarget: hoveredTarget,

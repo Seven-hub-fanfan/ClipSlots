@@ -4,11 +4,16 @@
 
 ## 当前版本
 
-- **当前版本：v2.9.20**
+- **当前版本：v2.9.21**
 - 平台：macOS（Swift / SwiftUI，SPM 构建，macOS 13+）
 - 单一版本号事实来源：`Info.plist` 的 `CFBundleShortVersionString`（`AppVersion.current` 动态读取，`AppVersion.fallback` 为编译期兜底）。CLI 版本号见 `Sources/ClipSlotsCLI/main.swift` 的 `CLI_VERSION`。
 
 ## 版本要点（近期）
+
+### v2.9.21
+- **修复节点画布端口消失 bug**（仅动 `NodeCanvasSheet.swift`，不改数据层）：
+  - **四边 hover 命中区外扩**：端口圆点位于卡片上/下/左/右四边外侧，此前 hover 命中区仅为卡片本体，鼠标从卡片移向任一边端口时会离开 hover 区，端口从就绪态缩回/消失（"刚要点就找不到"）。给卡片加 `.padding(12)`（在 `.contentShape`/`.onHover` 之前），四向外扩 12px hover 命中区，完整覆盖四个方向的端口圆点。
+  - **拖拽期间端口恒就绪**：进入拖拽连线模式（`activeDrag != nil`）后，`visibleSlots` 传入 `Set(1...10)`，所有节点端口保持就绪态，无论 hover 与否，直到连线完成或取消——避免拖拽途中目标端口缩回/消失。
 
 ### v2.9.20
 - **节点画布连接交互全面优化**（仅动节点画布相关文件，不改槽位数据层/其他功能；连线数据结构不变；深浅色自适应）：
