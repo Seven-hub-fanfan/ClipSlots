@@ -52,9 +52,10 @@ struct SlotThumbnailView: View {
                 fallbackView
             }
         }
-        // v2.9.22: 缩略图 minHeight 从 120 收紧到 96，降低短内容卡片整体高度；
-        // 长内容仍靠 maxHeight:.infinity 自适应撑开（配合放宽的 lineLimit 显示更多文本）。
-        .frame(minHeight: 96, idealHeight: 132, maxHeight: .infinity)
+        // v2.9.25: minHeight 96 → 108，idealHeight 132 → 116，保证文本预览区能稳定容纳约 4 行
+        // （12pt 等宽行高≈16pt，4 行 + 上下 padding≈8×2 需 ≈80-92pt，108 起步留足余量）；
+        // 长内容仍靠 maxHeight:.infinity 自适应撑开。
+        .frame(minHeight: 108, idealHeight: 116, maxHeight: .infinity)
         .clipped()
         .id(currentKey)
         .onAppear { reloadThumbnail() }
@@ -110,10 +111,11 @@ struct SlotThumbnailView: View {
                 Text(content.preview)
                     .font(.system(size: 12, design: .monospaced))
                     .foregroundColor(.primary.opacity(0.8))
-                    .lineLimit(28)
+                    // v2.9.25: lineLimit 28 → 4，配合下方增高的固定框，让长文本清晰显示约 4 行，
+                    // 短文本仍居中，避免过去只显示 1-2 行、下方大片空白的观感。
+                    .lineLimit(4)
                     .truncationMode(.tail)
                     .padding(8)
-                    // v2.9.22: lineLimit 14 → 28，预览区尽量填满灰框、减少过早省略与空白（截图问题③/🟡）。
                     .frame(
                         maxWidth: .infinity,
                         maxHeight: .infinity,

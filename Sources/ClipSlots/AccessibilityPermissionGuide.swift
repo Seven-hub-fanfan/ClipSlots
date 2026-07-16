@@ -1,5 +1,6 @@
 import Foundation
 import AppKit
+import SwiftUI
 
 // v2.9.8: 方案 Y — Accessibility permission guidance on launch.
 //
@@ -45,55 +46,141 @@ enum AccessibilityPermissionGuide {
         NSWorkspace.shared.open(URL(fileURLWithPath: prefPanePath))
     }
 
+    // v2.9.25: 权限弹窗彻底视觉重做——用自定义 SwiftUI 磁玻璃面板替换 NSAlert：
+    // 顶部 48pt+ 大图标、加大加粗标题、宽松行距副文本、数字圆圈步骤列表、
+    // 蓝色填充主按钮 +「本次已知晓」文字次要按钮、16pt+ 圆角与充裕内边距。
     private static func presentGuideAlert() {
-        let alert = NSAlert()
-        alert.messageText = "需要开启「辅助功能」权限"
-        // v2.9.22: 弹窗说明文字排版优化——精简文案、加大字号与行间距，改用 accessoryView
-        //（NSAlert.informativeText 无法控制行距），减轻密集压迫感（不改触发/跳转逻辑）。
-        alert.accessoryView = makeGuideAccessoryView()
-        alert.alertStyle = .warning
-        alert.addButton(withTitle: "打开设置")
-        alert.addButton(withTitle: "本次已知晓")
+        var didOpenSettings = false
 
-        let response = alert.runModal()
-        if response == .alertFirstButtonReturn {
+        let card = AccessibilityGuideCard(
+            onOpenSettings: {
+                didOpenSettings = true
+                NSApp.stopModal()
+            },
+            onDismiss: {
+                NSApp.stopModal()
+            }
+        )
+
+        let hosting = NSHostingView(rootView: card)
+        let fitting = hosting.fittingSize
+        let size = NSSize(
+            width: fitting.width > 0 ? fitting.width : 428,
+            height: fitting.height > 0 ? fitting.height : 480
+        )
+
+        let panel = NSPanel(
+            contentRect: NSRect(origin: .zero, size: size),
+            styleMask: [.borderless, .nonactivatingPanel],
+            backing: .buffered,
+            defer: false
+        )
+        panel.isOpaque = false
+        panel.backgroundColor = .clear
+        panel.hasShadow = false
+        panel.isMovableByWindowBackground = true
+        panel.level = .modalPanel
+        hosting.frame = NSRect(origin: .zero, size: size)
+        hosting.autoresizingMask = [.width, .height]
+        panel.contentView = hosting
+        panel.center()
+        panel.makeKeyAndOrderFront(nil)
+
+        NSApp.runModal(for: panel)
+        panel.orderOut(nil)
+
+        if didOpenSettings {
             openAccessibilitySettings()
         }
     }
+}
 
-    /// v2.9.22: 用带段落行距、稍大字号的富文本承载说明，视觉更透气。
-    private static func makeGuideAccessoryView() -> NSView {
-        let paragraph = NSMutableParagraphStyle()
-        paragraph.lineSpacing = 6
-        paragraph.paragraphSpacing = 10
+// MARK: - v2.9.25 Custom permission guide card
 
-        let text = """
-        ClipSlots 需要此权限来注册全局快捷键、模拟复制与粘贴。
+private struct AccessibilityGuideCard: View {
+    var onOpenSettings: () -> Void
+    var onDismiss: () -> Void
 
-        点击「打开设置」后：
-        1. 在「隐私与安全性 → 辅助功能」中打开 ClipSlots 的开关
-        2. 若列表里没有，点「+」添加 /Applications/ClipSlots.app
+    var body: some View {
+        VStack(spacing: 18) {
+            Image(systemName: "lock.shield.fill")
+                .font(.system(size: 52, weight: .semibold))
+                .foregroundStyle(Color.accentColor)
+                .padding(.top, 2)
 
-        无需重启即可生效；每次更新 App 后可能需要重新勾选。
-        """
+            VStack(spacing: 8) {
+                Text("需要开启「辅助功能」权限")
+                    .font(.system(size: 21, weight: .bold))
+                    .multilineTextAlignment(.center)
+                Text("ClipSlots 需要此权限来注册全局快捷键、模拟复制与粘贴。")
+                    .font(.system(size: 13))
+                    .foregroundColor(.secondary)
+                    .multilineTextAlignment(.center)
+                    .lineSpacing(5)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
 
-        let attributed = NSAttributedString(
-            string: text,
-            attributes: [
-                .font: NSFont.systemFont(ofSize: 13),
-                .foregroundColor: NSColor.labelColor,
-                .paragraphStyle: paragraph
-            ]
+            VStack(alignment: .leading, spacing: 14) {
+                stepRow(number: 1, text: "在「隐私与安全性 → 辅助功能」中打开 ClipSlots 的开关")
+                stepRow(number: 2, text: "若列表里没有，点「+」添加 /Applications/ClipSlots.app")
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.top, 2)
+
+            Text("无需重启即可生效；每次更新 App 后可能需要重新勾选。")
+                .font(.system(size: 11))
+                .foregroundColor(.secondary.opacity(0.9))
+                .multilineTextAlignment(.center)
+                .lineSpacing(3)
+                .fixedSize(horizontal: false, vertical: true)
+
+            VStack(spacing: 6) {
+                Button(action: onOpenSettings) {
+                    Text("打开设置")
+                        .font(.system(size: 14, weight: .semibold))
+                        .frame(maxWidth: .infinity)
+                        .frame(height: 24)
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.large)
+                .keyboardShortcut(.defaultAction)
+
+                Button(action: onDismiss) {
+                    Text("本次已知晓")
+                        .font(.system(size: 12.5))
+                        .foregroundColor(.secondary)
+                        .frame(maxWidth: .infinity)
+                        .frame(height: 26)
+                }
+                .buttonStyle(.plain)
+            }
+            .padding(.top, 4)
+        }
+        .padding(28)
+        .frame(width: 372)
+        .background(.ultraThinMaterial)
+        .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .strokeBorder(Color.primary.opacity(0.08), lineWidth: 1)
         )
+        .shadow(color: .black.opacity(0.28), radius: 26, x: 0, y: 12)
+        .padding(24)
+    }
 
-        let label = NSTextField(wrappingLabelWithString: "")
-        label.attributedStringValue = attributed
-        label.isEditable = false
-        label.isSelectable = false
-        label.drawsBackground = false
-        label.isBezeled = false
-        label.preferredMaxLayoutWidth = 360
-        label.frame = NSRect(x: 0, y: 0, width: 360, height: 168)
-        return label
+    private func stepRow(number: Int, text: String) -> some View {
+        HStack(alignment: .top, spacing: 12) {
+            Text("\(number)")
+                .font(.system(size: 13, weight: .bold))
+                .foregroundColor(.white)
+                .frame(width: 24, height: 24)
+                .background(Circle().fill(Color.accentColor))
+            Text(text)
+                .font(.system(size: 13))
+                .foregroundColor(.primary)
+                .lineSpacing(3)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
     }
 }

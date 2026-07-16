@@ -96,21 +96,9 @@ struct RadialLivePreviewContent: View {
                 RadialUniversalPreview(content: content)
                     .id(slot)
             } else {
-                // v2.9.22: 空态改用半透明毛玻璃底（原 v2.9.18 的浅色纯色底会形成"不透明色块"观感），
-                //（仅 UI 占位，不影响任何预览数据/悬停逻辑）。
-                RoundedRectangle(cornerRadius: AppTheme.smallCornerRadius, style: .continuous)
-                    .fill(.ultraThinMaterial)
-                    .overlay(
-                        VStack(spacing: AppTheme.spacingSmall) {
-                            Image(systemName: "eye")
-                                .font(.system(size: 22))
-                                .foregroundColor(.secondary.opacity(0.5))
-                            Text("悬停槽位查看预览")
-                                .font(AppTheme.Fonts.caption)
-                                .foregroundColor(.secondary)
-                        }
-                    )
-                    .padding(AppTheme.spacingMedium)
+                // v2.9.25: 删除空态占位（眼睛图标 + 「悬停槽位查看预览」 + 灰色容器）。
+                // 无悬停时预览窗只保留顶部工具栏那一行，工具栏下方不再显示任何内容区。
+                EmptyView()
             }
         }
         .onReceive(NotificationCenter.default.publisher(for: .radialMenuHoveredSlotChanged)) { note in

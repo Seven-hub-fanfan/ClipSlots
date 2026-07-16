@@ -4,11 +4,16 @@
 
 ## 当前版本
 
-- **当前版本：v2.9.24**
+- **当前版本：v2.9.25**
 - 平台：macOS（Swift / SwiftUI，SPM 构建，macOS 13+）
 - 单一版本号事实来源：`Info.plist` 的 `CFBundleShortVersionString`（`AppVersion.current` 动态读取，`AppVersion.fallback` 为编译期兜底）。CLI 版本号见 `Sources/ClipSlotsCLI/main.swift` 的 `CLI_VERSION`。
 
 ## 版本要点（近期）
+
+### v2.9.25
+- **辅助权限弹窗视觉重做**：由 `NSAlert` 换为自定义 SwiftUI 磁玻璃面板（`AccessibilityPermissionGuide.swift` 的 `AccessibilityGuideCard` + 自定义 `NSPanel` 模态）。顶部 52pt `lock.shield.fill` 主题色大图标、21pt 加粗标题、宽松行距副文本、数字圆圈（1/2）步骤列表；底部「打开设置」为蓝色填充主按钮、「本次已知晓」为文字次要按钮（不再两个并排实心按钮）；整体圆角 18pt、内边距充裕、`.ultraThinMaterial` 磨砂背景 + 描边/投影。
+- **实时预览窗空状态删除**：`RadialPreviewPanel.swift` 的 `RadialLivePreviewContent` 空态分支（眼睛图标 +「悬停槽位查看预览」+ 灰色毛玻璃容器）改为 `EmptyView()`。无悬停时只显示顶部工具栏那一行，工具栏下方不再有内容区；悬停时正常展开预览，不影响圆盘菜单预览。
+- **槽位卡片预览区扩充到约 4 行**：`SlotThumbnailView` 文本预览框 `minHeight 96→108 / idealHeight 132→116`，`lineLimit 28→4`，让长文本清晰稳定显示约 4 行；短文本（≤60 字符）仍 `.center` 居中。（注：`SlotCardView.contentPreview` 为未使用的死代码，实际渲染走 `SlotThumbnailView`。）
 
 ### v2.9.24
 - **Toast/FloatingNotice 视觉重做**：图标改为按语义类型（success→checkmark.circle.fill 绿 / warning→exclamationmark.triangle.fill 黄 / error→xmark.circle.fill 红 / info→info.circle.fill 蓝）统一渲染，移除此前看似"三横线/汉堡"的 text.alignleft 图标；标题加粗、副标题层次更清晰；内边距 12–16pt、圆角 12pt、统一背景材质与描边/轻投影。
