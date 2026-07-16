@@ -52,10 +52,10 @@ struct SlotThumbnailView: View {
                 fallbackView
             }
         }
-        // v2.9.25: minHeight 96 → 108，idealHeight 132 → 116，保证文本预览区能稳定容纳约 4 行
-        // （12pt 等宽行高≈16pt，4 行 + 上下 padding≈8×2 需 ≈80-92pt，108 起步留足余量）；
+        // v2.9.25 hotfix: 框高需容纳约 4 行等宽文本（行高≈17pt，4 行≈68pt + padding 8×2≈16pt
+        // + 余量 ≈ 116pt）。minHeight 116 / idealHeight 140 保证内容区净高足够放下 4 行；
         // 长内容仍靠 maxHeight:.infinity 自适应撑开。
-        .frame(minHeight: 108, idealHeight: 116, maxHeight: .infinity)
+        .frame(minHeight: 116, idealHeight: 140, maxHeight: .infinity)
         .clipped()
         .id(currentKey)
         .onAppear { reloadThumbnail() }

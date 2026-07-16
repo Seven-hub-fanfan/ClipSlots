@@ -164,7 +164,9 @@ private struct AccessibilityGuideCard: View {
             RoundedRectangle(cornerRadius: 18, style: .continuous)
                 .strokeBorder(Color.primary.opacity(0.08), lineWidth: 1)
         )
-        .shadow(color: .black.opacity(0.28), radius: 26, x: 0, y: 12)
+        // v2.9.25 hotfix: 阴影从 radius 26 / opacity 0.28 收敛到 radius 10 / opacity 0.15，
+        // 避免浅色模式下大面积扩散产生灰色"脏边"，保持轻盈克制的投影。
+        .shadow(color: .black.opacity(0.15), radius: 10, x: 0, y: 4)
         .padding(24)
     }
 
