@@ -34,11 +34,8 @@ final class RadialMenuWindowController {
     private var globalClickMonitor: Any?
     private var onDismissCallback: (() -> Void)?
 
-    // v2.9.23: 悬停展开 / 默认折叠。实时预览面板默认只显示顶部工具栏（约 60pt），
-    // 悬停圆盘槽位后才展开内容区，鼠标离开重新折叠，带高度动画，保持顶边固定。
-    private var previewHoverObserver: Any?
-    private var previewExpandedHeight: CGFloat = 420
-    private let previewCollapsedHeight: CGFloat = 60
+    // v2.9.25 hotfix4: 已彻底移除折叠/展开/悬停 resize 逻辑（previewHoverObserver /
+    // previewExpandedHeight / previewCollapsedHeight）。预览窗为固定尺寸，不再有任何高度变化。
 
     // v2.7.14: pinned state and frame persist across radial menu sessions.
     private var isPreviewPinned: Bool {
@@ -194,7 +191,8 @@ final class RadialMenuWindowController {
         if !isPreviewPinned { dismissPreviewPanel() }
 
         let screenFrame = NSScreen.main?.visibleFrame ?? NSScreen.screens.first?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
-        let defaultSize = NSSize(width: 360, height: 420)
+        // v2.9.25 hotfix4: 预览窗固定放大为原来的两倍（360×420 → 720×840），不折叠、不 resize。
+        let defaultSize = NSSize(width: 720, height: 840)
         let savedFrame = restoredPreviewFrame(defaultSize: defaultSize, screenFrame: screenFrame)
         let origin = savedFrame.origin
         let size = savedFrame.size
@@ -215,10 +213,9 @@ final class RadialMenuWindowController {
         previewPanel.level = .floating
         previewPanel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         previewPanel.isMovableByWindowBackground = true
-        // v2.9.25 hotfix2: 最小高度从 previewCollapsedHeight(60) 恢复为 220，避免窗口坍缩成
-        // 一条工具栏细横杠；窗口保持固定尺寸，空态时内容区留白（不再折叠）。
-        previewPanel.minSize = NSSize(width: 260, height: 220)
-        previewPanel.maxSize = NSSize(width: min(900, screenFrame.width - 80), height: min(900, screenFrame.height - 80))
+        // v2.9.25 hotfix4: 窗口锁定为固定尺寸（min == max），完全禁止 resize，杜绝悬停时窗口撑大/状态栏上跳。
+        previewPanel.minSize = size
+        previewPanel.maxSize = size
         previewPanel.contentView = hosting
         previewPanel.contentView?.wantsLayer = true
         previewPanel.contentView?.layer?.backgroundColor = NSColor.clear.cgColor
@@ -226,11 +223,7 @@ final class RadialMenuWindowController {
         previewPanel.contentView?.layer?.masksToBounds = false
         previewPanel.orderFrontRegardless()
         self.previewPanel = previewPanel
-
-        // v2.9.25 hotfix2: 取消"默认折叠为工具栏 / 悬停展开"逻辑（它会把窗口收成一条细横杠，
-        // 且叠加空态删除后观感异常）。改为窗口保持固定尺寸：空态内容区留白，悬停时内容区正常填充。
-        previewExpandedHeight = max(size.height, previewCollapsedHeight)
-        // 不再调用 applyPreviewCollapsed(true) / installPreviewHoverObserver()，窗口维持固定高度。
+        // v2.9.25 hotfix4: 无任何折叠/展开/resize 逻辑，窗口始终固定 720×840，工具栏固定在顶部，内容区在下方。
     }
 
     private func makePreviewHostingView(store: SlotStoreObservable, themeMode: ThemeMode, size: NSSize) -> NSView {
@@ -278,20 +271,18 @@ final class RadialMenuWindowController {
 
     private func persistPreviewFrame() {
         guard let previewPanel else { return }
-        // v2.9.23: 始终以展开高度持久化，避免下次恢复时停留在折叠态。
-        var frame = previewPanel.frame
-        if frame.height > previewCollapsedHeight + 1 { previewExpandedHeight = frame.height }
-        let top = frame.maxY
-        frame.size.height = max(previewExpandedHeight, previewCollapsedHeight)
-        frame.origin.y = top - frame.size.height
-        UserDefaults.standard.set(NSStringFromRect(frame), forKey: "radialPreviewFrame")
+        // v2.9.25 hotfix4: 窗口尺寸恒定，直接持久化当前 frame（仅记录位置）。
+        UserDefaults.standard.set(NSStringFromRect(previewPanel.frame), forKey: "radialPreviewFrame")
     }
 
     private func restoredPreviewFrame(defaultSize: NSSize, screenFrame: NSRect) -> NSRect {
+        // v2.9.25 hotfix4: 尺寸恒为 defaultSize（720×840），只从持久化里恢复位置，避免旧的小尺寸帧被复用。
         if isPreviewPinned,
            let raw = UserDefaults.standard.string(forKey: "radialPreviewFrame") {
             let rect = NSRectFromString(raw)
-            if rect.width >= 120, rect.height >= 120, screenFrame.intersects(rect) { return rect }
+            let candidate = NSRect(x: rect.origin.x, y: rect.maxY - defaultSize.height,
+                                   width: defaultSize.width, height: defaultSize.height)
+            if screenFrame.intersects(candidate) { return candidate }
         }
         return NSRect(
             x: screenFrame.maxX - defaultSize.width - 24,
@@ -308,47 +299,9 @@ final class RadialMenuWindowController {
         panel = nil
     }
 
-    // v2.9.23: 监听悬停槽位变化，展开/折叠实时预览面板。
-    private func installPreviewHoverObserver() {
-        if let obs = previewHoverObserver {
-            NotificationCenter.default.removeObserver(obs)
-        }
-        previewHoverObserver = NotificationCenter.default.addObserver(
-            forName: .radialMenuHoveredSlotChanged,
-            object: nil,
-            queue: .main
-        ) { [weak self] note in
-            guard let self else { return }
-            let hovering = (note.userInfo?["preview"] != nil) || (note.object is Int)
-            self.applyPreviewCollapsed(!hovering, animated: true)
-        }
-    }
-
-    // v2.9.23: 折叠 = 仅工具栏高度；展开 = 完整高度。保持顶边固定，向下折叠/展开。
-    private func applyPreviewCollapsed(_ collapsed: Bool, animated: Bool) {
-        guard let previewPanel else { return }
-        let targetHeight = collapsed ? previewCollapsedHeight : max(previewExpandedHeight, previewCollapsedHeight)
-        var frame = previewPanel.frame
-        if abs(frame.height - targetHeight) < 0.5 { return }
-        let top = frame.maxY
-        frame.size.height = targetHeight
-        frame.origin.y = top - targetHeight
-        if animated {
-            NSAnimationContext.runAnimationGroup { ctx in
-                ctx.duration = 0.22
-                ctx.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
-                previewPanel.animator().setFrame(frame, display: true)
-            }
-        } else {
-            previewPanel.setFrame(frame, display: false)
-        }
-    }
+    // v2.9.25 hotfix4: installPreviewHoverObserver / applyPreviewCollapsed 已删除（不再折叠/展开/resize）。
 
     private func dismissPreviewPanel() {
-        if let obs = previewHoverObserver {
-            NotificationCenter.default.removeObserver(obs)
-            previewHoverObserver = nil
-        }
         previewPanel?.close()
         previewPanel = nil
     }

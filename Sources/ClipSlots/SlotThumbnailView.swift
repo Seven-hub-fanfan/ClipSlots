@@ -111,15 +111,13 @@ struct SlotThumbnailView: View {
                 Text(multilinePreview)
                     .font(.system(size: 12, design: .monospaced))
                     .foregroundColor(.primary.opacity(0.8))
-                    // v2.9.25 hotfix3: 根因是 content.preview 上游被截断为 30 字符（ClipboardManager.preview），
-                    // 无论怎么调框高都只有约 2 行。改用 plainText 全文（截到 240 字符）+ lineLimit(4)，
-                    // 才能真正显示约 4 行；padding 8→4 让净内容区更大，minHeight 80 强制文本区撑到 4 行高。
+                    // v2.9.25 hotfix4: 去掉 minHeight（它让文本框只有 80pt 并被顶在容器上方，短文本看着"靠上"）。
+                    // 改为 maxHeight:.infinity 铺满整个预览区，短文本(.center)真正垂直居中，长文本(.topLeading)顶部对齐显示 4 行。
                     .lineLimit(4)
                     .truncationMode(.tail)
                     .padding(4)
                     .frame(
                         maxWidth: .infinity,
-                        minHeight: 80,
                         maxHeight: .infinity,
                         alignment: multilinePreview.count <= 60 ? .center : .topLeading
                     )
