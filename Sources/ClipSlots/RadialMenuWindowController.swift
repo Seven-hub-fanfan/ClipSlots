@@ -215,7 +215,9 @@ final class RadialMenuWindowController {
         previewPanel.level = .floating
         previewPanel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         previewPanel.isMovableByWindowBackground = true
-        previewPanel.minSize = NSSize(width: 260, height: previewCollapsedHeight)
+        // v2.9.25 hotfix2: 最小高度从 previewCollapsedHeight(60) 恢复为 220，避免窗口坍缩成
+        // 一条工具栏细横杠；窗口保持固定尺寸，空态时内容区留白（不再折叠）。
+        previewPanel.minSize = NSSize(width: 260, height: 220)
         previewPanel.maxSize = NSSize(width: min(900, screenFrame.width - 80), height: min(900, screenFrame.height - 80))
         previewPanel.contentView = hosting
         previewPanel.contentView?.wantsLayer = true
@@ -225,10 +227,10 @@ final class RadialMenuWindowController {
         previewPanel.orderFrontRegardless()
         self.previewPanel = previewPanel
 
-        // v2.9.23: 记录展开高度，默认折叠为仅工具栏，随后按悬停状态展开/折叠。
+        // v2.9.25 hotfix2: 取消"默认折叠为工具栏 / 悬停展开"逻辑（它会把窗口收成一条细横杠，
+        // 且叠加空态删除后观感异常）。改为窗口保持固定尺寸：空态内容区留白，悬停时内容区正常填充。
         previewExpandedHeight = max(size.height, previewCollapsedHeight)
-        applyPreviewCollapsed(true, animated: false)
-        installPreviewHoverObserver()
+        // 不再调用 applyPreviewCollapsed(true) / installPreviewHoverObserver()，窗口维持固定高度。
     }
 
     private func makePreviewHostingView(store: SlotStoreObservable, themeMode: ThemeMode, size: NSSize) -> NSView {

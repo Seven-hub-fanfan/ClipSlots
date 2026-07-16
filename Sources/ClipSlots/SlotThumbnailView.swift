@@ -111,13 +111,15 @@ struct SlotThumbnailView: View {
                 Text(content.preview)
                     .font(.system(size: 12, design: .monospaced))
                     .foregroundColor(.primary.opacity(0.8))
-                    // v2.9.25: lineLimit 28 → 4，配合下方增高的固定框，让长文本清晰显示约 4 行，
-                    // 短文本仍居中，避免过去只显示 1-2 行、下方大片空白的观感。
+                    // v2.9.25 hotfix2: lineLimit(4) 只是上限，Text 无 minHeight 时会收缩到 2 行内容高再居中，
+                    // 导致"只显示 2 行"。给文本区显式 minHeight 76（≈4 行×18pt 行高）强制预留 4 行竖向空间：
+                    // 长文本铺满 4 行，短文本在 4 行高的区域内居中。
                     .lineLimit(4)
                     .truncationMode(.tail)
                     .padding(8)
                     .frame(
                         maxWidth: .infinity,
+                        minHeight: 76,
                         maxHeight: .infinity,
                         alignment: content.preview.count <= 60 ? .center : .topLeading
                     )
