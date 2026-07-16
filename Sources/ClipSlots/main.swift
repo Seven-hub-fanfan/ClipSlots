@@ -49,7 +49,8 @@ struct ClipSlotsApp: App {
     var body: some Scene {
         WindowGroup {
             ContentView(store: store)
-                .frame(minWidth: 460, minHeight: 360)
+                // v2.9.23: 增大窗口最小尺寸，防止标题栏/应用图标在缩到最小时被挤压变形。
+                .frame(minWidth: 720, minHeight: 560)
                 .preferredColorScheme(appearanceMode.preferredColorScheme)
                 .onAppear {
                     AppearanceDefaults.ensureDefaultDarkIfNeeded()

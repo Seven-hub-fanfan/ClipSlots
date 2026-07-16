@@ -310,7 +310,8 @@ struct SlotCardView: View {
                     Text(content.preview)
                         .font(.system(size: 12, design: .monospaced))
                         .foregroundColor(.primary)
-                        .lineLimit(3)
+                        // v2.9.23: 统一所有槽位卡片文本预览行数为 28，避免部分卡片过早省略。
+                        .lineLimit(28)
                         .truncationMode(.tail)
 
                     Spacer(minLength: 0)

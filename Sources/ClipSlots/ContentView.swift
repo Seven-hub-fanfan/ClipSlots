@@ -391,18 +391,12 @@ struct ContentView: View {
             Button {
                 showingPlugins = true
             } label: {
-                // v2.9.22: 更精致的拼图图标（filled + 层次渲染）+ 右上角红点通知，提升精致度。
+                // v2.9.23: 干净简洁的主题色拼图图标（去掉层次渲染灰色锯齿与红点通知），
+                // 与相邻工具栏图标（外观/键盘）保持一致的样式。
                 Image(systemName: "puzzlepiece.extension.fill")
                     .font(.system(size: 15, weight: .semibold))
-                    .symbolRenderingMode(.hierarchical)
+                    .foregroundColor(.accentColor)
                     .frame(width: 30, height: 30)
-                    .overlay(alignment: .topTrailing) {
-                        Circle()
-                            .fill(Color.red)
-                            .frame(width: 7, height: 7)
-                            .overlay(Circle().stroke(AppTheme.chipBackground(colorScheme), lineWidth: 1.2))
-                            .offset(x: -4, y: 4)
-                    }
             }
             .buttonStyle(.borderless)
             .help("插件")

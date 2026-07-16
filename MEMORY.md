@@ -4,11 +4,17 @@
 
 ## 当前版本
 
-- **当前版本：v2.9.22**
+- **当前版本：v2.9.23**
 - 平台：macOS（Swift / SwiftUI，SPM 构建，macOS 13+）
 - 单一版本号事实来源：`Info.plist` 的 `CFBundleShortVersionString`（`AppVersion.current` 动态读取，`AppVersion.fallback` 为编译期兜底）。CLI 版本号见 `Sources/ClipSlotsCLI/main.swift` 的 `CLI_VERSION`。
 
 ## 版本要点（近期）
+
+### v2.9.23
+- **实时预览面板默认折叠 / 悬停展开**：圆盘菜单的浮动实时预览（`RadialPreviewPanel` + `RadialMenuWindowController`）默认只显示顶部工具栏（约 60pt），悬停圆盘槽位才展开完整内容区，离开重新折叠，带高度动画且保持顶边固定，不干扰任何主界面布局。
+- **统一槽位卡片文本预览行数**：`SlotCardView` 文本预览 `lineLimit` 由 3 统一为 28，与 `SlotThumbnailView` 一致，避免部分卡片过早省略。
+- **修复插件图标**：去掉 v2.9.22 的层次渲染灰色锯齿与右上角红点，改回干净的主题色（accentColor）填充拼图，与相邻工具栏图标样式一致。
+- **新增窗口最小尺寸**：`main.swift` WindowGroup 最小尺寸由 460×360 增大到 720×560，防止标题栏/应用图标在缩到最小时被挤压变形。
 
 ### v2.9.22
 - **UI 全面优化**（主界面 + 节点画布 + 圆盘预览 + 插件中心 + 权限弹窗）：
