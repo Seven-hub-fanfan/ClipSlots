@@ -198,10 +198,7 @@ struct NodeCanvasSheet: View {
                 Text("节点画布")
                     // v2.9.18: 标题统一到 AppTheme.Fonts.title（18pt）。
                     .font(AppTheme.Fonts.title)
-                Text("独立画布内编辑连接；主界面继续保持干净，只显示色点提醒。")
-                    // v2.9.18: 说明小字统一 AppTheme.Fonts.caption。
-                    .font(AppTheme.Fonts.caption)
-                    .foregroundColor(.secondary)
+                // v2.9.21: 移除标题下方说明小字，界面更简洁。
             }
             Spacer()
             // v2.9.18: 精简按钮文字（去掉"模板/十槽位"等冗余词），完整语义由 systemImage + help 承载。
@@ -238,18 +235,7 @@ struct NodeCanvasSheet: View {
 
     private var footer: some View {
         VStack(spacing: 8) {
-            HStack {
-                let chains = store.connectionChainSummaries()
-                if chains.isEmpty {
-                    Text("暂无连接。拖拽节点边缘端口建立连接。")
-                        .foregroundColor(.secondary)
-                } else {
-                    Text("当前链路：" + chains.map { compactChainDescription($0) }.joined(separator: "    "))
-                        .lineLimit(1)
-                        .foregroundColor(.secondary)
-                }
-                Spacer()
-            }
+            // v2.9.21: 移除「当前链路：1→6 …」文字行——连线关系从画布本身即可看清，无需文字重复。
 
             HStack(spacing: AppTheme.spacingSmall) {
                 Button { store.applyBuiltInFullChainTemplate() } label: { Label("本组全联", systemImage: "link") }
@@ -291,7 +277,17 @@ struct NodeCanvasSheet: View {
     private func position(for slot: Int) -> CGPoint {
         let col = CGFloat((slot - 1) % 5)
         let row = CGFloat((slot - 1) / 5)
-        return CGPoint(x: 115 + col * 175, y: 130 + row * 190)
+        // v2.9.21: 节点网格在画布内水平 + 垂直居中，不再紧贴左上角。
+        // 5 列 × 2 行，列间距 175 / 行间距 190。内容整体尺寸 = 中心跨度 + 单节点尺寸。
+        let colSpacing: CGFloat = 175
+        let rowSpacing: CGFloat = 190
+        let cols: CGFloat = 5
+        let rows: CGFloat = 2
+        let contentWidth = (cols - 1) * colSpacing + nodeSize.width
+        let contentHeight = (rows - 1) * rowSpacing + nodeSize.height
+        let originX = (canvasWidth - contentWidth) / 2 + nodeSize.width / 2
+        let originY = (canvasHeight - contentHeight) / 2 + nodeSize.height / 2
+        return CGPoint(x: originX + col * colSpacing, y: originY + row * rowSpacing)
     }
 
     private func beginDrag(slot: Int, port: SlotPort, point: CGPoint) {
