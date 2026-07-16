@@ -41,7 +41,9 @@ struct RadialPreviewPanel: View {
             .buttonStyle(.plain)
             .padding(.horizontal, 14)
             .frame(height: 54)
-            .background(Color(NSColor.windowBackgroundColor).opacity(0.96))
+            // v2.9.22: 头部由近乎不透明的 windowBackgroundColor(0.96) 改为半透明毛玻璃，
+            // 消除圆盘弹出后"大块不透明矩形遮屏"的观感，恢复通透效果。
+            .background(.ultraThinMaterial)
 
             Divider()
 
@@ -94,10 +96,10 @@ struct RadialLivePreviewContent: View {
                 RadialUniversalPreview(content: content)
                     .id(slot)
             } else {
-                // v2.9.18: 空态由完全透明的 Color.clear 改为克制的浅底 + 提示图标，避免大片空白
+                // v2.9.22: 空态改用半透明毛玻璃底（原 v2.9.18 的浅色纯色底会形成"不透明色块"观感），
                 //（仅 UI 占位，不影响任何预览数据/悬停逻辑）。
                 RoundedRectangle(cornerRadius: AppTheme.smallCornerRadius, style: .continuous)
-                    .fill(AppTheme.previewBackground(colorScheme))
+                    .fill(.ultraThinMaterial)
                     .overlay(
                         VStack(spacing: AppTheme.spacingSmall) {
                             Image(systemName: "eye")

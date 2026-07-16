@@ -102,9 +102,9 @@ struct SlotCardView: View {
 
             actionRow
         }
-        // v2.9.18: 解除 270px 硬高度，改自适应 minHeight，让预览区能撑开、
-        // 标题/基线不再被压缩（同时缓解截图问题 ①②③⑤）。
-        .frame(minHeight: 280, alignment: .top)
+        // v2.9.22: 卡片最小高度 280 → 216，配合空槽/缩略图/按钮区一起收紧，
+        // 让 10 个槽位尽量不滚动就能看全；长文本卡片仍可自适应撑开。
+        .frame(minHeight: 216, alignment: .top)
         .id(content.thumbnailKey(specialSlotId: specialSlotId, slot: slot))
         .padding(AppTheme.cardPadding)
         .background(
@@ -320,15 +320,15 @@ struct SlotCardView: View {
     }
 
     private var actionRow: some View {
-        VStack(spacing: 8) {
+        VStack(spacing: 6) {
             if !content.isEmpty {
-                HStack(spacing: 8) {
+                HStack(spacing: 6) {
                     Button { onPaste() } label: {
                         Label("粘贴", systemImage: "arrow.up.doc.fill")
                             .frame(maxWidth: .infinity)
                     }
                     .buttonStyle(.borderedProminent)
-                    .controlSize(.regular)
+                    .controlSize(.small)
                     .help(pasteShortcut.isEmpty ? "粘贴到目标应用" : pasteShortcut)
 
                     Button { onCopy() } label: {
@@ -336,11 +336,11 @@ struct SlotCardView: View {
                             .frame(maxWidth: .infinity)
                     }
                     .buttonStyle(.bordered)
-                    .controlSize(.regular)
+                    .controlSize(.small)
                     .help("复制到剪贴板")
                 }
 
-                HStack(spacing: 8) {
+                HStack(spacing: 6) {
                     if content.isHTMLContent {
                         Button {
                             editingText = content.htmlEditableValue
@@ -350,7 +350,7 @@ struct SlotCardView: View {
                                 .frame(maxWidth: .infinity)
                         }
                         .buttonStyle(.bordered)
-                        .controlSize(.regular)
+                        .controlSize(.small)
                         .help("编辑 HTML 原文")
                     } else if content.isPlainEditableText {
                         Button {
@@ -361,7 +361,7 @@ struct SlotCardView: View {
                                 .frame(maxWidth: .infinity)
                         }
                         .buttonStyle(.bordered)
-                        .controlSize(.regular)
+                        .controlSize(.small)
                         .help("直接编辑此文本槽位")
                     }
 
@@ -370,7 +370,7 @@ struct SlotCardView: View {
                             .frame(maxWidth: .infinity)
                     }
                     .buttonStyle(.bordered)
-                    .controlSize(.regular)
+                    .controlSize(.small)
                     .tint(AppTheme.warning)
                     .help(saveShortcut.isEmpty ? "用当前剪贴板覆盖此槽位" : saveShortcut)
 
@@ -379,7 +379,7 @@ struct SlotCardView: View {
                             .frame(maxWidth: .infinity)
                     }
                     .buttonStyle(.bordered)
-                    .controlSize(.regular)
+                    .controlSize(.small)
                     .help("清空槽位内容")
                 }
             } else {
@@ -388,13 +388,14 @@ struct SlotCardView: View {
                         .frame(maxWidth: .infinity)
                 }
                 .buttonStyle(.bordered)
-                .controlSize(.regular)
+                .controlSize(.small)
                 .help(saveShortcut.isEmpty ? "保存当前剪贴板内容到槽位 \(slot)" : saveShortcut)
 
                 Color.clear
             }
         }
-        .frame(height: 66)
+        // v2.9.22: 按钮区高度 66 → 52，控件改 .small，让有内容卡片按钮区更紧凑。
+        .frame(height: 52)
     }
 
     private func commitLabel() {

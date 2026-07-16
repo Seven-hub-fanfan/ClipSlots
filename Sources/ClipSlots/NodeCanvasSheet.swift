@@ -149,7 +149,7 @@ struct NodeCanvasSheet: View {
                 }
                 .padding(18)
             }
-            footer
+            // v2.9.22: 底部操作栏整行删除，全部操作已并入顶部菜单。
         }
         .sheet(isPresented: $showingExportScopeSheet) {
             ConnectionExportScopeSheet(
@@ -192,7 +192,9 @@ struct NodeCanvasSheet: View {
     }
 
     private var toolbar: some View {
-        // v2.9.18: 工具栏按钮间距收敛到 AppTheme.spacingSmall。
+        // v2.9.22: 顶部工具栏精简为 4 个按钮——串联 / 模板 / 清除 / 完成。
+        // 原顶部（全串联/导出/导入/清除/完成）+ 底部操作栏（本组全联/本页全联/清本组/清本页/批量应用）
+        // 合并进三个下拉菜单，底部操作栏整行删除，视觉更干净。
         HStack(spacing: AppTheme.spacingSmall) {
             VStack(alignment: .leading, spacing: 2) {
                 Text("节点画布")
@@ -201,78 +203,65 @@ struct NodeCanvasSheet: View {
                 // v2.9.21: 移除标题下方说明小字，界面更简洁。
             }
             Spacer()
-            // v2.9.18: 精简按钮文字（去掉"模板/十槽位"等冗余词），完整语义由 systemImage + help 承载。
-            Button { store.applyBuiltInFullChainTemplate() } label: { Label("全串联", systemImage: "link") }
-                .help("十槽位全串联")
-            Button {
-                if suppressExportConnectionsPanel {
-                    store.exportConnectionTemplate(scope: .currentGroup)
-                } else {
-                    showingExportScopeSheet = true
-                }
-            } label: { Label("导出", systemImage: "square.and.arrow.up") }
-                .help("导出连接模板")
-            Button { store.importConnectionTemplate() } label: { Label("导入", systemImage: "square.and.arrow.down") }
-                .help("导入连接模板")
-            Button(role: .destructive) {
-                if suppressClearConnectionsConfirm {
-                    store.clearCurrentConnectionsWithoutConfirm()
-                } else {
-                    showingClearConfirmSheet = true
-                }
+
+            // 「串联」：合并 全串联 + 本组全联 + 本页全联 + 批量应用，点击选范围。
+            Menu {
+                Button { store.applyBuiltInFullChainTemplate() } label: { Label("本组全串联", systemImage: "link") }
+                Button { store.applyFullChainToCurrentPage() } label: { Label("本页全串联", systemImage: "square.grid.2x2") }
+                Divider()
+                Button { store.applyCurrentConnectionMapToAllGroupsInCurrentPage() } label: { Label("批量应用于全部组", systemImage: "folder.badge.gearshape") }
+                Button { store.applyCurrentConnectionMapToAllPagesAndGroups() } label: { Label("批量应用于全部页", systemImage: "square.grid.3x3.topleft.filled") }
+            } label: {
+                Label("串联", systemImage: "link")
+            }
+            .menuStyle(.borderlessButton)
+            .fixedSize()
+            .help("按范围应用全串联 / 批量应用当前连接")
+
+            // 「模板」：合并 导出 + 导入。
+            Menu {
+                Button {
+                    if suppressExportConnectionsPanel {
+                        store.exportConnectionTemplate(scope: .currentGroup)
+                    } else {
+                        showingExportScopeSheet = true
+                    }
+                } label: { Label("导出连接模板", systemImage: "square.and.arrow.up") }
+                Button { store.importConnectionTemplate() } label: { Label("导入连接模板", systemImage: "square.and.arrow.down") }
+            } label: {
+                Label("模板", systemImage: "doc.on.doc")
+            }
+            .menuStyle(.borderlessButton)
+            .fixedSize()
+            .help("导出 / 导入连接模板")
+
+            // 「清除」：合并 清除 + 清本组 + 清本页 + 全部，点击选范围。
+            Menu {
+                Button(role: .destructive) {
+                    if suppressClearConnectionsConfirm {
+                        store.clearCurrentConnectionsWithoutConfirm()
+                    } else {
+                        showingClearConfirmSheet = true
+                    }
+                } label: { Label("清除当前槽位组", systemImage: "trash") }
+                Button(role: .destructive) { store.clearCurrentPageConnections() } label: { Label("清除当前页面", systemImage: "trash.slash") }
+                Divider()
+                Button(role: .destructive) { store.clearAllConnections() } label: { Label("清除全部连接", systemImage: "trash.fill") }
             } label: {
                 Label("清除", systemImage: "trash")
-                    .frame(minWidth: 70)
             }
-            .buttonStyle(.borderedProminent)
+            .menuStyle(.borderlessButton)
+            .fixedSize()
             .tint(AppTheme.danger)
-            .help("清除连接")
+            .help("按范围清除连接")
+
             Button("完成") { dismiss() }
                 .buttonStyle(.borderedProminent)
         }
         .padding(14)
     }
 
-    private var footer: some View {
-        VStack(spacing: 8) {
-            // v2.9.21: 移除「当前链路：1→6 …」文字行——连线关系从画布本身即可看清，无需文字重复。
-
-            HStack(spacing: AppTheme.spacingSmall) {
-                Button { store.applyBuiltInFullChainTemplate() } label: { Label("本组全联", systemImage: "link") }
-                Button { store.applyFullChainToCurrentPage() } label: { Label("本页全联", systemImage: "square.grid.2x2") }
-                Spacer()
-                // v2.9.18: 清除类危险按钮 tint 统一到 AppTheme.danger。
-                Button(role: .destructive) { store.clearCurrentConnectionsWithoutConfirm() } label: { Label("清本组", systemImage: "trash").frame(minWidth: 72) }
-                .buttonStyle(.borderedProminent).tint(AppTheme.danger)
-                Button(role: .destructive) { store.clearCurrentPageConnections() } label: { Label("清本页", systemImage: "trash.slash").frame(minWidth: 72) }
-                .buttonStyle(.borderedProminent).tint(AppTheme.danger)
-                Menu {
-                    Button {
-                        store.applyCurrentConnectionMapToAllGroupsInCurrentPage()
-                    } label: {
-                        Label("批量应用于全部组", systemImage: "folder.badge.gearshape")
-                    }
-                    Button {
-                        store.applyCurrentConnectionMapToAllPagesAndGroups()
-                    } label: {
-                        Label("批量应用于全部页", systemImage: "square.grid.3x3.topleft.filled")
-                    }
-                } label: {
-                    // v2.9.18: 精简为"批量应用"，完整语义由图标 + help 承载。
-                    Label("批量应用", systemImage: "wand.and.stars")
-                }
-                .menuStyle(.borderlessButton)
-                .buttonStyle(.borderedProminent)
-                .help("批量应用当前连接")
-                Spacer()
-            }
-            .font(.caption)
-            .buttonStyle(.bordered)
-        }
-        .font(.caption)
-        .padding(.horizontal, 14)
-        .padding(.vertical, 10)
-    }
+    // v2.9.22: footer 底部操作栏已删除；本组/本页全联、清本组/清本页、批量应用均已并入顶部菜单。
 
     private func position(for slot: Int) -> CGPoint {
         let col = CGFloat((slot - 1) % 5)

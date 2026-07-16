@@ -362,6 +362,12 @@ struct ContentView: View {
             .disabled(updateChecker.isChecking)
             .help("检查是否有新版本")
 
+            // v2.9.22: 版本号从右下角迁移到左上角「检查更新」按钮右侧，靠近版本相关操作更合理。
+            Text("v\(AppVersion.current)")
+                .font(.caption2)
+                .foregroundColor(Color.secondary.opacity(0.75))
+                .help("当前版本")
+
             Spacer()
 
             statPill(
@@ -385,9 +391,18 @@ struct ContentView: View {
             Button {
                 showingPlugins = true
             } label: {
-                Image(systemName: "puzzlepiece.extension")
+                // v2.9.22: 更精致的拼图图标（filled + 层次渲染）+ 右上角红点通知，提升精致度。
+                Image(systemName: "puzzlepiece.extension.fill")
                     .font(.system(size: 15, weight: .semibold))
+                    .symbolRenderingMode(.hierarchical)
                     .frame(width: 30, height: 30)
+                    .overlay(alignment: .topTrailing) {
+                        Circle()
+                            .fill(Color.red)
+                            .frame(width: 7, height: 7)
+                            .overlay(Circle().stroke(AppTheme.chipBackground(colorScheme), lineWidth: 1.2))
+                            .offset(x: -4, y: 4)
+                    }
             }
             .buttonStyle(.borderless)
             .help("插件")
@@ -755,11 +770,7 @@ struct ContentView: View {
 
             // Connection stays as a separate tool and is moved to the right side.
             connectionToolButton
-
-            Text("v\(AppVersion.current)")
-                .font(.caption2)
-                // v2.9.18: 版本号过淡，opacity 由 0.65 微调到 0.8 提升可读。
-                .foregroundColor(Color.secondary.opacity(0.8))
+            // v2.9.22: 版本号已迁移到左上角「检查更新」按钮右侧，底部不再重复展示。
         }
         .padding(.horizontal, AppTheme.pagePadding)
         .padding(.vertical, 11)
@@ -784,22 +795,38 @@ struct ContentView: View {
     private var connectionMenuLabel: some View {
         let edgeCount = store.currentConnectionMap.edges.count
         let hasConnections = edgeCount > 0
+        // v2.9.22: 「连接」按钮升级——更贴切的节点连线图标 + 渐变胶囊 + 描边/投影，
+        // 提升质感并与整体设计语言统一；有连接时用强调色渐变，无连接时用中性玻璃底。
         return HStack(spacing: 6) {
-            Image(systemName: hasConnections ? "link.circle.fill" : "point.3.connected.trianglepath.dotted")
-                .font(.system(size: 11, weight: .semibold))
+            Image(systemName: "point.3.connected.trianglepath.dotted")
+                .font(.system(size: 12, weight: .bold))
+                .symbolRenderingMode(.hierarchical)
             Text(hasConnections ? "连接 · \(edgeCount)" : "连接")
-                .font(.caption2.weight(.semibold))
+                .font(.caption.weight(.semibold))
         }
-        .foregroundColor(hasConnections ? .accentColor : .primary)
-        .padding(.horizontal, 11)
+        .foregroundColor(hasConnections ? .white : .accentColor)
+        .padding(.horizontal, 13)
         .padding(.vertical, 6)
         .background(
-            Capsule().fill(hasConnections ? Color.accentColor.opacity(0.18) : AppTheme.chipBackground(colorScheme))
+            Capsule()
+                .fill(
+                    hasConnections
+                        ? AnyShapeStyle(LinearGradient(
+                            colors: [Color.accentColor, Color.accentColor.opacity(0.78)],
+                            startPoint: .topLeading,
+                            endPoint: .bottomTrailing))
+                        : AnyShapeStyle(Color.accentColor.opacity(0.10))
+                )
         )
         .overlay(
-            Capsule().stroke(hasConnections ? Color.accentColor.opacity(0.55) : Color.secondary.opacity(0.16), lineWidth: 1)
+            Capsule().stroke(
+                hasConnections ? Color.white.opacity(0.35) : Color.accentColor.opacity(0.35),
+                lineWidth: 1)
         )
-        .scaleEffect(hasConnections ? 1.015 : 1.0)
+        .shadow(
+            color: hasConnections ? Color.accentColor.opacity(0.35) : Color.black.opacity(0.06),
+            radius: hasConnections ? 6 : 2, x: 0, y: hasConnections ? 2 : 1)
+        .scaleEffect(hasConnections ? 1.02 : 1.0)
         .animation(.spring(response: 0.32, dampingFraction: 0.78), value: edgeCount)
         .help(hasConnections ? "当前槽位组已有 \(edgeCount) 条连接" : "打开节点连接工具")
     }

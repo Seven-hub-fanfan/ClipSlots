@@ -48,16 +48,9 @@ enum AccessibilityPermissionGuide {
     private static func presentGuideAlert() {
         let alert = NSAlert()
         alert.messageText = "需要开启「辅助功能」权限"
-        // v2.9.18: 精简多步骤说明文案，保留关键指引，去掉啰嗦句（不改弹窗触发/跳转逻辑）。
-        alert.informativeText = """
-        ClipSlots 需要「辅助功能」权限才能注册全局快捷键、模拟复制/粘贴。
-
-        点击「打开设置」后：
-        1. 在「隐私与安全性 → 辅助功能」中找到 ClipSlots，打开右侧开关
-        2. 若列表里没有，点「+」添加 /Applications/ClipSlots.app
-
-        无需重启即可生效。每次更新 App 后可能需重新勾选。
-        """
+        // v2.9.22: 弹窗说明文字排版优化——精简文案、加大字号与行间距，改用 accessoryView
+        //（NSAlert.informativeText 无法控制行距），减轻密集压迫感（不改触发/跳转逻辑）。
+        alert.accessoryView = makeGuideAccessoryView()
         alert.alertStyle = .warning
         alert.addButton(withTitle: "打开设置")
         alert.addButton(withTitle: "本次已知晓")
@@ -66,5 +59,41 @@ enum AccessibilityPermissionGuide {
         if response == .alertFirstButtonReturn {
             openAccessibilitySettings()
         }
+    }
+
+    /// v2.9.22: 用带段落行距、稍大字号的富文本承载说明，视觉更透气。
+    private static func makeGuideAccessoryView() -> NSView {
+        let paragraph = NSMutableParagraphStyle()
+        paragraph.lineSpacing = 6
+        paragraph.paragraphSpacing = 10
+
+        let text = """
+        ClipSlots 需要此权限来注册全局快捷键、模拟复制与粘贴。
+
+        点击「打开设置」后：
+        1. 在「隐私与安全性 → 辅助功能」中打开 ClipSlots 的开关
+        2. 若列表里没有，点「+」添加 /Applications/ClipSlots.app
+
+        无需重启即可生效；每次更新 App 后可能需要重新勾选。
+        """
+
+        let attributed = NSAttributedString(
+            string: text,
+            attributes: [
+                .font: NSFont.systemFont(ofSize: 13),
+                .foregroundColor: NSColor.labelColor,
+                .paragraphStyle: paragraph
+            ]
+        )
+
+        let label = NSTextField(wrappingLabelWithString: "")
+        label.attributedStringValue = attributed
+        label.isEditable = false
+        label.isSelectable = false
+        label.drawsBackground = false
+        label.isBezeled = false
+        label.preferredMaxLayoutWidth = 360
+        label.frame = NSRect(x: 0, y: 0, width: 360, height: 168)
+        return label
     }
 }

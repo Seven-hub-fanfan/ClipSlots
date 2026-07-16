@@ -12,30 +12,34 @@ enum PluginMarketCategory: String, CaseIterable, Identifiable {
     case officialSkill
     case officialPlugin
     case community
+    // v2.9.22: 新增「社区 Skill」分类（即将开放），与「社区插件」并列。
+    case communitySkill
 
     var id: String { rawValue }
 
     var title: String {
         switch self {
-        case .officialSkill:  return "官方 Skill"
-        case .officialPlugin: return "官方插件"
-        case .community:      return "社区插件"
+        case .officialSkill:   return "官方 Skill"
+        case .officialPlugin:  return "官方插件"
+        case .community:       return "社区插件"
+        case .communitySkill:  return "社区 Skill"
         }
     }
 
     /// Categories that are intentionally empty placeholders for now.
     var comingSoon: Bool {
         switch self {
-        case .community: return true
-        default:         return false
+        case .community, .communitySkill: return true
+        default:                          return false
         }
     }
 
     var emptyPlaceholder: (icon: String, text: String) {
         switch self {
-        case .officialSkill:  return ("sparkles", "暂无官方 Skill")
-        case .officialPlugin: return ("shippingbox", "暂无官方插件")
-        case .community:      return ("person.2", "社区插件即将开放")
+        case .officialSkill:   return ("sparkles", "暂无官方 Skill")
+        case .officialPlugin:  return ("shippingbox", "暂无官方插件")
+        case .community:       return ("person.2", "社区插件即将开放")
+        case .communitySkill:  return ("person.2.wave.2", "社区 Skill 即将开放")
         }
     }
 }

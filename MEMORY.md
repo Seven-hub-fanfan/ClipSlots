@@ -4,11 +4,24 @@
 
 ## 当前版本
 
-- **当前版本：v2.9.21**
+- **当前版本：v2.9.22**
 - 平台：macOS（Swift / SwiftUI，SPM 构建，macOS 13+）
 - 单一版本号事实来源：`Info.plist` 的 `CFBundleShortVersionString`（`AppVersion.current` 动态读取，`AppVersion.fallback` 为编译期兜底）。CLI 版本号见 `Sources/ClipSlotsCLI/main.swift` 的 `CLI_VERSION`。
 
 ## 版本要点（近期）
+
+### v2.9.22
+- **UI 全面优化**（主界面 + 节点画布 + 圆盘预览 + 插件中心 + 权限弹窗）：
+  - 槽位卡片高度过高：空槽图标缩小、说明并为一行；有内容卡片按钮区改 `.small` 控件、高度 66→52；卡片 `minHeight` 280→216，缩略图 minHeight 120→96，让 10 个槽位尽量不滚动看全。
+  - 槽位文本预览 `lineLimit` 14→28，减少过早省略与空白。
+  - 节点画布按钮精简合并：顶部只剩「串联 / 模板 / 清除 / 完成」4 个（串联=本组/本页/批量应用菜单；模板=导出/导入；清除=本组/本页/全部菜单），底部操作栏整行删除（`footer` 已移除）。
+  - 圆盘预览面板不透明背景修复：头部 `windowBackgroundColor(0.96)` 与空态浅色底改为 `.ultraThinMaterial` 半透明毛玻璃，消除"大块不透明色块遮屏"。
+  - 「连接」按钮升级：节点连线图标 + 强调色渐变胶囊 + 描边/投影，更有质感。
+  - 版本号从右下角迁移到左上角「检查更新」按钮右侧。
+  - 辅助权限弹窗：改用 `accessoryView` 富文本，精简文案、加大字号（13pt）与行距（lineSpacing 6）。
+  - 插件中心补「社区 Skill」分类（即将开放，与「社区插件」并列）。
+  - 插件图标改 `puzzlepiece.extension.fill` + 层次渲染 + 右上角红点通知。
+  - 节点画布「导出连接模板」弹窗重做：头部图标+标题、卡片式范围选项（主要/次要层次）、圆角/间距统一、底部主次按钮分区。
 
 ### v2.9.21
 - **修复节点画布端口消失 bug**（仅动 `NodeCanvasSheet.swift`，不改数据层）：
