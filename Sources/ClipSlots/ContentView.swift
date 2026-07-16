@@ -366,7 +366,7 @@ struct ContentView: View {
             Text("v\(AppVersion.current)")
                 .font(.caption2)
                 .foregroundColor(Color.secondary.opacity(0.75))
-                .help("当前版本")
+                .help("当前版本 v\(AppVersion.current)\n首次打开 ClipSlots.app 时，macOS 可能提示“无法验证开发者”，请右键点击 App → 选择「打开」→ 点击「打开」确认即可。")
 
             Spacer()
 

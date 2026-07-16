@@ -2,7 +2,7 @@
 name: clipslots-manager
 version: 0.7 (draft)
 used_when: 当需要以编程方式读取、写入、检索、加载或整理 macOS 剪贴板槽位管理器 ClipSlots 中的内容时使用（把文本/文件存进槽位、读出内容、搜索历史、把内容放到系统剪贴板、批量整理文件夹素材到槽位组/页面、删除槽位组/页面等）。
-requires: macOS + 已安装 ClipSlots v2.9.7+（CLI 位于 `~/bin/clipslots`）
+requires: macOS + 已安装 ClipSlots v2.9.7+（CLI 位于 `/usr/local/bin/clipslots`）
 ---
 
 # ClipSlots CLI 使用技能（草稿）
@@ -19,7 +19,7 @@ requires: macOS + 已安装 ClipSlots v2.9.7+（CLI 位于 `~/bin/clipslots`）
 
 ## 0. 调用方式与通用约定
 
-- 可执行文件：`~/bin/clipslots`。
+- 可执行文件：`/usr/local/bin/clipslots`。
 - 输出：始终是一个 JSON 对象。成功 `{"ok":true,...}`（退出码 0）；失败 `{"ok":false,"error":"<原因>"}`（退出码 1）。
 - stdout 只有 JSON；日志走 stderr，解析时忽略 stderr。
 - 数据模型三层：`页面(page) → 槽位组(group) → 槽位(slot)`。

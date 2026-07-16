@@ -165,6 +165,14 @@ final class AgentSkillInstallManager: ObservableObject {
         let target = agent.skillTargetPath
         let skillsDir = agent.skillsDir
 
+        // v2.9.26 安全防护：目标存在且不是软链接（可能是用户的真实目录/文件）时，
+        // 绝不执行 rm -rf 删除，避免误删用户数据。仅当目标为软链接或不存在时才继续。
+        if fileExistsNoFollow(target) && !isSymlink(target) {
+            busyAgentID = nil
+            report("目标已存在且不是软链接，为安全起见未做任何删除：\(target)。请手动检查后再安装。", isError: true)
+            return
+        }
+
         // 先尝试非特权方式（家目录通常可写）。
         if trySymlinkWithoutPrivilege(source: source, target: target, skillsDir: skillsDir) {
             busyAgentID = nil
@@ -173,7 +181,7 @@ final class AgentSkillInstallManager: ObservableObject {
             return
         }
 
-        // 回退：macOS 系统鉴权弹窗。
+        // 回退：macOS 系统鉴权弹窗。仅在目标为软链接或不存在时才会执行到这里，rm -rf 安全。
         let script = "mkdir -p \(shellQuote(skillsDir)) && rm -rf \(shellQuote(target)) && ln -sfn \(shellQuote(source)) \(shellQuote(target))"
         runPrivileged(script,
                       successMessage: "已安装到 \(agent.displayName)：\(target)",
@@ -183,15 +191,32 @@ final class AgentSkillInstallManager: ObservableObject {
     private func trySymlinkWithoutPrivilege(source: String, target: String, skillsDir: String) -> Bool {
         do {
             try fm.createDirectory(atPath: skillsDir, withIntermediateDirectories: true)
-            // 移除旧的软链接 / 目录 / 文件
-            if fm.fileExists(atPath: target) || (try? fm.destinationOfSymbolicLink(atPath: target)) != nil {
+            // v2.9.26 安全防护：仅移除软链接，绝不删除真实目录/文件（真实目标已在 install() 中拦截）。
+            if isSymlink(target) {
                 try fm.removeItem(atPath: target)
+            } else if fileExistsNoFollow(target) {
+                // 真实目录/文件不应被删除，直接失败。
+                return false
             }
             try fm.createSymbolicLink(atPath: target, withDestinationPath: source)
             return true
         } catch {
             return false
         }
+    }
+
+    /// 使用 lstat 语义判断路径是否为软链接（不跟随软链接）。
+    private func isSymlink(_ path: String) -> Bool {
+        guard let type = try? fm.attributesOfItem(atPath: path)[.type] as? FileAttributeType else {
+            return false
+        }
+        return type == .typeSymbolicLink
+    }
+
+    /// 判断路径本身是否存在（不跟随软链接，坏软链接也算存在）。
+    private func fileExistsNoFollow(_ path: String) -> Bool {
+        if isSymlink(path) { return true }
+        return fm.fileExists(atPath: path)
     }
 
     // MARK: - 特权执行（macOS 鉴权弹窗）

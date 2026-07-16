@@ -100,7 +100,13 @@ final class CLIInstallManager: ObservableObject {
         }
         // mkdir -p /usr/local/bin then symlink the bundled CLI as `clipslots`.
         let script = "mkdir -p /usr/local/bin && ln -sf \(shellQuote(source)) \(shellQuote(Self.targetPath))"
-        runPrivileged(script, successMessage: "CLI 安装成功。")
+        // v2.9.26: 安装成功后，若 /usr/local/bin 不在 PATH 中，追加提示。
+        var successMessage = "CLI 安装成功。"
+        let path = ProcessInfo.processInfo.environment["PATH"] ?? ""
+        if !path.contains("/usr/local/bin") {
+            successMessage += "\n提示：请确认 /usr/local/bin 在您的 PATH 中，否则在终端输入 clipslots 可能找不到命令。"
+        }
+        runPrivileged(script, successMessage: successMessage)
     }
 
     func uninstall() {

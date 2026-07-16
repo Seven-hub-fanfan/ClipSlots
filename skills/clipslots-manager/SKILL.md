@@ -1,16 +1,16 @@
 ---
 name: clipslots-manager
-description: 通过命令行工具 clipslots 以编程方式操作 macOS 剪贴板槽位管理器 ClipSlots。能读取/写入/检索槽位内容、把内容加载到系统剪贴板、批量整理文件夹素材到"页面→槽位组→槽位"三层结构、创建/删除页面与槽位组。适用场景：需要把文本或文件存进 ClipSlots 槽位、读出或搜索已存内容、把某槽位内容放到剪贴板供粘贴、按规则批量归档素材、清理整理槽位数据等。要求 macOS 且已安装 ClipSlots v2.9.7+（CLI 位于 ~/bin/clipslots）。
+description: 通过命令行工具 clipslots 以编程方式操作 macOS 剪贴板槽位管理器 ClipSlots。能读取/写入/检索槽位内容、把内容加载到系统剪贴板、批量整理文件夹素材到"页面→槽位组→槽位"三层结构、创建/删除页面与槽位组。适用场景：需要把文本或文件存进 ClipSlots 槽位、读出或搜索已存内容、把某槽位内容放到剪贴板供粘贴、按规则批量归档素材、清理整理槽位数据等。要求 macOS 且已安装 ClipSlots v2.9.7+（CLI 位于 /usr/local/bin/clipslots）。
 author: 帅帅
 ---
 
 # ClipSlots CLI 使用技能
 
-`clipslots`（`~/bin/clipslots`）是 ClipSlots.app 的命令行接口，与 GUI **共享同一份磁盘数据**（`ClipSlotsKit` 库），CLI 的读写会实时反映到 GUI，反之亦然。所有命令输出**单个 JSON 对象**到 stdout，专为智能体调用设计。
+`clipslots`（`/usr/local/bin/clipslots`）是 ClipSlots.app 的命令行接口，与 GUI **共享同一份磁盘数据**（`ClipSlotsKit` 库），CLI 的读写会实时反映到 GUI，反之亦然。所有命令输出**单个 JSON 对象**到 stdout，专为智能体调用设计。
 
 ## 0. 调用方式与通用约定
 
-- 可执行文件：`~/bin/clipslots`（软链到应用内 `clipslots-cli`）。
+- 可执行文件：`/usr/local/bin/clipslots`（软链到应用内 `clipslots-cli`）。
 - 输出：始终是一个 JSON 对象。成功 `{"ok":true,...}`（退出码 0）；失败 `{"ok":false,"error":"<原因>"}`（退出码 1）。
 - stdout 只有 JSON；日志走 stderr，解析时忽略 stderr。
 - **以 `ok` 字段判断成败**，`ok:false` 时读 `error`；不要只看退出码文案。

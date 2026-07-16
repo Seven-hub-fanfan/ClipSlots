@@ -4,11 +4,17 @@
 
 ## 当前版本
 
-- **当前版本：v2.9.25**
+- **当前版本：v2.9.26**
 - 平台：macOS（Swift / SwiftUI，SPM 构建，macOS 13+）
 - 单一版本号事实来源：`Info.plist` 的 `CFBundleShortVersionString`（`AppVersion.current` 动态读取，`AppVersion.fallback` 为编译期兜底）。CLI 版本号见 `Sources/ClipSlotsCLI/main.swift` 的 `CLI_VERSION`。
 
 ## 版本要点（近期）
+
+### v2.9.26
+- **路径统一**：CLI 固定安装到 `/usr/local/bin/clipslots`（软链到应用内 `clipslots-cli`）；清理历史遗留的手动旧二进制 `~/bin/clipslots`；`docs/clipslots-cli-skill-draft.md` 与 `skills/clipslots-manager/SKILL.md`（含 frontmatter/requires）中所有 `~/bin/clipslots` 替换为 `/usr/local/bin/clipslots`，并同步刷新已安装 App bundle 内 SKILL.md。
+- **Gatekeeper 首次打开提示**：新增 `RELEASE_NOTES_v2.9.26.md` 中文提示；App 内版本号（`ContentView` 左上角 `v…`）悬停 `.help` 补充"右键→打开"引导。
+- **安装后 PATH 检测**：`CLIInstallManager.install()` 成功后若 `/usr/local/bin` 不在 `PATH`，在成功提示后追加终端找不到命令的提醒（复用现有 `lastMessage` 机制）。
+- **Skill 卸载软链安全防护**：`AgentSkillInstallManager` 安装/更新前增加软链接守卫（`lstat` 语义），仅当目标为软链接或不存在时才 `rm -rf`/`removeItem` 重建软链；真实目录/文件不删除并提示，防止误删用户数据。
 
 ### v2.9.25
 - **辅助权限弹窗视觉重做**：由 `NSAlert` 换为自定义 SwiftUI 磁玻璃面板（`AccessibilityPermissionGuide.swift` 的 `AccessibilityGuideCard` + 自定义 `NSPanel` 模态）。顶部 52pt `lock.shield.fill` 主题色大图标、21pt 加粗标题、宽松行距副文本、数字圆圈（1/2）步骤列表；底部「打开设置」为蓝色填充主按钮、「本次已知晓」为文字次要按钮（不再两个并排实心按钮）；整体圆角 18pt、内边距充裕、`.ultraThinMaterial` 磨砂背景 + 描边/投影。
