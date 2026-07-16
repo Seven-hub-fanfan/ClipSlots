@@ -5,7 +5,7 @@ import Foundation
 // 避免多处硬编码导致版本号不一致。若读取失败（极少数场景）回退到编译期常量。
 enum AppVersion {
     /// 编译期回退值，仅在无法从 Bundle 读取时使用。发布流水线会同步更新 Info.plist。
-    static let fallback = "2.9.23"
+    static let fallback = "2.9.24"
 
     /// 当前运行版本，动态读取自 Bundle.main。
     static var current: String {

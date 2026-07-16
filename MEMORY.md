@@ -4,11 +4,17 @@
 
 ## 当前版本
 
-- **当前版本：v2.9.23**
+- **当前版本：v2.9.24**
 - 平台：macOS（Swift / SwiftUI，SPM 构建，macOS 13+）
 - 单一版本号事实来源：`Info.plist` 的 `CFBundleShortVersionString`（`AppVersion.current` 动态读取，`AppVersion.fallback` 为编译期兜底）。CLI 版本号见 `Sources/ClipSlotsCLI/main.swift` 的 `CLI_VERSION`。
 
 ## 版本要点（近期）
+
+### v2.9.24
+- **Toast/FloatingNotice 视觉重做**：图标改为按语义类型（success→checkmark.circle.fill 绿 / warning→exclamationmark.triangle.fill 黄 / error→xmark.circle.fill 红 / info→info.circle.fill 蓝）统一渲染，移除此前看似"三横线/汉堡"的 text.alignleft 图标；标题加粗、副标题层次更清晰；内边距 12–16pt、圆角 12pt、统一背景材质与描边/轻投影。
+- **清除调试文本**：全仓检查确认用户可见字符串中不再出现调试占位「在代码里是圆盘」。
+- **统一槽位卡片预览 lineLimit=28**：`SlotThumbnailView` 文本分支与 `SlotCardView` 内容预览统一为 28，避免部分卡片过早省略（标题/文件名保持单行）。
+- **设置「槽位连接」Toggle 关闭时彻底隐藏连接入口**：主界面底部「连接」按钮（`connectionToolButton`）按 `enableSlotConnection`（`store.isSlotConnectionEnabled`）门控，关闭时完全隐藏（不占位）。
 
 ### v2.9.23
 - **实时预览面板默认折叠 / 悬停展开**：圆盘菜单的浮动实时预览（`RadialPreviewPanel` + `RadialMenuWindowController`）默认只显示顶部工具栏（约 60pt），悬停圆盘槽位才展开完整内容区，离开重新折叠，带高度动画且保持顶边固定，不干扰任何主界面布局。

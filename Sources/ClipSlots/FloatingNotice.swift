@@ -18,6 +18,17 @@ enum FloatingNoticeKind {
         case .error:   return AppTheme.danger
         }
     }
+
+    /// v2.9.24: 统一的语义化 SF Symbol 图标，替换掉此前按调用点传入的杂乱图标
+    /// （包括看起来像"汉堡菜单/三横线"的 text.alignleft）。
+    var semanticIcon: String {
+        switch self {
+        case .success: return "checkmark.circle.fill"
+        case .warning: return "exclamationmark.triangle.fill"
+        case .error:   return "xmark.circle.fill"
+        case .info:    return "info.circle.fill"
+        }
+    }
 }
 
 // MARK: - Floating Notice (v2.6.2, enhanced v2.6.3)
@@ -50,14 +61,14 @@ struct FloatingNoticeView: View {
     let notice: FloatingNotice
 
     var body: some View {
-        HStack(spacing: 10) {
-            Image(systemName: notice.iconName)
-                .font(.system(size: 18, weight: .semibold))
+        HStack(spacing: 12) {
+            Image(systemName: notice.kind.semanticIcon)
+                .font(.system(size: 20, weight: .semibold))
                 .foregroundColor(iconColor)
 
-            VStack(alignment: .leading, spacing: 2) {
+            VStack(alignment: .leading, spacing: 3) {
                 Text(notice.title)
-                    .font(.system(size: 13, weight: .semibold))
+                    .font(.system(size: 14, weight: .bold))
                     .foregroundColor(titleColor)
 
                 if !notice.subtitle.isEmpty {
@@ -68,14 +79,15 @@ struct FloatingNoticeView: View {
                 }
             }
         }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 8)
+        .padding(.horizontal, 16)
+        .padding(.vertical, 12)
         .background(cardBackground)
         .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
         .overlay(
             RoundedRectangle(cornerRadius: 12, style: .continuous)
                 .stroke(borderColor, lineWidth: 1)
         )
+        .shadow(color: Color.black.opacity(0.12), radius: 8, x: 0, y: 3)
         .allowsHitTesting(false)
     }
 

@@ -763,7 +763,10 @@ struct ContentView: View {
             Spacer()
 
             // Connection stays as a separate tool and is moved to the right side.
-            connectionToolButton
+            // v2.9.24: 当「槽位连接」开关关闭时，底部「连接」入口按钮彻底隐藏（不占位）。
+            if store.isSlotConnectionEnabled {
+                connectionToolButton
+            }
             // v2.9.22: 版本号已迁移到左上角「检查更新」按钮右侧，底部不再重复展示。
         }
         .padding(.horizontal, AppTheme.pagePadding)
