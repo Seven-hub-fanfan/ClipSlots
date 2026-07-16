@@ -126,7 +126,8 @@ struct SlotThumbnailView: View {
                         .foregroundColor(.primary.opacity(0.8))
                         .lineLimit(4)
                         .truncationMode(.tail)
-                        .padding(4)
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 8)
                         .background(
                             GeometryReader { g in
                                 Color.clear
