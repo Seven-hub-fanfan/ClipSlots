@@ -9,6 +9,14 @@ enum ThumbnailState {
     case failed
 }
 
+// v2.9.25 hotfix6: 测量文本块实际渲染高度的 PreferenceKey（方案C动态版）。
+private struct TextHeightKey: PreferenceKey {
+    static var defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = max(value, nextValue())
+    }
+}
+
 struct SlotThumbnailView: View {
     let content: SlotContent
     let specialSlotId: String
@@ -16,6 +24,8 @@ struct SlotThumbnailView: View {
 
     @State private var state: ThumbnailState = .idle
     @State private var loadToken = UUID()
+    // v2.9.25 hotfix6: 记录文本块实际渲染高度，用于动态判断居中/靠上（方案C动态版）。
+    @State private var textPreviewHeight: CGFloat = 0
 
     /// The composite key that uniquely identifies this slot version.
     /// When any dimension changes (special slot, slot number, content, or overwrite),
@@ -108,19 +118,28 @@ struct SlotThumbnailView: View {
                 // font/style to every other text slot), instead of an inconsistent
                 // "HTML" chip + WKWebView render. The HTML tags are stripped upstream
                 // in `SlotContent.preview`.
-                Text(multilinePreview)
-                    .font(.system(size: 12, design: .monospaced))
-                    .foregroundColor(.primary.opacity(0.8))
-                    // v2.9.25 hotfix4: 去掉 minHeight（它让文本框只有 80pt 并被顶在容器上方，短文本看着"靠上"）。
-                    // 改为 maxHeight:.infinity 铺满整个预览区，短文本(.center)真正垂直居中，长文本(.topLeading)顶部对齐显示 4 行。
-                    .lineLimit(4)
-                    .truncationMode(.tail)
-                    .padding(4)
-                    .frame(
-                        maxWidth: .infinity,
-                        maxHeight: .infinity,
-                        alignment: multilinePreview.count <= 60 ? .center : .topLeading
-                    )
+                // v2.9.25 hotfix6: 方案C动态版——用实际渲染高度判断对齐。
+                // 文字块渲染高度 < 预览区高度的 2/3 → 垂直居中；否则靠上（顶部对齐）。
+                GeometryReader { containerGeo in
+                    Text(multilinePreview)
+                        .font(.system(size: 12, design: .monospaced))
+                        .foregroundColor(.primary.opacity(0.8))
+                        .lineLimit(4)
+                        .truncationMode(.tail)
+                        .padding(4)
+                        .background(
+                            GeometryReader { g in
+                                Color.clear
+                                    .preference(key: TextHeightKey.self, value: g.size.height)
+                            }
+                        )
+                        .frame(
+                            maxWidth: .infinity,
+                            maxHeight: .infinity,
+                            alignment: textPreviewHeight < containerGeo.size.height * 2 / 3 ? .center : .topLeading
+                        )
+                }
+                .onPreferenceChange(TextHeightKey.self) { textPreviewHeight = $0 }
             }
         }
     }
