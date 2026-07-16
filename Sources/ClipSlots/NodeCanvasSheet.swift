@@ -56,8 +56,24 @@ struct NodeCanvasSheet: View {
                             store: store
                         )
                         .frame(width: nodeSize.width, height: nodeSize.height)
+                        // v2.9.19: onHover 必须作用在"卡片尺寸"的视图上，且要在 .position 之前。
+                        // 此前 onHover 加在 .position 之后——而 .position 会让返回的视图占满整个画布
+                        // （内容居中于指定点），于是 10 个节点的 hover 区域都变成"整块画布"。
+                        // ZStack 中最后渲染的 10 号视图在最上层，吞掉了全画布的 hover 事件：
+                        //   Bug1：1-9 号收不到任何 hover；
+                        //   Bug2：鼠标在画布内移动永远不会离开 10 号的全画布跟踪区，onHover(false)
+                        //         不触发，蓝框/端口一直不消失且响应迟钝。
+                        // 加 contentShape(Rectangle()) 保证整张卡片区域都能稳定命中 hover。
+                        .contentShape(Rectangle())
+                        .onHover { inside in
+                            if inside {
+                                hoveredNode = slot
+                            } else if hoveredNode == slot {
+                                // v2.9.19: 鼠标移出立即清除本节点 hover（无延迟/动画拖尾）。
+                                hoveredNode = nil
+                            }
+                        }
                         .position(position(for: slot))
-                        .onHover { inside in hoveredNode = inside ? slot : (hoveredNode == slot ? nil : hoveredNode) }
                     }
 
                     NodePortOverlay(

@@ -78,7 +78,13 @@ struct NodePortHandle: View {
             .animation(.easeOut(duration: 0.10), value: isHighlighted)
             .contentShape(Rectangle())
             .position(point)
-            .allowsHitTesting(true)
+            // v2.9.19: 端口命中区改为跟随 isVisible。此前恒为 true，导致 40 个"不可见"
+            // 端口（opacity 0.12）的 28×28 命中区仍处于 zIndex 10、压在卡片边缘之上，
+            // 拦截了鼠标进入卡片时的 hover（加剧 Bug2 的"移出不消失/迟钝"）。
+            // 现在只有可见端口（已连接 / 所属节点被 hover / 拖拽高亮目标）才可命中，
+            // 空白/隐藏端口让位给下层卡片的 hover；由于建连目标是靠几何 nearestNodePortTarget
+            // 判定、拖拽手势始终跟随源端口，故建连交互不受影响。
+            .allowsHitTesting(isVisible)
             .gesture(
                 DragGesture(minimumDistance: 2, coordinateSpace: .named("nodeCanvas"))
                     .onChanged { value in

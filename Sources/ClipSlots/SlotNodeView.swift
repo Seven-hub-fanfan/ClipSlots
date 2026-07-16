@@ -54,6 +54,10 @@ struct SlotNodeView: View {
         // v2.9.18: 卡片圆角硬编码 14 收敛到 AppTheme.cornerRadius（不改布局尺寸逻辑）。
         .background(RoundedRectangle(cornerRadius: AppTheme.cornerRadius).fill(Color(NSColor.controlBackgroundColor)))
         .overlay(RoundedRectangle(cornerRadius: AppTheme.cornerRadius).stroke(SlotConnectionColor.color(for: colorId).opacity(colorId == nil ? 0.18 : 0.8), lineWidth: colorId == nil ? 1 : 2))
+        // v2.9.19: hover 时叠加蓝色高亮描边。此前 isHovered 参数被接收却从未在 body 中使用，
+        // 导致节点 hover 没有视觉反馈；这里用 accentColor 描边，深浅色均自动适配。
+        // 未 hover 时 opacity=0 且不加动画，鼠标移出立即消失（无拖尾）。
+        .overlay(RoundedRectangle(cornerRadius: AppTheme.cornerRadius).stroke(Color.accentColor.opacity(isHovered ? 0.9 : 0), lineWidth: 2))
         .shadow(color: .black.opacity(0.08), radius: 8, x: 0, y: 3)
     }
 

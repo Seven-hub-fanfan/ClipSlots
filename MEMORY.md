@@ -4,11 +4,17 @@
 
 ## 当前版本
 
-- **当前版本：v2.9.18**
+- **当前版本：v2.9.19**
 - 平台：macOS（Swift / SwiftUI，SPM 构建，macOS 13+）
 - 单一版本号事实来源：`Info.plist` 的 `CFBundleShortVersionString`（`AppVersion.current` 动态读取，`AppVersion.fallback` 为编译期兜底）。CLI 版本号见 `Sources/ClipSlotsCLI/main.swift` 的 `CLI_VERSION`。
 
 ## 版本要点（近期）
+
+### v2.9.19
+- **修复节点画布 hover 交互两个问题**（仅动 hover 相关代码，不改数据层/其他视图）：
+  - **Bug1：1-9 号节点 hover 无反应，只有 10 号响应**。根因：`NodeCanvasSheet` 中 `.onHover` 被链在 `.position` 之后，而 `.position` 会让视图占满整块画布，导致 10 个节点的 hover 区域全变成"整张画布"，ZStack 中最后渲染的 10 号在最上层吞掉全部 hover。修复：把 `.onHover` 移到 `.frame` 之后、`.position` 之前，并加 `.contentShape(Rectangle())`，使每个节点 hover 区域严格等于自身卡片、互不干扰。
+  - **Bug2：鼠标移走后蓝框/端口不消失、响应迟钝**。根因同上（10 号全画布跟踪区永不触发 onHover(false)）+ `NodePortOverlay` 中 40 个不可见端口恒 `allowsHitTesting(true)`、命中区压在卡片边缘拦截 hover。修复：onHover(false) 立即清空本节点 hover（无动画拖尾）；端口命中区改为 `allowsHitTesting(isVisible)`，隐藏端口让位给卡片 hover（建连目标靠几何判定、拖拽跟随源端口，故建连不受影响）。
+  - 顺带修复 `SlotNodeView` 接收 `isHovered` 却未使用的问题：hover 时叠加 `accentColor` 描边（深浅色自适应），补齐每个节点的蓝框视觉反馈。
 
 ### v2.9.18
 - **UI 全面优化，共修复 28 项视觉/交互问题**（按 UI 代码审查报告 🔴5 / 🟡15 / 🟢8）。两条主线：解除卡片硬高度 + 补齐 AppTheme token。
