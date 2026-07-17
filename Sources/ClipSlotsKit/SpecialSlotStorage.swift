@@ -155,28 +155,12 @@ public final class SpecialSlotStorage {
             }
         }
 
-        // 4. Ensure each page has at least one slot group
-        for page in modified.pages {
-            let groupsInPage = modified.specialSlots.filter { $0.pageId == page.id }
-            if groupsInPage.isEmpty {
-                let defaultGroup = SpecialSlot(
-                    id: "special_\(UUID().uuidString)",
-                    name: "默认槽位组",
-                    icon: "folder",
-                    colorHex: nil,
-                    sourceType: .manual,
-                    sourcePath: nil,
-                    pageId: page.id,
-                    order: 0,
-                    createdAt: Date(),
-                    updatedAt: Date()
-                )
-                let dir = specialSlotDirectory(for: defaultGroup.id)
-                try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-                modified.specialSlots.append(defaultGroup)
-                changed = true
-            }
-        }
+        // 4. (removed in v2.9.33) Previously this step lazily back-filled a
+        // "默认槽位组" for any page that had none. That lazy backfill has been
+        // removed to avoid two competing code paths: `createPage` now creates
+        // the default group synchronously, so pages are never left empty at
+        // creation time. Keeping the lazy repair as well caused unpredictable
+        // timing (a page could momentarily appear empty between operations).
 
         // 5. Fix currentSpecialSlotId if it doesn't belong to current page
         let currentPageGroups = modified.specialSlots.filter { $0.pageId == modified.currentPageId }
@@ -555,7 +539,30 @@ public final class SpecialSlotStorage {
 
     // MARK: - Page CRUD (v2.4)
 
-    public func createPage(name: String) throws -> SlotPage {
+    /// Result of `createPage`: the new page plus its synchronously-created
+    /// default slot group (nil only when `withDefaultGroup` is false).
+    public struct CreatePageResult {
+        public let page: SlotPage
+        public let defaultGroup: SpecialSlot?
+        public init(page: SlotPage, defaultGroup: SpecialSlot?) {
+            self.page = page
+            self.defaultGroup = defaultGroup
+        }
+    }
+
+    /// Create a page and, by default, synchronously create its default slot
+    /// group inside the same lock/transaction.
+    ///
+    /// v2.9.33: previously a page was created empty and its default group was
+    /// only materialized lazily (by `repairPageScopedConsistency` on the next
+    /// load, or by `switchToPage`). That lazy backfill created a timing hole:
+    /// a `create-page` CLI call could return before any group existed, so a
+    /// follow-up `groups` query might see none and callers could wrongly create
+    /// an extra group. Building the group synchronously here — and returning it
+    /// in `CreatePageResult.defaultGroup` — closes that gap so callers can use
+    /// the id immediately without a second query.
+    @discardableResult
+    public func createPage(name: String, withDefaultGroup: Bool = true) throws -> CreatePageResult {
         try storageLock.withLock {
             var index = loadIndex()
 
@@ -579,9 +586,30 @@ public final class SpecialSlotStorage {
             )
 
             index.pages.append(page)
+
+            var defaultGroup: SpecialSlot? = nil
+            if withDefaultGroup {
+                let group = SpecialSlot(
+                    id: "special_\(UUID().uuidString)",
+                    name: "默认槽位组",
+                    icon: "folder",
+                    colorHex: nil,
+                    sourceType: .manual,
+                    sourcePath: nil,
+                    pageId: page.id,
+                    order: 0,
+                    createdAt: Date(),
+                    updatedAt: Date()
+                )
+                let dir = specialSlotDirectory(for: group.id)
+                try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+                index.specialSlots.append(group)
+                defaultGroup = group
+            }
+
             try saveIndex(index)
-            NSLog("[ClipSlots] Page created: \(page.name)")
-            return page
+            NSLog("[ClipSlots] Page created: \(page.name)\(defaultGroup != nil ? " (+ default group)" : "")")
+            return CreatePageResult(page: page, defaultGroup: defaultGroup)
         }
     }
 

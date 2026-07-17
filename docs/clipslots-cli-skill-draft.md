@@ -2,7 +2,7 @@
 name: clipslots-manager
 version: 1.0
 used_when: 当需要以编程方式读取、写入、检索、加载或整理 macOS 剪贴板槽位管理器 ClipSlots 中的内容时使用（把文本/文件存进槽位、读出内容、搜索历史、把内容放到系统剪贴板、批量整理文件夹素材到槽位组/页面、删除槽位组/页面等）。
-requires: macOS + 已安装 ClipSlots v2.9.32+（CLI 位于 `/usr/local/bin/clipslots`）
+requires: macOS + 已安装 ClipSlots v2.9.33+（CLI 位于 `/usr/local/bin/clipslots`）
 ---
 
 # ClipSlots CLI 使用技能（草稿）
@@ -47,7 +47,7 @@ requires: macOS + 已安装 ClipSlots v2.9.32+（CLI 位于 `/usr/local/bin/clip
 
 ### 只读
 ```bash
-clipslots version                                  # {"ok":true,"version":"2.9.32"}
+clipslots version                                  # {"ok":true,"version":"2.9.33"}
 clipslots help                                     # 命令清单 + version/defaultGroup/defaultPage/slotCount
 clipslots groups [--page <uuid>|--page-name <名称>]   # 所有槽位组，返回对象 {groups:[{id,name,pageId,pageName,pageCount,slotCount,current}]}；带页面参数时只返回该页面下的组（v2.9.32 A4），是 Agent 判断"某页面是否有空组"的核心原语
 clipslots pages                                    # 所有页面，返回对象 {pages:[{id,name,current}]}
@@ -83,6 +83,9 @@ clipslots clear <slot> [--group <id>]
 clipslots create-group <name> [--page <uuid>|--page-name <名称>]
 
 # 新建页面（返回 id）；页面名不可重复
+# v2.9.33: 同步创建一个空的「默认槽位组」，并在返回 JSON 附带 defaultGroup：
+#   {"ok":true,"page":{"id":"...","name":"..."},"defaultGroup":{"id":"...","name":"默认槽位组"}}
+#   → 新建页面后直接用 defaultGroup.id 写入，无需再跑 groups/list 查询。
 clipslots create-page <name>
 
 # 删除一个槽位组（软删除）；其数据目录移动到 .trash（可人工恢复，v2.9.5 起 .trash 自动清理）
@@ -133,7 +136,7 @@ clipslots delete-group -h
 
 1. 先判断：用户有没有指定目标页面/组？
 2. **【没有指定 = 默认】** 优先"新建页面 + 复用其默认组"（最安全，不碰已有数据）。
-   - **新建页面后复用自动生成的默认空组**：`create-page` 函数本身**只创建页面、不建组**；但 ClipSlotsKit 存储层会在**下一次任意 CLI 命令**执行时惰性修复(repair)——为尚无组的页面自动补建一个空的「默认槽位组」。因此新建页面后，该页可靠地拥有**恰好一个空默认组**。正确流程：`create-page` 后先 `groups --page-name <页面名>`（或 `list --page-name <页面名>`，v2.9.32 起会返回该页所有组）拿到该默认组，若为空（主体空且 `attachmentCount=0`）→ 直接复用它写第一批数据；只有需要额外分类时才 `create-group`。**切勿**在新建页后无脑显式 `create-group`——那样会得到「默认槽位组 + 新组」两个组、残留一个闲置空组。
+   - **新建页面直接拿返回的默认组**（v2.9.33）：`create-page` 现在**同步**创建页面 + 一个空的「默认槽位组」，并在返回 JSON 里附带 `defaultGroup:{id,name}`。因此新建页面后**直接用返回的 `defaultGroup.id` 写第一批数据即可，无需再跑 `groups`/`list` 查询**。旧版"`create-page` 只建页 + 存储层惰性修复(repair)补建默认组 + 二次查询拿 id"的流程已废弃——那套惰性补建有时序空窗（`create-page` 返回后到补建生效之间，`groups` 查询可能暂时返回空组，导致误建多余组）。v2.9.33 已删除该惰性补建逻辑，改为建页时同步建组。只有需要额外分类时才 `create-group`。**切勿**在新建页后无脑显式 `create-group`——那样会得到「默认槽位组 + 新组」两个组、残留一个闲置空组。
    - 实现说明：当前版本 `create-page` 无硬性数量上限，故默认此分支恒可执行；下面"页面已满"子分支是为未来引入页面上限预留的预案。
    - 若未来引入页面数上限并达到上限：暂停并询问用户如何存（选项 A：选一个现有页面新建组；选项 B：覆盖某页面，需二次确认）。
 3. **【指定了页面、未指定组】** 标准判空流程：先 `groups --page-name <页面名>` 列出该页所有组，再 `list --page-name <页面名>` 看各组槽位的 `empty`/`attachmentCount`，找"有空槽"的组：

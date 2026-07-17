@@ -39,7 +39,7 @@ author: 帅帅
 
 ### 只读
 ```bash
-clipslots version                                  # {"ok":true,"version":"2.9.32"}
+clipslots version                                  # {"ok":true,"version":"2.9.33"}
 clipslots help                                     # 命令清单 + version/defaultGroup/defaultPage/slotCount
 clipslots groups [--page <uuid>|--page-name <名称>] # {groups:[{id,name,pageId,pageName,pageCount,slotCount,current}]}；带页面则只列该页的组(v2.9.32 A4)
 clipslots pages                                    # {pages:[{id,name,current}]}
@@ -81,7 +81,7 @@ clipslots clear <slot> [--group <id|name>] [--force]
 # 新建槽位组(返回 id)；页面已满(10组)报错 → 先 create-page；同页面不允许重名(冲突改名或加 -2/-3)
 clipslots create-group <name> [--page <uuid>|--page-name <名称>]
 
-# 新建页面(返回 id)；页面名不可重复
+# 新建页面(返回 id)；页面名不可重复。v2.9.33: 同步创建默认槽位组并在返回值附带 defaultGroup {id,name}，可直接用其 id 写入，无需再跑 groups 查询
 clipslots create-page <name>
 
 # 删除槽位组 / 页面(软删除→移动到 .trash，可人工恢复；.trash 自动清理保留30天/50条)；id 不存在返回 ok:false
@@ -120,7 +120,7 @@ clipslots write --help
 
 1. 先判断：用户有没有指定目标页面/组？
 2. **【没有指定 = 默认】** 优先"新建页面 + 复用其默认组"（最安全，不碰已有数据）。
-   - **新建页面后复用自动生成的默认空组**：`create-page` 本身只创建页面；但 ClipSlotsKit 存储层会在**下一次任意 CLI 命令**执行时惰性补建——为尚无组的页面自动生成一个空的「默认槽位组」。因此新建页面后该页可靠地拥有恰好一个空默认组。正确流程：`create-page` 后先 `groups --page-name <页面名>`（或 `list --page-name <页面名>`，v2.9.32 起会返回该页所有组）拿到默认组，若其为空（主体空且 `attachmentCount=0`）→ 直接用它写第一批数据；只有需要额外分类时才 `create-group`。**切勿**在新建页后无脑 `create-group`，否则会得到「默认槽位组 + 新组」两个组、残留一个闲置空组。
+   - **新建页面直接拿返回的默认组**（v2.9.33）：`create-page` 现在**同步**创建一个空的「默认槽位组」，并在返回 JSON 里附带 `defaultGroup:{id,name}`。因此新建页面后**直接用返回的 `defaultGroup.id` 写第一批数据即可，无需再跑 `groups`/`list` 查询**。旧版的"惰性补建 + 二次查询拿默认组"流程已废弃（那会有时序空窗，查询可能暂时返回空组）。只有需要额外分类时才 `create-group`。**切勿**在新建页后无脑 `create-group`，否则会得到「默认槽位组 + 新组」两个组、残留一个闲置空组。
 3. **【指定了页面、未指定组】** 标准判空流程：先 `groups --page-name <页面名>` 列出该页所有组，再 `list --page-name <页面名>` 看各组槽位的 `empty`/`attachmentCount`，找"有空槽"的组 → 确认后存入；都无空槽 → 在该页面新建槽位组。（**不要**用旧的 `list --page-name` 无组回落判空——旧版会回落全局 `default` 组导致误判已满。）
 4. **【指定了页面 + 组】**：先 `read`/`list`（务必带 `--page-name` 约束到该页面）确认目标槽位是否有内容。目标为空 → 直接存入；已有内容 → **不自作主张覆盖**：询问用户是否覆盖；不覆盖则给优先级选项：① 同页面新建组；② 新建页面+新组；③ 找空槽依次存（组满建续组 -2/-3，续组满则新建页面+新组）。
    - 注：早期文档提到的 `write --on-conflict error|overwrite|skip|new-group` **当前 CLI 并未实现**，请勿使用；冲突处理一律走"显式读取后判断，或新建组"。

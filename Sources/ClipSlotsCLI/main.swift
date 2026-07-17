@@ -12,7 +12,7 @@ import ClipSlotsKit
 //   success: {"ok": true, ...}
 //   error:   {"ok": false, "error": "message"}  (exit code 1)
 
-let CLI_VERSION = "2.9.32"
+let CLI_VERSION = "2.9.33"
 let DEFAULT_GROUP = "default"
 let DEFAULT_PAGE = "default_page"
 
@@ -323,7 +323,7 @@ let COMMANDS: [[String: Any]] = [
     ["name": "paste", "description": "把某槽位的内容加载到系统剪贴板(NSPasteboard)，不模拟按键。", "flags": ["<slot> (位置参数,1..N)", "--group <id|name> (默认 default;可传 id 或组名)", "--group-name <name> (按组名精确匹配)", "--page <id> (可选,约束 --group/--group-name 匹配到该页面)", "--page-name <name> (按页面名精确匹配;找不到会报错,与 --page 互斥;约束 group 匹配范围)"]],
     ["name": "clear", "description": "清空某个槽位（内容、标签、附件全部移除）。", "flags": ["<slot> (位置参数,1..N)", "--group <id|name> (默认 default;可传 id 或组名)", "--group-name <name> (按组名精确匹配)", "--force (跳过跨进程锁,风险自负)"]],
     ["name": "create-group", "description": "在指定页面新建一个槽位组，返回其 id。页面已满(10组)会返回错误，此时应先 create-page。v2.9.4: 同页面内不允许重名(会返回错误)，冲突时请改名或加 -2 后缀。", "flags": ["<name> (位置参数,组名)", "--page <id> (可选,默认当前页面)", "--page-name <name> (按页面名精确匹配指定目标页;找不到会报错,与 --page 互斥)"]],
-    ["name": "create-page", "description": "新建一个页面，返回其 id。页面名不可重复。", "flags": ["<name> (位置参数,页面名)"]],
+    ["name": "create-page", "description": "新建一个页面，返回其 id。页面名不可重复。v2.9.33: 同步创建默认槽位组并在返回值中附带 defaultGroup {id,name}，可直接用其 id 写入，无需再跑 groups 查询。", "flags": ["<name> (位置参数,页面名)"]],
     ["name": "delete-group", "description": "删除一个槽位组(软删除)。其数据目录会被移动到 .trash，可恢复；.trash 会自动清理(默认保留最近 30 天/最多 50 条)。id 不存在会返回错误。", "flags": ["<id> (位置参数,槽位组 id)"]],
     ["name": "delete-page", "description": "删除一个页面及其下所有槽位组(软删除)。相关数据目录会被移动到 .trash，可恢复；.trash 会自动清理(默认保留最近 30 天/最多 50 条)。id 不存在会返回错误。", "flags": ["<id> (位置参数,页面 id)"]],
     ["name": "write-attachment", "description": "向某槽位追加一个或多个文件作为附件（按顺序），不改动槽位主体内容。图片扩展名归为 image 类型，其余为 file。", "flags": ["<slot> (位置参数,1..N)", "<file> [file ...] (位置参数,一个或多个文件路径,支持 ~ 与相对路径)", "--group <id|name> (默认 default;可传 id 或组名)", "--group-name <name> (按组名精确匹配)", "--replace (先清空该槽位已有附件再写入)", "--label <string> (可选)", "--force (跳过跨进程锁,风险自负)"]]
@@ -813,8 +813,14 @@ func cmdCreatePage(_ args: ParsedArgs) -> Never {
         fail("missing page name (usage: create-page <name>)")
     }
     do {
-        let page = try storage.createPage(name: name)
-        success(["page": ["id": page.id, "name": page.name, "order": page.order]])
+        let result = try storage.createPage(name: name)
+        var payload: [String: Any] = [
+            "page": ["id": result.page.id, "name": result.page.name, "order": result.page.order]
+        ]
+        if let g = result.defaultGroup {
+            payload["defaultGroup"] = ["id": g.id, "name": g.name]
+        }
+        success(payload)
     } catch let e as StorageLockError {
         fail(e.errorDescription ?? "storage is busy (lock timeout)")
     } catch let e as PageError {

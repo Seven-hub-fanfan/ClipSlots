@@ -1,6 +1,6 @@
 ---
 name: clipslots-manager
-description: 通过命令行工具 clipslots 以编程方式操作 macOS 剪贴板槽位管理器 ClipSlots。能读取/写入/检索槽位内容、把内容加载到系统剪贴板、批量整理文件夹素材到"页面→槽位组→槽位"三层结构、创建/删除页面与槽位组。适用场景：需要把文本或文件存进 ClipSlots 槽位、读出或搜索已存内容、把某槽位内容放到剪贴板供粘贴、按规则批量归档素材、清理整理槽位数据等。要求 macOS 且已安装 ClipSlots v2.9.29+（CLI 位于 /usr/local/bin/clipslots）。
+description: 通过命令行工具 clipslots 以编程方式操作 macOS 剪贴板槽位管理器 ClipSlots。能读取/写入/检索槽位内容、把内容加载到系统剪贴板、批量整理文件夹素材到"页面→槽位组→槽位"三层结构、创建/删除页面与槽位组。适用场景：需要把文本或文件存进 ClipSlots 槽位、读出或搜索已存内容、把某槽位内容放到剪贴板供粘贴、按规则批量归档素材、清理整理槽位数据等。要求 macOS 且已安装 ClipSlots v2.9.32+（CLI 位于 /usr/local/bin/clipslots）。
 author: 帅帅
 ---
 
@@ -18,11 +18,13 @@ author: 帅帅
   - 默认组 id：`default`；默认页 id：`default_page`；每组固定 `1..10` 共 10 个槽位。
   - **每个页面最多 10 个槽位组**；槽位组数超限需新建页面。
 - 省略 `--group` 默认操作 `default` 组（**注意**：`list` 的分页参数是 `--page-size`/`--page-num`，与 `--page` 完全不同）。
-- **按 UUID 或名称过滤/指定页面**（适用于接受 `--page` 的命令：`list`、`read`、`write`、`paste`、`create-group`）：
+- **按 UUID 或名称过滤/指定页面**（适用于接受 `--page` 的命令：`list`、`read`、`write`、`paste`、`create-group`、`groups`）：
   - `--page <uuid>`：按 UUID 过滤/指定页面
   - `--page-name <名称>`：按名称过滤/指定页面，找不到时报错（不会静默回落到默认页）
   - 两者功能等价，查找方式不同，互斥使用
-- **按组名引用（v2.9.16）**：读写类命令（`list`/`read`/`write`/`paste`/`search`/`clear`/`write-attachment`）的 `--group` 既可传组 id，也可直接传组名（如 `--group "导入 1"`）；也可用专门的 `--group-name "<组名>"` 精确匹配（优先级高于 `--group`，无匹配则报错）。匹配顺序：先按 id，再按 name。组名不确定时先 `groups` 查真实名称。
+- **`--page`/`--page-name` 会约束 group 匹配范围（v2.9.32，重要）**：在 `list`/`read`/`write`/`paste` 中，只要同时传了页面，`--group`/`--group-name` 的匹配就被限定在**该页面内**，不再全局取第一个同名组。组名允许跨页面重复，因此**跨页写入务必带上 `--page-name`（或 `--page`）**，否则同名组可能命中别的页面导致写错页面。
+  - **护栏（A2）**：若页面与组不一致（传了 `--page-name X` 但组 `Y` 不在 X 页面内），命令返回 `{"ok":false,"error":"group 'Y' not found in page 'X'"}`，不会静默写到别处。
+- **按组名引用（v2.9.16）**：读写类命令（`list`/`read`/`write`/`paste`/`search`/`clear`/`write-attachment`）的 `--group` 既可传组 id，也可直接传组名（如 `--group "导入 1"`）；也可用专门的 `--group-name "<组名>"` 精确匹配（优先级高于 `--group`，无匹配则报错）。匹配顺序：先按 id，再按 name。组名不确定时先 `groups`（可加 `--page-name` 限定页面）查真实名称。
 - **未知 flag 会报错（v2.9.7）**：给某命令传它不支持的 `--flag` 会返回 `ok:false`（`unknown flag: --xxx for command '...' (allowed flags: ...)`）。不确定某命令支持哪些 flag 时先跑 `<cmd> --help`。仅校验 `--flag`，位置参数不受影响。
 - 每个槽位包含：**主体内容（items，文本/图片/文件）** + **附件列表（attachments，按顺序）** + 标签(label)。主体与附件相互独立，主体可为空而只有附件。
 
@@ -37,18 +39,21 @@ author: 帅帅
 
 ### 只读
 ```bash
-clipslots version                                  # {"ok":true,"version":"2.9.7"}
+clipslots version                                  # {"ok":true,"version":"2.9.33"}
 clipslots help                                     # 命令清单 + version/defaultGroup/defaultPage/slotCount
-clipslots groups                                   # {groups:[{id,name,pageId,pageName,pageCount,slotCount,current}]}
+clipslots groups [--page <uuid>|--page-name <名称>] # {groups:[{id,name,pageId,pageName,pageCount,slotCount,current}]}；带页面则只列该页的组(v2.9.32 A4)
 clipslots pages                                    # {pages:[{id,name,current}]}
 # list 支持分页：传 --page-size 后按页返回并附带 pagination 元信息（见下）
+# list 只传 --page/--page-name 而不传组时：列出该页所有组（v2.9.32 A3，见下）
 clipslots list [--group <id>] [--page <uuid>|--page-name <名称>] [--page-size <N>] [--page-num <N>]
 clipslots read <slot> [--group <id>] [--page <uuid>|--page-name <名称>]               # {slot,label,preview,text,htmlSource,types,attachmentCount,empty}
 clipslots search <query> [--group <id>] [--all-groups] [--limit 50]   # 子串搜索(不分大小写)，命中范围含 预览/正文/标签/附件文件名
 ```
 
+- **`groups --page-name <页面名>`（v2.9.32 A4，判空核心原语）**：只返回该页面下的槽位组。判断"某页面是否有空组可用"应以此为准——遍历该页各组、配合 `list --page-name` 看槽位 `empty`/`attachmentCount`，**不要**再用旧的 `list --page-name`（无 `--group` 时旧版会回落全局 `default` 组，导致误判）。
 - `list` 返回顶层对象 `{group,page,slots:[{slot,label,preview,type,attachmentCount,empty}]}`（`slots` 是字段，不是裸数组）。
-- **`list` 分页**：传 `--page-size <N>`（正整数）即按页返回，额外带 `pagination:{pageNum,pageSize,total,totalPages,hasMore}`；`--page-num <N>` 从 1 开始（默认 1）。不传 `--page-size` 则返回全部、无 pagination 字段（向后兼容）。
+- **`list` 只指定页面、不指定组（v2.9.32 A3）**：返回 `{page,pageName,groupCount,groups:[{group,name,slots:[...]}]}`——即该页面下**所有组各自的槽位**，`groupCount` 为该页组数（新建页通常为 1，即自动生成的空默认组）。不再像旧版那样回落到全局 `default` 组（那是"误判已满"的根因）。要单组结果时显式带 `--group`/`--group-name`。
+- **`list` 分页**：传 `--page-size <N>`（正整数）即按页返回，额外带 `pagination:{pageNum,pageSize,total,totalPages,hasMore}`；`--page-num <N>` 从 1 开始（默认 1）。不传 `--page-size` 则返回全部、无 pagination 字段（向后兼容）。分页仅作用于单组列表。
 - `type` 可能取值：`empty`（主体+附件都空）、`attachment`（主体空但有附件）、`image`（含图片数据）、`image-file`、`video-file`、`file`、`html`、`text`、`rtf`、`other`。
 
 ### 写入 / 变更
@@ -76,7 +81,7 @@ clipslots clear <slot> [--group <id|name>] [--force]
 # 新建槽位组(返回 id)；页面已满(10组)报错 → 先 create-page；同页面不允许重名(冲突改名或加 -2/-3)
 clipslots create-group <name> [--page <uuid>|--page-name <名称>]
 
-# 新建页面(返回 id)；页面名不可重复
+# 新建页面(返回 id)；页面名不可重复。v2.9.33: 同步创建默认槽位组并在返回值附带 defaultGroup {id,name}，可直接用其 id 写入，无需再跑 groups 查询
 clipslots create-page <name>
 
 # 删除槽位组 / 页面(软删除→移动到 .trash，可人工恢复；.trash 自动清理保留30天/50条)；id 不存在返回 ok:false
@@ -114,16 +119,11 @@ clipslots write --help
 先决定"存到哪个页面/哪个槽位组"，再按第 3 节判定"具体怎么放"。核心是**默认最保守、不碰已有数据**。
 
 1. 先判断：用户有没有指定目标页面/组？
-2. **【没有指定 = 默认】** 优先"新建页面 + 新建槽位组"（最安全，不碰已有数据）。
-   - **新建页面后先复用默认空组**：`create-page` 会自动为新页面建一个默认槽位组。因此新建页面后：先调 `list --page-name <页面名>` 查看该页面组列表；若存在空的默认槽位组（`attachmentCount=0` 且主体为空）→ 直接用它写第一批数据；只有当默认组已有内容时才新建额外的组。避免页面上残留闲置空默认组。
-3. **【指定了页面、未指定组】** 扫描该页面所有槽位组找"有空槽"的组：找到 → 确认后存入；都无空槽 → 在该页面新建槽位组。
-4. **【指定了页面 + 组】**：目标位置无内容 → 直接存入；有内容 → 由 `write` 的 `--on-conflict error|overwrite|skip|new-group` 决定行为（**待实现 / 建议用法，当前 CLI 尚未支持**）：
-   - error：已有内容则报错（默认）
-   - overwrite：直接覆盖
-   - skip：跳过有内容的槽位，只写空槽
-   - new-group：自动创建新组写入
-
-   AI agent 遇到冲突时默认行为：创建新组（`--on-conflict new-group`）。该能力落地前仍沿用原策略：询问是否覆盖；不覆盖则给优先级选项：① 同页面新建组；② 新建页面+新组；③ 找空槽依次存（组满建续组 -2/-3，续组满则新建页面+新组）。
+2. **【没有指定 = 默认】** 优先"新建页面 + 复用其默认组"（最安全，不碰已有数据）。
+   - **新建页面直接拿返回的默认组**（v2.9.33）：`create-page` 现在**同步**创建一个空的「默认槽位组」，并在返回 JSON 里附带 `defaultGroup:{id,name}`。因此新建页面后**直接用返回的 `defaultGroup.id` 写第一批数据即可，无需再跑 `groups`/`list` 查询**。旧版的"惰性补建 + 二次查询拿默认组"流程已废弃（那会有时序空窗，查询可能暂时返回空组）。只有需要额外分类时才 `create-group`。**切勿**在新建页后无脑 `create-group`，否则会得到「默认槽位组 + 新组」两个组、残留一个闲置空组。
+3. **【指定了页面、未指定组】** 标准判空流程：先 `groups --page-name <页面名>` 列出该页所有组，再 `list --page-name <页面名>` 看各组槽位的 `empty`/`attachmentCount`，找"有空槽"的组 → 确认后存入；都无空槽 → 在该页面新建槽位组。（**不要**用旧的 `list --page-name` 无组回落判空——旧版会回落全局 `default` 组导致误判已满。）
+4. **【指定了页面 + 组】**：先 `read`/`list`（务必带 `--page-name` 约束到该页面）确认目标槽位是否有内容。目标为空 → 直接存入；已有内容 → **不自作主张覆盖**：询问用户是否覆盖；不覆盖则给优先级选项：① 同页面新建组；② 新建页面+新组；③ 找空槽依次存（组满建续组 -2/-3，续组满则新建页面+新组）。
+   - 注：早期文档提到的 `write --on-conflict error|overwrite|skip|new-group` **当前 CLI 并未实现**，请勿使用；冲突处理一律走"显式读取后判断，或新建组"。
 
 **核心原则**：默认最保守（只新建、不碰已有）；用户指定才询问；冲突时给选项不自作主张；复用已有页面时不改页面名。
 

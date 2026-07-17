@@ -507,7 +507,7 @@ final class SlotStoreObservable: ObservableObject {
     func createPage(name: String) {
         suppressWatcher() // v2.9.4 (#2): self-write
         do {
-            let page = try specialStorage.createPage(name: name)
+            let page = try specialStorage.createPage(name: name).page
             try specialStorage.switchToPage(id: page.id)
             reloadAll()
             showToast("已创建页面「\(page.name)」")
@@ -635,8 +635,9 @@ final class SlotStoreObservable: ObservableObject {
     }
 
     /// Called after a paste finishes. If auto-advance is enabled and `slot` was the
-    /// last non-empty slot of `specialSlotId`, switch to the next group/page after
-    /// a short delay with a subtle animation.
+    /// last non-empty slot of `specialSlotId`, switch to the next group/page
+    /// immediately (v2.9.33: no more 0.5s delay) with a subtle animation and a
+    /// lightweight toast telling the user where it jumped to.
     func maybeAutoAdvance(afterPasting slot: Int, in specialSlotId: String) {
         guard isAutoAdvanceEnabled else { return }
         guard let last = lastNonEmptySlot(in: specialSlotId), slot == last else { return }
@@ -645,19 +646,33 @@ final class SlotStoreObservable: ObservableObject {
             return
         }
 
-        NSLog("[ClipSlots] autoAdvance: slot=\(slot) is last non-empty in \(specialSlotId), advancing to \(targetId)")
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
-            guard let self = self else { return }
-            // Guard against the user having manually switched groups in the meantime.
-            guard self.currentSpecialSlotId == specialSlotId
-                    || self.activeHotkeySpecialSlotId == specialSlotId else {
-                NSLog("[ClipSlots] autoAdvance: group changed before advance fired, skipping")
-                return
-            }
-            withAnimation(.easeInOut(duration: 0.35)) {
-                self.switchSpecialSlot(id: targetId)
-            }
+        // v2.9.33: guard against the user having manually switched groups already.
+        guard currentSpecialSlotId == specialSlotId
+                || activeHotkeySpecialSlotId == specialSlotId else {
+            NSLog("[ClipSlots] autoAdvance: group changed before advance fired, skipping")
+            return
         }
+
+        // Resolve whether this advance crosses a page boundary, and the display names,
+        // BEFORE switching so we can craft the right toast message.
+        let fromPageId = specialSlots.first(where: { $0.id == specialSlotId })?.pageId
+        let targetGroup = specialSlots.first(where: { $0.id == targetId })
+        let targetGroupName = targetGroup?.name ?? "下一组"
+        let crossedPage = targetGroup?.pageId != nil && targetGroup?.pageId != fromPageId
+        let targetPageName = pages.first(where: { $0.id == targetGroup?.pageId })?.name ?? "下一页"
+
+        NSLog("[ClipSlots] autoAdvance: slot=\(slot) is last non-empty in \(specialSlotId), advancing to \(targetId) immediately")
+
+        withAnimation(.easeInOut(duration: 0.28)) {
+            self.switchSpecialSlot(id: targetId)
+        }
+
+        // v2.9.33: override the generic "已切换至" toast from switchSpecialSlot with a
+        // dedicated auto-advance message that stays ~1.5s.
+        let message = crossedPage
+            ? "已跳转到下一页 · \(targetPageName)"
+            : "已切换到「\(targetGroupName)」"
+        showToast(message, duration: 1.5)
     }
 
     // MARK: - Delete Special Slot with Confirmation
@@ -1075,10 +1090,10 @@ final class SlotStoreObservable: ObservableObject {
     // MARK: - Helpers
 
     /// Show a transient toast message that auto-dismisses after 1.2s.
-    private func showToast(_ message: String) {
+    private func showToast(_ message: String, duration: TimeInterval = 1.2) {
         toastMessage = message
         let captured = message
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { [weak self] in
+        DispatchQueue.main.asyncAfter(deadline: .now() + duration) { [weak self] in
             if self?.toastMessage == captured {
                 self?.toastMessage = nil
             }
@@ -3698,7 +3713,7 @@ final class SlotStoreObservable: ObservableObject {
         for pn in 1...actualPagesNeeded {
             let pageName = uniqueImportPageName(existingNames: existingPageNames, startNumber: pn + createdPageCount)
             do {
-                let newPage = try specialStorage.createPage(name: pageName)
+                let newPage = try specialStorage.createPage(name: pageName, withDefaultGroup: false).page
                 createdPageCount += 1
                 // Create groups in the new page (up to maxSpecialSlots)
                 let groupsNeededInPage = min(specialSlotSettings.maxSpecialSlots,

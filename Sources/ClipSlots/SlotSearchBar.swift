@@ -8,6 +8,8 @@ struct SlotSearchBar: View {
     @Binding var selectedFilter: SlotFilterType
     @Binding var searchScope: SlotSearchScope
     @Environment(\.colorScheme) private var colorScheme
+    // v2.9.33: "自动前进" toggle moved here (filter row, rightmost) from the top-right toolbar.
+    @AppStorage(UserPreferenceKeys.autoAdvanceAfterPaste) private var autoAdvanceAfterPaste = false
 
     var body: some View {
         // v2.9.18: 搜索行与筛选行的散落 spacing 统一收敛到 AppTheme.spacingSmall。
@@ -56,16 +58,61 @@ struct SlotSearchBar: View {
                     .stroke(AppTheme.searchFieldStroke(colorScheme), lineWidth: 1)
             )
 
-            // Filter chips
-            ScrollView(.horizontal, showsIndicators: false) {
-                // v2.9.18: chip 间距收敛到 AppTheme.spacingSmall，与搜索行保持一致节奏。
-                HStack(spacing: AppTheme.spacingSmall) {
-                    ForEach(SlotFilterType.allCases) { filter in
-                        filterChip(filter)
+            // Filter chips + auto-advance toggle (v2.9.33)
+            HStack(alignment: .center, spacing: AppTheme.spacingSmall) {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    // v2.9.18: chip 间距收敛到 AppTheme.spacingSmall，与搜索行保持一致节奏。
+                    HStack(spacing: AppTheme.spacingSmall) {
+                        ForEach(SlotFilterType.allCases) { filter in
+                            filterChip(filter)
+                        }
                     }
                 }
+
+                autoAdvanceToggle
             }
         }
+    }
+
+    // v2.9.33: "自动前进" toggle — sits at the rightmost of the filter row so it reads
+    // as part of the same control cluster. On/off states are clearly differentiated by
+    // color fill, border and a filled vs. hollow icon.
+    private var autoAdvanceToggle: some View {
+        Button {
+            withAnimation(.easeInOut(duration: 0.18)) {
+                autoAdvanceAfterPaste.toggle()
+            }
+        } label: {
+            HStack(spacing: AppTheme.spacingTight) {
+                Image(systemName: autoAdvanceAfterPaste
+                      ? "arrow.forward.circle.fill"
+                      : "arrow.forward.circle")
+                    .font(.system(size: 10, weight: .semibold))
+                Text("自动前进")
+                    .font(.system(size: 11, weight: .medium))
+            }
+            .padding(.horizontal, 8)
+            .padding(.vertical, 5)
+            .background(
+                Capsule()
+                    .fill(autoAdvanceAfterPaste
+                          ? Color.accentColor.opacity(0.18)
+                          : AppTheme.filterChipBackground(colorScheme))
+            )
+            .overlay(
+                Capsule()
+                    .stroke(autoAdvanceAfterPaste
+                            ? Color.accentColor.opacity(0.55)
+                            : Color.clear,
+                            lineWidth: 1)
+            )
+            .foregroundColor(autoAdvanceAfterPaste
+                             ? Color.accentColor
+                             : AppTheme.filterChipText(colorScheme))
+        }
+        .buttonStyle(.plain)
+        .fixedSize()
+        .help("开启后：粘贴当前组最后一个非空槽位后，立即切换到下一组/下一页（最后一页最后一组不循环）")
     }
 
     private func filterChip(_ filter: SlotFilterType) -> some View {

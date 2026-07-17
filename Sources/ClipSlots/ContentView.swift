@@ -18,10 +18,6 @@ struct ContentView: View {
 // users who already selected system/light/dark are not overwritten.
 @AppStorage("appearanceMode") private var appearanceModeRaw = ThemeMode.dark.rawValue
 
-    // v2.9.31: auto-advance to the next group/page after pasting the last non-empty
-    // slot of the current group. Persisted across launches; default off.
-    @AppStorage(UserPreferenceKeys.autoAdvanceAfterPaste) private var autoAdvanceAfterPaste = false
-
     // v2.5: Search state
     @State private var searchText: String = ""
     @State private var selectedFilter: SlotFilterType = .all
@@ -271,6 +267,7 @@ struct ContentView: View {
     }
 
     private func toastIcon(for message: String) -> String {
+        if message.contains("已切换到") || message.contains("下一页") { return "arrow.forward.circle.fill" }
         if message.contains("覆盖") { return "arrow.triangle.2.circlepath" }
         if message.contains("已保存") || message.contains("保存") { return "checkmark.circle.fill" }
         if message.contains("已复制") || message.contains("复制") { return "doc.on.doc" }
@@ -501,8 +498,6 @@ struct ContentView: View {
     // group look stuck to the top of the row.
     private var toolbarActions: some View {
         HStack(alignment: .center, spacing: 8) {
-            autoAdvanceToggle
-
             ToolbarActionButton(
                 title: "导入",
                 icon: "folder.badge.plus",
@@ -534,43 +529,7 @@ struct ContentView: View {
         .padding(.horizontal, 2)
     }
 
-    // v2.9.31: "自动前进" toggle — directly visible in the slot main view (not in
-    // Settings). When on, pasting the last non-empty slot of a group auto-switches
-    // to the next group / next page's first group. On-state is color-highlighted.
-    private var autoAdvanceToggle: some View {
-        Button {
-            withAnimation(.easeInOut(duration: 0.2)) {
-                autoAdvanceAfterPaste.toggle()
-            }
-        } label: {
-            HStack(spacing: 4) {
-                Image(systemName: autoAdvanceAfterPaste
-                      ? "arrow.forward.circle.fill"
-                      : "arrow.forward.circle")
-                    .font(.system(size: 12, weight: .semibold))
-                Text("自动前进")
-                    .font(.system(size: 11, weight: .medium))
-            }
-            .foregroundColor(autoAdvanceAfterPaste ? Color.accentColor : .secondary)
-            .padding(.horizontal, 8)
-            .frame(height: 26)
-            .background(
-                RoundedRectangle(cornerRadius: 6, style: .continuous)
-                    .fill(autoAdvanceAfterPaste
-                          ? Color.accentColor.opacity(0.15)
-                          : Color.primary.opacity(0.05))
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: 6, style: .continuous)
-                    .stroke(autoAdvanceAfterPaste
-                            ? Color.accentColor.opacity(0.45)
-                            : Color.secondary.opacity(0.15),
-                            lineWidth: 1)
-            )
-        }
-        .buttonStyle(.plain)
-        .help("开启后：粘贴当前组最后一个非空槽位后，自动切换到下一组/下一页（最后一页最后一组不循环）")
-    }
+    // v2.9.31: "自动前进" toggle moved to the filter row (see SlotSearchBar, v2.9.33).
 
     // v2.4: renamed from specialSlotTagBar — shows only current page's slot groups
     private var specialSlotTagBar: some View {
