@@ -12,7 +12,7 @@ import ClipSlotsKit
 //   success: {"ok": true, ...}
 //   error:   {"ok": false, "error": "message"}  (exit code 1)
 
-let CLI_VERSION = "2.9.31"
+let CLI_VERSION = "2.9.32"
 let DEFAULT_GROUP = "default"
 let DEFAULT_PAGE = "default_page"
 
@@ -157,15 +157,53 @@ func uniqueTypes(_ c: SlotContent) -> [String] {
 ///   • `--group <val>` → tries id match first (backward compatible); if no id
 ///     matches, falls back to a name match; otherwise passes the literal value
 ///     through (e.g. the bare `default` group that may only exist on disk).
-func resolveGroup(_ args: ParsedArgs) -> String {
+///
+/// v2.9.32 (A1/A2): group resolution is now PAGE-SCOPED. When the caller passes a
+/// resolved `pageId` (from --page / --page-name), the candidate set is restricted
+/// to groups on that page, so a group NAME or ID can never silently resolve to a
+/// same-named group on a DIFFERENT page (the root cause of the "write到错误页面"
+/// P0). If a page is constrained and the requested group is not on it, we FAIL with
+/// a clear mismatch error (A2) instead of falling back to another page. Without a
+/// page constraint (`inPage == nil`) behaviour is unchanged (global, backward
+/// compatible) — used by commands that have no page flags (search/clear/…).
+func resolveGroup(_ args: ParsedArgs, inPage pageId: String? = nil) -> String {
     let index = storage.loadIndex()
+    // Candidate scope: page-constrained when a page was requested, else global.
+    let scope = pageId.map { pid in index.specialSlots.filter { $0.pageId == pid } }
+                      ?? index.specialSlots
+    // Human-friendly label for the requested page (name if known, else the id).
+    let pageLabel: String? = pageId.map { pid in
+        index.pages.first(where: { $0.id == pid })?.name ?? pid
+    }
+
     if let name = args.flag("group-name") {
-        if let g = index.specialSlots.first(where: { $0.name == name }) { return g.id }
+        if let g = scope.first(where: { $0.name == name }) { return g.id }
+        if let label = pageLabel {
+            // A2 guardrail: named group is not on the requested page → refuse.
+            fail("group '\(name)' not found in page '\(label)'")
+        }
         fail("no group found with name '\(name)' (run 'clipslots groups' to list names)")
     }
-    let raw = args.flag("group") ?? DEFAULT_GROUP
-    if index.specialSlots.contains(where: { $0.id == raw }) { return raw }
-    if let g = index.specialSlots.first(where: { $0.name == raw }) { return g.id }
+
+    if let explicit = args.flag("group") {
+        if scope.contains(where: { $0.id == explicit }) { return explicit }
+        if let g = scope.first(where: { $0.name == explicit }) { return g.id }
+        if let label = pageLabel {
+            // A2 guardrail: an explicit --group (id or name) that resolves to nothing
+            // on the requested page is a page/group mismatch → refuse.
+            fail("group '\(explicit)' not found in page '\(label)'")
+        }
+        // No page constraint: keep literal passthrough (e.g. bare on-disk group id).
+        return explicit
+    }
+
+    // No explicit group flag → the documented default group, still page-scoped for
+    // matching but with a backward-compatible literal fallback. Note: `list` handles
+    // the page-without-group case via its own page-scoped logic (A3) before reaching
+    // here, so this default is only hit by read/write/paste when no group is given.
+    let raw = DEFAULT_GROUP
+    if scope.contains(where: { $0.id == raw }) { return raw }
+    if let g = scope.first(where: { $0.name == raw }) { return g.id }
     return raw
 }
 
@@ -276,13 +314,13 @@ func cmdVersion() -> Never {
 let COMMANDS: [[String: Any]] = [
     ["name": "version", "description": "打印 CLI 版本号。", "flags": [] as [String]],
     ["name": "help", "description": "列出所有命令、说明与参数（无参数时也返回此内容）。", "flags": [] as [String]],
-    ["name": "groups", "description": "列出所有槽位组（SpecialSlot）。", "flags": [] as [String]],
+    ["name": "groups", "description": "列出槽位组（SpecialSlot）。可用 --page/--page-name 只列出指定页面下的组，是判断某页面是否有（空）组的标准入口。", "flags": ["--page <id> (可选,只列出该页面下的组)", "--page-name <name> (可选,按页面名精确匹配;找不到会报错,与 --page 互斥)"]],
     ["name": "pages", "description": "列出所有页面（SlotPage）。", "flags": ["--group <id> (可选,当前实现忽略,页面为全局)"]],
-    ["name": "list", "description": "列出某个槽位组内 1..N 号槽位的摘要。支持分页：传 --page-size 后按页返回并附带 pagination 元信息。", "flags": ["--group <id|name> (默认 default;可传 id 或组名)", "--group-name <name> (按组名精确匹配,优先于 --group)", "--page <id> (可选,仅回显页面 id)", "--page-name <name> (按页面名精确匹配;找不到会报错,与 --page 互斥)", "--page-size <N> (可选,每页槽位数,>0 时启用分页)", "--page-num <N> (可选,第几页,从 1 开始,默认 1,需配合 --page-size)"]],
-    ["name": "read", "description": "读取单个槽位的完整内容（纯文本、HTML源、类型、附件数等）。", "flags": ["<slot> (位置参数,1..N)", "--group <id|name> (默认 default;可传 id 或组名)", "--group-name <name> (按组名精确匹配)", "--page <id> (可选,仅回显)", "--page-name <name> (按页面名精确匹配;找不到会报错,与 --page 互斥)"]],
-    ["name": "write", "description": "向槽位写入纯文本内容（保留已有附件），可选设置标签。成功返回里含 preview 字段(前100字符)，无需再 read 确认。支持 --batch 从 stdin 传入 JSON 数组一次写多条。", "flags": ["<slot> (位置参数,1..N;--batch 时省略)", "--text <string> (必填, 传 - 表示从 stdin 读取;--batch 时省略)", "--batch (从 stdin 读取 JSON 数组批量写入,见下)", "--group <id|name> (默认 default;可传 id 或组名)", "--group-name <name> (按组名精确匹配)", "--page <id> (可选,仅回显)", "--page-name <name> (按页面名精确匹配;找不到会报错,与 --page 互斥)", "--label <string> (可选)", "--force (跳过跨进程锁,风险自负)"]],
+    ["name": "list", "description": "列出槽位摘要。指定 --group/--group-name 时列出该组 1..N 号槽位；只给 --page/--page-name 而不给组时，列出该页面下所有组各自的槽位并附 groupCount（页面无组则 groupCount=0，不再回落全局 default 组）。同时给页面和组时，组匹配被约束在该页面内。支持分页：传 --page-size 后按页返回并附带 pagination 元信息。", "flags": ["--group <id|name> (默认 default;可传 id 或组名)", "--group-name <name> (按组名精确匹配,优先于 --group)", "--page <id> (可选,约束 group 匹配到该页面;单独使用时列出该页所有组)", "--page-name <name> (按页面名精确匹配;找不到会报错,与 --page 互斥;单独使用时列出该页所有组)", "--page-size <N> (可选,每页槽位数,>0 时启用分页)", "--page-num <N> (可选,第几页,从 1 开始,默认 1,需配合 --page-size)"]],
+    ["name": "read", "description": "读取单个槽位的完整内容（纯文本、HTML源、类型、附件数等）。", "flags": ["<slot> (位置参数,1..N)", "--group <id|name> (默认 default;可传 id 或组名)", "--group-name <name> (按组名精确匹配)", "--page <id> (可选,约束 --group/--group-name 匹配到该页面)", "--page-name <name> (按页面名精确匹配;找不到会报错,与 --page 互斥;约束 group 匹配范围)"]],
+    ["name": "write", "description": "向槽位写入纯文本内容（保留已有附件），可选设置标签。成功返回里含 preview 字段(前100字符)，无需再 read 确认。支持 --batch 从 stdin 传入 JSON 数组一次写多条。", "flags": ["<slot> (位置参数,1..N;--batch 时省略)", "--text <string> (必填, 传 - 表示从 stdin 读取;--batch 时省略)", "--batch (从 stdin 读取 JSON 数组批量写入,见下)", "--group <id|name> (默认 default;可传 id 或组名)", "--group-name <name> (按组名精确匹配)", "--page <id> (可选,约束 --group/--group-name 匹配到该页面,防止写到同名他页组)", "--page-name <name> (按页面名精确匹配;找不到会报错,与 --page 互斥;约束 group 匹配范围)", "--label <string> (可选)", "--force (跳过跨进程锁,风险自负)"]],
     ["name": "search", "description": "在槽位预览/文本/标签中做大小写不敏感子串搜索。", "flags": ["<query> (位置参数)", "--group <id|name> (默认 default;可传 id 或组名)", "--group-name <name> (按组名精确匹配)", "--all-groups (在所有槽位组内搜索)", "--limit <N> (默认 50)"]],
-    ["name": "paste", "description": "把某槽位的内容加载到系统剪贴板(NSPasteboard)，不模拟按键。", "flags": ["<slot> (位置参数,1..N)", "--group <id|name> (默认 default;可传 id 或组名)", "--group-name <name> (按组名精确匹配)", "--page <id> (可选,仅回显)", "--page-name <name> (按页面名精确匹配;找不到会报错,与 --page 互斥)"]],
+    ["name": "paste", "description": "把某槽位的内容加载到系统剪贴板(NSPasteboard)，不模拟按键。", "flags": ["<slot> (位置参数,1..N)", "--group <id|name> (默认 default;可传 id 或组名)", "--group-name <name> (按组名精确匹配)", "--page <id> (可选,约束 --group/--group-name 匹配到该页面)", "--page-name <name> (按页面名精确匹配;找不到会报错,与 --page 互斥;约束 group 匹配范围)"]],
     ["name": "clear", "description": "清空某个槽位（内容、标签、附件全部移除）。", "flags": ["<slot> (位置参数,1..N)", "--group <id|name> (默认 default;可传 id 或组名)", "--group-name <name> (按组名精确匹配)", "--force (跳过跨进程锁,风险自负)"]],
     ["name": "create-group", "description": "在指定页面新建一个槽位组，返回其 id。页面已满(10组)会返回错误，此时应先 create-page。v2.9.4: 同页面内不允许重名(会返回错误)，冲突时请改名或加 -2 后缀。", "flags": ["<name> (位置参数,组名)", "--page <id> (可选,默认当前页面)", "--page-name <name> (按页面名精确匹配指定目标页;找不到会报错,与 --page 互斥)"]],
     ["name": "create-page", "description": "新建一个页面，返回其 id。页面名不可重复。", "flags": ["<name> (位置参数,页面名)"]],
@@ -299,7 +337,7 @@ let COMMANDS: [[String: Any]] = [
 let COMMAND_ALLOWED_FLAGS: [String: Set<String>] = [
     "version": [],
     "help": [],
-    "groups": [],
+    "groups": ["page", "page-name"],
     "pages": ["group", "group-name"],
     "list": ["group", "group-name", "page", "page-name", "page-size", "page-num"],
     "read": ["group", "group-name", "page", "page-name"],
@@ -361,11 +399,18 @@ func cmdCommandHelp(_ name: String) -> Never {
     ])
 }
 
-func cmdGroups() -> Never {
+func cmdGroups(_ args: ParsedArgs) -> Never {
     let index = storage.loadIndex()
     let pageNames = Dictionary(uniqueKeysWithValues: index.pages.map { ($0.id, $0.name) })
+    // v2.9.32 (A4): optional page filter. `groups --page/--page-name X` returns only
+    // the groups that live on page X. This is the first-class primitive an agent uses
+    // to decide whether a page has any (empty) group before writing — replacing the
+    // misleading `list --page-name` path. Without a page flag behaviour is unchanged
+    // (all groups, every page). --page / --page-name validity + exclusivity is
+    // enforced by resolvePageFlag (page-name errors if unknown).
+    let filterPage = resolvePageFlag(args)
     var groups: [[String: Any]] = []
-    for g in index.specialSlots {
+    for g in index.specialSlots where filterPage == nil || g.pageId == filterPage {
         groups.append([
             "id": g.id,
             "name": g.name,
@@ -392,10 +437,9 @@ func cmdPages(_ args: ParsedArgs) -> Never {
     success(["pages": pages])
 }
 
-func cmdList(_ args: ParsedArgs) -> Never {
-    let group = resolveGroup(args)
-    let index = storage.loadIndex()
-    let page = resolvePageFlag(args) ?? pageId(forGroup: group, in: index)
+// v2.9.32: shared per-slot summary builder, reused by both the single-group and
+// the whole-page (A3) listing paths.
+func slotSummaries(in group: String) -> [[String: Any]] {
     var slots: [[String: Any]] = []
     for n in 1...slotCount {
         let content = storage.get(n, in: group)
@@ -409,6 +453,41 @@ func cmdList(_ args: ParsedArgs) -> Never {
             "empty": isTrulyEmpty(content)
         ])
     }
+    return slots
+}
+
+func cmdList(_ args: ParsedArgs) -> Never {
+    let index = storage.loadIndex()
+    let requestedPage = resolvePageFlag(args)
+    let hasGroupFlag = args.flag("group") != nil || args.flag("group-name") != nil
+
+    // v2.9.32 (A3): a page was given WITHOUT a group → list EVERY group on that page
+    // instead of silently falling back to the global "default" group. The old
+    // behaviour returned the (non-empty) global default group's slots, so an agent
+    // that had just created a fresh page saw "full" slots and wrongly created extra
+    // groups. `groupCount` makes the page's real state explicit: 0 means the page has
+    // no group yet (create-page does NOT auto-create one — use create-group).
+    if let pageId = requestedPage, !hasGroupFlag {
+        let pageName = index.pages.first(where: { $0.id == pageId })?.name
+        let groupsInPage = index.specialSlots
+            .filter { $0.pageId == pageId }
+            .sorted { $0.order < $1.order }
+        let groupsOut: [[String: Any]] = groupsInPage.map { g in
+            ["group": g.id, "name": g.name, "slots": slotSummaries(in: g.id)]
+        }
+        success([
+            "page": pageId,
+            "pageName": jsonValue(pageName),
+            "groupCount": groupsInPage.count,
+            "groups": groupsOut
+        ])
+    }
+
+    // Single-group listing (v2.9.32: now page-scoped when a page is also given, so a
+    // --group-name never resolves to a same-named group on another page).
+    let group = resolveGroup(args, inPage: requestedPage)
+    let page = requestedPage ?? pageId(forGroup: group, in: index)
+    let slots = slotSummaries(in: group)
 
     // v2.9.7 (S2): optional pagination. When --page-size is provided we return
     // only that slice plus a `pagination` object so agents can page through long
@@ -444,8 +523,9 @@ func cmdList(_ args: ParsedArgs) -> Never {
 }
 
 func cmdRead(_ args: ParsedArgs) -> Never {
-    let group = resolveGroup(args)
-    _ = resolvePageFlag(args) // v2.9.29: enforce --page/--page-name validity + exclusivity
+    // v2.9.32 (A1): resolve the page first, then scope group matching to it.
+    let requestedPage = resolvePageFlag(args)
+    let group = resolveGroup(args, inPage: requestedPage)
     let n = parseSlot(args.positionals.first)
     let content = storage.get(n, in: group)
     let label = storage.getLabel(n, in: group) ?? content.label
@@ -502,8 +582,7 @@ func cmdWrite(_ args: ParsedArgs) -> Never {
     // v2.9.16 (#3): batch mode dispatches to a separate handler.
     if args.hasFlag("batch") { cmdWriteBatch(args) }
 
-    let group = resolveGroup(args)
-    _ = resolvePageFlag(args) // v2.9.29: enforce --page/--page-name validity + exclusivity
+    let group = resolveGroup(args, inPage: resolvePageFlag(args)) // v2.9.32 (A1): page-scoped
     let n = parseSlot(args.positionals.first)
     guard var text = args.flag("text") else {
         fail("missing --text <string> (use --text - to read from stdin, or --batch for bulk)")
@@ -659,8 +738,7 @@ func cmdSearch(_ args: ParsedArgs) -> Never {
 }
 
 func cmdPaste(_ args: ParsedArgs) -> Never {
-    let group = resolveGroup(args)
-    _ = resolvePageFlag(args) // v2.9.29: enforce --page/--page-name validity + exclusivity
+    let group = resolveGroup(args, inPage: resolvePageFlag(args)) // v2.9.32 (A1): page-scoped
     let n = parseSlot(args.positionals.first)
     let content = storage.get(n, in: group)
     guard !content.isEmpty else {
@@ -902,7 +980,7 @@ case "version", "--version", "-v":
 case "help", "--help", "-h":
     cmdHelp()
 case "groups":
-    cmdGroups()
+    cmdGroups(parsed)
 case "pages":
     cmdPages(parsed)
 case "list":
