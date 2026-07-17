@@ -9,6 +9,8 @@ enum UserPreferenceKeys {
     static let showSaveToast = "showSaveToast"
     static let showCopyToast = "showCopyToast"
     static let enableSlotConnection = "enableSlotConnection"
+    // v2.9.31: auto-advance to next group/page after pasting the last non-empty slot.
+    static let autoAdvanceAfterPaste = "autoAdvanceAfterPaste"
 }
 
 extension UserDefaults {

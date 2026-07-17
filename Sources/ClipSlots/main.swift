@@ -583,6 +583,83 @@ final class SlotStoreObservable: ObservableObject {
         }
     }
 
+    // MARK: - v2.9.31 Auto-Advance After Paste
+    //
+    // When the "自动前进" toggle is on, pasting the LAST non-empty slot of the
+    // current group automatically switches focus + selection to the next group
+    // (or the first group of the next page). It never wraps: the last group of
+    // the last page simply stays put. When the toggle is off, paste behavior is
+    // completely unchanged.
+
+    var isAutoAdvanceEnabled: Bool {
+        UserDefaults.standard.bool(forKey: UserPreferenceKeys.autoAdvanceAfterPaste)
+    }
+
+    /// Index of the last non-empty slot in the given group, or nil if the group is empty.
+    private func lastNonEmptySlot(in specialSlotId: String) -> Int? {
+        var last: Int? = nil
+        for slot in 1...config.slots where !specialStorage.get(slot, in: specialSlotId).isEmpty {
+            last = slot
+        }
+        return last
+    }
+
+    /// Resolve the group we should auto-advance to after finishing `currentGroupId`.
+    /// Returns nil when there is nowhere to go (last group of the last page).
+    private func autoAdvanceTargetGroupId(from currentGroupId: String) -> String? {
+        guard let currentGroup = specialSlots.first(where: { $0.id == currentGroupId }) else { return nil }
+        let pageId = currentGroup.pageId
+
+        let groupsInPage = specialSlots
+            .filter { $0.pageId == pageId }
+            .sorted { $0.order < $1.order }
+
+        if let idx = groupsInPage.firstIndex(where: { $0.id == currentGroupId }),
+           idx < groupsInPage.count - 1 {
+            // There is a next group within the same page.
+            return groupsInPage[idx + 1].id
+        }
+
+        // Current group is the last one in its page — move to the next page's first group.
+        let sortedPages = pages.sorted { $0.order < $1.order }
+        guard let pageIdx = sortedPages.firstIndex(where: { $0.id == pageId }),
+              pageIdx < sortedPages.count - 1 else {
+            return nil // last page + last group → stop, no wrap.
+        }
+
+        let nextPageId = sortedPages[pageIdx + 1].id
+        let nextPageGroups = specialSlots
+            .filter { $0.pageId == nextPageId }
+            .sorted { $0.order < $1.order }
+        return nextPageGroups.first?.id
+    }
+
+    /// Called after a paste finishes. If auto-advance is enabled and `slot` was the
+    /// last non-empty slot of `specialSlotId`, switch to the next group/page after
+    /// a short delay with a subtle animation.
+    func maybeAutoAdvance(afterPasting slot: Int, in specialSlotId: String) {
+        guard isAutoAdvanceEnabled else { return }
+        guard let last = lastNonEmptySlot(in: specialSlotId), slot == last else { return }
+        guard let targetId = autoAdvanceTargetGroupId(from: specialSlotId) else {
+            NSLog("[ClipSlots] autoAdvance: reached last group of last page, staying put")
+            return
+        }
+
+        NSLog("[ClipSlots] autoAdvance: slot=\(slot) is last non-empty in \(specialSlotId), advancing to \(targetId)")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+            guard let self = self else { return }
+            // Guard against the user having manually switched groups in the meantime.
+            guard self.currentSpecialSlotId == specialSlotId
+                    || self.activeHotkeySpecialSlotId == specialSlotId else {
+                NSLog("[ClipSlots] autoAdvance: group changed before advance fired, skipping")
+                return
+            }
+            withAnimation(.easeInOut(duration: 0.35)) {
+                self.switchSpecialSlot(id: targetId)
+            }
+        }
+    }
+
     // MARK: - Delete Special Slot with Confirmation
 
     func deleteSpecialSlotWithConfirmation(id: String) {
@@ -1387,11 +1464,10 @@ final class SlotStoreObservable: ObservableObject {
                     iconName: "paperclip.circle.fill",
                     kind: .success
                 ))
+                self?.maybeAutoAdvance(afterPasting: slot, in: activeId) // v2.9.31
             }
             return
         }
-
-        // Global hotkey paste: uses content already read above for attachments check.
 
         guard !content.isEmpty else {
             NSLog("[ClipSlots] pasteSlot ignored: specialSlot=\(activeId) slot=\(slot) empty")
@@ -1441,6 +1517,8 @@ final class SlotStoreObservable: ObservableObject {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.08, execute: pasteWorkItem)
 
         NSLog("[ClipSlots] pasteSlot scheduled specialSlot=\(activeId) slot=\(slot) preview=\(content.preview)")
+
+        maybeAutoAdvance(afterPasting: slot, in: activeId) // v2.9.31
     }
 
     // MARK: - Radial Paste (targetApp activation + waitUntilFrontmost)
@@ -1474,6 +1552,7 @@ final class SlotStoreObservable: ObservableObject {
                     iconName: "paperclip.circle.fill",
                     kind: .success
                 ))
+                self?.maybeAutoAdvance(afterPasting: slot, in: activeId) // v2.9.31
             }
             return
         }
@@ -1527,6 +1606,8 @@ final class SlotStoreObservable: ObservableObject {
                 }
 
                 self.sendPasteKeystroke()
+
+                self.maybeAutoAdvance(afterPasting: slot, in: activeId) // v2.9.31
 
                 let restoreWorkItem = DispatchWorkItem { [weak self] in
                     guard let self = self else { return }
