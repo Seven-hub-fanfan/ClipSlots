@@ -59,6 +59,9 @@ struct ClipSlotsApp: App {
                     store.installLocalHotkeyGuardIfNeeded()
                     // v2.9.8: 方案 Y — 每次启动检测辅助功能权限并引导。
                     AccessibilityPermissionGuide.checkAndGuideOnLaunch()
+                    // v2.9.30: 启动时静默同步已安装的 Skill，确保各 Agent 用到最新决策流，
+                    // 无需用户再手动点「安装 Skill」。onAppear 已在主线程，直接调用即可。
+                    AgentSkillInstallManager().syncInstalledSkillsOnLaunch()
                 }
         }
         .windowStyle(.titleBar)

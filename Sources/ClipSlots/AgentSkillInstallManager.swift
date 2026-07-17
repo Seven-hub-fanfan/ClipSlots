@@ -250,6 +250,99 @@ final class AgentSkillInstallManager: ObservableObject {
                isError: installed.isEmpty && !skipped.isEmpty)
     }
 
+    // MARK: - 启动时静默自动同步（v2.9.30）
+
+    /// App 启动 / 进入设置页时调用：静默检测各 Agent 已安装的 Skill 是否落后于 App bundle
+    /// 内的最新版本，若落后则自动更新，不弹窗、不打扰用户。
+    ///
+    /// 覆盖范围与手动「安装 Skill」完全一致（同一份 `allAgents` 目标目录清单）。
+    /// 安全策略沿用手动安装：
+    ///   - 软链接目标（含指向旧 bundle 的失效软链）→ 直接重建软链，使其指向当前 bundle；
+    ///   - 真实目录/文件：绝不 `rm -rf`。仅当其确实是本 App 旧版拷贝式安装（目录内含
+    ///     `SKILL.md`）且内容与最新 bundle 不一致时，就地覆盖该 `SKILL.md` 文件；
+    ///     其余情况（用户自建目录等）一律跳过，避免误伤用户数据；
+    ///   - 未安装的 Agent 不做自动安装（尊重用户从未安装过的选择）。
+    func syncInstalledSkillsOnLaunch() {
+        guard let source = bundledSkillDir else {
+            NSLog("[ClipSlots][SkillSync] bundled skill dir not found, skip auto-sync")
+            return
+        }
+
+        refresh()
+
+        var relinked: [String] = []
+        var refreshedCopy: [String] = []
+
+        for agent in detectedAgents {
+            let target = agent.skillTargetPath
+
+            switch computeState(for: agent) {
+            case .installed:
+                // 已是指向当前 bundle 的软链，内容随 bundle 实时同步，无需处理。
+                continue
+
+            case .notInstalled:
+                // 用户从未安装到该 Agent，启动时不主动安装。
+                continue
+
+            case .needsUpdate:
+                if isSymlink(target) {
+                    // 失效软链（指向旧 bundle / 别处）→ 安全重建（removeItem 只删软链本身）。
+                    if trySymlinkWithoutPrivilege(source: source, target: target, skillsDir: agent.skillsDir) {
+                        relinked.append(agent.displayName)
+                        NSLog("[ClipSlots][SkillSync] re-linked stale symlink for \(agent.displayName): \(target) -> \(source)")
+                    } else {
+                        NSLog("[ClipSlots][SkillSync] failed to re-link \(agent.displayName) at \(target) (need privilege), skip silently")
+                    }
+                } else {
+                    // 真实目录/文件：仅当是本 App 旧版拷贝安装（含 SKILL.md）且内容过期时，就地刷新文件。
+                    if refreshLegacyCopyIfOutdated(source: source, targetDir: target) {
+                        refreshedCopy.append(agent.displayName)
+                        NSLog("[ClipSlots][SkillSync] refreshed outdated SKILL.md copy for \(agent.displayName): \(target)")
+                    }
+                }
+            }
+        }
+
+        if relinked.isEmpty && refreshedCopy.isEmpty {
+            NSLog("[ClipSlots][SkillSync] all installed skills up-to-date, nothing to sync")
+        } else {
+            NSLog("[ClipSlots][SkillSync] auto-sync done. relinked=\(relinked) refreshedCopy=\(refreshedCopy)")
+            refresh()
+        }
+    }
+
+    /// 旧版拷贝式安装的兼容处理：`targetDir` 是真实目录，若其中的 `SKILL.md` 与最新 bundle
+    /// 内容不一致，则就地覆盖该文件（绝不删除目录本身），保证 Agent 拿到最新决策流。
+    /// - Returns: 是否实际执行了覆盖更新。
+    private func refreshLegacyCopyIfOutdated(source: String, targetDir: String) -> Bool {
+        var isDir: ObjCBool = false
+        // 必须是真实目录（非软链），且内部含 SKILL.md，才认定为本 App 的拷贝式安装。
+        guard fm.fileExists(atPath: targetDir, isDirectory: &isDir), isDir.boolValue else { return false }
+
+        let targetSkill = (targetDir as NSString).appendingPathComponent("SKILL.md")
+        let sourceSkill = (source as NSString).appendingPathComponent("SKILL.md")
+
+        guard fm.fileExists(atPath: targetSkill),
+              fm.fileExists(atPath: sourceSkill),
+              let sourceData = fm.contents(atPath: sourceSkill) else {
+            return false
+        }
+
+        let targetData = fm.contents(atPath: targetSkill)
+        if targetData == sourceData {
+            return false // 已是最新，跳过。
+        }
+
+        do {
+            try sourceData.write(to: URL(fileURLWithPath: targetSkill), options: .atomic)
+            return true
+        } catch {
+            NSLog("[ClipSlots][SkillSync] failed to overwrite legacy SKILL.md at \(targetSkill): \(error)")
+            return false
+        }
+    }
+
     private func aggregateMessage(installed: [String], skipped: [String]) -> String {
         var parts: [String] = []
         if !installed.isEmpty {

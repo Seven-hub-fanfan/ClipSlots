@@ -42,7 +42,8 @@ struct PluginsView: View {
         }
         .frame(width: 560, height: 588)
         .background(AppTheme.windowBackground(scheme))
-        .onAppear { agentInstaller.refresh() }
+        // v2.9.30: 进入 Skill 市场页时也静默同步一次，确保已安装的 Skill 用到最新决策流。
+        .onAppear { agentInstaller.syncInstalledSkillsOnLaunch() }
     }
 
     // MARK: - Market (list) view
