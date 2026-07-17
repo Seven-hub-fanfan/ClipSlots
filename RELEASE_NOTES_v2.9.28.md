@@ -13,6 +13,8 @@
 3. **Skill 页「安装到 Agent」区域刷新按钮修复**
    刷新按钮现会重新扫描本机 Agent（`~/.claude` / `~/.cursor` / `~/.codex` / `~/.gemini`）并给出可见反馈。
 
+- 节点画布「清除当前槽位组」不再弹出二次确认弹窗，点击后直接清除当前槽位组的连接。
+
 ## 安装说明
 
 打开 DMG 后将 ClipSlots 拖入 Applications 即可。本 DMG 为 ad-hoc 签名，首次打开如遇 Gatekeeper 提示，请右键 → 打开。

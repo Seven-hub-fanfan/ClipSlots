@@ -4,14 +4,12 @@ import ClipSlotsKit
 struct NodeCanvasSheet: View {
     @ObservedObject var store: SlotStoreObservable
     @Environment(\.dismiss) private var dismiss
-    @AppStorage("suppressClearConnectionsConfirm") private var suppressClearConnectionsConfirm = false
     @AppStorage("suppressExportConnectionsPanel") private var suppressExportConnectionsPanel = false
     @State private var activeDrag: NodeCanvasDrag?
     @State private var hoveredNode: Int?
     @State private var hoveredTarget: SlotPortTarget?
     @State private var hoveredEdgeId: UUID?
     @State private var showingExportScopeSheet = false
-    @State private var showingClearConfirmSheet = false
 
     private let canvasWidth: CGFloat = 920
     private let canvasHeight: CGFloat = 520
@@ -170,25 +168,6 @@ struct NodeCanvasSheet: View {
             )
             .frame(width: 420)
         }
-        .sheet(isPresented: $showingClearConfirmSheet) {
-            ConnectionClearConfirmSheet(
-                suppressNextTime: $suppressClearConnectionsConfirm,
-                onCancel: { showingClearConfirmSheet = false },
-                onClearCurrentGroup: {
-                    showingClearConfirmSheet = false
-                    store.clearCurrentConnectionsWithoutConfirm()
-                },
-                onClearCurrentPage: {
-                    showingClearConfirmSheet = false
-                    store.clearCurrentPageConnections()
-                },
-                onClearAll: {
-                    showingClearConfirmSheet = false
-                    store.clearAllConnections()
-                }
-            )
-            .frame(width: 440)
-        }
     }
 
     private var toolbar: some View {
@@ -238,11 +217,8 @@ struct NodeCanvasSheet: View {
             // 「清除」：合并 清除 + 清本组 + 清本页 + 全部，点击选范围。
             Menu {
                 Button(role: .destructive) {
-                    if suppressClearConnectionsConfirm {
-                        store.clearCurrentConnectionsWithoutConfirm()
-                    } else {
-                        showingClearConfirmSheet = true
-                    }
+                    // v2.9.28: 去掉二次确认弹窗，点击后直接清除当前槽位组连接。
+                    store.clearCurrentConnectionsWithoutConfirm()
                 } label: { Label("清除当前槽位组", systemImage: "trash") }
                 Button(role: .destructive) { store.clearCurrentPageConnections() } label: { Label("清除当前页面", systemImage: "trash.slash") }
                 Divider()
