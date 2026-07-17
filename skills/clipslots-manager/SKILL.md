@@ -22,7 +22,7 @@ author: 帅帅
   - `--page <uuid>`：按 UUID 过滤/指定页面
   - `--page-name <名称>`：按名称过滤/指定页面，找不到时报错（不会静默回落到默认页）
   - 两者功能等价，查找方式不同，互斥使用
-- **`--page`/`--page-name` 会约束 group 匹配范围（v2.9.32，重要）**：在 `list`/`read`/`write`/`paste` 中，只要同时传了页面，`--group`/`--group-name` 的匹配就被限定在**该页面内**，不再全局取第一个同名组。组名允许跨页面重复，因此**跨页写入务必带上 `--page-name`（或 `--page`）**，否则同名组可能命中别的页面导致写错页面。
+- **`--page`/`--page-name` 会约束 group 匹配范围（v2.9.32；v2.9.35 起 `clear`/`write-attachment` 同样支持，重要）**：在 `list`/`read`/`write`/`paste`/`clear`/`write-attachment` 中，只要同时传了页面，`--group`/`--group-name` 的匹配就被限定在**该页面内**，不再全局取第一个同名组。组名允许跨页面重复，因此**跨页写入务必带上 `--page-name`（或 `--page`）**，否则同名组可能命中别的页面导致写错页面。
   - **护栏（A2）**：若页面与组不一致（传了 `--page-name X` 但组 `Y` 不在 X 页面内），命令返回 `{"ok":false,"error":"group 'Y' not found in page 'X'"}`，不会静默写到别处。
 - **按组名引用（v2.9.16）**：读写类命令（`list`/`read`/`write`/`paste`/`search`/`clear`/`write-attachment`）的 `--group` 既可传组 id，也可直接传组名（如 `--group "导入 1"`）；也可用专门的 `--group-name "<组名>"` 精确匹配（优先级高于 `--group`，无匹配则报错）。匹配顺序：先按 id，再按 name。组名不确定时先 `groups`（可加 `--page-name` 限定页面）查真实名称。
 - **未知 flag 会报错（v2.9.7）**：给某命令传它不支持的 `--flag` 会返回 `ok:false`（`unknown flag: --xxx for command '...' (allowed flags: ...)`）。不确定某命令支持哪些 flag 时先跑 `<cmd> --help`。仅校验 `--flag`，位置参数不受影响。
@@ -69,14 +69,14 @@ echo '[{"slot":1,"text":"甲"},{"slot":2,"text":"乙","label":"L2"}]' | clipslot
 
 # 向【槽位附件】追加一个或多个文件(按顺序)，不改动主体；--replace 先清空旧附件；--label 可选
 # 返回 {slot,group,added:[文件名...],attachmentCount,slotBodyEmpty}
-clipslots write-attachment <slot> <file> [file ...] [--group <id|name>] [--replace] [--label "标签"] [--force]
+clipslots write-attachment <slot> <file> [file ...] [--group <id|name>] [--page <uuid>|--page-name <名称>] [--replace] [--label "标签"] [--force]
 
 # 把某槽位内容加载到系统剪贴板(NSPasteboard)，不模拟按键(之后用户/工具再 Cmd+V)
 # 主体非空 → 送主体；主体空但有附件 → 送附件文件 URL，返回 {slot,action,attachmentsCopied[,attachmentsSkipped]}
 clipslots paste <slot> [--group <id>] [--page <uuid>|--page-name <名称>]
 
 # 清空某槽位(内容+标签+附件全部移除)
-clipslots clear <slot> [--group <id|name>] [--force]
+clipslots clear <slot> [--group <id|name>] [--page <uuid>|--page-name <名称>] [--force]
 
 # 新建槽位组(返回 id)；页面已满(10组)报错 → 先 create-page；同页面不允许重名(冲突改名或加 -2/-3)
 clipslots create-group <name> [--page <uuid>|--page-name <名称>]
@@ -149,7 +149,7 @@ clipslots write --help
 - **页面溢出**：一页最多 10 个槽位组。`create-group` 返回"页面槽位组已达上限"错误时先 `create-page` 再在新页面建组。
 
 ## 5. 命名规则
-- **长度**：页面名 ≤ 6 字，组名 ≤ 8 字，Label ≤ 6 字。
+- **长度**：页面名 ≤ 10 字，组名 ≤ 10 字，Label ≤ 10 字。
 - **取名来源**：优先用文件夹名/任务名；序号用阿拉伯数字（如 `导入 1`、`方案 2`）。
 - **续组**：用 `-2`/`-3` 后缀，不要用「续」（写 `产品图-2`，不写 `产品图续`）。
 
