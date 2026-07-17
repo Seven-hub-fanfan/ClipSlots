@@ -529,7 +529,7 @@ struct ContentView: View {
         .padding(.horizontal, 2)
     }
 
-    // v2.9.31: "自动前进" toggle moved to the filter row (see SlotSearchBar, v2.9.33).
+    // v2.9.31: "自动切换" toggle moved to the filter row (see SlotSearchBar, v2.9.33).
 
     // v2.4: renamed from specialSlotTagBar — shows only current page's slot groups
     private var specialSlotTagBar: some View {

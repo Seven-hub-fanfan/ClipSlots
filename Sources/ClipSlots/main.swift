@@ -585,7 +585,7 @@ final class SlotStoreObservable: ObservableObject {
 
     // MARK: - v2.9.31 Auto-Advance After Paste
     //
-    // When the "自动前进" toggle is on, pasting the LAST non-empty slot of the
+    // When the "自动切换" toggle is on, pasting the LAST non-empty slot of the
     // current group automatically switches focus + selection to the next group
     // (or the first group of the next page). It never wraps: the last group of
     // the last page simply stays put. When the toggle is off, paste behavior is

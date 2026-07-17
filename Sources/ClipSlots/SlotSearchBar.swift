@@ -8,7 +8,7 @@ struct SlotSearchBar: View {
     @Binding var selectedFilter: SlotFilterType
     @Binding var searchScope: SlotSearchScope
     @Environment(\.colorScheme) private var colorScheme
-    // v2.9.33: "自动前进" toggle moved here (filter row, rightmost) from the top-right toolbar.
+    // v2.9.33: "自动切换" toggle moved here (filter row, rightmost) from the top-right toolbar.
     @AppStorage(UserPreferenceKeys.autoAdvanceAfterPaste) private var autoAdvanceAfterPaste = false
 
     var body: some View {
@@ -74,7 +74,7 @@ struct SlotSearchBar: View {
         }
     }
 
-    // v2.9.33: "自动前进" toggle — sits at the rightmost of the filter row so it reads
+    // v2.9.33: "自动切换" toggle — sits at the rightmost of the filter row so it reads
     // as part of the same control cluster. On/off states are clearly differentiated by
     // color fill, border and a filled vs. hollow icon.
     private var autoAdvanceToggle: some View {
@@ -88,7 +88,7 @@ struct SlotSearchBar: View {
                       ? "arrow.forward.circle.fill"
                       : "arrow.forward.circle")
                     .font(.system(size: 10, weight: .semibold))
-                Text("自动前进")
+                Text("自动切换")
                     .font(.system(size: 11, weight: .medium))
             }
             .padding(.horizontal, 8)
