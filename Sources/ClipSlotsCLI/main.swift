@@ -12,7 +12,7 @@ import ClipSlotsKit
 //   success: {"ok": true, ...}
 //   error:   {"ok": false, "error": "message"}  (exit code 1)
 
-let CLI_VERSION = "2.9.34"
+let CLI_VERSION = "2.9.35"
 let DEFAULT_GROUP = "default"
 let DEFAULT_PAGE = "default_page"
 
@@ -321,12 +321,12 @@ let COMMANDS: [[String: Any]] = [
     ["name": "write", "description": "向槽位写入纯文本内容（保留已有附件），可选设置标签。成功返回里含 preview 字段(前100字符)，无需再 read 确认。支持 --batch 从 stdin 传入 JSON 数组一次写多条。", "flags": ["<slot> (位置参数,1..N;--batch 时省略)", "--text <string> (必填, 传 - 表示从 stdin 读取;--batch 时省略)", "--batch (从 stdin 读取 JSON 数组批量写入,见下)", "--group <id|name> (默认 default;可传 id 或组名)", "--group-name <name> (按组名精确匹配)", "--page <id> (可选,约束 --group/--group-name 匹配到该页面,防止写到同名他页组)", "--page-name <name> (按页面名精确匹配;找不到会报错,与 --page 互斥;约束 group 匹配范围)", "--label <string> (可选)", "--force (跳过跨进程锁,风险自负)"]],
     ["name": "search", "description": "在槽位预览/文本/标签中做大小写不敏感子串搜索。", "flags": ["<query> (位置参数)", "--group <id|name> (默认 default;可传 id 或组名)", "--group-name <name> (按组名精确匹配)", "--all-groups (在所有槽位组内搜索)", "--limit <N> (默认 50)"]],
     ["name": "paste", "description": "把某槽位的内容加载到系统剪贴板(NSPasteboard)，不模拟按键。", "flags": ["<slot> (位置参数,1..N)", "--group <id|name> (默认 default;可传 id 或组名)", "--group-name <name> (按组名精确匹配)", "--page <id> (可选,约束 --group/--group-name 匹配到该页面)", "--page-name <name> (按页面名精确匹配;找不到会报错,与 --page 互斥;约束 group 匹配范围)"]],
-    ["name": "clear", "description": "清空某个槽位（内容、标签、附件全部移除）。", "flags": ["<slot> (位置参数,1..N)", "--group <id|name> (默认 default;可传 id 或组名)", "--group-name <name> (按组名精确匹配)", "--force (跳过跨进程锁,风险自负)"]],
+    ["name": "clear", "description": "清空某个槽位（内容、标签、附件全部移除）。", "flags": ["<slot> (位置参数,1..N)", "--group <id|name> (默认 default;可传 id 或组名)", "--group-name <name> (按组名精确匹配)", "--page <id> (可选,约束 --group/--group-name 匹配到该页面)", "--page-name <name> (按页面名精确匹配;找不到会报错,与 --page 互斥;约束 group 匹配范围)", "--force (跳过跨进程锁,风险自负)"]],
     ["name": "create-group", "description": "在指定页面新建一个槽位组，返回其 id。页面已满(10组)会返回错误，此时应先 create-page。v2.9.4: 同页面内不允许重名(会返回错误)，冲突时请改名或加 -2 后缀。", "flags": ["<name> (位置参数,组名)", "--page <id> (可选,默认当前页面)", "--page-name <name> (按页面名精确匹配指定目标页;找不到会报错,与 --page 互斥)"]],
     ["name": "create-page", "description": "新建一个页面，返回其 id。页面名不可重复。v2.9.33: 同步创建默认槽位组并在返回值中附带 defaultGroup {id,name}，可直接用其 id 写入，无需再跑 groups 查询。", "flags": ["<name> (位置参数,页面名)"]],
     ["name": "delete-group", "description": "删除一个槽位组(软删除)。其数据目录会被移动到 .trash，可恢复；.trash 会自动清理(默认保留最近 30 天/最多 50 条)。id 不存在会返回错误。", "flags": ["<id> (位置参数,槽位组 id)"]],
     ["name": "delete-page", "description": "删除一个页面及其下所有槽位组(软删除)。相关数据目录会被移动到 .trash，可恢复；.trash 会自动清理(默认保留最近 30 天/最多 50 条)。id 不存在会返回错误。", "flags": ["<id> (位置参数,页面 id)"]],
-    ["name": "write-attachment", "description": "向某槽位追加一个或多个文件作为附件（按顺序），不改动槽位主体内容。图片扩展名归为 image 类型，其余为 file。", "flags": ["<slot> (位置参数,1..N)", "<file> [file ...] (位置参数,一个或多个文件路径,支持 ~ 与相对路径)", "--group <id|name> (默认 default;可传 id 或组名)", "--group-name <name> (按组名精确匹配)", "--replace (先清空该槽位已有附件再写入)", "--label <string> (可选)", "--force (跳过跨进程锁,风险自负)"]]
+    ["name": "write-attachment", "description": "向某槽位追加一个或多个文件作为附件（按顺序），不改动槽位主体内容。图片扩展名归为 image 类型，其余为 file。", "flags": ["<slot> (位置参数,1..N)", "<file> [file ...] (位置参数,一个或多个文件路径,支持 ~ 与相对路径)", "--group <id|name> (默认 default;可传 id 或组名)", "--group-name <name> (按组名精确匹配)", "--page <id> (可选,约束 --group/--group-name 匹配到该页面)", "--page-name <name> (按页面名精确匹配;找不到会报错,与 --page 互斥;约束 group 匹配范围)", "--replace (先清空该槽位已有附件再写入)", "--label <string> (可选)", "--force (跳过跨进程锁,风险自负)"]]
 ]
 
 // v2.9.7 (R1): allowed flag names per command. Any flag not in this set is
@@ -344,12 +344,12 @@ let COMMAND_ALLOWED_FLAGS: [String: Set<String>] = [
     "write": ["group", "group-name", "page", "page-name", "text", "label", "batch", "force"],
     "search": ["group", "group-name", "all-groups", "limit"],
     "paste": ["group", "group-name", "page", "page-name"],
-    "clear": ["group", "group-name", "force"],
+    "clear": ["group", "group-name", "page", "page-name", "force"],
     "create-group": ["page", "page-name", "force"],
     "create-page": ["force"],
     "delete-group": ["force"],
     "delete-page": ["force"],
-    "write-attachment": ["group", "group-name", "replace", "label", "force"]
+    "write-attachment": ["group", "group-name", "page", "page-name", "replace", "label", "force"]
 ]
 
 // v2.9.7 (R1): validate that every --flag passed to a known command is
@@ -831,9 +831,9 @@ func cmdCreatePage(_ args: ParsedArgs) -> Never {
 }
 
 func cmdWriteAttachment(_ args: ParsedArgs) -> Never {
-    let group = resolveGroup(args)
+    let group = resolveGroup(args, inPage: resolvePageFlag(args)) // v2.9.35: page-scoped (flag parity with write)
     guard let slotRaw = args.positionals.first else {
-        fail("missing slot number (usage: write-attachment <slot> <file> [file ...] [--group <id>] [--replace])")
+        fail("missing slot number (usage: write-attachment <slot> <file> [file ...] [--group <id>] [--page <id>] [--replace])")
     }
     let n = parseSlot(slotRaw)
     let fileArgs = Array(args.positionals.dropFirst())
@@ -896,7 +896,7 @@ func cmdWriteAttachment(_ args: ParsedArgs) -> Never {
 }
 
 func cmdClear(_ args: ParsedArgs) -> Never {
-    let group = resolveGroup(args)
+    let group = resolveGroup(args, inPage: resolvePageFlag(args)) // v2.9.35: page-scoped (flag parity with write)
     let n = parseSlot(args.positionals.first)
     // v2.9.4 (#4): cross-process lock around the clear write.
     do {
