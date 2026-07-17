@@ -18,6 +18,10 @@ struct SlotCardView: View {
     var onEditHTML: ((String) -> Void)? = nil
     var onDropFiles: (([URL]) -> Void)? = nil
 
+    // v2.9.36: when true, this slot was the most recent paste target and shows a
+    // persistent "上次粘贴" badge in the top-right corner until another slot is pasted.
+    var isLastPasted: Bool = false
+
     // v2.7.76: shared store so the main-grid card can host the same attachment
     // button used on the node canvas, reading/writing the same SlotContent.attachments.
     var store: SlotStoreObservable? = nil
@@ -156,6 +160,17 @@ struct SlotCardView: View {
                     lineWidth: isDropTargeted ? 1.2 : 0
                 )
         )
+        // v2.9.36: persistent "上次粘贴" corner badge, lightweight so it doesn't
+        // cover the card's main content.
+        .overlay(alignment: .topTrailing) {
+            if isLastPasted {
+                lastPasteBadge
+                    .padding(6)
+                    .transition(.opacity.combined(with: .scale(scale: 0.85)))
+                    .allowsHitTesting(false)
+            }
+        }
+        .animation(.spring(response: 0.3, dampingFraction: 0.8), value: isLastPasted)
         .sheet(isPresented: $showingPreview) {
             SlotPreviewView(content: content)
                 .frame(width: 640, height: 500)
@@ -204,6 +219,27 @@ struct SlotCardView: View {
             // v2.5: Type-specific actions
             typeSpecificMenuItems
         }
+    }
+
+    // v2.9.36: lightweight "上次粘贴" badge shown in the card's top-right corner.
+    private var lastPasteBadge: some View {
+        HStack(spacing: 3) {
+            Image(systemName: "checkmark.circle.fill")
+                .font(.system(size: 9, weight: .bold))
+            Text("上次粘贴")
+                .font(.system(size: 9, weight: .semibold))
+        }
+        .foregroundColor(.white)
+        .padding(.horizontal, 6)
+        .padding(.vertical, 3)
+        .background(
+            Capsule().fill(Color.accentColor.opacity(0.92))
+        )
+        .overlay(
+            Capsule().stroke(Color.white.opacity(0.25), lineWidth: 0.5)
+        )
+        .shadow(color: Color.accentColor.opacity(0.3), radius: 2, x: 0, y: 1)
+        .help("这是最近一次粘贴的槽位")
     }
 
     private var headerRow: some View {

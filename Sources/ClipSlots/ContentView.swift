@@ -763,6 +763,10 @@ struct ContentView: View {
             ShortcutBadge(title: "圆盘", shortcut: shortcutDisplay(store.config.radialKey), icon: "circle.grid.cross")
             ShortcutBadge(title: "切组", shortcut: "⌘ ← / ⌘ →", icon: "arrow.left.arrow.right")
 
+            // v2.9.36: persistent "上次粘贴" status, styled subtly so it never
+            // competes with the shortcut chips for attention.
+            lastPasteStatusView
+
             Spacer()
 
             // Connection stays as a separate tool and is moved to the right side.
@@ -778,6 +782,32 @@ struct ContentView: View {
         .overlay(alignment: .top) {
             Divider()
         }
+    }
+
+    // v2.9.36: footer "上次粘贴" status. Shows a placeholder "—" until the first
+    // paste happens, then the persisted location (page / group · slot).
+    private var lastPasteStatusView: some View {
+        HStack(spacing: 5) {
+            Image(systemName: "arrow.uturn.forward.circle")
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundColor(.secondary)
+            if let desc = store.lastPasteDescription {
+                Text("上次粘贴 ")
+                    .foregroundColor(.secondary)
+                + Text(desc)
+                    .foregroundColor(.primary)
+            } else {
+                Text("上次粘贴 —")
+                    .foregroundColor(.secondary)
+            }
+        }
+        .font(.caption2)
+        .lineLimit(1)
+        .truncationMode(.middle)
+        .padding(.horizontal, 9)
+        .padding(.vertical, 5)
+        .background(Capsule().fill(AppTheme.chipBackground(colorScheme)))
+        .help(store.lastPasteDescription.map { "上次粘贴位置：\($0)" } ?? "尚未粘贴过任何槽位")
     }
 
     // v2.7.9: prominent connection button with current-group state.
@@ -874,6 +904,7 @@ struct ContentView: View {
             onEditText: { newText in store.updateTextSlot(slot, text: newText) },
             onEditHTML: { html in store.updateHTMLSlot(slot, html: html) },
             onDropFiles: { urls in store.importDroppedFiles(urls, toSlot: slot) },
+            isLastPasted: store.isLastPasted(slot: slot, groupId: store.currentSpecialSlotId),
             store: store,
             connectionDotColor: store.portColor(for: slot),
             isConnectionMode: false,

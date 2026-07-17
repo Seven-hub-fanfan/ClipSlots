@@ -170,6 +170,15 @@ final class SlotStoreObservable: ObservableObject {
     @Published var currentPageId: String = "default_page"
     @Published var currentPage: SlotPage?
 
+    // v2.9.36: last paste location (persisted via UserDefaults / @AppStorage keys).
+    @Published var lastPastePageId: String = UserDefaults.standard.string(forKey: UserPreferenceKeys.lastPastePageId) ?? ""
+    @Published var lastPasteGroupId: String = UserDefaults.standard.string(forKey: UserPreferenceKeys.lastPasteGroupId) ?? ""
+    @Published var lastPasteSlotIndex: Int = {
+        UserDefaults.standard.object(forKey: UserPreferenceKeys.lastPasteSlotIndex) == nil
+            ? -1
+            : UserDefaults.standard.integer(forKey: UserPreferenceKeys.lastPasteSlotIndex)
+    }()
+
     // v2.7.0: Slot connection state
     @Published var currentConnectionMap: SlotConnectionMap = .empty
     @Published var isConnectionModeEnabled: Bool = false
@@ -638,6 +647,48 @@ final class SlotStoreObservable: ObservableObject {
     /// last non-empty slot of `specialSlotId`, switch to the next group/page
     /// immediately (v2.9.33: no more 0.5s delay) with a subtle animation and a
     /// lightweight toast telling the user where it jumped to.
+    // MARK: - v2.9.36 Last Paste Location Tracking
+
+    /// Persist the location of the most recent paste so the footer status bar and
+    /// the slot-card "上次粘贴" badge can keep pointing at it (also across relaunches).
+    /// Called from every single-slot paste success path (hotkey / radial / UI button).
+    func recordLastPaste(slot: Int, in groupId: String) {
+        // A group may live on a page that differs from the currently displayed one
+        // (e.g. Cmd+number hotkey targets activeHotkeySpecialSlotId). Resolve the
+        // group's own page so the recorded location is accurate.
+        let pageId = specialSlots.first(where: { $0.id == groupId })?.pageId ?? currentPageId
+        let defaults = UserDefaults.standard
+        defaults.set(pageId, forKey: UserPreferenceKeys.lastPastePageId)
+        defaults.set(groupId, forKey: UserPreferenceKeys.lastPasteGroupId)
+        defaults.set(slot, forKey: UserPreferenceKeys.lastPasteSlotIndex)
+        // Mirror to @Published so SwiftUI views observing the store refresh promptly.
+        lastPastePageId = pageId
+        lastPasteGroupId = groupId
+        lastPasteSlotIndex = slot
+        NSLog("[ClipSlots] recordLastPaste page=\(pageId) group=\(groupId) slot=\(slot)")
+    }
+
+    /// Human-readable description for the footer, e.g. "常用页 / 图片组 · 槽位 3".
+    /// Returns nil when nothing has been pasted yet or the location no longer exists.
+    var lastPasteDescription: String? {
+        guard lastPasteSlotIndex >= 0,
+              !lastPasteGroupId.isEmpty else { return nil }
+        guard let group = specialSlots.first(where: { $0.id == lastPasteGroupId }) else {
+            return nil
+        }
+        let pageName = pages.first(where: { $0.id == lastPastePageId })?.name
+            ?? pages.first(where: { $0.id == group.pageId })?.name
+        let pagePart = pageName.map { "\($0) / " } ?? ""
+        return "\(pagePart)\(group.name) · 槽位 \(lastPasteSlotIndex)"
+    }
+
+    /// True when the given slot on the currently displayed group is the last paste target.
+    func isLastPasted(slot: Int, groupId: String) -> Bool {
+        lastPasteSlotIndex >= 0
+            && slot == lastPasteSlotIndex
+            && groupId == lastPasteGroupId
+    }
+
     func maybeAutoAdvance(afterPasting slot: Int, in specialSlotId: String) {
         guard isAutoAdvanceEnabled else { return }
         guard let last = lastNonEmptySlot(in: specialSlotId), slot == last else { return }
@@ -1469,6 +1520,7 @@ final class SlotStoreObservable: ObservableObject {
         // cleans up any spilled temp image files.
         let content = specialStorage.get(slot, in: activeId)
         if !content.attachments.isEmpty {
+            recordLastPaste(slot: slot, in: activeId) // v2.9.36
             var tempFiles: [URL] = []
             let payloads = slotContentPayloads(slot: slot, activeId: activeId, tempFiles: &tempFiles)
             let attachCount = content.attachments.count
@@ -1488,6 +1540,8 @@ final class SlotStoreObservable: ObservableObject {
             NSLog("[ClipSlots] pasteSlot ignored: specialSlot=\(activeId) slot=\(slot) empty")
             return
         }
+
+        recordLastPaste(slot: slot, in: activeId) // v2.9.36
 
         guard AXIsProcessTrusted() else {
             NSLog("[ClipSlots] Accessibility permission not granted.")
@@ -1557,6 +1611,7 @@ final class SlotStoreObservable: ObservableObject {
         // v2.8.0 (P1-2): radial / UI single-slot paste now carries attachments too,
         // via the same central executor used by the hotkey path.
         if !content.attachments.isEmpty {
+            recordLastPaste(slot: slot, in: activeId) // v2.9.36
             var tempFiles: [URL] = []
             let payloads = slotContentPayloads(slot: slot, activeId: activeId, tempFiles: &tempFiles)
             let attachCount = content.attachments.count
@@ -1576,6 +1631,8 @@ final class SlotStoreObservable: ObservableObject {
             NSLog("[ClipSlots] radial paste ignored: specialSlot=\(activeId) slot \(slot) empty")
             return
         }
+
+        recordLastPaste(slot: slot, in: activeId) // v2.9.36
 
         guard AXIsProcessTrusted() else {
             NSLog("[ClipSlots] Accessibility permission not granted.")

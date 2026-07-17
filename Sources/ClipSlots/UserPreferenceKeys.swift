@@ -11,6 +11,13 @@ enum UserPreferenceKeys {
     static let enableSlotConnection = "enableSlotConnection"
     // v2.9.31: auto-advance to next group/page after pasting the last non-empty slot.
     static let autoAdvanceAfterPaste = "autoAdvanceAfterPaste"
+
+    // v2.9.36: persist the last paste location so the footer status bar and the
+    // slot-card badge can keep pointing at "上次粘贴" across relaunches.
+    static let lastPastePageId = "lastPastePageId"
+    static let lastPasteGroupId = "lastPasteGroupId"
+    // -1 means "never pasted yet".
+    static let lastPasteSlotIndex = "lastPasteSlotIndex"
 }
 
 extension UserDefaults {
