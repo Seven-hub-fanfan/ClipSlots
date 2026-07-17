@@ -4,11 +4,14 @@
 
 ## 当前版本
 
-- **当前版本：v2.9.26**
+- **当前版本：v2.9.27**
 - 平台：macOS（Swift / SwiftUI，SPM 构建，macOS 13+）
 - 单一版本号事实来源：`Info.plist` 的 `CFBundleShortVersionString`（`AppVersion.current` 动态读取，`AppVersion.fallback` 为编译期兜底）。CLI 版本号见 `Sources/ClipSlotsCLI/main.swift` 的 `CLI_VERSION`。
 
 ## 版本要点（近期）
+
+### v2.9.27
+- **修复 DMG 缺少 Applications 拖拽软链**：将 Applications 快捷方式固化进打包脚本 `scripts/package_dmg.sh`（`ensure_applications_symlink` 在 staging / 挂载卷 / 最终校验三处强制存在 `Applications -> /Applications`），确保每次发版打开 DMG 都能直接拖入 Applications 安装，不再随手动流程丢失。DMG 输出改为版本化命名 `ClipSlots_v<version>.dmg`。
 
 ### v2.9.26
 - **路径统一**：CLI 固定安装到 `/usr/local/bin/clipslots`（软链到应用内 `clipslots-cli`）；清理历史遗留的手动旧二进制 `~/bin/clipslots`；`docs/clipslots-cli-skill-draft.md` 与 `skills/clipslots-manager/SKILL.md`（含 frontmatter/requires）中所有 `~/bin/clipslots` 替换为 `/usr/local/bin/clipslots`，并同步刷新已安装 App bundle 内 SKILL.md。
