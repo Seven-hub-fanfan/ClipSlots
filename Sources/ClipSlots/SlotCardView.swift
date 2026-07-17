@@ -22,6 +22,10 @@ struct SlotCardView: View {
     // persistent "上次粘贴" badge in the top-right corner until another slot is pasted.
     var isLastPasted: Bool = false
 
+    // v2.9.37: transient flash highlight triggered by tapping the footer "上次粘贴"
+    // button — the card glows for ~2s so the user can spot where the last paste went.
+    var isFlashHighlighted: Bool = false
+
     // v2.7.76: shared store so the main-grid card can host the same attachment
     // button used on the node canvas, reading/writing the same SlotContent.attachments.
     var store: SlotStoreObservable? = nil
@@ -160,6 +164,21 @@ struct SlotCardView: View {
                     lineWidth: isDropTargeted ? 1.2 : 0
                 )
         )
+        // v2.9.37: transient flash-highlight ring when jumped to from the footer
+        // "上次粘贴" button. Animates in/out and never intercepts taps.
+        .overlay(
+            RoundedRectangle(cornerRadius: AppTheme.cornerRadius, style: .continuous)
+                .strokeBorder(
+                    isFlashHighlighted ? Color.accentColor : Color.clear,
+                    lineWidth: isFlashHighlighted ? 2.5 : 0
+                )
+                .allowsHitTesting(false)
+        )
+        .shadow(
+            color: isFlashHighlighted ? Color.accentColor.opacity(0.5) : Color.clear,
+            radius: isFlashHighlighted ? 9 : 0
+        )
+        .animation(.easeInOut(duration: 0.3), value: isFlashHighlighted)
         // v2.9.36: persistent "上次粘贴" corner badge, lightweight so it doesn't
         // cover the card's main content.
         .overlay(alignment: .topTrailing) {

@@ -11,6 +11,8 @@ struct ContentView: View {
     // v2.9.8: update checker.
     @ObservedObject private var updateChecker = UpdateChecker.shared
     @State private var showingConnectionFullscreen = false
+    // v2.9.37: hover state for the footer "上次粘贴" button (subtle hover highlight).
+    @State private var lastPasteHovering = false
     @Environment(\.colorScheme) private var colorScheme
 
     // v2.7.47: new installs should open in dark mode by default.
@@ -108,29 +110,41 @@ struct ContentView: View {
                     .padding(.horizontal, AppTheme.pagePadding)
                     .padding(.vertical, 8)
 
-                ScrollView {
-                    // v2.5: No results hint
-                    if searchScope == .currentGroup && isSearchActive && matchedSlotCount == 0 {
-                        noResultsView
-                            .padding(.top, 32)
-                    }
+                ScrollViewReader { scrollProxy in
+                    ScrollView {
+                        // v2.5: No results hint
+                        if searchScope == .currentGroup && isSearchActive && matchedSlotCount == 0 {
+                            noResultsView
+                                .padding(.top, 32)
+                        }
 
-                    LazyVGrid(
-                        columns: [
-                            // v2.7.37: rollback the over-compressed v2.7.36 grid.
-                            // The aggressive 218px cards caused text / thumbnails / buttons to overlap.
-                            GridItem(.adaptive(minimum: 240, maximum: 300), spacing: 14)
-                        ],
-                        spacing: 14
-                    ) {
-                        ForEach(1...store.config.slots, id: \.self) { slot in
-                            slotCardView(slot: slot)
+                        LazyVGrid(
+                            columns: [
+                                // v2.7.37: rollback the over-compressed v2.7.36 grid.
+                                // The aggressive 218px cards caused text / thumbnails / buttons to overlap.
+                                GridItem(.adaptive(minimum: 240, maximum: 300), spacing: 14)
+                            ],
+                            spacing: 14
+                        ) {
+                            ForEach(1...store.config.slots, id: \.self) { slot in
+                                slotCardView(slot: slot)
+                                    .id(slot)
+                            }
+                        }
+                        .padding(AppTheme.pagePadding)
+                    }
+                    .background(AppTheme.windowBackground(colorScheme))
+                    .transaction { $0.animation = nil }
+                    // v2.9.37: when the footer "上次粘贴" button flashes a slot, scroll it
+                    // into view so the highlighted card is always visible after the jump.
+                    .onChange(of: store.flashHighlightSlot) { target in
+                        guard let target else { return }
+                        withAnimation(.easeInOut(duration: 0.3)) {
+                            scrollProxy.scrollTo(target, anchor: .center)
                         }
                     }
-                    .padding(AppTheme.pagePadding)
                 }
-                .background(AppTheme.windowBackground(colorScheme))
-                .transaction { $0.animation = nil }
+
 
                 bottomBar
             }
@@ -784,30 +798,45 @@ struct ContentView: View {
         }
     }
 
-    // v2.9.36: footer "上次粘贴" status. Shows a placeholder "—" until the first
-    // paste happens, then the persisted location (page / group · slot).
+    // v2.9.37: footer "上次粘贴" status, redesigned to be low-key (small icon +
+    // secondary text, no coloured capsule) so it blends into the footer text.
+    // It is now a button: hover gives a subtle highlight, click jumps + scrolls to
+    // the last-paste group and flashes the corresponding card for 2s.
     private var lastPasteStatusView: some View {
-        HStack(spacing: 5) {
-            Image(systemName: "arrow.uturn.forward.circle")
-                .font(.system(size: 11, weight: .semibold))
-                .foregroundColor(.secondary)
-            if let desc = store.lastPasteDescription {
-                Text("上次粘贴 ")
-                    .foregroundColor(.secondary)
-                + Text(desc)
-                    .foregroundColor(.primary)
-            } else {
-                Text("上次粘贴 —")
-                    .foregroundColor(.secondary)
+        Button {
+            store.jumpToLastPaste()
+        } label: {
+            HStack(spacing: 5) {
+                Image(systemName: "arrow.uturn.forward.circle")
+                    .font(.system(size: 11, weight: .semibold))
+                if let desc = store.lastPasteDescription {
+                    Text("上次粘贴 ")
+                    + Text(desc)
+                        .foregroundColor(lastPasteHovering ? .primary : .secondary)
+                } else {
+                    Text("上次粘贴 —")
+                }
             }
+            .font(.caption2)
+            .lineLimit(1)
+            .truncationMode(.middle)
+            .foregroundColor(lastPasteHovering ? .primary : .secondary)
+            .padding(.horizontal, 6)
+            .padding(.vertical, 4)
+            .background(
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .fill(lastPasteHovering ? AppTheme.chipBackground(colorScheme) : Color.clear)
+            )
+            .contentShape(Rectangle())
         }
-        .font(.caption2)
-        .lineLimit(1)
-        .truncationMode(.middle)
-        .padding(.horizontal, 9)
-        .padding(.vertical, 5)
-        .background(Capsule().fill(AppTheme.chipBackground(colorScheme)))
-        .help(store.lastPasteDescription.map { "上次粘贴位置：\($0)" } ?? "尚未粘贴过任何槽位")
+        .buttonStyle(.plain)
+        .disabled(store.lastPasteDescription == nil)
+        .onHover { hovering in
+            // Only highlight when the button is actionable (there is a location).
+            lastPasteHovering = hovering && store.lastPasteDescription != nil
+        }
+        .animation(.easeInOut(duration: 0.15), value: lastPasteHovering)
+        .help(store.lastPasteDescription.map { "点击跳转到上次粘贴位置：\($0)" } ?? "尚未粘贴过任何槽位")
     }
 
     // v2.7.9: prominent connection button with current-group state.
@@ -905,6 +934,7 @@ struct ContentView: View {
             onEditHTML: { html in store.updateHTMLSlot(slot, html: html) },
             onDropFiles: { urls in store.importDroppedFiles(urls, toSlot: slot) },
             isLastPasted: store.isLastPasted(slot: slot, groupId: store.currentSpecialSlotId),
+            isFlashHighlighted: store.flashHighlightSlot == slot,
             store: store,
             connectionDotColor: store.portColor(for: slot),
             isConnectionMode: false,

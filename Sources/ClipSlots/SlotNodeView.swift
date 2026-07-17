@@ -121,6 +121,14 @@ struct NodeAttachmentButton: View {
             .popover(isPresented: $showingAttachments, arrowEdge: .top) {
                 AttachmentManagerPopover(slot: slot, store: store)
             }
+            // v2.9.37: when the attachment panel closes, run any auto-advance that
+            // was deferred because this slot had attachments (avoids interrupting
+            // attachment pasting by switching groups too early).
+            .onChange(of: showingAttachments) { isShowing in
+                if !isShowing {
+                    store.firePendingAutoAdvanceOnPanelClose(for: slot)
+                }
+            }
 
             if attachmentCount > 0 {
                 Button {
