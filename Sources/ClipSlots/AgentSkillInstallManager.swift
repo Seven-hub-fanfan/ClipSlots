@@ -188,6 +188,79 @@ final class AgentSkillInstallManager: ObservableObject {
                       agentID: agent.id)
     }
 
+    // MARK: - 聚合动作（v2.9.28）
+
+    /// 重新扫描本机 Agent，并给出可见反馈（修复刷新按钮点击"无反应"的观感问题）。
+    func rescan() {
+        refresh()
+        if detectedAgents.isEmpty {
+            report("已重新扫描：未检测到已安装的 Agent（Claude Code / Cursor / Codex / Gemini CLI）", isError: false)
+        } else {
+            let names = detectedAgents.map(\.displayName).joined(separator: "、")
+            report("已重新扫描，检测到 \(detectedAgents.count) 个 Agent：\(names)", isError: false)
+        }
+    }
+
+    /// 一键把本 Skill 安装到所有已检测到的 Agent。
+    /// 复用单 Agent 的安全软链逻辑，保留 lstat 软链接安全防护（绝不删除真实目录/文件）。
+    func installToAllDetectedAgents() {
+        guard let source = bundledSkillDir else {
+            report("找不到内置 Skill 目录，请重新安装 App。", isError: true)
+            return
+        }
+        let agents = detectedAgents
+        guard !agents.isEmpty else {
+            report("未检测到已安装的 Agent，请先安装 Claude Code / Cursor / Codex / Gemini CLI。", isError: true)
+            return
+        }
+
+        var installed: [String] = []
+        var skipped: [String] = []
+        var needPrivilege: [Agent] = []
+
+        for agent in agents {
+            let target = agent.skillTargetPath
+            // 安全防护：目标存在且不是软链接（可能是用户真实目录/文件）时，绝不删除，直接跳过。
+            if fileExistsNoFollow(target) && !isSymlink(target) {
+                skipped.append(agent.displayName)
+                continue
+            }
+            if trySymlinkWithoutPrivilege(source: source, target: target, skillsDir: agent.skillsDir) {
+                installed.append(agent.displayName)
+            } else {
+                needPrivilege.append(agent)
+            }
+        }
+
+        // 对家目录不可写的 Agent，回退到系统鉴权弹窗。
+        // 注意：needPrivilege 中的目标只可能是软链接或不存在（真实目录已被拦截进 skipped），rm -rf 安全。
+        if !needPrivilege.isEmpty {
+            let cmds = needPrivilege.map { agent in
+                "mkdir -p \(shellQuote(agent.skillsDir)) && rm -rf \(shellQuote(agent.skillTargetPath)) && ln -sfn \(shellQuote(source)) \(shellQuote(agent.skillTargetPath))"
+            }.joined(separator: " && ")
+            let allInstalled = installed + needPrivilege.map(\.displayName)
+            runPrivileged(cmds,
+                          successMessage: aggregateMessage(installed: allInstalled, skipped: skipped),
+                          agentID: needPrivilege[0].id)
+            return
+        }
+
+        refresh()
+        report(aggregateMessage(installed: installed, skipped: skipped),
+               isError: installed.isEmpty && !skipped.isEmpty)
+    }
+
+    private func aggregateMessage(installed: [String], skipped: [String]) -> String {
+        var parts: [String] = []
+        if !installed.isEmpty {
+            parts.append("已安装到 \(installed.count) 个 Agent：\(installed.joined(separator: "、"))")
+        }
+        if !skipped.isEmpty {
+            parts.append("已跳过（目标非软链接，为安全起见未删除）：\(skipped.joined(separator: "、"))")
+        }
+        return parts.isEmpty ? "没有可安装的 Agent。" : parts.joined(separator: "；")
+    }
+
     private func trySymlinkWithoutPrivilege(source: String, target: String, skillsDir: String) -> Bool {
         do {
             try fm.createDirectory(atPath: skillsDir, withIntermediateDirectories: true)

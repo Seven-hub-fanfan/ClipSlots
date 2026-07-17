@@ -327,6 +327,37 @@ struct PluginsView: View {
         }
     }
 
+    // 详情页右上角安装控件：可点击，一键安装到全部已检测到的 Agent（修复"点击无反应"）。
+    @ViewBuilder
+    private func detailInstallControl(for item: PluginMarketItem) -> some View {
+        if item.installsToAgent {
+            switch agentInstaller.aggregateState {
+            case .installed:
+                badge(text: "已安装", icon: "checkmark.seal.fill", color: .green)
+            case .needsUpdate:
+                Button {
+                    agentInstaller.installToAllDetectedAgents()
+                } label: {
+                    badge(text: "更新到全部 Agent", icon: "arrow.triangle.2.circlepath", color: .orange)
+                }
+                .buttonStyle(.plain)
+                .disabled(agentInstaller.busyAgentID != nil)
+                .help("把本 Skill 更新/安装到所有检测到的 Agent")
+            case .notInstalled:
+                Button {
+                    agentInstaller.installToAllDetectedAgents()
+                } label: {
+                    badge(text: "安装", icon: "square.and.arrow.down", color: .accentColor)
+                }
+                .buttonStyle(.plain)
+                .disabled(agentInstaller.busyAgentID != nil)
+                .help("一键安装到所有检测到的 Agent")
+            }
+        } else {
+            badge(text: "内置", icon: "shippingbox.fill", color: .secondary)
+        }
+    }
+
     private func badge(text: String, icon: String, color: Color) -> some View {
         HStack(spacing: 4) {
             Image(systemName: icon).font(.system(size: 9))
@@ -396,7 +427,7 @@ struct PluginsView: View {
                                 .foregroundColor(.secondary)
                         }
                         Spacer()
-                        statusBadge(for: item)
+                        detailInstallControl(for: item)
                     }
 
                     // Full description
@@ -432,7 +463,7 @@ struct PluginsView: View {
                     .font(.system(size: 13, weight: .semibold))
                 Spacer()
                 Button {
-                    agentInstaller.refresh()
+                    agentInstaller.rescan()
                 } label: {
                     Image(systemName: "arrow.clockwise")
                         .font(.system(size: 11))

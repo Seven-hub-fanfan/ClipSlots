@@ -8,14 +8,34 @@
 		<data>
 		QrBrMYG4dLIJMJNgrOq4rk3gXRA=
 		</data>
+		<key>Resources/skills/clipslots-manager/SKILL.md</key>
+		<data>
+		i1Mu2DyEuIj1gd+0RZiZ4N1p1Ck=
+		</data>
 	</dict>
 	<key>files2</key>
 	<dict>
+		<key>MacOS/clipslots-cli</key>
+		<dict>
+			<key>cdhash</key>
+			<data>
+			HgpdvmaZ6w7yI0ipKGg16T2yC3Q=
+			</data>
+			<key>requirement</key>
+			<string>cdhash H"1e0a5dbe6699eb0ef22348a9286835e93db20b74"</string>
+		</dict>
 		<key>Resources/AppIcon.icns</key>
 		<dict>
 			<key>hash2</key>
 			<data>
 			O/jh2yuOGto8QvAQpfN7w6zG9yXY+CdyehpqDGmaqMg=
+			</data>
+		</dict>
+		<key>Resources/skills/clipslots-manager/SKILL.md</key>
+		<dict>
+			<key>hash2</key>
+			<data>
+			GBWzRE9J/aEXUFbySTV5QXLOdj9HfvX4wY3xvnvUpG8=
 			</data>
 		</dict>
 	</dict>

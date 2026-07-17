@@ -31,6 +31,8 @@ verify_app_bundle() {
   local app="$1"
   test -d "$app" || die "$app missing"
   test -x "$app/Contents/MacOS/$APP_NAME" || die "$APP_NAME executable missing or not executable"
+  test -x "$app/Contents/MacOS/clipslots-cli" || die "bundled clipslots-cli missing or not executable in $app"
+  test -f "$app/Contents/Resources/skills/clipslots-manager/SKILL.md" || die "bundled skill missing in $app"
   plutil -lint "$app/Contents/Info.plist" >/dev/null
   test -f "$app/Contents/Resources/AppIcon.icns" || die "AppIcon.icns missing in app bundle"
   /usr/libexec/PlistBuddy -c 'Print :CFBundleIconFile' "$app/Contents/Info.plist" >/dev/null || die "CFBundleIconFile missing"
@@ -112,6 +114,40 @@ fi
 test -s "$APP_DIR/Contents/Resources/AppIcon.icns" || die "AppIcon.icns is empty"
 
 chmod +x "$APP_DIR/Contents/MacOS/$APP_NAME"
+
+# ---------------------------------------------------------------------------
+# v2.9.28: 把内置 CLI 二进制 (clipslots-cli) 打进 App bundle。
+# 根因：v2.9.27 打包脚本重写后遗漏了 CLI 拷贝，导致「设置 -> 安装 CLI」报错
+#       "找不到内置 CLI 二进制 (clipslots-cli)"（CLIInstallManager 期望路径
+#        <bundle>/Contents/MacOS/clipslots-cli）。
+# 说明：SPM 可执行 target 名为 ClipSlotsCLI，产物为 .build/release/ClipSlotsCLI，
+#       但因大小写不敏感文件系统会与 GUI 二进制 ClipSlots 同名冲突，故落地为
+#       clipslots-cli。此处固化为永久步骤，每次发版都会打包 CLI。
+# ---------------------------------------------------------------------------
+CLI_SRC="$ROOT_DIR/.build/release/ClipSlotsCLI"
+CLI_DST="$APP_DIR/Contents/MacOS/clipslots-cli"
+test -f "$CLI_SRC" || die "CLI binary not found at $CLI_SRC (SPM target ClipSlotsCLI). Did 'swift build -c release' succeed?"
+cp "$CLI_SRC" "$CLI_DST"
+chmod +x "$CLI_DST"
+codesign --force --timestamp=none --sign - "$CLI_DST"
+test -x "$CLI_DST" || die "bundled clipslots-cli missing or not executable at $CLI_DST"
+echo "  OK: bundled clipslots-cli -> $CLI_DST"
+
+# ---------------------------------------------------------------------------
+# v2.9.28: 把内置 Skill 目录打进 App bundle。
+# 根因：同上，v2.9.27 脚本重写遗漏了 skills 拷贝，导致 Skill 市场"安装到 Agent"
+#       找不到内置 Skill 源目录（AgentSkillInstallManager 期望
+#        <bundle>/Contents/Resources/skills/clipslots-manager）。
+# ---------------------------------------------------------------------------
+if [ -d "$ROOT_DIR/skills/clipslots-manager" ]; then
+  mkdir -p "$APP_DIR/Contents/Resources/skills"
+  ditto "$ROOT_DIR/skills/clipslots-manager" "$APP_DIR/Contents/Resources/skills/clipslots-manager"
+  test -f "$APP_DIR/Contents/Resources/skills/clipslots-manager/SKILL.md" || die "bundled skill SKILL.md missing"
+  echo "  OK: bundled skill -> $APP_DIR/Contents/Resources/skills/clipslots-manager"
+else
+  die "skills/clipslots-manager not found; Skill install feature would break"
+fi
+
 
 echo "==> Remove quarantine / stale extended attributes from app before DMG"
 xattr -cr "$APP_DIR" 2>/dev/null || true

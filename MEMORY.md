@@ -4,11 +4,16 @@
 
 ## 当前版本
 
-- **当前版本：v2.9.27**
+- **当前版本：v2.9.28**
 - 平台：macOS（Swift / SwiftUI，SPM 构建，macOS 13+）
 - 单一版本号事实来源：`Info.plist` 的 `CFBundleShortVersionString`（`AppVersion.current` 动态读取，`AppVersion.fallback` 为编译期兜底）。CLI 版本号见 `Sources/ClipSlotsCLI/main.swift` 的 `CLI_VERSION`。
 
 ## 版本要点（近期）
+
+### v2.9.28
+- **修复 CLI 安装报错"找不到内置 CLI 二进制 (clipslots-cli)"**（最重要）：v2.9.27 打包脚本重写后遗漏了 CLI 与 Skill 拷贝。`scripts/package_dmg.sh` 现固化：`swift build -c release` 后把 `.build/release/ClipSlotsCLI` 拷贝为 `ClipSlots.app/Contents/MacOS/clipslots-cli` 并 `codesign --force --sign -`；同时把 `skills/clipslots-manager` 拷进 `Contents/Resources/skills/`。`verify_app_bundle` 增加 `test -x .../clipslots-cli` 与 `test -f .../SKILL.md` 硬校验，缺件即 `die`。
+- **修复 Skill 市场详情页右上角「安装」按钮点击无反应**：该处原为纯展示徽章（非按钮）。新增 `PluginsView.detailInstallControl` 包成可点击 `Button`，调用新增的 `AgentSkillInstallManager.installToAllDetectedAgents()` —— 遍历所有已检测 Agent 一键安装，复用单 Agent 安全软链逻辑并保留 `lstat` 软链接安全守卫（真实目录/文件跳过不删）。
+- **修复 Skill 页「安装到 Agent」刷新按钮无可见反馈**：刷新按钮改为调用新增 `AgentSkillInstallManager.rescan()`，重新扫描 `~/.claude`/`~/.cursor`/`~/.codex`/`~/.gemini` 并通过 `lastMessage` 输出扫描结果反馈。
 
 ### v2.9.27
 - **修复 DMG 缺少 Applications 拖拽软链**：将 Applications 快捷方式固化进打包脚本 `scripts/package_dmg.sh`（`ensure_applications_symlink` 在 staging / 挂载卷 / 最终校验三处强制存在 `Applications -> /Applications`），确保每次发版打开 DMG 都能直接拖入 Applications 安装，不再随手动流程丢失。DMG 输出改为版本化命名 `ClipSlots_v<version>.dmg`。
