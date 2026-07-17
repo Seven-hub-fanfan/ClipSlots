@@ -4,11 +4,15 @@
 
 ## 当前版本
 
-- **当前版本：v2.9.28**
+- **当前版本：v2.9.29**
 - 平台：macOS（Swift / SwiftUI，SPM 构建，macOS 13+）
 - 单一版本号事实来源：`Info.plist` 的 `CFBundleShortVersionString`（`AppVersion.current` 动态读取，`AppVersion.fallback` 为编译期兜底）。CLI 版本号见 `Sources/ClipSlotsCLI/main.swift` 的 `CLI_VERSION`。
 
 ## 版本要点（近期）
+
+### v2.9.29
+- **CLI 新增 `--page-name`（与 `--group-name` 对称）**：`list`/`read`/`write`/`paste`/`create-group` 均支持按页面名精确匹配（遍历 `index.pages` 找 `name == pageName` 取其 id）。页面名找不到时显式报错 `找不到名为 '<name>' 的页面` 并非零退出，不再静默回落默认页；`--page`/`--page-name` 互斥（同传报 `只能指定 --page 或 --page-name 其中一个`）。`create-group` 的 `--page` 收敛为严格校验：显式传入不存在的页面 id/名 直接报错，不再静默落到当前页。
+- **新增 `CLIPSLOTS_DATA_DIR` 环境变量（env > 默认）**：新增 `Sources/ClipSlotsKit/ClipSlotsPaths.swift` 作为数据目录唯一事实来源；`SpecialSlotStorage`/`SlotStorage`/`StorageLock`/`SlotConnectionStorage`/GUI(`main.swift` 的 watcher 与 undo 快照)/CLI 诊断均改用它。**锁文件随数据目录移动**（`ClipSlotsPaths.lockFile`），保证 GUI+CLI 在重定向数据目录后仍协调同一把锁。`clipslots --help` 输出新增 `env.CLIPSLOTS_DATA_DIR` 说明。配置文件（`~/.config/clipslots/config.toml`）不受影响。
 
 ### v2.9.28
 - **修复 CLI 安装报错"找不到内置 CLI 二进制 (clipslots-cli)"**（最重要）：v2.9.27 打包脚本重写后遗漏了 CLI 与 Skill 拷贝。`scripts/package_dmg.sh` 现固化：`swift build -c release` 后把 `.build/release/ClipSlotsCLI` 拷贝为 `ClipSlots.app/Contents/MacOS/clipslots-cli` 并 `codesign --force --sign -`；同时把 `skills/clipslots-manager` 拷进 `Contents/Resources/skills/`。`verify_app_bundle` 增加 `test -x .../clipslots-cli` 与 `test -f .../SKILL.md` 硬校验，缺件即 `die`。

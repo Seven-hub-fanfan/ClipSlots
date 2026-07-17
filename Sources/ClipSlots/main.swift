@@ -245,8 +245,7 @@ final class SlotStoreObservable: ObservableObject {
     // MARK: - v2.9.4 Storage Watcher (Feature #2)
 
     private func setupStorageWatcher() {
-        let base = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent(".local/share/clipslots/special_slots")
+        let base = ClipSlotsPaths.specialSlots
         try? FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
         let watcher = StorageDirectoryWatcher(path: base.path) { [weak self] in
             self?.handleStorageChange()
@@ -632,8 +631,7 @@ final class SlotStoreObservable: ObservableObject {
     // v2.9.5 (Feature #3): on-disk location for the persisted undo snapshot. Lives
     // alongside the special-slot storage so it shares the same lifecycle/backups.
     private var undoSnapshotURL: URL {
-        FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent(".local/share/clipslots/special_slots/.undo/clear_snapshot.json")
+        ClipSlotsPaths.specialSlots.appendingPathComponent(".undo/clear_snapshot.json")
     }
 
     /// Write (or, when nil, delete) the persisted undo snapshot. Never throws — a

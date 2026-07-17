@@ -27,8 +27,7 @@ public final class SlotStorage {
         if let slotsDir {
             baseURL = slotsDir
         } else {
-            baseURL = FileManager.default.homeDirectoryForCurrentUser
-                .appendingPathComponent(".local/share/clipslots/slots")
+            baseURL = ClipSlotsPaths.slots
         }
         do {
             try FileManager.default.createDirectory(at: baseURL, withIntermediateDirectories: true)

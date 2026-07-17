@@ -12,7 +12,7 @@ import ClipSlotsKit
 //   success: {"ok": true, ...}
 //   error:   {"ok": false, "error": "message"}  (exit code 1)
 
-let CLI_VERSION = "2.9.17"
+let CLI_VERSION = "2.9.29"
 let DEFAULT_GROUP = "default"
 let DEFAULT_PAGE = "default_page"
 
@@ -169,6 +169,39 @@ func resolveGroup(_ args: ParsedArgs) -> String {
     return raw
 }
 
+// v2.9.29 (#1): resolve an explicitly-requested page from --page / --page-name.
+// Symmetric to `resolveGroup` / `--group-name`.
+//   • Returns the resolved page id, or nil when NEITHER flag was given (caller
+//     then falls back to its own default, e.g. the group's owning page).
+//   • --page and --page-name are MUTUALLY EXCLUSIVE.
+//   • --page-name matches SlotPage.name exactly; NO match => hard error
+//     (never silently falls back to a default page).
+//   • --page: matched against page id first, then name. When `strict` and the
+//     value matches no page, errors out (used by create-group where the page is
+//     an actual placement target, not a mere echo).
+func resolvePageFlag(_ args: ParsedArgs, strict: Bool = false) -> String? {
+    let hasPage = args.flag("page") != nil
+    let hasName = args.flag("page-name") != nil
+    if hasPage && hasName {
+        fail("只能指定 --page 或 --page-name 其中一个")
+    }
+    let index = storage.loadIndex()
+    if let name = args.flag("page-name") {
+        if let p = index.pages.first(where: { $0.name == name }) { return p.id }
+        fail("找不到名为 '\(name)' 的页面")
+    }
+    if let page = args.flag("page") {
+        if let p = index.pages.first(where: { $0.id == page || $0.name == page }) { return p.id }
+        // v2.9.29: an explicitly requested page that matches nothing is an error
+        // for placement commands (was previously a silent fallback to currentPage).
+        if strict {
+            fail("找不到 id 或名称为 '\(page)' 的页面")
+        }
+        return page
+    }
+    return nil
+}
+
 func parseSlot(_ raw: String?) -> Int {
     guard let raw, let n = Int(raw) else {
         fail("missing or invalid slot number (expected 1...\(slotCount))")
@@ -205,7 +238,7 @@ func describeWriteError(_ error: Error, context: String) -> String {
         switch ns.code {
         case 513:
             return "filesystem permission error while \(context): the ClipSlots data "
-                + "directory (~/.local/share/clipslots) is not writable by this user. "
+                + "directory (\(ClipSlotsPaths.dataRoot.path)) is not writable by this user. "
                 + "This is NOT a lock conflict. Check directory ownership/permissions."
         case 640:
             return "no space left on device while \(context)"
@@ -223,8 +256,7 @@ func describeWriteError(_ error: Error, context: String) -> String {
 // underlying error. Probe the data directory writability so we can still tell a
 // genuine permission problem apart from a transient failure.
 func writeFailureDiagnostic(context: String) -> String {
-    let dir = FileManager.default.homeDirectoryForCurrentUser
-        .appendingPathComponent(".local/share/clipslots").path
+    let dir = ClipSlotsPaths.dataRoot.path
     if !FileManager.default.isWritableFile(atPath: dir) {
         return "failed \(context): the ClipSlots data directory (\(dir)) is not "
             + "writable. This is a filesystem permission issue, not a lock conflict."
@@ -246,13 +278,13 @@ let COMMANDS: [[String: Any]] = [
     ["name": "help", "description": "列出所有命令、说明与参数（无参数时也返回此内容）。", "flags": [] as [String]],
     ["name": "groups", "description": "列出所有槽位组（SpecialSlot）。", "flags": [] as [String]],
     ["name": "pages", "description": "列出所有页面（SlotPage）。", "flags": ["--group <id> (可选,当前实现忽略,页面为全局)"]],
-    ["name": "list", "description": "列出某个槽位组内 1..N 号槽位的摘要。支持分页：传 --page-size 后按页返回并附带 pagination 元信息。", "flags": ["--group <id|name> (默认 default;可传 id 或组名)", "--group-name <name> (按组名精确匹配,优先于 --group)", "--page <id> (可选,仅回显页面 id)", "--page-size <N> (可选,每页槽位数,>0 时启用分页)", "--page-num <N> (可选,第几页,从 1 开始,默认 1,需配合 --page-size)"]],
-    ["name": "read", "description": "读取单个槽位的完整内容（纯文本、HTML源、类型、附件数等）。", "flags": ["<slot> (位置参数,1..N)", "--group <id|name> (默认 default;可传 id 或组名)", "--group-name <name> (按组名精确匹配)", "--page <id> (可选,仅回显)"]],
-    ["name": "write", "description": "向槽位写入纯文本内容（保留已有附件），可选设置标签。成功返回里含 preview 字段(前100字符)，无需再 read 确认。支持 --batch 从 stdin 传入 JSON 数组一次写多条。", "flags": ["<slot> (位置参数,1..N;--batch 时省略)", "--text <string> (必填, 传 - 表示从 stdin 读取;--batch 时省略)", "--batch (从 stdin 读取 JSON 数组批量写入,见下)", "--group <id|name> (默认 default;可传 id 或组名)", "--group-name <name> (按组名精确匹配)", "--page <id> (可选,仅回显)", "--label <string> (可选)", "--force (跳过跨进程锁,风险自负)"]],
+    ["name": "list", "description": "列出某个槽位组内 1..N 号槽位的摘要。支持分页：传 --page-size 后按页返回并附带 pagination 元信息。", "flags": ["--group <id|name> (默认 default;可传 id 或组名)", "--group-name <name> (按组名精确匹配,优先于 --group)", "--page <id> (可选,仅回显页面 id)", "--page-name <name> (按页面名精确匹配;找不到会报错,与 --page 互斥)", "--page-size <N> (可选,每页槽位数,>0 时启用分页)", "--page-num <N> (可选,第几页,从 1 开始,默认 1,需配合 --page-size)"]],
+    ["name": "read", "description": "读取单个槽位的完整内容（纯文本、HTML源、类型、附件数等）。", "flags": ["<slot> (位置参数,1..N)", "--group <id|name> (默认 default;可传 id 或组名)", "--group-name <name> (按组名精确匹配)", "--page <id> (可选,仅回显)", "--page-name <name> (按页面名精确匹配;找不到会报错,与 --page 互斥)"]],
+    ["name": "write", "description": "向槽位写入纯文本内容（保留已有附件），可选设置标签。成功返回里含 preview 字段(前100字符)，无需再 read 确认。支持 --batch 从 stdin 传入 JSON 数组一次写多条。", "flags": ["<slot> (位置参数,1..N;--batch 时省略)", "--text <string> (必填, 传 - 表示从 stdin 读取;--batch 时省略)", "--batch (从 stdin 读取 JSON 数组批量写入,见下)", "--group <id|name> (默认 default;可传 id 或组名)", "--group-name <name> (按组名精确匹配)", "--page <id> (可选,仅回显)", "--page-name <name> (按页面名精确匹配;找不到会报错,与 --page 互斥)", "--label <string> (可选)", "--force (跳过跨进程锁,风险自负)"]],
     ["name": "search", "description": "在槽位预览/文本/标签中做大小写不敏感子串搜索。", "flags": ["<query> (位置参数)", "--group <id|name> (默认 default;可传 id 或组名)", "--group-name <name> (按组名精确匹配)", "--all-groups (在所有槽位组内搜索)", "--limit <N> (默认 50)"]],
-    ["name": "paste", "description": "把某槽位的内容加载到系统剪贴板(NSPasteboard)，不模拟按键。", "flags": ["<slot> (位置参数,1..N)", "--group <id|name> (默认 default;可传 id 或组名)", "--group-name <name> (按组名精确匹配)", "--page <id> (可选,仅回显)"]],
+    ["name": "paste", "description": "把某槽位的内容加载到系统剪贴板(NSPasteboard)，不模拟按键。", "flags": ["<slot> (位置参数,1..N)", "--group <id|name> (默认 default;可传 id 或组名)", "--group-name <name> (按组名精确匹配)", "--page <id> (可选,仅回显)", "--page-name <name> (按页面名精确匹配;找不到会报错,与 --page 互斥)"]],
     ["name": "clear", "description": "清空某个槽位（内容、标签、附件全部移除）。", "flags": ["<slot> (位置参数,1..N)", "--group <id|name> (默认 default;可传 id 或组名)", "--group-name <name> (按组名精确匹配)", "--force (跳过跨进程锁,风险自负)"]],
-    ["name": "create-group", "description": "在指定页面新建一个槽位组，返回其 id。页面已满(10组)会返回错误，此时应先 create-page。v2.9.4: 同页面内不允许重名(会返回错误)，冲突时请改名或加 -2 后缀。", "flags": ["<name> (位置参数,组名)", "--page <id> (可选,默认当前页面)"]],
+    ["name": "create-group", "description": "在指定页面新建一个槽位组，返回其 id。页面已满(10组)会返回错误，此时应先 create-page。v2.9.4: 同页面内不允许重名(会返回错误)，冲突时请改名或加 -2 后缀。", "flags": ["<name> (位置参数,组名)", "--page <id> (可选,默认当前页面)", "--page-name <name> (按页面名精确匹配指定目标页;找不到会报错,与 --page 互斥)"]],
     ["name": "create-page", "description": "新建一个页面，返回其 id。页面名不可重复。", "flags": ["<name> (位置参数,页面名)"]],
     ["name": "delete-group", "description": "删除一个槽位组(软删除)。其数据目录会被移动到 .trash，可恢复；.trash 会自动清理(默认保留最近 30 天/最多 50 条)。id 不存在会返回错误。", "flags": ["<id> (位置参数,槽位组 id)"]],
     ["name": "delete-page", "description": "删除一个页面及其下所有槽位组(软删除)。相关数据目录会被移动到 .trash，可恢复；.trash 会自动清理(默认保留最近 30 天/最多 50 条)。id 不存在会返回错误。", "flags": ["<id> (位置参数,页面 id)"]],
@@ -269,13 +301,13 @@ let COMMAND_ALLOWED_FLAGS: [String: Set<String>] = [
     "help": [],
     "groups": [],
     "pages": ["group", "group-name"],
-    "list": ["group", "group-name", "page", "page-size", "page-num"],
-    "read": ["group", "group-name", "page"],
-    "write": ["group", "group-name", "page", "text", "label", "batch", "force"],
+    "list": ["group", "group-name", "page", "page-name", "page-size", "page-num"],
+    "read": ["group", "group-name", "page", "page-name"],
+    "write": ["group", "group-name", "page", "page-name", "text", "label", "batch", "force"],
     "search": ["group", "group-name", "all-groups", "limit"],
-    "paste": ["group", "group-name", "page"],
+    "paste": ["group", "group-name", "page", "page-name"],
     "clear": ["group", "group-name", "force"],
-    "create-group": ["page", "force"],
+    "create-group": ["page", "page-name", "force"],
     "create-page": ["force"],
     "delete-group": ["force"],
     "delete-page": ["force"],
@@ -303,6 +335,10 @@ func cmdHelp() -> Never {
         "defaultGroup": DEFAULT_GROUP,
         "defaultPage": DEFAULT_PAGE,
         "slotCount": slotCount,
+        // v2.9.29: document the env var that overrides the data directory.
+        "env": [
+            "CLIPSLOTS_DATA_DIR": "覆盖数据目录，默认 ~/.local/share/clipslots；锁文件随之移动（当前生效值：\(ClipSlotsPaths.dataRoot.path)）"
+        ],
         "commands": COMMANDS
     ])
 }
@@ -359,7 +395,7 @@ func cmdPages(_ args: ParsedArgs) -> Never {
 func cmdList(_ args: ParsedArgs) -> Never {
     let group = resolveGroup(args)
     let index = storage.loadIndex()
-    let page = args.flag("page") ?? pageId(forGroup: group, in: index)
+    let page = resolvePageFlag(args) ?? pageId(forGroup: group, in: index)
     var slots: [[String: Any]] = []
     for n in 1...slotCount {
         let content = storage.get(n, in: group)
@@ -409,6 +445,7 @@ func cmdList(_ args: ParsedArgs) -> Never {
 
 func cmdRead(_ args: ParsedArgs) -> Never {
     let group = resolveGroup(args)
+    _ = resolvePageFlag(args) // v2.9.29: enforce --page/--page-name validity + exclusivity
     let n = parseSlot(args.positionals.first)
     let content = storage.get(n, in: group)
     let label = storage.getLabel(n, in: group) ?? content.label
@@ -466,6 +503,7 @@ func cmdWrite(_ args: ParsedArgs) -> Never {
     if args.hasFlag("batch") { cmdWriteBatch(args) }
 
     let group = resolveGroup(args)
+    _ = resolvePageFlag(args) // v2.9.29: enforce --page/--page-name validity + exclusivity
     let n = parseSlot(args.positionals.first)
     guard var text = args.flag("text") else {
         fail("missing --text <string> (use --text - to read from stdin, or --batch for bulk)")
@@ -622,6 +660,7 @@ func cmdSearch(_ args: ParsedArgs) -> Never {
 
 func cmdPaste(_ args: ParsedArgs) -> Never {
     let group = resolveGroup(args)
+    _ = resolvePageFlag(args) // v2.9.29: enforce --page/--page-name validity + exclusivity
     let n = parseSlot(args.positionals.first)
     let content = storage.get(n, in: group)
     guard !content.isEmpty else {
@@ -671,7 +710,7 @@ func cmdCreateGroup(_ args: ParsedArgs) -> Never {
     guard let name = args.positionals.first, !name.trimmingCharacters(in: .whitespaces).isEmpty else {
         fail("missing group name (usage: create-group <name> [--page <id>])")
     }
-    let page = args.flag("page")
+    let page = resolvePageFlag(args, strict: true)
     do {
         let slot = try storage.createSpecialSlot(name: name, pageId: page)
         success(["group": ["id": slot.id, "name": slot.name, "pageId": slot.pageId]])

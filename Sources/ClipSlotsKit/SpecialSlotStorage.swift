@@ -21,8 +21,8 @@ public final class SpecialSlotStorage {
     private let storageLock = StorageLock.shared
 
     public init() {
-        let appSupport = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent(".local/share/clipslots/special_slots")
+        // v2.9.29: honor CLIPSLOTS_DATA_DIR via ClipSlotsPaths (env > default).
+        let appSupport = ClipSlotsPaths.specialSlots
         baseDir = appSupport
         indexURL = baseDir.appendingPathComponent("index.json")
 
@@ -205,8 +205,7 @@ public final class SpecialSlotStorage {
     }
 
     private func migrateLegacySlotsOrCreateDefault() {
-        let legacyDir = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent(".local/share/clipslots/slots")
+        let legacyDir = ClipSlotsPaths.slots
 
         if FileManager.default.fileExists(atPath: legacyDir.path) {
             NSLog("[ClipSlots] Migrating legacy slots to default special slot")

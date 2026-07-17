@@ -11,8 +11,7 @@ final class SlotConnectionStorage {
     private var cache: [String: SlotConnectionMap] = [:]
 
     private init() {
-        let home = FileManager.default.homeDirectoryForCurrentUser
-        baseDir = home.appendingPathComponent(".local/share/clipslots/special_slots", isDirectory: true)
+        baseDir = ClipSlotsPaths.specialSlots
         loadAll()
     }
 

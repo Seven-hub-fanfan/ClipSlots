@@ -66,10 +66,12 @@ public final class StorageLock {
         if let lockURL {
             self.lockURL = lockURL
         } else {
-            let base = FileManager.default.homeDirectoryForCurrentUser
-                .appendingPathComponent(".local/share/clipslots/special_slots")
-            try? FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
-            self.lockURL = base.appendingPathComponent(".storage.lock")
+            // v2.9.29 (CRITICAL): the lock follows the data dir. Deriving it from
+            // ClipSlotsPaths keeps GUI+CLI coordinating on ONE lock file even when
+            // CLIPSLOTS_DATA_DIR redirects the data root.
+            let lock = ClipSlotsPaths.lockFile
+            try? FileManager.default.createDirectory(at: lock.deletingLastPathComponent(), withIntermediateDirectories: true)
+            self.lockURL = lock
         }
     }
 
