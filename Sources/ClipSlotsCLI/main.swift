@@ -12,9 +12,34 @@ import ClipSlotsKit
 //   success: {"ok": true, ...}
 //   error:   {"ok": false, "error": "message"}  (exit code 1)
 
-let CLI_VERSION = "2.9.40"
+let CLI_VERSION = "2.9.41"
 let DEFAULT_GROUP = "default"
 let DEFAULT_PAGE = "default_page"
+
+// v2.9.41 (Problem A): capture the "request received" instant as early and as
+// robustly as possible so that parallel `create-group` processes keep the order in
+// which they were LAUNCHED, not the order in which they happen to win the storage
+// lock. Capturing `Date()` at the top of top-level code is NOT enough: the Swift
+// runtime + dyld startup jitter (tens of ms) is larger than the shell's fork
+// spacing (sub-ms), so per-process wall-clock reads get reordered. Instead we read
+// the kernel's process-CREATION time (`kp_proc.p_starttime`) via sysctl — the shell
+// forks background jobs sequentially, so this timestamp is monotonic with launch
+// order and free of runtime-startup jitter. Falls back to `Date()` if sysctl fails.
+func clipslotsProcessStartTime() -> Date {
+    var mib: [Int32] = [CTL_KERN, KERN_PROC, KERN_PROC_PID, getpid()]
+    var kp = kinfo_proc()
+    var size = MemoryLayout<kinfo_proc>.stride
+    let rc = mib.withUnsafeMutableBufferPointer { buf in
+        sysctl(buf.baseAddress, UInt32(buf.count), &kp, &size, nil, 0)
+    }
+    if rc == 0 {
+        let tv = kp.kp_proc.p_starttime
+        let secs = Double(tv.tv_sec) + Double(tv.tv_usec) / 1_000_000.0
+        if secs > 0 { return Date(timeIntervalSince1970: secs) }
+    }
+    return Date()
+}
+let CLI_REQUEST_RECEIVED_AT = clipslotsProcessStartTime()
 
 // Extensions treated as images (attachment typing + content classification).
 // v2.9.7 (R2): single source of truth now lives in ClipSlotsKit
@@ -409,8 +434,20 @@ func cmdGroups(_ args: ParsedArgs) -> Never {
     // (all groups, every page). --page / --page-name validity + exclusivity is
     // enforced by resolvePageFlag (page-name errors if unknown).
     let filterPage = resolvePageFlag(args)
+    // v2.9.41 (Problem A): emit groups sorted by (page order, group order) instead
+    // of raw storage-array order. `order` is now assigned by request-receipt time,
+    // so this makes `groups` output reflect the user's create-group issue sequence
+    // even when the groups were created by parallel processes. Matches the ordering
+    // `list --page` already uses.
+    let pageOrder = Dictionary(uniqueKeysWithValues: index.pages.map { ($0.id, $0.order) })
+    let sortedSlots = index.specialSlots.sorted { a, b in
+        let pa = pageOrder[a.pageId] ?? Int.max
+        let pb = pageOrder[b.pageId] ?? Int.max
+        if pa != pb { return pa < pb }
+        return a.order < b.order
+    }
     var groups: [[String: Any]] = []
-    for g in index.specialSlots where filterPage == nil || g.pageId == filterPage {
+    for g in sortedSlots where filterPage == nil || g.pageId == filterPage {
         groups.append([
             "id": g.id,
             "name": g.name,
@@ -806,7 +843,7 @@ func cmdCreateGroup(_ args: ParsedArgs) -> Never {
     }
     let page = resolvePageFlag(args, strict: true)
     do {
-        let slot = try storage.createSpecialSlot(name: name, pageId: page)
+        let slot = try storage.createSpecialSlot(name: name, pageId: page, requestedAt: CLI_REQUEST_RECEIVED_AT)
         success(["group": ["id": slot.id, "name": slot.name, "pageId": slot.pageId]])
     } catch SpecialSlotError.duplicateName {
         // v2.9.4 (Feature #4): same-page duplicate name is rejected. Agents should

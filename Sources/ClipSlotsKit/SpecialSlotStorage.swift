@@ -51,7 +51,7 @@ public final class SpecialSlotStorage {
 
         // Already v2.4+ format — just repair any inconsistencies
         if index.schemaVersion >= 2 {
-            repairPageScopedSlotGroupsIfNeeded(index)
+            repairPageScopedSlotGroupsIfNeeded()
             return
         }
 
@@ -120,9 +120,22 @@ public final class SpecialSlotStorage {
     }
 
     /// v2.4.1 Repair: ensure page-scoped slot group consistency.
-    private func repairPageScopedSlotGroupsIfNeeded(_ index: SpecialSlotIndex) {
-        var modified = index
-        var changed = false
+    ///
+    /// v2.9.41 (Problem B): this repair now runs INSIDE the cross-process lock and
+    /// re-loads the index under that lock. Previously it read the index outside any
+    /// lock (during storage init, which happens on EVERY CLI invocation) and then
+    /// wrote back if it found an inconsistency. Because a parallel `create-group` /
+    /// `write` could hold the lock and mutate the index between this read and write,
+    /// the unlocked repair could clobber a concurrent write (a lost update) — which
+    /// itself MANUFACTURED the very inconsistencies (dangling currentSpecialSlotId,
+    /// missing groups) that caused a "repair event" to fire on the next command
+    /// (e.g. delete-page). Reading + deciding + writing atomically under the lock
+    /// removes that self-inflicted inconsistency source. If the lock is momentarily
+    /// busy we simply skip repair this run (try?) — a later command repairs it.
+    private func repairPageScopedSlotGroupsIfNeeded() {
+        try? storageLock.withLock {
+            var modified = loadIndex()
+            var changed = false
 
         // 1. Ensure pages array is non-empty
         if modified.pages.isEmpty {
@@ -155,6 +168,24 @@ public final class SpecialSlotStorage {
             }
         }
 
+        // 3b. (v2.9.41) Back-fill `order` for legacy data. Pre-order groups decode
+        // with order == 0, so a page full of legacy groups has duplicate orders and
+        // no stable sort key. When a page's group orders are not all-distinct we
+        // renumber them 0..n-1 IN THEIR CURRENT ARRAY ORDER (the historical insert
+        // order), giving concurrent create-group a clean, gap-free base to insert
+        // into. Pages whose orders are already distinct are left untouched.
+        for pageId in validPageIds {
+            let idxs = modified.specialSlots.indices.filter { modified.specialSlots[$0].pageId == pageId }
+            guard idxs.count > 1 else { continue }
+            let orders = idxs.map { modified.specialSlots[$0].order }
+            if Set(orders).count != orders.count {
+                for (newOrder, i) in idxs.enumerated() where modified.specialSlots[i].order != newOrder {
+                    modified.specialSlots[i].order = newOrder
+                    changed = true
+                }
+            }
+        }
+
         // 4. (removed in v2.9.33) Previously this step lazily back-filled a
         // "默认槽位组" for any page that had none. That lazy backfill has been
         // removed to avoid two competing code paths: `createPage` now creates
@@ -182,9 +213,10 @@ public final class SpecialSlotStorage {
             changed = true
         }
 
-        if changed {
-            try? saveIndex(modified)
-            NSLog("[ClipSlots] v2.4.1 repair: fixed page-scoped slot group inconsistencies")
+            if changed {
+                try? saveIndex(modified)
+                NSLog("[ClipSlots] v2.4.1 repair: fixed page-scoped slot group inconsistencies")
+            }
         }
     }
 
@@ -417,7 +449,8 @@ public final class SpecialSlotStorage {
         name: String,
         pageId: String? = nil,
         sourceType: SpecialSlotSourceType = .manual,
-        sourcePath: String? = nil
+        sourcePath: String? = nil,
+        requestedAt: Date = Date()
     ) throws -> SpecialSlot {
         try storageLock.withLock {
             var index = loadIndex()
@@ -443,8 +476,33 @@ public final class SpecialSlotStorage {
                 throw SpecialSlotError.duplicateName
             }
 
-            let maxOrder = existingInPage.map { $0.order }.max() ?? (-1)
-            let nextOrder = maxOrder + 1
+            // v2.9.41 (Problem A): assign order by REQUEST-RECEIPT time, not by
+            // lock-acquisition (write-completion) time. Parallel `create-group`
+            // processes serialize on the cross-process lock in a non-deterministic
+            // order, so a blind `maxOrder + 1` append records "who won the lock"
+            // rather than "who was invoked first". Instead we place the new group
+            // BEFORE any existing group that was requested strictly later than us
+            // (only siblings that also carry a `requestedAt` participate — legacy
+            // groups without one are never reordered), then shift the trailing
+            // orders up by one. This keeps issue order stable regardless of the
+            // lock race, without renumbering / disturbing pre-existing groups.
+            let laterOrders = existingInPage
+                .compactMap { g -> Int? in
+                    guard let r = g.requestedAt, r > requestedAt else { return nil }
+                    return g.order
+                }
+            let insertOrder: Int
+            if let minLater = laterOrders.min() {
+                insertOrder = minLater
+                for i in index.specialSlots.indices
+                where index.specialSlots[i].pageId == targetPageId
+                    && index.specialSlots[i].order >= insertOrder {
+                    index.specialSlots[i].order += 1
+                }
+            } else {
+                let maxOrder = existingInPage.map { $0.order }.max() ?? (-1)
+                insertOrder = maxOrder + 1
+            }
 
             let slot = SpecialSlot(
                 id: "special_\(UUID().uuidString)",
@@ -454,7 +512,8 @@ public final class SpecialSlotStorage {
                 sourceType: sourceType,
                 sourcePath: sourcePath,
                 pageId: targetPageId,
-                order: nextOrder,
+                order: insertOrder,
+                requestedAt: requestedAt,
                 createdAt: Date(),
                 updatedAt: Date()
             )
@@ -666,6 +725,31 @@ public final class SpecialSlotStorage {
             }
 
             index.pages.removeAll { $0.id == id }
+
+            // v2.9.41 (Problem B): re-point the slot-group selection pointers to a
+            // valid group on the (possibly new) current page BEFORE saving. Deleting
+            // a page removes its groups, so currentSpecialSlotId / selectedSpecialSlotId
+            // / activeHotkeySpecialSlotId could otherwise be left dangling — which is
+            // exactly the inconsistency that made a subsequent command's init-time
+            // repair fire a "repair event". Fixing it here, inside the delete
+            // transaction, keeps the on-disk state self-consistent so no later repair
+            // is needed. Mirrors the post-conditions checked by repair (steps 5/6).
+            let currentPageGroups = index.specialSlots
+                .filter { $0.pageId == index.currentPageId }
+                .sorted { $0.order < $1.order }
+            if !currentPageGroups.contains(where: { $0.id == index.currentSpecialSlotId }) {
+                index.currentSpecialSlotId = currentPageGroups.first?.id
+                    ?? index.specialSlots.first?.id ?? "default"
+            }
+            if let selectedId = index.selectedSpecialSlotId,
+               !currentPageGroups.contains(where: { $0.id == selectedId }) {
+                index.selectedSpecialSlotId = index.currentSpecialSlotId
+            }
+            if let activeId = index.activeHotkeySpecialSlotId,
+               !currentPageGroups.contains(where: { $0.id == activeId }) {
+                index.activeHotkeySpecialSlotId = index.currentSpecialSlotId
+            }
+
             try saveIndex(index)
             NSLog("[ClipSlots] Page deleted: \(id)")
 

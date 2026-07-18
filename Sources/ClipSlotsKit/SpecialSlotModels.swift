@@ -40,12 +40,18 @@ public struct SpecialSlot: Codable, Identifiable, Equatable {
     public var sourcePath: String?
     public var pageId: String = "default_page"   // v2.4: 所属页面 ID
     public var order: Int = 0                    // v2.4: 页面内的排序
+    /// v2.9.41: 「请求接收时刻」。并行 create-group 时，各 CLI 进程抢锁的先后是
+    /// 不确定的，若在写入完成时才分配 order，最终顺序反映的是「谁先抢到锁」而非
+    /// 「谁先发起请求」。因此在请求接收时（持锁前）捕获这个时间戳并持久化，
+    /// createSpecialSlot 依据它把新组插入到正确位置，从而即使并行写入也能保持
+    /// 发起顺序。旧数据没有该字段时解码为 nil，排序回落到既有 order（不被打乱）。
+    public var requestedAt: Date?
     public var createdAt: Date
     public var updatedAt: Date
 
     public init(id: String, name: String, icon: String = "folder", colorHex: String? = nil,
          sourceType: SpecialSlotSourceType, sourcePath: String? = nil,
-         pageId: String = "default_page", order: Int = 0,
+         pageId: String = "default_page", order: Int = 0, requestedAt: Date? = nil,
          createdAt: Date, updatedAt: Date) {
         self.id = id
         self.name = name
@@ -55,6 +61,7 @@ public struct SpecialSlot: Codable, Identifiable, Equatable {
         self.sourcePath = sourcePath
         self.pageId = pageId
         self.order = order
+        self.requestedAt = requestedAt
         self.createdAt = createdAt
         self.updatedAt = updatedAt
     }
@@ -70,6 +77,7 @@ public struct SpecialSlot: Codable, Identifiable, Equatable {
         sourcePath = try c.decodeIfPresent(String.self, forKey: .sourcePath)
         pageId = try c.decodeIfPresent(String.self, forKey: .pageId) ?? "default_page"
         order = try c.decodeIfPresent(Int.self, forKey: .order) ?? 0
+        requestedAt = try c.decodeIfPresent(Date.self, forKey: .requestedAt)
         createdAt = try c.decode(Date.self, forKey: .createdAt)
         updatedAt = try c.decode(Date.self, forKey: .updatedAt)
     }
