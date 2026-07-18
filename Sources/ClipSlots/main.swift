@@ -105,6 +105,14 @@ struct ClipSlotsApp: App {
     }
 }
 
+/// v2.9.38: transient flash-highlight target carrying BOTH the group id and the
+/// slot index, so the highlight only lights up the correct card in the correct
+/// group (aligns with the group-aware `isLastPasted` check).
+struct FlashHighlightTarget: Equatable {
+    let groupId: String
+    let slot: Int
+}
+
 final class SlotStoreObservable: ObservableObject {
     let instanceID = UUID().uuidString
 
@@ -180,14 +188,10 @@ final class SlotStoreObservable: ObservableObject {
     }()
 
     // v2.9.37: transient flash-highlight target for the main grid. Set by
-    // jumpToLastPaste(); cleared automatically after ~2s.
-    @Published var flashHighlightSlot: Int? = nil
+    // jumpToLastPaste(); cleared automatically after ~2s. v2.9.38: now carries the
+    // group id too so only the matching card in the matching group lights up.
+    @Published var flashHighlightSlot: FlashHighlightTarget? = nil
     private var flashHighlightToken: UUID?
-
-    // v2.9.37: a deferred auto-advance waiting for an attachment paste to finish
-    // (or the attachment panel to close). Slots with attachments must not switch
-    // groups immediately, otherwise the attachment paste gets interrupted.
-    private var pendingAutoAdvance: (slot: Int, groupId: String)?
 
     // v2.7.0: Slot connection state
     @Published var currentConnectionMap: SlotConnectionMap = .empty
@@ -616,6 +620,9 @@ final class SlotStoreObservable: ObservableObject {
 
     /// Index of the last non-empty slot in the given group, or nil if the group is empty.
     private func lastNonEmptySlot(in specialSlotId: String) -> Int? {
+        // v2.9.38: guard against a degenerate `config.slots == 0`, which would make
+        // `1...config.slots` an invalid range and crash.
+        guard config.slots >= 1 else { return nil }
         var last: Int? = nil
         for slot in 1...config.slots where !specialStorage.get(slot, in: specialSlotId).isEmpty {
             last = slot
@@ -701,24 +708,18 @@ final class SlotStoreObservable: ObservableObject {
 
     // MARK: - v2.9.37 Jump to Last Paste + flash highlight
 
-    /// Authoritative (disk-backed) attachment count for a slot in a given group.
-    private func attachmentCount(for slot: Int, in groupId: String) -> Int {
-        specialStorage.get(slot, in: groupId).attachments.count
-    }
-
     /// Switch the main view to the last-paste page/group and flash-highlight the
     /// slot card for ~2s. Called from the footer "上次粘贴" button.
     func jumpToLastPaste() {
         guard lastPasteSlotIndex >= 0,
               !lastPasteGroupId.isEmpty,
-              let group = specialSlots.first(where: { $0.id == lastPasteGroupId }) else {
+              specialSlots.contains(where: { $0.id == lastPasteGroupId }) else {
             return
         }
 
-        let pageId = lastPastePageId.isEmpty ? group.pageId : lastPastePageId
-        if !pageId.isEmpty && pageId != currentPageId {
-            switchToPage(id: pageId)
-        }
+        // v2.9.38: switchSpecialSlot (= selectAndActivateSpecialSlot) already syncs
+        // the page / currentPageId to the group's own page, so calling switchToPage
+        // first was a redundant second reload + animation. Just switch the group.
         if currentSpecialSlotId != lastPasteGroupId {
             withAnimation(.easeInOut(duration: 0.28)) {
                 switchSpecialSlot(id: lastPasteGroupId)
@@ -727,7 +728,7 @@ final class SlotStoreObservable: ObservableObject {
 
         // Flash-highlight the target slot, auto-clearing after 2s (guarded by a
         // token so a newer jump cancels the previous clear).
-        let target = lastPasteSlotIndex
+        let target = FlashHighlightTarget(groupId: lastPasteGroupId, slot: lastPasteSlotIndex)
         let token = UUID()
         flashHighlightToken = token
         withAnimation(.easeInOut(duration: 0.3)) {
@@ -744,37 +745,18 @@ final class SlotStoreObservable: ObservableObject {
     func maybeAutoAdvance(afterPasting slot: Int, in specialSlotId: String) {
         guard isAutoAdvanceEnabled else { return }
 
-        // v2.9.37: if the slot carries attachments, do NOT switch groups now —
-        // switching would interrupt the attachment paste (main body pasted but the
-        // attachments still pending). Remember the intent and fire it later, either
-        // from the attachment-paste completion handler
-        // (completeAutoAdvanceAfterAttachments) or when the attachment panel closes
-        // (firePendingAutoAdvanceOnPanelClose). Slots without attachments keep the
-        // existing immediate-switch behaviour.
-        if attachmentCount(for: slot, in: specialSlotId) > 0 {
-            pendingAutoAdvance = (slot, specialSlotId)
-            NSLog("[ClipSlots] autoAdvance deferred: slot=\(slot) has attachments, waiting for attachment paste / panel close")
-            return
-        }
-
+        // Slots without attachments switch groups immediately. Slots WITH
+        // attachments are handled by completeAutoAdvanceAfterAttachments, called
+        // from the sequential-paste success callback once every attachment has
+        // finished pasting (switching earlier would interrupt the paste).
         performAutoAdvance(afterPasting: slot, in: specialSlotId)
     }
 
     /// v2.9.37: called from the attachment paste completion handler once all
     /// attachments have finished pasting — it is now safe to advance.
     func completeAutoAdvanceAfterAttachments(afterPasting slot: Int, in specialSlotId: String) {
-        pendingAutoAdvance = nil
         guard isAutoAdvanceEnabled else { return }
         performAutoAdvance(afterPasting: slot, in: specialSlotId)
-    }
-
-    /// v2.9.37: fired when the attachment panel closes. If an auto-advance was
-    /// deferred because the pasted slot had attachments, run it now.
-    func firePendingAutoAdvanceOnPanelClose(for slot: Int) {
-        guard let pending = pendingAutoAdvance, pending.slot == slot else { return }
-        pendingAutoAdvance = nil
-        guard isAutoAdvanceEnabled else { return }
-        performAutoAdvance(afterPasting: pending.slot, in: pending.groupId)
     }
 
     private func performAutoAdvance(afterPasting slot: Int, in specialSlotId: String) {
@@ -1608,11 +1590,11 @@ final class SlotStoreObservable: ObservableObject {
         // cleans up any spilled temp image files.
         let content = specialStorage.get(slot, in: activeId)
         if !content.attachments.isEmpty {
-            recordLastPaste(slot: slot, in: activeId) // v2.9.36
             var tempFiles: [URL] = []
             let payloads = slotContentPayloads(slot: slot, activeId: activeId, tempFiles: &tempFiles)
             let attachCount = content.attachments.count
             runSequentialPaste(payloads, activeId: activeId, targetApp: nil, tempFiles: tempFiles) { [weak self] in
+                self?.recordLastPaste(slot: slot, in: activeId) // v2.9.38: record only after the paste actually succeeds
                 self?.showFloatingNotice(FloatingNotice(
                     title: "已粘贴主内容 + \(attachCount) 个附件",
                     subtitle: "主内容与附件已依次粘贴",
@@ -1699,11 +1681,11 @@ final class SlotStoreObservable: ObservableObject {
         // v2.8.0 (P1-2): radial / UI single-slot paste now carries attachments too,
         // via the same central executor used by the hotkey path.
         if !content.attachments.isEmpty {
-            recordLastPaste(slot: slot, in: activeId) // v2.9.36
             var tempFiles: [URL] = []
             let payloads = slotContentPayloads(slot: slot, activeId: activeId, tempFiles: &tempFiles)
             let attachCount = content.attachments.count
             runSequentialPaste(payloads, activeId: activeId, targetApp: targetApp, tempFiles: tempFiles) { [weak self] in
+                self?.recordLastPaste(slot: slot, in: activeId) // v2.9.38: record only after the paste actually succeeds
                 self?.showFloatingNotice(FloatingNotice(
                     title: "已粘贴主内容 + \(attachCount) 个附件",
                     subtitle: "主内容与附件已依次粘贴",

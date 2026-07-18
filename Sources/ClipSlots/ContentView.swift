@@ -140,7 +140,7 @@ struct ContentView: View {
                     .onChange(of: store.flashHighlightSlot) { target in
                         guard let target else { return }
                         withAnimation(.easeInOut(duration: 0.3)) {
-                            scrollProxy.scrollTo(target, anchor: .center)
+                            scrollProxy.scrollTo(target.slot, anchor: .center)
                         }
                     }
                 }
@@ -934,7 +934,7 @@ struct ContentView: View {
             onEditHTML: { html in store.updateHTMLSlot(slot, html: html) },
             onDropFiles: { urls in store.importDroppedFiles(urls, toSlot: slot) },
             isLastPasted: store.isLastPasted(slot: slot, groupId: store.currentSpecialSlotId),
-            isFlashHighlighted: store.flashHighlightSlot == slot,
+            isFlashHighlighted: store.flashHighlightSlot == FlashHighlightTarget(groupId: store.currentSpecialSlotId, slot: slot),
             store: store,
             connectionDotColor: store.portColor(for: slot),
             isConnectionMode: false,
