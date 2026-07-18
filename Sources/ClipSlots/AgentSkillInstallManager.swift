@@ -109,8 +109,17 @@ final class AgentSkillInstallManager: ObservableObject {
 
     private func computeState(for agent: Agent) -> InstallState {
         let target = agent.skillTargetPath
-        // 是否为软链接
+        // 是否为软链接（destinationOfSymbolicLink 只读链接自身，即使目标已被删除也会成功返回）
         if let dest = try? fm.destinationOfSymbolicLink(atPath: target) {
+            // v2.9.39 修复：仅凭「链接存在 + 记录路径匹配」判定「已安装」会漏判悬空软链接
+            // （目标目录/App bundle 已删除时链接仍在）。必须校验软链接指向的真实目录是否
+            // 仍存在于文件系统上。fileExists(atPath:) 会跟随软链接，悬空链接返回 false。
+            var isDir: ObjCBool = false
+            let targetExists = fm.fileExists(atPath: target, isDirectory: &isDir) && isDir.boolValue
+            guard targetExists else {
+                // 悬空 / 失效软链接：真实文件系统上并没有可用的 Skill，视为未安装。
+                return .notInstalled
+            }
             let resolved = resolveSymlink(dest, base: agent.skillsDir)
             if let source = bundledSkillDir,
                standardized(resolved) == standardized(source) {
