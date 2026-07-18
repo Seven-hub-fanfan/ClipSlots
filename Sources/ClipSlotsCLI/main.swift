@@ -12,7 +12,7 @@ import ClipSlotsKit
 //   success: {"ok": true, ...}
 //   error:   {"ok": false, "error": "message"}  (exit code 1)
 
-let CLI_VERSION = "2.9.39"
+let CLI_VERSION = "2.9.40"
 let DEFAULT_GROUP = "default"
 let DEFAULT_PAGE = "default_page"
 
@@ -546,10 +546,22 @@ func cmdRead(_ args: ParsedArgs) -> Never {
 struct WriteFailure: Error { let message: String }
 
 // v2.9.16 (#2, batch): resolve a group literal (id OR name) to a group id.
-func resolveGroupLiteral(_ raw: String) -> String {
+// v2.9.40 (P0): page-scoped resolution. When `inPage` is supplied (from a
+// top-level --page / --page-name), the id/name lookup is RESTRICTED to groups on
+// that page, and a literal that resolves to nothing on that page is a hard error
+// (never silently falls back to a same-named group on ANOTHER page). Without a
+// page constraint behaviour is unchanged (global, backward compatible).
+func resolveGroupLiteral(_ raw: String, inPage pageId: String? = nil) -> String {
     let index = storage.loadIndex()
-    if index.specialSlots.contains(where: { $0.id == raw }) { return raw }
-    if let g = index.specialSlots.first(where: { $0.name == raw }) { return g.id }
+    let scope = pageId.map { pid in index.specialSlots.filter { $0.pageId == pid } }
+                      ?? index.specialSlots
+    if scope.contains(where: { $0.id == raw }) { return raw }
+    if let g = scope.first(where: { $0.name == raw }) { return g.id }
+    if let pid = pageId {
+        let label = index.pages.first(where: { $0.id == pid })?.name ?? pid
+        // P0 guardrail: refuse to write to a same-named group on another page.
+        fail("group '\(raw)' not found in page '\(label)'")
+    }
     return raw
 }
 
@@ -634,7 +646,11 @@ func cmdWriteBatch(_ args: ParsedArgs) -> Never {
     guard !arr.isEmpty else { fail("--batch array is empty; nothing to write") }
 
     // Group/label from top-level flags act as defaults for entries that omit them.
-    let defaultGroup = resolveGroup(args)
+    // v2.9.40 (P0): resolve the page ONCE and scope every group lookup to it, so
+    // `write --batch --group-name X --page-name Y` writes to group X on page Y (or
+    // errors), never to a same-named group on a different page.
+    let requestedPage = resolvePageFlag(args)
+    let defaultGroup = resolveGroup(args, inPage: requestedPage)
     let defaultLabel = args.flag("label")
 
     var results: [[String: Any]] = []
@@ -660,7 +676,7 @@ func cmdWriteBatch(_ args: ParsedArgs) -> Never {
                             "error": "missing or invalid 'text' (must be a string)"])
             continue
         }
-        let group = (entry["group"] as? String).map(resolveGroupLiteral) ?? defaultGroup
+        let group = (entry["group"] as? String).map { resolveGroupLiteral($0, inPage: requestedPage) } ?? defaultGroup
         let label = (entry["label"] as? String) ?? defaultLabel
         do {
             let preview = try performTextWrite(slot: n, text: text, group: group, label: label)

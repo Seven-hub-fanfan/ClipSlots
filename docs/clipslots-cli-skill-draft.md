@@ -80,6 +80,9 @@ clipslots clear <slot> [--group <id>] [--page <uuid>|--page-name <名称>]
 # v2.9.4: 同一页面内不允许重名（大小写/去空格后完全相同即冲突）；冲突时返回
 #   {"ok":false,"error":"a group named '<name>' already exists on this page"}
 #   → 改个名或加 -2/-3 后缀重试。不同页面允许同名。
+# ⚠️ 并发约定：需要建多个组时，create-group 必须【顺序调用】，不可并行。
+#   组的排序按创建先后确定，并行调用会导致组排序不确定（顺序错乱）。
+#   请等前一条 create-group 返回后再发下一条。
 clipslots create-group <name> [--page <uuid>|--page-name <名称>]
 
 # 新建页面（返回 id）；页面名不可重复
@@ -115,6 +118,7 @@ clipslots delete-group -h
 - ✅ **`.trash` 自动清理**（v2.9.5 新增）：`delete-group`/`delete-page` 的软删除数据会在删除时与 app/CLI 启动时自动清理，默认保留最近 30 天、最多 50 条，超出的最旧条目被物理删除。删除仍是"先移动到 `.trash`"，30 天内且未超上限的条目仍可人工恢复，因此删除依旧可安全用于整理。
 - ✅ **`delete-group` / `delete-page` 软删除**（v2.9.4 新增）：删除是"移动到 `.trash`"而非物理抹除，可人工恢复；因此可安全用于整理。删除不存在的 id 返回 `ok:false`（`group/page <id> not found`），不会误删。
 - ✅ **`create-group` 同页去重**（v2.9.4 新增）：同一页面内不允许出现同名槽位组，冲突返回 `a group named '<name>' already exists on this page`；不同页面之间允许同名。批量导入/自动建组时遇冲突请改名或加 `-2`/`-3` 后缀。
+- ⚠️ **`create-group` 必须顺序调用**：组的排序按创建先后确定，需要一次建多个组时**不可并行**发起 `create-group`，否则组排序不确定（顺序错乱）。务必等前一条返回后再发下一条。
 - ✅ **跨进程写锁**（v2.9.4 新增）：CLI 与 GUI 的并发写通过 `flock()` 串行化，不再互相覆盖；锁争用超时（约 5s）返回 `storage is busy (lock timeout)`，稍后重试即可。
 - ✅ **`paste` 支持纯附件槽位**：主体为空、仅有附件的槽位，`paste` 会把附件的文件 URL 写入系统剪贴板（`clearContents` 后 `writeObjects([NSURL])`），返回 `attachmentsCopied`（无法解析出文件路径的附件会被跳过并计入 `attachmentsSkipped`）。旧版"纯附件槽位无法 paste"的限制已在 v2.9.3 修复。
 - ✅ **`search` 命中附件文件名**：搜索的匹配范围已扩展到"预览 + 正文 + 标签 + 附件文件名"，因此模式C（纯附件）槽位可通过文件名被搜到。旧版"搜索不覆盖附件名"的限制已在 v2.9.3 修复。
