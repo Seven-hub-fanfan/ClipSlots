@@ -63,6 +63,14 @@ struct SettingsView: View {
     // v2.9.6: CLI install management
     @StateObject private var cliManager = CLIInstallManager()
 
+    // v2.9.46: Agent Skill 安装管理 + 卸载 App
+    @StateObject private var skillManager = AgentSkillInstallManager()
+    @StateObject private var appUninstaller = AppUninstaller()
+    @State private var showUninstallSheet = false
+    @State private var uninstallDeleteData = true
+    @State private var uninstallRemoveCLI = true
+    @State private var uninstallRemoveSkills = true
+
     @Environment(\.dismiss) private var dismiss
     @Environment(\.colorScheme) private var colorScheme
 
@@ -123,7 +131,13 @@ struct SettingsView: View {
             RoundedRectangle(cornerRadius: 14, style: .continuous)
                 .stroke(AppTheme.subtleBorder(colorScheme), lineWidth: 1)
         )
-        .onAppear { cliManager.refreshState() }
+        .onAppear {
+            cliManager.refreshState()
+            skillManager.refresh()
+        }
+        .sheet(isPresented: $showUninstallSheet) {
+            uninstallConfirmSheet
+        }
         .confirmationDialog("恢复默认设置？", isPresented: $showingResetConfirm, titleVisibility: .visible) {
             Button("恢复默认", role: .destructive) { resetDefaults() }
             Button("取消", role: .cancel) {}
@@ -266,7 +280,10 @@ struct SettingsView: View {
         case .notification: notificationPreferencesSection
         case .connection: connectionSection
         case .advanced: advancedSection
-        case .cli: cliSection
+        case .cli:
+            cliSection
+            agentSkillSection
+            uninstallAppSection
         }
     }
 
@@ -518,6 +535,156 @@ struct SettingsView: View {
         case .installed: return "arrow.clockwise"
         case .outdated: return "arrow.up.circle"
         }
+    }
+
+    // MARK: - v2.9.46 Agent Skill 卡片
+
+    private var agentSkillSection: some View {
+        settingsSection(title: "Agent Skill", icon: "brain.head.profile") {
+            VStack(alignment: .leading, spacing: 12) {
+                let installed = skillManager.agentsWithSkillInstalled
+
+                // 状态行（绿点 + 安装数量 + 版本）
+                HStack(spacing: 10) {
+                    Circle()
+                        .fill(installed.isEmpty ? Color.secondary : Color.green)
+                        .frame(width: 9, height: 9)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(installed.isEmpty ? "未安装" : "已安装 · \(installed.count) 个 Agent")
+                            .font(.subheadline)
+                            .fontWeight(.medium)
+                        Text(skillManager.bundledSkillVersionInfo.map { "当前 Skill 版本：\($0)" } ?? "未能读取内置 Skill 版本")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                            .textSelection(.enabled)
+                    }
+                    Spacer()
+                }
+
+                // 已安装 Agent 列表（绿点 + 路径）
+                if !installed.isEmpty {
+                    VStack(alignment: .leading, spacing: 6) {
+                        ForEach(installed) { agent in
+                            HStack(alignment: .top, spacing: 8) {
+                                Circle()
+                                    .fill(Color.green)
+                                    .frame(width: 6, height: 6)
+                                    .padding(.top, 5)
+                                VStack(alignment: .leading, spacing: 1) {
+                                    Text(agent.displayName)
+                                        .font(.caption)
+                                        .fontWeight(.medium)
+                                    Text(agent.skillTargetPath)
+                                        .font(.caption)
+                                        .foregroundColor(.secondary)
+                                        .textSelection(.enabled)
+                                }
+                            }
+                        }
+                    }
+                    .padding(.leading, 2)
+                }
+
+                Text("把 ClipSlots 使用说明（SKILL.md）安装到本机 Agent，供智能体理解 `clipslots` CLI 的用法。重新安装会用 App 内最新内容覆盖各 Agent 的 skill 目录。")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                // 操作按钮
+                HStack(spacing: 10) {
+                    Button(action: { skillManager.reinstallSkillByOverwrite() }) {
+                        Label("重新安装 Skill", systemImage: "arrow.clockwise")
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(skillManager.busyAgentID != nil)
+
+                    if !installed.isEmpty {
+                        Button(role: .destructive, action: { skillManager.uninstallSkillFromAllAgents() }) {
+                            Label("卸载 Skill", systemImage: "trash")
+                        }
+                        .disabled(skillManager.busyAgentID != nil)
+                    }
+                    Spacer()
+                }
+
+                if let message = skillManager.lastMessage {
+                    Text(message)
+                        .font(.caption)
+                        .foregroundColor(skillManager.lastMessageIsError ? .red : .green)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+        }
+    }
+
+    // MARK: - v2.9.46 卸载 App（危险区域）
+
+    private var uninstallAppSection: some View {
+        settingsSection(title: "卸载 ClipSlots", icon: "exclamationmark.triangle.fill") {
+            VStack(alignment: .leading, spacing: 12) {
+                Text("卸载会把 ClipSlots 移入废纸篓，并可选清理槽位数据、CLI 与 Agent Skill。此操作不可恢复。")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                HStack {
+                    Button(role: .destructive) {
+                        showUninstallSheet = true
+                    } label: {
+                        Label("卸载 ClipSlots", systemImage: "trash.fill")
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .tint(.red)
+                    .disabled(appUninstaller.isBusy)
+
+                    if appUninstaller.isBusy {
+                        ProgressView().controlSize(.small)
+                    }
+                    Spacer()
+                }
+            }
+        }
+    }
+
+    // v2.9.46: 卸载确认弹窗
+    private var uninstallConfirmSheet: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            VStack(alignment: .leading, spacing: 6) {
+                Text("确认卸载 ClipSlots？")
+                    .font(.system(size: 17, weight: .bold))
+                Text("此操作不可恢复，请谨慎选择。")
+                    .font(.subheadline)
+                    .foregroundColor(.secondary)
+            }
+
+            VStack(alignment: .leading, spacing: 10) {
+                Toggle("同时删除所有槽位数据（删除 App 数据目录）", isOn: $uninstallDeleteData)
+                Toggle("同时卸载 CLI（删除 \(CLIInstallManager.targetPath)）", isOn: $uninstallRemoveCLI)
+                Toggle("同时卸载所有 Agent Skill（删除各 Agent skill 目录）", isOn: $uninstallRemoveSkills)
+            }
+            .toggleStyle(.checkbox)
+
+            HStack {
+                Spacer()
+                Button("取消") { showUninstallSheet = false }
+                    .keyboardShortcut(.escape)
+                Button(role: .destructive) {
+                    showUninstallSheet = false
+                    appUninstaller.performUninstall(
+                        deleteData: uninstallDeleteData,
+                        uninstallCLI: uninstallRemoveCLI,
+                        uninstallSkills: uninstallRemoveSkills,
+                        skillManager: skillManager
+                    )
+                } label: {
+                    Text("确认卸载")
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(.red)
+            }
+        }
+        .padding(24)
+        .frame(width: 440)
     }
 
     private var helpSection: some View {

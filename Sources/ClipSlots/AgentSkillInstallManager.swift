@@ -404,6 +404,110 @@ final class AgentSkillInstallManager: ObservableObject {
                isError: installed.isEmpty && !skipped.isEmpty)
     }
 
+    // MARK: - 设置页「Agent Skill」卡片：拷贝式安装 / 卸载（v2.9.46）
+
+    /// 已安装本 Skill 的 Agent（skillTargetPath 真实存在，软链或真实目录皆算）。
+    /// 设置页卡片据此展示绿点与安装路径。
+    var agentsWithSkillInstalled: [Agent] {
+        detectedAgents.filter { fileExistsNoFollow($0.skillTargetPath) }
+    }
+
+    /// 「重新安装 Skill」：把 bundle 内最新 SKILL.md 内容**直接覆盖写入**所有已检测
+    /// Agent 的 skill 目录（真实文件，非软链）。与插件市场的软链安装相互独立，便于
+    /// 设置页统一管理 Skill 文件内容。
+    func reinstallSkillByOverwrite() {
+        guard let sourceFile = bundledSkillFile,
+              let data = fm.contents(atPath: sourceFile) else {
+            report("找不到内置 SKILL.md，请重新安装 App。", isError: true)
+            return
+        }
+        refresh()
+        let agents = detectedAgents
+        guard !agents.isEmpty else {
+            report("未检测到已安装的 Agent，请先安装 Claude Code / Cursor / Codex / Gemini CLI。", isError: true)
+            return
+        }
+
+        var done: [String] = []
+        var failed: [String] = []
+        for agent in agents {
+            if overwriteSkillFile(to: agent, data: data) {
+                done.append(agent.displayName)
+            } else {
+                failed.append(agent.displayName)
+            }
+        }
+        refresh()
+
+        if failed.isEmpty {
+            report("已把最新 Skill 覆盖写入 \(done.count) 个 Agent：\(done.joined(separator: "、"))", isError: false)
+        } else if done.isEmpty {
+            report("写入失败：\(failed.joined(separator: "、"))", isError: true)
+        } else {
+            report("已写入：\(done.joined(separator: "、"))；失败：\(failed.joined(separator: "、"))", isError: false)
+        }
+    }
+
+    /// 把 SKILL.md 内容覆盖写入单个 Agent 的 skill 目录（真实目录 + 真实文件）。
+    /// 若目标当前是软链，先移除软链本身（不影响 bundle 内的真实 skill 目录）。
+    private func overwriteSkillFile(to agent: Agent, data: Data) -> Bool {
+        let target = agent.skillTargetPath
+        do {
+            if isSymlink(target) {
+                try fm.removeItem(atPath: target)
+            }
+            try fm.createDirectory(atPath: target, withIntermediateDirectories: true)
+            let targetSkill = (target as NSString).appendingPathComponent("SKILL.md")
+            try data.write(to: URL(fileURLWithPath: targetSkill), options: .atomic)
+            return true
+        } catch {
+            NSLog("[ClipSlots][Skill] overwrite failed for \(agent.displayName) at \(target): \(error)")
+            return false
+        }
+    }
+
+    /// 「卸载 Skill」：删除所有已安装 Agent 的 skill 目录（软链或真实目录皆删除），
+    /// 卸载后卡片状态刷新为「未安装」。
+    func uninstallSkillFromAllAgents() {
+        refresh()
+        let agents = agentsWithSkillInstalled
+        guard !agents.isEmpty else {
+            report("未检测到已安装本 Skill 的 Agent，无需卸载。", isError: false)
+            refresh()
+            return
+        }
+
+        var removed: [String] = []
+        var failed: [String] = []
+        for agent in agents {
+            do {
+                try fm.removeItem(atPath: agent.skillTargetPath)
+                removed.append(agent.displayName)
+            } catch {
+                failed.append(agent.displayName)
+            }
+        }
+        refresh()
+
+        if failed.isEmpty {
+            report("已从 \(removed.count) 个 Agent 卸载本 Skill：\(removed.joined(separator: "、"))", isError: false)
+        } else if removed.isEmpty {
+            report("卸载失败：\(failed.joined(separator: "、"))", isError: true)
+        } else {
+            report("已卸载：\(removed.joined(separator: "、"))；失败：\(failed.joined(separator: "、"))", isError: false)
+        }
+    }
+
+    /// 卸载 App 时的静默清理：删除所有已安装 Agent 的 skill 目录，不产生 UI 反馈。
+    func removeAllSkillDirectoriesSilently() {
+        refresh()
+        for agent in detectedAgents {
+            let target = agent.skillTargetPath
+            guard fileExistsNoFollow(target) else { continue }
+            try? fm.removeItem(atPath: target)
+        }
+    }
+
     // MARK: - 启动时静默自动同步（v2.9.30）
 
     /// App 启动 / 进入设置页时调用：静默检测各 Agent 已安装的 Skill 是否落后于 App bundle
