@@ -585,7 +585,7 @@ struct SettingsView: View {
                     .padding(.leading, 2)
                 }
 
-                Text("把 ClipSlots 使用说明（SKILL.md）安装到本机 Agent，供智能体理解 `clipslots` CLI 的用法。重新安装会用 App 内最新内容覆盖各 Agent 的 skill 目录。")
+                Text("把 ClipSlots 使用说明（SKILL.md）安装到本机 Agent，供智能体理解 `clipslots` CLI 的用法。重新安装会删除各 Agent 旧的 skill 目标并重建软链，指向 App 内最新内容。")
                     .font(.caption)
                     .foregroundColor(.secondary)
                     .fixedSize(horizontal: false, vertical: true)

@@ -412,13 +412,15 @@ final class AgentSkillInstallManager: ObservableObject {
         detectedAgents.filter { fileExistsNoFollow($0.skillTargetPath) }
     }
 
-    /// 「重新安装 Skill」：把 bundle 内最新 SKILL.md 内容**直接覆盖写入**所有已检测
-    /// Agent 的 skill 目录（真实文件，非软链）。与插件市场的软链安装相互独立，便于
-    /// 设置页统一管理 Skill 文件内容。
+    /// 「重新安装 Skill」：删除所有已检测 Agent 的旧 skill 目标（软链**或**遗留真实目录），
+    /// 再重建软链指向 App bundle 内的最新 skill 目录（与插件市场的安装逻辑完全一致）。
+    ///
+    /// v2.9.47 修复：旧实现把 SKILL.md 拷贝进真实目录，导致 skill 目标变成真实目录；此后
+    /// 安装逻辑的安全护栏（「目标非软链接，为安全起见未删除」）会拦截重装。现在统一为
+    /// 「删旧路径 → 重建软链」，彻底避免遗留真实目录导致下次安装被拦截。
     func reinstallSkillByOverwrite() {
-        guard let sourceFile = bundledSkillFile,
-              let data = fm.contents(atPath: sourceFile) else {
-            report("找不到内置 SKILL.md，请重新安装 App。", isError: true)
+        guard let source = bundledSkillDir else {
+            report("找不到内置 Skill 目录，请重新安装 App。", isError: true)
             return
         }
         refresh()
@@ -429,39 +431,45 @@ final class AgentSkillInstallManager: ObservableObject {
         }
 
         var done: [String] = []
-        var failed: [String] = []
+        var needPrivilege: [Agent] = []
         for agent in agents {
-            if overwriteSkillFile(to: agent, data: data) {
+            if relinkSkill(to: agent, source: source) {
                 done.append(agent.displayName)
             } else {
-                failed.append(agent.displayName)
+                needPrivilege.append(agent)
             }
         }
-        refresh()
 
-        if failed.isEmpty {
-            report("已把最新 Skill 覆盖写入 \(done.count) 个 Agent：\(done.joined(separator: "、"))", isError: false)
-        } else if done.isEmpty {
-            report("写入失败：\(failed.joined(separator: "、"))", isError: true)
-        } else {
-            report("已写入：\(done.joined(separator: "、"))；失败：\(failed.joined(separator: "、"))", isError: false)
+        // 家目录不可写的 Agent 回退到系统鉴权弹窗，删旧路径后重建软链。
+        if !needPrivilege.isEmpty {
+            let cmds = needPrivilege.map { agent in
+                "mkdir -p \(shellQuote(agent.skillsDir)) && rm -rf \(shellQuote(agent.skillTargetPath)) && ln -sfn \(shellQuote(source)) \(shellQuote(agent.skillTargetPath))"
+            }.joined(separator: " && ")
+            let allDone = done + needPrivilege.map(\.displayName)
+            runPrivileged(cmds,
+                          successMessage: "已重新安装最新 Skill 到 \(allDone.count) 个 Agent：\(allDone.joined(separator: "、"))",
+                          agentID: needPrivilege[0].id)
+            return
         }
+
+        refresh()
+        report("已重新安装最新 Skill 到 \(done.count) 个 Agent：\(done.joined(separator: "、"))", isError: false)
     }
 
-    /// 把 SKILL.md 内容覆盖写入单个 Agent 的 skill 目录（真实目录 + 真实文件）。
-    /// 若目标当前是软链，先移除软链本身（不影响 bundle 内的真实 skill 目录）。
-    private func overwriteSkillFile(to agent: Agent, data: Data) -> Bool {
+    /// 删除单个 Agent 的旧 skill 目标（软链或遗留真实目录），再重建软链指向 bundle 内 skill 目录。
+    /// - Returns: 非特权方式是否成功（失败通常是家目录不可写，需回退系统鉴权）。
+    private func relinkSkill(to agent: Agent, source: String) -> Bool {
         let target = agent.skillTargetPath
         do {
-            if isSymlink(target) {
+            try fm.createDirectory(atPath: agent.skillsDir, withIntermediateDirectories: true)
+            // 目标存在即删除，无论软链还是真实目录（removeItem 只删软链本身，不影响 bundle 源目录）。
+            if fileExistsNoFollow(target) {
                 try fm.removeItem(atPath: target)
             }
-            try fm.createDirectory(atPath: target, withIntermediateDirectories: true)
-            let targetSkill = (target as NSString).appendingPathComponent("SKILL.md")
-            try data.write(to: URL(fileURLWithPath: targetSkill), options: .atomic)
+            try fm.createSymbolicLink(atPath: target, withDestinationPath: source)
             return true
         } catch {
-            NSLog("[ClipSlots][Skill] overwrite failed for \(agent.displayName) at \(target): \(error)")
+            NSLog("[ClipSlots][Skill] relink failed for \(agent.displayName) at \(target): \(error)")
             return false
         }
     }
