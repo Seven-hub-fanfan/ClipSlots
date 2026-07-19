@@ -796,34 +796,27 @@ public final class SpecialSlotStorage {
 
             index.currentPageId = id
 
-            // Switch to the first slot group in this page, or create a default one
+            // Switch to the first slot group in this page.
+            // v2.9.44: REMOVED the `else` branch that auto-created a "默认槽位组"
+            // when no groups were found. That backfill was the true source of the
+            // "extra default group" bug: `create-page --group-name` already creates
+            // the first group atomically with the correct name, but if the GUI
+            // called switchToPage in the brief window before the CLI write was
+            // flushed (or immediately after, with a stale read), `groupsInPage`
+            // could transiently appear empty and this branch would silently inject
+            // a second "默认槽位组". Removing the branch is safe because:
+            //   1. `createPage` always creates a group synchronously (since v2.9.33),
+            //      so a page with zero groups should never exist in normal operation.
+            //   2. If a page genuinely has no groups (corrupt data), leaving the
+            //      selection pointers nil is far less harmful than injecting a
+            //      phantom group — the UI can handle nil selection gracefully.
             let groupsInPage = index.specialSlots.filter { $0.pageId == id }
             if let firstGroup = groupsInPage.sorted(by: { $0.order < $1.order }).first {
                 index.currentSpecialSlotId = firstGroup.id
                 index.selectedSpecialSlotId = firstGroup.id
                 index.activeHotkeySpecialSlotId = firstGroup.id
-            } else {
-                // Create a default slot group for this page
-                let maxOrder = groupsInPage.map { $0.order }.max() ?? (-1)
-                let defaultGroup = SpecialSlot(
-                    id: "special_\(UUID().uuidString)",
-                    name: "默认槽位组",
-                    icon: "folder",
-                    colorHex: nil,
-                    sourceType: .manual,
-                    sourcePath: nil,
-                    pageId: id,
-                    order: maxOrder + 1,
-                    createdAt: Date(),
-                    updatedAt: Date()
-                )
-                let dir = specialSlotDirectory(for: defaultGroup.id)
-                try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-                index.specialSlots.append(defaultGroup)
-                index.currentSpecialSlotId = defaultGroup.id
-                index.selectedSpecialSlotId = defaultGroup.id
-                index.activeHotkeySpecialSlotId = defaultGroup.id
             }
+            // No else: do NOT auto-create "默认槽位组" here. See comment above.
 
             try saveIndex(index)
             NSLog("[ClipSlots] Switched to page: \(id)")
