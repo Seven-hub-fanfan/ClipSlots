@@ -12,7 +12,7 @@ import ClipSlotsKit
 //   success: {"ok": true, ...}
 //   error:   {"ok": false, "error": "message"}  (exit code 1)
 
-let CLI_VERSION = "2.9.41"
+let CLI_VERSION = "2.9.42"
 let DEFAULT_GROUP = "default"
 let DEFAULT_PAGE = "default_page"
 
@@ -348,7 +348,8 @@ let COMMANDS: [[String: Any]] = [
     ["name": "paste", "description": "把某槽位的内容加载到系统剪贴板(NSPasteboard)，不模拟按键。", "flags": ["<slot> (位置参数,1..N)", "--group <id|name> (默认 default;可传 id 或组名)", "--group-name <name> (按组名精确匹配)", "--page <id> (可选,约束 --group/--group-name 匹配到该页面)", "--page-name <name> (按页面名精确匹配;找不到会报错,与 --page 互斥;约束 group 匹配范围)"]],
     ["name": "clear", "description": "清空某个槽位（内容、标签、附件全部移除）。", "flags": ["<slot> (位置参数,1..N)", "--group <id|name> (默认 default;可传 id 或组名)", "--group-name <name> (按组名精确匹配)", "--page <id> (可选,约束 --group/--group-name 匹配到该页面)", "--page-name <name> (按页面名精确匹配;找不到会报错,与 --page 互斥;约束 group 匹配范围)", "--force (跳过跨进程锁,风险自负)"]],
     ["name": "create-group", "description": "在指定页面新建一个槽位组，返回其 id。页面已满(10组)会返回错误，此时应先 create-page。v2.9.4: 同页面内不允许重名(会返回错误)，冲突时请改名或加 -2 后缀。", "flags": ["<name> (位置参数,组名)", "--page <id> (可选,默认当前页面)", "--page-name <name> (按页面名精确匹配指定目标页;找不到会报错,与 --page 互斥)"]],
-    ["name": "create-page", "description": "新建一个页面，返回其 id。页面名不可重复。v2.9.33: 同步创建默认槽位组并在返回值中附带 defaultGroup {id,name}，可直接用其 id 写入，无需再跑 groups 查询。", "flags": ["<name> (位置参数,页面名)"]],
+    ["name": "create-page", "description": "新建一个页面，返回其 id。页面名不可重复。v2.9.33: 同步创建默认槽位组并在返回值中附带 defaultGroup {id,name}，可直接用其 id 写入，无需再跑 groups 查询。v2.9.42: 可选 --group-name，建页后立即把默认槽位组重命名为该名称，避免多出一个无用的默认组。", "flags": ["<name> (位置参数,页面名)", "--group-name <name> (可选,第一个槽位组的名称;不传则保留默认名)"]],
+    ["name": "rename-group", "description": "重命名一个槽位组。v2.9.42: 常用于 create-page 之后把自动生成的默认组改成想要的第一个组名，避免浪费。同页面内组名不可重复(会返回错误)。", "flags": ["<group-id> (位置参数,要重命名的槽位组 id)", "--name <name> (必填,新名称)", "--page-name <name> (可选,仅用于日志/校验,不影响核心逻辑)"]],
     ["name": "delete-group", "description": "删除一个槽位组(软删除)。其数据目录会被移动到 .trash，可恢复；.trash 会自动清理(默认保留最近 30 天/最多 50 条)。id 不存在会返回错误。", "flags": ["<id> (位置参数,槽位组 id)"]],
     ["name": "delete-page", "description": "删除一个页面及其下所有槽位组(软删除)。相关数据目录会被移动到 .trash，可恢复；.trash 会自动清理(默认保留最近 30 天/最多 50 条)。id 不存在会返回错误。", "flags": ["<id> (位置参数,页面 id)"]],
     ["name": "write-attachment", "description": "向某槽位追加一个或多个文件作为附件（按顺序），不改动槽位主体内容。图片扩展名归为 image 类型，其余为 file。", "flags": ["<slot> (位置参数,1..N)", "<file> [file ...] (位置参数,一个或多个文件路径,支持 ~ 与相对路径)", "--group <id|name> (默认 default;可传 id 或组名)", "--group-name <name> (按组名精确匹配)", "--page <id> (可选,约束 --group/--group-name 匹配到该页面)", "--page-name <name> (按页面名精确匹配;找不到会报错,与 --page 互斥;约束 group 匹配范围)", "--replace (先清空该槽位已有附件再写入)", "--label <string> (可选)", "--force (跳过跨进程锁,风险自负)"]]
@@ -371,7 +372,8 @@ let COMMAND_ALLOWED_FLAGS: [String: Set<String>] = [
     "paste": ["group", "group-name", "page", "page-name"],
     "clear": ["group", "group-name", "page", "page-name", "force"],
     "create-group": ["page", "page-name", "force"],
-    "create-page": ["force"],
+    "create-page": ["group-name", "force"],
+    "rename-group": ["name", "page-name", "force"],
     "delete-group": ["force"],
     "delete-page": ["force"],
     "write-attachment": ["group", "group-name", "page", "page-name", "replace", "label", "force"]
@@ -865,13 +867,26 @@ func cmdCreatePage(_ args: ParsedArgs) -> Never {
     guard let name = args.positionals.first, !name.trimmingCharacters(in: .whitespaces).isEmpty else {
         fail("missing page name (usage: create-page <name>)")
     }
+    // v2.9.42 (Feature B): optional --group-name renames the synchronously-created
+    // default group right after the page is built, so callers who already know the
+    // first group's name don't end up with an extra unused "默认槽位组".
+    let desiredGroupName = args.flag("group-name")?.trimmingCharacters(in: .whitespacesAndNewlines)
     do {
         let result = try storage.createPage(name: name)
+        // Rename the default group in place when requested. There can be no
+        // same-page duplicate at this point (the page was just created with a
+        // single group), so this cannot hit the duplicate-name guard.
+        var groupName = result.defaultGroup?.name
+        if let desired = desiredGroupName, !desired.isEmpty, let g = result.defaultGroup {
+            try storage.renameSpecialSlot(id: g.id, name: desired)
+            // Reflect the actual stored name (trimmed/clipped to 30 chars).
+            groupName = storage.loadIndex().specialSlots.first(where: { $0.id == g.id })?.name ?? desired
+        }
         var payload: [String: Any] = [
             "page": ["id": result.page.id, "name": result.page.name, "order": result.page.order]
         ]
         if let g = result.defaultGroup {
-            payload["defaultGroup"] = ["id": g.id, "name": g.name]
+            payload["defaultGroup"] = ["id": g.id, "name": groupName ?? g.name]
         }
         success(payload)
     } catch let e as StorageLockError {
@@ -880,6 +895,50 @@ func cmdCreatePage(_ args: ParsedArgs) -> Never {
         fail(e.errorDescription ?? "failed to create page")
     } catch {
         fail(describeWriteError(error, context: "creating page"))
+    }
+}
+
+// v2.9.42 (Feature A): rename an existing slot group by id. Primary use case is
+// renaming the auto-created default group after `create-page` so no wasted empty
+// group is left behind. Same-page duplicate names are rejected by the Kit layer
+// (renameSpecialSlot throws SpecialSlotError.duplicateName), surfaced here with
+// the documented message.
+func cmdRenameGroup(_ args: ParsedArgs) -> Never {
+    guard let id = args.positionals.first, !id.trimmingCharacters(in: .whitespaces).isEmpty else {
+        fail("missing group id (usage: rename-group <group-id> --name <新名称> [--page-name <页面名>])")
+    }
+    guard let newName = args.flag("name"), !newName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+        fail("missing new name (usage: rename-group <group-id> --name <新名称>)")
+    }
+    let index = storage.loadIndex()
+    guard let group = index.specialSlots.first(where: { $0.id == id }) else {
+        fail("group \(id) not found")
+    }
+    // --page-name is advisory only: when provided, validate it matches the group's
+    // owning page so a caller cannot silently rename a group on the wrong page.
+    if let pageName = args.flag("page-name") {
+        let ownerPageName = index.pages.first(where: { $0.id == group.pageId })?.name
+        if ownerPageName != pageName {
+            fail("group '\(id)' is not on page '\(pageName)'")
+        }
+    }
+    let trimmed = newName.trimmingCharacters(in: .whitespacesAndNewlines)
+    do {
+        try storage.renameSpecialSlot(id: id, name: trimmed)
+        let finalName = storage.loadIndex().specialSlots.first(where: { $0.id == id })?.name ?? String(trimmed.prefix(30))
+        success(["group": ["id": id, "name": finalName]])
+    } catch SpecialSlotError.duplicateName {
+        fail("a group named '\(String(trimmed.prefix(30)))' already exists on this page")
+    } catch SpecialSlotError.specialSlotNotFound {
+        fail("group \(id) not found")
+    } catch SpecialSlotError.invalidSpecialSlotName {
+        fail("invalid group name")
+    } catch let e as StorageLockError {
+        fail(e.errorDescription ?? "storage is busy (lock timeout)")
+    } catch let e as SpecialSlotError {
+        fail(e.errorDescription ?? "failed to rename group")
+    } catch {
+        fail(describeWriteError(error, context: "renaming group \(id)"))
     }
 }
 
@@ -1058,6 +1117,8 @@ case "create-group":
     cmdCreateGroup(parsed)
 case "create-page":
     cmdCreatePage(parsed)
+case "rename-group":
+    cmdRenameGroup(parsed)
 case "delete-group":
     cmdDeleteGroup(parsed)
 case "delete-page":

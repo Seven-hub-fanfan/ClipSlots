@@ -13,6 +13,8 @@ requires: macOS + 已安装 ClipSlots v2.9.33+（CLI 位于 `/usr/local/bin/clip
 
 `clipslots` 是 ClipSlots.app 的命令行接口，与 GUI **共享同一份磁盘数据**（`ClipSlotsKit` 库），CLI 的读写会实时反映到 GUI，反之亦然。所有命令输出**单个 JSON 对象**到 stdout，专为智能体调用设计。
 
+> **v2.9.42 新增**：(1) **`rename-group` 命令**——重命名已有槽位组，同页内名称不可重复（冲突返回 `a group named '...' already exists on this page`），可选 `--page-name` 校验防止误改错页的同名组。(2) **`create-page` 支持 `--group-name`**——建页时直接把默认组命名为指定名称（不传则保持向后兼容，defaultGroup.name = "默认槽位组"），实现「零废组」建库姿势。
+
 > **v2.9.7 新增**：(1) **未知 flag 报错（R1）**——任一命令传入其不认识的 `--flag` 时，不再静默忽略，而是返回 `{"ok":false,"error":"unknown flag: --xxx for command '...' (allowed flags: ...)"}` 并退出码 1，帮助发现拼写错误（如 `--lable`→`--label`）。位置参数不受此校验影响。(2) **`list` 支持分页（S2）**——传 `--page-size <N>` 即按页返回，并附带 `pagination:{pageNum,pageSize,total,totalPages,hasMore}`；可选 `--page-num <N>`（从 1 开始，默认 1）。不传 `--page-size` 时行为不变（返回全部，无 pagination 字段）。(3) **`write` / `write-attachment` 支持 `--label`（S3）**——写入槽位时可同时设置标签，省去一次额外调用。
 
 > **v2.9.5 新增**：(1) `.trash` **自动清理**——`delete-group`/`delete-page` 的软删除数据不再无限堆积，删除时及启动时自动清理（默认保留最近 30 天、最多 50 条，超出的最旧条目被物理删除）；30 天内、条数在上限内的删除仍可人工恢复。(2) **子命令级 `--help`/`-h`**——任意子命令加 `--help` 或 `-h` 即返回该命令的用法与参数说明（`{command,description,flags,usage}`），无需查顶层 `help`。
@@ -43,7 +45,7 @@ requires: macOS + 已安装 ClipSlots v2.9.33+（CLI 位于 `/usr/local/bin/clip
 
 **首选工作流**：动手前先 `clipslots help` / `groups` / `list` 了解现状，再执行读写；写入前优先选空槽，避免覆盖。
 
-## 1. 命令参考（v2.9.5，共 15 个；每个子命令均支持 `--help`/`-h`）
+## 1. 命令参考（v2.9.42，共 16 个；每个子命令均支持 `--help`/`-h`）
 
 ### 只读
 ```bash
@@ -89,7 +91,17 @@ clipslots create-group <name> [--page <uuid>|--page-name <名称>]
 # v2.9.33: 同步创建一个空的「默认槽位组」，并在返回 JSON 附带 defaultGroup：
 #   {"ok":true,"page":{"id":"...","name":"..."},"defaultGroup":{"id":"...","name":"默认槽位组"}}
 #   → 新建页面后直接用 defaultGroup.id 写入，无需再跑 groups/list 查询。
-clipslots create-page <name>
+# v2.9.42: 可选 --group-name 直接给默认组命名（返回的 defaultGroup.name 即传入的名称）：
+#   不传 --group-name → 行为与原来完全一致（向后兼容），defaultGroup.name = "默认槽位组"；
+#   传了 --group-name → 建页后把 defaultGroup 直接命名为指定名称。返回结构不变。
+#   → 推荐建库时直接带上 --group-name，第一个组即为实际用组，避免残留废组。
+clipslots create-page <name> [--group-name <第一个组的名称>]
+
+# 重命名一个槽位组（v2.9.42）；把指定 group 的 name 改为新名称
+# 同页内名称不可重复；重名时返回 {"ok":false,"error":"a group named '...' already exists on this page"}
+# 成功返回 {"ok":true,"group":{"id":"...","name":"..."}}
+# 可选 --page-name 校验：若提供且与该组所属页不符，返回页面不符错误，防止误改错页的同名组
+clipslots rename-group <group-id> --name <新名称> [--page-name <页面名>]
 
 # 删除一个槽位组（软删除）；其数据目录移动到 .trash（可人工恢复，v2.9.5 起 .trash 自动清理）
 # 成功返回 {"ok":true,"deleted":"<id>","movedToTrash":true}
@@ -109,8 +121,10 @@ clipslots delete-group -h
 
 > 说明：`write-attachment` 的文件路径支持 `~` 与相对路径；图片扩展名归 `image` 类型，其余归 `file`。
 
-### 已知能力 / 限制（v2.9.7）
+### 已知能力 / 限制（v2.9.42）
 
+- ✅ **`rename-group` 重命名槽位组**（v2.9.42 新增）：把指定 group 的 name 改为新名称，成功返回 `{"ok":true,"group":{"id":"...","name":"..."}}`。同页内名称去重规则与 `create-group` 一致，重名返回 `a group named '<name>' already exists on this page`；可选 `--page-name` 做归属校验（组不在该页则返回页面不符错误），防止误改错页的同名组。常用于「建页后延迟命名默认组」或整理时改名。
+- ✅ **`create-page --group-name` 零废组建库**（v2.9.42 新增）：建页时直接把默认组命名为指定名称，返回的 `defaultGroup.name` 即传入名称，返回结构不变。不传 `--group-name` 完全向后兼容（`defaultGroup.name = "默认槽位组"`）。这样第一个组就是实际使用的组，不再残留一个闲置的「默认槽位组」废组。
 - ✅ **未知 flag 报错**（v2.9.7 R1）：命令收到它不支持的 `--flag` 会返回 `ok:false`（`unknown flag: --xxx for command '...' (allowed flags: ...)`），便于发现拼写错误；不确定某命令支持哪些 flag 时先跑 `<cmd> --help`。仅校验 `--flag`，位置参数不受影响。
 - ✅ **`list` 分页**（v2.9.7 S2）：传 `--page-size <N>`（>0）按页返回该组槽位并附带 `pagination:{pageNum,pageSize,total,totalPages,hasMore}`，可用 `--page-num <N>`（从 1 开始）翻页；不传 `--page-size` 则返回全部（无 pagination 字段，向后兼容）。注意 `--page-size`/`--page-num` 与用于指定/约束页面的 `--page <id>`/`--page-name` 是两回事：后者会把 `--group` 匹配限定到该页面（v2.9.32），且只传页面不传组时返回该页所有组的槽位（A3）。
 - ✅ **`write` / `write-attachment` 支持 `--label`**（S3）：写入槽位主体或追加附件时可同时设置标签，减少一次额外的调用往返。
@@ -140,7 +154,20 @@ clipslots delete-group -h
 
 1. 先判断：用户有没有指定目标页面/组？
 2. **【没有指定 = 默认】** 优先"新建页面 + 复用其默认组"（最安全，不碰已有数据）。
-   - **新建页面直接拿返回的默认组**（v2.9.33）：`create-page` 现在**同步**创建页面 + 一个空的「默认槽位组」，并在返回 JSON 里附带 `defaultGroup:{id,name}`。因此新建页面后**直接用返回的 `defaultGroup.id` 写第一批数据即可，无需再跑 `groups`/`list` 查询**。旧版"`create-page` 只建页 + 存储层惰性修复(repair)补建默认组 + 二次查询拿 id"的流程已废弃——那套惰性补建有时序空窗（`create-page` 返回后到补建生效之间，`groups` 查询可能暂时返回空组，导致误建多余组）。v2.9.33 已删除该惰性补建逻辑，改为建页时同步建组。只有需要额外分类时才 `create-group`。**切勿**在新建页后无脑显式 `create-group`——那样会得到「默认槽位组 + 新组」两个组、残留一个闲置空组。
+   - **新建页面直接给默认组命名（v2.9.42，推荐「零废组」姿势）**：`create-page` 现在**同步**创建页面 + 一个空的默认组，并在返回 JSON 里附带 `defaultGroup:{id,name}`。建库时**直接带上 `--group-name` 给默认组命名**，第一个组即为实际使用的组，无需再跑 `groups`/`list` 查询，也不会残留闲置废组：
+     ```bash
+     # 新推荐做法（零废组）：defaultGroup 直接就是第一个实际用的组
+     create-page "Q3项目" --group-name "品牌VI"        # defaultGroup 直接命名为「品牌VI」
+     create-group "产品图" --page-name "Q3项目"         # 后续分类组顺序建
+     create-group "活动Banner" --page-name "Q3项目"
+     ```
+     若建页时还不知道第一个组名（需延迟命名），可先建页拿 `defaultGroup.id`，再用 `rename-group` 命名：
+     ```bash
+     create-page "Q3项目"                                       # 得到 defaultGroup.id
+     rename-group <defaultGroup.id> --name "品牌VI" --page-name "Q3项目"
+     ```
+   - ⚠️ **切勿沿用旧做法**：旧版先 `create-page "Q3项目"`（得到"默认槽位组"废组）再 `create-group "品牌VI"`（第一个实际用组），会残留一个闲置的默认组。建库时用 `--group-name` 或 `rename-group` 复用默认组，实现零废组。
+   - 说明：v2.9.33 起 `create-page` 同步建页 + 建组（已删除旧的存储层惰性补建逻辑，避免时序空窗导致误建多余组）。只有需要额外分类时才 `create-group`。
    - 实现说明：当前版本 `create-page` 无硬性数量上限，故默认此分支恒可执行；下面"页面已满"子分支是为未来引入页面上限预留的预案。
    - 若未来引入页面数上限并达到上限：暂停并询问用户如何存（选项 A：选一个现有页面新建组；选项 B：覆盖某页面，需二次确认）。
 3. **【指定了页面、未指定组】** 标准判空流程：先 `groups --page-name <页面名>` 列出该页所有组，再 `list --page-name <页面名>` 看各组槽位的 `empty`/`attachmentCount`，找"有空槽"的组：
@@ -191,6 +218,7 @@ clipslots delete-group -h
 - **长度**：页面名 ≤ 10 字，组名 ≤ 10 字，Label ≤ 10 字。
 - **取名来源**：优先用**文件夹名 / 任务名**；序号用**阿拉伯数字**（如 `导入 1`、`方案 2`）。
 - **续组**：用 `-2` / `-3` 后缀，**不要用「续」**（如 `产品图-2`，不写 `产品图续`）。
+- **改名**：用 `rename-group` 改组名时同样遵守组名 ≤ 10 字的建议规则，并注意同页内不可与已有组重名。
 
 ## 6. 典型场景（草稿，按讨论结果整理）
 

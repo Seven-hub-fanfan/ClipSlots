@@ -589,7 +589,19 @@ public final class SpecialSlotStorage {
                 throw SpecialSlotError.invalidSpecialSlotName
             }
 
-            index.specialSlots[idx].name = String(trimmed.prefix(30))
+            // v2.9.42: reject a rename that would collide with another group on
+            // the SAME page (self-rename to the identical name is a no-op and is
+            // allowed). Mirrors the page-scoped duplicate rule enforced by
+            // createSpecialSlot, so group names stay unique within a page.
+            let pageId = index.specialSlots[idx].pageId
+            let clipped = String(trimmed.prefix(30))
+            guard !index.specialSlots.contains(where: {
+                $0.id != id && $0.pageId == pageId && $0.name == clipped
+            }) else {
+                throw SpecialSlotError.duplicateName
+            }
+
+            index.specialSlots[idx].name = clipped
             index.specialSlots[idx].updatedAt = Date()
 
             try saveIndex(index)
