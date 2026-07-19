@@ -440,6 +440,19 @@ struct PluginsView: View {
                             .foregroundColor(.secondary)
                             .fixedSize(horizontal: false, vertical: true)
                             .lineSpacing(3)
+
+                        // v2.9.45: 介绍区域底部展示 bundle 内 SKILL.md 的版本信息。
+                        // 取自 SKILL.md frontmatter 的 version 字段，缺失时回退为文件最后修改时间。
+                        if item.installsToAgent, let versionInfo = agentInstaller.bundledSkillVersionInfo {
+                            HStack(spacing: 5) {
+                                Image(systemName: "doc.text")
+                                    .font(.system(size: 10))
+                                Text("SKILL.md 版本：\(versionInfo)")
+                                    .font(.system(size: 11))
+                            }
+                            .foregroundColor(.secondary)
+                            .padding(.top, 4)
+                        }
                     }
 
                     if item.installsToAgent {
@@ -562,17 +575,44 @@ struct PluginsView: View {
                                    state: AgentSkillInstallManager.InstallState) -> some View {
         switch state {
         case .installed:
-            HStack(spacing: 4) {
-                Image(systemName: "checkmark.seal.fill")
-                    .font(.system(size: 10))
-                Text("已安装")
-                    .font(.system(size: 11, weight: .medium))
+            // v2.9.45: 「已安装」不再是静态徽章，改为可点击菜单（更新 / 打开目录 / 卸载）。
+            Menu {
+                Button {
+                    agentInstaller.update(agent)
+                } label: {
+                    Label("更新", systemImage: "arrow.triangle.2.circlepath")
+                }
+                Button {
+                    agentInstaller.openInstallDirectory(agent)
+                } label: {
+                    Label("打开目录", systemImage: "folder")
+                }
+                Divider()
+                Button(role: .destructive) {
+                    agentInstaller.uninstall(agent)
+                } label: {
+                    Label("卸载", systemImage: "trash")
+                }
+            } label: {
+                HStack(spacing: 4) {
+                    Image(systemName: "checkmark.seal.fill")
+                        .font(.system(size: 10))
+                    Text("已安装")
+                        .font(.system(size: 11, weight: .medium))
+                    Image(systemName: "chevron.down")
+                        .font(.system(size: 8, weight: .semibold))
+                }
+                .foregroundColor(.green)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 4)
+                .background(Color.green.opacity(0.12))
+                .clipShape(Capsule())
+                .contentShape(Capsule())
             }
-            .foregroundColor(.green)
-            .padding(.horizontal, 8)
-            .padding(.vertical, 4)
-            .background(Color.green.opacity(0.12))
-            .clipShape(Capsule())
+            .menuStyle(.borderlessButton)
+            .menuIndicator(.hidden)
+            .fixedSize()
+            .help("已安装到 \(agent.displayName)，点击可更新 / 打开目录 / 卸载")
         case .needsUpdate:
             Button("可更新") { agentInstaller.install(agent) }
                 .font(.system(size: 11, weight: .medium))

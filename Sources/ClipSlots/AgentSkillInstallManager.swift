@@ -1,5 +1,6 @@
 import Foundation
 import SwiftUI
+import AppKit
 
 // v2.9.14: 一键把 ClipSlots Skill 安装到本机已安装的 Agent 环境。
 //
@@ -89,6 +90,53 @@ final class AgentSkillInstallManager: ObservableObject {
         var isDir: ObjCBool = false
         if fm.fileExists(atPath: candidate, isDirectory: &isDir), isDir.boolValue {
             return candidate
+        }
+        return nil
+    }
+
+    /// bundle 内 SKILL.md 的绝对路径（存在才返回）。
+    var bundledSkillFile: String? {
+        guard let dir = bundledSkillDir else { return nil }
+        let file = (dir as NSString).appendingPathComponent("SKILL.md")
+        return fm.fileExists(atPath: file) ? file : nil
+    }
+
+    /// 当前 bundle 内 SKILL.md 的版本信息，用于插件市场详情页展示。
+    ///
+    /// 优先从 frontmatter（首个 `---` 块）读取 `version` 字段；若无该字段，
+    /// 则回退为文件最后修改时间。读取失败返回 nil（UI 侧不展示）。
+    var bundledSkillVersionInfo: String? {
+        guard let file = bundledSkillFile else { return nil }
+        if let version = frontmatterVersion(atPath: file) {
+            return "v\(version)"
+        }
+        // 回退：文件最后修改时间。
+        if let mtime = (try? fm.attributesOfItem(atPath: file)[.modificationDate]) as? Date {
+            let df = DateFormatter()
+            df.locale = Locale(identifier: "zh_CN")
+            df.dateFormat = "yyyy-MM-dd HH:mm"
+            return "更新于 \(df.string(from: mtime))"
+        }
+        return nil
+    }
+
+    /// 解析 SKILL.md 头部 frontmatter 中的 `version` 字段。
+    private func frontmatterVersion(atPath path: String) -> String? {
+        guard let content = try? String(contentsOfFile: path, encoding: .utf8) else { return nil }
+        let lines = content.components(separatedBy: .newlines)
+        // frontmatter 必须以第一行的 `---` 开始。
+        guard let first = lines.first?.trimmingCharacters(in: .whitespaces), first == "---" else {
+            return nil
+        }
+        for line in lines.dropFirst() {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            if trimmed == "---" { break } // frontmatter 结束
+            if let range = trimmed.range(of: "version:", options: [.anchored, .caseInsensitive]) {
+                let value = trimmed[range.upperBound...]
+                    .trimmingCharacters(in: .whitespaces)
+                    .trimmingCharacters(in: CharacterSet(charactersIn: "\"'"))
+                return value.isEmpty ? nil : value
+            }
         }
         return nil
     }
@@ -195,6 +243,103 @@ final class AgentSkillInstallManager: ObservableObject {
         runPrivileged(script,
                       successMessage: "已安装到 \(agent.displayName)：\(target)",
                       agentID: agent.id)
+    }
+
+    // MARK: - 已安装状态下的操作菜单（v2.9.45）
+
+    /// 「更新」：把 App bundle 里最新的 Skill 重新覆盖到软链目标。
+    ///
+    /// 当前安装形态是软链接（`<agent skills>/clipslots-manager` -> bundle 内 skill 目录），
+    /// 因此「更新」= 重新把软链指向当前 bundle 的 skill 目录（App 升级后 bundle 路径可能变化，
+    /// 旧软链会指向已失效的旧 bundle）。重建后软链目录里的 SKILL.md 即为最新版本。
+    ///
+    /// 若目标是旧版拷贝式安装（真实目录，非软链），则就地覆盖其中的 SKILL.md 文件，
+    /// 绝不删除用户目录。
+    func update(_ agent: Agent) {
+        guard let source = bundledSkillDir else {
+            report("找不到内置 Skill 目录，请重新安装 App。", isError: true)
+            return
+        }
+        busyAgentID = agent.id
+        lastMessage = nil
+
+        let target = agent.skillTargetPath
+
+        if isSymlink(target) || !fileExistsNoFollow(target) {
+            // 软链接（或已不存在）→ 重建软链，指向当前 bundle，使 SKILL.md 恢复最新。
+            if trySymlinkWithoutPrivilege(source: source, target: target, skillsDir: agent.skillsDir) {
+                busyAgentID = nil
+                report("已更新 \(agent.displayName) 的 Skill 到最新版本：\(target)", isError: false)
+                refresh()
+                return
+            }
+            // 家目录不可写时回退系统鉴权（目标为软链或不存在，rm -rf 安全）。
+            let script = "mkdir -p \(shellQuote(agent.skillsDir)) && rm -rf \(shellQuote(target)) && ln -sfn \(shellQuote(source)) \(shellQuote(target))"
+            runPrivileged(script,
+                          successMessage: "已更新 \(agent.displayName) 的 Skill 到最新版本：\(target)",
+                          agentID: agent.id)
+            return
+        }
+
+        // 真实目录（旧版拷贝式安装）→ 仅就地覆盖 SKILL.md，不动目录本身。
+        busyAgentID = nil
+        if refreshLegacyCopyIfOutdated(source: source, targetDir: target) {
+            report("已更新 \(agent.displayName) 的 SKILL.md 到最新版本：\(target)", isError: false)
+        } else {
+            report("\(agent.displayName) 的 Skill 已是最新版本。", isError: false)
+        }
+        refresh()
+    }
+
+    /// 「打开目录」：在 Finder 中打开该 Agent 的 skill 安装目录。
+    func openInstallDirectory(_ agent: Agent) {
+        let target = agent.skillTargetPath
+        let path: String
+        if fileExistsNoFollow(target) {
+            path = target
+        } else {
+            // 目标不存在时退而打开其父级 skills 目录。
+            path = agent.skillsDir
+        }
+        NSWorkspace.shared.open(URL(fileURLWithPath: path))
+    }
+
+    /// 「卸载」：删除软链目录，卸载后该 Agent 状态回到「未安装」。
+    ///
+    /// 安全策略与安装一致：仅当目标为软链接时才删除（`removeItem` 只删软链本身，
+    /// 不影响 bundle 内的真实 skill 目录）。若目标是用户的真实目录/文件，为避免误删数据不做删除。
+    func uninstall(_ agent: Agent) {
+        busyAgentID = agent.id
+        lastMessage = nil
+        let target = agent.skillTargetPath
+
+        guard fileExistsNoFollow(target) else {
+            busyAgentID = nil
+            report("\(agent.displayName) 未安装本 Skill，无需卸载。", isError: false)
+            refresh()
+            return
+        }
+
+        // 真实目录/文件（非软链）不删除，避免误伤用户数据。
+        if !isSymlink(target) {
+            busyAgentID = nil
+            report("目标不是软链接，为安全起见未删除：\(target)。请手动检查后再卸载。", isError: true)
+            refresh()
+            return
+        }
+
+        do {
+            try fm.removeItem(atPath: target)
+            busyAgentID = nil
+            report("已从 \(agent.displayName) 卸载本 Skill。", isError: false)
+            refresh()
+        } catch {
+            // 家目录不可写时回退系统鉴权（目标已确认为软链，rm 安全）。
+            let script = "rm -rf \(shellQuote(target))"
+            runPrivileged(script,
+                          successMessage: "已从 \(agent.displayName) 卸载本 Skill。",
+                          agentID: agent.id)
+        }
     }
 
     // MARK: - 聚合动作（v2.9.28）

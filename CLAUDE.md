@@ -138,6 +138,7 @@ https://bytedance.sg.larkoffice.com/docx/...  执行
 
 After implementing all changes, execute this exact sequence. Each step is required:
 
+0. **Sync Skill**: `./scripts/sync-skill.sh` — 把 `docs/clipslots-cli-skill-draft.md` 同步到 `skills/clipslots-manager/SKILL.md`（App bundle 打包源）。**发版前必须运行**，否则 bundle 里会残留旧版 SKILL.md，Agent 通过软链接拿到的就是旧 Skill。可用 `./scripts/sync-skill.sh --check` 校验一致性。
 1. **Build**: `swift build` — fix real errors, ignore SourceKit "Cannot find type 'X'" spurious errors
 2. **Sign**: `codesign --force --deep --sign - .build/debug/ClipSlots`
 3. **Install**: `cp -f .build/debug/ClipSlots /Applications/ClipSlots.app/Contents/MacOS/ClipSlots`
@@ -154,7 +155,7 @@ After implementing all changes, execute this exact sequence. Each step is requir
 
 - **Never skip the push step.** After commit, always `git push origin main`.
 - **Never skip the version number.** Always update `ContentView.swift` version string before commit.
-- **Never skip the release.** Every version gets a DMG + GitHub Release.
+- **Never skip the Skill sync (step 0).** Whenever `docs/clipslots-cli-skill-draft.md` changes, run `./scripts/sync-skill.sh` before building/packaging, or the bundled `SKILL.md` (and the symlink agents rely on) stays stale.
 - **Always replace the computer's running version.** Step 3-4 ensures this.
 - **SourceKit errors are almost always false positives** in this project. If `swift build` succeeds, ignore them and proceed.
 - **Do NOT commit DMG files.** They are build artifacts, not source code.
