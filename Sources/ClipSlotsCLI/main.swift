@@ -12,7 +12,7 @@ import ClipSlotsKit
 //   success: {"ok": true, ...}
 //   error:   {"ok": false, "error": "message"}  (exit code 1)
 
-let CLI_VERSION = "2.9.42"
+let CLI_VERSION = "2.9.43"
 let DEFAULT_GROUP = "default"
 let DEFAULT_PAGE = "default_page"
 
@@ -872,21 +872,20 @@ func cmdCreatePage(_ args: ParsedArgs) -> Never {
     // first group's name don't end up with an extra unused "默认槽位组".
     let desiredGroupName = args.flag("group-name")?.trimmingCharacters(in: .whitespacesAndNewlines)
     do {
-        let result = try storage.createPage(name: name)
-        // Rename the default group in place when requested. There can be no
-        // same-page duplicate at this point (the page was just created with a
-        // single group), so this cannot hit the duplicate-name guard.
-        var groupName = result.defaultGroup?.name
-        if let desired = desiredGroupName, !desired.isEmpty, let g = result.defaultGroup {
-            try storage.renameSpecialSlot(id: g.id, name: desired)
-            // Reflect the actual stored name (trimmed/clipped to 30 chars).
-            groupName = storage.loadIndex().specialSlots.first(where: { $0.id == g.id })?.name ?? desired
-        }
+        // v2.9.43: name the default group atomically inside createPage instead of
+        // doing a second `renameSpecialSlot` write afterwards. The old two-write
+        // sequence left a brief window where the group was named "默认槽位组",
+        // which the concurrently-running GUI (separate process, in-process lock
+        // only) could observe and race with — occasionally producing BOTH the
+        // intended group and a lingering "默认槽位组" on the page. Passing the
+        // final name up front guarantees exactly one group with the correct name.
+        let effectiveGroupName = (desiredGroupName?.isEmpty == false) ? desiredGroupName : nil
+        let result = try storage.createPage(name: name, defaultGroupName: effectiveGroupName)
         var payload: [String: Any] = [
             "page": ["id": result.page.id, "name": result.page.name, "order": result.page.order]
         ]
         if let g = result.defaultGroup {
-            payload["defaultGroup"] = ["id": g.id, "name": groupName ?? g.name]
+            payload["defaultGroup"] = ["id": g.id, "name": g.name]
         }
         success(payload)
     } catch let e as StorageLockError {

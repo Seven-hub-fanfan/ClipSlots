@@ -633,7 +633,7 @@ public final class SpecialSlotStorage {
     /// in `CreatePageResult.defaultGroup` — closes that gap so callers can use
     /// the id immediately without a second query.
     @discardableResult
-    public func createPage(name: String, withDefaultGroup: Bool = true) throws -> CreatePageResult {
+    public func createPage(name: String, withDefaultGroup: Bool = true, defaultGroupName: String? = nil) throws -> CreatePageResult {
         try storageLock.withLock {
             var index = loadIndex()
 
@@ -660,9 +660,26 @@ public final class SpecialSlotStorage {
 
             var defaultGroup: SpecialSlot? = nil
             if withDefaultGroup {
+                // v2.9.43: create the default group with its final name in the SAME
+                // transaction. Previously `create-page --group-name` created a group
+                // literally named "默认槽位组" and then issued a SECOND rename write.
+                // That intermediate state (a page carrying "默认槽位组") could be
+                // observed by the running GUI (separate process; storageLock is
+                // in-process only), and a GUI self-write racing between the two CLI
+                // writes could resurrect/duplicate the default group — leaving both
+                // "默认槽位组" and the intended group on the page. Naming the group
+                // correctly up front means it is NEVER called "默认槽位组", removing
+                // the race window entirely.
+                let resolvedGroupName: String = {
+                    guard let raw = defaultGroupName?.trimmingCharacters(in: .whitespacesAndNewlines),
+                          !raw.isEmpty else {
+                        return "默认槽位组"
+                    }
+                    return String(raw.prefix(30))
+                }()
                 let group = SpecialSlot(
                     id: "special_\(UUID().uuidString)",
-                    name: "默认槽位组",
+                    name: resolvedGroupName,
                     icon: "folder",
                     colorHex: nil,
                     sourceType: .manual,
