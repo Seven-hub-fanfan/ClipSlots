@@ -103,6 +103,8 @@ final class UpdateChecker: ObservableObject {
             let preview = trimmedNotes.count > 400 ? String(trimmedNotes.prefix(400)) + "…" : trimmedNotes
             info += "\n\n更新内容：\n\(preview)"
         }
+        // v2.9.50: 说明 CLI 与 Agent Skill 会随 App 升级自动同步，无需重装。
+        info += "\n\n更新 App 后，CLI 和 Agent Skill 会自动同步为新版，无需重新安装。"
         alert.informativeText = info
         alert.alertStyle = .informational
         alert.addButton(withTitle: "前往下载")

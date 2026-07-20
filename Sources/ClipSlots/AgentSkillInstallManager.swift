@@ -412,6 +412,26 @@ final class AgentSkillInstallManager: ObservableObject {
         detectedAgents.filter { fileExistsNoFollow($0.skillTargetPath) }
     }
 
+    /// v2.9.50: 单个 Agent 的 skill 软链健康状态，用于设置页 Agent Skill 卡片展示。
+    enum SkillLinkHealth {
+        case healthy   // 软链存在且目标有效
+        case broken    // 软链存在但目标悬空（App 被删/移动）
+        case missing   // 目标不存在（未安装）
+    }
+
+    /// 检测单个 Agent 的 skill 软链健康状态。
+    ///
+    /// 关键：用 `fileExists(atPath:)`（会跟随软链）解析软链**目标**是否真实存在，
+    /// 而非软链本身是否存在。悬空软链（App 被删/移动）时 `fileExists` 返回 false，
+    /// 据此判定为 `.broken`，提示用户重新安装。
+    func linkHealth(for agent: Agent) -> SkillLinkHealth {
+        let target = agent.skillTargetPath
+        // 软链/真实目录本身都不存在 → 未安装。
+        guard fileExistsNoFollow(target) else { return .missing }
+        // 目标存在（软链或真实目录）。fileExists 跟随软链，悬空软链返回 false → 断开。
+        return fm.fileExists(atPath: target) ? .healthy : .broken
+    }
+
     /// 「重新安装 Skill」：删除所有已检测 Agent 的旧 skill 目标（软链**或**遗留真实目录），
     /// 再重建软链指向 App bundle 内的最新 skill 目录（与插件市场的安装逻辑完全一致）。
     ///

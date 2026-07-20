@@ -561,23 +561,35 @@ struct SettingsView: View {
                     Spacer()
                 }
 
-                // 已安装 Agent 列表（绿点 + 路径）
+                // 已安装 Agent 列表（健康状态 + 路径）
                 if !installed.isEmpty {
                     VStack(alignment: .leading, spacing: 6) {
                         ForEach(installed) { agent in
+                            let health = skillManager.linkHealth(for: agent)
                             HStack(alignment: .top, spacing: 8) {
                                 Circle()
-                                    .fill(Color.green)
+                                    .fill(health == .broken ? Color.orange : Color.green)
                                     .frame(width: 6, height: 6)
                                     .padding(.top, 5)
                                 VStack(alignment: .leading, spacing: 1) {
-                                    Text(agent.displayName)
-                                        .font(.caption)
-                                        .fontWeight(.medium)
+                                    HStack(spacing: 6) {
+                                        Text(agent.displayName)
+                                            .font(.caption)
+                                            .fontWeight(.medium)
+                                        Text(health == .broken ? "⚠️ 软链已断开" : "✅ 已安装")
+                                            .font(.caption)
+                                            .foregroundColor(health == .broken ? .orange : .green)
+                                    }
                                     Text(agent.skillTargetPath)
                                         .font(.caption)
                                         .foregroundColor(.secondary)
                                         .textSelection(.enabled)
+                                    if health == .broken {
+                                        Text("软链目标已失效（App 可能被删除或移动），请点击「重新安装 Skill」修复。")
+                                            .font(.caption)
+                                            .foregroundColor(.orange)
+                                            .fixedSize(horizontal: false, vertical: true)
+                                    }
                                 }
                             }
                         }
