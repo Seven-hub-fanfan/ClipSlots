@@ -487,6 +487,36 @@ struct PluginsView: View {
                         Divider()
                         agentInstallSection
                     }
+
+                    // v2.9.53: 第三方/社区项目展示「访问项目」链接（在浏览器中打开仓库/主页）。
+                    if let urlString = item.projectURL, let url = URL(string: urlString) {
+                        Divider()
+                        VStack(alignment: .leading, spacing: 6) {
+                            Text("项目主页")
+                                .font(.system(size: 13, weight: .semibold))
+                            Button {
+                                NSWorkspace.shared.open(url)
+                            } label: {
+                                HStack(spacing: 5) {
+                                    Image(systemName: "arrow.up.right.square")
+                                        .font(.system(size: 11))
+                                    Text("访问项目")
+                                        .font(.system(size: 11.5, weight: .medium))
+                                }
+                                .foregroundColor(.accentColor)
+                                .padding(.horizontal, 10)
+                                .padding(.vertical, 5)
+                                .background(Capsule().fill(Color.accentColor.opacity(0.12)))
+                            }
+                            .buttonStyle(.plain)
+                            .help(urlString)
+                            Text(urlString)
+                                .font(.system(size: 10.5, design: .monospaced))
+                                .foregroundColor(.secondary)
+                                .lineLimit(1)
+                                .truncationMode(.middle)
+                        }
+                    }
                 }
                 .padding(18)
             }
