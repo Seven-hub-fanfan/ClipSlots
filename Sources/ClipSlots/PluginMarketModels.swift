@@ -29,9 +29,9 @@ enum PluginMarketCategory: String, CaseIterable, Identifiable {
     /// Categories that are intentionally empty placeholders for now.
     var comingSoon: Bool {
         switch self {
-        // v2.9.53: 「社区插件」已解锁并上架首批第三方项目，不再是占位分类。
-        case .communitySkill: return true
-        default:              return false
+        // v2.9.53: 「社区插件」已解锁并上架首批第三方项目；
+        // 「社区 Skill」已解锁——支持用户自定义上传 Skill 并软链安装到各 Agent。
+        default: return false
         }
     }
 

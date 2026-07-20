@@ -19,6 +19,9 @@ struct PluginsView: View {
     // v2.9.14: 一键安装到 Agent。
     @StateObject private var agentInstaller = AgentSkillInstallManager()
 
+    // v2.9.53: 社区 Skill——用户自定义上传 Skill 并软链安装到各 Agent。
+    @StateObject private var communitySkills = CommunitySkillManager()
+
     // 保留旧标记键以兼容历史用户（当前仅作展示，不联动 CLI）。
     @AppStorage("skill_clipslots_manager_enabled") private var skillEnabled = true
 
@@ -44,7 +47,11 @@ struct PluginsView: View {
         .frame(width: 560, height: 588)
         .background(AppTheme.windowBackground(scheme))
         // v2.9.30: 进入 Skill 市场页时也静默同步一次，确保已安装的 Skill 用到最新决策流。
-        .onAppear { agentInstaller.syncInstalledSkillsOnLaunch() }
+        .onAppear {
+            agentInstaller.syncInstalledSkillsOnLaunch()
+            // v2.9.53: 扫描已上传的社区 Skill 及其在各 Agent 的安装状态。
+            communitySkills.refresh()
+        }
     }
 
     // MARK: - Market (list) view
@@ -202,18 +209,23 @@ struct PluginsView: View {
 
     private var listScroll: some View {
         ScrollView {
-            let items = filteredItems
-            if items.isEmpty {
-                emptyState
+            // v2.9.53: 社区 Skill 分类走独立渲染（动态读取本地上传的 Skill + 上传入口）。
+            if selectedCategory == .communitySkill {
+                communitySkillContent
             } else {
-                LazyVGrid(columns: [GridItem(.flexible(), spacing: 12),
-                                    GridItem(.flexible(), spacing: 12)],
-                          spacing: 12) {
-                    ForEach(items) { item in
-                        card(item)
+                let items = filteredItems
+                if items.isEmpty {
+                    emptyState
+                } else {
+                    LazyVGrid(columns: [GridItem(.flexible(), spacing: 12),
+                                        GridItem(.flexible(), spacing: 12)],
+                              spacing: 12) {
+                        ForEach(items) { item in
+                            card(item)
+                        }
                     }
+                    .padding(18)
                 }
-                .padding(18)
             }
         }
     }
@@ -688,6 +700,247 @@ struct PluginsView: View {
                 .buttonStyle(.bordered)
                 .controlSize(.small)
         }
+    }
+
+    // MARK: - 社区 Skill（v2.9.53：用户自定义上传）
+
+    private var communitySkillContent: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            // 上传入口 + 刷新
+            HStack(spacing: 10) {
+                Button {
+                    communitySkills.presentUploadPanel()
+                } label: {
+                    HStack(spacing: 5) {
+                        Image(systemName: "plus.circle.fill")
+                            .font(.system(size: 12, weight: .semibold))
+                        Text("上传 Skill")
+                            .font(.system(size: 12, weight: .semibold))
+                    }
+                    .foregroundColor(.white)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 7)
+                    .background(Capsule().fill(Color.accentColor))
+                    .contentShape(Capsule())
+                }
+                .buttonStyle(.plain)
+                .disabled(communitySkills.isBusy)
+                .help("选择 .zip（Skill 打包包）或单个 SKILL.md 文件上传")
+
+                if communitySkills.isBusy {
+                    ProgressView().scaleEffect(0.6)
+                }
+
+                Spacer()
+
+                Button {
+                    communitySkills.refresh()
+                } label: {
+                    Image(systemName: "arrow.clockwise")
+                        .font(.system(size: 12))
+                }
+                .buttonStyle(.borderless)
+                .foregroundColor(.secondary)
+                .help("重新扫描本地已上传的 Skill")
+            }
+
+            Text("支持上传 .zip（Skill 打包包）或单个 SKILL.md 文件；校验 frontmatter（须含 name / description）通过后落盘并以软链接安装到各 Agent。")
+                .font(AppTheme.Fonts.caption)
+                .foregroundColor(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            if let msg = communitySkills.lastMessage {
+                HStack(alignment: .top, spacing: 6) {
+                    Image(systemName: communitySkills.lastMessageIsError
+                          ? "exclamationmark.triangle.fill" : "checkmark.circle.fill")
+                        .font(.system(size: 11))
+                    Text(msg)
+                        .font(.caption2)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .foregroundColor(communitySkills.lastMessageIsError ? .orange : .green)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(10)
+                .background(
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .fill((communitySkills.lastMessageIsError ? Color.orange : Color.green).opacity(0.08))
+                )
+            }
+
+            let items = filteredCommunitySkills
+            if items.isEmpty {
+                communityEmptyState
+            } else {
+                LazyVGrid(columns: [GridItem(.flexible(), spacing: 12),
+                                    GridItem(.flexible(), spacing: 12)],
+                          spacing: 12) {
+                    ForEach(items) { skill in
+                        communityCard(skill)
+                    }
+                }
+            }
+        }
+        .padding(18)
+    }
+
+    private var communityEmptyState: some View {
+        VStack(spacing: 10) {
+            Image(systemName: "square.and.arrow.up.on.square")
+                .font(.system(size: 30))
+                .foregroundColor(.secondary.opacity(0.5))
+            Text(searchText.isEmpty ? "还没有上传任何社区 Skill" : "未找到匹配「\(searchText)」的结果")
+                .font(.system(size: 13))
+                .foregroundColor(.secondary)
+            if searchText.isEmpty {
+                Text("点击上方「上传 Skill」，选择 .zip 或 SKILL.md 即可添加。")
+                    .font(AppTheme.Fonts.caption)
+                    .foregroundColor(.secondary.opacity(0.75))
+            }
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.top, AppTheme.spacingLarge)
+    }
+
+    private func communityCard(_ skill: CommunitySkillManager.CommunitySkill) -> some View {
+        let state = communitySkills.aggregateState(for: skill)
+        return VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 10) {
+                communityIcon(size: 36, corner: 9)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(skill.name)
+                        .font(.system(size: 13.5, weight: .semibold))
+                        .lineLimit(1)
+                    Text("社区 · 自定义上传")
+                        .font(.system(size: 10.5))
+                        .foregroundColor(.secondary)
+                        .lineLimit(1)
+                }
+                Spacer(minLength: 0)
+                communityMoreMenu(skill)
+            }
+
+            Text(skill.summary)
+                .font(.system(size: 11.5))
+                .foregroundColor(.secondary)
+                .lineLimit(2)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: .infinity, alignment: .leading)
+
+            HStack {
+                if let v = skill.version, !v.isEmpty {
+                    Text("v\(v)")
+                        .font(.system(size: 10))
+                        .foregroundColor(.secondary)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(Capsule().fill(Color.secondary.opacity(0.12)))
+                }
+                Spacer()
+                communityStatusControl(skill: skill, state: state)
+            }
+        }
+        .padding(13)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .fill(AppTheme.elevatedBackground(scheme))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .stroke(AppTheme.subtleBorder(scheme), lineWidth: 1)
+        )
+    }
+
+    private func communityIcon(size: CGFloat, corner: CGFloat) -> some View {
+        ZStack {
+            RoundedRectangle(cornerRadius: corner, style: .continuous)
+                .fill(Color.accentColor.opacity(0.12))
+                .frame(width: size, height: size)
+            Text("🧩")
+                .font(.system(size: size * 0.5))
+        }
+    }
+
+    // 卡片状态控件：已安装绿色 pill；未安装/待更新为可点击安装按钮。
+    @ViewBuilder
+    private func communityStatusControl(skill: CommunitySkillManager.CommunitySkill,
+                                        state: CommunitySkillManager.InstallState) -> some View {
+        switch state {
+        case .installed:
+            badge(text: "已安装", icon: "checkmark.seal.fill", color: .green)
+        case .needsUpdate:
+            Button { communitySkills.install(skill) } label: {
+                badge(text: "更新", icon: "arrow.triangle.2.circlepath", color: .orange)
+            }
+            .buttonStyle(.plain)
+            .disabled(communitySkills.isBusy)
+            .help("软链目标已变化，点击重新安装到各 Agent")
+        case .notInstalled:
+            Button { communitySkills.install(skill) } label: {
+                badge(text: "安装到 Agent", icon: "square.and.arrow.down", color: .accentColor)
+            }
+            .buttonStyle(.plain)
+            .disabled(communitySkills.isBusy)
+            .help("以软链接方式安装到所有检测到的 Agent")
+        }
+    }
+
+    private func communityMoreMenu(_ skill: CommunitySkillManager.CommunitySkill) -> some View {
+        Menu {
+            Button {
+                communitySkills.openStorageDirectory(skill)
+            } label: {
+                Label("打开目录", systemImage: "folder")
+            }
+            if communitySkills.aggregateState(for: skill) != .notInstalled {
+                Button {
+                    communitySkills.uninstall(skill)
+                } label: {
+                    Label("卸载（保留本地文件）", systemImage: "eject")
+                }
+            }
+            Divider()
+            Button(role: .destructive) {
+                communitySkills.delete(skill)
+            } label: {
+                Label("删除（含本地文件）", systemImage: "trash")
+            }
+        } label: {
+            Image(systemName: "ellipsis")
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundColor(.secondary)
+                .frame(width: 24, height: 24)
+                .contentShape(Rectangle())
+        }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .help("更多操作：打开目录 / 卸载 / 删除")
+    }
+
+    private var filteredCommunitySkills: [CommunitySkillManager.CommunitySkill] {
+        var items = communitySkills.skills
+        let query = searchText.trimmingCharacters(in: .whitespaces).lowercased()
+        if !query.isEmpty {
+            items = items.filter {
+                $0.name.lowercased().contains(query) || $0.summary.lowercased().contains(query)
+            }
+        }
+        if onlyInstalled {
+            items = items.filter { communitySkills.aggregateState(for: $0) == .installed }
+        }
+        switch sort {
+        case .recommended:
+            break
+        case .nameAscending:
+            items.sort { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+        case .installedFirst:
+            items.sort {
+                (communitySkills.aggregateState(for: $0) == .installed)
+                && (communitySkills.aggregateState(for: $1) != .installed)
+            }
+        }
+        return items
     }
 
     // MARK: - Filtering & sorting
