@@ -58,9 +58,11 @@ final class UpdateChecker: ObservableObject {
                 let current = Self.normalize(Self.currentVersion)
                 let pageURL = (json["html_url"] as? String) ?? Self.releasesPage
                 let notes = (json["body"] as? String) ?? ""
+                // v2.9.54: 解析 Release assets，取第一个 .dmg 的 browser_download_url 用于自动下载。
+                let dmgURL = Self.extractDMGURL(from: json)
 
                 if Self.compare(latest, isNewerThan: current) {
-                    self.presentUpdateAvailable(latestTag: rawTag, pageURL: pageURL, notes: notes)
+                    self.presentUpdateAvailable(latestTag: rawTag, pageURL: pageURL, notes: notes, dmgURL: dmgURL)
                 } else {
                     self.presentUpToDate()
                 }
@@ -94,7 +96,21 @@ final class UpdateChecker: ObservableObject {
 
     // MARK: - Alerts
 
-    private func presentUpdateAvailable(latestTag: String, pageURL: String, notes: String) {
+    /// v2.9.54: 从 Release JSON 的 assets 中取第一个 .dmg 的 browser_download_url。
+    static func extractDMGURL(from json: [String: Any]) -> URL? {
+        guard let assets = json["assets"] as? [[String: Any]] else { return nil }
+        for asset in assets {
+            if let name = asset["name"] as? String,
+               name.lowercased().hasSuffix(".dmg"),
+               let urlString = asset["browser_download_url"] as? String,
+               let url = URL(string: urlString) {
+                return url
+            }
+        }
+        return nil
+    }
+
+    private func presentUpdateAvailable(latestTag: String, pageURL: String, notes: String, dmgURL: URL?) {
         let alert = NSAlert()
         alert.messageText = "发现新版本 \(latestTag)"
         var info = "当前版本：v\(Self.currentVersion)\n最新版本：\(latestTag)"
@@ -107,12 +123,30 @@ final class UpdateChecker: ObservableObject {
         info += "\n\n更新 App 后，CLI 和 Agent Skill 会自动同步为新版，无需重新安装。"
         alert.informativeText = info
         alert.alertStyle = .informational
-        alert.addButton(withTitle: "前往下载")
-        alert.addButton(withTitle: "稍后再说")
 
-        let response = alert.runModal()
-        if response == .alertFirstButtonReturn, let url = URL(string: pageURL) {
-            NSWorkspace.shared.open(url)
+        // v2.9.54: 若能拿到 DMG 直链，提供「自动下载并安装」，无需手动去 GitHub。
+        if let dmgURL = dmgURL {
+            alert.addButton(withTitle: "自动下载并安装")
+            alert.addButton(withTitle: "前往下载页")
+            alert.addButton(withTitle: "稍后再说")
+
+            let response = alert.runModal()
+            switch response {
+            case .alertFirstButtonReturn:
+                UpdateDownloader.shared.startDownload(from: dmgURL, version: latestTag)
+            case .alertSecondButtonReturn:
+                if let url = URL(string: pageURL) { NSWorkspace.shared.open(url) }
+            default:
+                break
+            }
+        } else {
+            alert.addButton(withTitle: "前往下载")
+            alert.addButton(withTitle: "稍后再说")
+
+            let response = alert.runModal()
+            if response == .alertFirstButtonReturn, let url = URL(string: pageURL) {
+                NSWorkspace.shared.open(url)
+            }
         }
     }
 

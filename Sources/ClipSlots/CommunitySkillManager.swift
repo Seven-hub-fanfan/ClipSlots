@@ -343,16 +343,20 @@ final class CommunitySkillManager: ObservableObject {
         let source = skill.storagePath
 
         var installed: [String] = []
-        var skipped: [String] = []
+        // v2.9.54: 安装即「强制重建软链」，不再因目标是真实目录而跳过（详见下方注释与
+        // trySymlinkWithoutPrivilege），因此 skipped 恒为空，保留仅为兼容 aggregateMessage 的签名。
+        let skipped: [String] = []
         var needPrivilege: [Agent] = []
 
         for agent in agents {
             let target = skillTargetPath(agent: agent, slug: skill.id)
-            // 安全防护：目标存在且不是软链接（用户真实目录/文件）时，绝不删除，直接跳过。
-            if fileExistsNoFollow(target) && !isSymlink(target) {
-                skipped.append(agent.displayName)
-                continue
-            }
+            // v2.9.54: 安装动作 = 强制重建软链，与官方 Skill 的重装/更新逻辑保持一致。
+            // 目标可能是旧软链、悬空软链，或历史遗留的真实目录（例如用户此前手动放进
+            // ~/.codex/skills/<slug> 的同名 Skill）。旧逻辑对真实目录直接跳过，导致 Codex
+            // 不出现在「已安装到」列表。由于社区 Skill 的落盘源目录
+            // （~/Library/Application Support/ClipSlots/community-skills/<slug>）与 Agent 侧目标
+            // 完全独立，删除目标不会影响源文件，可安全覆盖 —— 与提权兜底命令
+            // （rm -rf target && ln -sfn source target）以及官方 relinkSkill 行为一致。
             if trySymlinkWithoutPrivilege(source: source, target: target, skillsDir: agent.skillsDir) {
                 installed.append(agent.displayName)
             } else {
@@ -559,11 +563,13 @@ final class CommunitySkillManager: ObservableObject {
 
     private func trySymlinkWithoutPrivilege(source: String, target: String, skillsDir: String) -> Bool {
         do {
+            // v2.9.54: 确保父目录存在（如 ~/.codex/skills/ 首次安装时可能不存在）。
             try fm.createDirectory(atPath: skillsDir, withIntermediateDirectories: true)
-            if isSymlink(target) {
+            // 覆盖旧目标——软链、悬空软链或历史真实目录都先移除再重建软链。
+            // 源目录是独立的社区 Skill 落盘目录，删除 Agent 侧同名目标不影响源文件；
+            // 与官方 relinkSkill / 提权兜底命令（rm -rf target && ln -sfn）保持一致。
+            if fileExistsNoFollow(target) {
                 try fm.removeItem(atPath: target)
-            } else if fileExistsNoFollow(target) {
-                return false   // 真实目录/文件不删除
             }
             try fm.createSymbolicLink(atPath: target, withDestinationPath: source)
             return true
