@@ -12,7 +12,7 @@ import ClipSlotsKit
 //   success: {"ok": true, ...}
 //   error:   {"ok": false, "error": "message"}  (exit code 1)
 
-let CLI_VERSION = "2.9.48"
+let CLI_VERSION = "2.9.49"
 let DEFAULT_GROUP = "default"
 let DEFAULT_PAGE = "default_page"
 

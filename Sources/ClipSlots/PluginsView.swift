@@ -1,4 +1,5 @@
 import SwiftUI
+import AppKit
 
 // v2.9.17: Plugin marketplace (Obsidian community-plugins style).
 //
@@ -370,6 +371,26 @@ struct PluginsView: View {
         .background(Capsule().fill(color.opacity(0.14)))
     }
 
+    // v2.9.49: 小号次要按钮——用 Finder 打开 bundle 内 Skill 文件目录。
+    private var openSkillDirButton: some View {
+        Button {
+            if let dir = agentInstaller.bundledSkillDir {
+                NSWorkspace.shared.open(URL(fileURLWithPath: dir))
+            }
+        } label: {
+            HStack(spacing: 4) {
+                Image(systemName: "folder").font(.system(size: 9))
+                Text("打开目录").font(.system(size: 10.5, weight: .medium))
+            }
+            .foregroundColor(.secondary)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 3)
+            .background(Capsule().fill(Color.secondary.opacity(0.12)))
+        }
+        .buttonStyle(.plain)
+        .help("在 Finder 中打开 Skill 文件目录，可手动复制到其他 Agent")
+    }
+
     // MARK: - Detail view
 
     private func detailView(_ item: PluginMarketItem) -> some View {
@@ -428,7 +449,14 @@ struct PluginsView: View {
                                 .foregroundColor(.secondary)
                         }
                         Spacer()
-                        detailInstallControl(for: item)
+                        VStack(alignment: .trailing, spacing: 6) {
+                            detailInstallControl(for: item)
+                            // v2.9.49: 「打开目录」按钮——用 Finder 打开 bundle 内 Skill 文件目录，
+                            // 方便用户手动把 clipslots-manager 复制到其他 Agent 的 skills 目录。
+                            if item.installsToAgent, agentInstaller.bundledSkillDir != nil {
+                                openSkillDirButton
+                            }
+                        }
                     }
 
                     // Full description
@@ -527,6 +555,12 @@ struct PluginsView: View {
                 }
                 .foregroundColor(agentInstaller.lastMessageIsError ? .orange : .green)
             }
+
+            // v2.9.49: 手动安装说明——提示其他 Agent 的安装方式。
+            Text("其他 Agent：打开上方目录，将 clipslots-manager 文件夹复制到该 Agent 对应的 skills 目录下即可。")
+                .font(.footnote)
+                .foregroundColor(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
         }
     }
 
