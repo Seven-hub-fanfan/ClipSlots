@@ -90,6 +90,13 @@ final class UpdateDownloader: NSObject {
         panel.contentView = content
         panel.isFloatingPanel = true
         panel.hidesOnDeactivate = false
+        // v2.9.54 fix: 我们自己用 self.panel 强持有该窗口，必须关闭「关闭即释放」，
+        // 否则点击标题栏红色关闭按钮时 AppKit 会额外 release，导致 ARC 下过度释放而崩溃。
+        panel.isReleasedWhenClosed = false
+        // 让标题栏的关闭按钮与「取消」按钮行为一致：取消下载并清理窗口，
+        // 避免用户点 X 后下载仍在后台继续、完成后突然弹出 DMG。
+        panel.standardWindowButton(.closeButton)?.target = self
+        panel.standardWindowButton(.closeButton)?.action = #selector(onCancelPressed)
         panel.center()
         panel.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
