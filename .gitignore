@@ -13,3 +13,6 @@ assets/AppIcon.iconset/
 # SwiftPM
 .build/
 .swiftpm/
+
+# Build DMG artifacts
+build/*.dmg
