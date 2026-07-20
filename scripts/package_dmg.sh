@@ -94,6 +94,17 @@ detach_if_mounted "/Volumes/$VOLUME_NAME"
 rm -rf "$APP_DIR" "$STAGING_DIR" "$BACKGROUND_DIR"
 rm -f "$DMG_PATH" "$TMP_DMG" "$TMP_DMG.dmg"
 
+# ---------------------------------------------------------------------------
+# 清理 build 目录里所有历史遗留的旧版 DMG。
+# 根因：GitHub Release 发布用 `gh release create build/ClipSlots*.dmg` 通配符，
+#       会把 build 目录里积累的所有旧版 DMG 一并上传，导致每个 Release
+#       Assets 里挂着几十个历史文件。此处在生成新 DMG 之前先删掉所有旧 DMG，
+#       确保本次构建结束后 build 目录只保留当前版本这一个 DMG。
+# 说明：紧接其后的 DMG 生成流程会重新创建 ClipSlots_v<version>.dmg，不受影响。
+# ---------------------------------------------------------------------------
+echo "==> Clean stale DMGs in build dir (keep only current build output)"
+rm -f "$BUILD_DIR"/ClipSlots*.dmg
+
 echo "==> Build release"
 swift build -c release --package-path "$ROOT_DIR"
 
