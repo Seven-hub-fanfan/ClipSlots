@@ -544,15 +544,17 @@ struct SettingsView: View {
             VStack(alignment: .leading, spacing: 12) {
                 let installed = skillManager.agentsWithSkillInstalled
 
-                // 状态行（绿点 + 安装数量 + 版本）
+                // 状态行（精致徽章 + 安装数量 + 版本）
                 HStack(spacing: 10) {
-                    Circle()
-                        .fill(installed.isEmpty ? Color.secondary : Color.green)
-                        .frame(width: 9, height: 9)
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(installed.isEmpty ? "未安装" : "已安装 · \(installed.count) 个 Agent")
-                            .font(.subheadline)
-                            .fontWeight(.medium)
+                    VStack(alignment: .leading, spacing: 3) {
+                        HStack(spacing: 4) {
+                            Image(systemName: installed.isEmpty ? "circle.dashed" : "checkmark.circle.fill")
+                                .foregroundColor(installed.isEmpty ? .secondary : .green)
+                                .font(.caption)
+                            Text(installed.isEmpty ? "未安装" : "已安装 · \(installed.count) 个 Agent")
+                                .font(.subheadline)
+                                .fontWeight(.semibold)
+                        }
                         Text(skillManager.bundledSkillVersionInfo.map { "当前 Skill 版本：\($0)" } ?? "未能读取内置 Skill 版本")
                             .font(.caption)
                             .foregroundColor(.secondary)
@@ -561,35 +563,30 @@ struct SettingsView: View {
                     Spacer()
                 }
 
-                // 已安装 Agent 列表（健康状态 + 路径）
+                // 已安装 Agent 列表（健康状态 pill + 路径）
                 if !installed.isEmpty {
-                    VStack(alignment: .leading, spacing: 6) {
+                    VStack(alignment: .leading, spacing: 10) {
                         ForEach(installed) { agent in
                             let health = skillManager.linkHealth(for: agent)
-                            HStack(alignment: .top, spacing: 8) {
-                                Circle()
-                                    .fill(health == .broken ? Color.orange : Color.green)
-                                    .frame(width: 6, height: 6)
-                                    .padding(.top, 5)
-                                VStack(alignment: .leading, spacing: 1) {
-                                    HStack(spacing: 6) {
+                            VStack(alignment: .leading, spacing: 4) {
+                                HStack(alignment: .firstTextBaseline) {
+                                    VStack(alignment: .leading, spacing: 2) {
                                         Text(agent.displayName)
-                                            .font(.caption)
+                                            .font(.callout)
                                             .fontWeight(.medium)
-                                        Text(health == .broken ? "⚠️ 软链已断开" : "✅ 已安装")
-                                            .font(.caption)
-                                            .foregroundColor(health == .broken ? .orange : .green)
+                                        Text(agent.skillTargetPath)
+                                            .font(.caption2)
+                                            .foregroundColor(.secondary)
+                                            .textSelection(.enabled)
                                     }
-                                    Text(agent.skillTargetPath)
-                                        .font(.caption)
-                                        .foregroundColor(.secondary)
-                                        .textSelection(.enabled)
-                                    if health == .broken {
-                                        Text("软链目标已失效（App 可能被删除或移动），请点击「重新安装 Skill」修复。")
-                                            .font(.caption)
-                                            .foregroundColor(.orange)
-                                            .fixedSize(horizontal: false, vertical: true)
-                                    }
+                                    Spacer(minLength: 12)
+                                    SkillStatusPill(broken: health == .broken)
+                                }
+                                if health == .broken {
+                                    Text("软链目标已失效（App 可能被删除或移动），请点击「重新安装 Skill」修复。")
+                                        .font(.caption2)
+                                        .foregroundColor(.orange)
+                                        .fixedSize(horizontal: false, vertical: true)
                                 }
                             }
                         }
@@ -1038,5 +1035,23 @@ enum HotkeyTemplateNormalizer {
         }
         let ordered = ["cmd", "ctrl", "option", "shift"].filter { modifiers.contains($0) }
         return (ordered + [key ?? ""]).filter { !$0.isEmpty }.joined(separator: "+")
+    }
+}
+
+
+// MARK: - v2.9.51 Agent Skill 状态 pill 胶囊标签
+
+struct SkillStatusPill: View {
+    let broken: Bool
+
+    var body: some View {
+        Text(broken ? "软链已断开" : "已安装")
+            .font(.caption2)
+            .fontWeight(.medium)
+            .foregroundColor(.white)
+            .padding(.horizontal, 6)
+            .padding(.vertical, 2)
+            .background((broken ? Color.orange : Color.green).opacity(0.85))
+            .clipShape(Capsule())
     }
 }
