@@ -1640,6 +1640,16 @@ final class SlotStoreObservable: ObservableObject {
 
             self.sendPasteKeystroke()
 
+            // v2.9.56 fix: auto-advance MUST fire only after the paste keystroke has
+            // been sent. Previously maybeAutoAdvance was called synchronously right
+            // after scheduling this work item, so for the last non-empty slot it
+            // switched groups (changing currentSpecialSlotId) BEFORE this deferred
+            // work item ran — tripping the `currentSpecialSlotId == activeId` guard
+            // above and aborting the paste as "stale". Text-only slots therefore
+            // jumped without ever pasting; attachment slots were unaffected because
+            // they advance from the sequential-paste completion callback instead.
+            self.maybeAutoAdvance(afterPasting: slot, in: activeId) // v2.9.31 (moved post-keystroke in v2.9.56)
+
             let restoreWorkItem = DispatchWorkItem { [weak self] in
                 guard let self = self else { return }
                 _ = self.clipboard.restore(previous)
@@ -1656,8 +1666,6 @@ final class SlotStoreObservable: ObservableObject {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.08, execute: pasteWorkItem)
 
         NSLog("[ClipSlots] pasteSlot scheduled specialSlot=\(activeId) slot=\(slot) preview=\(content.preview)")
-
-        maybeAutoAdvance(afterPasting: slot, in: activeId) // v2.9.31
     }
 
     // MARK: - Radial Paste (targetApp activation + waitUntilFrontmost)
