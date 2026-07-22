@@ -20,6 +20,12 @@ public final class SpecialSlotStorage {
     /// serial `queue.sync` used inside `loadIndex`.
     private let storageLock = StorageLock.shared
 
+    // F7 (契约5): records what the startup default-page/group repair did on this
+    // process. Empty => nothing needed repair. Read by the CLI to emit `repaired`
+    // (+ `repair_actions`) on responses.
+    public private(set) var lastRepairActions: [String] = []
+    public var didRepairDefaults: Bool { !lastRepairActions.isEmpty }
+
     public init() {
         // v2.9.29: honor CLIPSLOTS_DATA_DIR via ClipSlotsPaths (env > default).
         let appSupport = ClipSlotsPaths.specialSlots
@@ -28,6 +34,10 @@ public final class SpecialSlotStorage {
 
         try? FileManager.default.createDirectory(at: baseDir, withIntermediateDirectories: true)
         ensureInitialized()
+        // F7 (契约5): detect + auto-repair a missing default page / default group on
+        // every process init (before trash cleanup so a repaired install is fully
+        // consistent for the command about to run).
+        repairDefaultsIfNeeded()
         // v2.9.5 (Feature #1): opportunistic trash cleanup at startup so a long-idle
         // install still shrinks accumulated `.trash` even without a new delete.
         cleanupTrash()
@@ -291,6 +301,63 @@ public final class SpecialSlotStorage {
         try? FileManager.default.createDirectory(at: defaultDir, withIntermediateDirectories: true)
     }
 
+    /// F7 (契约5): ensure default page ("default_page") and default group ("default")
+    /// exist; recreate whichever is missing. Idempotent, runs inside the cross-process
+    /// storage lock. Records human-readable actions in `lastRepairActions` so the CLI
+    /// can surface `repaired` / `repair_actions` on its responses.
+    private func repairDefaultsIfNeeded() {
+        do {
+            try storageLock.withLock {
+                var index = loadIndex()
+                // Skip repair for the empty/corrupt fallback index (schemaVersion 0):
+                // ensureInitialized()/migration owns that path; repairing here could
+                // clobber a corrupt-but-recoverable file.
+                guard index.schemaVersion >= 2 else { return }
+                var actions: [String] = []
+                var changed = false
+
+                let hasDefaultPage = index.pages.contains { $0.id == "default_page" }
+                if !hasDefaultPage {
+                    let page = SlotPage(id: "default_page", name: "默认页面",
+                                        order: (index.pages.map { $0.order }.max() ?? -1) + 1,
+                                        createdAt: Date(), updatedAt: Date())
+                    index.pages.append(page)
+                    if index.currentPageId.isEmpty { index.currentPageId = "default_page" }
+                    actions.append("recreated_default_page")
+                    changed = true
+                }
+
+                if let gi = index.specialSlots.firstIndex(where: { $0.id == "default" }) {
+                    // orphan reassign: default group points to a missing page
+                    if !index.pages.contains(where: { $0.id == index.specialSlots[gi].pageId }) {
+                        index.specialSlots[gi].pageId = "default_page"
+                        index.specialSlots[gi].updatedAt = Date()
+                        actions.append("reassigned_orphan_default_group")
+                        changed = true
+                    }
+                } else {
+                    let existingInPage = index.specialSlots.filter { $0.pageId == "default_page" }
+                    let slot = SpecialSlot(id: "default", name: "默认槽位组", icon: "folder",
+                                           colorHex: nil, sourceType: .migratedDefault, sourcePath: nil,
+                                           pageId: "default_page",
+                                           order: (existingInPage.map { $0.order }.max() ?? -1) + 1,
+                                           createdAt: Date(), updatedAt: Date())
+                    index.specialSlots.append(slot)
+                    if index.currentSpecialSlotId.isEmpty { index.currentSpecialSlotId = "default" }
+                    actions.append("recreated_default_group")
+                    changed = true
+                    let dir = specialSlotDirectory(for: "default")
+                    try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+                }
+
+                if changed { try saveIndex(index) }
+                self.lastRepairActions = actions
+            }
+        } catch {
+            // lock contention etc: leave lastRepairActions empty (no repair reported)
+        }
+    }
+
     // MARK: - Index Operations
 
     public func loadIndex() -> SpecialSlotIndex {
@@ -530,6 +597,8 @@ public final class SpecialSlotStorage {
 
     public func deleteSpecialSlot(id: String) throws {
         try storageLock.withLock {
+            // F6 (契约5): default group is protected at the Kit layer too (双保险).
+            if id == "default" { throw SpecialSlotError.defaultGroupProtected }
             var index = loadIndex()
 
             guard let targetSlot = index.specialSlots.first(where: { $0.id == id }) else {
@@ -725,6 +794,8 @@ public final class SpecialSlotStorage {
 
     public func deletePage(id: String) throws {
         try storageLock.withLock {
+            // F6 (契约5): default page is protected at the Kit layer too (双保险).
+            if id == "default_page" { throw PageError.defaultPageProtected }
             var index = loadIndex()
 
             guard index.pages.count > 1 else {

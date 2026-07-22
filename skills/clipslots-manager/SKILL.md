@@ -1,14 +1,22 @@
 ---
 name: clipslots-manager
 description: 当需要以编程方式读取、写入、检索、加载或整理 macOS 剪贴板槽位管理器 ClipSlots 中的内容时使用。把文本/文件存进槽位、读出内容、搜索历史、把内容放到系统剪贴板、批量整理文件夹素材到槽位组/页面、删除槽位组/页面等。requires: macOS + 已安装 ClipSlots v2.9.33+，CLI 位于 /usr/local/bin/clipslots。
-version: 1.0
-used_when: 当需要以编程方式读取、写入、检索、加载或整理 macOS 剪贴板槽位管理器 ClipSlots 中的内容时使用（把文本/文件存进槽位、读出内容、搜索历史、把内容放到系统剪贴板、批量整理文件夹素材到槽位组/页面、删除槽位组/页面等）。
-requires: macOS + 已安装 ClipSlots v2.9.33+（CLI 位于 `/usr/local/bin/clipslots`）
+version: 1.3.1
+compatibility: Requires macOS, ClipSlots, and /usr/local/bin/clipslots. Verified with ClipSlots CLI 2.9.57; probe version and command help at runtime.
 ---
 
 # ClipSlots CLI 使用技能（草稿）
 
 > 正式可安装版见 `skills/clipslots-manager/SKILL.md`；本文件为工作草稿，两者内容保持同步。
+
+> **Skill v1.3.1（对齐 CLI v2.9.57，已验证 CLI 2.9.57）**：本版为完整安全策略升级——写入前按能力矩阵优先使用 CLI 原生护栏，空槽 ≠ 可占用，定位歧义强制消歧，批量走预检。运行时先探测（`version` → 子命令 `--help` → `write --batch`/`CLIPSLOTS_DATA_DIR`），按实际能力降级。
+>
+> **v2.9.57 新增能力（Skill 默认使用）**：
+> - **`write --if-empty`**（空槽保护，v2.9.57 新增，Skill 默认使用）：仅当目标槽位整体为空（主体、附件、标签都空）才写入；非空返回 `error_code:"SLOT_NOT_EMPTY"` 且零副作用。探测到该参数时优先用它判冲突；未探测到时 Skill 自行 `read`/`list` 预检并请用户确认后再写。
+> - **`write --overwrite-text`**（明确覆盖，v2.9.57 新增）：只覆盖槽位文本主体，**保留附件与标签**；与 `--if-empty` 互斥（同传返回 `INVALID_ARGUMENT_COMBINATION`）。`--label` 三态：不传保留、传非空覆盖、传空串（`--label ""`）清除。
+> - **`write --batch --stop-on-error`**（批量遇错停止，v2.9.57 新增，默认 `false`）：批量写入前做**完整预检**（解析目标 / 去重 / 静态冲突 / 参数校验）；**预检失败整批零写入、磁盘不变**（`preflight_passed:false`，如 `BATCH_DUPLICATE_TARGET`、`SLOT_NOT_EMPTY`、`INVALID_ARGUMENT_COMBINATION`）。执行期失败（运行时错误）默认继续、失败项 `status:"failed"`；带 `--stop-on-error` 时其后项标记 `status:"not_executed"`。响应含 `preflight_passed`、`total/written/failed/skipped/not_executed`，每项含 `status`；顶层 `ok = preflight_passed && failed==0 && not_executed==0`，失败退出码非 0。未探测到 `--stop-on-error`/`--batch` 时改为高安全模式逐条 `write`、逐条查 `ok`、失败即停且不重放整批。
+> - **默认页/默认组保护 + 启动自动修复**：`delete-page default_page` 返回 `DEFAULT_PAGE_PROTECTED`、`delete-group default` 返回 `DEFAULT_GROUP_PROTECTED`（CLI 层与 Kit 层均拒绝）。每次 CLI 调用初始化时检测并**自动修复**缺失的默认页/默认组，所有成功响应含 `repaired` 字段（未修复为 `false`），修复时附 `repair_actions`。因此不再把"默认页可删"当作 CLI 缺陷，但破坏性操作仍需确认。
+> - **错误码稳定化**：所有失败返回体含全大写下划线 `error_code`（如 `GROUP_REQUIRED`、`AMBIGUOUS_GROUP`、`GROUP_NOT_FOUND`、`SLOT_NOT_EMPTY`、`INVALID_ARGUMENT_COMBINATION`、`INVALID_LIMIT`），退出码非 0；按 `error_code` 稳定分支，不要只解析文案。跨页同名组无页面限定时返回 `AMBIGUOUS_GROUP`（含候选列表），按组名操作务必绑定 `--page`/`--page-name`。
 
 > **v1.0 对齐 CLI v2.9.32**：页面作用域 group 解析（`--page`/`--page-name` 约束 `--group` 匹配范围）、`list` 仅传页面时返回该页所有组的语义（A3）、页面/组不一致的 A2 护栏、`groups --page` 过滤（A4）。
 

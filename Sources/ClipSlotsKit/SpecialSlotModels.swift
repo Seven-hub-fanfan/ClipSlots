@@ -207,6 +207,7 @@ public enum SpecialSlotError: Error, LocalizedError {
     case maxSpecialSlotsReached
     case duplicateName
     case indexCorrupted
+    case defaultGroupProtected
 
     public var errorDescription: String? {
         switch self {
@@ -216,6 +217,7 @@ public enum SpecialSlotError: Error, LocalizedError {
         case .maxSpecialSlotsReached: return "当前页面的槽位组数量已达到上限，最多 10 个"
         case .duplicateName: return "当前页面已存在同名槽位组"
         case .indexCorrupted: return "槽位组索引文件损坏"
+        case .defaultGroupProtected: return "默认槽位组受保护，无法删除"
         }
     }
 }
@@ -227,6 +229,7 @@ public enum PageError: Error, LocalizedError {
     case pageNotFound
     case duplicateName
     case emptyName
+    case defaultPageProtected
 
     public var errorDescription: String? {
         switch self {
@@ -234,6 +237,7 @@ public enum PageError: Error, LocalizedError {
         case .pageNotFound: return "页面不存在"
         case .duplicateName: return "已存在同名页面"
         case .emptyName: return "页面名称不能为空"
+        case .defaultPageProtected: return "默认页面受保护，无法删除"
         }
     }
 }

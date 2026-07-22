@@ -12,7 +12,7 @@ import ClipSlotsKit
 //   success: {"ok": true, ...}
 //   error:   {"ok": false, "error": "message"}  (exit code 1)
 
-let CLI_VERSION = "2.9.56"
+let CLI_VERSION = "2.9.57"
 let DEFAULT_GROUP = "default"
 let DEFAULT_PAGE = "default_page"
 
@@ -62,12 +62,25 @@ func emit(_ dict: [String: Any]) {
 func success(_ dict: [String: Any]) -> Never {
     var d = dict
     d["ok"] = true
+    // F7 (契约5): every success response carries the default-page/group repair
+    // status. `repaired` is ALWAYS present (false when nothing was repaired); when
+    // a repair happened `repair_actions` lists what was done. Callers that already
+    // set `repaired` (e.g. batch builds it itself) are left untouched.
+    if d["repaired"] == nil {
+        d["repaired"] = storage.didRepairDefaults
+        if storage.didRepairDefaults { d["repair_actions"] = storage.lastRepairActions }
+    }
     emit(d)
     exit(0)
 }
 
-func fail(_ message: String) -> Never {
-    emit(["ok": false, "error": message])
+// F7 (契约7): failures now carry a stable, all-caps `error_code` for reliable
+// agent branching, plus optional structured `extra` fields (e.g. candidate lists).
+// The default code "ERROR" keeps every existing `fail("...")` call compiling.
+func fail(_ message: String, code: String = "ERROR", extra: [String: Any] = [:]) -> Never {
+    var d: [String: Any] = ["ok": false, "error": message, "error_code": code]
+    for (k, v) in extra { d[k] = v }
+    emit(d)
     exit(1)
 }
 
@@ -193,6 +206,16 @@ func uniqueTypes(_ c: SlotContent) -> [String] {
 /// compatible) — used by commands that have no page flags (search/clear/…).
 func resolveGroup(_ args: ParsedArgs, inPage pageId: String? = nil) -> String {
     let index = storage.loadIndex()
+    let hasGroupFlag = args.flag("group") != nil || args.flag("group-name") != nil
+
+    // F2 (契约3): single-slot ops (read/write/paste/clear/write-attachment) must name a
+    // group. When a page is given but NO group flag, refuse instead of falling back to
+    // the global default group. `list` handles the page-only case in its own branch
+    // BEFORE calling resolveGroup, so it is never affected by this guard.
+    if pageId != nil, !hasGroupFlag {
+        fail("a group is required: pass --group or --group-name (page-only single-slot operation rejected)", code: "GROUP_REQUIRED")
+    }
+
     // Candidate scope: page-constrained when a page was requested, else global.
     let scope = pageId.map { pid in index.specialSlots.filter { $0.pageId == pid } }
                       ?? index.specialSlots
@@ -202,34 +225,47 @@ func resolveGroup(_ args: ParsedArgs, inPage pageId: String? = nil) -> String {
     }
 
     if let name = args.flag("group-name") {
-        if let g = scope.first(where: { $0.name == name }) { return g.id }
+        let matches = scope.filter { $0.name == name }
+        // F1 (契约7): without a page constraint an ambiguous name must not silently
+        // pick the first match.
+        if matches.count > 1 { failAmbiguousGroup(name: name, matches: matches, index: index) }
+        if let g = matches.first { return g.id }
         if let label = pageLabel {
             // A2 guardrail: named group is not on the requested page → refuse.
-            fail("group '\(name)' not found in page '\(label)'")
+            fail("group '\(name)' not found in page '\(label)'", code: "GROUP_NOT_FOUND")
         }
-        fail("no group found with name '\(name)' (run 'clipslots groups' to list names)")
+        fail("no group found with name '\(name)' (run 'clipslots groups' to list names)", code: "GROUP_NOT_FOUND")
     }
 
     if let explicit = args.flag("group") {
         if scope.contains(where: { $0.id == explicit }) { return explicit }
-        if let g = scope.first(where: { $0.name == explicit }) { return g.id }
+        let nameMatches = scope.filter { $0.name == explicit }
+        if nameMatches.count > 1 { failAmbiguousGroup(name: explicit, matches: nameMatches, index: index) }
+        if let g = nameMatches.first { return g.id }
         if let label = pageLabel {
             // A2 guardrail: an explicit --group (id or name) that resolves to nothing
             // on the requested page is a page/group mismatch → refuse.
-            fail("group '\(explicit)' not found in page '\(label)'")
+            fail("group '\(explicit)' not found in page '\(label)'", code: "GROUP_NOT_FOUND")
         }
-        // No page constraint: keep literal passthrough (e.g. bare on-disk group id).
-        return explicit
+        // F1/契约7: do NOT silently pass an unknown literal through.
+        fail("group '\(explicit)' not found", code: "GROUP_NOT_FOUND")
     }
 
-    // No explicit group flag → the documented default group, still page-scoped for
-    // matching but with a backward-compatible literal fallback. Note: `list` handles
-    // the page-without-group case via its own page-scoped logic (A3) before reaching
-    // here, so this default is only hit by read/write/paste when no group is given.
+    // No group flag, no page → documented default group.
     let raw = DEFAULT_GROUP
     if scope.contains(where: { $0.id == raw }) { return raw }
     if let g = scope.first(where: { $0.name == raw }) { return g.id }
     return raw
+}
+
+// F1 (契约7): ambiguous group name across pages → AMBIGUOUS_GROUP with candidate list.
+func failAmbiguousGroup(name: String, matches: [SpecialSlot], index: SpecialSlotIndex) -> Never {
+    let pageNames = Dictionary(uniqueKeysWithValues: index.pages.map { ($0.id, $0.name) })
+    let candidates: [[String: Any]] = matches.map { g in
+        ["group": g.id, "page": g.pageId, "pageName": jsonValue(pageNames[g.pageId])]
+    }
+    fail("group name '\(name)' is ambiguous across \(matches.count) groups; pass --page/--page-name to disambiguate",
+         code: "AMBIGUOUS_GROUP", extra: ["candidates": candidates])
 }
 
 // v2.9.29 (#1): resolve an explicitly-requested page from --page / --page-name.
@@ -331,7 +367,10 @@ func writeFailureDiagnostic(context: String) -> String {
 // MARK: - Commands
 
 func cmdVersion() -> Never {
-    success(["version": CLI_VERSION])
+    // F7: `version` stays a minimal, stable probe ({"ok":true,"version":"..."}),
+    // bypassing success()'s repaired-status injection so callers can parse it raw.
+    emit(["ok": true, "version": CLI_VERSION])
+    exit(0)
 }
 
 // v2.9.5 (Feature #2): single source of truth for command metadata. Both the
@@ -343,7 +382,7 @@ let COMMANDS: [[String: Any]] = [
     ["name": "pages", "description": "列出所有页面（SlotPage）。", "flags": ["--group <id> (可选,当前实现忽略,页面为全局)"]],
     ["name": "list", "description": "列出槽位摘要。指定 --group/--group-name 时列出该组 1..N 号槽位；只给 --page/--page-name 而不给组时，列出该页面下所有组各自的槽位并附 groupCount（页面无组则 groupCount=0，不再回落全局 default 组）。同时给页面和组时，组匹配被约束在该页面内。支持分页：传 --page-size 后按页返回并附带 pagination 元信息。", "flags": ["--group <id|name> (默认 default;可传 id 或组名)", "--group-name <name> (按组名精确匹配,优先于 --group)", "--page <id> (可选,约束 group 匹配到该页面;单独使用时列出该页所有组)", "--page-name <name> (按页面名精确匹配;找不到会报错,与 --page 互斥;单独使用时列出该页所有组)", "--page-size <N> (可选,每页槽位数,>0 时启用分页)", "--page-num <N> (可选,第几页,从 1 开始,默认 1,需配合 --page-size)"]],
     ["name": "read", "description": "读取单个槽位的完整内容（纯文本、HTML源、类型、附件数等）。", "flags": ["<slot> (位置参数,1..N)", "--group <id|name> (默认 default;可传 id 或组名)", "--group-name <name> (按组名精确匹配)", "--page <id> (可选,约束 --group/--group-name 匹配到该页面)", "--page-name <name> (按页面名精确匹配;找不到会报错,与 --page 互斥;约束 group 匹配范围)"]],
-    ["name": "write", "description": "向槽位写入纯文本内容（保留已有附件），可选设置标签。成功返回里含 preview 字段(前100字符)，无需再 read 确认。支持 --batch 从 stdin 传入 JSON 数组一次写多条。", "flags": ["<slot> (位置参数,1..N;--batch 时省略)", "--text <string> (必填, 传 - 表示从 stdin 读取;--batch 时省略)", "--batch (从 stdin 读取 JSON 数组批量写入,见下)", "--group <id|name> (默认 default;可传 id 或组名)", "--group-name <name> (按组名精确匹配)", "--page <id> (可选,约束 --group/--group-name 匹配到该页面,防止写到同名他页组)", "--page-name <name> (按页面名精确匹配;找不到会报错,与 --page 互斥;约束 group 匹配范围)", "--label <string> (可选)", "--force (跳过跨进程锁,风险自负)"]],
+    ["name": "write", "description": "向槽位写入纯文本内容（保留已有附件），可选设置标签。成功返回里含 preview 字段(前100字符)，无需再 read 确认。支持 --batch 从 stdin 传入 JSON 数组一次写多条。", "flags": ["<slot> (位置参数,1..N;--batch 时省略)", "--text <string> (必填, 传 - 表示从 stdin 读取;--batch 时省略)", "--batch (从 stdin 读取 JSON 数组批量写入,见下)", "--group <id|name> (默认 default;可传 id 或组名)", "--group-name <name> (按组名精确匹配)", "--page <id> (可选,约束 --group/--group-name 匹配到该页面,防止写到同名他页组)", "--page-name <name> (按页面名精确匹配;找不到会报错,与 --page 互斥;约束 group 匹配范围)", "--label <string> (可选)", "--if-empty (仅写入空槽,非空返回 SLOT_NOT_EMPTY)", "--overwrite-text (明确覆盖文本,保留附件与标签)", "--stop-on-error (批量遇错停止,默认 false)", "--force (跳过跨进程锁,风险自负)"]],
     ["name": "search", "description": "在槽位预览/文本/标签中做大小写不敏感子串搜索。", "flags": ["<query> (位置参数)", "--group <id|name> (默认 default;可传 id 或组名)", "--group-name <name> (按组名精确匹配)", "--all-groups (在所有槽位组内搜索)", "--limit <N> (默认 50)"]],
     ["name": "paste", "description": "把某槽位的内容加载到系统剪贴板(NSPasteboard)，不模拟按键。", "flags": ["<slot> (位置参数,1..N)", "--group <id|name> (默认 default;可传 id 或组名)", "--group-name <name> (按组名精确匹配)", "--page <id> (可选,约束 --group/--group-name 匹配到该页面)", "--page-name <name> (按页面名精确匹配;找不到会报错,与 --page 互斥;约束 group 匹配范围)"]],
     ["name": "clear", "description": "清空某个槽位（内容、标签、附件全部移除）。", "flags": ["<slot> (位置参数,1..N)", "--group <id|name> (默认 default;可传 id 或组名)", "--group-name <name> (按组名精确匹配)", "--page <id> (可选,约束 --group/--group-name 匹配到该页面)", "--page-name <name> (按页面名精确匹配;找不到会报错,与 --page 互斥;约束 group 匹配范围)", "--force (跳过跨进程锁,风险自负)"]],
@@ -366,11 +405,11 @@ let COMMAND_ALLOWED_FLAGS: [String: Set<String>] = [
     "groups": ["page", "page-name"],
     "pages": ["group", "group-name"],
     "list": ["group", "group-name", "page", "page-name", "page-size", "page-num"],
-    "read": ["group", "group-name", "page", "page-name"],
-    "write": ["group", "group-name", "page", "page-name", "text", "label", "batch", "force"],
+    "read": ["group", "group-name", "page", "page-name", "slot"],
+    "write": ["group", "group-name", "page", "page-name", "text", "label", "batch", "force", "if-empty", "overwrite-text", "stop-on-error", "slot"],
     "search": ["group", "group-name", "all-groups", "limit"],
-    "paste": ["group", "group-name", "page", "page-name"],
-    "clear": ["group", "group-name", "page", "page-name", "force"],
+    "paste": ["group", "group-name", "page", "page-name", "slot"],
+    "clear": ["group", "group-name", "page", "page-name", "force", "slot"],
     "create-group": ["page", "page-name", "force"],
     "create-page": ["group-name", "force"],
     "rename-group": ["name", "page-name", "force"],
@@ -391,6 +430,30 @@ func validateFlags(_ args: ParsedArgs) {
             ? "command '\(args.command)' takes no flags"
             : "allowed flags: \(allowed.sorted().map { "--\($0)" }.joined(separator: ", "))"
         fail("unknown flag: --\(key) for command '\(args.command)' (\(hint); run 'clipslots \(args.command) --help')")
+    }
+}
+
+// F9 (契约7 附): argument-combination validation. Runs AFTER validateFlags (so unknown
+// flags are already rejected). Emits INVALID_ARGUMENT_COMBINATION / INVALID_LIMIT.
+func validateArgCombinations(_ args: ParsedArgs) {
+    if args.flag("group") != nil && args.flag("group-name") != nil {
+        fail("--group and --group-name are mutually exclusive", code: "INVALID_ARGUMENT_COMBINATION")
+    }
+    if args.flag("page") != nil && args.flag("page-name") != nil {
+        fail("--page and --page-name are mutually exclusive", code: "INVALID_ARGUMENT_COMBINATION")
+    }
+    if args.hasFlag("if-empty") && args.hasFlag("overwrite-text") {
+        fail("--if-empty and --overwrite-text are mutually exclusive", code: "INVALID_ARGUMENT_COMBINATION")
+    }
+    if args.hasFlag("all-groups") &&
+        (args.flag("page") != nil || args.flag("page-name") != nil ||
+         args.flag("group") != nil || args.flag("group-name") != nil) {
+        fail("--all-groups cannot be combined with --page/--page-name/--group/--group-name", code: "INVALID_ARGUMENT_COMBINATION")
+    }
+    if let lim = args.flag("limit") {
+        guard let n = Int(lim), n > 0 else {
+            fail("--limit must be a positive integer (got '\(lim)')", code: "INVALID_LIMIT")
+        }
     }
 }
 
@@ -565,7 +628,7 @@ func cmdRead(_ args: ParsedArgs) -> Never {
     // v2.9.32 (A1): resolve the page first, then scope group matching to it.
     let requestedPage = resolvePageFlag(args)
     let group = resolveGroup(args, inPage: requestedPage)
-    let n = parseSlot(args.positionals.first)
+    let n = parseSlot(args.positionals.first ?? args.flag("slot"))
     let content = storage.get(n, in: group)
     let label = storage.getLabel(n, in: group) ?? content.label
     success([
@@ -604,23 +667,46 @@ func resolveGroupLiteral(_ raw: String, inPage pageId: String? = nil) -> String 
     return raw
 }
 
+// F3 (契约2): thrown when --if-empty is set but the target slot is not empty.
+struct SlotNotEmpty: Error {}
+
 // v2.9.16 (#5): shared text-write core used by both `write` and `write --batch`.
 // Returns a short preview of the written text; throws StorageLockError on lock
 // contention or WriteFailure with a diagnosed reason on IO failure.
-func performTextWrite(slot n: Int, text: String, group: String, label: String?) throws -> String {
+// F3 (契约2): supports `ifEmpty` (reject non-empty slots, atomically re-checked
+// INSIDE the lock) and `overwriteText`/label three-state semantics.
+func performTextWrite(slot n: Int, text: String, group: String, label: String?,
+                      ifEmpty: Bool, overwriteText: Bool) throws -> String {
     // Mirror the GUI's updateTextSlot: build a public.utf8-plain-text item and
     // PRESERVE any existing attachments on the slot (v2.8.7 fix). Read-modify-write
-    // runs as ONE cross-process critical section (v2.9.4 #4).
+    // runs as ONE cross-process critical section (v2.9.4 #4). The emptiness check
+    // (契约2 原子性要求) happens in the SAME critical section as the write.
     let wrote = try StorageLock.shared.withLock { () -> Bool in
         let existing = storage.get(n, in: group)
+        let existingLabel = storage.getLabel(n, in: group) ?? existing.label
+        // F3/契约2: --if-empty rejects if the slot is not empty (body OR attachments OR label).
+        if ifEmpty {
+            let labelEmpty = (existingLabel ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            let empty = existing.isEmpty && labelEmpty
+            if !empty { throw SlotNotEmpty() }
+        }
         let data = text.data(using: .utf8) ?? Data()
         let item = PasteboardItem(type: "public.utf8-plain-text", data: data)
         var content = SlotContent()
         content.items = [[item]]
         content.timestamp = Date()
-        content.attachments = existing.attachments
+        content.attachments = existing.attachments   // preserve attachments
         let ok = storage.set(n, content: content, in: group)
-        if ok, let label { storage.setLabel(n, label: label, in: group) }
+        if ok {
+            if let label {
+                // explicit --label provided → set it (empty string clears).
+                storage.setLabel(n, label: label.isEmpty ? nil : label, in: group)
+            } else if overwriteText {
+                // --overwrite-text without --label → keep existing label.
+                storage.setLabel(n, label: existingLabel, in: group)
+            }
+            // plain write without --label: legacy behavior (do not touch label).
+        }
         return ok
     }
     guard wrote else {
@@ -634,7 +720,8 @@ func cmdWrite(_ args: ParsedArgs) -> Never {
     if args.hasFlag("batch") { cmdWriteBatch(args) }
 
     let group = resolveGroup(args, inPage: resolvePageFlag(args)) // v2.9.32 (A1): page-scoped
-    let n = parseSlot(args.positionals.first)
+    // v2.9.57: accept slot from a positional OR a --slot flag (agent convenience).
+    let n = parseSlot(args.positionals.first ?? args.flag("slot"))
     guard var text = args.flag("text") else {
         fail("missing --text <string> (use --text - to read from stdin, or --batch for bulk)")
     }
@@ -648,13 +735,23 @@ func cmdWrite(_ args: ParsedArgs) -> Never {
         text = decoded
     }
 
+    // F3 (契约2): opt-in safety/overwrite semantics. Bare `write` (neither flag)
+    // keeps the v2.9.56 legacy overwrite behavior.
+    let ifEmpty = args.hasFlag("if-empty")
+    let overwriteText = args.hasFlag("overwrite-text")
+    let label = args.flag("label")
+
     do {
         // v2.9.16 (#5): return `preview` so the agent needn't re-read to confirm.
-        let preview = try performTextWrite(slot: n, text: text, group: group, label: args.flag("label"))
+        let preview = try performTextWrite(slot: n, text: text, group: group, label: label,
+                                           ifEmpty: ifEmpty, overwriteText: overwriteText)
         success(["slot": n, "group": group, "preview": preview])
+    } catch is SlotNotEmpty {
+        // F3 (契约2): --if-empty target was not empty.
+        fail("slot \(n) in group \(group) is not empty (use --overwrite-text to replace)", code: "SLOT_NOT_EMPTY")
     } catch let e as StorageLockError {
         // v2.9.16 (#4): lock contention — accurate, retryable message.
-        fail(e.errorDescription ?? "storage is busy (lock timeout)")
+        fail(e.errorDescription ?? "storage is busy (lock timeout)", code: "LOCK_TIMEOUT")
     } catch let e as WriteFailure {
         fail(e.message)
     } catch {
@@ -663,10 +760,16 @@ func cmdWrite(_ args: ParsedArgs) -> Never {
     }
 }
 
-// v2.9.16 (#3): batch write. Reads a JSON array from stdin, each element an
-// object {"slot":Int, "text":String, "group"?:String(id|name), "label"?:String}.
-// Writes are attempted per-entry; a failure on one entry does NOT abort the rest.
-// Returns {"ok":true,"batch":true,"total","written","failed","results":[...]}.
+// v2.9.57 (F4/F5/F6/F8): batch write with a full preflight + execution state
+// machine (契约1). Reads a JSON array from stdin, each element an object
+// {"slot":Int(required), "text":String?, "label":String?, "if_empty":Bool?,
+// "overwrite_text":Bool?}. `page`/`group` are command-level (shared by all items).
+//
+// Two failure classes (契约1):
+//   • Type A — preflight (static): invalid args, bad slot, duplicate targets,
+//     static conflicts (--if-empty target not empty). ZERO writes, disk unchanged.
+//   • Type B — execution (runtime): lock timeout / write failure while writing.
+//     Earlier items may have been written; --stop-on-error stops the rest.
 func cmdWriteBatch(_ args: ParsedArgs) -> Never {
     let data = FileHandle.standardInput.readDataToEndOfFile()
     guard !data.isEmpty else {
@@ -684,60 +787,185 @@ func cmdWriteBatch(_ args: ParsedArgs) -> Never {
     }
     guard !arr.isEmpty else { fail("--batch array is empty; nothing to write") }
 
-    // Group/label from top-level flags act as defaults for entries that omit them.
-    // v2.9.40 (P0): resolve the page ONCE and scope every group lookup to it, so
-    // `write --batch --group-name X --page-name Y` writes to group X on page Y (or
-    // errors), never to a same-named group on a different page.
+    // Command-level scope + defaults. v2.9.40 (P0): resolve the page ONCE and scope
+    // every group lookup to it. resolveGroup enforces F1/F2/F9 for the command.
     let requestedPage = resolvePageFlag(args)
-    let defaultGroup = resolveGroup(args, inPage: requestedPage)
+    let commandGroup = resolveGroup(args, inPage: requestedPage)
     let defaultLabel = args.flag("label")
+    let cmdIfEmpty = args.hasFlag("if-empty")
+    let cmdOverwrite = args.hasFlag("overwrite-text")
+    let stopOnError = args.hasFlag("stop-on-error")
+    let total = arr.count
 
-    var results: [[String: Any]] = []
-    var written = 0
+    // Parsed, validated representation of one batch item.
+    struct BatchItem {
+        let index: Int
+        let slot: Int
+        let text: String
+        let group: String
+        let label: String?
+        let ifEmpty: Bool
+        let overwriteText: Bool
+    }
+
+    // Best-effort slot number for display in results (before full validation).
+    func rawSlot(_ entry: [String: Any]) -> Int? {
+        if let s = entry["slot"] as? Int { return s }
+        if let s = entry["slot"] as? NSNumber { return s.intValue }
+        if let s = entry["slot"] as? String { return Int(s) }
+        return nil
+    }
+
+    // Emit a type-A (preflight) failure: zero writes, all counters 0, exit 1.
+    func emitPreflightFailure(offending: Set<Int>, code: String, message: String,
+                              extra: [String: Any] = [:],
+                              details: [Int: [String: Any]] = [:]) -> Never {
+        var results: [[String: Any]] = []
+        for i in 0..<total {
+            var r: [String: Any] = ["index": i]
+            if let s = rawSlot(arr[i]) { r["slot"] = s }
+            if offending.contains(i) {
+                r["ok"] = false
+                r["status"] = "failed"
+                r["error_code"] = code
+                if let d = details[i] { for (k, v) in d { r[k] = v } }
+            } else {
+                r["ok"] = false
+                r["status"] = "not_executed"
+            }
+            results.append(r)
+        }
+        var d: [String: Any] = [
+            "ok": false, "batch": true, "preflight_passed": false,
+            "error_code": code, "error": message,
+            "total": total, "written": 0, "failed": 0, "skipped": 0, "not_executed": 0,
+            "results": results
+        ]
+        for (k, v) in extra { d[k] = v }
+        d["repaired"] = storage.didRepairDefaults
+        if storage.didRepairDefaults { d["repair_actions"] = storage.lastRepairActions }
+        emit(d)
+        exit(1)
+    }
+
+    // ---- PREFLIGHT phase 1: per-item static validation + parse ----
+    var parsed: [BatchItem] = []
     for (idx, entry) in arr.enumerated() {
-        // slot (accept Int or numeric string).
-        let slotNum: Int?
-        if let s = entry["slot"] as? Int { slotNum = s }
-        else if let s = entry["slot"] as? String { slotNum = Int(s) }
-        else if let s = entry["slot"] as? NSNumber { slotNum = s.intValue }
-        else { slotNum = nil }
-        guard let n = slotNum else {
-            results.append(["index": idx, "ok": false, "error": "missing or invalid 'slot'"])
-            continue
+        guard let n = rawSlot(entry) else {
+            emitPreflightFailure(offending: [idx], code: "INVALID_ARGUMENT_COMBINATION",
+                                 message: "item \(idx): missing or invalid 'slot'")
         }
         guard (1...slotCount).contains(n) else {
-            results.append(["index": idx, "slot": n, "ok": false,
-                            "error": "slot out of range (valid 1...\(slotCount))"])
-            continue
+            emitPreflightFailure(offending: [idx], code: "INVALID_ARGUMENT_COMBINATION",
+                                 message: "item \(idx): slot out of range (valid 1...\(slotCount))")
         }
         guard let text = entry["text"] as? String else {
-            results.append(["index": idx, "slot": n, "ok": false,
-                            "error": "missing or invalid 'text' (must be a string)"])
-            continue
+            emitPreflightFailure(offending: [idx], code: "INVALID_ARGUMENT_COMBINATION",
+                                 message: "item \(idx): missing or invalid 'text' (must be a string)")
         }
-        let group = (entry["group"] as? String).map { resolveGroupLiteral($0, inPage: requestedPage) } ?? defaultGroup
+        // Per-item if_empty / overwrite_text override command-level (契约1 附).
+        let itemIfEmpty = (entry["if_empty"] as? Bool) ?? cmdIfEmpty
+        let itemOverwrite = (entry["overwrite_text"] as? Bool) ?? cmdOverwrite
+        if itemIfEmpty && itemOverwrite {
+            emitPreflightFailure(offending: [idx], code: "INVALID_ARGUMENT_COMBINATION",
+                                 message: "item \(idx): if_empty and overwrite_text are mutually exclusive")
+        }
+        let group = (entry["group"] as? String).map { resolveGroupLiteral($0, inPage: requestedPage) } ?? commandGroup
         let label = (entry["label"] as? String) ?? defaultLabel
-        do {
-            let preview = try performTextWrite(slot: n, text: text, group: group, label: label)
-            results.append(["index": idx, "slot": n, "group": group, "ok": true, "preview": preview])
-            written += 1
-        } catch let e as StorageLockError {
-            results.append(["index": idx, "slot": n, "group": group, "ok": false,
-                            "error": e.errorDescription ?? "storage is busy (lock timeout)"])
-        } catch let e as WriteFailure {
-            results.append(["index": idx, "slot": n, "group": group, "ok": false, "error": e.message])
-        } catch {
-            results.append(["index": idx, "slot": n, "group": group, "ok": false,
-                            "error": describeWriteError(error, context: "writing slot \(n)")])
+        parsed.append(BatchItem(index: idx, slot: n, text: text, group: group,
+                                label: label, ifEmpty: itemIfEmpty, overwriteText: itemOverwrite))
+    }
+
+    // ---- PREFLIGHT phase 2: duplicate (group, slot) targets ----
+    var seen: [String: Int] = [:]
+    var duplicateIdx: Set<Int> = []
+    for item in parsed {
+        let key = "\(item.group)#\(item.slot)"
+        if let first = seen[key] {
+            duplicateIdx.insert(first)
+            duplicateIdx.insert(item.index)
+        } else {
+            seen[key] = item.index
         }
     }
-    success([
-        "batch": true,
-        "total": arr.count,
-        "written": written,
-        "failed": arr.count - written,
-        "results": results
-    ])
+    if !duplicateIdx.isEmpty {
+        emitPreflightFailure(offending: duplicateIdx, code: "BATCH_DUPLICATE_TARGET",
+                             message: "duplicate target slot(s) resolved to the same (group, slot); the whole batch is rejected",
+                             extra: ["duplicates": duplicateIdx.sorted()])
+    }
+
+    // ---- PREFLIGHT phase 3: static conflict for if_empty items ----
+    var conflictIdx: Set<Int> = []
+    for item in parsed where item.ifEmpty {
+        let existing = storage.get(item.slot, in: item.group)
+        let existingLabel = storage.getLabel(item.slot, in: item.group) ?? existing.label
+        let labelEmpty = (existingLabel ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        if !(existing.isEmpty && labelEmpty) { conflictIdx.insert(item.index) }
+    }
+    if !conflictIdx.isEmpty {
+        emitPreflightFailure(offending: conflictIdx, code: "SLOT_NOT_EMPTY",
+                             message: "one or more --if-empty target slots are not empty; the whole batch is rejected")
+    }
+
+    // ---- EXECUTION phase (type B): preflight passed ----
+    var results: [[String: Any]] = []
+    var written = 0
+    var failed = 0
+    var notExecuted = 0
+    var stopped = false
+    for item in parsed {
+        if stopped {
+            results.append(["index": item.index, "slot": item.slot, "ok": false, "status": "not_executed"])
+            notExecuted += 1
+            continue
+        }
+        do {
+            let preview = try performTextWrite(slot: item.slot, text: item.text, group: item.group,
+                                               label: item.label, ifEmpty: item.ifEmpty,
+                                               overwriteText: item.overwriteText)
+            results.append(["index": item.index, "slot": item.slot, "group": item.group,
+                            "ok": true, "status": "written", "preview": preview])
+            written += 1
+        } catch is SlotNotEmpty {
+            // Atomic re-check (契约2) failed at execution time (concurrent modification).
+            results.append(["index": item.index, "slot": item.slot, "group": item.group,
+                            "ok": false, "status": "failed", "error_code": "SLOT_NOT_EMPTY",
+                            "error": "slot \(item.slot) in group \(item.group) is not empty"])
+            failed += 1
+            if stopOnError { stopped = true }
+        } catch let e as StorageLockError {
+            results.append(["index": item.index, "slot": item.slot, "group": item.group,
+                            "ok": false, "status": "failed", "error_code": "LOCK_TIMEOUT",
+                            "error": e.errorDescription ?? "storage is busy (lock timeout)"])
+            failed += 1
+            if stopOnError { stopped = true }
+        } catch let e as WriteFailure {
+            results.append(["index": item.index, "slot": item.slot, "group": item.group,
+                            "ok": false, "status": "failed", "error_code": "WRITE_FAILED",
+                            "error": e.message])
+            failed += 1
+            if stopOnError { stopped = true }
+        } catch {
+            results.append(["index": item.index, "slot": item.slot, "group": item.group,
+                            "ok": false, "status": "failed", "error_code": "WRITE_FAILED",
+                            "error": describeWriteError(error, context: "writing slot \(item.slot)")])
+            failed += 1
+            if stopOnError { stopped = true }
+        }
+    }
+
+    // Counters & top-level ok (契约1 附). skipped is always 0 in v2.9.57.
+    let ok = failed == 0 && notExecuted == 0
+    var out: [String: Any] = [
+        "ok": ok, "batch": true, "preflight_passed": true,
+        "total": total, "written": written, "failed": failed,
+        "skipped": 0, "not_executed": notExecuted, "results": results
+    ]
+    if failed > 0 { out["error_code"] = "BATCH_PARTIAL_FAILURE" }
+    out["repaired"] = storage.didRepairDefaults
+    if storage.didRepairDefaults { out["repair_actions"] = storage.lastRepairActions }
+    emit(out)
+    exit(ok ? 0 : 1)
 }
 
 func cmdSearch(_ args: ParsedArgs) -> Never {
@@ -794,7 +1022,7 @@ func cmdSearch(_ args: ParsedArgs) -> Never {
 
 func cmdPaste(_ args: ParsedArgs) -> Never {
     let group = resolveGroup(args, inPage: resolvePageFlag(args)) // v2.9.32 (A1): page-scoped
-    let n = parseSlot(args.positionals.first)
+    let n = parseSlot(args.positionals.first ?? args.flag("slot"))
     let content = storage.get(n, in: group)
     guard !content.isEmpty else {
         fail("slot \(n) in group \(group) is empty; nothing to copy")
@@ -1008,7 +1236,7 @@ func cmdWriteAttachment(_ args: ParsedArgs) -> Never {
 
 func cmdClear(_ args: ParsedArgs) -> Never {
     let group = resolveGroup(args, inPage: resolvePageFlag(args)) // v2.9.35: page-scoped (flag parity with write)
-    let n = parseSlot(args.positionals.first)
+    let n = parseSlot(args.positionals.first ?? args.flag("slot"))
     // v2.9.4 (#4): cross-process lock around the clear write.
     do {
         try StorageLock.shared.withLock {
@@ -1028,6 +1256,11 @@ func cmdDeleteGroup(_ args: ParsedArgs) -> Never {
     guard let id = args.positionals.first, !id.trimmingCharacters(in: .whitespaces).isEmpty else {
         fail("missing group id (usage: delete-group <id>)")
     }
+    // F6 (契约5): the default group is protected (CLI-layer guard; Kit layer also
+    // rejects it as a defense-in-depth double check).
+    if id == DEFAULT_GROUP {
+        fail("the default group '\(DEFAULT_GROUP)' is protected and cannot be deleted", code: "DEFAULT_GROUP_PROTECTED")
+    }
     // Validate existence first for a clear, agent-friendly error.
     let index = storage.loadIndex()
     guard index.specialSlots.contains(where: { $0.id == id }) else {
@@ -1036,6 +1269,8 @@ func cmdDeleteGroup(_ args: ParsedArgs) -> Never {
     do {
         try storage.deleteSpecialSlot(id: id)
         success(["deleted": id, "movedToTrash": true])
+    } catch SpecialSlotError.defaultGroupProtected {
+        fail("the default group '\(DEFAULT_GROUP)' is protected and cannot be deleted", code: "DEFAULT_GROUP_PROTECTED")
     } catch let e as StorageLockError {
         fail(e.errorDescription ?? "storage is busy (lock timeout)")
     } catch let e as SpecialSlotError {
@@ -1051,6 +1286,11 @@ func cmdDeletePage(_ args: ParsedArgs) -> Never {
     guard let id = args.positionals.first, !id.trimmingCharacters(in: .whitespaces).isEmpty else {
         fail("missing page id (usage: delete-page <id>)")
     }
+    // F6 (契约5): the default page is protected (CLI-layer guard; Kit layer also
+    // rejects it as a defense-in-depth double check).
+    if id == DEFAULT_PAGE {
+        fail("the default page '\(DEFAULT_PAGE)' is protected and cannot be deleted", code: "DEFAULT_PAGE_PROTECTED")
+    }
     let index = storage.loadIndex()
     guard index.pages.contains(where: { $0.id == id }) else {
         fail("page \(id) not found")
@@ -1058,6 +1298,8 @@ func cmdDeletePage(_ args: ParsedArgs) -> Never {
     do {
         try storage.deletePage(id: id)
         success(["deleted": id, "movedToTrash": true])
+    } catch PageError.defaultPageProtected {
+        fail("the default page '\(DEFAULT_PAGE)' is protected and cannot be deleted", code: "DEFAULT_PAGE_PROTECTED")
     } catch let e as StorageLockError {
         fail(e.errorDescription ?? "storage is busy (lock timeout)")
     } catch let e as PageError {
@@ -1083,6 +1325,10 @@ if parsed.command != "help", parsed.command != "version",
 // dispatch, so `--lable`/`--pagesize` etc. surface a clear error instead of being
 // silently ignored.
 validateFlags(parsed)
+
+// F9 (契约7 附): validate argument combinations (mutex flags, --limit) after the
+// unknown-flag check so error messages are accurate.
+validateArgCombinations(parsed)
 
 // v2.9.16 (#6): global `--force` bypasses the cross-process lock for this run.
 // Only allowed on mutating commands (validated above). A one-time warning is
