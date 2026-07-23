@@ -615,7 +615,8 @@ final class SlotStoreObservable: ObservableObject {
     // completely unchanged.
 
     var isAutoAdvanceEnabled: Bool {
-        UserDefaults.standard.bool(forKey: UserPreferenceKeys.autoAdvanceAfterPaste)
+        // v2.10.0: 「自动切换」统一由拨杆3（AutoModeState.autoAdvanceEnabled）控制。
+        AutoModeState.shared.autoAdvanceEnabled
     }
 
     /// Index of the last non-empty slot in the given group, or nil if the group is empty.
@@ -742,7 +743,8 @@ final class SlotStoreObservable: ObservableObject {
         }
     }
 
-    func maybeAutoAdvance(afterPasting slot: Int, in specialSlotId: String) {
+    func maybeAutoAdvance(afterPasting slot: Int, in specialSlotId: String, suppress: Bool = false) {
+        guard !suppress else { return } // v2.10.0: 自动粘贴自行管理读游标推进，跳过此处组切换
         guard isAutoAdvanceEnabled else { return }
 
         // Slots without attachments switch groups immediately. Slots WITH
@@ -754,9 +756,129 @@ final class SlotStoreObservable: ObservableObject {
 
     /// v2.9.37: called from the attachment paste completion handler once all
     /// attachments have finished pasting — it is now safe to advance.
-    func completeAutoAdvanceAfterAttachments(afterPasting slot: Int, in specialSlotId: String) {
+    func completeAutoAdvanceAfterAttachments(afterPasting slot: Int, in specialSlotId: String, suppress: Bool = false) {
+        guard !suppress else { return } // v2.10.0: 自动粘贴自行管理读游标推进
         guard isAutoAdvanceEnabled else { return }
         performAutoAdvance(afterPasting: slot, in: specialSlotId)
+    }
+
+    // MARK: - v2.10.0 Auto Store / Auto Paste（拨杆状态分流）
+
+    /// 校验持久化游标：若其所属组已不存在或槽位越界，返回 nil（视为从头开始）。
+    private func validatedCursor(_ cursor: SpecialSlotCursor?) -> SlotAddress? {
+        guard let cursor else { return nil }
+        guard specialSlots.contains(where: { $0.id == cursor.groupId }) else { return nil }
+        guard cursor.slot >= 1, cursor.slot <= config.slots else { return nil }
+        return SlotAddress(groupId: cursor.groupId, slot: cursor.slot)
+    }
+
+    /// 拨杆1「自动存储」入口（Opt+1 且 autoStoreEnabled）：
+    /// 读取系统剪贴板当前内容 → 找下一个空槽（跨组/跨页由拨杆3决定）→ 写入 → 推进写游标。
+    func autoStoreFromHotkey(_ slot: Int) {
+        cancelPendingClipboardRestore()
+
+        let content = clipboard.capture()
+        guard !content.isEmpty else {
+            showFloatingNotice(FloatingNotice(
+                title: "剪贴板为空",
+                subtitle: "没有可自动存储的内容",
+                iconName: "doc.on.clipboard",
+                kind: .warning
+            ))
+            return
+        }
+
+        let manager = AutoStoreManager(
+            pages: pages,
+            groups: specialSlots,
+            slotCount: config.slots,
+            isEmpty: { [weak self] addr in
+                guard let self = self else { return false }
+                return self.specialStorage.get(addr.slot, in: addr.groupId).isEmpty
+            }
+        )
+
+        let cursor = validatedCursor(specialStorage.autoStoreCursor())
+        let autoAdvance = AutoModeState.shared.autoAdvanceEnabled
+
+        guard let target = manager.findNextEmptySlot(
+            from: cursor,
+            startGroupId: currentSpecialSlotId,
+            autoAdvance: autoAdvance
+        ) else {
+            showFloatingNotice(FloatingNotice(
+                title: "所有槽位已满",
+                subtitle: autoAdvance ? "全部页面 / 组均无空槽" : "当前组已无空槽",
+                iconName: "exclamationmark.triangle.fill",
+                kind: .warning
+            ))
+            return
+        }
+
+        suppressWatcher() // self-write
+        _ = specialStorage.set(target.slot, content: content, in: target.groupId)
+        // 推进写游标（磁盘持久化，跨进程写锁内完成）。
+        try? specialStorage.setAutoStoreCursor(SpecialSlotCursor(groupId: target.groupId, slot: target.slot))
+
+        // 让 UI 跟随落点：写到别的组则切过去，否则刷新当前组。
+        if target.groupId != currentSpecialSlotId {
+            switchSpecialSlot(id: target.groupId)
+        } else {
+            reloadAll()
+        }
+
+        let groupName = specialSlots.first(where: { $0.id == target.groupId })?.name ?? ""
+        showFloatingNotice(FloatingNotice(
+            title: "已自动存储 → 槽位 \(target.slot)",
+            subtitle: groupName.isEmpty ? "" : "组「\(groupName)」",
+            iconName: "tray.and.arrow.down.fill",
+            kind: .success
+        ))
+    }
+
+    /// 拨杆2「自动粘贴」入口（Cmd+1 且 autoPasteEnabled）：
+    /// 从读游标位置找下一个非空槽 → 放入系统剪贴板 → 发出 Cmd+V → 推进读游标（跨组/跨页由拨杆3决定）。
+    func autoPasteFromHotkey(_ slot: Int) {
+        let manager = AutoPasteManager(
+            pages: pages,
+            groups: specialSlots,
+            slotCount: config.slots,
+            isNonEmpty: { [weak self] addr in
+                guard let self = self else { return false }
+                return !self.specialStorage.get(addr.slot, in: addr.groupId).isEmpty
+            }
+        )
+
+        let cursor = validatedCursor(specialStorage.autoPasteCursor())
+        let autoAdvance = AutoModeState.shared.autoAdvanceEnabled
+
+        guard let target = manager.findNextNonEmptySlot(
+            from: cursor,
+            startGroupId: currentSpecialSlotId,
+            autoAdvance: autoAdvance
+        ) else {
+            // 全部粘贴完毕：重置读游标，下次按下从头开始（第一个非空槽）。
+            try? specialStorage.setAutoPasteCursor(nil)
+            showFloatingNotice(FloatingNotice(
+                title: "所有槽位已粘贴完毕",
+                subtitle: "读游标已重置，可再次从头开始",
+                iconName: "checkmark.circle.fill",
+                kind: .success
+            ))
+            return
+        }
+
+        // 切到目标组，保证 pasteSlot 的 stale-guard（currentSpecialSlotId == activeId）通过。
+        if currentSpecialSlotId != target.groupId {
+            switchSpecialSlot(id: target.groupId)
+        }
+
+        // 推进读游标（磁盘持久化）。粘贴是异步的，先记录落点即可。
+        try? specialStorage.setAutoPasteCursor(SpecialSlotCursor(groupId: target.groupId, slot: target.slot))
+
+        // 复用现有粘贴管线（含附件链 / 剪贴板恢复 / Cmd+V），
+        // 但抑制其「粘贴后组自动切换」——跨组/跨页推进已由读游标负责。
+        pasteSlot(target.slot, suppressAutoAdvance: true)
     }
 
     private func performAutoAdvance(afterPasting slot: Int, in specialSlotId: String) {
@@ -1568,7 +1690,7 @@ final class SlotStoreObservable: ObservableObject {
 
     // MARK: - Simple Paste (hotkeys, menu)
 
-    func pasteSlot(_ slot: Int) {
+    func pasteSlot(_ slot: Int, suppressAutoAdvance: Bool = false) {
         let activeId = activeHotkeySpecialSlotId
 
         NSLog("[ClipSlots] pasteSlot instanceID=\(instanceID) slot=\(slot) activeSpecialSlotId=\(activeId) loadedSpecialSlotId=\(loadedSpecialSlotId ?? "nil")")
@@ -1601,7 +1723,7 @@ final class SlotStoreObservable: ObservableObject {
                     iconName: "paperclip.circle.fill",
                     kind: .success
                 ))
-                self?.completeAutoAdvanceAfterAttachments(afterPasting: slot, in: activeId) // v2.9.37: attachments done → safe to advance
+                self?.completeAutoAdvanceAfterAttachments(afterPasting: slot, in: activeId, suppress: suppressAutoAdvance) // v2.9.37: attachments done → safe to advance
             }
             return
         }
@@ -1648,7 +1770,7 @@ final class SlotStoreObservable: ObservableObject {
             // above and aborting the paste as "stale". Text-only slots therefore
             // jumped without ever pasting; attachment slots were unaffected because
             // they advance from the sequential-paste completion callback instead.
-            self.maybeAutoAdvance(afterPasting: slot, in: activeId) // v2.9.31 (moved post-keystroke in v2.9.56)
+            self.maybeAutoAdvance(afterPasting: slot, in: activeId, suppress: suppressAutoAdvance) // v2.9.31 (moved post-keystroke in v2.9.56)
 
             let restoreWorkItem = DispatchWorkItem { [weak self] in
                 guard let self = self else { return }

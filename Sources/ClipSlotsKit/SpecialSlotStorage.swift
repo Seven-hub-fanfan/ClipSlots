@@ -418,6 +418,34 @@ public final class SpecialSlotStorage {
         try data.write(to: indexURL, options: .atomic)
     }
 
+    // MARK: - Auto Mode Cursors (v2.10.0)
+    // 写/读游标持久化到磁盘 index.json（不用 UserDefaults），所有写入走跨进程写锁，
+    // 与其它 index 变更串行化，避免 GUI/CLI 并发覆盖。
+
+    public func autoStoreCursor() -> SpecialSlotCursor? {
+        loadIndex().autoStoreCursor
+    }
+
+    public func autoPasteCursor() -> SpecialSlotCursor? {
+        loadIndex().autoPasteCursor
+    }
+
+    public func setAutoStoreCursor(_ cursor: SpecialSlotCursor?) throws {
+        try storageLock.withLock {
+            var index = loadIndex()
+            index.autoStoreCursor = cursor
+            try saveIndex(index)
+        }
+    }
+
+    public func setAutoPasteCursor(_ cursor: SpecialSlotCursor?) throws {
+        try storageLock.withLock {
+            var index = loadIndex()
+            index.autoPasteCursor = cursor
+            try saveIndex(index)
+        }
+    }
+
     // MARK: - Current Special Slot
 
     public func currentSpecialSlot() throws -> SpecialSlot {

@@ -91,6 +91,22 @@ public enum SpecialSlotSourceType: String, Codable {
 
 // MARK: - Special Slot Index
 
+// MARK: - Auto Mode Cursor (v2.10.0)
+
+/// 一个磁盘持久化的游标，指向「某槽位组内的某个槽位」。
+/// v2.10.0：自动存储（写游标）/ 自动粘贴（读游标）用它记录上次落点，
+/// App 重启后仍能从原位置继续推进。槽位在本项目里由 (groupId, slot 1..10)
+/// 唯一确定，因此游标存这两者，而不是一个 UUID。
+public struct SpecialSlotCursor: Codable, Equatable {
+    public var groupId: String   // 所属槽位组 id
+    public var slot: Int         // 槽位序号（1...slotCount）
+
+    public init(groupId: String, slot: Int) {
+        self.groupId = groupId
+        self.slot = slot
+    }
+}
+
 public struct SpecialSlotIndex: Codable {
     public var schemaVersion: Int = 1              // v2.4: 数据格式版本，2 = Page/Group/Slot 三级结构。默认 1 确保旧数据触发迁移
     public var version: Int = 4                    // 内部版本号
@@ -101,10 +117,15 @@ public struct SpecialSlotIndex: Codable {
     public var activeHotkeySpecialSlotId: String?
     public var specialSlots: [SpecialSlot]
     public var settings: SpecialSlotSettings
+    // v2.10.0: 自动存储 / 自动粘贴 游标，持久化到磁盘（不用 UserDefaults），
+    // 保证 App 重启后仍从上次落点继续。nil 表示「从头开始」。
+    public var autoStoreCursor: SpecialSlotCursor? = nil   // 写游标
+    public var autoPasteCursor: SpecialSlotCursor? = nil   // 读游标
 
     public init(schemaVersion: Int = 1, version: Int = 4, currentPageId: String = "default_page",
          pages: [SlotPage] = [], currentSpecialSlotId: String, selectedSpecialSlotId: String? = nil,
-         activeHotkeySpecialSlotId: String? = nil, specialSlots: [SpecialSlot], settings: SpecialSlotSettings) {
+         activeHotkeySpecialSlotId: String? = nil, specialSlots: [SpecialSlot], settings: SpecialSlotSettings,
+         autoStoreCursor: SpecialSlotCursor? = nil, autoPasteCursor: SpecialSlotCursor? = nil) {
         self.schemaVersion = schemaVersion
         self.version = version
         self.currentPageId = currentPageId
@@ -114,6 +135,8 @@ public struct SpecialSlotIndex: Codable {
         self.activeHotkeySpecialSlotId = activeHotkeySpecialSlotId
         self.specialSlots = specialSlots
         self.settings = settings
+        self.autoStoreCursor = autoStoreCursor
+        self.autoPasteCursor = autoPasteCursor
     }
 
     // Custom decoder for backward compatibility with pre-v2.4 JSON
@@ -128,6 +151,9 @@ public struct SpecialSlotIndex: Codable {
         activeHotkeySpecialSlotId = try c.decodeIfPresent(String.self, forKey: .activeHotkeySpecialSlotId)
         specialSlots = try c.decode([SpecialSlot].self, forKey: .specialSlots)
         settings = try c.decode(SpecialSlotSettings.self, forKey: .settings)
+        // v2.10.0: 旧数据没有游标字段，decodeIfPresent 回退到 nil（从头开始）
+        autoStoreCursor = try c.decodeIfPresent(SpecialSlotCursor.self, forKey: .autoStoreCursor)
+        autoPasteCursor = try c.decodeIfPresent(SpecialSlotCursor.self, forKey: .autoPasteCursor)
     }
 }
 

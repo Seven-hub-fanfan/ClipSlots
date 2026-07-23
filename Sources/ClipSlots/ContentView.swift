@@ -3,6 +3,8 @@ import ClipSlotsKit
 
 struct ContentView: View {
     @ObservedObject var store: SlotStoreObservable
+    // v2.10.0: 三档金属拨杆共享状态（自动存储 / 自动粘贴 / 自动切换）。
+    @ObservedObject private var autoMode = AutoModeState.shared
     @State private var showingSettings = false
     @State private var showingSpecialSlotManagement = false
     @State private var showingHotkeyTemplatePopover = false
@@ -500,11 +502,31 @@ struct ContentView: View {
             .menuStyle(.borderlessButton)
             .fixedSize()
 
+            // v2.10.0: 三档金属拨杆（自动存储 / 自动粘贴 / 自动切换）。
+            leverCluster
+
             Spacer()
 
             toolbarActions
         }
         .frame(minHeight: 36, alignment: .center)
+    }
+
+    // v2.10.0: 三个金属拨杆并排，与现有操作按钮用分隔线区分。
+    private var leverCluster: some View {
+        HStack(alignment: .center, spacing: 10) {
+            Divider().frame(height: 26)
+
+            ToggleLeverView(isOn: $autoMode.autoStoreEnabled, label: "自动存储",
+                            help: "开启后按 Opt+1 会把剪贴板写入下一个空槽")
+            ToggleLeverView(isOn: $autoMode.autoPasteEnabled, label: "自动粘贴",
+                            help: "开启后按 Cmd+1 会从读游标取下一个非空槽粘贴")
+            ToggleLeverView(isOn: $autoMode.autoAdvanceEnabled, label: "自动切换",
+                            help: "开启后自动存储/粘贴可跨组、跨页推进；关闭则只在当前组内循环")
+
+            Divider().frame(height: 26)
+        }
+        .fixedSize()
     }
 
     // v2.7.39: keep the top-right action group vertically centered and easier to hit.

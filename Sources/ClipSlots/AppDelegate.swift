@@ -62,12 +62,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             onPaste: { [weak store] slot in
                 guard let store = store else { return }
                 NSLog("[ClipSlots] onPaste slot=\(slot) storeInstanceID=\(store.instanceID) activeHotkeySpecialSlotId=\(store.activeHotkeySpecialSlotId)")
-                store.pasteSlot(slot)
+                // v2.10.0: 方案A —— 拨杆状态分流。拨杆2「自动粘贴」开 → 走游标自动粘贴；关 → 原有单槽粘贴。
+                if AutoModeState.shared.autoPasteEnabled {
+                    store.autoPasteFromHotkey(slot)
+                } else {
+                    store.pasteSlot(slot)
+                }
             },
             onSave: { [weak store] slot in
                 guard let store = store else { return }
                 NSLog("[ClipSlots] onSave slot=\(slot) storeInstanceID=\(store.instanceID) activeHotkeySpecialSlotId=\(store.activeHotkeySpecialSlotId)")
-                store.captureSelectionAndSaveToSlot(slot)
+                // v2.10.0: 方案A —— 拨杆状态分流。拨杆1「自动存储」开 → 走空槽自动存储；关 → 原有单槽保存。
+                if AutoModeState.shared.autoStoreEnabled {
+                    store.autoStoreFromHotkey(slot)
+                } else {
+                    store.captureSelectionAndSaveToSlot(slot)
+                }
             },
             onRadial: { [weak self] in
                 self?.showRadialMenu()

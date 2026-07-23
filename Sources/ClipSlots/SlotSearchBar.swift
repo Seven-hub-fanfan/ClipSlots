@@ -9,7 +9,8 @@ struct SlotSearchBar: View {
     @Binding var searchScope: SlotSearchScope
     @Environment(\.colorScheme) private var colorScheme
     // v2.9.33: "自动切换" toggle moved here (filter row, rightmost) from the top-right toolbar.
-    @AppStorage(UserPreferenceKeys.autoAdvanceAfterPaste) private var autoAdvanceAfterPaste = false
+    // v2.10.0: 统一由 AutoModeState（拨杆3）驱动，与 toolbar 金属拨杆共享同一份内存状态。
+    @ObservedObject private var autoMode = AutoModeState.shared
 
     var body: some View {
         // v2.9.18: 搜索行与筛选行的散落 spacing 统一收敛到 AppTheme.spacingSmall。
@@ -80,11 +81,11 @@ struct SlotSearchBar: View {
     private var autoAdvanceToggle: some View {
         Button {
             withAnimation(.easeInOut(duration: 0.18)) {
-                autoAdvanceAfterPaste.toggle()
+                autoMode.autoAdvanceEnabled.toggle()
             }
         } label: {
             HStack(spacing: AppTheme.spacingTight) {
-                Image(systemName: autoAdvanceAfterPaste
+                Image(systemName: autoMode.autoAdvanceEnabled
                       ? "arrow.forward.circle.fill"
                       : "arrow.forward.circle")
                     .font(.system(size: 10, weight: .semibold))
@@ -95,18 +96,18 @@ struct SlotSearchBar: View {
             .padding(.vertical, 5)
             .background(
                 Capsule()
-                    .fill(autoAdvanceAfterPaste
+                    .fill(autoMode.autoAdvanceEnabled
                           ? Color.accentColor.opacity(0.18)
                           : AppTheme.filterChipBackground(colorScheme))
             )
             .overlay(
                 Capsule()
-                    .stroke(autoAdvanceAfterPaste
+                    .stroke(autoMode.autoAdvanceEnabled
                             ? Color.accentColor.opacity(0.55)
                             : Color.clear,
                             lineWidth: 1)
             )
-            .foregroundColor(autoAdvanceAfterPaste
+            .foregroundColor(autoMode.autoAdvanceEnabled
                              ? Color.accentColor
                              : AppTheme.filterChipText(colorScheme))
         }
