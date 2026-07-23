@@ -12,7 +12,7 @@ import ClipSlotsKit
 //   success: {"ok": true, ...}
 //   error:   {"ok": false, "error": "message"}  (exit code 1)
 
-let CLI_VERSION = "2.9.57"
+let CLI_VERSION = "2.9.58"
 let DEFAULT_GROUP = "default"
 let DEFAULT_PAGE = "default_page"
 
@@ -383,7 +383,7 @@ let COMMANDS: [[String: Any]] = [
     ["name": "list", "description": "列出槽位摘要。指定 --group/--group-name 时列出该组 1..N 号槽位；只给 --page/--page-name 而不给组时，列出该页面下所有组各自的槽位并附 groupCount（页面无组则 groupCount=0，不再回落全局 default 组）。同时给页面和组时，组匹配被约束在该页面内。支持分页：传 --page-size 后按页返回并附带 pagination 元信息。", "flags": ["--group <id|name> (默认 default;可传 id 或组名)", "--group-name <name> (按组名精确匹配,优先于 --group)", "--page <id> (可选,约束 group 匹配到该页面;单独使用时列出该页所有组)", "--page-name <name> (按页面名精确匹配;找不到会报错,与 --page 互斥;单独使用时列出该页所有组)", "--page-size <N> (可选,每页槽位数,>0 时启用分页)", "--page-num <N> (可选,第几页,从 1 开始,默认 1,需配合 --page-size)"]],
     ["name": "read", "description": "读取单个槽位的完整内容（纯文本、HTML源、类型、附件数等）。", "flags": ["<slot> (位置参数,1..N)", "--group <id|name> (默认 default;可传 id 或组名)", "--group-name <name> (按组名精确匹配)", "--page <id> (可选,约束 --group/--group-name 匹配到该页面)", "--page-name <name> (按页面名精确匹配;找不到会报错,与 --page 互斥;约束 group 匹配范围)"]],
     ["name": "write", "description": "向槽位写入纯文本内容（保留已有附件），可选设置标签。成功返回里含 preview 字段(前100字符)，无需再 read 确认。支持 --batch 从 stdin 传入 JSON 数组一次写多条。", "flags": ["<slot> (位置参数,1..N;--batch 时省略)", "--text <string> (必填, 传 - 表示从 stdin 读取;--batch 时省略)", "--batch (从 stdin 读取 JSON 数组批量写入,见下)", "--group <id|name> (默认 default;可传 id 或组名)", "--group-name <name> (按组名精确匹配)", "--page <id> (可选,约束 --group/--group-name 匹配到该页面,防止写到同名他页组)", "--page-name <name> (按页面名精确匹配;找不到会报错,与 --page 互斥;约束 group 匹配范围)", "--label <string> (可选)", "--if-empty (仅写入空槽,非空返回 SLOT_NOT_EMPTY)", "--overwrite-text (明确覆盖文本,保留附件与标签)", "--stop-on-error (批量遇错停止,默认 false)", "--force (跳过跨进程锁,风险自负)"]],
-    ["name": "search", "description": "在槽位预览/文本/标签中做大小写不敏感子串搜索。", "flags": ["<query> (位置参数)", "--group <id|name> (默认 default;可传 id 或组名)", "--group-name <name> (按组名精确匹配)", "--all-groups (在所有槽位组内搜索)", "--limit <N> (默认 50)"]],
+    ["name": "search", "description": "在槽位预览/文本/标签/附件名中做大小写不敏感子串搜索。", "flags": ["<query> (位置参数)", "--group <id|name> (默认 default;可传 id 或组名)", "--group-name <name> (按组名精确匹配)", "--page <uuid> / --page-name <name> (限定页面;仅传页面不传组则搜该页所有组)", "--all-groups (在所有槽位组内搜索)", "--limit <N> (默认 50)"]],
     ["name": "paste", "description": "把某槽位的内容加载到系统剪贴板(NSPasteboard)，不模拟按键。", "flags": ["<slot> (位置参数,1..N)", "--group <id|name> (默认 default;可传 id 或组名)", "--group-name <name> (按组名精确匹配)", "--page <id> (可选,约束 --group/--group-name 匹配到该页面)", "--page-name <name> (按页面名精确匹配;找不到会报错,与 --page 互斥;约束 group 匹配范围)"]],
     ["name": "clear", "description": "清空某个槽位（内容、标签、附件全部移除）。", "flags": ["<slot> (位置参数,1..N)", "--group <id|name> (默认 default;可传 id 或组名)", "--group-name <name> (按组名精确匹配)", "--page <id> (可选,约束 --group/--group-name 匹配到该页面)", "--page-name <name> (按页面名精确匹配;找不到会报错,与 --page 互斥;约束 group 匹配范围)", "--force (跳过跨进程锁,风险自负)"]],
     ["name": "create-group", "description": "在指定页面新建一个槽位组，返回其 id。页面已满(10组)会返回错误，此时应先 create-page。v2.9.4: 同页面内不允许重名(会返回错误)，冲突时请改名或加 -2 后缀。", "flags": ["<name> (位置参数,组名)", "--page <id> (可选,默认当前页面)", "--page-name <name> (按页面名精确匹配指定目标页;找不到会报错,与 --page 互斥)"]],
@@ -407,7 +407,7 @@ let COMMAND_ALLOWED_FLAGS: [String: Set<String>] = [
     "list": ["group", "group-name", "page", "page-name", "page-size", "page-num"],
     "read": ["group", "group-name", "page", "page-name", "slot"],
     "write": ["group", "group-name", "page", "page-name", "text", "label", "batch", "force", "if-empty", "overwrite-text", "stop-on-error", "slot"],
-    "search": ["group", "group-name", "all-groups", "limit"],
+    "search": ["group", "group-name", "all-groups", "limit", "page", "page-name"],
     "paste": ["group", "group-name", "page", "page-name", "slot"],
     "clear": ["group", "group-name", "page", "page-name", "force", "slot"],
     "create-group": ["page", "page-name", "force"],
@@ -667,6 +667,39 @@ func resolveGroupLiteral(_ raw: String, inPage pageId: String? = nil) -> String 
     return raw
 }
 
+// v2.9.58 (P0-2): strict, throwing group resolution for the BATCH path. Mirrors the
+// single-write resolveGroup (F1) semantics so batch and single write behave identically:
+//   • unknown group name/id                    → GROUP_NOT_FOUND
+//   • same name on multiple pages (no page ctx) → AMBIGUOUS_GROUP (with candidates)
+// It replaces resolveGroupLiteral in the batch path, which silently passed an unknown
+// literal through when no page was constrained — writing to a phantom/wrong group.
+enum GroupResolveFailure: Error {
+    case notFound(raw: String, pageLabel: String?)
+    case ambiguous(name: String, candidates: [[String: Any]])
+}
+
+func resolveGroupLiteralStrict(_ raw: String, inPage pageId: String?) throws -> String {
+    let index = storage.loadIndex()
+    let scope = pageId.map { pid in index.specialSlots.filter { $0.pageId == pid } }
+                      ?? index.specialSlots
+    // id match first (backward compatible with bare `default` etc.)
+    if scope.contains(where: { $0.id == raw }) { return raw }
+    // name match with ambiguity detection (F1)
+    let nameMatches = scope.filter { $0.name == raw }
+    if nameMatches.count > 1 {
+        let pageNames = Dictionary(uniqueKeysWithValues: index.pages.map { ($0.id, $0.name) })
+        let candidates: [[String: Any]] = nameMatches.map { g in
+            ["group": g.id, "page": g.pageId, "pageName": jsonValue(pageNames[g.pageId])]
+        }
+        throw GroupResolveFailure.ambiguous(name: raw, candidates: candidates)
+    }
+    if let g = nameMatches.first { return g.id }
+    let pageLabel: String? = pageId.map { pid in
+        index.pages.first(where: { $0.id == pid })?.name ?? pid
+    }
+    throw GroupResolveFailure.notFound(raw: raw, pageLabel: pageLabel)
+}
+
 // F3 (契约2): thrown when --if-empty is set but the target slot is not empty.
 struct SlotNotEmpty: Error {}
 
@@ -684,11 +717,11 @@ func performTextWrite(slot n: Int, text: String, group: String, label: String?,
     let wrote = try StorageLock.shared.withLock { () -> Bool in
         let existing = storage.get(n, in: group)
         let existingLabel = storage.getLabel(n, in: group) ?? existing.label
-        // F3/契约2: --if-empty rejects if the slot is not empty (body OR attachments OR label).
+        // v2.9.58 (P0-1): --if-empty emptiness口径统一为「主体为空 AND 附件列表为空」，
+        // 与 list/read 返回的 `empty` 字段（SlotContent.isEmpty）完全对齐。label 不再纳入
+        // 冲突判定——此前把 label 计入会导致 empty:true 的槽被 --if-empty 拒绝写入，自相矛盾。
         if ifEmpty {
-            let labelEmpty = (existingLabel ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            let empty = existing.isEmpty && labelEmpty
-            if !empty { throw SlotNotEmpty() }
+            if !existing.isEmpty { throw SlotNotEmpty() }
         }
         let data = text.data(using: .utf8) ?? Data()
         let item = PasteboardItem(type: "public.utf8-plain-text", data: data)
@@ -870,7 +903,30 @@ func cmdWriteBatch(_ args: ParsedArgs) -> Never {
             emitPreflightFailure(offending: [idx], code: "INVALID_ARGUMENT_COMBINATION",
                                  message: "item \(idx): if_empty and overwrite_text are mutually exclusive")
         }
-        let group = (entry["group"] as? String).map { resolveGroupLiteral($0, inPage: requestedPage) } ?? commandGroup
+        // v2.9.58 (P0-2): per-item group resolution now uses the same F1 logic as the
+        // single-write path. Unknown group → GROUP_NOT_FOUND; cross-page same name →
+        // AMBIGUOUS_GROUP. Any failure fails the WHOLE batch at preflight (zero writes,
+        // preflight_passed:false), matching single-write behaviour instead of silently
+        // writing to a phantom/wrong group.
+        let group: String
+        if let rawGroup = entry["group"] as? String {
+            do {
+                group = try resolveGroupLiteralStrict(rawGroup, inPage: requestedPage)
+            } catch let GroupResolveFailure.ambiguous(name, candidates) {
+                emitPreflightFailure(offending: [idx], code: "AMBIGUOUS_GROUP",
+                                     message: "item \(idx): group name '\(name)' is ambiguous across \(candidates.count) groups; pass 'page'/'page_name' or a group id to disambiguate",
+                                     details: [idx: ["candidates": candidates]])
+            } catch let GroupResolveFailure.notFound(name, pageLabel) {
+                let msg = pageLabel.map { "item \(idx): group '\(name)' not found in page '\($0)'" }
+                    ?? "item \(idx): group '\(name)' not found"
+                emitPreflightFailure(offending: [idx], code: "GROUP_NOT_FOUND", message: msg)
+            } catch {
+                emitPreflightFailure(offending: [idx], code: "ERROR",
+                                     message: "item \(idx): failed to resolve group: \(error)")
+            }
+        } else {
+            group = commandGroup
+        }
         let label = (entry["label"] as? String) ?? defaultLabel
         parsed.append(BatchItem(index: idx, slot: n, text: text, group: group,
                                 label: label, ifEmpty: itemIfEmpty, overwriteText: itemOverwrite))
@@ -895,12 +951,12 @@ func cmdWriteBatch(_ args: ParsedArgs) -> Never {
     }
 
     // ---- PREFLIGHT phase 3: static conflict for if_empty items ----
+    // v2.9.58 (P0-1): emptiness口径统一为「主体为空 AND 附件列表为空」(SlotContent.isEmpty)，
+    // 与 list/read 的 `empty` 字段完全对齐；label 不再纳入 --if-empty 冲突判定。
     var conflictIdx: Set<Int> = []
     for item in parsed where item.ifEmpty {
         let existing = storage.get(item.slot, in: item.group)
-        let existingLabel = storage.getLabel(item.slot, in: item.group) ?? existing.label
-        let labelEmpty = (existingLabel ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-        if !(existing.isEmpty && labelEmpty) { conflictIdx.insert(item.index) }
+        if !existing.isEmpty { conflictIdx.insert(item.index) }
     }
     if !conflictIdx.isEmpty {
         emitPreflightFailure(offending: conflictIdx, code: "SLOT_NOT_EMPTY",
@@ -977,17 +1033,27 @@ func cmdSearch(_ args: ParsedArgs) -> Never {
     let index = storage.loadIndex()
     let pageNames = Dictionary(uniqueKeysWithValues: index.pages.map { ($0.id, $0.name) })
 
+    // v2.9.58 (P1): search now supports --page/--page-name and uses the same
+    // page-scoped group resolution as list/read/write, so `search --group <UUID>`
+    // (and cross-page same-named groups) filter correctly.
+    let requestedPage = resolvePageFlag(args)
+    let hasGroupFlag = args.flag("group") != nil || args.flag("group-name") != nil
+
     let targetGroups: [SpecialSlot]
     if args.hasFlag("all-groups") {
         targetGroups = index.specialSlots
+    } else if let pid = requestedPage, !hasGroupFlag {
+        // Page given but no group flag → search every group on that page (parity with
+        // `list --page`), instead of falling back to the global default group.
+        targetGroups = index.specialSlots.filter { $0.pageId == pid }
     } else {
-        let group = resolveGroup(args)
+        let group = resolveGroup(args, inPage: requestedPage)
         if let g = index.specialSlots.first(where: { $0.id == group }) {
             targetGroups = [g]
         } else {
             // Group not present in index but may still have on-disk data.
             targetGroups = [SpecialSlot(id: group, name: group, sourceType: .manual,
-                                        pageId: DEFAULT_PAGE, createdAt: Date(), updatedAt: Date())]
+                                        pageId: requestedPage ?? DEFAULT_PAGE, createdAt: Date(), updatedAt: Date())]
         }
     }
 
@@ -1191,8 +1257,13 @@ func cmdWriteAttachment(_ args: ParsedArgs) -> Never {
             ? URL(fileURLWithPath: expanded)
             : URL(fileURLWithPath: cwd).appendingPathComponent(expanded)
         var isDir: ObjCBool = false
-        guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir), !isDir.boolValue else {
-            fail("file not found or is a directory: \(url.path)")
+        // v2.9.58 (P2): return a specific FILE_NOT_FOUND code (was the generic ERROR)
+        // when the attachment file is missing or is a directory, so agents can branch.
+        guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir) else {
+            fail("file not found: \(url.path)", code: "FILE_NOT_FOUND")
+        }
+        guard !isDir.boolValue else {
+            fail("path is a directory, not a file: \(url.path)", code: "FILE_NOT_FOUND")
         }
         let ext = url.pathExtension.lowercased()
         let type: SlotContent.AttachmentType = IMAGE_EXTS.contains(ext) ? .image : .file
