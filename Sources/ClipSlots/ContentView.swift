@@ -513,20 +513,80 @@ struct ContentView: View {
     }
 
     // v2.10.0: 三个金属拨杆并排，与现有操作按钮用分隔线区分。
+    // v2.10.1: 指示灯颜色统一（存储绿 / 粘贴蓝 / 切换黄），并为存储/粘贴拨杆加「回退 / 重置」游标按钮。
     private var leverCluster: some View {
         HStack(alignment: .center, spacing: 10) {
             Divider().frame(height: 26)
 
-            ToggleLeverView(isOn: $autoMode.autoStoreEnabled, label: "自动存储",
-                            help: "开启后按 Opt+1 会把剪贴板写入下一个空槽")
-            ToggleLeverView(isOn: $autoMode.autoPasteEnabled, label: "自动粘贴",
-                            help: "开启后按 Cmd+1 会从读游标取下一个非空槽粘贴")
+            leverWithCursorControls(
+                lever: ToggleLeverView(isOn: $autoMode.autoStoreEnabled, label: "自动存储",
+                                       help: "开启后按 Opt+1 会把剪贴板写入下一个空槽",
+                                       indicatorColor: .green),
+                enabled: autoMode.autoStoreEnabled,
+                tint: .green,
+                onBack: { store.autoStoreCursorGoBack() },
+                onReset: { store.autoStoreCursorReset() },
+                backHelp: "回退写游标：撤销最近一次自动存储的推进（回到上一个槽位）",
+                resetHelp: "重置写游标：下次 Opt+1 从第一个空槽重新开始"
+            )
+
+            leverWithCursorControls(
+                lever: ToggleLeverView(isOn: $autoMode.autoPasteEnabled, label: "自动粘贴",
+                                       help: "开启后按 Cmd+1 会从读游标取下一个非空槽粘贴",
+                                       indicatorColor: .blue),
+                enabled: autoMode.autoPasteEnabled,
+                tint: .blue,
+                onBack: { store.autoPasteCursorGoBack() },
+                onReset: { store.autoPasteCursorReset() },
+                backHelp: "回退读游标：撤销最近一次自动粘贴的推进（回到上一个槽位）",
+                resetHelp: "重置读游标：下次 Cmd+1 从第一个非空槽重新开始"
+            )
+
             ToggleLeverView(isOn: $autoMode.autoAdvanceEnabled, label: "自动切换",
-                            help: "开启后自动存储/粘贴可跨组、跨页推进；关闭则只在当前组内循环")
+                            help: "开启后自动存储/粘贴可跨组、跨页推进；关闭则只在当前组内循环",
+                            indicatorColor: .yellow)
 
             Divider().frame(height: 26)
         }
         .fixedSize()
+        .onChange(of: autoMode.autoStoreEnabled) { _ in store.recomputeAutoPreviews() }
+        .onChange(of: autoMode.autoPasteEnabled) { _ in store.recomputeAutoPreviews() }
+        .onChange(of: autoMode.autoAdvanceEnabled) { _ in store.recomputeAutoPreviews() }
+    }
+
+    // v2.10.1: 拨杆 + 下方一对「回退 / 重置」游标控制按钮（拨杆关时置灰不可点）。
+    private func leverWithCursorControls(
+        lever: ToggleLeverView,
+        enabled: Bool,
+        tint: Color,
+        onBack: @escaping () -> Void,
+        onReset: @escaping () -> Void,
+        backHelp: String,
+        resetHelp: String
+    ) -> some View {
+        VStack(spacing: 3) {
+            lever
+            HStack(spacing: 5) {
+                cursorControlButton(system: "arrow.uturn.backward", tint: tint, enabled: enabled, help: backHelp, action: onBack)
+                cursorControlButton(system: "backward.end", tint: tint, enabled: enabled, help: resetHelp, action: onReset)
+            }
+        }
+    }
+
+    private func cursorControlButton(system: String, tint: Color, enabled: Bool, help: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: system)
+                .font(.system(size: 9, weight: .semibold))
+                .foregroundColor(enabled ? tint : Color.secondary.opacity(0.4))
+                .frame(width: 18, height: 15)
+                .background(
+                    RoundedRectangle(cornerRadius: 4, style: .continuous)
+                        .fill(enabled ? tint.opacity(0.14) : Color.primary.opacity(0.04))
+                )
+        }
+        .buttonStyle(.plain)
+        .disabled(!enabled)
+        .help(help)
     }
 
     // v2.7.39: keep the top-right action group vertically centered and easier to hit.
@@ -967,9 +1027,40 @@ struct ContentView: View {
             onUpdateDrag: nil,
             onEndDrag: nil
         )
+        .overlay(alignment: .topTrailing) { cursorBadges(slot: slot) }
         .opacity(!isSearchActive || isMatched ? 1.0 : 0.22)
         .saturation(!isSearchActive || isMatched ? 1.0 : 0.35)
         .allowsHitTesting(!isSearchActive || isMatched)
+    }
+
+    // v2.10.1: 槽位格子右上角叠加游标角标——绿色 = 下一次自动存储写入点，蓝色 = 下一次自动粘贴读取点。
+    // 仅在对应拨杆开启且预览命中该槽位时显示；两者可同时出现（并排避免重叠）。
+    @ViewBuilder
+    private func cursorBadges(slot: Int) -> some View {
+        let addr = SlotAddress(groupId: store.currentSpecialSlotId, slot: slot)
+        let showWrite = autoMode.autoStoreEnabled && store.autoStorePreview == addr
+        let showRead = autoMode.autoPasteEnabled && store.autoPastePreview == addr
+        if showWrite || showRead {
+            HStack(spacing: 3) {
+                if showWrite {
+                    cursorDot(color: .green)
+                        .help("下一次 Opt+1 自动存储会写这里")
+                }
+                if showRead {
+                    cursorDot(color: .blue)
+                        .help("下一次 Cmd+1 自动粘贴会读这里")
+                }
+            }
+            .padding(7)
+        }
+    }
+
+    private func cursorDot(color: Color) -> some View {
+        Circle()
+            .fill(color)
+            .frame(width: 10, height: 10)
+            .overlay(Circle().stroke(Color.white.opacity(0.9), lineWidth: 1.5))
+            .shadow(color: color.opacity(0.55), radius: 2)
     }
 
     private var filledSlotCount: Int {

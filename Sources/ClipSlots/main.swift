@@ -163,6 +163,12 @@ final class SlotStoreObservable: ObservableObject {
     @Published var activeHotkeySpecialSlotId: String = "default"  // Cmd+number hotkey layer
     @Published var activeHotkeySpecialSlot: SpecialSlot?
     @Published var specialSlotSettings: SpecialSlotSettings = .default
+    // v2.10.1: 游标位置可视化预览。指向「下一次触发会落到的槽位」（而非上次落点）：
+    // - autoStorePreview：下一次 Opt+1 自动存储会写入的空槽（绿色写游标角标）
+    // - autoPastePreview：下一次 Cmd+1 自动粘贴会读取的非空槽（蓝色读游标角标）
+    // 随游标推进 / 回退 / 重置、内容变化、拨杆切换实时重算。
+    @Published var autoStorePreview: SlotAddress? = nil
+    @Published var autoPastePreview: SlotAddress? = nil
     @Published var toastMessage: String?
     @Published var floatingNotice: FloatingNotice?
     @Published var hotkeyRegistrationErrors: [String] = []
@@ -350,6 +356,7 @@ final class SlotStoreObservable: ObservableObject {
         loadSpecialSlots()
         loadSlots()
         loadConnectionMapForCurrentGroup()
+        recomputeAutoPreviews()
     }
 
     func switchSpecialSlot(id: String) {
@@ -817,8 +824,8 @@ final class SlotStoreObservable: ObservableObject {
 
         suppressWatcher() // self-write
         _ = specialStorage.set(target.slot, content: content, in: target.groupId)
-        // 推进写游标（磁盘持久化，跨进程写锁内完成）。
-        try? specialStorage.setAutoStoreCursor(SpecialSlotCursor(groupId: target.groupId, slot: target.slot))
+        // 推进写游标（磁盘持久化，跨进程写锁内完成；旧游标压入 prev 供回退）。
+        try? specialStorage.advanceAutoStoreCursor(to: SpecialSlotCursor(groupId: target.groupId, slot: target.slot))
 
         // 让 UI 跟随落点：写到别的组则切过去，否则刷新当前组。
         if target.groupId != currentSpecialSlotId {
@@ -826,6 +833,7 @@ final class SlotStoreObservable: ObservableObject {
         } else {
             reloadAll()
         }
+        recomputeAutoPreviews()
 
         let groupName = specialSlots.first(where: { $0.id == target.groupId })?.name ?? ""
         showFloatingNotice(FloatingNotice(
@@ -858,7 +866,8 @@ final class SlotStoreObservable: ObservableObject {
             autoAdvance: autoAdvance
         ) else {
             // 全部粘贴完毕：重置读游标，下次按下从头开始（第一个非空槽）。
-            try? specialStorage.setAutoPasteCursor(nil)
+            try? specialStorage.resetAutoPasteCursor()
+            recomputeAutoPreviews()
             showFloatingNotice(FloatingNotice(
                 title: "所有槽位已粘贴完毕",
                 subtitle: "读游标已重置，可再次从头开始",
@@ -873,12 +882,99 @@ final class SlotStoreObservable: ObservableObject {
             switchSpecialSlot(id: target.groupId)
         }
 
-        // 推进读游标（磁盘持久化）。粘贴是异步的，先记录落点即可。
-        try? specialStorage.setAutoPasteCursor(SpecialSlotCursor(groupId: target.groupId, slot: target.slot))
+        // 推进读游标（磁盘持久化；旧游标压入 prev 供回退）。粘贴是异步的，先记录落点即可。
+        try? specialStorage.advanceAutoPasteCursor(to: SpecialSlotCursor(groupId: target.groupId, slot: target.slot))
+        recomputeAutoPreviews()
 
         // 复用现有粘贴管线（含附件链 / 剪贴板恢复 / Cmd+V），
         // 但抑制其「粘贴后组自动切换」——跨组/跨页推进已由读游标负责。
         pasteSlot(target.slot, suppressAutoAdvance: true)
+    }
+
+    // MARK: - v2.10.1 游标回退 / 重置 / 可视化
+
+    /// 重算「下一次触发的落点」预览（写游标 = 下一个空槽；读游标 = 下一个非空槽），
+    /// 用于槽位格子上的绿色 / 蓝色角标。跟随游标推进 / 回退 / 重置、内容变化、拨杆切换调用。
+    func recomputeAutoPreviews() {
+        let autoAdvance = AutoModeState.shared.autoAdvanceEnabled
+
+        let storeManager = AutoStoreManager(
+            pages: pages,
+            groups: specialSlots,
+            slotCount: config.slots,
+            isEmpty: { [weak self] addr in
+                guard let self = self else { return false }
+                return self.specialStorage.get(addr.slot, in: addr.groupId).isEmpty
+            }
+        )
+        autoStorePreview = storeManager.findNextEmptySlot(
+            from: validatedCursor(specialStorage.autoStoreCursor()),
+            startGroupId: currentSpecialSlotId,
+            autoAdvance: autoAdvance
+        )
+
+        let pasteManager = AutoPasteManager(
+            pages: pages,
+            groups: specialSlots,
+            slotCount: config.slots,
+            isNonEmpty: { [weak self] addr in
+                guard let self = self else { return false }
+                return !self.specialStorage.get(addr.slot, in: addr.groupId).isEmpty
+            }
+        )
+        autoPastePreview = pasteManager.findNextNonEmptySlot(
+            from: validatedCursor(specialStorage.autoPasteCursor()),
+            startGroupId: currentSpecialSlotId,
+            autoAdvance: autoAdvance
+        )
+    }
+
+    /// 写游标回退一步（撤销最近一次自动存储的推进），并刷新预览角标。
+    func autoStoreCursorGoBack() {
+        _ = try? specialStorage.goBackAutoStoreCursor()
+        recomputeAutoPreviews()
+        showFloatingNotice(FloatingNotice(
+            title: "写游标已回退",
+            subtitle: "下一次 Opt+1 从上一个位置重新计算",
+            iconName: "arrow.uturn.backward",
+            kind: .info
+        ))
+    }
+
+    /// 写游标重置到初始（从第一个空槽重新开始），并刷新预览角标。
+    func autoStoreCursorReset() {
+        try? specialStorage.resetAutoStoreCursor()
+        recomputeAutoPreviews()
+        showFloatingNotice(FloatingNotice(
+            title: "写游标已重置",
+            subtitle: "下一次 Opt+1 从第一个空槽重新开始",
+            iconName: "backward.end",
+            kind: .info
+        ))
+    }
+
+    /// 读游标回退一步（撤销最近一次自动粘贴的推进），并刷新预览角标。
+    func autoPasteCursorGoBack() {
+        _ = try? specialStorage.goBackAutoPasteCursor()
+        recomputeAutoPreviews()
+        showFloatingNotice(FloatingNotice(
+            title: "读游标已回退",
+            subtitle: "下一次 Cmd+1 从上一个位置重新计算",
+            iconName: "arrow.uturn.backward",
+            kind: .info
+        ))
+    }
+
+    /// 读游标重置到初始（从第一个非空槽重新开始），并刷新预览角标。
+    func autoPasteCursorReset() {
+        try? specialStorage.resetAutoPasteCursor()
+        recomputeAutoPreviews()
+        showFloatingNotice(FloatingNotice(
+            title: "读游标已重置",
+            subtitle: "下一次 Cmd+1 从第一个非空槽重新开始",
+            iconName: "backward.end",
+            kind: .info
+        ))
     }
 
     private func performAutoAdvance(afterPasting slot: Int, in specialSlotId: String) {

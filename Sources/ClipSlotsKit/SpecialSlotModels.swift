@@ -121,11 +121,16 @@ public struct SpecialSlotIndex: Codable {
     // 保证 App 重启后仍从上次落点继续。nil 表示「从头开始」。
     public var autoStoreCursor: SpecialSlotCursor? = nil   // 写游标
     public var autoPasteCursor: SpecialSlotCursor? = nil   // 读游标
+    // v2.10.1: 回退历史（深度 1）。每次推进游标前把「推进前的游标值」记入 prev，
+    // 「回退」时把 cursor 恢复为 prev 并清空 prev（只支持撤销一步）。nil = 无可回退。
+    public var autoStoreCursorPrev: SpecialSlotCursor? = nil
+    public var autoPasteCursorPrev: SpecialSlotCursor? = nil
 
     public init(schemaVersion: Int = 1, version: Int = 4, currentPageId: String = "default_page",
          pages: [SlotPage] = [], currentSpecialSlotId: String, selectedSpecialSlotId: String? = nil,
          activeHotkeySpecialSlotId: String? = nil, specialSlots: [SpecialSlot], settings: SpecialSlotSettings,
-         autoStoreCursor: SpecialSlotCursor? = nil, autoPasteCursor: SpecialSlotCursor? = nil) {
+         autoStoreCursor: SpecialSlotCursor? = nil, autoPasteCursor: SpecialSlotCursor? = nil,
+         autoStoreCursorPrev: SpecialSlotCursor? = nil, autoPasteCursorPrev: SpecialSlotCursor? = nil) {
         self.schemaVersion = schemaVersion
         self.version = version
         self.currentPageId = currentPageId
@@ -137,6 +142,8 @@ public struct SpecialSlotIndex: Codable {
         self.settings = settings
         self.autoStoreCursor = autoStoreCursor
         self.autoPasteCursor = autoPasteCursor
+        self.autoStoreCursorPrev = autoStoreCursorPrev
+        self.autoPasteCursorPrev = autoPasteCursorPrev
     }
 
     // Custom decoder for backward compatibility with pre-v2.4 JSON
@@ -154,6 +161,9 @@ public struct SpecialSlotIndex: Codable {
         // v2.10.0: 旧数据没有游标字段，decodeIfPresent 回退到 nil（从头开始）
         autoStoreCursor = try c.decodeIfPresent(SpecialSlotCursor.self, forKey: .autoStoreCursor)
         autoPasteCursor = try c.decodeIfPresent(SpecialSlotCursor.self, forKey: .autoPasteCursor)
+        // v2.10.1: 回退历史，旧数据缺省为 nil
+        autoStoreCursorPrev = try c.decodeIfPresent(SpecialSlotCursor.self, forKey: .autoStoreCursorPrev)
+        autoPasteCursorPrev = try c.decodeIfPresent(SpecialSlotCursor.self, forKey: .autoPasteCursorPrev)
     }
 }
 

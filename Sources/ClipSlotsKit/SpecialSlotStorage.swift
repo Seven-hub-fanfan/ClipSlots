@@ -446,6 +446,79 @@ public final class SpecialSlotStorage {
         }
     }
 
+    // v2.10.1: 回退历史（深度 1）访问器。
+    public func autoStoreCursorPrev() -> SpecialSlotCursor? {
+        loadIndex().autoStoreCursorPrev
+    }
+
+    public func autoPasteCursorPrev() -> SpecialSlotCursor? {
+        loadIndex().autoPasteCursorPrev
+    }
+
+    /// 推进写游标：把当前游标压入 prev（供回退），再写入新落点。原子操作。
+    public func advanceAutoStoreCursor(to cursor: SpecialSlotCursor?) throws {
+        try storageLock.withLock {
+            var index = loadIndex()
+            index.autoStoreCursorPrev = index.autoStoreCursor
+            index.autoStoreCursor = cursor
+            try saveIndex(index)
+        }
+    }
+
+    /// 推进读游标：把当前游标压入 prev（供回退），再写入新落点。原子操作。
+    public func advanceAutoPasteCursor(to cursor: SpecialSlotCursor?) throws {
+        try storageLock.withLock {
+            var index = loadIndex()
+            index.autoPasteCursorPrev = index.autoPasteCursor
+            index.autoPasteCursor = cursor
+            try saveIndex(index)
+        }
+    }
+
+    /// 回退写游标一步：cursor ← prev，prev ← nil。返回回退后的游标值。
+    @discardableResult
+    public func goBackAutoStoreCursor() throws -> SpecialSlotCursor? {
+        try storageLock.withLock {
+            var index = loadIndex()
+            index.autoStoreCursor = index.autoStoreCursorPrev
+            index.autoStoreCursorPrev = nil
+            try saveIndex(index)
+            return index.autoStoreCursor
+        }
+    }
+
+    /// 回退读游标一步：cursor ← prev，prev ← nil。返回回退后的游标值。
+    @discardableResult
+    public func goBackAutoPasteCursor() throws -> SpecialSlotCursor? {
+        try storageLock.withLock {
+            var index = loadIndex()
+            index.autoPasteCursor = index.autoPasteCursorPrev
+            index.autoPasteCursorPrev = nil
+            try saveIndex(index)
+            return index.autoPasteCursor
+        }
+    }
+
+    /// 重置写游标：cursor 与 prev 均清零，下次从第一个有效槽位开始。
+    public func resetAutoStoreCursor() throws {
+        try storageLock.withLock {
+            var index = loadIndex()
+            index.autoStoreCursor = nil
+            index.autoStoreCursorPrev = nil
+            try saveIndex(index)
+        }
+    }
+
+    /// 重置读游标：cursor 与 prev 均清零，下次从第一个有效槽位开始。
+    public func resetAutoPasteCursor() throws {
+        try storageLock.withLock {
+            var index = loadIndex()
+            index.autoPasteCursor = nil
+            index.autoPasteCursorPrev = nil
+            try saveIndex(index)
+        }
+    }
+
     // MARK: - Current Special Slot
 
     public func currentSpecialSlot() throws -> SpecialSlot {

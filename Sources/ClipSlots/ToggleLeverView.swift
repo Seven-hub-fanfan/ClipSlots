@@ -12,6 +12,9 @@ struct ToggleLeverView: View {
     let label: String
     /// 可选副标题/提示（当前用于无障碍描述）。
     var help: String? = nil
+    /// v2.10.1: 指示灯颜色（开启时发光色）。默认绿色；toolbar 里按拨杆语义分别传入
+    /// 绿色（自动存储，与写游标角标一致）/ 蓝色（自动粘贴，与读游标角标一致）/ 黄色（自动切换）。
+    var indicatorColor: Color = .green
 
     // 尺寸常量（紧凑，适配 toolbar）。
     private let baseWidth: CGFloat = 26
@@ -43,13 +46,13 @@ struct ToggleLeverView: View {
         .accessibilityAddTraits(.isButton)
     }
 
-    // 顶部圆形指示灯：开 = 绿色发光，关 = 暗灰。
+    // 顶部圆形指示灯：开 = indicatorColor 发光，关 = 暗灰。
     private var indicatorLight: some View {
         Circle()
             .fill(
                 isOn
                     ? AnyShapeStyle(RadialGradient(
-                        colors: [Color(red: 0.55, green: 1.0, blue: 0.6), Color(red: 0.1, green: 0.78, blue: 0.28)],
+                        colors: [indicatorColor.opacity(0.8), indicatorColor],
                         center: .center, startRadius: 0, endRadius: 5))
                     : AnyShapeStyle(Color.gray.opacity(0.35))
             )
@@ -57,7 +60,7 @@ struct ToggleLeverView: View {
             .overlay(
                 Circle().stroke(Color.black.opacity(0.15), lineWidth: 0.5)
             )
-            .shadow(color: isOn ? Color.green.opacity(0.8) : .clear, radius: isOn ? 4 : 0)
+            .shadow(color: isOn ? indicatorColor.opacity(0.8) : .clear, radius: isOn ? 4 : 0)
             .animation(.easeInOut(duration: 0.2), value: isOn)
     }
 
