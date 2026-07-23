@@ -784,6 +784,37 @@ final class SlotStoreObservable: ObservableObject {
     func autoStoreFromHotkey(_ slot: Int) {
         cancelPendingClipboardRestore()
 
+        // v2.10.2: 先模拟 Cmd+C 复制「当前选中内容」，稍等系统完成复制后再读取剪贴板写入下一个空槽。
+        // 与不开启自动存储时的 Opt+1 单槽存储体验一致（支持文字/图片/文件等任意类型），区别仅在游标自动推进。
+        guard AXIsProcessTrusted() else {
+            NSLog("[ClipSlots] Accessibility permission not granted. Cannot capture selection for auto-store.")
+            promptAccessibilityPermissionIfNeeded()
+            return
+        }
+
+        let beforeChangeCount = NSPasteboard.general.changeCount
+        NSLog("[ClipSlots] autoStoreFromHotkey requested slot=\(slot), beforeChangeCount=\(beforeChangeCount)")
+
+        sendCopyKeystroke()
+
+        waitForClipboardChangeOrDelay(from: beforeChangeCount, timeout: 0.35, interval: 0.03) { [weak self] changed in
+            guard let self = self else { return }
+            guard changed else {
+                NSLog("[ClipSlots] autoStoreFromHotkey ignored: clipboard did not change")
+                self.showFloatingNotice(FloatingNotice(
+                    title: "自动存储失败",
+                    subtitle: "没有捕获到内容，请先选中要复制的内容",
+                    iconName: "xmark.circle.fill",
+                    kind: .error
+                ), duration: 2.5)
+                return
+            }
+            self.placeCapturedContentToNextEmptySlot()
+        }
+    }
+
+    /// v2.10.2: 自动存储的落点写入逻辑——读取剪贴板当前内容并写入下一个空槽（游标自动推进）。
+    private func placeCapturedContentToNextEmptySlot() {
         let content = clipboard.capture()
         guard !content.isEmpty else {
             showFloatingNotice(FloatingNotice(

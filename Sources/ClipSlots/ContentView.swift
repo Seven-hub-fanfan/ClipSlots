@@ -502,7 +502,7 @@ struct ContentView: View {
             .menuStyle(.borderlessButton)
             .fixedSize()
 
-            // v2.10.0: 三档金属拨杆（自动存储 / 自动粘贴 / 自动切换）。
+            // v2.10.0: 金属拨杆（自动存储 / 自动粘贴）。v2.10.2: 自动切换改回搜索栏按钮。
             leverCluster
 
             Spacer()
@@ -512,8 +512,9 @@ struct ContentView: View {
         .frame(minHeight: 36, alignment: .center)
     }
 
-    // v2.10.0: 三个金属拨杆并排，与现有操作按钮用分隔线区分。
-    // v2.10.1: 指示灯颜色统一（存储绿 / 粘贴蓝 / 切换黄），并为存储/粘贴拨杆加「回退 / 重置」游标按钮。
+    // v2.10.0: 金属拨杆并排，与现有操作按钮用分隔线区分。
+    // v2.10.1: 指示灯颜色统一（存储绿 / 粘贴蓝），并为存储/粘贴拨杆加「回退 / 重置」游标按钮。
+    // v2.10.2: 移除「自动切换」拨杆，改回搜索栏右侧按钮（见 SlotSearchBar）。
     private var leverCluster: some View {
         HStack(alignment: .center, spacing: 10) {
             Divider().frame(height: 26)
@@ -541,10 +542,6 @@ struct ContentView: View {
                 backHelp: "回退读游标：撤销最近一次自动粘贴的推进（回到上一个槽位）",
                 resetHelp: "重置读游标：下次 Cmd+1 从第一个非空槽重新开始"
             )
-
-            ToggleLeverView(isOn: $autoMode.autoAdvanceEnabled, label: "自动切换",
-                            help: "开启后自动存储/粘贴可跨组、跨页推进；关闭则只在当前组内循环",
-                            indicatorColor: .yellow)
 
             Divider().frame(height: 26)
         }
