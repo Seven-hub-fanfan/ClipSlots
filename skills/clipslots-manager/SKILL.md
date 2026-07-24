@@ -135,6 +135,8 @@ clipslots delete-group -h
 
 > 说明：`write-attachment` 的文件路径支持 `~` 与相对路径；图片扩展名归 `image` 类型，其余归 `file`。
 
+> ⚠️ 注意：`write-attachment` 不支持文件夹路径。如需上传文件夹内的文件，应遍历该文件夹，将所有文件路径逐一传入；不得未经用户确认将文件夹压缩为 ZIP 后上传。如用户意图不明，必须先询问澄清。
+
 ### 已知能力 / 限制（v2.9.58）
 
 - ✅ **`rename-group` 重命名槽位组**（v2.9.42 新增）：把指定 group 的 name 改为新名称，成功返回 `{"ok":true,"group":{"id":"...","name":"..."}}`。同页内名称去重规则与 `create-group` 一致，重名返回 `a group named '<name>' already exists on this page`；可选 `--page-name` 做归属校验（组不在该页则返回页面不符错误），防止误改错页的同名组。常用于「建页后延迟命名默认组」或整理时改名。
