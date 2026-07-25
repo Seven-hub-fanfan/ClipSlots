@@ -1404,11 +1404,20 @@ final class SlotStoreObservable: ObservableObject {
         previousClipboard: SlotContent
     ) {
         guard index < items.count else {
+            // v2.10.3 fix: skip the delayed restore if the user copied new content
+            // during the 0.8s window (changeCount changed), to avoid clobbering it.
+            let expectedChangeCount = clipboard.changeCount
             let restoreWorkItem = DispatchWorkItem { [weak self] in
                 guard let self = self else { return }
+                defer {
+                    self.pendingClipboardRestore = nil
+                    self.pendingClipboardRestoreContent = nil
+                }
+                if self.clipboard.changeCount != expectedChangeCount {
+                    NSLog("[ClipSlots] pasteAll skip clipboard restore: user changed clipboard (expected=\(expectedChangeCount) current=\(self.clipboard.changeCount))")
+                    return
+                }
                 _ = self.clipboard.restore(previousClipboard)
-                self.pendingClipboardRestore = nil
-                self.pendingClipboardRestoreContent = nil
             }
             pendingClipboardRestoreContent = previousClipboard
             pendingClipboardRestore = restoreWorkItem
@@ -1899,11 +1908,22 @@ final class SlotStoreObservable: ObservableObject {
             // they advance from the sequential-paste completion callback instead.
             self.maybeAutoAdvance(afterPasting: slot, in: activeId, suppress: suppressAutoAdvance) // v2.9.31 (moved post-keystroke in v2.9.56)
 
+            // v2.10.3 fix: capture the pasteboard changeCount after our own write.
+            // If the user copies new content during the 0.8s restore window, the
+            // changeCount will differ — skip the restore so we don't clobber the
+            // user's freshly copied data (previously surfaced as "复制失效").
+            let expectedChangeCount = self.clipboard.changeCount
             let restoreWorkItem = DispatchWorkItem { [weak self] in
                 guard let self = self else { return }
+                defer {
+                    self.pendingClipboardRestore = nil
+                    self.pendingClipboardRestoreContent = nil
+                }
+                if self.clipboard.changeCount != expectedChangeCount {
+                    NSLog("[ClipSlots] pasteSlot skip clipboard restore: user changed clipboard (expected=\(expectedChangeCount) current=\(self.clipboard.changeCount))")
+                    return
+                }
                 _ = self.clipboard.restore(previous)
-                self.pendingClipboardRestore = nil
-                self.pendingClipboardRestoreContent = nil
             }
             self.pendingClipboardRestoreContent = previous
             self.pendingClipboardRestore = restoreWorkItem
@@ -2765,7 +2785,7 @@ final class SlotStoreObservable: ObservableObject {
         }
 
         if contents.allSatisfy({ $0.primaryFileURL == nil && $0.inlineImage == nil }) {
-            let merged = contents.map { $0.preview }.filter { !$0.isEmpty }.joined(separator: "\n\n")
+            let merged = contents.compactMap { $0.plainText }.filter { !$0.isEmpty }.joined(separator: "\n\n")
             NSPasteboard.general.clearContents()
             NSPasteboard.general.setString(merged, forType: .string)
             target.activate(options: [])

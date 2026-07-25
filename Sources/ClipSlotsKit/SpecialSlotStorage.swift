@@ -998,8 +998,16 @@ public final class SpecialSlotStorage {
     // MARK: - Child Slot Operations
 
     private var storageCache: [String: SlotStorage] = [:]
+    /// v2.10.3 (P0 fix): in-process lock guarding `storageCache`. `slotStorage(for:)`
+    /// is entered concurrently by the main-thread UI, the FSEvents watcher callback,
+    /// and CLI-triggered tasks; Swift `Dictionary` is not thread-safe, so unguarded
+    /// reads/writes could randomly crash or corrupt the cache. This is distinct from
+    /// the cross-process `storageLock` (flock) — here we need an intra-process thread lock.
+    private let storageCacheLock = NSLock()
 
     public func slotStorage(for specialSlotId: String) -> SlotStorage {
+        storageCacheLock.lock()
+        defer { storageCacheLock.unlock() }
         if let cached = storageCache[specialSlotId] {
             return cached
         }
@@ -1055,7 +1063,10 @@ public final class SpecialSlotStorage {
     /// cached). Invalidating ALL cached groups — not just the active one — also fixes
     /// the case where the user later switches to a group the CLI wrote to.
     public func invalidateContentCaches() {
-        for storage in storageCache.values {
+        storageCacheLock.lock()
+        let storages = Array(storageCache.values)
+        storageCacheLock.unlock()
+        for storage in storages {
             storage.invalidateCache()
         }
     }

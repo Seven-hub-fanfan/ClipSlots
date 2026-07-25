@@ -10,7 +10,20 @@ import CoreServices
 /// bound to a single fd can miss these. FSEvents reports changes across the whole
 /// subtree reliably, including creates/renames/deletes of nested files.
 final class StorageDirectoryWatcher {
+    /// v2.10.3 (P0 fix): the FSEvents callback runs on `queue` and can still be
+    /// dispatched by the system AFTER `stop()`/`deinit` (queued events). Passing
+    /// `Unmanaged.passUnretained(self)` and calling `takeUnretainedValue()` in the
+    /// callback would then dereference a freed `self` → wild-pointer crash. Instead
+    /// we hand the C context a retained box holding a `weak` back-reference; the
+    /// callback checks it for nil and safely no-ops once the watcher is gone.
+    private final class WeakBox {
+        weak var watcher: StorageDirectoryWatcher?
+        init(_ watcher: StorageDirectoryWatcher) { self.watcher = watcher }
+    }
+
     private var stream: FSEventStreamRef?
+    /// Retained reference to the context box; released in `stop()`.
+    private var boxRef: Unmanaged<WeakBox>?
     private let path: String
     private let onChange: () -> Void
     /// Dedicated serial queue the FSEvents callback is delivered on. The callback
@@ -25,9 +38,11 @@ final class StorageDirectoryWatcher {
     func start() {
         guard stream == nil else { return }
 
+        let box = WeakBox(self)
+        let boxRef = Unmanaged.passRetained(box)
         var context = FSEventStreamContext(
             version: 0,
-            info: Unmanaged.passUnretained(self).toOpaque(),
+            info: boxRef.toOpaque(),
             retain: nil,
             release: nil,
             copyDescription: nil
@@ -35,7 +50,9 @@ final class StorageDirectoryWatcher {
 
         let callback: FSEventStreamCallback = { (_, info, _, _, _, _) in
             guard let info = info else { return }
-            let watcher = Unmanaged<StorageDirectoryWatcher>.fromOpaque(info).takeUnretainedValue()
+            let box = Unmanaged<WeakBox>.fromOpaque(info).takeUnretainedValue()
+            // weak back-reference: nil once the watcher has been deallocated → skip.
+            guard let watcher = box.watcher else { return }
             watcher.onChange()
         }
 
@@ -56,17 +73,20 @@ final class StorageDirectoryWatcher {
             flags
         ) else {
             NSLog("[ClipSlots] StorageDirectoryWatcher: FSEventStreamCreate failed for \(path)")
+            boxRef.release() // balance passRetained on the failure path
             return
         }
 
         FSEventStreamSetDispatchQueue(created, queue)
         if FSEventStreamStart(created) {
             stream = created
+            self.boxRef = boxRef // keep the box alive for the stream's lifetime
             NSLog("[ClipSlots] StorageDirectoryWatcher started on \(path)")
         } else {
             NSLog("[ClipSlots] StorageDirectoryWatcher: FSEventStreamStart failed for \(path)")
             FSEventStreamInvalidate(created)
             FSEventStreamRelease(created)
+            boxRef.release() // balance passRetained on the failure path
         }
     }
 
@@ -76,6 +96,10 @@ final class StorageDirectoryWatcher {
         FSEventStreamInvalidate(stream)
         FSEventStreamRelease(stream)
         self.stream = nil
+        // Release the retained context box only after the stream is fully torn down,
+        // so any callback that already started can still read the (now nil) weak ref.
+        boxRef?.release()
+        boxRef = nil
         NSLog("[ClipSlots] StorageDirectoryWatcher stopped")
     }
 
