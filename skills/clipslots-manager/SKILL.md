@@ -9,7 +9,7 @@ requires: macOS + 已安装 ClipSlots v2.9.33+，CLI 位于 /usr/local/bin/clips
 
 # ClipSlots CLI 使用技能
 
-> 本文件为随 App bundle 打包、供各 Agent 实际读取的正式版本，与 `docs/clipslots-cli-skill-draft.md` 工作草稿保持同步。
+> 本文件为随 App bundle 打包、供各 Agent 实际读取的正式版本，也是本项目 Skill 内容的唯一来源。
 
 > **Skill v1.3.2（对齐 CLI v2.9.58，已验证 CLI 2.9.58）**：本版为完整安全策略升级——写入前按能力矩阵优先使用 CLI 原生护栏，空槽 ≠ 可占用，定位歧义强制消歧，批量走预检。运行时先探测（`version` → 子命令 `--help` → `write --batch`/`CLIPSLOTS_DATA_DIR`），按实际能力降级。
 >
@@ -237,7 +237,7 @@ clipslots delete-group -h
   > ⚠️ 续组 `-2`/`-3` 后缀**只用于同名组需要扩容时**（如「设计素材」组满了 → 建「设计素材-2」）。若组名本身已是递增序号（词1、词2…词10），则延续命名为「词11」「词12」，不加 `-2`/`-3` 后缀。
 - **改名**：用 `rename-group` 改组名时同样遵守组名 ≤ 10 字的建议规则，并注意同页内不可与已有组重名。
 
-## 6. 典型场景（草稿，按讨论结果整理）
+## 6. 典型场景（按讨论结果整理）
 
 ### 场景一：客服 —— 常用话术/回复模板
 - 内容多为**纯文本**（模式A，无附件）。
@@ -275,4 +275,4 @@ clipslots delete-group -h
 11. **兜底规则**：任何不确定的情况下，使用 `--force` + 新建页面 + 新建组，每组只放 1 个槽位。污染用户已有数据比浪费空槽位更严重。（`--force` 当前用于跳过跨进程写锁；若冲突处理相关的 `--force` 语义未实现，则用等效的新建页/组方式规避冲突。）
 
 ---
-> 本文件为 Skill 草稿，接口以 `clipslots help` 实际输出为准；场景部分按当前讨论整理，可再据实际使用微调。CLI 与 GUI 共享 `ClipSlotsKit` 数据层，随 app 版本演进。
+> 本文件为随 App bundle 打包、供各 Agent 实际读取的正式版本，接口以 `clipslots help` 实际输出为准；场景部分按当前讨论整理，可再据实际使用微调。CLI 与 GUI 共享 `ClipSlotsKit` 数据层，随 app 版本演进。
