@@ -7,6 +7,11 @@ public enum SlotGroupDirection {
     case next
 }
 
+// P0-1: raised by saveIndex when a save would overwrite real data with the empty fallback.
+public enum SpecialSlotStorageError: Error {
+    case refusingToOverwriteWithEmptyIndex
+}
+
 public final class SpecialSlotStorage {
     public static let shared = SpecialSlotStorage()
 
@@ -206,7 +211,7 @@ public final class SpecialSlotStorage {
         // 5. Fix currentSpecialSlotId if it doesn't belong to current page
         let currentPageGroups = modified.specialSlots.filter { $0.pageId == modified.currentPageId }
         if !currentPageGroups.contains(where: { $0.id == modified.currentSpecialSlotId }) {
-            let fallback = currentPageGroups.sorted { $0.order < $1.order }.first
+            let fallback = currentPageGroups.sorted { $0.order != $1.order ? $0.order < $1.order : $0.id < $1.id }.first
             modified.currentSpecialSlotId = fallback?.id ?? modified.specialSlots.first?.id ?? "default"
             changed = true
         }
@@ -414,6 +419,14 @@ public final class SpecialSlotStorage {
     }
 
     public func saveIndex(_ index: SpecialSlotIndex) throws {
+        // P0-1: never let the empty decode-failure fallback (schemaVersion 0, no pages
+        // and no slots) overwrite an existing real index.json — that would wipe the
+        // whole library. All legitimate save paths persist schemaVersion >= 2.
+        if index.schemaVersion < 2, index.pages.isEmpty, index.specialSlots.isEmpty,
+           FileManager.default.fileExists(atPath: indexURL.path) {
+            NSLog("[ClipSlots] ERROR: refusing to overwrite index.json with empty fallback index; preserving existing data")
+            throw SpecialSlotStorageError.refusingToOverwriteWithEmptyIndex
+        }
         let data = try encoder.encode(index)
         try data.write(to: indexURL, options: .atomic)
     }
@@ -563,7 +576,7 @@ public final class SpecialSlotStorage {
 
             let groupsInPage = index.specialSlots
                 .filter { $0.pageId == index.currentPageId }
-                .sorted { $0.order < $1.order }
+                .sorted { $0.order != $1.order ? $0.order < $1.order : $0.id < $1.id }
 
             guard !groupsInPage.isEmpty else {
                 throw SpecialSlotError.specialSlotNotFound
@@ -729,7 +742,7 @@ public final class SpecialSlotStorage {
 
             let fallbackInPage = index.specialSlots
                 .filter { $0.pageId == targetSlot.pageId }
-                .sorted { $0.order < $1.order }
+                .sorted { $0.order != $1.order ? $0.order < $1.order : $0.id < $1.id }
                 .first
             let fallbackId = fallbackInPage?.id ?? index.specialSlots.first?.id ?? "default"
 
@@ -942,7 +955,7 @@ public final class SpecialSlotStorage {
             // is needed. Mirrors the post-conditions checked by repair (steps 5/6).
             let currentPageGroups = index.specialSlots
                 .filter { $0.pageId == index.currentPageId }
-                .sorted { $0.order < $1.order }
+                .sorted { $0.order != $1.order ? $0.order < $1.order : $0.id < $1.id }
             if !currentPageGroups.contains(where: { $0.id == index.currentSpecialSlotId }) {
                 index.currentSpecialSlotId = currentPageGroups.first?.id
                     ?? index.specialSlots.first?.id ?? "default"
@@ -988,7 +1001,7 @@ public final class SpecialSlotStorage {
             //      selection pointers nil is far less harmful than injecting a
             //      phantom group — the UI can handle nil selection gracefully.
             let groupsInPage = index.specialSlots.filter { $0.pageId == id }
-            if let firstGroup = groupsInPage.sorted(by: { $0.order < $1.order }).first {
+            if let firstGroup = groupsInPage.sorted(by: { $0.order != $1.order ? $0.order < $1.order : $0.id < $1.id }).first {
                 index.currentSpecialSlotId = firstGroup.id
                 index.selectedSpecialSlotId = firstGroup.id
                 index.activeHotkeySpecialSlotId = firstGroup.id

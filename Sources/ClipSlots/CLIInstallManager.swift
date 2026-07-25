@@ -129,27 +129,27 @@ final class CLIInstallManager: ObservableObject {
             .replacingOccurrences(of: "\"", with: "\\\"")
         let appleScript = "do shell script \"\(escaped)\" with administrator privileges"
 
-        DispatchQueue.global(qos: .userInitiated).async {
+        // P0-2: NSAppleScript is not thread-safe — construct AND execute it on the
+        // main thread. Previously this ran on a background queue, causing random crashes.
+        DispatchQueue.main.async {
             var errorInfo: NSDictionary?
             let script = NSAppleScript(source: appleScript)
             _ = script?.executeAndReturnError(&errorInfo)
 
-            DispatchQueue.main.async {
-                self.isBusy = false
-                if let errorInfo {
-                    // -128 = user cancelled the authorization dialog.
-                    let code = errorInfo[NSAppleScript.errorNumber] as? Int ?? 0
-                    if code == -128 {
-                        self.report("已取消操作。", isError: false)
-                    } else {
-                        let msg = errorInfo[NSAppleScript.errorMessage] as? String ?? "未知错误"
-                        self.report("操作失败：\(msg)", isError: true)
-                    }
+            self.isBusy = false
+            if let errorInfo {
+                // -128 = user cancelled the authorization dialog.
+                let code = errorInfo[NSAppleScript.errorNumber] as? Int ?? 0
+                if code == -128 {
+                    self.report("已取消操作。", isError: false)
                 } else {
-                    self.report(successMessage, isError: false)
+                    let msg = errorInfo[NSAppleScript.errorMessage] as? String ?? "未知错误"
+                    self.report("操作失败：\(msg)", isError: true)
                 }
-                self.refreshState()
+            } else {
+                self.report(successMessage, isError: false)
             }
+            self.refreshState()
         }
     }
 

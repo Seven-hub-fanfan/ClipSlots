@@ -59,11 +59,15 @@ final class AppUninstaller: ObservableObject {
             .replacingOccurrences(of: "\"", with: "\\\"")
         let appleScript = "do shell script \"\(escaped)\" with administrator privileges"
 
-        DispatchQueue.global(qos: .userInitiated).async {
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             var errorInfo: NSDictionary?
             NSAppleScript(source: appleScript)?.executeAndReturnError(&errorInfo)
-            // 无论成功、失败或用户取消鉴权，都继续把 App 移入废纸篓并退出。
             DispatchQueue.main.async {
+                // P2-7: 鉴权失败/取消时复位 isBusy 让用户可重试，不继续 trash App。
+                if errorInfo != nil {
+                    self?.isBusy = false
+                    return
+                }
                 completion()
             }
         }
@@ -74,8 +78,13 @@ final class AppUninstaller: ObservableObject {
     private func finishByTrashingApp() {
         // 使用运行中 App 的真实 bundle 路径（正常安装位置为 /Applications/ClipSlots.app）。
         let appURL = Bundle.main.bundleURL
-        NSWorkspace.shared.recycle([appURL]) { _, _ in
+        NSWorkspace.shared.recycle([appURL]) { [weak self] _, error in
             DispatchQueue.main.async {
+                // P2-7: 移入废纸篓失败时复位 isBusy 让用户可重试，不退出。
+                if error != nil {
+                    self?.isBusy = false
+                    return
+                }
                 NSApp.terminate(nil)
             }
         }

@@ -133,6 +133,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
                     if let previousApp = previousApp ?? self.store?.lastNonClipSlotsApp {
                         self.store?.lastNonClipSlotsApp = previousApp
+                        previousApp.activate(options: .activateIgnoringOtherApps)   // P1-3
                     }
                     self.store?.pasteSlot(slot)
                 }

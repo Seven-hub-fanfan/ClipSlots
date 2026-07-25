@@ -24,15 +24,30 @@ final class AutoModeState: ObservableObject {
     private let defaults: UserDefaults
 
     @Published var autoStoreEnabled: Bool {
-        didSet { defaults.set(autoStoreEnabled, forKey: Keys.autoStore) }
+        // P2-2: ensure the UserDefaults side-effect runs on the main thread.
+        didSet {
+            let v = autoStoreEnabled
+            if Thread.isMainThread { defaults.set(v, forKey: Keys.autoStore) }
+            else { DispatchQueue.main.async { self.defaults.set(v, forKey: Keys.autoStore) } }
+        }
     }
 
     @Published var autoPasteEnabled: Bool {
-        didSet { defaults.set(autoPasteEnabled, forKey: Keys.autoPaste) }
+        // P2-2: ensure the UserDefaults side-effect runs on the main thread.
+        didSet {
+            let v = autoPasteEnabled
+            if Thread.isMainThread { defaults.set(v, forKey: Keys.autoPaste) }
+            else { DispatchQueue.main.async { self.defaults.set(v, forKey: Keys.autoPaste) } }
+        }
     }
 
     @Published var autoAdvanceEnabled: Bool {
-        didSet { defaults.set(autoAdvanceEnabled, forKey: Keys.autoAdvance) }
+        // P2-2: ensure the UserDefaults side-effect runs on the main thread.
+        didSet {
+            let v = autoAdvanceEnabled
+            if Thread.isMainThread { defaults.set(v, forKey: Keys.autoAdvance) }
+            else { DispatchQueue.main.async { self.defaults.set(v, forKey: Keys.autoAdvance) } }
+        }
     }
 
     init(defaults: UserDefaults = .standard) {

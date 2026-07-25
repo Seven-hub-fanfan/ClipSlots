@@ -116,6 +116,10 @@ struct FlashHighlightTarget: Equatable {
 final class SlotStoreObservable: ObservableObject {
     let instanceID = UUID().uuidString
 
+    // P1-4: monotonically-increasing token for global search recompute. NOT @Published;
+    // ContentView reads it through the shared reference to reliably detect stale results.
+    var globalSearchGeneration: Int = 0
+
     // MARK: - v2.7.27 Local Hotkey Guard
     // Global hotkeys were fixed in v2.7.26, but the foreground app window can still
     // receive legacy local key equivalents (Ctrl+Option+number) through SwiftUI/AppKit

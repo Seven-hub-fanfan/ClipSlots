@@ -44,6 +44,17 @@ final class ThumbnailProvider {
         pendingCompletions[cacheKey] = [completion]
         lock.unlock()
 
+        // P2-1: QuickLook can hang and never call back; force-fire nil after 10s so waiters
+        // are released and captured views aren't leaked. If the normal path already
+        // removed the key, this is a safe no-op.
+        DispatchQueue.global().asyncAfter(deadline: .now() + 10) { [weak self] in
+            guard let self = self else { return }
+            self.lock.lock()
+            let pending = self.pendingCompletions.removeValue(forKey: cacheKey)
+            self.lock.unlock()
+            pending?.forEach { $0(nil, cacheKey) }
+        }
+
         let request = QLThumbnailGenerator.Request(
             fileAt: url,
             size: size,

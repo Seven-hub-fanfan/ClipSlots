@@ -726,6 +726,15 @@ struct ContentView: View {
         .id("\(store.config.saveKey)|\(store.config.pasteKey)|\(store.config.radialKey)|\(store.config.hotkeyTemplate.kind.rawValue)")
     }
 
+    // P2-4: run NSAlert without blocking the SwiftUI runloop; sheet on the key window, modal fallback.
+    private func runAlertNonBlocking(_ alert: NSAlert, completion: @escaping (NSApplication.ModalResponse) -> Void) {
+        if let window = NSApp.keyWindow ?? NSApp.mainWindow ?? NSApp.windows.first(where: { $0.isVisible }) {
+            alert.beginSheetModal(for: window) { completion($0) }
+        } else {
+            completion(alert.runModal())
+        }
+    }
+
     // v2.4: renamed from renameSpecialSlot
     private func renameSlotGroup(id: String, currentName: String) {
         let alert = NSAlert()
@@ -738,11 +747,13 @@ struct ContentView: View {
         textField.placeholderString = "输入新名称"
         alert.accessoryView = textField
 
-        let response = alert.runModal()
-        if response == .alertFirstButtonReturn {
-            let newName = textField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-            if !newName.isEmpty {
-                store.renameSpecialSlot(id: id, name: newName)
+        // P2-4: non-blocking sheet instead of runModal.
+        runAlertNonBlocking(alert) { response in
+            if response == .alertFirstButtonReturn {
+                let newName = textField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !newName.isEmpty {
+                    store.renameSpecialSlot(id: id, name: newName)
+                }
             }
         }
     }
@@ -759,11 +770,13 @@ struct ContentView: View {
         textField.placeholderString = "输入页面名称"
         alert.accessoryView = textField
 
-        let response = alert.runModal()
-        if response == .alertFirstButtonReturn {
-            let name = textField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-            if !name.isEmpty {
-                store.createPage(name: name)
+        // P2-4: non-blocking sheet instead of runModal.
+        runAlertNonBlocking(alert) { response in
+            if response == .alertFirstButtonReturn {
+                let name = textField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !name.isEmpty {
+                    store.createPage(name: name)
+                }
             }
         }
     }
@@ -779,11 +792,13 @@ struct ContentView: View {
         textField.placeholderString = "输入新名称"
         alert.accessoryView = textField
 
-        let response = alert.runModal()
-        if response == .alertFirstButtonReturn {
-            let newName = textField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-            if !newName.isEmpty {
-                store.renamePage(id: id, name: newName)
+        // P2-4: non-blocking sheet instead of runModal.
+        runAlertNonBlocking(alert) { response in
+            if response == .alertFirstButtonReturn {
+                let newName = textField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !newName.isEmpty {
+                    store.renamePage(id: id, name: newName)
+                }
             }
         }
     }
@@ -796,9 +811,11 @@ struct ContentView: View {
         alert.addButton(withTitle: "删除")
         alert.addButton(withTitle: "取消")
 
-        let response = alert.runModal()
-        if response == .alertFirstButtonReturn {
-            store.deletePage(id: id)
+        // P2-4: non-blocking sheet instead of runModal.
+        runAlertNonBlocking(alert) { response in
+            if response == .alertFirstButtonReturn {
+                store.deletePage(id: id)
+            }
         }
     }
 
@@ -1156,6 +1173,10 @@ struct ContentView: View {
         }
 
         let store = self.store
+        // P1-4: bump the generation on the main thread and capture the token; the stale
+        // guard below compares against the live reference value (self snapshots are unreliable).
+        store.globalSearchGeneration += 1
+        let searchToken = store.globalSearchGeneration
         let currentPageId = store.currentPageId
         let currentSpecialSlotId = store.currentSpecialSlotId
 
@@ -1171,12 +1192,8 @@ struct ContentView: View {
                 currentSpecialSlotId: currentSpecialSlotId
             )
             DispatchQueue.main.async {
-                // Stale-query guard: only apply if the inputs haven't changed since
-                // this background work was scheduled.
-                guard self.searchText == query,
-                      self.selectedFilter == filter,
-                      self.searchScope == scope,
-                      self.globalSearchSortRule == sortRule else { return }
+                // Stale-query guard: only apply if no newer recompute was scheduled.
+                guard store.globalSearchGeneration == searchToken else { return }   // P1-4
                 self.globalSearchResultsCache = results
             }
         }

@@ -12,7 +12,7 @@ import ClipSlotsKit
 //   success: {"ok": true, ...}
 //   error:   {"ok": false, "error": "message"}  (exit code 1)
 
-let CLI_VERSION = "2.10.3"
+let CLI_VERSION = "2.10.4"
 let DEFAULT_GROUP = "default"
 let DEFAULT_PAGE = "default_page"
 
@@ -86,6 +86,30 @@ func fail(_ message: String, code: String = "ERROR", extra: [String: Any] = [:])
 
 // A String? -> Any that JSONSerialization accepts (nil becomes NSNull).
 func jsonValue(_ value: String?) -> Any { value ?? NSNull() }
+
+// P2-14: map low-level storage errors to stable, specific error codes so callers
+// don't get the generic "ERROR" for well-known failure kinds. Exhaustive switches
+// (no default) keep them in sync with the Kit enum definitions.
+func codeForSpecialSlotError(_ e: SpecialSlotError) -> String {
+    switch e {
+    case .duplicateName: return "DUPLICATE_NAME"
+    case .maxSpecialSlotsReached: return "PAGE_GROUP_LIMIT_REACHED"
+    case .specialSlotNotFound: return "GROUP_NOT_FOUND"
+    case .defaultGroupProtected: return "DEFAULT_GROUP_PROTECTED"
+    case .cannotDeleteLastSpecialSlot: return "CANNOT_DELETE_LAST_GROUP"
+    case .invalidSpecialSlotName: return "INVALID_INPUT_FORMAT"
+    case .indexCorrupted: return "INDEX_CORRUPTED"
+    }
+}
+func codeForPageError(_ e: PageError) -> String {
+    switch e {
+    case .duplicateName: return "DUPLICATE_NAME"
+    case .pageNotFound: return "PAGE_NOT_FOUND"
+    case .defaultPageProtected: return "DEFAULT_PAGE_PROTECTED"
+    case .cannotDeleteLastPage: return "CANNOT_DELETE_LAST_PAGE"
+    case .emptyName: return "INVALID_INPUT_FORMAT"
+    }
+}
 
 // MARK: - Argument parsing (dependency-free)
 
@@ -282,19 +306,19 @@ func resolvePageFlag(_ args: ParsedArgs, strict: Bool = false) -> String? {
     let hasPage = args.flag("page") != nil
     let hasName = args.flag("page-name") != nil
     if hasPage && hasName {
-        fail("只能指定 --page 或 --page-name 其中一个")
+        fail("只能指定 --page 或 --page-name 其中一个", code: "INVALID_ARGUMENT_COMBINATION")
     }
     let index = storage.loadIndex()
     if let name = args.flag("page-name") {
         if let p = index.pages.first(where: { $0.name == name }) { return p.id }
-        fail("找不到名为 '\(name)' 的页面")
+        fail("找不到名为 '\(name)' 的页面", code: "PAGE_NOT_FOUND")
     }
     if let page = args.flag("page") {
         if let p = index.pages.first(where: { $0.id == page || $0.name == page }) { return p.id }
         // v2.9.29: an explicitly requested page that matches nothing is an error
         // for placement commands (was previously a silent fallback to currentPage).
         if strict {
-            fail("找不到 id 或名称为 '\(page)' 的页面")
+            fail("找不到 id 或名称为 '\(page)' 的页面", code: "PAGE_NOT_FOUND")
         }
         return page
     }
@@ -303,10 +327,10 @@ func resolvePageFlag(_ args: ParsedArgs, strict: Bool = false) -> String? {
 
 func parseSlot(_ raw: String?) -> Int {
     guard let raw, let n = Int(raw) else {
-        fail("missing or invalid slot number (expected 1...\(slotCount))")
+        fail("missing or invalid slot number (expected 1...\(slotCount))", code: "INVALID_LIMIT")
     }
     guard (1...slotCount).contains(n) else {
-        fail("slot out of range: \(n) (valid 1...\(slotCount))")
+        fail("slot out of range: \(n) (valid 1...\(slotCount))", code: "INVALID_LIMIT")
     }
     return n
 }
@@ -429,7 +453,7 @@ func validateFlags(_ args: ParsedArgs) {
         let hint = allowed.isEmpty
             ? "command '\(args.command)' takes no flags"
             : "allowed flags: \(allowed.sorted().map { "--\($0)" }.joined(separator: ", "))"
-        fail("unknown flag: --\(key) for command '\(args.command)' (\(hint); run 'clipslots \(args.command) --help')")
+        fail("unknown flag: --\(key) for command '\(args.command)' (\(hint); run 'clipslots \(args.command) --help')", code: "INVALID_ARGUMENT_COMBINATION")
     }
 }
 
@@ -604,9 +628,19 @@ func cmdList(_ args: ParsedArgs) -> Never {
             fail("--page-num must be >= 1 (got '\(args.flag("page-num") ?? "")')", code: "INVALID_LIMIT")
         }
         let total = slots.count
-        let totalPages = max(1, (total + pageSize - 1) / pageSize)
-        let start = (pageNum - 1) * pageSize
-        let pageSlots = start < total ? Array(slots[start..<min(start + pageSize, total)]) : []
+        // P0-3: compute totalPages without overflow (avoid `total + pageSize - 1`).
+        let totalPages = total == 0 ? 1 : (total - 1) / pageSize + 1
+        // P0-3: guard against integer overflow on huge page numbers.
+        let (start, overflowed) = (pageNum - 1).multipliedReportingOverflow(by: pageSize)
+        let pageSlots: [[String: Any]]
+        if overflowed || start >= total {
+            // out of range → return an empty page instead of crashing
+            pageSlots = []
+        } else {
+            // start < total here, so this end computation cannot overflow.
+            let end = (total - start) <= pageSize ? total : start + pageSize
+            pageSlots = Array(slots[start..<end])
+        }
         success([
             "group": group,
             "page": page,
@@ -616,7 +650,7 @@ func cmdList(_ args: ParsedArgs) -> Never {
                 "pageSize": pageSize,
                 "total": total,
                 "totalPages": totalPages,
-                "hasMore": pageNum < totalPages
+                "hasMore": !overflowed && pageNum < totalPages
             ]
         ])
     }
@@ -756,7 +790,7 @@ func cmdWrite(_ args: ParsedArgs) -> Never {
     // v2.9.57: accept slot from a positional OR a --slot flag (agent convenience).
     let n = parseSlot(args.positionals.first ?? args.flag("slot"))
     guard var text = args.flag("text") else {
-        fail("missing --text <string> (use --text - to read from stdin, or --batch for bulk)")
+        fail("missing --text <string> (use --text - to read from stdin, or --batch for bulk)", code: "INVALID_ARGUMENT_COMBINATION")
     }
     if text == "-" {
         let data = FileHandle.standardInput.readDataToEndOfFile()
@@ -807,18 +841,18 @@ func cmdWriteBatch(_ args: ParsedArgs) -> Never {
     let data = FileHandle.standardInput.readDataToEndOfFile()
     guard !data.isEmpty else {
         fail("--batch expects a JSON array on stdin, got empty input "
-            + "(e.g. echo '[{\"slot\":1,\"text\":\"a\"}]' | clipslots write --batch)")
+            + "(e.g. echo '[{\"slot\":1,\"text\":\"a\"}]' | clipslots write --batch)", code: "INVALID_INPUT_FORMAT")
     }
     let json: Any
     do {
         json = try JSONSerialization.jsonObject(with: data)
     } catch {
-        fail("--batch stdin is not valid JSON: \(error.localizedDescription)")
+        fail("--batch stdin is not valid JSON: \(error.localizedDescription)", code: "INVALID_INPUT_FORMAT")
     }
     guard let arr = json as? [[String: Any]] else {
-        fail("--batch expects a JSON ARRAY of objects, e.g. [{\"slot\":1,\"text\":\"...\"}]")
+        fail("--batch expects a JSON ARRAY of objects, e.g. [{\"slot\":1,\"text\":\"...\"}]", code: "INVALID_INPUT_FORMAT")
     }
-    guard !arr.isEmpty else { fail("--batch array is empty; nothing to write") }
+    guard !arr.isEmpty else { fail("--batch array is empty; nothing to write", code: "INVALID_INPUT_FORMAT") }
 
     // Command-level scope + defaults. v2.9.40 (P0): resolve the page ONCE and scope
     // every group lookup to it. resolveGroup enforces F1/F2/F9 for the command.
@@ -1026,7 +1060,7 @@ func cmdWriteBatch(_ args: ParsedArgs) -> Never {
 
 func cmdSearch(_ args: ParsedArgs) -> Never {
     guard let query = args.positionals.first, !query.isEmpty else {
-        fail("missing search query")
+        fail("missing search query", code: "INVALID_ARGUMENT_COMBINATION")
     }
     let needle = query.lowercased()
     let limit = Int(args.flag("limit") ?? "") ?? 50
@@ -1091,7 +1125,7 @@ func cmdPaste(_ args: ParsedArgs) -> Never {
     let n = parseSlot(args.positionals.first ?? args.flag("slot"))
     let content = storage.get(n, in: group)
     guard !content.isEmpty else {
-        fail("slot \(n) in group \(group) is empty; nothing to copy")
+        fail("slot \(n) in group \(group) is empty; nothing to copy", code: "SLOT_EMPTY")
     }
 
     // v2.9.3 (Fix #2): if the slot has body items, restore them to the pasteboard as
@@ -1135,9 +1169,16 @@ func cmdPaste(_ args: ParsedArgs) -> Never {
 
 func cmdCreateGroup(_ args: ParsedArgs) -> Never {
     guard let name = args.positionals.first, !name.trimmingCharacters(in: .whitespaces).isEmpty else {
-        fail("missing group name (usage: create-group <name> [--page <id>])")
+        fail("missing group name (usage: create-group <name> [--page <id>])", code: "INVALID_ARGUMENT_COMBINATION")
     }
     let page = resolvePageFlag(args, strict: true)
+    // P1-6: enforce the per-page group limit before creating (page nil == current page,
+    // matching createSpecialSlot's target resolution).
+    let preIndex = storage.loadIndex()
+    let targetPageForLimit = page ?? preIndex.currentPageId
+    if preIndex.specialSlots.filter({ $0.pageId == targetPageForLimit }).count >= preIndex.settings.maxSpecialSlots {
+        fail("page group limit reached (max 10 groups per page)", code: "PAGE_GROUP_LIMIT_REACHED")
+    }
     do {
         let slot = try storage.createSpecialSlot(name: name, pageId: page, requestedAt: CLI_REQUEST_RECEIVED_AT)
         success(["group": ["id": slot.id, "name": slot.name, "pageId": slot.pageId]])
@@ -1145,13 +1186,13 @@ func cmdCreateGroup(_ args: ParsedArgs) -> Never {
         // v2.9.4 (Feature #4): same-page duplicate name is rejected. Agents should
         // rename or add a `-2` suffix on conflict (see skill doc).
         let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
-        fail("a group named '\(trimmed)' already exists on this page")
+        fail("a group named '\(trimmed)' already exists on this page", code: "DUPLICATE_NAME")
     } catch let e as StorageLockError {
         // v2.9.4 (#4): cross-process lock contention timeout.
         fail(e.errorDescription ?? "storage is busy (lock timeout)", code: "LOCK_TIMEOUT")
     } catch let e as SpecialSlotError {
-        // maxSpecialSlotsReached → the caller should create a new page (see skill rules).
-        fail(e.errorDescription ?? "failed to create group")
+        // P2-14: map to a specific code (e.g. maxSpecialSlotsReached → PAGE_GROUP_LIMIT_REACHED).
+        fail(e.errorDescription ?? "failed to create group", code: codeForSpecialSlotError(e))
     } catch {
         fail(describeWriteError(error, context: "creating group"))
     }
@@ -1159,7 +1200,7 @@ func cmdCreateGroup(_ args: ParsedArgs) -> Never {
 
 func cmdCreatePage(_ args: ParsedArgs) -> Never {
     guard let name = args.positionals.first, !name.trimmingCharacters(in: .whitespaces).isEmpty else {
-        fail("missing page name (usage: create-page <name>)")
+        fail("missing page name (usage: create-page <name>)", code: "INVALID_ARGUMENT_COMBINATION")
     }
     // v2.9.42 (Feature B): optional --group-name renames the synchronously-created
     // default group right after the page is built, so callers who already know the
@@ -1185,7 +1226,7 @@ func cmdCreatePage(_ args: ParsedArgs) -> Never {
     } catch let e as StorageLockError {
         fail(e.errorDescription ?? "storage is busy (lock timeout)", code: "LOCK_TIMEOUT")
     } catch let e as PageError {
-        fail(e.errorDescription ?? "failed to create page")
+        fail(e.errorDescription ?? "failed to create page", code: codeForPageError(e))
     } catch {
         fail(describeWriteError(error, context: "creating page"))
     }
@@ -1198,10 +1239,10 @@ func cmdCreatePage(_ args: ParsedArgs) -> Never {
 // the documented message.
 func cmdRenameGroup(_ args: ParsedArgs) -> Never {
     guard let id = args.positionals.first, !id.trimmingCharacters(in: .whitespaces).isEmpty else {
-        fail("missing group id (usage: rename-group <group-id> --name <新名称> [--page-name <页面名>])")
+        fail("missing group id (usage: rename-group <group-id> --name <新名称> [--page-name <页面名>])", code: "INVALID_ARGUMENT_COMBINATION")
     }
     guard let newName = args.flag("name"), !newName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-        fail("missing new name (usage: rename-group <group-id> --name <新名称>)")
+        fail("missing new name (usage: rename-group <group-id> --name <新名称>)", code: "INVALID_ARGUMENT_COMBINATION")
     }
     let index = storage.loadIndex()
     guard let group = index.specialSlots.first(where: { $0.id == id }) else {
@@ -1221,15 +1262,15 @@ func cmdRenameGroup(_ args: ParsedArgs) -> Never {
         let finalName = storage.loadIndex().specialSlots.first(where: { $0.id == id })?.name ?? String(trimmed.prefix(30))
         success(["group": ["id": id, "name": finalName]])
     } catch SpecialSlotError.duplicateName {
-        fail("a group named '\(String(trimmed.prefix(30)))' already exists on this page")
+        fail("a group named '\(String(trimmed.prefix(30)))' already exists on this page", code: "DUPLICATE_NAME")
     } catch SpecialSlotError.specialSlotNotFound {
         fail("group \(id) not found", code: "GROUP_NOT_FOUND")
     } catch SpecialSlotError.invalidSpecialSlotName {
-        fail("invalid group name")
+        fail("invalid group name", code: "INVALID_INPUT_FORMAT")
     } catch let e as StorageLockError {
         fail(e.errorDescription ?? "storage is busy (lock timeout)", code: "LOCK_TIMEOUT")
     } catch let e as SpecialSlotError {
-        fail(e.errorDescription ?? "failed to rename group")
+        fail(e.errorDescription ?? "failed to rename group", code: codeForSpecialSlotError(e))
     } catch {
         fail(describeWriteError(error, context: "renaming group \(id)"))
     }
@@ -1238,12 +1279,12 @@ func cmdRenameGroup(_ args: ParsedArgs) -> Never {
 func cmdWriteAttachment(_ args: ParsedArgs) -> Never {
     let group = resolveGroup(args, inPage: resolvePageFlag(args)) // v2.9.35: page-scoped (flag parity with write)
     guard let slotRaw = args.positionals.first else {
-        fail("missing slot number (usage: write-attachment <slot> <file> [file ...] [--group <id>] [--page <id>] [--replace])")
+        fail("missing slot number (usage: write-attachment <slot> <file> [file ...] [--group <id>] [--page <id>] [--replace])", code: "INVALID_ARGUMENT_COMBINATION")
     }
     let n = parseSlot(slotRaw)
     let fileArgs = Array(args.positionals.dropFirst())
     guard !fileArgs.isEmpty else {
-        fail("no files given (usage: write-attachment <slot> <file> [file ...])")
+        fail("no files given (usage: write-attachment <slot> <file> [file ...])", code: "INVALID_ARGUMENT_COMBINATION")
     }
 
     // Resolve + validate each path, build SlotAttachment mirroring the GUI
@@ -1325,7 +1366,7 @@ func cmdClear(_ args: ParsedArgs) -> Never {
 // group's directory to `.trash` (recoverable), so this is a soft delete.
 func cmdDeleteGroup(_ args: ParsedArgs) -> Never {
     guard let id = args.positionals.first, !id.trimmingCharacters(in: .whitespaces).isEmpty else {
-        fail("missing group id (usage: delete-group <id>)")
+        fail("missing group id (usage: delete-group <id>)", code: "INVALID_ARGUMENT_COMBINATION")
     }
     // F6 (契约5): the default group is protected (CLI-layer guard; Kit layer also
     // rejects it as a defense-in-depth double check).
@@ -1345,7 +1386,7 @@ func cmdDeleteGroup(_ args: ParsedArgs) -> Never {
     } catch let e as StorageLockError {
         fail(e.errorDescription ?? "storage is busy (lock timeout)", code: "LOCK_TIMEOUT")
     } catch let e as SpecialSlotError {
-        fail(e.errorDescription ?? "failed to delete group")
+        fail(e.errorDescription ?? "failed to delete group", code: codeForSpecialSlotError(e))
     } catch {
         fail(describeWriteError(error, context: "deleting group"))
     }
@@ -1355,7 +1396,7 @@ func cmdDeleteGroup(_ args: ParsedArgs) -> Never {
 // moves the affected group directories to `.trash` (recoverable).
 func cmdDeletePage(_ args: ParsedArgs) -> Never {
     guard let id = args.positionals.first, !id.trimmingCharacters(in: .whitespaces).isEmpty else {
-        fail("missing page id (usage: delete-page <id>)")
+        fail("missing page id (usage: delete-page <id>)", code: "INVALID_ARGUMENT_COMBINATION")
     }
     // F6 (契约5): the default page is protected (CLI-layer guard; Kit layer also
     // rejects it as a defense-in-depth double check).
@@ -1364,7 +1405,7 @@ func cmdDeletePage(_ args: ParsedArgs) -> Never {
     }
     let index = storage.loadIndex()
     guard index.pages.contains(where: { $0.id == id }) else {
-        fail("page \(id) not found")
+        fail("page \(id) not found", code: "PAGE_NOT_FOUND")
     }
     do {
         try storage.deletePage(id: id)
@@ -1374,7 +1415,7 @@ func cmdDeletePage(_ args: ParsedArgs) -> Never {
     } catch let e as StorageLockError {
         fail(e.errorDescription ?? "storage is busy (lock timeout)", code: "LOCK_TIMEOUT")
     } catch let e as PageError {
-        fail(e.errorDescription ?? "failed to delete page")
+        fail(e.errorDescription ?? "failed to delete page", code: codeForPageError(e))
     } catch {
         fail(describeWriteError(error, context: "deleting page"))
     }

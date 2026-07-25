@@ -30,6 +30,7 @@ struct SlotSearchBar: View {
                 if !searchText.isEmpty {
                     Button {
                         searchText = ""
+                        selectedFilter = .all   // P2-5: match no-results「清除搜索」behavior
                     } label: {
                         Image(systemName: "xmark.circle.fill")
                             .foregroundColor(.secondary)

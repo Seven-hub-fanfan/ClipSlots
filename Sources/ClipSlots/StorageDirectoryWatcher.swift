@@ -92,14 +92,16 @@ final class StorageDirectoryWatcher {
 
     func stop() {
         guard let stream = stream else { return }
-        FSEventStreamStop(stream)
-        FSEventStreamInvalidate(stream)
-        FSEventStreamRelease(stream)
+        let boxRef = self.boxRef
         self.stream = nil
-        // Release the retained context box only after the stream is fully torn down,
-        // so any callback that already started can still read the (now nil) weak ref.
-        boxRef?.release()
-        boxRef = nil
+        self.boxRef = nil
+        let q = queue
+        q.async {                                   // P2-3: tear down off the caller/main thread
+            FSEventStreamStop(stream)
+            FSEventStreamInvalidate(stream)
+            FSEventStreamRelease(stream)
+            boxRef?.release()
+        }
         NSLog("[ClipSlots] StorageDirectoryWatcher stopped")
     }
 

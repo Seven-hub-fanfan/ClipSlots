@@ -181,21 +181,51 @@ final class HotKeyManager {
         return parseSimpleKeybind(expanded)
     }
 
+    // P1-5: resolve the key code that produces `character` on the CURRENT keyboard
+    // layout so single-char hotkeys also work on non-US layouts (AZERTY/Dvorak/…).
+    static func virtualKeyCode(forCharacter character: Character) -> Int? {
+        guard let scalar = String(character).lowercased().unicodeScalars.first, scalar.value <= 0xFFFF else { return nil }
+        let target = UniChar(scalar.value)
+        guard let src = TISCopyCurrentKeyboardLayoutInputSource()?.takeRetainedValue(),
+              let ptr = TISGetInputSourceProperty(src, kTISPropertyUnicodeKeyLayoutData) else { return nil }
+        let data = Unmanaged<CFData>.fromOpaque(ptr).takeUnretainedValue() as Data
+        return data.withUnsafeBytes { raw -> Int? in
+            guard let layout = raw.bindMemory(to: UCKeyboardLayout.self).baseAddress else { return nil }
+            var deadKeyState: UInt32 = 0
+            var chars = [UniChar](repeating: 0, count: 4)
+            var length = 0
+            for keyCode in UInt16(0)..<128 {
+                let status = UCKeyTranslate(layout, keyCode, UInt16(kUCKeyActionDisplay), 0,
+                                            UInt32(LMGetKbdType()), OptionBits(kUCKeyTranslateNoDeadKeysBit),
+                                            &deadKeyState, chars.count, &length, &chars)
+                if status == noErr, length == 1, chars[0] == target { return Int(keyCode) }
+            }
+            return nil
+        }
+    }
+
     private func parseSimpleKeybind(_ pattern: String) -> (modifiers: Int, keyCode: Int)? {
         let parts = pattern.lowercased().split(separator: "+").map { String($0).trimmingCharacters(in: .whitespaces) }
 
         var modifiers: Int = 0
         var keyCode: Int?
+        var isFunctionKey = false
 
         for part in parts {
             if let mod = modifierMap[part] {
                 modifiers |= mod
+            } else if part.count >= 2, part.hasPrefix("f"), Int(part.dropFirst()) != nil, let code = keyCodeMap[part] {
+                keyCode = code
+                isFunctionKey = true                                   // P2-6
+            } else if part.count == 1, let ch = part.first, ch.isLetter || ch.isNumber,
+                      let code = HotKeyManager.virtualKeyCode(forCharacter: ch) {
+                keyCode = code                                         // P1-5: dynamic layout
             } else if let code = keyCodeMap[part] {
                 keyCode = code
             }
         }
 
-        guard let keyCode = keyCode, modifiers != 0 else { return nil }
+        guard let keyCode = keyCode, (modifiers != 0 || isFunctionKey) else { return nil }   // P2-6
         return (modifiers, keyCode)
     }
 
