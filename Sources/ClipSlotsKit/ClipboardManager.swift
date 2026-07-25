@@ -189,6 +189,11 @@ public final class ClipboardManager {
     public init() {}
 
     public func capture() -> SlotContent {
+        // v2.10.3 (P2): NSPasteboard is not thread-safe; force pasteboard access onto
+        // the main thread. Only hop when off-main to avoid a same-thread sync deadlock.
+        if !Thread.isMainThread {
+            return DispatchQueue.main.sync { self.capture() }
+        }
         var content = SlotContent()
         content.timestamp = Date()
 
@@ -214,6 +219,10 @@ public final class ClipboardManager {
     }
 
     public func restore(_ content: SlotContent) -> Bool {
+        // v2.10.3 (P2): keep NSPasteboard mutation on the main thread.
+        if !Thread.isMainThread {
+            return DispatchQueue.main.sync { self.restore(content) }
+        }
         guard !content.items.isEmpty else {
             // v2.8.1 (P1-2): the original clipboard was genuinely empty — clear the
             // pasteboard so an injected paste payload isn't left behind. A non-empty

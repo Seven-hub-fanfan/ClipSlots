@@ -9,6 +9,10 @@ final class SlotConnectionStorage {
     private let baseDir: URL
     private let queue = DispatchQueue(label: "com.clipslots.connection-storage", qos: .utility)
     private var cache: [String: SlotConnectionMap] = [:]
+    /// v2.10.3 (P1 fix): guards `cache`. It is read on the main thread (load/save/
+    /// delete/export) but also written from the background `loadAll` hop; a plain
+    /// `Dictionary` under concurrent access can crash/corrupt.
+    private let cacheLock = NSLock()
 
     private init() {
         baseDir = ClipSlotsPaths.specialSlots
@@ -30,19 +34,24 @@ final class SlotConnectionStorage {
 
     func load(pageId: String, groupId: String) -> SlotConnectionMap {
         let k = key(pageId: pageId, groupId: groupId)
+        cacheLock.lock(); defer { cacheLock.unlock() }
         if let cached = cache[k] { return cached }
         return .empty
     }
 
     func save(_ map: SlotConnectionMap, pageId: String, groupId: String) {
         let k = key(pageId: pageId, groupId: groupId)
+        cacheLock.lock()
         cache[k] = map
+        cacheLock.unlock()
         persistMap(map, groupId: groupId)
     }
 
     func delete(pageId: String, groupId: String) {
         let k = key(pageId: pageId, groupId: groupId)
+        cacheLock.lock()
         cache.removeValue(forKey: k)
+        cacheLock.unlock()
         let url = fileURL(for: groupId)
         queue.async {
             try? FileManager.default.removeItem(at: url)
@@ -64,19 +73,24 @@ final class SlotConnectionStorage {
                 }
                 // Cache with empty pageId — will be overridden on explicit load
                 let k = self.key(pageId: "", groupId: id)
-                DispatchQueue.main.async {
-                    self.cache[k] = map
-                }
+                self.cacheLock.lock()
+                self.cache[k] = map
+                self.cacheLock.unlock()
             }
         }
     }
 
     // v2.7.7: Bulk access helpers for page/all export and clear.
-    func allCachedMaps() -> [String: SlotConnectionMap] { cache }
+    func allCachedMaps() -> [String: SlotConnectionMap] {
+        cacheLock.lock(); defer { cacheLock.unlock() }
+        return cache
+    }
 
     func deleteAll(where shouldDelete: @escaping (_ key: String, _ map: SlotConnectionMap) -> Bool) {
+        cacheLock.lock()
         let targetKeys = cache.filter { shouldDelete($0.key, $0.value) }.map(\.key)
         for k in targetKeys { cache.removeValue(forKey: k) }
+        cacheLock.unlock()
     }
 
     private func persistMap(_ map: SlotConnectionMap, groupId: String) {

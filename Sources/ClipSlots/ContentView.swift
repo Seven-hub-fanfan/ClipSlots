@@ -128,7 +128,7 @@ struct ContentView: View {
                             ],
                             spacing: 14
                         ) {
-                            ForEach(1...store.config.slots, id: \.self) { slot in
+                            ForEach(Array(stride(from: 1, through: store.config.slots, by: 1)), id: \.self) { slot in
                                 slotCardView(slot: slot)
                                     .id(slot)
                             }
@@ -1024,7 +1024,8 @@ struct ContentView: View {
             onUpdateDrag: nil,
             onEndDrag: nil
         )
-        .overlay(alignment: .topTrailing) { cursorBadges(slot: slot) }
+        // v2.10.3 (P2): 放左上角，避开右上角的「上次粘贴」角标，避免两者堆叠遮挡。
+        .overlay(alignment: .topLeading) { cursorBadges(slot: slot) }
         .opacity(!isSearchActive || isMatched ? 1.0 : 0.22)
         .saturation(!isSearchActive || isMatched ? 1.0 : 0.35)
         .allowsHitTesting(!isSearchActive || isMatched)
@@ -1118,7 +1119,7 @@ struct ContentView: View {
     }
 
     private var matchedSlotCount: Int {
-        (1...store.config.slots).filter { slotMatched($0) }.count
+        stride(from: 1, through: store.config.slots, by: 1).filter { slotMatched($0) }.count
     }
 
     private func slotMatched(_ slot: Int) -> Bool {

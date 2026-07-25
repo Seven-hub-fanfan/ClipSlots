@@ -50,7 +50,10 @@ final class AppUninstaller: ObservableObject {
 
     private func runPrivilegedCLIRemoval(completion: @escaping () -> Void) {
         let target = CLIInstallManager.targetPath
-        let shellCommand = "rm -f '\(target)'"
+        // v2.10.3 (P2): safely single-quote the path (handles embedded quotes) so the
+        // shell command can't be broken/injected by an unusual install path.
+        let quotedTarget = "'" + target.replacingOccurrences(of: "'", with: "'\\''") + "'"
+        let shellCommand = "rm -f \(quotedTarget)"
         let escaped = shellCommand
             .replacingOccurrences(of: "\\", with: "\\\\")
             .replacingOccurrences(of: "\"", with: "\\\"")

@@ -45,7 +45,10 @@ final class CLIInstallManager: ObservableObject {
     // MARK: - Version helpers
 
     /// Run `<binary> version` and parse the JSON `{"ok":true,"version":"x"}`.
-    private func binaryVersion(at path: String) -> String? {
+    /// `nonisolated static` so it can run off the main actor — `waitUntilExit()`
+    /// must never block the main thread (v2.10.3 P1 fix: CLI startup can be slow
+    /// under `flock` contention, which previously froze the Settings UI).
+    nonisolated private static func binaryVersion(at path: String) -> String? {
         guard FileManager.default.fileExists(atPath: path) else { return nil }
         let process = Process()
         process.executableURL = URL(fileURLWithPath: path)
@@ -67,27 +70,28 @@ final class CLIInstallManager: ObservableObject {
         return version
     }
 
-    private var bundledVersion: String? {
-        guard let bundledCLIPath else { return nil }
-        return binaryVersion(at: bundledCLIPath)
-    }
-
-    private var installedVersion: String? {
-        binaryVersion(at: Self.targetPath)
-    }
-
     // MARK: - State refresh
 
     func refreshState() {
-        guard FileManager.default.fileExists(atPath: Self.targetPath) else {
+        let target = Self.targetPath
+        guard FileManager.default.fileExists(atPath: target) else {
             state = .notInstalled
             return
         }
-        let installed = installedVersion ?? "未知"
-        if let bundled = bundledVersion, bundled != installed {
-            state = .outdated(installed: installed, bundled: bundled)
-        } else {
-            state = .installed(version: installed)
+        // Resolve the bundled path on the main actor, then probe versions off-main
+        // (each probe spawns a subprocess + waitUntilExit) and hop back to update UI.
+        let bundledPath = bundledCLIPath
+        DispatchQueue.global(qos: .userInitiated).async {
+            let installed = Self.binaryVersion(at: target) ?? "未知"
+            let bundled = bundledPath.flatMap { Self.binaryVersion(at: $0) }
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                if let bundled, bundled != installed {
+                    self.state = .outdated(installed: installed, bundled: bundled)
+                } else {
+                    self.state = .installed(version: installed)
+                }
+            }
         }
     }
 

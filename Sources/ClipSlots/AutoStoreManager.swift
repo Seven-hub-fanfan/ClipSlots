@@ -72,7 +72,9 @@ enum AutoModeTraversal {
         }
 
         // 仅在当前组内循环（wrap-around）。
-        let scopeGroupId = cursor?.groupId ?? startGroupId
+        // v2.10.3 (P2): 以「当前所在组」为域，而不是游标所在组——用户手动切到别的组后，
+        // 关闭自动切换时应在当前可见组内循环，而不是回到旧游标那个组。
+        let scopeGroupId = startGroupId
         let groupSlots = flat.filter { $0.groupId == scopeGroupId }
         guard !groupSlots.isEmpty else { return nil }
 

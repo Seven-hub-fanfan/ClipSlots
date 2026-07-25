@@ -81,8 +81,12 @@ final class ThumbnailProvider {
         let prefix = "\(specialSlotId)::\(slot)::"
         lock.lock()
         cache = cache.filter { !$0.key.hasPrefix(prefix) }
+        // v2.10.3 (P1 fix): fire (not drop) queued completions for invalidated keys,
+        // otherwise callers awaiting a thumbnail hang forever (leaking spinners/tasks).
+        let dropped = pendingCompletions.filter { $0.key.hasPrefix(prefix) }
         pendingCompletions = pendingCompletions.filter { !$0.key.hasPrefix(prefix) }
         lock.unlock()
+        notifyCancelled(dropped)
         NSLog("[ClipSlots] ThumbnailProvider invalidateSlot prefix=\(prefix)")
     }
 
@@ -91,15 +95,29 @@ final class ThumbnailProvider {
         let prefix = "\(specialSlotId)::"
         lock.lock()
         cache = cache.filter { !$0.key.hasPrefix(prefix) }
+        let dropped = pendingCompletions.filter { $0.key.hasPrefix(prefix) }
         pendingCompletions = pendingCompletions.filter { !$0.key.hasPrefix(prefix) }
         lock.unlock()
+        notifyCancelled(dropped)
         NSLog("[ClipSlots] ThumbnailProvider invalidateSpecialSlot prefix=\(prefix)")
     }
 
     func clearCache() {
         lock.lock()
         cache.removeAll()
+        let dropped = pendingCompletions
         pendingCompletions.removeAll()
         lock.unlock()
+        notifyCancelled(dropped)
+    }
+
+    /// Fire dropped/queued completions with a nil image so no caller is left hanging
+    /// when its in-flight request is invalidated before QuickLook returns.
+    private func notifyCancelled(_ dropped: [String: [(NSImage?, String) -> Void]]) {
+        for (key, completions) in dropped {
+            for completion in completions {
+                DispatchQueue.main.async { completion(nil, key) }
+            }
+        }
     }
 }

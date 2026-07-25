@@ -7,9 +7,9 @@ used_when: 当需要以编程方式读取、写入、检索、加载或整理 ma
 requires: macOS + 已安装 ClipSlots v2.9.33+，CLI 位于 /usr/local/bin/clipslots。
 ---
 
-# ClipSlots CLI 使用技能（草稿）
+# ClipSlots CLI 使用技能
 
-> 正式可安装版见 `skills/clipslots-manager/SKILL.md`；本文件为工作草稿，两者内容保持同步。
+> 本文件为随 App bundle 打包、供各 Agent 实际读取的正式版本，与 `docs/clipslots-cli-skill-draft.md` 工作草稿保持同步。
 
 > **Skill v1.3.2（对齐 CLI v2.9.58，已验证 CLI 2.9.58）**：本版为完整安全策略升级——写入前按能力矩阵优先使用 CLI 原生护栏，空槽 ≠ 可占用，定位歧义强制消歧，批量走预检。运行时先探测（`version` → 子命令 `--help` → `write --batch`/`CLIPSLOTS_DATA_DIR`），按实际能力降级。
 >

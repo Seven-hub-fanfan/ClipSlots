@@ -95,7 +95,7 @@ struct ClipSlotsApp: App {
             // That is the real reason ctrl+option+number kept saving/HUD while the
             // configured shortcut was cmd+option+number.
             CommandMenu("槽位") {
-                ForEach(1...store.config.slots, id: \.self) { slot in
+                ForEach(Array(stride(from: 1, through: store.config.slots, by: 1)), id: \.self) { slot in
                     Button("粘贴槽位 \(slot)") { store.pasteSlot(slot) }
                     Button("保存到槽位 \(slot)") { store.saveToSlot(slot) }
                 }
@@ -272,6 +272,11 @@ final class SlotStoreObservable: ObservableObject {
     deinit {
         storageWatcher?.stop()
         storageWatcher = nil
+        // v2.10.3 (P2): remove the local key monitor so it isn't leaked/dangling.
+        if let monitor = localHotkeyMonitor {
+            NSEvent.removeMonitor(monitor)
+            localHotkeyMonitor = nil
+        }
     }
 
     // MARK: - v2.9.4 Storage Watcher (Feature #2)
@@ -356,7 +361,20 @@ final class SlotStoreObservable: ObservableObject {
         loadSpecialSlots()
         loadSlots()
         loadConnectionMapForCurrentGroup()
+        reloadLastPasteFromDefaults() // v2.10.3 (P2): reflect CLI-side paste into GUI
         recomputeAutoPreviews()
+    }
+
+    /// v2.10.3 (P2): re-read the "上次粘贴" location from UserDefaults so a paste made
+    /// by the `clipslots` CLI (separate process) is reflected in the GUI after the
+    /// storage watcher reload, instead of only updating on relaunch.
+    func reloadLastPasteFromDefaults() {
+        let d = UserDefaults.standard
+        lastPastePageId = d.string(forKey: UserPreferenceKeys.lastPastePageId) ?? ""
+        lastPasteGroupId = d.string(forKey: UserPreferenceKeys.lastPasteGroupId) ?? ""
+        lastPasteSlotIndex = d.object(forKey: UserPreferenceKeys.lastPasteSlotIndex) == nil
+            ? -1
+            : d.integer(forKey: UserPreferenceKeys.lastPasteSlotIndex)
     }
 
     func switchSpecialSlot(id: String) {
@@ -391,6 +409,8 @@ final class SlotStoreObservable: ObservableObject {
         loadSlots()
         loadConnectionMapForCurrentGroup()
         refreshTrigger = UUID()
+
+        recomputeAutoPreviews() // v2.10.3 (P2): refresh cursor badges for the new group
 
         showToast("已预览「\(currentSpecialSlot?.name ?? id)」")
     }
@@ -464,6 +484,8 @@ final class SlotStoreObservable: ObservableObject {
         loadSlots()
         loadConnectionMapForCurrentGroup()
         refreshTrigger = UUID()
+
+        recomputeAutoPreviews() // v2.10.3 (P2): refresh cursor badges for the new group
 
         showToast("已切换至「\(currentSpecialSlot?.name ?? id)」")
     }
@@ -797,7 +819,7 @@ final class SlotStoreObservable: ObservableObject {
 
         sendCopyKeystroke()
 
-        waitForClipboardChangeOrDelay(from: beforeChangeCount, timeout: 0.35, interval: 0.03) { [weak self] changed in
+        waitForClipboardChangeOrDelay(from: beforeChangeCount, timeout: 0.6, interval: 0.03) { [weak self] changed in
             guard let self = self else { return }
             guard changed else {
                 NSLog("[ClipSlots] autoStoreFromHotkey ignored: clipboard did not change")
@@ -905,6 +927,13 @@ final class SlotStoreObservable: ObservableObject {
                 iconName: "checkmark.circle.fill",
                 kind: .success
             ))
+            return
+        }
+
+        // v2.10.3 (P2): 在推进读游标之前先确认辅助功能权限——否则 pasteSlot 会直接 return，
+        // 游标却已前移，导致「粘贴没发生但游标跳过了一个槽位」。
+        guard AXIsProcessTrusted() else {
+            promptAccessibilityPermissionIfNeeded()
             return
         }
 
@@ -1658,7 +1687,7 @@ final class SlotStoreObservable: ObservableObject {
     /// Poll until clipboard changeCount differs from `changeCount` or timeout.
     private func waitForClipboardChangeOrDelay(
         from changeCount: Int,
-        timeout: TimeInterval = 0.35,
+        timeout: TimeInterval = 0.6,
         interval: TimeInterval = 0.03,
         completion: @escaping (Bool) -> Void
     ) {
@@ -1697,7 +1726,7 @@ final class SlotStoreObservable: ObservableObject {
 
         sendCopyKeystroke()
 
-        waitForClipboardChangeOrDelay(from: beforeChangeCount, timeout: 0.35, interval: 0.03) { [weak self] changed in
+        waitForClipboardChangeOrDelay(from: beforeChangeCount, timeout: 0.6, interval: 0.03) { [weak self] changed in
             guard let self = self else { return }
 
             guard changed else {

@@ -350,7 +350,13 @@ public final class SlotStorage {
     private func updateManifest() throws {
         var entries: [SlotManifest.Entry] = []
 
-        for slot in 1...10 {
+        // v2.10.3 (P2): enumerate actual on-disk integer-named slot dirs instead of a
+        // hardcoded `1...10`, so a larger configured slot count is not silently dropped.
+        let slotNumbers = (try? FileManager.default.contentsOfDirectory(atPath: baseURL.path))?
+            .compactMap { Int($0) }
+            .sorted() ?? []
+
+        for slot in slotNumbers {
             let slotDir = baseURL.appendingPathComponent(String(slot))
 
             var isSlotDir: ObjCBool = false

@@ -480,6 +480,9 @@ public final class SpecialSlotStorage {
     public func goBackAutoStoreCursor() throws -> SpecialSlotCursor? {
         try storageLock.withLock {
             var index = loadIndex()
+            // v2.10.3 (P2): with no back-history, do NOT silently reset to the head —
+            // that made "回退" destructively jump the cursor to slot 1. No-op instead.
+            guard index.autoStoreCursorPrev != nil else { return index.autoStoreCursor }
             index.autoStoreCursor = index.autoStoreCursorPrev
             index.autoStoreCursorPrev = nil
             try saveIndex(index)
@@ -492,6 +495,8 @@ public final class SpecialSlotStorage {
     public func goBackAutoPasteCursor() throws -> SpecialSlotCursor? {
         try storageLock.withLock {
             var index = loadIndex()
+            // v2.10.3 (P2): same guard — no history means no-op, not a reset.
+            guard index.autoPasteCursorPrev != nil else { return index.autoPasteCursor }
             index.autoPasteCursor = index.autoPasteCursorPrev
             index.autoPasteCursorPrev = nil
             try saveIndex(index)

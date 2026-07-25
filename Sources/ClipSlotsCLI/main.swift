@@ -597,11 +597,11 @@ func cmdList(_ args: ParsedArgs) -> Never {
     // unchanged (full list, no pagination field) for backward compatibility.
     if let psRaw = args.flag("page-size") {
         guard let pageSize = Int(psRaw), pageSize > 0 else {
-            fail("--page-size must be a positive integer (got '\(psRaw)')")
+            fail("--page-size must be a positive integer (got '\(psRaw)')", code: "INVALID_LIMIT")
         }
         let pageNum = Int(args.flag("page-num") ?? "1") ?? 1
         guard pageNum >= 1 else {
-            fail("--page-num must be >= 1 (got '\(args.flag("page-num") ?? "")')")
+            fail("--page-num must be >= 1 (got '\(args.flag("page-num") ?? "")')", code: "INVALID_LIMIT")
         }
         let total = slots.count
         let totalPages = max(1, (total + pageSize - 1) / pageSize)
@@ -763,7 +763,7 @@ func cmdWrite(_ args: ParsedArgs) -> Never {
         // v2.9.3 (Fix #5): reject non-UTF8 / binary stdin instead of silently
         // decoding to "" and CLEARING the slot. `write` only accepts text.
         guard let decoded = String(data: data, encoding: .utf8), !data.contains(0) else {
-            fail("stdin is not valid UTF-8 text; write only accepts text (got \(data.count) bytes of binary)")
+            fail("stdin is not valid UTF-8 text; write only accepts text (got \(data.count) bytes of binary)", code: "INVALID_INPUT_FORMAT")
         }
         text = decoded
     }
@@ -1148,7 +1148,7 @@ func cmdCreateGroup(_ args: ParsedArgs) -> Never {
         fail("a group named '\(trimmed)' already exists on this page")
     } catch let e as StorageLockError {
         // v2.9.4 (#4): cross-process lock contention timeout.
-        fail(e.errorDescription ?? "storage is busy (lock timeout)")
+        fail(e.errorDescription ?? "storage is busy (lock timeout)", code: "LOCK_TIMEOUT")
     } catch let e as SpecialSlotError {
         // maxSpecialSlotsReached → the caller should create a new page (see skill rules).
         fail(e.errorDescription ?? "failed to create group")
@@ -1183,7 +1183,7 @@ func cmdCreatePage(_ args: ParsedArgs) -> Never {
         }
         success(payload)
     } catch let e as StorageLockError {
-        fail(e.errorDescription ?? "storage is busy (lock timeout)")
+        fail(e.errorDescription ?? "storage is busy (lock timeout)", code: "LOCK_TIMEOUT")
     } catch let e as PageError {
         fail(e.errorDescription ?? "failed to create page")
     } catch {
@@ -1205,7 +1205,7 @@ func cmdRenameGroup(_ args: ParsedArgs) -> Never {
     }
     let index = storage.loadIndex()
     guard let group = index.specialSlots.first(where: { $0.id == id }) else {
-        fail("group \(id) not found")
+        fail("group \(id) not found", code: "GROUP_NOT_FOUND")
     }
     // --page-name is advisory only: when provided, validate it matches the group's
     // owning page so a caller cannot silently rename a group on the wrong page.
@@ -1223,11 +1223,11 @@ func cmdRenameGroup(_ args: ParsedArgs) -> Never {
     } catch SpecialSlotError.duplicateName {
         fail("a group named '\(String(trimmed.prefix(30)))' already exists on this page")
     } catch SpecialSlotError.specialSlotNotFound {
-        fail("group \(id) not found")
+        fail("group \(id) not found", code: "GROUP_NOT_FOUND")
     } catch SpecialSlotError.invalidSpecialSlotName {
         fail("invalid group name")
     } catch let e as StorageLockError {
-        fail(e.errorDescription ?? "storage is busy (lock timeout)")
+        fail(e.errorDescription ?? "storage is busy (lock timeout)", code: "LOCK_TIMEOUT")
     } catch let e as SpecialSlotError {
         fail(e.errorDescription ?? "failed to rename group")
     } catch {
@@ -1288,7 +1288,7 @@ func cmdWriteAttachment(_ args: ParsedArgs) -> Never {
             return (wrote, content.attachments.count, content.items.isEmpty)
         }
     } catch let e as StorageLockError {
-        fail(e.errorDescription ?? "storage is busy (lock timeout)")
+        fail(e.errorDescription ?? "storage is busy (lock timeout)", code: "LOCK_TIMEOUT")
     } catch {
         fail(describeWriteError(error, context: "writing attachments to slot \(n) in group \(group)"))
     }
@@ -1314,7 +1314,7 @@ func cmdClear(_ args: ParsedArgs) -> Never {
             storage.clear(n, in: group)
         }
     } catch let e as StorageLockError {
-        fail(e.errorDescription ?? "storage is busy (lock timeout)")
+        fail(e.errorDescription ?? "storage is busy (lock timeout)", code: "LOCK_TIMEOUT")
     } catch {
         fail(describeWriteError(error, context: "clearing slot \(n) in group \(group)"))
     }
@@ -1335,7 +1335,7 @@ func cmdDeleteGroup(_ args: ParsedArgs) -> Never {
     // Validate existence first for a clear, agent-friendly error.
     let index = storage.loadIndex()
     guard index.specialSlots.contains(where: { $0.id == id }) else {
-        fail("group \(id) not found")
+        fail("group \(id) not found", code: "GROUP_NOT_FOUND")
     }
     do {
         try storage.deleteSpecialSlot(id: id)
@@ -1343,7 +1343,7 @@ func cmdDeleteGroup(_ args: ParsedArgs) -> Never {
     } catch SpecialSlotError.defaultGroupProtected {
         fail("the default group '\(DEFAULT_GROUP)' is protected and cannot be deleted", code: "DEFAULT_GROUP_PROTECTED")
     } catch let e as StorageLockError {
-        fail(e.errorDescription ?? "storage is busy (lock timeout)")
+        fail(e.errorDescription ?? "storage is busy (lock timeout)", code: "LOCK_TIMEOUT")
     } catch let e as SpecialSlotError {
         fail(e.errorDescription ?? "failed to delete group")
     } catch {
@@ -1372,7 +1372,7 @@ func cmdDeletePage(_ args: ParsedArgs) -> Never {
     } catch PageError.defaultPageProtected {
         fail("the default page '\(DEFAULT_PAGE)' is protected and cannot be deleted", code: "DEFAULT_PAGE_PROTECTED")
     } catch let e as StorageLockError {
-        fail(e.errorDescription ?? "storage is busy (lock timeout)")
+        fail(e.errorDescription ?? "storage is busy (lock timeout)", code: "LOCK_TIMEOUT")
     } catch let e as PageError {
         fail(e.errorDescription ?? "failed to delete page")
     } catch {
