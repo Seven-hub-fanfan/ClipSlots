@@ -7,6 +7,11 @@ final class ThumbnailProvider {
 
     private let lock = NSLock()
     private var cache: [String: NSImage] = [:]
+    // P2-15 (v2.10.6): cache 此前无上限，文件类槽位很多时内存持续增长。改为 LRU：
+    // accessOrder 记录访问顺序（末尾 = 最近使用），超过 maxCacheCount 时淘汰最旧项。
+    // 所有 cache/accessOrder 变更均在既有 lock（NSLock）保护下进行，保持顺序一致。
+    private var accessOrder: [String] = []
+    private let maxCacheCount = 200
     /// Callback queue for in-flight requests. Multiple callers waiting on the same
     /// key all get notified when the single QLThumbnailGenerator request completes.
     private var pendingCompletions: [String: [(NSImage?, String) -> Void]] = [:]
@@ -29,6 +34,7 @@ final class ThumbnailProvider {
         // Fast path: cache hit
         lock.lock()
         if let cached = cache[cacheKey] {
+            markAccessedLocked(cacheKey)  // P2-15 (v2.10.6): 命中后更新 LRU 访问顺序
             lock.unlock()
             DispatchQueue.main.async { completion(cached, cacheKey) }
             return
@@ -74,6 +80,8 @@ final class ThumbnailProvider {
             self.lock.lock()
             if let image = image {
                 self.cache[cacheKey] = image
+                self.markAccessedLocked(cacheKey)  // P2-15 (v2.10.6): 记录访问顺序
+                self.evictIfNeededLocked()          // P2-15 (v2.10.6): 超上限淘汰最旧项
             }
             let completions = self.pendingCompletions.removeValue(forKey: cacheKey) ?? []
             self.lock.unlock()
@@ -92,6 +100,7 @@ final class ThumbnailProvider {
         let prefix = "\(specialSlotId)::\(slot)::"
         lock.lock()
         cache = cache.filter { !$0.key.hasPrefix(prefix) }
+        accessOrder.removeAll { $0.hasPrefix(prefix) }  // P2-15 (v2.10.6): 同步剔除访问顺序
         // v2.10.3 (P1 fix): fire (not drop) queued completions for invalidated keys,
         // otherwise callers awaiting a thumbnail hang forever (leaking spinners/tasks).
         let dropped = pendingCompletions.filter { $0.key.hasPrefix(prefix) }
@@ -106,6 +115,7 @@ final class ThumbnailProvider {
         let prefix = "\(specialSlotId)::"
         lock.lock()
         cache = cache.filter { !$0.key.hasPrefix(prefix) }
+        accessOrder.removeAll { $0.hasPrefix(prefix) }  // P2-15 (v2.10.6): 同步剔除访问顺序
         let dropped = pendingCompletions.filter { $0.key.hasPrefix(prefix) }
         pendingCompletions = pendingCompletions.filter { !$0.key.hasPrefix(prefix) }
         lock.unlock()
@@ -116,10 +126,27 @@ final class ThumbnailProvider {
     func clearCache() {
         lock.lock()
         cache.removeAll()
+        accessOrder.removeAll()  // P2-15 (v2.10.6): 一并清空 LRU 访问顺序
         let dropped = pendingCompletions
         pendingCompletions.removeAll()
         lock.unlock()
         notifyCancelled(dropped)
+    }
+
+    // P2-15 (v2.10.6): 更新访问顺序——把 key 移到末尾（最近使用）。调用方必须已持 lock。
+    private func markAccessedLocked(_ key: String) {
+        if let idx = accessOrder.firstIndex(of: key) {
+            accessOrder.remove(at: idx)
+        }
+        accessOrder.append(key)
+    }
+
+    // P2-15 (v2.10.6): 超过上限时从最旧端淘汰，保持 cache 与 accessOrder 一致。调用方必须已持 lock。
+    private func evictIfNeededLocked() {
+        while cache.count > maxCacheCount, let oldest = accessOrder.first {
+            accessOrder.removeFirst()
+            cache.removeValue(forKey: oldest)
+        }
     }
 
     /// Fire dropped/queued completions with a nil image so no caller is left hanging

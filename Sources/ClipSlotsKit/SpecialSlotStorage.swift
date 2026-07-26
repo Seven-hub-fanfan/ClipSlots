@@ -545,7 +545,11 @@ public final class SpecialSlotStorage {
             // Auto-fix: switch to first available
             var fixed = index
             fixed.currentSpecialSlotId = fixed.specialSlots.first?.id ?? "default"
-            try saveIndex(fixed)
+            // P2-13 (v2.10.6): 自动修复写入必须走跨进程锁，否则与 CLI 并发写会丢更新。
+            // currentSpecialSlot() 本身未持锁，此处包一层 withLock 不会造成重入死锁。
+            try storageLock.withLock {
+                try saveIndex(fixed)
+            }
             guard let fallback = fixed.specialSlots.first else {
                 throw SpecialSlotError.specialSlotNotFound
             }
@@ -755,6 +759,14 @@ public final class SpecialSlotStorage {
             if index.activeHotkeySpecialSlotId == id {
                 index.activeHotkeySpecialSlotId = fallbackId
             }
+
+            // P2-12 (v2.10.6): 删除组时一并清理指向该组的自动存储/自动粘贴读写游标及其
+            // Prev 历史，避免留下悬空游标（遍历层虽能兜底不崩，但会丢失续传语义，且残留
+            // Prev 会让「回退」还原到已不存在的组）。命中被删组即重置为 nil（下次从头开始）。
+            if index.autoStoreCursor?.groupId == id { index.autoStoreCursor = nil }
+            if index.autoStoreCursorPrev?.groupId == id { index.autoStoreCursorPrev = nil }
+            if index.autoPasteCursor?.groupId == id { index.autoPasteCursor = nil }
+            if index.autoPasteCursorPrev?.groupId == id { index.autoPasteCursorPrev = nil }
 
             try saveIndex(index)
 
@@ -969,6 +981,15 @@ public final class SpecialSlotStorage {
                 index.activeHotkeySpecialSlotId = index.currentSpecialSlotId
             }
 
+            // P2-12 (v2.10.6): 删页会连带删除该页下所有组，需一并清理指向这些被删组的
+            // 自动存储/自动粘贴读写游标及其 Prev 历史，避免悬空游标丢失续传语义、以及
+            // 残留 Prev 让「回退」还原到已不存在的组。命中即重置为 nil（下次从头开始）。
+            let deletedGroupIds = Set(groupsInPage.map { $0.id })
+            if let c = index.autoStoreCursor, deletedGroupIds.contains(c.groupId) { index.autoStoreCursor = nil }
+            if let c = index.autoStoreCursorPrev, deletedGroupIds.contains(c.groupId) { index.autoStoreCursorPrev = nil }
+            if let c = index.autoPasteCursor, deletedGroupIds.contains(c.groupId) { index.autoPasteCursor = nil }
+            if let c = index.autoPasteCursorPrev, deletedGroupIds.contains(c.groupId) { index.autoPasteCursorPrev = nil }
+
             try saveIndex(index)
             NSLog("[ClipSlots] Page deleted: \(id)")
 
@@ -1045,9 +1066,21 @@ public final class SpecialSlotStorage {
     public func set(_ slot: Int, content: SlotContent, in specialSlotId: String) -> Bool {
         var content = content
         content.timestamp = Date()
-        let result = slotStorage(for: specialSlotId).set(slot, content: content)
-        if result { touchSpecialSlot(id: specialSlotId) }
-        return result
+        // P2-14 (v2.10.6): 内容写入本身此前不持跨进程锁，仅随后的 touchSpecialSlot 持锁，
+        // GUI 自动存储与 CLI 同时写同一槽位时 SlotStorage 层的删除重建可能交错。此处把
+        // 内容写入与索引 touch 一并纳入同一 storageLock.withLock 保护。set() 本身未持锁，
+        // 且 touch 逻辑已内联到本作用域（不再调用 touchSpecialSlot），故不会重入死锁。
+        return (try? storageLock.withLock {
+            let result = slotStorage(for: specialSlotId).set(slot, content: content)
+            if result {
+                var index = loadIndex()
+                if let idx = index.specialSlots.firstIndex(where: { $0.id == specialSlotId }) {
+                    index.specialSlots[idx].updatedAt = Date()
+                    try? saveIndex(index)
+                }
+            }
+            return result
+        }) ?? false
     }
 
     public func clear(_ slot: Int, in specialSlotId: String) {

@@ -5,7 +5,7 @@ import Carbon
 import UniformTypeIdentifiers
 
 /// Resolve the virtual key code that produces the letter 'v' on the current keyboard layout.
-fileprivate func virtualKeyForCharacterV() -> CGKeyCode {
+fileprivate func computeVirtualKeyForCharacterV() -> CGKeyCode {
     guard let inputSource = TISCopyCurrentKeyboardLayoutInputSource()?.takeRetainedValue() else { return 9 }
     guard let layoutDataPtr = TISGetInputSourceProperty(inputSource, kTISPropertyUnicodeKeyLayoutData) else { return 9 }
     let layoutData = Unmanaged<CFData>.fromOpaque(layoutDataPtr).takeUnretainedValue() as Data
@@ -25,6 +25,44 @@ fileprivate func virtualKeyForCharacterV() -> CGKeyCode {
         if result == noErr, actualLen == 1, unicodeString[0] == 0x0076 { return CGKeyCode(keyCode) }
     }
     return 9
+}
+
+/// v2.10.6 (P2-2): cache the 'v' virtual key code. `computeVirtualKeyForCharacterV`
+/// walks 128 key codes calling `UCKeyTranslate` (a relatively expensive TIS system
+/// call) on every paste, yet the keyboard layout rarely changes. Cache the result
+/// and only recompute when the selected keyboard input source actually changes.
+fileprivate final class VirtualVKeyCache {
+    static let shared = VirtualVKeyCache()
+
+    private let lock = NSLock()
+    private var cached: CGKeyCode?
+
+    private init() {
+        // Layout change events are posted on the distributed notification center.
+        DistributedNotificationCenter.default().addObserver(
+            self,
+            selector: #selector(layoutDidChange),
+            name: NSNotification.Name(kTISNotifySelectedKeyboardInputSourceChanged as String),
+            object: nil
+        )
+    }
+
+    @objc private func layoutDidChange() {
+        lock.lock(); cached = nil; lock.unlock()
+    }
+
+    var keyCode: CGKeyCode {
+        lock.lock()
+        if let c = cached { lock.unlock(); return c }
+        lock.unlock()
+        let computed = computeVirtualKeyForCharacterV()
+        lock.lock(); cached = computed; lock.unlock()
+        return computed
+    }
+}
+
+fileprivate func virtualKeyForCharacterV() -> CGKeyCode {
+    VirtualVKeyCache.shared.keyCode
 }
 
 // v2.7.33: Do not define slot keyboardShortcut helpers for foreground menu actions.
@@ -961,9 +999,13 @@ final class SlotStoreObservable: ObservableObject {
         // 此前是先推进游标再调 pasteSlot；若用户在异步 Cmd+V 触发前手动切组，pasteSlot 的
         // stale-guard 会中止粘贴，但游标已前移——导致跳过一个未粘贴的槽位。改用 onCommitted
         // 回调后，只有真正提交粘贴才推进；中止路径不回调，游标保持原位。
-        pasteSlot(target.slot, suppressAutoAdvance: true) { [weak self] in
+        //
+        // P1-1 (v2.10.6): 若 target.slot 是一条连线链的链首，pasteSlot 会把整条链依次粘贴，
+        // 但旧实现只把游标推进到链首本身，链内后续成员下次触发会被重复粘贴。onCommitted 现在
+        // 回传「实际应推进到的槽位」（连线链时为链内最大 slot，可跳过全部成员），据此推进游标。
+        pasteSlot(target.slot, suppressAutoAdvance: true) { [weak self] committedSlot in
             guard let self = self else { return }
-            try? self.specialStorage.advanceAutoPasteCursor(to: SpecialSlotCursor(groupId: target.groupId, slot: target.slot))
+            try? self.specialStorage.advanceAutoPasteCursor(to: SpecialSlotCursor(groupId: target.groupId, slot: committedSlot))
             self.recomputeAutoPreviews()
         }
     }
@@ -1412,13 +1454,10 @@ final class SlotStoreObservable: ObservableObject {
             return
         }
 
-        guard AXIsProcessTrusted() else {
-            promptAccessibilityPermissionIfNeeded()
-            return
-        }
-
-        cancelPendingClipboardRestore()
-
+        // P1-2 (v2.10.6): 「粘贴全部」改走带代数号(generation)守卫的统一执行器 runSequentialPaste
+        // （经由 pasteSlotChainSequentially）。旧的 pasteItemsSequentially 是一条无中止守卫的递归
+        // 链，快速重触发 / 中途切组会与旧序列交织错乱、乱序粘贴。runSequentialPaste 每次开跑都会
+        // 领取新的 generation 令牌并作废在飞的旧序列，且统一处理 AX 权限、目标应用激活与剪贴板还原。
         let cleanTarget: NSRunningApplication?
         if isSelfApp(targetApp) {
             cleanTarget = lastNonClipSlotsApp
@@ -1426,72 +1465,15 @@ final class SlotStoreObservable: ObservableObject {
             cleanTarget = targetApp ?? lastNonClipSlotsApp
         }
 
-        let previous = clipboard.capture()
-
-        let startSequence = { [weak self] in
-            guard let self = self else { return }
-            self.pasteItemsSequentially(items, index: 0, previousClipboard: previous)
-        }
-
-        if let app = cleanTarget {
-            app.activate(options: [.activateIgnoringOtherApps])
-            waitUntilFrontmost(app, timeout: 1.2) { success in
-                NSLog("[ClipSlots] pasteAll waitUntilFrontmost success=\(success)")
-                startSequence()
-            }
-        } else {
-            startSequence()
-        }
-    }
-
-    private func pasteItemsSequentially(
-        _ items: [(slot: Int, content: SlotContent)],
-        index: Int,
-        previousClipboard: SlotContent
-    ) {
-        guard index < items.count else {
-            // v2.10.3 fix: skip the delayed restore if the user copied new content
-            // during the 0.8s window (changeCount changed), to avoid clobbering it.
-            let expectedChangeCount = clipboard.changeCount
-            let restoreWorkItem = DispatchWorkItem { [weak self] in
-                guard let self = self else { return }
-                defer {
-                    self.pendingClipboardRestore = nil
-                    self.pendingClipboardRestoreContent = nil
-                }
-                if self.clipboard.changeCount != expectedChangeCount {
-                    NSLog("[ClipSlots] pasteAll skip clipboard restore: user changed clipboard (expected=\(expectedChangeCount) current=\(self.clipboard.changeCount))")
-                    return
-                }
-                _ = self.clipboard.restore(previousClipboard)
-            }
-            pendingClipboardRestoreContent = previousClipboard
-            pendingClipboardRestore = restoreWorkItem
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.8, execute: restoreWorkItem)
-            NSLog("[ClipSlots] pasteAll completed specialSlot=\(currentSpecialSlotId) count=\(items.count)")
-            return
-        }
-
-        let item = items[index]
-
-        guard clipboard.restore(item.content) else {
-            NSLog("[ClipSlots] pasteAll restore failed slot=\(item.slot)")
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) { [weak self] in
-                self?.pasteItemsSequentially(items, index: index + 1, previousClipboard: previousClipboard)
-            }
-            return
-        }
-
-        NSLog("[ClipSlots] pasteAll paste specialSlot=\(currentSpecialSlotId) slot=\(item.slot) index=\(index) preview=\(item.content.preview)")
-
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.10) { [weak self] in
-            guard let self = self else { return }
-            self.sendPasteKeystroke()
-
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { [weak self] in
-                self?.pasteItemsSequentially(items, index: index + 1, previousClipboard: previousClipboard)
-            }
-        }
+        let slotNumbers = items.map { $0.slot }
+        let count = slotNumbers.count
+        pasteSlotChainSequentially(
+            slotNumbers,
+            noticeTitle: "已粘贴全部 \(count) 个槽位",
+            noticeSubtitle: "按顺序依次粘贴",
+            activeId: currentSpecialSlotId,
+            targetApp: cleanTarget
+        )
     }
 
     // MARK: - Slot Loading
@@ -1872,7 +1854,7 @@ final class SlotStoreObservable: ObservableObject {
 
     // MARK: - Simple Paste (hotkeys, menu)
 
-    func pasteSlot(_ slot: Int, suppressAutoAdvance: Bool = false, onCommitted: (() -> Void)? = nil) {
+    func pasteSlot(_ slot: Int, suppressAutoAdvance: Bool = false, onCommitted: ((_ committedSlot: Int) -> Void)? = nil) {
         let activeId = activeHotkeySpecialSlotId
 
         NSLog("[ClipSlots] pasteSlot instanceID=\(instanceID) slot=\(slot) activeSpecialSlotId=\(activeId) loadedSpecialSlotId=\(loadedSpecialSlotId ?? "nil")")
@@ -1882,9 +1864,11 @@ final class SlotStoreObservable: ObservableObject {
             let chain = currentConnectionMap.chainSlots(startingAt: slot)
             if chain.count > 1 {
                 NSLog("[ClipSlots] pasteSlot chain detected, chain=\(chain)")
-                // P2-4 (v2.10.5): chain paste 已确定要执行，视为已提交。
-                onCommitted?()
-                pasteSlotChain(chain)
+                // P1-1 (v2.10.6): 旧实现在这里就同步调用 onCommitted?()（早于异步链粘贴），且只把
+                // 游标推进到链首，导致链内后续成员下次触发被重复粘贴。现在把回调下沉到 pasteSlotChain
+                // 的链尾（Cmd+V 真正发出后），并回传链内最大 slot，使游标一次性跳过整条链的全部成员。
+                let advanceSlot = chain.max() ?? slot
+                pasteSlotChain(chain) { onCommitted?(advanceSlot) }
                 return
             }
         }
@@ -1909,7 +1893,7 @@ final class SlotStoreObservable: ObservableObject {
                 ))
                 self?.completeAutoAdvanceAfterAttachments(afterPasting: slot, in: activeId, suppress: suppressAutoAdvance) // v2.9.37: attachments done → safe to advance
                 // P2-4 (v2.10.5): 附件路径确认粘贴完成后再回调，供自动粘贴推进游标。
-                onCommitted?()
+                onCommitted?(slot)
             }
             return
         }
@@ -1918,8 +1902,6 @@ final class SlotStoreObservable: ObservableObject {
             NSLog("[ClipSlots] pasteSlot ignored: specialSlot=\(activeId) slot=\(slot) empty")
             return
         }
-
-        recordLastPaste(slot: slot, in: activeId) // v2.9.36
 
         guard AXIsProcessTrusted() else {
             NSLog("[ClipSlots] Accessibility permission not granted.")
@@ -1948,9 +1930,14 @@ final class SlotStoreObservable: ObservableObject {
 
             self.sendPasteKeystroke()
 
+            // P2-1 (v2.10.6): recordLastPaste 从「调度前无条件调用」移到这里——只有 stale 守卫
+            // 通过、确认要发 Cmd+V 之后才记录一次粘贴，避免因中止路径记录到从未真正发生的粘贴
+            // （与附件路径在完成回调里记录的时机保持一致）。
+            self.recordLastPaste(slot: slot, in: activeId)
+
             // P2-4 (v2.10.5): 文本路径确认发送 Cmd+V 之后再回调，供自动粘贴推进读游标。
             // 若上面的 stale 守卫已中止，则不会走到这里，游标不会被错误推进。
-            onCommitted?()
+            onCommitted?(slot)
 
             // v2.9.56 fix: auto-advance MUST fire only after the paste keystroke has
             // been sent. Previously maybeAutoAdvance was called synchronously right
@@ -2406,7 +2393,7 @@ final class SlotStoreObservable: ObservableObject {
         return result
     }
 
-    func pasteSlotChain(_ slots: [Int]) {
+    func pasteSlotChain(_ slots: [Int], onChainCommitted: (() -> Void)? = nil) {
         let activeId = activeHotkeySpecialSlotId
 
         // v2.8.0: if any slot in the chain has attachments, expand each slot into
@@ -2426,6 +2413,8 @@ final class SlotStoreObservable: ObservableObject {
                     iconName: "link.circle.fill",
                     kind: .success
                 ))
+                // P1-1 (v2.10.6): 整条链粘贴完成后再回调，供自动粘贴把游标推进到链尾。
+                onChainCommitted?()
             }
             return
         }
@@ -2476,6 +2465,7 @@ final class SlotStoreObservable: ObservableObject {
                     return
                 }
                 self.sendPasteKeystroke()
+                onChainCommitted?() // P1-1 (v2.10.6): 合并文本链的 Cmd+V 已发出，回调推进游标。
                 let restoreWorkItem = DispatchWorkItem { [weak self] in
                     guard let self = self else { return }
                     _ = self.clipboard.restore(previous)
@@ -2516,6 +2506,7 @@ final class SlotStoreObservable: ObservableObject {
                     return
                 }
                 self.sendPasteKeystroke()
+                onChainCommitted?() // P1-1 (v2.10.6): 文件链的 Cmd+V 已发出，回调推进游标。
                 let restoreWorkItem = DispatchWorkItem { [weak self] in
                     guard let self = self else { return }
                     _ = self.clipboard.restore(previous)
@@ -2540,7 +2531,7 @@ final class SlotStoreObservable: ObservableObject {
         case .unsupported:
             // v2.7.4: Instead of rejecting mixed content chains, paste each item
             // sequentially in order (text → Cmd+V → image → Cmd+V → ...).
-            pasteSlotChainSequentially(slots, activeId: activeId)
+            pasteSlotChainSequentially(slots, activeId: activeId, onCommitted: onChainCommitted)
 
         case .empty:
             showFloatingNotice(FloatingNotice(
@@ -2701,12 +2692,12 @@ final class SlotStoreObservable: ObservableObject {
             ))
 
         case .unsupported:
-            showFloatingNotice(FloatingNotice(
-                title: "串联粘贴失败",
-                subtitle: "暂不支持混合类型",
-                iconName: "exclamationmark.triangle.fill",
-                kind: .warning
-            ))
+            // P2-3 (v2.10.6): 与快捷键路径 pasteSlotChain 对齐——混合类型链不再直接报「暂不支持」，
+            // 而是逐段依次粘贴（text → Cmd+V → image → Cmd+V → …），并把目标应用透传下去。
+            let cleanTarget: NSRunningApplication?
+            if isSelfApp(targetApp) { cleanTarget = lastNonClipSlotsApp }
+            else { cleanTarget = targetApp ?? lastNonClipSlotsApp }
+            pasteSlotChainSequentially(slots, activeId: activeId, targetApp: cleanTarget)
         case .empty:
             showFloatingNotice(FloatingNotice(
                 title: "串联粘贴失败",
@@ -2878,7 +2869,7 @@ final class SlotStoreObservable: ObservableObject {
 
     // MARK: - v2.7.4 Mixed Chain Sequential Paste
 
-    func pasteSlotChainSequentially(_ slots: [Int], noticeTitle: String? = nil, noticeSubtitle: String? = nil, activeId: String? = nil, targetApp: NSRunningApplication? = nil) {
+    func pasteSlotChainSequentially(_ slots: [Int], noticeTitle: String? = nil, noticeSubtitle: String? = nil, activeId: String? = nil, targetApp: NSRunningApplication? = nil, onCommitted: (() -> Void)? = nil) {
         let group = activeId ?? currentSpecialSlotId
         let payloads = slots.compactMap { slot -> ChainPastePayload? in
             let payload = payloadForSlot(slot)
@@ -2893,6 +2884,8 @@ final class SlotStoreObservable: ObservableObject {
                 iconName: "link.circle.fill",
                 kind: .success
             ))
+            // P1-1 (v2.10.6): 混合内容链逐段粘贴完成后回调，供自动粘贴推进游标到链尾。
+            onCommitted?()
         }
     }
 

@@ -103,6 +103,23 @@ final class SlotConnectionStorage {
         let targetKeys = cache.filter { shouldDelete($0.key, $0.value) }.map(\.key)
         for k in targetKeys { cache.removeValue(forKey: k) }
         cacheLock.unlock()
+
+        // P1-3 (v2.10.6): 此前 deleteAll 只清内存缓存、不删磁盘文件，下次启动 loadAll() 会把
+        // 这些连线从磁盘重新读回——「清除全部连接」弹「已清除」但重启后连接全部复活。这里在清缓存
+        // 的同时删除每个目标 group 的 connections.json。键格式为 "pageId::groupId"，连线以「组」为
+        // 单位存盘（fileURL 只用 groupId），故取最后一个 "::" 之后的段作为 groupId。
+        let groupIds = Set(targetKeys.compactMap { key -> String? in
+            guard let range = key.range(of: "::", options: .backwards) else { return nil }
+            let gid = String(key[range.upperBound...])
+            return gid.isEmpty ? nil : gid
+        })
+        guard !groupIds.isEmpty else { return }
+        let urls = groupIds.map { fileURL(for: $0) }
+        queue.async {
+            for url in urls {
+                try? FileManager.default.removeItem(at: url)
+            }
+        }
     }
 
     private func persistMap(_ map: SlotConnectionMap, groupId: String) {

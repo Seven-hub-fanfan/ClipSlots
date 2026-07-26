@@ -328,6 +328,12 @@ struct ContentView: View {
         .onChange(of: selectedFilter) { _ in scheduleGlobalSearchRecompute(debounced: false) }
         .onChange(of: searchScope) { _ in scheduleGlobalSearchRecompute(debounced: false) }
         .onChange(of: globalSearchSortRule) { _ in scheduleGlobalSearchRecompute(debounced: false) }
+        // P2-5 (v2.10.6): 全局搜索缓存此前只在搜索输入变化时失效，底层槽位内容
+        // （热键/后台同步改动）变化时结果保持陈旧。用槽位内容签名（contentId+updatedAt）
+        // 监听 store.slots 变化，触发非防抖重算，让结果随底层数据刷新。
+        .onChange(of: store.slots.mapValues { "\($0.contentId):\($0.updatedAt)" }) { _ in
+            scheduleGlobalSearchRecompute(debounced: false)
+        }
     }
 
     // Layer 1: Title + Stats + Settings
@@ -728,10 +734,20 @@ struct ContentView: View {
 
     // P2-4: run NSAlert without blocking the SwiftUI runloop; sheet on the key window, modal fallback.
     private func runAlertNonBlocking(_ alert: NSAlert, completion: @escaping (NSApplication.ModalResponse) -> Void) {
+        // P2-6 (v2.10.6): 统一聚焦逻辑。此前只有 beginSheetModal 路径设置了 accessory 输入框
+        // 为第一响应者，runModal() 回退路径（已有 sheet 附着 / 找不到 window）跳过了聚焦，
+        // 用户仍需手动点击输入框。这里对 runModal 路径在弹出前显式聚焦。
+        func focusAccessoryForModal() {
+            if let field = alert.accessoryView {
+                alert.layout()
+                alert.window.makeFirstResponder(field)
+            }
+        }
         if let window = NSApp.keyWindow ?? NSApp.mainWindow ?? NSApp.windows.first(where: { $0.isVisible }) {
             // P2-8 (v2.10.5): 若窗口已有 sheet 在展示，再 beginSheetModal 会排队/冲突，
             // 退化为 runModal 保证当前对话框可用。
             if window.attachedSheet != nil {
+                focusAccessoryForModal()
                 completion(alert.runModal())
                 return
             }
@@ -742,6 +758,7 @@ struct ContentView: View {
                 alert.window.makeFirstResponder(field)
             }
         } else {
+            focusAccessoryForModal()
             completion(alert.runModal())
         }
     }
@@ -1171,23 +1188,28 @@ struct ContentView: View {
     /// snapshot) used to run synchronously on the main thread, causing typing lag on
     /// large libraries. It now runs off the main thread; results are applied back on the
     /// main thread and only if the search inputs are still current (stale-query guard).
-    private func recomputeGlobalSearchResults() {
+    private func recomputeGlobalSearchResults(overrideQuery: String? = nil, overrideFilter: SlotFilterType? = nil) {
         // Capture the current inputs on the main thread.
-        let query = searchText
-        let filter = selectedFilter
+        // P2-8 (v2.10.6): 优先使用调度时刻显式捕获并传入的值（overrideQuery/overrideFilter），
+        // 避免防抖 work item 通过被捕获的 ContentView struct 拷贝读到陈旧的 searchText/selectedFilter。
+        let query = overrideQuery ?? searchText
+        let filter = overrideFilter ?? selectedFilter
         let scope = searchScope
         let sortRule = globalSearchSortRule
+
+        let store = self.store
+        // P2-4 (v2.10.6): 将 generation 自增与令牌捕获上移到最前（早返回之前）。
+        // 此前搜索失活（清空搜索框）走下面 guard 的早返回，不自增 generation，
+        // 已派发的后台搜索完成后会通过陈旧校验、把旧结果写回已清空的缓存（“回魂”）。
+        // 现在任何一次重算入口都会作废在途搜索。
+        store.globalSearchGeneration += 1
+        let searchToken = store.globalSearchGeneration
 
         guard scope == .global, SlotSearchMatcher.isActive(query: query, filter: filter) else {
             globalSearchResultsCache = []
             return
         }
 
-        let store = self.store
-        // P1-4: bump the generation on the main thread and capture the token; the stale
-        // guard below compares against the live reference value (self snapshots are unreliable).
-        store.globalSearchGeneration += 1
-        let searchToken = store.globalSearchGeneration
         let currentPageId = store.currentPageId
         let currentSpecialSlotId = store.currentSpecialSlotId
 
@@ -1210,7 +1232,20 @@ struct ContentView: View {
             DispatchQueue.main.async {
                 // Stale-query guard: only apply if no newer recompute was scheduled.
                 guard store.globalSearchGeneration == searchToken else { return }   // P1-4
-                self.globalSearchResultsCache = results
+                // P2-7 (v2.10.6): 智能排序在后台搜索开始时捕获了当时的当前页/组，
+                // 搜索运行期间若用户切页/切组，排序上下文已过时。此处在主线程完成回调里
+                // 重新捕获最新的当前页/组并按新上下文重排，保证渲染顺序正确。
+                let freshPageId = store.currentPageId
+                let freshSpecialSlotId = store.currentSpecialSlotId
+                let reordered = ContentView.filterAndSortGlobalSearch(
+                    all: results,
+                    query: query,
+                    filter: filter,
+                    sortRule: sortRule,
+                    currentPageId: freshPageId,
+                    currentSpecialSlotId: freshSpecialSlotId
+                )
+                self.globalSearchResultsCache = reordered
             }
         }
     }
@@ -1228,7 +1263,13 @@ struct ContentView: View {
         }
 
         if debounced {
-            let work = DispatchWorkItem { recomputeGlobalSearchResults() }
+            // P2-8 (v2.10.6): 在调度时刻显式捕获当前 searchText/selectedFilter 作为局部值，
+            // 并传入重算函数，避免 work item 延迟触发时从被捕获的 struct 拷贝读到陈旧输入。
+            let capturedQuery = searchText
+            let capturedFilter = selectedFilter
+            let work = DispatchWorkItem {
+                recomputeGlobalSearchResults(overrideQuery: capturedQuery, overrideFilter: capturedFilter)
+            }
             searchDebounceWorkItem = work
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.2, execute: work)
         } else {

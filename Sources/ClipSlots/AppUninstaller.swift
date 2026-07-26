@@ -26,23 +26,30 @@ final class AppUninstaller: ObservableObject {
                           skillManager: AgentSkillInstallManager) {
         isBusy = true
 
-        // 1) 删除槽位数据（home 目录，无需鉴权）
-        if deleteData {
-            try? fm.removeItem(at: ClipSlotsPaths.dataRoot)
-        }
-
-        // 2) 删除各 Agent skill 目录（home 目录，无需鉴权）
-        if uninstallSkills {
-            skillManager.removeAllSkillDirectoriesSilently()
-        }
-
-        // 3) CLI 需要写 /usr/local/bin，可能需要管理员权限
-        if uninstallCLI {
-            runPrivilegedCLIRemoval { [weak self] in
-                self?.finishByTrashingApp()
+        // P1-4 (v2.10.6): 调整卸载顺序——把「可能弹出且可取消的管理员鉴权」提到不可逆删除之前。
+        // 旧流程先删数据 / Skill，再走 CLI 的管理员鉴权，用户在鉴权弹窗点「取消」时会留下
+        // 「数据已删、App 未卸载」的半损坏状态。现在：先做需要鉴权的 CLI 移除，鉴权成功后
+        // 才执行删数据 / 删 Skill / 移废纸篓；用户取消鉴权则一切原样，isBusy 复位可重试。
+        let destructiveCleanupThenTrash: () -> Void = { [weak self] in
+            guard let self = self else { return }
+            // 1) 删除槽位数据（home 目录，无需鉴权）
+            if deleteData {
+                try? self.fm.removeItem(at: ClipSlotsPaths.dataRoot)
             }
+            // 2) 删除各 Agent skill 目录（home 目录，无需鉴权）
+            if uninstallSkills {
+                skillManager.removeAllSkillDirectoriesSilently()
+            }
+            // 3) 移入废纸篓并退出
+            self.finishByTrashingApp()
+        }
+
+        if uninstallCLI {
+            // 先鉴权：只有管理员鉴权通过（未取消）后，才在 completion 里执行删数据 / Skill。
+            runPrivilegedCLIRemoval(completion: destructiveCleanupThenTrash)
         } else {
-            finishByTrashingApp()
+            // 无需鉴权的分支：没有可取消的中途步骤，直接删数据 / Skill 再 trash。
+            destructiveCleanupThenTrash()
         }
     }
 

@@ -392,7 +392,10 @@ func failWriteError(_ error: Error, context: String) -> Never {
                  code: "INDEX_WRITE_REFUSED")
         }
     }
-    fail(describeWriteError(error, context: context))
+    // P2-10 (v2.10.6): 泛化写入失败映射为 WRITE_FAILED，与批量路径（error_code:
+    // "WRITE_FAILED"）保持一致。此前单写路径沿用 fail 默认码 "ERROR"，同一类 I/O 失败
+    // 在单写/批量两条路径返回不同错误码，增加调用方适配成本。
+    fail(describeWriteError(error, context: context), code: "WRITE_FAILED")
 }
 
 // Same mapping as `failWriteError` but returns (code, message) for the batch path,
@@ -566,7 +569,8 @@ func cmdGroups(_ args: ParsedArgs) -> Never {
         let pa = pageOrder[a.pageId] ?? Int.max
         let pb = pageOrder[b.pageId] ?? Int.max
         if pa != pb { return pa < pb }
-        return a.order < b.order
+        // P2-11 (v2.10.6): order 相同时补 .id 次级键，保证输出顺序稳定（与 list --page / Kit 口径一致）。
+        return a.order != b.order ? a.order < b.order : a.id < b.id
     }
     var groups: [[String: Any]] = []
     for g in sortedSlots where filterPage == nil || g.pageId == filterPage {
@@ -586,7 +590,8 @@ func cmdGroups(_ args: ParsedArgs) -> Never {
 func cmdPages(_ args: ParsedArgs) -> Never {
     let index = storage.loadIndex()
     var pages: [[String: Any]] = []
-    for p in index.pages.sorted(by: { $0.order < $1.order }) {
+    // P2-11 (v2.10.6): order 相同时补 .id 次级键，保证页面输出顺序稳定（与 groups / Kit 口径一致）。
+    for p in index.pages.sorted(by: { $0.order != $1.order ? $0.order < $1.order : $0.id < $1.id }) {
         pages.append([
             "id": p.id,
             "name": p.name,
@@ -627,6 +632,15 @@ func cmdList(_ args: ParsedArgs) -> Never {
     // groups. `groupCount` makes the page's real state explicit: 0 means the page has
     // no group yet (create-page does NOT auto-create one — use create-group).
     if let pageId = requestedPage, !hasGroupFlag {
+        // P2-9 (v2.10.6): 整页列出（只给 --page/--page-name 不给组）会一次性返回该页所有组×槽位，
+        // 与单组路径不同，它并不支持 --page-size/--page-num 分页。此前分页参数会被静默忽略，
+        // 误导调用方以为拿到的是分页结果。这里改为显式报错（而非静默忽略），因为跨多个组的
+        // 分页语义本身不明确；需要分页时应指定单个组。
+        if args.flag("page-size") != nil || args.flag("page-num") != nil {
+            fail("--page-size/--page-num 不支持整页列出（只给 --page/--page-name 不给组的场景）；"
+                    + "如需分页请指定 --group/--group-name 列出单个组",
+                 code: "INVALID_ARGUMENT_COMBINATION")
+        }
         let pageName = index.pages.first(where: { $0.id == pageId })?.name
         let groupsInPage = index.specialSlots
             .filter { $0.pageId == pageId }
