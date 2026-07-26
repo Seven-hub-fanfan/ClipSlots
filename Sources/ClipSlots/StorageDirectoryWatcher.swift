@@ -24,6 +24,10 @@ final class StorageDirectoryWatcher {
     private var stream: FSEventStreamRef?
     /// Retained reference to the context box; released in `stop()`.
     private var boxRef: Unmanaged<WeakBox>?
+    // P2-13 (v2.10.9): 串行化 start()/stop() 对 stream/boxRef 的检查与赋值，避免并发调用
+    // （如快速 stop→start，或 stop() 与 deinit 同时触发）导致重复创建 stream 或漏 release
+    // 已 retain 的 box。所有对 stream/boxRef 的读改都在此锁保护下进行。
+    private let stateLock = NSLock()
     private let path: String
     private let onChange: () -> Void
     /// Dedicated serial queue the FSEvents callback is delivered on. The callback
@@ -36,6 +40,10 @@ final class StorageDirectoryWatcher {
     }
 
     func start() {
+        // P2-13 (v2.10.9): 整个「检查 stream==nil → 创建 → 赋值 stream/boxRef」在锁内完成，
+        // 保证并发 start() 只会创建一个 stream。
+        stateLock.lock()
+        defer { stateLock.unlock() }
         guard stream == nil else { return }
 
         let box = WeakBox(self)
@@ -91,10 +99,14 @@ final class StorageDirectoryWatcher {
     }
 
     func stop() {
-        guard let stream = stream else { return }
+        // P2-13 (v2.10.9): 在锁内做「取出并清空 stream/boxRef」，保证并发 stop()/deinit 只有
+        // 一次真正 teardown，不会重复 release 已 retain 的 box，也不会与 start() 交错。
+        stateLock.lock()
+        guard let stream = stream else { stateLock.unlock(); return }
         let boxRef = self.boxRef
         self.stream = nil
         self.boxRef = nil
+        stateLock.unlock()
         let q = queue
         q.async {                                   // P2-3: tear down off the caller/main thread
             FSEventStreamStop(stream)

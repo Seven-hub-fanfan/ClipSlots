@@ -16,6 +16,24 @@ final class ThumbnailProvider {
     /// key all get notified when the single QLThumbnailGenerator request completes.
     private var pendingCompletions: [String: [(NSImage?, String) -> Void]] = [:]
 
+    // P2-14 (v2.10.9): NSScreen.main 是主线程 AppKit API，而 thumbnail(for:) 可能在后台线程
+    // 被调用，直接在后台读 NSScreen.main 属于误用。改为在 init 时于主线程读取一次
+    // backingScaleFactor 缓存到此属性，后台路径改用该缓存值。读写都在既有 lock 保护下进行。
+    private var cachedScale: CGFloat = 2.0
+
+    private init() {
+        let apply: () -> Void = { [weak self] in
+            guard let self = self else { return }
+            let scale = NSScreen.main?.backingScaleFactor ?? 2.0
+            self.lock.lock(); self.cachedScale = scale; self.lock.unlock()
+        }
+        if Thread.isMainThread {
+            apply()
+        } else {
+            DispatchQueue.main.async(execute: apply)
+        }
+    }
+
     /// Generate (or return cached) thumbnail for the given URL.
     ///
     /// - Parameters:
@@ -61,10 +79,14 @@ final class ThumbnailProvider {
             pending?.forEach { $0(nil, cacheKey) }
         }
 
+        // P2-14 (v2.10.9): 使用 init 时在主线程缓存的 scale，避免在后台线程读 NSScreen.main。
+        lock.lock()
+        let scale = cachedScale
+        lock.unlock()
         let request = QLThumbnailGenerator.Request(
             fileAt: url,
             size: size,
-            scale: NSScreen.main?.backingScaleFactor ?? 2.0,
+            scale: scale,
             representationTypes: .thumbnail
         )
 

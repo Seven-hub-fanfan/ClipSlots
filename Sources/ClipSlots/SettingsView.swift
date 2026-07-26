@@ -491,6 +491,8 @@ struct SettingsView: View {
         switch cliManager.state {
         case .notInstalled: return false
         case .installed, .outdated: return true
+        // P2-12 (v2.10.9): 软链损坏视为「已存在但需修复」，允许走重装按钮把链接指回当前 bundle。
+        case .broken: return true
         }
     }
 
@@ -499,6 +501,7 @@ struct SettingsView: View {
         case .notInstalled: return .secondary
         case .installed: return .green
         case .outdated: return .orange
+        case .broken: return .red  // P2-12 (v2.10.9)
         }
     }
 
@@ -507,6 +510,7 @@ struct SettingsView: View {
         case .notInstalled: return "未安装"
         case .installed(let version): return "已安装 · v\(version)"
         case .outdated(let installed, _): return "已安装（旧版本 v\(installed)）"
+        case .broken: return "软链损坏"  // P2-12 (v2.10.9)
         }
     }
 
@@ -518,6 +522,9 @@ struct SettingsView: View {
             return CLIInstallManager.targetPath
         case .outdated(_, let bundled):
             return "可更新至 v\(bundled)"
+        case .broken:
+            // P2-12 (v2.10.9): 软链存在但目标失效，提示重新安装以修复。
+            return "命令行软链已失效（目标不存在），请点击重新安装以修复。"
         }
     }
 
@@ -526,6 +533,7 @@ struct SettingsView: View {
         case .notInstalled: return "安装 CLI"
         case .installed: return "重新安装 CLI"
         case .outdated: return "更新 CLI"
+        case .broken: return "修复 CLI"  // P2-12 (v2.10.9)
         }
     }
 
@@ -534,6 +542,7 @@ struct SettingsView: View {
         case .notInstalled: return "arrow.down.circle"
         case .installed: return "arrow.clockwise"
         case .outdated: return "arrow.up.circle"
+        case .broken: return "exclamationmark.arrow.circlepath"  // P2-12 (v2.10.9)
         }
     }
 

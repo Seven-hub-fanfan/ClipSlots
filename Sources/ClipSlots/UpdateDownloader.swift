@@ -28,6 +28,10 @@ final class UpdateDownloader: NSObject {
 
     private var version: String = ""
 
+    // P2-17 (v2.10.9): 从 UpdateChecker 传入的期望下载字节数（Release asset 的 size）。
+    // 下载完成后据此校验实际文件大小，>0 时才校验（缺失则跳过）。
+    private var expectedSize: Int64 = 0
+
     // v2.10.7: 下载完成、等待安装的 DMG 本地路径。
     private var pendingInstallDMGPath: String?
 
@@ -37,10 +41,12 @@ final class UpdateDownloader: NSObject {
     private var isInstalling = false
 
     /// 开始下载指定 DMG。
-    func startDownload(from url: URL, version: String) {
+    /// - Parameter expectedSize: P2-17 (v2.10.9) Release asset 的期望字节数（0 表示未知、跳过校验）。
+    func startDownload(from url: URL, version: String, expectedSize: Int64 = 0) {
         // 若已有下载在进行，先取消旧的。
         cancel()
         self.version = version
+        self.expectedSize = expectedSize
 
         presentPanel()
 
@@ -160,6 +166,19 @@ final class UpdateDownloader: NSObject {
         } catch {
             handleFailure("移动下载文件失败：\(error.localizedDescription)")
             return
+        }
+
+        // P2-17 (v2.10.9): 校验下载文件字节数与 Release asset 声明的 size 是否一致。
+        // 不一致说明下载被截断/不完整（或与服务端记录不符），此时明确报错并删除坏文件，
+        // 绝不进入后续挂载 + ditto 安装流程，避免把损坏包装进 /Applications。
+        if expectedSize > 0 {
+            let attrs = try? fm.attributesOfItem(atPath: dest.path)
+            let actualSize = (attrs?[.size] as? NSNumber)?.int64Value ?? -1
+            if actualSize != expectedSize {
+                try? fm.removeItem(at: dest)
+                handleFailure("下载文件大小校验失败：期望 \(expectedSize) 字节，实际 \(actualSize) 字节。下载可能不完整，请重试。")
+                return
+            }
         }
 
         session?.finishTasksAndInvalidate()

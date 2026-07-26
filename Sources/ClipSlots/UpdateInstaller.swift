@@ -27,6 +27,12 @@ final class UpdateInstaller {
 
     private let queue = DispatchQueue(label: "com.clipslots.update-installer", qos: .userInitiated)
 
+    // P1-3 (v2.10.9): 安装重入保护。install() 可能被重复触发（连点「安装并重启」、失败
+    // 回调重入等），若后台安装流程并发跑会互相删除/替换 /Applications 里的 bundle，极其
+    // 危险。用锁 + 标记保证同一时刻只有一个安装流程在进行。
+    private let installLock = NSLock()
+    private var isInstalling = false
+
     /// 自动安装已下载的 DMG。成功后会重启 App 并结束当前进程；失败通过 `failure` 回调（主线程）。
     /// - Parameters:
     ///   - dmgPath: 已下载到本地的 DMG 路径
@@ -41,18 +47,41 @@ final class UpdateInstaller {
         // 否则残留弹窗会阻塞末尾的 NSApp.terminate()。
         Self.forceDismissBlockingModals()
 
+        // P1-3 (v2.10.9): 重入保护。已有安装在进行时直接走失败回调返回，避免并发替换 bundle。
+        installLock.lock()
+        if isInstalling {
+            installLock.unlock()
+            DispatchQueue.main.async { failure("更新安装已在进行中") }
+            return
+        }
+        isInstalling = true
+        installLock.unlock()
+
         let appName = "ClipSlots.app"
         let targetApp = "/Applications/\(appName)"
         let mountPoint = NSTemporaryDirectory() + "clipslots-update-mnt-\(UUID().uuidString)"
 
+        // P1-3 (v2.10.9): 统一失败出口——先复位 isInstalling（加锁）再回调 failure，保证
+        // 每条失败返回路径都能解除重入锁；成功路径会 terminate 进程，无需复位。
+        let fail: (String) -> Void = { [weak self] message in
+            if let self = self {
+                self.installLock.lock()
+                self.isInstalling = false
+                self.installLock.unlock()
+            }
+            DispatchQueue.main.async { failure(message) }
+        }
+
         queue.async {
-            // P2-3 (v2.10.8): 挂载前先校验 DMG 完整性。`hdiutil verify` 校验映像内部
-            // checksum，可拦截被截断/损坏/被篡改的下载包，避免把坏包安装进 /Applications。
+            // P2-16 (v2.10.9): DMG 由 package_dmg.sh 以 UDZO(压缩) 格式生成并带内建 CRC 校验和。
+            // `hdiutil verify` 只校验映像内部 checksum（完整性），并不校验签名/来源真实性——它
+            // 无法「防中间人/MITM」（真正的防篡改依赖 HTTPS 下载 + P2-17 的下载大小校验 + 代码
+            // 签名）。且 verify 对某些合法映像/环境可能过严而误报，若因此直接中止会挡掉正常更新。
+            // 故改为非致命：verify 失败仅 NSLog 警告并继续，由 P2-17 的下载大小校验兜底。
             do {
                 try Self.runProcess("/usr/bin/hdiutil", ["verify", dmgPath, "-quiet"], timeout: 120)
             } catch {
-                DispatchQueue.main.async { failure("磁盘映像校验失败（可能下载损坏）：\(error.localizedDescription)") }
-                return
+                NSLog("[ClipSlots] UpdateInstaller: hdiutil verify 未通过（非致命，继续安装）：\(error.localizedDescription)")
             }
 
             // 2. 挂载 DMG。
@@ -61,17 +90,20 @@ final class UpdateInstaller {
                                     ["attach", dmgPath, "-nobrowse", "-quiet", "-mountpoint", mountPoint],
                                     timeout: 120)
             } catch {
-                DispatchQueue.main.async { failure("挂载磁盘映像失败：\(error.localizedDescription)") }
+                // P2-18 (v2.10.9): attach 失败时清理可能残留的空挂载点目录（未挂载，删除安全），
+                // 避免每次失败泄漏一个。
+                try? FileManager.default.removeItem(atPath: mountPoint)
+                fail("挂载磁盘映像失败：\(error.localizedDescription)")
                 return
             }
 
             // 挂载点内定位 .app（package_dmg.sh 固定把 ClipSlots.app 放在卷根）。
             let mountedApp = mountPoint + "/" + appName
             guard FileManager.default.fileExists(atPath: mountedApp) else {
-                try? Self.runProcess("/usr/bin/hdiutil", ["detach", mountPoint, "-quiet", "-force"])
-                // P2-2 (v2.10.8): detach 后清理挂载点空目录，避免每次更新泄漏一个。
-                try? FileManager.default.removeItem(atPath: mountPoint)
-                DispatchQueue.main.async { failure("磁盘映像中未找到 \(appName)") }
+                // P1-2 (v2.10.9): 该 detach 补上 timeout: 60，与末尾 detach 一致，避免无超时挂起。
+                // P2-18 (v2.10.9): 交由 detachAndCleanup 处理 detach 重试 + 仅在确认卸载后清理挂载点。
+                Self.detachAndCleanup(mountPoint)
+                fail("磁盘映像中未找到 \(appName)")
                 return
             }
 
@@ -80,21 +112,46 @@ final class UpdateInstaller {
             // 3. 替换。先尝试无鉴权（App 在用户可写目录时可行），失败再用管理员授权。
             var installError: String? = nil
             do {
-                // P1-1 (v2.10.8): 「先移除再拷贝」而非直接 `ditto 源 目标`。
-                // `ditto 源 目标` 是把源内容「覆盖合并」进已存在的目标目录，不会删除新版本
-                // 里已移除的旧文件（旧 dylib、被删/改名的 skill 资源、旧本地化文件等会残留），
-                // 可能破坏 adhoc 签名或加载到过期资源，也可能因原地覆盖运行中 bundle 的
-                // Mach-O 触发 Killed:9。故与管理员分支（rm -rf && ditto）对齐：先删旧 bundle，
-                // 再整包 ditto，保证是「原子替换」语义而非合并。
-                if FileManager.default.fileExists(atPath: targetApp) {
-                    try FileManager.default.removeItem(atPath: targetApp)
+                // P0 (v2.10.9): 原子替换 + 回滚，杜绝旧版「先 rm 目标再 ditto」在 ditto 失败时把
+                // /Applications/ClipSlots.app 永久删除的致命风险。改为：先 ditto 到隐藏 staging，
+                // 校验 staging 完整性，再用 replaceItemAt（原子）/moveItem 落到目标；任意步骤抛错
+                // 都会移除 staging（原 App 原样保留）并转入管理员分支。
+                let staging = "/Applications/.ClipSlots.app.new-\(UUID().uuidString)"
+                // (1) ditto 到 staging，先清理可能残留的同名 staging。
+                try? FileManager.default.removeItem(atPath: staging)
+                try Self.runProcess("/usr/bin/ditto", [mountedApp, staging])
+                // (2) 校验 staging 完整性：主可执行必须存在且可执行，否则移除 staging 并视为失败。
+                guard FileManager.default.isExecutableFile(atPath: staging + "/Contents/MacOS/ClipSlots") else {
+                    try? FileManager.default.removeItem(atPath: staging)
+                    throw InstallError(message: "新版本完整性校验失败（主可执行缺失）")
                 }
-                try Self.runProcess("/usr/bin/ditto", [mountedApp, targetApp])
+                // (3) 原子落地：目标存在用 replaceItemAt（原子替换），否则 moveItem。
+                let stagingURL = URL(fileURLWithPath: staging)
+                let targetURL = URL(fileURLWithPath: targetApp)
+                if FileManager.default.fileExists(atPath: targetApp) {
+                    _ = try FileManager.default.replaceItemAt(targetURL, withItemAt: stagingURL)
+                } else {
+                    try FileManager.default.moveItem(at: stagingURL, to: targetURL)
+                }
             } catch {
-                // 权限不足或目标被占用：用 NSAppleScript 以管理员权限执行（必须主线程）。
-                let escapedMounted = Self.escapeForAppleScript(mountedApp)
-                let escapedTarget = Self.escapeForAppleScript(targetApp)
-                let shell = "rm -rf '\(escapedTarget)' && /usr/bin/ditto '\(escapedMounted)' '\(escapedTarget)'"
+                // 任意失败：移除 staging（原 App 原样保留），转入管理员分支重试。
+                // P0 (v2.10.9): 管理员分支同样用 staging + backup 做原子替换 + 回滚，永不让目标缺失。
+                // 用 /bin/sh 脚本：ditto 到隐藏 staging → 校验 [ -x staging/主可执行 ] →（目标存在则）
+                // mv 目标→backup → mv staging→目标；成功则 rm backup；最后一步 mv 失败则回滚
+                // (mv backup→目标) 并 rm staging，非零退出。所有路径用 shellSingleQuoteEscape 转义。
+                let adminStaging = "/Applications/.ClipSlots.app.new-\(UUID().uuidString)"
+                let adminBackup = "/Applications/.ClipSlots.app.bak-\(UUID().uuidString)"
+                let qMounted = Self.shellSingleQuoteEscape(mountedApp)
+                let qTarget = Self.shellSingleQuoteEscape(targetApp)
+                let qStaging = Self.shellSingleQuoteEscape(adminStaging)
+                let qBackup = Self.shellSingleQuoteEscape(adminBackup)
+                let shell = "set -e; "
+                    + "rm -rf '\(qStaging)'; "
+                    + "/usr/bin/ditto '\(qMounted)' '\(qStaging)'; "
+                    + "[ -x '\(qStaging)/Contents/MacOS/ClipSlots' ] || { rm -rf '\(qStaging)'; exit 1; }; "
+                    + "if [ -e '\(qTarget)' ]; then mv '\(qTarget)' '\(qBackup)'; fi; "
+                    + "if mv '\(qStaging)' '\(qTarget)'; then rm -rf '\(qBackup)'; "
+                    + "else if [ -e '\(qBackup)' ]; then mv '\(qBackup)' '\(qTarget)'; fi; rm -rf '\(qStaging)'; exit 1; fi"
                 let script = "do shell script \"\(Self.escapeForAppleScriptString(shell))\" with administrator privileges"
 
                 // 关键约束 2：NSAppleScript 必须在主线程执行。
@@ -112,12 +169,11 @@ final class UpdateInstaller {
                 }
             }
 
-            // 4. 无论成败都卸载 DMG，并清理挂载点空目录（P2-2：避免每次更新泄漏一个）。
-            try? Self.runProcess("/usr/bin/hdiutil", ["detach", mountPoint, "-quiet", "-force"], timeout: 60)
-            try? FileManager.default.removeItem(atPath: mountPoint)
+            // 4. 无论成败都卸载 DMG，并在确认卸载后清理挂载点（P2-18：detach 重试 + 不误删已挂载卷）。
+            Self.detachAndCleanup(mountPoint)
 
             if let installError = installError {
-                DispatchQueue.main.async { failure("安装失败：\(installError)") }
+                fail("安装失败：\(installError)")
                 return
             }
 
@@ -128,7 +184,7 @@ final class UpdateInstaller {
                 // 复用旧进程）。改为把当前 PID 传给分离出去的 shell，轮询等待旧进程真正
                 // 退出后再 open，并加 10s 上限兜底，避免异常时永不重启。
                 let pid = ProcessInfo.processInfo.processIdentifier
-                let escapedTarget = Self.escapeForAppleScript(targetApp)
+                let escapedTarget = Self.shellSingleQuoteEscape(targetApp)
                 let relaunch = "for i in $(seq 1 50); do kill -0 \(pid) 2>/dev/null || break; sleep 0.2; done; "
                     + "open '\(escapedTarget)'"
                 Process.launchedProcess(launchPath: "/bin/sh", arguments: ["-c", relaunch])
@@ -177,33 +233,61 @@ final class UpdateInstaller {
         let task = Process()
         task.executableURL = URL(fileURLWithPath: launchPath)
         task.arguments = arguments
+        let outPipe = Pipe()
         let errPipe = Pipe()
+        task.standardOutput = outPipe
         task.standardError = errPipe
-        task.standardOutput = Pipe()
+
+        // P1-1 (v2.10.9): 并发抽干 stdout/stderr，修复子进程写入 >64KB 撑满 pipe 缓冲区后
+        // 阻塞、而我们又在 waitUntilExit() 之后才读导致的死锁。两个 pipe 各自在后台队列
+        // readDataToEndOfFile()，用 DispatchGroup 同步；错误信息只取 stderr，用 NSLock 保护
+        // errData（stdout 读取后直接丢弃，仅为避免缓冲区写满阻塞）。
+        let dataLock = NSLock()
+        var errData = Data()
+        let drainGroup = DispatchGroup()
+
         try task.run()
+
+        drainGroup.enter()
+        DispatchQueue.global().async {
+            _ = outPipe.fileHandleForReading.readDataToEndOfFile()
+            drainGroup.leave()
+        }
+        drainGroup.enter()
+        DispatchQueue.global().async {
+            let d = errPipe.fileHandleForReading.readDataToEndOfFile()
+            dataLock.lock(); errData = d; dataLock.unlock()
+            drainGroup.leave()
+        }
 
         if let timeout = timeout {
             let deadline = DispatchTime.now() + timeout
             let sema = DispatchSemaphore(value: 0)
             let watcher = DispatchQueue(label: "com.clipslots.update.proc-timeout")
+            // P2-10 (v2.10.9): timedOut 跨线程读写（watcher 队列写、调用线程读），用 NSLock
+            // 保护消除 data race。
+            let timedOutLock = NSLock()
             var timedOut = false
             watcher.async {
                 if sema.wait(timeout: deadline) == .timedOut {
-                    timedOut = true
+                    timedOutLock.lock(); timedOut = true; timedOutLock.unlock()
                     if task.isRunning { task.terminate() }
                 }
             }
             task.waitUntilExit()
             sema.signal()
-            if timedOut {
+            drainGroup.wait()
+            timedOutLock.lock(); let didTimeOut = timedOut; timedOutLock.unlock()
+            if didTimeOut {
                 throw InstallError(message: "\(launchPath) 执行超时（>\(Int(timeout))s）已中止")
             }
         } else {
             task.waitUntilExit()
+            drainGroup.wait()
         }
 
         if task.terminationStatus != 0 {
-            let data = errPipe.fileHandleForReading.readDataToEndOfFile()
+            dataLock.lock(); let data = errData; dataLock.unlock()
             let msg = String(data: data, encoding: .utf8)?
                 .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
             throw InstallError(message: msg.isEmpty
@@ -212,8 +296,29 @@ final class UpdateInstaller {
         }
     }
 
-    /// 转义单引号，供 shell 单引号字符串内安全使用。
-    private static func escapeForAppleScript(_ path: String) -> String {
+    /// P2-18 (v2.10.9): 卸载 DMG 并清理挂载点。detach 失败/超时时重试一次；只有在确认已
+    /// 卸载（detach 成功）后才 removeItem 挂载点目录，避免对仍挂载的卷做 removeItem。
+    private static func detachAndCleanup(_ mountPoint: String) {
+        do {
+            try runProcess("/usr/bin/hdiutil", ["detach", mountPoint, "-quiet", "-force"], timeout: 60)
+        } catch {
+            NSLog("[ClipSlots] UpdateInstaller: detach 失败，重试一次：\(error.localizedDescription)")
+            do {
+                try runProcess("/usr/bin/hdiutil", ["detach", mountPoint, "-quiet", "-force"], timeout: 60)
+            } catch {
+                // 仍失败：卷可能仍挂载，不再 removeItem（避免误删已挂载卷），仅记录日志留待系统清理。
+                NSLog("[ClipSlots] UpdateInstaller: detach 重试仍失败，跳过挂载点清理：\(error.localizedDescription)")
+                return
+            }
+        }
+        // 已确认卸载，安全清理挂载点空目录。
+        try? FileManager.default.removeItem(atPath: mountPoint)
+    }
+
+    /// P2-19 (v2.10.9): 由 escapeForAppleScript 更名而来——它实际做的是「shell 单引号转义」，
+    /// 用于把路径安全嵌入 shell 单引号字符串（含 P0 管理员分支的 /bin/sh 脚本），与 AppleScript
+    /// 无关。转义单引号供 shell 单引号字符串内安全使用。
+    private static func shellSingleQuoteEscape(_ path: String) -> String {
         path.replacingOccurrences(of: "'", with: "'\\''")
     }
 

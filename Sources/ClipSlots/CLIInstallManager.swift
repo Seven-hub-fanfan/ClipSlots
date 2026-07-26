@@ -22,6 +22,10 @@ final class CLIInstallManager: ObservableObject {
         case notInstalled
         case installed(version: String)      // installed & up to date
         case outdated(installed: String, bundled: String)
+        // P2-12 (v2.10.9): 软链损坏——/usr/local/bin/clipslots 是符号链接但其目标已不存在
+        // （例如旧 App 被删/移动）。FileManager.fileExists 会跟随符号链接把它误判为「未安装」，
+        // 掩盖了「命令存在但指向失效」的真实故障，故单列此状态并在 UI 显式提示。
+        case broken
     }
 
     @Published private(set) var state: InstallState = .notInstalled
@@ -53,16 +57,40 @@ final class CLIInstallManager: ObservableObject {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: path)
         process.arguments = ["version"]
-        let pipe = Pipe()
-        process.standardOutput = pipe
-        process.standardError = Pipe()
+        let outPipe = Pipe()
+        let errPipe = Pipe()
+        process.standardOutput = outPipe
+        process.standardError = errPipe
+
+        // P1-1 (v2.10.9): 并发抽干 stdout/stderr，修复子进程输出 >64KB 撑满 pipe 缓冲区后
+        // 阻塞、而旧代码在 waitUntilExit() 之后才 readDataToEndOfFile（且 stderr 从不读取）
+        // 导致的死锁。两个 pipe 各自在后台队列读取，用 DispatchGroup 同步；共享 Data 用 NSLock 保护。
+        let dataLock = NSLock()
+        var outData = Data()
+        let drainGroup = DispatchGroup()
+
         do {
             try process.run()
-            process.waitUntilExit()
         } catch {
             return nil
         }
-        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+
+        drainGroup.enter()
+        DispatchQueue.global().async {
+            let d = outPipe.fileHandleForReading.readDataToEndOfFile()
+            dataLock.lock(); outData = d; dataLock.unlock()
+            drainGroup.leave()
+        }
+        drainGroup.enter()
+        DispatchQueue.global().async {
+            _ = errPipe.fileHandleForReading.readDataToEndOfFile()
+            drainGroup.leave()
+        }
+
+        process.waitUntilExit()
+        drainGroup.wait()
+
+        dataLock.lock(); let data = outData; dataLock.unlock()
         guard
             let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
             let version = obj["version"] as? String
@@ -74,7 +102,20 @@ final class CLIInstallManager: ObservableObject {
 
     func refreshState() {
         let target = Self.targetPath
-        guard FileManager.default.fileExists(atPath: target) else {
+        let fm = FileManager.default
+        // P2-12 (v2.10.9): 用 attributesOfItem（等价 lstat，不跟随符号链接）判断链接本身，
+        // 区分「未安装」与「软链损坏（是符号链接但目标已不存在）」。旧代码直接用
+        // FileManager.fileExists（跟随符号链接），会把 dangling symlink 误判为 .notInstalled。
+        let linkAttrs = try? fm.attributesOfItem(atPath: target)
+        let isSymlink = (linkAttrs?[.type] as? FileAttributeType) == .typeSymbolicLink
+        // fileExists 跟随符号链接：目标存在 → true；目标缺失（dangling）→ false。
+        let targetResolves = fm.fileExists(atPath: target)
+
+        if isSymlink && !targetResolves {
+            state = .broken
+            return
+        }
+        guard targetResolves else {
             state = .notInstalled
             return
         }
@@ -103,7 +144,11 @@ final class CLIInstallManager: ObservableObject {
             return
         }
         // mkdir -p /usr/local/bin then symlink the bundled CLI as `clipslots`.
-        let script = "mkdir -p /usr/local/bin && ln -sf \(shellQuote(source)) \(shellQuote(Self.targetPath))"
+        // P2-11 (v2.10.9): `ln -sf` 缺少 -n/-h：当 /usr/local/bin/clipslots 已是指向某个
+        // 真实存在目录的符号链接时，ln 会把新链接创建到那个目录「内部」（生成
+        // /usr/local/bin/clipslots/clipslots），而非替换该链接本身。加 -n（等价 -h，不跟随
+        // 已存在的符号链接目标）确保始终原子替换链接本身。
+        let script = "mkdir -p /usr/local/bin && ln -sfn \(shellQuote(source)) \(shellQuote(Self.targetPath))"
         // v2.9.26: 安装成功后，若 /usr/local/bin 不在 PATH 中，追加提示。
         var successMessage = "CLI 安装成功。"
         let path = ProcessInfo.processInfo.environment["PATH"] ?? ""

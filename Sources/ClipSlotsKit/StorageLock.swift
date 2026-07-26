@@ -109,6 +109,15 @@ public final class StorageLock {
             .utf8))
         FileHandle.standardError.write(Data(
             "Concurrent writes from another ClipSlots process could clobber data.\n".utf8))
+        // P2-9 (v2.10.9): the lockless downgrade was previously only visible as a
+        // one-time stderr log — invisible to the GUI. Also post a one-time
+        // notification (guarded by the same didWarnLockless once-flag) so a GUI
+        // observer can surface a visible notice. The observer is added by another
+        // agent; here we only emit the signal.
+        NotificationCenter.default.post(
+            name: Notification.Name("ClipSlotsStorageLockLockless"),
+            object: nil,
+            userInfo: ["reason": reason])
     }
 
     private func openFDIfNeeded() -> Int32 {
@@ -139,11 +148,24 @@ public final class StorageLock {
         // (never empty); readHolderPID() only parses the first line, so trailing
         // leftovers from a shorter new value are ignored.
         lseek(fd, 0, SEEK_SET)
-        let written = pidStr.withCString { cstr -> Int in
-            write(fd, cstr, strlen(cstr))
+        // P2-5 (v2.10.9): loop write() until the FULL PID has been written. A single
+        // write() may return 0 < written < len (short write); the old code then did
+        // ftruncate(fd, written), truncating the PID to garbage digits that
+        // readHolderPID() misparses. Only truncate once the whole value is on disk;
+        // on a short/failed write, leave the file's prior content intact (do NOT
+        // ftruncate to a partial length).
+        let didWriteFully = pidStr.withCString { cstr -> Bool in
+            let len = Int(strlen(cstr))
+            var total = 0
+            while total < len {
+                let n = write(fd, cstr + total, len - total)
+                if n <= 0 { return false }
+                total += n
+            }
+            return true
         }
-        if written > 0 {
-            ftruncate(fd, off_t(written))
+        if didWriteFully {
+            ftruncate(fd, off_t(pidStr.utf8.count))
         }
     }
 

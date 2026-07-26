@@ -12,7 +12,7 @@ import ClipSlotsKit
 //   success: {"ok": true, ...}
 //   error:   {"ok": false, "error": "message"}  (exit code 1)
 
-let CLI_VERSION = "2.10.8"
+let CLI_VERSION = "2.10.9"
 let DEFAULT_GROUP = "default"
 let DEFAULT_PAGE = "default_page"
 
@@ -54,9 +54,15 @@ func emit(_ dict: [String: Any]) {
           let str = String(data: data, encoding: .utf8) else {
         // Last-ditch fallback that is still valid JSON.
         print("{\"ok\":false,\"error\":\"failed to serialize response\"}")
-        return
+        // P2-21 (v2.10.9): this fallback is itself a failure (ok:false) → exit non-zero.
+        exit(1)
     }
     print(str)
+    // P2-21 (v2.10.9): any failure response (ok == false) MUST exit with a non-zero
+    // status so callers can rely on the process exit code, not just the JSON body.
+    // Success responses fall through (callers exit(0) as before). This does not alter
+    // the JSON stdout contract — the response is already printed above.
+    if let ok = dict["ok"] as? Bool, !ok { exit(1) }
 }
 
 func success(_ dict: [String: Any]) -> Never {
@@ -123,6 +129,19 @@ struct ParsedArgs {
     func hasFlag(_ name: String) -> Bool { boolFlags.contains(name) || flags[name] != nil }
 }
 
+// P1-7 (v2.10.9): known value-less BOOLEAN flags. The old parser greedily treated
+// the token after ANY `--xxx` as its value (only treating `--xxx` as boolean when the
+// NEXT token also started with `--`), so `write-attachment 1 --replace photo.png`,
+// `delete-group --force <id>` and `search --all-groups <query>` wrongly let the boolean
+// flag swallow the following positional. Flags listed here NEVER consume the next token;
+// every other `--xxx` keeps value-taking behaviour. Verified against the command handlers
+// (e.g. --page-name is value-taking via args.flag("page-name"), so it is intentionally
+// NOT in this set).
+let BOOLEAN_FLAGS: Set<String> = [
+    "force", "replace", "if-empty", "overwrite-text", "all-groups", "batch",
+    "stop-on-error", "help"
+]
+
 func parseArgs(_ raw: [String]) -> ParsedArgs {
     var positionals: [String] = []
     var flags: [String: String] = [:]
@@ -139,6 +158,13 @@ func parseArgs(_ raw: [String]) -> ParsedArgs {
             i += 1
         } else if token.hasPrefix("--") {
             let key = String(token.dropFirst(2))
+            // P1-7 (v2.10.9): a known boolean flag is value-less — record it as true and
+            // do NOT consume the following token (so the next positional survives).
+            if BOOLEAN_FLAGS.contains(key) {
+                boolFlags.insert(key)
+                i += 1
+                continue
+            }
             let next = (i + 1 < raw.count) ? raw[i + 1] : nil
             if let next, !next.hasPrefix("--") {
                 flags[key] = next
@@ -326,11 +352,14 @@ func resolvePageFlag(_ args: ParsedArgs, strict: Bool = false) -> String? {
 }
 
 func parseSlot(_ raw: String?) -> Int {
+    // P2-20 (v2.10.9): an unparseable / out-of-range slot now returns a dedicated
+    // INVALID_SLOT code (was INVALID_LIMIT, which conflated it with search/pagination
+    // limits). The batch path emits the same INVALID_SLOT so both paths are unified.
     guard let raw, let n = Int(raw) else {
-        fail("missing or invalid slot number (expected 1...\(slotCount))", code: "INVALID_LIMIT")
+        fail("missing or invalid slot number (expected 1...\(slotCount))", code: "INVALID_SLOT")
     }
     guard (1...slotCount).contains(n) else {
-        fail("slot out of range: \(n) (valid 1...\(slotCount))", code: "INVALID_LIMIT")
+        fail("slot out of range: \(n) (valid 1...\(slotCount))", code: "INVALID_SLOT")
     }
     return n
 }
@@ -953,11 +982,13 @@ func cmdWriteBatch(_ args: ParsedArgs) -> Never {
     var parsed: [BatchItem] = []
     for (idx, entry) in arr.enumerated() {
         guard let n = rawSlot(entry) else {
-            emitPreflightFailure(offending: [idx], code: "INVALID_ARGUMENT_COMBINATION",
+            // P2-20 (v2.10.9): unify with parseSlot's single-slot path → INVALID_SLOT.
+            emitPreflightFailure(offending: [idx], code: "INVALID_SLOT",
                                  message: "item \(idx): missing or invalid 'slot'")
         }
         guard (1...slotCount).contains(n) else {
-            emitPreflightFailure(offending: [idx], code: "INVALID_ARGUMENT_COMBINATION",
+            // P2-20 (v2.10.9): unify with parseSlot's single-slot path → INVALID_SLOT.
+            emitPreflightFailure(offending: [idx], code: "INVALID_SLOT",
                                  message: "item \(idx): slot out of range (valid 1...\(slotCount))")
         }
         guard let text = entry["text"] as? String else {
@@ -1104,7 +1135,17 @@ func cmdSearch(_ args: ParsedArgs) -> Never {
         fail("missing search query", code: "INVALID_ARGUMENT_COMBINATION")
     }
     let needle = query.lowercased()
-    let limit = Int(args.flag("limit") ?? "") ?? 50
+    // P2-23 (v2.10.9): explicitly validate --limit (must be a positive Int) instead of
+    // silently defaulting to 50 on garbage input; emit a structured INVALID_LIMIT.
+    let limit: Int
+    if let limRaw = args.flag("limit") {
+        guard let n = Int(limRaw), n > 0 else {
+            fail("--limit must be a positive integer (got '\(limRaw)')", code: "INVALID_LIMIT")
+        }
+        limit = n
+    } else {
+        limit = 50
+    }
     let index = storage.loadIndex()
     let pageNames = Dictionary(uniqueKeysWithValues: index.pages.map { ($0.id, $0.name) })
 
@@ -1232,6 +1273,15 @@ func cmdCreateGroup(_ args: ParsedArgs) -> Never {
     let page = resolvePageFlag(args, strict: true)
     // P1-6: enforce the per-page group limit before creating (page nil == current page,
     // matching createSpecialSlot's target resolution).
+    // P2-24 (v2.10.9): TODO(residual TOCTOU) — this preflight count check runs OUTSIDE
+    // the Kit storage lock, so between this read and createSpecialSlot's write a
+    // concurrent process could add a group and push the page over the limit. Moving the
+    // check into the Kit from the CLI is not cleanly possible without a larger refactor,
+    // so we keep this early check as a fast/friendly reject and RELY ON the AUTHORITATIVE
+    // guard inside SpecialSlotStorage.createSpecialSlot, which re-checks the limit INSIDE
+    // its own storageLock.withLock and throws .maxSpecialSlotsReached (mapped below to
+    // PAGE_GROUP_LIMIT_REACHED). The preflight is therefore best-effort, not the source
+    // of truth; the atomic Kit check closes the race.
     let preIndex = storage.loadIndex()
     let targetPageForLimit = page ?? preIndex.currentPageId
     if preIndex.specialSlots.filter({ $0.pageId == targetPageForLimit }).count >= preIndex.settings.maxSpecialSlots {
@@ -1388,7 +1438,11 @@ func cmdWriteAttachment(_ args: ParsedArgs) -> Never {
             }
             let wrote = storage.set(n, content: content, in: group)
             if wrote, let label = args.flag("label") {
-                storage.setLabel(n, label: label, in: group)
+                // P2-22 (v2.10.9): an explicitly empty/whitespace-only --label "" means
+                // NO label (nil), not an empty-string label. Non-empty labels pass
+                // through unchanged (preserved verbatim).
+                let normalized = label.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : label
+                storage.setLabel(n, label: normalized, in: group)
             }
             return (wrote, content.attachments.count, content.items.isEmpty)
         }

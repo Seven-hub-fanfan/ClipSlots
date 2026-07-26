@@ -59,10 +59,11 @@ final class UpdateChecker: ObservableObject {
                 let pageURL = (json["html_url"] as? String) ?? Self.releasesPage
                 let notes = (json["body"] as? String) ?? ""
                 // v2.9.54: 解析 Release assets，取第一个 .dmg 的 browser_download_url 用于自动下载。
-                let dmgURL = Self.extractDMGURL(from: json)
+                // P2-17 (v2.10.9): 一并取回该 asset 的 size 用于下载后大小校验。
+                let dmgAsset = Self.extractDMGURL(from: json)
 
                 if Self.compare(latest, isNewerThan: current) {
-                    self.presentUpdateAvailable(latestTag: rawTag, pageURL: pageURL, notes: notes, dmgURL: dmgURL)
+                    self.presentUpdateAvailable(latestTag: rawTag, pageURL: pageURL, notes: notes, dmgAsset: dmgAsset)
                 } else {
                     self.presentUpToDate()
                 }
@@ -97,7 +98,9 @@ final class UpdateChecker: ObservableObject {
     // MARK: - Alerts
 
     /// v2.9.54: 从 Release JSON 的 assets 中取第一个 .dmg 的 browser_download_url。
-    static func extractDMGURL(from json: [String: Any]) -> URL? {
+    /// P2-17 (v2.10.9): 同时返回该 asset 的 `size`（字节数），下游 UpdateDownloader 在下载
+    /// 完成后据此校验下载文件大小，防止把被截断/不完整的包安装进 /Applications。
+    static func extractDMGURL(from json: [String: Any]) -> (url: URL, size: Int64)? {
         guard let assets = json["assets"] as? [[String: Any]] else { return nil }
         for asset in assets {
             if let name = asset["name"] as? String,
@@ -108,13 +111,15 @@ final class UpdateChecker: ObservableObject {
                // 明文 HTTP 存在中间人替换安装包的风险；非 https 一律拒绝（GitHub Release
                // 资产本就是 https，此处是纵深防御，防止异常/被篡改的 JSON 混入 http 链接）。
                url.scheme?.lowercased() == "https" {
-                return url
+                // size 可能是 Int / NSNumber，缺失时置 0（下游据 >0 判定是否校验）。
+                let size = (asset["size"] as? NSNumber)?.int64Value ?? 0
+                return (url, size)
             }
         }
         return nil
     }
 
-    private func presentUpdateAvailable(latestTag: String, pageURL: String, notes: String, dmgURL: URL?) {
+    private func presentUpdateAvailable(latestTag: String, pageURL: String, notes: String, dmgAsset: (url: URL, size: Int64)?) {
         let alert = NSAlert()
         alert.messageText = "发现新版本 \(latestTag)"
         var info = "当前版本：v\(Self.currentVersion)\n最新版本：\(latestTag)"
@@ -129,7 +134,7 @@ final class UpdateChecker: ObservableObject {
         alert.alertStyle = .informational
 
         // v2.9.54: 若能拿到 DMG 直链，提供「自动下载并安装」，无需手动去 GitHub。
-        if let dmgURL = dmgURL {
+        if let dmgAsset = dmgAsset {
             alert.addButton(withTitle: "自动下载并安装")
             alert.addButton(withTitle: "前往下载页")
             alert.addButton(withTitle: "稍后再说")
@@ -137,7 +142,8 @@ final class UpdateChecker: ObservableObject {
             let response = alert.runModal()
             switch response {
             case .alertFirstButtonReturn:
-                UpdateDownloader.shared.startDownload(from: dmgURL, version: latestTag)
+                // P2-17 (v2.10.9): 把期望大小一并传给下载器，下载完成后校验字节数。
+                UpdateDownloader.shared.startDownload(from: dmgAsset.url, version: latestTag, expectedSize: dmgAsset.size)
             case .alertSecondButtonReturn:
                 if let url = URL(string: pageURL) { NSWorkspace.shared.open(url) }
             default:

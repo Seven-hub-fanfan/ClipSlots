@@ -27,10 +27,17 @@ struct SlotSearchBar: View {
                     .textFieldStyle(.plain)
                     .font(.system(size: 13))
 
-                if !searchText.isEmpty {
+                // P2-30 (v2.10.9): 只在有文本时才显示 × 无法清除「仅设了类型筛选」的情况。
+                // 改为文本非空 或 筛选非 .all 时都显示清除入口。
+                // P2-29 (v2.10.9): × 优先只清文本、保留 selectedFilter（避免同时设了文本+筛选的
+                // 用户仅想清文本却把筛选也丢了）；当文本已空但筛选仍生效时，再点 × 清除筛选。
+                if !searchText.isEmpty || selectedFilter != .all {
                     Button {
-                        searchText = ""
-                        selectedFilter = .all   // P2-5: match no-results「清除搜索」behavior
+                        if !searchText.isEmpty {
+                            searchText = ""            // 先只清文本，保留筛选
+                        } else {
+                            selectedFilter = .all      // 文本已空 → 再清筛选
+                        }
                     } label: {
                         Image(systemName: "xmark.circle.fill")
                             .foregroundColor(.secondary)

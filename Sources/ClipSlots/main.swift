@@ -198,7 +198,17 @@ final class SlotStoreObservable: ObservableObject {
     }
 
     @Published var config = AppConfig.load()
-    @Published var slots: [Int: SlotContent] = [:]
+    @Published var slots: [Int: SlotContent] = [:] {
+        didSet {
+            // P2-28 (v2.10.9): 预计算槽位内容签名（contentId+updatedAt）派生值。此前
+            // ContentView 在 .onChange 里对 store.slots.mapValues 每次 body 求值都新建一个
+            // [Int:String]，开销随槽位数增长。改为在 slots 变化时计算一次并 @Published，
+            // 视图直接观察该派生值即可感知底层内容变化。
+            slotsContentSignature = slots.mapValues { "\($0.contentId):\($0.updatedAt)" }
+        }
+    }
+    /// P2-28 (v2.10.9): slots 内容签名派生值，随 slots 变化自动更新（见 slots.didSet）。
+    @Published private(set) var slotsContentSignature: [Int: String] = [:]
     @Published var labels: [Int: String] = [:]
     @Published var refreshTrigger = UUID()
 

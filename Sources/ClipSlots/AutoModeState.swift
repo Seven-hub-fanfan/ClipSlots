@@ -26,6 +26,12 @@ final class AutoModeState: ObservableObject {
     @Published var autoStoreEnabled: Bool {
         // P2-2: ensure the UserDefaults side-effect runs on the main thread.
         didSet {
+            // P2-8 (v2.10.9): @Published mutation must occur on the main thread —
+            // objectWillChange fires synchronously here, and SwiftUI observers
+            // updating off-main is undefined behavior. Assert in debug to catch a
+            // background-thread assignment at its source (no-op in release, so
+            // behavior is identical when already on main).
+            assert(Thread.isMainThread, "AutoModeState.autoStoreEnabled must be mutated on the main thread")
             let v = autoStoreEnabled
             if Thread.isMainThread { defaults.set(v, forKey: Keys.autoStore) }
             else { DispatchQueue.main.async { self.defaults.set(v, forKey: Keys.autoStore) } }
@@ -35,6 +41,9 @@ final class AutoModeState: ObservableObject {
     @Published var autoPasteEnabled: Bool {
         // P2-2: ensure the UserDefaults side-effect runs on the main thread.
         didSet {
+            // P2-8 (v2.10.9): @Published mutation must occur on the main thread (see
+            // autoStoreEnabled). Assert in debug; no-op in release.
+            assert(Thread.isMainThread, "AutoModeState.autoPasteEnabled must be mutated on the main thread")
             let v = autoPasteEnabled
             if Thread.isMainThread { defaults.set(v, forKey: Keys.autoPaste) }
             else { DispatchQueue.main.async { self.defaults.set(v, forKey: Keys.autoPaste) } }
@@ -44,6 +53,9 @@ final class AutoModeState: ObservableObject {
     @Published var autoAdvanceEnabled: Bool {
         // P2-2: ensure the UserDefaults side-effect runs on the main thread.
         didSet {
+            // P2-8 (v2.10.9): @Published mutation must occur on the main thread (see
+            // autoStoreEnabled). Assert in debug; no-op in release.
+            assert(Thread.isMainThread, "AutoModeState.autoAdvanceEnabled must be mutated on the main thread")
             let v = autoAdvanceEnabled
             if Thread.isMainThread { defaults.set(v, forKey: Keys.autoAdvance) }
             else { DispatchQueue.main.async { self.defaults.set(v, forKey: Keys.autoAdvance) } }

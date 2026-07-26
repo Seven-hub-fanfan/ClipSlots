@@ -1,7 +1,23 @@
 import SwiftUI
 import ClipSlotsKit
 
+/// v2.10.9 (P2-27): 承载搜索防抖 DispatchWorkItem 的小型持有者。放在视图 @StateObject
+/// 里而不是 @State，可通过引用语义在 body 之外命令式地取消/替换，不再触发无意义的 body
+/// 失效（避免 @State 反模式）。deinit 兜底取消，onDisappear 亦会主动取消（P2-26）。
+final class SearchDebounceHolder: ObservableObject {
+    var workItem: DispatchWorkItem?
+    func cancel() {
+        workItem?.cancel()
+        workItem = nil
+    }
+    deinit { workItem?.cancel() }
+}
+
 struct ContentView: View {
+    // P2-31 (v2.10.9): 已确认 store 的所有权正确——真正的持有者是 @main `ClipSlotsApp`
+    // 里的 `@StateObject private var store = SlotStoreObservable()`（main.swift），并以
+    // `ContentView(store: store)` 注入。@StateObject 保证其生命周期跨视图重建存活，因此
+    // 这里用 @ObservedObject 只是「观察而不持有」是正确用法，无需改动所有权。
     @ObservedObject var store: SlotStoreObservable
     // v2.10.0: 三档金属拨杆共享状态（自动存储 / 自动粘贴 / 自动切换）。
     @ObservedObject private var autoMode = AutoModeState.shared
@@ -34,7 +50,8 @@ struct ContentView: View {
     // unrelated view re-renders (e.g. thumbnails finishing load) no longer re-run the
     // whole scan+sort on the main thread.
     @State private var globalSearchResultsCache: [SlotGlobalSearchResult] = []
-    @State private var searchDebounceWorkItem: DispatchWorkItem?
+    // P2-27 (v2.10.9): 防抖 work item 从 @State 迁到视图持有的 holder（引用语义，body 外可安全 mutate）。
+    @StateObject private var searchDebounce = SearchDebounceHolder()
 
     // v2.7.1: stable connection sheet replaces broken node-canvas UI.
     @State private var showingConnectionManagement = false
@@ -111,6 +128,9 @@ struct ContentView: View {
                 searchSection
                     .padding(.horizontal, AppTheme.pagePadding)
                     .padding(.vertical, 8)
+
+                // P2-25 (v2.10.9): 当自动存储/粘贴游标指向别的组/页时提示。
+                crossGroupCursorHint
 
                 ScrollViewReader { scrollProxy in
                     ScrollView {
@@ -328,11 +348,17 @@ struct ContentView: View {
         .onChange(of: selectedFilter) { _ in scheduleGlobalSearchRecompute(debounced: false) }
         .onChange(of: searchScope) { _ in scheduleGlobalSearchRecompute(debounced: false) }
         .onChange(of: globalSearchSortRule) { _ in scheduleGlobalSearchRecompute(debounced: false) }
-        // P2-5 (v2.10.6): 全局搜索缓存此前只在搜索输入变化时失效，底层槽位内容
-        // （热键/后台同步改动）变化时结果保持陈旧。用槽位内容签名（contentId+updatedAt）
-        // 监听 store.slots 变化，触发非防抖重算，让结果随底层数据刷新。
-        .onChange(of: store.slots.mapValues { "\($0.contentId):\($0.updatedAt)" }) { _ in
+        // P2-5 (v2.10.6) + P2-28 (v2.10.9): 全局搜索缓存此前只在搜索输入变化时失效，底层
+        // 槽位内容（热键/后台同步改动）变化时结果保持陈旧。原实现用
+        // `store.slots.mapValues { ... }` 在每次 body 求值都新建 [Int:String]，开销随槽位数增长。
+        // 现改为观察 store 上预先计算好的 @Published 派生签名（slotsContentSignature），
+        // 仅在 slots 真正变化时重算一次。
+        .onChange(of: store.slotsContentSignature) { _ in
             scheduleGlobalSearchRecompute(debounced: false)
+        }
+        // P2-26 (v2.10.9): 视图消失时取消尚未触发的搜索防抖 work item，避免其在视图销毁后再触发。
+        .onDisappear {
+            searchDebounce.cancel()
         }
     }
 
@@ -1106,6 +1132,53 @@ struct ContentView: View {
             .shadow(color: color.opacity(0.55), radius: 2)
     }
 
+    // MARK: - P2-25 (v2.10.9) 跨组游标提示
+    //
+    // 写/读游标角标（🟢 写 / 🔵 读）只画在「当前查看组」的槽位格子上。当自动存储/粘贴游标
+    // 已推进到别的组/页（跨组推进场景），当前视图看不到任何角标，用户会困惑。这里在搜索区
+    // 下方给出一条轻量的胶囊提示，指明写/读游标实际所在的页/组/槽位。
+
+    /// 若地址指向的组不是当前查看组，返回「页 / 组 · 槽位 N」描述；否则返回 nil（当前组已有角标）。
+    private func crossGroupCursorLabel(_ addr: SlotAddress?) -> String? {
+        guard let addr,
+              addr.groupId != store.currentSpecialSlotId,
+              let group = store.specialSlots.first(where: { $0.id == addr.groupId }) else {
+            return nil
+        }
+        let pageName = store.pages.first(where: { $0.id == group.pageId })?.name
+        let pagePart = pageName.map { "\($0) / " } ?? ""
+        return "\(pagePart)\(group.name) · 槽位 \(addr.slot)"
+    }
+
+    @ViewBuilder
+    private var crossGroupCursorHint: some View {
+        let writeHint = autoMode.autoStoreEnabled ? crossGroupCursorLabel(store.autoStorePreview) : nil
+        let readHint = autoMode.autoPasteEnabled ? crossGroupCursorLabel(store.autoPastePreview) : nil
+        if writeHint != nil || readHint != nil {
+            HStack(spacing: 12) {
+                if let writeHint {
+                    HStack(spacing: 5) {
+                        Circle().fill(Color.green).frame(width: 7, height: 7)
+                        Text("写游标在其他组：\(writeHint)")
+                    }
+                }
+                if let readHint {
+                    HStack(spacing: 5) {
+                        Circle().fill(Color.blue).frame(width: 7, height: 7)
+                        Text("读游标在其他组：\(readHint)")
+                    }
+                }
+            }
+            .font(.caption)
+            .foregroundColor(.secondary)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 5)
+            .background(Capsule().fill(Color.secondary.opacity(0.12)))
+            .padding(.horizontal, AppTheme.pagePadding)
+            .padding(.bottom, 4)
+        }
+    }
+
     private var filledSlotCount: Int {
         store.slots.values.filter { !$0.isEmpty }.count
     }
@@ -1151,6 +1224,8 @@ struct ContentView: View {
                 .font(.subheadline)
                 .foregroundColor(.secondary)
             Button("清除搜索") {
+                // P2-29 (v2.10.9): 这是显式的「清除搜索」整体动作，语义上清空全部搜索条件，
+                // 因此仍同时清文本 + 重置筛选。搜索栏的 × 按钮（SlotSearchBar）才需保留筛选。
                 searchText = ""
                 selectedFilter = .all
             }
@@ -1254,8 +1329,7 @@ struct ContentView: View {
     /// the cross-page scan runs once after the user pauses typing; structural changes
     /// (filter/scope/sort) recompute immediately.
     private func scheduleGlobalSearchRecompute(debounced: Bool) {
-        searchDebounceWorkItem?.cancel()
-        searchDebounceWorkItem = nil
+        searchDebounce.cancel()
 
         guard searchScope == .global, isSearchActive else {
             store.globalSearchGeneration += 1   // P1-4 (v2.10.7): 作废在途后台搜索，防止清空后旧结果回魂
@@ -1271,7 +1345,7 @@ struct ContentView: View {
             let work = DispatchWorkItem {
                 recomputeGlobalSearchResults(overrideQuery: capturedQuery, overrideFilter: capturedFilter)
             }
-            searchDebounceWorkItem = work
+            searchDebounce.workItem = work
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.2, execute: work)
         } else {
             recomputeGlobalSearchResults()

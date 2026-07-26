@@ -25,6 +25,13 @@ public final class SpecialSlotStorage {
     /// serial `queue.sync` used inside `loadIndex`.
     private let storageLock = StorageLock.shared
 
+    /// P1-4 (v2.10.9): "poison" flag set true when loadIndex() hits a genuine
+    /// DECODE failure (corrupt index.json that physically exists), reset false on
+    /// a clean successful decode. saveIndex() consults it to refuse persisting the
+    /// schemaVersion=0 empty fallback (or a single slot appended to it) over real
+    /// data — the P0-1 "completely empty" guard alone does not catch that case.
+    private var lastLoadDecodeFailed = false
+
     // F7 (契约5): records what the startup default-page/group repair did on this
     // process. Empty => nothing needed repair. Read by the CLI to emit `repaired`
     // (+ `repair_actions`) on responses.
@@ -78,6 +85,11 @@ public final class SpecialSlotStorage {
 
         // Already v2.4+ format — another process migrated while we waited for the lock.
         if index.schemaVersion >= 2 {
+            // P2-6 (v2.10.9): the fast pre-check path (schema>=2) runs the page-scoped
+            // group repair; this in-lock recheck branch returned early WITHOUT it, so a
+            // process that lost the migration race skipped repair entirely. repair is
+            // idempotent, so run it here too before returning.
+            repairPageScopedSlotGroupsIfNeeded()
             return
         }
 
@@ -381,7 +393,10 @@ public final class SpecialSlotStorage {
         queue.sync {
             do {
                 let data = try Data(contentsOf: indexURL)
-                return try decoder.decode(SpecialSlotIndex.self, from: data)
+                let decoded = try decoder.decode(SpecialSlotIndex.self, from: data)
+                // P1-4 (v2.10.9): clean successful decode clears the poison flag.
+                lastLoadDecodeFailed = false
+                return decoded
             } catch {
                 // NOTE (round 1 data-loss fix): loadIndex() intentionally does NOT throw.
                 // It is called in ~30 places and converting it to `throws` is out of scope
@@ -394,6 +409,10 @@ public final class SpecialSlotStorage {
                 // fallback, copy the corrupt bytes to a single stable backup so the user's
                 // original data can be recovered even after a later save clobbers index.json.
                 if FileManager.default.fileExists(atPath: indexURL.path) {
+                    // P1-4 (v2.10.9): a physically-present index.json that fails to
+                    // decode is a genuine corruption — poison saveIndex so the empty
+                    // fallback (or a slot appended to it) cannot overwrite real data.
+                    lastLoadDecodeFailed = true
                     let backupURL = indexURL.deletingLastPathComponent()
                         .appendingPathComponent("index.json.corrupt.bak")
                     do {
@@ -438,6 +457,25 @@ public final class SpecialSlotStorage {
            FileManager.default.fileExists(atPath: indexURL.path) {
             NSLog("[ClipSlots] ERROR: refusing to overwrite index.json with empty fallback index; preserving existing data")
             throw SpecialSlotStorageError.refusingToOverwriteWithEmptyIndex
+        }
+        // P1-4 (v2.10.9): the P0-1 guard above only catches a COMPLETELY empty
+        // fallback. loadIndex() returns a schemaVersion=0 fallback on ANY decode
+        // failure; a write path that appended one slot to it would slip past the
+        // "empty" check and PERMANENTLY overwrite the real (schema>=2) library.
+        // Refuse a schema<2 save over an existing index when EITHER the last load
+        // hit a decode failure (poison flag), OR the on-disk index is already
+        // schema>=2 (a schema downgrade can only be the corrupt fallback).
+        if index.schemaVersion < 2, FileManager.default.fileExists(atPath: indexURL.path) {
+            if lastLoadDecodeFailed {
+                NSLog("[ClipSlots] ERROR: refusing to overwrite index.json (last load decode failed); preserving existing data")
+                throw SpecialSlotStorageError.refusingToOverwriteWithEmptyIndex
+            }
+            if let data = try? Data(contentsOf: indexURL),
+               let existing = try? decoder.decode(SpecialSlotIndex.self, from: data),
+               existing.schemaVersion >= 2 {
+                NSLog("[ClipSlots] ERROR: refusing to downgrade index.json from schemaVersion \(existing.schemaVersion) to \(index.schemaVersion); preserving existing data")
+                throw SpecialSlotStorageError.refusingToOverwriteWithEmptyIndex
+            }
         }
         let data = try encoder.encode(index)
         try data.write(to: indexURL, options: .atomic)
@@ -799,6 +837,10 @@ public final class SpecialSlotStorage {
 
             try saveIndex(index)
 
+            // P2-3 (v2.10.9): evict this group's cached SlotStorage and notify the
+            // GUI to clean up its connection cache for the deleted group.
+            evictStorageCacheAndNotifyGroupDeletion(groupId: id)
+
             // v2.9.5 (Feature #1): prune old trash after adding a fresh entry so
             // repeated deletes cannot let `.trash` grow without bound.
             cleanupTrash()
@@ -1022,6 +1064,12 @@ public final class SpecialSlotStorage {
             try saveIndex(index)
             NSLog("[ClipSlots] Page deleted: \(id)")
 
+            // P2-3 (v2.10.9): evict each deleted group's cached SlotStorage and
+            // notify the GUI to purge connection state for every removed group.
+            for group in groupsInPage {
+                evictStorageCacheAndNotifyGroupDeletion(groupId: group.id)
+            }
+
             // v2.9.5 (Feature #1): prune old trash after page delete too.
             cleanupTrash()
         }
@@ -1085,6 +1133,22 @@ public final class SpecialSlotStorage {
         return storage
     }
 
+    /// P2-3 (v2.10.9): on group/page delete, evict the per-group SlotStorage from
+    /// `storageCache` (group IDs are UUIDs and never reused, so a retained entry
+    /// leaks memory for the process lifetime) and notify listeners to purge stale
+    /// connection state. SlotConnectionStorage lives in the GUI target and CANNOT
+    /// be imported from ClipSlotsKit, so cross-module signalling is done via
+    /// NotificationCenter; the GUI observer performs the actual connection cleanup.
+    private func evictStorageCacheAndNotifyGroupDeletion(groupId: String) {
+        storageCacheLock.lock()
+        storageCache.removeValue(forKey: groupId)
+        storageCacheLock.unlock()
+        NotificationCenter.default.post(
+            name: Notification.Name("ClipSlotsSpecialSlotGroupDeleted"),
+            object: nil,
+            userInfo: ["groupId": groupId])
+    }
+
     // MARK: Explicit API — all callers must pass specialSlotId
 
     public func get(_ slot: Int, in specialSlotId: String) -> SlotContent {
@@ -1113,13 +1177,30 @@ public final class SpecialSlotStorage {
     }
 
     public func clear(_ slot: Int, in specialSlotId: String) {
-        slotStorage(for: specialSlotId).clear(slot)
-        touchSpecialSlot(id: specialSlotId)
+        // P2-4 (v2.10.9): perform the content clear AND the index touch inside a
+        // SINGLE withLock (mirroring set() in v2.10.8) so updatedAt and content can
+        // never briefly disagree across an interleaving window. The touch is inlined
+        // here (not via touchSpecialSlot) to keep both mutations in one lock scope.
+        try? storageLock.withLock {
+            slotStorage(for: specialSlotId).clear(slot)
+            var index = loadIndex()
+            if let idx = index.specialSlots.firstIndex(where: { $0.id == specialSlotId }) {
+                index.specialSlots[idx].updatedAt = Date()
+                try? saveIndex(index)
+            }
+        }
     }
 
     public func clearAllSlots(in specialSlotId: String) throws {
-        try slotStorage(for: specialSlotId).clearAll()
-        touchSpecialSlot(id: specialSlotId)
+        // P2-4 (v2.10.9): content wipe + index touch in ONE withLock (see clear()).
+        try storageLock.withLock {
+            try slotStorage(for: specialSlotId).clearAll()
+            var index = loadIndex()
+            if let idx = index.specialSlots.firstIndex(where: { $0.id == specialSlotId }) {
+                index.specialSlots[idx].updatedAt = Date()
+                try? saveIndex(index)
+            }
+        }
     }
 
     public func getLabel(_ slot: Int, in specialSlotId: String) -> String? {
@@ -1127,8 +1208,15 @@ public final class SpecialSlotStorage {
     }
 
     public func setLabel(_ slot: Int, label: String?, in specialSlotId: String) {
-        slotStorage(for: specialSlotId).setLabel(slot, label: label)
-        touchSpecialSlot(id: specialSlotId)
+        // P2-4 (v2.10.9): label write + index touch in ONE withLock (see clear()).
+        try? storageLock.withLock {
+            slotStorage(for: specialSlotId).setLabel(slot, label: label)
+            var index = loadIndex()
+            if let idx = index.specialSlots.firstIndex(where: { $0.id == specialSlotId }) {
+                index.specialSlots[idx].updatedAt = Date()
+                try? saveIndex(index)
+            }
+        }
     }
 
     public func snapshot(in specialSlotId: String) -> [Int: SlotContent] {

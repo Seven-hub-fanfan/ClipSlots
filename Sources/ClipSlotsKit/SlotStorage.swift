@@ -14,16 +14,30 @@ struct SlotManifest: Codable {
     var version: Int = 1
 }
 
+/// P1-6 (v2.10.9): a stat(2)-derived fingerprint of a slot directory used to
+/// decide whether the in-memory cache is still fresh. The old signal was the
+/// directory modificationDate, but on 1-second-granularity volumes (HFS+, SMB,
+/// NFS) a same-second write by the CLI shared the same mtime and was missed.
+/// writeSlotContent swaps the WHOLE slot dir via replaceItemAt, so its inode
+/// changes on every write — combining st_ino with the full-resolution mtime
+/// (sec AND nsec) and st_size makes a same-second external write detectable.
+struct DirFingerprint: Equatable {
+    let ino: UInt64
+    let mtimeSec: Int
+    let mtimeNsec: Int
+    let size: Int64
+}
+
 public final class SlotStorage {
     public static let shared = SlotStorage()
 
     private let baseURL: URL
     private var cache: [Int: SlotContent] = [:]
-    // P2-15 (v2.10.8): last-seen on-disk modification time per cached slot. `get`
-    // compares it against the current directory mtime so a value written by another
-    // process (CLI) is picked up on the very next read, without waiting for the
-    // FSEvents watcher's debounce window — closing the stale-read gap.
-    private var cacheMTime: [Int: Date] = [:]
+    // P1-6 (v2.10.9): last-seen on-disk fingerprint per cached slot. `get` compares
+    // it against a freshly-stat'd fingerprint so a value written by another process
+    // (CLI) is picked up on the very next read, even on coarse-mtime volumes where
+    // the old modificationDate signal (P2-15, v2.10.8) missed same-second writes.
+    private var cacheFingerprint: [Int: DirFingerprint] = [:]
     private let queue = DispatchQueue(label: "com.clipslots.storage", qos: .utility)
     private let encoder = JSONEncoder()
     private let decoder = JSONDecoder()
@@ -39,6 +53,36 @@ public final class SlotStorage {
         } catch {
             NSLog("[ClipSlots] SlotStorage init: failed to create base dir \(baseURL.path): \(error)")
         }
+        // P1-5 (v2.10.9): sweep any `.tmp_slot_*` staging dirs orphaned by a crash
+        // (before replaceItemAt/moveItem completed) so they don't accumulate forever.
+        cleanupStagingDirs()
+    }
+
+    /// P1-6 (v2.10.9): compute a slot directory's stat(2) fingerprint. Returns nil
+    /// if the path cannot be stat'd (e.g. the slot dir does not exist yet).
+    private func dirFingerprint(_ path: String) -> DirFingerprint? {
+        var st = stat()
+        guard stat(path, &st) == 0 else { return nil }
+        return DirFingerprint(
+            ino: UInt64(st.st_ino),
+            mtimeSec: st.st_mtimespec.tv_sec,
+            mtimeNsec: st.st_mtimespec.tv_nsec,
+            size: Int64(st.st_size)
+        )
+    }
+
+    /// P1-5 (v2.10.9): remove orphaned atomic-write staging directories. With no
+    /// argument it removes every `.tmp_slot_*` entry under baseURL (startup sweep);
+    /// with `slot` it removes only `.tmp_slot_<slot>_*` entries (per-slot sweep run
+    /// before a fresh write). A crash between staging and the atomic swap would
+    /// otherwise leave these dirs behind permanently.
+    private func cleanupStagingDirs(slot: Int? = nil) {
+        let prefix = slot.map { ".tmp_slot_\($0)_" } ?? ".tmp_slot_"
+        guard let entries = try? FileManager.default.contentsOfDirectory(
+            at: baseURL, includingPropertiesForKeys: nil) else { return }
+        for entry in entries where entry.lastPathComponent.hasPrefix(prefix) {
+            try? FileManager.default.removeItem(at: entry)
+        }
     }
 
     // MARK: - Slot Content
@@ -46,17 +90,18 @@ public final class SlotStorage {
     public func get(_ slot: Int) -> SlotContent {
         queue.sync {
             let slotDir = baseURL.appendingPathComponent(String(slot))
-            // P2-15 (v2.10.8): serve from cache only if the on-disk mtime is unchanged;
-            // otherwise re-read so a CLI write is reflected immediately.
-            let diskMTime = (try? FileManager.default
-                .attributesOfItem(atPath: slotDir.path)[.modificationDate]) as? Date
-            if let cached = cache[slot], cacheMTime[slot] == diskMTime {
+            // P1-6 (v2.10.9): serve from cache only if the on-disk fingerprint is
+            // unchanged; otherwise re-read so a CLI write is reflected immediately —
+            // even a same-second write on a coarse-mtime volume (st_ino/nsec/size
+            // change catches it where a 1-second mtime would not).
+            let diskFP = dirFingerprint(slotDir.path)
+            if let cached = cache[slot], cacheFingerprint[slot] == diskFP {
                 return cached
             }
 
             let content = readSlotContent(from: slotDir)
             cache[slot] = content
-            cacheMTime[slot] = diskMTime
+            cacheFingerprint[slot] = diskFP
             return content
         }
     }
@@ -73,6 +118,11 @@ public final class SlotStorage {
                 do {
                     try writeSlotContent(content, to: slot)
                     cache[slot] = content
+                    // P2-7 (v2.10.9): backfill the fingerprint with the freshly-written
+                    // slot dir so the next get() serves the cache instead of doing a full
+                    // disk re-read (the atomic swap changed the dir's inode/mtime/size).
+                    let slotDir = baseURL.appendingPathComponent(String(slot))
+                    cacheFingerprint[slot] = dirFingerprint(slotDir.path)
                     NSLog("[ClipSlots] SlotStorage.set OK slot=\(slot) preview=\(content.preview)")
                     return true
                 } catch {
@@ -151,7 +201,12 @@ public final class SlotStorage {
     /// so external writes are reflected. (The body was always correctly persisted to
     /// disk — this was a read-cache staleness bug, not a write bug.)
     public func invalidateCache() {
-        queue.sync { cache.removeAll() }
+        // P1-6 (v2.10.9): also clear the fingerprint map so the next get() cannot
+        // match a stale fingerprint and serve dropped content.
+        queue.sync {
+            cache.removeAll()
+            cacheFingerprint.removeAll()
+        }
     }
 
     // MARK: - Label
@@ -290,6 +345,10 @@ public final class SlotStorage {
 
     private func writeSlotContent(_ content: SlotContent, to slot: Int) throws {
         let slotDir = baseURL.appendingPathComponent(String(slot))
+
+        // P1-5 (v2.10.9): sweep any staging dirs for THIS slot orphaned by a prior
+        // crash before creating a fresh one, so `.tmp_slot_<slot>_*` cannot pile up.
+        cleanupStagingDirs(slot: slot)
 
         // Preserve label before rebuilding.
         let existingLabel = getLabel(slot)
