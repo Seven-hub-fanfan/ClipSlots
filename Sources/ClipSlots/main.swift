@@ -56,7 +56,11 @@ fileprivate final class VirtualVKeyCache {
         if let c = cached { lock.unlock(); return c }
         lock.unlock()
         let computed = computeVirtualKeyForCharacterV()
-        lock.lock(); cached = computed; lock.unlock()
+        lock.lock()
+        // v2.10.7 (P2-6): 双重检查——若另一线程已在计算期间填充 cached，复用它，避免覆盖竞态。
+        if let c = cached { lock.unlock(); return c }
+        cached = computed
+        lock.unlock()
         return computed
     }
 }
@@ -1483,7 +1487,8 @@ final class SlotStoreObservable: ObservableObject {
         NSLog("[ClipSlots] loadSlots activeSpecialSlotId=\(activeId)")
         var result: [Int: SlotContent] = [:]
         var labelMap: [Int: String] = [:]
-        for slot in 1...config.slots {
+        // P2-7 (v2.10.7): 配置损坏导致 config.slots==0 时，1...0 闭区间会 fatalError；改用 stride 空迭代。
+        for slot in stride(from: 1, through: config.slots, by: 1) {
             result[slot] = specialStorage.get(slot, in: activeId)
             if let label = specialStorage.getLabel(slot, in: activeId), !label.isEmpty {
                 labelMap[slot] = label
@@ -1867,7 +1872,13 @@ final class SlotStoreObservable: ObservableObject {
                 // P1-1 (v2.10.6): 旧实现在这里就同步调用 onCommitted?()（早于异步链粘贴），且只把
                 // 游标推进到链首，导致链内后续成员下次触发被重复粘贴。现在把回调下沉到 pasteSlotChain
                 // 的链尾（Cmd+V 真正发出后），并回传链内最大 slot，使游标一次性跳过整条链的全部成员。
-                let advanceSlot = chain.max() ?? slot
+                // P1-2 (v2.10.7): 仅当链为连续递增区间时才把读游标一次性推进到 chain.max()。
+                // 非连续链（如 [1,5]）推进到 max 会让中间空档槽被 AutoPasteManager 永久跳过；
+                // 此时改为按链首推进，下次自动粘贴从链首的下一个非空槽继续，保证空档不被跳过。
+                let sortedChain = chain.sorted()
+                let isContiguous = (sortedChain.count > 1)
+                    && (sortedChain.last! - sortedChain.first! == sortedChain.count - 1)
+                let advanceSlot = isContiguous ? (sortedChain.last ?? slot) : (chain.first ?? slot)
                 pasteSlotChain(chain) { onCommitted?(advanceSlot) }
                 return
             }
@@ -2413,6 +2424,8 @@ final class SlotStoreObservable: ObservableObject {
                     iconName: "link.circle.fill",
                     kind: .success
                 ))
+                // P1-3 (v2.10.7): 附件链粘贴完成后也记录「上次粘贴」为链首，与单槽/文本链口径一致。
+                self?.recordLastPaste(slot: slots.first ?? 0, in: activeId)
                 // P1-1 (v2.10.6): 整条链粘贴完成后再回调，供自动粘贴把游标推进到链尾。
                 onChainCommitted?()
             }
@@ -2466,11 +2479,23 @@ final class SlotStoreObservable: ObservableObject {
                 }
                 self.sendPasteKeystroke()
                 onChainCommitted?() // P1-1 (v2.10.6): 合并文本链的 Cmd+V 已发出，回调推进游标。
+                // P1-3 (v2.10.7): 链式粘贴也要记录「上次粘贴」，取链首槽位，与单槽路径口径一致。
+                self.recordLastPaste(slot: slots.first ?? 0, in: activeId)
+                // P1-1 (v2.10.7): 捕获自身写入后的 changeCount，还原前比对，避免覆盖用户 0.8s 内新复制内容。
+                let expectedChangeCount = self.clipboard.changeCount
                 let restoreWorkItem = DispatchWorkItem { [weak self] in
                     guard let self = self else { return }
+                    // 用 defer 保证跳过还原时也清理 pending 引用，
+                    // 否则下次 cancelPendingClipboardRestore 会用旧内容覆盖用户新复制。
+                    defer {
+                        self.pendingClipboardRestore = nil
+                        self.pendingClipboardRestoreContent = nil
+                    }
+                    if self.clipboard.changeCount != expectedChangeCount {
+                        NSLog("[ClipSlots] skip clipboard restore: user changed clipboard (expected=\(expectedChangeCount) current=\(self.clipboard.changeCount))")
+                        return
+                    }
                     _ = self.clipboard.restore(previous)
-                    self.pendingClipboardRestore = nil
-                    self.pendingClipboardRestoreContent = nil
                 }
                 self.pendingClipboardRestoreContent = previous
                 self.pendingClipboardRestore = restoreWorkItem
@@ -2507,11 +2532,23 @@ final class SlotStoreObservable: ObservableObject {
                 }
                 self.sendPasteKeystroke()
                 onChainCommitted?() // P1-1 (v2.10.6): 文件链的 Cmd+V 已发出，回调推进游标。
+                // P1-3 (v2.10.7): 链式粘贴也要记录「上次粘贴」，取链首槽位，与单槽路径口径一致。
+                self.recordLastPaste(slot: slots.first ?? 0, in: activeId)
+                // P1-1 (v2.10.7): 捕获自身写入后的 changeCount，还原前比对，避免覆盖用户 0.8s 内新复制内容。
+                let expectedChangeCount = self.clipboard.changeCount
                 let restoreWorkItem = DispatchWorkItem { [weak self] in
                     guard let self = self else { return }
+                    // 用 defer 保证跳过还原时也清理 pending 引用，
+                    // 否则下次 cancelPendingClipboardRestore 会用旧内容覆盖用户新复制。
+                    defer {
+                        self.pendingClipboardRestore = nil
+                        self.pendingClipboardRestoreContent = nil
+                    }
+                    if self.clipboard.changeCount != expectedChangeCount {
+                        NSLog("[ClipSlots] skip clipboard restore: user changed clipboard (expected=\(expectedChangeCount) current=\(self.clipboard.changeCount))")
+                        return
+                    }
                     _ = self.clipboard.restore(previous)
-                    self.pendingClipboardRestore = nil
-                    self.pendingClipboardRestoreContent = nil
                 }
                 self.pendingClipboardRestoreContent = previous
                 self.pendingClipboardRestore = restoreWorkItem
@@ -2930,7 +2967,8 @@ final class SlotStoreObservable: ObservableObject {
         let previous = clipboard.capture()
         // v2.8.1 (P0-1): claim a fresh generation token for this run and publish the
         // in-flight bookkeeping so a later sequence / cancel can supersede us cleanly.
-        pasteSequenceGeneration &+= 1
+        // P2-8 (v2.10.7): cancelPendingPasteOperations 内部（abortInFlightSequence）已自增代际令牌，
+        // 无需再手动 +1（否则每次开新序列 generation 跳变 2，仅影响日志可读性）。
         let gen = pasteSequenceGeneration
         inFlightSequencePrevious = previous
         inFlightSequenceTempFiles = tempFiles
@@ -2958,12 +2996,23 @@ final class SlotStoreObservable: ObservableObject {
         let onFinish: () -> Void = { [weak self] in
             guard let self else { return }
             onSuccess()
+            // P1-1 (v2.10.7): 序列内部会多次写剪贴板，故在此（最后一次自身写入之后）捕获期望
+            // changeCount；还原前比对，避免覆盖用户在 0.8s 窗口内新复制的内容。
+            let expectedChangeCount = self.clipboard.changeCount
             let restoreWorkItem = DispatchWorkItem { [weak self] in
                 guard let self else { return }
+                // 用 defer 保证跳过还原时也清理 pending/in-flight 引用，
+                // 否则下次 cancelPendingClipboardRestore 会用旧内容覆盖用户新复制。
+                defer {
+                    self.pendingClipboardRestore = nil
+                    self.pendingClipboardRestoreContent = nil
+                    if self.pasteSequenceGeneration == gen { self.inFlightSequencePrevious = nil }
+                }
+                if self.clipboard.changeCount != expectedChangeCount {
+                    NSLog("[ClipSlots] skip clipboard restore: user changed clipboard (expected=\(expectedChangeCount) current=\(self.clipboard.changeCount))")
+                    return
+                }
                 _ = self.clipboard.restore(previous)
-                self.pendingClipboardRestore = nil
-                self.pendingClipboardRestoreContent = nil
-                if self.pasteSequenceGeneration == gen { self.inFlightSequencePrevious = nil }
             }
             self.pendingClipboardRestoreContent = previous
             self.pendingClipboardRestore = restoreWorkItem
@@ -3663,6 +3712,7 @@ final class SlotStoreObservable: ObservableObject {
         loadedSpecialSlotId = activeId
         refreshTrigger = UUID()
         NSLog("[ClipSlots] CLEAR specialSlot=\(activeId) slot=\(slot)")
+        recomputeAutoPreviews()   // P1-5 (v2.10.7): 清空后重算游标角标（下一写入点/读取点）
     }
 
     func clearSlotWithConfirmation(_ slot: Int) {

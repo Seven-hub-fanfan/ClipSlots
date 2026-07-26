@@ -1237,10 +1237,10 @@ struct ContentView: View {
                 // 重新捕获最新的当前页/组并按新上下文重排，保证渲染顺序正确。
                 let freshPageId = store.currentPageId
                 let freshSpecialSlotId = store.currentSpecialSlotId
-                let reordered = ContentView.filterAndSortGlobalSearch(
-                    all: results,
-                    query: query,
-                    filter: filter,
+                // P2 (#9, v2.10.7): 只重排、不重复过滤（results 已在后台过滤完毕），
+                // 避免大结果集在主线程再跑一遍 filter 造成卡顿。
+                let reordered = ContentView.sortGlobalSearch(
+                    results,
                     sortRule: sortRule,
                     currentPageId: freshPageId,
                     currentSpecialSlotId: freshSpecialSlotId
@@ -1258,6 +1258,7 @@ struct ContentView: View {
         searchDebounceWorkItem = nil
 
         guard searchScope == .global, isSearchActive else {
+            store.globalSearchGeneration += 1   // P1-4 (v2.10.7): 作废在途后台搜索，防止清空后旧结果回魂
             globalSearchResultsCache = []
             return
         }
@@ -1297,7 +1298,24 @@ struct ContentView: View {
                     filter: filter
                 )
             }
+        // P2 (#9, v2.10.7): 过滤后交给 sortGlobalSearch 排序；主线程完成回调可直接复用
+        // sortGlobalSearch 重排而无需重复过滤，避免大结果集在主线程二次过滤造成卡顿。
+        return ContentView.sortGlobalSearch(
+            filtered,
+            sortRule: sortRule,
+            currentPageId: currentPageId,
+            currentSpecialSlotId: currentSpecialSlotId
+        )
+    }
 
+    /// P2 (#9, v2.10.7): 仅排序（不重复过滤）。后台队列已完成过滤，主线程完成回调只需
+    /// 按最新的当前页/组上下文重排即可，避免对大结果集在主线程重复执行 filter。
+    private static func sortGlobalSearch(
+        _ filtered: [SlotGlobalSearchResult],
+        sortRule: SlotSearchSortRule,
+        currentPageId: String,
+        currentSpecialSlotId: String
+    ) -> [SlotGlobalSearchResult] {
         switch sortRule {
         case .smart:
             return filtered.sorted { lhs, rhs in

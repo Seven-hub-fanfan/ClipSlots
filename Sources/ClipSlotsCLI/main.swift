@@ -12,7 +12,7 @@ import ClipSlotsKit
 //   success: {"ok": true, ...}
 //   error:   {"ok": false, "error": "message"}  (exit code 1)
 
-let CLI_VERSION = "2.10.6"
+let CLI_VERSION = "2.10.7"
 let DEFAULT_GROUP = "default"
 let DEFAULT_PAGE = "default_page"
 
@@ -408,7 +408,8 @@ func writeErrorCodeAndMessage(_ error: Error, context: String) -> (code: String,
                     "refusing to overwrite existing slot data with an empty index while \(context)")
         }
     }
-    return ("ERROR", describeWriteError(error, context: context))
+    // P2-12 (v2.10.7): 与单写路径 failWriteError 的 WRITE_FAILED 对齐，避免批量辅助函数返回旧的 ERROR。
+    return ("WRITE_FAILED", describeWriteError(error, context: context))
 }
 
 // v2.9.16 (#4): when `storage.set` returns false it has already swallowed the
@@ -871,7 +872,8 @@ func cmdWrite(_ args: ParsedArgs) -> Never {
         // v2.9.16 (#4): lock contention — accurate, retryable message.
         fail(e.errorDescription ?? "storage is busy (lock timeout)", code: "LOCK_TIMEOUT")
     } catch let e as WriteFailure {
-        fail(e.message)
+        // P2-10 (v2.10.7): 与泛化分支 failWriteError 的 WRITE_FAILED 对齐，不再返回默认 ERROR。
+        fail(e.message, code: "WRITE_FAILED")
     } catch {
         // v2.9.16 (#4): genuine IO/permission error, NOT a lock conflict.
         failWriteError(error, context: "writing slot \(n) in group \(group)")
@@ -1006,7 +1008,9 @@ func cmdWriteBatch(_ args: ParsedArgs) -> Never {
                     ?? "item \(idx): group '\(name)' not found"
                 emitPreflightFailure(offending: [idx], code: "GROUP_NOT_FOUND", message: msg)
             } catch {
-                emitPreflightFailure(offending: [idx], code: "ERROR",
+                // P2-14 (v2.10.7): 该兜底仅在 group 解析异常时触发，语义等同组解析失败，
+                // 统一为 GROUP_NOT_FOUND，避免返回旧的通用 ERROR。
+                emitPreflightFailure(offending: [idx], code: "GROUP_NOT_FOUND",
                                      message: "item \(idx): failed to resolve group: \(error)")
             }
         } else {
@@ -1173,6 +1177,15 @@ func cmdSearch(_ args: ParsedArgs) -> Never {
             }
         }
     }
+    // P2-13 (v2.10.7): 按 page→group→slot 稳定排序，保证多组/all-groups 搜索输出顺序确定。
+    results.sort { a, b in
+        let pa = (a["page"] as? String) ?? "", pb = (b["page"] as? String) ?? ""
+        if pa != pb { return pa < pb }
+        let ga = (a["group"] as? String) ?? "", gb = (b["group"] as? String) ?? ""
+        if ga != gb { return ga < gb }
+        let sa = (a["slot"] as? Int) ?? 0, sb = (b["slot"] as? Int) ?? 0
+        return sa < sb
+    }
     success(["query": query, "results": results])
 }
 
@@ -1191,7 +1204,7 @@ func cmdPaste(_ args: ParsedArgs) -> Never {
     // slotContentPayloads / payloadForAttachment).
     if !content.items.isEmpty {
         let ok = ClipboardManager.shared.restore(content)
-        guard ok else { fail("failed to load slot \(n) onto the clipboard") }
+        guard ok else { fail("failed to load slot \(n) onto the clipboard", code: "PASTE_FAILED") } // P2-16 (v2.10.7)
         success(["slot": n, "action": "copied-to-clipboard"])
     } else {
         var urls: [NSURL] = []
@@ -1207,12 +1220,12 @@ func cmdPaste(_ args: ParsedArgs) -> Never {
             }
         }
         guard !urls.isEmpty else {
-            fail("slot \(n) in group \(group) has \(content.attachments.count) attachment(s) but none resolve to an existing file path")
+            fail("slot \(n) in group \(group) has \(content.attachments.count) attachment(s) but none resolve to an existing file path", code: "PASTE_FAILED") // P2-16 (v2.10.7)
         }
         let pb = NSPasteboard.general
         pb.clearContents()
         let ok = pb.writeObjects(urls)
-        guard ok else { fail("failed to write attachment file URLs to the clipboard") }
+        guard ok else { fail("failed to write attachment file URLs to the clipboard", code: "PASTE_FAILED") } // P2-16 (v2.10.7)
         var out: [String: Any] = [
             "slot": n,
             "action": "copied-to-clipboard",
@@ -1311,7 +1324,8 @@ func cmdRenameGroup(_ args: ParsedArgs) -> Never {
     if let pageName = args.flag("page-name") {
         let ownerPageName = index.pages.first(where: { $0.id == group.pageId })?.name
         if ownerPageName != pageName {
-            fail("group '\(id)' is not on page '\(pageName)'")
+            // P2-15 (v2.10.7): 与 resolveGroup 同类场景对齐，归属校验失败返回 GROUP_NOT_FOUND。
+            fail("group '\(id)' is not on page '\(pageName)'", code: "GROUP_NOT_FOUND")
         }
     }
     let trimmed = newName.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1391,7 +1405,8 @@ func cmdWriteAttachment(_ args: ParsedArgs) -> Never {
     } catch {
         failWriteError(error, context: "writing attachments to slot \(n) in group \(group)")
     }
-    guard result.ok else { fail(writeFailureDiagnostic(context: "to write attachments to slot \(n) in group \(group)")) }
+    // P2-11 (v2.10.7): 写附件失败的兜底改用具体错误码 WRITE_FAILED，不再返回默认 ERROR。
+    guard result.ok else { fail(writeFailureDiagnostic(context: "to write attachments to slot \(n) in group \(group)"), code: "WRITE_FAILED") }
 
     success([
         "slot": n,

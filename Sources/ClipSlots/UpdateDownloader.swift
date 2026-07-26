@@ -22,8 +22,14 @@ final class UpdateDownloader: NSObject {
     private var progressBar: NSProgressIndicator?
     private var titleLabel: NSTextField?
     private var detailLabel: NSTextField?
+    // v2.10.7: 面板底部按钮引用。下载阶段只显示「取消」；下载完成后 actionButton 显示为「安装并重启」。
+    private var actionButton: NSButton?
+    private var cancelButton: NSButton?
 
     private var version: String = ""
+
+    // v2.10.7: 下载完成、等待安装的 DMG 本地路径。
+    private var pendingInstallDMGPath: String?
 
     /// 开始下载指定 DMG。
     func startDownload(from url: URL, version: String) {
@@ -81,6 +87,16 @@ final class UpdateDownloader: NSObject {
         cancelButton.frame = NSRect(x: 280, y: 10, width: 80, height: 28)
         cancelButton.bezelStyle = .rounded
         content.addSubview(cancelButton)
+        self.cancelButton = cancelButton
+
+        // v2.10.7: 下载阶段隐藏；下载完成后显示为「安装并重启」，点击触发自动安装。
+        let actionButton = NSButton(title: "安装并重启", target: self, action: #selector(onInstallPressed))
+        actionButton.frame = NSRect(x: 168, y: 10, width: 104, height: 28)
+        actionButton.bezelStyle = .rounded
+        actionButton.keyEquivalent = "\r"
+        actionButton.isHidden = true
+        content.addSubview(actionButton)
+        self.actionButton = actionButton
 
         let panel = NSPanel(contentRect: content.frame,
                             styleMask: [.titled, .closable],
@@ -113,6 +129,8 @@ final class UpdateDownloader: NSObject {
         progressBar = nil
         titleLabel = nil
         detailLabel = nil
+        actionButton = nil
+        cancelButton = nil
     }
 
     private func updateProgress(_ fraction: Double, detail: String) {
@@ -137,19 +155,65 @@ final class UpdateDownloader: NSObject {
             return
         }
 
-        dismissPanel()
-        NSWorkspace.shared.open(dest)
-
-        let alert = NSAlert()
-        alert.messageText = "下载完成"
-        alert.informativeText = "ClipSlots \(version) 已下载并打开磁盘映像。\n\n请在弹出的窗口中，将 ClipSlots.app 拖入「应用程序」文件夹完成安装，然后重新启动应用。"
-        alert.alertStyle = .informational
-        alert.addButton(withTitle: "好的")
-        alert.runModal()
-
         session?.finishTasksAndInvalidate()
         session = nil
         task = nil
+
+        // v2.10.7: 下载完成后不再要求手动拖拽 DMG。切换面板为「安装就绪」，
+        // 用户点击「安装并重启」即自动完成挂载 + ditto 替换 + 重启。
+        pendingInstallDMGPath = dest.path
+        presentInstallReady()
+    }
+
+    /// v2.10.7: 下载完成后把进度面板切换为「安装就绪」状态。
+    private func presentInstallReady() {
+        if panel == nil { presentPanel() }
+        progressBar?.stopAnimation(nil)
+        progressBar?.isIndeterminate = false
+        progressBar?.doubleValue = 1.0
+        titleLabel?.stringValue = "下载完成 v\(version)"
+        detailLabel?.stringValue = "点击「安装并重启」自动完成更新，无需手动拖拽。"
+        cancelButton?.title = "稍后"
+        actionButton?.isHidden = false
+        panel?.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
+    /// v2.10.7: 点击「安装并重启」——静默自动安装。
+    @objc private func onInstallPressed() {
+        guard let dmgPath = pendingInstallDMGPath else { return }
+        titleLabel?.stringValue = "正在安装 v\(version)…"
+        detailLabel?.stringValue = "正在替换应用程序，请稍候…"
+        progressBar?.isIndeterminate = true
+        progressBar?.startAnimation(nil)
+        actionButton?.isEnabled = false
+        cancelButton?.isEnabled = false
+
+        UpdateInstaller.shared.install(
+            dmgPath: dmgPath,
+            version: version,
+            progress: { [weak self] text in
+                self?.detailLabel?.stringValue = text
+            },
+            failure: { [weak self] message in
+                self?.handleInstallFailure(message, dmgPath: dmgPath)
+            }
+        )
+        // 安装成功后 UpdateInstaller 会重启 App 并结束进程，无需成功回调。
+    }
+
+    /// v2.10.7: 自动安装失败——回退到手动安装（打开 DMG 让用户自行拖入）。
+    private func handleInstallFailure(_ message: String, dmgPath: String) {
+        dismissPanel()
+        let alert = NSAlert()
+        alert.messageText = "自动安装失败"
+        alert.informativeText = message + "\n\n可改用手动安装：打开磁盘映像后，将 ClipSlots.app 拖入「应用程序」文件夹。"
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "手动安装")
+        alert.addButton(withTitle: "取消")
+        if alert.runModal() == .alertFirstButtonReturn {
+            NSWorkspace.shared.open(URL(fileURLWithPath: dmgPath))
+        }
     }
 
     private func handleFailure(_ message: String) {

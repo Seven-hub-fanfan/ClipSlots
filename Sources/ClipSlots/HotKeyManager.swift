@@ -138,7 +138,9 @@ final class HotKeyManager {
         }
 
         let template = config.hotkeyTemplate
-        for slot in 1...config.slots {
+        // P2-7 (v2.10.7): 配置损坏导致 config.slots==0 时，1...0 闭区间会 fatalError。
+        // 改用 stride——slots==0 时直接空迭代，不崩溃；循环体保持不变。
+        for slot in stride(from: 1, through: config.slots, by: 1) {
             // Paste hotkey: signature=1
             if let (modifiers, keyCode) = parseKeybind(config.pasteKey, slot: slot, template: template) {
                 let id = EventHotKeyID(signature: 1, id: UInt32(slot))
