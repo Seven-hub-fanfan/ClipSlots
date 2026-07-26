@@ -880,7 +880,18 @@ final class SlotStoreObservable: ObservableObject {
         }
 
         suppressWatcher() // self-write
-        _ = specialStorage.set(target.slot, content: content, in: target.groupId)
+        // P2-3 (v2.10.5): 检查 set 返回值（@discardableResult -> Bool）。写入失败时
+        // 既不推进写游标、也不弹「已自动存储」成功提示，避免「假成功 + 游标跳过一个
+        // 未写入的槽位」。
+        guard specialStorage.set(target.slot, content: content, in: target.groupId) else {
+            showFloatingNotice(FloatingNotice(
+                title: "自动存储失败",
+                subtitle: "写入槽位 \(target.slot) 未成功，请重试",
+                iconName: "exclamationmark.triangle.fill",
+                kind: .warning
+            ))
+            return
+        }
         // 推进写游标（磁盘持久化，跨进程写锁内完成；旧游标压入 prev 供回退）。
         try? specialStorage.advanceAutoStoreCursor(to: SpecialSlotCursor(groupId: target.groupId, slot: target.slot))
 
@@ -946,13 +957,15 @@ final class SlotStoreObservable: ObservableObject {
             switchSpecialSlot(id: target.groupId)
         }
 
-        // 推进读游标（磁盘持久化；旧游标压入 prev 供回退）。粘贴是异步的，先记录落点即可。
-        try? specialStorage.advanceAutoPasteCursor(to: SpecialSlotCursor(groupId: target.groupId, slot: target.slot))
-        recomputeAutoPreviews()
-
-        // 复用现有粘贴管线（含附件链 / 剪贴板恢复 / Cmd+V），
-        // 但抑制其「粘贴后组自动切换」——跨组/跨页推进已由读游标负责。
-        pasteSlot(target.slot, suppressAutoAdvance: true)
+        // P2-4 (v2.10.5): 读游标推进改到「粘贴已提交（Cmd+V 已发出 / 附件链已完成）」之后再执行。
+        // 此前是先推进游标再调 pasteSlot；若用户在异步 Cmd+V 触发前手动切组，pasteSlot 的
+        // stale-guard 会中止粘贴，但游标已前移——导致跳过一个未粘贴的槽位。改用 onCommitted
+        // 回调后，只有真正提交粘贴才推进；中止路径不回调，游标保持原位。
+        pasteSlot(target.slot, suppressAutoAdvance: true) { [weak self] in
+            guard let self = self else { return }
+            try? self.specialStorage.advanceAutoPasteCursor(to: SpecialSlotCursor(groupId: target.groupId, slot: target.slot))
+            self.recomputeAutoPreviews()
+        }
     }
 
     // MARK: - v2.10.1 游标回退 / 重置 / 可视化
@@ -1859,7 +1872,7 @@ final class SlotStoreObservable: ObservableObject {
 
     // MARK: - Simple Paste (hotkeys, menu)
 
-    func pasteSlot(_ slot: Int, suppressAutoAdvance: Bool = false) {
+    func pasteSlot(_ slot: Int, suppressAutoAdvance: Bool = false, onCommitted: (() -> Void)? = nil) {
         let activeId = activeHotkeySpecialSlotId
 
         NSLog("[ClipSlots] pasteSlot instanceID=\(instanceID) slot=\(slot) activeSpecialSlotId=\(activeId) loadedSpecialSlotId=\(loadedSpecialSlotId ?? "nil")")
@@ -1869,6 +1882,8 @@ final class SlotStoreObservable: ObservableObject {
             let chain = currentConnectionMap.chainSlots(startingAt: slot)
             if chain.count > 1 {
                 NSLog("[ClipSlots] pasteSlot chain detected, chain=\(chain)")
+                // P2-4 (v2.10.5): chain paste 已确定要执行，视为已提交。
+                onCommitted?()
                 pasteSlotChain(chain)
                 return
             }
@@ -1893,6 +1908,8 @@ final class SlotStoreObservable: ObservableObject {
                     kind: .success
                 ))
                 self?.completeAutoAdvanceAfterAttachments(afterPasting: slot, in: activeId, suppress: suppressAutoAdvance) // v2.9.37: attachments done → safe to advance
+                // P2-4 (v2.10.5): 附件路径确认粘贴完成后再回调，供自动粘贴推进游标。
+                onCommitted?()
             }
             return
         }
@@ -1930,6 +1947,10 @@ final class SlotStoreObservable: ObservableObject {
             }
 
             self.sendPasteKeystroke()
+
+            // P2-4 (v2.10.5): 文本路径确认发送 Cmd+V 之后再回调，供自动粘贴推进读游标。
+            // 若上面的 stale 守卫已中止，则不会走到这里，游标不会被错误推进。
+            onCommitted?()
 
             // v2.9.56 fix: auto-advance MUST fire only after the paste keystroke has
             // been sent. Previously maybeAutoAdvance was called synchronously right

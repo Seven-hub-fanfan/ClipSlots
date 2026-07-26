@@ -12,7 +12,7 @@ import ClipSlotsKit
 //   success: {"ok": true, ...}
 //   error:   {"ok": false, "error": "message"}  (exit code 1)
 
-let CLI_VERSION = "2.10.4"
+let CLI_VERSION = "2.10.5"
 let DEFAULT_GROUP = "default"
 let DEFAULT_PAGE = "default_page"
 
@@ -375,6 +375,39 @@ func describeWriteError(_ error: Error, context: String) -> String {
         + "(not a lock conflict; check disk/permissions)"
 }
 
+// P2-2 (v2.10.5): the Kit raises `SpecialSlotStorageError.refusingToOverwriteWithEmptyIndex`
+// from saveIndex when a write would clobber a non-empty on-disk index with the empty
+// fallback (a data-loss guard). Previously every write/create/rename/delete command let
+// it fall through to the generic `catch` → `describeWriteError`, surfacing the useless
+// `error_code: "ERROR"`. This helper maps it to a stable, specific code so agents can
+// distinguish index-protection (retry / inspect data dir) from ordinary IO failures,
+// and defers everything else to `describeWriteError`.
+func failWriteError(_ error: Error, context: String) -> Never {
+    if let e = error as? SpecialSlotStorageError {
+        switch e {
+        case .refusingToOverwriteWithEmptyIndex:
+            fail("refusing to overwrite existing slot data with an empty index while \(context); "
+                    + "the on-disk index may be temporarily unreadable — retry, and if it persists "
+                    + "inspect \(ClipSlotsPaths.dataRoot.path)",
+                 code: "INDEX_WRITE_REFUSED")
+        }
+    }
+    fail(describeWriteError(error, context: context))
+}
+
+// Same mapping as `failWriteError` but returns (code, message) for the batch path,
+// which aggregates per-item results instead of exiting.
+func writeErrorCodeAndMessage(_ error: Error, context: String) -> (code: String, message: String) {
+    if let e = error as? SpecialSlotStorageError {
+        switch e {
+        case .refusingToOverwriteWithEmptyIndex:
+            return ("INDEX_WRITE_REFUSED",
+                    "refusing to overwrite existing slot data with an empty index while \(context)")
+        }
+    }
+    return ("ERROR", describeWriteError(error, context: context))
+}
+
 // v2.9.16 (#4): when `storage.set` returns false it has already swallowed the
 // underlying error. Probe the data directory writability so we can still tell a
 // genuine permission problem apart from a transient failure.
@@ -597,7 +630,8 @@ func cmdList(_ args: ParsedArgs) -> Never {
         let pageName = index.pages.first(where: { $0.id == pageId })?.name
         let groupsInPage = index.specialSlots
             .filter { $0.pageId == pageId }
-            .sorted { $0.order < $1.order }
+            // P2-5 (v2.10.5): 补 .id 次级键，order 相同时输出顺序稳定（与 GUI / Kit 一致）。
+            .sorted { $0.order != $1.order ? $0.order < $1.order : $0.id < $1.id }
         let groupsOut: [[String: Any]] = groupsInPage.map { g in
             ["group": g.id, "name": g.name, "slots": slotSummaries(in: g.id)]
         }
@@ -623,9 +657,12 @@ func cmdList(_ args: ParsedArgs) -> Never {
         guard let pageSize = Int(psRaw), pageSize > 0 else {
             fail("--page-size must be a positive integer (got '\(psRaw)')", code: "INVALID_LIMIT")
         }
-        let pageNum = Int(args.flag("page-num") ?? "1") ?? 1
-        guard pageNum >= 1 else {
-            fail("--page-num must be >= 1 (got '\(args.flag("page-num") ?? "")')", code: "INVALID_LIMIT")
+        // P2-6 (v2.10.5): --page-num 与 --page-size 一样做显式数值校验。此前用
+        // `Int(...) ?? 1`，非数字（如 --page-num abc）会被静默当成 1，与 --page-size
+        // 的报错行为不一致，掩盖了调用方的参数错误。
+        let pageNumRaw = args.flag("page-num") ?? "1"
+        guard let pageNum = Int(pageNumRaw), pageNum >= 1 else {
+            fail("--page-num must be a positive integer (got '\(pageNumRaw)')", code: "INVALID_LIMIT")
         }
         let total = slots.count
         // P0-3: compute totalPages without overflow (avoid `total + pageSize - 1`).
@@ -823,7 +860,7 @@ func cmdWrite(_ args: ParsedArgs) -> Never {
         fail(e.message)
     } catch {
         // v2.9.16 (#4): genuine IO/permission error, NOT a lock conflict.
-        fail(describeWriteError(error, context: "writing slot \(n) in group \(group)"))
+        failWriteError(error, context: "writing slot \(n) in group \(group)")
     }
 }
 
@@ -1036,9 +1073,14 @@ func cmdWriteBatch(_ args: ParsedArgs) -> Never {
             failed += 1
             if stopOnError { stopped = true }
         } catch {
+            // P2-2 (v2.10.5): surface refusingToOverwriteWithEmptyIndex as INDEX_WRITE_REFUSED
+            // here too, instead of the generic WRITE_FAILED, so batch callers get the same
+            // specific code as the single-write path.
+            let (code, message) = writeErrorCodeAndMessage(error, context: "writing slot \(item.slot)")
             results.append(["index": item.index, "slot": item.slot, "group": item.group,
-                            "ok": false, "status": "failed", "error_code": "WRITE_FAILED",
-                            "error": describeWriteError(error, context: "writing slot \(item.slot)")])
+                            "ok": false, "status": "failed",
+                            "error_code": code == "ERROR" ? "WRITE_FAILED" : code,
+                            "error": message])
             failed += 1
             if stopOnError { stopped = true }
         }
@@ -1177,7 +1219,9 @@ func cmdCreateGroup(_ args: ParsedArgs) -> Never {
     let preIndex = storage.loadIndex()
     let targetPageForLimit = page ?? preIndex.currentPageId
     if preIndex.specialSlots.filter({ $0.pageId == targetPageForLimit }).count >= preIndex.settings.maxSpecialSlots {
-        fail("page group limit reached (max 10 groups per page)", code: "PAGE_GROUP_LIMIT_REACHED")
+        // P2-10 (v2.10.5): 错误文案用真实的 settings.maxSpecialSlots，别再硬编码 "10"。
+        // 计数判断本就用 settings.maxSpecialSlots，一旦该配置被改，硬编码文案会误导调用方。
+        fail("page group limit reached (max \(preIndex.settings.maxSpecialSlots) groups per page)", code: "PAGE_GROUP_LIMIT_REACHED")
     }
     do {
         let slot = try storage.createSpecialSlot(name: name, pageId: page, requestedAt: CLI_REQUEST_RECEIVED_AT)
@@ -1194,7 +1238,7 @@ func cmdCreateGroup(_ args: ParsedArgs) -> Never {
         // P2-14: map to a specific code (e.g. maxSpecialSlotsReached → PAGE_GROUP_LIMIT_REACHED).
         fail(e.errorDescription ?? "failed to create group", code: codeForSpecialSlotError(e))
     } catch {
-        fail(describeWriteError(error, context: "creating group"))
+        failWriteError(error, context: "creating group")
     }
 }
 
@@ -1228,7 +1272,7 @@ func cmdCreatePage(_ args: ParsedArgs) -> Never {
     } catch let e as PageError {
         fail(e.errorDescription ?? "failed to create page", code: codeForPageError(e))
     } catch {
-        fail(describeWriteError(error, context: "creating page"))
+        failWriteError(error, context: "creating page")
     }
 }
 
@@ -1272,7 +1316,7 @@ func cmdRenameGroup(_ args: ParsedArgs) -> Never {
     } catch let e as SpecialSlotError {
         fail(e.errorDescription ?? "failed to rename group", code: codeForSpecialSlotError(e))
     } catch {
-        fail(describeWriteError(error, context: "renaming group \(id)"))
+        failWriteError(error, context: "renaming group \(id)")
     }
 }
 
@@ -1331,7 +1375,7 @@ func cmdWriteAttachment(_ args: ParsedArgs) -> Never {
     } catch let e as StorageLockError {
         fail(e.errorDescription ?? "storage is busy (lock timeout)", code: "LOCK_TIMEOUT")
     } catch {
-        fail(describeWriteError(error, context: "writing attachments to slot \(n) in group \(group)"))
+        failWriteError(error, context: "writing attachments to slot \(n) in group \(group)")
     }
     guard result.ok else { fail(writeFailureDiagnostic(context: "to write attachments to slot \(n) in group \(group)")) }
 
@@ -1357,7 +1401,7 @@ func cmdClear(_ args: ParsedArgs) -> Never {
     } catch let e as StorageLockError {
         fail(e.errorDescription ?? "storage is busy (lock timeout)", code: "LOCK_TIMEOUT")
     } catch {
-        fail(describeWriteError(error, context: "clearing slot \(n) in group \(group)"))
+        failWriteError(error, context: "clearing slot \(n) in group \(group)")
     }
     success(["slot": n, "group": group, "action": "cleared"])
 }
@@ -1388,7 +1432,7 @@ func cmdDeleteGroup(_ args: ParsedArgs) -> Never {
     } catch let e as SpecialSlotError {
         fail(e.errorDescription ?? "failed to delete group", code: codeForSpecialSlotError(e))
     } catch {
-        fail(describeWriteError(error, context: "deleting group"))
+        failWriteError(error, context: "deleting group")
     }
 }
 
@@ -1417,7 +1461,7 @@ func cmdDeletePage(_ args: ParsedArgs) -> Never {
     } catch let e as PageError {
         fail(e.errorDescription ?? "failed to delete page", code: codeForPageError(e))
     } catch {
-        fail(describeWriteError(error, context: "deleting page"))
+        failWriteError(error, context: "deleting page")
     }
 }
 

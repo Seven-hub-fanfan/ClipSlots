@@ -729,7 +729,18 @@ struct ContentView: View {
     // P2-4: run NSAlert without blocking the SwiftUI runloop; sheet on the key window, modal fallback.
     private func runAlertNonBlocking(_ alert: NSAlert, completion: @escaping (NSApplication.ModalResponse) -> Void) {
         if let window = NSApp.keyWindow ?? NSApp.mainWindow ?? NSApp.windows.first(where: { $0.isVisible }) {
+            // P2-8 (v2.10.5): 若窗口已有 sheet 在展示，再 beginSheetModal 会排队/冲突，
+            // 退化为 runModal 保证当前对话框可用。
+            if window.attachedSheet != nil {
+                completion(alert.runModal())
+                return
+            }
             alert.beginSheetModal(for: window) { completion($0) }
+            // P2-8 (v2.10.5): sheet 形式的 NSAlert 不会自动聚焦 accessory 输入框，
+            // 用户此前必须先点一下才能输入。sheet 窗口已创建，显式设为第一响应者。
+            if let field = alert.accessoryView {
+                alert.window.makeFirstResponder(field)
+            }
         } else {
             completion(alert.runModal())
         }
@@ -1180,9 +1191,14 @@ struct ContentView: View {
         let currentPageId = store.currentPageId
         let currentSpecialSlotId = store.currentSpecialSlotId
 
+        // P2-9 (v2.10.5): 在主线程先快照可搜索槽位集合。allSearchableSlots() 会遍历
+        // `pages` / `specialSlots`（这两个数组只在主线程被修改），此前整段放在后台队列执行
+        // 是真实数据竞争（可能崩溃/读到半更新状态）。快照来自内存 snapshot，成本可控；
+        // 繁重的 filter + sort 仍在下面的后台队列进行。
+        let all = store.allSearchableSlots()
+
         DispatchQueue.global(qos: .userInitiated).async {
-            // Heavy cross-page scan + filter + sort runs off the main thread.
-            let all = store.allSearchableSlots()
+            // Heavy cross-page filter + sort runs off the main thread.
             let results = ContentView.filterAndSortGlobalSearch(
                 all: all,
                 query: query,

@@ -16,18 +16,22 @@ enum AutoModeTraversal {
     static func flatten(pages: [SlotPage], groups: [SpecialSlot], slotCount: Int) -> [SlotAddress] {
         guard slotCount >= 1 else { return [] }
         var result: [SlotAddress] = []
-        let sortedPages = pages.sorted { $0.order < $1.order }
+        // P2-1 (v2.10.5): 补 .id 次级排序，与 Kit 层 SpecialSlotStorage 口径一致。
+        // 仅按 order 排序时，两页/两组 order 相同的场景下 Swift `sorted` 不保证稳定，
+        // 自动存储/粘贴的推进顺序可能与 UI tab 顺序不一致，甚至同数据两次运行落点不同。
+        let sortedPages = pages.sorted { $0.order != $1.order ? $0.order < $1.order : $0.id < $1.id }
 
         // 兜底：异常情况下没有任何 page，退化为直接按 group.order 排列。
         if sortedPages.isEmpty {
-            for g in groups.sorted(by: { $0.order < $1.order }) {
+            for g in groups.sorted(by: { $0.order != $1.order ? $0.order < $1.order : $0.id < $1.id }) {
                 for s in 1...slotCount { result.append(SlotAddress(groupId: g.id, slot: s)) }
             }
             return result
         }
 
         for page in sortedPages {
-            let groupsInPage = groups.filter { $0.pageId == page.id }.sorted { $0.order < $1.order }
+            let groupsInPage = groups.filter { $0.pageId == page.id }
+                .sorted { $0.order != $1.order ? $0.order < $1.order : $0.id < $1.id }
             for g in groupsInPage {
                 for s in 1...slotCount { result.append(SlotAddress(groupId: g.id, slot: s)) }
             }

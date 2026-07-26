@@ -59,17 +59,20 @@ final class AppUninstaller: ObservableObject {
             .replacingOccurrences(of: "\"", with: "\\\"")
         let appleScript = "do shell script \"\(escaped)\" with administrator privileges"
 
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+        // P1-1 (v2.10.5): NSAppleScript 非线程安全，必须在主线程构造并执行——与
+        // CLIInstallManager.runPrivileged（v2.10.4 P0-2 修复）保持一致。此前放在后台
+        // 队列执行是同一崩溃反模式；且卸载路径更危险：崩溃发生在步骤1/2 已删除用户数据
+        // 之后，会留下「数据已删、App 未卸载」的半损坏状态。
+        DispatchQueue.main.async { [weak self] in
             var errorInfo: NSDictionary?
-            NSAppleScript(source: appleScript)?.executeAndReturnError(&errorInfo)
-            DispatchQueue.main.async {
-                // P2-7: 鉴权失败/取消时复位 isBusy 让用户可重试，不继续 trash App。
-                if errorInfo != nil {
-                    self?.isBusy = false
-                    return
-                }
-                completion()
+            let script = NSAppleScript(source: appleScript)
+            _ = script?.executeAndReturnError(&errorInfo)
+            // P2-7: 鉴权失败/取消时复位 isBusy 让用户可重试，不继续 trash App。
+            if errorInfo != nil {
+                self?.isBusy = false
+                return
             }
+            completion()
         }
     }
 

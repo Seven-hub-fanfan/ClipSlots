@@ -132,6 +132,10 @@ final class CLIInstallManager: ObservableObject {
         // P0-2: NSAppleScript is not thread-safe — construct AND execute it on the
         // main thread. Previously this ran on a background queue, causing random crashes.
         DispatchQueue.main.async {
+            // P2-7 (v2.10.5): NSAppleScript 的鉴权弹窗 + shell 执行会同步阻塞主线程，
+            // 先前置的 isBusy 转圈来不及绘制。执行前显式驱动一次 runloop，让转圈状态
+            // 有机会先画出来，缓解 UI 短时冻结的观感（非崩溃，纯手感优化）。
+            RunLoop.current.run(until: Date())
             var errorInfo: NSDictionary?
             let script = NSAppleScript(source: appleScript)
             _ = script?.executeAndReturnError(&errorInfo)
