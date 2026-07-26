@@ -46,10 +46,20 @@ final class UpdateInstaller {
         let mountPoint = NSTemporaryDirectory() + "clipslots-update-mnt-\(UUID().uuidString)"
 
         queue.async {
+            // P2-3 (v2.10.8): 挂载前先校验 DMG 完整性。`hdiutil verify` 校验映像内部
+            // checksum，可拦截被截断/损坏/被篡改的下载包，避免把坏包安装进 /Applications。
+            do {
+                try Self.runProcess("/usr/bin/hdiutil", ["verify", dmgPath, "-quiet"], timeout: 120)
+            } catch {
+                DispatchQueue.main.async { failure("磁盘映像校验失败（可能下载损坏）：\(error.localizedDescription)") }
+                return
+            }
+
             // 2. 挂载 DMG。
             do {
                 try Self.runProcess("/usr/bin/hdiutil",
-                                    ["attach", dmgPath, "-nobrowse", "-quiet", "-mountpoint", mountPoint])
+                                    ["attach", dmgPath, "-nobrowse", "-quiet", "-mountpoint", mountPoint],
+                                    timeout: 120)
             } catch {
                 DispatchQueue.main.async { failure("挂载磁盘映像失败：\(error.localizedDescription)") }
                 return
@@ -59,16 +69,26 @@ final class UpdateInstaller {
             let mountedApp = mountPoint + "/" + appName
             guard FileManager.default.fileExists(atPath: mountedApp) else {
                 try? Self.runProcess("/usr/bin/hdiutil", ["detach", mountPoint, "-quiet", "-force"])
+                // P2-2 (v2.10.8): detach 后清理挂载点空目录，避免每次更新泄漏一个。
+                try? FileManager.default.removeItem(atPath: mountPoint)
                 DispatchQueue.main.async { failure("磁盘映像中未找到 \(appName)") }
                 return
             }
 
             DispatchQueue.main.async { progress("正在替换应用程序…") }
 
-            // 3. ditto 替换。先尝试无鉴权（App 在用户可写目录时可行），失败再用管理员授权。
+            // 3. 替换。先尝试无鉴权（App 在用户可写目录时可行），失败再用管理员授权。
             var installError: String? = nil
             do {
-                // 直接 ditto 覆盖到 /Applications。ditto 会原子替换目录内容。
+                // P1-1 (v2.10.8): 「先移除再拷贝」而非直接 `ditto 源 目标`。
+                // `ditto 源 目标` 是把源内容「覆盖合并」进已存在的目标目录，不会删除新版本
+                // 里已移除的旧文件（旧 dylib、被删/改名的 skill 资源、旧本地化文件等会残留），
+                // 可能破坏 adhoc 签名或加载到过期资源，也可能因原地覆盖运行中 bundle 的
+                // Mach-O 触发 Killed:9。故与管理员分支（rm -rf && ditto）对齐：先删旧 bundle，
+                // 再整包 ditto，保证是「原子替换」语义而非合并。
+                if FileManager.default.fileExists(atPath: targetApp) {
+                    try FileManager.default.removeItem(atPath: targetApp)
+                }
                 try Self.runProcess("/usr/bin/ditto", [mountedApp, targetApp])
             } catch {
                 // 权限不足或目标被占用：用 NSAppleScript 以管理员权限执行（必须主线程）。
@@ -92,8 +112,9 @@ final class UpdateInstaller {
                 }
             }
 
-            // 4. 无论成败都卸载 DMG。
-            try? Self.runProcess("/usr/bin/hdiutil", ["detach", mountPoint, "-quiet", "-force"])
+            // 4. 无论成败都卸载 DMG，并清理挂载点空目录（P2-2：避免每次更新泄漏一个）。
+            try? Self.runProcess("/usr/bin/hdiutil", ["detach", mountPoint, "-quiet", "-force"], timeout: 60)
+            try? FileManager.default.removeItem(atPath: mountPoint)
 
             if let installError = installError {
                 DispatchQueue.main.async { failure("安装失败：\(installError)") }
@@ -102,7 +123,14 @@ final class UpdateInstaller {
 
             // 5. 重启新版本 App 后结束当前进程。
             DispatchQueue.main.async {
-                let relaunch = "sleep 1 && open '\(targetApp)'"
+                // P2-5 (v2.10.8): relaunch 时序加固。旧版用固定 `sleep 1` 猜测退出耗时，
+                // 若本进程退出慢于 1s，open 会命中「App 仍在运行」而无法拉起新实例（甚至
+                // 复用旧进程）。改为把当前 PID 传给分离出去的 shell，轮询等待旧进程真正
+                // 退出后再 open，并加 10s 上限兜底，避免异常时永不重启。
+                let pid = ProcessInfo.processInfo.processIdentifier
+                let escapedTarget = Self.escapeForAppleScript(targetApp)
+                let relaunch = "for i in $(seq 1 50); do kill -0 \(pid) 2>/dev/null || break; sleep 0.2; done; "
+                    + "open '\(escapedTarget)'"
                 Process.launchedProcess(launchPath: "/bin/sh", arguments: ["-c", relaunch])
                 // 再次强制关闭弹窗，确保 terminate 不被任何后弹出的 sheet 阻塞。
                 Self.forceDismissBlockingModals()
@@ -114,14 +142,23 @@ final class UpdateInstaller {
     /// 强制关闭所有 modal sheet / alert，避免阻塞 NSApp.terminate()。必须主线程调用。
     static func forceDismissBlockingModals() {
         let work = {
+            // P2-4 (v2.10.8): 覆盖「所有层级」的阻塞 modal，而非只处理一层。
+            // 1. 递归结束每个窗口链上的 attachedSheet（sheet 可再挂 sheet）。
             for window in NSApp.windows {
-                if let sheet = window.attachedSheet {
-                    window.endSheet(sheet)
+                var host: NSWindow? = window
+                var guardCount = 0
+                while let h = host, let sheet = h.attachedSheet, guardCount < 16 {
+                    h.endSheet(sheet)
+                    host = sheet          // 继续向下检查该 sheet 自己挂的 sheet
+                    guardCount += 1
                 }
             }
-            // 结束仍在运行的 modal 会话（NSAlert.runModal / runModal(for:) 等）。
-            if NSApp.modalWindow != nil {
+            // 2. 循环退出仍在运行的嵌套 modal 会话（NSAlert.runModal / runModal(for:) 等
+            //    可以层层嵌套），直到没有 modalWindow 或达到安全上限。
+            var loops = 0
+            while NSApp.modalWindow != nil && loops < 16 {
                 NSApp.abortModal()
+                loops += 1
             }
         }
         if Thread.isMainThread {
@@ -132,7 +169,11 @@ final class UpdateInstaller {
     }
 
     /// 同步执行子进程，非零退出码抛错并携带 stderr。
-    private static func runProcess(_ launchPath: String, _ arguments: [String]) throws {
+    /// P2-1 (v2.10.8): 可选 `timeout`（秒）。hdiutil verify/attach/detach、ditto 在磁盘
+    /// 或映像异常时可能长时间挂起，卡死后台安装队列且无取消入口。超时后强制 terminate
+    /// 子进程并抛错，让上层回到失败路径（清理挂载点、提示用户），不再无限等待。
+    private static func runProcess(_ launchPath: String, _ arguments: [String],
+                                   timeout: TimeInterval? = nil) throws {
         let task = Process()
         task.executableURL = URL(fileURLWithPath: launchPath)
         task.arguments = arguments
@@ -140,7 +181,27 @@ final class UpdateInstaller {
         task.standardError = errPipe
         task.standardOutput = Pipe()
         try task.run()
-        task.waitUntilExit()
+
+        if let timeout = timeout {
+            let deadline = DispatchTime.now() + timeout
+            let sema = DispatchSemaphore(value: 0)
+            let watcher = DispatchQueue(label: "com.clipslots.update.proc-timeout")
+            var timedOut = false
+            watcher.async {
+                if sema.wait(timeout: deadline) == .timedOut {
+                    timedOut = true
+                    if task.isRunning { task.terminate() }
+                }
+            }
+            task.waitUntilExit()
+            sema.signal()
+            if timedOut {
+                throw InstallError(message: "\(launchPath) 执行超时（>\(Int(timeout))s）已中止")
+            }
+        } else {
+            task.waitUntilExit()
+        }
+
         if task.terminationStatus != 0 {
             let data = errPipe.fileHandleForReading.readDataToEndOfFile()
             let msg = String(data: data, encoding: .utf8)?

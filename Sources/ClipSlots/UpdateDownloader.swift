@@ -31,6 +31,11 @@ final class UpdateDownloader: NSObject {
     // v2.10.7: 下载完成、等待安装的 DMG 本地路径。
     private var pendingInstallDMGPath: String?
 
+    // P2-6 (v2.10.8): 是否正在执行「安装并重启」。安装启动后后台流程不可中途取消，
+    // 此标记用于同时屏蔽「取消」按钮和标题栏关闭按钮(X)，避免点 X 关掉面板但后台
+    // 安装仍在继续并最终 terminate 的语义混乱。
+    private var isInstalling = false
+
     /// 开始下载指定 DMG。
     func startDownload(from url: URL, version: String) {
         // 若已有下载在进行，先取消旧的。
@@ -120,6 +125,8 @@ final class UpdateDownloader: NSObject {
     }
 
     @objc private func onCancelPressed() {
+        // P2-6 (v2.10.8): 安装阶段不可取消，X/取消一律忽略（安装流程会自行重启或报错）。
+        if isInstalling { return }
         cancel()
     }
 
@@ -182,6 +189,9 @@ final class UpdateDownloader: NSObject {
     /// v2.10.7: 点击「安装并重启」——静默自动安装。
     @objc private func onInstallPressed() {
         guard let dmgPath = pendingInstallDMGPath else { return }
+        // P2-6 (v2.10.8): 进入不可取消的安装阶段，同时屏蔽标题栏关闭按钮(X)。
+        isInstalling = true
+        panel?.standardWindowButton(.closeButton)?.isEnabled = false
         titleLabel?.stringValue = "正在安装 v\(version)…"
         detailLabel?.stringValue = "正在替换应用程序，请稍候…"
         progressBar?.isIndeterminate = true
@@ -204,6 +214,8 @@ final class UpdateDownloader: NSObject {
 
     /// v2.10.7: 自动安装失败——回退到手动安装（打开 DMG 让用户自行拖入）。
     private func handleInstallFailure(_ message: String, dmgPath: String) {
+        // P2-6 (v2.10.8): 安装失败，退出安装态，恢复面板正常可关闭。
+        isInstalling = false
         dismissPanel()
         let alert = NSAlert()
         alert.messageText = "自动安装失败"

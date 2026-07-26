@@ -129,21 +129,36 @@ public final class StorageLock {
     private func writeHolderPID() {
         guard fd >= 0 else { return }
         let pidStr = "\(getpid())\n"
-        ftruncate(fd, 0)
+        // P2-13 (v2.10.8): make the PID update atomic-ish for concurrent readers.
+        // The old order was ftruncate(0) → write, which leaves an EMPTY window in
+        // which a waiter's readHolderPID() sees no PID. We cannot rename a temp file
+        // over the lock file (that would swap the inode out from under the live
+        // flock fd and break mutual exclusion), so instead we write the full PID at
+        // offset 0 FIRST, then truncate to its length. A concurrent reader therefore
+        // always sees either the old PID, the new PID, or new-PID + trailing bytes
+        // (never empty); readHolderPID() only parses the first line, so trailing
+        // leftovers from a shorter new value are ignored.
         lseek(fd, 0, SEEK_SET)
-        _ = pidStr.withCString { cstr in
+        let written = pidStr.withCString { cstr -> Int in
             write(fd, cstr, strlen(cstr))
+        }
+        if written > 0 {
+            ftruncate(fd, off_t(written))
         }
     }
 
     /// v2.9.16 (#1): read the PID currently stored in the lock file (0 if none).
     private func readHolderPID() -> Int32 {
+        // P2-13 (v2.10.8): parse only the FIRST line and tolerate a half-written /
+        // empty value (returns 0), so a read racing with writeHolderPID() never
+        // mis-parses trailing leftover bytes.
         guard let data = try? Data(contentsOf: lockURL),
-              let str = String(data: data, encoding: .utf8),
-              let pid = Int32(str.trimmingCharacters(in: .whitespacesAndNewlines)) else {
+              let str = String(data: data, encoding: .utf8) else {
             return 0
         }
-        return pid
+        let firstLine = str.split(whereSeparator: { $0 == "\n" || $0 == "\r" }).first
+            .map(String.init)?.trimmingCharacters(in: .whitespaces) ?? ""
+        return Int32(firstLine) ?? 0
     }
 
     /// True if a process with `pid` currently exists (kill(pid, 0) probe).

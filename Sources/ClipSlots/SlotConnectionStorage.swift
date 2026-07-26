@@ -48,6 +48,20 @@ final class SlotConnectionStorage {
             cache[k] = match.value
             return match.value
         }
+        // P2-16 (v2.10.8): cache-miss disk fallback. loadAll() runs asynchronously on
+        // the background queue, so an early load() at launch (before loadAll finished)
+        // — or any genuine cache miss — previously returned .empty even though the
+        // group's connections.json existed on disk, making persisted connections look
+        // lost until a later save(). Now read the group's file synchronously once,
+        // populate the cache under the real key, and return it. (Connections are stored
+        // per-group; fileURL only uses groupId.)
+        let url = fileURL(for: groupId)
+        if FileManager.default.fileExists(atPath: url.path),
+           let data = try? Data(contentsOf: url),
+           let map = try? JSONDecoder().decode(SlotConnectionMap.self, from: data) {
+            cache[k] = map
+            return map
+        }
         return .empty
     }
 

@@ -103,7 +103,11 @@ final class UpdateChecker: ObservableObject {
             if let name = asset["name"] as? String,
                name.lowercased().hasSuffix(".dmg"),
                let urlString = asset["browser_download_url"] as? String,
-               let url = URL(string: urlString) {
+               let url = URL(string: urlString),
+               // P2-3 (v2.10.8): 强制 HTTPS。自动下载后会挂载并 ditto 进 /Applications，
+               // 明文 HTTP 存在中间人替换安装包的风险；非 https 一律拒绝（GitHub Release
+               // 资产本就是 https，此处是纵深防御，防止异常/被篡改的 JSON 混入 http 链接）。
+               url.scheme?.lowercased() == "https" {
                 return url
             }
         }

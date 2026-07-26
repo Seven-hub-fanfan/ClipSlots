@@ -12,7 +12,7 @@ import ClipSlotsKit
 //   success: {"ok": true, ...}
 //   error:   {"ok": false, "error": "message"}  (exit code 1)
 
-let CLI_VERSION = "2.10.7"
+let CLI_VERSION = "2.10.8"
 let DEFAULT_GROUP = "default"
 let DEFAULT_PAGE = "default_page"
 
@@ -306,19 +306,19 @@ func resolvePageFlag(_ args: ParsedArgs, strict: Bool = false) -> String? {
     let hasPage = args.flag("page") != nil
     let hasName = args.flag("page-name") != nil
     if hasPage && hasName {
-        fail("只能指定 --page 或 --page-name 其中一个", code: "INVALID_ARGUMENT_COMBINATION")
+        fail("specify only one of --page or --page-name", code: "INVALID_ARGUMENT_COMBINATION")
     }
     let index = storage.loadIndex()
     if let name = args.flag("page-name") {
         if let p = index.pages.first(where: { $0.name == name }) { return p.id }
-        fail("找不到名为 '\(name)' 的页面", code: "PAGE_NOT_FOUND")
+        fail("no page named '\(name)'", code: "PAGE_NOT_FOUND")
     }
     if let page = args.flag("page") {
         if let p = index.pages.first(where: { $0.id == page || $0.name == page }) { return p.id }
         // v2.9.29: an explicitly requested page that matches nothing is an error
         // for placement commands (was previously a silent fallback to currentPage).
         if strict {
-            fail("找不到 id 或名称为 '\(page)' 的页面", code: "PAGE_NOT_FOUND")
+            fail("no page with id or name '\(page)'", code: "PAGE_NOT_FOUND")
         }
         return page
     }
@@ -537,7 +537,8 @@ func cmdHelp() -> Never {
 // single command's usage + parameter descriptions.
 func cmdCommandHelp(_ name: String) -> Never {
     guard let entry = COMMANDS.first(where: { ($0["name"] as? String) == name }) else {
-        fail("unknown command: \(name) (run 'clipslots help')")
+        // P2-7 (v2.10.8): carry a stable error_code like every other failure.
+        fail("unknown command: \(name) (run 'clipslots help')", code: "UNKNOWN_COMMAND")
     }
     let flags = (entry["flags"] as? [String]) ?? []
     // Build a compact usage line from the flag descriptions.
@@ -638,8 +639,8 @@ func cmdList(_ args: ParsedArgs) -> Never {
         // 误导调用方以为拿到的是分页结果。这里改为显式报错（而非静默忽略），因为跨多个组的
         // 分页语义本身不明确；需要分页时应指定单个组。
         if args.flag("page-size") != nil || args.flag("page-num") != nil {
-            fail("--page-size/--page-num 不支持整页列出（只给 --page/--page-name 不给组的场景）；"
-                    + "如需分页请指定 --group/--group-name 列出单个组",
+            fail("--page-size/--page-num are not supported for whole-page listing "
+                    + "(--page/--page-name without a group); specify --group/--group-name to page a single group",
                  code: "INVALID_ARGUMENT_COMBINATION")
         }
         let pageName = index.pages.first(where: { $0.id == pageId })?.name
@@ -732,26 +733,6 @@ func cmdRead(_ args: ParsedArgs) -> Never {
 // v2.9.16: a plain error carrying an already-formatted, agent-friendly message
 // (used when `storage.set` returns false and we've probed the reason).
 struct WriteFailure: Error { let message: String }
-
-// v2.9.16 (#2, batch): resolve a group literal (id OR name) to a group id.
-// v2.9.40 (P0): page-scoped resolution. When `inPage` is supplied (from a
-// top-level --page / --page-name), the id/name lookup is RESTRICTED to groups on
-// that page, and a literal that resolves to nothing on that page is a hard error
-// (never silently falls back to a same-named group on ANOTHER page). Without a
-// page constraint behaviour is unchanged (global, backward compatible).
-func resolveGroupLiteral(_ raw: String, inPage pageId: String? = nil) -> String {
-    let index = storage.loadIndex()
-    let scope = pageId.map { pid in index.specialSlots.filter { $0.pageId == pid } }
-                      ?? index.specialSlots
-    if scope.contains(where: { $0.id == raw }) { return raw }
-    if let g = scope.first(where: { $0.name == raw }) { return g.id }
-    if let pid = pageId {
-        let label = index.pages.first(where: { $0.id == pid })?.name ?? pid
-        // P0 guardrail: refuse to write to a same-named group on another page.
-        fail("group '\(raw)' not found in page '\(label)'")
-    }
-    return raw
-}
 
 // v2.9.58 (P0-2): strict, throwing group resolution for the BATCH path. Mirrors the
 // single-write resolveGroup (F1) semantics so batch and single write behave identically:
@@ -1177,11 +1158,19 @@ func cmdSearch(_ args: ParsedArgs) -> Never {
             }
         }
     }
-    // P2-13 (v2.10.7): 按 page→group→slot 稳定排序，保证多组/all-groups 搜索输出顺序确定。
+    // P2-8 (v2.10.8): sort by (page.order, group.order, slot) with id as a stable
+    // secondary key, matching list / groups / pages ordering (UI tab order) instead
+    // of raw page-id/group-id string order.
+    let pageOrderMap = Dictionary(uniqueKeysWithValues: index.pages.map { ($0.id, $0.order) })
+    let groupOrderMap = Dictionary(uniqueKeysWithValues: index.specialSlots.map { ($0.id, $0.order) })
     results.sort { a, b in
         let pa = (a["page"] as? String) ?? "", pb = (b["page"] as? String) ?? ""
+        let poa = pageOrderMap[pa] ?? Int.max, pob = pageOrderMap[pb] ?? Int.max
+        if poa != pob { return poa < pob }
         if pa != pb { return pa < pb }
         let ga = (a["group"] as? String) ?? "", gb = (b["group"] as? String) ?? ""
+        let goa = groupOrderMap[ga] ?? Int.max, gob = groupOrderMap[gb] ?? Int.max
+        if goa != gob { return goa < gob }
         if ga != gb { return ga < gb }
         let sa = (a["slot"] as? Int) ?? 0, sb = (b["slot"] as? Int) ?? 0
         return sa < sb
@@ -1248,7 +1237,10 @@ func cmdCreateGroup(_ args: ParsedArgs) -> Never {
     if preIndex.specialSlots.filter({ $0.pageId == targetPageForLimit }).count >= preIndex.settings.maxSpecialSlots {
         // P2-10 (v2.10.5): 错误文案用真实的 settings.maxSpecialSlots，别再硬编码 "10"。
         // 计数判断本就用 settings.maxSpecialSlots，一旦该配置被改，硬编码文案会误导调用方。
-        fail("page group limit reached (max \(preIndex.settings.maxSpecialSlots) groups per page)", code: "PAGE_GROUP_LIMIT_REACHED")
+        // P2-11 (v2.10.8): 标记 phase=preflight，让调用方能区分「预检拒绝」（此处，尚未写入）
+        // 与「执行期失败」（下方 catch，Kit 原子事务内触发），二者 error_code 相同但语义不同。
+        fail("page group limit reached (max \(preIndex.settings.maxSpecialSlots) groups per page)",
+             code: "PAGE_GROUP_LIMIT_REACHED", extra: ["phase": "preflight"])
     }
     do {
         let slot = try storage.createSpecialSlot(name: name, pageId: page, requestedAt: CLI_REQUEST_RECEIVED_AT)
@@ -1556,5 +1548,5 @@ case "delete-page":
 case "write-attachment":
     cmdWriteAttachment(parsed)
 default:
-    fail("unknown command: \(parsed.command) (run 'clipslots help')")
+    fail("unknown command: \(parsed.command) (run 'clipslots help')", code: "UNKNOWN_COMMAND")
 }

@@ -19,6 +19,11 @@ public final class SlotStorage {
 
     private let baseURL: URL
     private var cache: [Int: SlotContent] = [:]
+    // P2-15 (v2.10.8): last-seen on-disk modification time per cached slot. `get`
+    // compares it against the current directory mtime so a value written by another
+    // process (CLI) is picked up on the very next read, without waiting for the
+    // FSEvents watcher's debounce window — closing the stale-read gap.
+    private var cacheMTime: [Int: Date] = [:]
     private let queue = DispatchQueue(label: "com.clipslots.storage", qos: .utility)
     private let encoder = JSONEncoder()
     private let decoder = JSONDecoder()
@@ -40,11 +45,18 @@ public final class SlotStorage {
 
     public func get(_ slot: Int) -> SlotContent {
         queue.sync {
-            if let cached = cache[slot] { return cached }
-
             let slotDir = baseURL.appendingPathComponent(String(slot))
+            // P2-15 (v2.10.8): serve from cache only if the on-disk mtime is unchanged;
+            // otherwise re-read so a CLI write is reflected immediately.
+            let diskMTime = (try? FileManager.default
+                .attributesOfItem(atPath: slotDir.path)[.modificationDate]) as? Date
+            if let cached = cache[slot], cacheMTime[slot] == diskMTime {
+                return cached
+            }
+
             let content = readSlotContent(from: slotDir)
             cache[slot] = content
+            cacheMTime[slot] = diskMTime
             return content
         }
     }
@@ -279,48 +291,66 @@ public final class SlotStorage {
     private func writeSlotContent(_ content: SlotContent, to slot: Int) throws {
         let slotDir = baseURL.appendingPathComponent(String(slot))
 
-        // Preserve label before wiping
+        // Preserve label before rebuilding.
         let existingLabel = getLabel(slot)
 
-        // Remove entire slot directory to avoid stale residues
-        if FileManager.default.fileExists(atPath: slotDir.path) {
-            try FileManager.default.removeItem(at: slotDir)
-        }
-        try FileManager.default.createDirectory(at: slotDir, withIntermediateDirectories: true)
+        // P1-3 (v2.10.8): atomic write. The old implementation removed `slotDir`
+        // first and then rebuilt it file-by-file. If the process crashed / was
+        // killed after the delete but before the rebuild finished (auto-update
+        // ditto over a running bundle, power loss, etc.), the slot was left as a
+        // half-written directory — or an empty one — losing data permanently.
+        // Now everything is written into a same-volume staging directory and then
+        // swapped into place with `replaceItemAt` (atomic rename on the same
+        // volume). Any mid-way failure leaves the existing slot fully intact.
+        let stagingDir = baseURL.appendingPathComponent(".tmp_slot_\(slot)_\(UUID().uuidString)")
+        try? FileManager.default.removeItem(at: stagingDir)
+        try FileManager.default.createDirectory(at: stagingDir, withIntermediateDirectories: true)
 
-        // Restore label
-        if let label = existingLabel, !label.isEmpty {
-            try label.write(to: slotDir.appendingPathComponent("label.txt"), atomically: true, encoding: .utf8)
-        }
-
-        // v2.8.3 (fix): a slot may carry attachments even when its main content is
-        // empty (attachments are added independently in the node canvas). Persist
-        // if EITHER items or attachments exist so attachments are never dropped.
-        guard !content.isEmpty || !content.attachments.isEmpty else { return }
-
-        for (groupIdx, items) in content.items.enumerated() {
-            let targetDir = slotDir.appendingPathComponent("item_\(groupIdx)")
-            try FileManager.default.createDirectory(at: targetDir, withIntermediateDirectories: true)
-
-            for item in items {
-                let safeName = encodeSafeFileName(item.type) + ".bin"
-                let typeFile = targetDir.appendingPathComponent(safeName)
-                try item.data.write(to: typeFile, options: .atomic)
+        do {
+            // Restore label into the staging dir.
+            if let label = existingLabel, !label.isEmpty {
+                try label.write(to: stagingDir.appendingPathComponent("label.txt"),
+                                atomically: true, encoding: .utf8)
             }
-        }
 
-        // Persist content identity so thumbnail keys survive app restarts.
-        let meta = SlotContentMeta(contentId: content.contentId, updatedAt: content.updatedAt)
-        let metaData = try encoder.encode(meta)
-        try metaData.write(to: slotDir.appendingPathComponent("content.json"), options: .atomic)
+            // v2.8.3 (fix): a slot may carry attachments even when its main content is
+            // empty (attachments are added independently in the node canvas). Persist
+            // payload if EITHER items or attachments exist; an empty slot is a
+            // label-only staging dir (matches the previous wipe-then-empty behaviour).
+            if !content.isEmpty || !content.attachments.isEmpty {
+                for (groupIdx, items) in content.items.enumerated() {
+                    let targetDir = stagingDir.appendingPathComponent("item_\(groupIdx)")
+                    try FileManager.default.createDirectory(at: targetDir, withIntermediateDirectories: true)
 
-        // v2.8.3 (fix): persist slot attachments alongside item data so they
-        // survive app restarts. The whole slot dir was wiped above, so when the
-        // attachment list is empty we simply skip writing the file (a fresh read
-        // will fall back to the default empty array).
-        if !content.attachments.isEmpty {
-            let attData = try encoder.encode(content.attachments)
-            try attData.write(to: slotDir.appendingPathComponent("attachments.json"), options: .atomic)
+                    for item in items {
+                        let safeName = encodeSafeFileName(item.type) + ".bin"
+                        let typeFile = targetDir.appendingPathComponent(safeName)
+                        try item.data.write(to: typeFile, options: .atomic)
+                    }
+                }
+
+                // Persist content identity so thumbnail keys survive app restarts.
+                let meta = SlotContentMeta(contentId: content.contentId, updatedAt: content.updatedAt)
+                let metaData = try encoder.encode(meta)
+                try metaData.write(to: stagingDir.appendingPathComponent("content.json"), options: .atomic)
+
+                // Persist slot attachments alongside item data so they survive restarts.
+                if !content.attachments.isEmpty {
+                    let attData = try encoder.encode(content.attachments)
+                    try attData.write(to: stagingDir.appendingPathComponent("attachments.json"), options: .atomic)
+                }
+            }
+
+            // Atomic swap: replace the live slot dir with the fully-built staging dir.
+            if FileManager.default.fileExists(atPath: slotDir.path) {
+                _ = try FileManager.default.replaceItemAt(slotDir, withItemAt: stagingDir)
+            } else {
+                try FileManager.default.moveItem(at: stagingDir, to: slotDir)
+            }
+        } catch {
+            // Best-effort cleanup of the staging dir; the original slot is untouched.
+            try? FileManager.default.removeItem(at: stagingDir)
+            throw error
         }
     }
 

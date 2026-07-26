@@ -62,11 +62,22 @@ public final class SpecialSlotStorage {
     /// v2.4 migration: add Page layer on top of existing SpecialSlots.
     /// Safe to call repeatedly — checks schemaVersion before migrating.
     private func migrateToV2SchemaIfNeeded() {
+        // Fast pre-check outside the lock (common already-migrated path avoids lock churn).
+        if loadIndex().schemaVersion >= 2 {
+            repairPageScopedSlotGroupsIfNeeded()
+            return
+        }
+
+        // P2-12 (v2.10.8): run the migration read→transform→save atomically under the
+        // cross-process lock. ensureInitialized()/migrate runs on EVERY CLI invocation
+        // and GUI launch, so two processes racing on a not-yet-migrated index could both
+        // migrate and clobber each other (lost update / duplicate default page). Re-load
+        // and re-check the schema version under the lock so only the first writer migrates.
+        try? storageLock.withLock {
         let index = loadIndex()
 
-        // Already v2.4+ format — just repair any inconsistencies
+        // Already v2.4+ format — another process migrated while we waited for the lock.
         if index.schemaVersion >= 2 {
-            repairPageScopedSlotGroupsIfNeeded()
             return
         }
 
@@ -132,6 +143,7 @@ public final class SpecialSlotStorage {
         } catch {
             NSLog("[ClipSlots] v2.4 migration save failed: \(error)")
         }
+        } // end storageLock.withLock (P2-12)
     }
 
     /// v2.4.1 Repair: ensure page-scoped slot group consistency.
@@ -540,22 +552,39 @@ public final class SpecialSlotStorage {
     // MARK: - Current Special Slot
 
     public func currentSpecialSlot() throws -> SpecialSlot {
-        let index = loadIndex()
-        guard let current = index.specialSlots.first(where: { $0.id == index.currentSpecialSlotId }) else {
-            // Auto-fix: switch to first available
-            var fixed = index
-            fixed.currentSpecialSlotId = fixed.specialSlots.first?.id ?? "default"
-            // P2-13 (v2.10.6): 自动修复写入必须走跨进程锁，否则与 CLI 并发写会丢更新。
-            // currentSpecialSlot() 本身未持锁，此处包一层 withLock 不会造成重入死锁。
-            try storageLock.withLock {
-                try saveIndex(fixed)
-            }
-            guard let fallback = fixed.specialSlots.first else {
-                throw SpecialSlotError.specialSlotNotFound
-            }
-            return fallback
+        // Fast path: read outside the lock. If the current id still resolves, no
+        // write is needed, so an unlocked read is safe (and avoids lock churn on
+        // the hot path).
+        let snapshot = loadIndex()
+        if let current = snapshot.specialSlots.first(where: { $0.id == snapshot.currentSpecialSlotId }) {
+            return current
         }
-        return current
+        // Auto-fix path: the current id points at a missing group. This is a
+        // read-modify-write and MUST be atomic. P1-2 (v2.10.8): the whole
+        // load→decide→save is now performed INSIDE the cross-process lock and
+        // re-loads the index under that lock. Previously the snapshot was read
+        // OUTSIDE the lock (only the save was locked, v2.10.6 P2-13), so a parallel
+        // create-group / switch / write landing between the unlocked read and the
+        // locked write would be clobbered by the stale `fixed` snapshot (a silent
+        // lost update). currentSpecialSlot() itself holds no lock, so wrapping the
+        // reload here does not re-enter/deadlock.
+        var result: SpecialSlot?
+        try storageLock.withLock {
+            var index = loadIndex()
+            // Re-check under the lock: a concurrent writer may have already fixed
+            // (or legitimately changed) currentSpecialSlotId while we waited.
+            if let current = index.specialSlots.first(where: { $0.id == index.currentSpecialSlotId }) {
+                result = current
+                return
+            }
+            index.currentSpecialSlotId = index.specialSlots.first?.id ?? "default"
+            try saveIndex(index)
+            result = index.specialSlots.first
+        }
+        guard let fallback = result else {
+            throw SpecialSlotError.specialSlotNotFound
+        }
+        return fallback
     }
 
     public func switchToSpecialSlot(id: String) throws {
@@ -1183,13 +1212,20 @@ public final class SpecialSlotStorage {
         }
 
         // 1. Age-based pruning: drop anything older than the retention window.
+        // P2-14 (v2.10.8): tolerate "already gone". Two processes (GUI + CLI, or two
+        // CLI calls) can run cleanup concurrently and race on the SAME trash entry;
+        // guard fileExists before removing and keep `try?` so a concurrent delete that
+        // wins the race (NSFileNoSuchFileError) is ignored rather than surfacing a
+        // pointless I/O error.
         let cutoff = Date().addingTimeInterval(-Double(retentionDays) * 86_400)
         var survivors: [(url: URL, date: Date)] = []
         var removed = 0
         for url in entries {
             let date = trashEntryDate(url)
             if date < cutoff {
-                try? fm.removeItem(at: url)
+                if fm.fileExists(atPath: url.path) {
+                    try? fm.removeItem(at: url)
+                }
                 removed += 1
             } else {
                 survivors.append((url, date))
@@ -1200,7 +1236,9 @@ public final class SpecialSlotStorage {
         if survivors.count > maxEntries {
             let sorted = survivors.sorted { $0.date > $1.date } // newest first
             for entry in sorted.dropFirst(maxEntries) {
-                try? fm.removeItem(at: entry.url)
+                if fm.fileExists(atPath: entry.url.path) {
+                    try? fm.removeItem(at: entry.url)
+                }
                 removed += 1
             }
         }
