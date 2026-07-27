@@ -70,10 +70,18 @@ final class SlotConnectionStorage {
         // uses groupId.)
         let url = fileURL(for: groupId)
         var loaded: SlotConnectionMap? = nil
-        if FileManager.default.fileExists(atPath: url.path),
-           let data = try? Data(contentsOf: url),
-           let map = try? JSONDecoder().decode(SlotConnectionMap.self, from: data) {
-            loaded = map
+        if FileManager.default.fileExists(atPath: url.path) {
+            if let data = try? Data(contentsOf: url),
+               let map = try? JSONDecoder().decode(SlotConnectionMap.self, from: data) {
+                loaded = map
+            } else {
+                // P2 (v2.10.13): 文件「存在但读取/解码失败」= 真实损坏（区别于「文件缺失」的
+                // 正常空态）。此前一律 try? 静默回退 .empty，随后一次 save(.empty) 会经 persistMap
+                // 把损坏文件 removeItem 掉，令有效但位翻转的连线永久丢失。这里在返回 .empty 前
+                // 先把损坏文件备份到 .corrupt 兄弟文件，与 index.json 的 poison+backup 对齐，
+                // 保证后续即便被空态覆盖也能从备份恢复。
+                backupCorruptConnectionFile(at: url)
+            }
         }
 
         cacheLock.lock(); defer { cacheLock.unlock() }
@@ -183,13 +191,46 @@ final class SlotConnectionStorage {
     private func persistMap(_ map: SlotConnectionMap, groupId: String) {
         let url = fileURL(for: groupId)
         queue.async {
-            let dir = url.deletingLastPathComponent()
-            try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true, attributes: nil)
-            if map.isEmpty {
-                try? FileManager.default.removeItem(at: url)
-            } else if let data = try? JSONEncoder().encode(map) {
-                try? data.write(to: url, options: .atomic)
+            // P2 (v2.10.13): 连接写入复用跨进程 StorageLock + 原子写，与槽位存储层（SlotStorage/
+            // SpecialSlotStorage）对齐。此前仅靠进程内 serial queue 串行化，双 GUI 实例并发写
+            // connections.json 时仍可能相互覆盖/半写损坏。.atomic 本身即「写临时文件再原子替换」，
+            // 满足 staging + 原子替换语义。
+            try? StorageLock.shared.withLock {
+                let dir = url.deletingLastPathComponent()
+                try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true, attributes: nil)
+                if map.isEmpty {
+                    try? FileManager.default.removeItem(at: url)
+                } else if let data = try? JSONEncoder().encode(map) {
+                    try? data.write(to: url, options: .atomic)
+                }
             }
         }
+    }
+
+    // P2 (v2.10.13): 把「存在但损坏」的 connections.json 备份到带时间戳的 .corrupt 兄弟文件，
+    // 避免随后一次空态 save 经 persistMap 把它删除，从而丢失可恢复的原始字节。
+    private func backupCorruptConnectionFile(at url: URL) {
+        guard FileManager.default.fileExists(atPath: url.path) else { return }
+        let ts = Int(Date().timeIntervalSince1970)
+        let backupURL = url.deletingLastPathComponent()
+            .appendingPathComponent("connections.json.corrupt-\(ts)")
+        do {
+            try Data(contentsOf: url).write(to: backupURL, options: .atomic)
+            NSLog("[ClipSlots] ERROR: connections.json at \(url.path) failed to decode; "
+                + "backed up corrupt bytes to \(backupURL.path) before falling back to empty.")
+        } catch {
+            NSLog("[ClipSlots] ERROR: connections.json at \(url.path) failed to decode AND "
+                + "the corrupt backup failed: \(error).")
+        }
+    }
+
+    // P2 (v2.10.13): 外部进程（CLI）或另一 GUI 实例改动磁盘后，SpecialSlotStorage 的
+    // 文件监听回调会调用此方法，丢弃内存里可能已陈旧的连接缓存并从磁盘重新读取，
+    // 避免删组/删页后 GUI 仍显示已删除组的陈旧连线。
+    func invalidateCache() {
+        cacheLock.lock()
+        cache.removeAll()
+        cacheLock.unlock()
+        loadAll()
     }
 }

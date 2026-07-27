@@ -367,6 +367,11 @@ final class SlotStoreObservable: ObservableObject {
                 // directly) updated. Drop the content caches so reloadAll re-reads
                 // the freshly written bodies from disk.
                 self.specialStorage.invalidateContentCaches()
+                // P2 (v2.10.13): 一并失效连接缓存。invalidateContentCaches 只清槽位内容缓存，
+                // 不清 SlotConnectionStorage；外部删组/删页后 GUI 侧会残留已删除组的陈旧连线。
+                // 连接缓存归 GUI 层的 SlotConnectionStorage 管辖（Kit 层无法引用），故在文件
+                // 监听回调里一并清理。
+                SlotConnectionStorage.shared.invalidateCache()
                 self.reloadAll()
                 self.refreshTrigger = UUID()
             }

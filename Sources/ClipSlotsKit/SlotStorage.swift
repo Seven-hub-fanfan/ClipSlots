@@ -335,9 +335,31 @@ public final class SlotStorage {
         // (cold cache → disk read reconstructed SlotContent without attachments).
         // Missing/legacy file → keep the default empty array (fully backward compatible).
         let attachmentsURL = slotDir.appendingPathComponent("attachments.json")
-        if let attData = try? Data(contentsOf: attachmentsURL),
-           let atts = try? decoder.decode([SlotContent.SlotAttachment].self, from: attData) {
-            content.attachments = atts
+        if FileManager.default.fileExists(atPath: attachmentsURL.path) {
+            if let attData = try? Data(contentsOf: attachmentsURL),
+               let atts = try? decoder.decode([SlotContent.SlotAttachment].self, from: attData) {
+                content.attachments = atts
+            } else {
+                // P2 (v2.10.13): 文件「存在但解码失败」= 真实损坏（区别于「文件缺失」的正常
+                // 首次/legacy 情形）。此前一律走 try? 静默回退为空，随后一次 writeSlotContent
+                // 会因 attachments 为空而不再写 attachments.json，把「空」固化 → 附件永久丢失。
+                // 这里在返回空之前，先把损坏文件备份到 baseURL 下的兄弟文件（放在 slotDir 之外，
+                // 使其能在下一次「原子替换整个槽目录」后依然存活），与 index.json 的
+                // poison+backup 保护对齐，保证用户仍可从备份恢复。
+                let ts = Int(Date().timeIntervalSince1970)
+                let slotName = slotDir.lastPathComponent
+                let backupURL = baseURL.appendingPathComponent(
+                    "slot_\(slotName)_attachments.json.corrupt-\(ts)")
+                do {
+                    try Data(contentsOf: attachmentsURL).write(to: backupURL, options: .atomic)
+                    NSLog("[ClipSlots] ERROR: slot \(slotName) attachments.json failed to decode; "
+                        + "backed up corrupt bytes to \(backupURL.path) before falling back to empty. "
+                        + "Recover attachments from that backup.")
+                } catch {
+                    NSLog("[ClipSlots] ERROR: slot \(slotName) attachments.json failed to decode AND "
+                        + "the corrupt backup failed: \(error). Falling back to empty attachments.")
+                }
+            }
         }
 
         return content

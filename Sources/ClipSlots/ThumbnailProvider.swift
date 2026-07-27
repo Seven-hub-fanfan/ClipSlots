@@ -20,17 +20,44 @@ final class ThumbnailProvider {
     // 被调用，直接在后台读 NSScreen.main 属于误用。改为在 init 时于主线程读取一次
     // backingScaleFactor 缓存到此属性，后台路径改用该缓存值。读写都在既有 lock 保护下进行。
     private var cachedScale: CGFloat = 2.0
+    // P2 (v2.10.13): 标记 cachedScale 是否已从主线程真实 backingScaleFactor 解析过。
+    // 若首个缩略图请求在 init 的主线程回调就绪前从后台发起，会用兜底 2.0；解析完成后
+    // 后续请求即改用真实值。所有读写仍在既有 lock 保护下进行。
+    private var scaleResolved = false
 
     private init() {
         let apply: () -> Void = { [weak self] in
             guard let self = self else { return }
             let scale = NSScreen.main?.backingScaleFactor ?? 2.0
-            self.lock.lock(); self.cachedScale = scale; self.lock.unlock()
+            self.lock.lock(); self.cachedScale = scale; self.scaleResolved = true; self.lock.unlock()
         }
         if Thread.isMainThread {
             apply()
         } else {
             DispatchQueue.main.async(execute: apply)
+        }
+    }
+
+    // P2 (v2.10.13): 读取当前缩放因子。若尚未解析到真实 backingScaleFactor：在主线程可
+    // 立即解析并缓存；在后台线程则触发一次主线程刷新（本次先用兜底 2.0，后续请求即用真实值）。
+    // bootstrap 兜底仍为 2.0，但一旦真实值可用即被纠正。线程安全在既有 lock 下保证。
+    private func currentScale() -> CGFloat {
+        lock.lock()
+        let resolved = scaleResolved
+        let scale = cachedScale
+        lock.unlock()
+        if resolved { return scale }
+        if Thread.isMainThread {
+            let real = NSScreen.main?.backingScaleFactor ?? 2.0
+            lock.lock(); cachedScale = real; scaleResolved = true; lock.unlock()
+            return real
+        } else {
+            DispatchQueue.main.async { [weak self] in
+                guard let self = self else { return }
+                let real = NSScreen.main?.backingScaleFactor ?? 2.0
+                self.lock.lock(); self.cachedScale = real; self.scaleResolved = true; self.lock.unlock()
+            }
+            return scale
         }
     }
 
@@ -76,13 +103,19 @@ final class ThumbnailProvider {
             self.lock.lock()
             let pending = self.pendingCompletions.removeValue(forKey: cacheKey)
             self.lock.unlock()
-            pending?.forEach { $0(nil, cacheKey) }
+            // P1 (v2.10.13): completion 的契约是「在主队列回调」。此前 10s 超时兜底直接在
+            // 后台队列触发 completion，回调里常有 UI 更新（更新 @State / NSImage 显示），
+            // 违反主线程契约、可能崩溃或渲染异常。统一切回主队列触发。
+            if let pending = pending {
+                DispatchQueue.main.async {
+                    pending.forEach { $0(nil, cacheKey) }
+                }
+            }
         }
 
         // P2-14 (v2.10.9): 使用 init 时在主线程缓存的 scale，避免在后台线程读 NSScreen.main。
-        lock.lock()
-        let scale = cachedScale
-        lock.unlock()
+        // P2 (v2.10.13): 经 currentScale() 读取——若真实 scale 尚未解析则触发刷新，后续请求用真实值。
+        let scale = currentScale()
         let request = QLThumbnailGenerator.Request(
             fileAt: url,
             size: size,

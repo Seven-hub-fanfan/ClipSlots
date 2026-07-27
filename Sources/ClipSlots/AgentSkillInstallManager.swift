@@ -165,8 +165,10 @@ final class AgentSkillInstallManager: ObservableObject {
             var isDir: ObjCBool = false
             let targetExists = fm.fileExists(atPath: target, isDirectory: &isDir) && isDir.boolValue
             guard targetExists else {
-                // 悬空 / 失效软链接：真实文件系统上并没有可用的 Skill，视为未安装。
-                return .notInstalled
+                // P2 (v2.10.13): 悬空 / 失效软链接说明曾经安装过但目标已失效（如旧 App bundle 被删）。
+                // 之前直接判为「未安装」会让用户以为从没装过、也不提示修复。改为 .needsUpdate，
+                // 卡片显示「待修复」并引导重新安装（重建软链）。
+                return .needsUpdate
             }
             let resolved = resolveSymlink(dest, base: agent.skillsDir)
             if let source = bundledSkillDir,
@@ -451,8 +453,15 @@ final class AgentSkillInstallManager: ObservableObject {
         }
 
         var done: [String] = []
+        var skipped: [String] = []
         var needPrivilege: [Agent] = []
         for agent in agents {
+            // P1 (v2.10.13) 安全护栏：目标为真实目录/文件（非软链）时绝不删除，跳过
+            // （与 install() 一致），避免误删旧版拷贝安装或用户手动放置的同名目录。
+            if fileExistsNoFollow(agent.skillTargetPath) && !isSymlink(agent.skillTargetPath) {
+                skipped.append(agent.displayName)
+                continue
+            }
             if relinkSkill(to: agent, source: source) {
                 done.append(agent.displayName)
             } else {
@@ -461,30 +470,46 @@ final class AgentSkillInstallManager: ObservableObject {
         }
 
         // 家目录不可写的 Agent 回退到系统鉴权弹窗，删旧路径后重建软链。
+        // 注意：needPrivilege 中的目标只可能是软链接或不存在（真实目录已被拦截进 skipped），rm -rf 安全。
         if !needPrivilege.isEmpty {
             let cmds = needPrivilege.map { agent in
                 "mkdir -p \(shellQuote(agent.skillsDir)) && rm -rf \(shellQuote(agent.skillTargetPath)) && ln -sfn \(shellQuote(source)) \(shellQuote(agent.skillTargetPath))"
             }.joined(separator: " && ")
             let allDone = done + needPrivilege.map(\.displayName)
             runPrivileged(cmds,
-                          successMessage: "已重新安装最新 Skill 到 \(allDone.count) 个 Agent：\(allDone.joined(separator: "、"))",
+                          successMessage: reinstallMessage(done: allDone, skipped: skipped),
                           agentID: needPrivilege[0].id)
             return
         }
 
         refresh()
-        report("已重新安装最新 Skill 到 \(done.count) 个 Agent：\(done.joined(separator: "、"))", isError: false)
+        report(reinstallMessage(done: done, skipped: skipped), isError: done.isEmpty && !skipped.isEmpty)
     }
 
-    /// 删除单个 Agent 的旧 skill 目标（软链或遗留真实目录），再重建软链指向 bundle 内 skill 目录。
+    /// 重装结果反馈文案（含被安全跳过的真实目录 Agent）。
+    private func reinstallMessage(done: [String], skipped: [String]) -> String {
+        var parts: [String] = []
+        if !done.isEmpty {
+            parts.append("已重新安装最新 Skill 到 \(done.count) 个 Agent：\(done.joined(separator: "、"))")
+        }
+        if !skipped.isEmpty {
+            parts.append("已跳过（目标非软链接，为安全起见未删除）：\(skipped.joined(separator: "、"))")
+        }
+        return parts.isEmpty ? "没有可重装的 Agent。" : parts.joined(separator: "；")
+    }
+
+    /// 删除单个 Agent 的旧 skill 软链，再重建软链指向 bundle 内 skill 目录。
     /// - Returns: 非特权方式是否成功（失败通常是家目录不可写，需回退系统鉴权）。
     private func relinkSkill(to agent: Agent, source: String) -> Bool {
         let target = agent.skillTargetPath
         do {
             try fm.createDirectory(atPath: agent.skillsDir, withIntermediateDirectories: true)
-            // 目标存在即删除，无论软链还是真实目录（removeItem 只删软链本身，不影响 bundle 源目录）。
-            if fileExistsNoFollow(target) {
+            // P1 (v2.10.13) 安全护栏：仅删除软链本身；真实目录/文件绝不删除（调用方已在上层拦截，
+            // 此处为纵深防御）。removeItem 只删软链，不影响 bundle 内的真实 skill 源目录。
+            if isSymlink(target) {
                 try fm.removeItem(atPath: target)
+            } else if fileExistsNoFollow(target) {
+                return false
             }
             try fm.createSymbolicLink(atPath: target, withDestinationPath: source)
             return true
@@ -494,7 +519,7 @@ final class AgentSkillInstallManager: ObservableObject {
         }
     }
 
-    /// 「卸载 Skill」：删除所有已安装 Agent 的 skill 目录（软链或真实目录皆删除），
+    /// 「卸载 Skill」：删除所有已安装 Agent 的 skill 软链（真实目录为安全起见不删除），
     /// 卸载后卡片状态刷新为「未安装」。
     func uninstallSkillFromAllAgents() {
         refresh()
@@ -507,9 +532,16 @@ final class AgentSkillInstallManager: ObservableObject {
 
         var removed: [String] = []
         var failed: [String] = []
+        var skipped: [String] = []
         for agent in agents {
+            let target = agent.skillTargetPath
+            // P1 (v2.10.13) 安全护栏：真实目录/文件（非软链）绝不删除，避免误删用户数据。
+            if !isSymlink(target) {
+                skipped.append(agent.displayName)
+                continue
+            }
             do {
-                try fm.removeItem(atPath: agent.skillTargetPath)
+                try fm.removeItem(atPath: target)
                 removed.append(agent.displayName)
             } catch {
                 failed.append(agent.displayName)
@@ -517,13 +549,18 @@ final class AgentSkillInstallManager: ObservableObject {
         }
         refresh()
 
-        if failed.isEmpty {
-            report("已从 \(removed.count) 个 Agent 卸载本 Skill：\(removed.joined(separator: "、"))", isError: false)
-        } else if removed.isEmpty {
-            report("卸载失败：\(failed.joined(separator: "、"))", isError: true)
-        } else {
-            report("已卸载：\(removed.joined(separator: "、"))；失败：\(failed.joined(separator: "、"))", isError: false)
+        var parts: [String] = []
+        if !removed.isEmpty {
+            parts.append("已从 \(removed.count) 个 Agent 卸载本 Skill：\(removed.joined(separator: "、"))")
         }
+        if !skipped.isEmpty {
+            parts.append("已跳过（目标非软链接，为安全起见未删除）：\(skipped.joined(separator: "、"))")
+        }
+        if !failed.isEmpty {
+            parts.append("失败：\(failed.joined(separator: "、"))")
+        }
+        report(parts.isEmpty ? "未检测到可卸载的软链。" : parts.joined(separator: "；"),
+               isError: removed.isEmpty && !failed.isEmpty)
     }
 
     /// 卸载 App 时的静默清理：删除所有已安装 Agent 的 skill 目录，不产生 UI 反馈。
@@ -679,26 +716,30 @@ final class AgentSkillInstallManager: ObservableObject {
             .replacingOccurrences(of: "\"", with: "\\\"")
         let appleScript = "do shell script \"\(escaped)\" with administrator privileges"
 
-        DispatchQueue.global(qos: .userInitiated).async {
+        // P1 (v2.10.13): NSAppleScript 非线程安全，且 `with administrator privileges`
+        // 会拉起系统鉴权弹窗（UI）。之前把构造与 executeAndReturnError 放到后台队列执行，
+        // 可能随机崩溃或挂起。改为在主线程构造并执行，与 CLIInstallManager 对齐；
+        // 耗时只在鉴权等待，主线程可接受。
+        DispatchQueue.main.async {
+            // 执行前显式驱动一次 runloop，让 isBusy 转圈状态有机会先绘制出来（手感优化）。
+            RunLoop.current.run(until: Date())
             var errorInfo: NSDictionary?
             let script = NSAppleScript(source: appleScript)
             _ = script?.executeAndReturnError(&errorInfo)
 
-            DispatchQueue.main.async {
-                self.busyAgentID = nil
-                if let errorInfo {
-                    let code = errorInfo[NSAppleScript.errorNumber] as? Int ?? 0
-                    if code == -128 {
-                        self.report("已取消操作。", isError: false)
-                    } else {
-                        let msg = errorInfo[NSAppleScript.errorMessage] as? String ?? "未知错误"
-                        self.report("安装失败：\(msg)", isError: true)
-                    }
+            self.busyAgentID = nil
+            if let errorInfo {
+                let code = errorInfo[NSAppleScript.errorNumber] as? Int ?? 0
+                if code == -128 {
+                    self.report("已取消操作。", isError: false)
                 } else {
-                    self.report(successMessage, isError: false)
+                    let msg = errorInfo[NSAppleScript.errorMessage] as? String ?? "未知错误"
+                    self.report("安装失败：\(msg)", isError: true)
                 }
-                self.refresh()
+            } else {
+                self.report(successMessage, isError: false)
             }
+            self.refresh()
         }
     }
 

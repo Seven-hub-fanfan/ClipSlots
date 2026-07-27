@@ -137,7 +137,10 @@ final class UpdateDownloader: NSObject {
     }
 
     private func dismissPanel() {
-        panel?.orderOut(nil)
+        // P2 (v2.10.13): 仅 orderOut 会把窗口移出屏幕但不释放；面板设了
+        // isReleasedWhenClosed=false，需显式 close() 走完关闭流程，再置 nil 释放引用，
+        // 避免复用时残留旧状态（如按钮标题、进度值）。
+        panel?.close()
         panel = nil
         progressBar = nil
         titleLabel = nil
@@ -164,6 +167,8 @@ final class UpdateDownloader: NSObject {
         do {
             try fm.moveItem(at: tempURL, to: dest)
         } catch {
+            // P2 (v2.10.13): 移动失败时清理暂存文件，避免临时目录残留半截 DMG。
+            try? fm.removeItem(at: tempURL)
             handleFailure("移动下载文件失败：\(error.localizedDescription)")
             return
         }
@@ -290,6 +295,16 @@ extension UpdateDownloader: URLSessionDownloadDelegate {
                                 didFinishDownloadingTo location: URL) {
         // location 在回调返回后会被删除，必须在此同步搬运到我们自己的临时文件。
         let fm = FileManager.default
+        // P2 (v2.10.13): 校验最终 HTTP 响应码。asset 下线/被重定向到错误页时服务端可能返回
+        // 4xx/5xx，此时响应体是 HTML 错误页而非 DMG。若 asset size 缺失（expectedSize<=0），
+        // 后续大小校验无法兜底，损坏文件会被当作 DMG 装进 /Applications。故非 200 直接失败。
+        if let http = downloadTask.response as? HTTPURLResponse, http.statusCode != 200 {
+            try? fm.removeItem(at: location)
+            Task { @MainActor in
+                self.handleFailure("下载失败：服务器返回状态码 \(http.statusCode)。安装包可能已下线，请稍后重试。")
+            }
+            return
+        }
         let staging = fm.temporaryDirectory.appendingPathComponent("clipslots-dl-\(UUID().uuidString).dmg")
         do {
             try fm.moveItem(at: location, to: staging)

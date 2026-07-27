@@ -48,20 +48,27 @@ struct ToggleLeverView: View {
 
     // 顶部圆形指示灯：开 = indicatorColor 发光，关 = 暗灰。
     private var indicatorLight: some View {
-        Circle()
-            .fill(
-                isOn
-                    ? AnyShapeStyle(RadialGradient(
-                        colors: [indicatorColor.opacity(0.8), indicatorColor],
-                        center: .center, startRadius: 0, endRadius: 5))
-                    : AnyShapeStyle(Color.gray.opacity(0.35))
-            )
-            .frame(width: 7, height: 7)
-            .overlay(
-                Circle().stroke(Color.black.opacity(0.15), lineWidth: 0.5)
-            )
-            .shadow(color: isOn ? indicatorColor.opacity(0.8) : .clear, radius: isOn ? 4 : 0)
-            .animation(.easeInOut(duration: 0.2), value: isOn)
+        // P2 (v2.10.13): 此前用 AnyShapeStyle 在 RadialGradient / 纯色间切换，类型擦除使
+        // SwiftUI 无法对填充做插值动画，拨杆切换时指示灯是硬切/闪烁而非平滑过渡。改为双层
+        // 叠加（暗灰底 + 发光色层），对发光层做 opacity 交叉淡入，使颜色过渡可被动画。
+        // 视觉（金属拨杆 + 发光指示灯）保持不变。
+        ZStack {
+            // 关闭态底色（始终存在）。
+            Circle()
+                .fill(Color.gray.opacity(0.35))
+            // 开启态发光色，用 opacity 交叉淡入以支持动画。
+            Circle()
+                .fill(RadialGradient(
+                    colors: [indicatorColor.opacity(0.8), indicatorColor],
+                    center: .center, startRadius: 0, endRadius: 5))
+                .opacity(isOn ? 1 : 0)
+        }
+        .frame(width: 7, height: 7)
+        .overlay(
+            Circle().stroke(Color.black.opacity(0.15), lineWidth: 0.5)
+        )
+        .shadow(color: isOn ? indicatorColor.opacity(0.8) : .clear, radius: isOn ? 4 : 0)
+        .animation(.easeInOut(duration: 0.2), value: isOn)
     }
 
     // 金属底座 + 拨杆主体。

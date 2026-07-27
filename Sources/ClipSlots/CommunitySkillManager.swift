@@ -152,10 +152,13 @@ final class CommunitySkillManager: ObservableObject {
     private func computeState(skill: CommunitySkill, agent: Agent) -> InstallState {
         let target = skillTargetPath(agent: agent, slug: skill.id)
         if let dest = try? fm.destinationOfSymbolicLink(atPath: target) {
-            // 校验软链指向的真实目录是否仍存在（悬空软链视为需更新/未安装）。
+            // 校验软链指向的真实目录是否仍存在（悬空软链视为需更新/待修复）。
             var isDir: ObjCBool = false
             let targetExists = fm.fileExists(atPath: target, isDirectory: &isDir) && isDir.boolValue
-            guard targetExists else { return .notInstalled }
+            // P2 (v2.10.13): 悬空软链（指向已删除的旧 bundle）此前返回 .notInstalled，卡片
+            // 显示「未安装」，与 CLIInstallManager / AgentSkillInstallManager 的「已损坏/待修复」
+            // 表现不一致。改为返回 .needsUpdate（枚举注释已含「悬空」语义），提示用户重装修复。
+            guard targetExists else { return .needsUpdate }
             let resolved = resolveSymlink(dest, base: agent.skillsDir)
             if standardized(resolved) == standardized(skill.storagePath) {
                 return .installed
@@ -343,20 +346,21 @@ final class CommunitySkillManager: ObservableObject {
         let source = skill.storagePath
 
         var installed: [String] = []
-        // v2.9.54: 安装即「强制重建软链」，不再因目标是真实目录而跳过（详见下方注释与
-        // trySymlinkWithoutPrivilege），因此 skipped 恒为空，保留仅为兼容 aggregateMessage 的签名。
-        let skipped: [String] = []
+        // P1 (v2.10.13): 目标为真实目录/文件（非软链）时不再强制覆盖删除，改为安全跳过，
+        // 避免误删用户手动放置的同名 Skill 目录（与官方 install() 一致）。
+        var skipped: [String] = []
         var needPrivilege: [Agent] = []
 
         for agent in agents {
             let target = skillTargetPath(agent: agent, slug: skill.id)
-            // v2.9.54: 安装动作 = 强制重建软链，与官方 Skill 的重装/更新逻辑保持一致。
-            // 目标可能是旧软链、悬空软链，或历史遗留的真实目录（例如用户此前手动放进
-            // ~/.codex/skills/<slug> 的同名 Skill）。旧逻辑对真实目录直接跳过，导致 Codex
-            // 不出现在「已安装到」列表。由于社区 Skill 的落盘源目录
-            // （~/Library/Application Support/ClipSlots/community-skills/<slug>）与 Agent 侧目标
-            // 完全独立，删除目标不会影响源文件，可安全覆盖 —— 与提权兜底命令
-            // （rm -rf target && ln -sfn source target）以及官方 relinkSkill 行为一致。
+            // 安全护栏：真实目录/文件（非软链）跳过，绝不递归删除。
+            if fileExistsNoFollow(target) && !isSymlink(target) {
+                skipped.append(agent.displayName)
+                continue
+            }
+            // 安装动作 = 重建软链（软链、悬空软链或不存在时安全）。社区 Skill 的落盘源目录
+            // （~/Library/Application Support/ClipSlots/community-skills/<slug>）与 Agent 侧目标独立，
+            // 删除软链目标不影响源文件。
             if trySymlinkWithoutPrivilege(source: source, target: target, skillsDir: agent.skillsDir) {
                 installed.append(agent.displayName)
             } else {
@@ -365,6 +369,7 @@ final class CommunitySkillManager: ObservableObject {
         }
 
         if !needPrivilege.isEmpty {
+            // needPrivilege 中的目标只可能是软链或不存在（真实目录已进 skipped），rm -rf 安全。
             let cmds = needPrivilege.map { agent in
                 let target = skillTargetPath(agent: agent, slug: skill.id)
                 return "mkdir -p \(shellQuote(agent.skillsDir)) && rm -rf \(shellQuote(target)) && ln -sfn \(shellQuote(source)) \(shellQuote(target))"
@@ -565,11 +570,13 @@ final class CommunitySkillManager: ObservableObject {
         do {
             // v2.9.54: 确保父目录存在（如 ~/.codex/skills/ 首次安装时可能不存在）。
             try fm.createDirectory(atPath: skillsDir, withIntermediateDirectories: true)
-            // 覆盖旧目标——软链、悬空软链或历史真实目录都先移除再重建软链。
-            // 源目录是独立的社区 Skill 落盘目录，删除 Agent 侧同名目标不影响源文件；
-            // 与官方 relinkSkill / 提权兜底命令（rm -rf target && ln -sfn）保持一致。
-            if fileExistsNoFollow(target) {
+            // P1 (v2.10.13) 安全护栏：仅删除软链本身；真实目录/文件绝不递归删除，避免误删
+            // 用户手动放置在 ~/.codex/skills/<slug> 的同名 Skill。真实目录由调用方拦截进 skipped，
+            // 此处 return false 作为纵深防御（不会误删也不会安装）。
+            if isSymlink(target) {
                 try fm.removeItem(atPath: target)
+            } else if fileExistsNoFollow(target) {
+                return false
             }
             try fm.createSymbolicLink(atPath: target, withDestinationPath: source)
             return true
@@ -601,26 +608,28 @@ final class CommunitySkillManager: ObservableObject {
         let appleScript = "do shell script \"\(escaped)\" with administrator privileges"
 
         isBusy = true
-        DispatchQueue.global(qos: .userInitiated).async {
+        // P1 (v2.10.13): NSAppleScript 非线程安全且会拉起系统鉴权弹窗（UI），
+        // 之前放到后台队列执行可能随机崩溃。改为主线程构造并执行，与 CLIInstallManager /
+        // AgentSkillInstallManager 对齐。
+        DispatchQueue.main.async {
+            RunLoop.current.run(until: Date())
             var errorInfo: NSDictionary?
             let script = NSAppleScript(source: appleScript)
             _ = script?.executeAndReturnError(&errorInfo)
 
-            DispatchQueue.main.async {
-                self.isBusy = false
-                if let errorInfo {
-                    let code = errorInfo[NSAppleScript.errorNumber] as? Int ?? 0
-                    if code == -128 {
-                        self.report("已取消操作。", isError: false)
-                    } else {
-                        let msg = errorInfo[NSAppleScript.errorMessage] as? String ?? "未知错误"
-                        self.report("操作失败：\(msg)", isError: true)
-                    }
+            self.isBusy = false
+            if let errorInfo {
+                let code = errorInfo[NSAppleScript.errorNumber] as? Int ?? 0
+                if code == -128 {
+                    self.report("已取消操作。", isError: false)
                 } else {
-                    self.report(successMessage, isError: false)
+                    let msg = errorInfo[NSAppleScript.errorMessage] as? String ?? "未知错误"
+                    self.report("操作失败：\(msg)", isError: true)
                 }
-                self.refresh()
+            } else {
+                self.report(successMessage, isError: false)
             }
+            self.refresh()
         }
     }
 

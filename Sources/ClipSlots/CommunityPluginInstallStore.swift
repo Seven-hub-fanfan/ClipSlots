@@ -14,6 +14,16 @@ import SwiftUI
 @MainActor
 final class CommunityPluginInstallStore: ObservableObject {
 
+    // P2 (v2.10.13): 与 StorageDirectoryWatcher（v2.10.3）对齐——FSEvents 的 C 回调此前用
+    // Unmanaged.passUnretained(self) 作为上下文，回调里 takeUnretainedValue()。若实例在回调
+    // 仍在途时被释放，会解引用已释放的 self → 悬垂/野指针。改为传入 passRetained 的 WeakBox
+    // （弱引用持有 self），回调检查 weak 是否已释放并安全 no-op；deinit 里在停止/失效 stream
+    // 后再 release 该 box，避免残留回调解引用已释放的 box。
+    private final class WeakBox {
+        weak var store: CommunityPluginInstallStore?
+        init(_ store: CommunityPluginInstallStore) { self.store = store }
+    }
+
     /// 当前真实检测到「已安装」（App bundle 存在于磁盘）的社区插件 id 集合。
     @Published private(set) var installedIDs: Set<String>
 
@@ -22,6 +32,8 @@ final class CommunityPluginInstallStore: ObservableObject {
 
     /// FSEvents 监听流（监听应用目录的增删）。
     private var eventStream: FSEventStreamRef?
+    /// 持有传给 FSEvents 上下文的 WeakBox（passRetained）；在 deinit 停止 stream 后 release。
+    private var boxRef: Unmanaged<WeakBox>?
 
     init() {
         var dirs = ["/Applications"]
@@ -40,6 +52,8 @@ final class CommunityPluginInstallStore: ObservableObject {
             FSEventStreamInvalidate(stream)
             FSEventStreamRelease(stream)
         }
+        // P2 (v2.10.13): 在 stream 失效后再 release box，保证不会有残留回调解引用已释放的 box。
+        boxRef?.release()
     }
 
     /// 该插件当前是否真实已安装（其对应 App bundle 存在于磁盘）。
@@ -94,12 +108,13 @@ final class CommunityPluginInstallStore: ObservableObject {
     // MARK: - FSEvents 监听
 
     private func startMonitoring() {
-        // 用 Unmanaged<CommunityPluginInstallStore> 作为回调上下文，避免强引用循环；
-        // 回调里切回主线程调用 refresh()。
-        let selfPtr = Unmanaged.passUnretained(self).toOpaque()
+        // P2 (v2.10.13): 用 passRetained 的 WeakBox 作为回调上下文（见类顶部说明），
+        // 弱引用持有 self；回调固定投递到主队列后再检查 weak 是否已释放。
+        let box = WeakBox(self)
+        let boxRef = Unmanaged.passRetained(box)
         var context = FSEventStreamContext(
             version: 0,
-            info: selfPtr,
+            info: boxRef.toOpaque(),
             retain: nil,
             release: nil,
             copyDescription: nil
@@ -107,8 +122,10 @@ final class CommunityPluginInstallStore: ObservableObject {
 
         let callback: FSEventStreamCallback = { _, info, _, _, _, _ in
             guard let info = info else { return }
-            let store = Unmanaged<CommunityPluginInstallStore>.fromOpaque(info).takeUnretainedValue()
+            let box = Unmanaged<WeakBox>.fromOpaque(info).takeUnretainedValue()
             DispatchQueue.main.async {
+                // 弱回引用：实例已释放则为 nil → 安全 no-op。
+                guard let store = box.store else { return }
                 store.refresh()
             }
         }
@@ -123,10 +140,12 @@ final class CommunityPluginInstallStore: ObservableObject {
             0.5, // 0.5s 去抖延迟
             FSEventStreamCreateFlags(kFSEventStreamCreateFlagUseCFTypes | kFSEventStreamCreateFlagIgnoreSelf)
         ) else {
+            boxRef.release() // 平衡 passRetained（创建失败）
             return
         }
         FSEventStreamSetDispatchQueue(stream, DispatchQueue.main)
         FSEventStreamStart(stream)
         eventStream = stream
+        self.boxRef = boxRef // 保活到 stream 生命周期结束（deinit release）
     }
 }

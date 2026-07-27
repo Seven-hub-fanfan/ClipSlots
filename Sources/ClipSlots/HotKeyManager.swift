@@ -188,7 +188,12 @@ final class HotKeyManager {
     static func virtualKeyCode(forCharacter character: Character) -> Int? {
         guard let scalar = String(character).lowercased().unicodeScalars.first, scalar.value <= 0xFFFF else { return nil }
         let target = UniChar(scalar.value)
-        guard let src = TISCopyCurrentKeyboardLayoutInputSource()?.takeRetainedValue(),
+        // P2 (v2.10.13): TISCopyCurrentKeyboardLayoutInputSource 在当前输入源为中文/日文等
+        // 非 ASCII 输入法时，其 UnicodeKeyLayoutData 可能缺失或无法映射到拉丁字符，导致单字符
+        // 快捷键在这些输入法激活时解析失败。改用 ASCIICapable 变体获取与当前布局对应的
+        // ASCII-capable 键盘布局，确保始终能得到拉丁字符的 keyCode 映射。
+        guard let src = (TISCopyCurrentASCIICapableKeyboardLayoutInputSource()?.takeRetainedValue()
+                         ?? TISCopyCurrentKeyboardLayoutInputSource()?.takeRetainedValue()),
               let ptr = TISGetInputSourceProperty(src, kTISPropertyUnicodeKeyLayoutData) else { return nil }
         let data = Unmanaged<CFData>.fromOpaque(ptr).takeUnretainedValue() as Data
         return data.withUnsafeBytes { raw -> Int? in

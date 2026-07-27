@@ -760,32 +760,36 @@ struct ContentView: View {
 
     // P2-4: run NSAlert without blocking the SwiftUI runloop; sheet on the key window, modal fallback.
     private func runAlertNonBlocking(_ alert: NSAlert, completion: @escaping (NSApplication.ModalResponse) -> Void) {
-        // P2-6 (v2.10.6): 统一聚焦逻辑。此前只有 beginSheetModal 路径设置了 accessory 输入框
-        // 为第一响应者，runModal() 回退路径（已有 sheet 附着 / 找不到 window）跳过了聚焦，
-        // 用户仍需手动点击输入框。这里对 runModal 路径在弹出前显式聚焦。
-        func focusAccessoryForModal() {
+        // P2 (v2.10.13): 全程使用 beginSheetModal 异步展示，去除同步 runModal 回退——同步
+        // runModal 会进入嵌套 runloop，与自动更新/自动模式等其它 modal 叠加时造成卡顿/重入。
+        // 宿主窗口若已有 sheet，改把新 alert 挂到该 sheet 窗口上（sheet 可再挂 sheet），
+        // 而不是退回 runModal。极端情况下进程内无任何窗口时，创建一个临时不可见宿主窗口承载
+        // sheet，仍以异步方式呈现，绝不进入同步 runModal。
+        func focusAccessory() {
             if let field = alert.accessoryView {
                 alert.layout()
                 alert.window.makeFirstResponder(field)
             }
         }
-        if let window = NSApp.keyWindow ?? NSApp.mainWindow ?? NSApp.windows.first(where: { $0.isVisible }) {
-            // P2-8 (v2.10.5): 若窗口已有 sheet 在展示，再 beginSheetModal 会排队/冲突，
-            // 退化为 runModal 保证当前对话框可用。
-            if window.attachedSheet != nil {
-                focusAccessoryForModal()
-                completion(alert.runModal())
-                return
-            }
-            alert.beginSheetModal(for: window) { completion($0) }
-            // P2-8 (v2.10.5): sheet 形式的 NSAlert 不会自动聚焦 accessory 输入框，
-            // 用户此前必须先点一下才能输入。sheet 窗口已创建，显式设为第一响应者。
-            if let field = alert.accessoryView {
-                alert.window.makeFirstResponder(field)
-            }
+        if let window = NSApp.keyWindow ?? NSApp.mainWindow
+            ?? NSApp.windows.first(where: { $0.isVisible }) ?? NSApp.windows.first {
+            // 若窗口已有 sheet，挂到该 sheet 窗口上，避免与其冲突或回退到 runModal。
+            let target = window.attachedSheet ?? window
+            alert.beginSheetModal(for: target) { completion($0) }
+            focusAccessory()
         } else {
-            focusAccessoryForModal()
-            completion(alert.runModal())
+            // 进程内无任何可用窗口：创建临时不可见宿主窗口承载 sheet，异步呈现后释放。
+            let host = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1, height: 1),
+                                styleMask: [.borderless], backing: .buffered, defer: false)
+            host.isReleasedWhenClosed = false
+            host.alphaValue = 0
+            host.center()
+            host.orderFront(nil)
+            focusAccessory()
+            alert.beginSheetModal(for: host) { resp in
+                completion(resp)
+                host.orderOut(nil)
+            }
         }
     }
 
@@ -1338,12 +1342,13 @@ struct ContentView: View {
         }
 
         if debounced {
-            // P2-8 (v2.10.6): 在调度时刻显式捕获当前 searchText/selectedFilter 作为局部值，
-            // 并传入重算函数，避免 work item 延迟触发时从被捕获的 struct 拷贝读到陈旧输入。
-            let capturedQuery = searchText
-            let capturedFilter = selectedFilter
+            // P2 (v2.10.13): 去抖闭包不再在「调度时刻」冻结 searchText/selectedFilter 快照。
+            // 此前显式捕获局部值会把输入定格在调度瞬间——用户在 0.2s 去抖窗口内切换范围/筛选/
+            // 排序后，实际执行仍用旧快照，结果与当前筛选不符。@State 读取会穿透到底层持久存储，
+            // 故让闭包在「触发时刻」调用无参 recomputeGlobalSearchResults()，由它重新读取当前
+            // query/scope/filter/sortRule。
             let work = DispatchWorkItem {
-                recomputeGlobalSearchResults(overrideQuery: capturedQuery, overrideFilter: capturedFilter)
+                recomputeGlobalSearchResults()
             }
             searchDebounce.workItem = work
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.2, execute: work)

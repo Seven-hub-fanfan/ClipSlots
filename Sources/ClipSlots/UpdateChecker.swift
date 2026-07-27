@@ -33,7 +33,11 @@ final class UpdateChecker: ObservableObject {
         URLSession.shared.dataTask(with: request) { [weak self] data, response, error in
             DispatchQueue.main.async {
                 guard let self else { return }
-                self.isChecking = false
+                // P2 (v2.10.13): isChecking 之前在弹窗展示「之前」就被复位，用户快速连点
+                // 「检查更新」会堆叠多次请求/弹窗。改为在整个结果处理（含同步 runModal 弹窗
+                // 展示）结束后，通过 defer 统一复位——所有分支（error/403/最新/有更新）在
+                // 弹窗关闭后才允许再次发起检查。
+                defer { self.isChecking = false }
 
                 if let error = error {
                     self.presentError("网络请求失败：\(error.localizedDescription)")
@@ -66,8 +70,8 @@ final class UpdateChecker: ObservableObject {
                     return
                 }
 
-                let latest = Self.normalize(rawTag)
-                let current = Self.normalize(Self.currentVersion)
+                let latest = Self.parse(rawTag)
+                let current = Self.parse(Self.currentVersion)
                 let pageURL = (json["html_url"] as? String) ?? Self.releasesPage
                 let notes = (json["body"] as? String) ?? ""
                 // v2.9.54: 解析 Release assets，取第一个 .dmg 的 browser_download_url 用于自动下载。
@@ -85,26 +89,51 @@ final class UpdateChecker: ObservableObject {
 
     // MARK: - Version helpers
 
-    /// Strip a leading "v" and any pre-release suffix, keeping the numeric core.
-    static func normalize(_ tag: String) -> [Int] {
-        var s = tag.trimmingCharacters(in: .whitespacesAndNewlines)
-        if s.hasPrefix("v") || s.hasPrefix("V") { s.removeFirst() }
-        // Keep only the part before any "-" (pre-release) or "+" (build metadata).
-        if let dashIdx = s.firstIndex(where: { $0 == "-" || $0 == "+" }) {
-            s = String(s[s.startIndex..<dashIdx])
-        }
-        return s.split(separator: ".").map { Int($0) ?? 0 }
+    /// Parsed semantic version: numeric core + optional pre-release identifier.
+    /// P2 (v2.10.13): 之前 normalize 直接丢弃 `-beta` 预发布后缀，导致 `2.11.0-beta`
+    /// 与 `2.11.0` 被判为相等（beta 用户收不到正式版更新）。改为保留预发布段并按
+    /// SemVer 规则比较：数字核心相同时，正式版 > 预发布版。
+    struct SemVer: Equatable {
+        let core: [Int]
+        let pre: String?   // nil = 正式版；非空 = 预发布标识（如 "beta.1"）
     }
 
-    /// Semantic-ish comparison: returns true if `a` represents a strictly newer version than `b`.
-    static func compare(_ a: [Int], isNewerThan b: [Int]) -> Bool {
-        let count = max(a.count, b.count)
+    static func parse(_ tag: String) -> SemVer {
+        var s = tag.trimmingCharacters(in: .whitespacesAndNewlines)
+        if s.hasPrefix("v") || s.hasPrefix("V") { s.removeFirst() }
+        // build metadata（+ 之后）不参与比较，先剥离。
+        if let plus = s.firstIndex(of: "+") { s = String(s[s.startIndex..<plus]) }
+        var pre: String? = nil
+        if let dash = s.firstIndex(of: "-") {
+            let p = String(s[s.index(after: dash)...])
+            pre = p.isEmpty ? nil : p
+            s = String(s[s.startIndex..<dash])
+        }
+        let core = s.split(separator: ".").map { Int($0) ?? 0 }
+        return SemVer(core: core, pre: pre)
+    }
+
+    /// Kept for backward compatibility; returns the numeric core only.
+    static func normalize(_ tag: String) -> [Int] {
+        parse(tag).core
+    }
+
+    /// Semantic comparison: returns true if `a` represents a strictly newer version than `b`.
+    static func compare(_ a: SemVer, isNewerThan b: SemVer) -> Bool {
+        let count = max(a.core.count, b.core.count)
         for i in 0..<count {
-            let av = i < a.count ? a[i] : 0
-            let bv = i < b.count ? b[i] : 0
+            let av = i < a.core.count ? a.core[i] : 0
+            let bv = i < b.core.count ? b.core[i] : 0
             if av != bv { return av > bv }
         }
-        return false
+        // 数字核心相等：按 SemVer，正式版 > 预发布版。
+        switch (a.pre, b.pre) {
+        case (nil, nil): return false             // 完全相等
+        case (nil, .some): return true            // a 是正式版，b 是预发布 → a 更新
+        case (.some, nil): return false           // a 是预发布，b 是正式版 → a 不更新
+        case let (.some(ap), .some(bp)):
+            return ap.compare(bp, options: .numeric) == .orderedDescending
+        }
     }
 
     // MARK: - Alerts

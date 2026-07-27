@@ -29,9 +29,19 @@ enum AutoModeTraversal {
             return result
         }
 
+        // P2 (v2.10.13): 原实现在 sortedPages 循环内对每页做一次 groups.filter + sorted，
+        // 复杂度 O(P·G)，页 / 组很多时每次 Opt+1 都要重扫全库、热键有可感知延迟。改为先按
+        // pageId 一次性分桶并各自排序（O(G log G + P)），循环内仅做 O(1) 查表，遍历顺序不变。
+        var groupsByPage: [String: [SpecialSlot]] = [:]
+        for g in groups {
+            groupsByPage[g.pageId, default: []].append(g)
+        }
+        for (pid, bucket) in groupsByPage {
+            groupsByPage[pid] = bucket.sorted { $0.order != $1.order ? $0.order < $1.order : $0.id < $1.id }
+        }
+
         for page in sortedPages {
-            let groupsInPage = groups.filter { $0.pageId == page.id }
-                .sorted { $0.order != $1.order ? $0.order < $1.order : $0.id < $1.id }
+            let groupsInPage = groupsByPage[page.id] ?? []
             for g in groupsInPage {
                 for s in 1...slotCount { result.append(SlotAddress(groupId: g.id, slot: s)) }
             }

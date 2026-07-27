@@ -30,7 +30,17 @@ public final class SpecialSlotStorage {
     /// a clean successful decode. saveIndex() consults it to refuse persisting the
     /// schemaVersion=0 empty fallback (or a single slot appended to it) over real
     /// data — the P0-1 "completely empty" guard alone does not catch that case.
-    private var lastLoadDecodeFailed = false
+    ///
+    /// P2 (v2.10.13): 该标志此前在 loadIndex()（queue.sync 内，行 398/415）写、在
+    /// saveIndex()（不在 queue.sync 内，行 469）读，跨队列裸访问存在数据竞争（TSan 可报）。
+    /// 改为经专用 NSLock 原子访问的计算属性——loadIndex 已在 queue.sync 内也能安全读写
+    /// （不同锁，不会自锁），saveIndex 在任意上下文读取也线程安全。
+    private let decodeFailedLock = NSLock()
+    private var _lastLoadDecodeFailed = false
+    private var lastLoadDecodeFailed: Bool {
+        get { decodeFailedLock.lock(); defer { decodeFailedLock.unlock() }; return _lastLoadDecodeFailed }
+        set { decodeFailedLock.lock(); defer { decodeFailedLock.unlock() }; _lastLoadDecodeFailed = newValue }
+    }
 
     // F7 (契约5): records what the startup default-page/group repair did on this
     // process. Empty => nothing needed repair. Read by the CLI to emit `repaired`
@@ -59,7 +69,13 @@ public final class SpecialSlotStorage {
 
     private func ensureInitialized() {
         if !FileManager.default.fileExists(atPath: indexURL.path) {
-            migrateLegacySlotsOrCreateDefault()
+            // P2 (v2.10.13): 首启建库 / legacy 迁移的写入纳入跨进程 storageLock，并在锁内
+            // 二次校验 index.json 是否已被并发进程创建，做到幂等——GUI 与 CLI 同时首启时
+            // 只有一个进程真正建库，另一个直接跳过，避免 copyItem 目标已存在报错或 index 半写。
+            try? storageLock.withLock {
+                guard !FileManager.default.fileExists(atPath: indexURL.path) else { return }
+                migrateLegacySlotsOrCreateDefault()
+            }
             return
         }
         // v2.4 migration: upgrade existing index to schemaVersion 2
@@ -913,15 +929,19 @@ public final class SpecialSlotStorage {
                 throw PageError.emptyName
             }
 
+            // P2 (v2.10.13): 去重比较改用「截断后」的名字（与实际存储口径一致——下方按
+            // prefix(30) 截断落盘）。此前用未截断的 trimmed 比较，两个仅在第 30 字符之后
+            // 不同的长名会通过去重检查、却截断成同一存储名，导致页内出现重复显示名。
+            let clipped = String(trimmed.prefix(30))
             // Check for duplicate name
-            guard !index.pages.contains(where: { $0.name == trimmed }) else {
+            guard !index.pages.contains(where: { $0.name == clipped }) else {
                 throw PageError.duplicateName
             }
 
             let maxOrder = index.pages.map { $0.order }.max() ?? (-1)
             let page = SlotPage(
                 id: "page_\(UUID().uuidString)",
-                name: String(trimmed.prefix(30)),
+                name: clipped,
                 order: maxOrder + 1,
                 createdAt: Date(),
                 updatedAt: Date()
@@ -983,14 +1003,17 @@ public final class SpecialSlotStorage {
             guard !trimmed.isEmpty else {
                 throw PageError.emptyName
             }
-            guard !index.pages.contains(where: { $0.id != id && $0.name == trimmed }) else {
+            // P2 (v2.10.13): 去重比较使用「截断后」名，与存储口径（prefix(30)）一致，
+            // 避免两个超长名截断后同名却绕过去重（与 createPage 对齐）。
+            let clipped = String(trimmed.prefix(30))
+            guard !index.pages.contains(where: { $0.id != id && $0.name == clipped }) else {
                 throw PageError.duplicateName
             }
 
-            index.pages[idx].name = String(trimmed.prefix(30))
+            index.pages[idx].name = clipped
             index.pages[idx].updatedAt = Date()
             try saveIndex(index)
-            NSLog("[ClipSlots] Page renamed to: \(trimmed)")
+            NSLog("[ClipSlots] Page renamed to: \(clipped)")
         }
     }
 
