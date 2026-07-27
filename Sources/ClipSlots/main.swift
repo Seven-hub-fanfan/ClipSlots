@@ -3908,69 +3908,99 @@ final class SlotStoreObservable: ObservableObject {
     }
 
     /// 导入 .clipslotspack：解析 manifest → 逐一解决页/组名冲突 → 写回存储 → 刷新。
+    ///
+    /// PK-1 (v2.10.15): 整个导入（大包 unzip + JSON 解码 + 逐槽位持锁写入）此前全部同步跑在
+    /// 主线程，大包会阻塞 runloop 导致转圈/无响应（导出早已后台化，导入却没有）。改为把整个
+    /// 导入放到后台队列执行；仅「冲突弹窗」（必须主线程）与最终 UI 更新回到主线程。冲突弹窗通过
+    /// DispatchQueue.main.sync 同步取用户选择后继续在后台推进。
     func importPack(from packURL: URL) {
         let importer = PackImporter(maxChildSlots: specialSlotSettings.maxChildSlotsPerSpecialSlot)
 
-        // 先校验是否为有效槽位包。
-        let manifest: PackManifest
-        do {
-            manifest = try importer.readManifest(from: packURL)
-        } catch {
-            showFloatingNotice(FloatingNotice(
-                title: "无法导入",
-                subtitle: error.localizedDescription,
-                iconName: "xmark.circle.fill",
-                kind: .error))
-            return
-        }
-        guard !manifest.pages.isEmpty else {
-            showFloatingNotice(FloatingNotice(
-                title: "槽位包为空",
-                subtitle: "包内没有可导入的页面",
-                iconName: "tray",
-                kind: .warning))
-            return
-        }
+        DispatchQueue.global(qos: .userInitiated).async {
+            // 先校验是否为有效槽位包（readManifest 只解出 manifest.json，放后台即可）。
+            let manifest: PackManifest
+            do {
+                manifest = try importer.readManifest(from: packURL)
+            } catch {
+                DispatchQueue.main.async {
+                    self.showFloatingNotice(FloatingNotice(
+                        title: "无法导入",
+                        subtitle: error.localizedDescription,
+                        iconName: "xmark.circle.fill",
+                        kind: .error))
+                }
+                return
+            }
+            guard !manifest.pages.isEmpty else {
+                DispatchQueue.main.async {
+                    self.showFloatingNotice(FloatingNotice(
+                        title: "槽位包为空",
+                        subtitle: "包内没有可导入的页面",
+                        iconName: "tray",
+                        kind: .warning))
+                }
+                return
+            }
 
-        // 冲突解决：逐一弹窗，支持「对后续所有冲突应用此选择」。
-        var pageDecisionForAll: PackConflictResolution?
-        var groupDecisionForAll: PackConflictResolution?
+            // 冲突解决：逐一弹窗，支持「对后续所有冲突应用此选择」。
+            // PK-1: resolver 在后台线程被同步调用，NSAlert 必须主线程，故通过 main.sync 取选择。
+            var pageDecisionForAll: PackConflictResolution?
+            var groupDecisionForAll: PackConflictResolution?
 
-        let resolvePage: (String) -> PackConflictResolution = { name in
-            if let d = pageDecisionForAll { return d }
-            let (decision, applyAll) = self.askPackConflict(kind: "页面", name: name)
-            if applyAll { pageDecisionForAll = decision }
-            return decision
-        }
-        let resolveGroup: (String, String) -> PackConflictResolution = { pageName, groupName in
-            if let d = groupDecisionForAll { return d }
-            let (decision, applyAll) = self.askPackConflict(kind: "槽位组", name: "\(pageName) / \(groupName)")
-            if applyAll { groupDecisionForAll = decision }
-            return decision
-        }
+            let resolvePage: (String) -> PackConflictResolution = { name in
+                if let d = pageDecisionForAll { return d }
+                var decision: PackConflictResolution = .skip
+                DispatchQueue.main.sync {
+                    let (d, applyAll) = self.askPackConflict(kind: "页面", name: name)
+                    decision = d
+                    if applyAll { pageDecisionForAll = d }
+                }
+                return decision
+            }
+            let resolveGroup: (String, String) -> PackConflictResolution = { pageName, groupName in
+                if let d = groupDecisionForAll { return d }
+                var decision: PackConflictResolution = .skip
+                DispatchQueue.main.sync {
+                    let (d, applyAll) = self.askPackConflict(kind: "槽位组", name: "\(pageName) / \(groupName)")
+                    decision = d
+                    if applyAll { groupDecisionForAll = d }
+                }
+                return decision
+            }
 
-        suppressWatcher(2.0) // 导入会在磁盘创建页/组，抑制自身写触发的重复重载。
+            // PK-2 (v2.10.15): 用开放式抑制窗口覆盖整个导入生命周期（含 >2s 的模态冲突弹窗），
+            // 取代原先固定 2s 窗口——固定窗口会在用户停留弹窗期间过期，使导入写入触发 FSEvents 让
+            // StorageDirectoryWatcher 反复 reloadAll（闪烁 / 当前页被重置）。此处置为 distantFuture，
+            // 待完成后再收敛为 suppressWatcher(2.0) 覆盖尾随 FSEvents 并自然恢复。
+            DispatchQueue.main.sync { self.ignoreWatcherUntil = .distantFuture }
 
-        do {
-            let result = try importer.importPack(
-                from: packURL,
-                resolvePageConflict: resolvePage,
-                resolveGroupConflict: resolveGroup)
-            reloadAll()
-            var subtitle = "导入 \(result.importedGroups) 组 / \(result.importedSlots) 槽位"
-            if result.skippedGroups > 0 { subtitle += "，跳过 \(result.skippedGroups) 组" }
-            showFloatingNotice(FloatingNotice(
-                title: "导入完成",
-                subtitle: subtitle,
-                iconName: "square.and.arrow.down.fill",
-                kind: .success))
-        } catch {
-            reloadAll()
-            showFloatingNotice(FloatingNotice(
-                title: "导入失败",
-                subtitle: error.localizedDescription,
-                iconName: "xmark.circle.fill",
-                kind: .error))
+            do {
+                let result = try importer.importPack(
+                    from: packURL,
+                    resolvePageConflict: resolvePage,
+                    resolveGroupConflict: resolveGroup)
+                DispatchQueue.main.async {
+                    self.suppressWatcher(2.0) // 收敛抑制窗口，覆盖导入写入的尾随 FSEvents 后恢复。
+                    self.reloadAll()
+                    var subtitle = "导入 \(result.importedGroups) 组 / \(result.importedSlots) 槽位"
+                    if result.skippedGroups > 0 { subtitle += "，跳过 \(result.skippedGroups) 组" }
+                    self.showFloatingNotice(FloatingNotice(
+                        title: "导入完成",
+                        subtitle: subtitle,
+                        iconName: "square.and.arrow.down.fill",
+                        kind: .success))
+                }
+            } catch {
+                DispatchQueue.main.async {
+                    self.suppressWatcher(2.0) // 收敛抑制窗口（PK-3 回滚也在磁盘写入，需覆盖其 FSEvents）。
+                    self.reloadAll()
+                    self.showFloatingNotice(FloatingNotice(
+                        title: "导入失败",
+                        subtitle: error.localizedDescription,
+                        iconName: "xmark.circle.fill",
+                        kind: .error))
+                }
+            }
         }
     }
 

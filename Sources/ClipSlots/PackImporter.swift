@@ -23,12 +23,16 @@ enum PackImportError: Error, LocalizedError {
     case unzipFailed(String)
     case manifestMissing
     case manifestCorrupt(String)
+    // PK-3 (v2.10.15): 页/组创建失败（达到每页上限、候选名耗尽等）时抛出，
+    // 触发整包回滚而非留下半成品脏数据。
+    case writeFailed(String)
 
     var errorDescription: String? {
         switch self {
         case .unzipFailed(let s): return "解压失败：\(s)"
         case .manifestMissing: return "包内缺少 manifest.json，不是有效的槽位包"
         case .manifestCorrupt(let s): return "manifest.json 解析失败：\(s)"
+        case .writeFailed(let s): return "导入写入失败：\(s)"
         }
     }
 }
@@ -76,8 +80,19 @@ struct PackImporter {
 
         var result = PackImportResult()
 
+        // PK-3 (v2.10.15): 记录本次导入新建的页/组 id；任一步骤抛错时在 catch 中软删除回滚，
+        // 避免半成品页/组残留库中成为脏数据（用户看到「导入失败」却仍需手动清理）。
+        var createdPageIds: [String] = []
+        var createdGroupIds: [String] = []
+
+        do {
         for manifestPage in manifest.pages {
-            let pageDir = pagesRoot.appendingPathComponent(manifestPage.id, isDirectory: true)
+            // PK-4 (v2.10.15): manifest 的 page.id 是不可信输入，校验拼出的路径 standardize 后
+            // 仍在临时根目录内，防止 `../` 路径穿越读取包外任意文件（Zip-Slip 读侧信息泄露）。
+            guard let pageDir = safeChildURL(in: pagesRoot, component: manifestPage.id, isDirectory: true) else {
+                result.errors.append("页面 id 非法「\(manifestPage.id)」，已跳过")
+                continue
+            }
             let packPage = (try? loadJSON(PackPage.self, from: pageDir.appendingPathComponent("page.json")))
                 ?? PackPage(id: manifestPage.id, name: manifestPage.name, order: 0)
 
@@ -97,20 +112,22 @@ struct PackImporter {
                     continue
                 case .append:
                     guard let newId = createUniquePage(baseName: packPage.name + "-导入") else {
-                        result.errors.append("创建页面「\(packPage.name)」失败")
-                        continue
+                        // PK-3 (v2.10.15): 创建失败改为抛错，触发整包回滚而非静默残留。
+                        throw PackImportError.writeFailed("创建页面「\(packPage.name)」失败")
                     }
                     targetPageId = newId
+                    createdPageIds.append(newId) // PK-3 (v2.10.15): 追踪新建页以便回滚
                 case .overwrite:
                     targetPageId = existingPage!.id
                     overwritingExistingPage = true
                 }
             } else {
                 guard let newId = createPageDirectly(name: packPage.name) else {
-                    result.errors.append("创建页面「\(packPage.name)」失败")
-                    continue
+                    // PK-3 (v2.10.15): 创建失败改为抛错，触发整包回滚而非静默残留。
+                    throw PackImportError.writeFailed("创建页面「\(packPage.name)」失败")
                 }
                 targetPageId = newId
+                createdPageIds.append(newId) // PK-3 (v2.10.15): 追踪新建页以便回滚
             }
 
             result.importedPages += 1
@@ -128,11 +145,11 @@ struct PackImporter {
                         continue
                     case .append:
                         guard let newId = createUniqueGroup(baseName: packGroup.name + "-导入", inPage: targetPageId) else {
-                            result.errors.append("创建槽位组「\(packGroup.name)」失败")
-                            result.skippedGroups += 1
-                            continue
+                            // PK-3 (v2.10.15): 创建失败改为抛错，触发整包回滚而非静默残留。
+                            throw PackImportError.writeFailed("创建槽位组「\(packGroup.name)」失败")
                         }
                         targetGroupId = newId
+                        createdGroupIds.append(newId) // PK-3 (v2.10.15): 追踪新建组以便回滚
                     case .overwrite:
                         targetGroupId = existingGroup.id
                         try? storage.clearAllSlots(in: targetGroupId)
@@ -140,17 +157,24 @@ struct PackImporter {
                 } else {
                     // 无冲突或新页：始终新建组（新 UUID），绝不覆盖本地已有组。
                     guard let newId = createUniqueGroup(baseName: packGroup.name, inPage: targetPageId) else {
-                        result.errors.append("创建槽位组「\(packGroup.name)」失败（可能已达每页上限）")
-                        result.skippedGroups += 1
-                        continue
+                        // PK-3 (v2.10.15): 创建失败（可能已达每页上限）改为抛错，触发整包回滚。
+                        throw PackImportError.writeFailed("创建槽位组「\(packGroup.name)」失败（可能已达每页上限）")
                     }
                     targetGroupId = newId
+                    createdGroupIds.append(newId) // PK-3 (v2.10.15): 追踪新建组以便回滚
                 }
 
                 let slotCount = writeSlots(from: slotsRoot, declaredSlots: packGroup.slots, into: targetGroupId)
                 result.importedGroups += 1
                 result.importedSlots += slotCount
             }
+        }
+        } catch {
+            // PK-3 (v2.10.15): 回滚本次导入新建的内容（软删除到 .trash）——先删组再删页
+            // （删页会连带清理其下所有组），随后原样抛出，保证「导入失败」即无残留脏数据。
+            for gid in createdGroupIds { try? storage.deleteSpecialSlot(id: gid) }
+            for pid in createdPageIds { try? storage.deletePage(id: pid) }
+            throw error
         }
 
         return result
@@ -200,6 +224,9 @@ struct PackImporter {
             content.contentId = UUID().uuidString
 
             _ = storage.set(slot, content: content, in: groupId)
+            // PK-5 (v2.10.15): 经核对 SlotStorage.set / writeSlotContent 并不落盘 content.label
+            // （仅通过 getLabel 保留槽位目录里已有的旧 label.txt）。导入写入的是全新槽位目录，
+            // 旧 label 为空，故 set 不会持久化包内标签——setLabel 是必要的第二次写入，不能删除。
             if let label = packSlot.label, !label.isEmpty {
                 storage.setLabel(slot, label: label, in: groupId)
             }
@@ -256,6 +283,17 @@ struct PackImporter {
     }
 
     // MARK: - ZIP / JSON helpers
+
+    /// PK-4 (v2.10.15): 用不可信的 manifest id 拼接子路径前做防穿越校验。将拼出的 URL 做
+    /// standardize（解析 `..`/`.`）后，验证其仍位于 root 之内；否则返回 nil，调用方跳过。
+    /// 避免 `../` 逃逸出临时解压目录读取包外任意文件（Zip-Slip 读侧信息泄露）。
+    private func safeChildURL(in root: URL, component: String, isDirectory: Bool) -> URL? {
+        let resolved = root.appendingPathComponent(component, isDirectory: isDirectory).standardizedFileURL
+        let rootResolved = root.standardizedFileURL
+        let rootPrefix = rootResolved.path.hasSuffix("/") ? rootResolved.path : rootResolved.path + "/"
+        guard resolved.path == rootResolved.path || resolved.path.hasPrefix(rootPrefix) else { return nil }
+        return resolved
+    }
 
     private func unzip(_ packURL: URL, to dest: URL, members: [String] = []) throws {
         let fm = FileManager.default

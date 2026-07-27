@@ -174,31 +174,32 @@ final class CLIInstallManager: ObservableObject {
             .replacingOccurrences(of: "\"", with: "\\\"")
         let appleScript = "do shell script \"\(escaped)\" with administrator privileges"
 
-        // P0-2: NSAppleScript is not thread-safe — construct AND execute it on the
-        // main thread. Previously this ran on a background queue, causing random crashes.
-        DispatchQueue.main.async {
-            // P2-7 (v2.10.5): NSAppleScript 的鉴权弹窗 + shell 执行会同步阻塞主线程，
-            // 先前置的 isBusy 转圈来不及绘制。执行前显式驱动一次 runloop，让转圈状态
-            // 有机会先画出来，缓解 UI 短时冻结的观感（非崩溃，纯手感优化）。
-            RunLoop.current.run(until: Date())
+        // AU-1 (v2.10.15): `executeAndReturnError` 会同步阻塞当前线程（鉴权弹窗 + shell 执行），
+        // 之前放在 DispatchQueue.main.async 里仍旧冻结主线程，安装/卸载期间 UI 无响应。
+        // 改为在后台队列构造并执行 AppleScript（NSAppleScript 对象保持在闭包内局部、不跨线程），
+        // 执行完再回到主线程更新所有 @Published/UI 状态。
+        DispatchQueue.global(qos: .userInitiated).async {
             var errorInfo: NSDictionary?
             let script = NSAppleScript(source: appleScript)
             _ = script?.executeAndReturnError(&errorInfo)
 
-            self.isBusy = false
-            if let errorInfo {
-                // -128 = user cancelled the authorization dialog.
-                let code = errorInfo[NSAppleScript.errorNumber] as? Int ?? 0
-                if code == -128 {
-                    self.report("已取消操作。", isError: false)
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                self.isBusy = false
+                if let errorInfo {
+                    // -128 = user cancelled the authorization dialog.
+                    let code = errorInfo[NSAppleScript.errorNumber] as? Int ?? 0
+                    if code == -128 {
+                        self.report("已取消操作。", isError: false)
+                    } else {
+                        let msg = errorInfo[NSAppleScript.errorMessage] as? String ?? "未知错误"
+                        self.report("操作失败：\(msg)", isError: true)
+                    }
                 } else {
-                    let msg = errorInfo[NSAppleScript.errorMessage] as? String ?? "未知错误"
-                    self.report("操作失败：\(msg)", isError: true)
+                    self.report(successMessage, isError: false)
                 }
-            } else {
-                self.report(successMessage, isError: false)
+                self.refreshState()
             }
-            self.refreshState()
         }
     }
 

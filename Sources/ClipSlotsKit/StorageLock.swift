@@ -62,6 +62,21 @@ public final class StorageLock {
     /// process so we don't spam stderr on every write.
     private var didWarnLockless = false
 
+    /// ST-7 (v2.10.15): observable degradation state. Set true whenever the OS-level
+    /// cross-process flock could NOT be established and we fell back to "no-lock mode"
+    /// (lock file unopenable, flock EPERM / unsupported filesystem, or `--force`); set
+    /// false on a successful flock acquisition. Previously this downgrade was only
+    /// written to a log + posted as a notification — invisible to callers, so
+    /// cross-process serialization could silently fail with no upper-layer/UI signal.
+    /// Callers can now inspect `isDegraded` to surface a visible warning or decide
+    /// whether to proceed. Backward compatible: purely additive, existing call sites
+    /// are unaffected. Guarded by `recursive` (reentrant) for thread-safe reads.
+    private var _isDegraded = false
+    public var isDegraded: Bool {
+        recursive.lock(); defer { recursive.unlock() }
+        return _isDegraded
+    }
+
     public init(lockURL: URL? = nil) {
         if let lockURL {
             self.lockURL = lockURL
@@ -195,6 +210,7 @@ public final class StorageLock {
         if StorageLock.forceUnlocked {
             warnLocklessOnce("--force")
             holdsFlock = false
+            _isDegraded = true // ST-7 (v2.10.15): observable lockless downgrade.
             return
         }
 
@@ -204,12 +220,14 @@ public final class StorageLock {
             // the cross-process guarantee (in-process NSRecursiveLock still holds).
             warnLocklessOnce("lock file could not be opened")
             holdsFlock = false
+            _isDegraded = true // ST-7 (v2.10.15): observable lockless downgrade.
             return
         }
         let deadline = Date().addingTimeInterval(timeout)
         while true {
             if flock(handle, LOCK_EX | LOCK_NB) == 0 {
                 holdsFlock = true
+                _isDegraded = false // ST-7 (v2.10.15): real lock acquired — not degraded.
                 writeHolderPID()
                 return
             }
@@ -224,6 +242,7 @@ public final class StorageLock {
                 NSLog("[ClipSlots] StorageLock: \(reason); proceeding without cross-process lock")
                 warnLocklessOnce(reason)
                 holdsFlock = false
+                _isDegraded = true // ST-7 (v2.10.15): observable lockless downgrade.
                 return
             }
             if Date() >= deadline {
@@ -238,6 +257,7 @@ public final class StorageLock {
                     NSLog("[ClipSlots] StorageLock: stale lock from dead PID \(holder); reclaiming")
                     if flock(handle, LOCK_EX | LOCK_NB) == 0 {
                         holdsFlock = true
+                        _isDegraded = false // ST-7 (v2.10.15): real lock reclaimed — not degraded.
                         writeHolderPID()
                         return
                     }

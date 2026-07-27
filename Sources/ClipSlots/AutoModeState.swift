@@ -23,58 +23,68 @@ final class AutoModeState: ObservableObject {
 
     private let defaults: UserDefaults
 
-    @Published var autoStoreEnabled: Bool {
-        // P2-2: ensure the UserDefaults side-effect runs on the main thread.
-        didSet {
-            // P2-8 (v2.10.9): @Published mutation must occur on the main thread —
-            // objectWillChange fires synchronously here, and SwiftUI observers
-            // updating off-main is undefined behavior. Assert in debug to catch a
-            // background-thread assignment at its source (no-op in release, so
-            // behavior is identical when already on main).
-            assert(Thread.isMainThread, "AutoModeState.autoStoreEnabled must be mutated on the main thread")
-            let v = autoStoreEnabled
-            if Thread.isMainThread { defaults.set(v, forKey: Keys.autoStore) }
-            else { DispatchQueue.main.async { self.defaults.set(v, forKey: Keys.autoStore) } }
+    // AU-2 (v2.10.15): @Published 写入（objectWillChange 的触发）必须发生在主线程。历史方案
+    // 仅把 UserDefaults 副作用切回主线程并在 debug 断言，但 release 下后台线程（剪贴板等待 /
+    // 键盘事件回调等）直接赋值仍会让 objectWillChange 在非主线程触发，导致 SwiftUI 更新时序
+    // 异常甚至崩溃。改为：底层用私有 @Published 存储真正的值，公开属性保持可写 var（因此
+    // `$autoMode.xxx` 经 ObservedObject 的 keyPath 依旧生成 Binding，公开 API 不变），其 setter
+    // 统一切回主线程后再改写底层存储 + 持久化，使 objectWillChange 恒在主线程触发。
+    @Published private var _autoStoreEnabled: Bool
+    @Published private var _autoPasteEnabled: Bool
+    @Published private var _autoAdvanceEnabled: Bool
+
+    /// 保证闭包在主线程执行：已在主线程则同步执行（避免多余派发与时序问题），
+    /// 否则切回主线程异步执行，从而让后台线程调用方也安全。
+    private func writeOnMain(_ work: @escaping () -> Void) {
+        if Thread.isMainThread { work() }
+        else { DispatchQueue.main.async(execute: work) }
+    }
+
+    var autoStoreEnabled: Bool {
+        get { _autoStoreEnabled }
+        set {
+            writeOnMain {
+                self._autoStoreEnabled = newValue
+                self.defaults.set(newValue, forKey: Keys.autoStore)
+            }
         }
     }
 
-    @Published var autoPasteEnabled: Bool {
-        // P2-2: ensure the UserDefaults side-effect runs on the main thread.
-        didSet {
-            // P2-8 (v2.10.9): @Published mutation must occur on the main thread (see
-            // autoStoreEnabled). Assert in debug; no-op in release.
-            assert(Thread.isMainThread, "AutoModeState.autoPasteEnabled must be mutated on the main thread")
-            let v = autoPasteEnabled
-            if Thread.isMainThread { defaults.set(v, forKey: Keys.autoPaste) }
-            else { DispatchQueue.main.async { self.defaults.set(v, forKey: Keys.autoPaste) } }
+    var autoPasteEnabled: Bool {
+        get { _autoPasteEnabled }
+        set {
+            writeOnMain {
+                self._autoPasteEnabled = newValue
+                self.defaults.set(newValue, forKey: Keys.autoPaste)
+            }
         }
     }
 
-    @Published var autoAdvanceEnabled: Bool {
-        // P2-2: ensure the UserDefaults side-effect runs on the main thread.
-        didSet {
-            // P2-8 (v2.10.9): @Published mutation must occur on the main thread (see
-            // autoStoreEnabled). Assert in debug; no-op in release.
-            assert(Thread.isMainThread, "AutoModeState.autoAdvanceEnabled must be mutated on the main thread")
-            let v = autoAdvanceEnabled
-            if Thread.isMainThread { defaults.set(v, forKey: Keys.autoAdvance) }
-            else { DispatchQueue.main.async { self.defaults.set(v, forKey: Keys.autoAdvance) } }
+    var autoAdvanceEnabled: Bool {
+        get { _autoAdvanceEnabled }
+        set {
+            writeOnMain {
+                self._autoAdvanceEnabled = newValue
+                self.defaults.set(newValue, forKey: Keys.autoAdvance)
+            }
         }
     }
 
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
+        // AU-2 (v2.10.15): 初始化阶段直接写入底层 @Published 存储（构造发生在主线程、此时尚无
+        // 观察者），无需经过切主线程的 setter。
         // 自动存储 / 自动粘贴：默认关闭（key 不存在 → false）
-        self.autoStoreEnabled = defaults.bool(forKey: Keys.autoStore)
-        self.autoPasteEnabled = defaults.bool(forKey: Keys.autoPaste)
+        self._autoStoreEnabled = defaults.bool(forKey: Keys.autoStore)
+        self._autoPasteEnabled = defaults.bool(forKey: Keys.autoPaste)
         // 自动切换：首次安装 / 无历史值时默认关闭。
         // P2 (v2.10.13): 首装默认从 true 改为 false，避免新用户在未知情下自动存储/粘贴
         // 跨组、跨页推进导致落点意外。仅当 key 不存在（全新安装）时用 false；已有用户在
         // UserDefaults 中的历史选择照常读取，绝不覆盖。
         if defaults.object(forKey: Keys.autoAdvance) == nil {
-            self.autoAdvanceEnabled = false
+            self._autoAdvanceEnabled = false
         } else {
-            self.autoAdvanceEnabled = defaults.bool(forKey: Keys.autoAdvance)
+            self._autoAdvanceEnabled = defaults.bool(forKey: Keys.autoAdvance)
         }
     }
 }

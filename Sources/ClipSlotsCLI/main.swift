@@ -165,11 +165,18 @@ func parseArgs(_ raw: [String]) -> ParsedArgs {
                 i += 1
                 continue
             }
-            let next = (i + 1 < raw.count) ? raw[i + 1] : nil
-            if let next, !next.hasPrefix("--") {
+            // CLI-1 (v2.10.15): value-taking (non-boolean) flags MUST consume the next
+            // token as their value even when it starts with "--" (e.g. `--text --hello`
+            // or a `---` markdown divider). The old `!next.hasPrefix("--")` guard
+            // misclassified such values as flags, losing them and raising
+            // INVALID_ARGUMENT_COMBINATION, making such text impossible to write. Boolean
+            // flags are already handled above and never reach here, so `--flag1 --flag2`
+            // (flag1 boolean) is unaffected.
+            if let next = (i + 1 < raw.count) ? raw[i + 1] : nil {
                 flags[key] = next
                 i += 2
             } else {
+                // No next token at all → record the flag as a value-less boolean.
                 boolFlags.insert(key)
                 i += 1
             }
@@ -292,6 +299,12 @@ func resolveGroup(_ args: ParsedArgs, inPage pageId: String? = nil) -> String {
         let nameMatches = scope.filter { $0.name == explicit }
         if nameMatches.count > 1 { failAmbiguousGroup(name: explicit, matches: nameMatches, index: index) }
         if let g = nameMatches.first { return g.id }
+        // CLI-2 (v2.10.15): an explicit `--group default` must behave the same as
+        // OMITTING --group (which falls through to the DEFAULT_GROUP literal below),
+        // instead of erroring GROUP_NOT_FOUND just because that group hasn't been
+        // materialised in the index yet. Mirror the omitted-group fallback for the
+        // default group id specifically.
+        if explicit == DEFAULT_GROUP { return explicit }
         if let label = pageLabel {
             // A2 guardrail: an explicit --group (id or name) that resolves to nothing
             // on the requested page is a page/group mismatch → refuse.
@@ -505,7 +518,7 @@ let COMMAND_ALLOWED_FLAGS: [String: Set<String>] = [
     "rename-group": ["name", "page-name", "force"],
     "delete-group": ["force"],
     "delete-page": ["force"],
-    "write-attachment": ["group", "group-name", "page", "page-name", "replace", "label", "force"]
+    "write-attachment": ["group", "group-name", "page", "page-name", "replace", "label", "force", "slot"]
 ]
 
 // v2.9.7 (R1): validate that every --flag passed to a known command is
@@ -790,6 +803,11 @@ func resolveGroupLiteralStrict(_ raw: String, inPage pageId: String?) throws -> 
         throw GroupResolveFailure.ambiguous(name: raw, candidates: candidates)
     }
     if let g = nameMatches.first { return g.id }
+    // CLI-2 (v2.10.15): mirror resolveGroup — an explicit "default" literal resolves to
+    // the DEFAULT_GROUP even before that group has been materialised in the index, so
+    // batch items with group:"default" behave like the omitted-group fallback rather
+    // than failing GROUP_NOT_FOUND.
+    if raw == DEFAULT_GROUP { return raw }
     let pageLabel: String? = pageId.map { pid in
         index.pages.first(where: { $0.id == pid })?.name ?? pid
     }
@@ -965,6 +983,11 @@ func cmdWriteBatch(_ args: ParsedArgs) -> Never {
         for i in 0..<total {
             var r: [String: Any] = ["index": i]
             if let s = rawSlot(arr[i]) { r["slot"] = s }
+            // CLI-4 (v2.10.15): include `group` so preflight per-item output is
+            // structurally consistent with the execution-phase items (which always carry
+            // `group`), giving agents an even field set across both phases. Best-effort:
+            // the item's own `group` override if present, else the command-level group.
+            r["group"] = (arr[i]["group"] as? String) ?? commandGroup
             if offending.contains(i) {
                 r["ok"] = false
                 r["status"] = "failed"
@@ -1299,27 +1322,14 @@ func cmdCreateGroup(_ args: ParsedArgs) -> Never {
         fail("missing group name (usage: create-group <name> [--page <id>])", code: "INVALID_ARGUMENT_COMBINATION")
     }
     let page = resolvePageFlag(args, strict: true)
-    // P1-6: enforce the per-page group limit before creating (page nil == current page,
-    // matching createSpecialSlot's target resolution).
-    // P2-24 (v2.10.9): TODO(residual TOCTOU) — this preflight count check runs OUTSIDE
-    // the Kit storage lock, so between this read and createSpecialSlot's write a
-    // concurrent process could add a group and push the page over the limit. Moving the
-    // check into the Kit from the CLI is not cleanly possible without a larger refactor,
-    // so we keep this early check as a fast/friendly reject and RELY ON the AUTHORITATIVE
-    // guard inside SpecialSlotStorage.createSpecialSlot, which re-checks the limit INSIDE
-    // its own storageLock.withLock and throws .maxSpecialSlotsReached (mapped below to
-    // PAGE_GROUP_LIMIT_REACHED). The preflight is therefore best-effort, not the source
-    // of truth; the atomic Kit check closes the race.
-    let preIndex = storage.loadIndex()
-    let targetPageForLimit = page ?? preIndex.currentPageId
-    if preIndex.specialSlots.filter({ $0.pageId == targetPageForLimit }).count >= preIndex.settings.maxSpecialSlots {
-        // P2-10 (v2.10.5): 错误文案用真实的 settings.maxSpecialSlots，别再硬编码 "10"。
-        // 计数判断本就用 settings.maxSpecialSlots，一旦该配置被改，硬编码文案会误导调用方。
-        // P2-11 (v2.10.8): 标记 phase=preflight，让调用方能区分「预检拒绝」（此处，尚未写入）
-        // 与「执行期失败」（下方 catch，Kit 原子事务内触发），二者 error_code 相同但语义不同。
-        fail("page group limit reached (max \(preIndex.settings.maxSpecialSlots) groups per page)",
-             code: "PAGE_GROUP_LIMIT_REACHED", extra: ["phase": "preflight"])
-    }
+    // CLI-5 (v2.10.15): removed the CLI-layer per-page group-count preflight. It read the
+    // count OUTSIDE the Kit storage lock, so it had a TOCTOU race with concurrent
+    // create-group processes and could emit a misleading PAGE_GROUP_LIMIT_REACHED
+    // preflight error. The authoritative capacity guarantee lives in
+    // SpecialSlotStorage.createSpecialSlot, which re-checks the limit INSIDE its own
+    // storageLock.withLock and throws .maxSpecialSlotsReached — caught below and mapped
+    // to PAGE_GROUP_LIMIT_REACHED via codeForSpecialSlotError. Relying solely on the Kit
+    // closes the race.
     do {
         let slot = try storage.createSpecialSlot(name: name, pageId: page, requestedAt: CLI_REQUEST_RECEIVED_AT)
         success(["group": ["id": slot.id, "name": slot.name, "pageId": slot.pageId]])
@@ -1423,11 +1433,23 @@ func cmdRenameGroup(_ args: ParsedArgs) -> Never {
 
 func cmdWriteAttachment(_ args: ParsedArgs) -> Never {
     let group = resolveGroup(args, inPage: resolvePageFlag(args)) // v2.9.35: page-scoped (flag parity with write)
-    guard let slotRaw = args.positionals.first else {
-        fail("missing slot number (usage: write-attachment <slot> <file> [file ...] [--group <id>] [--page <id>] [--replace])", code: "INVALID_ARGUMENT_COMBINATION")
+    // CLI-3 (v2.10.15): accept `--slot` in addition to the positional <slot>, for flag
+    // parity with read/write/paste/clear. When `--slot` is given, EVERY positional is a
+    // file path (the slot no longer occupies the first positional); otherwise the first
+    // positional is the slot and the rest are files (original behaviour).
+    let slotRaw: String
+    let fileArgs: [String]
+    if let slotFlag = args.flag("slot") {
+        slotRaw = slotFlag
+        fileArgs = args.positionals
+    } else {
+        guard let first = args.positionals.first else {
+            fail("missing slot number (usage: write-attachment <slot> <file> [file ...] [--group <id>] [--page <id>] [--replace])", code: "INVALID_ARGUMENT_COMBINATION")
+        }
+        slotRaw = first
+        fileArgs = Array(args.positionals.dropFirst())
     }
     let n = parseSlot(slotRaw)
-    let fileArgs = Array(args.positionals.dropFirst())
     guard !fileArgs.isEmpty else {
         fail("no files given (usage: write-attachment <slot> <file> [file ...])", code: "INVALID_ARGUMENT_COMBINATION")
     }

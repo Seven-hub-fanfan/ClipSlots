@@ -268,17 +268,56 @@ final class CommunitySkillManager: ObservableObject {
         let front = parseFrontmatter(content)
         guard let validation = validateFrontmatter(front) else { return }
 
-        // 4. 落盘：把整个 skillDir 的内容拷进 community-skills/<slug>/。
+        // 4. AU-4 (v2.10.15): 先在同卷暂存目录内构建完整 Skill 并校验完整性，通过后再整体
+        //    原子移动到目标目录；任一步失败即清理暂存目录，绝不在目标目录留下半成品。
+        //    （旧实现逐个 copyItem 到目标目录，非原子：中途失败会残留不完整的 Skill，
+        //    后续校验/软链可能指向不完整内容。）
         let slug = validation.slug
-        guard let dest = prepareStorageDir(slug: slug) else { return }
+        let root = communitySkillsRoot
+        do {
+            // 暂存目录放在 community-skills 根下，确保与最终目标同卷 → moveItem 为原子 rename。
+            try fm.createDirectory(atPath: root, withIntermediateDirectories: true)
+        } catch {
+            report("准备落盘目录失败：\(error.localizedDescription)", isError: true)
+            return
+        }
+        let staging = (root as NSString).appendingPathComponent(".staging-\(UUID().uuidString)")
+        do {
+            try fm.createDirectory(atPath: staging, withIntermediateDirectories: true)
+        } catch {
+            report("创建暂存目录失败：\(error.localizedDescription)", isError: true)
+            return
+        }
+        // 成功时暂存目录已被 move 走，remove 变为无害的 no-op；失败时确保清理。
+        defer { try? fm.removeItem(atPath: staging) }
+
         do {
             let items = try fm.contentsOfDirectory(atPath: skillDir)
             for item in items {
                 if item == "__MACOSX" || item == ".DS_Store" { continue }
                 let src = (skillDir as NSString).appendingPathComponent(item)
-                let dst = (dest as NSString).appendingPathComponent(item)
+                let dst = (staging as NSString).appendingPathComponent(item)
                 try fm.copyItem(atPath: src, toPath: dst)
             }
+        } catch {
+            report("写入落盘目录失败：\(error.localizedDescription)", isError: true)
+            return
+        }
+
+        // 完整性校验：暂存目录内必须含 SKILL.md，否则视为不完整，放弃导入。
+        let stagedSkill = (staging as NSString).appendingPathComponent("SKILL.md")
+        guard fm.fileExists(atPath: stagedSkill) else {
+            report("Skill 内容不完整（缺少 SKILL.md），已取消导入。", isError: true)
+            return
+        }
+
+        // 原子落盘：目标已存在则先移除（覆盖同名 Skill），再把整个暂存目录 rename 过去。
+        let dest = (root as NSString).appendingPathComponent(slug)
+        do {
+            if fileExistsNoFollow(dest) {
+                try fm.removeItem(atPath: dest)   // 覆盖同名 Skill
+            }
+            try fm.moveItem(atPath: staging, toPath: dest)
         } catch {
             report("写入落盘目录失败：\(error.localizedDescription)", isError: true)
             return
@@ -608,28 +647,31 @@ final class CommunitySkillManager: ObservableObject {
         let appleScript = "do shell script \"\(escaped)\" with administrator privileges"
 
         isBusy = true
-        // P1 (v2.10.13): NSAppleScript 非线程安全且会拉起系统鉴权弹窗（UI），
-        // 之前放到后台队列执行可能随机崩溃。改为主线程构造并执行，与 CLIInstallManager /
-        // AgentSkillInstallManager 对齐。
-        DispatchQueue.main.async {
-            RunLoop.current.run(until: Date())
+        // AU-1 (v2.10.15): `executeAndReturnError` 会同步阻塞当前线程（鉴权弹窗 + shell 执行），
+        // 放在 DispatchQueue.main.async 里仍会冻结主线程，安装/重装期间 UI 无响应。
+        // 改为在后台队列构造并执行 AppleScript（NSAppleScript 对象保持在闭包内局部、不跨线程），
+        // 执行完再回到主线程更新所有 @Published/UI 状态。
+        DispatchQueue.global(qos: .userInitiated).async {
             var errorInfo: NSDictionary?
             let script = NSAppleScript(source: appleScript)
             _ = script?.executeAndReturnError(&errorInfo)
 
-            self.isBusy = false
-            if let errorInfo {
-                let code = errorInfo[NSAppleScript.errorNumber] as? Int ?? 0
-                if code == -128 {
-                    self.report("已取消操作。", isError: false)
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                self.isBusy = false
+                if let errorInfo {
+                    let code = errorInfo[NSAppleScript.errorNumber] as? Int ?? 0
+                    if code == -128 {
+                        self.report("已取消操作。", isError: false)
+                    } else {
+                        let msg = errorInfo[NSAppleScript.errorMessage] as? String ?? "未知错误"
+                        self.report("操作失败：\(msg)", isError: true)
+                    }
                 } else {
-                    let msg = errorInfo[NSAppleScript.errorMessage] as? String ?? "未知错误"
-                    self.report("操作失败：\(msg)", isError: true)
+                    self.report(successMessage, isError: false)
                 }
-            } else {
-                self.report(successMessage, isError: false)
+                self.refresh()
             }
-            self.refresh()
         }
     }
 

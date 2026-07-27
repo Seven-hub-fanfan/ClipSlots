@@ -716,30 +716,31 @@ final class AgentSkillInstallManager: ObservableObject {
             .replacingOccurrences(of: "\"", with: "\\\"")
         let appleScript = "do shell script \"\(escaped)\" with administrator privileges"
 
-        // P1 (v2.10.13): NSAppleScript 非线程安全，且 `with administrator privileges`
-        // 会拉起系统鉴权弹窗（UI）。之前把构造与 executeAndReturnError 放到后台队列执行，
-        // 可能随机崩溃或挂起。改为在主线程构造并执行，与 CLIInstallManager 对齐；
-        // 耗时只在鉴权等待，主线程可接受。
-        DispatchQueue.main.async {
-            // 执行前显式驱动一次 runloop，让 isBusy 转圈状态有机会先绘制出来（手感优化）。
-            RunLoop.current.run(until: Date())
+        // AU-1 (v2.10.15): `executeAndReturnError` 会同步阻塞当前线程（鉴权弹窗 + shell 执行），
+        // 放在 DispatchQueue.main.async 里仍会冻结主线程，安装/重装期间 UI 无响应。
+        // 改为在后台队列构造并执行 AppleScript（NSAppleScript 对象保持在闭包内局部、不跨线程），
+        // 执行完再回到主线程更新所有 @Published/UI 状态。
+        DispatchQueue.global(qos: .userInitiated).async {
             var errorInfo: NSDictionary?
             let script = NSAppleScript(source: appleScript)
             _ = script?.executeAndReturnError(&errorInfo)
 
-            self.busyAgentID = nil
-            if let errorInfo {
-                let code = errorInfo[NSAppleScript.errorNumber] as? Int ?? 0
-                if code == -128 {
-                    self.report("已取消操作。", isError: false)
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                self.busyAgentID = nil
+                if let errorInfo {
+                    let code = errorInfo[NSAppleScript.errorNumber] as? Int ?? 0
+                    if code == -128 {
+                        self.report("已取消操作。", isError: false)
+                    } else {
+                        let msg = errorInfo[NSAppleScript.errorMessage] as? String ?? "未知错误"
+                        self.report("安装失败：\(msg)", isError: true)
+                    }
                 } else {
-                    let msg = errorInfo[NSAppleScript.errorMessage] as? String ?? "未知错误"
-                    self.report("安装失败：\(msg)", isError: true)
+                    self.report(successMessage, isError: false)
                 }
-            } else {
-                self.report(successMessage, isError: false)
+                self.refresh()
             }
-            self.refresh()
         }
     }
 

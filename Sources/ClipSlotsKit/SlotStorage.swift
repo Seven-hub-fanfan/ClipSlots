@@ -38,7 +38,23 @@ public final class SlotStorage {
     // (CLI) is picked up on the very next read, even on coarse-mtime volumes where
     // the old modificationDate signal (P2-15, v2.10.8) missed same-second writes.
     private var cacheFingerprint: [Int: DirFingerprint] = [:]
+    // ST-2 (v2.10.15): slots whose attachments.json PHYSICALLY EXISTS but FAILED to
+    // decode (genuine corruption), as opposed to a slot that is legitimately empty.
+    // Set/cleared by readSlotContent and consulted by writeSlotContent so an empty
+    // attachments payload cannot atomically overwrite (physically delete) a corrupt
+    // attachments.json — mirroring the index-layer refusingToOverwriteWithEmpty
+    // poison guard in SpecialSlotStorage. Accessed only on `queue` (get/set both hop
+    // through queue.sync), so a plain Set needs no extra locking.
+    private var attachmentDecodeFailedSlots: Set<Int> = []
     private let queue = DispatchQueue(label: "com.clipslots.storage", qos: .utility)
+    // ST-5 (v2.10.15): the diagnostic manifest rebuild (updateManifest) walks every
+    // slot directory off disk. It previously ran on the shared serial `queue`, so a
+    // large rebuild blocked the get/set hot path (both use queue.sync). manifest.json
+    // is a write-only diagnostic (readManifest has no callers) and updateManifest
+    // touches ONLY the filesystem (no in-memory cache/state), so running it on a
+    // dedicated serial queue moves the rebuild entirely off the hot path without
+    // changing behavior or introducing data races.
+    private let manifestQueue = DispatchQueue(label: "com.clipslots.storage.manifest", qos: .utility)
     private let encoder = JSONEncoder()
     private let decoder = JSONDecoder()
 
@@ -179,7 +195,12 @@ public final class SlotStorage {
     /// v2.8.0 (perf H2): regenerate the diagnostic manifest asynchronously on the
     /// serial storage queue so it never blocks the save/clear critical path.
     private func scheduleManifestUpdate() {
-        queue.async { [weak self] in
+        // ST-5 (v2.10.15): rebuild on the dedicated manifestQueue (not the shared
+        // storage `queue`) so the full slot-directory walk never blocks the get/set
+        // hot path. Both callers invoke this AFTER their queue.sync write completes,
+        // so the on-disk state is already current; updateManifest only reads the
+        // filesystem, so it is safe off the storage queue.
+        manifestQueue.async { [weak self] in
             do {
                 try self?.updateManifest()
             } catch {
@@ -335,10 +356,17 @@ public final class SlotStorage {
         // (cold cache → disk read reconstructed SlotContent without attachments).
         // Missing/legacy file → keep the default empty array (fully backward compatible).
         let attachmentsURL = slotDir.appendingPathComponent("attachments.json")
+        // ST-2 (v2.10.15): track whether THIS slot's attachments.json failed to decode
+        // so writeSlotContent can refuse to physically overwrite a corrupt file with an
+        // empty payload. Slot number is derived from the dir name (get() passes the
+        // integer-named slot dir); nil means an unexpected path — treat as no tracking.
+        let slotNum = Int(slotDir.lastPathComponent)
         if FileManager.default.fileExists(atPath: attachmentsURL.path) {
             if let attData = try? Data(contentsOf: attachmentsURL),
                let atts = try? decoder.decode([SlotContent.SlotAttachment].self, from: attData) {
                 content.attachments = atts
+                // Clean decode clears any prior corruption poison for this slot.
+                if let s = slotNum { attachmentDecodeFailedSlots.remove(s) }
             } else {
                 // P2 (v2.10.13): 文件「存在但解码失败」= 真实损坏（区别于「文件缺失」的正常
                 // 首次/legacy 情形）。此前一律走 try? 静默回退为空，随后一次 writeSlotContent
@@ -346,6 +374,9 @@ public final class SlotStorage {
                 // 这里在返回空之前，先把损坏文件备份到 baseURL 下的兄弟文件（放在 slotDir 之外，
                 // 使其能在下一次「原子替换整个槽目录」后依然存活），与 index.json 的
                 // poison+backup 保护对齐，保证用户仍可从备份恢复。
+                // ST-2 (v2.10.15): also POISON this slot so a following empty-attachment
+                // write refuses to drop the corrupt file (see writeSlotContent).
+                if let s = slotNum { attachmentDecodeFailedSlots.insert(s) }
                 let ts = Int(Date().timeIntervalSince1970)
                 let slotName = slotDir.lastPathComponent
                 let backupURL = baseURL.appendingPathComponent(
@@ -360,6 +391,10 @@ public final class SlotStorage {
                         + "the corrupt backup failed: \(error). Falling back to empty attachments.")
                 }
             }
+        } else {
+            // ST-2 (v2.10.15): no file on disk = genuinely empty (or legacy). Clear any
+            // stale poison so it never blocks a legitimate empty-attachment write.
+            if let s = slotNum { attachmentDecodeFailedSlots.remove(s) }
         }
 
         return content
@@ -419,6 +454,25 @@ public final class SlotStorage {
                 if !content.attachments.isEmpty {
                     let attData = try encoder.encode(content.attachments)
                     try attData.write(to: stagingDir.appendingPathComponent("attachments.json"), options: .atomic)
+                }
+            }
+
+            // ST-2 (v2.10.15): if this payload carries NO attachments but the slot's
+            // on-disk attachments.json previously FAILED to decode (genuine corruption,
+            // tracked in attachmentDecodeFailedSlots — NOT a legitimately-empty slot),
+            // do NOT let the atomic swap physically drop that file: that would be
+            // permanent data loss. Mirror the index-layer refusingToOverwriteWithEmpty
+            // guard by carrying the original (corrupt) file into the staging dir so it
+            // survives the swap, and log the refusal instead of silently clearing.
+            if content.attachments.isEmpty, attachmentDecodeFailedSlots.contains(slot) {
+                let liveAttachments = slotDir.appendingPathComponent("attachments.json")
+                let stagedAttachments = stagingDir.appendingPathComponent("attachments.json")
+                if FileManager.default.fileExists(atPath: liveAttachments.path),
+                   !FileManager.default.fileExists(atPath: stagedAttachments.path) {
+                    try? FileManager.default.copyItem(at: liveAttachments, to: stagedAttachments)
+                    NSLog("[ClipSlots] WARNING: slot \(slot) attachments.json is corrupt (failed to decode); "
+                        + "refusing to overwrite it with an empty payload — preserving the original file "
+                        + "across the atomic write so it stays recoverable.")
                 }
             }
 

@@ -40,6 +40,12 @@ final class HotKeyManager {
     private var eventHandlerRef: EventHandlerRef?
     private var radialHotKeyRef: EventHotKeyRef?
 
+    // AU-5 (v2.10.15): 防御性清理——即便当前是单例（理论上不会释放），也在 deinit 里
+    // 注销所有全局热键与事件处理器，避免未来改为非单例时泄漏 Carbon 热键/事件监听。
+    deinit {
+        unregisterAll()
+    }
+
     private let keyCodeMap: [String: Int] = [
         "0": 29, "1": 18, "2": 19, "3": 20, "4": 21, "5": 23,
         "6": 22, "7": 26, "8": 28, "9": 25,

@@ -59,7 +59,10 @@ final class UpdateInstaller {
 
         let appName = "ClipSlots.app"
         let targetApp = "/Applications/\(appName)"
-        let mountPoint = NSTemporaryDirectory() + "clipslots-update-mnt-\(UUID().uuidString)"
+        // UP-4 (v2.10.15): 用 FileManager.temporaryDirectory + appendingPathComponent 拼路径，
+        // 避免直接字符串拼接 NSTemporaryDirectory()（可能缺/多尾部斜杠、含特殊字符）导致的脆弱路径。
+        let mountPoint = FileManager.default.temporaryDirectory
+            .appendingPathComponent("clipslots-update-mnt-\(UUID().uuidString)").path
 
         // P1-3 (v2.10.9): 统一失败出口——先复位 isInstalling（加锁）再回调 failure，保证
         // 每条失败返回路径都能解除重入锁；成功路径会 terminate 进程，无需复位。
@@ -145,7 +148,12 @@ final class UpdateInstaller {
                 let qTarget = Self.shellSingleQuoteEscape(targetApp)
                 let qStaging = Self.shellSingleQuoteEscape(adminStaging)
                 let qBackup = Self.shellSingleQuoteEscape(adminBackup)
-                let shell = "set -e; "
+                // UP-3 (v2.10.15): 用 trap ... EXIT 兜底清理 staging 临时目录。原脚本 set -e 下若中途
+                // 某步失败会立即退出，跳过后续显式 rm，导致 staging 目录残留在 /Applications 下。改为
+                // 先把 staging 路径存入 shell 变量 STAGING 并注册 EXIT trap，无论从哪条路径退出都会清理它。
+                let shell = "STAGING='\(qStaging)'; "
+                    + "trap 'rm -rf \"$STAGING\"' EXIT; "
+                    + "set -e; "
                     + "rm -rf '\(qStaging)'; "
                     + "/usr/bin/ditto '\(qMounted)' '\(qStaging)'; "
                     + "[ -x '\(qStaging)/Contents/MacOS/ClipSlots' ] || { rm -rf '\(qStaging)'; exit 1; }; "

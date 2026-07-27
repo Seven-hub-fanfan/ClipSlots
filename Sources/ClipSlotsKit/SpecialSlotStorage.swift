@@ -352,7 +352,17 @@ public final class SpecialSlotStorage {
     /// can surface `repaired` / `repair_actions` on its responses.
     private func repairDefaultsIfNeeded() {
         do {
-            try storageLock.withLock {
+            // ST-1 (v2.10.15): init() calls this synchronously on the launching
+            // thread (the main thread for the GUI). It previously used the default
+            // 5s blocking lock timeout, so if the CLI held storageLock during a slow
+            // import, GUI launch stalled for the full ~5s. Fix (least invasive, keeps
+            // lastRepairActions semantics): stay SYNCHRONOUS — so the CLI still repairs
+            // before its command runs and reports `repaired`/`repair_actions` — but
+            // acquire the lock with a SHORT timeout instead of blocking 5s. On lock
+            // contention the acquisition throws quickly and we fall back gracefully
+            // (leave lastRepairActions empty; a later command performs the idempotent
+            // repair), so the GUI never blocks on launch.
+            try storageLock.withLock(timeout: 0.5) {
                 var index = loadIndex()
                 // Skip repair for the empty/corrupt fallback index (schemaVersion 0):
                 // ensureInitialized()/migration owns that path; repairing here could
@@ -695,13 +705,22 @@ public final class SpecialSlotStorage {
     }
 
     public func updateSelectedSpecialSlot(id: String) {
-        // v2.9.4 (#4): non-throwing — swallow lock timeout via try?.
-        try? storageLock.withLock {
-            var index = loadIndex()
-            guard index.specialSlots.contains(where: { $0.id == id }) else { return }
-            index.selectedSpecialSlotId = id
-            index.currentSpecialSlotId = id
-            try? saveIndex(index)
+        // ST-4 (v2.10.15): this previously used `try? storageLock.withLock { ... }`
+        // and dropped any lock timeout on the floor — under fast group switching the
+        // persist could be silently skipped, so the selected item was lost on restart
+        // with no trace. Surface the failure via NSLog (do NOT silently swallow), and
+        // let the inner saveIndex error propagate to the same handler.
+        do {
+            try storageLock.withLock {
+                var index = loadIndex()
+                guard index.specialSlots.contains(where: { $0.id == id }) else { return }
+                index.selectedSpecialSlotId = id
+                index.currentSpecialSlotId = id
+                try saveIndex(index)
+            }
+        } catch {
+            NSLog("[ClipSlots] updateSelectedSpecialSlot(id=\(id)) failed to persist: \(error). "
+                + "Selected slot may not survive restart.")
         }
     }
 

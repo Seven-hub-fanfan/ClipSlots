@@ -120,8 +120,15 @@ final class SlotConnectionStorage {
         }
         cacheLock.unlock()
         let url = fileURL(for: groupId)
+        // ST-3 (v2.10.15): route the disk delete through the SAME cross-process
+        // StorageLock RMW used by persistMap. Previously the delete removed the file
+        // without the lock, so a concurrent write (persistMap) from another process
+        // could interleave and corrupt/resurrect connection data. Mirror persistMap:
+        // acquire the lock inside the serial queue hop.
         queue.async {
-            try? FileManager.default.removeItem(at: url)
+            try? StorageLock.shared.withLock {
+                try? FileManager.default.removeItem(at: url)
+            }
         }
     }
 
@@ -131,7 +138,22 @@ final class SlotConnectionStorage {
         queue.async { [weak self] in
             guard let self = self else { return }
             guard let ids = try? FileManager.default.contentsOfDirectory(atPath: self.baseDir.path) else { return }
+            // ST-6 (v2.10.15): the data dir holds non-group entries alongside group
+            // subdirectories (index.json, .trash, .storage.lock, .DS_Store,
+            // .migration_v2_done, index.json.corrupt.bak, etc). Trying to parse them as
+            // connection dirs is wasted IO. Only iterate legitimate group-id entries:
+            // skip dotfiles and known system files, and require the entry to actually
+            // be a directory (connections live at <groupId>/connections.json).
+            let skipNames: Set<String> = [
+                "index.json", "index.json.corrupt.bak",
+                ".trash", ".storage.lock", ".DS_Store", ".migration_v2_done"
+            ]
             for id in ids {
+                if id.hasPrefix(".") || skipNames.contains(id) { continue }
+                let groupDir = self.baseDir.appendingPathComponent(id, isDirectory: true)
+                var isDir: ObjCBool = false
+                guard FileManager.default.fileExists(atPath: groupDir.path, isDirectory: &isDir),
+                      isDir.boolValue else { continue }
                 let url = self.fileURL(for: id)
                 guard FileManager.default.fileExists(atPath: url.path),
                       let data = try? Data(contentsOf: url),
@@ -181,9 +203,14 @@ final class SlotConnectionStorage {
         // 的同时删除每个目标 group 的 connections.json。
         guard !groupIds.isEmpty else { return }
         let urls = groupIds.map { fileURL(for: $0) }
+        // ST-3 (v2.10.15): as with delete(), perform the disk removals under the same
+        // cross-process StorageLock used by persistMap so a concurrent write from
+        // another process cannot interleave and corrupt connection data.
         queue.async {
-            for url in urls {
-                try? FileManager.default.removeItem(at: url)
+            try? StorageLock.shared.withLock {
+                for url in urls {
+                    try? FileManager.default.removeItem(at: url)
+                }
             }
         }
     }

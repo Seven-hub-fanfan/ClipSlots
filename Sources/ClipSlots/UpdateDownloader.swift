@@ -32,6 +32,15 @@ final class UpdateDownloader: NSObject {
     // 下载完成后据此校验实际文件大小，>0 时才校验（缺失则跳过）。
     private var expectedSize: Int64 = 0
 
+    // UP-1 (v2.10.15): 把每次下载的参数（版本号 / 期望字节数）绑定到对应的 URLSessionDownloadTask
+    // 上（关联对象），异步回调只读取“自己 task”上的参数，绝不依赖单例的 self.version / self.expectedSize，
+    // 避免快速重下载 / 并发下载时旧任务回调读到被新任务覆盖的值，从而把旧 DMG 搬到错误路径。
+    // nonisolated(unsafe): these are only ever used as stable address tokens for
+    // objc associated objects (never read/written as values), so they are safe to
+    // reference via `&` from the nonisolated URLSession delegate callbacks.
+    nonisolated(unsafe) private static var versionKey: UInt8 = 0
+    nonisolated(unsafe) private static var expectedSizeKey: UInt8 = 0
+
     // v2.10.7: 下载完成、等待安装的 DMG 本地路径。
     private var pendingInstallDMGPath: String?
 
@@ -55,6 +64,9 @@ final class UpdateDownloader: NSObject {
         self.session = session
         let task = session.downloadTask(with: url)
         self.task = task
+        // UP-1 (v2.10.15): 把本次下载参数绑定到该 task 自身，回调只认自己 task 上的参数。
+        objc_setAssociatedObject(task, &Self.versionKey, version as NSString, .OBJC_ASSOCIATION_COPY_NONATOMIC)
+        objc_setAssociatedObject(task, &Self.expectedSizeKey, NSNumber(value: expectedSize), .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
         task.resume()
     }
 
@@ -64,6 +76,12 @@ final class UpdateDownloader: NSObject {
         task = nil
         session?.invalidateAndCancel()
         session = nil
+        // UP-2 (v2.10.15): 取消时一并清理下载完成态残留：pendingInstallDMGPath 可能指向已被
+        // 删除/不完整的 DMG，若不清空，之后误触发「安装并重启」会引用无效路径；同时复位进度与
+        // expectedSize，避免下次下载沿用上一次的校验基准。
+        pendingInstallDMGPath = nil
+        expectedSize = 0
+        progressBar?.doubleValue = 0
         dismissPanel()
     }
 
@@ -159,7 +177,9 @@ final class UpdateDownloader: NSObject {
 
     // MARK: - 完成 / 失败
 
-    private func handleFinished(tempURL: URL) {
+    // UP-1 (v2.10.15): 改为接收「本次下载 task 绑定的」version / expectedSize，不再读取单例成员，
+    // 从根本上避免旧任务回调用到被新任务覆盖的值（错误命名 DMG、按错误基准校验大小）。
+    private func handleFinished(tempURL: URL, version: String, expectedSize: Int64) {
         // 把下载文件挪到一个带 .dmg 后缀的稳定临时路径，再用 Finder 打开。
         let fm = FileManager.default
         let dest = fm.temporaryDirectory.appendingPathComponent("ClipSlots-\(version).dmg")
@@ -285,7 +305,10 @@ extension UpdateDownloader: URLSessionDownloadDelegate {
         } else {
             detail = String(format: "已下载 %.1f MB", writtenMB)
         }
+        let taskID = ObjectIdentifier(downloadTask)
         Task { @MainActor in
+            // UP-1 (v2.10.15): 丢弃非当前任务的进度回调，避免旧任务刷新新下载的进度条。
+            guard let current = self.task, ObjectIdentifier(current) == taskID else { return }
             self.updateProgress(fraction, detail: detail)
         }
     }
@@ -295,27 +318,41 @@ extension UpdateDownloader: URLSessionDownloadDelegate {
                                 didFinishDownloadingTo location: URL) {
         // location 在回调返回后会被删除，必须在此同步搬运到我们自己的临时文件。
         let fm = FileManager.default
-        // P2 (v2.10.13): 校验最终 HTTP 响应码。asset 下线/被重定向到错误页时服务端可能返回
-        // 4xx/5xx，此时响应体是 HTML 错误页而非 DMG。若 asset size 缺失（expectedSize<=0），
-        // 后续大小校验无法兜底，损坏文件会被当作 DMG 装进 /Applications。故非 200 直接失败。
-        if let http = downloadTask.response as? HTTPURLResponse, http.statusCode != 200 {
-            try? fm.removeItem(at: location)
-            Task { @MainActor in
-                self.handleFailure("下载失败：服务器返回状态码 \(http.statusCode)。安装包可能已下线，请稍后重试。")
-            }
-            return
-        }
+        // UP-1 (v2.10.15): 读取“绑定在本 task 上”的下载参数，并记录该 task 的身份标识，
+        // 后续在主线程回调开头据此判定是否为当前任务，非当前任务一律丢弃。
+        let boundVersion = (objc_getAssociatedObject(downloadTask, &Self.versionKey) as? String) ?? ""
+        let boundExpectedSize = (objc_getAssociatedObject(downloadTask, &Self.expectedSizeKey) as? NSNumber)?.int64Value ?? 0
+        let taskID = ObjectIdentifier(downloadTask)
+        let httpStatus = (downloadTask.response as? HTTPURLResponse)?.statusCode
+        // 先同步把文件搬到唯一暂存路径（location 即将被系统删除），后续判定/校验在主线程进行。
         let staging = fm.temporaryDirectory.appendingPathComponent("clipslots-dl-\(UUID().uuidString).dmg")
+        var moveError: Error?
         do {
             try fm.moveItem(at: location, to: staging)
         } catch {
-            Task { @MainActor in
-                self.handleFailure("保存下载文件失败：\(error.localizedDescription)")
-            }
-            return
+            try? fm.removeItem(at: location)
+            moveError = error
         }
         Task { @MainActor in
-            self.handleFinished(tempURL: staging)
+            // UP-1 (v2.10.15): 回调开头校验是否为当前 task；不是则丢弃（并清理暂存文件），
+            // 避免旧任务把 DMG 搬到当前任务的路径、或干扰当前面板状态。
+            guard let current = self.task, ObjectIdentifier(current) == taskID else {
+                try? fm.removeItem(at: staging)
+                return
+            }
+            // P2 (v2.10.13): 校验最终 HTTP 响应码。asset 下线/被重定向到错误页时服务端可能返回
+            // 4xx/5xx，此时响应体是 HTML 错误页而非 DMG。若 asset size 缺失（expectedSize<=0），
+            // 后续大小校验无法兜底，损坏文件会被当作 DMG 装进 /Applications。故非 200 直接失败。
+            if let http = httpStatus, http != 200 {
+                try? fm.removeItem(at: staging)
+                self.handleFailure("下载失败：服务器返回状态码 \(http)。安装包可能已下线，请稍后重试。")
+                return
+            }
+            if let moveError = moveError {
+                self.handleFailure("保存下载文件失败：\(moveError.localizedDescription)")
+                return
+            }
+            self.handleFinished(tempURL: staging, version: boundVersion, expectedSize: boundExpectedSize)
         }
     }
 
