@@ -66,6 +66,9 @@ struct PluginMarketItem: Identifiable, Equatable {
     let installsToAgent: Bool
     /// v2.9.53: 第三方/社区项目的主页或仓库地址（详情页展示「访问项目」链接）。nil 表示官方内置项。
     var projectURL: String? = nil
+    /// v2.10.10: 第三方 App 在 /Applications 下的 bundle 名（如 "Espanso.app"）。
+    /// 用于真实检测该社区插件是否已安装（FileManager.fileExists），nil 表示无需真实检测。
+    var appName: String? = nil
 
     static func == (lhs: PluginMarketItem, rhs: PluginMarketItem) -> Bool { lhs.id == rhs.id }
 }
@@ -118,7 +121,8 @@ enum PluginCatalog {
         """,
         version: "",
         installsToAgent: false,
-        projectURL: "https://github.com/espanso/espanso"
+        projectURL: "https://github.com/espanso/espanso",
+        appName: "Espanso.app"
     )
 
     static let massCode = PluginMarketItem(
@@ -136,7 +140,8 @@ enum PluginCatalog {
         """,
         version: "",
         installsToAgent: false,
-        projectURL: "https://github.com/massCodeIO/massCode"
+        projectURL: "https://github.com/massCodeIO/massCode",
+        appName: "massCode.app"
     )
 
     static let monitorControl = PluginMarketItem(
@@ -154,7 +159,8 @@ enum PluginCatalog {
         """,
         version: "",
         installsToAgent: false,
-        projectURL: "https://github.com/MonitorControl/MonitorControl"
+        projectURL: "https://github.com/MonitorControl/MonitorControl",
+        appName: "MonitorControl.app"
     )
 }
 

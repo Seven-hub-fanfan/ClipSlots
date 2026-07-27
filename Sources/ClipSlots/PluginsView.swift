@@ -360,40 +360,47 @@ struct PluginsView: View {
         }
     }
 
-    // v2.9.54: 社区插件安装状态控件。
-    // - 未安装：显示「安装」按钮（点击打开下载页 + 标记已安装）；
-    // - 已安装：显示非交互的「已安装 ✓」Text 标签 +「卸载」按钮（仅清除标记）。
-    // 「已安装 ✓」用 Text 而非 Button，修复历史上标签出现蓝色焦点框的问题。
+    // v2.10.10: 社区插件安装状态控件（真实检测，不再依赖 UserDefaults 虚假标记）。
+    // - 已安装（磁盘上真实存在该 App）：显示绿色「已安装 ✓」标签 +「打开」按钮（拉起该 App）；
+    // - 未安装：显示「获取」按钮（点击打开官网下载页，不产生任何虚假状态标记）。
+    // 说明：ClipSlots 无法真正安装/卸载第三方 App，故移除「卸载」按钮；安装/卸载后
+    // 由 FSEvents 监听 /Applications 自动刷新状态。
     @ViewBuilder
     private func pluginInstallControl(for item: PluginMarketItem, compact: Bool) -> some View {
         if communityPlugins.isInstalled(item.id) {
             HStack(spacing: 8) {
                 badge(text: "已安装 ✓", icon: "checkmark.circle.fill", color: .green)
                 Button {
-                    communityPlugins.markUninstalled(item.id)
+                    openCommunityPluginApp(item)
                 } label: {
-                    badge(text: "卸载", icon: "xmark.circle", color: .secondary)
+                    badge(text: "打开", icon: "arrow.up.forward.app", color: .accentColor)
                 }
                 .buttonStyle(.plain)
-                .help("清除安装标记（不会真正卸载第三方工具）")
+                .help("打开已安装的 \(item.name)")
             }
         } else {
             Button {
-                installCommunityPlugin(item)
+                fetchCommunityPlugin(item)
             } label: {
-                badge(text: "安装", icon: "square.and.arrow.down", color: .accentColor)
+                badge(text: "获取", icon: "arrow.down.circle", color: .accentColor)
             }
             .buttonStyle(.plain)
-            .help("打开下载页并标记为已安装")
+            .help("打开官网下载页（安装后状态自动更新为「已安装」）")
         }
     }
 
-    /// 打开第三方项目下载页并标记为已安装。
-    private func installCommunityPlugin(_ item: PluginMarketItem) {
+    /// 打开第三方项目下载页（不产生任何虚假安装标记；用户真正装好后由 FSEvents 自动刷新为「已安装」）。
+    private func fetchCommunityPlugin(_ item: PluginMarketItem) {
         if let urlString = item.projectURL, let url = URL(string: urlString) {
             NSWorkspace.shared.open(url)
         }
-        communityPlugins.markInstalled(item.id)
+    }
+
+    /// 拉起已安装的第三方 App（用真实检测到的磁盘路径）。
+    private func openCommunityPluginApp(_ item: PluginMarketItem) {
+        if let path = communityPlugins.installedAppPath(for: item.id) {
+            NSWorkspace.shared.open(URL(fileURLWithPath: path))
+        }
     }
 
     // 详情页右上角安装控件：可点击，一键安装到全部已检测到的 Agent（修复"点击无反应"）。

@@ -24,6 +24,10 @@ enum UserPreferenceKeys {
     static let lastPasteGroupId = "lastPasteGroupId"
     // -1 means "never pasted yet".
     static let lastPasteSlotIndex = "lastPasteSlotIndex"
+
+    // v2.10.10: 自动更新替换 bundle 后，macOS 会把辅助功能授权与旧二进制解绑，
+    // 需重新授权。安装流程在重启前置此标记；下次启动读到后强制弹出「更新后重新授权」引导。
+    static let pendingAccessibilityReauthAfterUpdate = "pendingAccessibilityReauthAfterUpdate"
 }
 
 extension UserDefaults {

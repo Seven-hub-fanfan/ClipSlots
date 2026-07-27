@@ -29,11 +29,17 @@ enum AccessibilityPermissionGuide {
     static func checkAndGuideOnLaunch() {
         guard !didGuide else { return }
         didGuide = true
+        // v2.10.10: 读取并清除「自动更新后待重新授权」标记，用于展示更贴切的更新文案。
+        let afterUpdate = UserDefaults.standard.bool(
+            forKey: UserPreferenceKeys.pendingAccessibilityReauthAfterUpdate)
+        if afterUpdate {
+            UserDefaults.standard.set(false, forKey: UserPreferenceKeys.pendingAccessibilityReauthAfterUpdate)
+        }
         // Small delay so the main window is on screen before the alert appears.
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) {
             guard !AXIsProcessTrusted() else { return }
             // v2.9.9: 先弹说明 alert，由用户主动点「打开设置」再跳转，避免一启动就被弹到系统设置。
-            presentGuideAlert()
+            presentGuideAlert(afterUpdate: afterUpdate)
         }
     }
 
@@ -49,10 +55,11 @@ enum AccessibilityPermissionGuide {
     // v2.9.25: 权限弹窗彻底视觉重做——用自定义 SwiftUI 磁玻璃面板替换 NSAlert：
     // 顶部 48pt+ 大图标、加大加粗标题、宽松行距副文本、数字圆圈步骤列表、
     // 蓝色填充主按钮 +「本次已知晓」文字次要按钮、16pt+ 圆角与充裕内边距。
-    private static func presentGuideAlert() {
+    private static func presentGuideAlert(afterUpdate: Bool = false) {
         var didOpenSettings = false
 
         let card = AccessibilityGuideCard(
+            afterUpdate: afterUpdate,
             onOpenSettings: {
                 didOpenSettings = true
                 NSApp.stopModal()
@@ -98,6 +105,8 @@ enum AccessibilityPermissionGuide {
 // MARK: - v2.9.25 Custom permission guide card
 
 private struct AccessibilityGuideCard: View {
+    // v2.10.10: 是否为「自动更新后」触发（展示更新专属文案）。
+    var afterUpdate: Bool = false
     var onOpenSettings: () -> Void
     var onDismiss: () -> Void
 
@@ -109,10 +118,12 @@ private struct AccessibilityGuideCard: View {
                 .padding(.top, 2)
 
             VStack(spacing: 8) {
-                Text("需要开启「辅助功能」权限")
+                Text(afterUpdate ? "App 更新后需重新授权「辅助功能」" : "需要开启「辅助功能」权限")
                     .font(.system(size: 21, weight: .bold))
                     .multilineTextAlignment(.center)
-                Text("ClipSlots 需要此权限来注册全局快捷键、模拟复制与粘贴。")
+                Text(afterUpdate
+                     ? "ClipSlots 刚刚完成更新。macOS 会在 App 更新后解除旧版本的辅助功能授权，需要重新勾选才能恢复全局快捷键、复制与粘贴。"
+                     : "ClipSlots 需要此权限来注册全局快捷键、模拟复制与粘贴。")
                     .font(.system(size: 13))
                     .foregroundColor(.secondary)
                     .multilineTextAlignment(.center)
@@ -121,7 +132,9 @@ private struct AccessibilityGuideCard: View {
             }
 
             VStack(alignment: .leading, spacing: 14) {
-                stepRow(number: 1, text: "在「隐私与安全性 → 辅助功能」中打开 ClipSlots 的开关")
+                stepRow(number: 1, text: afterUpdate
+                        ? "在「隐私与安全性 → 辅助功能」中重新勾选 ClipSlots（如有旧的失效条目，先用「-」移除）"
+                        : "在「隐私与安全性 → 辅助功能」中打开 ClipSlots 的开关")
                 stepRow(number: 2, text: "若列表里没有，点「+」添加 /Applications/ClipSlots.app")
             }
             .frame(maxWidth: .infinity, alignment: .leading)

@@ -179,6 +179,13 @@ final class UpdateInstaller {
 
             // 5. 重启新版本 App 后结束当前进程。
             DispatchQueue.main.async {
+                // v2.10.10: 更新替换 bundle 后 macOS 会把「辅助功能」授权与旧二进制解绑，
+                // 新版本首次启动通常需要重新授权。置标记，供下次启动弹出「更新后重新授权」引导；
+                // 同时在安装面板文案里提前告知用户「重启后请重新授权辅助功能」。
+                UserDefaults.standard.set(true, forKey: UserPreferenceKeys.pendingAccessibilityReauthAfterUpdate)
+                progress("更新完成，正在重启…（重启后如快捷键失效，请重新授权「辅助功能」）")
+                NSLog("[UpdateInstaller] 安装完成，重启后请重新授权辅助功能（隐私与安全性 → 辅助功能）")
+
                 // P2-5 (v2.10.8): relaunch 时序加固。旧版用固定 `sleep 1` 猜测退出耗时，
                 // 若本进程退出慢于 1s，open 会命中「App 仍在运行」而无法拉起新实例（甚至
                 // 复用旧进程）。改为把当前 PID 传给分离出去的 shell，轮询等待旧进程真正
