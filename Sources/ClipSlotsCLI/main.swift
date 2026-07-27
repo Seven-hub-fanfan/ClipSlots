@@ -12,7 +12,7 @@ import ClipSlotsKit
 //   success: {"ok": true, ...}
 //   error:   {"ok": false, "error": "message"}  (exit code 1)
 
-let CLI_VERSION = "2.10.12"
+let CLI_VERSION = "2.10.13"
 let DEFAULT_GROUP = "default"
 let DEFAULT_PAGE = "default_page"
 
@@ -799,6 +799,16 @@ func resolveGroupLiteralStrict(_ raw: String, inPage pageId: String?) throws -> 
 // F3 (契约2): thrown when --if-empty is set but the target slot is not empty.
 struct SlotNotEmpty: Error {}
 
+// P2 (v2.10.13): 统一 --label 归一化，供 `write`(performTextWrite) 与 `write-attachment`
+// 复用。此前两处口径不一致：performTextWrite 用 `label.isEmpty`（不去空白），write-attachment
+// 用 `trimmingCharacters(...).isEmpty`（去空白后判空），导致「仅空白的 label」在两命令下结果
+// 不同。统一规则：去首尾空白后为空 → nil（清除 label）；否则保留原始 label 值（verbatim，
+// 不改动其内部空白）。
+func normalizeLabelArg(_ label: String?) -> String? {
+    guard let label else { return nil }
+    return label.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : label
+}
+
 // v2.9.16 (#5): shared text-write core used by both `write` and `write --batch`.
 // Returns a short preview of the written text; throws StorageLockError on lock
 // contention or WriteFailure with a diagnosed reason on IO failure.
@@ -828,8 +838,9 @@ func performTextWrite(slot n: Int, text: String, group: String, label: String?,
         let ok = storage.set(n, content: content, in: group)
         if ok {
             if let label {
-                // explicit --label provided → set it (empty string clears).
-                storage.setLabel(n, label: label.isEmpty ? nil : label, in: group)
+                // explicit --label provided → set it (empty/whitespace clears).
+                // P2 (v2.10.13): 走统一归一化，与 write-attachment 口径一致。
+                storage.setLabel(n, label: normalizeLabelArg(label), in: group)
             } else if overwriteText {
                 // --overwrite-text without --label → keep existing label.
                 storage.setLabel(n, label: existingLabel, in: group)
@@ -1173,8 +1184,27 @@ func cmdSearch(_ args: ParsedArgs) -> Never {
         }
     }
 
+    // P2-8 (v2.10.8): sort by (page.order, group.order, slot) with id as a stable
+    // secondary key, matching list / groups / pages ordering (UI tab order) instead
+    // of raw page-id/group-id string order.
+    let pageOrderMap = Dictionary(uniqueKeysWithValues: index.pages.map { ($0.id, $0.order) })
+    let groupOrderMap = Dictionary(uniqueKeysWithValues: index.specialSlots.map { ($0.id, $0.order) })
+
+    // P2 (v2.10.13): 先按显示顺序（page.order → group.order → id）排序 targetGroups，再遍历
+    // 截断。此前按 index.specialSlots 的数组序遍历、命中 --limit 即 break，之后才对已截断的
+    // 子集排序；当匹配数超过 limit 且用户在 GUI 拖动重排过组/页（数组序 ≠ order 序）时，
+    // 显示顺序靠前的匹配反而被丢弃，返回错误子集。改为在截断前就以显示序遍历。
+    let orderedTargetGroups = targetGroups.sorted { a, b in
+        let poa = pageOrderMap[a.pageId] ?? Int.max, pob = pageOrderMap[b.pageId] ?? Int.max
+        if poa != pob { return poa < pob }
+        if a.pageId != b.pageId { return a.pageId < b.pageId }
+        let goa = groupOrderMap[a.id] ?? Int.max, gob = groupOrderMap[b.id] ?? Int.max
+        if goa != gob { return goa < gob }
+        return a.id < b.id
+    }
+
     var results: [[String: Any]] = []
-    outer: for g in targetGroups {
+    outer: for g in orderedTargetGroups {
         for n in 1...slotCount {
             let content = storage.get(n, in: g.id)
             // v2.9.3: SlotContent.isEmpty already covers `items && attachments`, so the
@@ -1201,9 +1231,7 @@ func cmdSearch(_ args: ParsedArgs) -> Never {
     }
     // P2-8 (v2.10.8): sort by (page.order, group.order, slot) with id as a stable
     // secondary key, matching list / groups / pages ordering (UI tab order) instead
-    // of raw page-id/group-id string order.
-    let pageOrderMap = Dictionary(uniqueKeysWithValues: index.pages.map { ($0.id, $0.order) })
-    let groupOrderMap = Dictionary(uniqueKeysWithValues: index.specialSlots.map { ($0.id, $0.order) })
+    // of raw page-id/group-id string order. (pageOrderMap/groupOrderMap 已在遍历前构建。)
     results.sort { a, b in
         let pa = (a["page"] as? String) ?? "", pb = (b["page"] as? String) ?? ""
         let poa = pageOrderMap[pa] ?? Int.max, pob = pageOrderMap[pb] ?? Int.max
@@ -1373,7 +1401,10 @@ func cmdRenameGroup(_ args: ParsedArgs) -> Never {
     let trimmed = newName.trimmingCharacters(in: .whitespacesAndNewlines)
     do {
         try storage.renameSpecialSlot(id: id, name: trimmed)
-        let finalName = storage.loadIndex().specialSlots.first(where: { $0.id == id })?.name ?? String(trimmed.prefix(30))
+        // P2 (v2.10.13): 回显存储层写回后的真实组名（read-back），不在 CLI 侧二次 prefix(30)
+        // 截断。renameSpecialSlot 成功后组必然存在，read-back 一定命中；兜底也用未截断的
+        // trimmed（而非 prefix(30)），确保返回值不再出现 CLI 侧的二次截断口径。
+        let finalName = storage.loadIndex().specialSlots.first(where: { $0.id == id })?.name ?? trimmed
         success(["group": ["id": id, "name": finalName]])
     } catch SpecialSlotError.duplicateName {
         fail("a group named '\(String(trimmed.prefix(30)))' already exists on this page", code: "DUPLICATE_NAME")
@@ -1441,8 +1472,8 @@ func cmdWriteAttachment(_ args: ParsedArgs) -> Never {
                 // P2-22 (v2.10.9): an explicitly empty/whitespace-only --label "" means
                 // NO label (nil), not an empty-string label. Non-empty labels pass
                 // through unchanged (preserved verbatim).
-                let normalized = label.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : label
-                storage.setLabel(n, label: normalized, in: group)
+                // P2 (v2.10.13): 复用统一归一化函数，与 write 命令口径一致。
+                storage.setLabel(n, label: normalizeLabelArg(label), in: group)
             }
             return (wrote, content.attachments.count, content.items.isEmpty)
         }
