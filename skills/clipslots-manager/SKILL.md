@@ -1,8 +1,8 @@
 ---
 name: clipslots-manager
 description: 当需要以编程方式读取、写入、检索、加载或整理 macOS 剪贴板槽位管理器 ClipSlots 中的内容时使用。把文本/文件存进槽位、读出内容、搜索历史、把内容放到系统剪贴板、批量整理文件夹素材到槽位组/页面、删除槽位组/页面等。前置要求：macOS + 已安装 ClipSlots v2.9.33+，CLI 位于 /usr/local/bin/clipslots。
-version: 1.3.2
-compatibility: Requires macOS, ClipSlots, and /usr/local/bin/clipslots. Verified with ClipSlots CLI 2.9.58; probe version and command help at runtime.
+version: 1.4.0
+compatibility: Requires macOS, ClipSlots, and /usr/local/bin/clipslots. Verified with ClipSlots CLI 2.10.10; probe version and command help at runtime.
 used_when: 当需要以编程方式读取、写入、检索、加载或整理 macOS 剪贴板槽位管理器 ClipSlots 中的槽位内容时使用（写文本/文件进槽位、读出内容、搜索历史、把内容放到系统剪贴板、批量整理文件夹素材到槽位组/页面、删除槽位组/页面等）。
 requires: macOS + 已安装 ClipSlots v2.9.33+，CLI 位于 /usr/local/bin/clipslots。
 ---
@@ -56,7 +56,7 @@ requires: macOS + 已安装 ClipSlots v2.9.33+，CLI 位于 /usr/local/bin/clips
 
 **首选工作流**：动手前先 `clipslots help` / `groups` / `list` 了解现状，再执行读写；写入前优先选空槽，避免覆盖。
 
-## 1. 命令参考（v2.9.58，共 16 个；每个子命令均支持 `--help`/`-h`）
+## 1. 命令参考（v2.10.10，共 16 个；每个子命令均支持 `--help`/`-h`）
 
 ### 只读
 ```bash
@@ -79,7 +79,17 @@ clipslots search <query> [--group <id>] [--page <uuid>|--page-name <名称>] [--
 # --if-empty：写空槽保护，目标槽非空（主体或附件任一非空）时返回 SLOT_NOT_EMPTY 并 exit 1；判空口径与 list/read 的 empty 字段一致（不含 label），仅在显式传入时生效
 # --overwrite-text：明确覆盖槽位文本主体，保留已有附件和标签
 # --if-empty 与 --overwrite-text 互斥，同传返回 INVALID_ARGUMENT_COMBINATION
+# --label ""：传空串可清除已有标签（v2.9.7+）
 clipslots write <slot> --text "内容" [--group <id>] [--page <uuid>|--page-name <名称>] [--label "标签"] [--if-empty | --overwrite-text]
+
+# 批量写入多个槽位（v2.9.57+）：单进程内顺序执行，比循环逐条 write 更快更安全
+# ⚡ 超过 3 个槽位写入时，优先使用 --batch，避免循环启动多个进程
+# 输入：从 stdin 读取 JSON 数组，每项包含 slot/text/group/label/ifEmpty/overwriteText
+# 预检：解析→去重→冲突→参数校验，预检失败整批零写入（preflight_passed:false）
+# 执行期失败默认继续（failed 项标 status:"failed"），加 --stop-on-error 时其后项标 not_executed
+# 顺序保证：按数组下标顺序写入，不会乱序
+echo '[{"slot":1,"text":"内容A"},{"slot":2,"text":"内容B"}]' \
+  | clipslots write --batch --group <id> [--page-name <名称>] [--stop-on-error]
 
 # 向【槽位附件】追加一个或多个文件（按顺序），不改动主体；--replace 先清空旧附件
 # 返回 {slot,group,added:[文件名...],attachmentCount,slotBodyEmpty}
@@ -263,7 +273,7 @@ clipslots delete-group -h
 
 ## 7. 智能体使用规则
 
-1. **先读后写**（三步清单）：`① 读（list/read 查现有状态）→ ② 分析（判断目标槽位/页面/组）→ ③ 执行（write/create）`。优先写 `empty:true` 空槽，批量覆盖前与用户确认。
+1. **先读后写**（三步清单）：`① 读（list/read 查现有状态）→ ② 分析（判断目标槽位/页面/组）→ ③ 执行（write/create）`。优先写 `empty:true` 空槽，批量覆盖前与用户确认。新建页面时直接带 `--group-name` 给默认组命名（零废组，v2.9.42），无需额外 `rename-group`。
 2. **空槽判定**（详见第 0 节"空槽判定"）：一个槽位为空当且仅当**主体内容与附件列表都为空**；有主体或有附件都算非空。扫描空槽必须同时检查主体与附件——直接用 `empty:true` 判定即可（v2.9.3+ 的 `empty` 已含附件检查，`list` 另有 `attachmentCount`），不要只看主体。
 3. **存入位置**：先按第 2 节"存入位置决策流"决定存到哪个页面/组（默认最保守：只新建、不碰已有数据；冲突时给选项不自作主张），再按第 3 节判定模式A/B/C。
 4. **以 `ok` 判断成败**，`ok:false` 读 `error`；不要只看退出码文案。
@@ -272,8 +282,9 @@ clipslots delete-group -h
 7. **paste 语义**：只送入剪贴板，不自动粘贴；需要真正粘贴时提示用户 Cmd+V。纯附件槽位（主体空）也可 `paste`，会把附件文件 URL 送入剪贴板（v2.9.3+）。
 8. **多组/多页**：优先使用 `--group-name` / `--page-name` 直接按名称操作，无需手动获取 UUID。
 9. **容量与命名**：严格按第 4、5 节；溢出用 `-2/-3` 或新页面，命名遵守字数上限与阿拉伯数字序号。**每页必须优先填满 10 组再开新页**（第 4 节硬性约束），不得以「留余量」「均衡布局」等理由主动减少每页组数。
-10. **批量前先确认分页方案**：当批量操作涉及**多页 / 多组结构**（预计超过 1 页，或总组数 > 10）时，**必须先向用户输出完整的分页方案**——列明「每页几个组、每组几个槽、总槽数、共几页」——并**等待用户确认后再开始执行写入**。禁止在未确认结构的情况下直接批量建组/写入。
+10. **批量前先确认分页方案**：当批量操作涉及**多页 / 多组结构**（预计超过 1 页，或总组数 > 10）时，**必须先向用户输出完整的分页方案**——列明「每页几个组、每组几个槽、总槽数、共几页」——并**等待用户确认后再开始执行写入**。禁止在未确认结构的情况下直接批量建组/写入。批量建组前先 `groups --page-name <页名>` 确认当前页剩余组数（10 - 已有组数），不要等 `create-group` 报「页面已满」错误再处理。
 11. **富文本**：`read` 的 `htmlSource` 非空表示有 HTML 源；CLI `write` 只写纯文本，需保 HTML 走 GUI。
+13. **批量写入用 `--batch`**：当需要向同一组（或跨组）写入 **>3 个槽位**时，优先使用 `write --batch`（v2.9.57+），一次进程完成全部写入，比 shell 循环逐条 `write` 快得多且顺序有保证（按数组下标顺序，单进程内串行）。循环逐条 `write` 仅在 `--batch` 不可用时作为降级方案。
 12. **兜底规则**：任何不确定的情况下，使用 `--force` + 新建页面 + 新建组，每组只放 1 个槽位。污染用户已有数据比浪费空槽位更严重。（`--force` 当前用于跳过跨进程写锁；若冲突处理相关的 `--force` 语义未实现，则用等效的新建页/组方式规避冲突。）
 
 ---
