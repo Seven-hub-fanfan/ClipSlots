@@ -24,8 +24,9 @@ final class UpdateChecker: ObservableObject {
         guard !isChecking else { return }
         isChecking = true
 
-        var request = URLRequest(url: Self.latestAPI)
-        request.timeoutInterval = 15
+        // v2.10.12: 强制忽略本地缓存，避免 URLSession 复用磁盘里陈旧的失败响应
+        // （如上一次的 403），导致每次检查都直接返回缓存而不再真正发网络请求。
+        var request = URLRequest(url: Self.latestAPI, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 15)
         request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
         request.setValue("ClipSlots-macOS", forHTTPHeaderField: "User-Agent")
 
@@ -40,6 +41,17 @@ final class UpdateChecker: ObservableObject {
                 }
                 guard let http = response as? HTTPURLResponse else {
                     self.presentError("无法解析服务器响应。")
+                    return
+                }
+                // v2.10.12: 单独处理 403，区分「频率限制」与「其他被拒绝」，并给出前往
+                // GitHub Releases 页面手动下载的入口，避免用户被卡在 API 限流上。
+                if http.statusCode == 403 {
+                    let remaining = http.value(forHTTPHeaderField: "X-RateLimit-Remaining")
+                    if remaining == "0" {
+                        self.presentError403RateLimit()
+                    } else {
+                        self.presentError403Forbidden()
+                    }
                     return
                 }
                 guard http.statusCode == 200, let data = data else {
@@ -176,5 +188,33 @@ final class UpdateChecker: ObservableObject {
         alert.alertStyle = .warning
         alert.addButton(withTitle: "好的")
         alert.runModal()
+    }
+
+    // v2.10.12: GitHub API 频率限制（X-RateLimit-Remaining == "0"）专用提示。
+    private func presentError403RateLimit() {
+        self.present403Alert(
+            informativeText: "GitHub API 访问已达频率限制，请约 1 小时后再试。\n如需立即查看最新版本，可前往 GitHub Releases 页面。"
+        )
+    }
+
+    // v2.10.12: 其他 403（非频率限制）专用提示。
+    private func presentError403Forbidden() {
+        self.present403Alert(
+            informativeText: "访问被拒绝（HTTP 403），请检查网络后重试。\n也可前往 GitHub Releases 页面手动下载最新版本。"
+        )
+    }
+
+    // v2.10.12: 403 弹窗共用逻辑，提供「查看 GitHub Releases」入口绕过 API 限流手动下载。
+    private func present403Alert(informativeText: String) {
+        let alert = NSAlert()
+        alert.messageText = "检查更新失败"
+        alert.informativeText = informativeText
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "查看 GitHub Releases")
+        alert.addButton(withTitle: "好的")
+        if alert.runModal() == .alertFirstButtonReturn,
+           let url = URL(string: Self.releasesPage) {
+            NSWorkspace.shared.open(url)
+        }
     }
 }
