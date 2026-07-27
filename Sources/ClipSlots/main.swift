@@ -235,6 +235,9 @@ final class SlotStoreObservable: ObservableObject {
     // v2.6.7: import options sheet
     @Published var pendingImportSelection: PendingImportSelection?
 
+    // v2.10.14: 打包导出选择 sheet 的呈现状态
+    @Published var showingPackExport: Bool = false
+
     // v2.4 Page state
     @Published var pages: [SlotPage] = []
     @Published var currentPageId: String = "default_page"
@@ -3806,16 +3809,194 @@ final class SlotStoreObservable: ObservableObject {
     // MARK: - Toolbar Import (v2.6.4)
 
     /// Opens NSOpenPanel for multi-select files + folders, then shows import options.
+    /// v2.10.14: 智能适配——若选中 .clipslotspack 则走「槽位包导入」，否则保持原有
+    /// 批量导入图片/文件夹逻辑。文件类型放开为「图片/任意文件 + .clipslotspack」。
     func startToolbarImport() {
         let panel = NSOpenPanel()
         panel.canChooseFiles = true
         panel.canChooseDirectories = true
         panel.allowsMultipleSelection = true
         panel.canCreateDirectories = false
-        panel.message = "选择要导入的文件或文件夹（可多选）"
+        panel.message = "选择要导入的文件、文件夹或槽位包（.clipslotspack）"
 
         guard panel.runModal() == .OK, !panel.urls.isEmpty else { return }
+
+        // 优先识别槽位包：只要选择里包含 .clipslotspack，就走包导入（取第一个）。
+        if let packURL = panel.urls.first(where: { $0.pathExtension.lowercased() == "clipslotspack" }) {
+            importPack(from: packURL)
+            return
+        }
         presentImportOptions(for: panel.urls)
+    }
+
+    // MARK: - Pack Export / Import (v2.10.14)
+
+    /// 打开「打包导出」选择 sheet。无内容时直接提示。
+    func startPackExport() {
+        guard !specialSlots.isEmpty else {
+            showFloatingNotice(FloatingNotice(
+                title: "暂无可导出的内容",
+                subtitle: "请先创建页面或槽位组",
+                iconName: "shippingbox",
+                kind: .warning))
+            return
+        }
+        showingPackExport = true
+    }
+
+    /// sheet 确认后：后台预估体积 → 必要时二次确认 → 弹 NSSavePanel → 后台导出。
+    func performPackExport(_ selection: PackExportSelection) {
+        showingPackExport = false
+        guard !selection.isEmpty else { return }
+
+        let exporter = PackExporter(
+            maxChildSlots: specialSlotSettings.maxChildSlotsPerSpecialSlot,
+            appVersion: appVersionString())
+
+        DispatchQueue.global(qos: .userInitiated).async {
+            let bytes = exporter.estimateBytes(for: selection)
+            DispatchQueue.main.async {
+                let sizeMB = Double(bytes) / (1024.0 * 1024.0)
+                if sizeMB > 50 {
+                    let alert = NSAlert()
+                    alert.messageText = "包体积较大"
+                    alert.informativeText = String(format: "包体积约 %.1f MB，确认导出？", sizeMB)
+                    alert.addButton(withTitle: "确认导出")
+                    alert.addButton(withTitle: "取消")
+                    guard alert.runModal() == .alertFirstButtonReturn else { return }
+                }
+                self.presentPackSavePanelAndExport(selection: selection, exporter: exporter)
+            }
+        }
+    }
+
+    private func presentPackSavePanelAndExport(selection: PackExportSelection, exporter: PackExporter) {
+        let panel = NSSavePanel()
+        let df = DateFormatter()
+        df.dateFormat = "yyyyMMdd"
+        panel.nameFieldStringValue = "ClipSlots_pack_\(df.string(from: Date())).clipslotspack"
+        panel.canCreateDirectories = true
+        panel.isExtensionHidden = false
+        if #available(macOS 12.0, *) {
+            panel.allowedContentTypes = [UTType(filenameExtension: "clipslotspack") ?? .data]
+        } else {
+            panel.allowedFileTypes = ["clipslotspack"]
+        }
+
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+
+        DispatchQueue.global(qos: .userInitiated).async {
+            do {
+                try exporter.export(selection, to: url)
+                DispatchQueue.main.async {
+                    self.showFloatingNotice(FloatingNotice(
+                        title: "导出成功",
+                        subtitle: "已导出 \(selection.totalGroupCount) 个槽位组",
+                        iconName: "square.and.arrow.up.fill",
+                        kind: .success))
+                }
+            } catch {
+                DispatchQueue.main.async {
+                    self.showFloatingNotice(FloatingNotice(
+                        title: "导出失败",
+                        subtitle: error.localizedDescription,
+                        iconName: "xmark.circle.fill",
+                        kind: .error))
+                }
+            }
+        }
+    }
+
+    /// 导入 .clipslotspack：解析 manifest → 逐一解决页/组名冲突 → 写回存储 → 刷新。
+    func importPack(from packURL: URL) {
+        let importer = PackImporter(maxChildSlots: specialSlotSettings.maxChildSlotsPerSpecialSlot)
+
+        // 先校验是否为有效槽位包。
+        let manifest: PackManifest
+        do {
+            manifest = try importer.readManifest(from: packURL)
+        } catch {
+            showFloatingNotice(FloatingNotice(
+                title: "无法导入",
+                subtitle: error.localizedDescription,
+                iconName: "xmark.circle.fill",
+                kind: .error))
+            return
+        }
+        guard !manifest.pages.isEmpty else {
+            showFloatingNotice(FloatingNotice(
+                title: "槽位包为空",
+                subtitle: "包内没有可导入的页面",
+                iconName: "tray",
+                kind: .warning))
+            return
+        }
+
+        // 冲突解决：逐一弹窗，支持「对后续所有冲突应用此选择」。
+        var pageDecisionForAll: PackConflictResolution?
+        var groupDecisionForAll: PackConflictResolution?
+
+        let resolvePage: (String) -> PackConflictResolution = { name in
+            if let d = pageDecisionForAll { return d }
+            let (decision, applyAll) = self.askPackConflict(kind: "页面", name: name)
+            if applyAll { pageDecisionForAll = decision }
+            return decision
+        }
+        let resolveGroup: (String, String) -> PackConflictResolution = { pageName, groupName in
+            if let d = groupDecisionForAll { return d }
+            let (decision, applyAll) = self.askPackConflict(kind: "槽位组", name: "\(pageName) / \(groupName)")
+            if applyAll { groupDecisionForAll = decision }
+            return decision
+        }
+
+        suppressWatcher(2.0) // 导入会在磁盘创建页/组，抑制自身写触发的重复重载。
+
+        do {
+            let result = try importer.importPack(
+                from: packURL,
+                resolvePageConflict: resolvePage,
+                resolveGroupConflict: resolveGroup)
+            reloadAll()
+            var subtitle = "导入 \(result.importedGroups) 组 / \(result.importedSlots) 槽位"
+            if result.skippedGroups > 0 { subtitle += "，跳过 \(result.skippedGroups) 组" }
+            showFloatingNotice(FloatingNotice(
+                title: "导入完成",
+                subtitle: subtitle,
+                iconName: "square.and.arrow.down.fill",
+                kind: .success))
+        } catch {
+            reloadAll()
+            showFloatingNotice(FloatingNotice(
+                title: "导入失败",
+                subtitle: error.localizedDescription,
+                iconName: "xmark.circle.fill",
+                kind: .error))
+        }
+    }
+
+    /// 弹出冲突处理弹窗，返回 (选择, 是否应用到后续全部同类冲突)。
+    private func askPackConflict(kind: String, name: String) -> (PackConflictResolution, Bool) {
+        let alert = NSAlert()
+        alert.messageText = "\(kind)「\(name)」已存在"
+        alert.informativeText = "选择处理方式：追加新建（名称后加 -导入）、覆盖同名内容，或跳过。"
+        alert.addButton(withTitle: "追加新建")   // .alertFirstButtonReturn
+        alert.addButton(withTitle: "覆盖")        // .alertSecondButtonReturn
+        alert.addButton(withTitle: "跳过")        // .alertThirdButtonReturn
+        let suppress = NSButton(checkboxWithTitle: "对后续所有\(kind)冲突应用此选择", target: nil, action: nil)
+        suppress.sizeToFit()
+        alert.accessoryView = suppress
+
+        let response = alert.runModal()
+        let applyAll = suppress.state == .on
+        switch response {
+        case .alertFirstButtonReturn: return (.append, applyAll)
+        case .alertSecondButtonReturn: return (.overwrite, applyAll)
+        default: return (.skip, applyAll)
+        }
+    }
+
+    private func appVersionString() -> String {
+        Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "2.10.14"
     }
 
     /// Show import mode picker for the selected URLs, then execute. (v2.6.7: SwiftUI sheet)

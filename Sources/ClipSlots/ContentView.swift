@@ -223,6 +223,16 @@ struct ContentView: View {
                 }
             )
         }
+        // v2.10.14: 打包导出选择 sheet
+        .sheet(isPresented: $store.showingPackExport) {
+            PackExportView(
+                store: store,
+                onCancel: { store.showingPackExport = false },
+                onExport: { selection in
+                    store.performPackExport(selection)
+                }
+            )
+        }
         // v2.7.1: stable connection manager replaces broken node-canvas UI.
         .sheet(isPresented: $showingConnectionManagement) {
             ConnectionManagementSheet(store: store)
@@ -624,13 +634,22 @@ struct ContentView: View {
     private var toolbarActions: some View {
         HStack(alignment: .center, spacing: 8) {
             ToolbarActionButton(
+                title: "打包",
+                icon: "shippingbox",
+                role: .normal,
+                prominent: false,
+                action: { store.startPackExport() }
+            )
+            .help("把选中的页面/槽位组打包导出为 .clipslotspack")
+
+            ToolbarActionButton(
                 title: "导入",
                 icon: "folder.badge.plus",
                 role: .normal,
                 prominent: false,
                 action: { store.startToolbarImport() }
             )
-            .help("导入文件或文件夹到当前槽位组")
+            .help("导入图片/文件夹，或导入槽位包（.clipslotspack）")
 
             ToolbarActionButton(
                 title: "全部粘贴",
