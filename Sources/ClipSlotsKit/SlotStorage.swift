@@ -104,22 +104,24 @@ public final class SlotStorage {
     // MARK: - Slot Content
 
     public func get(_ slot: Int) -> SlotContent {
-        queue.sync {
-            let slotDir = baseURL.appendingPathComponent(String(slot))
-            // P1-6 (v2.10.9): serve from cache only if the on-disk fingerprint is
-            // unchanged; otherwise re-read so a CLI write is reflected immediately —
-            // even a same-second write on a coarse-mtime volume (st_ino/nsec/size
-            // change catches it where a 1-second mtime would not).
-            let diskFP = dirFingerprint(slotDir.path)
-            if let cached = cache[slot], cacheFingerprint[slot] == diskFP {
-                return cached
-            }
+        (try? StorageLock.shared.withLock {
+            queue.sync {
+                let slotDir = baseURL.appendingPathComponent(String(slot))
+                // P1-6 (v2.10.9): serve from cache only if the on-disk fingerprint is
+                // unchanged; otherwise re-read so a CLI write is reflected immediately —
+                // even a same-second write on a coarse-mtime volume (st_ino/nsec/size
+                // change catches it where a 1-second mtime would not).
+                let diskFP = dirFingerprint(slotDir.path)
+                if let cached = cache[slot], cacheFingerprint[slot] == diskFP {
+                    return cached
+                }
 
-            let content = readSlotContent(from: slotDir)
-            cache[slot] = content
-            cacheFingerprint[slot] = diskFP
-            return content
-        }
+                let content = readSlotContent(from: slotDir)
+                cache[slot] = content
+                cacheFingerprint[slot] = diskFP
+                return content
+            }
+        }) ?? SlotContent()
     }
 
     @discardableResult
@@ -233,9 +235,11 @@ public final class SlotStorage {
     // MARK: - Label
 
     public func getLabel(_ slot: Int) -> String? {
-        let labelFile = baseURL.appendingPathComponent(String(slot)).appendingPathComponent("label.txt")
-        guard let content = try? String(contentsOf: labelFile, encoding: .utf8) else { return nil }
-        return content.trimmingCharacters(in: .whitespacesAndNewlines)
+        try? StorageLock.shared.withLock {
+            let labelFile = baseURL.appendingPathComponent(String(slot)).appendingPathComponent("label.txt")
+            guard let content = try? String(contentsOf: labelFile, encoding: .utf8) else { return nil }
+            return content.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
     }
 
     public func setLabel(_ slot: Int, label: String?) {

@@ -1228,12 +1228,11 @@ public final class SpecialSlotStorage {
         // 且 touch 逻辑已内联到本作用域（不再调用 touchSpecialSlot），故不会重入死锁。
         // P2-4 (v2.10.16): 超时不再用 `try?` 静默吞掉。对齐 ST-4，超时路径记日志并向调用方返回
         // false（失败态），让 GUI/CLI 能感知「存储繁忙」而非误以为写入成功。
-        // P1-C (v2.10.17): 覆盖前备份（整目录快照）移出 storageLock 临界区执行——锁内做大附件深拷贝
-        // 会放大 I/O 并阻塞其他读写。备份是「尽力而为」的回滚快照，移出锁带来的极小竞争窗口可接受。
-        // 详见 backupSlotBeforeOverwriteIfNeeded（同时修复了同秒同槽命名冲突导致备份被静默跳过的问题）。
-        backupSlotBeforeOverwriteIfNeeded(slot: slot, in: specialSlotId)
+        // P1-C (v2.10.18): 覆盖前备份（整目录快照）移回 storageLock 临界区执行——v2.10.17 移出锁
+        // 曾为了规避 I/O 阻塞，但导致了并发下的快照撕裂风险。改为锁内执行以确保原子性。
         do {
             return try storageLock.withLock {
+                backupSlotBeforeOverwriteIfNeeded(slot: slot, in: specialSlotId)
                 let result = slotStorage(for: specialSlotId).set(slot, content: content)
                 if result {
                     var index = loadIndex()
@@ -1250,16 +1249,11 @@ public final class SpecialSlotStorage {
         }
     }
 
-    /// P1-C (v2.10.17): 覆盖写入前，把被覆盖槽位的「非空」旧内容整目录快照进 .trash，使覆盖写入也拥有
+    /// P1-C (v2.10.18): 覆盖写入前，把被覆盖槽位的「非空」旧内容整目录快照进 .trash，使覆盖写入也拥有
     /// 30 天回滚窗口（对齐 delete 的软删除），防止 AI 批量 write 时旧内容被永久覆盖。
     ///
-    /// 相比 v2.10.16 的实现，这里修复了两点：
-    /// 1. **移出锁临界区**：本方法在 storageLock 之外调用（见 set()），避免锁内对大附件做整目录深拷贝
-    ///    时放大 I/O 并阻塞其他读写。备份为「尽力而为」的回滚快照，移出锁带来的极小竞争窗口可接受。
-    /// 2. **杜绝同秒同槽命名冲突静默丢备份**：末段时间戳改用毫秒精度（`%.3f`），并在极端碰撞时以 1ms
-    ///    递增直至路径空闲——旧实现用 unix「秒」结尾，同一槽位 1 秒内被覆盖两次时第二次 copyItem 因目标
-    ///    已存在而抛错被 catch 静默吞掉，导致这次覆盖的旧内容没有进 .trash，与「覆盖 30 天可恢复」承诺不符。
-    ///    末段仍是可被 `trashEntryDate()` 按 unix 秒（Double）解析的数值，无需改动 cleanupTrash/trashEntryDate。
+    /// 相比 v2.10.17，本版本将备份操作移回了 storageLock 临界区，解决了并发写下备份撕裂或丢失的 P1。
+    /// 依然保留毫秒精度去重逻辑，确保同秒内多次覆盖均有独立备份。
     ///
     /// 磁盘布局：单个槽位就是一个独立目录 baseDir/<specialSlotId>/<slot>/（含主体 + 全部附件），
     /// 整目录一次 copyItem 即可涵盖主体与附件。备份失败仅 NSLog、不阻断写入成功。

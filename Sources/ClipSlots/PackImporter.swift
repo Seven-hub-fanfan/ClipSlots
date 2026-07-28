@@ -162,7 +162,7 @@ struct PackImporter {
                         // 清单，再清空。此前直接 clearAllSlots，一旦清空后、写入过程中抛错触发回滚，
                         // 原内容既不在 createdGroupIds 范围内又已被清空，将永久丢失。
                         overwrittenSnapshots.append(snapshotGroup(targetGroupId))
-                        try? storage.clearAllSlots(in: targetGroupId)
+                        try storage.clearAllSlots(in: targetGroupId)
                     }
                 } else {
                     // 无冲突或新页：始终新建组（新 UUID），绝不覆盖本地已有组。
@@ -227,7 +227,10 @@ struct PackImporter {
                 let type = SlotContent.AttachmentType(rawValue: att.type) ?? .file
                 var data: Data? = nil
                 if let file = att.file {
-                    data = try? Data(contentsOf: attachmentsDir.appendingPathComponent(file))
+                    // P1-2 (v2.10.18): 附件路径做 safeChildURL 校验，防止 Zip Slip 路径穿越读取包外文件。
+                    if let safeURL = safeChildURL(in: attachmentsDir, component: file, isDirectory: false) {
+                        data = try? Data(contentsOf: safeURL)
+                    }
                 }
                 // 槽位 UUID 始终新生成，附件字节内联，路径不跨机还原。
                 restored.append(SlotContent.SlotAttachment(
