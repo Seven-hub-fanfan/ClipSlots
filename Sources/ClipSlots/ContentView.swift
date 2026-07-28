@@ -331,14 +331,15 @@ struct ContentView: View {
             Divider()
 
             actionBar
+                // v2.10.24: 跨组游标提示胶囊移到「第二行」——即自动存储 / 自动粘贴 拨杆所在的
+                // actionBar 这一行，水平居中显示。用 overlay 叠加不占额外垂直空间
+                // （仅在游标位于其他组时才有内容），保持 .thickMaterial 磨砂玻璃样式。
+                .overlay(crossGroupCursorHint)
                 .padding(.horizontal, AppTheme.pagePadding)
                 .padding(.top, 6)
                 .padding(.bottom, 4)
 
             specialSlotTagBar
-                // v2.10.23: 跨组游标提示胶囊叠加在分组标签栏这一行，水平居中显示，
-                // 用 overlay 不占额外垂直空间（仅在游标位于其他组时才有内容）。
-                .overlay(crossGroupCursorHint)
                 .padding(.horizontal, AppTheme.pagePadding)
                 .padding(.bottom, 4)
 
