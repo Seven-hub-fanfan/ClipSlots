@@ -234,13 +234,16 @@ final class SlotConnectionStorage {
         }
     }
 
-    // P2 (v2.10.13): 把「存在但损坏」的 connections.json 备份到带时间戳的 .corrupt 兄弟文件，
+    // P2 (v2.10.13): 把「存在但损坏」的 connections.json 备份到 .corrupt 兄弟文件，
     // 避免随后一次空态 save 经 persistMap 把它删除，从而丢失可恢复的原始字节。
+    // P2-6 (v2.10.16): 损坏备份改为「固定文件名覆盖式」。此前用带时间戳的 `.corrupt-<ts>`，
+    // 每次读到同一损坏文件都会新建一份带时间戳的备份且无任何清理，反复读会持续堆盘，
+    // 与 index.json「单份备份」的设计不一致。改为统一用不带时间戳的 `connections.json.corrupt`，
+    // 每次损坏就以 .atomic 覆盖写这一份，保证同一损坏文件最多只占用一份备份。
     private func backupCorruptConnectionFile(at url: URL) {
         guard FileManager.default.fileExists(atPath: url.path) else { return }
-        let ts = Int(Date().timeIntervalSince1970)
         let backupURL = url.deletingLastPathComponent()
-            .appendingPathComponent("connections.json.corrupt-\(ts)")
+            .appendingPathComponent("connections.json.corrupt")
         do {
             try Data(contentsOf: url).write(to: backupURL, options: .atomic)
             NSLog("[ClipSlots] ERROR: connections.json at \(url.path) failed to decode; "

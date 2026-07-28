@@ -716,31 +716,34 @@ final class AgentSkillInstallManager: ObservableObject {
             .replacingOccurrences(of: "\"", with: "\\\"")
         let appleScript = "do shell script \"\(escaped)\" with administrator privileges"
 
-        // AU-1 (v2.10.15): `executeAndReturnError` 会同步阻塞当前线程（鉴权弹窗 + shell 执行），
-        // 放在 DispatchQueue.main.async 里仍会冻结主线程，安装/重装期间 UI 无响应。
-        // 改为在后台队列构造并执行 AppleScript（NSAppleScript 对象保持在闭包内局部、不跨线程），
-        // 执行完再回到主线程更新所有 @Published/UI 状态。
-        DispatchQueue.global(qos: .userInitiated).async {
+        // P1-1 (v2.10.16): 回退 AU-1 (v2.10.15) 的后台线程执行。`NSAppleScript` 被 Apple 明确标注
+        // 为非线程安全，OSA/Apple Event 执行必须在主线程进行；与同版本 `UpdateInstaller` 刻意用
+        // `DispatchQueue.main.sync` 执行同类脚本自相矛盾，存在偶发崩溃/授权框不弹的线程安全隐患。
+        // 改回主线程执行：授权弹窗本身就是系统级模态、短暂阻塞不可避免。runPrivileged 由 UI 动作在
+        // 主线程调用，故直接内联执行；若在非主线程调用则 main.sync 切回，避免死锁。
+        let execute = { [weak self] in
             var errorInfo: NSDictionary?
             let script = NSAppleScript(source: appleScript)
             _ = script?.executeAndReturnError(&errorInfo)
-
-            DispatchQueue.main.async { [weak self] in
-                guard let self else { return }
-                self.busyAgentID = nil
-                if let errorInfo {
-                    let code = errorInfo[NSAppleScript.errorNumber] as? Int ?? 0
-                    if code == -128 {
-                        self.report("已取消操作。", isError: false)
-                    } else {
-                        let msg = errorInfo[NSAppleScript.errorMessage] as? String ?? "未知错误"
-                        self.report("安装失败：\(msg)", isError: true)
-                    }
+            guard let self else { return }
+            self.busyAgentID = nil
+            if let errorInfo {
+                let code = errorInfo[NSAppleScript.errorNumber] as? Int ?? 0
+                if code == -128 {
+                    self.report("已取消操作。", isError: false)
                 } else {
-                    self.report(successMessage, isError: false)
+                    let msg = errorInfo[NSAppleScript.errorMessage] as? String ?? "未知错误"
+                    self.report("安装失败：\(msg)", isError: true)
                 }
-                self.refresh()
+            } else {
+                self.report(successMessage, isError: false)
             }
+            self.refresh()
+        }
+        if Thread.isMainThread {
+            execute()
+        } else {
+            DispatchQueue.main.sync(execute: execute)
         }
     }
 

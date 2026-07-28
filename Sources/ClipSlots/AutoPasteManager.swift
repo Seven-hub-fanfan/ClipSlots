@@ -28,6 +28,8 @@ struct AutoPasteManager {
     }
 
     /// 全局第一个非空槽（用于「已粘贴完毕」后把读游标重置到第一个非空槽）。
+    /// P2-1 (v2.10.16): 此前为死代码，现已在 autoPasteFromHotkey / recomputeAutoPreviews 中接通——
+    /// 作为线性推进模式下读游标为空时的「从头开始」重启原语，返回按 页→组→槽 全局顺序的第一个非空槽。
     func firstNonEmptySlot() -> SlotAddress? {
         let flat = AutoModeTraversal.flatten(pages: pages, groups: groups, slotCount: slotCount)
         return flat.first(where: { isNonEmpty($0) })

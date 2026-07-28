@@ -98,6 +98,17 @@ enum PackExportError: Error, LocalizedError {
     }
 }
 
+/// 导出结果。P2-2 (v2.10.16): 承载导出过程中因源文件不可读/为空而未能打包的附件清单。
+///
+/// 背景：附件若无内联 data，会回退去读其引用的本地源文件；此前读取失败被 `try?` 静默吞掉，
+/// 附件名仍写进 manifest 但字节为空，导入后成为「有名无实」的空附件且无人知晓。现在这类
+/// 附件不再写入包，而是登记到 `failedAttachments`，导出照常完成并把清单返回给上层提示用户
+/// （例如「X 个附件因源文件不可读未能打包」）。`failedAttachments` 为空即表示全部附件完整导出。
+struct PackExportResult {
+    // P2-2 (v2.10.16): 源文件已移动/删除/不可读/为空、未能写入包的附件描述清单。
+    var failedAttachments: [String] = []
+}
+
 /// 负责把选中的页面/槽位组构建成目录树并压缩为 .clipslotspack。
 struct PackExporter {
     static let packFormatVersion = "1.0"
@@ -140,7 +151,11 @@ struct PackExporter {
     // MARK: 导出
 
     /// 构建目录树并压缩到 `destURL`（后缀 .clipslotspack）。
-    func export(_ selection: PackExportSelection, to destURL: URL) throws {
+    /// P2-2 (v2.10.16): 返回 `PackExportResult`，其 `failedAttachments` 收集了因源文件不可读/为空
+    /// 而未能打包的附件；导出仍会完成，上层可据此提示用户「X 个附件未能打包」。加 @discardableResult
+    /// 以兼容忽略返回值的既有调用方。
+    @discardableResult
+    func export(_ selection: PackExportSelection, to destURL: URL) throws -> PackExportResult {
         guard !selection.isEmpty else { throw PackExportError.nothingSelected }
 
         let fm = FileManager.default
@@ -154,6 +169,8 @@ struct PackExporter {
         }
 
         var manifestPages: [PackManifest.Page] = []
+        // P2-2 (v2.10.16): 累积「有名无字节」而被跳过的附件描述，导出结束后随结果返回。
+        var failedAttachments: [String] = []
         let pagesRoot = root.appendingPathComponent("pages", isDirectory: true)
 
         for pageSel in selection.pages where !pageSel.groups.isEmpty {
@@ -194,8 +211,24 @@ struct PackExporter {
                             url: att.url,
                             file: nil
                         )
-                        // 取字节：优先 data，其次可读的本地 path。
-                        let bytes: Data? = att.data ?? (att.path.flatMap { readFile($0) })
+                        // 取字节：优先内联 data，其次回退去读其引用的本地源文件路径。
+                        // P2-2 (v2.10.16): 此前用 `att.data ?? readFile(path)`，回源读取失败（源文件
+                        // 已移动/删除/不可读/读到空）时结果为 nil，被静默跳过——附件名照写进 manifest
+                        // 但 file 为空，导入后成为「有名无实」的空附件且无人察觉，造成字节静默丢失。
+                        // 现改为：区分「本无字节的附件（纯 url/reference 型，无 data 也无 path）」与
+                        // 「本应有字节但源文件读取失败的附件」，后者不再写入空壳条目，而是登记到
+                        // failedAttachments 供上层提示用户，杜绝「名进 manifest、字节为空且无人知晓」。
+                        var bytes: Data? = att.data
+                        var sourceReadFailed = false
+                        if bytes == nil, let path = att.path {
+                            // 该附件无内联字节、声明了源文件路径，说明它本应携带字节——必须回源读取。
+                            if let read = readFile(path), !read.isEmpty {
+                                bytes = read
+                            } else {
+                                sourceReadFailed = true
+                            }
+                        }
+
                         if let bytes = bytes {
                             if !attachmentsDirCreated {
                                 try createDir(attachmentsDir)
@@ -208,8 +241,17 @@ struct PackExporter {
                                 throw PackExportError.ioFailed(error.localizedDescription)
                             }
                             packAtt.file = fileName
+                            packAttachments.append(packAtt)
+                        } else if sourceReadFailed {
+                            // P2-2 (v2.10.16): 源文件不可读/为空——不写入「有名无实」的空壳附件，
+                            // 改为登记失败清单（不 append 到 packAttachments，附件条目也不进 slot.json）。
+                            let attName = att.name.isEmpty ? att.path! : att.name
+                            failedAttachments.append("\(group.name) / 槽位 \(slot)：\(attName)")
+                        } else {
+                            // 本就无 data 且无 path（例如纯 url / reference 型附件）——属正常无字节附件，
+                            // 保留其元信息引用（file 仍为 nil），不视为失败。
+                            packAttachments.append(packAtt)
                         }
-                        packAttachments.append(packAtt)
                     }
 
                     let packSlot = PackSlot(
@@ -253,6 +295,9 @@ struct PackExporter {
         try writeJSON(manifest, to: root.appendingPathComponent("manifest.json"))
 
         try zipDirectory(contentsOf: root, to: destURL)
+
+        // P2-2 (v2.10.16): 返回失败清单（可能为空），让上层能提示「X 个附件因源文件不可读未能打包」。
+        return PackExportResult(failedAttachments: failedAttachments)
     }
 
     // MARK: - Helpers

@@ -377,10 +377,14 @@ public final class SlotStorage {
                 // ST-2 (v2.10.15): also POISON this slot so a following empty-attachment
                 // write refuses to drop the corrupt file (see writeSlotContent).
                 if let s = slotNum { attachmentDecodeFailedSlots.insert(s) }
-                let ts = Int(Date().timeIntervalSince1970)
                 let slotName = slotDir.lastPathComponent
+                // P2-6 (v2.10.16): 损坏备份改为「固定文件名覆盖式」。此前用带时间戳的
+                // `.corrupt-<ts>`，每次读到同一损坏文件都会新建一份备份且无任何清理，
+                // 反复读会持续堆盘，与 index.json「单份备份」的设计不一致。改为统一用
+                // 不带时间戳的 `slot_<slotName>_attachments.json.corrupt`，每次损坏就以
+                // .atomic 覆盖写这一份，保证同一损坏文件最多只占用一份备份。
                 let backupURL = baseURL.appendingPathComponent(
-                    "slot_\(slotName)_attachments.json.corrupt-\(ts)")
+                    "slot_\(slotName)_attachments.json.corrupt")
                 do {
                     try Data(contentsOf: attachmentsURL).write(to: backupURL, options: .atomic)
                     NSLog("[ClipSlots] ERROR: slot \(slotName) attachments.json failed to decode; "

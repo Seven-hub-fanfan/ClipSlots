@@ -85,6 +85,12 @@ struct PackImporter {
         var createdPageIds: [String] = []
         var createdGroupIds: [String] = []
 
+        // P2-9 (v2.10.16): 覆盖模式下对「已有组」会先 clearAllSlots 清空原内容，而 PK-3 回滚只删除
+        // 本次新建的页/组，被清空的已有组既不在 createdGroupIds 范围内又已丢失原内容，回滚无法恢复。
+        // 改为采用「快照恢复」（方案 B）：覆盖前先把被覆盖组的原槽位内容+标签快照到内存并登记到此清单，
+        // catch 回滚时先删新建页/组，再把每个被覆盖组从快照原样写回，确保中途失败不丢原数据。
+        var overwrittenSnapshots: [GroupSnapshot] = []
+
         do {
         for manifestPage in manifest.pages {
             // PK-4 (v2.10.15): manifest 的 page.id 是不可信输入，校验拼出的路径 standardize 后
@@ -152,6 +158,10 @@ struct PackImporter {
                         createdGroupIds.append(newId) // PK-3 (v2.10.15): 追踪新建组以便回滚
                     case .overwrite:
                         targetGroupId = existingGroup.id
+                        // P2-9 (v2.10.16): 覆盖前先把被覆盖组的原槽位内容+标签快照到内存并登记待恢复
+                        // 清单，再清空。此前直接 clearAllSlots，一旦清空后、写入过程中抛错触发回滚，
+                        // 原内容既不在 createdGroupIds 范围内又已被清空，将永久丢失。
+                        overwrittenSnapshots.append(snapshotGroup(targetGroupId))
                         try? storage.clearAllSlots(in: targetGroupId)
                     }
                 } else {
@@ -174,6 +184,20 @@ struct PackImporter {
             // （删页会连带清理其下所有组），随后原样抛出，保证「导入失败」即无残留脏数据。
             for gid in createdGroupIds { try? storage.deleteSpecialSlot(id: gid) }
             for pid in createdPageIds { try? storage.deletePage(id: pid) }
+
+            // P2-9 (v2.10.16): 恢复被覆盖组的原内容（方案 B）。被覆盖组在清空后可能已写入了部分
+            // 新槽位，故恢复前先再次 clearAllSlots 抹掉半成品，再从快照逐槽写回内容与标签，使其回到
+            // 导入前的状态。注意：被覆盖组均为「已有组」，与上面删除的 createdGroupIds 互不相交，
+            // 故两段回滚互不影响；标签需经 setLabel 单独写回（PK-5：set 不落盘 content.label）。
+            for snap in overwrittenSnapshots {
+                try? storage.clearAllSlots(in: snap.groupId)
+                for (slot, content) in snap.contents {
+                    _ = storage.set(slot, content: content, in: snap.groupId)
+                }
+                for (slot, label) in snap.labels {
+                    storage.setLabel(slot, label: label, in: snap.groupId)
+                }
+            }
             throw error
         }
 
@@ -236,6 +260,33 @@ struct PackImporter {
     }
 
     // MARK: - 页/组创建（含去重与容错）
+
+    // P2-9 (v2.10.16): 覆盖模式下被清空组的内存快照，用于导入失败时回滚恢复原内容。
+    private struct GroupSnapshot {
+        let groupId: String
+        let contents: [Int: SlotContent]   // 原槽位内容（snapshot 返回，仅含有内容的槽位）
+        let labels: [Int: String]          // 原槽位标签（getLabel 逐槽读取，仅含非空标签）
+    }
+
+    /// P2-9 (v2.10.16): 快照某组当前所有槽位的内容与标签，供覆盖失败时回滚恢复。
+    /// 注意：不直接用 storage.snapshot(in:)，因为它只返回内存缓存（cache 由 get 惰性填充），
+    /// 若被覆盖组的某些槽位从未被读取过，缓存缺失会导致快照不完整、恢复时丢内容。改为对
+    /// 1...maxChildSlots 逐槽 get（get 会按磁盘指纹在必要时重读磁盘）以拿到真实的落盘内容；
+    /// 标签同样逐槽 getLabel（PK-5：标签独立于内容存于 label.txt，需单独快照并经 setLabel 写回）。
+    private func snapshotGroup(_ groupId: String) -> GroupSnapshot {
+        var contents: [Int: SlotContent] = [:]
+        var labels: [Int: String] = [:]
+        for slot in 1...maxChildSlots {
+            let content = storage.get(slot, in: groupId)
+            if !content.isEmpty {
+                contents[slot] = content
+            }
+            if let label = storage.getLabel(slot, in: groupId), !label.isEmpty {
+                labels[slot] = label
+            }
+        }
+        return GroupSnapshot(groupId: groupId, contents: contents, labels: labels)
+    }
 
     /// 新页（无名称冲突场景），失败返回 nil。
     private func createPageDirectly(name: String) -> String? {

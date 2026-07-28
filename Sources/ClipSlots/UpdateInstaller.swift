@@ -36,7 +36,7 @@ final class UpdateInstaller {
     /// 自动安装已下载的 DMG。成功后会重启 App 并结束当前进程；失败通过 `failure` 回调（主线程）。
     /// - Parameters:
     ///   - dmgPath: 已下载到本地的 DMG 路径
-    ///   - version: 目标版本号（仅用于文案）
+    ///   - version: 目标版本号（用于进度文案；P2-8 (v2.10.16) 起还作为 ditto 前挂载 bundle 版本校验的预期值）
     ///   - progress: 安装进度文案回调（主线程）
     ///   - failure: 安装失败回调（主线程），携带可读错误信息
     func install(dmgPath: String,
@@ -111,6 +111,33 @@ final class UpdateInstaller {
             }
 
             DispatchQueue.main.async { progress("正在替换应用程序…") }
+
+            // P2-8 (v2.10.16): ditto 替换前的第二道校验——核对挂载 bundle 的实际版本号是否等于预期 version。
+            // 根因：install(dmgPath:version:...) 的 version 此前仅用于进度文案，ditto 无条件替换 DMG 根目录里
+            // 的 ClipSlots.app，从不校验其 CFBundleShortVersionString，一旦下载/打包串包（版本不符）也会被静默
+            // 安装。修复：在此（已挂载并定位到 mountedApp、ditto 之前）读取 mountedApp 的 Contents/Info.plist 的
+            // CFBundleShortVersionString，与预期 version 规范化（去除可能的 "v/V" 前缀与首尾空白）后比对；不一致
+            // （或读不到）则中止安装、detach 卸载 DMG，并走既有 fail 失败回调提示用户，绝不继续 ditto。
+            // 本校验为纯文件读取，运行在既有后台串行队列（queue.async）中，不引入新线程，与线程模型一致。
+            let normalizeVersion: (String) -> String = { raw in
+                var s = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+                if s.hasPrefix("v") || s.hasPrefix("V") { s.removeFirst() }
+                return s.trimmingCharacters(in: .whitespacesAndNewlines)
+            }
+            let mountedInfoPlist = mountedApp + "/Contents/Info.plist"
+            guard let mountedVersion = NSDictionary(contentsOfFile: mountedInfoPlist)?["CFBundleShortVersionString"] as? String else {
+                // 读不到版本号 → 无法通过第二道校验，按不一致处理：中止并卸载 DMG。
+                NSLog("[ClipSlots] UpdateInstaller: 无法读取磁盘映像中 App 的 CFBundleShortVersionString，中止安装")
+                Self.detachAndCleanup(mountPoint)
+                fail("更新包版本不符，已中止安装（无法读取磁盘映像中 App 的版本号）")
+                return
+            }
+            guard normalizeVersion(mountedVersion) == normalizeVersion(version) else {
+                NSLog("[ClipSlots] UpdateInstaller: 版本校验失败，预期=\(version) 实际=\(mountedVersion)，中止安装")
+                Self.detachAndCleanup(mountPoint)
+                fail("更新包版本不符，已中止安装（预期 \(normalizeVersion(version))，实际 \(normalizeVersion(mountedVersion))）")
+                return
+            }
 
             // 3. 替换。先尝试无鉴权（App 在用户可写目录时可行），失败再用管理员授权。
             var installError: String? = nil

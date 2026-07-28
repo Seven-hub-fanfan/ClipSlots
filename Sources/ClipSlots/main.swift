@@ -320,6 +320,17 @@ final class SlotStoreObservable: ObservableObject {
     /// to genuinely external writes.
     private var ignoreWatcherUntil: Date = .distantPast
 
+    // P2-5 (v2.10.16): 纯时间窗（ignoreWatcherUntil）无法区分「本进程自写」与「恰好落在 0.6s 窗口内
+    // 的外部 CLI 写」，后者会被一并吞掉导致 GUI 显示滞后。这里改用「自写内容指纹」辅助判定：每次自写
+    // 完成后记录一次 special_slots 目录树指纹；watcher 回调在时间窗内命中时，用当前磁盘指纹与最近自写
+    // 指纹比对——匹配才判定为自写并跳过（且消费掉该指纹），不匹配说明窗口内混入了外部写，即使仍在时间窗
+    // 内也执行 reload，从而不再误吞外部写。
+    // 线程约束：本集合仅在主线程读写——recordSelfWriteFingerprint 经 suppressWatcher 内 main.async
+    // 排入主队列，watcher 的 debounce work 也在主队列执行，两者天然串行，无需额外加锁。
+    private var pendingSelfWriteFingerprints: [UInt64] = []
+    /// 最多保留的自写指纹数量（环形裁剪，覆盖连续多次自写；避免无界增长）。
+    private let maxPendingSelfWriteFingerprints = 16
+
     init() {
         NSLog("[ClipSlots] SlotStoreObservable init instanceID=\(instanceID)")
         loadSpecialSlots()
@@ -359,8 +370,24 @@ final class SlotStoreObservable: ObservableObject {
             let work = DispatchWorkItem { [weak self] in
                 guard let self else { return }
                 if Date() < self.ignoreWatcherUntil {
-                    NSLog("[ClipSlots] watcher fired → suppressed (self-write)")
-                    return
+                    // P2-5 (v2.10.16): 不再在时间窗内无条件跳过。
+                    // (1) 开放式抑制窗（导入生命周期把 ignoreWatcherUntil 顶到极远未来，见 PK-2 v2.10.15）：
+                    //     此时磁盘正被本进程持续写入、指纹频繁变化，仍需保持无条件跳过以避免导入期间反复
+                    //     reload 造成的闪烁 / 当前页被重置。用一个较大的阈值区分它与普通自写窗（后者 ≤ 数秒）。
+                    if self.ignoreWatcherUntil.timeIntervalSinceNow > 60 {
+                        NSLog("[ClipSlots] watcher fired → suppressed (open-ended/import window)")
+                        return
+                    }
+                    // (2) 普通自写窗：用磁盘指纹校验区分自写与外部写。仅当当前磁盘指纹命中本进程最近的自写
+                    //     指纹时，才判定为自写并跳过（并消费该指纹，避免后续外部写复用同一指纹被误跳过）；
+                    //     否则说明窗口内混入了外部 CLI 写，即使仍在时间窗内也 fall-through 执行 reload。
+                    let fp = self.storageDirFingerprint()
+                    if let idx = self.pendingSelfWriteFingerprints.lastIndex(of: fp) {
+                        self.pendingSelfWriteFingerprints.remove(at: idx)
+                        NSLog("[ClipSlots] watcher fired → suppressed (self-write fingerprint match)")
+                        return
+                    }
+                    NSLog("[ClipSlots] watcher fired → external write detected within window (fingerprint mismatch) → reloadAll")
                 }
                 NSLog("[ClipSlots] watcher fired → reloadAll")
                 // v2.9.15 (fix): an external write (the `clipslots` CLI) changed
@@ -389,6 +416,68 @@ final class SlotStoreObservable: ObservableObject {
     /// as long as it is bumped at every GUI write entry point.
     func suppressWatcher(_ interval: TimeInterval = 0.6) {
         ignoreWatcherUntil = Date().addingTimeInterval(interval)
+        // P2-5 (v2.10.16): 记录本次自写完成后的磁盘指纹，供 watcher 回调区分自写 / 外部写。
+        // suppressWatcher 在实际写入「之前」调用，故用 main.async 把指纹采集排到当前主线程同步写入
+        // 「之后」执行，从而捕获到「写后」磁盘状态（同步写入路径覆盖绝大多数入口）。watcher 的 debounce
+        // 有 0.3s 延迟，采集必定先于回调完成，比对时指纹已就绪。
+        // 注：开放式导入窗（ignoreWatcherUntil 被顶到极远未来）走 watcher 里的 (1) 分支无条件跳过，
+        // 不依赖此处指纹；导入收敛时改调 suppressWatcher(2.0)，届时写入已完成，采集到的即最终磁盘状态，
+        // 尾随 FSEvents 可凭指纹匹配被正确跳过。
+        DispatchQueue.main.async { [weak self] in
+            self?.recordSelfWriteFingerprint()
+        }
+    }
+
+    /// P2-5 (v2.10.16): 采集当前 special_slots 目录树指纹并登记为一次自写指纹（环形裁剪）。
+    /// 仅在主线程调用（经 suppressWatcher 的 main.async）。
+    private func recordSelfWriteFingerprint() {
+        let fp = storageDirFingerprint()
+        // 去重后追加到尾部（保持“最近”在后），避免重复自写把同一指纹塞满环。
+        pendingSelfWriteFingerprints.removeAll { $0 == fp }
+        pendingSelfWriteFingerprints.append(fp)
+        if pendingSelfWriteFingerprints.count > maxPendingSelfWriteFingerprints {
+            pendingSelfWriteFingerprints.removeFirst(
+                pendingSelfWriteFingerprints.count - maxPendingSelfWriteFingerprints)
+        }
+    }
+
+    /// P2-5 (v2.10.16): 计算 special_slots 目录树的内容指纹。
+    /// 对每个常规文件的 (相对路径, 大小, 修改时间) 生成局部哈希，用「与顺序无关」的 XOR 聚合，
+    /// 再混入文件计数，得到一个对「任意文件的增/删/改」都敏感的 64 位指纹。
+    /// - 跳过隐藏文件（.storage.lock / .DS_Store 等）以过滤写锁抖动噪声。
+    /// - 指纹仅用于「同一进程运行内」的前后比对（记录 vs 回调时刻），因此使用进程内一致的 Hasher 即可，
+    ///   不要求跨进程 / 跨启动稳定。
+    private func storageDirFingerprint() -> UInt64 {
+        let base = ClipSlotsPaths.specialSlots
+        let fm = FileManager.default
+        let keys: [URLResourceKey] = [.isRegularFileKey, .fileSizeKey, .contentModificationDateKey]
+        guard let enumerator = fm.enumerator(
+            at: base,
+            includingPropertiesForKeys: keys,
+            options: [.skipsHiddenFiles]
+        ) else {
+            return 0
+        }
+        let basePath = base.path
+        var acc: UInt64 = 0
+        var count: UInt64 = 0
+        for case let url as URL in enumerator {
+            guard let vals = try? url.resourceValues(forKeys: Set(keys)),
+                  vals.isRegularFile == true else { continue }
+            let rel = url.path.hasPrefix(basePath) ? String(url.path.dropFirst(basePath.count)) : url.path
+            let size = UInt64(vals.fileSize ?? 0)
+            // 毫秒精度足以区分外部写；避免浮点比较误差。
+            let mtime = UInt64(max(0, (vals.contentModificationDate?.timeIntervalSince1970 ?? 0) * 1000))
+            var hasher = Hasher()
+            hasher.combine(rel)
+            hasher.combine(size)
+            hasher.combine(mtime)
+            acc ^= UInt64(bitPattern: Int64(hasher.finalize())) // 顺序无关聚合
+            count &+= 1
+        }
+        // 混入文件数，区分「删一个文件」与「改一个文件」等 XOR 抵消场景。
+        acc ^= count &* 0x9E3779B97F4A7C15
+        return acc
     }
 
     // MARK: - Special Slots
@@ -988,11 +1077,27 @@ final class SlotStoreObservable: ObservableObject {
         let cursor = validatedCursor(specialStorage.autoPasteCursor())
         let autoAdvance = AutoModeState.shared.autoAdvanceEnabled
 
-        guard let target = manager.findNextNonEmptySlot(
-            from: cursor,
-            startGroupId: currentSpecialSlotId,
-            autoAdvance: autoAdvance
-        ) else {
+        // P2-1 (v2.10.16): 修复「从头开始」在多组场景失效。
+        // 线性推进模式下（autoAdvance = true），读游标为空有两种情况：首次按下、以及走到全局末尾被
+        // resetAutoPasteCursor() 置空后再次按下。此时必须从「全局第一个非空槽」重启，而不是走
+        // findNextNonEmptySlot 里 cursor==nil 的兜底（linearStartIndex 会以 startGroupId=当前组
+        // 为起点）。因为反复 Cmd+1 会跨组线性推进并把当前组切到落点组，走到末尾时当前组已是最后一个组，
+        // 若仍以当前组为起点就只会从最后一个组重扫到末尾，永远回不到第一页第一组。
+        // 这里接通此前从未被调用的 firstNonEmptySlot()（按 页→组→槽 全局顺序取第一个非空槽）作为重启原语。
+        // 仅作用于 autoAdvance=true 且无游标的重启路径；组内循环模式(autoAdvance=false)与已有游标的
+        // tape 推进保持原逻辑不变。自动存储方向完全不经过此分支，行为不受影响。
+        let target: SlotAddress?
+        if autoAdvance, cursor == nil {
+            target = manager.firstNonEmptySlot()
+        } else {
+            target = manager.findNextNonEmptySlot(
+                from: cursor,
+                startGroupId: currentSpecialSlotId,
+                autoAdvance: autoAdvance
+            )
+        }
+
+        guard let target = target else {
             // 全部粘贴完毕：重置读游标，下次按下从头开始（第一个非空槽）。
             try? specialStorage.resetAutoPasteCursor()
             recomputeAutoPreviews()
@@ -1063,11 +1168,19 @@ final class SlotStoreObservable: ObservableObject {
                 return !self.specialStorage.get(addr.slot, in: addr.groupId).isEmpty
             }
         )
-        autoPastePreview = pasteManager.findNextNonEmptySlot(
-            from: validatedCursor(specialStorage.autoPasteCursor()),
-            startGroupId: currentSpecialSlotId,
-            autoAdvance: autoAdvance
-        )
+        // P2-1 (v2.10.16): 预览角标须与 autoPasteFromHotkey 的实际落点保持一致——线性推进模式下
+        // 读游标为空时，下一次粘贴从「全局第一个非空槽」开始，因此预览也走 firstNonEmptySlot()，
+        // 避免角标停留在当前组而与真实起点不符。写游标（自动存储）预览不经过此分支，行为不受影响。
+        let pasteCursor = validatedCursor(specialStorage.autoPasteCursor())
+        if autoAdvance, pasteCursor == nil {
+            autoPastePreview = pasteManager.firstNonEmptySlot()
+        } else {
+            autoPastePreview = pasteManager.findNextNonEmptySlot(
+                from: pasteCursor,
+                startGroupId: currentSpecialSlotId,
+                autoAdvance: autoAdvance
+            )
+        }
     }
 
     /// 写游标回退一步（撤销最近一次自动存储的推进），并刷新预览角标。

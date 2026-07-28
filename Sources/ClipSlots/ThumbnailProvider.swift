@@ -16,6 +16,14 @@ final class ThumbnailProvider {
     /// key all get notified when the single QLThumbnailGenerator request completes.
     private var pendingCompletions: [String: [(NSImage?, String) -> Void]] = [:]
 
+    // P2-7 (v2.10.16): 看门狗代次隔离。此前每个请求挂 10s 看门狗但未绑定该请求的代次，
+    // 若某 key 被 LRU 逐出后 10s 内被再次请求，旧看门狗到点会取消「新的」挂起请求 → 缩略图空白。
+    // 修复：为每次「新建」挂起请求分配单调递增 token 记录到 pendingGeneration[key]；看门狗闭包捕获
+    // 其对应 token，回调时先比对「当前 key 的挂起 token 是否仍等于本看门狗 token」，相等才执行超时
+    // 取消，否则说明已被新请求替换，直接忽略，绝不取消新请求。读写均在既有 lock（NSLock）保护下进行。
+    private var pendingGeneration: [String: UInt64] = [:]
+    private var generationCounter: UInt64 = 0
+
     // P2-14 (v2.10.9): NSScreen.main 是主线程 AppKit API，而 thumbnail(for:) 可能在后台线程
     // 被调用，直接在后台读 NSScreen.main 属于误用。改为在 init 时于主线程读取一次
     // backingScaleFactor 缓存到此属性，后台路径改用该缓存值。读写都在既有 lock 保护下进行。
@@ -93,6 +101,10 @@ final class ThumbnailProvider {
         }
 
         pendingCompletions[cacheKey] = [completion]
+        // P2-7 (v2.10.16): 为本次「新建」挂起请求分配代次 token 并记录，供看门狗回调比对。
+        generationCounter &+= 1
+        let requestToken = generationCounter
+        pendingGeneration[cacheKey] = requestToken
         lock.unlock()
 
         // P2-1: QuickLook can hang and never call back; force-fire nil after 10s so waiters
@@ -101,6 +113,14 @@ final class ThumbnailProvider {
         DispatchQueue.global().asyncAfter(deadline: .now() + 10) { [weak self] in
             guard let self = self else { return }
             self.lock.lock()
+            // P2-7 (v2.10.16): 仅当当前 key 的挂起 token 仍等于本看门狗捕获的 token 时才超时取消。
+            // 若不相等（或已无记录），说明原请求已完成/被逐出并被新请求替换，本看门狗必须忽略，
+            // 绝不能取消新请求，否则会造成新缩略图空白。
+            guard self.pendingGeneration[cacheKey] == requestToken else {
+                self.lock.unlock()
+                return
+            }
+            self.pendingGeneration.removeValue(forKey: cacheKey)  // P2-7 (v2.10.16): 本次超时，清理代次记录
             let pending = self.pendingCompletions.removeValue(forKey: cacheKey)
             self.lock.unlock()
             // P1 (v2.10.13): completion 的契约是「在主队列回调」。此前 10s 超时兜底直接在
@@ -139,6 +159,7 @@ final class ThumbnailProvider {
                 self.evictIfNeededLocked()          // P2-15 (v2.10.6): 超上限淘汰最旧项
             }
             let completions = self.pendingCompletions.removeValue(forKey: cacheKey) ?? []
+            self.pendingGeneration.removeValue(forKey: cacheKey)  // P2-7 (v2.10.16): 正常完成，清理本次代次记录
             self.lock.unlock()
 
             // Fire all queued completions so no caller is left hanging.
@@ -160,6 +181,7 @@ final class ThumbnailProvider {
         // otherwise callers awaiting a thumbnail hang forever (leaking spinners/tasks).
         let dropped = pendingCompletions.filter { $0.key.hasPrefix(prefix) }
         pendingCompletions = pendingCompletions.filter { !$0.key.hasPrefix(prefix) }
+        pendingGeneration = pendingGeneration.filter { !$0.key.hasPrefix(prefix) }  // P2-7 (v2.10.16): 同步剔除代次记录
         lock.unlock()
         notifyCancelled(dropped)
         NSLog("[ClipSlots] ThumbnailProvider invalidateSlot prefix=\(prefix)")
@@ -173,6 +195,7 @@ final class ThumbnailProvider {
         accessOrder.removeAll { $0.hasPrefix(prefix) }  // P2-15 (v2.10.6): 同步剔除访问顺序
         let dropped = pendingCompletions.filter { $0.key.hasPrefix(prefix) }
         pendingCompletions = pendingCompletions.filter { !$0.key.hasPrefix(prefix) }
+        pendingGeneration = pendingGeneration.filter { !$0.key.hasPrefix(prefix) }  // P2-7 (v2.10.16): 同步剔除代次记录
         lock.unlock()
         notifyCancelled(dropped)
         NSLog("[ClipSlots] ThumbnailProvider invalidateSpecialSlot prefix=\(prefix)")
@@ -184,6 +207,7 @@ final class ThumbnailProvider {
         accessOrder.removeAll()  // P2-15 (v2.10.6): 一并清空 LRU 访问顺序
         let dropped = pendingCompletions
         pendingCompletions.removeAll()
+        pendingGeneration.removeAll()  // P2-7 (v2.10.16): 一并清空代次记录
         lock.unlock()
         notifyCancelled(dropped)
     }

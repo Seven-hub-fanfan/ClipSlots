@@ -647,31 +647,38 @@ final class CommunitySkillManager: ObservableObject {
         let appleScript = "do shell script \"\(escaped)\" with administrator privileges"
 
         isBusy = true
-        // AU-1 (v2.10.15): `executeAndReturnError` 会同步阻塞当前线程（鉴权弹窗 + shell 执行），
-        // 放在 DispatchQueue.main.async 里仍会冻结主线程，安装/重装期间 UI 无响应。
-        // 改为在后台队列构造并执行 AppleScript（NSAppleScript 对象保持在闭包内局部、不跨线程），
-        // 执行完再回到主线程更新所有 @Published/UI 状态。
-        DispatchQueue.global(qos: .userInitiated).async {
+        // P1-1 (v2.10.16): 回退 AU-1 (v2.10.15) 的后台线程执行。`NSAppleScript` 非线程安全，
+        // OSA/Apple Event 执行必须在主线程；与同版本 `UpdateInstaller` 的 `DispatchQueue.main.sync`
+        // 写法自相矛盾，存在偶发崩溃/授权框不弹隐患。改回主线程同步执行。
+        //
+        // P2-10 (v2.10.16): 同步执行同时根治「isBusy 复位时机偏早」——旧版 runPrivileged 把授权/执行
+        // 放进 `DispatchQueue.global.async` 后立即返回，调用方（importZip/importMarkdown/install）的
+        // `defer { isBusy = false }` 会在异步授权尚未完成时就复位 isBusy，短暂放开按钮造成重复触发。
+        // 改为同步执行后，runPrivileged 会阻塞到授权+shell 真正结束再复位 isBusy，期间主线程被占用无法
+        // 响应点击，彻底消除重复触发窗口；外层 defer 仅在真正完成后再冗余复位一次（无害）。
+        let execute = { [weak self] in
             var errorInfo: NSDictionary?
             let script = NSAppleScript(source: appleScript)
             _ = script?.executeAndReturnError(&errorInfo)
-
-            DispatchQueue.main.async { [weak self] in
-                guard let self else { return }
-                self.isBusy = false
-                if let errorInfo {
-                    let code = errorInfo[NSAppleScript.errorNumber] as? Int ?? 0
-                    if code == -128 {
-                        self.report("已取消操作。", isError: false)
-                    } else {
-                        let msg = errorInfo[NSAppleScript.errorMessage] as? String ?? "未知错误"
-                        self.report("操作失败：\(msg)", isError: true)
-                    }
+            guard let self else { return }
+            self.isBusy = false
+            if let errorInfo {
+                let code = errorInfo[NSAppleScript.errorNumber] as? Int ?? 0
+                if code == -128 {
+                    self.report("已取消操作。", isError: false)
                 } else {
-                    self.report(successMessage, isError: false)
+                    let msg = errorInfo[NSAppleScript.errorMessage] as? String ?? "未知错误"
+                    self.report("操作失败：\(msg)", isError: true)
                 }
-                self.refresh()
+            } else {
+                self.report(successMessage, isError: false)
             }
+            self.refresh()
+        }
+        if Thread.isMainThread {
+            execute()
+        } else {
+            DispatchQueue.main.sync(execute: execute)
         }
     }
 

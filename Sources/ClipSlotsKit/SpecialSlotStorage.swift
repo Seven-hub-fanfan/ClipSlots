@@ -96,7 +96,11 @@ public final class SpecialSlotStorage {
         // and GUI launch, so two processes racing on a not-yet-migrated index could both
         // migrate and clobber each other (lost update / duplicate default page). Re-load
         // and re-check the schema version under the lock so only the first writer migrates.
-        try? storageLock.withLock {
+        //
+        // P1-2 (v2.10.16): 与 repairPageScopedSlotGroupsIfNeeded 同理，此处也在 init 路径上。
+        // 之前用默认 5s 超时，CLI 持锁时 GUI 启动仍可卡最多 5s。改为短超时（0.5s）：超时即跳过本次
+        // 迁移，迁移逻辑幂等且下次任一命令启动会再次尝试，不会丢数据也不会阻塞启动。
+        try? storageLock.withLock(timeout: 0.5) {
         let index = loadIndex()
 
         // Already v2.4+ format — another process migrated while we waited for the lock.
@@ -188,7 +192,12 @@ public final class SpecialSlotStorage {
     /// removes that self-inflicted inconsistency source. If the lock is momentarily
     /// busy we simply skip repair this run (try?) — a later command repairs it.
     private func repairPageScopedSlotGroupsIfNeeded() {
-        try? storageLock.withLock {
+        // P1-2 (v2.10.16): 此修复位于 init()/ensureInitialized() 路径，随每次 CLI 调用与 GUI 启动执行，
+        // 且是所有已迁移用户（schema>=2）的公共快路径。之前用默认 5s 超时的 withLock，当 CLI 正持锁时
+        // GUI 启动仍会在此阻塞最多 5s，正是 ST-1 (v2.10.15) 想根除的「启动卡死」。ST-1 只给
+        // repairDefaultsIfNeeded 加了 0.5s 超时，却漏掉了 init 路径上更早的本修复与 v2 迁移。
+        // 统一改为短超时（0.5s），超时即跳过本次修复——修复是幂等的，交由后续任一命令再修复。
+        try? storageLock.withLock(timeout: 0.5) {
             var modified = loadIndex()
             var changed = false
 
@@ -836,13 +845,10 @@ public final class SpecialSlotStorage {
                 throw SpecialSlotError.cannotDeleteLastSpecialSlot
             }
 
-            // Move to trash first
-            let dir = specialSlotDirectory(for: id)
-            let trashDir = baseDir.appendingPathComponent(".trash")
-            try? FileManager.default.createDirectory(at: trashDir, withIntermediateDirectories: true)
-            let trashTarget = trashDir.appendingPathComponent("deleted_\(id)_\(Int(Date().timeIntervalSince1970))")
-            try? FileManager.default.moveItem(at: dir, to: trashTarget)
-
+            // P2-3 (v2.10.16): 先更新并持久化索引（新索引不再引用该组），saveIndex 成功后再把
+            // 数据目录移入 .trash。旧顺序是「先移目录再 saveIndex」，一旦 saveIndex 写盘失败（磁盘满/
+            // IO 错误），目录已移走而索引仍指向它 → 悬挂索引项/孤儿数据。反转顺序后 saveIndex 抛错会在
+            // 目录被移动前就 throw 退出（withLock 内、无副作用），数据保持一致。
             // Update index — use page-scoped fallback
             index.specialSlots.removeAll { $0.id == id }
 
@@ -871,6 +877,14 @@ public final class SpecialSlotStorage {
             if index.autoPasteCursorPrev?.groupId == id { index.autoPasteCursorPrev = nil }
 
             try saveIndex(index)
+
+            // P2-3 (v2.10.16): 索引已成功持久化，再把该组数据目录移入 .trash（软删除，可 30 天内恢复）。
+            // 即使这一步失败，索引也已自洽（不再引用该组），只会残留一个可被后续 cleanup/覆盖处理的目录。
+            let dir = specialSlotDirectory(for: id)
+            let trashDir = baseDir.appendingPathComponent(".trash")
+            try? FileManager.default.createDirectory(at: trashDir, withIntermediateDirectories: true)
+            let trashTarget = trashDir.appendingPathComponent("deleted_\(id)_\(Int(Date().timeIntervalSince1970))")
+            try? FileManager.default.moveItem(at: dir, to: trashTarget)
 
             // P2-3 (v2.10.9): evict this group's cached SlotStorage and notify the
             // GUI to clean up its connection cache for the deleted group.
@@ -1050,17 +1064,11 @@ public final class SpecialSlotStorage {
             }
 
             // v2.4.1: truly delete the page's slot groups (move data to .trash)
+            // P2-3 (v2.10.16): 仅先做索引层移除，真正的目录移动推迟到 saveIndex 成功之后，
+            // 避免「目录已移走但索引写盘失败」造成孤儿数据 / 悬挂索引。
             let groupsInPage = index.specialSlots.filter { $0.pageId == id }
             if !groupsInPage.isEmpty {
-                let trashDir = baseDir.appendingPathComponent(".trash")
-                try? FileManager.default.createDirectory(at: trashDir, withIntermediateDirectories: true)
-                for group in groupsInPage {
-                    let dir = specialSlotDirectory(for: group.id)
-                    let trashTarget = trashDir.appendingPathComponent("page_deleted_\(group.id)_\(Int(Date().timeIntervalSince1970))")
-                    try? FileManager.default.moveItem(at: dir, to: trashTarget)
-                }
                 index.specialSlots.removeAll { $0.pageId == id }
-                NSLog("[ClipSlots] Page delete: \(groupsInPage.count) slot groups moved to .trash")
             }
 
             // If deleting current page, switch to another
@@ -1105,6 +1113,19 @@ public final class SpecialSlotStorage {
 
             try saveIndex(index)
             NSLog("[ClipSlots] Page deleted: \(id)")
+
+            // P2-3 (v2.10.16): 索引已成功持久化，再把被删各组的数据目录移入 .trash（软删除，可恢复）。
+            // 放到 saveIndex 之后，保证「目录移动」永远发生在索引一致之后，写盘失败时不会产生孤儿数据。
+            if !groupsInPage.isEmpty {
+                let trashDir = baseDir.appendingPathComponent(".trash")
+                try? FileManager.default.createDirectory(at: trashDir, withIntermediateDirectories: true)
+                for group in groupsInPage {
+                    let dir = specialSlotDirectory(for: group.id)
+                    let trashTarget = trashDir.appendingPathComponent("page_deleted_\(group.id)_\(Int(Date().timeIntervalSince1970))")
+                    try? FileManager.default.moveItem(at: dir, to: trashTarget)
+                }
+                NSLog("[ClipSlots] Page delete: \(groupsInPage.count) slot groups moved to .trash")
+            }
 
             // P2-3 (v2.10.9): evict each deleted group's cached SlotStorage and
             // notify the GUI to purge connection state for every removed group.
@@ -1205,31 +1226,81 @@ public final class SpecialSlotStorage {
         // GUI 自动存储与 CLI 同时写同一槽位时 SlotStorage 层的删除重建可能交错。此处把
         // 内容写入与索引 touch 一并纳入同一 storageLock.withLock 保护。set() 本身未持锁，
         // 且 touch 逻辑已内联到本作用域（不再调用 touchSpecialSlot），故不会重入死锁。
-        return (try? storageLock.withLock {
-            let result = slotStorage(for: specialSlotId).set(slot, content: content)
-            if result {
+        // P2-4 (v2.10.16): 超时不再用 `try?` 静默吞掉。对齐 ST-4，超时路径记日志并向调用方返回
+        // false（失败态），让 GUI/CLI 能感知「存储繁忙」而非误以为写入成功。
+        do {
+            return try storageLock.withLock {
+                // 额外-2 (v2.10.16): write 覆盖写入前，把被覆盖槽位的「非空」旧内容先备份进
+                // .trash，使覆盖写入也拥有 30 天回滚窗口（对齐 delete 的软删除做法），防止 AI
+                // 批量 write 时旧内容被永久覆盖。备份发生在真正调用 SlotStorage.set(覆盖) 之前、
+                // 同一把 storageLock 之内；仅备份非空槽位（空槽覆盖不产生备份，避免污染回收站）；
+                // 备份失败仅 NSLog、不阻断写入成功。
+                //
+                // 磁盘布局：单个槽位在磁盘上就是一个独立目录
+                // baseDir/<specialSlotId>/<slot>/（内含 item 子目录 + .bin 数据、content.json 元数据、
+                // attachments.json、label.txt 及各附件文件），可整目录一次性拷贝，天然涵盖主体+附件。
+                // 因此这里直接对该 slot 目录做 FileManager.copyItem 快照。
+                let oldContent = slotStorage(for: specialSlotId).get(slot)
+                if !oldContent.isEmpty {
+                    let slotDir = specialSlotDirectory(for: specialSlotId)
+                        .appendingPathComponent(String(slot))
+                    if FileManager.default.fileExists(atPath: slotDir.path) {
+                        let trashDir = baseDir.appendingPathComponent(".trash")
+                        try? FileManager.default.createDirectory(
+                            at: trashDir, withIntermediateDirectories: true)
+                        // 命名 slot_overwritten_<specialSlotId>_<slot>_<unixts>：时间戳位于末段，
+                        // 与既有 deleted_<id>_<ts> / page_deleted_<id>_<ts> 命名风格一致。
+                        // cleanupTrash 通过 trashEntryDate() 解析条目日期——它按 "_" 分割取「最后一段」
+                        // 作为 unix 秒时间戳，本命名把 <unixts> 放在末段即可被其识别，从而纳入
+                        // 30 天 / 200 条上限的统一清理（无需改动 cleanupTrash/trashEntryDate 本身）。
+                        let trashTarget = trashDir.appendingPathComponent(
+                            "slot_overwritten_\(specialSlotId)_\(slot)_\(Int(Date().timeIntervalSince1970))")
+                        do {
+                            try FileManager.default.copyItem(at: slotDir, to: trashTarget)
+                        } catch {
+                            NSLog("[ClipSlots] 额外-2: 覆盖前备份槽位旧内容到 .trash 失败（不阻断写入）"
+                                + " slot=\(slot) group=\(specialSlotId): \(error)")
+                        }
+                    }
+                }
+                let result = slotStorage(for: specialSlotId).set(slot, content: content)
+                if result {
+                    var index = loadIndex()
+                    if let idx = index.specialSlots.firstIndex(where: { $0.id == specialSlotId }) {
+                        index.specialSlots[idx].updatedAt = Date()
+                        try? saveIndex(index)
+                    }
+                }
+                return result
+            }
+        } catch {
+            NSLog("[ClipSlots] set(slot:\(slot) in:\(specialSlotId)) 获取存储锁失败，写入未执行：\(error.localizedDescription)")
+            return false
+        }
+    }
+
+    @discardableResult
+    public func clear(_ slot: Int, in specialSlotId: String) -> Bool {
+        // P2-4 (v2.10.9): perform the content clear AND the index touch inside a
+        // SINGLE withLock (mirroring set() in v2.10.8) so updatedAt and content can
+        // never briefly disagree across an interleaving window. The touch is inlined
+        // here (not via touchSpecialSlot) to keep both mutations in one lock scope.
+        //
+        // P2-4 (v2.10.16): 锁超时不再用 `try?` 静默吞掉——对齐 ST-4，超时记日志并返回 false，
+        // 让调用方（GUI/CLI）能感知「清空」未生效，而非误以为成功。
+        do {
+            try storageLock.withLock {
+                slotStorage(for: specialSlotId).clear(slot)
                 var index = loadIndex()
                 if let idx = index.specialSlots.firstIndex(where: { $0.id == specialSlotId }) {
                     index.specialSlots[idx].updatedAt = Date()
                     try? saveIndex(index)
                 }
             }
-            return result
-        }) ?? false
-    }
-
-    public func clear(_ slot: Int, in specialSlotId: String) {
-        // P2-4 (v2.10.9): perform the content clear AND the index touch inside a
-        // SINGLE withLock (mirroring set() in v2.10.8) so updatedAt and content can
-        // never briefly disagree across an interleaving window. The touch is inlined
-        // here (not via touchSpecialSlot) to keep both mutations in one lock scope.
-        try? storageLock.withLock {
-            slotStorage(for: specialSlotId).clear(slot)
-            var index = loadIndex()
-            if let idx = index.specialSlots.firstIndex(where: { $0.id == specialSlotId }) {
-                index.specialSlots[idx].updatedAt = Date()
-                try? saveIndex(index)
-            }
+            return true
+        } catch {
+            NSLog("[ClipSlots] clear(slot:\(slot) in:\(specialSlotId)) 获取存储锁失败，清空未执行：\(error.localizedDescription)")
+            return false
         }
     }
 
@@ -1249,15 +1320,23 @@ public final class SpecialSlotStorage {
         slotStorage(for: specialSlotId).getLabel(slot)
     }
 
-    public func setLabel(_ slot: Int, label: String?, in specialSlotId: String) {
+    @discardableResult
+    public func setLabel(_ slot: Int, label: String?, in specialSlotId: String) -> Bool {
         // P2-4 (v2.10.9): label write + index touch in ONE withLock (see clear()).
-        try? storageLock.withLock {
-            slotStorage(for: specialSlotId).setLabel(slot, label: label)
-            var index = loadIndex()
-            if let idx = index.specialSlots.firstIndex(where: { $0.id == specialSlotId }) {
-                index.specialSlots[idx].updatedAt = Date()
-                try? saveIndex(index)
+        // P2-4 (v2.10.16): 锁超时不再用 `try?` 静默吞掉——超时记日志并返回 false（对齐 ST-4）。
+        do {
+            try storageLock.withLock {
+                slotStorage(for: specialSlotId).setLabel(slot, label: label)
+                var index = loadIndex()
+                if let idx = index.specialSlots.firstIndex(where: { $0.id == specialSlotId }) {
+                    index.specialSlots[idx].updatedAt = Date()
+                    try? saveIndex(index)
+                }
             }
+            return true
+        } catch {
+            NSLog("[ClipSlots] setLabel(slot:\(slot) in:\(specialSlotId)) 获取存储锁失败，标签未更新：\(error.localizedDescription)")
+            return false
         }
     }
 
@@ -1314,7 +1393,9 @@ public final class SpecialSlotStorage {
     /// removed too. Bounding BOTH age and count keeps the trash from growing without
     /// limit while still giving the user a generous recovery window.
     public static let trashRetentionDays = 30
-    public static let trashMaxEntries = 50
+    // v2.10.16: 回收站上限从 50 提升到 200。随着 write 覆盖也开始把旧内容备份进 .trash
+    // （见 set() 的覆盖前备份），删除类操作产生的条目会更多，200 条给回滚留更充裕的空间。
+    public static let trashMaxEntries = 200
 
     /// Extract the unix-second timestamp embedded in a trash entry directory name
     /// ("deleted_<id>_<ts>" / "page_deleted_<id>_<ts>"). Falls back to the entry's
