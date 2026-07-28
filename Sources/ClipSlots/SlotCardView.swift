@@ -88,12 +88,9 @@ struct SlotCardView: View {
                         .help(content.canPreview ? "点击查看大图" : "")
                 }
             }
-            // v2.10.20: 「删除主体文本」叉号从 metadata 行移到内容预览框角落，
+            // v2.10.20: 「删除主体文本」叉号从 metadata 行移到内容预览框左上角，
             // 避开右上角卡片级「上次粘贴」角标；仅当槽位有主体文本内容时显示。
-            // v2.10.25: 从左上角移到右下角——左上角已被游标角标（🟢写/🔵读，见 ContentView
-            // cursorBadges 的 .topLeading overlay）占用，两者会在「有内容且是下一个游标落点」
-            // 的槽位上完全重叠；右下角同时避开左上角游标点与右上角「上次粘贴」角标。
-            .overlay(alignment: .bottomTrailing) {
+            .overlay(alignment: .topLeading) {
                 if let onClearBody, (!content.items.isEmpty || content.htmlSource != nil) {
                     Button(action: onClearBody) {
                         Image(systemName: "xmark.circle.fill")
