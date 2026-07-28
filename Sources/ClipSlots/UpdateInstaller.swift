@@ -119,11 +119,16 @@ final class UpdateInstaller {
             // CFBundleShortVersionString，与预期 version 规范化（去除可能的 "v/V" 前缀与首尾空白）后比对；不一致
             // （或读不到）则中止安装、detach 卸载 DMG，并走既有 fail 失败回调提示用户，绝不继续 ditto。
             // 本校验为纯文件读取，运行在既有后台串行队列（queue.async）中，不引入新线程，与线程模型一致。
-            let normalizeVersion: (String) -> String = { raw in
-                var s = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-                if s.hasPrefix("v") || s.hasPrefix("V") { s.removeFirst() }
-                return s.trimmingCharacters(in: .whitespacesAndNewlines)
+            // P1-A (v2.10.17): 版本比对复用 UpdateChecker.parse() 的 SemVer 规范化，仅比较数字核心
+            // （SemVer.core），剥离 `v/V` 前缀、`-` 预发布段与 `+` 构建元数据段。此前 normalizeVersion
+            // 只去 `v` 前缀，不处理 `-beta.1` / `+build` 后缀，导致挂载 bundle 的数字版本 `2.11.0`
+            // 与 tag_name 原值 `v2.11.0-beta.1` 恒不相等 → 误杀所有 beta 通道更新，且与 UpdateChecker
+            // 「判定有新 beta 可更新」的逻辑自相矛盾。两处版本规范化就此收敛到同一 parse()，避免再次漂移。
+            let normalizeCore: (String) -> [Int] = { raw in
+                UpdateChecker.parse(raw).core
             }
+            // 便于日志/文案展示的核心版本串（如 [2,11,0] → "2.11.0"）。
+            let coreString: ([Int]) -> String = { $0.map(String.init).joined(separator: ".") }
             let mountedInfoPlist = mountedApp + "/Contents/Info.plist"
             guard let mountedVersion = NSDictionary(contentsOfFile: mountedInfoPlist)?["CFBundleShortVersionString"] as? String else {
                 // 读不到版本号 → 无法通过第二道校验，按不一致处理：中止并卸载 DMG。
@@ -132,10 +137,12 @@ final class UpdateInstaller {
                 fail("更新包版本不符，已中止安装（无法读取磁盘映像中 App 的版本号）")
                 return
             }
-            guard normalizeVersion(mountedVersion) == normalizeVersion(version) else {
+            let mountedCore = normalizeCore(mountedVersion)
+            let expectedCore = normalizeCore(version)
+            guard mountedCore == expectedCore else {
                 NSLog("[ClipSlots] UpdateInstaller: 版本校验失败，预期=\(version) 实际=\(mountedVersion)，中止安装")
                 Self.detachAndCleanup(mountPoint)
-                fail("更新包版本不符，已中止安装（预期 \(normalizeVersion(version))，实际 \(normalizeVersion(mountedVersion))）")
+                fail("更新包版本不符，已中止安装（预期 \(coreString(expectedCore))，实际 \(coreString(mountedCore))）")
                 return
             }
 

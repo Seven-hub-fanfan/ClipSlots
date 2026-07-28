@@ -325,11 +325,15 @@ final class SlotStoreObservable: ObservableObject {
     // 完成后记录一次 special_slots 目录树指纹；watcher 回调在时间窗内命中时，用当前磁盘指纹与最近自写
     // 指纹比对——匹配才判定为自写并跳过（且消费掉该指纹），不匹配说明窗口内混入了外部写，即使仍在时间窗
     // 内也执行 reload，从而不再误吞外部写。
-    // 线程约束：本集合仅在主线程读写——recordSelfWriteFingerprint 经 suppressWatcher 内 main.async
-    // 排入主队列，watcher 的 debounce work 也在主队列执行，两者天然串行，无需额外加锁。
+    // 线程约束：P1-B (v2.10.17) 起，本集合的读写以及指纹计算（整树遍历）统一挪到 fingerprintQueue
+    // 串行队列执行，不再占用主线程——记录端（recordSelfWriteFingerprint）与消费端（watcher 回调）都在
+    // 同一队列上访问，天然串行，无需额外加锁；主线程只负责最终的 reload/UI 刷新。
     private var pendingSelfWriteFingerprints: [UInt64] = []
     /// 最多保留的自写指纹数量（环形裁剪，覆盖连续多次自写；避免无界增长）。
     private let maxPendingSelfWriteFingerprints = 16
+    // P1-B (v2.10.17): 指纹计算是 I/O 密集的整目录树递归 stat，放主线程会在大库写入时造成 UI 卡顿。
+    // 统一改到该后台串行队列执行；队列的串行性同时充当 pendingSelfWriteFingerprints 的并发保护。
+    private let fingerprintQueue = DispatchQueue(label: "com.clipslots.fingerprint", qos: .utility)
 
     init() {
         NSLog("[ClipSlots] SlotStoreObservable init instanceID=\(instanceID)")
@@ -380,34 +384,47 @@ final class SlotStoreObservable: ObservableObject {
                     }
                     // (2) 普通自写窗：用磁盘指纹校验区分自写与外部写。仅当当前磁盘指纹命中本进程最近的自写
                     //     指纹时，才判定为自写并跳过（并消费该指纹，避免后续外部写复用同一指纹被误跳过）；
-                    //     否则说明窗口内混入了外部 CLI 写，即使仍在时间窗内也 fall-through 执行 reload。
-                    let fp = self.storageDirFingerprint()
-                    if let idx = self.pendingSelfWriteFingerprints.lastIndex(of: fp) {
-                        self.pendingSelfWriteFingerprints.remove(at: idx)
-                        NSLog("[ClipSlots] watcher fired → suppressed (self-write fingerprint match)")
-                        return
+                    //     否则说明窗口内混入了外部 CLI 写，即使仍在时间窗内也执行 reload。
+                    // P1-B (v2.10.17): 指纹计算（整树遍历 + 逐文件 stat）挪到 fingerprintQueue 后台执行，
+                    //     不再阻塞主线程；命中自写则直接结束，未命中再回主线程执行 reload。
+                    self.fingerprintQueue.async { [weak self] in
+                        guard let self else { return }
+                        let fp = self.storageDirFingerprint()
+                        if let idx = self.pendingSelfWriteFingerprints.lastIndex(of: fp) {
+                            self.pendingSelfWriteFingerprints.remove(at: idx)
+                            NSLog("[ClipSlots] watcher fired → suppressed (self-write fingerprint match)")
+                            return
+                        }
+                        NSLog("[ClipSlots] watcher fired → external write detected within window (fingerprint mismatch) → reloadAll")
+                        DispatchQueue.main.async { [weak self] in self?.performWatcherReload() }
                     }
-                    NSLog("[ClipSlots] watcher fired → external write detected within window (fingerprint mismatch) → reloadAll")
+                    return
                 }
-                NSLog("[ClipSlots] watcher fired → reloadAll")
-                // v2.9.15 (fix): an external write (the `clipslots` CLI) changed
-                // slot bodies on disk. SlotStorage.get() is cache-backed and would
-                // otherwise keep returning the stale in-memory SlotContent, so the
-                // body stayed "空槽位 0 B" even though the label (read from disk
-                // directly) updated. Drop the content caches so reloadAll re-reads
-                // the freshly written bodies from disk.
-                self.specialStorage.invalidateContentCaches()
-                // P2 (v2.10.13): 一并失效连接缓存。invalidateContentCaches 只清槽位内容缓存，
-                // 不清 SlotConnectionStorage；外部删组/删页后 GUI 侧会残留已删除组的陈旧连线。
-                // 连接缓存归 GUI 层的 SlotConnectionStorage 管辖（Kit 层无法引用），故在文件
-                // 监听回调里一并清理。
-                SlotConnectionStorage.shared.invalidateCache()
-                self.reloadAll()
-                self.refreshTrigger = UUID()
+                self.performWatcherReload()
             }
             self.watcherDebounceWorkItem = work
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.3, execute: work)
         }
+    }
+
+    /// P1-B (v2.10.17): watcher 命中「需要 reload」时在主线程执行的收尾工作（缓存失效 + UI 刷新）。
+    /// 从原 debounce work item 中抽出，供同步（非时间窗）与异步（指纹不匹配回主线程）两条路径共用。
+    private func performWatcherReload() {
+        NSLog("[ClipSlots] watcher fired → reloadAll")
+        // v2.9.15 (fix): an external write (the `clipslots` CLI) changed
+        // slot bodies on disk. SlotStorage.get() is cache-backed and would
+        // otherwise keep returning the stale in-memory SlotContent, so the
+        // body stayed "空槽位 0 B" even though the label (read from disk
+        // directly) updated. Drop the content caches so reloadAll re-reads
+        // the freshly written bodies from disk.
+        self.specialStorage.invalidateContentCaches()
+        // P2 (v2.10.13): 一并失效连接缓存。invalidateContentCaches 只清槽位内容缓存，
+        // 不清 SlotConnectionStorage；外部删组/删页后 GUI 侧会残留已删除组的陈旧连线。
+        // 连接缓存归 GUI 层的 SlotConnectionStorage 管辖（Kit 层无法引用），故在文件
+        // 监听回调里一并清理。
+        SlotConnectionStorage.shared.invalidateCache()
+        self.reloadAll()
+        self.refreshTrigger = UUID()
     }
 
     /// Bump the suppression window right before a GUI-initiated disk write so the
@@ -429,15 +446,20 @@ final class SlotStoreObservable: ObservableObject {
     }
 
     /// P2-5 (v2.10.16): 采集当前 special_slots 目录树指纹并登记为一次自写指纹（环形裁剪）。
-    /// 仅在主线程调用（经 suppressWatcher 的 main.async）。
+    /// P1-B (v2.10.17): 指纹计算与集合读写整体挪到 fingerprintQueue 后台串行队列，不再占用主线程。
+    /// 由 suppressWatcher 经 main.async 调用（确保排在本次同步写入「之后」），本方法再把重活派发到
+    /// fingerprintQueue，主线程仅承担一次 async 派发开销。
     private func recordSelfWriteFingerprint() {
-        let fp = storageDirFingerprint()
-        // 去重后追加到尾部（保持“最近”在后），避免重复自写把同一指纹塞满环。
-        pendingSelfWriteFingerprints.removeAll { $0 == fp }
-        pendingSelfWriteFingerprints.append(fp)
-        if pendingSelfWriteFingerprints.count > maxPendingSelfWriteFingerprints {
-            pendingSelfWriteFingerprints.removeFirst(
-                pendingSelfWriteFingerprints.count - maxPendingSelfWriteFingerprints)
+        fingerprintQueue.async { [weak self] in
+            guard let self else { return }
+            let fp = self.storageDirFingerprint()
+            // 去重后追加到尾部（保持“最近”在后），避免重复自写把同一指纹塞满环。
+            self.pendingSelfWriteFingerprints.removeAll { $0 == fp }
+            self.pendingSelfWriteFingerprints.append(fp)
+            if self.pendingSelfWriteFingerprints.count > self.maxPendingSelfWriteFingerprints {
+                self.pendingSelfWriteFingerprints.removeFirst(
+                    self.pendingSelfWriteFingerprints.count - self.maxPendingSelfWriteFingerprints)
+            }
         }
     }
 

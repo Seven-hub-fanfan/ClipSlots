@@ -1228,41 +1228,12 @@ public final class SpecialSlotStorage {
         // 且 touch 逻辑已内联到本作用域（不再调用 touchSpecialSlot），故不会重入死锁。
         // P2-4 (v2.10.16): 超时不再用 `try?` 静默吞掉。对齐 ST-4，超时路径记日志并向调用方返回
         // false（失败态），让 GUI/CLI 能感知「存储繁忙」而非误以为写入成功。
+        // P1-C (v2.10.17): 覆盖前备份（整目录快照）移出 storageLock 临界区执行——锁内做大附件深拷贝
+        // 会放大 I/O 并阻塞其他读写。备份是「尽力而为」的回滚快照，移出锁带来的极小竞争窗口可接受。
+        // 详见 backupSlotBeforeOverwriteIfNeeded（同时修复了同秒同槽命名冲突导致备份被静默跳过的问题）。
+        backupSlotBeforeOverwriteIfNeeded(slot: slot, in: specialSlotId)
         do {
             return try storageLock.withLock {
-                // 额外-2 (v2.10.16): write 覆盖写入前，把被覆盖槽位的「非空」旧内容先备份进
-                // .trash，使覆盖写入也拥有 30 天回滚窗口（对齐 delete 的软删除做法），防止 AI
-                // 批量 write 时旧内容被永久覆盖。备份发生在真正调用 SlotStorage.set(覆盖) 之前、
-                // 同一把 storageLock 之内；仅备份非空槽位（空槽覆盖不产生备份，避免污染回收站）；
-                // 备份失败仅 NSLog、不阻断写入成功。
-                //
-                // 磁盘布局：单个槽位在磁盘上就是一个独立目录
-                // baseDir/<specialSlotId>/<slot>/（内含 item 子目录 + .bin 数据、content.json 元数据、
-                // attachments.json、label.txt 及各附件文件），可整目录一次性拷贝，天然涵盖主体+附件。
-                // 因此这里直接对该 slot 目录做 FileManager.copyItem 快照。
-                let oldContent = slotStorage(for: specialSlotId).get(slot)
-                if !oldContent.isEmpty {
-                    let slotDir = specialSlotDirectory(for: specialSlotId)
-                        .appendingPathComponent(String(slot))
-                    if FileManager.default.fileExists(atPath: slotDir.path) {
-                        let trashDir = baseDir.appendingPathComponent(".trash")
-                        try? FileManager.default.createDirectory(
-                            at: trashDir, withIntermediateDirectories: true)
-                        // 命名 slot_overwritten_<specialSlotId>_<slot>_<unixts>：时间戳位于末段，
-                        // 与既有 deleted_<id>_<ts> / page_deleted_<id>_<ts> 命名风格一致。
-                        // cleanupTrash 通过 trashEntryDate() 解析条目日期——它按 "_" 分割取「最后一段」
-                        // 作为 unix 秒时间戳，本命名把 <unixts> 放在末段即可被其识别，从而纳入
-                        // 30 天 / 200 条上限的统一清理（无需改动 cleanupTrash/trashEntryDate 本身）。
-                        let trashTarget = trashDir.appendingPathComponent(
-                            "slot_overwritten_\(specialSlotId)_\(slot)_\(Int(Date().timeIntervalSince1970))")
-                        do {
-                            try FileManager.default.copyItem(at: slotDir, to: trashTarget)
-                        } catch {
-                            NSLog("[ClipSlots] 额外-2: 覆盖前备份槽位旧内容到 .trash 失败（不阻断写入）"
-                                + " slot=\(slot) group=\(specialSlotId): \(error)")
-                        }
-                    }
-                }
                 let result = slotStorage(for: specialSlotId).set(slot, content: content)
                 if result {
                     var index = loadIndex()
@@ -1276,6 +1247,53 @@ public final class SpecialSlotStorage {
         } catch {
             NSLog("[ClipSlots] set(slot:\(slot) in:\(specialSlotId)) 获取存储锁失败，写入未执行：\(error.localizedDescription)")
             return false
+        }
+    }
+
+    /// P1-C (v2.10.17): 覆盖写入前，把被覆盖槽位的「非空」旧内容整目录快照进 .trash，使覆盖写入也拥有
+    /// 30 天回滚窗口（对齐 delete 的软删除），防止 AI 批量 write 时旧内容被永久覆盖。
+    ///
+    /// 相比 v2.10.16 的实现，这里修复了两点：
+    /// 1. **移出锁临界区**：本方法在 storageLock 之外调用（见 set()），避免锁内对大附件做整目录深拷贝
+    ///    时放大 I/O 并阻塞其他读写。备份为「尽力而为」的回滚快照，移出锁带来的极小竞争窗口可接受。
+    /// 2. **杜绝同秒同槽命名冲突静默丢备份**：末段时间戳改用毫秒精度（`%.3f`），并在极端碰撞时以 1ms
+    ///    递增直至路径空闲——旧实现用 unix「秒」结尾，同一槽位 1 秒内被覆盖两次时第二次 copyItem 因目标
+    ///    已存在而抛错被 catch 静默吞掉，导致这次覆盖的旧内容没有进 .trash，与「覆盖 30 天可恢复」承诺不符。
+    ///    末段仍是可被 `trashEntryDate()` 按 unix 秒（Double）解析的数值，无需改动 cleanupTrash/trashEntryDate。
+    ///
+    /// 磁盘布局：单个槽位就是一个独立目录 baseDir/<specialSlotId>/<slot>/（含主体 + 全部附件），
+    /// 整目录一次 copyItem 即可涵盖主体与附件。备份失败仅 NSLog、不阻断写入成功。
+    private func backupSlotBeforeOverwriteIfNeeded(slot: Int, in specialSlotId: String) {
+        // 仅备份非空槽位（空槽覆盖不产生备份，避免污染回收站）。
+        let oldContent = slotStorage(for: specialSlotId).get(slot)
+        guard !oldContent.isEmpty else { return }
+        let slotDir = specialSlotDirectory(for: specialSlotId)
+            .appendingPathComponent(String(slot))
+        guard FileManager.default.fileExists(atPath: slotDir.path) else { return }
+        let trashDir = baseDir.appendingPathComponent(".trash")
+        try? FileManager.default.createDirectory(at: trashDir, withIntermediateDirectories: true)
+        // 命名 slot_overwritten_<specialSlotId>_<slot>_<秒.毫秒>：时间戳位于末段，与既有
+        // deleted_<id>_<ts> / page_deleted_<id>_<ts> 命名风格一致，且末段为 Double 可被 trashEntryDate() 识别。
+        var ts = Date().timeIntervalSince1970
+        func target(_ ts: TimeInterval) -> URL {
+            trashDir.appendingPathComponent(
+                "slot_overwritten_\(specialSlotId)_\(slot)_\(String(format: "%.3f", ts))")
+        }
+        var trashTarget = target(ts)
+        while FileManager.default.fileExists(atPath: trashTarget.path) {
+            ts += 0.001   // 同毫秒碰撞：递增 1ms 直至路径空闲，保证唯一且时间戳仍准确可解析。
+            trashTarget = target(ts)
+        }
+        do {
+            try FileManager.default.copyItem(at: slotDir, to: trashTarget)
+            // P1-C: 覆盖备份路径上也适时触发一次清理，避免 GUI 长会话「只写不删」时 .trash 无界堆积到
+            // 下一次删组/删页/启动才收敛。放到后台队列执行，不拖慢写入热路径。
+            DispatchQueue.global(qos: .utility).async { [weak self] in
+                self?.cleanupTrash()
+            }
+        } catch {
+            NSLog("[ClipSlots] P1-C: 覆盖前备份槽位旧内容到 .trash 失败（不阻断写入）"
+                + " slot=\(slot) group=\(specialSlotId): \(error)")
         }
     }
 
