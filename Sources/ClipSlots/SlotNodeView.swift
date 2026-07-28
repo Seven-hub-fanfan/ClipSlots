@@ -93,7 +93,7 @@ struct NodeAttachmentButton: View {
     // v2.7.75: local mirror of the "不再提醒" toggle inside the confirm popover.
     @State private var suppressConfirmToggle = false
 
-    // v2.10.20: 附件面板改用浮动 NSPanel 承载（见 AttachmentManagerPanel.swift）。
+    // v2.10.22: 附件面板改回跟随主窗口的 NSPopover 承载（见 AttachmentManagerPanel.swift）。
     @State private var panelController = AttachmentManagerPanelController()
     @State private var buttonAnchor = AttachmentButtonScreenAnchor()
 
@@ -153,8 +153,8 @@ struct NodeAttachmentButton: View {
         }
     }
 
-    // v2.10.20: 再次点击切换开合；打开时用按钮屏幕矩形定位浮动面板。
-    // 带兜底重试：若首帧 view.window 尚未就绪导致 rect 为 nil，下一 runloop 再试一次，
+    // v2.10.22: 再次点击切换开合；打开时用附件按钮 backing NSView 锚定 NSPopover。
+    // 带兜底重试：若首帧 view.window 尚未就绪（isReady == false），下一 runloop 再试一次，
     // 避免 v2.10.19 时序竞态导致「部分槽位点击无反应」。
     private func toggleAttachmentPanel() {
         if panelController.isVisible {
@@ -166,17 +166,16 @@ struct NodeAttachmentButton: View {
     }
 
     private func presentAttachmentPanel(retry: Bool) {
-        guard let rect = buttonAnchor.screenRect() else {
+        guard buttonAnchor.isReady else {
             if retry {
                 DispatchQueue.main.async { self.presentAttachmentPanel(retry: false) }
             }
             return
         }
         panelController.show(
-            anchor: rect,
+            anchor: buttonAnchor,
             slot: slot,
             store: store,
-            anchorProvider: { buttonAnchor.screenRect() },
             onClose: { showingAttachments = false }
         )
         showingAttachments = true

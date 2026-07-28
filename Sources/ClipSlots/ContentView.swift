@@ -129,10 +129,6 @@ struct ContentView: View {
                     .padding(.horizontal, AppTheme.pagePadding)
                     .padding(.vertical, 8)
 
-                // v2.10.21: 跨组游标提示胶囊改为紧贴分类标签栏下方的独立行，
-                // 不再 overlay 在 ScrollView 顶部（原方案会遮挡第一行槽位卡片标题）。
-                crossGroupCursorHint
-
                 ScrollViewReader { scrollProxy in
                     ScrollView {
                         // v2.5: No results hint
@@ -427,6 +423,10 @@ struct ContentView: View {
                 .font(.caption2)
                 .foregroundColor(Color.secondary.opacity(0.75))
                 .help("当前版本 v\(AppVersion.current)\n首次打开 ClipSlots.app 时，macOS 可能提示“无法验证开发者”，请右键点击 App → 选择「打开」→ 点击「打开」确认即可。")
+
+            // v2.10.22: 跨组游标提示胶囊内嵌到标题栏（ClipSlots / 检查更新 那一横行）内，
+            // 完全不占用内容区的任何垂直空间。
+            crossGroupCursorHint
 
             Spacer()
 
@@ -1216,15 +1216,15 @@ struct ContentView: View {
             .foregroundColor(.secondary)
             .padding(.horizontal, 10)
             .padding(.vertical, 5)
-            // v2.10.19: 半透明胶囊悬浮在内容区顶部（overlay，不占布局高度），
-            // 避免此前作为 VStack 兄弟节点把整个槽位区域向下压低。
+            // v2.10.22: 胶囊改用中高强度磨砂玻璃（.thickMaterial），背景半透明但内容不可辨认、
+            // 只透出色彩基调，观感对齐系统 Popover / 「快捷键模板」弹窗的毛玻璃质感；
+            // 修复此前 .regularMaterial 在标题栏上显得几乎全透明的问题。胶囊内嵌标题栏，不占内容区高度。
             .background(
                 Capsule()
-                    .fill(.regularMaterial)
+                    .fill(.thickMaterial)
                     .overlay(Capsule().stroke(Color.secondary.opacity(0.18), lineWidth: 0.5))
             )
             .shadow(color: .black.opacity(0.12), radius: 4, y: 1)
-            .padding(.top, 6)
         }
     }
 

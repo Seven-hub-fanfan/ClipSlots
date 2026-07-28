@@ -2,24 +2,29 @@ import AppKit
 import SwiftUI
 import ClipSlotsKit
 
-// v2.10.20: 附件管理面板改用「非激活浮动 NSPanel」承载，替代 v2.10.19 的
-// SemiTransientPopoverAnchor(.semitransient NSPopover)。原方案存在打开卡顿、
-// 部分槽位点击无反应（时序竞态 / view.window 为 nil 静默失败）等问题。
+// v2.10.22: 附件面板改回「跟随主窗口的 NSPopover」承载。
 //
-// 该方案参考本仓库已验证流畅的 AttachmentPreviewWindowController：
-//   .borderless + .nonactivatingPanel、hidesOnDeactivate = false、isFloatingPanel、
-//   orderFrontRegardless()。
-// 特点：
-//   (a) 打开丝滑可靠（无 popover 动画/布局竞态）；
-//   (b) 用按钮屏幕矩形定位，所有槽位都能稳定打开（带兜底重试）；
-//   (c) hidesOnDeactivate = false + 非激活面板 ⇒ 切到 Finder 拖文件时面板不关闭。
+// 历史演进：
+//   v2.10.19：SemiTransientPopoverAnchor(.semitransient NSPopover) —— 有时序竞态（view.window
+//             为 nil）导致部分槽位点击无反应。
+//   v2.10.20：改用 .borderless + 透明 NSPanel 浮动窗承载。虽然打开可靠，但因为面板 isOpaque=false /
+//             backgroundColor=.clear 且内容背景 AppTheme.elevatedBackground 近乎全透明，视觉上变成
+//             「脱离主窗口、悬浮在屏幕上的半透明独立窗口」，与主窗口完全脱节（用户反馈问题 A/C）。
+//   v2.10.22（本次）：回到 NSPopover。NSPopover 天然带箭头锚定按钮、跟随主窗口移动，且拥有系统级
+//             毛玻璃（vibrant）背景，与「快捷键模板」弹窗观感一致，直接解决 A（脱节）+ C（太透明）。
 //
-// 关闭时机：点击本 App 内、面板之外（本地事件监听）；Esc；再次点击附件按钮切换。
-// 切到其他 App（失焦）不会触发本地监听，因此面板保持打开。
+// 关键点：
+//   (a) behavior = .semitransient ⇒ 切到其他 App（如 Finder）时 popover 不关闭，可从 Finder 拖文件进来；
+//       仅当用户与主窗口自身交互（点击窗口其他区域）时才关闭。
+//   (b) 用附件按钮持续上报的 backing NSView 作为锚点，保证该 NSView 已在窗口层级中，
+//       避免 v2.10.19 的 view.window == nil 时序竞态；配合 SlotNodeView 的下一 runloop 兜底重试。
 
-/// 记录附件按钮 backing NSView 的透明锚点，用于计算按钮的屏幕矩形。
+/// 记录附件按钮 backing NSView，供 NSPopover 锚定 / 屏幕矩形计算使用。
 final class AttachmentButtonScreenAnchor {
     weak var view: NSView?
+
+    /// 锚点 NSView 当前是否已挂到窗口层级（NSPopover.show 的前置条件）。
+    var isReady: Bool { view?.window != nil }
 
     func screenRect() -> NSRect? {
         guard let view, let window = view.window else { return nil }
@@ -43,131 +48,51 @@ struct AttachmentButtonAnchorReporter: NSViewRepresentable {
     }
 }
 
-/// 非激活浮动面板：切到其他 App 不隐藏、不抢占主窗口焦点。
-private final class AttachmentManagerFloatingPanel: NSPanel {
-    override var canBecomeKey: Bool { true }
-    override var canBecomeMain: Bool { false }
-}
-
-/// 承载 AttachmentManagerPopover 的浮动面板控制器。
-final class AttachmentManagerPanelController {
-    private var panel: AttachmentManagerFloatingPanel?
-    private var localMonitor: Any?
-    private var anchorProvider: (() -> NSRect?)?
+/// 承载 AttachmentManagerPopover 的 NSPopover 控制器。
+final class AttachmentManagerPanelController: NSObject, NSPopoverDelegate {
+    private var popover: NSPopover?
     private var onClose: (() -> Void)?
-    private let panelSize = NSSize(width: 360, height: 480)
 
-    var isVisible: Bool { panel?.isVisible ?? false }
+    var isVisible: Bool { popover?.isShown ?? false }
 
-    /// 在锚点矩形下方展示附件面板。anchorProvider 用于关闭判断时复算按钮矩形。
+    /// 相对附件按钮的 backing NSView 弹出 popover（箭头锚定、跟随主窗口）。
     func show(
-        anchor: NSRect,
+        anchor: AttachmentButtonScreenAnchor,
         slot: Int,
         store: SlotStoreObservable,
-        anchorProvider: @escaping () -> NSRect?,
         onClose: @escaping () -> Void
     ) {
-        self.anchorProvider = anchorProvider
+        guard let anchorView = anchor.view, anchorView.window != nil else { return }
+
+        // 已经打开则先收起，避免重复弹出。
+        if let existing = popover, existing.isShown {
+            existing.performClose(nil)
+        }
+
         self.onClose = onClose
 
         let hosting = NSHostingController(rootView: AttachmentManagerPopover(slot: slot, store: store))
-
-        let panel = self.panel ?? makePanel()
-        panel.contentViewController = hosting
-        panel.setContentSize(panelSize)
-        position(panel, anchor: anchor)
-        panel.orderFrontRegardless()
-        self.panel = panel
-
-        installMonitor()
+        let pop = NSPopover()
+        pop.contentViewController = hosting
+        pop.contentSize = NSSize(width: 360, height: 480)
+        // .semitransient：切到其他 App（Finder 拖文件）时不关闭；仅与主窗口交互时关闭。
+        pop.behavior = .semitransient
+        pop.animates = true
+        pop.delegate = self
+        pop.show(relativeTo: anchorView.bounds, of: anchorView, preferredEdge: .maxY)
+        self.popover = pop
     }
 
     func close() {
-        removeMonitor()
-        panel?.orderOut(nil)
-        panel?.contentViewController = nil
+        popover?.performClose(nil)
+    }
+
+    // MARK: NSPopoverDelegate
+
+    func popoverDidClose(_ notification: Notification) {
+        popover = nil
         let cb = onClose
         onClose = nil
-        anchorProvider = nil
         cb?()
-    }
-
-    private func makePanel() -> AttachmentManagerFloatingPanel {
-        let panel = AttachmentManagerFloatingPanel(
-            contentRect: NSRect(origin: .zero, size: panelSize),
-            styleMask: [.borderless, .nonactivatingPanel],
-            backing: .buffered,
-            defer: false
-        )
-        panel.isOpaque = false
-        panel.backgroundColor = .clear
-        panel.hasShadow = true
-        panel.level = .floating
-        panel.hidesOnDeactivate = false          // 关键：失焦（切 Finder）不关闭
-        panel.isFloatingPanel = true
-        panel.becomesKeyOnlyIfNeeded = true
-        panel.animationBehavior = .utilityWindow
-        panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
-        return panel
-    }
-
-    /// 面板定位在按钮下方，超出屏幕时向上/水平夹紧到可见区域。
-    private func position(_ panel: NSPanel, anchor: NSRect) {
-        let size = panelSize
-        let gap: CGFloat = 6
-        let screen = NSScreen.screens.first { $0.frame.intersects(anchor) } ?? NSScreen.main
-        let visible = screen?.visibleFrame ?? anchor
-
-        var x = anchor.minX
-        x = min(max(x, visible.minX + 4), visible.maxX - size.width - 4)
-
-        // 屏幕坐标 y 向上为正：按钮「下方」= 更小的 y。
-        var y = anchor.minY - gap - size.height
-        if y < visible.minY + 4 {
-            // 下方空间不足，放到按钮上方。
-            y = anchor.maxY + gap
-        }
-        y = min(max(y, visible.minY + 4), visible.maxY - size.height - 4)
-
-        panel.setFrameOrigin(NSPoint(x: x, y: y))
-    }
-
-    private func installMonitor() {
-        removeMonitor()
-        localMonitor = NSEvent.addLocalMonitorForEvents(
-            matching: [.leftMouseDown, .rightMouseDown, .keyDown]
-        ) { [weak self] event in
-            guard let self else { return event }
-
-            // Esc 关闭并吞掉事件。
-            if event.type == .keyDown {
-                if event.keyCode == 53 { // Esc
-                    self.close()
-                    return nil
-                }
-                return event
-            }
-
-            let loc = NSEvent.mouseLocation
-
-            // 点击附件按钮自身：交给按钮的 toggle 处理，避免关闭又立刻重开。
-            if let btnRect = self.anchorProvider?(), btnRect.insetBy(dx: -4, dy: -4).contains(loc) {
-                return event
-            }
-            // 点击面板内部：保持打开。
-            if let panel = self.panel, panel.frame.contains(loc) {
-                return event
-            }
-            // 点击本 App 其他区域：关闭。（切到其他 App 不会触发本地监听 ⇒ 失焦不关闭）
-            self.close()
-            return event
-        }
-    }
-
-    private func removeMonitor() {
-        if let localMonitor {
-            NSEvent.removeMonitor(localMonitor)
-            self.localMonitor = nil
-        }
     }
 }
