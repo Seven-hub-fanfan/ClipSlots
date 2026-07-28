@@ -94,7 +94,9 @@ struct NodeAttachmentButton: View {
     @State private var suppressConfirmToggle = false
 
     // v2.10.22: 附件面板改回跟随主窗口的 NSPopover 承载（见 AttachmentManagerPanel.swift）。
-    @State private var panelController = AttachmentManagerPanelController()
+    // v2.10.23: 控制器改用全局单例 AttachmentManagerPanelController.shared，所有槽位共用同一个
+    //           NSPopover 生命周期，切换槽位时「关→开」串行化，消除动画打架/卡顿。
+    private var panelController: AttachmentManagerPanelController { .shared }
     @State private var buttonAnchor = AttachmentButtonScreenAnchor()
 
     // v2.7.75: persisted preference — when true, the red ✕ clears attachments
@@ -157,7 +159,10 @@ struct NodeAttachmentButton: View {
     // 带兜底重试：若首帧 view.window 尚未就绪（isReady == false），下一 runloop 再试一次，
     // 避免 v2.10.19 时序竞态导致「部分槽位点击无反应」。
     private func toggleAttachmentPanel() {
-        if panelController.isVisible {
+        // v2.10.23: 用共享控制器判断「当前展示的是否正是本槽位」——
+        //   是 → 再次点击同一按钮，收起面板；
+        //   否（未显示 / 显示的是别的槽位）→ present，控制器内部会串行「关旧→开新」。
+        if panelController.isVisible(forSlot: slot) {
             panelController.close()
             showingAttachments = false
             return

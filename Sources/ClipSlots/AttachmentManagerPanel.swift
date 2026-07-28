@@ -49,11 +49,30 @@ struct AttachmentButtonAnchorReporter: NSViewRepresentable {
 }
 
 /// 承载 AttachmentManagerPopover 的 NSPopover 控制器。
+///
+/// v2.10.23：改为**全局单例**（`shared`）。此前每个 SlotNodeView 各持有一个 @State 实例，
+/// 切换槽位时是「A 的 popover 还在关、B 的 popover 已在开」两个独立控制器的动画同时进行，
+/// 出现卡顿 / 动画打架。现在所有槽位共用同一个控制器与同一个 NSPopover 生命周期：
+///   - 未显示 → 直接 show（无动画竞态）。
+///   - 已显示（切到另一个槽位）→ 先 performClose，待 `popoverDidClose` 回调后再在下一
+///     runloop show 新槽位，彻底串行化「关→开」，避免并发动画。
 final class AttachmentManagerPanelController: NSObject, NSPopoverDelegate {
+    /// 全局共享控制器：所有槽位的附件面板共用同一个 NSPopover 生命周期。
+    static let shared = AttachmentManagerPanelController()
+
     private var popover: NSPopover?
     private var onClose: (() -> Void)?
+    /// 当前 popover 正在展示的槽位号（用于「点同一个按钮再切换关闭」判断）。
+    private(set) var currentSlot: Int?
+    /// 关闭进行中时挂起的下一次 show 请求（切换槽位时用），在 popoverDidClose 后执行。
+    private var pendingShow: (() -> Void)?
 
     var isVisible: Bool { popover?.isShown ?? false }
+
+    /// 指定槽位的面板是否正在显示（点同一个附件按钮时用于切换关闭）。
+    func isVisible(forSlot slot: Int) -> Bool {
+        isVisible && currentSlot == slot
+    }
 
     /// 相对附件按钮的 backing NSView 弹出 popover（箭头锚定、跟随主窗口）。
     func show(
@@ -62,14 +81,33 @@ final class AttachmentManagerPanelController: NSObject, NSPopoverDelegate {
         store: SlotStoreObservable,
         onClose: @escaping () -> Void
     ) {
-        guard let anchorView = anchor.view, anchorView.window != nil else { return }
+        guard anchor.view?.window != nil else { return }
 
-        // 已经打开则先收起，避免重复弹出。
-        if let existing = popover, existing.isShown {
-            existing.performClose(nil)
+        // 把「真正展示」封装成请求，便于在关闭回调后串行执行。
+        let request: () -> Void = { [weak self] in
+            self?.reallyShow(anchor: anchor, slot: slot, store: store, onClose: onClose)
         }
 
+        // 已经打开（可能是别的槽位）→ 先收起，待关闭回调后再开，避免并发动画卡顿。
+        if let existing = popover, existing.isShown {
+            pendingShow = request
+            existing.performClose(nil)
+        } else {
+            request()
+        }
+    }
+
+    /// 真正创建并展示 popover。要求锚点 NSView 已在窗口层级中。
+    private func reallyShow(
+        anchor: AttachmentButtonScreenAnchor,
+        slot: Int,
+        store: SlotStoreObservable,
+        onClose: @escaping () -> Void
+    ) {
+        guard let anchorView = anchor.view, anchorView.window != nil else { return }
+
         self.onClose = onClose
+        self.currentSlot = slot
 
         let hosting = NSHostingController(rootView: AttachmentManagerPopover(slot: slot, store: store))
         let pop = NSPopover()
@@ -84,6 +122,7 @@ final class AttachmentManagerPanelController: NSObject, NSPopoverDelegate {
     }
 
     func close() {
+        pendingShow = nil
         popover?.performClose(nil)
     }
 
@@ -91,8 +130,16 @@ final class AttachmentManagerPanelController: NSObject, NSPopoverDelegate {
 
     func popoverDidClose(_ notification: Notification) {
         popover = nil
+        currentSlot = nil
         let cb = onClose
         onClose = nil
         cb?()
+
+        // 若在关闭前挂起了「切换到另一个槽位」的请求，此刻串行执行（下一 runloop 保证
+        // 旧 popover 动画/资源彻底释放，新 popover 从零开始，无动画打架）。
+        if let pending = pendingShow {
+            pendingShow = nil
+            DispatchQueue.main.async(execute: pending)
+        }
     }
 }

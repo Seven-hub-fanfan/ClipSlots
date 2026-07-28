@@ -336,6 +336,9 @@ struct ContentView: View {
                 .padding(.bottom, 4)
 
             specialSlotTagBar
+                // v2.10.23: 跨组游标提示胶囊叠加在分组标签栏这一行，水平居中显示，
+                // 用 overlay 不占额外垂直空间（仅在游标位于其他组时才有内容）。
+                .overlay(crossGroupCursorHint)
                 .padding(.horizontal, AppTheme.pagePadding)
                 .padding(.bottom, 4)
 
@@ -424,9 +427,8 @@ struct ContentView: View {
                 .foregroundColor(Color.secondary.opacity(0.75))
                 .help("当前版本 v\(AppVersion.current)\n首次打开 ClipSlots.app 时，macOS 可能提示“无法验证开发者”，请右键点击 App → 选择「打开」→ 点击「打开」确认即可。")
 
-            // v2.10.22: 跨组游标提示胶囊内嵌到标题栏（ClipSlots / 检查更新 那一横行）内，
-            // 完全不占用内容区的任何垂直空间。
-            crossGroupCursorHint
+            // v2.10.23: 跨组游标提示胶囊移到「分组标签栏」那一行并水平居中（见 headerView 的
+            // specialSlotTagBar.overlay(crossGroupCursorHint)）；标题栏不再承载它。
 
             Spacer()
 
