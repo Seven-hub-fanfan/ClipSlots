@@ -17,6 +17,9 @@ struct SlotCardView: View {
     var onEditText: ((String) -> Void)? = nil
     var onEditHTML: ((String) -> Void)? = nil
     var onDropFiles: (([URL]) -> Void)? = nil
+    // v2.10.19: 单独删除主体文本内容（保留附件）；组内拖拽排序回调。
+    var onClearBody: (() -> Void)? = nil
+    var onMoveSlot: ((_ from: Int, _ to: Int) -> Void)? = nil
 
     // v2.9.36: when true, this slot was the most recent paste target and shows a
     // persistent "上次粘贴" badge in the top-right corner until another slot is pasted.
@@ -49,6 +52,8 @@ struct SlotCardView: View {
     @State private var editingText = ""
     @State private var isDropTargeted = false
     @State private var isPressed = false
+    // v2.10.19: 组内拖拽排序：是否作为放置目标高亮。
+    @State private var isReorderTargeted = false
 
     @Environment(\.colorScheme) private var colorScheme
 
@@ -98,6 +103,17 @@ struct SlotCardView: View {
                     .help(content.metadataSummary)
 
                 Spacer(minLength: 4)
+
+                // v2.10.19: 单独删除主体文本内容的叉号（仅当有主体内容时显示），不影响附件。
+                if let onClearBody, (!content.items.isEmpty || content.htmlSource != nil) {
+                    Button(action: onClearBody) {
+                        Image(systemName: "xmark.circle.fill")
+                            .font(.system(size: 13))
+                            .foregroundColor(.secondary.opacity(0.7))
+                    }
+                    .buttonStyle(.plain)
+                    .help("删除此槽位的文本内容（保留附件）")
+                }
 
                 if let store = store {
                     NodeAttachmentButton(slot: slot, store: store)
@@ -150,6 +166,18 @@ struct SlotCardView: View {
         .onDrop(of: [UTType.fileURL.identifier], isTargeted: $isDropTargeted) { providers in
             handleFileDrop(providers)
         }
+        // v2.10.19: 组内拖拽排序放置目标（接收拖拽手柄携带的源槽位编号）。
+        .onDrop(of: [UTType.plainText.identifier], isTargeted: $isReorderTargeted) { providers in
+            handleReorderDrop(providers)
+        }
+        .overlay(
+            RoundedRectangle(cornerRadius: AppTheme.cornerRadius, style: .continuous)
+                .strokeBorder(
+                    isReorderTargeted ? Color.accentColor.opacity(0.8) : Color.clear,
+                    lineWidth: isReorderTargeted ? 2 : 0
+                )
+                .allowsHitTesting(false)
+        )
         .overlay(alignment: .center) {
             if isDropTargeted {
                 DropImportOverlay(slot: slot)
@@ -261,8 +289,37 @@ struct SlotCardView: View {
         .help("这是最近一次粘贴的槽位")
     }
 
+    // v2.10.19: 组内拖拽排序手柄。横线 icon，悬停变抓手光标（grab），拖拽携带源槽位编号。
+    private var dragHandle: some View {
+        Image(systemName: "line.3.horizontal")
+            .font(.system(size: 12, weight: .semibold))
+            .foregroundColor(.secondary.opacity(0.7))
+            .frame(width: 20, height: 24)
+            .contentShape(Rectangle())
+            .help("拖拽调整槽位顺序")
+            .onHover { hovering in
+                if hovering {
+                    NSCursor.openHand.push()
+                } else {
+                    NSCursor.pop()
+                }
+            }
+            .onDrag {
+                // 携带源槽位编号，带自定义前缀避免与普通文本拖放混淆。
+                NSItemProvider(object: "\(Self.reorderDragPrefix)\(slot)" as NSString)
+            }
+    }
+
+    /// 拖拽排序 payload 前缀，标识这是一次「槽位重排」而非普通文本拖放。
+    static let reorderDragPrefix = "clipslots-slot-reorder:"
+
     private var headerRow: some View {
         HStack(spacing: 10) {
+            // v2.10.19: 组内拖拽排序手柄（仅非空槽位显示）。悬停变抓手光标，可拖拽改变槽位顺序。
+            if !content.isEmpty, onMoveSlot != nil {
+                dragHandle
+            }
+
             ZStack {
                 Circle()
                     .fill(AppTheme.slotBadgeBackground(colorScheme, isEmpty: content.isEmpty))
@@ -579,6 +636,33 @@ struct SlotCardView: View {
 
         group.notify(queue: .main) {
             if !urls.isEmpty { onDropFiles(urls) }
+        }
+        return true
+    }
+
+    // v2.10.19: 处理组内拖拽排序的放置：解析源槽位编号，回调 onMoveSlot(from, to: 本槽位)。
+    private func handleReorderDrop(_ providers: [NSItemProvider]) -> Bool {
+        guard let onMoveSlot else { return false }
+        guard let provider = providers.first(where: {
+            $0.hasItemConformingToTypeIdentifier(UTType.plainText.identifier)
+        }) else { return false }
+
+        provider.loadItem(forTypeIdentifier: UTType.plainText.identifier, options: nil) { item, _ in
+            var raw: String? = nil
+            if let data = item as? Data {
+                raw = String(data: data, encoding: .utf8)
+            } else if let s = item as? String {
+                raw = s
+            } else if let ns = item as? NSString {
+                raw = ns as String
+            }
+            guard let raw,
+                  raw.hasPrefix(Self.reorderDragPrefix),
+                  let from = Int(raw.dropFirst(Self.reorderDragPrefix.count)),
+                  from != slot else { return }
+            DispatchQueue.main.async {
+                onMoveSlot(from, slot)
+            }
         }
         return true
     }

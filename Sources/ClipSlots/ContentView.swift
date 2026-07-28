@@ -129,9 +129,6 @@ struct ContentView: View {
                     .padding(.horizontal, AppTheme.pagePadding)
                     .padding(.vertical, 8)
 
-                // P2-25 (v2.10.9): 当自动存储/粘贴游标指向别的组/页时提示。
-                crossGroupCursorHint
-
                 ScrollViewReader { scrollProxy in
                     ScrollView {
                         // v2.5: No results hint
@@ -157,6 +154,11 @@ struct ContentView: View {
                     }
                     .background(AppTheme.windowBackground(colorScheme))
                     .transaction { $0.animation = nil }
+                    // v2.10.19: 跨组游标提示改为悬浮 overlay，紧贴内容区顶部，不再推高槽位区域。
+                    .overlay(alignment: .top) {
+                        crossGroupCursorHint
+                            .allowsHitTesting(true)
+                    }
                     // v2.9.37: when the footer "上次粘贴" button flashes a slot, scroll it
                     // into view so the highlighted card is always visible after the jump.
                     .onChange(of: store.flashHighlightSlot) { target in
@@ -582,7 +584,7 @@ struct ContentView: View {
                 onBack: { store.autoPasteCursorGoBack() },
                 onReset: { store.autoPasteCursorReset() },
                 backHelp: "回退读游标：撤销最近一次自动粘贴的推进（回到上一个槽位）",
-                resetHelp: "重置读游标：下次 Cmd+1 从第一个非空槽重新开始"
+                resetHelp: "重置读游标：下次 Cmd+1 从当前组第一个非空槽重新开始"
             )
 
             Divider().frame(height: 26)
@@ -1106,6 +1108,8 @@ struct ContentView: View {
             onEditText: { newText in store.updateTextSlot(slot, text: newText) },
             onEditHTML: { html in store.updateHTMLSlot(slot, html: html) },
             onDropFiles: { urls in store.importDroppedFiles(urls, toSlot: slot) },
+            onClearBody: { store.clearSlotBody(slot) },
+            onMoveSlot: { from, to in store.moveSlotWithinCurrentGroup(from: from, to: to) },
             isLastPasted: store.isLastPasted(slot: slot, groupId: store.currentSpecialSlotId),
             isFlashHighlighted: store.flashHighlightSlot == FlashHighlightTarget(groupId: store.currentSpecialSlotId, slot: slot),
             store: store,
@@ -1179,26 +1183,50 @@ struct ContentView: View {
         let readHint = autoMode.autoPasteEnabled ? crossGroupCursorLabel(store.autoPastePreview) : nil
         if writeHint != nil || readHint != nil {
             HStack(spacing: 12) {
-                if let writeHint {
-                    HStack(spacing: 5) {
-                        Circle().fill(Color.green).frame(width: 7, height: 7)
-                        Text("写游标在其他组：\(writeHint)")
+                if let writeHint, let addr = store.autoStorePreview {
+                    Button {
+                        store.jumpToCursorAddress(addr)
+                    } label: {
+                        HStack(spacing: 5) {
+                            Circle().fill(Color.green).frame(width: 7, height: 7)
+                            Text("写游标在其他组：\(writeHint)")
+                            Image(systemName: "arrow.right.circle.fill")
+                                .font(.system(size: 9))
+                                .foregroundColor(.secondary.opacity(0.7))
+                        }
                     }
+                    .buttonStyle(.plain)
+                    .help("点击跳转到写游标所在槽位")
                 }
-                if let readHint {
-                    HStack(spacing: 5) {
-                        Circle().fill(Color.blue).frame(width: 7, height: 7)
-                        Text("读游标在其他组：\(readHint)")
+                if let readHint, let addr = store.autoPastePreview {
+                    Button {
+                        store.jumpToCursorAddress(addr)
+                    } label: {
+                        HStack(spacing: 5) {
+                            Circle().fill(Color.blue).frame(width: 7, height: 7)
+                            Text("读游标在其他组：\(readHint)")
+                            Image(systemName: "arrow.right.circle.fill")
+                                .font(.system(size: 9))
+                                .foregroundColor(.secondary.opacity(0.7))
+                        }
                     }
+                    .buttonStyle(.plain)
+                    .help("点击跳转到读游标所在槽位")
                 }
             }
             .font(.caption)
             .foregroundColor(.secondary)
             .padding(.horizontal, 10)
             .padding(.vertical, 5)
-            .background(Capsule().fill(Color.secondary.opacity(0.12)))
-            .padding(.horizontal, AppTheme.pagePadding)
-            .padding(.bottom, 4)
+            // v2.10.19: 半透明胶囊悬浮在内容区顶部（overlay，不占布局高度），
+            // 避免此前作为 VStack 兄弟节点把整个槽位区域向下压低。
+            .background(
+                Capsule()
+                    .fill(.regularMaterial)
+                    .overlay(Capsule().stroke(Color.secondary.opacity(0.18), lineWidth: 0.5))
+            )
+            .shadow(color: .black.opacity(0.12), radius: 4, y: 1)
+            .padding(.top, 6)
         }
     }
 

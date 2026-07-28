@@ -585,6 +585,10 @@ final class SlotStoreObservable: ObservableObject {
         loadConnectionMapForCurrentGroup()
         refreshTrigger = UUID()
 
+        // v2.10.19: 游标跟随激活组——每次切到新组时重置读游标，
+        // 下一次自动粘贴从「该组第一个非空槽」开始（含 A→B→A 切回 A 也重置到 A 头）。
+        try? specialStorage.resetAutoPasteCursor()
+
         recomputeAutoPreviews() // v2.10.3 (P2): refresh cursor badges for the new group
 
         showToast("已预览「\(currentSpecialSlot?.name ?? id)」")
@@ -659,6 +663,11 @@ final class SlotStoreObservable: ObservableObject {
         loadSlots()
         loadConnectionMapForCurrentGroup()
         refreshTrigger = UUID()
+
+        // v2.10.19: 游标跟随激活组——切组后重置读游标，下一次自动粘贴从「该组第一个非空槽」开始。
+        // 注意：自动切换（autoAdvance）跨组时也经由此函数切组并触发本重置；随后 autoPasteFromHotkey
+        // 会在粘贴完成回调里 advanceAutoPasteCursor(to:) 把游标重新设到落点，故跨组连续推进不受影响。
+        try? specialStorage.resetAutoPasteCursor()
 
         recomputeAutoPreviews() // v2.10.3 (P2): refresh cursor badges for the new group
 
@@ -947,6 +956,31 @@ final class SlotStoreObservable: ObservableObject {
         }
     }
 
+    /// v2.10.19: 点击「跨组游标提示」跳转到游标所在的组/页并高亮闪烁该槽位（滚动 + 高亮）。
+    func jumpToCursorAddress(_ addr: SlotAddress) {
+        guard specialSlots.contains(where: { $0.id == addr.groupId }),
+              addr.slot >= 1, addr.slot <= config.slots else { return }
+
+        if currentSpecialSlotId != addr.groupId {
+            withAnimation(.easeInOut(duration: 0.28)) {
+                switchSpecialSlot(id: addr.groupId)
+            }
+        }
+
+        let target = FlashHighlightTarget(groupId: addr.groupId, slot: addr.slot)
+        let token = UUID()
+        flashHighlightToken = token
+        withAnimation(.easeInOut(duration: 0.3)) {
+            flashHighlightSlot = target
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { [weak self] in
+            guard let self, self.flashHighlightToken == token else { return }
+            withAnimation(.easeInOut(duration: 0.3)) {
+                self.flashHighlightSlot = nil
+            }
+        }
+    }
+
     func maybeAutoAdvance(afterPasting slot: Int, in specialSlotId: String, suppress: Bool = false) {
         guard !suppress else { return } // v2.10.0: 自动粘贴自行管理读游标推进，跳过此处组切换
         guard isAutoAdvanceEnabled else { return }
@@ -1098,29 +1132,46 @@ final class SlotStoreObservable: ObservableObject {
 
         let cursor = validatedCursor(specialStorage.autoPasteCursor())
         let autoAdvance = AutoModeState.shared.autoAdvanceEnabled
+        let activeGroupId = currentSpecialSlotId
 
-        // P2-1 (v2.10.16): 修复「从头开始」在多组场景失效。
-        // 线性推进模式下（autoAdvance = true），读游标为空有两种情况：首次按下、以及走到全局末尾被
-        // resetAutoPasteCursor() 置空后再次按下。此时必须从「全局第一个非空槽」重启，而不是走
-        // findNextNonEmptySlot 里 cursor==nil 的兜底（linearStartIndex 会以 startGroupId=当前组
-        // 为起点）。因为反复 Cmd+1 会跨组线性推进并把当前组切到落点组，走到末尾时当前组已是最后一个组，
-        // 若仍以当前组为起点就只会从最后一个组重扫到末尾，永远回不到第一页第一组。
-        // 这里接通此前从未被调用的 firstNonEmptySlot()（按 页→组→槽 全局顺序取第一个非空槽）作为重启原语。
-        // 仅作用于 autoAdvance=true 且无游标的重启路径；组内循环模式(autoAdvance=false)与已有游标的
-        // tape 推进保持原逻辑不变。自动存储方向完全不经过此分支，行为不受影响。
+        // v2.10.19: 自动粘贴游标锁定「当前激活组」，与「自动切换」开关解耦。
+        // 此前 autoAdvance=true 且无游标时会走 firstNonEmptySlot()（全局第一页第一组）重启，
+        // 而 autoAdvance 状态还间接影响起点，导致：关掉自动切换后游标跑到第一个页面、忽略当前组。
+        // 新语义：无论自动切换开/关，起点与轮转范围都以「当前激活组」为基准。
+        // - 游标不在当前激活组（切组 / 跨进程改动）→ 视为「在当前组从头开始」，绝不回退全局。
+        let cursorInActiveGroup: SlotAddress? = (cursor?.groupId == activeGroupId) ? cursor : nil
+
         let target: SlotAddress?
-        if autoAdvance, cursor == nil {
-            target = manager.firstNonEmptySlot()
-        } else {
+        if cursorInActiveGroup == nil {
+            // 全新起点：只取「当前激活组」的第一个非空槽（组内域，cursor=nil）。不跨组、不跳全局。
+            // 整组为空时返回 nil，走下方「组为空」提示分支。
             target = manager.findNextNonEmptySlot(
-                from: cursor,
-                startGroupId: currentSpecialSlotId,
+                from: nil,
+                startGroupId: activeGroupId,
+                autoAdvance: false
+            )
+        } else {
+            // 组内推进；autoAdvance 决定「组内粘完后」是否跨组继续（ON 跨组，OFF 组内循环）。
+            target = manager.findNextNonEmptySlot(
+                from: cursorInActiveGroup,
+                startGroupId: activeGroupId,
                 autoAdvance: autoAdvance
             )
         }
 
         guard let target = target else {
-            // 全部粘贴完毕：重置读游标，下次按下从头开始（第一个非空槽）。
+            if cursorInActiveGroup == nil {
+                // 当前激活组整组为空：明确提示，不静默跳过、不自动切到其他组（无论自动切换开/关）。
+                let name = specialSlots.first(where: { $0.id == activeGroupId })?.name ?? "当前组"
+                showFloatingNotice(FloatingNotice(
+                    title: "「\(name)」没有可粘贴的内容",
+                    subtitle: "该组所有槽位均为空，已停止（不会跳到其他组）",
+                    iconName: "exclamationmark.triangle.fill",
+                    kind: .warning
+                ))
+                return
+            }
+            // 自动切换 ON 且已线性推进到全局末尾（后续再无非空组）：重置读游标并提示，不循环卡死。
             try? specialStorage.resetAutoPasteCursor()
             recomputeAutoPreviews()
             showFloatingNotice(FloatingNotice(
@@ -1190,15 +1241,20 @@ final class SlotStoreObservable: ObservableObject {
                 return !self.specialStorage.get(addr.slot, in: addr.groupId).isEmpty
             }
         )
-        // P2-1 (v2.10.16): 预览角标须与 autoPasteFromHotkey 的实际落点保持一致——线性推进模式下
-        // 读游标为空时，下一次粘贴从「全局第一个非空槽」开始，因此预览也走 firstNonEmptySlot()，
-        // 避免角标停留在当前组而与真实起点不符。写游标（自动存储）预览不经过此分支，行为不受影响。
+        // v2.10.19: 预览角标须与 autoPasteFromHotkey 一致——起点与轮转范围锁定「当前激活组」，
+        // 与自动切换开关解耦。游标不在当前组则视为「当前组从头开始」，不回退全局第一页。
         let pasteCursor = validatedCursor(specialStorage.autoPasteCursor())
-        if autoAdvance, pasteCursor == nil {
-            autoPastePreview = pasteManager.firstNonEmptySlot()
+        let pasteCursorInActiveGroup: SlotAddress? =
+            (pasteCursor?.groupId == currentSpecialSlotId) ? pasteCursor : nil
+        if pasteCursorInActiveGroup == nil {
+            autoPastePreview = pasteManager.findNextNonEmptySlot(
+                from: nil,
+                startGroupId: currentSpecialSlotId,
+                autoAdvance: false
+            )
         } else {
             autoPastePreview = pasteManager.findNextNonEmptySlot(
-                from: pasteCursor,
+                from: pasteCursorInActiveGroup,
                 startGroupId: currentSpecialSlotId,
                 autoAdvance: autoAdvance
             )
@@ -1241,13 +1297,13 @@ final class SlotStoreObservable: ObservableObject {
         ))
     }
 
-    /// 读游标重置到初始（从第一个非空槽重新开始），并刷新预览角标。
+    /// 读游标重置到当前激活组的第一个非空槽（与切组时的自动行为一致），并刷新预览角标。
     func autoPasteCursorReset() {
         try? specialStorage.resetAutoPasteCursor()
         recomputeAutoPreviews()
         showFloatingNotice(FloatingNotice(
             title: "读游标已重置",
-            subtitle: "下一次 Cmd+1 从第一个非空槽重新开始",
+            subtitle: "下一次 Cmd+1 从当前组第一个非空槽重新开始",
             iconName: "backward.end",
             kind: .info
         ))
@@ -3866,6 +3922,95 @@ final class SlotStoreObservable: ObservableObject {
         refreshTrigger = UUID()
         NSLog("[ClipSlots] CLEAR specialSlot=\(activeId) slot=\(slot)")
         recomputeAutoPreviews()   // P1-5 (v2.10.7): 清空后重算游标角标（下一写入点/读取点）
+    }
+
+    /// v2.10.19: 只清空槽位「主体文本内容」（items），保留附件列表不变。
+    /// 供槽位卡片内容区的叉号按钮调用，与整体清空（clearSlot）区分。
+    func clearSlotBody(_ slot: Int) {
+        let activeId = currentSpecialSlotId
+        var content = contentForSlot(slot)
+
+        // 已经没有主体内容则无需处理（避免误清附件 / 无谓写盘）。
+        guard !content.items.isEmpty || content.htmlSource != nil else { return }
+
+        captureUndoSnapshot(title: "删除槽位 \(slot) 内容")
+
+        suppressWatcher() // v2.9.4 (#2): self-write
+        cancelPendingClipboardRestore()
+
+        content.items = []
+        content.htmlSource = nil
+        content.timestamp = Date()
+        // 附件（content.attachments）原样保留。
+        _ = specialStorage.set(slot, content: content, in: activeId)
+
+        ThumbnailProvider.shared.invalidateSlot(specialSlotId: activeId, slot: slot)
+
+        var newSlots = slots
+        newSlots[slot] = content
+        slots = newSlots
+        slotRenderTokens["\(activeId)::\(slot)"] = UUID()
+
+        loadedSpecialSlotId = activeId
+        refreshTrigger = UUID()
+        NSLog("[ClipSlots] CLEAR BODY specialSlot=\(activeId) slot=\(slot) keptAttachments=\(content.attachments.count)")
+        recomputeAutoPreviews()
+        showFloatingNotice(FloatingNotice(
+            title: "已删除内容",
+            subtitle: content.attachments.isEmpty ? "槽位 \(slot)" : "槽位 \(slot)（附件已保留）",
+            iconName: "xmark.circle",
+            kind: .info
+        ))
+    }
+
+    /// v2.10.19: 在「当前组内」把槽位内容（主体 + 附件 + 标签）从 `from` 位置移动到 `to` 位置，
+    /// 其余槽位按序前移/后移填补，实现拖拽排序。槽位编号固定 1...N，因此这里重排的是「内容」。
+    func moveSlotWithinCurrentGroup(from: Int, to: Int) {
+        let n = config.slots
+        guard n >= 2,
+              from >= 1, from <= n,
+              to >= 1, to <= n,
+              from != to else { return }
+
+        let activeId = currentSpecialSlotId
+
+        captureUndoSnapshot(title: "移动槽位 \(from) → \(to)")
+
+        // 读取当前组全部槽位的 (内容, 标签) 快照。
+        var pairs: [(content: SlotContent, label: String?)] = []
+        for s in 1...n {
+            pairs.append((content: contentForSlot(s), label: labels[s]))
+        }
+
+        // 数组下标从 0 开始：把 from-1 元素移动到 to-1。
+        let moving = pairs.remove(at: from - 1)
+        pairs.insert(moving, at: to - 1)
+
+        suppressWatcher() // v2.9.4 (#2): self-write
+        cancelPendingClipboardRestore()
+
+        var newSlots = slots
+        var newLabels = labels
+        for (idx, pair) in pairs.enumerated() {
+            let slotNo = idx + 1
+            _ = specialStorage.set(slotNo, content: pair.content, in: activeId)
+            _ = specialStorage.setLabel(slotNo, label: pair.label, in: activeId)
+            newSlots[slotNo] = pair.content
+            if let lbl = pair.label, !lbl.isEmpty {
+                newLabels[slotNo] = lbl
+            } else {
+                newLabels.removeValue(forKey: slotNo)
+            }
+            slotRenderTokens["\(activeId)::\(slotNo)"] = UUID()
+            ThumbnailProvider.shared.invalidateSlot(specialSlotId: activeId, slot: slotNo)
+        }
+        slots = newSlots
+        labels = newLabels
+
+        loadedSpecialSlotId = activeId
+        refreshTrigger = UUID()
+        NSLog("[ClipSlots] MOVE slot specialSlot=\(activeId) from=\(from) to=\(to)")
+        recomputeAutoPreviews()
     }
 
     func clearSlotWithConfirmation(_ slot: Int) {

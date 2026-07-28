@@ -118,9 +118,18 @@ struct NodeAttachmentButton: View {
             }
             .buttonStyle(.plain)
             .help(attachmentCount > 0 ? "附件：\(attachmentCount) 个，点击管理" : "添加附件")
-            .popover(isPresented: $showingAttachments, arrowEdge: .top) {
-                AttachmentManagerPopover(slot: slot, store: store)
-            }
+            // v2.10.19: 用 .semitransient 的 NSPopover 替代 SwiftUI 默认 .transient 弹窗。
+            // 默认 transient 弹窗在 App 失焦（切到 Finder 选文件）时会自动关闭，导致无法把
+            // 文件从 Finder 拖进「拖拽文件到这里」面板。semitransient 在切到其他 App 时保持打开，
+            // 只在用户与本窗口交互 / 主动关闭 / Esc 时才关闭，从而支持从 Finder 拖入。
+            .background(
+                SemiTransientPopoverAnchor(
+                    isPresented: $showingAttachments,
+                    preferredEdge: .minY
+                ) {
+                    AttachmentManagerPopover(slot: slot, store: store)
+                }
+            )
 
             if attachmentCount > 0 {
                 Button {
