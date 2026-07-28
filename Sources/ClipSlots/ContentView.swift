@@ -129,6 +129,10 @@ struct ContentView: View {
                     .padding(.horizontal, AppTheme.pagePadding)
                     .padding(.vertical, 8)
 
+                // v2.10.21: 跨组游标提示胶囊改为紧贴分类标签栏下方的独立行，
+                // 不再 overlay 在 ScrollView 顶部（原方案会遮挡第一行槽位卡片标题）。
+                crossGroupCursorHint
+
                 ScrollViewReader { scrollProxy in
                     ScrollView {
                         // v2.5: No results hint
@@ -154,11 +158,6 @@ struct ContentView: View {
                     }
                     .background(AppTheme.windowBackground(colorScheme))
                     .transaction { $0.animation = nil }
-                    // v2.10.19: 跨组游标提示改为悬浮 overlay，紧贴内容区顶部，不再推高槽位区域。
-                    .overlay(alignment: .top) {
-                        crossGroupCursorHint
-                            .allowsHitTesting(true)
-                    }
                     // v2.9.37: when the footer "上次粘贴" button flashes a slot, scroll it
                     // into view so the highlighted card is always visible after the jump.
                     .onChange(of: store.flashHighlightSlot) { target in
