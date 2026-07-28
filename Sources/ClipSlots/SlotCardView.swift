@@ -17,9 +17,8 @@ struct SlotCardView: View {
     var onEditText: ((String) -> Void)? = nil
     var onEditHTML: ((String) -> Void)? = nil
     var onDropFiles: (([URL]) -> Void)? = nil
-    // v2.10.19: 单独删除主体文本内容（保留附件）；组内拖拽排序回调。
+    // v2.10.19: 单独删除主体文本内容（保留附件）。
     var onClearBody: (() -> Void)? = nil
-    var onMoveSlot: ((_ from: Int, _ to: Int) -> Void)? = nil
 
     // v2.9.36: when true, this slot was the most recent paste target and shows a
     // persistent "上次粘贴" badge in the top-right corner until another slot is pasted.
@@ -52,8 +51,6 @@ struct SlotCardView: View {
     @State private var editingText = ""
     @State private var isDropTargeted = false
     @State private var isPressed = false
-    // v2.10.19: 组内拖拽排序：是否作为放置目标高亮。
-    @State private var isReorderTargeted = false
 
     @Environment(\.colorScheme) private var colorScheme
 
@@ -62,32 +59,49 @@ struct SlotCardView: View {
             headerRow
 
             // Thumbnail area — split empty vs filled to prevent @State image reuse
-            if content.isEmpty {
-                EmptySlotThumbnailView()
-            } else if content.isVideoFile, let url = content.primaryFileURL {
-                InlineSlotVideoPreview(url: url)
-                    .clipShape(RoundedRectangle(cornerRadius: AppTheme.smallCornerRadius, style: .continuous))
-                    .contentShape(RoundedRectangle(cornerRadius: AppTheme.smallCornerRadius, style: .continuous))
-                    .overlay(
-                        RoundedRectangle(cornerRadius: AppTheme.smallCornerRadius, style: .continuous)
-                            .fill(Color.clear)
-                            .contentShape(RoundedRectangle(cornerRadius: AppTheme.smallCornerRadius, style: .continuous))
-                            .onTapGesture {
-                                // v2.7.35: AVPlayerView is an NSView and can swallow SwiftUI gestures.
-                                // Put the click layer above it so video behaves like image cards.
+            Group {
+                if content.isEmpty {
+                    EmptySlotThumbnailView()
+                } else if content.isVideoFile, let url = content.primaryFileURL {
+                    InlineSlotVideoPreview(url: url)
+                        .clipShape(RoundedRectangle(cornerRadius: AppTheme.smallCornerRadius, style: .continuous))
+                        .contentShape(RoundedRectangle(cornerRadius: AppTheme.smallCornerRadius, style: .continuous))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: AppTheme.smallCornerRadius, style: .continuous)
+                                .fill(Color.clear)
+                                .contentShape(RoundedRectangle(cornerRadius: AppTheme.smallCornerRadius, style: .continuous))
+                                .onTapGesture {
+                                    // v2.7.35: AVPlayerView is an NSView and can swallow SwiftUI gestures.
+                                    // Put the click layer above it so video behaves like image cards.
+                                    showingPreview = true
+                                }
+                        )
+                        .help("点击查看视频大图预览")
+                } else {
+                    SlotThumbnailView(content: content, specialSlotId: specialSlotId, slot: slot)
+                        .clipShape(RoundedRectangle(cornerRadius: AppTheme.smallCornerRadius, style: .continuous))
+                        .onTapGesture {
+                            if content.canPreview {
                                 showingPreview = true
                             }
-                    )
-                    .help("点击查看视频大图预览")
-            } else {
-                SlotThumbnailView(content: content, specialSlotId: specialSlotId, slot: slot)
-                    .clipShape(RoundedRectangle(cornerRadius: AppTheme.smallCornerRadius, style: .continuous))
-                    .onTapGesture {
-                        if content.canPreview {
-                            showingPreview = true
                         }
+                        .help(content.canPreview ? "点击查看大图" : "")
+                }
+            }
+            // v2.10.20: 「删除主体文本」叉号从 metadata 行移到内容预览框左上角，
+            // 避开右上角卡片级「上次粘贴」角标；仅当槽位有主体文本内容时显示。
+            .overlay(alignment: .topLeading) {
+                if let onClearBody, (!content.items.isEmpty || content.htmlSource != nil) {
+                    Button(action: onClearBody) {
+                        Image(systemName: "xmark.circle.fill")
+                            .font(.system(size: 15))
+                            .foregroundColor(.secondary.opacity(0.75))
+                            .background(Circle().fill(Color(NSColor.controlBackgroundColor).opacity(0.9)).frame(width: 14, height: 14))
                     }
-                    .help(content.canPreview ? "点击查看大图" : "")
+                    .buttonStyle(.plain)
+                    .help("删除此槽位的文本内容（保留附件）")
+                    .padding(6)
+                }
             }
 
             // Metadata — fixed single-line, with the attachment button pinned on the right.
@@ -103,17 +117,6 @@ struct SlotCardView: View {
                     .help(content.metadataSummary)
 
                 Spacer(minLength: 4)
-
-                // v2.10.19: 单独删除主体文本内容的叉号（仅当有主体内容时显示），不影响附件。
-                if let onClearBody, (!content.items.isEmpty || content.htmlSource != nil) {
-                    Button(action: onClearBody) {
-                        Image(systemName: "xmark.circle.fill")
-                            .font(.system(size: 13))
-                            .foregroundColor(.secondary.opacity(0.7))
-                    }
-                    .buttonStyle(.plain)
-                    .help("删除此槽位的文本内容（保留附件）")
-                }
 
                 if let store = store {
                     NodeAttachmentButton(slot: slot, store: store)
@@ -166,18 +169,6 @@ struct SlotCardView: View {
         .onDrop(of: [UTType.fileURL.identifier], isTargeted: $isDropTargeted) { providers in
             handleFileDrop(providers)
         }
-        // v2.10.19: 组内拖拽排序放置目标（接收拖拽手柄携带的源槽位编号）。
-        .onDrop(of: [UTType.plainText.identifier], isTargeted: $isReorderTargeted) { providers in
-            handleReorderDrop(providers)
-        }
-        .overlay(
-            RoundedRectangle(cornerRadius: AppTheme.cornerRadius, style: .continuous)
-                .strokeBorder(
-                    isReorderTargeted ? Color.accentColor.opacity(0.8) : Color.clear,
-                    lineWidth: isReorderTargeted ? 2 : 0
-                )
-                .allowsHitTesting(false)
-        )
         .overlay(alignment: .center) {
             if isDropTargeted {
                 DropImportOverlay(slot: slot)
@@ -289,37 +280,8 @@ struct SlotCardView: View {
         .help("这是最近一次粘贴的槽位")
     }
 
-    // v2.10.19: 组内拖拽排序手柄。横线 icon，悬停变抓手光标（grab），拖拽携带源槽位编号。
-    private var dragHandle: some View {
-        Image(systemName: "line.3.horizontal")
-            .font(.system(size: 12, weight: .semibold))
-            .foregroundColor(.secondary.opacity(0.7))
-            .frame(width: 20, height: 24)
-            .contentShape(Rectangle())
-            .help("拖拽调整槽位顺序")
-            .onHover { hovering in
-                if hovering {
-                    NSCursor.openHand.push()
-                } else {
-                    NSCursor.pop()
-                }
-            }
-            .onDrag {
-                // 携带源槽位编号，带自定义前缀避免与普通文本拖放混淆。
-                NSItemProvider(object: "\(Self.reorderDragPrefix)\(slot)" as NSString)
-            }
-    }
-
-    /// 拖拽排序 payload 前缀，标识这是一次「槽位重排」而非普通文本拖放。
-    static let reorderDragPrefix = "clipslots-slot-reorder:"
-
     private var headerRow: some View {
         HStack(spacing: 10) {
-            // v2.10.19: 组内拖拽排序手柄（仅非空槽位显示）。悬停变抓手光标，可拖拽改变槽位顺序。
-            if !content.isEmpty, onMoveSlot != nil {
-                dragHandle
-            }
-
             ZStack {
                 Circle()
                     .fill(AppTheme.slotBadgeBackground(colorScheme, isEmpty: content.isEmpty))
@@ -636,33 +598,6 @@ struct SlotCardView: View {
 
         group.notify(queue: .main) {
             if !urls.isEmpty { onDropFiles(urls) }
-        }
-        return true
-    }
-
-    // v2.10.19: 处理组内拖拽排序的放置：解析源槽位编号，回调 onMoveSlot(from, to: 本槽位)。
-    private func handleReorderDrop(_ providers: [NSItemProvider]) -> Bool {
-        guard let onMoveSlot else { return false }
-        guard let provider = providers.first(where: {
-            $0.hasItemConformingToTypeIdentifier(UTType.plainText.identifier)
-        }) else { return false }
-
-        provider.loadItem(forTypeIdentifier: UTType.plainText.identifier, options: nil) { item, _ in
-            var raw: String? = nil
-            if let data = item as? Data {
-                raw = String(data: data, encoding: .utf8)
-            } else if let s = item as? String {
-                raw = s
-            } else if let ns = item as? NSString {
-                raw = ns as String
-            }
-            guard let raw,
-                  raw.hasPrefix(Self.reorderDragPrefix),
-                  let from = Int(raw.dropFirst(Self.reorderDragPrefix.count)),
-                  from != slot else { return }
-            DispatchQueue.main.async {
-                onMoveSlot(from, slot)
-            }
         }
         return true
     }

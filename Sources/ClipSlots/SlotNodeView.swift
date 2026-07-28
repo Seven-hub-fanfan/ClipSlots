@@ -93,6 +93,10 @@ struct NodeAttachmentButton: View {
     // v2.7.75: local mirror of the "不再提醒" toggle inside the confirm popover.
     @State private var suppressConfirmToggle = false
 
+    // v2.10.20: 附件面板改用浮动 NSPanel 承载（见 AttachmentManagerPanel.swift）。
+    @State private var panelController = AttachmentManagerPanelController()
+    @State private var buttonAnchor = AttachmentButtonScreenAnchor()
+
     // v2.7.75: persisted preference — when true, the red ✕ clears attachments
     // immediately without showing the confirm popover. Shared across all nodes.
     private static let suppressClearConfirmKey = "suppressAttachmentClearConfirm"
@@ -112,24 +116,14 @@ struct NodeAttachmentButton: View {
         ZStack(alignment: .topTrailing) {
             Button {
                 NSLog("[ClipSlots] attachment button tapped slot=\(slot) count=\(attachmentCount)")
-                showingAttachments = true
+                toggleAttachmentPanel()
             } label: {
                 pill
             }
             .buttonStyle(.plain)
             .help(attachmentCount > 0 ? "附件：\(attachmentCount) 个，点击管理" : "添加附件")
-            // v2.10.19: 用 .semitransient 的 NSPopover 替代 SwiftUI 默认 .transient 弹窗。
-            // 默认 transient 弹窗在 App 失焦（切到 Finder 选文件）时会自动关闭，导致无法把
-            // 文件从 Finder 拖进「拖拽文件到这里」面板。semitransient 在切到其他 App 时保持打开，
-            // 只在用户与本窗口交互 / 主动关闭 / Esc 时才关闭，从而支持从 Finder 拖入。
-            .background(
-                SemiTransientPopoverAnchor(
-                    isPresented: $showingAttachments,
-                    preferredEdge: .minY
-                ) {
-                    AttachmentManagerPopover(slot: slot, store: store)
-                }
-            )
+            // v2.10.20: 用透明背景视图持续上报按钮的屏幕矩形，供浮动面板定位与关闭判断。
+            .background(AttachmentButtonAnchorReporter(holder: buttonAnchor))
 
             if attachmentCount > 0 {
                 Button {
@@ -157,6 +151,35 @@ struct NodeAttachmentButton: View {
                 }
             }
         }
+    }
+
+    // v2.10.20: 再次点击切换开合；打开时用按钮屏幕矩形定位浮动面板。
+    // 带兜底重试：若首帧 view.window 尚未就绪导致 rect 为 nil，下一 runloop 再试一次，
+    // 避免 v2.10.19 时序竞态导致「部分槽位点击无反应」。
+    private func toggleAttachmentPanel() {
+        if panelController.isVisible {
+            panelController.close()
+            showingAttachments = false
+            return
+        }
+        presentAttachmentPanel(retry: true)
+    }
+
+    private func presentAttachmentPanel(retry: Bool) {
+        guard let rect = buttonAnchor.screenRect() else {
+            if retry {
+                DispatchQueue.main.async { self.presentAttachmentPanel(retry: false) }
+            }
+            return
+        }
+        panelController.show(
+            anchor: rect,
+            slot: slot,
+            store: store,
+            anchorProvider: { buttonAnchor.screenRect() },
+            onClose: { showingAttachments = false }
+        )
+        showingAttachments = true
     }
 
     // v2.7.75: custom confirm popover carrying a "不再提醒" toggle.

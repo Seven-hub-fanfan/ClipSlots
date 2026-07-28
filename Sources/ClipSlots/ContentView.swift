@@ -1109,7 +1109,6 @@ struct ContentView: View {
             onEditHTML: { html in store.updateHTMLSlot(slot, html: html) },
             onDropFiles: { urls in store.importDroppedFiles(urls, toSlot: slot) },
             onClearBody: { store.clearSlotBody(slot) },
-            onMoveSlot: { from, to in store.moveSlotWithinCurrentGroup(from: from, to: to) },
             isLastPasted: store.isLastPasted(slot: slot, groupId: store.currentSpecialSlotId),
             isFlashHighlighted: store.flashHighlightSlot == FlashHighlightTarget(groupId: store.currentSpecialSlotId, slot: slot),
             store: store,

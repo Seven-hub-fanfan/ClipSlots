@@ -3963,56 +3963,6 @@ final class SlotStoreObservable: ObservableObject {
         ))
     }
 
-    /// v2.10.19: 在「当前组内」把槽位内容（主体 + 附件 + 标签）从 `from` 位置移动到 `to` 位置，
-    /// 其余槽位按序前移/后移填补，实现拖拽排序。槽位编号固定 1...N，因此这里重排的是「内容」。
-    func moveSlotWithinCurrentGroup(from: Int, to: Int) {
-        let n = config.slots
-        guard n >= 2,
-              from >= 1, from <= n,
-              to >= 1, to <= n,
-              from != to else { return }
-
-        let activeId = currentSpecialSlotId
-
-        captureUndoSnapshot(title: "移动槽位 \(from) → \(to)")
-
-        // 读取当前组全部槽位的 (内容, 标签) 快照。
-        var pairs: [(content: SlotContent, label: String?)] = []
-        for s in 1...n {
-            pairs.append((content: contentForSlot(s), label: labels[s]))
-        }
-
-        // 数组下标从 0 开始：把 from-1 元素移动到 to-1。
-        let moving = pairs.remove(at: from - 1)
-        pairs.insert(moving, at: to - 1)
-
-        suppressWatcher() // v2.9.4 (#2): self-write
-        cancelPendingClipboardRestore()
-
-        var newSlots = slots
-        var newLabels = labels
-        for (idx, pair) in pairs.enumerated() {
-            let slotNo = idx + 1
-            _ = specialStorage.set(slotNo, content: pair.content, in: activeId)
-            _ = specialStorage.setLabel(slotNo, label: pair.label, in: activeId)
-            newSlots[slotNo] = pair.content
-            if let lbl = pair.label, !lbl.isEmpty {
-                newLabels[slotNo] = lbl
-            } else {
-                newLabels.removeValue(forKey: slotNo)
-            }
-            slotRenderTokens["\(activeId)::\(slotNo)"] = UUID()
-            ThumbnailProvider.shared.invalidateSlot(specialSlotId: activeId, slot: slotNo)
-        }
-        slots = newSlots
-        labels = newLabels
-
-        loadedSpecialSlotId = activeId
-        refreshTrigger = UUID()
-        NSLog("[ClipSlots] MOVE slot specialSlot=\(activeId) from=\(from) to=\(to)")
-        recomputeAutoPreviews()
-    }
-
     func clearSlotWithConfirmation(_ slot: Int) {
         captureUndoSnapshot(title: "清空槽位 \(slot)")
         if !specialSlotSettings.confirmBeforeClearSingleSlot {
