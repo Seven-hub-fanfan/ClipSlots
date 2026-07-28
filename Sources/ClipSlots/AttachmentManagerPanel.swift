@@ -54,57 +54,53 @@ struct AttachmentButtonAnchorReporter: NSViewRepresentable {
 /// 切换槽位时是「A 的 popover 还在关、B 的 popover 已在开」两个独立控制器的动画同时进行，
 /// 出现卡顿 / 动画打架。现在所有槽位共用同一个控制器管理 NSPopover 生命周期。
 ///
-/// v2.10.24（本次）：切换槽位改为**并行**方案。v2.10.23 的「先 performClose 旧的、待
-/// popoverDidClose 回调后再 show 新的」串行策略需要等待旧 popover 的关闭动画（约
-/// 0.2s），切换时有明显等待/卡顿感。现在改为：
-///   - 未显示 → 直接 show。
-///   - 已显示（切到另一个槽位）→ **立即** show 新 popover，同时异步 performClose 旧的，
-///     两者动画并行进行。效果：切换附件和第一次打开一样快，无等待感。
-///   - 为防止旧 popover 关闭时的 popoverDidClose 回调误清空「新 popover」的状态，
-///     控制器只在关闭的 popover 正是当前 `self.popover` 时才复位状态（陈旧的旧实例关闭被忽略）。
+/// v2.10.24：切换槽位改为「并行开新关旧」方案（立即 show 新 popover + 异步 performClose 旧
+/// popover）。但该方案存在严重时序竞态：`reallyShow` 中 `self.popover = pop` 在 `pop.show()`
+/// **之后**才赋值，展示新 popover 时若同步触发旧 popover 的 `popoverDidClose`，此刻
+/// `self.popover` 仍指向旧实例，guard 误判为「当前 popover」从而复位状态 / 触发 onClose，
+/// 表现为「附件面板打开后立即被关闭」。
+///
+/// v2.10.25（本次）：彻底放弃「同时关旧 / 开新」思路，改为**复用同一个单例 NSPopover**：
+///   - 控制器持有唯一的 `popover` 实例（init 时创建，delegate/behavior 固定），生命周期内不销毁。
+///   - 切换槽位时只更新 `contentViewController`（换绑新槽位数据）并重新 `show(relativeTo:)`
+///     锚定到新按钮——**不调用 close，也不等待任何关闭动画**。系统会把同一个 popover 自然地
+///     从旧按钮移动到新按钮，切换瞬时完成，且完全不会触发 close 回调，从根本上杜绝
+///     「刚打开就被关」的竞态。
+///   - `popoverDidClose` 只在用户真正收起面板（点窗口其他区域、再次点同一按钮）时触发，
+///     用于复位 `currentSlot` 并回调 onClose。
 final class AttachmentManagerPanelController: NSObject, NSPopoverDelegate {
-    /// 全局共享控制器：所有槽位的附件面板共用同一个控制器。
+    /// 全局共享控制器：所有槽位的附件面板共用同一个控制器与同一个 NSPopover。
     static let shared = AttachmentManagerPanelController()
 
-    /// 当前正在展示（或最近一次展示）的 popover。
-    private var popover: NSPopover?
+    /// 唯一复用的 popover 实例；生命周期内不重建，切换槽位时只更新内容 + 重新锚定。
+    private let popover: NSPopover
     private var onClose: (() -> Void)?
     /// 当前 popover 正在展示的槽位号（用于「点同一个按钮再切换关闭」判断）。
     private(set) var currentSlot: Int?
 
-    var isVisible: Bool { popover?.isShown ?? false }
+    override init() {
+        let pop = NSPopover()
+        pop.contentSize = NSSize(width: 360, height: 480)
+        // .semitransient：切到其他 App（Finder 拖文件）时不关闭；仅与主窗口交互时关闭。
+        pop.behavior = .semitransient
+        pop.animates = true
+        self.popover = pop
+        super.init()
+        pop.delegate = self
+    }
+
+    var isVisible: Bool { popover.isShown }
 
     /// 指定槽位的面板是否正在显示（点同一个附件按钮时用于切换关闭）。
     func isVisible(forSlot slot: Int) -> Bool {
         isVisible && currentSlot == slot
     }
 
-    /// 相对附件按钮的 backing NSView 弹出 popover（箭头锚定、跟随主窗口）。
+    /// 相对附件按钮的 backing NSView 弹出 / 移动 popover（箭头锚定、跟随主窗口）。
     ///
-    /// 并行切换（v2.10.24）：若已有别的槽位的 popover 在展示，先立即展示新的，再异步关闭旧的，
-    /// 让「开新」与「关旧」动画并行，消除切换时的等待感。
+    /// 复用单例（v2.10.25）：无论首次打开还是切换槽位，都只更新内容并重新锚定，绝不 close，
+    /// 因此不会触发任何 close 回调，切换瞬时且无自关闭竞态。
     func show(
-        anchor: AttachmentButtonScreenAnchor,
-        slot: Int,
-        store: SlotStoreObservable,
-        onClose: @escaping () -> Void
-    ) {
-        guard anchor.view?.window != nil else { return }
-
-        // 记下旧 popover（可能是别的槽位）；它将与新 popover 的展示动画并行关闭。
-        let oldPopover = popover
-
-        // 立即展示新 popover（reallyShow 会把 self.popover 指向新实例）。
-        reallyShow(anchor: anchor, slot: slot, store: store, onClose: onClose)
-
-        // 并行关闭旧的：异步 performClose，与新 popover 的展开动画同时进行，不阻塞、不等待。
-        if let oldPopover, oldPopover.isShown {
-            DispatchQueue.main.async { oldPopover.performClose(nil) }
-        }
-    }
-
-    /// 真正创建并展示 popover。要求锚点 NSView 已在窗口层级中。
-    private func reallyShow(
         anchor: AttachmentButtonScreenAnchor,
         slot: Int,
         store: SlotStoreObservable,
@@ -115,32 +111,27 @@ final class AttachmentManagerPanelController: NSObject, NSPopoverDelegate {
         self.onClose = onClose
         self.currentSlot = slot
 
-        let hosting = NSHostingController(rootView: AttachmentManagerPopover(slot: slot, store: store))
-        let pop = NSPopover()
-        pop.contentViewController = hosting
-        pop.contentSize = NSSize(width: 360, height: 480)
-        // .semitransient：切到其他 App（Finder 拖文件）时不关闭；仅与主窗口交互时关闭。
-        pop.behavior = .semitransient
-        pop.animates = true
-        pop.delegate = self
-        pop.show(relativeTo: anchorView.bounds, of: anchorView, preferredEdge: .maxY)
-        self.popover = pop
+        // 复用同一 popover：换绑新槽位内容，再重新锚定到新按钮。已显示时系统会把它移动到新锚点，
+        // 不调用 close、不等待动画，因此不会产生 close 回调，从根本上避免「打开即关闭」竞态。
+        popover.contentViewController = NSHostingController(
+            rootView: AttachmentManagerPopover(slot: slot, store: store)
+        )
+        popover.show(relativeTo: anchorView.bounds, of: anchorView, preferredEdge: .maxY)
     }
 
     func close() {
-        popover?.performClose(nil)
+        popover.performClose(nil)
     }
 
     // MARK: NSPopoverDelegate
 
     func popoverDidClose(_ notification: Notification) {
-        // 并行切换时旧 popover 会晚于新 popover 关闭；只有当关闭的正是「当前 popover」时
-        // 才复位状态与触发 onClose，避免旧实例的关闭误清空刚展示的新 popover。
+        // 只处理本控制器自己的 popover 的真实关闭（用户点窗口其他区域 / 再次点同一按钮收起）。
+        // 切换槽位走的是 show（不 close），不会进入这里，因此不存在旧实例误清空新面板的问题。
         guard let closed = notification.object as? NSPopover, closed === popover else {
             return
         }
 
-        popover = nil
         currentSlot = nil
         let cb = onClose
         onClose = nil
