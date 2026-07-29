@@ -99,19 +99,15 @@ extension SlotContent {
     // MARK: - Image Detection
 
     /// All image-related pasteboard types found in this content.
+    /// v2.10.33 (bug #2): delegate to the canonical `SlotContent.isImagePasteboardType`
+    /// so this list, `preview`, and the decode paths below can never disagree (the old
+    /// local pattern list omitted bare-extension types and some UTIs, letting an image
+    /// slot decode to nil and render a "[png]" text preview).
     private var imageTypes: [String] {
-        let imageTypePatterns = ["public.png", "public.tiff", "public.jpeg", "public.image",
-                                 "com.apple.icns", "com.compuserve.gif", "public.heic",
-                                 "public.heif", "public.avci", "public.webp", "org.webmproject.webp"]
         var found: Set<String> = []
         for itemList in items {
-            for item in itemList {
-                let lower = item.type.lowercased()
-                for pattern in imageTypePatterns {
-                    if lower == pattern || lower.contains("image") {
-                        found.insert(item.type)
-                    }
-                }
+            for item in itemList where SlotContent.isImagePasteboardType(item.type) {
+                found.insert(item.type)
             }
         }
         return Array(found)
@@ -186,8 +182,11 @@ extension SlotContent {
         }
         for itemList in items {
             for item in itemList {
-                let lower = item.type.lowercased()
-                if lower.contains("image") || lower == "public.png" || lower == "public.tiff" || lower == "public.jpeg" {
+                // v2.10.33 (bug #2): match the canonical image predicate used by
+                // `hasImage`/`imageTypes`/`preview`, so every type that takes the image
+                // branch (heic/gif/webp/bare-extension included) is actually attempted
+                // here instead of decoding to nil and falling back to a text preview.
+                if SlotContent.isImagePasteboardType(item.type) {
                     if let image = NSImage(data: item.data) {
                         if let cacheKey {
                             // C-3 (v2.10.31): pass the decompressed-byte cost so the
@@ -231,8 +230,11 @@ extension SlotContent {
         }
         for itemList in items {
             for item in itemList {
-                let lower = item.type.lowercased()
-                if lower.contains("image") || lower == "public.png" || lower == "public.tiff" || lower == "public.jpeg" {
+                // v2.10.33 (bug #2): match the canonical image predicate used by
+                // `hasImage`/`imageTypes`/`preview`, so every type that takes the image
+                // branch (heic/gif/webp/bare-extension included) is actually attempted
+                // here instead of decoding to nil and falling back to a text preview.
+                if SlotContent.isImagePasteboardType(item.type) {
                     if let thumb = ClipSlotsImageIO.downsampledImage(data: item.data, maxPixel: maxPixel) {
                         if let cacheKey {
                             Self.inlineThumbnailCache.setObject(thumb, forKey: cacheKey, cost: ClipSlotsImageIO.pixelCost(of: thumb))
@@ -252,8 +254,11 @@ extension SlotContent {
     func inlineImagePointSize() -> CGSize? {
         for itemList in items {
             for item in itemList {
-                let lower = item.type.lowercased()
-                if lower.contains("image") || lower == "public.png" || lower == "public.tiff" || lower == "public.jpeg" {
+                // v2.10.33 (bug #2): match the canonical image predicate used by
+                // `hasImage`/`imageTypes`/`preview`, so every type that takes the image
+                // branch (heic/gif/webp/bare-extension included) is actually attempted
+                // here instead of decoding to nil and falling back to a text preview.
+                if SlotContent.isImagePasteboardType(item.type) {
                     if let size = ClipSlotsImageIO.pointSize(data: item.data) { return size }
                 }
             }
@@ -339,6 +344,33 @@ extension SlotContent {
         cache.countLimit = 128
         return cache
     }()
+
+    // MARK: - Cache Invalidation (v2.10.33, bug #1)
+
+    /// Drop the cached decoded image / downsampled thumbnail / metadata summary for a
+    /// specific content identity (`contentId::updatedAt`). Called by the pack importer
+    /// right after it mints a fresh `contentId` + `updatedAt` for each imported slot so
+    /// that no stale entry — however unlikely a key coincidence — can bleed a local
+    /// slot's thumbnail onto a freshly imported one. Thumbnails are keyed with a
+    /// `::<maxPixel>` suffix, so we clear the known grid size (512) plus the raw key.
+    static func invalidateInlineCaches(contentId: String, updatedAt: TimeInterval) {
+        guard !contentId.isEmpty else { return }
+        let base = "\(contentId)::\(updatedAt)"
+        inlineImageCache.removeObject(forKey: base as NSString)
+        metadataSummaryCache.removeObject(forKey: base as NSString)
+        for maxPixel in [512, 256, 128, 1024] {
+            inlineThumbnailCache.removeObject(forKey: "\(base)::\(maxPixel)" as NSString)
+        }
+    }
+
+    /// Nuke every inline image cache. Used as a belt-and-suspenders sweep after a bulk
+    /// pack import so the grid re-decodes each slot from its own (fresh-identity) bytes.
+    /// Cheap: entries are lazily rebuilt on next render. v2.10.33 (bug #1).
+    static func purgeAllInlineImageCaches() {
+        inlineImageCache.removeAllObjects()
+        inlineThumbnailCache.removeAllObjects()
+        metadataSummaryCache.removeAllObjects()
+    }
 
     /// Summary string like "PNG · 512×512" or "PDF 文件".
     var metadataSummary: String {

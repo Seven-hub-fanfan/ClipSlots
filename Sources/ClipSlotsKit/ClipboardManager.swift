@@ -114,6 +114,36 @@ public struct SlotContent: Codable {
     /// Composite cache key that scopes a thumbnail by special-slot, slot number,
     /// content identity, and save timestamp. Changing any dimension invalidates
     /// the cached thumbnail.
+    /// Canonical set of pasteboard types that denote image data. v2.10.33 (bug #2):
+    /// this is the single source of truth shared by `preview` (Kit), `hasImage`,
+    /// `imageTypes`, `decodedInlineImage`, `decodedInlineThumbnail` and
+    /// `inlineImagePointSize` (all in the app's SlotContent+Thumbnail extension). It
+    /// covers standard UTIs (public.png/jpeg/tiff/heic/heif/gif/webp/bmp/…) AND the
+    /// bare file-extension strings ("png"/"jpeg"/"heic"/…) that some legacy or imported
+    /// slots stored instead of a full UTI. Before this, `hasImage` matched a broad UTI
+    /// list while the decode paths only matched png/tiff/jpeg + `contains("image")`, so
+    /// a heic/gif/webp/bare-extension image took the image branch yet decoded to nil and
+    /// fell back to a "[png]"/"[heic]" TEXT preview instead of a thumbnail.
+    public static let imagePasteboardTypes: Set<String> = [
+        // Standard UTIs
+        "public.png", "public.jpeg", "public.jpeg-2000", "public.tiff",
+        "public.heic", "public.heif", "public.heics", "public.avci",
+        "public.camera-raw-image", "com.compuserve.gif", "com.apple.icns",
+        "com.microsoft.bmp", "public.webp", "org.webmproject.webp",
+        // Bare file extensions (legacy / imported slots)
+        "png", "jpg", "jpeg", "jpeg2000", "jp2", "tif", "tiff", "gif",
+        "heic", "heif", "webp", "bmp", "icns"
+    ]
+
+    /// True when `type` denotes image data. Matches any type containing the substring
+    /// "image" (covers `public.image` and vendor image UTIs) or any member of
+    /// `imagePasteboardTypes`. Case-insensitive. v2.10.33 (bug #2).
+    public static func isImagePasteboardType(_ type: String) -> Bool {
+        let lower = type.lowercased()
+        if lower.contains("image") { return true }
+        return imagePasteboardTypes.contains(lower)
+    }
+
     public func thumbnailKey(specialSlotId: String, slot: Int) -> String {
         // v2.10.28 (fix 空槽位附件面板打开即关闭): an empty slot has no persisted
         // content.json, so `readSlotContent` mints a BRAND-NEW random `contentId`
@@ -175,7 +205,14 @@ public struct SlotContent: Codable {
                     }
                     return "[文件]"
                 }
-                if item.type.hasPrefix("public.") && item.type.contains("image") {
+                // v2.10.33 (bug #2): use the canonical image predicate instead of the
+                // old `hasPrefix("public.") && contains("image")` test. That test MISSED
+                // every real image UTI — `public.png` / `public.jpeg` / `public.heic` /
+                // `com.compuserve.gif` etc. do NOT contain the substring "image" — so an
+                // image slot fell through to the "[<type>]" fallback below and the card
+                // rendered a "[png]" text preview instead of the thumbnail. Centralizing
+                // detection keeps preview, `hasImage` and the decode paths in lockstep.
+                if SlotContent.isImagePasteboardType(item.type) {
                     return "[图片 \(item.data.count / 1024)KB]"
                 }
             }

@@ -77,12 +77,12 @@ final class AutoModeState: ObservableObject {
         // 自动存储 / 自动粘贴：默认关闭（key 不存在 → false）
         self._autoStoreEnabled = defaults.bool(forKey: Keys.autoStore)
         self._autoPasteEnabled = defaults.bool(forKey: Keys.autoPaste)
-        // 自动切换：首次安装 / 无历史值时默认关闭。
-        // P2 (v2.10.13): 首装默认从 true 改为 false，避免新用户在未知情下自动存储/粘贴
-        // 跨组、跨页推进导致落点意外。仅当 key 不存在（全新安装）时用 false；已有用户在
-        // UserDefaults 中的历史选择照常读取，绝不覆盖。
+        // 自动切换：首次安装 / 无历史值时默认【开启】。
+        // v2.10.33: 用户明确要求自动切换默认打开（自动存储/自动粘贴仍默认关闭不变）。
+        // 仅当 key 不存在（全新安装）时用 true；已有用户在 UserDefaults 中的历史选择照常
+        // 读取，绝不覆盖。
         if defaults.object(forKey: Keys.autoAdvance) == nil {
-            self._autoAdvanceEnabled = false
+            self._autoAdvanceEnabled = true
         } else {
             self._autoAdvanceEnabled = defaults.bool(forKey: Keys.autoAdvance)
         }

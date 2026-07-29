@@ -260,6 +260,14 @@ struct PackImporter {
             }
         }
 
+        // bug #1 (v2.10.33): belt-and-suspenders sweep of the process-wide inline image
+        // caches after a bulk import. Each imported slot already got a fresh identity +
+        // per-slot cache eviction above; this final purge guarantees the grid re-decodes
+        // every visible slot from its own bytes so no local thumbnail can bleed onto an
+        // imported slot even under an unforeseen cache-key coincidence. Cheap: caches are
+        // lazily rebuilt on next render.
+        SlotContent.purgeAllInlineImageCaches()
+
         return result
     }
 
@@ -336,7 +344,15 @@ struct PackImporter {
             content.htmlSource = packSlot.htmlSource
             content.label = packSlot.label
             content.attachments = restored
+            // bug #1 (v2.10.33): every imported slot MUST get a brand-new content identity
+            // so it can never share a thumbnail-cache key (`contentId::updatedAt`) with a
+            // pre-existing local slot. The old code minted a fresh `contentId` but reused
+            // the default `updatedAt`; whatever the pack carried, we now overwrite BOTH and
+            // then evict any (defensively) matching cache entry, so the grid always decodes
+            // the imported slot's own bytes instead of bleeding a local slot's image.
             content.contentId = UUID().uuidString
+            content.updatedAt = Date().timeIntervalSince1970
+            SlotContent.invalidateInlineCaches(contentId: content.contentId, updatedAt: content.updatedAt)
 
             _ = storage.set(slot, content: content, in: groupId)
             // PK-5 (v2.10.15): 经核对 SlotStorage.set / writeSlotContent 并不落盘 content.label
