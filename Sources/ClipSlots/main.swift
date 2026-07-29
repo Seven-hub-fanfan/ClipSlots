@@ -3357,7 +3357,12 @@ final class SlotStoreObservable: ObservableObject {
             return
         }
 
-        if contents.allSatisfy({ $0.primaryFileURL == nil && $0.inlineImage == nil }) {
+        // P1-4 (v2.10.34): 这里只是判断「这批槽位是否全是纯文本（无文件、无图片）」以决定走文本合并
+        // 快路径。原判据 `$0.inlineImage == nil` 会为【每个】槽位触发 inlineImage 的整图解码
+        // （NSImage 全分辨率解码，主线程同步），只为拿一个「是否为图」的布尔——一次「全部粘贴」若涉及
+        // 多张大图，会在主线程叠加多次全分辨率解码，直接卡顿掉帧。改用 `hasImage`（`!imageTypes.isEmpty`，
+        // 只看 item 类型、零解码）这一廉价谓词，语义等价而无解码开销。
+        if contents.allSatisfy({ $0.primaryFileURL == nil && !$0.hasImage }) {
             let merged = contents.compactMap { $0.plainText }.filter { !$0.isEmpty }.joined(separator: "\n\n")
             NSPasteboard.general.clearContents()
             NSPasteboard.general.setString(merged, forType: .string)
@@ -4825,16 +4830,33 @@ final class SlotStoreObservable: ObservableObject {
                     ), duration: 2.5)
                     return
                 }
-                var newSlots = self.slots
-                newSlots[targetSlot] = contentToWrite
-                self.slots = newSlots
-                self.slotRenderTokens["\(activeId)::\(targetSlot)"] = UUID()
-                self.loadedSpecialSlotId = activeId
-                self.refreshTrigger = UUID()
+                // P1-2 (v2.10.34): 组一致性守卫。本闭包在后台写盘（最长阻塞 ~5s 抢锁）完成后才回到
+                // 主线程，这期间用户可能已切到别的组（currentSpecialSlotId 变了）。磁盘写已按捕获的
+                // activeId 落到正确的组，但下面的内存刷新（slots / render token / loadedSpecialSlotId）
+                // 与 setLabel（其内部按【当前】currentSpecialSlotId 写盘+内存）若无条件执行，会把「旧组
+                // 的内容」灌进「新当前组」的内存视图，并把文件名标签持久化到错组——即污染错组内存 +
+                // 标签写错组。故仅当仍停留在 activeId 时才刷新内存并走 setLabel；已切组时跳过内存刷新，
+                // 且仅把文件名标签按 activeId 直接持久化到正确组的磁盘（不碰任何内存），避免标签丢失。
+                let stillOnActiveGroup = (self.currentSpecialSlotId == activeId)
+                if stillOnActiveGroup {
+                    var newSlots = self.slots
+                    newSlots[targetSlot] = contentToWrite
+                    self.slots = newSlots
+                    self.slotRenderTokens["\(activeId)::\(targetSlot)"] = UUID()
+                    self.loadedSpecialSlotId = activeId
+                    self.refreshTrigger = UUID()
 
-                // Update label to file name if present
-                if let fileURL = contentToWrite.primaryFileURL {
-                    self.setLabel(targetSlot, label: fileURL.lastPathComponent)
+                    // Update label to file name if present
+                    if let fileURL = contentToWrite.primaryFileURL {
+                        self.setLabel(targetSlot, label: fileURL.lastPathComponent)
+                    }
+                } else {
+                    NSLog("[ClipSlots] SAVE 回调发现已切组（active=\(activeId) current=\(self.currentSpecialSlotId)），"
+                        + "跳过内存刷新，仅按 activeId 持久化标签，避免污染错组内存 / 标签写错组")
+                    if let fileURL = contentToWrite.primaryFileURL {
+                        self.suppressWatcher() // 自写，避免文件监听回灌
+                        _ = self.specialStorage.setLabel(targetSlot, label: fileURL.lastPathComponent, in: activeId)
+                    }
                 }
 
                 NSLog("[ClipSlots] SAVE OK specialSlot=\(activeId) slot=\(targetSlot) contentId=\(contentToWrite.contentId) preview=\(contentToWrite.preview)")

@@ -1373,42 +1373,53 @@ public final class SpecialSlotStorage {
     /// 磁盘布局：单个槽位就是一个独立目录 baseDir/<specialSlotId>/<slot>/（含主体 + 全部附件），
     /// 整目录一次 copyItem 即可涵盖主体与附件。备份失败仅 NSLog、不阻断写入成功。
     private func backupSlotBeforeOverwriteIfNeeded(slot: Int, in specialSlotId: String) {
-        // 仅备份非空槽位（空槽覆盖不产生备份，避免污染回收站）。
-        let oldContent = slotStorage(for: specialSlotId).get(slot)
-        guard !oldContent.isEmpty else { return }
+        backupSlotDirToTrash(slot: slot, in: specialSlotId, namePrefix: "slot_overwritten")
+    }
+
+    /// P1-1 / P1-3 (v2.10.34): 把指定槽位的「非空」旧内容整目录快照进 .trash，供【覆盖写】与【单槽
+    /// clear】复用，使二者都拥有 30 天回滚窗口（对齐 delete 的软删除）。`namePrefix` 决定回收站条目
+    /// 前缀（覆盖→`slot_overwritten`，清空→`slot_cleared`）；末段为 Double 秒时间戳，供 trashEntryDate()
+    /// 统一识别与清理。必须在 storageLock 临界区内调用。备份失败仅 NSLog、不阻断调用方的破坏性操作。
+    ///
+    /// P1-3 (v2.10.34): 判空改用轻量 `SlotStorage.isSlotEmpty()`（只 stat / 枚举目录，不读 blob），不再
+    /// 用 `get()` 把该槽所有 item_*/*.bin 与内联 base64 附件全量 Data(contentsOf:) 读进内存——后者仅为
+    /// 拿一个 isEmpty 布尔，却对含大图 / 大内联附件的槽位每次覆盖 / 清空都产生一次与负载等大的瞬时
+    /// 分配，批量覆盖大图时叠加内存尖峰。真正的备份是对【目录】做 cloneOrCopyItem，本不需要内容字节。
+    private func backupSlotDirToTrash(slot: Int, in specialSlotId: String, namePrefix: String) {
+        // 仅备份非空槽位（空槽不产生备份，避免污染回收站）。
+        guard !slotStorage(for: specialSlotId).isSlotEmpty(slot) else { return }
         let slotDir = specialSlotDirectory(for: specialSlotId)
             .appendingPathComponent(String(slot))
         guard FileManager.default.fileExists(atPath: slotDir.path) else { return }
         let trashDir = baseDir.appendingPathComponent(".trash")
         try? FileManager.default.createDirectory(at: trashDir, withIntermediateDirectories: true)
-        // 命名 slot_overwritten_<specialSlotId>_<slot>_<秒.毫秒>：时间戳位于末段，与既有
-        // deleted_<id>_<ts> / page_deleted_<id>_<ts> 命名风格一致，且末段为 Double 可被 trashEntryDate() 识别。
+        // 命名 <prefix>_<specialSlotId>_<slot>_<秒.毫秒>：时间戳位于末段，与既有
+        // deleted_<id>_<ts> / page_deleted_<id>_<ts> / slot_overwritten_<...> 命名风格一致，
+        // 且末段为 Double 可被 trashEntryDate() 识别。
         var ts = Date().timeIntervalSince1970
         func target(_ ts: TimeInterval) -> URL {
             trashDir.appendingPathComponent(
-                "slot_overwritten_\(specialSlotId)_\(slot)_\(String(format: "%.3f", ts))")
+                "\(namePrefix)_\(specialSlotId)_\(slot)_\(String(format: "%.3f", ts))")
         }
         var trashTarget = target(ts)
         while FileManager.default.fileExists(atPath: trashTarget.path) {
             ts += 0.001   // 同毫秒碰撞：递增 1ms 直至路径空闲，保证唯一且时间戳仍准确可解析。
             trashTarget = target(ts)
         }
-        do {
-            // A-5 (v2.10.31): use clonefile(2) copy-on-write instead of a physical copyItem.
-            // The backup runs INSIDE the cross-process storageLock; a physical copy of a slot
-            // holding a large file (hundreds of MB) blocked GUI/CLI/FSEvents for seconds on
-            // every overwrite. `cloneOrCopyItem` clones in constant time on APFS and only falls
-            // back to copyItem on filesystems without clone support.
-            guard cloneOrCopyItem(at: slotDir, to: trashTarget) else {
-                NSLog("[ClipSlots] A-5: 覆盖前备份槽位旧内容到 .trash 失败（不阻断写入）"
-                    + " slot=\(slot) group=\(specialSlotId)")
-                return
-            }
-            // P1-C: 覆盖备份路径上也适时触发一次清理，避免 GUI 长会话「只写不删」时 .trash 无界堆积到
-            // 下一次删组/删页/启动才收敛。放到后台队列执行，不拖慢写入热路径。
-            DispatchQueue.global(qos: .utility).async { [weak self] in
-                self?.cleanupTrash()
-            }
+        // A-5 (v2.10.31): use clonefile(2) copy-on-write instead of a physical copyItem.
+        // The backup runs INSIDE the cross-process storageLock; a physical copy of a slot
+        // holding a large file (hundreds of MB) blocked GUI/CLI/FSEvents for seconds on
+        // every overwrite. `cloneOrCopyItem` clones in constant time on APFS and only falls
+        // back to copyItem on filesystems without clone support.
+        guard cloneOrCopyItem(at: slotDir, to: trashTarget) else {
+            NSLog("[ClipSlots] 备份槽位旧内容到 .trash 失败（不阻断操作）"
+                + " prefix=\(namePrefix) slot=\(slot) group=\(specialSlotId)")
+            return
+        }
+        // P1-C: 备份路径上也适时触发一次清理，避免 GUI 长会话「只写不删」时 .trash 无界堆积到
+        // 下一次删组/删页/启动才收敛。放到后台队列执行，不拖慢写入热路径。
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            self?.cleanupTrash()
         }
     }
 
@@ -1422,20 +1433,28 @@ public final class SpecialSlotStorage {
         // P2-4 (v2.10.16): 锁超时不再用 `try?` 静默吞掉——对齐 ST-4，超时记日志并返回 false，
         // 让调用方（GUI/CLI）能感知「清空」未生效，而非误以为成功。
         do {
-            try storageLock.withLock {
-                // STG-2 (v2.10.32): reject clear() on a group no longer in the index (see set()).
+            return try storageLock.withLock { () -> Bool in
+                // STG-2 / P1-5 (v2.10.34): reject clear() on a group no longer in the index (deleted/ghost).
+                // 此前只从闭包 return（Void），函数体随后仍无条件返回 true —— 被并发删除的 ghost 组上
+                // clear 实际什么都没做却回报成功，与 set() 的 `return false` 语义不一致，会误导 CLI/AI。
+                // 现让闭包返回 Bool，命中 ghost 组返回 false，如实反馈「未生效」。
                 guard loadIndex().specialSlots.contains(where: { $0.id == specialSlotId }) else {
                     NSLog("[ClipSlots] STG-2: refusing clear() on group '\(specialSlotId)' not present in index (deleted/ghost); skipped")
-                    return
+                    return false
                 }
+                // P1-1 (v2.10.34): 单槽 clear 也接入 .trash 软删除备份（清空前对非空槽整目录快照进 .trash）。
+                // `clip clear <slot>` 是无二次确认、AI 可直接调用的破坏性命令，此前是唯一未接入任何软删除
+                // 的破坏性路径（覆盖写 / 清空整组 / 删组 / 删页均已备份），属契约违背式的永久丢失。补齐后
+                // 拥有与它们一致的 30 天回滚窗口。备份失败仅 NSLog、不阻断清空。
+                backupSlotDirToTrash(slot: slot, in: specialSlotId, namePrefix: "slot_cleared")
                 slotStorage(for: specialSlotId).clear(slot)
                 var index = loadIndex()
                 if let idx = index.specialSlots.firstIndex(where: { $0.id == specialSlotId }) {
                     index.specialSlots[idx].updatedAt = Date()
                     try? saveIndex(index)
                 }
+                return true
             }
-            return true
         } catch {
             NSLog("[ClipSlots] clear(slot:\(slot) in:\(specialSlotId)) 获取存储锁失败，清空未执行：\(error.localizedDescription)")
             return false

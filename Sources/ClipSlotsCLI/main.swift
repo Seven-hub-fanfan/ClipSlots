@@ -16,7 +16,7 @@ import ClipSlotsKit
 // current release. This is the single source of truth surfaced by `version`,
 // `help` and per-command help (all reference CLI_VERSION), so no other literal
 // needs bumping.
-let CLI_VERSION = "2.10.33"
+let CLI_VERSION = "2.10.34"
 let DEFAULT_GROUP = "default"
 let DEFAULT_PAGE = "default_page"
 
@@ -1633,14 +1633,21 @@ func cmdClear(_ args: ParsedArgs) -> Never {
     let group = resolveGroup(args, inPage: resolvePageFlag(args)) // v2.9.35: page-scoped (flag parity with write)
     let n = parseSlot(args.positionals.first ?? args.flag("slot"))
     // v2.9.4 (#4): cross-process lock around the clear write.
+    var cleared = false
     do {
         try StorageLock.shared.withLock {
-            storage.clear(n, in: group)
+            cleared = storage.clear(n, in: group)
         }
     } catch let e as StorageLockError {
         fail(e.errorDescription ?? "storage is busy (lock timeout)", code: "LOCK_TIMEOUT")
     } catch {
         failWriteError(error, context: "clearing slot \(n) in group \(group)")
+    }
+    // P1-5 (v2.10.34): storage.clear() 命中已删除 / 幽灵组时返回 false（内存与索引都无此组，实际什么
+    // 都没清）。此前无视返回值恒回报 "cleared" 成功，属静默误报，会让 AI/脚本误以为已清空。现如实
+    // 返回 GROUP_NOT_FOUND 错误（对齐 resolveGroup 的组缺失语义），让调用方能感知清空未生效。
+    guard cleared else {
+        fail("group '\(group)' not found or already removed; nothing cleared", code: "GROUP_NOT_FOUND")
     }
     success(["slot": n, "group": group, "action": "cleared"])
 }

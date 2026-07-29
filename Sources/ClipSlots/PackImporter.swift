@@ -308,6 +308,17 @@ struct PackImporter {
                         if isSymlink {
                             NSLog("[ClipSlots] PackImporter PACK-1 拒绝符号链接附件（防越界读取包外文件）："
                                 + "\(att.name)（条目 \(file)）")
+                        } else if !resolvedURLStaysWithin(safeURL, root: attachmentsDir) {
+                            // P0-1 (v2.10.34): PACK-1 的 `.isSymbolicLinkKey` 只判断路径「末段(leaf)」是否
+                            // 软链，safeChildURL 又只用 standardizedFileURL 解析 `..`/`.`——两者都不检查
+                            // 「中间目录组件」是否为软链。恶意包可放一个指向系统目录的软链【目录】条目
+                            // （如 attachments/sub -> /etc），再令 file="sub/passwd"：名字级 Zip Slip 校验
+                            // 与 leaf 软链判定全过，随后 Data(contentsOf:)/copyItem 跟随中间软链读到解压
+                            // 目录外的 /etc/passwd 当作附件字节吸入用户数据（分享即外泄）。这里在真正读取
+                            // 前用 resolvingSymlinksInPath() 把【每一级组件】的软链全解析出真实路径，再重做
+                            // 一次「仍在 attachmentsDir 之内」的前缀校验；越界即整条附件跳过、绝不读其目标。
+                            NSLog("[ClipSlots] PackImporter P0-1 拒绝越界附件（软链穿越解压目录外，防任意文件读取）："
+                                + "\(att.name)（条目 \(file)）")
                         } else {
                         // D-1 (v2.10.31): 旧实现无差别用 `Data(contentsOf:)` 把附件整块读入内存再内联到
                         // attachments.json——单个超大文件（如 2GB 视频）会直接 OOM 崩溃。改为：先用元数据
@@ -491,6 +502,53 @@ struct PackImporter {
         return resolved
     }
 
+    /// P0-1 (v2.10.34): 把 `url` 的软链【每一级路径组件】全部解析成真实路径后，判断其是否仍位于
+    /// `root` 之内。`safeChildURL` 的 standardizedFileURL 只解析 `..`/`.`，`.isSymbolicLinkKey` 只查
+    /// leaf——都无法拦截「中间目录组件是软链」的穿越。`resolvingSymlinksInPath()` 会逐级解析软链，
+    /// 因此这里对 url 与 root 双方都解析后再做前缀比较，可堵住任意读侧软链穿越（读到解压目录外文件）。
+    private func resolvedURLStaysWithin(_ url: URL, root: URL) -> Bool {
+        let resolved = url.resolvingSymlinksInPath().standardizedFileURL
+        let rootResolved = root.resolvingSymlinksInPath().standardizedFileURL
+        let rootPrefix = rootResolved.path.hasSuffix("/") ? rootResolved.path : rootResolved.path + "/"
+        return resolved.path == rootResolved.path || resolved.path.hasPrefix(rootPrefix)
+    }
+
+    /// P0-1 (v2.10.34, 纵深防御): 在解压前拒绝任何含符号链接条目的包。/usr/bin/unzip 会原样恢复
+    /// symlink 条目，恶意包借此放一个指向系统目录的软链目录，再让 slot.json 的附件 file 走该软链
+    /// 读到包外任意文件（读侧路径穿越，读侧 `resolvedURLStaysWithin` 已能拦下）。这里用 `zipinfo`
+    /// 的长列表格式（首列为 Unix 权限位，符号链接以 'l' 开头）在源头识别并整包拒绝，作为第二道防线。
+    private func assertNoSymlinkEntries(_ packURL: URL) throws {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/zipinfo")
+        process.arguments = [packURL.path]   // 默认长列表：每条目一行，首列为权限位如 `lrwxrwxrwx`
+        let outPipe = Pipe()
+        let errPipe = Pipe()
+        process.standardOutput = outPipe
+        process.standardError = errPipe
+        do {
+            try process.run()
+        } catch {
+            throw PackImportError.unzipFailed("无法预检包内符号链接：\(error.localizedDescription)")
+        }
+        let outData = outPipe.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        guard process.terminationStatus == 0 else {
+            let errData = errPipe.fileHandleForReading.readDataToEndOfFile()
+            let msg = String(data: errData, encoding: .utf8) ?? "zipinfo exit \(process.terminationStatus)"
+            throw PackImportError.unzipFailed("包内符号链接预检失败：\(msg)")
+        }
+        let listing = String(data: outData, encoding: .utf8) ?? ""
+        for rawLine in listing.split(separator: "\n", omittingEmptySubsequences: true) {
+            let line = rawLine.trimmingCharacters(in: .whitespaces)
+            guard let first = line.split(separator: " ", omittingEmptySubsequences: true).first else { continue }
+            // Unix 权限位固定 10 字符（如 `lrwxrwxrwx` / `-rw-r--r--`），首字符 'l' 即符号链接条目。
+            // 头部（Archive:/Zip file size:）与尾部（"N files, ..."）不满足该形态，不会误判。
+            if first.count == 10, first.hasPrefix("l") {
+                throw PackImportError.unzipFailed("包内含符号链接条目，疑似路径穿越攻击，已拒绝导入：\(line)")
+            }
+        }
+    }
+
     /// D-6 (v2.10.31): Zip Slip 防护。/usr/bin/unzip 会原样解出条目路径（含 `../` 或绝对路径），
     /// 恶意 .clipslotspack 可借此写到目标解压根目录之外覆盖任意文件。这里在真正解压前用 `zipinfo -1`
     /// 列出包内所有条目，逐个校验：拒绝绝对路径，以及经 standardizedFileURL 解析 `..`/`.` 后仍逃逸出
@@ -544,6 +602,8 @@ struct PackImporter {
 
         // D-6 (v2.10.31): 解压前先做 Zip Slip 预检；发现越界条目直接抛错，绝不落盘。
         try assertNoZipSlip(packURL, extractingInto: dest)
+        // P0-1 (v2.10.34): 再拒绝任何符号链接条目（纵深防御，配合读侧 resolvedURLStaysWithin）。
+        try assertNoSymlinkEntries(packURL)
 
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/unzip")

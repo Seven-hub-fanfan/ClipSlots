@@ -23,6 +23,22 @@ final class AutoModeState: ObservableObject {
 
     private let defaults: UserDefaults
 
+    // P1-6 (v2.10.34): 三档开关的 getter 此前直接读 @Published 底层存储 `_autoXxxEnabled`，而 setter
+    // 在主线程写。后台线程（剪贴板等待、全局键盘事件回调等）会频繁读取这些开关——对同一存储的
+    // 非同步跨线程读/写属 data race（TSan 可报、极端时序下可读到撕裂/过期值）。这里用一把轻量
+    // NSLock 保护一份「纯值镜像」：所有读走镜像（线程安全、不触发 SwiftUI），写时先同步更新镜像，
+    // 再切主线程更新 @Published / UserDefaults。镜像与 @Published 始终由 setter 一起推进，二者一致。
+    private let stateLock = NSLock()
+    private var autoStoreValue: Bool
+    private var autoPasteValue: Bool
+    private var autoAdvanceValue: Bool
+
+    private func lockedRead(_ read: () -> Bool) -> Bool {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return read()
+    }
+
     // AU-2 (v2.10.15): @Published 写入（objectWillChange 的触发）必须发生在主线程。历史方案
     // 仅把 UserDefaults 副作用切回主线程并在 debug 断言，但 release 下后台线程（剪贴板等待 /
     // 键盘事件回调等）直接赋值仍会让 objectWillChange 在非主线程触发，导致 SwiftUI 更新时序
@@ -41,8 +57,9 @@ final class AutoModeState: ObservableObject {
     }
 
     var autoStoreEnabled: Bool {
-        get { _autoStoreEnabled }
+        get { lockedRead { self.autoStoreValue } }
         set {
+            stateLock.lock(); autoStoreValue = newValue; stateLock.unlock()
             writeOnMain {
                 self._autoStoreEnabled = newValue
                 self.defaults.set(newValue, forKey: Keys.autoStore)
@@ -51,8 +68,9 @@ final class AutoModeState: ObservableObject {
     }
 
     var autoPasteEnabled: Bool {
-        get { _autoPasteEnabled }
+        get { lockedRead { self.autoPasteValue } }
         set {
+            stateLock.lock(); autoPasteValue = newValue; stateLock.unlock()
             writeOnMain {
                 self._autoPasteEnabled = newValue
                 self.defaults.set(newValue, forKey: Keys.autoPaste)
@@ -61,8 +79,9 @@ final class AutoModeState: ObservableObject {
     }
 
     var autoAdvanceEnabled: Bool {
-        get { _autoAdvanceEnabled }
+        get { lockedRead { self.autoAdvanceValue } }
         set {
+            stateLock.lock(); autoAdvanceValue = newValue; stateLock.unlock()
             writeOnMain {
                 self._autoAdvanceEnabled = newValue
                 self.defaults.set(newValue, forKey: Keys.autoAdvance)
@@ -75,16 +94,24 @@ final class AutoModeState: ObservableObject {
         // AU-2 (v2.10.15): 初始化阶段直接写入底层 @Published 存储（构造发生在主线程、此时尚无
         // 观察者），无需经过切主线程的 setter。
         // 自动存储 / 自动粘贴：默认关闭（key 不存在 → false）
-        self._autoStoreEnabled = defaults.bool(forKey: Keys.autoStore)
-        self._autoPasteEnabled = defaults.bool(forKey: Keys.autoPaste)
+        let store = defaults.bool(forKey: Keys.autoStore)
+        let paste = defaults.bool(forKey: Keys.autoPaste)
         // 自动切换：首次安装 / 无历史值时默认【开启】。
         // v2.10.33: 用户明确要求自动切换默认打开（自动存储/自动粘贴仍默认关闭不变）。
         // 仅当 key 不存在（全新安装）时用 true；已有用户在 UserDefaults 中的历史选择照常
         // 读取，绝不覆盖。
+        let advance: Bool
         if defaults.object(forKey: Keys.autoAdvance) == nil {
-            self._autoAdvanceEnabled = true
+            advance = true
         } else {
-            self._autoAdvanceEnabled = defaults.bool(forKey: Keys.autoAdvance)
+            advance = defaults.bool(forKey: Keys.autoAdvance)
         }
+        self._autoStoreEnabled = store
+        self._autoPasteEnabled = paste
+        self._autoAdvanceEnabled = advance
+        // P1-6 (v2.10.34): 同步初始化纯值镜像，使 getter 从构造起即返回正确值。
+        self.autoStoreValue = store
+        self.autoPasteValue = paste
+        self.autoAdvanceValue = advance
     }
 }
