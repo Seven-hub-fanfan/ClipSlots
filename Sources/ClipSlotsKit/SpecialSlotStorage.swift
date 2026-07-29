@@ -1218,6 +1218,13 @@ public final class SpecialSlotStorage {
         slotStorage(for: specialSlotId).get(slot)
     }
 
+    /// PERF (switch lag): cheap emptiness probe that avoids loading a slot's full payload.
+    /// Prefer this over `get(_:in:).isEmpty` on hot paths (auto-mode cursor previews,
+    /// auto-advance scans) where only emptiness — not the content — is needed.
+    public func isEmpty(_ slot: Int, in specialSlotId: String) -> Bool {
+        slotStorage(for: specialSlotId).isSlotEmpty(slot)
+    }
+
     @discardableResult
     public func set(_ slot: Int, content: SlotContent, in specialSlotId: String) -> Bool {
         var content = content

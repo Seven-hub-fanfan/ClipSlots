@@ -104,24 +104,88 @@ public final class SlotStorage {
     // MARK: - Slot Content
 
     public func get(_ slot: Int) -> SlotContent {
-        (try? StorageLock.shared.withLock {
+        let slotDir = baseURL.appendingPathComponent(String(slot))
+        // PERF (switch lag): fast cache-hit path that does NOT take the cross-process
+        // flock. Page/group switching reloads EVERY slot of the target group (loadSlots)
+        // AND probes slots for the auto-mode cursor previews, so `get` is called dozens
+        // of times per switch. The old implementation wrapped the whole body — including
+        // the common cache-hit branch — in `StorageLock.withLock`, so each cache hit paid
+        // for a flock acquire + holder-PID file write + release (plus spin-retries when
+        // the CLI/FSEvents watcher held the lock). That per-slot syscall overhead is what
+        // made switching feel progressively laggier as data grew.
+        //
+        // Correctness: the in-memory cache is guarded by the in-process serial `queue`;
+        // the `dirFingerprint` stat below (st_ino + full-resolution mtime + size) detects
+        // any external (CLI) write, so a stale value can never be served without a re-read.
+        // No disk I/O of slot payloads happens on this path, so the cross-process lock is
+        // unnecessary here — it is still taken on the slow path where we actually read.
+        let diskFP = dirFingerprint(slotDir.path)
+        if let cached = queue.sync(execute: {
+            cache[slot].flatMap { cacheFingerprint[slot] == diskFP ? $0 : nil }
+        }) {
+            return cached
+        }
+
+        // Slow path (cache miss or external change): read under the cross-process lock so
+        // the directory enumeration cannot race a concurrent atomic slot swap.
+        return (try? StorageLock.shared.withLock {
             queue.sync {
-                let slotDir = baseURL.appendingPathComponent(String(slot))
-                // P1-6 (v2.10.9): serve from cache only if the on-disk fingerprint is
-                // unchanged; otherwise re-read so a CLI write is reflected immediately —
-                // even a same-second write on a coarse-mtime volume (st_ino/nsec/size
-                // change catches it where a 1-second mtime would not).
-                let diskFP = dirFingerprint(slotDir.path)
-                if let cached = cache[slot], cacheFingerprint[slot] == diskFP {
+                // Re-check inside the lock: another thread may have populated the cache
+                // (or an external write may have landed) while we waited for the flock.
+                let fp = dirFingerprint(slotDir.path)
+                if let cached = cache[slot], cacheFingerprint[slot] == fp {
                     return cached
                 }
-
                 let content = readSlotContent(from: slotDir)
                 cache[slot] = content
-                cacheFingerprint[slot] = diskFP
+                cacheFingerprint[slot] = fp
                 return content
             }
         }) ?? SlotContent()
+    }
+
+    /// PERF (switch lag): cheap emptiness probe that does NOT load item payloads into
+    /// memory. Mirrors `SlotContent.isEmpty` (main items empty AND attachments empty) but
+    /// only stats / enumerates directory entries instead of reading every `.bin` blob.
+    ///
+    /// The auto-store / auto-paste cursor previews (`recomputeAutoPreviews`) run on EVERY
+    /// page/group switch and previously tested emptiness via `get().isEmpty`, which forced
+    /// a full-content disk read (all image/file bytes) of each probed slot — and, with
+    /// "自动切换" on, across many groups/pages. Probing the filesystem shape instead keeps
+    /// that scan proportional to the number of directory entries, not the payload size.
+    public func isSlotEmpty(_ slot: Int) -> Bool {
+        let slotDir = baseURL.appendingPathComponent(String(slot))
+        let diskFP = dirFingerprint(slotDir.path)
+        // Reuse the in-memory cache when fresh — avoids any filesystem work at all.
+        if let cached = queue.sync(execute: {
+            cache[slot].flatMap { cacheFingerprint[slot] == diskFP ? $0 : nil }
+        }) {
+            return cached.isEmpty
+        }
+
+        let fm = FileManager.default
+        var isDir: ObjCBool = false
+        guard fm.fileExists(atPath: slotDir.path, isDirectory: &isDir), isDir.boolValue else {
+            return true
+        }
+        // Non-empty attachments.json → slot is not empty. Use a local decoder so this can
+        // run off the serial `queue` without racing the shared `decoder` instance.
+        let attachmentsURL = slotDir.appendingPathComponent("attachments.json")
+        if let attData = try? Data(contentsOf: attachmentsURL),
+           let atts = try? JSONDecoder().decode([SlotContent.SlotAttachment].self, from: attData),
+           !atts.isEmpty {
+            return false
+        }
+        // Any item_* dir containing at least one .bin file → not empty.
+        if let entries = try? fm.contentsOfDirectory(at: slotDir, includingPropertiesForKeys: nil) {
+            for itemDir in entries where itemDir.lastPathComponent.hasPrefix("item_") {
+                if let files = try? fm.contentsOfDirectory(at: itemDir, includingPropertiesForKeys: nil),
+                   files.contains(where: { $0.pathExtension == "bin" }) {
+                    return false
+                }
+            }
+        }
+        return true
     }
 
     @discardableResult

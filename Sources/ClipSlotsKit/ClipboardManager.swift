@@ -115,7 +115,26 @@ public struct SlotContent: Codable {
     /// content identity, and save timestamp. Changing any dimension invalidates
     /// the cached thumbnail.
     public func thumbnailKey(specialSlotId: String, slot: Int) -> String {
-        "\(specialSlotId)::\(slot)::\(contentId)::\(updatedAt)"
+        // v2.10.28 (fix 空槽位附件面板打开即关闭): an empty slot has no persisted
+        // content.json, so `readSlotContent` mints a BRAND-NEW random `contentId`
+        // on every disk read (see SlotStorage.readSlotContent legacy branch). Because
+        // `contentForSlot` never trusts the in-memory copy for empty slots and always
+        // falls back to `storage.get()`, each grid body re-evaluation produced a
+        // different `contentId` → a different `thumbnailKey` → a changed SlotCardView
+        // `.id()`. SwiftUI then destroyed and recreated the card (and with it the
+        // NodeAttachmentButton's backing anchor NSView), tearing the anchor out of the
+        // window hierarchy. The .semitransient attachment NSPopover, anchored to that
+        // view, immediately lost its anchor and auto-closed — the "打开即关闭" bug that
+        // only ever hit empty slots. A non-empty slot persists a stable contentId, so
+        // its key was stable and its popover stayed open.
+        //
+        // Empty content is visually identical no matter what the ephemeral contentId
+        // is, so pin empty slots to a stable, identity-only key. This keeps the card
+        // (and its anchor NSView) alive across re-renders, so the popover stays open.
+        if isEmpty {
+            return "\(specialSlotId)::\(slot)::empty"
+        }
+        return "\(specialSlotId)::\(slot)::\(contentId)::\(updatedAt)"
     }
 
     public var preview: String {

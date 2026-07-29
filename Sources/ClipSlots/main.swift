@@ -838,7 +838,7 @@ final class SlotStoreObservable: ObservableObject {
         // `1...config.slots` an invalid range and crash.
         guard config.slots >= 1 else { return nil }
         var last: Int? = nil
-        for slot in 1...config.slots where !specialStorage.get(slot, in: specialSlotId).isEmpty {
+        for slot in 1...config.slots where !specialStorage.isEmpty(slot, in: specialSlotId) {
             last = slot
         }
         return last
@@ -1063,7 +1063,8 @@ final class SlotStoreObservable: ObservableObject {
             slotCount: config.slots,
             isEmpty: { [weak self] addr in
                 guard let self = self else { return false }
-                return self.specialStorage.get(addr.slot, in: addr.groupId).isEmpty
+                // PERF: cheap FS-shape probe instead of a full-content read.
+                return self.specialStorage.isEmpty(addr.slot, in: addr.groupId)
             }
         )
 
@@ -1126,7 +1127,8 @@ final class SlotStoreObservable: ObservableObject {
             slotCount: config.slots,
             isNonEmpty: { [weak self] addr in
                 guard let self = self else { return false }
-                return !self.specialStorage.get(addr.slot, in: addr.groupId).isEmpty
+                // PERF: cheap FS-shape probe instead of a full-content read.
+                return !self.specialStorage.isEmpty(addr.slot, in: addr.groupId)
             }
         )
 
@@ -1223,7 +1225,10 @@ final class SlotStoreObservable: ObservableObject {
             slotCount: config.slots,
             isEmpty: { [weak self] addr in
                 guard let self = self else { return false }
-                return self.specialStorage.get(addr.slot, in: addr.groupId).isEmpty
+                // PERF: cheap FS-shape probe instead of loading full slot content just
+                // to check emptiness (this runs on every switch and can scan across
+                // groups/pages when 自动切换 is on).
+                return self.specialStorage.isEmpty(addr.slot, in: addr.groupId)
             }
         )
         autoStorePreview = storeManager.findNextEmptySlot(
@@ -1238,7 +1243,8 @@ final class SlotStoreObservable: ObservableObject {
             slotCount: config.slots,
             isNonEmpty: { [weak self] addr in
                 guard let self = self else { return false }
-                return !self.specialStorage.get(addr.slot, in: addr.groupId).isEmpty
+                // PERF: cheap FS-shape probe instead of a full-content read.
+                return !self.specialStorage.isEmpty(addr.slot, in: addr.groupId)
             }
         )
         // v2.10.19: 预览角标须与 autoPasteFromHotkey 一致——起点与轮转范围锁定「当前激活组」，
@@ -4373,7 +4379,7 @@ final class SlotStoreObservable: ObservableObject {
             }
 
             // Overwrite check
-            let hasContent = (1...config.slots).contains { !specialStorage.get($0, in: activeId).isEmpty }
+            let hasContent = (1...config.slots).contains { !specialStorage.isEmpty($0, in: activeId) }
             if hasContent && specialSlotSettings.confirmBeforeOverwrite {
                 guard confirmOverwriteCurrentSpecialSlot() else { return }
             }
@@ -4774,7 +4780,7 @@ final class SlotStoreObservable: ObservableObject {
 
     private func countOverwrites(targets: ArraySlice<(specialSlotId: String, slot: Int)>) -> Int {
         targets.filter { target in
-            !specialStorage.get(target.slot, in: target.specialSlotId).isEmpty
+            !specialStorage.isEmpty(target.slot, in: target.specialSlotId)
         }.count
     }
 
