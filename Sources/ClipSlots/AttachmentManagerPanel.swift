@@ -75,6 +75,12 @@ final class AttachmentManagerPanelController: NSObject, NSPopoverDelegate {
     }
 
     /// 相对附件按钮的 backing NSView 弹出 popover（箭头锚定、跟随主窗口）。
+    ///
+    /// v2.10.29 性能优化：连续点击不同槽位的附件按钮时，旧逻辑是「动画关旧 popover →
+    /// 等 popoverDidClose 回调 → 下一 runloop 再动画开新 popover」——一次切换要串起
+    /// 「淡出动画 + runloop 跳转 + 淡入动画」，用户看到的就是「卡顿一下再弹出」。
+    /// 现改为：切换槽位时**同步无动画关闭旧 popover 并立即无动画展示新 popover**，
+    /// 消除双段动画与 runloop 空窗，切换瞬时完成；首次打开（无 popover 在显示）仍带动画。
     func show(
         anchor: AttachmentButtonScreenAnchor,
         slot: Int,
@@ -83,26 +89,37 @@ final class AttachmentManagerPanelController: NSObject, NSPopoverDelegate {
     ) {
         guard anchor.view?.window != nil else { return }
 
-        // 把「真正展示」封装成请求，便于在关闭回调后串行执行。
-        let request: () -> Void = { [weak self] in
-            self?.reallyShow(anchor: anchor, slot: slot, store: store, onClose: onClose)
-        }
-
-        // 已经打开（可能是别的槽位）→ 先收起，待关闭回调后再开，避免并发动画卡顿。
+        // 已经打开（可能是别的槽位）→ 直接同步无动画切换，不再走「关→等回调→开」的异步链。
         if let existing = popover, existing.isShown {
-            pendingShow = request
-            existing.performClose(nil)
+            // 关掉旧 popover：摘掉 delegate，避免其 popoverDidClose 触发 pendingShow 逻辑；
+            // 关掉动画让收起瞬时完成（无淡出）。
+            pendingShow = nil
+            existing.delegate = nil
+            existing.animates = false
+            existing.close()
+            popover = nil
+            // 手动回调上一个槽位的 onClose（原本由 popoverDidClose 负责）。
+            let previousOnClose = self.onClose
+            self.onClose = nil
+            previousOnClose?()
+            currentSlot = nil
+
+            // 立即无动画展示新槽位面板，切换瞬时可见，无卡顿空窗。
+            reallyShow(anchor: anchor, slot: slot, store: store, onClose: onClose, animates: false)
         } else {
-            request()
+            // 首次打开：保留原有淡入动画。
+            reallyShow(anchor: anchor, slot: slot, store: store, onClose: onClose, animates: true)
         }
     }
 
     /// 真正创建并展示 popover。要求锚点 NSView 已在窗口层级中。
+    /// - Parameter animates: 是否带淡入动画。首次打开为 true；连续切换槽位时为 false（瞬时切换，去卡顿）。
     private func reallyShow(
         anchor: AttachmentButtonScreenAnchor,
         slot: Int,
         store: SlotStoreObservable,
-        onClose: @escaping () -> Void
+        onClose: @escaping () -> Void,
+        animates: Bool
     ) {
         guard let anchorView = anchor.view, anchorView.window != nil else { return }
 
@@ -115,7 +132,7 @@ final class AttachmentManagerPanelController: NSObject, NSPopoverDelegate {
         pop.contentSize = NSSize(width: 360, height: 480)
         // .semitransient：切到其他 App（Finder 拖文件）时不关闭；仅与主窗口交互时关闭。
         pop.behavior = .semitransient
-        pop.animates = true
+        pop.animates = animates
         pop.delegate = self
         pop.show(relativeTo: anchorView.bounds, of: anchorView, preferredEdge: .maxY)
         self.popover = pop
