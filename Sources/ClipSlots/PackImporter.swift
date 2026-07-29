@@ -85,11 +85,13 @@ struct PackImporter {
         var createdPageIds: [String] = []
         var createdGroupIds: [String] = []
 
-        // P2-9 (v2.10.16): 覆盖模式下对「已有组」会先 clearAllSlots 清空原内容，而 PK-3 回滚只删除
-        // 本次新建的页/组，被清空的已有组既不在 createdGroupIds 范围内又已丢失原内容，回滚无法恢复。
-        // 改为采用「快照恢复」（方案 B）：覆盖前先把被覆盖组的原槽位内容+标签快照到内存并登记到此清单，
-        // catch 回滚时先删新建页/组，再把每个被覆盖组从快照原样写回，确保中途失败不丢原数据。
-        var overwrittenSnapshots: [GroupSnapshot] = []
+        // P2-9 (v2.10.16): 覆盖模式下对「已有组」原本会 clearAllSlots 清空原内容，回滚只能靠内存快照
+        // 经 storage.set 逐槽写回——而 storage.set 会分配新磁盘空间，若失败诱因正是「磁盘已满」，回滚
+        // 同样失败且被 try? 吞掉，最终「旧数据没了、新数据只写了一半」，组被损坏。
+        // PK-3 (v2.10.30): 改为「磁盘级 rename 备份」（不占新空间）：覆盖前把被覆盖组目录整体 moveItem
+        // 到同卷备份路径并登记到此清单；catch 回滚时先删半成品新组目录，再把备份 rename 回原位——回滚
+        // 完全不依赖空闲磁盘空间，磁盘满也能可靠还原。导入整体成功后再删除这些备份目录。
+        var overwrittenBackups: [GroupDirBackup] = []
 
         do {
         for manifestPage in manifest.pages {
@@ -158,11 +160,11 @@ struct PackImporter {
                         createdGroupIds.append(newId) // PK-3 (v2.10.15): 追踪新建组以便回滚
                     case .overwrite:
                         targetGroupId = existingGroup.id
-                        // P2-9 (v2.10.16): 覆盖前先把被覆盖组的原槽位内容+标签快照到内存并登记待恢复
-                        // 清单，再清空。此前直接 clearAllSlots，一旦清空后、写入过程中抛错触发回滚，
-                        // 原内容既不在 createdGroupIds 范围内又已被清空，将永久丢失。
-                        overwrittenSnapshots.append(snapshotGroup(targetGroupId))
-                        try storage.clearAllSlots(in: targetGroupId)
+                        // PK-3 (v2.10.30): 覆盖前用磁盘级 rename 把被覆盖组目录整体移到同卷备份路径
+                        // （不占新空间），替代旧的「内存快照 + storage.set 回滚」。rename 后原组目录被清空，
+                        // 后续 writeSlots 会把新内容写入一个全新的空组目录；一旦中途失败，catch 回滚只需把
+                        // 备份 rename 回原位即可完整还原，且不依赖任何空闲磁盘空间（磁盘满也能成功）。
+                        overwrittenBackups.append(try backupGroupDirForOverwrite(targetGroupId))
                     }
                 } else {
                     // 无冲突或新页：始终新建组（新 UUID），绝不覆盖本地已有组。
@@ -185,20 +187,36 @@ struct PackImporter {
             for gid in createdGroupIds { try? storage.deleteSpecialSlot(id: gid) }
             for pid in createdPageIds { try? storage.deletePage(id: pid) }
 
-            // P2-9 (v2.10.16): 恢复被覆盖组的原内容（方案 B）。被覆盖组在清空后可能已写入了部分
-            // 新槽位，故恢复前先再次 clearAllSlots 抹掉半成品，再从快照逐槽写回内容与标签，使其回到
-            // 导入前的状态。注意：被覆盖组均为「已有组」，与上面删除的 createdGroupIds 互不相交，
-            // 故两段回滚互不影响；标签需经 setLabel 单独写回（PK-5：set 不落盘 content.label）。
-            for snap in overwrittenSnapshots {
-                try? storage.clearAllSlots(in: snap.groupId)
-                for (slot, content) in snap.contents {
-                    _ = storage.set(slot, content: content, in: snap.groupId)
-                }
-                for (slot, label) in snap.labels {
-                    storage.setLabel(slot, label: label, in: snap.groupId)
+            // PK-3 (v2.10.30): 用磁盘级 rename 回滚被覆盖组——先删掉中途可能写了一半的新组目录
+            // （rename 目标须为空），再把备份目录原样 moveItem 回原位。整个过程只做 rename/删除，不
+            // 分配新空间，因此即使失败诱因是「磁盘已满」也能可靠还原，杜绝旧的「快照 + storage.set 回滚」
+            // 在满盘时同样失败、被 try? 吞掉而留下「旧数据没了、新数据半写」的损坏态。被覆盖组均为
+            // 「已有组」，与上面删除的 createdGroupIds 互不相交，两段回滚互不影响。
+            for backup in overwrittenBackups {
+                guard let backupDir = backup.backupDir else { continue }
+                do {
+                    if fm.fileExists(atPath: backup.groupDir.path) {
+                        try fm.removeItem(at: backup.groupDir)
+                    }
+                    try fm.moveItem(at: backupDir, to: backup.groupDir)
+                } catch {
+                    // rename 回滚是空间无关操作，正常不会失败；万一失败也记录（不再静默吞掉），备份目录
+                    // 仍原样保留在 special_slots 下（.import_backup_<groupId>_<uuid>）供人工恢复。
+                    NSLog("[ClipSlots] PackImporter PK-3 回滚失败：无法将备份 \(backupDir.path) 还原到 "
+                        + "\(backup.groupDir.path)：\(error)。原数据仍完整保存在该备份目录中。")
                 }
             }
+            // rename 改变了组目录 inode，使各 SlotStorage 的内存缓存指纹失效；主动清缓存确保回滚后
+            // 后续读取立即反映还原后的磁盘内容。
+            storage.invalidateContentCaches()
             throw error
+        }
+
+        // PK-3 (v2.10.30): 导入整体成功——被覆盖组已被新内容替换，删除其磁盘级 rename 备份以释放空间。
+        for backup in overwrittenBackups {
+            if let backupDir = backup.backupDir {
+                try? fm.removeItem(at: backupDir)
+            }
         }
 
         return result
@@ -264,31 +282,42 @@ struct PackImporter {
 
     // MARK: - 页/组创建（含去重与容错）
 
-    // P2-9 (v2.10.16): 覆盖模式下被清空组的内存快照，用于导入失败时回滚恢复原内容。
-    private struct GroupSnapshot {
+    // PK-3 (v2.10.30): 覆盖导入前对被覆盖组目录做「磁盘级 rename 备份」的句柄，用于成功后删除或失败时回滚。
+    private struct GroupDirBackup {
         let groupId: String
-        let contents: [Int: SlotContent]   // 原槽位内容（snapshot 返回，仅含有内容的槽位）
-        let labels: [Int: String]          // 原槽位标签（getLabel 逐槽读取，仅含非空标签）
+        let groupDir: URL       // 组在磁盘上的原目录（special_slots/<groupId>/）
+        let backupDir: URL?     // 已 rename 到的备份目录；nil 表示备份时原目录不存在，无需还原
     }
 
-    /// P2-9 (v2.10.16): 快照某组当前所有槽位的内容与标签，供覆盖失败时回滚恢复。
-    /// 注意：不直接用 storage.snapshot(in:)，因为它只返回内存缓存（cache 由 get 惰性填充），
-    /// 若被覆盖组的某些槽位从未被读取过，缓存缺失会导致快照不完整、恢复时丢内容。改为对
-    /// 1...maxChildSlots 逐槽 get（get 会按磁盘指纹在必要时重读磁盘）以拿到真实的落盘内容；
-    /// 标签同样逐槽 getLabel（PK-5：标签独立于内容存于 label.txt，需单独快照并经 setLabel 写回）。
-    private func snapshotGroup(_ groupId: String) -> GroupSnapshot {
-        var contents: [Int: SlotContent] = [:]
-        var labels: [Int: String] = [:]
-        for slot in 1...maxChildSlots {
-            let content = storage.get(slot, in: groupId)
-            if !content.isEmpty {
-                contents[slot] = content
-            }
-            if let label = storage.getLabel(slot, in: groupId), !label.isEmpty {
-                labels[slot] = label
-            }
+    /// PK-3 (v2.10.30): 覆盖导入前，用磁盘级 moveItem（rename，不占用新磁盘空间）把被覆盖组目录整体
+    /// 移到「同卷」备份路径。返回句柄供导入成功后删除、或失败时把备份原样 rename 回原位。
+    ///
+    /// 相比旧的「内存快照 + storage.set 回滚」：storage.set 需分配新空间，若失败诱因是磁盘满，回滚同样
+    /// 失败并被 try? 吞掉，导致原数据丢失；而 rename 回滚是空间无关操作，磁盘满也能可靠还原。
+    ///
+    /// 备份目录刻意放在 special_slots 根下（与原组目录同一卷），保证 moveItem 是原子 rename 而非跨卷拷贝；
+    /// 移走后立即重建一个空的原组目录，与旧 clearAllSlots「清空并保留空目录」的落地状态保持一致，随后
+    /// writeSlots 会把新内容写入其中。
+    private func backupGroupDirForOverwrite(_ groupId: String) throws -> GroupDirBackup {
+        let fm = FileManager.default
+        let groupDir = ClipSlotsPaths.specialSlots.appendingPathComponent(groupId, isDirectory: true)
+        guard fm.fileExists(atPath: groupDir.path) else {
+            // 索引有该组但磁盘无目录（罕见）——无需备份/还原。
+            return GroupDirBackup(groupId: groupId, groupDir: groupDir, backupDir: nil)
         }
-        return GroupSnapshot(groupId: groupId, contents: contents, labels: labels)
+        let backupDir = ClipSlotsPaths.specialSlots
+            .appendingPathComponent(".import_backup_\(groupId)_\(UUID().uuidString)", isDirectory: true)
+        do {
+            try fm.moveItem(at: groupDir, to: backupDir)
+        } catch {
+            throw PackImportError.writeFailed("备份被覆盖组「\(groupId)」目录失败：\(error.localizedDescription)")
+        }
+        // rename 会失效该组 SlotStorage 的内存缓存指纹，且后续 writeSlots 的 set() 会重建目录并刷新缓存；
+        // 这里主动清一次缓存，确保覆盖过程中任何对该组的读取都反映「已清空」的新状态。
+        storage.invalidateContentCaches()
+        // 重建空的原组目录，保持与旧 clearAllSlots 一致的「空目录存在」落地状态。
+        try? fm.createDirectory(at: groupDir, withIntermediateDirectories: true)
+        return GroupDirBackup(groupId: groupId, groupDir: groupDir, backupDir: backupDir)
     }
 
     /// 新页（无名称冲突场景），失败返回 nil。

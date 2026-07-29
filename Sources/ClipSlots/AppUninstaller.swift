@@ -61,20 +61,39 @@ final class AppUninstaller: ObservableObject {
             .replacingOccurrences(of: "\"", with: "\\\"")
         let appleScript = "do shell script \"\(escaped)\" with administrator privileges"
 
-        // P1-1 (v2.10.5): NSAppleScript 非线程安全，必须在主线程构造并执行——与
-        // CLIInstallManager.runPrivileged（v2.10.4 P0-2 修复）保持一致。此前放在后台
-        // 队列执行是同一崩溃反模式；且卸载路径更危险：崩溃发生在步骤1/2 已删除用户数据
-        // 之后，会留下「数据已删、App 未卸载」的半损坏状态。
-        DispatchQueue.main.async { [weak self] in
-            var errorInfo: NSDictionary?
-            let script = NSAppleScript(source: appleScript)
-            _ = script?.executeAndReturnError(&errorInfo)
-            // P2-7: 鉴权失败/取消时复位 isBusy 让用户可重试，不继续 trash App。
-            if errorInfo != nil {
-                self?.isBusy = false
-                return
+        // P0-2 (v2.10.30): 改用后台 Process 启动 /usr/bin/osascript 执行授权脚本，替代旧的
+        // `DispatchQueue.main.async { NSAppleScript ... }`（在主线程执行 NSAppleScript，授权弹窗期间会
+        // 冻结主 run loop → 界面假死）。osascript 是独立进程，没有 NSAppleScript 的主线程限制：后台
+        // run + waitUntilExit，结束后回主线程——鉴权失败/取消（非零退出）复位 isBusy 让用户可重试且不
+        // 继续 trash App；成功才调用 completion。（历史注释「NSAppleScript 必须在主线程执行」已随切换失效。）
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            var status: Int32 = -1
+            let proc = Process()
+            proc.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
+            proc.arguments = ["-e", appleScript]
+            let outPipe = Pipe()
+            let errPipe = Pipe()
+            proc.standardOutput = outPipe
+            proc.standardError = errPipe
+            do {
+                try proc.run()
+                // 授权脚本无输出，先读 stderr 到 EOF 再读 stdout，避免管道缓冲区风险。
+                _ = errPipe.fileHandleForReading.readDataToEndOfFile()
+                _ = outPipe.fileHandleForReading.readDataToEndOfFile()
+                proc.waitUntilExit()
+                status = proc.terminationStatus
+            } catch {
+                status = -1
             }
-            completion()
+            DispatchQueue.main.async {
+                guard let self else { return }
+                // P2-7: 鉴权失败/取消时复位 isBusy 让用户可重试，不继续 trash App。
+                if status != 0 {
+                    self.isBusy = false
+                    return
+                }
+                completion()
+            }
         }
     }
 

@@ -1022,46 +1022,68 @@ final class DragHandleNSView: NSView {
     var onChanged: ((CGFloat) -> Void)?
     var onEnded: (() -> Void)?
 
+    // AT-5 (v2.10.30): drag state tracked across separate mouseDown/Dragged/Up
+    // callbacks (see below) instead of a single blocking event-tracking loop.
+    private var dragStartY: CGFloat?
+    private var didPushCursor = false
+
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 
     override func resetCursorRects() {
         addCursorRect(bounds, cursor: .openHand)
     }
 
-    // v2.8.9: drive the whole drag from a single modal event-tracking loop
-    // started in mouseDown. Previously we relied on AppKit delivering the
-    // follow-up mouseDragged / mouseUp to this same view, but each reorder
-    // rebuilds the SwiftUI ForEach and recreates this NSView, which severed the
-    // event stream mid-drag and made the handle feel unstable / "sticky". By
-    // pumping events with nextEvent(matching:) inside mouseDown, the drag stays
-    // owned by this call frame until the mouse is released, independent of any
-    // SwiftUI view rebuild triggered by the live reordering.
+    // AT-5 (v2.10.30): the previous implementation ran the entire drag inside
+    // mouseDown by pumping `window.nextEvent(matching:)` in a `while` loop. That
+    // seized the RunLoop for the whole gesture; if the window closed or entered an
+    // abnormal state mid-drag, `nextEvent` could stall and hang the app.
+    //
+    // This version uses the standard AppKit mouse-event callbacks instead. AppKit
+    // routes mouseDragged / mouseUp to the view that received the initial mouseDown
+    // (the window's "mouse-down view") for the whole gesture, and the dragged row's
+    // ForEach identity (\.id) is stable, so the backing NSView is reused rather than
+    // recreated during the live reorder — the event stream stays intact without a
+    // manual loop. The drag semantics are preserved exactly: onChanged(0) at start,
+    // onChanged(dy) with dy = startY - currentY (positive downward, matching the
+    // SwiftUI top-left translation convention the reorder math expects), the
+    // closed-hand cursor for the gesture duration, and onEnded() on release.
     override func mouseDown(with event: NSEvent) {
-        guard let window = self.window else { return }
-        let startY = event.locationInWindow.y
-        onChanged?(0)
-
+        dragStartY = event.locationInWindow.y
         // Switch to the closed-hand "grabbing" cursor for the drag duration.
         NSCursor.closedHand.push()
-        defer { NSCursor.pop() }
+        didPushCursor = true
+        onChanged?(0)
+    }
 
-        var dragging = true
-        while dragging {
-            guard let e = window.nextEvent(matching: [.leftMouseDragged, .leftMouseUp]) else {
-                continue
-            }
-            switch e.type {
-            case .leftMouseDragged:
-                // SwiftUI DragGesture translation.height is positive downward
-                // (top-left origin). NSEvent window coordinates are bottom-left
-                // origin (positive upward), so downward motion == startY - y.
-                let dy = startY - e.locationInWindow.y
-                onChanged?(dy)
-            case .leftMouseUp:
-                dragging = false
-            default:
-                break
-            }
+    override func mouseDragged(with event: NSEvent) {
+        guard let startY = dragStartY else { return }
+        // NSEvent window coordinates are bottom-left origin (positive upward), so
+        // downward pointer motion == startY - y (positive), matching SwiftUI's
+        // top-left-origin translation.height used by the reorder math.
+        let dy = startY - event.locationInWindow.y
+        onChanged?(dy)
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        finishDrag()
+    }
+
+    // AT-5 (v2.10.30): safety net — if this view is pulled out of its window while
+    // a drag is in flight (the abnormal case that could hang the old loop), end the
+    // gesture cleanly so the cursor is restored and the reorder is committed.
+    override func viewWillMove(toWindow newWindow: NSWindow?) {
+        super.viewWillMove(toWindow: newWindow)
+        if newWindow == nil, dragStartY != nil {
+            finishDrag()
+        }
+    }
+
+    private func finishDrag() {
+        guard dragStartY != nil else { return }
+        dragStartY = nil
+        if didPushCursor {
+            NSCursor.pop()
+            didPushCursor = false
         }
         onEnded?()
     }
@@ -1124,14 +1146,21 @@ final class AttachmentPreviewWindowController {
     static let shared = AttachmentPreviewWindowController()
 
     private var panel: AttachmentPreviewPanel?
+    // AT-4 (v2.10.30): reuse a single hosting view across hovers and only swap its
+    // rootView, instead of allocating a new NSHostingView (and a whole SwiftUI
+    // render tree) on every hover show. Rapid row hovering previously left the old
+    // render trees to be torn down implicitly when `contentView` was replaced.
+    private var hostingView: NSHostingView<AnyView>?
     private var currentID: UUID?
     private let previewSize = NSSize(width: 340, height: 300)
 
     private init() {}
 
     func show(attachment: SlotContent.SlotAttachment, scheme: ColorScheme, anchor: NSRect) {
-        let hosting = NSHostingView(
-            rootView: AttachmentPreviewContent(attachment: attachment, scheme: scheme)
+        // AT-4 (v2.10.30): type-erase to AnyView so a single concrete
+        // NSHostingView<AnyView> can be reused and only have its rootView updated.
+        let rootView = AnyView(
+            AttachmentPreviewContent(attachment: attachment, scheme: scheme)
                 .frame(width: previewSize.width, height: previewSize.height)
                 .clipShape(RoundedRectangle(cornerRadius: 12))
                 .overlay(
@@ -1142,7 +1171,15 @@ final class AttachmentPreviewWindowController {
         )
 
         let panel = self.panel ?? makePanel()
-        panel.contentView = hosting
+        // AT-4 (v2.10.30): update the existing hosting view's rootView when present;
+        // only create (and attach) a new one the first time.
+        if let hosting = hostingView {
+            hosting.rootView = rootView
+        } else {
+            let hosting = NSHostingView(rootView: rootView)
+            panel.contentView = hosting
+            hostingView = hosting
+        }
         panel.setContentSize(previewSize)
         position(panel, anchor: anchor)
         panel.orderFrontRegardless()

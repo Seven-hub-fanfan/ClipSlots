@@ -174,37 +174,51 @@ final class CLIInstallManager: ObservableObject {
             .replacingOccurrences(of: "\"", with: "\\\"")
         let appleScript = "do shell script \"\(escaped)\" with administrator privileges"
 
-        // P1-1 (v2.10.16): 回退 AU-1 (v2.10.15) 的后台线程执行。`NSAppleScript` 被 Apple 明确标注
-        // 为非线程安全，OSA/Apple Event 执行必须在主线程进行；v2.10.15 为消除卡顿把它挪到
-        // `DispatchQueue.global` 后台线程，与同版本 `UpdateInstaller` 刻意用 `DispatchQueue.main.sync`
-        // 执行同类脚本（注释「NSAppleScript 必须在主线程执行」）自相矛盾，存在偶发崩溃/授权框不弹的
-        // 线程安全隐患。改回主线程执行：授权弹窗本身就是系统级模态、短暂阻塞不可避免，主线程执行是
-        // 正确且一致的做法。runPrivileged 由 UI 动作在主线程调用，故直接内联执行；若在非主线程调用
-        // 则 main.sync 切回，避免死锁。
-        let execute = { [weak self] in
-            var errorInfo: NSDictionary?
-            let script = NSAppleScript(source: appleScript)
-            _ = script?.executeAndReturnError(&errorInfo)
-            guard let self else { return }
-            self.isBusy = false
-            if let errorInfo {
-                // -128 = user cancelled the authorization dialog.
-                let code = errorInfo[NSAppleScript.errorNumber] as? Int ?? 0
-                if code == -128 {
+        // P0-2 (v2.10.30): 改用后台 Process 启动 /usr/bin/osascript 执行授权脚本，替代此前在主线程
+        // 同步执行的 NSAppleScript。NSAppleScript 非线程安全且要求主线程执行——授权弹窗（密码 / 触控 ID）
+        // 期间会把主 run loop 完全冻住，整个 App 模态假死（无法移动窗口 / 点菜单）。osascript 是独立进程，
+        // 没有 NSAppleScript 的主线程限制：在后台队列 run + waitUntilExit，弹窗照常出现但主线程保持响应；
+        // 结束后再 DispatchQueue.main.async 回主线程复位 isBusy、更新 @Published 状态并刷新。
+        // （历史注释「NSAppleScript 必须在主线程执行」已随本次切换到 Process+osascript 失效，故移除。）
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            var status: Int32 = -1
+            var errText = ""
+            let proc = Process()
+            proc.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
+            proc.arguments = ["-e", appleScript]
+            let outPipe = Pipe()
+            let errPipe = Pipe()
+            proc.standardOutput = outPipe
+            proc.standardError = errPipe
+            do {
+                try proc.run()
+                // 授权脚本 stdout/stderr 均为极少量文本，先读 stderr 到 EOF（进程退出即关闭），再读 stdout，
+                // 不存在撑满 64KB 管道缓冲区的风险。
+                let errData = errPipe.fileHandleForReading.readDataToEndOfFile()
+                _ = outPipe.fileHandleForReading.readDataToEndOfFile()
+                proc.waitUntilExit()
+                status = proc.terminationStatus
+                errText = String(data: errData, encoding: .utf8)?
+                    .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            } catch {
+                status = -1
+                errText = error.localizedDescription
+            }
+
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.isBusy = false
+                if status == 0 {
+                    self.report(successMessage, isError: false)
+                } else if errText.contains("-128") || errText.contains("User canceled") {
+                    // -128 = user cancelled the authorization dialog.
                     self.report("已取消操作。", isError: false)
                 } else {
-                    let msg = errorInfo[NSAppleScript.errorMessage] as? String ?? "未知错误"
+                    let msg = errText.isEmpty ? "未知错误（退出码 \(status)）" : errText
                     self.report("操作失败：\(msg)", isError: true)
                 }
-            } else {
-                self.report(successMessage, isError: false)
+                self.refreshState()
             }
-            self.refreshState()
-        }
-        if Thread.isMainThread {
-            execute()
-        } else {
-            DispatchQueue.main.sync(execute: execute)
         }
     }
 

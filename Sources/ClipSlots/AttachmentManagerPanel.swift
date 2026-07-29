@@ -61,6 +61,12 @@ final class AttachmentManagerPanelController: NSObject, NSPopoverDelegate {
     static let shared = AttachmentManagerPanelController()
 
     private var popover: NSPopover?
+    // AT-4 (v2.10.30): hold a strong reference to the current content hosting
+    // controller so it can be explicitly dismantled before a new one is created.
+    // Previously each `reallyShow` built a fresh NSHostingController and replaced
+    // the popover's contentView without tearing down the old controller; rapid
+    // slot switching could accumulate un-released SwiftUI render trees.
+    private var hosting: NSHostingController<AttachmentManagerPopover>?
     private var onClose: (() -> Void)?
     /// 当前 popover 正在展示的槽位号（用于「点同一个按钮再切换关闭」判断）。
     private(set) var currentSlot: Int?
@@ -105,7 +111,16 @@ final class AttachmentManagerPanelController: NSObject, NSPopoverDelegate {
             currentSlot = nil
 
             // 立即无动画展示新槽位面板，切换瞬时可见，无卡顿空窗。
-            reallyShow(anchor: anchor, slot: slot, store: store, onClose: onClose, animates: false)
+            // AT-3 (v2.10.30): defer `reallyShow` by one main-loop tick. The
+            // `previousOnClose?()` above may drive a parent SwiftUI state update
+            // that re-lays-out (or momentarily tears down) the attachment button's
+            // backing NSView; anchoring synchronously in the same RunLoop can then
+            // hit a niled `anchor.view`/`window` and silently fail to pop. Deferring
+            // lets that redraw settle so the anchor is valid when we show. This is a
+            // micro-defer (no animation), so the instant-switch feel is preserved.
+            DispatchQueue.main.async { [weak self] in
+                self?.reallyShow(anchor: anchor, slot: slot, store: store, onClose: onClose, animates: false)
+            }
         } else {
             // 首次打开：保留原有淡入动画。
             reallyShow(anchor: anchor, slot: slot, store: store, onClose: onClose, animates: true)
@@ -126,6 +141,10 @@ final class AttachmentManagerPanelController: NSObject, NSPopoverDelegate {
         self.onClose = onClose
         self.currentSlot = slot
 
+        // AT-4 (v2.10.30): tear down any previous hosting controller before
+        // building a new one so switching content can't leak SwiftUI render trees.
+        tearDownHosting()
+
         let hosting = NSHostingController(rootView: AttachmentManagerPopover(slot: slot, store: store))
         let pop = NSPopover()
         pop.contentViewController = hosting
@@ -136,6 +155,17 @@ final class AttachmentManagerPanelController: NSObject, NSPopoverDelegate {
         pop.delegate = self
         pop.show(relativeTo: anchorView.bounds, of: anchorView, preferredEdge: .maxY)
         self.popover = pop
+        self.hosting = hosting
+    }
+
+    // AT-4 (v2.10.30): detach and release the current content hosting controller.
+    // Removing its view from the hierarchy and dropping the strong reference lets
+    // the SwiftUI render tree deallocate instead of lingering behind a replaced
+    // popover.
+    private func tearDownHosting() {
+        hosting?.view.removeFromSuperview()
+        hosting?.removeFromParent()
+        hosting = nil
     }
 
     func close() {
@@ -148,6 +178,8 @@ final class AttachmentManagerPanelController: NSObject, NSPopoverDelegate {
     func popoverDidClose(_ notification: Notification) {
         popover = nil
         currentSlot = nil
+        // AT-4 (v2.10.30): release the hosting controller once the popover is gone.
+        tearDownHosting()
         let cb = onClose
         onClose = nil
         cb?()

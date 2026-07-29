@@ -8,14 +8,15 @@ import AppKit
 // 遮住 → 卡死只能强退 的连锁问题。本类在下载完成后自动完成安装，全程无需拖拽：
 //   1. 强制关闭所有阻塞弹窗（sheet / modal），保证后续 NSApp.terminate() 不被阻塞；
 //   2. hdiutil attach 挂载 DMG；
-//   3. ditto 替换 /Applications/ClipSlots.app（无权限时用 NSAppleScript 以管理员授权，
-//      与 CLIInstallManager 的主线程 NSAppleScript 修法一致）；
+//   3. ditto 替换 /Applications/ClipSlots.app（无权限时用 /usr/bin/osascript 以管理员授权，
+//      与 CLIInstallManager 改用 Process+osascript 的修法一致，P0-2 v2.10.30）；
 //   4. hdiutil detach 卸载 DMG；
 //   5. open 重启新版本 App 后 terminate 自身。
 //
-// 线程模型：整个安装流程（挂载、ditto、卸载）在后台串行队列执行，避免阻塞主线程；
-// 仅 NSAppleScript（管理员授权）必须切回主线程（DispatchQueue.main.sync）。所有
-// AppKit 访问（弹窗 dismiss / terminate / open）都在主线程执行。
+// 线程模型：整个安装流程（挂载、ditto、卸载、管理员授权）在后台串行队列执行，避免阻塞主线程。
+// P0-2 (v2.10.30): 管理员授权改用 Process 启动 /usr/bin/osascript（独立进程，无 NSAppleScript 的
+// 主线程要求），直接在该后台队列执行、不再 DispatchQueue.main.sync 切回主线程——授权弹窗期间主线程
+// 保持响应，界面不再假死。所有 AppKit 访问（弹窗 dismiss / terminate / open）仍在主线程执行。
 final class UpdateInstaller {
 
     static let shared = UpdateInstaller()
@@ -119,14 +120,11 @@ final class UpdateInstaller {
             // CFBundleShortVersionString，与预期 version 规范化（去除可能的 "v/V" 前缀与首尾空白）后比对；不一致
             // （或读不到）则中止安装、detach 卸载 DMG，并走既有 fail 失败回调提示用户，绝不继续 ditto。
             // 本校验为纯文件读取，运行在既有后台串行队列（queue.async）中，不引入新线程，与线程模型一致。
-            // P1-A (v2.10.17): 版本比对复用 UpdateChecker.parse() 的 SemVer 规范化，仅比较数字核心
-            // （SemVer.core），剥离 `v/V` 前缀、`-` 预发布段与 `+` 构建元数据段。此前 normalizeVersion
-            // 只去 `v` 前缀，不处理 `-beta.1` / `+build` 后缀，导致挂载 bundle 的数字版本 `2.11.0`
-            // 与 tag_name 原值 `v2.11.0-beta.1` 恒不相等 → 误杀所有 beta 通道更新，且与 UpdateChecker
-            // 「判定有新 beta 可更新」的逻辑自相矛盾。两处版本规范化就此收敛到同一 parse()，避免再次漂移。
-            let normalizeCore: (String) -> [Int] = { raw in
-                UpdateChecker.parse(raw).core
-            }
+            // P1-A (v2.10.17): 版本比对复用 UpdateChecker.parse() 的 SemVer 规范化，剥离 `v/V` 前缀、
+            // `+` 构建元数据段，并单独解析出 `-` 预发布段。此前 normalizeVersion 只去 `v` 前缀，不处理
+            // `-beta.1` / `+build` 后缀，导致挂载 bundle 的数字版本 `2.11.0` 与 tag_name 原值
+            // `v2.11.0-beta.1` 恒不相等 → 误杀所有 beta 通道更新，且与 UpdateChecker「判定有新 beta 可更新」
+            // 的逻辑自相矛盾。两处版本规范化就此收敛到同一 parse()，避免再次漂移。
             // 便于日志/文案展示的核心版本串（如 [2,11,0] → "2.11.0"）。
             let coreString: ([Int]) -> String = { $0.map(String.init).joined(separator: ".") }
             let mountedInfoPlist = mountedApp + "/Contents/Info.plist"
@@ -137,12 +135,19 @@ final class UpdateInstaller {
                 fail("更新包版本不符，已中止安装（无法读取磁盘映像中 App 的版本号）")
                 return
             }
-            let mountedCore = normalizeCore(mountedVersion)
-            let expectedCore = normalizeCore(version)
-            guard mountedCore == expectedCore else {
+            // UP-4 (v2.10.30): 仅比数字核心不够——核心相同但预发布后缀不同的两个包（如 `2.11.0` 正式版
+            // 与 `2.11.0-beta.1`）会被旧逻辑判为一致而放行，导致 beta/正式互相误装。解析完整 SemVer 后，
+            // 核心相等时再严格比对预发布标识（nil = 正式版），二者完全一致才通过校验。
+            let mountedSem = UpdateChecker.parse(mountedVersion)
+            let expectedSem = UpdateChecker.parse(version)
+            let mountedCore = mountedSem.core
+            let expectedCore = expectedSem.core
+            guard mountedCore == expectedCore && mountedSem.pre == expectedSem.pre else {
                 NSLog("[ClipSlots] UpdateInstaller: 版本校验失败，预期=\(version) 实际=\(mountedVersion)，中止安装")
                 Self.detachAndCleanup(mountPoint)
-                fail("更新包版本不符，已中止安装（预期 \(coreString(expectedCore))，实际 \(coreString(mountedCore))）")
+                let expectedLabel = expectedSem.pre.map { "\(coreString(expectedCore))-\($0)" } ?? coreString(expectedCore)
+                let mountedLabel = mountedSem.pre.map { "\(coreString(mountedCore))-\($0)" } ?? coreString(mountedCore)
+                fail("更新包版本不符，已中止安装（预期 \(expectedLabel)，实际 \(mountedLabel)）")
                 return
             }
 
@@ -196,18 +201,16 @@ final class UpdateInstaller {
                     + "else if [ -e '\(qBackup)' ]; then mv '\(qBackup)' '\(qTarget)'; fi; rm -rf '\(qStaging)'; exit 1; fi"
                 let script = "do shell script \"\(Self.escapeForAppleScriptString(shell))\" with administrator privileges"
 
-                // 关键约束 2：NSAppleScript 必须在主线程执行。
-                DispatchQueue.main.sync {
-                    var errInfo: NSDictionary?
-                    if let apple = NSAppleScript(source: script) {
-                        apple.executeAndReturnError(&errInfo)
-                        if let errInfo = errInfo {
-                            let msg = (errInfo[NSAppleScript.errorMessage] as? String) ?? "管理员授权安装失败"
-                            installError = msg
-                        }
-                    } else {
-                        installError = "无法创建安装脚本"
-                    }
+                // P0-2 (v2.10.30): 改用 Process 启动 /usr/bin/osascript 执行管理员授权脚本，替代旧的
+                // `DispatchQueue.main.sync { NSAppleScript ... }`。旧写法把授权脚本切回主线程同步执行，
+                // 授权弹窗（密码 / 触控 ID）期间主 run loop 被 main.sync 完全占用 → 界面假死。osascript 是
+                // 独立进程，没有 NSAppleScript 的主线程要求；此处本就运行在后台串行 queue 上，直接执行即可，
+                // 无需再回主线程，授权弹窗期间主线程保持响应。非零退出（含用户取消 -128、脚本失败）会由
+                // runProcess 抛出携带 stderr 的 InstallError，转入既有失败回调。
+                do {
+                    try Self.runProcess("/usr/bin/osascript", ["-e", script])
+                } catch {
+                    installError = (error as? InstallError)?.message ?? error.localizedDescription
                 }
             }
 

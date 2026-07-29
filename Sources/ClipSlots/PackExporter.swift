@@ -125,23 +125,26 @@ struct PackExporter {
     // MARK: 体积预估
 
     /// 估算选中范围内所有槽位主体 + 附件的总字节数（用于导出前的大小提示）。
+    ///
+    /// PK-2 (v2.10.30): 旧实现对每个槽位调用 `storage.get`，其 `readSlotContent` 会把该槽位所有
+    /// item `.bin` 以及 attachments.json（含内联附件字节）全部读进内存缓存——预估一个多 GB 的页面
+    /// 会在「保存对话框弹出之前」就耗尽内存崩溃。改为「只走磁盘元数据」：直接遍历每个组的槽位目录，
+    /// 用文件大小属性（resourceValues/.fileSizeKey）累加各常规文件字节数，全程不加载任何文件 Data。
+    ///
+    /// 说明：此估算基于「落盘字节」（内联附件在 attachments.json 中以 base64 存储，略大于原始字节），
+    /// 且不包含「仅以外部路径引用、字节尚未内联落盘」的附件（若为拿到 path 而解码 attachments.json，
+    /// 反而会把内联大字节读进内存，违背防 OOM 初衷）。作为导出前的体积提示，此近似值足够且绝不 OOM。
     func estimateBytes(for selection: PackExportSelection) -> Int {
         var total = 0
+        // 特殊槽位在磁盘上的布局：special_slots/<groupId>/<slot>/（整数名的槽位子目录，含主体 item_*
+        // /*.bin、content.json、attachments.json、label.txt）。ClipSlotsPaths.specialSlots 为公开常量。
+        let groupsRoot = ClipSlotsPaths.specialSlots
         for pageSel in selection.pages {
             for group in pageSel.groups {
+                let groupDir = groupsRoot.appendingPathComponent(group.id, isDirectory: true)
                 for slot in 1...maxChildSlots {
-                    let content = storage.get(slot, in: group.id)
-                    if content.isEmpty && (storage.getLabel(slot, in: group.id)?.isEmpty ?? true) { continue }
-                    for itemList in content.items {
-                        for item in itemList { total += item.data.count }
-                    }
-                    for att in content.attachments {
-                        if let data = att.data {
-                            total += data.count
-                        } else if let path = att.path, let size = fileSize(path) {
-                            total += size
-                        }
-                    }
+                    let slotDir = groupDir.appendingPathComponent("\(slot)", isDirectory: true)
+                    total += directorySizeOnDisk(slotDir)
                 }
             }
         }
@@ -211,42 +214,54 @@ struct PackExporter {
                             url: att.url,
                             file: nil
                         )
-                        // 取字节：优先内联 data，其次回退去读其引用的本地源文件路径。
-                        // P2-2 (v2.10.16): 此前用 `att.data ?? readFile(path)`，回源读取失败（源文件
-                        // 已移动/删除/不可读/读到空）时结果为 nil，被静默跳过——附件名照写进 manifest
-                        // 但 file 为空，导入后成为「有名无实」的空附件且无人察觉，造成字节静默丢失。
-                        // 现改为：区分「本无字节的附件（纯 url/reference 型，无 data 也无 path）」与
-                        // 「本应有字节但源文件读取失败的附件」，后者不再写入空壳条目，而是登记到
-                        // failedAttachments 供上层提示用户，杜绝「名进 manifest、字节为空且无人知晓」。
-                        var bytes: Data? = att.data
-                        var sourceReadFailed = false
-                        if bytes == nil, let path = att.path {
-                            // 该附件无内联字节、声明了源文件路径，说明它本应携带字节——必须回源读取。
-                            if let read = readFile(path), !read.isEmpty {
-                                bytes = read
-                            } else {
-                                sourceReadFailed = true
-                            }
-                        }
-
-                        if let bytes = bytes {
+                        // 取字节：优先内联 data（已在内存），其次回退到其引用的本地源文件路径。
+                        // P2-2 (v2.10.16): 区分「本无字节的附件（纯 url/reference 型）」与「本应有字节但
+                        // 源文件不可读/为空的附件」，后者登记到 failedAttachments 而非写入空壳条目。
+                        // PK-3 (v2.10.30): 外置源文件不再用 `Data(contentsOf:)` 整体读入内存再写出（单个
+                        // 2GB 视频即可 OOM），改为先用元数据做存在性/非空探测，再用 `FileManager.copyItem`
+                        // 流式拷贝到 attachments/ 暂存目录——全程不把文件内容加载进内存。
+                        if let data = att.data {
+                            // 内联字节：已在内存中，直接写出（不引入额外内存放大）。
                             if !attachmentsDirCreated {
                                 try createDir(attachmentsDir)
                                 attachmentsDirCreated = true
                             }
                             let fileName = attachmentFileName(id: att.id.uuidString, name: att.name)
                             do {
-                                try bytes.write(to: attachmentsDir.appendingPathComponent(fileName))
+                                try data.write(to: attachmentsDir.appendingPathComponent(fileName))
                             } catch {
                                 throw PackExportError.ioFailed(error.localizedDescription)
                             }
                             packAtt.file = fileName
                             packAttachments.append(packAtt)
-                        } else if sourceReadFailed {
-                            // P2-2 (v2.10.16): 源文件不可读/为空——不写入「有名无实」的空壳附件，
-                            // 改为登记失败清单（不 append 到 packAttachments，附件条目也不进 slot.json）。
-                            let attName = att.name.isEmpty ? att.path! : att.name
-                            failedAttachments.append("\(group.name) / 槽位 \(slot)：\(attName)")
+                        } else if let path = att.path {
+                            // 无内联字节但声明了源文件路径——本应携带字节，须回源。用元数据探测：文件
+                            // 缺失/为目录/不可 stat/为空（size == 0）均视为「源读取失败」，与旧 readFile 语义一致。
+                            if let size = regularFileSize(path), size > 0 {
+                                if !attachmentsDirCreated {
+                                    try createDir(attachmentsDir)
+                                    attachmentsDirCreated = true
+                                }
+                                let fileName = attachmentFileName(id: att.id.uuidString, name: att.name)
+                                let destURL = attachmentsDir.appendingPathComponent(fileName)
+                                do {
+                                    // copyItem 目标已存在会报错；文件名前缀含唯一附件 id，碰撞极罕见，仍稳妥清理。
+                                    if FileManager.default.fileExists(atPath: destURL.path) {
+                                        try FileManager.default.removeItem(at: destURL)
+                                    }
+                                    // 流式拷贝：不把文件读进内存，从根本上规避大文件 OOM。
+                                    try FileManager.default.copyItem(at: URL(fileURLWithPath: path), to: destURL)
+                                } catch {
+                                    throw PackExportError.ioFailed(error.localizedDescription)
+                                }
+                                packAtt.file = fileName
+                                packAttachments.append(packAtt)
+                            } else {
+                                // P2-2 (v2.10.16): 源文件不可读/为空——不写入「有名无实」的空壳附件，
+                                // 改为登记失败清单（不 append 到 packAttachments，附件条目也不进 slot.json）。
+                                let attName = att.name.isEmpty ? path : att.name
+                                failedAttachments.append("\(group.name) / 槽位 \(slot)：\(attName)")
+                            }
                         } else {
                             // 本就无 data 且无 path（例如纯 url / reference 型附件）——属正常无字节附件，
                             // 保留其元信息引用（file 仍为 nil），不视为失败。
@@ -321,16 +336,29 @@ struct PackExporter {
         }
     }
 
-    private func readFile(_ path: String) -> Data? {
-        let url = URL(fileURLWithPath: path)
+    /// PK-2 (v2.10.30): 递归累加某目录下所有「常规文件」的字节数，仅读取文件大小元数据
+    /// （resourceValues(.fileSizeKey)），绝不把任何文件内容读进内存——用于大页面的体积预估防 OOM。
+    private func directorySizeOnDisk(_ url: URL) -> Int {
+        let fm = FileManager.default
         var isDir: ObjCBool = false
-        guard FileManager.default.fileExists(atPath: path, isDirectory: &isDir), !isDir.boolValue else { return nil }
-        return try? Data(contentsOf: url)
+        guard fm.fileExists(atPath: url.path, isDirectory: &isDir), isDir.boolValue else { return 0 }
+        let keys: Set<URLResourceKey> = [.isRegularFileKey, .fileSizeKey]
+        guard let enumerator = fm.enumerator(at: url, includingPropertiesForKeys: Array(keys)) else { return 0 }
+        var total = 0
+        for case let fileURL as URL in enumerator {
+            guard let values = try? fileURL.resourceValues(forKeys: keys),
+                  values.isRegularFile == true, let size = values.fileSize else { continue }
+            total += size
+        }
+        return total
     }
 
-    private func fileSize(_ path: String) -> Int? {
-        guard let attrs = try? FileManager.default.attributesOfItem(atPath: path),
-              let size = attrs[.size] as? Int else { return nil }
+    /// PK-3 (v2.10.30): 仅通过元数据探测源文件是否为「可 stat 的常规文件」并返回其字节数，绝不把
+    /// 文件内容读进内存（避免大文件 OOM）。返回 nil 表示文件缺失/为目录/无法读取资源属性。
+    private func regularFileSize(_ path: String) -> Int? {
+        let url = URL(fileURLWithPath: path)
+        guard let values = try? url.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey]),
+              values.isRegularFile == true, let size = values.fileSize else { return nil }
         return size
     }
 

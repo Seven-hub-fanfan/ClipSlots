@@ -12,9 +12,19 @@ import ClipSlotsKit
 //   success: {"ok": true, ...}
 //   error:   {"ok": false, "error": "message"}  (exit code 1)
 
-let CLI_VERSION = "2.10.16"
+// UP-1 (v2.10.30): bump the hardcoded CLI version from the stale "2.10.16" to the
+// current release. This is the single source of truth surfaced by `version`,
+// `help` and per-command help (all reference CLI_VERSION), so no other literal
+// needs bumping.
+let CLI_VERSION = "2.10.30"
 let DEFAULT_GROUP = "default"
 let DEFAULT_PAGE = "default_page"
+
+// UP-3 (v2.10.30): hard cap on how much stdin the `write --batch` path will read
+// before erroring. A malicious/oversized JSON payload must not be buffered wholesale
+// into memory (OOM risk); we read incrementally and abort once this many bytes have
+// been accumulated. 64 MiB is far above any legitimate batch while bounding memory.
+let MAX_BATCH_STDIN_BYTES = 64 * 1024 * 1024
 
 // v2.9.41 (Problem A): capture the "request received" instant as early and as
 // robustly as possible so that parallel `create-group` processes keep the order in
@@ -929,8 +939,28 @@ func cmdWrite(_ args: ParsedArgs) -> Never {
 //     static conflicts (--if-empty target not empty). ZERO writes, disk unchanged.
 //   • Type B — execution (runtime): lock timeout / write failure while writing.
 //     Earlier items may have been written; --stop-on-error stops the rest.
+// UP-3 (v2.10.30): read stdin incrementally and abort as soon as the cumulative
+// size exceeds `limit`, so an oversized payload can never be buffered whole into
+// memory. Returns nil when the cap is exceeded; the caller reports an error and
+// exits WITHOUT writing anything.
+func readStdinCapped(limit: Int) -> Data? {
+    let handle = FileHandle.standardInput
+    var data = Data()
+    while true {
+        let chunk = handle.readData(ofLength: 1024 * 1024) // 1 MiB per read
+        if chunk.isEmpty { break }                          // EOF
+        data.append(chunk)
+        if data.count > limit { return nil }                // cap exceeded → stop early
+    }
+    return data
+}
+
 func cmdWriteBatch(_ args: ParsedArgs) -> Never {
-    let data = FileHandle.standardInput.readDataToEndOfFile()
+    // UP-3 (v2.10.30): enforce a stdin size cap while reading (incremental, no
+    // unbounded buffering). Over the cap → error out BEFORE any write happens.
+    guard let data = readStdinCapped(limit: MAX_BATCH_STDIN_BYTES) else {
+        fail("stdin too large (limit \(MAX_BATCH_STDIN_BYTES) bytes)", code: "INVALID_INPUT_FORMAT")
+    }
     guard !data.isEmpty else {
         fail("--batch expects a JSON array on stdin, got empty input "
             + "(e.g. echo '[{\"slot\":1,\"text\":\"a\"}]' | clipslots write --batch)", code: "INVALID_INPUT_FORMAT")
@@ -1104,50 +1134,82 @@ func cmdWriteBatch(_ args: ParsedArgs) -> Never {
     var failed = 0
     var notExecuted = 0
     var stopped = false
-    for item in parsed {
-        if stopped {
-            results.append(["index": item.index, "slot": item.slot, "ok": false, "status": "not_executed"])
-            notExecuted += 1
-            continue
+    // UP-3 (v2.10.30): hold ONE storage lock across the ENTIRE execution loop so the
+    // whole batch is atomic w.r.t. other processes — no per-item lock/unlock and no
+    // interleaving. `StorageLock.withLock` is reentrant (depth-counted flock), so the
+    // inner `withLock` inside `performTextWrite` reuses this same OS lock instead of
+    // re-acquiring it. Preflight semantics are unchanged (pre-check failure → zero
+    // writes above); within this loop earlier items succeed and later ones may fail /
+    // be not_executed exactly as before. Failure to acquire the outer lock is itself an
+    // execution-phase failure with zero writes → every item is not_executed + LOCK_TIMEOUT.
+    do {
+        try StorageLock.shared.withLock { () -> Void in
+            for item in parsed {
+                if stopped {
+                    results.append(["index": item.index, "slot": item.slot, "ok": false, "status": "not_executed"])
+                    notExecuted += 1
+                    continue
+                }
+                do {
+                    let preview = try performTextWrite(slot: item.slot, text: item.text, group: item.group,
+                                                       label: item.label, ifEmpty: item.ifEmpty,
+                                                       overwriteText: item.overwriteText)
+                    results.append(["index": item.index, "slot": item.slot, "group": item.group,
+                                    "ok": true, "status": "written", "preview": preview])
+                    written += 1
+                } catch is SlotNotEmpty {
+                    // Atomic re-check (契约2) failed at execution time (concurrent modification).
+                    results.append(["index": item.index, "slot": item.slot, "group": item.group,
+                                    "ok": false, "status": "failed", "error_code": "SLOT_NOT_EMPTY",
+                                    "error": "slot \(item.slot) in group \(item.group) is not empty"])
+                    failed += 1
+                    if stopOnError { stopped = true }
+                } catch let e as StorageLockError {
+                    results.append(["index": item.index, "slot": item.slot, "group": item.group,
+                                    "ok": false, "status": "failed", "error_code": "LOCK_TIMEOUT",
+                                    "error": e.errorDescription ?? "storage is busy (lock timeout)"])
+                    failed += 1
+                    if stopOnError { stopped = true }
+                } catch let e as WriteFailure {
+                    results.append(["index": item.index, "slot": item.slot, "group": item.group,
+                                    "ok": false, "status": "failed", "error_code": "WRITE_FAILED",
+                                    "error": e.message])
+                    failed += 1
+                    if stopOnError { stopped = true }
+                } catch {
+                    // P2-2 (v2.10.5): surface refusingToOverwriteWithEmptyIndex as INDEX_WRITE_REFUSED
+                    // here too, instead of the generic WRITE_FAILED, so batch callers get the same
+                    // specific code as the single-write path.
+                    let (code, message) = writeErrorCodeAndMessage(error, context: "writing slot \(item.slot)")
+                    results.append(["index": item.index, "slot": item.slot, "group": item.group,
+                                    "ok": false, "status": "failed",
+                                    "error_code": code == "ERROR" ? "WRITE_FAILED" : code,
+                                    "error": message])
+                    failed += 1
+                    if stopOnError { stopped = true }
+                }
+            }
         }
-        do {
-            let preview = try performTextWrite(slot: item.slot, text: item.text, group: item.group,
-                                               label: item.label, ifEmpty: item.ifEmpty,
-                                               overwriteText: item.overwriteText)
-            results.append(["index": item.index, "slot": item.slot, "group": item.group,
-                            "ok": true, "status": "written", "preview": preview])
-            written += 1
-        } catch is SlotNotEmpty {
-            // Atomic re-check (契约2) failed at execution time (concurrent modification).
-            results.append(["index": item.index, "slot": item.slot, "group": item.group,
-                            "ok": false, "status": "failed", "error_code": "SLOT_NOT_EMPTY",
-                            "error": "slot \(item.slot) in group \(item.group) is not empty"])
-            failed += 1
-            if stopOnError { stopped = true }
-        } catch let e as StorageLockError {
-            results.append(["index": item.index, "slot": item.slot, "group": item.group,
-                            "ok": false, "status": "failed", "error_code": "LOCK_TIMEOUT",
-                            "error": e.errorDescription ?? "storage is busy (lock timeout)"])
-            failed += 1
-            if stopOnError { stopped = true }
-        } catch let e as WriteFailure {
-            results.append(["index": item.index, "slot": item.slot, "group": item.group,
-                            "ok": false, "status": "failed", "error_code": "WRITE_FAILED",
-                            "error": e.message])
-            failed += 1
-            if stopOnError { stopped = true }
-        } catch {
-            // P2-2 (v2.10.5): surface refusingToOverwriteWithEmptyIndex as INDEX_WRITE_REFUSED
-            // here too, instead of the generic WRITE_FAILED, so batch callers get the same
-            // specific code as the single-write path.
-            let (code, message) = writeErrorCodeAndMessage(error, context: "writing slot \(item.slot)")
-            results.append(["index": item.index, "slot": item.slot, "group": item.group,
-                            "ok": false, "status": "failed",
-                            "error_code": code == "ERROR" ? "WRITE_FAILED" : code,
-                            "error": message])
-            failed += 1
-            if stopOnError { stopped = true }
+    } catch {
+        // UP-3 (v2.10.30): could not acquire the batch-wide lock (e.g. StorageLockError
+        // timeout). Nothing was written — report every item as not_executed and surface
+        // LOCK_TIMEOUT so callers can retry the whole batch.
+        let lockMsg = (error as? StorageLockError)?.errorDescription ?? "storage is busy (lock timeout)"
+        var lockResults: [[String: Any]] = []
+        for item in parsed {
+            lockResults.append(["index": item.index, "slot": item.slot, "group": item.group,
+                                "ok": false, "status": "not_executed"])
         }
+        var d: [String: Any] = [
+            "ok": false, "batch": true, "preflight_passed": true,
+            "error_code": "LOCK_TIMEOUT", "error": lockMsg,
+            "total": total, "written": 0, "failed": 0, "skipped": 0,
+            "not_executed": total, "results": lockResults
+        ]
+        d["repaired"] = storage.didRepairDefaults
+        if storage.didRepairDefaults { d["repair_actions"] = storage.lastRepairActions }
+        emit(d)
+        exit(1)
     }
 
     // Counters & top-level ok (契约1 附). skipped is always 0 in v2.9.57.

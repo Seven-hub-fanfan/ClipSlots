@@ -182,7 +182,12 @@ final class UpdateDownloader: NSObject {
     private func handleFinished(tempURL: URL, version: String, expectedSize: Int64) {
         // 把下载文件挪到一个带 .dmg 后缀的稳定临时路径，再用 Finder 打开。
         let fm = FileManager.default
-        let dest = fm.temporaryDirectory.appendingPathComponent("ClipSlots-\(version).dmg")
+        // UP-2 (v2.10.30): version/tag_name 来自外部 GitHub Release，直接插值进文件路径存在路径穿越风险
+        //（被篡改的 tag 如 `../../evil` 会让 moveItem 写到临时目录之外）。先取 lastPathComponent 剥离任何
+        // 目录分量，再按白名单（数字 / 字母 / `.` / `-`）逐字符过滤，彻底去除 `/`、`..` 等分隔符；结果为空
+        // 时回退占位符，保证 dest 始终落在 temporaryDirectory 内。
+        let safeVersion = Self.sanitizeVersionForPath(version)
+        let dest = fm.temporaryDirectory.appendingPathComponent("ClipSlots-\(safeVersion).dmg")
         try? fm.removeItem(at: dest)
         do {
             try fm.moveItem(at: tempURL, to: dest)
@@ -283,6 +288,16 @@ final class UpdateDownloader: NSObject {
         session?.invalidateAndCancel()
         session = nil
         task = nil
+    }
+
+    /// UP-2 (v2.10.30): 把外部版本串净化为仅含 `[0-9A-Za-z.-]` 的安全文件名片段，用于拼接下载 DMG 的
+    /// 落盘路径。先取 lastPathComponent 去掉任何目录分量，再逐字符白名单过滤（连 `/` 与 `..` 里的分隔符
+    /// 一并剔除）；过滤后为空则回退占位符，确保绝不产生可跳出目标目录的路径。
+    nonisolated private static func sanitizeVersionForPath(_ raw: String) -> String {
+        let base = (raw as NSString).lastPathComponent
+        let allowed = Set("0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ.-")
+        let filtered = String(base.filter { allowed.contains($0) })
+        return filtered.isEmpty ? "unknown" : filtered
     }
 }
 

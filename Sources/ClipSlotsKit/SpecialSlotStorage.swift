@@ -45,7 +45,16 @@ public final class SpecialSlotStorage {
     // F7 (契约5): records what the startup default-page/group repair did on this
     // process. Empty => nothing needed repair. Read by the CLI to emit `repaired`
     // (+ `repair_actions`) on responses.
-    public private(set) var lastRepairActions: [String] = []
+    // DS-5 (v2.10.30): `lastRepairActions` is written on the background repair path
+    // (repairDefaultsIfNeeded) and read by the CLI/UI on another thread — an unsynchronized
+    // Array read/write is a data race (can crash / read a torn value). Back it with a private
+    // store guarded by a dedicated lock; expose thread-safe get/set accessors.
+    private var _lastRepairActions: [String] = []
+    private let repairActionsLock = NSLock()
+    public private(set) var lastRepairActions: [String] {
+        get { repairActionsLock.lock(); defer { repairActionsLock.unlock() }; return _lastRepairActions }
+        set { repairActionsLock.lock(); _lastRepairActions = newValue; repairActionsLock.unlock() }
+    }
     public var didRepairDefaults: Bool { !lastRepairActions.isEmpty }
 
     public init() {
@@ -1204,8 +1213,14 @@ public final class SpecialSlotStorage {
     /// NotificationCenter; the GUI observer performs the actual connection cleanup.
     private func evictStorageCacheAndNotifyGroupDeletion(groupId: String) {
         storageCacheLock.lock()
-        storageCache.removeValue(forKey: groupId)
+        let evicted = storageCache.removeValue(forKey: groupId)
         storageCacheLock.unlock()
+        // DS-3 / CR-3 (v2.10.30): evicting from the cache only stops NEW lookups from
+        // reusing this instance; it does nothing about references already captured by the
+        // UI / watcher / an in-flight task before the delete. Mark the evicted instance
+        // invalidated so any such lingering reference refuses future writes and can never
+        // physically recreate the deleted group's slot directory (phantom-group resurrection).
+        evicted?.invalidate()
         NotificationCenter.default.post(
             name: Notification.Name("ClipSlotsSpecialSlotGroupDeleted"),
             object: nil,
@@ -1326,12 +1341,60 @@ public final class SpecialSlotStorage {
     public func clearAllSlots(in specialSlotId: String) throws {
         // P2-4 (v2.10.9): content wipe + index touch in ONE withLock (see clear()).
         try storageLock.withLock {
+            // PK-1 (v2.10.30): overwrite-import and "clear whole group" previously routed
+            // straight to SlotStorage.clearAll(), which physically removes the group's slot
+            // directory with NO .trash backup — an unrecoverable data loss (e.g. importing a
+            // .clipslotspack in overwrite mode wiped the entire target group forever). Snapshot
+            // the whole group directory into .trash first (soft delete, 30-day recovery),
+            // matching delete-group / overwrite-write semantics. Failure only logs; it does not
+            // block the wipe (the wipe is what the caller asked for).
+            backupGroupBeforeClearIfNeeded(specialSlotId: specialSlotId)
             try slotStorage(for: specialSlotId).clearAll()
             var index = loadIndex()
             if let idx = index.specialSlots.firstIndex(where: { $0.id == specialSlotId }) {
                 index.specialSlots[idx].updatedAt = Date()
                 try? saveIndex(index)
             }
+        }
+    }
+
+    /// PK-1 (v2.10.30): snapshot an entire slot group's data directory into `.trash` before a
+    /// destructive clearAll (overwrite import / clear-all-slots). Mirrors
+    /// `backupSlotBeforeOverwriteIfNeeded` but at group granularity. Only backs up a group that
+    /// actually has slot data on disk (skips empty groups to avoid polluting `.trash`). Must be
+    /// called INSIDE `storageLock.withLock` so the snapshot is atomic w.r.t. concurrent writes.
+    private func backupGroupBeforeClearIfNeeded(specialSlotId: String) {
+        let groupDir = specialSlotDirectory(for: specialSlotId)
+        guard FileManager.default.fileExists(atPath: groupDir.path) else { return }
+        // Only back up if the group has at least one numeric slot dir (real content); a bare /
+        // freshly-created group dir is not worth a .trash entry.
+        let hasSlotData = (try? FileManager.default.contentsOfDirectory(
+            at: groupDir, includingPropertiesForKeys: nil))?
+            .contains(where: { Int($0.lastPathComponent) != nil }) ?? false
+        guard hasSlotData else { return }
+        let trashDir = baseDir.appendingPathComponent(".trash")
+        try? FileManager.default.createDirectory(at: trashDir, withIntermediateDirectories: true)
+        // 命名 group_cleared_<specialSlotId>_<秒.毫秒>：末段为 Double 时间戳，可被 trashEntryDate() 识别、
+        // 参与统一的保留期/条数清理。
+        var ts = Date().timeIntervalSince1970
+        func target(_ ts: TimeInterval) -> URL {
+            trashDir.appendingPathComponent(
+                "group_cleared_\(specialSlotId)_\(String(format: "%.3f", ts))")
+        }
+        var trashTarget = target(ts)
+        while FileManager.default.fileExists(atPath: trashTarget.path) {
+            ts += 0.001
+            trashTarget = target(ts)
+        }
+        do {
+            // copyItem (not moveItem): keep the group dir in place so SlotStorage.clearAll()'s
+            // own remove/recreate semantics and the cached instance's baseURL are unchanged.
+            try FileManager.default.copyItem(at: groupDir, to: trashTarget)
+            DispatchQueue.global(qos: .utility).async { [weak self] in
+                self?.cleanupTrash()
+            }
+        } catch {
+            NSLog("[ClipSlots] PK-1: 清空整组前备份到 .trash 失败（不阻断清空）group=\(specialSlotId): \(error.localizedDescription)")
         }
     }
 

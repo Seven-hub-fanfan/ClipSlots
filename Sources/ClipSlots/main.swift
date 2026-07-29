@@ -320,6 +320,34 @@ final class SlotStoreObservable: ObservableObject {
     /// to genuinely external writes.
     private var ignoreWatcherUntil: Date = .distantPast
 
+    // CR-1 (v2.10.30): `ignoreWatcherUntil` 会被「可能运行在非主线程的 GUI 写入入口」(suppressWatcher)
+    // 与「主线程 watcher 回调」并发读写，构成对 Date 的数据竞争。用专用 NSLock 串行化其所有读写，
+    // 全部经由下方 setIgnoreWatcherUntil / currentIgnoreWatcherUntil 两个访问器进行，禁止再直接触碰。
+    // 注：pendingSelfWriteFingerprints/fingerprintQueue 已由串行队列保护，此锁仅覆盖 ignoreWatcherUntil。
+    private let watcherStateLock = NSLock()
+    private func setIgnoreWatcherUntil(_ d: Date) {
+        watcherStateLock.lock()
+        ignoreWatcherUntil = d
+        watcherStateLock.unlock()
+    }
+    private func currentIgnoreWatcherUntil() -> Date {
+        watcherStateLock.lock()
+        defer { watcherStateLock.unlock() }
+        return ignoreWatcherUntil
+    }
+
+    // CR-2 / CS-3 (v2.10.30): 自动存储的 capture→找空槽→写入→推进游标 全流程串行化保护标志。
+    // 快速连按 Opt+1 时，第二次按下若在第一次的异步剪贴板等待窗口内，会与第一次解析到同一个空槽
+    // 造成重复写入。入口处若发现仍在进行中则忽略本次；所有完成/提前返回分支都必须复位为 false。
+    // 仅在主线程读写（自动存储流程全程在主线程调度）。
+    private var isAutoStoreInFlight = false
+
+    // CS-2 (v2.10.30): 记录「连线链」本轮自动粘贴已粘过的成员（按组 id）。非连续链粘贴后读游标会
+    // 推进到 chain.first（为了不跳过链内空档之外的普通槽），若不加记录，链内其余成员会在后续扫描中被
+    // 再次选中而重复粘贴。auto-paste 的 isNonEmpty 探针会把命中该集合的槽位视为空跳过，做到「每轮每成员
+    // 至多粘贴一次」；读游标重置（一轮结束）时清空。仅在主线程读写。
+    private var pastedChainMembersByGroup: [String: Set<Int>] = [:]
+
     // P2-5 (v2.10.16): 纯时间窗（ignoreWatcherUntil）无法区分「本进程自写」与「恰好落在 0.6s 窗口内
     // 的外部 CLI 写」，后者会被一并吞掉导致 GUI 显示滞后。这里改用「自写内容指纹」辅助判定：每次自写
     // 完成后记录一次 special_slots 目录树指纹；watcher 回调在时间窗内命中时，用当前磁盘指纹与最近自写
@@ -373,12 +401,15 @@ final class SlotStoreObservable: ObservableObject {
             self.watcherDebounceWorkItem?.cancel()
             let work = DispatchWorkItem { [weak self] in
                 guard let self else { return }
-                if Date() < self.ignoreWatcherUntil {
+                // CR-1 (v2.10.30): 通过加锁访问器读取，避免与 suppressWatcher 的写入竞争；一次读入本地
+                // 变量供后续两处判断使用（消除 TOCTOU）。
+                let ignoreUntil = self.currentIgnoreWatcherUntil()
+                if Date() < ignoreUntil {
                     // P2-5 (v2.10.16): 不再在时间窗内无条件跳过。
                     // (1) 开放式抑制窗（导入生命周期把 ignoreWatcherUntil 顶到极远未来，见 PK-2 v2.10.15）：
                     //     此时磁盘正被本进程持续写入、指纹频繁变化，仍需保持无条件跳过以避免导入期间反复
                     //     reload 造成的闪烁 / 当前页被重置。用一个较大的阈值区分它与普通自写窗（后者 ≤ 数秒）。
-                    if self.ignoreWatcherUntil.timeIntervalSinceNow > 60 {
+                    if ignoreUntil.timeIntervalSinceNow > 60 {
                         NSLog("[ClipSlots] watcher fired → suppressed (open-ended/import window)")
                         return
                     }
@@ -423,8 +454,12 @@ final class SlotStoreObservable: ObservableObject {
         // 连接缓存归 GUI 层的 SlotConnectionStorage 管辖（Kit 层无法引用），故在文件
         // 监听回调里一并清理。
         SlotConnectionStorage.shared.invalidateCache()
-        self.reloadAll()
-        self.refreshTrigger = UUID()
+        // P0-1 (v2.10.30): 改走异步 reload，把逐槽磁盘读移出主线程，避免 CLI 批量写盘时 GUI 卡死。
+        // 原先紧跟在 reloadAll 之后的 UI 刷新触发（refreshTrigger）挪到异步完成闭包里，确保在 @Published
+        // 赋值完成后再刷新。
+        self.reloadAllAsync { [weak self] in
+            self?.refreshTrigger = UUID()
+        }
     }
 
     /// Bump the suppression window right before a GUI-initiated disk write so the
@@ -432,7 +467,8 @@ final class SlotStoreObservable: ObservableObject {
     /// A single timestamp (rather than per-method bool flags) is simpler and safe
     /// as long as it is bumped at every GUI write entry point.
     func suppressWatcher(_ interval: TimeInterval = 0.6) {
-        ignoreWatcherUntil = Date().addingTimeInterval(interval)
+        // CR-1 (v2.10.30): 经加锁访问器写入（本方法可能从非主线程的 GUI 写入入口调用）。
+        setIgnoreWatcherUntil(Date().addingTimeInterval(interval))
         // P2-5 (v2.10.16): 记录本次自写完成后的磁盘指纹，供 watcher 回调区分自写 / 外部写。
         // suppressWatcher 在实际写入「之前」调用，故用 main.async 把指纹采集排到当前主线程同步写入
         // 「之后」执行，从而捕获到「写后」磁盘状态（同步写入路径覆盖绝大多数入口）。watcher 的 debounce
@@ -540,6 +576,32 @@ final class SlotStoreObservable: ObservableObject {
         recomputeAutoPreviews()
     }
 
+    // P0-1 (v2.10.30): reloadAll 的异步版本，仅供「FSEvents watcher 触发」的 reload 使用。
+    // reloadAll 里最重的是 loadSlots 的逐槽磁盘读（N 次跨进程 flock，最长各阻塞 ~5s），此前直接跑在
+    // 主线程上，CLI 批量写盘期间会把 GUI 主线程卡到转圈。这里把该重活挪到后台队列，读完再回主线程赋值
+    // @Published 并执行其余较轻的收尾步骤。init / 显式切组等其他 reloadAll 调用方保持同步不变。
+    // 说明：loadSpecialSlots 只读索引（轻），保留在主线程先跑以拿到最新 currentSpecialSlotId；
+    // loadConnectionMapForCurrentGroup / reloadLastPasteFromDefaults / recomputeAutoPreviews 均只做
+    // 内存缓存读或轻量 FS-shape 探测且会写 @Published，统一放主线程完成闭包里执行。
+    private func reloadAllAsync(completion: (() -> Void)? = nil) {
+        loadSpecialSlots()
+        let activeId = currentSpecialSlotId
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let self = self else { return }
+            let snapshot = self.readSlotsSnapshot(for: activeId)
+            DispatchQueue.main.async { [weak self] in
+                guard let self = self else { return }
+                self.slots = snapshot.slots
+                self.labels = snapshot.labels
+                self.loadedSpecialSlotId = activeId
+                self.loadConnectionMapForCurrentGroup()
+                self.reloadLastPasteFromDefaults()
+                self.recomputeAutoPreviews()
+                completion?()
+            }
+        }
+    }
+
     /// v2.10.3 (P2): re-read the "上次粘贴" location from UserDefaults so a paste made
     /// by the `clipslots` CLI (separate process) is reflected in the GUI after the
     /// storage watcher reload, instead of only updating on relaunch.
@@ -588,6 +650,7 @@ final class SlotStoreObservable: ObservableObject {
         // v2.10.19: 游标跟随激活组——每次切到新组时重置读游标，
         // 下一次自动粘贴从「该组第一个非空槽」开始（含 A→B→A 切回 A 也重置到 A 头）。
         try? specialStorage.resetAutoPasteCursor()
+        pastedChainMembersByGroup.removeAll() // CS-2 (v2.10.30): 读游标重置=开启新一轮，清空连线链已粘记录
 
         recomputeAutoPreviews() // v2.10.3 (P2): refresh cursor badges for the new group
 
@@ -668,6 +731,7 @@ final class SlotStoreObservable: ObservableObject {
         // 注意：自动切换（autoAdvance）跨组时也经由此函数切组并触发本重置；随后 autoPasteFromHotkey
         // 会在粘贴完成回调里 advanceAutoPasteCursor(to:) 把游标重新设到落点，故跨组连续推进不受影响。
         try? specialStorage.resetAutoPasteCursor()
+        pastedChainMembersByGroup.removeAll() // CS-2 (v2.10.30): 读游标重置=开启新一轮，清空连线链已粘记录
 
         recomputeAutoPreviews() // v2.10.3 (P2): refresh cursor badges for the new group
 
@@ -1013,6 +1077,16 @@ final class SlotStoreObservable: ObservableObject {
     /// 拨杆1「自动存储」入口（Opt+1 且 autoStoreEnabled）：
     /// 读取系统剪贴板当前内容 → 找下一个空槽（跨组/跨页由拨杆3决定）→ 写入 → 推进写游标。
     func autoStoreFromHotkey(_ slot: Int) {
+        // CR-2 / CS-3 (v2.10.30): 串行化整个 capture→写入→推进游标 流程。若上一次自动存储仍在进行
+        // （尚未走完异步剪贴板等待 + 后台写入），忽略本次连按，避免两次按下解析到同一空槽造成重复写入。
+        // 注意：以下每一条提前返回分支都必须把标志复位（见各 return 处 / placeCaptured 的所有分支）。
+        if isAutoStoreInFlight {
+            NSLog("[ClipSlots] autoStoreFromHotkey ignored: previous auto-store still in flight")
+            showToast("正在自动存储，请稍候")
+            return
+        }
+        isAutoStoreInFlight = true
+
         cancelPendingClipboardRestore()
 
         // v2.10.2: 先模拟 Cmd+C 复制「当前选中内容」，稍等系统完成复制后再读取剪贴板写入下一个空槽。
@@ -1020,6 +1094,7 @@ final class SlotStoreObservable: ObservableObject {
         guard AXIsProcessTrusted() else {
             NSLog("[ClipSlots] Accessibility permission not granted. Cannot capture selection for auto-store.")
             promptAccessibilityPermissionIfNeeded()
+            isAutoStoreInFlight = false // CR-2 / CS-3 (v2.10.30): 提前返回，复位在途标志
             return
         }
 
@@ -1038,6 +1113,7 @@ final class SlotStoreObservable: ObservableObject {
                     iconName: "xmark.circle.fill",
                     kind: .error
                 ), duration: 2.5)
+                self.isAutoStoreInFlight = false // CR-2 / CS-3 (v2.10.30): 剪贴板未变化，复位在途标志
                 return
             }
             self.placeCapturedContentToNextEmptySlot()
@@ -1054,6 +1130,7 @@ final class SlotStoreObservable: ObservableObject {
                 iconName: "doc.on.clipboard",
                 kind: .warning
             ))
+            isAutoStoreInFlight = false // CR-2 / CS-3 (v2.10.30): 复位在途标志
             return
         }
 
@@ -1070,52 +1147,83 @@ final class SlotStoreObservable: ObservableObject {
 
         let cursor = validatedCursor(specialStorage.autoStoreCursor())
         let autoAdvance = AutoModeState.shared.autoAdvanceEnabled
+        let activeGroupId = currentSpecialSlotId
 
-        guard let target = manager.findNextEmptySlot(
-            from: cursor,
-            startGroupId: currentSpecialSlotId,
-            autoAdvance: autoAdvance
-        ) else {
+        // CS-1 (v2.10.30): 与 autoPasteFromHotkey 保持一致——扫描起点锁定「当前激活组」。
+        // 持久化的写游标若属于别的组（切组 / 跨进程改动），此前会被原样当作扫描起点：在自动切换关闭时
+        // 会把内容写进那个「其他组」而非当前激活组。这里把外组游标视为 nil（从当前组头部开始）。
+        // 组内推进时仍透传 autoAdvance（组内写满后是否跨组），不改变自动切换 ON 时的既有跨组行为。
+        let cursorInActiveGroup: SlotAddress? = (cursor?.groupId == activeGroupId) ? cursor : nil
+        let target: SlotAddress?
+        if cursorInActiveGroup == nil {
+            target = manager.findNextEmptySlot(
+                from: nil,
+                startGroupId: activeGroupId,
+                autoAdvance: false
+            )
+        } else {
+            target = manager.findNextEmptySlot(
+                from: cursorInActiveGroup,
+                startGroupId: activeGroupId,
+                autoAdvance: autoAdvance
+            )
+        }
+
+        guard let target = target else {
             showFloatingNotice(FloatingNotice(
                 title: "所有槽位已满",
                 subtitle: autoAdvance ? "全部页面 / 组均无空槽" : "当前组已无空槽",
                 iconName: "exclamationmark.triangle.fill",
                 kind: .warning
             ))
+            isAutoStoreInFlight = false // CR-2 / CS-3 (v2.10.30): 复位在途标志
             return
         }
 
         suppressWatcher() // self-write
-        // P2-3 (v2.10.5): 检查 set 返回值（@discardableResult -> Bool）。写入失败时
-        // 既不推进写游标、也不弹「已自动存储」成功提示，避免「假成功 + 游标跳过一个
-        // 未写入的槽位」。
-        guard specialStorage.set(target.slot, content: content, in: target.groupId) else {
-            showFloatingNotice(FloatingNotice(
-                title: "自动存储失败",
-                subtitle: "写入槽位 \(target.slot) 未成功，请重试",
-                iconName: "exclamationmark.triangle.fill",
-                kind: .warning
-            ))
-            return
-        }
-        // 推进写游标（磁盘持久化，跨进程写锁内完成；旧游标压入 prev 供回退）。
-        try? specialStorage.advanceAutoStoreCursor(to: SpecialSlotCursor(groupId: target.groupId, slot: target.slot))
+        // MT-2 / CS-4 (v2.10.30): specialStorage.set 需拿跨进程写锁，锁竞争时最长阻塞 ~5s。把它挪到后台
+        // 队列执行，避免卡住主线程；写完再回主线程推进游标 / 切组 / 提示 / 复位在途标志。写入所需的内容与
+        // 落点在派发前先固定为不可变快照，后台闭包不读取可变 @Published 状态。
+        let capturedContent = content
+        let capturedTarget = target
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let self = self else { return }
+            // P2-3 (v2.10.5): 检查 set 返回值（@discardableResult -> Bool）。写入失败时既不推进写游标、
+            // 也不弹「已自动存储」成功提示，避免「假成功 + 游标跳过一个未写入的槽位」。
+            let ok = self.specialStorage.set(capturedTarget.slot, content: capturedContent, in: capturedTarget.groupId)
+            DispatchQueue.main.async { [weak self] in
+                guard let self = self else { return }
+                // CR-2 / CS-3 (v2.10.30): 无论成功/失败，回到主线程后统一复位在途标志，放行下一次连按。
+                defer { self.isAutoStoreInFlight = false }
+                guard ok else {
+                    self.showFloatingNotice(FloatingNotice(
+                        title: "自动存储失败",
+                        subtitle: "写入槽位 \(capturedTarget.slot) 未成功，请重试",
+                        iconName: "exclamationmark.triangle.fill",
+                        kind: .warning
+                    ))
+                    return
+                }
+                // 推进写游标（磁盘持久化，跨进程写锁内完成；旧游标压入 prev 供回退）。
+                try? self.specialStorage.advanceAutoStoreCursor(to: SpecialSlotCursor(groupId: capturedTarget.groupId, slot: capturedTarget.slot))
 
-        // 让 UI 跟随落点：写到别的组则切过去，否则刷新当前组。
-        if target.groupId != currentSpecialSlotId {
-            switchSpecialSlot(id: target.groupId)
-        } else {
-            reloadAll()
-        }
-        recomputeAutoPreviews()
+                // 让 UI 跟随落点：写到别的组则切过去，否则刷新当前组。
+                if capturedTarget.groupId != self.currentSpecialSlotId {
+                    self.switchSpecialSlot(id: capturedTarget.groupId)
+                } else {
+                    self.reloadAll()
+                }
+                self.recomputeAutoPreviews()
 
-        let groupName = specialSlots.first(where: { $0.id == target.groupId })?.name ?? ""
-        showFloatingNotice(FloatingNotice(
-            title: "已自动存储 → 槽位 \(target.slot)",
-            subtitle: groupName.isEmpty ? "" : "组「\(groupName)」",
-            iconName: "tray.and.arrow.down.fill",
-            kind: .success
-        ))
+                let groupName = self.specialSlots.first(where: { $0.id == capturedTarget.groupId })?.name ?? ""
+                self.showFloatingNotice(FloatingNotice(
+                    title: "已自动存储 → 槽位 \(capturedTarget.slot)",
+                    subtitle: groupName.isEmpty ? "" : "组「\(groupName)」",
+                    iconName: "tray.and.arrow.down.fill",
+                    kind: .success
+                ))
+            }
+        }
     }
 
     /// 拨杆2「自动粘贴」入口（Cmd+1 且 autoPasteEnabled）：
@@ -1127,6 +1235,8 @@ final class SlotStoreObservable: ObservableObject {
             slotCount: config.slots,
             isNonEmpty: { [weak self] addr in
                 guard let self = self else { return false }
+                // CS-2 (v2.10.30): 本轮自动粘贴已粘过的连线链成员视为空槽跳过，避免非连续链重复粘贴。
+                if self.pastedChainMembersByGroup[addr.groupId]?.contains(addr.slot) == true { return false }
                 // PERF: cheap FS-shape probe instead of a full-content read.
                 return !self.specialStorage.isEmpty(addr.slot, in: addr.groupId)
             }
@@ -1175,6 +1285,7 @@ final class SlotStoreObservable: ObservableObject {
             }
             // 自动切换 ON 且已线性推进到全局末尾（后续再无非空组）：重置读游标并提示，不循环卡死。
             try? specialStorage.resetAutoPasteCursor()
+            pastedChainMembersByGroup.removeAll() // CS-2 (v2.10.30): 读游标重置=开启新一轮，清空连线链已粘记录
             recomputeAutoPreviews()
             showFloatingNotice(FloatingNotice(
                 title: "所有槽位已粘贴完毕",
@@ -1243,6 +1354,8 @@ final class SlotStoreObservable: ObservableObject {
             slotCount: config.slots,
             isNonEmpty: { [weak self] addr in
                 guard let self = self else { return false }
+                // CS-2 (v2.10.30): 预览与实际自动粘贴一致——已粘过的连线链成员视为空槽跳过。
+                if self.pastedChainMembersByGroup[addr.groupId]?.contains(addr.slot) == true { return false }
                 // PERF: cheap FS-shape probe instead of a full-content read.
                 return !self.specialStorage.isEmpty(addr.slot, in: addr.groupId)
             }
@@ -1306,6 +1419,7 @@ final class SlotStoreObservable: ObservableObject {
     /// 读游标重置到当前激活组的第一个非空槽（与切组时的自动行为一致），并刷新预览角标。
     func autoPasteCursorReset() {
         try? specialStorage.resetAutoPasteCursor()
+        pastedChainMembersByGroup.removeAll() // CS-2 (v2.10.30): 读游标重置=开启新一轮，清空连线链已粘记录
         recomputeAutoPreviews()
         showFloatingNotice(FloatingNotice(
             title: "读游标已重置",
@@ -1465,11 +1579,20 @@ final class SlotStoreObservable: ObservableObject {
     private func persistCurrentSpecialSlotData() {
         suppressWatcher() // v2.9.4 (#2): our own write — don't let it trigger a reload
         let activeId = currentSpecialSlotId
-        for (slot, content) in slots {
-            specialStorage.set(slot, content: content, in: activeId)
-        }
-        for (slot, label) in labels {
-            specialStorage.setLabel(slot, label: label, in: activeId)
+        // MT-1 (v2.10.30): 逐槽写盘（每次 set/setLabel 需拿跨进程写锁，锁竞争时最长各阻塞 ~5s）此前直接
+        // 跑在主线程，拖拽导入 / 文本编辑等会卡住 UI。改为：在主线程先固定 slots/labels 的不可变快照，再把
+        // 实际磁盘写入整体挪到后台队列。in-memory 的 slots/labels 变更已由各调用方在主线程完成（UI 立即
+        // 更新），此处仅做持久化；写入成功与否不驱动任何后续 UI（与原同步实现一致，均忽略返回值）。
+        let slotsSnapshot = slots
+        let labelsSnapshot = labels
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let self = self else { return }
+            for (slot, content) in slotsSnapshot {
+                self.specialStorage.set(slot, content: content, in: activeId)
+            }
+            for (slot, label) in labelsSnapshot {
+                self.specialStorage.setLabel(slot, label: label, in: activeId)
+            }
         }
     }
 
@@ -1530,6 +1653,8 @@ final class SlotStoreObservable: ObservableObject {
             newContent.attachments = slots[target]?.attachments ?? []
             slots[target] = newContent
         }
+        // MT-1 (v2.10.30): persistCurrentSpecialSlotData 已改为「主线程快照 + 后台写盘」，此处拖拽导入
+        // 不再在主线程上逐槽同步写锁写盘。
         persistCurrentSpecialSlotData()
         showFloatingNotice(FloatingNotice(title: "已导入文件", subtitle: urls.count == 1 ? first.lastPathComponent : "\(urls.count) 个文件", iconName: "folder.badge.plus", kind: .success))
     }
@@ -1551,19 +1676,31 @@ final class SlotStoreObservable: ObservableObject {
         let checkbox = NSButton(checkboxWithTitle: "不再提醒", target: nil, action: nil)
         alert.accessoryView = checkbox
 
-        let response = alert.runModal()
-        guard response == .alertFirstButtonReturn else { return }
-
-        if checkbox.state == .on {
-            do {
-                try specialStorage.updateSettings { $0.confirmBeforeClearAllSlots = false }
-                specialSlotSettings.confirmBeforeClearAllSlots = false
-            } catch {
-                NSLog("[ClipSlots] update confirmBeforeClearAllSlots failed: \(error)")
+        // MT-3 (v2.10.30): 原 alert.runModal() 会阻塞主 run loop。改为非阻塞 sheet，确认后的清空动作移到
+        // 完成闭包里执行；取不到宿主窗口时回退到 runModal() 以免流程中断。
+        let onConfirm: (NSButton) -> Void = { [weak self] checkbox in
+            guard let self = self else { return }
+            if checkbox.state == .on {
+                do {
+                    try self.specialStorage.updateSettings { $0.confirmBeforeClearAllSlots = false }
+                    self.specialSlotSettings.confirmBeforeClearAllSlots = false
+                } catch {
+                    NSLog("[ClipSlots] update confirmBeforeClearAllSlots failed: \(error)")
+                }
             }
+            self.clearAllSlotsInCurrentSpecialSlot()
         }
 
-        clearAllSlotsInCurrentSpecialSlot()
+        guard let window = sheetHostWindow() else {
+            let response = alert.runModal()
+            guard response == .alertFirstButtonReturn else { return }
+            onConfirm(checkbox)
+            return
+        }
+        alert.beginSheetModal(for: window) { response in
+            guard response == .alertFirstButtonReturn else { return }
+            onConfirm(checkbox)
+        }
     }
 
     func clearAllSlotsInCurrentSpecialSlot() {
@@ -1641,17 +1778,32 @@ final class SlotStoreObservable: ObservableObject {
             let checkbox = NSButton(checkboxWithTitle: "不再提醒", target: nil, action: nil)
             alert.accessoryView = checkbox
 
-            let response = alert.runModal()
-            guard response == .alertFirstButtonReturn else { return }
-
-            if checkbox.state == .on {
-                do {
-                    try specialStorage.updateSettings { $0.confirmBeforePasteAllSlots = false }
-                    specialSlotSettings.confirmBeforePasteAllSlots = false
-                } catch {
-                    NSLog("[ClipSlots] update confirmBeforePasteAllSlots failed: \(error)")
+            // MT-3 (v2.10.30): 原 alert.runModal() 会阻塞主 run loop。改为非阻塞 sheet，确认后的粘贴动作
+            // 移到完成闭包里执行（并 return 以跳过下方无条件调用）；取不到宿主窗口时回退 runModal()。
+            let onConfirm: (NSButton) -> Void = { [weak self] checkbox in
+                guard let self = self else { return }
+                if checkbox.state == .on {
+                    do {
+                        try self.specialStorage.updateSettings { $0.confirmBeforePasteAllSlots = false }
+                        self.specialSlotSettings.confirmBeforePasteAllSlots = false
+                    } catch {
+                        NSLog("[ClipSlots] update confirmBeforePasteAllSlots failed: \(error)")
+                    }
                 }
+                self.pasteAllSlotsFromUI()
             }
+
+            guard let window = sheetHostWindow() else {
+                let response = alert.runModal()
+                guard response == .alertFirstButtonReturn else { return }
+                onConfirm(checkbox)
+                return
+            }
+            alert.beginSheetModal(for: window) { response in
+                guard response == .alertFirstButtonReturn else { return }
+                onConfirm(checkbox)
+            }
+            return
         }
 
         pasteAllSlotsFromUI()
@@ -1700,6 +1852,18 @@ final class SlotStoreObservable: ObservableObject {
     func loadSlots() {
         let activeId = currentSpecialSlotId
         NSLog("[ClipSlots] loadSlots activeSpecialSlotId=\(activeId)")
+        // P0-1 (v2.10.30): 磁盘重读逻辑抽到 readSlotsSnapshot（纯函数，不触碰 @Published）。
+        // 同步路径（init / 显式切组）保持原样：读完立即在主线程赋值 @Published。
+        let snapshot = readSlotsSnapshot(for: activeId)
+        slots = snapshot.slots
+        labels = snapshot.labels
+        loadedSpecialSlotId = activeId
+    }
+
+    // P0-1 (v2.10.30): 逐槽磁盘读取（每次 get/getLabel 需拿跨进程 flock，最长阻塞 ~5s）。抽为纯函数
+    // 返回局部字典，不做任何 @Published 赋值，便于在后台队列调用（见 reloadAllAsync），避免 watcher
+    // 触发的 reload 在主线程上被 flock 阻塞导致 GUI 卡死（转圈）。
+    private func readSlotsSnapshot(for activeId: String) -> (slots: [Int: SlotContent], labels: [Int: String]) {
         var result: [Int: SlotContent] = [:]
         var labelMap: [Int: String] = [:]
         // P2-7 (v2.10.7): 配置损坏导致 config.slots==0 时，1...0 闭区间会 fatalError；改用 stride 空迭代。
@@ -1709,9 +1873,7 @@ final class SlotStoreObservable: ObservableObject {
                 labelMap[slot] = label
             }
         }
-        slots = result
-        labels = labelMap
-        loadedSpecialSlotId = activeId
+        return (result, labelMap)
     }
 
     // MARK: - Helpers
@@ -1983,15 +2145,33 @@ final class SlotStoreObservable: ObservableObject {
                 let checkbox = NSButton(checkboxWithTitle: "以后覆盖时不再提醒", target: nil, action: nil)
                 alert.accessoryView = checkbox
 
-                let response = alert.runModal()
-                guard response == .alertFirstButtonReturn else {
-                    NSLog("[ClipSlots] SAVE cancelled by user slot=\(slot)")
-                    return
+                // MT-3 (v2.10.30): 原 alert.runModal() 会阻塞主 run loop。改为非阻塞 sheet；确认后的保存动作
+                // 移到完成闭包（并 return 跳过下方无条件保存）；取不到宿主窗口时回退 runModal()。
+                let onConfirm: (NSButton) -> Void = { [weak self] checkbox in
+                    guard let self = self else { return }
+                    if checkbox.state == .on {
+                        UserDefaults.standard.set(true, forKey: UserPreferenceKeys.skipOverwriteConfirmation)
+                    }
+                    self.handleCapturedContentForSave(content, targetSlot: slot)
                 }
 
-                if checkbox.state == .on {
-                    UserDefaults.standard.set(true, forKey: UserPreferenceKeys.skipOverwriteConfirmation)
+                guard let window = self.sheetHostWindow() else {
+                    let response = alert.runModal()
+                    guard response == .alertFirstButtonReturn else {
+                        NSLog("[ClipSlots] SAVE cancelled by user slot=\(slot)")
+                        return
+                    }
+                    onConfirm(checkbox)
+                    return
                 }
+                alert.beginSheetModal(for: window) { response in
+                    guard response == .alertFirstButtonReturn else {
+                        NSLog("[ClipSlots] SAVE cancelled by user slot=\(slot)")
+                        return
+                    }
+                    onConfirm(checkbox)
+                }
+                return
             }
 
             self.handleCapturedContentForSave(content, targetSlot: slot)
@@ -2025,15 +2205,33 @@ final class SlotStoreObservable: ObservableObject {
             let checkbox = NSButton(checkboxWithTitle: "以后覆盖时不再提醒", target: nil, action: nil)
             alert.accessoryView = checkbox
 
-            let response = alert.runModal()
-            guard response == .alertFirstButtonReturn else {
-                NSLog("[ClipSlots] SAVE cancelled by user slot=\(slot)")
-                return
+            // MT-3 (v2.10.30): 与 captureSelectionAndSaveToSlot 的覆盖确认同构——把阻塞的 runModal 改成非阻塞
+            // sheet；确认后的保存移到完成闭包（并 return 跳过下方无条件保存）；无宿主窗口时回退 runModal()。
+            let onConfirm: (NSButton) -> Void = { [weak self] checkbox in
+                guard let self = self else { return }
+                if checkbox.state == .on {
+                    UserDefaults.standard.set(true, forKey: UserPreferenceKeys.skipOverwriteConfirmation)
+                }
+                self.handleCapturedContentForSave(content, targetSlot: slot)
             }
 
-            if checkbox.state == .on {
-                UserDefaults.standard.set(true, forKey: UserPreferenceKeys.skipOverwriteConfirmation)
+            guard let window = sheetHostWindow() else {
+                let response = alert.runModal()
+                guard response == .alertFirstButtonReturn else {
+                    NSLog("[ClipSlots] SAVE cancelled by user slot=\(slot)")
+                    return
+                }
+                onConfirm(checkbox)
+                return
             }
+            alert.beginSheetModal(for: window) { response in
+                guard response == .alertFirstButtonReturn else {
+                    NSLog("[ClipSlots] SAVE cancelled by user slot=\(slot)")
+                    return
+                }
+                onConfirm(checkbox)
+            }
+            return
         }
 
         handleCapturedContentForSave(content, targetSlot: slot)
@@ -2094,7 +2292,19 @@ final class SlotStoreObservable: ObservableObject {
                 let isContiguous = (sortedChain.count > 1)
                     && (sortedChain.last! - sortedChain.first! == sortedChain.count - 1)
                 let advanceSlot = isContiguous ? (sortedChain.last ?? slot) : (chain.first ?? slot)
-                pasteSlotChain(chain) { onCommitted?(advanceSlot) }
+                // CS-2 (v2.10.30): 非连续链在自动粘贴（suppressAutoAdvance）路径下，读游标推进到
+                // chain.first 后，链内其余成员会在后续扫描中被再次选中导致重复粘贴。此处在 Cmd+V 真正
+                // 提交后的完成闭包内（与 onCommitted 同为主线程）记录本链全部成员为「本轮已粘贴」，之后
+                // 自动粘贴扫描经 isNonEmpty 探针把它们视为空跳过；一轮结束（读游标重置）时清空。连续链
+                // 因游标已推进到 chain.max 天然跳过全部成员，无需记录。
+                let chainGroupId = activeId
+                let chainMembers = chain
+                pasteSlotChain(chain) { [weak self] in
+                    if suppressAutoAdvance && !isContiguous {
+                        self?.pastedChainMembersByGroup[chainGroupId, default: []].formUnion(chainMembers)
+                    }
+                    onCommitted?(advanceSlot)
+                }
                 return
             }
         }
@@ -4208,7 +4418,9 @@ final class SlotStoreObservable: ObservableObject {
             // 取代原先固定 2s 窗口——固定窗口会在用户停留弹窗期间过期，使导入写入触发 FSEvents 让
             // StorageDirectoryWatcher 反复 reloadAll（闪烁 / 当前页被重置）。此处置为 distantFuture，
             // 待完成后再收敛为 suppressWatcher(2.0) 覆盖尾随 FSEvents 并自然恢复。
-            DispatchQueue.main.sync { self.ignoreWatcherUntil = .distantFuture }
+            // CR-1 (v2.10.30): 改用加锁访问器直接写入，去掉原 `DispatchQueue.main.sync { ... }` 包裹——
+            // 该 sync 若碰巧已在主线程执行会死锁；锁本身即保证线程安全，无需再切主队列。
+            self.setIgnoreWatcherUntil(.distantFuture)
 
             do {
                 let result = try importer.importPack(
@@ -4461,6 +4673,13 @@ final class SlotStoreObservable: ObservableObject {
         alert.runModal()
     }
 
+    // MT-3 (v2.10.30): 为「把阻塞的 alert.runModal() 改成非阻塞 beginSheetModal(for:)」提供宿主窗口。
+    // 优先 keyWindow（非面板），退回第一个可见的非面板窗口。取不到窗口时返回 nil，调用方回退到 runModal()。
+    private func sheetHostWindow() -> NSWindow? {
+        if let key = NSApp.keyWindow, !(key is NSPanel) { return key }
+        return NSApp.windows.first(where: { !($0 is NSPanel) && $0.isVisible })
+    }
+
     // MARK: - File Detection
 
     func handleCapturedContentForSave(_ content: SlotContent, targetSlot: Int) {
@@ -4498,42 +4717,53 @@ final class SlotStoreObservable: ObservableObject {
 
         ThumbnailProvider.shared.invalidateSlot(specialSlotId: activeId, slot: targetSlot)
 
-        let success = specialStorage.set(targetSlot, content: savedContent, in: activeId)
+        // MT-1 (v2.10.30): 单槽保存写盘同样走跨进程写锁（锁竞争时最长阻塞 ~5s），从主线程挪到后台队列，
+        // 写完再回主线程更新内存 @Published / 标签 / 提示。要写入的内容在派发前固定为不可变快照，后台
+        // 闭包不读取可变 @Published 状态。callers（saveToSlot / captureSelectionAndSaveToSlot）不依赖本
+        // 方法的同步返回，故异步化安全。
+        let contentToWrite = savedContent
+        let existingSnapshot = existingBeforeSave
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let self = self else { return }
+            let success = self.specialStorage.set(targetSlot, content: contentToWrite, in: activeId)
+            DispatchQueue.main.async { [weak self] in
+                guard let self = self else { return }
+                guard success else {
+                    NSLog("[ClipSlots] SAVE FAIL specialSlot=\(activeId) slot=\(targetSlot)")
+                    self.showFloatingNotice(FloatingNotice(
+                        title: "保存失败",
+                        subtitle: "槽位 \(targetSlot) 写入失败，请重试",
+                        iconName: "xmark.circle.fill",
+                        kind: .error
+                    ), duration: 2.5)
+                    return
+                }
+                var newSlots = self.slots
+                newSlots[targetSlot] = contentToWrite
+                self.slots = newSlots
+                self.slotRenderTokens["\(activeId)::\(targetSlot)"] = UUID()
+                self.loadedSpecialSlotId = activeId
+                self.refreshTrigger = UUID()
 
-        guard success else {
-            NSLog("[ClipSlots] SAVE FAIL specialSlot=\(activeId) slot=\(targetSlot)")
-            showFloatingNotice(FloatingNotice(
-                title: "保存失败",
-                subtitle: "槽位 \(targetSlot) 写入失败，请重试",
-                iconName: "xmark.circle.fill",
-                kind: .error
-            ), duration: 2.5)
-            return
-        }
-        var newSlots = slots
-        newSlots[targetSlot] = savedContent
-        slots = newSlots
-        slotRenderTokens["\(activeId)::\(targetSlot)"] = UUID()
-        loadedSpecialSlotId = activeId
-        refreshTrigger = UUID()
+                // Update label to file name if present
+                if let fileURL = contentToWrite.primaryFileURL {
+                    self.setLabel(targetSlot, label: fileURL.lastPathComponent)
+                }
 
-        // Update label to file name if present
-        if let fileURL = savedContent.primaryFileURL {
-            setLabel(targetSlot, label: fileURL.lastPathComponent)
-        }
+                NSLog("[ClipSlots] SAVE OK specialSlot=\(activeId) slot=\(targetSlot) contentId=\(contentToWrite.contentId) preview=\(contentToWrite.preview)")
 
-        NSLog("[ClipSlots] SAVE OK specialSlot=\(activeId) slot=\(targetSlot) contentId=\(savedContent.contentId) preview=\(savedContent.preview)")
-
-        // v2.6.2: Floating notice with content summary
-        if UserDefaults.standard.showSaveToast {
-            let summary = savedContent.noticeSummary
-            let isOverwrite = !existingBeforeSave.isEmpty
-            showFloatingNotice(FloatingNotice(
-                title: isOverwrite ? "已覆盖槽位 \(targetSlot)" : "已保存到槽位 \(targetSlot)",
-                subtitle: "\(summary.typeTitle) · \(summary.detail)",
-                iconName: summary.iconName,
-                kind: .success
-            ))
+                // v2.6.2: Floating notice with content summary
+                if UserDefaults.standard.showSaveToast {
+                    let summary = contentToWrite.noticeSummary
+                    let isOverwrite = !existingSnapshot.isEmpty
+                    self.showFloatingNotice(FloatingNotice(
+                        title: isOverwrite ? "已覆盖槽位 \(targetSlot)" : "已保存到槽位 \(targetSlot)",
+                        subtitle: "\(summary.typeTitle) · \(summary.detail)",
+                        iconName: summary.iconName,
+                        kind: .success
+                    ))
+                }
+            }
         }
     }
 

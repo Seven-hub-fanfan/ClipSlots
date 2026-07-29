@@ -1,5 +1,6 @@
 import AppKit
 import Foundation
+import SwiftUI // AT-1 (v2.10.30): for the async InlineImageView below.
 import ClipSlotsKit
 
 extension SlotContent {
@@ -45,7 +46,27 @@ extension SlotContent {
     }()
 
     /// Attempt to decode an NSImage from inline image data.
+    ///
+    /// NOTE: this remains a synchronous accessor because many callers across the
+    /// app read it inline (search preview, radial preview, HUD, metadata, node
+    /// card). After the first decode the result is cached, so repeat reads of the
+    /// same content version are O(1). For the *first* decode of a huge image on
+    /// the UI path, prefer the async `InlineImageView` (see AT-1 below) which
+    /// warms this same cache off the main thread.
     var inlineImage: NSImage? {
+        decodedInlineImage()
+    }
+
+    // AT-1 (v2.10.30): factored the actual decode out of the `inlineImage`
+    // accessor so both the synchronous accessor and the async `InlineImageView`
+    // share one implementation and one cache. Previously `inlineImage` decoded
+    // the full-resolution `NSImage(data:)` synchronously on whatever thread read
+    // it; because it is read inside SwiftUI view bodies, the first read of an 8K
+    // screenshot blocked the main thread ~200-500ms while a preview opened.
+    // `InlineImageView` now performs this decode on a background task and, on
+    // completion, this cache is populated so later synchronous reads never
+    // re-decode on the main thread.
+    func decodedInlineImage() -> NSImage? {
         let cacheKey: NSString? = contentId.isEmpty ? nil : "\(contentId)::\(updatedAt)" as NSString
         if let cacheKey, let cached = Self.inlineImageCache.object(forKey: cacheKey) {
             return cached
@@ -65,6 +86,11 @@ extension SlotContent {
         }
         return nil
     }
+
+    // AT-1 (v2.10.30): stable identity used as `.task(id:)` for `InlineImageView`
+    // so the async decoder only re-runs when the underlying content version
+    // changes (matches the `inlineImageCache` key shape).
+    var inlineImageIdentity: String { "\(contentId)::\(updatedAt)" }
 
     // MARK: - File URL Detection
 
@@ -132,8 +158,37 @@ extension SlotContent {
 
     // MARK: - Metadata
 
+    // AT-2 (v2.10.30): process-wide cache of the computed summary string, keyed by
+    // the same `contentId::updatedAt` identity as `inlineImageCache`. `metadataSummary`
+    // is read inside `SlotCardView` / `SlotThumbnailView` / `SlotPreviewView` bodies;
+    // for text (non-file) attachments it recursively `reduce`-summed every item's byte
+    // count on *every* body evaluation, dropping frames while scrolling / switching
+    // slots. Caching the finished string makes repeat reads O(1); an overwrite mints a
+    // new identity and misses the cache, so the summary still refreshes correctly.
+    private static let metadataSummaryCache: NSCache<NSString, NSString> = {
+        let cache = NSCache<NSString, NSString>()
+        cache.countLimit = 128
+        return cache
+    }()
+
     /// Summary string like "PNG · 512×512" or "PDF 文件".
     var metadataSummary: String {
+        // AT-2 (v2.10.30): serve from cache when possible so the render loop never
+        // re-traverses the item bytes.
+        let cacheKey: NSString? = contentId.isEmpty ? nil : "\(contentId)::\(updatedAt)" as NSString
+        if let cacheKey, let cached = Self.metadataSummaryCache.object(forKey: cacheKey) {
+            return cached as String
+        }
+        let summary = computeMetadataSummary()
+        if let cacheKey {
+            Self.metadataSummaryCache.setObject(summary as NSString, forKey: cacheKey)
+        }
+        return summary
+    }
+
+    // AT-2 (v2.10.30): the original (uncached) summary computation, now invoked at
+    // most once per content version.
+    private func computeMetadataSummary() -> String {
         if let image = inlineImage {
             let size = image.size
             let w = Int(size.width)
@@ -159,5 +214,54 @@ extension SlotContent {
     /// True if this content can show a visual preview.
     var canPreview: Bool {
         displayKind == .image || displayKind == .video || displayKind == .file
+    }
+}
+
+// AT-1 (v2.10.30): async, off-main inline-image decoder view.
+//
+// Motivation: `SlotContent.inlineImage` is a synchronous computed property that
+// runs `NSImage(data:)` on the full-resolution image. Because it is read inside
+// SwiftUI view bodies, opening a preview for a huge image (e.g. an 8K screenshot)
+// decoded on the main thread and froze the first frame for ~200-500ms.
+//
+// This view mirrors the existing async-thumbnail pattern (`AttachmentThumbnail`
+// in AttachmentManagerPopover.swift): it renders `placeholder` immediately, then
+// decodes on a background `Task.detached` and publishes the image when ready. The
+// decode routes through `SlotContent.decodedInlineImage()`, which populates the
+// shared `inlineImageCache`, so any subsequent *synchronous* `inlineImage` read of
+// the same content version returns instantly without re-decoding on the main
+// thread.
+//
+// Callers that currently read `content.inlineImage` directly inside a body (e.g.
+// SlotThumbnailView, SlotPreviewView, RadialPreviewPanel, GlobalSearchResultsView)
+// can adopt this view to move the first decode off-main. Those files are outside
+// this change's edit scope; adopting them is a follow-up for the main agent.
+struct InlineImageView<Placeholder: View>: View {
+    let content: SlotContent
+    @ViewBuilder let placeholder: () -> Placeholder
+
+    @State private var image: NSImage?
+
+    init(content: SlotContent, @ViewBuilder placeholder: @escaping () -> Placeholder) {
+        self.content = content
+        self.placeholder = placeholder
+    }
+
+    var body: some View {
+        ZStack {
+            if let image {
+                Image(nsImage: image)
+                    .resizable()
+            } else {
+                placeholder()
+            }
+        }
+        .task(id: content.inlineImageIdentity) {
+            let snapshot = content
+            let decoded = await Task.detached(priority: .userInitiated) {
+                snapshot.decodedInlineImage()
+            }.value
+            if !Task.isCancelled { image = decoded }
+        }
     }
 }

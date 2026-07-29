@@ -78,6 +78,11 @@ public struct AppConfig: Codable {
             guard parts.count == 2 else { continue }
             let key = parts[0]
             var value = parts[1]
+            // DS-4 (v2.10.30): strip a trailing inline `#` comment BEFORE parsing. Previously
+            // `slots = 10  # ten slots` kept the value as `10  # ten slots`; `Int()` then failed
+            // and the key was silently dropped (config quietly reverted to the default). A `#`
+            // inside a quoted string stays literal.
+            value = Self.stripInlineComment(value).trimmingCharacters(in: .whitespaces)
             value = value.trimmingCharacters(in: CharacterSet(charactersIn: "\"'"))
 
             if inKeybinds {
@@ -95,5 +100,19 @@ public struct AppConfig: Codable {
             }
         }
         return config
+    }
+
+    /// DS-4 (v2.10.30): remove a trailing inline `#` comment from a TOML value, treating `#`
+    /// inside single/double quotes as literal.
+    private static func stripInlineComment(_ s: String) -> String {
+        var inSingle = false, inDouble = false
+        var result = ""
+        for ch in s {
+            if ch == "\"" && !inSingle { inDouble.toggle() }
+            else if ch == "'" && !inDouble { inSingle.toggle() }
+            else if ch == "#" && !inSingle && !inDouble { break }
+            result.append(ch)
+        }
+        return result
     }
 }

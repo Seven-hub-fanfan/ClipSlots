@@ -46,6 +46,14 @@ public final class SlotStorage {
     // poison guard in SpecialSlotStorage. Accessed only on `queue` (get/set both hop
     // through queue.sync), so a plain Set needs no extra locking.
     private var attachmentDecodeFailedSlots: Set<Int> = []
+    // DS-3 / CR-3 (v2.10.30): once the owning slot group is deleted, its `SlotStorage`
+    // instance must never write again. A lingering reference (retained by the UI, a watcher
+    // callback, or an in-flight task captured before the delete) could otherwise call set()
+    // and physically recreate the group's slot directory on disk — a "phantom group" that
+    // reappears with orphaned data on the next reload. `SpecialSlotStorage` marks the cached
+    // instance invalidated when it evicts the group; every write path checks this flag and
+    // refuses. Guarded by `queue` like the rest of the mutable state.
+    private var invalidated = false
     private let queue = DispatchQueue(label: "com.clipslots.storage", qos: .utility)
     // ST-5 (v2.10.15): the diagnostic manifest rebuild (updateManifest) walks every
     // slot directory off disk. It previously ran on the shared serial `queue`, so a
@@ -94,9 +102,25 @@ public final class SlotStorage {
     /// otherwise leave these dirs behind permanently.
     private func cleanupStagingDirs(slot: Int? = nil) {
         let prefix = slot.map { ".tmp_slot_\($0)_" } ?? ".tmp_slot_"
+        // DS-2 (v2.10.30): the startup sweep (slot == nil) previously deleted EVERY
+        // `.tmp_slot_*` unconditionally. If another process (the `clipslots` CLI, or a second
+        // GUI) is atomically writing a slot at the exact moment this instance starts up, its
+        // in-flight staging dir would be wiped mid-write — corrupting that write. Only reap
+        // staging dirs that are demonstrably stale (older than the threshold); a genuine crash
+        // orphan is always far older, while a live atomic write completes within milliseconds.
+        // The per-slot sweep (slot != nil) stays unconditional: it runs in THIS process right
+        // before we (re)write that same slot, so there is no concurrent writer to protect.
+        let isStartupSweep = (slot == nil)
+        let keys: [URLResourceKey] = isStartupSweep ? [.contentModificationDateKey] : []
         guard let entries = try? FileManager.default.contentsOfDirectory(
-            at: baseURL, includingPropertiesForKeys: nil) else { return }
+            at: baseURL, includingPropertiesForKeys: keys) else { return }
+        let staleThreshold: TimeInterval = 30
+        let now = Date()
         for entry in entries where entry.lastPathComponent.hasPrefix(prefix) {
+            if isStartupSweep {
+                let mtime = try? entry.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate
+                if let mtime, now.timeIntervalSince(mtime) < staleThreshold { continue }
+            }
             try? FileManager.default.removeItem(at: entry)
         }
     }
@@ -128,7 +152,7 @@ public final class SlotStorage {
 
         // Slow path (cache miss or external change): read under the cross-process lock so
         // the directory enumeration cannot race a concurrent atomic slot swap.
-        return (try? StorageLock.shared.withLock {
+        if let content = try? StorageLock.shared.withLock({
             queue.sync {
                 // Re-check inside the lock: another thread may have populated the cache
                 // (or an external write may have landed) while we waited for the flock.
@@ -141,7 +165,23 @@ public final class SlotStorage {
                 cacheFingerprint[slot] = fp
                 return content
             }
-        }) ?? SlotContent()
+        }) {
+            return content
+        }
+
+        // DS-1 (v2.10.30): the cross-process lock could not be acquired (storage busy /
+        // timeout). Previously we fell through to `?? SlotContent()`, handing back a FRESH
+        // EMPTY slot. That "假空槽" is dangerous: it makes real content look lost in the UI
+        // and, worse, could feed an overwrite decision that wipes the still-intact disk data.
+        // Never synthesize an empty slot on a lock failure — serve the last-known cached
+        // value instead. Only when we have genuinely never loaded this slot do we return an
+        // empty SlotContent (nothing better exists), and we log so the degradation is visible.
+        if let cached = queue.sync(execute: { cache[slot] }) {
+            NSLog("[ClipSlots] SlotStorage.get slot=\(slot): lock busy, serving cached value (not empty)")
+            return cached
+        }
+        NSLog("[ClipSlots] SlotStorage.get slot=\(slot): lock busy and no cache; returning empty placeholder")
+        return SlotContent()
     }
 
     /// PERF (switch lag): cheap emptiness probe that does NOT load item payloads into
@@ -190,6 +230,11 @@ public final class SlotStorage {
 
     @discardableResult
     public func set(_ slot: Int, content: SlotContent) -> Bool {
+        // DS-3 / CR-3 (v2.10.30): a deleted group's storage must never write again.
+        if isInvalidated {
+            NSLog("[ClipSlots] SlotStorage.set slot=\(slot): refused — storage invalidated (group deleted)")
+            return false
+        }
         // v2.9.4 (#4): wrap the whole write in the cross-process lock so a CLI and
         // the GUI cannot clobber each other. flock is acquired OUTSIDE `queue`
         // (StorageLock uses its own NSRecursiveLock), never dispatched onto the
@@ -224,6 +269,8 @@ public final class SlotStorage {
     }
 
     public func clear(_ slot: Int) {
+        // DS-3 / CR-3 (v2.10.30): refuse writes on an invalidated (deleted-group) instance.
+        if isInvalidated { return }
         // v2.9.4 (#4): cross-process lock around the delete write.
         try? StorageLock.shared.withLock {
             queue.sync {
@@ -242,6 +289,9 @@ public final class SlotStorage {
     }
 
     public func clearAll() {
+        // DS-3 / CR-3 (v2.10.30): refuse on an invalidated instance — clearAll recreates
+        // `baseURL`, which for a deleted group would resurrect its directory.
+        if isInvalidated { return }
         // v2.9.4 (#4): cross-process lock around the wipe-and-recreate.
         try? StorageLock.shared.withLock {
             queue.sync {
@@ -296,6 +346,17 @@ public final class SlotStorage {
         }
     }
 
+    /// DS-3 / CR-3 (v2.10.30): permanently disable this storage instance. Called by
+    /// `SpecialSlotStorage` when the owning slot group is deleted. After this, every write
+    /// path (`set` / `clear` / `clearAll` / `setLabel`) refuses, so a lingering reference to
+    /// a deleted group's storage can never physically recreate its directory ("phantom group").
+    public func invalidate() {
+        queue.sync { invalidated = true }
+    }
+
+    /// Whether this instance has been invalidated (group deleted). Read on `queue`.
+    private var isInvalidated: Bool { queue.sync { invalidated } }
+
     // MARK: - Label
 
     public func getLabel(_ slot: Int) -> String? {
@@ -307,6 +368,8 @@ public final class SlotStorage {
     }
 
     public func setLabel(_ slot: Int, label: String?) {
+        // DS-3 / CR-3 (v2.10.30): refuse writes on an invalidated (deleted-group) instance.
+        if isInvalidated { return }
         // v2.9.4 (#4): cross-process lock around the label write.
         try? StorageLock.shared.withLock {
             queue.sync {

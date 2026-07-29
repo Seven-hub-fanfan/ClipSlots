@@ -236,57 +236,89 @@ final class CommunitySkillManager: ObservableObject {
 
     private func importZip(at url: URL) {
         isBusy = true
-        defer { isBusy = false }
+        // 落盘根目录在主线程上读取（@MainActor 计算属性），随后传入后台。
+        let root = communitySkillsRoot
+        // MT-4 (v2.10.30): 解压(unzip 的 waitUntilExit)与逐文件拷贝原先在主线程同步执行，大包 / 大量
+        // 小文件会冻结界面。改为在后台队列完成全部文件 I/O（performZipImport 为 nonisolated，仅用
+        // FileManager.default 与其它 nonisolated helper，不触碰 @MainActor 状态），再回主线程复位 isBusy、
+        // 刷新 @Published 状态并收尾（report / finishImport）。
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let self else { return }
+            let outcome = self.performZipImport(at: url, root: root)
+            DispatchQueue.main.async {
+                self.isBusy = false
+                switch outcome {
+                case .failure(let message):
+                    self.report(message, isError: true)
+                case .success(let name, let slug):
+                    self.finishImport(name: name, slug: slug)
+                }
+            }
+        }
+    }
+
+    /// MT-4 (v2.10.30): ZIP 导入的后台执行结果——成功携带解析出的 name/slug，失败携带用户可读错误文案。
+    private enum ZipImportOutcome {
+        case success(name: String, slug: String)
+        case failure(String)
+    }
+
+    /// MT-4 (v2.10.30): 在后台线程完成 ZIP 导入的全部文件 I/O：解压 → 定位 SKILL.md → 解析并校验
+    /// frontmatter → 同卷暂存目录构建并校验完整性 → 原子落盘。全程仅用 FileManager.default 与
+    /// nonisolated helper，绝不触碰 @MainActor 的 @Published 状态或 report（校验失败以返回值携带文案，
+    /// 由主线程统一反馈），因此可安全在 DispatchQueue.global 上运行而不阻塞主线程。
+    nonisolated private func performZipImport(at url: URL, root: String) -> ZipImportOutcome {
+        let fm = FileManager.default
 
         // 1. 解压到临时目录。
         let tmp = fm.temporaryDirectory.appendingPathComponent("clipslots-skill-\(UUID().uuidString)", isDirectory: true)
         do {
             try fm.createDirectory(at: tmp, withIntermediateDirectories: true)
         } catch {
-            report("创建临时目录失败：\(error.localizedDescription)", isError: true)
-            return
+            return .failure("创建临时目录失败：\(error.localizedDescription)")
         }
         defer { try? fm.removeItem(at: tmp) }
 
         guard unzip(url.path, to: tmp.path) else {
-            report("解压失败，请确认这是一个有效的 .zip 文件。", isError: true)
-            return
+            return .failure("解压失败，请确认这是一个有效的 .zip 文件。")
         }
 
         // 2. 定位含 SKILL.md 的目录（根目录或一级子目录）。
         guard let skillDir = findSkillRoot(in: tmp.path) else {
-            report("压缩包内未找到 SKILL.md（应位于根目录或一级子目录下）。", isError: true)
-            return
+            return .failure("压缩包内未找到 SKILL.md（应位于根目录或一级子目录下）。")
         }
 
-        // 3. 解析并校验 frontmatter。
+        // 3. 解析并校验 frontmatter（后台执行，故内联校验并以返回值携带错误文案，不调用 @MainActor 的 report）。
         let skillMd = (skillDir as NSString).appendingPathComponent("SKILL.md")
         guard let content = try? String(contentsOfFile: skillMd, encoding: .utf8) else {
-            report("无法读取 SKILL.md 内容。", isError: true)
-            return
+            return .failure("无法读取 SKILL.md 内容。")
         }
         let front = parseFrontmatter(content)
-        guard let validation = validateFrontmatter(front) else { return }
+        let name = front["name"]?.trimmingCharacters(in: .whitespaces) ?? ""
+        let desc = front["description"]?.trimmingCharacters(in: .whitespaces) ?? ""
+        var missing: [String] = []
+        if name.isEmpty { missing.append("name") }
+        if desc.isEmpty { missing.append("description") }
+        guard missing.isEmpty else {
+            return .failure("SKILL.md 的 frontmatter 缺少必填字段：\(missing.joined(separator: "、"))。请补全后重试。")
+        }
+        let slugValue = slug(from: name)
 
         // 4. AU-4 (v2.10.15): 先在同卷暂存目录内构建完整 Skill 并校验完整性，通过后再整体
         //    原子移动到目标目录；任一步失败即清理暂存目录，绝不在目标目录留下半成品。
         //    （旧实现逐个 copyItem 到目标目录，非原子：中途失败会残留不完整的 Skill，
         //    后续校验/软链可能指向不完整内容。）
-        let slug = validation.slug
-        let root = communitySkillsRoot
         do {
             // 暂存目录放在 community-skills 根下，确保与最终目标同卷 → moveItem 为原子 rename。
             try fm.createDirectory(atPath: root, withIntermediateDirectories: true)
         } catch {
-            report("准备落盘目录失败：\(error.localizedDescription)", isError: true)
-            return
+            return .failure("准备落盘目录失败：\(error.localizedDescription)")
         }
         let staging = (root as NSString).appendingPathComponent(".staging-\(UUID().uuidString)")
         do {
             try fm.createDirectory(atPath: staging, withIntermediateDirectories: true)
         } catch {
-            report("创建暂存目录失败：\(error.localizedDescription)", isError: true)
-            return
+            return .failure("创建暂存目录失败：\(error.localizedDescription)")
         }
         // 成功时暂存目录已被 move 走，remove 变为无害的 no-op；失败时确保清理。
         defer { try? fm.removeItem(atPath: staging) }
@@ -300,30 +332,27 @@ final class CommunitySkillManager: ObservableObject {
                 try fm.copyItem(atPath: src, toPath: dst)
             }
         } catch {
-            report("写入落盘目录失败：\(error.localizedDescription)", isError: true)
-            return
+            return .failure("写入落盘目录失败：\(error.localizedDescription)")
         }
 
         // 完整性校验：暂存目录内必须含 SKILL.md，否则视为不完整，放弃导入。
         let stagedSkill = (staging as NSString).appendingPathComponent("SKILL.md")
         guard fm.fileExists(atPath: stagedSkill) else {
-            report("Skill 内容不完整（缺少 SKILL.md），已取消导入。", isError: true)
-            return
+            return .failure("Skill 内容不完整（缺少 SKILL.md），已取消导入。")
         }
 
         // 原子落盘：目标已存在则先移除（覆盖同名 Skill），再把整个暂存目录 rename 过去。
-        let dest = (root as NSString).appendingPathComponent(slug)
+        let dest = (root as NSString).appendingPathComponent(slugValue)
         do {
             if fileExistsNoFollow(dest) {
                 try fm.removeItem(atPath: dest)   // 覆盖同名 Skill
             }
             try fm.moveItem(atPath: staging, toPath: dest)
         } catch {
-            report("写入落盘目录失败：\(error.localizedDescription)", isError: true)
-            return
+            return .failure("写入落盘目录失败：\(error.localizedDescription)")
         }
 
-        finishImport(name: validation.name, slug: slug)
+        return .success(name: name, slug: slugValue)
     }
 
     // MARK: - 单个 SKILL.md 导入
@@ -494,7 +523,8 @@ final class CommunitySkillManager: ObservableObject {
     // MARK: - Frontmatter 解析 & 校验
 
     /// 解析 SKILL.md 头部 frontmatter（首个 `---` 块）为 key -> value 字典（key 小写）。
-    func parseFrontmatter(_ content: String) -> [String: String] {
+    // MT-4 (v2.10.30): nonisolated（纯函数，不触碰 self 状态）以便后台 performZipImport 调用。
+    nonisolated func parseFrontmatter(_ content: String) -> [String: String] {
         let lines = content.components(separatedBy: .newlines)
         guard let first = lines.first?.trimmingCharacters(in: .whitespaces), first == "---" else {
             return [:]
@@ -531,7 +561,8 @@ final class CommunitySkillManager: ObservableObject {
     }
 
     /// name -> slug：小写、空白转 `-`、仅保留字母/数字/CJK/`-`/`_`，去除其他特殊字符。
-    func slug(from name: String) -> String {
+    // MT-4 (v2.10.30): nonisolated（纯函数）以便后台 performZipImport 调用。
+    nonisolated func slug(from name: String) -> String {
         var out = ""
         var lastDash = false
         for ch in name.lowercased() {
@@ -569,7 +600,9 @@ final class CommunitySkillManager: ObservableObject {
     }
 
     /// 在解压目录中定位含 SKILL.md 的目录：优先根目录，其次任一一级子目录。
-    private func findSkillRoot(in root: String) -> String? {
+    // MT-4 (v2.10.30): nonisolated（用 FileManager.default）以便后台 performZipImport 调用。
+    nonisolated private func findSkillRoot(in root: String) -> String? {
+        let fm = FileManager.default
         let rootSkill = (root as NSString).appendingPathComponent("SKILL.md")
         if fm.fileExists(atPath: rootSkill) { return root }
 
@@ -587,7 +620,8 @@ final class CommunitySkillManager: ObservableObject {
 
     // MARK: - 解压
 
-    private func unzip(_ zipPath: String, to dest: String) -> Bool {
+    // MT-4 (v2.10.30): nonisolated 以便在后台 performZipImport 中调用；本方法只用局部 Process，不触碰 self 状态。
+    nonisolated private func unzip(_ zipPath: String, to dest: String) -> Bool {
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: "/usr/bin/unzip")
         proc.arguments = ["-o", "-q", zipPath, "-d", dest]
@@ -625,17 +659,19 @@ final class CommunitySkillManager: ObservableObject {
     }
 
     /// 使用 lstat 语义判断路径是否为软链接（不跟随软链接）。
-    private func isSymlink(_ path: String) -> Bool {
-        guard let type = try? fm.attributesOfItem(atPath: path)[.type] as? FileAttributeType else {
+    // MT-4 (v2.10.30): nonisolated（用 FileManager.default，不读 @MainActor 的 self.fm）以便后台调用。
+    nonisolated private func isSymlink(_ path: String) -> Bool {
+        guard let type = try? FileManager.default.attributesOfItem(atPath: path)[.type] as? FileAttributeType else {
             return false
         }
         return type == .typeSymbolicLink
     }
 
     /// 判断路径本身是否存在（不跟随软链接，坏软链接也算存在）。
-    private func fileExistsNoFollow(_ path: String) -> Bool {
+    // MT-4 (v2.10.30): nonisolated（用 FileManager.default）以便后台 performZipImport 调用。
+    nonisolated private func fileExistsNoFollow(_ path: String) -> Bool {
         if isSymlink(path) { return true }
-        return fm.fileExists(atPath: path)
+        return FileManager.default.fileExists(atPath: path)
     }
 
     // MARK: - 特权执行（macOS 鉴权弹窗）
@@ -647,38 +683,49 @@ final class CommunitySkillManager: ObservableObject {
         let appleScript = "do shell script \"\(escaped)\" with administrator privileges"
 
         isBusy = true
-        // P1-1 (v2.10.16): 回退 AU-1 (v2.10.15) 的后台线程执行。`NSAppleScript` 非线程安全，
-        // OSA/Apple Event 执行必须在主线程；与同版本 `UpdateInstaller` 的 `DispatchQueue.main.sync`
-        // 写法自相矛盾，存在偶发崩溃/授权框不弹隐患。改回主线程同步执行。
-        //
-        // P2-10 (v2.10.16): 同步执行同时根治「isBusy 复位时机偏早」——旧版 runPrivileged 把授权/执行
-        // 放进 `DispatchQueue.global.async` 后立即返回，调用方（importZip/importMarkdown/install）的
-        // `defer { isBusy = false }` 会在异步授权尚未完成时就复位 isBusy，短暂放开按钮造成重复触发。
-        // 改为同步执行后，runPrivileged 会阻塞到授权+shell 真正结束再复位 isBusy，期间主线程被占用无法
-        // 响应点击，彻底消除重复触发窗口；外层 defer 仅在真正完成后再冗余复位一次（无害）。
-        let execute = { [weak self] in
-            var errorInfo: NSDictionary?
-            let script = NSAppleScript(source: appleScript)
-            _ = script?.executeAndReturnError(&errorInfo)
-            guard let self else { return }
-            self.isBusy = false
-            if let errorInfo {
-                let code = errorInfo[NSAppleScript.errorNumber] as? Int ?? 0
-                if code == -128 {
+        // P0-2 (v2.10.30): 改用后台 Process 启动 /usr/bin/osascript 执行授权脚本，替代旧的主线程同步
+        // NSAppleScript。NSAppleScript 非线程安全且要求主线程执行，授权弹窗（密码 / 触控 ID）期间会把主
+        // run loop 完全冻住，整个 App 模态假死（无法移动窗口 / 点菜单）。osascript 是独立进程，没有
+        // NSAppleScript 的主线程限制：后台 run + waitUntilExit，弹窗照常出现但主线程保持响应；结束后再
+        // DispatchQueue.main.async 回主线程复位 isBusy、更新 @Published 状态并刷新。isBusy 在授权完成前
+        // 保持为 true，UI 据此禁用按钮，避免重复触发（不再依赖主线程被同步阻塞来拦截点击）。
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            var status: Int32 = -1
+            var errText = ""
+            let proc = Process()
+            proc.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
+            proc.arguments = ["-e", appleScript]
+            let outPipe = Pipe()
+            let errPipe = Pipe()
+            proc.standardOutput = outPipe
+            proc.standardError = errPipe
+            do {
+                try proc.run()
+                // 授权脚本输出极少，先读 stderr 到 EOF（进程退出即关闭）再读 stdout，无撑满管道缓冲区之虞。
+                let errData = errPipe.fileHandleForReading.readDataToEndOfFile()
+                _ = outPipe.fileHandleForReading.readDataToEndOfFile()
+                proc.waitUntilExit()
+                status = proc.terminationStatus
+                errText = String(data: errData, encoding: .utf8)?
+                    .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            } catch {
+                status = -1
+                errText = error.localizedDescription
+            }
+
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.isBusy = false
+                if status == 0 {
+                    self.report(successMessage, isError: false)
+                } else if errText.contains("-128") || errText.contains("User canceled") {
                     self.report("已取消操作。", isError: false)
                 } else {
-                    let msg = errorInfo[NSAppleScript.errorMessage] as? String ?? "未知错误"
+                    let msg = errText.isEmpty ? "未知错误（退出码 \(status)）" : errText
                     self.report("操作失败：\(msg)", isError: true)
                 }
-            } else {
-                self.report(successMessage, isError: false)
+                self.refresh()
             }
-            self.refresh()
-        }
-        if Thread.isMainThread {
-            execute()
-        } else {
-            DispatchQueue.main.sync(execute: execute)
         }
     }
 
