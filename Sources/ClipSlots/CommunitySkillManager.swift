@@ -97,7 +97,7 @@ final class CommunitySkillManager: ObservableObject {
     // MARK: - 扫描 & 刷新
 
     /// 重新扫描：读取落盘目录下所有已上传的 Skill + 检测本机 Agent + 计算安装状态。
-    func refresh() {
+    func refresh(completion: (() -> Void)? = nil) {
         // B-8 (v2.10.31): 之前 refresh() 完全跑在主线程（@MainActor）：loadCommunitySkills 会对每个
         // 社区 Skill 目录 String(contentsOfFile: SKILL.md) 全量读盘，computeState 对每个 (skill×agent)
         // 组合做 lstat/readlink。落盘在 FUSE / 网络盘 / 机械盘或 Skill 数量多时，会阻塞主线程造成插件
@@ -124,6 +124,7 @@ final class CommunitySkillManager: ObservableObject {
                 self.detectedAgents = agents
                 self.skills = skills
                 self.states = newStates
+                completion?()
             }
         }
     }
@@ -410,17 +411,26 @@ final class CommunitySkillManager: ObservableObject {
 
     /// 导入成功后的收尾：刷新列表 + 自动安装到已检测 Agent + 反馈。
     private func finishImport(name: String, slug: String) {
-        refresh()
-        guard let skill = skills.first(where: { $0.id == slug }) else {
-            report("已上传「\(name)」，但刷新列表失败，请重新打开插件市场。", isError: true)
-            return
-        }
-        if detectedAgents.isEmpty {
-            report("已上传 Skill「\(name)」。未检测到 Agent，稍后可在卡片上点击「安装到 Agent」。", isError: false)
-        } else {
-            install(skill, silent: true)
-            let names = detectedAgents.map(\.displayName).joined(separator: "、")
-            report("已上传并安装 Skill「\(name)」到 \(detectedAgents.count) 个 Agent：\(names)", isError: false)
+        // INST-2 (v2.10.32): B-8 made refresh() async (self.skills is only assigned after a
+        // background scan), but finishImport still read `skills.first(where: id==slug)` in the
+        // SAME main-thread turn right after calling refresh() — i.e. against the STALE pre-refresh
+        // array. For a brand-new upload the slug is not in the old array, so the guard always
+        // failed → "已上传但刷新列表失败" and install(silent:) never ran (new community skills were
+        // never auto-symlinked). Fix: run the lookup + install inside refresh()'s completion, after
+        // the background scan has populated skills/detectedAgents on the main thread.
+        refresh { [weak self] in
+            guard let self = self else { return }
+            guard let skill = self.skills.first(where: { $0.id == slug }) else {
+                self.report("已上传「\(name)」，但刷新列表失败，请重新打开插件市场。", isError: true)
+                return
+            }
+            if self.detectedAgents.isEmpty {
+                self.report("已上传 Skill「\(name)」。未检测到 Agent，稍后可在卡片上点击「安装到 Agent」。", isError: false)
+            } else {
+                self.install(skill, silent: true)
+                let names = self.detectedAgents.map(\.displayName).joined(separator: "、")
+                self.report("已上传并安装 Skill「\(name)」到 \(self.detectedAgents.count) 个 Agent：\(names)", isError: false)
+            }
         }
     }
 

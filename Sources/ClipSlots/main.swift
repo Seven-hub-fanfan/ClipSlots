@@ -306,6 +306,16 @@ final class SlotStoreObservable: ObservableObject {
     /// The special slot id that current in-memory `slots` / `labels` belong to.
     private var loadedSpecialSlotId: String?
 
+    /// APP-1 (v2.10.32): monotonic generation stamp for `reloadAllAsync`. B-1 only dropped a
+    /// stale snapshot when the user switched to ANOTHER group (activeId mismatch). But two
+    /// reloadAllAsync runs for the SAME group (e.g. rapid back-to-back watcher batches) both pass
+    /// the activeId==current check, and there is NO ordering guarantee on when each background
+    /// read completes — an older, slower read can land AFTER a newer one and clobber fresh data
+    /// with stale-but-same-group content. Each reloadAllAsync bumps this counter and captures its
+    /// value; the completion applies its result only if it is still the latest generation.
+    /// Main-thread only.
+    private var reloadGeneration: Int = 0
+
     // MARK: - v2.9.4 (Feature #2) Live disk refresh
     /// FSEvents watcher on the storage base dir. External (CLI / other GUI) writes
     /// trigger a debounced `reloadAll()` so the UI reflects disk changes without a
@@ -586,6 +596,9 @@ final class SlotStoreObservable: ObservableObject {
     private func reloadAllAsync(completion: (() -> Void)? = nil) {
         loadSpecialSlots()
         let activeId = currentSpecialSlotId
+        // APP-1 (v2.10.32): stamp this reload; only the newest generation may commit its snapshot.
+        reloadGeneration &+= 1
+        let gen = reloadGeneration
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self = self else { return }
             let snapshot = self.readSlotsSnapshot(for: activeId)
@@ -601,6 +614,15 @@ final class SlotStoreObservable: ObservableObject {
                 // block, so `currentSpecialSlotId` here is the up-to-date selection.
                 guard activeId == self.currentSpecialSlotId else {
                     NSLog("[ClipSlots] reloadAllAsync: dropping stale snapshot for \(activeId) — active group is now \(self.currentSpecialSlotId)")
+                    completion?()
+                    return
+                }
+                // APP-1 (v2.10.32): even for the SAME group, a newer reloadAllAsync may have been
+                // scheduled after us; if so its (higher) generation is authoritative. An older read
+                // finishing late must NOT clobber the newer group state with stale-but-same-group
+                // bytes. Drop this result unless we are still the latest generation.
+                guard gen == self.reloadGeneration else {
+                    NSLog("[ClipSlots] reloadAllAsync: dropping superseded snapshot gen=\(gen) latest=\(self.reloadGeneration)")
                     completion?()
                     return
                 }
@@ -656,7 +678,7 @@ final class SlotStoreObservable: ObservableObject {
         suppressWatcher() // v2.9.4 (#2): self-write
         specialStorage.updateSelectedSpecialSlot(id: id)
 
-        loadSlots()
+        loadSlotsAsync() // APP-2 (v2.10.32): 切组读盘异步化，避免主线程被逐槽 flock 卡死
         loadConnectionMapForCurrentGroup()
         refreshTrigger = UUID()
 
@@ -736,7 +758,7 @@ final class SlotStoreObservable: ObservableObject {
         specialSlots = index.specialSlots
         specialSlotSettings = index.settings
 
-        loadSlots()
+        loadSlotsAsync() // APP-2 (v2.10.32): 切组读盘异步化，避免主线程被逐槽 flock 卡死
         loadConnectionMapForCurrentGroup()
         refreshTrigger = UUID()
 
@@ -1871,6 +1893,37 @@ final class SlotStoreObservable: ObservableObject {
         slots = snapshot.slots
         labels = snapshot.labels
         loadedSpecialSlotId = activeId
+    }
+
+    // APP-2 (v2.10.32): async variant of loadSlots() for the GROUP-SWITCH path. loadSlots() does
+    // N per-slot cross-process flock reads (each up to ~5s under lock contention); running it
+    // synchronously on the main thread froze the entire GUI when switching groups while the CLI
+    // was writing in batch. The switch functions already clear slots/labels and update the
+    // title/@Published selection synchronously (instant visual feedback), and the follow-up
+    // recomputeAutoPreviews()/loadConnectionMapForCurrentGroup() do NOT read the in-memory `slots`
+    // dict, so the heavy disk read can move to a background queue and back-fill slots/labels when
+    // done. Reuses the shared reloadGeneration stamp (also bumped by reloadAllAsync) so a rapid
+    // A→B→A switch — or a concurrent watcher reload — can never let an older read clobber the
+    // newer group's state.
+    private func loadSlotsAsync() {
+        let activeId = currentSpecialSlotId
+        reloadGeneration &+= 1
+        let gen = reloadGeneration
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let self = self else { return }
+            let snapshot = self.readSlotsSnapshot(for: activeId)
+            DispatchQueue.main.async { [weak self] in
+                guard let self = self else { return }
+                guard activeId == self.currentSpecialSlotId, gen == self.reloadGeneration else {
+                    NSLog("[ClipSlots] loadSlotsAsync: dropping stale/superseded snapshot for \(activeId)")
+                    return
+                }
+                self.slots = snapshot.slots
+                self.labels = snapshot.labels
+                self.loadedSpecialSlotId = activeId
+                self.refreshTrigger = UUID()
+            }
+        }
     }
 
     // P0-1 (v2.10.30): 逐槽磁盘读取（每次 get/getLabel 需拿跨进程 flock，最长阻塞 ~5s）。抽为纯函数
@@ -4613,37 +4666,58 @@ final class SlotStoreObservable: ObservableObject {
             ThumbnailProvider.shared.invalidateSpecialSlot(specialSlotId: activeId)
 
             suppressWatcher() // v2.9.4 (#2): re-bump after any modal so the write burst below stays suppressed
-            try specialStorage.clearAllSlots(in: activeId)
 
-            var successCount = 0
-            var failCount = 0
-            for (idx, fileURL) in preview.willImportFiles.enumerated() {
-                let slotNumber = idx + 1
-                var content = folderImportService.makeSlotContent(for: fileURL)
-                // Regenerate identity so thumbnails and SwiftUI views refresh.
-                content.contentId = UUID().uuidString
-                content.updatedAt = Date().timeIntervalSince1970
-                if specialStorage.set(slotNumber, content: content, in: activeId) {
-                    successCount += 1
-                } else {
-                    failCount += 1
+            // APP-3 (v2.10.32): the clear + per-file makeSlotContent + set() burst (each set() a
+            // cross-process flock, plus big-file bytes loaded by makeSlotContent) previously ran
+            // synchronously on the main thread — a folder of hundreds of files froze the GUI. Move
+            // the whole burst to a background serial queue and commit the reload/toast back on main.
+            let willImportFiles = preview.willImportFiles
+            DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+                guard let self = self else { return }
+                do {
+                    try self.specialStorage.clearAllSlots(in: activeId)
+
+                    var successCount = 0
+                    var failCount = 0
+                    for (idx, fileURL) in willImportFiles.enumerated() {
+                        self.suppressWatcher() // keep the self-write window fresh during a long import
+                        let slotNumber = idx + 1
+                        var content = self.folderImportService.makeSlotContent(for: fileURL)
+                        // Regenerate identity so thumbnails and SwiftUI views refresh.
+                        content.contentId = UUID().uuidString
+                        content.updatedAt = Date().timeIntervalSince1970
+                        if self.specialStorage.set(slotNumber, content: content, in: activeId) {
+                            successCount += 1
+                        } else {
+                            failCount += 1
+                        }
+                    }
+
+                    try? self.specialStorage.updateCurrentSpecialSlotSource(
+                        sourceType: .folderImport,
+                        sourcePath: folderURL.path
+                    )
+
+                    DispatchQueue.main.async { [weak self] in
+                        guard let self = self else { return }
+                        self.reloadAllAsync()
+                        self.refreshTrigger = UUID()
+                        self.suppressWatcher(2.0)
+                        // v2.6.2: Floating notice instead of blocking alert
+                        self.showFloatingNotice(FloatingNotice(
+                            title: "已导入 \(successCount) 个文件",
+                            subtitle: failCount > 0 ? "\(failCount) 个失败" : "当前槽位组",
+                            iconName: failCount > 0 ? "exclamationmark.triangle.fill" : "checkmark.circle.fill",
+                            kind: failCount > 0 ? .warning : .success
+                        ))
+                    }
+                } catch {
+                    NSLog("[ClipSlots] Folder import (bg) error: \(error)")
+                    DispatchQueue.main.async { [weak self] in
+                        self?.showAlert(message: "导入失败: \(error.localizedDescription)")
+                    }
                 }
             }
-
-            try specialStorage.updateCurrentSpecialSlotSource(
-                sourceType: .folderImport,
-                sourcePath: folderURL.path
-            )
-
-            reloadAll()
-            refreshTrigger = UUID()
-            // v2.6.2: Floating notice instead of blocking alert
-            showFloatingNotice(FloatingNotice(
-                title: "已导入 \(successCount) 个文件",
-                subtitle: failCount > 0 ? "\(failCount) 个失败" : "当前槽位组",
-                iconName: failCount > 0 ? "exclamationmark.triangle.fill" : "checkmark.circle.fill",
-                kind: failCount > 0 ? .warning : .success
-            ))
 
         } catch {
             NSLog("[ClipSlots] Folder import error: \(error)")
@@ -4880,145 +4954,165 @@ final class SlotStoreObservable: ObservableObject {
         }
 
         isBatchSaving = true
-        defer { isBatchSaving = false }
 
         suppressWatcher() // v2.9.4 (#2): re-bump after confirmation modals, before the create/write burst
 
-        var savedCount = 0
-        var failedCount = 0
-        var overwrittenCount = 0
-        var createdGroupCount = 0
-        var createdPageCount = 0
-        let itemsToSave = plan.willSaveCount
+        // APP-3 (v2.10.32): the entire create-groups / create-pages + per-item makeSlotContent +
+        // get + set + setLabel burst (each set/setLabel a cross-process flock, plus big-file bytes
+        // loaded by makeSlotContent) previously ran SYNCHRONOUSLY on the main thread. MT-1 only
+        // moved the single-slot write off-main; this batch call site was left behind, so importing
+        // a folder of dozens~hundreds of files froze the GUI for seconds to minutes with no
+        // response and no way to cancel — approaching a P0 under lock contention. isBatchSaving
+        // only blocked re-entry; it did not yield the main thread. Fix: run the whole burst on a
+        // background serial queue over an immutable item snapshot, then hop back to the main thread
+        // to update @Published state, reloadAllAsync, and show the toast, clearing isBatchSaving
+        // only after that completes.
+        let cfgSlots = config.slots
+        let maxSpecial = specialSlotSettings.maxSpecialSlots
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let self = self else { return }
+            var savedCount = 0
+            var failedCount = 0
+            var overwrittenCount = 0
+            var createdGroupCount = 0
+            var createdPageCount = 0
+            let itemsToSave = plan.willSaveCount
+            var targets = targets
 
-        // Create new groups in current page
-        if newGroupsNeededInPage > 0 {
-        for n in 1...newGroupsNeededInPage {
-            let groupName = uniqueImportGroupName(existingNames: Set(pageGroups.map { $0.name }), startNumber: n)
-            do {
-                let newGroup = try specialStorage.createSpecialSlot(name: groupName, pageId: originalPageId)
-                for s in 1...config.slots {
-                    targets.append((newGroup.id, s))
+            // Create new groups in current page
+            if newGroupsNeededInPage > 0 {
+            for n in 1...newGroupsNeededInPage {
+                let groupName = self.uniqueImportGroupName(existingNames: Set(pageGroups.map { $0.name }), startNumber: n)
+                do {
+                    let newGroup = try self.specialStorage.createSpecialSlot(name: groupName, pageId: originalPageId)
+                    for s in 1...cfgSlots {
+                        targets.append((newGroup.id, s))
+                    }
+                    createdGroupCount += 1
+                } catch {
+                    NSLog("[ClipSlots] Batch save: failed to create group '\(groupName)': \(error)")
+                    break
                 }
-                createdGroupCount += 1
-            } catch {
-                NSLog("[ClipSlots] Batch save: failed to create group '\(groupName)': \(error)")
-                break
             }
-        }
-        } // end if newGroupsNeededInPage > 0
+            } // end if newGroupsNeededInPage > 0
 
-        // Create new pages if needed
-        remainingAfterPage = max(0, itemsToSave - targets.count)
-        let actualPagesNeeded = min(pagesNeeded,
-            (remainingAfterPage + specialSlotSettings.maxSpecialSlots * config.slots - 1)
-                / (specialSlotSettings.maxSpecialSlots * config.slots))
+            // Create new pages if needed
+            let remainingAfterPage = max(0, itemsToSave - targets.count)
+            let actualPagesNeeded = min(pagesNeeded,
+                (remainingAfterPage + maxSpecial * cfgSlots - 1)
+                    / (maxSpecial * cfgSlots))
 
-        let existingPageNames = Set(allPages.map { $0.name })
-        if actualPagesNeeded > 0 {
-        for pn in 1...actualPagesNeeded {
-            let pageName = uniqueImportPageName(existingNames: existingPageNames, startNumber: pn + createdPageCount)
-            do {
-                let newPage = try specialStorage.createPage(name: pageName, withDefaultGroup: false).page
-                createdPageCount += 1
-                // Create groups in the new page (up to maxSpecialSlots)
-                let groupsNeededInPage = min(specialSlotSettings.maxSpecialSlots,
-                    max(0, (itemsToSave - targets.count + config.slots - 1) / config.slots))
-                if groupsNeededInPage > 0 {
-                for gn in 1...groupsNeededInPage {
-                    let groupName = "导入 \(gn)"
-                    do {
-                        let newGroup = try specialStorage.createSpecialSlot(name: groupName, pageId: newPage.id)
-                        for s in 1...config.slots {
-                            targets.append((newGroup.id, s))
+            let existingPageNames = Set(allPages.map { $0.name })
+            if actualPagesNeeded > 0 {
+            for pn in 1...actualPagesNeeded {
+                let pageName = self.uniqueImportPageName(existingNames: existingPageNames, startNumber: pn + createdPageCount)
+                do {
+                    let newPage = try self.specialStorage.createPage(name: pageName, withDefaultGroup: false).page
+                    createdPageCount += 1
+                    // Create groups in the new page (up to maxSpecialSlots)
+                    let groupsNeededInPage = min(maxSpecial,
+                        max(0, (itemsToSave - targets.count + cfgSlots - 1) / cfgSlots))
+                    if groupsNeededInPage > 0 {
+                    for gn in 1...groupsNeededInPage {
+                        let groupName = "导入 \(gn)"
+                        do {
+                            let newGroup = try self.specialStorage.createSpecialSlot(name: groupName, pageId: newPage.id)
+                            for s in 1...cfgSlots {
+                                targets.append((newGroup.id, s))
+                            }
+                            createdGroupCount += 1
+                        } catch {
+                            NSLog("[ClipSlots] Batch save: failed to create group in page '\(pageName)': \(error)")
+                            break
                         }
-                        createdGroupCount += 1
-                    } catch {
-                        NSLog("[ClipSlots] Batch save: failed to create group in page '\(pageName)': \(error)")
+                    }
+                    } // end if groupsNeededInPage > 0
+                } catch {
+                    NSLog("[ClipSlots] Batch save: failed to create page: \(error)")
+                    break
+                }
+            }
+            } // end if actualPagesNeeded > 0
+
+            // Save items to targets
+            for (index, item) in items.enumerated() {
+                guard index < itemsToSave, index < targets.count else { break }
+                self.suppressWatcher() // v2.9.4 (#2): keep the self-write window fresh during a long batch
+                let target = targets[index]
+                var content = self.batchImportService.makeSlotContent(for: item.fileURL)
+                content.contentId = UUID().uuidString
+                content.updatedAt = Date().timeIntervalSince1970
+
+                // Check if overwriting
+                let existing = self.specialStorage.get(target.slot, in: target.specialSlotId)
+                let isOverwrite = !existing.isEmpty
+
+                let ok = self.specialStorage.set(target.slot, content: content, in: target.specialSlotId)
+                if ok {
+                    if isOverwrite { overwrittenCount += 1 }
+                    // Set label to file name
+                    self.specialStorage.setLabel(target.slot, label: item.fileName, in: target.specialSlotId)
+                    savedCount += 1
+                } else {
+                    failedCount += 1
+                }
+            }
+
+            // Switch back to original page if we navigated away
+            if pagesNeeded > 0 {
+                try? self.specialStorage.switchToPage(id: originalPageId)
+            }
+
+            DispatchQueue.main.async { [weak self] in
+                guard let self = self else { return }
+                // Refresh state (must touch @Published on the main thread)
+                let refreshedIndex = self.specialStorage.loadIndex()
+                self.specialSlots = refreshedIndex.specialSlots
+                self.pages = refreshedIndex.pages
+
+                // Reload current slots and show toast
+                self.reloadAllAsync()
+                self.refreshTrigger = UUID()
+
+                // Count source folders
+                let sourceFolderNames = Set(items.prefix(itemsToSave).compactMap { $0.sourceFolderName })
+                let folderSourceCount = sourceFolderNames.count
+
+                var parts: [String] = []
+                parts.append("已保存 \(savedCount) 个文件")
+                if overwrittenCount > 0 { parts.append("覆盖 \(overwrittenCount) 个槽位") }
+                if createdPageCount > 0 { parts.append("新建 \(createdPageCount) 个页面") }
+                if createdGroupCount > 0 { parts.append("新建 \(createdGroupCount) 个槽位组") }
+                if folderSourceCount > 0 { parts.append("来自 \(folderSourceCount) 个文件夹") }
+                if failedCount > 0 { parts.append("\(failedCount) 个失败") }
+
+                // v2.6.4: Include expansion context when available
+                if let exp = expansion, exp.limitedByMode {
+                    switch exp.mode {
+                    case .firstTenTotal:
+                        parts.append("已按设置只导入前 10 个")
+                    case .firstTenPerFolder:
+                        parts.append("每个文件夹前 10 个")
+                    default:
                         break
                     }
                 }
-                } // end if groupsNeededInPage > 0
-            } catch {
-                NSLog("[ClipSlots] Batch save: failed to create page: \(error)")
-                break
+
+                let toast = parts.joined(separator: "，")
+                if UserDefaults.standard.showSaveToast {
+                    let iconName = failedCount > 0 ? "exclamationmark.triangle.fill" : "checkmark.circle.fill"
+                    self.showFloatingNotice(FloatingNotice(
+                        title: "已批量保存 \(savedCount) 个文件",
+                        subtitle: parts.dropFirst().joined(separator: "，"),
+                        iconName: iconName,
+                        kind: failedCount > 0 ? .warning : .success
+                    ), duration: 2.5)
+                }
+                self.suppressWatcher(2.0) // 收敛抑制窗口，覆盖批量写入的尾随 FSEvents
+                self.isBatchSaving = false
+                NSLog("[ClipSlots] Batch save complete: \(toast)")
             }
         }
-        } // end if actualPagesNeeded > 0
-
-        // Refresh state
-        specialSlots = specialStorage.loadIndex().specialSlots
-        pages = specialStorage.loadIndex().pages
-
-        // Save items to targets
-        for (index, item) in items.enumerated() {
-            guard index < itemsToSave, index < targets.count else { break }
-            suppressWatcher() // v2.9.4 (#2): keep the self-write window fresh during a long batch
-            let target = targets[index]
-            var content = batchImportService.makeSlotContent(for: item.fileURL)
-            content.contentId = UUID().uuidString
-            content.updatedAt = Date().timeIntervalSince1970
-
-            // Check if overwriting
-            let existing = specialStorage.get(target.slot, in: target.specialSlotId)
-            let isOverwrite = !existing.isEmpty
-
-            let ok = specialStorage.set(target.slot, content: content, in: target.specialSlotId)
-            if ok {
-                if isOverwrite { overwrittenCount += 1 }
-                // Set label to file name
-                specialStorage.setLabel(target.slot, label: item.fileName, in: target.specialSlotId)
-                savedCount += 1
-            } else {
-                failedCount += 1
-            }
-        }
-
-        // Switch back to original page if we navigated away
-        if pagesNeeded > 0 {
-            try? specialStorage.switchToPage(id: originalPageId)
-        }
-
-        // Reload current slots and show toast
-        reloadAll()
-        refreshTrigger = UUID()
-
-        // Count source folders
-        let sourceFolderNames = Set(items.prefix(itemsToSave).compactMap { $0.sourceFolderName })
-        let folderSourceCount = sourceFolderNames.count
-
-        var parts: [String] = []
-        parts.append("已保存 \(savedCount) 个文件")
-        if overwrittenCount > 0 { parts.append("覆盖 \(overwrittenCount) 个槽位") }
-        if createdPageCount > 0 { parts.append("新建 \(createdPageCount) 个页面") }
-        if createdGroupCount > 0 { parts.append("新建 \(createdGroupCount) 个槽位组") }
-        if folderSourceCount > 0 { parts.append("来自 \(folderSourceCount) 个文件夹") }
-        if failedCount > 0 { parts.append("\(failedCount) 个失败") }
-
-        // v2.6.4: Include expansion context when available
-        if let exp = expansion, exp.limitedByMode {
-            switch exp.mode {
-            case .firstTenTotal:
-                parts.append("已按设置只导入前 10 个")
-            case .firstTenPerFolder:
-                parts.append("每个文件夹前 10 个")
-            default:
-                break
-            }
-        }
-
-        let toast = parts.joined(separator: "，")
-        if UserDefaults.standard.showSaveToast {
-            let iconName = failedCount > 0 ? "exclamationmark.triangle.fill" : "checkmark.circle.fill"
-            showFloatingNotice(FloatingNotice(
-                title: "已批量保存 \(savedCount) 个文件",
-                subtitle: parts.dropFirst().joined(separator: "，"),
-                iconName: iconName,
-                kind: failedCount > 0 ? .warning : .success
-            ), duration: 2.5)
-        }
-
-        NSLog("[ClipSlots] Batch save complete: \(toast)")
     }
 
     private func countOverwrites(targets: ArraySlice<(specialSlotId: String, slot: Int)>) -> Int {

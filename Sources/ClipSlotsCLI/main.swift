@@ -16,7 +16,7 @@ import ClipSlotsKit
 // current release. This is the single source of truth surfaced by `version`,
 // `help` and per-command help (all reference CLI_VERSION), so no other literal
 // needs bumping.
-let CLI_VERSION = "2.10.31"
+let CLI_VERSION = "2.10.32"
 let DEFAULT_GROUP = "default"
 let DEFAULT_PAGE = "default_page"
 
@@ -493,7 +493,19 @@ func cmdVersion() -> Never {
 // repaired 状态，便于调用方原样解析。`storage` 即 SpecialSlotStorage.shared。
 func cmdRepairIndex() -> Never {
     let action = storage.forceRepair()
-    emit(["ok": true, "action": action])
+    // P0-1 (v2.10.32): forceRepair() now refuses to touch a HEALTHY index and returns
+    // "index_healthy_no_action". Surface that clearly so callers/AI never mistake a no-op
+    // for a successful repair, and never assume data was rebuilt when nothing was wrong.
+    if action == "index_healthy_no_action" {
+        emit([
+            "ok": true,
+            "action": "none",
+            "repaired": false,
+            "note": "index is healthy — no repair needed; no data was modified"
+        ])
+        exit(0)
+    }
+    emit(["ok": true, "action": action, "repaired": true])
     exit(0)
 }
 
@@ -503,7 +515,7 @@ let COMMANDS: [[String: Any]] = [
     ["name": "version", "description": "打印 CLI 版本号。", "flags": [] as [String]],
     ["name": "help", "description": "列出所有命令、说明与参数（无参数时也返回此内容）。", "flags": [] as [String]],
     // A-6 (v2.10.31): 索引自愈入口。
-    ["name": "repair-index", "description": "修复损坏的索引（index.json）：清除写禁态并从备份/默认恢复，返回执行的动作。", "flags": [] as [String]],
+    ["name": "repair-index", "description": "仅当索引(index.json)确实损坏时才修复：清除写禁态并从备份/默认恢复；索引健康则不做任何改动并返回 action:none。返回执行的动作。", "flags": [] as [String]],
     ["name": "groups", "description": "列出槽位组（SpecialSlot）。可用 --page/--page-name 只列出指定页面下的组，是判断某页面是否有（空）组的标准入口。", "flags": ["--page <id> (可选,只列出该页面下的组)", "--page-name <name> (可选,按页面名精确匹配;找不到会报错,与 --page 互斥)"]],
     ["name": "pages", "description": "列出所有页面（SlotPage）。", "flags": ["--group <id> (可选,当前实现忽略,页面为全局)"]],
     ["name": "list", "description": "列出槽位摘要。指定 --group/--group-name 时列出该组 1..N 号槽位；只给 --page/--page-name 而不给组时，列出该页面下所有组各自的槽位并附 groupCount（页面无组则 groupCount=0，不再回落全局 default 组）。同时给页面和组时，组匹配被约束在该页面内。支持分页：传 --page-size 后按页返回并附带 pagination 元信息。", "flags": ["--group <id|name> (默认 default;可传 id 或组名)", "--group-name <name> (按组名精确匹配,优先于 --group)", "--page <id> (可选,约束 group 匹配到该页面;单独使用时列出该页所有组)", "--page-name <name> (按页面名精确匹配;找不到会报错,与 --page 互斥;单独使用时列出该页所有组)", "--page-size <N> (可选,每页槽位数,>0 时启用分页)", "--page-num <N> (可选,第几页,从 1 开始,默认 1,需配合 --page-size)"]],
@@ -909,7 +921,14 @@ func cmdWrite(_ args: ParsedArgs) -> Never {
         fail("missing --text <string> (use --text - to read from stdin, or --batch for bulk)", code: "INVALID_ARGUMENT_COMBINATION")
     }
     if text == "-" {
-        let data = FileHandle.standardInput.readDataToEndOfFile()
+        // CLI-2 (v2.10.32): single-write stdin previously used readDataToEndOfFile() with NO cap
+        // (then an O(n) data.contains(0) scan over the whole buffer), so `head -c 2G /dev/zero |
+        // clipslots write 1 --text -` buffered the entire input into memory → OOM. Batch write
+        // already guards with readStdinCapped(); reuse it here so both stdin entry points share
+        // the same bound and abort during read once the cap is exceeded.
+        guard let data = readStdinCapped(limit: MAX_BATCH_STDIN_BYTES) else {
+            fail("stdin exceeds the \(MAX_BATCH_STDIN_BYTES / (1024 * 1024))MiB text limit; aborted before buffering", code: "INVALID_INPUT_FORMAT")
+        }
         // v2.9.3 (Fix #5): reject non-UTF8 / binary stdin instead of silently
         // decoding to "" and CLEARING the slot. `write` only accepts text.
         guard let decoded = String(data: data, encoding: .utf8), !data.contains(0) else {

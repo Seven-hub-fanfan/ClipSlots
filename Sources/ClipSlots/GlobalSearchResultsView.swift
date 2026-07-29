@@ -255,11 +255,15 @@ struct GlobalSearchResultsView: View {
     // MARK: - Preview Image Helper
 
     /// Whether this result should render an image preview. Cheap and synchronous:
-    /// `inlineImage` is cached (v2.8.0 H1) and the file branch only checks existence,
-    /// never decodes. The actual pixel load happens asynchronously in
+    /// `hasImage` only inspects item type strings and the file branch only checks
+    /// existence, never decodes. The actual pixel load happens asynchronously in
     /// `SearchResultPreviewImage`.
     private func hasImagePreview(for result: SlotGlobalSearchResult) -> Bool {
-        if result.content.inlineImage != nil { return true }
+        // ATT-2 (v2.10.32): use the cheap `hasImage` type check instead of `inlineImage`.
+        // This runs for every result row; `inlineImage` would fully decode a pasted
+        // image on the main thread. This was previously masked by the grid warming the
+        // full-res cache, but the grid now decodes only a downsampled thumbnail.
+        if result.content.hasImage { return true }
         if let fileURL = result.content.primaryFileURL,
            result.content.isImageFile,
            FileManager.default.fileExists(atPath: fileURL.path) {
@@ -360,10 +364,12 @@ struct GlobalSearchResultsView: View {
 private struct SearchResultPreviewImage: View {
     let content: SlotContent
     @State private var fileImage: NSImage?
+    // ATT-2 (v2.10.32): inline (pasteboard) image decoded off the main thread.
+    @State private var inlineImage: NSImage?
 
     var body: some View {
         ZStack {
-            if let image = content.inlineImage ?? fileImage {
+            if let image = inlineImage ?? fileImage {
                 Image(nsImage: image)
                     .resizable()
                     .scaledToFit()
@@ -373,11 +379,22 @@ private struct SearchResultPreviewImage: View {
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
-        .onAppear(perform: loadFileImageIfNeeded)
+        .onAppear(perform: loadImageIfNeeded)
     }
 
-    private func loadFileImageIfNeeded() {
-        guard content.inlineImage == nil, fileImage == nil,
+    private func loadImageIfNeeded() {
+        // ATT-2 (v2.10.32): previously the body read `content.inlineImage` directly,
+        // which fully decodes a pasted image on the main thread when a result is
+        // selected. Decode it (and on-disk image files) off the main thread instead.
+        if content.hasImage, inlineImage == nil {
+            let snapshot = content
+            DispatchQueue.global(qos: .userInitiated).async {
+                let decoded = snapshot.decodedInlineImage()
+                DispatchQueue.main.async { self.inlineImage = decoded }
+            }
+            return
+        }
+        guard fileImage == nil,
               let url = content.primaryFileURL, content.isImageFile else { return }
         DispatchQueue.global(qos: .userInitiated).async {
             let image = NSImage(contentsOf: url)

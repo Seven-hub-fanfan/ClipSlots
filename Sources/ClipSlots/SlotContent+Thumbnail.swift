@@ -1,7 +1,98 @@
 import AppKit
 import Foundation
 import SwiftUI // AT-1 (v2.10.30): for the async InlineImageView below.
+import ImageIO // ATT-1/ATT-2/UI-1 (v2.10.32): CGImageSource-based downsample & pixel probe.
+import CoreGraphics
 import ClipSlotsKit
+
+// MARK: - Shared ImageIO helpers (v2.10.32)
+
+// ATT-1/ATT-2/ATT-3/UI-1 (v2.10.32): a small, reusable ImageIO toolbox shared by
+// every image call site (grid thumbnail, inline/hover/radial preview, HUD notice,
+// attachment panel). It produces *downsampled* NSImages bounded by a max pixel edge
+// and probes pixel/point dimensions from the image header WITHOUT decoding the full
+// bitmap. This is the generalization of the previous C-1/C-3/C-5 fixes that only
+// touched the attachment panel.
+enum ClipSlotsImageIO {
+
+    // Downsample options: cap the longest edge and force generation from the main
+    // image (so files without an embedded thumbnail still work). ImageIO decodes
+    // incrementally, so the full-resolution bitmap never lands in memory.
+    private static func thumbnailOptions(maxPixel: CGFloat) -> CFDictionary {
+        [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceCreateThumbnailWithTransform: true,
+            kCGImageSourceShouldCacheImmediately: true,
+            kCGImageSourceThumbnailMaxPixelSize: max(1, Int(maxPixel.rounded()))
+        ] as CFDictionary
+    }
+
+    private static func downsampled(source: CGImageSource, maxPixel: CGFloat) -> NSImage? {
+        guard let cg = CGImageSourceCreateThumbnailAtIndex(source, 0, thumbnailOptions(maxPixel: maxPixel)) else {
+            return nil
+        }
+        return NSImage(cgImage: cg, size: NSSize(width: cg.width, height: cg.height))
+    }
+
+    /// Downsampled NSImage from raw image data, longest edge ≤ maxPixel.
+    static func downsampledImage(data: Data, maxPixel: CGFloat) -> NSImage? {
+        guard let source = CGImageSourceCreateWithData(data as CFData, nil) else { return nil }
+        return downsampled(source: source, maxPixel: maxPixel)
+    }
+
+    /// Downsampled NSImage from a file URL, longest edge ≤ maxPixel.
+    static func downsampledImage(url: URL, maxPixel: CGFloat) -> NSImage? {
+        guard let source = CGImageSourceCreateWithURL(url as CFURL, nil) else { return nil }
+        return downsampled(source: source, maxPixel: maxPixel)
+    }
+
+    /// Pixel dimensions read from the image header (no decode). Used for cache cost.
+    static func pixelSize(data: Data) -> CGSize? {
+        guard let source = CGImageSourceCreateWithData(data as CFData, nil) else { return nil }
+        return pixelSize(source: source)
+    }
+
+    private static func pixelSize(source: CGImageSource) -> CGSize? {
+        guard let props = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
+              let w = (props[kCGImagePropertyPixelWidth] as? NSNumber)?.doubleValue,
+              let h = (props[kCGImagePropertyPixelHeight] as? NSNumber)?.doubleValue else { return nil }
+        return CGSize(width: w, height: h)
+    }
+
+    /// Point (DPI-normalized) size that matches what `NSImage.size` would report,
+    /// computed from the header only (pixel size ÷ DPI/72). Used for the "w×h"
+    /// summaries so the displayed value is unchanged while avoiding a full decode.
+    static func pointSize(data: Data) -> CGSize? {
+        guard let source = CGImageSourceCreateWithData(data as CFData, nil),
+              let props = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
+              let pw = (props[kCGImagePropertyPixelWidth] as? NSNumber)?.doubleValue,
+              let ph = (props[kCGImagePropertyPixelHeight] as? NSNumber)?.doubleValue else { return nil }
+        let dpiW = (props[kCGImagePropertyDPIWidth] as? NSNumber)?.doubleValue ?? 72
+        let dpiH = (props[kCGImagePropertyDPIHeight] as? NSNumber)?.doubleValue ?? 72
+        let scaleW = dpiW > 0 ? dpiW / 72 : 1
+        let scaleH = dpiH > 0 ? dpiH / 72 : 1
+        return CGSize(width: (pw / scaleW).rounded(), height: (ph / scaleH).rounded())
+    }
+
+    /// Approximate decompressed byte cost of an NSImage using its real PIXEL
+    /// dimensions (RGBA = 4 bytes/pixel).
+    static func pixelCost(of image: NSImage) -> Int {
+        let (pw, ph) = pixelDimensions(of: image)
+        let cost = pw * ph * 4
+        return cost > 0 ? cost : 1
+    }
+
+    /// Real pixel dimensions of an NSImage (NOT the DPI-normalized `size`).
+    static func pixelDimensions(of image: NSImage) -> (Int, Int) {
+        if let cg = image.cgImage(forProposedRect: nil, context: nil, hints: nil) {
+            return (cg.width, cg.height)
+        }
+        for rep in image.representations where rep.pixelsWide > 0 && rep.pixelsHigh > 0 {
+            return (rep.pixelsWide, rep.pixelsHigh)
+        }
+        return (Int(image.size.width), Int(image.size.height))
+    }
+}
 
 extension SlotContent {
 
@@ -53,13 +144,18 @@ extension SlotContent {
         return cache
     }()
 
-    // C-3 (v2.10.31): approximate decompressed byte cost of an NSImage, used as the
-    // NSCache cost so totalCostLimit reflects real memory pressure (width × height ×
-    // 4 bytes for RGBA). Falls back to a small non-zero cost when the size is unknown.
+    // ATT-1 (v2.10.32): approximate decompressed byte cost of an NSImage, used as the
+    // NSCache cost so totalCostLimit reflects real memory pressure.
+    //
+    // Previously (C-3, v2.10.31) this used `image.size` — but `NSImage.size` is the
+    // DPI-normalized POINT size, not pixels. A 144-DPI Retina 8192×4320 screenshot
+    // reports size 4096×2160, so its real ~135MB decompressed footprint was charged
+    // as only ~34MB, letting the 512MB cache hold ~2GB of real memory before evicting.
+    // We now compute cost from the true PIXEL dimensions (CGImage.width/height, or
+    // NSBitmapImageRep.pixelsWide/High), i.e. pixelsWide × pixelsHigh × 4 (RGBA).
+    // The 512MB totalCostLimit is kept.
     private static func decompressedCost(of image: NSImage) -> Int {
-        let size = image.size
-        let cost = Int(size.width * size.height * 4)
-        return cost > 0 ? cost : 1
+        ClipSlotsImageIO.pixelCost(of: image)
     }
 
     /// Attempt to decode an NSImage from inline image data.
@@ -110,6 +206,60 @@ extension SlotContent {
     // so the async decoder only re-runs when the underlying content version
     // changes (matches the `inlineImageCache` key shape).
     var inlineImageIdentity: String { "\(contentId)::\(updatedAt)" }
+
+    // ATT-1/ATT-2 (v2.10.32): separate small-thumbnail cache for the main grid. The
+    // grid cell is only ~140pt, so storing a full-resolution 8K NSImage there (as the
+    // old `decodedInlineImage()` path did) both wasted memory and undercounted cost.
+    // Full-res images stay in `inlineImageCache` (used only by the enlarge-preview
+    // path); grid thumbnails live here. Each entry is tiny; bound by count + a small
+    // cost limit as a safety net.
+    private static let inlineThumbnailCache: NSCache<NSString, NSImage> = {
+        let cache = NSCache<NSString, NSImage>()
+        cache.countLimit = 128
+        cache.totalCostLimit = 64 * 1024 * 1024 // 64 MB of small thumbnails
+        return cache
+    }()
+
+    // ATT-1/ATT-2 (v2.10.32): decode a DOWNSAMPLED inline image (longest edge ≤
+    // maxPixel) via ImageIO instead of the full-resolution `NSImage(data:)`. Used by
+    // the main grid thumbnail so a huge pasted image never decompresses to full size
+    // just to draw a small cell. Cached separately from the full-res preview cache.
+    func decodedInlineThumbnail(maxPixel: CGFloat) -> NSImage? {
+        let cacheKey: NSString? = contentId.isEmpty ? nil : "\(contentId)::\(updatedAt)::\(Int(maxPixel))" as NSString
+        if let cacheKey, let cached = Self.inlineThumbnailCache.object(forKey: cacheKey) {
+            return cached
+        }
+        for itemList in items {
+            for item in itemList {
+                let lower = item.type.lowercased()
+                if lower.contains("image") || lower == "public.png" || lower == "public.tiff" || lower == "public.jpeg" {
+                    if let thumb = ClipSlotsImageIO.downsampledImage(data: item.data, maxPixel: maxPixel) {
+                        if let cacheKey {
+                            Self.inlineThumbnailCache.setObject(thumb, forKey: cacheKey, cost: ClipSlotsImageIO.pixelCost(of: thumb))
+                        }
+                        return thumb
+                    }
+                }
+            }
+        }
+        return nil
+    }
+
+    // ATT-2/UI-1 (v2.10.32): cheap POINT-size probe of the first inline image item.
+    // Reads only the image header (pixel size + DPI) via ImageIO and reproduces what
+    // `NSImage.size` would report, so the "w×h" summaries stay identical while never
+    // triggering a full-resolution decode on the main thread.
+    func inlineImagePointSize() -> CGSize? {
+        for itemList in items {
+            for item in itemList {
+                let lower = item.type.lowercased()
+                if lower.contains("image") || lower == "public.png" || lower == "public.tiff" || lower == "public.jpeg" {
+                    if let size = ClipSlotsImageIO.pointSize(data: item.data) { return size }
+                }
+            }
+        }
+        return nil
+    }
 
     // MARK: - File URL Detection
 
@@ -208,8 +358,14 @@ extension SlotContent {
     // AT-2 (v2.10.30): the original (uncached) summary computation, now invoked at
     // most once per content version.
     private func computeMetadataSummary() -> String {
-        if let image = inlineImage {
-            let size = image.size
+        // ATT-2 (v2.10.32): probe the image dimensions from the header instead of
+        // fully decoding via `inlineImage`. `metadataSummary` is read inside
+        // SlotCardView / SlotThumbnailView / SlotPreviewView bodies, so the old
+        // `inlineImage` read forced a full-resolution decode of large pasted images on
+        // the main thread. `inlineImagePointSize()` reads only the header and
+        // reproduces the same "w×h" (DPI-normalized point) value that `image.size`
+        // produced, so the displayed text is unchanged.
+        if hasImage, let size = inlineImagePointSize() {
             let w = Int(size.width)
             let h = Int(size.height)
             let typeName = imageTypes.first?.replacingOccurrences(of: "public.", with: "").uppercased() ?? "IMG"

@@ -191,8 +191,14 @@ struct SlotThumbnailView: View {
             state = .loading
             let snapshot = content
             Task {
-                let decoded = await Task.detached(priority: .userInitiated) {
-                    snapshot.decodedInlineImage()
+                let decoded = await Task.detached(priority: .userInitiated) { () -> NSImage? in
+                    // ATT-1/ATT-2 (v2.10.32): the grid cell is small, so decode a
+                    // DOWNSAMPLED thumbnail (longest edge ≤ 512px) via ImageIO rather
+                    // than the full-resolution NSImage. This keeps an 8K screenshot from
+                    // decompressing ~135MB just to draw a ~140pt cell, and stores it in a
+                    // dedicated thumbnail cache (full-res stays in the enlarge-preview
+                    // path). Falls back to the full-res decode if downsampling fails.
+                    snapshot.decodedInlineThumbnail(maxPixel: 512) ?? snapshot.decodedInlineImage()
                 }.value
                 await MainActor.run {
                     // Discard if the cell was reused / content version changed while

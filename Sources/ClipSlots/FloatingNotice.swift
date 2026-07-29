@@ -163,9 +163,17 @@ extension SlotContent {
 
         // Image
         if hasImage {
-            if let nsImage = inlineImage {
-                let w = Int(nsImage.size.width)
-                let h = Int(nsImage.size.height)
+            // UI-1 (v2.10.32): probe the image dimensions from the header instead of
+            // decoding via `inlineImage`. This summary is built on the main thread from
+            // all three save/copy trigger points (copySlot, 保存/覆盖, 文件夹按普通槽保存),
+            // and the content is usually a freshly-written contentId (cold cache), so the
+            // old `inlineImage` read fully decoded an 8K image on the main thread and
+            // dropped ~200-500ms of frames on every save/copy of a large image.
+            // `inlineImagePointSize()` reads only the header and reproduces the same
+            // "w×h" value, so the HUD text is unchanged.
+            if let size = inlineImagePointSize() {
+                let w = Int(size.width)
+                let h = Int(size.height)
                 return NoticeSummary(
                     typeTitle: "图片",
                     detail: "\(w)×\(h)",

@@ -53,6 +53,12 @@ struct PackImporter {
     // 超过该阈值的附件改走流式 copyItem 落盘，绝不整块读进内存，从根本上规避大文件导入 OOM。
     private static let inlineAttachmentThreshold = 20 * 1024 * 1024
 
+    // PACK-2 (v2.10.32): JSON 元数据（manifest.json / group.json / slot.json）读取上限（10MB）。
+    // D-1 只给「附件字节」加了流式阈值，元数据仍无差别 Data(contentsOf:)。恶意包可放一个高压缩比的
+    // 超大 manifest.json（ZIP 把数 GB 压到极小），解压后整块读入 + JSONDecoder 再翻倍即 OOM。读取前
+    // 先用 fileSizeKey 探测大小，超限直接抛错，绝不整块读进内存。
+    private static let maxJSONBytes = 10 * 1024 * 1024
+
     init(maxChildSlots: Int) {
         self.maxChildSlots = max(1, maxChildSlots)
     }
@@ -284,6 +290,17 @@ struct PackImporter {
                 if let file = att.file {
                     // P1-2 (v2.10.18): 附件路径做 safeChildURL 校验，防止 Zip Slip 路径穿越读取包外文件。
                     if let safeURL = safeChildURL(in: attachmentsDir, component: file, isDirectory: false) {
+                        // PACK-1 (v2.10.32): safeChildURL 用 standardizedFileURL，不解析符号链接；
+                        // 而 /usr/bin/unzip 会原样恢复 symlink 条目。恶意包可放一个「名字正常、target
+                        // 指向 ../../../etc/passwd」的符号链接附件——名字级 Zip Slip 校验全过，随后
+                        // Data(contentsOf:)/copyItem 会跟随 symlink 读到解压目录外的任意本地文件当作
+                        // 附件字节吸入用户数据，再分享即信息外泄。这里在读取前用 lstat 语义（不跟随链接）
+                        // 判断是否符号链接，遇到即整体跳过并记录可读报错，绝不读取其目标。
+                        let isSymlink = (try? safeURL.resourceValues(forKeys: [.isSymbolicLinkKey]).isSymbolicLink) ?? false
+                        if isSymlink {
+                            NSLog("[ClipSlots] PackImporter PACK-1 拒绝符号链接附件（防越界读取包外文件）："
+                                + "\(att.name)（条目 \(file)）")
+                        } else {
                         // D-1 (v2.10.31): 旧实现无差别用 `Data(contentsOf:)` 把附件整块读入内存再内联到
                         // attachments.json——单个超大文件（如 2GB 视频）会直接 OOM 崩溃。改为：先用元数据
                         // 探测文件大小，超过阈值（20MB）的大文件不进内存，直接用 FileManager.copyItem 流式
@@ -299,6 +316,7 @@ struct PackImporter {
                             }
                         } else {
                             data = try? Data(contentsOf: safeURL)
+                        }
                         }
                     }
                 }
@@ -560,6 +578,13 @@ struct PackImporter {
     }
 
     private func loadJSON<T: Decodable>(_ type: T.Type, from url: URL) throws -> T {
+        // PACK-2 (v2.10.32): 读取前先探测文件大小，超过 10MB 直接拒绝，避免超大/高压缩比 JSON
+        // 元数据整块读入内存触发 OOM。
+        let size = (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
+        if size > Self.maxJSONBytes {
+            throw PackImportError.manifestCorrupt(
+                "JSON 文件过大（\(size) 字节，上限 \(Self.maxJSONBytes)），疑似恶意包，已拒绝读取：\(url.lastPathComponent)")
+        }
         let data = try Data(contentsOf: url)
         return try JSONDecoder().decode(T.self, from: data)
     }

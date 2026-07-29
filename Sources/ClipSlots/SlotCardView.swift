@@ -620,7 +620,13 @@ private extension SlotContent {
     }
     var htmlEditableValue: String { htmlSource ?? plainText ?? preview }
     var isPlainEditableText: Bool {
-        primaryFileURL == nil && inlineImage == nil && !isHTMLContent && !preview.hasPrefix("[图片") && !preview.hasPrefix("[文件") && !preview.hasPrefix("[富文本]")
+        // ATT-2 (v2.10.32): use the cheap `hasImage` type check instead of `inlineImage`.
+        // This is evaluated in the card's actionRow body on every render; `inlineImage`
+        // would fully decode a pasted image on the main thread. That used to be masked
+        // because the grid thumbnail warmed the full-res cache, but the grid now decodes
+        // only a downsampled thumbnail (see decodedInlineThumbnail), so reading
+        // `inlineImage` here would re-introduce a main-thread full decode.
+        primaryFileURL == nil && !hasImage && !isHTMLContent && !preview.hasPrefix("[图片") && !preview.hasPrefix("[文件") && !preview.hasPrefix("[富文本]")
     }
     var editableTextValue: String { plainText ?? preview }
 }

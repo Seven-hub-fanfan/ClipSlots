@@ -125,8 +125,12 @@ private struct RadialUniversalPreview: View {
 
     var body: some View {
         Group {
-            if let image = content.inlineImage {
-                RadialImagePreview(image: image)
+            if content.hasImage {
+                // ATT-2 (v2.10.32): decode the inline image off the main thread before
+                // display. Previously this read `content.inlineImage` synchronously in
+                // the body, so hovering a radial slot with a big pasted image decoded it
+                // full-resolution on the main thread and janked the hover.
+                RadialInlineImagePreview(content: content)
             } else if content.isImageFile, let url = content.primaryFileURL {
                 RadialImageFilePreview(url: url)
             } else if content.isVideoFile, let url = content.primaryFileURL {
@@ -153,6 +157,33 @@ private struct RadialImagePreview: View {
             .resizable()
             .aspectRatio(contentMode: .fit)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+}
+
+// ATT-2 (v2.10.32): async, off-main inline-image decoder for the radial hover
+// preview. Mirrors RadialImageFilePreview's pattern (spinner → background decode →
+// publish) so the same layout is preserved while the full-resolution decode of a
+// big pasted image no longer runs on the main thread inside the view body.
+private struct RadialInlineImagePreview: View {
+    let content: SlotContent
+    @State private var image: NSImage?
+
+    var body: some View {
+        ZStack {
+            if let image {
+                RadialImagePreview(image: image)
+            } else {
+                ProgressView().controlSize(.small)
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .task(id: content.inlineImageIdentity) {
+            let snapshot = content
+            let decoded = await Task.detached(priority: .userInitiated) {
+                snapshot.decodedInlineImage()
+            }.value
+            if !Task.isCancelled { image = decoded }
+        }
     }
 }
 
@@ -319,7 +350,7 @@ private struct RadialImageOnlyPreview: View {
 
     var body: some View {
         ZStack {
-            if let img = image ?? content.inlineImage {
+            if let img = image {
                 Image(nsImage: img)
                     .resizable()
                     .aspectRatio(contentMode: .fit)
@@ -335,7 +366,17 @@ private struct RadialImageOnlyPreview: View {
 
     private func loadImageIfNeeded() {
         guard image == nil else { return }
-        if let inline = content.inlineImage { image = inline; return }
+        // ATT-2 (v2.10.32): decode inline images off the main thread as well. The old
+        // code read `content.inlineImage` synchronously (both in the body and here),
+        // decoding a full-resolution pasted image on the main thread.
+        if content.hasImage {
+            let snapshot = content
+            DispatchQueue.global(qos: .userInitiated).async {
+                let decoded = snapshot.decodedInlineImage()
+                DispatchQueue.main.async { if decoded != nil { image = decoded } }
+            }
+            return
+        }
         guard content.isImageFile, let url = content.primaryFileURL else { return }
         // v2.8.0 (perf M4): decode off the main thread.
         DispatchQueue.global(qos: .userInitiated).async {
@@ -407,7 +448,8 @@ private extension SlotContent {
     }
 
     var isImageLikeForRadialPreview: Bool {
-        inlineImage != nil || isImageFile
+        // ATT-2 (v2.10.32): cheap type check instead of `inlineImage` (which fully decodes).
+        hasImage || isImageFile
     }
 
     var isDirectoryLike: Bool {

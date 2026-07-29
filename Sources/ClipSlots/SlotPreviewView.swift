@@ -22,11 +22,23 @@ struct SlotPreviewView: View {
                     } else {
                         unavailableFilePreview(url: url)
                     }
-                } else if let image = largeImage ?? content.inlineImage {
+                } else if let image = largeImage {
                     Image(nsImage: image)
                         .resizable()
                         .aspectRatio(contentMode: .fit)
                         .padding(16)
+                } else if content.hasImage {
+                    // ATT-2 (v2.10.32): previously this branch read `content.inlineImage`
+                    // synchronously inside the body, decoding a full-resolution pasted
+                    // image on the main thread when the preview opened (~200-500ms stall
+                    // for an 8K image). loadInlineImage() (onAppear) now decodes it off
+                    // the main thread and assigns `largeImage`; show a spinner until it
+                    // lands (or the broken-image fallback if the decode fails).
+                    if imageLoadFailed {
+                        brokenImagePreview
+                    } else {
+                        ProgressView()
+                    }
                 } else if content.isImageFile, content.primaryFileURL != nil {
                     // v2.8.4 (perf): previously this branch called NSImage(contentsOf:)
                     // synchronously inside body, decoding the FULL-resolution image on the
@@ -92,6 +104,9 @@ struct SlotPreviewView: View {
         .onAppear {
             if content.isImageFile {
                 loadLargeImage()
+            } else if content.hasImage {
+                // ATT-2 (v2.10.32): decode inline (pasted) images off the main thread.
+                loadInlineImage()
             } else if content.isVideoFile, let url = content.primaryFileURL {
                 loadVideoThumbnail(url: url)
                 // v2.7.35: the preview sheet should play the video directly, like image large preview.
@@ -188,6 +203,25 @@ struct SlotPreviewView: View {
             // flag the failure so the view shows a fallback instead of spinning forever.
             largeImage = image
             imageLoadFailed = (image == nil)
+        }
+    }
+
+    // ATT-2 (v2.10.32): decode an inline (pasted) image off the main thread. The
+    // enlarge-preview is the one place a full-resolution decode is acceptable, so we
+    // reuse `decodedInlineImage()` (which warms/serves the shared full-res cache), but
+    // run it on a detached background task and publish the result on the main actor —
+    // the body never triggers a synchronous full-resolution decode.
+    private func loadInlineImage() {
+        guard largeImage == nil, content.hasImage else { return }
+        let snapshot = content
+        Task {
+            let decoded = await Task.detached(priority: .userInitiated) {
+                snapshot.decodedInlineImage()
+            }.value
+            await MainActor.run {
+                largeImage = decoded
+                imageLoadFailed = (decoded == nil)
+            }
         }
     }
 }

@@ -541,6 +541,35 @@ public final class SpecialSlotStorage {
         try? storageLock.withLock {
             let backupURL = indexURL.deletingLastPathComponent()
                 .appendingPathComponent("index.json.corrupt.bak")
+
+            // P0-1 (v2.10.32): NEVER run the destructive rebuild on a HEALTHY index.
+            // Previously forceRepair() fell through to `removeItem(indexURL)` + recreate-default
+            // whenever no decodable `.corrupt.bak` existed — but for a healthy library that is the
+            // NORMAL case (no corrupt backup ever gets written), so `repair-index` on a perfectly
+            // fine install silently deleted the real index and wiped every user page/group while
+            // still returning ok:true. Guard: only enter ANY destructive path when the index is
+            // ACTUALLY corrupt, i.e. the poison flag is set OR the current on-disk index.json
+            // cannot be decoded into a schema>=2 index right now.
+            let indexExists = FileManager.default.fileExists(atPath: indexURL.path)
+            var indexIsCorrupt = lastLoadDecodeFailed
+            if indexExists, !indexIsCorrupt {
+                if let data = try? Data(contentsOf: indexURL),
+                   let decoded = try? decoder.decode(SpecialSlotIndex.self, from: data),
+                   decoded.schemaVersion >= 2 {
+                    indexIsCorrupt = false
+                } else {
+                    indexIsCorrupt = true
+                }
+            }
+            // Healthy index (file present AND decodes cleanly) → refuse to touch anything.
+            // A physically-missing index.json is a legitimate first-run/legacy recovery case
+            // and is allowed to fall through to the (non-destructive) recreate path below.
+            if indexExists, !indexIsCorrupt {
+                action = "index_healthy_no_action"
+                NSLog("[ClipSlots] P0-1 forceRepair: index is healthy — no action taken")
+                return
+            }
+
             // Clear the poison flag first so the writes below are not refused by saveIndex().
             lastLoadDecodeFailed = false
             // 1) Try restoring a valid backup.
@@ -555,9 +584,18 @@ public final class SpecialSlotStorage {
             // 2) No usable backup → drop the corrupt index and recreate defaults.
             if action == "none" {
                 if FileManager.default.fileExists(atPath: indexURL.path) {
-                    // Preserve the corrupt file as the single backup if none exists yet.
+                    // Preserve the corrupt file as the single stable backup if none exists yet.
                     if !FileManager.default.fileExists(atPath: backupURL.path) {
                         try? FileManager.default.copyItem(at: indexURL, to: backupURL)
+                    }
+                    // P0-1 (v2.10.32): additionally keep a timestamped snapshot so a second
+                    // (mis)invocation cannot clobber the first backup, preserving every prior
+                    // on-disk index state for manual recovery.
+                    let stamp = Int(Date().timeIntervalSince1970)
+                    let tsBackup = indexURL.deletingLastPathComponent()
+                        .appendingPathComponent("index.json.corrupt.\(stamp).bak")
+                    if !FileManager.default.fileExists(atPath: tsBackup.path) {
+                        try? FileManager.default.copyItem(at: indexURL, to: tsBackup)
                     }
                     try? FileManager.default.removeItem(at: indexURL)
                 }
@@ -1299,6 +1337,16 @@ public final class SpecialSlotStorage {
         // 曾为了规避 I/O 阻塞，但导致了并发下的快照撕裂风险。改为锁内执行以确保原子性。
         do {
             return try storageLock.withLock {
+                // STG-2 (v2.10.32): validate the target group is still in the index INSIDE the lock
+                // before writing. A caller holding only a groupId string (e.g. CLI resolveGroup that
+                // resolved the id before entering the lock — TOCTOU) could otherwise write to a group
+                // that was concurrently deleted, causing slotStorage(for:) to build a fresh
+                // (non-invalidated) instance and re-materialize special_slots/<deletedId>/ as an
+                // orphan/phantom directory not referenced by any index. Reject the write instead.
+                guard loadIndex().specialSlots.contains(where: { $0.id == specialSlotId }) else {
+                    NSLog("[ClipSlots] STG-2: refusing set() to group '\(specialSlotId)' not present in index (deleted/ghost); write skipped")
+                    return false
+                }
                 backupSlotBeforeOverwriteIfNeeded(slot: slot, in: specialSlotId)
                 let result = slotStorage(for: specialSlotId).set(slot, content: content)
                 if result {
@@ -1375,6 +1423,11 @@ public final class SpecialSlotStorage {
         // 让调用方（GUI/CLI）能感知「清空」未生效，而非误以为成功。
         do {
             try storageLock.withLock {
+                // STG-2 (v2.10.32): reject clear() on a group no longer in the index (see set()).
+                guard loadIndex().specialSlots.contains(where: { $0.id == specialSlotId }) else {
+                    NSLog("[ClipSlots] STG-2: refusing clear() on group '\(specialSlotId)' not present in index (deleted/ghost); skipped")
+                    return
+                }
                 slotStorage(for: specialSlotId).clear(slot)
                 var index = loadIndex()
                 if let idx = index.specialSlots.firstIndex(where: { $0.id == specialSlotId }) {
@@ -1464,6 +1517,11 @@ public final class SpecialSlotStorage {
         // P2-4 (v2.10.16): 锁超时不再用 `try?` 静默吞掉——超时记日志并返回 false（对齐 ST-4）。
         do {
             try storageLock.withLock {
+                // STG-2 (v2.10.32): reject setLabel() on a group no longer in the index (see set()).
+                guard loadIndex().specialSlots.contains(where: { $0.id == specialSlotId }) else {
+                    NSLog("[ClipSlots] STG-2: refusing setLabel() on group '\(specialSlotId)' not present in index (deleted/ghost); skipped")
+                    return
+                }
                 slotStorage(for: specialSlotId).setLabel(slot, label: label)
                 var index = loadIndex()
                 if let idx = index.specialSlots.firstIndex(where: { $0.id == specialSlotId }) {

@@ -132,15 +132,43 @@ public final class SlotStorage {
         let keys: [URLResourceKey] = isStartupSweep ? [.contentModificationDateKey] : []
         guard let entries = try? FileManager.default.contentsOfDirectory(
             at: baseURL, includingPropertiesForKeys: keys) else { return }
-        let staleThreshold: TimeInterval = 30
+        // STG-3 (v2.10.32): the startup sweep judged staleness by the staging DIRECTORY's mtime.
+        // But a directory's mtime only updates when entries are added/removed, NOT while a large
+        // file is being written into item_0/*.bin. A single-file write that takes > threshold
+        // (e.g. a 1GB attachment) leaves the dir mtime frozen at creation time, so another
+        // process starting up would treat the still-active staging dir as stale and delete it
+        // mid-write, failing the legitimate large write. Fix: (1) judge staleness by the MOST
+        // RECENT mtime found anywhere in the staging subtree (a live write keeps bumping the
+        // .bin file mtime), and (2) widen the threshold substantially so slow-but-legit writes
+        // are never reaped.
+        let staleThreshold: TimeInterval = 600
         let now = Date()
         for entry in entries where entry.lastPathComponent.hasPrefix(prefix) {
             if isStartupSweep {
-                let mtime = try? entry.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate
-                if let mtime, now.timeIntervalSince(mtime) < staleThreshold { continue }
+                let latest = latestModificationDate(in: entry)
+                if let latest, now.timeIntervalSince(latest) < staleThreshold { continue }
             }
             try? FileManager.default.removeItem(at: entry)
         }
+    }
+
+    /// STG-3 (v2.10.32): return the most recent contentModificationDate found anywhere in the
+    /// directory subtree rooted at `url` (including `url` itself). Used to decide whether a
+    /// staging directory is truly orphaned vs. an in-progress large write. A live write keeps
+    /// touching a deep `.bin` file even when the parent directory's own mtime is stale.
+    private func latestModificationDate(in url: URL) -> Date? {
+        var latest = try? url.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate
+        if let enumerator = FileManager.default.enumerator(
+            at: url,
+            includingPropertiesForKeys: [.contentModificationDateKey],
+            options: []) {
+            for case let child as URL in enumerator {
+                if let m = try? child.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate {
+                    if latest == nil || m > latest! { latest = m }
+                }
+            }
+        }
+        return latest
     }
 
     // MARK: - Slot Content

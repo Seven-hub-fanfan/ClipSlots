@@ -712,14 +712,15 @@ enum AttachmentThumbnailProvider {
             // C-5 (v2.10.31): 之前用 NSImage(contentsOfFile:) / NSImage(data:) 把原图整张
             // 全尺寸解码进内存再缩小，超大图片会瞬时占用巨量内存甚至 OOM 崩溃。改用
             // CGImageSourceCreateThumbnailAtIndex 直接解码出受 maxPixel 限制的缩略图，
-            // 全程不做全尺寸解码。解码失败时回退到旧的整图缩放路径。
+            // 全程不做全尺寸解码。
+            // ATT-3 (v2.10.32): 移除失败回退里的 NSImage(contentsOfFile:) / NSImage(data:)
+            // 整图全尺寸解码——这正是 C-5 残留、快速划过大图列表时叠加多份全分辨率缓冲的根因。
+            // 缩略图生成失败（极少数非标准格式）时返回 nil 回退到语义图标，绝不整张解码。
             if let path = att.path, !path.isEmpty {
                 if let thumb = downsampledThumbnail(path: path, maxPixel: maxPixel) { return thumb }
-                if let img = NSImage(contentsOfFile: path) { return resized(img, maxPixel: maxPixel) }
             }
             if let data = att.data {
                 if let thumb = downsampledThumbnail(data: data, maxPixel: maxPixel) { return thumb }
-                if let img = NSImage(data: data) { return resized(img, maxPixel: maxPixel) }
             }
             return nil
         case .file:
@@ -732,10 +733,10 @@ enum AttachmentThumbnailProvider {
             // actually images (e.g. dragged / spilled PNGs). Decode the real
             // pixels so they render a true thumbnail instead of the generic
             // Finder "PNG" document icon.
-            // C-5 (v2.10.31): 同样改走缩略图解码，失败再回退整图缩放。
+            // C-5 (v2.10.31): 同样改走缩略图解码。
+            // ATT-3 (v2.10.32): 失败不再回退整图解码，直接落到下方 Finder 图标。
             if isImage(url) {
                 if let thumb = downsampledThumbnail(path: path, maxPixel: maxPixel) { return thumb }
-                if let img = NSImage(contentsOfFile: path) { return resized(img, maxPixel: maxPixel) }
             }
             // Finder icon is always available even for missing files.
             let icon = NSWorkspace.shared.icon(forFile: path)
@@ -786,6 +787,33 @@ enum AttachmentThumbnailProvider {
             if isVideo(url) { return videoFrame(url: url, maxPixel: 640) }
             // v2.8.9: image files stored as `.file` still get a rich preview.
             if isImage(url), let img = NSImage(contentsOfFile: path) { return img }
+            return nil
+        default:
+            return nil
+        }
+    }
+
+    // ATT-3 (v2.10.32): the hover preview panel is only ~340-640pt, but `fullImage`
+    // above decoded the attachment at FULL resolution (an 8K image ≈ 135MB) just to
+    // shrink it into that panel. Worse, scrubbing quickly down the list stacked
+    // several of those full-size buffers because `NSImage(contentsOfFile:)` cannot be
+    // cancelled mid-decode. `previewImage` decodes a downsampled image bounded by
+    // `maxPixel` via ImageIO instead, so each hover costs a small, fixed amount of
+    // memory and finishes quickly. Falls back to nil (→ card fallback) on failure —
+    // never a full-resolution decode.
+    static func previewImage(for att: SlotContent.SlotAttachment, maxPixel: CGFloat) -> NSImage? {
+        switch att.type {
+        case .image:
+            if let path = att.path, !path.isEmpty,
+               let thumb = downsampledThumbnail(path: path, maxPixel: maxPixel) { return thumb }
+            if let data = att.data,
+               let thumb = downsampledThumbnail(data: data, maxPixel: maxPixel) { return thumb }
+            return nil
+        case .file:
+            guard let path = att.path, !path.isEmpty else { return nil }
+            let url = URL(fileURLWithPath: path)
+            if isVideo(url) { return videoFrame(url: url, maxPixel: maxPixel) }
+            if isImage(url) { return downsampledThumbnail(path: path, maxPixel: maxPixel) }
             return nil
         default:
             return nil
@@ -979,8 +1007,13 @@ private struct AsyncPreviewImage<Fallback: View>: View {
         }
         .task(id: attachment.id) {
             let att = attachment
+            // ATT-3 (v2.10.32): bail out immediately if this hover was already
+            // superseded, and decode a downsampled panel-sized image (≤ 640px) off the
+            // main thread instead of the full-resolution bitmap. This bounds per-hover
+            // memory and keeps fast scrubbing from stacking multiple full-size buffers.
+            if Task.isCancelled { return }
             let img = await Task.detached(priority: .userInitiated) {
-                AttachmentThumbnailProvider.fullImage(for: att)
+                AttachmentThumbnailProvider.previewImage(for: att, maxPixel: 640)
             }.value
             if !Task.isCancelled {
                 image = img

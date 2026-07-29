@@ -293,7 +293,12 @@ enum SlotConnectionColor: Int, CaseIterable, Codable {
         guard let id = id else { return .clear }
         let colors = Self.allCases
         guard !colors.isEmpty else { return .accentColor }
-        return colors[abs(id) % colors.count].swiftUIColor
+        // CONN-1 (v2.10.32): `abs(id)` traps at runtime for `Int.min` (its magnitude is not
+        // representable). A hand-edited / corrupt template with colorId == Int.min would crash
+        // the moment its group's canvas or slot badge renders. Use a wrap-around modulo that is
+        // total over all Int values instead of abs().
+        let idx = ((id % colors.count) + colors.count) % colors.count
+        return colors[idx].swiftUIColor
     }
 }
 
@@ -403,6 +408,12 @@ func validateConnectionMap(_ map: SlotConnectionMap) throws {
         guard (1...10).contains(edge.fromSlot),
               (1...10).contains(edge.toSlot),
               edge.fromSlot != edge.toSlot else {
+            throw SlotConnectionError.invalidTemplate
+        }
+        // CONN-1 (v2.10.32): reject out-of-range colorId at the import gate. A hand-edited /
+        // corrupt template (e.g. colorId == Int.min) previously passed every check and only
+        // crashed later at render time (see color(for:)). Constrain to the valid palette range.
+        guard (0..<SlotConnectionColor.allCases.count).contains(edge.colorId) else {
             throw SlotConnectionError.invalidTemplate
         }
         if outgoing[edge.fromSlot] != nil { throw SlotConnectionError.invalidTemplate }

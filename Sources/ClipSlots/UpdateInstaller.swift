@@ -144,7 +144,19 @@ final class UpdateInstaller {
             let expectedSem = UpdateChecker.parse(version)
             let mountedCore = mountedSem.core
             let expectedCore = expectedSem.core
-            guard mountedCore == expectedCore && mountedSem.pre == expectedSem.pre else {
+            // INST-1 (v2.10.32): UP-4 added a strict `mountedSem.pre == expectedSem.pre` gate, but
+            // the two sources are asymmetric: `expected` comes from the GitHub tag_name (which CAN
+            // carry `-beta.N`), while `mounted` is the DMG bundle's CFBundleShortVersionString —
+            // and this repo's build chain NEVER injects a pre-release suffix into Info.plist (it is
+            // always the bare numeric core, e.g. "2.11.0"). So for ANY pre-release tag,
+            // expectedSem.pre="beta.1" vs mountedSem.pre=nil could never be equal → the beta /
+            // pre-release channel was permanently un-installable, with a self-contradictory
+            // "预期 2.11.0-beta.1，实际 2.11.0" message. The meaningful anti-misbox guard is
+            // numeric-core equality; the pre suffix asymmetry is a data-source artifact. Accept when
+            // the pre matches OR the mounted bundle simply carries no pre (the normal case); only a
+            // mounted bundle that itself declares a DIFFERENT pre is rejected.
+            let preCompatible = (mountedSem.pre == expectedSem.pre) || (mountedSem.pre == nil)
+            guard mountedCore == expectedCore && preCompatible else {
                 NSLog("[ClipSlots] UpdateInstaller: 版本校验失败，预期=\(version) 实际=\(mountedVersion)，中止安装")
                 Self.detachAndCleanup(mountPoint)
                 let expectedLabel = expectedSem.pre.map { "\(coreString(expectedCore))-\($0)" } ?? coreString(expectedCore)
