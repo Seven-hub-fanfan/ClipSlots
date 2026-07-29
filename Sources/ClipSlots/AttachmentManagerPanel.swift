@@ -72,6 +72,11 @@ final class AttachmentManagerPanelController: NSObject, NSPopoverDelegate {
     private(set) var currentSlot: Int?
     /// 关闭进行中时挂起的下一次 show 请求（切换槽位时用），在 popoverDidClose 后执行。
     private var pendingShow: (() -> Void)?
+    // C-6 (v2.10.31): 恢复 pendingShow token 机制。切换槽位时 reallyShow 会被 defer 到
+    // 下一个 main-loop tick 执行；若用户连续快速切换槽位，早前排队的异步 show 可能在更
+    // 新的 show 之后才执行，从而用过期的槽位/store 覆盖最新状态（竞态）。为此给每次 show
+    // 分配一个递增 token，异步回调里校验 token 仍是最新才真正展示，过期请求直接丢弃。
+    private var pendingShowToken: Int = 0
 
     var isVisible: Bool { popover?.isShown ?? false }
 
@@ -94,6 +99,10 @@ final class AttachmentManagerPanelController: NSObject, NSPopoverDelegate {
         onClose: @escaping () -> Void
     ) {
         guard anchor.view?.window != nil else { return }
+
+        // C-6 (v2.10.31): 每次 show 领取一个新 token，作废所有在途的 pending show 请求。
+        pendingShowToken &+= 1
+        let token = pendingShowToken
 
         // 已经打开（可能是别的槽位）→ 直接同步无动画切换，不再走「关→等回调→开」的异步链。
         if let existing = popover, existing.isShown {
@@ -119,7 +128,11 @@ final class AttachmentManagerPanelController: NSObject, NSPopoverDelegate {
             // lets that redraw settle so the anchor is valid when we show. This is a
             // micro-defer (no animation), so the instant-switch feel is preserved.
             DispatchQueue.main.async { [weak self] in
-                self?.reallyShow(anchor: anchor, slot: slot, store: store, onClose: onClose, animates: false)
+                guard let self else { return }
+                // C-6 (v2.10.31): 仅当仍是最新一次 show 请求时才真正展示；否则说明用户
+                // 已再次切换槽位，本次为过期请求，直接丢弃，避免覆盖新状态。
+                guard token == self.pendingShowToken else { return }
+                self.reallyShow(anchor: anchor, slot: slot, store: store, onClose: onClose, animates: false)
             }
         } else {
             // 首次打开：保留原有淡入动画。

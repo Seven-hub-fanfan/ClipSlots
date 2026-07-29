@@ -3,6 +3,7 @@ import ClipSlotsKit
 import AppKit
 import AVFoundation
 import UniformTypeIdentifiers
+import ImageIO
 
 // v2.7.65: Attachment management UI for the node canvas.
 //
@@ -708,11 +709,17 @@ enum AttachmentThumbnailProvider {
     static func thumbnail(for att: SlotContent.SlotAttachment, maxPixel: CGFloat) -> NSImage? {
         switch att.type {
         case .image:
-            if let path = att.path, !path.isEmpty, let img = NSImage(contentsOfFile: path) {
-                return resized(img, maxPixel: maxPixel)
+            // C-5 (v2.10.31): 之前用 NSImage(contentsOfFile:) / NSImage(data:) 把原图整张
+            // 全尺寸解码进内存再缩小，超大图片会瞬时占用巨量内存甚至 OOM 崩溃。改用
+            // CGImageSourceCreateThumbnailAtIndex 直接解码出受 maxPixel 限制的缩略图，
+            // 全程不做全尺寸解码。解码失败时回退到旧的整图缩放路径。
+            if let path = att.path, !path.isEmpty {
+                if let thumb = downsampledThumbnail(path: path, maxPixel: maxPixel) { return thumb }
+                if let img = NSImage(contentsOfFile: path) { return resized(img, maxPixel: maxPixel) }
             }
-            if let data = att.data, let img = NSImage(data: data) {
-                return resized(img, maxPixel: maxPixel)
+            if let data = att.data {
+                if let thumb = downsampledThumbnail(data: data, maxPixel: maxPixel) { return thumb }
+                if let img = NSImage(data: data) { return resized(img, maxPixel: maxPixel) }
             }
             return nil
         case .file:
@@ -725,8 +732,10 @@ enum AttachmentThumbnailProvider {
             // actually images (e.g. dragged / spilled PNGs). Decode the real
             // pixels so they render a true thumbnail instead of the generic
             // Finder "PNG" document icon.
-            if isImage(url), let img = NSImage(contentsOfFile: path) {
-                return resized(img, maxPixel: maxPixel)
+            // C-5 (v2.10.31): 同样改走缩略图解码，失败再回退整图缩放。
+            if isImage(url) {
+                if let thumb = downsampledThumbnail(path: path, maxPixel: maxPixel) { return thumb }
+                if let img = NSImage(contentsOfFile: path) { return resized(img, maxPixel: maxPixel) }
             }
             // Finder icon is always available even for missing files.
             let icon = NSWorkspace.shared.icon(forFile: path)
@@ -735,6 +744,34 @@ enum AttachmentThumbnailProvider {
         default:
             return nil
         }
+    }
+
+    // C-5 (v2.10.31): 用 ImageIO 直接从文件/数据解码出缩略图，避免全尺寸解码。
+    // kCGImageSourceThumbnailMaxPixelSize 限制缩略图最长边，
+    // kCGImageSourceCreateThumbnailFromImageAlways 保证即使源文件无内嵌缩略图也会
+    // 从主图生成（但仍由 ImageIO 增量解码，不会把原图整张解进内存）。
+    private static func downsampledThumbnail(source: CGImageSource, maxPixel: CGFloat) -> NSImage? {
+        let options: [CFString: Any] = [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceCreateThumbnailWithTransform: true,
+            kCGImageSourceShouldCacheImmediately: true,
+            kCGImageSourceThumbnailMaxPixelSize: max(1, Int(maxPixel.rounded()))
+        ]
+        guard let cg = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary) else {
+            return nil
+        }
+        return NSImage(cgImage: cg, size: NSSize(width: cg.width, height: cg.height))
+    }
+
+    private static func downsampledThumbnail(path: String, maxPixel: CGFloat) -> NSImage? {
+        let url = URL(fileURLWithPath: path) as CFURL
+        guard let source = CGImageSourceCreateWithURL(url, nil) else { return nil }
+        return downsampledThumbnail(source: source, maxPixel: maxPixel)
+    }
+
+    private static func downsampledThumbnail(data: Data, maxPixel: CGFloat) -> NSImage? {
+        guard let source = CGImageSourceCreateWithData(data as CFData, nil) else { return nil }
+        return downsampledThumbnail(source: source, maxPixel: maxPixel)
     }
 
     static func fullImage(for att: SlotContent.SlotAttachment) -> NSImage? {
@@ -1138,6 +1175,25 @@ private final class AttachmentPreviewPanel: NSPanel {
     override var canBecomeMain: Bool { false }
 }
 
+/// C-4 (v2.10.31): 精确命中测试的承载视图。上一轮为「防穿透」把整个预览面板设成
+/// `ignoresMouseEvents = true`，导致预览面板彻底不可交互（里面的按钮/内容点不动）。
+/// 这里改为只让**透明/空白区域**（圆角面板四角的透明像素）穿透，圆角矩形内部的
+/// 真实内容照常命中，从而恢复内容可交互，同时保留「点空白不吞事件」的原意。
+private final class PassthroughHostingView: NSHostingView<AnyView> {
+    /// 与 rootView 的 `RoundedRectangle(cornerRadius: 12)` 保持一致。
+    var cornerRadius: CGFloat = 12
+
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        // point 为父视图坐标；转换到本视图坐标后判断是否落在圆角矩形内。
+        let local = convert(point, from: superview)
+        let path = NSBezierPath(roundedRect: bounds, xRadius: cornerRadius, yRadius: cornerRadius)
+        // 落在圆角外的透明区域 → 返回 nil，事件穿透到下层（如附件行）。
+        guard path.contains(local) else { return nil }
+        // 圆角内的真实内容 → 正常命中，按钮/内容可交互。
+        return super.hitTest(point)
+    }
+}
+
 /// Shows the attachment hover preview in a floating, mouse-transparent panel.
 /// Because the panel ignores mouse events and is not a popover, it never
 /// consumes clicks aimed at the row's delete / drag controls, so a single
@@ -1150,7 +1206,7 @@ final class AttachmentPreviewWindowController {
     // rootView, instead of allocating a new NSHostingView (and a whole SwiftUI
     // render tree) on every hover show. Rapid row hovering previously left the old
     // render trees to be torn down implicitly when `contentView` was replaced.
-    private var hostingView: NSHostingView<AnyView>?
+    private var hostingView: PassthroughHostingView?
     private var currentID: UUID?
     private let previewSize = NSSize(width: 340, height: 300)
 
@@ -1176,7 +1232,7 @@ final class AttachmentPreviewWindowController {
         if let hosting = hostingView {
             hosting.rootView = rootView
         } else {
-            let hosting = NSHostingView(rootView: rootView)
+            let hosting = PassthroughHostingView(rootView: rootView)
             panel.contentView = hosting
             hostingView = hosting
         }
@@ -1211,7 +1267,10 @@ final class AttachmentPreviewWindowController {
         panel.backgroundColor = .clear
         panel.hasShadow = true
         panel.level = .popUpMenu           // above the attachment-manager popover
-        panel.ignoresMouseEvents = true    // never intercept clicks -> no swallow
+        // C-4 (v2.10.31): 移除整窗 `ignoresMouseEvents = true`（上一轮防穿透副作用，
+        // 会让预览面板彻底不可交互）。改由 PassthroughHostingView.hitTest 精确处理：
+        // 圆角外透明区域穿透、圆角内内容可交互。
+        panel.ignoresMouseEvents = false
         panel.hidesOnDeactivate = false
         panel.becomesKeyOnlyIfNeeded = false
         panel.collectionBehavior = [.canJoinAllSpaces, .transient, .ignoresCycle, .fullScreenAuxiliary]

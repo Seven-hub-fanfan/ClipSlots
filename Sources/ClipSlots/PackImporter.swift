@@ -49,6 +49,10 @@ struct PackImporter {
     private let storage = SpecialSlotStorage.shared
     private let maxChildSlots: Int
 
+    // D-1 (v2.10.31): 附件字节「内联进 attachments.json」与「落盘为路径引用」的分界阈值（20MB）。
+    // 超过该阈值的附件改走流式 copyItem 落盘，绝不整块读进内存，从根本上规避大文件导入 OOM。
+    private static let inlineAttachmentThreshold = 20 * 1024 * 1024
+
     init(maxChildSlots: Int) {
         self.maxChildSlots = max(1, maxChildSlots)
     }
@@ -193,16 +197,47 @@ struct PackImporter {
             // 在满盘时同样失败、被 try? 吞掉而留下「旧数据没了、新数据半写」的损坏态。被覆盖组均为
             // 「已有组」，与上面删除的 createdGroupIds 互不相交，两段回滚互不影响。
             for backup in overwrittenBackups {
-                guard let backupDir = backup.backupDir else { continue }
-                do {
+                guard let backupDir = backup.backupDir else {
+                    // D-4 (v2.10.31): backupDir == nil 表示覆盖时该组磁盘目录本不存在，backupGroupDirForOverwrite
+                    // 会重建一个空目录并让 writeSlots 往里写——此刻 groupDir 里是「半写入的新内容」。旧逻辑
+                    // 直接 continue 跳过，导致失败后半写入组目录残留（既没回滚也没清理）成为脏数据。这里补上
+                    // 清理：把该半写入目录 removeItem 掉，保证导入失败时不留残物。
                     if fm.fileExists(atPath: backup.groupDir.path) {
-                        try fm.removeItem(at: backup.groupDir)
+                        do {
+                            try fm.removeItem(at: backup.groupDir)
+                        } catch {
+                            NSLog("[ClipSlots] PackImporter D-4 回滚清理半写入组目录失败："
+                                + "\(backup.groupDir.path)：\(error)")
+                        }
                     }
-                    try fm.moveItem(at: backupDir, to: backup.groupDir)
+                    continue
+                }
+                // D-3 (v2.10.31): 旧实现「先 removeItem 半写入 groupDir，再 moveItem 备份回来」两步非原子——
+                // 若在「删掉半写入内容之后、把备份移回之前」崩溃/失败，正式位置将永久为空，原组数据永久丢失
+                // （高危数据丢失）。改为「先落地新的再删旧的」：把半写入 groupDir 先 rename 到临时丢弃名（不删除）
+                // → 再把备份 rename 到正式位置 → 确认成功后才删临时目录。任何时刻正式位置或备份至少有一份完整
+                // 数据；备份未能就位时还会把半写入内容原样搬回，绝不让正式位置落到「空」。
+                let discardDir = backup.groupDir.deletingLastPathComponent()
+                    .appendingPathComponent(".rollback_discard_\(backup.groupId)_\(UUID().uuidString)", isDirectory: true)
+                do {
+                    var vacated = false
+                    if fm.fileExists(atPath: backup.groupDir.path) {
+                        try fm.moveItem(at: backup.groupDir, to: discardDir)  // 半写入内容先挪走，暂不删除
+                        vacated = true
+                    }
+                    do {
+                        try fm.moveItem(at: backupDir, to: backup.groupDir)   // 备份 rename 回正式位置
+                    } catch {
+                        // 备份未能就位：把刚挪走的半写入内容原样搬回，保证正式位置不为空，再抛出。
+                        if vacated { try? fm.moveItem(at: discardDir, to: backup.groupDir) }
+                        throw error
+                    }
+                    // 备份已完整就位，此时才删除挪到临时名的半写入内容（先落地新的再删旧的）。
+                    if vacated { try? fm.removeItem(at: discardDir) }
                 } catch {
                     // rename 回滚是空间无关操作，正常不会失败；万一失败也记录（不再静默吞掉），备份目录
                     // 仍原样保留在 special_slots 下（.import_backup_<groupId>_<uuid>）供人工恢复。
-                    NSLog("[ClipSlots] PackImporter PK-3 回滚失败：无法将备份 \(backupDir.path) 还原到 "
+                    NSLog("[ClipSlots] PackImporter D-3 回滚失败：无法将备份 \(backupDir.path) 还原到 "
                         + "\(backup.groupDir.path)：\(error)。原数据仍完整保存在该备份目录中。")
                 }
             }
@@ -243,19 +278,36 @@ struct PackImporter {
             var restored: [SlotContent.SlotAttachment] = []
             for att in packSlot.attachments {
                 let type = SlotContent.AttachmentType(rawValue: att.type) ?? .file
+                let attId = UUID()  // 槽位 UUID 始终新生成；也用作大文件持久落盘的文件名前缀
                 var data: Data? = nil
+                var persistentPath: String? = nil
                 if let file = att.file {
                     // P1-2 (v2.10.18): 附件路径做 safeChildURL 校验，防止 Zip Slip 路径穿越读取包外文件。
                     if let safeURL = safeChildURL(in: attachmentsDir, component: file, isDirectory: false) {
-                        data = try? Data(contentsOf: safeURL)
+                        // D-1 (v2.10.31): 旧实现无差别用 `Data(contentsOf:)` 把附件整块读入内存再内联到
+                        // attachments.json——单个超大文件（如 2GB 视频）会直接 OOM 崩溃。改为：先用元数据
+                        // 探测文件大小，超过阈值（20MB）的大文件不进内存，直接用 FileManager.copyItem 流式
+                        // 拷贝到持久附件目录并以「路径引用」形式登记（data=nil, path=持久文件）；小文件才内联。
+                        let size = (try? safeURL.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
+                        if size > Self.inlineAttachmentThreshold {
+                            if let dest = copyLargeAttachmentToStore(from: safeURL, attachmentId: attId) {
+                                persistentPath = dest.path
+                            } else {
+                                // 拷贝失败：记录可读报错，保留附件元信息（无字节），绝不静默把整块读进内存。
+                                NSLog("[ClipSlots] PackImporter D-1 大附件流式落盘失败，已跳过其字节："
+                                    + "\(att.name)（源 \(safeURL.path)）")
+                            }
+                        } else {
+                            data = try? Data(contentsOf: safeURL)
+                        }
                     }
                 }
-                // 槽位 UUID 始终新生成，附件字节内联，路径不跨机还原。
+                // 附件 UUID 始终新生成；小文件字节内联，大文件以持久路径引用，路径不跨机还原。
                 restored.append(SlotContent.SlotAttachment(
-                    id: UUID(),
+                    id: attId,
                     name: att.name,
                     type: type,
-                    path: nil,
+                    path: persistentPath,
                     url: att.url,
                     data: data
                 ))
@@ -278,6 +330,33 @@ struct PackImporter {
             written += 1
         }
         return written
+    }
+
+    /// D-1 (v2.10.31): 把「超过内联阈值」的大附件从解压临时目录流式拷贝到持久附件目录，返回落盘 URL。
+    /// 用 FileManager.copyItem（内核级流式拷贝，不把文件内容读进进程内存），从根本上规避大文件 OOM。
+    /// 目标目录 dataRoot/imported_attachments/ 与其它「以 path 引用外部文件」的附件同一存储语义，导出/
+    /// 展示均按路径读取；文件名以新生成的附件 UUID 为前缀避免碰撞。拷贝失败返回 nil（调用方记录并降级）。
+    private func copyLargeAttachmentToStore(from src: URL, attachmentId: UUID) -> URL? {
+        let fm = FileManager.default
+        let dir = ClipSlotsPaths.dataRoot.appendingPathComponent("imported_attachments", isDirectory: true)
+        do {
+            try fm.createDirectory(at: dir, withIntermediateDirectories: true)
+        } catch {
+            NSLog("[ClipSlots] PackImporter D-1 无法创建持久附件目录 \(dir.path)：\(error)")
+            return nil
+        }
+        let dest = dir.appendingPathComponent("\(attachmentId.uuidString)_\(src.lastPathComponent)")
+        do {
+            // copyItem 目标已存在会报错；文件名前缀含唯一附件 id，碰撞极罕见，仍稳妥清理。
+            if fm.fileExists(atPath: dest.path) {
+                try fm.removeItem(at: dest)
+            }
+            try fm.copyItem(at: src, to: dest)
+            return dest
+        } catch {
+            NSLog("[ClipSlots] PackImporter D-1 流式拷贝大附件失败 \(src.path) → \(dest.path)：\(error)")
+            return nil
+        }
     }
 
     // MARK: - 页/组创建（含去重与容错）
@@ -378,6 +457,49 @@ struct PackImporter {
         return resolved
     }
 
+    /// D-6 (v2.10.31): Zip Slip 防护。/usr/bin/unzip 会原样解出条目路径（含 `../` 或绝对路径），
+    /// 恶意 .clipslotspack 可借此写到目标解压根目录之外覆盖任意文件。这里在真正解压前用 `zipinfo -1`
+    /// 列出包内所有条目，逐个校验：拒绝绝对路径，以及经 standardizedFileURL 解析 `..`/`.` 后仍逃逸出
+    /// dest 根目录的条目（前缀匹配）。一旦发现越界即抛错使整个导入失败，绝不解压。
+    private func assertNoZipSlip(_ packURL: URL, extractingInto dest: URL) throws {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/zipinfo")
+        process.arguments = ["-1", packURL.path]   // -1：每行仅输出一个条目路径
+        let outPipe = Pipe()
+        let errPipe = Pipe()
+        process.standardOutput = outPipe
+        process.standardError = errPipe
+        do {
+            try process.run()
+        } catch {
+            throw PackImportError.unzipFailed("无法预检包内条目：\(error.localizedDescription)")
+        }
+        // 先读干管道再 wait，避免大列表撑满管道缓冲导致死锁。
+        let outData = outPipe.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        guard process.terminationStatus == 0 else {
+            let errData = errPipe.fileHandleForReading.readDataToEndOfFile()
+            let msg = String(data: errData, encoding: .utf8) ?? "zipinfo exit \(process.terminationStatus)"
+            throw PackImportError.unzipFailed("包内条目预检失败：\(msg)")
+        }
+
+        let listing = String(data: outData, encoding: .utf8) ?? ""
+        let destRoot = dest.standardizedFileURL
+        let rootPrefix = destRoot.path.hasSuffix("/") ? destRoot.path : destRoot.path + "/"
+        for rawLine in listing.split(separator: "\n", omittingEmptySubsequences: true) {
+            let entry = String(rawLine)
+            if entry.isEmpty { continue }
+            // 绝对路径条目直接拒绝（zipinfo 会原样打印前导 `/`）。
+            if entry.hasPrefix("/") {
+                throw PackImportError.unzipFailed("包内条目为绝对路径，疑似恶意路径穿越，已拒绝导入：\(entry)")
+            }
+            let resolved = dest.appendingPathComponent(entry).standardizedFileURL
+            guard resolved.path == destRoot.path || resolved.path.hasPrefix(rootPrefix) else {
+                throw PackImportError.unzipFailed("包内条目路径越界（Zip Slip），已拒绝导入：\(entry)")
+            }
+        }
+    }
+
     private func unzip(_ packURL: URL, to dest: URL, members: [String] = []) throws {
         let fm = FileManager.default
         do {
@@ -385,6 +507,9 @@ struct PackImporter {
         } catch {
             throw PackImportError.unzipFailed(error.localizedDescription)
         }
+
+        // D-6 (v2.10.31): 解压前先做 Zip Slip 预检；发现越界条目直接抛错，绝不落盘。
+        try assertNoZipSlip(packURL, extractingInto: dest)
 
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/unzip")

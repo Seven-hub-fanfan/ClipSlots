@@ -193,10 +193,16 @@ struct PackExporter {
 
                 var writtenSlots: [Int] = []
                 for slot in 1...maxChildSlots {
-                    let content = storage.get(slot, in: group.id)
+                    // D-2 (v2.10.31): 旧实现调用 storage.get(slot,in:)——其 readSlotContent 会把该槽位所有
+                    // item 的 .bin 以及 attachments.json（含内联附件字节）整块读进内存，并常驻 SlotStorage
+                    // 的 in-memory cache；导出一个含大量/超大槽位的页面时，缓存随槽位不断累积直至 OOM。
+                    // 改为直接从磁盘按需读取该槽位目录（special_slots/<groupId>/<slot>/），读完即释放、不污染
+                    // 也不常驻任何缓存；大附件（D-1 起以 path 引用落盘、不再内联）经下方 att.path 分支流式
+                    // copyItem 写出，全程不进内存。
+                    let disk = readSlotFromDisk(groupId: group.id, slot: slot)
                     let label = storage.getLabel(slot, in: group.id)
                     let hasLabel = !(label?.isEmpty ?? true)
-                    if content.isEmpty && !hasLabel { continue }
+                    if disk.isEmpty && !hasLabel { continue }
 
                     let slotDir = slotsDir.appendingPathComponent("\(slot)", isDirectory: true)
                     try createDir(slotDir)
@@ -206,7 +212,7 @@ struct PackExporter {
                     var attachmentsDirCreated = false
                     let attachmentsDir = slotDir.appendingPathComponent("attachments", isDirectory: true)
 
-                    for att in content.attachments {
+                    for att in disk.attachments {
                         var packAtt = PackAttachment(
                             id: att.id.uuidString,
                             name: att.name,
@@ -271,10 +277,12 @@ struct PackExporter {
 
                     let packSlot = PackSlot(
                         slot: slot,
-                        label: hasLabel ? label : content.label,
-                        htmlSource: content.htmlSource,
-                        contentId: content.contentId,
-                        items: content.items,
+                        // 特殊槽位的 label 仅落盘在 label.txt（经 getLabel 读取），其余分支无内联 label；
+                        // htmlSource 从未持久化到特殊槽位磁盘（与 storage.get 的返回一致），故为 nil。
+                        label: hasLabel ? label : nil,
+                        htmlSource: nil,
+                        contentId: disk.contentId,
+                        items: disk.items,
                         attachments: packAttachments
                     )
                     try writeJSON(packSlot, to: slotDir.appendingPathComponent("slot.json"))
@@ -360,6 +368,64 @@ struct PackExporter {
         guard let values = try? url.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey]),
               values.isRegularFile == true, let size = values.fileSize else { return nil }
         return size
+    }
+
+    // D-2 (v2.10.31): 直接从磁盘读出的槽位内容（绕过 storage.get 的整块内存载入与缓存常驻）。
+    private struct DiskSlot {
+        var items: [[PasteboardItem]] = []
+        var attachments: [SlotContent.SlotAttachment] = []
+        var contentId: String = UUID().uuidString
+        var isEmpty: Bool { items.isEmpty && attachments.isEmpty }
+    }
+
+    /// D-2 (v2.10.31): 直接读取磁盘上的槽位目录（special_slots/<groupId>/<slot>/），复刻
+    /// SlotStorage.readSlotContent 的落盘格式，构造导出所需内容——绕过 storage.get()：既不把内容常驻
+    /// 进 SlotStorage 的 in-memory cache（导出大页面时缓存累积是主要 OOM 诱因），也让大附件（D-1 起以
+    /// path 引用落盘、不再内联进 attachments.json）保持「仅有路径、无内联字节」，由导出主流程的 att.path
+    /// 分支 copyItem 流式写出。返回结构读完即随作用域释放。
+    private func readSlotFromDisk(groupId: String, slot: Int) -> DiskSlot {
+        let fm = FileManager.default
+        var result = DiskSlot()
+        let slotDir = ClipSlotsPaths.specialSlots
+            .appendingPathComponent(groupId, isDirectory: true)
+            .appendingPathComponent("\(slot)", isDirectory: true)
+        var isDir: ObjCBool = false
+        guard fm.fileExists(atPath: slotDir.path, isDirectory: &isDir), isDir.boolValue else { return result }
+
+        // item_N/*.bin —— 与 SlotStorage 落盘格式一致：item_N 目录按名排序，文件名为
+        // encodeSafeFileName(type)+".bin"（"/" 被替换为 "$slash$"），此处逆向解码类型。
+        let itemDirs = ((try? fm.contentsOfDirectory(at: slotDir, includingPropertiesForKeys: nil)) ?? [])
+            .filter { $0.lastPathComponent.hasPrefix("item_") }
+            .sorted { $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending }
+        for itemDir in itemDirs {
+            let files = (try? fm.contentsOfDirectory(at: itemDir, includingPropertiesForKeys: nil)) ?? []
+            var items: [PasteboardItem] = []
+            for file in files where file.pathExtension == "bin" {
+                let type = file.deletingPathExtension().lastPathComponent
+                    .replacingOccurrences(of: "$slash$", with: "/")
+                if let data = try? Data(contentsOf: file) {
+                    items.append(PasteboardItem(type: type, data: data))
+                }
+            }
+            if !items.isEmpty { result.items.append(items) }
+        }
+
+        // content.json → contentId（仅取字符串字段，用 JSONSerialization 避免依赖私有 Meta 类型）。
+        let metaURL = slotDir.appendingPathComponent("content.json")
+        if let metaData = try? Data(contentsOf: metaURL),
+           let obj = try? JSONSerialization.jsonObject(with: metaData) as? [String: Any],
+           let cid = obj["contentId"] as? String, !cid.isEmpty {
+            result.contentId = cid
+        }
+
+        // attachments.json → [SlotAttachment]。大附件此处仅携带 path（无内联 data），不占内存。
+        let attURL = slotDir.appendingPathComponent("attachments.json")
+        if fm.fileExists(atPath: attURL.path),
+           let attData = try? Data(contentsOf: attURL),
+           let atts = try? JSONDecoder().decode([SlotContent.SlotAttachment].self, from: attData) {
+            result.attachments = atts
+        }
+        return result
     }
 
     /// 生成安全且唯一的附件文件名：`<attachmentId>_<sanitizedName>`。

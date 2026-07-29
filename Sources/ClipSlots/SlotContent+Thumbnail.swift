@@ -41,9 +41,26 @@ extension SlotContent {
     /// overwrite (new contentId/updatedAt) still misses the cache.
     private static let inlineImageCache: NSCache<NSString, NSImage> = {
         let cache = NSCache<NSString, NSImage>()
+        // C-3 (v2.10.31): countLimit=64 alone let 64 decoded 8K images (~100MB+
+        // each once decompressed) accumulate to multiple GB and OOM on
+        // memory-constrained machines. Add a totalCostLimit sized in *decompressed*
+        // bytes and pass a per-image cost at every setObject. 512MB is a sane cap:
+        // it holds ~5 full-screen 8K images (8192×4320×4B ≈ 135MB) or many smaller
+        // thumbnails while bounding worst-case resident memory. countLimit stays as
+        // a secondary safety net for tiny-image floods.
         cache.countLimit = 64
+        cache.totalCostLimit = 512 * 1024 * 1024 // 512 MB of decompressed pixels
         return cache
     }()
+
+    // C-3 (v2.10.31): approximate decompressed byte cost of an NSImage, used as the
+    // NSCache cost so totalCostLimit reflects real memory pressure (width × height ×
+    // 4 bytes for RGBA). Falls back to a small non-zero cost when the size is unknown.
+    private static func decompressedCost(of image: NSImage) -> Int {
+        let size = image.size
+        let cost = Int(size.width * size.height * 4)
+        return cost > 0 ? cost : 1
+    }
 
     /// Attempt to decode an NSImage from inline image data.
     ///
@@ -77,7 +94,9 @@ extension SlotContent {
                 if lower.contains("image") || lower == "public.png" || lower == "public.tiff" || lower == "public.jpeg" {
                     if let image = NSImage(data: item.data) {
                         if let cacheKey {
-                            Self.inlineImageCache.setObject(image, forKey: cacheKey)
+                            // C-3 (v2.10.31): pass the decompressed-byte cost so the
+                            // cache's totalCostLimit can evict large images correctly.
+                            Self.inlineImageCache.setObject(image, forKey: cacheKey, cost: Self.decompressedCost(of: image))
                         }
                         return image
                     }

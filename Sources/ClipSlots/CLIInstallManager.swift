@@ -1,6 +1,42 @@
 import Foundation
 import SwiftUI
 
+/// B-4 (v2.10.31): run a `Process` and drain BOTH stdout and stderr concurrently (via a
+/// `DispatchGroup`) before `waitUntilExit()`, mirroring `CLIInstallManager.binaryVersion`'s
+/// proven pattern. The old "read stderr to EOF → read stdout → waitUntilExit" ordering
+/// deadlocks whenever the child writes more than the ~64KB pipe buffer to stdout: the child
+/// blocks on its stdout write (nobody is draining it) while the parent blocks reading stderr.
+/// Returns terminationStatus plus captured stdout/stderr. If `proc.run()` throws, returns
+/// status -1 with the error text placed in the stderr buffer.
+func runProcessDrainingBothPipes(_ proc: Process, outPipe: Pipe, errPipe: Pipe)
+    -> (status: Int32, out: Data, err: Data) {
+    let lock = NSLock()
+    var outData = Data()
+    var errData = Data()
+    let group = DispatchGroup()
+    do {
+        try proc.run()
+    } catch {
+        return (-1, Data(), Data(error.localizedDescription.utf8))
+    }
+    group.enter()
+    DispatchQueue.global().async {
+        let d = outPipe.fileHandleForReading.readDataToEndOfFile()
+        lock.lock(); outData = d; lock.unlock()
+        group.leave()
+    }
+    group.enter()
+    DispatchQueue.global().async {
+        let d = errPipe.fileHandleForReading.readDataToEndOfFile()
+        lock.lock(); errData = d; lock.unlock()
+        group.leave()
+    }
+    proc.waitUntilExit()
+    group.wait()
+    lock.lock(); let o = outData; let e = errData; lock.unlock()
+    return (proc.terminationStatus, o, e)
+}
+
 // v2.9.6: CLI install management from the Settings page.
 //
 // The `clipslots` CLI binary is bundled inside the app at
@@ -32,6 +68,14 @@ final class CLIInstallManager: ObservableObject {
     @Published private(set) var isBusy = false
     @Published var lastMessage: String?
     @Published var lastMessageIsError = false
+
+    // B-6 (v2.10.31): monotonic token to discard stale async refreshState results. Each
+    // refreshState() bumps this and captures the value; the version-probe completion only
+    // applies its result if the token still matches. Without it, rapid clicks on "刷新" spawn
+    // several concurrent binaryVersion subprocesses whose completions can return out of order,
+    // making the CLI state flicker between versions (a late-returning old probe overwriting a
+    // newer one). Read/written on the main actor only.
+    private var refreshStateRequestID = 0
 
     // MARK: - Source resolution
 
@@ -122,11 +166,16 @@ final class CLIInstallManager: ObservableObject {
         // Resolve the bundled path on the main actor, then probe versions off-main
         // (each probe spawns a subprocess + waitUntilExit) and hop back to update UI.
         let bundledPath = bundledCLIPath
+        // B-6 (v2.10.31): capture a fresh token; only the latest refresh applies its result.
+        refreshStateRequestID += 1
+        let requestID = refreshStateRequestID
         DispatchQueue.global(qos: .userInitiated).async {
             let installed = Self.binaryVersion(at: target) ?? "未知"
             let bundled = bundledPath.flatMap { Self.binaryVersion(at: $0) }
             DispatchQueue.main.async { [weak self] in
                 guard let self else { return }
+                // Discard a stale probe that finished after a newer refreshState was issued.
+                guard requestID == self.refreshStateRequestID else { return }
                 if let bundled, bundled != installed {
                     self.state = .outdated(installed: installed, bundled: bundled)
                 } else {
@@ -190,20 +239,11 @@ final class CLIInstallManager: ObservableObject {
             let errPipe = Pipe()
             proc.standardOutput = outPipe
             proc.standardError = errPipe
-            do {
-                try proc.run()
-                // 授权脚本 stdout/stderr 均为极少量文本，先读 stderr 到 EOF（进程退出即关闭），再读 stdout，
-                // 不存在撑满 64KB 管道缓冲区的风险。
-                let errData = errPipe.fileHandleForReading.readDataToEndOfFile()
-                _ = outPipe.fileHandleForReading.readDataToEndOfFile()
-                proc.waitUntilExit()
-                status = proc.terminationStatus
-                errText = String(data: errData, encoding: .utf8)?
-                    .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-            } catch {
-                status = -1
-                errText = error.localizedDescription
-            }
+            // B-4 (v2.10.31): drain both pipes concurrently before waitUntilExit (see helper).
+            let result = runProcessDrainingBothPipes(proc, outPipe: outPipe, errPipe: errPipe)
+            status = result.status
+            errText = String(data: result.err, encoding: .utf8)?
+                .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
 
             DispatchQueue.main.async {
                 guard let self else { return }

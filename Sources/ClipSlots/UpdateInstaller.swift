@@ -77,6 +77,8 @@ final class UpdateInstaller {
         }
 
         queue.async {
+            // B-5 (v2.10.31): 挂载新 DMG 前先回收历次更新失败残留的挂载点/目录，防止无界泄漏。
+            Self.reapStalePendingMounts()
             // P2-16 (v2.10.9): DMG 由 package_dmg.sh 以 UDZO(压缩) 格式生成并带内建 CRC 校验和。
             // `hdiutil verify` 只校验映像内部 checksum（完整性），并不校验签名/来源真实性——它
             // 无法「防中间人/MITM」（真正的防篡改依赖 HTTPS 下载 + P2-17 的下载大小校验 + 代码
@@ -252,10 +254,17 @@ final class UpdateInstaller {
         let work = {
             // P2-4 (v2.10.8): 覆盖「所有层级」的阻塞 modal，而非只处理一层。
             // 1. 递归结束每个窗口链上的 attachedSheet（sheet 可再挂 sheet）。
+            // B-7 (v2.10.31): endSheet 不会同步清空 attachedSheet，AppKit 有响应延迟时同一个 sheet
+            // 可能在循环里被重复 endSheet 多次。用 ObjectIdentifier 记录已处理的 sheet，命中即跳出，
+            // 保证对同一 sheet 只 endSheet 一次。
+            var processedSheets = Set<ObjectIdentifier>()
             for window in NSApp.windows {
                 var host: NSWindow? = window
                 var guardCount = 0
                 while let h = host, let sheet = h.attachedSheet, guardCount < 16 {
+                    let sid = ObjectIdentifier(sheet)
+                    if processedSheets.contains(sid) { break }
+                    processedSheets.insert(sid)
                     h.endSheet(sheet)
                     host = sheet          // 继续向下检查该 sheet 自己挂的 sheet
                     guardCount += 1
@@ -358,13 +367,62 @@ final class UpdateInstaller {
             do {
                 try runProcess("/usr/bin/hdiutil", ["detach", mountPoint, "-quiet", "-force"], timeout: 60)
             } catch {
-                // 仍失败：卷可能仍挂载，不再 removeItem（避免误删已挂载卷），仅记录日志留待系统清理。
-                NSLog("[ClipSlots] UpdateInstaller: detach 重试仍失败，跳过挂载点清理：\(error.localizedDescription)")
+                // B-5 (v2.10.31): 卷仍挂载，不能 removeItem（会误删已挂载卷）。旧代码到此直接 return，
+                // 既不清理也不记录，反复更新失败会在 /private/tmp 残留大量 clipslots-update-mnt-* 挂载卷
+                // 与目录。改为把挂载点记入待清理列表，下次更新流程启动时由 reapStalePendingMounts() 兜底
+                // 卸载并删除，避免无界泄漏。
+                NSLog("[ClipSlots] UpdateInstaller: detach 重试仍失败，记录待清理：\(error.localizedDescription)")
+                recordPendingMountCleanup(mountPoint)
                 return
             }
         }
         // 已确认卸载，安全清理挂载点空目录。
         try? FileManager.default.removeItem(atPath: mountPoint)
+        removePendingMountCleanup(mountPoint)
+    }
+
+    // B-5 (v2.10.31): UserDefaults 里保存「detach 失败、待下次清理」的挂载点路径列表。
+    private static let pendingMountCleanupKey = "UpdateInstaller.pendingMountCleanup"
+
+    private static func recordPendingMountCleanup(_ mountPoint: String) {
+        let d = UserDefaults.standard
+        var list = d.stringArray(forKey: pendingMountCleanupKey) ?? []
+        if !list.contains(mountPoint) { list.append(mountPoint) }
+        d.set(list, forKey: pendingMountCleanupKey)
+    }
+
+    private static func removePendingMountCleanup(_ mountPoint: String) {
+        let d = UserDefaults.standard
+        guard var list = d.stringArray(forKey: pendingMountCleanupKey), list.contains(mountPoint) else { return }
+        list.removeAll { $0 == mountPoint }
+        d.set(list, forKey: pendingMountCleanupKey)
+    }
+
+    /// B-5 (v2.10.31): 兜底回收残留的更新挂载点——(1) 之前记录的待清理列表，(2) 扫描临时目录中所有
+    /// clipslots-update-mnt-* 遗留目录。对每个尝试 hdiutil detach -force，成功后 removeItem。在每次
+    /// install() 真正挂载新 DMG 前调用，防止反复失败累积泄漏。永不抛错（清理失败只记日志）。
+    static func reapStalePendingMounts() {
+        let fm = FileManager.default
+        var candidates = Set(UserDefaults.standard.stringArray(forKey: pendingMountCleanupKey) ?? [])
+        let tmp = fm.temporaryDirectory
+        if let entries = try? fm.contentsOfDirectory(at: tmp, includingPropertiesForKeys: nil) {
+            for url in entries where url.lastPathComponent.hasPrefix("clipslots-update-mnt-") {
+                candidates.insert(url.path)
+            }
+        }
+        for mountPoint in candidates {
+            // 已经不存在的直接从待清理列表移除。
+            if !fm.fileExists(atPath: mountPoint) { removePendingMountCleanup(mountPoint); continue }
+            // 尝试卸载（可能本就未挂载，detach 会报错，忽略即可），随后删除目录。
+            try? runProcess("/usr/bin/hdiutil", ["detach", mountPoint, "-quiet", "-force"], timeout: 60)
+            do {
+                try fm.removeItem(atPath: mountPoint)
+                removePendingMountCleanup(mountPoint)
+                NSLog("[ClipSlots] UpdateInstaller: 已回收残留挂载点 \(mountPoint)")
+            } catch {
+                NSLog("[ClipSlots] UpdateInstaller: 残留挂载点仍无法清理，留待下次：\(mountPoint)")
+            }
+        }
     }
 
     /// P2-19 (v2.10.9): 由 escapeForAppleScript 更名而来——它实际做的是「shell 单引号转义」，

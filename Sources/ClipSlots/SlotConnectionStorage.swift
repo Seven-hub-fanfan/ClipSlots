@@ -70,16 +70,24 @@ final class SlotConnectionStorage {
         // uses groupId.)
         let url = fileURL(for: groupId)
         var loaded: SlotConnectionMap? = nil
+        // D-7 (v2.10.31): load 与 delete 并发时的误报损坏修复。此前只在进入函数时用一次
+        // fileExists 判定，随后 Data(contentsOf:) 失败即视为「真实损坏」并备份/告警。但 delete
+        // 在另一线程/进程 removeItem 后，这里的读取会因「文件正好被删」而失败，被误判为 corrupt，
+        // 产生虚假的 .corrupt 备份与 ERROR 日志。修复：仅当文件「此刻仍存在」时才读取；读/解码
+        // 失败后再次 fileExists 复核——若文件已不存在，说明是 delete 竞态而非损坏，按「空/无连接」
+        // 正常回退，绝不当作损坏处理。
         if FileManager.default.fileExists(atPath: url.path) {
             if let data = try? Data(contentsOf: url),
                let map = try? JSONDecoder().decode(SlotConnectionMap.self, from: data) {
                 loaded = map
-            } else {
+            } else if FileManager.default.fileExists(atPath: url.path) {
                 // P2 (v2.10.13): 文件「存在但读取/解码失败」= 真实损坏（区别于「文件缺失」的
                 // 正常空态）。此前一律 try? 静默回退 .empty，随后一次 save(.empty) 会经 persistMap
                 // 把损坏文件 removeItem 掉，令有效但位翻转的连线永久丢失。这里在返回 .empty 前
                 // 先把损坏文件备份到 .corrupt 兄弟文件，与 index.json 的 poison+backup 对齐，
                 // 保证后续即便被空态覆盖也能从备份恢复。
+                // D-7 (v2.10.31): 到这里说明读/解码失败「且」文件此刻仍存在，才是真正的损坏；
+                // 若文件已被并发 delete 移除，则跳过备份/告警，视为正常空态。
                 backupCorruptConnectionFile(at: url)
             }
         }

@@ -591,6 +591,19 @@ final class SlotStoreObservable: ObservableObject {
             let snapshot = self.readSlotsSnapshot(for: activeId)
             DispatchQueue.main.async { [weak self] in
                 guard let self = self else { return }
+                // B-1 (v2.10.31): the background read above can take up to several seconds (N
+                // per-slot cross-process flocks). If the user switched to another group while it
+                // ran, `currentSpecialSlotId` no longer equals the `activeId` we snapshotted, and
+                // unconditionally assigning `snapshot.slots` would overwrite the now-current group
+                // with STALE data from the old group (title shows B, content is A). Drop the stale
+                // result — loadSpecialSlots() during the switch already scheduled a fresh reload
+                // for the new group. loadSpecialSlots() ran again on the main thread before this
+                // block, so `currentSpecialSlotId` here is the up-to-date selection.
+                guard activeId == self.currentSpecialSlotId else {
+                    NSLog("[ClipSlots] reloadAllAsync: dropping stale snapshot for \(activeId) — active group is now \(self.currentSpecialSlotId)")
+                    completion?()
+                    return
+                }
                 self.slots = snapshot.slots
                 self.labels = snapshot.labels
                 self.loadedSpecialSlotId = activeId

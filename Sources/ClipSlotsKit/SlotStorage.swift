@@ -1,5 +1,23 @@
 import Foundation
 
+/// A-2 / A-5 (v2.10.31): snapshot a directory tree using APFS copy-on-write `clonefile(2)`
+/// when possible (sub-millisecond, constant-time, leaves the source in place), falling back
+/// to a physical `copyItem` on non-APFS / cross-volume filesystems where the clone fails.
+/// Used to take `.trash` snapshots INSIDE the cross-process storage lock without blocking
+/// every other process for the whole duration of a multi-hundred-MB physical copy.
+@discardableResult
+func cloneOrCopyItem(at src: URL, to dst: URL) -> Bool {
+    let rc = src.path.withCString { s in dst.path.withCString { d in clonefile(s, d, 0) } }
+    if rc == 0 { return true }
+    do {
+        try FileManager.default.copyItem(at: src, to: dst)
+        return true
+    } catch {
+        NSLog("[ClipSlots] cloneOrCopyItem FAIL \(src.lastPathComponent): \(error.localizedDescription)")
+        return false
+    }
+}
+
 struct SlotManifest: Codable {
     struct Entry: Codable {
         let description: String
@@ -203,6 +221,25 @@ public final class SlotStorage {
             return cached.isEmpty
         }
 
+        let result = probeSlotEmptyOnDisk(slotDir)
+        // A-4 (v2.10.31): the probe above enumerates attachments.json + item_* dirs with
+        // several non-atomic I/O calls while holding NEITHER the StorageLock NOR queue.sync.
+        // A concurrent `replaceItemAt` (CLI/GUI overwrite swaps the whole slot dir) can be
+        // observed mid-flight, yielding a TORN result (e.g. saw the old empty attachments.json
+        // but not the freshly-written item_*, or vice versa). Basing an auto-store / auto-paste
+        // "find empty slot" decision on a torn read risks overwriting live data. If the slot
+        // dir fingerprint changed during the probe, the read was potentially torn — fall back
+        // to the authoritative `get()`, which reads the full slot under the cross-process lock.
+        if dirFingerprint(slotDir.path) != diskFP {
+            NSLog("[ClipSlots] isSlotEmpty slot=\(slot): dir changed during probe, recomputing via get()")
+            return get(slot).isEmpty
+        }
+        return result
+    }
+
+    /// A-4 (v2.10.31): the lock-free filesystem shape probe, extracted so `isSlotEmpty`
+    /// can re-run it / fall back to a locked `get()` when it detects a torn read.
+    private func probeSlotEmptyOnDisk(_ slotDir: URL) -> Bool {
         let fm = FileManager.default
         var isDir: ObjCBool = false
         guard fm.fileExists(atPath: slotDir.path, isDirectory: &isDir), isDir.boolValue else {
@@ -242,6 +279,15 @@ public final class SlotStorage {
         // timeout degrades to a failed write (returns false) rather than a hang.
         return (try? StorageLock.shared.withLock {
             let ok: Bool = queue.sync {
+                // A-1 (v2.10.31): re-check invalidation INSIDE the lock+queue. The pre-lock
+                // `isInvalidated` guard above is a TOCTOU window: while this call waited for the
+                // cross-process flock, the owning group could have been deleted + invalidated by
+                // another thread/process. Writing now would resurrect the group's slot directory
+                // ("phantom group"). `invalidated` is guarded by `queue`, so reading it here is safe.
+                if invalidated {
+                    NSLog("[ClipSlots] SlotStorage.set slot=\(slot): refused inside lock — invalidated while awaiting lock")
+                    return false
+                }
                 do {
                     try writeSlotContent(content, to: slot)
                     cache[slot] = content
@@ -274,6 +320,8 @@ public final class SlotStorage {
         // v2.9.4 (#4): cross-process lock around the delete write.
         try? StorageLock.shared.withLock {
             queue.sync {
+                // A-1 (v2.10.31): re-check invalidation inside the lock (TOCTOU, see set()).
+                if invalidated { return }
                 cache[slot] = SlotContent()
                 let slotDir = baseURL.appendingPathComponent(String(slot))
                 do {
@@ -288,13 +336,23 @@ public final class SlotStorage {
         }
     }
 
-    public func clearAll() {
+    public func clearAll(backupToTrash: Bool = true) {
         // DS-3 / CR-3 (v2.10.30): refuse on an invalidated instance — clearAll recreates
         // `baseURL`, which for a deleted group would resurrect its directory.
         if isInvalidated { return }
         // v2.9.4 (#4): cross-process lock around the wipe-and-recreate.
         try? StorageLock.shared.withLock {
             queue.sync {
+                // A-1 (v2.10.31): re-check invalidation inside the lock (TOCTOU, see set()).
+                if invalidated { return }
+                // A-3 (v2.10.31): defense-in-depth soft delete. Previously the physical
+                // `removeItem(baseURL)` below wiped the group with NO recycle-bin backup, so any
+                // caller that reached the low-level `clearAll()` directly (bypassing
+                // SpecialSlotStorage.clearAllSlots) lost the data unrecoverably. Snapshot the
+                // group dir into `.trash` here so the LOW-LEVEL API self-defends. The one existing
+                // caller already snapshots at the group layer and passes backupToTrash:false to
+                // avoid a duplicate `.trash` entry.
+                if backupToTrash { backupBaseDirToTrash() }
                 cache.removeAll()
                 do {
                     try FileManager.default.removeItem(at: baseURL)
@@ -306,6 +364,31 @@ public final class SlotStorage {
             }
             scheduleManifestUpdate()
         }
+    }
+
+    /// A-3 (v2.10.31): snapshot this group's slot directory into the sibling `.trash` before a
+    /// destructive wipe, mirroring SpecialSlotStorage's group/overwrite soft-delete semantics.
+    /// Uses `clonefile(2)` (via `cloneOrCopyItem`) so it stays cheap inside the storage lock.
+    /// Only backs up a dir that actually has numeric slot data; skips a bare/empty group dir.
+    /// Called on `queue` inside the StorageLock; failure only logs (never blocks the wipe).
+    private func backupBaseDirToTrash() {
+        let fm = FileManager.default
+        guard fm.fileExists(atPath: baseURL.path) else { return }
+        let hasData = (try? fm.contentsOfDirectory(at: baseURL, includingPropertiesForKeys: nil))?
+            .contains(where: { Int($0.lastPathComponent) != nil }) ?? false
+        guard hasData else { return }
+        let trashDir = baseURL.deletingLastPathComponent().appendingPathComponent(".trash")
+        try? fm.createDirectory(at: trashDir, withIntermediateDirectories: true)
+        let groupId = baseURL.lastPathComponent
+        // Name ends with `_<秒.毫秒>` so SpecialSlotStorage.trashEntryDate() (splits on "_", last
+        // segment parsed as Double) can date it for the unified retention/count pruning.
+        var ts = Date().timeIntervalSince1970
+        func target(_ ts: TimeInterval) -> URL {
+            trashDir.appendingPathComponent("group_cleared_\(groupId)_\(String(format: "%.3f", ts))")
+        }
+        var t = target(ts)
+        while fm.fileExists(atPath: t.path) { ts += 0.001; t = target(ts) }
+        _ = cloneOrCopyItem(at: baseURL, to: t)
     }
 
     /// v2.8.0 (perf H2): regenerate the diagnostic manifest asynchronously on the

@@ -148,14 +148,21 @@ final class AgentSkillInstallManager: ObservableObject {
             var isDir: ObjCBool = false
             return fm.fileExists(atPath: agent.detectPath, isDirectory: &isDir) && isDir.boolValue
         }
+        // B-3 (v2.10.31): computeState 现为 nonisolated，需从主线程快照 bundledSkillDir 作为参数传入
+        // （bundledSkillDir 仍是 @MainActor 计算属性）。这里 refresh 本身在主线程，直接读取即可。
+        let source = bundledSkillDir
         var newStates: [String: InstallState] = [:]
         for agent in detectedAgents {
-            newStates[agent.id] = computeState(for: agent)
+            newStates[agent.id] = computeState(for: agent, source: source)
         }
         states = newStates
     }
 
-    private func computeState(for agent: Agent) -> InstallState {
+    // B-3 (v2.10.31): 标记为 nonisolated，使其可在后台队列（syncInstalledSkillsOnLaunch 的重 I/O 段）
+    // 执行——纯文件系统读，不触碰 @Published / @MainActor 状态。内部改用 FileManager.default 局部变量
+    // （不再引用 @MainActor 隔离的实例存储属性 fm），bundledSkillDir 由调用方在主线程快照后作为 source 传入。
+    nonisolated private func computeState(for agent: Agent, source: String?) -> InstallState {
+        let fm = FileManager.default
         let target = agent.skillTargetPath
         // 是否为软链接（destinationOfSymbolicLink 只读链接自身，即使目标已被删除也会成功返回）
         if let dest = try? fm.destinationOfSymbolicLink(atPath: target) {
@@ -171,7 +178,7 @@ final class AgentSkillInstallManager: ObservableObject {
                 return .needsUpdate
             }
             let resolved = resolveSymlink(dest, base: agent.skillsDir)
-            if let source = bundledSkillDir,
+            if let source,
                standardized(resolved) == standardized(source) {
                 return .installed
             }
@@ -184,7 +191,8 @@ final class AgentSkillInstallManager: ObservableObject {
         return .notInstalled
     }
 
-    private func resolveSymlink(_ dest: String, base: String) -> String {
+    // B-3 (v2.10.31): nonisolated（纯字符串运算，不触碰任何实例状态）以便后台 computeState 调用。
+    nonisolated private func resolveSymlink(_ dest: String, base: String) -> String {
         if (dest as NSString).isAbsolutePath { return dest }
         return (base as NSString).appendingPathComponent(dest)
     }
@@ -207,7 +215,8 @@ final class AgentSkillInstallManager: ObservableObject {
         detectedAgents.reduce(0) { $0 + ((states[$1.id] == .installed) ? 1 : 0) }
     }
 
-    private func standardized(_ path: String) -> String {
+    // B-3 (v2.10.31): nonisolated（纯字符串运算）以便后台 computeState 调用。
+    nonisolated private func standardized(_ path: String) -> String {
         (path as NSString).standardizingPath
     }
 
@@ -591,54 +600,75 @@ final class AgentSkillInstallManager: ObservableObject {
             return
         }
 
+        // B-3 (v2.10.31) 回归修复：本方法在 SwiftUI onAppear（主线程）同步执行，旧实现把 refresh() 的
+        // 全量读盘 + 逐 agent 的 computeState / relink / refreshLegacyCopy（读两份 SKILL.md 做 Data 比对 +
+        // 原子写）全部压在主线程，FUSE / 网络盘 / 机械盘或多 Agent 场景下会造成启动数秒界面假死。
+        // 参照 CommunitySkillManager 的做法：主线程仅做写 @Published 的 refresh()，随后把逐 agent 的重 I/O
+        // 判定整段挪到后台队列执行（依赖的 helper 均已 nonisolated、只用 FileManager.default），完成后若有
+        // 变更再回主线程 refresh() 更新 @Published 状态。
+
+        // 第一步（主线程）：refresh() 写 @Published detectedAgents / states，必须留在主线程。
         refresh()
+        // 快照遍历所需数据到局部值类型，随后交给后台闭包（不在后台访问 @MainActor 的 self.detectedAgents）。
+        let agents = detectedAgents
 
-        var relinked: [String] = []
-        var refreshedCopy: [String] = []
+        // 第二步（后台）：逐 agent 的 computeState 判定 + relink / refreshLegacyCopy 的重 I/O。
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let self else { return }
 
-        for agent in detectedAgents {
-            let target = agent.skillTargetPath
+            var relinked: [String] = []
+            var refreshedCopy: [String] = []
 
-            switch computeState(for: agent) {
-            case .installed:
-                // 已是指向当前 bundle 的软链，内容随 bundle 实时同步，无需处理。
-                continue
+            for agent in agents {
+                let target = agent.skillTargetPath
 
-            case .notInstalled:
-                // 用户从未安装到该 Agent，启动时不主动安装。
-                continue
+                switch self.computeState(for: agent, source: source) {
+                case .installed:
+                    // 已是指向当前 bundle 的软链，内容随 bundle 实时同步，无需处理。
+                    continue
 
-            case .needsUpdate:
-                if isSymlink(target) {
-                    // 失效软链（指向旧 bundle / 别处）→ 安全重建（removeItem 只删软链本身）。
-                    if trySymlinkWithoutPrivilege(source: source, target: target, skillsDir: agent.skillsDir) {
-                        relinked.append(agent.displayName)
-                        NSLog("[ClipSlots][SkillSync] re-linked stale symlink for \(agent.displayName): \(target) -> \(source)")
+                case .notInstalled:
+                    // 用户从未安装到该 Agent，启动时不主动安装。
+                    continue
+
+                case .needsUpdate:
+                    if self.isSymlink(target) {
+                        // 失效软链（指向旧 bundle / 别处）→ 安全重建（removeItem 只删软链本身）。
+                        if self.trySymlinkWithoutPrivilege(source: source, target: target, skillsDir: agent.skillsDir) {
+                            relinked.append(agent.displayName)
+                            NSLog("[ClipSlots][SkillSync] re-linked stale symlink for \(agent.displayName): \(target) -> \(source)")
+                        } else {
+                            NSLog("[ClipSlots][SkillSync] failed to re-link \(agent.displayName) at \(target) (need privilege), skip silently")
+                        }
                     } else {
-                        NSLog("[ClipSlots][SkillSync] failed to re-link \(agent.displayName) at \(target) (need privilege), skip silently")
-                    }
-                } else {
-                    // 真实目录/文件：仅当是本 App 旧版拷贝安装（含 SKILL.md）且内容过期时，就地刷新文件。
-                    if refreshLegacyCopyIfOutdated(source: source, targetDir: target) {
-                        refreshedCopy.append(agent.displayName)
-                        NSLog("[ClipSlots][SkillSync] refreshed outdated SKILL.md copy for \(agent.displayName): \(target)")
+                        // 真实目录/文件：仅当是本 App 旧版拷贝安装（含 SKILL.md）且内容过期时，就地刷新文件。
+                        if self.refreshLegacyCopyIfOutdated(source: source, targetDir: target) {
+                            refreshedCopy.append(agent.displayName)
+                            NSLog("[ClipSlots][SkillSync] refreshed outdated SKILL.md copy for \(agent.displayName): \(target)")
+                        }
                     }
                 }
             }
-        }
 
-        if relinked.isEmpty && refreshedCopy.isEmpty {
-            NSLog("[ClipSlots][SkillSync] all installed skills up-to-date, nothing to sync")
-        } else {
-            NSLog("[ClipSlots][SkillSync] auto-sync done. relinked=\(relinked) refreshedCopy=\(refreshedCopy)")
-            refresh()
+            // 第三步（主线程）：仅当有实际变更时回主线程 refresh()，更新 @Published 状态。
+            if relinked.isEmpty && refreshedCopy.isEmpty {
+                NSLog("[ClipSlots][SkillSync] all installed skills up-to-date, nothing to sync")
+            } else {
+                NSLog("[ClipSlots][SkillSync] auto-sync done. relinked=\(relinked) refreshedCopy=\(refreshedCopy)")
+                DispatchQueue.main.async {
+                    self.refresh()
+                }
+            }
         }
     }
 
     /// 旧版拷贝式安装的兼容处理：`targetDir` 是真实目录，若其中的 `SKILL.md` 与最新 bundle
     /// 内容不一致，则就地覆盖该文件（绝不删除目录本身），保证 Agent 拿到最新决策流。
     /// - Returns: 是否实际执行了覆盖更新。
-    private func refreshLegacyCopyIfOutdated(source: String, targetDir: String) -> Bool {
+    // B-3 (v2.10.31): nonisolated（改用 FileManager.default 局部变量，不触碰 @Published / @MainActor 状态）
+    // 以便后台 syncInstalledSkillsOnLaunch 执行「读两份 SKILL.md 做 Data 比对 + 原子写」这段重 I/O。
+    nonisolated private func refreshLegacyCopyIfOutdated(source: String, targetDir: String) -> Bool {
+        let fm = FileManager.default
         var isDir: ObjCBool = false
         // 必须是真实目录（非软链），且内部含 SKILL.md，才认定为本 App 的拷贝式安装。
         guard fm.fileExists(atPath: targetDir, isDirectory: &isDir), isDir.boolValue else { return false }
@@ -677,7 +707,10 @@ final class AgentSkillInstallManager: ObservableObject {
         return parts.isEmpty ? "没有可安装的 Agent。" : parts.joined(separator: "；")
     }
 
-    private func trySymlinkWithoutPrivilege(source: String, target: String, skillsDir: String) -> Bool {
+    // B-3 (v2.10.31): nonisolated（改用 FileManager.default 局部变量，不再引用 @MainActor 的实例属性 fm；
+    // 依赖的 isSymlink / fileExistsNoFollow 亦为 nonisolated）以便后台 syncInstalledSkillsOnLaunch 调用。
+    nonisolated private func trySymlinkWithoutPrivilege(source: String, target: String, skillsDir: String) -> Bool {
+        let fm = FileManager.default
         do {
             try fm.createDirectory(atPath: skillsDir, withIntermediateDirectories: true)
             // v2.9.26 安全防护：仅移除软链接，绝不删除真实目录/文件（真实目标已在 install() 中拦截）。
@@ -695,17 +728,19 @@ final class AgentSkillInstallManager: ObservableObject {
     }
 
     /// 使用 lstat 语义判断路径是否为软链接（不跟随软链接）。
-    private func isSymlink(_ path: String) -> Bool {
-        guard let type = try? fm.attributesOfItem(atPath: path)[.type] as? FileAttributeType else {
+    // B-3 (v2.10.31): nonisolated（用 FileManager.default，不读 @MainActor 的 self.fm）以便后台调用。
+    nonisolated private func isSymlink(_ path: String) -> Bool {
+        guard let type = try? FileManager.default.attributesOfItem(atPath: path)[.type] as? FileAttributeType else {
             return false
         }
         return type == .typeSymbolicLink
     }
 
     /// 判断路径本身是否存在（不跟随软链接，坏软链接也算存在）。
-    private func fileExistsNoFollow(_ path: String) -> Bool {
+    // B-3 (v2.10.31): nonisolated（用 FileManager.default）以便后台调用。
+    nonisolated private func fileExistsNoFollow(_ path: String) -> Bool {
         if isSymlink(path) { return true }
-        return fm.fileExists(atPath: path)
+        return FileManager.default.fileExists(atPath: path)
     }
 
     // MARK: - 特权执行（macOS 鉴权弹窗）

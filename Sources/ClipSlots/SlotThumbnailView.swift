@@ -177,9 +177,34 @@ struct SlotThumbnailView: View {
             return
         }
 
-        // Try inline image data first
-        if let image = content.inlineImage {
-            state = .loaded(image)
+        // C-1 (v2.10.31): decode inline images off the main thread.
+        // Previously this synchronously read `content.inlineImage`, which runs
+        // `NSImage(data:)` on the full-resolution data on the main thread. For an
+        // uncached large image (e.g. an 8K screenshot) that blocked the UI ~200-500ms
+        // and dropped frames when the card appeared / scrolled. v2.10.30 already added
+        // the async background decoder (InlineImageView / decodedInlineImage) but the
+        // main grid thumbnail never adopted it. We now mirror InlineImageView's pattern:
+        // decode on a detached background Task, then hop back to the main actor and only
+        // assign if this cell still represents the same content version (guard against
+        // stale callbacks from cell reuse via key + loadToken).
+        if content.hasImage {
+            state = .loading
+            let snapshot = content
+            Task {
+                let decoded = await Task.detached(priority: .userInitiated) {
+                    snapshot.decodedInlineImage()
+                }.value
+                await MainActor.run {
+                    // Discard if the cell was reused / content version changed while
+                    // decoding, or a newer reload superseded this one.
+                    guard currentKey == key, loadToken == token else { return }
+                    if let decoded {
+                        state = .loaded(decoded)
+                    } else {
+                        state = .failed
+                    }
+                }
+            }
             return
         }
 

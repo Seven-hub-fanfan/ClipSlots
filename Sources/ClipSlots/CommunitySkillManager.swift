@@ -89,7 +89,8 @@ final class CommunitySkillManager: ObservableObject {
               detectPath: home(".gemini"), skillsDir: home(".gemini/skills")),
     ]
 
-    private func skillTargetPath(agent: Agent, slug: String) -> String {
+    // B-8 (v2.10.31): nonisolated（纯字符串运算）以便后台 refresh 扫描调用。
+    nonisolated private func skillTargetPath(agent: Agent, slug: String) -> String {
         (agent.skillsDir as NSString).appendingPathComponent(slug)
     }
 
@@ -97,27 +98,41 @@ final class CommunitySkillManager: ObservableObject {
 
     /// 重新扫描：读取落盘目录下所有已上传的 Skill + 检测本机 Agent + 计算安装状态。
     func refresh() {
-        detectedAgents = allAgents.filter { agent in
+        // B-8 (v2.10.31): 之前 refresh() 完全跑在主线程（@MainActor）：loadCommunitySkills 会对每个
+        // 社区 Skill 目录 String(contentsOfFile: SKILL.md) 全量读盘，computeState 对每个 (skill×agent)
+        // 组合做 lstat/readlink。落盘在 FUSE / 网络盘 / 机械盘或 Skill 数量多时，会阻塞主线程造成插件
+        // 市场刷新卡顿。改为：主线程只做轻量的 Agent 目录探测拿到 detectedAgents，然后把全部读盘扫描
+        // 挪到后台队列（下列 helper 均已 nonisolated、只用 FileManager.default），算完回主线程一次性赋值
+        // @Published。fm.fileExists 探测很轻，保留在主线程以拿到与旧行为一致的 detectedAgents。
+        let agents = allAgents.filter { agent in
             var isDir: ObjCBool = false
             return fm.fileExists(atPath: agent.detectPath, isDirectory: &isDir) && isDir.boolValue
         }
-
-        skills = loadCommunitySkills()
-
-        var newStates: [String: [String: InstallState]] = [:]
-        for skill in skills {
-            var perAgent: [String: InstallState] = [:]
-            for agent in detectedAgents {
-                perAgent[agent.id] = computeState(skill: skill, agent: agent)
+        let root = communitySkillsRoot
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let self else { return }
+            let skills = self.loadCommunitySkills(root: root)
+            var newStates: [String: [String: InstallState]] = [:]
+            for skill in skills {
+                var perAgent: [String: InstallState] = [:]
+                for agent in agents {
+                    perAgent[agent.id] = self.computeState(skill: skill, agent: agent)
+                }
+                newStates[skill.id] = perAgent
             }
-            newStates[skill.id] = perAgent
+            DispatchQueue.main.async {
+                self.detectedAgents = agents
+                self.skills = skills
+                self.states = newStates
+            }
         }
-        states = newStates
     }
 
     /// 扫描落盘根目录下的所有一级子目录，解析每个目录内的 SKILL.md。
-    private func loadCommunitySkills() -> [CommunitySkill] {
-        let root = communitySkillsRoot
+    // B-8 (v2.10.31): nonisolated（只用 FileManager.default + nonisolated parseFrontmatter，不触碰
+    // @Published 状态）以便在后台队列执行全量读盘扫描。root 由主线程读取后传入。
+    nonisolated private func loadCommunitySkills(root: String) -> [CommunitySkill] {
+        let fm = FileManager.default
         var isDir: ObjCBool = false
         guard fm.fileExists(atPath: root, isDirectory: &isDir), isDir.boolValue else {
             return []
@@ -149,7 +164,9 @@ final class CommunitySkillManager: ObservableObject {
         return result
     }
 
-    private func computeState(skill: CommunitySkill, agent: Agent) -> InstallState {
+    // B-8 (v2.10.31): nonisolated（只用 FileManager.default）以便后台 refresh 扫描调用。
+    nonisolated private func computeState(skill: CommunitySkill, agent: Agent) -> InstallState {
+        let fm = FileManager.default
         let target = skillTargetPath(agent: agent, slug: skill.id)
         if let dest = try? fm.destinationOfSymbolicLink(atPath: target) {
             // 校验软链指向的真实目录是否仍存在（悬空软链视为需更新/待修复）。
@@ -171,12 +188,12 @@ final class CommunitySkillManager: ObservableObject {
         return .notInstalled
     }
 
-    private func resolveSymlink(_ dest: String, base: String) -> String {
+    nonisolated private func resolveSymlink(_ dest: String, base: String) -> String {
         if (dest as NSString).isAbsolutePath { return dest }
         return (base as NSString).appendingPathComponent(dest)
     }
 
-    private func standardized(_ path: String) -> String {
+    nonisolated private func standardized(_ path: String) -> String {
         (path as NSString).standardizingPath
     }
 
@@ -220,6 +237,14 @@ final class CommunitySkillManager: ObservableObject {
 
     /// 根据扩展名分发到 zip / md 导入逻辑。
     func importSkill(at url: URL) {
+        // B-2 (v2.10.31): 入口串行化拦截。importZip 把落盘 I/O 派发到 global 队列，`isBusy` 直到主线程
+        // 收尾才复位。若无此拦截，快速连点 / 并发导入「同名 Skill」会有多个后台线程对同一目标 dest 并发
+        // removeItem(dest)+moveItem——线程 A 可能在线程 B 刚 move 完之后又 remove，最终目录缺失或残缺。
+        // dest 由 Skill 名 slug 唯一确定，故用 @MainActor 的 isBusy 做全局单飞闸门即可覆盖同名冲突。
+        guard !isBusy else {
+            report("正在导入其它 Skill，请稍候…", isError: true)
+            return
+        }
         lastMessage = nil
         let ext = url.pathExtension.lowercased()
         switch ext {
@@ -699,19 +724,13 @@ final class CommunitySkillManager: ObservableObject {
             let errPipe = Pipe()
             proc.standardOutput = outPipe
             proc.standardError = errPipe
-            do {
-                try proc.run()
-                // 授权脚本输出极少，先读 stderr 到 EOF（进程退出即关闭）再读 stdout，无撑满管道缓冲区之虞。
-                let errData = errPipe.fileHandleForReading.readDataToEndOfFile()
-                _ = outPipe.fileHandleForReading.readDataToEndOfFile()
-                proc.waitUntilExit()
-                status = proc.terminationStatus
-                errText = String(data: errData, encoding: .utf8)?
-                    .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-            } catch {
-                status = -1
-                errText = error.localizedDescription
-            }
+            // B-4 (v2.10.31): drain both pipes concurrently before waitUntilExit (see helper in
+            // CLIInstallManager.swift). Old sequential "read stderr → read stdout" ordering
+            // deadlocks if the child ever writes > ~64KB to stdout.
+            let result = runProcessDrainingBothPipes(proc, outPipe: outPipe, errPipe: errPipe)
+            status = result.status
+            errText = String(data: result.err, encoding: .utf8)?
+                .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
 
             DispatchQueue.main.async {
                 guard let self else { return }

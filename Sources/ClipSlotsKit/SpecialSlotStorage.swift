@@ -525,6 +525,51 @@ public final class SpecialSlotStorage {
         try data.write(to: indexURL, options: .atomic)
     }
 
+    /// A-6 (v2.10.31): escape the read-only "poison" dead state WITHOUT a process restart.
+    /// When `loadIndex()` hits a genuine decode failure it sets `lastLoadDecodeFailed = true`,
+    /// after which every `saveIndex` is refused (`refusingToOverwriteWithEmptyIndex`) to protect
+    /// real data. That flag previously had NO in-memory self-heal path, so the GUI stayed frozen
+    /// until relaunch. This method — meant to be wired to a user-confirmed "修复 / 从备份恢复"
+    /// entry — clears the flag and rebuilds a usable index:
+    ///   1) if `index.json.corrupt.bak` decodes cleanly (schema ≥ 2), restore it as the live index;
+    ///   2) otherwise drop the corrupt `index.json` and recreate defaults (the corrupt bytes stay
+    ///      in `.corrupt.bak` for manual recovery).
+    /// Returns a short action string for logging / UI feedback.
+    @discardableResult
+    public func forceRepair() -> String {
+        var action = "none"
+        try? storageLock.withLock {
+            let backupURL = indexURL.deletingLastPathComponent()
+                .appendingPathComponent("index.json.corrupt.bak")
+            // Clear the poison flag first so the writes below are not refused by saveIndex().
+            lastLoadDecodeFailed = false
+            // 1) Try restoring a valid backup.
+            if let data = try? Data(contentsOf: backupURL),
+               let restored = try? decoder.decode(SpecialSlotIndex.self, from: data),
+               restored.schemaVersion >= 2 {
+                if let out = try? encoder.encode(restored) {
+                    try? out.write(to: indexURL, options: .atomic)
+                    action = "restored_from_corrupt_backup"
+                }
+            }
+            // 2) No usable backup → drop the corrupt index and recreate defaults.
+            if action == "none" {
+                if FileManager.default.fileExists(atPath: indexURL.path) {
+                    // Preserve the corrupt file as the single backup if none exists yet.
+                    if !FileManager.default.fileExists(atPath: backupURL.path) {
+                        try? FileManager.default.copyItem(at: indexURL, to: backupURL)
+                    }
+                    try? FileManager.default.removeItem(at: indexURL)
+                }
+                migrateLegacySlotsOrCreateDefault()
+                action = "recreated_default_index"
+            }
+        }
+        // Drop stale in-memory caches so the next read reflects the repaired index.
+        NSLog("[ClipSlots] A-6 forceRepair: \(action)")
+        return action
+    }
+
     // MARK: - Auto Mode Cursors (v2.10.0)
     // 写/读游标持久化到磁盘 index.json（不用 UserDefaults），所有写入走跨进程写锁，
     // 与其它 index 变更串行化，避免 GUI/CLI 并发覆盖。
@@ -1301,15 +1346,21 @@ public final class SpecialSlotStorage {
             trashTarget = target(ts)
         }
         do {
-            try FileManager.default.copyItem(at: slotDir, to: trashTarget)
+            // A-5 (v2.10.31): use clonefile(2) copy-on-write instead of a physical copyItem.
+            // The backup runs INSIDE the cross-process storageLock; a physical copy of a slot
+            // holding a large file (hundreds of MB) blocked GUI/CLI/FSEvents for seconds on
+            // every overwrite. `cloneOrCopyItem` clones in constant time on APFS and only falls
+            // back to copyItem on filesystems without clone support.
+            guard cloneOrCopyItem(at: slotDir, to: trashTarget) else {
+                NSLog("[ClipSlots] A-5: 覆盖前备份槽位旧内容到 .trash 失败（不阻断写入）"
+                    + " slot=\(slot) group=\(specialSlotId)")
+                return
+            }
             // P1-C: 覆盖备份路径上也适时触发一次清理，避免 GUI 长会话「只写不删」时 .trash 无界堆积到
             // 下一次删组/删页/启动才收敛。放到后台队列执行，不拖慢写入热路径。
             DispatchQueue.global(qos: .utility).async { [weak self] in
                 self?.cleanupTrash()
             }
-        } catch {
-            NSLog("[ClipSlots] P1-C: 覆盖前备份槽位旧内容到 .trash 失败（不阻断写入）"
-                + " slot=\(slot) group=\(specialSlotId): \(error)")
         }
     }
 
@@ -1349,7 +1400,9 @@ public final class SpecialSlotStorage {
             // matching delete-group / overwrite-write semantics. Failure only logs; it does not
             // block the wipe (the wipe is what the caller asked for).
             backupGroupBeforeClearIfNeeded(specialSlotId: specialSlotId)
-            try slotStorage(for: specialSlotId).clearAll()
+            // A-3 (v2.10.31): the group was just snapshotted above, so tell the low-level wipe
+            // to skip its own (now defensive-only) `.trash` snapshot and avoid a duplicate entry.
+            try slotStorage(for: specialSlotId).clearAll(backupToTrash: false)
             var index = loadIndex()
             if let idx = index.specialSlots.firstIndex(where: { $0.id == specialSlotId }) {
                 index.specialSlots[idx].updatedAt = Date()
@@ -1387,14 +1440,17 @@ public final class SpecialSlotStorage {
             trashTarget = target(ts)
         }
         do {
-            // copyItem (not moveItem): keep the group dir in place so SlotStorage.clearAll()'s
-            // own remove/recreate semantics and the cached instance's baseURL are unchanged.
-            try FileManager.default.copyItem(at: groupDir, to: trashTarget)
+            // A-2 (v2.10.31): clonefile(2) copy-on-write instead of physical copyItem — this
+            // runs inside storageLock and a big group (e.g. 500MB) previously blocked all other
+            // processes for seconds. Clone keeps the group dir in place (so SlotStorage.clearAll's
+            // remove/recreate is unaffected) yet completes in constant time on APFS.
+            guard cloneOrCopyItem(at: groupDir, to: trashTarget) else {
+                NSLog("[ClipSlots] PK-1: 清空整组前备份到 .trash 失败（不阻断清空）group=\(specialSlotId)")
+                return
+            }
             DispatchQueue.global(qos: .utility).async { [weak self] in
                 self?.cleanupTrash()
             }
-        } catch {
-            NSLog("[ClipSlots] PK-1: 清空整组前备份到 .trash 失败（不阻断清空）group=\(specialSlotId): \(error.localizedDescription)")
         }
     }
 

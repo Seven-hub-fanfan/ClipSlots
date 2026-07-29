@@ -132,7 +132,13 @@ struct SlotCardView: View {
         // v2.9.22: 卡片最小高度 280 → 216，配合空槽/缩略图/按钮区一起收紧，
         // 让 10 个槽位尽量不滚动就能看全；长文本卡片仍可自适应撑开。
         .frame(minHeight: 216, alignment: .top)
-        .id(content.thumbnailKey(specialSlotId: specialSlotId, slot: slot))
+        // C-2 (v2.10.31): removed `.id(content.thumbnailKey(...))` from the card root.
+        // thumbnailKey embeds updatedAt, so any minor content/metadata change (background
+        // sync, label update) mutated the id and destroyed+rebuilt the whole card, wiping
+        // its internal @State (editingLabel/labelText/editingText) — losing in-progress,
+        // unsaved edits. Content-driven refresh now lives only on SlotThumbnailView, which
+        // already applies `.id(currentKey)` internally, so the thumbnail still reloads
+        // correctly while the card's editing state survives.
         .padding(AppTheme.cardPadding)
         .background(
             RoundedRectangle(cornerRadius: AppTheme.cornerRadius, style: .continuous)

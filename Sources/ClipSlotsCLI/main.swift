@@ -16,7 +16,7 @@ import ClipSlotsKit
 // current release. This is the single source of truth surfaced by `version`,
 // `help` and per-command help (all reference CLI_VERSION), so no other literal
 // needs bumping.
-let CLI_VERSION = "2.10.30"
+let CLI_VERSION = "2.10.31"
 let DEFAULT_GROUP = "default"
 let DEFAULT_PAGE = "default_page"
 
@@ -486,11 +486,24 @@ func cmdVersion() -> Never {
     exit(0)
 }
 
+// A-6 (v2.10.31): CLI 自愈入口。当索引 index.json 解码失败进入「写禁态」后，调用 Kit 的
+// SpecialSlotStorage.forceRepair() 清除毒化标志并从备份/默认重建索引，返回执行的动作字符串
+// （如 "restored_from_corrupt_backup" / "recreated_default_index"）。仿照 `version` 的最简
+// 只读模式：直接 emit 稳定 JSON（{"ok":true,"action":"<返回值>"}），不经 success() 注入
+// repaired 状态，便于调用方原样解析。`storage` 即 SpecialSlotStorage.shared。
+func cmdRepairIndex() -> Never {
+    let action = storage.forceRepair()
+    emit(["ok": true, "action": action])
+    exit(0)
+}
+
 // v2.9.5 (Feature #2): single source of truth for command metadata. Both the
 // top-level `help` command and per-subcommand `--help`/`-h` render from this.
 let COMMANDS: [[String: Any]] = [
     ["name": "version", "description": "打印 CLI 版本号。", "flags": [] as [String]],
     ["name": "help", "description": "列出所有命令、说明与参数（无参数时也返回此内容）。", "flags": [] as [String]],
+    // A-6 (v2.10.31): 索引自愈入口。
+    ["name": "repair-index", "description": "修复损坏的索引（index.json）：清除写禁态并从备份/默认恢复，返回执行的动作。", "flags": [] as [String]],
     ["name": "groups", "description": "列出槽位组（SpecialSlot）。可用 --page/--page-name 只列出指定页面下的组，是判断某页面是否有（空）组的标准入口。", "flags": ["--page <id> (可选,只列出该页面下的组)", "--page-name <name> (可选,按页面名精确匹配;找不到会报错,与 --page 互斥)"]],
     ["name": "pages", "description": "列出所有页面（SlotPage）。", "flags": ["--group <id> (可选,当前实现忽略,页面为全局)"]],
     ["name": "list", "description": "列出槽位摘要。指定 --group/--group-name 时列出该组 1..N 号槽位；只给 --page/--page-name 而不给组时，列出该页面下所有组各自的槽位并附 groupCount（页面无组则 groupCount=0，不再回落全局 default 组）。同时给页面和组时，组匹配被约束在该页面内。支持分页：传 --page-size 后按页返回并附带 pagination 元信息。", "flags": ["--group <id|name> (默认 default;可传 id 或组名)", "--group-name <name> (按组名精确匹配,优先于 --group)", "--page <id> (可选,约束 group 匹配到该页面;单独使用时列出该页所有组)", "--page-name <name> (按页面名精确匹配;找不到会报错,与 --page 互斥;单独使用时列出该页所有组)", "--page-size <N> (可选,每页槽位数,>0 时启用分页)", "--page-num <N> (可选,第几页,从 1 开始,默认 1,需配合 --page-size)"]],
@@ -515,6 +528,8 @@ let COMMANDS: [[String: Any]] = [
 let COMMAND_ALLOWED_FLAGS: [String: Set<String>] = [
     "version": [],
     "help": [],
+    // A-6 (v2.10.31): repair-index 是无参只读式自愈命令，不接受任何 flag。
+    "repair-index": [],
     "groups": ["page", "page-name"],
     "pages": ["group", "group-name"],
     "list": ["group", "group-name", "page", "page-name", "page-size", "page-num"],
@@ -1072,7 +1087,22 @@ func cmdWriteBatch(_ args: ParsedArgs) -> Never {
         // preflight_passed:false), matching single-write behaviour instead of silently
         // writing to a phantom/wrong group.
         let group: String
-        if let rawGroup = entry["group"] as? String {
+        // D-5 (v2.10.31): batch item 'group' 字段的多类型解析。此前用 `entry["group"] as? String`
+        // 只接受字符串，若调用方把 group 传成 JSON 数字（或其它非字符串类型）会被静默当作「未提供
+        // group」回落到 commandGroup，从而写到非预期的组。这里与上方 rawSlot 的多类型解析风格保持
+        // 一致：String / 数字均转成字符串；仅当 'group' 键存在但类型无法转成字符串（如 null / 数组 /
+        // 对象）时明确抛错（preflight 失败，返回 ok:false + 可读 error），绝不静默忽略。
+        // 注意区分「未提供 group 键」(走 else 回落 commandGroup) 与「提供了但类型非法」(明确报错)。
+        if let rawGroupValue = entry["group"] {
+            let rawGroup: String
+            if let s = rawGroupValue as? String {
+                rawGroup = s
+            } else if let n = rawGroupValue as? NSNumber {
+                rawGroup = n.stringValue
+            } else {
+                emitPreflightFailure(offending: [idx], code: "INVALID_ARGUMENT_COMBINATION",
+                                     message: "item \(idx): invalid 'group' (must be a string or number)")
+            }
             do {
                 group = try resolveGroupLiteralStrict(rawGroup, inPage: requestedPage)
             } catch let GroupResolveFailure.ambiguous(name, candidates) {
@@ -1688,6 +1718,9 @@ case "version", "--version", "-v":
     cmdVersion()
 case "help", "--help", "-h":
     cmdHelp()
+// A-6 (v2.10.31): 索引自愈命令，仿 version 的最简只读接入。
+case "repair-index":
+    cmdRepairIndex()
 case "groups":
     cmdGroups(parsed)
 case "pages":
