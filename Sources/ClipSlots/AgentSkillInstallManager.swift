@@ -767,19 +767,14 @@ final class AgentSkillInstallManager: ObservableObject {
             let errPipe = Pipe()
             proc.standardOutput = outPipe
             proc.standardError = errPipe
-            do {
-                try proc.run()
-                // 授权脚本输出极少，先读 stderr 到 EOF（进程退出即关闭）再读 stdout，无撑满管道缓冲区之虞。
-                let errData = errPipe.fileHandleForReading.readDataToEndOfFile()
-                _ = outPipe.fileHandleForReading.readDataToEndOfFile()
-                proc.waitUntilExit()
-                status = proc.terminationStatus
-                errText = String(data: errData, encoding: .utf8)?
-                    .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-            } catch {
-                status = -1
-                errText = error.localizedDescription
-            }
+            // P1-7 (v2.10.35): 根因——旧代码「先读 stderr 到 EOF 再读 stdout」是顺序读，子进程一旦向
+            // stdout 写满 ~64KB 管道缓冲即阻塞，而父进程正阻塞在读 stderr → 经典管道死锁，busyAgentID
+            // 永不复位、Skill 卡片按钮永久禁用。修法：复用已有的 runProcessDrainingBothPipes（stdout/
+            // stderr 各起后台线程并发抽干到 EOF，再 waitUntilExit），与其它三处特权执行对齐。
+            let result = runProcessDrainingBothPipes(proc, outPipe: outPipe, errPipe: errPipe)
+            status = result.status
+            errText = String(data: result.err, encoding: .utf8)?
+                .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
 
             DispatchQueue.main.async {
                 guard let self else { return }

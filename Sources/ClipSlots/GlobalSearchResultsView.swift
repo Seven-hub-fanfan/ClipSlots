@@ -367,6 +367,14 @@ private struct SearchResultPreviewImage: View {
     // ATT-2 (v2.10.32): inline (pasteboard) image decoded off the main thread.
     @State private var inlineImage: NSImage?
 
+    // P1-5 (v2.10.35): 内容标识键。用 contentId::updatedAt + 文件路径唯一标识一条结果的图片。
+    // 当右侧预览从图片结果 A 切到图片结果 B 时，二者命中同一 `if hasImagePreview` 分支、SwiftUI 复用同一
+    // 视图实例仅更新 content 常量、视图身份不变 → 旧的 `.onAppear` 只触发一次、@State 保留 A 的旧图，导致
+    // B 的预览显示 A 的图。改用 `.task(id:)` 绑定该键：键变即重跑加载，先清空旧图再按新 content 解码。
+    private var previewKey: String {
+        "\(content.contentId)::\(content.updatedAt)::\(content.primaryFileURL?.path ?? "")"
+    }
+
     var body: some View {
         ZStack {
             if let image = inlineImage ?? fileImage {
@@ -379,26 +387,43 @@ private struct SearchResultPreviewImage: View {
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
-        .onAppear(perform: loadImageIfNeeded)
+        // P1-5 (v2.10.35): 随内容标识刷新（替换只触发一次的 .onAppear）。切换结果时先清空上一张的解码结果，
+        // 再按当前 content 重新加载，彻底消除 A→B 预览残影。
+        .task(id: previewKey) {
+            inlineImage = nil
+            fileImage = nil
+            loadImageIfNeeded()
+        }
     }
 
     private func loadImageIfNeeded() {
         // ATT-2 (v2.10.32): previously the body read `content.inlineImage` directly,
         // which fully decodes a pasted image on the main thread when a result is
         // selected. Decode it (and on-disk image files) off the main thread instead.
+        // P1-5 (v2.10.35): 捕获发起时的内容键，异步完成回主线程时若已切到别的结果则丢弃，防串图。
+        let keyAtDispatch = previewKey
         if content.hasImage, inlineImage == nil {
             let snapshot = content
             DispatchQueue.global(qos: .userInitiated).async {
                 let decoded = snapshot.decodedInlineImage()
-                DispatchQueue.main.async { self.inlineImage = decoded }
+                DispatchQueue.main.async {
+                    guard self.previewKey == keyAtDispatch else { return }
+                    self.inlineImage = decoded
+                }
             }
             return
         }
         guard fileImage == nil,
               let url = content.primaryFileURL, content.isImageFile else { return }
         DispatchQueue.global(qos: .userInitiated).async {
-            let image = NSImage(contentsOf: url)
-            DispatchQueue.main.async { self.fileImage = image }
+            // P1-6 (v2.10.35): 此前用 NSImage(contentsOf:) 把磁盘图片文件全尺寸解码进内存，一张几十 MB 的
+            // 高分辨率图会在预览时造成内存尖峰。改走 ImageIO 下采样（长边 ≤ 2048px，增量解码，全尺寸位图
+            // 永不落内存）；极少数 ImageIO 无法解码的格式再回退到 NSImage 兜底。
+            let image = ClipSlotsImageIO.downsampledImage(url: url, maxPixel: 2048) ?? NSImage(contentsOf: url)
+            DispatchQueue.main.async {
+                guard self.previewKey == keyAtDispatch else { return }
+                self.fileImage = image
+            }
         }
     }
 }

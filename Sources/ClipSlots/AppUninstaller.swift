@@ -75,16 +75,12 @@ final class AppUninstaller: ObservableObject {
             let errPipe = Pipe()
             proc.standardOutput = outPipe
             proc.standardError = errPipe
-            do {
-                try proc.run()
-                // 授权脚本无输出，先读 stderr 到 EOF 再读 stdout，避免管道缓冲区风险。
-                _ = errPipe.fileHandleForReading.readDataToEndOfFile()
-                _ = outPipe.fileHandleForReading.readDataToEndOfFile()
-                proc.waitUntilExit()
-                status = proc.terminationStatus
-            } catch {
-                status = -1
-            }
+            // P1-7 (v2.10.35): 根因——旧代码「先读 stderr 到 EOF 再读 stdout」是顺序读，子进程一旦向
+            // stdout 写满 ~64KB 管道缓冲即阻塞，而父进程正阻塞在读 stderr → 经典管道死锁。修法：复用
+            // 已有的 runProcessDrainingBothPipes（stdout/stderr 并发抽干到 EOF 再 waitUntilExit），与
+            // 其它特权执行路径对齐，彻底消除死锁。
+            let result = runProcessDrainingBothPipes(proc, outPipe: outPipe, errPipe: errPipe)
+            status = result.status
             DispatchQueue.main.async {
                 guard let self else { return }
                 // P2-7: 鉴权失败/取消时复位 isBusy 让用户可重试，不继续 trash App。

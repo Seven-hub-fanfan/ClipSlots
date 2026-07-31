@@ -205,7 +205,10 @@ private struct RadialImageFilePreview: View {
             // the main thread while a full-resolution NSImage decodes.
             guard image == nil else { return }
             DispatchQueue.global(qos: .userInitiated).async {
-                let decoded = NSImage(contentsOf: url)
+                // P1-6 (v2.10.35): 磁盘图片文件此前用 NSImage(contentsOf:) 全尺寸解码（8K 图约 135MB
+                // 瞬时占用），而径向预览窗仅 360×480。改走已有的 ClipSlotsImageIO 下采样帮助函数，
+                // 只解码到 maxPixel，失败再回退全尺寸；仅改磁盘"图片文件"解码路径。
+                let decoded = ClipSlotsImageIO.downsampledImage(url: url, maxPixel: 2048) ?? NSImage(contentsOf: url)
                 DispatchQueue.main.async { image = decoded }
             }
         }
@@ -380,7 +383,9 @@ private struct RadialImageOnlyPreview: View {
         guard content.isImageFile, let url = content.primaryFileURL else { return }
         // v2.8.0 (perf M4): decode off the main thread.
         DispatchQueue.global(qos: .userInitiated).async {
-            let decoded = NSImage(contentsOf: url)
+            // P1-6 (v2.10.35): 同上，磁盘图片文件走 ClipSlotsImageIO 下采样解码，避免为小尺寸展示
+            // 全分辨率解码巨图；失败回退 NSImage(contentsOf:)。仅改磁盘"图片文件"路径。
+            let decoded = ClipSlotsImageIO.downsampledImage(url: url, maxPixel: 2048) ?? NSImage(contentsOf: url)
             DispatchQueue.main.async { if decoded != nil { image = decoded } }
         }
     }

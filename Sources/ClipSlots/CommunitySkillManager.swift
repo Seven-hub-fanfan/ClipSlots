@@ -385,28 +385,72 @@ final class CommunitySkillManager: ObservableObject {
 
     private func importMarkdown(at url: URL) {
         isBusy = true
-        defer { isBusy = false }
+        // 落盘根目录在主线程读取（@MainActor 计算属性），随后传入后台。
+        let root = communitySkillsRoot
+        // P1-9 (v2.10.35): 根因——importMarkdown 为 @MainActor，String(contentsOfFile:) 读与
+        // content.write(atomically:) 写均在主线程同步执行；用户可经 NSOpenPanel/拖拽选中任意大小
+        // （甚至数百 MB 或位于慢速 FUSE/网络盘）的 md，同步读+原子写会冻结主线程。修法：比照
+        // importZip 把「读文件+校验 frontmatter+落盘」整段挪到后台队列（performMarkdownImport 为
+        // nonisolated，仅用 FileManager.default 与 nonisolated helper），完成后回主线程复位 isBusy +
+        // 反馈/收尾。
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let self else { return }
+            let outcome = self.performMarkdownImport(at: url, root: root)
+            DispatchQueue.main.async {
+                self.isBusy = false
+                switch outcome {
+                case .failure(let message):
+                    self.report(message, isError: true)
+                case .success(let name, let slug):
+                    self.finishImport(name: name, slug: slug)
+                }
+            }
+        }
+    }
+
+    /// P1-9 (v2.10.35): 在后台线程完成单个 SKILL.md 导入的全部文件 I/O：读文件 → 解析并校验
+    /// frontmatter → 准备落盘目录（覆盖同名 Skill）→ 原子写入 SKILL.md。全程仅用 FileManager.default
+    /// 与 nonisolated helper，不触碰 @MainActor 的 @Published 状态或 report（错误以返回值携带文案，由
+    /// 主线程统一反馈），因此可安全在 DispatchQueue.global 上运行而不阻塞主线程。
+    nonisolated private func performMarkdownImport(at url: URL, root: String) -> ZipImportOutcome {
+        let fm = FileManager.default
 
         guard let content = try? String(contentsOfFile: url.path, encoding: .utf8) else {
-            report("无法读取所选 Markdown 文件。", isError: true)
-            return
+            return .failure("无法读取所选 Markdown 文件。")
         }
+        // 后台执行，故内联 frontmatter 校验并以返回值携带错误文案，不调用 @MainActor 的 report。
         let front = parseFrontmatter(content)
-        guard let validation = validateFrontmatter(front) else { return }
+        let name = front["name"]?.trimmingCharacters(in: .whitespaces) ?? ""
+        let desc = front["description"]?.trimmingCharacters(in: .whitespaces) ?? ""
+        var missing: [String] = []
+        if name.isEmpty { missing.append("name") }
+        if desc.isEmpty { missing.append("description") }
+        guard missing.isEmpty else {
+            return .failure("SKILL.md 的 frontmatter 缺少必填字段：\(missing.joined(separator: "、"))。请补全后重试。")
+        }
+        let slugValue = slug(from: name)
 
-        let slug = validation.slug
-        guard let dest = prepareStorageDir(slug: slug) else { return }
+        // 准备落盘目录：若已存在同名 slug 目录则先移除（覆盖上传），再新建空目录。
+        let dest = (root as NSString).appendingPathComponent(slugValue)
+        do {
+            try fm.createDirectory(atPath: root, withIntermediateDirectories: true)
+            if fileExistsNoFollow(dest) {
+                try fm.removeItem(atPath: dest)   // 覆盖同名 Skill
+            }
+            try fm.createDirectory(atPath: dest, withIntermediateDirectories: true)
+        } catch {
+            return .failure("准备落盘目录失败：\(error.localizedDescription)")
+        }
 
         // 单文件统一落盘为 SKILL.md，保证各 Agent 能识别。
         let destFile = (dest as NSString).appendingPathComponent("SKILL.md")
         do {
             try content.write(toFile: destFile, atomically: true, encoding: .utf8)
         } catch {
-            report("写入 SKILL.md 失败：\(error.localizedDescription)", isError: true)
-            return
+            return .failure("写入 SKILL.md 失败：\(error.localizedDescription)")
         }
 
-        finishImport(name: validation.name, slug: slug)
+        return .success(name: name, slug: slugValue)
     }
 
     /// 导入成功后的收尾：刷新列表 + 自动安装到已检测 Agent + 反馈。

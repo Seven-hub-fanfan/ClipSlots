@@ -103,6 +103,10 @@ struct PackImporter {
         // 完全不依赖空闲磁盘空间，磁盘满也能可靠还原。导入整体成功后再删除这些备份目录。
         var overwrittenBackups: [GroupDirBackup] = []
 
+        // P1-2 (v2.10.35): 登记本次导入流式落盘到 imported_attachments/ 的大附件路径，供 catch 回滚清理，
+        // 避免导入失败后这些独立于组目录的大文件成为无主孤儿永久残留。
+        var importedAttachmentPaths: [URL] = []
+
         do {
         for manifestPage in manifest.pages {
             // PK-4 (v2.10.15): manifest 的 page.id 是不可信输入，校验拼出的路径 standardize 后
@@ -186,12 +190,17 @@ struct PackImporter {
                     createdGroupIds.append(newId) // PK-3 (v2.10.15): 追踪新建组以便回滚
                 }
 
-                let slotCount = writeSlots(from: slotsRoot, declaredSlots: packGroup.slots, into: targetGroupId)
+                let slotCount = try writeSlots(from: slotsRoot, declaredSlots: packGroup.slots, into: targetGroupId, importedAttachmentPaths: &importedAttachmentPaths)
                 result.importedGroups += 1
                 result.importedSlots += slotCount
             }
         }
         } catch {
+            // P1-2 (v2.10.35): 先清理本次导入已流式落盘的大附件（imported_attachments/ 下），它们独立于组
+            // 目录，rename/删组回滚都不会触及，不清理即成无主孤儿永久残留。放在回滚最前面，确保无论后续
+            // 组/页回滚成败都先释放这些大文件占用的磁盘空间。
+            for url in importedAttachmentPaths { try? fm.removeItem(at: url) }
+
             // PK-3 (v2.10.15): 回滚本次导入新建的内容（软删除到 .trash）——先删组再删页
             // （删页会连带清理其下所有组），随后原样抛出，保证「导入失败」即无残留脏数据。
             for gid in createdGroupIds { try? storage.deleteSpecialSlot(id: gid) }
@@ -273,7 +282,7 @@ struct PackImporter {
 
     // MARK: - 写入单组的槽位
 
-    private func writeSlots(from slotsRoot: URL, declaredSlots: [Int], into groupId: String) -> Int {
+    private func writeSlots(from slotsRoot: URL, declaredSlots: [Int], into groupId: String, importedAttachmentPaths: inout [URL]) throws -> Int {
         let fm = FileManager.default
         // 优先用 group.json 声明的槽位序号；缺失时回退到扫描目录。
         var slotNumbers = declaredSlots
@@ -328,6 +337,11 @@ struct PackImporter {
                         if size > Self.inlineAttachmentThreshold {
                             if let dest = copyLargeAttachmentToStore(from: safeURL, attachmentId: attId) {
                                 persistentPath = dest.path
+                                // P1-2 (v2.10.35): 登记本次流式落盘的大附件路径。这些文件写在独立于组目录的
+                                // imported_attachments/ 下，若随后某页/组创建失败触发 catch 回滚，原本只删组目录
+                                // （rename 回滚）不会触及它们，遂成无主孤儿（可达数百 MB～GB、可反复失败累积、
+                                // 可能含分享包中的敏感文件）。这里记录路径清单，catch 回滚时一并清理。
+                                importedAttachmentPaths.append(dest)
                             } else {
                                 // 拷贝失败：记录可读报错，保留附件元信息（无字节），绝不静默把整块读进内存。
                                 NSLog("[ClipSlots] PackImporter D-1 大附件流式落盘失败，已跳过其字节："
@@ -365,7 +379,16 @@ struct PackImporter {
             content.updatedAt = Date().timeIntervalSince1970
             SlotContent.invalidateInlineCaches(contentId: content.contentId, updatedAt: content.updatedAt)
 
-            _ = storage.set(slot, content: content, in: groupId)
+            // P0-1 (v2.10.35): 此前 `_ = storage.set(...)` 直接丢弃返回值、`written += 1` 无条件自增。
+            // 但 storage.set 的失败是「返回 false 而不抛异常」的软失败（锁超时 / invalidated / writeSlotContent
+            // 抛错如磁盘满 / STG-2 幽灵组守卫），一旦发生：新内容根本没落盘，writeSlots 仍返回正数、do 块正常
+            // 结束、不进 catch，从而完全绕过覆盖模式「先落新再删旧」的 rename 回滚，且成功尾段还会把承载原始
+            // 数据的备份目录删除 → 被覆盖组数据永久丢失，UI 却提示「导入完成」。这里改为检查返回值：任一槽位
+            // set 失败即抛 writeFailed，交由 importPack 的 catch 走 rename 回滚把原数据完整还原；计数也只在
+            // 真正写入成功后自增，杜绝虚高统计。
+            guard storage.set(slot, content: content, in: groupId) else {
+                throw PackImportError.writeFailed("写入槽位 \(slot) 失败（组「\(groupId)」，可能磁盘已满或锁超时）")
+            }
             // PK-5 (v2.10.15): 经核对 SlotStorage.set / writeSlotContent 并不落盘 content.label
             // （仅通过 getLabel 保留槽位目录里已有的旧 label.txt）。导入写入的是全新槽位目录，
             // 旧 label 为空，故 set 不会持久化包内标签——setLabel 是必要的第二次写入，不能删除。

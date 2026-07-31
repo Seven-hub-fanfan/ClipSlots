@@ -373,6 +373,14 @@ final class SlotStoreObservable: ObservableObject {
     // 统一改到该后台串行队列执行；队列的串行性同时充当 pendingSelfWriteFingerprints 的并发保护。
     private let fingerprintQueue = DispatchQueue(label: "com.clipslots.fingerprint", qos: .utility)
 
+    // P1-1 (v2.10.35): 槽位写盘统一串行队列。MT-1/APP-3（v2.10.30/32）把原先「主线程同步、天然有序」的
+    // 写盘挪到了 DispatchQueue.global（并发队列）。并发队列上多个 async 写块在不同线程竞争同一把跨进程
+    // flock，而 flock 的获取顺序并非 FIFO，SpecialSlotStorage.set 也不按 updatedAt 拒绝旧写——于是「较早
+    // 提交但较晚抢到锁」的旧快照会覆盖较新快照，磁盘与内存缓存双双回退成陈旧值（数据永久丢失）。改为把
+    // 所有 App 自身的槽位写盘（persist 快照 / 自动存储 / 文件夹导入 / 单槽保存 / 批量保存）都排入这一条
+    // 串行队列：入队顺序即主线程发起编辑的顺序，串行执行保证 last-write-wins 与编辑顺序一致，彻底消除错序。
+    private let slotWriteQueue = DispatchQueue(label: "com.clipslots.slotwrite", qos: .userInitiated)
+
     init() {
         NSLog("[ClipSlots] SlotStoreObservable init instanceID=\(instanceID)")
         loadSpecialSlots()
@@ -880,7 +888,7 @@ final class SlotStoreObservable: ObservableObject {
         suppressWatcher() // v2.9.4 (#2): self-write
         do {
             try specialStorage.switchToPage(id: id)
-            reloadAll()
+            reloadAllAsync() // P1-3 (v2.10.35): 切页读盘异步化，避免主线程逐槽 flock 卡顿
             if let page = pages.first(where: { $0.id == id }) {
                 showToast("已切换至「\(page.name)」")
             }
@@ -894,7 +902,7 @@ final class SlotStoreObservable: ObservableObject {
         suppressWatcher() // v2.9.4 (#2): self-write
         do {
             try specialStorage.switchToAdjacentSpecialSlot(direction: .previous)
-            reloadAll()
+            reloadAllAsync() // P1-3 (v2.10.35): Cmd+Left 相邻切组读盘异步化，避免主线程逐槽 flock 卡顿
             refreshTrigger = UUID()
             if let name = currentSpecialSlot?.name {
                 showToast("已切换至「\(name)」")
@@ -908,7 +916,7 @@ final class SlotStoreObservable: ObservableObject {
         suppressWatcher() // v2.9.4 (#2): self-write
         do {
             try specialStorage.switchToAdjacentSpecialSlot(direction: .next)
-            reloadAll()
+            reloadAllAsync() // P1-3 (v2.10.35): Cmd+Right 相邻切组读盘异步化，避免主线程逐槽 flock 卡顿
             refreshTrigger = UUID()
             if let name = currentSpecialSlot?.name {
                 showToast("已切换至「\(name)」")
@@ -1221,7 +1229,7 @@ final class SlotStoreObservable: ObservableObject {
         // 落点在派发前先固定为不可变快照，后台闭包不读取可变 @Published 状态。
         let capturedContent = content
         let capturedTarget = target
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+        slotWriteQueue.async { [weak self] in  // P1-1 (v2.10.35): 串行写队列，防并发错序覆盖
             guard let self = self else { return }
             // P2-3 (v2.10.5): 检查 set 返回值（@discardableResult -> Bool）。写入失败时既不推进写游标、
             // 也不弹「已自动存储」成功提示，避免「假成功 + 游标跳过一个未写入的槽位」。
@@ -1246,7 +1254,7 @@ final class SlotStoreObservable: ObservableObject {
                 if capturedTarget.groupId != self.currentSpecialSlotId {
                     self.switchSpecialSlot(id: capturedTarget.groupId)
                 } else {
-                    self.reloadAll()
+                    self.reloadAllAsync() // P1-3 (v2.10.35): 自动存储回调刷新走异步读盘，避免主线程逐槽 flock 卡顿
                 }
                 self.recomputeAutoPreviews()
 
@@ -1620,7 +1628,7 @@ final class SlotStoreObservable: ObservableObject {
         // 更新），此处仅做持久化；写入成功与否不驱动任何后续 UI（与原同步实现一致，均忽略返回值）。
         let slotsSnapshot = slots
         let labelsSnapshot = labels
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+        slotWriteQueue.async { [weak self] in  // P1-1 (v2.10.35): 串行写队列，防并发错序覆盖
             guard let self = self else { return }
             for (slot, content) in slotsSnapshot {
                 self.specialStorage.set(slot, content: content, in: activeId)
@@ -2001,13 +2009,25 @@ final class SlotStoreObservable: ObservableObject {
     func setAttachments(_ attachments: [SlotContent.SlotAttachment], for slot: Int) {
         let activeId = currentSpecialSlotId
         suppressWatcher() // v2.9.4 (#2): self-write
-        var content = specialStorage.get(slot, in: activeId)
-        content.attachments = attachments
-        _ = specialStorage.set(slot, content: content, in: activeId)
-        if loadedSpecialSlotId == activeId {
-            slots[slot] = content
+        // P1-4 (v2.10.35): 附件编辑此前在主线程同步跑 get + set（两次跨进程 flock，锁竞争时各最长阻塞 ~5s），
+        // 在 CLI 批量写盘 / 另一实例持锁时会直接 Beachball。改为把 get + set 挪到统一的串行写队列（与 P1-1 的
+        // 单槽 / 批量写盘共用一条队列，天然保序、last-write-wins），写完再回主线程更新 @Published 视图。
+        let capturedAttachments = attachments
+        slotWriteQueue.async { [weak self] in
+            guard let self = self else { return }
+            var content = self.specialStorage.get(slot, in: activeId)
+            content.attachments = capturedAttachments
+            _ = self.specialStorage.set(slot, content: content, in: activeId)
+            let committed = content
+            DispatchQueue.main.async { [weak self] in
+                guard let self = self else { return }
+                // 回主线程时可能已切组：仅当仍停留在原组才刷新其内存视图，避免把旧组内容灌进新当前组。
+                if self.loadedSpecialSlotId == activeId {
+                    self.slots[slot] = committed
+                    self.refreshTrigger = UUID()
+                }
+            }
         }
-        refreshTrigger = UUID()
     }
 
     private func isSelfApp(_ app: NSRunningApplication?) -> Bool {
@@ -3830,15 +3850,34 @@ final class SlotStoreObservable: ObservableObject {
             // mis-detected as an (empty) bundle.
             if let bundle = try? SlotConnectionTemplateService.decodeBundle(data), !bundle.entries.isEmpty {
                 // v2.7.62: 导入 Bundle 模板时创建多个新槽位组
+                // P1-8 (v2.10.35): 根因——旧实现在同一个 do{} 循环里「边校验边建组落盘」，某个靠后的
+                // entry 校验失败（循环/越界槽/colorId 越界）直接跳到 catch，但此前迭代已 createSpecialSlot
+                // + save 落盘的组不做任何撤销 →「导入失败」提示下页面却残留若干用户并不想要的幽灵组。
+                // 修法：改为两阶段——先对全部有效 entry 做 validateConnectionMap 预检（此时尚未落盘任何
+                // 组），全部通过后再进入建组+落盘循环；且建组阶段若中途失败（如达每页组上限），回滚
+                // （软删除）本次已创建的组，保证导入失败绝不残留半成品。
+                // 阶段一：全量预检（过滤空连接 entry，与旧逻辑一致地跳过它们），任一非法立即抛错。
+                let validEntries = bundle.entries.filter { !$0.map.edges.isEmpty }
+                for entry in validEntries {
+                    try validateConnectionMap(entry.map)
+                }
+
+                // 阶段二：全部校验通过后才建组 + 落盘；中途任一步失败即回滚已创建的组再抛错。
                 var importedCount = 0
                 var firstGroupId: String?
-                for entry in bundle.entries {
-                    guard !entry.map.edges.isEmpty else { continue }
-                    try validateConnectionMap(entry.map)
-                    let newGroup = try specialStorage.createSpecialSlot(name: entry.groupName, pageId: currentPageId)
-                    SlotConnectionStorage.shared.save(entry.map, pageId: currentPageId, groupId: newGroup.id)
-                    if firstGroupId == nil { firstGroupId = newGroup.id }
-                    importedCount += 1
+                var createdGroupIds: [String] = []
+                do {
+                    for entry in validEntries {
+                        let newGroup = try specialStorage.createSpecialSlot(name: entry.groupName, pageId: currentPageId)
+                        createdGroupIds.append(newGroup.id)
+                        SlotConnectionStorage.shared.save(entry.map, pageId: currentPageId, groupId: newGroup.id)
+                        if firstGroupId == nil { firstGroupId = newGroup.id }
+                        importedCount += 1
+                    }
+                } catch {
+                    // P1-8 (v2.10.35): 回滚本次已创建的组，避免导入失败后残留幽灵组。
+                    for gid in createdGroupIds { try? specialStorage.deleteSpecialSlot(id: gid) }
+                    throw error
                 }
 
                 guard importedCount > 0, let firstGroupId else {
@@ -4677,7 +4716,7 @@ final class SlotStoreObservable: ObservableObject {
             // synchronously on the main thread — a folder of hundreds of files froze the GUI. Move
             // the whole burst to a background serial queue and commit the reload/toast back on main.
             let willImportFiles = preview.willImportFiles
-            DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            slotWriteQueue.async { [weak self] in  // P1-1 (v2.10.35): 串行写队列，防并发错序覆盖
                 guard let self = self else { return }
                 do {
                     try self.specialStorage.clearAllSlots(in: activeId)
@@ -4815,7 +4854,7 @@ final class SlotStoreObservable: ObservableObject {
         // 方法的同步返回，故异步化安全。
         let contentToWrite = savedContent
         let existingSnapshot = existingBeforeSave
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+        slotWriteQueue.async { [weak self] in  // P1-1 (v2.10.35): 串行写队列，防并发错序覆盖
             guard let self = self else { return }
             let success = self.specialStorage.set(targetSlot, content: contentToWrite, in: activeId)
             DispatchQueue.main.async { [weak self] in
@@ -4991,7 +5030,7 @@ final class SlotStoreObservable: ObservableObject {
         // only after that completes.
         let cfgSlots = config.slots
         let maxSpecial = specialSlotSettings.maxSpecialSlots
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+        slotWriteQueue.async { [weak self] in  // P1-1 (v2.10.35): 串行写队列，防并发错序覆盖
             guard let self = self else { return }
             var savedCount = 0
             var failedCount = 0
@@ -5263,30 +5302,42 @@ final class SlotStoreObservable: ObservableObject {
             // v2.6.4: Show import mode picker (first 10 / all)
             presentImportModePickerForFolder([folderURL], startSlot: targetSlot)
         case .alertSecondButtonReturn:
-            var content = folderImportService.makeSlotContent(for: folderURL)
-            content.contentId = UUID().uuidString
-            content.updatedAt = Date().timeIntervalSince1970
             let activeId = currentSpecialSlotId
             ThumbnailProvider.shared.invalidateSlot(specialSlotId: activeId, slot: targetSlot)
             suppressWatcher() // v2.9.4 (#2): self-write (bump right before the write, after the modal)
-            let success = specialStorage.set(targetSlot, content: content, in: activeId)
-            guard success else {
-                NSLog("[ClipSlots] save folder as normal FAIL specialSlot=\(activeId) slot=\(targetSlot)")
-                return
+            // P1-4 (v2.10.35): makeSlotContent（可能读入大文件字节）+ specialStorage.set（跨进程 flock，
+            // 锁竞争时最长阻塞 ~5s）此前同步跑在主线程，把文件夹当普通文件保存时会卡住 UI。改为把内容构造与
+            // 写盘挪到统一串行写队列（与其他槽位写盘保序），写完再回主线程更新 @Published 视图与提示。
+            slotWriteQueue.async { [weak self] in
+                guard let self = self else { return }
+                var content = self.folderImportService.makeSlotContent(for: folderURL)
+                content.contentId = UUID().uuidString
+                content.updatedAt = Date().timeIntervalSince1970
+                let success = self.specialStorage.set(targetSlot, content: content, in: activeId)
+                let committed = content
+                DispatchQueue.main.async { [weak self] in
+                    guard let self = self else { return }
+                    guard success else {
+                        NSLog("[ClipSlots] save folder as normal FAIL specialSlot=\(activeId) slot=\(targetSlot)")
+                        return
+                    }
+                    // 回主线程时可能已切组：仅当仍停留在原组才刷新内存视图，避免污染错组。
+                    guard self.currentSpecialSlotId == activeId else { return }
+                    var newSlots = self.slots
+                    newSlots[targetSlot] = committed
+                    self.slots = newSlots
+                    self.slotRenderTokens["\(activeId)::\(targetSlot)"] = UUID()
+                    self.loadedSpecialSlotId = activeId
+                    self.refreshTrigger = UUID()
+                    let summary = committed.noticeSummary
+                    self.showFloatingNotice(FloatingNotice(
+                        title: "已保存到槽位 \(targetSlot)",
+                        subtitle: "\(summary.typeTitle) · \(summary.detail)",
+                        iconName: summary.iconName,
+                        kind: .success
+                    ))
+                }
             }
-            var newSlots = slots
-            newSlots[targetSlot] = content
-            slots = newSlots
-            slotRenderTokens["\(activeId)::\(targetSlot)"] = UUID()
-            loadedSpecialSlotId = activeId
-            refreshTrigger = UUID()
-            let summary = content.noticeSummary
-            showFloatingNotice(FloatingNotice(
-                title: "已保存到槽位 \(targetSlot)",
-                subtitle: "\(summary.typeTitle) · \(summary.detail)",
-                iconName: summary.iconName,
-                kind: .success
-            ))
         default:
             break
         }
