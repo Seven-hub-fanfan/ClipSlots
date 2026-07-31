@@ -61,15 +61,21 @@ public struct SlotContent: Codable {
         public var path: String?
         public var url: String?
         public var data: Data?
+        /// v2.10.37: 本地文件引用的「原始绝对路径」。仅对 image/file 类本地文件引用有意义：
+        /// 记录该附件最初引用的本地源文件位置。用于 .clipslotspack 导入后——当包内未内嵌字节
+        /// （只保留了路径引用）且 `path` 不可用时，据此做断链检测与提示，避免粘贴静默失败/破损缩略图。
+        /// 可选字段，历史数据缺失即为 nil（Codable 向后兼容）。
+        public var originalPath: String?
         public var createdAt: Date = Date()
 
-        public init(id: UUID = UUID(), name: String, type: AttachmentType, path: String? = nil, url: String? = nil, data: Data? = nil, createdAt: Date = Date()) {
+        public init(id: UUID = UUID(), name: String, type: AttachmentType, path: String? = nil, url: String? = nil, data: Data? = nil, originalPath: String? = nil, createdAt: Date = Date()) {
             self.id = id
             self.name = name
             self.type = type
             self.path = path
             self.url = url
             self.data = data
+            self.originalPath = originalPath
             self.createdAt = createdAt
         }
     }
@@ -381,5 +387,39 @@ extension SlotContent {
         }
         if let htmlSource, !htmlSource.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return htmlSource }
         return nil
+    }
+}
+
+// MARK: - SlotAttachment 断链检测 (v2.10.37)
+//
+// 背景：`.clipslotspack` 导入后，「本地文件」类附件若在包内未内嵌字节（只保留了路径引用），
+// 换机器或源文件被移动/删除后引用即失效。此前粘贴路径直接 `URL(fileURLWithPath:)` 不做存在性
+// 校验，导致粘贴静默失败；附件面板则渲染出破损缩略图。这里提供统一的断链判定入口，供粘贴前
+// 跳过 + UI 提示，以及附件面板断链角标共用（此前解析逻辑散落多处、无统一入口）。
+extension SlotContent.SlotAttachment {
+    /// 该附件是否携带可直接使用的内联字节（无需依赖磁盘源文件即可粘贴/渲染，如内存图片）。
+    public var hasUsableInlineData: Bool {
+        if let d = data, !d.isEmpty { return true }
+        return false
+    }
+
+    /// 本地文件引用实际应指向的磁盘路径：优先 `path`，其次导入时保留的 `originalPath`。
+    /// 仅对 image/file 类型有意义；其余类型返回 nil。
+    public var localFileReferencePath: String? {
+        guard type == .image || type == .file else { return nil }
+        if let p = path, !p.isEmpty { return p }
+        if let op = originalPath, !op.isEmpty { return op }
+        return nil
+    }
+
+    /// 是否为「断链的本地文件引用」——期望指向本地文件、但源文件已被移动/删除，且没有可回退的
+    /// 内联字节。用于粘贴前跳过并给出明确提示、以及附件面板断链角标；避免静默失败/破损缩略图。
+    public var isBrokenLocalFileRef: Bool {
+        guard type == .image || type == .file else { return false }
+        // 图片等有内联字节仍可粘贴/渲染，不算断链。
+        if hasUsableInlineData { return false }
+        // 没有任何本地路径引用（例如纯 url / 内联型），不属于本地文件断链范畴。
+        guard let p = localFileReferencePath else { return false }
+        return !FileManager.default.fileExists(atPath: p)
     }
 }

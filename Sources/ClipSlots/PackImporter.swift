@@ -354,13 +354,18 @@ struct PackImporter {
                     }
                 }
                 // 附件 UUID 始终新生成；小文件字节内联，大文件以持久路径引用，路径不跨机还原。
+                // v2.10.37: 保留导出时记录的 originalPath（本地文件引用）。当包内未内嵌字节
+                // （att.file == nil，data/persistentPath 均为空）时，附件成为「仅本地引用」状态：
+                // path/data 皆为空、仅携带 originalPath，粘贴前的可达性检测与附件面板断链角标
+                // 会据此把它标记为断链，给出明确提示而非静默失败 / 破损缩略图。
                 restored.append(SlotContent.SlotAttachment(
                     id: attId,
                     name: att.name,
                     type: type,
                     path: persistentPath,
                     url: att.url,
-                    data: data
+                    data: data,
+                    originalPath: att.linkType == "localFile" ? att.originalPath : nil
                 ))
             }
 

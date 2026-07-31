@@ -65,6 +65,11 @@ struct PackAttachment: Codable {
     var type: String               // SlotContent.AttachmentType 的 rawValue
     var url: String?
     var file: String?              // attachments/ 内的相对文件名
+    // v2.10.37: 本地文件引用断链检测的两枚元数据。`linkType == "localFile"` 明确标记
+    // 「这是一个本地文件引用」；`originalPath` 记录导出时源文件的绝对路径。导入后据此在
+    // path 不可用（换机 / 源文件移动）时做断链检测与提示，避免粘贴静默失败 / 破损缩略图。
+    var linkType: String?          // "localFile" 表示引用了本地文件；nil 表示非本地文件引用
+    var originalPath: String?      // 导出时源文件的绝对路径（本地文件引用才有）
 }
 
 // MARK: - 导出选择范围
@@ -220,6 +225,14 @@ struct PackExporter {
                             url: att.url,
                             file: nil
                         )
+                        // v2.10.37: 若该附件是本地文件引用（image/file 且带有本地路径），
+                        // 无论字节是否内嵌，都在清单里明确标记 linkType=localFile 并记录源文件
+                        // 的原始绝对路径。导入方据此可在字节缺失 / 换机后做断链检测与提示。
+                        if (att.type == .image || att.type == .file),
+                           let localPath = att.localFileReferencePath {
+                            packAtt.linkType = "localFile"
+                            packAtt.originalPath = localPath
+                        }
                         // 取字节：优先内联 data（已在内存），其次回退到其引用的本地源文件路径。
                         // P2-2 (v2.10.16): 区分「本无字节的附件（纯 url/reference 型）」与「本应有字节但
                         // 源文件不可读/为空的附件」，后者登记到 failedAttachments 而非写入空壳条目。

@@ -2404,17 +2404,42 @@ final class SlotStoreObservable: ObservableObject {
         // cleans up any spilled temp image files.
         let content = specialStorage.get(slot, in: activeId)
         if !content.attachments.isEmpty {
+            // v2.10.37: 断链本地文件附件（源文件已移动/删除）检测。这些附件在 payload 解析阶段
+            // 会被跳过（见 payloadForAttachment / fileURLForFileLikeAttachment 的 fileExists 校验），
+            // 这里统计数量以便给出明确提示，杜绝「静默失败」。
+            let brokenCount = content.attachments.filter { $0.isBrokenLocalFileRef }.count
             var tempFiles: [URL] = []
             let payloads = slotContentPayloads(slot: slot, activeId: activeId, tempFiles: &tempFiles)
-            let attachCount = content.attachments.count
+            // 主体为空且全部附件均断链 → 没有任何可粘贴内容，明确报错并终止，不再走空粘贴。
+            guard !payloads.isEmpty else {
+                cleanupTempFiles(tempFiles)
+                showFloatingNotice(FloatingNotice(
+                    title: "无法粘贴",
+                    subtitle: brokenCount > 0 ? "原始文件已移动或不存在，无法粘贴" : "该槽位没有可粘贴的内容",
+                    iconName: "exclamationmark.triangle.fill",
+                    kind: brokenCount > 0 ? .error : .info
+                ))
+                return
+            }
+            let pastedAttachCount = content.attachments.count - brokenCount
             runSequentialPaste(payloads, activeId: activeId, targetApp: nil, tempFiles: tempFiles) { [weak self] in
                 self?.recordLastPaste(slot: slot, in: activeId) // v2.9.38: record only after the paste actually succeeds
-                self?.showFloatingNotice(FloatingNotice(
-                    title: "已粘贴主内容 + \(attachCount) 个附件",
-                    subtitle: "主内容与附件已依次粘贴",
-                    iconName: "paperclip.circle.fill",
-                    kind: .success
-                ))
+                if brokenCount > 0 {
+                    // 部分附件断链：明确告知已跳过的数量，而非假装全部成功。
+                    self?.showFloatingNotice(FloatingNotice(
+                        title: "已粘贴主内容 + \(pastedAttachCount) 个附件",
+                        subtitle: "\(brokenCount) 个附件的原始文件已移动或不存在，已跳过",
+                        iconName: "exclamationmark.triangle.fill",
+                        kind: .warning
+                    ))
+                } else {
+                    self?.showFloatingNotice(FloatingNotice(
+                        title: "已粘贴主内容 + \(pastedAttachCount) 个附件",
+                        subtitle: "主内容与附件已依次粘贴",
+                        iconName: "paperclip.circle.fill",
+                        kind: .success
+                    ))
+                }
                 self?.completeAutoAdvanceAfterAttachments(afterPasting: slot, in: activeId, suppress: suppressAutoAdvance) // v2.9.37: attachments done → safe to advance
                 // P2-4 (v2.10.5): 附件路径确认粘贴完成后再回调，供自动粘贴推进游标。
                 onCommitted?(slot)
@@ -3312,13 +3337,19 @@ final class SlotStoreObservable: ObservableObject {
             let text = att.url ?? att.name
             return ChainPastePayload(sourceSlot: 0, text: text, fileURLs: [], isImage: false, isEmpty: text.isEmpty, image: nil)
         case .file:
-            guard let path = att.path, !path.isEmpty else { return empty }
+            // v2.10.37: 粘贴前做源文件可达性校验。断链的本地文件引用（源文件已移动/删除）
+            // 返回空 payload 而非 `URL(fileURLWithPath:)` 一个不存在的路径——后者会被写进剪贴板
+            // 却在真正 Cmd+V 时静默失败。跳过后由调用方统计并给出明确提示。
+            guard let path = att.path, !path.isEmpty,
+                  FileManager.default.fileExists(atPath: path) else { return empty }
             return ChainPastePayload(sourceSlot: 0, text: nil, fileURLs: [URL(fileURLWithPath: path)], isImage: false, isEmpty: false, image: nil)
         case .image:
             if let data = att.data, let image = NSImage(data: data) {
                 return ChainPastePayload(sourceSlot: 0, text: nil, fileURLs: [], isImage: true, isEmpty: false, image: image)
             }
-            if let path = att.path, !path.isEmpty {
+            // v2.10.37: 无内联字节时才回退到源文件；同样校验文件存在，断链即跳过。
+            if let path = att.path, !path.isEmpty,
+               FileManager.default.fileExists(atPath: path) {
                 return ChainPastePayload(sourceSlot: 0, text: nil, fileURLs: [URL(fileURLWithPath: path)], isImage: false, isEmpty: false, image: nil)
             }
             return empty
@@ -3624,7 +3655,9 @@ final class SlotStoreObservable: ObservableObject {
     private func fileURLForFileLikeAttachment(_ att: SlotContent.SlotAttachment, tempFiles: inout [URL]) -> URL? {
         switch att.type {
         case .file:
-            guard let path = att.path, !path.isEmpty else { return nil }
+            // v2.10.37: 多附件合并粘贴同样先校验源文件存在，断链附件不加入 URL 列表。
+            guard let path = att.path, !path.isEmpty,
+                  FileManager.default.fileExists(atPath: path) else { return nil }
             return URL(fileURLWithPath: path)
         case .image:
             if let path = att.path, !path.isEmpty, FileManager.default.fileExists(atPath: path) {

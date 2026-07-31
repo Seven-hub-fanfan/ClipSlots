@@ -558,15 +558,31 @@ struct AttachmentRow: View {
         HStack(spacing: 10) {
             AttachmentThumbnail(attachment: attachment)
                 .frame(width: 32, height: 32)
+                // v2.10.37: 断链本地文件引用（源文件已移动/删除）——缩略图淡出，配合下方角标提示。
+                .opacity(attachment.isBrokenLocalFileRef ? 0.4 : 1)
 
             VStack(alignment: .leading, spacing: 2) {
                 Text(attachment.name)
                     .font(.system(size: 13, weight: .medium))
                     .lineLimit(1)
-                Text(subtitle)
-                    .font(.system(size: 11))
+                if attachment.isBrokenLocalFileRef {
+                    // v2.10.37: 断链附件在列表里加灰色「⚠️ 文件不存在」角标，而不是显示破损缩略图，
+                    // 让用户一眼看出该附件已不可用（源文件被移动/删除，粘贴会被跳过）。
+                    HStack(spacing: 3) {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .font(.system(size: 10))
+                        Text("文件不存在")
+                            .font(.system(size: 11))
+                    }
                     .foregroundColor(.secondary)
                     .lineLimit(1)
+                    .help("原始文件已移动或不存在，无法粘贴")
+                } else {
+                    Text(subtitle)
+                        .font(.system(size: 11))
+                        .foregroundColor(.secondary)
+                        .lineLimit(1)
+                }
             }
 
             Spacer(minLength: 4)
