@@ -553,19 +553,38 @@ struct AttachmentRow: View {
     @State private var hoverToken = 0
     // Backing NSView anchor so the preview panel can be positioned next to the row.
     @State private var anchor = AttachmentRowAnchor()
+    // v2.10.37: 断链本地文件引用的判定含磁盘 fileExists，若在 SwiftUI body 里同步调用，遇到
+    // 断连的网络卷会阻塞主线程。改为后台异步计算一次，结果驱动角标 / 缩略图淡出。
+    @State private var isBrokenRef = false
 
     var body: some View {
         HStack(spacing: 10) {
             AttachmentThumbnail(attachment: attachment)
                 .frame(width: 32, height: 32)
                 // v2.10.37: 断链本地文件引用（源文件已移动/删除）——缩略图淡出，配合下方角标提示。
-                .opacity(attachment.isBrokenLocalFileRef ? 0.4 : 1)
+                .opacity(isBrokenRef ? 0.4 : 1)
+                .task(id: attachment.id) {
+                    // 断链判定含磁盘 fileExists，放后台线程算，避免主线程同步 stat 阻塞（网络卷）。
+                    let hasData = attachment.hasUsableInlineData
+                    let refPath = attachment.localFileReferencePath
+                    let broken: Bool
+                    if hasData || refPath == nil {
+                        broken = false
+                    } else if let p = refPath {
+                        broken = await Task.detached(priority: .utility) {
+                            !FileManager.default.fileExists(atPath: p)
+                        }.value
+                    } else {
+                        broken = false
+                    }
+                    if broken != isBrokenRef { isBrokenRef = broken }
+                }
 
             VStack(alignment: .leading, spacing: 2) {
                 Text(attachment.name)
                     .font(.system(size: 13, weight: .medium))
                     .lineLimit(1)
-                if attachment.isBrokenLocalFileRef {
+                if isBrokenRef {
                     // v2.10.37: 断链附件在列表里加灰色「⚠️ 文件不存在」角标，而不是显示破损缩略图，
                     // 让用户一眼看出该附件已不可用（源文件被移动/删除，粘贴会被跳过）。
                     HStack(spacing: 3) {

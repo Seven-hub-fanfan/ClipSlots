@@ -2419,6 +2419,9 @@ final class SlotStoreObservable: ObservableObject {
                     iconName: "exclamationmark.triangle.fill",
                     kind: brokenCount > 0 ? .error : .info
                 ))
+                // v2.10.37: 即便无可粘贴内容，也要推进自动粘贴游标，否则游标会永久卡在该断链
+                // 槽位（onCommitted 不触发 → 自动粘贴 livelock 卡死）。跳过该槽位继续向后推进。
+                onCommitted?(slot)
                 return
             }
             let pastedAttachCount = content.attachments.count - brokenCount
@@ -2952,6 +2955,20 @@ final class SlotStoreObservable: ObservableObject {
         if chainHasAttachments(slots, activeId: activeId) {
             var tempFiles: [URL] = []
             let payloads = expandedChainPayloads(for: slots, activeId: activeId, tempFiles: &tempFiles)
+            // v2.10.37: 链路展开后若全部为空（例如成员全是断链本地文件附件），runSequentialPaste 会
+            // 早退且不回调 onSuccess → onChainCommitted 不触发，自动粘贴游标永久卡在此链（livelock）。
+            // 这里提前拦截：清理临时文件、给出提示，并仍回调 onChainCommitted 推进游标越过该链。
+            guard payloads.contains(where: { !$0.isEmpty }) else {
+                cleanupTempFiles(tempFiles)
+                showFloatingNotice(FloatingNotice(
+                    title: "串联粘贴失败",
+                    subtitle: "链路内容均已断链或为空",
+                    iconName: "exclamationmark.triangle.fill",
+                    kind: .warning
+                ))
+                onChainCommitted?()
+                return
+            }
             let attachmentTotal = slots.reduce(0) { $0 + specialStorage.get($1, in: activeId).attachments.count }
             let chainForNotice = slots
             let count = payloads.count
