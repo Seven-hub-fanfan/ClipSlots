@@ -212,7 +212,7 @@ struct PackExporter {
                     var attachmentsDirCreated = false
                     let attachmentsDir = slotDir.appendingPathComponent("attachments", isDirectory: true)
 
-                    for att in disk.attachments {
+                    for (attIndex, att) in disk.attachments.enumerated() {
                         var packAtt = PackAttachment(
                             id: att.id.uuidString,
                             name: att.name,
@@ -232,7 +232,7 @@ struct PackExporter {
                                 try createDir(attachmentsDir)
                                 attachmentsDirCreated = true
                             }
-                            let fileName = attachmentFileName(id: att.id.uuidString, name: att.name)
+                            let fileName = attachmentFileName(index: attIndex, id: att.id.uuidString, name: att.name)
                             do {
                                 try data.write(to: attachmentsDir.appendingPathComponent(fileName))
                             } catch {
@@ -248,7 +248,7 @@ struct PackExporter {
                                     try createDir(attachmentsDir)
                                     attachmentsDirCreated = true
                                 }
-                                let fileName = attachmentFileName(id: att.id.uuidString, name: att.name)
+                                let fileName = attachmentFileName(index: attIndex, id: att.id.uuidString, name: att.name)
                                 let destURL = attachmentsDir.appendingPathComponent(fileName)
                                 do {
                                     // copyItem 目标已存在会报错；文件名前缀含唯一附件 id，碰撞极罕见，仍稳妥清理。
@@ -429,14 +429,18 @@ struct PackExporter {
     }
 
     /// 生成安全且唯一的附件文件名：`<attachmentId>_<sanitizedName>`。
-    private func attachmentFileName(id: String, name: String) -> String {
+    // P1-2 (v2.10.36): 文件名加上槽位内下标前缀，保证「同一槽位内」附件文件名绝不碰撞。
+    // 旧实现只用 `<id>_<name>`，声称 id 唯一故碰撞极罕见；但附件 id 在「复制槽位 / 包导入重建」等
+    // 路径下可能出现重复，一旦同槽内两条附件 id 相同，导出时后者会覆盖前者（copyItem 分支先删同名目标、
+    // 内联 data.write 直接覆盖）→ 静默丢附件/损坏。加下标前缀后，同槽内下标天然唯一，彻底杜绝该覆盖。
+    private func attachmentFileName(index: Int, id: String, name: String) -> String {
         let base = name.isEmpty ? "attachment" : name
         let sanitized = base.map { ch -> Character in
             if ch == "/" || ch == "\\" || ch == ":" || ch == "\n" || ch == "\r" || ch == "\0" { return "_" }
             return ch
         }
         let clean = String(sanitized).trimmingCharacters(in: .whitespaces)
-        return "\(id)_\(clean.isEmpty ? "attachment" : clean)"
+        return "\(index)_\(id)_\(clean.isEmpty ? "attachment" : clean)"
     }
 
     /// 用系统 /usr/bin/zip 压缩目录内容（不依赖第三方库）。

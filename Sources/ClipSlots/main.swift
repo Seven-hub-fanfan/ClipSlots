@@ -4445,13 +4445,25 @@ final class SlotStoreObservable: ObservableObject {
 
         DispatchQueue.global(qos: .userInitiated).async {
             do {
-                try exporter.export(selection, to: url)
+                // P1-3 (v2.10.36): 接住导出结果里的 failedAttachments——旧实现丢弃返回值、无论是否有附件
+                // 因源文件缺失/为空而被跳过，都无脑弹「导出成功」，用户完全不知道附件已丢。现在若有附件未能
+                // 打包，改弹 warning 明确告知数量，避免「以为导全了、实际缺附件」的静默数据丢失。
+                let result = try exporter.export(selection, to: url)
                 DispatchQueue.main.async {
-                    self.showFloatingNotice(FloatingNotice(
-                        title: "导出成功",
-                        subtitle: "已导出 \(selection.totalGroupCount) 个槽位组",
-                        iconName: "square.and.arrow.up.fill",
-                        kind: .success))
+                    let failedCount = result.failedAttachments.count
+                    if failedCount > 0 {
+                        self.showFloatingNotice(FloatingNotice(
+                            title: "导出完成，但有 \(failedCount) 个附件未能打包",
+                            subtitle: "源文件缺失或不可读，已跳过；其余内容已导出",
+                            iconName: "exclamationmark.triangle.fill",
+                            kind: .warning))
+                    } else {
+                        self.showFloatingNotice(FloatingNotice(
+                            title: "导出成功",
+                            subtitle: "已导出 \(selection.totalGroupCount) 个槽位组",
+                            iconName: "square.and.arrow.up.fill",
+                            kind: .success))
+                    }
                 }
             } catch {
                 DispatchQueue.main.async {
