@@ -273,12 +273,17 @@ public final class SlotStorage {
         guard fm.fileExists(atPath: slotDir.path, isDirectory: &isDir), isDir.boolValue else {
             return true
         }
-        // Non-empty attachments.json → slot is not empty. Use a local decoder so this can
-        // run off the serial `queue` without racing the shared `decoder` instance.
+        // P0-2 (v2.10.36): non-empty attachments.json → slot is not empty, but do NOT read
+        // the whole file. Attachments are stored INLINE as base64 in attachments.json, so a
+        // slot with a large attachment yields a multi-MB JSON file. The old probe did
+        // `Data(contentsOf:) + JSONDecode([SlotAttachment])`, materializing every base64 blob
+        // just to test `!isEmpty` — O(attachment bytes) per call. recomputeAutoPreviews (自动
+        // 切换 default ON) scans isSlotEmpty across ALL groups/pages on every switch/action via
+        // the auto-advance cursor, and those cross-group probes never populate the content
+        // cache, so after a large (~1.6GB) pack import every UI action re-read hundreds of MB
+        // on the main thread → 3-5s beachball. Replace with an O(1) head-window scan.
         let attachmentsURL = slotDir.appendingPathComponent("attachments.json")
-        if let attData = try? Data(contentsOf: attachmentsURL),
-           let atts = try? JSONDecoder().decode([SlotContent.SlotAttachment].self, from: attData),
-           !atts.isEmpty {
+        if attachmentsJSONHasEntry(attachmentsURL) {
             return false
         }
         // Any item_* dir containing at least one .bin file → not empty.
@@ -291,6 +296,21 @@ public final class SlotStorage {
             }
         }
         return true
+    }
+
+    /// P0-2 (v2.10.36): O(1) "does attachments.json contain at least one entry?" check that
+    /// avoids reading/decoding the (potentially multi-MB, inline-base64) file. attachments.json
+    /// is a JSON array: an empty list serializes to `[]` (no `{`), while any element makes it
+    /// `[{...}]` — the first object-open `{` sits within the first few bytes right after `[`
+    /// (the encoder emits compact JSON, no indentation). We read only a small head window and
+    /// look for `{` (0x7B). Missing/unreadable file → treated as no entry (empty). A corrupt or
+    /// truncated file that still contains `{` is conservatively treated as NON-empty, matching
+    /// the project-wide "never mistake real data for an empty slot" invariant.
+    private func attachmentsJSONHasEntry(_ url: URL) -> Bool {
+        guard let handle = try? FileHandle(forReadingFrom: url) else { return false }
+        defer { try? handle.close() }
+        let head = (try? handle.read(upToCount: 64)) ?? Data()
+        return head.contains(0x7B) // '{'
     }
 
     @discardableResult

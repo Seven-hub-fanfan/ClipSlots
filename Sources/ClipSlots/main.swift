@@ -2009,24 +2009,26 @@ final class SlotStoreObservable: ObservableObject {
     func setAttachments(_ attachments: [SlotContent.SlotAttachment], for slot: Int) {
         let activeId = currentSpecialSlotId
         suppressWatcher() // v2.9.4 (#2): self-write
-        // P1-4 (v2.10.35): 附件编辑此前在主线程同步跑 get + set（两次跨进程 flock，锁竞争时各最长阻塞 ~5s），
-        // 在 CLI 批量写盘 / 另一实例持锁时会直接 Beachball。改为把 get + set 挪到统一的串行写队列（与 P1-1 的
-        // 单槽 / 批量写盘共用一条队列，天然保序、last-write-wins），写完再回主线程更新 @Published 视图。
-        let capturedAttachments = attachments
+        // P1-1 (v2.10.36): 修复 v2.10.35 P1-4 引入的附件 lost-update 回归。
+        // 上一版把 get + set 整体挪到 slotWriteQueue，并把内存视图 slots[slot] 的更新推迟到「异步写盘完成
+        // 回主线程之后」。这段窗口里 in-memory slots[slot] 仍是旧附件，而 App 其它写盘路径
+        // （persistCurrentSpecialSlotData / updateTextSlot / saveHTMLToSlot 等）都是「主线程抓 slots 快照 →
+        // 整份 content 落盘」，且靠 contentForSlot(优先读内存) 来「保留」附件。于是窗口内一旦触发这些路径，
+        // 就会用缺新附件的陈旧快照把刚写进磁盘的附件覆盖掉（串行队列 FIFO 让陈旧写稳定最后落盘 → 稳定丢失），
+        // 在写盘队列拥塞（CLI 批量写 / 另一实例持锁 ~5s）时窗口最长、最易复现。
+        // 修法：主线程先做同步「乐观内存更新」——用 contentForSlot 取当前最新内容（common case 命中内存、无
+        // flock，成本极低）替换 attachments 后立即写回 slots[slot]，关闭 lost-update 窗口；磁盘写盘仍走
+        // slotWriteQueue 异步串行（保序、last-write-wins、不卡主线程），保留 P1-4 的防 Beachball 收益。
+        var content = contentForSlot(slot)
+        content.attachments = attachments
+        if loadedSpecialSlotId == activeId {
+            slots[slot] = content
+        }
+        refreshTrigger = UUID()
+        let toWrite = content
         slotWriteQueue.async { [weak self] in
             guard let self = self else { return }
-            var content = self.specialStorage.get(slot, in: activeId)
-            content.attachments = capturedAttachments
-            _ = self.specialStorage.set(slot, content: content, in: activeId)
-            let committed = content
-            DispatchQueue.main.async { [weak self] in
-                guard let self = self else { return }
-                // 回主线程时可能已切组：仅当仍停留在原组才刷新其内存视图，避免把旧组内容灌进新当前组。
-                if self.loadedSpecialSlotId == activeId {
-                    self.slots[slot] = committed
-                    self.refreshTrigger = UUID()
-                }
-            }
+            _ = self.specialStorage.set(slot, content: toWrite, in: activeId)
         }
     }
 
