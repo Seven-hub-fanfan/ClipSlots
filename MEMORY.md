@@ -4,11 +4,27 @@
 
 ## 当前版本
 
-- **当前版本：v2.10.43**
+- **当前版本：v2.10.44**
 - 平台：macOS（Swift / SwiftUI，SPM 构建，macOS 13+）
 - 单一版本号事实来源：`Info.plist` 的 `CFBundleShortVersionString`（`AppVersion.current` 动态读取，`AppVersion.fallback` 为编译期兜底）。CLI 版本号见 `Sources/ClipSlotsCLI/main.swift` 的 `CLI_VERSION`。
 
 ## 版本要点（近期）
+
+### v2.10.44 — 附件字节外置 P1×3 + P2×6 全量修复
+- 背景：收敛 v2.10.41–v2.10.43「附件字节外置三步走」Bug 扫描报告（https://bytedance.larkoffice.com/docx/Fxsid2ifdo5VcnxHxmEchamunOh）发现的全部 P1 与 P2。
+- **P1-A 附件字节永久丢失**（`SlotStorage.externalizeAttachments`）：情形 2（克隆现存 `.bin` 进 staging）失败时不再静默置 `storagePath=nil` 后继续写 JSON + 原子 swap（会把旧 `.bin` 随整目录替换掉），改为 `throw SlotStorageError.attachmentExternalizeFailed` → `writeSlotContent` catch 清理 staging、保留原槽目录及其现存字节，整批回滚。
+- **P1-B 数据目录不可移植断链**（`SlotStorage.normalizeStoragePaths`，读路径新增）：`storagePath` 存的是写入时绝对路径，迁移/换机/`CLIPSLOTS_DATA_DIR` 变更后 `resolveData` 全量断链。读取时按「当前 slotDir + `attachments/{id}.bin`」约定重建：只要 `.bin` 就在当前 slotDir 下即回填真实绝对路径（仅改内存态，下次 set 自然持久化）。
+- **P1-C（v2.10.40 遗留）锁超时空占位覆盖实数据**：`get()` 抽出 `loadContentOrUnknown` 三态（新鲜缓存/锁内读盘/最近缓存 → 真值；锁忙且从未缓存 → nil=未知）。`get()` 把 nil 映射回空占位保持读契约；`isSlotEmpty` 撕裂读回退改用 `loadContentOrUnknown`，遇「未知」保守判为**非空**，杜绝自动模式覆盖仍完好的磁盘数据。
+- **P2-A**（`main.swift recordSelfWriteFingerprint`）：自写指纹整树遍历改突发合并（`fingerprintRecordPending` 标志 + 0.08s 延后一次采集，捕获突发最终磁盘态；远小于 watcher 0.3s debounce，自写判定正确性不变）。
+- **P2-B**（`SlotStorage.didWriteLiveSlotDir` static hook）：懒迁移写 live 目录后回调，GUI 在 `SlotStoreObservable.init` 注册 `suppressWatcher()`，升级后首次读老库不再触发多余 reloadAll；CLI 侧 hook 为 nil 无副作用。
+- **P2-C**（`SlotStorage.writeSlotContent` 改 `@discardableResult` 返回持久化附件；`set()` 缓存该形态）：缓存「已外置」附件（`data=nil` + storagePath），外置省下的内存立即释放，不再等下次 get 重读。
+- **P2-D**（`AttachmentManagerPopover` thumbnail/fullImage/previewImage + `SlotAttachment.storageFileURL`）：外置图片按文件 URL 交 ImageIO 增量下采样（`CGImageSourceCreateWithURL`）/`NSImage(contentsOf:)`，不再 `resolveData()` 把整份 `.bin` 读进内存再解码。
+- **P2-E**（`SlotAttachment.resolveTextString()` + `AttachmentTextCache` NSCache）：文本附件预览带进程内解码缓存（键 id+storagePath），消除 SwiftUI 重绘时主线程同步读盘；面板 subtitle/bodyText 改用它。
+- **P2-F**（`SlotAttachment.resolveData()`）：读 `.bin` 加轻量重试（越过与另一进程原子 swap 交叠时的瞬时 nil），仍失败才当断链返回 nil，最终语义不变。
+- 自测：本机 `swift build` 通过（仅历史遗留 warning）；`SKIP_NOTARIZE=1 bash scripts/package_dmg.sh` 打包 + DMG 校验通过。
+- commit：`69b7715`（fix+bump 合并）
+- DMG SHA256：`2022fabe036027c6c9ac58421367a9ea1a94060d08677d9b2eb84dc9778b3af5`
+- Release：https://github.com/Seven-hub-fanfan/ClipSlots/releases/tag/v2.10.44
 
 ### v2.10.43 — 附件字节外置架构 Step 3（pack 导出流式打包外置 .bin + CLI/Skill 研判）
 - 背景：方案 B「附件字节外置」三步走收官。承接 Step 2（v2.10.42）写盘外置 `{slotDir}/attachments/{id}.bin`，本版让 pack 导出/导入与 CLI/Skill 完成外置字节适配。
