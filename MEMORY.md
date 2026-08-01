@@ -4,11 +4,22 @@
 
 ## 当前版本
 
-- **当前版本：v2.10.42**
+- **当前版本：v2.10.43**
 - 平台：macOS（Swift / SwiftUI，SPM 构建，macOS 13+）
 - 单一版本号事实来源：`Info.plist` 的 `CFBundleShortVersionString`（`AppVersion.current` 动态读取，`AppVersion.fallback` 为编译期兜底）。CLI 版本号见 `Sources/ClipSlotsCLI/main.swift` 的 `CLI_VERSION`。
 
 ## 版本要点（近期）
+
+### v2.10.43 — 附件字节外置架构 Step 3（pack 导出流式打包外置 .bin + CLI/Skill 研判）
+- 背景：方案 B「附件字节外置」三步走收官。承接 Step 2（v2.10.42）写盘外置 `{slotDir}/attachments/{id}.bin`，本版让 pack 导出/导入与 CLI/Skill 完成外置字节适配。
+- **PackExporter 导出改造（唯一代码改动）**（`PackExporter.swift`）：取字节优先「可流式拷贝的磁盘文件」——先 `storagePath`（外置 .bin），其次本地引用 `path`，均用 `FileManager.copyItem` 内核级流式拷贝进包内 `attachments/` 目录，全程不把文件读进进程内存。**关键：绕过 `att.resolveData()`**——Step 2 后 resolveData() 会按 storagePath 把整个 .bin 读进内存返回，导出含大视频的外置附件即可 OOM（正是 PK-3/D-1 一直规避的问题）；仅当字节只在内存（少见未落盘内联 data）才 `data.write`；声明了 storagePath/path 但文件缺失/为空登记 `failedAttachments`；纯 url/reference 型保留元信息。包内只存字节文件（`file` 相对引用），绝不写 storagePath 绝对路径（换机后无效）。
+- **PackImporter 无需改动**：解包后小附件内联字节经 `storage.set → externalizeAttachments`（Step 2）自动落 `.bin`（data 置 nil），大附件保持 path 引用；两类都不内联进 JSON，Step 2 已覆盖导入侧的「字节写成独立文件而非内联 JSON」诉求。
+- **CLI 无 breaking change**：`read` 从不输出附件 base64 `data`（仅 `attachmentCount`/`preview`/`text`/`htmlSource`/`types`/`empty` 元数据），任务预设的「read 依赖 base64 data 字段」前提不成立，无需改；`write-attachment` 建 path 引用、`paste` 走 `att.path`，均与外置字节解耦，不受影响。
+- **Skill 无需更新（研判结论）**：Step 3 为内部存储/pack 机制改造，对 CLI 命令、参数、输出、行为完全透明；`clipslots-manager` SKILL.md（bundle 版 v1.5.0 + user_skills 草稿）无任何 base64/storagePath/外置字节相关表述，仍准确，本版不改。
+- 自测：`swift build -c release` 通过（仅历史遗留 warning）；`SKIP_NOTARIZE=1 bash scripts/package_dmg.sh` 打包 + DMG 校验通过。
+- commit：`b910f28`（refactor+bump 合并）
+- DMG SHA256：`a9cc4af6be99c640a9000f912c719078dfae6a02dddd9c5b751b629cf9d0dac8`
+- Release：https://github.com/Seven-hub-fanfan/ClipSlots/releases/tag/v2.10.43
 
 ### v2.10.42 — 附件字节外置架构 Step 2（写盘落独立文件 + 老数据懒迁移）
 - 背景：方案 B「附件字节外置」三步走的第二步，承接 v2.10.41 Step 1 的统一读入口 `resolveData()`。Step 2 让字节真正落到独立文件、老数据懒迁移，行为对上层透明。
