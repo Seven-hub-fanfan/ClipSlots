@@ -4,11 +4,19 @@
 
 ## 当前版本
 
-- **当前版本：v2.10.39**
+- **当前版本：v2.10.40**
 - 平台：macOS（Swift / SwiftUI，SPM 构建，macOS 13+）
 - 单一版本号事实来源：`Info.plist` 的 `CFBundleShortVersionString`（`AppVersion.current` 动态读取，`AppVersion.fallback` 为编译期兜底）。CLI 版本号见 `Sources/ClipSlotsCLI/main.swift` 的 `CLI_VERSION`。
 
 ## 版本要点（近期）
+
+### v2.10.40 — P0 槽位包导入死锁崩溃修复
+- 崩溃：`EXC_BREAKPOINT (SIGTRAP)` / `BUG IN CLIENT OF LIBDISPATCH: dispatch_sync called on queue already owned by current thread`，崩溃线程 dispatch queue = `com.clipslots.storage`。
+- 根因：`SlotStorage.set()` 在 `queue.sync` 块内调用 `writeSlotContent()`（SlotStorage.swift:359），后者自 v2.10.38 起为保留旧标签调用 `getLabel()`（:739），而 `getLabel()` 内部又对同一串行队列 `queue.sync`（:528）→ 同队列重入 → libdispatch 断言崩溃。`PackImporter.writeSlots()` → `SpecialSlotStorage.set()`（已持 `com.clipslots.storage` flock）→ `SlotStorage.set()` 批量导入时稳定触发。
+- 修复：新增 private `getLabelOnQueue(_:)`（no-lock、必须在 `queue` 上调用的内部版），复刻 getLabel 的 cache/disk 逻辑但不再 `queue.sync`、不再重取跨进程锁；`writeSlotContent` 改用它读取旧标签。
+- commit：`bc9079e`（fix+bump 合并）
+- DMG SHA256：`b985966dbc715bdc08c079b1faee71fd330bf2d1d4cf71298d815c8244873a53`
+- Release：https://github.com/Seven-hub-fanfan/ClipSlots/releases/tag/v2.10.40
 
 ### v2.10.39 — 导入进度条浮层
 - 需求：导入时加进度条，让用户看到导入进度。覆盖三条导入路径：槽位包导入（PackImporter）、批量图片/文件导入（handleBatchSave）、文件夹导入当前组（importFolderIntoCurrentSpecialSlot）。
