@@ -78,6 +78,12 @@ final class AttachmentManagerPanelController: NSObject, NSPopoverDelegate {
     // 分配一个递增 token，异步回调里校验 token 仍是最新才真正展示，过期请求直接丢弃。
     private var pendingShowToken: Int = 0
 
+    // UX (v2.10.46): 切换槽位时的淡入淡出时长。此前（v2.10.29）为消卡顿改成硬切/瞬切，
+    // 现性能已 OK，补回极短过渡：旧面板内容淡出 → 关闭 → 新面板内容淡入，形成柔和过手感。
+    private let switchFadeDuration: TimeInterval = 0.12
+    // 正在淡出、尚未真正关闭的旧 popover。用于在下一次 show 到来时立即硬关，避免叠加。
+    private var fadingOutPopover: NSPopover?
+
     var isVisible: Bool { popover?.isShown ?? false }
 
     /// 指定槽位的面板是否正在显示（点同一个附件按钮时用于切换关闭）。
@@ -90,8 +96,9 @@ final class AttachmentManagerPanelController: NSObject, NSPopoverDelegate {
     /// v2.10.29 性能优化：连续点击不同槽位的附件按钮时，旧逻辑是「动画关旧 popover →
     /// 等 popoverDidClose 回调 → 下一 runloop 再动画开新 popover」——一次切换要串起
     /// 「淡出动画 + runloop 跳转 + 淡入动画」，用户看到的就是「卡顿一下再弹出」。
-    /// 现改为：切换槽位时**同步无动画关闭旧 popover 并立即无动画展示新 popover**，
-    /// 消除双段动画与 runloop 空窗，切换瞬时完成；首次打开（无 popover 在显示）仍带动画。
+    /// v2.10.29 曾改成同步无动画硬切消卡顿；v2.10.46 性能已 OK，补回极短过渡：
+    /// 旧面板内容淡出 0.12s → 瞬时关闭 → 新面板内容淡入 0.12s，形成柔和过手感，
+    /// 且用 fadingOutPopover 硬关兜底避免连点叠加。首次打开仍走系统淡入动画。
     func show(
         anchor: AttachmentButtonScreenAnchor,
         slot: Int,
@@ -104,50 +111,72 @@ final class AttachmentManagerPanelController: NSObject, NSPopoverDelegate {
         pendingShowToken &+= 1
         let token = pendingShowToken
 
-        // 已经打开（可能是别的槽位）→ 直接同步无动画切换，不再走「关→等回调→开」的异步链。
+        // UX (v2.10.46): 若上一次切换的旧面板还在淡出，立即硬关，避免两个 popover 叠加。
+        hardCloseFadingOut()
+
+        // 已经打开（可能是别的槽位）→ 淡出旧面板内容后关闭，再淡入新面板。
         if let existing = popover, existing.isShown {
-            // 关掉旧 popover：摘掉 delegate，避免其 popoverDidClose 触发 pendingShow 逻辑；
-            // 关掉动画让收起瞬时完成（无淡出）。
             pendingShow = nil
             existing.delegate = nil
-            existing.animates = false
-            existing.close()
-            popover = nil
             // 手动回调上一个槽位的 onClose（原本由 popoverDidClose 负责）。
             let previousOnClose = self.onClose
             self.onClose = nil
             previousOnClose?()
             currentSlot = nil
+            popover = nil
 
-            // 立即无动画展示新槽位面板，切换瞬时可见，无卡顿空窗。
-            // AT-3 (v2.10.30): defer `reallyShow` by one main-loop tick. The
-            // `previousOnClose?()` above may drive a parent SwiftUI state update
-            // that re-lays-out (or momentarily tears down) the attachment button's
-            // backing NSView; anchoring synchronously in the same RunLoop can then
-            // hit a niled `anchor.view`/`window` and silently fail to pop. Deferring
-            // lets that redraw settle so the anchor is valid when we show. This is a
-            // micro-defer (no animation), so the instant-switch feel is preserved.
-            DispatchQueue.main.async { [weak self] in
+            // 交给淡出通道：内容 alpha 1→0（0.12s），完成后关闭旧 popover 并淡入新面板。
+            fadingOutPopover = existing
+            fadeOutContent(of: existing, duration: switchFadeDuration) { [weak self] in
                 guard let self else { return }
+                if self.fadingOutPopover === existing {
+                    existing.animates = false
+                    existing.close()
+                    self.fadingOutPopover = nil
+                }
                 // C-6 (v2.10.31): 仅当仍是最新一次 show 请求时才真正展示；否则说明用户
                 // 已再次切换槽位，本次为过期请求，直接丢弃，避免覆盖新状态。
+                // 淡出完成回调发生在当前 runloop 之后，附件按钮 backing NSView 的重排也已
+                // settle（原 AT-3 的一个 runloop micro-defer 由 0.12s 淡出自然覆盖）。
                 guard token == self.pendingShowToken else { return }
-                self.reallyShow(anchor: anchor, slot: slot, store: store, onClose: onClose, animates: false)
+                self.reallyShow(anchor: anchor, slot: slot, store: store, onClose: onClose, animates: false, fadeIn: true)
             }
         } else {
-            // 首次打开：保留原有淡入动画。
-            reallyShow(anchor: anchor, slot: slot, store: store, onClose: onClose, animates: true)
+            // 首次打开：保留原有系统淡入动画。
+            reallyShow(anchor: anchor, slot: slot, store: store, onClose: onClose, animates: true, fadeIn: false)
         }
     }
 
+    /// 立即硬关正在淡出的旧 popover（无动画），用于下一次 show 到来时防叠加。
+    private func hardCloseFadingOut() {
+        guard let fading = fadingOutPopover else { return }
+        fading.delegate = nil
+        fading.animates = false
+        fading.close()
+        fadingOutPopover = nil
+    }
+
+    /// 将 popover 内容视图的 alpha 在 duration 内淡出到 0，完成后回调。
+    private func fadeOutContent(of popover: NSPopover, duration: TimeInterval, completion: @escaping () -> Void) {
+        guard let view = popover.contentViewController?.view else { completion(); return }
+        view.wantsLayer = true
+        NSAnimationContext.runAnimationGroup({ ctx in
+            ctx.duration = duration
+            ctx.allowsImplicitAnimation = true
+            view.animator().alphaValue = 0
+        }, completionHandler: completion)
+    }
+
     /// 真正创建并展示 popover。要求锚点 NSView 已在窗口层级中。
-    /// - Parameter animates: 是否带淡入动画。首次打开为 true；连续切换槽位时为 false（瞬时切换，去卡顿）。
+    /// - Parameter animates: 是否带系统淡入动画（首次打开为 true）。
+    /// - Parameter fadeIn: 切换槽位时是否对新内容做 0.12s 自定义淡入（瞬时定位 + 内容淡入，去卡顿）。
     private func reallyShow(
         anchor: AttachmentButtonScreenAnchor,
         slot: Int,
         store: SlotStoreObservable,
         onClose: @escaping () -> Void,
-        animates: Bool
+        animates: Bool,
+        fadeIn: Bool
     ) {
         guard let anchorView = anchor.view, anchorView.window != nil else { return }
 
@@ -166,9 +195,22 @@ final class AttachmentManagerPanelController: NSObject, NSPopoverDelegate {
         pop.behavior = .semitransient
         pop.animates = animates
         pop.delegate = self
+        // UX (v2.10.46): 切换场景先把内容置透明，show 后再淡入，避免硬切跳变。
+        if fadeIn {
+            hosting.view.wantsLayer = true
+            hosting.view.alphaValue = 0
+        }
         pop.show(relativeTo: anchorView.bounds, of: anchorView, preferredEdge: .maxY)
         self.popover = pop
         self.hosting = hosting
+
+        if fadeIn {
+            NSAnimationContext.runAnimationGroup { ctx in
+                ctx.duration = switchFadeDuration
+                ctx.allowsImplicitAnimation = true
+                hosting.view.animator().alphaValue = 1
+            }
+        }
     }
 
     // AT-4 (v2.10.30): detach and release the current content hosting controller.

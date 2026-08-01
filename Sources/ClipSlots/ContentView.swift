@@ -184,11 +184,20 @@ struct ContentView: View {
                     .zIndex(101)
             }
 
-            // v2.10.39: 导入进度浮层（槽位包 / 批量文件 / 文件夹导入共用）。
+            // v2.10.46: 导入进度浮层（槽位包 / 批量文件 / 文件夹导入共用）。非模态：底部悬浮、不阻塞交互。
             if let progress = store.importProgress {
                 importProgressOverlay(progress)
-                    .transition(.opacity)
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
                     .zIndex(150)
+            }
+
+            // v2.10.46: 轻量 inline 确认条（删页 / 清空组等），替代系统 NSAlert。
+            if let confirmation = store.pendingConfirmation {
+                InlineConfirmationBar(confirmation: confirmation) {
+                    withAnimation(.easeInOut(duration: 0.2)) { store.pendingConfirmation = nil }
+                }
+                .transition(.move(edge: .bottom).combined(with: .opacity))
+                .zIndex(200)
             }
 
             // v2.9.12: in-app settings overlay (Obsidian-style two-pane).
@@ -206,6 +215,7 @@ struct ContentView: View {
         }
         .animation(.easeInOut(duration: 0.25), value: store.toastMessage != nil)
         .animation(.easeInOut(duration: 0.2), value: store.importProgress != nil)
+        .animation(.easeInOut(duration: 0.2), value: store.pendingConfirmation?.id)
         // v2.9.12: settings overlay is a modal hotkey-editing safe zone; keep the
         // store flag in sync so business hotkeys don't fire while it is open.
         .onChange(of: showingSettings) { store.isSettingsPresented = $0 }
@@ -299,26 +309,24 @@ struct ContentView: View {
             .padding(.top, 8)
     }
 
-    // v2.10.39: 导入进度浮层——半透明遮罩 + 居中卡片，内含进度条与文案。
+    // v2.10.46: 导入进度改为非模态——去掉全屏黑色阻塞遮罩，改为底部悬浮的轻量进度条，
+    // 并对整体 allowsHitTesting(false)，导入期间可继续操作其他槽位（边导入边整理），消除心流打断。
     // total<=0 时显示不确定进度（解压/解析阶段）；否则显示确定百分比与「x/y」计数。
     private func importProgressOverlay(_ progress: ImportProgress) -> some View {
-        ZStack {
-            // 半透明遮罩，拦截点击避免导入期误操作。
-            Color.black.opacity(0.28)
-                .ignoresSafeArea()
-
-            VStack(spacing: 14) {
-                HStack(spacing: 10) {
+        VStack(spacing: 0) {
+            Spacer(minLength: 0)
+            VStack(spacing: 7) {
+                HStack(spacing: 8) {
                     Image(systemName: "square.and.arrow.down.fill")
-                        .font(.system(size: 16, weight: .semibold))
+                        .font(.system(size: 13, weight: .semibold))
                         .foregroundColor(.accentColor)
                     Text(progress.title)
-                        .font(.system(size: 14, weight: .semibold))
+                        .font(.system(size: 12, weight: .semibold))
                         .foregroundColor(.primary)
                     Spacer(minLength: 0)
                     if !progress.isIndeterminate {
                         Text("\(progress.completed)/\(progress.total)")
-                            .font(.system(size: 12, weight: .medium).monospacedDigit())
+                            .font(.system(size: 11, weight: .medium).monospacedDigit())
                             .foregroundColor(.secondary)
                     }
                 }
@@ -334,31 +342,36 @@ struct ContentView: View {
                 if !progress.detail.isEmpty {
                     HStack {
                         Text(progress.detail)
-                            .font(.system(size: 11))
+                            .font(.system(size: 10))
                             .foregroundColor(.secondary)
                             .lineLimit(1)
                             .truncationMode(.middle)
                         Spacer(minLength: 0)
                         if !progress.isIndeterminate {
                             Text("\(Int(progress.fraction * 100))%")
-                                .font(.system(size: 11, weight: .medium).monospacedDigit())
+                                .font(.system(size: 10, weight: .medium).monospacedDigit())
                                 .foregroundColor(.secondary)
                         }
                     }
                 }
             }
-            .padding(18)
-            .frame(width: 320)
+            .padding(.horizontal, 14)
+            .padding(.vertical, 11)
+            .frame(width: 340)
             .background(
-                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
                     .fill(.ultraThickMaterial)
                     .overlay(
-                        RoundedRectangle(cornerRadius: 14, style: .continuous)
+                        RoundedRectangle(cornerRadius: 12, style: .continuous)
                             .stroke(Color.white.opacity(0.12), lineWidth: 1)
                     )
-                    .shadow(color: Color.black.opacity(0.25), radius: 18, y: 8)
+                    .shadow(color: Color.black.opacity(0.22), radius: 14, y: 6)
             )
+            .padding(.bottom, 16)
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        // 非模态关键点：整体不拦截点击，导入期间主网格照常可交互。
+        .allowsHitTesting(false)
     }
 
     private func toastView(_ message: String) -> some View {
@@ -955,19 +968,18 @@ struct ContentView: View {
     }
 
     private func confirmDeletePage(id: String, name: String) {
-        let alert = NSAlert()
-        alert.messageText = "删除页面？"
-        alert.informativeText = "将删除页面「\(name)」及其下所有槽位组和槽位内容。此操作不可撤销。"
-        alert.alertStyle = .warning
-        alert.addButton(withTitle: "删除")
-        alert.addButton(withTitle: "取消")
-
-        // P2-4: non-blocking sheet instead of runModal.
-        runAlertNonBlocking(alert) { response in
-            if response == .alertFirstButtonReturn {
-                store.deletePage(id: id)
-            }
-        }
+        // v2.10.46: 系统 NSAlert → 轻量 inline 确认条（底部弹出，跟随 App 视觉，不打断心流）。
+        store.requestConfirmation(
+            InlineConfirmation(
+                title: "删除页面？",
+                message: "将删除页面「\(name)」及其下所有槽位组和槽位内容。此操作不可撤销。",
+                confirmTitle: "删除",
+                isDestructive: true,
+                onConfirm: { _ in
+                    store.deletePage(id: id)
+                }
+            )
+        )
     }
 
     private func statPill(title: String, value: String, icon: String, color: Color) -> some View {
@@ -2016,5 +2028,85 @@ private struct ConnectionFullscreenAction: View {
         .buttonStyle(.plain)
         .onHover { hovering = $0 }
         .animation(.spring(response: 0.28, dampingFraction: 0.76), value: hovering)
+    }
+}
+
+// MARK: - Inline Confirmation (v2.10.46)
+
+/// v2.10.46: 轻量 inline 确认条。替代删页/清空等场景的系统 NSAlert——系统弹窗打断心流、
+/// 有「进入另一个房间」的压迫感。改为在主窗口内底部弹出确认卡片（跟随 App 视觉、可回车确认 /
+/// Esc 取消 / 点击空白取消），确认动作走 confirmation.onConfirm，可选「不再提醒」。
+struct InlineConfirmationBar: View {
+    let confirmation: InlineConfirmation
+    let onDismiss: () -> Void
+
+    @State private var doNotRemind = false
+
+    var body: some View {
+        ZStack(alignment: .bottom) {
+            // 轻量半透明遮罩：聚焦当前决策但不喧宾夺主；点击空白 = 取消。
+            Color.black.opacity(0.12)
+                .ignoresSafeArea()
+                .contentShape(Rectangle())
+                .onTapGesture { onDismiss() }
+
+            VStack(alignment: .leading, spacing: 10) {
+                HStack(alignment: .top, spacing: 10) {
+                    Image(systemName: confirmation.isDestructive
+                          ? "exclamationmark.triangle.fill"
+                          : "questionmark.circle.fill")
+                        .font(.system(size: 15, weight: .semibold))
+                        .foregroundColor(confirmation.isDestructive ? .orange : .accentColor)
+                        .padding(.top, 1)
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text(confirmation.title)
+                            .font(.system(size: 13, weight: .semibold))
+                            .foregroundColor(.primary)
+                        Text(confirmation.message)
+                            .font(.system(size: 11))
+                            .foregroundColor(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    Spacer(minLength: 0)
+                }
+
+                HStack(spacing: 10) {
+                    if confirmation.showDoNotRemind {
+                        Toggle(isOn: $doNotRemind) {
+                            Text("不再提醒")
+                                .font(.system(size: 11))
+                                .foregroundColor(.secondary)
+                        }
+                        .toggleStyle(.checkbox)
+                    }
+                    Spacer(minLength: 0)
+                    Button(confirmation.cancelTitle) {
+                        onDismiss()
+                    }
+                    .keyboardShortcut(.cancelAction)
+                    .buttonStyle(.bordered)
+
+                    Button(confirmation.confirmTitle) {
+                        confirmation.onConfirm(doNotRemind)
+                        onDismiss()
+                    }
+                    .keyboardShortcut(.defaultAction)
+                    .buttonStyle(.borderedProminent)
+                    .tint(confirmation.isDestructive ? .red : .accentColor)
+                }
+            }
+            .padding(14)
+            .frame(width: 360)
+            .background(
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .fill(.ultraThickMaterial)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 12, style: .continuous)
+                            .stroke(Color.white.opacity(0.12), lineWidth: 1)
+                    )
+                    .shadow(color: Color.black.opacity(0.25), radius: 18, y: 8)
+            )
+            .padding(.bottom, 18)
+        }
     }
 }

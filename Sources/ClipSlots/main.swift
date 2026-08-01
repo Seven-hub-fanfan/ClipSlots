@@ -173,6 +173,24 @@ struct ImportProgress: Equatable {
     }
 }
 
+/// v2.10.46: 轻量 inline 确认模型。替代删页/清空等场景的系统 NSAlert——系统弹窗会打断心流、
+/// 给「进入另一个房间」的压迫感。改为在主窗口内弹出底部确认条（跟随 App 视觉），确认动作通过
+/// onConfirm 回调执行；可选「不再提醒」勾选（doNotRemind 回传给回调）。非 Equatable（含闭包），
+/// 仅作 @Published 触发 UI，用 id 区分不同请求。
+struct InlineConfirmation: Identifiable {
+    let id = UUID()
+    var title: String
+    var message: String
+    var confirmTitle: String
+    var cancelTitle: String = "取消"
+    /// 确认按钮是否为破坏性（红色）样式。
+    var isDestructive: Bool = true
+    /// 是否展示「不再提醒」勾选项。
+    var showDoNotRemind: Bool = false
+    /// 确认回调；参数为「不再提醒」是否被勾选（未展示时恒为 false）。
+    var onConfirm: (_ doNotRemind: Bool) -> Void
+}
+
 final class SlotStoreObservable: ObservableObject {
     let instanceID = UUID().uuidString
 
@@ -265,6 +283,18 @@ final class SlotStoreObservable: ObservableObject {
 
     // v2.6.7: import options sheet
     @Published var pendingImportSelection: PendingImportSelection?
+
+    // v2.10.46: 当前待确认的 inline 确认请求（删页/清空等）。非 nil 时 ContentView 弹出底部确认条。
+    @Published var pendingConfirmation: InlineConfirmation?
+
+    // v2.10.46: 发起一次 inline 确认（替代系统 NSAlert）。始终在主线程发布。
+    func requestConfirmation(_ confirmation: InlineConfirmation) {
+        if Thread.isMainThread {
+            self.pendingConfirmation = confirmation
+        } else {
+            DispatchQueue.main.async { self.pendingConfirmation = confirmation }
+        }
+    }
 
     // v2.10.14: 打包导出选择 sheet 的呈现状态
     @Published var showingPackExport: Bool = false
@@ -1816,41 +1846,29 @@ final class SlotStoreObservable: ObservableObject {
             return
         }
 
-        let alert = NSAlert()
-        alert.messageText = "清空当前槽位组？"
-        alert.informativeText = "将清空「\(currentSpecialSlot?.name ?? "当前槽位组")」中的全部槽位内容。此操作不会删除槽位组本身。"
-        alert.alertStyle = .warning
-        alert.addButton(withTitle: "清空")
-        alert.addButton(withTitle: "取消")
-
-        let checkbox = NSButton(checkboxWithTitle: "不再提醒", target: nil, action: nil)
-        alert.accessoryView = checkbox
-
-        // MT-3 (v2.10.30): 原 alert.runModal() 会阻塞主 run loop。改为非阻塞 sheet，确认后的清空动作移到
-        // 完成闭包里执行；取不到宿主窗口时回退到 runModal() 以免流程中断。
-        let onConfirm: (NSButton) -> Void = { [weak self] checkbox in
-            guard let self = self else { return }
-            if checkbox.state == .on {
-                do {
-                    try self.specialStorage.updateSettings { $0.confirmBeforeClearAllSlots = false }
-                    self.specialSlotSettings.confirmBeforeClearAllSlots = false
-                } catch {
-                    NSLog("[ClipSlots] update confirmBeforeClearAllSlots failed: \(error)")
+        // v2.10.46: 系统 NSAlert → 轻量 inline 确认条（底部弹出，跟随 App 视觉，不打断心流）。
+        let groupName = currentSpecialSlot?.name ?? "当前槽位组"
+        requestConfirmation(
+            InlineConfirmation(
+                title: "清空当前槽位组？",
+                message: "将清空「\(groupName)」中的全部槽位内容。此操作不会删除槽位组本身。",
+                confirmTitle: "清空",
+                isDestructive: true,
+                showDoNotRemind: true,
+                onConfirm: { [weak self] doNotRemind in
+                    guard let self = self else { return }
+                    if doNotRemind {
+                        do {
+                            try self.specialStorage.updateSettings { $0.confirmBeforeClearAllSlots = false }
+                            self.specialSlotSettings.confirmBeforeClearAllSlots = false
+                        } catch {
+                            NSLog("[ClipSlots] update confirmBeforeClearAllSlots failed: \(error)")
+                        }
+                    }
+                    self.clearAllSlotsInCurrentSpecialSlot()
                 }
-            }
-            self.clearAllSlotsInCurrentSpecialSlot()
-        }
-
-        guard let window = sheetHostWindow() else {
-            let response = alert.runModal()
-            guard response == .alertFirstButtonReturn else { return }
-            onConfirm(checkbox)
-            return
-        }
-        alert.beginSheetModal(for: window) { response in
-            guard response == .alertFirstButtonReturn else { return }
-            onConfirm(checkbox)
-        }
+            )
+        )
     }
 
     func clearAllSlotsInCurrentSpecialSlot() {

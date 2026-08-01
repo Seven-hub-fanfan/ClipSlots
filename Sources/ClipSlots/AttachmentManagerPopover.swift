@@ -668,7 +668,10 @@ struct AttachmentRow: View {
             if hovering && !dragActive {
                 hoverToken += 1
                 let token = hoverToken
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+                // UX (v2.10.46): 悬停预览延迟 0.4s → 0.18s，扫视附件更跟手。
+                // 预览窗已开时后续切换即时响应（延迟 0），避免边扫边等的「钝」感。
+                let delay = AttachmentPreviewWindowController.shared.isVisible ? 0 : 0.18
+                DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
                     guard isHovered, token == hoverToken, !dragActive,
                           let rect = anchor.screenRect() else { return }
                     AttachmentPreviewWindowController.shared.show(
@@ -1286,6 +1289,10 @@ final class AttachmentPreviewWindowController {
     private var hostingView: PassthroughHostingView?
     private var currentID: UUID?
     private let previewSize = NSSize(width: 340, height: 300)
+
+    /// UX (v2.10.46): 预览窗当前是否已显示。用于让「已开预览时切换到相邻附件」即时响应，
+    /// 而非每次都重新等待悬停延迟。
+    var isVisible: Bool { currentID != nil && (panel?.isVisible ?? false) }
 
     private init() {}
 
