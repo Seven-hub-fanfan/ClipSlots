@@ -407,6 +407,11 @@ final class SlotStoreObservable: ObservableObject {
     // 为 true 表示已有一次延后的整树指纹采集在排队，期间的其余自写记录直接跳过，由那次采集统一捕获
     // 最终磁盘状态，避免外置后文件数变多时对同一目录树反复整树遍历。
     private var fingerprintRecordPending = false
+    // P2-05 (v2.10.45): 突发合并窗口内是否并入了后续自写（被跳过采集）。仅在 fingerprintQueue 上读写。
+    // 为 true 表示合并窗内还有后续自写，其【最终磁盘态】可能晚于本次 +0.08s 采集落盘、落在采集之后；
+    // 此时需在窗口末尾补采一次「尾指纹」入环，覆盖末尾态，消除「最终态落在两次采集之间 → 误判外部写 →
+    // 多余 reloadAll（界面闪烁）」。
+    private var fingerprintRecordCoalesced = false
 
     // P1-1 (v2.10.35): 槽位写盘统一串行队列。MT-1/APP-3（v2.10.30/32）把原先「主线程同步、天然有序」的
     // 写盘挪到了 DispatchQueue.global（并发队列）。并发队列上多个 async 写块在不同线程竞争同一把跨进程
@@ -560,20 +565,41 @@ final class SlotStoreObservable: ObservableObject {
             // 这里把突发合并：若已有一次待执行的指纹采集在排队，则本次直接跳过——那次采集延后一小段再跑，
             // 会捕获到突发的【最终】磁盘状态（即 watcher 回调时刻磁盘的真实指纹）。0.08s 合并窗远小于
             // watcher 的 0.3s debounce，自写判定的正确性不受影响；分散的自写（间隔大于窗口）仍各自采集。
-            if self.fingerprintRecordPending { return }
+            if self.fingerprintRecordPending {
+                // P2-05 (v2.10.45): 窗口内还有后续自写并入 → 标记，供窗口末尾补采尾指纹。
+                self.fingerprintRecordCoalesced = true
+                return
+            }
             self.fingerprintRecordPending = true
+            self.fingerprintRecordCoalesced = false
             self.fingerprintQueue.asyncAfter(deadline: .now() + 0.08) { [weak self] in
                 guard let self else { return }
                 self.fingerprintRecordPending = false
-                let fp = self.storageDirFingerprint()
-                // 去重后追加到尾部（保持“最近”在后），避免重复自写把同一指纹塞满环。
-                self.pendingSelfWriteFingerprints.removeAll { $0 == fp }
-                self.pendingSelfWriteFingerprints.append(fp)
-                if self.pendingSelfWriteFingerprints.count > self.maxPendingSelfWriteFingerprints {
-                    self.pendingSelfWriteFingerprints.removeFirst(
-                        self.pendingSelfWriteFingerprints.count - self.maxPendingSelfWriteFingerprints)
+                self.appendSelfWriteFingerprint(self.storageDirFingerprint())
+                // P2-05 (v2.10.45): 若合并窗口内并入了后续自写，其最终磁盘态可能晚于上面这次采集落盘、
+                // 落在采集之后 → 尾随 FSEvents 回调时磁盘指纹不在环里 → 误判外部写触发多余 reloadAll。
+                // 在窗口末尾再补采一次尾指纹入环，覆盖末尾态。两次采集合计 0.16s，仍在 watcher 0.3s
+                // debounce 内完成，自写判定正确性不受影响；无并入则不多采（分散自写各自采集足矣）。
+                if self.fingerprintRecordCoalesced {
+                    self.fingerprintRecordCoalesced = false
+                    self.fingerprintQueue.asyncAfter(deadline: .now() + 0.08) { [weak self] in
+                        guard let self else { return }
+                        self.appendSelfWriteFingerprint(self.storageDirFingerprint())
+                    }
                 }
             }
+        }
+    }
+
+    /// P2-05 (v2.10.45): 从 recordSelfWriteFingerprint 抽出的「登记一次自写指纹」原语，供正常采集与
+    /// 尾指纹补采复用。仅在 fingerprintQueue 上调用（串行，pendingSelfWriteFingerprints 无需额外锁）。
+    private func appendSelfWriteFingerprint(_ fp: UInt64) {
+        // 去重后追加到尾部（保持“最近”在后），避免重复自写把同一指纹塞满环。
+        self.pendingSelfWriteFingerprints.removeAll { $0 == fp }
+        self.pendingSelfWriteFingerprints.append(fp)
+        if self.pendingSelfWriteFingerprints.count > self.maxPendingSelfWriteFingerprints {
+            self.pendingSelfWriteFingerprints.removeFirst(
+                self.pendingSelfWriteFingerprints.count - self.maxPendingSelfWriteFingerprints)
         }
     }
 
@@ -1709,7 +1735,16 @@ final class SlotStoreObservable: ObservableObject {
         content.htmlSource = html
         // v2.7.74: preserve existing attachments when updating slot content.
         // v2.8.7 (A): read via contentForSlot so disk-backed attachments survive a cache miss.
-        content.attachments = contentForSlot(slot).attachments
+        // P1-01 (v2.10.45): read via the UNKNOWN-aware accessor. When the authoritative disk
+        // state is genuinely UNKNOWN (cross-process lock busy AND never cached), ABORT — copying
+        // an empty placeholder's attachments would blank them and let the atomic swap drop the
+        // externalized attachments/ bytes permanently.
+        guard let existing = contentForSlotOrUnknown(slot) else {
+            NSLog("[ClipSlots] saveHTMLToSlot slot=\(slot): storage state UNKNOWN (lock busy), aborting write to avoid dropping attachments")
+            showFloatingNotice(FloatingNotice(title: "存储繁忙", subtitle: "槽位 \(slot) 暂不可写，请稍后重试", iconName: "exclamationmark.triangle.fill", kind: .warning))
+            return
+        }
+        content.attachments = existing.attachments
         slots[slot] = content
         persistCurrentSpecialSlotData()
         refreshTrigger = UUID()
@@ -1722,7 +1757,13 @@ final class SlotStoreObservable: ObservableObject {
         // v2.8.0 (P1-1): explicitly carry over existing attachments so editing the
         // HTML source of a slot never silently drops its attachments.
         // v2.8.7 (A): read via contentForSlot so disk-backed attachments survive a cache miss.
-        content.attachments = contentForSlot(slot).attachments
+        // P1-01 (v2.10.45): UNKNOWN-aware read + abort-on-unknown (see saveHTMLToSlot).
+        guard let existing = contentForSlotOrUnknown(slot) else {
+            NSLog("[ClipSlots] updateHTMLSlot slot=\(slot): storage state UNKNOWN (lock busy), aborting write to avoid dropping attachments")
+            showFloatingNotice(FloatingNotice(title: "存储繁忙", subtitle: "槽位 \(slot) 暂不可写，请稍后重试", iconName: "exclamationmark.triangle.fill", kind: .warning))
+            return
+        }
+        content.attachments = existing.attachments
         slots[slot] = content
         persistCurrentSpecialSlotData()
         refreshTrigger = UUID()
@@ -1740,7 +1781,13 @@ final class SlotStoreObservable: ObservableObject {
         // and overwrite the whole record, silently dropping the slot's attachments.
         // Carry the existing attachments over so editing content keeps them.
         // v2.8.7 (A): read via contentForSlot so disk-backed attachments survive a cache miss.
-        content.attachments = contentForSlot(slot).attachments
+        // P1-01 (v2.10.45): UNKNOWN-aware read + abort-on-unknown (see saveHTMLToSlot).
+        guard let existing = contentForSlotOrUnknown(slot) else {
+            NSLog("[ClipSlots] updateTextSlot slot=\(slot): storage state UNKNOWN (lock busy), aborting write to avoid dropping attachments")
+            showFloatingNotice(FloatingNotice(title: "存储繁忙", subtitle: "槽位 \(slot) 暂不可写，请稍后重试", iconName: "exclamationmark.triangle.fill", kind: .warning))
+            return
+        }
+        content.attachments = existing.attachments
         slots[slot] = content
         persistCurrentSpecialSlotData()
         showFloatingNotice(FloatingNotice(title: "已更新文本", subtitle: "槽位 \(slot)", iconName: "pencil.circle.fill", kind: .success))
@@ -2055,6 +2102,21 @@ final class SlotStoreObservable: ObservableObject {
         let stored = specialStorage.get(slot, in: activeId)
         NSLog("[ClipSlots] contentForSlot storage specialSlot=\(activeId) slot=\(slot) preview=\(stored.preview) loadedSpecialSlotId=\(loadedSpecialSlotId ?? "nil")")
         return stored
+    }
+
+    /// P1-01 (v2.10.45): UNKNOWN-aware variant of `contentForSlot` for read-modify-write paths
+    /// that carry over existing attachments (updateTextSlot / updateHTMLSlot / saveHTMLToSlot).
+    /// Returns nil ONLY when the authoritative disk state is genuinely UNKNOWN (cross-process
+    /// lock busy AND this slot never cached). The memory-cache-hit path never returns nil.
+    /// Callers MUST abort the write on nil: overwriting with a blank placeholder would let the
+    /// staging→atomic-swap drop the externalized `attachments/` bytes permanently (no inline
+    /// `data` fallback exists after externalization).
+    private func contentForSlotOrUnknown(_ slot: Int) -> SlotContent? {
+        let activeId = currentSpecialSlotId
+        if loadedSpecialSlotId == activeId, let inMemory = slots[slot], !inMemory.isEmpty {
+            return inMemory
+        }
+        return specialStorage.getOrUnknown(slot, in: activeId)
     }
 
     // MARK: - v2.7.65 Slot Attachments (node canvas)
@@ -2956,7 +3018,11 @@ final class SlotStoreObservable: ObservableObject {
             case .file:
                 return (att.path?.isEmpty == false)
             case .image:
-                return (att.path?.isEmpty == false) || (att.resolveData()?.isEmpty == false)
+                // P2-01 (v2.10.45): 判空用【廉价谓词】，绝不为 file-like 分类触发 resolveData() 把整份
+                // 外置 .bin 读进内存——粘贴含大图/大视频附件时这会造成 2× 内存 + 冗余整读（判空一次、
+                // payloadForAttachment 再读一次），多张大图叠加即瞬时内存尖峰。storageFileURL 仅 stat
+                // 文件是否存在、hasUsableInlineData 仅看内存 data，均为 O(1) 不读字节。
+                return (att.path?.isEmpty == false) || att.storageFileURL != nil || att.hasUsableInlineData
             default:
                 return false
             }

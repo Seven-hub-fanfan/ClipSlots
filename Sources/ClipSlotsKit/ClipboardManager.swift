@@ -443,9 +443,14 @@ extension SlotContent.SlotAttachment {
             if let d = try? Data(contentsOf: url) { return d }
             if attempt == 0 && FileManager.default.fileExists(atPath: sp) == false {
                 // 换盘瞬间：极短退避后重试一次。
+                // P2-02 (v2.10.45): 仅在【非主线程】做 sleep 退避重试。resolveData 被大量 SwiftUI 主线程
+                // 计算属性调用（缩略图回退、文本预览、粘贴构造等）。对真断链外置附件（storagePath 有、文件
+                // 确实缺失），旧实现每次都在主线程 Thread.sleep(15ms)，快速滑过含断链附件的列表时主线程掉帧
+                // 会累加。主线程直接判 nil 回退（TOCTOU 重试仅是锦上添花、非正确性所需），把退避重试留给后台。
+                if Thread.isMainThread { break }
                 Thread.sleep(forTimeInterval: 0.015)
             } else if attempt == 0 {
-                // 文件在但读失败（同样可能是 swap 中途）：立即重试一次。
+                // 文件在但读失败（同样可能是 swap 中途）：立即重试一次（无 sleep，主线程亦廉价）。
                 continue
             } else {
                 break

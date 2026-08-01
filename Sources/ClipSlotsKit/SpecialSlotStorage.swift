@@ -1316,6 +1316,14 @@ public final class SpecialSlotStorage {
         slotStorage(for: specialSlotId).get(slot)
     }
 
+    /// P1-01 (v2.10.45): UNKNOWN-aware variant of `get(_:in:)`. Returns nil ONLY in the
+    /// degraded UNKNOWN state (cross-process lock busy AND slot never cached). Read-modify-write
+    /// callers that carry over attachments MUST use this and abort the write on nil rather than
+    /// overwrite the disk with an empty placeholder (which drops externalized `.bin` bytes).
+    public func getOrUnknown(_ slot: Int, in specialSlotId: String) -> SlotContent? {
+        slotStorage(for: specialSlotId).getOrUnknown(slot)
+    }
+
     /// PERF (switch lag): cheap emptiness probe that avoids loading a slot's full payload.
     /// Prefer this over `get(_:in:).isEmpty` on hot paths (auto-mode cursor previews,
     /// auto-advance scans) where only emptiness — not the content — is needed.

@@ -217,6 +217,18 @@ public final class SlotStorage {
         return loadContentOrUnknown(slot) ?? SlotContent()
     }
 
+    /// P1-01 (v2.10.45): UNKNOWN-aware public read for read-modify-write callers that must
+    /// PRESERVE fields (e.g. attachments carried over on a text/HTML edit). Returns nil ONLY
+    /// in the degraded UNKNOWN case (cross-process lock busy AND this slot never cached);
+    /// every other path returns a real value. Unlike `get()`, it does NOT collapse UNKNOWN
+    /// into an empty placeholder. A caller that copies `get(slot).attachments` into a fresh
+    /// SlotContent and then persists it would, on UNKNOWN, silently blank the attachments and
+    /// let the staging→atomic-swap drop the externalized `attachments/` bytes permanently.
+    /// Such callers MUST use this and ABORT the write when it returns nil.
+    public func getOrUnknown(_ slot: Int) -> SlotContent? {
+        return loadContentOrUnknown(slot)
+    }
+
     /// Shared core for `get()` / `isSlotEmpty`. Returns nil ONLY in the degraded case where
     /// the cross-process lock could not be acquired AND this slot has never been cached — i.e.
     /// the on-disk content is genuinely UNKNOWN (NOT known-empty). Every other path returns a
@@ -913,6 +925,16 @@ public final class SlotStorage {
                         + "refusing to overwrite it with an empty payload — preserving the original file "
                         + "across the atomic write so it stays recoverable.")
                 }
+                // P2-04 (v2.10.45): 外置后 attachments.json 与字节分离，仅保 JSON 不保
+                // {slotDir}/attachments/ 目录，原子 swap 后 JSON 引用的外置 .bin 仍会随 swap 丢失。
+                // 守卫触发时连同整个 attachments/ 字节目录一并克隆进 staging，最大化保住可能仍有效的字节。
+                let liveAttachmentsDir = slotDir.appendingPathComponent("attachments", isDirectory: true)
+                let stagedAttachmentsDir = stagingDir.appendingPathComponent("attachments", isDirectory: true)
+                if FileManager.default.fileExists(atPath: liveAttachmentsDir.path),
+                   !FileManager.default.fileExists(atPath: stagedAttachmentsDir.path) {
+                    try? FileManager.default.copyItem(at: liveAttachmentsDir, to: stagedAttachmentsDir)
+                    NSLog("[ClipSlots] WARNING: slot \(slot) corrupt-guard — also preserved attachments/ byte directory across the atomic write.")
+                }
             }
 
             // Atomic swap: replace the live slot dir with the fully-built staging dir.
@@ -990,9 +1012,27 @@ public final class SlotStorage {
                     throw SlotStorageError.attachmentExternalizeFailed(slot: slot, attachment: att.id, source: sp)
                 }
             } else {
-                // 情形 3：无字节（纯 path 引用 / url / reference / storagePath 已断链）——原样保留元数据。
-                // 若 storagePath 指向已不存在的文件，清空以如实反映断链，避免读侧误判有字节。
-                if let sp = att.storagePath, !sp.isEmpty, !fm.fileExists(atPath: sp) {
+                // 情形 3：内联无 data 且 storagePath 缺失 / 断链。
+                // P2-03 (v2.10.45): 清空 storagePath 前先【回探规范路径】{slotDir}/attachments/{id}.bin。
+                // att.storagePath 可能是绕过 P1-B normalizeStoragePaths 的陈旧路径（未来重构、或从持久化
+                // JSON 直接构造 SlotContent 而绕过 readSlotContent），而真实字节其实仍躺在规范位置。整槽
+                // 目录每次 staging→原子 swap 会把 live 目录整体替换掉，若不把规范路径下的 .bin 克隆进
+                // staging，swap 后这份真实字节就被丢弃 → 永久丢失。故：
+                //   • 规范路径存在 → 按情形 2 克隆进 staging 并回填 storagePath（克隆失败同样抛错回滚）；
+                //   • 仅当规范路径也确不存在时，才判为真断链、清空 storagePath（如实反映，避免读侧误判有字节）。
+                let canonicalURL = finalAttachmentsDir.appendingPathComponent(binName)
+                if fm.fileExists(atPath: canonicalURL.path) {
+                    try ensureStagingDir()
+                    try? fm.removeItem(at: destFile)
+                    if cloneOrCopyItem(at: canonicalURL, to: destFile) {
+                        out.data = nil
+                        out.storagePath = finalPath
+                    } else {
+                        NSLog("[ClipSlots] externalizeAttachments slot=\(slot) att=\(att.id) clone FAIL from canonical \(canonicalURL.path) — aborting write to preserve existing bytes")
+                        throw SlotStorageError.attachmentExternalizeFailed(slot: slot, attachment: att.id, source: canonicalURL.path)
+                    }
+                } else if let sp = att.storagePath, !sp.isEmpty {
+                    // 规范路径也不存在 → 真断链，清空以如实反映断链，避免读侧误判有字节。
                     out.storagePath = nil
                 }
             }
