@@ -556,6 +556,30 @@ public final class SlotStorage {
         return queue.sync { labelCache.index(forKey: slot) != nil ? labelCache[slot]! : nil }
     }
 
+    /// P0 (v2.10.40): no-lock label read for callers that ALREADY run on `queue`
+    /// (and, in the write path, already hold `StorageLock`). `getLabel` takes
+    /// `queue.sync`, so calling it from inside `set()`'s `queue.sync` block (via
+    /// `writeSlotContent`) triggered "dispatch_sync called on queue already owned
+    /// by current thread" (EXC_BREAKPOINT) — the v2.10.39 pack-import crash. This
+    /// variant mirrors `getLabel`'s cache/disk logic WITHOUT re-dispatching onto
+    /// `queue` or re-taking the cross-process lock. MUST only be called while
+    /// executing on `queue`.
+    private func getLabelOnQueue(_ slot: Int) -> String? {
+        let labelFile = baseURL.appendingPathComponent(String(slot)).appendingPathComponent("label.txt")
+        let fp = dirFingerprint(labelFile.path)
+        // Serve the cache when its fingerprint still matches disk.
+        if labelCache.index(forKey: slot) != nil, labelCacheFingerprint[slot]! == fp {
+            return labelCache[slot]!
+        }
+        // Miss / stale: read label.txt directly (we're already on `queue`, and the
+        // caller holds the cross-process lock, so no extra locking is needed).
+        let value = (try? String(contentsOf: labelFile, encoding: .utf8))?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        labelCache[slot] = value
+        labelCacheFingerprint[slot] = fp
+        return value
+    }
+
     public func setLabel(_ slot: Int, label: String?) {
         // DS-3 / CR-3 (v2.10.30): refuse writes on an invalidated (deleted-group) instance.
         if isInvalidated { return }
@@ -736,7 +760,12 @@ public final class SlotStorage {
         cleanupStagingDirs(slot: slot)
 
         // Preserve label before rebuilding.
-        let existingLabel = getLabel(slot)
+        // P0 (v2.10.40): writeSlotContent always runs inside set()'s `queue.sync`
+        // block, so it MUST use the no-lock, on-queue variant. Calling the public
+        // `getLabel` here re-entered `queue.sync` on the queue-owning thread and
+        // crashed with "dispatch_sync called on queue already owned by current
+        // thread" during pack import (v2.10.39).
+        let existingLabel = getLabelOnQueue(slot)
 
         // P1-3 (v2.10.8): atomic write. The old implementation removed `slotDir`
         // first and then rebuilt it file-by-file. If the process crashed / was
