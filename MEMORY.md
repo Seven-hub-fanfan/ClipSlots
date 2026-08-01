@@ -4,11 +4,21 @@
 
 ## 当前版本
 
-- **当前版本：v2.9.29**
+- **当前版本：v2.10.38**
 - 平台：macOS（Swift / SwiftUI，SPM 构建，macOS 13+）
 - 单一版本号事实来源：`Info.plist` 的 `CFBundleShortVersionString`（`AppVersion.current` 动态读取，`AppVersion.fallback` 为编译期兜底）。CLI 版本号见 `Sources/ClipSlotsCLI/main.swift` 的 `CLI_VERSION`。
 
 ## 版本要点（近期）
+
+### v2.10.38 — 大批量图库卡顿 P0 优化（4 项）
+- 背景：导入约 1.6GB `.clipslotspack` 图库后「几乎所有操作 3-5s 彩球」。根因分析报告见 https://bytedance.larkoffice.com/docx/BLa5dspXfoGKSnxwUAecKY12nqe
+- **P0-1 搜索异步化 + label 内存缓存**：`SlotStorage.getLabel` 加 label.txt 指纹缓存 + 无锁快路径（命中不抢 flock、不读盘）；`SlotStoreObservable.allSearchableSlots` 拆为 `searchableGroupsSnapshot()`（主线程仅捕获轻量分组引用）+ `expandSearchableSlots()`（后台展开逐槽 snapshot/getLabel），ContentView 全局搜索把展开+过滤+排序整体移出主线程。
+- **P0-2 导入完成异步刷新 + 跳过重指纹**：导入成功/失败分支的 `reloadAll()` 改 `reloadAllAsync()`；`suppressWatcher` 新增 `recordFingerprint:` 参数，导入收敛时传 `false` 跳过 1.6GB 全树指纹遍历。
+- **P0-3 读路径限时**：新增 `SlotStorage.readLockTimeout = 2.0`，`get()`/`getLabel()` 慢路径用短超时，超时回退最近缓存值，杜绝主线程读操作等满 5s。
+- **P0-4 缩略图解码全局并发限流**：新增 `ThumbnailDecodeLimiter`（actor，按核数 2–6 上限），网格缩略图（SlotThumbnailView）与内联预览（InlineImageView）解码经其 `run{}` 限流。
+- commit：`c39b101`（fix+bump 合并）
+- DMG SHA256：`2b725105530aab1974af0614795f5c15a64db3c108427a8c02b413d7430f9827`
+- Release：https://github.com/Seven-hub-fanfan/ClipSlots/releases/tag/v2.10.38
 
 ### v2.9.29
 - **CLI 新增 `--page-name`（与 `--group-name` 对称）**：`list`/`read`/`write`/`paste`/`create-group` 均支持按页面名精确匹配（遍历 `index.pages` 找 `name == pageName` 取其 id）。页面名找不到时显式报错 `找不到名为 '<name>' 的页面` 并非零退出，不再静默回落默认页；`--page`/`--page-name` 互斥（同传报 `只能指定 --page 或 --page-name 其中一个`）。`create-group` 的 `--page` 收敛为严格校验：显式传入不存在的页面 id/名 直接报错，不再静默落到当前页。
