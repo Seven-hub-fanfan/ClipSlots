@@ -2935,7 +2935,7 @@ final class SlotStoreObservable: ObservableObject {
             case .file:
                 return (att.path?.isEmpty == false)
             case .image:
-                return (att.path?.isEmpty == false) || (att.data?.isEmpty == false)
+                return (att.path?.isEmpty == false) || (att.resolveData()?.isEmpty == false)
             default:
                 return false
             }
@@ -3387,7 +3387,7 @@ final class SlotStoreObservable: ObservableObject {
         let empty = ChainPastePayload(sourceSlot: 0, text: nil, fileURLs: [], isImage: false, isEmpty: true, image: nil)
         switch att.type {
         case .text:
-            let text = att.data.flatMap { String(data: $0, encoding: .utf8) } ?? att.name
+            let text = att.resolveData().flatMap { String(data: $0, encoding: .utf8) } ?? att.name
             return ChainPastePayload(sourceSlot: 0, text: text, fileURLs: [], isImage: false, isEmpty: text.isEmpty, image: nil)
         case .url:
             let text = att.url ?? att.name
@@ -3400,7 +3400,7 @@ final class SlotStoreObservable: ObservableObject {
                   FileManager.default.fileExists(atPath: path) else { return empty }
             return ChainPastePayload(sourceSlot: 0, text: nil, fileURLs: [URL(fileURLWithPath: path)], isImage: false, isEmpty: false, image: nil)
         case .image:
-            if let data = att.data, let image = NSImage(data: data) {
+            if let data = att.resolveData(), let image = NSImage(data: data) {
                 return ChainPastePayload(sourceSlot: 0, text: nil, fileURLs: [], isImage: true, isEmpty: false, image: image)
             }
             // v2.10.37: 无内联字节时才回退到源文件；同样校验文件存在，断链即跳过。
@@ -3719,7 +3719,7 @@ final class SlotStoreObservable: ObservableObject {
             if let path = att.path, !path.isEmpty, FileManager.default.fileExists(atPath: path) {
                 return URL(fileURLWithPath: path)
             }
-            guard let data = att.data, !data.isEmpty else { return nil }
+            guard let data = att.resolveData(), !data.isEmpty else { return nil }
             return spillImageDataToTempFile(att, data: data, tempFiles: &tempFiles)
         default:
             return nil

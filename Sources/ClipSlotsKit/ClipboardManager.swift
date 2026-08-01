@@ -403,6 +403,25 @@ extension SlotContent.SlotAttachment {
         return false
     }
 
+    /// 统一的附件字节懒加载入口（方案 B / 附件字节外置架构）。
+    ///
+    /// 设计目标：把散落各处「直接读 `att.data`」的代码统一收敛到这一个函数，
+    /// 使后续两步能安全落地——
+    ///   • Step 1（v2.10.41，当前）：字节仍内联在 JSON 里，本函数直接返回 `self.data`，
+    ///     行为与旧代码逐字节一致，纯重构、零行为变化。
+    ///   • Step 2（v2.10.42，后续）：写盘时把字节外置到独立文件，本函数将扩展为
+    ///     「先看内联 `self.data`，为空则按内容寻址从磁盘懒加载字节」，同时对老数据懒迁移。
+    ///   • Step 3（v2.10.43，后续）：pack 导入/导出与 CLI 适配外置字节。
+    ///
+    /// 因此所有需要「拿到附件原始字节」的读取路径都应调用 `resolveData()`，
+    /// 而不再直接访问 `self.data`；这样 Step 2 落地时无需再逐处修改调用点。
+    ///
+    /// 返回 nil 表示该附件没有可用字节（例如纯路径引用 / url / reference 型）。
+    public func resolveData() -> Data? {
+        // Step 1：字节仍在内存/JSON 内，直接返回。后续步骤在此追加磁盘懒加载分支。
+        return self.data
+    }
+
     /// 本地文件引用实际应指向的磁盘路径：优先 `path`，其次导入时保留的 `originalPath`。
     /// 仅对 image/file 类型有意义；其余类型返回 nil。
     public var localFileReferencePath: String? {

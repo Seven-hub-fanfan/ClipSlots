@@ -239,7 +239,7 @@ struct PackExporter {
                         // PK-3 (v2.10.30): 外置源文件不再用 `Data(contentsOf:)` 整体读入内存再写出（单个
                         // 2GB 视频即可 OOM），改为先用元数据做存在性/非空探测，再用 `FileManager.copyItem`
                         // 流式拷贝到 attachments/ 暂存目录——全程不把文件内容加载进内存。
-                        if let data = att.data {
+                        if let data = att.resolveData() {
                             // 内联字节：已在内存中，直接写出（不引入额外内存放大）。
                             if !attachmentsDirCreated {
                                 try createDir(attachmentsDir)

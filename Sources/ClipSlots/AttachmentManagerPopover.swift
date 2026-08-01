@@ -694,7 +694,7 @@ struct AttachmentRow: View {
         case .url:
             return attachment.url ?? ""
         case .text:
-            let text = attachment.data.flatMap { String(data: $0, encoding: .utf8) } ?? ""
+            let text = attachment.resolveData().flatMap { String(data: $0, encoding: .utf8) } ?? ""
             return String(text.prefix(30))
         case .reference:
             return attachment.path.map { "→ 槽位 \($0)" } ?? "引用"
@@ -754,7 +754,7 @@ enum AttachmentThumbnailProvider {
             if let path = att.path, !path.isEmpty {
                 if let thumb = downsampledThumbnail(path: path, maxPixel: maxPixel) { return thumb }
             }
-            if let data = att.data {
+            if let data = att.resolveData() {
                 if let thumb = downsampledThumbnail(data: data, maxPixel: maxPixel) { return thumb }
             }
             return nil
@@ -814,7 +814,7 @@ enum AttachmentThumbnailProvider {
         switch att.type {
         case .image:
             if let path = att.path, !path.isEmpty, let img = NSImage(contentsOfFile: path) { return img }
-            if let data = att.data, let img = NSImage(data: data) { return img }
+            if let data = att.resolveData(), let img = NSImage(data: data) { return img }
             return nil
         case .file:
             guard let path = att.path, !path.isEmpty else { return nil }
@@ -841,7 +841,7 @@ enum AttachmentThumbnailProvider {
         case .image:
             if let path = att.path, !path.isEmpty,
                let thumb = downsampledThumbnail(path: path, maxPixel: maxPixel) { return thumb }
-            if let data = att.data,
+            if let data = att.resolveData(),
                let thumb = downsampledThumbnail(data: data, maxPixel: maxPixel) { return thumb }
             return nil
         case .file:
@@ -955,7 +955,7 @@ private struct AttachmentPreviewContent: View {
     }
 
     private var bodyText: String {
-        attachment.data.flatMap { String(data: $0, encoding: .utf8) } ?? attachment.name
+        attachment.resolveData().flatMap { String(data: $0, encoding: .utf8) } ?? attachment.name
     }
 
     private func textCard(_ text: String) -> some View {
