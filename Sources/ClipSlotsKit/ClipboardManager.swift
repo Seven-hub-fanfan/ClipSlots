@@ -66,9 +66,16 @@ public struct SlotContent: Codable {
         /// （只保留了路径引用）且 `path` 不可用时，据此做断链检测与提示，避免粘贴静默失败/破损缩略图。
         /// 可选字段，历史数据缺失即为 nil（Codable 向后兼容）。
         public var originalPath: String?
+        /// v2.10.42（方案 B / 附件字节外置架构 Step 2）：外置字节文件的绝对路径，
+        /// 指向 `{slotDir}/attachments/{id}.bin`。当附件字节已从 attachments.json 外置到
+        /// 独立文件时，`data` 置 nil、本字段记录字节所在磁盘路径；`resolveData()` 在内存
+        /// `data` 为空时据此懒加载。可选字段，历史数据缺失即为 nil（Codable 向后兼容）：
+        ///   • 老数据（inline base64 `data`，无 storagePath）：首次读时懒迁移落盘并回填本字段。
+        ///   • 纯路径引用 / url / reference 型附件：本字段始终为 nil（字节不由本机存储层管理）。
+        public var storagePath: String?
         public var createdAt: Date = Date()
 
-        public init(id: UUID = UUID(), name: String, type: AttachmentType, path: String? = nil, url: String? = nil, data: Data? = nil, originalPath: String? = nil, createdAt: Date = Date()) {
+        public init(id: UUID = UUID(), name: String, type: AttachmentType, path: String? = nil, url: String? = nil, data: Data? = nil, originalPath: String? = nil, storagePath: String? = nil, createdAt: Date = Date()) {
             self.id = id
             self.name = name
             self.type = type
@@ -76,6 +83,7 @@ public struct SlotContent: Codable {
             self.url = url
             self.data = data
             self.originalPath = originalPath
+            self.storagePath = storagePath
             self.createdAt = createdAt
         }
     }
@@ -418,8 +426,18 @@ extension SlotContent.SlotAttachment {
     ///
     /// 返回 nil 表示该附件没有可用字节（例如纯路径引用 / url / reference 型）。
     public func resolveData() -> Data? {
-        // Step 1：字节仍在内存/JSON 内，直接返回。后续步骤在此追加磁盘懒加载分支。
-        return self.data
+        // Step 2（v2.10.42）：字节懒加载入口。
+        // 1) 内联字节优先——覆盖两种情形：
+        //    • 新写入尚未落盘前的内存态附件（setAttachments 拿到的 in-memory data）；
+        //    • 老数据尚未触发懒迁移时（attachments.json 里仍内联着 base64 data）。
+        if let d = self.data { return d }
+        // 2) 外置字节——内存无 data 时，按 storagePath 从磁盘懒加载 `{slotDir}/attachments/{id}.bin`。
+        //    读失败 / 文件缺失（断链）返回 nil，与旧「无字节」语义一致，调用方据此回退。
+        if let sp = self.storagePath, !sp.isEmpty,
+           FileManager.default.fileExists(atPath: sp) {
+            return try? Data(contentsOf: URL(fileURLWithPath: sp))
+        }
+        return nil
     }
 
     /// 本地文件引用实际应指向的磁盘路径：优先 `path`，其次导入时保留的 `originalPath`。

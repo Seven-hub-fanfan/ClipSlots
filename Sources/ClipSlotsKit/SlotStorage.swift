@@ -227,7 +227,10 @@ public final class SlotStorage {
                 }
                 let content = readSlotContent(from: slotDir)
                 cache[slot] = content
-                cacheFingerprint[slot] = fp
+                // Step 2 (v2.10.42): readSlotContent 可能触发老数据懒迁移（写 .bin + 改写
+                // attachments.json），改变了 slotDir 指纹。这里在读之后重新 stat 一次指纹再缓存，
+                // 否则下一次 get() 会因指纹不匹配而多做一次无谓的整槽重读。
+                cacheFingerprint[slot] = dirFingerprint(slotDir.path)
                 return content
             }
         }) {
@@ -712,7 +715,11 @@ public final class SlotStorage {
         if FileManager.default.fileExists(atPath: attachmentsURL.path) {
             if let attData = try? Data(contentsOf: attachmentsURL),
                let atts = try? decoder.decode([SlotContent.SlotAttachment].self, from: attData) {
-                content.attachments = atts
+                // Step 2 (v2.10.42) 老数据懒迁移：若解码出的附件仍内联着 base64 `data`
+                // （老格式，storagePath 缺失/文件不存在），首次读到时把字节外置成独立文件并
+                // 回写 JSON，收敛到「JSON 只存元数据 + storagePath」的新格式。见方法内注释——
+                // 全程原子化、先落盘 .bin 再改写 JSON，中途崩溃不丢原始 data；无迁移需求时零写盘。
+                content.attachments = migrateInlineAttachmentsIfNeeded(atts, slotDir: slotDir)
                 // Clean decode clears any prior corruption poison for this slot.
                 if let s = slotNum { attachmentDecodeFailedSlots.remove(s) }
             } else {
@@ -808,8 +815,13 @@ public final class SlotStorage {
                 try metaData.write(to: stagingDir.appendingPathComponent("content.json"), options: .atomic)
 
                 // Persist slot attachments alongside item data so they survive restarts.
+                // Step 2 (v2.10.42) 附件字节外置：把「带字节」的附件写成独立文件
+                // `{slotDir}/attachments/{id}.bin`，attachments.json 从此只存元数据 + storagePath
+                // （data 置 nil）。externalizeAttachments 在 staging 目录内落盘，随整槽目录原子 swap
+                // 一并生效——JSON 与其引用的 .bin 文件永远同生共死，不会出现「JSON 指向不存在字节」。
                 if !content.attachments.isEmpty {
-                    let attData = try encoder.encode(content.attachments)
+                    let externalized = try externalizeAttachments(content.attachments, slot: slot, stagingDir: stagingDir)
+                    let attData = try encoder.encode(externalized)
                     try attData.write(to: stagingDir.appendingPathComponent("attachments.json"), options: .atomic)
                 }
             }
@@ -844,6 +856,139 @@ public final class SlotStorage {
             try? FileManager.default.removeItem(at: stagingDir)
             throw error
         }
+    }
+
+    /// Step 2 (v2.10.42) 附件字节外置：把每个「带字节」的附件写成独立文件
+    /// `{stagingDir}/attachments/{id}.bin`（随整槽目录原子 swap 后成为 `{slotDir}/attachments/{id}.bin`），
+    /// 返回「字节已外置」的附件数组（`data=nil`、`storagePath=最终路径`）用于写入 attachments.json。
+    ///
+    /// 字节来源优先级：
+    ///   1) 内联 `data`（新写入 / 尚未迁移的内存态）——直接写文件；inline 已在内存中，不额外放大内存。
+    ///   2) 已外置的 `storagePath` 指向的现存文件（本槽历次写入 / 读后内存 data 为 nil）——用 clonefile
+    ///      克隆进 staging，保证「重写槽位（如只改正文/标签）」时不丢历史外置字节；否则整槽目录每次
+    ///      staging→原子 swap，旧 `.bin` 会随 swap 一并消失。
+    ///   3) 二者皆无（纯 path 引用 / url / reference / 断链）——原样保留元数据，不外置。
+    private func externalizeAttachments(_ attachments: [SlotContent.SlotAttachment],
+                                        slot: Int,
+                                        stagingDir: URL) throws -> [SlotContent.SlotAttachment] {
+        let fm = FileManager.default
+        let finalAttachmentsDir = baseURL.appendingPathComponent(String(slot))
+            .appendingPathComponent("attachments", isDirectory: true)
+        let stagingAttachmentsDir = stagingDir.appendingPathComponent("attachments", isDirectory: true)
+
+        func ensureStagingDir() throws {
+            if !fm.fileExists(atPath: stagingAttachmentsDir.path) {
+                try fm.createDirectory(at: stagingAttachmentsDir, withIntermediateDirectories: true)
+            }
+        }
+
+        var result: [SlotContent.SlotAttachment] = []
+        result.reserveCapacity(attachments.count)
+
+        for att in attachments {
+            let binName = att.id.uuidString + ".bin"
+            let destFile = stagingAttachmentsDir.appendingPathComponent(binName)
+            // storagePath 记录的是「原子 swap 后」的最终路径，读侧稳定可寻址。
+            let finalPath = finalAttachmentsDir.appendingPathComponent(binName).path
+
+            var out = att
+            if let inline = att.data, !inline.isEmpty {
+                // 情形 1：内联字节 → 落成独立文件。
+                try ensureStagingDir()
+                try inline.write(to: destFile, options: .atomic)
+                out.data = nil
+                out.storagePath = finalPath
+            } else if let sp = att.storagePath, !sp.isEmpty, fm.fileExists(atPath: sp) {
+                // 情形 2：本已外置、内存无 data → 把现存 .bin 克隆进 staging（零内存），
+                // 否则整目录原子 swap 会把旧字节文件一并替换掉导致丢失。
+                try ensureStagingDir()
+                try? fm.removeItem(at: destFile)
+                if cloneOrCopyItem(at: URL(fileURLWithPath: sp), to: destFile) {
+                    out.data = nil
+                    out.storagePath = finalPath
+                } else {
+                    // 搬运失败：不谎报外置路径（会让读侧断链），退回「无字节」元数据。
+                    out.data = nil
+                    out.storagePath = nil
+                    NSLog("[ClipSlots] externalizeAttachments slot=\(slot) att=\(att.id) clone FAIL from \(sp)")
+                }
+            } else {
+                // 情形 3：无字节（纯 path 引用 / url / reference / storagePath 已断链）——原样保留元数据。
+                // 若 storagePath 指向已不存在的文件，清空以如实反映断链，避免读侧误判有字节。
+                if let sp = att.storagePath, !sp.isEmpty, !fm.fileExists(atPath: sp) {
+                    out.storagePath = nil
+                }
+            }
+            result.append(out)
+        }
+        return result
+    }
+
+    /// Step 2 (v2.10.42) 老数据懒迁移：把 attachments.json 里仍内联着 base64 `data` 的老附件
+    /// 字节外置成独立文件 `{slotDir}/attachments/{id}.bin`，并回写 JSON（data 置 nil、写入
+    /// storagePath），使老数据收敛到新格式。仅在 get() 的慢路径（已持跨进程 StorageLock + 串行
+    /// queue）内被 readSlotContent 调用，故此处磁盘写入是并发安全的。
+    ///
+    /// 崩溃安全（要求 5）——严格的落盘顺序 + 原子操作：
+    ///   1) 逐条把内联字节写入唯一命名的临时文件，再 rename 到最终 `{id}.bin`（rename 前最终名不
+    ///      可见，崩溃只会留下可被覆盖/清理的 .tmp，绝不产生半截 .bin）。
+    ///   2) 只有 .bin 全部安全落盘后，才原子改写 attachments.json 去掉内联 data。
+    ///   因此任意时刻「原始内联 data」与「已外置 .bin」至少一份完整存在：崩溃在改写 JSON 之前 →
+    ///   旧 JSON（含 data）仍在，下次读幂等重迁；崩溃在之后 → .bin + 新 JSON 一致。原始 data 永不丢。
+    ///
+    /// 无迁移需求时（新数据 / 无内联 data）零写盘，直接返回原数组，不影响正常读取。
+    private func migrateInlineAttachmentsIfNeeded(_ attachments: [SlotContent.SlotAttachment],
+                                                  slotDir: URL) -> [SlotContent.SlotAttachment] {
+        let fm = FileManager.default
+        // 需要迁移 = 携带内联 data，且尚无可用的外置文件。
+        func needsMigration(_ att: SlotContent.SlotAttachment) -> Bool {
+            guard let d = att.data, !d.isEmpty else { return false }
+            if let sp = att.storagePath, !sp.isEmpty, fm.fileExists(atPath: sp) { return false }
+            return true
+        }
+        guard attachments.contains(where: needsMigration) else { return attachments }
+
+        let attachmentsDir = slotDir.appendingPathComponent("attachments", isDirectory: true)
+        var migrated = attachments
+        var anyChanged = false
+
+        for i in migrated.indices {
+            let att = migrated[i]
+            guard needsMigration(att), let bytes = att.data else { continue }
+            let binName = att.id.uuidString + ".bin"
+            let finalFile = attachmentsDir.appendingPathComponent(binName)
+            do {
+                if !fm.fileExists(atPath: attachmentsDir.path) {
+                    try fm.createDirectory(at: attachmentsDir, withIntermediateDirectories: true)
+                }
+                // 临时文件 + rename：唯一命名的 .tmp 写完再 move 到最终名，保证最终 .bin 不会半截。
+                let tmpFile = attachmentsDir.appendingPathComponent(".mig_\(binName)_\(UUID().uuidString).tmp")
+                try bytes.write(to: tmpFile)
+                if fm.fileExists(atPath: finalFile.path) { try? fm.removeItem(at: finalFile) }
+                try fm.moveItem(at: tmpFile, to: finalFile)
+                // .bin 安全落盘后，才把内存态改为「已外置」：data 置 nil、storagePath 指向新文件。
+                migrated[i].data = nil
+                migrated[i].storagePath = finalFile.path
+                anyChanged = true
+            } catch {
+                // 单条迁移失败：保留内联 data（绝不丢原始字节），下次读再重试（幂等）。
+                NSLog("[ClipSlots] migrate attachment slot=\(slotDir.lastPathComponent) att=\(att.id) FAIL: \(error)")
+            }
+        }
+
+        // 只有确有字节成功外置后，才原子改写 attachments.json（此时 .bin 已安全落盘）。
+        if anyChanged {
+            do {
+                let attData = try encoder.encode(migrated)
+                try attData.write(to: slotDir.appendingPathComponent("attachments.json"), options: .atomic)
+            } catch {
+                // JSON 改写失败：.bin 已在盘上但 JSON 仍是旧的（含 data）——数据不丢；下次读因旧 JSON
+                // 无 storagePath 仍判定需迁移，会覆盖同名 .bin 并重试写 JSON（幂等）。本次返回 migrated
+                // （storagePath 已指向存在文件），读取正常。
+                NSLog("[ClipSlots] migrate rewrite attachments.json FAIL slot=\(slotDir.lastPathComponent): \(error)")
+            }
+        }
+        return migrated
     }
 
     // MARK: - Safe Filename Encoding
