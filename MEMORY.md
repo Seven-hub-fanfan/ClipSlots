@@ -4,11 +4,20 @@
 
 ## 当前版本
 
-- **当前版本：v2.10.38**
+- **当前版本：v2.10.39**
 - 平台：macOS（Swift / SwiftUI，SPM 构建，macOS 13+）
 - 单一版本号事实来源：`Info.plist` 的 `CFBundleShortVersionString`（`AppVersion.current` 动态读取，`AppVersion.fallback` 为编译期兜底）。CLI 版本号见 `Sources/ClipSlotsCLI/main.swift` 的 `CLI_VERSION`。
 
 ## 版本要点（近期）
+
+### v2.10.39 — 导入进度条浮层
+- 需求：导入时加进度条，让用户看到导入进度。覆盖三条导入路径：槽位包导入（PackImporter）、批量图片/文件导入（handleBatchSave）、文件夹导入当前组（importFolderIntoCurrentSpecialSlot）。
+- **新增 `ImportProgress` 模型 + `SlotStoreObservable.importProgress` @Published 状态**：非空即表示导入进行中；`publishImportProgress()` 统一在主线程发布。ContentView ZStack 内新增 `importProgressOverlay`（半透明遮罩拦截点击 + 居中 `.ultraThickMaterial` 卡片，含 `ProgressView` 进度条、`已处理/总数`、百分比、当前项名称）。`total<=0` 显示不确定进度（.linear 无值），否则确定进度。
+- **PackImporter.importPack 新增 `onProgress: (done,total,name)` 回调**：新增 `countTotalSlots(manifest:pagesRoot:)` 预统计总槽位数（遍历各页组 slots 声明，空则扫 slots 目录，口径同 writeSlots）；每写完一组上报一次（组级粒度）。解压/解析阶段先发不确定进度。
+- **batch/folder 导入循环内逐条上报**：每处理一个文件刷新 `completed=index+1`，完成/失败分支 `publishImportProgress(nil)` 收起浮层。
+- commit：`e3def87`（fix+bump 合并）
+- DMG SHA256：`f6b8346fc5ef802da3dad7e2f2a6c8689dea2227d83170b5f67ccbb0b982eeb4`
+- Release：https://github.com/Seven-hub-fanfan/ClipSlots/releases/tag/v2.10.39
 
 ### v2.10.38 — 大批量图库卡顿 P0 优化（4 项）
 - 背景：导入约 1.6GB `.clipslotspack` 图库后「几乎所有操作 3-5s 彩球」。根因分析报告见 https://bytedance.larkoffice.com/docx/BLa5dspXfoGKSnxwUAecKY12nqe
