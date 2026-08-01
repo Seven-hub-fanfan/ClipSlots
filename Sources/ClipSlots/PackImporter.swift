@@ -74,11 +74,13 @@ struct PackImporter {
     }
 
     /// 执行导入。resolver 闭包在需要用户决策时被同步调用（应在主线程运行）。
+    /// v2.10.39: onProgress 在后台线程被调用，用于驱动进度条；参数为 (已写入槽位数, 总槽位数, 当前组名)。
     @discardableResult
     func importPack(
         from packURL: URL,
         resolvePageConflict: (_ pageName: String) -> PackConflictResolution,
-        resolveGroupConflict: (_ pageName: String, _ groupName: String) -> PackConflictResolution
+        resolveGroupConflict: (_ pageName: String, _ groupName: String) -> PackConflictResolution,
+        onProgress: ((_ done: Int, _ total: Int, _ currentName: String) -> Void)? = nil
     ) throws -> PackImportResult {
         let fm = FileManager.default
         let tmp = fm.temporaryDirectory.appendingPathComponent("clipslotspack_in_\(UUID().uuidString)", isDirectory: true)
@@ -87,6 +89,13 @@ struct PackImporter {
         try unzip(packURL, to: tmp)
         let manifest = try loadManifest(in: tmp)
         let pagesRoot = tmp.appendingPathComponent("pages", isDirectory: true)
+
+        // v2.10.39: 预统计总槽位数，供进度条显示分母。轻量遍历各页组的 slots 声明；
+        // 声明为空时回退扫描 slots 目录，与 writeSlots 的口径保持一致。失败不影响导入，
+        // 仅令进度条退化为不确定态（total=0）。
+        let totalSlots = countTotalSlots(manifest: manifest, pagesRoot: pagesRoot)
+        var doneSlots = 0
+        onProgress?(0, totalSlots, "")
 
         var result = PackImportResult()
 
@@ -193,6 +202,9 @@ struct PackImporter {
                 let slotCount = try writeSlots(from: slotsRoot, declaredSlots: packGroup.slots, into: targetGroupId, importedAttachmentPaths: &importedAttachmentPaths)
                 result.importedGroups += 1
                 result.importedSlots += slotCount
+                // v2.10.39: 每写完一个组上报一次进度（组级粒度，足够驱动进度条）。
+                doneSlots += slotCount
+                onProgress?(doneSlots, totalSlots, packGroup.name)
             }
         }
         } catch {
@@ -278,6 +290,30 @@ struct PackImporter {
         SlotContent.purgeAllInlineImageCaches()
 
         return result
+    }
+
+    // MARK: - 统计总槽位数（进度条分母）
+
+    /// v2.10.39: 轻量预统计包内总槽位数，供进度条显示分母。遍历各页 groups 的 slots 声明，
+    /// 声明为空时回退扫描 slots 目录（与 writeSlots 口径一致）。任何读取失败都被吞掉并跳过，
+    /// 统计仅用于展示，绝不影响导入正确性；返回 0 时进度条退化为不确定态。
+    private func countTotalSlots(manifest: PackManifest, pagesRoot: URL) -> Int {
+        let fm = FileManager.default
+        var total = 0
+        for manifestPage in manifest.pages {
+            guard let pageDir = safeChildURL(in: pagesRoot, component: manifestPage.id, isDirectory: true) else { continue }
+            let groupsRoot = pageDir.appendingPathComponent("groups", isDirectory: true)
+            for (groupDir, packGroup) in loadGroups(in: groupsRoot) {
+                var slotNumbers = packGroup.slots
+                if slotNumbers.isEmpty {
+                    let slotsRoot = groupDir.appendingPathComponent("slots", isDirectory: true)
+                    let dirs = (try? fm.contentsOfDirectory(at: slotsRoot, includingPropertiesForKeys: nil)) ?? []
+                    slotNumbers = dirs.compactMap { Int($0.lastPathComponent) }
+                }
+                total += slotNumbers.filter { $0 >= 1 && $0 <= maxChildSlots }.count
+            }
+        }
+        return total
     }
 
     // MARK: - 写入单组的槽位

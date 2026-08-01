@@ -155,6 +155,24 @@ struct FlashHighlightTarget: Equatable {
     let slot: Int
 }
 
+/// v2.10.39: 导入进度模型。驱动 ContentView 的进度条浮层。
+/// - completed/total：已处理 / 总条目数；total<=0 时显示为不确定（indeterminate）进度。
+struct ImportProgress: Equatable {
+    var title: String          // 浮层标题，如「正在导入槽位包」
+    var detail: String = ""    // 副标题，如当前文件名 / 组名
+    var completed: Int = 0
+    var total: Int = 0
+
+    /// 是否为不确定进度（未知总量，如解压/解析阶段）。
+    var isIndeterminate: Bool { total <= 0 }
+
+    /// 完成比例（0...1）。不确定时返回 0。
+    var fraction: Double {
+        guard total > 0 else { return 0 }
+        return min(1.0, max(0.0, Double(completed) / Double(total)))
+    }
+}
+
 final class SlotStoreObservable: ObservableObject {
     let instanceID = UUID().uuidString
 
@@ -231,6 +249,19 @@ final class SlotStoreObservable: ObservableObject {
     @Published var isSettingsPresented: Bool = false
     @Published var slotRenderTokens: [String: UUID] = [:]
     @Published var isBatchSaving: Bool = false
+
+    // v2.10.39: 导入进度（槽位包导入 / 批量图片文件导入 / 文件夹导入共用）。
+    // 非空即表示有导入正在进行，ContentView 据此显示进度条浮层；完成/失败后置 nil 收起。
+    @Published var importProgress: ImportProgress?
+
+    // v2.10.39: 在主线程发布/更新导入进度。所有导入路径统一通过它驱动进度条浮层。
+    func publishImportProgress(_ progress: ImportProgress?) {
+        if Thread.isMainThread {
+            self.importProgress = progress
+        } else {
+            DispatchQueue.main.async { self.importProgress = progress }
+        }
+    }
 
     // v2.6.7: import options sheet
     @Published var pendingImportSelection: PendingImportSelection?
@@ -4545,12 +4576,15 @@ final class SlotStoreObservable: ObservableObject {
         let importer = PackImporter(maxChildSlots: specialSlotSettings.maxChildSlotsPerSpecialSlot)
 
         DispatchQueue.global(qos: .userInitiated).async {
+            // v2.10.39: 进入解压/解析阶段先显示不确定进度浮层（total 未知）。
+            self.publishImportProgress(ImportProgress(title: "正在解析槽位包", detail: "读取包信息…"))
             // 先校验是否为有效槽位包（readManifest 只解出 manifest.json，放后台即可）。
             let manifest: PackManifest
             do {
                 manifest = try importer.readManifest(from: packURL)
             } catch {
                 DispatchQueue.main.async {
+                    self.publishImportProgress(nil)
                     self.showFloatingNotice(FloatingNotice(
                         title: "无法导入",
                         subtitle: error.localizedDescription,
@@ -4561,6 +4595,7 @@ final class SlotStoreObservable: ObservableObject {
             }
             guard !manifest.pages.isEmpty else {
                 DispatchQueue.main.async {
+                    self.publishImportProgress(nil)
                     self.showFloatingNotice(FloatingNotice(
                         title: "槽位包为空",
                         subtitle: "包内没有可导入的页面",
@@ -4605,11 +4640,21 @@ final class SlotStoreObservable: ObservableObject {
             self.setIgnoreWatcherUntil(.distantFuture)
 
             do {
+                // v2.10.39: 进入实际写入阶段，切换为「正在导入槽位包」，并随每组写入刷新进度。
+                self.publishImportProgress(ImportProgress(title: "正在导入槽位包", detail: "准备写入…"))
                 let result = try importer.importPack(
                     from: packURL,
                     resolvePageConflict: resolvePage,
-                    resolveGroupConflict: resolveGroup)
+                    resolveGroupConflict: resolveGroup,
+                    onProgress: { done, total, name in
+                        self.publishImportProgress(ImportProgress(
+                            title: "正在导入槽位包",
+                            detail: name.isEmpty ? "" : "写入槽位组「\(name)」",
+                            completed: done,
+                            total: total))
+                    })
                 DispatchQueue.main.async {
+                    self.publishImportProgress(nil)
                     // P0-2 (v2.10.38): 收敛抑制窗口但跳过重指纹（导入后整树可达 1.6GB，指纹全树遍历
                     // 会与紧随的刷新抢磁盘 I/O）；刷新改用 reloadAllAsync，把逐槽磁盘读移出主线程，
                     // 消除「导入完成瞬间全量刷新钉死主线程 3-5s」的彩球。
@@ -4625,6 +4670,7 @@ final class SlotStoreObservable: ObservableObject {
                 }
             } catch {
                 DispatchQueue.main.async {
+                    self.publishImportProgress(nil)
                     // P0-2 (v2.10.38): 同上，异步刷新 + 跳过重指纹（回滚也写盘，需时间窗覆盖其 FSEvents）。
                     self.suppressWatcher(2.0, recordFingerprint: false)
                     self.reloadAllAsync()
@@ -4792,6 +4838,9 @@ final class SlotStoreObservable: ObservableObject {
             // synchronously on the main thread — a folder of hundreds of files froze the GUI. Move
             // the whole burst to a background serial queue and commit the reload/toast back on main.
             let willImportFiles = preview.willImportFiles
+            // v2.10.39: 显示导入进度浮层，分母为将导入的文件数。
+            publishImportProgress(ImportProgress(
+                title: "正在导入文件夹", detail: "准备中…", completed: 0, total: willImportFiles.count))
             slotWriteQueue.async { [weak self] in  // P1-1 (v2.10.35): 串行写队列，防并发错序覆盖
                 guard let self = self else { return }
                 do {
@@ -4811,6 +4860,12 @@ final class SlotStoreObservable: ObservableObject {
                         } else {
                             failCount += 1
                         }
+                        // v2.10.39: 刷新导入进度。
+                        self.publishImportProgress(ImportProgress(
+                            title: "正在导入文件夹",
+                            detail: fileURL.lastPathComponent,
+                            completed: idx + 1,
+                            total: willImportFiles.count))
                     }
 
                     try? self.specialStorage.updateCurrentSpecialSlotSource(
@@ -4823,6 +4878,7 @@ final class SlotStoreObservable: ObservableObject {
                         self.reloadAllAsync()
                         self.refreshTrigger = UUID()
                         self.suppressWatcher(2.0)
+                        self.publishImportProgress(nil) // v2.10.39: 收起进度条浮层
                         // v2.6.2: Floating notice instead of blocking alert
                         self.showFloatingNotice(FloatingNotice(
                             title: "已导入 \(successCount) 个文件",
@@ -4834,6 +4890,7 @@ final class SlotStoreObservable: ObservableObject {
                 } catch {
                     NSLog("[ClipSlots] Folder import (bg) error: \(error)")
                     DispatchQueue.main.async { [weak self] in
+                        self?.publishImportProgress(nil) // v2.10.39: 收起进度条浮层
                         self?.showAlert(message: "导入失败: \(error.localizedDescription)")
                     }
                 }
@@ -5091,6 +5148,9 @@ final class SlotStoreObservable: ObservableObject {
         }
 
         isBatchSaving = true
+        // v2.10.39: 显示导入进度浮层，分母为将要保存的文件数。
+        publishImportProgress(ImportProgress(
+            title: "正在导入文件", detail: "准备中…", completed: 0, total: plan.willSaveCount))
 
         suppressWatcher() // v2.9.4 (#2): re-bump after confirmation modals, before the create/write burst
 
@@ -5193,6 +5253,12 @@ final class SlotStoreObservable: ObservableObject {
                 } else {
                     failedCount += 1
                 }
+                // v2.10.39: 刷新导入进度（已处理 = 已尝试的条目数）。
+                self.publishImportProgress(ImportProgress(
+                    title: "正在导入文件",
+                    detail: item.fileName,
+                    completed: index + 1,
+                    total: itemsToSave))
             }
 
             // Switch back to original page if we navigated away
@@ -5247,6 +5313,7 @@ final class SlotStoreObservable: ObservableObject {
                 }
                 self.suppressWatcher(2.0) // 收敛抑制窗口，覆盖批量写入的尾随 FSEvents
                 self.isBatchSaving = false
+                self.publishImportProgress(nil) // v2.10.39: 收起进度条浮层
                 NSLog("[ClipSlots] Batch save complete: \(toast)")
             }
         }

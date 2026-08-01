@@ -184,6 +184,13 @@ struct ContentView: View {
                     .zIndex(101)
             }
 
+            // v2.10.39: 导入进度浮层（槽位包 / 批量文件 / 文件夹导入共用）。
+            if let progress = store.importProgress {
+                importProgressOverlay(progress)
+                    .transition(.opacity)
+                    .zIndex(150)
+            }
+
             // v2.9.12: in-app settings overlay (Obsidian-style two-pane).
             // Rendered inside the main window's ZStack so it stays attached to the
             // window and moves together when the window is dragged.
@@ -198,6 +205,7 @@ struct ContentView: View {
             AppearanceDefaults.ensureDefaultDarkIfNeeded()
         }
         .animation(.easeInOut(duration: 0.25), value: store.toastMessage != nil)
+        .animation(.easeInOut(duration: 0.2), value: store.importProgress != nil)
         // v2.9.12: settings overlay is a modal hotkey-editing safe zone; keep the
         // store flag in sync so business hotkeys don't fire while it is open.
         .onChange(of: showingSettings) { store.isSettingsPresented = $0 }
@@ -289,6 +297,68 @@ struct ContentView: View {
         FloatingNoticeView(notice: notice)
             .allowsHitTesting(false)
             .padding(.top, 8)
+    }
+
+    // v2.10.39: 导入进度浮层——半透明遮罩 + 居中卡片，内含进度条与文案。
+    // total<=0 时显示不确定进度（解压/解析阶段）；否则显示确定百分比与「x/y」计数。
+    private func importProgressOverlay(_ progress: ImportProgress) -> some View {
+        ZStack {
+            // 半透明遮罩，拦截点击避免导入期误操作。
+            Color.black.opacity(0.28)
+                .ignoresSafeArea()
+
+            VStack(spacing: 14) {
+                HStack(spacing: 10) {
+                    Image(systemName: "square.and.arrow.down.fill")
+                        .font(.system(size: 16, weight: .semibold))
+                        .foregroundColor(.accentColor)
+                    Text(progress.title)
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundColor(.primary)
+                    Spacer(minLength: 0)
+                    if !progress.isIndeterminate {
+                        Text("\(progress.completed)/\(progress.total)")
+                            .font(.system(size: 12, weight: .medium).monospacedDigit())
+                            .foregroundColor(.secondary)
+                    }
+                }
+
+                if progress.isIndeterminate {
+                    ProgressView()
+                        .progressViewStyle(.linear)
+                } else {
+                    ProgressView(value: progress.fraction)
+                        .progressViewStyle(.linear)
+                }
+
+                if !progress.detail.isEmpty {
+                    HStack {
+                        Text(progress.detail)
+                            .font(.system(size: 11))
+                            .foregroundColor(.secondary)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                        Spacer(minLength: 0)
+                        if !progress.isIndeterminate {
+                            Text("\(Int(progress.fraction * 100))%")
+                                .font(.system(size: 11, weight: .medium).monospacedDigit())
+                                .foregroundColor(.secondary)
+                        }
+                    }
+                }
+            }
+            .padding(18)
+            .frame(width: 320)
+            .background(
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .fill(.ultraThickMaterial)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 14, style: .continuous)
+                            .stroke(Color.white.opacity(0.12), lineWidth: 1)
+                    )
+                    .shadow(color: Color.black.opacity(0.25), radius: 18, y: 8)
+            )
+        }
     }
 
     private func toastView(_ message: String) -> some View {
