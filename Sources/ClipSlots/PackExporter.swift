@@ -233,14 +233,49 @@ struct PackExporter {
                             packAtt.linkType = "localFile"
                             packAtt.originalPath = localPath
                         }
-                        // 取字节：优先内联 data（已在内存），其次回退到其引用的本地源文件路径。
+                        // 取字节（Step 3 / v2.10.43 附件字节外置）：优先「可流式拷贝的磁盘文件」，
+                        // 即 v2.10.42 起外置到 `{slotDir}/attachments/{id}.bin` 的 storagePath，其次是
+                        // 本地文件引用 path；两者都用 `FileManager.copyItem`（内核级流式拷贝）搬进包内
+                        // attachments/ 目录，全程不把文件内容读进进程内存。
+                        //
+                        // ⚠️ 为何不再走 `att.resolveData()`：Step 2 后 resolveData() 会按 storagePath 把
+                        // 整个 .bin 读进内存返回——导出一个含大视频的外置附件即可 OOM（正是 PK-3/D-1 一直
+                        // 规避的问题）。故这里显式绕过 resolveData，改由 storagePath/path 走流式 copyItem。
+                        // 包内只存字节文件（file 引用），绝不写 storagePath 绝对路径——换机后路径无效。
+                        //
                         // P2-2 (v2.10.16): 区分「本无字节的附件（纯 url/reference 型）」与「本应有字节但
                         // 源文件不可读/为空的附件」，后者登记到 failedAttachments 而非写入空壳条目。
-                        // PK-3 (v2.10.30): 外置源文件不再用 `Data(contentsOf:)` 整体读入内存再写出（单个
-                        // 2GB 视频即可 OOM），改为先用元数据做存在性/非空探测，再用 `FileManager.copyItem`
-                        // 流式拷贝到 attachments/ 暂存目录——全程不把文件内容加载进内存。
-                        if let data = att.resolveData() {
-                            // 内联字节：已在内存中，直接写出（不引入额外内存放大）。
+                        var streamSource: URL? = nil
+                        if let sp = att.storagePath, !sp.isEmpty, let size = regularFileSize(sp), size > 0 {
+                            // 情形 1：字节已外置为独立 .bin（v2.10.42+ 新格式 / 老数据懒迁移后）。
+                            streamSource = URL(fileURLWithPath: sp)
+                        } else if let path = att.path, let size = regularFileSize(path), size > 0 {
+                            // 情形 2：本地文件引用（如 CLI write-attachment、纯 path 引用附件），回源读取。
+                            streamSource = URL(fileURLWithPath: path)
+                        }
+
+                        if let src = streamSource {
+                            if !attachmentsDirCreated {
+                                try createDir(attachmentsDir)
+                                attachmentsDirCreated = true
+                            }
+                            let fileName = attachmentFileName(index: attIndex, id: att.id.uuidString, name: att.name)
+                            let destURL = attachmentsDir.appendingPathComponent(fileName)
+                            do {
+                                // copyItem 目标已存在会报错；文件名前缀含唯一附件 id，碰撞极罕见，仍稳妥清理。
+                                if FileManager.default.fileExists(atPath: destURL.path) {
+                                    try FileManager.default.removeItem(at: destURL)
+                                }
+                                // 流式拷贝：不把文件读进内存，从根本上规避大文件 OOM。
+                                try FileManager.default.copyItem(at: src, to: destURL)
+                            } catch {
+                                throw PackExportError.ioFailed(error.localizedDescription)
+                            }
+                            packAtt.file = fileName
+                            packAttachments.append(packAtt)
+                        } else if let data = att.data, !data.isEmpty {
+                            // 情形 3：字节仅存在于内存（少见的尚未落盘内联 data，如刚写入未 flush）——
+                            // 直接写出（已在内存，不额外放大）。
                             if !attachmentsDirCreated {
                                 try createDir(attachmentsDir)
                                 attachmentsDirCreated = true
@@ -253,36 +288,13 @@ struct PackExporter {
                             }
                             packAtt.file = fileName
                             packAttachments.append(packAtt)
-                        } else if let path = att.path {
-                            // 无内联字节但声明了源文件路径——本应携带字节，须回源。用元数据探测：文件
-                            // 缺失/为目录/不可 stat/为空（size == 0）均视为「源读取失败」，与旧 readFile 语义一致。
-                            if let size = regularFileSize(path), size > 0 {
-                                if !attachmentsDirCreated {
-                                    try createDir(attachmentsDir)
-                                    attachmentsDirCreated = true
-                                }
-                                let fileName = attachmentFileName(index: attIndex, id: att.id.uuidString, name: att.name)
-                                let destURL = attachmentsDir.appendingPathComponent(fileName)
-                                do {
-                                    // copyItem 目标已存在会报错；文件名前缀含唯一附件 id，碰撞极罕见，仍稳妥清理。
-                                    if FileManager.default.fileExists(atPath: destURL.path) {
-                                        try FileManager.default.removeItem(at: destURL)
-                                    }
-                                    // 流式拷贝：不把文件读进内存，从根本上规避大文件 OOM。
-                                    try FileManager.default.copyItem(at: URL(fileURLWithPath: path), to: destURL)
-                                } catch {
-                                    throw PackExportError.ioFailed(error.localizedDescription)
-                                }
-                                packAtt.file = fileName
-                                packAttachments.append(packAtt)
-                            } else {
-                                // P2-2 (v2.10.16): 源文件不可读/为空——不写入「有名无实」的空壳附件，
-                                // 改为登记失败清单（不 append 到 packAttachments，附件条目也不进 slot.json）。
-                                let attName = att.name.isEmpty ? path : att.name
-                                failedAttachments.append("\(group.name) / 槽位 \(slot)：\(attName)")
-                            }
+                        } else if att.storagePath != nil || att.path != nil {
+                            // 情形 4：声明了字节来源（storagePath/path）但文件缺失/为空/不可读——本应有字节却
+                            // 回源失败，不写入「有名无实」的空壳附件，改登记失败清单（不进 slot.json）。
+                            let attName = att.name.isEmpty ? (att.storagePath ?? att.path ?? "attachment") : att.name
+                            failedAttachments.append("\(group.name) / 槽位 \(slot)：\(attName)")
                         } else {
-                            // 本就无 data 且无 path（例如纯 url / reference 型附件）——属正常无字节附件，
+                            // 情形 5：本就无字节来源（纯 url / reference 型附件）——属正常无字节附件，
                             // 保留其元信息引用（file 仍为 nil），不视为失败。
                             packAttachments.append(packAtt)
                         }

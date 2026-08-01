@@ -16,7 +16,7 @@ import ClipSlotsKit
 // current release. This is the single source of truth surfaced by `version`,
 // `help` and per-command help (all reference CLI_VERSION), so no other literal
 // needs bumping.
-let CLI_VERSION = "2.10.42"
+let CLI_VERSION = "2.10.43"
 let DEFAULT_GROUP = "default"
 let DEFAULT_PAGE = "default_page"
 
