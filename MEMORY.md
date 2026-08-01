@@ -4,11 +4,25 @@
 
 ## 当前版本
 
-- **当前版本：v2.10.41**
+- **当前版本：v2.10.42**
 - 平台：macOS（Swift / SwiftUI，SPM 构建，macOS 13+）
 - 单一版本号事实来源：`Info.plist` 的 `CFBundleShortVersionString`（`AppVersion.current` 动态读取，`AppVersion.fallback` 为编译期兜底）。CLI 版本号见 `Sources/ClipSlotsCLI/main.swift` 的 `CLI_VERSION`。
 
 ## 版本要点（近期）
+
+### v2.10.42 — 附件字节外置架构 Step 2（写盘落独立文件 + 老数据懒迁移）
+- 背景：方案 B「附件字节外置」三步走的第二步，承接 v2.10.41 Step 1 的统一读入口 `resolveData()`。Step 2 让字节真正落到独立文件、老数据懒迁移，行为对上层透明。
+- **`SlotAttachment` 新增可选字段 `storagePath`**（`ClipboardManager.swift`）：外置字节文件的绝对路径，指向 `{slotDir}/attachments/{id}.bin`；Codable 向后兼容（历史数据缺失即 nil）。
+- **`resolveData()` 扩展磁盘懒加载**：内存 `data` 优先（新写入内存态 / 未迁移老数据），否则按 `storagePath` 从磁盘读；文件缺失/断链返回 nil。
+- **写盘外置 `externalizeAttachments()`**（`SlotStorage.swift`，`writeSlotContent` 内调用）：把「带字节」附件写成独立 `.bin`，`attachments.json` 只存元数据 + `storagePath`（`data` 置 nil）。字节来源三态：①内联 data 直接写文件；②已外置（内存无 data、仅 storagePath）用 clonefile 把现存 `.bin` 克隆进 staging（否则整槽目录每次 staging→原子 swap 会把旧 `.bin` 一并替换丢失）；③纯 path/url/reference/断链 原样保留元数据不外置。
+- **老数据懒迁移 `migrateInlineAttachmentsIfNeeded()`**：读到 `attachments.json` 仍内联 base64 `data`（无 storagePath）时，`readSlotContent` 首次读自动外置落盘并回写 JSON。仅在 get() 慢路径（已持跨进程 StorageLock + 串行 queue）内执行，并发安全；无迁移需求零写盘。
+- **崩溃安全（要求 5）**：严格顺序「逐条 临时文件 + rename 落 `.bin` → 全部落盘后才原子改写 JSON」。崩溃在改 JSON 前→旧 JSON（含 data）仍在，下次读幂等重迁；崩溃在后→`.bin`+新 JSON 一致。原始 data 永不丢。
+- **`get()` 读后重算 fingerprint**：懒迁移改动了 slotDir，读后重新 stat 指纹再缓存，避免下次 get 无谓整槽重读。
+- 自测：CLI（`ClipSlotsCLI` 产物）+ `CLIPSLOTS_DATA_DIR` 隔离验证——老格式内联 data 读时迁移（bin 字节与原始精确一致）、重写槽位后外置 `.bin` 跨原子 swap 存活、JSON 收敛为 data=nil+storagePath、CLI path 引用附件不被误外置。
+- 后续：Step 3（v2.10.43）改 pack 导入/导出与 CLI paste 适配外置字节。
+- commit：`8648588`（refactor+bump 合并）
+- DMG SHA256：`25476cfdf2cb9670737a94afb9433413ffda1af97c41ad62dec3e2b51dd72165`
+- Release：https://github.com/Seven-hub-fanfan/ClipSlots/releases/tag/v2.10.42
 
 ### v2.10.41 — 附件字节外置架构 Step 1（统一懒加载入口，纯重构）
 - 背景：方案 B「附件字节外置（独立文件 + 懒加载）」分三步走。Step 1（本版）加统一懒加载入口，把所有直接读 `att.data` 的地方收敛到一个函数，**此时字节仍在 JSON，行为不变，纯重构**，为后续步骤安全落地铺路。
