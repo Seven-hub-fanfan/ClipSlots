@@ -151,9 +151,23 @@ struct ContentView: View {
                             }
                         }
                         .padding(AppTheme.pagePadding)
+                        // v2.10.47: 切组过渡——保留旧内容但轻微淡化 + 微模糊，作为「切换中」骨架的底衬；
+                        // 期间禁用点击，避免在旧内容上误操作。新数据就绪后 store.isSwitchingGroup 归 false，
+                        // 内容整体淡入还原（配合 loadSlotsAsync 里的 0.16s 动画）。
+                        .opacity(store.isSwitchingGroup ? 0.35 : 1)
+                        .blur(radius: store.isSwitchingGroup ? 2 : 0)
+                        .allowsHitTesting(!store.isSwitchingGroup)
+                        .animation(.easeInOut(duration: 0.16), value: store.isSwitchingGroup)
                     }
                     .background(AppTheme.windowBackground(colorScheme))
                     .transaction { $0.animation = nil }
+                    // v2.10.47: 切组过渡遮罩——柔和高光扫过淡化后的旧内容，表示「正在切换/加载」。
+                    .overlay {
+                        if store.isSwitchingGroup {
+                            GroupSwitchVeil()
+                                .transition(.opacity)
+                        }
+                    }
                     // v2.9.37: when the footer "上次粘贴" button flashes a slot, scroll it
                     // into view so the highlighted card is always visible after the jump.
                     .onChange(of: store.flashHighlightSlot) { target in
@@ -191,15 +205,6 @@ struct ContentView: View {
                     .zIndex(150)
             }
 
-            // v2.10.46: 轻量 inline 确认条（删页 / 清空组等），替代系统 NSAlert。
-            if let confirmation = store.pendingConfirmation {
-                InlineConfirmationBar(confirmation: confirmation) {
-                    withAnimation(.easeInOut(duration: 0.2)) { store.pendingConfirmation = nil }
-                }
-                .transition(.move(edge: .bottom).combined(with: .opacity))
-                .zIndex(200)
-            }
-
             // v2.9.12: in-app settings overlay (Obsidian-style two-pane).
             // Rendered inside the main window's ZStack so it stays attached to the
             // window and moves together when the window is dragged.
@@ -215,7 +220,6 @@ struct ContentView: View {
         }
         .animation(.easeInOut(duration: 0.25), value: store.toastMessage != nil)
         .animation(.easeInOut(duration: 0.2), value: store.importProgress != nil)
-        .animation(.easeInOut(duration: 0.2), value: store.pendingConfirmation?.id)
         // v2.9.12: settings overlay is a modal hotkey-editing safe zone; keep the
         // store flag in sync so business hotkeys don't fire while it is open.
         .onChange(of: showingSettings) { store.isSettingsPresented = $0 }
@@ -968,18 +972,20 @@ struct ContentView: View {
     }
 
     private func confirmDeletePage(id: String, name: String) {
-        // v2.10.46: 系统 NSAlert → 轻量 inline 确认条（底部弹出，跟随 App 视觉，不打断心流）。
-        store.requestConfirmation(
-            InlineConfirmation(
-                title: "删除页面？",
-                message: "将删除页面「\(name)」及其下所有槽位组和槽位内容。此操作不可撤销。",
-                confirmTitle: "删除",
-                isDestructive: true,
-                onConfirm: { _ in
-                    store.deletePage(id: id)
-                }
-            )
-        )
+        // v2.10.47: 回退 v2.10.46 的 inline 确认卡（负优化）——恢复系统 NSAlert（非阻塞 sheet）。
+        let alert = NSAlert()
+        alert.messageText = "删除页面？"
+        alert.informativeText = "将删除页面「\(name)」及其下所有槽位组和槽位内容。此操作不可撤销。"
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "删除")
+        alert.addButton(withTitle: "取消")
+
+        // P2-4: non-blocking sheet instead of runModal.
+        runAlertNonBlocking(alert) { response in
+            if response == .alertFirstButtonReturn {
+                store.deletePage(id: id)
+            }
+        }
     }
 
     private func statPill(title: String, value: String, icon: String, color: Color) -> some View {
@@ -2028,85 +2034,5 @@ private struct ConnectionFullscreenAction: View {
         .buttonStyle(.plain)
         .onHover { hovering = $0 }
         .animation(.spring(response: 0.28, dampingFraction: 0.76), value: hovering)
-    }
-}
-
-// MARK: - Inline Confirmation (v2.10.46)
-
-/// v2.10.46: 轻量 inline 确认条。替代删页/清空等场景的系统 NSAlert——系统弹窗打断心流、
-/// 有「进入另一个房间」的压迫感。改为在主窗口内底部弹出确认卡片（跟随 App 视觉、可回车确认 /
-/// Esc 取消 / 点击空白取消），确认动作走 confirmation.onConfirm，可选「不再提醒」。
-struct InlineConfirmationBar: View {
-    let confirmation: InlineConfirmation
-    let onDismiss: () -> Void
-
-    @State private var doNotRemind = false
-
-    var body: some View {
-        ZStack(alignment: .bottom) {
-            // 轻量半透明遮罩：聚焦当前决策但不喧宾夺主；点击空白 = 取消。
-            Color.black.opacity(0.12)
-                .ignoresSafeArea()
-                .contentShape(Rectangle())
-                .onTapGesture { onDismiss() }
-
-            VStack(alignment: .leading, spacing: 10) {
-                HStack(alignment: .top, spacing: 10) {
-                    Image(systemName: confirmation.isDestructive
-                          ? "exclamationmark.triangle.fill"
-                          : "questionmark.circle.fill")
-                        .font(.system(size: 15, weight: .semibold))
-                        .foregroundColor(confirmation.isDestructive ? .orange : .accentColor)
-                        .padding(.top, 1)
-                    VStack(alignment: .leading, spacing: 3) {
-                        Text(confirmation.title)
-                            .font(.system(size: 13, weight: .semibold))
-                            .foregroundColor(.primary)
-                        Text(confirmation.message)
-                            .font(.system(size: 11))
-                            .foregroundColor(.secondary)
-                            .fixedSize(horizontal: false, vertical: true)
-                    }
-                    Spacer(minLength: 0)
-                }
-
-                HStack(spacing: 10) {
-                    if confirmation.showDoNotRemind {
-                        Toggle(isOn: $doNotRemind) {
-                            Text("不再提醒")
-                                .font(.system(size: 11))
-                                .foregroundColor(.secondary)
-                        }
-                        .toggleStyle(.checkbox)
-                    }
-                    Spacer(minLength: 0)
-                    Button(confirmation.cancelTitle) {
-                        onDismiss()
-                    }
-                    .keyboardShortcut(.cancelAction)
-                    .buttonStyle(.bordered)
-
-                    Button(confirmation.confirmTitle) {
-                        confirmation.onConfirm(doNotRemind)
-                        onDismiss()
-                    }
-                    .keyboardShortcut(.defaultAction)
-                    .buttonStyle(.borderedProminent)
-                    .tint(confirmation.isDestructive ? .red : .accentColor)
-                }
-            }
-            .padding(14)
-            .frame(width: 360)
-            .background(
-                RoundedRectangle(cornerRadius: 12, style: .continuous)
-                    .fill(.ultraThickMaterial)
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 12, style: .continuous)
-                            .stroke(Color.white.opacity(0.12), lineWidth: 1)
-                    )
-                    .shadow(color: Color.black.opacity(0.25), radius: 18, y: 8)
-            )
-            .padding(.bottom, 18)
-        }
     }
 }

@@ -173,24 +173,6 @@ struct ImportProgress: Equatable {
     }
 }
 
-/// v2.10.46: 轻量 inline 确认模型。替代删页/清空等场景的系统 NSAlert——系统弹窗会打断心流、
-/// 给「进入另一个房间」的压迫感。改为在主窗口内弹出底部确认条（跟随 App 视觉），确认动作通过
-/// onConfirm 回调执行；可选「不再提醒」勾选（doNotRemind 回传给回调）。非 Equatable（含闭包），
-/// 仅作 @Published 触发 UI，用 id 区分不同请求。
-struct InlineConfirmation: Identifiable {
-    let id = UUID()
-    var title: String
-    var message: String
-    var confirmTitle: String
-    var cancelTitle: String = "取消"
-    /// 确认按钮是否为破坏性（红色）样式。
-    var isDestructive: Bool = true
-    /// 是否展示「不再提醒」勾选项。
-    var showDoNotRemind: Bool = false
-    /// 确认回调；参数为「不再提醒」是否被勾选（未展示时恒为 false）。
-    var onConfirm: (_ doNotRemind: Bool) -> Void
-}
-
 final class SlotStoreObservable: ObservableObject {
     let instanceID = UUID().uuidString
 
@@ -268,6 +250,26 @@ final class SlotStoreObservable: ObservableObject {
     @Published var slotRenderTokens: [String: UUID] = [:]
     @Published var isBatchSaving: Bool = false
 
+    // v2.10.47: 切组/切页过渡态。为 true 时表示「已切到新组、新数据尚在后台异步读盘」，此窗口内
+    // 主体内容仍保留旧组内容并叠一层轻微骨架/淡化遮罩（见 ContentView），待新数据就绪后整体淡入替换，
+    // 消除 v2.10.42 附件外置后「切组瞬间全槽位闪成空槽位占位」的中间态。仅驱动 UI，不预加载、不增内存。
+    @Published var isSwitchingGroup: Bool = false
+
+    // v2.10.47: 兜底令牌——每次开启切组遮罩时自增；配合 asyncAfter 兜底关闭，避免任何异常路径下
+    // 遮罩永久卡住（正常情况下 loadSlotsAsync/reloadAllAsync 提交新数据时即会关闭）。
+    private var groupSwitchVeilToken: Int = 0
+
+    // v2.10.47: 开启切组过渡遮罩（保留旧内容），并挂一个 1.2s 兜底关闭，防止遮罩卡死。
+    private func beginGroupSwitchTransition() {
+        isSwitchingGroup = true
+        groupSwitchVeilToken &+= 1
+        let token = groupSwitchVeilToken
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { [weak self] in
+            guard let self = self, self.isSwitchingGroup, token == self.groupSwitchVeilToken else { return }
+            withAnimation(.easeInOut(duration: 0.16)) { self.isSwitchingGroup = false }
+        }
+    }
+
     // v2.10.39: 导入进度（槽位包导入 / 批量图片文件导入 / 文件夹导入共用）。
     // 非空即表示有导入正在进行，ContentView 据此显示进度条浮层；完成/失败后置 nil 收起。
     @Published var importProgress: ImportProgress?
@@ -283,18 +285,6 @@ final class SlotStoreObservable: ObservableObject {
 
     // v2.6.7: import options sheet
     @Published var pendingImportSelection: PendingImportSelection?
-
-    // v2.10.46: 当前待确认的 inline 确认请求（删页/清空等）。非 nil 时 ContentView 弹出底部确认条。
-    @Published var pendingConfirmation: InlineConfirmation?
-
-    // v2.10.46: 发起一次 inline 确认（替代系统 NSAlert）。始终在主线程发布。
-    func requestConfirmation(_ confirmation: InlineConfirmation) {
-        if Thread.isMainThread {
-            self.pendingConfirmation = confirmation
-        } else {
-            DispatchQueue.main.async { self.pendingConfirmation = confirmation }
-        }
-    }
 
     // v2.10.14: 打包导出选择 sheet 的呈现状态
     @Published var showingPackExport: Bool = false
@@ -753,6 +743,11 @@ final class SlotStoreObservable: ObservableObject {
                 self.slots = snapshot.slots
                 self.labels = snapshot.labels
                 self.loadedSpecialSlotId = activeId
+                // v2.10.47: 若一次 watcher 触发的 reload 抢先在切组读盘之前提交（generation 更高），
+                // 切组遮罩需在此一并关闭，避免遮罩因 loadSlotsAsync 被判超时丢弃而卡住。
+                if self.isSwitchingGroup {
+                    withAnimation(.easeInOut(duration: 0.16)) { self.isSwitchingGroup = false }
+                }
                 self.loadConnectionMapForCurrentGroup()
                 self.reloadLastPasteFromDefaults()
                 self.recomputeAutoPreviews()
@@ -790,11 +785,10 @@ final class SlotStoreObservable: ObservableObject {
 
         cancelPendingPasteOperations(restoreClipboard: true)
 
-        ThumbnailProvider.shared.invalidateSpecialSlot(specialSlotId: oldId)
-
-        slots = [:]
-        labels = [:]
-        loadedSpecialSlotId = nil
+        // v2.10.47: 丝滑切组——不再立即清空 slots/labels（那会让所有槽位瞬间闪成「空槽位」占位）。
+        // 改为保留旧组内容并开启切组遮罩，待新数据在 loadSlotsAsync 后台读盘就绪后整体淡入替换；
+        // 旧组缩略图缓存推迟到新数据提交后再失效（onCommit），避免旧内容在遮罩下先掉图。
+        beginGroupSwitchTransition()
 
         currentSpecialSlotId = id
         currentSpecialSlot = specialSlots.first { $0.id == id }
@@ -802,7 +796,7 @@ final class SlotStoreObservable: ObservableObject {
         suppressWatcher() // v2.9.4 (#2): self-write
         specialStorage.updateSelectedSpecialSlot(id: id)
 
-        loadSlotsAsync() // APP-2 (v2.10.32): 切组读盘异步化，避免主线程被逐槽 flock 卡死
+        loadSlotsAsync(onCommit: { ThumbnailProvider.shared.invalidateSpecialSlot(specialSlotId: oldId) }) // APP-2 (v2.10.32): 切组读盘异步化，避免主线程被逐槽 flock 卡死
         loadConnectionMapForCurrentGroup()
         refreshTrigger = UUID()
 
@@ -854,12 +848,10 @@ final class SlotStoreObservable: ObservableObject {
 
         cancelPendingPasteOperations(restoreClipboard: true)
 
-        ThumbnailProvider.shared.invalidateSpecialSlot(specialSlotId: oldPreview)
-
-        slots = [:]
-        labels = [:]
-        loadedSpecialSlotId = nil
-        refreshTrigger = UUID()
+        // v2.10.47: 丝滑切组——不再立即清空 slots/labels（那会让所有槽位瞬间闪成「空槽位」占位）。
+        // 保留旧组内容并开启切组遮罩，待新数据在 loadSlotsAsync 后台读盘就绪后整体淡入替换；旧组缩略图
+        // 缓存推迟到新数据提交后再失效（onCommit），避免旧内容在遮罩下先掉图。
+        beginGroupSwitchTransition()
 
         suppressWatcher() // v2.9.4 (#2): self-write
         do {
@@ -882,7 +874,7 @@ final class SlotStoreObservable: ObservableObject {
         specialSlots = index.specialSlots
         specialSlotSettings = index.settings
 
-        loadSlotsAsync() // APP-2 (v2.10.32): 切组读盘异步化，避免主线程被逐槽 flock 卡死
+        loadSlotsAsync(onCommit: { ThumbnailProvider.shared.invalidateSpecialSlot(specialSlotId: oldPreview) }) // APP-2 (v2.10.32): 切组读盘异步化，避免主线程被逐槽 flock 卡死
         loadConnectionMapForCurrentGroup()
         refreshTrigger = UUID()
 
@@ -1846,29 +1838,42 @@ final class SlotStoreObservable: ObservableObject {
             return
         }
 
-        // v2.10.46: 系统 NSAlert → 轻量 inline 确认条（底部弹出，跟随 App 视觉，不打断心流）。
-        let groupName = currentSpecialSlot?.name ?? "当前槽位组"
-        requestConfirmation(
-            InlineConfirmation(
-                title: "清空当前槽位组？",
-                message: "将清空「\(groupName)」中的全部槽位内容。此操作不会删除槽位组本身。",
-                confirmTitle: "清空",
-                isDestructive: true,
-                showDoNotRemind: true,
-                onConfirm: { [weak self] doNotRemind in
-                    guard let self = self else { return }
-                    if doNotRemind {
-                        do {
-                            try self.specialStorage.updateSettings { $0.confirmBeforeClearAllSlots = false }
-                            self.specialSlotSettings.confirmBeforeClearAllSlots = false
-                        } catch {
-                            NSLog("[ClipSlots] update confirmBeforeClearAllSlots failed: \(error)")
-                        }
-                    }
-                    self.clearAllSlotsInCurrentSpecialSlot()
+        // v2.10.47: 回退 v2.10.46 的 inline 确认卡（负优化）——恢复系统 NSAlert（sheet 呈现）。
+        let alert = NSAlert()
+        alert.messageText = "清空当前槽位组？"
+        alert.informativeText = "将清空「\(currentSpecialSlot?.name ?? "当前槽位组")」中的全部槽位内容。此操作不会删除槽位组本身。"
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "清空")
+        alert.addButton(withTitle: "取消")
+
+        let checkbox = NSButton(checkboxWithTitle: "不再提醒", target: nil, action: nil)
+        alert.accessoryView = checkbox
+
+        // MT-3 (v2.10.30): 原 alert.runModal() 会阻塞主 run loop。改为非阻塞 sheet，确认后的清空动作移到
+        // 完成闭包里执行；取不到宿主窗口时回退到 runModal() 以免流程中断。
+        let onConfirm: (NSButton) -> Void = { [weak self] checkbox in
+            guard let self = self else { return }
+            if checkbox.state == .on {
+                do {
+                    try self.specialStorage.updateSettings { $0.confirmBeforeClearAllSlots = false }
+                    self.specialSlotSettings.confirmBeforeClearAllSlots = false
+                } catch {
+                    NSLog("[ClipSlots] update confirmBeforeClearAllSlots failed: \(error)")
                 }
-            )
-        )
+            }
+            self.clearAllSlotsInCurrentSpecialSlot()
+        }
+
+        guard let window = sheetHostWindow() else {
+            let response = alert.runModal()
+            guard response == .alertFirstButtonReturn else { return }
+            onConfirm(checkbox)
+            return
+        }
+        alert.beginSheetModal(for: window) { response in
+            guard response == .alertFirstButtonReturn else { return }
+            onConfirm(checkbox)
+        }
     }
 
     func clearAllSlotsInCurrentSpecialSlot() {
@@ -2038,7 +2043,7 @@ final class SlotStoreObservable: ObservableObject {
     // done. Reuses the shared reloadGeneration stamp (also bumped by reloadAllAsync) so a rapid
     // A→B→A switch — or a concurrent watcher reload — can never let an older read clobber the
     // newer group's state.
-    private func loadSlotsAsync() {
+    private func loadSlotsAsync(onCommit: (() -> Void)? = nil) {
         let activeId = currentSpecialSlotId
         reloadGeneration &+= 1
         let gen = reloadGeneration
@@ -2051,11 +2056,19 @@ final class SlotStoreObservable: ObservableObject {
                     NSLog("[ClipSlots] loadSlotsAsync: dropping stale/superseded snapshot for \(activeId)")
                     return
                 }
-                self.slots = snapshot.slots
-                self.labels = snapshot.labels
+                // v2.10.47: 丝滑切组——旧组内容一直显示到此刻（切组时未清空），新数据就绪后连同关闭
+                // 切组遮罩一起淡入替换（0.16s），消除「先闪空槽位」的中间态。onCommit 承接旧组缩略图缓存
+                // 失效等收尾（此时已切走旧内容，安全）。
+                withAnimation(.easeInOut(duration: 0.16)) {
+                    self.slots = snapshot.slots
+                    self.labels = snapshot.labels
+                    self.isSwitchingGroup = false
+                }
                 self.loadedSpecialSlotId = activeId
                 self.refreshTrigger = UUID()
+                onCommit?()
             }
+
         }
     }
 
