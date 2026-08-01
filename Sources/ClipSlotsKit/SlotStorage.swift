@@ -56,6 +56,22 @@ public final class SlotStorage {
     // (CLI) is picked up on the very next read, even on coarse-mtime volumes where
     // the old modificationDate signal (P2-15, v2.10.8) missed same-second writes.
     private var cacheFingerprint: [Int: DirFingerprint] = [:]
+    // P0-1 (v2.10.38): in-memory label cache + per-slot label.txt fingerprint. `getLabel`
+    // previously took the cross-process StorageLock and synchronously read `label.txt` on
+    // EVERY call. `allSearchableSlots()` (global search) invokes it once per slot on the main
+    // thread, so a large multi-group library paid N flock acquisitions + N synchronous file
+    // reads on the main thread → opening/typing search froze (the "head culprit" in the
+    // v2.10.37 analysis). This mirrors the `cache`/`cacheFingerprint` design used by `get()`:
+    // serve the label from memory whenever the label.txt fingerprint is unchanged, and only
+    // touch the lock + disk on a genuine miss. `label == nil` (no label.txt) is cached too,
+    // distinguished from "not cached" by key presence. Guarded by `queue` like `cache`.
+    private var labelCache: [Int: String?] = [:]
+    private var labelCacheFingerprint: [Int: DirFingerprint?] = [:]
+    // P0-3 (v2.10.38): read paths use a SHORT lock timeout so a main-thread read never blocks
+    // for the full write timeout (5s) while a big import holds the lock in bursts. On timeout
+    // both `get()` and `getLabel()` gracefully serve the last-known cached value, so bounding
+    // the wait trades a rare re-read for eliminating the "everything spins 5s" beachball.
+    private static let readLockTimeout: TimeInterval = 2.0
     // ST-2 (v2.10.15): slots whose attachments.json PHYSICALLY EXISTS but FAILED to
     // decode (genuine corruption), as opposed to a slot that is legitimately empty.
     // Set/cleared by readSlotContent and consulted by writeSlotContent so an empty
@@ -198,7 +214,10 @@ public final class SlotStorage {
 
         // Slow path (cache miss or external change): read under the cross-process lock so
         // the directory enumeration cannot race a concurrent atomic slot swap.
-        if let content = try? StorageLock.shared.withLock({
+        // P0-3 (v2.10.38): use the SHORT read timeout so a main-thread read never waits the full
+        // 5s while a big import holds the lock in bursts; on timeout we fall through to the
+        // last-known cached value below (never synthesize an empty slot).
+        if let content = try? StorageLock.shared.withLock(timeout: SlotStorage.readLockTimeout, {
             queue.sync {
                 // Re-check inside the lock: another thread may have populated the cache
                 // (or an external write may have landed) while we waited for the flock.
@@ -371,6 +390,10 @@ public final class SlotStorage {
                 // A-1 (v2.10.31): re-check invalidation inside the lock (TOCTOU, see set()).
                 if invalidated { return }
                 cache[slot] = SlotContent()
+                // P0-1 (v2.10.38): the slot dir (incl. label.txt) is removed below; drop its
+                // label cache entry so getLabel doesn't serve a stale label for a cleared slot.
+                labelCache.removeValue(forKey: slot)
+                labelCacheFingerprint.removeValue(forKey: slot)
                 let slotDir = baseURL.appendingPathComponent(String(slot))
                 do {
                     try FileManager.default.removeItem(at: slotDir)
@@ -402,6 +425,9 @@ public final class SlotStorage {
                 // avoid a duplicate `.trash` entry.
                 if backupToTrash { backupBaseDirToTrash() }
                 cache.removeAll()
+                // P0-1 (v2.10.38): the whole group dir is wiped/recreated; clear the label cache too.
+                labelCache.removeAll()
+                labelCacheFingerprint.removeAll()
                 do {
                     try FileManager.default.removeItem(at: baseURL)
                     try FileManager.default.createDirectory(at: baseURL, withIntermediateDirectories: true)
@@ -462,18 +488,19 @@ public final class SlotStorage {
 
     /// v2.9.15 (fix): drop the in-memory SlotContent cache so the next `get(_:)`
     /// re-reads from disk. `get(_:)` serves cached SlotContent and never notices a
-    /// change made by ANOTHER process (the `clipslots` CLI). Labels bypass this
-    /// cache (getLabel reads label.txt directly every call), which is exactly why a
-    /// CLI `write` used to surface the new label while the body still showed the
-    /// stale "空槽位 0 B". The GUI's FSEvents watcher now calls this before reloading
-    /// so external writes are reflected. (The body was always correctly persisted to
-    /// disk — this was a read-cache staleness bug, not a write bug.)
+    /// change made by ANOTHER process (the `clipslots` CLI). The GUI's FSEvents watcher
+    /// calls this before reloading so external writes are reflected. (The body was always
+    /// correctly persisted to disk — this was a read-cache staleness bug, not a write bug.)
+    /// P0-1 (v2.10.38): also drops the label cache (getLabel now caches label.txt too), so an
+    /// external CLI label change is guaranteed to surface on the next read after invalidation.
     public func invalidateCache() {
         // P1-6 (v2.10.9): also clear the fingerprint map so the next get() cannot
         // match a stale fingerprint and serve dropped content.
         queue.sync {
             cache.removeAll()
             cacheFingerprint.removeAll()
+            labelCache.removeAll()
+            labelCacheFingerprint.removeAll()
         }
     }
 
@@ -491,11 +518,42 @@ public final class SlotStorage {
     // MARK: - Label
 
     public func getLabel(_ slot: Int) -> String? {
-        try? StorageLock.shared.withLock {
-            let labelFile = baseURL.appendingPathComponent(String(slot)).appendingPathComponent("label.txt")
-            guard let content = try? String(contentsOf: labelFile, encoding: .utf8) else { return nil }
-            return content.trimmingCharacters(in: .whitespacesAndNewlines)
+        let labelFile = baseURL.appendingPathComponent(String(slot)).appendingPathComponent("label.txt")
+        // P0-1 (v2.10.38): fast path — if the label.txt fingerprint is unchanged since we last
+        // read it, serve the cached label WITHOUT taking the cross-process lock or touching disk.
+        // This is what makes global search on a large multi-group library stop freezing the main
+        // thread. `dirFingerprint` returns nil when label.txt is absent; that (== nil) is a valid
+        // cached state too. Outer optional from the closure = "was it a cache hit?".
+        let diskFP = dirFingerprint(labelFile.path)
+        if let cached: String? = queue.sync(execute: { () -> String?? in
+            guard labelCache.index(forKey: slot) != nil else { return nil }      // never cached
+            guard labelCacheFingerprint[slot]! == diskFP else { return nil }      // stale — re-read
+            return labelCache[slot]!                                              // .some(String?)
+        }) {
+            return cached
         }
+
+        // Slow path (miss or changed): read label.txt under the cross-process lock with the SHORT
+        // read timeout (P0-3) so a main-thread search never stalls for the full 5s write timeout.
+        if let result = try? StorageLock.shared.withLock(timeout: SlotStorage.readLockTimeout, {
+            queue.sync { () -> String? in
+                // Re-check inside the lock: another thread may have refreshed the cache meanwhile.
+                let fp = dirFingerprint(labelFile.path)
+                if labelCache.index(forKey: slot) != nil, labelCacheFingerprint[slot]! == fp {
+                    return labelCache[slot]!
+                }
+                let value = (try? String(contentsOf: labelFile, encoding: .utf8))?
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                labelCache[slot] = value
+                labelCacheFingerprint[slot] = fp
+                return value
+            }
+        }) {
+            return result
+        }
+
+        // Lock busy / timed out: serve the last-known cached label rather than stall or lie.
+        return queue.sync { labelCache.index(forKey: slot) != nil ? labelCache[slot]! : nil }
     }
 
     public func setLabel(_ slot: Int, label: String?) {
@@ -526,6 +584,10 @@ public final class SlotStorage {
                         }
                     }
                 }
+                // P0-1 (v2.10.38): invalidate the label cache entry so the next getLabel re-reads
+                // the just-written value exactly once and repopulates the cache coherently.
+                labelCache.removeValue(forKey: slot)
+                labelCacheFingerprint.removeValue(forKey: slot)
             }
         }
     }

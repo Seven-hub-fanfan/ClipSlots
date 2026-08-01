@@ -484,9 +484,17 @@ final class SlotStoreObservable: ObservableObject {
     /// resulting FSEvents callback does not trigger a redundant `reloadAll()`.
     /// A single timestamp (rather than per-method bool flags) is simpler and safe
     /// as long as it is bumped at every GUI write entry point.
-    func suppressWatcher(_ interval: TimeInterval = 0.6) {
+    /// P0-2 (v2.10.38): `recordFingerprint` lets a caller skip the post-write full-tree
+    /// fingerprint walk. After a large `.clipslotspack` import the tree can be 1.6GB /
+    /// thousands of files, so `storageDirFingerprint()` becomes a heavy disk walk that
+    /// competes with the reload we run right after. The fingerprint only helps skip a
+    /// possible EXTRA reload from a late self-write FSEvents; since we already reload
+    /// explicitly (and a redundant reload is idempotent), skipping the walk there is a
+    /// clear net win. The time window (`interval`) still suppresses the trailing events.
+    func suppressWatcher(_ interval: TimeInterval = 0.6, recordFingerprint: Bool = true) {
         // CR-1 (v2.10.30): 经加锁访问器写入（本方法可能从非主线程的 GUI 写入入口调用）。
         setIgnoreWatcherUntil(Date().addingTimeInterval(interval))
+        guard recordFingerprint else { return }
         // P2-5 (v2.10.16): 记录本次自写完成后的磁盘指纹，供 watcher 回调区分自写 / 外部写。
         // suppressWatcher 在实际写入「之前」调用，故用 main.async 把指纹采集排到当前主线程同步写入
         // 「之后」执行，从而捕获到「写后」磁盘状态（同步写入路径覆盖绝大多数入口）。watcher 的 debounce
@@ -4602,8 +4610,11 @@ final class SlotStoreObservable: ObservableObject {
                     resolvePageConflict: resolvePage,
                     resolveGroupConflict: resolveGroup)
                 DispatchQueue.main.async {
-                    self.suppressWatcher(2.0) // 收敛抑制窗口，覆盖导入写入的尾随 FSEvents 后恢复。
-                    self.reloadAll()
+                    // P0-2 (v2.10.38): 收敛抑制窗口但跳过重指纹（导入后整树可达 1.6GB，指纹全树遍历
+                    // 会与紧随的刷新抢磁盘 I/O）；刷新改用 reloadAllAsync，把逐槽磁盘读移出主线程，
+                    // 消除「导入完成瞬间全量刷新钉死主线程 3-5s」的彩球。
+                    self.suppressWatcher(2.0, recordFingerprint: false)
+                    self.reloadAllAsync()
                     var subtitle = "导入 \(result.importedGroups) 组 / \(result.importedSlots) 槽位"
                     if result.skippedGroups > 0 { subtitle += "，跳过 \(result.skippedGroups) 组" }
                     self.showFloatingNotice(FloatingNotice(
@@ -4614,8 +4625,9 @@ final class SlotStoreObservable: ObservableObject {
                 }
             } catch {
                 DispatchQueue.main.async {
-                    self.suppressWatcher(2.0) // 收敛抑制窗口（PK-3 回滚也在磁盘写入，需覆盖其 FSEvents）。
-                    self.reloadAll()
+                    // P0-2 (v2.10.38): 同上，异步刷新 + 跳过重指纹（回滚也写盘，需时间窗覆盖其 FSEvents）。
+                    self.suppressWatcher(2.0, recordFingerprint: false)
+                    self.reloadAllAsync()
                     self.showFloatingNotice(FloatingNotice(
                         title: "导入失败",
                         subtitle: error.localizedDescription,
@@ -5444,33 +5456,73 @@ final class SlotStoreObservable: ObservableObject {
 
     // MARK: - Global Search (v2.5.2)
 
-    /// Return all searchable slots across all pages and groups (read-only).
-    func allSearchableSlots() -> [SlotGlobalSearchResult] {
-        var results: [SlotGlobalSearchResult] = []
+    /// P0-1 (v2.10.38): a lightweight, main-thread-captured reference to one searchable group.
+    /// Holds only cheap metadata + the group's `SlotStorage` handle so the expensive per-slot
+    /// expansion (`snapshot()` + `getLabel()`) can run OFF the main thread. `pages`/`specialSlots`
+    /// are mutated only on the main thread, so we read them here (on main) and hand the rest off.
+    struct SearchableGroupRef {
+        let pageId: String
+        let pageName: String
+        let pageOrder: Int
+        let groupId: String
+        let groupName: String
+        let groupOrder: Int
+        let storage: SlotStorage
+    }
 
+    /// Capture the searchable-group list on the main thread. Cheap: reads the in-memory
+    /// `pages`/`specialSlots` metadata and resolves each group's cached `SlotStorage` handle
+    /// (`slotStorage(for:)` is internally lock-guarded). No per-slot disk work happens here.
+    func searchableGroupsSnapshot() -> [SearchableGroupRef] {
+        var refs: [SearchableGroupRef] = []
         for page in pages {
             let groups = specialSlots.filter { $0.pageId == page.id }.sorted { $0.order < $1.order }
             for group in groups {
-                let storage = specialStorage.slotStorage(for: group.id)
-                let snapshot = storage.snapshot()
-                for (slot, content) in snapshot {
-                    let label = storage.getLabel(slot) ?? ""
-                    results.append(SlotGlobalSearchResult(
-                        pageId: page.id,
-                        pageName: page.name,
-                        groupId: group.id,
-                        groupName: group.name,
-                        slot: slot,
-                        content: content,
-                        label: label,
-                        pageOrder: page.order,
-                        groupOrder: group.order
-                    ))
-                }
+                refs.append(SearchableGroupRef(
+                    pageId: page.id,
+                    pageName: page.name,
+                    pageOrder: page.order,
+                    groupId: group.id,
+                    groupName: group.name,
+                    groupOrder: group.order,
+                    storage: specialStorage.slotStorage(for: group.id)
+                ))
             }
         }
+        return refs
+    }
 
+    /// Expand captured group refs into per-slot search results. SAFE to call off the main
+    /// thread: `SlotStorage.snapshot()` and `getLabel()` are internally synchronized, and (since
+    /// v2.10.38) `getLabel()` serves from an in-memory, fingerprinted label cache without taking
+    /// the cross-process lock on the hot path. This is the heavy part that used to freeze the UI.
+    static func expandSearchableSlots(_ groups: [SearchableGroupRef]) -> [SlotGlobalSearchResult] {
+        var results: [SlotGlobalSearchResult] = []
+        for group in groups {
+            let snapshot = group.storage.snapshot()
+            for (slot, content) in snapshot {
+                let label = group.storage.getLabel(slot) ?? ""
+                results.append(SlotGlobalSearchResult(
+                    pageId: group.pageId,
+                    pageName: group.pageName,
+                    groupId: group.groupId,
+                    groupName: group.groupName,
+                    slot: slot,
+                    content: content,
+                    label: label,
+                    pageOrder: group.pageOrder,
+                    groupOrder: group.groupOrder
+                ))
+            }
+        }
         return results
+    }
+
+    /// Return all searchable slots across all pages and groups (read-only). Convenience
+    /// composition of `searchableGroupsSnapshot()` + `expandSearchableSlots(_:)` for callers
+    /// that don't need the two-phase (main-capture / off-main-expand) split.
+    func allSearchableSlots() -> [SlotGlobalSearchResult] {
+        SlotStoreObservable.expandSearchableSlots(searchableGroupsSnapshot())
     }
 }
 

@@ -465,9 +465,13 @@ struct InlineImageView<Placeholder: View>: View {
         }
         .task(id: content.inlineImageIdentity) {
             let snapshot = content
-            let decoded = await Task.detached(priority: .userInitiated) {
-                snapshot.decodedInlineImage()
-            }.value
+            // P0-4 (v2.10.38): gate through the global ThumbnailDecodeLimiter so many inline
+            // previews appearing at once can't spawn an unbounded number of concurrent decodes.
+            let decoded = await ThumbnailDecodeLimiter.shared.run {
+                await Task.detached(priority: .userInitiated) {
+                    snapshot.decodedInlineImage()
+                }.value
+            }
             if !Task.isCancelled { image = decoded }
         }
     }

@@ -1340,14 +1340,16 @@ struct ContentView: View {
         let currentPageId = store.currentPageId
         let currentSpecialSlotId = store.currentSpecialSlotId
 
-        // P2-9 (v2.10.5): 在主线程先快照可搜索槽位集合。allSearchableSlots() 会遍历
-        // `pages` / `specialSlots`（这两个数组只在主线程被修改），此前整段放在后台队列执行
-        // 是真实数据竞争（可能崩溃/读到半更新状态）。快照来自内存 snapshot，成本可控；
-        // 繁重的 filter + sort 仍在下面的后台队列进行。
-        let all = store.allSearchableSlots()
+        // P2-9 (v2.10.5): 在主线程先快照可搜索槽位集合。`pages` / `specialSlots` 只在主线程被
+        // 修改，直接在后台遍历是真实数据竞争。
+        // P0-1 (v2.10.38): 只在主线程捕获「轻量的分组引用」（页/组元数据 + 各组 SlotStorage 句柄），
+        // 把真正繁重的逐槽展开（snapshot + getLabel，此前会逐槽抢 flock 同步读 label.txt 钉死主线程）
+        // 连同 filter + sort 一起移到后台队列。大库全局搜索不再卡主线程。
+        let groupRefs = store.searchableGroupsSnapshot()
 
         DispatchQueue.global(qos: .userInitiated).async {
-            // Heavy cross-page filter + sort runs off the main thread.
+            // Heavy per-slot expansion + cross-page filter + sort all run off the main thread.
+            let all = SlotStoreObservable.expandSearchableSlots(groupRefs)
             let results = ContentView.filterAndSortGlobalSearch(
                 all: all,
                 query: query,

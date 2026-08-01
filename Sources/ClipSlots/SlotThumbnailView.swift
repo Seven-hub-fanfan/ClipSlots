@@ -191,15 +191,20 @@ struct SlotThumbnailView: View {
             state = .loading
             let snapshot = content
             Task {
-                let decoded = await Task.detached(priority: .userInitiated) { () -> NSImage? in
-                    // ATT-1/ATT-2 (v2.10.32): the grid cell is small, so decode a
-                    // DOWNSAMPLED thumbnail (longest edge ≤ 512px) via ImageIO rather
-                    // than the full-resolution NSImage. This keeps an 8K screenshot from
-                    // decompressing ~135MB just to draw a ~140pt cell, and stores it in a
-                    // dedicated thumbnail cache (full-res stays in the enlarge-preview
-                    // path). Falls back to the full-res decode if downsampling fails.
-                    snapshot.decodedInlineThumbnail(maxPixel: 512) ?? snapshot.decodedInlineImage()
-                }.value
+                // P0-4 (v2.10.38): gate the decode through the global ThumbnailDecodeLimiter so
+                // that a burst of image cells appearing at once (big group scroll / post-import
+                // refresh) can't fire hundreds of concurrent ImageIO decodes and swamp CPU/memory.
+                let decoded = await ThumbnailDecodeLimiter.shared.run {
+                    await Task.detached(priority: .userInitiated) { () -> NSImage? in
+                        // ATT-1/ATT-2 (v2.10.32): the grid cell is small, so decode a
+                        // DOWNSAMPLED thumbnail (longest edge ≤ 512px) via ImageIO rather
+                        // than the full-resolution NSImage. This keeps an 8K screenshot from
+                        // decompressing ~135MB just to draw a ~140pt cell, and stores it in a
+                        // dedicated thumbnail cache (full-res stays in the enlarge-preview
+                        // path). Falls back to the full-res decode if downsampling fails.
+                        snapshot.decodedInlineThumbnail(maxPixel: 512) ?? snapshot.decodedInlineImage()
+                    }.value
+                }
                 await MainActor.run {
                     // Discard if the cell was reused / content version changed while
                     // decoding, or a newer reload superseded this one.
