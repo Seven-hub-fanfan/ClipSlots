@@ -433,12 +433,52 @@ extension SlotContent.SlotAttachment {
         if let d = self.data { return d }
         // 2) 外置字节——内存无 data 时，按 storagePath 从磁盘懒加载 `{slotDir}/attachments/{id}.bin`。
         //    读失败 / 文件缺失（断链）返回 nil，与旧「无字节」语义一致，调用方据此回退。
-        if let sp = self.storagePath, !sp.isEmpty,
-           FileManager.default.fileExists(atPath: sp) {
-            return try? Data(contentsOf: URL(fileURLWithPath: sp))
+        guard let sp = self.storagePath, !sp.isEmpty else { return nil }
+        let url = URL(fileURLWithPath: sp)
+        // P2-F (v2.10.44): 读 .bin 不持 StorageLock，与另一进程（CLI / 自动存储）的 `replaceItemAt`
+        // 整槽目录原子 swap 可能交叠——`fileExists` 通过后文件恰被换走 → 偶发瞬时 nil（把真有字节的
+        // 附件误判为断链，缩略图/粘贴瞬时失败）。swap 是原子的，加一次轻量重试即可越过换盘瞬间读到
+        // swap 后的新文件（内容一致）。仍失败才当断链返回 nil，不改变最终语义。
+        for attempt in 0..<2 {
+            if let d = try? Data(contentsOf: url) { return d }
+            if attempt == 0 && FileManager.default.fileExists(atPath: sp) == false {
+                // 换盘瞬间：极短退避后重试一次。
+                Thread.sleep(forTimeInterval: 0.015)
+            } else if attempt == 0 {
+                // 文件在但读失败（同样可能是 swap 中途）：立即重试一次。
+                continue
+            } else {
+                break
+            }
         }
         return nil
     }
+
+    /// P2-D / P2-F (v2.10.44): 外置字节文件的磁盘 URL（若存在）。`resolveData()` 会把整份字节读进
+    /// 内存；对「图片缩略图 / 大图下采样」等只需按 URL 流式读取的场景，优先用本 URL 交给 ImageIO
+    /// （`CGImageSourceCreateWithURL`）按需下采样，避免先整图 materialize 到内存再解码。纯内联 /
+    /// 纯路径引用 / url / reference 型附件返回 nil（无外置字节文件）。
+    public var storageFileURL: URL? {
+        guard let sp = storagePath, !sp.isEmpty,
+              FileManager.default.fileExists(atPath: sp) else { return nil }
+        return URL(fileURLWithPath: sp)
+    }
+
+    /// P2-E (v2.10.44): 文本附件的解码字符串，带进程内缓存。文本附件的预览（附件面板 subtitle /
+    /// 正文卡片）是 SwiftUI 计算属性，每次重绘都会调 `resolveData()` 同步读盘 + UTF-8 解码；外置后
+    /// 这条路径变成主线程磁盘 I/O。这里按「id + storagePath」缓存解码结果（外置 `.bin` 一经写入内容
+    /// 不变，缓存安全），重绘命中缓存不再读盘。仅对 `.text` 类型有意义；解不出 UTF-8 返回 nil。
+    public func resolveTextString() -> String? {
+        guard type == .text else {
+            return resolveData().flatMap { String(data: $0, encoding: .utf8) }
+        }
+        let key = id.uuidString + "|" + (storagePath ?? "")
+        if let cached = AttachmentTextCache.shared.string(forKey: key) { return cached }
+        guard let s = resolveData().flatMap({ String(data: $0, encoding: .utf8) }) else { return nil }
+        AttachmentTextCache.shared.set(s, forKey: key)
+        return s
+    }
+
 
     /// 本地文件引用实际应指向的磁盘路径：优先 `path`，其次导入时保留的 `originalPath`。
     /// 仅对 image/file 类型有意义；其余类型返回 nil。
@@ -458,5 +498,28 @@ extension SlotContent.SlotAttachment {
         // 没有任何本地路径引用（例如纯 url / 内联型），不属于本地文件断链范畴。
         guard let p = localFileReferencePath else { return false }
         return !FileManager.default.fileExists(atPath: p)
+    }
+}
+
+/// P2-E (v2.10.44): 进程内的文本附件解码缓存。文本附件外置后，附件面板的文本预览计算属性会在
+/// 每次 SwiftUI 重绘时同步读盘 + UTF-8 解码；本缓存按「id + storagePath」键缓存解码字符串，重绘直接
+/// 命中内存。外置 `.bin` 一经写入其内容不再变化（内容变更会生成新附件 / 新路径），故缓存无失效风险。
+/// 用 `NSCache` 承载（自动内存压力回收 + 容量上限），线程安全。
+final class AttachmentTextCache {
+    static let shared = AttachmentTextCache()
+    private let cache = NSCache<NSString, NSString>()
+
+    private init() {
+        // 文本附件通常很小；限制条数与总字符数，避免异常大文本堆积。
+        cache.countLimit = 512
+        cache.totalCostLimit = 16 * 1024 * 1024 // 约 16MB 字符
+    }
+
+    func string(forKey key: String) -> String? {
+        cache.object(forKey: key as NSString) as String?
+    }
+
+    func set(_ value: String, forKey key: String) {
+        cache.setObject(value as NSString, forKey: key as NSString, cost: value.utf8.count)
     }
 }

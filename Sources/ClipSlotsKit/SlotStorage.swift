@@ -18,6 +18,16 @@ func cloneOrCopyItem(at src: URL, to dst: URL) -> Bool {
     }
 }
 
+/// P1-A (v2.10.44): errors surfaced by the slot write path so the caller can abort an
+/// atomic swap (and roll back) instead of silently persisting a lossy payload.
+enum SlotStorageError: Error {
+    /// externalizeAttachments 情形 2（把本已外置的 `.bin` 克隆进 staging）失败。抛出后
+    /// writeSlotContent 的 catch 会清理 staging 并保留原槽目录（含现存字节），本次写入整体回滚，
+    /// 宁可失败也不把「storagePath=nil」的 attachments.json 连同原子 swap 写出去 —— 后者会让旧
+    /// `.bin` 随整槽目录被替换而永久丢失。
+    case attachmentExternalizeFailed(slot: Int, attachment: UUID, source: String)
+}
+
 struct SlotManifest: Codable {
     struct Entry: Codable {
         let description: String
@@ -48,6 +58,16 @@ struct DirFingerprint: Equatable {
 
 public final class SlotStorage {
     public static let shared = SlotStorage()
+
+    /// P2-B (v2.10.44): invoked right after a lazy inline→external attachment migration
+    /// writes into the LIVE slot dir (`.bin` files + rewritten `attachments.json`). The
+    /// migration is triggered by a READ (`get()` slow path), not by a normal GUI write
+    /// entry point, so the GUI's FSEvents watcher would otherwise see it as an EXTERNAL
+    /// write and fire a redundant `reloadAll()` right after upgrade. The GUI registers a
+    /// hook here (typically `suppressWatcher()`) so the migration write is treated as a
+    /// self-write. Stays nil in the CLI (no watcher) → a harmless no-op. Kit cannot
+    /// reference the GUI watcher directly, hence this injection point.
+    public static var didWriteLiveSlotDir: (() -> Void)?
 
     private let baseURL: URL
     private var cache: [Int: SlotContent] = [:]
@@ -190,6 +210,18 @@ public final class SlotStorage {
     // MARK: - Slot Content
 
     public func get(_ slot: Int) -> SlotContent {
+        // Preserve the historical public contract: the degraded "unknown" state (lock busy
+        // AND never cached) maps to an empty placeholder. Callers that make DESTRUCTIVE
+        // decisions off emptiness must instead use `loadContentOrUnknown` and treat nil as
+        // "unknown, do not overwrite" (see isSlotEmpty, P1-C v2.10.44).
+        return loadContentOrUnknown(slot) ?? SlotContent()
+    }
+
+    /// Shared core for `get()` / `isSlotEmpty`. Returns nil ONLY in the degraded case where
+    /// the cross-process lock could not be acquired AND this slot has never been cached — i.e.
+    /// the on-disk content is genuinely UNKNOWN (NOT known-empty). Every other path returns a
+    /// real value (fresh cache hit, locked disk read, or last-known cache on lock-busy).
+    private func loadContentOrUnknown(_ slot: Int) -> SlotContent? {
         let slotDir = baseURL.appendingPathComponent(String(slot))
         // PERF (switch lag): fast cache-hit path that does NOT take the cross-process
         // flock. Page/group switching reloads EVERY slot of the target group (loadSlots)
@@ -242,15 +274,20 @@ public final class SlotStorage {
         // EMPTY slot. That "假空槽" is dangerous: it makes real content look lost in the UI
         // and, worse, could feed an overwrite decision that wipes the still-intact disk data.
         // Never synthesize an empty slot on a lock failure — serve the last-known cached
-        // value instead. Only when we have genuinely never loaded this slot do we return an
-        // empty SlotContent (nothing better exists), and we log so the degradation is visible.
+        // value instead.
         if let cached = queue.sync(execute: { cache[slot] }) {
             NSLog("[ClipSlots] SlotStorage.get slot=\(slot): lock busy, serving cached value (not empty)")
             return cached
         }
-        NSLog("[ClipSlots] SlotStorage.get slot=\(slot): lock busy and no cache; returning empty placeholder")
-        return SlotContent()
+        // P1-C (v2.10.44): lock busy AND never cached → the slot's content/emptiness is
+        // genuinely UNKNOWN. Return nil so a caller making an overwrite decision (isSlotEmpty
+        // → auto-store / auto-paste "find empty slot") never treats it as free and clobbers
+        // still-intact disk data. `get()` maps this back to an empty placeholder for its
+        // historical read contract.
+        NSLog("[ClipSlots] SlotStorage.get slot=\(slot): lock busy and no cache; content UNKNOWN")
+        return nil
     }
+
 
     /// PERF (switch lag): cheap emptiness probe that does NOT load item payloads into
     /// memory. Mirrors `SlotContent.isEmpty` (main items empty AND attachments empty) but
@@ -281,8 +318,19 @@ public final class SlotStorage {
         // dir fingerprint changed during the probe, the read was potentially torn — fall back
         // to the authoritative `get()`, which reads the full slot under the cross-process lock.
         if dirFingerprint(slotDir.path) != diskFP {
-            NSLog("[ClipSlots] isSlotEmpty slot=\(slot): dir changed during probe, recomputing via get()")
-            return get(slot).isEmpty
+            // A-4 (v2.10.31): torn read → resolve authoritatively under the cross-process lock.
+            // P1-C (v2.10.44): if even the authoritative read cannot determine state (lock busy
+            // AND never cached → loadContentOrUnknown returns nil), do NOT report empty. An
+            // auto-store / auto-paste "find empty slot" decision would otherwise treat an UNKNOWN
+            // slot as free and overwrite still-intact disk data. Externalizing attachment bytes
+            // widened the lock-contention surface, raising the odds of hitting this path, so a
+            // genuinely-unknown slot is conservatively reported as NON-empty.
+            if let content = loadContentOrUnknown(slot) {
+                NSLog("[ClipSlots] isSlotEmpty slot=\(slot): dir changed during probe, recomputed via authoritative read")
+                return content.isEmpty
+            }
+            NSLog("[ClipSlots] isSlotEmpty slot=\(slot): state UNKNOWN (lock busy, no cache) after torn read; reporting NON-empty to avoid overwrite")
+            return false
         }
         return result
     }
@@ -359,8 +407,16 @@ public final class SlotStorage {
                     return false
                 }
                 do {
-                    try writeSlotContent(content, to: slot)
-                    cache[slot] = content
+                    let persisted = try writeSlotContent(content, to: slot)
+                    // P2-C (v2.10.44): cache the PERSISTED attachments (data=nil, storagePath →
+                    // on-disk `.bin`) rather than the caller's `content`, which still carries the
+                    // inline attachment bytes. Caching `content` kept those bytes resident until
+                    // the NEXT get() re-read from disk, deferring the memory win the externalization
+                    // was meant to deliver. Converging the cache to the on-disk shape here releases
+                    // the inline attachment bytes immediately.
+                    var cachedContent = content
+                    cachedContent.attachments = persisted
+                    cache[slot] = cachedContent
                     // P2-7 (v2.10.9): backfill the fingerprint with the freshly-written
                     // slot dir so the next get() serves the cache instead of doing a full
                     // disk re-read (the atomic swap changed the dir's inode/mtime/size).
@@ -719,7 +775,10 @@ public final class SlotStorage {
                 // （老格式，storagePath 缺失/文件不存在），首次读到时把字节外置成独立文件并
                 // 回写 JSON，收敛到「JSON 只存元数据 + storagePath」的新格式。见方法内注释——
                 // 全程原子化、先落盘 .bin 再改写 JSON，中途崩溃不丢原始 data；无迁移需求时零写盘。
-                content.attachments = migrateInlineAttachmentsIfNeeded(atts, slotDir: slotDir)
+                // P1-B (v2.10.44): 迁移后再按当前 slotDir 约定重建外置字节路径，消除「存量绝对
+                // 路径随数据目录迁移/换机/CLIPSLOTS_DATA_DIR 变更而全量断链」。
+                content.attachments = normalizeStoragePaths(
+                    migrateInlineAttachmentsIfNeeded(atts, slotDir: slotDir), slotDir: slotDir)
                 // Clean decode clears any prior corruption poison for this slot.
                 if let s = slotNum { attachmentDecodeFailedSlots.remove(s) }
             } else {
@@ -759,8 +818,18 @@ public final class SlotStorage {
         return content
     }
 
-    private func writeSlotContent(_ content: SlotContent, to slot: Int) throws {
+    /// Persists `content` to the slot's directory via an atomic staging-dir swap and returns
+    /// the attachment array as PERSISTED to `attachments.json` — i.e. with inline bytes
+    /// externalized (`data=nil`, `storagePath` → the post-swap `.bin` path). The caller (set)
+    /// caches this shape so the freshly-written slot doesn't keep inline bytes resident (P2-C).
+    /// A slot with no attachments returns the (empty) `content.attachments` unchanged.
+    @discardableResult
+    private func writeSlotContent(_ content: SlotContent, to slot: Int) throws -> [SlotContent.SlotAttachment] {
         let slotDir = baseURL.appendingPathComponent(String(slot))
+        // P2-C (v2.10.44): the attachment shape actually written to disk. Defaults to the
+        // caller's attachments (covers the no-attachment / non-externalized paths); the
+        // externalize branch below replaces it with the `data=nil` + storagePath form.
+        var persistedAttachments = content.attachments
 
         // P1-5 (v2.10.9): sweep any staging dirs for THIS slot orphaned by a prior
         // crash before creating a fresh one, so `.tmp_slot_<slot>_*` cannot pile up.
@@ -821,6 +890,7 @@ public final class SlotStorage {
                 // 一并生效——JSON 与其引用的 .bin 文件永远同生共死，不会出现「JSON 指向不存在字节」。
                 if !content.attachments.isEmpty {
                     let externalized = try externalizeAttachments(content.attachments, slot: slot, stagingDir: stagingDir)
+                    persistedAttachments = externalized
                     let attData = try encoder.encode(externalized)
                     try attData.write(to: stagingDir.appendingPathComponent("attachments.json"), options: .atomic)
                 }
@@ -856,6 +926,10 @@ public final class SlotStorage {
             try? FileManager.default.removeItem(at: stagingDir)
             throw error
         }
+
+        // P2-C (v2.10.44): the atomic swap succeeded — hand back the on-disk attachment shape
+        // so the caller can cache it (inline bytes released).
+        return persistedAttachments
     }
 
     /// Step 2 (v2.10.42) 附件字节外置：把每个「带字节」的附件写成独立文件
@@ -907,10 +981,13 @@ public final class SlotStorage {
                     out.data = nil
                     out.storagePath = finalPath
                 } else {
-                    // 搬运失败：不谎报外置路径（会让读侧断链），退回「无字节」元数据。
-                    out.data = nil
-                    out.storagePath = nil
-                    NSLog("[ClipSlots] externalizeAttachments slot=\(slot) att=\(att.id) clone FAIL from \(sp)")
+                    // P1-A (v2.10.44): 克隆现存 .bin 失败 → 抛错中断整槽写入，放弃原子 swap。
+                    // 旧实现把 storagePath 置 nil 后继续写 attachments.json 并完成 swap，会把仍在
+                    // 【旧槽目录】下的原始 .bin 随整目录替换掉 → 附件字节永久丢失（本槽内存 data 已为
+                    // nil，无处可回退）。抛错后 writeSlotContent 的 catch 清理 staging、保留原槽目录
+                    // 及其现存字节，本次写入整体回滚；宁可让本次 set 失败，也绝不静默丢字节。
+                    NSLog("[ClipSlots] externalizeAttachments slot=\(slot) att=\(att.id) clone FAIL from \(sp) — aborting write to preserve existing bytes")
+                    throw SlotStorageError.attachmentExternalizeFailed(slot: slot, attachment: att.id, source: sp)
                 }
             } else {
                 // 情形 3：无字节（纯 path 引用 / url / reference / storagePath 已断链）——原样保留元数据。
@@ -987,11 +1064,46 @@ public final class SlotStorage {
                 // （storagePath 已指向存在文件），读取正常。
                 NSLog("[ClipSlots] migrate rewrite attachments.json FAIL slot=\(slotDir.lastPathComponent): \(error)")
             }
+            // P2-B (v2.10.44): 懒迁移直接写 live slotDir（.bin + attachments.json）。这是由「读」
+            // 触发的写，不经过任何 GUI 写入入口，GUI 的 FSEvents watcher 会把它当外部写触发多余
+            // reloadAll（升级后首次读老数据时尤为集中）。通知 GUI 登记自写指纹 / 抑制 watcher。
+            // CLI 中该 hook 为 nil，无副作用。
+            SlotStorage.didWriteLiveSlotDir?()
         }
         return migrated
     }
 
-    // MARK: - Safe Filename Encoding
+    /// P1-B (v2.10.44): 修正外置附件的 `storagePath`，消除「存量绝对路径不可移植」的断链回归。
+    ///
+    /// `attachments.json` 里的 `storagePath` 存的是【写入时】的绝对路径（如
+    /// `/Users/alice/.local/share/clipslots/.../attachments/{id}.bin`）。一旦整个数据目录被迁移、
+    /// 换机恢复、或 `CLIPSLOTS_DATA_DIR` 指向别处，存量绝对路径就整体失效，`resolveData()`
+    /// 走 `fileExists(sp)` 全部落空 → 附件字节全量断链（其实字节就在 slotDir 旁边）。
+    ///
+    /// 约定：外置字节文件恒为 `{slotDir}/attachments/{id}.bin`，永远与 `attachments.json` 同目录树。
+    /// 因此读取时按【当前】slotDir 重建期望路径：只要该 `.bin` 就在当前 slotDir 下，就把
+    /// `storagePath` 回填成当前真实绝对路径，无论存量记录是否已失效。仅改内存态（下次 `set()`
+    /// 的 externalize 情形 2 会自然把修正后的路径持久化到 JSON），不在读路径额外写盘，避免多余的
+    /// watcher 抖动。若当前 slotDir 下不存在该 `.bin`（例如同机原位仍有效、或真断链），保持原
+    /// `storagePath` 不动——`resolveData()` 仍会 `fileExists` 校验，真断链时返回 nil，行为不回退。
+    private func normalizeStoragePaths(_ attachments: [SlotContent.SlotAttachment],
+                                       slotDir: URL) -> [SlotContent.SlotAttachment] {
+        let fm = FileManager.default
+        let attachmentsDir = slotDir.appendingPathComponent("attachments", isDirectory: true)
+        var out = attachments
+        for i in out.indices {
+            // 仅处理「字节应由存储层外置管理」的附件：有 storagePath 记录且内存无 inline data。
+            guard out[i].data == nil, let sp = out[i].storagePath, !sp.isEmpty else { continue }
+            let expected = attachmentsDir.appendingPathComponent(out[i].id.uuidString + ".bin")
+            guard fm.fileExists(atPath: expected.path) else { continue }
+            // 外置文件就在当前 slotDir 下——以当前真实路径为准，覆盖可能已失效的存量绝对路径。
+            if sp != expected.path {
+                out[i].storagePath = expected.path
+            }
+        }
+        return out
+    }
+
 
     private let slashPlaceholder = "$slash$"
 

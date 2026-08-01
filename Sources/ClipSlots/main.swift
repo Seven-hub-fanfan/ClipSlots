@@ -403,6 +403,10 @@ final class SlotStoreObservable: ObservableObject {
     // P1-B (v2.10.17): 指纹计算是 I/O 密集的整目录树递归 stat，放主线程会在大库写入时造成 UI 卡顿。
     // 统一改到该后台串行队列执行；队列的串行性同时充当 pendingSelfWriteFingerprints 的并发保护。
     private let fingerprintQueue = DispatchQueue(label: "com.clipslots.fingerprint", qos: .utility)
+    // P2-A (v2.10.44): 自写指纹采集的突发合并标志。仅在 fingerprintQueue 上读写（串行，无需额外锁）。
+    // 为 true 表示已有一次延后的整树指纹采集在排队，期间的其余自写记录直接跳过，由那次采集统一捕获
+    // 最终磁盘状态，避免外置后文件数变多时对同一目录树反复整树遍历。
+    private var fingerprintRecordPending = false
 
     // P1-1 (v2.10.35): 槽位写盘统一串行队列。MT-1/APP-3（v2.10.30/32）把原先「主线程同步、天然有序」的
     // 写盘挪到了 DispatchQueue.global（并发队列）。并发队列上多个 async 写块在不同线程竞争同一把跨进程
@@ -414,6 +418,12 @@ final class SlotStoreObservable: ObservableObject {
 
     init() {
         NSLog("[ClipSlots] SlotStoreObservable init instanceID=\(instanceID)")
+        // P2-B (v2.10.44): 老数据 inline→external 懒迁移由「读」触发、直接写 live slotDir，不经任何
+        // GUI 写入入口，FSEvents watcher 会把它误判为外部写触发多余 reloadAll（升级后首次读老库尤为
+        // 集中）。注册回调，把这类迁移写当作自写抑制掉。CLI 侧不设此 hook（无 watcher）。
+        SlotStorage.didWriteLiveSlotDir = { [weak self] in
+            self?.suppressWatcher()
+        }
         loadSpecialSlots()
         loadSlots()
         loadPersistedUndoSnapshot() // v2.9.5 (Feature #3): restore pending undo across restarts
@@ -545,13 +555,24 @@ final class SlotStoreObservable: ObservableObject {
     private func recordSelfWriteFingerprint() {
         fingerprintQueue.async { [weak self] in
             guard let self else { return }
-            let fp = self.storageDirFingerprint()
-            // 去重后追加到尾部（保持“最近”在后），避免重复自写把同一指纹塞满环。
-            self.pendingSelfWriteFingerprints.removeAll { $0 == fp }
-            self.pendingSelfWriteFingerprints.append(fp)
-            if self.pendingSelfWriteFingerprints.count > self.maxPendingSelfWriteFingerprints {
-                self.pendingSelfWriteFingerprints.removeFirst(
-                    self.pendingSelfWriteFingerprints.count - self.maxPendingSelfWriteFingerprints)
+            // P2-A (v2.10.44): 附件字节外置后 special_slots 目录的文件数显著增加，storageDirFingerprint
+            // 的整树遍历变重。一连串自写（批量导入尾声、连续编辑）若每次都各走一遍全树遍历十分浪费。
+            // 这里把突发合并：若已有一次待执行的指纹采集在排队，则本次直接跳过——那次采集延后一小段再跑，
+            // 会捕获到突发的【最终】磁盘状态（即 watcher 回调时刻磁盘的真实指纹）。0.08s 合并窗远小于
+            // watcher 的 0.3s debounce，自写判定的正确性不受影响；分散的自写（间隔大于窗口）仍各自采集。
+            if self.fingerprintRecordPending { return }
+            self.fingerprintRecordPending = true
+            self.fingerprintQueue.asyncAfter(deadline: .now() + 0.08) { [weak self] in
+                guard let self else { return }
+                self.fingerprintRecordPending = false
+                let fp = self.storageDirFingerprint()
+                // 去重后追加到尾部（保持“最近”在后），避免重复自写把同一指纹塞满环。
+                self.pendingSelfWriteFingerprints.removeAll { $0 == fp }
+                self.pendingSelfWriteFingerprints.append(fp)
+                if self.pendingSelfWriteFingerprints.count > self.maxPendingSelfWriteFingerprints {
+                    self.pendingSelfWriteFingerprints.removeFirst(
+                        self.pendingSelfWriteFingerprints.count - self.maxPendingSelfWriteFingerprints)
+                }
             }
         }
     }

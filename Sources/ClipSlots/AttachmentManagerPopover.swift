@@ -694,7 +694,7 @@ struct AttachmentRow: View {
         case .url:
             return attachment.url ?? ""
         case .text:
-            let text = attachment.resolveData().flatMap { String(data: $0, encoding: .utf8) } ?? ""
+            let text = attachment.resolveTextString() ?? ""
             return String(text.prefix(30))
         case .reference:
             return attachment.path.map { "→ 槽位 \($0)" } ?? "引用"
@@ -754,6 +754,10 @@ enum AttachmentThumbnailProvider {
             if let path = att.path, !path.isEmpty {
                 if let thumb = downsampledThumbnail(path: path, maxPixel: maxPixel) { return thumb }
             }
+            // P2-D (v2.10.44): 外置字节（storagePath → `{slotDir}/attachments/{id}.bin`，`path` 为 nil）
+            // 按文件 URL 交给 ImageIO 增量下采样，而不是先 resolveData() 把整份 .bin 读进内存再解码。
+            if let url = att.storageFileURL,
+               let thumb = downsampledThumbnail(path: url.path, maxPixel: maxPixel) { return thumb }
             if let data = att.resolveData() {
                 if let thumb = downsampledThumbnail(data: data, maxPixel: maxPixel) { return thumb }
             }
@@ -814,6 +818,8 @@ enum AttachmentThumbnailProvider {
         switch att.type {
         case .image:
             if let path = att.path, !path.isEmpty, let img = NSImage(contentsOfFile: path) { return img }
+            // P2-D (v2.10.44): 外置字节按文件 URL 解码，避免 resolveData() 先把整份 .bin 拷进内存。
+            if let url = att.storageFileURL, let img = NSImage(contentsOf: url) { return img }
             if let data = att.resolveData(), let img = NSImage(data: data) { return img }
             return nil
         case .file:
@@ -841,6 +847,9 @@ enum AttachmentThumbnailProvider {
         case .image:
             if let path = att.path, !path.isEmpty,
                let thumb = downsampledThumbnail(path: path, maxPixel: maxPixel) { return thumb }
+            // P2-D (v2.10.44): 外置字节按文件 URL 增量下采样，避免整份 .bin 读进内存再解码。
+            if let url = att.storageFileURL,
+               let thumb = downsampledThumbnail(path: url.path, maxPixel: maxPixel) { return thumb }
             if let data = att.resolveData(),
                let thumb = downsampledThumbnail(data: data, maxPixel: maxPixel) { return thumb }
             return nil
@@ -955,7 +964,7 @@ private struct AttachmentPreviewContent: View {
     }
 
     private var bodyText: String {
-        attachment.resolveData().flatMap { String(data: $0, encoding: .utf8) } ?? attachment.name
+        attachment.resolveTextString() ?? attachment.name
     }
 
     private func textCard(_ text: String) -> some View {
