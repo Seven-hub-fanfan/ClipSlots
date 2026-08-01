@@ -4,11 +4,20 @@
 
 ## 当前版本
 
-- **当前版本：v2.10.40**
+- **当前版本：v2.10.41**
 - 平台：macOS（Swift / SwiftUI，SPM 构建，macOS 13+）
 - 单一版本号事实来源：`Info.plist` 的 `CFBundleShortVersionString`（`AppVersion.current` 动态读取，`AppVersion.fallback` 为编译期兜底）。CLI 版本号见 `Sources/ClipSlotsCLI/main.swift` 的 `CLI_VERSION`。
 
 ## 版本要点（近期）
+
+### v2.10.41 — 附件字节外置架构 Step 1（统一懒加载入口，纯重构）
+- 背景：方案 B「附件字节外置（独立文件 + 懒加载）」分三步走。Step 1（本版）加统一懒加载入口，把所有直接读 `att.data` 的地方收敛到一个函数，**此时字节仍在 JSON，行为不变，纯重构**，为后续步骤安全落地铺路。
+- **新增 `SlotContent.SlotAttachment.resolveData() -> Data?`**（`ClipboardManager.swift` 扩展内）：Step 1 直接返回 `self.data`（逐字节行为一致）；附完整设计注释说明 Step 2 将扩展为「内联为空则按内容寻址从磁盘懒加载 + 老数据懒迁移」，Step 3 适配 pack/CLI。
+- **9 处读取路径改走 `resolveData()`**：`main.swift`（3390 文本附件、3403 图片、3722 多图合并 spill、2938 file-like 分类判存在）、`AttachmentManagerPopover.swift`（697 subtitle、757 缩略图、817 大图、844 悬停预览、958 文本附件预览）、`PackExporter.swift`（242 pack 导出写字节）。全仓已无其他直接 `att.data`/`attachment.data` 读取（仅剩 resolveData 内部与文档注释引用）。
+- 后续：Step 2（v2.10.42）改写盘字节落独立文件 + 老数据懒迁移；Step 3（v2.10.43）改 pack 导入/导出 + CLI 适配。
+- commit：`b97660a`（refactor+bump 合并）
+- DMG SHA256：`66e52ce1e54aeea4d2c7e8a5e9243ab4726df03e5bc567eb50dea25dc698263a`
+- Release：https://github.com/Seven-hub-fanfan/ClipSlots/releases/tag/v2.10.41
 
 ### v2.10.40 — P0 槽位包导入死锁崩溃修复
 - 崩溃：`EXC_BREAKPOINT (SIGTRAP)` / `BUG IN CLIENT OF LIBDISPATCH: dispatch_sync called on queue already owned by current thread`，崩溃线程 dispatch queue = `com.clipslots.storage`。
