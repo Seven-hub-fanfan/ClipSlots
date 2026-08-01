@@ -4,11 +4,22 @@
 
 ## 当前版本
 
-- **当前版本：v2.10.45**
+- **当前版本：v2.10.46**
 - 平台：macOS（Swift / SwiftUI，SPM 构建，macOS 13+）
 - 单一版本号事实来源：`Info.plist` 的 `CFBundleShortVersionString`（`AppVersion.current` 动态读取，`AppVersion.fallback` 为编译期兜底）。CLI 版本号见 `Sources/ClipSlotsCLI/main.swift` 的 `CLI_VERSION`。
 
 ## 版本要点（近期）
+
+### v2.10.46 — UX 丝滑度改进第一批（高感知、低风险 4 项）
+- 背景：技术 P0/P1 已全部清理，转做 UX 丝滑度。研判报告 https://bytedance.larkoffice.com/docx/XuDEd3WYwoExwqxcoq5cGSjfn7c 结论：不丝滑主因在 UX（过度模态化 + 过渡动画缺失 + 反馈滞后），非技术架构。本轮做第一批 4 项。
+- **① 附件面板切槽位补 0.12s 淡入淡出**（`AttachmentManagerPanel.swift`）：v2.10.29 曾为消卡顿改硬切/瞬切；现性能已 OK，补回极短过渡——切换时旧面板内容 alpha 1→0（0.12s）→ 瞬时 close → 新面板 `animates:false` 定位 + 内容 alpha 0→1（0.12s）。新增 `fadingOutPopover` 记录淡出中的旧 popover，下次 `show` 到来先 `hardCloseFadingOut()` 硬关兜底，杜绝连点叠加两个 popover。首次打开仍走系统淡入动画。淡出完成回调发生在当前 runloop 之后，自然覆盖原 AT-3 的 micro-defer（锚点 NSView 重排已 settle）。面板仍 `.semitransient` 跟随主窗口、切 Finder 拖文件不关闭。
+- **② 导入进度改非模态**（`ContentView.swift` `importProgressOverlay`）：去掉 `Color.black.opacity(0.28)` 全屏阻塞遮罩，改为底部悬浮轻量进度卡（`VStack{Spacer();card}` 底部对齐，`.move(edge:.bottom)` 转场），整体 `.allowsHitTesting(false)`，导入期间主网格照常可交互（边导入边整理）。
+- **③ 删页/清空组 NSAlert 换轻量 inline 确认**：新增 `InlineConfirmation` 模型（含 `onConfirm(doNotRemind:)` 闭包、`showDoNotRemind`）+ `store.pendingConfirmation` @Published + `requestConfirmation()`（主线程发布）；新增 `InlineConfirmationBar` 视图（底部确认卡，回车确认 / Esc 取消 / 点空白取消，破坏性动作红色 prominent，清空保留「不再提醒」）。`confirmDeletePage`（ContentView）与 `clearAllSlotsInCurrentSpecialSlotWithConfirmation`（main.swift）改用之，移除对应 NSAlert。重命名等其余 NSAlert（`runAlertNonBlocking`/`sheetHostWindow`）保留不动。
+- **④ 悬停预览延迟 0.4s→0.18s**（`AttachmentManagerPopover.swift`）：`AttachmentPreviewWindowController` 新增 `isVisible`；hover 时 `delay = isVisible ? 0 : 0.18`，预览窗已开时切换即时响应。
+- 约束遵守：未改 UI 样式 / 未引入拖拽排序 / 未改游标胶囊位置；附件面板跟随主窗口、切 Finder 拖文件不关闭；自动切换默认开启、自动存储/粘贴默认关闭、已有用户设置不覆盖。
+- commit：`e76ce55`（fix+bump 合并）
+- DMG SHA256：`5dee83040198ada1ad30fcb4ba075cb3fa82db9ab23f1fd50d5c43298dbac1bb`
+- Release：https://github.com/Seven-hub-fanfan/ClipSlots/releases/tag/v2.10.46
 
 ### v2.10.45 — 第八轮 P1×1 + P2×5 全量修复
 - 背景：收敛第八轮全量扫描报告（https://bytedance.larkoffice.com/docx/RbpmdrxXRovftnxV4cUcsBFDnJc）发现的 P1×1 + P2×5。未发现 P0。
