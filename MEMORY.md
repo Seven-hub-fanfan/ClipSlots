@@ -4,11 +4,23 @@
 
 ## 当前版本
 
-- **当前版本：v2.10.44**
+- **当前版本：v2.10.45**
 - 平台：macOS（Swift / SwiftUI，SPM 构建，macOS 13+）
 - 单一版本号事实来源：`Info.plist` 的 `CFBundleShortVersionString`（`AppVersion.current` 动态读取，`AppVersion.fallback` 为编译期兜底）。CLI 版本号见 `Sources/ClipSlotsCLI/main.swift` 的 `CLI_VERSION`。
 
 ## 版本要点（近期）
+
+### v2.10.45 — 第八轮 P1×1 + P2×5 全量修复
+- 背景：收敛第八轮全量扫描报告（https://bytedance.larkoffice.com/docx/RbpmdrxXRovftnxV4cUcsBFDnJc）发现的 P1×1 + P2×5。未发现 P0。
+- **P1-01 读-改-写 UNKNOWN 态丢附件**：`get()`/`contentForSlot()` 在跨进程锁超时且从未缓存时把 UNKNOWN 态坍缩为空占位；`updateTextSlot`/`updateHTMLSlot`/`saveHTMLToSlot` 用它保留 attachments 时会把 attachments 置空，原子 swap 后附件永久丢失。修复：`SlotStorage`/`SpecialSlotStorage` 新增 UNKNOWN-aware 的 `getOrUnknown`（返回 nil = UNKNOWN，不坍缩空占位）；main.swift 新增 `contentForSlotOrUnknown`，三条读-改-写路径在 nil 时**中止本次写入**（弹「存储繁忙」提示），不做 swap。
+- **P2-01 判空整读 2× 内存**：`slotContentPayloads` file-like 判空不再 `att.resolveData()` 把整份外置 `.bin` 读进内存，改为廉价谓词 `path != nil || storageFileURL != nil || hasUsableInlineData`（仅 stat/看内存，O(1)）。
+- **P2-02 主线程 sleep 掉帧**：`ClipboardManager.resolveData` 换盘重试的 `Thread.sleep(15ms)` 仅在**非主线程**执行；主线程直接判 nil 回退（TOCTOU 重试非正确性所需），消断链附件列表滑动掉帧。
+- **P2-03 情形3 陈旧路径丢字节**：`externalizeAttachments` 情形3 清空 `storagePath` 前回探规范路径 `{slotDir}/attachments/{id}.bin`，存在则按情形2克隆进 staging + 回填 `storagePath`（克隆失败抛错回滚），仅规范路径也缺失才判真断链清空。
+- **P2-04 损坏守卫漏保字节目录**：损坏守卫（`attachmentDecodeFailedSlots`）在克隆 `attachments.json` 之外，一并克隆 `attachments/` 外置字节目录进 staging，跨原子 swap 保全。
+- **P2-05 突发合并漏采尾指纹**：`recordSelfWriteFingerprint` 突发合并（0.08s 窗）内并入后续自写时，新增 `fingerprintRecordCoalesced` 标记，窗口末尾再补采一次尾指纹入环（抽出 `appendSelfWriteFingerprint` 复用），覆盖末尾态，消除最终态落在两次采集之间导致的误判外部写 + 多余 reloadAll。两次采集合计 0.16s，仍 < watcher 0.3s debounce。
+- commit：`12b9cf7`（fix+bump 合并）
+- DMG SHA256：`b4fbd59a694b7cf4b40f8464191d7555a2b34ba7166eefd09a0eab28cfc1bbe8`
+- Release：https://github.com/Seven-hub-fanfan/ClipSlots/releases/tag/v2.10.45
 
 ### v2.10.44 — 附件字节外置 P1×3 + P2×6 全量修复
 - 背景：收敛 v2.10.41–v2.10.43「附件字节外置三步走」Bug 扫描报告（https://bytedance.larkoffice.com/docx/Fxsid2ifdo5VcnxHxmEchamunOh）发现的全部 P1 与 P2。
