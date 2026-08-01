@@ -4,11 +4,23 @@
 
 ## 当前版本
 
-- **当前版本：v2.10.46**
+- **当前版本：v2.10.47**
 - 平台：macOS（Swift / SwiftUI，SPM 构建，macOS 13+）
 - 单一版本号事实来源：`Info.plist` 的 `CFBundleShortVersionString`（`AppVersion.current` 动态读取，`AppVersion.fallback` 为编译期兜底）。CLI 版本号见 `Sources/ClipSlotsCLI/main.swift` 的 `CLI_VERSION`。
 
 ## 版本要点（近期）
+
+### v2.10.47 — 回退删页/清空 inline 确认卡（负优化）+ 修复切组内容闪空槽位
+- **回退**：v2.10.46 把删页/清空确认改成的底部 inline 确认卡属负优化，本版回退为系统 NSAlert（`confirmDeletePage` 走 `runAlertNonBlocking`；清空组走 `beginSheetModal`，保留「不再提醒」）。彻底删除 `InlineConfirmation` 模型 / `pendingConfirmation` / `requestConfirmation` / `InlineConfirmationBar`。**其余三项 v2.10.46 改进保留**（附件面板 0.12s 淡入淡出、导入进度非模态悬浮条、悬停预览 0.18s）。
+- **修复切组主体内容闪空槽位中间态**：根因——v2.10.42 附件外置后切组读盘异步化，而 `selectSpecialSlotForPreview` / `selectAndActivateSpecialSlot` 会先 `slots=[:]` 清空，导致新数据回填前所有槽位闪成「空槽位」占位（顶部已用数/附件角标一直正确，仅主体预览区闪白）。
+  - 方案（最优解）：切组时**不清空** slots/labels，保留旧内容 + 叠 `GroupSwitchVeil` 轻微淡化(0.35)/微模糊(2)/高光扫过遮罩表示切换中；新数据在 `loadSlotsAsync(onCommit:)` 后台就绪后整体淡入(0.16s)替换并关闭遮罩。旧组缩略图缓存 `invalidateSpecialSlot` 推迟到 onCommit（切走旧内容后）执行，避免旧内容在遮罩下掉图。
+  - 健壮性：新增 `isSwitchingGroup` @Published + `beginGroupSwitchTransition()`（1.2s 兜底关闭防卡死）；`reloadAllAsync` 提交时若 `isSwitchingGroup` 仍开也一并关闭（watcher reload 抢先提交场景）；切组期间 grid `allowsHitTesting(false)` 防误操作。不预加载、不增内存。
+  - 新增文件：`Sources/ClipSlots/GroupSwitchVeil.swift`
+- version bump 2.10.46 → 2.10.47（Info.plist + AppVersion.swift）；CLI_VERSION 保持 2.10.45（GUI-only，与 v2.10.46 一致未 bump）
+- commit：`69ba271`（fix+bump 合并单提交）
+- DMG SHA256：`6d02d27b739c1e8519f2b3d0107edc7c8eee87e9bd545a1be87132ede77f8df7`
+- Release：https://github.com/Seven-hub-fanfan/ClipSlots/releases/tag/v2.10.47
+- 约束遵守：不改 UI 样式、不引入拖拽排序、不改游标胶囊位置；附件面板跟随主窗口、切 Finder 拖文件不关闭；自动切换默认开启、自动存储/自动粘贴默认关闭、已有用户设置不覆盖
 
 ### v2.10.46 — UX 丝滑度改进第一批（高感知、低风险 4 项）
 - 背景：技术 P0/P1 已全部清理，转做 UX 丝滑度。研判报告 https://bytedance.larkoffice.com/docx/XuDEd3WYwoExwqxcoq5cGSjfn7c 结论：不丝滑主因在 UX（过度模态化 + 过渡动画缺失 + 反馈滞后），非技术架构。本轮做第一批 4 项。
