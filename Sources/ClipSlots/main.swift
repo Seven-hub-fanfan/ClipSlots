@@ -4757,12 +4757,23 @@ final class SlotStoreObservable: ObservableObject {
         guard panel.runModal() == .OK, let url = panel.url else { return }
 
         DispatchQueue.global(qos: .userInitiated).async {
+            // v2.10.55: 进入构建阶段先显示不确定进度浮层（分母尚未统计出），随后 export 通过
+            // onProgress 逐槽位上报，复用与导入完全同款的 ImportProgress 浮层。
+            self.publishImportProgress(ImportProgress(title: "正在导出槽位包", detail: "准备打包…"))
             do {
                 // P1-3 (v2.10.36): 接住导出结果里的 failedAttachments——旧实现丢弃返回值、无论是否有附件
                 // 因源文件缺失/为空而被跳过，都无脑弹「导出成功」，用户完全不知道附件已丢。现在若有附件未能
                 // 打包，改弹 warning 明确告知数量，避免「以为导全了、实际缺附件」的静默数据丢失。
-                let result = try exporter.export(selection, to: url)
+                let result = try exporter.export(selection, to: url, onProgress: { done, total, name in
+                    // v2.10.55: 后台线程回调，统一经 publishImportProgress 切主线程驱动浮层。
+                    self.publishImportProgress(ImportProgress(
+                        title: "正在导出槽位包",
+                        detail: name,
+                        completed: done,
+                        total: total))
+                })
                 DispatchQueue.main.async {
+                    self.publishImportProgress(nil) // v2.10.55: 收起进度条浮层
                     let failedCount = result.failedAttachments.count
                     if failedCount > 0 {
                         self.showFloatingNotice(FloatingNotice(
@@ -4780,6 +4791,7 @@ final class SlotStoreObservable: ObservableObject {
                 }
             } catch {
                 DispatchQueue.main.async {
+                    self.publishImportProgress(nil) // v2.10.55: 失败也收起进度条浮层
                     self.showFloatingNotice(FloatingNotice(
                         title: "导出失败",
                         subtitle: error.localizedDescription,

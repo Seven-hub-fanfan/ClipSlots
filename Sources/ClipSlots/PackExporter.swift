@@ -158,13 +158,43 @@ struct PackExporter {
 
     // MARK: 导出
 
+    /// v2.10.55: 统计选中范围内「非空槽位」的总数（分母），供导出进度条显示 x/y。
+    /// 与 export 的写入判定口径保持一致（disk.isEmpty && !hasLabel 才跳过）。仅走磁盘元数据，
+    /// 不加载附件字节，绝不 OOM；失败/异常时退化为 0（进度条退化为不确定态）。
+    func countExportableSlots(for selection: PackExportSelection) -> Int {
+        var count = 0
+        for pageSel in selection.pages where !pageSel.groups.isEmpty {
+            for group in pageSel.groups {
+                for slot in 1...maxChildSlots {
+                    let disk = readSlotFromDisk(groupId: group.id, slot: slot)
+                    let label = storage.getLabel(slot, in: group.id)
+                    let hasLabel = !(label?.isEmpty ?? true)
+                    if disk.isEmpty && !hasLabel { continue }
+                    count += 1
+                }
+            }
+        }
+        return count
+    }
+
     /// 构建目录树并压缩到 `destURL`（后缀 .clipslotspack）。
     /// P2-2 (v2.10.16): 返回 `PackExportResult`，其 `failedAttachments` 收集了因源文件不可读/为空
     /// 而未能打包的附件；导出仍会完成，上层可据此提示用户「X 个附件未能打包」。加 @discardableResult
     /// 以兼容忽略返回值的既有调用方。
+    /// v2.10.55: onProgress 在后台线程被调用，用于驱动导出进度条；参数为 (已写入槽位数, 总槽位数, 当前组名)。
+    /// 与导入进度条同款回调签名，上层据此驱动同一套 ImportProgress 浮层。
     @discardableResult
-    func export(_ selection: PackExportSelection, to destURL: URL) throws -> PackExportResult {
+    func export(
+        _ selection: PackExportSelection,
+        to destURL: URL,
+        onProgress: ((_ done: Int, _ total: Int, _ currentName: String) -> Void)? = nil
+    ) throws -> PackExportResult {
         guard !selection.isEmpty else { throw PackExportError.nothingSelected }
+
+        // v2.10.55: 预统计非空槽位总数作为进度条分母；失败退化为 0（不确定态）。
+        let totalSlots = onProgress != nil ? countExportableSlots(for: selection) : 0
+        var doneSlots = 0
+        onProgress?(0, totalSlots, "")
 
         let fm = FileManager.default
         let root = fm.temporaryDirectory.appendingPathComponent("clipslotspack_\(UUID().uuidString)", isDirectory: true)
@@ -312,6 +342,10 @@ struct PackExporter {
                     )
                     try writeJSON(packSlot, to: slotDir.appendingPathComponent("slot.json"))
                     writtenSlots.append(slot)
+
+                    // v2.10.55: 每写完一个槽位上报一次进度（确定态时驱动 x/y + 百分比）。
+                    doneSlots += 1
+                    onProgress?(doneSlots, totalSlots, group.name)
                 }
 
                 let packGroup = PackGroup(
@@ -342,6 +376,8 @@ struct PackExporter {
         )
         try writeJSON(manifest, to: root.appendingPathComponent("manifest.json"))
 
+        // v2.10.55: 进入压缩阶段（无法逐字节上报），保持确定态计数满格并提示「正在压缩…」。
+        onProgress?(totalSlots, totalSlots, "正在压缩…")
         try zipDirectory(contentsOf: root, to: destURL)
 
         // P2-2 (v2.10.16): 返回失败清单（可能为空），让上层能提示「X 个附件因源文件不可读未能打包」。
