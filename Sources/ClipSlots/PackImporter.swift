@@ -502,6 +502,21 @@ struct PackImporter {
                 continue
             }
             guard name.hasPrefix(".import_backup_") else { continue }
+            // P2-2 (v2.10.54): 并发导入安全阈值。本清扫在启动时运行，若此刻【另一进程/实例】正有一场
+            // 导入进行中——backupGroupDirForOverwrite 已把旧组 rename 成 .import_backup_ 并重建了空的原组
+            // 目录，但 writeSlots 尚未把新内容写进去——原组目录会短暂为空，误触发下面「实况组为空 → 恢复
+            // 备份」分支，把进行中导入的备份错误地覆盖回去，毁掉那场导入。故只清扫「足够老」（mtime 超过
+            // 1 小时）的备份：进行中的导入其备份 mtime 必然很新，跳过它；只有确属上次崩溃/中断遗留的陈旧
+            // 备份才参与恢复/删除。
+            let backupAge: TimeInterval = {
+                let attrs = try? fm.attributesOfItem(atPath: url.path)
+                let mtime = (attrs?[.modificationDate] as? Date) ?? .distantPast
+                return Date().timeIntervalSince(mtime)
+            }()
+            if backupAge < 3600 {
+                NSLog("[ClipSlots] PackImporter 启动清扫：跳过较新的备份 \(name)（\(Int(backupAge))s，疑似进行中的并发导入）")
+                continue
+            }
             // 解析 groupId：形如 .import_backup_<groupId>_<uuid>。groupId（UUID 或 "default"）与末段 uuid 均
             // 不含下划线，故 groupId = 去掉前缀后、最后一个 "_" 之前的部分。
             let rest = String(name.dropFirst(".import_backup_".count))

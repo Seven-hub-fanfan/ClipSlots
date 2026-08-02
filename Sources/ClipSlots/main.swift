@@ -2248,6 +2248,7 @@ final class SlotStoreObservable: ObservableObject {
         // flock，成本极低）替换 attachments 后立即写回 slots[slot]，关闭 lost-update 窗口；磁盘写盘仍走
         // slotWriteQueue 异步串行（保序、last-write-wins、不卡主线程），保留 P1-4 的防 Beachball 收益。
         var content = contentForSlot(slot)
+        let previousContent = content // P2-1 (v2.10.54): 乐观更新前的旧内容快照，写盘失败时回滚用。
         content.attachments = attachments
         // P1-2 (v2.10.53): 同 updateHTMLSlot——复用旧 content 仅改 attachments 却不刷新身份字段，会破坏
         // v2.10.52 增量 diff（slotsSnapshotEqual 以 contentId+updatedAt 判等）的「内容变则 id/时间戳变」不变量，
@@ -2261,7 +2262,27 @@ final class SlotStoreObservable: ObservableObject {
         let toWrite = content
         slotWriteQueue.async { [weak self] in
             guard let self = self else { return }
-            _ = self.specialStorage.set(slot, content: toWrite, in: activeId)
+            let success = self.specialStorage.set(slot, content: toWrite, in: activeId)
+            // P2-1 (v2.10.54): 写盘失败时回滚乐观内存更新，避免内存（已含新附件）与磁盘（仍是旧附件）
+            // 长期不一致。仅当仍停留在同组、且内存快照确为本次写入的值（未被后续写入覆盖）时才回滚。
+            if !success {
+                DispatchQueue.main.async { [weak self] in
+                    guard let self = self else { return }
+                    if self.loadedSpecialSlotId == activeId,
+                       self.slots[slot]?.contentId == toWrite.contentId {
+                        self.slots[slot] = previousContent
+                        self.slotRenderTokens["\(activeId)::\(slot)"] = UUID()
+                        self.refreshTrigger = UUID()
+                    }
+                    NSLog("[ClipSlots] setAttachments 写盘失败，已回滚内存 specialSlot=\(activeId) slot=\(slot)")
+                    self.showFloatingNotice(FloatingNotice(
+                        title: "附件保存失败",
+                        subtitle: "槽位 \(slot) 写入失败，已回滚",
+                        iconName: "xmark.circle.fill",
+                        kind: .error
+                    ), duration: 2.5)
+                }
+            }
         }
     }
 
@@ -4556,6 +4577,11 @@ final class SlotStoreObservable: ObservableObject {
         content.items = []
         content.htmlSource = nil
         content.timestamp = Date()
+        // P1 (v2.10.54): 与 v2.10.53 P1-2 的 updateHTMLSlot/setAttachments 保持一致——清空主体也属于
+        // 内容变化，必须刷新身份字段（contentId/updatedAt），否则跨进程/多实例下 slotsSnapshotEqual
+        // 以 contentId+updatedAt 判等会误判等价而跳过 slots 赋值，导致网格/预览停留旧态、搜索计数陈旧。
+        content.contentId = UUID().uuidString
+        content.updatedAt = Date().timeIntervalSince1970
         // 附件（content.attachments）原样保留。
         _ = specialStorage.set(slot, content: content, in: activeId)
 
@@ -5214,6 +5240,15 @@ final class SlotStoreObservable: ObservableObject {
                 guard let self = self else { return }
                 guard success else {
                     NSLog("[ClipSlots] SAVE FAIL specialSlot=\(activeId) slot=\(targetSlot)")
+                    // P2-1 (v2.10.54): 写盘失败时回滚乐观内存更新（第 5212 行提前写入的 contentToWrite），
+                    // 避免内存（新内容）与磁盘（旧内容）长期不一致。仅当仍停留同组、且内存快照确为本次写入
+                    // 的值（未被后续写入覆盖）时才回滚回 existingSnapshot。
+                    if self.loadedSpecialSlotId == activeId,
+                       self.slots[targetSlot]?.contentId == contentToWrite.contentId {
+                        self.slots[targetSlot] = existingSnapshot
+                        self.slotRenderTokens["\(activeId)::\(targetSlot)"] = UUID()
+                        self.refreshTrigger = UUID()
+                    }
                     self.showFloatingNotice(FloatingNotice(
                         title: "保存失败",
                         subtitle: "槽位 \(targetSlot) 写入失败，请重试",

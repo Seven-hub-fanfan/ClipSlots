@@ -225,17 +225,17 @@ struct SlotCardView: View {
         }
     }
 
-    // v2.10.48: 标签/文本编辑不再弹出遮住整片网格的巨大 Sheet，改为锚定在「编辑」按钮上的
-    // 轻量 Popover 气泡，保持在槽位网格上下文中，减少「进入另一个房间」的割裂感。
-    // 纯文本编辑气泡。
+    // v2.10.54: 回退 v2.10.48 的 inline Popover（负优化——点气泡外部无保存 dismiss，编辑内容被静默
+    // 丢弃），改回 Sheet（原 520×320 尺寸），并保留 v2.10.48 新增的 ⌘↩ 保存快捷键。
+    // 纯文本编辑 Sheet。
     @ViewBuilder
-    private var textEditorPopover: some View {
-        VStack(alignment: .leading, spacing: 10) {
+    private var textEditorSheet: some View {
+        VStack(alignment: .leading, spacing: 12) {
             Text("编辑槽位 \(slot) 文本")
-                .font(.subheadline.weight(.semibold))
+                .font(.headline)
             TextEditor(text: $editingText)
                 .font(.system(size: 13, design: .monospaced))
-                .frame(width: 360, height: 220)
+                .frame(minWidth: 520, minHeight: 320)
                 .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.secondary.opacity(0.2)))
             HStack {
                 Spacer()
@@ -248,18 +248,18 @@ struct SlotCardView: View {
                 .keyboardShortcut(.return, modifiers: .command)
             }
         }
-        .padding(14)
+        .padding(18)
     }
 
-    // HTML 原文编辑气泡。
+    // HTML 原文编辑 Sheet。
     @ViewBuilder
-    private var htmlEditorPopover: some View {
-        VStack(alignment: .leading, spacing: 10) {
+    private var htmlEditorSheet: some View {
+        VStack(alignment: .leading, spacing: 12) {
             Text("编辑槽位 \(slot) HTML")
-                .font(.subheadline.weight(.semibold))
+                .font(.headline)
             TextEditor(text: $editingText)
                 .font(.system(size: 13, design: .monospaced))
-                .frame(width: 420, height: 260)
+                .frame(minWidth: 620, minHeight: 360)
                 .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.secondary.opacity(0.2)))
             HStack {
                 Spacer()
@@ -272,7 +272,7 @@ struct SlotCardView: View {
                 .keyboardShortcut(.return, modifiers: .command)
             }
         }
-        .padding(14)
+        .padding(18)
     }
 
     // v2.9.36: lightweight "上次粘贴" badge shown in the card's top-right corner.
@@ -443,9 +443,9 @@ struct SlotCardView: View {
                         .buttonStyle(.bordered)
                         .controlSize(.small)
                         .help("编辑 HTML 原文")
-                        // v2.10.48: Sheet → inline Popover，锚定在按钮上就地编辑。
-                        .popover(isPresented: $showingHTMLEditor, arrowEdge: .top) {
-                            htmlEditorPopover
+                        // v2.10.54: 回退 v2.10.48 的 inline Popover → Sheet。
+                        .sheet(isPresented: $showingHTMLEditor) {
+                            htmlEditorSheet
                         }
                     } else if content.isPlainEditableText {
                         Button {
@@ -458,9 +458,9 @@ struct SlotCardView: View {
                         .buttonStyle(.bordered)
                         .controlSize(.small)
                         .help("直接编辑此文本槽位")
-                        // v2.10.48: Sheet → inline Popover，锚定在按钮上就地编辑。
-                        .popover(isPresented: $showingTextEditor, arrowEdge: .top) {
-                            textEditorPopover
+                        // v2.10.54: 回退 v2.10.48 的 inline Popover → Sheet。
+                        .sheet(isPresented: $showingTextEditor) {
+                            textEditorSheet
                         }
                     }
 
