@@ -4,11 +4,22 @@
 
 ## 当前版本
 
-- **当前版本：v2.10.47**
+- **当前版本：v2.10.48**
 - 平台：macOS（Swift / SwiftUI，SPM 构建，macOS 13+）
 - 单一版本号事实来源：`Info.plist` 的 `CFBundleShortVersionString`（`AppVersion.current` 动态读取，`AppVersion.fallback` 为编译期兜底）。CLI 版本号见 `Sources/ClipSlotsCLI/main.swift` 的 `CLI_VERSION`。
 
 ## 版本要点（近期）
+
+### v2.10.48 — UX 丝滑度改进第二批（搜索 + 就地编辑 3 项）
+- 背景：接续 v2.10.46 第一批，做研判报告（https://bytedance.larkoffice.com/docx/XuDEd3WYwoExwqxcoq5cGSjfn7c）第二批中与搜索/编辑相关的 3 项。
+- **① 搜索预览滚动闪烁修复**（`GlobalSearchResultsView.swift`）：全局搜索结果行 `onHover` 原本立刻 `selectedResultId = result.id`，滚动/扫视时鼠标连续掠过多行触发右侧预览疯狂重解码闪烁。新增 `hoverDebounce: DispatchWorkItem?`，进入后延迟 ~80ms 才切换选中项，期间离开或掠到别行即 `cancel()`，只有真正停留才更新预览；`onTapGesture` 取消防抖立即选中并跳转（点击是明确意图）。
+- **② 标签/文本编辑 Sheet 改 inline Popover**（`SlotCardView.swift`）：标签编辑本就是内联 TextField（未动）；纯文本 / HTML 就地编辑原用 `.sheet`（520×320 / 620×360 巨大遮罩），改为锚定在「编辑」/「编辑HTML」按钮上的 `.popover(arrowEdge: .top)` 气泡（360×220 / 420×260），保持在网格上下文；新增 `textEditorPopover`/`htmlEditorPopover` 两个 `@ViewBuilder`，保存按钮加 `⌘↩` 快捷键。预览大图 `.sheet` 保留不动。
+- **③ 搜索结果过渡动画**（`GlobalSearchResultsView.swift`）：新增 `resultsSignature = results.map(\.id)` 作动画驱动键，body 加 `.animation(.easeInOut(duration:0.22), value: resultsSignature)`，空/非空分支与结果行加 `.transition(.opacity)`；换搜索词/切排序时列表与预览面板淡入淡出过渡，消除硬切跳变。
+- version bump 2.10.47 → 2.10.48（Info.plist + AppVersion.swift）；CLI_VERSION 保持 2.10.45（GUI-only 未 bump）
+- commit：`2c7b29b`（feat+bump 合并单提交）
+- DMG SHA256：`06ed209e664f589cef747b55a8baf590b1169262ab4d3d703449de23d8a1656e`
+- Release：https://github.com/Seven-hub-fanfan/ClipSlots/releases/tag/v2.10.48
+- 约束遵守：不改 UI 样式、不引入拖拽排序、不改游标胶囊位置；附件面板跟随主窗口、切 Finder 拖文件不关闭；自动切换默认开启、自动存储/自动粘贴默认关闭、已有用户设置不覆盖
 
 ### v2.10.47 — 回退删页/清空 inline 确认卡（负优化）+ 修复切组内容闪空槽位
 - **回退**：v2.10.46 把删页/清空确认改成的底部 inline 确认卡属负优化，本版回退为系统 NSAlert（`confirmDeletePage` 走 `runAlertNonBlocking`；清空组走 `beginSheetModal`，保留「不再提醒」）。彻底删除 `InlineConfirmation` 模型 / `pendingConfirmation` / `requestConfirmation` / `InlineConfirmationBar`。**其余三项 v2.10.46 改进保留**（附件面板 0.12s 淡入淡出、导入进度非模态悬浮条、悬停预览 0.18s）。
