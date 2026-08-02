@@ -4,11 +4,21 @@
 
 ## 当前版本
 
-- **当前版本：v2.10.56**
+- **当前版本：v2.10.57**
 - 平台：macOS（Swift / SwiftUI，SPM 构建，macOS 13+）
 - 单一版本号事实来源：`Info.plist` 的 `CFBundleShortVersionString`（`AppVersion.current` 动态读取，`AppVersion.fallback` 为编译期兜底）。CLI 版本号见 `Sources/ClipSlotsCLI/main.swift` 的 `CLI_VERSION`。
 
 ## 版本要点（近期）
+
+### v2.10.57 — 打包压缩阶段进度条改不确定态
+- 背景：v2.10.55/56 之后，用户反馈打包进度条在槽位写完后立刻跳到 100%，但 zip 压缩还要耗时很久，浮层一直卡在「正在压缩… 100%」不动，直到压缩完成弹成功框才消失，观感像卡死。
+- **根因**：`PackExporter` 进入压缩阶段时发的是确定态 `(totalSlots, totalSlots)` = 100%（`PackExporter.swift` L380），而 zip 压缩无法逐字节上报进度、且往往比逐槽位写入更耗时。
+- **修法**：压缩阶段改发 `onProgress?(0, 0, "正在压缩…")`，`total = 0` 触发 `ImportProgress.isIndeterminate`，UI（`ContentView.importProgressOverlay`）本就对不确定态渲染来回滚动的线性进度条并隐藏 x/y 与百分比，如实表达「压缩中、耗时未知」。压缩完成（成功/失败/异常）照常 `publishImportProgress(nil)` 收起，与 v2.10.56 的会话代次守卫完全兼容（该不确定态是 zip 前的最后一次非 nil 上报，nil 收起后不会被 stale 更新顶回）。
+- 改动文件：`Sources/ClipSlots/PackExporter.swift`（仅压缩阶段那一行进度上报）。UI 与 main.swift 均未改，`ImportProgress` 模型也未动（复用现有 `isIndeterminate`）。
+- version bump：Info.plist ×2 + AppVersion.swift + CLI_VERSION 2.10.56 → 2.10.57
+- commit：`9c6a736`（fix+bump 合并）
+- DMG SHA256：`baa7d215970ff595ecb12da954b444fb473bcb041d1087c96a9157021df9546a`
+- Release：https://github.com/Seven-hub-fanfan/ClipSlots/releases/tag/v2.10.57
 
 ### v2.10.56 — 打包导出进度浮层卡死修复（P0）
 - 背景：v2.10.55 给打包导出接进度条后，用户反馈打包完成后进度浮层卡在「正在压缩… 628/628 100%」不消失。
