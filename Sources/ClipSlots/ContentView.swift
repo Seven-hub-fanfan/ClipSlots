@@ -191,17 +191,13 @@ struct ContentView: View {
                     .ignoresSafeArea()
             )
 
-            // Toast overlay
-            if let message = store.toastMessage {
-                toastView(message)
-                    .transition(.move(edge: .top).combined(with: .opacity))
-                    .zIndex(100)
-            }
-            if let notice = store.floatingNotice {
-                floatingNoticeView(notice)
-                    .transition(.opacity)
-                    .zIndex(101)
-            }
+            // v2.10.52 (perf 第四批 · 巨型 @Published Store 拆分): Toast / 浮层提示改由独立子视图
+            // TransientOverlayView 观察 store.transientUI 渲染。ContentView.body 不再读取
+            // toastMessage/floatingNotice（store.transientUI 是普通引用读取，不建立 @Published 依赖），
+            // 因此二者高频弹出/消失不再触发整棵 body 重新求值，只重绘该覆盖层子视图。
+            // 层级用 zIndex(101) 与原 toast(100)/floatingNotice(101) 对齐，位于设置(200)与进度(150)之下。
+            TransientOverlayView(ui: store.transientUI)
+                .zIndex(101)
 
             // v2.10.46: 导入进度浮层（槽位包 / 批量文件 / 文件夹导入共用）。非模态：底部悬浮、不阻塞交互。
             if let progress = store.importProgress {
@@ -223,7 +219,8 @@ struct ContentView: View {
         .onAppear {
             AppearanceDefaults.ensureDefaultDarkIfNeeded()
         }
-        .animation(.easeInOut(duration: 0.25), value: store.toastMessage != nil)
+        // v2.10.52 (perf 第四批): Toast 的进出场动画随其状态迁入 TransientOverlayView，这里不再
+        // 引用 store.toastMessage，避免 body 依赖该瞬态状态。
         .animation(.easeInOut(duration: 0.2), value: store.importProgress != nil)
         // v2.9.12: settings overlay is a modal hotkey-editing safe zone; keep the
         // store flag in sync so business hotkeys don't fire while it is open.
@@ -312,12 +309,6 @@ struct ContentView: View {
         .padding(.vertical, 4)
     }
 
-    private func floatingNoticeView(_ notice: FloatingNotice) -> some View {
-        FloatingNoticeView(notice: notice)
-            .allowsHitTesting(false)
-            .padding(.top, 8)
-    }
-
     // v2.10.46: 导入进度改为非模态——去掉全屏黑色阻塞遮罩，改为底部悬浮的轻量进度条，
     // 并对整体 allowsHitTesting(false)，导入期间可继续操作其他槽位（边导入边整理），消除心流打断。
     // total<=0 时显示不确定进度（解压/解析阶段）；否则显示确定百分比与「x/y」计数。
@@ -383,34 +374,8 @@ struct ContentView: View {
         .allowsHitTesting(false)
     }
 
-    private func toastView(_ message: String) -> some View {
-        HStack(spacing: 6) {
-            Image(systemName: toastIcon(for: message))
-                .font(.system(size: 11, weight: .semibold))
-            Text(message)
-                .font(.system(size: 12, weight: .medium))
-                .foregroundColor(.primary)
-        }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 8)
-        .background(
-            Capsule()
-                .fill(.regularMaterial)
-                .shadow(color: Color.black.opacity(0.12), radius: 6, y: 3)
-        )
-        .padding(.top, 8)
-    }
-
-    private func toastIcon(for message: String) -> String {
-        if message.contains("已切换到") || message.contains("下一页") { return "arrow.forward.circle.fill" }
-        if message.contains("覆盖") { return "arrow.triangle.2.circlepath" }
-        if message.contains("已保存") || message.contains("保存") { return "checkmark.circle.fill" }
-        if message.contains("已复制") || message.contains("复制") { return "doc.on.doc" }
-        if message.contains("为空") { return "tray" }
-        if message.contains("正在批量") { return "hourglass" }
-        if message.contains("失败") { return "xmark.circle.fill" }
-        return "info.circle.fill"
-    }
+    // v2.10.52 (perf 第四批): Toast / 浮层提示的渲染已迁至 TransientOverlayView（见 TransientUIStore.swift），
+    // ContentView 内不再保留 toastView / toastIcon / floatingNoticeView。
 
     // MARK: - Header Layers
 

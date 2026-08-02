@@ -243,8 +243,11 @@ final class SlotStoreObservable: ObservableObject {
     // 随游标推进 / 回退 / 重置、内容变化、拨杆切换实时重算。
     @Published var autoStorePreview: SlotAddress? = nil
     @Published var autoPastePreview: SlotAddress? = nil
-    @Published var toastMessage: String?
-    @Published var floatingNotice: FloatingNotice?
+    // v2.10.52 (perf 第四批 · 巨型 @Published Store 拆分): Toast / 浮层提示等瞬态覆盖层状态迁到
+    // 独立的 TransientUIStore，避免其高频变更（几乎每次切组/保存/复制都会弹 Toast）触发主
+    // store.objectWillChange、波及整棵 ContentView.body 与全部槽位卡片重绘。用只读引用持有，
+    // 生命周期随主 store；ContentView 通过 store.transientUI 单独交给 TransientOverlayView 观察。
+    let transientUI = TransientUIStore()
     @Published var hotkeyRegistrationErrors: [String] = []
     @Published var isSettingsPresented: Bool = false
     @Published var slotRenderTokens: [String: UUID] = [:]
@@ -751,8 +754,8 @@ final class SlotStoreObservable: ObservableObject {
                     completion?()
                     return
                 }
-                self.slots = snapshot.slots
-                self.labels = snapshot.labels
+                // v2.10.52 (perf 第四批): 增量 diff 提交——快照与内存等价则跳过赋值，不触发重绘。
+                self.applySlotsSnapshot(snapshot.slots, labels: snapshot.labels)
                 self.loadedSpecialSlotId = activeId
                 // v2.10.47: 若一次 watcher 触发的 reload 抢先在切组读盘之前提交（generation 更高），
                 // 切组遮罩需在此一并关闭，避免遮罩因 loadSlotsAsync 被判超时丢弃而卡住。
@@ -2054,8 +2057,8 @@ final class SlotStoreObservable: ObservableObject {
         // P0-1 (v2.10.30): 磁盘重读逻辑抽到 readSlotsSnapshot（纯函数，不触碰 @Published）。
         // 同步路径（init / 显式切组）保持原样：读完立即在主线程赋值 @Published。
         let snapshot = readSlotsSnapshot(for: activeId)
-        slots = snapshot.slots
-        labels = snapshot.labels
+        // v2.10.52 (perf 第四批): 增量 diff 提交——快照与内存等价则跳过赋值，不触发重绘。
+        applySlotsSnapshot(snapshot.slots, labels: snapshot.labels)
         loadedSpecialSlotId = activeId
     }
 
@@ -2086,8 +2089,10 @@ final class SlotStoreObservable: ObservableObject {
                 // 切组遮罩一起淡入替换（0.16s），消除「先闪空槽位」的中间态。onCommit 承接旧组缩略图缓存
                 // 失效等收尾（此时已切走旧内容，安全）。
                 withAnimation(.easeInOut(duration: 0.16)) {
-                    self.slots = snapshot.slots
-                    self.labels = snapshot.labels
+                    // v2.10.52 (perf 第四批): 增量 diff 提交。切到不同组时内容必不同（contentId 各异）
+                    // → 照常整体替换；A→A 重复切组时快照等价 → 跳过 slots/labels 赋值不触发重绘，
+                    // 切组遮罩仍随本动画正常关闭。
+                    self.applySlotsSnapshot(snapshot.slots, labels: snapshot.labels)
                     self.isSwitchingGroup = false
                 }
                 self.loadedSpecialSlotId = activeId
@@ -2114,29 +2119,66 @@ final class SlotStoreObservable: ObservableObject {
         return (result, labelMap)
     }
 
-    // MARK: - Helpers
+    // MARK: - Slots snapshot commit (v2.10.52 · perf 第四批 · slots 增量 diff)
+
+    /// 把「新读到的 slots/labels 快照」提交到 @Published 内存态——但只在真正发生变化时才赋值。
+    ///
+    /// 背景：此前所有 reload / 切组路径都无条件执行 `slots = snapshot.slots`。即便磁盘内容与内存
+    /// 完全一致（FSEvents watcher 的自写回声、无关文件变更触发的整树 reload、A→A 重复切组等），
+    /// 也会触发 slots 的 @Published 全量替换：`slots.didSet` 重算内容签名、`objectWillChange`
+    /// 发射并令观察 store 的整棵 ContentView.body 与全部槽位卡片重绘。这类「无变化 reload」在
+    /// 后台同步 / CLI 写盘场景相当常见，是纯浪费。
+    ///
+    /// 现改为按槽位 id（contentId + updatedAt）逐槽对比：快照与内存等价则直接跳过、不赋值、不
+    /// 重绘；确有变化时仍一次性整体赋值（保持 didSet 只重算一次签名，避免逐槽赋值引发 N 次
+    /// 签名重算）。labels 用值相等判定。返回值表示本次是否实际提交了变更。
+    @discardableResult
+    private func applySlotsSnapshot(_ newSlots: [Int: SlotContent], labels newLabels: [Int: String]) -> Bool {
+        let slotsChanged = !Self.slotsSnapshotEqual(slots, newSlots)
+        let labelsChanged = labels != newLabels
+        if slotsChanged { slots = newSlots }
+        if labelsChanged { labels = newLabels }
+        return slotsChanged || labelsChanged
+    }
+
+    /// 按槽位 id（contentId + updatedAt）判定两份 slots 快照是否内容等价。
+    ///
+    /// SlotContent 未实现 Equatable（含 Data 附件，逐字节全等比较昂贵且无必要），而 contentId /
+    /// updatedAt 在每次 save/overwrite 都会刷新，是内容变化的稳定判据；空槽的 contentId 由存储层
+    /// 缓存保持稳定（同一实例的重复读返回同一 SlotContent）。即便某路径下 contentId 偶发不稳定，
+    /// 也只会退化为「判为不等 → 照旧全量赋值」（原行为），不会漏更、无正确性风险。
+    private static func slotsSnapshotEqual(_ a: [Int: SlotContent], _ b: [Int: SlotContent]) -> Bool {
+        guard a.count == b.count else { return false }
+        for (slot, ac) in a {
+            guard let bc = b[slot] else { return false }
+            if ac.contentId != bc.contentId || ac.updatedAt != bc.updatedAt { return false }
+        }
+        return true
+    }
 
     /// Show a transient toast message that auto-dismisses after 1.2s.
     private func showToast(_ message: String, duration: TimeInterval = 1.2) {
-        toastMessage = message
+        // v2.10.52: 瞬态状态迁至 transientUI（独立 ObservableObject），不再触发主 store 重绘。
+        transientUI.toastMessage = message
         let captured = message
         DispatchQueue.main.asyncAfter(deadline: .now() + duration) { [weak self] in
-            if self?.toastMessage == captured {
-                self?.toastMessage = nil
+            if self?.transientUI.toastMessage == captured {
+                self?.transientUI.toastMessage = nil
             }
         }
     }
 
     /// v2.6.2: Show a floating notice with icon/title/subtitle, auto-dismiss.
     func showFloatingNotice(_ notice: FloatingNotice, duration: TimeInterval = 2.0) {
-        floatingNotice = notice
+        // v2.10.52: 瞬态状态迁至 transientUI（独立 ObservableObject），不再触发主 store 重绘。
+        transientUI.floatingNotice = notice
         // v2.6.3: Also show global HUD so the notice is visible when
         // ClipSlots main window is not in front (e.g. hotkey save from Finder).
         FloatingNoticeWindowController.shared.show(notice: notice, duration: duration)
         let noticeId = notice.id
         DispatchQueue.main.asyncAfter(deadline: .now() + duration) { [weak self] in
-            if self?.floatingNotice?.id == noticeId {
-                self?.floatingNotice = nil
+            if self?.transientUI.floatingNotice?.id == noticeId {
+                self?.transientUI.floatingNotice = nil
             }
         }
     }

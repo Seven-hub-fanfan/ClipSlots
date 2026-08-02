@@ -1,0 +1,87 @@
+import SwiftUI
+
+/// v2.10.52 (perf 第四批 · 巨型 @Published Store 拆分)
+///
+/// 把高频触发的「瞬态覆盖层」UI 状态（Toast / 浮层提示）从主 `SlotStoreObservable` 里剥离到本
+/// 独立的 `ObservableObject`。
+///
+/// 背景：`toastMessage` / `floatingNotice` 原本是主 store 上的 `@Published`。每次 `showToast` /
+/// `showFloatingNotice`（切组、保存、复制、覆盖、批量等几乎所有操作都会触发）都会让
+/// `store.objectWillChange` 发射，从而令观察 store 的整棵 `ContentView.body`（标题栏 / 搜索区 /
+/// 槽位网格 / 底栏）全部重新求值、所有槽位卡片重建。而 Toast 本身只是顶部一个一闪即逝的胶囊，
+/// 与主网格内容毫无关系。
+///
+/// 拆分后：这两个状态只由独立的 `TransientOverlayView` 通过 `@ObservedObject` 单独观察。Toast /
+/// 浮层的弹出与消失只会重绘该覆盖层子视图，不再波及主网格与标题栏的渲染。
+///
+/// 注意：本对象由 `SlotStoreObservable` 以只读引用 `let transientUI` 持有，生命周期与主 store
+/// 一致；`ContentView` 通过 `store.transientUI`（普通引用读取，不建立 @Published 依赖）拿到它，
+/// 再单独交给 `TransientOverlayView` 观察。
+final class TransientUIStore: ObservableObject {
+    /// 顶部短暂 Toast 文案；`nil` 表示不显示。默认约 1.2s 自动消失（见 `showToast`）。
+    @Published var toastMessage: String?
+
+    /// 顶部浮层提示（保存 / 覆盖 / 复制结果摘要等）；`nil` 表示不显示。
+    @Published var floatingNotice: FloatingNotice?
+}
+
+/// v2.10.52 (perf 第四批): 独立承载 Toast + 浮层提示的覆盖层子视图，只观察 `TransientUIStore`。
+///
+/// 从主 `ContentView.body` 抽离后，Toast / 浮层的弹出与消失只重绘本子视图，不再触发主网格、
+/// 标题栏、底栏等的重新求值。视觉表现（顶部居中、圆角胶囊、进出场动画、层级 zIndex）与
+/// 抽离前保持完全一致；`allowsHitTesting(false)` 保证覆盖层不拦截下方槽位的点击。
+struct TransientOverlayView: View {
+    @ObservedObject var ui: TransientUIStore
+
+    var body: some View {
+        ZStack(alignment: .top) {
+            if let message = ui.toastMessage {
+                toastView(message)
+                    .transition(.move(edge: .top).combined(with: .opacity))
+                    .zIndex(100)
+            }
+            if let notice = ui.floatingNotice {
+                FloatingNoticeView(notice: notice)
+                    .allowsHitTesting(false)
+                    .padding(.top, 8)
+                    .transition(.opacity)
+                    .zIndex(101)
+            }
+        }
+        // 覆盖层纯展示、不接受交互，避免顶部区域拦截下方槽位/工具栏点击。
+        .allowsHitTesting(false)
+        .animation(.easeInOut(duration: 0.25), value: ui.toastMessage != nil)
+        .animation(.easeInOut(duration: 0.2), value: ui.floatingNotice != nil)
+    }
+
+    // MARK: - Toast (从 ContentView 原样迁入，样式不变)
+
+    private func toastView(_ message: String) -> some View {
+        HStack(spacing: 6) {
+            Image(systemName: toastIcon(for: message))
+                .font(.system(size: 11, weight: .semibold))
+            Text(message)
+                .font(.system(size: 12, weight: .medium))
+                .foregroundColor(.primary)
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 8)
+        .background(
+            Capsule()
+                .fill(.regularMaterial)
+                .shadow(color: Color.black.opacity(0.12), radius: 6, y: 3)
+        )
+        .padding(.top, 8)
+    }
+
+    private func toastIcon(for message: String) -> String {
+        if message.contains("已切换到") || message.contains("下一页") { return "arrow.forward.circle.fill" }
+        if message.contains("覆盖") { return "arrow.triangle.2.circlepath" }
+        if message.contains("已保存") || message.contains("保存") { return "checkmark.circle.fill" }
+        if message.contains("已复制") || message.contains("复制") { return "doc.on.doc" }
+        if message.contains("为空") { return "tray" }
+        if message.contains("正在批量") { return "hourglass" }
+        if message.contains("失败") { return "xmark.circle.fill" }
+        return "info.circle.fill"
+    }
+}
