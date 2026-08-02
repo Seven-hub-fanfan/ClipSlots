@@ -219,50 +219,60 @@ struct SlotCardView: View {
             SlotPreviewView(content: content)
                 .frame(width: 640, height: 500)
         }
-        .sheet(isPresented: $showingTextEditor) {
-            VStack(alignment: .leading, spacing: 12) {
-                Text("编辑槽位 \(slot) 文本")
-                    .font(.headline)
-                TextEditor(text: $editingText)
-                    .font(.system(size: 13, design: .monospaced))
-                    .frame(minWidth: 520, minHeight: 320)
-                    .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.secondary.opacity(0.2)))
-                HStack {
-                    Spacer()
-                    Button("取消") { showingTextEditor = false }
-                    Button("保存") {
-                        onEditText?(editingText)
-                        showingTextEditor = false
-                    }
-                    .buttonStyle(.borderedProminent)
-                }
-            }
-            .padding(18)
-        }
-        .sheet(isPresented: $showingHTMLEditor) {
-            VStack(alignment: .leading, spacing: 12) {
-                Text("编辑槽位 \(slot) HTML")
-                    .font(.headline)
-                TextEditor(text: $editingText)
-                    .font(.system(size: 13, design: .monospaced))
-                    .frame(minWidth: 620, minHeight: 360)
-                    .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.secondary.opacity(0.2)))
-                HStack {
-                    Spacer()
-                    Button("取消") { showingHTMLEditor = false }
-                    Button("保存") {
-                        onEditHTML?(editingText)
-                        showingHTMLEditor = false
-                    }
-                    .buttonStyle(.borderedProminent)
-                }
-            }
-            .padding(18)
-        }
         .contextMenu {
             // v2.5: Type-specific actions
             typeSpecificMenuItems
         }
+    }
+
+    // v2.10.48: 标签/文本编辑不再弹出遮住整片网格的巨大 Sheet，改为锚定在「编辑」按钮上的
+    // 轻量 Popover 气泡，保持在槽位网格上下文中，减少「进入另一个房间」的割裂感。
+    // 纯文本编辑气泡。
+    @ViewBuilder
+    private var textEditorPopover: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("编辑槽位 \(slot) 文本")
+                .font(.subheadline.weight(.semibold))
+            TextEditor(text: $editingText)
+                .font(.system(size: 13, design: .monospaced))
+                .frame(width: 360, height: 220)
+                .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.secondary.opacity(0.2)))
+            HStack {
+                Spacer()
+                Button("取消") { showingTextEditor = false }
+                Button("保存") {
+                    onEditText?(editingText)
+                    showingTextEditor = false
+                }
+                .buttonStyle(.borderedProminent)
+                .keyboardShortcut(.return, modifiers: .command)
+            }
+        }
+        .padding(14)
+    }
+
+    // HTML 原文编辑气泡。
+    @ViewBuilder
+    private var htmlEditorPopover: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("编辑槽位 \(slot) HTML")
+                .font(.subheadline.weight(.semibold))
+            TextEditor(text: $editingText)
+                .font(.system(size: 13, design: .monospaced))
+                .frame(width: 420, height: 260)
+                .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.secondary.opacity(0.2)))
+            HStack {
+                Spacer()
+                Button("取消") { showingHTMLEditor = false }
+                Button("保存") {
+                    onEditHTML?(editingText)
+                    showingHTMLEditor = false
+                }
+                .buttonStyle(.borderedProminent)
+                .keyboardShortcut(.return, modifiers: .command)
+            }
+        }
+        .padding(14)
     }
 
     // v2.9.36: lightweight "上次粘贴" badge shown in the card's top-right corner.
@@ -433,6 +443,10 @@ struct SlotCardView: View {
                         .buttonStyle(.bordered)
                         .controlSize(.small)
                         .help("编辑 HTML 原文")
+                        // v2.10.48: Sheet → inline Popover，锚定在按钮上就地编辑。
+                        .popover(isPresented: $showingHTMLEditor, arrowEdge: .top) {
+                            htmlEditorPopover
+                        }
                     } else if content.isPlainEditableText {
                         Button {
                             editingText = content.editableTextValue
@@ -444,6 +458,10 @@ struct SlotCardView: View {
                         .buttonStyle(.bordered)
                         .controlSize(.small)
                         .help("直接编辑此文本槽位")
+                        // v2.10.48: Sheet → inline Popover，锚定在按钮上就地编辑。
+                        .popover(isPresented: $showingTextEditor, arrowEdge: .top) {
+                            textEditorPopover
+                        }
                     }
 
                     Button { onSave() } label: {

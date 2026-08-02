@@ -11,6 +11,9 @@ struct GlobalSearchResultsView: View {
     @Binding var sortRule: SlotSearchSortRule
 
     @State private var selectedResultId: String?
+    // v2.10.48: 悬停防抖 work item——扫视 / 滚动搜索结果列表时，抑制右侧预览随每一行掠过而
+    // 疯狂重新解码切换，消除「预览图狂闪」。停留 ~80ms 后才真正切换选中项。
+    @State private var hoverDebounce: DispatchWorkItem?
     @Environment(\.colorScheme) private var colorScheme
 
     private var previewResult: SlotGlobalSearchResult? {
@@ -21,12 +24,17 @@ struct GlobalSearchResultsView: View {
         return results.first
     }
 
+    // v2.10.48: 搜索词变化时用它作为动画驱动键——列表按结果 id 序列做淡入淡出过渡，
+    // 而不是硬切跳变。
+    private var resultsSignature: [String] { results.map(\.id) }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             header
 
             if results.isEmpty {
                 emptyView
+                    .transition(.opacity)
             } else {
                 HStack(alignment: .top, spacing: 12) {
                     resultList
@@ -35,8 +43,11 @@ struct GlobalSearchResultsView: View {
                     previewPanel
                         .frame(width: 260)
                 }
+                .transition(.opacity)
             }
         }
+        // v2.10.48: 搜索结果集变化（换搜索词 / 排序）时做柔性过渡，避免列表与预览硬切跳变。
+        .animation(.easeInOut(duration: 0.22), value: resultsSignature)
         .padding(10)
         .background(
             RoundedRectangle(cornerRadius: 10, style: .continuous)
@@ -159,15 +170,26 @@ struct GlobalSearchResultsView: View {
         )
         .contentShape(Rectangle())
         .onHover { hovering in
-            if hovering {
-                selectedResultId = result.id
+            // v2.10.48: 悬停防抖。滚动 / 扫视时鼠标会连续掠过多行，若每次进入都立刻改
+            // selectedResultId，右侧预览会随之疯狂重解码闪烁。改为进入后延迟 ~80ms 再切换，
+            // 若期间已离开或掠到别的行则取消，只有真正「停留」才更新预览。
+            hoverDebounce?.cancel()
+            guard hovering else { return }
+            let target = result.id
+            let work = DispatchWorkItem {
+                selectedResultId = target
             }
+            hoverDebounce = work
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.08, execute: work)
         }
         .onTapGesture {
+            // 点击是明确意图，取消防抖、立即选中并跳转。
+            hoverDebounce?.cancel()
             selectedResultId = result.id
             onJump(result)
         }
         .help("点击跳转到该槽位")
+        .transition(.opacity)
     }
 
     // MARK: - Preview Panel (Right)
