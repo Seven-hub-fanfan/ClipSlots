@@ -4,11 +4,22 @@
 
 ## 当前版本
 
-- **当前版本：v2.10.50**
+- **当前版本：v2.10.51**
 - 平台：macOS（Swift / SwiftUI，SPM 构建，macOS 13+）
 - 单一版本号事实来源：`Info.plist` 的 `CFBundleShortVersionString`（`AppVersion.current` 动态读取，`AppVersion.fallback` 为编译期兜底）。CLI 版本号见 `Sources/ClipSlotsCLI/main.swift` 的 `CLI_VERSION`。
 
 ## 版本要点（近期）
+
+### v2.10.51 — 性能优化第三批（saveIndex 收编串行队列 + 存储层竞态加固）
+- 背景：接续 v2.10.49（第一批·低风险清扫）、v2.10.50（第二批·P0 异步化）。本批做研判报告 https://bytedance.larkoffice.com/docx/EyyVdYi8CoBqVjxmQk1ctPaEnUg 标注的存储层索引竞态项（🔴 高危区），SwiftUI 渲染重构留待第四批。性能扫描报告 https://bytedance.larkoffice.com/docx/YWWFdwcRMoGyKqxfaRhcBkz9n6d 。
+- **saveIndex 收进串行队列**（`SpecialSlotStorage.swift`）：原 `loadIndex()` 走 `com.clipslots.specialstorage` 串行 `queue`，而 `saveIndex()`（含 schema 重读 + 原子写盘）在**队列外**裸执行，构成「load 走 queue、save 不走 queue」的队列不一致 data race。现 `saveIndex()` = `queue.sync { saveIndexOnQueue(index) }`，读/写全程串行，**schema 重读一并纳入队列**，写前读到的现有索引不再是并发写中间态。
+- **无锁内部版 `saveIndexOnQueue()` / `loadIndexOnQueue()`**：针对 v2.10.40 式重入死锁前科，抽出无锁内部版；任何「已持有 queue」的路径（未来 repair 逻辑等）必须调 OnQueue 版，杜绝二次 `queue.sync`。核查确认当前仅 `loadIndex` 一处 `queue.sync`、无 saveIndex 嵌套，收编本身无死锁。
+- **forceRepair 索引读写收编队列 + 消除共享 decoder/encoder 并发**：修复前腐坏判定的读盘+解码、备份恢复的解码+写回均在队列外裸执行，与 `loadIndexOnQueue`/`saveIndexOnQueue` **并发共享同一 `decoder`/`encoder`** 是真实 data race。现全部经 `queue.sync` + 无锁内部版串行执行；恢复写入走 `saveIndexOnQueue()`（restored schema≥2，不触发降级护栏，等价原子写回）。收编后**所有 `index.json` 磁盘读写与 JSON 编解码统一收敛到 `queue`**。`forceRepair` 仅持 `storageLock`（队列外），队列内代码从不反向取 `storageLock`，无锁序环、无死锁。
+- 无功能/CLI 契约/UI 变更；`swift build`（Kit + App + CLI）全量通过（仅历史 warning）。
+- version bump 2.10.50 → 2.10.51（Info.plist ×2 + AppVersion.swift）；CLI_VERSION 2.10.50 → 2.10.51（同步）
+- commit：`d399a9a`（fix+bump 合并单提交）
+- DMG SHA256：`8ec1acb6626a68e37fbb7f458cb397d3e2c39b0058e7b627808a8a5bf9baff15`
+- Release：https://github.com/Seven-hub-fanfan/ClipSlots/releases/tag/v2.10.51
 
 ### v2.10.50 — 性能优化第二批（P0 异步化 + Pack 流式化）
 - 背景：接续 v2.10.49（第一批低风险清扫），本批做两处 P0 + 一处 P1，均严守历史加固的安全/时序红线。性能扫描报告 https://bytedance.larkoffice.com/docx/YWWFdwcRMoGyKqxfaRhcBkz9n6d ，风险研判报告 https://bytedance.larkoffice.com/docx/EyyVdYi8CoBqVjxmQk1ctPaEnUg 。saveIndex 串行队列收编与 SwiftUI 渲染重构留待第三、四批单独灰度。
