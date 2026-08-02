@@ -4,11 +4,22 @@
 
 ## 当前版本
 
-- **当前版本：v2.10.53**
+- **当前版本：v2.10.54**
 - 平台：macOS（Swift / SwiftUI，SPM 构建，macOS 13+）
 - 单一版本号事实来源：`Info.plist` 的 `CFBundleShortVersionString`（`AppVersion.current` 动态读取，`AppVersion.fallback` 为编译期兜底）。CLI 版本号见 `Sources/ClipSlotsCLI/main.swift` 的 `CLI_VERSION`。
 
 ## 版本要点（近期）
+
+### v2.10.54 — 第七轮扫描 P1×1 + UX 回退 + P2×2
+- 背景：修复第七轮扫描报告 https://bytedance.larkoffice.com/docx/J9dzdGacVoDVBhxF1qEcEFr2n2c 标注的问题，并回退 v2.10.48 的编辑 Popover。
+- **P1 clearSlotBody 漏刷 contentId/updatedAt**：内容区叉号单独清空槽位主体时只更新 `timestamp`，漏刷身份字段，破坏 v2.10.52 增量 diff（slotsSnapshotEqual 以 contentId+updatedAt 判等）不变量，致跨进程/多实例网格/预览停留旧态、搜索计数陈旧。现补刷 contentId/updatedAt，与 v2.10.53 P1-2 的 updateHTMLSlot/setAttachments 一致（main.swift clearSlotBody）。
+- **UX 回退 编辑文本/HTML Popover → Sheet**：v2.10.48 把标签/文本编辑从 Sheet 改 inline Popover 是负优化（点气泡外部无保存 dismiss，编辑内容被静默丢弃）。改回 Sheet（文本 520×320 / HTML 620×360），保留 v2.10.48 新增的 ⌘↩ 保存快捷键；纯展示层改动，@State/编辑缓冲/保存回调不变（SlotCardView textEditorSheet/htmlEditorSheet + 两处按钮 .popover → .sheet）。
+- **P2-1 乐观内存更新写盘失败不回滚**：单槽保存（handleCapturedContentForSave）与 setAttachments 的 P0 乐观内存更新写盘失败时未回滚，致内存（新内容）与磁盘（旧内容）长期不一致。现写盘失败时回滚内存到旧快照，带 `contentId` 守卫（仅当内存快照仍是本次写入的值、未被后续写入覆盖时才回滚）+ 失败 toast。
+- **P2-2 sweepStaleImportTempDirs 并发误恢复**：启动清扫可能把另一进程进行中导入的 .import_backup_ 备份误恢复回去（其原组目录在 rename 后、writeSlots 前短暂为空），毁掉那场导入。现加 mtime 阈值：仅清扫 mtime 超过 1 小时的陈旧备份，进行中导入的新备份被跳过（PackImporter.swift）。
+- version bump：Info.plist ×2 + AppVersion.swift + CLI_VERSION 2.10.53 → 2.10.54
+- commit：`74c4ebf`（fix+bump 合并）
+- DMG SHA256：`d41cd56feaf874efacebd47a3d4476802215e1fdbc202dfd7e271aae37c85444`
+- Release：https://github.com/Seven-hub-fanfan/ClipSlots/releases/tag/v2.10.54
 
 ### v2.10.53 — 性能优化专项 Bug 扫描修复（1 P0 + 2 P1 + 3 P2）
 - 背景：修复扫描报告 https://bytedance.larkoffice.com/docx/XeKndcG2HowLSGxj150cAMCRnZg（覆盖 v2.10.48→v2.10.52 四批性能改动）标注的问题。
