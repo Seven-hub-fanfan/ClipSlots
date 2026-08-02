@@ -117,8 +117,11 @@ public final class SlotStorage {
     // dedicated serial queue moves the rebuild entirely off the hot path without
     // changing behavior or introducing data races.
     private let manifestQueue = DispatchQueue(label: "com.clipslots.storage.manifest", qos: .utility)
-    private let encoder = JSONEncoder()
-    private let decoder = JSONDecoder()
+    // P1-1 (v2.10.53): 移除共享的 encoder / decoder 实例。JSONEncoder / JSONDecoder 非线程安全，而
+    // updateManifest 自 ST-5(v2.10.15) 起跑在独立的 manifestQueue，主存储写路径（编码 meta / 附件外置后的
+    // attachments.json / 迁移数据）跑在 `queue`；两条队列并发调用同一 encoder 属真实 data race——轻则 manifest
+    // 损坏，重则 attachments.json 字节错乱致附件元数据丢失（叠加 v2.10.41–44 附件字节外置后果更严重）。
+    // 改为在每个编解码点创建局部实例（无自定义配置，创建成本极低），彻底消除跨队列共享。
 
     public init(slotsDir: URL? = nil) {
         if let slotsDir {
@@ -645,8 +648,14 @@ public final class SlotStorage {
         let labelFile = baseURL.appendingPathComponent(String(slot)).appendingPathComponent("label.txt")
         let fp = dirFingerprint(labelFile.path)
         // Serve the cache when its fingerprint still matches disk.
-        if labelCache.index(forKey: slot) != nil, labelCacheFingerprint[slot]! == fp {
-            return labelCache[slot]!
+        // P2 (v2.10.53): 去强解包，与公共 getLabel 的 v2.10.49 加固对齐。原先用 `labelCacheFingerprint[slot]!`
+        // / `labelCache[slot]!` 依赖「labelCache 有 key ⇒ labelCacheFingerprint 必有 key」这一隐式不变量；串行
+        // queue 下一般成立，但若并发/部分状态破坏该不变量，强解包会 EXC_BREAKPOINT 崩溃。改逐个 if let：任一
+        // 缺失即安全回退下面慢路径重读，永不崩溃。（labelCache 值为 String?，`if let` 只解外层 Optional，故已
+        // 缓存的「无标签」nil 态仍能命中并原样返回。）
+        if let cachedFP = labelCacheFingerprint[slot], cachedFP == fp,
+           let cachedLabel = labelCache[slot] {
+            return cachedLabel
         }
         // Miss / stale: read label.txt directly (we're already on `queue`, and the
         // caller holds the cross-process lock, so no extra locking is needed).
@@ -766,7 +775,7 @@ public final class SlotStorage {
         // so the first thumbnail load after upgrade is a one-time cache miss.
         let metaURL = slotDir.appendingPathComponent("content.json")
         if let metaData = try? Data(contentsOf: metaURL),
-           let meta = try? decoder.decode(SlotContentMeta.self, from: metaData) {
+           let meta = try? JSONDecoder().decode(SlotContentMeta.self, from: metaData) {
             content.contentId = meta.contentId
             content.updatedAt = meta.updatedAt
         } else {
@@ -788,7 +797,7 @@ public final class SlotStorage {
         let slotNum = Int(slotDir.lastPathComponent)
         if FileManager.default.fileExists(atPath: attachmentsURL.path) {
             if let attData = try? Data(contentsOf: attachmentsURL),
-               let atts = try? decoder.decode([SlotContent.SlotAttachment].self, from: attData) {
+               let atts = try? JSONDecoder().decode([SlotContent.SlotAttachment].self, from: attData) {
                 // Step 2 (v2.10.42) 老数据懒迁移：若解码出的附件仍内联着 base64 `data`
                 // （老格式，storagePath 缺失/文件不存在），首次读到时把字节外置成独立文件并
                 // 回写 JSON，收敛到「JSON 只存元数据 + storagePath」的新格式。见方法内注释——
@@ -898,7 +907,7 @@ public final class SlotStorage {
 
                 // Persist content identity so thumbnail keys survive app restarts.
                 let meta = SlotContentMeta(contentId: content.contentId, updatedAt: content.updatedAt)
-                let metaData = try encoder.encode(meta)
+                let metaData = try JSONEncoder().encode(meta)
                 try metaData.write(to: stagingDir.appendingPathComponent("content.json"), options: .atomic)
 
                 // Persist slot attachments alongside item data so they survive restarts.
@@ -909,7 +918,7 @@ public final class SlotStorage {
                 if !content.attachments.isEmpty {
                     let externalized = try externalizeAttachments(content.attachments, slot: slot, stagingDir: stagingDir)
                     persistedAttachments = externalized
-                    let attData = try encoder.encode(externalized)
+                    let attData = try JSONEncoder().encode(externalized)
                     try attData.write(to: stagingDir.appendingPathComponent("attachments.json"), options: .atomic)
                 }
             }
@@ -1102,7 +1111,7 @@ public final class SlotStorage {
         // 只有确有字节成功外置后，才原子改写 attachments.json（此时 .bin 已安全落盘）。
         if anyChanged {
             do {
-                let attData = try encoder.encode(migrated)
+                let attData = try JSONEncoder().encode(migrated)
                 try attData.write(to: slotDir.appendingPathComponent("attachments.json"), options: .atomic)
             } catch {
                 // JSON 改写失败：.bin 已在盘上但 JSON 仍是旧的（含 data）——数据不丢；下次读因旧 JSON
@@ -1169,7 +1178,7 @@ public final class SlotStorage {
 
     private func readManifest() throws -> SlotManifest {
         let data = try Data(contentsOf: manifestURL())
-        return try decoder.decode(SlotManifest.self, from: data)
+        return try JSONDecoder().decode(SlotManifest.self, from: data)
     }
 
     private func updateManifest() throws {
@@ -1263,7 +1272,7 @@ public final class SlotStorage {
         }
 
         let manifest = SlotManifest(entries: entries, version: 1)
-        let data = try encoder.encode(manifest)
+        let data = try JSONEncoder().encode(manifest)
         try data.write(to: manifestURL(), options: .atomic)
     }
 }

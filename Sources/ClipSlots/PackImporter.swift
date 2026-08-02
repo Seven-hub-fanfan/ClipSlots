@@ -85,6 +85,11 @@ struct PackImporter {
         let tmp = fm.temporaryDirectory.appendingPathComponent("clipslotspack_in_\(UUID().uuidString)", isDirectory: true)
         defer { try? fm.removeItem(at: tmp) }
 
+        // P2-3 (v2.10.53): 先清扫上次导入遗留的孤儿临时目录（崩溃/回滚失败留下的 .import_backup_ /
+        // .rollback_discard_），既释放累积占用，又能从「备份是唯一副本」的中断态恢复数据；须在本次创建
+        // 任何新备份之前执行。
+        sweepStaleImportTempDirs()
+
         try unzip(packURL, to: tmp)
         let manifest = try loadManifest(in: tmp)
         let pagesRoot = tmp.appendingPathComponent("pages", isDirectory: true)
@@ -479,9 +484,51 @@ struct PackImporter {
         let backupDir: URL?     // 已 rename 到的备份目录；nil 表示备份时原目录不存在，无需还原
     }
 
+    /// P2-3 (v2.10.53): 导入前清扫上一次导入（含进程崩溃 / 回滚失败）遗留在 special_slots 根下的孤儿临时
+    /// 目录，避免其无限累积占用磁盘。两类前缀分别处理，且绝不删除数据的唯一副本：
+    ///   - `.rollback_discard_*`：回滚时把「半写入新内容」挪走待丢弃的目录，纯废弃物 → 直接删除。
+    ///   - `.import_backup_<groupId>_<uuid>`：覆盖导入前对被覆盖组做的磁盘级 rename 备份。
+    ///       · 实况组目录存在且非空 → 组已完好（导入成功或已回滚），备份冗余 → 删除释放空间；
+    ///       · 实况组目录缺失 / 为空 → 崩溃发生在「备份已挪走、新内容尚未写就」窗口，备份是原数据唯一副本
+    ///         → rename 回原位恢复数据，绝不删除。
+    private func sweepStaleImportTempDirs() {
+        let fm = FileManager.default
+        let root = ClipSlotsPaths.specialSlots
+        guard let entries = try? fm.contentsOfDirectory(at: root, includingPropertiesForKeys: nil) else { return }
+        for url in entries {
+            let name = url.lastPathComponent
+            if name.hasPrefix(".rollback_discard_") {
+                try? fm.removeItem(at: url)
+                continue
+            }
+            guard name.hasPrefix(".import_backup_") else { continue }
+            // 解析 groupId：形如 .import_backup_<groupId>_<uuid>。groupId（UUID 或 "default"）与末段 uuid 均
+            // 不含下划线，故 groupId = 去掉前缀后、最后一个 "_" 之前的部分。
+            let rest = String(name.dropFirst(".import_backup_".count))
+            guard let lastUnderscore = rest.lastIndex(of: "_") else { continue } // 命名异常，保守不动
+            let groupId = String(rest[rest.startIndex..<lastUnderscore])
+            guard !groupId.isEmpty else { continue }
+            let groupDir = root.appendingPathComponent(groupId, isDirectory: true)
+            let liveContents = (try? fm.contentsOfDirectory(atPath: groupDir.path)) ?? []
+            if liveContents.isEmpty {
+                // 实况组缺失 / 为空 → 备份是唯一副本，恢复它（绝不删除）。
+                if fm.fileExists(atPath: groupDir.path) { try? fm.removeItem(at: groupDir) }
+                do {
+                    try fm.moveItem(at: url, to: groupDir)
+                    storage.invalidateContentCaches()
+                    NSLog("[ClipSlots] PackImporter 启动清扫：从孤儿备份恢复组 \(groupId)（上次导入未完成）")
+                } catch {
+                    NSLog("[ClipSlots] PackImporter 启动清扫：恢复孤儿备份失败 \(url.path)：\(error)（备份原样保留）")
+                }
+            } else {
+                // 实况组已有内容 → 备份冗余 → 删除释放空间。
+                try? fm.removeItem(at: url)
+            }
+        }
+    }
+
     /// PK-3 (v2.10.30): 覆盖导入前，用磁盘级 moveItem（rename，不占用新磁盘空间）把被覆盖组目录整体
     /// 移到「同卷」备份路径。返回句柄供导入成功后删除、或失败时把备份原样 rename 回原位。
-    ///
     /// 相比旧的「内存快照 + storage.set 回滚」：storage.set 需分配新空间，若失败诱因是磁盘满，回滚同样
     /// 失败并被 try? 吞掉，导致原数据丢失；而 rename 回滚是空间无关操作，磁盘满也能可靠还原。
     ///
@@ -680,14 +727,29 @@ struct PackImporter {
         process.arguments = args
         let errPipe = Pipe()
         process.standardError = errPipe
+        // P2-2 (v2.10.53): 在 waitUntilExit 之前就开始抽干 stderr。unzip 遇坏包/大量警告可能向 stderr 写出
+        // 超过管道缓冲（~64KB）的内容；若不提前读取，写端会阻塞在 write()，进程永不退出，waitUntilExit 随之
+        // 永久挂起（导入卡死）。用后台线程 readDataToEndOfFile 持续抽干（进程退出关闭写端后读到 EOF 返回），
+        // 主线程先等进程退出、再等抽干完成——drainGroup.wait() 建立 happens-before，errData 读取安全。
+        var errData = Data()
+        let drainGroup = DispatchGroup()
+        drainGroup.enter()
+        DispatchQueue.global(qos: .utility).async {
+            errData = errPipe.fileHandleForReading.readDataToEndOfFile()
+            drainGroup.leave()
+        }
         do {
             try process.run()
             process.waitUntilExit()
         } catch {
+            // run() 抛错时进程从未启动，Foundation 不会关闭父进程侧的写端，后台 readDataToEndOfFile 会一直
+            // 阻塞——手动关掉写端制造 EOF，让抽干线程退出后再 wait，避免死锁。
+            try? errPipe.fileHandleForWriting.close()
+            drainGroup.wait()
             throw PackImportError.unzipFailed(error.localizedDescription)
         }
+        drainGroup.wait()
         guard process.terminationStatus == 0 else {
-            let errData = errPipe.fileHandleForReading.readDataToEndOfFile()
             let msg = String(data: errData, encoding: .utf8) ?? "unzip exit \(process.terminationStatus)"
             throw PackImportError.unzipFailed(msg)
         }

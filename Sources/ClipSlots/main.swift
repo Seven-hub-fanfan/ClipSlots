@@ -1815,6 +1815,13 @@ final class SlotStoreObservable: ObservableObject {
             return
         }
         content.attachments = existing.attachments
+        // P1-2 (v2.10.53): 复用了旧 SlotContent（仅改 htmlSource / attachments）却不刷新身份字段，会破坏
+        // v2.10.52 增量 diff（slotsSnapshotEqual 以 contentId+updatedAt 判等）依赖的「内容变则 id/时间戳变」
+        // 不变量：跨进程/多实例下别的实例改了本槽 html，本进程 reloadAllAsync 读到新磁盘态但 id/时间戳未变，
+        // 被判等价 → 跳过 slots 赋值 → 网格/预览/附件停留旧态，且 slotsContentSignature 陈旧使搜索计数不更新。
+        // 修法：改内容后统一刷新身份字段，恢复不变量（同步跨进程 + 搜索计数）。
+        content.contentId = UUID().uuidString
+        content.updatedAt = Date().timeIntervalSince1970
         slots[slot] = content
         persistCurrentSpecialSlotData()
         refreshTrigger = UUID()
@@ -2242,6 +2249,11 @@ final class SlotStoreObservable: ObservableObject {
         // slotWriteQueue 异步串行（保序、last-write-wins、不卡主线程），保留 P1-4 的防 Beachball 收益。
         var content = contentForSlot(slot)
         content.attachments = attachments
+        // P1-2 (v2.10.53): 同 updateHTMLSlot——复用旧 content 仅改 attachments 却不刷新身份字段，会破坏
+        // v2.10.52 增量 diff（slotsSnapshotEqual 以 contentId+updatedAt 判等）的「内容变则 id/时间戳变」不变量，
+        // 令跨进程/多实例改附件后本进程 UI（网格/预览/附件列表）陈旧、搜索计数不更新。改附件后统一刷新身份字段。
+        content.contentId = UUID().uuidString
+        content.updatedAt = Date().timeIntervalSince1970
         if loadedSpecialSlotId == activeId {
             slots[slot] = content
         }
@@ -5183,6 +5195,18 @@ final class SlotStoreObservable: ObservableObject {
         // 方法的同步返回，故异步化安全。
         let contentToWrite = savedContent
         let existingSnapshot = existingBeforeSave
+        // P0 (v2.10.53): 派发写盘前先在主线程做一次同步「乐观内存更新」，对齐 v2.10.36 为 setAttachments 打的
+        // 补丁。此前 slots[targetSlot] 的刷新被推迟到「后台写盘完成回主线程」之后（且仅 stillOnActiveGroup 时），
+        // 这段窗口内内存 slots[targetSlot] 仍是【旧值】。若窗口内用户编辑另一槽位 B（updateTextSlot /
+        // updateHTMLSlot / saveHTMLToSlot）触发 persistCurrentSpecialSlotData——它在主线程抓 slots 全量快照
+        // （含旧的 A）再逐槽写盘并追加到同一 FIFO 串行 slotWriteQueue——就会在 set(A,新内容) 之后再执行
+        // set(A,旧内容)，旧内容稳定地最后落盘，把刚保存的新内容静默覆盖（lost update）。跨进程写锁被占用
+        // （CLI 批量写 / 另一实例持锁）时窗口最长可达 ~5s，极易复现。修法：写盘前把新内容同步写进内存快照，
+        // 关闭 lost-update 窗口；磁盘写盘仍走下方后台串行队列，last-write-wins 时序不变；异步回调里的内存刷新
+        // 保留作二次确认。仅当当前内存视图确属 activeId（loadedSpecialSlotId == activeId）时才更新，避免污染错组。
+        if loadedSpecialSlotId == activeId {
+            slots[targetSlot] = contentToWrite
+        }
         slotWriteQueue.async { [weak self] in  // P1-1 (v2.10.35): 串行写队列，防并发错序覆盖
             guard let self = self else { return }
             let success = self.specialStorage.set(targetSlot, content: contentToWrite, in: activeId)
