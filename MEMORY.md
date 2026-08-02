@@ -4,11 +4,21 @@
 
 ## 当前版本
 
-- **当前版本：v2.10.54**
+- **当前版本：v2.10.55**
 - 平台：macOS（Swift / SwiftUI，SPM 构建，macOS 13+）
 - 单一版本号事实来源：`Info.plist` 的 `CFBundleShortVersionString`（`AppVersion.current` 动态读取，`AppVersion.fallback` 为编译期兜底）。CLI 版本号见 `Sources/ClipSlotsCLI/main.swift` 的 `CLI_VERSION`。
 
 ## 版本要点（近期）
+
+### v2.10.55 — 打包导出加进度条（复用导入同款 UI）
+- 背景：打包导出（.clipslotspack）此前无进度显示，大包导出时静默等待、体验差。本次照导入进度条同款样式给导出路径接上进度回调。
+- **PackExporter.export 新增 `onProgress(done,total,name)` 回调**：与 `PackImporter.importPack` 同签名，后台线程调用。新增 `countExportableSlots(for:)` 在导出前统计「非空槽位」总数作为分母（判定口径与 export 写入一致：`disk.isEmpty && !hasLabel` 才跳过；仅走磁盘元数据不加载附件字节，绝不 OOM）；写完每个槽位 `doneSlots += 1` 上报一次；写完 manifest 进入压缩阶段上报满格 + detail「正在压缩…」。
+- **UI 完全复用**：`presentPackSavePanelAndExport`（main.swift）进入构建阶段先 `publishImportProgress(ImportProgress(title:"正在导出槽位包",detail:"准备打包…"))` 显示不确定态浮层，随后 export 回调经 `publishImportProgress` 切主线程逐槽驱动同一套 `ImportProgress` 模型 + `store.importProgress` + `ContentView.importProgressOverlay`（底部悬浮磨砂玻璃卡片，非模态）。成功/失败/异常三分支均 `publishImportProgress(nil)` 收起浮层。**未改任何 UI 样式**。
+- 改动文件：`Sources/ClipSlots/PackExporter.swift`（+countExportableSlots、export 加 onProgress 参数与上报点）、`Sources/ClipSlots/main.swift`（presentPackSavePanelAndExport 接进度）。
+- version bump：Info.plist ×2 + AppVersion.swift + CLI_VERSION 2.10.54 → 2.10.55
+- commit：`34df043`（feat+bump 合并）
+- DMG SHA256：`086cb3d08dd179573aa9adb8a26da546d10b14d97bd0caa3f29e877b36f56f4d`
+- Release：https://github.com/Seven-hub-fanfan/ClipSlots/releases/tag/v2.10.55
 
 ### v2.10.54 — 第七轮扫描 P1×1 + UX 回退 + P2×2
 - 背景：修复第七轮扫描报告 https://bytedance.larkoffice.com/docx/J9dzdGacVoDVBhxF1qEcEFr2n2c 标注的问题，并回退 v2.10.48 的编辑 Popover。
