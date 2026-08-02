@@ -277,13 +277,51 @@ final class SlotStoreObservable: ObservableObject {
     // 非空即表示有导入正在进行，ContentView 据此显示进度条浮层；完成/失败后置 nil 收起。
     @Published var importProgress: ImportProgress?
 
+    // v2.10.56: 进度浮层「会话代次」守卫。每次收起浮层（发布 nil）都会 +1，
+    // 使得同一批导出/导入的后续 stale 非 nil 上报被丢弃，无法把已收起的浮层重新顶起来。
+    // 只在主线程读写，无需加锁。
+    private var importProgressGeneration: Int = 0
+
     // v2.10.39: 在主线程发布/更新导入进度。所有导入路径统一通过它驱动进度条浮层。
+    //
+    // v2.10.56 修复「打包完成后进度浮层卡在 628/628 100% 不消失」：
+    // 根因是后台的最后一次进度上报（PackExporter 里 zip 前发的「正在压缩… total/total」）
+    // 与主线程收起浮层的 `publishImportProgress(nil)` 之间存在时序竞态——某些时序下这条
+    // 「100%」非 nil 上报会晚于 nil 落到主线程，把刚收起的浮层又顶了回去、并且不再有后续
+    // 上报来收起它。这里用单调递增的 generation 令牌把「收起」变成一道不可逆的闸门：
+    //   - 发布 nil（收起）：置 nil 并使 generation +1，让此后落地的 stale 非 nil 上报失效；
+    //   - 发布非 nil（显示/更新）：在「入队瞬间」（可能在后台线程）快照当前 generation 并随
+    //     block 一起带到主线程；真正落主线程 apply 时若发现 generation 已被某次收起推进过，
+    //     则丢弃这条 stale 更新，绝不把浮层重新顶起来。
+    //
+    // 关键：非 nil 的代次快照必须在「入队时」抓取，而不是在主线程 apply 时抓取——否则一旦
+    // nil 先落地推进了代次，晚到的非 nil 在 apply 时读到的就是新代次、会误判为「当前会话」放行。
     func publishImportProgress(_ progress: ImportProgress?) {
-        if Thread.isMainThread {
-            self.importProgress = progress
-        } else {
-            DispatchQueue.main.async { self.importProgress = progress }
+        // nil = 收起：不可逆地推进代次，压制所有在途 / 后续落地的 stale 非 nil 上报。
+        guard let progress = progress else {
+            let apply = {
+                self.importProgress = nil
+                self.importProgressGeneration &+= 1
+            }
+            if Thread.isMainThread { apply() } else { DispatchQueue.main.async(execute: apply) }
+            return
         }
+
+        // 非 nil = 显示/更新：入队瞬间快照代次（主/后台线程都在此刻读取当前值）。
+        if Thread.isMainThread {
+            applyImportProgressIfCurrent(progress, generation: importProgressGeneration)
+        } else {
+            let snapshot = importProgressGeneration
+            DispatchQueue.main.async {
+                self.applyImportProgressIfCurrent(progress, generation: snapshot)
+            }
+        }
+    }
+
+    // v2.10.56: 仅当代次未被某次收起推进过时才写入非 nil 进度。必须在主线程调用。
+    private func applyImportProgressIfCurrent(_ progress: ImportProgress, generation: Int) {
+        guard generation == importProgressGeneration else { return }
+        self.importProgress = progress
     }
 
     // v2.6.7: import options sheet
