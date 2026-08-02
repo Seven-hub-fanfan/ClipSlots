@@ -72,6 +72,16 @@ struct PackImporter {
         return try loadManifest(in: tmp)
     }
 
+    /// v2.10.58: 基于「内容」而非文件扩展名判断一个文件是否是有效的槽位包。
+    ///
+    /// 背景：此前导入端仅靠 `.clipslotspack` 扩展名来区分「包导入」与「普通文件写入槽位」，
+    /// 一旦用户把导出的包改名（扩展名变化），导入就误走普通文件路径，把整个 ZIP 当作普通
+    /// 文件塞进槽位。这里尝试仅解出并解析 `manifest.json`：解析成功即认定为槽位包，
+    /// 从而不再依赖文件名。探测只解压 manifest.json，成本极低；任何失败都视为「不是包」。
+    func isValidPack(at url: URL) -> Bool {
+        (try? readManifest(from: url)) != nil
+    }
+
     /// 执行导入。resolver 闭包在需要用户决策时被同步调用（应在主线程运行）。
     /// v2.10.39: onProgress 在后台线程被调用，用于驱动进度条；参数为 (已写入槽位数, 总槽位数, 当前组名)。
     @discardableResult

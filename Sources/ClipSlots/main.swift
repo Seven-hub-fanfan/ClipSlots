@@ -4730,12 +4730,29 @@ final class SlotStoreObservable: ObservableObject {
 
         guard panel.runModal() == .OK, !panel.urls.isEmpty else { return }
 
-        // 优先识别槽位包：只要选择里包含 .clipslotspack，就走包导入（取第一个）。
+        // 优先识别槽位包（v2.10.58：内容优先，不再只看扩展名）。
+        // 用户可能把导出的 .clipslotspack 改名（扩展名变化），此时仅靠扩展名会误走普通文件
+        // 导入路径，把整个 ZIP 当普通文件塞进槽位。这里先按扩展名快速命中；未命中时再对
+        // 「单个非目录文件」尝试解析 manifest.json 做内容探测，探测成功即走包导入。
         if let packURL = panel.urls.first(where: { $0.pathExtension.lowercased() == "clipslotspack" }) {
             importPack(from: packURL)
             return
         }
+        if panel.urls.count == 1, let candidate = panel.urls.first,
+           !isDirectory(candidate) {
+            let importer = PackImporter(maxChildSlots: specialSlotSettings.maxChildSlotsPerSpecialSlot)
+            if importer.isValidPack(at: candidate) {
+                importPack(from: candidate)
+                return
+            }
+        }
         presentImportOptions(for: panel.urls)
+    }
+
+    /// v2.10.58: 判断 URL 是否指向一个目录（用于内容探测前排除文件夹选择）。
+    private func isDirectory(_ url: URL) -> Bool {
+        var isDir: ObjCBool = false
+        return FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir) && isDir.boolValue
     }
 
     // MARK: - Pack Export / Import (v2.10.14)
@@ -4779,6 +4796,25 @@ final class SlotStoreObservable: ObservableObject {
         }
     }
 
+    /// v2.10.58: 强制把导出目标 URL 规范为恰好一个 `.clipslotspack` 扩展名。
+    /// 用户可能在 NSSavePanel 里删掉扩展名、改成别的后缀、或误加重复后缀；这里统一收敛，
+    /// 保证导出的包始终带正确扩展名（配合导入端的内容探测，双重加固误判问题）。
+    static func enforcePackExtension(_ url: URL) -> URL {
+        let ext = "clipslotspack"
+        let suffix = ".\(ext)"
+        var last = url.lastPathComponent
+        // 去掉末尾重复的 `.clipslotspack.clipslotspack`。
+        let dupSuffix = suffix + suffix
+        while last.lowercased().hasSuffix(dupSuffix) {
+            last = String(last.dropLast(suffix.count))
+        }
+        // 若末尾不是（大小写不敏感）`.clipslotspack`，补上一个。
+        if !last.lowercased().hasSuffix(suffix) {
+            last += suffix
+        }
+        return url.deletingLastPathComponent().appendingPathComponent(last)
+    }
+
     private func presentPackSavePanelAndExport(selection: PackExportSelection, exporter: PackExporter) {
         let panel = NSSavePanel()
         let df = DateFormatter()
@@ -4794,6 +4830,10 @@ final class SlotStoreObservable: ObservableObject {
 
         guard panel.runModal() == .OK, let url = panel.url else { return }
 
+        // v2.10.58: 锁定扩展名——即便用户在保存框里改掉/删掉扩展名，也强制写成
+        // 单个 `.clipslotspack`，避免导出的包因扩展名不对而在导入时被误判为普通文件。
+        let finalURL = Self.enforcePackExtension(url)
+
         DispatchQueue.global(qos: .userInitiated).async {
             // v2.10.55: 进入构建阶段先显示不确定进度浮层（分母尚未统计出），随后 export 通过
             // onProgress 逐槽位上报，复用与导入完全同款的 ImportProgress 浮层。
@@ -4802,7 +4842,7 @@ final class SlotStoreObservable: ObservableObject {
                 // P1-3 (v2.10.36): 接住导出结果里的 failedAttachments——旧实现丢弃返回值、无论是否有附件
                 // 因源文件缺失/为空而被跳过，都无脑弹「导出成功」，用户完全不知道附件已丢。现在若有附件未能
                 // 打包，改弹 warning 明确告知数量，避免「以为导全了、实际缺附件」的静默数据丢失。
-                let result = try exporter.export(selection, to: url, onProgress: { done, total, name in
+                let result = try exporter.export(selection, to: finalURL, onProgress: { done, total, name in
                     // v2.10.55: 后台线程回调，统一经 publishImportProgress 切主线程驱动浮层。
                     self.publishImportProgress(ImportProgress(
                         title: "正在导出槽位包",
