@@ -376,8 +376,11 @@ struct PackExporter {
         )
         try writeJSON(manifest, to: root.appendingPathComponent("manifest.json"))
 
-        // v2.10.55: 进入压缩阶段（无法逐字节上报），保持确定态计数满格并提示「正在压缩…」。
-        onProgress?(totalSlots, totalSlots, "正在压缩…")
+        // v2.10.57: 压缩（zip）阶段无法逐字节上报进度，且往往比逐槽位写入更耗时。此前发
+        // `(totalSlots, totalSlots, …)` 会让浮层卡在确定态「100%」不动，直到压缩完成才收起，
+        // 观感像卡死。改为发 `total = 0` 触发 ImportProgress.isIndeterminate，UI 渲染成来回
+        // 滚动的不确定进度条（不显示 x/y 与百分比），如实表达「压缩中、耗时未知」。
+        onProgress?(0, 0, "正在压缩…")
         try zipDirectory(contentsOf: root, to: destURL)
 
         // P2-2 (v2.10.16): 返回失败清单（可能为空），让上层能提示「X 个附件因源文件不可读未能打包」。
