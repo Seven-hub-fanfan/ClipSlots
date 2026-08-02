@@ -4,11 +4,22 @@
 
 ## 当前版本
 
-- **当前版本：v2.10.57**
+- **当前版本：v2.10.58**
 - 平台：macOS（Swift / SwiftUI，SPM 构建，macOS 13+）
 - 单一版本号事实来源：`Info.plist` 的 `CFBundleShortVersionString`（`AppVersion.current` 动态读取，`AppVersion.fallback` 为编译期兜底）。CLI 版本号见 `Sources/ClipSlotsCLI/main.swift` 的 `CLI_VERSION`。
 
 ## 版本要点（近期）
+
+### v2.10.58 — .clipslotspack 改名后再导入被误判为普通文件（双重加固）
+- 背景：导入时靠文件扩展名 `.clipslotspack` 判断走「包导入」还是「普通文件写入槽位」。用户把导出的包改名（扩展名变了），导入就走错路径，把整个 ZIP 当普通文件塞进槽位。
+- **修法（两个都做，一起加固）**：
+  1. **导入按内容识别，不再只看扩展名**：`startToolbarImport()` 先按扩展名快速命中；未命中时，若为「单个非目录文件」，用新增的 `PackImporter.isValidPack(at:)` 尝试解析内部 `manifest.json`，成功即走包导入。探测只解出 manifest.json，成本极低；失败安全回退普通文件导入。新增私有 `isDirectory(_:)` 排除文件夹选择。
+  2. **导出锁定扩展名**：`presentPackSavePanelAndExport` 里 NSSavePanel 取到 URL 后经新增静态方法 `enforcePackExtension(_:)` 收敛为恰好一个 `.clipslotspack`（去重复后缀、大小写不敏感、缺失则补齐），从源头保证导出包后缀正确。
+- 改动文件：`Sources/ClipSlots/PackImporter.swift`（新增 `isValidPack`）、`Sources/ClipSlots/main.swift`（`startToolbarImport` 内容探测 + `isDirectory` + `enforcePackExtension` + 导出用 `finalURL`）。
+- version bump：Info.plist ×2 + AppVersion.swift + CLI_VERSION 2.10.57 → 2.10.58
+- commit：`8226fa9`（fix+bump 合并）
+- DMG SHA256：`e242688f3db9e8b973edaa0a0291cb15b4f5144571ada94a30ea8edc992cf732`
+- Release：https://github.com/Seven-hub-fanfan/ClipSlots/releases/tag/v2.10.58
 
 ### v2.10.57 — 打包压缩阶段进度条改不确定态
 - 背景：v2.10.55/56 之后，用户反馈打包进度条在槽位写完后立刻跳到 100%，但 zip 压缩还要耗时很久，浮层一直卡在「正在压缩… 100%」不动，直到压缩完成弹成功框才消失，观感像卡死。
