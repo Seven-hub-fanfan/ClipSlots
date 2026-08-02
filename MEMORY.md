@@ -4,11 +4,25 @@
 
 ## 当前版本
 
-- **当前版本：v2.10.55**
+- **当前版本：v2.10.56**
 - 平台：macOS（Swift / SwiftUI，SPM 构建，macOS 13+）
 - 单一版本号事实来源：`Info.plist` 的 `CFBundleShortVersionString`（`AppVersion.current` 动态读取，`AppVersion.fallback` 为编译期兜底）。CLI 版本号见 `Sources/ClipSlotsCLI/main.swift` 的 `CLI_VERSION`。
 
 ## 版本要点（近期）
+
+### v2.10.56 — 打包导出进度浮层卡死修复（P0）
+- 背景：v2.10.55 给打包导出接进度条后，用户反馈打包完成后进度浮层卡在「正在压缩… 628/628 100%」不消失。
+- **根因**：`PackExporter` 在 zip 前发出的最后一次「正在压缩… total/total」100% 进度上报（`PackExporter.swift` L380），与主线程收起浮层的 `publishImportProgress(nil)` 之间存在时序竞态。`publishImportProgress` 后台调用走 `DispatchQueue.main.async`、主线程调用走同步分支，混用下某些时序里这条 stale 100% 非 nil 上报晚于 nil 落到主线程，把刚收起的浮层又顶回去，且此后再无上报来收起它。
+- **修法**：给进度浮层引入单调递增的「会话代次」(generation) 令牌，把「收起」变成一道不可逆闸门——
+  - 发布 nil（收起）：置空 `importProgress` 并 `importProgressGeneration &+= 1`；
+  - 发布非 nil（显示/更新）：在**入队瞬间**（可能在后台线程）快照当前代次并随 block 带到主线程，`applyImportProgressIfCurrent` apply 时若代次已被某次收起推进过则直接丢弃该 stale 更新，绝不把浮层重新顶起来。
+  - 关键：非 nil 代次快照必须在入队时抓取，不能在主线程 apply 时抓取（否则 nil 先落地推进代次后，晚到的非 nil 会读到新代次误判为「当前会话」放行）。
+  - 导入 / 导出 / 文件夹导入三条路径共用同一 `publishImportProgress`，一并加固。
+- 改动文件：`Sources/ClipSlots/main.swift`（`publishImportProgress` 重写 + `importProgressGeneration` + `applyImportProgressIfCurrent`）。UI 与 PackExporter 逻辑未改。
+- version bump：Info.plist ×2 + AppVersion.swift + CLI_VERSION 2.10.55 → 2.10.56
+- commit：`b4da52f`（fix+bump 合并）
+- DMG SHA256：`da9ab672447dd45404015a311f34fc485dc28df6ff6e66e330d9be3a47109e12`
+- Release：https://github.com/Seven-hub-fanfan/ClipSlots/releases/tag/v2.10.56
 
 ### v2.10.55 — 打包导出加进度条（复用导入同款 UI）
 - 背景：打包导出（.clipslotspack）此前无进度显示，大包导出时静默等待、体验差。本次照导入进度条同款样式给导出路径接上进度回调。
