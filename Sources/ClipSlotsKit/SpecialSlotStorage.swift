@@ -434,8 +434,16 @@ public final class SpecialSlotStorage {
     // MARK: - Index Operations
 
     public func loadIndex() -> SpecialSlotIndex {
-        queue.sync {
-            do {
+        queue.sync { loadIndexOnQueue() }
+    }
+
+    /// P1 (v2.10.51): 无锁内部版——**必须已在 `queue` 上执行**（由 `loadIndex()` 或其它
+    /// `queue.sync`/`queue.async` 闭包调用），内部绝不再 `queue.sync`，杜绝 v2.10.40 式重入死锁。
+    /// 抽出此版本的目的：让「已持有 queue」的路径（saveIndexOnQueue 的 schema 重读、未来的 repair
+    /// 逻辑）能复用同一份读逻辑而不二次进队列。索引读/写现全部收敛到 `queue` 串行执行，
+    /// 消除「load 走 queue、save 不走 queue」的队列不一致 data race。
+    private func loadIndexOnQueue() -> SpecialSlotIndex {
+        do {
                 let data = try Data(contentsOf: indexURL)
                 let decoded = try decoder.decode(SpecialSlotIndex.self, from: data)
                 // P1-4 (v2.10.9): clean successful decode clears the poison flag.
@@ -490,10 +498,20 @@ public final class SpecialSlotStorage {
                     settings: .default
                 )
             }
-        }
     }
 
     public func saveIndex(_ index: SpecialSlotIndex) throws {
+        // P1 (v2.10.51): 收编到与 loadIndex 相同的串行 `queue`，使索引的读与写全程串行化，
+        // 消除「load 走 queue、save 不走 queue」的队列不一致 data race（schema 重读也一并纳入队列）。
+        // 实际逻辑放在无锁内部版 saveIndexOnQueue()——任何「已持有 queue」的路径（未来的 repair 逻辑等）
+        // 必须调用 saveIndexOnQueue() 而非本方法，否则会二次 queue.sync 触发 v2.10.40 式重入死锁。
+        try queue.sync { try saveIndexOnQueue(index) }
+    }
+
+    /// P1 (v2.10.51): saveIndex 的无锁内部版——**必须已在 `queue` 上执行**，内部绝不再 `queue.sync`
+    /// （否则重入死锁）。把原先在队列外裸执行的「schema 重读 + 原子写盘」整段纳入队列串行区间，
+    /// 保证与 `loadIndexOnQueue()` 互斥，读到的现有索引不会是并发写的中间态。
+    private func saveIndexOnQueue(_ index: SpecialSlotIndex) throws {
         // P0-1: never let the empty decode-failure fallback (schemaVersion 0, no pages
         // and no slots) overwrite an existing real index.json — that would wipe the
         // whole library. All legitimate save paths persist schemaVersion >= 2.
@@ -553,13 +571,18 @@ public final class SpecialSlotStorage {
             let indexExists = FileManager.default.fileExists(atPath: indexURL.path)
             var indexIsCorrupt = lastLoadDecodeFailed
             if indexExists, !indexIsCorrupt {
-                if let data = try? Data(contentsOf: indexURL),
-                   let decoded = try? decoder.decode(SpecialSlotIndex.self, from: data),
-                   decoded.schemaVersion >= 2 {
-                    indexIsCorrupt = false
-                } else {
-                    indexIsCorrupt = true
+                // P1 (v2.10.51): 腐坏判定的读盘+解码收进 `queue` 串行执行——原先在队列外裸用共享
+                // `decoder` 与 loadIndexOnQueue/saveIndexOnQueue 并发访问同一 decoder 是真实 data race；
+                // 收进队列后既消除共享解码器竞争，读到的也是与索引读写串行一致的磁盘态。
+                let decodesCleanly: Bool = queue.sync {
+                    if let data = try? Data(contentsOf: indexURL),
+                       let decoded = try? decoder.decode(SpecialSlotIndex.self, from: data),
+                       decoded.schemaVersion >= 2 {
+                        return true
+                    }
+                    return false
                 }
+                indexIsCorrupt = !decodesCleanly
             }
             // Healthy index (file present AND decodes cleanly) → refuse to touch anything.
             // A physically-missing index.json is a legitimate first-run/legacy recovery case
@@ -573,14 +596,17 @@ public final class SpecialSlotStorage {
             // Clear the poison flag first so the writes below are not refused by saveIndex().
             lastLoadDecodeFailed = false
             // 1) Try restoring a valid backup.
-            if let data = try? Data(contentsOf: backupURL),
-               let restored = try? decoder.decode(SpecialSlotIndex.self, from: data),
-               restored.schemaVersion >= 2 {
-                if let out = try? encoder.encode(restored) {
-                    try? out.write(to: indexURL, options: .atomic)
-                    action = "restored_from_corrupt_backup"
-                }
+            // P1 (v2.10.51): 备份读取/解码/写回整体收进 `queue` 串行——消除共享 decoder/encoder 的并发
+            // 访问，并让恢复写入经无锁内部版 saveIndexOnQueue() 与其它索引读写互斥。restored.schemaVersion
+            // >= 2，saveIndexOnQueue 的 schema<2 降级护栏不会触发，等价于原子写回。forceRepair 本身在
+            // 队列外（仅持 storageLock），故此处 queue.sync 不会重入死锁。
+            let restoredFromBackup: Bool = queue.sync {
+                guard let data = try? Data(contentsOf: backupURL),
+                      let restored = try? decoder.decode(SpecialSlotIndex.self, from: data),
+                      restored.schemaVersion >= 2 else { return false }
+                do { try saveIndexOnQueue(restored); return true } catch { return false }
             }
+            if restoredFromBackup { action = "restored_from_corrupt_backup" }
             // 2) No usable backup → drop the corrupt index and recreate defaults.
             if action == "none" {
                 if FileManager.default.fileExists(atPath: indexURL.path) {
