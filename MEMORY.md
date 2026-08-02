@@ -4,11 +4,22 @@
 
 ## 当前版本
 
-- **当前版本：v2.10.51**
+- **当前版本：v2.10.52**
 - 平台：macOS（Swift / SwiftUI，SPM 构建，macOS 13+）
 - 单一版本号事实来源：`Info.plist` 的 `CFBundleShortVersionString`（`AppVersion.current` 动态读取，`AppVersion.fallback` 为编译期兜底）。CLI 版本号见 `Sources/ClipSlotsCLI/main.swift` 的 `CLI_VERSION`。
 
 ## 版本要点（近期）
+
+### v2.10.52 — 性能优化第四批（SwiftUI 渲染重构：瞬态 UI 拆分 + slots 增量 diff）
+- 背景：接续 v2.10.49（第一批·低风险清扫）、v2.10.50（第二批·P0 异步化）、v2.10.51（第三批·索引竞态）。本批做研判报告 https://bytedance.larkoffice.com/docx/EyyVdYi8CoBqVjxmQk1ctPaEnUg 标注的 UI 层性能项。约束：不改 UI 样式/布局、不引入拖拽排序、不改游标胶囊位置；自动切换默认开启、自动存储/自动粘贴默认关闭、已有用户设置不覆盖。
+- **巨型 @Published Store 拆分**（新增 `TransientUIStore.swift`）：`toastMessage` / `floatingNotice` 从主 `SlotStoreObservable` 剥离到独立 `TransientUIStore`（`let transientUI` 只读引用持有，生命周期随主 store）。原本这两个瞬态状态是 store 的 `@Published`，每次 `showToast`/`showFloatingNotice`（切组/保存/复制几乎都触发）都令 `store.objectWillChange` 发射、波及整棵 `ContentView.body` 与全部槽位卡片重绘。现 Toast/浮层由独立子视图 `TransientOverlayView`（`@ObservedObject var ui`）单独观察渲染，`ContentView.body` 不再读 `toastMessage/floatingNotice`（`store.transientUI` 普通引用读取不建依赖），二者弹出/消失只重绘该覆盖层子视图。toast 进出场动画随状态迁入子视图；`toastView`/`toastIcon`/`floatingNoticeView` 从 ContentView 移除。
+- **slots 字典全量替换改增量 diff**（`main.swift` 新增 `applySlotsSnapshot` + `slotsSnapshotEqual`）：此前所有 reload/切组路径无条件 `slots = snapshot.slots`，即便磁盘与内存完全一致（FS watcher 自写回声、无关变更整树 reload、A→A 重复切组）也触发 @Published 全量替换 → didSet 重算签名 + objectWillChange 全树重绘。现按槽位 id（contentId+updatedAt）逐槽对比，快照等价则跳过赋值不重绘；确有变化仍一次性整体赋值（didSet 只重算一次签名）。SlotContent 未实现 Equatable（含 Data 附件），故用 contentId/updatedAt 作稳定判据；即便偶发 id 不稳定也只退化为原「全量赋值」行为，无正确性风险。改造 3 处提交点：`reloadAllAsync`、`loadSlots`（同步）、`loadSlotsAsync`（切组）。
+- **组内搜索 matchedSlotCount**：已于 v2.10.49 移出 body 缓存化（`matchedSlotCountCache` + onChange 重算），本批确认无残留 O(N) 渲染路径开销，未再改动。
+- 无功能/CLI 契约/UI 样式变更；`swift build -c release --target ClipSlots` 通过（仅历史 warning，本批 0 新增 warning）。
+- version bump 2.10.51 → 2.10.52（Info.plist ×2 + AppVersion.swift）；CLI_VERSION 2.10.51 → 2.10.52（同步）
+- commit：`c33375b`（fix+bump 合并单提交）
+- DMG SHA256：`126c2e658db1ecb5a14a134606d3d892d53b24d1df001dc26ad66c389fee484c`
+- Release：https://github.com/Seven-hub-fanfan/ClipSlots/releases/tag/v2.10.52
 
 ### v2.10.51 — 性能优化第三批（saveIndex 收编串行队列 + 存储层竞态加固）
 - 背景：接续 v2.10.49（第一批·低风险清扫）、v2.10.50（第二批·P0 异步化）。本批做研判报告 https://bytedance.larkoffice.com/docx/EyyVdYi8CoBqVjxmQk1ctPaEnUg 标注的存储层索引竞态项（🔴 高危区），SwiftUI 渲染重构留待第四批。性能扫描报告 https://bytedance.larkoffice.com/docx/YWWFdwcRMoGyKqxfaRhcBkz9n6d 。
