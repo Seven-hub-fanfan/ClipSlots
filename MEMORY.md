@@ -4,11 +4,24 @@
 
 ## 当前版本
 
-- **当前版本：v2.10.48**
+- **当前版本：v2.10.49**
 - 平台：macOS（Swift / SwiftUI，SPM 构建，macOS 13+）
 - 单一版本号事实来源：`Info.plist` 的 `CFBundleShortVersionString`（`AppVersion.current` 动态读取，`AppVersion.fallback` 为编译期兜底）。CLI 版本号见 `Sources/ClipSlotsCLI/main.swift` 的 `CLI_VERSION`。
 
 ## 版本要点（近期）
+
+### v2.10.49 — 性能优化第一批（低风险清扫）
+- 背景：按四批节奏推进性能优化，本批做第一批低风险、纯增益项；保留所有现有功能与约束不变。性能扫描报告 https://bytedance.larkoffice.com/docx/YWWFdwcRMoGyKqxfaRhcBkz9n6d ，风险研判报告 https://bytedance.larkoffice.com/docx/EyyVdYi8CoBqVjxmQk1ctPaEnUg 。高风险 4 项（保存前同步 get 移后台、saveIndex 串行队列、Pack 流式化、SwiftUI 渲染重构）本批不做。
+- **① labelCacheFingerprint 去强解包**（`SlotStorage.swift` getLabel 快/慢路径）：`labelCacheFingerprint[slot]!` / `labelCache[slot]!` 强解包改为 guard/if let（`labelCacheFingerprint:[Int:DirFingerprint?]`、`labelCache:[Int:String?]` 均为可选值字典），缓存与指纹不同步时安全回退慢路径重读，消除潜在崩溃。
+- **② 径向悬停预览解码限流**（`RadialPreviewPanel.swift` RadialInlineImagePreview）：内联图解码从裸 `Task.detached` 接入已有全局 `ThumbnailDecodeLimiter`（2–6 并发上限，v2.10.38 引入），与网格/内联缩略图共用配额削峰，不改解码结果。
+- **③ 缓存内存压力回收**（`AppDelegate.swift`）：新增 `memoryPressureSource: DispatchSourceMemoryPressure`，`applicationDidFinishLaunching` 调 `setupMemoryPressureMonitor()`，监听 `.warning/.critical`（主队列回调）时清空可重建缓存 `ThumbnailProvider.shared.clearCache()` + `SlotContent.purgeAllInlineImageCaches()`（内联图/缩略图/元数据三缓存）；`applicationWillTerminate` cancel。仅回收内存不触碰磁盘。
+- **④ 组内搜索 matchedSlotCount 防抖缓存**（`ContentView.swift`）：新增 `@State matchedSlotCountCache`，`matchedSlotCount` 计算属性改为读缓存；`computeMatchedSlotCount()` 实际遍历、`recomputeMatchedSlotCount()` 写回（非搜索态归零、值变才写）；在 searchText/selectedFilter/searchScope/slotsContentSignature 的 onChange 及 onAppear 触发，避免每次 body 遍历重算。
+- 已核查无需再动：inlineImageCache totalCostLimit 已是 512MB（C-3 v2.10.31）；ClipboardManager capture/restore 已用 `if !Thread.isMainThread` 守卫，`main.sync` 不会同线程死锁。
+- version bump 2.10.48 → 2.10.49（Info.plist ×2 + AppVersion.swift）；CLI_VERSION 2.10.45 → 2.10.49（同步）
+- commit：`33963f4`（fix+bump 合并单提交）
+- DMG SHA256：`5db31f0a51739a241d7f5e35ac05f804b5b55608719bf6abf65a59ad32fd2eaa`
+- Release：https://github.com/Seven-hub-fanfan/ClipSlots/releases/tag/v2.10.49
+- ⚠️ 注意：workspace 沙盒内 `/workspace/.../ClipSlots/` 是一份**过时旧快照**，真实仓库/构建目标在挂载点 `/Users/bytedance/Cursor/ClipSlotsApp`（沙盒 `/mnt/propagation/.../`），务必只改挂载点。
 
 ### v2.10.48 — UX 丝滑度改进第二批（搜索 + 就地编辑 3 项）
 - 背景：接续 v2.10.46 第一批，做研判报告（https://bytedance.larkoffice.com/docx/XuDEd3WYwoExwqxcoq5cGSjfn7c）第二批中与搜索/编辑相关的 3 项。
