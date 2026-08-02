@@ -4,11 +4,21 @@
 
 ## 当前版本
 
-- **当前版本：v2.10.49**
+- **当前版本：v2.10.50**
 - 平台：macOS（Swift / SwiftUI，SPM 构建，macOS 13+）
 - 单一版本号事实来源：`Info.plist` 的 `CFBundleShortVersionString`（`AppVersion.current` 动态读取，`AppVersion.fallback` 为编译期兜底）。CLI 版本号见 `Sources/ClipSlotsCLI/main.swift` 的 `CLI_VERSION`。
 
 ## 版本要点（近期）
+
+### v2.10.50 — 性能优化第二批（P0 异步化 + Pack 流式化）
+- 背景：接续 v2.10.49（第一批低风险清扫），本批做两处 P0 + 一处 P1，均严守历史加固的安全/时序红线。性能扫描报告 https://bytedance.larkoffice.com/docx/YWWFdwcRMoGyKqxfaRhcBkz9n6d ，风险研判报告 https://bytedance.larkoffice.com/docx/EyyVdYi8CoBqVjxmQk1ctPaEnUg 。saveIndex 串行队列收编与 SwiftUI 渲染重构留待第三、四批单独灰度。
+- **P0-1 切组/切页/启动读盘全面异步化**（`main.swift`）：`createSpecialSlot` / `deleteSpecialSlot` / `createPage` / `deletePage` / `createSpecialSlotAndImportFolder` / `init` 启动首帧原走同步 `reloadAll`（主线程逐槽抢跨进程 flock，锁竞争下最长卡死 ~N×5s），统一改走 `reloadAllAsync` / `loadSlotsAsync`；每处切换前 `beginGroupSwitchTransition()` 开 `GroupSwitchVeil` 过渡遮罩（保留旧内容淡化、禁点击、1.2s 兜底关闭）+ generation/activeId 双重陈旧守卫，切组不闪空、旧读晚回不盖新组。`createSpecialSlotAndImportFolder` 的文件夹导入放进 `reloadAllAsync` 完成回调保序。同步版 `reloadAll` 仅保留内部兜底，不再由任何 UI 路径直接调用。
+- **P0-2 Pack 导入附件字节全量流式化**（`PackImporter.swift`）：此前仅 >20MB 走 `copyItem` 流式落盘、<20MB 仍 `Data(contentsOf:)` 整块读入内联；统一为无论大小都用内核级 `copyItem` 流式落盘为路径引用（`data` 恒 nil），彻底消除附件字节 Data 中转。删除 `inlineAttachmentThreshold` 阈值常量。三重安全校验（Zip Slip 名字、leaf 软链、中间目录软链越界）全部保留（只换搬运方式）；落盘路径登记 `importedAttachmentPaths`，失败回滚一并清理，绝不残留孤儿。覆盖导入 rename 回滚 + `invalidateContentCaches` 保持不变。Exporter 经核查早已全面 `copyItem` 流式，无需改动。
+- **P1 保存前 get 改内存快照**（`main.swift` `handleCapturedContentForSave`）：保存前的 `specialStorage.get()` 同步读盘（锁竞争最长阻塞 ~5s）改为 `contentForSlotOrUnknown`（命中当前组内存即用、无 flock），UNKNOWN 时 ABORT 并提示"存储繁忙"，绝不用空占位覆盖丢已有附件。⚠️ 特意**不**移后台（避免重踩 v2.10.36 lost-update 坑），仅换读源，写盘仍走 slotWriteQueue 串行异步、时序不变。参照 saveHTMLToSlot/updateTextSlot（v2.10.45）现成模式。
+- version bump 2.10.49 → 2.10.50（Info.plist ×2 + AppVersion.swift）；CLI_VERSION 2.10.49 → 2.10.50（同步）
+- commit：`6edd214`（fix+bump 合并单提交）
+- DMG SHA256：`9925635fbde9c0088e6d52205660b7a1c6cb288fff87c62d4c9f4160c4c094a4`
+- Release：https://github.com/Seven-hub-fanfan/ClipSlots/releases/tag/v2.10.50
 
 ### v2.10.49 — 性能优化第一批（低风险清扫）
 - 背景：按四批节奏推进性能优化，本批做第一批低风险、纯增益项；保留所有现有功能与约束不变。性能扫描报告 https://bytedance.larkoffice.com/docx/YWWFdwcRMoGyKqxfaRhcBkz9n6d ，风险研判报告 https://bytedance.larkoffice.com/docx/EyyVdYi8CoBqVjxmQk1ctPaEnUg 。高风险 4 项（保存前同步 get 移后台、saveIndex 串行队列、Pack 流式化、SwiftUI 渲染重构）本批不做。
