@@ -50,6 +50,11 @@ struct ContentView: View {
     // unrelated view re-renders (e.g. thumbnails finishing load) no longer re-run the
     // whole scan+sort on the main thread.
     @State private var globalSearchResultsCache: [SlotGlobalSearchResult] = []
+    // v2.10.49 (perf 第一批 P1「组内搜索 matchedSlotCount 防抖缓存」): 此前 matchedSlotCount 是
+    // 每次 body 求值都遍历本组槽位重算的计算属性（无结果提示与匹配计数文案各触发一次遍历）。
+    // 改为把结果缓存到此 @State，仅在搜索输入（searchText/selectedFilter/searchScope）或底层槽位
+    // 内容签名（slotsContentSignature）变化时重算一次，避免无关重绘（缩略图加载完成等）反复遍历。
+    @State private var matchedSlotCountCache: Int = 0
     // P2-27 (v2.10.9): 防抖 work item 从 @State 迁到视图持有的 holder（引用语义，body 外可安全 mutate）。
     @StateObject private var searchDebounce = SearchDebounceHolder()
 
@@ -442,9 +447,18 @@ struct ContentView: View {
         }
         // v2.8.0 (perf M1/M2): drive the cached global-search results from explicit
         // input changes instead of recomputing inside the view body on every render.
-        .onChange(of: searchText) { _ in scheduleGlobalSearchRecompute(debounced: true) }
-        .onChange(of: selectedFilter) { _ in scheduleGlobalSearchRecompute(debounced: false) }
-        .onChange(of: searchScope) { _ in scheduleGlobalSearchRecompute(debounced: false) }
+        .onChange(of: searchText) { _ in
+            scheduleGlobalSearchRecompute(debounced: true)
+            recomputeMatchedSlotCount()  // v2.10.49: 组内匹配计数即时刷新（本组遍历 ≤10 槽极廉价）
+        }
+        .onChange(of: selectedFilter) { _ in
+            scheduleGlobalSearchRecompute(debounced: false)
+            recomputeMatchedSlotCount()  // v2.10.49
+        }
+        .onChange(of: searchScope) { _ in
+            scheduleGlobalSearchRecompute(debounced: false)
+            recomputeMatchedSlotCount()  // v2.10.49
+        }
         .onChange(of: globalSearchSortRule) { _ in scheduleGlobalSearchRecompute(debounced: false) }
         // P2-5 (v2.10.6) + P2-28 (v2.10.9): 全局搜索缓存此前只在搜索输入变化时失效，底层
         // 槽位内容（热键/后台同步改动）变化时结果保持陈旧。原实现用
@@ -453,6 +467,11 @@ struct ContentView: View {
         // 仅在 slots 真正变化时重算一次。
         .onChange(of: store.slotsContentSignature) { _ in
             scheduleGlobalSearchRecompute(debounced: false)
+            recomputeMatchedSlotCount()  // v2.10.49: 槽位内容变化时同步刷新匹配计数缓存
+        }
+        // v2.10.49: 首次出现时初始化匹配计数缓存，避免进入即处于搜索态时读到 0 的短暂错值。
+        .onAppear {
+            recomputeMatchedSlotCount()
         }
         // P2-26 (v2.10.9): 视图消失时取消尚未触发的搜索防抖 work item，避免其在视图销毁后再触发。
         .onDisappear {
@@ -1378,8 +1397,22 @@ struct ContentView: View {
         SlotSearchMatcher.isActive(query: searchText, filter: selectedFilter)
     }
 
+    // v2.10.49: 读缓存值，不再在 body 求值时遍历重算。缓存由 recomputeMatchedSlotCount() 维护。
     private var matchedSlotCount: Int {
+        matchedSlotCountCache
+    }
+
+    // v2.10.49: 实际遍历本组槽位计算匹配数；仅由输入/内容变化的 onChange 与 onAppear 触发。
+    private func computeMatchedSlotCount() -> Int {
         stride(from: 1, through: store.config.slots, by: 1).filter { slotMatched($0) }.count
+    }
+
+    // v2.10.49: 重算并写回缓存。非搜索激活态直接归零，省去无谓遍历。仅在值变化时写 @State。
+    private func recomputeMatchedSlotCount() {
+        let newValue = isSearchActive ? computeMatchedSlotCount() : 0
+        if matchedSlotCountCache != newValue {
+            matchedSlotCountCache = newValue
+        }
     }
 
     private func slotMatched(_ slot: Int) -> Bool {

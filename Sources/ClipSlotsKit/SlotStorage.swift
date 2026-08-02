@@ -597,9 +597,13 @@ public final class SlotStorage {
         // cached state too. Outer optional from the closure = "was it a cache hit?".
         let diskFP = dirFingerprint(labelFile.path)
         if let cached: String? = queue.sync(execute: { () -> String?? in
-            guard labelCache.index(forKey: slot) != nil else { return nil }      // never cached
-            guard labelCacheFingerprint[slot]! == diskFP else { return nil }      // stale — re-read
-            return labelCache[slot]!                                              // .some(String?)
+            // P2 (v2.10.49): 去强解包。原先用 `labelCacheFingerprint[slot]!` / `labelCache[slot]!`，
+            // 依赖「labelCache 有 key ⇒ labelCacheFingerprint 必有 key」这一隐式不变量；若因并发/
+            // 部分状态导致二者不同步（或未来改动破坏该不变量），强解包会直接崩溃。改为逐个 if/guard let：
+            // 任一缺失即安全回退到下面的慢路径重读，永不崩溃。
+            guard let cachedFP = labelCacheFingerprint[slot], cachedFP == diskFP,
+                  let cachedLabel = labelCache[slot] else { return nil }  // 未缓存/指纹缺失或过期 — 重读
+            return cachedLabel                                            // .some(String?)
         }) {
             return cached
         }
@@ -610,8 +614,10 @@ public final class SlotStorage {
             queue.sync { () -> String? in
                 // Re-check inside the lock: another thread may have refreshed the cache meanwhile.
                 let fp = dirFingerprint(labelFile.path)
-                if labelCache.index(forKey: slot) != nil, labelCacheFingerprint[slot]! == fp {
-                    return labelCache[slot]!
+                // P2 (v2.10.49): 同样去强解包，缓存缺失即落到下面的实际读盘逻辑。
+                if let cachedFP = labelCacheFingerprint[slot], cachedFP == fp,
+                   let cachedLabel = labelCache[slot] {
+                    return cachedLabel
                 }
                 let value = (try? String(contentsOf: labelFile, encoding: .utf8))?
                     .trimmingCharacters(in: .whitespacesAndNewlines)

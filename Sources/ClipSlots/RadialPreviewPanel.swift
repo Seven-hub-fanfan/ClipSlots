@@ -179,9 +179,15 @@ private struct RadialInlineImagePreview: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .task(id: content.inlineImageIdentity) {
             let snapshot = content
-            let decoded = await Task.detached(priority: .userInitiated) {
-                snapshot.decodedInlineImage()
-            }.value
+            // P2 (v2.10.49): 径向悬停预览的内联图解码此前直接 Task.detached 全速解码，未经并发限流。
+            // 快速扫视多个图片槽位时会瞬时并发拉起多个全尺寸解码，与网格缩略图争抢 CPU/内存。
+            // 改为复用已有的全局 ThumbnailDecodeLimiter（2–6 并发上限），与网格/内联缩略图共用同一配额，
+            // 削峰而不改变解码结果；decodedInlineImage 内部命中缓存时几乎瞬返。
+            let decoded = await ThumbnailDecodeLimiter.shared.run {
+                await Task.detached(priority: .userInitiated) {
+                    snapshot.decodedInlineImage()
+                }.value
+            }
             if !Task.isCancelled { image = decoded }
         }
     }

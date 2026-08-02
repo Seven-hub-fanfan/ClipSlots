@@ -9,8 +9,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // P2-9 (v2.10.9): 保证「存储锁降级为无锁」通知只弹一次可见提示。
     private var didShowLocklessNotice = false
 
+    // v2.10.49 (perf 第一批 P2「缓存内存压力回收」): 监听系统内存压力事件。图库很大时缩略图缓存
+    // (ThumbnailProvider) 与内联图/缩略图/元数据解码缓存 (SlotContent) 会持续占用内存；收到
+    // .warning/.critical 时主动清空这些「可重建」缓存（下次访问自动重新解码/生成），把内存让给系统。
+    // 纯增益：只清可重建的内存缓存，绝不触碰磁盘数据。
+    private var memoryPressureSource: DispatchSourceMemoryPressure?
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.regular)
+
+        setupMemoryPressureMonitor()
 
         // P2-9 (v2.10.9): 跨进程存储锁降级为「无锁」时，另一 Agent 侧的 StorageLock 会且仅会
         // post 一次 Notification.Name("ClipSlotsStorageLockLockless")。这里注册 GUI 观察者，
@@ -76,6 +84,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationWillTerminate(_ notification: Notification) {
         hotkeyManager.unregisterAll()
         radialMenuController.dismiss()
+        memoryPressureSource?.cancel()
+        memoryPressureSource = nil
+    }
+
+    // v2.10.49 (perf 第一批 P2): 建立系统内存压力监听。收到 warning/critical 时清空可重建的
+    // 缩略图缓存与内联图/缩略图/元数据解码缓存（下次访问会自动重建），主动回收内存。事件在主队列
+    // 回调；ThumbnailProvider.clearCache 内部持 NSLock、SlotContent 缓存为 NSCache，均线程安全。
+    private func setupMemoryPressureMonitor() {
+        let source = DispatchSource.makeMemoryPressureSource(
+            eventMask: [.warning, .critical],
+            queue: .main
+        )
+        source.setEventHandler { [weak source] in
+            let event = source?.data ?? []
+            let level = event.contains(.critical) ? "critical" : "warning"
+            NSLog("[ClipSlots] memory pressure (\(level)) → 清空缩略图/内联图缓存回收内存")
+            ThumbnailProvider.shared.clearCache()
+            SlotContent.purgeAllInlineImageCaches()
+        }
+        source.resume()
+        memoryPressureSource = source
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
