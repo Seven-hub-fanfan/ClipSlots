@@ -49,9 +49,8 @@ struct PackImporter {
     private let storage = SpecialSlotStorage.shared
     private let maxChildSlots: Int
 
-    // D-1 (v2.10.31): 附件字节「内联进 attachments.json」与「落盘为路径引用」的分界阈值（20MB）。
-    // 超过该阈值的附件改走流式 copyItem 落盘，绝不整块读进内存，从根本上规避大文件导入 OOM。
-    private static let inlineAttachmentThreshold = 20 * 1024 * 1024
+    // D-1 (v2.10.31) / P0-2 (v2.10.50): 附件字节一律流式 copyItem 落盘为路径引用，绝不整块读进内存
+    // （从根本上规避大文件/大批量导入 OOM）。原「<20MB 内联、>20MB 流式」的分界阈值已随全量流式化移除。
 
     // PACK-2 (v2.10.32): JSON 元数据（manifest.json / group.json / slot.json）读取上限（10MB）。
     // D-1 只给「附件字节」加了流式阈值，元数据仍无差别 Data(contentsOf:)。恶意包可放一个高压缩比的
@@ -337,8 +336,10 @@ struct PackImporter {
             var restored: [SlotContent.SlotAttachment] = []
             for att in packSlot.attachments {
                 let type = SlotContent.AttachmentType(rawValue: att.type) ?? .file
-                let attId = UUID()  // 槽位 UUID 始终新生成；也用作大文件持久落盘的文件名前缀
-                var data: Data? = nil
+                let attId = UUID()  // 槽位 UUID 始终新生成；也用作持久落盘的文件名前缀
+                // P0-2 (v2.10.50): 附件字节全部流式落盘为路径引用，不再内联；data 恒为 nil，仅为兼容
+                // SlotAttachment 构造与「仅本地引用」（att.file == nil）态而保留。
+                let data: Data? = nil
                 var persistentPath: String? = nil
                 if let file = att.file {
                     // P1-2 (v2.10.18): 附件路径做 safeChildURL 校验，防止 Zip Slip 路径穿越读取包外文件。
@@ -365,26 +366,27 @@ struct PackImporter {
                             NSLog("[ClipSlots] PackImporter P0-1 拒绝越界附件（软链穿越解压目录外，防任意文件读取）："
                                 + "\(att.name)（条目 \(file)）")
                         } else {
-                        // D-1 (v2.10.31): 旧实现无差别用 `Data(contentsOf:)` 把附件整块读入内存再内联到
-                        // attachments.json——单个超大文件（如 2GB 视频）会直接 OOM 崩溃。改为：先用元数据
-                        // 探测文件大小，超过阈值（20MB）的大文件不进内存，直接用 FileManager.copyItem 流式
-                        // 拷贝到持久附件目录并以「路径引用」形式登记（data=nil, path=持久文件）；小文件才内联。
-                        let size = (try? safeURL.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
-                        if size > Self.inlineAttachmentThreshold {
-                            if let dest = copyLargeAttachmentToStore(from: safeURL, attachmentId: attId) {
-                                persistentPath = dest.path
-                                // P1-2 (v2.10.35): 登记本次流式落盘的大附件路径。这些文件写在独立于组目录的
-                                // imported_attachments/ 下，若随后某页/组创建失败触发 catch 回滚，原本只删组目录
-                                // （rename 回滚）不会触及它们，遂成无主孤儿（可达数百 MB～GB、可反复失败累积、
-                                // 可能含分享包中的敏感文件）。这里记录路径清单，catch 回滚时一并清理。
-                                importedAttachmentPaths.append(dest)
-                            } else {
-                                // 拷贝失败：记录可读报错，保留附件元信息（无字节），绝不静默把整块读进内存。
-                                NSLog("[ClipSlots] PackImporter D-1 大附件流式落盘失败，已跳过其字节："
-                                    + "\(att.name)（源 \(safeURL.path)）")
-                            }
+                        // P0-2 (v2.10.50): 附件字节【全部】流式化。D-1（v2.10.31）只给 >20MB 的大文件走
+                        // copyItem 流式落盘，<20MB 仍用 `Data(contentsOf:)` 整块读入内存再内联进
+                        // attachments.json——批量导入大量中等附件（几 MB × 上百个）时进程内存峰值仍可观，
+                        // 且这块字节要等 JSONEncoder 把 attachments.json 编码落盘后才释放。这里统一为：
+                        // 无论大小，所有附件都用 FileManager.copyItem（内核级流式拷贝、不进进程内存）落盘为
+                        // 「路径引用」（data=nil, path=持久文件），彻底消除附件字节的 Data 中转与内联。
+                        // ⚠️ 安全红线全部保留：上方 Zip Slip 名字校验、leaf 软链判定（PACK-1）、中间目录软链
+                        // 越界校验（P0-1 v2.10.34）三重校验都在真正读取【之前】，safeURL 已通过校验才走到这里；
+                        // 本改动只替换「搬运方式」（Data→copyItem），不触碰任一校验点。落盘路径同样登记
+                        // importedAttachmentPaths，导入失败时 catch 回滚一并清理，绝不残留孤儿附件。
+                        if let dest = copyLargeAttachmentToStore(from: safeURL, attachmentId: attId) {
+                            persistentPath = dest.path
+                            // P1-2 (v2.10.35): 登记本次流式落盘的附件路径。这些文件写在独立于组目录的
+                            // imported_attachments/ 下，若随后某页/组创建失败触发 catch 回滚，原本只删组目录
+                            // （rename 回滚）不会触及它们，遂成无主孤儿（可反复失败累积、可能含分享包中的
+                            // 敏感文件）。这里记录路径清单，catch 回滚时一并清理。
+                            importedAttachmentPaths.append(dest)
                         } else {
-                            data = try? Data(contentsOf: safeURL)
+                            // 拷贝失败：记录可读报错，保留附件元信息（无字节），绝不静默把整块读进内存。
+                            NSLog("[ClipSlots] PackImporter P0-2 附件流式落盘失败，已跳过其字节："
+                                + "\(att.name)（源 \(safeURL.path)）")
                         }
                         }
                     }

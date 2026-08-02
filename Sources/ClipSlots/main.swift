@@ -450,7 +450,13 @@ final class SlotStoreObservable: ObservableObject {
             self?.suppressWatcher()
         }
         loadSpecialSlots()
-        loadSlots()
+        // P0-1 (v2.10.50): 启动首帧读盘异步化。原 init 同步 loadSlots 会在主线程逐槽抢跨进程 flock——
+        // 冷启动瞬间若恰逢 CLI 批量写盘 / 另一实例持锁，主线程最长可被卡死 ~N×5s（启动即转圈、甚至被
+        // 系统判为无响应）。改走 loadSlotsAsync 把逐槽读盘挪到后台队列，读完回主线程淡入回填；为避免首帧
+        // 闪出空槽位网格，先开 GroupSwitchVeil 遮罩（含 1.2s 兜底关闭），新数据就绪后由 loadSlotsAsync
+        // 提交并淡入、同时关闭遮罩。loadSlots 同步版仍保留，供无 UI 的内部兜底路径使用。
+        beginGroupSwitchTransition()
+        loadSlotsAsync()
         loadPersistedUndoSnapshot() // v2.9.5 (Feature #3): restore pending undo across restarts
         setupStorageWatcher()
     }
@@ -692,6 +698,10 @@ final class SlotStoreObservable: ObservableObject {
         specialSlotSettings = index.settings
     }
 
+    // P0-1 (v2.10.50): 同步全量重载——现仅作【内部兜底】保留（不再由任何 UI 路径直接调用）。所有切组 /
+    // 切页 / 建组删组 / 建页删页 / 启动首帧路径已统一改走 reloadAllAsync / loadSlotsAsync，把逐槽跨进程
+    // flock 读盘挪到后台，杜绝主线程在锁竞争下卡死。此同步版逐槽读盘会阻塞主线程（每槽最长 ~5s），仅供
+    // 无 UI、需强一致读的内部场景显式调用；日常刷新一律走异步版。
     func reloadAll() {
         loadSpecialSlots()
         loadSlots()
@@ -700,10 +710,11 @@ final class SlotStoreObservable: ObservableObject {
         recomputeAutoPreviews()
     }
 
-    // P0-1 (v2.10.30): reloadAll 的异步版本，仅供「FSEvents watcher 触发」的 reload 使用。
+    // P0-1 (v2.10.30): reloadAll 的异步版本。最初仅供「FSEvents watcher 触发」的 reload 使用，v2.10.50 起
+    // 建组 / 删组 / 建页 / 删页等切组切页管理路径也统一改走本异步版（见各 caller）。
     // reloadAll 里最重的是 loadSlots 的逐槽磁盘读（N 次跨进程 flock，最长各阻塞 ~5s），此前直接跑在
     // 主线程上，CLI 批量写盘期间会把 GUI 主线程卡到转圈。这里把该重活挪到后台队列，读完再回主线程赋值
-    // @Published 并执行其余较轻的收尾步骤。init / 显式切组等其他 reloadAll 调用方保持同步不变。
+    // @Published 并执行其余较轻的收尾步骤。
     // 说明：loadSpecialSlots 只读索引（轻），保留在主线程先跑以拿到最新 currentSpecialSlotId；
     // loadConnectionMapForCurrentGroup / reloadLastPasteFromDefaults / recomputeAutoPreviews 均只做
     // 内存缓存读或轻量 FS-shape 探测且会写 @Published，统一放主线程完成闭包里执行。
@@ -894,7 +905,13 @@ final class SlotStoreObservable: ObservableObject {
         do {
             let slot = try specialStorage.createSpecialSlot(name: name)
             try specialStorage.switchToSpecialSlot(id: slot.id)
-            reloadAll()
+            // P0-1 (v2.10.50): 建组后切到新组的读盘统一走异步 reloadAllAsync，不再走同步 reloadAll。
+            // 同步版里最重的 loadSlots 会在主线程逐槽抢跨进程 flock（CLI 批量写盘 / 另一实例持锁时每槽
+            // 最长阻塞 ~5s），锁竞争下建组会把 GUI 主线程卡到转圈。切到新组属切组语义，先开 GroupSwitchVeil
+            // 遮罩（保留旧内容淡化过渡、禁点击），新数据在后台读盘就绪后由 reloadAllAsync 提交并自动关闭
+            // 遮罩（含 generation/activeId 双重陈旧守卫，防旧组读晚点回来盖掉新组）。
+            beginGroupSwitchTransition()
+            reloadAllAsync()
             refreshTrigger = UUID()
         } catch SpecialSlotError.duplicateName {
             // v2.9.4 (Feature #4): same-page duplicate names are rejected. Show a
@@ -936,7 +953,10 @@ final class SlotStoreObservable: ObservableObject {
         suppressWatcher() // v2.9.4 (#2): self-write
         do {
             try specialStorage.deleteSpecialSlot(id: id)
-            reloadAll()
+            // P0-1 (v2.10.50): 删组后会切到剩余组，读盘统一走异步 reloadAllAsync，避免主线程逐槽 flock
+            // 卡死（同 createSpecialSlot）。切到剩余组属切组语义，开 GroupSwitchVeil 平滑过渡。
+            beginGroupSwitchTransition()
+            reloadAllAsync()
             refreshTrigger = UUID()
         } catch {
             NSLog("[ClipSlots] deleteSpecialSlot error: \(error)")
@@ -960,7 +980,10 @@ final class SlotStoreObservable: ObservableObject {
         do {
             let page = try specialStorage.createPage(name: name).page
             try specialStorage.switchToPage(id: page.id)
-            reloadAll()
+            // P0-1 (v2.10.50): 建页后切到新页读盘统一走异步 reloadAllAsync，避免主线程逐槽 flock 卡死
+            // （同 createSpecialSlot）。切页会切到新页默认组，属切组语义，开 GroupSwitchVeil 平滑过渡。
+            beginGroupSwitchTransition()
+            reloadAllAsync()
             showToast("已创建页面「\(page.name)」")
         } catch {
             NSLog("[ClipSlots] createPage error: \(error)")
@@ -984,7 +1007,10 @@ final class SlotStoreObservable: ObservableObject {
         suppressWatcher() // v2.9.4 (#2): self-write
         do {
             try specialStorage.deletePage(id: id)
-            reloadAll()
+            // P0-1 (v2.10.50): 删页后切到剩余页读盘统一走异步 reloadAllAsync，避免主线程逐槽 flock 卡死
+            // （同 createSpecialSlot）。切到剩余页属切组语义，开 GroupSwitchVeil 平滑过渡。
+            beginGroupSwitchTransition()
+            reloadAllAsync()
             showToast("页面已删除")
         } catch {
             NSLog("[ClipSlots] deletePage error: \(error)")
@@ -5087,7 +5113,17 @@ final class SlotStoreObservable: ObservableObject {
         }
 
         // Check if overwriting (before save)
-        let existingBeforeSave = specialStorage.get(targetSlot, in: activeId)
+        // P1 (v2.10.50): 保存前不再同步 specialStorage.get() 抢跨进程 flock（锁竞争时主线程最长阻塞 ~5s）。
+        // 改读内存快照 contentForSlotOrUnknown：命中当前组内存即用（无 flock，成本极低），仅在磁盘状态确实
+        // UNKNOWN（内存未命中 AND 跨进程锁繁忙）时返回 nil。参照 saveHTMLToSlot / updateTextSlot（v2.10.45）：
+        // UNKNOWN 时 ABORT，绝不用空占位覆盖——附件已外置，若带空 attachments 覆盖会触发原子换目录、
+        // 永久丢失该槽已有附件字节。⚠️ 不能把 get 移到后台线程（会重踩 v2.10.36 lost-update 附件丢失坑）；
+        // 此处仅把「读源」从磁盘换成内存快照，写盘仍走下方 slotWriteQueue 串行异步，last-write-wins 时序不变。
+        guard let existingBeforeSave = contentForSlotOrUnknown(targetSlot) else {
+            NSLog("[ClipSlots] handleCapturedContentForSave slot=\(targetSlot): storage state UNKNOWN (lock busy), aborting save to avoid dropping attachments")
+            showFloatingNotice(FloatingNotice(title: "存储繁忙", subtitle: "槽位 \(targetSlot) 暂不可写，请稍后重试", iconName: "exclamationmark.triangle.fill", kind: .warning))
+            return
+        }
 
         // Normal save — regenerate identity so thumbnails and SwiftUI views refresh.
         var savedContent = content
@@ -5631,8 +5667,14 @@ final class SlotStoreObservable: ObservableObject {
                 sourcePath: folderURL.path
             )
             try specialStorage.switchToSpecialSlot(id: slot.id)
-            reloadAll()
-            importFolderIntoCurrentSpecialSlot(folderURL)
+            // P0-1 (v2.10.50): 建组+切组读盘异步化（同 createSpecialSlot），避免主线程逐槽 flock 卡死。
+            // 后续的文件夹导入原本依赖「reloadAll 之后」的时序（先把 UI 刷到新空组再往里导），故放进
+            // reloadAllAsync 的完成回调里执行，保序不变；importFolder 内部按 currentSpecialSlotId 定位写入，
+            // 不依赖 slots @Published 是否已回填，安全。开 GroupSwitchVeil 平滑过渡。
+            beginGroupSwitchTransition()
+            reloadAllAsync { [weak self] in
+                self?.importFolderIntoCurrentSpecialSlot(folderURL)
+            }
         } catch {
             NSLog("[ClipSlots] createSpecialSlotAndImportFolder error: \(error)")
             showAlert(message: "创建槽位组失败: \(error.localizedDescription)")
