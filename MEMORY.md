@@ -4,11 +4,24 @@
 
 ## 当前版本
 
-- **当前版本：v2.10.52**
+- **当前版本：v2.10.53**
 - 平台：macOS（Swift / SwiftUI，SPM 构建，macOS 13+）
 - 单一版本号事实来源：`Info.plist` 的 `CFBundleShortVersionString`（`AppVersion.current` 动态读取，`AppVersion.fallback` 为编译期兜底）。CLI 版本号见 `Sources/ClipSlotsCLI/main.swift` 的 `CLI_VERSION`。
 
 ## 版本要点（近期）
+
+### v2.10.53 — 性能优化专项 Bug 扫描修复（1 P0 + 2 P1 + 3 P2）
+- 背景：修复扫描报告 https://bytedance.larkoffice.com/docx/XeKndcG2HowLSGxj150cAMCRnZg（覆盖 v2.10.48→v2.10.52 四批性能改动）标注的问题。
+- **P0 跨槽并发编辑静默覆盖**：`handleCapturedContentForSave` 派发写盘前补一次同步乐观内存更新（`if loadedSpecialSlotId == activeId { slots[targetSlot] = contentToWrite }`），对齐 v2.10.36 给 `setAttachments` 的补丁。此前内存刷新推迟到后台写盘回调后，窗口内编辑另一槽位触发 `persistCurrentSpecialSlotData` 抓全量旧快照回写，FIFO 让旧值最后落盘覆盖新内容（跨进程锁竞争窗口最长 ~5s）。
+- **P1-1 共享 JSONEncoder/Decoder 跨队列 data race**：`SlotStorage` 移除共享 `encoder`/`decoder` 属性，7 个编解码点（meta/附件外置/迁移/manifest 编码 + 3 处解码）改用局部实例，消除 `manifestQueue` 与主 `queue` 并发编码致 `attachments.json`/manifest 错乱。
+- **P1-2 增量 diff 判等字段跨进程不更新**：`updateHTMLSlot` / `setAttachments` 复用旧 `SlotContent` 改内容后刷新 `contentId`/`updatedAt`，恢复 v2.10.52 `slotsSnapshotEqual`（以 contentId+updatedAt 判等）不变量，修跨进程/多实例 UI 陈旧、搜索计数不更新。
+- **P2-1** `getLabelOnQueue` 去强解包（`labelCacheFingerprint[slot]!`/`labelCache[slot]!` → `if let` 逐个绑定），与公共 `getLabel` 的 v2.10.49 加固对齐，永不 EXC_BREAKPOINT。
+- **P2-2** `PackImporter.unzip` 在 `waitUntilExit` 前用后台线程 `readDataToEndOfFile` 抽干 stderr（run() 抛错路径主动关写端制造 EOF 防死锁），防坏包大量输出撑爆 ~64KB 管道缓冲致进程挂起。
+- **P2-3** 新增 `sweepStaleImportTempDirs()`，`importPack` 开头（建新备份前）清扫孤儿临时目录：`.rollback_discard_*` 直接删；`.import_backup_<groupId>_<uuid>` 按实况组目录非空→删冗余、缺失/空→rename 回原位恢复数据（绝不删唯一副本）。
+- version bump：Info.plist ×2 + AppVersion.swift + CLI_VERSION 2.10.52 → 2.10.53
+- commit：`e03d180`(fix) + `59d7f48`(bump)
+- DMG SHA256：`25c326f425e10df04db0153551dcd5ae3378ebc923aee9a6dc50bbb71719f0fb`
+- Release：https://github.com/Seven-hub-fanfan/ClipSlots/releases/tag/v2.10.53
 
 ### v2.10.52 — 性能优化第四批（SwiftUI 渲染重构：瞬态 UI 拆分 + slots 增量 diff）
 - 背景：接续 v2.10.49（第一批·低风险清扫）、v2.10.50（第二批·P0 异步化）、v2.10.51（第三批·索引竞态）。本批做研判报告 https://bytedance.larkoffice.com/docx/EyyVdYi8CoBqVjxmQk1ctPaEnUg 标注的 UI 层性能项。约束：不改 UI 样式/布局、不引入拖拽排序、不改游标胶囊位置；自动切换默认开启、自动存储/自动粘贴默认关闭、已有用户设置不覆盖。
