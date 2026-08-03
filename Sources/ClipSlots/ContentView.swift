@@ -644,7 +644,7 @@ struct ContentView: View {
                 tint: .green,
                 onBack: { store.autoStoreCursorGoBack() },
                 onReset: { store.autoStoreCursorReset() },
-                backHelp: "回退写游标：撤销最近一次自动存储的推进（回到上一个槽位）",
+                backHelp: "回退写游标：可连续点击，逐个空槽往回退，直到回到开头",
                 resetHelp: "重置写游标：下次 Opt+1 从第一个空槽重新开始"
             )
 
@@ -656,7 +656,7 @@ struct ContentView: View {
                 tint: .blue,
                 onBack: { store.autoPasteCursorGoBack() },
                 onReset: { store.autoPasteCursorReset() },
-                backHelp: "回退读游标：撤销最近一次自动粘贴的推进（回到上一个槽位）",
+                backHelp: "回退读游标：可连续点击，逐个非空槽往回退，直到回到开头",
                 resetHelp: "重置读游标：下次 Cmd+1 从当前组第一个非空槽重新开始"
             )
 

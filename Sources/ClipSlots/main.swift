@@ -1598,13 +1598,45 @@ final class SlotStoreObservable: ObservableObject {
         }
     }
 
+    /// 在「当前激活组」内，找到严格位于 `beforeSlot` 之前、且满足 `matches` 的最后一个槽位序号。
+    /// 找不到返回 nil。`beforeSlot <= 1` 时直接返回 nil（已在开头，无可回退）。
+    /// v2.10.59: 支持「撤回」按钮连续点击，逐个槽位往回退，而非仅依赖深度 1 的 prev 历史。
+    private func previousMatchingSlot(before beforeSlot: Int,
+                                      in groupId: String,
+                                      matches: (Int) -> Bool) -> Int? {
+        guard beforeSlot > 1 else { return nil }
+        for s in stride(from: beforeSlot - 1, through: 1, by: -1) where matches(s) {
+            return s
+        }
+        return nil
+    }
+
     /// 写游标回退一步（撤销最近一次自动存储的推进），并刷新预览角标。
+    /// v2.10.59: 可连续点击，在当前组内逐个空槽往回退，直到回退到开头（游标清空）。
     func autoStoreCursorGoBack() {
-        _ = try? specialStorage.goBackAutoStoreCursor()
+        let groupId = currentSpecialSlotId
+        let cursor = specialStorage.autoStoreCursor()
+        // 游标不在当前激活组（切组 / 跨进程改动）视为「已在开头」，无可回退。
+        let currentSlot: Int = (cursor?.groupId == groupId) ? (cursor?.slot ?? 0) : 0
+        guard currentSlot > 0 else {
+            showFloatingNotice(FloatingNotice(
+                title: "已在开头",
+                subtitle: "写游标已在起点，无法再回退",
+                iconName: "arrow.uturn.backward",
+                kind: .warning
+            ))
+            return
+        }
+        // 找当前槽之前的上一个空槽（自动存储写入的是空槽）。找不到 → 回退到开头（游标清空）。
+        let target = previousMatchingSlot(before: currentSlot, in: groupId) { slot in
+            self.specialStorage.isEmpty(slot, in: groupId)
+        }
+        let newCursor = target.map { SpecialSlotCursor(groupId: groupId, slot: $0) }
+        try? specialStorage.setAutoStoreCursor(newCursor)
         recomputeAutoPreviews()
         showFloatingNotice(FloatingNotice(
-            title: "写游标已回退",
-            subtitle: "下一次 Opt+1 从上一个位置重新计算",
+            title: newCursor == nil ? "写游标已回到开头" : "写游标已回退",
+            subtitle: newCursor == nil ? "下一次 Opt+1 从第一个空槽重新开始" : "下一次 Opt+1 从上一个位置重新计算",
             iconName: "arrow.uturn.backward",
             kind: .info
         ))
@@ -1623,12 +1655,33 @@ final class SlotStoreObservable: ObservableObject {
     }
 
     /// 读游标回退一步（撤销最近一次自动粘贴的推进），并刷新预览角标。
+    /// v2.10.59: 可连续点击，在当前组内逐个非空槽往回退，直到回退到开头（游标清空）。
     func autoPasteCursorGoBack() {
-        _ = try? specialStorage.goBackAutoPasteCursor()
+        let groupId = currentSpecialSlotId
+        let cursor = specialStorage.autoPasteCursor()
+        // 游标不在当前激活组（切组 / 跨进程改动）视为「已在开头」，无可回退。
+        let currentSlot: Int = (cursor?.groupId == groupId) ? (cursor?.slot ?? 0) : 0
+        guard currentSlot > 0 else {
+            showFloatingNotice(FloatingNotice(
+                title: "已在开头",
+                subtitle: "读游标已在起点，无法再回退",
+                iconName: "arrow.uturn.backward",
+                kind: .warning
+            ))
+            return
+        }
+        // 找当前槽之前的上一个非空槽（自动粘贴读取的是非空槽）。找不到 → 回退到开头（游标清空）。
+        let target = previousMatchingSlot(before: currentSlot, in: groupId) { slot in
+            !self.specialStorage.isEmpty(slot, in: groupId)
+        }
+        let newCursor = target.map { SpecialSlotCursor(groupId: groupId, slot: $0) }
+        try? specialStorage.setAutoPasteCursor(newCursor)
+        // 回退时清空「本组连线链已粘记录」，让回退到的槽位重新可被粘贴/预览（否则会被当作空槽跳过）。
+        pastedChainMembersByGroup[groupId] = nil
         recomputeAutoPreviews()
         showFloatingNotice(FloatingNotice(
-            title: "读游标已回退",
-            subtitle: "下一次 Cmd+1 从上一个位置重新计算",
+            title: newCursor == nil ? "读游标已回到开头" : "读游标已回退",
+            subtitle: newCursor == nil ? "下一次 Cmd+1 从当前组第一个非空槽重新开始" : "下一次 Cmd+1 从上一个位置重新计算",
             iconName: "arrow.uturn.backward",
             kind: .info
         ))
