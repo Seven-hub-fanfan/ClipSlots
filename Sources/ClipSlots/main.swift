@@ -367,7 +367,7 @@ final class SlotStoreObservable: ObservableObject {
 
     /// Slot groups belonging to the current page, sorted by order.
     var currentPageSlotGroups: [SpecialSlot] {
-        specialSlots.filter { $0.pageId == currentPageId }.sorted { $0.order < $1.order }
+        specialSlots.filter { $0.pageId == currentPageId }.sorted { ($0.order, $0.id) < ($1.order, $1.id) }
     }
 
     var lastNonClipSlotsApp: NSRunningApplication?
@@ -1134,7 +1134,7 @@ final class SlotStoreObservable: ObservableObject {
 
         let groupsInPage = specialSlots
             .filter { $0.pageId == pageId }
-            .sorted { $0.order < $1.order }
+            .sorted { ($0.order, $0.id) < ($1.order, $1.id) }
 
         if let idx = groupsInPage.firstIndex(where: { $0.id == currentGroupId }),
            idx < groupsInPage.count - 1 {
@@ -1143,7 +1143,7 @@ final class SlotStoreObservable: ObservableObject {
         }
 
         // Current group is the last one in its page — move to the next page's first group.
-        let sortedPages = pages.sorted { $0.order < $1.order }
+        let sortedPages = pages.sorted { ($0.order, $0.id) < ($1.order, $1.id) }
         guard let pageIdx = sortedPages.firstIndex(where: { $0.id == pageId }),
               pageIdx < sortedPages.count - 1 else {
             return nil // last page + last group → stop, no wrap.
@@ -1152,7 +1152,7 @@ final class SlotStoreObservable: ObservableObject {
         let nextPageId = sortedPages[pageIdx + 1].id
         let nextPageGroups = specialSlots
             .filter { $0.pageId == nextPageId }
-            .sorted { $0.order < $1.order }
+            .sorted { ($0.order, $0.id) < ($1.order, $1.id) }
         return nextPageGroups.first?.id
     }
 
@@ -1612,31 +1612,15 @@ final class SlotStoreObservable: ObservableObject {
     }
 
     /// 写游标回退一步（撤销最近一次自动存储的推进），并刷新预览角标。
-    /// v2.10.59: 可连续点击，在当前组内逐个空槽往回退，直到回退到开头（游标清空）。
+    /// v2.10.61: 回退到 prev-history 单步语义。写游标指向「刚写入的（非空）槽位」，
+    /// 与读游标（指向待粘的非空槽、可逐个往回退）语义不同——写游标做连续「找上一个空槽」
+    /// 回退没有意义（前面的槽位都已填充），v2.10.60 的连续版会直接跳到开头，是回归。
     func autoStoreCursorGoBack() {
-        let groupId = currentSpecialSlotId
-        let cursor = specialStorage.autoStoreCursor()
-        // 游标不在当前激活组（切组 / 跨进程改动）视为「已在开头」，无可回退。
-        let currentSlot: Int = (cursor?.groupId == groupId) ? (cursor?.slot ?? 0) : 0
-        guard currentSlot > 0 else {
-            showFloatingNotice(FloatingNotice(
-                title: "已在开头",
-                subtitle: "写游标已在起点，无法再回退",
-                iconName: "arrow.uturn.backward",
-                kind: .warning
-            ))
-            return
-        }
-        // 找当前槽之前的上一个空槽（自动存储写入的是空槽）。找不到 → 回退到开头（游标清空）。
-        let target = previousMatchingSlot(before: currentSlot, in: groupId) { slot in
-            self.specialStorage.isEmpty(slot, in: groupId)
-        }
-        let newCursor = target.map { SpecialSlotCursor(groupId: groupId, slot: $0) }
-        try? specialStorage.setAutoStoreCursor(newCursor)
+        _ = try? specialStorage.goBackAutoStoreCursor()
         recomputeAutoPreviews()
         showFloatingNotice(FloatingNotice(
-            title: newCursor == nil ? "写游标已回到开头" : "写游标已回退",
-            subtitle: newCursor == nil ? "下一次 Opt+1 从第一个空槽重新开始" : "下一次 Opt+1 从上一个位置重新计算",
+            title: "写游标已回退",
+            subtitle: "下一次 Opt+1 从上一个位置重新计算",
             iconName: "arrow.uturn.backward",
             kind: .info
         ))
@@ -1676,8 +1660,13 @@ final class SlotStoreObservable: ObservableObject {
         }
         let newCursor = target.map { SpecialSlotCursor(groupId: groupId, slot: $0) }
         try? specialStorage.setAutoPasteCursor(newCursor)
-        // 回退时清空「本组连线链已粘记录」，让回退到的槽位重新可被粘贴/预览（否则会被当作空槽跳过）。
-        pastedChainMembersByGroup[groupId] = nil
+        // 回退时只重置「回退目标及其之后」的已粘记录，让这些槽位重新可被粘贴/预览；
+        // 保留回退点之前的其它独立连线链记录，避免组内多链场景误清导致重复粘贴。
+        let clearFrom = target ?? 0
+        if var members = pastedChainMembersByGroup[groupId] {
+            members = members.filter { $0 < clearFrom }
+            pastedChainMembersByGroup[groupId] = members.isEmpty ? nil : members
+        }
         recomputeAutoPreviews()
         showFloatingNotice(FloatingNotice(
             title: newCursor == nil ? "读游标已回到开头" : "读游标已回退",
@@ -4798,9 +4787,10 @@ final class SlotStoreObservable: ObservableObject {
             // 全程主线程不阻塞（探测期间 UI 保持响应）。
             let urls = panel.urls
             let maxChild = specialSlotSettings.maxChildSlotsPerSpecialSlot
-            DispatchQueue.global(qos: .userInitiated).async {
+            DispatchQueue.global(qos: .userInitiated).async { [weak self] in
                 let isPack = PackImporter(maxChildSlots: maxChild).isValidPack(at: candidate)
-                DispatchQueue.main.async {
+                DispatchQueue.main.async { [weak self] in
+                    guard let self = self else { return }
                     if isPack {
                         self.importPack(from: candidate)
                     } else {
@@ -5958,7 +5948,7 @@ final class SlotStoreObservable: ObservableObject {
     func searchableGroupsSnapshot() -> [SearchableGroupRef] {
         var refs: [SearchableGroupRef] = []
         for page in pages {
-            let groups = specialSlots.filter { $0.pageId == page.id }.sorted { $0.order < $1.order }
+            let groups = specialSlots.filter { $0.pageId == page.id }.sorted { ($0.order, $0.id) < ($1.order, $1.id) }
             for group in groups {
                 refs.append(SearchableGroupRef(
                     pageId: page.id,

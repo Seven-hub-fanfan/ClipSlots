@@ -644,7 +644,7 @@ struct ContentView: View {
                 tint: .green,
                 onBack: { store.autoStoreCursorGoBack() },
                 onReset: { store.autoStoreCursorReset() },
-                backHelp: "回退写游标：可连续点击，逐个空槽往回退，直到回到开头",
+                backHelp: "回退写游标：撤销最近一次自动存储的推进（回到上一个槽位）",
                 resetHelp: "重置写游标：下次 Opt+1 从第一个空槽重新开始"
             )
 
