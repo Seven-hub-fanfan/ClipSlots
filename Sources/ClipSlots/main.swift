@@ -4793,11 +4793,22 @@ final class SlotStoreObservable: ObservableObject {
         }
         if panel.urls.count == 1, let candidate = panel.urls.first,
            !isDirectory(candidate) {
-            let importer = PackImporter(maxChildSlots: specialSlotSettings.maxChildSlotsPerSpecialSlot)
-            if importer.isValidPack(at: candidate) {
-                importPack(from: candidate)
-                return
+            // P2 (v2.10.60): isValidPack 会同步 spawn /usr/bin/unzip 解出 manifest.json 做内容探测，
+            // 选中大文件 / 慢速卷时可能在主线程短暂卡顿。改为后台探测，完成后回主线程分流，
+            // 全程主线程不阻塞（探测期间 UI 保持响应）。
+            let urls = panel.urls
+            let maxChild = specialSlotSettings.maxChildSlotsPerSpecialSlot
+            DispatchQueue.global(qos: .userInitiated).async {
+                let isPack = PackImporter(maxChildSlots: maxChild).isValidPack(at: candidate)
+                DispatchQueue.main.async {
+                    if isPack {
+                        self.importPack(from: candidate)
+                    } else {
+                        self.presentImportOptions(for: urls)
+                    }
+                }
             }
+            return
         }
         presentImportOptions(for: panel.urls)
     }
