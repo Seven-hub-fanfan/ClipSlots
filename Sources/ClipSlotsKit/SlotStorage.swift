@@ -18,6 +18,33 @@ func cloneOrCopyItem(at src: URL, to dst: URL) -> Bool {
     }
 }
 
+/// P0 (v2.10.62): single-file variant used when staging an EXISTING externalized `.bin`
+/// (immutable, content-addressed by attachment UUID) inside the cross-process storage lock.
+/// The previous path used `cloneOrCopyItem`, whose non-APFS/cross-volume fallback is a
+/// physical `copyItem` — for a GB-scale attachment that holds the lock for tens of seconds
+/// and freezes every other GUI/CLI write. Tiered strategy avoids the byte copy whenever
+/// possible:
+///   1) `clonefile(2)` — APFS copy-on-write, sub-millisecond, constant time.
+///   2) `link(2)` hardlink — same-volume O(1) metadata op (covers HFS+/ExFAT-on-same-volume).
+///      Safe because `.bin` files are never mutated in place (edits always go staging→atomic
+///      swap), so transiently sharing an inode between the live slot dir and staging is correct;
+///      after `replaceItemAt` deletes the old slot dir the link count simply drops back to 1.
+///   3) physical `copyItem` — only genuinely cross-volume sources, where a copy is unavoidable.
+@discardableResult
+func cloneLinkOrCopyFile(at src: URL, to dst: URL) -> Bool {
+    let crc = src.path.withCString { s in dst.path.withCString { d in clonefile(s, d, 0) } }
+    if crc == 0 { return true }
+    let lrc = src.path.withCString { s in dst.path.withCString { d in link(s, d) } }
+    if lrc == 0 { return true }
+    do {
+        try FileManager.default.copyItem(at: src, to: dst)
+        return true
+    } catch {
+        NSLog("[ClipSlots] cloneLinkOrCopyFile FAIL \(src.lastPathComponent): \(error.localizedDescription)")
+        return false
+    }
+}
+
 /// P1-A (v2.10.44): errors surfaced by the slot write path so the caller can abort an
 /// atomic swap (and roll back) instead of silently persisting a lossy payload.
 enum SlotStorageError: Error {
@@ -1014,7 +1041,7 @@ public final class SlotStorage {
                 // 否则整目录原子 swap 会把旧字节文件一并替换掉导致丢失。
                 try ensureStagingDir()
                 try? fm.removeItem(at: destFile)
-                if cloneOrCopyItem(at: URL(fileURLWithPath: sp), to: destFile) {
+                if cloneLinkOrCopyFile(at: URL(fileURLWithPath: sp), to: destFile) {
                     out.data = nil
                     out.storagePath = finalPath
                 } else {
@@ -1039,7 +1066,7 @@ public final class SlotStorage {
                 if fm.fileExists(atPath: canonicalURL.path) {
                     try ensureStagingDir()
                     try? fm.removeItem(at: destFile)
-                    if cloneOrCopyItem(at: canonicalURL, to: destFile) {
+                    if cloneLinkOrCopyFile(at: canonicalURL, to: destFile) {
                         out.data = nil
                         out.storagePath = finalPath
                     } else {

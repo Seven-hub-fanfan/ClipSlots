@@ -451,7 +451,12 @@ struct PackImporter {
             // （仅通过 getLabel 保留槽位目录里已有的旧 label.txt）。导入写入的是全新槽位目录，
             // 旧 label 为空，故 set 不会持久化包内标签——setLabel 是必要的第二次写入，不能删除。
             if let label = packSlot.label, !label.isEmpty {
-                storage.setLabel(slot, label: label, in: groupId)
+                // P1 (v2.10.62): setLabel 是软失败（锁超时 / invalidated 返回 false 而不抛异常）。此前丢弃
+                // 返回值 → 「内容进了、标签丢了」却仍计入成功、绕过回滚。改为校验：写标签失败即抛 writeFailed，
+                // 交由 importPack 的 catch 走 rename 回滚把原数据完整还原，杜绝「内容对、标签缺」的静默不一致。
+                guard storage.setLabel(slot, label: label, in: groupId) else {
+                    throw PackImportError.writeFailed("写入槽位 \(slot) 标签失败（组「\(groupId)」，可能锁超时）")
+                }
             }
             written += 1
         }
