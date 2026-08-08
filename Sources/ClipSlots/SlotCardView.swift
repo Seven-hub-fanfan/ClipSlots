@@ -50,9 +50,12 @@ struct SlotCardView: View {
     @State private var showingHTMLEditor = false
     @State private var editingText = ""
     @State private var isDropTargeted = false
-    @State private var isPressed = false
 
     @Environment(\.colorScheme) private var colorScheme
+
+    private var slotAccent: Color {
+        AppTheme.slotAccent(slot, scheme: colorScheme)
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: AppTheme.spacingMedium) {
@@ -64,12 +67,12 @@ struct SlotCardView: View {
                     EmptySlotThumbnailView()
                 } else if content.isVideoFile, let url = content.primaryFileURL {
                     InlineSlotVideoPreview(url: url)
-                        .clipShape(RoundedRectangle(cornerRadius: AppTheme.smallCornerRadius, style: .continuous))
-                        .contentShape(RoundedRectangle(cornerRadius: AppTheme.smallCornerRadius, style: .continuous))
+                        .clipShape(RoundedRectangle(cornerRadius: AppTheme.slotPreviewCornerRadius, style: .continuous))
+                        .contentShape(RoundedRectangle(cornerRadius: AppTheme.slotPreviewCornerRadius, style: .continuous))
                         .overlay(
-                            RoundedRectangle(cornerRadius: AppTheme.smallCornerRadius, style: .continuous)
+                            RoundedRectangle(cornerRadius: AppTheme.slotPreviewCornerRadius, style: .continuous)
                                 .fill(Color.clear)
-                                .contentShape(RoundedRectangle(cornerRadius: AppTheme.smallCornerRadius, style: .continuous))
+                                .contentShape(RoundedRectangle(cornerRadius: AppTheme.slotPreviewCornerRadius, style: .continuous))
                                 .onTapGesture {
                                     // v2.7.35: AVPlayerView is an NSView and can swallow SwiftUI gestures.
                                     // Put the click layer above it so video behaves like image cards.
@@ -79,7 +82,7 @@ struct SlotCardView: View {
                         .help("点击查看视频大图预览")
                 } else {
                     SlotThumbnailView(content: content, specialSlotId: specialSlotId, slot: slot)
-                        .clipShape(RoundedRectangle(cornerRadius: AppTheme.smallCornerRadius, style: .continuous))
+                        .clipShape(RoundedRectangle(cornerRadius: AppTheme.slotPreviewCornerRadius, style: .continuous))
                         .onTapGesture {
                             if content.canPreview {
                                 showingPreview = true
@@ -88,15 +91,19 @@ struct SlotCardView: View {
                         .help(content.canPreview ? "点击查看大图" : "")
                 }
             }
-            // v2.10.20: 「删除主体文本」叉号从 metadata 行移到内容预览框左上角，
-            // 避开右上角卡片级「上次粘贴」角标；仅当槽位有主体文本内容时显示。
+            // v2.10.20: 「删除主体文本」叉号位于内容预览框左上角，
+            // 避开右上角卡片级「上次粘贴」角标；仅当槽位有主体内容时显示。
             .overlay(alignment: .topLeading) {
                 if let onClearBody, (!content.items.isEmpty || content.htmlSource != nil) {
                     Button(action: onClearBody) {
                         Image(systemName: "xmark.circle.fill")
                             .font(.system(size: 15))
                             .foregroundColor(.secondary.opacity(0.75))
-                            .background(Circle().fill(Color(NSColor.controlBackgroundColor).opacity(0.9)).frame(width: 14, height: 14))
+                            .background(
+                                Circle()
+                                    .fill(Color(NSColor.controlBackgroundColor).opacity(0.9))
+                                    .frame(width: 14, height: 14)
+                            )
                     }
                     .buttonStyle(.plain)
                     .help("删除此槽位的文本内容（保留附件）")
@@ -111,7 +118,7 @@ struct SlotCardView: View {
             HStack(alignment: .lastTextBaseline, spacing: 6) {
                 Text(content.metadataSummary)
                     .font(.caption2)
-                    .foregroundColor(.secondary)
+                    .foregroundColor(.secondary.opacity(0.68))
                     .lineLimit(1)
                     .truncationMode(.middle)
                     .help(content.metadataSummary)
@@ -139,39 +146,38 @@ struct SlotCardView: View {
         // unsaved edits. Content-driven refresh now lives only on SlotThumbnailView, which
         // already applies `.id(currentKey)` internally, so the thumbnail still reloads
         // correctly while the card's editing state survives.
-        .padding(AppTheme.cardPadding)
+        .padding(AppTheme.slotCardPadding)
         .background(
-            RoundedRectangle(cornerRadius: AppTheme.cornerRadius, style: .continuous)
+            RoundedRectangle(cornerRadius: AppTheme.slotCardCornerRadius, style: .continuous)
                 .fill(AppTheme.cardBackground(colorScheme, isEmpty: content.isEmpty))
                 .shadow(
                     color: AppTheme.cardShadow(colorScheme, isEmpty: content.isEmpty),
-                    radius: isHovering ? 10 : (content.isEmpty ? 3 : 6),
-                    y: isHovering ? 5 : 2
+                    radius: isHovering ? 9 : (content.isEmpty ? 3 : 5),
+                    y: isHovering ? 4 : 2
                 )
+                .allowsHitTesting(false)
         )
         .overlay(
-            RoundedRectangle(cornerRadius: AppTheme.cornerRadius, style: .continuous)
+            RoundedRectangle(cornerRadius: AppTheme.slotCardCornerRadius, style: .continuous)
                 .stroke(
-                    isHovering
-                        ? AppTheme.activeBorder(colorScheme)
-                        : (content.isEmpty ? AppTheme.subtleBorder(colorScheme) : AppTheme.activeBorder(colorScheme)),
-                    lineWidth: isHovering ? 1.4 : 1
+                    isHovering ? slotAccent.opacity(0.72) : AppTheme.subtleBorder(colorScheme),
+                    lineWidth: isHovering ? 1.5 : 1
                 )
+                .allowsHitTesting(false)
         )
-        // v2.7.1: Do not render node-canvas ports on the main card grid.
-        // The v2.7.0 port overlay polluted the normal UI with permanent blue handles.
-        // Keep only a tiny chain-color dot in the header.
-        .scaleEffect(isPressed ? 0.98 : (isHovering ? 1.012 : 1.0))
-        .animation(.spring(response: 0.28, dampingFraction: 0.82), value: isHovering)
-        .animation(.spring(response: 0.18, dampingFraction: 0.70), value: isPressed)
+        .overlay(alignment: .topLeading) {
+            Capsule()
+                .fill(slotAccent)
+                .frame(width: 34, height: 3)
+                .padding(.leading, AppTheme.slotCardPadding)
+                .allowsHitTesting(false)
+        }
+        // Keep hover feedback visual only: no parent gesture competes with card controls.
+        .offset(y: isHovering ? -2 : 0)
+        .animation(.easeOut(duration: 0.18), value: isHovering)
         .onHover { hovering in
             isHovering = hovering
         }
-        .simultaneousGesture(
-            DragGesture(minimumDistance: 0)
-                .onChanged { _ in isPressed = true }
-                .onEnded { _ in isPressed = false }
-        )
         .onDrop(of: [UTType.fileURL.identifier], isTargeted: $isDropTargeted) { providers in
             handleFileDrop(providers)
         }
@@ -183,16 +189,17 @@ struct SlotCardView: View {
             }
         }
         .overlay(
-            RoundedRectangle(cornerRadius: AppTheme.cornerRadius, style: .continuous)
+            RoundedRectangle(cornerRadius: AppTheme.slotCardCornerRadius, style: .continuous)
                 .strokeBorder(
-                    isDropTargeted ? Color.accentColor.opacity(0.55) : Color.clear,
+                    isDropTargeted ? slotAccent.opacity(0.72) : Color.clear,
                     lineWidth: isDropTargeted ? 1.2 : 0
                 )
+                .allowsHitTesting(false)
         )
         // v2.9.37: transient flash-highlight ring when jumped to from the footer
         // "上次粘贴" button. Animates in/out and never intercepts taps.
         .overlay(
-            RoundedRectangle(cornerRadius: AppTheme.cornerRadius, style: .continuous)
+            RoundedRectangle(cornerRadius: AppTheme.slotCardCornerRadius, style: .continuous)
                 .strokeBorder(
                     isFlashHighlighted ? Color.accentColor : Color.clear,
                     lineWidth: isFlashHighlighted ? 2.5 : 0
@@ -209,7 +216,8 @@ struct SlotCardView: View {
         .overlay(alignment: .topTrailing) {
             if isLastPasted {
                 lastPasteBadge
-                    .padding(6)
+                    .padding(.top, 6)
+                    .padding(.trailing, 42)
                     .transition(.opacity.combined(with: .scale(scale: 0.85)))
                     .allowsHitTesting(false)
             }
@@ -298,15 +306,12 @@ struct SlotCardView: View {
 
     private var headerRow: some View {
         HStack(spacing: 10) {
-            ZStack {
-                Circle()
-                    .fill(AppTheme.slotBadgeBackground(colorScheme, isEmpty: content.isEmpty))
-                    .frame(width: 30, height: 30)
-
-                Text("\(slot)")
-                    .font(.system(size: 14, weight: .bold, design: .rounded))
-                    .foregroundColor(content.isEmpty ? .secondary : AppTheme.onAccentText)
-            }
+            Text("\(slot)")
+                .font(.system(size: 26, weight: .black, design: .rounded))
+                .foregroundColor(slotAccent)
+                .monospacedDigit()
+                .frame(minWidth: 34, alignment: .leading)
+                .accessibilityLabel("槽位 \(slot)")
 
             // v2.7.9: Connection indicator with capsule badge
             if let dotColor = connectionDotColor {
@@ -365,6 +370,8 @@ struct SlotCardView: View {
                     .font(.caption2)
                     .foregroundColor(.secondary)
             }
+
+            moreActionsMenu
         }
         // v2.9.18: header 顶部留出呼吸空间，数字气泡不再紧贴卡片大圆角上沿（截图问题①）。
         .padding(.top, AppTheme.spacingTight)
@@ -413,88 +420,114 @@ struct SlotCardView: View {
     private var actionRow: some View {
         VStack(spacing: 6) {
             if !content.isEmpty {
-                HStack(spacing: 6) {
-                    Button { onPaste() } label: {
-                        Label("粘贴", systemImage: "arrow.up.doc.fill")
+                HStack(spacing: 8) {
+                    Button(action: beginEditing) {
+                        Label(editActionTitle, systemImage: "pencil")
                             .frame(maxWidth: .infinity)
                     }
-                    .buttonStyle(.borderedProminent)
-                    .controlSize(.small)
-                    .help(pasteShortcut.isEmpty ? "粘贴到目标应用" : pasteShortcut)
-
-                    Button { onCopy() } label: {
-                        Label("复制", systemImage: "doc.on.doc")
-                            .frame(maxWidth: .infinity)
-                    }
-                    .buttonStyle(.bordered)
-                    .controlSize(.small)
-                    .help("复制到剪贴板")
-                }
-
-                HStack(spacing: 6) {
-                    if content.isHTMLContent {
-                        Button {
-                            editingText = content.htmlEditableValue
-                            showingHTMLEditor = true
-                        } label: {
-                            Label("编辑HTML", systemImage: "chevron.left.forwardslash.chevron.right")
-                                .frame(maxWidth: .infinity)
-                        }
-                        .buttonStyle(.bordered)
-                        .controlSize(.small)
-                        .help("编辑 HTML 原文")
-                        // v2.10.54: 回退 v2.10.48 的 inline Popover → Sheet。
-                        .sheet(isPresented: $showingHTMLEditor) {
-                            htmlEditorSheet
-                        }
-                    } else if content.isPlainEditableText {
-                        Button {
-                            editingText = content.editableTextValue
-                            showingTextEditor = true
-                        } label: {
-                            Label("编辑", systemImage: "pencil")
-                                .frame(maxWidth: .infinity)
-                        }
-                        .buttonStyle(.bordered)
-                        .controlSize(.small)
-                        .help("直接编辑此文本槽位")
-                        // v2.10.54: 回退 v2.10.48 的 inline Popover → Sheet。
-                        .sheet(isPresented: $showingTextEditor) {
-                            textEditorSheet
-                        }
-                    }
-
-                    Button { onSave() } label: {
-                        Label("覆盖", systemImage: "arrow.triangle.2.circlepath")
-                            .frame(maxWidth: .infinity)
-                    }
-                    .buttonStyle(.bordered)
-                    .controlSize(.small)
-                    .tint(AppTheme.warning)
-                    .help(saveShortcut.isEmpty ? "用当前剪贴板覆盖此槽位" : saveShortcut)
+                    .buttonStyle(SlotActionButtonStyle(kind: .accent(AppTheme.slotActionAccent(slot, scheme: colorScheme))))
+                    .disabled(!canEditContent)
+                    .help(editActionHelp)
+                    .frame(maxWidth: .infinity)
 
                     Button(role: .destructive) { onClear() } label: {
                         Label("清空", systemImage: "trash")
                             .frame(maxWidth: .infinity)
                     }
-                    .buttonStyle(.bordered)
-                    .controlSize(.small)
-                    .help("清空槽位内容")
+                    .buttonStyle(SlotActionButtonStyle(kind: .destructive))
+                    .help("清空槽位内容（需要确认）")
+                    .frame(maxWidth: .infinity)
                 }
             } else {
                 Button { onSave() } label: {
                     Label("保存到槽位 \(slot)", systemImage: "square.and.arrow.down")
                         .frame(maxWidth: .infinity)
                 }
-                .buttonStyle(.bordered)
-                .controlSize(.small)
+                .buttonStyle(SlotActionButtonStyle(kind: .accent(AppTheme.slotActionAccent(slot, scheme: colorScheme))))
                 .help(saveShortcut.isEmpty ? "保存当前剪贴板内容到槽位 \(slot)" : saveShortcut)
 
                 Color.clear
             }
         }
-        // v2.9.22: 按钮区高度 66 → 52，控件改 .small，让有内容卡片按钮区更紧凑。
         .frame(height: 52)
+        .sheet(isPresented: $showingHTMLEditor) { htmlEditorSheet }
+        .sheet(isPresented: $showingTextEditor) { textEditorSheet }
+    }
+
+    private var canEditContent: Bool {
+        (content.isHTMLContent && onEditHTML != nil) || (content.isPlainEditableText && onEditText != nil)
+    }
+
+    private var editActionTitle: String {
+        canEditContent ? "编辑" : "不可编辑"
+    }
+
+    private var editActionHelp: String {
+        if content.isHTMLContent && onEditHTML != nil { return "编辑 HTML 原文" }
+        if content.isPlainEditableText && onEditText != nil { return "直接编辑此文本槽位" }
+        return "此内容类型不支持直接编辑"
+    }
+
+    private func beginEditing() {
+        if content.isHTMLContent, onEditHTML != nil {
+            editingText = content.htmlEditableValue
+            showingHTMLEditor = true
+        } else if content.isPlainEditableText, onEditText != nil {
+            editingText = content.editableTextValue
+            showingTextEditor = true
+        }
+    }
+
+    private var moreActionsMenu: some View {
+        Menu {
+            if content.isEmpty {
+                Button { onSave() } label: {
+                    Label(saveShortcut.isEmpty ? "保存到槽位" : "保存到槽位（\(saveShortcut)）", systemImage: "square.and.arrow.down")
+                }
+            } else {
+                Button { onPaste() } label: {
+                    Label(pasteShortcut.isEmpty ? "粘贴" : "粘贴（\(pasteShortcut)）", systemImage: "arrow.up.doc.fill")
+                }
+                Button { onCopy() } label: {
+                    Label("复制", systemImage: "doc.on.doc")
+                }
+
+                Divider()
+
+                if content.isPlainEditableText, onEditText != nil {
+                    Button(action: beginEditing) { Label("编辑文本", systemImage: "pencil") }
+                }
+                if content.isHTMLContent, onEditHTML != nil {
+                    Button(action: beginEditing) { Label("编辑 HTML", systemImage: "chevron.left.forwardslash.chevron.right") }
+                }
+                Button { onSave() } label: {
+                    Label(saveShortcut.isEmpty ? "覆盖" : "覆盖（\(saveShortcut)）", systemImage: "arrow.triangle.2.circlepath")
+                }
+
+                if let onClearBody, !content.items.isEmpty || content.htmlSource != nil {
+                    Button(role: .destructive, action: onClearBody) {
+                        Label("删除主体内容（保留附件）", systemImage: "doc.badge.minus")
+                    }
+                }
+
+                typeSpecificMenuItems
+
+                Divider()
+                Button(role: .destructive) { onClear() } label: {
+                    Label("清空槽位…", systemImage: "trash")
+                }
+            }
+        } label: {
+            Image(systemName: "ellipsis")
+                .font(.system(size: 14, weight: .semibold))
+                .frame(width: 28, height: 28)
+                .contentShape(Rectangle())
+        }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .help("更多操作")
+        .accessibilityLabel("槽位 \(slot) 更多操作")
     }
 
     private func commitLabel() {
@@ -627,6 +660,103 @@ struct SlotCardView: View {
     }
 }
 
+// MARK: - Slot card action buttons
+
+/// A compact rounded-rectangle style used by the card's primary actions.
+/// It intentionally avoids the system bordered styles so a slot keeps its own identity.
+private struct SlotActionButtonStyle: ButtonStyle {
+    enum Kind {
+        case accent(Color)
+        case destructive
+    }
+
+    let kind: Kind
+
+    func makeBody(configuration: Configuration) -> some View {
+        SlotActionButtonBody(configuration: configuration, kind: kind)
+    }
+}
+
+private struct SlotActionButtonBody: View {
+    let configuration: ButtonStyle.Configuration
+    let kind: SlotActionButtonStyle.Kind
+
+    @Environment(\.isEnabled) private var isEnabled
+    @Environment(\.colorScheme) private var colorScheme
+    @State private var isHovering = false
+
+    private var isDangerActive: Bool {
+        if case .destructive = kind { return isHovering || configuration.isPressed }
+        return false
+    }
+
+    private var backgroundColor: Color {
+        guard isEnabled else {
+            return colorScheme == .dark ? Color.white.opacity(0.13) : Color.black.opacity(0.10)
+        }
+        switch kind {
+        case .accent(let color):
+            return color
+        case .destructive:
+            if isDangerActive {
+                return colorScheme == .dark ? AppTheme.danger : AppTheme.danger.opacity(0.14)
+            }
+            return colorScheme == .dark
+                ? Color(red: 0.20, green: 0.21, blue: 0.23)
+                : Color.black.opacity(0.075)
+        }
+    }
+
+    private var foregroundColor: Color {
+        guard isEnabled else { return .secondary }
+        switch kind {
+        case .accent:
+            // Both themes use dark ink to preserve contrast over the vivid slot colors.
+            return colorScheme == .dark ? Color.black.opacity(0.82) : Color.black.opacity(0.72)
+        case .destructive:
+            if colorScheme == .dark { return AppTheme.onAccentText }
+            return isDangerActive ? AppTheme.danger : Color.black.opacity(0.68)
+        }
+    }
+
+    private var backgroundBrightness: Double {
+        guard colorScheme == .light, isHovering else { return 0 }
+        if case .accent = kind { return -0.04 }
+        return 0
+    }
+
+    var body: some View {
+        configuration.label
+            .font(.system(size: 12, weight: .bold, design: .rounded))
+            .labelStyle(.titleAndIcon)
+            .foregroundStyle(foregroundColor)
+            .padding(.horizontal, 12)
+            .frame(maxWidth: .infinity, minHeight: 36, maxHeight: 36)
+            .background(
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .fill(backgroundColor)
+                    .brightness(backgroundBrightness)
+                    .overlay(alignment: .top) {
+                        RoundedRectangle(cornerRadius: 10, style: .continuous)
+                            .stroke(Color.white.opacity(isEnabled ? 0.16 : 0.06), lineWidth: 1)
+                            .allowsHitTesting(false)
+                    }
+                    .shadow(
+                        color: backgroundColor.opacity(isEnabled ? 0.22 : 0),
+                        radius: configuration.isPressed ? 1 : 4,
+                        y: configuration.isPressed ? 0 : 2
+                    )
+                    .allowsHitTesting(false)
+            )
+            .contentShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+            .opacity(isEnabled ? 1 : 0.68)
+            .scaleEffect(configuration.isPressed ? 0.975 : 1)
+            .animation(.easeOut(duration: 0.12), value: configuration.isPressed)
+            .animation(.easeOut(duration: 0.16), value: isHovering)
+            .onHover { isHovering = $0 }
+    }
+}
+
 // MARK: - v2.7.27 SlotContent Text Edit Helpers
 
 private extension SlotContent {
@@ -755,10 +885,10 @@ private struct DropImportOverlay: View {
 
     var body: some View {
         ZStack {
-            RoundedRectangle(cornerRadius: AppTheme.cornerRadius, style: .continuous)
+            RoundedRectangle(cornerRadius: AppTheme.slotCardCornerRadius, style: .continuous)
                 .fill(.ultraThinMaterial)
                 .overlay(
-                    RoundedRectangle(cornerRadius: AppTheme.cornerRadius, style: .continuous)
+                    RoundedRectangle(cornerRadius: AppTheme.slotCardCornerRadius, style: .continuous)
                         .fill(Color.accentColor.opacity(0.08))
                 )
 

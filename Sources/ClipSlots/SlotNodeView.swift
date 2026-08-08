@@ -90,6 +90,7 @@ struct NodeAttachmentButton: View {
     @ObservedObject var store: SlotStoreObservable
     @State private var showingAttachments = false
     @State private var showingClearConfirm = false
+    @State private var isHoveringAttachmentControl = false
     // v2.7.75: local mirror of the "不再提醒" toggle inside the confirm popover.
     @State private var suppressConfirmToggle = false
 
@@ -110,6 +111,10 @@ struct NodeAttachmentButton: View {
 
     private var label: String {
         attachmentCount > 0 ? "附件 \(attachmentCount)" : "附件"
+    }
+
+    private var isClearButtonVisible: Bool {
+        isHoveringAttachmentControl || showingClearConfirm
     }
 
     var body: some View {
@@ -148,11 +153,15 @@ struct NodeAttachmentButton: View {
                 .buttonStyle(.plain)
                 .help("清空该槽位全部附件")
                 .offset(x: 5, y: -6)
+                .opacity(isClearButtonVisible ? 1 : 0)
+                .allowsHitTesting(isClearButtonVisible)
+                .animation(.easeOut(duration: 0.14), value: isClearButtonVisible)
                 .popover(isPresented: $showingClearConfirm, arrowEdge: .top) {
                     clearConfirmPopover
                 }
             }
         }
+        .onHover { isHoveringAttachmentControl = $0 }
     }
 
     // v2.10.22: 再次点击切换开合；打开时用附件按钮 backing NSView 锚定 NSPopover。

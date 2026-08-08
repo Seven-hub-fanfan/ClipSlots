@@ -8,6 +8,10 @@ enum AppTheme {
     static let controlRadius: CGFloat = 8
 
     static let cardPadding: CGFloat = 14
+    /// Main-grid slot cards use a softer, editorial radius without changing other surfaces.
+    static let slotCardCornerRadius: CGFloat = 24
+    static let slotPreviewCornerRadius: CGFloat = 14
+    static let slotCardPadding: CGFloat = 18
     static let pagePadding: CGFloat = 20
 
     // MARK: - Spacing (v2.9.18 — 收敛硬编码间距到统一 token)
@@ -124,10 +128,47 @@ enum AppTheme {
 
     static func cardBackground(_ scheme: ColorScheme, isEmpty: Bool = false) -> Color {
         if scheme == .dark {
-            return Color.white.opacity(isEmpty ? 0.045 : 0.075)
+            return Color(red: 0.105, green: 0.108, blue: 0.115).opacity(isEmpty ? 0.92 : 0.98)
         } else {
-            return Color.white.opacity(isEmpty ? 0.62 : 0.92)
+            return isEmpty
+                ? Color(red: 0.965, green: 0.955, blue: 0.935)
+                : Color(red: 0.995, green: 0.99, blue: 0.98)
         }
+    }
+
+    /// A restrained, single-color identity per slot. The palette deliberately cycles
+    /// instead of blending, so each card has one clear accent.
+    static func slotAccent(_ slot: Int, scheme: ColorScheme) -> Color {
+        let darkPalette: [Color] = [
+            Color(red: 0.42, green: 0.82, blue: 0.55),
+            Color(red: 0.94, green: 0.76, blue: 0.32),
+            Color(red: 0.95, green: 0.55, blue: 0.31),
+            Color(red: 0.91, green: 0.48, blue: 0.64),
+            Color(red: 0.48, green: 0.72, blue: 0.92)
+        ]
+        let lightPalette: [Color] = [
+            Color(red: 0.12, green: 0.56, blue: 0.28),
+            Color(red: 0.72, green: 0.49, blue: 0.04),
+            Color(red: 0.78, green: 0.31, blue: 0.08),
+            Color(red: 0.72, green: 0.24, blue: 0.43),
+            Color(red: 0.16, green: 0.46, blue: 0.70)
+        ]
+        let palette = scheme == .dark ? darkPalette : lightPalette
+        return palette[max(0, slot - 1) % palette.count]
+    }
+
+    /// High-chroma light fills for card actions. These stay bright without relying on
+    /// opacity, which would mix the hue with the card background and create a muted gray cast.
+    static func slotActionAccent(_ slot: Int, scheme: ColorScheme) -> Color {
+        guard scheme == .light else { return slotAccent(slot, scheme: scheme) }
+        let palette: [Color] = [
+            Color(red: 0.56, green: 0.93, blue: 0.65),
+            Color(red: 1.00, green: 0.82, blue: 0.28),
+            Color(red: 1.00, green: 0.62, blue: 0.30),
+            Color(red: 0.98, green: 0.52, blue: 0.70),
+            Color(red: 0.45, green: 0.75, blue: 1.00)
+        ]
+        return palette[max(0, slot - 1) % palette.count]
     }
 
     static func previewBackground(_ scheme: ColorScheme) -> Color {
