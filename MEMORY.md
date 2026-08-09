@@ -4,11 +4,25 @@
 
 ## 当前版本
 
-- **当前版本：v2.10.58**
+- **当前版本：v2.10.66**
 - 平台：macOS（Swift / SwiftUI，SPM 构建，macOS 13+）
 - 单一版本号事实来源：`Info.plist` 的 `CFBundleShortVersionString`（`AppVersion.current` 动态读取，`AppVersion.fallback` 为编译期兜底）。CLI 版本号见 `Sources/ClipSlotsCLI/main.swift` 的 `CLI_VERSION`。
 
 ## 版本要点（近期）
+
+### v2.10.66 — 全量 bug 扫描修复批次（数据不变量 / 滚动回归 / 拖拽竞态 + 3 项 Low）
+- 背景：对 v2.10.65 最新代码做了一次全量 bug 扫描，本版落地其中「改动小、无争议、可直接验证」的一批；自动更新加密级完整性校验（方案 A：SHA-256）改动涉及发布流程，另起一版做。
+- **关键修复**：
+  1. **数据不变量**：`clearAllSlots` 补齐与 `set/clear/setLabel` 一致的 STG-2 护栏——组已从 index 删除时拒绝清空，杜绝 GUI/CLI 并发删组后清空/覆盖导入把已删组目录"复活"成孤儿目录。（`SpecialSlotStorage.swift`）
+  2. **回归修复（v2.10.65 引入）**：底部「上次粘贴」跳转不再滚动定位——抽出唯一 `cellIdentity(for:)`，`.id()` 与 `scrollProxy.scrollTo()` 共用同一身份。（`ContentView.swift`）
+  3. **并发崩溃**：`handleFileDrop` 多文件拖入对共享数组无锁 append 改为专用串行队列收集，消除偶发丢文件/崩溃的数据竞争。（`SlotCardView.swift`）
+- **Low**：CLI 版本号与 App 对齐（此前滞后到 2.10.58）；批量写 stop-on-error 后 `not_executed` 结果补 `group` 字段；导入进度条成功后补发满值推到 100%（`ClipSlotsCLI/main.swift`、`PackImporter.swift`）。
+- 验证：`swift build` 通过；23 项 smoke 测试全绿（`swift run ClipSlotsKitSmokeTests`）。
+- version bump：Info.plist ×2 + AppVersion.swift + CLI_VERSION 2.10.58 → 2.10.66
+- commit：`4d4dc90`（fix+bump 合并）
+- DMG SHA256：`17cc983311e131ccd23bdd5a7ebb843a9c2dca4354c1fbc7d39836a360dcfcb8`
+- Release：https://github.com/Seven-hub-fanfan/ClipSlots/releases/tag/v2.10.66
+- 备注：v2.10.59–v2.10.65 为本地打包直装、未上传 GitHub，也未在本文件逐条登记；本版是继 v2.10.58 后下一个正式发到 GitHub Release 的版本。
 
 ### v2.10.58 — .clipslotspack 改名后再导入被误判为普通文件（双重加固）
 - 背景：导入时靠文件扩展名 `.clipslotspack` 判断走「包导入」还是「普通文件写入槽位」。用户把导出的包改名（扩展名变了），导入就走错路径，把整个 ZIP 当普通文件塞进槽位。
