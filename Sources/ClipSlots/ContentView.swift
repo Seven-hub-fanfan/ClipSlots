@@ -1,5 +1,27 @@
 import SwiftUI
 import ClipSlotsKit
+import AppKit
+
+/// v2.10.70: 监测 macOS 窗口的 live-resize（拖拽边缘缩放 / 标题栏缩放）。拖拽过程中窗口尺寸每帧变化，
+/// 整窗的环境背景（radius 50~58 的超大高斯模糊 + 多层 .screen 混合）与每张卡片的软阴影都会按新尺寸
+/// 逐帧重新离屏栅格化/重合成，是拖拽卡顿的主因。此单例把 willStartLiveResize / didEndLiveResize 通知
+/// 转成一个 @Published 开关，供背景与卡片在拖拽期间降级渲染（去模糊 / 去阴影），拖拽结束立即恢复。
+final class LiveResizeMonitor: ObservableObject {
+    static let shared = LiveResizeMonitor()
+    @Published private(set) var isResizing = false
+    private init() {
+        NotificationCenter.default.addObserver(
+            forName: NSWindow.willStartLiveResizeNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            if self?.isResizing == false { self?.isResizing = true }
+        }
+        NotificationCenter.default.addObserver(
+            forName: NSWindow.didEndLiveResizeNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            if self?.isResizing == true { self?.isResizing = false }
+        }
+    }
+}
 
 /// v2.10.9 (P2-27): 承载搜索防抖 DispatchWorkItem 的小型持有者。放在视图 @StateObject
 /// 里而不是 @State，可通过引用语义在 body 之外命令式地取消/替换，不再触发无意义的 body
@@ -34,6 +56,8 @@ struct ContentView: View {
     @ObservedObject var store: SlotStoreObservable
     // v2.10.0: 三档金属拨杆共享状态（自动存储 / 自动粘贴 / 自动切换）。
     @ObservedObject private var autoMode = AutoModeState.shared
+    // v2.10.70: 观察 live-resize 状态，拖拽缩放窗口期间把整窗环境背景降级为纯色填充。
+    @ObservedObject private var liveResize = LiveResizeMonitor.shared
     @State private var showingSettings = false
     @State private var showingSpecialSlotManagement = false
     @State private var showingHotkeyTemplatePopover = false
@@ -241,7 +265,7 @@ struct ContentView: View {
                 bottomBar
             }
             .background(
-                RetroPosterAmbientBackground()
+                RetroPosterAmbientBackground(simplified: liveResize.isResizing)
                     .ignoresSafeArea()
             )
 
@@ -2096,8 +2120,19 @@ struct SlotFramePreferenceKey: PreferenceKey {
 
 private struct RetroPosterAmbientBackground: View {
     @Environment(\.colorScheme) private var colorScheme
+    // v2.10.70: 拖拽 live-resize 期间为 true——只画纯色底，跳过 4 层超大高斯模糊 + grain + drawingGroup，
+    // 避免整窗离屏缓冲每帧按新尺寸重新栅格化造成掉帧；拖拽结束恢复完整海报背景。
+    var simplified: Bool = false
 
     var body: some View {
+        if simplified {
+            AppTheme.windowBackground(colorScheme)
+        } else {
+            fullBackground
+        }
+    }
+
+    private var fullBackground: some View {
         ZStack {
             AppTheme.windowBackground(colorScheme)
 

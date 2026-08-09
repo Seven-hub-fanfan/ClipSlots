@@ -52,6 +52,8 @@ struct SlotCardView: View {
     @State private var isDropTargeted = false
 
     @Environment(\.colorScheme) private var colorScheme
+    // v2.10.70: 拖拽 live-resize 期间去掉卡片软阴影——resize 时 N 张可见卡片的软阴影每帧重合成开销很大。
+    @ObservedObject private var liveResize = LiveResizeMonitor.shared
 
     private var slotAccent: Color {
         AppTheme.slotAccent(slot, scheme: colorScheme)
@@ -164,9 +166,9 @@ struct SlotCardView: View {
             RoundedRectangle(cornerRadius: AppTheme.slotCardCornerRadius, style: .continuous)
                 .fill(AppTheme.cardBackground(colorScheme, isEmpty: content.isEmpty))
                 .shadow(
-                    color: AppTheme.cardShadow(colorScheme, isEmpty: content.isEmpty),
-                    radius: isHovering ? 9 : (content.isEmpty ? 3 : 5),
-                    y: isHovering ? 4 : 2
+                    color: liveResize.isResizing ? .clear : AppTheme.cardShadow(colorScheme, isEmpty: content.isEmpty),
+                    radius: liveResize.isResizing ? 0 : (isHovering ? 9 : (content.isEmpty ? 3 : 5)),
+                    y: liveResize.isResizing ? 0 : (isHovering ? 4 : 2)
                 )
                 .allowsHitTesting(false)
         )
