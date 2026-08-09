@@ -16,7 +16,9 @@ import ClipSlotsKit
 // current release. This is the single source of truth surfaced by `version`,
 // `help` and per-command help (all reference CLI_VERSION), so no other literal
 // needs bumping.
-let CLI_VERSION = "2.10.58"
+// v2.10.66: keep in lockstep with the app's CFBundleShortVersionString on every
+// release — this constant had drifted (2.10.58) behind the app (2.10.65).
+let CLI_VERSION = "2.10.66"
 let DEFAULT_GROUP = "default"
 let DEFAULT_PAGE = "default_page"
 
@@ -1195,7 +1197,10 @@ func cmdWriteBatch(_ args: ParsedArgs) -> Never {
         try StorageLock.shared.withLock { () -> Void in
             for item in parsed {
                 if stopped {
-                    results.append(["index": item.index, "slot": item.slot, "ok": false, "status": "not_executed"])
+                    // v2.10.66: include `group` for parity with the written / failed result
+                    // shapes below (all other batch result entries carry it). Consumers that
+                    // key off `group` no longer see it missing on not_executed items.
+                    results.append(["index": item.index, "slot": item.slot, "group": item.group, "ok": false, "status": "not_executed"])
                     notExecuted += 1
                     continue
                 }

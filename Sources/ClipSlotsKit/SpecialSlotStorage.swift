@@ -1498,6 +1498,17 @@ public final class SpecialSlotStorage {
     public func clearAllSlots(in specialSlotId: String) throws {
         // P2-4 (v2.10.9): content wipe + index touch in ONE withLock (see clear()).
         try storageLock.withLock {
+            // STG-2 (v2.10.66): mirror the guard already present in set()/clear()/setLabel().
+            // clearAllSlots was the sole destructive entry lacking it. A caller (e.g. overwrite
+            // import / "clear whole group") holding a groupId that was concurrently deleted by
+            // another process (CLI delete-group) would otherwise fall through to
+            // slotStorage(for:).clearAll(), whose non-invalidated instance recreates
+            // special_slots/<deletedId>/ as an orphan/phantom directory not referenced by any
+            // index — the exact "phantom group revival" the STG-2 invariant forbids. Reject it.
+            guard loadIndex().specialSlots.contains(where: { $0.id == specialSlotId }) else {
+                NSLog("[ClipSlots] STG-2: refusing clearAllSlots() on group '\(specialSlotId)' not present in index (deleted/ghost); skipped")
+                return
+            }
             // PK-1 (v2.10.30): overwrite-import and "clear whole group" previously routed
             // straight to SlotStorage.clearAll(), which physically removes the group's slot
             // directory with NO .trash backup — an unrecoverable data loss (e.g. importing a

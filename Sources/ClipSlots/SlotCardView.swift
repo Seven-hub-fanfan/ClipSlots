@@ -636,25 +636,38 @@ struct SlotCardView: View {
 
     private func handleFileDrop(_ providers: [NSItemProvider]) -> Bool {
         guard let onDropFiles else { return false }
+        // v2.10.66: `loadItem` 的 completion 在任意（并发）队列回调，旧实现对共享 `var urls`
+        // 无锁 append——多文件同时拖入时，数组扩容 / copy-on-write 与 retain/release 在多线程下
+        // 竞争，会偶发丢文件甚至崩溃。改用专用串行队列串行化所有 append，并在主线程 notify 中
+        // 同样经该队列读取以保证内存可见性。
         var urls: [URL] = []
+        let collectQueue = DispatchQueue(label: "com.clipslots.filedrop.collect")
         let group = DispatchGroup()
 
         for provider in providers {
             group.enter()
             provider.loadItem(forTypeIdentifier: UTType.fileURL.identifier, options: nil) { item, _ in
                 defer { group.leave() }
+                let resolved: URL?
                 if let data = item as? Data,
                    let string = String(data: data, encoding: .utf8),
                    let url = URL(string: string) {
-                    urls.append(url)
+                    resolved = url
                 } else if let url = item as? URL {
-                    urls.append(url)
+                    resolved = url
+                } else {
+                    resolved = nil
+                }
+                if let resolved {
+                    collectQueue.sync { urls.append(resolved) }
                 }
             }
         }
 
         group.notify(queue: .main) {
-            if !urls.isEmpty { onDropFiles(urls) }
+            collectQueue.sync {
+                if !urls.isEmpty { onDropFiles(urls) }
+            }
         }
         return true
     }

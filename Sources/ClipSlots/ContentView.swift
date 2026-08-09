@@ -119,6 +119,16 @@ struct ContentView: View {
         withAnimation(.easeInOut(duration: 0.2)) { showingSettings = false }
     }
 
+    // v2.10.66: 单元格 SwiftUI 身份的唯一事实来源。`.id(...)` 与 `scrollProxy.scrollTo(...)`
+    // 必须使用完全一致的值——v2.10.65 把「内容版本」(contentId + updatedAt) 编进 .id 时，
+    // 底部「上次粘贴」跳转仍按裸 slot(Int) 调 scrollTo，身份不匹配导致 ScrollViewReader
+    // 找不到目标、静默不滚动。抽成同一函数供两处复用，杜绝再次跑偏。
+    private func cellIdentity(for slot: Int) -> String {
+        let versionKey = store.slots[slot].map { "\($0.contentId)|\($0.updatedAt)" } ?? "empty"
+        return "\(store.currentPageId)|\(store.currentSpecialSlotId)|\(slot)|\(versionKey)|"
+            + (store.slotRenderTokens["\(store.currentSpecialSlotId)::\(slot)"]?.uuidString ?? "stable")
+    }
+
     var body: some View {
         ZStack(alignment: .top) {
             VStack(spacing: 0) {
@@ -158,12 +168,8 @@ struct ContentView: View {
                                 // 才刷新。把内容版本编进 .id 后，提交新内容即触发整格重建（含全新 loadState），
                                 // 旧图被丢弃并按新内容重新加载，无需再手动切走切回。
                                 // 空槽 (nil) 用固定 "empty" 兜底，避免 SlotContent() 每次生成随机 contentId 导致抖动重建。
-                                let versionKey = store.slots[slot].map { "\($0.contentId)|\($0.updatedAt)" } ?? "empty"
                                 slotCardView(slot: slot)
-                                    .id(
-                                        "\(store.currentPageId)|\(store.currentSpecialSlotId)|\(slot)|\(versionKey)|"
-                                            + (store.slotRenderTokens["\(store.currentSpecialSlotId)::\(slot)"]?.uuidString ?? "stable")
-                                    )
+                                    .id(cellIdentity(for: slot))
                             }
                         }
                         .padding(AppTheme.pagePadding)
@@ -186,10 +192,13 @@ struct ContentView: View {
                     }
                     // v2.9.37: when the footer "上次粘贴" button flashes a slot, scroll it
                     // into view so the highlighted card is always visible after the jump.
+                    // v2.10.66: scroll target must use the SAME identity the cell's .id() carries
+                    // (cellIdentity), otherwise the versioned id introduced in v2.10.65 no longer
+                    // matches a bare Int slot and the scroll silently no-ops.
                     .onChange(of: store.flashHighlightSlot) { target in
                         guard let target else { return }
                         withAnimation(.easeInOut(duration: 0.3)) {
-                            scrollProxy.scrollTo(target.slot, anchor: .center)
+                            scrollProxy.scrollTo(cellIdentity(for: target.slot), anchor: .center)
                         }
                     }
                 }

@@ -303,6 +303,12 @@ struct PackImporter {
         // lazily rebuilt on next render.
         SlotContent.purgeAllInlineImageCaches()
 
+        // v2.10.66: 进度条收口。分母 totalSlots 预统计的是包内「声明」的槽位数，而 doneSlots 只累加
+        // 实际写入成功的槽位——被跳过的组（resolveGroupConflict=.skip）与元数据损坏无法加载的槽位都不计入，
+        // 因此正常成功路径下 doneSlots 常 < totalSlots，进度条永远停在 <100%。导入既已整体成功，这里补发
+        // 一次满值，把进度条明确推到 100%（total=0 的不确定态下发 (0,0) 无副作用）。
+        onProgress?(totalSlots, totalSlots, "")
+
         return result
     }
 
