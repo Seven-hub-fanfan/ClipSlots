@@ -164,8 +164,17 @@ struct ContentView: View {
         withAnimation(.easeInOut(duration: 0.2)) { showingSettings = false }
     }
 
-    // v2.10.71: 原 cellIdentity(for:) 已移除——卡片 .id 改回裸 slot(Int) 后不再需要把内容版本/组页 id
-    // 编进卡片身份（缩略图刷新由 SlotThumbnailView 内部 .id(currentKey) 独立保证）。
+    // v2.10.66: 单元格 SwiftUI 身份的唯一事实来源。`.id(...)` 与 `scrollProxy.scrollTo(...)`
+    // 必须使用完全一致的值。
+    // v2.10.72: 回滚 v2.10.71 的 .id(slot) 尝试——实测把内容版本移出卡片身份后，v2.10.65 的
+    // 「切组主体图片缩略图卡住、需切走切回才刷新」回归了：卡壳复用时 SlotThumbnailView 内部的
+    // .id(currentKey) 并不足以独立强刷（@StateObject 未按预期重建）。因此恢复：把 组/页/内容版本/
+    // renderToken 编进卡片身份，切换/写入时整格重建、缩略图随之刷新。切换卡顿的优化改走不破坏此身份的路径。
+    private func cellIdentity(for slot: Int) -> String {
+        let versionKey = store.slots[slot].map { "\($0.contentId)|\($0.updatedAt)" } ?? "empty"
+        return "\(store.currentPageId)|\(store.currentSpecialSlotId)|\(slot)|\(versionKey)|"
+            + (store.slotRenderTokens["\(store.currentSpecialSlotId)::\(slot)"]?.uuidString ?? "stable")
+    }
 
     var body: some View {
         ZStack(alignment: .top) {
@@ -203,16 +212,10 @@ struct ContentView: View {
                             spacing: 14
                         ) {
                             ForEach(Array(stride(from: 1, through: store.config.slots, by: 1)), id: \.self) { slot in
-                                // v2.10.71: 卡片身份改回稳定的 slot(Int)。此前 v2.10.65 把
-                                // (currentPageId|currentSpecialSlotId|contentId|updatedAt|renderToken) 编进卡片 .id，
-                                // 导致切页/切组时所有格子身份全变 → 10 张 SlotCardView 在主线程同步销毁重建，
-                                // 是切换卡顿的主因。改回 .id(slot) 后卡壳被复用（内容随值类型 prop 自然流转），消除该 hitch。
-                                // 缩略图刷新不受影响：SlotThumbnailView 内部已用
-                                // .id(currentKey = specialSlotId::slot::contentId::updatedAt) 独立强刷其 @StateObject，
-                                // 故 v2.10.65 修的「切组主体图片缩略图卡住」由缩略图自身身份守住，不会回归；
-                                // 稳定卡片身份同时保住 v2.10.28 的附件 popover 锚点（.id 变动会扯掉锚点 NSView）。
+                                // v2.10.72: 恢复内容版本编入卡片身份（回滚 v2.10.71）——保证切组/切页/写入后
+                                // 主体图片缩略图正确刷新，不再出现「切走切回才刷新」的回归。
                                 slotCardView(slot: slot)
-                                    .id(slot)
+                                    .id(cellIdentity(for: slot))
                             }
                         }
                         .padding(AppTheme.pagePadding)
@@ -236,11 +239,11 @@ struct ContentView: View {
                     }
                     // v2.9.37: when the footer "上次粘贴" button flashes a slot, scroll it
                     // into view so the highlighted card is always visible after the jump.
-                    // v2.10.71: 卡片 .id 已改回裸 slot(Int)，scrollTo 目标同步改回 slot 以保持一致。
+                    // v2.10.72: 卡片 .id 已恢复为 cellIdentity，scrollTo 目标同步用 cellIdentity 保持一致。
                     .onChange(of: store.flashHighlightSlot) { target in
                         guard let target else { return }
                         withAnimation(.easeInOut(duration: 0.3)) {
-                            scrollProxy.scrollTo(target.slot, anchor: .center)
+                            scrollProxy.scrollTo(cellIdentity(for: target.slot), anchor: .center)
                         }
                     }
                     // v2.10.69: 网格宽度量化——仅当容器宽度相对上次缓存变化 ≥ 8pt（或首次）时，
