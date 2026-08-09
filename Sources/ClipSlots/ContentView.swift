@@ -14,14 +14,18 @@ final class SearchDebounceHolder: ObservableObject {
 }
 
 struct ContentView: View {
-    private static let gridColumns: [Int: [GridItem]] = Dictionary(
-        uniqueKeysWithValues: (1...10).map { count in
-            (count, Array(
-                repeating: GridItem(.flexible(minimum: 240, maximum: 300), spacing: 14),
-                count: count
-            ))
-        }
-    )
+    // v2.10.69: 网格列由「量化后的容器宽度」推导为 .fixed 列宽（原来是 .flexible + 逐像素弹性解算）。
+    // 拖拽实时缩放窗口时，弹性列会在每一像素都重解算列宽并重排全部可见卡片，造成明显卡顿；
+    // 改为固定列宽后，卡片尺寸在两个宽度台阶之间保持不变，无需逐帧重排。列宽由此工具方法计算，
+    // 结果缓存进 @State（gridColumnsState），保证台阶之间数组身份稳定、不触发 LazyVGrid 重新布局。
+    static let gridColumnSpacing: CGFloat = 14
+    private static func makeGridColumns(for totalWidth: CGFloat) -> [GridItem] {
+        let spacing = gridColumnSpacing
+        let availableWidth = max(0, totalWidth - AppTheme.pagePadding * 2)
+        let columnCount = max(1, Int((availableWidth + spacing) / 254))
+        let columnWidth = max(1, (availableWidth - spacing * CGFloat(columnCount - 1)) / CGFloat(columnCount))
+        return Array(repeating: GridItem(.fixed(columnWidth), spacing: spacing), count: columnCount)
+    }
 
     // P2-31 (v2.10.9): 已确认 store 的所有权正确——真正的持有者是 @main `ClipSlotsApp`
     // 里的 `@StateObject private var store = SlotStoreObservable()`（main.swift），并以
@@ -38,6 +42,10 @@ struct ContentView: View {
     @State private var showingPageSelector = false
     @State private var expandedPageId: String?
     @State private var isPageMultiSelecting = false
+    // v2.10.69: 量化后的网格容器宽度 + 缓存的列数组。拖拽 resize 时仅当宽度跨过 8pt 台阶才更新，
+    // 其余帧沿用同一 [GridItem] 实例（身份稳定），避免逐像素重排。
+    @State private var quantizedGridWidth: CGFloat = 0
+    @State private var gridColumnsState: [GridItem] = []
     @State private var selectedPageIds: Set<String> = []
     // v2.9.8: update checker.
     @ObservedObject private var updateChecker = UpdateChecker.shared
@@ -160,9 +168,10 @@ struct ContentView: View {
                 }
 
                 GeometryReader { gridGeometry in
-                    let availableWidth = max(0, gridGeometry.size.width - AppTheme.pagePadding * 2)
-                    let columnCount = max(1, Int((availableWidth + 14) / 254))
-                    let columns = Self.gridColumns[columnCount] ?? Self.gridColumns[1]!
+                    let rawWidth = gridGeometry.size.width
+                    // v2.10.69: 首帧（state 尚空）用当前宽度直接算一份兜底；之后一律读 @State 缓存的
+                    // 列数组，保证拖拽 resize 台阶之间数组身份稳定，不触发 LazyVGrid 逐帧重排。
+                    let columns = gridColumnsState.isEmpty ? Self.makeGridColumns(for: rawWidth) : gridColumnsState
 
                     ScrollViewReader { scrollProxy in
                         ScrollView {
@@ -215,6 +224,15 @@ struct ContentView: View {
                         guard let target else { return }
                         withAnimation(.easeInOut(duration: 0.3)) {
                             scrollProxy.scrollTo(cellIdentity(for: target.slot), anchor: .center)
+                        }
+                    }
+                    // v2.10.69: 网格宽度量化——仅当容器宽度相对上次缓存变化 ≥ 8pt（或首次）时，
+                    // 才重算并提交固定列宽到 @State。这样把拖拽 resize 的「逐像素重排」降为「每 8pt 一次」，
+                    // 其余帧沿用同一 [GridItem] 实例，卡片尺寸固定、不再逐帧重解算布局。
+                    .onChange(of: rawWidth) { newWidth in
+                        if quantizedGridWidth == 0 || abs(newWidth - quantizedGridWidth) >= 8 {
+                            quantizedGridWidth = newWidth
+                            gridColumnsState = Self.makeGridColumns(for: newWidth)
                         }
                     }
                 }
