@@ -18,9 +18,11 @@
   3. **requireChecksum 常量（默认 `false`）**：为未来「强制模式」预留——为 `true` 且拿不到期望哈希时直接拒绝更新；默认 `false` 即上面的宽松策略。size 校验保留为第一道，哈希为更强的第二道。
 - 改动文件：`Sources/ClipSlots/UpdateChecker.swift`、`Sources/ClipSlots/UpdateDownloader.swift`、`Sources/ClipSlots/AppVersion.swift`、`Sources/ClipSlotsCLI/main.swift`、`Info.plist`、`MEMORY.md`。
 - version bump：Info.plist ×2 + AppVersion.swift + CLI_VERSION 2.10.66 → 2.10.67
-- commit：`a788f39`（feat+bump 合并）
+- commit：`a412af7`（feat+bump 合并），已推到默认分支 `main`（a8c6244 → a412af7，fast-forward，与 Release 对齐）
 - 验证：`swift build` 通过（无新增警告）；23 项 smoke 测试全绿（`swift run ClipSlotsKitSmokeTests`：通过 23，失败 0）。
-- 备注：本版仅本地实现 + 编译 + smoke，未打包 DMG、未上传 GitHub Release；强制模式（requireChecksum=true）待线上所有 release 均带 digest / 正文哈希后再开启。
+- **已发布**：GitHub Release https://github.com/Seven-hub-fanfan/ClipSlots/releases/tag/v2.10.67（asset `ClipSlots_v2.10.67.dmg`，state=uploaded，GitHub 原生 `digest=sha256:7e1c24e5185dac444ca74b65218815ab3e78d12ebd8ba434c63f532a0257ae99`，即本版校验首选来源）；`repos/.../releases/latest` 已返回 tag=v2.10.67。
+- **本机已装**：`/Applications/ClipSlots.app` 与 `/usr/local/bin/clipslots` 均为 2.10.67（旧 2.10.66 已替换，App 已重启）。DMG：`build/ClipSlots_v2.10.67.dmg`，SHA256=`7e1c24e5185dac444ca74b65218815ab3e78d12ebd8ba434c63f532a0257ae99`。
+- 备注：强制模式（requireChecksum=true）待线上所有 release 均带 digest / 正文哈希后再开启。
 
 ### v2.10.66 — 全量 bug 扫描修复批次（数据不变量 / 滚动回归 / 拖拽竞态 + 3 项 Low）
 - 背景：对 v2.10.65 最新代码做了一次全量 bug 扫描，本版落地其中「改动小、无争议、可直接验证」的一批；自动更新加密级完整性校验（方案 A：SHA-256）改动涉及发布流程，另起一版做。
