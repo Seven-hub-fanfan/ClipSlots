@@ -4,11 +4,26 @@
 
 ## 当前版本
 
-- **当前版本：v2.10.67**
+- **当前版本：v2.10.68**
 - 平台：macOS（Swift / SwiftUI，SPM 构建，macOS 13+）
 - 单一版本号事实来源：`Info.plist` 的 `CFBundleShortVersionString`（`AppVersion.current` 动态读取，`AppVersion.fallback` 为编译期兜底）。CLI 版本号见 `Sources/ClipSlotsCLI/main.swift` 的 `CLI_VERSION`。
 
 ## 版本要点（近期）
+
+### v2.10.68 — 界面体验优化 + 滚动/缩放性能改善
+- 背景：集中打磨主界面 UI、导航与交互，并针对网格滚动、窗口实时缩放的流畅度做优化。
+- 主要改动：
+  - 优化页面与槽位组导航：支持展开/收起、多选及批量操作。
+  - 优化设置界面、顶部搜索区（`SlotSearchBar`）与插件市场图标（`PluginsView`）。
+  - 修复槽位卡片 hover 重复描边与文字预览对齐。
+  - 缓存文本预览解码与 HTML 清洗结果，改善网格滚动性能。
+  - 稳定 `LazyVGrid` 列配置，改善窗口实时缩放流畅度；收敛动画事务与视频预览启动时机。
+- 改动文件：`ContentView.swift`(±590)、`SlotSearchBar.swift`、`SettingsView.swift`、`PluginsView.swift`、`SlotCardView.swift`、`SlotThumbnailView.swift`、`VideoPreviewView.swift`、`ToggleLeverView.swift`、`main.swift`、`ClipboardManager.swift`(+34)、`Info.plist`、`AppVersion.swift`、`CLI_VERSION`（共 13 文件，+761/-438）。
+- version bump：Info.plist ×2 + AppVersion.swift + CLI_VERSION 2.10.67 → 2.10.68
+- commit：`ca5499b`，已推到默认分支 `main`。
+- **已发布**：GitHub Release https://github.com/Seven-hub-fanfan/ClipSlots/releases/tag/v2.10.68（asset `ClipSlots_v2.10.68.dmg`，state=uploaded，原生 `digest=sha256:b2afbd1413aad3c94d1d1331844a1fde44a5283ae0c864eba343c28af5d8ebb4`，与本地打包 DMG 实算哈希、正文 SHA-256 三者一致）；`releases/latest` 已返回 tag=v2.10.68。
+- **本机已装**：`/Applications/ClipSlots.app` = 2.10.68。DMG：`build/ClipSlots_v2.10.68.dmg`，SHA256=`b2afbd1413aad3c94d1d1331844a1fde44a5283ae0c864eba343c28af5d8ebb4`。
+- 遗留：拖动放大窗口时仍有缩放卡顿/不流畅，v2.10.69 继续优化。
 
 ### v2.10.67 — 自动更新 SHA-256 完整性校验（方案 A：优先 GitHub asset digest，回退 release body）
 - 背景：此前自动更新链路只做「落盘字节数 == asset size」的弱校验（v2.10.9），无法防篡改/中间人替换。GitHub 已原生给该仓库 release 资产返回 `"digest": "sha256:<64位hex>"`，无需改发布流程即可拿到期望哈希，故本版落地加密级完整性校验（方案 A：SHA-256）。
