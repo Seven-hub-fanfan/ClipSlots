@@ -164,15 +164,8 @@ struct ContentView: View {
         withAnimation(.easeInOut(duration: 0.2)) { showingSettings = false }
     }
 
-    // v2.10.66: 单元格 SwiftUI 身份的唯一事实来源。`.id(...)` 与 `scrollProxy.scrollTo(...)`
-    // 必须使用完全一致的值——v2.10.65 把「内容版本」(contentId + updatedAt) 编进 .id 时，
-    // 底部「上次粘贴」跳转仍按裸 slot(Int) 调 scrollTo，身份不匹配导致 ScrollViewReader
-    // 找不到目标、静默不滚动。抽成同一函数供两处复用，杜绝再次跑偏。
-    private func cellIdentity(for slot: Int) -> String {
-        let versionKey = store.slots[slot].map { "\($0.contentId)|\($0.updatedAt)" } ?? "empty"
-        return "\(store.currentPageId)|\(store.currentSpecialSlotId)|\(slot)|\(versionKey)|"
-            + (store.slotRenderTokens["\(store.currentSpecialSlotId)::\(slot)"]?.uuidString ?? "stable")
-    }
+    // v2.10.71: 原 cellIdentity(for:) 已移除——卡片 .id 改回裸 slot(Int) 后不再需要把内容版本/组页 id
+    // 编进卡片身份（缩略图刷新由 SlotThumbnailView 内部 .id(currentKey) 独立保证）。
 
     var body: some View {
         ZStack(alignment: .top) {
@@ -210,15 +203,16 @@ struct ContentView: View {
                             spacing: 14
                         ) {
                             ForEach(Array(stride(from: 1, through: store.config.slots, by: 1)), id: \.self) { slot in
-                                // v2.10.65: 把「内容版本」(contentId + updatedAt) 也编进单元格身份。
-                                // 切组时 slots 不清空（v2.10.47 为丝滑保留旧内容），新组单元格会先渲染上一组内容；
-                                // 若身份里不含内容版本，异步读盘提交新内容后单元格 .id 不变，SlotThumbnailView 的
-                                // @StateObject（持有已解码的旧组 NSImage）不会重建 → 旧缩略图卡住，必须切走再切回
-                                // 才刷新。把内容版本编进 .id 后，提交新内容即触发整格重建（含全新 loadState），
-                                // 旧图被丢弃并按新内容重新加载，无需再手动切走切回。
-                                // 空槽 (nil) 用固定 "empty" 兜底，避免 SlotContent() 每次生成随机 contentId 导致抖动重建。
+                                // v2.10.71: 卡片身份改回稳定的 slot(Int)。此前 v2.10.65 把
+                                // (currentPageId|currentSpecialSlotId|contentId|updatedAt|renderToken) 编进卡片 .id，
+                                // 导致切页/切组时所有格子身份全变 → 10 张 SlotCardView 在主线程同步销毁重建，
+                                // 是切换卡顿的主因。改回 .id(slot) 后卡壳被复用（内容随值类型 prop 自然流转），消除该 hitch。
+                                // 缩略图刷新不受影响：SlotThumbnailView 内部已用
+                                // .id(currentKey = specialSlotId::slot::contentId::updatedAt) 独立强刷其 @StateObject，
+                                // 故 v2.10.65 修的「切组主体图片缩略图卡住」由缩略图自身身份守住，不会回归；
+                                // 稳定卡片身份同时保住 v2.10.28 的附件 popover 锚点（.id 变动会扯掉锚点 NSView）。
                                 slotCardView(slot: slot)
-                                    .id(cellIdentity(for: slot))
+                                    .id(slot)
                             }
                         }
                         .padding(AppTheme.pagePadding)
@@ -226,7 +220,8 @@ struct ContentView: View {
                         // 期间禁用点击，避免在旧内容上误操作。新数据就绪后 store.isSwitchingGroup 归 false，
                         // 内容整体淡入还原（配合 loadSlotsAsync 里的 0.16s 动画）。
                         .opacity(store.isSwitchingGroup ? 0.35 : 1)
-                        .blur(radius: store.isSwitchingGroup ? 2 : 0)
+                        // v2.10.71: 去掉切换期的全网格 .blur(2)——对含 10 张复杂卡片的容器做实时高斯模糊是
+                        // 昂贵的离屏渲染，与切换重建叠加加剧掉帧；仅保留淡化 + GroupSwitchVeil 微光已足够表达「切换中」。
                         .allowsHitTesting(!store.isSwitchingGroup)
                         .animation(.easeInOut(duration: 0.16), value: store.isSwitchingGroup)
                     }
@@ -241,13 +236,11 @@ struct ContentView: View {
                     }
                     // v2.9.37: when the footer "上次粘贴" button flashes a slot, scroll it
                     // into view so the highlighted card is always visible after the jump.
-                    // v2.10.66: scroll target must use the SAME identity the cell's .id() carries
-                    // (cellIdentity), otherwise the versioned id introduced in v2.10.65 no longer
-                    // matches a bare Int slot and the scroll silently no-ops.
+                    // v2.10.71: 卡片 .id 已改回裸 slot(Int)，scrollTo 目标同步改回 slot 以保持一致。
                     .onChange(of: store.flashHighlightSlot) { target in
                         guard let target else { return }
                         withAnimation(.easeInOut(duration: 0.3)) {
-                            scrollProxy.scrollTo(cellIdentity(for: target.slot), anchor: .center)
+                            scrollProxy.scrollTo(target.slot, anchor: .center)
                         }
                     }
                     // v2.10.69: 网格宽度量化——仅当容器宽度相对上次缓存变化 ≥ 8pt（或首次）时，
