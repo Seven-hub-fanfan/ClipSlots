@@ -152,7 +152,10 @@ struct ContentView: View {
                         ) {
                             ForEach(Array(stride(from: 1, through: store.config.slots, by: 1)), id: \.self) { slot in
                                 slotCardView(slot: slot)
-                                    .id(slot)
+                                    .id(
+                                        "\(store.currentPageId)|\(store.currentSpecialSlotId)|\(slot)|"
+                                            + (store.slotRenderTokens["\(store.currentSpecialSlotId)::\(slot)"]?.uuidString ?? "stable")
+                                    )
                             }
                         }
                         .padding(AppTheme.pagePadding)

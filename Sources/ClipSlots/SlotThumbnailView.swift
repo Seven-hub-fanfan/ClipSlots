@@ -9,6 +9,30 @@ enum ThumbnailState {
     case failed
 }
 
+@MainActor
+private final class ThumbnailLoadState: ObservableObject {
+    @Published var state: ThumbnailState = .idle
+
+    private var key = ""
+    private var token = UUID()
+
+    func begin(key: String) -> UUID {
+        self.key = key
+        token = UUID()
+        state = .idle
+        return token
+    }
+
+    func update(_ state: ThumbnailState, key: String, token: UUID) {
+        guard self.key == key, self.token == token else { return }
+        self.state = state
+    }
+
+    func isCurrent(key: String, token: UUID) -> Bool {
+        self.key == key && self.token == token
+    }
+}
+
 // v2.9.25 hotfix6: 测量文本块实际渲染高度的 PreferenceKey（方案C动态版）。
 private struct TextHeightKey: PreferenceKey {
     static var defaultValue: CGFloat = 0
@@ -22,8 +46,7 @@ struct SlotThumbnailView: View {
     let specialSlotId: String
     let slot: Int
 
-    @State private var state: ThumbnailState = .idle
-    @State private var loadToken = UUID()
+    @StateObject private var loadState = ThumbnailLoadState()
     // v2.9.25 hotfix6: 记录文本块实际渲染高度，用于动态判断居中/靠上（方案C动态版）。
     @State private var textPreviewHeight: CGFloat = 0
 
@@ -39,7 +62,7 @@ struct SlotThumbnailView: View {
             RoundedRectangle(cornerRadius: AppTheme.smallCornerRadius, style: .continuous)
                 .fill(Color.primary.opacity(0.04))
 
-            switch state {
+            switch loadState.state {
             case .idle:
                 idleView
             case .loading:
@@ -70,9 +93,6 @@ struct SlotThumbnailView: View {
         .id(currentKey)
         .onAppear { reloadThumbnail() }
         .onChange(of: currentKey) { _ in
-            // Force-reset @State when the content identity changes (overwrite,
-            // special-slot switch, etc.). This is the key fix for stale thumbnails.
-            state = .idle
             reloadThumbnail()
         }
     }
@@ -169,11 +189,10 @@ struct SlotThumbnailView: View {
 
     private func reloadThumbnail() {
         let key = currentKey
-        let token = UUID()
-        loadToken = token
+        let token = loadState.begin(key: key)
 
         guard !content.isEmpty else {
-            state = .failed
+            loadState.update(.failed, key: key, token: token)
             return
         }
 
@@ -188,7 +207,7 @@ struct SlotThumbnailView: View {
         // assign if this cell still represents the same content version (guard against
         // stale callbacks from cell reuse via key + loadToken).
         if content.hasImage {
-            state = .loading
+            loadState.update(.loading, key: key, token: token)
             let snapshot = content
             Task {
                 // P0-4 (v2.10.38): gate the decode through the global ThumbnailDecodeLimiter so
@@ -208,12 +227,8 @@ struct SlotThumbnailView: View {
                 await MainActor.run {
                     // Discard if the cell was reused / content version changed while
                     // decoding, or a newer reload superseded this one.
-                    guard currentKey == key, loadToken == token else { return }
-                    if let decoded {
-                        state = .loaded(decoded)
-                    } else {
-                        state = .failed
-                    }
+                    guard loadState.isCurrent(key: key, token: token) else { return }
+                    loadState.update(decoded.map(ThumbnailState.loaded) ?? .failed, key: key, token: token)
                 }
             }
             return
@@ -223,39 +238,33 @@ struct SlotThumbnailView: View {
         // The previous condition treated .html as file content first, so the HTML branch
         // was never reached after thumbnail loading failed.
         if content.isHTMLDocument {
-            state = .failed
+            loadState.update(.failed, key: key, token: token)
             return
         }
 
         // Need a file URL for QuickLook
         guard let url = content.primaryFileURL, content.isImageFile || content.isFileContent else {
-            state = .failed
+            loadState.update(.failed, key: key, token: token)
             return
         }
 
-        state = .loading
+        loadState.update(.loading, key: key, token: token)
 
         ThumbnailProvider.shared.thumbnail(for: url, cacheKey: key) { image, returnedKey in
-            // Discard stale callbacks: if the key changed while loading
-            // (special-slot switch, overwrite, etc.), don't update state.
-            guard returnedKey == currentKey else {
-                NSLog("[ClipSlots] SlotThumbnailView discard stale callback slot=\(slot) specialSlot=\(specialSlotId) returnedKey=\(returnedKey) currentKey=\(currentKey)")
-                return
-            }
-            guard loadToken == token else { return }
-            if let image = image {
-                state = .loaded(image)
-            } else {
-                state = .failed
+            Task { @MainActor in
+                guard returnedKey == key else {
+                    NSLog("[ClipSlots] SlotThumbnailView discard stale callback slot=\(slot) specialSlot=\(specialSlotId) returnedKey=\(returnedKey) currentKey=\(key)")
+                    return
+                }
+                loadState.update(image.map(ThumbnailState.loaded) ?? .failed, key: key, token: token)
             }
         }
 
         // 3-second timeout
         DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) {
-            guard loadToken == token else { return }
-            guard currentKey == key else { return }
-            if case .loading = state {
-                state = .failed
+            guard loadState.isCurrent(key: key, token: token) else { return }
+            if case .loading = loadState.state {
+                loadState.update(.failed, key: key, token: token)
             }
         }
     }

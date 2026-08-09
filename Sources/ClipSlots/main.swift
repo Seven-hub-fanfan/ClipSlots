@@ -1061,6 +1061,7 @@ final class SlotStoreObservable: ObservableObject {
 
     func switchToPage(id: String) {
         suppressWatcher() // v2.9.4 (#2): self-write
+        beginGroupSwitchTransition()
         do {
             try specialStorage.switchToPage(id: id)
             reloadAllAsync() // P1-3 (v2.10.35): 切页读盘异步化，避免主线程逐槽 flock 卡顿
@@ -1075,6 +1076,7 @@ final class SlotStoreObservable: ObservableObject {
     // v2.4.1: Cmd+Left / Cmd+Right — cycle through slot groups in current page
     func switchToPreviousSlotGroup() {
         suppressWatcher() // v2.9.4 (#2): self-write
+        beginGroupSwitchTransition()
         do {
             try specialStorage.switchToAdjacentSpecialSlot(direction: .previous)
             reloadAllAsync() // P1-3 (v2.10.35): Cmd+Left 相邻切组读盘异步化，避免主线程逐槽 flock 卡顿
@@ -1089,6 +1091,7 @@ final class SlotStoreObservable: ObservableObject {
 
     func switchToNextSlotGroup() {
         suppressWatcher() // v2.9.4 (#2): self-write
+        beginGroupSwitchTransition()
         do {
             try specialStorage.switchToAdjacentSpecialSlot(direction: .next)
             reloadAllAsync() // P1-3 (v2.10.35): Cmd+Right 相邻切组读盘异步化，避免主线程逐槽 flock 卡顿
@@ -1431,6 +1434,7 @@ final class SlotStoreObservable: ObservableObject {
                 } else {
                     self.reloadAllAsync() // P1-3 (v2.10.35): 自动存储回调刷新走异步读盘，避免主线程逐槽 flock 卡顿
                 }
+                self.slotRenderTokens["\(capturedTarget.groupId)::\(capturedTarget.slot)"] = UUID()
                 self.recomputeAutoPreviews()
 
                 let groupName = self.specialSlots.first(where: { $0.id == capturedTarget.groupId })?.name ?? ""
@@ -1827,6 +1831,9 @@ final class SlotStoreObservable: ObservableObject {
             return
         }
         slots = snapshot.slots
+        for slot in 1...config.slots {
+            slotRenderTokens["\(currentSpecialSlotId)::\(slot)"] = UUID()
+        }
         labels = snapshot.labels
         persistCurrentSpecialSlotData()
         lastClearSnapshot = nil
@@ -1877,6 +1884,7 @@ final class SlotStoreObservable: ObservableObject {
         }
         content.attachments = existing.attachments
         slots[slot] = content
+        slotRenderTokens["\(currentSpecialSlotId)::\(slot)"] = UUID()
         persistCurrentSpecialSlotData()
         refreshTrigger = UUID()
         showFloatingNotice(FloatingNotice(title: "已保存 HTML", subtitle: "槽位 \(slot)", iconName: "doc.richtext", kind: .success))
@@ -1903,6 +1911,7 @@ final class SlotStoreObservable: ObservableObject {
         content.contentId = UUID().uuidString
         content.updatedAt = Date().timeIntervalSince1970
         slots[slot] = content
+        slotRenderTokens["\(currentSpecialSlotId)::\(slot)"] = UUID()
         persistCurrentSpecialSlotData()
         refreshTrigger = UUID()
     }
@@ -1927,6 +1936,7 @@ final class SlotStoreObservable: ObservableObject {
         }
         content.attachments = existing.attachments
         slots[slot] = content
+        slotRenderTokens["\(currentSpecialSlotId)::\(slot)"] = UUID()
         persistCurrentSpecialSlotData()
         showFloatingNotice(FloatingNotice(title: "已更新文本", subtitle: "槽位 \(slot)", iconName: "pencil.circle.fill", kind: .success))
     }
@@ -1940,6 +1950,7 @@ final class SlotStoreObservable: ObservableObject {
             // v2.7.74: preserve existing attachments when replacing slot content.
             newContent.attachments = slots[target]?.attachments ?? []
             slots[target] = newContent
+            slotRenderTokens["\(currentSpecialSlotId)::\(target)"] = UUID()
         }
         // MT-1 (v2.10.30): persistCurrentSpecialSlotData 已改为「主线程快照 + 后台写盘」，此处拖拽导入
         // 不再在主线程上逐槽同步写锁写盘。
@@ -2008,6 +2019,7 @@ final class SlotStoreObservable: ObservableObject {
             var emptySlots: [Int: SlotContent] = [:]
             for slot in 1...config.slots {
                 emptySlots[slot] = SlotContent()
+                slotRenderTokens["\(activeId)::\(slot)"] = UUID()
             }
 
             slots = emptySlots
@@ -2337,6 +2349,7 @@ final class SlotStoreObservable: ObservableObject {
         content.updatedAt = Date().timeIntervalSince1970
         if loadedSpecialSlotId == activeId {
             slots[slot] = content
+            slotRenderTokens["\(activeId)::\(slot)"] = UUID()
         }
         refreshTrigger = UUID()
         let toWrite = content
@@ -5243,6 +5256,10 @@ final class SlotStoreObservable: ObservableObject {
 
                     DispatchQueue.main.async { [weak self] in
                         guard let self = self else { return }
+                        // v2.10.60: 批量导入后更新全部受影响槽位的渲染 token，强制 UI 刷新缩略图。
+                        for i in 1...willImportFiles.count {
+                            self.slotRenderTokens["\(activeId)::\(i)"] = UUID()
+                        }
                         self.reloadAllAsync()
                         self.refreshTrigger = UUID()
                         self.suppressWatcher(2.0)
@@ -5671,6 +5688,11 @@ final class SlotStoreObservable: ObservableObject {
                 let refreshedIndex = self.specialStorage.loadIndex()
                 self.specialSlots = refreshedIndex.specialSlots
                 self.pages = refreshedIndex.pages
+
+                // v2.10.60: 批量保存后更新全部受影响槽位的渲染 token，强制 UI 刷新缩略图。
+                for target in targets.prefix(itemsToSave) {
+                    self.slotRenderTokens["\(target.specialSlotId)::\(target.slot)"] = UUID()
+                }
 
                 // Reload current slots and show toast
                 self.reloadAllAsync()
