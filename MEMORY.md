@@ -4,11 +4,41 @@
 
 ## 当前版本
 
-- **当前版本：v2.10.68**
+- **当前版本：v2.10.74**
 - 平台：macOS（Swift / SwiftUI，SPM 构建，macOS 13+）
 - 单一版本号事实来源：`Info.plist` 的 `CFBundleShortVersionString`（`AppVersion.current` 动态读取，`AppVersion.fallback` 为编译期兜底）。CLI 版本号见 `Sources/ClipSlotsCLI/main.swift` 的 `CLI_VERSION`。
 
 ## 版本要点（近期）
+
+### v2.10.74 — 切组/切页「延迟遮罩（Debounced Veil）」，缓存命中零闪动
+- 背景：切组/切页时立即置 `isSwitchingGroup` 会导致即便数据在缓存里瞬时可得也闪一下过渡遮罩（淡化/微模糊），观感不流畅。
+- **改动**：`beginGroupSwitchTransition` 不再立即置 `isSwitchingGroup`，改用 `groupSwitchVeilToken` + `asyncAfter(0.08)` 延迟置位。数据 80ms 内就绪（缓存命中）则 token 推进作废延迟闭包 → 遮罩根本不出现，瞬时无闪动切换；仅当真异步等待 > 80ms 才显示过渡遮罩。
+- **统一复位入口**：新增 `endGroupSwitchTransition()`，`loadSlotsAsync` / `reloadAllAsync` / 1.2s 兜底三条路径统一走它复位。
+- commit：`71f938d`，已推到默认分支 `main`。
+- DMG SHA256：`cdd33a7a66285b2a34df4b0f1982671c39af91227bd6d407461299158a8092cd`（`build/ClipSlots_v2.10.74.dmg`）。
+- Release：https://github.com/Seven-hub-fanfan/ClipSlots/releases/tag/v2.10.74（本批唯一发到 GitHub Release 的版本，自动更新读 latest，v2.10.69~73 仅本地打包未发 Release）。
+
+### v2.10.73 — 缩略图渲染解耦最优解（keyed 共享可观察缓存）
+- **改动**：`ThumbnailProvider` 升级为 keyed 共享可观察缓存；`SlotThumbnailView` 去掉 per-view `@StateObject`，改为 `currentKey` 纯函数渲染；卡片身份回到 `.id(slot)`（切换复用不重建）。缩略图正确性由 shared provider 保证，而非依赖 cell 重建。
+- commit：`56687d7`。
+- ★关键经验（v2.10.71→72→73 教训）：**不能靠「移除父级 .id 但保留 per-view @StateObject」赌刷新**（v2.10.71 那样做造成切组卡旧图的缩略图回归）；正确方向是缩略图 = `currentKey` → shared provider 的纯函数渲染，卡片身份保持 `.id(slot)` 稳定复用。
+
+### v2.10.72 — 回滚 v2.10.71 卡片身份改动，修复缩略图回归
+- **改动**：回滚 v2.10.71 的卡片身份改动（恢复 `cellIdentity`），修复切组卡旧图的缩略图回归；保留「去掉切换期全网格模糊」的优化。
+- commit：`aac74ac`。
+
+### v2.10.71 — 切页/切组卡顿尝试（★造成缩略图回归，后被回滚）
+- **改动**：卡片身份 `cellIdentity` 改回 `.id(slot)` + 去掉切换期全网格 `.blur(2)`。
+- ★但造成缩略图回归（切组卡旧图），故 v2.10.72 回滚卡片身份改动。
+- commit：`e01bef0`。
+
+### v2.10.70 — live-resize 期间背景/卡片降级
+- **改动**：live-resize 期间整窗高斯模糊背景降级为纯色（`RetroPosterAmbientBackground` simplified）+ 卡片去软阴影；新增 `LiveResizeMonitor` 监听 `NSWindow` 的 willStart/didEnd LiveResize。
+- commit：`aa3cb3d`。
+
+### v2.10.69 — 拖拽缩放窗口流畅度
+- **改动**：网格改固定列宽 `makeGridColumns` + 宽度量化（≥8pt 才重算列），消除弹性列逐像素重排。
+- commit：`62258b8`。
 
 ### v2.10.68 — 界面体验优化 + 滚动/缩放性能改善
 - 背景：集中打磨主界面 UI、导航与交互，并针对网格滚动、窗口实时缩放的流畅度做优化。
