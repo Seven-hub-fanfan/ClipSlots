@@ -260,16 +260,38 @@ final class SlotStoreObservable: ObservableObject {
 
     // v2.10.47: 兜底令牌——每次开启切组遮罩时自增；配合 asyncAfter 兜底关闭，避免任何异常路径下
     // 遮罩永久卡住（正常情况下 loadSlotsAsync/reloadAllAsync 提交新数据时即会关闭）。
+    //
+    // v2.10.74: 令牌语义升级为「延迟遮罩(Debounced Veil)」的可取消凭据。beginGroupSwitchTransition
+    // 不再立即置位 isSwitchingGroup，而是自增 token 后延迟 80ms 才置位；任何「切换完成/复位」路径
+    // 都会再次自增 token，使那次延迟置位闭包因 token 不匹配而作废。缓存命中时新数据几乎立刻提交，
+    // token 在 80ms 到期前就已被推进 → 遮罩根本不出现，实现瞬时无闪动切换；仅当 80ms 后数据仍未就绪
+    // （真异步等待）才置位遮罩，并保留原 1.2s 兜底关闭。
     private var groupSwitchVeilToken: Int = 0
 
-    // v2.10.47: 开启切组过渡遮罩（保留旧内容），并挂一个 1.2s 兜底关闭，防止遮罩卡死。
+    // v2.10.74: 开启「延迟切组过渡遮罩」。延迟 80ms 再置位 isSwitchingGroup，若这期间切换已完成
+    // （endGroupSwitchTransition 推进了 token），则此闭包作废、遮罩不出现。置位后仍挂 1.2s 兜底关闭。
     private func beginGroupSwitchTransition() {
-        isSwitchingGroup = true
         groupSwitchVeilToken &+= 1
         let token = groupSwitchVeilToken
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { [weak self] in
-            guard let self = self, self.isSwitchingGroup, token == self.groupSwitchVeilToken else { return }
-            self.isSwitchingGroup = false
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) { [weak self] in
+            // 校验 token 未变：若这 80ms 内切换已完成/被复位，token 已自增 → 取消置位，遮罩不出现。
+            guard let self = self, token == self.groupSwitchVeilToken else { return }
+            self.isSwitchingGroup = true
+            // 1.2s 兜底关闭：防止任何异常路径下遮罩卡死；触发时校验 token 仍属本次切换。
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { [weak self] in
+                guard let self = self, self.isSwitchingGroup, token == self.groupSwitchVeilToken else { return }
+                self.isSwitchingGroup = false
+            }
+        }
+    }
+
+    // v2.10.74: 复位切组过渡。所有「切换完成/新数据已提交」的路径统一调用它：
+    //   1) 自增 token —— 让任何在途的 80ms 延迟置位闭包作废（缓存命中路径下遮罩因此从不出现）；
+    //   2) 若遮罩已经显示（真异步等待路径），正常关闭它。
+    private func endGroupSwitchTransition() {
+        groupSwitchVeilToken &+= 1
+        if isSwitchingGroup {
+            isSwitchingGroup = false
         }
     }
 
@@ -797,9 +819,9 @@ final class SlotStoreObservable: ObservableObject {
                 self.loadedSpecialSlotId = activeId
                 // v2.10.47: 若一次 watcher 触发的 reload 抢先在切组读盘之前提交（generation 更高），
                 // 切组遮罩需在此一并关闭，避免遮罩因 loadSlotsAsync 被判超时丢弃而卡住。
-                if self.isSwitchingGroup {
-                    self.isSwitchingGroup = false
-                }
+                // v2.10.74: 统一走 endGroupSwitchTransition —— 既作废在途的 80ms 延迟置位（缓存命中不闪），
+                // 也关闭已显示的遮罩。
+                self.endGroupSwitchTransition()
                 self.loadConnectionMapForCurrentGroup()
                 self.reloadLastPasteFromDefaults()
                 self.recomputeAutoPreviews()
@@ -2182,7 +2204,9 @@ final class SlotStoreObservable: ObservableObject {
                 // 切组遮罩一起淡入替换（0.16s），消除「先闪空槽位」的中间态。onCommit 承接旧组缩略图缓存
                 // 失效等收尾（此时已切走旧内容，安全）。
                 self.applySlotsSnapshot(snapshot.slots, labels: snapshot.labels)
-                self.isSwitchingGroup = false
+                // v2.10.74: 新数据已提交——作废在途的 80ms 延迟置位（缓存命中不出现遮罩），
+                // 若遮罩已显示（真异步等待路径）则正常关闭。
+                self.endGroupSwitchTransition()
                 self.loadedSpecialSlotId = activeId
                 self.refreshTrigger = UUID()
                 onCommit?()
