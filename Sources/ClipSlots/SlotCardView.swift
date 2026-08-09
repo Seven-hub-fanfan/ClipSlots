@@ -158,9 +158,10 @@ struct SlotCardView: View {
         // thumbnailKey embeds updatedAt, so any minor content/metadata change (background
         // sync, label update) mutated the id and destroyed+rebuilt the whole card, wiping
         // its internal @State (editingLabel/labelText/editingText) — losing in-progress,
-        // unsaved edits. Content-driven refresh now lives only on SlotThumbnailView, which
-        // already applies `.id(currentKey)` internally, so the thumbnail still reloads
-        // correctly while the card's editing state survives.
+        // unsaved edits.
+        // v2.10.73（方案③）：缩略图刷新不再依赖任何 `.id`。SlotThumbnailView 已去掉内部
+        // `.id(currentKey)`，改为观察 ThumbnailProvider（keyed 共享缓存单一数据源）——currentKey
+        // 变化即读新 key、命中秒出/未命中异步填充，卡片编辑态得以在切换/复用中存活。
         .padding(AppTheme.slotCardPadding)
         .background(
             RoundedRectangle(cornerRadius: AppTheme.slotCardCornerRadius, style: .continuous)

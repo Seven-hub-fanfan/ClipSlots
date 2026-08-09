@@ -1,8 +1,30 @@
 import AppKit
 import ClipSlotsKit
 import QuickLookThumbnailing
+import SwiftUI
 
-final class ThumbnailProvider {
+/// 缩略图渲染状态。`.loaded` 直接携带已解码的 NSImage。
+/// v2.10.73 (方案③): 从 SlotThumbnailView 移到此处，作为 ThumbnailProvider 状态查询的返回类型。
+enum ThumbnailState {
+    case idle
+    case loading
+    case loaded(NSImage)
+    case failed
+}
+
+/// v2.10.73（方案③：缩略图渲染解耦）：ThumbnailProvider 升级为「以 key 为维度的共享可观察缓存」，
+/// 成为缩略图状态的**单一数据源**。SlotThumbnailView 不再各自持有 @StateObject 解码态，而是
+/// `@ObservedObject` 观察本单例、按 `currentKey` 纯函数式渲染。
+///
+/// 为什么这样能根治历史回归「切到含主体图片的组，缩略图卡旧图、需切走切回才刷新」：
+/// - 旧实现把解码结果放在每个 SlotThumbnailView 自己的 @StateObject 里；卡壳复用（.id(slot)）时
+///   该 @StateObject 不销毁，而切组是「两段跳」（先 specialSlotId 变、slots 仍旧内容 → 再异步提交
+///   新内容），SwiftUI 常只发一次 onAppear，第二跳 reload 漏触发 → 卡旧图。
+/// - 新实现里缓存以 `key`（specialSlotId::slot::contentId::updatedAt / ::empty）为维度、外置于视图。
+///   视图渲染只是 `state(for: currentKey)` 的纯函数：currentKey 一变即读新 key，命中秒出、未命中
+///   loading 后异步填充。**late 的旧 key 解码结果只写到它自己的 key，不会污染当前视图**，因此无需
+///   per-view token 守卫。
+final class ThumbnailProvider: ObservableObject {
     static let shared = ThumbnailProvider()
 
     private let lock = NSLock()
@@ -12,6 +34,15 @@ final class ThumbnailProvider {
     // 所有 cache/accessOrder 变更均在既有 lock（NSLock）保护下进行，保持顺序一致。
     private var accessOrder: [String] = []
     private let maxCacheCount = 200
+
+    // v2.10.73 (方案③): 以 key 为维度的「进行中 / 失败」态。
+    // - loaded：`cache[key] != nil`（命中即已解码）。
+    // - loading：`inFlight.contains(key)`（正在后台解码；同一 key 不重复解码 = in-flight 去重）。
+    // - failed：`failedKeys.contains(key)`（解码失败/不支持，记录以避免无限重试）。
+    // - idle：三者都不命中（尚未触发过解码）。
+    // 读写均在既有 lock（NSLock）保护下进行，保持与 cache/accessOrder 一致。
+    private var inFlight: Set<String> = []
+    private var failedKeys: Set<String> = []
     /// Callback queue for in-flight requests. Multiple callers waiting on the same
     /// key all get notified when the single QLThumbnailGenerator request completes.
     private var pendingCompletions: [String: [(NSImage?, String) -> Void]] = [:]
@@ -171,6 +202,112 @@ final class ThumbnailProvider {
         }
     }
 
+    // MARK: - v2.10.73 (方案③) keyed observable API
+
+    /// 同步查询：命中缓存返回已解码图片，否则 nil。供视图 body 直接读取（主线程）。
+    func image(for key: String) -> NSImage? {
+        lock.lock(); defer { lock.unlock() }
+        if let img = cache[key] {
+            markAccessedLocked(key)  // 命中即视为最近使用，更新 LRU
+            return img
+        }
+        return nil
+    }
+
+    /// 同步查询该 key 的渲染状态：loaded(命中缓存) / loading(解码中) / failed(失败) / idle(未触发)。
+    func state(for key: String) -> ThumbnailState {
+        lock.lock(); defer { lock.unlock() }
+        if let img = cache[key] {
+            markAccessedLocked(key)
+            return .loaded(img)
+        }
+        if inFlight.contains(key) { return .loading }
+        if failedKeys.contains(key) { return .failed }
+        return .idle
+    }
+
+    /// 触发（或跳过）某 key 的解码。
+    /// - in-flight 去重：若该 key 已在缓存 / 已在解码中 / 已知失败，则直接返回，绝不重复解码。
+    /// - 否则标记 inFlight（状态转为 .loading 并通知），在后台按内容类型解码，完成后回主线程
+    ///   写入缓存并 `objectWillChange.send()`。因为缓存以 key 为维度，late 的旧 key 结果只写到它
+    ///   自己的 key，不会污染当前视图，故无需 per-view token 守卫。
+    func load(key: String, content: SlotContent, specialSlotId: String, slot: Int) {
+        lock.lock()
+        if cache[key] != nil || inFlight.contains(key) || failedKeys.contains(key) {
+            lock.unlock()
+            return
+        }
+        inFlight.insert(key)
+        lock.unlock()
+        notifyChangeOnMain()  // 状态转为 .loading
+
+        // 空槽（理论上网格用 EmptySlotThumbnailView 兜住，此处为防御）：无缩略图。
+        guard !content.isEmpty else {
+            finish(key: key, image: nil)
+            return
+        }
+
+        // 内联图片：走全局 ThumbnailDecodeLimiter 限流 + Task.detached 后台降采样解码，
+        // 避免一屏图片卡同时触发数百次全分辨率 ImageIO 解码而卡主线程（沿用原 SlotThumbnailView 逻辑）。
+        if content.hasImage {
+            let snapshot = content
+            Task {
+                let decoded = await ThumbnailDecodeLimiter.shared.run {
+                    await Task.detached(priority: .userInitiated) { () -> NSImage? in
+                        snapshot.decodedInlineThumbnail(maxPixel: 512) ?? snapshot.decodedInlineImage()
+                    }.value
+                }
+                self.finish(key: key, image: decoded)
+            }
+            return
+        }
+
+        // HTML 文档：卡片走 WebView，不出缩略图。
+        if content.isHTMLDocument {
+            finish(key: key, image: nil)
+            return
+        }
+
+        // 文件（图片文件 / 其它文件如 PDF/压缩包）：复用既有 QuickLook 路径（含 scale 缓存、
+        // 10s 看门狗、代次隔离），完成/超时后回调到 finish。
+        guard let url = content.primaryFileURL, content.isImageFile || content.isFileContent else {
+            finish(key: key, image: nil)
+            return
+        }
+        thumbnail(for: url, cacheKey: key) { [weak self] image, _ in
+            self?.finish(key: key, image: image)
+        }
+    }
+
+    /// 解码收尾：清 in-flight，写入缓存（成功）或记录失败态，然后在主线程发出变更通知。
+    /// 可能从后台线程（QuickLook 回调 / detached 解码）被调用，统一切回主线程发通知。
+    private func finish(key: String, image: NSImage?) {
+        let apply: () -> Void = { [weak self] in
+            guard let self = self else { return }
+            self.lock.lock()
+            self.inFlight.remove(key)
+            if let image = image {
+                self.cache[key] = image
+                self.markAccessedLocked(key)  // P2-15: 记录访问顺序
+                self.evictIfNeededLocked()     // P2-15: 超上限淘汰最旧项
+                self.failedKeys.remove(key)
+            } else {
+                self.failedKeys.insert(key)   // 记录失败，避免无限重试
+            }
+            self.lock.unlock()
+            self.objectWillChange.send()
+        }
+        if Thread.isMainThread { apply() } else { DispatchQueue.main.async(execute: apply) }
+    }
+
+    /// 在主线程发出 objectWillChange（ObservableObject 通知须在主线程）。
+    /// 用于 .loading 过渡；异步派发以避开「在视图更新中发布变更」的运行时告警。
+    private func notifyChangeOnMain() {
+        DispatchQueue.main.async { [weak self] in self?.objectWillChange.send() }
+    }
+
+    // MARK: - Invalidation
+
     /// Invalidate all cached thumbnails and in-flight requests for a specific slot.
     func invalidateSlot(specialSlotId: String, slot: Int) {
         let prefix = "\(specialSlotId)::\(slot)::"
@@ -182,8 +319,11 @@ final class ThumbnailProvider {
         let dropped = pendingCompletions.filter { $0.key.hasPrefix(prefix) }
         pendingCompletions = pendingCompletions.filter { !$0.key.hasPrefix(prefix) }
         pendingGeneration = pendingGeneration.filter { !$0.key.hasPrefix(prefix) }  // P2-7 (v2.10.16): 同步剔除代次记录
+        inFlight = inFlight.filter { !$0.hasPrefix(prefix) }     // v2.10.73 (方案③): 同步剔除进行中标记
+        failedKeys = failedKeys.filter { !$0.hasPrefix(prefix) } // v2.10.73 (方案③): 同步剔除失败态，允许重新解码
         lock.unlock()
         notifyCancelled(dropped)
+        notifyChangeOnMain()  // v2.10.73 (方案③): 通知观察者按新 key 重渲染
         NSLog("[ClipSlots] ThumbnailProvider invalidateSlot prefix=\(prefix)")
     }
 
@@ -196,8 +336,11 @@ final class ThumbnailProvider {
         let dropped = pendingCompletions.filter { $0.key.hasPrefix(prefix) }
         pendingCompletions = pendingCompletions.filter { !$0.key.hasPrefix(prefix) }
         pendingGeneration = pendingGeneration.filter { !$0.key.hasPrefix(prefix) }  // P2-7 (v2.10.16): 同步剔除代次记录
+        inFlight = inFlight.filter { !$0.hasPrefix(prefix) }     // v2.10.73 (方案③): 同步剔除进行中标记
+        failedKeys = failedKeys.filter { !$0.hasPrefix(prefix) } // v2.10.73 (方案③): 同步剔除失败态，允许重新解码
         lock.unlock()
         notifyCancelled(dropped)
+        notifyChangeOnMain()  // v2.10.73 (方案③): 通知观察者按新 key 重渲染
         NSLog("[ClipSlots] ThumbnailProvider invalidateSpecialSlot prefix=\(prefix)")
     }
 
@@ -208,8 +351,11 @@ final class ThumbnailProvider {
         let dropped = pendingCompletions
         pendingCompletions.removeAll()
         pendingGeneration.removeAll()  // P2-7 (v2.10.16): 一并清空代次记录
+        inFlight.removeAll()     // v2.10.73 (方案③): 一并清空进行中标记
+        failedKeys.removeAll()   // v2.10.73 (方案③): 一并清空失败态
         lock.unlock()
         notifyCancelled(dropped)
+        notifyChangeOnMain()  // v2.10.73 (方案③): 通知观察者重渲染
     }
 
     // P2-15 (v2.10.6): 更新访问顺序——把 key 移到末尾（最近使用）。调用方必须已持 lock。

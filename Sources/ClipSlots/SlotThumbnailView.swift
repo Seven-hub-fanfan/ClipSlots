@@ -2,47 +2,22 @@ import SwiftUI
 import ClipSlotsKit
 import WebKit
 
-enum ThumbnailState {
-    case idle
-    case loading
-    case loaded(NSImage)
-    case failed
-}
-
-@MainActor
-private final class ThumbnailLoadState: ObservableObject {
-    @Published var state: ThumbnailState = .idle
-
-    private var key = ""
-    private var token = UUID()
-
-    func begin(key: String) -> UUID {
-        self.key = key
-        token = UUID()
-        state = .idle
-        return token
-    }
-
-    func update(_ state: ThumbnailState, key: String, token: UUID) {
-        guard self.key == key, self.token == token else { return }
-        self.state = state
-    }
-
-    func isCurrent(key: String, token: UUID) -> Bool {
-        self.key == key && self.token == token
-    }
-}
+// v2.10.73 (方案③): `ThumbnailState` 已上移至 ThumbnailProvider.swift 作为其状态查询返回类型；
+// 原内部 `ThumbnailLoadState`（per-view @StateObject 解码态）已删除——它在卡壳复用时不销毁，
+// 且切组两段跳只发一次 onAppear、第二跳漏 reload，是「缩略图卡旧图」回归的根因。
 
 struct SlotThumbnailView: View {
     let content: SlotContent
     let specialSlotId: String
     let slot: Int
 
-    @StateObject private var loadState = ThumbnailLoadState()
+    // v2.10.73 (方案③): 观察共享的、以 key 为维度的缩略图缓存（单一数据源）。
+    // 本视图的渲染是 `currentKey` 的纯函数：读到什么就画什么，不再持有各自的解码态。
+    @ObservedObject private var provider = ThumbnailProvider.shared
 
     /// The composite key that uniquely identifies this slot version.
     /// When any dimension changes (special slot, slot number, content, or overwrite),
-    /// this key changes and the view is force-rebuilt.
+    /// this key changes; the view then reads the new key from the shared provider.
     private var currentKey: String {
         content.thumbnailKey(specialSlotId: specialSlotId, slot: slot)
     }
@@ -52,7 +27,9 @@ struct SlotThumbnailView: View {
             RoundedRectangle(cornerRadius: AppTheme.smallCornerRadius, style: .continuous)
                 .fill(Color.primary.opacity(0.04))
 
-            switch loadState.state {
+            // v2.10.73 (方案③): 渲染完全由 provider 对 currentKey 的状态决定。
+            // 命中缓存 → 秒出图；未命中 → loading，异步填充后 objectWillChange 触发重渲染。
+            switch provider.state(for: currentKey) {
             case .idle:
                 idleView
             case .loading:
@@ -80,11 +57,10 @@ struct SlotThumbnailView: View {
         // 长内容仍靠 maxHeight:.infinity 自适应撑开。
         .frame(minHeight: 116, idealHeight: 140, maxHeight: .infinity)
         .clipped()
-        .id(currentKey)
-        .onAppear { reloadThumbnail() }
-        .onChange(of: currentKey) { _ in
-            reloadThumbnail()
-        }
+        // v2.10.73 (方案③): 去掉 `.id(currentKey)`——不再靠内部整格重建强刷缩略图；
+        // 刷新改由「currentKey 变化 → 读取新 key → provider 状态驱动重渲染」保证。
+        .onAppear { loadIfNeeded() }
+        .onChange(of: currentKey) { _ in loadIfNeeded() }
     }
 
     // MARK: - Subviews
@@ -160,86 +136,12 @@ struct SlotThumbnailView: View {
 
     // MARK: - Loading
 
-    private func reloadThumbnail() {
-        let key = currentKey
-        let token = loadState.begin(key: key)
-
-        guard !content.isEmpty else {
-            loadState.update(.failed, key: key, token: token)
-            return
-        }
-
-        // C-1 (v2.10.31): decode inline images off the main thread.
-        // Previously this synchronously read `content.inlineImage`, which runs
-        // `NSImage(data:)` on the full-resolution data on the main thread. For an
-        // uncached large image (e.g. an 8K screenshot) that blocked the UI ~200-500ms
-        // and dropped frames when the card appeared / scrolled. v2.10.30 already added
-        // the async background decoder (InlineImageView / decodedInlineImage) but the
-        // main grid thumbnail never adopted it. We now mirror InlineImageView's pattern:
-        // decode on a detached background Task, then hop back to the main actor and only
-        // assign if this cell still represents the same content version (guard against
-        // stale callbacks from cell reuse via key + loadToken).
-        if content.hasImage {
-            loadState.update(.loading, key: key, token: token)
-            let snapshot = content
-            Task {
-                // P0-4 (v2.10.38): gate the decode through the global ThumbnailDecodeLimiter so
-                // that a burst of image cells appearing at once (big group scroll / post-import
-                // refresh) can't fire hundreds of concurrent ImageIO decodes and swamp CPU/memory.
-                let decoded = await ThumbnailDecodeLimiter.shared.run {
-                    await Task.detached(priority: .userInitiated) { () -> NSImage? in
-                        // ATT-1/ATT-2 (v2.10.32): the grid cell is small, so decode a
-                        // DOWNSAMPLED thumbnail (longest edge ≤ 512px) via ImageIO rather
-                        // than the full-resolution NSImage. This keeps an 8K screenshot from
-                        // decompressing ~135MB just to draw a ~140pt cell, and stores it in a
-                        // dedicated thumbnail cache (full-res stays in the enlarge-preview
-                        // path). Falls back to the full-res decode if downsampling fails.
-                        snapshot.decodedInlineThumbnail(maxPixel: 512) ?? snapshot.decodedInlineImage()
-                    }.value
-                }
-                await MainActor.run {
-                    // Discard if the cell was reused / content version changed while
-                    // decoding, or a newer reload superseded this one.
-                    guard loadState.isCurrent(key: key, token: token) else { return }
-                    loadState.update(decoded.map(ThumbnailState.loaded) ?? .failed, key: key, token: token)
-                }
-            }
-            return
-        }
-
-        // v2.7.30: HTML must render as WebView, not fall into QuickLook/file thumbnail.
-        // The previous condition treated .html as file content first, so the HTML branch
-        // was never reached after thumbnail loading failed.
-        if content.isHTMLDocument {
-            loadState.update(.failed, key: key, token: token)
-            return
-        }
-
-        // Need a file URL for QuickLook
-        guard let url = content.primaryFileURL, content.isImageFile || content.isFileContent else {
-            loadState.update(.failed, key: key, token: token)
-            return
-        }
-
-        loadState.update(.loading, key: key, token: token)
-
-        ThumbnailProvider.shared.thumbnail(for: url, cacheKey: key) { image, returnedKey in
-            Task { @MainActor in
-                guard returnedKey == key else {
-                    NSLog("[ClipSlots] SlotThumbnailView discard stale callback slot=\(slot) specialSlot=\(specialSlotId) returnedKey=\(returnedKey) currentKey=\(key)")
-                    return
-                }
-                loadState.update(image.map(ThumbnailState.loaded) ?? .failed, key: key, token: token)
-            }
-        }
-
-        // 3-second timeout
-        DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) {
-            guard loadState.isCurrent(key: key, token: token) else { return }
-            if case .loading = loadState.state {
-                loadState.update(.failed, key: key, token: token)
-            }
-        }
+    // v2.10.73 (方案③): 触发解码的唯一入口。渲染态外置到 ThumbnailProvider（keyed 单一数据源），
+    // 本视图只在「当前 key 未命中缓存」时请求 provider.load(...)。所有内容类型判定、后台限流解码、
+    // in-flight 去重、失败态记录都在 provider.load 内部完成——本视图不再持有 token / @StateObject。
+    private func loadIfNeeded() {
+        guard provider.image(for: currentKey) == nil else { return }
+        provider.load(key: currentKey, content: content, specialSlotId: specialSlotId, slot: slot)
     }
 }
 
