@@ -33,22 +33,12 @@ private final class ThumbnailLoadState: ObservableObject {
     }
 }
 
-// v2.9.25 hotfix6: 测量文本块实际渲染高度的 PreferenceKey（方案C动态版）。
-private struct TextHeightKey: PreferenceKey {
-    static var defaultValue: CGFloat = 0
-    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
-        value = max(value, nextValue())
-    }
-}
-
 struct SlotThumbnailView: View {
     let content: SlotContent
     let specialSlotId: String
     let slot: Int
 
     @StateObject private var loadState = ThumbnailLoadState()
-    // v2.9.25 hotfix6: 记录文本块实际渲染高度，用于动态判断居中/靠上（方案C动态版）。
-    @State private var textPreviewHeight: CGFloat = 0
 
     /// The composite key that uniquely identifies this slot version.
     /// When any dimension changes (special slot, slot number, content, or overwrite),
@@ -134,33 +124,16 @@ struct SlotThumbnailView: View {
                         .foregroundColor(.secondary.opacity(0.7))
                 }
             } else {
-                // v2.8.6: HTML slots now show the plain-text preview here (identical
-                // font/style to every other text slot), instead of an inconsistent
-                // "HTML" chip + WKWebView render. The HTML tags are stripped upstream
-                // in `SlotContent.preview`.
-                // v2.9.25 hotfix6: 方案C动态版——用实际渲染高度判断对齐。
-                // 文字块渲染高度 < 预览区高度的 2/3 → 垂直居中；否则靠上（顶部对齐）。
-                GeometryReader { containerGeo in
-                    Text(multilinePreview)
-                        .font(.system(size: 12, design: .monospaced))
-                        .foregroundColor(.primary.opacity(0.8))
-                        .lineLimit(4)
-                        .truncationMode(.tail)
-                        .padding(.horizontal, 14)
-                        .padding(.vertical, 8)
-                        .background(
-                            GeometryReader { g in
-                                Color.clear
-                                    .preference(key: TextHeightKey.self, value: g.size.height)
-                            }
-                        )
-                        .frame(
-                            maxWidth: .infinity,
-                            maxHeight: .infinity,
-                            alignment: textPreviewHeight < containerGeo.size.height * 2 / 3 ? .center : .topLeading
-                        )
-                }
-                .onPreferenceChange(TextHeightKey.self) { textPreviewHeight = $0 }
+                Text(multilinePreview)
+                    .font(.system(size: 12, design: .monospaced))
+                    .foregroundColor(.primary.opacity(0.8))
+                    .multilineTextAlignment(.leading)
+                    .lineLimit(4)
+                    .truncationMode(.tail)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 8)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
             }
         }
     }

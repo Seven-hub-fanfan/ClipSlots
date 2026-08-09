@@ -35,9 +35,9 @@ struct ToggleLeverView: View {
         }
         .contentShape(Rectangle())
         .onTapGesture {
-            withAnimation(.spring(response: 0.32, dampingFraction: 0.55)) {
-                isOn.toggle()
-            }
+            // Change the model without a transaction-wide animation. Only the light and
+            // lever below animate, so observers can update without animating the toolbar tree.
+            isOn.toggle()
         }
         .help(help ?? (isOn ? "\(label)：已开启" : "\(label)：已关闭"))
         .accessibilityElement(children: .ignore)
@@ -68,7 +68,7 @@ struct ToggleLeverView: View {
             Circle().stroke(Color.black.opacity(0.15), lineWidth: 0.5)
         )
         .shadow(color: isOn ? indicatorColor.opacity(0.8) : .clear, radius: isOn ? 4 : 0)
-        .animation(.easeInOut(duration: 0.2), value: isOn)
+        .animation(.easeInOut(duration: 0.24), value: isOn)
     }
 
     // 金属底座 + 拨杆主体。
@@ -113,6 +113,7 @@ struct ToggleLeverView: View {
                 // 让长条一端固定在底座中心，另一端摆动：先把锚点下移半个身位再旋转。
                 .offset(y: -leverHeight / 2 + 3)
                 .rotationEffect(.degrees(isOn ? -20 : 20), anchor: .bottom)
+                .animation(.smooth(duration: 0.26), value: isOn)
                 .offset(y: leverHeight / 2 - 3)
                 .shadow(color: Color.black.opacity(0.25), radius: 1, x: 0, y: 0.5)
         }

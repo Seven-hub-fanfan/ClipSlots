@@ -57,6 +57,19 @@ struct SlotCardView: View {
         AppTheme.slotAccent(slot, scheme: colorScheme)
     }
 
+    private var cardOutlineColor: Color {
+        if isFlashHighlighted { return slotAccent }
+        if isDropTargeted { return slotAccent.opacity(0.72) }
+        if isHovering { return slotAccent.opacity(0.72) }
+        return AppTheme.subtleBorder(colorScheme)
+    }
+
+    private var cardOutlineWidth: CGFloat {
+        if isFlashHighlighted { return 2.5 }
+        if isDropTargeted { return 1.2 }
+        return isHovering ? 1.5 : 1
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: AppTheme.spacingMedium) {
             headerRow
@@ -159,10 +172,7 @@ struct SlotCardView: View {
         )
         .overlay(
             RoundedRectangle(cornerRadius: AppTheme.slotCardCornerRadius, style: .continuous)
-                .stroke(
-                    isHovering ? slotAccent.opacity(0.72) : AppTheme.subtleBorder(colorScheme),
-                    lineWidth: isHovering ? 1.5 : 1
-                )
+                .strokeBorder(cardOutlineColor, lineWidth: cardOutlineWidth)
                 .allowsHitTesting(false)
         )
         .overlay(alignment: .topLeading) {
@@ -172,9 +182,7 @@ struct SlotCardView: View {
                 .padding(.leading, AppTheme.slotCardPadding)
                 .allowsHitTesting(false)
         }
-        // Keep hover feedback visual only: no parent gesture competes with card controls.
-        .offset(y: isHovering ? -2 : 0)
-        .animation(.easeOut(duration: 0.18), value: isHovering)
+        // Hover state only; the composed-card transform is applied after every visual overlay.
         .onHover { hovering in
             isHovering = hovering
         }
@@ -188,26 +196,10 @@ struct SlotCardView: View {
                     .allowsHitTesting(false)
             }
         }
-        .overlay(
-            RoundedRectangle(cornerRadius: AppTheme.slotCardCornerRadius, style: .continuous)
-                .strokeBorder(
-                    isDropTargeted ? slotAccent.opacity(0.72) : Color.clear,
-                    lineWidth: isDropTargeted ? 1.2 : 0
-                )
-                .allowsHitTesting(false)
-        )
-        // v2.9.37: transient flash-highlight ring when jumped to from the footer
-        // "上次粘贴" button. Animates in/out and never intercepts taps.
-        .overlay(
-            RoundedRectangle(cornerRadius: AppTheme.slotCardCornerRadius, style: .continuous)
-                .strokeBorder(
-                    isFlashHighlighted ? Color.accentColor : Color.clear,
-                    lineWidth: isFlashHighlighted ? 2.5 : 0
-                )
-                .allowsHitTesting(false)
-        )
+        // Flash keeps the original colored glow, but its hard edge is rendered by the
+        // single card outline above so hover/drop/flash never produce parallel strokes.
         .shadow(
-            color: isFlashHighlighted ? Color.accentColor.opacity(0.5) : Color.clear,
+            color: isFlashHighlighted ? slotAccent.opacity(0.5) : Color.clear,
             radius: isFlashHighlighted ? 9 : 0
         )
         .animation(.easeInOut(duration: 0.3), value: isFlashHighlighted)
@@ -223,6 +215,10 @@ struct SlotCardView: View {
             }
         }
         .animation(.spring(response: 0.3, dampingFraction: 0.8), value: isLastPasted)
+        // Apply one transform to the fully composed card. The outline is already unified,
+        // so scaling cannot reveal multiple independently rasterized hard edges.
+        .scaleEffect(isHovering ? 1.015 : 1)
+        .animation(.easeOut(duration: 0.18), value: isHovering)
         .sheet(isPresented: $showingPreview) {
             SlotPreviewView(content: content)
                 .frame(width: 640, height: 500)
@@ -295,12 +291,12 @@ struct SlotCardView: View {
         .padding(.horizontal, 6)
         .padding(.vertical, 3)
         .background(
-            Capsule().fill(Color.accentColor.opacity(0.92))
+            Capsule().fill(slotAccent.opacity(0.92))
         )
         .overlay(
             Capsule().stroke(Color.white.opacity(0.25), lineWidth: 0.5)
         )
-        .shadow(color: Color.accentColor.opacity(0.3), radius: 2, x: 0, y: 1)
+        .shadow(color: slotAccent.opacity(0.3), radius: 2, x: 0, y: 1)
         .help("这是最近一次粘贴的槽位")
     }
 
@@ -763,7 +759,7 @@ private struct SlotActionButtonBody: View {
             )
             .contentShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
             .opacity(isEnabled ? 1 : 0.68)
-            .scaleEffect(configuration.isPressed ? 0.975 : 1)
+            .offset(y: configuration.isPressed ? 1 : 0)
             .animation(.easeOut(duration: 0.12), value: configuration.isPressed)
             .animation(.easeOut(duration: 0.16), value: isHovering)
             .onHover { isHovering = $0 }
@@ -841,16 +837,25 @@ private struct InlineSlotVideoPreview: View {
         .frame(maxWidth: .infinity)
         // v2.9.18: 与图片/文本缩略图一致，视频预览也改自适应高度填满灰框。
         .frame(minHeight: 120, idealHeight: 160, maxHeight: .infinity)
-        .onAppear {
-            loadPosterIfNeeded()
-            guard player == nil else { player?.play(); return }
-            let p = AVPlayer(url: url)
-            p.isMuted = true
-            player = p
-            p.play()
+        .task(id: url) {
+            do {
+                try await Task.sleep(nanoseconds: 180_000_000)
+                try Task.checkCancellation()
+                loadPosterIfNeeded()
+                guard player == nil else { player?.play(); return }
+                let p = AVPlayer(url: url)
+                p.isMuted = true
+                player = p
+                p.play()
+            } catch is CancellationError {
+                return
+            } catch {
+                return
+            }
         }
         .onDisappear {
             player?.pause()
+            player = nil
         }
     }
 

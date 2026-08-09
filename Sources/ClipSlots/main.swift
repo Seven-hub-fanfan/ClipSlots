@@ -269,7 +269,7 @@ final class SlotStoreObservable: ObservableObject {
         let token = groupSwitchVeilToken
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { [weak self] in
             guard let self = self, self.isSwitchingGroup, token == self.groupSwitchVeilToken else { return }
-            withAnimation(.easeInOut(duration: 0.16)) { self.isSwitchingGroup = false }
+            self.isSwitchingGroup = false
         }
     }
 
@@ -798,7 +798,7 @@ final class SlotStoreObservable: ObservableObject {
                 // v2.10.47: 若一次 watcher 触发的 reload 抢先在切组读盘之前提交（generation 更高），
                 // 切组遮罩需在此一并关闭，避免遮罩因 loadSlotsAsync 被判超时丢弃而卡住。
                 if self.isSwitchingGroup {
-                    withAnimation(.easeInOut(duration: 0.16)) { self.isSwitchingGroup = false }
+                    self.isSwitchingGroup = false
                 }
                 self.loadConnectionMapForCurrentGroup()
                 self.reloadLastPasteFromDefaults()
@@ -1220,9 +1220,7 @@ final class SlotStoreObservable: ObservableObject {
         // the page / currentPageId to the group's own page, so calling switchToPage
         // first was a redundant second reload + animation. Just switch the group.
         if currentSpecialSlotId != lastPasteGroupId {
-            withAnimation(.easeInOut(duration: 0.28)) {
-                switchSpecialSlot(id: lastPasteGroupId)
-            }
+            switchSpecialSlot(id: lastPasteGroupId)
         }
 
         // Flash-highlight the target slot, auto-clearing after 2s (guarded by a
@@ -1247,9 +1245,7 @@ final class SlotStoreObservable: ObservableObject {
               addr.slot >= 1, addr.slot <= config.slots else { return }
 
         if currentSpecialSlotId != addr.groupId {
-            withAnimation(.easeInOut(duration: 0.28)) {
-                switchSpecialSlot(id: addr.groupId)
-            }
+            switchSpecialSlot(id: addr.groupId)
         }
 
         let target = FlashHighlightTarget(groupId: addr.groupId, slot: addr.slot)
@@ -1718,9 +1714,7 @@ final class SlotStoreObservable: ObservableObject {
 
         NSLog("[ClipSlots] autoAdvance: slot=\(slot) is last non-empty in \(specialSlotId), advancing to \(targetId) immediately")
 
-        withAnimation(.easeInOut(duration: 0.28)) {
-            self.switchSpecialSlot(id: targetId)
-        }
+        self.switchSpecialSlot(id: targetId)
 
         // v2.9.33: override the generic "已切换至" toast from switchSpecialSlot with a
         // dedicated auto-advance message that stays ~1.5s.
@@ -2187,13 +2181,8 @@ final class SlotStoreObservable: ObservableObject {
                 // v2.10.47: 丝滑切组——旧组内容一直显示到此刻（切组时未清空），新数据就绪后连同关闭
                 // 切组遮罩一起淡入替换（0.16s），消除「先闪空槽位」的中间态。onCommit 承接旧组缩略图缓存
                 // 失效等收尾（此时已切走旧内容，安全）。
-                withAnimation(.easeInOut(duration: 0.16)) {
-                    // v2.10.52 (perf 第四批): 增量 diff 提交。切到不同组时内容必不同（contentId 各异）
-                    // → 照常整体替换；A→A 重复切组时快照等价 → 跳过 slots/labels 赋值不触发重绘，
-                    // 切组遮罩仍随本动画正常关闭。
-                    self.applySlotsSnapshot(snapshot.slots, labels: snapshot.labels)
-                    self.isSwitchingGroup = false
-                }
+                self.applySlotsSnapshot(snapshot.slots, labels: snapshot.labels)
+                self.isSwitchingGroup = false
                 self.loadedSpecialSlotId = activeId
                 self.refreshTrigger = UUID()
                 onCommit?()

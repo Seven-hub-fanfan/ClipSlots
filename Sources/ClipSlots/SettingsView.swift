@@ -19,6 +19,18 @@ enum SettingsCategory: String, CaseIterable, Identifiable {
         }
     }
 
+    var subtitle: String {
+        switch self {
+        case .appearance: return "主题与界面显示方式"
+        case .slot: return "槽位数量与基础行为"
+        case .shortcut: return "全局操作与键盘录入"
+        case .notification: return "确认流程与操作反馈"
+        case .connection: return "槽位之间的串联能力"
+        case .advanced: return "日志及调试选项"
+        case .cli: return "CLI、Agent Skill 与卸载"
+        }
+    }
+
     var icon: String {
         switch self {
         case .appearance: return "paintbrush.fill"
@@ -113,13 +125,14 @@ struct SettingsView: View {
                 overlayHeader
                 Divider()
                 ScrollView {
-                    VStack(alignment: .leading, spacing: 20) {
+                    VStack(alignment: .leading, spacing: 16) {
                         sectionContent(for: selectedCategory)
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.horizontal, 24)
-                    .padding(.vertical, 22)
+                    .padding(.horizontal, 22)
+                    .padding(.vertical, 20)
                 }
+                .background(AppTheme.windowBackground(colorScheme))
                 Divider()
                 footer
             }
@@ -151,24 +164,25 @@ struct SettingsView: View {
         VStack(alignment: .leading, spacing: 2) {
             HStack(spacing: 10) {
                 ZStack {
-                    RoundedRectangle(cornerRadius: 9, style: .continuous)
+                    RoundedRectangle(cornerRadius: 10, style: .continuous)
                         .fill(AppTheme.brandGradient(colorScheme))
-                        .frame(width: 32, height: 32)
+                        .frame(width: 36, height: 36)
+                        .shadow(color: Color.accentColor.opacity(0.22), radius: 7, y: 3)
                     Image(systemName: "gearshape.fill")
-                        .font(.system(size: 15, weight: .semibold))
+                        .font(.system(size: 16, weight: .semibold))
                         .foregroundColor(.white)
                 }
                 VStack(alignment: .leading, spacing: 1) {
                     Text("ClipSlots")
-                        .font(.system(size: 14, weight: .bold, design: .rounded))
-                    Text("设置")
-                        .font(.caption)
+                        .font(.system(size: 15, weight: .bold, design: .rounded))
+                    Text("偏好设置")
+                        .font(.system(size: 11))
                         .foregroundColor(.secondary)
                 }
             }
-            .padding(.horizontal, 14)
+            .padding(.horizontal, 16)
             .padding(.top, 18)
-            .padding(.bottom, 14)
+            .padding(.bottom, 16)
 
             ForEach(SettingsCategory.allCases) { category in
                 sidebarRow(category)
@@ -195,19 +209,29 @@ struct SettingsView: View {
             selectedCategory = category
         } label: {
             HStack(spacing: 10) {
-                Image(systemName: category.icon)
-                    .font(.system(size: 13))
-                    .frame(width: 20)
+                ZStack {
+                    RoundedRectangle(cornerRadius: 7, style: .continuous)
+                        .fill(isSelected ? Color.accentColor : Color.clear)
+                        .frame(width: 28, height: 28)
+                    Image(systemName: category.icon)
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundColor(isSelected ? .white : .secondary)
+                }
                 Text(category.title)
-                    .font(.system(size: 13, weight: .medium))
+                    .font(.system(size: 13, weight: isSelected ? .semibold : .medium))
                 Spacer(minLength: 0)
+                if isSelected {
+                    Circle()
+                        .fill(Color.accentColor)
+                        .frame(width: 5, height: 5)
+                }
             }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 8)
-            .foregroundColor(isSelected ? .accentColor : .primary)
+            .padding(.horizontal, 9)
+            .padding(.vertical, 5)
+            .foregroundColor(isSelected ? .primary : .secondary)
             .background(
-                RoundedRectangle(cornerRadius: 8, style: .continuous)
-                    .fill(isSelected ? Color.accentColor.opacity(0.16) : Color.clear)
+                RoundedRectangle(cornerRadius: 9, style: .continuous)
+                    .fill(isSelected ? Color.accentColor.opacity(colorScheme == .dark ? 0.18 : 0.10) : Color.clear)
             )
             // v2.9.13: make the entire row (incl. blank area right of the text)
             // clickable, not just the text/icon glyphs.
@@ -249,9 +273,22 @@ struct SettingsView: View {
 
     // v2.9.12: content header with the × close button (no window titlebar).
     private var overlayHeader: some View {
-        HStack {
-            Text(selectedCategory.title)
-                .font(.system(size: 16, weight: .semibold))
+        HStack(spacing: 12) {
+            ZStack {
+                RoundedRectangle(cornerRadius: 9, style: .continuous)
+                    .fill(Color.accentColor.opacity(colorScheme == .dark ? 0.20 : 0.12))
+                    .frame(width: 34, height: 34)
+                Image(systemName: selectedCategory.icon)
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundColor(.accentColor)
+            }
+            VStack(alignment: .leading, spacing: 2) {
+                Text(selectedCategory.title)
+                    .font(.system(size: 16, weight: .semibold))
+                Text(selectedCategory.subtitle)
+                    .font(.system(size: 11))
+                    .foregroundColor(.secondary)
+            }
             Spacer()
             Button { closeAction() } label: {
                 Image(systemName: "xmark")
@@ -735,25 +772,31 @@ struct SettingsView: View {
 
     private func settingsSection<Content: View>(title: String, icon: String, @ViewBuilder content: () -> Content) -> some View {
         VStack(alignment: .leading, spacing: 14) {
-            HStack(spacing: 8) {
-                Image(systemName: icon)
-                    .foregroundColor(.accentColor)
-                    .frame(width: 20)
+            HStack(spacing: 9) {
+                ZStack {
+                    RoundedRectangle(cornerRadius: 7, style: .continuous)
+                        .fill(Color.accentColor.opacity(colorScheme == .dark ? 0.20 : 0.11))
+                        .frame(width: 28, height: 28)
+                    Image(systemName: icon)
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundColor(.accentColor)
+                }
                 Text(title)
-                    .font(.system(size: 16, weight: .semibold))
+                    .font(.system(size: 15, weight: .semibold))
             }
             content()
         }
         .padding(18)
-        .frame(maxWidth: 560, alignment: .leading)
+        .frame(maxWidth: .infinity, alignment: .leading)
         .background(
-            RoundedRectangle(cornerRadius: 18, style: .continuous)
+            RoundedRectangle(cornerRadius: 15, style: .continuous)
                 .fill(AppTheme.elevatedBackground(colorScheme))
         )
         .overlay(
-            RoundedRectangle(cornerRadius: 18, style: .continuous)
+            RoundedRectangle(cornerRadius: 15, style: .continuous)
                 .stroke(AppTheme.subtleBorder(colorScheme), lineWidth: 1)
         )
+        .shadow(color: Color.black.opacity(colorScheme == .dark ? 0.14 : 0.05), radius: 8, y: 3)
     }
 
     private func shortcutInput(title: String, subtitle: String, placeholder: String, text: Binding<String>, preview: String) -> some View {

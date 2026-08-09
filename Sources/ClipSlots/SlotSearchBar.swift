@@ -1,158 +1,144 @@
 import SwiftUI
 import ClipSlotsKit
 
-// MARK: - Slot Search Bar (v2.5.1)
+// MARK: - Compact slot search bar
 
 struct SlotSearchBar: View {
     @Binding var searchText: String
     @Binding var selectedFilter: SlotFilterType
     @Binding var searchScope: SlotSearchScope
     @Environment(\.colorScheme) private var colorScheme
-    // v2.9.33: "自动切换" toggle moved here (filter row, rightmost) from the top-right toolbar.
-    // v2.10.0: 统一由 AutoModeState（拨杆3）驱动，与 toolbar 金属拨杆共享同一份内存状态。
-    // v2.10.2: 移除顶部「自动切换」拨杆后，恢复此处按钮为唯一入口，仍绑定 AutoModeState.autoAdvanceEnabled。
-    @ObservedObject private var autoMode = AutoModeState.shared
 
     var body: some View {
-        // v2.9.18: 搜索行与筛选行的散落 spacing 统一收敛到 AppTheme.spacingSmall。
-        VStack(spacing: AppTheme.spacingSmall) {
-            // Search field + scope picker
-            // v2.9.18: 显式声明 .center，确保放大镜、输入框、清除按钮、scope picker 垂直居中对齐。
-            HStack(alignment: .center, spacing: AppTheme.spacingSmall) {
-                Image(systemName: "magnifyingglass")
-                    .foregroundColor(.secondary)
-                    .font(.system(size: 12))
-
-                TextField("搜索槽位、标签、文件名、路径...", text: $searchText)
-                    .textFieldStyle(.plain)
-                    .font(.system(size: 13))
-
-                // P2-30 (v2.10.9): 只在有文本时才显示 × 无法清除「仅设了类型筛选」的情况。
-                // 改为文本非空 或 筛选非 .all 时都显示清除入口。
-                // P2-29 (v2.10.9): × 优先只清文本、保留 selectedFilter（避免同时设了文本+筛选的
-                // 用户仅想清文本却把筛选也丢了）；当文本已空但筛选仍生效时，再点 × 清除筛选。
-                if !searchText.isEmpty || selectedFilter != .all {
-                    Button {
-                        if !searchText.isEmpty {
-                            searchText = ""            // 先只清文本，保留筛选
-                        } else {
-                            selectedFilter = .all      // 文本已空 → 再清筛选
-                        }
-                    } label: {
-                        Image(systemName: "xmark.circle.fill")
-                            .foregroundColor(.secondary)
-                            .font(.system(size: 12))
-                    }
-                    .buttonStyle(.plain)
-                    .contentShape(Rectangle())
-                }
-
-                // Scope picker
-                Picker("", selection: $searchScope) {
-                    ForEach(SlotSearchScope.allCases) { scope in
-                        Label(scope.title, systemImage: scope.systemImage)
-                            .tag(scope)
-                    }
-                }
-                .pickerStyle(.segmented)
-                .frame(width: 110)
-            }
-            .padding(.horizontal, 10)
-            .padding(.vertical, 7)
-            .background(
-                RoundedRectangle(cornerRadius: 10, style: .continuous)
-                    .fill(AppTheme.searchFieldBackground(colorScheme))
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: 10, style: .continuous)
-                    .stroke(AppTheme.searchFieldStroke(colorScheme), lineWidth: 1)
-            )
-
-            // Filter chips + auto-advance toggle（v2.10.2: 恢复行尾「自动切换」按钮，绑定 AutoModeState）
-            HStack(alignment: .center, spacing: AppTheme.spacingSmall) {
-                ScrollView(.horizontal, showsIndicators: false) {
-                    // v2.9.18: chip 间距收敛到 AppTheme.spacingSmall，与搜索行保持一致节奏。
-                    HStack(spacing: AppTheme.spacingSmall) {
-                        ForEach(SlotFilterType.allCases) { filter in
-                            filterChip(filter)
-                        }
+        HStack(alignment: .center, spacing: AppTheme.spacingSmall) {
+            ViewThatFits(in: .horizontal) {
+                HStack(alignment: .center, spacing: AppTheme.spacingSmall) {
+                    searchField
+                        .layoutPriority(2)
+                    ViewThatFits(in: .horizontal) {
+                        filterStrip
+                        filterMenu
                     }
                 }
 
-                autoAdvanceToggle
+                HStack(alignment: .center, spacing: AppTheme.spacingTight) {
+                    searchField
+                        .layoutPriority(2)
+                    filterMenu
+                }
             }
         }
     }
 
-    // v2.9.33: "自动切换" toggle — sits at the rightmost of the filter row so it reads
-    // as part of the same control cluster. On/off states are clearly differentiated by
-    // color fill, border and a filled vs. hollow icon.
-    // v2.10.2: 恢复为「自动切换」的唯一 UI 入口（顶部拨杆已移除），仍与 AutoModeState 同步。
-    private var autoAdvanceToggle: some View {
-        Button {
-            withAnimation(.easeInOut(duration: 0.18)) {
-                autoMode.autoAdvanceEnabled.toggle()
+    private var searchField: some View {
+        HStack(alignment: .center, spacing: AppTheme.spacingSmall) {
+            Image(systemName: "magnifyingglass")
+                .foregroundColor(.secondary)
+                .font(.system(size: 12))
+
+            TextField("搜索槽位…", text: $searchText)
+                .textFieldStyle(.plain)
+                .font(.system(size: 13))
+                .frame(minWidth: 90)
+
+            if !searchText.isEmpty || selectedFilter != .all {
+                Button {
+                    if !searchText.isEmpty { searchText = "" } else { selectedFilter = .all }
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .foregroundColor(.secondary)
+                        .font(.system(size: 12))
+                }
+                .buttonStyle(.plain)
+                .contentShape(Rectangle())
+            }
+
+            ViewThatFits(in: .horizontal) {
+                Picker("", selection: $searchScope) {
+                    ForEach(SlotSearchScope.allCases) { scope in
+                        Label(scope.title, systemImage: scope.systemImage).tag(scope)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .frame(width: 104)
+
+                Menu {
+                    ForEach(SlotSearchScope.allCases) { scope in
+                        Button {
+                            searchScope = scope
+                        } label: {
+                            Label(scope.title, systemImage: searchScope == scope ? "checkmark" : scope.systemImage)
+                        }
+                    }
+                } label: {
+                    Image(systemName: searchScope.systemImage)
+                        .font(.system(size: 11, weight: .semibold))
+                        .frame(width: 24, height: 22)
+                        .background(Capsule().fill(AppTheme.filterChipBackground(colorScheme)))
+                }
+                .menuStyle(.borderlessButton)
+                .menuIndicator(.hidden)
+                .fixedSize()
+                .help("搜索范围：\(searchScope.title)")
+            }
+        }
+        .padding(.horizontal, 9)
+        .padding(.vertical, 6)
+        .background(
+            RoundedRectangle(cornerRadius: 9, style: .continuous)
+                .fill(AppTheme.searchFieldBackground(colorScheme))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 9, style: .continuous)
+                .stroke(AppTheme.searchFieldStroke(colorScheme), lineWidth: 1)
+        )
+    }
+
+    private var filterStrip: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: AppTheme.spacingTight) {
+                ForEach(SlotFilterType.allCases) { filter in filterChip(filter) }
+            }
+        }
+        .frame(minWidth: 150, idealWidth: 330, maxWidth: 390)
+    }
+
+    private var filterMenu: some View {
+        Menu {
+            ForEach(SlotFilterType.allCases) { filter in
+                Button {
+                    selectedFilter = filter
+                } label: {
+                    Label(filter.title, systemImage: selectedFilter == filter ? "checkmark" : filter.systemImage)
+                }
             }
         } label: {
-            HStack(spacing: AppTheme.spacingTight) {
-                Image(systemName: autoMode.autoAdvanceEnabled
-                      ? "arrow.forward.circle.fill"
-                      : "arrow.forward.circle")
-                    .font(.system(size: 10, weight: .semibold))
-                Text("自动切换")
-                    .font(.system(size: 11, weight: .medium))
-            }
-            .padding(.horizontal, 8)
-            .padding(.vertical, 5)
-            .background(
-                Capsule()
-                    .fill(autoMode.autoAdvanceEnabled
-                          ? Color.accentColor.opacity(0.18)
-                          : AppTheme.filterChipBackground(colorScheme))
-            )
-            .overlay(
-                Capsule()
-                    .stroke(autoMode.autoAdvanceEnabled
-                            ? Color.accentColor.opacity(0.55)
-                            : Color.clear,
-                            lineWidth: 1)
-            )
-            .foregroundColor(autoMode.autoAdvanceEnabled
-                             ? Color.accentColor
-                             : AppTheme.filterChipText(colorScheme))
+            Label(selectedFilter.title, systemImage: "line.3.horizontal.decrease.circle")
+                .font(.system(size: 11, weight: .medium))
+                .padding(.horizontal, 7)
+                .padding(.vertical, 5)
+                .background(Capsule().fill(AppTheme.filterChipBackground(colorScheme)))
         }
-        .buttonStyle(.plain)
+        .menuStyle(.borderlessButton)
         .fixedSize()
-        .help("开启后：自动存储/粘贴可跨组、跨页推进；关闭则只在当前组内循环")
+        .help("筛选槽位类型")
     }
 
     private func filterChip(_ filter: SlotFilterType) -> some View {
         let selected = selectedFilter == filter
-
-        return Button {
-            selectedFilter = filter
-        } label: {
-            // v2.9.18: chip 内图标↔文字间距收敛到 AppTheme.spacingTight。
+        return Button { selectedFilter = filter } label: {
             HStack(spacing: AppTheme.spacingTight) {
-                Image(systemName: filter.systemImage)
-                    .font(.system(size: 10, weight: .semibold))
-
-                Text(filter.title)
-                    .font(.system(size: 11, weight: .medium))
+                Image(systemName: filter.systemImage).font(.system(size: 9, weight: .semibold))
+                Text(filter.title).font(.system(size: 10, weight: .medium))
             }
-            .padding(.horizontal, 8)
+            .padding(.horizontal, 7)
             .padding(.vertical, 5)
-            .background(
-                Capsule()
-                    .fill(selected
-                        ? AppTheme.filterChipSelectedBackground(colorScheme)
-                        : AppTheme.filterChipBackground(colorScheme)
-                    )
-            )
+            .background(Capsule().fill(selected
+                ? AppTheme.filterChipSelectedBackground(colorScheme)
+                : AppTheme.filterChipBackground(colorScheme)))
             .foregroundColor(selected
                 ? AppTheme.filterChipSelectedText(colorScheme)
-                : AppTheme.filterChipText(colorScheme)
-            )
+                : AppTheme.filterChipText(colorScheme))
         }
         .buttonStyle(.plain)
     }

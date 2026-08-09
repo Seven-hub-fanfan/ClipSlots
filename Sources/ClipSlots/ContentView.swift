@@ -14,6 +14,15 @@ final class SearchDebounceHolder: ObservableObject {
 }
 
 struct ContentView: View {
+    private static let gridColumns: [Int: [GridItem]] = Dictionary(
+        uniqueKeysWithValues: (1...10).map { count in
+            (count, Array(
+                repeating: GridItem(.flexible(minimum: 240, maximum: 300), spacing: 14),
+                count: count
+            ))
+        }
+    )
+
     // P2-31 (v2.10.9): 已确认 store 的所有权正确——真正的持有者是 @main `ClipSlotsApp`
     // 里的 `@StateObject private var store = SlotStoreObservable()`（main.swift），并以
     // `ContentView(store: store)` 注入。@StateObject 保证其生命周期跨视图重建存活，因此
@@ -26,6 +35,10 @@ struct ContentView: View {
     @State private var showingHotkeyTemplatePopover = false
     // v2.9.8: plugins page popover.
     @State private var showingPlugins = false
+    @State private var showingPageSelector = false
+    @State private var expandedPageId: String?
+    @State private var isPageMultiSelecting = false
+    @State private var selectedPageIds: Set<String> = []
     // v2.9.8: update checker.
     @ObservedObject private var updateChecker = UpdateChecker.shared
     @State private var showingConnectionFullscreen = false
@@ -139,13 +152,20 @@ struct ContentView: View {
                     hotkeyErrorBanner
                 }
 
-                // v2.5: Search bar
-                searchSection
-                    .padding(.horizontal, AppTheme.pagePadding)
-                    .padding(.vertical, 8)
+                // Search results remain in the content area; the controls themselves live in titleBar.
+                if isSearchActive {
+                    searchResultsSection
+                        .padding(.horizontal, AppTheme.pagePadding)
+                        .padding(.vertical, 6)
+                }
 
-                ScrollViewReader { scrollProxy in
-                    ScrollView {
+                GeometryReader { gridGeometry in
+                    let availableWidth = max(0, gridGeometry.size.width - AppTheme.pagePadding * 2)
+                    let columnCount = max(1, Int((availableWidth + 14) / 254))
+                    let columns = Self.gridColumns[columnCount] ?? Self.gridColumns[1]!
+
+                    ScrollViewReader { scrollProxy in
+                        ScrollView {
                         // v2.5: No results hint
                         if searchScope == .currentGroup && isSearchActive && matchedSlotCount == 0 {
                             noResultsView
@@ -153,11 +173,7 @@ struct ContentView: View {
                         }
 
                         LazyVGrid(
-                            columns: [
-                                // v2.7.37: rollback the over-compressed v2.7.36 grid.
-                                // The aggressive 218px cards caused text / thumbnails / buttons to overlap.
-                                GridItem(.adaptive(minimum: 240, maximum: 300), spacing: 14)
-                            ],
+                            columns: columns,
                             spacing: 14
                         ) {
                             ForEach(Array(stride(from: 1, through: store.config.slots, by: 1)), id: \.self) { slot in
@@ -202,7 +218,7 @@ struct ContentView: View {
                         }
                     }
                 }
-
+                }
 
                 bottomBar
             }
@@ -220,11 +236,14 @@ struct ContentView: View {
                 .zIndex(101)
 
             // v2.10.46: 导入进度浮层（槽位包 / 批量文件 / 文件夹导入共用）。非模态：底部悬浮、不阻塞交互。
-            if let progress = store.importProgress {
-                importProgressOverlay(progress)
-                    .transition(.move(edge: .bottom).combined(with: .opacity))
-                    .zIndex(150)
+            Group {
+                if let progress = store.importProgress {
+                    importProgressOverlay(progress)
+                        .transition(.move(edge: .bottom).combined(with: .opacity))
+                }
             }
+            .animation(.easeInOut(duration: 0.2), value: store.importProgress != nil)
+            .zIndex(150)
 
             // v2.9.12: in-app settings overlay (Obsidian-style two-pane).
             // Rendered inside the main window's ZStack so it stays attached to the
@@ -239,9 +258,6 @@ struct ContentView: View {
         .onAppear {
             AppearanceDefaults.ensureDefaultDarkIfNeeded()
         }
-        // v2.10.52 (perf 第四批): Toast 的进出场动画随其状态迁入 TransientOverlayView，这里不再
-        // 引用 store.toastMessage，避免 body 依赖该瞬态状态。
-        .animation(.easeInOut(duration: 0.2), value: store.importProgress != nil)
         // v2.9.12: settings overlay is a modal hotkey-editing safe zone; keep the
         // store flag in sync so business hotkeys don't fire while it is open.
         .onChange(of: showingSettings) { store.isSettingsPresented = $0 }
@@ -467,7 +483,9 @@ struct ContentView: View {
     // Layer 1: Title + Stats + Settings
     private var titleBar: some View {
         HStack(spacing: 14) {
-            ZStack {
+            // The edge clusters keep their intrinsic sizes and stay pinned to the title-bar edges.
+            HStack(spacing: 14) {
+                ZStack {
                 RoundedRectangle(cornerRadius: 12, style: .continuous)
                     .fill(AppTheme.brandGradient(colorScheme))
                     .frame(width: 44, height: 44)
@@ -478,60 +496,53 @@ struct ContentView: View {
                     .foregroundColor(.white)
             }
 
-            VStack(alignment: .leading, spacing: 3) {
+            VStack(alignment: .leading, spacing: 4) {
                 Text("ClipSlots")
                     .font(.system(size: 22, weight: .bold, design: .rounded))
 
-                Text("快速保存、调用和粘贴你的常用剪贴板内容")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-            }
-
-            // v2.9.8: 检查更新入口（标题右侧空白区，月亮图标左边那一排）
-            Button {
-                updateChecker.checkForUpdates()
-            } label: {
-                HStack(spacing: 5) {
-                    if updateChecker.isChecking {
-                        ProgressView()
-                            .controlSize(.small)
-                            .scaleEffect(0.7)
-                    } else {
-                        Image(systemName: "arrow.triangle.2.circlepath")
-                            .font(.system(size: 12, weight: .semibold))
+                Button {
+                    updateChecker.checkForUpdates()
+                    } label: {
+                        HStack(spacing: 5) {
+                            if updateChecker.isChecking {
+                                ProgressView()
+                                    .controlSize(.small)
+                                    .scaleEffect(0.7)
+                            } else {
+                                Image(systemName: "arrow.triangle.2.circlepath")
+                                    .font(.system(size: 11, weight: .semibold))
+                            }
+                            Text(updateChecker.isChecking ? "检查中…" : "检查更新")
+                                .font(.system(size: 11, weight: .medium))
+                        }
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 3)
+                        .background(Color.accentColor.opacity(0.12))
+                        .foregroundColor(.accentColor)
+                        .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
                     }
-                    Text(updateChecker.isChecking ? "检查中…" : "检查更新")
-                        .font(.system(size: 12, weight: .medium))
-                }
-                .padding(.horizontal, 10)
-                .padding(.vertical, 5)
-                .background(Color.accentColor.opacity(0.12))
-                .foregroundColor(.accentColor)
-                .clipShape(Capsule())
+                    .buttonStyle(.borderless)
+                    .disabled(updateChecker.isChecking)
+                    .help("检查是否有新版本")
             }
-            .buttonStyle(.borderless)
-            .disabled(updateChecker.isChecking)
-            .help("检查是否有新版本")
+            }
+            .fixedSize(horizontal: true, vertical: false)
+            .layoutPriority(2)
 
-            // v2.9.22: 版本号从右下角迁移到左上角「检查更新」按钮右侧，靠近版本相关操作更合理。
-            Text("v\(AppVersion.current)")
-                .font(.caption2)
-                .foregroundColor(Color.secondary.opacity(0.75))
-                .help("当前版本 v\(AppVersion.current)\n首次打开 ClipSlots.app 时，macOS 可能提示“无法验证开发者”，请右键点击 App → 选择「打开」→ 点击「打开」确认即可。")
+            leverCluster
+                .fixedSize(horizontal: true, vertical: false)
+                .layoutPriority(2)
 
-            // v2.10.26: 跨组游标提示胶囊移到「第二行」——自动存储 / 自动粘贴 拨杆所在的
-            // actionBar 那一行并水平居中（见 actionBar.overlay(crossGroupCursorHint)）；标题栏不再承载它。
-
-            Spacer()
-
-            statPill(
-                title: "已使用",
-                value: "\(filledSlotCount)/\(store.config.slots)",
-                icon: "checkmark.circle.fill",
-                color: AppTheme.success
+            SlotSearchBar(
+                searchText: $searchText,
+                selectedFilter: $selectedFilter,
+                searchScope: $searchScope
             )
+            .frame(minWidth: 0, idealWidth: 560, maxWidth: .infinity)
+            .layoutPriority(0)
 
-            Button {
+            HStack(spacing: 8) {
+                Button {
                 cycleAppearanceMode()
             } label: {
                 Image(systemName: (ThemeMode(rawValue: appearanceModeRaw) ?? .system).icon)
@@ -591,62 +602,297 @@ struct ContentView: View {
             }
             .buttonStyle(.borderless)
             .help("设置")
+            }
+            .fixedSize(horizontal: true, vertical: false)
+            .layoutPriority(2)
         }
+        .frame(maxWidth: .infinity)
     }
 
     // Layer 2: Page Selector + Actions
     private var actionBar: some View {
         HStack(alignment: .center, spacing: 10) {
-            // Page selector dropdown (v2.4)
-            Menu {
-                ForEach(store.pages) { page in
-                    Button {
-                        store.switchToPage(id: page.id)
-                    } label: {
-                        Label(
-                            page.name,
-                            systemImage: page.id == store.currentPageId ? "checkmark.circle.fill" : "square.grid.2x2"
-                        )
-                    }
-                }
-                Divider()
-                Button("新建页面") { promptCreatePage() }
-                if store.pages.count > 1, let page = store.currentPage {
-                    Button("重命名当前页面") {
-                        promptRenamePage(id: page.id, currentName: page.name)
-                    }
-                    Button("删除当前页面", role: .destructive) {
-                        confirmDeletePage(id: page.id, name: page.name)
-                    }
-                }
+            Button {
+                showingPageSelector.toggle()
             } label: {
-                HStack(spacing: 5) {
-                    Image(systemName: "square.grid.2x2")
-                        .font(.system(size: 11))
+                HStack(spacing: 7) {
+                    ZStack {
+                        RoundedRectangle(cornerRadius: 6, style: .continuous)
+                            .fill(Color.accentColor.opacity(0.16))
+                            .frame(width: 25, height: 25)
+                        Image(systemName: "square.grid.2x2.fill")
+                            .font(.system(size: 10, weight: .semibold))
+                            .foregroundColor(.accentColor)
+                    }
                     Text(store.currentPage?.name ?? "默认页面")
-                        .font(.system(size: 13, weight: .semibold))
+                        .font(.system(size: 12, weight: .semibold))
+                        .lineLimit(1)
+                    Text("\(store.currentPageSlotGroups.count)")
+                        .font(.system(size: 9, weight: .bold, design: .rounded))
+                        .foregroundColor(.secondary)
+                        .padding(.horizontal, 5)
+                        .padding(.vertical, 2)
+                        .background(Capsule().fill(Color.primary.opacity(0.08)))
                     Image(systemName: "chevron.down")
                         .font(.system(size: 8, weight: .bold))
+                        .foregroundColor(.secondary)
                 }
                 .foregroundColor(.primary)
-                .padding(.horizontal, 9)
-                .padding(.vertical, 5)
+                .padding(.leading, 5)
+                .padding(.trailing, 9)
+                .padding(.vertical, 4)
                 .background(
-                    RoundedRectangle(cornerRadius: 6, style: .continuous)
-                        .fill(Color.primary.opacity(0.06))
+                    RoundedRectangle(cornerRadius: 9, style: .continuous)
+                        .fill(Color.primary.opacity(colorScheme == .dark ? 0.09 : 0.055))
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 9, style: .continuous)
+                        .stroke(Color.secondary.opacity(colorScheme == .dark ? 0.20 : 0.13), lineWidth: 0.8)
                 )
             }
-            .menuStyle(.borderlessButton)
+            .buttonStyle(.plain)
             .fixedSize()
+            .popover(isPresented: $showingPageSelector, arrowEdge: .bottom) {
+                pageSelectorPopover
+            }
 
-            // v2.10.0: 金属拨杆（自动存储 / 自动粘贴）。v2.10.2: 自动切换改回搜索栏按钮。
-            leverCluster
+            Spacer(minLength: 8)
 
-            Spacer()
+            autoAdvanceToggle
 
             toolbarActions
         }
         .frame(minHeight: 36, alignment: .center)
+    }
+
+    private var pageSelectorPopover: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 9) {
+                ZStack {
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .fill(Color.primary.opacity(0.88))
+                        .frame(width: 30, height: 30)
+                    Image(systemName: "square.grid.2x2.fill")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundColor(colorScheme == .dark ? .black : .white)
+                }
+                Text("页面导航")
+                    .font(.system(size: 13, weight: .semibold))
+                Spacer()
+                Button {
+                    showingPageSelector = false
+                    promptCreatePage()
+                } label: {
+                    Image(systemName: "plus")
+                        .font(.system(size: 10, weight: .bold))
+                        .frame(width: 24, height: 24)
+                        .background(Circle().fill(Color.primary.opacity(0.07)))
+                }
+                .buttonStyle(.plain)
+                .help("新建页面")
+            }
+            .padding(.horizontal, 10)
+            .padding(.top, 10)
+            .padding(.bottom, 4)
+
+            ScrollView {
+                VStack(spacing: 3) {
+                    ForEach(store.pages) { page in
+                        let isCurrentPage = page.id == store.currentPageId
+                        let isExpanded = expandedPageId == page.id || (expandedPageId == nil && isCurrentPage)
+                        let isSelected = selectedPageIds.contains(page.id)
+                        let pageGroups = store.specialSlots.filter { $0.pageId == page.id }
+
+                        Button {
+                            if isPageMultiSelecting {
+                                if isSelected {
+                                    selectedPageIds.remove(page.id)
+                                } else {
+                                    selectedPageIds.insert(page.id)
+                                }
+                            } else if isExpanded {
+                                withAnimation(.easeOut(duration: 0.16)) {
+                                    expandedPageId = ""
+                                }
+                            } else {
+                                store.switchToPage(id: page.id)
+                                withAnimation(.easeOut(duration: 0.18)) {
+                                    expandedPageId = page.id
+                                }
+                            }
+                        } label: {
+                            HStack(spacing: 9) {
+                                Image(systemName: isCurrentPage ? "folder.fill" : "folder")
+                                    .font(.system(size: 12, weight: .medium))
+                                    .frame(width: 18)
+                                Text(page.name)
+                                    .font(.system(size: 12, weight: isCurrentPage ? .semibold : .medium))
+                                    .lineLimit(1)
+                                Spacer()
+                                Text("\(pageGroups.count)")
+                                    .font(.system(size: 9, weight: .semibold, design: .rounded))
+                                    .foregroundColor(.secondary)
+                                    .padding(.horizontal, 6)
+                                    .padding(.vertical, 2)
+                                    .background(Capsule().fill(Color.primary.opacity(0.07)))
+                                if isPageMultiSelecting {
+                                    Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
+                                        .font(.system(size: 12, weight: .semibold))
+                                        .foregroundColor(isSelected ? .accentColor : .secondary)
+                                } else {
+                                    Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
+                                        .font(.system(size: 8, weight: .bold))
+                                        .foregroundColor(.secondary)
+                                }
+                            }
+                            .foregroundColor(.primary)
+                            .padding(.horizontal, 10)
+                            .frame(height: 36)
+                            .background(
+                                RoundedRectangle(cornerRadius: 9, style: .continuous)
+                                    .fill(isCurrentPage ? Color.primary.opacity(0.075) : Color.clear)
+                            )
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(PageNavigationButtonStyle())
+
+                        if isExpanded && !isPageMultiSelecting {
+                            VStack(spacing: 2) {
+                                ForEach(pageGroups) { group in
+                                    let isCurrentGroup = group.id == store.currentSpecialSlotId
+                                    Button {
+                                        store.switchSpecialSlot(id: group.id)
+                                        showingPageSelector = false
+                                    } label: {
+                                        HStack(spacing: 8) {
+                                            Rectangle()
+                                                .fill(isCurrentGroup ? Color.accentColor : Color.primary.opacity(0.10))
+                                                .frame(width: 1, height: 24)
+                                            Text(group.name)
+                                                .font(.system(size: 11, weight: isCurrentGroup ? .semibold : .regular))
+                                                .lineLimit(1)
+                                            Spacer()
+                                            if isCurrentGroup {
+                                                Image(systemName: "chevron.right")
+                                                    .font(.system(size: 8, weight: .bold))
+                                            }
+                                        }
+                                        .foregroundColor(isCurrentGroup ? .primary : .secondary)
+                                        .padding(.leading, 23)
+                                        .padding(.trailing, 11)
+                                        .frame(height: 31)
+                                        .background(
+                                            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                                .fill(isCurrentGroup ? Color.primary.opacity(0.07) : Color.clear)
+                                        )
+                                        .contentShape(Rectangle())
+                                    }
+                                    .buttonStyle(.plain)
+                                }
+                            }
+                            .transition(.opacity.combined(with: .move(edge: .top)))
+                        }
+                    }
+                }
+                .padding(.horizontal, 6)
+            }
+            .frame(maxHeight: 300)
+
+            Divider()
+
+            HStack(spacing: 10) {
+                if isPageMultiSelecting {
+                    Button(role: .destructive) {
+                        let pageIds = selectedPageIds
+                        for pageId in pageIds {
+                            store.deletePage(id: pageId)
+                        }
+                        selectedPageIds.removeAll()
+                        withAnimation(.easeOut(duration: 0.15)) {
+                            isPageMultiSelecting = false
+                        }
+                    } label: {
+                        Label("删除 \(selectedPageIds.count)", systemImage: "trash")
+                    }
+                    .disabled(selectedPageIds.isEmpty)
+
+                    Button {
+                        selectedPageIds.removeAll()
+                        withAnimation(.easeOut(duration: 0.15)) {
+                            isPageMultiSelecting = false
+                        }
+                    } label: {
+                        Text("取消")
+                    }
+                } else {
+                    if store.pages.count > 1, let page = store.currentPage {
+                        Button {
+                            showingPageSelector = false
+                            promptRenamePage(id: page.id, currentName: page.name)
+                        } label: {
+                            Label("重命名", systemImage: "pencil")
+                        }
+                        Button(role: .destructive) {
+                            showingPageSelector = false
+                            confirmDeletePage(id: page.id, name: page.name)
+                        } label: {
+                            Label("删除", systemImage: "trash")
+                        }
+                    }
+
+                    Button {
+                        selectedPageIds.removeAll()
+                        withAnimation(.easeOut(duration: 0.15)) {
+                            isPageMultiSelecting = true
+                        }
+                    } label: {
+                        Label("多选", systemImage: "checkmark.circle")
+                    }
+                }
+
+                Spacer()
+
+                Button {
+                    showingPageSelector = false
+                    isPageMultiSelecting = false
+                    selectedPageIds.removeAll()
+                } label: {
+                    Text("完成")
+                        .fontWeight(.semibold)
+                }
+            }
+            .font(.system(size: 10.5))
+            .buttonStyle(.borderless)
+            .padding(.horizontal, 11)
+            .padding(.bottom, 9)
+        }
+        .frame(width: 252)
+    }
+
+    private var autoAdvanceToggle: some View {
+        Button {
+            autoMode.autoAdvanceEnabled.toggle()
+        } label: {
+            HStack(spacing: AppTheme.spacingTight) {
+                Image(systemName: autoMode.autoAdvanceEnabled ? "arrow.forward.circle.fill" : "arrow.forward.circle")
+                    .font(.system(size: 10, weight: .semibold))
+                Text("自动切换")
+                    .font(.system(size: 11, weight: .medium))
+            }
+            .padding(.horizontal, 8)
+            .padding(.vertical, 5)
+            .background(Capsule().fill(autoMode.autoAdvanceEnabled
+                ? Color.accentColor.opacity(0.18)
+                : AppTheme.filterChipBackground(colorScheme)))
+            .overlay(Capsule().stroke(autoMode.autoAdvanceEnabled
+                ? Color.accentColor.opacity(0.55) : Color.clear, lineWidth: 1))
+            .foregroundColor(autoMode.autoAdvanceEnabled
+                ? Color.accentColor : AppTheme.filterChipText(colorScheme))
+            .animation(.easeInOut(duration: 0.18), value: autoMode.autoAdvanceEnabled)
+        }
+        .buttonStyle(.plain)
+        .fixedSize()
+        .help("开启后：自动存储/粘贴可跨组、跨页推进；关闭则只在当前组内循环")
     }
 
     // v2.10.0: 金属拨杆并排，与现有操作按钮用分隔线区分。
@@ -683,9 +929,15 @@ struct ContentView: View {
             Divider().frame(height: 26)
         }
         .fixedSize()
-        .onChange(of: autoMode.autoStoreEnabled) { _ in store.recomputeAutoPreviews() }
-        .onChange(of: autoMode.autoPasteEnabled) { _ in store.recomputeAutoPreviews() }
-        .onChange(of: autoMode.autoAdvanceEnabled) { _ in store.recomputeAutoPreviews() }
+        .onChange(of: autoMode.autoStoreEnabled) { _ in
+            DispatchQueue.main.async { store.recomputeAutoPreviews() }
+        }
+        .onChange(of: autoMode.autoPasteEnabled) { _ in
+            DispatchQueue.main.async { store.recomputeAutoPreviews() }
+        }
+        .onChange(of: autoMode.autoAdvanceEnabled) { _ in
+            DispatchQueue.main.async { store.recomputeAutoPreviews() }
+        }
     }
 
     // v2.10.1: 拨杆 + 下方一对「回退 / 重置」游标控制按钮（拨杆关时置灰不可点）。
@@ -747,15 +999,6 @@ struct ContentView: View {
             .help("导入图片/文件夹，或导入槽位包（.clipslotspack）")
 
             ToolbarActionButton(
-                title: "全部粘贴",
-                icon: "text.line.first.and.arrowtriangle.forward",
-                role: .accent,
-                prominent: true,
-                action: { store.pasteAllSlotsWithConfirmation() }
-            )
-            .help("按顺序粘贴当前槽位组中的全部内容")
-
-            ToolbarActionButton(
                 title: "清空",
                 icon: "trash",
                 role: .destructive,
@@ -773,7 +1016,7 @@ struct ContentView: View {
     // v2.4: renamed from specialSlotTagBar — shows only current page's slot groups
     private var specialSlotTagBar: some View {
         ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 7) {
+            HStack(spacing: 6) {
                 ForEach(store.currentPageSlotGroups) { group in
                     let isCurrent = group.id == store.currentSpecialSlotId
 
@@ -782,26 +1025,27 @@ struct ContentView: View {
                     } label: {
                         HStack(spacing: 5) {
                             Image(systemName: isCurrent ? "folder.fill" : "folder")
+                                .font(.system(size: 11, weight: .semibold))
                             Text(group.name)
                         }
-                        .font(.caption)
-                        .padding(.horizontal, 9)
-                        .padding(.vertical, 5)
+                        .font(.system(size: 12, weight: isCurrent ? .semibold : .medium))
+                        .padding(.horizontal, 10)
+                        .frame(minHeight: 28)
                         .background(
-                            Capsule()
+                            RoundedRectangle(cornerRadius: 8, style: .continuous)
                                 .fill(
                                     isCurrent
-                                    ? Color.accentColor.opacity(0.18)
-                                    : Color.primary.opacity(0.05)
+                                    ? Color.accentColor.opacity(0.20)
+                                    : Color.primary.opacity(0.055)
                                 )
                         )
                         .overlay(
-                            Capsule()
+                            RoundedRectangle(cornerRadius: 8, style: .continuous)
                                 .stroke(
                                     isCurrent
-                                    ? Color.accentColor.opacity(0.45)
-                                    : Color.secondary.opacity(0.15),
-                                    lineWidth: 1
+                                    ? Color.accentColor.opacity(0.50)
+                                    : Color.secondary.opacity(0.16),
+                                    lineWidth: isCurrent ? 1.2 : 0.8
                                 )
                         )
                     }
@@ -826,9 +1070,16 @@ struct ContentView: View {
                     store.createQuickSpecialSlot()
                 } label: {
                     Image(systemName: "plus")
-                        .font(.caption)
-                        .padding(6)
-                        .background(Circle().fill(Color.primary.opacity(0.05)))
+                        .font(.system(size: 11, weight: .semibold))
+                        .frame(width: 28, height: 28)
+                        .background(
+                            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                .fill(Color.primary.opacity(0.055))
+                        )
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                .stroke(Color.secondary.opacity(0.16), lineWidth: 0.8)
+                        )
                 }
                 .buttonStyle(.plain)
                 .disabled(store.currentPageSlotGroups.count >= store.specialSlotSettings.maxSpecialSlots)
@@ -839,9 +1090,16 @@ struct ContentView: View {
                     showingSpecialSlotManagement = true
                 } label: {
                     Image(systemName: "slider.horizontal.3")
-                        .font(.caption)
-                        .padding(6)
-                        .background(Circle().fill(Color.primary.opacity(0.05)))
+                        .font(.system(size: 11, weight: .semibold))
+                        .frame(width: 28, height: 28)
+                        .background(
+                            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                .fill(Color.primary.opacity(0.055))
+                        )
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                .stroke(Color.secondary.opacity(0.16), lineWidth: 0.8)
+                        )
                 }
                 .buttonStyle(.plain)
                 .help("管理槽位组")
@@ -992,23 +1250,6 @@ struct ContentView: View {
         }
     }
 
-    private func statPill(title: String, value: String, icon: String, color: Color) -> some View {
-        HStack(spacing: 7) {
-            Image(systemName: icon)
-                .foregroundColor(color)
-            VStack(alignment: .leading, spacing: 0) {
-                Text(title)
-                    .font(.system(size: 10))
-                    .foregroundColor(.secondary)
-                Text(value)
-                    .font(.system(size: 12, weight: .semibold, design: .rounded))
-            }
-        }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 7)
-        .background(Capsule().fill(AppTheme.chipBackground(colorScheme)))
-    }
-
     private func humanReadableShortcut(_ template: String) -> String {
         shortcutDisplay(template, slotToken: "数字")
     }
@@ -1051,6 +1292,12 @@ struct ContentView: View {
             lastPasteStatusView
 
             Spacer()
+
+            Text("v\(AppVersion.current)")
+                .font(.system(size: 9, weight: .medium, design: .rounded))
+                .foregroundColor(Color.secondary.opacity(0.55))
+                .fixedSize()
+                .help("当前版本 v\(AppVersion.current)\n首次打开 ClipSlots.app 时，macOS 可能提示“无法验证开发者”，请右键点击 App → 选择「打开」→ 点击「打开」确认即可。")
 
             // Connection stays as a separate tool and is moved to the right side.
             // v2.9.24: 当「槽位连接」开关关闭时，底部「连接」入口按钮彻底隐藏（不占位）。
@@ -1323,38 +1570,26 @@ struct ContentView: View {
         }
     }
 
-    private var filledSlotCount: Int {
-        store.slots.values.filter { !$0.isEmpty }.count
-    }
-
     // MARK: - Search (v2.5.1)
 
-    private var searchSection: some View {
+    private var searchResultsSection: some View {
         VStack(spacing: 4) {
-            SlotSearchBar(
-                searchText: $searchText,
-                selectedFilter: $selectedFilter,
-                searchScope: $searchScope
-            )
-
-            if isSearchActive {
-                if searchScope == .currentGroup {
-                    Text(matchedSlotCount == 0
-                         ? "组内未找到匹配槽位"
-                         : "组内找到 \(matchedSlotCount) 个匹配槽位")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                        .padding(.top, 2)
-                } else {
-                    GlobalSearchResultsView(
-                        results: globalSearchResultsCache,
-                        currentPageId: store.currentPageId,
-                        currentGroupId: store.currentSpecialSlotId,
-                        onJump: jumpToSearchResult,
-                        sortRule: $globalSearchSortRule
-                    )
+            if searchScope == .currentGroup {
+                Text(matchedSlotCount == 0
+                     ? "组内未找到匹配槽位"
+                     : "组内找到 \(matchedSlotCount) 个匹配槽位")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
                     .padding(.top, 2)
-                }
+            } else {
+                GlobalSearchResultsView(
+                    results: globalSearchResultsCache,
+                    currentPageId: store.currentPageId,
+                    currentGroupId: store.currentSpecialSlotId,
+                    onJump: jumpToSearchResult,
+                    sortRule: $globalSearchSortRule
+                )
+                .padding(.top, 2)
             }
         }
     }
@@ -2052,5 +2287,14 @@ private struct ConnectionFullscreenAction: View {
         .buttonStyle(.plain)
         .onHover { hovering = $0 }
         .animation(.spring(response: 0.28, dampingFraction: 0.76), value: hovering)
+    }
+}
+
+private struct PageNavigationButtonStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .scaleEffect(configuration.isPressed ? 0.985 : 1)
+            .opacity(configuration.isPressed ? 0.78 : 1)
+            .animation(.easeOut(duration: 0.10), value: configuration.isPressed)
     }
 }

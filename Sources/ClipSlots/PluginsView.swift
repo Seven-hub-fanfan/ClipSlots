@@ -325,21 +325,61 @@ struct PluginsView: View {
             }
     }
 
-    @ViewBuilder
     private func itemIcon(_ item: PluginMarketItem, size: CGFloat, corner: CGFloat) -> some View {
+        let appearance = iconAppearance(for: item)
+        return marketIcon(
+            systemName: appearance.systemName,
+            colors: appearance.colors,
+            size: size,
+            corner: corner
+        )
+    }
+
+    private func iconAppearance(for item: PluginMarketItem) -> (systemName: String, colors: [Color]) {
+        switch item.id {
+        case "clipslots-manager":
+            return ("sparkles", [Color(red: 0.48, green: 0.31, blue: 1.0),
+                                  Color(red: 0.25, green: 0.49, blue: 1.0)])
+        case "espanso":
+            return ("bolt.fill", [Color(red: 1.0, green: 0.69, blue: 0.16),
+                                   Color(red: 1.0, green: 0.43, blue: 0.15)])
+        case "masscode":
+            return ("shippingbox.fill", [Color(red: 0.73, green: 0.43, blue: 0.22),
+                                          Color(red: 0.48, green: 0.25, blue: 0.13)])
+        case "monitorcontrol":
+            return ("display", [Color(red: 0.30, green: 0.42, blue: 0.56),
+                                 Color(red: 0.13, green: 0.19, blue: 0.28)])
+        default:
+            return (item.iconSystemName, [Color.accentColor, Color.accentColor.opacity(0.72)])
+        }
+    }
+
+    private func marketIcon(systemName: String,
+                            colors: [Color],
+                            size: CGFloat,
+                            corner: CGFloat) -> some View {
         ZStack {
             RoundedRectangle(cornerRadius: corner, style: .continuous)
-                .fill(Color.accentColor.opacity(0.12))
-                .frame(width: size, height: size)
-            if let emoji = item.emoji {
-                Text(emoji)
-                    .font(.system(size: size * 0.5))
-            } else {
-                Image(systemName: item.iconSystemName)
-                    .font(.system(size: size * 0.42, weight: .semibold))
-                    .foregroundColor(.accentColor)
-            }
+                .fill(
+                    LinearGradient(
+                        colors: colors,
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
+                    )
+                )
+
+            RoundedRectangle(cornerRadius: corner, style: .continuous)
+                .strokeBorder(Color.white.opacity(scheme == .dark ? 0.20 : 0.34), lineWidth: 0.8)
+
+            Image(systemName: systemName)
+                .font(.system(size: size * 0.43, weight: .semibold))
+                .foregroundStyle(.white)
+                .shadow(color: .black.opacity(0.18), radius: 1, y: 1)
         }
+        .frame(width: size, height: size)
+        .shadow(color: colors.last?.opacity(scheme == .dark ? 0.30 : 0.20) ?? .clear,
+                radius: size * 0.13,
+                y: size * 0.06)
     }
 
     // 卡片状态徽章：仅对可安装到 Agent 的 Skill 反映聚合状态。
@@ -966,13 +1006,13 @@ struct PluginsView: View {
     }
 
     private func communityIcon(size: CGFloat, corner: CGFloat) -> some View {
-        ZStack {
-            RoundedRectangle(cornerRadius: corner, style: .continuous)
-                .fill(Color.accentColor.opacity(0.12))
-                .frame(width: size, height: size)
-            Text("🧩")
-                .font(.system(size: size * 0.5))
-        }
+        marketIcon(
+            systemName: "puzzlepiece.extension.fill",
+            colors: [Color(red: 0.34, green: 0.78, blue: 0.44),
+                     Color(red: 0.17, green: 0.58, blue: 0.40)],
+            size: size,
+            corner: corner
+        )
     }
 
     // 卡片状态控件：已安装绿色 pill；未安装/待更新为可点击安装按钮。

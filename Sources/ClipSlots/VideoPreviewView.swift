@@ -23,11 +23,19 @@ struct VideoPreviewView: View {
                 }
             }
         }
-        .onAppear {
+        .task(id: url) {
             guard player == nil else { return }
-            let newPlayer = AVPlayer(url: url)
-            player = newPlayer
-            newPlayer.play()
+            do {
+                try await Task.sleep(nanoseconds: 140_000_000)
+                try Task.checkCancellation()
+                let newPlayer = AVPlayer(url: url)
+                player = newPlayer
+                newPlayer.play()
+            } catch is CancellationError {
+                return
+            } catch {
+                return
+            }
         }
         .onDisappear {
             player?.pause()

@@ -182,6 +182,16 @@ public struct SlotContent: Codable {
     }
 
     public var preview: String {
+        let key = "\(contentId)::\(updatedAt)::preview" as NSString
+        if let cached = SlotContentPreviewCache.preview.object(forKey: key) {
+            return cached as String
+        }
+        let result = computedPreview
+        SlotContentPreviewCache.preview.setObject(result as NSString, forKey: key)
+        return result
+    }
+
+    private var computedPreview: String {
         for itemList in items {
             for item in itemList {
                 if item.type == "public.utf8-plain-text" || item.type == "NSStringPboardType" {
@@ -240,6 +250,16 @@ public struct SlotContent: Codable {
     }
 
     public var plainText: String? {
+        let key = "\(contentId)::\(updatedAt)::plainText" as NSString
+        if let cached = SlotContentPreviewCache.plainText.object(forKey: key) {
+            return cached === SlotContentPreviewCache.missing ? nil : cached as String
+        }
+        let result = computedPlainText
+        SlotContentPreviewCache.plainText.setObject((result as NSString?) ?? SlotContentPreviewCache.missing, forKey: key)
+        return result
+    }
+
+    private var computedPlainText: String? {
         for itemList in items {
             for item in itemList {
                 if item.type == "public.utf8-plain-text" || item.type == "NSStringPboardType" {
@@ -250,6 +270,20 @@ public struct SlotContent: Codable {
         }
         return nil
     }
+}
+
+private enum SlotContentPreviewCache {
+    static let preview: NSCache<NSString, NSString> = {
+        let cache = NSCache<NSString, NSString>()
+        cache.countLimit = 500
+        return cache
+    }()
+    static let plainText: NSCache<NSString, NSString> = {
+        let cache = NSCache<NSString, NSString>()
+        cache.countLimit = 500
+        return cache
+    }()
+    static let missing = NSString(string: "\u{0}")
 }
 
 public final class ClipboardManager {
