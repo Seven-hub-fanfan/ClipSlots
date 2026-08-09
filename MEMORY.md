@@ -4,11 +4,23 @@
 
 ## 当前版本
 
-- **当前版本：v2.10.66**
+- **当前版本：v2.10.67**
 - 平台：macOS（Swift / SwiftUI，SPM 构建，macOS 13+）
 - 单一版本号事实来源：`Info.plist` 的 `CFBundleShortVersionString`（`AppVersion.current` 动态读取，`AppVersion.fallback` 为编译期兜底）。CLI 版本号见 `Sources/ClipSlotsCLI/main.swift` 的 `CLI_VERSION`。
 
 ## 版本要点（近期）
+
+### v2.10.67 — 自动更新 SHA-256 完整性校验（方案 A：优先 GitHub asset digest，回退 release body）
+- 背景：此前自动更新链路只做「落盘字节数 == asset size」的弱校验（v2.10.9），无法防篡改/中间人替换。GitHub 已原生给该仓库 release 资产返回 `"digest": "sha256:<64位hex>"`，无需改发布流程即可拿到期望哈希，故本版落地加密级完整性校验（方案 A：SHA-256）。
+- **改动（enforce-when-present + warn-when-absent，预留 requireChecksum 强制模式）**：
+  1. **UpdateChecker.swift（期望哈希解析 + 透传）**：`extractDMGURL(from:body:)` 新增 `body` 入参并把返回值从元组升级为 `struct DMGAsset { url; size; sha256? }`。新增 `extractExpectedSHA256(asset:body:)`：来源优先级 ① asset 的 `digest` 字段（去 `sha256:` 前缀取 64 位 hex，兼容个别无前缀情形）；② 回退 `extractSHA256FromBody`——仅在含 "sha256" 关键字（大小写不敏感）的**行内**、用带非-hex 边界的正则 `(?<![0-9a-fA-F])[0-9a-fA-F]{64}(?![0-9a-fA-F])` 取独立 64 位 hex（避免误匹配 40 位 commit hash / 128 位 sha512）。`sha256` 一路透传 `presentUpdateAvailable` → `startDownload`。
+  2. **UpdateDownloader.swift（下载后比对 + 策略）**：`import CryptoKit`；`startDownload` 增参 `expectedSHA256: String?` 并绑定到本次 `URLSessionDownloadTask`（关联对象 `sha256Key`，与既有 version/expectedSize 绑定一致，回调只认自己 task）。`handleFinished` 在原 size 校验（第一道）之后、交 UpdateInstaller 之前：期望哈希非空 → 用私有静态 `sha256HexOfFile(atPath:)`（FileHandle 1MB/块**流式**计算，避免整包载入）算出小写 hex，与期望值**大小写不敏感**比对，不一致视为致命错误（删文件、走现有 `handleFailure` 中文错误提示、中止安装，NSLog 记期望/实际）；期望哈希为空 → 默认继续安装但 NSLog 告警（兼容无哈希的老 release）。
+  3. **requireChecksum 常量（默认 `false`）**：为未来「强制模式」预留——为 `true` 且拿不到期望哈希时直接拒绝更新；默认 `false` 即上面的宽松策略。size 校验保留为第一道，哈希为更强的第二道。
+- 改动文件：`Sources/ClipSlots/UpdateChecker.swift`、`Sources/ClipSlots/UpdateDownloader.swift`、`Sources/ClipSlots/AppVersion.swift`、`Sources/ClipSlotsCLI/main.swift`、`Info.plist`、`MEMORY.md`。
+- version bump：Info.plist ×2 + AppVersion.swift + CLI_VERSION 2.10.66 → 2.10.67
+- commit：`a788f39`（feat+bump 合并）
+- 验证：`swift build` 通过（无新增警告）；23 项 smoke 测试全绿（`swift run ClipSlotsKitSmokeTests`：通过 23，失败 0）。
+- 备注：本版仅本地实现 + 编译 + smoke，未打包 DMG、未上传 GitHub Release；强制模式（requireChecksum=true）待线上所有 release 均带 digest / 正文哈希后再开启。
 
 ### v2.10.66 — 全量 bug 扫描修复批次（数据不变量 / 滚动回归 / 拖拽竞态 + 3 项 Low）
 - 背景：对 v2.10.65 最新代码做了一次全量 bug 扫描，本版落地其中「改动小、无争议、可直接验证」的一批；自动更新加密级完整性校验（方案 A：SHA-256）改动涉及发布流程，另起一版做。

@@ -1,5 +1,6 @@
 import Foundation
 import AppKit
+import CryptoKit
 
 // v2.9.54: 自动下载并安装更新。
 //
@@ -14,6 +15,13 @@ import AppKit
 final class UpdateDownloader: NSObject {
 
     static let shared = UpdateDownloader()
+
+    // v2.10.67: 「强制校验」总开关（方案 A 预留）。
+    //  - false（默认，宽松策略）：拿不到期望 SHA-256 时仅告警并继续安装，兼容无哈希的老 Release；
+    //    拿到了则强制比对，不一致中止。
+    //  - true（强制模式）：拿不到期望 SHA-256 时直接拒绝安装。待所有在线 Release 均带 digest / 正文哈希
+    //    后可切换为 true，彻底杜绝无校验安装。
+    private static let requireChecksum = false
 
     private var session: URLSession?
     private var task: URLSessionDownloadTask?
@@ -32,14 +40,20 @@ final class UpdateDownloader: NSObject {
     // 下载完成后据此校验实际文件大小，>0 时才校验（缺失则跳过）。
     private var expectedSize: Int64 = 0
 
+    // v2.10.67: 从 UpdateChecker 传入的期望 SHA-256（小写 hex，64 位；nil 表示本次未获得）。
+    // 下载完成、大小校验通过后据此做加密级完整性校验（见 handleFinished）。
+    private var expectedSHA256: String?
+
     // UP-1 (v2.10.15): 把每次下载的参数（版本号 / 期望字节数）绑定到对应的 URLSessionDownloadTask
     // 上（关联对象），异步回调只读取“自己 task”上的参数，绝不依赖单例的 self.version / self.expectedSize，
     // 避免快速重下载 / 并发下载时旧任务回调读到被新任务覆盖的值，从而把旧 DMG 搬到错误路径。
+    // v2.10.67: expectedSHA256 同样绑定到 task 上（sha256Key），回调只认自己 task 的期望哈希。
     // nonisolated(unsafe): these are only ever used as stable address tokens for
     // objc associated objects (never read/written as values), so they are safe to
     // reference via `&` from the nonisolated URLSession delegate callbacks.
     nonisolated(unsafe) private static var versionKey: UInt8 = 0
     nonisolated(unsafe) private static var expectedSizeKey: UInt8 = 0
+    nonisolated(unsafe) private static var sha256Key: UInt8 = 0
 
     // v2.10.7: 下载完成、等待安装的 DMG 本地路径。
     private var pendingInstallDMGPath: String?
@@ -51,11 +65,13 @@ final class UpdateDownloader: NSObject {
 
     /// 开始下载指定 DMG。
     /// - Parameter expectedSize: P2-17 (v2.10.9) Release asset 的期望字节数（0 表示未知、跳过校验）。
-    func startDownload(from url: URL, version: String, expectedSize: Int64 = 0) {
+    /// - Parameter expectedSHA256: v2.10.67 Release 的期望 SHA-256（nil 表示本次未获得，按宽松策略处理）。
+    func startDownload(from url: URL, version: String, expectedSize: Int64 = 0, expectedSHA256: String? = nil) {
         // 若已有下载在进行，先取消旧的。
         cancel()
         self.version = version
         self.expectedSize = expectedSize
+        self.expectedSHA256 = expectedSHA256
 
         presentPanel()
 
@@ -67,6 +83,8 @@ final class UpdateDownloader: NSObject {
         // UP-1 (v2.10.15): 把本次下载参数绑定到该 task 自身，回调只认自己 task 上的参数。
         objc_setAssociatedObject(task, &Self.versionKey, version as NSString, .OBJC_ASSOCIATION_COPY_NONATOMIC)
         objc_setAssociatedObject(task, &Self.expectedSizeKey, NSNumber(value: expectedSize), .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
+        // v2.10.67: 期望 SHA-256 也绑定到 task（可为 nil）。
+        objc_setAssociatedObject(task, &Self.sha256Key, expectedSHA256 as NSString?, .OBJC_ASSOCIATION_COPY_NONATOMIC)
         task.resume()
     }
 
@@ -81,6 +99,7 @@ final class UpdateDownloader: NSObject {
         // expectedSize，避免下次下载沿用上一次的校验基准。
         pendingInstallDMGPath = nil
         expectedSize = 0
+        expectedSHA256 = nil
         progressBar?.doubleValue = 0
         dismissPanel()
     }
@@ -179,7 +198,8 @@ final class UpdateDownloader: NSObject {
 
     // UP-1 (v2.10.15): 改为接收「本次下载 task 绑定的」version / expectedSize，不再读取单例成员，
     // 从根本上避免旧任务回调用到被新任务覆盖的值（错误命名 DMG、按错误基准校验大小）。
-    private func handleFinished(tempURL: URL, version: String, expectedSize: Int64) {
+    // v2.10.67: 新增 expectedSHA256（本次 task 绑定的期望哈希，可为 nil），用于大小校验后的完整性校验。
+    private func handleFinished(tempURL: URL, version: String, expectedSize: Int64, expectedSHA256: String?) {
         // 把下载文件挪到一个带 .dmg 后缀的稳定临时路径，再用 Finder 打开。
         let fm = FileManager.default
         // UP-2 (v2.10.30): version/tag_name 来自外部 GitHub Release，直接插值进文件路径存在路径穿越风险
@@ -209,6 +229,36 @@ final class UpdateDownloader: NSObject {
                 handleFailure("下载文件大小校验失败：期望 \(expectedSize) 字节，实际 \(actualSize) 字节。下载可能不完整，请重试。")
                 return
             }
+        }
+
+        // v2.10.67: SHA-256 完整性校验（方案 A，第二道、也是更强的一道；size 校验为第一道）。
+        //  - 拿到期望哈希：流式计算下载文件哈希并做大小写不敏感比对，不一致视为致命错误——删除文件、
+        //    走现有错误提示路径、中止安装，绝不把被篡改/损坏的包装进 /Applications。
+        //  - 未拿到期望哈希：默认（requireChecksum=false）保持原有行为继续安装，仅告警；若开启强制模式
+        //    （requireChecksum=true）则直接拒绝，杜绝无校验安装。
+        if let expected = expectedSHA256, !expected.isEmpty {
+            let expectedLower = expected.lowercased()
+            guard let actual = Self.sha256HexOfFile(atPath: dest.path) else {
+                try? fm.removeItem(at: dest)
+                NSLog("[ClipSlots][Update] SHA-256 校验失败：无法读取下载文件计算哈希，path=\(dest.path)")
+                handleFailure("下载文件完整性校验失败：无法读取文件计算哈希。下载可能已损坏，请重试。")
+                return
+            }
+            if actual != expectedLower {
+                try? fm.removeItem(at: dest)
+                NSLog("[ClipSlots][Update] SHA-256 校验不通过：期望=\(expectedLower) 实际=\(actual)")
+                handleFailure("下载文件完整性校验失败：SHA-256 与官方发布值不一致，文件可能被篡改或下载损坏，已中止安装。请稍后重试。")
+                return
+            }
+            NSLog("[ClipSlots][Update] SHA-256 校验通过：\(actual)")
+        } else if Self.requireChecksum {
+            // 强制模式下拿不到期望哈希：拒绝安装。
+            try? fm.removeItem(at: dest)
+            NSLog("[ClipSlots][Update] 强制校验模式开启但未获得期望 SHA-256，已拒绝安装。")
+            handleFailure("未获得官方完整性校验值（SHA-256），按当前安全策略已中止安装。请前往 GitHub Releases 页面手动下载。")
+            return
+        } else {
+            NSLog("[ClipSlots][Update] 本次未获得期望 SHA-256，跳过完整性校验（宽松策略，兼容无哈希的旧版本发布）。")
         }
 
         session?.finishTasksAndInvalidate()
@@ -299,6 +349,27 @@ final class UpdateDownloader: NSObject {
         let filtered = String(base.filter { allowed.contains($0) })
         return filtered.isEmpty ? "unknown" : filtered
     }
+
+    /// v2.10.67: 流式计算文件的 SHA-256，返回小写 hex 字符串（64 位）。
+    /// 用 FileHandle 分块读取（1MB/块），逐块喂给 CryptoKit 的 SHA256，避免把整个 DMG（可达数十 MB）
+    /// 一次性载入内存。读取/计算过程中任何异常返回 nil，由调用方按致命错误处理。
+    nonisolated private static func sha256HexOfFile(atPath path: String) -> String? {
+        guard let handle = FileHandle(forReadingAtPath: path) else { return nil }
+        defer { try? handle.close() }
+        var hasher = SHA256()
+        let chunkSize = 1024 * 1024 // 1MB
+        while true {
+            let chunk: Data?
+            do {
+                chunk = try handle.read(upToCount: chunkSize)
+            } catch {
+                return nil
+            }
+            guard let data = chunk, !data.isEmpty else { break }
+            hasher.update(data: data)
+        }
+        return hasher.finalize().map { String(format: "%02x", $0) }.joined()
+    }
 }
 
 // MARK: - URLSessionDownloadDelegate
@@ -337,6 +408,8 @@ extension UpdateDownloader: URLSessionDownloadDelegate {
         // 后续在主线程回调开头据此判定是否为当前任务，非当前任务一律丢弃。
         let boundVersion = (objc_getAssociatedObject(downloadTask, &Self.versionKey) as? String) ?? ""
         let boundExpectedSize = (objc_getAssociatedObject(downloadTask, &Self.expectedSizeKey) as? NSNumber)?.int64Value ?? 0
+        // v2.10.67: 读取绑定在本 task 上的期望 SHA-256（可能为 nil）。
+        let boundSHA256 = objc_getAssociatedObject(downloadTask, &Self.sha256Key) as? String
         let taskID = ObjectIdentifier(downloadTask)
         let httpStatus = (downloadTask.response as? HTTPURLResponse)?.statusCode
         // 先同步把文件搬到唯一暂存路径（location 即将被系统删除），后续判定/校验在主线程进行。
@@ -367,7 +440,7 @@ extension UpdateDownloader: URLSessionDownloadDelegate {
                 self.handleFailure("保存下载文件失败：\(moveError.localizedDescription)")
                 return
             }
-            self.handleFinished(tempURL: staging, version: boundVersion, expectedSize: boundExpectedSize)
+            self.handleFinished(tempURL: staging, version: boundVersion, expectedSize: boundExpectedSize, expectedSHA256: boundSHA256)
         }
     }
 

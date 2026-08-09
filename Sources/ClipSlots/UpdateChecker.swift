@@ -76,7 +76,9 @@ final class UpdateChecker: ObservableObject {
                 let notes = (json["body"] as? String) ?? ""
                 // v2.9.54: 解析 Release assets，取第一个 .dmg 的 browser_download_url 用于自动下载。
                 // P2-17 (v2.10.9): 一并取回该 asset 的 size 用于下载后大小校验。
-                let dmgAsset = Self.extractDMGURL(from: json)
+                // v2.10.67: 一并解析期望 SHA-256（asset digest 优先，回退 release body），
+                // 用于下载完成后的加密级完整性校验（方案 A）。body 在此传入以支持回退解析。
+                let dmgAsset = Self.extractDMGURL(from: json, body: notes)
 
                 if Self.compare(latest, isNewerThan: current) {
                     self.presentUpdateAvailable(latestTag: rawTag, pageURL: pageURL, notes: notes, dmgAsset: dmgAsset)
@@ -138,10 +140,20 @@ final class UpdateChecker: ObservableObject {
 
     // MARK: - Alerts
 
+    /// v2.10.67: 承载单个可下载 DMG 资产的解析结果。
+    /// 在 (url, size) 基础上新增可选 `sha256`（期望哈希，统一小写 hex，64 位；无则 nil），
+    /// 由 `extractDMGURL` 一路透传到 `UpdateDownloader.startDownload` 做完整性校验。
+    struct DMGAsset {
+        let url: URL
+        let size: Int64
+        let sha256: String?
+    }
+
     /// v2.9.54: 从 Release JSON 的 assets 中取第一个 .dmg 的 browser_download_url。
     /// P2-17 (v2.10.9): 同时返回该 asset 的 `size`（字节数），下游 UpdateDownloader 在下载
     /// 完成后据此校验下载文件大小，防止把被截断/不完整的包安装进 /Applications。
-    static func extractDMGURL(from json: [String: Any]) -> (url: URL, size: Int64)? {
+    /// v2.10.67: 额外解析期望 SHA-256（见 `extractExpectedSHA256`），下游据此做加密级完整性校验。
+    static func extractDMGURL(from json: [String: Any], body: String) -> DMGAsset? {
         guard let assets = json["assets"] as? [[String: Any]] else { return nil }
         for asset in assets {
             if let name = asset["name"] as? String,
@@ -154,13 +166,65 @@ final class UpdateChecker: ObservableObject {
                url.scheme?.lowercased() == "https" {
                 // size 可能是 Int / NSNumber，缺失时置 0（下游据 >0 判定是否校验）。
                 let size = (asset["size"] as? NSNumber)?.int64Value ?? 0
-                return (url, size)
+                // v2.10.67: 期望 SHA-256——优先 asset digest，回退 release body。
+                let sha256 = Self.extractExpectedSHA256(asset: asset, body: body)
+                return DMGAsset(url: url, size: size, sha256: sha256)
             }
         }
         return nil
     }
 
-    private func presentUpdateAvailable(latestTag: String, pageURL: String, notes: String, dmgAsset: (url: URL, size: Int64)?) {
+    // MARK: - SHA-256 期望值解析（v2.10.67）
+
+    /// 解析该 DMG asset 的期望 SHA-256，来源优先级：
+    ///  ① asset 的 `digest` 字段（GitHub 原生返回，形如 `"sha256:<64位hex>"`）——去前缀取 hex；
+    ///  ② 回退到 release `body` 中 "SHA256" 关键字附近的第一个 64 位十六进制串
+    ///     （见 `extractSHA256FromBody`，用于兼容仅在正文写了哈希的 Release）。
+    /// 统一返回小写 hex；解析失败返回 nil（下游据此走「宽松/强制」策略）。
+    static func extractExpectedSHA256(asset: [String: Any], body: String) -> String? {
+        // ① asset digest（大小写不敏感识别前缀）。
+        if let digest = (asset["digest"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) {
+            let lower = digest.lowercased()
+            let prefix = "sha256:"
+            if lower.hasPrefix(prefix) {
+                let hex = String(lower.dropFirst(prefix.count))
+                if isValidSHA256Hex(hex) { return hex }
+            } else if isValidSHA256Hex(lower) {
+                // 兜底：个别情况下 digest 可能不带前缀，只要是合法 64 位 hex 也接受。
+                return lower
+            }
+        }
+        // ② 回退到 release body 文本解析。
+        return extractSHA256FromBody(body)
+    }
+
+    /// 从 release body 里解析期望 SHA-256：仅在包含 "sha256" 关键字（大小写不敏感）的行内
+    /// 查找**独立的** 64 位十六进制串，避免误匹配 commit hash（40 位）或 SHA-512（128 位）等。
+    /// 命中第一条即返回（小写 hex）；无匹配返回 nil。
+    static func extractSHA256FromBody(_ body: String) -> String? {
+        guard !body.isEmpty else { return nil }
+        // 前后加“非 hex 字符”边界，防止把更长 hex 串（如 sha512 的 128 位）的前 64 位截出来。
+        guard let regex = try? NSRegularExpression(
+            pattern: "(?<![0-9a-fA-F])[0-9a-fA-F]{64}(?![0-9a-fA-F])"
+        ) else { return nil }
+        for rawLine in body.split(whereSeparator: { $0 == "\n" || $0 == "\r" }) {
+            let line = String(rawLine)
+            guard line.lowercased().contains("sha256") else { continue }
+            let range = NSRange(line.startIndex..<line.endIndex, in: line)
+            if let match = regex.firstMatch(in: line, options: [], range: range),
+               let r = Range(match.range, in: line) {
+                return String(line[r]).lowercased()
+            }
+        }
+        return nil
+    }
+
+    /// 校验字符串是否为合法的 64 位十六进制（SHA-256）表示。
+    static func isValidSHA256Hex(_ s: String) -> Bool {
+        return s.count == 64 && s.allSatisfy { $0.isHexDigit }
+    }
+
+    private func presentUpdateAvailable(latestTag: String, pageURL: String, notes: String, dmgAsset: DMGAsset?) {
         let alert = NSAlert()
         alert.messageText = "发现新版本 \(latestTag)"
         var info = "当前版本：v\(Self.currentVersion)\n最新版本：\(latestTag)"
@@ -184,7 +248,8 @@ final class UpdateChecker: ObservableObject {
             switch response {
             case .alertFirstButtonReturn:
                 // P2-17 (v2.10.9): 把期望大小一并传给下载器，下载完成后校验字节数。
-                UpdateDownloader.shared.startDownload(from: dmgAsset.url, version: latestTag, expectedSize: dmgAsset.size)
+                // v2.10.67: 同时传入期望 SHA-256，下载器据此做加密级完整性校验（方案 A）。
+                UpdateDownloader.shared.startDownload(from: dmgAsset.url, version: latestTag, expectedSize: dmgAsset.size, expectedSHA256: dmgAsset.sha256)
             case .alertSecondButtonReturn:
                 if let url = URL(string: pageURL) { NSWorkspace.shared.open(url) }
             default:
