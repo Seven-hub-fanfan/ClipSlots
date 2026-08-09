@@ -151,9 +151,17 @@ struct ContentView: View {
                             spacing: 14
                         ) {
                             ForEach(Array(stride(from: 1, through: store.config.slots, by: 1)), id: \.self) { slot in
+                                // v2.10.65: 把「内容版本」(contentId + updatedAt) 也编进单元格身份。
+                                // 切组时 slots 不清空（v2.10.47 为丝滑保留旧内容），新组单元格会先渲染上一组内容；
+                                // 若身份里不含内容版本，异步读盘提交新内容后单元格 .id 不变，SlotThumbnailView 的
+                                // @StateObject（持有已解码的旧组 NSImage）不会重建 → 旧缩略图卡住，必须切走再切回
+                                // 才刷新。把内容版本编进 .id 后，提交新内容即触发整格重建（含全新 loadState），
+                                // 旧图被丢弃并按新内容重新加载，无需再手动切走切回。
+                                // 空槽 (nil) 用固定 "empty" 兜底，避免 SlotContent() 每次生成随机 contentId 导致抖动重建。
+                                let versionKey = store.slots[slot].map { "\($0.contentId)|\($0.updatedAt)" } ?? "empty"
                                 slotCardView(slot: slot)
                                     .id(
-                                        "\(store.currentPageId)|\(store.currentSpecialSlotId)|\(slot)|"
+                                        "\(store.currentPageId)|\(store.currentSpecialSlotId)|\(slot)|\(versionKey)|"
                                             + (store.slotRenderTokens["\(store.currentSpecialSlotId)::\(slot)"]?.uuidString ?? "stable")
                                     )
                             }
