@@ -4,11 +4,63 @@
 
 ## 当前版本
 
-- **当前版本：v2.10.74**
+- **当前版本：v2.10.82**
 - 平台：macOS（Swift / SwiftUI，SPM 构建，macOS 13+）
 - 单一版本号事实来源：`Info.plist` 的 `CFBundleShortVersionString`（`AppVersion.current` 动态读取，`AppVersion.fallback` 为编译期兜底）。CLI 版本号见 `Sources/ClipSlotsCLI/main.swift` 的 `CLI_VERSION`。
 
 ## 版本要点（近期）
+
+### v2.10.82 — 纯附件槽位 `(空)` 占位居中（★本批正式发布版）
+- 背景：正文为空但有附件（0B 文本 + 附件N）的槽位，`SlotThumbnailView` 文本回退分支把 `(空)` 占位按 `.leading` 左上对齐，观感不居中。
+- 根因链：`SlotContent.preview` 空回退返回字符串 `"(空)"`（`ClipboardManager.swift`）；纯附件槽位 `SlotContent.isEmpty`（`items.isEmpty && attachments.isEmpty`）为 false，故不走完全空槽位的 `EmptySlotThumbnailView`，而是落到 `SlotThumbnailView.fallbackView` 的文本分支。
+- **改动**：`SlotThumbnailView.swift` 新增私有 `isEmptyBodyPlaceholder`（`multilinePreview == "(空)"`）；文本分支的 `.multilineTextAlignment` 与 `.frame(maxWidth:alignment:)` 在该占位时切为 `.center`，否则保持 `.leading`。仅影响正文空但有附件的 `(空)`，不影响有正文文本、图片/视频缩略图、完全空槽位。
+- 验证：`swift build` 通过（仅 WebKit `javaScriptEnabled` 既有 deprecation 警告，无害）；23 项 smoke 全绿（通过 23，失败 0）。
+- version bump：Info.plist ×2 + AppVersion.swift + CLI_VERSION → 2.10.82
+- commit：`a2273be`，已推到默认分支 `main`。
+- DMG SHA256：`47137d95f54ce135a3bf3f9a74b27fed04d31b5fc26f803d70e4a37a7771ae3b`（`build/ClipSlots_v2.10.82.dmg`）。
+- Release：https://github.com/Seven-hub-fanfan/ClipSlots/releases/tag/v2.10.82（本批 v2.10.75→82 唯一发到 GitHub Release 的版本，自动更新只读 latest，中间版本仅本地打包直装未发 Release）。
+- **本机已装**：`/Applications/ClipSlots.app` 与 PATH `clipslots`（→ `.app/Contents/MacOS/clipslots-cli`）均为 2.10.82。
+
+### v2.10.81 — 切主题顶部氛围层卡旧色根治（去静态栅格 + 身份失效）
+- 背景：切换深浅色后顶部工具栏区域背景仍停留旧主题颜色（v2.10.76 引入的回归）。
+- ★关键经验：v2.10.80 只把 ImageRenderer 栅格缓存 key 并入主题维度**无效**——真因是 ImageRenderer 离屏栅格快照 + `drawingGroup()` / `.regularMaterial` 的 Metal / NSVisualEffectView 纹理会卡在旧 appearance；视图 identity 不变时不随主题刷新，只有 resize 才被动纠正。缓存 key 层面改动治不了纹理层。
+- **改动（方案A：去静态化 + 强制身份失效）**：`ContentView.swift` 的 `RetroPosterAmbientBackground` 彻底移除 ImageRenderer 静态栅格缓存（删 `@State raster`/`rasterKey`、`GeometryReader`+`cacheKey`/`quantize`/`rebuildRasterIfNeeded`）；非 resize 常态改为实时 `fullBackground(scheme: effectiveScheme).id(effectiveScheme)`（drawingGroup 保留），resize 期间仍走 `AppTheme.windowBackground(effectiveScheme)` simplified 纯色降级。`headerView` 的 `.background(.regularMaterial)` 改为 `.background(Rectangle().fill(.regularMaterial).id(colorScheme))`，只重建材质层不重建 header 子树。
+- 验证：`swift build` 通过；23 项 smoke 全绿。
+- version bump：Info.plist ×2 + AppVersion.swift + CLI_VERSION → 2.10.81
+- commit：`46c8bc4`，已推到 `main`。
+- DMG SHA256：`50eb0ccac5d0b7359d8cbae55b2135e169c81faf8175c30e28d57b82381990c7`（本地打包直装，未发 Release）。
+
+### v2.10.80 — 切主题背景卡旧色首次尝试（★缓存 key 并入主题维度，实测无效）
+- **改动**：`RetroPosterAmbientBackground` 新增 `@AppStorage("appearanceMode")` 与 `effectiveScheme`，让栅格缓存 key 与栅格配色一致、用捕获配色重建。
+- ★结果：用户实测未解决——问题在 Metal/material 纹理层而非缓存 key，故 v2.10.81 改走「去静态化 + 身份失效」根治。
+- commit：`b9610d5`，已推到 `main`。
+- DMG SHA256：`250036832f34f567b38f986f447aac96aa87f738b1361b34b8c55b72c2e34c5c`（本地打包直装，未发 Release）。
+
+### v2.10.79 — 自动存储/自动粘贴金属摇杆拨动卡顿修复（观察下沉 + 后台化）
+- 背景：拨动自动存储/自动粘贴摇杆时卡顿——`ContentView` 巨型视图对高频 `autoMode` 的响应式读取导致整树重求值；`recomputeAutoPreviews()` 在主线程做跨页/跨组磁盘探测。
+- **改动A（观察下沉）**：`ContentView` 的 `autoMode` 从 `@ObservedObject` 改为非观察 `private let autoMode = AutoModeState.shared`，只透传给局部观察子视图。新增 `LeverClusterView.swift`：`LeverClusterView(store:autoMode:)` 局部 `@ObservedObject` 承接摇杆/游标控制及 3 个 `.onChange`；`AutoAdvanceToggleView(autoMode:)` 局部观察承接自动切换开关。commit：`bc77b90`。
+- **改动B（后台化 + 令牌防错序）**：`main.swift` 新增单调代次令牌 `autoPreviewGeneration`；`recomputeAutoPreviews()` 改为主线程快照状态（pages/specialSlots/config.slots/currentSpecialSlotId/两个游标/pastedChainMembersByGroup）→ 后台执行 `findNextEmptySlot`/`findNextNonEmptySlot` → 回主线程 `guard token == autoPreviewGeneration` 后写 preview，防旧异步结果覆盖新结果。commit：`afb1cf3`。
+- 未采用改动C（ToggleLeverView 内部 `@State internalIsOn`）：A+B 已解决重负载，C 有 Binding 状态分叉风险。
+- 验证：`swift build` 通过；23 项 smoke 全绿。version bump commit：`fa1acf7`（→ 2.10.79）。均已推到 `main`。
+- DMG SHA256：`ecf2dcaacbf9cc622464785a3b165fd072b04842354e9682d6411bed86b9e1a7`（本地打包直装，未发 Release）。
+
+### v2.10.78 — 搜索框整体右移紧挨图标簇
+- **改动**：顶部搜索框整体右移，紧贴右侧图标簇布局。
+- commit：`656d373`（本地打包直装，未发 Release）。
+
+### v2.10.77 — 切组 tab 交互反馈 + 搜索框收窄
+- **改动**：切组 tab 增加交互反馈；顶部搜索框收窄。
+- commit：`6a9ec52`（本地打包直装，未发 Release）。
+
+### v2.10.76 — 性能三阶段（★引入背景离屏栅格缓存，后成为切主题卡旧色隐患）
+- **Phase1（架构治本）**：交互状态下沉 `TransientUIStore` + `SlotCardView` 实现 `Equatable` + 确认 watcher 已异步。commit：`02f0dda`。
+- **Phase2（渲染/体感）**：★海报背景 `RetroPosterAmbientBackground` 引入 ImageRenderer 栅格化静态缓存 + `timeAgo` 分钟粒度缓存。commit：`a3f9e17`。★该静态栅格缓存是后续 v2.10.80/81 切主题顶部卡旧色的根源，v2.10.81 已去除。
+- **Phase3（动画体系统一）**：新增 `Anim` 三档 token（interactive/status/transition），全仓散装曲线就近替换，`ToggleLeverView` 加轻量按压反馈。commit：`709d53e`。
+- version bump commit：`03d1128`（→ 2.10.76，本地打包直装，未发 Release）。
+
+### v2.10.75 — 拖拽 resize 彻底冻结布局
+- **改动**：拖拽 resize 期间锁定量化宽度 + 冻结容器 frame + 关饱和度滤镜，消除每帧重排。
+- commit：`c5651b5`（本地打包直装，未发 Release）。
 
 ### v2.10.74 — 切组/切页「延迟遮罩（Debounced Veil）」，缓存命中零闪动
 - 背景：切组/切页时立即置 `isSwitchingGroup` 会导致即便数据在缓存里瞬时可得也闪一下过渡遮罩（淡化/微模糊），观感不流畅。
