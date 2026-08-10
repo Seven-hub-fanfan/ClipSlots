@@ -216,14 +216,11 @@ struct ContentView: View {
                             }
                         }
                         .padding(AppTheme.pagePadding)
-                        // v2.10.47: 切组过渡——保留旧内容但轻微淡化 + 微模糊，作为「切换中」骨架的底衬；
-                        // 期间禁用点击，避免在旧内容上误操作。新数据就绪后 store.isSwitchingGroup 归 false，
-                        // 内容整体淡入还原（配合 loadSlotsAsync 里的 0.16s 动画）。
-                        .opacity(store.isSwitchingGroup ? 0.35 : 1)
-                        // v2.10.71: 去掉切换期的全网格 .blur(2)——对含 10 张复杂卡片的容器做实时高斯模糊是
-                        // 昂贵的离屏渲染，与切换重建叠加加剧掉帧；仅保留淡化 + GroupSwitchVeil 微光已足够表达「切换中」。
-                        .allowsHitTesting(!store.isSwitchingGroup)
-                        .animation(.easeInOut(duration: 0.16), value: store.isSwitchingGroup)
+                        // v2.10.47: 切组过渡——保留旧内容但轻微淡化，作为「切换中」骨架的底衬；期间禁用点击。
+                        // v2.10.76 (Phase 1 交互状态下沉): 淡化/禁点击/淡入动画迁入 GroupSwitchDimModifier，
+                        // 只观察 store.transientUI.isSwitchingGroup——切组状态变更不再触发整棵 ContentView.body
+                        // 重新求值。视觉与 v2.10.71 完全一致（0.35 透明度 + 0.16s easeInOut，无全网格模糊）。
+                        .modifier(GroupSwitchDimModifier(ui: store.transientUI))
                     }
                     // v2.10.75: resize 期间给 ScrollView 显式固定宽度=锁定的 layoutWidth，让 AppKit 窗口
                     // 拉伸而 SwiftUI 内容尺寸不动（宁可露底色也保帧率）；非 resize 时 width=nil 恢复自适应。
@@ -231,11 +228,9 @@ struct ContentView: View {
                     .background(AppTheme.windowBackground(colorScheme))
                     .transaction { $0.animation = nil }
                     // v2.10.47: 切组过渡遮罩——柔和高光扫过淡化后的旧内容，表示「正在切换/加载」。
+                    // v2.10.76 (Phase 1): 遮罩显隐迁入 GroupSwitchVeilOverlay，只观察 store.transientUI。
                     .overlay {
-                        if store.isSwitchingGroup {
-                            GroupSwitchVeil()
-                                .transition(.opacity)
-                        }
+                        GroupSwitchVeilOverlay(ui: store.transientUI)
                     }
                     // v2.9.37: when the footer "上次粘贴" button flashes a slot, scroll it
                     // into view so the highlighted card is always visible after the jump.
@@ -1508,6 +1503,9 @@ struct ContentView: View {
             onUpdateDrag: nil,
             onEndDrag: nil
         )
+        // v2.10.76 (Phase 1.2): 让 SwiftUI 用 SlotCardView 的 Equatable 判定跳过未变卡片的 body 求值。
+        // 只有 thumbnailKey/label/快捷键/上次粘贴/高亮/连线等视觉输入变化的那张卡片才重算 body。
+        .equatable()
         // v2.10.3 (P2): 放左上角，避开右上角的「上次粘贴」角标，避免两者堆叠遮挡。
         .overlay(alignment: .topLeading) { cursorBadges(slot: slot) }
         .opacity(!isSearchActive || isMatched ? 1.0 : 0.22)
@@ -1519,32 +1517,10 @@ struct ContentView: View {
 
     // v2.10.1: 槽位格子右上角叠加游标角标——绿色 = 下一次自动存储写入点，蓝色 = 下一次自动粘贴读取点。
     // 仅在对应拨杆开启且预览命中该槽位时显示；两者可同时出现（并排避免重叠）。
-    @ViewBuilder
+    // v2.10.76 (Phase 1 交互状态下沉): 改为独立的 CursorBadgesView（只观察 store.transientUI + autoMode），
+    // 使游标预览变更（recomputeAutoPreviews）只重绘这 10 个极小的角标视图，不再触发整棵 ContentView.body。
     private func cursorBadges(slot: Int) -> some View {
-        let addr = SlotAddress(groupId: store.currentSpecialSlotId, slot: slot)
-        let showWrite = autoMode.autoStoreEnabled && store.autoStorePreview == addr
-        let showRead = autoMode.autoPasteEnabled && store.autoPastePreview == addr
-        if showWrite || showRead {
-            HStack(spacing: 3) {
-                if showWrite {
-                    cursorDot(color: .green)
-                        .help("下一次 Opt+1 自动存储会写这里")
-                }
-                if showRead {
-                    cursorDot(color: .blue)
-                        .help("下一次 Cmd+1 自动粘贴会读这里")
-                }
-            }
-            .padding(7)
-        }
-    }
-
-    private func cursorDot(color: Color) -> some View {
-        Circle()
-            .fill(color)
-            .frame(width: 10, height: 10)
-            .overlay(Circle().stroke(Color.white.opacity(0.9), lineWidth: 1.5))
-            .shadow(color: color.opacity(0.55), radius: 2)
+        CursorBadgesView(slot: slot, groupId: store.currentSpecialSlotId, ui: store.transientUI, autoMode: autoMode)
     }
 
     // MARK: - P2-25 (v2.10.9) 跨组游标提示
@@ -1553,69 +1529,12 @@ struct ContentView: View {
     // 已推进到别的组/页（跨组推进场景），当前视图看不到任何角标，用户会困惑。这里在搜索区
     // 下方给出一条轻量的胶囊提示，指明写/读游标实际所在的页/组/槽位。
 
-    /// 若地址指向的组不是当前查看组，返回「页 / 组 · 槽位 N」描述；否则返回 nil（当前组已有角标）。
-    private func crossGroupCursorLabel(_ addr: SlotAddress?) -> String? {
-        guard let addr,
-              addr.groupId != store.currentSpecialSlotId,
-              let group = store.specialSlots.first(where: { $0.id == addr.groupId }) else {
-            return nil
-        }
-        let pageName = store.pages.first(where: { $0.id == group.pageId })?.name
-        let pagePart = pageName.map { "\($0) / " } ?? ""
-        return "\(pagePart)\(group.name) · 槽位 \(addr.slot)"
-    }
-
+    // v2.10.76 (Phase 1 交互状态下沉): 跨组游标提示改为独立的 CrossGroupCursorHintView。
+    // 它同时观察 store（specialSlots/pages/currentSpecialSlotId 供文案与跳转）与 store.transientUI
+    // （游标预览）——预览变更只重绘这条胶囊提示，不再触发整棵 ContentView.body。
     @ViewBuilder
     private var crossGroupCursorHint: some View {
-        let writeHint = autoMode.autoStoreEnabled ? crossGroupCursorLabel(store.autoStorePreview) : nil
-        let readHint = autoMode.autoPasteEnabled ? crossGroupCursorLabel(store.autoPastePreview) : nil
-        if writeHint != nil || readHint != nil {
-            HStack(spacing: 12) {
-                if let writeHint, let addr = store.autoStorePreview {
-                    Button {
-                        store.jumpToCursorAddress(addr)
-                    } label: {
-                        HStack(spacing: 5) {
-                            Circle().fill(Color.green).frame(width: 7, height: 7)
-                            Text("写游标在其他组：\(writeHint)")
-                            Image(systemName: "arrow.right.circle.fill")
-                                .font(.system(size: 9))
-                                .foregroundColor(.secondary.opacity(0.7))
-                        }
-                    }
-                    .buttonStyle(.plain)
-                    .help("点击跳转到写游标所在槽位")
-                }
-                if let readHint, let addr = store.autoPastePreview {
-                    Button {
-                        store.jumpToCursorAddress(addr)
-                    } label: {
-                        HStack(spacing: 5) {
-                            Circle().fill(Color.blue).frame(width: 7, height: 7)
-                            Text("读游标在其他组：\(readHint)")
-                            Image(systemName: "arrow.right.circle.fill")
-                                .font(.system(size: 9))
-                                .foregroundColor(.secondary.opacity(0.7))
-                        }
-                    }
-                    .buttonStyle(.plain)
-                    .help("点击跳转到读游标所在槽位")
-                }
-            }
-            .font(.caption)
-            .foregroundColor(.secondary)
-            .padding(.horizontal, 10)
-            .padding(.vertical, 5)
-            // v2.10.22: 胶囊改用中高强度磨砂玻璃（.thickMaterial），背景半透明但内容不可辨认、
-            // 只透出色彩基调，观感对齐系统 Popover / 「快捷键模板」弹窗的毛玻璃质感；
-            // 修复此前 .regularMaterial 在标题栏上显得几乎全透明的问题。胶囊内嵌标题栏，不占内容区高度。
-            .background(
-                Capsule()
-                    .fill(.thickMaterial)
-                    .overlay(Capsule().stroke(Color.secondary.opacity(0.18), lineWidth: 0.5))
-            )
-            .shadow(color: .black.opacity(0.12), radius: 4, y: 1)
-        }
+        CrossGroupCursorHintView(store: store, ui: store.transientUI, autoMode: autoMode)
     }
 
     // MARK: - Search (v2.5.1)
@@ -2119,6 +2038,119 @@ struct SlotFramePreferenceKey: PreferenceKey {
 
     static func reduce(value: inout [Int: CGRect], nextValue: () -> [Int: CGRect]) {
         value.merge(nextValue(), uniquingKeysWith: { _, new in new })
+    }
+}
+
+// MARK: - v2.10.76 (Phase 1 交互状态下沉) 只观察 TransientUIStore 的游标提示子视图
+//
+// 这两个视图承接原先写在 ContentView.body 里、直接读取主 store 游标预览的两处 UI。迁到独立视图后，
+// 它们各自持有 @ObservedObject 观察 store.transientUI（游标预览）+ autoMode（拨杆开关）；游标预览的
+// 高频重算（recomputeAutoPreviews）只重绘这些小视图，不再触发整棵 ContentView.body 与 10 张卡片重算。
+// 视觉与交互（角标颜色/位置/help、跨组胶囊文案/跳转/磨砂玻璃样式）与迁移前逐像素一致。
+
+/// 槽位格子右上角的写/读游标角标（🟢 写 / 🔵 读）。
+private struct CursorBadgesView: View {
+    let slot: Int
+    let groupId: String
+    @ObservedObject var ui: TransientUIStore
+    @ObservedObject var autoMode: AutoModeState
+
+    var body: some View {
+        let addr = SlotAddress(groupId: groupId, slot: slot)
+        let showWrite = autoMode.autoStoreEnabled && ui.autoStorePreview == addr
+        let showRead = autoMode.autoPasteEnabled && ui.autoPastePreview == addr
+        if showWrite || showRead {
+            HStack(spacing: 3) {
+                if showWrite {
+                    cursorDot(color: .green)
+                        .help("下一次 Opt+1 自动存储会写这里")
+                }
+                if showRead {
+                    cursorDot(color: .blue)
+                        .help("下一次 Cmd+1 自动粘贴会读这里")
+                }
+            }
+            .padding(7)
+        }
+    }
+
+    private func cursorDot(color: Color) -> some View {
+        Circle()
+            .fill(color)
+            .frame(width: 10, height: 10)
+            .overlay(Circle().stroke(Color.white.opacity(0.9), lineWidth: 1.5))
+            .shadow(color: color.opacity(0.55), radius: 2)
+    }
+}
+
+/// 标题栏第二行的「写/读游标在其他组」跨组提示胶囊。
+private struct CrossGroupCursorHintView: View {
+    @ObservedObject var store: SlotStoreObservable
+    @ObservedObject var ui: TransientUIStore
+    @ObservedObject var autoMode: AutoModeState
+
+    /// 若地址指向的组不是当前查看组，返回「页 / 组 · 槽位 N」描述；否则返回 nil（当前组已有角标）。
+    private func crossGroupCursorLabel(_ addr: SlotAddress?) -> String? {
+        guard let addr,
+              addr.groupId != store.currentSpecialSlotId,
+              let group = store.specialSlots.first(where: { $0.id == addr.groupId }) else {
+            return nil
+        }
+        let pageName = store.pages.first(where: { $0.id == group.pageId })?.name
+        let pagePart = pageName.map { "\($0) / " } ?? ""
+        return "\(pagePart)\(group.name) · 槽位 \(addr.slot)"
+    }
+
+    @ViewBuilder
+    var body: some View {
+        let writeHint = autoMode.autoStoreEnabled ? crossGroupCursorLabel(ui.autoStorePreview) : nil
+        let readHint = autoMode.autoPasteEnabled ? crossGroupCursorLabel(ui.autoPastePreview) : nil
+        if writeHint != nil || readHint != nil {
+            HStack(spacing: 12) {
+                if let writeHint, let addr = ui.autoStorePreview {
+                    Button {
+                        store.jumpToCursorAddress(addr)
+                    } label: {
+                        HStack(spacing: 5) {
+                            Circle().fill(Color.green).frame(width: 7, height: 7)
+                            Text("写游标在其他组：\(writeHint)")
+                            Image(systemName: "arrow.right.circle.fill")
+                                .font(.system(size: 9))
+                                .foregroundColor(.secondary.opacity(0.7))
+                        }
+                    }
+                    .buttonStyle(.plain)
+                    .help("点击跳转到写游标所在槽位")
+                }
+                if let readHint, let addr = ui.autoPastePreview {
+                    Button {
+                        store.jumpToCursorAddress(addr)
+                    } label: {
+                        HStack(spacing: 5) {
+                            Circle().fill(Color.blue).frame(width: 7, height: 7)
+                            Text("读游标在其他组：\(readHint)")
+                            Image(systemName: "arrow.right.circle.fill")
+                                .font(.system(size: 9))
+                                .foregroundColor(.secondary.opacity(0.7))
+                        }
+                    }
+                    .buttonStyle(.plain)
+                    .help("点击跳转到读游标所在槽位")
+                }
+            }
+            .font(.caption)
+            .foregroundColor(.secondary)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 5)
+            // v2.10.22: 胶囊改用中高强度磨砂玻璃（.thickMaterial），背景半透明但内容不可辨认、
+            // 只透出色彩基调，观感对齐系统 Popover / 「快捷键模板」弹窗的毛玻璃质感。
+            .background(
+                Capsule()
+                    .fill(.thickMaterial)
+                    .overlay(Capsule().stroke(Color.secondary.opacity(0.18), lineWidth: 0.5))
+            )
+            .shadow(color: .black.opacity(0.12), radius: 4, y: 1)
+        }
     }
 }
 

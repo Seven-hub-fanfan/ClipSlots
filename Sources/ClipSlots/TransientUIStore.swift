@@ -23,6 +23,33 @@ final class TransientUIStore: ObservableObject {
 
     /// 顶部浮层提示（保存 / 覆盖 / 复制结果摘要等）；`nil` 表示不显示。
     @Published var floatingNotice: FloatingNotice?
+
+    // v2.10.76 (架构治本 · Phase 1 交互状态下沉):
+    //
+    // 把「纯交互 / 瞬态高频」状态从巨型主 `SlotStoreObservable`（30+ @Published）继续下沉到这里。
+    // 背景：主 store 的任一 @Published 变更都会令 `objectWillChange` 发射，从而让以
+    // `@ObservedObject store` 观察它的整棵 `ContentView.body`（含 10 张槽位卡片的 LazyVGrid）全部
+    // 重新求值。而下列状态只影响极小的局部视觉（切组遮罩 / 游标角标 / 连线口 hover），与主网格内容
+    // 无关，却因挂在主 store 上而波及全网格重算。迁到本独立 store 后，由专门观察 `TransientUIStore`
+    // 的小型子视图（GroupSwitchDimModifier / GroupSwitchVeilOverlay / CursorBadgesView /
+    // CrossGroupCursorHintView）单独承接，其高频变更不再触发主 store.objectWillChange。
+    //
+    // 主 store 侧保留同名「转发计算属性」（见 main.swift），内部逻辑读写不变，仅存储落到这里；
+    // 因此 v2.10.74 的延迟遮罩 token 机制、endGroupSwitchTransition、1.2s 兜底关闭全部等价保留
+    // （token/定时器仍在主 store，只是 isSwitchingGroup 的最终读写落到本 store 的 @Published）。
+
+    /// v2.10.47/74: 切组/切页过渡态。为 true 时表示「已切到新组、新数据尚在后台异步读盘」。
+    /// 仅驱动切组遮罩与旧内容淡化，token/兜底逻辑仍在主 store 的 begin/endGroupSwitchTransition。
+    @Published var isSwitchingGroup: Bool = false
+
+    /// v2.10.1: 下一次 Opt+1 自动存储会写入的空槽（绿色写游标角标）。
+    @Published var autoStorePreview: SlotAddress? = nil
+    /// v2.10.1: 下一次 Cmd+1 自动粘贴会读取的非空槽（蓝色读游标角标）。
+    @Published var autoPastePreview: SlotAddress? = nil
+
+    /// v2.7.0: 当前 hover 的槽位（连线口显隐判定用）。历史上从未被写入（卡片 hover 用卡片内部
+    /// @State），此处下沉以统一交互态归属，不改变行为。
+    @Published var hoveredSlot: Int? = nil
 }
 
 /// v2.10.52 (perf 第四批): 独立承载 Toast + 浮层提示的覆盖层子视图，只观察 `TransientUIStore`。

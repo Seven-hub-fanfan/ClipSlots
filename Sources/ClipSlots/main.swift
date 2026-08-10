@@ -241,8 +241,17 @@ final class SlotStoreObservable: ObservableObject {
     // - autoStorePreview：下一次 Opt+1 自动存储会写入的空槽（绿色写游标角标）
     // - autoPastePreview：下一次 Cmd+1 自动粘贴会读取的非空槽（蓝色读游标角标）
     // 随游标推进 / 回退 / 重置、内容变化、拨杆切换实时重算。
-    @Published var autoStorePreview: SlotAddress? = nil
-    @Published var autoPastePreview: SlotAddress? = nil
+    // v2.10.76 (Phase 1 交互状态下沉): 存储迁至 transientUI（独立 ObservableObject），主 store 仅保留
+    // 同名转发计算属性——内部逻辑读写不变，但其变更不再触发主 store.objectWillChange 波及整棵
+    // ContentView.body；改由观察 transientUI 的 CursorBadgesView / CrossGroupCursorHintView 单独承接。
+    var autoStorePreview: SlotAddress? {
+        get { transientUI.autoStorePreview }
+        set { transientUI.autoStorePreview = newValue }
+    }
+    var autoPastePreview: SlotAddress? {
+        get { transientUI.autoPastePreview }
+        set { transientUI.autoPastePreview = newValue }
+    }
     // v2.10.52 (perf 第四批 · 巨型 @Published Store 拆分): Toast / 浮层提示等瞬态覆盖层状态迁到
     // 独立的 TransientUIStore，避免其高频变更（几乎每次切组/保存/复制都会弹 Toast）触发主
     // store.objectWillChange、波及整棵 ContentView.body 与全部槽位卡片重绘。用只读引用持有，
@@ -256,7 +265,14 @@ final class SlotStoreObservable: ObservableObject {
     // v2.10.47: 切组/切页过渡态。为 true 时表示「已切到新组、新数据尚在后台异步读盘」，此窗口内
     // 主体内容仍保留旧组内容并叠一层轻微骨架/淡化遮罩（见 ContentView），待新数据就绪后整体淡入替换，
     // 消除 v2.10.42 附件外置后「切组瞬间全槽位闪成空槽位占位」的中间态。仅驱动 UI，不预加载、不增内存。
-    @Published var isSwitchingGroup: Bool = false
+    // v2.10.76 (Phase 1 交互状态下沉): 存储迁至 transientUI，主 store 保留同名转发计算属性。切组遮罩
+    // 的置位/复位（begin/endGroupSwitchTransition）改写 transientUI.isSwitchingGroup，其变更只触发
+    // 观察 transientUI 的 GroupSwitchDimModifier / GroupSwitchVeilOverlay 重绘，不再波及整棵 ContentView.body。
+    // v2.10.74 的延迟 token + 1.2s 兜底逻辑（下方 begin/endGroupSwitchTransition）完全等价保留。
+    var isSwitchingGroup: Bool {
+        get { transientUI.isSwitchingGroup }
+        set { transientUI.isSwitchingGroup = newValue }
+    }
 
     // v2.10.47: 兜底令牌——每次开启切组遮罩时自增；配合 asyncAfter 兜底关闭，避免任何异常路径下
     // 遮罩永久卡住（正常情况下 loadSlotsAsync/reloadAllAsync 提交新数据时即会关闭）。
@@ -375,7 +391,12 @@ final class SlotStoreObservable: ObservableObject {
     // v2.7.0: Slot connection state
     @Published var currentConnectionMap: SlotConnectionMap = .empty
     @Published var isConnectionModeEnabled: Bool = false
-    @Published var hoveredSlot: Int? = nil
+    // v2.10.76 (Phase 1 交互状态下沉): hoveredSlot 存储迁至 transientUI，保留同名转发计算属性。
+    // 历史上从未被写入（卡片 hover 用卡片内部 @State），仅 shouldShowPorts 读取，行为不变。
+    var hoveredSlot: Int? {
+        get { transientUI.hoveredSlot }
+        set { transientUI.hoveredSlot = newValue }
+    }
     @Published var activeDragConnection: ActiveDragConnection? = nil
     @Published var hoveredPortTarget: SlotPortTarget? = nil
 

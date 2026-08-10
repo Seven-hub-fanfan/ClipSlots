@@ -672,6 +672,47 @@ struct SlotCardView: View {
     }
 }
 
+// MARK: - v2.10.76 (Phase 1.2 · 让 SwiftUI 跳过未变卡片的 body)
+//
+// 主网格是 10 张 SlotCardView 的 ForEach。此前只要 ContentView.body 重新求值（任一 store.slots /
+// labels / 其他 @Published 变更），10 张卡片的值都会被重建，SwiftUI 逐张 diff 其庞大的 body（缩略图 /
+// 元数据 / 动作区 / 多个 overlay），即使只有一张槽位内容真正变化，其余 9 张也白白重算 body。
+//
+// 让 SlotCardView 遵循 Equatable 并在网格里用 `.equatable()` 包裹后，SwiftUI 会先用下面的 == 判断：
+// 输入等价则直接复用上一帧渲染、跳过 body 求值。这样「保存 1 号槽 / hover / 切页」只让真正变动的那张
+// 卡片重算 body，其余卡片零成本。
+//
+// == 覆盖了所有影响本卡片自身渲染的输入：
+//   • thumbnailKey：编码 (specialSlotId, slot, contentId, updatedAt)，空槽固定为 ::empty——它既是
+//     缩略图/预览/元数据/可编辑性的内容版本键（保证 v2.10.73 keyed 缩略图刷新正确），也天然覆盖
+//     「内容变更 / 覆盖 / 切组切页」；
+//   • label（标题）、saveShortcut/pasteShortcut（按钮与提示文案）；
+//   • isLastPasted（右上角「上次粘贴」角标）、isFlashHighlighted（发光高亮）——最近粘贴视觉输入；
+//   • connectionDotColor / 连线相关（连线口显隐与配色）；
+//   • store 引用身份（附件按钮观察的是同一 store 实例，内容变化经 thumbnailKey 反映）。
+// 注意：卡片内部的 hover（isHovering）、编辑态等是 @State，Equatable 命中复用时会被 SwiftUI 原样保留，
+// 不受影响；hover 缩放/描边由卡片自身 onHover 驱动，无需进入 ==。timeAgo 依赖“当前时间”，命中复用时
+// 不会自行走秒——这与迁移前一致（原本也只在 body 重算时刷新），非回归。
+extension SlotCardView: Equatable {
+    static func == (lhs: SlotCardView, rhs: SlotCardView) -> Bool {
+        lhs.slot == rhs.slot
+            && lhs.specialSlotId == rhs.specialSlotId
+            && lhs.content.thumbnailKey(specialSlotId: lhs.specialSlotId, slot: lhs.slot)
+                == rhs.content.thumbnailKey(specialSlotId: rhs.specialSlotId, slot: rhs.slot)
+            && lhs.label == rhs.label
+            && lhs.saveShortcut == rhs.saveShortcut
+            && lhs.pasteShortcut == rhs.pasteShortcut
+            && lhs.isLastPasted == rhs.isLastPasted
+            && lhs.isFlashHighlighted == rhs.isFlashHighlighted
+            && lhs.connectionDotColor == rhs.connectionDotColor
+            && lhs.isConnectionMode == rhs.isConnectionMode
+            && lhs.connectedPorts == rhs.connectedPorts
+            && lhs.highlightedPort == rhs.highlightedPort
+            && lhs.isPortVisible == rhs.isPortVisible
+            && lhs.store === rhs.store
+    }
+}
+
 // MARK: - Slot card action buttons
 
 /// A compact rounded-rectangle style used by the card's primary actions.

@@ -43,3 +43,37 @@ struct GroupSwitchVeil: View {
         .accessibilityHidden(true)
     }
 }
+
+// MARK: - v2.10.76 (Phase 1 交互状态下沉) 切组过渡的局部观察子视图
+//
+// 背景：切组遮罩的两处视觉——① LazyVGrid 的淡化 + 禁点击 + 淡入动画；② 叠在网格上的 shimmer 微光
+// 遮罩——原先直接读 `store.isSwitchingGroup`。该状态挂在巨型主 store 上，其置位/复位会让以
+// `@ObservedObject store` 观察它的整棵 ContentView.body 重新求值（含 10 张卡片的 LazyVGrid ForEach）。
+// v2.10.76 起 isSwitchingGroup 存储迁到 TransientUIStore；下面两个只观察 TransientUIStore 的小视图
+// 承接这两处视觉，切组状态变更只重绘它们、不再波及整棵 ContentView.body。
+// 注意：视觉表现（0.35 透明度、切换期禁点击、0.16s easeInOut 淡入、shimmer 微光）与迁移前完全一致；
+// v2.10.74 的延迟 token / 1.2s 兜底逻辑仍在主 store，未受影响。
+
+/// 应用到 LazyVGrid 上的「切组淡化」修饰器：只观察 TransientUIStore.isSwitchingGroup。
+struct GroupSwitchDimModifier: ViewModifier {
+    @ObservedObject var ui: TransientUIStore
+
+    func body(content: Content) -> some View {
+        content
+            .opacity(ui.isSwitchingGroup ? 0.35 : 1)
+            .allowsHitTesting(!ui.isSwitchingGroup)
+            .animation(.easeInOut(duration: 0.16), value: ui.isSwitchingGroup)
+    }
+}
+
+/// 叠在网格上的切组 shimmer 微光遮罩：只观察 TransientUIStore.isSwitchingGroup。
+struct GroupSwitchVeilOverlay: View {
+    @ObservedObject var ui: TransientUIStore
+
+    var body: some View {
+        if ui.isSwitchingGroup {
+            GroupSwitchVeil()
+                .transition(.opacity)
+        }
+    }
+}
