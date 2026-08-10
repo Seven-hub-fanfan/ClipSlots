@@ -55,7 +55,12 @@ struct ContentView: View {
     // 这里用 @ObservedObject 只是「观察而不持有」是正确用法，无需改动所有权。
     @ObservedObject var store: SlotStoreObservable
     // v2.10.0: 三档金属拨杆共享状态（自动存储 / 自动粘贴 / 自动切换）。
-    @ObservedObject private var autoMode = AutoModeState.shared
+    // v2.10.79 (改动A 观察下沉): 改为非观察的 `let` 引用——ContentView 自身不再订阅 autoMode，
+    // 仅把该引用透传给局部观察它的子视图（LeverClusterView / AutoAdvanceToggleView）以及既有的
+    // CursorBadgesView / CrossGroupCursorHintView。拨杆翻动只重绘这些小簇，不再触发整棵
+    // ContentView.body 重新求值。（全量 grep 已确认 ContentView 内对 autoMode 的响应式读取只在
+    // 摇杆簇与自动切换按钮，其余仅透传，故撤订阅安全、不破坏开关联动。）
+    private let autoMode = AutoModeState.shared
     // v2.10.70: 观察 live-resize 状态，拖拽缩放窗口期间把整窗环境背景降级为纯色填充。
     @ObservedObject private var liveResize = LiveResizeMonitor.shared
     @State private var showingSettings = false
@@ -570,7 +575,7 @@ struct ContentView: View {
             .fixedSize(horizontal: true, vertical: false)
             .layoutPriority(2)
 
-            leverCluster
+            LeverClusterView(store: store, autoMode: autoMode)
                 .fixedSize(horizontal: true, vertical: false)
                 .layoutPriority(2)
 
@@ -706,7 +711,7 @@ struct ContentView: View {
 
             Spacer(minLength: 8)
 
-            autoAdvanceToggle
+            AutoAdvanceToggleView(autoMode: autoMode)
 
             toolbarActions
         }
@@ -917,111 +922,10 @@ struct ContentView: View {
         .frame(width: 252)
     }
 
-    private var autoAdvanceToggle: some View {
-        Button {
-            autoMode.autoAdvanceEnabled.toggle()
-        } label: {
-            HStack(spacing: AppTheme.spacingTight) {
-                Image(systemName: autoMode.autoAdvanceEnabled ? "arrow.forward.circle.fill" : "arrow.forward.circle")
-                    .font(.system(size: 10, weight: .semibold))
-                Text("自动切换")
-                    .font(.system(size: 11, weight: .medium))
-            }
-            .padding(.horizontal, 8)
-            .padding(.vertical, 5)
-            .background(Capsule().fill(autoMode.autoAdvanceEnabled
-                ? Color.accentColor.opacity(0.18)
-                : AppTheme.filterChipBackground(colorScheme)))
-            .overlay(Capsule().stroke(autoMode.autoAdvanceEnabled
-                ? Color.accentColor.opacity(0.55) : Color.clear, lineWidth: 1))
-            .foregroundColor(autoMode.autoAdvanceEnabled
-                ? Color.accentColor : AppTheme.filterChipText(colorScheme))
-            .animation(Anim.status, value: autoMode.autoAdvanceEnabled)
-        }
-        .buttonStyle(.plain)
-        .fixedSize()
-        .help("开启后：自动存储/粘贴可跨组、跨页推进；关闭则只在当前组内循环")
-    }
-
-    // v2.10.0: 金属拨杆并排，与现有操作按钮用分隔线区分。
-    // v2.10.1: 指示灯颜色统一（存储绿 / 粘贴蓝），并为存储/粘贴拨杆加「回退 / 重置」游标按钮。
-    // v2.10.2: 移除「自动切换」拨杆，改回搜索栏右侧按钮（见 SlotSearchBar）。
-    private var leverCluster: some View {
-        HStack(alignment: .center, spacing: 10) {
-            Divider().frame(height: 26)
-
-            leverWithCursorControls(
-                lever: ToggleLeverView(isOn: $autoMode.autoStoreEnabled, label: "自动存储",
-                                       help: "开启后按 Opt+1 会把剪贴板写入下一个空槽",
-                                       indicatorColor: .green),
-                enabled: autoMode.autoStoreEnabled,
-                tint: .green,
-                onBack: { store.autoStoreCursorGoBack() },
-                onReset: { store.autoStoreCursorReset() },
-                backHelp: "回退写游标：撤销最近一次自动存储的推进（回到上一个槽位）",
-                resetHelp: "重置写游标：下次 Opt+1 从第一个空槽重新开始"
-            )
-
-            leverWithCursorControls(
-                lever: ToggleLeverView(isOn: $autoMode.autoPasteEnabled, label: "自动粘贴",
-                                       help: "开启后按 Cmd+1 会从读游标取下一个非空槽粘贴",
-                                       indicatorColor: .blue),
-                enabled: autoMode.autoPasteEnabled,
-                tint: .blue,
-                onBack: { store.autoPasteCursorGoBack() },
-                onReset: { store.autoPasteCursorReset() },
-                backHelp: "回退读游标：可连续点击，逐个非空槽往回退，直到回到开头",
-                resetHelp: "重置读游标：下次 Cmd+1 从当前组第一个非空槽重新开始"
-            )
-
-            Divider().frame(height: 26)
-        }
-        .fixedSize()
-        .onChange(of: autoMode.autoStoreEnabled) { _ in
-            DispatchQueue.main.async { store.recomputeAutoPreviews() }
-        }
-        .onChange(of: autoMode.autoPasteEnabled) { _ in
-            DispatchQueue.main.async { store.recomputeAutoPreviews() }
-        }
-        .onChange(of: autoMode.autoAdvanceEnabled) { _ in
-            DispatchQueue.main.async { store.recomputeAutoPreviews() }
-        }
-    }
-
-    // v2.10.1: 拨杆 + 下方一对「回退 / 重置」游标控制按钮（拨杆关时置灰不可点）。
-    private func leverWithCursorControls(
-        lever: ToggleLeverView,
-        enabled: Bool,
-        tint: Color,
-        onBack: @escaping () -> Void,
-        onReset: @escaping () -> Void,
-        backHelp: String,
-        resetHelp: String
-    ) -> some View {
-        VStack(spacing: 3) {
-            lever
-            HStack(spacing: 5) {
-                cursorControlButton(system: "arrow.uturn.backward", tint: tint, enabled: enabled, help: backHelp, action: onBack)
-                cursorControlButton(system: "backward.end", tint: tint, enabled: enabled, help: resetHelp, action: onReset)
-            }
-        }
-    }
-
-    private func cursorControlButton(system: String, tint: Color, enabled: Bool, help: String, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            Image(systemName: system)
-                .font(.system(size: 9, weight: .semibold))
-                .foregroundColor(enabled ? tint : Color.secondary.opacity(0.4))
-                .frame(width: 18, height: 15)
-                .background(
-                    RoundedRectangle(cornerRadius: 4, style: .continuous)
-                        .fill(enabled ? tint.opacity(0.14) : Color.primary.opacity(0.04))
-                )
-        }
-        .buttonStyle(.plain)
-        .disabled(!enabled)
-        .help(help)
-    }
+    // v2.10.79 (改动A 观察下沉): 原 `autoAdvanceToggle` / `leverCluster` 及其私有辅助
+    // `leverWithCursorControls` / `cursorControlButton` 已迁至独立子视图
+    // AutoAdvanceToggleView / LeverClusterView（见 LeverClusterView.swift），由它们各自
+    // @ObservedObject 局部观察 autoMode，使拨杆翻动不再触发整棵 ContentView.body 重求值。
 
     // v2.7.39: keep the top-right action group vertically centered and easier to hit.
     // The previous system Button styles had inconsistent intrinsic heights, making the
