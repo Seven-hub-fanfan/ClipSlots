@@ -579,8 +579,15 @@ struct ContentView: View {
                 selectedFilter: $selectedFilter,
                 searchScope: $searchScope
             )
-            .frame(minWidth: 0, idealWidth: 560, maxWidth: .infinity)
+            // v2.10.77: 搜索框此前 maxWidth: .infinity 会横向铺满整行，观感过长。改为
+            // 固定上限宽度 400pt，右侧多出的空间自然留白 / 交由既有右侧图标簇占据。
+            // 用固定上限而非随窗口宽度变化的比例值，配合 v2.10.75 resize 冻结，resize 时宽度稳定。
+            .frame(minWidth: 0, idealWidth: 400, maxWidth: 400)
             .layoutPriority(0)
+
+            // v2.10.77: 搜索框收窄后由此 Spacer 吸收剩余宽度，保证右侧外观/插件/键盘/设置
+            // 图标簇仍贴右对齐，其余控件排布不错位。
+            Spacer(minLength: 0)
 
             HStack(spacing: 8) {
                 Button {
@@ -1061,36 +1068,11 @@ struct ContentView: View {
                 ForEach(store.currentPageSlotGroups) { group in
                     let isCurrent = group.id == store.currentSpecialSlotId
 
-                    Button {
+                    // v2.10.77: 组切换 tab 加入按压微缩 / hover 高亮 / 选中态平滑过渡，
+                    // 交互反馈由 GroupTabButton 内部承载，点击切组语义（switchSpecialSlot）保持不变。
+                    GroupTabButton(name: group.name, isCurrent: isCurrent) {
                         store.switchSpecialSlot(id: group.id)
-                    } label: {
-                        HStack(spacing: 5) {
-                            Image(systemName: isCurrent ? "folder.fill" : "folder")
-                                .font(.system(size: 11, weight: .semibold))
-                            Text(group.name)
-                        }
-                        .font(.system(size: 12, weight: isCurrent ? .semibold : .medium))
-                        .padding(.horizontal, 10)
-                        .frame(minHeight: 28)
-                        .background(
-                            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                                .fill(
-                                    isCurrent
-                                    ? Color.accentColor.opacity(0.20)
-                                    : Color.primary.opacity(0.055)
-                                )
-                        )
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                                .stroke(
-                                    isCurrent
-                                    ? Color.accentColor.opacity(0.50)
-                                    : Color.secondary.opacity(0.16),
-                                    lineWidth: isCurrent ? 1.2 : 0.8
-                                )
-                        )
                     }
-                    .buttonStyle(.plain)
                     .contextMenu {
                         Button {
                             renameSlotGroup(id: group.id, currentName: group.name)
