@@ -56,32 +56,62 @@ final class AutoModeState: ObservableObject {
         else { DispatchQueue.main.async(execute: work) }
     }
 
-    var autoStoreEnabled: Bool {
-        get { lockedRead { self.autoStoreValue } }
-        set {
-            stateLock.lock(); autoStoreValue = newValue; stateLock.unlock()
-            writeOnMain {
+    private enum LinkedMode: Equatable {
+        case store, paste
+    }
+
+    /// 处理自动存储/自动粘贴的一次真实状态变化，并把自动切换同步到该事件的新值。
+    /// 联动只发生在这两个明确 setter 的 false↔true transition；初始化直接写底层值，
+    /// autoAdvance 的手动 setter 也不会反向影响它们，因此不是持续绑定。
+    private func setLinkedMode(_ mode: LinkedMode, to newValue: Bool) {
+        stateLock.lock()
+        let oldValue = mode == .store ? autoStoreValue : autoPasteValue
+        guard oldValue != newValue else {
+            stateLock.unlock()
+            return
+        }
+        if mode == .store { autoStoreValue = newValue }
+        else { autoPasteValue = newValue }
+        let advanceChanged = autoAdvanceValue != newValue
+        if advanceChanged { autoAdvanceValue = newValue }
+        stateLock.unlock()
+
+        writeOnMain {
+            if mode == .store {
                 self._autoStoreEnabled = newValue
                 self.defaults.set(newValue, forKey: Keys.autoStore)
+            } else {
+                self._autoPasteEnabled = newValue
+                self.defaults.set(newValue, forKey: Keys.autoPaste)
+            }
+            // 目标已是期望值时不发布、也不重复写 UserDefaults。
+            if advanceChanged {
+                self._autoAdvanceEnabled = newValue
+                self.defaults.set(newValue, forKey: Keys.autoAdvance)
             }
         }
     }
 
+    var autoStoreEnabled: Bool {
+        get { lockedRead { self.autoStoreValue } }
+        set { setLinkedMode(.store, to: newValue) }
+    }
+
     var autoPasteEnabled: Bool {
         get { lockedRead { self.autoPasteValue } }
-        set {
-            stateLock.lock(); autoPasteValue = newValue; stateLock.unlock()
-            writeOnMain {
-                self._autoPasteEnabled = newValue
-                self.defaults.set(newValue, forKey: Keys.autoPaste)
-            }
-        }
+        set { setLinkedMode(.paste, to: newValue) }
     }
 
     var autoAdvanceEnabled: Bool {
         get { lockedRead { self.autoAdvanceValue } }
         set {
-            stateLock.lock(); autoAdvanceValue = newValue; stateLock.unlock()
+            stateLock.lock()
+            guard autoAdvanceValue != newValue else {
+                stateLock.unlock()
+                return
+            }
+            autoAdvanceValue = newValue
+            stateLock.unlock()
             writeOnMain {
                 self._autoAdvanceEnabled = newValue
                 self.defaults.set(newValue, forKey: Keys.autoAdvance)
@@ -96,13 +126,12 @@ final class AutoModeState: ObservableObject {
         // 自动存储 / 自动粘贴：默认关闭（key 不存在 → false）
         let store = defaults.bool(forKey: Keys.autoStore)
         let paste = defaults.bool(forKey: Keys.autoPaste)
-        // 自动切换：首次安装 / 无历史值时默认【开启】。
-        // v2.10.33: 用户明确要求自动切换默认打开（自动存储/自动粘贴仍默认关闭不变）。
-        // 仅当 key 不存在（全新安装）时用 true；已有用户在 UserDefaults 中的历史选择照常
+        // 自动切换：首次安装 / 无历史值时默认【关闭】。
+        // 仅当 key 不存在（全新安装）时使用 false；已有用户在 UserDefaults 中的历史选择照常
         // 读取，绝不覆盖。
         let advance: Bool
         if defaults.object(forKey: Keys.autoAdvance) == nil {
-            advance = true
+            advance = false
         } else {
             advance = defaults.bool(forKey: Keys.autoAdvance)
         }

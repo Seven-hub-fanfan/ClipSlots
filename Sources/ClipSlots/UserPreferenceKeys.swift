@@ -16,7 +16,7 @@ enum UserPreferenceKeys {
     // v2.10.0: 三档金属拨杆共享开关（同时被 toolbar 拨杆与设置项读写）。
     static let autoStoreEnabled = "autoStoreEnabled"     // 拨杆1 自动存储（默认关）
     static let autoPasteEnabled = "autoPasteEnabled"     // 拨杆2 自动粘贴（默认关）
-    static let autoAdvanceEnabled = "autoAdvanceEnabled" // 拨杆3 自动切换（默认开）
+    static let autoAdvanceEnabled = "autoAdvanceEnabled" // 拨杆3 自动切换（默认关）
 
     // v2.9.36: persist the last paste location so the footer status bar and the
     // slot-card badge can keep pointing at "上次粘贴" across relaunches.
