@@ -189,9 +189,12 @@ struct ContentView: View {
 
                 GeometryReader { gridGeometry in
                     let rawWidth = gridGeometry.size.width
+                    // v2.10.75: resize 期间锁定「上次量化台阶宽度」作为有效布局宽度，逐像素 Diff 归零；
+                    // 非 resize 时用真实 rawWidth 自适应。quantizedGridWidth 尚未初始化(0)时兜底用 rawWidth。
+                    let layoutWidth = liveResize.isResizing && quantizedGridWidth > 0 ? quantizedGridWidth : rawWidth
                     // v2.10.69: 首帧（state 尚空）用当前宽度直接算一份兜底；之后一律读 @State 缓存的
                     // 列数组，保证拖拽 resize 台阶之间数组身份稳定，不触发 LazyVGrid 逐帧重排。
-                    let columns = gridColumnsState.isEmpty ? Self.makeGridColumns(for: rawWidth) : gridColumnsState
+                    let columns = gridColumnsState.isEmpty ? Self.makeGridColumns(for: layoutWidth) : gridColumnsState
 
                     ScrollViewReader { scrollProxy in
                         ScrollView {
@@ -222,6 +225,9 @@ struct ContentView: View {
                         .allowsHitTesting(!store.isSwitchingGroup)
                         .animation(.easeInOut(duration: 0.16), value: store.isSwitchingGroup)
                     }
+                    // v2.10.75: resize 期间给 ScrollView 显式固定宽度=锁定的 layoutWidth，让 AppKit 窗口
+                    // 拉伸而 SwiftUI 内容尺寸不动（宁可露底色也保帧率）；非 resize 时 width=nil 恢复自适应。
+                    .frame(width: liveResize.isResizing ? layoutWidth : nil)
                     .background(AppTheme.windowBackground(colorScheme))
                     .transaction { $0.animation = nil }
                     // v2.10.47: 切组过渡遮罩——柔和高光扫过淡化后的旧内容，表示「正在切换/加载」。
@@ -247,6 +253,14 @@ struct ContentView: View {
                         if quantizedGridWidth == 0 || abs(newWidth - quantizedGridWidth) >= 8 {
                             quantizedGridWidth = newWidth
                             gridColumnsState = Self.makeGridColumns(for: newWidth)
+                        }
+                    }
+                    // v2.10.75: resize 结束时强制把量化宽度对齐到真实宽度并重算列，避免停在
+                    // 1-7pt 偏差处（< 8pt 阈值未触发）导致网格没贴齐窗口边缘的量化边界回归。
+                    .onChange(of: liveResize.isResizing) { resizing in
+                        if resizing == false {
+                            quantizedGridWidth = rawWidth
+                            gridColumnsState = Self.makeGridColumns(for: rawWidth)
                         }
                     }
                 }
@@ -1497,7 +1511,9 @@ struct ContentView: View {
         // v2.10.3 (P2): 放左上角，避开右上角的「上次粘贴」角标，避免两者堆叠遮挡。
         .overlay(alignment: .topLeading) { cursorBadges(slot: slot) }
         .opacity(!isSearchActive || isMatched ? 1.0 : 0.22)
-        .saturation(!isSearchActive || isMatched ? 1.0 : 0.35)
+        // v2.10.75: resize 期间强制 saturation=1.0，避免 .saturation 滤镜每帧离屏合成拖累帧率；
+        // 非 resize 时保持原有搜索未命中降饱和度效果。
+        .saturation(liveResize.isResizing ? 1.0 : (!isSearchActive || isMatched ? 1.0 : 0.35))
         .allowsHitTesting(!isSearchActive || isMatched)
     }
 
