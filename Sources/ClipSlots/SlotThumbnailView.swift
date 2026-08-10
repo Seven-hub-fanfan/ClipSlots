@@ -100,13 +100,17 @@ struct SlotThumbnailView: View {
                         .foregroundColor(.secondary.opacity(0.7))
                 }
             } else {
+                // v2.10.82:「正文为空但有附件」的槽位（items 为空、attachments 非空，
+                // 故 content.isEmpty 为 false，走到此文本分支）预览解析为占位符 "(空)"。
+                // 仅此情形把占位文字在正文内容区水平+垂直居中；有正文文本时仍沿用
+                // 左对齐 + 顶部多行铺排，图片/视频缩略图与完全空槽位占位均不经过此分支。
                 Text(multilinePreview)
                     .font(.system(size: 12, design: .monospaced))
                     .foregroundColor(.primary.opacity(0.8))
-                    .multilineTextAlignment(.leading)
+                    .multilineTextAlignment(isEmptyBodyPlaceholder ? .center : .leading)
                     .lineLimit(4)
                     .truncationMode(.tail)
-                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .frame(maxWidth: .infinity, alignment: isEmptyBodyPlaceholder ? .center : .leading)
                     .padding(.horizontal, 14)
                     .padding(.vertical, 8)
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
@@ -121,6 +125,13 @@ struct SlotThumbnailView: View {
             return text.count > 240 ? String(text.prefix(240)) + "…" : text
         }
         return content.preview
+    }
+
+    // v2.10.82: 正文预览是否为占位符 "(空)"。仅当槽位没有可显示正文（纯附件槽位，
+    // items 为空 → content.preview 回退为 "(空)"，且 plainText 无有效文本）时为 true。
+    // 用来把 "(空)" 占位在正文内容区水平+垂直居中，其它有正文的文本卡片不受影响。
+    private var isEmptyBodyPlaceholder: Bool {
+        multilinePreview == "(空)"
     }
 
     private var fileIconName: String {
