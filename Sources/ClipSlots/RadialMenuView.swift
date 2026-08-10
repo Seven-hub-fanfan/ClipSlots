@@ -221,7 +221,7 @@ struct RadialMenuView: View {
                     .contentShape(Circle())
                     .scaleEffect(appeared ? 1 : 0.92)
                     .opacity(appeared ? 1 : 0)
-                    .animation(.spring(response: 0.22, dampingFraction: 0.82), value: appeared)
+                    .animation(Anim.transition, value: appeared)
                     .onAppear { appeared = true }
                     .onContinuousHover(coordinateSpace: .local) { phase in
                         switch phase {
@@ -400,7 +400,7 @@ struct RadialMenuView: View {
             }
             // v2.7.12: do not scale the sector. Scaling pushes arc edges outside
             // the circular disk and creates the visible broken blue caps.
-            .animation(.easeOut(duration: 0.10), value: isHovered)
+            .animation(Anim.interactive, value: isHovered)
         }
     }
 
@@ -435,7 +435,7 @@ struct RadialMenuView: View {
                 specialSlotLabel(name: special.name, index: i + 1, isCurrent: isCurrent, angle: midAngle, midRadius: (deadZoneRadius + outerRadius) / 2)
             }
             // v2.7.12: no sector scaling; keep highlight clipped inside disk.
-            .animation(.easeOut(duration: 0.10), value: isHovered)
+            .animation(Anim.interactive, value: isHovered)
         }
     }
 
@@ -617,7 +617,7 @@ struct RadialMenuView: View {
             }
         }
         .offset(x: x, y: y)
-        .animation(.easeOut(duration: 0.1), value: isHovered)
+        .animation(Anim.interactive, value: isHovered)
     }
 
     @ViewBuilder
@@ -640,7 +640,7 @@ struct RadialMenuView: View {
                 .frame(width: midRadius * 0.7)
         }
         .offset(x: x, y: y)
-        .animation(.easeOut(duration: 0.1), value: isHovered)
+        .animation(Anim.interactive, value: isHovered)
     }
 
     private func handlePasteAll() {

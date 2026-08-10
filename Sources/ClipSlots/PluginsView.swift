@@ -914,7 +914,7 @@ struct PluginsView: View {
                     style: StrokeStyle(lineWidth: isSkillDropTargeted ? 2 : 1, dash: [6, 4])
                 )
         )
-        .animation(.easeInOut(duration: 0.12), value: isSkillDropTargeted)
+        .animation(Anim.interactive, value: isSkillDropTargeted)
         .onDrop(of: [.fileURL], isTargeted: $isSkillDropTargeted) { providers in
             handleSkillDrop(providers)
         }

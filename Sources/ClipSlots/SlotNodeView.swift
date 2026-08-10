@@ -155,7 +155,7 @@ struct NodeAttachmentButton: View {
                 .offset(x: 5, y: -6)
                 .opacity(isClearButtonVisible ? 1 : 0)
                 .allowsHitTesting(isClearButtonVisible)
-                .animation(.easeOut(duration: 0.14), value: isClearButtonVisible)
+                .animation(Anim.interactive, value: isClearButtonVisible)
                 .popover(isPresented: $showingClearConfirm, arrowEdge: .top) {
                     clearConfirmPopover
                 }

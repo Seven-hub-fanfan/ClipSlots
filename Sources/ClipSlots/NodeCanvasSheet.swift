@@ -346,6 +346,6 @@ struct EdgeConnectionDeleteHandle: View {
         .frame(width: 26, height: 26)
         .contentShape(Circle())
         .onHover { onHover($0) }
-        .animation(.easeOut(duration: 0.12), value: isHovered)
+        .animation(Anim.interactive, value: isHovered)
     }
 }

@@ -205,7 +205,7 @@ struct SlotCardView: View {
             color: isFlashHighlighted ? slotAccent.opacity(0.5) : Color.clear,
             radius: isFlashHighlighted ? 9 : 0
         )
-        .animation(.easeInOut(duration: 0.3), value: isFlashHighlighted)
+        .animation(Anim.status, value: isFlashHighlighted)
         // v2.9.36: persistent "上次粘贴" corner badge, lightweight so it doesn't
         // cover the card's main content.
         .overlay(alignment: .topTrailing) {
@@ -217,11 +217,11 @@ struct SlotCardView: View {
                     .allowsHitTesting(false)
             }
         }
-        .animation(.spring(response: 0.3, dampingFraction: 0.8), value: isLastPasted)
+        .animation(Anim.transition, value: isLastPasted)
         // Apply one transform to the fully composed card. The outline is already unified,
         // so scaling cannot reveal multiple independently rasterized hard edges.
         .scaleEffect(isHovering ? 1.015 : 1)
-        .animation(.easeOut(duration: 0.18), value: isHovering)
+        .animation(Anim.interactive, value: isHovering)
         .sheet(isPresented: $showingPreview) {
             SlotPreviewView(content: content)
                 .frame(width: 640, height: 500)
@@ -822,8 +822,8 @@ private struct SlotActionButtonBody: View {
             .contentShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
             .opacity(isEnabled ? 1 : 0.68)
             .offset(y: configuration.isPressed ? 1 : 0)
-            .animation(.easeOut(duration: 0.12), value: configuration.isPressed)
-            .animation(.easeOut(duration: 0.16), value: isHovering)
+            .animation(Anim.interactive, value: configuration.isPressed)
+            .animation(Anim.interactive, value: isHovering)
             .onHover { isHovering = $0 }
     }
 }

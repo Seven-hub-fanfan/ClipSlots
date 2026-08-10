@@ -220,7 +220,7 @@ struct AttachmentManagerPopover: View {
         .onDrop(of: [.fileURL], isTargeted: $isDropTargeted) { providers in
             handleDrop(providers)
         }
-        .animation(.easeOut(duration: 0.15), value: isDropTargeted)
+        .animation(Anim.interactive, value: isDropTargeted)
     }
 
     // v2.9.17: compact dropzone shown above the add bar when attachments exist,
@@ -257,7 +257,7 @@ struct AttachmentManagerPopover: View {
         .onDrop(of: [.fileURL], isTargeted: $isDropTargeted) { providers in
             handleDrop(providers)
         }
-        .animation(.easeOut(duration: 0.15), value: isDropTargeted)
+        .animation(Anim.interactive, value: isDropTargeted)
     }
 
     // MARK: Inline editor (text / url / reference)
@@ -344,14 +344,14 @@ struct AttachmentManagerPopover: View {
         draftName = ""
         draftValue = ""
         inlineError = nil
-        withAnimation(.spring(response: 0.32, dampingFraction: 0.82)) {
+        withAnimation(Anim.transition) {
             inlineEditor = kind
         }
     }
 
     private func cancelInline() {
         inlineError = nil
-        withAnimation(.spring(response: 0.32, dampingFraction: 0.82)) {
+        withAnimation(Anim.transition) {
             inlineEditor = nil
         }
     }
@@ -379,7 +379,7 @@ struct AttachmentManagerPopover: View {
                                              type: .reference, path: String(index))
         }
         inlineError = nil
-        withAnimation(.spring(response: 0.32, dampingFraction: 0.82)) {
+        withAnimation(Anim.transition) {
             var current = store.attachments(for: slot)
             current.append(att)
             store.setAttachments(current, for: slot)
@@ -429,7 +429,7 @@ struct AttachmentManagerPopover: View {
     private func addFileURLs(_ urls: [URL]) {
         let fileURLs = urls.filter { $0.isFileURL }
         guard !fileURLs.isEmpty else { return }
-        withAnimation(.spring(response: 0.32, dampingFraction: 0.82)) {
+        withAnimation(Anim.transition) {
             var current = store.attachments(for: slot)
             for url in fileURLs {
                 let att = SlotContent.SlotAttachment(
@@ -485,7 +485,7 @@ struct AttachmentManagerPopover: View {
     }
 
     private func remove(_ att: SlotContent.SlotAttachment) {
-        withAnimation(.spring(response: 0.32, dampingFraction: 0.82)) {
+        withAnimation(Anim.transition) {
             var current = store.attachments(for: slot)
             current.removeAll { $0.id == att.id }
             store.setAttachments(current, for: slot)
@@ -510,14 +510,14 @@ struct AttachmentManagerPopover: View {
         if target != cur {
             let moved = current.remove(at: cur)
             current.insert(moved, at: target)
-            withAnimation(.spring(response: 0.28, dampingFraction: 0.85)) {
+            withAnimation(Anim.transition) {
                 store.setAttachments(current, for: slot)
             }
         }
     }
 
     private func handleDragEnded() {
-        withAnimation(.spring(response: 0.28, dampingFraction: 0.85)) {
+        withAnimation(Anim.transition) {
             draggingId = nil
             dragTranslation = 0
             dragStartIndex = nil

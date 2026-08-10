@@ -47,7 +47,7 @@ struct GlobalSearchResultsView: View {
             }
         }
         // v2.10.48: 搜索结果集变化（换搜索词 / 排序）时做柔性过渡，避免列表与预览硬切跳变。
-        .animation(.easeInOut(duration: 0.22), value: resultsSignature)
+        .animation(Anim.status, value: resultsSignature)
         .padding(10)
         .background(
             RoundedRectangle(cornerRadius: 10, style: .continuous)

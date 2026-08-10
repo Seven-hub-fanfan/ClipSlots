@@ -29,8 +29,8 @@ struct SlotPortHandle: View {
             .frame(width: 28, height: 28) // hit area
             .opacity(isVisible || isConnected ? 1 : 0)
             .scaleEffect(isVisible || isConnected ? 1 : 0.65)
-            .animation(.easeOut(duration: 0.12), value: isVisible)
-            .animation(.easeOut(duration: 0.12), value: isConnected)
+            .animation(Anim.interactive, value: isVisible)
+            .animation(Anim.interactive, value: isConnected)
             .contentShape(Rectangle())
             .onHover { hovering in
                 isHoveringPort = hovering

@@ -77,8 +77,8 @@ struct TransientOverlayView: View {
         }
         // 覆盖层纯展示、不接受交互，避免顶部区域拦截下方槽位/工具栏点击。
         .allowsHitTesting(false)
-        .animation(.easeInOut(duration: 0.25), value: ui.toastMessage != nil)
-        .animation(.easeInOut(duration: 0.2), value: ui.floatingNotice != nil)
+        .animation(Anim.status, value: ui.toastMessage != nil)
+        .animation(Anim.status, value: ui.floatingNotice != nil)
     }
 
     // MARK: - Toast (从 ContentView 原样迁入，样式不变)

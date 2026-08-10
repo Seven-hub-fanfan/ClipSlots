@@ -97,8 +97,8 @@ struct NodePortHandle: View {
             .frame(width: 18, height: 18)
             .opacity(restingOpacity)
             .scaleEffect(isHighlighted ? 1.12 : 1)
-            .animation(.easeOut(duration: 0.12), value: isHighlighted)
-            .animation(.easeOut(duration: 0.12), value: isReady)
+            .animation(Anim.interactive, value: isHighlighted)
+            .animation(Anim.interactive, value: isReady)
             .contentShape(Circle())
             .position(point)
             // v2.9.20: 命中区与可见性彻底解耦——端口恒可命中，不再随状态切换而翻转，

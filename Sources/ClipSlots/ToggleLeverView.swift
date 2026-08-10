@@ -22,6 +22,10 @@ struct ToggleLeverView: View {
     private let leverWidth: CGFloat = 9
     private let leverHeight: CGFloat = 22
 
+    // v2.10.76 (Phase 3): 轻量按压反馈——按下时整块拨杆微缩，松手回弹。仅视觉反馈，
+    // 不改变原有点击切换语义（切换仍由下方 onTapGesture 触发）。
+    @GestureState private var isPressing = false
+
     var body: some View {
         VStack(spacing: 3) {
             indicatorLight
@@ -34,11 +38,19 @@ struct ToggleLeverView: View {
                 .fixedSize()
         }
         .contentShape(Rectangle())
+        .scaleEffect(isPressing ? 0.93 : 1)
+        .animation(Anim.interactive, value: isPressing)
         .onTapGesture {
             // Change the model without a transaction-wide animation. Only the light and
             // lever below animate, so observers can update without animating the toolbar tree.
             isOn.toggle()
         }
+        .simultaneousGesture(
+            // 只用于捕捉按下/松手状态以驱动按压微缩；minimumDistance 0 且不消费点击，
+            // 因此不影响 onTapGesture 的切换行为。
+            DragGesture(minimumDistance: 0)
+                .updating($isPressing) { _, state, _ in state = true }
+        )
         .help(help ?? (isOn ? "\(label)：已开启" : "\(label)：已关闭"))
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(label)
@@ -68,7 +80,7 @@ struct ToggleLeverView: View {
             Circle().stroke(Color.black.opacity(0.15), lineWidth: 0.5)
         )
         .shadow(color: isOn ? indicatorColor.opacity(0.8) : .clear, radius: isOn ? 4 : 0)
-        .animation(.easeInOut(duration: 0.24), value: isOn)
+        .animation(Anim.status, value: isOn)
     }
 
     // 金属底座 + 拨杆主体。
@@ -113,7 +125,7 @@ struct ToggleLeverView: View {
                 // 让长条一端固定在底座中心，另一端摆动：先把锚点下移半个身位再旋转。
                 .offset(y: -leverHeight / 2 + 3)
                 .rotationEffect(.degrees(isOn ? -20 : 20), anchor: .bottom)
-                .animation(.smooth(duration: 0.26), value: isOn)
+                .animation(Anim.transition, value: isOn)
                 .offset(y: leverHeight / 2 - 3)
                 .shadow(color: Color.black.opacity(0.25), radius: 1, x: 0, y: 0.5)
         }

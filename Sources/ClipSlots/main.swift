@@ -1271,12 +1271,12 @@ final class SlotStoreObservable: ObservableObject {
         let target = FlashHighlightTarget(groupId: lastPasteGroupId, slot: lastPasteSlotIndex)
         let token = UUID()
         flashHighlightToken = token
-        withAnimation(.easeInOut(duration: 0.3)) {
+        withAnimation(Anim.status) {
             flashHighlightSlot = target
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { [weak self] in
             guard let self, self.flashHighlightToken == token else { return }
-            withAnimation(.easeInOut(duration: 0.3)) {
+            withAnimation(Anim.status) {
                 self.flashHighlightSlot = nil
             }
         }
@@ -1294,12 +1294,12 @@ final class SlotStoreObservable: ObservableObject {
         let target = FlashHighlightTarget(groupId: addr.groupId, slot: addr.slot)
         let token = UUID()
         flashHighlightToken = token
-        withAnimation(.easeInOut(duration: 0.3)) {
+        withAnimation(Anim.status) {
             flashHighlightSlot = target
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { [weak self] in
             guard let self, self.flashHighlightToken == token else { return }
-            withAnimation(.easeInOut(duration: 0.3)) {
+            withAnimation(Anim.status) {
                 self.flashHighlightSlot = nil
             }
         }

@@ -241,7 +241,7 @@ private struct RadialTextPreview: View {
         .cornerRadius(12)
         .shadow(color: .black.opacity(0.12), radius: 10, x: 0, y: 4)
         .padding(14)
-        .animation(.easeOut(duration: 0.12), value: text)
+        .animation(Anim.interactive, value: text)
     }
 }
 
@@ -277,7 +277,7 @@ private struct RadialFileCardPreview: View {
         .cornerRadius(12)
         .shadow(color: .black.opacity(0.12), radius: 10, x: 0, y: 4)
         .padding(14)
-        .animation(.easeOut(duration: 0.12), value: url)
+        .animation(Anim.interactive, value: url)
     }
 }
 

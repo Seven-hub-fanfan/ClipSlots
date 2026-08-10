@@ -161,7 +161,7 @@ struct ContentView: View {
     }
 
     private func closeSettings() {
-        withAnimation(.easeInOut(duration: 0.2)) { showingSettings = false }
+        withAnimation(Anim.status) { showingSettings = false }
     }
 
     // v2.10.73（方案③：缩略图渲染解耦）：卡片身份改回 `.id(slot)`——切页/切组时卡片被复用而非
@@ -237,7 +237,7 @@ struct ContentView: View {
                     // v2.10.73（方案③）：卡片 .id 已改回 slot，scrollTo 目标同步用 slot 保持一致。
                     .onChange(of: store.flashHighlightSlot) { target in
                         guard let target else { return }
-                        withAnimation(.easeInOut(duration: 0.3)) {
+                        withAnimation(Anim.status) {
                             scrollProxy.scrollTo(target.slot, anchor: .center)
                         }
                     }
@@ -283,7 +283,7 @@ struct ContentView: View {
                         .transition(.move(edge: .bottom).combined(with: .opacity))
                 }
             }
-            .animation(.easeInOut(duration: 0.2), value: store.importProgress != nil)
+            .animation(Anim.status, value: store.importProgress != nil)
             .zIndex(150)
 
             // v2.9.12: in-app settings overlay (Obsidian-style two-pane).
@@ -304,7 +304,7 @@ struct ContentView: View {
         .onChange(of: showingSettings) { store.isSettingsPresented = $0 }
         // v2.9.12: Cmd+, / "设置…" menu opens the in-app overlay.
         .onReceive(NotificationCenter.default.publisher(for: .openInAppSettings)) { _ in
-            withAnimation(.easeInOut(duration: 0.2)) { showingSettings = true }
+            withAnimation(Anim.status) { showingSettings = true }
         }
         // v2.6.7: Import options sheet
         .sheet(item: $store.pendingImportSelection) { selection in
@@ -635,7 +635,7 @@ struct ContentView: View {
             // v2.9.12: settings now open as an in-app overlay (Obsidian-style),
             // embedded in the main window so it follows the window when dragged.
             Button {
-                withAnimation(.easeInOut(duration: 0.2)) { showingSettings = true }
+                withAnimation(Anim.status) { showingSettings = true }
             } label: {
                 Image(systemName: "gearshape.fill")
                     .font(.system(size: 15, weight: .semibold))
@@ -752,12 +752,12 @@ struct ContentView: View {
                                     selectedPageIds.insert(page.id)
                                 }
                             } else if isExpanded {
-                                withAnimation(.easeOut(duration: 0.16)) {
+                                withAnimation(Anim.status) {
                                     expandedPageId = ""
                                 }
                             } else {
                                 store.switchToPage(id: page.id)
-                                withAnimation(.easeOut(duration: 0.18)) {
+                                withAnimation(Anim.status) {
                                     expandedPageId = page.id
                                 }
                             }
@@ -849,7 +849,7 @@ struct ContentView: View {
                             store.deletePage(id: pageId)
                         }
                         selectedPageIds.removeAll()
-                        withAnimation(.easeOut(duration: 0.15)) {
+                        withAnimation(Anim.interactive) {
                             isPageMultiSelecting = false
                         }
                     } label: {
@@ -859,7 +859,7 @@ struct ContentView: View {
 
                     Button {
                         selectedPageIds.removeAll()
-                        withAnimation(.easeOut(duration: 0.15)) {
+                        withAnimation(Anim.interactive) {
                             isPageMultiSelecting = false
                         }
                     } label: {
@@ -883,7 +883,7 @@ struct ContentView: View {
 
                     Button {
                         selectedPageIds.removeAll()
-                        withAnimation(.easeOut(duration: 0.15)) {
+                        withAnimation(Anim.interactive) {
                             isPageMultiSelecting = true
                         }
                     } label: {
@@ -929,7 +929,7 @@ struct ContentView: View {
                 ? Color.accentColor.opacity(0.55) : Color.clear, lineWidth: 1))
             .foregroundColor(autoMode.autoAdvanceEnabled
                 ? Color.accentColor : AppTheme.filterChipText(colorScheme))
-            .animation(.easeInOut(duration: 0.18), value: autoMode.autoAdvanceEnabled)
+            .animation(Anim.status, value: autoMode.autoAdvanceEnabled)
         }
         .buttonStyle(.plain)
         .fixedSize()
@@ -1392,7 +1392,7 @@ struct ContentView: View {
             // Only highlight when the button is actionable (there is a location).
             lastPasteHovering = hovering && store.lastPasteDescription != nil
         }
-        .animation(.easeInOut(duration: 0.15), value: lastPasteHovering)
+        .animation(Anim.interactive, value: lastPasteHovering)
         .help(store.lastPasteDescription.map { "点击跳转到上次粘贴位置：\($0)" } ?? "尚未粘贴过任何槽位")
     }
 
@@ -1443,7 +1443,7 @@ struct ContentView: View {
             color: hasConnections ? Color.accentColor.opacity(0.35) : Color.black.opacity(0.06),
             radius: hasConnections ? 6 : 2, x: 0, y: hasConnections ? 2 : 1)
         .scaleEffect(hasConnections ? 1.02 : 1.0)
-        .animation(.spring(response: 0.32, dampingFraction: 0.78), value: edgeCount)
+        .animation(Anim.transition, value: edgeCount)
         .help(hasConnections ? "当前槽位组已有 \(edgeCount) 条连接" : "打开节点连接工具")
     }
 
@@ -1876,7 +1876,7 @@ private struct ToolbarActionButton: View {
         )
         .shadow(color: shadowColor, radius: prominent ? 4 : 0, x: 0, y: prominent ? 1 : 0)
         .scaleEffect(isHovering ? 1.035 : 1.0)
-        .animation(.spring(response: 0.22, dampingFraction: 0.72), value: isHovering)
+        .animation(Anim.interactive, value: isHovering)
         .onHover { isHovering = $0 }
     }
 
@@ -2434,7 +2434,7 @@ private struct ConnectionFullscreenAction: View {
         }
         .buttonStyle(.plain)
         .onHover { hovering = $0 }
-        .animation(.spring(response: 0.28, dampingFraction: 0.76), value: hovering)
+        .animation(Anim.interactive, value: hovering)
     }
 }
 
@@ -2443,6 +2443,6 @@ private struct PageNavigationButtonStyle: ButtonStyle {
         configuration.label
             .scaleEffect(configuration.isPressed ? 0.985 : 1)
             .opacity(configuration.isPressed ? 0.78 : 1)
-            .animation(.easeOut(duration: 0.10), value: configuration.isPressed)
+            .animation(Anim.interactive, value: configuration.isPressed)
     }
 }
