@@ -451,6 +451,14 @@ final class SlotStoreObservable: ObservableObject {
     /// Main-thread only.
     private var reloadGeneration: Int = 0
 
+    // v2.10.79 (改动B 副作用后台化): recomputeAutoPreviews 的磁盘扫描（findNextEmptySlot /
+    // findNextNonEmptySlot → specialStorage.isEmpty 的跨页/跨组 FS-shape 探测）从主线程同步执行
+    // 改到后台队列执行，结果回主线程再写入预览角标。此单调自增令牌用于防止异步时序错乱：每次调用
+    // recomputeAutoPreviews 都在主线程 +1 并捕获当次值；后台扫描完成回主线程提交前校验令牌未变，
+    // 若期间又发起了新的重算（更高代次），旧结果直接丢弃，避免绿/蓝角标显示陈旧值。
+    // 仿 groupSwitchVeilToken 令牌思路，仅在主线程读写。
+    private var autoPreviewGeneration: Int = 0
+
     // MARK: - v2.9.4 (Feature #2) Live disk refresh
     /// FSEvents watcher on the storage base dir. External (CLI / other GUI) writes
     /// trigger a debounced `reloadAll()` so the UI reflects disk changes without a
@@ -1588,56 +1596,91 @@ final class SlotStoreObservable: ObservableObject {
 
     /// 重算「下一次触发的落点」预览（写游标 = 下一个空槽；读游标 = 下一个非空槽），
     /// 用于槽位格子上的绿色 / 蓝色角标。跟随游标推进 / 回退 / 重置、内容变化、拨杆切换调用。
+    ///
+    /// v2.10.79 (改动B 副作用后台化): 此前整段在主线程同步执行——findNextEmptySlot /
+    /// findNextNonEmptySlot 会对 specialStorage.isEmpty 做跨页/跨组的大量 FS-shape 探测（自动切换
+    /// 开启时尤甚），把「拨动开关 / 切组」那一帧卡住。现改为：
+    ///   1) 在主线程同步快照所有主线程态（pages / specialSlots / slotCount / 当前组 / 两个游标 /
+    ///      连线链已粘记录），避免后台线程直接读 @Published 造成数据竞争；
+    ///   2) 把纯值遍历 + 磁盘探测放到后台 userInitiated 队列执行（isEmpty 探针内部用 queue.sync
+    ///      保护缓存 + 撕裂读回退，可安全跨线程调用）；
+    ///   3) 回主线程，用 autoPreviewGeneration 令牌校验未被更晚的重算取代后，才提交预览角标，
+    ///      保证绿/蓝角标最终正确、不显示陈旧值。
     func recomputeAutoPreviews() {
+        // 步骤 1：主线程快照（本方法所有调用点均在主线程）。
         let autoAdvance = AutoModeState.shared.autoAdvanceEnabled
+        let pagesSnapshot = pages
+        let groupsSnapshot = specialSlots
+        let slotCount = config.slots
+        let activeGroupId = currentSpecialSlotId
+        let storeCursor = validatedCursor(specialStorage.autoStoreCursor())
+        let pasteCursor = validatedCursor(specialStorage.autoPasteCursor())
+        let pastedChainSnapshot = pastedChainMembersByGroup
 
-        let storeManager = AutoStoreManager(
-            pages: pages,
-            groups: specialSlots,
-            slotCount: config.slots,
-            isEmpty: { [weak self] addr in
-                guard let self = self else { return false }
-                // PERF: cheap FS-shape probe instead of loading full slot content just
-                // to check emptiness (this runs on every switch and can scan across
-                // groups/pages when 自动切换 is on).
-                return self.specialStorage.isEmpty(addr.slot, in: addr.groupId)
-            }
-        )
-        autoStorePreview = storeManager.findNextEmptySlot(
-            from: validatedCursor(specialStorage.autoStoreCursor()),
-            startGroupId: currentSpecialSlotId,
-            autoAdvance: autoAdvance
-        )
-
-        let pasteManager = AutoPasteManager(
-            pages: pages,
-            groups: specialSlots,
-            slotCount: config.slots,
-            isNonEmpty: { [weak self] addr in
-                guard let self = self else { return false }
-                // CS-2 (v2.10.30): 预览与实际自动粘贴一致——已粘过的连线链成员视为空槽跳过。
-                if self.pastedChainMembersByGroup[addr.groupId]?.contains(addr.slot) == true { return false }
-                // PERF: cheap FS-shape probe instead of a full-content read.
-                return !self.specialStorage.isEmpty(addr.slot, in: addr.groupId)
-            }
-        )
         // v2.10.19: 预览角标须与 autoPasteFromHotkey 一致——起点与轮转范围锁定「当前激活组」，
         // 与自动切换开关解耦。游标不在当前组则视为「当前组从头开始」，不回退全局第一页。
-        let pasteCursor = validatedCursor(specialStorage.autoPasteCursor())
         let pasteCursorInActiveGroup: SlotAddress? =
-            (pasteCursor?.groupId == currentSpecialSlotId) ? pasteCursor : nil
-        if pasteCursorInActiveGroup == nil {
-            autoPastePreview = pasteManager.findNextNonEmptySlot(
-                from: nil,
-                startGroupId: currentSpecialSlotId,
-                autoAdvance: false
+            (pasteCursor?.groupId == activeGroupId) ? pasteCursor : nil
+
+        // 令牌自增并捕获本次代次。
+        autoPreviewGeneration &+= 1
+        let token = autoPreviewGeneration
+
+        // 步骤 2：磁盘扫描挪到后台执行。
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let self = self else { return }
+
+            let storeManager = AutoStoreManager(
+                pages: pagesSnapshot,
+                groups: groupsSnapshot,
+                slotCount: slotCount,
+                isEmpty: { addr in
+                    // PERF: cheap FS-shape probe instead of loading full slot content just
+                    // to check emptiness (this runs on every switch and can scan across
+                    // groups/pages when 自动切换 is on). 探针内部线程安全，可后台调用。
+                    self.specialStorage.isEmpty(addr.slot, in: addr.groupId)
+                }
             )
-        } else {
-            autoPastePreview = pasteManager.findNextNonEmptySlot(
-                from: pasteCursorInActiveGroup,
-                startGroupId: currentSpecialSlotId,
+            let newStorePreview = storeManager.findNextEmptySlot(
+                from: storeCursor,
+                startGroupId: activeGroupId,
                 autoAdvance: autoAdvance
             )
+
+            let pasteManager = AutoPasteManager(
+                pages: pagesSnapshot,
+                groups: groupsSnapshot,
+                slotCount: slotCount,
+                isNonEmpty: { addr in
+                    // CS-2 (v2.10.30): 预览与实际自动粘贴一致——已粘过的连线链成员视为空槽跳过。
+                    // 用主线程快照的 pastedChainSnapshot，避免后台读 self.pastedChainMembersByGroup。
+                    if pastedChainSnapshot[addr.groupId]?.contains(addr.slot) == true { return false }
+                    // PERF: cheap FS-shape probe instead of a full-content read.
+                    return !self.specialStorage.isEmpty(addr.slot, in: addr.groupId)
+                }
+            )
+            let newPastePreview: SlotAddress?
+            if pasteCursorInActiveGroup == nil {
+                newPastePreview = pasteManager.findNextNonEmptySlot(
+                    from: nil,
+                    startGroupId: activeGroupId,
+                    autoAdvance: false
+                )
+            } else {
+                newPastePreview = pasteManager.findNextNonEmptySlot(
+                    from: pasteCursorInActiveGroup,
+                    startGroupId: activeGroupId,
+                    autoAdvance: autoAdvance
+                )
+            }
+
+            // 步骤 3：回主线程，令牌校验后提交。
+            DispatchQueue.main.async {
+                // 期间若又发起新的重算（更高代次），本次结果作废，避免角标闪回陈旧值。
+                guard token == self.autoPreviewGeneration else { return }
+                self.autoStorePreview = newStorePreview
+                self.autoPastePreview = newPastePreview
+            }
         }
     }
 
