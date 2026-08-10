@@ -4,13 +4,22 @@
 
 ## 当前版本
 
-- **当前版本：v2.10.82**
+- **当前版本：v2.10.83**
 - 平台：macOS（Swift / SwiftUI，SPM 构建，macOS 13+）
 - 单一版本号事实来源：`Info.plist` 的 `CFBundleShortVersionString`（`AppVersion.current` 动态读取，`AppVersion.fallback` 为编译期兜底）。CLI 版本号见 `Sources/ClipSlotsCLI/main.swift` 的 `CLI_VERSION`。
 
 ## 版本要点（近期）
 
-### v2.10.82 — 纯附件槽位 `(空)` 占位居中（★本批正式发布版）
+### v2.10.83 — 自动模式一次性开关联动（★当前正式发布版）
+- **默认值与兼容性**：自动切换对从未保存过该偏好的新用户默认关闭；已有用户的 `UserDefaults` 历史值优先读取并完整保留，升级不会强制覆盖。
+- **一次性双向联动**：自动存储或自动粘贴任一发生关→开时，若自动切换为关则同步打开一次；任一发生开→关时，若自动切换为开则同步关闭一次。
+- **非持续绑定**：联动完成后允许用户手动修改自动切换，不会被后台轮询、状态重算或视图重建持续纠正；只有自动存储或自动粘贴下一次真实状态变化才再次联动。
+- **初始化安全**：初始化、从 `UserDefaults` 加载、`onAppear` 及重建 `LeverClusterView` 均不触发联动。
+- **实现位置**：逻辑集中在 `AutoModeState` 的 setter / `setLinkedMode(_:to:)`；先判定真实 transition，且自动切换目标值一致时不重复发布 `@Published`、不重复写盘，也不存在自动切换反向联动自动存储/自动粘贴。
+- 功能 commit：`f779e89`；`swift build` 通过，smoke 通过 23、失败 0。
+- DMG SHA256：`3176b758158e851e93cc7b550fa26a2b6636b4d0b8f8aba995eb9cf047e25b8a`（`build/ClipSlots_v2.10.83.dmg`）。
+
+### v2.10.82 — 纯附件槽位 `(空)` 占位居中
 - 背景：正文为空但有附件（0B 文本 + 附件N）的槽位，`SlotThumbnailView` 文本回退分支把 `(空)` 占位按 `.leading` 左上对齐，观感不居中。
 - 根因链：`SlotContent.preview` 空回退返回字符串 `"(空)"`（`ClipboardManager.swift`）；纯附件槽位 `SlotContent.isEmpty`（`items.isEmpty && attachments.isEmpty`）为 false，故不走完全空槽位的 `EmptySlotThumbnailView`，而是落到 `SlotThumbnailView.fallbackView` 的文本分支。
 - **改动**：`SlotThumbnailView.swift` 新增私有 `isEmptyBodyPlaceholder`（`multilinePreview == "(空)"`）；文本分支的 `.multilineTextAlignment` 与 `.frame(maxWidth:alignment:)` 在该占位时切为 `.center`，否则保持 `.leading`。仅影响正文空但有附件的 `(空)`，不影响有正文文本、图片/视频缩略图、完全空槽位。
