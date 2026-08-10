@@ -488,7 +488,14 @@ struct ContentView: View {
 
             Divider()
         }
-        .background(.regularMaterial)
+        // v2.10.81: 用独立矩形承载 .regularMaterial 并加 .id(colorScheme)，切主题时强制重建这层
+        // NSVisualEffectView——修复 AppKit 材质 appearance 滞后（顶部磨砂玻璃切主题后卡旧色）。
+        // .id 只作用于材质层，不波及 header 内容子树（搜索框文本/焦点、popover 状态不受影响）。
+        .background(
+            Rectangle()
+                .fill(.regularMaterial)
+                .id(colorScheme)
+        )
         .popover(isPresented: $showingSpecialSlotManagement) {
             SpecialSlotManagementView(store: store)
         }
@@ -2053,13 +2060,12 @@ private struct RetroPosterAmbientBackground: View {
     // 避免整窗离屏缓冲每帧按新尺寸重新栅格化造成掉帧；拖拽结束恢复完整海报背景。
     var simplified: Bool = false
 
-    // v2.10.76 (Phase 2.4 · 背景静态化): 用 ImageRenderer(macOS13+) 把「4 层超大 blur/.screen 渐变 +
-    // grain」的复杂海报背景一次性栅格化成静态位图缓存，之后仅作为一张普通 Image 合成——每帧只需贴一张
-    // 位图，比 drawingGroup 的每帧离屏 Metal pass 更省。缓存键 = (配色, 尺寸量化台阶)；仅当窗口尺寸
-    // 跨 64pt 台阶或明暗配色变化时才重建。栅格未就绪 / 重建期间回退到实时 fullBackground（观感零差异，
-    // 不会闪空）。resize 期间仍走 simplified 纯色降级（见 v2.10.70），不触发任何栅格化。
-    @State private var raster: NSImage?
-    @State private var rasterKey: String = ""
+    // v2.10.81: 彻底移除 v2.10.76 的 ImageRenderer 静态栅格快照（raster/@State + cacheKey/quantize +
+    // rebuildRasterIfNeeded 全部删除）。根因：ImageRenderer 离屏位图 + drawingGroup 的 Metal 纹理会
+    // 卡在旧 appearance，视图 identity 不变就不刷新——切主题时缓存键虽已含新 scheme，但快照/纹理不重建，
+    // 背景卡旧色直到 resize 被动纠正。改回「非 resize 常态实时渲染 fullBackground + drawingGroup 维持
+    // 低开销」，并对该层加 .id(effectiveScheme) 破除身份缓存，切主题即时重建拿到新配色。
+    // resize 期间仍保留 v2.10.75/70 的 simplified 纯色降级（不画多层模糊、不触发离屏）。
 
     // v2.10.80: 真实驱动背景配色的主题。显式模式(dark/light)直接取用——与太阳/月亮切换、Settings
     // Picker 同步，不依赖 @Environment(\.colorScheme) 在本子视图里的延迟传播；system 模式回落到环境
@@ -2070,65 +2076,18 @@ private struct RetroPosterAmbientBackground: View {
 
     var body: some View {
         if simplified {
+            // v2.10.75/70: live-resize 期间只画纯色底，跳过 4 层超大高斯模糊 + grain + drawingGroup，
+            // 避免整窗离屏缓冲每帧按新尺寸重合成造成掉帧。
             AppTheme.windowBackground(effectiveScheme)
         } else {
-            GeometryReader { geo in
-                // v2.10.80: 在 body（@Environment 有效）内一次性捕获当前主题，随后统一贯穿 key、兜底
-                // fullBackground 与栅格重建，使「缓存键编码的主题」与「实际栅格化用的配色」永远一致，
-                // 杜绝 v2.10.76 的回归：此前 rebuild 在 .onChange 闭包里重新读 self.colorScheme（该处
-                // 环境值可能滞后），导致切主题时用旧配色栅格化却盖了新键，背景卡在旧主题直到 resize。
-                let scheme = effectiveScheme
-                let key = Self.cacheKey(scheme: scheme, size: geo.size)
-                ZStack {
-                    if let raster, rasterKey == key {
-                        Image(nsImage: raster)
-                            .resizable()
-                            .interpolation(.medium)
-                            .allowsHitTesting(false)
-                    } else {
-                        // 首帧 / 重建期间用完整实时背景兜底，保证观感与旧版逐像素一致、绝不闪空。
-                        fullBackground(scheme: scheme)
-                    }
-                }
-                .onAppear { rebuildRasterIfNeeded(key: key, size: geo.size, scheme: scheme) }
-                .onChange(of: key) { newKey in rebuildRasterIfNeeded(key: newKey, size: geo.size, scheme: scheme) }
-            }
+            // v2.10.81: 实时海报渲染（drawingGroup 仍在，维持非 resize 常态低开销）。.id(effectiveScheme)
+            // 使切主题时该子树获得新身份、强制重建 drawingGroup 的 GPU 纹理，即时呈现新主题配色。
+            fullBackground(scheme: effectiveScheme)
+                .id(effectiveScheme)
         }
     }
 
-    /// 尺寸量化台阶：64pt。普通拖动/微调不跨台阶就复用同一张位图，避免频繁重栅格化。
-    private static func quantize(_ v: CGFloat) -> Int {
-        guard v.isFinite, v > 0 else { return 64 }
-        return max(64, Int((v / 64).rounded()) * 64)
-    }
-
-    private static func cacheKey(scheme: ColorScheme, size: CGSize) -> String {
-        "\(scheme == .dark ? "d" : "l")-\(quantize(size.width))x\(quantize(size.height))"
-    }
-
-    /// 在主线程按需重建栅格位图。仅在缓存键变化（配色 / 尺寸台阶）时执行，属低频事件。
-    /// v2.10.80: scheme 由 body 显式传入（body 内 @Environment 有效），栅格化用的配色与 key 编码的
-    /// 主题严格一致，避免在此处再读可能滞后的 self.colorScheme。
-    @MainActor
-    private func rebuildRasterIfNeeded(key: String, size: CGSize, scheme: ColorScheme) {
-        guard size.width > 1, size.height > 1 else { return }
-        guard rasterKey != key || raster == nil else { return }
-        let w = CGFloat(Self.quantize(size.width))
-        let h = CGFloat(Self.quantize(size.height))
-        // 用不含 drawingGroup 的层叠版本栅格化——ImageRenderer 本身已把结果展平为位图，
-        // 再叠一层 drawingGroup 既多余又可能干扰 .screen/.blur 的捕获。
-        let renderer = ImageRenderer(content:
-            posterLayers(scheme: scheme).frame(width: w, height: h)
-        )
-        renderer.scale = 1
-        if let image = renderer.nsImage {
-            raster = image
-            rasterKey = key
-        }
-    }
-
-    /// 海报层叠内容（不含 drawingGroup），供实时兜底与 ImageRenderer 栅格化共用。
-    /// v2.10.80: 改为按显式 scheme 参数取色（原读 self.colorScheme），保证与缓存键口径一致。
+    /// 海报层叠内容（不含 drawingGroup）。按显式 scheme 参数取色，避免依赖可能滞后的 self.colorScheme。
     private func posterLayers(scheme: ColorScheme) -> some View {
         ZStack {
             AppTheme.windowBackground(scheme)
