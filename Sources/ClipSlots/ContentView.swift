@@ -574,20 +574,20 @@ struct ContentView: View {
                 .fixedSize(horizontal: true, vertical: false)
                 .layoutPriority(2)
 
+            // v2.10.78: 唯一撑开用 Spacer 前移到搜索框之前，把 400pt 搜索框推到右侧、
+            // 紧挨右侧图标簇；左侧（logo/拨杆簇与搜索框之间）留白。
+            Spacer(minLength: 0)
+
             SlotSearchBar(
                 searchText: $searchText,
                 selectedFilter: $selectedFilter,
                 searchScope: $searchScope
             )
             // v2.10.77: 搜索框此前 maxWidth: .infinity 会横向铺满整行，观感过长。改为
-            // 固定上限宽度 400pt，右侧多出的空间自然留白 / 交由既有右侧图标簇占据。
-            // 用固定上限而非随窗口宽度变化的比例值，配合 v2.10.75 resize 冻结，resize 时宽度稳定。
+            // 固定上限宽度 400pt。用固定上限而非随窗口宽度变化的比例值，配合 v2.10.75
+            // resize 冻结，resize 时宽度稳定。
             .frame(minWidth: 0, idealWidth: 400, maxWidth: 400)
             .layoutPriority(0)
-
-            // v2.10.77: 搜索框收窄后由此 Spacer 吸收剩余宽度，保证右侧外观/插件/键盘/设置
-            // 图标簇仍贴右对齐，其余控件排布不错位。
-            Spacer(minLength: 0)
 
             HStack(spacing: 8) {
                 Button {
