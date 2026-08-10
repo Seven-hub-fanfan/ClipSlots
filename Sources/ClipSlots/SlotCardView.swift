@@ -606,11 +606,29 @@ struct SlotCardView: View {
     }
 
     private var timeAgo: String {
-        let interval = -content.timestamp.timeIntervalSinceNow
-        if interval < 60 { return "刚刚" }
-        if interval < 3600 { return "\(Int(interval / 60)) 分钟前" }
-        if interval < 86400 { return "\(Int(interval / 3600)) 小时前" }
-        return "\(Int(interval / 86400)) 天前" }
+        SlotCardView.relativeTimeString(since: content.timestamp)
+    }
+
+    // v2.10.76 (Phase 2.5 · body 重算缓存): 相对时间字符串按「分钟粒度」记忆化。
+    // timeAgo 依赖“当前时间”，无法随内容永久缓存；但同一分钟内、对同一 timestamp 的重复求值结果不变，
+    // 故用 (timestamp 秒, 当前分钟桶) 作 key 缓存，避免卡片 body 重算时反复做区间判断 + 字符串插值分配。
+    // 语义与旧实现逐字节一致（含未来时间戳→“刚刚”）。metadataSummary 已于 v2.10.30 用 contentId::updatedAt
+    // 缓存（见 SlotContent+Thumbnail.swift），无需再处理。
+    private static let timeAgoCache = NSCache<NSString, NSString>()
+    static func relativeTimeString(since date: Date) -> String {
+        let now = Date()
+        let interval = now.timeIntervalSince(date)
+        let minuteBucket = Int(now.timeIntervalSince1970 / 60)
+        let key = "\(Int(date.timeIntervalSince1970))-\(minuteBucket)" as NSString
+        if let cached = timeAgoCache.object(forKey: key) { return cached as String }
+        let result: String
+        if interval < 60 { result = "刚刚" }
+        else if interval < 3600 { result = "\(Int(interval / 60)) 分钟前" }
+        else if interval < 86400 { result = "\(Int(interval / 3600)) 小时前" }
+        else { result = "\(Int(interval / 86400)) 天前" }
+        timeAgoCache.setObject(result as NSString, forKey: key)
+        return result
+    }
 
     // MARK: - v2.7.0 Port Overlay
 

@@ -2162,15 +2162,68 @@ private struct RetroPosterAmbientBackground: View {
     // 避免整窗离屏缓冲每帧按新尺寸重新栅格化造成掉帧；拖拽结束恢复完整海报背景。
     var simplified: Bool = false
 
+    // v2.10.76 (Phase 2.4 · 背景静态化): 用 ImageRenderer(macOS13+) 把「4 层超大 blur/.screen 渐变 +
+    // grain」的复杂海报背景一次性栅格化成静态位图缓存，之后仅作为一张普通 Image 合成——每帧只需贴一张
+    // 位图，比 drawingGroup 的每帧离屏 Metal pass 更省。缓存键 = (配色, 尺寸量化台阶)；仅当窗口尺寸
+    // 跨 64pt 台阶或明暗配色变化时才重建。栅格未就绪 / 重建期间回退到实时 fullBackground（观感零差异，
+    // 不会闪空）。resize 期间仍走 simplified 纯色降级（见 v2.10.70），不触发任何栅格化。
+    @State private var raster: NSImage?
+    @State private var rasterKey: String = ""
+
     var body: some View {
         if simplified {
             AppTheme.windowBackground(colorScheme)
         } else {
-            fullBackground
+            GeometryReader { geo in
+                let key = Self.cacheKey(scheme: colorScheme, size: geo.size)
+                ZStack {
+                    if let raster, rasterKey == key {
+                        Image(nsImage: raster)
+                            .resizable()
+                            .interpolation(.medium)
+                            .allowsHitTesting(false)
+                    } else {
+                        // 首帧 / 重建期间用完整实时背景兜底，保证观感与旧版逐像素一致、绝不闪空。
+                        fullBackground
+                    }
+                }
+                .onAppear { rebuildRasterIfNeeded(key: key, size: geo.size) }
+                .onChange(of: key) { newKey in rebuildRasterIfNeeded(key: newKey, size: geo.size) }
+            }
         }
     }
 
-    private var fullBackground: some View {
+    /// 尺寸量化台阶：64pt。普通拖动/微调不跨台阶就复用同一张位图，避免频繁重栅格化。
+    private static func quantize(_ v: CGFloat) -> Int {
+        guard v.isFinite, v > 0 else { return 64 }
+        return max(64, Int((v / 64).rounded()) * 64)
+    }
+
+    private static func cacheKey(scheme: ColorScheme, size: CGSize) -> String {
+        "\(scheme == .dark ? "d" : "l")-\(quantize(size.width))x\(quantize(size.height))"
+    }
+
+    /// 在主线程按需重建栅格位图。仅在缓存键变化（配色 / 尺寸台阶）时执行，属低频事件。
+    @MainActor
+    private func rebuildRasterIfNeeded(key: String, size: CGSize) {
+        guard size.width > 1, size.height > 1 else { return }
+        guard rasterKey != key || raster == nil else { return }
+        let w = CGFloat(Self.quantize(size.width))
+        let h = CGFloat(Self.quantize(size.height))
+        // 用不含 drawingGroup 的层叠版本栅格化——ImageRenderer 本身已把结果展平为位图，
+        // 再叠一层 drawingGroup 既多余又可能干扰 .screen/.blur 的捕获。
+        let renderer = ImageRenderer(content:
+            posterLayers.frame(width: w, height: h)
+        )
+        renderer.scale = 1
+        if let image = renderer.nsImage {
+            raster = image
+            rasterKey = key
+        }
+    }
+
+    /// 海报层叠内容（不含 drawingGroup），供实时兜底与 ImageRenderer 栅格化共用。
+    private var posterLayers: some View {
         ZStack {
             AppTheme.windowBackground(colorScheme)
 
@@ -2210,6 +2263,9 @@ private struct RetroPosterAmbientBackground: View {
 
             RetroPosterGrain(opacity: colorScheme == .dark ? 0.060 : 0.050)
         }
+    }
+
+    private var fullBackground: some View {
         // v2.8.4 (perf): flatten the whole poster background (base fill + 4 large
         // blur/`.screen` gradient layers + grain) into ONE offscreen GPU texture.
         // Previously CoreAnimation had to composite ~7 blurred/blended layers every
@@ -2217,7 +2273,8 @@ private struct RetroPosterAmbientBackground: View {
         // feel. drawingGroup keeps the identical look (screen blends still composite
         // against the base fill inside the group) but collapses the overdraw into a
         // single Metal pass, off the main thread.
-        .drawingGroup()
+        posterLayers
+            .drawingGroup()
     }
 }
 
