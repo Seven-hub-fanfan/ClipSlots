@@ -66,6 +66,18 @@ final class TransientUIStore: ObservableObject {
     // 注意：主 store 侧保留同名转发计算属性（见 main.swift），`publishImportProgress` 的
     // v2.10.56 generation 代次守卫逻辑与调用方全部不变，仅最终存储落到本 store 的 @Published。
     @Published var importProgress: ImportProgress?
+
+    // ★ v2.10.91 (perf 第四轮 · 设置界面转场): 应用内设置覆盖层的显隐状态。
+    //
+    // 原先它是 `ContentView` 自己的 `@State showingSettings`，覆盖层写在 ContentView.body 的 ZStack 里：
+    // 于是**开/关设置这个动作本身**就要让整棵 ContentView.body（标题栏 / 组标签栏 / 含 10 张卡片的
+    // LazyVGrid / 底栏 / 各 overlay）重新求值并跑一遍完整布局 —— 实测一次「打开设置」里 ContentView.body
+    // 被求值 3 次，而这些重算与设置面板的内容毫无关系，纯粹是在和 0.2s 的淡入动画抢主线程。
+    //
+    // 下沉到这里后，覆盖层由只观察本 store 的 `SettingsOverlayHost` 单独承接：开/关设置只重绘覆盖层
+    // 自己，主网格不再参与。视觉（0.38 黑底 + 居中面板 + radius 18 阴影 + .opacity 过渡 + Anim.status）
+    // 与下沉前逐像素一致。
+    @Published var isSettingsOverlayPresented: Bool = false
 }
 
 /// v2.10.52 (perf 第四批): 独立承载 Toast + 浮层提示的覆盖层子视图，只观察 `TransientUIStore`。

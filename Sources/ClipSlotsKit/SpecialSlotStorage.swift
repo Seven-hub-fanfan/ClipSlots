@@ -540,6 +540,24 @@ public final class SpecialSlotStorage {
             }
         }
         let data = try encoder.encode(index)
+        // ★ v2.10.91 (perf 第五轮): 写前比对 —— 编码结果与磁盘上现有字节完全一致就跳过这次写盘。
+        //
+        // 为什么需要：`index.json` 是被 FSEvents 监听的目录里**写得最频繁的非隐藏文件**，而它的多个
+        // 写入者是「无条件 load→改→save」的结构（updateSelectedSpecialSlot / updateActiveHotkey... /
+        // setAuto*Cursor / reset*Cursor / updateSettings / switchToPage …）。只要传入值与磁盘现状相同，
+        // 原实现照样 encode + 原子写（临时文件 + rename），于是凭空产生一次 mtime 变化 → 一批 FSEvents
+        // → 去抖 → 整棵 ContentView 的全量 reloadAll（实测单次占住主线程 140~180ms）。这类「什么都
+        // 没改的保存」在切组/切页/开关设置这些高频路径上大量存在。
+        //
+        // 语义完全不变：跳过的前提正是「要写的字节与磁盘上已有的字节逐字节相同」，无论写与不写，
+        // 之后任何一次 load 读到的都是同一份索引。判定就在 `queue` 串行区间内、且调用方仍持跨进程
+        // storageLock，故不存在「比对后被别人改写」的 TOCTOU。JSONEncoder 对同一 Codable 结构的
+        // 键序是确定的，因此内容相同必然字节相同；万一编码不稳定，也只是退化成照旧写盘（原行为）。
+        // 这与 v2.10.84 给 resetAutoPasteCursor 加的短路、以及 StorageLock.writeHolderPID 的
+        // 「PID 已一致就不写」是同一套写前比对思路，只是收敛到了所有索引写入者的唯一收口。
+        if let existing = try? Data(contentsOf: indexURL), existing == data {
+            return
+        }
         try data.write(to: indexURL, options: .atomic)
     }
 

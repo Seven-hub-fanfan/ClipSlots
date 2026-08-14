@@ -28,6 +28,9 @@ enum AccessibilityPermissionGuide {
     /// Call once on app launch (from the App scene onAppear).
     static func checkAndGuideOnLaunch() {
         guard !didGuide else { return }
+        // v2.10.91 (perf): 性能自测模式下不弹权限引导面板——它会盖在主窗口上并抢焦点，
+        // 干扰切组/设置转场的取数。仅在 CLIPSLOTS_PERF_AUTOTEST=1 时生效，正常运行不受影响。
+        guard !PerfAutoTest.isEnabled else { return }
         didGuide = true
         // v2.10.10: 读取并清除「自动更新后待重新授权」标记，用于展示更贴切的更新文案。
         let afterUpdate = UserDefaults.standard.bool(

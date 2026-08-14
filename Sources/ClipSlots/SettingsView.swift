@@ -155,9 +155,14 @@ struct SettingsView: View {
             //
             // 改为让出一个 runloop 再扫：进场动画先跑起来，扫描落在动画之后。安装状态本来就是
             // 「显示用」信息，晚一帧到达无任何语义影响（CLI / Skill 分区在拿到结果后自然刷新）。
-            DispatchQueue.main.async {
+            // v2.10.91 (perf 第四轮): 进一步把 Skill 扫描整体挪到**后台队列**（refreshInBackground），
+            // 不再只是「推迟一个 runloop 仍在主线程跑」——v2.10.90 的推迟并没有让它离开主线程，扫描照旧
+            // 落在 0.2s 淡入动画的头几帧上。cliManager.refreshState() 的重活（探测 CLI 版本要 spawn 子进程）
+            // 本来就在后台，主线程只剩两次 lstat/fileExists，可忽略。
+            // 再叠加一点延迟（0.25s ≈ 淡入动画走完），保证转场帧完全独占主线程。
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
                 cliManager.refreshState()
-                skillManager.refresh()
+                skillManager.refreshInBackground()
             }
         }
         .sheet(isPresented: $showUninstallSheet) {
@@ -169,6 +174,7 @@ struct SettingsView: View {
         } message: {
             Text("槽位数量、快捷键和日志设置将恢复为默认值。")
         }
+        .perfCount("SettingsView.body")
     }
 
     // v2.9.12: left category navigation sidebar (Obsidian-style).

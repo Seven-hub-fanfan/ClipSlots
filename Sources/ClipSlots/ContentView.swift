@@ -63,7 +63,6 @@ struct ContentView: View {
     private let autoMode = AutoModeState.shared
     // v2.10.70: 观察 live-resize 状态，拖拽缩放窗口期间把整窗环境背景降级为纯色填充。
     @ObservedObject private var liveResize = LiveResizeMonitor.shared
-    @State private var showingSettings = false
     @State private var showingSpecialSlotManagement = false
     @State private var showingHotkeyTemplatePopover = false
     // v2.9.8: plugins page popover.
@@ -115,6 +114,13 @@ struct ContentView: View {
 
     // v2.9.17: theme switch now takes effect instantly with no transition effect.
     // The previous water-ripple overlay (v2.7.45) was removed per product request.
+    /// v2.10.91: 有效主题（显式 dark/light 直接取用，system 回落到环境 colorScheme）。
+    /// 口径与 RetroPosterAmbientBackground 原先内部的 effectiveScheme 完全一致，只是把推导上移到这里，
+    /// 以便作为参数显式传给氛围层（配合 .equatable() 短路，且主题变化必然穿透）。
+    private var effectiveAppearanceScheme: ColorScheme {
+        (ThemeMode(rawValue: appearanceModeRaw) ?? .system).preferredColorScheme ?? colorScheme
+    }
+
     private func cycleAppearanceMode() {
         let current = ThemeMode(rawValue: appearanceModeRaw) ?? .system
         switch current {
@@ -126,65 +132,10 @@ struct ContentView: View {
         }
     }
 
-    // v2.9.12: Obsidian-style in-app settings overlay. Dimmed backdrop + centered
-    // two-pane panel. Lives inside the main window ZStack, so it follows the window.
-    private var settingsOverlay: some View {
-        GeometryReader { geo in
-            ZStack {
-                Color.black.opacity(0.38)
-                    .ignoresSafeArea()
-                    .contentShape(Rectangle())
-                    .onTapGesture { closeSettings() }
-
-                SettingsView(
-                    config: store.config,
-                    onSave: { newConfig in
-                        // v2.10.90 (perf · 关闭设置卡一下): 先启动关闭动画，再让出一个 runloop 应用配置。
-                        //
-                        // 原先是 `store.updateConfig(newConfig)` 紧接 `closeSettings()`，两者落在**同一个
-                        // 事务/同一帧**里。而 updateConfig 是重活：注销并重注册全部全局热键（Carbon/AppKit
-                        // 调用），并触发主 store 的 objectWillChange → 整棵 ContentView（含 10 张槽位卡片的
-                        // LazyVGrid）全量重绘。这批工作正好压在 0.2s 淡出动画的头几帧上，与动画抢主线程 —— 
-                        // 就是「关闭设置动画很慢、还卡一下」的来源。
-                        //
-                        // 拆开后淡出动画独占前一帧、先跑起来，配置在下一个 runloop 落地。用户可感知的
-                        // 生效时机差异约一帧（~16ms），而热键与配置的最终状态完全不变。
-                        closeSettings()
-                        DispatchQueue.main.async {
-                            store.updateConfig(newConfig)
-                        }
-                    },
-                    onClose: { closeSettings() },
-                    // v2.9.17: sidebar「插件市场」→ close settings, open the
-                    // independent plugin marketplace popover (anchored on toolbar).
-                    onOpenPlugins: {
-                        showingSettings = false
-                        store.isSettingsPresented = false
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
-                            showingPlugins = true
-                        }
-                    }
-                )
-                // Fill the main window with small insets so it reads as an in-app
-                // panel (like Obsidian), while staying usable in small windows.
-                .frame(
-                    width: min(max(geo.size.width - 32, 480), 880),
-                    height: min(max(geo.size.height - 32, 380), 660)
-                )
-                // v2.10.90 (perf · 设置进出场动画): 阴影模糊半径 30 → 18。
-                // 这个阴影挂在一块最大 880×660 的面板上，模糊半径直接决定离屏模糊的采样面积
-                // （半径 30 意味着阴影要向外扩 30pt 做大核卷积）。而面板进出场走的是 `.transition(.opacity)`，
-                // 透明度每帧变化都要重新合成这层大面积模糊，是进出场掉帧的一大项。
-                // 18 在视觉上仍是清晰的「悬浮面板」层次感，卷积面积却降到约 (18/30)² ≈ 36%。
-                .shadow(color: .black.opacity(0.35), radius: 18, y: 10)
-            }
-            .frame(width: geo.size.width, height: geo.size.height)
-        }
-    }
-
-    private func closeSettings() {
-        withAnimation(Anim.status) { showingSettings = false }
-    }
+    // v2.10.91 (perf 第四轮): 应用内设置覆盖层（含 0.38 黑底 + 居中面板 + 过渡）已整体迁到独立的
+    // `SettingsOverlayHost`（见本文件末尾）。它只观察 store.transientUI 的 isSettingsOverlayPresented，
+    // 因此「开/关设置」不再让整棵 ContentView.body 重新求值（原先 @State showingSettings 就在这里，
+    // 一次开关要带着 10 张卡片的 LazyVGrid 一起重算 3 次，正好压在 0.2s 淡入动画上）。
 
     // v2.10.73（方案③：缩略图渲染解耦）：卡片身份改回 `.id(slot)`——切页/切组时卡片被复用而非
     // 整格重建（流畅）。缩略图刷新不再依赖卡片身份携带内容版本，而是由 SlotThumbnailView 观察
@@ -312,8 +263,29 @@ struct ContentView: View {
                 bottomBar
             }
             .background(
-                RetroPosterAmbientBackground(simplified: liveResize.isResizing)
-                    .ignoresSafeArea()
+                // ★ v2.10.91 (perf 第四轮): 整窗氛围层改为「显式传入主题 + EquatableView 短路」。
+                //
+                // 实测（PerfMonitor body 计数）：切一次组，ContentView.body 被求值 4 次，
+                // ambientBackground.body 就跟着求值 4 次——而这一层是 4 个超大高斯模糊（radius 32~58）
+                // + 3 层 .screen 混合 + 噪点贴图 + drawingGroup（整窗离屏 Metal 纹理）。用实验开关
+                // （CLIPSLOTS_PERF_EXP_NOAMBIENT=1）把它降级为纯色底做 A/B：每次切组的主线程累计停顿从
+                // 670ms 降到 548ms，也就是**这一层单独占了约 120ms/次切组**。
+                //
+                // 它的内容其实只依赖两个输入：有效主题 + 是否 resize 降级。所以让它成为 Equatable 值类型、
+                // 由父视图显式传入这两个输入，再套 `.equatable()`：ContentView 因任何**槽位数据**变化重绘时，
+                // 这一层值不变 → SwiftUI 直接跳过它的 body 求值与重新栅格化。
+                //
+                // ⚠️ 与 v2.10.80/81「切主题顶部氛围层卡旧色」的关系（务必保持）：主题不再靠子视图内部的
+                // @AppStorage 传播，而是由 ContentView 自己的 @AppStorage(appearanceMode) 推导后**当作参数传入**，
+                // 因此主题一变 → 参数变 → Equatable 判不等 → body 必然重算，且内部 `.id(scheme)` 同步换身份、
+                // 强制重建 drawingGroup 的 GPU 纹理。这比原先「依赖环境/AppStorage 在 .background 子树里的
+                // 传播时机」更强，不会重现卡旧色。
+                RetroPosterAmbientBackground(
+                    scheme: effectiveAppearanceScheme,
+                    simplified: liveResize.isResizing
+                )
+                .equatable()
+                .ignoresSafeArea()
             )
 
             // v2.10.52 (perf 第四批 · 巨型 @Published Store 拆分): Toast / 浮层提示改由独立子视图
@@ -334,22 +306,30 @@ struct ContentView: View {
             // v2.9.12: in-app settings overlay (Obsidian-style two-pane).
             // Rendered inside the main window's ZStack so it stays attached to the
             // window and moves together when the window is dragged.
-            if showingSettings {
-                settingsOverlay
-                    .transition(.opacity)
-                    .zIndex(200)
-            }
+            // v2.10.91 (perf): 改由独立子视图承载，显隐状态下沉到 store.transientUI —— 开/关设置
+            // 只重绘覆盖层，不再触发整棵 ContentView.body（store.transientUI 是普通引用读取，
+            // 不建立 @Published 依赖）。
+            SettingsOverlayHost(
+                store: store,
+                ui: store.transientUI,
+                onOpenPlugins: {
+                    // v2.9.17: sidebar「插件市场」→ 关设置、开独立插件市场 popover（锚在工具栏）。
+                    store.setSettingsOverlay(false)
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+                        showingPlugins = true
+                    }
+                }
+            )
+            .zIndex(200)
 
         }
         .onAppear {
             AppearanceDefaults.ensureDefaultDarkIfNeeded()
         }
-        // v2.9.12: settings overlay is a modal hotkey-editing safe zone; keep the
-        // store flag in sync so business hotkeys don't fire while it is open.
-        .onChange(of: showingSettings) { store.isSettingsPresented = $0 }
         // v2.9.12: Cmd+, / "设置…" menu opens the in-app overlay.
+        // v2.10.91: 显隐与「热键安全区」标志的同步统一由 store.setSettingsOverlay 负责。
         .onReceive(NotificationCenter.default.publisher(for: .openInAppSettings)) { _ in
-            withAnimation(Anim.status) { showingSettings = true }
+            store.setSettingsOverlay(true)
         }
         // v2.6.7: Import options sheet
         .sheet(item: $store.pendingImportSelection) { selection in
@@ -394,6 +374,12 @@ struct ContentView: View {
                 onOpenManager: { showingConnectionManagement = true; showingConnectionFullscreen = false }
             )
                 .frame(minWidth: 720, minHeight: 560)
+        }
+        // v2.10.91 (perf 测量): 记录整棵 ContentView.body 的求值次数（默认关闭，零开销）。
+        .perfCount("ContentView.body")
+        // v2.10.91: 供 PerfAutoTest 程序化关闭设置覆盖层（等价点击面板外遮罩）。
+        .onReceive(NotificationCenter.default.publisher(for: .closeInAppSettings)) { _ in
+            store.setSettingsOverlay(false)
         }
     }
 
@@ -510,6 +496,7 @@ struct ContentView: View {
         .onDisappear {
             searchDebounce.cancel()
         }
+        .perfCount("headerView.body")
     }
 
     // Layer 1: Title + Stats + Settings
@@ -633,7 +620,7 @@ struct ContentView: View {
             // v2.9.12: settings now open as an in-app overlay (Obsidian-style),
             // embedded in the main window so it follows the window when dragged.
             Button {
-                withAnimation(Anim.status) { showingSettings = true }
+                store.setSettingsOverlay(true)
             } label: {
                 Image(systemName: "gearshape.fill")
                     .font(.system(size: 15, weight: .semibold))
@@ -1018,6 +1005,7 @@ struct ContentView: View {
                 .help("管理槽位组")
             }
         }
+        .perfCount("groupTagBar.body")
     }
 
     private var activeHotkeyLayerNotice: some View {
@@ -1225,6 +1213,7 @@ struct ContentView: View {
         .overlay(alignment: .top) {
             Divider()
         }
+        .perfCount("bottomBar.body")
     }
 
     // v2.9.37: footer "上次粘贴" status, redesigned to be low-key (small icon +
@@ -1513,7 +1502,10 @@ struct ContentView: View {
         let searchToken = store.globalSearchGeneration
 
         guard scope == .global, SlotSearchMatcher.isActive(query: query, filter: filter) else {
-            globalSearchResultsCache = []
+            // v2.10.91 (perf): @State 赋值一律触发视图失效，即便赋的是同一个空数组。
+            // 本函数在每次 `store.slotsContentSignature` 变化（含每次切组）时都会被调用，而非搜索态下
+            // 它只是把缓存清空——原来那次无条件赋空等于每次切组白搭一整棵 ContentView 重绘 + 重布局。
+            if !globalSearchResultsCache.isEmpty { globalSearchResultsCache = [] }
             return
         }
 
@@ -1578,7 +1570,7 @@ struct ContentView: View {
 
         guard searchScope == .global, isSearchActive else {
             store.globalSearchGeneration += 1   // P1-4 (v2.10.7): 作废在途后台搜索，防止清空后旧结果回魂
-            globalSearchResultsCache = []
+            if !globalSearchResultsCache.isEmpty { globalSearchResultsCache = [] }  // v2.10.91 (perf)
             return
         }
 
@@ -2039,16 +2031,18 @@ private struct CrossGroupCursorHintView: View {
 
 // MARK: - v2.7.43 Always-on Poster Ambient Background
 
-private struct RetroPosterAmbientBackground: View {
-    @Environment(\.colorScheme) private var colorScheme
-    // v2.10.80: 直接观察 App 自有主题（顶部太阳/月亮切换写入的 @AppStorage("appearanceMode")）。
-    // 背景配色的真实驱动是它（经 App 根部 .preferredColorScheme 生效），而非派生的
-    // @Environment(\.colorScheme)——后者在 .background 内嵌子视图里传播到本视图可能滞后，
-    // 正是 v2.10.76 栅格缓存切主题不刷新的根因之一。
-    @AppStorage("appearanceMode") private var appearanceModeRaw = ThemeMode.dark.rawValue
+private struct RetroPosterAmbientBackground: View, Equatable {
+    // v2.10.91: 主题由父视图显式传入（原先是本视图内部的 @AppStorage + @Environment 推导）。
+    // 这样本视图成为纯值类型，可配合 `.equatable()` 在「与主题/resize 无关的重绘」里被完全短路；
+    // 同时主题变化必然改变本值 → 必然重算 body + 换 .id，彻底避免 v2.10.80/81 的「卡旧色」。
+    let scheme: ColorScheme
     // v2.10.70: 拖拽 live-resize 期间为 true——只画纯色底，跳过 4 层超大高斯模糊 + grain + drawingGroup，
     // 避免整窗离屏缓冲每帧按新尺寸重新栅格化造成掉帧；拖拽结束恢复完整海报背景。
     var simplified: Bool = false
+
+    static func == (lhs: RetroPosterAmbientBackground, rhs: RetroPosterAmbientBackground) -> Bool {
+        lhs.scheme == rhs.scheme && lhs.simplified == rhs.simplified
+    }
 
     // v2.10.81: 彻底移除 v2.10.76 的 ImageRenderer 静态栅格快照（raster/@State + cacheKey/quantize +
     // rebuildRasterIfNeeded 全部删除）。根因：ImageRenderer 离屏位图 + drawingGroup 的 Metal 纹理会
@@ -2057,23 +2051,21 @@ private struct RetroPosterAmbientBackground: View {
     // 低开销」，并对该层加 .id(effectiveScheme) 破除身份缓存，切主题即时重建拿到新配色。
     // resize 期间仍保留 v2.10.75/70 的 simplified 纯色降级（不画多层模糊、不触发离屏）。
 
-    // v2.10.80: 真实驱动背景配色的主题。显式模式(dark/light)直接取用——与太阳/月亮切换、Settings
-    // Picker 同步，不依赖 @Environment(\.colorScheme) 在本子视图里的延迟传播；system 模式回落到环境
-    // colorScheme（跟随系统外观）。口径与 FloatingNoticeWindowController 的 effectiveColorScheme 一致。
-    private var effectiveScheme: ColorScheme {
-        (ThemeMode(rawValue: appearanceModeRaw) ?? .system).preferredColorScheme ?? colorScheme
-    }
+    // 实验/诊断开关：CLIPSLOTS_PERF_EXP_NOAMBIENT=1 时退化为纯色底。用于 A/B 量化「整窗氛围层」
+    // 在一次重绘里占多少主线程时间（v2.10.91 用它测出约 120ms/次切组）。默认关闭，正式运行零影响。
+    private static let expNoAmbient = ProcessInfo.processInfo.environment["CLIPSLOTS_PERF_EXP_NOAMBIENT"] == "1"
 
     var body: some View {
-        if simplified {
+        if simplified || Self.expNoAmbient {
             // v2.10.75/70: live-resize 期间只画纯色底，跳过 4 层超大高斯模糊 + grain + drawingGroup，
             // 避免整窗离屏缓冲每帧按新尺寸重合成造成掉帧。
-            AppTheme.windowBackground(effectiveScheme)
+            AppTheme.windowBackground(scheme)
         } else {
             // v2.10.81: 实时海报渲染（drawingGroup 仍在，维持非 resize 常态低开销）。.id(effectiveScheme)
             // 使切主题时该子树获得新身份、强制重建 drawingGroup 的 GPU 纹理，即时呈现新主题配色。
-            fullBackground(scheme: effectiveScheme)
-                .id(effectiveScheme)
+            fullBackground(scheme: scheme)
+                .id(scheme)
+                .perfCount("ambientBackground.body")
         }
     }
 
@@ -2299,5 +2291,75 @@ private struct PageNavigationButtonStyle: ButtonStyle {
             .scaleEffect(configuration.isPressed ? 0.985 : 1)
             .opacity(configuration.isPressed ? 0.78 : 1)
             .animation(Anim.interactive, value: configuration.isPressed)
+    }
+}
+
+
+// MARK: - v2.10.91 (perf 第四轮 · 交互状态下沉) 设置覆盖层宿主
+//
+// 承接原先写在 `ContentView.body` 里的应用内设置覆盖层。显隐状态来自 `TransientUIStore`
+// （@Published isSettingsOverlayPresented），因此开/关设置只重绘本子视图，主网格（10 张卡片的
+// LazyVGrid）、标题栏、底栏都不再参与重算 —— 这是「打开设置不流畅」的主因之一（实测一次打开
+// 会让 ContentView.body 求值 3 次，每次都要跑整树布局，正好压在 0.2s 淡入动画的头几帧）。
+//
+// 视觉与迁移前逐像素一致：0.38 黑色遮罩（点击关闭）+ 居中面板（窗口内缩 32pt、上限 880×660）
+// + radius 18 / y 10 阴影 + `.transition(.opacity)`，动画曲线由 store.setSettingsOverlay 里的
+// withAnimation(Anim.status) 提供。
+struct SettingsOverlayHost: View {
+    // v2.10.91: 刻意用**非观察**的 `let` 持有主 store（只在构建面板时读一次 store.config、并调用其方法）。
+    // 若用 @ObservedObject，主 store 的任何变更（切组、保存、Toast…）都会让本宿主重绘——实测切一次组
+    // 会白白重绘本宿主 5 次。SettingsView 自己有 @State 副本承载编辑中的配置，因此不需要持续观察。
+    let store: SlotStoreObservable
+    @ObservedObject var ui: TransientUIStore
+    var onOpenPlugins: () -> Void
+
+    var body: some View {
+        ZStack {
+            if ui.isSettingsOverlayPresented {
+                overlay
+                    .transition(.opacity)
+            }
+        }
+        .perfCount("settingsOverlayHost.body")
+    }
+
+    private var overlay: some View {
+        GeometryReader { geo in
+            ZStack {
+                Color.black.opacity(0.38)
+                    .ignoresSafeArea()
+                    .contentShape(Rectangle())
+                    .onTapGesture { store.setSettingsOverlay(false) }
+
+                SettingsView(
+                    config: store.config,
+                    onSave: { newConfig in
+                        // v2.10.90 (perf · 关闭设置卡一下): 先启动关闭动画，再让出一个 runloop 应用配置。
+                        //
+                        // updateConfig 是重活：注销并重注册全部全局热键（Carbon/AppKit 调用），并触发主
+                        // store 的 objectWillChange → 整棵 ContentView 全量重绘。若与关闭动画落在同一帧，
+                        // 这批工作会压在淡出动画头几帧上与动画抢主线程。拆开后淡出先跑，配置下一 runloop 落地
+                        // （可感知差异约一帧），热键与配置的最终状态完全不变。
+                        store.setSettingsOverlay(false)
+                        DispatchQueue.main.async {
+                            store.updateConfig(newConfig)
+                        }
+                    },
+                    onClose: { store.setSettingsOverlay(false) },
+                    onOpenPlugins: onOpenPlugins
+                )
+                // Fill the main window with small insets so it reads as an in-app
+                // panel (like Obsidian), while staying usable in small windows.
+                .frame(
+                    width: min(max(geo.size.width - 32, 480), 880),
+                    height: min(max(geo.size.height - 32, 380), 660)
+                )
+                // v2.10.90 (perf · 设置进出场动画): 阴影模糊半径 30 → 18。半径直接决定离屏模糊的采样
+                // 面积，而面板进出场走 `.transition(.opacity)`，每帧透明度变化都要重合成这层大面积模糊。
+                // 18 仍是清晰的「悬浮面板」层次感，卷积面积约降到 (18/30)² ≈ 36%。
+                .shadow(color: .black.opacity(0.35), radius: 18, y: 10)
+            }
+            .frame(width: geo.size.width, height: geo.size.height)
+        }
     }
 }

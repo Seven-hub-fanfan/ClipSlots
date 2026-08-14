@@ -92,6 +92,14 @@ struct ClipSlotsApp: App {
         WindowGroup {
             ContentView(store: store)
                 // v2.9.23: 增大窗口最小尺寸，防止标题栏/应用图标在缩到最小时被挤压变形。
+                //
+                // v2.10.91 (perf 第四轮 · 被数据否证的假设，勿再尝试): `sample` 采样显示主线程活跃时间
+                // 里约 1/3 落在 `NSHostingView.updateWindowContentSizeExtremaIfNecessary → minSize()
+                // → ViewGraph.sizeThatFits`（AppKit 为把根视图 min/max 尺寸同步到窗口约束而跑的额外
+                // 全树测量）。据此试过「移除本 frame，改用 NSWindow.contentMinSize 设置最小尺寸」，
+                // A/B 实测**更差**：每次切组累计主线程停顿 507ms → 615ms、最大单次停顿 210ms → 639ms。
+                // 原因推测是没有根部弹性 frame 后，hosting view 与窗口之间要反复协商内容尺寸，反而多了
+                // 布局往返。故保留原写法。
                 .frame(minWidth: 720, minHeight: 560)
                 .preferredColorScheme(appearanceMode.preferredColorScheme)
                 .onAppear {
@@ -104,6 +112,9 @@ struct ClipSlotsApp: App {
                     // v2.9.30: 启动时静默同步已安装的 Skill，确保各 Agent 用到最新决策流，
                     // 无需用户再手动点「安装 Skill」。onAppear 已在主线程，直接调用即可。
                     AgentSkillInstallManager().syncInstalledSkillsOnLaunch()
+                    // v2.10.91 (perf): 主线程卡顿采样（默认关闭，CLIPSLOTS_PERF_LOG=1 开启）
+                    PerfMonitor.shared.start()
+                    PerfAutoTest.shared.start(store: store)
                 }
         }
         .windowStyle(.titleBar)
@@ -228,7 +239,21 @@ final class SlotStoreObservable: ObservableObject {
     /// P2-28 (v2.10.9): slots 内容签名派生值，随 slots 变化自动更新（见 slots.didSet）。
     @Published private(set) var slotsContentSignature: [Int: String] = [:]
     @Published var labels: [Int: String] = [:]
-    @Published var refreshTrigger = UUID()
+    // ★ v2.10.91 (perf 第四轮): `refreshTrigger` 去掉 @Published。
+    //
+    // 全仓 grep 结果：本字段有 23 处**写入**、**零处读取**（无任何视图把它用作 .id / 依赖读取），
+    // 与 v2.10.87 删掉的 `slotRenderTokens` 是同一类架构债。但它此前是主 store 的 @Published，
+    // 于是每一次 `refreshTrigger = UUID()` 都会发一次 objectWillChange，让以 @ObservedObject 观察
+    // 主 store 的整棵 ContentView.body（header / 组标签栏 / 10 张卡片的 LazyVGrid / 底栏 / 各 overlay）
+    // 重新求值并触发一次完整 SwiftUI 布局 pass —— 而实测（PerfMonitor）表明单次这样的更新在本项目的
+    // 树规模下要花 60~200ms 主线程时间。
+    //
+    // 为什么可以安全去掉 publish 而不是删字段：已逐一核对全部 23 处写入点，每一处都紧跟着一次**真实的**
+    // @Published 变更（`slots = ` / `slots[x] = ` / `labels = ` / `config = ` / `currentSpecialSlotId = `
+    // / `reloadAllAsync()`），所以该刷新的场景照旧会刷新；唯一被消除的是「什么都没变也强制整树重绘」。
+    // 保留字段本身（而非删掉 23 处调用）是为了把改动面压到一行，避免与并行改动冲突；语义上它现在是一个
+    // 纯粹的内部代次计数器。
+    var refreshTrigger = UUID()
 
     // Special slot state
     @Published var specialSlots: [SpecialSlot] = []
@@ -258,7 +283,20 @@ final class SlotStoreObservable: ObservableObject {
     // 生命周期随主 store；ContentView 通过 store.transientUI 单独交给 TransientOverlayView 观察。
     let transientUI = TransientUIStore()
     @Published var hotkeyRegistrationErrors: [String] = []
-    @Published var isSettingsPresented: Bool = false
+    // v2.10.91 (perf): 去掉 @Published。全仓 grep：本标志只被**命令式**读取一处
+    // （installLocalHotkeyGuardIfNeeded 的本地按键守卫，见上方 `if self.isSettingsPresented`），
+    // 没有任何视图读它。此前它是 @Published，于是「开/关设置」这个动作会额外触发一次主 store
+    // objectWillChange → 整棵 ContentView 重绘，纯属浪费。
+    var isSettingsPresented: Bool = false
+
+    /// v2.10.91: 统一的「应用内设置覆盖层」开关。显隐状态存放在 transientUI（只影响覆盖层子视图），
+    /// 同时同步热键安全区标志 isSettingsPresented。动画曲线沿用原 ContentView 的 Anim.status。
+    func setSettingsOverlay(_ shown: Bool) {
+        isSettingsPresented = shown
+        if transientUI.isSettingsOverlayPresented != shown {
+            withAnimation(Anim.status) { transientUI.isSettingsOverlayPresented = shown }
+        }
+    }
     // v2.10.87 (perf): 已删除 `slotRenderTokens: [String: UUID]`。
     //
     // 它是 v2.10.72 之前「靠改卡片 .id 强刷缩略图」方案的遗留基础设施。v2.10.73（方案③）把缩略图
@@ -570,6 +608,13 @@ final class SlotStoreObservable: ObservableObject {
         loadSlotsAsync()
         loadPersistedUndoSnapshot() // v2.9.5 (Feature #3): restore pending undo across restarts
         setupStorageWatcher()
+        // v2.10.91 (perf): 性能自测驱动的启动挂载点（默认关闭；仅 CLIPSLOTS_PERF_AUTOTEST=1 生效）。
+        // 不放在 ContentView.onAppear 是因为窗口若没有出现（例如所在 Space 被全屏应用占据），onAppear
+        // 不会触发、取数会空转；这里在 store 初始化时就挂上，并由自测入口负责把窗口带到前台。
+        if PerfAutoTest.isEnabled {
+            let storeRef = self
+            Task { @MainActor in PerfAutoTest.shared.startAtLaunch(store: storeRef) }
+        }
     }
 
     deinit {
@@ -597,11 +642,14 @@ final class SlotStoreObservable: ObservableObject {
     /// Called on the watcher's background queue for every FSEvents batch.
     /// Debounces ~300ms, then reloads on the main queue (unless self-write suppressed).
     private func handleStorageChange() {
+        NSLog("[ClipSlots][TMPDIAG] handleStorageChange entered")
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
+            NSLog("[ClipSlots][TMPDIAG] handleStorageChange on main, scheduling debounce")
             self.watcherDebounceWorkItem?.cancel()
             let work = DispatchWorkItem { [weak self] in
                 guard let self else { return }
+                NSLog("[ClipSlots][TMPDIAG] debounce fired")
                 // CR-1 (v2.10.30): 通过加锁访问器读取，避免与 suppressWatcher 的写入竞争；一次读入本地
                 // 变量供后续两处判断使用（消除 TOCTOU）。
                 let ignoreUntil = self.currentIgnoreWatcherUntil()
@@ -621,14 +669,7 @@ final class SlotStoreObservable: ObservableObject {
                     //     不再阻塞主线程；命中自写则直接结束，未命中再回主线程执行 reload。
                     self.fingerprintQueue.async { [weak self] in
                         guard let self else { return }
-                        let fp = self.storageDirFingerprint()
-                        if let idx = self.pendingSelfWriteFingerprints.lastIndex(of: fp) {
-                            self.pendingSelfWriteFingerprints.remove(at: idx)
-                            NSLog("[ClipSlots] watcher fired → suppressed (self-write fingerprint match)")
-                            return
-                        }
-                        NSLog("[ClipSlots] watcher fired → external write detected within window (fingerprint mismatch) → reloadAll")
-                        DispatchQueue.main.async { [weak self] in self?.performWatcherReload() }
+                        self.evaluateSelfWriteWindowEvent(retriesLeft: 1)
                     }
                     return
                 }
@@ -637,6 +678,39 @@ final class SlotStoreObservable: ObservableObject {
             self.watcherDebounceWorkItem = work
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.3, execute: work)
         }
+    }
+
+    /// ★ v2.10.91 (perf 第五轮): 自写抑制窗内的「自写 vs 外部写」判定，从 handleStorageChange 抽出，
+    /// 并加入**一次**延后复判。
+    ///
+    /// 为什么需要复判（实测证据）：连续快速切组/切页时（真机日志里 selectAndActivateSpecialSlot 每
+    /// ~0.5s 一次），每一次切换都会打出
+    ///   `watcher fired → external write detected within window (fingerprint mismatch) → reloadAll`
+    /// —— 但当时**只有本进程在写**（index.json 的选中组/当前页）。原因是这套比对存在时序竞态：
+    /// 自写指纹是在写入后 +0.08s（突发合并窗）才采集入环的，而 watcher 的 0.3s 去抖回调可能正好落在
+    /// 「上一次自写指纹已被消费 / 下一次自写刚落盘但尚未采集」的缝隙里，甚至整树遍历本身就跨了下一次
+    /// 自写；于是磁盘现状对不上环里任何一条指纹，被判成外部写，白付一次 140~180ms 的全量重载。
+    ///
+    /// 修法：首次比对不中时，若**仍处于自写抑制窗内**，等 0.15s 让在飞的采集落地后再比一次（至多一次）。
+    /// 磁盘此时已稳定在那次自写的最终态，指纹自然命中 → 正确抑制。
+    /// 对外部写的语义影响：仅在「外部写恰好落进本进程 0.6s 自写窗」这一小概率场景下，把刷新推迟
+    /// ≤0.15s，之后照旧 reloadAll —— 绝不吞掉外部写（复判仍不中就一定 reload）。
+    /// 线程约束：只能在 `fingerprintQueue` 上调用（pendingSelfWriteFingerprints 由该串行队列保护）。
+    private func evaluateSelfWriteWindowEvent(retriesLeft: Int) {
+        let fp = storageDirFingerprint()
+        if let idx = pendingSelfWriteFingerprints.lastIndex(of: fp) {
+            pendingSelfWriteFingerprints.remove(at: idx)
+            NSLog("[ClipSlots] watcher fired → suppressed (self-write fingerprint match)")
+            return
+        }
+        if retriesLeft > 0, Date() < currentIgnoreWatcherUntil() {
+            fingerprintQueue.asyncAfter(deadline: .now() + 0.15) { [weak self] in
+                self?.evaluateSelfWriteWindowEvent(retriesLeft: retriesLeft - 1)
+            }
+            return
+        }
+        NSLog("[ClipSlots] watcher fired → external write detected within window (fingerprint mismatch) → reloadAll")
+        DispatchQueue.main.async { [weak self] in self?.performWatcherReload() }
     }
 
     /// P1-B (v2.10.17): watcher 命中「需要 reload」时在主线程执行的收尾工作（缓存失效 + UI 刷新）。
@@ -784,12 +858,22 @@ final class SlotStoreObservable: ObservableObject {
     func loadSpecialSlots() {
         let index = specialStorage.loadIndex()
 
-        // v2.4: load pages
-        pages = index.pages
-        currentPageId = index.currentPageId.isEmpty ? (index.pages.first?.id ?? "default_page") : index.currentPageId
-        currentPage = index.pages.first { $0.id == currentPageId }
+        // v2.10.91 (perf): 全部 @Published 赋值改为「值真的变了才写」。
+        //
+        // 本方法是所有 reload 路径（reloadAll / reloadAllAsync / watcher 刷新 / 建组删组 / 切页）的第一步，
+        // 而其中绝大多数调用**读到的索引与内存里完全一致**（典型：FSEvents 触发的刷新、同页内切组）。
+        // @Published 不做等值判断，原来的无条件赋值意味着一次「什么都没变的 reload」也要连发 8 次
+        // objectWillChange → 整棵 ContentView.body 重新求值 + 完整布局 pass（实测本项目树规模下单次
+        // 60~200ms 主线程时间）。等值跳过后，无变化的 reload 变成零重绘。
+        // 语义不变：任何真实变化（改名/新建/删除/切换选中组）都会让对应值不等而照旧写入并刷新 UI。
+        let newPages = index.pages
+        if pages != newPages { pages = newPages }
+        let newPageId = index.currentPageId.isEmpty ? (index.pages.first?.id ?? "default_page") : index.currentPageId
+        if currentPageId != newPageId { currentPageId = newPageId }
+        let newCurrentPage = index.pages.first { $0.id == newPageId }
+        if currentPage != newCurrentPage { currentPage = newCurrentPage }
 
-        specialSlots = index.specialSlots
+        if specialSlots != index.specialSlots { specialSlots = index.specialSlots }
 
         let fallbackId = index.specialSlots.first?.id ?? "default"
 
@@ -800,11 +884,13 @@ final class SlotStoreObservable: ObservableObject {
         let validSelectedId = index.specialSlots.contains(where: { $0.id == selectedId }) ? selectedId : fallbackId
         let validActiveId = index.specialSlots.contains(where: { $0.id == activeId }) ? activeId : fallbackId
 
-        currentSpecialSlotId = validSelectedId
-        currentSpecialSlot = index.specialSlots.first { $0.id == validSelectedId }
+        if currentSpecialSlotId != validSelectedId { currentSpecialSlotId = validSelectedId }
+        let newCurrentGroup = index.specialSlots.first { $0.id == validSelectedId }
+        if currentSpecialSlot != newCurrentGroup { currentSpecialSlot = newCurrentGroup }
 
-        activeHotkeySpecialSlotId = validActiveId
-        activeHotkeySpecialSlot = index.specialSlots.first { $0.id == validActiveId }
+        if activeHotkeySpecialSlotId != validActiveId { activeHotkeySpecialSlotId = validActiveId }
+        let newActiveGroup = index.specialSlots.first { $0.id == validActiveId }
+        if activeHotkeySpecialSlot != newActiveGroup { activeHotkeySpecialSlot = newActiveGroup }
 
         specialSlotSettings = index.settings
     }
@@ -887,11 +973,18 @@ final class SlotStoreObservable: ObservableObject {
     /// storage watcher reload, instead of only updating on relaunch.
     func reloadLastPasteFromDefaults() {
         let d = UserDefaults.standard
-        lastPastePageId = d.string(forKey: UserPreferenceKeys.lastPastePageId) ?? ""
-        lastPasteGroupId = d.string(forKey: UserPreferenceKeys.lastPasteGroupId) ?? ""
-        lastPasteSlotIndex = d.object(forKey: UserPreferenceKeys.lastPasteSlotIndex) == nil
+        // v2.10.91 (perf): 三个 @Published 改为「值真的变了才赋值」。
+        // 本方法在每次 reloadAllAsync 完成时都会被调用（切组、watcher 刷新、导入收尾…），而绝大多数
+        // 情况下 UserDefaults 里的「上次粘贴」位置根本没变。@Published 的 willSet 不做等值判断，
+        // 原来的无条件赋值等于每次 reload 白发 3 次 objectWillChange → 整棵 ContentView 重绘 + 重布局。
+        let newPage = d.string(forKey: UserPreferenceKeys.lastPastePageId) ?? ""
+        let newGroup = d.string(forKey: UserPreferenceKeys.lastPasteGroupId) ?? ""
+        let newSlot = d.object(forKey: UserPreferenceKeys.lastPasteSlotIndex) == nil
             ? -1
             : d.integer(forKey: UserPreferenceKeys.lastPasteSlotIndex)
+        if lastPastePageId != newPage { lastPastePageId = newPage }
+        if lastPasteGroupId != newGroup { lastPasteGroupId = newGroup }
+        if lastPasteSlotIndex != newSlot { lastPasteSlotIndex = newSlot }
     }
 
     func switchSpecialSlot(id: String) {
@@ -990,43 +1083,53 @@ final class SlotStoreObservable: ObservableObject {
         // 缓存推迟到新数据提交后再失效（onCommit），避免旧内容在遮罩下先掉图。
         beginGroupSwitchTransition()
 
+        // v2.10.91 (perf 测量): 切组同步段整体计时，内部再分项。
+        let perfSwitchT0 = PerfMonitor.begin()
+
         suppressWatcher() // v2.9.4 (#2): self-write
-        do {
-            try specialStorage.switchToSpecialSlot(id: id)
-        } catch {
-            NSLog("[ClipSlots] selectAndActivateSpecialSlot save failed: \(error)")
+        PerfMonitor.measure("切组.writeSelection") {
+            do {
+                try specialStorage.switchToSpecialSlot(id: id)
+            } catch {
+                NSLog("[ClipSlots] selectAndActivateSpecialSlot save failed: \(error)")
+            }
         }
 
-        let index = specialStorage.loadIndex()
+        let index = PerfMonitor.measure("切组.loadIndex") { specialStorage.loadIndex() }
 
         // v2.4: sync page state
-        pages = index.pages
-        currentPageId = index.currentPageId
-        currentPage = index.pages.first { $0.id == currentPageId }
+        // v2.10.91 (perf): 切同一页内的组时，pages / specialSlots / currentPageId / currentPage 全都
+        // **没有变化**，但原来无条件赋值 = 4 次多余的 objectWillChange。@Published 不做等值判断，
+        // 且 `pages`/`specialSlots` 还是数组（下游 ForEach 会跟着做 diff）。改为等值跳过。
+        if pages != index.pages { pages = index.pages }
+        if currentPageId != index.currentPageId { currentPageId = index.currentPageId }
+        let newCurrentPage = index.pages.first { $0.id == index.currentPageId }
+        if currentPage != newCurrentPage { currentPage = newCurrentPage }
 
         currentSpecialSlotId = id
         currentSpecialSlot = index.specialSlots.first { $0.id == id }
         activeHotkeySpecialSlotId = id
         activeHotkeySpecialSlot = index.specialSlots.first { $0.id == id }
-        specialSlots = index.specialSlots
+        if specialSlots != index.specialSlots { specialSlots = index.specialSlots }
         specialSlotSettings = index.settings
 
         // PERF-1 (v2.10.84): 同 selectSpecialSlotForPreview——移除切组时对「离开组」缩略图缓存的
         // 失效（onCommit: invalidateSpecialSlot(oldPreview)）。keyed 缓存已使 late 回调无法串组，
         // 而清空会导致切回旧组时整组图片重新解码，是「切组卡顿」的主因。详见上方同类注释。
         loadSlotsAsync()
-        loadConnectionMapForCurrentGroup()
+        PerfMonitor.measure("切组.loadConnectionMap") { loadConnectionMapForCurrentGroup() }
         refreshTrigger = UUID()
 
         // v2.10.19: 游标跟随激活组——切组后重置读游标，下一次自动粘贴从「该组第一个非空槽」开始。
         // 注意：自动切换（autoAdvance）跨组时也经由此函数切组并触发本重置；随后 autoPasteFromHotkey
         // 会在粘贴完成回调里 advanceAutoPasteCursor(to:) 把游标重新设到落点，故跨组连续推进不受影响。
-        try? specialStorage.resetAutoPasteCursor()
+        PerfMonitor.measure("切组.resetCursor") { try? specialStorage.resetAutoPasteCursor() }
         pastedChainMembersByGroup.removeAll() // CS-2 (v2.10.30): 读游标重置=开启新一轮，清空连线链已粘记录
 
-        recomputeAutoPreviews() // v2.10.3 (P2): refresh cursor badges for the new group
+        PerfMonitor.measure("切组.recomputeAutoPreviews") { recomputeAutoPreviews() } // v2.10.3 (P2)
 
         showToast("已切换至「\(currentSpecialSlot?.name ?? id)」")
+        PerfMonitor.end("切组.同步段合计", since: perfSwitchT0)
     }
 
     func createSpecialSlot(name: String) {
@@ -2297,13 +2400,14 @@ final class SlotStoreObservable: ObservableObject {
         let gen = reloadGeneration
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self = self else { return }
-            let snapshot = self.readSlotsSnapshot(for: activeId)
+            let snapshot = PerfMonitor.measure("切组.后台读盘") { self.readSlotsSnapshot(for: activeId) }
             DispatchQueue.main.async { [weak self] in
                 guard let self = self else { return }
                 guard activeId == self.currentSpecialSlotId, gen == self.reloadGeneration else {
                     NSLog("[ClipSlots] loadSlotsAsync: dropping stale/superseded snapshot for \(activeId)")
                     return
                 }
+                let perfCommitT0 = PerfMonitor.begin()
                 // v2.10.47: 丝滑切组——旧组内容一直显示到此刻（切组时未清空），新数据就绪后连同关闭
                 // 切组遮罩一起淡入替换（0.16s），消除「先闪空槽位」的中间态。onCommit 承接旧组缩略图缓存
                 // 失效等收尾（此时已切走旧内容，安全）。
@@ -2320,6 +2424,7 @@ final class SlotStoreObservable: ObservableObject {
                 // 「提交后一个 tick 再通知一次」，同时恢复了「偶发解码失败可在切组时自愈」的行为。
                 ThumbnailProvider.shared.refreshAfterGroupSwitch(specialSlotId: activeId)
                 onCommit?()
+                PerfMonitor.end("切组.主线程提交段", since: perfCommitT0)
             }
 
         }
@@ -3127,11 +3232,14 @@ final class SlotStoreObservable: ObservableObject {
     func loadConnectionMapForCurrentGroup() {
         guard let pageId = currentPage?.id ?? Optional(currentPageId),
               !pageId.isEmpty else {
-            currentConnectionMap = .empty
+            if currentConnectionMap != .empty { currentConnectionMap = .empty }
             return
         }
         let groupId = currentSpecialSlotId
-        currentConnectionMap = SlotConnectionStorage.shared.load(pageId: pageId, groupId: groupId)
+        // v2.10.91 (perf): SlotConnectionMap 是 Equatable，等值时不赋值——绝大多数组都没有连线
+        // （.empty == .empty），此前每次切组/每次 watcher reload 都要白发一次 objectWillChange。
+        let loaded = SlotConnectionStorage.shared.load(pageId: pageId, groupId: groupId)
+        if currentConnectionMap != loaded { currentConnectionMap = loaded }
         NSLog("[ClipSlots] loadConnectionMap edges=\(currentConnectionMap.edges.count) pageId=\(pageId) groupId=\(groupId)")
     }
 

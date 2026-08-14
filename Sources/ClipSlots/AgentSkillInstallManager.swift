@@ -45,6 +45,8 @@ final class AgentSkillInstallManager: ObservableObject {
     @Published private(set) var detectedAgents: [Agent] = []
     @Published private(set) var states: [String: InstallState] = [:]
     @Published private(set) var busyAgentID: String?
+    /// v2.10.91: 后台扫描代次令牌，丢弃过期结果（见 refreshInBackground）。
+    private var scanGeneration: Int = 0
     @Published var lastMessage: String?
     @Published var lastMessageIsError = false
 
@@ -143,25 +145,75 @@ final class AgentSkillInstallManager: ObservableObject {
 
     // MARK: - 扫描 & 状态刷新
 
+    /// 同步扫描（主线程）。保留给「需要立刻拿到最新状态再继续」的既有流程使用
+    /// （安装/卸载完成后的收尾 refresh、syncInstalledSkillsOnLaunch 的第一步等），行为与历史完全一致。
     func refresh() {
-        detectedAgents = allAgents.filter { agent in
+        let source = bundledSkillDir
+        let scan = Self.scan(agents: allAgents, source: source)
+        applyScan(scan)
+    }
+
+    /// ★ v2.10.91 (perf · 打开设置卡一下): 后台扫描版本，供**设置面板 onAppear** 使用。
+    ///
+    /// 背景：这次扫描是主线程同步文件系统 I/O —— 遍历全部 Agent 目录做 `fileExists`，再对命中的 Agent
+    /// 走 `computeState`（含 `destinationOfSymbolicLink` 符号链接解析 + SKILL.md 读取解析 frontmatter）。
+    /// v2.10.90 已把它从「onAppear 同帧」推迟到「下一个 runloop」，但**仍然在主线程**，于是照旧落在
+    /// 0.2s 淡入动画的头几帧里，转场必然掉帧。
+    ///
+    /// 现在把整段扫描搬到后台队列，只把结果回主线程赋值。安装状态本身是「显示用」信息，晚几十毫秒到达
+    /// 没有任何语义影响（CLI / Skill 分区拿到结果后自然刷新）；`computeState` 已是 nonisolated 纯文件系统
+    /// 读，不触碰 @Published，后台执行安全。用 generation 令牌丢弃过期结果，避免与手动安装后的同步
+    /// refresh 竞争造成状态回退。
+    func refreshInBackground() {
+        let source = bundledSkillDir
+        let agents = allAgents
+        scanGeneration &+= 1
+        let token = scanGeneration
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let scan = Self.scan(agents: agents, source: source)
+            DispatchQueue.main.async {
+                guard let self, self.scanGeneration == token else { return }
+                self.applyScan(scan)
+            }
+        }
+    }
+
+    /// 纯扫描（无 @Published 访问，可在任意线程执行）。
+    nonisolated private static func scan(
+        agents: [Agent], source: String?
+    ) -> (detected: [Agent], states: [String: InstallState]) {
+        let fm = FileManager.default
+        let detected = agents.filter { agent in
             var isDir: ObjCBool = false
             return fm.fileExists(atPath: agent.detectPath, isDirectory: &isDir) && isDir.boolValue
         }
-        // B-3 (v2.10.31): computeState 现为 nonisolated，需从主线程快照 bundledSkillDir 作为参数传入
-        // （bundledSkillDir 仍是 @MainActor 计算属性）。这里 refresh 本身在主线程，直接读取即可。
-        let source = bundledSkillDir
         var newStates: [String: InstallState] = [:]
-        for agent in detectedAgents {
-            newStates[agent.id] = computeState(for: agent, source: source)
+        for agent in detected {
+            newStates[agent.id] = computeStateStatic(for: agent, source: source)
         }
-        states = newStates
+        return (detected, newStates)
+    }
+
+    /// v2.10.91: 结果回填（只在主线程调用）。等值不赋值，避免无谓的 objectWillChange。
+    private func applyScan(_ scan: (detected: [Agent], states: [String: InstallState])) {
+        if detectedAgents != scan.detected { detectedAgents = scan.detected }
+        if states != scan.states { states = scan.states }
     }
 
     // B-3 (v2.10.31): 标记为 nonisolated，使其可在后台队列（syncInstalledSkillsOnLaunch 的重 I/O 段）
     // 执行——纯文件系统读，不触碰 @Published / @MainActor 状态。内部改用 FileManager.default 局部变量
     // （不再引用 @MainActor 隔离的实例存储属性 fm），bundledSkillDir 由调用方在主线程快照后作为 source 传入。
+    /// v2.10.91: 静态入口，供 `scan` 在后台使用（原实例方法虽已是 nonisolated，但静态版本更明确地
+    /// 表明这段逻辑不依赖任何实例状态）。实现完全复用同一函数体。
+    nonisolated private static func computeStateStatic(for agent: Agent, source: String?) -> InstallState {
+        AgentSkillInstallManager.computeStateImpl(for: agent, source: source)
+    }
+
     nonisolated private func computeState(for agent: Agent, source: String?) -> InstallState {
+        AgentSkillInstallManager.computeStateImpl(for: agent, source: source)
+    }
+
+    nonisolated private static func computeStateImpl(for agent: Agent, source: String?) -> InstallState {
         let fm = FileManager.default
         let target = agent.skillTargetPath
         // 是否为软链接（destinationOfSymbolicLink 只读链接自身，即使目标已被删除也会成功返回）
@@ -193,6 +245,11 @@ final class AgentSkillInstallManager: ObservableObject {
 
     // B-3 (v2.10.31): nonisolated（纯字符串运算，不触碰任何实例状态）以便后台 computeState 调用。
     nonisolated private func resolveSymlink(_ dest: String, base: String) -> String {
+        Self.resolveSymlink(dest, base: base)
+    }
+
+    // v2.10.91: 静态版（供 nonisolated static 的 computeStateImpl 使用；纯字符串运算）。
+    nonisolated private static func resolveSymlink(_ dest: String, base: String) -> String {
         if (dest as NSString).isAbsolutePath { return dest }
         return (base as NSString).appendingPathComponent(dest)
     }
@@ -217,6 +274,11 @@ final class AgentSkillInstallManager: ObservableObject {
 
     // B-3 (v2.10.31): nonisolated（纯字符串运算）以便后台 computeState 调用。
     nonisolated private func standardized(_ path: String) -> String {
+        Self.standardized(path)
+    }
+
+    // v2.10.91: 静态版（供 nonisolated static 的 computeStateImpl 使用；纯字符串运算）。
+    nonisolated private static func standardized(_ path: String) -> String {
         (path as NSString).standardizingPath
     }
 

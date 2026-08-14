@@ -15,8 +15,51 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // 纯增益：只清可重建的内存缓存，绝不触碰磁盘数据。
     private var memoryPressureSource: DispatchSourceMemoryPressure?
 
+    // MARK: - v2.10.91 App 外观同步（修复 AppKit 弹窗缺浅色）
+
+    /// 上一次已应用的主题原始值，用于在 UserDefaults 变更通知里过滤掉与外观无关的写入。
+    private var lastAppliedAppearanceRaw: String?
+
+    /// 把 App 内选择的主题同步到 `NSApp.appearance`。
+    ///
+    /// 背景：主题原先**只**经 SwiftUI 的 `.preferredColorScheme` 生效，作用域仅限 SwiftUI 视图层级。
+    /// `NSAlert`（删除槽位组 / 清空 / 覆盖等确认框）、`NSMenu`、`NSOpenPanel` 这些由 AppKit 拥有、
+    /// 不在 SwiftUI 层级内的界面，跟随的是 `NSApp.effectiveAppearance`；而 `NSApp.appearance` 一直是
+    /// nil（= 跟随系统）。所以「App 选浅色 + 系统深色」时这些弹窗全是深色，看起来就是「弹窗没有浅色界面」。
+    ///
+    /// 设置 `NSApp.appearance` 后一处生效、覆盖全部 AppKit 界面，不必逐个 NSAlert 去设 window.appearance。
+    /// `.system` 时置 nil，保持「跟随系统」语义不变。这只影响外观呈现，不改变任何主题偏好的存储与语义。
+    private func applyAppAppearance() {
+        let raw = UserDefaults.standard.string(forKey: "appearanceMode")
+            ?? ThemeMode.dark.rawValue
+        let mode = ThemeMode(rawValue: raw) ?? .dark
+        lastAppliedAppearanceRaw = raw
+        NSApp.appearance = mode.nsAppearance
+    }
+
+    /// 监听主题偏好变化。主题由 SwiftUI 侧的 `@AppStorage("appearanceMode")` 写入 UserDefaults，
+    /// 这里观察 UserDefaults 变更并在原始值真的变化时才重新应用，避免无关写入触发多余的外观刷新。
+    private func startObservingAppearancePreference() {
+        NotificationCenter.default.addObserver(
+            forName: UserDefaults.didChangeNotification,
+            object: UserDefaults.standard,
+            queue: .main
+        ) { [weak self] _ in
+            guard let self = self else { return }
+            let raw = UserDefaults.standard.string(forKey: "appearanceMode")
+                ?? ThemeMode.dark.rawValue
+            guard raw != self.lastAppliedAppearanceRaw else { return }
+            self.applyAppAppearance()
+        }
+    }
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.regular)
+
+        // v2.10.91: 启动即把 App 主题同步到 NSApp.appearance，并持续跟随后续切换。
+        // 修复「NSAlert 等 AppKit 弹窗不跟随 App 主题、没有浅色界面」。详见 applyAppAppearance。
+        applyAppAppearance()
+        startObservingAppearancePreference()
 
         setupMemoryPressureMonitor()
 

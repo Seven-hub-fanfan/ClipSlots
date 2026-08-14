@@ -273,6 +273,7 @@ struct SlotCardView: View {
             // v2.5: Type-specific actions
             typeSpecificMenuItems
         }
+        .perfCount("SlotCardView.body")
     }
 
     // v2.10.54: 回退 v2.10.48 的 inline Popover（负优化——点气泡外部无保存 dismiss，编辑内容被静默

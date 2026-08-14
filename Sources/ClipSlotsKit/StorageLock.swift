@@ -153,6 +153,19 @@ public final class StorageLock {
     private func writeHolderPID() {
         guard fd >= 0 else { return }
         let pidStr = "\(getpid())\n"
+        // ★ v2.10.91 (perf): 若锁文件里已经就是本进程 PID，直接跳过这次写入。
+        //
+        // 背景（实测得到的卡顿真凶之一）：本方法在**每一次**成功 flock 后都会写锁文件。锁文件位于
+        // `special_slots/` 内，而 GUI 的 StorageDirectoryWatcher 以 kFSEventStreamCreateFlagFileEvents
+        // 监听整棵子树 —— 于是「任何一次读盘（读也要拿锁）→ 写 .storage.lock → FSEvents → 去抖 0.3s
+        // → reloadAll → 又读盘」构成了 ~2Hz 的无限自触发全量重载，主线程每 0.5s 被占住 ~150ms。
+        // watcher 侧已按「隐藏文件」过滤（见 StorageDirectoryWatcher），这里再从源头消除无意义写入：
+        // PID 在进程生命周期内恒定，只要文件内容已是本进程 PID，重复写没有任何信息增量，纯粹是
+        // 磁盘 I/O + mtime 变更 + FSEvents 噪声。
+        //
+        // 语义完全不变：跳过的前提正是「文件内容已等于要写的内容」。别的进程抢过锁并写入自己的 PID 后，
+        // 内容与本进程 PID 不等，下一次获取锁仍会正常写回（stale-lock 回收逻辑因此不受影响）。
+        if holderFileMatches(pidStr) { return }
         // P2-13 (v2.10.8): make the PID update atomic-ish for concurrent readers.
         // The old order was ftruncate(0) → write, which leaves an EMPTY window in
         // which a waiter's readHolderPID() sees no PID. We cannot rename a temp file
@@ -182,6 +195,19 @@ public final class StorageLock {
         if didWriteFully {
             ftruncate(fd, off_t(pidStr.utf8.count))
         }
+    }
+
+    /// v2.10.91: 锁文件当前内容是否与 `expected` 完全一致（用于跳过重复的 PID 写入）。
+    /// 用 `pread` 从偏移 0 读，不动共享 fd 的文件偏移，因此对 writeHolderPID 的 lseek/write 无副作用。
+    private func holderFileMatches(_ expected: String) -> Bool {
+        guard fd >= 0 else { return false }
+        let expectedBytes = Array(expected.utf8)
+        var buf = [UInt8](repeating: 0, count: expectedBytes.count + 1)
+        let n = buf.withUnsafeMutableBytes { raw -> Int in
+            pread(fd, raw.baseAddress, raw.count, 0)
+        }
+        guard n == expectedBytes.count else { return false }
+        return Array(buf[0..<n]) == expectedBytes
     }
 
     /// v2.9.16 (#1): read the PID currently stored in the lock file (0 if none).

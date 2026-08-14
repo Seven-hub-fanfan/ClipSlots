@@ -232,12 +232,23 @@ final class SlotConnectionStorage {
             // 满足 staging + 原子替换语义。
             try? StorageLock.shared.withLock {
                 let dir = url.deletingLastPathComponent()
-                try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true, attributes: nil)
+                let fm = FileManager.default
                 if map.isEmpty {
-                    try? FileManager.default.removeItem(at: url)
-                } else if let data = try? JSONEncoder().encode(map) {
-                    try? data.write(to: url, options: .atomic)
+                    // ★ v2.10.91 (perf 第五轮): 空连线 + 文件本就不存在 → 什么都不做。
+                    // 原实现会先 createDirectory（组目录已存在时无副作用，但组目录不存在时会凭空建目录）
+                    // 再 removeItem 一个不存在的文件。绝大多数组从来没连过线，每次 save(.empty) 都白跑。
+                    if fm.fileExists(atPath: url.path) {
+                        try? fm.removeItem(at: url)
+                    }
+                    return
                 }
+                guard let data = try? JSONEncoder().encode(map) else { return }
+                // ★ v2.10.91 (perf 第五轮): 写前比对 —— connections.json 字节完全一致就跳过写盘。
+                // 该文件是被监听目录内的非隐藏文件；连线画布上的拖拽/重复提交常常以「和磁盘一模一样的
+                // map」结束，一次无意义重写就换来一次全量 reloadAll。语义不变：内容相同才跳过。
+                if let existing = try? Data(contentsOf: url), existing == data { return }
+                try? fm.createDirectory(at: dir, withIntermediateDirectories: true, attributes: nil)
+                try? data.write(to: url, options: .atomic)
             }
         }
     }

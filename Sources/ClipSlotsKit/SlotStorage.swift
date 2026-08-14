@@ -576,7 +576,14 @@ public final class SlotStorage {
         // filesystem, so it is safe off the storage queue.
         manifestQueue.async { [weak self] in
             do {
-                try self?.updateManifest()
+                // ★ v2.10.91 (perf 第五轮): manifest 重建发生在 set/clear **之后**、且在独立队列上
+                // 异步落盘，因此它的写盘时刻通常晚于 GUI 的自写指纹采集（写后 +0.08s）——一旦真的写了盘，
+                // 尾随 FSEvents 就会因「指纹对不上环里任何一条」被判成外部写，白付一次全量 reloadAll。
+                // 真的写了盘时复用既有的 didWriteLiveSlotDir 钩子（GUI 侧 = suppressWatcher，登记新的
+                // 自写指纹并续上抑制窗；CLI 侧该钩子为 nil，无副作用）。
+                if try self?.updateManifest() == true {
+                    SlotStorage.didWriteLiveSlotDir?()
+                }
             } catch {
                 NSLog("[ClipSlots] SlotStorage manifest update FAIL: \(error)")
             }
@@ -708,6 +715,16 @@ public final class SlotStorage {
                 }
                 let labelFile = slotDir.appendingPathComponent("label.txt")
                 if let label = label, !label.isEmpty {
+                    // ★ v2.10.91 (perf 第五轮): 写前比对 —— label.txt 内容已是同一字符串就不写。
+                    // `label.txt` 位于被 FSEvents 监听的目录内且是非隐藏文件，一次无意义的重写就换来
+                    // 一次全量 reloadAll。批量改名 / 重复提交同名标签 / 导入回填标签等路径都会出现
+                    // 「写入与磁盘现状相同」的情形。语义不变：跳过的前提就是磁盘内容已完全相同。
+                    if let existing = try? String(contentsOf: labelFile, encoding: .utf8), existing == label {
+                        // 缓存照旧失效（与写入分支一致），保证下一次 getLabel 的读路径行为不变。
+                        labelCache.removeValue(forKey: slot)
+                        labelCacheFingerprint.removeValue(forKey: slot)
+                        return
+                    }
                     do {
                         try label.write(to: labelFile, atomically: true, encoding: .utf8)
                     } catch {
@@ -1208,8 +1225,11 @@ public final class SlotStorage {
         return try JSONDecoder().decode(SlotManifest.self, from: data)
     }
 
-    private func updateManifest() throws {
+    private func updateManifest() throws -> Bool {
         var entries: [SlotManifest.Entry] = []
+        // ★ v2.10.91 (perf 第五轮): 一个 formatter 复用，且时间取「槽位目录自身的修改时间」而非
+        // 「本次重建时刻」，见文件末尾写盘处的说明。
+        let isoFormatter = ISO8601DateFormatter()
 
         // v2.10.3 (P2): enumerate actual on-disk integer-named slot dirs instead of a
         // hardcoded `1...10`, so a larger configured slot count is not silently dropped.
@@ -1288,18 +1308,32 @@ public final class SlotStorage {
                 preview = "[Rich Text]\(suffix)"
             }
 
+            // ★ v2.10.91 (perf 第五轮): updatedAt 改用「该槽位目录的实际修改时间」（取不到才退回 now）。
+            // 原来写的是 `Date()` = 本次重建时刻，导致 manifest.json 的字节**每次重建必然不同**，
+            // 于是下面的「写前比对」永远无法生效，任何一次重建都会在被监听目录里制造一次 mtime 变化
+            // → FSEvents → 全量 reloadAll。改用槽位目录 mtime 后：内容没变 ⇒ 字节不变 ⇒ 不写盘。
+            // 语义上也更准确（这个字段本就该表达「槽位何时被更新」），且 manifest.json 是纯诊断产物
+            // （readManifest 无任何调用方，CLI / 文档 / 导出包都不读它），不影响任何功能行为。
+            let slotUpdatedAt = (try? FileManager.default.attributesOfItem(atPath: slotDir.path))?[.modificationDate] as? Date
             entries.append(SlotManifest.Entry(
                 description: preview,
                 itemCount: itemCount,
                 slot: slot,
                 totalBytes: totalBytes,
                 types: types.sorted(),
-                updatedAt: ISO8601DateFormatter().string(from: Date())
+                updatedAt: isoFormatter.string(from: slotUpdatedAt ?? Date())
             ))
         }
 
         let manifest = SlotManifest(entries: entries, version: 1)
         let data = try JSONEncoder().encode(manifest)
+        // ★ v2.10.91 (perf 第五轮): 写前比对 —— 与磁盘上现有 manifest.json 字节一致就不写。
+        // 返回值告诉调用方「本次是否真的动了磁盘」，以便 GUI 把这次（发生在写入路径之后、异步落盘的）
+        // 写入纳入自写抑制，避免被自己的 watcher 判成外部写。
+        if let existing = try? Data(contentsOf: manifestURL()), existing == data {
+            return false
+        }
         try data.write(to: manifestURL(), options: .atomic)
+        return true
     }
 }
