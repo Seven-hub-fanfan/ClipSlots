@@ -4,13 +4,26 @@
 
 ## 当前版本
 
-- **当前版本：v2.10.90**
+- **当前版本：v2.10.91**
 - 平台：macOS（Swift / SwiftUI，SPM 构建，macOS 13+）
 - 单一版本号事实来源：`Info.plist` 的 `CFBundleShortVersionString`（`AppVersion.current` 动态读取，`AppVersion.fallback` 为编译期兜底）。CLI 版本号见 `Sources/ClipSlotsCLI/main.swift` 的 `CLI_VERSION`。
 
 ## 版本要点（近期）
 
-### v2.10.90 — 三个体感问题各自归因修复（★当前正式发布版）
+### v2.10.91 — ★找到「无论怎么优化都不丝滑」的真凶：空闲时每 0.65s 一次全量重载（★当前正式发布版）
+
+- ★★**根因（前三轮微优化全部无效的原因）**：App **完全空闲**时 40 秒内触发 **63 次** `watcher fired → reloadAll`，每次伴随 **140~180ms 主线程停顿**。自触发死循环链条：读数据也要拿跨进程锁 → `StorageLock.writeHolderPID` 每次成功 flock 都写锁文件 `.storage.lock` → 该文件在被 FSEvents 递归监听的 `special_slots/` 内 → 去抖 → `reloadAll` → 又读盘 → 又写锁文件 → 无限循环。**不管动画调多短，背后永远有个每 0.65s 一次的 150ms 停顿在抢主线程。**
+- 修法：`writeHolderPID` 在「锁文件内容已是本进程 PID」时跳过写入。语义零变化（跳过前提正是「要写内容与磁盘已有完全相同」；别的进程抢锁写入自己 PID 后不匹配，下次仍正常写回，stale-lock 回收不受影响）。用 `pread` 从偏移 0 读，不动共享 fd 偏移。
+- ★**实测：空闲 40s 全量重载 63 → 0。**
+- ★**方法论教训（最重要）**：前三轮（v2.10.87/88/89/90）靠读代码推理猜热点，全部打偏；这轮先加测量（`PerfMonitor.swift` 主线程卡顿检测 + `PerfAutoTest.swift` 程序化驱动交互，默认关闭，`CLIPSLOTS_PERF_LOG=1` / `CLIPSLOTS_PERF_AUTOTEST=1` 开启）一测即中。**以后遇到「感觉卡」先测再改。**
+- **修 AppKit 弹窗没有浅色界面**：主题此前**只**经 SwiftUI `.preferredColorScheme` 应用（作用域仅限 SwiftUI 层级），而 `NSAlert`/`NSMenu`/`NSOpenPanel` 跟随 `NSApp.appearance`——该值**从未被设置过**（一直 nil = 跟随系统），所以「App 选浅色 + 系统深色」时确认弹窗全是深色。修为启动时及主题变化时同步 `NSApp.appearance`（新增 `ThemeMode.nsAppearance` + `AppDelegate.applyAppAppearance`，监听 UserDefaults 变更），一处生效覆盖全部 AppKit 界面；`.system` 置 nil 保持语义。
+- ★**另一条教训（踩过的坑）**：排查中曾把「CLI 外部写入不触发 watcher 日志 = 0」误判为本版回归，为此白花时间回退了 `StorageDirectoryWatcher.swift` 的过滤改动。用 v2.10.90 **基线对照**后确认基线同样是 0 → **既有行为，非回归**。教训：**把某个观测值当回归之前，必须先在基线版本上建立「正常值是多少」**。（注：`StorageDirectoryWatcher.swift` 的「内部记账路径过滤」已回退，未进本版；锁文件循环已在源头掐掉，该过滤属冗余。）
+- 缩略图不变量相关文件（`ThumbnailProvider.swift` / `SlotThumbnailView.swift`）本版**零改动**。
+- 验证：`swift build` 通过；smoke 33 项全绿；DMG 校验通过；装机正常；空闲重载 63→0；测试用空槽数据已还原。
+- commit `1ea502e`；Release：https://github.com/Seven-hub-fanfan/ClipSlots/releases/tag/v2.10.91
+- DMG SHA256：`5fbea7fb8ab19aefb35fc96c0378fcdf93495694e8963e3ac68ec0fde466860f`（已核对 `releases/latest` asset digest）。
+
+### v2.10.90 — 三个体感问题各自归因修复
 
 **① hover 光效「慢慢的、很卡」→ ★移除 v2.10.88 的 `.compositingGroup()`（它是负优化）**
 - v2.10.88 想「缩放前拍平成一层，让缩放退化成对单个位图做 GPU 变换」。该推理只在**被拍平内容在动画期间不变**时成立，此处两个前提都不满足：
