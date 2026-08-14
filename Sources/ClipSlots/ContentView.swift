@@ -139,8 +139,20 @@ struct ContentView: View {
                 SettingsView(
                     config: store.config,
                     onSave: { newConfig in
-                        store.updateConfig(newConfig)
+                        // v2.10.90 (perf · 关闭设置卡一下): 先启动关闭动画，再让出一个 runloop 应用配置。
+                        //
+                        // 原先是 `store.updateConfig(newConfig)` 紧接 `closeSettings()`，两者落在**同一个
+                        // 事务/同一帧**里。而 updateConfig 是重活：注销并重注册全部全局热键（Carbon/AppKit
+                        // 调用），并触发主 store 的 objectWillChange → 整棵 ContentView（含 10 张槽位卡片的
+                        // LazyVGrid）全量重绘。这批工作正好压在 0.2s 淡出动画的头几帧上，与动画抢主线程 —— 
+                        // 就是「关闭设置动画很慢、还卡一下」的来源。
+                        //
+                        // 拆开后淡出动画独占前一帧、先跑起来，配置在下一个 runloop 落地。用户可感知的
+                        // 生效时机差异约一帧（~16ms），而热键与配置的最终状态完全不变。
                         closeSettings()
+                        DispatchQueue.main.async {
+                            store.updateConfig(newConfig)
+                        }
                     },
                     onClose: { closeSettings() },
                     // v2.9.17: sidebar「插件市场」→ close settings, open the
@@ -159,7 +171,12 @@ struct ContentView: View {
                     width: min(max(geo.size.width - 32, 480), 880),
                     height: min(max(geo.size.height - 32, 380), 660)
                 )
-                .shadow(color: .black.opacity(0.35), radius: 30, y: 12)
+                // v2.10.90 (perf · 设置进出场动画): 阴影模糊半径 30 → 18。
+                // 这个阴影挂在一块最大 880×660 的面板上，模糊半径直接决定离屏模糊的采样面积
+                // （半径 30 意味着阴影要向外扩 30pt 做大核卷积）。而面板进出场走的是 `.transition(.opacity)`，
+                // 透明度每帧变化都要重新合成这层大面积模糊，是进出场掉帧的一大项。
+                // 18 在视觉上仍是清晰的「悬浮面板」层次感，卷积面积却降到约 (18/30)² ≈ 36%。
+                .shadow(color: .black.opacity(0.35), radius: 18, y: 10)
             }
             .frame(width: geo.size.width, height: geo.size.height)
         }

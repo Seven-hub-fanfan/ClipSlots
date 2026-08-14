@@ -145,8 +145,20 @@ struct SettingsView: View {
                 .stroke(AppTheme.subtleBorder(colorScheme), lineWidth: 1)
         )
         .onAppear {
-            cliManager.refreshState()
-            skillManager.refresh()
+            // v2.10.90 (perf · 打开设置卡一下): 这两个刷新都是**主线程同步文件系统扫描**——
+            // `skillManager.refresh()`（AgentSkillInstallManager.swift:146）会遍历全部 Agent 目录做
+            // `fileExists`，再对每个命中的 Agent 走 `computeState`（含 `destinationOfSymbolicLink`
+            // 等符号链接解析）；`cliManager.refreshState()` 同样要探测安装路径属性。
+            //
+            // 原先它们直接跑在 onAppear 里，也就是**设置面板进场动画的第一帧**上，磁盘 stat/symlink
+            // 解析把主线程占住，转场必然掉帧——就是「打开设置卡一下」。
+            //
+            // 改为让出一个 runloop 再扫：进场动画先跑起来，扫描落在动画之后。安装状态本来就是
+            // 「显示用」信息，晚一帧到达无任何语义影响（CLI / Skill 分区在拿到结果后自然刷新）。
+            DispatchQueue.main.async {
+                cliManager.refreshState()
+                skillManager.refresh()
+            }
         }
         .sheet(isPresented: $showUninstallSheet) {
             uninstallConfirmSheet

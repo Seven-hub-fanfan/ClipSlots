@@ -138,36 +138,48 @@ enum AppTheme {
 
     /// A restrained, single-color identity per slot. The palette deliberately cycles
     /// instead of blending, so each card has one clear accent.
+    ///
+    /// v2.10.90 (perf · hover 光效不丝滑): 两个调色板从函数内的 `let` 局部数组提为 `static let`。
+    /// 原实现每次调用都要**构造两个 5 元素 Color 数组**（且不论 scheme 如何，两个都建），而
+    /// `SlotCardView` 里 `slotAccent` 被引用 10 处（顶部色条、描边色、保存按钮、角标、连线点…），
+    /// 即一次卡片 body 求值就是 ~100 次 Color 分配 + 2 次数组分配，10 张卡片 ~1000 次。
+    /// hover 会让整张卡片 body 重算，这笔分配正好压在 0.12s 的高亮动画里。
+    /// 提为静态常量后只在首次访问时构造一次，之后是纯下标读取。
+    private static let slotAccentDark: [Color] = [
+        Color(red: 0.42, green: 0.82, blue: 0.55),
+        Color(red: 0.94, green: 0.76, blue: 0.32),
+        Color(red: 0.95, green: 0.55, blue: 0.31),
+        Color(red: 0.91, green: 0.48, blue: 0.64),
+        Color(red: 0.48, green: 0.72, blue: 0.92)
+    ]
+    private static let slotAccentLight: [Color] = [
+        Color(red: 0.12, green: 0.56, blue: 0.28),
+        Color(red: 0.72, green: 0.49, blue: 0.04),
+        Color(red: 0.78, green: 0.31, blue: 0.08),
+        Color(red: 0.72, green: 0.24, blue: 0.43),
+        Color(red: 0.16, green: 0.46, blue: 0.70)
+    ]
+
     static func slotAccent(_ slot: Int, scheme: ColorScheme) -> Color {
-        let darkPalette: [Color] = [
-            Color(red: 0.42, green: 0.82, blue: 0.55),
-            Color(red: 0.94, green: 0.76, blue: 0.32),
-            Color(red: 0.95, green: 0.55, blue: 0.31),
-            Color(red: 0.91, green: 0.48, blue: 0.64),
-            Color(red: 0.48, green: 0.72, blue: 0.92)
-        ]
-        let lightPalette: [Color] = [
-            Color(red: 0.12, green: 0.56, blue: 0.28),
-            Color(red: 0.72, green: 0.49, blue: 0.04),
-            Color(red: 0.78, green: 0.31, blue: 0.08),
-            Color(red: 0.72, green: 0.24, blue: 0.43),
-            Color(red: 0.16, green: 0.46, blue: 0.70)
-        ]
-        let palette = scheme == .dark ? darkPalette : lightPalette
+        let palette = scheme == .dark ? slotAccentDark : slotAccentLight
         return palette[max(0, slot - 1) % palette.count]
     }
 
     /// High-chroma light fills for card actions. These stay bright without relying on
     /// opacity, which would mix the hue with the card background and create a muted gray cast.
+    ///
+    /// v2.10.90: 同上，调色板提为 `static let`（原先每次调用新建一个 5 元素数组）。
+    private static let slotActionAccentLight: [Color] = [
+        Color(red: 0.56, green: 0.93, blue: 0.65),
+        Color(red: 1.00, green: 0.82, blue: 0.28),
+        Color(red: 1.00, green: 0.62, blue: 0.30),
+        Color(red: 0.98, green: 0.52, blue: 0.70),
+        Color(red: 0.45, green: 0.75, blue: 1.00)
+    ]
+
     static func slotActionAccent(_ slot: Int, scheme: ColorScheme) -> Color {
         guard scheme == .light else { return slotAccent(slot, scheme: scheme) }
-        let palette: [Color] = [
-            Color(red: 0.56, green: 0.93, blue: 0.65),
-            Color(red: 1.00, green: 0.82, blue: 0.28),
-            Color(red: 1.00, green: 0.62, blue: 0.30),
-            Color(red: 0.98, green: 0.52, blue: 0.70),
-            Color(red: 0.45, green: 0.75, blue: 1.00)
-        ]
+        let palette = slotActionAccentLight
         return palette[max(0, slot - 1) % palette.count]
     }
 

@@ -243,15 +243,24 @@ struct SlotCardView: View {
         // Apply one transform to the fully composed card. The outline is already unified,
         // so scaling cannot reveal multiple independently rasterized hard edges.
         //
-        // v2.10.88 (perf · hover 切槽位卡顿): 缩放前先 `.compositingGroup()`。
-        // 没有它时，scaleEffect 作用在一棵「背景 + 阴影 + 描边 + 顶部胶囊 + 角标 + 缩略图 + 文本 + 两个
-        // 按钮」的多层子树上，缩放动画的每一帧都要把这些图层分别重新光栅化再合成（文本与图片还要按新的
-        // 非整数缩放重新重采样）。compositingGroup 先把整张卡片拍平成一层，之后 0.12s 的缩放就退化成对
-        // 单个已有位图做一次 GPU 变换，成本与卡片内部复杂度解耦。
+        // v2.10.90 (perf · hover 光效不丝滑): **移除** v2.10.88 加的 `.compositingGroup()`。
         //
-        // 这不改变任何视觉：卡片内所有装饰本来就在这一步之前全部应用完毕（描边早已统一为单条，见上），
-        // 拍平后叠放次序与外观一致。
-        .compositingGroup()
+        // v2.10.88 的想法是「缩放前先把卡片拍平成一层，让 0.12s 的缩放退化成对单个位图做 GPU 变换」。
+        // 这个推理只在「被拍平的内容在动画期间保持不变」时成立，而这里两个前提都不满足：
+        //
+        //   1) 描边就在这个组里，而且和缩放**由同一个 isHovering、在同一个 0.12s 窗口里一起变**
+        //      （cardOutlineColor 淡入 accent、cardOutlineWidth 1 → 1.5）。内容每帧都在变 → 拍平出来的
+        //      位图每帧都失效、必须重新生成。缓存收益为零，却凭空多出一次**离屏合成 pass**。
+        //   2) 卡片子树里含 AppKit 视图：附件胶囊的 `AttachmentButtonAnchorReporter`
+        //      （NSViewRepresentable，见 AttachmentManagerPanel.swift）持续上报锚点矩形；视频槽位还有
+        //      `SafeInlineAVPlayerView`。compositingGroup 要维持这一层位图，就得在每帧对这些 NSView
+        //      做快照再合成，这是 CPU/GPU 同步开销，比它想省掉的重采样更贵。
+        //
+        // 净效果是负优化——这正是「hover 光效慢慢的、感觉很卡」的主因。去掉后回到 SwiftUI 默认路径：
+        // 描边是廉价矢量重绘，缩放是普通图层变换，两者互不放大。
+        //
+        // ⚠️ 不要因为「拍平能优化缩放」这条一般性经验再把它加回来：要加之前先确认组内没有随动画变化的
+        // 内容、也没有 NSViewRepresentable，否则必然是净损失。
         // v2.10.88: 1.015 → 1.012。缩放比例直接决定重采样的像素量与外扩重绘面积；1.012 仍能读出
         // 「这张卡浮起来了」，但在 hover 快速掠过多张卡片时更轻。
         .scaleEffect(isHovering ? 1.012 : 1)
@@ -269,51 +278,40 @@ struct SlotCardView: View {
     // v2.10.54: 回退 v2.10.48 的 inline Popover（负优化——点气泡外部无保存 dismiss，编辑内容被静默
     // 丢弃），改回 Sheet（原 520×320 尺寸），并保留 v2.10.48 新增的 ⌘↩ 保存快捷键。
     // 纯文本编辑 Sheet。
-    @ViewBuilder
+    //
+    // v2.10.90 (perf · ★逐字延迟根因): 两个编辑 Sheet 的内容改由独立的 `SlotTextEditorSheet` 承载。
+    //
+    // 原先 `TextEditor` 直接绑本视图的 `@State editingText`，于是**每敲一个字符都要重算整张卡片的
+    // body**（缩略图 / 元数据 / actionRow / 6 层 overlay / 阴影 / scaleEffect / 两个 sheet 闭包全都跑一遍），
+    // 延迟量随卡片复杂度增长——就是「每个字都像有延迟输入」的来源。拆出去后逐字输入只重算那个轻量 Sheet。
+    //
+    // `editingText` 保留，但现在只在 `beginEditing()` 里被写一次、作为传给 Sheet 的初值快照，
+    // 打字过程中不再变化，因此不会再让卡片 body 失效。
     private var textEditorSheet: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text("编辑槽位 \(slot) 文本")
-                .font(.headline)
-            TextEditor(text: $editingText)
-                .font(.system(size: 13, design: .monospaced))
-                .frame(minWidth: 520, minHeight: 320)
-                .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.secondary.opacity(0.2)))
-            HStack {
-                Spacer()
-                Button("取消") { showingTextEditor = false }
-                Button("保存") {
-                    onEditText?(editingText)
-                    showingTextEditor = false
-                }
-                .buttonStyle(.borderedProminent)
-                .keyboardShortcut(.return, modifiers: .command)
-            }
-        }
-        .padding(18)
+        SlotTextEditorSheet(
+            slot: slot,
+            mode: .plainText,
+            initialText: editingText,
+            onSave: { text in
+                onEditText?(text)
+                showingTextEditor = false
+            },
+            onCancel: { showingTextEditor = false }
+        )
     }
 
     // HTML 原文编辑 Sheet。
-    @ViewBuilder
     private var htmlEditorSheet: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text("编辑槽位 \(slot) HTML")
-                .font(.headline)
-            TextEditor(text: $editingText)
-                .font(.system(size: 13, design: .monospaced))
-                .frame(minWidth: 620, minHeight: 360)
-                .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.secondary.opacity(0.2)))
-            HStack {
-                Spacer()
-                Button("取消") { showingHTMLEditor = false }
-                Button("保存") {
-                    onEditHTML?(editingText)
-                    showingHTMLEditor = false
-                }
-                .buttonStyle(.borderedProminent)
-                .keyboardShortcut(.return, modifiers: .command)
-            }
-        }
-        .padding(18)
+        SlotTextEditorSheet(
+            slot: slot,
+            mode: .html,
+            initialText: editingText,
+            onSave: { text in
+                onEditHTML?(text)
+                showingHTMLEditor = false
+            },
+            onCancel: { showingHTMLEditor = false }
+        )
     }
 
     // v2.9.36: lightweight "上次粘贴" badge shown in the card's top-right corner.
@@ -864,8 +862,32 @@ private struct SlotActionButtonBody: View {
 
 // MARK: - v2.7.27 SlotContent Text Edit Helpers
 
+// v2.10.90 (perf): `isHTMLContent` 的记忆化缓存。
+//
+// 它原本每次求值都要 `(plainText ?? preview).lowercased()` —— 对全文做一次**完整拷贝 + 大小写折叠**，
+// 再跑三次 `contains`。而它在卡片 body 路径上被反复触发：`canEditContent` 直接调它一次，若为 false 还会
+// 走 `isPlainEditableText`，后者内部**又**调一次；`editActionTitle` 再走一遍 `canEditContent` →
+// 一次卡片 body 求值最多 4 次全文 lowercased()。hover 会重算整张卡片 body，编辑长文本时更是每个字符
+// 都要重来一轮，正好落在最需要跟手的两条路径上。
+//
+// 沿用本项目既有做法（`SlotContent.preview` / `plainText` 已用同款 NSCache），以
+// `contentId::updatedAt` 为键——内容一变键就变，不会读到过期结果。
+private let slotIsHTMLCache: NSCache<NSString, NSNumber> = {
+    let cache = NSCache<NSString, NSNumber>()
+    cache.countLimit = 500
+    return cache
+}()
+
 private extension SlotContent {
     var isHTMLContent: Bool {
+        let key = "\(contentId)::\(updatedAt)::isHTML" as NSString
+        if let cached = slotIsHTMLCache.object(forKey: key) { return cached.boolValue }
+        let result = computeIsHTMLContent()
+        slotIsHTMLCache.setObject(NSNumber(value: result), forKey: key)
+        return result
+    }
+
+    private func computeIsHTMLContent() -> Bool {
         if let htmlSource, !htmlSource.isEmpty { return true }
         if let url = primaryFileURL, ["html", "htm"].contains(url.pathExtension.lowercased()) { return true }
         let raw = (plainText ?? preview).lowercased()
