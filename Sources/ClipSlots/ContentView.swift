@@ -1567,14 +1567,25 @@ struct ContentView: View {
                 // 重新捕获最新的当前页/组并按新上下文重排，保证渲染顺序正确。
                 let freshPageId = store.currentPageId
                 let freshSpecialSlotId = store.currentSpecialSlotId
+                // PERF-6 (v2.10.84): 仅在「排序上下文真的变了」时才在主线程重排。
+                // 后台已按 (currentPageId, currentSpecialSlotId) 排好序；只有当用户在搜索运行期间
+                // 切了页/组，那份顺序才会过时。而这是**罕见**情况——绝大多数搜索里用户只是打字，
+                // 上下文自始至终没变，此时主线程那次 sortGlobalSearch 是纯粹重复劳动：它会对整个
+                // 结果集再跑一遍比较器（nameAscending/nameDescending 用的还是相对昂贵的
+                // localizedStandardCompare），大库下正是「输入最后一个字符后界面顿一下」的来源。
+                // 上下文未变时直接复用后台结果，语义完全等价（同输入、同比较器 → 同顺序）。
+                let contextChanged = freshPageId != currentPageId
+                    || freshSpecialSlotId != currentSpecialSlotId
                 // P2 (#9, v2.10.7): 只重排、不重复过滤（results 已在后台过滤完毕），
                 // 避免大结果集在主线程再跑一遍 filter 造成卡顿。
-                let reordered = ContentView.sortGlobalSearch(
-                    results,
-                    sortRule: sortRule,
-                    currentPageId: freshPageId,
-                    currentSpecialSlotId: freshSpecialSlotId
-                )
+                let reordered = contextChanged
+                    ? ContentView.sortGlobalSearch(
+                        results,
+                        sortRule: sortRule,
+                        currentPageId: freshPageId,
+                        currentSpecialSlotId: freshSpecialSlotId
+                    )
+                    : results
                 self.globalSearchResultsCache = reordered
             }
         }

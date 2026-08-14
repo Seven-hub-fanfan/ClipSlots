@@ -734,6 +734,18 @@ public final class SpecialSlotStorage {
     public func resetAutoPasteCursor() throws {
         try storageLock.withLock {
             var index = loadIndex()
+            // PERF-7 (v2.10.84): 游标本来就是空时直接返回，跳过整份 index.json 的重新编码 + 原子写盘。
+            //
+            // 为什么值得加这道短路：GUI 每次切组/切页都会调用本方法（"游标跟随激活组"，见
+            // selectSpecialSlotForPreview / selectAndActivateSpecialSlot），且是在**主线程同步**调用。
+            // 而绝大多数切组场景下用户并没有用过自动粘贴，两个游标本就是 nil —— 此时原实现仍会照常
+            // encode 整份索引并做一次 atomic write（临时文件 + rename，多次 syscall），纯属无谓的
+            // 主线程磁盘写，直接叠加在切组这条最敏感的交互路径上。
+            //
+            // 语义完全等价：把已经是 nil 的两个游标再置为 nil 是空操作。判断刻意放在
+            // storageLock 临界区**内部**，因此不存在「检查后、写入前被其它进程改动」的 TOCTOU——
+            // 要么我们看到有游标并照常清空，要么确实无游标可清。
+            guard index.autoPasteCursor != nil || index.autoPasteCursorPrev != nil else { return }
             index.autoPasteCursor = nil
             index.autoPasteCursorPrev = nil
             try saveIndex(index)

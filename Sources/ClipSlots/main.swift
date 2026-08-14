@@ -899,7 +899,18 @@ final class SlotStoreObservable: ObservableObject {
         suppressWatcher() // v2.9.4 (#2): self-write
         specialStorage.updateSelectedSpecialSlot(id: id)
 
-        loadSlotsAsync(onCommit: { ThumbnailProvider.shared.invalidateSpecialSlot(specialSlotId: oldId) }) // APP-2 (v2.10.32): 切组读盘异步化，避免主线程被逐槽 flock 卡死
+        // APP-2 (v2.10.32): 切组读盘异步化，避免主线程被逐槽 flock 卡死。
+        // PERF-1 (v2.10.84): 不再在切组时失效「离开组」的缩略图缓存。
+        // 历史上这里挂 onCommit: invalidateSpecialSlot(oldId)，理由是「防止旧组的 late 异步回调
+        // 写进错误的 UI」。该理由自 v2.10.73（缩略图改为 keyed 单一数据源）起已不成立：缓存键为
+        // `specialSlotId::slot::contentId::updatedAt`，late 的旧 key 结果只会写到它自己的 key，
+        // 物理上无法污染当前视图（详见 ThumbnailProvider 头部注释）。
+        // 而这次清空的实际代价是：A→B 会把 A 的全部已解码缩略图丢掉，切回 A 时必须重新解码整组图片，
+        // 这正是用户可感的「切组卡顿」主因。移除后缓存跨组常驻（仍受 maxCacheCount=200 的 LRU 约束），
+        // A→B→A 直接命中、秒出图。
+        // 不变量「切组立即刷新、不串图」仍由键身份保证：任一保存/覆盖都会 bump updatedAt（见
+        // SlotContent.updatedAt 注释「updated on every save/overwrite」）→ 新 key → 必然 miss 重解码。
+        loadSlotsAsync()
         loadConnectionMapForCurrentGroup()
         refreshTrigger = UUID()
 
@@ -924,11 +935,11 @@ final class SlotStoreObservable: ObservableObject {
 
         cancelPendingPasteOperations(restoreClipboard: true)
 
-        // The hotkey layer is now bound to a different special slot.
-        // Invalidate cached thumbnails for the old layer so stale async callbacks
-        // don't write into the wrong UI.
-        ThumbnailProvider.shared.invalidateSpecialSlot(specialSlotId: oldId)
-
+        // PERF-1 (v2.10.84): 移除此处的 ThumbnailProvider.invalidateSpecialSlot(oldId)。
+        // 原注释理由是「失效旧层缓存，避免 late 异步回调写进错误的 UI」——该风险自 v2.10.73 起已由
+        // keyed 缓存（specialSlotId::slot::contentId::updatedAt）在结构上消除：旧 key 的结果只能写回
+        // 旧 key。而且本函数只切换 Cmd+数字 的热键绑定层，**根本不改变当前显示的组**，清空缓存纯属
+        // 无谓开销：它会让当前正在看的这一组（若恰为 oldId）所有缩略图凭空掉图并重新解码。
         activeHotkeySpecialSlotId = id
         activeHotkeySpecialSlot = specialSlots.first { $0.id == id }
 
@@ -977,7 +988,10 @@ final class SlotStoreObservable: ObservableObject {
         specialSlots = index.specialSlots
         specialSlotSettings = index.settings
 
-        loadSlotsAsync(onCommit: { ThumbnailProvider.shared.invalidateSpecialSlot(specialSlotId: oldPreview) }) // APP-2 (v2.10.32): 切组读盘异步化，避免主线程被逐槽 flock 卡死
+        // PERF-1 (v2.10.84): 同 selectSpecialSlotForPreview——移除切组时对「离开组」缩略图缓存的
+        // 失效（onCommit: invalidateSpecialSlot(oldPreview)）。keyed 缓存已使 late 回调无法串组，
+        // 而清空会导致切回旧组时整组图片重新解码，是「切组卡顿」的主因。详见上方同类注释。
+        loadSlotsAsync()
         loadConnectionMapForCurrentGroup()
         refreshTrigger = UUID()
 
@@ -2135,6 +2149,18 @@ final class SlotStoreObservable: ObservableObject {
     // v2.7.59: right-top realtime preview needs both content and its original slot.
     func firstNonEmptySlotSnapshot(pageId: String, specialSlotId: String) -> (slot: Int, content: SlotContent)? {
         for slot in 1...config.slots {
+            // PERF-3 (v2.10.84): 先用廉价探针筛掉空槽，避免为「找第一个非空槽」而把前面每个空槽的
+            // 完整 payload 都读进来。`isEmpty(_:in:)` 是 SpecialSlotStorage 专为热路径提供的探测
+            // （指纹命中内存缓存时零文件系统操作、且常规路径不抢跨进程 flock），而 `get(_:in:)` 会在
+            // storageLock 下读取整个槽位内容（含附件字节）。
+            //
+            // 为什么这条路径值得优化：本方法在环形菜单 hover 每次切换扇区时于**主线程**同步调用
+            // （RadialMenuView.hoveredPreviewPayload），原实现最多触发 config.slots 次全量读盘 +
+            // flock，是「划过环形菜单发粘」的直接来源。
+            //
+            // 语义完全不变：探针在 UNKNOWN 降级态会保守报「非空」，因此这里仍以 `get()` 的真实结果
+            // 作最终判定——探针说空就跳过，说非空则读全量并再次校验 `!content.isEmpty` 才返回。
+            if specialStorage.isEmpty(slot, in: specialSlotId) { continue }
             let content = specialStorage.get(slot, in: specialSlotId)
             if !content.isEmpty { return (slot, content) }
         }

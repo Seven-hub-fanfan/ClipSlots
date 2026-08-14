@@ -4,13 +4,27 @@
 
 ## 当前版本
 
-- **当前版本：v2.10.83**
+- **当前版本：v2.10.84**
 - 平台：macOS（Swift / SwiftUI，SPM 构建，macOS 13+）
 - 单一版本号事实来源：`Info.plist` 的 `CFBundleShortVersionString`（`AppVersion.current` 动态读取，`AppVersion.fallback` 为编译期兜底）。CLI 版本号见 `Sources/ClipSlotsCLI/main.swift` 的 `CLI_VERSION`。
 
 ## 版本要点（近期）
 
-### v2.10.83 — 自动模式一次性开关联动（★当前正式发布版）
+### v2.10.84 — 专项流畅度优化（★当前正式发布版）
+- 背景：用户反馈「大量直观影响流畅度的卡顿细节」。四维度（SwiftUI 重绘 / 主线程 I/O / 缩略图管线 / 交互动画）全仓扫描后，只落地有真实代码证据且不改功能语义的 7 项。
+- **PERF-1（收益最大）切组不再清空缩略图缓存**：`selectSpecialSlotForPreview` / `selectAndActivateSpecialSlot` 的 `loadSlotsAsync(onCommit: invalidateSpecialSlot(oldId))` 与 `activateSpecialSlotForHotkeys` 里的同类调用全部移除。★该清空的原始理由「防旧组 late 异步回调写错 UI」自 v2.10.73 keyed 缓存起已不成立（旧 key 结果只能写回旧 key）；其真实代价是 A→B 丢掉 A 全部已解码图，切回 A 必须整组重解码——**这是切组卡顿主因**。现缓存跨组常驻（仍受 LRU 200 约束），A→B→A 秒回。
+- **PERF-2 缩略图通知合并**：`ThumbnailProvider` 单例每张图「开始加载 + 解码完成」各发一次 `objectWillChange`，且回调分散在不同 runloop tick（SwiftUI 只合并同 tick），一屏 10 图 ≈ 20 次全网格重绘。改为 16ms（一帧）窗口合并成 1 次；且缓存写入不再 hop 主线程（本就由 NSLock 保护）。
+- **PERF-3 环形菜单 hover 不再全量读盘**：`firstNonEmptySlotSnapshot` 原逐槽 `get().isEmpty`（全 payload + 跨进程 flock），正是仓库自身注释警告的反模式。改为先用 `specialStorage.isEmpty` 廉价探针筛空槽，只对命中槽读全量；探针 UNKNOWN 态保守报非空，故仍以 `get()` 结果终判，语义不变。
+- **PERF-4 环形预览内联图下采样**：`RadialInlineImagePreview` 仍用 `decodedInlineImage()` 全尺寸解码（8K 图上百 MB），而预览窗仅 360×480。对齐同文件磁盘图片路径 v2.10.35 已有策略：`decodedInlineThumbnail(maxPixel: 2048) ?? decodedInlineImage()`。★注意 detached 闭包需显式标注 `() -> NSImage?`，否则 `??` 会被推断成 `NSObject?` 编译报错。
+- **PERF-7 切组免去无谓索引写盘**：`resetAutoPasteCursor` 在两个游标本就为 nil 时短路跳过 `saveIndex`（整份 index.json 编码 + 原子写）。判断刻意放在 `storageLock` 临界区内，无 TOCTOU。
+- **PERF-6 全局搜索去重复排序**：主线程仅在「搜索期间用户真切了页/组」时才按新上下文重排，否则直接复用后台已排好的结果（此前每次搜索都在主线程对全结果集重跑一遍比较器，含较贵的 `localizedStandardCompare`）。
+- **PERF-5 动画节奏收紧**：`Anim.transition` response `0.35 → 0.28`；`AttachmentManagerPanel.switchFadeDuration` `0.12 → 0.08`（串行淡出+淡入总等待 240ms → 160ms）。纯观感参数。
+- ★**不变量守护（历史最敏感）**：「图片槽位切组立即刷新、绝不串图」由键身份保证——缓存键 `specialSlotId::slot::contentId::updatedAt`，且 CLI 实测确认**任何覆盖写都会同时改变 contentId 与 updatedAt** → 键必变 → 必然 miss 重解码。内容真变的失效点（clearAllSlots、导入覆盖、单槽写入）全部保留，仅移除「因切组」的清空。
+- ★**主动放弃的 5 项误报**（避免为改而改）：卡片 `metadataSummary`（早有 NSCache）、环形 hover 判等（早已存在）、启动 `cleanupTrash` 后台化（仅 200 项浅扫描，且会破坏短命 CLI 进程的清理）、`refreshTrigger` 全量摘除（SwiftUI 同 tick 已合并，风险高收益低）、附件列表改 `LazyVStack`（会干扰拖拽重排的 coordinateSpace 几何计算）。
+- 验证：`swift build` 通过；smoke **通过 28、失败 0**（新增 5 项断言守护 PERF-7 短路的幂等性 + 索引完整性）；DMG 打包校验通过、装机运行无崩溃、CLI 版本 2.10.84、`clipslots list` 数据完好（`repaired: false`）。
+- DMG SHA256：`7aac11d23fe81fa6481283805627c1681d9d08b7932ee5b959a11aab4e918191`（`build/ClipSlots_v2.10.84.dmg`）。
+
+### v2.10.83 — 自动模式一次性开关联动
 - **默认值与兼容性**：自动切换对从未保存过该偏好的新用户默认关闭；已有用户的 `UserDefaults` 历史值优先读取并完整保留，升级不会强制覆盖。
 - **一次性双向联动**：自动存储或自动粘贴任一发生关→开时，若自动切换为关则同步打开一次；任一发生开→关时，若自动切换为开则同步关闭一次。
 - **非持续绑定**：联动完成后允许用户手动修改自动切换，不会被后台轮询、状态重算或视图重建持续纠正；只有自动存储或自动粘贴下一次真实状态变化才再次联动。

@@ -43,6 +43,14 @@ final class ThumbnailProvider: ObservableObject {
     // 读写均在既有 lock（NSLock）保护下进行，保持与 cache/accessOrder 一致。
     private var inFlight: Set<String> = []
     private var failedKeys: Set<String> = []
+
+    // PERF-2 (v2.10.84): 变更通知合并。`notifyPending` 表示「已有一次合并通知在途」，
+    // 在窗口内到达的后续通知请求直接被它覆盖，不再各自触发一次全网格重绘。
+    // 读写均在既有 lock（NSLock）保护下进行，与 cache/inFlight 等状态保持一致。
+    private var notifyPending = false
+    /// 合并窗口：一帧（约 16ms）。低于一帧、肉眼不可察，却能把一屏缩略图回填的数十次
+    /// objectWillChange 压成 1~2 次。
+    private static let notifyCoalesceWindow: TimeInterval = 1.0 / 60.0
     /// Callback queue for in-flight requests. Multiple callers waiting on the same
     /// key all get notified when the single QLThumbnailGenerator request completes.
     private var pendingCompletions: [String: [(NSImage?, String) -> Void]] = [:]
@@ -279,31 +287,64 @@ final class ThumbnailProvider: ObservableObject {
         }
     }
 
-    /// 解码收尾：清 in-flight，写入缓存（成功）或记录失败态，然后在主线程发出变更通知。
-    /// 可能从后台线程（QuickLook 回调 / detached 解码）被调用，统一切回主线程发通知。
+    /// 解码收尾：清 in-flight，写入缓存（成功）或记录失败态，然后发出合并后的变更通知。
+    ///
+    /// PERF-2 (v2.10.84): 此前本方法整体（含缓存写入）被 hop 到主线程执行，并在每次完成时无条件
+    /// `objectWillChange.send()`。因为 `ThumbnailProvider` 是**单例**、所有 SlotThumbnailView 都以
+    /// `@ObservedObject` 观察它，每一次 send 都会让整个槽位网格重新求值。一屏 10 张图 = 10 次
+    /// 「开始加载」+ 10 次「完成」通知，且这些回调分散在不同 runloop tick（SwiftUI 只合并同一 tick 内
+    /// 的多次变更），于是切组瞬间产生约 20 次全网格重绘 —— 这是切组/滚动掉帧的直接来源。
+    ///
+    /// 现在：
+    /// 1. 缓存写入不再 hop 主线程。它本就由 `lock` 保护，在解码线程直接落盘更快，且能让随后的 body
+    ///    求值立刻读到结果（少一次「先 loading 再 loaded」的中间态重绘）。
+    /// 2. 通知走 `scheduleCoalescedChangeNotification()`，把一个合并窗口内的多次变更压成 1 次 send。
     private func finish(key: String, image: NSImage?) {
-        let apply: () -> Void = { [weak self] in
+        lock.lock()
+        inFlight.remove(key)
+        if let image = image {
+            cache[key] = image
+            markAccessedLocked(key)  // P2-15: 记录访问顺序
+            evictIfNeededLocked()     // P2-15: 超上限淘汰最旧项
+            failedKeys.remove(key)
+        } else {
+            failedKeys.insert(key)   // 记录失败，避免无限重试
+        }
+        lock.unlock()
+        scheduleCoalescedChangeNotification()
+    }
+
+    /// 在主线程发出**合并后**的 objectWillChange（ObservableObject 通知须在主线程）。
+    ///
+    /// PERF-2 (v2.10.84): 合并窗口 = 一帧（约 16ms）。窗口内到达的任意多次通知请求只会触发一次
+    /// `objectWillChange.send()`，从而把「一屏缩略图逐张回填」造成的数十次全网格重绘压到 1~2 次。
+    /// 16ms 的延迟低于一帧、肉眼不可察，但对主线程的解放非常显著。
+    ///
+    /// 正确性说明：本方法只影响「何时通知」，不影响「通知什么」。视图渲染始终是
+    /// `state(for: currentKey)` 的纯函数，合并后的那一次 send 会让所有视图重新读取自己最新的 key
+    /// 状态，因此不会丢更新（最后一次请求必然被那次 send 覆盖）。
+    /// 异步派发同时避开了「在视图更新中发布变更」的运行时告警。
+    private func scheduleCoalescedChangeNotification() {
+        lock.lock()
+        if notifyPending {
+            lock.unlock()
+            return  // 已有一次合并通知在途，本次请求被它覆盖
+        }
+        notifyPending = true
+        lock.unlock()
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.notifyCoalesceWindow) { [weak self] in
             guard let self = self else { return }
             self.lock.lock()
-            self.inFlight.remove(key)
-            if let image = image {
-                self.cache[key] = image
-                self.markAccessedLocked(key)  // P2-15: 记录访问顺序
-                self.evictIfNeededLocked()     // P2-15: 超上限淘汰最旧项
-                self.failedKeys.remove(key)
-            } else {
-                self.failedKeys.insert(key)   // 记录失败，避免无限重试
-            }
+            self.notifyPending = false
             self.lock.unlock()
             self.objectWillChange.send()
         }
-        if Thread.isMainThread { apply() } else { DispatchQueue.main.async(execute: apply) }
     }
 
-    /// 在主线程发出 objectWillChange（ObservableObject 通知须在主线程）。
-    /// 用于 .loading 过渡；异步派发以避开「在视图更新中发布变更」的运行时告警。
+    /// 兼容旧调用点的别名（.loading 过渡 / 失效后重渲染），行为统一为「合并通知」。
     private func notifyChangeOnMain() {
-        DispatchQueue.main.async { [weak self] in self?.objectWillChange.send() }
+        scheduleCoalescedChangeNotification()
     }
 
     // MARK: - Invalidation

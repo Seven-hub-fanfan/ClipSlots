@@ -184,8 +184,22 @@ private struct RadialInlineImagePreview: View {
             // 改为复用已有的全局 ThumbnailDecodeLimiter（2–6 并发上限），与网格/内联缩略图共用同一配额，
             // 削峰而不改变解码结果；decodedInlineImage 内部命中缓存时几乎瞬返。
             let decoded = await ThumbnailDecodeLimiter.shared.run {
-                await Task.detached(priority: .userInitiated) {
-                    snapshot.decodedInlineImage()
+                // 显式标注闭包返回类型为 NSImage?：`a ?? b` 两侧都是 Optional<NSImage>，
+                // 但在无类型标注的 detached 闭包里会被推断成公共父类 NSObject?，导致回填 @State 时
+                // 类型不匹配。与 ThumbnailProvider.load 中同款写法保持一致。
+                await Task.detached(priority: .userInitiated) { () -> NSImage? in
+                    // PERF-4 (v2.10.84): 内联（粘贴进来的）图片此前仍走 `decodedInlineImage()` 全尺寸解码，
+                    // 而径向预览窗只有 360×480 —— 一张 8K 粘贴图会瞬时解出上百 MB 位图，快速扫视图片
+                    // 槽位时反复制造 CPU/内存尖峰，既拖慢 hover 也挤压网格缩略图的解码配额。
+                    //
+                    // 同文件的**磁盘图片文件**路径早在 v2.10.35 (P1-6) 就改成了下采样（maxPixel: 2048
+                    // + 失败回退全尺寸），只有这条内联路径被漏掉。这里对齐同一策略与同一上限，保持两条
+                    // 预览路径行为一致。
+                    //
+                    // 观感无损：2048px 远超预览窗所需分辨率。缓存也不会串味——
+                    // `decodedInlineThumbnail` 的缓存键含 maxPixel（"contentId::updatedAt::2048"），
+                    // 与网格用的 512 版本各自独立；解码失败仍回退 `decodedInlineImage()`，即与改动前等价。
+                    snapshot.decodedInlineThumbnail(maxPixel: 2048) ?? snapshot.decodedInlineImage()
                 }.value
             }
             if !Task.isCancelled { image = decoded }

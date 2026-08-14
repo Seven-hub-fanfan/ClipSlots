@@ -80,7 +80,12 @@ final class AttachmentManagerPanelController: NSObject, NSPopoverDelegate {
 
     // UX (v2.10.46): 切换槽位时的淡入淡出时长。此前（v2.10.29）为消卡顿改成硬切/瞬切，
     // 现性能已 OK，补回极短过渡：旧面板内容淡出 → 关闭 → 新面板内容淡入，形成柔和过手感。
-    private let switchFadeDuration: TimeInterval = 0.12
+    //
+    // PERF-5 (v2.10.84): 0.12 → 0.08。这两段淡入淡出是**串行**的（淡出完成后才关闭并淡入），
+    // 所以用户在不同槽位的附件按钮间连续点击时，感知到的是 2×时长 的纯等待：0.12 时为 240ms，
+    // 已经足以被读作「面板反应迟钝」。压到 0.08 后总过渡约 160ms，既保住柔和感又明显更跟手。
+    // 纯观感参数：只影响动画时长，不改变 pendingShowToken 竞态防护与显示/关闭时序逻辑。
+    private let switchFadeDuration: TimeInterval = 0.08
     // 正在淡出、尚未真正关闭的旧 popover。用于在下一次 show 到来时立即硬关，避免叠加。
     private var fadingOutPopover: NSPopover?
 

@@ -22,5 +22,10 @@ enum Anim {
     static let status: Animation = .easeInOut(duration: 0.2)
 
     /// 元素进出场 / 位置变化过渡：带轻微回弹，柔和自然。
-    static let transition: Animation = .spring(response: 0.35, dampingFraction: 0.82)
+    ///
+    /// PERF-5 (v2.10.84): response 从 0.35 收紧到 0.28。0.35s + dampingFraction 0.82 的组合会拖出
+    /// 一条较长的收敛尾巴，在这种「高频连续操作」的工具型 App 里，即使帧率满格也会被感知成
+    /// 「软件反应慢」——因为下一次操作要等上一段过渡走完才显得干净。0.28s 仍保留回弹质感，
+    /// 但把等待感明显压短。纯观感参数，不改变任何状态语义。
+    static let transition: Animation = .spring(response: 0.28, dampingFraction: 0.82)
 }

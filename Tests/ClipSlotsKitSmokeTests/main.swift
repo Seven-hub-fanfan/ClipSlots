@@ -160,6 +160,31 @@ t.withFreshStore("读游标") { storage in
     t.check(storage.autoPasteCursor() == nil, "重置后读游标应清空")
 }
 
+// PERF-7 (v2.10.84): resetAutoPasteCursor 在「游标本就为空」时会短路跳过写盘。
+// 该短路必须是纯粹的性能优化，对外行为与旧实现完全一致，故守住三点：
+//   1. 对空游标重复 reset 幂等且不报错（走短路分支）
+//   2. 短路不会破坏索引里的既有页/组数据（确认没有误写空索引）
+//   3. 短路之后仍能正常 set → reset（确认没有把状态卡死）
+t.withFreshStore("读游标重置幂等（PERF-7 短路）") { storage in
+    let g = firstGroupId(storage)
+    let groupCountBefore = storage.loadIndex().specialSlots.count
+
+    // 1. 空游标下连续 reset：走短路，应幂等无副作用
+    try storage.resetAutoPasteCursor()
+    try storage.resetAutoPasteCursor()
+    t.check(storage.autoPasteCursor() == nil, "空游标重复重置后仍应为空")
+
+    // 2. 短路不得动到索引内容
+    t.equal(storage.loadIndex().specialSlots.count, groupCountBefore, "短路重置不应改变组数量")
+    t.check(storage.loadIndex().specialSlots.contains { $0.id == g }, "短路重置后原有组应仍在索引中")
+
+    // 3. 短路后写入再重置，仍走正常清空路径
+    try storage.setAutoPasteCursor(SpecialSlotCursor(groupId: g, slot: 6))
+    t.equal(storage.autoPasteCursor()?.slot, 6, "短路后仍应能正常写入读游标")
+    try storage.resetAutoPasteCursor()
+    t.check(storage.autoPasteCursor() == nil, "短路后仍应能正常清空读游标")
+}
+
 // 写游标持久化
 t.withFreshStore("写游标持久化") { storage in
     let g = firstGroupId(storage)
