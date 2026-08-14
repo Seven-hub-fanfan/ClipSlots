@@ -4,13 +4,32 @@
 
 ## 当前版本
 
-- **当前版本：v2.10.86**
+- **当前版本：v2.10.87**
 - 平台：macOS（Swift / SwiftUI，SPM 构建，macOS 13+）
 - 单一版本号事实来源：`Info.plist` 的 `CFBundleShortVersionString`（`AppVersion.current` 动态读取，`AppVersion.fallback` 为编译期兜底）。CLI 版本号见 `Sources/ClipSlotsCLI/main.swift` 的 `CLI_VERSION`。
 
 ## 版本要点（近期）
 
-### v2.10.86 — 修复切组缩略图停在占位图（★当前正式发布版）
+### v2.10.87 — 性能盲点复扫 + 动画过渡打磨（★当前正式发布版）
+
+性能（3 项，均为「被前几轮优化掩盖」的存量盲点）：
+- ★**删除 write-only 的 `slotRenderTokens`**。v2.10.72 之前「靠改卡片 `.id` 强刷缩略图」的遗留基础设施；v2.10.73 改由 `ThumbnailProvider` keyed 缓存驱动后**全仓零读取点**，却仍留着 **16 处写入**。它是主 store 的 `@Published`，每次写入 → `objectWillChange` → 整棵 `ContentView.body`（含 10 卡片 LazyVGrid）重新求值。最坏是 `undoLastClearIfPossible` / `clearAllSlots` / 批量导入 / 批量保存里的 `for slot in 1...config.slots`，一次操作连发 10 次。删除前逐一核验 16 处写入**每处都伴随** `slots` / `refreshTrigger` / `reloadAllAsync()` 之一，刷新链路不依赖它。
+- **`importProgress` 下沉 `TransientUIStore`** + 新增独立 `ImportProgressOverlayView`（沿用 v2.10.52/76 的「交互状态下沉」模式，主 store 保留同名转发计算属性，v2.10.56 的 generation 代次守卫逻辑零改动）。它是全仓最高频状态之一（每条目上报一次，几百文件几百次），原先每次百分比前进都全局重算 → 「导入大批文件时界面发涩」。
+- **`resultsSignature` 零分配化**：`results.map(\.id)`（每次 body 求值新建 N 元数组 + N 次字符串引用计数，hover/选中/排序都会走）→ `Hasher` 折叠成 `Int`。
+- ★**核验发现两项「审计报告声称的 High 热点」实为已解决，本次未动**：`SlotContent.preview` / `plainText` 早已有以 `contentId::updatedAt` 为键的 NSCache（countLimit 500），非每次全量解码；组内搜索匹配计数 v2.10.49 已做防抖 + `@State` 缓存（`matchedSlotCountCache`）。**结论：性能层面已基本到位，剩余是架构级技术债而非可摘的低垂果实。**
+
+动画：
+- ★**缩略图「占位 → 出图」0.2s 淡入，且动画是有方向的**：驱动键刻意用 `isThumbnailLoaded`(Bool) 而非 `currentKey`，写法必须保持 `.animation(isLoaded ? Anim.status : nil, value: isLoaded)`。图 A→图 B（新 key 命中缓存）Bool 不变 → **仍瞬时硬切**，不会两组图交叠淡化；有图→占位（切到未缓存组）动画取 `nil` → 旧图**立即**消失无淡出尾巴。只有「占位→有图」拿到动画。**这是守住 v2.10.64/65/86 反复修过的「切组/切页立即刷新、不串图」不变量的关键，改此行前必须复现切组场景。**
+- **搜索结果区 + 热键横幅出现/消失过渡**：原为裸 `if` 硬切（敲第一个字符时整块凭空出现、把网格硬顶下去；清空时网格「弹」回）。改「淡入 + 自顶部展开」，`.animation` 紧贴 Group 作用域、只由一个布尔驱动（逐字符输入不反复触发），时长用 `Anim.status`(0.2s) 压短，因为会带动 10 卡片容器的纵向布局。
+- **切组扫光真正可见**：原 0.95s 一趟 + 起点整条在画面外，而光带是「两端透明中心最亮」渐变，看得见要等中心入画 ≈0.22s；v2.10.74 后遮罩只在切组确实慢时延迟显示、窗口常仅两三百毫秒 → 扫光在多数真实切组里**从没亮起来过**，观感只是「内容淡了一下又回来」。现行程 0.72s + 起点半露（`-bandWidth*0.5`），第一帧即可读。遮罩显隐时序完全不动。
+- 切组 0.16s 收进 token 体系为 **`Anim.groupSwitch`**（数值曲线一字未改，仅去魔法数；注明这一档刻意独立于 interactive/status/transition，且不要调大——拉长会直接让切组显得变慢）。
+- 未介入：卡片「展开」走系统 `.sheet` 无可定制过渡空间；游标胶囊位置、拖拽排序均未触碰。
+- ★**遗留技术债**：`refreshTrigger` 同样是「23 处写、0 处读」的 `@Published`，但它是多条路径唯一的「强制刷新」副作用通道（删除后某些只改非 @Published 状态的路径可能不再刷新 UI），风险高于收益，本次**刻意保留**待专项梳理。
+- 验证：`swift build` 通过；smoke 33 项全绿；DMG 校验通过；装机运行正常无崩溃；CLI 2.10.87 写入/读取/搜索/清空回归正常。
+- commit `9ab002a`（已推 main）；Release：https://github.com/Seven-hub-fanfan/ClipSlots/releases/tag/v2.10.87
+- DMG SHA256：`ec8969600462af4143099683e19b8acefd772178f5aae688e537e74181c3181e`（`build/ClipSlots_v2.10.87.dmg`），已核对 `releases/latest` 返回的 asset digest 一致。
+
+### v2.10.86 — 修复切组缩略图停在占位图
 - 现象（v2.10.85 回归）：切换到一个组时，所有槽位缩略图都显示占位图标（山+太阳）+文件名，不加载真实内容；切走再切回才出图。
 - ★根因是**通知投递**而非解码失败。本机基准实测：QuickLook 为 10 张 1MB PNG 出图共 0.103s、零失败；ImageIO 下采样 0.142s、零失败 → 图片早已解好进缓存，只是网格没被重新求值。链条是 v2.10.84 两处优化叠加：
   - **PERF-2** 把「每图开始加载+解码完成」约 20 次 `objectWillChange.send()` 合并成 16ms 窗口内**恰好一次**；
