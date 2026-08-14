@@ -141,7 +141,17 @@ struct SlotCardView: View {
                 Spacer(minLength: 4)
 
                 if let store = store {
-                    NodeAttachmentButton(slot: slot, store: store)
+                    // v2.10.89 (perf): 把附件数直接传给按钮，热路径零存储读。
+                    // 卡片本来就持有权威的 `content`，而按钮内部原先靠 `store.attachments(for:)`
+                    // 自己做存储读（stat 系统调用 + queue.sync），一次 body 要读 9 次、×10 张卡片
+                    // ≈ 90 次主线程同步 I/O，且因按钮自己观察主 store 而绕过了卡片 .equatable() 短路。
+                    // 这是 v2.10.88 两处渲染优化之外、hover 切槽位卡顿的第二条根因，影响面还覆盖
+                    // 每次保存/清空/Toast/切组（详见 NodeAttachmentButton 的注释）。
+                    NodeAttachmentButton(
+                        slot: slot,
+                        store: store,
+                        attachmentCountOverride: content.attachments.count
+                    )
                 }
             }
             // v2.8.2 (P2-5): use minHeight so the row can grow to fit the 22pt

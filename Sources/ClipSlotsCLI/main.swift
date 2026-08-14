@@ -18,7 +18,7 @@ import ClipSlotsKit
 // needs bumping.
 // v2.10.66: keep in lockstep with the app's CFBundleShortVersionString on every
 // release — this constant had drifted (2.10.58) behind the app (2.10.65).
-let CLI_VERSION = "2.10.88"
+let CLI_VERSION = "2.10.89"
 let DEFAULT_GROUP = "default"
 let DEFAULT_PAGE = "default_page"
 

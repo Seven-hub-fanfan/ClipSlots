@@ -107,10 +107,37 @@ struct NodeAttachmentButton: View {
         UserDefaults.standard.bool(forKey: Self.suppressClearConfirmKey)
     }
 
-    private var attachmentCount: Int { store.attachments(for: slot).count }
+    // v2.10.89 (perf · ★hover 切槽位卡顿的第二条根因：主线程同步 I/O): 附件数改为「调用方传入优先」。
+    //
+    // v2.10.88 已修掉 hover 路径上两处**渲染**开销（阴影模糊半径逐帧重算、scaleEffect 作用于未拍平
+    // 子树）。但卡顿还有一条与渲染无关的来源：本按钮在 body 里反复做同步存储读。
+    //
+    // 原实现是 `private var attachmentCount: Int { store.attachments(for: slot).count }`，而
+    // `store.attachments(for:)` → `specialStorage.get(slot, in:)` → `SlotStorage.loadContentOrUnknown`
+    // 是一次**存储读**：即便走的是不加 flock 的快路径，也仍要付 `dirFingerprint()` 的 `stat(2)`
+    // 系统调用 + 一次 `queue.sync` 串行队列跳转（若该队列正被后台读盘占用，主线程会直接被阻塞）。
+    //
+    // 致命之处在于它是 computed property，而 body 与 `pill` 里对 `attachmentCount` 的引用有
+    // **9 处**（pill 的 icon / label×2 / foregroundColor / background / overlay，body 的 help×2、
+    // `if attachmentCount > 0`）——即一次 body 求值就是 9 次存储读。本按钮又内嵌在每张槽位卡片里
+    // （×10），且以 `@ObservedObject store` 观察巨型主 store，**绕过了卡片 `.equatable()` 的短路**，
+    // 于是任何主 store 变更、以及任何一次卡片 body 重算，都会放大成约 90 次主线程 stat + queue.sync。
+    //
+    // 对 hover 的影响：hover 改的是卡片自身的 @State（Equatable 拦不住），离开的卡 + 进入的卡各重算
+    // 一次 body → 约 18 次同步 I/O 正好压在缩放动画的头几帧上。
+    // 影响面其实远大于 hover：每次保存 / 清空 / 弹 Toast / 切组，只要主 store 发一次 objectWillChange，
+    // 就会触发这约 90 次主线程存储读。
+    //
+    // 修法两层：
+    //   1) 调用方若已持有权威内容（主网格的 SlotCardView 有 `content`），直接把 count 传进来 →
+    //      热路径**零存储读**；
+    //   2) 未传时仍回退存储读，但 body 内**只求值一次**（见 body 里的 `let count`），9 次降为 1 次。
+    var attachmentCountOverride: Int? = nil
 
-    private var label: String {
-        attachmentCount > 0 ? "附件 \(attachmentCount)" : "附件"
+    /// 解析出本次渲染要用的附件数。**只应在 body 顶部求值一次**，然后把结果传下去。
+    private var resolvedAttachmentCount: Int {
+        if let attachmentCountOverride { return attachmentCountOverride }
+        return store.attachments(for: slot).count
     }
 
     private var isClearButtonVisible: Bool {
@@ -118,21 +145,24 @@ struct NodeAttachmentButton: View {
     }
 
     var body: some View {
+        // v2.10.88: 整个 body（含 pill 与确认弹窗）共用这一次求值，杜绝重复存储读。
+        let count = resolvedAttachmentCount
+
         // v2.7.74: pill (open manager) + red ✕ clear entry as SIBLING buttons in the
         // same top-most (zIndex 30) overlay layer, so both taps land reliably.
-        ZStack(alignment: .topTrailing) {
+        return ZStack(alignment: .topTrailing) {
             Button {
-                NSLog("[ClipSlots] attachment button tapped slot=\(slot) count=\(attachmentCount)")
+                NSLog("[ClipSlots] attachment button tapped slot=\(slot) count=\(count)")
                 toggleAttachmentPanel()
             } label: {
-                pill
+                pill(count: count)
             }
             .buttonStyle(.plain)
-            .help(attachmentCount > 0 ? "附件：\(attachmentCount) 个，点击管理" : "添加附件")
+            .help(count > 0 ? "附件：\(count) 个，点击管理" : "添加附件")
             // v2.10.20: 用透明背景视图持续上报按钮的屏幕矩形，供浮动面板定位与关闭判断。
             .background(AttachmentButtonAnchorReporter(holder: buttonAnchor))
 
-            if attachmentCount > 0 {
+            if count > 0 {
                 Button {
                     // v2.7.75: honor the persisted "不再提醒" preference.
                     if suppressClearConfirm {
@@ -157,7 +187,7 @@ struct NodeAttachmentButton: View {
                 .allowsHitTesting(isClearButtonVisible)
                 .animation(Anim.interactive, value: isClearButtonVisible)
                 .popover(isPresented: $showingClearConfirm, arrowEdge: .top) {
-                    clearConfirmPopover
+                    clearConfirmPopover(count: count)
                 }
             }
         }
@@ -196,7 +226,7 @@ struct NodeAttachmentButton: View {
     }
 
     // v2.7.75: custom confirm popover carrying a "不再提醒" toggle.
-    private var clearConfirmPopover: some View {
+    private func clearConfirmPopover(count: Int) -> some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack(spacing: 8) {
                 Image(systemName: "trash.circle.fill")
@@ -206,7 +236,7 @@ struct NodeAttachmentButton: View {
                 Text("清空该槽位的全部附件？")
                     .font(.system(size: 13, weight: .semibold))
             }
-            Text("将删除该槽位当前的 \(attachmentCount) 个附件，此操作无法撤销。")
+            Text("将删除该槽位当前的 \(count) 个附件，此操作无法撤销。")
                 .font(.caption)
                 .foregroundColor(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -226,7 +256,7 @@ struct NodeAttachmentButton: View {
                     store.setAttachments([], for: slot)
                     showingClearConfirm = false
                 } label: {
-                    Text("清空 \(attachmentCount) 个附件")
+                    Text("清空 \(count) 个附件")
                 }
                 .keyboardShortcut(.defaultAction)
             }
@@ -235,26 +265,26 @@ struct NodeAttachmentButton: View {
         .frame(width: 260)
     }
 
-    private var pill: some View {
+    private func pill(count: Int) -> some View {
         HStack(spacing: 4) {
-            Image(systemName: attachmentCount > 0 ? "paperclip.circle.fill" : "paperclip")
+            Image(systemName: count > 0 ? "paperclip.circle.fill" : "paperclip")
                 .font(.system(size: 12, weight: .semibold))
-            Text(label)
+            Text(count > 0 ? "附件 \(count)" : "附件")
                 .font(.system(size: 11, weight: .semibold))
                 .lineLimit(1)
         }
         // v2.9.18: 品牌渐变胶囊上的文字统一到 AppTheme.onAccentText。
-        .foregroundColor(attachmentCount > 0 ? AppTheme.onAccentText : .secondary)
+        .foregroundColor(count > 0 ? AppTheme.onAccentText : .secondary)
         .padding(.horizontal, 8)
         .frame(height: 22)
         .background(
             Capsule().fill(
-                attachmentCount > 0
+                count > 0
                     ? AnyShapeStyle(AppTheme.brandGradient(.light))
                     : AnyShapeStyle(Color(NSColor.controlBackgroundColor))
             )
         )
-        .overlay(Capsule().stroke(Color.secondary.opacity(attachmentCount > 0 ? 0 : 0.35), lineWidth: 1))
+        .overlay(Capsule().stroke(Color.secondary.opacity(count > 0 ? 0 : 0.35), lineWidth: 1))
         .contentShape(Capsule())
     }
 }
