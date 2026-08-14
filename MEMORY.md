@@ -4,13 +4,25 @@
 
 ## 当前版本
 
-- **当前版本：v2.10.84**
+- **当前版本：v2.10.85**
 - 平台：macOS（Swift / SwiftUI，SPM 构建，macOS 13+）
 - 单一版本号事实来源：`Info.plist` 的 `CFBundleShortVersionString`（`AppVersion.current` 动态读取，`AppVersion.fallback` 为编译期兜底）。CLI 版本号见 `Sources/ClipSlotsCLI/main.swift` 的 `CLI_VERSION`。
 
 ## 版本要点（近期）
 
-### v2.10.84 — 专项流畅度优化（★当前正式发布版）
+### v2.10.85 — 悬停预览显示文件图标而非真实图片内容（★当前正式发布版）
+- 现象：环形菜单悬停预览窗显示的是 macOS 的 PNG 文档图标，而不是图片像素。
+- ★根因（与 v2.10.84 PERF-4 无关）：从 Finder **复制文件**时，剪贴板内容是 `public.file-url` + `com.apple.icns`，后者是 1024px 的**通用文档图标**（本机实测 `default/1/item_0/com.apple.icns.bin` 1.1MB、10 个 rep、最大 1024×1024）。`com.apple.icns` 属于合法图片类型 → `SlotContent.hasImage` 为真 → 所有预览路径优先走「内联图片」分支，把 Finder 图标当内容渲染，真实文件像素没人读。新旧两条解码路径（`decodedInlineImage` / `decodedInlineThumbnail`）都会画出这张图标，所以这是长期存在的行为，不是下采样引入的。
+- 修复：
+  - Kit 新增 `iconOnlyPasteboardTypes` / `isIconOnlyPasteboardType`（icns 系列）；icns **仍留在** `imagePasteboardTypes`，保证真正粘贴 `.icns` 数据时渲染行为不变。
+  - `SlotContent` 新增 `prefersFileContentOverInlineIcon`（内联图片全是图标类型 且 存在 file-url）与 `hasRenderableInlineImage`。
+  - 环形悬停预览、网格缩略图、全局搜索预览改用 `hasRenderableInlineImage`：图片文件走磁盘 `ClipSlotsImageIO` 下采样（2048 / 512）显示真实像素；非图片文件（PDF/压缩包等）保留原 Finder 图标渲染（其图标常自带内容缩览），不降级。
+- 性能不回退：PERF-4 下采样策略完整保留，只是把「解码哪份数据」从图标换成真实文件，仍不做原图尺寸解码。
+- 冷知识：`file:///.file/id=...` 形式的 URL 也能正确解析出 `pathExtension`（实测 png）与真实路径，故 `isImageFile` 判定成立。
+- 验证：`swift build` 通过；smoke **通过 33、失败 0**（新增 5 项图标类型判定断言）；DMG 打包校验通过、装机 CLI 版本 2.10.85。
+- DMG SHA256：`3bb008fda57caeaf5d928f382c9978b98020bf3363c9975ee06145def307d1fc`（`build/ClipSlots_v2.10.85.dmg`）。
+
+### v2.10.84 — 专项流畅度优化
 - 背景：用户反馈「大量直观影响流畅度的卡顿细节」。四维度（SwiftUI 重绘 / 主线程 I/O / 缩略图管线 / 交互动画）全仓扫描后，只落地有真实代码证据且不改功能语义的 7 项。
 - **PERF-1（收益最大）切组不再清空缩略图缓存**：`selectSpecialSlotForPreview` / `selectAndActivateSpecialSlot` 的 `loadSlotsAsync(onCommit: invalidateSpecialSlot(oldId))` 与 `activateSpecialSlotForHotkeys` 里的同类调用全部移除。★该清空的原始理由「防旧组 late 异步回调写错 UI」自 v2.10.73 keyed 缓存起已不成立（旧 key 结果只能写回旧 key）；其真实代价是 A→B 丢掉 A 全部已解码图，切回 A 必须整组重解码——**这是切组卡顿主因**。现缓存跨组常驻（仍受 LRU 200 约束），A→B→A 秒回。
 - **PERF-2 缩略图通知合并**：`ThumbnailProvider` 单例每张图「开始加载 + 解码完成」各发一次 `objectWillChange`，且回调分散在不同 runloop tick（SwiftUI 只合并同 tick），一屏 10 图 ≈ 20 次全网格重绘。改为 16ms（一帧）窗口合并成 1 次；且缓存写入不再 hop 主线程（本就由 NSLock 保护）。
