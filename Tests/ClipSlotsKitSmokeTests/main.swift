@@ -193,4 +193,13 @@ t.withFreshStore("写游标持久化") { storage in
     t.equal(reopened.autoStoreCursor()?.slot, 7, "写游标应持久化到磁盘")
 }
 
+// v2.10.85（环形预览显示文件图标而非真实内容）: Finder 复制文件时剪贴板里带的
+// `com.apple.icns` 是文档图标，不是文件像素。它必须仍被识别为图片类型（真 .icns
+// 粘贴要能渲染），同时又能被单独判定为「仅图标」，供预览路径改走真实文件像素。
+t.check(SlotContent.isImagePasteboardType("com.apple.icns"), "icns 仍应算图片类型")
+t.check(SlotContent.isIconOnlyPasteboardType("com.apple.icns"), "icns 应判定为仅图标类型")
+t.check(SlotContent.isIconOnlyPasteboardType("ICNS"), "仅图标判定应大小写不敏感")
+t.check(!SlotContent.isIconOnlyPasteboardType("public.png"), "public.png 不应判定为仅图标")
+t.check(!SlotContent.isIconOnlyPasteboardType("public.tiff"), "public.tiff 不应判定为仅图标")
+
 t.report()

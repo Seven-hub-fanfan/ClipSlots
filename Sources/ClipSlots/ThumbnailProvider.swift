@@ -257,7 +257,7 @@ final class ThumbnailProvider: ObservableObject {
 
         // 内联图片：走全局 ThumbnailDecodeLimiter 限流 + Task.detached 后台降采样解码，
         // 避免一屏图片卡同时触发数百次全分辨率 ImageIO 解码而卡主线程（沿用原 SlotThumbnailView 逻辑）。
-        if content.hasImage {
+        if content.hasRenderableInlineImage {
             let snapshot = content
             Task {
                 let decoded = await ThumbnailDecodeLimiter.shared.run {

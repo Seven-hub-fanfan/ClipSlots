@@ -125,7 +125,7 @@ private struct RadialUniversalPreview: View {
 
     var body: some View {
         Group {
-            if content.hasImage {
+            if content.hasRenderableInlineImage {
                 // ATT-2 (v2.10.32): decode the inline image off the main thread before
                 // display. Previously this read `content.inlineImage` synchronously in
                 // the body, so hovering a radial slot with a big pasted image decoded it
@@ -135,6 +135,12 @@ private struct RadialUniversalPreview: View {
                 RadialImageFilePreview(url: url)
             } else if content.isVideoFile, let url = content.primaryFileURL {
                 RadialVideoPreview(url: url)
+            } else if content.hasImage {
+                // v2.10.85: 走到这里意味着内联图片只有 Finder 文件图标（icns），且这个文件
+                // 既不是图片也不是视频（PDF / 压缩包 / 应用等）。这类文件的 Finder 图标本身
+                // 常常带真实内容缩览，比纯图标卡片信息量更大，所以保留原来的图标渲染，
+                // 只把"图片文件"这一类改走真实像素路径。
+                RadialInlineImagePreview(content: content)
             } else if let html = content.preferredHTMLSourceForPreview {
                 RadialHTMLPreview(html: html)
             } else if content.isHTMLDocument {
@@ -392,7 +398,7 @@ private struct RadialImageOnlyPreview: View {
         // ATT-2 (v2.10.32): decode inline images off the main thread as well. The old
         // code read `content.inlineImage` synchronously (both in the body and here),
         // decoding a full-resolution pasted image on the main thread.
-        if content.hasImage {
+        if content.hasRenderableInlineImage {
             let snapshot = content
             DispatchQueue.global(qos: .userInitiated).async {
                 let decoded = snapshot.decodedInlineImage()

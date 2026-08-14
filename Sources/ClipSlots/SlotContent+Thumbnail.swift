@@ -118,6 +118,30 @@ extension SlotContent {
         !imageTypes.isEmpty
     }
 
+    /// v2.10.85（环形/网格预览显示的是 macOS 文件图标而不是图片本身）:
+    /// 从 Finder 复制一个文件时，剪贴板里是 `public.file-url` + `com.apple.icns`
+    /// —— 后者是 1024px 的**通用文档图标**（本机实测：一个 PNG 文件的槽位里
+    /// `com.apple.icns.bin` 有 1.1MB / 10 个 rep，最大 1024×1024，画出来就是那张
+    /// 蓝色 PNG 文档图标）。因为 `com.apple.icns` 属于合法图片类型，`hasImage`
+    /// 为真，于是所有预览路径都优先走"内联图片"分支，把图标当成内容画了出来，
+    /// 真正的文件像素反而没人读。
+    ///
+    /// 这里判定"内联图片其实只有文件图标、且存在可读的文件 URL"，此时预览应该
+    /// 走**文件**路径（磁盘下采样解码 / QuickLook），显示真实内容。
+    /// 注意：真的粘贴了一个 `.icns` 数据（没有 file-url）时该值为 false，仍按
+    /// 内联图片渲染，行为不变。
+    var prefersFileContentOverInlineIcon: Bool {
+        guard !imageTypes.isEmpty else { return false }
+        guard imageTypes.allSatisfy({ SlotContent.isIconOnlyPasteboardType($0) }) else { return false }
+        return primaryFileURL != nil
+    }
+
+    /// 真正可作为"内容"渲染的内联图片（排除只有文件图标的情况）。所有预览/缩略图
+    /// 路径都应该用它来决定是否走内联图片分支。
+    var hasRenderableInlineImage: Bool {
+        hasImage && !prefersFileContentOverInlineIcon
+    }
+
     /// Process-wide cache of decoded inline images, keyed by `contentId::updatedAt`.
     /// v2.8.0 (perf H1): `inlineImage` was previously re-decoding the raw image
     /// data via `NSImage(data:)` on *every* access. Because this property is read

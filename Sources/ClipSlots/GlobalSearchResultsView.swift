@@ -424,7 +424,7 @@ private struct SearchResultPreviewImage: View {
         // selected. Decode it (and on-disk image files) off the main thread instead.
         // P1-5 (v2.10.35): 捕获发起时的内容键，异步完成回主线程时若已切到别的结果则丢弃，防串图。
         let keyAtDispatch = previewKey
-        if content.hasImage, inlineImage == nil {
+        if content.hasRenderableInlineImage, inlineImage == nil {
             let snapshot = content
             DispatchQueue.global(qos: .userInitiated).async {
                 let decoded = snapshot.decodedInlineImage()

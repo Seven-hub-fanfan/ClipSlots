@@ -158,6 +158,23 @@ public struct SlotContent: Codable {
         return imagePasteboardTypes.contains(lower)
     }
 
+    /// v2.10.85（预览显示文件图标而非真实内容）: pasteboard types that carry a
+    /// **file ICON** rather than the file's real pixels. Copying a file in Finder
+    /// puts `public.file-url` + `com.apple.icns` (the 1024px generic document icon)
+    /// on the pasteboard. `com.apple.icns` is legitimately an image type (a real
+    /// `.icns` pasted as data must still render), so it stays in
+    /// `imagePasteboardTypes` — but when it is the ONLY image item AND a file URL
+    /// exists, rendering it shows a PNG/PDF document icon instead of the file the
+    /// user actually stored. Call sites use `prefersFileContentOverInlineIcon`.
+    public static let iconOnlyPasteboardTypes: Set<String> = [
+        "com.apple.icns", "icns", "com.apple.iconfamily", "apple icns format"
+    ]
+
+    /// True when `type` only ever carries a file icon (see `iconOnlyPasteboardTypes`).
+    public static func isIconOnlyPasteboardType(_ type: String) -> Bool {
+        iconOnlyPasteboardTypes.contains(type.lowercased())
+    }
+
     public func thumbnailKey(specialSlotId: String, slot: Int) -> String {
         // v2.10.28 (fix 空槽位附件面板打开即关闭): an empty slot has no persisted
         // content.json, so `readSlotContent` mints a BRAND-NEW random `contentId`
