@@ -35,6 +35,8 @@
   - 真机实测确认 FSEvents **确实会静默不投递**（本次抓到 34.5s 静默后由自愈重建流），故这层兜底不是过度设计。
 - 缩略图不变量相关文件（`ThumbnailProvider.swift` / `SlotThumbnailView.swift`）本版**零改动**。
 - 验证：`swift build` 通过；smoke **59 项全绿**（33 → 59，新增全部围绕版本比对与安装护栏）；DMG 校验通过；装机正常；引导面板**开着**时 CLI 写入仍能打出 `watcher fired → reloadAll`（修复前此路径完全静默）；空闲 30s 重载 0 次；测试用空槽已还原。
+- commit `bd21d14`；Release：https://github.com/Seven-hub-fanfan/ClipSlots/releases/tag/v2.10.92
+- DMG SHA256：`844b41bc07e1879857b33f411022f5c6709c0f6b338b59b9bdcdcd5d9951bc50`（已核对 `releases/latest` asset digest）。
 
 
 ### v2.10.91 — ★找到「无论怎么优化都不丝滑」的真凶：空闲时每 0.65s 一次全量重载

@@ -63,4 +63,6 @@ AccessibilityPermissionGuide.presentGuideAlert(afterUpdate:)
 
 ### DMG SHA-256
 
-见下方 asset digest。
+```
+844b41bc07e1879857b33f411022f5c6709c0f6b338b59b9bdcdcd5d9951bc50
+```
