@@ -4,13 +4,34 @@
 
 ## 当前版本
 
-- **当前版本：v2.10.87**
+- **当前版本：v2.10.89**
 - 平台：macOS（Swift / SwiftUI，SPM 构建，macOS 13+）
 - 单一版本号事实来源：`Info.plist` 的 `CFBundleShortVersionString`（`AppVersion.current` 动态读取，`AppVersion.fallback` 为编译期兜底）。CLI 版本号见 `Sources/ClipSlotsCLI/main.swift` 的 `CLI_VERSION`。
 
 ## 版本要点（近期）
 
-### v2.10.87 — 性能盲点复扫 + 动画过渡打磨（★当前正式发布版）
+### v2.10.89 — hover 切槽位卡顿的第二条根因：主线程同步 I/O（★当前正式发布版）
+
+- 现象：鼠标悬停在某个槽位卡片上，再移到另一个槽位时明显卡一下。v2.10.88 已修掉该路径两处**渲染**开销（阴影模糊半径逐帧重算、`scaleEffect` 作用于未拍平子树），但仍有一条与渲染无关的来源。
+- ★根因：每张卡片内嵌的 `NodeAttachmentButton`（「附件」胶囊）用 `store.attachments(for: slot).count` 取附件数，而该调用 → `specialStorage.get(slot, in:)` → `SlotStorage.loadContentOrUnknown` 是一次**存储读**。即便走不加 flock 的快路径，仍要付 `dirFingerprint()` 的 `stat(2)` 系统调用 + 一次 `queue.sync`（该队列被后台读盘占用时主线程直接阻塞）。
+  - 放大倍数：它是 computed property，body 与 `pill` 里引用了 **9 处**（pill 的 icon/label×2/foregroundColor/background/overlay + body 的 help×2 + `if count > 0`）→ 一次 body 求值 = 9 次存储读；×10 张卡片 ≈ **90 次主线程 stat + queue.sync**。
+  - ★该按钮以 `@ObservedObject` 观察巨型主 store，**绕过 v2.10.76 卡片 `.equatable()` 短路**——「跳过未变卡片 body」的优化对它无效。
+  - 对 hover：hover 改卡片自身 @State（Equatable 拦不住），离开+进入两张卡各重算一次 body → 约 18 次同步 I/O 压在缩放动画头几帧。**影响面远大于 hover**：每次保存/清空/弹 Toast/切组，只要主 store 发一次 objectWillChange 就触发约 90 次。
+- 修法两层：① 新增 `attachmentCountOverride` 参数，主网格 `SlotCardView` 本就持有权威 `content`，直接传 `content.attachments.count` → 热路径**零存储读**；② 未传时仍回退存储读（节点画布），但 body 内**只求值一次**，9→1。
+- 响应性不变：改附件会刷新 `contentId`/`updatedAt`（v2.10.53 起的不变量）→ `thumbnailKey` 变 → 卡片 Equatable 判不等 → 重算并传入新 count。附带一致性改善：附件胶囊与卡片其余部分（缩略图/元数据）现在读同一份 `content`。
+- 顺带修掉 v2.10.87 自引入的小回归：`SlotThumbnailView.isThumbnailLoaded` 会**再**调一次 `provider.state(for: currentKey)`（currentKey 是 4 段插值字符串拼接）；改为 body 顶部只取一次 state，同时驱动渲染分支与淡入动画。缩略图「不串图」的方向性动画逻辑（驱动键为 `isLoaded` 而非 `currentKey`）完好未动。
+- ★**经验教训**：`.equatable()` 只能短路它所包裹的那个 View 的 body。子树里任何自带「@ObservedObject 巨型 store」的子视图都会独立订阅、独立重算，绕过父级 Equatable。排查「明明加了 Equatable 还是卡」时，应优先审计子视图的 store 订阅 + body 内是否藏着存储读。
+- 验证：`swift build` 通过；smoke 33 项全绿；DMG 校验通过；装机运行正常无崩溃；附件计数在 CLI `write-attachment`/`read`/`list` 三处一致。
+- commit `5ba5bd3`；Release：https://github.com/Seven-hub-fanfan/ClipSlots/releases/tag/v2.10.89
+- DMG SHA256：`466bb47c9fb74af5698db118f0d2c24a26f30437af08b725a8cfc70a03745a68`，已核对 `releases/latest` asset digest 一致。
+
+### v2.10.88 — 动画提速两档新 token + hover 切槽位卡顿（渲染侧两处）
+
+- 动画提速（v2.10.87 三处体感偏慢）：新增 `Anim.thumbnailFade`(0.09s easeOut) 用于缩略图「占位→出图」淡入（原 status 0.2s；缩略图是切组后第一眼要读的信息，淡入超过约 0.1s 会被读成「图加载得慢」）；新增 `Anim.reveal`(0.13s easeOut) 用于搜索结果区与热键横幅的纵向展开/收起（该过渡带动整个槽位网格的纵向布局，属大面积位移、感知时长更长，0.2s 在连续输入搜索词时明显拖节奏）。方向性逻辑与「不串图」不变量未动。
+- hover 卡顿渲染侧两处：① 卡片阴影模糊半径随 hover 变化（radius 5→9、y 2→4）被链尾隐式动画纳入，模糊半径变化无法靠图层缓存复用、只能整块重新合成（0.12s 内逐帧重做卡片级模糊，相邻两卡各跑一遍）→ 改为 radius/y 不再随 hover 变化，hover 反馈由描边加深加粗（纯矢量无模糊）+ 缩放承担；② `scaleEffect` 直接作用于未拍平的多层子树（背景+阴影+描边+胶囊+角标+缩略图+文本+按钮），每帧各图层分别重新光栅化再合成 → 缩放前插入 `.compositingGroup()` 先拍平成一层。
+- ⚠️ 本版由并行会话提交（commit `0bf6fd9`），当时未同步更新 MEMORY.md，本条为 v2.10.89 时补记。
+
+### v2.10.87 — 性能盲点复扫 + 动画过渡打磨
 
 性能（3 项，均为「被前几轮优化掩盖」的存量盲点）：
 - ★**删除 write-only 的 `slotRenderTokens`**。v2.10.72 之前「靠改卡片 `.id` 强刷缩略图」的遗留基础设施；v2.10.73 改由 `ThumbnailProvider` keyed 缓存驱动后**全仓零读取点**，却仍留着 **16 处写入**。它是主 store 的 `@Published`，每次写入 → `objectWillChange` → 整棵 `ContentView.body`（含 10 卡片 LazyVGrid）重新求值。最坏是 `undoLastClearIfPossible` / `clearAllSlots` / 批量导入 / 批量保存里的 `for slot in 1...config.slots`，一次操作连发 10 次。删除前逐一核验 16 处写入**每处都伴随** `slots` / `refreshTrigger` / `reloadAllAsync()` 之一，刷新链路不依赖它。
