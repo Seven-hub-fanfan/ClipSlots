@@ -166,10 +166,22 @@ struct SlotCardView: View {
         .background(
             RoundedRectangle(cornerRadius: AppTheme.slotCardCornerRadius, style: .continuous)
                 .fill(AppTheme.cardBackground(colorScheme, isEmpty: content.isEmpty))
+                // v2.10.88 (perf · hover 切槽位卡顿): 阴影的 radius / y **不再随 hover 变化**。
+                //
+                // 原实现是 radius 5→9、y 2→4，而卡片链尾的 `.animation(Anim.interactive, value: isHovering)`
+                // 会把它一并纳入隐式动画——于是每次 hover 进/出，这个高斯模糊的半径都要在 0.12s 内被
+                // **逐帧重新计算**（模糊半径变化无法靠图层缓存复用，只能整块重新合成）。把鼠标从一张卡片
+                // 移到相邻卡片时，两张卡片会同时各跑一遍这个逐帧重模糊（离开的那张缩+减半径、进入的那张
+                // 放大+加半径），叠加下面 scaleEffect 对整张已合成卡片的重采样，正是「悬停状态下切到另一个
+                // 槽位时 UI 发卡」的主因。
+                //
+                // hover 的视觉反馈完全由「描边加深加粗（cardOutlineColor / cardOutlineWidth，纯矢量描边，
+                // 无模糊）+ 1.012 缩放」承担，这两者都便宜；去掉长在阴影上的那一档抬升，观感差异极小，
+                // 但省掉了 hover 路径上唯一的逐帧模糊重算。
                 .shadow(
                     color: liveResize.isResizing ? .clear : AppTheme.cardShadow(colorScheme, isEmpty: content.isEmpty),
-                    radius: liveResize.isResizing ? 0 : (isHovering ? 9 : (content.isEmpty ? 3 : 5)),
-                    y: liveResize.isResizing ? 0 : (isHovering ? 4 : 2)
+                    radius: liveResize.isResizing ? 0 : (content.isEmpty ? 3 : 5),
+                    y: liveResize.isResizing ? 0 : 2
                 )
                 .allowsHitTesting(false)
         )
@@ -220,7 +232,19 @@ struct SlotCardView: View {
         .animation(Anim.transition, value: isLastPasted)
         // Apply one transform to the fully composed card. The outline is already unified,
         // so scaling cannot reveal multiple independently rasterized hard edges.
-        .scaleEffect(isHovering ? 1.015 : 1)
+        //
+        // v2.10.88 (perf · hover 切槽位卡顿): 缩放前先 `.compositingGroup()`。
+        // 没有它时，scaleEffect 作用在一棵「背景 + 阴影 + 描边 + 顶部胶囊 + 角标 + 缩略图 + 文本 + 两个
+        // 按钮」的多层子树上，缩放动画的每一帧都要把这些图层分别重新光栅化再合成（文本与图片还要按新的
+        // 非整数缩放重新重采样）。compositingGroup 先把整张卡片拍平成一层，之后 0.12s 的缩放就退化成对
+        // 单个已有位图做一次 GPU 变换，成本与卡片内部复杂度解耦。
+        //
+        // 这不改变任何视觉：卡片内所有装饰本来就在这一步之前全部应用完毕（描边早已统一为单条，见上），
+        // 拍平后叠放次序与外观一致。
+        .compositingGroup()
+        // v2.10.88: 1.015 → 1.012。缩放比例直接决定重采样的像素量与外扩重绘面积；1.012 仍能读出
+        // 「这张卡浮起来了」，但在 hover 快速掠过多张卡片时更轻。
+        .scaleEffect(isHovering ? 1.012 : 1)
         .animation(Anim.interactive, value: isHovering)
         .sheet(isPresented: $showingPreview) {
             SlotPreviewView(content: content)

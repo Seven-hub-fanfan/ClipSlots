@@ -31,6 +31,21 @@ enum Anim {
     /// 但把等待感明显压短。纯观感参数，不改变任何状态语义。
     static let transition: Animation = .spring(response: 0.28, dampingFraction: 0.82)
 
+    /// 缩略图「占位 → 出图」显影专用档（v2.10.88）。
+    ///
+    /// v2.10.87 这一下淡入直接复用了 status(0.2s easeInOut)，实测体感偏慢：缩略图是用户切组后
+    /// **第一眼要读的信息**，任何超过约 0.1s 的淡入都会被读成「图加载得慢」，而不是「显影得好看」。
+    /// 这里单列一档 0.09s easeOut——足够抹掉硬切的跳变感（还能看出是渐现而非闪现），但衰减尾巴短到
+    /// 不构成等待。easeOut 而非 easeInOut：省掉起手那段缓入，透明度一开始就快速拉起。
+    static let thumbnailFade: Animation = .easeOut(duration: 0.09)
+
+    /// 纵向插入 / 移除（搜索结果区、横幅等把下方内容推开的块）专用档（v2.10.88）。
+    ///
+    /// 同样是从 v2.10.87 的 status(0.2s easeInOut) 收紧而来。这类过渡会带动整个槽位网格的纵向布局，
+    /// 是"全屏内容都在动"的大面积动作，感知时长天然比小控件更长；0.2s easeInOut 在连续输入搜索词时
+    /// 会明显拖住节奏。0.13s easeOut 保留"被推开"的方向感，但基本不占用输入的心流。
+    static let reveal: Animation = .easeOut(duration: 0.13)
+
     /// 切组 / 切页过渡遮罩专用档（v2.10.87 收敛自 GroupSwitchVeil.swift 里的裸 0.16s）。
     ///
     /// ⚠️ 这一档**刻意独立于上面三档**，且不要随意调大：

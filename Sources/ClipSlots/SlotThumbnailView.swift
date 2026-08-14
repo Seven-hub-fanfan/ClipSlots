@@ -63,8 +63,12 @@ struct SlotThumbnailView: View {
                 }
             }
             // v2.10.87（动画打磨）: 消除「占位/转圈 → 图片」的硬切。异步解码完成的瞬间，
-            // 缩略图原先是「啪」地一下替换上来，跳变感明显；改成 0.2s 淡入后，卡片读起来是
+            // 缩略图原先是「啪」地一下替换上来，跳变感明显；改成淡入后，卡片读起来是
             // 「图片显影」而不是「界面闪了一下」。
+            //
+            // v2.10.88: 时长从 Anim.status(0.2s easeInOut) 换成专用档 Anim.thumbnailFade(0.09s easeOut)。
+            // 0.2s 用在这里被实测反馈为「慢」——缩略图是切组后第一眼要读的信息，淡入一旦超过约 0.1s
+            // 就会被读成图片加载得慢。方向性逻辑（下面几条）完全不变，只换曲线与时长。
             //
             // ⚠️ 这里的动画是**有方向的**，写法必须保持 `isLoaded ? Anim.status : nil`，
             // 这是为了不碰「切组/切页立即刷新、不串图」这条被 v2.10.64 / 65 / 86 反复修过的不变量：
@@ -75,12 +79,12 @@ struct SlotThumbnailView: View {
             //   • 「有图 → 占位」（切到未缓存的新组，state 回落 loading）时，新一轮 body 里
             //     isLoaded 已是 false → 动画取 nil → 旧图**立即**消失，不留任何淡出尾巴，
             //     旧组的图一帧都不会拖到新组上。
-            //   • 只有「占位 → 有图」这一个方向拿到 Anim.status（新 body 里 isLoaded 为 true），
+            //   • 只有「占位 → 有图」这一个方向拿到 Anim.thumbnailFade（新 body 里 isLoaded 为 true），
             //     即真正需要柔化的那一次显影。
             //
-            // 换成 `.animation(Anim.status, value: currentKey)` 或无条件 `.animation(Anim.status, ...)`
+            // 换成 `.animation(Anim.thumbnailFade, value: currentKey)` 或无条件 `.animation(...)`
             // 都会破坏上面两条，切组时会看到旧图淡出/交叠——改动此行前请先复现切组场景。
-            .animation(isThumbnailLoaded ? Anim.status : nil, value: isThumbnailLoaded)
+            .animation(isThumbnailLoaded ? Anim.thumbnailFade : nil, value: isThumbnailLoaded)
         }
         // v2.9.25 hotfix: 框高需容纳约 4 行等宽文本（行高≈17pt，4 行≈68pt + padding 8×2≈16pt
         // + 余量 ≈ 116pt）。minHeight 116 / idealHeight 140 保证内容区净高足够放下 4 行；

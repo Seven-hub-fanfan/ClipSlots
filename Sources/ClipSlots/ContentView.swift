@@ -191,7 +191,7 @@ struct ContentView: View {
                             .transition(.opacity.combined(with: .move(edge: .top)))
                     }
                 }
-                .animation(Anim.status, value: store.hotkeyRegistrationErrors.isEmpty)
+                .animation(Anim.reveal, value: store.hotkeyRegistrationErrors.isEmpty)
 
                 // Search results remain in the content area; the controls themselves live in titleBar.
                 //
@@ -204,8 +204,10 @@ struct ContentView: View {
                 // - 动画只由 isSearchActive 这一个布尔驱动，输入过程中逐字符改 searchText 不会反复触发；
                 // - 作用域限定在本 Group，父 VStack 的其它子项（标题栏 / 网格 / 底栏）不会被顺带纳入
                 //   隐式动画，只是跟着本块被动画的高度平滑让位，因此网格是「被推开」而不是「跳一下」；
-                // - 用 Anim.status（0.2s）而不是更长的 Anim.transition：这一下会带动 10 张卡片所在容器
-                //   的纵向布局，时长必须压短，既读得出动作又不拖慢连续输入的节奏。
+                // - 用 Anim.reveal（0.13s easeOut）而不是更长的 Anim.transition：这一下会带动 10 张卡片
+                //   所在容器的纵向布局，时长必须压短，既读得出动作又不拖慢连续输入的节奏。
+                //   v2.10.88：原为 Anim.status(0.2s easeInOut)，实测偏慢——大面积纵向位移的感知时长
+                //   天然比小控件更长，0.2s 在连续输入搜索词时会明显拖住节奏，故收紧到专用的 reveal 档。
                 Group {
                     if isSearchActive {
                         searchResultsSection
@@ -214,7 +216,7 @@ struct ContentView: View {
                             .transition(.opacity.combined(with: .move(edge: .top)))
                     }
                 }
-                .animation(Anim.status, value: isSearchActive)
+                .animation(Anim.reveal, value: isSearchActive)
 
                 GeometryReader { gridGeometry in
                     let rawWidth = gridGeometry.size.width
