@@ -4,13 +4,38 @@
 
 ## 当前版本
 
-- **当前版本：v2.10.89**
+- **当前版本：v2.10.90**
 - 平台：macOS（Swift / SwiftUI，SPM 构建，macOS 13+）
 - 单一版本号事实来源：`Info.plist` 的 `CFBundleShortVersionString`（`AppVersion.current` 动态读取，`AppVersion.fallback` 为编译期兜底）。CLI 版本号见 `Sources/ClipSlotsCLI/main.swift` 的 `CLI_VERSION`。
 
 ## 版本要点（近期）
 
-### v2.10.89 — hover 切槽位卡顿的第二条根因：主线程同步 I/O（★当前正式发布版）
+### v2.10.90 — 三个体感问题各自归因修复（★当前正式发布版）
+
+**① hover 光效「慢慢的、很卡」→ ★移除 v2.10.88 的 `.compositingGroup()`（它是负优化）**
+- v2.10.88 想「缩放前拍平成一层，让缩放退化成对单个位图做 GPU 变换」。该推理只在**被拍平内容在动画期间不变**时成立，此处两个前提都不满足：
+  1. 描边就在组内，且与缩放**由同一个 isHovering、在同一 0.12s 窗口一起变**（色淡入 accent、宽 1→1.5）→ 拍平位图每帧失效必须重建，缓存收益为零，却凭空多一次**离屏合成 pass**；
+  2. 卡片子树含 AppKit 视图：附件胶囊的 `AttachmentButtonAnchorReporter`（NSViewRepresentable）、视频槽的 `SafeInlineAVPlayerView` → compositingGroup 每帧要对 NSView 快照再合成，比它想省的重采样更贵。
+- ★**教训：`.compositingGroup()` 只在「组内内容静止 + 无 NSViewRepresentable」时才是优化，否则必为净损失。加之前必须核对这两条。**
+- 顺带：`AppTheme.slotAccent` 每次调用构造**两个** 5 元素 Color 数组（不论 scheme 都建），而卡片 body 引用它 10 处 → 单卡 body 约 100 次 Color 分配、10 卡约 1000 次，正好压在 hover 重算上。调色板提为 `static let`；`slotActionAccent` 同样处理。
+
+**② 槽位编辑「每个字都像有延迟输入」→ ★编辑器状态从卡片下沉到独立子视图**
+- 根因：`TextEditor` 绑的是 `SlotCardView` 自己的 `@State editingText` → **每敲一个字符都重算整张卡片 body**（headerRow、缩略图区含 `currentKey` 四段拼接 + provider 查表、元数据、actionRow、6 层 overlay、阴影、scaleEffect、两个 sheet 闭包）。卡片被 Sheet 遮住但仍在视图树里照样全算。**延迟量随卡片复杂度增长，不随文本长度增长**。
+- 新增 `Sources/ClipSlots/SlotTextEditorSheet.swift`：`TextEditor` 绑它自己的 `@State draft`，逐字输入只重算该轻量 Sheet。语义全保留（初值由 `beginEditing()` 快照传入、保存回调传草稿、取消不回调、⌘↩、等宽字体、520×320 / 620×360 两种尺寸）。
+- ★初值播种坑：**在 `init` 里 `_draft = State(initialValue:)`**，不用 `onAppear`（onAppear 若重复触发会覆盖用户已输入内容）；另加 `onChange(of: initialText)` 作为「视图身份被复用」时的纠偏兜底，防止重开编辑器看到上一次旧草稿。
+- `isHTMLContent` 记忆化（NSCache，键 `contentId::updatedAt`，同 `preview`/`plainText` 做法）：原先每次求值都对全文做完整拷贝 + `lowercased()`，而 `canEditContent` 调一次 → `isPlainEditableText` 内部又调一次 → `editActionTitle` 再走一遍 = 一次 body 最多 **4 次全文 lowercased()**。同时降低 hover 成本。
+
+**③ 设置界面打开/关闭「很慢、卡一下」**
+- 打开：`SettingsView.onAppear` 的 `cliManager.refreshState()` + `skillManager.refresh()` 是**主线程同步 FS 扫描**（遍历 Agent 目录 `fileExists` + 逐个 `destinationOfSymbolicLink`），却跑在进场动画第一帧 → 改为 `DispatchQueue.main.async` 让出一帧，动画先跑。
+- 关闭：原 `store.updateConfig(newConfig)` 紧接 `closeSettings()` 落在同一帧，而 updateConfig 会注销+重注册全部全局热键并触发主 store `objectWillChange` → 整棵 ContentView 全量重绘，正好与 0.2s 淡出抢主线程 → 改为**先启动关闭动画、配置下一个 runloop 落地**（差约一帧，最终状态不变）。
+- 设置面板 `.shadow` 半径 30 → 18（面板最大 880×660，进出场走 `.transition(.opacity)`，每帧重新合成大面积模糊；卷积面积降到约 36%）。
+
+- 未动：缩略图「切组/切页立即刷新、不串图」不变量相关代码一行未改（方向性动画驱动键仍是 `isLoaded`）；游标胶囊位置、拖拽排序未触碰。
+- 验证：`swift build` 通过；smoke 33 项全绿；DMG 校验通过；装机运行正常无崩溃。
+- commit `b2ef687`；Release：https://github.com/Seven-hub-fanfan/ClipSlots/releases/tag/v2.10.90
+- DMG SHA256：`d11ceca74630f12c371f8c6007f7696c3d0d9d434f9ea28549fd2201a400465e`，已核对 `releases/latest` asset digest 一致。
+
+### v2.10.89 — hover 切槽位卡顿的第二条根因：主线程同步 I/O
 
 - 现象：鼠标悬停在某个槽位卡片上，再移到另一个槽位时明显卡一下。v2.10.88 已修掉该路径两处**渲染**开销（阴影模糊半径逐帧重算、`scaleEffect` 作用于未拍平子树），但仍有一条与渲染无关的来源。
 - ★根因：每张卡片内嵌的 `NodeAttachmentButton`（「附件」胶囊）用 `store.attachments(for: slot).count` 取附件数，而该调用 → `specialStorage.get(slot, in:)` → `SlotStorage.loadContentOrUnknown` 是一次**存储读**。即便走不加 flock 的快路径，仍要付 `dirFingerprint()` 的 `stat(2)` 系统调用 + 一次 `queue.sync`（该队列被后台读盘占用时主线程直接阻塞）。
