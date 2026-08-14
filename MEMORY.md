@@ -4,13 +4,40 @@
 
 ## 当前版本
 
-- **当前版本：v2.10.91**
+- **当前版本：v2.10.92**
 - 平台：macOS（Swift / SwiftUI，SPM 构建，macOS 13+）
 - 单一版本号事实来源：`Info.plist` 的 `CFBundleShortVersionString`（`AppVersion.current` 动态读取，`AppVersion.fallback` 为编译期兜底）。CLI 版本号见 `Sources/ClipSlotsCLI/main.swift` 的 `CLI_VERSION`。
 
+## ★ 开发期装机硬约束（v2.10.92 起，用户明确要求）
+
+- **开发/验证期一律不得替换用户日常在用的 `/Applications/ClipSlots.app`。** 需要跑真机验证时装到 `/Applications/ClipSlots-dev.app`（独立 bundle id + `CLIPSLOTS_DATA_DIR` 隔离数据目录）。
+- 替换正式 App **只能在正式发布时、且用户明确同意后做一次**。
+- 背景：v2.10.87~91 迭代期间 40 分钟内反复打包装机 9 次，用户体感是「反反复复重装」，且每次替换 bundle 都会导致 macOS 撤销辅助功能授权、弹出重新授权引导。**这不是 App 自动更新造成的**——本 App 只有设置里的手动「检查更新」入口（`ContentView.swift` 唯一调用点），没有定时/启动自检、没有 launchd agent。
+- 另一条铁律：**装机的包必须与将要发布的版本号严格对应**。曾出现「装进 /Applications 的 2.10.91 里含未提交代码」的脏包，与 GitHub 上的 2.10.91 不是同一个东西，排查时极易误判。
+
 ## 版本要点（近期）
 
-### v2.10.91 — ★找到「无论怎么优化都不丝滑」的真凶：空闲时每 0.65s 一次全量重载（★当前正式发布版）
+### v2.10.92 — ★辅助功能引导弹窗 runModal 让全 App 异步刷新停摆 + 自动更新护栏（★当前正式发布版）
+
+- ★★**最重要的发现**：装机验证时 `sample ClipSlots` 抓到主线程停在 `AccessibilityPermissionGuide.presentGuideAlert` → `-[NSApplication runModalForWindow:]` → `_doModalLoop:`。`runModal` 跑 `NSModalPanelRunLoopMode` 嵌套 run loop，而 `DispatchQueue.main.async`/`asyncAfter` 的块只在 common modes 被 drain → **该面板开着的整段时间，App 所有异步主线程工作全部堆积不执行**：watcher 0.3s 去抖 reload 一次都跑不了、CLI 写盘 GUI 不刷新、哨兵轮询也白跑。
+  - 尤其危险的原因：这个面板**启动时未经用户触发就弹**（每次替换 bundle 后 macOS 撤销辅助功能授权），可能挂几小时；外部只表现为「GUI 不刷新」，极难归因。**之前排查中「FSEvents 回调进得来但主队列不转」的诡异现象，根因就在这里。**
+  - 修法：改为**非模态**展示（`makeKeyAndOrderFront` + `.modalPanel` 层级 + 静态属性持有面板，回调里关闭置 nil）。borderless + nonactivating 面板去掉 runModal 后默认 `canBecomeKey == false`，故子类化 `GuidePanel` 覆写 `canBecomeKey = true`，保住回车触发「打开设置」。
+  - ★**通用教训**：**自有的 `runModal` 弹窗 = 全局异步停摆**。未经用户触发、可能长期存在的弹窗**绝不能用 runModal**。用户主动触发且瞬时的（删除确认/文件选择/更新提示）可以保留，块只被推迟不会丢。
+  - ★**排查手法**：怀疑「异步任务不执行 / 主队列不转」时，直接 `sample <进程名> 2 -file /tmp/x.txt` 看主线程栈，一步定位，别猜。
+- **自动更新护栏（起因是「反复重装」投诉，但结论是**误判**——重装是开发期装机造成，见上节）**：
+  - 版本语义下沉到 `ClipSlotsKit/UpdateVersion.swift`（零依赖纯函数）。原因：之前逻辑在 App target 的 `@MainActor UpdateChecker` 里，而 smoke 测试 target 只能依赖 Kit → **最易写错的逻辑恰恰无法被测试覆盖**。
+  - 规范化剥 `v`/`V`、去空白、丢 `+build`、拆 `-pre`；**逐段按整数**比较；**相等/更旧一律不更新**。（注：HEAD 原有实现本来就是对的，此次是下沉 + 加测试 + 加日志，不是修 bug。）
+  - 三道安装闸门 `UpdateVersion.installGuard`：总闸关闭 / 目标 == 当前运行版本 / 同一目标已尝试过。
+  - ★**去重记录必须在失败时清除**（`UpdateInstallGuardStore.clearAttempt`，接在 `UpdateInstaller` 统一失败出口 `fail` 上）。记录是在动 bundle **之前**写的，若不清，一次偶发失败就把该版本**永久拉黑** → 把「重装循环」修成「更新彻底堵死」，比原病更糟。
+  - 止血总闸：`defaults write com.clipslots.app disableAutoUpdateInstall -bool true`（恢复用 `false`）。
+  - 全链路 `[ClipSlots][Update]` 日志（此前整条更新链路**一条日志都没有**，出问题无法自证有没有下载/安装，只能靠文件 mtime 反推）。
+- **存储 watcher 契约兜底（第六轮）**：新增哨兵轮询（每 2s 两次 `lstat`：存储根目录 + `index.json`，取 inode/size/mtime 混哈希）+ 自写哨兵抑制 + FSEvents 流自愈（哨兵变了却 5s 内无任何 FSEvents 上报 → `restart()` 重建流）。另加内部记账路径过滤（一批事件全是隐藏分量路径 `.storage.lock`/`.tmp_slot_*`/`.trash/**`/`.undo/**`/`.dat.nosync*` 才丢弃）。稳态成本可忽略，不写盘故不会重新引入自触发循环。
+  - 真机实测确认 FSEvents **确实会静默不投递**（本次抓到 34.5s 静默后由自愈重建流），故这层兜底不是过度设计。
+- 缩略图不变量相关文件（`ThumbnailProvider.swift` / `SlotThumbnailView.swift`）本版**零改动**。
+- 验证：`swift build` 通过；smoke **59 项全绿**（33 → 59，新增全部围绕版本比对与安装护栏）；DMG 校验通过；装机正常；引导面板**开着**时 CLI 写入仍能打出 `watcher fired → reloadAll`（修复前此路径完全静默）；空闲 30s 重载 0 次；测试用空槽已还原。
+
+
+### v2.10.91 — ★找到「无论怎么优化都不丝滑」的真凶：空闲时每 0.65s 一次全量重载
 
 - ★★**根因（前三轮微优化全部无效的原因）**：App **完全空闲**时 40 秒内触发 **63 次** `watcher fired → reloadAll`，每次伴随 **140~180ms 主线程停顿**。自触发死循环链条：读数据也要拿跨进程锁 → `StorageLock.writeHolderPID` 每次成功 flock 都写锁文件 `.storage.lock` → 该文件在被 FSEvents 递归监听的 `special_slots/` 内 → 去抖 → `reloadAll` → 又读盘 → 又写锁文件 → 无限循环。**不管动画调多短，背后永远有个每 0.65s 一次的 150ms 停顿在抢主线程。**
 - 修法：`writeHolderPID` 在「锁文件内容已是本进程 PID」时跳过写入。语义零变化（跳过前提正是「要写内容与磁盘已有完全相同」；别的进程抢锁写入自己 PID 后不匹配，下次仍正常写回，stale-lock 回收不受影响）。用 `pread` 从偏移 0 读，不动共享 fd 偏移。

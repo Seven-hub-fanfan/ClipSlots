@@ -620,6 +620,13 @@ final class SlotStoreObservable: ObservableObject {
     deinit {
         storageWatcher?.stop()
         storageWatcher = nil
+        // ★ v2.10.91 (第六轮): 停掉哨兵轮询并摘掉激活/可见性观察者，避免对象销毁后仍被回调。
+        externalSentinelTimer?.cancel()
+        externalSentinelTimer = nil
+        for token in externalSentinelObservers {
+            NotificationCenter.default.removeObserver(token)
+        }
+        externalSentinelObservers.removeAll()
         // v2.10.3 (P2): remove the local key monitor so it isn't leaked/dangling.
         if let monitor = localHotkeyMonitor {
             NSEvent.removeMonitor(monitor)
@@ -632,24 +639,26 @@ final class SlotStoreObservable: ObservableObject {
     private func setupStorageWatcher() {
         let base = ClipSlotsPaths.specialSlots
         try? FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
-        let watcher = StorageDirectoryWatcher(path: base.path) { [weak self] in
+        let watcher = StorageDirectoryWatcher(path: base.path, onChange: { [weak self] in
             self?.handleStorageChange()
-        }
+        }, onAnyEvent: { [weak self] in
+            // 流心跳（过滤前）：区分「流活着但这批不值得刷新」与「流聋了」。
+            self?.noteWatcherStreamAlive()
+        })
         watcher.start()
         storageWatcher = watcher
+        // ★ v2.10.91 (第六轮): FSEvents 只是「快路径」，契约兜底交给 sentinel 轮询（见下）。
+        setupExternalChangeSentinelPoll()
     }
 
     /// Called on the watcher's background queue for every FSEvents batch.
     /// Debounces ~300ms, then reloads on the main queue (unless self-write suppressed).
     private func handleStorageChange() {
-        NSLog("[ClipSlots][TMPDIAG] handleStorageChange entered")
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
-            NSLog("[ClipSlots][TMPDIAG] handleStorageChange on main, scheduling debounce")
             self.watcherDebounceWorkItem?.cancel()
             let work = DispatchWorkItem { [weak self] in
                 guard let self else { return }
-                NSLog("[ClipSlots][TMPDIAG] debounce fired")
                 // CR-1 (v2.10.30): 通过加锁访问器读取，避免与 suppressWatcher 的写入竞争；一次读入本地
                 // 变量供后续两处判断使用（消除 TOCTOU）。
                 let ignoreUntil = self.currentIgnoreWatcherUntil()
@@ -717,6 +726,17 @@ final class SlotStoreObservable: ObservableObject {
     /// 从原 debounce work item 中抽出，供同步（非时间窗）与异步（指纹不匹配回主线程）两条路径共用。
     private func performWatcherReload() {
         NSLog("[ClipSlots] watcher fired → reloadAll")
+        // ★ v2.10.91 (第六轮): 记下本次重载的起始时刻，供 sentinel 轮询判断「这次磁盘变化是否已被
+        // 本次重载覆盖」，避免同一次外部写被 FSEvents 与轮询各重载一次。
+        noteWatcherReloadStarted()
+        // ★ v2.10.91 (第六轮): 把 sentinel 基线推到「当前磁盘态」。否则 FSEvents 快路径刚刚为这次
+        // 外部写 reload 过，2s 后的轮询还会因为哨兵与旧基线不同而**再 reload 一次**（外部写触发
+        // 次数从 1 变 2）。刷新基线后，一次外部写恰好只换来一次重载；若外部写仍在继续（哨兵在基线
+        // 采集之后又变），下一 tick 依然会正确地再刷新一次，不会漏。
+        fingerprintQueue.async { [weak self] in
+            guard let self else { return }
+            self.lastExternalSentinel = self.storageSentinel()
+        }
         // v2.9.15 (fix): an external write (the `clipslots` CLI) changed
         // slot bodies on disk. SlotStorage.get() is cache-backed and would
         // otherwise keep returning the stale in-memory SlotContent, so the
@@ -812,6 +832,15 @@ final class SlotStoreObservable: ObservableObject {
             self.pendingSelfWriteFingerprints.removeFirst(
                 self.pendingSelfWriteFingerprints.count - self.maxPendingSelfWriteFingerprints)
         }
+        // ★ v2.10.91 (第六轮): 同一时刻登记一次「哨兵」，供 sentinel 轮询区分自写与外部写
+        // （轮询看的是 index.json/根目录的 stat，与整树指纹是两套口径，必须各自登记）。
+        let sentinel = self.storageSentinel()
+        self.pendingSelfWriteSentinels.removeAll { $0 == sentinel }
+        self.pendingSelfWriteSentinels.append(sentinel)
+        if self.pendingSelfWriteSentinels.count > self.maxPendingSelfWriteFingerprints {
+            self.pendingSelfWriteSentinels.removeFirst(
+                self.pendingSelfWriteSentinels.count - self.maxPendingSelfWriteFingerprints)
+        }
     }
 
     /// P2-5 (v2.10.16): 计算 special_slots 目录树的内容指纹。
@@ -851,6 +880,162 @@ final class SlotStoreObservable: ObservableObject {
         // 混入文件数，区分「删一个文件」与「改一个文件」等 XOR 抵消场景。
         acc ^= count &* 0x9E3779B97F4A7C15
         return acc
+    }
+
+    // MARK: - ★ v2.10.91 (第六轮) 外部写契约兜底：sentinel 轮询 + FSEvents 流自愈
+    //
+    // 为什么需要：本轮实测（真实数据目录 `~/.local/share/clipslots/special_slots`）抓到过这样的状态
+    // —— ClipSlots 进程存活、主线程能响应 AppleEvent，但 FSEvents 回调在十几分钟里一次都没有投递；
+    // 也抓到过 FSEvents 回调正常进入、但那个实例的**主队列根本不转**（`handleStorageChange` 打了日志，
+    // 之后的 main.async 分支再没执行）的实例。二者都会让「外部进程写盘 → GUI 刷新」这条契约静默失效，
+    // 而 watcher 本身**没有任何自检**：只要系统不投递事件，App 永远不知道自己已经聋了。
+    //
+    // 兜底设计（三条，全部很便宜）：
+    //   1) sentinel 轮询：每 2s 在 fingerprintQueue 上做 **2 次 lstat**（存储根目录 + `index.json`），
+    //      拿 (mtime, size, inode) 混成一个 64 位哨兵。所有数据变更（set/clear/setLabel/建组删组/
+    //      切页……）在 SpecialSlotStorage 里都以 `saveIndex()` 原子重写 `index.json` 收尾，所以哨兵
+    //      对「任何外部写」必然敏感；纯读**不会**改这两者（`.storage.lock` 是文件写、不改父目录 mtime，
+    //      且本轮已在 StorageLock 里跳过同 PID 重复写）。→ 空闲时哨兵恒定，轮询零动作。
+    //   2) 自写抑制：自写完成后除了登记整树指纹，同时登记一次哨兵；轮询命中环里的自写哨兵就只更新基线
+    //      不 reload（并消费掉）。再叠加原有的 0.6s 时间窗判定，GUI 自己的写不会被轮询回灌。
+    //   3) 流自愈：若哨兵变了、而 FSEvents 通道在最近 5s 内一次上报都没有，说明流已经聋了 →
+    //      `storageWatcher?.restart()` 重建流，并照常 reload。
+    //
+    // 成本：稳态每 2s 两次 lstat（微秒级，且带 0.5s leeway 允许系统合并唤醒），不写盘、不产生 FSEvents，
+    // 因此不会重新引入自触发循环；相比一次 140~180ms 的全量重载可以忽略。
+    /// 轮询间隔（秒）。2s 是「外部写最坏刷新延迟」与「唤醒成本」的折中；FSEvents 正常时 0.3s 就刷新了。
+    private static let externalSentinelPollInterval: TimeInterval = 2.0
+    /// 判定「FSEvents 通道已聋」的静默阈值（秒）：哨兵已变化却在此时间内没有任何 FSEvents 上报。
+    private static let watcherStreamDeafThreshold: TimeInterval = 5.0
+    private var externalSentinelTimer: DispatchSourceTimer?
+    /// 上一次轮询看到的哨兵值。仅在 fingerprintQueue 上读写（串行，无需加锁）。
+    private var lastExternalSentinel: UInt64 = 0
+    /// 自写哨兵环（与 pendingSelfWriteFingerprints 一一对应地登记）。仅在 fingerprintQueue 上读写。
+    private var pendingSelfWriteSentinels: [UInt64] = []
+    /// FSEvents 通道最近一次上报时刻（可能从 watcher 队列写、从 fingerprintQueue 读 → 加锁）。
+    private var lastWatcherStreamEventAt: Date = .distantPast
+    private let watcherStreamStampLock = NSLock()
+    /// 观察者令牌（App 激活 / 窗口可见性变化时立即复查一次哨兵）。
+    private var externalSentinelObservers: [NSObjectProtocol] = []
+
+    private func noteWatcherStreamAlive() {
+        watcherStreamStampLock.lock()
+        lastWatcherStreamEventAt = Date()
+        watcherStreamStampLock.unlock()
+    }
+
+    /// 上一次重载「开始读盘」的时刻（performWatcherReload 入口）。与 storageNewestMtime() 比较即可
+    /// 判断某次磁盘变化是否已经被那次重载覆盖。跨线程访问 → 复用 watcherStreamStampLock。
+    private var watcherReloadStartedAt: Date = .distantPast
+    private func noteWatcherReloadStarted() {
+        watcherStreamStampLock.lock()
+        watcherReloadStartedAt = Date()
+        watcherStreamStampLock.unlock()
+    }
+    private func lastWatcherReloadStartedAt() -> Date {
+        watcherStreamStampLock.lock()
+        defer { watcherStreamStampLock.unlock() }
+        return watcherReloadStartedAt
+    }
+
+    private func watcherStreamSilentInterval() -> TimeInterval {
+        watcherStreamStampLock.lock()
+        defer { watcherStreamStampLock.unlock() }
+        return Date().timeIntervalSince(lastWatcherStreamEventAt)
+    }
+
+    /// 极廉价的「存储发生了变化吗」哨兵：只 lstat 存储根目录与 `index.json`。
+    /// - 根目录 mtime：建/删组目录、原子写 `index.json` 时的临时文件进出都会改它；
+    /// - `index.json` 的 (mtime, size, inode)：所有数据变更都以原子重写它收尾（rename → inode 变）。
+    private func storageSentinel() -> UInt64 {
+        let base = ClipSlotsPaths.specialSlots.path
+        var acc: UInt64 = 0
+        for p in [base, base + "/index.json"] {
+            var st = stat()
+            guard lstat(p, &st) == 0 else { continue }
+            var hasher = Hasher()
+            hasher.combine(p)
+            hasher.combine(st.st_ino)
+            hasher.combine(st.st_size)
+            hasher.combine(st.st_mtimespec.tv_sec)
+            hasher.combine(st.st_mtimespec.tv_nsec)
+            acc ^= UInt64(bitPattern: Int64(hasher.finalize()))
+        }
+        return acc
+    }
+
+    /// 哨兵所观测的两个路径里「最近一次修改时刻」。用于判断某次变化是否已经被上一次重载覆盖到，
+    /// 从而避免「FSEvents 快路径刚刚重载过，轮询又重载一次」（实测一次 CLI write 变成 2 次）。
+    private func storageNewestMtime() -> Date {
+        let base = ClipSlotsPaths.specialSlots.path
+        var newest: TimeInterval = 0
+        for p in [base, base + "/index.json"] {
+            var st = stat()
+            guard lstat(p, &st) == 0 else { continue }
+            let t = TimeInterval(st.st_mtimespec.tv_sec) + TimeInterval(st.st_mtimespec.tv_nsec) / 1_000_000_000
+            newest = max(newest, t)
+        }
+        return Date(timeIntervalSince1970: newest)
+    }
+
+    private func setupExternalChangeSentinelPoll() {
+        fingerprintQueue.async { [weak self] in
+            guard let self else { return }
+            self.lastExternalSentinel = self.storageSentinel()
+        }
+        let timer = DispatchSource.makeTimerSource(queue: fingerprintQueue)
+        timer.schedule(deadline: .now() + Self.externalSentinelPollInterval,
+                       repeating: Self.externalSentinelPollInterval,
+                       leeway: .milliseconds(500))
+        timer.setEventHandler { [weak self] in self?.pollExternalStorageChange() }
+        timer.resume()
+        externalSentinelTimer = timer
+        // App 重新激活 / 窗口重新可见时立即复查一次：被 App Nap 挂起（或流聋掉）期间攒下的外部写，
+        // 用户一看向窗口就能立刻看到最新内容，而不用等下一个 2s tick。
+        for name in [NSApplication.didBecomeActiveNotification,
+                     NSWindow.didChangeOcclusionStateNotification,
+                     NSWindow.didBecomeKeyNotification] {
+            let token = NotificationCenter.default.addObserver(
+                forName: name, object: nil, queue: .main
+            ) { [weak self] _ in
+                guard let self else { return }
+                self.fingerprintQueue.async { [weak self] in self?.pollExternalStorageChange() }
+            }
+            externalSentinelObservers.append(token)
+        }
+    }
+
+    /// 线程约束：只能在 `fingerprintQueue` 上调用（与自写指纹/哨兵环共用同一串行队列）。
+    private func pollExternalStorageChange() {
+        let now = storageSentinel()
+        guard now != lastExternalSentinel else { return }
+        lastExternalSentinel = now
+        // (a) 本进程自写：命中自写哨兵环 → 消费掉，不 reload。
+        if let idx = pendingSelfWriteSentinels.lastIndex(of: now) {
+            pendingSelfWriteSentinels.remove(at: idx)
+            return
+        }
+        // (b) 仍在自写抑制窗内（含导入的开放式窗）：交给 FSEvents 那条带指纹复判的路径处理，
+        //     轮询只更新基线，避免把自写误判成外部写造成多余重载。
+        if Date() < currentIgnoreWatcherUntil() { return }
+        // (b2) 这次变化是否已被「上一次重载」覆盖？比较「哨兵路径的最新 mtime」与「上一次重载开始时刻」：
+        //      若磁盘最后一次修改早于那次重载，说明 FSEvents 快路径已经把这次外部写读进去了，轮询
+        //      不必再重载一次（这正是「外部写恰好触发 1 次」的关键；否则实测会变成 2 次）。
+        //      反之（mtime 更新）一定重载，因此**不会漏**掉重载之后才落盘的改动。
+        if storageNewestMtime() <= lastWatcherReloadStartedAt() { return }
+        // (c) FSEvents 通道聋了 → 重建流（这才是本轮真正的可用性修复：watcher 从此有自检）。
+        let silent = watcherStreamSilentInterval()
+        if silent > Self.watcherStreamDeafThreshold {
+            NSLog("[ClipSlots] sentinel poll: FSEvents stream silent for \(String(format: "%.1f", silent))s while storage changed → restarting stream")
+            noteWatcherStreamAlive() // 避免重建后紧接着的下一次 tick 又重复重建
+            DispatchQueue.main.async { [weak self] in self?.storageWatcher?.restart() }
+        }
+        // (d) 交给与 FSEvents **同一条** 0.3s 去抖路径，而不是直接 performWatcherReload：
+        //     否则「轮询命中」与「FSEvents 上报」会各自触发一次重载（实测一次 CLI write 变成 2 次）。
+        //     走同一个 debounce work item 后二者天然合并成恰好一次；自写指纹判定也照旧生效。
+        //     日志刻意不含 "watcher fired"/"reloadAll" 字样，避免污染「触发次数」的口径统计。
+        NSLog("[ClipSlots] sentinel poll: external storage change detected → scheduling debounced reload")
+        handleStorageChange()
     }
 
     // MARK: - Special Slots

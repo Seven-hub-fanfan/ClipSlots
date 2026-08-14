@@ -1,5 +1,6 @@
 import Foundation
 import AppKit
+import ClipSlotsKit
 
 // v2.10.7: App 内自动静默安装更新。
 //
@@ -58,6 +59,38 @@ final class UpdateInstaller {
         isInstalling = true
         installLock.unlock()
 
+        // UPD-LOOP (v2.10.92): 幂等护栏——安装的最后一道闸门。
+        //
+        // 之前从 UpdateChecker 的比对结论到这里，中间没有任何「同版本不重装」的兜底：只要
+        // 有人（错误的比对、被篡改的 tag、重复触发的回调）把一个与当前运行版本相同的目标喂进来，
+        // 就会挂载 → 替换 bundle → 重启，重启后再来一遍，形成无限重装循环。现在无论调用方
+        // 是谁，这里都会拦住三类请求：总闸关闭 / 目标版本 == 当前运行版本 / 同一目标已尝试过。
+        let running = AppVersion.current
+        let guardDecision = UpdateInstallGuardStore.evaluate(targetTag: version, runningVersion: running)
+        if guardDecision != .proceed {
+            let reason: String
+            switch guardDecision {
+            case .skipSameAsRunning:
+                reason = "目标版本与当前运行版本相同（目标=\(version) 运行中=\(running)），跳过安装以避免同版本重装循环"
+            case .skipAlreadyAttempted:
+                reason = "该目标版本已尝试安装过（目标=\(version)），跳过以避免重复安装"
+            case .skipDisabled:
+                reason = "自动更新安装已被 disableAutoUpdateInstall 开关关闭，跳过安装"
+            case .proceed:
+                reason = ""
+            }
+            NSLog("[ClipSlots][Update] 安装被幂等护栏拦截：\(reason)")
+            installLock.lock()
+            isInstalling = false
+            installLock.unlock()
+            DispatchQueue.main.async { failure(reason) }
+            return
+        }
+        // 通过护栏：先落盘「已尝试安装该版本」，再真正动 bundle。顺序很关键——即使后续
+        // 安装崩溃或重启后又被误判为需要更新，去重依据也已经存在。
+        UpdateInstallGuardStore.recordAttempt(targetTag: version)
+        NSLog("[ClipSlots][Update] 开始安装：目标=\(version) 运行中=\(running) dmg=\(dmgPath)")
+
         let appName = "ClipSlots.app"
         let targetApp = "/Applications/\(appName)"
         // UP-4 (v2.10.15): 用 FileManager.temporaryDirectory + appendingPathComponent 拼路径，
@@ -73,6 +106,10 @@ final class UpdateInstaller {
                 self.isInstalling = false
                 self.installLock.unlock()
             }
+            // ★ UPD-LOOP-FIX (v2.10.92): 安装没走到「替换成功 + 重启」就失败 → 清掉去重记录，
+            // 否则一次偶发失败会把该版本永久拉黑，用户之后再也装不上这个版本（见 clearAttempt 注释）。
+            UpdateInstallGuardStore.clearAttempt(reason: message)
+            NSLog("[ClipSlots][Update] 安装失败：目标=\(version) 原因=\(message)")
             DispatchQueue.main.async { failure(message) }
         }
 

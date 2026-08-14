@@ -202,4 +202,88 @@ t.check(SlotContent.isIconOnlyPasteboardType("ICNS"), "仅图标判定应大小�
 t.check(!SlotContent.isIconOnlyPasteboardType("public.png"), "public.png 不应判定为仅图标")
 t.check(!SlotContent.isIconOnlyPasteboardType("public.tiff"), "public.tiff 不应判定为仅图标")
 
+// MARK: - UPD-LOOP (v2.10.92): 自动更新版本比对 + 幂等护栏
+//
+// 线上事故语境：用户投诉「反复重装同一个版本」。这一组用例把「同版本绝不更新」钉成契约，
+// 并覆盖所有历史上容易写错的比对姿势：`v` 前缀、字符串字典序、位数不同、相等误判为需更新。
+do {
+    // ① 规范化：`v` / `V` 前缀、首尾空白、`+build` 元数据都不应影响版本语义。
+    t.equal(UpdateVersion.parse("v2.10.91").coreString, "2.10.91", "应剥掉小写 v 前缀")
+    t.equal(UpdateVersion.parse("V2.10.91").coreString, "2.10.91", "应剥掉大写 V 前缀")
+    t.equal(UpdateVersion.parse("  v2.10.91\n").coreString, "2.10.91", "应去掉首尾空白与换行")
+    t.equal(UpdateVersion.parse("2.10.91+build7").coreString, "2.10.91", "应丢弃 + 构建元数据")
+
+    // ② 核心契约：线上 tag 带 v 前缀、本地不带，但二者是同一版本 → 必须判定为「无需更新」。
+    //    这正是本次事故假设中「永远认为有新版 → 无限重装」的那条路径。
+    t.equal(UpdateVersion.decide(remoteTag: "v2.10.91", localVersion: "2.10.91"), .upToDate,
+            "v2.10.91 vs 2.10.91 必须判为已是最新（同版本绝不重装）")
+    t.check(!UpdateVersion.isNewer(UpdateVersion.parse("v2.10.91"), than: UpdateVersion.parse("2.10.91")),
+            "带 v 前缀的同版本不得被判为更新")
+    t.check(UpdateVersion.isSameVersion("v2.10.91", "2.10.91"), "v2.10.91 与 2.10.91 应视为同一版本")
+
+    // ③ 相等的其它写法：位数不同（2.10 == 2.10.0）也必须判为相等，不得触发更新。
+    t.equal(UpdateVersion.decide(remoteTag: "2.10", localVersion: "2.10.0"), .upToDate,
+            "2.10 与 2.10.0 应判为相同版本")
+    t.check(UpdateVersion.isSameVersion("2.10.0.0", "2.10"), "补零后相等的版本应视为同一版本")
+
+    // ④ 逐段按整数比较——绝不能退化成字符串字典序。
+    //    字典序下 "2.9.9" > "2.10.0"（"9" > "1"）、"2.10.9" > "2.10.91" 都会比错。
+    t.equal(UpdateVersion.decide(remoteTag: "2.10.0", localVersion: "2.9.9"), .update,
+            "2.9.9 < 2.10.0（按整数比较，不可按字典序）")
+    t.equal(UpdateVersion.decide(remoteTag: "2.10.91", localVersion: "2.10.9"), .update,
+            "2.10.9 < 2.10.91（位数不同，按整数比较）")
+    t.equal(UpdateVersion.decide(remoteTag: "2.9.9", localVersion: "2.10.0"), .remoteOlder,
+            "线上 2.9.9 比本地 2.10.0 旧 → 不更新")
+    t.equal(UpdateVersion.decide(remoteTag: "2.10.9", localVersion: "2.10.91"), .remoteOlder,
+            "线上 2.10.9 比本地 2.10.91 旧 → 不更新")
+
+    // ⑤ 真正的新版本仍要能被识别（防止修过头把更新彻底堵死）。
+    t.equal(UpdateVersion.decide(remoteTag: "v2.10.92", localVersion: "2.10.91"), .update,
+            "v2.10.92 相对 2.10.91 应判为有更新")
+    t.equal(UpdateVersion.decide(remoteTag: "v3.0.0", localVersion: "2.10.91"), .update,
+            "大版本跨越应判为有更新")
+
+    // ⑥ 预发布语义（v2.10.13 / INST-1 既有契约，不得回归）：核心相同时正式版 > 预发布版。
+    t.check(UpdateVersion.isNewer(UpdateVersion.parse("2.11.0"), than: UpdateVersion.parse("2.11.0-beta.1")),
+            "正式版应新于同核心的预发布版")
+    t.check(!UpdateVersion.isNewer(UpdateVersion.parse("2.11.0-beta.1"), than: UpdateVersion.parse("2.11.0")),
+            "预发布版不应新于同核心的正式版")
+    t.check(UpdateVersion.isNewer(UpdateVersion.parse("2.11.0-beta.2"), than: UpdateVersion.parse("2.11.0-beta.1")),
+            "beta.2 应新于 beta.1（数字感知比较）")
+
+    // ⑦ 幂等护栏：即便比对逻辑将来又出错，也必须挡住无限重装。
+    t.equal(UpdateVersion.installGuard(targetTag: "v2.10.91", runningVersion: "2.10.91",
+                                       lastAttemptedTag: nil, autoInstallDisabled: false),
+            .skipSameAsRunning, "目标版本 == 运行版本 → 必须跳过安装")
+    t.equal(UpdateVersion.installGuard(targetTag: "v2.10.92", runningVersion: "2.10.91",
+                                       lastAttemptedTag: "2.10.92", autoInstallDisabled: false),
+            .skipAlreadyAttempted, "同一目标版本已尝试过 → 必须跳过（防装完重启又重装）")
+    t.equal(UpdateVersion.installGuard(targetTag: "v2.10.92", runningVersion: "2.10.91",
+                                       lastAttemptedTag: nil, autoInstallDisabled: true),
+            .skipDisabled, "总闸关闭 → 必须跳过安装（止血开关）")
+    t.equal(UpdateVersion.installGuard(targetTag: "v2.10.92", runningVersion: "2.10.91",
+                                       lastAttemptedTag: "v2.10.90", autoInstallDisabled: false),
+            .proceed, "确有新版本且未尝试过 → 允许安装")
+    t.equal(UpdateVersion.installGuard(targetTag: "v2.10.92", runningVersion: "2.10.91",
+                                       lastAttemptedTag: "", autoInstallDisabled: false),
+            .proceed, "空的历史记录不应误判为已尝试过")
+
+    // ⑧ UPD-LOOP-FIX (v2.10.92): 「失败后可重试」契约。
+    //    去重记录是在动 bundle **之前**写的，因此 App 侧（UpdateInstallGuardStore.clearAttempt）
+    //    必须在每条安装失败路径上清掉它；这里把清掉之后的期望行为钉死：记录为 nil / 空串时，
+    //    同一个目标版本必须能重新安装。否则一次偶发失败（挂载失败/版本校验中止/授权取消）
+    //    就会把该版本永久拉黑，等于把「同版本重装循环」修成「更新彻底堵死」。
+    t.equal(UpdateVersion.installGuard(targetTag: "v2.10.92", runningVersion: "2.10.91",
+                                       lastAttemptedTag: nil, autoInstallDisabled: false),
+            .proceed, "失败后清除去重记录 → 同一目标版本必须允许重试")
+    //    记录与目标的 `v` 前缀写法不同也必须识别为同一版本（否则去重形同虚设）。
+    t.equal(UpdateVersion.installGuard(targetTag: "2.10.92", runningVersion: "2.10.91",
+                                       lastAttemptedTag: "v2.10.92", autoInstallDisabled: false),
+            .skipAlreadyAttempted, "去重比对需规范化 v 前缀（v2.10.92 与 2.10.92 是同一版本）")
+    //    优先级：总闸关闭要盖过「目标就是当前版本」等其它判定，保证止血开关一按即停。
+    t.equal(UpdateVersion.installGuard(targetTag: "v2.10.91", runningVersion: "2.10.91",
+                                       lastAttemptedTag: "v2.10.91", autoInstallDisabled: true),
+            .skipDisabled, "总闸关闭时优先返回 skipDisabled（止血开关优先级最高）")
+}
+
 t.report()

@@ -25,6 +25,10 @@ enum AccessibilityPermissionGuide {
     /// （窗口重建 / 场景切换），若不加此守卫会重复弹窗骚扰用户。
     private static var didGuide = false
 
+    /// ★ MODAL-STALL (v2.10.92): 非模态展示时持有引导面板，防止 `presentGuideAlert` 返回后被释放。
+    /// 面板关闭（点「打开设置」或「本次已知晓」）时置 nil。
+    private static var guidePanel: NSPanel?
+
     /// Call once on app launch (from the App scene onAppear).
     static func checkAndGuideOnLaunch() {
         guard !didGuide else { return }
@@ -58,17 +62,37 @@ enum AccessibilityPermissionGuide {
     // v2.9.25: 权限弹窗彻底视觉重做——用自定义 SwiftUI 磁玻璃面板替换 NSAlert：
     // 顶部 48pt+ 大图标、加大加粗标题、宽松行距副文本、数字圆圈步骤列表、
     // 蓝色填充主按钮 +「本次已知晓」文字次要按钮、16pt+ 圆角与充裕内边距。
+    // ★ MODAL-STALL (v2.10.92): **不再使用 `NSApp.runModal(for:)`**。
+    //
+    // 实测（`sample ClipSlots` 抓到的主线程栈）：只要这个引导面板还开着，主线程就一直停在
+    // `runModalForWindow:` → `_doModalLoop:` 里。`runModal` 跑的是 `NSModalPanelRunLoopMode`
+    // 嵌套 run loop，而 `DispatchQueue.main.async` / `asyncAfter` 的块只在 common modes 下被
+    // drain —— 于是**整个 App 的异步主线程工作全部堆积不执行**：存储 watcher 的 0.3s 去抖
+    // reload 一次都跑不了，外部进程（CLI）写盘后 GUI 不刷新，哨兵轮询也白跑（它同样要回主线程）。
+    //
+    // 这个面板尤其致命：它在**启动时未经用户触发**就弹出（每次 App 更新后 macOS 都会撤销辅助功能
+    // 授权），用户完全可能让它挂在那儿几小时 —— 那段时间里 App 的外部写刷新契约整体失效，
+    // 而且从外部看只是「GUI 不刷新」，极难归因。（此前排查中「FSEvents 回调进得来但主队列不转」
+    // 的诡异现象，根因就是这里。）
+    //
+    // 改为非模态：`makeKeyAndOrderFront` 展示 + `.modalPanel` 层级保证它仍浮在最上层，用静态
+    // 属性持有面板防止被释放，按钮回调里关闭并置 nil。视觉与交互（含回车触发「打开设置」）不变，
+    // 但主线程 run loop 保持常规模式，异步刷新链路照常工作。
     private static func presentGuideAlert(afterUpdate: Bool = false) {
-        var didOpenSettings = false
+        // 已有面板在展示（理论上已被 didGuide 挡住，这里是纵深防御）→ 只前置，不重复创建。
+        if let existing = guidePanel {
+            existing.makeKeyAndOrderFront(nil)
+            return
+        }
 
         let card = AccessibilityGuideCard(
             afterUpdate: afterUpdate,
             onOpenSettings: {
-                didOpenSettings = true
-                NSApp.stopModal()
+                dismissGuidePanel()
+                openAccessibilitySettings()
             },
             onDismiss: {
-                NSApp.stopModal()
+                dismissGuidePanel()
             }
         )
 
@@ -79,7 +103,7 @@ enum AccessibilityPermissionGuide {
             height: fitting.height > 0 ? fitting.height : 480
         )
 
-        let panel = NSPanel(
+        let panel = GuidePanel(
             contentRect: NSRect(origin: .zero, size: size),
             styleMask: [.borderless, .nonactivatingPanel],
             backing: .buffered,
@@ -90,19 +114,29 @@ enum AccessibilityPermissionGuide {
         panel.hasShadow = false
         panel.isMovableByWindowBackground = true
         panel.level = .modalPanel
+        // 非模态展示后 App 可能被切走，面板跟着隐藏/恢复，避免盖住别的 App。
+        panel.hidesOnDeactivate = true
         hosting.frame = NSRect(origin: .zero, size: size)
         hosting.autoresizingMask = [.width, .height]
         panel.contentView = hosting
         panel.center()
+        guidePanel = panel
         panel.makeKeyAndOrderFront(nil)
-
-        NSApp.runModal(for: panel)
-        panel.orderOut(nil)
-
-        if didOpenSettings {
-            openAccessibilitySettings()
-        }
     }
+
+    /// 关闭引导面板并释放持有（幂等）。
+    private static func dismissGuidePanel() {
+        guard let panel = guidePanel else { return }
+        guidePanel = nil
+        panel.orderOut(nil)
+    }
+}
+
+// ★ MODAL-STALL (v2.10.92): borderless + nonactivating 的 NSPanel 默认 `canBecomeKey == false`。
+// 此前靠 `runModal` 的模态会话强制它成为 key window；去掉 runModal 后必须显式允许成为 key，
+// 否则按钮的键盘默认动作（回车触发「打开设置」）会失效。
+private final class GuidePanel: NSPanel {
+    override var canBecomeKey: Bool { true }
 }
 
 // MARK: - v2.9.25 Custom permission guide card

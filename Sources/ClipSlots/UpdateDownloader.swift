@@ -1,6 +1,7 @@
 import Foundation
 import AppKit
 import CryptoKit
+import ClipSlotsKit
 
 // v2.9.54: 自动下载并安装更新。
 //
@@ -67,6 +68,18 @@ final class UpdateDownloader: NSObject {
     /// - Parameter expectedSize: P2-17 (v2.10.9) Release asset 的期望字节数（0 表示未知、跳过校验）。
     /// - Parameter expectedSHA256: v2.10.67 Release 的期望 SHA-256（nil 表示本次未获得，按宽松策略处理）。
     func startDownload(from url: URL, version: String, expectedSize: Int64 = 0, expectedSHA256: String? = nil) {
+        // UPD-LOOP (v2.10.92): 下载入口先做一次「同版本」拦截 + 落日志。真正的强约束在
+        // UpdateInstaller 的幂等护栏（最后一道闸门），这里提前拦是为了连「下载」这一步的
+        // 流量与磁盘写入都省掉，并且让日志能明确区分「没下载」与「下载了但没装」。
+        let running = AppVersion.current
+        if UpdateVersion.isSameVersion(version, running) {
+            NSLog("[ClipSlots][Update] 拒绝下载：目标版本与当前运行版本相同（目标=\(version) 运行中=\(running)），"
+                + "不下载、不安装（防同版本重装循环）")
+            return
+        }
+        NSLog("[ClipSlots][Update] 开始下载：目标=\(version) 运行中=\(running) url=\(url.absoluteString) "
+            + "期望大小=\(expectedSize) 期望SHA256=\(expectedSHA256 ?? "无")")
+
         // 若已有下载在进行，先取消旧的。
         cancel()
         self.version = version
@@ -268,6 +281,7 @@ final class UpdateDownloader: NSObject {
         // v2.10.7: 下载完成后不再要求手动拖拽 DMG。切换面板为「安装就绪」，
         // 用户点击「安装并重启」即自动完成挂载 + ditto 替换 + 重启。
         pendingInstallDMGPath = dest.path
+        NSLog("[ClipSlots][Update] 下载完成并通过校验：目标=\(version) path=\(dest.path)，等待用户点击「安装并重启」")
         presentInstallReady()
     }
 

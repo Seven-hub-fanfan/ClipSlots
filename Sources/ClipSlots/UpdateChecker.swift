@@ -1,5 +1,6 @@
 import Foundation
 import AppKit
+import ClipSlotsKit
 
 // v2.9.8: "检查更新" entry.
 // Calls the GitHub Releases "latest" API, compares the tag against the running
@@ -80,11 +81,22 @@ final class UpdateChecker: ObservableObject {
                 // 用于下载完成后的加密级完整性校验（方案 A）。body 在此传入以支持回退解析。
                 let dmgAsset = Self.extractDMGURL(from: json, body: notes)
 
-                if Self.compare(latest, isNewerThan: current) {
-                    self.presentUpdateAvailable(latestTag: rawTag, pageURL: pageURL, notes: notes, dmgAsset: dmgAsset)
-                } else {
+                // UPD-LOOP (v2.10.92): 更新判定改用 ClipSlotsKit 的语义化纯函数，并把
+                // 「线上版本 / 本地版本 / 规范化结果 / 比对结论」全部落 NSLog——线上出现
+                // 「反复重装同版本」时此前一条更新日志都没有，无法自证清白。
+                let decision = UpdateVersion.decide(remoteTag: rawTag, localVersion: Self.currentVersion)
+                NSLog("[ClipSlots][Update] 检查完成：线上 tag=\(rawTag)（规范化=\(latest.displayString)）"
+                    + " 本地=\(Self.currentVersion)（规范化=\(current.displayString)）"
+                    + " 结论=\(decision.rawValue) dmg=\(dmgAsset != nil ? "有" : "无")"
+                    + " sha256=\(dmgAsset?.sha256 ?? "无")")
+
+                guard decision == .update else {
+                    // 相等（含 `v` 前缀差异）或线上更旧：一律不更新，绝不进入下载/安装。
+                    NSLog("[ClipSlots][Update] 无需更新（\(decision.rawValue)），不下载、不安装。")
                     self.presentUpToDate()
+                    return
                 }
+                self.presentUpdateAvailable(latestTag: rawTag, pageURL: pageURL, notes: notes, dmgAsset: dmgAsset)
             }
         }.resume()
     }
@@ -95,47 +107,27 @@ final class UpdateChecker: ObservableObject {
     /// P2 (v2.10.13): 之前 normalize 直接丢弃 `-beta` 预发布后缀，导致 `2.11.0-beta`
     /// 与 `2.11.0` 被判为相等（beta 用户收不到正式版更新）。改为保留预发布段并按
     /// SemVer 规则比较：数字核心相同时，正式版 > 预发布版。
-    struct SemVer: Equatable {
-        let core: [Int]
-        let pre: String?   // nil = 正式版；非空 = 预发布标识（如 "beta.1"）
-    }
+    ///
+    /// UPD-LOOP (v2.10.92): 实现整体下沉到 `ClipSlotsKit.UpdateVersion`（零依赖纯函数，可被
+    /// smoke 测试直接覆盖）。此处仅保留类型别名与薄封装，保证 `UpdateInstaller` 等既有调用点
+    /// 与 beta 通道语义完全不变，同时让 App 与测试共用同一份规范化 / 比较逻辑。
+    typealias SemVer = UpdateVersion.Semantic
 
-    static func parse(_ tag: String) -> SemVer {
-        var s = tag.trimmingCharacters(in: .whitespacesAndNewlines)
-        if s.hasPrefix("v") || s.hasPrefix("V") { s.removeFirst() }
-        // build metadata（+ 之后）不参与比较，先剥离。
-        if let plus = s.firstIndex(of: "+") { s = String(s[s.startIndex..<plus]) }
-        var pre: String? = nil
-        if let dash = s.firstIndex(of: "-") {
-            let p = String(s[s.index(after: dash)...])
-            pre = p.isEmpty ? nil : p
-            s = String(s[s.startIndex..<dash])
-        }
-        let core = s.split(separator: ".").map { Int($0) ?? 0 }
-        return SemVer(core: core, pre: pre)
+    /// 规范化解析（剥 `v`/`V` 前缀、去空白、丢 `+build`、拆 `-pre`）。
+    /// nonisolated: `UpdateInstaller` 会在后台串行队列上调用它做安装前版本校验。
+    nonisolated static func parse(_ tag: String) -> SemVer {
+        UpdateVersion.parse(tag)
     }
 
     /// Kept for backward compatibility; returns the numeric core only.
-    static func normalize(_ tag: String) -> [Int] {
-        parse(tag).core
+    nonisolated static func normalize(_ tag: String) -> [Int] {
+        UpdateVersion.parse(tag).core
     }
 
     /// Semantic comparison: returns true if `a` represents a strictly newer version than `b`.
-    static func compare(_ a: SemVer, isNewerThan b: SemVer) -> Bool {
-        let count = max(a.core.count, b.core.count)
-        for i in 0..<count {
-            let av = i < a.core.count ? a.core[i] : 0
-            let bv = i < b.core.count ? b.core[i] : 0
-            if av != bv { return av > bv }
-        }
-        // 数字核心相等：按 SemVer，正式版 > 预发布版。
-        switch (a.pre, b.pre) {
-        case (nil, nil): return false             // 完全相等
-        case (nil, .some): return true            // a 是正式版，b 是预发布 → a 更新
-        case (.some, nil): return false           // a 是预发布，b 是正式版 → a 不更新
-        case let (.some(ap), .some(bp)):
-            return ap.compare(bp, options: .numeric) == .orderedDescending
-        }
+    /// 逐段按整数比较；**相等一律返回 false**（相等绝不视为有更新）。
+    nonisolated static func compare(_ a: SemVer, isNewerThan b: SemVer) -> Bool {
+        UpdateVersion.isNewer(a, than: b)
     }
 
     // MARK: - Alerts
