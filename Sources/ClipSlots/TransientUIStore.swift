@@ -50,6 +50,22 @@ final class TransientUIStore: ObservableObject {
     /// v2.7.0: 当前 hover 的槽位（连线口显隐判定用）。历史上从未被写入（卡片 hover 用卡片内部
     /// @State），此处下沉以统一交互态归属，不改变行为。
     @Published var hoveredSlot: Int? = nil
+
+    // v2.10.87 (perf · 交互状态继续下沉):
+    //
+    // 导入进度原为主 `SlotStoreObservable` 上的 @Published。它是全仓「更新频率最高」的状态之一：
+    // 槽位包导入 / 批量文件导入 / 文件夹导入 / 打包导出每处理一个条目就上报一次，几百个文件就是
+    // 几百次上报。而它挂在主 store 上，于是每一次进度百分比的微小前进都会让 store.objectWillChange
+    // 发射，令整棵 ContentView.body（标题栏 / 搜索区 / 含 10 张卡片的 LazyVGrid / 底栏）重新求值。
+    // 卡片有 Equatable 兜底不会真重绘像素，但视图树 Diff 本身就占满了导入期间的主线程 —— 表现为
+    // 「导入大批文件时整个界面发涩、hover/滚动不跟手」。
+    //
+    // 迁到这里后，进度浮层由只观察本 store 的 `ImportProgressOverlayView` 单独承接，进度推进只重绘
+    // 那一条 340pt 宽的浮层，不再波及主网格。
+    //
+    // 注意：主 store 侧保留同名转发计算属性（见 main.swift），`publishImportProgress` 的
+    // v2.10.56 generation 代次守卫逻辑与调用方全部不变，仅最终存储落到本 store 的 @Published。
+    @Published var importProgress: ImportProgress?
 }
 
 /// v2.10.52 (perf 第四批): 独立承载 Toast + 浮层提示的覆盖层子视图，只观察 `TransientUIStore`。

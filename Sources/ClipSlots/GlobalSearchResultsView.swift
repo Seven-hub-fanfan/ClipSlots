@@ -24,9 +24,23 @@ struct GlobalSearchResultsView: View {
         return results.first
     }
 
-    // v2.10.48: 搜索词变化时用它作为动画驱动键——列表按结果 id 序列做淡入淡出过渡，
+    // v2.10.48: 搜索词变化时用它作为动画驱动键——列表按结果集身份做淡入淡出过渡，
     // 而不是硬切跳变。
-    private var resultsSignature: [String] { results.map(\.id) }
+    //
+    // v2.10.87 (perf): 原实现是 `results.map(\.id)`，返回 `[String]`。它是计算属性，因此本视图
+    // **每次** body 求值都会重跑一遍：新建一个 N 元数组 + N 次 String 引用计数操作。而 body 求值远不止
+    // 「换搜索词」这一种诱因——hover 某一行、切换选中项、改排序规则、父视图重算都会走一遍。全局搜索
+    // 命中几百条时，就是每帧几百次无谓分配，正好落在「输入搜索词」这个最需要跟手的路径上。
+    //
+    // 改为把全部 id 折进一个 Hasher 得到 Int：语义等价（结果集的增删改序都会改变哈希，仍能正确驱动
+    // 过渡），但零堆分配、无引用计数。Hasher 每进程随机种子，同一进程内多次 body 求值间的比较依然
+    // 有效（SwiftUI 只在同进程内比较新旧值）。
+    private var resultsSignature: Int {
+        var hasher = Hasher()
+        hasher.combine(results.count)
+        for result in results { hasher.combine(result.id) }
+        return hasher.finalize()
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {

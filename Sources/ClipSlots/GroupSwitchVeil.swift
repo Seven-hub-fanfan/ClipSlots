@@ -13,6 +13,22 @@ import SwiftUI
 struct GroupSwitchVeil: View {
     @State private var animating = false
 
+    // v2.10.87（动画打磨）: 扫光的两个观感参数。
+    //
+    // 原实现：0.95s 走完一趟，且起点是 `-bandWidth`（整条光带完全在左侧画面外）。
+    // 问题在于这条光带用的是「两端 0 透明度、中心 0.14」的渐变，真正「看得见」要等到光带中心进入
+    // 画面——也就是走完约 bandWidth/2、约整趟行程的 1/4，折算 ≈0.22s。而 v2.10.74 之后遮罩只在
+    // 「切组确实慢」时才延迟显示，实际存在窗口常常只有两三百毫秒。两者一叠加，结果是这道扫光在绝大
+    // 多数真实切组里几乎从没亮起来过：用户看到的只是「内容淡了一下又回来」，没有任何「正在加载」的
+    // 交代，切组因此显得是卡了一下而不是在读数据。
+    //
+    // 修法只动观感、不动任何时序：
+    //   • 行程压到 0.72s，峰值亮度提前到 ≈0.17s；
+    //   • 起点从 `-bandWidth` 改为 `-bandWidth * 0.5`，光带开局就有半条在画面内，第一帧即可读。
+    // 遮罩何时出现/消失仍完全由 isSwitchingGroup + v2.10.74 的延迟 token / 1.2s 兜底决定，与此无关。
+    private static let sweepDuration: Double = 0.72
+    private static let sweepStartRatio: CGFloat = -0.5
+
     var body: some View {
         GeometryReader { geo in
             let w = max(geo.size.width, 1)
@@ -29,12 +45,12 @@ struct GroupSwitchVeil: View {
             )
             .frame(width: bandWidth)
             .frame(maxHeight: .infinity)
-            // 从左侧外一直扫到右侧外，循环往复。
-            .offset(x: animating ? (w + bandWidth) : -bandWidth)
+            // 从左侧（半露）一直扫到右侧外，循环往复。
+            .offset(x: animating ? (w + bandWidth) : bandWidth * Self.sweepStartRatio)
             .frame(maxWidth: .infinity, alignment: .leading)
             .onAppear {
                 animating = false
-                withAnimation(.linear(duration: 0.95).repeatForever(autoreverses: false)) {
+                withAnimation(.linear(duration: Self.sweepDuration).repeatForever(autoreverses: false)) {
                     animating = true
                 }
             }
@@ -62,7 +78,8 @@ struct GroupSwitchDimModifier: ViewModifier {
         content
             .opacity(ui.isSwitchingGroup ? 0.35 : 1)
             .allowsHitTesting(!ui.isSwitchingGroup)
-            .animation(.easeInOut(duration: 0.16), value: ui.isSwitchingGroup)
+            // v2.10.87: 曲线与时长与此前完全一致，仅把裸 0.16s 换成具名 token（见 AnimationTokens.swift）。
+            .animation(Anim.groupSwitch, value: ui.isSwitchingGroup)
     }
 }
 

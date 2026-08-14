@@ -22,6 +22,15 @@ struct SlotThumbnailView: View {
         content.thumbnailKey(specialSlotId: specialSlotId, slot: slot)
     }
 
+    // v2.10.87（动画打磨）: 当前 key 是否已拿到图。
+    //
+    // 它是下方「淡入」的动画驱动键，**刻意不用 currentKey 本身**——这一点是守住
+    // 「切组/切页立即刷新、不串图」不变量的关键，详见 body 内注释。
+    private var isThumbnailLoaded: Bool {
+        if case .loaded = provider.state(for: currentKey) { return true }
+        return false
+    }
+
     var body: some View {
         ZStack {
             RoundedRectangle(cornerRadius: AppTheme.smallCornerRadius, style: .continuous)
@@ -29,28 +38,49 @@ struct SlotThumbnailView: View {
 
             // v2.10.73 (方案③): 渲染完全由 provider 对 currentKey 的状态决定。
             // 命中缓存 → 秒出图；未命中 → loading，异步填充后 objectWillChange 触发重渲染。
-            switch provider.state(for: currentKey) {
-            case .idle:
-                idleView
-            case .loading:
-                loadingView
-            case .loaded(let image):
-                ZStack {
-                    Image(nsImage: image)
-                        .resizable()
-                        .aspectRatio(contentMode: .fit)
-                        .padding(4)
+            Group {
+                switch provider.state(for: currentKey) {
+                case .idle:
+                    idleView
+                case .loading:
+                    loadingView
+                case .loaded(let image):
+                    ZStack {
+                        Image(nsImage: image)
+                            .resizable()
+                            .aspectRatio(contentMode: .fit)
+                            .padding(4)
 
-                    if content.isVideoFile {
-                        Image(systemName: "play.circle.fill")
-                            .font(.system(size: 36))
-                            .foregroundColor(.white.opacity(0.9))
-                            .shadow(radius: 4)
+                        if content.isVideoFile {
+                            Image(systemName: "play.circle.fill")
+                                .font(.system(size: 36))
+                                .foregroundColor(.white.opacity(0.9))
+                                .shadow(radius: 4)
+                        }
                     }
+                case .failed:
+                    fallbackView
                 }
-            case .failed:
-                fallbackView
             }
+            // v2.10.87（动画打磨）: 消除「占位/转圈 → 图片」的硬切。异步解码完成的瞬间，
+            // 缩略图原先是「啪」地一下替换上来，跳变感明显；改成 0.2s 淡入后，卡片读起来是
+            // 「图片显影」而不是「界面闪了一下」。
+            //
+            // ⚠️ 这里的动画是**有方向的**，写法必须保持 `isLoaded ? Anim.status : nil`，
+            // 这是为了不碰「切组/切页立即刷新、不串图」这条被 v2.10.64 / 65 / 86 反复修过的不变量：
+            //
+            //   • 驱动键是 isThumbnailLoaded（Bool），**不是 currentKey**。因此「图 A → 图 B」
+            //     （切到另一组、新 key 已在缓存里命中）时 Bool 不变 → 本修饰器不产生动画 →
+            //     依旧是瞬时硬切，绝不会出现两组的图交叠淡化（那才是观感上的「串图」）。
+            //   • 「有图 → 占位」（切到未缓存的新组，state 回落 loading）时，新一轮 body 里
+            //     isLoaded 已是 false → 动画取 nil → 旧图**立即**消失，不留任何淡出尾巴，
+            //     旧组的图一帧都不会拖到新组上。
+            //   • 只有「占位 → 有图」这一个方向拿到 Anim.status（新 body 里 isLoaded 为 true），
+            //     即真正需要柔化的那一次显影。
+            //
+            // 换成 `.animation(Anim.status, value: currentKey)` 或无条件 `.animation(Anim.status, ...)`
+            // 都会破坏上面两条，切组时会看到旧图淡出/交叠——改动此行前请先复现切组场景。
+            .animation(isThumbnailLoaded ? Anim.status : nil, value: isThumbnailLoaded)
         }
         // v2.9.25 hotfix: 框高需容纳约 4 行等宽文本（行高≈17pt，4 行≈68pt + padding 8×2≈16pt
         // + 余量 ≈ 116pt）。minHeight 116 / idealHeight 140 保证内容区净高足够放下 4 行；

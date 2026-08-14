@@ -259,7 +259,19 @@ final class SlotStoreObservable: ObservableObject {
     let transientUI = TransientUIStore()
     @Published var hotkeyRegistrationErrors: [String] = []
     @Published var isSettingsPresented: Bool = false
-    @Published var slotRenderTokens: [String: UUID] = [:]
+    // v2.10.87 (perf): 已删除 `slotRenderTokens: [String: UUID]`。
+    //
+    // 它是 v2.10.72 之前「靠改卡片 .id 强刷缩略图」方案的遗留基础设施。v2.10.73（方案③）把缩略图
+    // 刷新彻底改为「SlotThumbnailView 观察 ThumbnailProvider 的 keyed 共享缓存」后，全仓再无任何
+    // 读取点（cellIdentity(for:) 同期删除），但仍保留了 16 处写入。由于它是主 store 上的 @Published，
+    // 每次写入都会让 store.objectWillChange 发射，从而令以 @ObservedObject store 观察的整棵
+    // ContentView.body（标题栏 / 搜索区 / 含 10 张卡片的 LazyVGrid / 底栏）重新求值 —— 为一个没人读的
+    // 值付全局重绘的代价。最坏情况是 undoLastClearIfPossible / clearAllSlots / 批量导入 / 批量保存里
+    // 的 `for slot in 1...config.slots` 循环：一次操作连发 10 次写入 = 10 个 UUID 分配 + 10 次字典 CoW。
+    //
+    // 删除前已逐一核验全部 16 处写入点：每一处都伴随 `slots = ` / `slots[x] = ` / `refreshTrigger = UUID()`
+    // / `reloadAllAsync()` / `switchSpecialSlot()` 中的至少一个（同为 @Published 或最终写 @Published），
+    // 因此 UI 刷新链路由这些真实数据变更保证，删除它不改变任何刷新时序与可见行为。
     @Published var isBatchSaving: Bool = false
 
     // v2.10.47: 切组/切页过渡态。为 true 时表示「已切到新组、新数据尚在后台异步读盘」，此窗口内
@@ -313,7 +325,14 @@ final class SlotStoreObservable: ObservableObject {
 
     // v2.10.39: 导入进度（槽位包导入 / 批量图片文件导入 / 文件夹导入共用）。
     // 非空即表示有导入正在进行，ContentView 据此显示进度条浮层；完成/失败后置 nil 收起。
-    @Published var importProgress: ImportProgress?
+    //
+    // v2.10.87 (perf): 存储下沉到 TransientUIStore（高频进度上报不再触发主 store.objectWillChange /
+    // 整棵 ContentView.body 重算，详见 TransientUIStore.swift 该字段处注释）。这里保留同名转发
+    // 计算属性，publishImportProgress 的代次守卫逻辑与全部调用方读写方式完全不变。
+    var importProgress: ImportProgress? {
+        get { transientUI.importProgress }
+        set { transientUI.importProgress = newValue }
+    }
 
     // v2.10.56: 进度浮层「会话代次」守卫。每次收起浮层（发布 nil）都会 +1，
     // 使得同一批导出/导入的后续 stale 非 nil 上报被丢弃，无法把已收起的浮层重新顶起来。
@@ -1499,7 +1518,6 @@ final class SlotStoreObservable: ObservableObject {
                 } else {
                     self.reloadAllAsync() // P1-3 (v2.10.35): 自动存储回调刷新走异步读盘，避免主线程逐槽 flock 卡顿
                 }
-                self.slotRenderTokens["\(capturedTarget.groupId)::\(capturedTarget.slot)"] = UUID()
                 self.recomputeAutoPreviews()
 
                 let groupName = self.specialSlots.first(where: { $0.id == capturedTarget.groupId })?.name ?? ""
@@ -1929,9 +1947,6 @@ final class SlotStoreObservable: ObservableObject {
             return
         }
         slots = snapshot.slots
-        for slot in 1...config.slots {
-            slotRenderTokens["\(currentSpecialSlotId)::\(slot)"] = UUID()
-        }
         labels = snapshot.labels
         persistCurrentSpecialSlotData()
         lastClearSnapshot = nil
@@ -1982,7 +1997,6 @@ final class SlotStoreObservable: ObservableObject {
         }
         content.attachments = existing.attachments
         slots[slot] = content
-        slotRenderTokens["\(currentSpecialSlotId)::\(slot)"] = UUID()
         persistCurrentSpecialSlotData()
         refreshTrigger = UUID()
         showFloatingNotice(FloatingNotice(title: "已保存 HTML", subtitle: "槽位 \(slot)", iconName: "doc.richtext", kind: .success))
@@ -2009,7 +2023,6 @@ final class SlotStoreObservable: ObservableObject {
         content.contentId = UUID().uuidString
         content.updatedAt = Date().timeIntervalSince1970
         slots[slot] = content
-        slotRenderTokens["\(currentSpecialSlotId)::\(slot)"] = UUID()
         persistCurrentSpecialSlotData()
         refreshTrigger = UUID()
     }
@@ -2034,7 +2047,6 @@ final class SlotStoreObservable: ObservableObject {
         }
         content.attachments = existing.attachments
         slots[slot] = content
-        slotRenderTokens["\(currentSpecialSlotId)::\(slot)"] = UUID()
         persistCurrentSpecialSlotData()
         showFloatingNotice(FloatingNotice(title: "已更新文本", subtitle: "槽位 \(slot)", iconName: "pencil.circle.fill", kind: .success))
     }
@@ -2048,7 +2060,6 @@ final class SlotStoreObservable: ObservableObject {
             // v2.7.74: preserve existing attachments when replacing slot content.
             newContent.attachments = slots[target]?.attachments ?? []
             slots[target] = newContent
-            slotRenderTokens["\(currentSpecialSlotId)::\(target)"] = UUID()
         }
         // MT-1 (v2.10.30): persistCurrentSpecialSlotData 已改为「主线程快照 + 后台写盘」，此处拖拽导入
         // 不再在主线程上逐槽同步写锁写盘。
@@ -2117,7 +2128,6 @@ final class SlotStoreObservable: ObservableObject {
             var emptySlots: [Int: SlotContent] = [:]
             for slot in 1...config.slots {
                 emptySlots[slot] = SlotContent()
-                slotRenderTokens["\(activeId)::\(slot)"] = UUID()
             }
 
             slots = emptySlots
@@ -2462,7 +2472,6 @@ final class SlotStoreObservable: ObservableObject {
         content.updatedAt = Date().timeIntervalSince1970
         if loadedSpecialSlotId == activeId {
             slots[slot] = content
-            slotRenderTokens["\(activeId)::\(slot)"] = UUID()
         }
         refreshTrigger = UUID()
         let toWrite = content
@@ -2477,7 +2486,6 @@ final class SlotStoreObservable: ObservableObject {
                     if self.loadedSpecialSlotId == activeId,
                        self.slots[slot]?.contentId == toWrite.contentId {
                         self.slots[slot] = previousContent
-                        self.slotRenderTokens["\(activeId)::\(slot)"] = UUID()
                         self.refreshTrigger = UUID()
                     }
                     NSLog("[ClipSlots] setAttachments 写盘失败，已回滚内存 specialSlot=\(activeId) slot=\(slot)")
@@ -4754,7 +4762,6 @@ final class SlotStoreObservable: ObservableObject {
         var newSlots = slots
         newSlots[slot] = SlotContent()
         slots = newSlots
-        slotRenderTokens["\(activeId)::\(slot)"] = UUID()
 
         var newLabels = labels
         newLabels.removeValue(forKey: slot)
@@ -4796,7 +4803,6 @@ final class SlotStoreObservable: ObservableObject {
         var newSlots = slots
         newSlots[slot] = content
         slots = newSlots
-        slotRenderTokens["\(activeId)::\(slot)"] = UUID()
 
         loadedSpecialSlotId = activeId
         refreshTrigger = UUID()
@@ -5369,10 +5375,10 @@ final class SlotStoreObservable: ObservableObject {
 
                     DispatchQueue.main.async { [weak self] in
                         guard let self = self else { return }
-                        // v2.10.60: 批量导入后更新全部受影响槽位的渲染 token，强制 UI 刷新缩略图。
-                        for i in 1...willImportFiles.count {
-                            self.slotRenderTokens["\(activeId)::\(i)"] = UUID()
-                        }
+                        // v2.10.87 (perf): 原 v2.10.60 在此循环写 slotRenderTokens「强制 UI 刷新缩略图」的
+                        // 代码已删除。自 v2.10.73（方案③）起缩略图由 ThumbnailProvider 的 keyed 缓存驱动，
+                        // 新内容带来新的 contentId/updatedAt 即形成新 key，下面的 reloadAllAsync() 把新内容
+                        // 灌进 @Published slots 后缩略图自然刷新，无需再逐槽写一个没人读的 token。
                         self.reloadAllAsync()
                         self.refreshTrigger = UUID()
                         self.suppressWatcher(2.0)
@@ -5520,7 +5526,6 @@ final class SlotStoreObservable: ObservableObject {
                     if self.loadedSpecialSlotId == activeId,
                        self.slots[targetSlot]?.contentId == contentToWrite.contentId {
                         self.slots[targetSlot] = existingSnapshot
-                        self.slotRenderTokens["\(activeId)::\(targetSlot)"] = UUID()
                         self.refreshTrigger = UUID()
                     }
                     self.showFloatingNotice(FloatingNotice(
@@ -5543,7 +5548,6 @@ final class SlotStoreObservable: ObservableObject {
                     var newSlots = self.slots
                     newSlots[targetSlot] = contentToWrite
                     self.slots = newSlots
-                    self.slotRenderTokens["\(activeId)::\(targetSlot)"] = UUID()
                     self.loadedSpecialSlotId = activeId
                     self.refreshTrigger = UUID()
 
@@ -5802,10 +5806,9 @@ final class SlotStoreObservable: ObservableObject {
                 self.specialSlots = refreshedIndex.specialSlots
                 self.pages = refreshedIndex.pages
 
-                // v2.10.60: 批量保存后更新全部受影响槽位的渲染 token，强制 UI 刷新缩略图。
-                for target in targets.prefix(itemsToSave) {
-                    self.slotRenderTokens["\(target.specialSlotId)::\(target.slot)"] = UUID()
-                }
+                // v2.10.87 (perf): 原 v2.10.60 在此循环写 slotRenderTokens 的代码已删除，理由同批量导入
+                // 路径——缩略图刷新由 ThumbnailProvider 的 keyed 缓存 + 下面 reloadAllAsync() 的真实内容
+                // 变更驱动，token 自 v2.10.73 起已无任何读取点。
 
                 // Reload current slots and show toast
                 self.reloadAllAsync()
@@ -6003,7 +6006,6 @@ final class SlotStoreObservable: ObservableObject {
                     var newSlots = self.slots
                     newSlots[targetSlot] = committed
                     self.slots = newSlots
-                    self.slotRenderTokens["\(activeId)::\(targetSlot)"] = UUID()
                     self.loadedSpecialSlotId = activeId
                     self.refreshTrigger = UUID()
                     let summary = committed.noticeSummary

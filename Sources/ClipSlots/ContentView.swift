@@ -173,7 +173,9 @@ struct ContentView: View {
     // 整格重建（流畅）。缩略图刷新不再依赖卡片身份携带内容版本，而是由 SlotThumbnailView 观察
     // ThumbnailProvider（以 key 为维度的共享缓存单一数据源）驱动：currentKey 一变即读新 key，
     // 命中秒出、未命中异步填充，彻底消除「切到含主体图片的组、缩略图卡旧图需切走切回」的回归。
-    // 注：原 v2.10.72 的 cellIdentity(for:) 已删除（全仓再无引用）。slotRenderTokens 基础设施保留。
+    // 注：原 v2.10.72 的 cellIdentity(for:) 已删除（全仓再无引用）。v2.10.87 起 slotRenderTokens
+    // 基础设施也已一并删除——它自 v2.10.73 就再无读取点，却仍作为主 store 的 @Published 被写 16 次，
+    // 每次都白白触发整棵 ContentView.body 重算（详见 main.swift 该字段原声明处的注释）。
 
     var body: some View {
         ZStack(alignment: .top) {
@@ -181,16 +183,38 @@ struct ContentView: View {
                 headerView
 
                 // Hotkey error banner
-                if !store.hotkeyRegistrationErrors.isEmpty {
-                    hotkeyErrorBanner
+                // v2.10.87（动画打磨）: 原为硬切——横幅出现/消失会瞬间把下方网格顶下去/弹上来。
+                // 用与搜索结果区同一套「淡入 + 自顶部展开」过渡，两处纵向插入的节奏保持一致。
+                Group {
+                    if !store.hotkeyRegistrationErrors.isEmpty {
+                        hotkeyErrorBanner
+                            .transition(.opacity.combined(with: .move(edge: .top)))
+                    }
                 }
+                .animation(Anim.status, value: store.hotkeyRegistrationErrors.isEmpty)
 
                 // Search results remain in the content area; the controls themselves live in titleBar.
-                if isSearchActive {
-                    searchResultsSection
-                        .padding(.horizontal, AppTheme.pagePadding)
-                        .padding(.vertical, 6)
+                //
+                // v2.10.87（动画打磨）: 原实现是裸 `if isSearchActive { ... }`，无任何过渡——敲下第一个
+                // 搜索字符的瞬间，这一整块（组内计数提示 / 全局搜索结果面板）凭空出现，把下方槽位网格
+                // 硬生生往下顶一大截；清空搜索时又整块消失、网格「弹」回原位。这是搜索路径上观感最突兀
+                // 的一处跳变。
+                //
+                // 改为「淡入 + 自顶部展开」，并把 `.animation` 紧贴这个 Group 作用域：
+                // - 动画只由 isSearchActive 这一个布尔驱动，输入过程中逐字符改 searchText 不会反复触发；
+                // - 作用域限定在本 Group，父 VStack 的其它子项（标题栏 / 网格 / 底栏）不会被顺带纳入
+                //   隐式动画，只是跟着本块被动画的高度平滑让位，因此网格是「被推开」而不是「跳一下」；
+                // - 用 Anim.status（0.2s）而不是更长的 Anim.transition：这一下会带动 10 张卡片所在容器
+                //   的纵向布局，时长必须压短，既读得出动作又不拖慢连续输入的节奏。
+                Group {
+                    if isSearchActive {
+                        searchResultsSection
+                            .padding(.horizontal, AppTheme.pagePadding)
+                            .padding(.vertical, 6)
+                            .transition(.opacity.combined(with: .move(edge: .top)))
+                    }
                 }
+                .animation(Anim.status, value: isSearchActive)
 
                 GeometryReader { gridGeometry in
                     let rawWidth = gridGeometry.size.width
@@ -282,14 +306,11 @@ struct ContentView: View {
                 .zIndex(101)
 
             // v2.10.46: 导入进度浮层（槽位包 / 批量文件 / 文件夹导入共用）。非模态：底部悬浮、不阻塞交互。
-            Group {
-                if let progress = store.importProgress {
-                    importProgressOverlay(progress)
-                        .transition(.move(edge: .bottom).combined(with: .opacity))
-                }
-            }
-            .animation(Anim.status, value: store.importProgress != nil)
-            .zIndex(150)
+            // v2.10.87 (perf): 改由独立子视图 ImportProgressOverlayView 观察 store.transientUI 渲染。
+            // ContentView.body 不再读取 importProgress（store.transientUI 是普通引用读取，不建立
+            // @Published 依赖），因此几百次进度上报不再逐次触发整棵 body 重新求值，只重绘该浮层。
+            ImportProgressOverlayView(ui: store.transientUI)
+                .zIndex(150)
 
             // v2.9.12: in-app settings overlay (Obsidian-style two-pane).
             // Rendered inside the main window's ZStack so it stays attached to the
@@ -391,70 +412,9 @@ struct ContentView: View {
         .padding(.vertical, 4)
     }
 
-    // v2.10.46: 导入进度改为非模态——去掉全屏黑色阻塞遮罩，改为底部悬浮的轻量进度条，
-    // 并对整体 allowsHitTesting(false)，导入期间可继续操作其他槽位（边导入边整理），消除心流打断。
-    // total<=0 时显示不确定进度（解压/解析阶段）；否则显示确定百分比与「x/y」计数。
-    private func importProgressOverlay(_ progress: ImportProgress) -> some View {
-        VStack(spacing: 0) {
-            Spacer(minLength: 0)
-            VStack(spacing: 7) {
-                HStack(spacing: 8) {
-                    Image(systemName: "square.and.arrow.down.fill")
-                        .font(.system(size: 13, weight: .semibold))
-                        .foregroundColor(.accentColor)
-                    Text(progress.title)
-                        .font(.system(size: 12, weight: .semibold))
-                        .foregroundColor(.primary)
-                    Spacer(minLength: 0)
-                    if !progress.isIndeterminate {
-                        Text("\(progress.completed)/\(progress.total)")
-                            .font(.system(size: 11, weight: .medium).monospacedDigit())
-                            .foregroundColor(.secondary)
-                    }
-                }
-
-                if progress.isIndeterminate {
-                    ProgressView()
-                        .progressViewStyle(.linear)
-                } else {
-                    ProgressView(value: progress.fraction)
-                        .progressViewStyle(.linear)
-                }
-
-                if !progress.detail.isEmpty {
-                    HStack {
-                        Text(progress.detail)
-                            .font(.system(size: 10))
-                            .foregroundColor(.secondary)
-                            .lineLimit(1)
-                            .truncationMode(.middle)
-                        Spacer(minLength: 0)
-                        if !progress.isIndeterminate {
-                            Text("\(Int(progress.fraction * 100))%")
-                                .font(.system(size: 10, weight: .medium).monospacedDigit())
-                                .foregroundColor(.secondary)
-                        }
-                    }
-                }
-            }
-            .padding(.horizontal, 14)
-            .padding(.vertical, 11)
-            .frame(width: 340)
-            .background(
-                RoundedRectangle(cornerRadius: 12, style: .continuous)
-                    .fill(.ultraThickMaterial)
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 12, style: .continuous)
-                            .stroke(Color.white.opacity(0.12), lineWidth: 1)
-                    )
-                    .shadow(color: Color.black.opacity(0.22), radius: 14, y: 6)
-            )
-            .padding(.bottom, 16)
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        // 非模态关键点：整体不拦截点击，导入期间主网格照常可交互。
-        .allowsHitTesting(false)
-    }
+    // v2.10.87 (perf): 导入进度浮层的渲染已迁至 ImportProgressOverlayView（见 TransientUIStore.swift），
+    // 与 v2.10.52 的 Toast/浮层拆分同构——ContentView 不再读取 store.importProgress，因此高频进度
+    // 上报不再触发整棵 body 重新求值。视觉（底部悬浮 340pt 胶囊、非模态不拦点击、进出场动画）不变。
 
     // v2.10.52 (perf 第四批): Toast / 浮层提示的渲染已迁至 TransientOverlayView（见 TransientUIStore.swift），
     // ContentView 内不再保留 toastView / toastIcon / floatingNoticeView。
