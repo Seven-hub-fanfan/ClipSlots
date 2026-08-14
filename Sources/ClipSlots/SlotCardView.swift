@@ -51,19 +51,18 @@ struct SlotCardView: View {
     @State private var editingText = ""
     @State private var isDropTargeted = false
 
-    @Environment(\.colorScheme) private var colorScheme
     // v2.10.70: 拖拽 live-resize 期间去掉卡片软阴影——resize 时 N 张可见卡片的软阴影每帧重合成开销很大。
     @ObservedObject private var liveResize = LiveResizeMonitor.shared
 
     private var slotAccent: Color {
-        AppTheme.slotAccent(slot, scheme: colorScheme)
+        AppTheme.slotAccent(slot)
     }
 
     private var cardOutlineColor: Color {
         if isFlashHighlighted { return slotAccent }
         if isDropTargeted { return slotAccent.opacity(0.72) }
         if isHovering { return slotAccent.opacity(0.72) }
-        return AppTheme.subtleBorder(colorScheme)
+        return AppTheme.subtleBorder
     }
 
     private var cardOutlineWidth: CGFloat {
@@ -175,7 +174,7 @@ struct SlotCardView: View {
         .padding(AppTheme.slotCardPadding)
         .background(
             RoundedRectangle(cornerRadius: AppTheme.slotCardCornerRadius, style: .continuous)
-                .fill(AppTheme.cardBackground(colorScheme, isEmpty: content.isEmpty))
+                .fill(AppTheme.cardBackground(isEmpty: content.isEmpty))
                 // v2.10.88 (perf · hover 切槽位卡顿): 阴影的 radius / y **不再随 hover 变化**。
                 //
                 // 原实现是 radius 5→9、y 2→4，而卡片链尾的 `.animation(Anim.interactive, value: isHovering)`
@@ -189,7 +188,7 @@ struct SlotCardView: View {
                 // 无模糊）+ 1.012 缩放」承担，这两者都便宜；去掉长在阴影上的那一档抬升，观感差异极小，
                 // 但省掉了 hover 路径上唯一的逐帧模糊重算。
                 .shadow(
-                    color: liveResize.isResizing ? .clear : AppTheme.cardShadow(colorScheme, isEmpty: content.isEmpty),
+                    color: liveResize.isResizing ? .clear : AppTheme.cardShadow(isEmpty: content.isEmpty),
                     radius: liveResize.isResizing ? 0 : (content.isEmpty ? 3 : 5),
                     y: liveResize.isResizing ? 0 : 2
                 )
@@ -457,7 +456,7 @@ struct SlotCardView: View {
                         Label(editActionTitle, systemImage: "pencil")
                             .frame(maxWidth: .infinity)
                     }
-                    .buttonStyle(SlotActionButtonStyle(kind: .accent(AppTheme.slotActionAccent(slot, scheme: colorScheme))))
+                    .buttonStyle(SlotActionButtonStyle(kind: .accent(AppTheme.slotActionAccent(slot))))
                     .disabled(!canEditContent)
                     .help(editActionHelp)
                     .frame(maxWidth: .infinity)
@@ -475,7 +474,7 @@ struct SlotCardView: View {
                     Label("保存到槽位 \(slot)", systemImage: "square.and.arrow.down")
                         .frame(maxWidth: .infinity)
                 }
-                .buttonStyle(SlotActionButtonStyle(kind: .accent(AppTheme.slotActionAccent(slot, scheme: colorScheme))))
+                .buttonStyle(SlotActionButtonStyle(kind: .accent(AppTheme.slotActionAccent(slot))))
                 .help(saveShortcut.isEmpty ? "保存当前剪贴板内容到槽位 \(slot)" : saveShortcut)
 
                 Color.clear
@@ -786,7 +785,6 @@ private struct SlotActionButtonBody: View {
     let kind: SlotActionButtonStyle.Kind
 
     @Environment(\.isEnabled) private var isEnabled
-    @Environment(\.colorScheme) private var colorScheme
     @State private var isHovering = false
 
     private var isDangerActive: Bool {
@@ -796,18 +794,16 @@ private struct SlotActionButtonBody: View {
 
     private var backgroundColor: Color {
         guard isEnabled else {
-            return colorScheme == .dark ? Color.white.opacity(0.13) : Color.black.opacity(0.10)
+            return AppTheme.actionButtonDisabledBackground
         }
         switch kind {
         case .accent(let color):
             return color
         case .destructive:
             if isDangerActive {
-                return colorScheme == .dark ? AppTheme.danger : AppTheme.danger.opacity(0.14)
+                return AppTheme.actionButtonDangerActiveBackground
             }
-            return colorScheme == .dark
-                ? Color(red: 0.20, green: 0.21, blue: 0.23)
-                : Color.black.opacity(0.075)
+            return AppTheme.actionButtonDangerIdleBackground
         }
     }
 
@@ -816,17 +812,25 @@ private struct SlotActionButtonBody: View {
         switch kind {
         case .accent:
             // Both themes use dark ink to preserve contrast over the vivid slot colors.
-            return colorScheme == .dark ? Color.black.opacity(0.82) : Color.black.opacity(0.72)
+            return AppTheme.actionButtonAccentText
         case .destructive:
-            if colorScheme == .dark { return AppTheme.onAccentText }
-            return isDangerActive ? AppTheme.danger : Color.black.opacity(0.68)
+            // 深色：白字；浅色：激活时红字、静息时深灰字。
+            return isDangerActive ? dangerActiveText : AppTheme.actionButtonDangerIdleText
         }
     }
 
+    /// 浅色模式下 hover 时把强调色按钮压暗一点。
+    /// v2.10.93: 原实现读 `@Environment(\.colorScheme)`，那会让整棵按钮子树在切主题时被迫重算；
+    /// 改为在需要时直接问当前 appearance（一次布尔判断，不建立视图依赖）。
     private var backgroundBrightness: Double {
-        guard colorScheme == .light, isHovering else { return 0 }
+        guard !AppTheme.isDarkAppearance, isHovering else { return 0 }
         if case .accent = kind { return -0.04 }
         return 0
+    }
+
+    /// 危险操作激活态文字：深色白字、浅色红字。
+    private var dangerActiveText: Color {
+        AppTheme.isDarkAppearance ? AppTheme.onAccentText : AppTheme.danger
     }
 
     var body: some View {

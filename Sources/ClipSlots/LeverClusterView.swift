@@ -104,7 +104,6 @@ struct LeverClusterView: View {
 /// actionBar 里的「自动切换」胶囊按钮。局部观察 autoMode.autoAdvanceEnabled，翻动仅重绘本按钮。
 struct AutoAdvanceToggleView: View {
     @ObservedObject var autoMode: AutoModeState
-    @Environment(\.colorScheme) private var colorScheme
 
     var body: some View {
         Button {
@@ -120,11 +119,11 @@ struct AutoAdvanceToggleView: View {
             .padding(.vertical, 5)
             .background(Capsule().fill(autoMode.autoAdvanceEnabled
                 ? Color.accentColor.opacity(0.18)
-                : AppTheme.filterChipBackground(colorScheme)))
+                : AppTheme.filterChipBackground))
             .overlay(Capsule().stroke(autoMode.autoAdvanceEnabled
                 ? Color.accentColor.opacity(0.55) : Color.clear, lineWidth: 1))
             .foregroundColor(autoMode.autoAdvanceEnabled
-                ? Color.accentColor : AppTheme.filterChipText(colorScheme))
+                ? Color.accentColor : AppTheme.filterChipText)
             .animation(Anim.status, value: autoMode.autoAdvanceEnabled)
         }
         .buttonStyle(.plain)

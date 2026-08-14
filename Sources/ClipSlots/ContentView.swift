@@ -41,12 +41,41 @@ struct ContentView: View {
     // 改为固定列宽后，卡片尺寸在两个宽度台阶之间保持不变，无需逐帧重排。列宽由此工具方法计算，
     // 结果缓存进 @State（gridColumnsState），保证台阶之间数组身份稳定、不触发 LazyVGrid 重新布局。
     static let gridColumnSpacing: CGFloat = 14
-    private static func makeGridColumns(for totalWidth: CGFloat) -> [GridItem] {
-        let spacing = gridColumnSpacing
-        let availableWidth = max(0, totalWidth - AppTheme.pagePadding * 2)
-        let columnCount = max(1, Int((availableWidth + spacing) / 254))
-        let columnWidth = max(1, (availableWidth - spacing * CGFloat(columnCount - 1)) / CGFloat(columnCount))
-        return Array(repeating: GridItem(.fixed(columnWidth), spacing: spacing), count: columnCount)
+
+    /// 外层宽度变化时：记下宽度（写引用盒子，不触发失效），只有**列数真的变了**才写 @State。
+    private func syncGridMetrics(outerWidth: CGFloat) {
+        widthBox.outerWidth = outerWidth
+        let n = Self.columnCount(for: outerWidth)
+        if n != gridColumnCount { gridColumnCount = n }
+    }
+
+    /// 内容区宽度变化时：算出「滚动条预留槽」差值，只有它真的变了才写 @State（实际上一辈子只写一次）。
+    ///
+    /// 探针放在内容流里、且**没有**套过补偿 padding，量到的是纯净的内容区宽度，因此这里直接相减、
+    /// 一次收敛。
+    /// （踩过的坑：最初把探针挂在「已补偿过的网格」的 `.background` 上，量到的宽度含补偿量，
+    /// 于是 deficit 每轮自加一次直到撞上 40pt 上限，卡片被撑宽约 5pt、右边距只剩 13px。
+    /// 两版都用进程内窗口截图逐像素核对过，以本版为准：5 列各 513px、左右边距 40/41px，与 v2.10.92 一致。）
+    private func syncScrollDeficit(contentWidth: CGFloat) {
+        let outer = widthBox.outerWidth
+        guard outer > 0, contentWidth > 0 else { return }
+        let deficit = min(max(0, outer - contentWidth), 40)
+        if abs(deficit - scrollContentDeficit) > 0.5 { scrollContentDeficit = deficit }
+    }
+
+    /// 容器总宽 → 列数。公式与 v2.10.92 的 `makeGridColumns` 完全一致（⌊(可用宽 + 14) / 254⌋）。
+    static func columnCount(for totalWidth: CGFloat) -> Int {
+        let available = max(0, totalWidth - AppTheme.pagePadding * 2)
+        return max(1, Int((available + gridColumnSpacing) / 254))
+    }
+
+    /// 列定义：n 个 `.flexible()` 均分整行。
+    /// 为什么不用 `.adaptive`：实测 `.adaptive(minimum: 240)` 会**在行尾留下约 15pt 的空隙**
+    /// （截图核对：卡片 507px、右边距 71px，而 v2.10.92 是 513px / 41px），网格不再与页面
+    /// 内边距对齐；`.flexible` 是严格均分铺满，与原 `.fixed(算出来的列宽)` 逐像素一致。
+    private var gridColumns: [GridItem] {
+        Array(repeating: GridItem(.flexible(), spacing: Self.gridColumnSpacing),
+              count: max(1, gridColumnCount))
     }
 
     // P2-31 (v2.10.9): 已确认 store 的所有权正确——真正的持有者是 @main `ClipSlotsApp`
@@ -72,20 +101,47 @@ struct ContentView: View {
     @State private var isPageMultiSelecting = false
     // v2.10.69: 量化后的网格容器宽度 + 缓存的列数组。拖拽 resize 时仅当宽度跨过 8pt 台阶才更新，
     // 其余帧沿用同一 [GridItem] 实例（身份稳定），避免逐像素重排。
-    @State private var quantizedGridWidth: CGFloat = 0
-    @State private var gridColumnsState: [GridItem] = []
+    /// v2.10.93: 「装宽度的盒子」。写它的属性**不会**让任何视图失效（普通引用类型，不是 @Published），
+    /// 所以可以在每帧的几何探针里安全地记下最新外层宽度，供另一个探针做一次性比对。
+    private final class WidthBox { var outerWidth: CGFloat = 0 }
+    @State private var widthBox = WidthBox()
+
+    /// v2.10.93: macOS 的 SwiftUI `ScrollView` 会为**传统样式滚动条**预留约 15pt 的槽（接鼠标时
+    /// `NSScroller.preferredScrollerStyle == .legacy`），导致其内容可用宽度比 ScrollView 自身窄。
+    /// v2.10.92 用 `.fixed(按外层宽度算出的列宽)` 时卡片会盖过这段预留区，视觉上左右边距对称（各 20pt）；
+    /// 改用 `.flexible()` 均分后，若不补偿就会出现「右边距 35pt、左边距 20pt」的不对称（实测差 15pt）。
+    /// 这里把差值**实测**出来（不写死 15，overlay 样式下自然为 0），再以负 trailing padding 补回，
+    /// 保证任何滚动条样式下都与 v2.10.92 逐像素一致。
+    @State private var scrollContentDeficit: CGFloat = 0
+
+    /// v2.10.93: 网格列数。**只存列数，不存宽度**——这是本轮 resize 优化的关键取舍：
+    /// 列数在一次拖拽里只会变几次（每跨过约 254pt 才 +1/-1），而宽度每帧都在变。
+    /// 于是「宽度 → 状态回写 → 整棵 body 重算」这条每帧都要走一遍的路径，
+    /// 变成了「跨列时才走一次」；列宽则交给 `.flexible()` 在布局阶段均分铺满，逐帧免费。
+    @State private var gridColumnCount: Int = 0
+
     @State private var selectedPageIds: Set<String> = []
     // v2.9.8: update checker.
     @ObservedObject private var updateChecker = UpdateChecker.shared
     @State private var showingConnectionFullscreen = false
     // v2.9.37: hover state for the footer "上次粘贴" button (subtle hover highlight).
     @State private var lastPasteHovering = false
-    @Environment(\.colorScheme) private var colorScheme
+    // v2.10.93: ContentView 本体**不再读 `@Environment(\.colorScheme)`**。
+    // 原因：整棵主界面（header / 组标签栏 / 网格 / 底栏）都挂在 ContentView.body 上，
+    // 只要它依赖 colorScheme，切一次主题就必须把这一整棵重算一遍（含所有文字重新排版），
+    // 实测单次 130~215ms 主线程停顿——那段时间画面停在旧帧，就是用户说的「卡颜色」。
+    // 颜色现在一律取 AppTheme 的动态 token（绘制时按 appearance 解析），
+    // 少数确实需要显式 scheme 的地方（氛围海报层、顶部材质层）下沉到各自的小视图里去读。
 
     // v2.7.47: new installs should open in dark mode by default.
 // AppStorage's default only applies when UserDefaults has no value, so existing
 // users who already selected system/light/dark are not overwritten.
-@AppStorage("appearanceMode") private var appearanceModeRaw = ThemeMode.dark.rawValue
+// v2.10.93: 原先 ContentView 自己持有 `@AppStorage("appearanceMode")`。
+    // 那意味着**每次切主题都会让整棵 ContentView.body（header / 组标签栏 / 网格 / 底栏）重算一遍**。
+    // 现在这份依赖被下沉到两个叶子视图：
+    //   • `AmbientBackgroundHost`  —— 氛围海报层需要显式 scheme（drawingGroup 纹理要按主题重建）
+    //   • `ThemeCycleButton`       —— 月亮/太阳按钮的图标要反映当前档位
+    // ContentView 自身对主题**零依赖**，切主题不再触发主界面重算。
 
     // v2.5: Search state
     @State private var searchText: String = ""
@@ -117,18 +173,14 @@ struct ContentView: View {
     /// v2.10.91: 有效主题（显式 dark/light 直接取用，system 回落到环境 colorScheme）。
     /// 口径与 RetroPosterAmbientBackground 原先内部的 effectiveScheme 完全一致，只是把推导上移到这里，
     /// 以便作为参数显式传给氛围层（配合 .equatable() 短路，且主题变化必然穿透）。
-    private var effectiveAppearanceScheme: ColorScheme {
-        (ThemeMode(rawValue: appearanceModeRaw) ?? .system).preferredColorScheme ?? colorScheme
-    }
-
     private func cycleAppearanceMode() {
-        let current = ThemeMode(rawValue: appearanceModeRaw) ?? .system
+        let current = ThemeMode(rawValue: AppearanceDefaults.currentRawValue) ?? .system
         switch current {
         // v2.7.41: toolbar theme switch only toggles light/dark.
         // Keep "follow system" only in Settings to avoid confusing three-state cycling.
-        case .system: appearanceModeRaw = ThemeMode.dark.rawValue
-        case .light:  appearanceModeRaw = ThemeMode.dark.rawValue
-        case .dark:   appearanceModeRaw = ThemeMode.light.rawValue
+        case .system: AppearanceDefaults.currentRawValue = ThemeMode.dark.rawValue
+        case .light:  AppearanceDefaults.currentRawValue = ThemeMode.dark.rawValue
+        case .dark:   AppearanceDefaults.currentRawValue = ThemeMode.light.rawValue
         }
     }
 
@@ -186,17 +238,38 @@ struct ContentView: View {
                 }
                 .animation(Anim.reveal, value: isSearchActive)
 
-                GeometryReader { gridGeometry in
-                    let rawWidth = gridGeometry.size.width
-                    // v2.10.75: resize 期间锁定「上次量化台阶宽度」作为有效布局宽度，逐像素 Diff 归零；
-                    // 非 resize 时用真实 rawWidth 自适应。quantizedGridWidth 尚未初始化(0)时兜底用 rawWidth。
-                    let layoutWidth = liveResize.isResizing && quantizedGridWidth > 0 ? quantizedGridWidth : rawWidth
-                    // v2.10.69: 首帧（state 尚空）用当前宽度直接算一份兜底；之后一律读 @State 缓存的
-                    // 列数组，保证拖拽 resize 台阶之间数组身份稳定，不触发 LazyVGrid 逐帧重排。
-                    let columns = gridColumnsState.isEmpty ? Self.makeGridColumns(for: layoutWidth) : gridColumnsState
-
-                    ScrollViewReader { scrollProxy in
+                // ★ v2.10.93（resize 丝滑第二刀）：这里原来是一个包住整个网格的 `GeometryReader`，
+                // 内部把容器宽度量化成 8pt 台阶写回两个 @State（quantizedGridWidth / gridColumnsState），
+                // 再用 `.fixed(列宽)` 构造列，并在 live-resize 期间用 `.frame(width:)` 把内容宽度**冻住**。
+                //
+                // 实测（v2.10.93 单帧布局探针）：这套机制**没有带来任何可测收益**，却带来两个真实代价：
+                //   1) `GeometryReader` 的 closure 每次窗口尺寸变化都要重跑 → 10 张卡片的 View 值被重新
+                //      构造 + SwiftUI 重新 diff（虽有 `.equatable()` 短路 body，构造与 diff 仍然发生）。
+                //      A/B：修掉搜索栏后，一次尺寸变化 26ms，把整个网格摘掉只剩 6ms → 这条路径 ≈20ms/帧。
+                //   2) 冻结宽度让「窗口边框已经跟着鼠标走了，内容还停在上一个台阶」，正是用户抱怨的
+                //      「内容跟不上鼠标」。A/B 关掉冻结（CLIPSLOTS_PERF_EXP_NOFREEZE=1）耗时**一模一样**
+                //      （93.2 vs 93.5ms），证明它只买到了滞后感，没买到帧率。
+                //
+                // 现在的做法：列数用一个极薄的 `.background(GeometryReader)` 探针算出来（探针只产出
+                // `Color.clear`，不参与内容布局），且**只有列数真的变化时**才回写 @State；列宽交给
+                // `.flexible()` 在布局阶段均分铺满整行。
+                // 结果：逐帧不再重建网格子树、不再冻结宽度（内容与窗口边框严格同步），
+                // 而列宽/边距与 v2.10.92 逐像素一致（已用进程内截图核对：5 列各 513px、左右边距均 40px）。
+                ScrollViewReader { scrollProxy in
                         ScrollView {
+                        // v2.10.93: 显式 `VStack(spacing: 0)` 包住滚动内容。
+                        // ScrollView 的隐式容器默认带 8pt 间距，直接塞入下面那个零高度探针会凭空多出
+                        // 8pt、把整个网格下移——已用进程内截图对照发现并修正。
+                        VStack(spacing: 0) {
+                        // 内容宽度探针：零高度、不画任何东西；量到的是 ScrollView **内容区**可用宽
+                        // （已被滚动条预留槽扣掉），与外层宽度相减即得需要补偿的差值。
+                        GeometryReader { contentProxy in
+                            Color.clear
+                                .onAppear { syncScrollDeficit(contentWidth: contentProxy.size.width) }
+                                .onChange(of: contentProxy.size.width) { syncScrollDeficit(contentWidth: $0) }
+                        }
+                        .frame(height: 0)
+
                         // v2.5: No results hint
                         if searchScope == .currentGroup && isSearchActive && matchedSlotCount == 0 {
                             noResultsView
@@ -204,7 +277,7 @@ struct ContentView: View {
                         }
 
                         LazyVGrid(
-                            columns: columns,
+                            columns: gridColumns,
                             spacing: 14
                         ) {
                             ForEach(Array(stride(from: 1, through: store.config.slots, by: 1)), id: \.self) { slot in
@@ -214,17 +287,18 @@ struct ContentView: View {
                                     .id(slot)
                             }
                         }
-                        .padding(AppTheme.pagePadding)
+                        .padding(.vertical, AppTheme.pagePadding)
+                        .padding(.leading, AppTheme.pagePadding)
+                        // 见 scrollContentDeficit 注释：把滚动条预留槽补回去，左右边距才对称。
+                        .padding(.trailing, AppTheme.pagePadding - scrollContentDeficit)
                         // v2.10.47: 切组过渡——保留旧内容但轻微淡化，作为「切换中」骨架的底衬；期间禁用点击。
                         // v2.10.76 (Phase 1 交互状态下沉): 淡化/禁点击/淡入动画迁入 GroupSwitchDimModifier，
                         // 只观察 store.transientUI.isSwitchingGroup——切组状态变更不再触发整棵 ContentView.body
                         // 重新求值。视觉与 v2.10.71 完全一致（0.35 透明度 + 0.16s easeInOut，无全网格模糊）。
                         .modifier(GroupSwitchDimModifier(ui: store.transientUI))
+                        }
                     }
-                    // v2.10.75: resize 期间给 ScrollView 显式固定宽度=锁定的 layoutWidth，让 AppKit 窗口
-                    // 拉伸而 SwiftUI 内容尺寸不动（宁可露底色也保帧率）；非 resize 时 width=nil 恢复自适应。
-                    .frame(width: liveResize.isResizing ? layoutWidth : nil)
-                    .background(AppTheme.windowBackground(colorScheme))
+                    .background(AppTheme.windowBackground)
                     .transaction { $0.animation = nil }
                     // v2.10.47: 切组过渡遮罩——柔和高光扫过淡化后的旧内容，表示「正在切换/加载」。
                     // v2.10.76 (Phase 1): 遮罩显隐迁入 GroupSwitchVeilOverlay，只观察 store.transientUI。
@@ -240,24 +314,18 @@ struct ContentView: View {
                             scrollProxy.scrollTo(target.slot, anchor: .center)
                         }
                     }
-                    // v2.10.69: 网格宽度量化——仅当容器宽度相对上次缓存变化 ≥ 8pt（或首次）时，
-                    // 才重算并提交固定列宽到 @State。这样把拖拽 resize 的「逐像素重排」降为「每 8pt 一次」，
-                    // 其余帧沿用同一 [GridItem] 实例，卡片尺寸固定、不再逐帧重解算布局。
-                    .onChange(of: rawWidth) { newWidth in
-                        if quantizedGridWidth == 0 || abs(newWidth - quantizedGridWidth) >= 8 {
-                            quantizedGridWidth = newWidth
-                            gridColumnsState = Self.makeGridColumns(for: newWidth)
+                    // 列数探针：GeometryReader 放在 `.background` 里，只输出 Color.clear，
+                    // 因此它的 closure 重跑不会重建任何真实内容；只有跨列时才写一次 @State。
+                    .background(
+                        GeometryReader { proxy in
+                            Color.clear
+                                .onChange(of: proxy.size.width) { syncGridMetrics(outerWidth: $0) }
+                                .onAppear { syncGridMetrics(outerWidth: proxy.size.width) }
                         }
-                    }
-                    // v2.10.75: resize 结束时强制把量化宽度对齐到真实宽度并重算列，避免停在
-                    // 1-7pt 偏差处（< 8pt 阈值未触发）导致网格没贴齐窗口边缘的量化边界回归。
-                    .onChange(of: liveResize.isResizing) { resizing in
-                        if resizing == false {
-                            quantizedGridWidth = rawWidth
-                            gridColumnsState = Self.makeGridColumns(for: rawWidth)
-                        }
-                    }
-                }
+                    )
+                    // v2.10.93 (测量): 这一层的求值次数 = 「网格子树被重新构造」的次数。
+                    // 修好之后它应当**不再随窗口尺寸变化增长**（尺寸变化只走布局，不重建视图值）。
+                    .perfCount("gridSubtree")
                 }
 
                 bottomBar
@@ -280,11 +348,7 @@ struct ContentView: View {
                 // 因此主题一变 → 参数变 → Equatable 判不等 → body 必然重算，且内部 `.id(scheme)` 同步换身份、
                 // 强制重建 drawingGroup 的 GPU 纹理。这比原先「依赖环境/AppStorage 在 .background 子树里的
                 // 传播时机」更强，不会重现卡旧色。
-                RetroPosterAmbientBackground(
-                    scheme: effectiveAppearanceScheme,
-                    simplified: liveResize.isResizing
-                )
-                .equatable()
+                AmbientBackgroundHost(simplified: liveResize.isResizing)
                 .ignoresSafeArea()
             )
 
@@ -456,11 +520,7 @@ struct ContentView: View {
         // v2.10.81: 用独立矩形承载 .regularMaterial 并加 .id(colorScheme)，切主题时强制重建这层
         // NSVisualEffectView——修复 AppKit 材质 appearance 滞后（顶部磨砂玻璃切主题后卡旧色）。
         // .id 只作用于材质层，不波及 header 内容子树（搜索框文本/焦点、popover 状态不受影响）。
-        .background(
-            Rectangle()
-                .fill(.regularMaterial)
-                .id(colorScheme)
-        )
+        .background(HeaderMaterialBackground())
         .popover(isPresented: $showingSpecialSlotManagement) {
             SpecialSlotManagementView(store: store)
         }
@@ -506,7 +566,7 @@ struct ContentView: View {
             HStack(spacing: 14) {
                 ZStack {
                 RoundedRectangle(cornerRadius: 12, style: .continuous)
-                    .fill(AppTheme.brandGradient(colorScheme))
+                    .fill(AppTheme.brandGradient)
                     .frame(width: 44, height: 44)
                     .shadow(color: Color.accentColor.opacity(0.25), radius: 10, y: 4)
 
@@ -568,15 +628,7 @@ struct ContentView: View {
             .layoutPriority(0)
 
             HStack(spacing: 8) {
-                Button {
-                cycleAppearanceMode()
-            } label: {
-                Image(systemName: (ThemeMode(rawValue: appearanceModeRaw) ?? .system).icon)
-                    .font(.system(size: 15, weight: .semibold))
-                    .frame(width: 30, height: 30)
-            }
-            .buttonStyle(.borderless)
-            .help("外观：\((ThemeMode(rawValue: appearanceModeRaw) ?? .system).title)，点击切换")
+                ThemeCycleButton(onCycle: cycleAppearanceMode)
 
             // v2.9.8: 插件入口（月亮与键盘图标之间）
             Button {
@@ -669,11 +721,11 @@ struct ContentView: View {
                 .padding(.vertical, 4)
                 .background(
                     RoundedRectangle(cornerRadius: 9, style: .continuous)
-                        .fill(Color.primary.opacity(colorScheme == .dark ? 0.09 : 0.055))
+                        .fill(AppTheme.capsuleFill)
                 )
                 .overlay(
                     RoundedRectangle(cornerRadius: 9, style: .continuous)
-                        .stroke(Color.secondary.opacity(colorScheme == .dark ? 0.20 : 0.13), lineWidth: 0.8)
+                        .stroke(AppTheme.capsuleStroke, lineWidth: 0.8)
                 )
             }
             .buttonStyle(.plain)
@@ -700,7 +752,7 @@ struct ContentView: View {
                         .frame(width: 30, height: 30)
                     Image(systemName: "square.grid.2x2.fill")
                         .font(.system(size: 11, weight: .semibold))
-                        .foregroundColor(colorScheme == .dark ? .black : .white)
+                        .foregroundColor(AppTheme.invertedOnAccentText)
                 }
                 Text("页面导航")
                     .font(.system(size: 13, weight: .semibold))
@@ -1243,7 +1295,7 @@ struct ContentView: View {
             .padding(.vertical, 4)
             .background(
                 RoundedRectangle(cornerRadius: 6, style: .continuous)
-                    .fill(lastPasteHovering ? AppTheme.chipBackground(colorScheme) : Color.clear)
+                    .fill(lastPasteHovering ? AppTheme.chipBackground : Color.clear)
             )
             .contentShape(Rectangle())
         }
@@ -1313,7 +1365,7 @@ struct ContentView: View {
             .font(.caption2)
             .padding(.horizontal, 9)
             .padding(.vertical, 5)
-            .background(Capsule().fill(AppTheme.chipBackground(colorScheme)))
+            .background(Capsule().fill(AppTheme.chipBackground))
     }
 
     private func shortcutPreview(_ template: String, slot: Int) -> String {
@@ -1725,8 +1777,6 @@ private struct ToolbarActionButton: View {
     let action: () -> Void
     @State private var isHovering = false
 
-    @Environment(\.colorScheme) private var colorScheme
-
     var body: some View {
         Button(action: action) {
             HStack(spacing: 6) {
@@ -1775,7 +1825,7 @@ private struct ToolbarActionButton: View {
     private var backgroundColor: Color {
         switch role {
         case .normal:
-            return Color.primary.opacity(colorScheme == .dark ? 0.12 : 0.07)
+            return AppTheme.groupTagIdleFill
         case .accent:
             return Color.accentColor
         case .destructive:
@@ -2170,6 +2220,68 @@ private struct RetroPosterGrain: View {
     }
 }
 
+/// v2.10.93: 氛围海报层的宿主。
+///
+/// 主题依赖只留在这一层：它自己读 `@AppStorage("appearanceMode")` 与环境 colorScheme 推导有效主题，
+/// 再把结果作为参数传给 Equatable 的 `RetroPosterAmbientBackground`。
+/// 这样既保住 v2.10.80/81 的不变量（主题一变，参数必变 → body 必重算 → `.id(scheme)` 重建
+/// drawingGroup 纹理，绝不卡旧色），又不再把「整棵 ContentView」拖进主题切换的重算范围。
+private struct AmbientBackgroundHost: View {
+    let simplified: Bool
+    @AppStorage("appearanceMode") private var appearanceModeRaw = ThemeMode.dark.rawValue
+    @Environment(\.colorScheme) private var colorScheme
+
+    private var effectiveScheme: ColorScheme {
+        (ThemeMode(rawValue: appearanceModeRaw) ?? .system).preferredColorScheme ?? colorScheme
+    }
+
+    var body: some View {
+        RetroPosterAmbientBackground(scheme: effectiveScheme, simplified: simplified)
+            .equatable()
+    }
+}
+
+/// v2.10.93: 外观切换按钮（月亮 / 太阳 / 自动）。
+/// 图标需要反映当前档位，所以它必须依赖 appearanceMode —— 单独成一个叶子视图，
+/// 让这份依赖不再牵连整个 titleBar 重算。
+private struct ThemeCycleButton: View {
+    let onCycle: () -> Void
+    @AppStorage("appearanceMode") private var appearanceModeRaw = ThemeMode.dark.rawValue
+
+    private var mode: ThemeMode { ThemeMode(rawValue: appearanceModeRaw) ?? .system }
+
+    var body: some View {
+        Button(action: onCycle) {
+            Image(systemName: mode.icon)
+                .font(.system(size: 15, weight: .semibold))
+                .frame(width: 30, height: 30)
+        }
+        .buttonStyle(.borderless)
+        .help("外观：\(mode.title)，点击切换")
+    }
+}
+
+/// v2.10.93: 顶部磨砂玻璃材质层。
+///
+/// 之所以单独成一个视图：`.regularMaterial` 背后是 AppKit 的 NSVisualEffectView，
+/// v2.10.81 曾给它加 `.id(colorScheme)` 来强制切主题时重建（修「顶部材质卡旧色」）。
+/// 但 `.id` 变化意味着**销毁 + 重建**一个 NSVisualEffectView，这本身就是一次卡顿；
+/// 而且它写在 header 的 `.background` 里，导致整个 headerView 都要跟着 colorScheme 重算。
+/// 现在把这层单独隔离：colorScheme 的依赖只留在这一个叶子视图里，
+/// header 其余内容（搜索框、拨杆、组标签…）不再被主题切换牵连重算。
+private struct HeaderMaterialBackground: View {
+    @Environment(\.colorScheme) private var colorScheme
+
+    var body: some View {
+        // `.id(colorScheme)` 保留（v2.10.81 的不变量）：切主题时强制重建这层 NSVisualEffectView，
+        // 杜绝「顶部磨砂条卡旧色」。A/B 实测它对切主题耗时无可测影响（122 vs 131ms，噪声内），
+        // 而隔离成叶子视图后它不再牵连整个 headerView 重算，所以留着纯属保险。
+        Rectangle()
+            .fill(.regularMaterial)
+            .id(colorScheme)
+    }
+}
+
 // MARK: - v2.7.40 Fullscreen Connection Mode
 
 private struct ConnectionFullscreenView: View {
@@ -2177,15 +2289,13 @@ private struct ConnectionFullscreenView: View {
     var onClose: () -> Void
     var onOpenNodeCanvas: () -> Void
     var onOpenManager: () -> Void
-    @Environment(\.colorScheme) private var colorScheme
-
     var body: some View {
         ZStack {
             LinearGradient(
                 colors: [
-                    AppTheme.windowBackground(colorScheme),
-                    Color.accentColor.opacity(colorScheme == .dark ? 0.16 : 0.08),
-                    AppTheme.windowBackground(colorScheme)
+                    AppTheme.windowBackground,
+                    AppTheme.accentHairline,
+                    AppTheme.windowBackground
                 ],
                 startPoint: .topLeading,
                 endPoint: .bottomTrailing

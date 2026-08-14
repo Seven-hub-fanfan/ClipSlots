@@ -4,7 +4,6 @@ import ClipSlotsKit
 struct ConnectionManagementSheet: View {
     @ObservedObject var store: SlotStoreObservable
     @Environment(\.dismiss) private var dismiss
-    @Environment(\.colorScheme) private var colorScheme
 
     @State private var fromSlot: Int = 1
     @State private var toSlot: Int = 2

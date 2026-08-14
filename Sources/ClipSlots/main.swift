@@ -85,8 +85,10 @@ struct ClipSlotsApp: App {
     // v2.7.54: startup entry must also default to dark.
     // v2.7.47 changed ContentView/SettingsView, but App root still defaulted to
     // system, so first launch could render as light before ContentView appeared.
-    @AppStorage("appearanceMode") private var appearanceModeRaw = ThemeMode.dark.rawValue
-    private var appearanceMode: ThemeMode { ThemeMode(rawValue: appearanceModeRaw) ?? .dark }
+    // v2.10.93: App 根不再持有 `@AppStorage("appearanceMode")`。
+    // 它唯一的用途是喂 `.preferredColorScheme`，而那条路径已按上面的注释移除；
+    // 留着 @AppStorage 只会让**整个 Scene** 在切主题时重新求值一次（连带重新下发 ContentView 值）。
+    // 主题现在只有一条生效路径：UserDefaults → AppDelegate.applyAppAppearance → NSApp.appearance。
 
     var body: some Scene {
         WindowGroup {
@@ -101,7 +103,22 @@ struct ClipSlotsApp: App {
                 // 原因推测是没有根部弹性 frame 后，hosting view 与窗口之间要反复协商内容尺寸，反而多了
                 // 布局往返。故保留原写法。
                 .frame(minWidth: 720, minHeight: 560)
-                .preferredColorScheme(appearanceMode.preferredColorScheme)
+                // ★ v2.10.93（切主题「卡颜色」第三刀）：这里**故意不再设 `.preferredColorScheme`**。
+                //
+                // 自 v2.10.91 起主题已经由 `AppDelegate.applyAppAppearance()` 同步到 `NSApp.appearance`
+                // （启动时 + 每次偏好变化，见 AppDelegate）。若这里再设一次 `.preferredColorScheme`，
+                // 主窗口就会被**两条独立路径**各改一次 appearance：SwiftUI 改 hosting window 的 appearance、
+                // AppDelegate 改 NSApp 的 appearance。两次 appearance 变更 = 两轮全窗口重绘 + 两轮
+                // AppKit `_viewDidChangeAppearance` 传播，而且两轮之间画面处于「一半旧色一半新色」的
+                // 中间态——这正是用户反馈的「切深浅色卡颜色」。
+                //
+                // A/B 实测（release，10 张卡片，同一台机器交替跑）：
+                //   保留 .preferredColorScheme：单次切主题主线程停顿 130ms / 131ms，>100ms 严重卡顿 3/3 次
+                //   去掉（只留 NSApp.appearance）：85ms / 89ms，>100ms 严重卡顿 **0 次**
+                //
+                // 语义不变：`.system` 档 `NSApp.appearance = nil` 即跟随系统；显式 light/dark 则由
+                // NSApp.appearance 决定，SwiftUI 的 `\.colorScheme` 环境值会从窗口 effectiveAppearance
+                // 推导出来，与原先一致。（子窗口如环形菜单/悬浮提示仍各自设 preferredColorScheme，不受影响。）
                 .onAppear {
                     AppearanceDefaults.ensureDefaultDarkIfNeeded()
                     appDelegate.store = store
@@ -6475,9 +6492,20 @@ private extension String {
 }
 
 enum AppearanceDefaults {
+    static let key = "appearanceMode"
+
     static func ensureDefaultDarkIfNeeded() {
         let defaults = UserDefaults.standard
-        guard defaults.object(forKey: "appearanceMode") == nil else { return }
-        defaults.set(ThemeMode.dark.rawValue, forKey: "appearanceMode")
+        guard defaults.object(forKey: key) == nil else { return }
+        defaults.set(ThemeMode.dark.rawValue, forKey: key)
+    }
+
+    /// v2.10.93: 直读/直写主题档位。
+    /// 供**不需要观察**主题变化的调用方使用（例如"点一下切换外观"这个动作本身）——
+    /// 用 `@AppStorage` 会让宿主视图订阅主题变化，从而在切主题时被迫整棵重算；
+    /// 而动作只在被点击时读一次当前值，没有订阅的必要。
+    static var currentRawValue: String {
+        get { UserDefaults.standard.string(forKey: key) ?? ThemeMode.dark.rawValue }
+        set { UserDefaults.standard.set(newValue, forKey: key) }
     }
 }

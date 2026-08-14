@@ -4,7 +4,6 @@ import ClipSlotsKit
 struct SpecialSlotManagementView: View {
     @ObservedObject var store: SlotStoreObservable
     @Environment(\.dismiss) private var dismiss
-    @Environment(\.colorScheme) private var colorScheme
 
     @State private var selectedId: String = ""
     @State private var showingNewDialog = false
@@ -22,7 +21,7 @@ struct SpecialSlotManagementView: View {
             HStack(spacing: 12) {
                 ZStack {
                     RoundedRectangle(cornerRadius: 10, style: .continuous)
-                        .fill(AppTheme.brandGradient(colorScheme))
+                        .fill(AppTheme.brandGradient)
                         .frame(width: 38, height: 38)
                     Image(systemName: "folder.fill")
                         .font(.system(size: 17, weight: .semibold))
@@ -138,7 +137,7 @@ struct SpecialSlotManagementView: View {
             .overlay(alignment: .top) { Divider() }
         }
         .frame(width: 500, height: 380)
-        .background(AppTheme.windowBackground(colorScheme))
+        .background(AppTheme.windowBackground)
         .onAppear { selectedId = store.currentSpecialSlotId }
         .sheet(isPresented: $showingNewDialog) {
             newSpecialSlotSheet()

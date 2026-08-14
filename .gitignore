@@ -17,3 +17,4 @@ assets/AppIcon.iconset/
 # Build DMG artifacts
 build/*.dmg
 build/dmg_staging/
+build/perf/

@@ -4,7 +4,7 @@
 
 ## 当前版本
 
-- **当前版本：v2.10.92**
+- **当前版本：v2.10.93**
 - 平台：macOS（Swift / SwiftUI，SPM 构建，macOS 13+）
 - 单一版本号事实来源：`Info.plist` 的 `CFBundleShortVersionString`（`AppVersion.current` 动态读取，`AppVersion.fallback` 为编译期兜底）。CLI 版本号见 `Sources/ClipSlotsCLI/main.swift` 的 `CLI_VERSION`。
 
@@ -16,6 +16,44 @@
 - 另一条铁律：**装机的包必须与将要发布的版本号严格对应**。曾出现「装进 /Applications 的 2.10.91 里含未提交代码」的脏包，与 GitHub 上的 2.10.91 不是同一个东西，排查时极易误判。
 
 ## 版本要点（近期）
+
+### v2.10.93 — ★全方位丝滑：窗口缩放 3.5x / 切主题「卡颜色」根治 / 切组 3.7x（★当前正式发布版）
+
+- **方法论（延续 v2.10.91 的教训）**：先加测量再动手。新增两件取数设施：
+  - 「单帧布局耗时」探针（`PerfAutoTest.measureResizeSteps`，场景 `resizestep`）：离散步进改窗口尺寸，
+    单独计时 `setFrame(display:true)` 这一次**同步布局+显示**。60Hz 连续扫掠会让主线程永久饱和、
+    测出来只是「饱和」，无判别力——这一点踩过坑，勿再用扫掠数据做归因。
+  - 进程内窗口截图（`PerfAutoTest.snapshotWindow`，场景 `shot` / `themeshot`）：`NSView.cacheDisplay`
+    渲染 PNG，不依赖屏幕/Space/截屏权限，用于改前改后**逐像素**核对视觉零回归。
+  - `scripts/perf_probe.sh`：一键 build+组 bundle（id `com.clipslots.app.perf`，UserDefaults 与数据目录全隔离）+跑场景+打摘要。
+- **真凶 1：搜索栏三层嵌套 `ViewThatFits` = 一帧 ≈66ms**（窗口缩放跟不上鼠标的主因）。
+  ViewThatFits 逐个完整测量每个候选，嵌套相乘；候选内含 NSSegmentedControl/NSMenu/NSTextField，
+  测量即实例化 platform view。二分数据：整帧 104ms → 摘搜索栏 34ms → 仅去嵌套 38ms；
+  对照：关掉整窗 4 层大高斯模糊氛围层 96ms（**背景根本不是瓶颈**，v2.10.69/70/75 三轮都优化错了地方）。
+  改法：自建 `WidthThresholdLayout`（按可用宽度阈值 340pt 二选一，只测量被选中候选）；
+  删掉 `filterStrip`（受 `.frame(maxWidth: 400)` 限宽，任何尺寸下都从未被选中，已截图确认）。
+- **真凶 2：包住网格的 GeometryReader 每帧重建网格子树 ≈20ms/帧**。
+  改法：只用 `.background` 里的探针算**列数**（跨列才写 @State），列宽交给 `.flexible()` 布局期均分；
+  **删除 v2.10.75 的 resize 冻结**——A/B 证明它对耗时零贡献（93.2 vs 93.5ms），只带来「内容跟不上鼠标」的滞后感。
+  注：macOS ScrollView 会为传统滚动条预留 ~15pt，`.flexible()` 均分内容区后需用负 trailing padding 补回，
+  否则右边距比左边多 15pt；补偿量由「外层宽 - 内容区宽」实测，**探针必须放在未补偿的内容流里**
+  （挂到已补偿视图的 background 上会自我叠加，实测 deficit 15→30→撞 40 上限，卡片被撑宽 5pt）。
+  另注：`.adaptive(minimum:)` 会在行尾留 15pt 空隙，不能用来替代 `.fixed`。
+- **真凶 3：切主题要靠「每个视图重算 body」才能换色**，采样里 CoreText 重新排版占大头。
+  改法：AppTheme 全量 token 改为 `NSColor(name:dynamicProvider:)` 动态色（绘制时按 appearance 解析），
+  各视图不再读 `@Environment(\.colorScheme)`；主题依赖下沉到两个叶子视图
+  （`AmbientBackgroundHost` 需显式 scheme 重建 drawingGroup 纹理、`ThemeCycleButton` 需反映档位）。
+  实测：切主题时 SlotCardView.body 10→0，ContentView/header/tagBar/bottomBar → 0，只剩氛围层 1 次。
+  **每个 token 保留忽略 scheme 参数的同名重载 shim**，100+ 处老调用点无需改写。
+- **真凶 4：主题有两条生效路径 = 两轮全窗重绘**。移除根视图 `.preferredColorScheme`
+  （v2.10.91 起 `NSApp.appearance` 已是单一驱动），App 根也不再持有 `@AppStorage("appearanceMode")`。
+  A/B：130ms → 87ms，>100ms 严重卡顿 3/3 → 0。语义不变（`.system` 档 NSApp.appearance=nil 跟随系统）。
+- **交替 A/B 结果（同机、同负载、base 用 worktree 编 HEAD 版本）**：
+  resize 单帧 102~113ms → 27~34ms；切主题 300~1600ms → 83~93ms（严重卡顿 0 次）；
+  切组 442~497ms → 126~136ms（严重卡顿 20~23 次 → 0~1 次）；关设置 158~364ms → 0~33ms。
+- 视觉核对：深色/浅色/760pt 窄窗三档逐像素对照 —— 窗口底色、卡片底色、顶部条 RGB 完全一致；
+  5 列各 513/512px、左右边距 40/41px 完全一致；窄窗仍是「搜索范围退化为地球图标菜单」。
+- 测试：`swift run ClipSlotsKitSmokeTests` 59/59 通过。
 
 ### v2.10.92 — ★辅助功能引导弹窗 runModal 让全 App 异步刷新停摆 + 自动更新护栏（★当前正式发布版）
 

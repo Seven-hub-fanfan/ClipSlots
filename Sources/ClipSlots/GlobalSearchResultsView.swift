@@ -14,7 +14,6 @@ struct GlobalSearchResultsView: View {
     // v2.10.48: 悬停防抖 work item——扫视 / 滚动搜索结果列表时，抑制右侧预览随每一行掠过而
     // 疯狂重新解码切换，消除「预览图狂闪」。停留 ~80ms 后才真正切换选中项。
     @State private var hoverDebounce: DispatchWorkItem?
-    @Environment(\.colorScheme) private var colorScheme
 
     private var previewResult: SlotGlobalSearchResult? {
         if let id = selectedResultId,

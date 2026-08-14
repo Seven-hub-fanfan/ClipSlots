@@ -3,15 +3,14 @@ import ClipSlotsKit
 
 /// A fixed-height empty slot placeholder that never has any @State image to leak.
 struct EmptySlotThumbnailView: View {
-    @Environment(\.colorScheme) private var colorScheme
 
     var body: some View {
         ZStack {
             RoundedRectangle(cornerRadius: AppTheme.slotPreviewCornerRadius, style: .continuous)
-                .fill(AppTheme.previewBackground(colorScheme))
+                .fill(AppTheme.previewBackground)
                 .overlay(
                     RoundedRectangle(cornerRadius: AppTheme.slotPreviewCornerRadius, style: .continuous)
-                        .strokeBorder(AppTheme.subtleBorder(colorScheme).opacity(0.65), lineWidth: 1)
+                        .strokeBorder(AppTheme.subtleBorder.opacity(0.65), lineWidth: 1)
                 )
                 .allowsHitTesting(false)
 
