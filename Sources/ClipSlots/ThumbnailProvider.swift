@@ -44,10 +44,28 @@ final class ThumbnailProvider: ObservableObject {
     private var inFlight: Set<String> = []
     private var failedKeys: Set<String> = []
 
-    // PERF-2 (v2.10.84): 变更通知合并。`notifyPending` 表示「已有一次合并通知在途」，
-    // 在窗口内到达的后续通知请求直接被它覆盖，不再各自触发一次全网格重绘。
-    // 读写均在既有 lock（NSLock）保护下进行，与 cache/inFlight 等状态保持一致。
-    private var notifyPending = false
+    // PERF-2 (v2.10.84): 变更通知合并，把一屏缩略图回填的数十次全网格重绘压成 1~2 次。
+    //
+    // v2.10.86 修复（切到一个组时全部槽位停在占位图、切走再切回才出图）：
+    // 原实现只用一个 `notifyPending` 布尔量做「窗口内去重」，一个合并窗口只会发出**恰好一次**
+    // `objectWillChange.send()`。而 SwiftUI 的失效通知并非「一定被下一帧看到」——当这唯一的一次
+    // send 恰好落在切组自身的更新/过渡（slots 提交 + GroupSwitchDim 动画）进行中时，已经在本轮
+    // 更新里求值过的那些卡片可能不会因它再次求值（这也是 SwiftUI「Publishing changes from within
+    // view updates」告警描述的那类时序）。v2.10.83 之前之所以看不到这个问题，是因为当时每张图
+    // 「开始加载 + 解码完成」各发一次、外加切组 onCommit 里 `invalidateSpecialSlot(oldId)` 还会在
+    // 提交后的下一个 tick 再发一次 —— 一次 burst 里有约 20 次 send，总有一次落在安全时机。
+    // PERF-2 把 20 次压到 1 次、PERF-1 又移走了那次 onCommit 通知，于是「唯一的一次 send 被吞掉」
+    // 就变成了必现的「不加载」。
+    //
+    // 现在改为 epoch 计数 + 双保险投递：
+    // 1. 每次状态变化 `changeEpoch += 1`；flush 时记录 `flushedEpoch`，因此「flush 之后又发生的
+    //    变化」一定会被识别出来并再排一次 flush（不再依赖布尔量恰好覆盖）。
+    // 2. 每次 flush 除了立即 send，还会在**下一个 runloop tick** 补发一次校验 send。它必然落在
+    //    当前那轮 SwiftUI 更新之外，保证「解码完成」这件事最终一定被视图看到。
+    //    代价是一次 burst 2 次全网格重绘（对比 v2.10.83 的约 20 次），PERF-2 的收益基本保留。
+    private var changeEpoch: UInt64 = 0
+    private var flushedEpoch: UInt64 = 0
+    private var flushScheduled = false
     /// 合并窗口：一帧（约 16ms）。低于一帧、肉眼不可察，却能把一屏缩略图回填的数十次
     /// objectWillChange 压成 1~2 次。
     private static let notifyCoalesceWindow: TimeInterval = 1.0 / 60.0
@@ -316,29 +334,62 @@ final class ThumbnailProvider: ObservableObject {
 
     /// 在主线程发出**合并后**的 objectWillChange（ObservableObject 通知须在主线程）。
     ///
-    /// PERF-2 (v2.10.84): 合并窗口 = 一帧（约 16ms）。窗口内到达的任意多次通知请求只会触发一次
-    /// `objectWillChange.send()`，从而把「一屏缩略图逐张回填」造成的数十次全网格重绘压到 1~2 次。
-    /// 16ms 的延迟低于一帧、肉眼不可察，但对主线程的解放非常显著。
+    /// PERF-2 (v2.10.84): 合并窗口 = 一帧（约 16ms）。窗口内到达的任意多次变更只触发一次 flush，
+    /// 从而把「一屏缩略图逐张回填」造成的数十次全网格重绘压到 1~2 次。
     ///
-    /// 正确性说明：本方法只影响「何时通知」，不影响「通知什么」。视图渲染始终是
-    /// `state(for: currentKey)` 的纯函数，合并后的那一次 send 会让所有视图重新读取自己最新的 key
-    /// 状态，因此不会丢更新（最后一次请求必然被那次 send 覆盖）。
-    /// 异步派发同时避开了「在视图更新中发布变更」的运行时告警。
+    /// v2.10.86: 记录 `changeEpoch`，使「flush 之后才发生的变更」必然被下一次 flush 覆盖；
+    /// 单纯的布尔量去重做不到这一点，且一个 burst 只发一次 send 时那一次若被 SwiftUI 的更新时序
+    /// 吞掉就再无补救（表现为切组后整组缩略图停在占位图）。详见属性声明处的长注释。
     private func scheduleCoalescedChangeNotification() {
         lock.lock()
-        if notifyPending {
+        changeEpoch &+= 1
+        if flushScheduled {
             lock.unlock()
-            return  // 已有一次合并通知在途，本次请求被它覆盖
+            return  // 已有一次 flush 在途；它会读到更新后的 epoch，本次变更必被覆盖
         }
-        notifyPending = true
+        flushScheduled = true
         lock.unlock()
 
         DispatchQueue.main.asyncAfter(deadline: .now() + Self.notifyCoalesceWindow) { [weak self] in
-            guard let self = self else { return }
-            self.lock.lock()
-            self.notifyPending = false
-            self.lock.unlock()
-            self.objectWillChange.send()
+            self?.flushChangeNotification()
+        }
+    }
+
+    /// 主线程执行一次合并通知的投递。
+    ///
+    /// v2.10.86: 两道保险——
+    /// 1. **补发校验 send**：立即 send 之后再于下一个 runloop tick 补发一次。这一次必然落在当前
+    ///    SwiftUI 更新轮次之外，因此即使第一次 send 撞上切组的更新/动画窗口被吞掉，缩略图也一定
+    ///    会在下一帧被画出来。这是本次回归（「切组不出图，切走再回来才出」）的直接修复点。
+    /// 2. **epoch 追平**：若 flush 期间又有新的解码完成（changeEpoch 前进），立刻再排一次 flush，
+    ///    绝不会出现「最后一次变更没人通知」的尾部丢失。
+    private func flushChangeNotification() {
+        lock.lock()
+        flushScheduled = false
+        let epoch = changeEpoch
+        let hasPendingChange = epoch != flushedEpoch
+        flushedEpoch = epoch
+        lock.unlock()
+
+        guard hasPendingChange else { return }
+
+        objectWillChange.send()
+
+        // 保险 1：下一个 tick 补发。不改变「画什么」（渲染始终是 state(for: currentKey) 的纯函数），
+        // 只保证「何时被看到」不再依赖单次 send 的运气。
+        DispatchQueue.main.async { [weak self] in
+            self?.objectWillChange.send()
+        }
+
+        // 保险 2：flush 期间到达的新变更立即安排下一次 flush。
+        lock.lock()
+        let needsAnotherFlush = changeEpoch != flushedEpoch && !flushScheduled
+        if needsAnotherFlush { flushScheduled = true }
+        lock.unlock()
+        if needsAnotherFlush {
+            DispatchQueue.main.asyncAfter(deadline: .now() + Self.notifyCoalesceWindow) { [weak self] in
+                self?.flushChangeNotification()
+            }
         }
     }
 
@@ -348,6 +399,33 @@ final class ThumbnailProvider: ObservableObject {
     }
 
     // MARK: - Invalidation
+
+    /// v2.10.86: 切组/切页「新数据已提交」后的收尾刷新。**不动缓存**，因此完整保留 PERF-1
+    /// （跨组常驻缓存、A→B→A 秒回）的收益，只做两件低成本、且都不可能造成串图的事：
+    ///
+    /// 1. 清掉进入组的 `failedKeys`。失败态原本是为了「不无限重试」，但它是永久的：一旦某次解码
+    ///    因偶发原因（QuickLook 抖动、10s 看门狗兜底、请求被取消）返回 nil，该 key 就再也不会被
+    ///    重试，槽位永久停在占位图。v2.10.83 之前每次切组都会 `invalidateSpecialSlot(oldId)`，
+    ///    顺带清掉了离开组的失败态，于是「切走再切回」总能自愈；PERF-1 移除后这条自愈路径也没了。
+    ///    这里改为在**进入**某组时给它一次干净的重试机会——只清失败态，不丢任何已解码图片。
+    /// 2. 在提交后的这个 tick 触发一次变更通知，让刚提交的新 slots 与缓存状态对齐重渲染
+    ///    （即 v2.10.83 之前由 onCommit 的 invalidate 顺带完成、PERF-1 之后缺失的那次通知）。
+    ///
+    /// 不变量安全性：失败态里从不含图片，清空它只可能导致「重新解码一次」，绝不可能让任何槽位
+    /// 显示到别的内容；缓存键仍为 `specialSlotId::slot::contentId::updatedAt`，内容一变键必变。
+    func refreshAfterGroupSwitch(specialSlotId: String) {
+        let prefix = "\(specialSlotId)::"
+        lock.lock()
+        let clearedFailures = failedKeys.contains { $0.hasPrefix(prefix) }
+        if clearedFailures {
+            failedKeys = failedKeys.filter { !$0.hasPrefix(prefix) }
+        }
+        lock.unlock()
+        scheduleCoalescedChangeNotification()
+        if clearedFailures {
+            NSLog("[ClipSlots] ThumbnailProvider cleared failed keys for prefix=\(prefix) (retry on group switch)")
+        }
+    }
 
     /// Invalidate all cached thumbnails and in-flight requests for a specific slot.
     func invalidateSlot(specialSlotId: String, slot: Int) {

@@ -854,6 +854,10 @@ final class SlotStoreObservable: ObservableObject {
                 self.loadConnectionMapForCurrentGroup()
                 self.reloadLastPasteFromDefaults()
                 self.recomputeAutoPreviews()
+                // v2.10.86: 与 loadSlotsAsync 的提交点保持一致——watcher / 外部写入触发的 reload
+                // 也可能是「进入这一组后第一次拿到内容」的那次提交（例如它抢在切组读盘之前完成），
+                // 所以同样补一次缩略图层收尾刷新。只清失败态 + 通知，不清缓存。
+                ThumbnailProvider.shared.refreshAfterGroupSwitch(specialSlotId: activeId)
                 completion?()
             }
         }
@@ -2299,6 +2303,12 @@ final class SlotStoreObservable: ObservableObject {
                 self.endGroupSwitchTransition()
                 self.loadedSpecialSlotId = activeId
                 self.refreshTrigger = UUID()
+                // v2.10.86（修复「切到一个组时全部槽位停在占位图，切走再切回才加载」）：
+                // 新 slots 刚提交完，这里给缩略图层补一次「进入组」收尾刷新。它只清进入组的失败态
+                // 并触发一次变更通知，**不清任何缓存**，所以 PERF-1（跨组常驻缓存）收益完整保留。
+                // 这补回了 v2.10.83 之前由 onCommit 的 invalidateSpecialSlot(oldId) 顺带提供的
+                // 「提交后一个 tick 再通知一次」，同时恢复了「偶发解码失败可在切组时自愈」的行为。
+                ThumbnailProvider.shared.refreshAfterGroupSwitch(specialSlotId: activeId)
                 onCommit?()
             }
 

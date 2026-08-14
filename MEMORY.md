@@ -4,13 +4,27 @@
 
 ## 当前版本
 
-- **当前版本：v2.10.85**
+- **当前版本：v2.10.86**
 - 平台：macOS（Swift / SwiftUI，SPM 构建，macOS 13+）
 - 单一版本号事实来源：`Info.plist` 的 `CFBundleShortVersionString`（`AppVersion.current` 动态读取，`AppVersion.fallback` 为编译期兜底）。CLI 版本号见 `Sources/ClipSlotsCLI/main.swift` 的 `CLI_VERSION`。
 
 ## 版本要点（近期）
 
-### v2.10.85 — 悬停预览显示文件图标而非真实图片内容（★当前正式发布版）
+### v2.10.86 — 修复切组缩略图停在占位图（★当前正式发布版）
+- 现象（v2.10.85 回归）：切换到一个组时，所有槽位缩略图都显示占位图标（山+太阳）+文件名，不加载真实内容；切走再切回才出图。
+- ★根因是**通知投递**而非解码失败。本机基准实测：QuickLook 为 10 张 1MB PNG 出图共 0.103s、零失败；ImageIO 下采样 0.142s、零失败 → 图片早已解好进缓存，只是网格没被重新求值。链条是 v2.10.84 两处优化叠加：
+  - **PERF-2** 把「每图开始加载+解码完成」约 20 次 `objectWillChange.send()` 合并成 16ms 窗口内**恰好一次**；
+  - **PERF-1** 又移除了切组 `onCommit` 的 `invalidateSpecialSlot(oldId)`，那次调用原本还会在「新数据提交后的下一个 tick」补发一次通知。
+  - 于是每次切组只剩唯一一次 send，且恰好落在切组自身的更新/过渡窗口内；被 SwiftUI 更新时序吞掉后再无补救 → 整组停在占位图，只能靠切走再切回（缓存命中）自愈。
+- 修复三层：
+  1. `ThumbnailProvider` 通知改为 **epoch 计数 + 补发校验 send**：`changeEpoch/flushedEpoch` 保证「flush 之后发生的变更」必被下一次 flush 覆盖；每次 flush 立即 send 后再在**下一个 runloop tick** 补发一次（必然落在当轮 SwiftUI 更新之外）。一次 burst 2 次全网格重绘（对比 v2.10.83 约 20 次），PERF-2 收益基本保留。
+  2. 新增 `refreshAfterGroupSwitch(specialSlotId:)`，挂在 `loadSlotsAsync` 与 `reloadAllAsync` 两个提交点：**不动缓存**（PERF-1 跨组常驻缓存收益完整保留），只清「进入组」的 `failedKeys` + 触发一次通知。★`failedKeys` 原本是**永久**的：一次偶发 nil（QuickLook 抖动 / 10s 看门狗 / 请求被取消）就让该槽位永久停在占位图；v2.10.83 之前靠每次切组的 invalidate 顺带自愈，PERF-1 之后自愈路径消失，这里以「进入组给一次干净重试」补回。
+  3. `SlotThumbnailView` 增加 `.task(id: currentKey)` 作为触发解码的第三道保险——卡片身份自 v2.10.73 是 `.id(slot)`（复用卡片），切组时 `onAppear` 不触发，此前全靠 `onChange(of: currentKey)` 单一钩子。`load()` 对已缓存/在解码/已知失败直接返回，重复调用零成本。
+- ★不变量守护：缓存键仍 `specialSlotId::slot::contentId::updatedAt`；渲染仍是 `state(for: currentKey)` 纯函数，改动只影响「何时被通知」不影响「画什么」；清 `failedKeys` 不含图片数据，最坏只是重解码一次，不可能串图；内容真变的失效点全部保留。
+- 验证：`swift build` 通过；smoke **通过 33、失败 0**；DMG 打包校验通过、装机运行无崩溃、CLI 2.10.86。
+- DMG SHA256：`fbe6ea9064cf804577db4487ac02bf95f1858277f5a38e00b7950a621d3ce982`（`build/ClipSlots_v2.10.86.dmg`）。
+
+### v2.10.85 — 悬停预览显示文件图标而非真实图片内容
 - 现象：环形菜单悬停预览窗显示的是 macOS 的 PNG 文档图标，而不是图片像素。
 - ★根因（与 v2.10.84 PERF-4 无关）：从 Finder **复制文件**时，剪贴板内容是 `public.file-url` + `com.apple.icns`，后者是 1024px 的**通用文档图标**（本机实测 `default/1/item_0/com.apple.icns.bin` 1.1MB、10 个 rep、最大 1024×1024）。`com.apple.icns` 属于合法图片类型 → `SlotContent.hasImage` 为真 → 所有预览路径优先走「内联图片」分支，把 Finder 图标当内容渲染，真实文件像素没人读。新旧两条解码路径（`decodedInlineImage` / `decodedInlineThumbnail`）都会画出这张图标，所以这是长期存在的行为，不是下采样引入的。
 - 修复：

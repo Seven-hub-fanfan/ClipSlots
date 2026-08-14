@@ -61,6 +61,13 @@ struct SlotThumbnailView: View {
         // 刷新改由「currentKey 变化 → 读取新 key → provider 状态驱动重渲染」保证。
         .onAppear { loadIfNeeded() }
         .onChange(of: currentKey) { _ in loadIfNeeded() }
+        // v2.10.86: 触发解码的第三道保险。卡片身份是 `.id(slot)`（v2.10.73 起为了切组流畅而复用
+        // 卡片），所以切组时 `onAppear` 不会再触发，全靠 `onChange(of: currentKey)` 这一个钩子；
+        // 一旦它在某个更新时序里没被触发（或触发时状态已被别的路径改写），槽位就会永久停在占位图，
+        // 只能靠切走再切回自愈——正是本次回归的表现。`.task(id:)` 与 onChange 相互独立：它在视图
+        // 出现以及 id 变化时都会重新执行，且执行点在当轮更新之外。
+        // load() 内部对「已缓存 / 正在解码 / 已知失败」都会直接返回，因此重复调用零成本、不会重复解码。
+        .task(id: currentKey) { loadIfNeeded() }
     }
 
     // MARK: - Subviews
