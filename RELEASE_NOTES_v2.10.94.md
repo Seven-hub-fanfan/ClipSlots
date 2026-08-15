@@ -19,3 +19,8 @@
 - `swift build` 通过
 - `swift run ClipSlotsKitSmokeTests`：**59/59 通过**
 - 本地打包（adhoc 签名）+ 装机验证：App 与 CLI 版本号均为 2.10.94
+
+
+---
+
+SHA-256 (ClipSlots_v2.10.94.dmg): `50b52258777c8f850bd58ba28ea967fd3e5b4f8c5ce89c8ba2b13b34cf4e31a3`
