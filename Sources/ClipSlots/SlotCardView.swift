@@ -199,11 +199,27 @@ struct SlotCardView: View {
                 .strokeBorder(cardOutlineColor, lineWidth: cardOutlineWidth)
                 .allowsHitTesting(false)
         )
-        .overlay(alignment: .topLeading) {
+        // 卡片顶部的槽位配色装饰横线。
+        //
+        // v2.10.94 (bugfix · 拖入文件时横线左端露出方块): 原实现是 `.overlay(alignment: .topLeading)`
+        // 直接摆一条 34×3 的 Capsule，**没有做任何裁剪**。它的 y 范围是 0...3（贴着卡片上沿），而卡片
+        // 圆角半径 24 —— 在 y≈0 处卡片的填充区其实还没开始（左上角正被圆角切掉），所以横线最左侧一小段
+        // 落在卡片形状之外。
+        //
+        // 静止态下这段溢出压在窗口背景上、与横线本体连成一体，肉眼几乎看不出；但 drag-over 时
+        // `DropImportOverlay` 会用同样圆角的 RoundedRectangle + ultraThinMaterial 蒙住卡片，
+        // **圆角之内**的横线被蒙层压暗、**圆角之外**那一小段却没人遮 —— 于是它以一个饱和度不变的
+        // 小方块形式孤零零地凸在左上角（用户截图红框处）。
+        //
+        // 修复：把横线放进一个与卡片等大的容器并按卡片圆角 clip，横线永远不可能画到卡片形状之外。
+        // 位置、尺寸、配色一律不变（不动任何胶囊坐标），只是左端会被圆角自然切齐。
+        .overlay {
             Capsule()
                 .fill(slotAccent)
                 .frame(width: 34, height: 3)
                 .padding(.leading, AppTheme.slotCardPadding)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                .clipShape(RoundedRectangle(cornerRadius: AppTheme.slotCardCornerRadius, style: .continuous))
                 .allowsHitTesting(false)
         }
         // Hover state only; the composed-card transform is applied after every visual overlay.
