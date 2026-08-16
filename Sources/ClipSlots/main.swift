@@ -82,6 +82,20 @@ struct ClipSlotsApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
     @StateObject private var store = SlotStoreObservable()
 
+    /// UNDO-1 (v2.10.95): Cmd+Z 的分流。Cmd+Z 是系统「撤销」的标准键位，直接抢下来会让
+    /// 槽位文本编辑器 / 搜索框里的原生文本撤销失效。所以先看第一响应者是不是文本控件：
+    /// 是且它自己有可撤销记录 → 交还给原生 undoManager；否则才执行槽位撤销。
+    static func performSlotUndo(_ store: SlotStoreObservable) {
+        if let responder = NSApp.keyWindow?.firstResponder,
+           (responder is NSTextView || responder is NSTextField),
+           let undoManager = responder.undoManager,
+           undoManager.canUndo {
+            undoManager.undo()
+            return
+        }
+        store.undoLastClearIfPossible()
+    }
+
     // v2.7.54: startup entry must also default to dark.
     // v2.7.47 changed ContentView/SettingsView, but App root still defaulted to
     // system, so first launch could render as light before ContentView appeared.
@@ -152,10 +166,19 @@ struct ClipSlotsApp: App {
                 }
                 .keyboardShortcut(",", modifiers: .command)
             }
-            // v2.7.26: Ctrl+Z undo for clear/delete operations
-            CommandGroup(after: .undoRedo) {
-                Button("撤销清空/删除") {
-                    store.undoLastClearIfPossible()
+            // UNDO-1 (v2.10.95): Cmd+Z 撤销最近 10 步槽位操作（清空 / 覆盖保存 / 编辑 / 改附件 / 改标签）。
+            // 旧的 Ctrl+Z 作为别名保留，避免老用户肌肉记忆失效。
+            // ⚠️ 必须用 replacing 而不是 after：SwiftUI 标准的「撤销」菜单项本身占着 Cmd+Z，
+            // 用 after 追加时我们的项会被系统吞掉快捷键（AX 实测 cmdChar 为空），而那个标准项在本
+            // App 里恒为禁用态 → Cmd+Z 什么都不会发生。替换掉整个 undoRedo 组，Cmd+Z 才真正归我们；
+            // 文本框内的原生撤销由 performSlotUndo 的第一响应者分流保证不丢。
+            CommandGroup(replacing: .undoRedo) {
+                Button("撤销槽位操作") {
+                    Self.performSlotUndo(store)
+                }
+                .keyboardShortcut("z", modifiers: [.command])
+                Button("撤销槽位操作（Ctrl+Z）") {
+                    Self.performSlotUndo(store)
                 }
                 .keyboardShortcut("z", modifiers: [.control])
             }
@@ -606,6 +629,9 @@ final class SlotStoreObservable: ObservableObject {
     // 所有 App 自身的槽位写盘（persist 快照 / 自动存储 / 文件夹导入 / 单槽保存 / 批量保存）都排入这一条
     // 串行队列：入队顺序即主线程发起编辑的顺序，串行执行保证 last-write-wins 与编辑顺序一致，彻底消除错序。
     private let slotWriteQueue = DispatchQueue(label: "com.clipslots.slotwrite", qos: .userInitiated)
+    // UNDO-1 (v2.10.95): 撤销栈落盘专用串行队列。快照可能较大（含内联附件字节），编码 + 写盘
+    // 不能占用主线程，也不应挤在 slotWriteQueue 上拖慢槽位写盘热路径。
+    private let undoPersistQueue = DispatchQueue(label: "com.clipslots.undopersist", qos: .utility)
 
     init() {
         NSLog("[ClipSlots] SlotStoreObservable init instanceID=\(instanceID)")
@@ -1790,6 +1816,11 @@ final class SlotStoreObservable: ObservableObject {
             return
         }
 
+        // UNDO-1 (v2.10.95): 自动存储的落点写入也算一步撤销。仅当落点就在【当前激活组】时抓快照——
+        // 快照是「当前内存中的这一组」，落点在别的组时抓了也无法用于还原那个组（且会误占额度）。
+        if target.groupId == currentSpecialSlotId {
+            captureUndoSnapshot(title: "自动存储到槽位 \(target.slot)")
+        }
         suppressWatcher() // self-write
         // MT-2 / CS-4 (v2.10.30): specialStorage.set 需拿跨进程写锁，锁竞争时最长阻塞 ~5s。把它挪到后台
         // 队列执行，避免卡住主线程；写完再回主线程推进游标 / 切组 / 提示 / 复位在途标志。写入所需的内容与
@@ -2187,78 +2218,156 @@ final class SlotStoreObservable: ObservableObject {
 
     // MARK: - v2.7.26 Undo Clear
 
-    // v2.9.5 (Feature #3): the clear/delete undo snapshot is now Codable and
-    // persisted to disk so a pending undo survives an app restart.
-    private struct SlotUndoSnapshot: Codable {
-        let slots: [Int: SlotContent]
-        let labels: [Int: String]
-        let title: String
-        // v2.8.7 (D): remember which group the snapshot belongs to so Undo cannot
-        // restore into a different (wrong) group after the user switches groups.
-        let specialSlotId: String
-    }
-    private var lastClearSnapshot: SlotUndoSnapshot?
+    // UNDO-1 (v2.10.95): 单步撤销升级为「每组最近 10 步」的撤销栈（Cmd+Z）。
+    // 栈结构与不变量在 ClipSlotsKit.SlotUndoStack（纯逻辑、有 smoke 测试覆盖）；此处只负责
+    //   ① 在破坏性/覆盖性写入前抓整组快照；② 撤销时把快照整组回写并落盘 + 刷新缩略图。
+    // 快照是【整组 10 个槽位】的全量状态，所以「清空整组」撤销后内容全部返回（需求原话：
+    // 「清空槽位算一次，撤销的话可以全部返回的」）。
+    private var undoStack = SlotUndoStack()
 
-    // v2.9.5 (Feature #3): on-disk location for the persisted undo snapshot. Lives
-    // alongside the special-slot storage so it shares the same lifecycle/backups.
-    private var undoSnapshotURL: URL {
+    /// 撤销栈持久化位置（沿用 .undo 目录，与槽位数据同生命周期）。
+    private var undoStackURL: URL {
+        ClipSlotsPaths.specialSlots.appendingPathComponent(".undo/undo_stack.json")
+    }
+
+    /// v2.9.5 时代的单快照文件，仅用于一次性迁移（读完即删）。
+    private var legacyUndoSnapshotURL: URL {
         ClipSlotsPaths.specialSlots.appendingPathComponent(".undo/clear_snapshot.json")
     }
 
-    /// Write (or, when nil, delete) the persisted undo snapshot. Never throws — a
-    /// persistence failure must not break the clear/undo operation itself.
-    private func persistUndoSnapshot(_ snapshot: SlotUndoSnapshot?) {
-        let url = undoSnapshotURL
-        let fm = FileManager.default
-        guard let snapshot else {
-            try? fm.removeItem(at: url)
-            return
-        }
-        do {
-            try fm.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
-            let data = try JSONEncoder().encode(snapshot)
-            try data.write(to: url, options: .atomic)
-        } catch {
-            NSLog("[ClipSlots] persist undo snapshot failed: \(error)")
+    /// 抓快照时「就地取回附件字节」的总预算。撤销要能把内容【全部】还原，而单槽 clear /
+    /// 清空整组会把槽位目录（含外置附件字节 attachments/*.bin）物理删除——此时快照里
+    /// `data == nil` + `storagePath` 的附件会变成断链，撤销只回来元数据。所以对「即将被销毁
+    /// 字节」的槽位，在快照里把字节内联进内存（回写时存储层会重新外置落盘）。
+    /// 超出预算的超大附件保持 storagePath 原样（仍可从 .trash 的 30 天克隆里人工恢复），
+    /// 避免一次撤销快照吃掉数百 MB 内存。
+    private static let undoMaterializeBudgetBytes = 64 * 1024 * 1024
+
+    /// 撤销栈落盘（后台串行队列，避免大快照编码卡主线程）。失败仅记日志，绝不影响撤销本身。
+    private func persistUndoStack() {
+        let stack = undoStack
+        let url = undoStackURL
+        undoPersistQueue.async {
+            let fm = FileManager.default
+            guard !stack.isEmpty else {
+                try? fm.removeItem(at: url)
+                return
+            }
+            do {
+                try fm.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+                let data = try JSONEncoder().encode(stack)
+                try data.write(to: url, options: .atomic)
+            } catch {
+                NSLog("[ClipSlots] persist undo stack failed: \(error)")
+            }
         }
     }
 
-    /// Load a previously persisted undo snapshot into memory at launch, so the
-    /// most recent clear/delete remains undoable after a restart.
+    /// 启动时恢复撤销栈，使「最近若干步」跨重启仍可撤销（沿用 v2.9.5 Feature #3 的契约）。
     private func loadPersistedUndoSnapshot() {
-        guard let data = try? Data(contentsOf: undoSnapshotURL),
-              let snapshot = try? JSONDecoder().decode(SlotUndoSnapshot.self, from: data) else {
-            return
+        if let data = try? Data(contentsOf: undoStackURL),
+           let stack = try? JSONDecoder().decode(SlotUndoStack.self, from: data) {
+            undoStack = stack
+            NSLog("[ClipSlots] restored undo stack: \(stack.entries.count) entr(ies)")
+        } else if let data = try? Data(contentsOf: legacyUndoSnapshotURL),
+                  let legacy = try? JSONDecoder().decode(LegacyUndoSnapshot.self, from: data) {
+            // 老版本（≤v2.10.94）的单快照文件：迁移成栈里的一步，然后删掉旧文件。
+            undoStack.push(SlotUndoSnapshot(slots: legacy.slots,
+                                            labels: legacy.labels,
+                                            title: legacy.title,
+                                            groupId: legacy.specialSlotId))
+            try? FileManager.default.removeItem(at: legacyUndoSnapshotURL)
+            persistUndoStack()
+            NSLog("[ClipSlots] migrated legacy undo snapshot: \(legacy.title)")
         }
-        lastClearSnapshot = snapshot
-        NSLog("[ClipSlots] restored persisted undo snapshot: \(snapshot.title)")
     }
 
-    private func captureUndoSnapshot(title: String) {
-        lastClearSnapshot = SlotUndoSnapshot(slots: slots, labels: labels, title: title, specialSlotId: currentSpecialSlotId)
-        // v2.9.5 (Feature #3): persist immediately so the undo survives a restart.
-        persistUndoSnapshot(lastClearSnapshot)
+    /// ≤v2.10.94 的单快照磁盘格式，仅用于迁移解码。
+    private struct LegacyUndoSnapshot: Codable {
+        let slots: [Int: SlotContent]
+        let labels: [Int: String]
+        let title: String
+        let specialSlotId: String
     }
+
+    /// 在一次会改动槽位内容的操作【之前】抓一步撤销快照。
+    /// - Parameters:
+    ///   - title: 浮层提示用的操作描述。
+    ///   - materializeSlots: 本次操作会物理删除其字节的槽位（单槽 clear → [slot]；清空整组 →
+    ///     全部槽位）。这些槽位的外置附件字节会被就地读入快照（受 64MB 预算约束）。
+    ///     普通覆盖写不需要（存储层会保留/重新克隆附件字节），传空即可。
+    private func captureUndoSnapshot(title: String, materializeSlots: [Int] = []) {
+        var snapshotSlots = slots
+        if !materializeSlots.isEmpty {
+            var budget = Self.undoMaterializeBudgetBytes
+            for slot in materializeSlots {
+                guard var content = snapshotSlots[slot], !content.attachments.isEmpty else { continue }
+                var changed = false
+                for i in content.attachments.indices {
+                    guard content.attachments[i].data == nil,
+                          let sp = content.attachments[i].storagePath, !sp.isEmpty else { continue }
+                    guard let bytes = content.attachments[i].resolveData() else { continue }
+                    guard bytes.count <= budget else {
+                        NSLog("[ClipSlots] undo snapshot: attachment '\(content.attachments[i].name)' (\(bytes.count) bytes) exceeds materialize budget; keeping storagePath only (recoverable from .trash)")
+                        continue
+                    }
+                    budget -= bytes.count
+                    content.attachments[i].data = bytes
+                    changed = true
+                }
+                if changed { snapshotSlots[slot] = content }
+            }
+        }
+        let snapshot = SlotUndoSnapshot(slots: snapshotSlots,
+                                        labels: labels,
+                                        title: title,
+                                        groupId: currentSpecialSlotId)
+        guard undoStack.push(snapshot) else { return }  // 与上一步状态完全一致 → 不占额度
+        persistUndoStack()
+    }
+
+    /// 当前组还可撤销几步（供 UI / 日志使用）。
+    var undoStepsAvailableForCurrentGroup: Int { undoStack.count(forGroup: currentSpecialSlotId) }
 
     func undoLastClearIfPossible() {
-        guard let snapshot = lastClearSnapshot else {
-            showFloatingNotice(FloatingNotice(title: "没有可撤销操作", subtitle: "最近没有清空或删除槽位", iconName: "arrow.uturn.backward", kind: .warning))
+        let activeId = currentSpecialSlotId
+        guard undoStack.canUndo(forGroup: activeId) else {
+            let subtitle = undoStack.isEmpty ? "最近没有可撤销的槽位改动" : "当前分组没有可撤销记录（请切回原分组）"
+            showFloatingNotice(FloatingNotice(title: "没有可撤销操作", subtitle: subtitle, iconName: "arrow.uturn.backward", kind: .warning))
             return
         }
-        // v2.8.7 (D): the snapshot must be restored into the same group it was
-        // captured from; otherwise Undo would corrupt whatever group is now active.
-        guard snapshot.specialSlotId == currentSpecialSlotId else {
-            showFloatingNotice(FloatingNotice(title: "无法撤销", subtitle: "请切回原分组后再撤销", iconName: "arrow.uturn.backward", kind: .warning))
-            return
+        // v2.8.7 (D) 的不变量保留：快照只回写到它被抓取的那个组（popLatest 按组取），
+        // 绝不把 A 组的历史写进当前激活的 B 组。
+        guard let snapshot = undoStack.popLatest(forGroup: activeId) else { return }
+
+        suppressWatcher()             // v2.9.4 (#2): 自写，不要触发 watcher 反向 reload
+        cancelPendingClipboardRestore()
+
+        // 整组回写：按 config.slots 归一化，快照里缺失的槽位显式还原为空槽，
+        // 避免「撤销后残留操作产生的新内容」。
+        var restored: [Int: SlotContent] = [:]
+        for slot in stride(from: 1, through: config.slots, by: 1) {
+            restored[slot] = snapshot.slots[slot] ?? SlotContent()
         }
-        slots = snapshot.slots
+        // 缩略图身份不变量（v2.10.64/65）：缩略图 key = contentId + updatedAt。回写的是历史身份，
+        // 与当前身份不同 → diff 能识别变化；同时整组失效一次缓存，杜绝切组串图/不刷。
+        ThumbnailProvider.shared.invalidateSpecialSlot(specialSlotId: activeId)
+
+        slots = restored
         labels = snapshot.labels
+        loadedSpecialSlotId = activeId
         persistCurrentSpecialSlotData()
-        lastClearSnapshot = nil
-        // v2.9.5 (Feature #3): consume the persisted snapshot so it cannot be
-        // replayed after the next restart.
-        persistUndoSnapshot(nil)
-        showFloatingNotice(FloatingNotice(title: "已撤销", subtitle: snapshot.title, iconName: "arrow.uturn.backward.circle.fill", kind: .success))
+        refreshTrigger = UUID()
+        recomputeAutoPreviews()       // 游标角标随内容还原重算
+        persistUndoStack()
+
+        let remaining = undoStack.count(forGroup: activeId)
+        NSLog("[ClipSlots] UNDO specialSlot=\(activeId) title=\(snapshot.title) remaining=\(remaining)")
+        showFloatingNotice(FloatingNotice(
+            title: "已撤销",
+            subtitle: remaining > 0 ? "\(snapshot.title)（还可撤销 \(remaining) 步）" : snapshot.title,
+            iconName: "arrow.uturn.backward.circle.fill",
+            kind: .success))
     }
 
     private func persistCurrentSpecialSlotData() {
@@ -2301,6 +2410,7 @@ final class SlotStoreObservable: ObservableObject {
             return
         }
         content.attachments = existing.attachments
+        captureUndoSnapshot(title: "保存 HTML 到槽位 \(slot)")   // UNDO-1 (v2.10.95)
         slots[slot] = content
         persistCurrentSpecialSlotData()
         refreshTrigger = UUID()
@@ -2327,6 +2437,7 @@ final class SlotStoreObservable: ObservableObject {
         // 修法：改内容后统一刷新身份字段，恢复不变量（同步跨进程 + 搜索计数）。
         content.contentId = UUID().uuidString
         content.updatedAt = Date().timeIntervalSince1970
+        captureUndoSnapshot(title: "编辑槽位 \(slot) HTML")   // UNDO-1 (v2.10.95)
         slots[slot] = content
         persistCurrentSpecialSlotData()
         refreshTrigger = UUID()
@@ -2351,6 +2462,7 @@ final class SlotStoreObservable: ObservableObject {
             return
         }
         content.attachments = existing.attachments
+        captureUndoSnapshot(title: "编辑槽位 \(slot) 文本")   // UNDO-1 (v2.10.95)
         slots[slot] = content
         persistCurrentSpecialSlotData()
         showFloatingNotice(FloatingNotice(title: "已更新文本", subtitle: "槽位 \(slot)", iconName: "pencil.circle.fill", kind: .success))
@@ -2358,6 +2470,8 @@ final class SlotStoreObservable: ObservableObject {
 
     func importDroppedFiles(_ urls: [URL], toSlot slot: Int) {
         guard let first = urls.first else { return }
+        // UNDO-1 (v2.10.95): 拖入文件会覆盖若干槽位主体，整批算一步撤销。
+        captureUndoSnapshot(title: urls.count == 1 ? "导入文件到槽位 \(slot)" : "导入 \(urls.count) 个文件（槽位 \(slot) 起）")
         for (offset, url) in urls.enumerated() {
             let target = slot + offset
             guard target <= config.slots else { break }
@@ -2373,7 +2487,8 @@ final class SlotStoreObservable: ObservableObject {
     }
 
     func clearAllSlotsInCurrentSpecialSlotWithConfirmation() {
-        captureUndoSnapshot(title: "清空槽位组「\(currentSpecialSlot?.name ?? currentSpecialSlotId)」")
+        // UNDO-1 (v2.10.95): 快照改到 clearAllSlotsInCurrentSpecialSlot() 内部抓——此前在确认弹窗
+        // 【之前】就抓，用户点「取消」也会白占一步撤销额度（10 步额度下更明显）。
         if !specialSlotSettings.confirmBeforeClearAllSlots {
             clearAllSlotsInCurrentSpecialSlot()
             return
@@ -2419,6 +2534,10 @@ final class SlotStoreObservable: ObservableObject {
 
     func clearAllSlotsInCurrentSpecialSlot() {
         let activeId = currentSpecialSlotId
+        // UNDO-1 (v2.10.95): 清空整组算「一步」，且撤销后 10 个槽位的内容要全部返回 → 快照抓整组，
+        // 并把全部槽位的外置附件字节内联进快照（clearAll 会物理删除整个组目录）。
+        captureUndoSnapshot(title: "清空槽位组「\(currentSpecialSlot?.name ?? activeId)」",
+                            materializeSlots: Array(stride(from: 1, through: config.slots, by: 1)))
         suppressWatcher() // v2.9.4 (#2): self-write
         cancelPendingClipboardRestore()
 
@@ -2771,6 +2890,9 @@ final class SlotStoreObservable: ObservableObject {
         // slotWriteQueue 异步串行（保序、last-write-wins、不卡主线程），保留 P1-4 的防 Beachball 收益。
         var content = contentForSlot(slot)
         let previousContent = content // P2-1 (v2.10.54): 乐观更新前的旧内容快照，写盘失败时回滚用。
+        // UNDO-1 (v2.10.95): 改附件（节点画布增删附件）算一步撤销。旧附件字节仍在磁盘（set 会重新克隆），
+        // 故无需 materialize。
+        captureUndoSnapshot(title: "修改槽位 \(slot) 附件")
         content.attachments = attachments
         // P1-2 (v2.10.53): 同 updateHTMLSlot——复用旧 content 仅改 attachments 却不刷新身份字段，会破坏
         // v2.10.52 增量 diff（slotsSnapshotEqual 以 contentId+updatedAt 判等）的「内容变则 id/时间戳变」不变量，
@@ -5062,6 +5184,9 @@ final class SlotStoreObservable: ObservableObject {
 
     func clearSlot(_ slot: Int) {
         let activeId = currentSpecialSlotId
+        // UNDO-1 (v2.10.95): 单槽清空算一步。clear() 会物理删除该槽目录（含外置附件字节），
+        // 所以把该槽的附件字节内联进快照，撤销时主体 + 附件 + 标签能整体返回。
+        captureUndoSnapshot(title: "清空槽位 \(slot)", materializeSlots: [slot])
 
         suppressWatcher() // v2.9.4 (#2): self-write
         cancelPendingClipboardRestore()
@@ -5127,7 +5252,7 @@ final class SlotStoreObservable: ObservableObject {
     }
 
     func clearSlotWithConfirmation(_ slot: Int) {
-        captureUndoSnapshot(title: "清空槽位 \(slot)")
+        // UNDO-1 (v2.10.95): 快照移到 clearSlot() 内部（点「取消」不再白占撤销额度）。
         if !specialSlotSettings.confirmBeforeClearSingleSlot {
             clearSlot(slot)
             return
@@ -5162,6 +5287,8 @@ final class SlotStoreObservable: ObservableObject {
 
     func setLabel(_ slot: Int, label: String?) {
         let activeId = currentSpecialSlotId
+        // UNDO-1 (v2.10.95): 改标签也算一步撤销（快照含 labels 全量）。
+        captureUndoSnapshot(title: "修改槽位 \(slot) 标签")
 
         suppressWatcher() // v2.9.4 (#2): self-write
         specialStorage.setLabel(slot, label: label, in: activeId)
@@ -5802,6 +5929,10 @@ final class SlotStoreObservable: ObservableObject {
         // v2.7.74: overwriting a slot's main content should keep its attachments,
         // which belong to the slot rather than the captured clipboard payload.
         savedContent.attachments = existingBeforeSave.attachments
+
+        // UNDO-1 (v2.10.95): 保存/覆盖单槽（Cmd+Option+数字保存、自动存储落点、划词保存等的统一收口）
+        // 算一步撤销。覆盖写不会销毁附件字节（存储层保留 + .trash 备份），故无需 materialize。
+        captureUndoSnapshot(title: "保存到槽位 \(targetSlot)")
 
         ThumbnailProvider.shared.invalidateSlot(specialSlotId: activeId, slot: targetSlot)
 

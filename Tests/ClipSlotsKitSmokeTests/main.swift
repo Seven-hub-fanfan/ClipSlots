@@ -286,4 +286,77 @@ do {
             .skipDisabled, "总闸关闭时优先返回 skipDisabled（止血开关优先级最高）")
 }
 
+// MARK: - UNDO-1 (v2.10.95) 多步撤销栈
+
+// 纯逻辑：SlotUndoStack 的每组 10 步上限 / 按组弹出 / 去重
+do {
+    func snap(_ group: String, _ title: String, slotContentId: String) -> SlotUndoSnapshot {
+        var c = SlotContent()
+        c.items = [[PasteboardItem(type: "public.utf8-plain-text", data: Data(title.utf8))]]
+        c.contentId = slotContentId
+        c.updatedAt = 1
+        return SlotUndoSnapshot(slots: [1: c], labels: [:], title: title, groupId: group)
+    }
+
+    var stack = SlotUndoStack()
+    t.check(!stack.canUndo(forGroup: "A"), "空栈时任何组都不可撤销")
+
+    // ① 每组保留 10 步，第 11 步压入后最旧的一步被丢弃
+    for i in 1...12 { stack.push(snap("A", "A-\(i)", slotContentId: "a\(i)")) }
+    t.equal(stack.count(forGroup: "A"), 10, "单组撤销步数上限应为 10")
+    t.equal(stack.entries.first?.title, "A-3", "超出 10 步后应丢弃最旧的步骤")
+
+    // ② 按组弹出：弹出的是当前组最新一步，别组历史不受影响（v2.8.7 D 不变量）
+    stack.push(snap("B", "B-1", slotContentId: "b1"))
+    t.equal(stack.popLatest(forGroup: "A")?.title, "A-12", "撤销应弹出该组最新一步")
+    t.equal(stack.count(forGroup: "A"), 9, "弹出后该组剩 9 步")
+    t.equal(stack.count(forGroup: "B"), 1, "弹出 A 组不应影响 B 组历史")
+    t.check(stack.popLatest(forGroup: "C") == nil, "没有历史的组撤销应返回 nil")
+
+    // ③ 去重：状态完全一致的连续快照不占额度
+    var dedup = SlotUndoStack()
+    t.check(dedup.push(snap("A", "同状态-1", slotContentId: "same")), "首次压入应成功")
+    t.check(!dedup.push(snap("A", "同状态-2", slotContentId: "same")), "与该组最新快照状态一致应被去重")
+    t.equal(dedup.entries.count, 1, "去重后仍只有一步")
+
+    // ④ 可持久化（跨重启撤销依赖 JSON 编解码）
+    let data = try! JSONEncoder().encode(stack)
+    var decoded = try! JSONDecoder().decode(SlotUndoStack.self, from: data)
+    t.equal(decoded.entries.count, stack.entries.count, "撤销栈应能 JSON 往返（跨重启保留）")
+    t.equal(decoded.popLatest(forGroup: "B")?.title, "B-1", "JSON 往返后按组弹出仍正确")
+}
+
+// 存储层：清空槽位后，用快照内容（附件字节已内联）回写 → 主体 + 附件 + 标签全部返回。
+// 这是 GUI 撤销（captureUndoSnapshot(materializeSlots:) → set）依赖的存储层契约。
+t.withFreshStore("撤销回写") { storage in
+    let g = firstGroupId(storage)
+    var content = makeTextContent("撤销前的内容")
+    content.attachments = [SlotContent.SlotAttachment(
+        name: "a.txt", type: .file, data: Data("附件字节".utf8))]
+    t.check(storage.set(1, content: content, in: g), "写入带附件的槽位应成功")
+    t.check(storage.setLabel(1, label: "旧标签", in: g), "写入标签应成功")
+
+    // 模拟 GUI 抓快照：把外置附件字节内联进内存快照（clear 会物理删除槽位目录）。
+    var snapshotContent = storage.get(1, in: g)
+    for i in snapshotContent.attachments.indices {
+        snapshotContent.attachments[i].data = snapshotContent.attachments[i].resolveData()
+    }
+    let snapshotLabel = storage.getLabel(1, in: g)
+    t.equal(snapshotContent.attachments.first?.data.map { String(data: $0, encoding: .utf8) } ?? nil,
+            "附件字节", "快照应能取回附件字节（撤销要能全部还原）")
+
+    t.check(storage.clear(1, in: g), "清空应成功")
+    t.check(storage.isEmpty(1, in: g), "清空后应为空槽")
+
+    // 撤销：整份内容回写
+    t.check(storage.set(1, content: snapshotContent, in: g), "撤销回写应成功")
+    t.check(storage.setLabel(1, label: snapshotLabel, in: g), "撤销回写标签应成功")
+    let restored = storage.get(1, in: g)
+    t.equal(extractText(restored), "撤销前的内容", "撤销后主体内容应完整还原")
+    t.equal(restored.attachments.count, 1, "撤销后附件数量应还原")
+    t.equal(restored.attachments.first?.resolveData().map { String(data: $0, encoding: .utf8) } ?? nil,
+            "附件字节", "撤销后附件字节应可读（未断链）")
+    t.equal(storage.getLabel(1, in: g), "旧标签", "撤销后标签应还原")
+}
+
 t.report()
