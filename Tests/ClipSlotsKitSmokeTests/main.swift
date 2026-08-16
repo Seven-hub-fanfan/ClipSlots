@@ -431,4 +431,61 @@ t.withFreshStore("重做回写") { storage in
     t.equal(extractText(storage.get(1, in: g)), "状态B", "重做后应恢复状态B")
 }
 
+// MARK: - UNDO-3 (v2.10.97) 撤销步数可配置
+
+do {
+    func snap(_ group: String, _ title: String, _ cid: String) -> SlotUndoSnapshot {
+        var c = SlotContent()
+        c.items = [[PasteboardItem(type: "public.utf8-plain-text", data: Data(title.utf8))]]
+        c.contentId = cid
+        c.updatedAt = 1
+        return SlotUndoSnapshot(slots: [1: c], labels: [:], title: title, groupId: group)
+    }
+
+    // ① 默认仍是 10 步，范围夹取到 1~100
+    t.equal(SlotUndoStack().limitPerGroup, 10, "撤销步数默认应为 10")
+    t.equal(SlotUndoStack.clampLimit(0), 1, "步数下界应夹到 1")
+    t.equal(SlotUndoStack.clampLimit(999), 100, "步数上界应夹到 100")
+    t.equal(SlotUndoStack(limitPerGroup: -5).limitPerGroup, 1, "非法初始步数应夹到下界")
+
+    // ② 自定义上限对新压入生效
+    var big = SlotUndoStack(limitPerGroup: 25)
+    for i in 1...30 { big.push(snap("A", "A-\(i)", "a\(i)")) }
+    t.equal(big.count(forGroup: "A"), 25, "自定义 25 步上限应对新操作生效")
+    t.equal(big.entries.first?.title, "A-6", "超出自定义上限时应丢弃最旧的步骤")
+
+    // ③ 调小上限 → 已有超出部分立即截断（需求：已有超出部分也截断）
+    let dropped = big.applyLimit(3)
+    t.equal(dropped, 22, "调小上限应返回被截断的条目数")
+    t.equal(big.count(forGroup: "A"), 3, "调小上限后历史应立即截断到新上限")
+    t.equal(big.entries.last?.title, "A-30", "截断应保留最新的步骤")
+    t.equal(big.limitPerGroup, 3, "applyLimit 后实例上限应更新")
+
+    // ④ 截断按组独立：A 组截断不吃掉 B 组额度
+    var perGroup = SlotUndoStack(limitPerGroup: 2)
+    for i in 1...4 { perGroup.push(snap("A", "A-\(i)", "pa\(i)")) }
+    for i in 1...4 { perGroup.push(snap("B", "B-\(i)", "pb\(i)")) }
+    t.equal(perGroup.count(forGroup: "A"), 2, "A 组应各自保留 2 步")
+    t.equal(perGroup.count(forGroup: "B"), 2, "B 组应各自保留 2 步")
+
+    // ⑤ 全局上限随每组上限放大（至少 30）
+    t.equal(SlotUndoStack(limitPerGroup: 10).globalLimit, 30, "默认全局上限应为 30")
+    t.equal(SlotUndoStack(limitPerGroup: 100).globalLimit, 300, "每组 100 步时全局上限应为 300")
+
+    // ⑥ JSON 往返带上限；≤v2.10.96 的老 JSON（无 limitPerGroup 字段）必须仍能解码
+    var roundTrip = SlotUndoStack(limitPerGroup: 7)
+    roundTrip.push(snap("A", "持久化", "z1"))
+    let data = try! JSONEncoder().encode(roundTrip)
+    let decoded = try! JSONDecoder().decode(SlotUndoStack.self, from: data)
+    t.equal(decoded.limitPerGroup, 7, "撤销步数上限应随栈一起持久化")
+    t.equal(decoded.entries.count, 1, "带上限的栈 JSON 往返后条目不丢")
+
+    let legacyJSON = Data(#"{"entries":[]}"#.utf8)
+    let legacy = try! JSONDecoder().decode(SlotUndoStack.self, from: legacyJSON)
+    t.equal(legacy.limitPerGroup, 10, "老版本 JSON 缺字段时应回落默认 10（不得解码失败）")
+
+    // ⑦ 配置项：AppConfig.undoSteps 默认 10 且 TOML 往返夹取
+    t.equal(AppConfig().undoSteps, 10, "AppConfig.undoSteps 默认应为 10")
+}
+
 t.report()

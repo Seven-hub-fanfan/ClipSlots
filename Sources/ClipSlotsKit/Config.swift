@@ -8,6 +8,9 @@ public struct AppConfig: Codable {
     public var pasteKey: String = "cmd+{n}"
     public var radialKey: String = "ctrl+space"
     public var hotkeyTemplate: HotkeyTemplate = HotkeyTemplate(kind: .numeric)
+    /// UNDO-3 (v2.10.97): 每个槽位组保留的撤销/重做步数（设置面板「高级 → 操作历史」）。
+    /// 合法范围 1~100，默认 10；写入时统一经 `SlotUndoStack.clampLimit` 夹取。
+    public var undoSteps: Int = SlotUndoStack.defaultLimitPerGroup
 
     public init() {}
 
@@ -35,6 +38,9 @@ public struct AppConfig: Codable {
             "# Show daemon logs in terminal (true/false)",
             "# Logs save/paste actions, startup info, errors, etc.",
             "verbose = \(verbose)",
+            "",
+            "# Undo/redo steps kept per slot group (1-100)",
+            "undo_steps = \(undoSteps)",
             "",
             "# Keybind configuration",
             "# Use {n} as placeholder for the slot number",
@@ -97,6 +103,7 @@ public struct AppConfig: Codable {
             } else {
                 if key == "slots", let v = Int(value) { config.slots = max(1, min(10, v)) }
                 else if key == "verbose" { config.verbose = value.lowercased() == "true" }
+                else if key == "undo_steps", let v = Int(value) { config.undoSteps = SlotUndoStack.clampLimit(v) }
             }
         }
         return config

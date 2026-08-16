@@ -26,7 +26,7 @@ enum SettingsCategory: String, CaseIterable, Identifiable {
         case .shortcut: return "全局操作与键盘录入"
         case .notification: return "确认流程与操作反馈"
         case .connection: return "槽位之间的串联能力"
-        case .advanced: return "日志及调试选项"
+        case .advanced: return "日志调试与操作历史"
         case .cli: return "CLI、Agent Skill 与卸载"
         }
     }
@@ -60,6 +60,10 @@ struct SettingsView: View {
     @State private var pasteKey: String
     @State private var radialKey: String
     @State private var verbose: Bool
+    // UNDO-3 (v2.10.97): 撤销步数（每个槽位组保留的撤销/重做步数，1~100）。
+    @State private var undoSteps: Int
+    /// 撤销栈当前磁盘占用（字节）。进入设置面板 / 改动步数后刷新。
+    @State private var undoDiskBytes: Int64 = 0
     @State private var hotkeyTemplateKind: HotkeyTemplateKind
     @State private var showingResetConfirm = false
 
@@ -108,6 +112,7 @@ struct SettingsView: View {
         _pasteKey = State(initialValue: config.pasteKey)
         _radialKey = State(initialValue: config.radialKey)
         _verbose = State(initialValue: config.verbose)
+        _undoSteps = State(initialValue: SlotUndoStack.clampLimit(config.undoSteps))
         _hotkeyTemplateKind = State(initialValue: config.hotkeyTemplate.kind)
         _skipOverwriteConfirmation = State(initialValue: UserDefaults.standard.skipOverwriteConfirmation)
         _skipBatchSaveConfirmation = State(initialValue: UserDefaults.standard.skipBatchSaveConfirmation)
@@ -436,12 +441,70 @@ struct SettingsView: View {
 
     private var advancedSection: some View {
         settingsSection(title: "高级", icon: "slider.horizontal.3") {
-            settingsToggleRow(
-                title: "输出详细日志",
-                subtitle: "用于调试保存、粘贴、快捷键注册等问题。",
-                isOn: $verbose
-            )
+            // UNDO-3 (v2.10.97): 「高级」拆成两个小节——日志及调试 / 操作历史。
+            VStack(alignment: .leading, spacing: 18) {
+                VStack(alignment: .leading, spacing: 10) {
+                    subsectionHeader("日志及调试")
+                    settingsToggleRow(
+                        title: "输出详细日志",
+                        subtitle: "用于调试保存、粘贴、快捷键注册等问题。",
+                        isOn: $verbose
+                    )
+                }
+
+                VStack(alignment: .leading, spacing: 10) {
+                    subsectionHeader("操作历史")
+                    undoStepsRow
+                }
+            }
         }
+        .onAppear { refreshUndoDiskUsage() }
+    }
+
+    /// UNDO-3 (v2.10.97): 撤销步数（Stepper，1~100），下方显示撤销栈磁盘占用。
+    private var undoStepsRow: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(alignment: .firstTextBaseline) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("撤销步数").font(.subheadline)
+                    Text("每个槽位组保留的撤销 / 重做步数（Cmd+Z / Cmd+Shift+Z），范围 1～100。")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+                Spacer()
+                Stepper(value: $undoSteps,
+                        in: SlotUndoStack.minLimitPerGroup...SlotUndoStack.maxLimitPerGroup) {
+                    Text("\(undoSteps)")
+                        .font(.system(size: 13, weight: .semibold, design: .rounded))
+                        .padding(.horizontal, 9)
+                        .padding(.vertical, 4)
+                        .background(Capsule().fill(AppTheme.chipBackground(colorScheme)))
+                }
+                .labelsHidden()
+                .fixedSize()
+            }
+            Text("撤销栈磁盘占用：\(formattedUndoDiskUsage)（调小步数并保存后会立即截断超出的历史）")
+                .font(.caption)
+                .foregroundColor(.secondary)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private var formattedUndoDiskUsage: String {
+        ByteCountFormatter.string(fromByteCount: undoDiskBytes, countStyle: .file)
+    }
+
+    private func refreshUndoDiskUsage() {
+        let bytes = ClipSlotsPaths.undoStackDiskBytes()
+        DispatchQueue.main.async { undoDiskBytes = bytes }
+    }
+
+    /// 分区内的小节标题。
+    private func subsectionHeader(_ title: String) -> some View {
+        Text(title)
+            .font(.system(size: 12, weight: .semibold))
+            .foregroundColor(.secondary)
+            .textCase(.uppercase)
     }
 
     private var notificationPreferencesSection: some View {
@@ -879,6 +942,7 @@ struct SettingsView: View {
         pasteKey = "cmd+{n}"
         radialKey = "ctrl+space"
         verbose = true
+        undoSteps = SlotUndoStack.defaultLimitPerGroup
     }
 
     private func save() {
@@ -888,6 +952,7 @@ struct SettingsView: View {
         newConfig.pasteKey = HotkeyTemplateNormalizer.normalizedShortcut(pasteKey, allowsSlotPlaceholder: true)
         newConfig.radialKey = HotkeyTemplateNormalizer.normalizedShortcut(radialKey, allowsSlotPlaceholder: false)
         newConfig.verbose = verbose
+        newConfig.undoSteps = SlotUndoStack.clampLimit(undoSteps)
         newConfig.hotkeyTemplate.kind = hotkeyTemplateKind
         newConfig.save()
 

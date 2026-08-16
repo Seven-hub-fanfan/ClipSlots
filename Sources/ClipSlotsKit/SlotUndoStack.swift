@@ -7,12 +7,13 @@ import Foundation
 /// 便于 smoke 测试钉死不变量，GUI 侧（SlotStoreObservable）只负责「何时抓快照 / 如何回写」。
 ///
 /// 语义约定（与用户预期一致，不得回归）：
-///   • 每个槽位组各自维护一条撤销链，最多 `limitPerGroup`（10）步，超出丢弃最旧的一步。
+///   • 每个槽位组各自维护一条撤销链，最多 `limitPerGroup`（默认 10，v2.10.97 起可在设置里
+///     配置 1~100）步，超出丢弃最旧的一步。
 ///   • 「清空整组」与「清空单槽」都各算一步（快照是整组 10 个槽位的全量状态，所以撤销后
 ///     内容全部返回，而不是只回来一个槽位）。
 ///   • 撤销总是弹出「当前组最新的一步」；其它组的历史保持原样（切回去仍可撤销），避免
 ///     v2.8.7 (D) 修过的「跨组撤销污染错组」问题。
-///   • 全局再加一道 `globalLimit`（30）上限，防止用户在很多组之间来回操作时无界堆积。
+///   • 全局再加一道 `globalLimit`（每组上限×3，至少 30）上限，防止用户在很多组之间来回操作时无界堆积。
 public struct SlotUndoSnapshot: Codable {
     /// 抓快照时该组全部槽位的内容（key 为 1...slotCount）。
     public var slots: [Int: SlotContent]
@@ -50,17 +51,57 @@ public struct SlotUndoSnapshot: Codable {
 }
 
 public struct SlotUndoStack: Codable {
-    /// 单个槽位组最多保留的撤销步数（需求：10 步）。
-    public static let limitPerGroup = 10
-    /// 所有组合计的硬上限，防止跨组来回操作时无界堆积。
-    public static let globalLimit = 30
+    /// 单个槽位组默认保留的撤销步数。
+    public static let defaultLimitPerGroup = 10
+    /// 设置面板允许的步数范围（UNDO-3 v2.10.97：可配置 1~100 步）。
+    public static let minLimitPerGroup = 1
+    public static let maxLimitPerGroup = 100
+
+    /// 把任意输入夹到合法步数区间。
+    public static func clampLimit(_ value: Int) -> Int {
+        max(minLimitPerGroup, min(maxLimitPerGroup, value))
+    }
+
+    /// UNDO-3 (v2.10.97): 每组保留步数改为**实例可配置**（设置面板「高级 → 操作历史 → 撤销步数」）。
+    /// 语义：改小之后不仅新操作按新上限截断，已有超出部分也立即截断（用户明确要求）。
+    public private(set) var limitPerGroup: Int = SlotUndoStack.defaultLimitPerGroup
+
+    /// 所有组合计的硬上限，防止跨组来回操作时无界堆积。随每组上限等比放大（至少 30）。
+    public var globalLimit: Int { max(30, limitPerGroup * 3) }
 
     /// 由旧到新（末尾为最近一次操作前的状态）。
     public private(set) var entries: [SlotUndoSnapshot] = []
 
-    public init(entries: [SlotUndoSnapshot] = []) {
+    public init(entries: [SlotUndoSnapshot] = [],
+                limitPerGroup: Int = SlotUndoStack.defaultLimitPerGroup) {
         self.entries = entries
+        self.limitPerGroup = Self.clampLimit(limitPerGroup)
         trim()
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case entries, limitPerGroup
+    }
+
+    /// 自定义解码：≤v2.10.96 落盘的 JSON 没有 `limitPerGroup` 字段，缺失时回落默认 10，
+    /// 避免老用户升级后撤销栈整份解码失败（等于历史被静默清空）。
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        let decodedEntries = try c.decodeIfPresent([SlotUndoSnapshot].self, forKey: .entries) ?? []
+        let decodedLimit = try c.decodeIfPresent(Int.self, forKey: .limitPerGroup)
+            ?? SlotUndoStack.defaultLimitPerGroup
+        self.init(entries: decodedEntries, limitPerGroup: decodedLimit)
+    }
+
+    /// 应用新的每组步数上限。改小会**立即截断**已有历史（返回被丢弃的条目数）。
+    @discardableResult
+    public mutating func applyLimit(_ newLimit: Int) -> Int {
+        let clamped = Self.clampLimit(newLimit)
+        guard clamped != limitPerGroup else { return 0 }
+        let before = entries.count
+        limitPerGroup = clamped
+        trim()
+        return before - entries.count
     }
 
     /// 压入一步。返回 false 表示被去重丢弃（与该组最新快照状态完全一致）。
@@ -107,14 +148,14 @@ public struct SlotUndoStack: Codable {
             let gid = entries[i].groupId
             let n = (seen[gid] ?? 0) + 1
             seen[gid] = n
-            keep[i] = n <= Self.limitPerGroup
+            keep[i] = n <= limitPerGroup
         }
         var trimmed: [SlotUndoSnapshot] = []
         trimmed.reserveCapacity(entries.count)
         for (i, e) in entries.enumerated() where keep[i] { trimmed.append(e) }
         // 2) 全局裁剪：只留最新的 globalLimit 条。
-        if trimmed.count > Self.globalLimit {
-            trimmed.removeFirst(trimmed.count - Self.globalLimit)
+        if trimmed.count > globalLimit {
+            trimmed.removeFirst(trimmed.count - globalLimit)
         }
         entries = trimmed
     }

@@ -179,8 +179,8 @@ struct ClipSlotsApp: App {
                 }
                 .keyboardShortcut(",", modifiers: .command)
             }
-            // UNDO-1 (v2.10.95): Cmd+Z 撤销最近 10 步槽位操作（清空 / 覆盖保存 / 编辑 / 改附件 / 改标签）。
-            // 旧的 Ctrl+Z 作为别名保留，避免老用户肌肉记忆失效。
+            // UNDO-1 (v2.10.95): Cmd+Z 撤销最近若干步槽位操作（步数可在设置里配置，默认 10）（清空 / 覆盖保存 / 编辑 / 改附件 / 改标签）。
+            // UNDO-3 (v2.10.97): 去掉旧的 Ctrl+Z 别名，只保留 macOS 标准的 Cmd+Z。
             // ⚠️ 必须用 replacing 而不是 after：SwiftUI 标准的「撤销」菜单项本身占着 Cmd+Z，
             // 用 after 追加时我们的项会被系统吞掉快捷键（AX 实测 cmdChar 为空），而那个标准项在本
             // App 里恒为禁用态 → Cmd+Z 什么都不会发生。替换掉整个 undoRedo 组，Cmd+Z 才真正归我们；
@@ -190,10 +190,6 @@ struct ClipSlotsApp: App {
                     Self.performSlotUndo(store)
                 }
                 .keyboardShortcut("z", modifiers: [.command])
-                Button("撤销槽位操作（Ctrl+Z）") {
-                    Self.performSlotUndo(store)
-                }
-                .keyboardShortcut("z", modifiers: [.control])
                 // UNDO-2 (v2.10.96): Cmd+Shift+Z 反向撤回（重做），撤销过头可以再往前恢复。
                 Button("重做槽位操作") {
                     Self.performSlotRedo(store)
@@ -2249,14 +2245,10 @@ final class SlotStoreObservable: ObservableObject {
     private var redoStack = SlotUndoStack()
 
     /// 撤销栈持久化位置（沿用 .undo 目录，与槽位数据同生命周期）。
-    private var undoStackURL: URL {
-        ClipSlotsPaths.specialSlots.appendingPathComponent(".undo/undo_stack.json")
-    }
+    private var undoStackURL: URL { ClipSlotsPaths.undoStackFile }
 
     /// 重做栈持久化位置。
-    private var redoStackURL: URL {
-        ClipSlotsPaths.specialSlots.appendingPathComponent(".undo/redo_stack.json")
-    }
+    private var redoStackURL: URL { ClipSlotsPaths.redoStackFile }
 
     /// v2.9.5 时代的单快照文件，仅用于一次性迁移（读完即删）。
     private var legacyUndoSnapshotURL: URL {
@@ -2315,6 +2307,22 @@ final class SlotStoreObservable: ObservableObject {
            let stack = try? JSONDecoder().decode(SlotUndoStack.self, from: data) {
             redoStack = stack
             NSLog("[ClipSlots] restored redo stack: \(stack.entries.count) entr(ies)")
+        }
+        // UNDO-3 (v2.10.97): config.toml 里的「撤销步数」是唯一真源——落盘 JSON 里带的旧上限
+        // 不算数（用户可能在上次运行后改过设置）。这里统一按当前配置截断一次。
+        applyUndoStepsLimit(config.undoSteps, persistIfTrimmed: true)
+    }
+
+    /// UNDO-3 (v2.10.97): 把配置里的撤销步数上限落到两条栈上，超出部分立即截断并落盘。
+    /// 「改完设置后新操作按新上限截断，已有超出部分也截断」——需求原话。
+    func applyUndoStepsLimit(_ steps: Int, persistIfTrimmed: Bool) {
+        let dropped = undoStack.applyLimit(steps) + redoStack.applyLimit(steps)
+        if dropped > 0 {
+            NSLog("[ClipSlots] undo limit -> \(SlotUndoStack.clampLimit(steps)); trimmed \(dropped) entr(ies)")
+            if persistIfTrimmed {
+                persistUndoStack()
+                persistRedoStack()
+            }
         }
     }
 
@@ -5411,6 +5419,8 @@ final class SlotStoreObservable: ObservableObject {
         hotkeyRegistrationErrors.removeAll()
         config = newConfig.normalizedForRuntime()
         config.save()
+        // UNDO-3 (v2.10.97): 撤销步数改动立即生效（含截断已有历史）。
+        applyUndoStepsLimit(config.undoSteps, persistIfTrimmed: true)
         onConfigChanged?()
         refreshTrigger = UUID()
         installLocalHotkeyGuardIfNeeded()
