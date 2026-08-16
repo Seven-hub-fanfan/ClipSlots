@@ -359,4 +359,76 @@ t.withFreshStore("撤销回写") { storage in
     t.equal(storage.getLabel(1, in: g), "旧标签", "撤销后标签应还原")
 }
 
+// MARK: - UNDO-2 (v2.10.96) 反向撤回（重做）
+
+// 纯逻辑：撤销 / 重做双栈来回走 + 「新操作作废重做分支」
+do {
+    func snap(_ group: String, _ title: String, _ cid: String) -> SlotUndoSnapshot {
+        var c = SlotContent()
+        c.items = [[PasteboardItem(type: "public.utf8-plain-text", data: Data(title.utf8))]]
+        c.contentId = cid
+        c.updatedAt = 1
+        return SlotUndoSnapshot(slots: [1: c], labels: [:], title: title, groupId: group)
+    }
+
+    // ① 撤销把「撤销前状态」搬到重做栈，重做再搬回撤销栈——两栈总步数守恒
+    var undo = SlotUndoStack()
+    var redo = SlotUndoStack()
+    undo.push(snap("A", "状态0", "s0"))       // 操作1 之前
+    undo.push(snap("A", "状态1", "s1"))       // 操作2 之前
+    t.equal(undo.count(forGroup: "A"), 2, "两步操作应产生两步撤销记录")
+
+    // 撤销一步：弹撤销栈顶，当前状态（这里用 状态2 表示）进重做栈
+    let undone = undo.popLatest(forGroup: "A")
+    redo.push(snap("A", "状态2", "s2"))
+    t.equal(undone?.title, "状态1", "撤销应回到上一步状态")
+    t.equal(undo.count(forGroup: "A"), 1, "撤销后撤销栈剩 1 步")
+    t.equal(redo.count(forGroup: "A"), 1, "撤销后重做栈应有 1 步")
+
+    // 重做一步：弹重做栈顶，重做前状态回到撤销栈
+    let redone = redo.popLatest(forGroup: "A")
+    undo.push(snap("A", "状态1", "s1b"))
+    t.equal(redone?.title, "状态2", "重做应恢复被撤销掉的那一步")
+    t.equal(redo.count(forGroup: "A"), 0, "重做后重做栈应清空")
+    t.equal(undo.count(forGroup: "A"), 2, "重做后撤销栈应恢复为 2 步")
+
+    // ② 重做栈同样受每组 10 步上限约束
+    var bigRedo = SlotUndoStack()
+    for i in 1...12 { bigRedo.push(snap("A", "R-\(i)", "r\(i)")) }
+    t.equal(bigRedo.count(forGroup: "A"), 10, "重做步数上限同样为 10")
+
+    // ③ 撤销后又做了新改动 → 该组的重做分支必须作废（时间线分叉）
+    var redo2 = SlotUndoStack()
+    redo2.push(snap("A", "被撤销的状态", "x1"))
+    redo2.push(snap("B", "B组的重做记录", "y1"))
+    redo2.removeAll(forGroup: "A")
+    t.check(!redo2.canUndo(forGroup: "A"), "新操作后 A 组重做记录必须清空")
+    t.equal(redo2.count(forGroup: "B"), 1, "清空 A 组重做记录不应影响 B 组")
+
+    // ④ 重做栈同样要能跨重启持久化
+    let data = try! JSONEncoder().encode(redo2)
+    var decoded = try! JSONDecoder().decode(SlotUndoStack.self, from: data)
+    t.equal(decoded.popLatest(forGroup: "B")?.title, "B组的重做记录", "重做栈应能 JSON 往返")
+}
+
+// 存储层：撤销 → 重做 的整组回写往返，内容不丢
+t.withFreshStore("重做回写") { storage in
+    let g = firstGroupId(storage)
+    // 状态 A：槽位 1 有内容
+    t.check(storage.set(1, content: makeTextContent("状态A"), in: g), "写入状态A应成功")
+    let snapshotA = storage.get(1, in: g)
+
+    // 操作：覆盖成状态 B
+    t.check(storage.set(1, content: makeTextContent("状态B"), in: g), "覆盖成状态B应成功")
+    let snapshotB = storage.get(1, in: g)
+
+    // 撤销：回到状态 A
+    t.check(storage.set(1, content: snapshotA, in: g), "撤销回写状态A应成功")
+    t.equal(extractText(storage.get(1, in: g)), "状态A", "撤销后应回到状态A")
+
+    // 重做：再回到状态 B
+    t.check(storage.set(1, content: snapshotB, in: g), "重做回写状态B应成功")
+    t.equal(extractText(storage.get(1, in: g)), "状态B", "重做后应恢复状态B")
+}
+
 t.report()

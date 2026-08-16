@@ -85,6 +85,13 @@ public struct SlotUndoStack: Codable {
         entries.contains { $0.groupId == groupId }
     }
 
+    /// 清空某个组的全部历史。
+    /// UNDO-2 (v2.10.96): 用于「新操作让重做链失效」——撤销后又做了新改动，原先的重做分支
+    /// 已不再是同一条时间线，必须丢弃（与所有编辑器的 undo/redo 语义一致）。
+    public mutating func removeAll(forGroup groupId: String) {
+        entries.removeAll { $0.groupId == groupId }
+    }
+
     public func count(forGroup groupId: String) -> Int {
         entries.reduce(0) { $0 + ($1.groupId == groupId ? 1 : 0) }
     }

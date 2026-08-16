@@ -96,6 +96,19 @@ struct ClipSlotsApp: App {
         store.undoLastClearIfPossible()
     }
 
+    /// UNDO-2 (v2.10.96): Cmd+Shift+Z 的分流，规则与 performSlotUndo 对称——
+    /// 焦点在文本控件且它自己有可重做记录时交还原生 undoManager，否则执行槽位重做。
+    static func performSlotRedo(_ store: SlotStoreObservable) {
+        if let responder = NSApp.keyWindow?.firstResponder,
+           (responder is NSTextView || responder is NSTextField),
+           let undoManager = responder.undoManager,
+           undoManager.canRedo {
+            undoManager.redo()
+            return
+        }
+        store.redoLastUndoIfPossible()
+    }
+
     // v2.7.54: startup entry must also default to dark.
     // v2.7.47 changed ContentView/SettingsView, but App root still defaulted to
     // system, so first launch could render as light before ContentView appeared.
@@ -181,6 +194,11 @@ struct ClipSlotsApp: App {
                     Self.performSlotUndo(store)
                 }
                 .keyboardShortcut("z", modifiers: [.control])
+                // UNDO-2 (v2.10.96): Cmd+Shift+Z 反向撤回（重做），撤销过头可以再往前恢复。
+                Button("重做槽位操作") {
+                    Self.performSlotRedo(store)
+                }
+                .keyboardShortcut("z", modifiers: [.command, .shift])
             }
             // v2.7.32: Do NOT register hard-coded SwiftUI menu shortcuts here.
             // These keyboardShortcut modifiers bypass AppConfig and remain active
@@ -2225,9 +2243,19 @@ final class SlotStoreObservable: ObservableObject {
     // 「清空槽位算一次，撤销的话可以全部返回的」）。
     private var undoStack = SlotUndoStack()
 
+    /// UNDO-2 (v2.10.96): 重做栈（Cmd+Shift+Z）。撤销时把「撤销前的状态」压进这里，
+    /// 于是撤销过头可以再往前恢复。任何**新的**槽位改动会清掉当前组的重做栈——撤销后又
+    /// 编辑就等于开了新的时间线，旧的重做分支必须作废（与所有编辑器一致）。
+    private var redoStack = SlotUndoStack()
+
     /// 撤销栈持久化位置（沿用 .undo 目录，与槽位数据同生命周期）。
     private var undoStackURL: URL {
         ClipSlotsPaths.specialSlots.appendingPathComponent(".undo/undo_stack.json")
+    }
+
+    /// 重做栈持久化位置。
+    private var redoStackURL: URL {
+        ClipSlotsPaths.specialSlots.appendingPathComponent(".undo/redo_stack.json")
     }
 
     /// v2.9.5 时代的单快照文件，仅用于一次性迁移（读完即删）。
@@ -2244,9 +2272,12 @@ final class SlotStoreObservable: ObservableObject {
     private static let undoMaterializeBudgetBytes = 64 * 1024 * 1024
 
     /// 撤销栈落盘（后台串行队列，避免大快照编码卡主线程）。失败仅记日志，绝不影响撤销本身。
-    private func persistUndoStack() {
-        let stack = undoStack
-        let url = undoStackURL
+    private func persistUndoStack() { persistStack(undoStack, to: undoStackURL) }
+
+    /// 重做栈落盘（同上）。
+    private func persistRedoStack() { persistStack(redoStack, to: redoStackURL) }
+
+    private func persistStack(_ stack: SlotUndoStack, to url: URL) {
         undoPersistQueue.async {
             let fm = FileManager.default
             guard !stack.isEmpty else {
@@ -2258,7 +2289,7 @@ final class SlotStoreObservable: ObservableObject {
                 let data = try JSONEncoder().encode(stack)
                 try data.write(to: url, options: .atomic)
             } catch {
-                NSLog("[ClipSlots] persist undo stack failed: \(error)")
+                NSLog("[ClipSlots] persist stack failed (\(url.lastPathComponent)): \(error)")
             }
         }
     }
@@ -2280,6 +2311,11 @@ final class SlotStoreObservable: ObservableObject {
             persistUndoStack()
             NSLog("[ClipSlots] migrated legacy undo snapshot: \(legacy.title)")
         }
+        if let data = try? Data(contentsOf: redoStackURL),
+           let stack = try? JSONDecoder().decode(SlotUndoStack.self, from: data) {
+            redoStack = stack
+            NSLog("[ClipSlots] restored redo stack: \(stack.entries.count) entr(ies)")
+        }
     }
 
     /// ≤v2.10.94 的单快照磁盘格式，仅用于迁移解码。
@@ -2297,6 +2333,19 @@ final class SlotStoreObservable: ObservableObject {
     ///     全部槽位）。这些槽位的外置附件字节会被就地读入快照（受 64MB 预算约束）。
     ///     普通覆盖写不需要（存储层会保留/重新克隆附件字节），传空即可。
     private func captureUndoSnapshot(title: String, materializeSlots: [Int] = []) {
+        let snapshot = makeStateSnapshot(title: title, materializeSlots: materializeSlots)
+        guard undoStack.push(snapshot) else { return }  // 与上一步状态完全一致 → 不占额度
+        persistUndoStack()
+        // UNDO-2 (v2.10.96): 新的改动让当前组的重做分支失效。
+        if redoStack.canUndo(forGroup: snapshot.groupId) {
+            redoStack.removeAll(forGroup: snapshot.groupId)
+            persistRedoStack()
+        }
+    }
+
+    /// 把「当前内存中的这一组」打成一份快照。`materializeSlots` 里的槽位会把外置附件字节
+    /// 就地读进快照（用于字节即将被物理删除的场景，见 captureUndoSnapshot 注释）。
+    private func makeStateSnapshot(title: String, materializeSlots: [Int]) -> SlotUndoSnapshot {
         var snapshotSlots = slots
         if !materializeSlots.isEmpty {
             var budget = Self.undoMaterializeBudgetBytes
@@ -2318,33 +2367,23 @@ final class SlotStoreObservable: ObservableObject {
                 if changed { snapshotSlots[slot] = content }
             }
         }
-        let snapshot = SlotUndoSnapshot(slots: snapshotSlots,
-                                        labels: labels,
-                                        title: title,
-                                        groupId: currentSpecialSlotId)
-        guard undoStack.push(snapshot) else { return }  // 与上一步状态完全一致 → 不占额度
-        persistUndoStack()
+        return SlotUndoSnapshot(slots: snapshotSlots,
+                                labels: labels,
+                                title: title,
+                                groupId: currentSpecialSlotId)
     }
 
-    /// 当前组还可撤销几步（供 UI / 日志使用）。
+    /// 当前组还可撤销 / 重做几步（供 UI / 日志使用）。
     var undoStepsAvailableForCurrentGroup: Int { undoStack.count(forGroup: currentSpecialSlotId) }
+    var redoStepsAvailableForCurrentGroup: Int { redoStack.count(forGroup: currentSpecialSlotId) }
 
-    func undoLastClearIfPossible() {
-        let activeId = currentSpecialSlotId
-        guard undoStack.canUndo(forGroup: activeId) else {
-            let subtitle = undoStack.isEmpty ? "最近没有可撤销的槽位改动" : "当前分组没有可撤销记录（请切回原分组）"
-            showFloatingNotice(FloatingNotice(title: "没有可撤销操作", subtitle: subtitle, iconName: "arrow.uturn.backward", kind: .warning))
-            return
-        }
-        // v2.8.7 (D) 的不变量保留：快照只回写到它被抓取的那个组（popLatest 按组取），
-        // 绝不把 A 组的历史写进当前激活的 B 组。
-        guard let snapshot = undoStack.popLatest(forGroup: activeId) else { return }
-
+    /// 把一份快照整组回写到磁盘 + 内存（撤销与重做共用）。
+    private func applyStateSnapshot(_ snapshot: SlotUndoSnapshot, activeId: String) {
         suppressWatcher()             // v2.9.4 (#2): 自写，不要触发 watcher 反向 reload
         cancelPendingClipboardRestore()
 
         // 整组回写：按 config.slots 归一化，快照里缺失的槽位显式还原为空槽，
-        // 避免「撤销后残留操作产生的新内容」。
+        // 避免「回退后残留操作产生的新内容」。
         var restored: [Int: SlotContent] = [:]
         for slot in stride(from: 1, through: config.slots, by: 1) {
             restored[slot] = snapshot.slots[slot] ?? SlotContent()
@@ -2359,15 +2398,72 @@ final class SlotStoreObservable: ObservableObject {
         persistCurrentSpecialSlotData()
         refreshTrigger = UUID()
         recomputeAutoPreviews()       // 游标角标随内容还原重算
+    }
+
+    func undoLastClearIfPossible() {
+        let activeId = currentSpecialSlotId
+        guard undoStack.canUndo(forGroup: activeId) else {
+            let subtitle = undoStack.isEmpty ? "最近没有可撤销的槽位改动" : "当前分组没有可撤销记录（请切回原分组）"
+            showFloatingNotice(FloatingNotice(title: "没有可撤销操作", subtitle: subtitle, iconName: "arrow.uturn.backward", kind: .warning))
+            return
+        }
+        // v2.8.7 (D) 的不变量保留：快照只回写到它被抓取的那个组（popLatest 按组取），
+        // 绝不把 A 组的历史写进当前激活的 B 组。
+        guard let snapshot = undoStack.popLatest(forGroup: activeId) else { return }
+
+        // UNDO-2 (v2.10.96): 先把「撤销前的状态」压进重做栈，Cmd+Shift+Z 才能再往前恢复。
+        // 这里 materialize 全部槽位：撤销的整组回写会覆盖当前槽位目录（原子换目录），当前状态里
+        // 那些外置的附件字节可能随之消失，不内联进重做快照就会断链。
+        pushRedoSnapshot(title: snapshot.title, activeId: activeId)
+
+        applyStateSnapshot(snapshot, activeId: activeId)
         persistUndoStack()
 
         let remaining = undoStack.count(forGroup: activeId)
         NSLog("[ClipSlots] UNDO specialSlot=\(activeId) title=\(snapshot.title) remaining=\(remaining)")
         showFloatingNotice(FloatingNotice(
             title: "已撤销",
-            subtitle: remaining > 0 ? "\(snapshot.title)（还可撤销 \(remaining) 步）" : snapshot.title,
+            subtitle: remaining > 0 ? "\(snapshot.title)（还可撤销 \(remaining) 步）" : "\(snapshot.title)（Cmd+Shift+Z 可重做）",
             iconName: "arrow.uturn.backward.circle.fill",
             kind: .success))
+    }
+
+    /// UNDO-2 (v2.10.96): 重做（Cmd+Shift+Z）——把最近一次被撤销掉的改动重新应用回来。
+    /// 与撤销完全对称：弹出当前组最新一条重做记录，同时把「重做前的状态」压回撤销栈，
+    /// 于是 Cmd+Z / Cmd+Shift+Z 可以来回走。
+    func redoLastUndoIfPossible() {
+        let activeId = currentSpecialSlotId
+        guard redoStack.canUndo(forGroup: activeId) else {
+            let subtitle = redoStack.isEmpty ? "没有被撤销的改动可以恢复" : "当前分组没有可重做记录（请切回原分组）"
+            showFloatingNotice(FloatingNotice(title: "没有可重做操作", subtitle: subtitle, iconName: "arrow.uturn.forward", kind: .warning))
+            return
+        }
+        guard let snapshot = redoStack.popLatest(forGroup: activeId) else { return }
+
+        // 把重做前的状态放回撤销栈（不走 captureUndoSnapshot——那条路径会清空重做栈）。
+        let backToUndo = makeStateSnapshot(title: snapshot.title,
+                                          materializeSlots: Array(stride(from: 1, through: config.slots, by: 1)))
+        undoStack.push(backToUndo)
+        persistUndoStack()
+
+        applyStateSnapshot(snapshot, activeId: activeId)
+        persistRedoStack()
+
+        let remaining = redoStack.count(forGroup: activeId)
+        NSLog("[ClipSlots] REDO specialSlot=\(activeId) title=\(snapshot.title) remaining=\(remaining)")
+        showFloatingNotice(FloatingNotice(
+            title: "已重做",
+            subtitle: remaining > 0 ? "\(snapshot.title)（还可重做 \(remaining) 步）" : snapshot.title,
+            iconName: "arrow.uturn.forward.circle.fill",
+            kind: .success))
+    }
+
+    /// 把当前状态压入重做栈（撤销时调用）。
+    private func pushRedoSnapshot(title: String, activeId: String) {
+        let current = makeStateSnapshot(title: title,
+                                       materializeSlots: Array(stride(from: 1, through: config.slots, by: 1)))
+        redoStack.push(current)
+        persistRedoStack()
     }
 
     private func persistCurrentSpecialSlotData() {
