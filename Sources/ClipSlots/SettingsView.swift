@@ -462,26 +462,35 @@ struct SettingsView: View {
     }
 
     /// UNDO-3 (v2.10.97): 撤销步数（Stepper，1~100），下方显示撤销栈磁盘占用。
+    ///
+    /// ⚠️ v2.10.98 修复：数值胶囊**必须放在 Stepper 外面**。之前把它写成 Stepper 的 label 又叠了
+    /// `.labelsHidden()`，等于亲手把唯一显示当前步数的控件隐藏掉 —— 界面上只剩 ∧/∨ 两个箭头，
+    /// 用户完全看不出现在是几步。这里改为「标题（含数值）+ 独立胶囊 + 纯箭头 Stepper」的组合。
     private var undoStepsRow: some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack(alignment: .firstTextBaseline) {
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("撤销步数").font(.subheadline)
+                    Text("撤销步数：\(undoSteps)").font(.subheadline)
                     Text("每个槽位组保留的撤销 / 重做步数（Cmd+Z / Cmd+Shift+Z），范围 1～100。")
                         .font(.caption)
                         .foregroundColor(.secondary)
                 }
                 Spacer()
+                // 数值胶囊（与「槽位数量」的数值样式保持一致）
+                Text("\(undoSteps)")
+                    .font(.system(size: 13, weight: .semibold, design: .rounded))
+                    .monospacedDigit()
+                    .padding(.horizontal, 9)
+                    .padding(.vertical, 4)
+                    .background(Capsule().fill(AppTheme.chipBackground(colorScheme)))
                 Stepper(value: $undoSteps,
                         in: SlotUndoStack.minLimitPerGroup...SlotUndoStack.maxLimitPerGroup) {
-                    Text("\(undoSteps)")
-                        .font(.system(size: 13, weight: .semibold, design: .rounded))
-                        .padding(.horizontal, 9)
-                        .padding(.vertical, 4)
-                        .background(Capsule().fill(AppTheme.chipBackground(colorScheme)))
+                    EmptyView()
                 }
                 .labelsHidden()
                 .fixedSize()
+                .accessibilityLabel("撤销步数")
+                .accessibilityValue("\(undoSteps)")
             }
             Text("撤销栈磁盘占用：\(formattedUndoDiskUsage)（调小步数并保存后会立即截断超出的历史）")
                 .font(.caption)
