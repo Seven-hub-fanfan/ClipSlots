@@ -488,4 +488,151 @@ do {
     t.equal(AppConfig().undoSteps, 10, "AppConfig.undoSteps 默认应为 10")
 }
 
+// MARK: - ATT-INGEST (v2.10.99) 附件字节摄取：引用型附件落盘时必须把源文件字节拷进自有目录
+//
+// 回归背景（线上 P0）：CLI write-attachment / GUI 拖拽 / 文件选择器此前只把源文件的绝对路径写进
+// attachments.json（data=nil、storagePath=nil），字节从未进入 App 数据目录。附件的存活因此完全寄生
+// 在外部源文件上——源文件位于 /tmp、/private/tmp、agent 共享目录等会被自动清理的位置时，附件集体
+// 静默失效（元数据在、字节没了），且 .trash 备份里同样只有 JSON，无从恢复。
+// 修复：externalizeAttachments 情形 2.5 在唯一的落盘汇聚点摄取字节。以下用例锁定该行为不回退。
+
+do {
+    let fm = FileManager.default
+
+    /// 造一个「模拟外部源文件」的临时目录，用完即删——模拟 /tmp 被系统回收。
+    func makeExternalSource(_ name: String, bytes: Data) -> URL {
+        let dir = fm.temporaryDirectory
+            .appendingPathComponent("clipslots_extsrc_\(UUID().uuidString)", isDirectory: true)
+        try? fm.createDirectory(at: dir, withIntermediateDirectories: true)
+        let f = dir.appendingPathComponent(name)
+        try? bytes.write(to: f)
+        return f
+    }
+
+    // ① 核心：写入一个纯路径引用附件 → 删除源文件 → 附件字节必须仍可读出（此前会永久丢失）
+    t.withFreshStore("附件摄取-源文件删除后仍可读") { storage in
+        let g = firstGroupId(storage)
+        let payload = Data("甄姬的语音字节".utf8)
+        let src = makeExternalSource("甄姬cv.mp3", bytes: payload)
+
+        var content = makeTextContent("营地抵达")
+        content.attachments = [
+            SlotContent.SlotAttachment(name: "甄姬cv.mp3", type: .file, path: src.path)
+        ]
+        t.check(storage.set(1, content: content, in: g), "写入引用型附件应成功")
+
+        // 模拟 /tmp 被系统清理：源文件（连同其目录）彻底消失。
+        try? fm.removeItem(at: src.deletingLastPathComponent())
+        t.check(!fm.fileExists(atPath: src.path), "前置条件：源文件应已被删除")
+
+        let reread = storage.get(1, in: g)
+        t.equal(reread.attachments.count, 1, "重读后附件条目应仍在")
+        guard let att = reread.attachments.first else { return }
+
+        // 关键断言：字节已自有，源文件消失也读得出来。
+        t.check(att.storagePath != nil, "落盘后应回填 storagePath（字节已摄取为自有副本）")
+        t.equal(att.resolveData(), payload, "源文件删除后仍应能读出原始字节")
+        t.check(!att.isBrokenLocalFileRef, "有自有字节时不得再被判定为断链（否则 UI 误报「文件不存在」）")
+        t.equal(att.originalPath, src.path, "应保留 originalPath 记录来源以便溯源")
+    }
+
+    // ② 字节确实落在了槽位自有的 attachments/ 目录下（而非仍旧指向外部）
+    t.withFreshStore("附件摄取-字节落在自有目录") { storage in
+        let g = firstGroupId(storage)
+        let src = makeExternalSource("场景1.png", bytes: Data("PNGBYTES".utf8))
+        var content = SlotContent()
+        content.attachments = [
+            SlotContent.SlotAttachment(name: "场景1.png", type: .image, path: src.path)
+        ]
+        t.check(storage.set(2, content: content, in: g), "写入图片引用附件应成功")
+
+        guard let att = storage.get(2, in: g).attachments.first, let sp = att.storagePath else {
+            t.check(false, "应拿到带 storagePath 的附件"); return
+        }
+        t.check(sp.contains("/attachments/"), "storagePath 应位于槽位自有的 attachments/ 目录下")
+        t.check(sp.hasSuffix(att.id.uuidString + ".bin"), "外置字节应按附件 UUID 内容寻址命名")
+        t.check(fm.fileExists(atPath: sp), "外置字节文件应真实存在于磁盘")
+        t.check(!sp.contains(src.deletingLastPathComponent().lastPathComponent),
+                "storagePath 不得仍指向外部源目录")
+        try? fm.removeItem(at: src.deletingLastPathComponent())
+    }
+
+    // ③ materializedFileURL：源文件没了也要能按【原始文件名】取出可粘贴的文件（不能给出 UUID.bin）
+    t.withFreshStore("附件摄取-materialize保留原始文件名") { storage in
+        let g = firstGroupId(storage)
+        let payload = Data("VIDEOBYTES".utf8)
+        let src = makeExternalSource("蓝.mp3", bytes: payload)
+        var content = SlotContent()
+        content.attachments = [
+            SlotContent.SlotAttachment(name: "蓝.mp3", type: .file, path: src.path)
+        ]
+        t.check(storage.set(3, content: content, in: g), "写入附件应成功")
+        try? fm.removeItem(at: src.deletingLastPathComponent())
+
+        guard let att = storage.get(3, in: g).attachments.first else {
+            t.check(false, "应拿到附件"); return
+        }
+        guard let url = att.materializedFileURL() else {
+            t.check(false, "源文件消失但字节完好时，materializedFileURL 不应返回 nil"); return
+        }
+        t.equal(url.lastPathComponent, "蓝.mp3", "materialize 出的文件应保留原始文件名与扩展名")
+        t.equal(try? Data(contentsOf: url), payload, "materialize 出的文件内容应与原始字节一致")
+        // 幂等：再取一次应复用同一路径，不重复拷贝。
+        t.equal(att.materializedFileURL()?.path, url.path, "重复 materialize 应复用同一路径")
+    }
+
+    // ④ 源文件仍在原位时，materializedFileURL 必须零拷贝直接返回原路径（不改变既有行为）
+    t.withFreshStore("附件摄取-源文件在位时零拷贝") { storage in
+        let g = firstGroupId(storage)
+        let src = makeExternalSource("在位.txt", bytes: Data("STILLHERE".utf8))
+        defer { try? fm.removeItem(at: src.deletingLastPathComponent()) }
+        var content = SlotContent()
+        content.attachments = [
+            SlotContent.SlotAttachment(name: "在位.txt", type: .file, path: src.path)
+        ]
+        t.check(storage.set(4, content: content, in: g), "写入附件应成功")
+        guard let att = storage.get(4, in: g).attachments.first else {
+            t.check(false, "应拿到附件"); return
+        }
+        t.equal(att.materializedFileURL()?.path, src.path, "源文件在位时应直接返回原始路径")
+        t.check(!att.isBrokenLocalFileRef, "源文件在位自然不算断链")
+    }
+
+    // ⑤ 多次改写槽位（只动正文/标签）不得丢掉已摄取的附件字节——覆盖情形 2 的跨写入保活
+    t.withFreshStore("附件摄取-反复改写不丢字节") { storage in
+        let g = firstGroupId(storage)
+        let payload = Data("KEEPME".utf8)
+        let src = makeExternalSource("曹操.png", bytes: payload)
+        var content = makeTextContent("初始正文")
+        content.attachments = [
+            SlotContent.SlotAttachment(name: "曹操.png", type: .image, path: src.path)
+        ]
+        t.check(storage.set(5, content: content, in: g), "首次写入应成功")
+        try? fm.removeItem(at: src.deletingLastPathComponent())
+
+        // 连续 3 次只改正文重写整槽（每次都是 staging → 原子 swap）
+        for i in 1...3 {
+            var next = storage.get(5, in: g)
+            next.items = makeTextContent("正文修改 \(i)").items
+            t.check(storage.set(5, content: next, in: g), "第 \(i) 次改写正文应成功")
+        }
+
+        let final = storage.get(5, in: g)
+        t.equal(extractText(final), "正文修改 3", "正文应为最后一次修改的值")
+        t.equal(final.attachments.first?.resolveData(), payload,
+                "反复改写整槽后附件字节仍应完好（原子 swap 不得丢掉外置 .bin）")
+    }
+
+    // ⑥ 真断链（从未落盘过字节、源文件也不存在）仍应如实判为断链，不得被本次修复掩盖
+    do {
+        let ghost = SlotContent.SlotAttachment(
+            name: "不存在.png", type: .image,
+            path: "/tmp/clipslots_definitely_missing_\(UUID().uuidString)/x.png"
+        )
+        t.check(ghost.isBrokenLocalFileRef, "无字节且源文件不存在的附件仍应判为断链")
+        t.check(ghost.materializedFileURL() == nil, "真断链附件 materialize 应返回 nil")
+        t.check(ghost.resolveData() == nil, "真断链附件不应解析出字节")
+    }
+}
+
 t.report()

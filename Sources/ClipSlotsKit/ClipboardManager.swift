@@ -551,9 +551,71 @@ extension SlotContent.SlotAttachment {
         guard type == .image || type == .file else { return false }
         // 图片等有内联字节仍可粘贴/渲染，不算断链。
         if hasUsableInlineData { return false }
+        // P0 (v2.10.99): 有自有外置字节 → 绝不算断链，哪怕 `path` 指向的原始源文件早已消失。
+        //
+        // 摄取机制（externalizeAttachments 情形 2.5）落地后，引用型附件在首次落盘时字节就被拷进
+        // `{slotDir}/attachments/{id}.bin`，而 `path` / `originalPath` 仍如实保留【来源】路径以供溯源。
+        // 此时源文件被删是完全正常且预期的（典型场景：从 /tmp 或下载目录加进来的文件，源目录随后被清理），
+        // 附件本身依然完好可粘贴。若仍只按 `path` 存在性判定，就会把这些健康附件全部误报成「文件不存在」——
+        // 相当于把修复后的正常状态显示成故障。故这里先看自有字节，有则直接放行。
+        if storageFileURL != nil { return false }
         // 没有任何本地路径引用（例如纯 url / 内联型），不属于本地文件断链范畴。
         guard let p = localFileReferencePath else { return false }
         return !FileManager.default.fileExists(atPath: p)
+    }
+
+    /// P0 (v2.10.99): 解析出一个「可直接放进剪贴板 / 交给其他 App」的磁盘文件 URL，且**保持原始文件名**。
+    ///
+    /// 为什么需要它：附件字节外置后存成内容寻址的 `{id}.bin`，文件名是一串 UUID、扩展名恒为 `.bin`。
+    /// 直接把该 URL 写进剪贴板，用户粘贴出来会得到 `A1B2C3….bin` 这种既看不出是什么、又丢了扩展名
+    /// （目标 App 无法识别类型、预览失效）的文件。因此粘贴路径不能直接用 `storageFileURL`。
+    ///
+    /// 解析优先级：
+    ///   1) 原始源文件仍在原位 → 直接返回它。零拷贝，且文件名/扩展名天然正确，与旧行为完全一致。
+    ///   2) 源文件已消失但自有外置字节在 → 在临时目录里按 `{id}/{原始文件名}` materialize 一份
+    ///      （clonefile，APFS 上 O(1)），返回该 URL。这正是修复后最常见的情形——源文件早被清理，
+    ///      但附件完好，粘贴必须照常可用。
+    ///   3) 都没有（真断链 / 非文件型） → nil，调用方跳过并提示，不把不存在的路径写进剪贴板。
+    ///
+    /// 缓存与幂等：materialize 目标路径由 `id` + 文件名确定，`.bin` 内容不可变，故已存在同名文件即
+    /// 直接复用，同一附件重复粘贴不会反复拷贝。落在系统临时目录下，由 macOS 按常规回收。
+    public func materializedFileURL() -> URL? {
+        guard type == .image || type == .file else { return nil }
+        let fm = FileManager.default
+        // 1) 源文件仍在原位——原样使用，文件名正确且零成本。
+        if let p = localFileReferencePath, fm.fileExists(atPath: p) {
+            return URL(fileURLWithPath: p)
+        }
+        // 2) 回退到自有外置字节，按原始文件名 materialize。
+        guard let binURL = storageFileURL else { return nil }
+        // 文件名兜底：name 可能为空或含路径分隔符（历史数据），清洗后再用；仍拿不到就退回 UUID + 原扩展名。
+        var fileName = name.replacingOccurrences(of: "/", with: "_")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        if fileName.isEmpty || fileName == "." || fileName == ".." {
+            let ext = URL(fileURLWithPath: localFileReferencePath ?? "").pathExtension
+            fileName = ext.isEmpty ? id.uuidString : "\(id.uuidString).\(ext)"
+        }
+        let dir = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
+            .appendingPathComponent("ClipSlotsAttachments", isDirectory: true)
+            .appendingPathComponent(id.uuidString, isDirectory: true)
+        let dest = dir.appendingPathComponent(fileName)
+        // 已 materialize 过（内容不可变）→ 直接复用，避免重复粘贴反复拷贝。
+        if fm.fileExists(atPath: dest.path) { return dest }
+        do {
+            try fm.createDirectory(at: dir, withIntermediateDirectories: true)
+        } catch {
+            NSLog("[ClipSlots] materializedFileURL mkdir FAIL att=\(id): \(error.localizedDescription)")
+            return nil
+        }
+        let crc = binURL.path.withCString { s in dest.path.withCString { d in clonefile(s, d, 0) } }
+        if crc == 0 { return dest }
+        do {
+            try fm.copyItem(at: binURL, to: dest)
+            return dest
+        } catch {
+            NSLog("[ClipSlots] materializedFileURL copy FAIL att=\(id): \(error.localizedDescription)")
+            return nil
+        }
     }
 }
 

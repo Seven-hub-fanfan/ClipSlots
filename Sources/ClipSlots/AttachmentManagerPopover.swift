@@ -565,18 +565,18 @@ struct AttachmentRow: View {
                 .opacity(isBrokenRef ? 0.4 : 1)
                 .task(id: attachment.id) {
                     // 断链判定含磁盘 fileExists，放后台线程算，避免主线程同步 stat 阻塞（网络卷）。
-                    let hasData = attachment.hasUsableInlineData
-                    let refPath = attachment.localFileReferencePath
-                    let broken: Bool
-                    if hasData || refPath == nil {
-                        broken = false
-                    } else if let p = refPath {
-                        broken = await Task.detached(priority: .utility) {
-                            !FileManager.default.fileExists(atPath: p)
-                        }.value
-                    } else {
-                        broken = false
-                    }
+                    // P0 (v2.10.99): 判定口径收敛到 Kit 的 `isBrokenLocalFileRef` 单一真源，不再在这里
+                    // 复算「只看 localFileReferencePath 是否存在」。
+                    //
+                    // 旧实现漏掉了「自有外置字节」这一维度：字节摄取修复（externalizeAttachments 情形 2.5）
+                    // 落地后，附件字节存在 `{slotDir}/attachments/{id}.bin`，而 `path` 仍如实保留原始来源
+                    // 路径用于溯源——源文件被清理是正常预期（典型如从 /tmp 或下载目录添加的文件）。此时
+                    // 附件完好可粘贴，旧口径却因 `path` 不存在而给每一个都打上「⚠️ 文件不存在」角标，
+                    // 等于把修复后的健康状态显示成故障。两处口径必须一致，否则角标与实际可粘贴性长期背离。
+                    let att = attachment
+                    let broken = await Task.detached(priority: .utility) {
+                        att.isBrokenLocalFileRef
+                    }.value
                     if broken != isBrokenRef { isBrokenRef = broken }
                 }
 

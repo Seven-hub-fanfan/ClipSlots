@@ -45,6 +45,27 @@ func cloneLinkOrCopyFile(at src: URL, to dst: URL) -> Bool {
     }
 }
 
+/// P0 (v2.10.99): 把【外部源文件】的字节摄取（ingest）进槽位自有的 `attachments/` 目录。
+///
+/// 与 `cloneLinkOrCopyFile` 的关键区别：**绝不使用 `link(2)` 硬链接**。硬链接会让我们的
+/// `.bin` 与用户源文件共享 inode——用户之后原位编辑（或某些编辑器的截断写）会顺带改坏我们
+/// 这份「快照」，违背 `.bin` 一经写入内容不变的架构假设（`AttachmentTextCache` 等据此永不失效）。
+/// 源文件是外部世界、不受我们控制，故只用两级：
+///   1) `clonefile(2)` —— APFS copy-on-write，亚毫秒、恒定时间，写时才分裂，语义上就是快照。
+///   2) 物理 `copyItem` —— 非 APFS / 跨卷时不可避免地真拷字节。
+@discardableResult
+func ingestExternalFile(at src: URL, to dst: URL) -> Bool {
+    let crc = src.path.withCString { s in dst.path.withCString { d in clonefile(s, d, 0) } }
+    if crc == 0 { return true }
+    do {
+        try FileManager.default.copyItem(at: src, to: dst)
+        return true
+    } catch {
+        NSLog("[ClipSlots] ingestExternalFile FAIL \(src.lastPathComponent): \(error.localizedDescription)")
+        return false
+    }
+}
+
 /// P1-A (v2.10.44): errors surfaced by the slot write path so the caller can abort an
 /// atomic swap (and roll back) instead of silently persisting a lossy payload.
 enum SlotStorageError: Error {
@@ -53,6 +74,12 @@ enum SlotStorageError: Error {
     /// 宁可失败也不把「storagePath=nil」的 attachments.json 连同原子 swap 写出去 —— 后者会让旧
     /// `.bin` 随整槽目录被替换而永久丢失。
     case attachmentExternalizeFailed(slot: Int, attachment: UUID, source: String)
+
+    /// P0 (v2.10.99): externalizeAttachments 情形 2.5（把外部源文件的字节摄取进槽位自有
+    /// `attachments/` 目录）失败。同样抛出以回滚整槽写入——绝不退化成「静默写入一条纯路径引用」，
+    /// 那会让用户误以为附件已安全存档，而实际上源文件一旦被清理（尤其 /tmp 下的临时文件）附件即
+    /// 永久失效且无法从 .trash 恢复。这正是 v2.10.98 及之前版本附件丢失的根因形态。
+    case attachmentIngestFailed(slot: Int, attachment: UUID, source: String)
 }
 
 struct SlotManifest: Codable {
@@ -1022,7 +1049,11 @@ public final class SlotStorage {
     ///   2) 已外置的 `storagePath` 指向的现存文件（本槽历次写入 / 读后内存 data 为 nil）——用 clonefile
     ///      克隆进 staging，保证「重写槽位（如只改正文/标签）」时不丢历史外置字节；否则整槽目录每次
     ///      staging→原子 swap，旧 `.bin` 会随 swap 一并消失。
-    ///   3) 二者皆无（纯 path 引用 / url / reference / 断链）——原样保留元数据，不外置。
+    ///   3) 二者皆无但 `path` / `originalPath` 指向一个【现存的外部源文件】（纯路径引用型附件，
+    ///      如 CLI write-attachment / GUI 拖拽刚加进来的文件）——P0 (v2.10.99) 起在此摄取其字节
+    ///      进自有 `.bin`，把「寄生在外部文件上的引用」转成「自有副本」。这是附件丢失 bug 的修复点，
+    ///      详见该分支内的长注释。
+    ///   4) 以上皆无（url / reference / 真断链）——原样保留元数据，不外置。
     private func externalizeAttachments(_ attachments: [SlotContent.SlotAttachment],
                                         slot: Int,
                                         stagingDir: URL) throws -> [SlotContent.SlotAttachment] {
@@ -1089,6 +1120,47 @@ public final class SlotStorage {
                     } else {
                         NSLog("[ClipSlots] externalizeAttachments slot=\(slot) att=\(att.id) clone FAIL from canonical \(canonicalURL.path) — aborting write to preserve existing bytes")
                         throw SlotStorageError.attachmentExternalizeFailed(slot: slot, attachment: att.id, source: canonicalURL.path)
+                    }
+                } else if let srcPath = att.localFileReferencePath,
+                          fm.fileExists(atPath: srcPath),
+                          (try? URL(fileURLWithPath: srcPath).resourceValues(forKeys: [.isRegularFileKey]))?.isRegularFile == true {
+                    // ── 情形 2.5（P0 修复，v2.10.99）：外部本地文件引用 → 摄取字节，转为自有外置副本。
+                    //
+                    // 这是「附件显示⚠️文件不存在」的根因修复点。此前 CLI `write-attachment`、GUI 拖拽
+                    // 与文件选择器都只把源文件的【绝对路径】写进 attachments.json（data=nil、
+                    // storagePath=nil），字节从未进入 App 数据目录。于是附件的存活完全寄生在外部源文件上：
+                    // 源文件被删、被移动、或位于 /tmp、/private/tmp、Aime 共享目录等【会被系统或工具自动
+                    // 清理】的临时路径时，附件即静默永久失效——元数据还在，字节没了。线上实例：一整页 4 个
+                    // 槽位 26 个附件的 path 全部指向 /private/tmp/aime-agent-shared-dir/...，临时目录被回收
+                    // 后集体断链，且因从未落盘，.trash 里的备份也只有 attachments.json，无从恢复。
+                    //
+                    // 修复策略——在【唯一的落盘汇聚点】摄取，而不是逐个修每条写入链路：
+                    // 所有写入路径（CLI write-attachment / GUI 拖拽 / 文件选择器 / pack 导入 / 自动存储）
+                    // 最终都经由 set() → writeSlotContent → 本函数，因此只要这里补上「引用型附件首次落盘时
+                    // 顺手把字节摄取进来」，全部入口一次性收敛，不会再有新增入口漏掉这一步。
+                    //
+                    // 摄取后 storagePath 指向自有 `.bin`，字节从此由存储层掌管，享受既有的全部保障：
+                    // 情形 2 的跨写入克隆保活、normalizeStoragePaths 的数据目录迁移重定位、.trash 备份
+                    // 含真实字节因而可恢复。同时【保留 originalPath】记录来源以便展示与 pack 导出。
+                    //
+                    // 用 clonefile 而非硬链接：APFS 上是 O(1) copy-on-write，摄取 GB 级视频也不会长时间
+                    // 占着跨进程 StorageLock，且不与用户源文件共享 inode（见 ingestExternalFile 注释）。
+                    try ensureStagingDir()
+                    try? fm.removeItem(at: destFile)
+                    if ingestExternalFile(at: URL(fileURLWithPath: srcPath), to: destFile) {
+                        out.data = nil
+                        out.storagePath = finalPath
+                        // 保留来源路径用于展示 / pack 导出溯源；字节已自有，源文件此后可安全消失。
+                        if out.originalPath == nil || out.originalPath?.isEmpty == true {
+                            out.originalPath = srcPath
+                        }
+                        NSLog("[ClipSlots] externalizeAttachments slot=\(slot) att=\(att.id) ingested external file from \(srcPath)")
+                    } else {
+                        // 摄取失败（磁盘满 / 权限 / 源文件读不了）→ 与情形 2 同样抛错回滚整槽写入。
+                        // 绝不「静默写入一条注定断链的纯路径记录」：那正是本次 bug 的形态，用户会以为
+                        // 附件已安全存档，实际只存了个迟早失效的路径。宁可让本次写入显式失败并报错。
+                        NSLog("[ClipSlots] externalizeAttachments slot=\(slot) att=\(att.id) ingest FAIL from \(srcPath) — aborting write rather than persisting a doomed path-only reference")
+                        throw SlotStorageError.attachmentIngestFailed(slot: slot, attachment: att.id, source: srcPath)
                     }
                 } else if let sp = att.storagePath, !sp.isEmpty {
                     // 规范路径也不存在 → 真断链，清空以如实反映断链，避免读侧误判有字节。

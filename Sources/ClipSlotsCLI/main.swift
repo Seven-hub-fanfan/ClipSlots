@@ -18,7 +18,7 @@ import ClipSlotsKit
 // needs bumping.
 // v2.10.66: keep in lockstep with the app's CFBundleShortVersionString on every
 // release — this constant had drifted (2.10.58) behind the app (2.10.65).
-let CLI_VERSION = "2.10.98"
+let CLI_VERSION = "2.10.99"
 let DEFAULT_GROUP = "default"
 let DEFAULT_PAGE = "default_page"
 
@@ -1409,9 +1409,16 @@ func cmdPaste(_ args: ParsedArgs) -> Never {
         for att in content.attachments {
             // Only .file / .image attachments resolve to an on-disk file path; other
             // types (text/url/reference) or path-less attachments are skipped.
-            if let path = att.path, !path.isEmpty,
-               FileManager.default.fileExists(atPath: path) {
-                urls.append(URL(fileURLWithPath: path) as NSURL)
+            // P0 (v2.10.99): resolve via materializedFileURL() instead of reading `att.path`
+            // directly. After the byte-ingest fix, an attachment's authoritative bytes live in
+            // `{slotDir}/attachments/{id}.bin` while `path` keeps pointing at the ORIGINAL source
+            // for provenance — which is routinely gone (files added from /tmp, Downloads, agent
+            // shared dirs). The old `att.path` existence check counted those perfectly healthy
+            // attachments as unresolvable and could fail the whole paste with PASTE_FAILED.
+            // materializedFileURL() returns the original file when still in place, otherwise
+            // materializes the owned bytes under the original filename.
+            if let url = att.materializedFileURL() {
+                urls.append(url as NSURL)
             } else {
                 skipped += 1
             }

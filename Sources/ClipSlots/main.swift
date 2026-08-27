@@ -4365,17 +4365,19 @@ final class SlotStoreObservable: ObservableObject {
             // v2.10.37: 粘贴前做源文件可达性校验。断链的本地文件引用（源文件已移动/删除）
             // 返回空 payload 而非 `URL(fileURLWithPath:)` 一个不存在的路径——后者会被写进剪贴板
             // 却在真正 Cmd+V 时静默失败。跳过后由调用方统计并给出明确提示。
-            guard let path = att.path, !path.isEmpty,
-                  FileManager.default.fileExists(atPath: path) else { return empty }
-            return ChainPastePayload(sourceSlot: 0, text: nil, fileURLs: [URL(fileURLWithPath: path)], isImage: false, isEmpty: false, image: nil)
+            // P0 (v2.10.99): 改走 materializedFileURL()——源文件仍在原位时行为不变（直接返回原路径），
+            // 源文件已被清理但自有外置字节尚在时，按原始文件名 materialize 一份再粘贴。此前这里只看
+            // `att.path`，摄取修复落地后会把「字节完好、仅源文件消失」的健康附件当成断链跳过。
+            guard let url = att.materializedFileURL() else { return empty }
+            return ChainPastePayload(sourceSlot: 0, text: nil, fileURLs: [url], isImage: false, isEmpty: false, image: nil)
         case .image:
             if let data = att.resolveData(), let image = NSImage(data: data) {
                 return ChainPastePayload(sourceSlot: 0, text: nil, fileURLs: [], isImage: true, isEmpty: false, image: image)
             }
             // v2.10.37: 无内联字节时才回退到源文件；同样校验文件存在，断链即跳过。
-            if let path = att.path, !path.isEmpty,
-               FileManager.default.fileExists(atPath: path) {
-                return ChainPastePayload(sourceSlot: 0, text: nil, fileURLs: [URL(fileURLWithPath: path)], isImage: false, isEmpty: false, image: nil)
+            // P0 (v2.10.99): 同 .file，回退路径改用 materializedFileURL()。
+            if let url = att.materializedFileURL() {
+                return ChainPastePayload(sourceSlot: 0, text: nil, fileURLs: [url], isImage: false, isEmpty: false, image: nil)
             }
             return empty
         case .reference:
