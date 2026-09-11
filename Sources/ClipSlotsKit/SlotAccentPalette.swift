@@ -155,7 +155,7 @@ public enum SlotAccentPalette {
 
     // 圆盘上的槽位色是**大面积半透明色块**（扇区高亮、底栏胶囊、外沿弧），和主界面卡片上那种
     // 几毫米见方的小角标不是一回事：同一支色，铺成小色点时「深而稳」，铺成扇区就是「脏而闷」，
-    // 叠上 0.45~0.85 的不透明度之后更是往灰里塌。
+    // 叠上 0.25~0.65 的不透明度之后更是往灰里塌。
     //
     // 所以圆盘不直接吃基础调色板，而是过一层提亮：色相锁死不动（红还是红、绿还是绿，
     // 与主界面卡片仍然一眼同源），只把饱和度 ×1.20、明度朝白抬 45%。
@@ -177,13 +177,18 @@ public enum SlotAccentPalette {
     }
 
     // MARK: - 交互态不透明度（圆盘与底栏共用，改一处即全局生效）
+    //
+    // v2.11.4 hotfix2：三档整体再降 20%（0.45→0.25 / 0.72→0.52 / 0.85→0.65）。
+    // 提亮之后色本身够亮了，原来的浓度反而把圆盘压成实心色块、盖住了下面的磨砂玻璃；
+    // 降浓度让高亮回到「一层染色玻璃」而不是「一块塑料贴片」。
+    // 三者的相对层级（填充 < 描边 < 胶囊）保持不变，smoke 有断言钉着。
 
     /// 悬停扇区填充：保持透明感，让下面的磨砂玻璃与相邻扇区分界线仍然透出来。
-    public static let hoverFillOpacity: Double = 0.45
+    public static let hoverFillOpacity: Double = 0.25
     /// 悬停扇区描边：比填充实一档，负责「这一格被选中」的硬边界。
-    public static let hoverStrokeOpacity: Double = 0.72
-    /// 底栏胶囊底色：接近实心，但留一点底纹透出以维持玻璃感。
-    public static let pillFillOpacity: Double = 0.85
+    public static let hoverStrokeOpacity: Double = 0.52
+    /// 底栏胶囊底色：三档里最实的一档，但仍留出底纹以维持玻璃感。
+    public static let pillFillOpacity: Double = 0.65
     /// 底栏胶囊描边。
     public static let pillStrokeOpacity: Double = 0.95
 

@@ -295,19 +295,19 @@ enum AppTheme {
     // v2.11.4 让悬停高亮与底栏「上次粘贴」胶囊都跟随槽位色。`slot` 传 nil（或非法值）时
     // 回落到原来的蓝色 / 玻璃灰，保证组扇区模式与「无上次粘贴记录」这两条路径行为不变。
 
-    /// 悬停扇区填充：槽位色 @0.45。透明度刻意留高，磨砂玻璃与扇区分界线要能透出来。
+    /// 悬停扇区填充：槽位色 @0.25。透明度刻意留高，磨砂玻璃与扇区分界线要能透出来。
     static func radialSegmentHoverFill(slot: Int?) -> Color {
         guard let slot, slot >= 1 else { return radialSegmentHovered }
         return slotAccentTint(slot, opacity: SlotAccentPalette.hoverFillOpacity)
     }
 
-    /// 悬停扇区描边：槽位色 @0.72，比填充实一档，负责「选中」的硬边界。
+    /// 悬停扇区描边：槽位色 @0.52，比填充实一档，负责「选中」的硬边界。
     static func radialSegmentHoverStroke(slot: Int?) -> Color {
         guard let slot, slot >= 1 else { return radialStroke(isHovered: true) }
         return slotAccentTint(slot, opacity: SlotAccentPalette.hoverStrokeOpacity)
     }
 
-    /// 底栏「上次粘贴」胶囊底色：槽位色 @0.85（无记录时回落玻璃灰）。
+    /// 底栏「上次粘贴」胶囊底色：槽位色 @0.65（无记录时回落玻璃灰）。
     static func radialSlotPillFill(slot: Int?) -> Color {
         guard let slot, slot >= 1 else { return radialGlassButtonTint }
         return slotAccentTint(slot, opacity: SlotAccentPalette.pillFillOpacity)
