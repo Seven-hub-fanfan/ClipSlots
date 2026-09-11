@@ -18,7 +18,7 @@ import ClipSlotsKit
 // needs bumping.
 // v2.10.66: keep in lockstep with the app's CFBundleShortVersionString on every
 // release — this constant had drifted (2.10.58) behind the app (2.10.65).
-let CLI_VERSION = "2.11.1"
+let CLI_VERSION = "2.11.2"
 let DEFAULT_GROUP = "default"
 let DEFAULT_PAGE = "default_page"
 
@@ -151,7 +151,10 @@ struct ParsedArgs {
 // NOT in this set).
 let BOOLEAN_FLAGS: Set<String> = [
     "force", "replace", "if-empty", "overwrite-text", "all-groups", "batch",
-    "stop-on-error", "help"
+    "stop-on-error", "help",
+    // v2.11.2: `set-thumbnail --if-absent` 是幂等护栏开关，同样不吃下一个 token
+    // （否则 `set-thumbnail 1 --if-absent --image a.png` 会把 `--image` 当成它的值）。
+    "if-absent"
 ]
 
 func parseArgs(_ raw: [String]) -> ParsedArgs {
@@ -531,7 +534,10 @@ let COMMANDS: [[String: Any]] = [
     ["name": "rename-group", "description": "重命名一个槽位组。v2.9.42: 常用于 create-page 之后把自动生成的默认组改成想要的第一个组名，避免浪费。同页面内组名不可重复(会返回错误)。", "flags": ["<group-id> (位置参数,要重命名的槽位组 id)", "--name <name> (必填,新名称)", "--page-name <name> (可选,仅用于日志/校验,不影响核心逻辑)"]],
     ["name": "delete-group", "description": "删除一个槽位组(软删除)。其数据目录会被移动到 .trash，可恢复；.trash 会自动清理(默认保留最近 30 天/最多 50 条)。id 不存在会返回错误。", "flags": ["<id> (位置参数,槽位组 id)"]],
     ["name": "delete-page", "description": "删除一个页面及其下所有槽位组(软删除)。相关数据目录会被移动到 .trash，可恢复；.trash 会自动清理(默认保留最近 30 天/最多 50 条)。id 不存在会返回错误。", "flags": ["<id> (位置参数,页面 id)"]],
-    ["name": "write-attachment", "description": "向某槽位追加一个或多个文件作为附件（按顺序），不改动槽位主体内容。图片扩展名归为 image 类型，其余为 file。", "flags": ["<slot> (位置参数,1..N)", "<file> [file ...] (位置参数,一个或多个文件路径,支持 ~ 与相对路径)", "--group <id|name> (默认 default;可传 id 或组名)", "--group-name <name> (按组名精确匹配)", "--page <id> (可选,约束 --group/--group-name 匹配到该页面)", "--page-name <name> (按页面名精确匹配;找不到会报错,与 --page 互斥;约束 group 匹配范围)", "--replace (先清空该槽位已有附件再写入)", "--label <string> (可选)", "--force (跳过跨进程锁,风险自负)"]]
+    ["name": "write-attachment", "description": "向某槽位追加一个或多个文件作为附件（按顺序），不改动槽位主体内容。图片扩展名归为 image 类型，其余为 file。", "flags": ["<slot> (位置参数,1..N)", "<file> [file ...] (位置参数,一个或多个文件路径,支持 ~ 与相对路径)", "--group <id|name> (默认 default;可传 id 或组名)", "--group-name <name> (按组名精确匹配)", "--page <id> (可选,约束 --group/--group-name 匹配到该页面)", "--page-name <name> (按页面名精确匹配;找不到会报错,与 --page 互斥;约束 group 匹配范围)", "--replace (先清空该槽位已有附件再写入)", "--label <string> (可选)", "--force (跳过跨进程锁,风险自负)"]],
+    // v2.11.2: 手动缩略图的 CLI 入口，与 GUI「右键 → 设置缩略图」写同一份数据。
+    ["name": "set-thumbnail", "description": "为槽位设置手动缩略图（卡片与轮盘优先展示它，无则回退自动缩略图）。图片会被统一压成最长边 1024px 的 JPEG。注意区分用途：set-thumbnail 是给槽位「配封面」，不改动槽位内容；要把图片本身存进槽位请用 write-attachment。支持 --batch 从 stdin 传入 JSON 数组一次设多个。", "flags": ["<slot> (位置参数,1..N;--batch 时省略)", "--image <path> (必填,图片路径,支持 ~ 与相对路径;--batch 时省略)", "--batch (从 stdin 读取 JSON 数组批量设置,元素形如 {\"slot\":1,\"image\":\"~/a.png\",\"group\":\"设计稿\",\"page\":\"素材\",\"if_absent\":true})", "--if-absent (仅当槽位尚无手动缩略图时写入,已有则返回 THUMBNAIL_ALREADY_SET)", "--group <id|name> (默认 default;可传 id 或组名)", "--group-name <name> (按组名精确匹配)", "--page <id> (可选,约束 --group/--group-name 匹配到该页面)", "--page-name <name> (按页面名精确匹配;找不到会报错,与 --page 互斥;约束 group 匹配范围)", "--stop-on-error (批量遇错停止,默认 false)", "--force (跳过跨进程锁,风险自负)"]],
+    ["name": "clear-thumbnail", "description": "移除槽位的手动缩略图，回落到自动生成的预览。槽位内容、附件、标签均不受影响。槽位本就没有手动缩略图时返回 NO_MANUAL_THUMBNAIL。", "flags": ["<slot> (位置参数,1..N)", "--group <id|name> (默认 default;可传 id 或组名)", "--group-name <name> (按组名精确匹配)", "--page <id> (可选,约束 --group/--group-name 匹配到该页面)", "--page-name <name> (按页面名精确匹配;找不到会报错,与 --page 互斥;约束 group 匹配范围)", "--force (跳过跨进程锁,风险自负)"]]
 ]
 
 // v2.9.7 (R1): allowed flag names per command. Any flag not in this set is
@@ -557,7 +563,11 @@ let COMMAND_ALLOWED_FLAGS: [String: Set<String>] = [
     "rename-group": ["name", "page-name", "force"],
     "delete-group": ["force"],
     "delete-page": ["force"],
-    "write-attachment": ["group", "group-name", "page", "page-name", "replace", "label", "force", "slot"]
+    "write-attachment": ["group", "group-name", "page", "page-name", "replace", "label", "force", "slot"],
+    // v2.11.2: 手动缩略图。set-thumbnail 与 write 一样支持 --batch/--stop-on-error；
+    // clear-thumbnail 是单槽操作，flag 集合对齐 clear。
+    "set-thumbnail": ["group", "group-name", "page", "page-name", "image", "if-absent", "batch", "stop-on-error", "force", "slot"],
+    "clear-thumbnail": ["group", "group-name", "page", "page-name", "force", "slot"]
 ]
 
 // v2.9.7 (R1): validate that every --flag passed to a known command is
@@ -595,6 +605,17 @@ func validateArgCombinations(_ args: ParsedArgs) {
     if let lim = args.flag("limit") {
         guard let n = Int(lim), n > 0 else {
             fail("--limit must be a positive integer (got '\(lim)')", code: "INVALID_LIMIT")
+        }
+    }
+    // v2.11.2 (set-thumbnail): --batch 从 stdin 取全部输入，命令行上的 <slot>/--image
+    // 此时是无意义且极易误导的（调用方多半以为它们会作为默认值生效）。明确拒绝，
+    // 与 write --batch 的「批量项自带 slot/text」口径一致。
+    if args.command == "set-thumbnail", args.hasFlag("batch") {
+        if args.flag("image") != nil {
+            fail("--batch and --image are mutually exclusive (each batch item carries its own \"image\")", code: "INVALID_ARGUMENT_COMBINATION")
+        }
+        if args.flag("slot") != nil || !args.positionals.isEmpty {
+            fail("--batch takes no <slot> (each batch item carries its own \"slot\")", code: "INVALID_ARGUMENT_COMBINATION")
         }
     }
 }
@@ -684,6 +705,17 @@ func cmdPages(_ args: ParsedArgs) -> Never {
     success(["pages": pages])
 }
 
+// v2.11.2: 手动缩略图字节文件的大小（字节）。没设置 / 文件缺失时返回 0。
+//
+// 为什么 `read`/`list` 要暴露它：agent 用 `set-thumbnail` 之后需要一个**可验证的**回执。
+// 光有 hasManualThumbnail 只能确认「有」，无法区分「写进去的是那张图」还是「写了个 0 字节
+// 的壳」；带上体积就能和 set-thumbnail 返回的 bytes 对上号。
+func manualThumbnailBytes(slot n: Int, group: String) -> Int {
+    guard let url = storage.manualThumbnailURL(n, in: group) else { return 0 }
+    let attrs = try? FileManager.default.attributesOfItem(atPath: url.path)
+    return (attrs?[.size] as? NSNumber)?.intValue ?? 0
+}
+
 // v2.9.32: shared per-slot summary builder, reused by both the single-group and
 // the whole-page (A3) listing paths.
 func slotSummaries(in group: String) -> [[String: Any]] {
@@ -697,7 +729,11 @@ func slotSummaries(in group: String) -> [[String: Any]] {
             "preview": content.preview,
             "type": classify(content),
             "attachmentCount": content.attachments.count,
-            "empty": isTrulyEmpty(content)
+            "empty": isTrulyEmpty(content),
+            // v2.11.2: 手动缩略图状态。`storage.get` 已对悬空 id 做过自愈（content.json 有 id
+            // 但字节文件丢了 → 归一化为无缩略图），所以这里的 bool 可以直接信任。
+            "hasManualThumbnail": content.hasManualThumbnail,
+            "thumbnailBytes": manualThumbnailBytes(slot: n, group: group)
         ])
     }
     return slots
@@ -807,7 +843,10 @@ func cmdRead(_ args: ParsedArgs) -> Never {
         "htmlSource": jsonValue(content.htmlSource),
         "types": uniqueTypes(content),
         "attachmentCount": content.attachments.count,
-        "empty": isTrulyEmpty(content)
+        "empty": isTrulyEmpty(content),
+        // v2.11.2: 与 list 同款的手动缩略图两字段，供 set-thumbnail / clear-thumbnail 之后自检。
+        "hasManualThumbnail": content.hasManualThumbnail,
+        "thumbnailBytes": manualThumbnailBytes(slot: n, group: group)
     ])
 }
 
@@ -1641,6 +1680,489 @@ func cmdWriteAttachment(_ args: ParsedArgs) -> Never {
     ])
 }
 
+// MARK: - v2.11.2 手动缩略图（set-thumbnail / clear-thumbnail）
+//
+// 与 GUI「右键 → 设置缩略图」写的是同一份数据（content.json 的 manualThumbnailId +
+// attachments/{id}.bin），归一化参数也共用 `ClipSlotsKit.ManualThumbnailCodec`，所以两个入口
+// 产出的字节完全一致。
+//
+// ★ 本功能最大的坑（v2.10.64/65 串图事故的复发面）：写入后**必须**刷新 contentId / updatedAt /
+//   timestamp。GUI 的网格用 `slotsSnapshotEqual` 做脏检查、SwiftUI 的缩略图缓存以
+//   `contentId + updatedAt` 编入 `.id`。若只换 manualThumbnailId 而不动身份字段，GUI 会判定
+//   「这个槽位没变」从而跳过重绘，用户看到的仍是旧封面；切组再切回来时缓存还可能把另一组的图
+//   贴上来。这里逐字照抄 GUI `applyManualThumbnail` 的写法，三个字段一个不少。
+
+/// `--if-absent` 命中「槽位已有手动缩略图」时抛出。语义与 write 的 `SlotNotEmpty` 对齐。
+struct ThumbnailAlreadySet: Error {}
+/// `clear-thumbnail` 遇到「本来就没有手动缩略图」时抛出。
+struct NoManualThumbnail: Error {}
+
+/// 图片入参在**落盘之前**就能判定的失败。批量预检直接复用它，因此它必须自带错误码。
+enum ThumbnailInputFailure: Error {
+    case notFound(String)          // 文件不存在
+    case isDirectory(String)       // 传的是目录
+    case invalidImage(String)      // 存在但解不出位图 / 是 SVG·PDF / 编码失败
+
+    var code: String {
+        switch self {
+        case .notFound, .isDirectory: return "FILE_NOT_FOUND"
+        case .invalidImage: return "INVALID_IMAGE"
+        }
+    }
+
+    var message: String {
+        switch self {
+        case .notFound(let p): return "image file not found: \(p)"
+        case .isDirectory(let p): return "path is a directory, not an image file: \(p)"
+        case .invalidImage(let m): return m
+        }
+    }
+}
+
+/// `~` / 相对路径 → 绝对 URL（与 write-attachment 的路径口径完全一致）。
+/// `standardizedFileURL` 顺手抹掉 `./`、`../`，让回执里的 source 是一条干净的绝对路径。
+func resolveImageURL(_ raw: String) -> URL {
+    let expanded = (raw as NSString).expandingTildeInPath
+    let url = expanded.hasPrefix("/")
+        ? URL(fileURLWithPath: expanded)
+        : URL(fileURLWithPath: FileManager.default.currentDirectoryPath).appendingPathComponent(expanded)
+    return url.standardizedFileURL
+}
+
+/// 路径 → 归一化后的 JPEG 字节。**不碰磁盘上的槽位数据**，纯输入侧校验 + 转码，
+/// 因此可以放心地在批量预检阶段对所有条目先跑一遍（预检失败 → 整批零写入）。
+func loadThumbnailJPEG(_ raw: String) throws -> (url: URL, jpeg: Data) {
+    let url = resolveImageURL(raw)
+    var isDir: ObjCBool = false
+    guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir) else {
+        throw ThumbnailInputFailure.notFound(url.path)
+    }
+    guard !isDir.boolValue else { throw ThumbnailInputFailure.isDirectory(url.path) }
+    do {
+        let jpeg = try ManualThumbnailCodec.normalizedJPEGData(from: url)
+        guard !jpeg.isEmpty else {
+            throw ThumbnailInputFailure.invalidImage("image '\(url.lastPathComponent)' encoded to 0 bytes")
+        }
+        return (url, jpeg)
+    } catch let e as ManualThumbnailCodec.CodecError {
+        if case .fileNotFound = e { throw ThumbnailInputFailure.notFound(url.path) }
+        throw ThumbnailInputFailure.invalidImage(e.errorDescription ?? "cannot decode image: \(url.path)")
+    }
+}
+
+/// 单槽的 read-modify-write，整段包在跨进程锁里。
+///
+/// 字节不直接写 live 目录，而是塞进 `pendingManualThumbnailData` 交给存储层——`writeSlotContent`
+/// 会把它连同槽位其余内容一起搬进 staging 目录后**整目录原子 swap**。若在这里自己往
+/// `attachments/{id}.bin` 写，下一次任何无关写入重建槽位目录时，这个文件就会被 swap 掉。
+///
+/// `StorageLock` 是可重入的（depth-counted flock），所以批量路径外层已持锁时这里不会重复申请。
+func performSetThumbnail(slot n: Int, group: String, jpeg: Data, ifAbsent: Bool) throws -> (id: String, bytes: Int, replaced: Bool) {
+    try StorageLock.shared.withLock { () -> (String, Int, Bool) in
+        var content = storage.get(n, in: group)
+        // 契约2 同款：持锁后再做一次原子复检，而不是信任预检阶段的快照。
+        if ifAbsent && content.hasManualThumbnail { throw ThumbnailAlreadySet() }
+        let replaced = content.hasManualThumbnail
+
+        content.manualThumbnailId = UUID().uuidString
+        content.pendingManualThumbnailData = jpeg
+        // ★ 身份三件套：缺一个都会让 GUI 停在旧图上（见本节顶部注释）。
+        content.contentId = UUID().uuidString
+        content.updatedAt = Date().timeIntervalSince1970
+        content.timestamp = Date()
+
+        guard storage.set(n, content: content, in: group) else {
+            throw WriteFailure(message: writeFailureDiagnostic(context: "to set thumbnail on slot \(n) in group \(group)"))
+        }
+        // 回读校验：存储层可能把 id 归一化掉（字节没落成功时降级为 nil）。不回读就可能返回
+        // 「ok:true 但磁盘上没有图」，agent 拿着假回执继续往下走。
+        let persisted = storage.get(n, in: group)
+        guard persisted.hasManualThumbnail, let pid = persisted.manualThumbnailId, !pid.isEmpty else {
+            throw WriteFailure(message: "thumbnail bytes did not persist for slot \(n) in group \(group)")
+        }
+        return (pid, manualThumbnailBytes(slot: n, group: group), replaced)
+    }
+}
+
+func cmdSetThumbnail(_ args: ParsedArgs) -> Never {
+    if args.hasFlag("batch") { cmdSetThumbnailBatch(args) }
+
+    let group = resolveGroup(args, inPage: resolvePageFlag(args))
+    let n = parseSlot(args.positionals.first ?? args.flag("slot"))
+    guard let imageRaw = args.flag("image"), !imageRaw.trimmingCharacters(in: .whitespaces).isEmpty else {
+        fail("missing --image (usage: set-thumbnail <slot> --image <path> [--group <id|name>] [--page-name <name>] [--if-absent])",
+             code: "INVALID_ARGUMENT_COMBINATION")
+    }
+
+    let loaded: (url: URL, jpeg: Data)
+    do {
+        loaded = try loadThumbnailJPEG(imageRaw)
+    } catch let e as ThumbnailInputFailure {
+        fail(e.message, code: e.code)
+    } catch {
+        fail("cannot read image '\(imageRaw)': \(error.localizedDescription)", code: "INVALID_IMAGE")
+    }
+
+    let ifAbsent = args.hasFlag("if-absent")
+    let result: (id: String, bytes: Int, replaced: Bool)
+    do {
+        result = try performSetThumbnail(slot: n, group: group, jpeg: loaded.jpeg, ifAbsent: ifAbsent)
+    } catch is ThumbnailAlreadySet {
+        fail("slot \(n) in group \(group) already has a manual thumbnail; --if-absent refused to overwrite it "
+            + "(drop --if-absent to replace it, or use clear-thumbnail first)", code: "THUMBNAIL_ALREADY_SET")
+    } catch let e as StorageLockError {
+        fail(e.errorDescription ?? "storage is busy (lock timeout)", code: "LOCK_TIMEOUT")
+    } catch let e as WriteFailure {
+        fail(e.message, code: "WRITE_FAILED")
+    } catch {
+        failWriteError(error, context: "setting thumbnail on slot \(n) in group \(group)")
+    }
+
+    success([
+        "slot": n,
+        "group": group,
+        "source": loaded.url.path,
+        "sourceBytes": loaded.jpeg.count,
+        "thumbnailId": result.id,
+        "thumbnailBytes": result.bytes,
+        "hasManualThumbnail": true,
+        // 之前有没有图被顶掉——agent 用它区分「新设」与「换封面」。
+        "replaced": result.replaced
+    ])
+}
+
+func cmdClearThumbnail(_ args: ParsedArgs) -> Never {
+    let group = resolveGroup(args, inPage: resolvePageFlag(args))
+    let n = parseSlot(args.positionals.first ?? args.flag("slot"))
+
+    var removedId = ""
+    var removedBytes = 0
+    do {
+        try StorageLock.shared.withLock { () -> Void in
+            var content = storage.get(n, in: group)
+            guard content.hasManualThumbnail else { throw NoManualThumbnail() }
+            removedId = content.manualThumbnailId ?? ""
+            removedBytes = manualThumbnailBytes(slot: n, group: group)
+
+            content.manualThumbnailId = nil
+            content.pendingManualThumbnailData = nil
+            // ★ 与 set 同款身份三件套：移除封面也是内容变更，不刷新 GUI 会停在旧图上。
+            content.contentId = UUID().uuidString
+            content.updatedAt = Date().timeIntervalSince1970
+            content.timestamp = Date()
+
+            guard storage.set(n, content: content, in: group) else {
+                throw WriteFailure(message: writeFailureDiagnostic(context: "to clear thumbnail on slot \(n) in group \(group)"))
+            }
+        }
+    } catch is NoManualThumbnail {
+        fail("slot \(n) in group \(group) has no manual thumbnail to clear", code: "NO_MANUAL_THUMBNAIL")
+    } catch let e as StorageLockError {
+        fail(e.errorDescription ?? "storage is busy (lock timeout)", code: "LOCK_TIMEOUT")
+    } catch let e as WriteFailure {
+        fail(e.message, code: "WRITE_FAILED")
+    } catch {
+        failWriteError(error, context: "clearing thumbnail on slot \(n) in group \(group)")
+    }
+
+    success([
+        "slot": n,
+        "group": group,
+        "cleared": true,
+        "removedThumbnailId": removedId,
+        "removedBytes": removedBytes,
+        "hasManualThumbnail": false
+    ])
+}
+
+// v2.11.2: `set-thumbnail --batch`，两阶段契约与 `write --batch`（契约1）逐条对齐。
+//
+// stdin 是一个 JSON 数组，元素形如：
+//   {"slot":1, "image":"~/a.png", "group":"设计稿", "page":"素材", "if_absent":true}
+// `group` / `page` / `page_name` / `if_absent` 缺省时回落到命令行同名 flag。
+//
+//   • Type A 预检（静态）：slot 合法性、image 存在性与可解码性、组/页解析、重复目标、
+//     `if_absent` 静态冲突。任一失败 → **整批零写入**，磁盘不变。
+//   • Type B 执行（运行时）：锁超时 / 写失败。前面的条目可能已写入，后面的按
+//     `--stop-on-error` 决定是继续还是 not_executed。
+//
+// 预检阶段就把所有图片解码成 JPEG 并留在内存里：一是「可解码」这条预检本来就得真解一次，
+// 二是执行期只剩纯写盘，把可失败的重活挪出了持锁窗口。归一化后每张 ~100–300KB，量级安全。
+func cmdSetThumbnailBatch(_ args: ParsedArgs) -> Never {
+    guard let data = readStdinCapped(limit: MAX_BATCH_STDIN_BYTES) else {
+        fail("--batch stdin exceeds the \(MAX_BATCH_STDIN_BYTES / (1024 * 1024)) MiB cap; nothing was written",
+             code: "INPUT_TOO_LARGE")
+    }
+    guard !data.isEmpty else {
+        fail("--batch expects a JSON array on stdin, got empty input "
+            + "(e.g. echo '[{\"slot\":1,\"image\":\"~/a.png\"}]' | clipslots set-thumbnail --batch)", code: "INVALID_INPUT_FORMAT")
+    }
+    let json: Any
+    do {
+        json = try JSONSerialization.jsonObject(with: data)
+    } catch {
+        fail("--batch stdin is not valid JSON: \(error.localizedDescription)", code: "INVALID_INPUT_FORMAT")
+    }
+    guard let arr = json as? [[String: Any]] else {
+        fail("--batch expects a JSON ARRAY of objects, e.g. [{\"slot\":1,\"image\":\"~/a.png\"}]", code: "INVALID_INPUT_FORMAT")
+    }
+    guard !arr.isEmpty else { fail("--batch array is empty; nothing to write", code: "INVALID_INPUT_FORMAT") }
+
+    let requestedPage = resolvePageFlag(args)
+    let commandGroup = resolveGroup(args, inPage: requestedPage)
+    let cmdIfAbsent = args.hasFlag("if-absent")
+    let stopOnError = args.hasFlag("stop-on-error")
+    let total = arr.count
+
+    struct ThumbBatchItem {
+        let index: Int
+        let slot: Int
+        let group: String
+        let source: String
+        let jpeg: Data
+        let ifAbsent: Bool
+    }
+
+    func rawSlot(_ entry: [String: Any]) -> Int? {
+        if let s = entry["slot"] as? Int { return s }
+        if let s = entry["slot"] as? NSNumber { return s.intValue }
+        if let s = entry["slot"] as? String { return Int(s) }
+        return nil
+    }
+
+    // Type A 失败：零写入，所有计数器归零，exit 1。与 write --batch 的输出结构完全同形。
+    func emitPreflightFailure(offending: Set<Int>, code: String, message: String,
+                              extra: [String: Any] = [:],
+                              details: [Int: [String: Any]] = [:]) -> Never {
+        var results: [[String: Any]] = []
+        for i in 0..<total {
+            var r: [String: Any] = ["index": i]
+            if let s = rawSlot(arr[i]) { r["slot"] = s }
+            r["group"] = (arr[i]["group"] as? String) ?? commandGroup
+            r["ok"] = false
+            if offending.contains(i) {
+                r["status"] = "failed"
+                r["error_code"] = code
+                if let d = details[i] { for (k, v) in d { r[k] = v } }
+            } else {
+                r["status"] = "not_executed"
+            }
+            results.append(r)
+        }
+        var d: [String: Any] = [
+            "ok": false, "batch": true, "preflight_passed": false,
+            "error_code": code, "error": message,
+            "total": total, "written": 0, "failed": 0, "skipped": 0, "not_executed": 0,
+            "results": results
+        ]
+        for (k, v) in extra { d[k] = v }
+        d["repaired"] = storage.didRepairDefaults
+        if storage.didRepairDefaults { d["repair_actions"] = storage.lastRepairActions }
+        emit(d)
+        exit(1)
+    }
+
+    // ---- PREFLIGHT phase 1: 逐条静态校验 + 解码 ----
+    var parsed: [ThumbBatchItem] = []
+    for (idx, entry) in arr.enumerated() {
+        guard let n = rawSlot(entry) else {
+            emitPreflightFailure(offending: [idx], code: "INVALID_SLOT",
+                                 message: "item \(idx): missing or invalid 'slot'")
+        }
+        guard (1...slotCount).contains(n) else {
+            emitPreflightFailure(offending: [idx], code: "INVALID_SLOT",
+                                 message: "item \(idx): slot out of range (valid 1...\(slotCount))")
+        }
+        guard let imageRaw = entry["image"] as? String, !imageRaw.trimmingCharacters(in: .whitespaces).isEmpty else {
+            emitPreflightFailure(offending: [idx], code: "INVALID_ARGUMENT_COMBINATION",
+                                 message: "item \(idx): missing or invalid 'image' (must be a non-empty path string)")
+        }
+
+        // 每条可覆盖命令级的页面作用域；`page` 与 CLI 的 `--page` 同口径（id 或名称皆可）。
+        var itemPage = requestedPage
+        if let rawPageName = entry["page_name"] {
+            guard let name = rawPageName as? String else {
+                emitPreflightFailure(offending: [idx], code: "INVALID_ARGUMENT_COMBINATION",
+                                     message: "item \(idx): invalid 'page_name' (must be a string)")
+            }
+            guard let p = storage.loadIndex().pages.first(where: { $0.name == name }) else {
+                emitPreflightFailure(offending: [idx], code: "PAGE_NOT_FOUND", message: "item \(idx): no page named '\(name)'")
+            }
+            itemPage = p.id
+        } else if let rawPage = entry["page"] {
+            guard let value = rawPage as? String else {
+                emitPreflightFailure(offending: [idx], code: "INVALID_ARGUMENT_COMBINATION",
+                                     message: "item \(idx): invalid 'page' (must be a string)")
+            }
+            guard let p = storage.loadIndex().pages.first(where: { $0.id == value || $0.name == value }) else {
+                emitPreflightFailure(offending: [idx], code: "PAGE_NOT_FOUND",
+                                     message: "item \(idx): no page with id or name '\(value)'")
+            }
+            itemPage = p.id
+        }
+
+        // 组解析：与 write --batch 完全一致的 F1 逻辑（未知组 → GROUP_NOT_FOUND，
+        // 跨页重名 → AMBIGUOUS_GROUP），失败即整批拒绝。
+        let group: String
+        if let rawGroupValue = entry["group"] {
+            let rawGroup: String
+            if let s = rawGroupValue as? String {
+                rawGroup = s
+            } else if let num = rawGroupValue as? NSNumber {
+                rawGroup = num.stringValue
+            } else {
+                emitPreflightFailure(offending: [idx], code: "INVALID_ARGUMENT_COMBINATION",
+                                     message: "item \(idx): invalid 'group' (must be a string or number)")
+            }
+            do {
+                group = try resolveGroupLiteralStrict(rawGroup, inPage: itemPage)
+            } catch let GroupResolveFailure.ambiguous(name, candidates) {
+                emitPreflightFailure(offending: [idx], code: "AMBIGUOUS_GROUP",
+                                     message: "item \(idx): group name '\(name)' is ambiguous across \(candidates.count) groups; pass 'page'/'page_name' or a group id to disambiguate",
+                                     details: [idx: ["candidates": candidates]])
+            } catch let GroupResolveFailure.notFound(name, pageLabel) {
+                let msg = pageLabel.map { "item \(idx): group '\(name)' not found in page '\($0)'" }
+                    ?? "item \(idx): group '\(name)' not found"
+                emitPreflightFailure(offending: [idx], code: "GROUP_NOT_FOUND", message: msg)
+            } catch {
+                emitPreflightFailure(offending: [idx], code: "GROUP_NOT_FOUND",
+                                     message: "item \(idx): failed to resolve group: \(error)")
+            }
+        } else {
+            group = commandGroup
+        }
+
+        // 「可解码」预检：真解一次，顺带把归一化后的 JPEG 留给执行期用。
+        let loaded: (url: URL, jpeg: Data)
+        do {
+            loaded = try loadThumbnailJPEG(imageRaw)
+        } catch let e as ThumbnailInputFailure {
+            emitPreflightFailure(offending: [idx], code: e.code, message: "item \(idx): \(e.message)")
+        } catch {
+            emitPreflightFailure(offending: [idx], code: "INVALID_IMAGE",
+                                 message: "item \(idx): cannot read image '\(imageRaw)': \(error.localizedDescription)")
+        }
+
+        parsed.append(ThumbBatchItem(index: idx, slot: n, group: group, source: loaded.url.path,
+                                     jpeg: loaded.jpeg,
+                                     ifAbsent: (entry["if_absent"] as? Bool) ?? cmdIfAbsent))
+    }
+
+    // ---- PREFLIGHT phase 2: 重复的 (group, slot) 目标 ----
+    var seen: [String: Int] = [:]
+    var duplicateIdx: Set<Int> = []
+    for item in parsed {
+        let key = "\(item.group)#\(item.slot)"
+        if let first = seen[key] {
+            duplicateIdx.insert(first)
+            duplicateIdx.insert(item.index)
+        } else {
+            seen[key] = item.index
+        }
+    }
+    if !duplicateIdx.isEmpty {
+        emitPreflightFailure(offending: duplicateIdx, code: "BATCH_DUPLICATE_TARGET",
+                             message: "duplicate target slot(s) resolved to the same (group, slot); the whole batch is rejected",
+                             extra: ["duplicates": duplicateIdx.sorted()])
+    }
+
+    // ---- PREFLIGHT phase 3: if_absent 静态冲突（对齐 write --batch 的 --if-empty 预检）----
+    var conflictIdx: Set<Int> = []
+    for item in parsed where item.ifAbsent {
+        if storage.get(item.slot, in: item.group).hasManualThumbnail { conflictIdx.insert(item.index) }
+    }
+    if !conflictIdx.isEmpty {
+        emitPreflightFailure(offending: conflictIdx, code: "THUMBNAIL_ALREADY_SET",
+                             message: "one or more if_absent target slots already have a manual thumbnail; the whole batch is rejected")
+    }
+
+    // ---- EXECUTION phase (type B) ----
+    var results: [[String: Any]] = []
+    var written = 0
+    var failed = 0
+    var notExecuted = 0
+    var stopped = false
+    // 全批共用一次 StorageLock：整批相对其它进程是原子的，且 performSetThumbnail 内层的
+    // withLock 会重入复用同一把 flock，不会逐条申请/释放。
+    do {
+        try StorageLock.shared.withLock { () -> Void in
+            for item in parsed {
+                if stopped {
+                    results.append(["index": item.index, "slot": item.slot, "group": item.group,
+                                    "ok": false, "status": "not_executed"])
+                    notExecuted += 1
+                    continue
+                }
+                do {
+                    let r = try performSetThumbnail(slot: item.slot, group: item.group,
+                                                    jpeg: item.jpeg, ifAbsent: item.ifAbsent)
+                    results.append(["index": item.index, "slot": item.slot, "group": item.group,
+                                    "ok": true, "status": "written", "source": item.source,
+                                    "thumbnailId": r.id, "thumbnailBytes": r.bytes, "replaced": r.replaced])
+                    written += 1
+                } catch is ThumbnailAlreadySet {
+                    // 持锁后的原子复检失败（预检之后被并发改过）。
+                    results.append(["index": item.index, "slot": item.slot, "group": item.group,
+                                    "ok": false, "status": "failed", "error_code": "THUMBNAIL_ALREADY_SET",
+                                    "error": "slot \(item.slot) in group \(item.group) already has a manual thumbnail"])
+                    failed += 1
+                    if stopOnError { stopped = true }
+                } catch let e as StorageLockError {
+                    results.append(["index": item.index, "slot": item.slot, "group": item.group,
+                                    "ok": false, "status": "failed", "error_code": "LOCK_TIMEOUT",
+                                    "error": e.errorDescription ?? "storage is busy (lock timeout)"])
+                    failed += 1
+                    if stopOnError { stopped = true }
+                } catch let e as WriteFailure {
+                    results.append(["index": item.index, "slot": item.slot, "group": item.group,
+                                    "ok": false, "status": "failed", "error_code": "WRITE_FAILED",
+                                    "error": e.message])
+                    failed += 1
+                    if stopOnError { stopped = true }
+                } catch {
+                    let (code, message) = writeErrorCodeAndMessage(error, context: "setting thumbnail on slot \(item.slot)")
+                    results.append(["index": item.index, "slot": item.slot, "group": item.group,
+                                    "ok": false, "status": "failed",
+                                    "error_code": code == "ERROR" ? "WRITE_FAILED" : code,
+                                    "error": message])
+                    failed += 1
+                    if stopOnError { stopped = true }
+                }
+            }
+        }
+    } catch {
+        // 拿不到批级锁 → 一个字节都没写，全部 not_executed，调用方可整批重试。
+        let lockMsg = (error as? StorageLockError)?.errorDescription ?? "storage is busy (lock timeout)"
+        var lockResults: [[String: Any]] = []
+        for item in parsed {
+            lockResults.append(["index": item.index, "slot": item.slot, "group": item.group,
+                                "ok": false, "status": "not_executed"])
+        }
+        var d: [String: Any] = [
+            "ok": false, "batch": true, "preflight_passed": true,
+            "error_code": "LOCK_TIMEOUT", "error": lockMsg,
+            "total": total, "written": 0, "failed": 0, "skipped": 0,
+            "not_executed": total, "results": lockResults
+        ]
+        d["repaired"] = storage.didRepairDefaults
+        if storage.didRepairDefaults { d["repair_actions"] = storage.lastRepairActions }
+        emit(d)
+        exit(1)
+    }
+
+    let ok = failed == 0 && notExecuted == 0
+    var out: [String: Any] = [
+        "ok": ok, "batch": true, "preflight_passed": true,
+        "total": total, "written": written, "failed": failed,
+        "skipped": 0, "not_executed": notExecuted, "results": results
+    ]
+    if failed > 0 { out["error_code"] = "BATCH_PARTIAL_FAILURE" }
+    out["repaired"] = storage.didRepairDefaults
+    if storage.didRepairDefaults { out["repair_actions"] = storage.lastRepairActions }
+    emit(out)
+    exit(ok ? 0 : 1)
+}
+
 func cmdClear(_ args: ParsedArgs) -> Never {
     let group = resolveGroup(args, inPage: resolvePageFlag(args)) // v2.9.35: page-scoped (flag parity with write)
     let n = parseSlot(args.positionals.first ?? args.flag("slot"))
@@ -1787,6 +2309,11 @@ case "delete-page":
     cmdDeletePage(parsed)
 case "write-attachment":
     cmdWriteAttachment(parsed)
+// v2.11.2: 手动缩略图
+case "set-thumbnail":
+    cmdSetThumbnail(parsed)
+case "clear-thumbnail":
+    cmdClearThumbnail(parsed)
 default:
     fail("unknown command: \(parsed.command) (run 'clipslots help')", code: "UNKNOWN_COMMAND")
 }

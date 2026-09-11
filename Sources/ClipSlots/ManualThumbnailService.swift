@@ -26,9 +26,12 @@ enum ManualThumbnailMaker {
 
     /// 归一化后的最长边（像素）。1024 足够覆盖 Retina 下的卡片主预览与轮盘扇区，
     /// 又能把一张 4K 截图从数 MB 压到百 KB 级，避免大图撑爆槽位目录。
-    static let maxPixelEdge: CGFloat = 1024
+    ///
+    /// v2.11.2：编码参数与实现整体下沉到 `ClipSlotsKit.ManualThumbnailCodec`，GUI 与 CLI 共用
+    /// 同一份真理。这里保留同名常量只是为了不动 UI 文案等既有调用点。
+    static let maxPixelEdge: CGFloat = ManualThumbnailCodec.maxPixelEdge
     /// JPEG 压缩质量。0.85 是「肉眼几乎无损 / 体积可控」的常用折中。
-    static let jpegQuality: CGFloat = 0.85
+    static let jpegQuality: CGFloat = ManualThumbnailCodec.jpegQuality
 
     /// 可作为缩略图来源的图片类型。PNG / JPEG / HEIC 是需求明确要求的三种，
     /// 另外附带常见的 TIFF / GIF / BMP / WebP —— 反正统一转码成 JPEG，多支持几种零成本。
@@ -56,45 +59,27 @@ enum ManualThumbnailMaker {
 
     /// 把任意图片文件归一化成「最长边 ≤1024 的 JPEG」字节。
     ///
-    /// 用 ImageIO 增量降采样（`CGImageSourceCreateThumbnailAtIndex`）而不是先 `NSImage(contentsOf:)`
-    /// 再缩放：后者会把整张原图的全分辨率位图读进内存，用户随手拖一张 8000×6000 的照片就是 ~190MB
-    /// 的瞬时峰值。降采样路径全程只解出目标尺寸的位图。
+    /// v2.11.2：实现下沉到 `ClipSlotsKit.ManualThumbnailCodec`（CLI 的 `set-thumbnail` 复用同一份），
+    /// 这里只做「Kit 错误 → GUI MakeError」的映射，行为与下沉前等价：
+    ///   • 解不出位图 / 文件缺失 / SVG·PDF → `.decodeFailed`（面向用户的文案不变）
+    ///   • 位图 OK 但 JPEG 编码失败       → `.encodeFailed`
+    ///
+    /// 归一化本身仍走 ImageIO 增量降采样（`CGImageSourceCreateThumbnailAtIndex`）而不是先
+    /// `NSImage(contentsOf:)` 再缩放：后者会把整张原图的全分辨率位图读进内存，用户随手拖一张
+    /// 8000×6000 的照片就是 ~190MB 的瞬时峰值。
     static func normalizedJPEGData(from url: URL) throws -> Data {
-        guard let image = ClipSlotsImageIO.downsampledImage(url: url, maxPixel: maxPixelEdge) else {
+        do {
+            return try ManualThumbnailCodec.normalizedJPEGData(from: url)
+        } catch ManualThumbnailCodec.CodecError.encodeFailed {
+            throw MakeError.encodeFailed
+        } catch {
             throw MakeError.decodeFailed(url.lastPathComponent)
         }
-        guard let data = jpegData(from: image) else { throw MakeError.encodeFailed }
-        return data
     }
 
     /// 把已解码的 NSImage 编码成 JPEG（同样先保证最长边 ≤1024）。
     static func jpegData(from image: NSImage) -> Data? {
-        guard let cg = downsampledCGImage(from: image) else { return nil }
-        let rep = NSBitmapImageRep(cgImage: cg)
-        // NSBitmapImageRep 从 CGImage 构造时 size 取的是像素数；显式对齐，避免编码出带诡异 DPI 的图。
-        rep.size = NSSize(width: cg.width, height: cg.height)
-        return rep.representation(using: .jpeg, properties: [.compressionFactor: jpegQuality])
-    }
-
-    /// 保证 CGImage 最长边 ≤ maxPixelEdge；已经够小就原样返回（不做无谓重采样）。
-    private static func downsampledCGImage(from image: NSImage) -> CGImage? {
-        guard let cg = image.cgImage(forProposedRect: nil, context: nil, hints: nil) else { return nil }
-        let longest = CGFloat(max(cg.width, cg.height))
-        guard longest > maxPixelEdge, longest > 0 else { return cg }
-
-        let scale = maxPixelEdge / longest
-        let w = max(1, Int((CGFloat(cg.width) * scale).rounded()))
-        let h = max(1, Int((CGFloat(cg.height) * scale).rounded()))
-        guard let ctx = CGContext(data: nil,
-                                  width: w,
-                                  height: h,
-                                  bitsPerComponent: 8,
-                                  bytesPerRow: 0,
-                                  space: CGColorSpaceCreateDeviceRGB(),
-                                  bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue) else { return cg }
-        ctx.interpolationQuality = .high
-        ctx.draw(cg, in: CGRect(x: 0, y: 0, width: w, height: h))
-        return ctx.makeImage() ?? cg
+        ManualThumbnailCodec.jpegData(from: image)
     }
 
     // MARK: 入口 1：选图

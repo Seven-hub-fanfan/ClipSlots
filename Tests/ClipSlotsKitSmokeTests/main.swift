@@ -1,7 +1,13 @@
 import Foundation
 import ClipSlotsKit
+// v2.11.2: THUMB-CODEC 组要现造 PNG 测试图并读回像素尺寸。
+import CoreGraphics
+import ImageIO
 
 // MARK: - 轻量断言 harness（零依赖，替代 XCTest）
+
+/// v2.11.2: 端到端用例在前置条件不满足时用它提前退出本组（顶层代码不能 `return`）。
+enum SmokeSkip: Error { case cliMissing }
 
 final class TestRunner {
     private(set) var passed = 0
@@ -1115,6 +1121,397 @@ do {
     let capNegative = RadialAttachmentPreviewPlanner.plan(imageFlags: [true], maxImageThumbnails: -3)
     t.equal(capNegative.imageIndices, [], "负数上限按 0 处理，不崩")
     t.equal(capNegative.hiddenImageCount, 1, "负数上限时图片全部折叠")
+}
+
+// MARK: - THUMB-CODEC (v2.11.2) 手动缩略图归一化编解码
+//
+// `ManualThumbnailCodec` 是 v2.11.2 从 GUI 下沉到 Kit 的编码器，GUI「右键设缩略图」与
+// CLI `set-thumbnail` 共用它。下沉的全部价值就在「两个入口产出同一份字节」，所以这里锁死
+// 编码参数本身——参数一旦漂移，同一张图在两个入口下的产物就不一样了，而这种差异在界面上
+// 只表现为「命令行设的封面好像糊一点」，几乎不可能被人工发现。
+//
+//   ① 编码参数：最长边 1024 / JPEG q=0.85，且常量与 GUI 侧同源。
+//   ② 降采样：超过 1024 的图必须被压到 1024，且**不上采样**小图。
+//   ③ 格式收敛：PNG / JPEG / TIFF / GIF / BMP 等位图统一输出 JPEG。
+//   ④ 拒绝矢量/文档：SVG / PDF 返回 nil（而不是栅格化出一张用户没预期的图）。
+
+do {
+    let fm = FileManager.default
+
+    // 用 CoreGraphics 现造测试图，避免往仓库里塞二进制 fixture。
+    func writePNG(_ url: URL, width: Int, height: Int) -> Bool {
+        guard let ctx = CGContext(data: nil, width: width, height: height,
+                                  bitsPerComponent: 8, bytesPerRow: 0,
+                                  space: CGColorSpaceCreateDeviceRGB(),
+                                  bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return false }
+        // 画点花纹，避免纯色图被编码器压成几十字节而让体积断言失去意义。
+        ctx.setFillColor(CGColor(red: 0.1, green: 0.4, blue: 0.9, alpha: 1))
+        ctx.fill(CGRect(x: 0, y: 0, width: width, height: height))
+        ctx.setFillColor(CGColor(red: 1, green: 0.8, blue: 0, alpha: 1))
+        for i in stride(from: 0, to: width, by: 17) {
+            ctx.fill(CGRect(x: i, y: 0, width: 8, height: height))
+        }
+        guard let image = ctx.makeImage(),
+              let dest = CGImageDestinationCreateWithURL(url as CFURL, "public.png" as CFString, 1, nil) else { return false }
+        CGImageDestinationAddImage(dest, image, nil)
+        return CGImageDestinationFinalize(dest)
+    }
+
+    /// 从 JPEG 字节里读出像素尺寸（只读图片头）。
+    func pixelSize(_ data: Data) -> (w: Int, h: Int)? {
+        guard let src = CGImageSourceCreateWithData(data as CFData, nil),
+              let props = CGImageSourceCopyPropertiesAtIndex(src, 0, nil) as? [CFString: Any],
+              let w = (props[kCGImagePropertyPixelWidth] as? NSNumber)?.intValue,
+              let h = (props[kCGImagePropertyPixelHeight] as? NSNumber)?.intValue else { return nil }
+        return (w, h)
+    }
+
+    func utiOf(_ data: Data) -> String? {
+        guard let src = CGImageSourceCreateWithData(data as CFData, nil) else { return nil }
+        return CGImageSourceGetType(src) as String?
+    }
+
+    let sandbox = fm.temporaryDirectory.appendingPathComponent("clipslots_codec_\(UUID().uuidString)", isDirectory: true)
+    try? fm.createDirectory(at: sandbox, withIntermediateDirectories: true)
+    defer { try? fm.removeItem(at: sandbox) }
+
+    // ① 编码参数（★ 这两个常量就是「GUI 与 CLI 同源」的全部内容，改动必须是有意识的）
+    t.equal(ManualThumbnailCodec.maxPixelEdge, 1024, "★归一化最长边必须是 1024px")
+    t.equal(ManualThumbnailCodec.jpegQuality, 0.85, "★JPEG 质量必须是 0.85")
+
+    // ② 大图降采样：2400×1600 → 最长边 1024，宽高比保持
+    let bigURL = sandbox.appendingPathComponent("big.png")
+    t.check(writePNG(bigURL, width: 2400, height: 1600), "测试用大图应能生成")
+    if let data = ManualThumbnailCodec.normalizedJPEGDataOrNil(from: bigURL) {
+        t.check(!data.isEmpty, "大图归一化应产出非空字节")
+        t.equal(utiOf(data), "public.jpeg", "★PNG 输入必须统一输出 JPEG")
+        if let size = pixelSize(data) {
+            t.equal(max(size.w, size.h), 1024, "★超过 1024 的图必须被降采样到最长边 1024")
+            t.check(abs(Double(size.w) / Double(size.h) - 1.5) < 0.01, "降采样必须保持 3:2 宽高比")
+        } else {
+            t.check(false, "归一化产物应能读出像素尺寸")
+        }
+        // 一张 2400×1600 的花纹图压成 1024px JPEG 后应远小于原始位图（2400*1600*4 ≈ 15MB）
+        t.check(data.count < 1_000_000, "归一化后体积应控制在 1MB 以内（实际 \(data.count) 字节）")
+    } else {
+        t.check(false, "大图归一化不应失败")
+    }
+
+    // ② 小图不上采样：64×48 原样保留
+    let smallURL = sandbox.appendingPathComponent("small.png")
+    t.check(writePNG(smallURL, width: 64, height: 48), "测试用小图应能生成")
+    if let data = ManualThumbnailCodec.normalizedJPEGDataOrNil(from: smallURL),
+       let size = pixelSize(data) {
+        t.equal(size.w, 64, "★小图不得被上采样（宽）")
+        t.equal(size.h, 48, "★小图不得被上采样（高）")
+        t.equal(utiOf(data), "public.jpeg", "小图同样统一输出 JPEG")
+    } else {
+        t.check(false, "小图归一化不应失败")
+    }
+
+    // ③ JPEG 输入也能吃（自反性：归一化的产物再喂回去仍然成立）
+    let jpegURL = sandbox.appendingPathComponent("round.jpg")
+    if let first = ManualThumbnailCodec.normalizedJPEGDataOrNil(from: bigURL) {
+        try? first.write(to: jpegURL)
+        if let second = ManualThumbnailCodec.normalizedJPEGDataOrNil(from: jpegURL), let s = pixelSize(second) {
+            t.equal(max(s.w, s.h), 1024, "★JPEG 输入再归一化一次应幂等（仍是 1024）")
+        } else {
+            t.check(false, "JPEG 输入应能被归一化")
+        }
+    }
+
+    // ④ SVG / PDF 明确拒绝
+    let svgURL = sandbox.appendingPathComponent("vector.svg")
+    try? Data("<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"10\" height=\"10\"></svg>".utf8).write(to: svgURL)
+    t.check(ManualThumbnailCodec.normalizedJPEGDataOrNil(from: svgURL) == nil, "★SVG 必须返回 nil（矢量图不做缩略图来源）")
+    t.check(!ManualThumbnailCodec.isDecodableImage(url: svgURL), "SVG 的可解码预检也应为 false")
+
+    let pdfURL = sandbox.appendingPathComponent("doc.pdf")
+    try? Data("%PDF-1.4\n%%EOF\n".utf8).write(to: pdfURL)
+    t.check(ManualThumbnailCodec.normalizedJPEGDataOrNil(from: pdfURL) == nil, "★PDF 必须返回 nil")
+
+    // 伪装成 .png 的 SVG：按内容嗅探同样要拒绝，不能被扩展名骗过去
+    let disguised = sandbox.appendingPathComponent("disguised.png")
+    try? fm.copyItem(at: svgURL, to: disguised)
+    t.check(ManualThumbnailCodec.normalizedJPEGDataOrNil(from: disguised) == nil,
+            "★改名成 .png 的 SVG 仍应被拒绝（按内容而非扩展名判定）")
+
+    // 非图片 / 不存在 / 目录
+    let txtURL = sandbox.appendingPathComponent("note.txt")
+    try? Data("not an image".utf8).write(to: txtURL)
+    t.check(ManualThumbnailCodec.normalizedJPEGDataOrNil(from: txtURL) == nil, "文本文件应返回 nil")
+    t.check(ManualThumbnailCodec.normalizedJPEGDataOrNil(from: sandbox.appendingPathComponent("nope.png")) == nil,
+            "不存在的文件应返回 nil")
+    t.check(ManualThumbnailCodec.normalizedJPEGDataOrNil(from: sandbox) == nil, "目录路径应返回 nil")
+
+    // 错误分型：CLI 靠它区分 FILE_NOT_FOUND / INVALID_IMAGE 两个错误码
+    do {
+        _ = try ManualThumbnailCodec.normalizedJPEGData(from: sandbox.appendingPathComponent("nope.png"))
+        t.check(false, "缺失文件应抛 fileNotFound")
+    } catch let e as ManualThumbnailCodec.CodecError {
+        if case .fileNotFound = e { t.check(true, "缺失文件抛 .fileNotFound") }
+        else { t.check(false, "缺失文件应抛 .fileNotFound，实际 \(e)") }
+    } catch { t.check(false, "缺失文件抛了非预期错误 \(error)") }
+
+    do {
+        _ = try ManualThumbnailCodec.normalizedJPEGData(from: svgURL)
+        t.check(false, "SVG 应抛 unsupportedFormat")
+    } catch let e as ManualThumbnailCodec.CodecError {
+        if case .unsupportedFormat = e { t.check(true, "SVG 抛 .unsupportedFormat") }
+        else { t.check(false, "SVG 应抛 .unsupportedFormat，实际 \(e)") }
+    } catch { t.check(false, "SVG 抛了非预期错误 \(error)") }
+
+    // 内存字节入口（截图路径用的就是它）
+    if let raw = try? Data(contentsOf: bigURL),
+       let out = try? ManualThumbnailCodec.normalizedJPEGData(from: raw, sourceName: "clipboard"),
+       let s = pixelSize(out) {
+        t.equal(max(s.w, s.h), 1024, "★Data 入口与 URL 入口必须同参数（同样收敛到 1024）")
+    } else {
+        t.check(false, "Data 入口归一化不应失败")
+    }
+
+    // 轻量预检与真实解码的结论应当一致（预检只读图片头，是批量场景的把门人）
+    t.check(ManualThumbnailCodec.isDecodableImage(url: bigURL), "正常 PNG 的预检应为 true")
+    t.check(!ManualThumbnailCodec.isDecodableImage(url: txtURL), "文本文件的预检应为 false")
+}
+
+// MARK: - CLI-THUMB (v2.11.2) set-thumbnail / clear-thumbnail 端到端
+//
+// 这组用例直接拉起**真实的 CLI 二进制**（`.build/<config>/ClipSlotsCLI`，与本测试同目录），
+// 用 CLIPSLOTS_DATA_DIR 隔离到临时数据目录后跑真命令、解析真 JSON 回执。
+//
+// 为什么非要端到端而不是调 Kit 函数：本功能的风险几乎全在 CLI 那一层的**组装**上——
+// 身份字段刷没刷、字节走没走 pendingManualThumbnailData、--if-absent 有没有在锁内复检。
+// 这些都不在 Kit 的可测面里，只测 Kit 等于什么都没测。
+//
+//   ① 落盘回读：set 之后 read/list 的 hasManualThumbnail / thumbnailBytes 必须对得上。
+//   ② ★身份字段已刷新：contentId 与 updatedAt 每次写入都要变——这是 v2.10.64/65「切组串图」
+//      的复发面，GUI 的脏检查与缩略图缓存 key 全靠它。
+//   ③ --if-absent 幂等：已有缩略图时拒绝覆盖，且**磁盘一字节不改**。
+//   ④ clear 之后 id 与字节都消失，且身份字段同样刷新。
+//   ⑤ 批量两阶段契约：预检失败 → 整批零写入。
+
+do {
+    let fm = FileManager.default
+    // 测试可执行文件与 CLI 是同一个 .build/<config>/ 目录下的兄弟。
+    let cliURL = URL(fileURLWithPath: CommandLine.arguments[0])
+        .resolvingSymlinksInPath()
+        .deletingLastPathComponent()
+        .appendingPathComponent("ClipSlotsCLI")
+
+    guard fm.isExecutableFile(atPath: cliURL.path) else {
+        // 只跑 `swift run ClipSlotsKitSmokeTests` 而没构建 CLI 时优雅跳过，而不是判失败。
+        print("⚠️  跳过 CLI-THUMB 端到端用例：未找到 \(cliURL.path)（先跑一次 swift build）")
+        t.check(false, "CLI-THUMB 无法执行：CLI 二进制不存在于 \(cliURL.path)")
+        throw SmokeSkip.cliMissing
+    }
+
+    let sandbox = fm.temporaryDirectory.appendingPathComponent("clipslots_clithumb_\(UUID().uuidString)", isDirectory: true)
+    try? fm.createDirectory(at: sandbox, withIntermediateDirectories: true)
+    defer { try? fm.removeItem(at: sandbox) }
+
+    let dataDir = sandbox.appendingPathComponent("data", isDirectory: true)
+    try? fm.createDirectory(at: dataDir, withIntermediateDirectories: true)
+
+    func writePNG(_ url: URL, width: Int, height: Int, tint: CGFloat) -> Bool {
+        guard let ctx = CGContext(data: nil, width: width, height: height,
+                                  bitsPerComponent: 8, bytesPerRow: 0,
+                                  space: CGColorSpaceCreateDeviceRGB(),
+                                  bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return false }
+        ctx.setFillColor(CGColor(red: tint, green: 0.5, blue: 1 - tint, alpha: 1))
+        ctx.fill(CGRect(x: 0, y: 0, width: width, height: height))
+        guard let image = ctx.makeImage(),
+              let dest = CGImageDestinationCreateWithURL(url as CFURL, "public.png" as CFString, 1, nil) else { return false }
+        CGImageDestinationAddImage(dest, image, nil)
+        return CGImageDestinationFinalize(dest)
+    }
+
+    let imgA = sandbox.appendingPathComponent("a.png")
+    let imgB = sandbox.appendingPathComponent("b.png")
+    _ = writePNG(imgA, width: 300, height: 200, tint: 0.2)
+    _ = writePNG(imgB, width: 1800, height: 1200, tint: 0.8)
+
+    /// 跑一条 CLI 命令，返回 (退出码, 解析后的 JSON)。
+    @discardableResult
+    func runCLI(_ argv: [String], stdin: String? = nil) -> (code: Int32, json: [String: Any]) {
+        let p = Process()
+        p.executableURL = cliURL
+        p.arguments = argv
+        var env = ProcessInfo.processInfo.environment
+        env["CLIPSLOTS_DATA_DIR"] = dataDir.path
+        p.environment = env
+        let out = Pipe()
+        p.standardOutput = out
+        p.standardError = Pipe() // CLI 会往 stderr 打日志，丢掉即可
+        if let stdin {
+            let inPipe = Pipe()
+            p.standardInput = inPipe
+            do { try p.run() } catch { return (-1, [:]) }
+            inPipe.fileHandleForWriting.write(Data(stdin.utf8))
+            inPipe.fileHandleForWriting.closeFile()
+        } else {
+            p.standardInput = FileHandle.nullDevice
+            do { try p.run() } catch { return (-1, [:]) }
+        }
+        let data = out.fileHandleForReading.readDataToEndOfFile()
+        p.waitUntilExit()
+        let json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] ?? [:]
+        return (p.terminationStatus, json)
+    }
+
+    /// 直接窥探磁盘上的 content.json，用于校验身份字段。
+    func contentMeta(slot: Int, group: String = "default") -> [String: Any] {
+        let url = dataDir
+            .appendingPathComponent("special_slots", isDirectory: true)
+            .appendingPathComponent(group, isDirectory: true)
+            .appendingPathComponent("\(slot)", isDirectory: true)
+            .appendingPathComponent("content.json")
+        guard let d = try? Data(contentsOf: url),
+              let j = try? JSONSerialization.jsonObject(with: d) as? [String: Any] else { return [:] }
+        return j
+    }
+
+    // ── 版本号必须与本次发布一致（历史上 CLI_VERSION 漂移过好几次）
+    let ver = runCLI(["version"])
+    t.equal(ver.json["version"] as? String, "2.11.2", "★CLI_VERSION 必须与 App 版本同步为 2.11.2")
+
+    // ── ① 落盘回读
+    let set1 = runCLI(["set-thumbnail", "1", "--image", imgA.path])
+    t.equal(set1.code, 0, "set-thumbnail 应成功退出")
+    t.check(set1.json["ok"] as? Bool == true, "set-thumbnail 应返回 ok:true")
+    t.check(set1.json["replaced"] as? Bool == false, "首次设置 replaced 应为 false")
+    let bytes1 = set1.json["thumbnailBytes"] as? Int ?? 0
+    t.check(bytes1 > 0, "set-thumbnail 应回报非零字节数")
+
+    let read1 = runCLI(["read", "1"])
+    t.check(read1.json["hasManualThumbnail"] as? Bool == true, "★read 必须新增 hasManualThumbnail 且为 true")
+    t.equal(read1.json["thumbnailBytes"] as? Int, bytes1, "★read 的 thumbnailBytes 必须与 set 的回执一致")
+
+    let list1 = runCLI(["list"])
+    let slots1 = list1.json["slots"] as? [[String: Any]] ?? []
+    let slot1Row = slots1.first { ($0["slot"] as? Int) == 1 }
+    t.check(slot1Row?["hasManualThumbnail"] as? Bool == true, "★list 每个槽位必须带 hasManualThumbnail")
+    t.equal(slot1Row?["thumbnailBytes"] as? Int, bytes1, "★list 的 thumbnailBytes 必须与 read 一致")
+    let slot2Row = slots1.first { ($0["slot"] as? Int) == 2 }
+    t.check(slot2Row?["hasManualThumbnail"] as? Bool == false, "未设置缩略图的槽位应为 false")
+    t.equal(slot2Row?["thumbnailBytes"] as? Int, 0, "未设置缩略图的槽位 thumbnailBytes 应为 0")
+
+    // ── ② ★身份字段已刷新（v2.10.64/65 串图事故的复发面）
+    let metaBefore = contentMeta(slot: 1)
+    let idBefore = metaBefore["contentId"] as? String ?? ""
+    let updatedBefore = metaBefore["updatedAt"] as? Double ?? 0
+    t.check(!idBefore.isEmpty, "content.json 应有 contentId")
+    t.check(updatedBefore > 0, "content.json 应有 updatedAt")
+
+    // 换一张图（不带 --if-absent，应覆盖）
+    Thread.sleep(forTimeInterval: 0.02) // 保证 updatedAt 有可观测的差值
+    let set2 = runCLI(["set-thumbnail", "1", "--image", imgB.path])
+    t.check(set2.json["ok"] as? Bool == true, "覆盖设置应成功")
+    t.check(set2.json["replaced"] as? Bool == true, "★覆盖时 replaced 应为 true")
+
+    let metaAfter = contentMeta(slot: 1)
+    t.check((metaAfter["contentId"] as? String ?? "") != idBefore,
+            "★★contentId 必须随缩略图写入而刷新——不刷新会重现 v2.10.64/65 切组串图")
+    t.check((metaAfter["updatedAt"] as? Double ?? 0) > updatedBefore,
+            "★★updatedAt 必须前进（SwiftUI 缩略图缓存以 contentId+updatedAt 编入 .id）")
+    t.check((metaAfter["manualThumbnailId"] as? String ?? "") != (metaBefore["manualThumbnailId"] as? String ?? ""),
+            "覆盖后 manualThumbnailId 应换新")
+
+    // 旧的字节文件必须随原子 swap 一起消失，不能在 attachments/ 里堆垃圾
+    let attachDir = dataDir.appendingPathComponent("special_slots/default/1/attachments")
+    let bins = ((try? fm.contentsOfDirectory(atPath: attachDir.path)) ?? []).filter { $0.hasSuffix(".bin") }
+    t.equal(bins.count, 1, "★覆盖后槽位里只应留一份缩略图字节（旧文件不得残留）")
+
+    // ── ③ --if-absent 幂等：拒绝覆盖，且磁盘一字节不改
+    let metaGuardBefore = contentMeta(slot: 1)
+    let ifAbsent = runCLI(["set-thumbnail", "1", "--image", imgA.path, "--if-absent"])
+    t.equal(ifAbsent.code, 1, "★--if-absent 命中已有缩略图应以退出码 1 失败")
+    t.check(ifAbsent.json["ok"] as? Bool == false, "--if-absent 冲突应返回 ok:false")
+    t.equal(ifAbsent.json["error_code"] as? String, "THUMBNAIL_ALREADY_SET", "错误码应为 THUMBNAIL_ALREADY_SET")
+    let metaGuardAfter = contentMeta(slot: 1)
+    t.equal(metaGuardAfter["contentId"] as? String, metaGuardBefore["contentId"] as? String,
+            "★--if-absent 被拒时 contentId 不得变化（必须是彻底的零写入）")
+    t.equal(metaGuardAfter["manualThumbnailId"] as? String, metaGuardBefore["manualThumbnailId"] as? String,
+            "★--if-absent 被拒时 manualThumbnailId 不得变化")
+
+    // 空槽上的 --if-absent 应当正常写入（幂等护栏只挡「已有」，不挡「没有」）
+    let ifAbsentFresh = runCLI(["set-thumbnail", "3", "--image", imgA.path, "--if-absent"])
+    t.equal(ifAbsentFresh.code, 0, "★空槽上的 --if-absent 应正常写入")
+    t.check(ifAbsentFresh.json["ok"] as? Bool == true, "空槽 --if-absent 应返回 ok:true")
+    // 再跑一次同样的命令 → 第二次必须被挡住（这才是「幂等护栏」的完整语义）
+    let ifAbsentRepeat = runCLI(["set-thumbnail", "3", "--image", imgA.path, "--if-absent"])
+    t.equal(ifAbsentRepeat.json["error_code"] as? String, "THUMBNAIL_ALREADY_SET",
+            "★重复执行同一条 --if-absent 命令，第二次必须被幂等护栏挡下")
+
+    // ── ④ clear-thumbnail
+    let metaClearBefore = contentMeta(slot: 1)
+    let clear = runCLI(["clear-thumbnail", "1"])
+    t.equal(clear.code, 0, "clear-thumbnail 应成功")
+    t.check(clear.json["cleared"] as? Bool == true, "clear-thumbnail 应返回 cleared:true")
+    t.check((clear.json["removedBytes"] as? Int ?? 0) > 0, "clear-thumbnail 应回报被移除的字节数")
+
+    let readCleared = runCLI(["read", "1"])
+    t.check(readCleared.json["hasManualThumbnail"] as? Bool == false, "clear 之后 hasManualThumbnail 应为 false")
+    t.equal(readCleared.json["thumbnailBytes"] as? Int, 0, "clear 之后 thumbnailBytes 应为 0")
+    let metaClearAfter = contentMeta(slot: 1)
+    t.check((metaClearAfter["contentId"] as? String ?? "") != (metaClearBefore["contentId"] as? String ?? ""),
+            "★clear 同样必须刷新 contentId，否则 GUI 会停在被删掉的旧封面上")
+    t.check(metaClearAfter["manualThumbnailId"] == nil, "clear 之后 content.json 不应再有 manualThumbnailId")
+
+    // 重复 clear → NO_MANUAL_THUMBNAIL
+    let clearAgain = runCLI(["clear-thumbnail", "1"])
+    t.equal(clearAgain.json["error_code"] as? String, "NO_MANUAL_THUMBNAIL", "重复 clear 应返回 NO_MANUAL_THUMBNAIL")
+
+    // ── 错误输入
+    let missing = runCLI(["set-thumbnail", "4", "--image", sandbox.appendingPathComponent("nope.png").path])
+    t.equal(missing.json["error_code"] as? String, "FILE_NOT_FOUND", "缺失文件应返回 FILE_NOT_FOUND")
+    let notImage = sandbox.appendingPathComponent("x.txt")
+    try? Data("nope".utf8).write(to: notImage)
+    let bad = runCLI(["set-thumbnail", "4", "--image", notImage.path])
+    t.equal(bad.json["error_code"] as? String, "INVALID_IMAGE", "非图片应返回 INVALID_IMAGE")
+    let noImageFlag = runCLI(["set-thumbnail", "4"])
+    t.equal(noImageFlag.json["error_code"] as? String, "INVALID_ARGUMENT_COMBINATION", "缺 --image 应报参数组合错误")
+
+    // ── ⑤ 批量：全成功
+    let okBatch = "[{\"slot\":5,\"image\":\"\(imgA.path)\"},{\"slot\":6,\"image\":\"\(imgB.path)\"}]"
+    let batchOK = runCLI(["set-thumbnail", "--batch"], stdin: okBatch)
+    t.equal(batchOK.code, 0, "全合法批量应成功")
+    t.equal(batchOK.json["written"] as? Int, 2, "批量应写入 2 条")
+    t.check(batchOK.json["preflight_passed"] as? Bool == true, "批量预检应通过")
+
+    // ── ⑤ 批量：预检失败 → 整批零写入（★两阶段契约的核心）
+    let badPath = sandbox.appendingPathComponent("ghost.png").path
+    let badBatch = "[{\"slot\":7,\"image\":\"\(imgA.path)\"},{\"slot\":8,\"image\":\"\(badPath)\"}]"
+    let batchBad = runCLI(["set-thumbnail", "--batch"], stdin: badBatch)
+    t.equal(batchBad.code, 1, "预检失败的批量应以退出码 1 结束")
+    t.check(batchBad.json["preflight_passed"] as? Bool == false, "预检应标记为未通过")
+    t.equal(batchBad.json["written"] as? Int, 0, "★预检失败必须零写入")
+    t.equal(batchBad.json["error_code"] as? String, "FILE_NOT_FOUND", "预检失败错误码应为 FILE_NOT_FOUND")
+    let read7 = runCLI(["read", "7"])
+    t.check(read7.json["hasManualThumbnail"] as? Bool == false,
+            "★★预检失败时，排在坏条目**之前**的槽位也绝不能被写入")
+
+    // ── ⑤ 批量：重复目标
+    let dupBatch = "[{\"slot\":9,\"image\":\"\(imgA.path)\"},{\"slot\":9,\"image\":\"\(imgB.path)\"}]"
+    let batchDup = runCLI(["set-thumbnail", "--batch"], stdin: dupBatch)
+    t.equal(batchDup.json["error_code"] as? String, "BATCH_DUPLICATE_TARGET", "同一 (group, slot) 重复应被预检拦下")
+    t.equal(batchDup.json["written"] as? Int, 0, "重复目标批量应零写入")
+
+    // ── ⑤ 批量：if_absent 静态冲突 → 整批拒绝（slot 5 上面刚写过）
+    let conflictBatch = "[{\"slot\":10,\"image\":\"\(imgA.path)\"},{\"slot\":5,\"image\":\"\(imgA.path)\",\"if_absent\":true}]"
+    let batchConflict = runCLI(["set-thumbnail", "--batch"], stdin: conflictBatch)
+    t.equal(batchConflict.json["error_code"] as? String, "THUMBNAIL_ALREADY_SET", "if_absent 静态冲突应整批拒绝")
+    t.equal(batchConflict.json["written"] as? Int, 0, "if_absent 冲突批量应零写入")
+    t.check((runCLI(["read", "10"]).json["hasManualThumbnail"] as? Bool) == false, "冲突批量中的合法条目也不得写入")
+
+    // ── 批量与单条互斥的参数校验
+    let batchWithImage = runCLI(["set-thumbnail", "--batch", "--image", imgA.path], stdin: "[]")
+    t.equal(batchWithImage.json["error_code"] as? String, "INVALID_ARGUMENT_COMBINATION",
+            "--batch 与 --image 应互斥")
+} catch SmokeSkip.cliMissing {
+    // 上面已经记过一条失败断言了，这里只负责让顶层代码继续走到 t.report()。
+} catch {
+    t.check(false, "CLI-THUMB 组抛出异常：\(error)")
 }
 
 t.report()

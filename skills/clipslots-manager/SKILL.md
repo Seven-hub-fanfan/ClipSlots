@@ -1,8 +1,8 @@
 ---
 name: clipslots-manager
 description: 当需要以编程方式读取、写入、检索、加载或整理 macOS 剪贴板槽位管理器 ClipSlots 中的内容时使用。把文本/文件存进槽位、读出内容、搜索历史、把内容放到系统剪贴板、批量整理文件夹素材到槽位组/页面、删除槽位组/页面等。前置要求：macOS + 已安装 ClipSlots v2.9.33+，CLI 位于 /usr/local/bin/clipslots。
-version: 1.5.0
-compatibility: Requires macOS, ClipSlots, and /usr/local/bin/clipslots. Verified with ClipSlots CLI 2.10.10; probe version and command help at runtime.
+version: 1.6.0
+compatibility: Requires macOS, ClipSlots, and /usr/local/bin/clipslots. Verified with ClipSlots CLI 2.11.2; probe version and command help at runtime.
 used_when: 当需要以编程方式读取、写入、检索、加载或整理 macOS 剪贴板槽位管理器 ClipSlots 中的槽位内容时使用（写文本/文件进槽位、读出内容、搜索历史、把内容放到系统剪贴板、批量整理文件夹素材到槽位组/页面、删除槽位组/页面等）。
 requires: macOS + 已安装 ClipSlots v2.9.33+，CLI 位于 /usr/local/bin/clipslots。
 ---
@@ -56,7 +56,7 @@ requires: macOS + 已安装 ClipSlots v2.9.33+，CLI 位于 /usr/local/bin/clips
 
 **首选工作流**：动手前先 `clipslots help` / `groups` / `list` 了解现状，再执行读写；写入前优先选空槽，避免覆盖。
 
-## 1. 命令参考（v2.10.10，共 16 个；每个子命令均支持 `--help`/`-h`）
+## 1. 命令参考（v2.11.2，共 18 个；每个子命令均支持 `--help`/`-h`）
 
 ### 只读
 ```bash
@@ -64,8 +64,8 @@ clipslots version                                  # {"ok":true,"version":"2.9.5
 clipslots help                                     # 命令清单 + version/defaultGroup/defaultPage/slotCount
 clipslots groups [--page <uuid>|--page-name <名称>]   # 所有槽位组，返回对象 {groups:[{id,name,pageId,pageName,pageCount,slotCount,current}]}；带页面参数时只返回该页面下的组（v2.9.32 A4），是 Agent 判断"某页面是否有空组"的核心原语
 clipslots pages                                    # 所有页面，返回对象 {pages:[{id,name,current}]}
-clipslots list [--group <id>] [--page <uuid>|--page-name <名称>] [--page-size <N>] [--page-num <N>]   # 传 --group（或 --group-name）时返回单组顶层对象 {group,page,slots:[{slot,label,preview,type,attachmentCount,empty}]}（注意 slots 是对象里的字段，不是裸数组）；empty 表示主体与附件都为空（v2.9.3+），每槽含 attachmentCount 字段。只传 --page/--page-name 而不传组时（v2.9.32 A3）返回 {page,pageName,groupCount,groups:[{group,name,slots:[...]}]}（该页所有组各自的槽位），不再回落到全局 default 组。传 --page-size 后按页返回并附带 pagination:{pageNum,pageSize,total,totalPages,hasMore}（v2.9.7）。--page 按 UUID、--page-name 按名称指定页面，两者互斥
-clipslots read <slot> [--group <id>] [--page <uuid>|--page-name <名称>]               # 单槽完整内容 {slot,label,preview,text,htmlSource,types,attachmentCount,empty}；empty 表示主体与附件都为空（v2.9.3+）
+clipslots list [--group <id>] [--page <uuid>|--page-name <名称>] [--page-size <N>] [--page-num <N>]   # 传 --group（或 --group-name）时返回单组顶层对象 {group,page,slots:[{slot,label,preview,type,attachmentCount,empty,hasManualThumbnail,thumbnailBytes}]}（注意 slots 是对象里的字段，不是裸数组）；empty 表示主体与附件都为空（v2.9.3+），每槽含 attachmentCount 字段。v2.11.2 起每槽还含 hasManualThumbnail(bool) 与 thumbnailBytes(int)，用于确认手动缩略图状态。只传 --page/--page-name 而不传组时（v2.9.32 A3）返回 {page,pageName,groupCount,groups:[{group,name,slots:[...]}]}（该页所有组各自的槽位），不再回落到全局 default 组。传 --page-size 后按页返回并附带 pagination:{pageNum,pageSize,total,totalPages,hasMore}（v2.9.7）。--page 按 UUID、--page-name 按名称指定页面，两者互斥
+clipslots read <slot> [--group <id>] [--page <uuid>|--page-name <名称>]               # 单槽完整内容 {slot,label,preview,text,htmlSource,types,attachmentCount,empty,hasManualThumbnail,thumbnailBytes}；empty 表示主体与附件都为空（v2.9.3+）；hasManualThumbnail/thumbnailBytes 为 v2.11.2 新增，是 set-thumbnail/clear-thumbnail 之后唯一的自检依据
 clipslots search <query> [--group <id>] [--page <uuid>|--page-name <名称>] [--all-groups] [--limit 50]   # 子串搜索（不分大小写），返回 {query,results:[{group,page,pageName,slot,label,preview}]}；命中范围含预览/正文/标签/附件文件名（v2.9.3+）。v2.9.58 起支持 --page/--page-name，采用与其它命令相同的「页面+组」定位规则（只传页面不传组时搜索该页所有组）；并修复了 --group <UUID> 精确过滤（早期 CLI 2.9.57 指定有效组 UUID 会错误返回空结果）
 ```
 
@@ -142,6 +142,35 @@ clipslots delete-page <id>
 clipslots write --help
 clipslots delete-group -h
 ```
+
+### 槽位缩略图（v2.11.2 新增）
+
+```bash
+# 给槽位配一张「封面图」。卡片与轮盘会优先展示它，没有时才回退到自动生成的预览。
+# 图片被统一压成最长边 1024px 的 JPEG 存进槽位；不改动槽位主体与附件。
+# 支持 PNG / JPEG / HEIC / TIFF / GIF / BMP / WebP；SVG / PDF 会返回 INVALID_IMAGE。
+# 路径支持 ~ 与相对路径。
+clipslots set-thumbnail <slot> --image <path> [--group <id|name>] [--group-name <名称>] [--page <uuid>|--page-name <名称>] [--if-absent]
+
+# --if-absent：仅当槽位「还没有」手动缩略图时才写入（幂等护栏，推荐批处理时默认带上）。
+#   已有缩略图时返回 {"ok":false,"error_code":"THUMBNAIL_ALREADY_SET"}，磁盘零改动。
+#   不带该 flag 则直接覆盖，返回体里 replaced:true 表示顶掉了旧封面。
+# 成功返回 {"ok":true,"slot":1,"group":"...","source":"/abs/path.png","thumbnailId":"...","thumbnailBytes":12160,"hasManualThumbnail":true,"replaced":false}
+
+# 批量设置（stdin 传 JSON 数组）。group / page / page_name / if_absent 每条可覆盖命令级同名 flag。
+echo '[{"slot":1,"image":"~/a.png","group":"设计稿","page":"素材"},{"slot":2,"image":"~/b.jpg","if_absent":true}]' \
+  | clipslots set-thumbnail --batch [--stop-on-error]
+# 两阶段契约与 write --batch 一致：预检（路径存在性 + 可解码 + 组/页解析 + 重复目标 + if_absent 冲突）
+#   任一失败 → 整批零写入（preflight_passed:false, written:0）；执行期失败 → 前项成功、后项 not_executed。
+
+# 移除手动缩略图，回落到自动生成的预览。槽位内容/附件/标签均不受影响。
+# 本来就没有缩略图时返回 {"ok":false,"error_code":"NO_MANUAL_THUMBNAIL"}。
+clipslots clear-thumbnail <slot> [--group <id|name>] [--group-name <名称>] [--page <uuid>|--page-name <名称>]
+```
+
+> ⚠️ **`set-thumbnail` ≠ `write-attachment`，别混用**：`set-thumbnail` 只是给槽位「配张封面」，图片本身不会成为槽位的内容；`write-attachment` 才是把图片作为附件**存进**槽位。用户说「给这个槽位配个封面/图标/缩略图，看着好找」→ `set-thumbnail`；说「把这张图存进去/附上这张图」→ `write-attachment`。
+
+> 写入后请用 `read <slot>` 的 `hasManualThumbnail` / `thumbnailBytes` 自检：`thumbnailBytes` 应与 `set-thumbnail` 回执里的数值一致。GUI 开着时会在约 1 秒内自动刷新卡片与轮盘，无需重启 App。
 
 > 说明：`write-attachment` 的文件路径支持 `~` 与相对路径；图片扩展名归 `image` 类型，其余归 `file`。
 
@@ -225,6 +254,8 @@ clipslots delete-group -h
 2. **有文本** → 【模式A】：文本写入**槽位主体**（`write`），其余文件按顺序进**附件**（`write-attachment`）。
 3. **纯图片（无文本）** → 【模式B】：**首图**写入槽位主体，**其余图**按顺序进附件。
 4. **其他情况**（纯视频 / 纯文档 / 混合非文本文件） → 【模式C】：**全部文件进附件**，槽位主体留空。
+
+> **封面 vs 存图（v2.11.2）**：用户说「配个封面/图标/缩略图」→ `set-thumbnail`（只设展示用的封面，不占用槽位内容）；说「把图存进去/附上图片」→ `write-attachment`（图片本身作为附件入库）。两者互不冲突，可以先 `write-attachment` 存图、再 `set-thumbnail` 用同一张图当封面。
 
 | 模式 | 主体(items) | 附件(attachments) | 命令 |
 |---|---|---|---|
