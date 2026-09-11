@@ -428,28 +428,43 @@ struct RadialMenuView: View {
 
     // MARK: - Jump to Last Paste (v2.11.1, radial-only)
 
-    /// 底栏「上次粘贴」跳转按钮。
+    /// 底栏「上次粘贴」定位按钮。
     ///
-    /// 图标用 `checkmark.circle.fill`，与主界面卡片右上角那枚「上次粘贴」胶囊完全一致
-    /// （见 `SlotCardView.lastPasteBadge`）——三处（卡片胶囊 / 扇区外弧 / 这颗按钮）共用
-    /// 同一套符号 + `slotAccent(slot)` 配色，用户一眼就能把它们串成同一个概念。
-    /// 刻意不用 `checkmark.arrow.trianglehead.counterclockwise`：那是 SF Symbols 6（macOS 15+）
-    /// 才有的符号，而本 App `LSMinimumSystemVersion` 是 13.0，老系统上会渲染成空白方块。
+    /// v2.11.3 hotfix2：由纯图标（`checkmark.circle.fill`）改成**带文字的胶囊按钮**。
+    /// 纯图标在这条底栏里辨识度不够——左右邻居分别是「📁 组名」和「全部粘贴」两个带字元素，
+    /// 中间夹一颗无字圆点，用户得靠 tooltip 才知道它干什么。
     ///
-    /// 有效时染成目标槽位的强调色——和扇区外沿那条弧同色，点之前就知道会跳去哪一格。
+    /// 样式对齐底栏既有语言：`radialGlassButtonTint` 深灰胶囊底 + `radialGlassButtonText`
+    /// 高对比文字 + `radialGlassButtonStroke` 描边，与组名 chip / 页面切换 chip 同一套 token，
+    /// 因此亮暗模式自动跟随（亮色=半透白底深字，暗色=半透黑底白字）。
+    /// 保留一枚 10pt 小对勾在文字左侧：卡片胶囊 / 扇区外弧 / 这颗按钮三处共用同一个符号，
+    /// 视觉上串成同一个概念。刻意不用 `checkmark.arrow.trianglehead.counterclockwise`
+    /// ——那是 SF Symbols 6（macOS 15+）才有的符号，本 App 最低支持 13.0，老系统会渲染成空白方块。
+    ///
+    /// 无记录时整颗置灰（0.35）并禁用，tooltip 提示「尚未粘贴过任何槽位」。
     private var lastPasteJumpButton: some View {
         let address = store.lastPasteAddress
         return Button {
             jumpToLastPasteInRadial()
         } label: {
-            Image(systemName: "checkmark.circle.fill")
-                .font(.system(size: 12, weight: .bold))
-                .frame(width: 22, height: 20)
+            HStack(spacing: 4) {
+                Image(systemName: "checkmark.circle.fill")
+                    .font(.system(size: 10, weight: .semibold))
+                Text("上次粘贴")
+                    .font(.system(size: 11, weight: .bold))
+                    .lineLimit(1)
+            }
+            .foregroundColor(AppTheme.radialGlassButtonText(colorScheme))
+            .padding(.horizontal, 8)
+            .padding(.vertical, 4)
+            .background(Capsule().fill(AppTheme.radialGlassButtonTint(colorScheme)))
+            .overlay(Capsule().stroke(AppTheme.radialGlassButtonStroke(colorScheme), lineWidth: 0.7))
+            .contentShape(Capsule())
         }
         .buttonStyle(.plain)
+        .fixedSize()
         .disabled(address == nil)
         .opacity(address == nil ? 0.35 : 1)
-        .foregroundColor(address.map { AppTheme.slotAccent($0.slot) })
         .help(store.lastPasteDescription.map { "在圆盘内定位到上次粘贴：\($0)" } ?? "尚未粘贴过任何槽位")
     }
 
