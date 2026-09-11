@@ -72,7 +72,19 @@ struct RadialPreviewPanel: View {
                 .onAppear(perform: republishRetainedPayload)
             }
         }
-        .frame(minWidth: 260, minHeight: 220)
+        // v2.11.3 hotfix4：★这个 alignment 是"面板向上跳"的真凶，必须显式写 .top。
+        //
+        // `.frame(minHeight:)` 的默认对齐是 **.center**。hotfix3 把内容区改成条件渲染后，
+        // 空态下 VStack 的自然高度只剩工具栏那 54pt，被塞进 220pt 高的框里垂直居中
+        // → 工具栏被压低约 (220-54)/2 ≈ 83pt；内容区一展开、VStack 填满，工具栏又弹回顶部。
+        // 于是每次悬停都能看见标题栏"向上跳"一下。
+        // hotfix3 之前内容区常驻且带 maxHeight: .infinity，VStack 恒定填满，所以这个
+        // .center 一直没被触发 —— 属于我上一轮改动带出来的连带问题。
+        //
+        // 说明：窗口层面本来就没有跳动的余地 —— NSPanel 是固定 360×480（minSize == maxSize），
+        // origin 在 show 时算好后不再变，恢复位置时也是按 maxY 锚住上边缘。所以只需要
+        // 把 SwiftUI 这层的顶部锚点补上，内容区就只会向下伸展。
+        .frame(minWidth: 260, minHeight: 220, alignment: .top)
         // v2.9.25 hotfix5: 固定填满整个窗口并顶部对齐，工具栏钉在顶部，
         // 内容区始终占据剩余空间，空态/悬停态切换时工具栏不再跳动。
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
@@ -100,6 +112,10 @@ struct RadialPreviewPanel: View {
             }
         }
         .clipShape(panelShape)
+        // v2.11.3 hotfix4：展开 / 收起走 0.15s easeOut，高度不再瞬变。
+        // 挂在这一层（而不是内容区内部）才能同时覆盖三件事：内容区的插入删除、
+        // 磨砂底与描边的淡入淡出、工具栏圆角在 0/14pt 之间的过渡。
+        .animation(.easeOut(duration: 0.15), value: hasPreviewTarget)
         .onReceive(NotificationCenter.default.publisher(for: .radialMenuHoveredSlotChanged)) { note in
             if let payload = note.userInfo?["preview"] as? RadialHoverPreviewPayload {
                 dynamicTitle = payload.title

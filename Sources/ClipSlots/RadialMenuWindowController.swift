@@ -192,7 +192,14 @@ final class RadialMenuWindowController {
 
         let screenFrame = NSScreen.main?.visibleFrame ?? NSScreen.screens.first?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
         // v2.9.25 hotfix5: 预览窗尺寸从误设的 720×840 改回固定 360×480，不折叠、不 resize。
-        let defaultSize = NSSize(width: 360, height: 480)
+        // v2.11.3 hotfix4: 高度再加一道屏幕相关上限 —— 屏幕可用高度的 60%。
+        // 480pt 在常规屏（可用高度 ≥ 800pt）下就是 480，行为不变；但在小屏 / 分屏 / 竖屏侧栏
+        // 这类可用高度只有 600~740pt 的场景下，480 + 24 的上边距会把面板顶到屏幕边缘外，
+        // 底部内容（尤其是附件条）看不见也拖不上来。取 60% 后最坏情况也留得下上下边距。
+        // 内容超长本身不会撑破面板：文本预览是 ScrollView、图片走 scaledToFit + clipped、
+        // 附件条横向滚动，所以只需要在窗口这一层封顶。
+        let heightCap = max(220, (screenFrame.height * 0.6).rounded())
+        let defaultSize = NSSize(width: 360, height: min(480, heightCap))
         let savedFrame = restoredPreviewFrame(defaultSize: defaultSize, screenFrame: screenFrame)
         let origin = savedFrame.origin
         let size = savedFrame.size
