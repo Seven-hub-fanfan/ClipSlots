@@ -648,13 +648,18 @@ struct RadialMenuView: View {
                 .offset(x: layout.thumbnailRadius * cos(rad),
                         y: layout.thumbnailRadius * sin(rad))
 
-                segmentTextBlock(slot: slot, content: content, label: label, isHovered: isHovered, midRadius: midRadius)
+                segmentTextBlock(slot: slot, content: content, label: label, isHovered: isHovered,
+                                 textWidth: layout.textBlockWidth)
                     .offset(x: layout.textRadius * cos(rad),
                             y: layout.textRadius * sin(rad))
             } else {
-                // 无手动缩略图（或扇区太窄放不下）：完全走 v2.11.0 之前的「纯文字居中」布局，
-                // 像素级保持原样。
-                segmentTextBlock(slot: slot, content: content, label: label, isHovered: isHovered, midRadius: midRadius)
+                // 无手动缩略图（或扇区太窄放不下）：仍走「纯文字居中」的原有布局，
+                // 只是标签宽度同样按楔形弦宽收敛，避免长标签横向压过扇区分隔线。
+                segmentTextBlock(slot: slot, content: content, label: label, isHovered: isHovered,
+                                 textWidth: RadialSegmentLayoutCalculator.textBlockWidth(
+                                    atRadius: midRadius,
+                                    segmentDegrees: segmentDegrees,
+                                    preferred: midRadius * 0.78))
                     .offset(x: midRadius * cos(rad), y: midRadius * sin(rad))
             }
         }
@@ -664,7 +669,7 @@ struct RadialMenuView: View {
     /// 扇区内的文字块：槽位编号（+ 串联色点）+ 标签/预览。
     /// 从 `segmentLabel` 里抽出来，好让它能作为独立元素挂到自己的中轴线锚点上。
     @ViewBuilder
-    private func segmentTextBlock(slot: Int, content: SlotContent, label: String, isHovered: Bool, midRadius: CGFloat) -> some View {
+    private func segmentTextBlock(slot: Int, content: SlotContent, label: String, isHovered: Bool, textWidth: CGFloat) -> some View {
         VStack(spacing: 3) {
             // v2.7.0: Slot number + connection dot
             HStack(spacing: 4) {
@@ -685,7 +690,7 @@ struct RadialMenuView: View {
                     .foregroundColor(AppTheme.radialSecondaryText(colorScheme, isHovered: isHovered))
                     .lineLimit(1)
                     .truncationMode(.tail)
-                    .frame(width: midRadius * 0.78)
+                    .frame(width: textWidth)
             } else {
                 // v2.9.18: 空槽占位由"空"文字改为更克制的圆点符号，减少圆盘文字噪音
                 //（纯 UI 占位替换，字号/颜色 token/位置计算均保持不变，不触碰任何交互逻辑）。

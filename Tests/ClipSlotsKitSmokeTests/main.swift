@@ -920,7 +920,41 @@ do {
                                                         segmentDegrees: 36) {
         t.check(layout.textRadius - RadialSegmentLayoutCalculator.textBlockHeight / 2 >= segmentInner,
                 "★文字块不得压进中心死区")
+
+        // v2.11.0 hotfix-2：文字块横向不得越过扇区分隔线。
+        // 回归背景：文字块宽度曾写死 midRadius*0.78（≈87pt），而楔形在 textRadius 处的
+        // 弦宽只有 ≈57pt，长标签横向溢出到邻居扇区，并在斜向扇区撞上本扇区的缩略图。
+        let chordAtText = RadialSegmentLayoutCalculator.chordWidth(atRadius: layout.textRadius,
+                                                                   segmentDegrees: 36)
+        t.check(layout.textBlockWidth <= chordAtText + 0.001,
+                "★文字块宽度不得超过所在半径处的弦宽（不越扇区分隔线）")
+        t.check(layout.textBlockWidth >= RadialSegmentLayoutCalculator.minTextBlockWidth - 0.001,
+                "文字块宽度不得低于可读下限")
+
+        // 文字块的外沿（径向）与缩略图的内沿之间必须留有间距，二者不得相贴/重叠。
+        let textOuterEdge = layout.textRadius + RadialSegmentLayoutCalculator.textBlockHeight / 2
+        let thumbInnerEdge = layout.thumbnailRadius - layout.thumbnailSide / 2
+        t.check(thumbInnerEdge >= textOuterEdge - 0.001,
+                "★缩略图内沿不得压到文字块外沿")
     }
+
+    // 弦宽/文字宽度纯函数的边界行为
+    t.equal(RadialSegmentLayoutCalculator.chordWidth(atRadius: 100, segmentDegrees: 360),
+            .greatestFiniteMagnitude,
+            "360° 单扇区不构成弦宽约束")
+    t.check(abs(RadialSegmentLayoutCalculator.chordWidth(atRadius: 100, segmentDegrees: 90)
+                - 2 * 100 * CGFloat(tan(45 * Double.pi / 180))) < 0.001,
+            "弦宽公式：90° 扇区在 r=100 处应为 200")
+    t.equal(RadialSegmentLayoutCalculator.textBlockWidth(atRadius: 1,
+                                                         segmentDegrees: 36,
+                                                         preferred: 200),
+            RadialSegmentLayoutCalculator.minTextBlockWidth,
+            "极小半径处文字宽度收敛到下限而不是 0")
+    t.equal(RadialSegmentLayoutCalculator.textBlockWidth(atRadius: 1000,
+                                                         segmentDegrees: 36,
+                                                         preferred: 60),
+            60,
+            "弦宽充裕时文字宽度取 preferred")
 
     // 退化输入：环带太薄 / 参数非法时必须返回 nil，让调用方退回纯文字布局而不是画出畸形缩略图
     t.check(RadialSegmentLayoutCalculator.layout(innerRadius: 40, outerRadius: 60, segmentDegrees: 36) == nil,

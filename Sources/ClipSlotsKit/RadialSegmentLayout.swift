@@ -28,11 +28,14 @@ public struct RadialSegmentLayout: Equatable, Sendable {
     public let thumbnailRadius: CGFloat
     /// 文字块（编号 + 标签）中心到圆盘圆心的距离（沿扇区中轴线，偏内侧）。
     public let textRadius: CGFloat
+    /// 文字块允许的最大宽度（受楔形在 `textRadius` 处的弦宽约束）。
+    public let textBlockWidth: CGFloat
 
-    public init(thumbnailSide: CGFloat, thumbnailRadius: CGFloat, textRadius: CGFloat) {
+    public init(thumbnailSide: CGFloat, thumbnailRadius: CGFloat, textRadius: CGFloat, textBlockWidth: CGFloat) {
         self.thumbnailSide = thumbnailSide
         self.thumbnailRadius = thumbnailRadius
         self.textRadius = textRadius
+        self.textBlockWidth = textBlockWidth
     }
 }
 
@@ -52,6 +55,32 @@ public enum RadialSegmentLayoutCalculator {
     /// 角向可用弦宽的利用率。0.62 = 留出约 1/3 余量，实测可把最坏角偏差压到
     /// 半扇区角的 ~75% 以内（见 smoke 测试的四角断言）。
     public static let arcWidthUtilization: CGFloat = 0.62
+    /// 文字块的最小宽度。再窄连「10」+ 一个省略号都放不下，宁可让它轻微压线。
+    public static let minTextBlockWidth: CGFloat = 48
+    /// 文字块相对弦宽的利用率。文字是横平的一行，比方形缩略图更贴合弦，
+    /// 所以可以比 `arcWidthUtilization` 宽松一些。
+    public static let textWidthUtilization: CGFloat = 0.9
+
+    /// 楔形在半径 `radius` 处的可用弦宽（单侧半角 `segmentDegrees/2`）。
+    /// `segmentDegrees >= 179` 时楔形不再构成约束，返回 `.greatestFiniteMagnitude`。
+    public static func chordWidth(atRadius radius: CGFloat, segmentDegrees: Double) -> CGFloat {
+        let halfDegrees = segmentDegrees / 2
+        guard halfDegrees < 89.5 else { return .greatestFiniteMagnitude }
+        return 2 * radius * CGFloat(tan(halfDegrees * .pi / 180))
+    }
+
+    /// 文字块在半径 `radius` 处允许的最大宽度。
+    ///
+    /// 为什么需要它：此前文字块宽度写死为 `midRadius * 0.78`（10 槽位下 ≈ 87pt），
+    /// 而楔形在文字块所在半径处的弦宽只有 ~57pt —— 长标签因此**横向溢出到邻居扇区**，
+    /// 并且在斜向扇区里正好撞上本扇区沿中轴线外移的缩略图（截图里 4 号扇区的标签
+    /// 与缩略图相贴即由此而来）。按弦宽收敛后，文字永远待在自己的楔形里。
+    public static func textBlockWidth(atRadius radius: CGFloat,
+                                      segmentDegrees: Double,
+                                      preferred: CGFloat) -> CGFloat {
+        let byChord = chordWidth(atRadius: radius, segmentDegrees: segmentDegrees) * textWidthUtilization
+        return max(minTextBlockWidth, min(preferred, byChord))
+    }
 
     /// 计算某个扇区内缩略图 + 文字块的布局。
     ///
@@ -77,8 +106,7 @@ public enum RadialSegmentLayoutCalculator {
         if halfDegrees >= 89.5 {
             byArcWidth = .greatestFiniteMagnitude
         } else {
-            let chord = 2 * midRadius * CGFloat(tan(halfDegrees * .pi / 180))
-            byArcWidth = chord * arcWidthUtilization
+            byArcWidth = chordWidth(atRadius: midRadius, segmentDegrees: segmentDegrees) * arcWidthUtilization
         }
 
         // 约束 2（径向）：环带厚度要同时容纳缩略图、间距、文字块和两侧留白。
@@ -102,6 +130,9 @@ public enum RadialSegmentLayoutCalculator {
 
         return RadialSegmentLayout(thumbnailSide: side,
                                    thumbnailRadius: thumbnailRadius,
-                                   textRadius: textRadius)
+                                   textRadius: textRadius,
+                                   textBlockWidth: textBlockWidth(atRadius: textRadius,
+                                                                  segmentDegrees: segmentDegrees,
+                                                                  preferred: midRadius * 0.78))
     }
 }
