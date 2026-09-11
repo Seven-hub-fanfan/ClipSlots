@@ -267,6 +267,43 @@ final class ThumbnailProvider: ObservableObject {
         lock.unlock()
         notifyChangeOnMain()  // 状态转为 .loading
 
+        // v2.11.0「槽位缩略图手动上传」：手动缩略图**优先级最高**，压过下面所有自动生成分支。
+        //
+        // 放在这里（而不是在视图层做 if/else 二选一）的三个理由：
+        // 1. 手动图与自动图共用同一套 key/缓存/驱逐/in-flight 去重协议，不引入第二条状态机。
+        //    key 尾部已编入 `::m{id}`（见 SlotContent.thumbnailKey），换图/清图自然失效。
+        // 2. 空槽守卫在其后 —— 空槽也能有手动封面图，不会被 `content.isEmpty` 提前短路掉。
+        // 3. 磁盘字节缺失时不 return，而是**继续往下走自动逻辑**，等价于优雅降级而非白屏。
+        if let manualId = content.manualThumbnailId, !manualId.isEmpty,
+           let manualURL = SpecialSlotStorage.shared.manualThumbnailURL(slot, in: specialSlotId) {
+            Task {
+                let decoded = await ThumbnailDecodeLimiter.shared.run {
+                    await Task.detached(priority: .userInitiated) { () -> NSImage? in
+                        // 与内联图片同样的 512px 降采样档位：卡片主预览区最大也就这个量级，
+                        // 且手动缩略图入库时已压到最长边 1024，这里几乎不做实质缩放。
+                        ClipSlotsImageIO.downsampledImage(url: manualURL, maxPixel: 512)
+                    }.value
+                }
+                if decoded == nil {
+                    // 极少数情况：文件存在但解不出（写入中断 / 被外部替换成损坏字节）。
+                    // 不静默留白，落回自动缩略图逻辑，用户至少还能看到内容本身的预览。
+                    NSLog("[ClipSlots] ThumbnailProvider: manual thumbnail \(manualId) failed to decode for "
+                        + "\(specialSlotId)#\(slot); falling back to the automatic thumbnail")
+                    self.loadAutomatic(key: key, content: content, specialSlotId: specialSlotId, slot: slot)
+                } else {
+                    self.finish(key: key, image: decoded)
+                }
+            }
+            return
+        }
+
+        loadAutomatic(key: key, content: content, specialSlotId: specialSlotId, slot: slot)
+    }
+
+    /// 原有的「按内容类型自动生成缩略图」逻辑。v2.11.0 从 `load` 中原样抽出，
+    /// 以便手动缩略图解码失败时能干净地回退到这条路径（避免复制粘贴两份分支）。
+    /// 注意：调用方已完成 in-flight 标记，本方法只负责产出并 `finish`。
+    private func loadAutomatic(key: String, content: SlotContent, specialSlotId: String, slot: Int) {
         // 空槽（理论上网格用 EmptySlotThumbnailView 兜住，此处为防御）：无缩略图。
         guard !content.isEmpty else {
             finish(key: key, image: nil)

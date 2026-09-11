@@ -20,6 +20,17 @@ struct SlotCardView: View {
     // v2.10.19: 单独删除主体文本内容（保留附件）。
     var onClearBody: (() -> Void)? = nil
 
+    // MARK: v2.11.0「槽位缩略图手动上传」回调
+    //
+    // 三者同时为 nil 时，右上角图标与右键菜单项都不出现——保持节点画布等复用 SlotCardView
+    // 的场景零行为变化（它们不传这几个闭包）。
+    /// 调起系统交互式截图（screencapture -i），框选结果设为本槽位缩略图。
+    var onCaptureThumbnail: (() -> Void)? = nil
+    /// 弹出文件选择器，选一张本地图片设为本槽位缩略图。
+    var onUploadThumbnail: (() -> Void)? = nil
+    /// 移除手动缩略图，回落到自动生成的缩略图。
+    var onClearManualThumbnail: (() -> Void)? = nil
+
     // v2.9.36: when true, this slot was the most recent paste target and shows a
     // persistent "上次粘贴" badge in the top-right corner until another slot is pasted.
     var isLastPasted: Bool = false
@@ -50,6 +61,8 @@ struct SlotCardView: View {
     @State private var showingHTMLEditor = false
     @State private var editingText = ""
     @State private var isDropTargeted = false
+    // v2.11.0: 缩略图入口图标的悬停高亮。
+    @State private var isHoveringThumbnailEntry = false
 
     // v2.10.70: 拖拽 live-resize 期间去掉卡片软阴影——resize 时 N 张可见卡片的软阴影每帧重合成开销很大。
     @ObservedObject private var liveResize = LiveResizeMonitor.shared
@@ -77,7 +90,20 @@ struct SlotCardView: View {
 
             // Thumbnail area — split empty vs filled to prevent @State image reuse
             Group {
-                if content.isEmpty {
+                if content.hasManualThumbnail {
+                    // v2.11.0「槽位缩略图手动上传」：手动封面图优先级最高，压过空槽占位、
+                    // 视频内联播放器和自动缩略图三条分支。真正的取图优先级在
+                    // ThumbnailProvider.load 里实现——这里只是把渲染入口统一收敛到
+                    // SlotThumbnailView，避免视图层再分叉出第二套缩略图状态机。
+                    SlotThumbnailView(content: content, specialSlotId: specialSlotId, slot: slot)
+                        .clipShape(RoundedRectangle(cornerRadius: AppTheme.slotPreviewCornerRadius, style: .continuous))
+                        .onTapGesture {
+                            if content.canPreview {
+                                showingPreview = true
+                            }
+                        }
+                        .help(content.canPreview ? "点击查看大图（当前显示的是手动设置的缩略图）" : "当前显示的是手动设置的缩略图")
+                } else if content.isEmpty {
                     EmptySlotThumbnailView()
                 } else if content.isVideoFile, let url = content.primaryFileURL {
                     InlineSlotVideoPreview(url: url)
@@ -122,6 +148,16 @@ struct SlotCardView: View {
                     .buttonStyle(.plain)
                     .help("删除此槽位的文本内容（保留附件）")
                     .padding(6)
+                }
+            }
+            // v2.11.0「槽位缩略图手动上传」：缩略图入口图标钉在**预览框**右上角。
+            // 位置论证：卡片级「上次粘贴」角标在卡片根视图的 .topTrailing（更靠上、在 headerRow 那一行），
+            // 附件角标在预览框下方的 metadata 行，删除主体文本的叉号在预览框 .topLeading —— 本图标落在
+            // 预览框 .topTrailing，与三者均无重叠。
+            .overlay(alignment: .topTrailing) {
+                if hasThumbnailActions {
+                    thumbnailEntryButton
+                        .padding(6)
                 }
             }
 
@@ -287,6 +323,18 @@ struct SlotCardView: View {
         .contextMenu {
             // v2.5: Type-specific actions
             typeSpecificMenuItems
+
+            // v2.11.0「槽位缩略图手动上传」：右键菜单是第二个入口，放在**现有菜单项末尾**，
+            // 内容与右上角图标菜单完全一致（共用 thumbnailMenuItems）。
+            if hasThumbnailActions {
+                Divider()
+                Menu {
+                    thumbnailMenuItems
+                } label: {
+                    Label(content.hasManualThumbnail ? "更改缩略图…" : "设置缩略图…",
+                          systemImage: content.hasManualThumbnail ? "photo.fill.on.rectangle.fill" : "photo.badge.plus")
+                }
+            }
         }
         .perfCount("SlotCardView.body")
     }
@@ -422,6 +470,70 @@ struct SlotCardView: View {
         }
         // v2.9.18: header 顶部留出呼吸空间，数字气泡不再紧贴卡片大圆角上沿（截图问题①）。
         .padding(.top, AppTheme.spacingTight)
+    }
+
+    // MARK: - v2.11.0 手动缩略图入口
+
+    /// 是否有任何缩略图动作可用（决定右上角图标与右键菜单项是否出现）。
+    private var hasThumbnailActions: Bool {
+        onCaptureThumbnail != nil || onUploadThumbnail != nil
+    }
+
+    /// 预览框右上角的缩略图入口图标。已设置手动缩略图时换成**填充态**图标并染上强调色，
+    /// 让用户一眼看出「这张卡的封面是我自己设的，不是自动生成的」。
+    private var thumbnailEntryButton: some View {
+        Menu {
+            thumbnailMenuItems
+        } label: {
+            Image(systemName: content.hasManualThumbnail ? "photo.fill.on.rectangle.fill" : "photo.badge.plus")
+                .font(.system(size: 16, weight: .medium))
+                .foregroundColor(thumbnailEntryTint)
+                .frame(width: 22, height: 22)
+                // 半透明**深色**底片而非浅色：预览框里可能是任意一张图，白底 + 白图标在浅色截图上
+                // 会彻底看不见。深色底片配白图标在任何背景上都成立，也贴合原型「半透明白色图标」的观感。
+                .background(
+                    Circle()
+                        .fill(Color.black.opacity(isHoveringThumbnailEntry ? 0.58 : 0.34))
+                )
+                .contentShape(Circle())
+        }
+        // .borderlessButtonMenuIndicator + .menuStyle(.borderlessButton) 会画一个下拉箭头，
+        // 在 16pt 的小图标上非常拥挤；隐藏指示器只保留纯图标。
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .frame(width: 24, height: 24)
+        .onHover { isHoveringThumbnailEntry = $0 }
+        .help(content.hasManualThumbnail
+              ? "已设置手动缩略图 · 点击可更换或移除"
+              : "设置槽位缩略图（截图 / 上传图片）")
+    }
+
+    private var thumbnailEntryTint: Color {
+        // 已设置手动缩略图 → 用槽位强调色的高亮版，一眼可辨「这张封面是我设的」。
+        if content.hasManualThumbnail { return isHoveringThumbnailEntry ? .white : .white.opacity(0.95) }
+        return .white.opacity(isHoveringThumbnailEntry ? 1.0 : 0.82)
+    }
+
+    /// 缩略图菜单项。右上角图标菜单与右键菜单共用同一份定义，保证两个入口行为**永远一致**
+    /// （需求明确要求「右键菜单与图标功能相同」——共用而非复制是唯一能持续保证这点的写法）。
+    @ViewBuilder
+    private var thumbnailMenuItems: some View {
+        if let onCaptureThumbnail {
+            Button(action: onCaptureThumbnail) {
+                Label("截图", systemImage: "camera.viewfinder")
+            }
+        }
+        if let onUploadThumbnail {
+            Button(action: onUploadThumbnail) {
+                Label("上传图片…", systemImage: "photo.on.rectangle")
+            }
+        }
+        if content.hasManualThumbnail, let onClearManualThumbnail {
+            Divider()
+            Button(role: .destructive, action: onClearManualThumbnail) {
+                Label("移除手动缩略图", systemImage: "arrow.uturn.backward")
+            }
+        }
     }
 
     private var contentPreview: some View {

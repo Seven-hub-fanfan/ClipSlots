@@ -484,7 +484,12 @@ public final class SlotStorage {
                     // was meant to deliver. Converging the cache to the on-disk shape here releases
                     // the inline attachment bytes immediately.
                     var cachedContent = content
-                    cachedContent.attachments = persisted
+                    cachedContent.attachments = persisted.attachments
+                    // v2.11.0: 缓存必须收敛到「磁盘真实形态」——用存储层归一化后的 id，而不是调用方
+                    // 传进来的原值（字节缺失时会被降级为 nil）。同时清掉瞬态字节载荷，否则这份缓存会
+                    // 把整张图长期驻留在内存里（与上面释放内联附件字节的动机完全一致）。
+                    cachedContent.manualThumbnailId = persisted.manualThumbnailId
+                    cachedContent.pendingManualThumbnailData = nil
                     cache[slot] = cachedContent
                     // P2-7 (v2.10.9): backfill the fingerprint with the freshly-written
                     // slot dir so the next get() serves the cache instead of doing a full
@@ -778,6 +783,28 @@ public final class SlotStorage {
     private struct SlotContentMeta: Codable {
         let contentId: String
         let updatedAt: TimeInterval
+        // v2.11.0「槽位缩略图手动上传」：手动缩略图字节文件的标识（文件落在
+        // `{slotDir}/attachments/{id}.bin`）。老 content.json 无此键 → 可选类型的合成解码器
+        // 走 decodeIfPresent 自动回落 nil，完全向后兼容；编码时 nil 会被省略，因此没设置
+        // 手动缩略图的槽位其 content.json 与升级前逐字节一致。
+        var manualThumbnailId: String? = nil
+    }
+
+    /// v2.11.0：手动缩略图在槽位目录内的字节文件路径（不校验存在性）。
+    /// 与附件共用 `attachments/` 目录：它同样是「随槽位目录原子 swap 一起生效」的外置字节，
+    /// 复用同一目录可让 `.trash` 快照、组删除、pack 导出等既有清理/搬运逻辑天然覆盖到它。
+    private static func manualThumbnailFile(in slotDir: URL, id: String) -> URL {
+        slotDir.appendingPathComponent("attachments", isDirectory: true)
+            .appendingPathComponent("\(id).bin")
+    }
+
+    /// v2.11.0：读取某槽位手动缩略图的磁盘 URL；未设置或文件缺失时返回 nil。
+    /// 只做一次轻量 `fileExists`，不读字节——调用方（ThumbnailProvider / 轮盘）自行按需解码。
+    public func manualThumbnailURL(slot: Int) -> URL? {
+        let content = get(slot)
+        guard let id = content.manualThumbnailId, !id.isEmpty else { return nil }
+        let url = Self.manualThumbnailFile(in: baseURL.appendingPathComponent(String(slot)), id: id)
+        return FileManager.default.fileExists(atPath: url.path) ? url : nil
     }
 
     // MARK: - Internal Read/Write
@@ -849,6 +876,22 @@ public final class SlotStorage {
            let meta = try? JSONDecoder().decode(SlotContentMeta.self, from: metaData) {
             content.contentId = meta.contentId
             content.updatedAt = meta.updatedAt
+            // v2.11.0: 恢复手动缩略图身份，并**校验字节文件确实存在**。
+            // 为什么要校验：manualThumbnailId 在 content.json 里，字节在 attachments/{id}.bin 里，
+            // 二者虽随同一次原子 swap 生效（不会半写），但用户手动清理数据目录、外部同步工具漏传、
+            // 或从老版本回滚后再升级等场景仍可能留下「有 id 无字节」的悬空引用。悬空 id 会让
+            // thumbnailKey 编进一个永远解不出图的分支，缩略图退化为空白且无法自愈。这里读到即
+            // 归一化为 nil，等价于「没有手动缩略图」，自动 fallback 到原有的自动生成逻辑。
+            if let id = meta.manualThumbnailId, !id.isEmpty,
+               FileManager.default.fileExists(atPath: Self.manualThumbnailFile(in: slotDir, id: id).path) {
+                content.manualThumbnailId = id
+            } else {
+                if let id = meta.manualThumbnailId, !id.isEmpty {
+                    NSLog("[ClipSlots] readSlotContent slot=\(slotDir.lastPathComponent): manual thumbnail "
+                        + "\(id).bin missing on disk; falling back to auto thumbnail")
+                }
+                content.manualThumbnailId = nil
+            }
         } else {
             // Legacy slot: generate stable-ish IDs so restarts don't thrash.
             content.contentId = UUID().uuidString
@@ -916,18 +959,31 @@ public final class SlotStorage {
         return content
     }
 
+    /// v2.11.0: `writeSlotContent` 的返回体。此前它只返回「已持久化的附件数组」，现在还要把
+    /// **实际落盘生效的** `manualThumbnailId` 带回给 `set`——因为存储层可能把调用方给的 id 归一化掉
+    /// （字节缺失时降级为 nil）。若 `set` 仍按调用方原值填缓存，就会出现「内存说有图、磁盘没字节」
+    /// 的不一致，下一次冷读又自愈成 nil，表现为缩略图诡异地时有时无。
+    struct PersistedSlotShape {
+        var attachments: [SlotContent.SlotAttachment]
+        var manualThumbnailId: String?
+    }
+
     /// Persists `content` to the slot's directory via an atomic staging-dir swap and returns
     /// the attachment array as PERSISTED to `attachments.json` — i.e. with inline bytes
     /// externalized (`data=nil`, `storagePath` → the post-swap `.bin` path). The caller (set)
     /// caches this shape so the freshly-written slot doesn't keep inline bytes resident (P2-C).
     /// A slot with no attachments returns the (empty) `content.attachments` unchanged.
     @discardableResult
-    private func writeSlotContent(_ content: SlotContent, to slot: Int) throws -> [SlotContent.SlotAttachment] {
+    private func writeSlotContent(_ content: SlotContent, to slot: Int) throws -> PersistedSlotShape {
         let slotDir = baseURL.appendingPathComponent(String(slot))
         // P2-C (v2.10.44): the attachment shape actually written to disk. Defaults to the
         // caller's attachments (covers the no-attachment / non-externalized paths); the
         // externalize branch below replaces it with the `data=nil` + storagePath form.
         var persistedAttachments = content.attachments
+
+        // v2.11.0: 本次实际落盘生效的手动缩略图 id。默认 nil（未设置 / 被归一化掉），
+        // 由 stageManualThumbnail 在字节确实进入 staging 后回填。
+        var effectiveManualThumbnailId: String? = nil
 
         // P1-5 (v2.10.9): sweep any staging dirs for THIS slot orphaned by a prior
         // crash before creating a fresh one, so `.tmp_slot_<slot>_*` cannot pile up.
@@ -964,7 +1020,7 @@ public final class SlotStorage {
             // empty (attachments are added independently in the node canvas). Persist
             // payload if EITHER items or attachments exist; an empty slot is a
             // label-only staging dir (matches the previous wipe-then-empty behaviour).
-            if !content.isEmpty || !content.attachments.isEmpty {
+            if !content.isEmpty || !content.attachments.isEmpty || content.hasManualThumbnail {
                 for (groupIdx, items) in content.items.enumerated() {
                     let targetDir = stagingDir.appendingPathComponent("item_\(groupIdx)")
                     try FileManager.default.createDirectory(at: targetDir, withIntermediateDirectories: true)
@@ -976,8 +1032,17 @@ public final class SlotStorage {
                     }
                 }
 
+                // v2.11.0: 手动缩略图字节必须在写 content.json **之前**搬进 staging——meta 里记的
+                // id 只有在字节确实落到 staging 后才算数，顺序颠倒会写出「指向不存在字节」的 meta。
+                effectiveManualThumbnailId = try stageManualThumbnail(content,
+                                                                     slot: slot,
+                                                                     slotDir: slotDir,
+                                                                     stagingDir: stagingDir)
+
                 // Persist content identity so thumbnail keys survive app restarts.
-                let meta = SlotContentMeta(contentId: content.contentId, updatedAt: content.updatedAt)
+                let meta = SlotContentMeta(contentId: content.contentId,
+                                           updatedAt: content.updatedAt,
+                                           manualThumbnailId: effectiveManualThumbnailId)
                 let metaData = try JSONEncoder().encode(meta)
                 try metaData.write(to: stagingDir.appendingPathComponent("content.json"), options: .atomic)
 
@@ -1037,7 +1102,59 @@ public final class SlotStorage {
 
         // P2-C (v2.10.44): the atomic swap succeeded — hand back the on-disk attachment shape
         // so the caller can cache it (inline bytes released).
-        return persistedAttachments
+        return PersistedSlotShape(attachments: persistedAttachments,
+                                  manualThumbnailId: effectiveManualThumbnailId)
+    }
+
+    /// v2.11.0「槽位缩略图手动上传」：把手动缩略图字节搬进 staging 目录，返回实际生效的 id。
+    ///
+    /// 与 `externalizeAttachments` 同源的道理——`writeSlotContent` 用「staging 整目录原子 swap」
+    /// 落盘，**任何没被显式搬进 staging 的文件都会在 swap 后物理消失**。所以每次写槽位都必须重新
+    /// 把缩略图字节放进 staging，否则「只改了标签 / 只编辑了正文」这类无关写入就会顺手把用户的
+    /// 封面图抹掉。字节来源优先级：
+    ///   1) `pendingManualThumbnailData`：本次新设置的图（GUI 压缩后的 JPEG / pack 导入的字节），
+    ///      直接写文件。
+    ///   2) live 目录里的现存 `.bin`：历次写入留下的图，用 clonefile(2) 写时复制克隆进 staging
+    ///      （亚毫秒、常数时间、不放大磁盘占用，与附件 A-5/A-2 的做法一致）。
+    ///   3) 都没有：说明 id 悬空（字节丢失/被外部删除），返回 nil 让它自然降级为「无手动缩略图」，
+    ///      而不是写出一个指向不存在文件的 meta。
+    private func stageManualThumbnail(_ content: SlotContent,
+                                      slot: Int,
+                                      slotDir: URL,
+                                      stagingDir: URL) throws -> String? {
+        guard let id = content.manualThumbnailId, !id.isEmpty else { return nil }
+
+        let fm = FileManager.default
+        let stagingAttachmentsDir = stagingDir.appendingPathComponent("attachments", isDirectory: true)
+        let dest = stagingAttachmentsDir.appendingPathComponent("\(id).bin")
+
+        // externalizeAttachments 可能已经建过该目录（附件与缩略图共用 attachments/）。
+        if !fm.fileExists(atPath: stagingAttachmentsDir.path) {
+            try fm.createDirectory(at: stagingAttachmentsDir, withIntermediateDirectories: true)
+        }
+        // 极端巧合：新缩略图 id 与某个附件 id 撞名（id 都是 UUID，实际不可能，但撞了就是静默覆盖
+        // 附件字节的严重后果）。已存在即视为已就位，不覆盖。
+        if fm.fileExists(atPath: dest.path) { return id }
+
+        // 情形 1：本次新设置的字节。
+        if let data = content.pendingManualThumbnailData, !data.isEmpty {
+            try data.write(to: dest, options: .atomic)
+            return id
+        }
+
+        // 情形 2：把 live 目录里的既有字节克隆进 staging，保证它熬过这次原子 swap。
+        let live = Self.manualThumbnailFile(in: slotDir, id: id)
+        if fm.fileExists(atPath: live.path) {
+            if cloneLinkOrCopyFile(at: live, to: dest) { return id }
+            NSLog("[ClipSlots] stageManualThumbnail slot=\(slot): failed to carry \(id).bin across the "
+                + "atomic swap; dropping the manual thumbnail rather than persisting a dangling id")
+            return nil
+        }
+
+        // 情形 3：id 悬空——降级为「无手动缩略图」，下次读取即自愈。
+        NSLog("[ClipSlots] stageManualThumbnail slot=\(slot): no bytes for manual thumbnail \(id) "
+            + "(neither pending data nor an on-disk .bin); dropping the id")
+        return nil
     }
 
     /// Step 2 (v2.10.42) 附件字节外置：把每个「带字节」的附件写成独立文件

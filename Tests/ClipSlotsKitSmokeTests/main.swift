@@ -635,4 +635,215 @@ do {
     }
 }
 
+// MARK: - MANUAL-THUMB (v2.11.0) 槽位缩略图手动上传
+//
+// 本组用例锁定手动缩略图的四条核心不变量。前三条是「数据不丢」，最后一条是「缓存必失效」——
+// 后者对应 v2.10.64/65 反复回归过的「切组串图 / 缩略图卡旧图」类问题，是本功能最敏感的地方。
+//
+//   ① 持久化：pendingManualThumbnailData 交给存储层后，字节落到 attachments/{id}.bin，
+//      manualThumbnailId 落到 content.json，冷读能原样恢复。
+//   ② 保活（★最关键）：writeSlotContent 是「staging 整目录原子 swap」，任何**无关**的后续写入
+//      （改标签、编辑正文、加附件…）都会重建槽位目录。缩略图字节必须每次都被重新搬进 staging，
+//      否则用户改一次文本，封面图就人间蒸发。
+//   ③ 悬空自愈：content.json 里有 id、但字节文件被外部删掉时，读取应归一化为「无手动缩略图」，
+//      而不是留一个永远解不出图的悬空引用。
+//   ④ 缓存 key：thumbnailKey 必须随手动缩略图身份变化而变化，且未设置时与升级前**逐字节一致**
+//      （老数据的缓存不能因为升级而全量失效）。
+
+do {
+    let fm = FileManager.default
+
+    /// 直接窥探磁盘：某槽位 attachments/ 目录下的 .bin 文件名集合。
+    func binFiles(dataDir: URL, groupId: String, slot: Int) -> Set<String> {
+        let dir = dataDir
+            .appendingPathComponent("special_slots", isDirectory: true)
+            .appendingPathComponent(groupId, isDirectory: true)
+            .appendingPathComponent("\(slot)", isDirectory: true)
+            .appendingPathComponent("attachments", isDirectory: true)
+        let names = (try? fm.contentsOfDirectory(atPath: dir.path)) ?? []
+        return Set(names.filter { $0.hasSuffix(".bin") })
+    }
+
+    /// 与 withFreshStore 同构，但额外把数据目录路径交给用例，方便做磁盘断言。
+    func withFreshStoreAndDir(_ name: String, _ body: (SpecialSlotStorage, URL) throws -> Void) {
+        let dir = fm.temporaryDirectory
+            .appendingPathComponent("clipslots_smoke_\(UUID().uuidString)", isDirectory: true)
+        try? fm.createDirectory(at: dir, withIntermediateDirectories: true)
+        setenv("CLIPSLOTS_DATA_DIR", dir.path, 1)
+        defer {
+            unsetenv("CLIPSLOTS_DATA_DIR")
+            try? fm.removeItem(at: dir)
+        }
+        do { try body(SpecialSlotStorage(), dir) }
+        catch { t.check(false, "\(name) 抛出异常：\(error)") }
+    }
+
+    let thumbBytes = Data("FAKE-JPEG-THUMBNAIL-BYTES-\(UUID().uuidString)".utf8)
+
+    // ① 持久化 + 冷读恢复
+    withFreshStoreAndDir("手动缩略图持久化") { storage, dataDir in
+        let gid = firstGroupId(storage)
+        var content = makeTextContent("有封面的槽位")
+        let thumbId = UUID().uuidString
+        content.manualThumbnailId = thumbId
+        content.pendingManualThumbnailData = thumbBytes
+        t.check(storage.set(1, content: content, in: gid), "带手动缩略图的写入应成功")
+
+        let read = storage.get(1, in: gid)
+        t.equal(read.manualThumbnailId, thumbId, "manualThumbnailId 应持久化并原样读回")
+        t.check(read.hasManualThumbnail, "hasManualThumbnail 应为 true")
+        t.check(read.pendingManualThumbnailData == nil, "瞬态字节载荷不得被持久化/缓存")
+
+        t.check(binFiles(dataDir: dataDir, groupId: gid, slot: 1).contains("\(thumbId).bin"),
+                "缩略图字节应落盘为 attachments/\(thumbId).bin")
+
+        guard let url = storage.manualThumbnailURL(1, in: gid) else {
+            t.check(false, "manualThumbnailURL 应返回有效路径"); return
+        }
+        t.equal(try Data(contentsOf: url), thumbBytes, "落盘字节应与写入字节完全一致")
+
+        // 冷读：换一个 storage 实例，绕过内存缓存，验证真的读的是磁盘。
+        let cold = SpecialSlotStorage().get(1, in: gid)
+        t.equal(cold.manualThumbnailId, thumbId, "冷读（新实例、无内存缓存）也应恢复 manualThumbnailId")
+
+        // content.json 的键名契约：PackExporter 用 JSONSerialization 直接读 "manualThumbnailId"
+        // 字符串字段来决定要不要把封面图打进包里（它刻意不依赖 Kit 的私有 SlotContentMeta 类型）。
+        // 这条断言把「磁盘 JSON 键名」钉死，防止将来重命名字段时静默让 pack 导出丢图。
+        let metaURL = dataDir
+            .appendingPathComponent("special_slots", isDirectory: true)
+            .appendingPathComponent(gid, isDirectory: true)
+            .appendingPathComponent("1", isDirectory: true)
+            .appendingPathComponent("content.json")
+        let metaObj = (try? JSONSerialization.jsonObject(with: Data(contentsOf: metaURL))) as? [String: Any]
+        t.equal(metaObj?["manualThumbnailId"] as? String, thumbId,
+                "content.json 必须包含 manualThumbnailId 字段（PackExporter 依赖此键名）")
+    }
+
+    // ② ★保活：无关的后续写入不得抹掉缩略图字节
+    withFreshStoreAndDir("手动缩略图跨原子 swap 保活") { storage, dataDir in
+        let gid = firstGroupId(storage)
+        var content = makeTextContent("原始文本")
+        let thumbId = UUID().uuidString
+        content.manualThumbnailId = thumbId
+        content.pendingManualThumbnailData = thumbBytes
+        _ = storage.set(1, content: content, in: gid)
+
+        // 模拟「用户后来编辑了正文」：走一次完全不关心缩略图的普通写入
+        //（注意 pendingManualThumbnailData 此时为 nil —— 字节只能靠存储层从 live 目录 clone 过去）。
+        var edited = storage.get(1, in: gid)
+        edited.items = [[PasteboardItem(type: "public.utf8-plain-text", data: Data("改过的文本".utf8))]]
+        edited.contentId = UUID().uuidString
+        edited.updatedAt = Date().timeIntervalSince1970
+        t.check(edited.pendingManualThumbnailData == nil, "前置条件：二次写入不应携带瞬态字节")
+        _ = storage.set(1, content: edited, in: gid)
+
+        let after = storage.get(1, in: gid)
+        t.equal(extractText(after), "改过的文本", "二次写入应正常更新正文")
+        t.equal(after.manualThumbnailId, thumbId, "二次写入后 manualThumbnailId 必须保留（不得被 swap 抹掉）")
+        t.check(binFiles(dataDir: dataDir, groupId: gid, slot: 1).contains("\(thumbId).bin"),
+                "★二次写入后缩略图字节文件必须仍在磁盘上（原子 swap 保活）")
+        if let url = storage.manualThumbnailURL(1, in: gid) {
+            t.equal(try Data(contentsOf: url), thumbBytes, "保活后的字节内容不得损坏")
+        } else {
+            t.check(false, "保活后 manualThumbnailURL 不应为 nil")
+        }
+
+        // 再验「清除」：manualThumbnailId 置 nil 后，读回应彻底无缩略图。
+        var cleared = storage.get(1, in: gid)
+        cleared.manualThumbnailId = nil
+        cleared.contentId = UUID().uuidString
+        cleared.updatedAt = Date().timeIntervalSince1970
+        _ = storage.set(1, content: cleared, in: gid)
+
+        let afterClear = storage.get(1, in: gid)
+        t.check(afterClear.manualThumbnailId == nil, "清除后 manualThumbnailId 应为 nil")
+        t.check(!afterClear.hasManualThumbnail, "清除后 hasManualThumbnail 应为 false")
+        t.check(storage.manualThumbnailURL(1, in: gid) == nil, "清除后不应再解析出缩略图 URL")
+        t.check(!binFiles(dataDir: dataDir, groupId: gid, slot: 1).contains("\(thumbId).bin"),
+                "清除后旧缩略图字节应随原子 swap 自然回收（不再被搬进 staging）")
+        t.equal(extractText(afterClear), "改过的文本", "清除缩略图不得影响槽位正文")
+    }
+
+    // ③ 悬空 id 自愈：字节被外部删除时，读取应降级为「无手动缩略图」
+    withFreshStoreAndDir("悬空 manualThumbnailId 自愈") { storage, dataDir in
+        let gid = firstGroupId(storage)
+        var content = makeTextContent("待悬空")
+        let thumbId = UUID().uuidString
+        content.manualThumbnailId = thumbId
+        content.pendingManualThumbnailData = thumbBytes
+        _ = storage.set(1, content: content, in: gid)
+
+        // 模拟外部清理/同步遗漏：把字节文件删掉，只留 content.json 里的 id。
+        let binURL = dataDir
+            .appendingPathComponent("special_slots", isDirectory: true)
+            .appendingPathComponent(gid, isDirectory: true)
+            .appendingPathComponent("1", isDirectory: true)
+            .appendingPathComponent("attachments", isDirectory: true)
+            .appendingPathComponent("\(thumbId).bin")
+        try fm.removeItem(at: binURL)
+
+        // 必须用新实例：老实例的内存缓存还记着删除前的状态。
+        let cold = SpecialSlotStorage().get(1, in: gid)
+        t.check(cold.manualThumbnailId == nil, "字节缺失时应把悬空 id 归一化为 nil（自动回落到自动缩略图）")
+        t.equal(extractText(cold), "待悬空", "悬空自愈不得影响槽位正文")
+    }
+
+    // ④ 缓存 key：随手动缩略图身份变化，且未设置时保持与升级前一致
+    do {
+        var plain = makeTextContent("key 测试")
+        plain.contentId = "CID"
+        plain.updatedAt = 1234.5
+
+        var withThumb = plain
+        withThumb.manualThumbnailId = "THUMB-A"
+
+        var withOtherThumb = plain
+        withOtherThumb.manualThumbnailId = "THUMB-B"
+
+        let kPlain = plain.thumbnailKey(specialSlotId: "G1", slot: 3)
+        let kA = withThumb.thumbnailKey(specialSlotId: "G1", slot: 3)
+        let kB = withOtherThumb.thumbnailKey(specialSlotId: "G1", slot: 3)
+
+        t.equal(kPlain, "G1::3::CID::1234.5::m0", "未设置手动缩略图时 key 应以 ::m0 结尾")
+        t.equal(kA, "G1::3::CID::1234.5::mTHUMB-A", "设置手动缩略图后 key 应编入其 id")
+        t.check(kA != kPlain, "★设置手动缩略图必须让缓存 key 变化（否则卡旧图）")
+        t.check(kA != kB, "★更换手动缩略图必须让缓存 key 变化")
+
+        // 不同组 / 不同槽位仍必须产出不同 key —— 这是「切组不串图」的地基，不能因为
+        // 新拼接的 ::m 后缀而被削弱。
+        t.check(withThumb.thumbnailKey(specialSlotId: "G2", slot: 3) != kA, "不同组的 key 必须不同（防串组）")
+        t.check(withThumb.thumbnailKey(specialSlotId: "G1", slot: 4) != kA, "不同槽位的 key 必须不同（防串槽）")
+
+        // 空槽：未设手动图时保持历史 `::empty`（v2.10.28 空槽附件面板修复依赖它稳定）；
+        // 设了手动图则必须可区分。
+        var emptyPlain = SlotContent()
+        emptyPlain.contentId = "CID"
+        emptyPlain.updatedAt = 1234.5
+        var emptyWithThumb = emptyPlain
+        emptyWithThumb.manualThumbnailId = "THUMB-A"
+        t.equal(emptyPlain.thumbnailKey(specialSlotId: "G1", slot: 3), "G1::3::empty",
+                "空槽且无手动缩略图时 key 必须与升级前逐字节一致")
+        t.check(emptyWithThumb.thumbnailKey(specialSlotId: "G1", slot: 3) != "G1::3::empty",
+                "空槽设置手动缩略图后 key 必须可区分")
+    }
+
+    // ⑤ 向后兼容：老版本 payload（无 manualThumbnailId 键）必须能正常解码为「无手动缩略图」
+    do {
+        let legacyJSON = """
+        {"items":[],"timestamp":0,"contentId":"OLD","updatedAt":11.0}
+        """
+        let decoded = try? JSONDecoder().decode(SlotContent.self, from: Data(legacyJSON.utf8))
+        t.check(decoded != nil, "老版本 SlotContent JSON 应能解码")
+        t.check(decoded?.manualThumbnailId == nil, "老 payload 缺 manualThumbnailId 时应回落 nil，不得解码失败")
+        t.equal(decoded?.contentId, "OLD", "老 payload 的其余字段应正常解码")
+
+        // 空串按「未设置」处理，避免拼出 attachments/.bin 这种非法路径。
+        let emptyIdJSON = """
+        {"items":[],"timestamp":0,"contentId":"OLD","updatedAt":11.0,"manualThumbnailId":""}
+        """
+        let emptyDecoded = try? JSONDecoder().decode(SlotContent.self, from: Data(emptyIdJSON.utf8))
+        t.check(emptyDecoded?.manualThumbnailId == nil, "manualThumbnailId 为空串时应归一化为 nil")
+    }
+}
+
 t.report()

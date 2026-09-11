@@ -18,3 +18,6 @@ assets/AppIcon.iconset/
 build/*.dmg
 build/dmg_staging/
 build/perf/
+
+# UI screenshots
+build/uishots/

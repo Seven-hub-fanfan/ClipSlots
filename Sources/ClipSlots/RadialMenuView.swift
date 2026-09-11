@@ -580,6 +580,16 @@ struct RadialMenuView: View {
             }
     }
 
+    /// v2.11.0：解析扇区里某槽位手动缩略图的磁盘 URL。
+    ///
+    /// 轮盘只在 `.childSlots` 模式下展示当前组的子槽位，因此直接查当前组即可；
+    /// `.specialSlots` 模式画的是「组」而非槽位，没有手动缩略图的概念。
+    /// 存储层会顺带校验字节文件存在性，缺失时返回 nil → 扇区自动退回原有纯文字展示。
+    private func manualThumbnailURL(slot: Int, manualThumbnailId: String) -> URL? {
+        guard mode == .childSlots else { return nil }
+        return SpecialSlotStorage.shared.manualThumbnailURL(slot, in: store.currentSpecialSlotId)
+    }
+
     @ViewBuilder
     private func segmentLabel(slot: Int, content: SlotContent, label: String, angle: Angle, midRadius: CGFloat) -> some View {
         let rad = CGFloat(angle.radians)
@@ -588,6 +598,22 @@ struct RadialMenuView: View {
         let isHovered = hoveredIndex == slot
 
         VStack(spacing: 3) {
+            // v2.11.0「槽位缩略图手动上传」：手动封面图在扇区内以 56×56 圆角方形（center-crop）呈现。
+            //
+            // 只对**手动**缩略图生效，自动缩略图维持原样：轮盘是「瞬时弹出 → 扫一眼 → 松手选中」的
+            // 高频交互，为 10 个扇区同步解 10 张自动缩略图会让弹出明显掉帧；而手动封面图是用户主动
+            // 设的强识别信号（就是为了「一眼认出这是哪个槽」），值得这点开销，且实测只有少数槽位会设。
+            if let manualId = content.manualThumbnailId, !manualId.isEmpty,
+               let manualURL = manualThumbnailURL(slot: slot, manualThumbnailId: manualId) {
+                ManualThumbnailImage(manualThumbnailId: manualId, url: manualURL, side: 56, cornerRadius: 10) {
+                    // 解码未就绪时用等尺寸的占位，避免图一出现就把整个 VStack 撑开、
+                    // 造成扇区文字跳动。
+                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        .fill(Color.primary.opacity(0.06))
+                        .frame(width: 56, height: 56)
+                }
+            }
+
             // v2.7.0: Slot number + connection dot
             HStack(spacing: 4) {
                 Text("\(slot)")

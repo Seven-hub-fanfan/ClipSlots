@@ -1380,6 +1380,12 @@ public final class SpecialSlotStorage {
         slotStorage(for: specialSlotId).getOrUnknown(slot)
     }
 
+    /// v2.11.0「槽位缩略图手动上传」：某槽位手动缩略图字节文件的 URL；未设置或字节缺失返回 nil。
+    /// 供 GUI 的 ThumbnailProvider（卡片主预览）与轮盘扇区按需解码使用。
+    public func manualThumbnailURL(_ slot: Int, in specialSlotId: String) -> URL? {
+        slotStorage(for: specialSlotId).manualThumbnailURL(slot: slot)
+    }
+
     /// PERF (switch lag): cheap emptiness probe that avoids loading a slot's full payload.
     /// Prefer this over `get(_:in:).isEmpty` on hot paths (auto-mode cursor previews,
     /// auto-advance scans) where only emptiness — not the content — is needed.

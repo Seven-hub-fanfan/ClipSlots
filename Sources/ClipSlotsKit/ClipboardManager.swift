@@ -18,10 +18,40 @@ public struct SlotContent: Codable {
     // v2.7.61: Slot attachments - only visible and editable in node canvas
     // Empty array = disabled, no change to existing behavior
     public var attachments: [SlotAttachment] = []
-    
+
+    // MARK: - Manual thumbnail (v2.11.0)
+
+    /// v2.11.0「槽位缩略图手动上传」：用户为该槽位手动指定的封面图标识。
+    ///
+    /// 非空时，其字节以 `{slotDir}/attachments/{manualThumbnailId}.bin` 落盘（与附件同目录、
+    /// 同 clonefile 摄取语义），内容是压缩后的 JPEG（最长边 1024 / quality 0.85）。
+    /// 该字段随 `content.json`（`SlotContentMeta`）持久化，老版本数据缺字段时 `decodeIfPresent`
+    /// 回落为 nil，行为与升级前完全一致。
+    ///
+    /// ⚠️ 缓存不变量：`thumbnailKey` 已把本字段编进 key 尾部（`::m{id}`）。**任何**修改本字段的
+    /// 写入路径都必须同时刷新 `contentId` / `updatedAt`，否则 SlotCardView 的 Equatable 会判等
+    /// 从而跳过重绘（v2.10.64/65「切组串图 / 不刷新」回归的同源坑）。
+    public var manualThumbnailId: String? = nil
+
+    /// v2.11.0：本次写入要落盘的手动缩略图字节（**瞬态**，不在 CodingKeys 里、不持久化）。
+    ///
+    /// 为什么需要它：`SlotStorage.writeSlotContent` 是「staging 目录整体原子 swap」，槽位目录会被
+    /// 重建，未被显式搬进 staging 的文件在 swap 后即物理消失。因此新缩略图不能由调用方直接写进
+    /// live 目录（会被下一次写入抹掉），而要随 content 一起交给存储层，在 staging 内落盘后原子生效。
+    /// 为 nil 且 `manualThumbnailId` 非空时，存储层会把 live 目录里的旧 `.bin` clone 进 staging 保活。
+    public var pendingManualThumbnailData: Data? = nil
+
+    /// 该槽位是否设置了手动缩略图。
+    public var hasManualThumbnail: Bool {
+        !(manualThumbnailId?.isEmpty ?? true)
+    }
+
     // 向后兼容：旧模板没有 attachments 字段时自动填充空数组
     enum CodingKeys: String, CodingKey {
         case items, timestamp, label, htmlSource, attachments, contentId, updatedAt
+        // v2.11.0: 手动缩略图标识。`pendingManualThumbnailData` 刻意不在此列——它是仅在
+        // 「调用方 → 存储层」这一次写入中传递字节的瞬态载荷，绝不可编码进任何 JSON。
+        case manualThumbnailId
     }
     
     public init(from decoder: Decoder) throws {
@@ -38,11 +68,15 @@ public struct SlotContent: Codable {
         // Decode leniently with sensible defaults so legacy data still loads.
         contentId = try container.decodeIfPresent(String.self, forKey: .contentId) ?? UUID().uuidString
         updatedAt = try container.decodeIfPresent(TimeInterval.self, forKey: .updatedAt) ?? timestamp.timeIntervalSince1970
+        // v2.11.0: 老版本 payload 没有 manualThumbnailId，decodeIfPresent 回落 nil（无手动缩略图）。
+        // 空串按「未设置」处理，避免拼出 `attachments/.bin` 这种非法路径。
+        let rawManualThumbnailId = try container.decodeIfPresent(String.self, forKey: .manualThumbnailId)
+        manualThumbnailId = (rawManualThumbnailId?.isEmpty ?? true) ? nil : rawManualThumbnailId
     }
 
     public init() {}
 
-    public init(items: [[PasteboardItem]] = [], timestamp: Date = Date(), label: String? = nil, htmlSource: String? = nil, attachments: [SlotAttachment] = [], contentId: String = UUID().uuidString, updatedAt: TimeInterval = Date().timeIntervalSince1970) {
+    public init(items: [[PasteboardItem]] = [], timestamp: Date = Date(), label: String? = nil, htmlSource: String? = nil, attachments: [SlotAttachment] = [], contentId: String = UUID().uuidString, updatedAt: TimeInterval = Date().timeIntervalSince1970, manualThumbnailId: String? = nil) {
         self.items = items
         self.timestamp = timestamp
         self.label = label
@@ -50,6 +84,7 @@ public struct SlotContent: Codable {
         self.attachments = attachments
         self.contentId = contentId
         self.updatedAt = updatedAt
+        self.manualThumbnailId = manualThumbnailId
     }
 
     // MARK: - Slot Attachment
@@ -193,9 +228,22 @@ public struct SlotContent: Codable {
         // is, so pin empty slots to a stable, identity-only key. This keeps the card
         // (and its anchor NSView) alive across re-renders, so the popover stays open.
         if isEmpty {
-            return "\(specialSlotId)::\(slot)::empty"
+            // v2.11.0: 空槽位也可以被赋予手动缩略图（例如先占位再补内容），此时「视觉上完全相同」
+            // 的前提不再成立——两个空槽可能挂着不同的封面图。故把手动缩略图身份编进空槽 key，
+            // 保证换图/清图能失效缓存；未设置手动缩略图时 key 与升级前逐字节一致（`::empty`），
+            // 上面 v2.10.28 修复的「空槽附件面板打开即关闭」不受任何影响。
+            guard let manualThumbnailId, !manualThumbnailId.isEmpty else {
+                return "\(specialSlotId)::\(slot)::empty"
+            }
+            return "\(specialSlotId)::\(slot)::empty::m\(manualThumbnailId)"
         }
-        return "\(specialSlotId)::\(slot)::\(contentId)::\(updatedAt)"
+        // v2.11.0: key 尾部追加手动缩略图身份 `::m{id}`（未设置为 `::m0`）。
+        //
+        // 为什么必须编进 key：ThumbnailProvider 是「以 key 为维度的共享缓存」，同一 key 命中即直出
+        // 旧图。手动上传/清除缩略图会改写 contentId+updatedAt（见 manualThumbnailId 的注释），单靠
+        // 那两者其实已足够失效；这里再显式编上 `::m{id}` 是**第二道保险**——万一将来有写入路径漏刷
+        // 身份字段，缩略图仍会因 key 变化而重解码，不会退化成 v2.10.64/65 的「卡旧图」回归。
+        return "\(specialSlotId)::\(slot)::\(contentId)::\(updatedAt)::m\(manualThumbnailId ?? "0")"
     }
 
     public var preview: String {

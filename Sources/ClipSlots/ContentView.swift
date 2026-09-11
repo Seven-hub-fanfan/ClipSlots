@@ -1404,6 +1404,10 @@ struct ContentView: View {
             onEditHTML: { html in store.updateHTMLSlot(slot, html: html) },
             onDropFiles: { urls in store.importDroppedFiles(urls, toSlot: slot) },
             onClearBody: { store.clearSlotBody(slot) },
+            // v2.11.0「槽位缩略图手动上传」：图标菜单与右键菜单双入口共用这三个回调。
+            onCaptureThumbnail: { store.captureManualThumbnail(slot) },
+            onUploadThumbnail: { store.uploadManualThumbnail(slot) },
+            onClearManualThumbnail: { store.clearManualThumbnail(slot) },
             isLastPasted: store.isLastPasted(slot: slot, groupId: store.currentSpecialSlotId),
             isFlashHighlighted: store.flashHighlightSlot == FlashHighlightTarget(groupId: store.currentSpecialSlotId, slot: slot),
             store: store,

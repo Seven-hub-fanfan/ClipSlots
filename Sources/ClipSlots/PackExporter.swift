@@ -56,6 +56,14 @@ struct PackSlot: Codable {
     var contentId: String
     var items: [[PasteboardItem]]
     var attachments: [PackAttachment]
+    /// v2.11.0「槽位缩略图手动上传」：手动缩略图在包内的相对文件名（固定为 `thumbnail.bin`，
+    /// 与槽位目录下的 `slot.json` 同级）。老包没有此键 → 可选类型解码为 nil，向后兼容；
+    /// 新包被老版本 App 打开时，未知键会被 `Codable` 忽略，只是丢失缩略图，不会导入失败。
+    ///
+    /// 为什么不复用 `attachments/` 目录：包内缩略图与附件是两种语义（前者是展示元数据、
+    /// 后者是用户数据）。放在槽位根目录能让「有没有缩略图」在包结构上一目了然，也避免
+    /// 导入方误把缩略图当成一个附件恢复到附件列表里。
+    var manualThumbnail: String? = nil
 }
 
 /// 附件元信息。`file` 指向 attachments/ 目录内的原始文件名（若字节被外置）。
@@ -159,8 +167,8 @@ struct PackExporter {
     // MARK: 导出
 
     /// v2.10.55: 统计选中范围内「非空槽位」的总数（分母），供导出进度条显示 x/y。
-    /// 与 export 的写入判定口径保持一致（disk.isEmpty && !hasLabel 才跳过）。仅走磁盘元数据，
-    /// 不加载附件字节，绝不 OOM；失败/异常时退化为 0（进度条退化为不确定态）。
+    /// 与 export 的写入判定口径保持一致（disk.isEmpty && !hasLabel && !hasManualThumbnail 才跳过）。
+    /// 仅走磁盘元数据，不加载附件字节，绝不 OOM；失败/异常时退化为 0（进度条退化为不确定态）。
     func countExportableSlots(for selection: PackExportSelection) -> Int {
         var count = 0
         for pageSel in selection.pages where !pageSel.groups.isEmpty {
@@ -169,7 +177,7 @@ struct PackExporter {
                     let disk = readSlotFromDisk(groupId: group.id, slot: slot)
                     let label = storage.getLabel(slot, in: group.id)
                     let hasLabel = !(label?.isEmpty ?? true)
-                    if disk.isEmpty && !hasLabel { continue }
+                    if disk.isEmpty && !hasLabel && !disk.hasManualThumbnail { continue }
                     count += 1
                 }
             }
@@ -237,7 +245,7 @@ struct PackExporter {
                     let disk = readSlotFromDisk(groupId: group.id, slot: slot)
                     let label = storage.getLabel(slot, in: group.id)
                     let hasLabel = !(label?.isEmpty ?? true)
-                    if disk.isEmpty && !hasLabel { continue }
+                    if disk.isEmpty && !hasLabel && !disk.hasManualThumbnail { continue }
 
                     let slotDir = slotsDir.appendingPathComponent("\(slot)", isDirectory: true)
                     try createDir(slotDir)
@@ -330,6 +338,24 @@ struct PackExporter {
                         }
                     }
 
+                    // v2.11.0「槽位缩略图手动上传」：把手动封面图一并打进包里，
+                    // 落成槽位目录下的 `thumbnail.bin`（与 slot.json 同级）。
+                    // 用 copyItem 而非读进内存：虽然缩略图已压到百 KB 级，但导出可能一次遍历
+                    // 上千个槽位，逐个进内存仍会累积成可观的峰值——与附件情形 2 的处理保持一致。
+                    var packThumbnailName: String? = nil
+                    if let thumbSrc = disk.manualThumbnailURL {
+                        let dest = slotDir.appendingPathComponent("thumbnail.bin")
+                        do {
+                            try FileManager.default.copyItem(at: thumbSrc, to: dest)
+                            packThumbnailName = "thumbnail.bin"
+                        } catch {
+                            // 缩略图是纯展示元数据，拷不动不该让整包导出失败——降级为「本槽无缩略图」
+                            // 并记一行日志即可（不进 failedAttachments，那是给用户数据用的）。
+                            NSLog("[ClipSlots] PackExporter: failed to include manual thumbnail for "
+                                + "\(group.name)/slot \(slot): \(error.localizedDescription)")
+                        }
+                    }
+
                     let packSlot = PackSlot(
                         slot: slot,
                         // 特殊槽位的 label 仅落盘在 label.txt（经 getLabel 读取），其余分支无内联 label；
@@ -338,7 +364,8 @@ struct PackExporter {
                         htmlSource: nil,
                         contentId: disk.contentId,
                         items: disk.items,
-                        attachments: packAttachments
+                        attachments: packAttachments,
+                        manualThumbnail: packThumbnailName
                     )
                     try writeJSON(packSlot, to: slotDir.appendingPathComponent("slot.json"))
                     writtenSlots.append(slot)
@@ -439,7 +466,15 @@ struct PackExporter {
         var items: [[PasteboardItem]] = []
         var attachments: [SlotContent.SlotAttachment] = []
         var contentId: String = UUID().uuidString
+        /// v2.11.0：手动缩略图字节在源槽位目录内的绝对路径（`attachments/{id}.bin`）；
+        /// 未设置或字节缺失为 nil。
+        var manualThumbnailURL: URL? = nil
+        /// 注意：手动缩略图**不影响**空槽判定，语义与 Kit 的 `SlotContent.isEmpty` 严格保持一致
+        /// （封面图不是内容）。导出侧是否跳过该槽位另由 `isExportSkippable` 判定。
         var isEmpty: Bool { items.isEmpty && attachments.isEmpty }
+        /// v2.11.0：导出跳过判定。空槽本身可跳过，但「只设了封面图」的槽位在用户视角下卡片上
+        /// 明明有一张图，导出后丢失即数据丢失，因此有手动缩略图时不跳过（与 label 同等对待）。
+        var hasManualThumbnail: Bool { manualThumbnailURL != nil }
     }
 
     /// D-2 (v2.10.31): 直接读取磁盘上的槽位目录（special_slots/<groupId>/<slot>/），复刻
@@ -477,9 +512,19 @@ struct PackExporter {
         // content.json → contentId（仅取字符串字段，用 JSONSerialization 避免依赖私有 Meta 类型）。
         let metaURL = slotDir.appendingPathComponent("content.json")
         if let metaData = try? Data(contentsOf: metaURL),
-           let obj = try? JSONSerialization.jsonObject(with: metaData) as? [String: Any],
-           let cid = obj["contentId"] as? String, !cid.isEmpty {
-            result.contentId = cid
+           let obj = try? JSONSerialization.jsonObject(with: metaData) as? [String: Any] {
+            if let cid = obj["contentId"] as? String, !cid.isEmpty {
+                result.contentId = cid
+            }
+            // v2.11.0: 手动缩略图。同样用 JSONSerialization 取字符串字段（不依赖 Kit 的私有
+            // SlotContentMeta），再校验字节文件真实存在——悬空 id 直接当作没有缩略图。
+            if let manualId = obj["manualThumbnailId"] as? String, !manualId.isEmpty {
+                let thumbURL = slotDir.appendingPathComponent("attachments", isDirectory: true)
+                    .appendingPathComponent("\(manualId).bin")
+                if fm.fileExists(atPath: thumbURL.path) {
+                    result.manualThumbnailURL = thumbURL
+                }
+            }
         }
 
         // attachments.json → [SlotAttachment]。大附件此处仅携带 path（无内联 data），不占内存。

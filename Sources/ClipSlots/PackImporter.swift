@@ -443,6 +443,27 @@ struct PackImporter {
             content.updatedAt = Date().timeIntervalSince1970
             SlotContent.invalidateInlineCaches(contentId: content.contentId, updatedAt: content.updatedAt)
 
+            // v2.11.0「槽位缩略图手动上传」：恢复包内携带的手动封面图。
+            //
+            // 只把字节挂到 `pendingManualThumbnailData` 上，落盘交给 SlotStorage —— 它会在
+            // staging 目录里写好再原子 swap，与内容/附件同一次事务生效，不会出现「内容进了、
+            // 封面图没进」的半截状态（也因此天然满足需求里「目标槽位已有手动缩略图则覆盖」：
+            // 整个槽位目录本就是被新目录整体替换的）。
+            if let thumbName = packSlot.manualThumbnail, !thumbName.isEmpty {
+                // 安全：只接受不含路径分隔符的纯文件名，杜绝 `../../` 之类的 ZIP 路径穿越，
+                // 与附件恢复分支的处理保持一致。
+                let safeName = (thumbName as NSString).lastPathComponent
+                let thumbURL = slotDir.appendingPathComponent(safeName)
+                if fm.fileExists(atPath: thumbURL.path),
+                   let data = try? Data(contentsOf: thumbURL), !data.isEmpty {
+                    content.manualThumbnailId = UUID().uuidString  // 始终新生成，绝不复用包内 id
+                    content.pendingManualThumbnailData = data
+                } else {
+                    NSLog("[ClipSlots] PackImporter: slot \(slot) declares manual thumbnail "
+                        + "\(thumbName) but the bytes are missing/unreadable; importing without it")
+                }
+            }
+
             // P0-1 (v2.10.35): 此前 `_ = storage.set(...)` 直接丢弃返回值、`written += 1` 无条件自增。
             // 但 storage.set 的失败是「返回 false 而不抛异常」的软失败（锁超时 / invalidated / writeSlotContent
             // 抛错如磁盘满 / STG-2 幽灵组守卫），一旦发生：新内容根本没落盘，writeSlots 仍返回正数、do 块正常

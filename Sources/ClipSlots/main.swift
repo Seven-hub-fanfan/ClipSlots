@@ -5357,6 +5357,166 @@ final class SlotStoreObservable: ObservableObject {
         ))
     }
 
+    // MARK: - v2.11.0 槽位缩略图手动上传
+
+    /// 入口 1：调起系统交互式截图，框选结果设为槽位缩略图。
+    ///
+    /// `screencapture -i` 会**阻塞到用户完成框选**（可能几十秒），所以整个采集 + 压缩流程都派到
+    /// 后台队列，只在最后回主线程落盘刷 UI。若放在主线程，取景期间整个 App 会假死。
+    func captureManualThumbnail(_ slot: Int) {
+        let activeId = currentSpecialSlotId
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let self else { return }
+            do {
+                guard let shot = try ManualThumbnailMaker.captureInteractiveScreenshot() else {
+                    return  // 用户按 Esc 取消——静默返回，不打扰
+                }
+                defer { try? FileManager.default.removeItem(at: shot) }
+                let data = try ManualThumbnailMaker.normalizedJPEGData(from: shot)
+                DispatchQueue.main.async {
+                    self.applyManualThumbnail(slot, in: activeId, jpegData: data, sourceLabel: "截图")
+                }
+            } catch {
+                DispatchQueue.main.async {
+                    self.showFloatingNotice(FloatingNotice(
+                        title: "设置缩略图失败",
+                        subtitle: error.localizedDescription,
+                        iconName: "exclamationmark.triangle",
+                        kind: .warning
+                    ))
+                }
+            }
+        }
+    }
+
+    /// 入口 2：弹出文件选择器，把用户选中的图片设为槽位缩略图。
+    ///
+    /// NSOpenPanel 必须在主线程跑；**压缩**（可能要解一张几千万像素的照片）则派到后台，
+    /// 避免选完图后界面卡一下。
+    func uploadManualThumbnail(_ slot: Int) {
+        let activeId = currentSpecialSlotId
+        guard let url = ManualThumbnailMaker.pickImageFile(slot: slot) else { return }
+
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let self else { return }
+            do {
+                let data = try ManualThumbnailMaker.normalizedJPEGData(from: url)
+                DispatchQueue.main.async {
+                    self.applyManualThumbnail(slot, in: activeId, jpegData: data, sourceLabel: url.lastPathComponent)
+                }
+            } catch {
+                DispatchQueue.main.async {
+                    self.showFloatingNotice(FloatingNotice(
+                        title: "设置缩略图失败",
+                        subtitle: error.localizedDescription,
+                        iconName: "exclamationmark.triangle",
+                        kind: .warning
+                    ))
+                }
+            }
+        }
+    }
+
+    /// 移除手动缩略图，回落到自动生成逻辑。
+    func clearManualThumbnail(_ slot: Int) {
+        let activeId = currentSpecialSlotId
+        var content = contentForSlot(slot)
+        guard content.hasManualThumbnail else { return }
+
+        captureUndoSnapshot(title: "移除槽位 \(slot) 缩略图")
+        suppressWatcher()
+
+        content.manualThumbnailId = nil
+        content.pendingManualThumbnailData = nil
+        // 与 clearSlotBody / updateHTMLSlot 同款不变量：改内容必刷身份字段，否则
+        // slotsSnapshotEqual 会判等而跳过 slots 赋值，网格停留旧态。
+        content.contentId = UUID().uuidString
+        content.updatedAt = Date().timeIntervalSince1970
+        content.timestamp = Date()
+        _ = specialStorage.set(slot, content: content, in: activeId)
+
+        ThumbnailProvider.shared.invalidateSlot(specialSlotId: activeId, slot: slot)
+
+        var newSlots = slots
+        newSlots[slot] = content
+        slots = newSlots
+        loadedSpecialSlotId = activeId
+        refreshTrigger = UUID()
+        recomputeAutoPreviews()
+
+        NSLog("[ClipSlots] MANUAL THUMBNAIL CLEARED specialSlot=\(activeId) slot=\(slot)")
+        showFloatingNotice(FloatingNotice(
+            title: "已移除缩略图",
+            subtitle: "槽位 \(slot) 恢复自动预览",
+            iconName: "arrow.uturn.backward",
+            kind: .info
+        ))
+    }
+
+    /// 两个入口共用的落盘 + 刷新收口。**必须在主线程调用。**
+    ///
+    /// 关键点：只把字节塞进 `pendingManualThumbnailData` 交给存储层，绝不自己往 live 目录写文件。
+    /// `SlotStorage.writeSlotContent` 是「staging 整目录原子 swap」，直接写 live 的文件会在下一次
+    /// 任意槽位写入时被物理抹掉（详见 SlotContent.pendingManualThumbnailData 的注释）。
+    private func applyManualThumbnail(_ slot: Int, in specialSlotId: String, jpegData: Data, sourceLabel: String) {
+        // 采集期间用户可能已经切走了组：此时若还按当前组写，就会把图设到**另一个组的同号槽位**上。
+        // 明确中止并告知，而不是悄悄设错地方。
+        guard specialSlotId == currentSpecialSlotId else {
+            showFloatingNotice(FloatingNotice(
+                title: "已取消设置缩略图",
+                subtitle: "操作过程中切换了分组",
+                iconName: "exclamationmark.arrow.triangle.2.circlepath",
+                kind: .warning
+            ))
+            return
+        }
+
+        captureUndoSnapshot(title: "设置槽位 \(slot) 缩略图")
+        suppressWatcher()
+
+        var content = contentForSlot(slot)
+        // 每次换图都生成**全新 UUID**：`.bin` 文件内容寻址、永不原地覆盖，于是
+        // ManualThumbnailCache 这类按 id 定址的缓存天然不可能脏读旧图。
+        content.manualThumbnailId = UUID().uuidString
+        content.pendingManualThumbnailData = jpegData
+        content.contentId = UUID().uuidString
+        content.updatedAt = Date().timeIntervalSince1970
+        content.timestamp = Date()
+
+        _ = specialStorage.set(slot, content: content, in: specialSlotId)
+
+        // 从存储层回读，拿到**归一化后**的形态（写入失败时 manualThumbnailId 会被降级为 nil），
+        // 避免内存里挂着一个磁盘上并不存在的 id。
+        let persisted = specialStorage.get(slot, in: specialSlotId)
+        guard persisted.hasManualThumbnail else {
+            showFloatingNotice(FloatingNotice(
+                title: "设置缩略图失败",
+                subtitle: "缩略图未能写入磁盘",
+                iconName: "exclamationmark.triangle",
+                kind: .warning
+            ))
+            return
+        }
+
+        ThumbnailProvider.shared.invalidateSlot(specialSlotId: specialSlotId, slot: slot)
+
+        var newSlots = slots
+        newSlots[slot] = persisted
+        slots = newSlots
+        loadedSpecialSlotId = specialSlotId
+        refreshTrigger = UUID()
+        recomputeAutoPreviews()
+
+        NSLog("[ClipSlots] MANUAL THUMBNAIL SET specialSlot=\(specialSlotId) slot=\(slot) "
+            + "id=\(persisted.manualThumbnailId ?? "-") bytes=\(jpegData.count) source=\(sourceLabel)")
+        showFloatingNotice(FloatingNotice(
+            title: "已设置缩略图",
+            subtitle: "槽位 \(slot) · \(sourceLabel)",
+            iconName: "photo.badge.checkmark",
+            kind: .success
+        ))
+    }
+
     func clearSlotWithConfirmation(_ slot: Int) {
         // UNDO-1 (v2.10.95): 快照移到 clearSlot() 内部（点「取消」不再白占撤销额度）。
         if !specialSlotSettings.confirmBeforeClearSingleSlot {
