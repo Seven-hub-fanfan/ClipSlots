@@ -846,4 +846,93 @@ do {
     }
 }
 
+// MARK: - 轮盘扇区手动缩略图布局（v2.11.0 hotfix 回归防护）
+//
+// v2.11.0 首版把缩略图和文字塞进同一个 VStack 再整体 offset 到扇区中点，导致缩略图被推到
+// 「屏幕正上方」而不是「沿中轴线向外」：10 槽位下 8 个扇区角偏差 25°~30°（半扇区仅 18°），
+// 缩略图歪进邻居扇区、顶部扇区紧贴圆盘边缘。下面直接断言几何不变量，钉死这个 bug。
+do {
+    /// 复刻 RadialMenuView 的真实几何：menuSize 372 → outerRadius 186。
+    let outer: CGFloat = 186
+    let segmentOuter = outer - 8            // segmentOuterInset
+    let deadZone = outer * 0.24
+    let segmentInner = deadZone + 1.5       // segmentInnerInset
+
+    // 缩略图正方形四角（屏幕坐标轴对齐，中心在中轴线上 thumbnailRadius 处）
+    func corners(midAngleDegrees: Double, radius: CGFloat, side: CGFloat) -> [(CGFloat, CGFloat)] {
+        let rad = midAngleDegrees * .pi / 180
+        let cx = radius * CGFloat(cos(rad))
+        let cy = radius * CGFloat(sin(rad))
+        let h = side / 2
+        return [(cx - h, cy - h), (cx + h, cy - h), (cx - h, cy + h), (cx + h, cy + h)]
+    }
+
+    // slots 取值范围由 Config 限定为 1...10，全覆盖
+    for slotCount in 1...10 {
+        let segmentDegrees = 360.0 / Double(slotCount)
+        guard let layout = RadialSegmentLayoutCalculator.layout(innerRadius: segmentInner,
+                                                               outerRadius: segmentOuter,
+                                                               segmentDegrees: segmentDegrees) else {
+            t.check(false, "\(slotCount) 槽位布局下应能放下缩略图")
+            continue
+        }
+
+        t.check(layout.thumbnailSide >= RadialSegmentLayoutCalculator.minThumbnailSide
+                    && layout.thumbnailSide <= RadialSegmentLayoutCalculator.maxThumbnailSide,
+                "\(slotCount) 槽位：缩略图边长应落在合法区间（实际 \(layout.thumbnailSide)）")
+        t.check(layout.thumbnailRadius > layout.textRadius,
+                "\(slotCount) 槽位：缩略图应在文字块外侧")
+
+        for i in 0..<slotCount {
+            let midAngle = (Double(i) + 0.5) * segmentDegrees - 90
+            var maxRadius: CGFloat = 0
+            var maxAngularDeviation: Double = 0
+
+            for (px, py) in corners(midAngleDegrees: midAngle, radius: layout.thumbnailRadius, side: layout.thumbnailSide) {
+                maxRadius = max(maxRadius, (px * px + py * py).squareRoot())
+                let cornerAngle = atan2(Double(py), Double(px)) * 180 / .pi
+                // 归一化到 [-180, 180]：truncatingRemainder 对负数保留负号，必须二次校正，
+                // 否则 -170° 会被算成 350° 的偏差。
+                var delta = (cornerAngle - midAngle).truncatingRemainder(dividingBy: 360)
+                if delta > 180 { delta -= 360 }
+                if delta < -180 { delta += 360 }
+                maxAngularDeviation = max(maxAngularDeviation, abs(delta))
+            }
+
+            // ★不变量 1：缩略图不得越过扇区外沿（否则会溢出到圆盘边缘之外）
+            t.check(maxRadius <= segmentOuter,
+                    "★\(slotCount)槽位/第\(i + 1)扇区：缩略图不得越过外沿（最远 \(Int(maxRadius)) > \(Int(segmentOuter))）")
+            // ★不变量 2：缩略图不得越过扇区内沿（不得压进中心死区）
+            let minCornerRadius = layout.thumbnailRadius - layout.thumbnailSide * CGFloat(2.0.squareRoot()) / 2
+            t.check(minCornerRadius >= segmentInner,
+                    "★\(slotCount)槽位/第\(i + 1)扇区：缩略图不得压进死区")
+            // ★不变量 3：缩略图四角必须留在本扇区楔形内（这正是 v2.11.0 首版失守的那条）
+            if slotCount > 1 {
+                t.check(maxAngularDeviation <= segmentDegrees / 2,
+                        "★\(slotCount)槽位/第\(i + 1)扇区：缩略图不得歪出扇区（角偏差 \(Int(maxAngularDeviation))° > 半扇区 \(Int(segmentDegrees / 2))°）")
+            }
+        }
+    }
+
+    // 文字块也不许压进死区
+    if let layout = RadialSegmentLayoutCalculator.layout(innerRadius: segmentInner,
+                                                        outerRadius: segmentOuter,
+                                                        segmentDegrees: 36) {
+        t.check(layout.textRadius - RadialSegmentLayoutCalculator.textBlockHeight / 2 >= segmentInner,
+                "★文字块不得压进中心死区")
+    }
+
+    // 退化输入：环带太薄 / 参数非法时必须返回 nil，让调用方退回纯文字布局而不是画出畸形缩略图
+    t.check(RadialSegmentLayoutCalculator.layout(innerRadius: 40, outerRadius: 60, segmentDegrees: 36) == nil,
+            "★环带过薄时应返回 nil（退回纯文字扇区）")
+    t.check(RadialSegmentLayoutCalculator.layout(innerRadius: 100, outerRadius: 100, segmentDegrees: 36) == nil,
+            "内外半径相等应返回 nil")
+    t.check(RadialSegmentLayoutCalculator.layout(innerRadius: segmentInner, outerRadius: segmentOuter, segmentDegrees: 0) == nil,
+            "扇区张角为 0 应返回 nil")
+    // 单扇区（360°）没有角向约束，应拿到最大边长
+    t.equal(RadialSegmentLayoutCalculator.layout(innerRadius: segmentInner, outerRadius: segmentOuter, segmentDegrees: 360)?.thumbnailSide,
+            RadialSegmentLayoutCalculator.maxThumbnailSide,
+            "单扇区应可用最大边长")
+}
+
 t.report()

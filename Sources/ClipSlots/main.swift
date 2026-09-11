@@ -5363,6 +5363,10 @@ final class SlotStoreObservable: ObservableObject {
     ///
     /// `screencapture -i` 会**阻塞到用户完成框选**（可能几十秒），所以整个采集 + 压缩流程都派到
     /// 后台队列，只在最后回主线程落盘刷 UI。若放在主线程，取景期间整个 App 会假死。
+    ///
+    /// v2.11.0 hotfix：取景前会先隐藏 ClipSlots 自己的窗口、截完自动恢复（微信/飞书同款体验），
+    /// 具体实现见 `ScreenshotWindowHider`。隐藏/恢复由 `captureInteractiveScreenshot` 内部闭环，
+    /// 这里不需要（也不应该）自己插手窗口状态。
     func captureManualThumbnail(_ slot: Int) {
         let activeId = currentSpecialSlotId
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in

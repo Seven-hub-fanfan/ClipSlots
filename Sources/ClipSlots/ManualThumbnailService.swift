@@ -121,6 +121,13 @@ enum ManualThumbnailMaker {
 
     // MARK: 入口 2：截图
 
+    /// 隐藏自身窗口后再截图，窗口消失需要等的时间。
+    ///
+    /// `orderOut` 只是把窗口从窗口列表里摘掉，窗口服务器还要合成并上屏下一帧；紧接着
+    /// spawn `screencapture` 有实测概率把 ClipSlots 自己拍进去。0.3s 是「用户几乎感知不到延迟」
+    /// 与「窗口一定已经消失」之间的折中，也和微信/飞书截图的手感一致。
+    static let windowHideSettleDelay: TimeInterval = 0.3
+
     /// 调起系统交互式截图（框选），返回截图文件的临时路径；用户按 Esc 取消返回 nil。
     ///
     /// 为什么用 `/usr/sbin/screencapture -i` 子进程而不是 ScreenCaptureKit / CGWindowListCreateImage：
@@ -132,9 +139,30 @@ enum ManualThumbnailMaker {
     ///   -o  窗口捕获时不带窗口阴影（避免缩略图四周一圈半透明黑边）
     ///   -x  静音（不放快门声）——设缩略图是个高频小操作，每次都「咔嚓」很吵
     ///
+    /// - Parameter hidingOwnWindows: v2.11.0 hotfix。为 true 时先隐藏 ClipSlots 自己的所有可见
+    ///   窗口、等窗口真正消失后再取景，截完（含 Esc 取消 / 抛错）在 `defer` 里恢复。这是微信/飞书
+    ///   截图的标准体验：否则主窗口/轮盘就横在屏幕中间，用户想框的内容正好被自己挡住。
+    ///
     /// ⚠️ 必须在主线程之外等待吗？不。`screencapture -i` 会阻塞到用户框选完成，可能长达数十秒；
     /// 因此本函数**不可**在主线程调用，调用方（store）负责派到后台队列。
-    static func captureInteractiveScreenshot() throws -> URL? {
+    static func captureInteractiveScreenshot(hidingOwnWindows: Bool = true) throws -> URL? {
+        assert(!Thread.isMainThread, "captureInteractiveScreenshot 会阻塞到用户框选完成，不可在主线程调用")
+
+        // 隐藏 → 等一帧 → 截图 → 恢复。恢复走 defer，保证 Esc 取消和任何抛错路径都不会
+        // 把用户的窗口永久留在隐藏状态（这是本功能最不能出的 bug）。
+        var restoreHandle: ScreenshotWindowHider.Handle?
+        if hidingOwnWindows {
+            restoreHandle = DispatchQueue.main.sync { ScreenshotWindowHider.hideVisibleWindows() }
+            if restoreHandle?.isEmpty == false {
+                Thread.sleep(forTimeInterval: windowHideSettleDelay)
+            }
+        }
+        defer {
+            if let restoreHandle {
+                DispatchQueue.main.async { ScreenshotWindowHider.restore(restoreHandle) }
+            }
+        }
+
         let tmp = FileManager.default.temporaryDirectory
             .appendingPathComponent("clipslots_shot_\(UUID().uuidString).png")
 
@@ -170,6 +198,61 @@ enum ManualThumbnailMaker {
             return nil
         }
         return tmp
+    }
+}
+
+// MARK: - 截图期间隐藏自身窗口（v2.11.0 hotfix）
+
+/// 截图取景期间把 ClipSlots 自己的窗口藏起来，截完再原样恢复。
+///
+/// 为什么是「逐窗口 orderOut」而不是 `NSApp.hide(nil)`：
+///   1. `hide` 是 App 级别的，会连带把 App 置为 hidden 状态并交出激活权，`unhide` 回来时
+///      还会强行重新激活 App —— 对一个「贴边浮窗 + 菜单栏常驻」的工具来说副作用太大。
+///   2. 逐窗口处理才能**精确恢复**：只把「原本可见」的窗口放回去，并保持原有 z 序与 key 窗口，
+///      不会把用户早就关掉的面板一起翻出来。
+///
+/// 状态栏窗口（`NSStatusBarWindow`）必须排除：它承载菜单栏图标，藏掉会让图标在截图期间
+/// 闪一下消失，而且它本来也不会挡住用户要框选的内容。
+enum ScreenshotWindowHider {
+
+    /// 恢复所需的最小状态：被藏起来的窗口（按原 z 序，前 → 后）与原 key 窗口。
+    struct Handle {
+        let hidden: [NSWindow]
+        let keyWindow: NSWindow?
+
+        var isEmpty: Bool { hidden.isEmpty }
+    }
+
+    /// 隐藏本 App 当前所有可见窗口（状态栏窗口除外）。**必须在主线程调用。**
+    static func hideVisibleWindows() -> Handle {
+        assert(Thread.isMainThread, "hideVisibleWindows 操作 NSWindow，必须在主线程调用")
+
+        let key = NSApp.keyWindow
+        // NSApp.windows 是前 → 后的 z 序，原样记下来，恢复时倒序 orderFront 即可还原层次。
+        let targets = NSApp.windows.filter { win in
+            guard win.isVisible else { return false }
+            // 菜单栏图标所在的窗口不能动。用类名判断：NSStatusBarWindow 是私有类，
+            // 没有公开符号可比，但类名在各系统版本上稳定。
+            return String(describing: type(of: win)) != "NSStatusBarWindow"
+        }
+
+        for win in targets { win.orderOut(nil) }
+        return Handle(hidden: targets, keyWindow: key)
+    }
+
+    /// 恢复此前隐藏的窗口，尽量还原 z 序与键盘焦点。**必须在主线程调用。**
+    static func restore(_ handle: Handle) {
+        assert(Thread.isMainThread, "restore 操作 NSWindow，必须在主线程调用")
+        guard !handle.isEmpty else { return }
+
+        // 倒序（后 → 前）逐个 orderFront，最终 z 序与隐藏前一致。
+        for win in handle.hidden.reversed() {
+            win.orderFront(nil)
+        }
+        // key 窗口单独复位。它可能在截图期间被关掉（比如轮盘），所以要重新确认还在列表里。
+        if let key = handle.keyWindow, handle.hidden.contains(where: { $0 === key }), key.canBecomeKey {
+            key.makeKeyAndOrderFront(nil)
+        }
     }
 }
 

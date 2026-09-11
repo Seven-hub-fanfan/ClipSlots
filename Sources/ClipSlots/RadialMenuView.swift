@@ -396,7 +396,14 @@ struct RadialMenuView: View {
                         )
                 }
 
-                segmentLabel(slot: slot, content: content, label: store.labels[slot] ?? "", angle: midAngle, midRadius: (deadZoneRadius + outerRadius) / 2)
+                segmentLabel(slot: slot,
+                             content: content,
+                             label: store.labels[slot] ?? "",
+                             angle: midAngle,
+                             midRadius: (deadZoneRadius + outerRadius) / 2,
+                             innerRadius: deadZoneRadius,
+                             outerRadius: outerRadius,
+                             segmentDegrees: segmentAngle)
             }
             // v2.7.12: do not scale the sector. Scaling pushes arc edges outside
             // the circular disk and creates the visible broken blue caps.
@@ -591,29 +598,74 @@ struct RadialMenuView: View {
     }
 
     @ViewBuilder
-    private func segmentLabel(slot: Int, content: SlotContent, label: String, angle: Angle, midRadius: CGFloat) -> some View {
+    private func segmentLabel(slot: Int,
+                              content: SlotContent,
+                              label: String,
+                              angle: Angle,
+                              midRadius: CGFloat,
+                              innerRadius: CGFloat,
+                              outerRadius: CGFloat,
+                              segmentDegrees: Double) -> some View {
         let rad = CGFloat(angle.radians)
-        let x = midRadius * cos(rad)
-        let y = midRadius * sin(rad)
         let isHovered = hoveredIndex == slot
 
-        VStack(spacing: 3) {
-            // v2.11.0「槽位缩略图手动上传」：手动封面图在扇区内以 56×56 圆角方形（center-crop）呈现。
-            //
-            // 只对**手动**缩略图生效，自动缩略图维持原样：轮盘是「瞬时弹出 → 扫一眼 → 松手选中」的
-            // 高频交互，为 10 个扇区同步解 10 张自动缩略图会让弹出明显掉帧；而手动封面图是用户主动
-            // 设的强识别信号（就是为了「一眼认出这是哪个槽」），值得这点开销，且实测只有少数槽位会设。
-            if let manualId = content.manualThumbnailId, !manualId.isEmpty,
-               let manualURL = manualThumbnailURL(slot: slot, manualThumbnailId: manualId) {
-                ManualThumbnailImage(manualThumbnailId: manualId, url: manualURL, side: 56, cornerRadius: 10) {
-                    // 解码未就绪时用等尺寸的占位，避免图一出现就把整个 VStack 撑开、
-                    // 造成扇区文字跳动。
-                    RoundedRectangle(cornerRadius: 10, style: .continuous)
-                        .fill(Color.primary.opacity(0.06))
-                        .frame(width: 56, height: 56)
-                }
-            }
+        // v2.11.0「槽位缩略图手动上传」：手动封面图在扇区内以圆角方形（center-crop）呈现。
+        //
+        // 只对**手动**缩略图生效，自动缩略图维持原样：轮盘是「瞬时弹出 → 扫一眼 → 松手选中」的
+        // 高频交互，为 10 个扇区同步解 10 张自动缩略图会让弹出明显掉帧；而手动封面图是用户主动
+        // 设的强识别信号（就是为了「一眼认出这是哪个槽」），值得这点开销，且实测只有少数槽位会设。
+        let manual: (id: String, url: URL)? = {
+            guard let manualId = content.manualThumbnailId, !manualId.isEmpty,
+                  let manualURL = manualThumbnailURL(slot: slot, manualThumbnailId: manualId) else { return nil }
+            return (manualId, manualURL)
+        }()
 
+        // v2.11.0 hotfix：缩略图与文字块**各自**沿扇区中轴线取极坐标锚点，不再共用一个 VStack。
+        //
+        // 旧写法把两者塞进 VStack 再对整体 .offset 到中轴线中点，于是缩略图被推到 VStack 顶部 =
+        // 「屏幕正上方」。除了正上方那个扇区，这个位移都有垂直于中轴线的分量，实测 10 槽位下 8 个
+        // 扇区的缩略图角偏差 25°~30°（半扇区仅 18°）——直接歪进邻居扇区，顶部扇区还紧贴圆盘边缘。
+        // 现在两个锚点都在中轴线上，位移方向恒为径向，方位角再变也不会漂出楔形。
+        let layout = manual == nil
+            ? nil
+            : RadialSegmentLayoutCalculator.layout(innerRadius: innerRadius,
+                                                   outerRadius: outerRadius,
+                                                   segmentDegrees: segmentDegrees)
+
+        ZStack {
+            if let manual, let layout {
+                let side = layout.thumbnailSide
+                let corner = max(6, side * 0.18)
+                ManualThumbnailImage(manualThumbnailId: manual.id,
+                                     url: manual.url,
+                                     side: side,
+                                     cornerRadius: corner) {
+                    // 解码未就绪时用等尺寸占位，避免图一出现就把布局撑开、造成扇区内容跳动。
+                    RoundedRectangle(cornerRadius: corner, style: .continuous)
+                        .fill(Color.primary.opacity(0.06))
+                        .frame(width: side, height: side)
+                }
+                .offset(x: layout.thumbnailRadius * cos(rad),
+                        y: layout.thumbnailRadius * sin(rad))
+
+                segmentTextBlock(slot: slot, content: content, label: label, isHovered: isHovered, midRadius: midRadius)
+                    .offset(x: layout.textRadius * cos(rad),
+                            y: layout.textRadius * sin(rad))
+            } else {
+                // 无手动缩略图（或扇区太窄放不下）：完全走 v2.11.0 之前的「纯文字居中」布局，
+                // 像素级保持原样。
+                segmentTextBlock(slot: slot, content: content, label: label, isHovered: isHovered, midRadius: midRadius)
+                    .offset(x: midRadius * cos(rad), y: midRadius * sin(rad))
+            }
+        }
+        .animation(Anim.interactive, value: isHovered)
+    }
+
+    /// 扇区内的文字块：槽位编号（+ 串联色点）+ 标签/预览。
+    /// 从 `segmentLabel` 里抽出来，好让它能作为独立元素挂到自己的中轴线锚点上。
+    @ViewBuilder
+    private func segmentTextBlock(slot: Int, content: SlotContent, label: String, isHovered: Bool, midRadius: CGFloat) -> some View {
+        VStack(spacing: 3) {
             // v2.7.0: Slot number + connection dot
             HStack(spacing: 4) {
                 Text("\(slot)")
@@ -642,8 +694,7 @@ struct RadialMenuView: View {
                     .foregroundColor(AppTheme.radialEmptyText(colorScheme))
             }
         }
-        .offset(x: x, y: y)
-        .animation(Anim.interactive, value: isHovered)
+        // 位置由调用方（segmentLabel）按中轴线锚点决定；本视图只负责内容。
     }
 
     @ViewBuilder
