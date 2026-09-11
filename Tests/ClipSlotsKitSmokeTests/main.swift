@@ -1134,12 +1134,16 @@ do {
     t.equal(SlotAccentPalette.ink(for: .white, fillOpacity: 1, over: .white), .black, "纯白胶囊必须黑字")
     t.equal(SlotAccentPalette.ink(for: .black, fillOpacity: 1, over: .black), .white, "纯黑胶囊必须白字")
 
-    // ⑥ 交互态不透明度的相对关系（悬停填充要最透、胶囊底要最实），改动时别把层级搞反
+    // ⑥ 交互态不透明度的相对关系。v2.11.4 hotfix3 起层级不再是「填充 < 描边 < 胶囊底」：
+    //    胶囊底被降到与悬停填充同档（轻染色），改由描边守边界。现在钉住的是
+    //    「两种填充都比对应描边更透」+「两种填充属于同一重量级」这两条。
     t.check(SlotAccentPalette.hoverFillOpacity < SlotAccentPalette.hoverStrokeOpacity,
-            "悬停填充必须比描边更透（否则扇区边界糊掉）")
-    t.check(SlotAccentPalette.hoverStrokeOpacity < SlotAccentPalette.pillFillOpacity,
-            "底栏胶囊底色应比扇区描边更实（它是常驻控件，不是瞬时反馈）")
-    t.check(SlotAccentPalette.hoverFillOpacity > 0.2 && SlotAccentPalette.pillFillOpacity <= 1.0,
+            "悬停填充必须比同处的描边更透（否则扇区边界糊掉）")
+    t.check(SlotAccentPalette.pillFillOpacity < SlotAccentPalette.pillStrokeOpacity,
+            "胶囊底色必须比胶囊描边更透（淡底色靠描边守住按钮轮廓）")
+    t.check(abs(SlotAccentPalette.pillFillOpacity - SlotAccentPalette.hoverFillOpacity) <= 0.1,
+            "★胶囊底与悬停填充应保持同一重量级（差值 ≤ 0.1），底栏才不会比圆盘重")
+    t.check(SlotAccentPalette.hoverFillOpacity > 0.15 && SlotAccentPalette.pillStrokeOpacity <= 1.0,
             "不透明度都应落在合理区间内")
 
     // ⑦ HSB 往返与提亮（v2.11.4 hotfix：圆盘色偏深偏闷，统一过一层提亮）

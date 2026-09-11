@@ -307,7 +307,7 @@ enum AppTheme {
         return slotAccentTint(slot, opacity: SlotAccentPalette.hoverStrokeOpacity)
     }
 
-    /// 底栏「上次粘贴」胶囊底色：槽位色 @0.65（无记录时回落玻璃灰）。
+    /// 底栏「上次粘贴」胶囊底色：槽位色 @0.28（无记录时回落玻璃灰）。
     static func radialSlotPillFill(slot: Int?) -> Color {
         guard let slot, slot >= 1 else { return radialGlassButtonTint }
         return slotAccentTint(slot, opacity: SlotAccentPalette.pillFillOpacity)
