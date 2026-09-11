@@ -16,6 +16,19 @@ struct RadialPreviewPanel: View {
     @State private var dynamicTitle: String = ""
     @State private var dynamicSubtitle: String = ""
 
+    /// v2.11.3 hotfix：当前有没有「可预览的目标」。
+    ///
+    /// 通知里的 `preview` payload 非 nil ⇔ 悬停到了一个有内容（或有手动封面图）的槽位；
+    /// 没悬停、悬停到空槽、圆盘刚弹出、`clearPreviewContent()` 复位，全都是 nil。
+    /// 面板本体（工具栏 + 磨砂底）只在它为 true 时才渲染 —— 否则整扇窗口不画一个像素。
+    ///
+    /// 口径说明：这里判定的是「有没有可预览内容」，而不是「有没有附件」。
+    /// 附件条本身另有 `if !content.attachments.isEmpty` 把关（见 RadialUniversalPreview），
+    /// 所以无附件的槽位不会出现空的附件条；但它的文本 / 图片 / 文件预览仍会正常显示 ——
+    /// 那是这扇窗从 v2.7.x 起的主职能。若要收紧成「只有带附件的槽位才弹面板」，
+    /// 把下面 onReceive 里的赋值改成 `!payload.content.attachments.isEmpty` 即可。
+    @State private var hasPreviewTarget = false
+
     /// 面板外形：圆角矩形，背景 / 描边 / 裁剪共用同一份，避免三处圆角写歪。
     private var panelShape: RoundedRectangle {
         RoundedRectangle(cornerRadius: 14, style: .continuous)
@@ -23,40 +36,23 @@ struct RadialPreviewPanel: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            // v2.7.13: use this app toolbar as the only top bar.
-            HStack(spacing: 10) {
-                Image(systemName: "eye")
-                    .foregroundColor(.secondary)
-                VStack(alignment: .leading, spacing: 1) {
-                    Text(dynamicTitle.isEmpty ? title : dynamicTitle)
-                        .font(.system(size: 13, weight: .semibold)).lineLimit(1)
-                    Text(dynamicSubtitle.isEmpty ? "实时预览" : dynamicSubtitle)
-                        .font(.caption2).foregroundColor(.secondary).lineLimit(1)
-                }
-                Spacer()
-                Button { scale = max(0.75, scale - 0.1) } label: { Image(systemName: "minus.magnifyingglass") }
-                Button { scale = min(1.8, scale + 0.1) } label: { Image(systemName: "plus.magnifyingglass") }
-                Button { isPinned.toggle() } label: {
-                    Image(systemName: isPinned ? "pin.fill" : "pin")
-                        .foregroundColor(isPinned ? .accentColor : .secondary)
-                        .padding(6)
-                        .background(Circle().fill(isPinned ? Color.accentColor.opacity(0.16) : Color.clear))
-                }
-                .help(isPinned ? "已置顶：拖到哪里就固定到哪里" : "置顶预览窗")
+            // v2.11.3 hotfix：空态不渲染工具栏。用 `if` 真正把视图摘掉，
+            // 不是 .opacity(0) / .hidden() —— 那两种做法磨砂底依旧会被实例化并绘制。
+            if hasPreviewTarget {
+                toolbar
+                Divider()
             }
-            .buttonStyle(.plain)
-            .padding(.horizontal, 14)
-            .frame(height: 54)
-            // v2.9.22: 头部由近乎不透明的 windowBackgroundColor(0.96) 改为半透明毛玻璃，
-            // 消除圆盘弹出后"大块不透明矩形遮屏"的观感，恢复通透效果。
-            .background(.ultraThinMaterial)
-
-            Divider()
 
             ZStack {
                 // v2.7.17: smart background. Only show opaque background when there
                 // is actual content to preview. Empty state / image preview remain
                 // transparent / unobtrusive.
+                //
+                // v2.11.3 hotfix：这一层**必须常驻挂载**，不能跟着 hasPreviewTarget 一起 if 掉。
+                // 因为 RadialLivePreviewContent 的 previewPayload 是靠同一条通知喂的：
+                // 若它随空态卸载，下一次悬停时「通知先到、视图后挂载」，新挂载的实例会错过那一发
+                // 通知，预览窗就会空着不出内容。它在空态下渲染的是 Color.clear（零像素，
+                // 不占任何视觉），真正的磨砂底由上面的 if 和下面的 background 控制。
                 content
                     .scaleEffect(scale)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -77,18 +73,64 @@ struct RadialPreviewPanel: View {
         //
         // 层次关系：面板 ultraThin（最透）< 头部工具栏 ultraThin 叠加（略实，自然分隔）
         //          < 内容卡片 regularMaterial（最实，保证正文可读）。
-        .background(panelShape.fill(.ultraThinMaterial).opacity(0.88))
-        .overlay(panelShape.stroke(Color.primary.opacity(0.08), lineWidth: 0.5))
+        //
+        // v2.11.3 hotfix：背景 / 描边同样收进 `if` —— 空态下圆盘右侧不该有任何磨砂色块。
+        .background {
+            if hasPreviewTarget {
+                panelShape.fill(.ultraThinMaterial).opacity(0.88)
+            }
+        }
+        .overlay {
+            if hasPreviewTarget {
+                panelShape.stroke(Color.primary.opacity(0.08), lineWidth: 0.5)
+            }
+        }
         .clipShape(panelShape)
+        // 空态是一扇完全透明的窗：顺手关掉命中测试，避免这块看不见的区域拦掉
+        // 落在它下面的点击（此前有可见工具栏时不存在这个问题）。
+        .allowsHitTesting(hasPreviewTarget)
         .onReceive(NotificationCenter.default.publisher(for: .radialMenuHoveredSlotChanged)) { note in
             if let payload = note.userInfo?["preview"] as? RadialHoverPreviewPayload {
                 dynamicTitle = payload.title
                 dynamicSubtitle = payload.subtitle
+                hasPreviewTarget = true
             } else {
                 dynamicTitle = ""
                 dynamicSubtitle = ""
+                hasPreviewTarget = false
             }
         }
+    }
+
+    /// 顶部工具栏（标题 + 缩放 + 置顶）。
+    private var toolbar: some View {
+        // v2.7.13: use this app toolbar as the only top bar.
+        HStack(spacing: 10) {
+            Image(systemName: "eye")
+                .foregroundColor(.secondary)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(dynamicTitle.isEmpty ? title : dynamicTitle)
+                    .font(.system(size: 13, weight: .semibold)).lineLimit(1)
+                Text(dynamicSubtitle.isEmpty ? "实时预览" : dynamicSubtitle)
+                    .font(.caption2).foregroundColor(.secondary).lineLimit(1)
+            }
+            Spacer()
+            Button { scale = max(0.75, scale - 0.1) } label: { Image(systemName: "minus.magnifyingglass") }
+            Button { scale = min(1.8, scale + 0.1) } label: { Image(systemName: "plus.magnifyingglass") }
+            Button { isPinned.toggle() } label: {
+                Image(systemName: isPinned ? "pin.fill" : "pin")
+                    .foregroundColor(isPinned ? .accentColor : .secondary)
+                    .padding(6)
+                    .background(Circle().fill(isPinned ? Color.accentColor.opacity(0.16) : Color.clear))
+            }
+            .help(isPinned ? "已置顶：拖到哪里就固定到哪里" : "置顶预览窗")
+        }
+        .buttonStyle(.plain)
+        .padding(.horizontal, 14)
+        .frame(height: 54)
+        // v2.9.22: 头部由近乎不透明的 windowBackgroundColor(0.96) 改为半透明毛玻璃，
+        // 消除圆盘弹出后"大块不透明矩形遮屏"的观感，恢复通透效果。
+        .background(.ultraThinMaterial)
     }
 }
 
