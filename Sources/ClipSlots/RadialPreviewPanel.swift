@@ -2,6 +2,7 @@ import SwiftUI
 import ClipSlotsKit
 import AVKit
 import WebKit
+import UniformTypeIdentifiers
 
 /// v2.7.13: clean image-only preview. No material background, no rounded container,
 /// no AppKit shadow. The HStack toolbar is the only top bar.
@@ -141,6 +142,25 @@ private struct RadialUniversalPreview: View {
     }
 
     var body: some View {
+        // v2.11.1「附件预览」：主视觉区 + 底部附件条。
+        //
+        // 优先级（与用户约定的一致）：手动封面图 → 槽位主体内容 → 图片附件缩略图 → 文本 → 空。
+        // 「图片附件」只在**主体为空**（items 为空、槽位只挂了附件）时上位当主视觉；主体有内容时
+        // 主体永远占主视觉区，附件走底部那条 strip —— 否则用户存的正文会被一张随手带的截图挤下去。
+        VStack(spacing: 0) {
+            mainArea
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+
+            if !content.attachments.isEmpty {
+                Divider().opacity(0.6)
+                RadialAttachmentStrip(attachments: content.attachments)
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    @ViewBuilder
+    private var mainArea: some View {
         Group {
             if let manual = manualThumbnail {
                 // v2.11.0 hotfix2：手动封面图优先级最高，与扇区侧 / 卡片侧（ThumbnailProvider）一致。
@@ -165,11 +185,24 @@ private struct RadialUniversalPreview: View {
                         }
                     }
                 }
+            } else if content.items.isEmpty, let hero = firstImageAttachment {
+                // 主体空、只挂了附件：让第一张图片附件当主视觉，比一张空白文本卡片有用得多。
+                RadialAttachmentImageView(attachment: hero, maxPixel: 1024, contentMode: .fit)
+                    .padding(14)
             } else {
                 contentPreview
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    /// 第一张「图片型」附件。用于主体为空时的主视觉兜底（走 Kit 的同一份 plan，口径与附件条一致）。
+    private var firstImageAttachment: SlotContent.SlotAttachment? {
+        let plan = RadialAttachmentPreviewPlanner.plan(
+            imageFlags: content.attachments.map { RadialAttachmentKind.isImage($0) }
+        )
+        guard let index = plan.heroImageIndex else { return nil }
+        return content.attachments[index]
     }
 
     @ViewBuilder
@@ -202,6 +235,200 @@ private struct RadialUniversalPreview: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+}
+
+// MARK: - v2.11.1 Attachment Preview (悬浮预览 Panel 的附件展示区)
+
+/// 附件的「种类判定 + 语义图标」。
+///
+/// 为什么不直接用 `att.type`：`.file` 类附件里混着大量其实是图片/视频的东西（拖进来的 PNG、
+/// 录屏 MOV），只看 type 会把它们全渲染成一个灰色文档图标。这里按扩展名的 UTType 再分一层，
+/// 与附件面板 `AttachmentThumbnailProvider` 的判定口径一致。
+enum RadialAttachmentKind {
+    /// 是否「能出真实像素」的图片附件（图片型 + 扩展名 conforms to .image 的文件型）。
+    ///
+    /// 注意 `.file` 分支要求 `path` 非空：`AttachmentThumbnailProvider.previewImage` 对
+    /// 文件型附件只认 `path`，没有 path 就永远解不出图，提前判 false 才不会让 panel 卡在 spinner。
+    static func isImage(_ att: SlotContent.SlotAttachment) -> Bool {
+        switch att.type {
+        case .image:
+            return true
+        case .file:
+            guard let path = att.path, !path.isEmpty else { return false }
+            return AttachmentThumbnailProvider.isImage(URL(fileURLWithPath: path))
+        default:
+            return false
+        }
+    }
+
+    /// 非图片附件的 SF Symbol。按 UTType 粗分音频 / 视频 / PDF / 压缩包 / 文本。
+    static func icon(for att: SlotContent.SlotAttachment) -> String {
+        switch att.type {
+        case .text:      return "doc.text"
+        case .url:       return "link"
+        case .reference: return "arrow.triangle.branch"
+        case .image:     return "photo"
+        case .file:
+            // path 缺失（外置字节 / 导入包只留了名字）时退回按附件名的扩展名判断。
+            let ext = ((att.path?.isEmpty == false ? att.path! : att.name) as NSString)
+                .pathExtension.lowercased()
+            guard !ext.isEmpty, let type = UTType(filenameExtension: ext) else { return "doc" }
+            if type.conforms(to: .movie) || type.conforms(to: .video) { return "film" }
+            if type.conforms(to: .audio) { return "music.note" }
+            if type.conforms(to: .image) { return "photo" }
+            if type.conforms(to: .pdf) { return "doc.richtext" }
+            if type.conforms(to: .archive) { return "archivebox" }
+            if type.conforms(to: .sourceCode) { return "chevron.left.forwardslash.chevron.right" }
+            if type.conforms(to: .plainText) || type.conforms(to: .text) { return "doc.text" }
+            return "doc"
+        }
+    }
+}
+
+/// 预览窗里的附件条：图片附件出缩略图（最多 3 张），其余出「图标 + 文件名」小卡。
+///
+/// 数据来源全部是 `content.attachments` 这个**已在内存**的字段（缓存层把 data 置 nil 只留
+/// storagePath）——和扇区角标同一条约定：**绝不**调 `store.attachments(for:)`（stat + queue.sync
+/// 的主线程同步 I/O）。真要读字节时只走 `previewImage(for:)` 里的 path / storageFileURL，
+/// 而且整个解码都在后台线程 + 全局 ThumbnailDecodeLimiter 限流下进行。
+private struct RadialAttachmentStrip: View {
+    let attachments: [SlotContent.SlotAttachment]
+    @Environment(\.colorScheme) private var colorScheme
+
+    /// 最多渲染几张图片缩略图。再多就折成「+N」——预览窗只有 360pt 宽，
+    /// 也避免一次悬停就拉起十几个解码任务。
+    private static let maxImageThumbnails = 3
+    private static let thumbnailSide: CGFloat = 52
+
+    var body: some View {
+        // 「谁上缩略图 / 谁折成 +N / 谁走小卡」的选择交给 Kit 里的纯函数决定（有 smoke 断言兜底），
+        // 这里只负责把计划渲染出来。
+        let plan = RadialAttachmentPreviewPlanner.plan(
+            imageFlags: attachments.map { RadialAttachmentKind.isImage($0) },
+            maxImageThumbnails: Self.maxImageThumbnails
+        )
+
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 4) {
+                Image(systemName: "paperclip")
+                    .font(.system(size: 9, weight: .bold))
+                Text("附件 \(attachments.count)")
+                    .font(.system(size: 10, weight: .bold))
+                Spacer(minLength: 0)
+            }
+            .foregroundColor(AppTheme.radialAttachmentBadge(colorScheme))
+
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 8) {
+                    ForEach(plan.imageIndices, id: \.self) { index in
+                        RadialAttachmentImageView(attachment: attachments[index],
+                                                  maxPixel: 128,
+                                                  contentMode: .fill)
+                            .frame(width: Self.thumbnailSide, height: Self.thumbnailSide)
+                            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                    .stroke(Color.primary.opacity(0.10), lineWidth: 0.5)
+                            )
+                            .help(attachments[index].name)
+                    }
+
+                    if plan.hiddenImageCount > 0 {
+                        Text("+\(plan.hiddenImageCount)")
+                            .font(.system(size: 12, weight: .bold, design: .rounded))
+                            .foregroundColor(AppTheme.radialAttachmentBadge(colorScheme))
+                            .frame(width: Self.thumbnailSide, height: Self.thumbnailSide)
+                            .background(
+                                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                    .fill(AppTheme.radialAttachmentBadgeFill(colorScheme))
+                            )
+                            .help("另有 \(plan.hiddenImageCount) 张图片附件")
+                    }
+
+                    ForEach(plan.chipIndices, id: \.self) { index in
+                        fileChip(attachments[index])
+                    }
+                }
+                .padding(.bottom, 2)
+            }
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 9)
+        .frame(height: 92)
+    }
+
+    /// 非图片附件：图标 + 文件名（+ 类型名）小卡。
+    private func fileChip(_ att: SlotContent.SlotAttachment) -> some View {
+        HStack(spacing: 6) {
+            Image(systemName: RadialAttachmentKind.icon(for: att))
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundColor(AppTheme.radialAttachmentBadge(colorScheme))
+                .frame(width: 18)
+
+            VStack(alignment: .leading, spacing: 1) {
+                Text(att.name.isEmpty ? att.type.displayName : att.name)
+                    .font(.system(size: 10, weight: .semibold))
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                Text(att.type.displayName)
+                    .font(.system(size: 9))
+                    .foregroundColor(.secondary)
+            }
+        }
+        .padding(.horizontal, 8)
+        .frame(height: Self.thumbnailSide)
+        .frame(maxWidth: 140)
+        .background(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .fill(AppTheme.radialAttachmentBadgeFill(colorScheme))
+        )
+        .help(att.name)
+    }
+}
+
+/// 单个图片附件的异步缩略图：spinner → 后台解码 → 替换；解码失败退回语义图标。
+///
+/// 解码走 `AttachmentThumbnailProvider.previewImage`（ImageIO 增量下采样，绝不整图解码），
+/// 并复用全局 `ThumbnailDecodeLimiter` 限流，和网格缩略图 / 内联图预览共用同一份并发配额 ——
+/// 快速划过多个带附件的扇区时不会瞬时拉起一堆解码抢 CPU。
+private struct RadialAttachmentImageView: View {
+    let attachment: SlotContent.SlotAttachment
+    let maxPixel: CGFloat
+    let contentMode: ContentMode
+
+    @State private var image: NSImage?
+    @State private var failed = false
+
+    var body: some View {
+        ZStack {
+            if let image {
+                Image(nsImage: image)
+                    .resizable()
+                    .aspectRatio(contentMode: contentMode)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else if failed {
+                Image(systemName: RadialAttachmentKind.icon(for: attachment))
+                    .font(.system(size: 16, weight: .semibold))
+                    .foregroundColor(.secondary)
+            } else {
+                ProgressView().controlSize(.small)
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        // 附件 id 是 UUID，换槽 / 换附件必然换 id → 一定重新解码，不会串图。
+        .task(id: attachment.id) {
+            let att = attachment
+            let px = maxPixel
+            let decoded = await ThumbnailDecodeLimiter.shared.run {
+                await Task.detached(priority: .userInitiated) { () -> NSImage? in
+                    AttachmentThumbnailProvider.previewImage(for: att, maxPixel: px)
+                }.value
+            }
+            guard !Task.isCancelled else { return }
+            image = decoded
+            failed = decoded == nil
+        }
     }
 }
 

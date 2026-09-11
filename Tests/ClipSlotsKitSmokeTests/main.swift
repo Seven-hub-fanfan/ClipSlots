@@ -1049,6 +1049,72 @@ do {
                 - RadialSegmentLayoutCalculator.numberRowWidth(hasConnectionDot: false, badgeCount: 0),
             RadialSegmentLayoutCalculator.numberRowSpacing + RadialSegmentLayoutCalculator.badgeIconWidth,
             "每个角标增加 spacing + icon 宽度")
+
+    // ★为什么「上次粘贴」标识做成扇区外弧、而不是编号行里的第二个角标：**编号行塞不下**。
+    // 10 槽位（36°/扇区）时编号行所在半径处的弦宽只有 ~57pt，而「编号 + 串联色点 + 2 个角标」
+    // 要 70pt —— 第二个角标必定把整行顶进邻居扇区，正是 v2.11.0 hotfix 那类越界的横向翻版。
+    // 这条断言把该结论钉死：以后谁想再往编号行加第二个角标，会立刻在这里失败。
+    let tenSegmentDegrees = 36.0
+    if let tenLayout = RadialSegmentLayoutCalculator.layout(innerRadius: segmentInner,
+                                                           outerRadius: segmentOuter,
+                                                           segmentDegrees: tenSegmentDegrees) {
+        t.check(!RadialSegmentLayoutCalculator.numberRowFits(hasConnectionDot: true,
+                                                            badgeCount: 2,
+                                                            atRadius: tenLayout.textRadius,
+                                                            segmentDegrees: tenSegmentDegrees),
+                "★10槽位：编号行放不下第二个角标（行宽 \(RadialSegmentLayoutCalculator.numberRowWidth(hasConnectionDot: true, badgeCount: 2)) > 弦宽 \(RadialSegmentLayoutCalculator.chordWidth(atRadius: tenLayout.textRadius, segmentDegrees: tenSegmentDegrees))）——「上次粘贴」因此走外弧")
+    }
+}
+
+// MARK: - 悬浮预览 Panel 附件展示计划（v2.11.1 功能 5）
+//
+// 三条不变量：
+//  1. 图片缩略图不超过上限，多出来的必须被 hiddenImageCount 如实计数（不静默丢附件）；
+//  2. 非图片附件一个不漏，且图片/非图片两组各自保持原始顺序；
+//  3. hero（主体为空时的主视觉）恒等于「第一张图片附件」，与缩略图上限无关。
+do {
+    let empty = RadialAttachmentPreviewPlanner.plan(imageFlags: [])
+    t.equal(empty, RadialAttachmentPreviewPlan.empty, "无附件时返回空计划")
+    t.check(empty.heroImageIndex == nil, "无附件时没有 hero")
+
+    // 纯图片且未超上限
+    let three = RadialAttachmentPreviewPlanner.plan(imageFlags: [true, true, true])
+    t.equal(three.imageIndices, [0, 1, 2], "3 张图片全部渲染缩略图")
+    t.equal(three.hiddenImageCount, 0, "未超上限时 hiddenImageCount 为 0")
+    t.equal(three.chipIndices, [], "纯图片时没有文件小卡")
+    t.equal(three.heroImageIndex, 0, "hero 取第一张图片")
+
+    // ★超上限：只渲染前 3 张，其余进 +N
+    let five = RadialAttachmentPreviewPlanner.plan(imageFlags: [true, true, true, true, true])
+    t.equal(five.imageIndices.count, RadialAttachmentPreviewPlanner.maxImageThumbnails,
+            "★超上限时缩略图数量恰好等于上限")
+    t.equal(five.imageIndices, [0, 1, 2], "★渲染的是前 3 张（顺序稳定）")
+    t.equal(five.hiddenImageCount, 2, "★多出的 2 张必须被计数，不能静默丢弃")
+
+    // ★混合：图片挑出来上缩略图，非图片全进小卡，两组各自保序
+    let mixed = RadialAttachmentPreviewPlanner.plan(imageFlags: [false, true, false, true, true, true, false])
+    t.equal(mixed.imageIndices, [1, 3, 4], "★混合时按原顺序取前 3 张图片")
+    t.equal(mixed.hiddenImageCount, 1, "★第 4 张图片折进 +1")
+    t.equal(mixed.chipIndices, [0, 2, 6], "★非图片附件一个不漏且保序")
+    t.equal(mixed.imageIndices.count + mixed.hiddenImageCount + mixed.chipIndices.count, 7,
+            "★渲染 + 折叠 + 小卡三者之和必须等于附件总数")
+    t.equal(mixed.heroImageIndex, 1, "hero 是第一张图片附件（不是第一个附件）")
+
+    // 纯非图片
+    let noImage = RadialAttachmentPreviewPlanner.plan(imageFlags: [false, false])
+    t.equal(noImage.imageIndices, [], "无图片附件时不渲染缩略图")
+    t.equal(noImage.hiddenImageCount, 0, "无图片附件时无折叠")
+    t.equal(noImage.chipIndices, [0, 1], "全部走文件小卡")
+    t.check(noImage.heroImageIndex == nil, "无图片附件时没有 hero")
+
+    // 边界：上限 0 / 负数不得崩，也不得让 hero 消失
+    let capZero = RadialAttachmentPreviewPlanner.plan(imageFlags: [true, false, true], maxImageThumbnails: 0)
+    t.equal(capZero.imageIndices, [], "上限 0 时不渲染缩略图")
+    t.equal(capZero.hiddenImageCount, 2, "上限 0 时两张图片全部折叠")
+    t.equal(capZero.heroImageIndex, 0, "★上限为 0 也不影响 hero —— 主视觉与缩略图条是两回事")
+    let capNegative = RadialAttachmentPreviewPlanner.plan(imageFlags: [true], maxImageThumbnails: -3)
+    t.equal(capNegative.imageIndices, [], "负数上限按 0 处理，不崩")
+    t.equal(capNegative.hiddenImageCount, 1, "负数上限时图片全部折叠")
 }
 
 t.report()

@@ -274,14 +274,31 @@ enum AppTheme {
 
     // MARK: - Radial Segment Badges (v2.11.1)
 
-    /// 扇区附件角标（回形针）的图标色。刻意比编号更弱：它是「有没有」的信号，
+    /// 扇区角标（非附件类）的图标色。刻意比编号更弱：它是「有没有」的信号，
     /// 不该跟槽位编号抢视觉权重。
     static let radialBadgeIcon = dyn(light: Color.black.opacity(0.58), dark: Color.white.opacity(0.70))
     static func radialBadgeIcon(_ scheme: ColorScheme) -> Color { radialBadgeIcon }
 
-    /// 扇区附件角标的圆形底。给一点底色是为了在手动封面图/深色扇区上仍能辨认。
+    /// 扇区**附件**角标（回形针）的图标色 —— 与主界面卡片「附件 N」胶囊同一套品牌蓝紫。
+    ///
+    /// 为什么不直接用 `brandGradient`：角标只有 9pt，渐变在这个尺寸上退化成一团糊色，
+    /// 还会因为扇区方位不同而呈现不同色相（渐变是按 view bounds 取向的）。这里取渐变
+    /// 起止色的**中点**做单色，色相与胶囊一致、在 9pt 上又足够干净：
+    ///   light 0.36/0.49/1.00 ~ 0.50/0.35/1.00 → 0.43/0.42/1.00
+    ///   dark  在中点基础上再提亮，保证压在深色扇区/手动封面图上仍然读得出是蓝紫而不是灰。
+    static let radialAttachmentBadge = dyn(light: Color(red: 0.43, green: 0.42, blue: 1.00),
+                                           dark: Color(red: 0.63, green: 0.59, blue: 1.00))
+    static func radialAttachmentBadge(_ scheme: ColorScheme) -> Color { radialAttachmentBadge }
+
+    /// 扇区角标的圆形底。给一点底色是为了在手动封面图/深色扇区上仍能辨认。
     static let radialBadgeFill = dyn(light: Color.black.opacity(0.08), dark: Color.white.opacity(0.14))
     static func radialBadgeFill(_ scheme: ColorScheme) -> Color { radialBadgeFill }
+
+    /// 附件角标的圆形底：换成同色系的极淡蓝紫，让 9pt 的回形针在浅底扇区上也有对比度。
+    /// 只是把中性灰底替换成同色调，透明度与 `radialBadgeFill` 同档，不额外加重视觉。
+    static let radialAttachmentBadgeFill = dyn(light: Color(red: 0.43, green: 0.42, blue: 1.00).opacity(0.14),
+                                               dark: Color(red: 0.63, green: 0.59, blue: 1.00).opacity(0.20))
+    static func radialAttachmentBadgeFill(_ scheme: ColorScheme) -> Color { radialAttachmentBadgeFill }
 
     static let radialShadow = dyn(light: Color.black.opacity(0.13), dark: Color.black.opacity(0.34))
     static func radialShadow(_ scheme: ColorScheme) -> Color { radialShadow }
