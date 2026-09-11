@@ -110,7 +110,9 @@ struct RadialMenuView: View {
     private var hoveredPreviewPayload: RadialHoverPreviewPayload? {
         guard let idx = hoveredIndex else { return nil }
         if mode == .childSlots {
-            guard let content = store.slots[idx], !content.isEmpty else { return nil }
+            // v2.11.0 hotfix2：空槽也可能有手动封面图（扇区已显示），这类槽位同样要发预览 payload，
+            // 否则悬停它时预览窗只剩空态。有内容的槽位行为完全不变。
+            guard let content = store.slots[idx], !content.isEmpty || content.hasManualThumbnail else { return nil }
             return RadialHoverPreviewPayload(
                 title: store.labels[idx] ?? "槽位 \(idx)",
                 subtitle: "实时预览",

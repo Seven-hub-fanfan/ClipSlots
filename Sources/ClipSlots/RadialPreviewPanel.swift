@@ -91,12 +91,18 @@ struct RadialLivePreviewContent: View {
                 // v2.7.59: when hovering a slot group in radial menu, use the
                 // payload's content from the target group, not store.slots[slot]
                 // which always reads from the current group.
-                RadialUniversalPreview(content: payload.content)
+                RadialUniversalPreview(content: payload.content,
+                                       specialSlotId: payload.specialSlotId,
+                                       slot: payload.slot)
                     .id("payload-\(payload.specialSlotId)-\(payload.slot)")
             } else if let slot = hoveredSlot,
                       let content = store.slots[slot],
-                      !content.isEmpty {
-                RadialUniversalPreview(content: content)
+                      // v2.11.0 hotfix2: 空槽也可能设了手动封面图（扇区已能显示），
+                      // 这里同样放行，否则悬停这类槽位预览窗会整块留白。
+                      !content.isEmpty || content.hasManualThumbnail {
+                RadialUniversalPreview(content: content,
+                                       specialSlotId: store.currentSpecialSlotId,
+                                       slot: slot)
                     .id(slot)
             } else {
                 // v2.9.25 hotfix5: 空态改为填满剩余空间的透明占位，保证内容区高度恒定，
@@ -122,8 +128,52 @@ struct RadialLivePreviewContent: View {
 
 private struct RadialUniversalPreview: View {
     let content: SlotContent
+    /// v2.11.0 hotfix2：手动缩略图的字节按 `{组}/{槽}` 定址，所以预览窗必须知道自己在预览谁。
+    /// 悬停「组」模式下这里是目标组 id + 该组首个非空槽位（与 payload 一致）。
+    let specialSlotId: String
+    let slot: Int
+
+    /// 该槽位的手动封面图（id + 磁盘 URL）；未设置或字节缺失时为 nil → 完全维持原有预览逻辑。
+    private var manualThumbnail: (id: String, url: URL)? {
+        guard let id = content.manualThumbnailId, !id.isEmpty,
+              let url = SpecialSlotStorage.shared.manualThumbnailURL(slot, in: specialSlotId) else { return nil }
+        return (id, url)
+    }
 
     var body: some View {
+        Group {
+            if let manual = manualThumbnail {
+                // v2.11.0 hotfix2：手动封面图优先级最高，与扇区侧 / 卡片侧（ThumbnailProvider）一致。
+                //
+                // 但预览窗和扇区的职责不同：扇区只需要「一眼认出是哪个槽」，预览窗还要能看清内容。
+                // 所以这里不是简单替换，而是分两种形态：
+                //  · 槽位有内容 → 封面图占顶部一条（高度自适应，上限 42% 且不超过 220pt），下面继续渲染原内容；
+                //  · 空槽只有封面图 → 封面图铺满整个内容区（不再显示"空文本"卡片）。
+                if content.isEmpty {
+                    RadialManualThumbnailView(manualThumbnailId: manual.id, url: manual.url)
+                        .padding(14)
+                } else {
+                    GeometryReader { geo in
+                        VStack(spacing: 0) {
+                            RadialManualThumbnailView(manualThumbnailId: manual.id, url: manual.url)
+                                .frame(height: min(220, max(96, geo.size.height * 0.42)))
+                                .padding(.horizontal, 14)
+                                .padding(.top, 12)
+                                .padding(.bottom, 8)
+                            Divider().opacity(0.6)
+                            contentPreview
+                        }
+                    }
+                }
+            } else {
+                contentPreview
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    @ViewBuilder
+    private var contentPreview: some View {
         Group {
             if content.hasRenderableInlineImage {
                 // ATT-2 (v2.10.32): decode the inline image off the main thread before
@@ -152,6 +202,51 @@ private struct RadialUniversalPreview: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+}
+
+// MARK: - v2.11.0 hotfix2 Manual Thumbnail Preview
+
+/// 预览窗里的手动封面图：按可用区域等比缩放（fit，不裁切），圆角 + 细描边。
+///
+/// 为什么不直接复用扇区用的 `ManualThumbnailImage`：那条路走 `ManualThumbnailCache`，
+/// 解码档位是 256px（够扇区 56pt 用），放到 360×480 的预览窗里会明显发虚。这里改成
+/// 按 1024（= 手动缩略图入库时的最长边上限，等于原图）单独解码，同时把缓存里已有的
+/// 256px 版本当作占位先顶上，避免悬停瞬间闪白。
+private struct RadialManualThumbnailView: View {
+    let manualThumbnailId: String
+    let url: URL
+    @State private var image: NSImage?
+    @ObservedObject private var cache = ManualThumbnailCache.shared
+
+    var body: some View {
+        ZStack {
+            if let shown = image ?? cache.cachedImage(id: manualThumbnailId) {
+                Image(nsImage: shown)
+                    .resizable()
+                    .aspectRatio(contentMode: .fit)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 10, style: .continuous)
+                            .stroke(Color.primary.opacity(0.10), lineWidth: 0.5)
+                    )
+                    .shadow(color: .black.opacity(0.10), radius: 8, x: 0, y: 3)
+            } else {
+                ProgressView().controlSize(.small)
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        // id 是内容寻址的（换图必换 UUID），所以换槽/换图都会重新触发解码，绝不串图。
+        .task(id: manualThumbnailId) {
+            let target = url
+            let decoded = await ThumbnailDecodeLimiter.shared.run {
+                await Task.detached(priority: .userInitiated) { () -> NSImage? in
+                    ClipSlotsImageIO.downsampledImage(url: target, maxPixel: 1024)
+                }.value
+            }
+            if !Task.isCancelled { image = decoded }
+        }
     }
 }
 
