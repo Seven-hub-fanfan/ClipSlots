@@ -30,6 +30,29 @@ struct PieSegmentShape: Shape {
     }
 }
 
+// MARK: - Sector Outer Arc (v2.11.1「上次粘贴」标识)
+
+/// 只描扇区**外沿**的一段圆弧。
+///
+/// 与 `PieSegmentShape().stroke()` 的区别：后者会同时描出两条径向边和内弧，
+/// 那两条径向边正好压在相邻扇区的分隔线上，视觉上像是选中了两个扇区。
+/// 状态标识要的是「这一格的外框亮起来」，因此单独一个只画外弧的 Shape。
+struct SegmentOuterArcShape: Shape {
+    let startAngle: Angle
+    let endAngle: Angle
+    let radius: CGFloat
+
+    func path(in rect: CGRect) -> Path {
+        var path = Path()
+        path.addArc(center: CGPoint(x: rect.midX, y: rect.midY),
+                    radius: radius,
+                    startAngle: startAngle,
+                    endAngle: endAngle,
+                    clockwise: false)
+        return path
+    }
+}
+
 // MARK: - Radial Glass Pill (v2.4.5)
 
 private struct RadialGlassPill<Content: View>: View {
@@ -87,7 +110,7 @@ struct RadialMenuView: View {
     }
 
     private var hoveredPreviewContent: SlotContent? {
-        guard let idx = hoveredIndex else { return nil }
+        guard let idx = effectiveIndex else { return nil }
         if mode == .childSlots {
             return store.slots[idx]
         }
@@ -100,7 +123,7 @@ struct RadialMenuView: View {
     }
 
     private var previewTitle: String {
-        guard let idx = hoveredIndex else { return "实时预览" }
+        guard let idx = effectiveIndex else { return "实时预览" }
         if mode == .childSlots { return store.labels[idx] ?? "槽位 \(idx)" }
         let groups = store.currentPageSlotGroups
         guard idx >= 0, idx < groups.count else { return "实时预览" }
@@ -108,7 +131,7 @@ struct RadialMenuView: View {
     }
 
     private var hoveredPreviewPayload: RadialHoverPreviewPayload? {
-        guard let idx = hoveredIndex else { return nil }
+        guard let idx = effectiveIndex else { return nil }
         if mode == .childSlots {
             // v2.11.0 hotfix2：空槽也可能有手动封面图（扇区已显示），这类槽位同样要发预览 payload，
             // 否则悬停它时预览窗只剩空态。有内容的槽位行为完全不变。
@@ -139,7 +162,24 @@ struct RadialMenuView: View {
     @State private var hoveredIndex: Int? = nil
     @State private var appeared = false
     @State private var mode: RadialMenuMode = .childSlots
+    // v2.11.1「圆盘内跳转到上次粘贴」：由底栏按钮设置的**程序化**聚焦槽位。
+    // 与 hoveredIndex 分开存：鼠标一旦接管（updateHover / handleTap）就清掉它，
+    // 否则鼠标移开扇区后聚焦会「复活」，看起来像高亮卡住了。
+    @State private var focusedSlot: Int? = nil
+    // 聚焦所属的组。切组是异步读盘（loadSlotsAsync），期间 currentSpecialSlotId 已经变了但
+    // slots 还是旧组的；记住组 id 才能判断这次聚焦是否仍指向用户当前看到的组。
+    @State private var focusedGroupId: String? = nil
     @Environment(\.colorScheme) private var colorScheme
+
+    /// 圆盘当前「生效」的索引：鼠标 hover 优先，其次才是「上次粘贴」跳转带来的程序化聚焦。
+    /// 扇区高亮、中心提示、预览窗 payload 统一走它，这样跳转后的表现与手动 hover 完全一致。
+    private var effectiveIndex: Int? {
+        if let hoveredIndex { return hoveredIndex }
+        guard mode == .childSlots,
+              let focusedSlot,
+              focusedGroupId == store.currentSpecialSlotId else { return nil }
+        return focusedSlot
+    }
 
     private let menuSize: CGFloat = 372
     // v2.7.12: keep hover segments safely inside the radial disk.
@@ -253,6 +293,17 @@ struct RadialMenuView: View {
         .frame(width: menuSize + 56)
         .padding(.horizontal, 28)
         .padding(.vertical, 10)
+        // v2.11.1: 跨组跳转时 switchSpecialSlot 走的是异步读盘（loadSlotsAsync）。扇区高亮按
+        // 「槽位序号」渲染、与内容无关，可以立刻生效；但预览窗 payload 依赖 store.slots，
+        // 点击瞬间读到的还是旧组内容。等新组数据提交（slotsContentSignature 变化）后补发一次。
+        .onChange(of: store.slotsContentSignature) { _ in
+            guard hoveredIndex == nil, effectiveIndex != nil else { return }
+            postHoverPreviewPayload()
+        }
+        // 用户手动切组（圆盘左右箭头 / 组扇区 / 页面切换）后，旧的程序化聚焦不再有意义。
+        .onChange(of: store.currentSpecialSlotId) { newValue in
+            if focusedGroupId != newValue { clearProgrammaticFocus() }
+        }
     }
 
     // MARK: - Top Navigation (v2.4.6: vertical two-tier)
@@ -340,6 +391,10 @@ struct RadialMenuView: View {
                         .frame(maxWidth: 140)
                 }
 
+                // v2.11.1: 「上次粘贴」跳转。位置刻意夹在组名 chip 与「全部粘贴」之间——
+                // 左侧是「我现在在哪」，右侧是「对这一组做什么」，中间放「回到刚才那一格」。
+                lastPasteJumpButton
+
                 Button {
                     handlePasteAll()
                 } label: {
@@ -371,6 +426,57 @@ struct RadialMenuView: View {
         }
     }
 
+    // MARK: - Jump to Last Paste (v2.11.1, radial-only)
+
+    /// 底栏「上次粘贴」跳转按钮。图标与主界面底栏保持一致（arrow.uturn.forward.circle），
+    /// 有效时染成目标槽位的强调色——和扇区外沿那条弧同色，点之前就知道会跳去哪一格。
+    private var lastPasteJumpButton: some View {
+        let address = store.lastPasteAddress
+        return Button {
+            jumpToLastPasteInRadial()
+        } label: {
+            Image(systemName: "arrow.uturn.forward.circle")
+                .font(.system(size: 12, weight: .bold))
+                .frame(width: 22, height: 20)
+        }
+        .buttonStyle(.plain)
+        .disabled(address == nil)
+        .opacity(address == nil ? 0.35 : 1)
+        .foregroundColor(address.map { AppTheme.slotAccent($0.slot) })
+        .help(store.lastPasteDescription.map { "跳转到上次粘贴：\($0)" } ?? "尚未粘贴过任何槽位")
+    }
+
+    /// 圆盘内跳转到「上次粘贴」的槽位。
+    ///
+    /// 刻意**不复用** `store.jumpToLastPaste()`：那条路径服务主界面卡片
+    /// （flashHighlightSlot → 滚动定位 + 2s 闪烁），还会要求主窗口在前台。圆盘这个按钮的
+    /// 诉求恰恰相反——不打开 GUI 也能定位。所以这里只做三件事：切到目标组（
+    /// `selectAndActivateSpecialSlot` 内部会一并同步 pages/currentPageId，因此天然跨页）、
+    /// 把扇区聚焦到目标槽位、让预览窗跟着切过去。圆盘保持打开，不 dismiss、不激活主窗口。
+    private func jumpToLastPasteInRadial() {
+        guard let address = store.lastPasteAddress else { return }
+
+        mode = .childSlots
+        hoveredIndex = nil
+        focusedGroupId = address.groupId
+        focusedSlot = address.slot
+
+        if store.currentSpecialSlotId != address.groupId {
+            store.switchSpecialSlot(id: address.groupId)
+        }
+
+        // 同组直接命中；跨组时这一发用的还是旧组内容，等 slotsContentSignature 变化后
+        // body 上的 onChange 会补发一次正确的 payload（见 body 末尾注释）。
+        postHoverPreviewPayload()
+    }
+
+    /// 鼠标接管后放弃程序化聚焦。
+    private func clearProgrammaticFocus() {
+        guard focusedSlot != nil || focusedGroupId != nil else { return }
+        focusedSlot = nil
+        focusedGroupId = nil
+    }
+
     // MARK: - Child Slot Segments
 
     @ViewBuilder
@@ -382,7 +488,10 @@ struct RadialMenuView: View {
             let startAngle = Angle(degrees: Double(slot - 1) * segmentAngle - 90)
             let endAngle = Angle(degrees: Double(slot) * segmentAngle - 90)
             let midAngle = Angle(degrees: (Double(slot - 1) + 0.5) * segmentAngle - 90)
-            let isHovered = hoveredIndex == slot
+            // v2.11.1: hover 与「上次粘贴跳转」的程序化聚焦走同一套高亮，用 effectiveIndex 统一。
+            let isHovered = effectiveIndex == slot
+            // v2.11.1: 「上次粘贴」标识——只在扇区外沿描一段弧，不占扇区内部任何空间。
+            let isLastPasted = store.isLastPasted(slot: slot, groupId: store.currentSpecialSlotId)
 
             ZStack {
                 PieSegmentShape(startAngle: startAngle, endAngle: endAngle, innerRadius: deadZoneRadius, outerRadius: outerRadius)
@@ -396,6 +505,21 @@ struct RadialMenuView: View {
                                 .fill(Color.white.opacity(colorScheme == .dark ? 0.045 : 0.22))
                                 .blur(radius: 0.4)
                         )
+                }
+
+                // 外沿高亮弧放在 hover 描边**之上**：hover 时也要看得见这格是上次粘贴的。
+                // 颜色取 AppTheme.slotAccent(slot)，与主界面卡片右上角的「上次粘贴」角标同色。
+                if isLastPasted,
+                   let arc = RadialSegmentLayoutCalculator.lastPasteArc(outerRadius: outerRadius,
+                                                                       startDegrees: startAngle.degrees,
+                                                                       endDegrees: endAngle.degrees) {
+                    SegmentOuterArcShape(startAngle: .degrees(arc.startDegrees),
+                                         endAngle: .degrees(arc.endDegrees),
+                                         radius: arc.radius)
+                        .stroke(AppTheme.slotAccent(slot),
+                                style: StrokeStyle(lineWidth: arc.lineWidth, lineCap: .round))
+                        .shadow(color: AppTheme.slotAccent(slot).opacity(0.45), radius: 3)
+                        .allowsHitTesting(false)
                 }
 
                 segmentLabel(slot: slot,
@@ -457,6 +581,11 @@ struct RadialMenuView: View {
             return
         }
 
+        // v2.11.1: 圆盘上的任意点击都视为「鼠标接管」，先释放程序化聚焦。
+        // 注意 handleTap 只处理**圆盘内**的点击（底栏按钮走各自的 Button action，不经过这里），
+        // 所以点「上次粘贴」跳转按钮不会自己把刚设好的聚焦清掉。
+        clearProgrammaticFocus()
+
         if mode == .childSlots, hoveredIndex == nil {
             mode = .specialSlots
             hoveredIndex = nil
@@ -494,6 +623,11 @@ struct RadialMenuView: View {
         let distance = sqrt(dx * dx + dy * dy)
         let cnt = displayCount
 
+        // v2.11.1: 指针一进入圆盘就交还控制权——「上次粘贴」跳转带来的程序化聚焦到此为止。
+        // 不这么做的话，鼠标划过扇区再移开（hoveredIndex 归 nil）时聚焦会「复活」，
+        // 高亮看起来像卡在了一个用户早已离开的槽位上。
+        clearProgrammaticFocus()
+
         if distance < deadZoneRadius || cnt == 0 {
             if hoveredIndex != nil {
                 hoveredIndex = nil
@@ -521,7 +655,9 @@ struct RadialMenuView: View {
             object: nil,
             userInfo: [
                 "mode": mode == .childSlots ? "childSlots" : "specialSlots",
-                "slot": hoveredIndex as Any,
+                // v2.11.1: 用 effectiveIndex —— 「上次粘贴」跳转后没有鼠标 hover，
+                // 但预览窗同样要跟着切到目标槽位（这正是「不开 GUI 也能看」的关键）。
+                "slot": effectiveIndex as Any,
                 "preview": hoveredPreviewPayload as Any
             ]
         )
@@ -529,7 +665,7 @@ struct RadialMenuView: View {
 
     @ViewBuilder
     private func centerView(deadZoneRadius: CGFloat) -> some View {
-        let idx = hoveredIndex
+        let idx = effectiveIndex
 
         Circle()
             .fill(AppTheme.radialCenterBackground(colorScheme))
@@ -609,7 +745,7 @@ struct RadialMenuView: View {
                               outerRadius: CGFloat,
                               segmentDegrees: Double) -> some View {
         let rad = CGFloat(angle.radians)
-        let isHovered = hoveredIndex == slot
+        let isHovered = effectiveIndex == slot
 
         // v2.11.0「槽位缩略图手动上传」：手动封面图在扇区内以圆角方形（center-crop）呈现。
         //
@@ -683,6 +819,29 @@ struct RadialMenuView: View {
                     Circle()
                         .fill(SlotConnectionColor.color(for: colorId))
                         .frame(width: 6, height: 6)
+                }
+
+                // v2.11.1「扇区附件角标」：有附件就在编号旁挂一个回形针。
+                //
+                // 为什么挂在**编号这一行**而不是新起一行/挂到扇区外沿：
+                //  • v2.11.0 hotfix 的教训——往 VStack 里加带高度的块 = 沿**屏幕垂直方向**位移，
+                //    只有正上方那个扇区才等价于「径向向外」，其余扇区会把内容顶出楔形。
+                //    HStack 是横向对称扩张，整块仍锚在原来的中轴线锚点上，几何上安全。
+                //  • 扇区外沿在有手动缩略图时只剩 ~12pt（缩略图最远角已到 R+side/√2），塞不下角标。
+                // 宽度不变量（编号 + 色点 + 角标 ≤ 该半径处弦宽）由
+                // RadialSegmentLayoutCalculator.numberRowFits 在 smoke 测试里钉死。
+                //
+                // 性能：attachments 是 store.slots 里已在内存的字段（缓存层把 data 置 nil 只留
+                // storagePath），isEmpty 是 O(1)。**绝不能**改用 store.attachments(for:) —— 那是
+                // stat + queue.sync 的主线程同步 I/O，v2.10.89 已经在卡片上踩过一次 hover 卡顿。
+                if !content.attachments.isEmpty {
+                    Image(systemName: "paperclip")
+                        .font(.system(size: 8, weight: .bold))
+                        .foregroundColor(AppTheme.radialBadgeIcon(colorScheme))
+                        .frame(width: RadialSegmentLayoutCalculator.badgeIconWidth,
+                               height: RadialSegmentLayoutCalculator.badgeIconWidth)
+                        .background(Circle().fill(AppTheme.radialBadgeFill(colorScheme)))
+                        .help("该槽位有附件")
                 }
             }
 

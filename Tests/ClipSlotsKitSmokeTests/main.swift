@@ -969,4 +969,86 @@ do {
             "单扇区应可用最大边长")
 }
 
+// MARK: - 轮盘「上次粘贴」外弧 + 编号行角标（v2.11.1）
+//
+// 两条新增的扇区不变量：
+//  1. 外弧必须完整落在本扇区的楔形内，且不越出扇区外沿、不压到缩略图；
+//  2. 编号行（编号 + 串联色点 + 附件角标）的总宽不得超过所在半径处的弦宽——
+//     即角标不会把编号行顶到邻居扇区去（v2.11.0 hotfix 同款失守方式的横向版本）。
+do {
+    let outer: CGFloat = 186
+    let segmentOuter = outer - 8
+    let deadZone = outer * 0.24
+    let segmentInner = deadZone + 1.5
+
+    for slotCount in 1...10 {
+        let segmentDegrees = 360.0 / Double(slotCount)
+
+        for i in 0..<slotCount {
+            let start = Double(i) * segmentDegrees - 90
+            let end = Double(i + 1) * segmentDegrees - 90
+            guard let arc = RadialSegmentLayoutCalculator.lastPasteArc(outerRadius: segmentOuter,
+                                                                      startDegrees: start,
+                                                                      endDegrees: end) else {
+                t.check(false, "\(slotCount) 槽位/第\(i + 1)扇区：应能画出「上次粘贴」外弧")
+                continue
+            }
+
+            // ★不变量 1：弧线（含线宽）不得越出扇区外沿
+            t.check(arc.outerEdgeRadius <= segmentOuter + 0.001,
+                    "★\(slotCount)槽位/第\(i + 1)扇区：外弧不得越出扇区外沿（\(arc.outerEdgeRadius) > \(segmentOuter)）")
+            // ★不变量 2：弧线必须留在本扇区角度范围内（两端不得压到分隔线）
+            t.check(arc.startDegrees > start && arc.endDegrees < end,
+                    "★\(slotCount)槽位/第\(i + 1)扇区：外弧两端必须内缩，不得压到扇区分隔线")
+            // 两端内缩量对称，视觉上才居中
+            t.check(abs((arc.startDegrees - start) - (end - arc.endDegrees)) < 0.001,
+                    "\(slotCount)槽位/第\(i + 1)扇区：外弧两端内缩量应对称")
+            // ★不变量 3：弧线内缘不得压进死区（外弧永远贴外沿，这条只是兜底）
+            t.check(arc.innerEdgeRadius > segmentInner,
+                    "★\(slotCount)槽位/第\(i + 1)扇区：外弧不得压进中心死区")
+            // 弧线仍有可见张角
+            t.check(arc.spanDegrees >= min(RadialSegmentLayoutCalculator.lastPasteArcMinSpanDegrees, segmentDegrees) - 0.001,
+                    "\(slotCount)槽位/第\(i + 1)扇区：外弧张角应可见（\(arc.spanDegrees)°）")
+        }
+    }
+
+    // 10 槽位（最窄扇区）下外弧仍应保留至少 2/3 的扇区张角，否则看起来就是个小点
+    if let arc = RadialSegmentLayoutCalculator.lastPasteArc(outerRadius: segmentOuter,
+                                                           startDegrees: 0,
+                                                           endDegrees: 36) {
+        t.check(arc.spanDegrees >= 36 * 2.0 / 3,
+                "★10 槽位下外弧应仍占扇区张角的 2/3 以上（实际 \(arc.spanDegrees)°）")
+    }
+
+    // 退化输入：张角为 0 / 负、半径过小 → nil（调用方不画，而不是画出一个畸形弧）
+    t.check(RadialSegmentLayoutCalculator.lastPasteArc(outerRadius: segmentOuter, startDegrees: 10, endDegrees: 10) == nil,
+            "★张角为 0 时不应画外弧")
+    t.check(RadialSegmentLayoutCalculator.lastPasteArc(outerRadius: segmentOuter, startDegrees: 20, endDegrees: 10) == nil,
+            "起止角反向时不应画外弧")
+    t.check(RadialSegmentLayoutCalculator.lastPasteArc(outerRadius: 1, startDegrees: 0, endDegrees: 36) == nil,
+            "外半径过小时不应画外弧")
+
+    // 编号行横向约束：编号 + 串联色点 + 附件角标（当前最多 1 个角标）
+    for slotCount in 1...10 {
+        let segmentDegrees = 360.0 / Double(slotCount)
+        guard let layout = RadialSegmentLayoutCalculator.layout(innerRadius: segmentInner,
+                                                               outerRadius: segmentOuter,
+                                                               segmentDegrees: segmentDegrees) else { continue }
+        t.check(RadialSegmentLayoutCalculator.numberRowFits(hasConnectionDot: true,
+                                                            badgeCount: 1,
+                                                            atRadius: layout.textRadius,
+                                                            segmentDegrees: segmentDegrees),
+                "★\(slotCount)槽位：编号 + 串联色点 + 附件角标不得越出楔形（行宽 \(RadialSegmentLayoutCalculator.numberRowWidth(hasConnectionDot: true, badgeCount: 1))，弦宽 \(RadialSegmentLayoutCalculator.chordWidth(atRadius: layout.textRadius, segmentDegrees: segmentDegrees))）")
+    }
+
+    // 宽度公式本身：加角标必须真的变宽，且是 spacing + icon 的量
+    t.equal(RadialSegmentLayoutCalculator.numberRowWidth(hasConnectionDot: false, badgeCount: 0),
+            RadialSegmentLayoutCalculator.slotNumberMaxWidth,
+            "无色点无角标时行宽 = 编号宽度")
+    t.equal(RadialSegmentLayoutCalculator.numberRowWidth(hasConnectionDot: false, badgeCount: 1)
+                - RadialSegmentLayoutCalculator.numberRowWidth(hasConnectionDot: false, badgeCount: 0),
+            RadialSegmentLayoutCalculator.numberRowSpacing + RadialSegmentLayoutCalculator.badgeIconWidth,
+            "每个角标增加 spacing + icon 宽度")
+}
+
 t.report()

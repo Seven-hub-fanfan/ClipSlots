@@ -1638,6 +1638,19 @@ final class SlotStoreObservable: ObservableObject {
             && groupId == lastPasteGroupId
     }
 
+    /// v2.11.1: 「上次粘贴」的**有效**地址——组仍存在、槽位号在当前槽位数范围内。
+    ///
+    /// `lastPasteDescription` 只用于展示，不校验槽位号；而圆盘的跳转会拿这个 slot 去
+    /// 聚焦扇区，因此必须额外挡住「用户把槽位数从 10 调到 5，而上次粘贴记在槽位 8」
+    /// 这种越界情况（否则会聚焦到一个根本不存在的扇区）。
+    var lastPasteAddress: SlotAddress? {
+        guard lastPasteSlotIndex >= 1,
+              lastPasteSlotIndex <= config.slots,
+              !lastPasteGroupId.isEmpty,
+              specialSlots.contains(where: { $0.id == lastPasteGroupId }) else { return nil }
+        return SlotAddress(groupId: lastPasteGroupId, slot: lastPasteSlotIndex)
+    }
+
     // MARK: - v2.9.37 Jump to Last Paste + flash highlight
 
     /// Switch the main view to the last-paste page/group and flash-highlight the

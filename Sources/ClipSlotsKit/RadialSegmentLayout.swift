@@ -136,3 +136,110 @@ public enum RadialSegmentLayoutCalculator {
                                                                   preferred: midRadius * 0.78))
     }
 }
+
+// MARK: - 「上次粘贴」扇区外弧（v2.11.1）
+
+/// 扇区外沿那条「上次粘贴」高亮弧的几何参数（圆心与扇区同心）。
+///
+/// 为什么只画**外弧**而不是整条楔形轮廓：`PieSegmentShape.stroke` 会同时描出外弧、
+/// 两条径向边和内弧，视觉重量远超一个状态标识，而且径向边与相邻扇区的分隔线重合，
+/// 会让人误以为是「选中了两个扇区」。只描外弧既醒目又不污染分隔线。
+public struct RadialLastPasteArc: Equatable {
+    /// 弧线中心线所在半径（已扣掉线宽的一半与外沿留白）。
+    public let radius: CGFloat
+    public let lineWidth: CGFloat
+    public let startDegrees: Double
+    public let endDegrees: Double
+
+    public init(radius: CGFloat, lineWidth: CGFloat, startDegrees: Double, endDegrees: Double) {
+        self.radius = radius
+        self.lineWidth = lineWidth
+        self.startDegrees = startDegrees
+        self.endDegrees = endDegrees
+    }
+
+    public var spanDegrees: Double { endDegrees - startDegrees }
+    /// 弧线外缘（含线宽）触及的最大半径——用来断言「不越出扇区外沿」。
+    public var outerEdgeRadius: CGFloat { radius + lineWidth / 2 }
+    /// 弧线内缘触及的最小半径——用来断言「不压到缩略图」。
+    public var innerEdgeRadius: CGFloat { radius - lineWidth / 2 }
+}
+
+extension RadialSegmentLayoutCalculator {
+
+    /// 「上次粘贴」外弧线宽。
+    public static let lastPasteArcLineWidth: CGFloat = 3.5
+    /// 弧线外缘与扇区外沿之间的留白，避免和圆盘内阴影糊在一起。
+    public static let lastPasteArcEdgeMargin: CGFloat = 1.5
+    /// 弧线两端相对扇区分隔线内缩的**弧长**（pt）。用弧长而不是固定角度，
+    /// 这样槽位数变化时两端的视觉留白保持一致。
+    public static let lastPasteArcEndInset: CGFloat = 6
+    /// 内缩后至少要保留的张角，否则宁可不画（扇区太窄时画出来就是一个点）。
+    public static let lastPasteArcMinSpanDegrees: Double = 4
+
+    /// 计算某扇区的「上次粘贴」外弧。
+    ///
+    /// - Parameters:
+    ///   - outerRadius: 扇区外半径（与 `layout(innerRadius:outerRadius:segmentDegrees:)` 同一口径）。
+    ///   - startDegrees / endDegrees: 扇区起止角（与扇区绘制用的角度同一坐标系，度）。
+    /// - Returns: 可绘制时返回弧参数；扇区退化或太窄时返回 `nil`（调用方不画）。
+    public static func lastPasteArc(outerRadius: CGFloat,
+                                    startDegrees: Double,
+                                    endDegrees: Double) -> RadialLastPasteArc? {
+        let span = endDegrees - startDegrees
+        guard span > 0 else { return nil }
+
+        let radius = outerRadius - lastPasteArcEdgeMargin - lastPasteArcLineWidth / 2
+        guard radius > 0 else { return nil }
+
+        // 端点内缩：把固定弧长换算成角度；同时最多只吃掉本扇区 1/4 的张角，
+        // 保证窄扇区下弧线不会被两端啃光。
+        let byLength = Double(lastPasteArcEndInset / radius) * 180 / .pi
+        let inset = min(byLength, span / 4)
+        let start = startDegrees + inset
+        let end = endDegrees - inset
+        guard end - start >= min(lastPasteArcMinSpanDegrees, span) else { return nil }
+
+        return RadialLastPasteArc(radius: radius,
+                                  lineWidth: lastPasteArcLineWidth,
+                                  startDegrees: start,
+                                  endDegrees: end)
+    }
+}
+
+// MARK: - 扇区编号行的横向排布约束（v2.11.1）
+
+extension RadialSegmentLayoutCalculator {
+
+    /// 编号行里一个状态角标（附件回形针等）的占位宽度。
+    public static let badgeIconWidth: CGFloat = 13
+    /// 串联色点的直径（与 `RadialMenuView.segmentTextBlock` 里的 Circle 保持一致）。
+    public static let connectionDotWidth: CGFloat = 6
+    /// 编号行内各元素间距（与 HStack(spacing:) 保持一致）。
+    public static let numberRowSpacing: CGFloat = 4
+    /// 槽位编号「10」在 20pt bold rounded 下的宽度上限估算（槽位数上限就是 10）。
+    public static let slotNumberMaxWidth: CGFloat = 26
+
+    /// 编号行（槽位编号 + 可选串联色点 + N 个状态角标）的估算总宽。
+    ///
+    /// 为什么把它做成纯函数：v2.11.0 hotfix 的教训是「往扇区里加元素」必须先算清楚
+    /// 它会不会越出楔形。角标横向排布时的约束就是这行的总宽 ≤ 该半径处弦宽，
+    /// 有了纯函数才能在 smoke 测试里把这条不变量钉死。
+    public static func numberRowWidth(hasConnectionDot: Bool, badgeCount: Int) -> CGFloat {
+        var width = slotNumberMaxWidth
+        if hasConnectionDot { width += numberRowSpacing + connectionDotWidth }
+        if badgeCount > 0 {
+            width += CGFloat(badgeCount) * (numberRowSpacing + badgeIconWidth)
+        }
+        return width
+    }
+
+    /// 编号行在半径 `radius` 处是否仍待在自己的楔形内。
+    public static func numberRowFits(hasConnectionDot: Bool,
+                                     badgeCount: Int,
+                                     atRadius radius: CGFloat,
+                                     segmentDegrees: Double) -> Bool {
+        let width = numberRowWidth(hasConnectionDot: hasConnectionDot, badgeCount: badgeCount)
+        return width <= chordWidth(atRadius: radius, segmentDegrees: segmentDegrees)
+    }
+}

@@ -272,6 +272,17 @@ enum AppTheme {
     static let radialEmptyText = dyn(light: Color.black.opacity(0.30), dark: Color.white.opacity(0.26))
     static func radialEmptyText(_ scheme: ColorScheme) -> Color { radialEmptyText }
 
+    // MARK: - Radial Segment Badges (v2.11.1)
+
+    /// 扇区附件角标（回形针）的图标色。刻意比编号更弱：它是「有没有」的信号，
+    /// 不该跟槽位编号抢视觉权重。
+    static let radialBadgeIcon = dyn(light: Color.black.opacity(0.58), dark: Color.white.opacity(0.70))
+    static func radialBadgeIcon(_ scheme: ColorScheme) -> Color { radialBadgeIcon }
+
+    /// 扇区附件角标的圆形底。给一点底色是为了在手动封面图/深色扇区上仍能辨认。
+    static let radialBadgeFill = dyn(light: Color.black.opacity(0.08), dark: Color.white.opacity(0.14))
+    static func radialBadgeFill(_ scheme: ColorScheme) -> Color { radialBadgeFill }
+
     static let radialShadow = dyn(light: Color.black.opacity(0.13), dark: Color.black.opacity(0.34))
     static func radialShadow(_ scheme: ColorScheme) -> Color { radialShadow }
 
