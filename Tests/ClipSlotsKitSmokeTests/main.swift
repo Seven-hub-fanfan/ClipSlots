@@ -1373,7 +1373,7 @@ do {
 
     // ── 版本号必须与本次发布一致（历史上 CLI_VERSION 漂移过好几次）
     let ver = runCLI(["version"])
-    t.equal(ver.json["version"] as? String, "2.11.2", "★CLI_VERSION 必须与 App 版本同步为 2.11.2")
+    t.equal(ver.json["version"] as? String, "2.11.3", "★CLI_VERSION 必须与 App 版本同步为 2.11.3")
 
     // ── ① 落盘回读
     let set1 = runCLI(["set-thumbnail", "1", "--image", imgA.path])

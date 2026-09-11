@@ -2,7 +2,7 @@
 name: clipslots-manager
 description: 当需要以编程方式读取、写入、检索、加载或整理 macOS 剪贴板槽位管理器 ClipSlots 中的内容时使用。把文本/文件存进槽位、读出内容、搜索历史、把内容放到系统剪贴板、批量整理文件夹素材到槽位组/页面、删除槽位组/页面等。前置要求：macOS + 已安装 ClipSlots v2.9.33+，CLI 位于 /usr/local/bin/clipslots。
 version: 1.6.0
-compatibility: Requires macOS, ClipSlots, and /usr/local/bin/clipslots. Verified with ClipSlots CLI 2.11.2; probe version and command help at runtime.
+compatibility: Requires macOS, ClipSlots, and /usr/local/bin/clipslots. Verified with ClipSlots CLI 2.11.3; probe version and command help at runtime.
 used_when: 当需要以编程方式读取、写入、检索、加载或整理 macOS 剪贴板槽位管理器 ClipSlots 中的槽位内容时使用（写文本/文件进槽位、读出内容、搜索历史、把内容放到系统剪贴板、批量整理文件夹素材到槽位组/页面、删除槽位组/页面等）。
 requires: macOS + 已安装 ClipSlots v2.9.33+，CLI 位于 /usr/local/bin/clipslots。
 ---
@@ -56,7 +56,7 @@ requires: macOS + 已安装 ClipSlots v2.9.33+，CLI 位于 /usr/local/bin/clips
 
 **首选工作流**：动手前先 `clipslots help` / `groups` / `list` 了解现状，再执行读写；写入前优先选空槽，避免覆盖。
 
-## 1. 命令参考（v2.11.2，共 18 个；每个子命令均支持 `--help`/`-h`）
+## 1. 命令参考（v2.11.3，共 18 个；每个子命令均支持 `--help`/`-h`）
 
 ### 只读
 ```bash

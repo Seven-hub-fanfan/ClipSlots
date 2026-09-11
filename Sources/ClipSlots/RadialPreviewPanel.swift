@@ -16,6 +16,11 @@ struct RadialPreviewPanel: View {
     @State private var dynamicTitle: String = ""
     @State private var dynamicSubtitle: String = ""
 
+    /// 面板外形：圆角矩形，背景 / 描边 / 裁剪共用同一份，避免三处圆角写歪。
+    private var panelShape: RoundedRectangle {
+        RoundedRectangle(cornerRadius: 14, style: .continuous)
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             // v2.7.13: use this app toolbar as the only top bar.
@@ -62,9 +67,19 @@ struct RadialPreviewPanel: View {
         // v2.9.25 hotfix5: 固定填满整个窗口并顶部对齐，工具栏钉在顶部，
         // 内容区始终占据剩余空间，空态/悬停态切换时工具栏不再跳动。
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-        // v2.7.17: window remains transparent. Background is only drawn inside the
-        // individual text/file preview cards, not the entire window.
-        .background(Color.clear)
+        // v2.11.3：整个面板改为一整块磨砂玻璃。
+        //
+        // 此前这里是 `Color.clear`（v2.7.17 的"窗口全透明、只有内容卡片自带底"方案），
+        // 配上纯白不透明的内容卡片，观感就是"一块白板悬在深色圆盘上"。
+        // 现在反过来：面板本体用 `.ultraThinMaterial` 打底 —— 模糊透出下层圆盘扇区，
+        // 亮/暗模式由系统 material 自动适配（不含任何硬编码白色，也不含任何彩色）；
+        // 再压 0.88 不透明度，让通透感更明显。
+        //
+        // 层次关系：面板 ultraThin（最透）< 头部工具栏 ultraThin 叠加（略实，自然分隔）
+        //          < 内容卡片 regularMaterial（最实，保证正文可读）。
+        .background(panelShape.fill(.ultraThinMaterial).opacity(0.88))
+        .overlay(panelShape.stroke(Color.primary.opacity(0.08), lineWidth: 0.5))
+        .clipShape(panelShape)
         .onReceive(NotificationCenter.default.publisher(for: .radialMenuHoveredSlotChanged)) { note in
             if let payload = note.userInfo?["preview"] as? RadialHoverPreviewPayload {
                 dynamicTitle = payload.title
@@ -294,7 +309,6 @@ enum RadialAttachmentKind {
 /// 而且整个解码都在后台线程 + 全局 ThumbnailDecodeLimiter 限流下进行。
 private struct RadialAttachmentStrip: View {
     let attachments: [SlotContent.SlotAttachment]
-    @Environment(\.colorScheme) private var colorScheme
 
     /// 最多渲染几张图片缩略图。再多就折成「+N」——预览窗只有 360pt 宽，
     /// 也避免一次悬停就拉起十几个解码任务。
@@ -317,7 +331,10 @@ private struct RadialAttachmentStrip: View {
                     .font(.system(size: 10, weight: .bold))
                 Spacer(minLength: 0)
             }
-            .foregroundColor(AppTheme.radialAttachmentBadge(colorScheme))
+            // v2.11.3：预览窗整体改走系统中性色，这里不再染品牌蓝紫。
+            // （扇区上那枚 paperclip 角标仍保留品牌色 —— 那是圆盘本体的视觉锚点；
+            //   预览窗则要尽量"隐形"，让内容本身说话。）
+            .foregroundColor(.secondary)
 
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 8) {
@@ -337,11 +354,15 @@ private struct RadialAttachmentStrip: View {
                     if plan.hiddenImageCount > 0 {
                         Text("+\(plan.hiddenImageCount)")
                             .font(.system(size: 12, weight: .bold, design: .rounded))
-                            .foregroundColor(AppTheme.radialAttachmentBadge(colorScheme))
+                            .foregroundColor(.primary)
                             .frame(width: Self.thumbnailSide, height: Self.thumbnailSide)
                             .background(
                                 RoundedRectangle(cornerRadius: 8, style: .continuous)
-                                    .fill(AppTheme.radialAttachmentBadgeFill(colorScheme))
+                                    .fill(.thinMaterial)
+                            )
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                    .stroke(Color.primary.opacity(0.10), lineWidth: 0.5)
                             )
                             .help("另有 \(plan.hiddenImageCount) 张图片附件")
                     }
@@ -363,7 +384,7 @@ private struct RadialAttachmentStrip: View {
         HStack(spacing: 6) {
             Image(systemName: RadialAttachmentKind.icon(for: att))
                 .font(.system(size: 13, weight: .semibold))
-                .foregroundColor(AppTheme.radialAttachmentBadge(colorScheme))
+                .foregroundColor(.secondary)
                 .frame(width: 18)
 
             VStack(alignment: .leading, spacing: 1) {
@@ -381,7 +402,11 @@ private struct RadialAttachmentStrip: View {
         .frame(maxWidth: 140)
         .background(
             RoundedRectangle(cornerRadius: 8, style: .continuous)
-                .fill(AppTheme.radialAttachmentBadgeFill(colorScheme))
+                .fill(.thinMaterial)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .stroke(Color.primary.opacity(0.10), lineWidth: 0.5)
         )
         .help(att.name)
     }
@@ -563,6 +588,41 @@ private struct RadialImageFilePreview: View {
     }
 }
 
+// MARK: - v2.11.3 预览卡片统一磨砂背景
+
+/// 预览窗内各类内容卡片（文本 / 文件 / HTML）的统一背景。
+///
+/// v2.11.3 之前用的是 `Color(NSColor.textBackgroundColor)` —— 亮色模式下就是**纯白且完全不透明**，
+/// 一块白矩形直接糊在深色圆盘上，既突兀又把下层扇区完全挡死。
+/// 现在换成系统 material：
+///  · `.regularMaterial` 自带高斯模糊，下层圆盘内容能透上来但不干扰阅读；
+///  · material 本身就是动态色，亮/暗模式自动适配，不再有任何硬编码白色；
+///  · 额外压 0.88 不透明度，让通透感再上一档。
+///
+/// 关于 0.88 的施加位置：只压在**背景层**上，不是整卡 `.opacity(0.88)`。
+/// 整卡压会连带把文字也降到 88%，本来就半透明的底上再叠淡文字，正文可读性会明显掉档；
+/// 只压背景层即可拿到"背景更透"的观感，同时正文保持 100% 实心。
+private struct RadialPreviewCardBackground: ViewModifier {
+    var cornerRadius: CGFloat = 12
+
+    func body(content: Content) -> some View {
+        let shape = RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+        return content
+            .background(shape.fill(.regularMaterial).opacity(0.88))
+            // 半透明底在浅色墙纸上边界会发虚，补一道极淡的中性描边把卡片轮廓勾出来。
+            // 用 Color.primary 派生 → 亮/暗模式自动翻转，不引入任何彩色。
+            .overlay(shape.stroke(Color.primary.opacity(0.08), lineWidth: 0.5))
+            .clipShape(shape)
+            .shadow(color: .black.opacity(0.12), radius: 10, x: 0, y: 4)
+    }
+}
+
+private extension View {
+    func radialPreviewCard(cornerRadius: CGFloat = 12) -> some View {
+        modifier(RadialPreviewCardBackground(cornerRadius: cornerRadius))
+    }
+}
+
 private struct RadialTextPreview: View {
     let text: String
 
@@ -572,16 +632,14 @@ private struct RadialTextPreview: View {
         ScrollView {
             Text(text.isEmpty ? "空文本" : text)
                 .font(.system(size: 13, weight: .regular, design: .monospaced))
-                .foregroundColor(Color(NSColor.labelColor))
+                .foregroundColor(.primary)
                 .lineSpacing(3)
                 .fixedSize(horizontal: false, vertical: true)
                 .textSelection(.enabled)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(14)
         }
-        .background(Color(NSColor.textBackgroundColor))
-        .cornerRadius(12)
-        .shadow(color: .black.opacity(0.12), radius: 10, x: 0, y: 4)
+        .radialPreviewCard()
         .padding(14)
         .animation(Anim.interactive, value: text)
     }
@@ -615,9 +673,7 @@ private struct RadialFileCardPreview: View {
         .padding(18)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         // v2.7.17: file preview also gets its own adaptive card.
-        .background(Color(NSColor.textBackgroundColor))
-        .cornerRadius(12)
-        .shadow(color: .black.opacity(0.12), radius: 10, x: 0, y: 4)
+        .radialPreviewCard()
         .padding(14)
         .animation(Anim.interactive, value: url)
     }
@@ -745,9 +801,7 @@ private struct RadialHTMLPreview: View {
     let html: String
     var body: some View {
         HTMLWebLivePreview(html: html)
-            .background(Color(NSColor.textBackgroundColor))
-            .cornerRadius(12)
-            .shadow(color: .black.opacity(0.12), radius: 10, x: 0, y: 4)
+            .radialPreviewCard()
             .padding(14)
     }
 }
