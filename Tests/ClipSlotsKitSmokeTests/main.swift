@@ -1112,9 +1112,10 @@ do {
             "alpha 超界应被夹到 [0,1]，不产生诡异插值")
 
     // ④ ★核心：每个槽位、每种外观，选出来的墨色都要满足 AA（≥4.5:1）
+    //    注意用的是**提亮后**的圆盘色（胶囊底铺的就是它）。
     for slot in 1...SlotAccentPalette.light.count {
         for isDark in [false, true] {
-            let accent = isDark ? SlotAccentPalette.dark(forSlot: slot) : SlotAccentPalette.light(forSlot: slot)
+            let accent = SlotAccentPalette.radial(forSlot: slot, isDark: isDark)
             let surface = isDark ? SlotAccentPalette.darkSurface : SlotAccentPalette.lightSurface
             let composited = accent.composited(alpha: SlotAccentPalette.pillFillOpacity, over: surface)
             let ink = SlotAccentPalette.pillInk(forSlot: slot, isDark: isDark)
@@ -1140,6 +1141,50 @@ do {
             "底栏胶囊底色应比扇区描边更实（它是常驻控件，不是瞬时反馈）")
     t.check(SlotAccentPalette.hoverFillOpacity > 0.2 && SlotAccentPalette.pillFillOpacity <= 1.0,
             "不透明度都应落在合理区间内")
+
+    // ⑦ HSB 往返与提亮（v2.11.4 hotfix：圆盘色偏深偏闷，统一过一层提亮）
+    for probe in [SlotAccentPalette.RGB(0.12, 0.56, 0.28),
+                  SlotAccentPalette.RGB(0.94, 0.76, 0.32),
+                  SlotAccentPalette.RGB(0.16, 0.46, 0.70),
+                  SlotAccentPalette.RGB(0.5, 0.5, 0.5)] {
+        let (h, s, v) = probe.hsb
+        let roundTrip = SlotAccentPalette.RGB.fromHSB(hue: h, saturation: s, brightness: v)
+        t.check(abs(roundTrip.red - probe.red) < 0.0001
+                    && abs(roundTrip.green - probe.green) < 0.0001
+                    && abs(roundTrip.blue - probe.blue) < 0.0001,
+                "RGB→HSB→RGB 往返必须无损（\(probe)）")
+    }
+    t.check(SlotAccentPalette.RGB(0.3, 0.3, 0.3).hsb.saturation == 0, "灰色的饱和度为 0")
+    t.equal(SlotAccentPalette.RGB.fromHSB(hue: 0.4, saturation: 0, brightness: 0.6),
+            SlotAccentPalette.RGB(0.6, 0.6, 0.6),
+            "零饱和度时任何色相都还原成灰")
+
+    // ★提亮必须真的更亮更艳，且色相不许漂移 —— 色相一漂，圆盘和主界面卡片就不再是同一支色。
+    for slot in 1...SlotAccentPalette.light.count {
+        for isDark in [false, true] {
+            let base = isDark ? SlotAccentPalette.dark(forSlot: slot) : SlotAccentPalette.light(forSlot: slot)
+            let vivid = SlotAccentPalette.radial(forSlot: slot, isDark: isDark)
+            let (baseH, baseS, baseV) = base.hsb
+            let (vividH, vividS, vividV) = vivid.hsb
+            t.check(abs(vividH - baseH) < 0.005,
+                    "★slot \(slot)（\(isDark ? "深色" : "浅色")）提亮后色相不得漂移（\(baseH) → \(vividH)）")
+            t.check(vividV > baseV, "★slot \(slot)（\(isDark ? "深色" : "浅色")）提亮后明度必须更高")
+            t.check(vividS >= baseS - 0.0001,
+                    "★slot \(slot)（\(isDark ? "深色" : "浅色")）提亮后饱和度不得降低")
+            // 刻意**不**断言 WCAG 相对亮度必须更高：拉饱和度会压低非主导通道，
+            // 而相对亮度是感知加权（绿权重 0.7152），所以「更艳」完全可能让它反而下降
+            // （深色橙 0.95/0.55/0.31 提亮后绿通道从 .55 掉到 .42 就是这种情况）。
+            // 这里要保的是「HSB 更亮更艳、色相不动」，不是「亮度数值单调上升」。
+            t.check(max(vivid.red, max(vivid.green, vivid.blue)) >= max(base.red, max(base.green, base.blue)) - 0.0001,
+                    "★slot \(slot)（\(isDark ? "深色" : "浅色")）提亮后主导通道不得变暗")
+        }
+    }
+    t.check(SlotAccentPalette.radialSaturationScale > 1 && SlotAccentPalette.radialBrightnessLift > 0,
+            "圆盘提亮参数必须真的往「更艳更亮」方向走")
+    // 明度用补足式抬升：已经接近纯白的颜色不会被抬爆成 1（否则粉彩系会一起糊成白）
+    let nearWhite = SlotAccentPalette.RGB(0.98, 0.96, 0.94)
+    t.check(nearWhite.vivid(saturationScale: 1.2, brightnessLift: 0.45).hsb.brightness < 1.0,
+            "接近纯白的颜色提亮后仍应 < 1（补足式抬升不会溢出）")
 }
 
 // MARK: - 悬浮预览 Panel 附件展示计划（v2.11.1 功能 5）

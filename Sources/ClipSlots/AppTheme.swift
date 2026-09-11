@@ -177,14 +177,24 @@ enum AppTheme {
     }
     static func slotAccent(_ slot: Int, scheme: ColorScheme) -> Color { slotAccent(slot) }
 
-    /// 槽位色的半透明版本（动态色 + 指定 alpha）。
+    /// 圆盘专用的**提亮版**槽位色（不透明，用于扇区外沿「上次粘贴」弧这类描线）。
     ///
-    /// 不能写成 `slotAccent(slot).opacity(x)`：`slotAccent` 返回的是 dynamic NSColor 包出来的
+    /// v2.11.4 hotfix：圆盘上的槽位色是大面积半透明色块，基础调色板铺上去偏深偏闷，
+    /// 于是统一过一层 `SlotAccentPalette.radial`（色相不动，饱和度 ×1.20、明度朝白抬 45%）。
+    /// 主界面卡片仍用基础色，两边同色相、只差一档明度，看得出是同一支色。
+    static func radialSlotAccent(_ slot: Int) -> Color {
+        dyn(light: color(SlotAccentPalette.radialLight(forSlot: slot)),
+            dark: color(SlotAccentPalette.radialDark(forSlot: slot)))
+    }
+
+    /// 圆盘槽位色的半透明版本（动态色 + 指定 alpha）。
+    ///
+    /// 不能写成 `radialSlotAccent(slot).opacity(x)`：它返回的是 dynamic NSColor 包出来的
     /// `Color`，SwiftUI 的 `.opacity` 会在**当前**解析结果上乘 alpha，深浅切换时不会重新解析。
     /// 所以这里重新构造一次 dynamic provider，在绘制阶段先选色板再套 alpha。
     private static func slotAccentTint(_ slot: Int, opacity: Double) -> Color {
-        let lightNS = NSColor(color(SlotAccentPalette.light(forSlot: slot))).withAlphaComponent(opacity)
-        let darkNS = NSColor(color(SlotAccentPalette.dark(forSlot: slot))).withAlphaComponent(opacity)
+        let lightNS = NSColor(color(SlotAccentPalette.radialLight(forSlot: slot))).withAlphaComponent(opacity)
+        let darkNS = NSColor(color(SlotAccentPalette.radialDark(forSlot: slot))).withAlphaComponent(opacity)
         return Color(nsColor: NSColor(name: nil) { appearance in
             appearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua ? darkNS : lightNS
         })

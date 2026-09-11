@@ -63,6 +63,58 @@ public enum SlotAccentPalette {
 
         public static let white = RGB(1, 1, 1)
         public static let black = RGB(0, 0, 0)
+
+        // MARK: - HSB 与提亮
+
+        /// 转成 HSB（hue 以 0...1 圈计，与 `NSColor` / `colorsys` 同约定）。
+        public var hsb: (hue: Double, saturation: Double, brightness: Double) {
+            let maxV = max(red, green, blue)
+            let minV = min(red, green, blue)
+            let delta = maxV - minV
+            guard delta > 0, maxV > 0 else { return (0, 0, maxV) }
+
+            let hue: Double
+            switch maxV {
+            case red:   hue = ((green - blue) / delta).truncatingRemainder(dividingBy: 6)
+            case green: hue = (blue - red) / delta + 2
+            default:    hue = (red - green) / delta + 4
+            }
+            let normalized = (hue / 6).truncatingRemainder(dividingBy: 1)
+            return (normalized < 0 ? normalized + 1 : normalized, delta / maxV, maxV)
+        }
+
+        public static func fromHSB(hue: Double, saturation: Double, brightness: Double) -> RGB {
+            let s = min(max(saturation, 0), 1)
+            let v = min(max(brightness, 0), 1)
+            guard s > 0 else { return RGB(v, v, v) }
+
+            let h = (hue.truncatingRemainder(dividingBy: 1) + 1).truncatingRemainder(dividingBy: 1) * 6
+            let sector = floor(h)
+            let f = h - sector
+            let p = v * (1 - s)
+            let q = v * (1 - s * f)
+            let t = v * (1 - s * (1 - f))
+
+            switch Int(sector) % 6 {
+            case 0: return RGB(v, t, p)
+            case 1: return RGB(q, v, p)
+            case 2: return RGB(p, v, t)
+            case 3: return RGB(p, q, v)
+            case 4: return RGB(t, p, v)
+            default: return RGB(v, p, q)
+            }
+        }
+
+        /// 保持色相不变，把饱和度按比例拉高、明度朝纯白方向抬一档。
+        ///
+        /// 明度用「补足式」`v + (1 - v) * lift` 而不是 `v * scale`：后者对本来就亮的深色调色板
+        /// （粉彩系，v 已接近 0.95）几乎无效，还会在乘出 >1 时被截断成失真的纯色。
+        public func vivid(saturationScale: Double, brightnessLift: Double) -> RGB {
+            let (h, s, v) = hsb
+            return RGB.fromHSB(hue: h,
+                               saturation: s * saturationScale,
+                               brightness: v + (1 - v) * min(max(brightnessLift, 0), 1))
+        }
     }
 
     /// 胶囊 / 扇区上的墨色只有黑白两种取值，避免调用方自由发挥。
@@ -99,6 +151,31 @@ public enum SlotAccentPalette {
     public static func light(forSlot slot: Int) -> RGB { light[index(forSlot: slot)] }
     public static func dark(forSlot slot: Int) -> RGB { dark[index(forSlot: slot)] }
 
+    // MARK: - 圆盘专用「提亮版」调色板（v2.11.4 hotfix）
+
+    // 圆盘上的槽位色是**大面积半透明色块**（扇区高亮、底栏胶囊、外沿弧），和主界面卡片上那种
+    // 几毫米见方的小角标不是一回事：同一支色，铺成小色点时「深而稳」，铺成扇区就是「脏而闷」，
+    // 叠上 0.45~0.85 的不透明度之后更是往灰里塌。
+    //
+    // 所以圆盘不直接吃基础调色板，而是过一层提亮：色相锁死不动（红还是红、绿还是绿，
+    // 与主界面卡片仍然一眼同源），只把饱和度 ×1.20、明度朝白抬 45%。
+    // 主界面卡片 / 连接色点等仍用基础调色板，本次不动。
+
+    public static let radialSaturationScale: Double = 1.20
+    public static let radialBrightnessLift: Double = 0.45
+
+    private static func radialVivid(_ rgb: RGB) -> RGB {
+        rgb.vivid(saturationScale: radialSaturationScale, brightnessLift: radialBrightnessLift)
+    }
+
+    public static func radialLight(forSlot slot: Int) -> RGB { radialVivid(light(forSlot: slot)) }
+    public static func radialDark(forSlot slot: Int) -> RGB { radialVivid(dark(forSlot: slot)) }
+
+    /// 圆盘用色（按外观选深浅两套之一，已提亮）。
+    public static func radial(forSlot slot: Int, isDark: Bool) -> RGB {
+        isDark ? radialDark(forSlot: slot) : radialLight(forSlot: slot)
+    }
+
     // MARK: - 交互态不透明度（圆盘与底栏共用，改一处即全局生效）
 
     /// 悬停扇区填充：保持透明感，让下面的磨砂玻璃与相邻扇区分界线仍然透出来。
@@ -130,8 +207,10 @@ public enum SlotAccentPalette {
     }
 
     /// 便利重载：直接问「某个槽位在某个外观下的胶囊该用什么墨色」。
+    ///
+    /// 注意算的是**提亮后**的圆盘用色：胶囊底铺的就是它，拿基础色算会选错墨色。
     public static func pillInk(forSlot slot: Int, isDark: Bool) -> Ink {
-        ink(for: isDark ? dark(forSlot: slot) : light(forSlot: slot),
+        ink(for: radial(forSlot: slot, isDark: isDark),
             fillOpacity: pillFillOpacity,
             over: isDark ? darkSurface : lightSurface)
     }

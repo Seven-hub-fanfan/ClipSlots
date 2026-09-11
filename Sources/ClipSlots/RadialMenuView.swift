@@ -548,7 +548,8 @@ struct RadialMenuView: View {
                 }
 
                 // 外沿高亮弧放在 hover 描边**之上**：hover 时也要看得见这格是上次粘贴的。
-                // 颜色取 AppTheme.slotAccent(slot)，与主界面卡片右上角的「上次粘贴」角标同色。
+                // v2.11.4 hotfix：改用 `radialSlotAccent`（提亮版）——基础色描在深色扇区外沿
+                // 会闷成一条暗边，尤其琥珀/橄榄那两支几乎看不出是高亮。色相与主界面卡片角标一致。
                 if isLastPasted,
                    let arc = RadialSegmentLayoutCalculator.lastPasteArc(outerRadius: outerRadius,
                                                                        startDegrees: startAngle.degrees,
@@ -556,9 +557,9 @@ struct RadialMenuView: View {
                     SegmentOuterArcShape(startAngle: .degrees(arc.startDegrees),
                                          endAngle: .degrees(arc.endDegrees),
                                          radius: arc.radius)
-                        .stroke(AppTheme.slotAccent(slot),
+                        .stroke(AppTheme.radialSlotAccent(slot),
                                 style: StrokeStyle(lineWidth: arc.lineWidth, lineCap: .round))
-                        .shadow(color: AppTheme.slotAccent(slot).opacity(0.45), radius: 3)
+                        .shadow(color: AppTheme.radialSlotAccent(slot).opacity(0.45), radius: 3)
                         .allowsHitTesting(false)
                 }
 
