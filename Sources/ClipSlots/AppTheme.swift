@@ -159,18 +159,50 @@ enum AppTheme {
     ///
     /// v2.10.93: 深/浅两套调色板合并成一套动态色（原先是两个 `static let [Color]`，
     /// 由调用方按 scheme 选数组 —— 那正是逼着卡片必须读 colorScheme 的原因之一）。
-    private static let slotAccents: [Color] = [
-        dyn(light: Color(red: 0.12, green: 0.56, blue: 0.28), dark: Color(red: 0.42, green: 0.82, blue: 0.55)),
-        dyn(light: Color(red: 0.72, green: 0.49, blue: 0.04), dark: Color(red: 0.94, green: 0.76, blue: 0.32)),
-        dyn(light: Color(red: 0.78, green: 0.31, blue: 0.08), dark: Color(red: 0.95, green: 0.55, blue: 0.31)),
-        dyn(light: Color(red: 0.72, green: 0.24, blue: 0.43), dark: Color(red: 0.91, green: 0.48, blue: 0.64)),
-        dyn(light: Color(red: 0.16, green: 0.46, blue: 0.70), dark: Color(red: 0.48, green: 0.72, blue: 0.92))
-    ]
+    ///
+    /// v2.11.4: 调色板数值本体搬到 `ClipSlotsKit.SlotAccentPalette`。这里只负责把 Kit 的
+    /// 纯 RGB 包成动态 `Color`。动机是槽位色从「卡片装饰」升级成了「圆盘交互反馈」
+    /// （悬停扇区、底栏胶囊都要跟色，还要按亮度自动决定黑字/白字），亮度与对比度计算
+    /// 必须能被 smoke 测试覆盖，而 App 层在本机跑不了测试。
+    private static let slotAccents: [Color] = zip(SlotAccentPalette.light, SlotAccentPalette.dark).map { pair in
+        dyn(light: color(pair.0), dark: color(pair.1))
+    }
+
+    private static func color(_ rgb: SlotAccentPalette.RGB) -> Color {
+        Color(red: rgb.red, green: rgb.green, blue: rgb.blue)
+    }
 
     static func slotAccent(_ slot: Int) -> Color {
-        slotAccents[max(0, slot - 1) % slotAccents.count]
+        slotAccents[SlotAccentPalette.index(forSlot: slot)]
     }
     static func slotAccent(_ slot: Int, scheme: ColorScheme) -> Color { slotAccent(slot) }
+
+    /// 槽位色的半透明版本（动态色 + 指定 alpha）。
+    ///
+    /// 不能写成 `slotAccent(slot).opacity(x)`：`slotAccent` 返回的是 dynamic NSColor 包出来的
+    /// `Color`，SwiftUI 的 `.opacity` 会在**当前**解析结果上乘 alpha，深浅切换时不会重新解析。
+    /// 所以这里重新构造一次 dynamic provider，在绘制阶段先选色板再套 alpha。
+    private static func slotAccentTint(_ slot: Int, opacity: Double) -> Color {
+        let lightNS = NSColor(color(SlotAccentPalette.light(forSlot: slot))).withAlphaComponent(opacity)
+        let darkNS = NSColor(color(SlotAccentPalette.dark(forSlot: slot))).withAlphaComponent(opacity)
+        return Color(nsColor: NSColor(name: nil) { appearance in
+            appearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua ? darkNS : lightNS
+        })
+    }
+
+    /// 位于「槽位色胶囊」之上的墨色：按合成后亮度自动取黑或白（深浅两套各判一次）。
+    private static func slotPillInk(_ slot: Int) -> Color {
+        func ns(isDark: Bool) -> NSColor {
+            SlotAccentPalette.pillInk(forSlot: slot, isDark: isDark) == .black
+                ? NSColor.black.withAlphaComponent(0.88)
+                : NSColor.white
+        }
+        let lightNS = ns(isDark: false)
+        let darkNS = ns(isDark: true)
+        return Color(nsColor: NSColor(name: nil) { appearance in
+            appearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua ? darkNS : lightNS
+        })
+    }
 
     /// High-chroma light fills for card actions. These stay bright without relying on
     /// opacity, which would mix the hue with the card background and create a muted gray cast.
@@ -243,6 +275,45 @@ enum AppTheme {
         isHovered ? Color.accentColor.opacity(0.70) : radialStrokeIdle
     }
     static func radialStroke(_ scheme: ColorScheme, isHovered: Bool) -> Color { radialStroke(isHovered: isHovered) }
+
+    // MARK: - Radial Menu · 槽位色跟随（v2.11.4）
+    //
+    // 在 v2.11.3 之前，圆盘的悬停反馈统一是「系统强调色蓝」：无论悬停第 1 格还是第 7 格，
+    // 高亮都是同一种蓝。这让圆盘和主界面成了两套语言 —— 主界面每张卡片都有自己的槽位色，
+    // 到了圆盘全被抹平，用户没法用颜色记住「绿色那格是我的常用文案」。
+    //
+    // v2.11.4 让悬停高亮与底栏「上次粘贴」胶囊都跟随槽位色。`slot` 传 nil（或非法值）时
+    // 回落到原来的蓝色 / 玻璃灰，保证组扇区模式与「无上次粘贴记录」这两条路径行为不变。
+
+    /// 悬停扇区填充：槽位色 @0.45。透明度刻意留高，磨砂玻璃与扇区分界线要能透出来。
+    static func radialSegmentHoverFill(slot: Int?) -> Color {
+        guard let slot, slot >= 1 else { return radialSegmentHovered }
+        return slotAccentTint(slot, opacity: SlotAccentPalette.hoverFillOpacity)
+    }
+
+    /// 悬停扇区描边：槽位色 @0.72，比填充实一档，负责「选中」的硬边界。
+    static func radialSegmentHoverStroke(slot: Int?) -> Color {
+        guard let slot, slot >= 1 else { return radialStroke(isHovered: true) }
+        return slotAccentTint(slot, opacity: SlotAccentPalette.hoverStrokeOpacity)
+    }
+
+    /// 底栏「上次粘贴」胶囊底色：槽位色 @0.85（无记录时回落玻璃灰）。
+    static func radialSlotPillFill(slot: Int?) -> Color {
+        guard let slot, slot >= 1 else { return radialGlassButtonTint }
+        return slotAccentTint(slot, opacity: SlotAccentPalette.pillFillOpacity)
+    }
+
+    /// 底栏「上次粘贴」胶囊描边。
+    static func radialSlotPillStroke(slot: Int?) -> Color {
+        guard let slot, slot >= 1 else { return radialGlassButtonStroke }
+        return slotAccentTint(slot, opacity: SlotAccentPalette.pillStrokeOpacity)
+    }
+
+    /// 底栏「上次粘贴」胶囊文字 / 图标色：按合成后亮度自动黑或白（无记录时回落玻璃文字色）。
+    static func radialSlotPillText(slot: Int?) -> Color {
+        guard let slot, slot >= 1 else { return radialGlassButtonText }
+        return slotPillInk(slot)
+    }
 
     static let radialDivider = dyn(light: Color.white.opacity(0.44), dark: Color.white.opacity(0.075))
     static func radialDivider(_ scheme: ColorScheme) -> Color { radialDivider }

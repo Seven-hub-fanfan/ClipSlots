@@ -442,8 +442,15 @@ struct RadialMenuView: View {
     /// ——那是 SF Symbols 6（macOS 15+）才有的符号，本 App 最低支持 13.0，老系统会渲染成空白方块。
     ///
     /// 无记录时整颗置灰（0.35）并禁用，tooltip 提示「尚未粘贴过任何槽位」。
+    ///
+    /// v2.11.4：有记录时胶囊底色改成**目标槽位自己的颜色**（@0.85），文字/图标按合成后亮度
+    /// 自动取黑或白（`SlotAccentPalette.pillInk`，走 WCAG 对比度而非 HSB brightness——
+    /// 后者会把深蓝和亮黄判成同一亮度，必然选错墨色）。这样这颗按钮、卡片角标、扇区外弧
+    /// 三处的颜色是同一个，眼睛不用二次翻译「上次粘贴的是哪一格」。
+    /// 无记录时保持原来的玻璃灰 token，不做染色。
     private var lastPasteJumpButton: some View {
         let address = store.lastPasteAddress
+        let accentSlot = address?.slot
         return Button {
             jumpToLastPasteInRadial()
         } label: {
@@ -454,11 +461,11 @@ struct RadialMenuView: View {
                     .font(.system(size: 11, weight: .bold))
                     .lineLimit(1)
             }
-            .foregroundColor(AppTheme.radialGlassButtonText(colorScheme))
+            .foregroundColor(AppTheme.radialSlotPillText(slot: accentSlot))
             .padding(.horizontal, 8)
             .padding(.vertical, 4)
-            .background(Capsule().fill(AppTheme.radialGlassButtonTint(colorScheme)))
-            .overlay(Capsule().stroke(AppTheme.radialGlassButtonStroke(colorScheme), lineWidth: 0.7))
+            .background(Capsule().fill(AppTheme.radialSlotPillFill(slot: accentSlot)))
+            .overlay(Capsule().stroke(AppTheme.radialSlotPillStroke(slot: accentSlot), lineWidth: 0.7))
             .contentShape(Capsule())
         }
         .buttonStyle(.plain)
@@ -524,11 +531,15 @@ struct RadialMenuView: View {
 
             ZStack {
                 PieSegmentShape(startAngle: startAngle, endAngle: endAngle, innerRadius: deadZoneRadius, outerRadius: outerRadius)
-                    .fill(AppTheme.radialSegment(colorScheme, isEmpty: content.isEmpty, isHovered: isHovered))
+                    // v2.11.4: 悬停填充改用**该槽位自己的颜色**（原先是统一的系统强调色蓝）。
+                    // 非悬停态仍走原来的白玻璃档位 —— 十格全染色会变成调色盘，反而看不出焦点。
+                    .fill(isHovered
+                          ? AppTheme.radialSegmentHoverFill(slot: slot)
+                          : AppTheme.radialSegment(colorScheme, isEmpty: content.isEmpty, isHovered: false))
 
                 if isHovered {
                     PieSegmentShape(startAngle: startAngle, endAngle: endAngle, innerRadius: deadZoneRadius, outerRadius: outerRadius)
-                        .stroke(AppTheme.radialStroke(colorScheme, isHovered: true), lineWidth: 2)
+                        .stroke(AppTheme.radialSegmentHoverStroke(slot: slot), lineWidth: 2)
                         .background(
                             PieSegmentShape(startAngle: startAngle, endAngle: endAngle, innerRadius: deadZoneRadius, outerRadius: outerRadius)
                                 .fill(Color.white.opacity(colorScheme == .dark ? 0.045 : 0.22))

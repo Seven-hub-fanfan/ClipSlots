@@ -1072,6 +1072,76 @@ do {
     }
 }
 
+// MARK: - 槽位色跟随（v2.11.4）：调色板取色 + 黑白墨色对比度
+//
+// v2.11.4 让圆盘悬停高亮与底栏「上次粘贴」胶囊都跟随槽位色，于是「胶囊上该写黑字还是白字」
+// 从审美问题变成了可读性问题。这一组把三条不变量钉住：
+//  1. 取色循环与历史 `AppTheme.slotAccent` 完全一致（slot 从 1 起、按调色板长度取模、非法值兜到首色）；
+//  2. 亮度算的是 WCAG 相对亮度，不是 (r+g+b)/3 —— 后者会把纯蓝判得比纯黄还亮，选墨色必翻车；
+//  3. 每个槽位在深/浅两套外观下，最终墨色与胶囊底的对比度都不低于 4.5:1（WCAG AA 正文档）。
+do {
+    // ① 取色循环
+    t.equal(SlotAccentPalette.light.count, SlotAccentPalette.dark.count, "深浅调色板长度必须一致")
+    t.equal(SlotAccentPalette.index(forSlot: 1), 0, "slot 1 取第 0 号色")
+    t.equal(SlotAccentPalette.index(forSlot: SlotAccentPalette.light.count), SlotAccentPalette.light.count - 1,
+            "slot 等于调色板长度时取最后一号色")
+    t.equal(SlotAccentPalette.index(forSlot: SlotAccentPalette.light.count + 1), 0, "超出长度后循环回第 0 号色")
+    t.equal(SlotAccentPalette.index(forSlot: 0), 0, "slot 0（非法）兜到第 0 号色，绝不越界崩溃")
+    t.equal(SlotAccentPalette.index(forSlot: -7), 0, "负数 slot 同样兜到第 0 号色")
+
+    // ② 亮度必须是感知加权的：同强度下绿最亮、蓝最暗（(r+g+b)/3 会把三者判成一样）
+    let pureRed = SlotAccentPalette.RGB(1, 0, 0)
+    let pureGreen = SlotAccentPalette.RGB(0, 1, 0)
+    let pureBlue = SlotAccentPalette.RGB(0, 0, 1)
+    t.check(pureGreen.relativeLuminance > pureRed.relativeLuminance,
+            "★绿的相对亮度必须高于红（证明用的是 WCAG 加权而非算术平均）")
+    t.check(pureRed.relativeLuminance > pureBlue.relativeLuminance, "★红的相对亮度必须高于蓝")
+    t.check(abs(SlotAccentPalette.RGB.white.relativeLuminance - 1) < 0.0001, "纯白亮度为 1")
+    t.check(abs(SlotAccentPalette.RGB.black.relativeLuminance) < 0.0001, "纯黑亮度为 0")
+    t.check(abs(SlotAccentPalette.RGB.white.contrastRatio(to: .black) - 21) < 0.01, "黑白对比度为 21:1")
+    t.check(abs(pureGreen.contrastRatio(to: pureGreen) - 1) < 0.0001, "同色对比度为 1:1")
+
+    // ③ 合成：0 alpha 等于底色、1 alpha 等于前景色、0.5 落在中间
+    let over = SlotAccentPalette.RGB(0.2, 0.4, 0.6)
+    t.equal(pureRed.composited(alpha: 0, over: over), over, "alpha 0 时完全等于底色")
+    t.equal(pureRed.composited(alpha: 1, over: over), pureRed, "alpha 1 时完全等于前景色")
+    let half = pureRed.composited(alpha: 0.5, over: over)
+    t.check(abs(half.red - 0.6) < 0.0001 && abs(half.green - 0.2) < 0.0001 && abs(half.blue - 0.3) < 0.0001,
+            "alpha 0.5 时逐通道取中点")
+    t.check(SlotAccentPalette.RGB(2, -1, 0.5).composited(alpha: 5, over: over) == SlotAccentPalette.RGB(2, -1, 0.5),
+            "alpha 超界应被夹到 [0,1]，不产生诡异插值")
+
+    // ④ ★核心：每个槽位、每种外观，选出来的墨色都要满足 AA（≥4.5:1）
+    for slot in 1...SlotAccentPalette.light.count {
+        for isDark in [false, true] {
+            let accent = isDark ? SlotAccentPalette.dark(forSlot: slot) : SlotAccentPalette.light(forSlot: slot)
+            let surface = isDark ? SlotAccentPalette.darkSurface : SlotAccentPalette.lightSurface
+            let composited = accent.composited(alpha: SlotAccentPalette.pillFillOpacity, over: surface)
+            let ink = SlotAccentPalette.pillInk(forSlot: slot, isDark: isDark)
+            let inkRGB: SlotAccentPalette.RGB = ink == .black ? .black : .white
+            let ratio = composited.contrastRatio(to: inkRGB)
+            t.check(ratio >= 4.5,
+                    "★slot \(slot)（\(isDark ? "深色" : "浅色")）胶囊墨色对比度 \(String(format: "%.2f", ratio)) 必须 ≥ 4.5:1")
+            // 同时确认选的是两者中更优的一个，而不是碰巧过线
+            let other: SlotAccentPalette.RGB = ink == .black ? .white : .black
+            t.check(ratio >= composited.contrastRatio(to: other),
+                    "★slot \(slot)（\(isDark ? "深色" : "浅色")）必须选对比度更高的那种墨色")
+        }
+    }
+
+    // ⑤ 极端底色下的墨色方向：纯白底选黑字、纯黑底选白字
+    t.equal(SlotAccentPalette.ink(for: .white, fillOpacity: 1, over: .white), .black, "纯白胶囊必须黑字")
+    t.equal(SlotAccentPalette.ink(for: .black, fillOpacity: 1, over: .black), .white, "纯黑胶囊必须白字")
+
+    // ⑥ 交互态不透明度的相对关系（悬停填充要最透、胶囊底要最实），改动时别把层级搞反
+    t.check(SlotAccentPalette.hoverFillOpacity < SlotAccentPalette.hoverStrokeOpacity,
+            "悬停填充必须比描边更透（否则扇区边界糊掉）")
+    t.check(SlotAccentPalette.hoverStrokeOpacity < SlotAccentPalette.pillFillOpacity,
+            "底栏胶囊底色应比扇区描边更实（它是常驻控件，不是瞬时反馈）")
+    t.check(SlotAccentPalette.hoverFillOpacity > 0.2 && SlotAccentPalette.pillFillOpacity <= 1.0,
+            "不透明度都应落在合理区间内")
+}
+
 // MARK: - 悬浮预览 Panel 附件展示计划（v2.11.1 功能 5）
 //
 // 三条不变量：
@@ -1373,7 +1443,7 @@ do {
 
     // ── 版本号必须与本次发布一致（历史上 CLI_VERSION 漂移过好几次）
     let ver = runCLI(["version"])
-    t.equal(ver.json["version"] as? String, "2.11.3", "★CLI_VERSION 必须与 App 版本同步为 2.11.3")
+    t.equal(ver.json["version"] as? String, "2.11.4", "★CLI_VERSION 必须与 App 版本同步为 2.11.4")
 
     // ── ① 落盘回读
     let set1 = runCLI(["set-thumbnail", "1", "--image", imgA.path])
