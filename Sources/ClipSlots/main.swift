@@ -5367,6 +5367,10 @@ final class SlotStoreObservable: ObservableObject {
     /// v2.11.0 hotfix：取景前会先隐藏 ClipSlots 自己的窗口、截完自动恢复（微信/飞书同款体验），
     /// 具体实现见 `ScreenshotWindowHider`。隐藏/恢复由 `captureInteractiveScreenshot` 内部闭环，
     /// 这里不需要（也不应该）自己插手窗口状态。
+    ///
+    /// v2.11.0：屏幕录制权限未授权时，`captureInteractiveScreenshot` 会直接返回 nil 并弹出置顶
+    /// 引导面板（`ScreenRecordingPermissionGuide`），不会走到这里的错误提示分支——所以「返回 nil」
+    /// 现在有两种含义：用户 Esc 取消，或权限引导已接管。两者都应静默返回。
     func captureManualThumbnail(_ slot: Int) {
         let activeId = currentSpecialSlotId
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in

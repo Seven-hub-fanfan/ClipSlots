@@ -28,6 +28,7 @@ struct PackExportView: View {
         VStack(alignment: .leading, spacing: AppTheme.spacingLarge) {
             header
             Divider()
+            selectAllRow
             scopeList
             Divider()
             footer
@@ -59,6 +60,60 @@ struct PackExportView: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
             Spacer()
+        }
+    }
+
+    // MARK: 全选（v2.11.0）
+
+    /// 所有「可导出的槽位组」（叶节点）id，按页面顺序展开。
+    /// 全选/取消全选只作用于这批 id —— 页面本身不是可选实体，它的勾选态永远是
+    /// 由下辖组推导出来的（见 `pageState`），所以这里天然与既有级联逻辑一致：
+    /// 只要叶节点集合变了，页面行的三态显示会自动跟着重算，无需额外同步。
+    private var allGroupIds: [String] { pageGroups.flatMap { $0.groups.map(\.id) } }
+
+    /// 顶层三态：全选 / 部分选中 / 全未选。
+    private var overallState: CheckState {
+        let ids = allGroupIds
+        guard !ids.isEmpty else { return .none }
+        let selected = ids.filter { selectedGroupIds.contains($0) }.count
+        if selected == 0 { return .none }
+        return selected == ids.count ? .all : .partial
+    }
+
+    private var selectAllRow: some View {
+        Button(action: toggleSelectAll) {
+            HStack(spacing: 8) {
+                checkboxIcon(state: overallState)
+                    .foregroundColor(.accentColor)
+                Text(overallState == .all ? "取消全选" : "全选")
+                    .font(.system(size: 12.5, weight: .semibold))
+                Spacer()
+                Text("共 \(allGroupIds.count) 个槽位组")
+                    .font(.system(size: 11))
+                    .foregroundColor(.secondary)
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .disabled(allGroupIds.isEmpty)
+        .opacity(allGroupIds.isEmpty ? 0.45 : 1)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 7)
+        .background(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .fill(Color.accentColor.opacity(0.07))
+        )
+    }
+
+    /// 半选（partial）点击一律走「全选」，与 Finder / 邮件客户端的树形多选手感一致：
+    /// 只有「已经全选」时点击才是取消。
+    private func toggleSelectAll() {
+        let ids = allGroupIds
+        guard !ids.isEmpty else { return }
+        if overallState == .all {
+            selectedGroupIds.subtract(ids)
+        } else {
+            selectedGroupIds.formUnion(ids)
         }
     }
 

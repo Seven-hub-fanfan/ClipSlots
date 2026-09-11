@@ -148,6 +148,19 @@ enum ManualThumbnailMaker {
     static func captureInteractiveScreenshot(hidingOwnWindows: Bool = true) throws -> URL? {
         assert(!Thread.isMainThread, "captureInteractiveScreenshot 会阻塞到用户框选完成，不可在主线程调用")
 
+        // v2.11.0：屏幕录制权限**前置**预检。
+        //
+        // TCC 归因到发起进程（ClipSlots），未授权时直接跑 screencapture 会由系统弹出
+        // 「ClipSlots 想要录制此电脑的屏幕」授权窗——那是个普通层级窗口，实测经常被主窗口压在
+        // 后面，用户只看到「点了截图什么都没发生」。所以这里不去触发它，改弹我们自己的置顶
+        // 引导面板（level = .screenSaver，盖过 App 全部窗口），把用户直接送到设置页。
+        //
+        // 注意顺序：预检必须在隐藏窗口**之前**，否则面板会在一片空屏上弹出。
+        guard ScreenRecordingPermission.isAuthorized else {
+            DispatchQueue.main.async { ScreenRecordingPermissionGuide.present() }
+            return nil  // 非错误路径：引导已展示，调用方静默返回即可
+        }
+
         // 隐藏 → 等一帧 → 截图 → 恢复。恢复走 defer，保证 Esc 取消和任何抛错路径都不会
         // 把用户的窗口永久留在隐藏状态（这是本功能最不能出的 bug）。
         var restoreHandle: ScreenshotWindowHider.Handle?
@@ -186,6 +199,9 @@ enum ManualThumbnailMaker {
         // 用户按 Esc 取消：screencapture 退出码为 1 且不产出文件。这是**正常流程**，不是错误。
         guard proc.terminationStatus == 0 else {
             try? FileManager.default.removeItem(at: tmp)
+            // 兜底：授权可能在预检之后被撤销（系统设置里现改现生效），此时 screencapture 会
+            // 直接失败。别把它当成「用户取消」吞掉，仍然把置顶引导弹出来。
+            if presentPermissionGuideIfRevoked() { return nil }
             let msg = String(data: errData, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
             if msg.isEmpty { return nil }  // 静默失败 = 用户取消
             throw MakeError.captureToolFailed(msg)
@@ -195,9 +211,17 @@ enum ManualThumbnailMaker {
               let size = try? FileManager.default.attributesOfItem(atPath: tmp.path)[.size] as? Int,
               size > 0 else {
             try? FileManager.default.removeItem(at: tmp)
+            _ = presentPermissionGuideIfRevoked()
             return nil
         }
         return tmp
+    }
+
+    /// 截图失败后复检权限：已被撤销就弹置顶引导并返回 true（调用方按「已处理」静默返回）。
+    private static func presentPermissionGuideIfRevoked() -> Bool {
+        guard !ScreenRecordingPermission.isAuthorized else { return false }
+        DispatchQueue.main.async { ScreenRecordingPermissionGuide.present() }
+        return true
     }
 }
 
