@@ -20,14 +20,24 @@ struct RadialPreviewPanel: View {
     ///
     /// 通知里的 `preview` payload 非 nil ⇔ 悬停到了一个有内容（或有手动封面图）的槽位；
     /// 没悬停、悬停到空槽、圆盘刚弹出、`clearPreviewContent()` 复位，全都是 nil。
-    /// 面板本体（工具栏 + 磨砂底）只在它为 true 时才渲染 —— 否则整扇窗口不画一个像素。
+    ///
+    /// hotfix3 修正了作用范围：**只管内容区**。
+    /// hotfix2 曾把工具栏也一起 `if` 掉，结果空态下置顶 / 缩放按钮整条不可点 —— 那是回归。
+    /// 现在工具栏无条件常驻，只有「内容区 + 面板磨砂底」跟着它开关。
     ///
     /// 口径说明：这里判定的是「有没有可预览内容」，而不是「有没有附件」。
     /// 附件条本身另有 `if !content.attachments.isEmpty` 把关（见 RadialUniversalPreview），
     /// 所以无附件的槽位不会出现空的附件条；但它的文本 / 图片 / 文件预览仍会正常显示 ——
-    /// 那是这扇窗从 v2.7.x 起的主职能。若要收紧成「只有带附件的槽位才弹面板」，
-    /// 把下面 onReceive 里的赋值改成 `!payload.content.attachments.isEmpty` 即可。
+    /// 那是这扇窗从 v2.7.x 起的主职能。
     @State private var hasPreviewTarget = false
+
+    /// hotfix3：留存最近一发 payload，供内容区重新挂载时补发。
+    ///
+    /// 内容区一旦随空态卸载，`RadialLivePreviewContent` 的 `@State previewPayload` 就一起没了；
+    /// 而它的数据来源是通知 —— 下次悬停时顺序是「通知发出 → 面板 onReceive → hasPreviewTarget 翻真
+    /// → 内容区才被创建并订阅」，那一发通知它必然错过，于是**空态后第一次悬停会显示空白**，
+    /// 得再划到第二个扇区才恢复。所以内容区挂载后立刻把这份 payload 原样补发一次。
+    @State private var retainedPayload: RadialHoverPreviewPayload?
 
     /// 面板外形：圆角矩形，背景 / 描边 / 裁剪共用同一份，避免三处圆角写歪。
     private var panelShape: RoundedRectangle {
@@ -36,27 +46,30 @@ struct RadialPreviewPanel: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            // v2.11.3 hotfix：空态不渲染工具栏。用 `if` 真正把视图摘掉，
-            // 不是 .opacity(0) / .hidden() —— 那两种做法磨砂底依旧会被实例化并绘制。
-            if hasPreviewTarget {
-                toolbar
-                Divider()
-            }
+            // hotfix3：工具栏**无条件常驻**。
+            // 它承载标题 / 缩放 / 置顶三组控件，其中「置顶」尤其关键 —— 置顶后面板会脱离
+            // 圆盘生命周期独立留在屏幕上（见 RadialMenuWindowController.isPreviewPinned），
+            // 此时若工具栏跟着空态一起消失，用户就再也点不到那颗图钉来取消置顶了。
+            // 空态下把它自己也切成 14pt 全圆角，让这条独立浮着的窄条不至于是个方角。
+            toolbar
+                .clipShape(RoundedRectangle(cornerRadius: hasPreviewTarget ? 0 : 14, style: .continuous))
 
-            ZStack {
-                // v2.7.17: smart background. Only show opaque background when there
-                // is actual content to preview. Empty state / image preview remain
-                // transparent / unobtrusive.
-                //
-                // v2.11.3 hotfix：这一层**必须常驻挂载**，不能跟着 hasPreviewTarget 一起 if 掉。
-                // 因为 RadialLivePreviewContent 的 previewPayload 是靠同一条通知喂的：
-                // 若它随空态卸载，下一次悬停时「通知先到、视图后挂载」，新挂载的实例会错过那一发
-                // 通知，预览窗就会空着不出内容。它在空态下渲染的是 Color.clear（零像素，
-                // 不占任何视觉），真正的磨砂底由上面的 if 和下面的 background 控制。
-                content
-                    .scaleEffect(scale)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .clipped()
+            // hotfix3：内容区（文本 / 图片 / 文件预览 + 附件磨砂条）随悬停状态收放。
+            // 无悬停 → 整块摘掉（`if`，不是 .opacity(0)/.hidden()），只剩上面那条标题栏。
+            if hasPreviewTarget {
+                Divider()
+
+                ZStack {
+                    // v2.7.17: smart background. Only show opaque background when there
+                    // is actual content to preview. Empty state / image preview remain
+                    // transparent / unobtrusive.
+                    content
+                        .scaleEffect(scale)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .clipped()
+                }
+                // 内容区是刚刚才挂载的，它错过了触发本次展开的那一发通知，这里补发一次。
+                .onAppear(perform: republishRetainedPayload)
             }
         }
         .frame(minWidth: 260, minHeight: 220)
@@ -74,7 +87,8 @@ struct RadialPreviewPanel: View {
         // 层次关系：面板 ultraThin（最透）< 头部工具栏 ultraThin 叠加（略实，自然分隔）
         //          < 内容卡片 regularMaterial（最实，保证正文可读）。
         //
-        // v2.11.3 hotfix：背景 / 描边同样收进 `if` —— 空态下圆盘右侧不该有任何磨砂色块。
+        // hotfix3：整幅磨砂底只在内容区展开时铺。空态下面板收成一条标题栏，
+        // 若这层还在，圆盘右侧就又会挂着一块 360×480 的空磨砂色块（hotfix 要修的正是它）。
         .background {
             if hasPreviewTarget {
                 panelShape.fill(.ultraThinMaterial).opacity(0.88)
@@ -86,19 +100,38 @@ struct RadialPreviewPanel: View {
             }
         }
         .clipShape(panelShape)
-        // 空态是一扇完全透明的窗：顺手关掉命中测试，避免这块看不见的区域拦掉
-        // 落在它下面的点击（此前有可见工具栏时不存在这个问题）。
-        .allowsHitTesting(hasPreviewTarget)
         .onReceive(NotificationCenter.default.publisher(for: .radialMenuHoveredSlotChanged)) { note in
             if let payload = note.userInfo?["preview"] as? RadialHoverPreviewPayload {
                 dynamicTitle = payload.title
                 dynamicSubtitle = payload.subtitle
+                retainedPayload = payload
                 hasPreviewTarget = true
             } else {
                 dynamicTitle = ""
                 dynamicSubtitle = ""
+                retainedPayload = nil
                 hasPreviewTarget = false
             }
+        }
+    }
+
+    /// 内容区重新挂载后补发留存的 payload，避免"空态后第一次悬停显示空白"。
+    ///
+    /// 用 `DispatchQueue.main.async` 推迟一拍：`onAppear` 正处在本次渲染事务里，
+    /// 同步 post 会在视图更新途中改 `@State`（SwiftUI 会告 "Modifying state during view update"）。
+    /// 补发的这一发通知也会被本面板自己收到，但赋的值与当前完全相同，不会引起新的挂载 —— 不存在循环。
+    private func republishRetainedPayload() {
+        guard let payload = retainedPayload else { return }
+        DispatchQueue.main.async {
+            NotificationCenter.default.post(
+                name: .radialMenuHoveredSlotChanged,
+                object: nil,
+                userInfo: [
+                    "mode": "childSlots",
+                    "slot": payload.slot,
+                    "preview": payload
+                ]
+            )
         }
     }
 
