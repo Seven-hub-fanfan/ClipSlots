@@ -294,17 +294,39 @@ enum AppTheme {
     //
     // v2.11.4 让悬停高亮与底栏「上次粘贴」胶囊都跟随槽位色。`slot` 传 nil（或非法值）时
     // 回落到原来的蓝色 / 玻璃灰，保证组扇区模式与「无上次粘贴记录」这两条路径行为不变。
+    //
+    // v2.11.4 hotfix4：悬停扇区**退出**槽位色跟随，换成一支统一的低饱和冷灰蓝。
+    // 圆盘上同时有三处在讲槽位色（悬停填充、外沿「上次粘贴」弧、底栏胶囊），
+    // 鼠标扫一圈就是五色相轮播，「哪一格被选中」这条信息被颜色噪声盖住了。
+    // 现在职责切开：**槽位身份**只由外沿弧 + 底栏胶囊表达（不动），
+    // **悬停/选中**由统一冷灰蓝表达。函数签名保留 `slot:` 不变，
+    // 免得 40 多个调用点集体改写，也方便以后想回退时只改这一处。
 
-    /// 悬停扇区填充：槽位色 @0.25。透明度刻意留高，磨砂玻璃与扇区分界线要能透出来。
-    static func radialSegmentHoverFill(slot: Int?) -> Color {
-        guard let slot, slot >= 1 else { return radialSegmentHovered }
-        return slotAccentTint(slot, opacity: SlotAccentPalette.hoverFillOpacity)
+    /// 统一悬停色的半透明动态版本。
+    ///
+    /// 与 `slotAccentTint` 同理不能写成 `Color(...).opacity(x)`：dynamic NSColor 包出来的 `Color`
+    /// 上乘 alpha 会锁死在**当前**外观的解析结果，深浅切换时不重算。
+    private static func hoverTint(opacity: Double) -> Color {
+        let lightNS = NSColor(color(SlotAccentPalette.hoverAccentLight)).withAlphaComponent(opacity)
+        let darkNS = NSColor(color(SlotAccentPalette.hoverAccentDark)).withAlphaComponent(opacity)
+        return Color(nsColor: NSColor(name: nil) { appearance in
+            appearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua ? darkNS : lightNS
+        })
     }
 
-    /// 悬停扇区描边：槽位色 @0.52，比填充实一档，负责「选中」的硬边界。
+    private static let radialUnifiedHoverFill = hoverTint(opacity: SlotAccentPalette.hoverFillOpacity)
+    private static let radialUnifiedHoverStroke = hoverTint(opacity: SlotAccentPalette.hoverStrokeOpacity)
+
+    /// 悬停扇区填充：统一冷灰蓝 @0.25。透明度刻意留高，磨砂玻璃与扇区分界线要能透出来。
+    ///
+    /// `slot` 参数保留但不再参与取色（见上方 hotfix4 说明）。
+    static func radialSegmentHoverFill(slot: Int?) -> Color {
+        radialUnifiedHoverFill
+    }
+
+    /// 悬停扇区描边：统一冷灰蓝 @0.70，比填充实一档，负责「选中」的硬边界。
     static func radialSegmentHoverStroke(slot: Int?) -> Color {
-        guard let slot, slot >= 1 else { return radialStroke(isHovered: true) }
-        return slotAccentTint(slot, opacity: SlotAccentPalette.hoverStrokeOpacity)
+        radialUnifiedHoverStroke
     }
 
     /// 底栏「上次粘贴」胶囊底色：槽位色 @0.28（无记录时回落玻璃灰）。
@@ -425,6 +447,24 @@ enum AppTheme {
 
     static let radialGlassButtonShadow = dyn(light: Color.black.opacity(0.08), dark: Color.black.opacity(0.22))
     static func radialGlassButtonShadow(_ scheme: ColorScheme) -> Color { radialGlassButtonShadow }
+
+    // MARK: - Radial Menu 底栏中性动作按钮（v2.11.4 hotfix4）
+    //
+    // 「全部粘贴」原先用 `Color.accentColor`（0.16 底 / 0.35 描边）。两个问题：
+    //   1. accentColor 跟随系统偏好设置，用户设成粉 / 橙 / 石墨时，底栏会跟着换色，
+    //      而它旁边就是跟随槽位色的「上次粘贴」胶囊 —— 两块彩色贴片抢同一条底栏；
+    //   2. 「全部粘贴」是一个**无差别批量动作**，不隶属任何槽位，本来就没有色彩身份可言。
+    //
+    // 现在改成中性灰：浅色下在磨砂玻璃上压一层黑（→ 浅灰），深色下提一层白（→ 深灰），
+    // 与系统默认 bezel 按钮同一路数。底栏的彩色配额留给唯一真正需要它的「上次粘贴」。
+    static let radialNeutralActionFill = dyn(light: Color.black.opacity(0.06), dark: Color.white.opacity(0.10))
+    static func radialNeutralActionFill(_ scheme: ColorScheme) -> Color { radialNeutralActionFill }
+
+    static let radialNeutralActionStroke = dyn(light: Color.black.opacity(0.14), dark: Color.white.opacity(0.20))
+    static func radialNeutralActionStroke(_ scheme: ColorScheme) -> Color { radialNeutralActionStroke }
+
+    static let radialNeutralActionText = dyn(light: Color.black.opacity(0.80), dark: Color.white.opacity(0.92))
+    static func radialNeutralActionText(_ scheme: ColorScheme) -> Color { radialNeutralActionText }
 
     // MARK: - Search Field (v2.5)
 

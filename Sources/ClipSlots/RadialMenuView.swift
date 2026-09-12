@@ -406,8 +406,11 @@ struct RadialMenuView: View {
                     }
                     .padding(.horizontal, 8)
                     .padding(.vertical, 4)
-                    .background(Capsule().fill(Color.accentColor.opacity(0.16)))
-                    .overlay(Capsule().stroke(Color.accentColor.opacity(0.35), lineWidth: 0.8))
+                    // v2.11.4 hotfix4：从 accentColor 换成中性灰。「全部粘贴」不隶属任何槽位，
+                    // 没有色彩身份；底栏的彩色配额留给旁边跟随槽位色的「上次粘贴」胶囊。
+                    .foregroundColor(AppTheme.radialNeutralActionText)
+                    .background(Capsule().fill(AppTheme.radialNeutralActionFill))
+                    .overlay(Capsule().stroke(AppTheme.radialNeutralActionStroke, lineWidth: 0.8))
                 }
                 .buttonStyle(.plain)
                 .help("粘贴当前槽位组全部非空内容")

@@ -176,6 +176,30 @@ public enum SlotAccentPalette {
         isDark ? radialDark(forSlot: slot) : radialLight(forSlot: slot)
     }
 
+    // MARK: - 统一悬停色（v2.11.4 hotfix4）
+    //
+    // hotfix1~3 一直在给「跟随槽位色的悬停扇区」调浓度，但问题不在浓度而在**色数**：
+    // 一个 10 槽位的圆盘，鼠标一圈扫过去就是绿→黄→橙→粉→蓝→绿…… 五种色相轮播，
+    // 悬停反馈本该是「哪一格被选中」这一条信息，却被读成了「这一格是什么颜色」。
+    // 槽位色的身份识别职责已经由主界面卡片、扇区外沿弧、底栏「上次粘贴」胶囊承担，
+    // 悬停态不需要再重复一遍。
+    //
+    // 所以悬停扇区改为一支**统一的低饱和冷灰蓝**：色相锁在 220°/224°（比系统默认强调蓝更冷、更收），
+    // 饱和度压到 0.18~0.26（几乎是带蓝调的灰，不与任何槽位色抢眼），明度 0.84~0.88。
+    // 铺 @0.25 之后浅色下约 #E4E7F0、深色下约 #40444F —— 只是「亮了一档 + 微微偏蓝」，
+    // 不产生第六种颜色。
+    //
+    // 刻意不用 `Color.accentColor`：那是跟随系统偏好设置的（用户可能设成粉、橙、石墨），
+    // 圆盘上一旦跟着变，就又回到「悬停色不可控」的老问题。
+
+    /// 浅色外观的统一悬停色：HSB(220°, 18%, 88%) ≈ #B8C5E0。
+    public static let hoverAccentLight = RGB.fromHSB(hue: 220.0 / 360.0, saturation: 0.18, brightness: 0.88)
+    /// 深色外观的统一悬停色：同色系略深略艳 HSB(224°, 26%, 84%) ≈ #9FADD6，
+    /// @0.25 叠在深底上得到冷灰蓝的抬升，而不是发白的雾。
+    public static let hoverAccentDark = RGB.fromHSB(hue: 224.0 / 360.0, saturation: 0.26, brightness: 0.84)
+
+    public static func hoverAccent(isDark: Bool) -> RGB { isDark ? hoverAccentDark : hoverAccentLight }
+
     // MARK: - 交互态不透明度（圆盘与底栏共用，改一处即全局生效）
     //
     // v2.11.4 hotfix2：三档整体降 20%（0.45→0.25 / 0.72→0.52 / 0.85→0.65）。
@@ -184,11 +208,14 @@ public enum SlotAccentPalette {
     // 现在胶囊底与悬停扇区填充同档（0.25 / 0.28），槽位色只作为一层轻染色；
     // 按钮的边界交给 0.95 的同色描边守住 —— 底色越淡，越需要一条清晰的轮廓线，
     // 否则胶囊会在磨砂底栏上「化开」，看不出这是个可点的控件。
+    // v2.11.4 hotfix4：悬停描边 0.52 → 0.70。染色从高饱和槽位色换成低饱和冷灰蓝后，
+    // 同样的 0.52 在浅色下几乎看不出边界（#D4DBE9 与白底差不到一档），
+    // 必须把描边补实一点，「选中」的硬边界才还在。填充仍保持 0.25 的轻盈。
 
     /// 悬停扇区填充：只做一层轻染色，下面的磨砂玻璃与相邻扇区分界线要能透出来。
     public static let hoverFillOpacity: Double = 0.25
     /// 悬停扇区描边：比填充实一档，负责「这一格被选中」的硬边界。
-    public static let hoverStrokeOpacity: Double = 0.52
+    public static let hoverStrokeOpacity: Double = 0.70
     /// 底栏胶囊底色：与悬停填充同档的轻盈感（略高一点，因为它是常驻控件而非瞬时反馈）。
     public static let pillFillOpacity: Double = 0.28
     /// 底栏胶囊描边：三档里最实的一档，替淡底色守住按钮轮廓。

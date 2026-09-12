@@ -1146,6 +1146,53 @@ do {
     t.check(SlotAccentPalette.hoverFillOpacity > 0.15 && SlotAccentPalette.pillStrokeOpacity <= 1.0,
             "不透明度都应落在合理区间内")
 
+    // ⑥' 统一悬停色（v2.11.4 hotfix4）：悬停扇区退出槽位色跟随，改一支低饱和冷灰蓝。
+    //     这里钉住的是「它必须是冷调、必须低饱和、必须不与任何槽位色撞脸」——
+    //     一旦以后有人把它调艳/调暖，圆盘就会重新变成彩色噪声。
+    for isDark in [false, true] {
+        let hover = SlotAccentPalette.hoverAccent(isDark: isDark)
+        let (h, s, v) = hover.hsb
+        let hueDegrees = h * 360
+        t.check(hueDegrees > 200 && hueDegrees < 250,
+                "★统一悬停色必须落在冷灰蓝~紫蓝区间 200°~250°（当前 \(hueDegrees)°，\(isDark ? "深色" : "浅色")）")
+        t.check(s <= 0.30,
+                "★统一悬停色必须低饱和（≤0.30，当前 \(s)），否则会跟槽位色抢注意力")
+        t.check(v >= 0.70,
+                "统一悬停色明度要够高，铺 0.25 才抬得起底（当前 \(v)）")
+        t.check(hover.blue > hover.red && hover.blue > hover.green,
+                "★统一悬停色的蓝通道必须是主导通道（\(isDark ? "深色" : "浅色")），保证是冷调而非暖灰")
+
+        // 与所有槽位色（提亮版）都不得撞脸。注意**不能只看色相**：统一悬停色本身就是蓝调，
+        // 与 slot 5（蓝）色相只差 13°~17°，硬要拉开色相只会把它推成紫或青，反而不中性。
+        // 真正把两者分开的是饱和度 —— 槽位色是「有身份的彩色」，悬停色是「带蓝调的灰」。
+        // 所以规则是：色相差得开（>25°）**或者**饱和度低到不足其一半。
+        for slot in 1...SlotAccentPalette.light.count {
+            let accent = SlotAccentPalette.radial(forSlot: slot, isDark: isDark)
+            let accentHSB = accent.hsb
+            var delta = abs(accentHSB.hue * 360 - hueDegrees)
+            if delta > 180 { delta = 360 - delta }
+            t.check(delta > 25 || s <= accentHSB.saturation * 0.5,
+                    "★统一悬停色不得与 slot \(slot) 撞脸（色相差 \(delta)°、饱和度 \(s) vs \(accentHSB.saturation)，\(isDark ? "深色" : "浅色")）")
+        }
+
+        // 铺 @0.25 之后必须真的看得出「亮了一档」：与底色的对比度差要够，但也不能刺眼
+        let surface = isDark ? SlotAccentPalette.darkSurface : SlotAccentPalette.lightSurface
+        let composited = hover.composited(alpha: SlotAccentPalette.hoverFillOpacity, over: surface)
+        if isDark {
+            t.check(composited.relativeLuminance > surface.relativeLuminance,
+                    "★深色下悬停填充必须比底色更亮（看得出被选中）")
+        } else {
+            t.check(composited.relativeLuminance < surface.relativeLuminance,
+                    "★浅色下悬停填充必须比底色略深（浅底上只能靠压暗做高亮）")
+        }
+        // 上限放在 1.9：深色底（L≈0.015）本身极暗，任何可见的抬升在比值上都会显得很大，
+        // 而 1.9:1 远低于「文字可读」的 4.5:1，仍是一层轻纱而不是实心色块。
+        t.check(composited.contrastRatio(to: surface) < 1.9,
+                "悬停填充与底色的对比度不能过大（\(composited.contrastRatio(to: surface))），否则失去磨砂轻盈感")
+    }
+    t.check(SlotAccentPalette.hoverStrokeOpacity >= 0.60,
+            "★换成低饱和冷灰蓝后，悬停描边必须补实（≥0.60），否则浅色下看不出选中边界")
+
     // ⑦ HSB 往返与提亮（v2.11.4 hotfix：圆盘色偏深偏闷，统一过一层提亮）
     for probe in [SlotAccentPalette.RGB(0.12, 0.56, 0.28),
                   SlotAccentPalette.RGB(0.94, 0.76, 0.32),
