@@ -101,6 +101,19 @@ struct SettingsView: View {
         )
     }
 
+    // v2.11.7 皮肤（多彩 / 简洁）。与上面的 `appearanceMode`（深 / 浅 / 跟随系统）正交，
+    // 键名也刻意分开：`appearanceMode` 管明暗，`appearanceSkin` 管风格。
+    @AppStorage(AppSkin.defaultsKey) private var appSkinRaw = AppSkin.fallback.rawValue
+
+    private var appSkinBinding: Binding<AppSkin> {
+        Binding(
+            get: { AppSkin(rawValue: appSkinRaw) ?? .fallback },
+            // 先过 AppSkinCenter 再落 @AppStorage：前者同步更新 AppTheme 读取的内存缓存，
+            // 后者负责触发 SwiftUI 重建。顺序反了会先用旧皮肤画一帧。
+            set: { AppSkinCenter.apply($0); appSkinRaw = $0.rawValue }
+        )
+    }
+
     init(config: AppConfig, onSave: @escaping (AppConfig) -> Void, onClose: (() -> Void)? = nil, onOpenPlugins: (() -> Void)? = nil) {
         AppearanceDefaults.ensureDefaultDarkIfNeeded()
         self.config = config
@@ -383,16 +396,35 @@ struct SettingsView: View {
 
     private var appearanceSection: some View {
         settingsSection(title: "外观", icon: "paintbrush.fill") {
-            VStack(alignment: .leading, spacing: 10) {
-                Picker("外观", selection: appearanceModeBinding) {
-                    ForEach(ThemeMode.allCases) { mode in
-                        Label(mode.title, systemImage: mode.icon).tag(mode)
+            VStack(alignment: .leading, spacing: 16) {
+                VStack(alignment: .leading, spacing: 10) {
+                    Picker("外观", selection: appearanceModeBinding) {
+                        ForEach(ThemeMode.allCases) { mode in
+                            Label(mode.title, systemImage: mode.icon).tag(mode)
+                        }
                     }
+                    .pickerStyle(.segmented)
+                    Text("首次安装默认使用深色模式；也可以改为浅色或跟随系统。")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
                 }
-                .pickerStyle(.segmented)
-                Text("首次安装默认使用深色模式；也可以改为浅色或跟随系统。")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
+
+                Divider()
+
+                VStack(alignment: .leading, spacing: 10) {
+                    Text("皮肤")
+                        .font(.subheadline)
+                    Picker("皮肤", selection: appSkinBinding) {
+                        ForEach(AppSkin.allCases, id: \.self) { skin in
+                            Label(skin.title, systemImage: skin.iconName).tag(skin)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+                    .labelsHidden()
+                    Text(appSkinBinding.wrappedValue.subtitle + "。切换立即生效，不影响任何已保存的数据。")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
             }
         }
     }

@@ -95,6 +95,53 @@ enum AppTheme {
         NSApp?.effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
     }
 
+    // MARK: - Skin（v2.11.7 简洁模式）
+
+    /// 当前皮肤。视图侧判断「要不要画彩色装饰」时读它。
+    static var skin: AppSkin { AppSkinCenter.current }
+
+    /// 简洁模式下为真。比 `skin == .minimal` 读起来顺一点，调用点很多。
+    static var isMinimalSkin: Bool { AppSkinCenter.current == .minimal }
+
+    /// 把 Kit 里的中性调色板包成动态色。
+    ///
+    /// 注意这里**不能**偷懒写成 `dyn(light: .white, dark: .black).opacity(x)`：简洁模式的灰阶是
+    /// 一组精确的不透明色值（它们要参与 WCAG 对比度断言），半透明叠加会随底色漂移，
+    /// 实际渲染出来的对比度就不是测过的那个数了。
+    private static func minimal(_ keyPath: KeyPath<MinimalSkinPalette.Surfaces, MinimalSkinPalette.RGB>) -> Color {
+        dyn(light: color(MinimalSkinPalette.light[keyPath: keyPath]),
+            dark: color(MinimalSkinPalette.dark[keyPath: keyPath]))
+    }
+
+    /// 简洁模式的中性色，按 alpha 叠加（阴影这类必须半透明的场合用）。
+    private static func minimalAlpha(light: Double, dark: Double) -> Color {
+        dyn(light: Color.black.opacity(light), dark: Color.black.opacity(dark))
+    }
+
+    /// 选中 / 悬停卡片的细描边（简洁模式唯一允许带颜色的表面：浅色淡紫、深色霓虹紫）。
+    static let minimalSelectionBorder = minimal(\.selection)
+
+    /// 空槽「保存到槽位 X」主行动按钮：浅色近黑底白字、深色白底黑字。
+    ///
+    /// 反相是刻意的。简洁模式的空卡片除了这枚按钮之外几乎没有别的元素，
+    /// 若按钮也用中间调的灰，整张卡片会平得看不出「这里可以点」。
+    static let minimalCTAFill = minimal(\.ctaFill)
+    static let minimalCTAInk = minimal(\.ctaInk)
+
+    /// 简洁模式的中性表面。都是**不透明**色值，理由见上面 `minimal(_:)` 的注释。
+    private static let minimalWindow = minimal(\.window)
+    private static let minimalCardFilled = minimal(\.cardFilled)
+    private static let minimalCardEmpty = minimal(\.cardEmpty)
+    private static let minimalBorder = minimal(\.border)
+    private static let minimalControlFill = minimal(\.controlFill)
+    static let minimalControlInk = minimal(\.controlInk)
+    static let minimalSecondaryInk = minimal(\.secondaryInk)
+
+    /// 简洁模式的投影：「极微弱」。浅色几乎只是一层灰雾，深色靠底色差本身分层。
+    private static let minimalShadowFilled = minimalAlpha(light: 0.055, dark: 0.20)
+    private static let minimalShadowEmpty = minimalAlpha(light: 0.025, dark: 0.12)
+    private static let minimalPreviewBackground = minimalAlpha(light: 0.035, dark: 0.24)
+
     // MARK: - Brand
 
     static let brandGradientStart = dyn(light: Color(red: 0.36, green: 0.49, blue: 1.00),
@@ -128,27 +175,40 @@ enum AppTheme {
     static func noticeSubtitle(_ scheme: ColorScheme) -> Color { noticeSubtitle }
 
     // MARK: - Window
+    //
+    // v2.11.7：凡是简洁模式要改写的 token，一律从 `static let` 改成**计算属性**，
+    // 把多彩模式的原值原封不动挪进 `colorful*` 常量。
+    //
+    // 为什么不能沿用 dynamic NSColor 那一套「绘制时再解析」：`NSColor(name:dynamicProvider:)`
+    // 的 provider 只在 **appearance**（深/浅）变化时被重新调用，皮肤是 App 自己定义的状态，
+    // AppKit 根本不知道它变了。所以皮肤分叉必须发生在「读 token」的那一刻 —— 也就是
+    // 计算属性；再由 `ContentView` 在皮肤变化时强制重建视图树（见 AppSkinCenter）。
+    // 深浅切换依旧走动态色，零成本那条路径没有被牺牲。
 
-    static let windowBackground = dyn(light: Color(red: 0.965, green: 0.970, blue: 0.980),
-                                      dark: Color(red: 0.075, green: 0.078, blue: 0.088))
+    private static let colorfulWindowBackground = dyn(light: Color(red: 0.965, green: 0.970, blue: 0.980),
+                                                      dark: Color(red: 0.075, green: 0.078, blue: 0.088))
+    static var windowBackground: Color { isMinimalSkin ? minimalWindow : colorfulWindowBackground }
     static func windowBackground(_ scheme: ColorScheme) -> Color { windowBackground }
 
-    static let elevatedBackground = dyn(light: Color.white.opacity(0.82),
-                                        dark: Color.white.opacity(0.055))
+    private static let colorfulElevatedBackground = dyn(light: Color.white.opacity(0.82),
+                                                        dark: Color.white.opacity(0.055))
+    static var elevatedBackground: Color { isMinimalSkin ? minimalCardFilled : colorfulElevatedBackground }
     static func elevatedBackground(_ scheme: ColorScheme) -> Color { elevatedBackground }
 
-    static let headerBackground = dyn(light: Color.white.opacity(0.72),
-                                      dark: Color.white.opacity(0.04))
+    private static let colorfulHeaderBackground = dyn(light: Color.white.opacity(0.72),
+                                                      dark: Color.white.opacity(0.04))
+    static var headerBackground: Color { isMinimalSkin ? minimalCardEmpty : colorfulHeaderBackground }
     static func headerBackground(_ scheme: ColorScheme) -> Color { headerBackground }
 
     // MARK: - Card
 
-    static let cardBackgroundFilled = dyn(light: Color(red: 0.995, green: 0.99, blue: 0.98),
-                                          dark: Color(red: 0.105, green: 0.108, blue: 0.115).opacity(0.98))
-    static let cardBackgroundEmpty = dyn(light: Color(red: 0.965, green: 0.955, blue: 0.935),
-                                         dark: Color(red: 0.105, green: 0.108, blue: 0.115).opacity(0.92))
+    private static let cardBackgroundFilled = dyn(light: Color(red: 0.995, green: 0.99, blue: 0.98),
+                                                  dark: Color(red: 0.105, green: 0.108, blue: 0.115).opacity(0.98))
+    private static let cardBackgroundEmpty = dyn(light: Color(red: 0.965, green: 0.955, blue: 0.935),
+                                                 dark: Color(red: 0.105, green: 0.108, blue: 0.115).opacity(0.92))
     static func cardBackground(isEmpty: Bool = false) -> Color {
-        isEmpty ? cardBackgroundEmpty : cardBackgroundFilled
+        if isMinimalSkin { return isEmpty ? minimalCardEmpty : minimalCardFilled }
+        return isEmpty ? cardBackgroundEmpty : cardBackgroundFilled
     }
     static func cardBackground(_ scheme: ColorScheme, isEmpty: Bool = false) -> Color {
         cardBackground(isEmpty: isEmpty)
@@ -225,28 +285,41 @@ enum AppTheme {
     ]
 
     static func slotActionAccent(_ slot: Int) -> Color {
-        slotActionAccents[max(0, slot - 1) % slotActionAccents.count]
+        // 简洁模式：操作按钮全部收成中性灰。槽位身份只由编号角标承载。
+        if isMinimalSkin { return minimalControlFill }
+        return slotActionAccents[max(0, slot - 1) % slotActionAccents.count]
     }
     static func slotActionAccent(_ slot: Int, scheme: ColorScheme) -> Color { slotActionAccent(slot) }
 
-    static let previewBackground = dyn(light: Color.black.opacity(0.035), dark: Color.black.opacity(0.22))
+    private static let colorfulPreviewBackground = dyn(light: Color.black.opacity(0.035), dark: Color.black.opacity(0.22))
+    static var previewBackground: Color {
+        isMinimalSkin ? minimalPreviewBackground : colorfulPreviewBackground
+    }
     static func previewBackground(_ scheme: ColorScheme) -> Color { previewBackground }
 
-    static let subtleBorder = dyn(light: Color.black.opacity(0.075), dark: Color.white.opacity(0.10))
+    private static let colorfulSubtleBorder = dyn(light: Color.black.opacity(0.075), dark: Color.white.opacity(0.10))
+    static var subtleBorder: Color { isMinimalSkin ? minimalBorder : colorfulSubtleBorder }
     static func subtleBorder(_ scheme: ColorScheme) -> Color { subtleBorder }
 
     static let activeBorder = dynAccent(lightOpacity: 0.32, darkOpacity: 0.45)
     static func activeBorder(_ scheme: ColorScheme) -> Color { activeBorder }
 
-    static let cardShadowFilled = dyn(light: Color.black.opacity(0.09), dark: Color.black.opacity(0.30))
-    static let cardShadowEmpty = dyn(light: Color.black.opacity(0.035), dark: Color.black.opacity(0.16))
-    static func cardShadow(isEmpty: Bool) -> Color { isEmpty ? cardShadowEmpty : cardShadowFilled }
+    private static let cardShadowFilled = dyn(light: Color.black.opacity(0.09), dark: Color.black.opacity(0.30))
+    private static let cardShadowEmpty = dyn(light: Color.black.opacity(0.035), dark: Color.black.opacity(0.16))
+    static func cardShadow(isEmpty: Bool) -> Color {
+        if isMinimalSkin { return isEmpty ? minimalShadowEmpty : minimalShadowFilled }
+        return isEmpty ? cardShadowEmpty : cardShadowFilled
+    }
     static func cardShadow(_ scheme: ColorScheme, isEmpty: Bool) -> Color { cardShadow(isEmpty: isEmpty) }
+
+    /// 简洁模式的卡片投影半径：比多彩模式再收一档（6 → 4），配合极低的 alpha。
+    static var cardShadowRadius: CGFloat { isMinimalSkin ? 4 : 6 }
 
     private static let slotBadgeEmptyBackground = dyn(light: Color.black.opacity(0.06),
                                                      dark: Color.white.opacity(0.08))
     static func slotBadgeBackground(isEmpty: Bool) -> AnyShapeStyle {
-        isEmpty ? AnyShapeStyle(slotBadgeEmptyBackground) : AnyShapeStyle(brandGradient)
+        if isMinimalSkin { return AnyShapeStyle(isEmpty ? slotBadgeEmptyBackground : minimalControlFill) }
+        return isEmpty ? AnyShapeStyle(slotBadgeEmptyBackground) : AnyShapeStyle(brandGradient)
     }
     static func slotBadgeBackground(_ scheme: ColorScheme, isEmpty: Bool) -> AnyShapeStyle {
         slotBadgeBackground(isEmpty: isEmpty)
@@ -254,10 +327,12 @@ enum AppTheme {
 
     // MARK: - Chip
 
-    static let chipBackground = dyn(light: Color.black.opacity(0.045), dark: Color.white.opacity(0.075))
+    private static let colorfulChipBackground = dyn(light: Color.black.opacity(0.045), dark: Color.white.opacity(0.075))
+    static var chipBackground: Color { isMinimalSkin ? minimalControlFill : colorfulChipBackground }
     static func chipBackground(_ scheme: ColorScheme) -> Color { chipBackground }
 
-    static let softButtonBackground = dyn(light: Color.black.opacity(0.055), dark: Color.white.opacity(0.08))
+    private static let colorfulSoftButtonBackground = dyn(light: Color.black.opacity(0.055), dark: Color.white.opacity(0.08))
+    static var softButtonBackground: Color { isMinimalSkin ? minimalControlFill : colorfulSoftButtonBackground }
     static func softButtonBackground(_ scheme: ColorScheme) -> Color { softButtonBackground }
 
     // MARK: - Radial Menu
@@ -481,15 +556,18 @@ enum AppTheme {
 
     // MARK: - Search Field (v2.5)
 
-    static let searchFieldBackground = dyn(light: Color.black.opacity(0.04), dark: Color.white.opacity(0.06))
+    private static let colorfulSearchFieldBackground = dyn(light: Color.black.opacity(0.04), dark: Color.white.opacity(0.06))
+    static var searchFieldBackground: Color { isMinimalSkin ? minimalControlFill : colorfulSearchFieldBackground }
     static func searchFieldBackground(_ scheme: ColorScheme) -> Color { searchFieldBackground }
 
-    static let searchFieldStroke = dyn(light: Color.black.opacity(0.08), dark: Color.white.opacity(0.10))
+    private static let colorfulSearchFieldStroke = dyn(light: Color.black.opacity(0.08), dark: Color.white.opacity(0.10))
+    static var searchFieldStroke: Color { isMinimalSkin ? minimalBorder : colorfulSearchFieldStroke }
     static func searchFieldStroke(_ scheme: ColorScheme) -> Color { searchFieldStroke }
 
     // MARK: - Filter Chips (v2.5)
 
-    static let filterChipBackground = dyn(light: Color.black.opacity(0.04), dark: Color.white.opacity(0.05))
+    private static let colorfulFilterChipBackground = dyn(light: Color.black.opacity(0.04), dark: Color.white.opacity(0.05))
+    static var filterChipBackground: Color { isMinimalSkin ? minimalControlFill : colorfulFilterChipBackground }
     static func filterChipBackground(_ scheme: ColorScheme) -> Color { filterChipBackground }
 
     static let filterChipSelectedBackground = dynAccent(lightOpacity: 0.16, darkOpacity: 0.28)
@@ -506,16 +584,29 @@ enum AppTheme {
     static let actionButtonDisabledBackground = dyn(light: Color.black.opacity(0.10),
                                                     dark: Color.white.opacity(0.13))
     /// 卡片操作按钮：危险操作激活态底色。
+    ///
+    /// 简洁模式**不**把它收成灰：这是「再点一次就真的删了」的二次确认态，红色在这里不是装饰，
+    /// 是安全信号。简洁模式收的是常态装饰色，不是功能色。
     static let actionButtonDangerActiveBackground = dyn(light: AppTheme.danger.opacity(0.14),
                                                         dark: AppTheme.danger)
     /// 卡片操作按钮：危险操作静息态底色。
-    static let actionButtonDangerIdleBackground = dyn(light: Color.black.opacity(0.075),
-                                                      dark: Color(red: 0.20, green: 0.21, blue: 0.23))
-    /// 卡片操作按钮：强调色按钮上的文字（两套主题都用深墨色压在鲜亮槽位色上以保对比度）。
-    static let actionButtonAccentText = dyn(light: Color.black.opacity(0.72),
-                                            dark: Color.black.opacity(0.82))
+    private static let colorfulActionButtonDangerIdleBackground = dyn(light: Color.black.opacity(0.075),
+                                                                      dark: Color(red: 0.20, green: 0.21, blue: 0.23))
+    static var actionButtonDangerIdleBackground: Color {
+        isMinimalSkin ? minimalControlFill : colorfulActionButtonDangerIdleBackground
+    }
+    /// 卡片操作按钮：强调色按钮上的文字（多彩模式两套主题都用深墨色压在鲜亮槽位色上以保对比度）。
+    private static let colorfulActionButtonAccentText = dyn(light: Color.black.opacity(0.72),
+                                                            dark: Color.black.opacity(0.82))
+    static var actionButtonAccentText: Color {
+        // 简洁模式的按钮底已经是中性灰，再压深墨色就会在深色下变成黑底黑字。
+        isMinimalSkin ? minimalControlInk : colorfulActionButtonAccentText
+    }
     /// 卡片操作按钮：危险操作静息态文字。
-    static let actionButtonDangerIdleText = dyn(light: Color.black.opacity(0.68), dark: .white)
+    private static let colorfulActionButtonDangerIdleText = dyn(light: Color.black.opacity(0.68), dark: .white)
+    static var actionButtonDangerIdleText: Color {
+        isMinimalSkin ? minimalControlInk : colorfulActionButtonDangerIdleText
+    }
 
     /// 顶部工具条上的软性胶囊底/描边（原 ContentView 内联取色）。
     static let capsuleFill = dyn(light: Color.primary.opacity(0.055), dark: Color.primary.opacity(0.09))

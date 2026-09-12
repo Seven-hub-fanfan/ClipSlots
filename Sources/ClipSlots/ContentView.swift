@@ -96,6 +96,16 @@ struct ContentView: View {
     @State private var showingHotkeyTemplatePopover = false
     // v2.9.8: plugins page popover.
     @State private var showingPlugins = false
+
+    // v2.11.7 皮肤（多彩 / 简洁）。
+    //
+    // 这是 ContentView 上**唯一**被刻意保留的「全树级」依赖，和上面竭力避免的 `appearanceMode`
+    // 恰好相反，原因是两者的机制不同：深浅切换由 dynamic NSColor 在绘制时解析，视图树不用重算；
+    // 皮肤是 App 自己的全局状态，AppKit 不认识它，不重建就不会有任何视图知道该换色（详见
+    // AppSkinCenter 的注释）。所以这里主动 `.id(appSkinRaw)` 让整棵树重建一次。
+    // 代价是切皮肤那一下会有一次整树重算（≈ 切主题在 v2.10.93 之前的成本），但切皮肤是极低频的
+    // 显式操作——用户一年可能点两次，和「每次切深浅都卡 130ms」完全不是一个量级的问题。
+    @AppStorage(AppSkin.defaultsKey) private var appSkinRaw = AppSkin.fallback.rawValue
     @State private var showingPageSelector = false
     @State private var expandedPageId: String?
     @State private var isPageMultiSelecting = false
@@ -348,7 +358,17 @@ struct ContentView: View {
                 // 因此主题一变 → 参数变 → Equatable 判不等 → body 必然重算，且内部 `.id(scheme)` 同步换身份、
                 // 强制重建 drawingGroup 的 GPU 纹理。这比原先「依赖环境/AppStorage 在 .background 子树里的
                 // 传播时机」更强，不会重现卡旧色。
-                AmbientBackgroundHost(simplified: liveResize.isResizing)
+                Group {
+                    // v2.11.7: 简洁模式整层不渲染。这层复古海报氛围底（4 层高斯模糊 + .screen 混合
+                    // + 噪点贴图 + drawingGroup）正是「多彩」观感的来源，简洁模式换成一张纯净中性底
+                    // ——顺带也省掉上面注释里实测的那 ~120ms/次离屏合成。用 if 而不是 .opacity(0)：
+                    // 透明度为 0 的图层照样要走一遍模糊与栅格化。
+                    if AppTheme.isMinimalSkin {
+                        AppTheme.windowBackground
+                    } else {
+                        AmbientBackgroundHost(simplified: liveResize.isResizing)
+                    }
+                }
                 .ignoresSafeArea()
             )
 
@@ -445,6 +465,10 @@ struct ContentView: View {
         .onReceive(NotificationCenter.default.publisher(for: .closeInAppSettings)) { _ in
             store.setSettingsOverlay(false)
         }
+        // v2.11.7: 皮肤切换 → 换身份 → 整棵树按新皮肤重建（理由见 appSkinRaw 的声明处）。
+        // 放在链尾是刻意的：`.id` 之后再挂修饰符会让那些修饰符落在「新身份」之外，
+        // 切皮肤时不跟着重建。
+        .id(appSkinRaw)
     }
 
     private var hotkeyErrorBanner: some View {

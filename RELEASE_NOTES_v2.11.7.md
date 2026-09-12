@@ -1,0 +1,73 @@
+# ClipSlots v2.11.7 — 简洁模式皮肤
+
+## 这版做了什么
+
+新增「简洁模式」皮肤，和原来的「多彩模式」并存，在 **设置 → 外观 → 皮肤** 里实时切换，不用重启。
+
+多彩模式的观感一个像素都没动——所有原值被原封不动挪进 `colorful*` 常量，简洁模式只是在读 token 的那一刻分了个叉。
+
+### 简洁模式长什么样
+
+| 元素 | 多彩模式 | 简洁模式 |
+| --- | --- | --- |
+| 窗口底 | 复古海报氛围层（4 层高斯模糊 + .screen 混合 + 噪点） | 纯净中性底（浅色 `#F2F2F3` / 深色哑光 `#161618`） |
+| 卡片 | 米白 / 暖黑 + 顶部槽位色装饰条 | 纯白 `#FFFFFF` / `#232325`，大圆角 24pt，极微弱投影，无装饰条 |
+| 槽位编号 | 26pt 彩色裸数字 | **保留槽位色**，收进 30pt 圆形角标——简洁模式唯一的彩色出口 |
+| 选中 / 悬停 | 槽位色描边 + 彩色外发光 | 统一紫色细描边（浅色淡紫 `#8B7BE8` / 深色霓虹紫 `#A78BFA`），无外发光 |
+| 空槽主按钮 | 彩色按钮 + 下方留白 | 反相大 CTA（浅色近黑底白字 / 深色白底黑字），撑满卡片底部 |
+| 编辑 / 清空 | 槽位色 / 暖灰 | 中性灰（浅色 `#EDEDEF` / 深色 `#313133`），低调 |
+| 危险操作激活态 | 红 | **仍然是红**（这是二次确认的安全信号，不是装饰色） |
+
+深浅色跟随系统 light / dark，两套皮肤各有独立的浅色与深色取值。
+
+## 实现要点
+
+### 皮肤为什么不能走 dynamic NSColor 那条路
+
+深浅切换之所以能做到「不重算 body、只重绘」，靠的是 `NSColor(name:dynamicProvider:)`：系统 appearance 一变，所有图层自然重绘，provider 顺势解析出新值。
+
+皮肤不一样——它是 App 自己的全局变量，改了它 AppKit 根本不知道，没有任何东西会被标记为「需要重绘」。若只把皮肤塞进 provider 闭包，切换后只有恰好因别的原因重绘的视图会变色，屏幕上会出现一半新皮肤一半旧皮肤。
+
+所以：
+
+- 需要分叉的 token 从 `static let` 改成**计算属性**，分叉发生在「读 token」那一刻；
+- `ContentView` 用 `.id(appSkinRaw)` 承接，切皮肤时整棵树重建一次。
+
+代价是切皮肤那一下有一次整树重算，但这是用户一年点两次的显式操作，和「每次切深浅都卡 130ms」不是一个量级的问题。深浅切换依旧走动态色，v2.10.93 那轮优化的成果没有被牺牲。
+
+### 命名
+
+需求里写的是 `AppearanceMode`，但项目里 `appearanceMode` 这个 UserDefaults 键早就被 `ThemeMode`（深色 / 浅色 / 跟随系统）占了。明暗和风格是两个正交维度，硬塞进同一个名字只会在半年后害到自己，所以：
+
+- 枚举叫 `AppSkin`（`.colorful` / `.minimal`）
+- 键名叫 `appearanceSkin`
+- 默认值 `.colorful`——老用户升级上来不该被换皮肤
+
+smoke 里专门有一条断言盯着这两个键不能重名。
+
+### 改动文件
+
+- `Sources/ClipSlotsKit/AppSkin.swift`（新增）：皮肤枚举 + 持久化 + `MinimalSkinPalette` 中性调色板
+- `Sources/ClipSlots/AppSkinCenter.swift`（新增）：运行时皮肤缓存（绘制路径每帧读上百次，不能每次查 UserDefaults）
+- `Sources/ClipSlots/AppTheme.swift`：窗口 / 卡片 / 边框 / 投影 / 控件 / 搜索框 / 操作按钮共 15 个 token 按皮肤分叉
+- `Sources/ClipSlots/SlotCardView.swift`：装饰条、描边高亮、外发光、编号角标、CTA 按钮、「上次粘贴」角标
+- `Sources/ClipSlots/SettingsView.swift`：外观区新增皮肤选择器
+- `Sources/ClipSlots/ContentView.swift`：`.id` 重建 + 简洁模式跳过氛围层渲染
+- `Sources/ClipSlots/AppDelegate.swift`：外部改 defaults 时同步皮肤缓存
+
+## 验证
+
+- `swift build` 通过
+- smoke 测试 **通过 1208，失败 0**（新增 74 条 SKIN 断言）
+  - 持久化契约：键名、默认值、脏值回退、与 `appearanceMode` 不重名
+  - 中性度：简洁模式全部表面色 RGB 极差 ≤ 0.02（选中紫是唯一例外，且必须 > 0.15）
+  - 明暗关系：卡片必须比窗口底亮、空槽比有内容的暗、深色底不是纯黑
+  - 对比度：正文 / 次要文字 / 控件 / CTA 全部 ≥ 4.5:1（WCAG AA）
+  - 槽位编号在两种简洁卡片底上均 ≥ 3:1（大字 AA）——这是「保留编号颜色」这条需求的真正验收项
+- `SKIP_NOTARIZE=1` 打包 + 覆盖安装 `/Applications/ClipSlots.app`，App 与 CLI 版本号均为 2.11.7
+
+## DMG SHA-256
+
+```
+33b099a1f51969c2716bd394ba68320123fbb28daac77dbb397ffe07f66f36de
+```

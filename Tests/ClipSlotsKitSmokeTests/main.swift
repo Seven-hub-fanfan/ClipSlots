@@ -1844,7 +1844,7 @@ do {
 
     // ── 版本号必须与本次发布一致（历史上 CLI_VERSION 漂移过好几次）
     let ver = runCLI(["version"])
-    t.equal(ver.json["version"] as? String, "2.11.6", "★CLI_VERSION 必须与 App 版本同步为 2.11.6")
+    t.equal(ver.json["version"] as? String, "2.11.7", "★CLI_VERSION 必须与 App 版本同步为 2.11.7")
 
     // ── ① 落盘回读
     let set1 = runCLI(["set-thumbnail", "1", "--image", imgA.path])
@@ -1983,6 +1983,119 @@ do {
     // 上面已经记过一条失败断言了，这里只负责让顶层代码继续走到 t.report()。
 } catch {
     t.check(false, "CLI-THUMB 组抛出异常：\(error)")
+}
+
+// MARK: - SKIN（v2.11.7 简洁模式皮肤）
+//
+// 皮肤的视觉层在 ClipSlots（AppKit/SwiftUI）里，没法在这套零依赖 smoke 里渲染。
+// 但能被测的恰好是最容易悄悄坏掉的两件事：
+//   1. 持久化契约 —— 键名、默认值、脏值回退。写错一个字符，用户切完皮肤重启就回到多彩模式。
+//   2. 调色板本身 —— 「简洁」这个需求翻译成可判定的命题就是：中性色真的中性、该有的对比度真的够。
+//      这是肉眼评审最容易放过、而截图又看不出差几个色阶的地方。
+
+do {
+    // ── ① 枚举与持久化契约
+    t.equal(AppSkin.defaultsKey, "appearanceSkin", "★皮肤的 defaults 键名必须是 appearanceSkin")
+    t.check(AppSkin.defaultsKey != "appearanceMode",
+            "★★皮肤键名绝不能撞上 ThemeMode 的 appearanceMode（深浅与风格是两个正交维度）")
+    t.equal(AppSkin.fallback, .colorful, "★默认值必须是多彩模式——老用户升级上来不该被换皮肤")
+    t.equal(AppSkin.allCases.count, 2, "皮肤只有多彩 / 简洁两种")
+    t.equal(AppSkin.colorful.rawValue, "colorful", "rawValue 是持久化格式，不能改")
+    t.equal(AppSkin.minimal.rawValue, "minimal", "rawValue 是持久化格式，不能改")
+
+    let suiteName = "clipslots.smoke.skin.\(UUID().uuidString)"
+    if let defaults = UserDefaults(suiteName: suiteName) {
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        t.equal(AppSkin.load(from: defaults), .colorful, "空 defaults 应回退到多彩模式")
+
+        AppSkin.minimal.store(in: defaults)
+        t.equal(AppSkin.load(from: defaults), .minimal, "★写入后必须能原样读回")
+        t.equal(defaults.string(forKey: AppSkin.defaultsKey), "minimal",
+                "落盘的必须是 rawValue 字符串（便于 defaults write 手工调试）")
+
+        defaults.set("rainbow", forKey: AppSkin.defaultsKey)
+        t.equal(AppSkin.load(from: defaults), .colorful, "★脏值必须回退到默认皮肤，而不是崩或空白界面")
+
+        AppSkin.colorful.store(in: defaults)
+        t.equal(AppSkin.load(from: defaults), .colorful, "切回多彩模式应正常")
+    } else {
+        t.check(false, "无法创建测试用 UserDefaults suite")
+    }
+
+    // ── ② 中性度：简洁模式的表面色必须是真灰
+    //
+    // 阈值 0.02（RGB 三分量极差 ≤ 2%）。设计稿里的中性灰常常带一丝蓝或暖调，这在成片里看不出来，
+    // 但一旦有人「顺手」把某个 token 改成带彩色的值，简洁模式就废了——这条断言就是那道闸。
+    //
+    // 加 1e-9 容差：#F2F2F7 这类「贴着上限」的系统灰算出来是 0.020000000000000018，
+    // 差的那一点纯粹是二进制浮点表示误差，不是色值真的超标。
+    let neutralLimit = 0.02 + 1e-9
+    for (name, surfaces) in [("浅色", MinimalSkinPalette.light), ("深色", MinimalSkinPalette.dark)] {
+        for member in surfaces.neutralMembers {
+            t.check(MinimalSkinPalette.neutrality(member) <= neutralLimit,
+                    "★\(name)简洁模式的表面色必须中性（极差 \(MinimalSkinPalette.neutrality(member)) ≤ 0.02）")
+        }
+        // 选中色是**唯一**允许带色相的表面色，而且必须真的带（否则「紫色高亮」就名存实亡）。
+        t.check(MinimalSkinPalette.neutrality(surfaces.selection) > 0.15,
+                "★\(name)简洁模式的选中描边必须是可辨认的紫色，不能退化成灰")
+    }
+
+    // ── ③ 明暗关系：卡片必须能从窗口底上浮起来
+    t.check(MinimalSkinPalette.light.cardFilled.relativeLuminance > MinimalSkinPalette.light.window.relativeLuminance,
+            "★浅色：填充卡片必须比窗口底更亮，卡片才浮得起来")
+    t.check(MinimalSkinPalette.dark.cardFilled.relativeLuminance > MinimalSkinPalette.dark.window.relativeLuminance,
+            "★深色：填充卡片必须比窗口底更亮（哑光黑窗 + 稍亮卡片）")
+    t.check(MinimalSkinPalette.light.cardEmpty.relativeLuminance < MinimalSkinPalette.light.cardFilled.relativeLuminance,
+            "浅色：空槽卡片应比有内容的卡片更暗一档")
+    t.check(MinimalSkinPalette.dark.cardEmpty.relativeLuminance < MinimalSkinPalette.dark.cardFilled.relativeLuminance,
+            "深色：空槽卡片应比有内容的卡片更暗一档")
+    t.check(MinimalSkinPalette.dark.window.relativeLuminance > 0,
+            "★深色底是「哑光深灰」不是纯黑——纯黑会和卡片糊成一片")
+
+    // ── ④ 对比度：文字与 CTA 必须可读（WCAG AA 正文 4.5:1、大字 3:1）
+    let readability: [(String, MinimalSkinPalette.RGB, MinimalSkinPalette.RGB, Double)] = [
+        ("浅色正文/卡片", MinimalSkinPalette.light.primaryInk, MinimalSkinPalette.light.cardFilled, 4.5),
+        ("深色正文/卡片", MinimalSkinPalette.dark.primaryInk, MinimalSkinPalette.dark.cardFilled, 4.5),
+        ("浅色次要文字/卡片", MinimalSkinPalette.light.secondaryInk, MinimalSkinPalette.light.cardFilled, 4.5),
+        ("深色次要文字/卡片", MinimalSkinPalette.dark.secondaryInk, MinimalSkinPalette.dark.cardFilled, 4.5),
+        ("浅色控件文字/控件底", MinimalSkinPalette.light.controlInk, MinimalSkinPalette.light.controlFill, 4.5),
+        ("深色控件文字/控件底", MinimalSkinPalette.dark.controlInk, MinimalSkinPalette.dark.controlFill, 4.5),
+        ("浅色 CTA 文字/CTA 底", MinimalSkinPalette.light.ctaInk, MinimalSkinPalette.light.ctaFill, 4.5),
+        ("深色 CTA 文字/CTA 底", MinimalSkinPalette.dark.ctaInk, MinimalSkinPalette.dark.ctaFill, 4.5),
+    ]
+    for (name, ink, ground, minimum) in readability {
+        let ratio = ink.contrastRatio(to: ground)
+        t.check(ratio >= minimum, "★\(name) 对比度必须 ≥ \(minimum):1（实际 \(String(format: "%.2f", ratio))）")
+    }
+
+    // CTA 是空卡片上唯一的交互元素，靠**反相**做引导：它必须比卡片本身显著更跳。
+    let lightCTAvsCard = MinimalSkinPalette.light.ctaFill.contrastRatio(to: MinimalSkinPalette.light.cardEmpty)
+    let darkCTAvsCard = MinimalSkinPalette.dark.ctaFill.contrastRatio(to: MinimalSkinPalette.dark.cardEmpty)
+    t.check(lightCTAvsCard >= 4.5, "★浅色 CTA 必须从空卡片上跳出来（实际 \(String(format: "%.2f", lightCTAvsCard))）")
+    t.check(darkCTAvsCard >= 4.5, "★深色 CTA 必须从空卡片上跳出来（实际 \(String(format: "%.2f", darkCTAvsCard))）")
+    t.check(MinimalSkinPalette.light.ctaFill.relativeLuminance < MinimalSkinPalette.light.cardEmpty.relativeLuminance,
+            "★浅色 CTA 是深底白字（比卡片暗）")
+    t.check(MinimalSkinPalette.dark.ctaFill.relativeLuminance > MinimalSkinPalette.dark.cardEmpty.relativeLuminance,
+            "★深色 CTA 是白底深字（比卡片亮）")
+
+    // ── ⑤ 边框要看得见，但不能喧宾夺主
+    for (name, surfaces) in [("浅色", MinimalSkinPalette.light), ("深色", MinimalSkinPalette.dark)] {
+        let ratio = surfaces.border.contrastRatio(to: surfaces.cardFilled)
+        t.check(ratio > 1.08, "★\(name)卡片边框必须看得见（实际 \(String(format: "%.2f", ratio))）")
+        t.check(ratio < 4.5, "\(name)卡片边框不能重到抢过内容（实际 \(String(format: "%.2f", ratio))）")
+    }
+
+    // ── ⑥ 槽位编号：简洁模式唯一的彩色出口，必须在两种底色上都读得出来
+    //
+    // 这条是「简洁模式保留编号颜色」这个需求的真正验收项：颜色留下来了，但压在新的中性卡片底上
+    // 还看不看得清，取决于卡片底换了之后的对比度——原来的验收是在米白/暖黑卡片上做的，不通用。
+    for slot in 1...10 {
+        let onLight = SlotAccentPalette.light(forSlot: slot).contrastRatio(to: MinimalSkinPalette.light.cardFilled)
+        let onDark = SlotAccentPalette.dark(forSlot: slot).contrastRatio(to: MinimalSkinPalette.dark.cardFilled)
+        t.check(onLight >= 3.0, "★槽位 \(slot) 编号在浅色简洁卡片上应达大字对比度 3:1（实际 \(String(format: "%.2f", onLight))）")
+        t.check(onDark >= 3.0, "★槽位 \(slot) 编号在深色简洁卡片上应达大字对比度 3:1（实际 \(String(format: "%.2f", onDark))）")
+    }
 }
 
 t.report()

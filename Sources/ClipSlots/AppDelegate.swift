@@ -46,6 +46,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             queue: .main
         ) { [weak self] _ in
             guard let self = self else { return }
+            // v2.11.7: 顺带把皮肤缓存对齐一次。SettingsView 切换时是先走 AppSkinCenter.apply 再写
+            // defaults，这里只会判等直接返回；真正用得上的是「外部写入」——CLI / 调试时
+            // `defaults write ... appearanceSkin`，或将来多窗口场景下另一处入口改了它。
+            AppSkinCenter.syncFromDefaults()
             let raw = UserDefaults.standard.string(forKey: "appearanceMode")
                 ?? ThemeMode.dark.rawValue
             guard raw != self.lastAppliedAppearanceRaw else { return }
