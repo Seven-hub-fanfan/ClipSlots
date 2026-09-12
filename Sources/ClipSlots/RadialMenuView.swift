@@ -8,25 +8,60 @@ enum RadialMenuMode {
     case specialSlots
 }
 
-// MARK: - Pie Segment Shape
+// MARK: - Petal Segment Shape (v2.11.5)
 
-struct PieSegmentShape: Shape {
+/// 花瓣式扇区：大圆角 + 相邻扇区之间恒宽通道的「卡片」形状。
+///
+/// v2.11.4 之前这里是 `PieSegmentShape`——硬边扇形，两条径向直边直接顶到邻居，
+/// 十格排下来是一块被切开的披萨。v2.11.5 换成花瓣：每格是一张独立卡片，
+/// 靠留白而不是分隔线划界，因此圆盘上的线条总量反而减少了。
+///
+/// 所有几何都在 `ClipSlotsKit.RadialPetalGeometry` 里（纯函数、可被 smoke 断言），
+/// 这个 Shape 只负责把基元序列翻译成 `SwiftUI.Path`——刻意不在这里做任何计算，
+/// 否则「花瓣是否越出自己的楔形」「通道宽度是否恒定」这类问题又变成只能靠肉眼看。
+struct PetalSegmentShape: Shape {
     let startAngle: Angle
     let endAngle: Angle
     let innerRadius: CGFloat
     let outerRadius: CGFloat
+    var gap: CGFloat = RadialPetalGeometry.defaultGap
+    var cornerTrim: CGFloat = RadialPetalGeometry.defaultCornerTrim
 
     func path(in rect: CGRect) -> Path {
         let center = CGPoint(x: rect.midX, y: rect.midY)
-        let endRad = CGFloat(endAngle.radians)
+        guard let petal = RadialPetalGeometry.petal(startDegrees: startAngle.degrees,
+                                                   endDegrees: endAngle.degrees,
+                                                   innerRadius: innerRadius,
+                                                   outerRadius: outerRadius,
+                                                   gap: gap,
+                                                   cornerTrim: cornerTrim) else {
+            return Path()
+        }
+
         var path = Path()
-
-        path.addArc(center: center, radius: outerRadius, startAngle: startAngle, endAngle: endAngle, clockwise: false)
-        path.addLine(to: CGPoint(x: center.x + innerRadius * cos(endRad), y: center.y + innerRadius * sin(endRad)))
-        path.addArc(center: center, radius: innerRadius, startAngle: endAngle, endAngle: startAngle, clockwise: true)
-        path.closeSubpath()
-
+        for element in petal.elements {
+            switch element {
+            case .move(let p):
+                path.move(to: absolute(p, center))
+            case .line(let p):
+                path.addLine(to: absolute(p, center))
+            case .quad(let to, let control):
+                path.addQuadCurve(to: absolute(to, center), control: absolute(control, center))
+            case .arc(let radius, let start, let end, let clockwise):
+                path.addArc(center: center,
+                            radius: radius,
+                            startAngle: .radians(Double(start)),
+                            endAngle: .radians(Double(end)),
+                            clockwise: clockwise)
+            case .close:
+                path.closeSubpath()
+            }
+        }
         return path
+    }
+
+    private func absolute(_ p: CGPoint, _ center: CGPoint) -> CGPoint {
+        CGPoint(x: center.x + p.x, y: center.y + p.y)
     }
 }
 
@@ -34,9 +69,9 @@ struct PieSegmentShape: Shape {
 
 /// 只描扇区**外沿**的一段圆弧。
 ///
-/// 与 `PieSegmentShape().stroke()` 的区别：后者会同时描出两条径向边和内弧，
-/// 那两条径向边正好压在相邻扇区的分隔线上，视觉上像是选中了两个扇区。
-/// 状态标识要的是「这一格的外框亮起来」，因此单独一个只画外弧的 Shape。
+/// 与 `PetalSegmentShape().stroke()` 的区别：后者会同时描出两条侧边和内弧，
+/// 视觉重量远超一个状态标识，还会与花瓣自身的轮廓线叠成双线。
+/// 状态标识要的是「这一格的外沿亮起来」，因此单独一个只画外弧的 Shape。
 struct SegmentOuterArcShape: Shape {
     let startAngle: Angle
     let endAngle: Angle
@@ -186,7 +221,30 @@ struct RadialMenuView: View {
     // Previous hover style scaled the whole sector and used outerRadius directly,
     // causing blue sectors to protrude outside the white circle at 1/5/6/8 etc.
     private let segmentOuterInset: CGFloat = 8
-    private let segmentInnerInset: CGFloat = 1.5
+    // v2.11.5: 1.5 → 4。硬边扇形时代扇区内沿几乎贴着死区圆环，因为两者本来就用同一条
+    // 分隔线语言；花瓣化之后中心 hub 是一个独立元素，花瓣的内圆角必须离开它一点，
+    // 否则 10 片花瓣的内侧尖端会全部压在 hub 描边上，看起来像「花瓣长在轮毂里」。
+    private let segmentInnerInset: CGFloat = 4
+
+    // MARK: - 花瓣扇区参数（v2.11.5）
+
+    /// 相邻花瓣之间的通道总宽（pt）。恒宽——不是固定角度，见 `RadialPetalGeometry` 的说明。
+    static let petalGap: CGFloat = 5
+    /// 圆角切点距离。16pt 是「大圆角」的观感来源；内圈弧短，Kit 会自动把内侧收紧，
+    /// 因此花瓣自然呈现「外圆内窄」的花瓣轮廓，不需要在这里分别配两个值。
+    static let petalCornerTrim: CGFloat = 18
+
+    /// 构造一片花瓣。抽成函数的唯一目的是让填充 / 描边 / 高光三层共用同一份参数——
+    /// v2.11.4 之前这三层各自 new 一个 `PieSegmentShape`，改任何一个参数都要改三处，
+    /// 漏一处就是「描边和填充对不上」的诡异错位。
+    private func petalShape(start: Angle, end: Angle, inner: CGFloat, outer: CGFloat) -> PetalSegmentShape {
+        PetalSegmentShape(startAngle: start,
+                          endAngle: end,
+                          innerRadius: inner,
+                          outerRadius: outer,
+                          gap: Self.petalGap,
+                          cornerTrim: Self.petalCornerTrim)
+    }
 
     private var displayCount: Int {
         mode == .childSlots ? store.config.slots : store.currentPageSlotGroups.count
@@ -232,20 +290,9 @@ struct RadialMenuView: View {
                                     .padding(6)
                             )
 
-                        if displayCount > 0 {
-                            ForEach(0..<displayCount, id: \.self) { i in
-                                let segmentAngle = 360.0 / Double(displayCount)
-                                let a = Angle(degrees: Double(i) * segmentAngle - 90)
-                                dividerLine(
-                                    center: center,
-                                    angle: a,
-                                    innerRadius: deadZoneRadius + 2,
-                                    outerRadius: segmentOuterRadius
-                                )
-                                .stroke(AppTheme.radialDivider(colorScheme), lineWidth: 1)
-                            }
-                        }
-
+                        // v2.11.5：分隔线整组删除。花瓣之间已经有一条 5pt 的恒宽通道，
+                        // 再在通道正中画一条 1pt 白线，等于把「留白」重新填上噪声——
+                        // 参考图里的径向菜单也是靠留白划界、零分隔线。
                         if mode == .childSlots {
                             childSlotSegments(center: center, outerRadius: segmentOuterRadius, deadZoneRadius: segmentInnerRadius)
                         } else {
@@ -533,18 +580,27 @@ struct RadialMenuView: View {
             let isLastPasted = store.isLastPasted(slot: slot, groupId: store.currentSpecialSlotId)
 
             ZStack {
-                PieSegmentShape(startAngle: startAngle, endAngle: endAngle, innerRadius: deadZoneRadius, outerRadius: outerRadius)
-                    // v2.11.4: 悬停填充改用**该槽位自己的颜色**（原先是统一的系统强调色蓝）。
-                    // 非悬停态仍走原来的白玻璃档位 —— 十格全染色会变成调色盘，反而看不出焦点。
+                let petal = petalShape(start: startAngle, end: endAngle,
+                                       inner: deadZoneRadius, outer: outerRadius)
+
+                petal
+                    // v2.11.4: 悬停填充改用统一冷灰蓝（原先是系统强调色蓝，v2.11.4 中途还试过槽位色）。
+                    // v2.11.5: 非悬停态的白玻璃档位整体提浓——花瓣之间有了 5pt 通道后，
+                    // 原来 0.018~0.18 的极淡填充在通道旁边根本读不出「这是一张卡片」。
                     .fill(isHovered
                           ? AppTheme.radialSegmentHoverFill(slot: slot)
                           : AppTheme.radialSegment(colorScheme, isEmpty: content.isEmpty, isHovered: false))
+                    // v2.11.5: 每片花瓣一圈极细轮廓（0.7pt）。删掉的分隔线预算花在这里——
+                    // 同样的「划界」职责，画在卡片自己的边上比画在通道正中更符合卡片语义。
+                    .overlay(
+                        petal.stroke(AppTheme.radialPetalEdge(colorScheme), lineWidth: 0.7)
+                    )
 
                 if isHovered {
-                    PieSegmentShape(startAngle: startAngle, endAngle: endAngle, innerRadius: deadZoneRadius, outerRadius: outerRadius)
+                    petal
                         .stroke(AppTheme.radialSegmentHoverStroke(slot: slot), lineWidth: 2)
                         .background(
-                            PieSegmentShape(startAngle: startAngle, endAngle: endAngle, innerRadius: deadZoneRadius, outerRadius: outerRadius)
+                            petal
                                 .fill(Color.white.opacity(colorScheme == .dark ? 0.045 : 0.22))
                                 .blur(radius: 0.4)
                         )
@@ -553,10 +609,13 @@ struct RadialMenuView: View {
                 // 外沿高亮弧放在 hover 描边**之上**：hover 时也要看得见这格是上次粘贴的。
                 // v2.11.4 hotfix：改用 `radialSlotAccent`（提亮版）——基础色描在深色扇区外沿
                 // 会闷成一条暗边，尤其琥珀/橄榄那两支几乎看不出是高亮。色相与主界面卡片角标一致。
+                // v2.11.5：端点内缩改由花瓣参数决定，否则弧会探出花瓣的圆角、悬在通道上方。
                 if isLastPasted,
                    let arc = RadialSegmentLayoutCalculator.lastPasteArc(outerRadius: outerRadius,
                                                                        startDegrees: startAngle.degrees,
-                                                                       endDegrees: endAngle.degrees) {
+                                                                       endDegrees: endAngle.degrees,
+                                                                       petalGap: Self.petalGap,
+                                                                       petalCornerTrim: Self.petalCornerTrim) {
                     SegmentOuterArcShape(startAngle: .degrees(arc.startDegrees),
                                          endAngle: .degrees(arc.endDegrees),
                                          radius: arc.radius)
@@ -596,14 +655,20 @@ struct RadialMenuView: View {
             let isCurrent = special.id == store.currentSpecialSlotId
 
             ZStack {
-                PieSegmentShape(startAngle: startAngle, endAngle: endAngle, innerRadius: deadZoneRadius, outerRadius: outerRadius)
+                let petal = petalShape(start: startAngle, end: endAngle,
+                                       inner: deadZoneRadius, outer: outerRadius)
+
+                petal
                     .fill(AppTheme.radialSegment(colorScheme, isEmpty: false, isHovered: isHovered))
+                    .overlay(
+                        petal.stroke(AppTheme.radialPetalEdge(colorScheme), lineWidth: 0.7)
+                    )
 
                 if isHovered {
-                    PieSegmentShape(startAngle: startAngle, endAngle: endAngle, innerRadius: deadZoneRadius, outerRadius: outerRadius)
+                    petal
                         .stroke(AppTheme.radialStroke(colorScheme, isHovered: true), lineWidth: 2)
                         .background(
-                            PieSegmentShape(startAngle: startAngle, endAngle: endAngle, innerRadius: deadZoneRadius, outerRadius: outerRadius)
+                            petal
                                 .fill(Color.white.opacity(colorScheme == .dark ? 0.045 : 0.22))
                                 .blur(radius: 0.4)
                         )
@@ -813,7 +878,8 @@ struct RadialMenuView: View {
             ? nil
             : RadialSegmentLayoutCalculator.layout(innerRadius: innerRadius,
                                                    outerRadius: outerRadius,
-                                                   segmentDegrees: segmentDegrees)
+                                                   segmentDegrees: segmentDegrees,
+                                                   petalGap: Self.petalGap)
 
         ZStack {
             if let manual, let layout {
@@ -838,10 +904,15 @@ struct RadialMenuView: View {
             } else {
                 // 无手动缩略图（或扇区太窄放不下）：仍走「纯文字居中」的原有布局，
                 // 只是标签宽度同样按楔形弦宽收敛，避免长标签横向压过扇区分隔线。
+                // v2.11.5：宽度按**花瓣内缩后**的张角算。花瓣侧边比原扇区边界向内让了
+                // 2.5pt（垂直距离），标签若还按满张角撑开就会压在圆角边上、探进通道。
                 segmentTextBlock(slot: slot, content: content, label: label, isHovered: isHovered,
                                  textWidth: RadialSegmentLayoutCalculator.textBlockWidth(
                                     atRadius: midRadius,
-                                    segmentDegrees: segmentDegrees,
+                                    segmentDegrees: RadialPetalGeometry.effectiveSegmentDegrees(
+                                        atRadius: midRadius,
+                                        segmentDegrees: segmentDegrees,
+                                        sideInset: Self.petalGap / 2),
                                     preferred: midRadius * 0.78))
                     .offset(x: midRadius * cos(rad), y: midRadius * sin(rad))
             }
@@ -949,15 +1020,6 @@ struct RadialMenuView: View {
         }
     }
 
-    private func dividerLine(center: CGPoint, angle: Angle, innerRadius: CGFloat, outerRadius: CGFloat) -> Path {
-        let rad = CGFloat(angle.radians)
-        let start = CGPoint(x: center.x + innerRadius * cos(rad), y: center.y + innerRadius * sin(rad))
-        let end = CGPoint(x: center.x + outerRadius * cos(rad), y: center.y + outerRadius * sin(rad))
-        var path = Path()
-        path.move(to: start)
-        path.addLine(to: end)
-        return path
-    }
 }
 
 extension Notification.Name {

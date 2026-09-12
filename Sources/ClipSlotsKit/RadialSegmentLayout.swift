@@ -88,25 +88,40 @@ public enum RadialSegmentLayoutCalculator {
     ///   - innerRadius: 扇区内半径（死区外沿）。
     ///   - outerRadius: 扇区外半径（圆盘内沿）。
     ///   - segmentDegrees: 单个扇区的张角（度）。360 表示只有一个扇区。
+    ///   - petalGap: v2.11.5 花瓣间通道总宽（pt）。传 0 等价于旧的硬边扇形。
+    ///     花瓣的侧边内缩了 `petalGap/2` 的垂直距离，可用弦宽随之变窄；
+    ///     内容宽度必须按**内缩后**的张角算，否则缩略图 / 标签会压在花瓣的圆角边上、
+    ///     甚至探进通道里，那正是「留白」被视觉噪声吃掉的方式。
     /// - Returns: 放得下缩略图时返回布局；扇区太窄或太薄放不下时返回 `nil`，
     ///            调用方应退回「纯文字居中」的原有渲染。
     public static func layout(innerRadius: CGFloat,
                              outerRadius: CGFloat,
-                             segmentDegrees: Double) -> RadialSegmentLayout? {
+                             segmentDegrees: Double,
+                             petalGap: CGFloat = 0) -> RadialSegmentLayout? {
         guard outerRadius > innerRadius, innerRadius >= 0, segmentDegrees > 0 else { return nil }
 
         let midRadius = (innerRadius + outerRadius) / 2
         let band = outerRadius - innerRadius
 
+        let sideInset = RadialPetalGeometry.clampedSideInset(requestedGap: petalGap,
+                                                            innerRadius: max(innerRadius, 1),
+                                                            segmentDegrees: segmentDegrees)
+        /// 花瓣在半径 r 处实际剩下的张角。gap = 0 时恒等于 `segmentDegrees`。
+        func effectiveDegrees(at radius: CGFloat) -> Double {
+            RadialPetalGeometry.effectiveSegmentDegrees(atRadius: radius,
+                                                        segmentDegrees: segmentDegrees,
+                                                        sideInset: sideInset)
+        }
+
         // 约束 1（角向）：扇区在中轴线中点处的可用弦宽。楔形越往内越窄，用中点处估算
         // 已经足够保守——缩略图被摆在中点**外侧**，那里的楔形只会更宽。
         // 半扇区角 ≥ 90° 时楔形已不构成约束（tan 发散），直接放开。
-        let halfDegrees = segmentDegrees / 2
+        let midDegrees = effectiveDegrees(at: midRadius)
         let byArcWidth: CGFloat
-        if halfDegrees >= 89.5 {
+        if midDegrees / 2 >= 89.5 {
             byArcWidth = .greatestFiniteMagnitude
         } else {
-            byArcWidth = chordWidth(atRadius: midRadius, segmentDegrees: segmentDegrees) * arcWidthUtilization
+            byArcWidth = chordWidth(atRadius: midRadius, segmentDegrees: midDegrees) * arcWidthUtilization
         }
 
         // 约束 2（径向）：环带厚度要同时容纳缩略图、间距、文字块和两侧留白。
@@ -132,7 +147,7 @@ public enum RadialSegmentLayoutCalculator {
                                    thumbnailRadius: thumbnailRadius,
                                    textRadius: textRadius,
                                    textBlockWidth: textBlockWidth(atRadius: textRadius,
-                                                                  segmentDegrees: segmentDegrees,
+                                                                  segmentDegrees: effectiveDegrees(at: textRadius),
                                                                   preferred: midRadius * 0.78))
     }
 }
@@ -141,9 +156,9 @@ public enum RadialSegmentLayoutCalculator {
 
 /// 扇区外沿那条「上次粘贴」高亮弧的几何参数（圆心与扇区同心）。
 ///
-/// 为什么只画**外弧**而不是整条楔形轮廓：`PieSegmentShape.stroke` 会同时描出外弧、
-/// 两条径向边和内弧，视觉重量远超一个状态标识，而且径向边与相邻扇区的分隔线重合，
-/// 会让人误以为是「选中了两个扇区」。只描外弧既醒目又不污染分隔线。
+/// 为什么只画**外弧**而不是整条楔形轮廓：整圈描边（`PetalSegmentShape.stroke`）会同时描出
+/// 外弧、两条侧边和内弧，视觉重量远超一个状态标识；v2.11.5 之后花瓣本身已经有一层轮廓线，
+/// 再叠一整圈只会糊成「这一格被选中了两次」。只描外弧既醒目又不与花瓣轮廓打架。
 public struct RadialLastPasteArc: Equatable {
     /// 弧线中心线所在半径（已扣掉线宽的一半与外沿留白）。
     public let radius: CGFloat
@@ -182,10 +197,17 @@ extension RadialSegmentLayoutCalculator {
     /// - Parameters:
     ///   - outerRadius: 扇区外半径（与 `layout(innerRadius:outerRadius:segmentDegrees:)` 同一口径）。
     ///   - startDegrees / endDegrees: 扇区起止角（与扇区绘制用的角度同一坐标系，度）。
+    ///   - petalGap / petalCornerTrim: v2.11.5 花瓣形状参数。传 0 等价于旧的硬边扇形。
+    ///     花瓣的外弧被通道内缩了 `asin(h/R)`、又被两端圆角吃掉了 `trim/R` 的弧度，
+    ///     如果这条弧还按老口径只内缩 6pt，两端就会探出圆角、悬在通道上方 —— 一条
+    ///     「比花瓣本身还长」的高亮弧看起来就是渲染出错。所以端点内缩取
+    ///     `max(6pt, 通道内缩 + 圆角占用)`。
     /// - Returns: 可绘制时返回弧参数；扇区退化或太窄时返回 `nil`（调用方不画）。
     public static func lastPasteArc(outerRadius: CGFloat,
                                     startDegrees: Double,
-                                    endDegrees: Double) -> RadialLastPasteArc? {
+                                    endDegrees: Double,
+                                    petalGap: CGFloat = 0,
+                                    petalCornerTrim: CGFloat = 0) -> RadialLastPasteArc? {
         let span = endDegrees - startDegrees
         guard span > 0 else { return nil }
 
@@ -195,7 +217,13 @@ extension RadialSegmentLayoutCalculator {
         // 端点内缩：把固定弧长换算成角度；同时最多只吃掉本扇区 1/4 的张角，
         // 保证窄扇区下弧线不会被两端啃光。
         let byLength = Double(lastPasteArcEndInset / radius) * 180 / .pi
-        let inset = min(byLength, span / 4)
+        // v2.11.5：花瓣的圆角与通道也要让路，取两者更大的一档。
+        let petalDelta = RadialPetalGeometry.insetDegrees(atRadius: radius,
+                                                         sideInset: petalGap / 2)
+        let byPetal = petalGap > 0
+            ? petalDelta + Double(petalCornerTrim * 0.75 / radius) * 180 / .pi
+            : 0
+        let inset = min(max(byLength, byPetal), span / 4)
         let start = startDegrees + inset
         let end = endDegrees - inset
         guard end - start >= min(lastPasteArcMinSpanDegrees, span) else { return nil }

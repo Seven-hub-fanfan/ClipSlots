@@ -270,8 +270,13 @@ enum AppTheme {
     static func radialCenterBackground(_ scheme: ColorScheme) -> Color { radialCenterBackground }
 
     private static let radialSegmentHovered = dynAccent(lightOpacity: 0.30, darkOpacity: 0.42)
-    private static let radialSegmentEmpty = dyn(light: Color.white.opacity(0.10), dark: Color.white.opacity(0.018))
-    private static let radialSegmentFilled = dyn(light: Color.white.opacity(0.18), dark: Color.white.opacity(0.045))
+    // v2.11.5：花瓣化之后静息态填充整体提浓（浅 0.10/0.18 → 0.17/0.30，深 0.018/0.045 → 0.05/0.10）。
+    //
+    // 原来的极淡填充是为「硬边扇形」调的：那时扇区彼此相接、靠分隔线划界，填充只需要
+    // 隐约区分「空 / 有内容」。花瓣之间隔了 5pt 通道之后，填充要独自承担「这是一张卡片」
+    // 的全部表达——0.018 的白在深色磨砂上根本看不出边界，十片花瓣会糊成一团雾。
+    private static let radialSegmentEmpty = dyn(light: Color.white.opacity(0.17), dark: Color.white.opacity(0.05))
+    private static let radialSegmentFilled = dyn(light: Color.white.opacity(0.30), dark: Color.white.opacity(0.10))
     static func radialSegment(isEmpty: Bool, isHovered: Bool) -> Color {
         if isHovered { return radialSegmentHovered }
         return isEmpty ? radialSegmentEmpty : radialSegmentFilled
@@ -279,6 +284,14 @@ enum AppTheme {
     static func radialSegment(_ scheme: ColorScheme, isEmpty: Bool, isHovered: Bool) -> Color {
         radialSegment(isEmpty: isEmpty, isHovered: isHovered)
     }
+
+    /// 花瓣轮廓线（v2.11.5）。极细一圈（0.7pt），职责是把卡片的圆角边缘「收住」。
+    ///
+    /// 这笔预算是从删掉的径向分隔线那里挪来的：同样一条「划界」的线，画在卡片自己的边上
+    /// 是卡片语义，画在两片花瓣正中间就是把留白重新填满。浓度刻意比原分隔线（浅 0.44）低
+    /// 一半以上——轮廓要的是「有边界」，不是「有线条」。
+    static let radialPetalEdge = dyn(light: Color.white.opacity(0.55), dark: Color.white.opacity(0.085))
+    static func radialPetalEdge(_ scheme: ColorScheme) -> Color { radialPetalEdge }
 
     private static let radialStrokeIdle = dyn(light: Color.white.opacity(0.50), dark: Color.white.opacity(0.16))
     static func radialStroke(isHovered: Bool) -> Color {

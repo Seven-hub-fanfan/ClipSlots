@@ -1072,6 +1072,311 @@ do {
     }
 }
 
+// MARK: - 花瓣扇区几何（v2.11.5）
+//
+// 硬边扇形改成「圆角花瓣 + 恒宽通道」之后，出错的方式全都是**看起来差不多但其实越界**：
+// 花瓣探进邻居的角度区间、通道内圈粘住外圈裂开、圆角大到路径自交打结、圆角把「上次粘贴」
+// 外弧挤到花瓣外面悬空。这些都是可以精确断言的几何不变量，下面逐条钉住。
+//
+// 采样口径与 RadialMenuView 一致：menuSize 372 → outerRadius 186、segmentOuterInset 8、
+// 死区 0.24R、segmentInnerInset 1.5、gap 5、cornerTrim 16。
+do {
+    let outer: CGFloat = 186
+    let segmentOuter = outer - 8
+    let deadZone = outer * 0.24
+    let segmentInner = deadZone + 4      // segmentInnerInset（v2.11.5 从 1.5 抬到 4）
+    let gap: CGFloat = 5
+    let trim: CGFloat = 18
+
+    /// 从路径基元里抽出所有「实体点」（含贝塞尔控制点：控制点就是被倒掉的几何拐角，
+    /// 它必须也在楔形内，否则圆角会鼓出边界）。
+    func samplePoints(_ petal: RadialPetal) -> [CGPoint] {
+        var pts: [CGPoint] = []
+        for e in petal.elements {
+            switch e {
+            case .move(let p), .line(let p):
+                pts.append(p)
+            case .quad(let to, let control):
+                pts.append(to)
+                pts.append(control)
+            case .arc(let radius, let start, let end, _):
+                // 圆弧本身按半径采样：等分 5 点，覆盖弧中段（端点已由相邻基元贡献）。
+                for k in 0...5 {
+                    let t = CGFloat(k) / 5
+                    let a = start + (end - start) * t
+                    pts.append(CGPoint(x: radius * cos(a), y: radius * sin(a)))
+                }
+            case .close:
+                break
+            }
+        }
+        return pts
+    }
+
+    func polarDegrees(_ p: CGPoint) -> Double {
+        var deg = Double(atan2(p.y, p.x)) * 180 / .pi
+        if deg < -180 { deg += 360 }
+        return deg
+    }
+
+    func radius(_ p: CGPoint) -> CGFloat { sqrt(p.x * p.x + p.y * p.y) }
+
+    // ① 核心不变量：每片花瓣完整落在自己的楔形内（角度 + 内外半径都不越界）。
+    //    槽位数从 1 扫到 12，覆盖「单片=整环带」到「12 片窄花瓣」。
+    for count in [1, 2, 3, 4, 5, 6, 8, 10, 12] {
+        let span = 360.0 / Double(count)
+        for i in 0..<count {
+            let start = Double(i) * span - 90
+            let end = Double(i + 1) * span - 90
+            guard let petal = RadialPetalGeometry.petal(startDegrees: start,
+                                                       endDegrees: end,
+                                                       innerRadius: segmentInner,
+                                                       outerRadius: segmentOuter,
+                                                       gap: gap,
+                                                       cornerTrim: trim) else {
+                t.check(false, "★\(count) 花瓣：第 \(i) 片应当可解")
+                continue
+            }
+
+            t.equal(petal.elements.count, 10, "花瓣路径基元数固定为 10（move+arc+4圆角+2侧边+arc+close）")
+
+            var maxRadius: CGFloat = 0
+            var minRadius: CGFloat = .greatestFiniteMagnitude
+            var worstAngleOverflow: Double = 0
+            for p in samplePoints(petal) {
+                let r = radius(p)
+                maxRadius = max(maxRadius, r)
+                minRadius = min(minRadius, r)
+
+                // 角度必须落在 [start, end] 内。用该点自身半径处的允许区间比较，
+                // 容差 0.01° 兜浮点。
+                // 把采样角搬进 [start, start+360)：atan2 只给 (-180, 180]，而扇区角可以是
+                // 234°~270° 这种跨界区间；容差 0.01° 是为了让「刚好压在 start 上、浮点下溢
+                // 到 start - 1e-7」的点留在原地，而不是被整整搬走一圈变成假越界。
+                var normalized = polarDegrees(p)
+                while normalized < start - 0.01 { normalized += 360 }
+                while normalized > start + 359.99 { normalized -= 360 }
+                let overflow = max(start - normalized, normalized - end)
+                worstAngleOverflow = max(worstAngleOverflow, overflow)
+            }
+
+            t.check(maxRadius <= segmentOuter + 0.01,
+                    "★\(count) 花瓣第 \(i) 片不得越出外沿（最大 \(maxRadius) vs \(segmentOuter)）")
+            t.check(minRadius >= segmentInner - 0.01,
+                    "★\(count) 花瓣第 \(i) 片不得压进死区（最小 \(minRadius) vs \(segmentInner)）")
+            // count == 1 时首尾就是同一条边界，允许贴边（overflow ≈ 0）。
+            t.check(worstAngleOverflow <= 0.01,
+                    "★\(count) 花瓣第 \(i) 片不得探进邻居的角度区间（越界 \(worstAngleOverflow)°）")
+        }
+    }
+
+    // ② 通道**恒宽**：这是选「垂直距离内缩」而不是「固定角度内缩」的全部理由。
+    //    验证方式：花瓣四个拐角到自己那条原始径向边的垂直距离都必须等于 gap/2，
+    //    因此相邻两片之间的通道处处等于 gap —— 内圈不粘、外圈不裂。
+    if let petal = RadialPetalGeometry.petal(startDegrees: -90,
+                                            endDegrees: -90 + 36.0,
+                                            innerRadius: segmentInner,
+                                            outerRadius: segmentOuter,
+                                            gap: gap,
+                                            cornerTrim: trim) {
+        let span = 36.0
+        t.check(abs(petal.sideInset - gap / 2) < 0.0001,
+                "10 槽位下侧边内缩应恰为 gap/2（实际 \(petal.sideInset)）")
+
+        // corners 顺序：[外-起始边, 外-结束边, 内-结束边, 内-起始边]
+        let startSideCorners = [petal.corners[0], petal.corners[3]]
+        let endSideCorners = [petal.corners[1], petal.corners[2]]
+        for c in startSideCorners {
+            let d = RadialPetalGeometry.perpendicularDistance(c, toRayAtDegrees: -90)
+            t.check(abs(d - gap / 2) < 0.001,
+                    "★起始边拐角到原始径向边的垂距必须恒为 gap/2（实际 \(d)）")
+        }
+        for c in endSideCorners {
+            let d = RadialPetalGeometry.perpendicularDistance(c, toRayAtDegrees: -90 + span)
+            t.check(abs(d - gap / 2) < 0.001,
+                    "★结束边拐角到原始径向边的垂距必须恒为 gap/2（实际 \(d)）")
+        }
+
+        // 内外两端的角度内缩必须**不同**（内圈吃掉更多角度），这正是「花瓣形」的来源。
+        // 若两者相等说明退回成了固定角度内缩 —— 那就是内圈粘外圈裂的老毛病。
+        let innerDelta = RadialPetalGeometry.insetDegrees(atRadius: segmentInner, sideInset: gap / 2)
+        let outerDelta = RadialPetalGeometry.insetDegrees(atRadius: segmentOuter, sideInset: gap / 2)
+        t.check(innerDelta > outerDelta * 2,
+                "★内圈的角度内缩必须显著大于外圈（\(innerDelta)° vs \(outerDelta)°），否则通道不是恒宽的")
+    } else {
+        t.check(false, "10 槽位花瓣应当可解")
+    }
+
+    // ③ 相邻花瓣之间真的隔着 gap：取同半径处两片的相邻边界角，换算成弦距。
+    for count in [3, 5, 10] {
+        let span = 360.0 / Double(count)
+        guard let a = RadialPetalGeometry.petal(startDegrees: -90, endDegrees: -90 + span,
+                                               innerRadius: segmentInner, outerRadius: segmentOuter,
+                                               gap: gap, cornerTrim: trim),
+              let b = RadialPetalGeometry.petal(startDegrees: -90 + span, endDegrees: -90 + 2 * span,
+                                                innerRadius: segmentInner, outerRadius: segmentOuter,
+                                                gap: gap, cornerTrim: trim) else {
+            t.check(false, "\(count) 槽位相邻两片应当可解")
+            continue
+        }
+        for probe: CGFloat in [segmentInner, (segmentInner + segmentOuter) / 2, segmentOuter] {
+            let aEnd = a.angleRange(atRadius: probe).end
+            let bStart = b.angleRange(atRadius: probe).start
+            // 同半径两点间的弦长 = 2r·sin(Δθ/2)
+            let deltaRad = (bStart - aEnd) * .pi / 180
+            let chord = 2 * probe * CGFloat(sin(deltaRad / 2))
+            t.check(abs(chord - gap) < 0.05,
+                    "★\(count) 槽位在 r=\(probe) 处的通道宽度必须 ≈ gap=\(gap)（实际 \(chord)）")
+        }
+    }
+
+    // ④ 圆角必须被收紧，绝不允许「切点越过对边切点」——那会让路径自交、渲染成打结的怪形。
+    //    内圈弧短（10 槽位下只有 ~26pt），所以内侧圆角一定小于请求的 16pt。
+    for count in [5, 10, 12] {
+        let span = 360.0 / Double(count)
+        guard let petal = RadialPetalGeometry.petal(startDegrees: -90, endDegrees: -90 + span,
+                                                   innerRadius: segmentInner, outerRadius: segmentOuter,
+                                                   gap: gap, cornerTrim: 999) else {
+            t.check(false, "\(count) 槽位在超大圆角请求下也必须给出解")
+            continue
+        }
+        let innerSpan = span - 2 * RadialPetalGeometry.insetDegrees(atRadius: segmentInner, sideInset: petal.sideInset)
+        let innerArc = segmentInner * CGFloat(innerSpan * .pi / 180)
+        let outerSpanDeg = span - 2 * RadialPetalGeometry.insetDegrees(atRadius: segmentOuter, sideInset: petal.sideInset)
+        let outerArc = segmentOuter * CGFloat(outerSpanDeg * .pi / 180)
+        let sideLen = sqrt(segmentOuter * segmentOuter - petal.sideInset * petal.sideInset)
+            - sqrt(segmentInner * segmentInner - petal.sideInset * petal.sideInset)
+
+        t.check(petal.innerCornerTrim <= innerArc * 0.46,
+                "★\(count) 槽位：内侧圆角不得超过内弧的一半（\(petal.innerCornerTrim) vs 弧长 \(innerArc)）")
+        t.check(petal.outerCornerTrim <= outerArc * 0.46,
+                "★\(count) 槽位：外侧圆角不得超过外弧的一半（\(petal.outerCornerTrim) vs 弧长 \(outerArc)）")
+        t.check(petal.outerCornerTrim + petal.innerCornerTrim <= sideLen * 0.91,
+                "★\(count) 槽位：同一条侧边两端的圆角切点不得越过对方（\(petal.outerCornerTrim)+\(petal.innerCornerTrim) vs 边长 \(sideLen)）")
+        t.check(petal.innerCornerTrim <= petal.outerCornerTrim + 0.0001,
+                "内弧比外弧短，内侧圆角不该比外侧更大（\(petal.innerCornerTrim) vs \(petal.outerCornerTrim)）")
+    }
+
+    // ⑤ gap = 0 且 cornerTrim = 0 时必须精确退化成老的硬边扇形——
+    //    这条是「花瓣是硬边扇形的连续推广」的桥接断言，也让日后想回退时有据可依。
+    if let sharp = RadialPetalGeometry.petal(startDegrees: -90, endDegrees: -54,
+                                             innerRadius: segmentInner, outerRadius: segmentOuter,
+                                             gap: 0, cornerTrim: 0) {
+        t.check(abs(sharp.sideInset) < 0.0001, "gap=0 时不应有侧边内缩")
+        t.check(abs(sharp.outerCornerTrim) < 0.0001 && abs(sharp.innerCornerTrim) < 0.0001,
+                "cornerTrim=0 时不应有圆角")
+        t.check(abs(polarDegrees(sharp.corners[0]) - (-90)) < 0.0001,
+                "★gap=0 时外-起始拐角回到原始扇区边界（实际 \(polarDegrees(sharp.corners[0]))°）")
+        t.check(abs(polarDegrees(sharp.corners[1]) - (-54)) < 0.0001,
+                "★gap=0 时外-结束拐角回到原始扇区边界（实际 \(polarDegrees(sharp.corners[1]))°）")
+        t.check(abs(radius(sharp.corners[2]) - segmentInner) < 0.0001, "gap=0 时内侧拐角贴内半径")
+    } else {
+        t.check(false, "gap=0/trim=0 的退化形状必须可解")
+    }
+
+    // ⑥ 退化输入必须返回 nil 而不是画出垃圾：内外半径倒置、张角为 0。
+    t.check(RadialPetalGeometry.petal(startDegrees: 0, endDegrees: 36,
+                                     innerRadius: 100, outerRadius: 100,
+                                     gap: gap, cornerTrim: trim) == nil,
+            "内外半径相等时应返回 nil")
+    t.check(RadialPetalGeometry.petal(startDegrees: 0, endDegrees: 0,
+                                     innerRadius: 40, outerRadius: 180,
+                                     gap: gap, cornerTrim: trim) == nil,
+            "零张角时应返回 nil")
+
+    // ⑦ 极窄扇区（一页 40 个组 → 9°/片）：间隙必须被自动收紧，否则内圈两侧内缩
+    //    合计 6.2° 会吃掉 2/3 张角，花瓣被压成一根针。
+    do {
+        let narrowSpan = 9.0
+        let clamped = RadialPetalGeometry.clampedSideInset(requestedGap: gap,
+                                                          innerRadius: segmentInner,
+                                                          segmentDegrees: narrowSpan)
+        t.check(clamped < gap / 2,
+                "★9° 窄扇区下间隙必须被收紧（\(clamped) < \(gap / 2)）")
+        let delta = RadialPetalGeometry.insetDegrees(atRadius: segmentInner, sideInset: clamped)
+        t.check(2 * delta <= narrowSpan * 0.61,
+                "★收紧后两侧内缩合计不得吃掉超过 60% 张角（实际 \(2 * delta)° / \(narrowSpan)°）")
+        t.check(RadialPetalGeometry.petal(startDegrees: 0, endDegrees: narrowSpan,
+                                          innerRadius: segmentInner, outerRadius: segmentOuter,
+                                          gap: gap, cornerTrim: trim) != nil,
+                "窄扇区收紧后仍应给出可绘制的花瓣")
+    }
+
+    // ⑧ 内容宽度必须按内缩后的张角算。花瓣把两侧各让出 2.5pt 垂距，
+    //    若内容仍按满张角撑开，就会压在圆角边上甚至探进通道。
+    do {
+        let span = 36.0
+        let r: CGFloat = 120
+        let full = RadialSegmentLayoutCalculator.chordWidth(atRadius: r, segmentDegrees: span)
+        let effDegrees = RadialPetalGeometry.effectiveSegmentDegrees(atRadius: r,
+                                                                    segmentDegrees: span,
+                                                                    sideInset: gap / 2)
+        let narrowed = RadialSegmentLayoutCalculator.chordWidth(atRadius: r, segmentDegrees: effDegrees)
+        t.check(effDegrees < span, "内缩后张角必须变小（\(effDegrees)° < \(span)°）")
+        t.check(narrowed < full, "★花瓣可用弦宽必须比硬边扇形更窄（\(narrowed) < \(full)）")
+        // 收窄量应当就是「两侧各让 gap/2」这一条通道的量级。取区间而不是等号：
+        // `chordWidth` 用的是 2r·tan(θ/2)（楔形在该半径处的横向可用宽度，不是几何弦长），
+        // tan 超线性，于是同样的角度内缩换算出来的宽度损失会比一条通道**略多**一点
+        // （10 槽位 r=120 处实测 5.49pt vs gap 5pt）。方向是保守的：内容更窄 = 更不会压边。
+        t.check((full - narrowed) >= gap * 0.9 && (full - narrowed) <= gap * 1.3,
+                "★弦宽收窄量应在一整条通道宽的量级（\(full - narrowed) vs gap \(gap)）——两侧各让 gap/2")
+
+        // 走完整 layout：传 petalGap 后文字块宽度必须收窄，且缩略图不能反而变大。
+        if let plain = RadialSegmentLayoutCalculator.layout(innerRadius: segmentInner,
+                                                           outerRadius: segmentOuter,
+                                                           segmentDegrees: span),
+           let petaled = RadialSegmentLayoutCalculator.layout(innerRadius: segmentInner,
+                                                              outerRadius: segmentOuter,
+                                                              segmentDegrees: span,
+                                                              petalGap: gap) {
+            t.check(petaled.textBlockWidth < plain.textBlockWidth,
+                    "★花瓣模式下文字块必须更窄（\(petaled.textBlockWidth) < \(plain.textBlockWidth)）")
+            t.check(petaled.thumbnailSide <= plain.thumbnailSide,
+                    "花瓣模式下缩略图不得变大（\(petaled.thumbnailSide) vs \(plain.thumbnailSide)）")
+            t.check(petaled.thumbnailSide >= RadialSegmentLayoutCalculator.minThumbnailSide,
+                    "10 槽位花瓣仍应放得下缩略图（\(petaled.thumbnailSide)）")
+        } else {
+            t.check(false, "10 槽位下两种模式都应给出布局")
+        }
+    }
+
+    // ⑨「上次粘贴」外弧必须缩进到花瓣的圆角**里面**，否则弧的两端会探出花瓣、悬在通道上方。
+    for count in [5, 10] {
+        let span = 360.0 / Double(count)
+        guard let petal = RadialPetalGeometry.petal(startDegrees: -90, endDegrees: -90 + span,
+                                                   innerRadius: segmentInner, outerRadius: segmentOuter,
+                                                   gap: gap, cornerTrim: trim),
+              let arc = RadialSegmentLayoutCalculator.lastPasteArc(outerRadius: segmentOuter,
+                                                                  startDegrees: -90,
+                                                                  endDegrees: -90 + span,
+                                                                  petalGap: gap,
+                                                                  petalCornerTrim: trim) else {
+            t.check(false, "\(count) 槽位：花瓣与外弧都应可解")
+            continue
+        }
+        let allowed = petal.angleRange(atRadius: arc.radius)
+        t.check(arc.startDegrees >= allowed.start - 0.001 && arc.endDegrees <= allowed.end + 0.001,
+                "★\(count) 槽位：外弧必须落在花瓣角度区间内（弧 \(arc.startDegrees)~\(arc.endDegrees) vs 花瓣 \(allowed.start)~\(allowed.end)）")
+        t.check(arc.outerEdgeRadius <= segmentOuter + 0.001,
+                "外弧含线宽后仍不得越出扇区外沿")
+        // 与老口径对比：花瓣化之后端点内缩必须更大（因为要给圆角让路）。
+        if let legacy = RadialSegmentLayoutCalculator.lastPasteArc(outerRadius: segmentOuter,
+                                                                  startDegrees: -90,
+                                                                  endDegrees: -90 + span) {
+            t.check(arc.spanDegrees < legacy.spanDegrees,
+                    "★\(count) 槽位：花瓣模式的外弧必须比硬边模式更短（\(arc.spanDegrees)° < \(legacy.spanDegrees)°）")
+        }
+    }
+
+    // ⑩ 视觉参数本身的护栏：通道 4~6pt 是需求给定的甜点区间，圆角要「大」但不能大过环带的一半。
+    t.check(RadialPetalGeometry.defaultGap >= 4 && RadialPetalGeometry.defaultGap <= 6,
+            "默认通道宽应落在 4~6pt（当前 \(RadialPetalGeometry.defaultGap)）")
+    t.check(RadialPetalGeometry.defaultCornerTrim >= 10,
+            "默认圆角要足够「大圆角」（当前 \(RadialPetalGeometry.defaultCornerTrim)）")
+    t.check(RadialPetalGeometry.defaultCornerTrim < (segmentOuter - segmentInner) / 2,
+            "默认圆角不得超过环带厚度的一半（否则花瓣退化成一颗药丸）")
+}
+
 // MARK: - 槽位色跟随（v2.11.4）：调色板取色 + 黑白墨色对比度
 //
 // v2.11.4 让圆盘悬停高亮与底栏「上次粘贴」胶囊都跟随槽位色，于是「胶囊上该写黑字还是白字」
@@ -1539,7 +1844,7 @@ do {
 
     // ── 版本号必须与本次发布一致（历史上 CLI_VERSION 漂移过好几次）
     let ver = runCLI(["version"])
-    t.equal(ver.json["version"] as? String, "2.11.4", "★CLI_VERSION 必须与 App 版本同步为 2.11.4")
+    t.equal(ver.json["version"] as? String, "2.11.5", "★CLI_VERSION 必须与 App 版本同步为 2.11.5")
 
     // ── ① 落盘回读
     let set1 = runCLI(["set-thumbnail", "1", "--image", imgA.path])
