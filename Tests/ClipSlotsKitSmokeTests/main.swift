@@ -2123,7 +2123,7 @@ do {
 // （否则工具栏会重新变成一块颜色略不同的方块压在内容上）——这条也补成断言。
 //
 // 所以这一段把新拟物的三条硬约束全部写成断言，四套取值（简洁/多彩 × 浅色/深色）逐套过：
-//   ① 光源方向一致：raised > ground > well（亮度严格递减）
+//   ① 光源方向一致：raised == ground（同材质，边界靠双色投影）、well < ground（凹陷）
 //   ② 层级可辨：凸起与内凹之间必须有可察的亮度差，否则退化成「一片白」
 //   ③ 选中滑块与轨道、按钮文字与底色的对比度达标（滑块是「当前选哪个」的唯一信号）
 
@@ -2133,20 +2133,18 @@ do {
     // 原来的 well 是相对**面板**调的，面板比画布亮，直接搬到画布上就可能比画布还亮
     //（深色档尤其明显：原 #1B1B1D 压在 #161618 上其实是凸起，不是凹陷）。
     for (name, s) in NeumorphicPalette.allSurfaces {
-        t.check(s.raised.relativeLuminance > s.ground.relativeLuminance,
-                "★★\(name)：凸起必须比承载面（画布）亮（光源在左上，顶面受光）")
+        // hotfix5：凸起**必须与画布同色**。这条和上面的直觉正好相反，所以特别容易被「顺手
+        // 调亮一点让按钮更清楚」破坏——一旦拉开色差，按钮立刻从「底板上鼓起的一块」退回
+        // 「一片白薄片叠在灰底上」，双色投影调得再准都救不回来（这就是 hotfix5 之前的样子）。
+        t.check(s.raised == s.ground,
+                "★★\(name)：凸起填充必须与画布同色（边界靠左上高光 + 右下投影定义，不靠色差）")
         t.check(s.well.relativeLuminance < s.ground.relativeLuminance,
                 "★★\(name)：内凹必须比承载面（画布）暗")
         let wellVsGround = s.ground.contrastRatio(to: s.well)
         t.check(wellVsGround > 1.04,
                 "★\(name)：内凹要在画布上读得出来（实际 \(String(format: "%.3f", wellVsGround))）")
-        let raisedVsGround = s.raised.contrastRatio(to: s.ground)
-        t.check(raisedVsGround > 1.04,
-                "★\(name)：凸起要在画布上读得出来（实际 \(String(format: "%.3f", raisedVsGround))）")
         t.check(s.wellShade.relativeLuminance < s.well.relativeLuminance,
                 "★\(name)：内凹的上沿暗边必须比凹底更暗（内阴影的方向）")
-        t.check(s.raisedHighlight.relativeLuminance >= s.raised.relativeLuminance,
-                "★\(name)：凸起顶部高光不能比凸起主色暗")
     }
 
     // ── ② 层级可辨：凸起 vs 内凹的对比度既要看得出，又不能大到像两个不同控件。
@@ -2211,6 +2209,26 @@ do {
             "★★外阴影朝下、高光朝上——这是「光源在左上」的唯一编码，反了整套凹凸都会翻面")
     t.check(NeumorphicMetrics.pressedShadowScale > 0 && NeumorphicMetrics.pressedShadowScale < 1,
             "★按下时阴影收敛比例必须在 (0,1)（=「压平」而不是消失或变大）")
+
+    // ── ⑦b 双色投影的方向必须**互为反向**，且都是对角而非纯垂直（v2.11.7 hotfix5）。
+    //
+    // 「光源在左上」这句话在代码里唯一的落点就是这四个偏移量的符号：高光往左上（负负）、
+    // 投影往右下（正正）。之前投影是 (0, 3) —— x 为 0 意味着纯垂直下坠，读起来是「悬空掉影子」
+    // 而不是「有一束光从左上打过来」，这也是用户说「感觉是垂直下坠的」的根因。
+    t.check(NeumorphicMetrics.highlightShadowOffsetX < 0 && NeumorphicMetrics.highlightShadowOffsetY < 0,
+            "★★左上高光的偏移必须同时为负（指向左上 = 光源方向）")
+    t.check(NeumorphicMetrics.dropShadowOffsetX > 0 && NeumorphicMetrics.dropShadowOffsetY > 0,
+            "★★右下投影的偏移必须同时为正（背光侧），且 x 不能是 0——纯垂直偏移会读成「下坠」")
+    t.check(NeumorphicMetrics.dropShadowOffsetX == -NeumorphicMetrics.highlightShadowOffsetX * 2,
+            "★投影与高光的水平偏移保持 2:1（设计稿：投影 4 / 高光 2）")
+    // 柔和度：投影必须明显比高光糊。投影是「柔和的大范围过渡」，高光是「贴边的一条亮线」，
+    // 两者糊成同一档，按钮边缘就会发平（hotfix5 之前 radius 5 vs 4，几乎没有区分）。
+    t.check(NeumorphicMetrics.dropShadowRadius >= NeumorphicMetrics.highlightShadowRadius * 2.5,
+            "★★右下投影的模糊半径要远大于左上高光（柔和 vs 贴边），至少 2.5 倍")
+    t.check(NeumorphicMetrics.dropShadowRadius >= 5 && NeumorphicMetrics.dropShadowRadius <= 7,
+            "★右下投影 blur 折算成 SwiftUI radius 应在 5～7（设计稿 blur 10~14，radius = blur/2）")
+    t.check(NeumorphicMetrics.wellInnerOffset > 0 && NeumorphicMetrics.wellInnerRadius > NeumorphicMetrics.wellInnerOffset,
+            "★内凹的内阴影必须「偏移小、模糊大」，否则会画成一条硬边而不是渗进去的阴影")
 
     // ── ⑧ 一体化（v2.11.7 hotfix4）：工具栏承载面必须与窗口底**逐值相同**。
     //

@@ -34,10 +34,18 @@ public enum NeumorphicPalette {
         /// 的窗口底），否则工具栏会重新变成一块「颜色略不同的方块」压在内容上——
         /// smoke 里有断言钉住这条等式。
         public let ground: RGB
-        /// 凸起控件（图标按钮 / 操作按钮）的表面主色。
+        /// 凸起控件（图标按钮 / 操作按钮）的表面色。
+        ///
+        /// v2.11.7 hotfix5：这个值**必须等于 `ground`**。
+        ///
+        /// 之前它是纯白、画布是浅灰，于是按钮读成「一片白薄片叠在灰底上」——色差本身就成了
+        /// 边界，光影反而成了配角，这正是「浮」的来源。设计稿里按钮和底板是**同一块材质**，
+        /// 边界完全由「左上白高光 + 右下柔投影」这对双色投影定义，按钮像从底板上鼓起来的一块。
+        /// 一旦这里和 `ground` 拉开色差，双色投影做得再准也救不回来。
         public let raised: RGB
-        /// 凸起控件顶部的高光（光源在左上，所以高光压在上沿）。
-        public let raisedHighlight: RGB
+        // hotfix5: 原来这里还有个 `raisedHighlight`（凸起表面的渐变高光色）。凸起既然与画布同色，
+        // 顶面渐变就必须取消——渐变上端是纯白，等于把「白薄片」的色差换个形式请回来。
+        // 高光现在是一道**投影**（左上、白 80%、blur 4），归 App 层的 `Neu.lightShadow`。
         /// 内凹容器（搜索框 / 开关滑道）的底色。必须比 `ground` 暗（浅色 / 深色档都是）。
         public let well: RGB
         /// 内凹容器上沿的暗边（内阴影的主要成分）。
@@ -55,12 +63,11 @@ public enum NeumorphicPalette {
         /// 危险操作的文字 / 图标色。
         public let dangerInk: RGB
 
-        public init(ground: RGB, raised: RGB, raisedHighlight: RGB,
+        public init(ground: RGB, raised: RGB,
                     well: RGB, wellShade: RGB, sliderFill: RGB, sliderInk: RGB,
                     ink: RGB, subtleInk: RGB, dangerFill: RGB, dangerInk: RGB) {
             self.ground = ground
             self.raised = raised
-            self.raisedHighlight = raisedHighlight
             self.well = well
             self.wellShade = wellShade
             self.sliderFill = sliderFill
@@ -73,7 +80,7 @@ public enum NeumorphicPalette {
 
         /// 参与「必须是中性灰」断言的成员（简洁模式专用；危险色与品牌色天然带色相，不在其中）。
         public var neutralMembers: [RGB] {
-            [ground, raised, raisedHighlight, well, wellShade, sliderFill, sliderInk, ink, subtleInk]
+            [ground, raised, well, wellShade, sliderFill, sliderInk, ink, subtleInk]
         }
     }
 
@@ -84,8 +91,7 @@ public enum NeumorphicPalette {
         // 与 MinimalSkinPalette.light.window 完全相同（#F2F2F3）：工具栏与卡片区同底，
         // 才不会出现「工具栏是一块颜色略不同的方块」。
         ground: RGB(0.949, 0.949, 0.953),          // #F2F2F3 画布 = 工具栏承载面
-        raised: RGB(1.0, 1.0, 1.0),                // #FFFFFF 凸起（全场最亮）
-        raisedHighlight: RGB(1.0, 1.0, 1.0),       // #FFFFFF 上沿高光
+        raised: RGB(0.949, 0.949, 0.953),          // #F2F2F3 与画布同色（hotfix5：边界靠双色投影）
         // 内凹要在**画布**上读得出来。hotfix4 去掉浮动面板后承载面从 #F8F8FA 降到 #F2F2F3，
         // 原来的 #E9E9EC 只比它暗 3.5%，搜索框几乎消失，所以一并压深到 #E5E5E8。
         well: RGB(0.898, 0.898, 0.910),            // #E5E5E8 内凹底
@@ -101,8 +107,7 @@ public enum NeumorphicPalette {
     /// 简洁模式 · 深色。整套关系镜像翻转：凸起比画布亮、内凹比画布暗、滑块反相成近白。
     public static let minimalDark = Surfaces(
         ground: RGB(0.086, 0.086, 0.094),          // #161618 = MinimalSkinPalette.dark.window
-        raised: RGB(0.184, 0.184, 0.196),          // #2F2F32
-        raisedHighlight: RGB(0.259, 0.259, 0.275),  // #424246
+        raised: RGB(0.086, 0.086, 0.094),          // #161618 与画布同色
         // 深色档同理：承载面从原面板 #252527 变成画布 #161618，内凹必须跟着压到画布**之下**，
         // 否则「凹陷」会翻成「凸起」（原值 #1B1B1D 比画布还亮）。
         well: RGB(0.055, 0.055, 0.063),            // #0E0E10
@@ -123,8 +128,7 @@ public enum NeumorphicPalette {
     public static let colorfulLight = Surfaces(
         // 与 AppTheme 的多彩窗口底同值（AppTheme 直接引用这里，见 windowBackground）。
         ground: RGB(0.965, 0.970, 0.980),          // #F6F7FA 画布 = 工具栏承载面
-        raised: RGB(0.996, 0.998, 1.0),            // #FEFFFF
-        raisedHighlight: RGB(1.0, 1.0, 1.0),
+        raised: RGB(0.965, 0.970, 0.980),          // #F6F7FA 与画布同色
         well: RGB(0.906, 0.914, 0.960),            // #E7E9F5 内凹（更明显的蓝紫）
         wellShade: RGB(0.757, 0.773, 0.871),       // #C1C5DE
         sliderFill: RGB(0.357, 0.373, 0.898),      // #5B5FE5 品牌蓝紫（渐变起点）
@@ -138,9 +142,10 @@ public enum NeumorphicPalette {
     /// 多彩模式 · 深色。
     public static let colorfulDark = Surfaces(
         ground: RGB(0.075, 0.078, 0.088),          // #131416 画布 = AppTheme 多彩深色窗口底
-        raised: RGB(0.184, 0.192, 0.251),          // #2F3140
-        raisedHighlight: RGB(0.267, 0.278, 0.357),  // #44475B
-        well: RGB(0.051, 0.055, 0.086),            // #0D0E16
+        raised: RGB(0.075, 0.078, 0.088),          // #131416 与画布同色
+        // hotfix5：凸起改成与画布同色后，「凸起 vs 内凹」的明度差全靠内凹自己撑（原来还有
+        // 纯白凸起帮忙）。多彩深色这档原值只剩 1.044 对比度，搜索框在黑底上彻底消失，压深一档。
+        well: RGB(0.035, 0.039, 0.063),            // #090A10
         wellShade: RGB(0.020, 0.024, 0.043),
         sliderFill: RGB(0.404, 0.384, 0.918),      // #6762EA（比浅色档亮一档，但仍压得住白字：白字对比 4.66:1）
         sliderInk: RGB(1.0, 1.0, 1.0),
@@ -201,10 +206,24 @@ public enum NeumorphicMetrics {
     }
 
     /// 阴影：外阴影（右下，光源左上）与高光（左上）。
-    public static let dropShadowRadius: CGFloat = 5
-    public static let dropShadowOffsetY: CGFloat = 3
-    public static let highlightShadowRadius: CGFloat = 4
+    // v2.11.7 hotfix5：阴影参数按设计稿 1:1 对齐。
+    //
+    // SwiftUI 的 `.shadow(radius:)` 是**高斯 sigma**，不是设计稿里的 blur 直径，两者差一半——
+    // 设计稿标 blur 12 就要写 radius 6。这个 2 倍关系搞错，阴影要么生硬要么糊成一团。
+    //
+    // 右下投影：offset (4, 4)、blur 12（= radius 6）、黑 9%。之前是 (0, 3) + radius 5：
+    // 纯垂直偏移让按钮读成「向下坠」而不是「左上有光」，而且太近太实，像描了一圈深边。
+    public static let dropShadowRadius: CGFloat = 6
+    public static let dropShadowOffsetX: CGFloat = 4
+    public static let dropShadowOffsetY: CGFloat = 4
+    /// 左上高光：offset (-2, -2)、blur 4（= radius 2）、白 80%。它承担「材质厚度」那一半观感，
+    /// 缺了按钮就只有一团投影、边缘发平。
+    public static let highlightShadowRadius: CGFloat = 2
+    public static let highlightShadowOffsetX: CGFloat = -2
     public static let highlightShadowOffsetY: CGFloat = -2
+    /// 内凹的内阴影 / 内高光：offset ±2、blur 5（= radius 2.5）。
+    public static let wellInnerOffset: CGFloat = 2
+    public static let wellInnerRadius: CGFloat = 2.5
 
     /// 按下时凸起「压平」：阴影收敛到这个比例。
     public static let pressedShadowScale: CGFloat = 0.3
