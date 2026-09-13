@@ -142,6 +142,44 @@ enum AppTheme {
     private static let minimalShadowEmpty = minimalAlpha(light: 0.025, dark: 0.12)
     private static let minimalPreviewBackground = minimalAlpha(light: 0.035, dark: 0.24)
 
+    // MARK: - Chrome accent（v2.11.7 hotfix）
+    //
+    // 「装饰性品牌色」与「功能性强调色」的分界线。这一组 token 专门给**前者**：
+    // 工具栏图标、logo 底板、页面选择器图标、内容类型图标、附件计数胶囊——它们用蓝紫色纯粹是
+    // 品牌观感，不携带任何状态信息。多彩模式保留原来的强调色，简洁模式一律收成中性墨色。
+    //
+    // 后者（选中的组、启用的拨杆、拖入高亮、已有连接、危险操作红）**不在这一组里**，两种皮肤下
+    // 都保留强调色：那是在传递「哪个是当前的 / 这一下会发生什么」，收成灰会真的丢信息。
+    // 简洁模式的设计里紫色本来就是选中色（见 MinimalSkinPalette.selection），所以这条分界线
+    // 也让两者在视觉语言上自洽：**简洁模式里出现彩色，就意味着「这里有状态」**。
+
+    /// 装饰性图标 / 文字的着色。
+    static var chromeAccentInk: Color { isMinimalSkin ? minimalControlInk : Color.accentColor }
+
+    /// 装饰性图标背后的浅色底板（原先各处裸写 `Color.accentColor.opacity(0.12~0.16)`）。
+    private static let colorfulChromeAccentSoftFill = Color.accentColor.opacity(0.14)
+    static var chromeAccentSoftFill: Color { isMinimalSkin ? minimalControlFill : colorfulChromeAccentSoftFill }
+
+    /// 更淡一档的装饰底（快捷键提示条那种「几乎看不见」的色块）。
+    private static let colorfulChromeAccentFaintFill = Color.accentColor.opacity(0.06)
+    private static let minimalChromeAccentFaintFill = minimalAlpha(light: 0.035, dark: 0.16)
+    static var chromeAccentFaintFill: Color {
+        isMinimalSkin ? minimalChromeAccentFaintFill : colorfulChromeAccentFaintFill
+    }
+
+    /// 实心品牌色块（App logo 底板、有附件的计数胶囊）及其上的文字色 / 投影。
+    static var chromeAccentTile: AnyShapeStyle {
+        isMinimalSkin ? AnyShapeStyle(minimalControlFill) : AnyShapeStyle(brandGradient)
+    }
+    static var chromeAccentTileInk: Color { isMinimalSkin ? minimalControlInk : onAccentText }
+    private static let colorfulChromeAccentTileShadow = Color.accentColor.opacity(0.25)
+    static var chromeAccentTileShadow: Color { isMinimalSkin ? .clear : colorfulChromeAccentTileShadow }
+
+    /// 实心品牌色块的描边。多彩模式靠白色高光提亮渐变；简洁模式改用与卡片同源的细边框
+    /// （中性灰块没有渐变可提亮，白高光只会变成脏边）。
+    private static let colorfulChromeAccentTileStroke = Color.white.opacity(0.22)
+    static var chromeAccentTileStroke: Color { isMinimalSkin ? minimalBorder : colorfulChromeAccentTileStroke }
+
     // MARK: - Brand
 
     static let brandGradientStart = dyn(light: Color(red: 0.36, green: 0.49, blue: 1.00),

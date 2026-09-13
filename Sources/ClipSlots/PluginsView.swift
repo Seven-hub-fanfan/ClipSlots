@@ -89,11 +89,11 @@ struct PluginsView: View {
         HStack(spacing: 10) {
             ZStack {
                 RoundedRectangle(cornerRadius: 9, style: .continuous)
-                    .fill(AppTheme.brandGradient(scheme))
+                    .fill(AppTheme.chromeAccentTile)
                     .frame(width: 32, height: 32)
                 Image(systemName: "square.grid.2x2.fill")
                     .font(.system(size: 15, weight: .semibold))
-                    .foregroundColor(.white)
+                    .foregroundColor(AppTheme.chromeAccentTileInk)
             }
             VStack(alignment: .leading, spacing: 1) {
                 Text("插件市场")

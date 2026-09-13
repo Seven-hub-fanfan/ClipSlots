@@ -274,13 +274,16 @@ struct NodeAttachmentButton: View {
                 .lineLimit(1)
         }
         // v2.9.18: 品牌渐变胶囊上的文字统一到 AppTheme.onAccentText。
-        .foregroundColor(count > 0 ? AppTheme.onAccentText : .secondary)
+        // v2.11.7 hotfix: 「有附件」这一档原先是品牌渐变胶囊——它表达的是数量而不是状态，
+        // 而且每张有附件的卡上都有一枚，是简洁模式下最大片的彩色残留。改走 chromeAccentTile：
+        // 多彩模式仍是原来的渐变，简洁模式变成中性实底 + 深墨字。
+        .foregroundColor(count > 0 ? AppTheme.chromeAccentTileInk : .secondary)
         .padding(.horizontal, 8)
         .frame(height: 22)
         .background(
             Capsule().fill(
                 count > 0
-                    ? AnyShapeStyle(AppTheme.brandGradient(.light))
+                    ? AppTheme.chromeAccentTile
                     : AnyShapeStyle(Color(NSColor.controlBackgroundColor))
             )
         )

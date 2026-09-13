@@ -590,13 +590,14 @@ struct ContentView: View {
             HStack(spacing: 14) {
                 ZStack {
                 RoundedRectangle(cornerRadius: 12, style: .continuous)
-                    .fill(AppTheme.brandGradient)
+                    // v2.11.7 hotfix: logo 底板是纯装饰的品牌渐变 → 简洁模式收成中性灰块。
+                    .fill(AppTheme.chromeAccentTile)
                     .frame(width: 44, height: 44)
-                    .shadow(color: Color.accentColor.opacity(0.25), radius: 10, y: 4)
+                    .shadow(color: AppTheme.chromeAccentTileShadow, radius: 10, y: 4)
 
                 Image(systemName: "rectangle.stack.fill")
                     .font(.system(size: 20, weight: .semibold))
-                    .foregroundColor(.white)
+                    .foregroundColor(AppTheme.chromeAccentTileInk)
             }
 
             VStack(alignment: .leading, spacing: 4) {
@@ -620,8 +621,8 @@ struct ContentView: View {
                         }
                         .padding(.horizontal, 8)
                         .padding(.vertical, 3)
-                        .background(Color.accentColor.opacity(0.12))
-                        .foregroundColor(.accentColor)
+                        .background(AppTheme.chromeAccentSoftFill)
+                        .foregroundColor(AppTheme.chromeAccentInk)
                         .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
                     }
                     .buttonStyle(.borderless)
@@ -660,9 +661,11 @@ struct ContentView: View {
             } label: {
                 // v2.9.23: 干净简洁的主题色拼图图标（去掉层次渲染灰色锯齿与红点通知），
                 // 与相邻工具栏图标（外观/键盘）保持一致的样式。
+                // v2.11.7 hotfix: 这枚图标只是「插件入口」，不带任何状态 → 简洁模式必须和左右
+                // 邻居（外观 / 键盘 / 设置）一样是中性墨色，否则它会成为整个界面上唯一的彩色图标。
                 Image(systemName: "puzzlepiece.extension.fill")
                     .font(.system(size: 15, weight: .semibold))
-                    .foregroundColor(.accentColor)
+                    .foregroundColor(AppTheme.chromeAccentInk)
                     .frame(width: 30, height: 30)
             }
             .buttonStyle(.borderless)
@@ -720,11 +723,11 @@ struct ContentView: View {
                 HStack(spacing: 7) {
                     ZStack {
                         RoundedRectangle(cornerRadius: 6, style: .continuous)
-                            .fill(Color.accentColor.opacity(0.16))
+                            .fill(AppTheme.chromeAccentSoftFill)
                             .frame(width: 25, height: 25)
                         Image(systemName: "square.grid.2x2.fill")
                             .font(.system(size: 10, weight: .semibold))
-                            .foregroundColor(.accentColor)
+                            .foregroundColor(AppTheme.chromeAccentInk)
                     }
                     Text(store.currentPage?.name ?? "默认页面")
                         .font(.system(size: 12, weight: .semibold))
@@ -1102,7 +1105,7 @@ struct ContentView: View {
         .padding(.vertical, 6)
         .background(
             RoundedRectangle(cornerRadius: 6, style: .continuous)
-                .fill(Color.accentColor.opacity(0.06))
+                .fill(AppTheme.chromeAccentFaintFill)
         )
         .id("\(store.config.saveKey)|\(store.config.pasteKey)|\(store.config.radialKey)|\(store.config.hotkeyTemplate.kind.rawValue)")
     }
@@ -1350,6 +1353,10 @@ struct ContentView: View {
         let hasConnections = edgeCount > 0
         // v2.9.22: 「连接」按钮升级——更贴切的节点连线图标 + 渐变胶囊 + 描边/投影，
         // 提升质感并与整体设计语言统一；有连接时用强调色渐变，无连接时用中性玻璃底。
+        //
+        // v2.11.7 hotfix: 只把**无连接**那一档收成中性——它是「什么都没发生」的静息态，用强调色纯属装饰。
+        // 有连接时保留强调色渐变：那是在报「当前组已有 N 条连接」的状态，收成灰就把信息丢了
+        // （简洁模式的规矩是「出现彩色 = 这里有状态」，这一档正是有状态）。
         return HStack(spacing: 6) {
             Image(systemName: "point.3.connected.trianglepath.dotted")
                 .font(.system(size: 12, weight: .bold))
@@ -1357,7 +1364,7 @@ struct ContentView: View {
             Text(hasConnections ? "连接 · \(edgeCount)" : "连接")
                 .font(.caption.weight(.semibold))
         }
-        .foregroundColor(hasConnections ? .white : .accentColor)
+        .foregroundColor(hasConnections ? .white : AppTheme.chromeAccentInk)
         .padding(.horizontal, 13)
         .padding(.vertical, 6)
         .background(
@@ -1368,12 +1375,12 @@ struct ContentView: View {
                             colors: [Color.accentColor, Color.accentColor.opacity(0.78)],
                             startPoint: .topLeading,
                             endPoint: .bottomTrailing))
-                        : AnyShapeStyle(Color.accentColor.opacity(0.10))
+                        : AnyShapeStyle(AppTheme.chromeAccentSoftFill)
                 )
         )
         .overlay(
             Capsule().stroke(
-                hasConnections ? Color.white.opacity(0.35) : Color.accentColor.opacity(0.35),
+                hasConnections ? Color.white.opacity(0.35) : AppTheme.chromeAccentTileStroke,
                 lineWidth: 1)
         )
         .shadow(

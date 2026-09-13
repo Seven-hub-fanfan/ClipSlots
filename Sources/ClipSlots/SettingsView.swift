@@ -201,12 +201,13 @@ struct SettingsView: View {
             HStack(spacing: 10) {
                 ZStack {
                     RoundedRectangle(cornerRadius: 10, style: .continuous)
-                        .fill(AppTheme.brandGradient(colorScheme))
+                        // v2.11.7 hotfix: 品牌渐变底板是装饰 → 简洁模式收成中性灰块。
+                        .fill(AppTheme.chromeAccentTile)
                         .frame(width: 36, height: 36)
-                        .shadow(color: Color.accentColor.opacity(0.22), radius: 7, y: 3)
+                        .shadow(color: AppTheme.chromeAccentTileShadow, radius: 7, y: 3)
                     Image(systemName: "gearshape.fill")
                         .font(.system(size: 16, weight: .semibold))
-                        .foregroundColor(.white)
+                        .foregroundColor(AppTheme.chromeAccentTileInk)
                 }
                 VStack(alignment: .leading, spacing: 1) {
                     Text("ClipSlots")
@@ -373,11 +374,11 @@ struct SettingsView: View {
         HStack(spacing: 12) {
             ZStack {
                 RoundedRectangle(cornerRadius: 10, style: .continuous)
-                    .fill(AppTheme.brandGradient(colorScheme))
+                    .fill(AppTheme.chromeAccentTile)
                     .frame(width: 38, height: 38)
                 Image(systemName: "gearshape.fill")
                     .font(.system(size: 17, weight: .semibold))
-                    .foregroundColor(.white)
+                    .foregroundColor(AppTheme.chromeAccentTileInk)
             }
             VStack(alignment: .leading, spacing: 2) {
                 Text("ClipSlots 设置")

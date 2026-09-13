@@ -21,11 +21,11 @@ struct SpecialSlotManagementView: View {
             HStack(spacing: 12) {
                 ZStack {
                     RoundedRectangle(cornerRadius: 10, style: .continuous)
-                        .fill(AppTheme.brandGradient)
+                        .fill(AppTheme.chromeAccentTile)
                         .frame(width: 38, height: 38)
                     Image(systemName: "folder.fill")
                         .font(.system(size: 17, weight: .semibold))
-                        .foregroundColor(.white)
+                        .foregroundColor(AppTheme.chromeAccentTileInk)
                 }
                 VStack(alignment: .leading, spacing: 2) {
                     Text("槽位组管理")

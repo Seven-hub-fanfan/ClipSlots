@@ -597,7 +597,9 @@ struct SlotCardView: View {
                 HStack(alignment: .top, spacing: 9) {
                     Image(systemName: contentTypeIcon)
                         .font(.system(size: 15, weight: .semibold))
-                        .foregroundColor(.accentColor)
+                        // v2.11.7 hotfix: 内容类型图标（文本/链接/图片…）是装饰性强调色，
+                        // 简洁模式收成中性墨色。
+                        .foregroundColor(AppTheme.chromeAccentInk)
                         .frame(width: 20)
 
                     Text(content.preview)

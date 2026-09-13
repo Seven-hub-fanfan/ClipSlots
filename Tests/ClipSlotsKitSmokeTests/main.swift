@@ -2086,6 +2086,18 @@ do {
         t.check(ratio < 4.5, "\(name)卡片边框不能重到抢过内容（实际 \(String(format: "%.2f", ratio))）")
     }
 
+    // ── ⑤b 中性色块压在卡片上必须还分得出来（v2.11.7 hotfix）
+    //
+    // hotfix 把「装饰性品牌色」（logo 底板、附件计数胶囊、页面选择器图标底）在简洁模式下换成了
+    // controlFill 中性块，而这些块**大多直接压在卡片或窗口底上**。中性化最容易翻车的地方就是这里：
+    // 一不小心就和承载面同色，色块直接消失。这两条断言盯住它们不许糊在一起。
+    for (name, surfaces) in [("浅色", MinimalSkinPalette.light), ("深色", MinimalSkinPalette.dark)] {
+        let onCard = surfaces.controlFill.contrastRatio(to: surfaces.cardFilled)
+        let onWindow = surfaces.controlFill.contrastRatio(to: surfaces.window)
+        t.check(onCard > 1.04, "★\(name)中性色块压在卡片上必须仍可分辨（实际 \(String(format: "%.3f", onCard))）")
+        t.check(onWindow > 1.02, "★\(name)中性色块压在窗口底上必须仍可分辨（实际 \(String(format: "%.3f", onWindow))）")
+    }
+
     // ── ⑥ 槽位编号：简洁模式唯一的彩色出口，必须在两种底色上都读得出来
     //
     // 这条是「简洁模式保留编号颜色」这个需求的真正验收项：颜色留下来了，但压在新的中性卡片底上
