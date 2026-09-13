@@ -225,6 +225,19 @@ public enum NeumorphicMetrics {
     public static let wellInnerOffset: CGFloat = 2
     public static let wellInnerRadius: CGFloat = 2.5
 
+    // MARK: - 双侧描边（v2.11.7 hotfix6，按设计稿 image-a4ad5438）
+    //
+    // 光影只交代「按钮周围的空气」，交代不了「按钮本身有多厚」。设计稿里每颗按钮都有两条边：
+    // 左上一条锐利白亮边（受光面），右下一条更宽的灰边（凸起物的侧面厚度）。这两条边叠起来
+    // 才有「从画布里冲压出来」的实体感——只有内外阴影时，按钮看着像一块贴纸。
+    //
+    // 关键是**两条边宽度不同**：厚度边必须比高光边宽（1.5 vs 1），因为它模拟的是有体积的侧面，
+    // 而高光只是一条反光。等宽会退化成「描了一圈双色边框」。
+    public static let edgeThicknessWidth: CGFloat = 1.5
+    public static let edgeHighlightWidth: CGFloat = 1
+    /// 高光边整体往左上挪半像素，让它压在形状轮廓外侧一点，边缘才「锐」。
+    public static let edgeHighlightOffset: CGFloat = -0.5
+
     /// 按下时凸起「压平」：阴影收敛到这个比例。
     public static let pressedShadowScale: CGFloat = 0.3
 }

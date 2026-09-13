@@ -43,6 +43,30 @@ enum Neu {
         })
     }
 
+    /// 把「浅色一档 / 深色一档」包成**动态色**（NSColor dynamicProvider）。
+    ///
+    /// ⚠️ v2.11.7 hotfix6 的核心修复点。原来这些半透明的阴影 / 描边 token 写成
+    /// `AppTheme.isDarkAppearance ? A : B`，也就是在**body 求值那一刻**读 `NSApp.effectiveAppearance`
+    /// 把结果**烘死**进视图里。两个后果，正好对上用户报的两个现象：
+    ///
+    ///   1. **新开 App 工具栏漂浮**：SwiftUI 的第一帧比 `applicationDidFinishLaunching` 里的
+    ///      `applyAppAppearance()` 更早发生，此时 `NSApp.effectiveAppearance` 还不是用户设定的浅色
+    ///      （App 默认主题是深色）。于是首帧按钮拿到的是**深色档的投影**：黑 55% / radius 6 / (4,4)
+    ///      ——在浅色画布上就是一坨浓重的外投影，正是「悬浮漂浮」的观感。
+    ///   2. **手动切一次皮肤就正常、但阴影变少**：切皮肤会让 `.id(skin)` 整树重建，重建时
+    ///      appearance 已经正确，token 重新算成浅色档的黑 9%——「正常了」和「阴影少了一些」
+    ///      其实是同一件事：前者是错的（55%），后者才是设计值（9%）。
+    ///
+    /// 包成动态色后，明暗解析交给 AppKit 在**绘制时**做，与 body 何时求值彻底解耦：首帧就是对的，
+    /// 也不会因为重建而改变。表面色（ground/raised/well…）一直走的就是这条路，所以它们从来没出过这个问题。
+    private static func dynAlpha(light: Color, dark: Color) -> Color {
+        let lightNS = NSColor(light)
+        let darkNS = NSColor(dark)
+        return Color(nsColor: NSColor(name: nil) { appearance in
+            appearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua ? darkNS : lightNS
+        })
+    }
+
     private static func color(_ rgb: NeumorphicPalette.RGB) -> Color {
         Color(.sRGB, red: rgb.red, green: rgb.green, blue: rgb.blue, opacity: 1)
     }
@@ -63,41 +87,49 @@ enum Neu {
     /// 右下柔和投影。设计稿：黑 8%～10%、大模糊。浅色档取 9%——再深就从「柔和阴影」
     /// 变成「深色描边」，按钮又浮起来了；深色档环境本身就黑，必须给到 55% 才看得出层次。
     static var dropShadow: Color {
-        AppTheme.isDarkAppearance ? Color.black.opacity(0.55) : Color.black.opacity(0.09)
+        dynAlpha(light: Color.black.opacity(0.09), dark: Color.black.opacity(0.55))
     }
 
     /// 左上高光。设计稿：白 80%。深色档没有「更亮的白」可用，用低透明白点一下边缘即可。
     static var lightShadow: Color {
-        AppTheme.isDarkAppearance ? Color.white.opacity(0.07) : Color.white.opacity(0.8)
+        dynAlpha(light: Color.white.opacity(0.8), dark: Color.white.opacity(0.07))
     }
 
     /// 内凹的**上/左内阴影**（设计稿：黑 8%）与**下/右内高光**（设计稿：白 60%）。
     /// 深色档同样要放大：黑底上 8% 的黑等于什么都没有。
     static var wellInnerShadow: Color {
-        AppTheme.isDarkAppearance ? Color.black.opacity(0.65) : Color.black.opacity(0.08)
+        dynAlpha(light: Color.black.opacity(0.08), dark: Color.black.opacity(0.65))
     }
     static var wellInnerGlow: Color {
-        AppTheme.isDarkAppearance ? Color.white.opacity(0.06) : Color.white.opacity(0.6)
+        dynAlpha(light: Color.white.opacity(0.6), dark: Color.white.opacity(0.06))
+    }
+    /// 内凹最内圈那道收口的浓度（深色档要更实）。同样必须是动态色，理由见 `dynAlpha`。
+    static var wellRimOpacity: Color {
+        dynAlpha(light: wellShade.opacity(0.35), dark: wellShade.opacity(0.5))
     }
 
-    /// 凸起控件的**极弱**收边。
-    ///
-    /// 设计稿里按钮没有描边，边界纯靠光影。浅色档给到黑 3%（低于用户要求的 0.05 上限）只为
-    /// 在纯白系统背景等极端情况下不至于完全化开；深色档必须留 8% 白——那里可用的「白高光」
-    /// 只有 7%，光靠黑投影压不出边缘，去掉描边按钮会直接消失在黑底里。
-    static var raisedEdge: Color {
-        AppTheme.isDarkAppearance ? Color.white.opacity(0.08) : Color.black.opacity(0.03)
+    /// 凸起控件的**右下厚度边**（设计稿 image-a4ad5438：约 #CCCCCC、1.5pt、50%）。
+    /// 它模拟的是凸起物被我们看见的那个**侧面**，所以必须比高光边宽。
+    static var edgeThickness: Color {
+        dynAlpha(light: Color(.sRGB, white: 0.8, opacity: 0.5),
+                 dark: Color.black.opacity(0.55))
+    }
+
+    /// 凸起控件的**左上高光边**（设计稿：纯白、1pt、70%，锐利）。
+    /// 深色档没有「纯白受光面」可言，压到 14% 只留一线，否则按钮会像描了圈白框。
+    static var edgeHighlight: Color {
+        dynAlpha(light: Color.white.opacity(0.7), dark: Color.white.opacity(0.14))
     }
 
     /// 面板描边。浅色档几乎不可见，只用来收边；深色档承担主要的轮廓感。
     static var hairline: Color {
-        AppTheme.isDarkAppearance ? Color.white.opacity(0.07) : Color.black.opacity(0.045)
+        dynAlpha(light: Color.black.opacity(0.045), dark: Color.white.opacity(0.07))
     }
 
     /// 面板**内部**的分区细线。比 `hairline` 实一档：收边线可以近乎隐形，
     /// 但「把一块面板分成左右两区」这件事必须真的看得见，否则两组开关会读成一堆四个控件。
     static var hairlineStrong: Color {
-        AppTheme.isDarkAppearance ? Color.white.opacity(0.12) : Color.black.opacity(0.10)
+        dynAlpha(light: Color.black.opacity(0.10), dark: Color.white.opacity(0.12))
     }
 
     /// 选中滑块的填充。简洁模式是单色近黑（深色档反相），多彩模式换成品牌渐变。
@@ -132,11 +164,14 @@ enum Neu {
 
 /// 微凸表面：**与底板同色**的填充 + 左上白高光 + 右下柔投影。按下时两道投影一起收敛（“压平”）。
 ///
-/// v2.11.7 hotfix5 把这里从「白薄片 + 灰描边 + 垂直投影」改成真正的新拟物：
-///   - 填充与画布同色（见 `NeumorphicPalette.Surfaces.raised` 的注释）
-///   - 描边从 0.8pt 的 `hairline` 降到 0.5pt 的 `raisedEdge`（浅色 3% 黑，几乎不可见）
-///   - 投影从 (0, 3)/radius 5 改成 (4, 4)/radius 6，高光补上 (-2, -2)/radius 2 的白 80%
-/// 这三件事缺任何一件，按钮都会退回「浮在上面」的观感。
+/// v2.11.7 hotfix5 把这里从「白薄片 + 灰描边 + 垂直投影」改成真正的新拟物：填充与画布同色、
+/// 投影 (4, 4)/radius 6、高光 (-2, -2)/radius 2。
+///
+/// v2.11.7 hotfix6 再补上**双侧描边**（设计稿 image-a4ad5438）：外阴影只交代「按钮周围的空气」，
+/// 交代不了「按钮自己有多厚」。所以在形状上再叠两圈方向相反的描边：
+///   - 右下 1.5pt 的灰边 = 凸起物的**侧面厚度**（看得见的那个立面）
+///   - 左上 1pt 的白边（再往左上挪 0.5pt）= **受光的棱**，锐利、不模糊
+/// 两条边都用方向渐变 mask 限制在各自半圈，否则就成了「描了一圈双色边框」——那是边框，不是体积。
 struct NeuRaisedBackground: View {
     var radius: CGFloat = NeumorphicMetrics.actionRadius
     var pressed: Bool = false
@@ -150,7 +185,24 @@ struct NeuRaisedBackground: View {
         let hoverBoost: CGFloat = hovering ? 1.25 : 1
         shape
             .fill(fill ?? AnyShapeStyle(Neu.raisedFill))
-            .overlay(shape.strokeBorder(Neu.raisedEdge, lineWidth: 0.5))
+            // 右下：厚度边（宽、灰、限制在下半/右半圈）
+            .overlay(
+                shape
+                    .strokeBorder(Neu.edgeThickness, lineWidth: NeumorphicMetrics.edgeThicknessWidth)
+                    .mask(shape.fill(LinearGradient(colors: [.clear, .black],
+                                                    startPoint: .topLeading,
+                                                    endPoint: .bottomTrailing)))
+            )
+            // 左上：高光棱（窄、白、锐利，整体挪 -0.5pt 压到轮廓外沿）
+            .overlay(
+                shape
+                    .strokeBorder(Neu.edgeHighlight, lineWidth: NeumorphicMetrics.edgeHighlightWidth)
+                    .offset(x: NeumorphicMetrics.edgeHighlightOffset,
+                            y: NeumorphicMetrics.edgeHighlightOffset)
+                    .mask(shape.fill(LinearGradient(colors: [.black, .clear],
+                                                    startPoint: .topLeading,
+                                                    endPoint: .center)))
+            )
             // 悬停时把投影推远一点点：新拟物里「浮得更高」比「变个颜色」更贴合材质语言。
             .shadow(color: Neu.dropShadow,
                     radius: NeumorphicMetrics.dropShadowRadius * scale * hoverBoost,
@@ -203,8 +255,7 @@ struct NeuWellBackground: View {
             // 宽 0.6pt 且只出现在上半圈，不会形成闭合边框。
             .overlay(
                 shape
-                    .stroke(Neu.wellShade.opacity(AppTheme.isDarkAppearance ? 0.5 : 0.35),
-                            lineWidth: 0.6)
+                    .stroke(Neu.wellRimOpacity, lineWidth: 0.6)
                     .mask(shape.fill(LinearGradient(colors: [.black, .clear],
                                                     startPoint: .topLeading,
                                                     endPoint: .center)))

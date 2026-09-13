@@ -2230,6 +2230,19 @@ do {
     t.check(NeumorphicMetrics.wellInnerOffset > 0 && NeumorphicMetrics.wellInnerRadius > NeumorphicMetrics.wellInnerOffset,
             "★内凹的内阴影必须「偏移小、模糊大」，否则会画成一条硬边而不是渗进去的阴影")
 
+    // ── ⑦c 双侧描边（v2.11.7 hotfix6）：厚度边必须比高光边**宽**，高光边必须往左上偏。
+    //
+    // 这两条边分别代表「凸起物的侧面」和「受光的棱」，物理上就不是一回事：侧面有厚度所以宽，
+    // 棱只是一条反光所以细。等宽的话按钮会读成「描了一圈双色边框」——是边框，不是体积。
+    t.check(NeumorphicMetrics.edgeThicknessWidth > NeumorphicMetrics.edgeHighlightWidth,
+            "★★右下厚度边必须比左上高光边宽（侧面有厚度，棱只是一条反光）")
+    t.check(NeumorphicMetrics.edgeHighlightOffset < 0,
+            "★★高光边的偏移必须为负（往左上压到轮廓外沿，边缘才锐）")
+    t.check(abs(NeumorphicMetrics.edgeHighlightOffset) <= NeumorphicMetrics.edgeHighlightWidth,
+            "★高光边的偏移不能超过它自身线宽，否则会脱开轮廓变成一条独立的白线")
+    t.check(NeumorphicMetrics.edgeThicknessWidth <= 2 && NeumorphicMetrics.edgeHighlightWidth >= 1,
+            "★描边宽度守在设计稿量级（厚度 ≤2pt、高光 ≥1pt）")
+
     // ── ⑧ 一体化（v2.11.7 hotfix4）：工具栏承载面必须与窗口底**逐值相同**。
     //
     // 这是「工具栏和内容区看不出接缝」的唯一硬条件，也是最容易在后续调色里悄悄失效的：

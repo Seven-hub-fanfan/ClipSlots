@@ -192,3 +192,57 @@ hotfix3 的新拟物只做对了「形」，没做对「光」。用户逐条对
 - `raised == ground` 本身也是断言——这条与「调亮一点让按钮更清楚」的直觉正好相反，最容易被顺手改坏。
 
 副作用修正：凸起不再是纯白后，「凸起 vs 内凹」的明度差全靠内凹自己撑，多彩深色档只剩 1.044 对比度（搜索框在黑底上消失），内凹压深到 #090A10。
+
+
+## hotfix 6（同版本号重打包）
+
+三件事：一个被误判成「样式绑定」的窗口问题，一个设计稿细节，以及一个**首帧时序 bug**（后两者其实同源）。
+
+### 1. 新开 App 工具栏漂浮 / 切一次皮肤才正常、但阴影变少 —— 同一个 bug
+
+用户报的是两个现象，根因只有一个：那些**半透明的阴影 / 描边 token** 当时写成
+
+```swift
+static var dropShadow: Color {
+    AppTheme.isDarkAppearance ? .black.opacity(0.55) : .black.opacity(0.09)
+}
+```
+
+也就是在 **body 求值那一刻**读 `NSApp.effectiveAppearance`，把结果**烘死**进视图里。于是：
+
+- **首帧**：SwiftUI 的第一帧比 `applicationDidFinishLaunching` 里的 `applyAppAppearance()` 更早，
+  此时 `NSApp.appearance` 还没被设成用户选的浅色（App 默认主题是深色）。按钮拿到的是**深色档投影**：
+  黑 55% / radius 6 / (4,4)——在浅色画布上就是一坨浓重外投影，正是「悬浮漂浮」。
+- **手动切一次皮肤**：`.id(skin)` 整树重建，此时 appearance 已正确，token 重算成浅色档的黑 9%。
+  所以「切完就正常了」和「切完阴影少了一些」**是同一件事**：前者是错的（55%），后者才是设计值（9%）。
+
+修法不是加 `onAppear` 补刷，而是把这些 token 全部包成 **动态色**（`NSColor(name:dynamicProvider:)`）：
+明暗解析交给 AppKit 在**绘制时**做，与 body 何时求值彻底解耦——首帧就是对的，重建也不会变。
+表面色（ground/raised/well…）一直走的就是这条路，所以它们从来没出过这个问题；出问题的恰好是
+后来新加、图省事写成三元表达式的那几个半透明 token。
+
+顺带把 `applyAppAppearance()` + `AppSkinCenter.syncFromDefaults()` 提前到
+`applicationWillFinishLaunching`，让首帧的 AppKit 界面也是对的（第二道保险）。
+
+### 2. 按钮双侧描边（设计稿 image-a4ad5438）
+
+外阴影只交代「按钮周围的空气」，交代不了「按钮自己有多厚」。补上两圈方向相反的描边：
+
+- 右下 **1.5pt 灰边**（约 #CCCCCC / 50%）= 凸起物的**侧面厚度**
+- 左上 **1pt 白边**（70%，再往左上挪 0.5pt）= **受光的棱**，锐利不模糊
+
+两条边都用方向渐变 mask 限制在各自半圈——否则就成了「描了一圈双色边框」，那是边框不是体积。
+smoke 钉住「厚度边必须比高光边宽」：等宽就会退化成边框。
+
+### 3. 简洁模式「标题栏消失」
+
+代码里没有任何一处按皮肤改 `styleMask`。真正的原因是标题栏的**观感**依赖它背后透出来的东西：
+多彩模式那层复古海报氛围底有纹理和渐变，标题栏区域于是有明显材质分界；简洁模式换成纯色底，
+标题栏与内容区同色同质，那条带子就「看不见了」，只剩三颗按钮悬在一片纯色上。
+
+所以修法不是解绑一个不存在的绑定，而是**显式声明标题栏必须由 AppKit 自己画**：
+`titlebarAppearsTransparent = false`、`titleVisibility = .visible`、去掉 `.fullSizeContentView`，
+并在切皮肤后重跑一次，防止 SwiftUI 重建窗口时改回去。两种皮肤下窗口 chrome 从此完全一致。
+
+smoke：1302 条全绿。
+DMG SHA-256：`045c9bb371882c7c99c34f74360962cae4572d38264ba7a9a1feeefe19e9671b`

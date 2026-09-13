@@ -57,12 +57,64 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    /// v2.11.7 hotfix6：把主题同步提前到 `willFinishLaunching`。
+    ///
+    /// 原来它在 `didFinishLaunching` 里，而 SwiftUI 的第一帧比那更早——首帧渲染时
+    /// `NSApp.effectiveAppearance` 还是系统值而不是用户选的档位。表面色是动态色不受影响，
+    /// 但任何在求值期读 appearance 的地方都会拿到错的档（这正是 hotfix6 修的
+    /// 「新开 App 工具栏漂浮」）。阴影 token 已改成动态色从根上免疫，这里再把时序也修正一次：
+    /// 两道保险，且顺带让首帧的 AppKit 界面（菜单栏、弹窗）就是对的。
+    /// 把主窗口的标题栏样式**钉死成 macOS 标准样式**，与皮肤无关。
+    ///
+    /// 用户报「多彩模式有标题栏、切到简洁模式标题栏就没了，界面变成无边框悬浮窗」。
+    /// 代码里没有任何一处按皮肤改 `styleMask`——真正的原因是标题栏的**观感**依赖它背后透出来的东西：
+    /// 多彩模式那层复古海报氛围底有纹理和渐变，标题栏区域于是有明显的材质分界；简洁模式换成一张
+    /// 纯色底，标题栏和内容区同色同质，那条带子就「看不见了」，只剩三颗按钮悬在一片纯色上。
+    ///
+    /// 所以修法不是去解绑某个不存在的绑定，而是**显式声明标题栏必须由 AppKit 自己画**：
+    /// 不透明、标题可见、不做 fullSizeContentView。这样两种皮肤下窗口 chrome 完全一致，
+    /// 也不会再随背景层的实现变化而漂移。切皮肤后重新跑一次，防止 SwiftUI 重建窗口时改回去。
+    private func normalizeMainWindowChrome() {
+        // SwiftUI 建窗有时晚于 didFinishLaunching，拿不到就下一轮再试（最多几次，避免死循环）。
+        func apply(retry: Int) {
+            guard let window = NSApp.windows.first(where: {
+                $0.styleMask.contains(.titled) && !($0 is NSPanel)
+            }) else {
+                guard retry > 0 else { return }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { apply(retry: retry - 1) }
+                return
+            }
+            window.styleMask.remove(.fullSizeContentView)
+            window.titlebarAppearsTransparent = false
+            window.titleVisibility = .visible
+            window.isMovableByWindowBackground = false
+        }
+        apply(retry: 10)
+    }
+
+    func applicationWillFinishLaunching(_ notification: Notification) {
+        applyAppAppearance()
+        // 皮肤缓存也在首帧前对齐，避免首帧用默认皮肤画一遍再被通知刷成用户选的那套。
+        AppSkinCenter.syncFromDefaults()
+    }
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.regular)
 
         // v2.10.91: 启动即把 App 主题同步到 NSApp.appearance，并持续跟随后续切换。
         // 修复「NSAlert 等 AppKit 弹窗不跟随 App 主题、没有浅色界面」。详见 applyAppAppearance。
+        // hotfix6 起 willFinishLaunching 已经跑过一次，这里保留是为了「delegate 被晚装」的场景。
         applyAppAppearance()
+
+        // v2.11.7 hotfix6: 窗口 chrome 与皮肤解绑（见 normalizeMainWindowChrome）。
+        normalizeMainWindowChrome()
+        NotificationCenter.default.addObserver(
+            forName: AppSkinCenter.didChangeNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            self?.normalizeMainWindowChrome()
+        }
         startObservingAppearancePreference()
 
         setupMemoryPressureMonitor()
