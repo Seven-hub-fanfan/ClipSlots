@@ -516,20 +516,33 @@ struct ContentView: View {
 
     private var headerView: some View {
         VStack(spacing: 0) {
-            titleBar
-                .padding(.horizontal, AppTheme.pagePadding)
-                .padding(.vertical, 12)
+            // v2.11.8: 工具栏两行（标题/搜索行 + 操作行）收进一块**浮动新拟物面板**里，
+            // 面板与窗口边缘留 12pt（NeumorphicMetrics.panelInset），靠这圈留白 + 外阴影浮起来。
+            //
+            // 行间那条分隔线刻意用 1px 的 Neu.hairline 而不是 Divider()：Divider 在 macOS 上是
+            // 系统分隔色的实线，压在白面板上比设计稿重一档，会把「一块完整面板」看成「两块拼起来的」。
+            VStack(spacing: 0) {
+                titleBar
+                    .padding(.horizontal, NeumorphicMetrics.panelPadding)
+                    .padding(.vertical, 10)
 
-            Divider()
+                Rectangle()
+                    .fill(Neu.hairline)
+                    .frame(height: 1)
+                    .padding(.horizontal, NeumorphicMetrics.panelPadding)
 
-            actionBar
-                // v2.10.24: 跨组游标提示胶囊移到「第二行」——即自动存储 / 自动粘贴 拨杆所在的
-                // actionBar 这一行，水平居中显示。用 overlay 叠加不占额外垂直空间
-                // （仅在游标位于其他组时才有内容），保持 .thickMaterial 磨砂玻璃样式。
-                .overlay(crossGroupCursorHint)
-                .padding(.horizontal, AppTheme.pagePadding)
-                .padding(.top, 6)
-                .padding(.bottom, 4)
+                actionBar
+                    // v2.10.24: 跨组游标提示胶囊叠在操作行上，水平居中，不占额外垂直空间
+                    // （仅在游标位于其他组时才有内容）。
+                    .overlay(crossGroupCursorHint)
+                    .padding(.horizontal, NeumorphicMetrics.panelPadding)
+                    .padding(.top, 8)
+                    .padding(.bottom, 8)
+            }
+            .neuPanel()
+            .padding(.horizontal, NeumorphicMetrics.panelInset)
+            .padding(.top, NeumorphicMetrics.panelInset)
+            .padding(.bottom, 6)
 
             specialSlotTagBar
                 .padding(.horizontal, AppTheme.pagePadding)
@@ -690,12 +703,13 @@ struct ContentView: View {
                 // 与相邻工具栏图标（外观/键盘）保持一致的样式。
                 // v2.11.7 hotfix: 这枚图标只是「插件入口」，不带任何状态 → 简洁模式必须和左右
                 // 邻居（外观 / 键盘 / 设置）一样是中性墨色，否则它会成为整个界面上唯一的彩色图标。
+                // v2.11.8: 与左右邻居一起换成新拟物凸起方块（见 NeumorphicKit 的 neuIconTile）。
                 Image(systemName: "puzzlepiece.extension.fill")
-                    .font(.system(size: 15, weight: .semibold))
+                    .font(.system(size: 14, weight: .semibold))
                     .foregroundColor(AppTheme.chromeAccentInk)
-                    .frame(width: 30, height: 30)
+                    .neuIconTile()
             }
-            .buttonStyle(.borderless)
+            .buttonStyle(.plain)
             .help("插件")
             .popover(isPresented: $showingPlugins) {
                 PluginsView {
@@ -707,10 +721,11 @@ struct ContentView: View {
                 showingHotkeyTemplatePopover = true
             } label: {
                 Image(systemName: "keyboard")
-                    .font(.system(size: 15, weight: .semibold))
-                    .frame(width: 30, height: 30)
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundColor(Neu.ink)
+                    .neuIconTile()
             }
-            .buttonStyle(.borderless)
+            .buttonStyle(.plain)
             .help("快捷键模板：\(store.config.hotkeyTemplate.kind.title)")
             .popover(isPresented: $showingHotkeyTemplatePopover) {
                 HotkeyTemplatePopover(
@@ -729,10 +744,11 @@ struct ContentView: View {
                 store.setSettingsOverlay(true)
             } label: {
                 Image(systemName: "gearshape.fill")
-                    .font(.system(size: 15, weight: .semibold))
-                    .frame(width: 30, height: 30)
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundColor(Neu.ink)
+                    .neuIconTile()
             }
-            .buttonStyle(.borderless)
+            .buttonStyle(.plain)
             .help("设置")
             }
             .fixedSize(horizontal: true, vertical: false)
@@ -769,18 +785,13 @@ struct ContentView: View {
                         .font(.system(size: 8, weight: .bold))
                         .foregroundColor(.secondary)
                 }
-                .foregroundColor(.primary)
+                .foregroundColor(Neu.ink)
                 .padding(.leading, 5)
                 .padding(.trailing, 9)
-                .padding(.vertical, 4)
-                .background(
-                    RoundedRectangle(cornerRadius: 9, style: .continuous)
-                        .fill(AppTheme.capsuleFill)
-                )
-                .overlay(
-                    RoundedRectangle(cornerRadius: 9, style: .continuous)
-                        .stroke(AppTheme.capsuleStroke, lineWidth: 0.8)
-                )
+                .frame(height: NeumorphicMetrics.actionHeight)
+                // v2.11.8: 页面选择器与右侧操作按钮同为「凸起」层级，用同一套 neu 表面，
+                // 免得一行里出现两种材质（原来是半透明胶囊 + 描边）。
+                .neuRaised(radius: NeumorphicMetrics.actionRadius)
             }
             .buttonStyle(.plain)
             .fixedSize()
@@ -1015,7 +1026,6 @@ struct ContentView: View {
                 title: "打包",
                 icon: "shippingbox",
                 role: .normal,
-                prominent: false,
                 action: { store.startPackExport() }
             )
             .help("把选中的页面/槽位组打包导出为 .clipslotspack")
@@ -1024,7 +1034,6 @@ struct ContentView: View {
                 title: "导入",
                 icon: "folder.badge.plus",
                 role: .normal,
-                prominent: false,
                 action: { store.startToolbarImport() }
             )
             .help("导入图片/文件夹，或导入槽位包（.clipslotspack）")
@@ -1033,7 +1042,6 @@ struct ContentView: View {
                 title: "清空",
                 icon: "trash",
                 role: .destructive,
-                prominent: true,
                 action: { store.clearAllSlotsInCurrentSpecialSlotWithConfirmation() }
             )
             .help("清空当前槽位组中的全部槽位")
@@ -1835,7 +1843,8 @@ private struct ToolbarActionButton: View {
     let title: String
     let icon: String
     let role: Role
-    let prominent: Bool
+    // v2.11.8: 原 `prominent` 参数（是否加投影）已删除——新拟物里投影是**表面语言**的一部分，
+    // 由 NeuRaisedBackground 统一负责，不再由调用点逐个决定「这颗要不要投影」。
     let action: () -> Void
     @State private var isHovering = false
 
@@ -1847,73 +1856,46 @@ private struct ToolbarActionButton: View {
                 Text(title)
                     .font(.system(size: 12, weight: .semibold))
             }
-            .frame(minWidth: minWidth, minHeight: 30)
+            .frame(minWidth: minWidth, minHeight: NeumorphicMetrics.actionHeight)
             .padding(.horizontal, 9)
-            .contentShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+            .contentShape(RoundedRectangle(cornerRadius: NeumorphicMetrics.actionRadius, style: .continuous))
         }
         .buttonStyle(.plain)
         .foregroundColor(foregroundColor)
-        .background(
-            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                .fill(backgroundColor)
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                .stroke(borderColor, lineWidth: 0.8)
-        )
-        .shadow(color: shadowColor, radius: prominent ? 4 : 0, x: 0, y: prominent ? 1 : 0)
-        .scaleEffect(isHovering ? 1.035 : 1.0)
-        .animation(Anim.interactive, value: isHovering)
+        // v2.11.8: 三种 role 都落到同一套新拟物凸起表面上，只换填充：
+        //   normal      → 默认凸起（白/浅灰渐变）
+        //   accent      → 选中滑块色（简洁模式近黑、多彩模式品牌渐变）+ 反相文字
+        //   destructive → 淡红底 + 红字（设计稿里「清空」就是这个处理，而不是整块实心红）
+        // 原实现里 destructive 是**实心红底白字**，在白面板上是全场最重的一块，
+        // 视觉上盖过了主操作；设计稿刻意把它降成「淡底彩字」——危险但不喧哗。
+        .neuRaised(radius: NeumorphicMetrics.actionRadius,
+                   hovering: isHovering,
+                   fill: surfaceFill)
         .onHover { isHovering = $0 }
     }
 
     private var minWidth: CGFloat {
         switch role {
-        case .normal: return 70
-        case .accent: return 92
-        case .destructive: return 66
+        case .normal: return 66
+        case .accent: return 88
+        case .destructive: return 62
         }
     }
 
     private var foregroundColor: Color {
         switch role {
-        case .normal:
-            return .primary
-        case .accent, .destructive:
-            return .white
+        case .normal: return Neu.ink
+        case .accent: return Neu.sliderInk
+        case .destructive: return Neu.dangerInk
         }
     }
 
-    private var backgroundColor: Color {
+    /// nil = 用 NeuRaisedBackground 的默认凸起填充。
+    private var surfaceFill: AnyShapeStyle? {
         switch role {
-        case .normal:
-            return AppTheme.groupTagIdleFill
-        case .accent:
-            return Color.accentColor
-        case .destructive:
-            return Color.red
-        }
-    }
-
-    private var borderColor: Color {
-        switch role {
-        case .normal:
-            return Color.secondary.opacity(0.16)
-        case .accent:
-            return Color.white.opacity(0.22)
-        case .destructive:
-            return Color.white.opacity(0.20)
-        }
-    }
-
-    private var shadowColor: Color {
-        switch role {
-        case .normal:
-            return .clear
-        case .accent:
-            return Color.accentColor.opacity(0.20)
-        case .destructive:
-            return Color.red.opacity(0.18)
+        case .normal: return nil
+        case .accent: return Neu.selectedFill
+        case .destructive: return AnyShapeStyle(Neu.dangerFill)
         }
     }
 }
@@ -2315,10 +2297,11 @@ private struct ThemeCycleButton: View {
     var body: some View {
         Button(action: onCycle) {
             Image(systemName: mode.icon)
-                .font(.system(size: 15, weight: .semibold))
-                .frame(width: 30, height: 30)
+                .font(.system(size: 14, weight: .semibold))
+                .foregroundColor(Neu.ink)
+                .neuIconTile()
         }
-        .buttonStyle(.borderless)
+        .buttonStyle(.plain)
         .help("外观：\(mode.title)，点击切换")
     }
 }

@@ -62,13 +62,9 @@ struct SlotSearchBar: View {
     @Binding var selectedFilter: SlotFilterType
     @Binding var searchScope: SlotSearchScope
 
-    /// 「范围选择器」的两种形态。
-    private enum ScopeControlStyle {
-        /// 宽版：分段控件（组内 / 全局），与 v2.10.92 在默认窗口尺寸下的实际渲染一致。
-        case segmented
-        /// 窄版：退化为一个图标菜单（地球图标），与 v2.10.92 在 760pt 窗口下的实际渲染一致。
-        case compactMenu
-    }
+    // v2.11.8: 原 `ScopeControlStyle` 枚举已删除。范围选择器挪到搜索框外侧后，宽窄两版
+    // 各自直接写在 body 的两个候选分支里（宽版 = NeuSegmentedControl、窄版 = 图标菜单），
+    // 不再需要把形态当参数透进 searchField。
 
     /// 切换阈值。取值依据：本栏外层 `.frame(maxWidth: 400)`，默认窗口下拿到 400pt（渲染分段控件）；
     /// 窗口收到 760pt 时本栏被压到约 260pt（渲染图标菜单）。340 落在两者之间且留足余量，
@@ -78,27 +74,38 @@ struct SlotSearchBar: View {
     var body: some View {
         WidthThresholdLayout(threshold: Self.scopeSegmentedMinWidth) {
             HStack(alignment: .center, spacing: AppTheme.spacingSmall) {
-                searchField(scope: .segmented)
+                searchField
                     .layoutPriority(2)
+                // v2.11.8: 范围选择器从「搜索框内部」挪到搜索框**右侧**，与新设计稿一致。
+                // 内凹的搜索框里再嵌一个凹轨道会出现「凹中凹」，两层内阴影叠在一起谁也读不出来。
+                NeuSegmentedControl(
+                    options: SlotSearchScope.allCases.map { NeuSegment(value: $0, title: $0.title) },
+                    selection: $searchScope
+                )
+                .frame(width: 108)
+                .help("搜索范围：\(searchScope.title)")
                 filterMenu
             }
             HStack(alignment: .center, spacing: AppTheme.spacingTight) {
-                searchField(scope: .compactMenu)
+                searchField
                     .layoutPriority(2)
+                scopeCompactMenu
                 filterMenu
             }
         }
     }
 
-    private func searchField(scope style: ScopeControlStyle) -> some View {
+    /// 内凹搜索框：椭圆形（圆角 = 半高）well，左侧放大镜、右侧清除按钮。
+    private var searchField: some View {
         HStack(alignment: .center, spacing: AppTheme.spacingSmall) {
             Image(systemName: "magnifyingglass")
-                .foregroundColor(.secondary)
-                .font(.system(size: 12))
+                .foregroundColor(Neu.subtleInk)
+                .font(.system(size: 12, weight: .medium))
 
             TextField("搜索槽位…", text: $searchText)
                 .textFieldStyle(.plain)
                 .font(.system(size: 13))
+                .foregroundColor(Neu.ink)
                 .frame(minWidth: 90)
 
             if !searchText.isEmpty || selectedFilter != .all {
@@ -106,38 +113,16 @@ struct SlotSearchBar: View {
                     if !searchText.isEmpty { searchText = "" } else { selectedFilter = .all }
                 } label: {
                     Image(systemName: "xmark.circle.fill")
-                        .foregroundColor(.secondary)
+                        .foregroundColor(Neu.subtleInk)
                         .font(.system(size: 12))
                 }
                 .buttonStyle(.plain)
                 .contentShape(Rectangle())
             }
-
-            switch style {
-            case .segmented: scopeSegmentedPicker
-            case .compactMenu: scopeCompactMenu
-            }
         }
-        .padding(.horizontal, 9)
-        .padding(.vertical, 6)
-        .background(
-            RoundedRectangle(cornerRadius: 9, style: .continuous)
-                .fill(AppTheme.searchFieldBackground)
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 9, style: .continuous)
-                .stroke(AppTheme.searchFieldStroke, lineWidth: 1)
-        )
-    }
-
-    private var scopeSegmentedPicker: some View {
-        Picker("", selection: $searchScope) {
-            ForEach(SlotSearchScope.allCases) { scope in
-                Label(scope.title, systemImage: scope.systemImage).tag(scope)
-            }
-        }
-        .pickerStyle(.segmented)
-        .frame(width: 104)
+        .padding(.horizontal, 12)
+        .frame(height: NeumorphicMetrics.searchHeight)
+        .neuWell()
     }
 
     private var scopeCompactMenu: some View {
@@ -152,8 +137,9 @@ struct SlotSearchBar: View {
         } label: {
             Image(systemName: searchScope.systemImage)
                 .font(.system(size: 11, weight: .semibold))
-                .frame(width: 24, height: 22)
-                .background(Capsule().fill(AppTheme.filterChipBackground))
+                .foregroundColor(Neu.ink)
+                .frame(width: 26, height: NeumorphicMetrics.segmentHeight)
+                .neuRaised(radius: NeumorphicMetrics.segmentHeight / 2)
         }
         .menuStyle(.borderlessButton)
         .menuIndicator(.hidden)
@@ -177,10 +163,11 @@ struct SlotSearchBar: View {
             }
         } label: {
             Label(selectedFilter.title, systemImage: "line.3.horizontal.decrease.circle")
-                .font(.system(size: 11, weight: .medium))
-                .padding(.horizontal, 7)
-                .padding(.vertical, 5)
-                .background(Capsule().fill(AppTheme.filterChipBackground))
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundColor(Neu.ink)
+                .padding(.horizontal, 9)
+                .frame(height: NeumorphicMetrics.segmentHeight)
+                .neuRaised(radius: NeumorphicMetrics.segmentHeight / 2)
         }
         .menuStyle(.borderlessButton)
         .fixedSize()

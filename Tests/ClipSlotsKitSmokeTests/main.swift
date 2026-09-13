@@ -2110,4 +2110,94 @@ do {
     }
 }
 
+// MARK: - NEU（v2.11.8 新拟物工具栏 / 开关面板）
+//
+// 新拟物这套风格能不能成立，几乎全靠**数值关系**，而这些关系恰恰是截图评审最容易放过的：
+// 「凸起比承载面亮、内凹比承载面暗」一旦某个档位反过来，按钮就从凸起翻转成凹陷，
+// 整屏光影语言崩塌——但人眼看单张图往往只觉得「有点怪」，指不出具体哪里错。
+// 深色档尤其危险：那里没有「更亮的白」可用，凸起要靠**比面板更亮的灰**来表达，
+// 很容易一手滑就调得比面板还暗。
+//
+// 所以这一段把新拟物的三条硬约束全部写成断言，四套取值（简洁/多彩 × 浅色/深色）逐套过：
+//   ① 光源方向一致：raised > panel > well（亮度严格递减）
+//   ② 层级可辨：凸起与内凹之间必须有可察的亮度差，否则退化成「一片白」
+//   ③ 选中滑块与轨道、按钮文字与底色的对比度达标（滑块是「当前选哪个」的唯一信号）
+
+do {
+    // ── ① 光源方向：凸起比面板亮、内凹比面板暗。四套都必须成立。
+    for (name, s) in NeumorphicPalette.allSurfaces {
+        t.check(s.raised.relativeLuminance > s.panel.relativeLuminance,
+                "★★\(name)：凸起必须比面板亮（光源在左上，顶面受光）")
+        t.check(s.well.relativeLuminance < s.panel.relativeLuminance,
+                "★★\(name)：内凹必须比面板暗")
+        t.check(s.wellShade.relativeLuminance < s.well.relativeLuminance,
+                "★\(name)：内凹的上沿暗边必须比凹底更暗（内阴影的方向）")
+        t.check(s.raisedHighlight.relativeLuminance >= s.raised.relativeLuminance,
+                "★\(name)：凸起顶部高光不能比凸起主色暗")
+    }
+
+    // ── ② 层级可辨：凸起 vs 内凹的对比度既要看得出，又不能大到像两个不同控件。
+    for (name, s) in NeumorphicPalette.allSurfaces {
+        let ratio = s.raised.contrastRatio(to: s.well)
+        t.check(ratio > 1.05, "★\(name)：凸起与内凹必须分得出来（实际 \(String(format: "%.3f", ratio))）")
+        t.check(ratio < 3.0, "\(name)：凸起与内凹差得过大就不是同一块材质了（实际 \(String(format: "%.3f", ratio))）")
+    }
+
+    // ── ③ 选中滑块：与轨道的对比度必须够高，它是「当前选的是哪个」的唯一载体。
+    for (name, s) in NeumorphicPalette.allSurfaces {
+        let sliderVsWell = s.sliderFill.contrastRatio(to: s.well)
+        t.check(sliderVsWell >= 3.0,
+                "★★\(name)：选中滑块必须从内凹轨道上跳出来（实际 \(String(format: "%.2f", sliderVsWell))）")
+        let inkOnSlider = s.sliderInk.contrastRatio(to: s.sliderFill)
+        t.check(inkOnSlider >= 4.5,
+                "★\(name)：滑块上的文字要达 WCAG AA 4.5:1（实际 \(String(format: "%.2f", inkOnSlider))）")
+    }
+
+    // ── ④ 面板文字与危险操作
+    for (name, s) in NeumorphicPalette.allSurfaces {
+        t.check(s.ink.contrastRatio(to: s.panel) >= 4.5, "★\(name)：正文压在面板上要达 4.5:1")
+        t.check(s.subtleInk.contrastRatio(to: s.panel) >= 3.0, "★\(name)：次要文字压在面板上要达 3:1")
+        t.check(s.ink.contrastRatio(to: s.raised) >= 4.5, "★\(name)：正文压在凸起按钮上要达 4.5:1")
+        // 「清空」是淡底 + 彩字，不是实心红底白字，所以要验的是彩字在淡底上的可读性。
+        let danger = s.dangerInk.contrastRatio(to: s.dangerFill)
+        t.check(danger >= 4.5, "★\(name)：危险操作的红字压在淡红底上要达 4.5:1（实际 \(String(format: "%.2f", danger))）")
+        t.check(s.dangerFill.contrastRatio(to: s.panel) < 2.0,
+                "\(name)：危险操作的淡底不能重到抢过整行（它只是提示，不是主操作）")
+    }
+
+    // ── ⑤ 简洁模式仍必须是纯中性（新拟物的白面板最容易在调阴影时被掺进冷灰）
+    for (name, s) in [("简洁·浅色", NeumorphicPalette.minimalLight), ("简洁·深色", NeumorphicPalette.minimalDark)] {
+        for member in s.neutralMembers {
+            let n = MinimalSkinPalette.neutrality(member)
+            t.check(n <= 0.02 + 1e-9, "★★\(name)：新拟物表面色必须是灰阶（RGB 极差 \(String(format: "%.4f", n))）")
+        }
+    }
+
+    // ── ⑥ 多彩模式必须**真的带色**，否则两种皮肤就没区别了
+    let colorfulSlider = MinimalSkinPalette.neutrality(NeumorphicPalette.colorfulLight.sliderFill)
+    t.check(colorfulSlider > 0.15,
+            "★★多彩模式的选中滑块必须是品牌彩色（RGB 极差 \(String(format: "%.3f", colorfulSlider))），否则和简洁模式无异")
+    t.check(MinimalSkinPalette.neutrality(NeumorphicPalette.colorfulLight.well) >
+            MinimalSkinPalette.neutrality(NeumorphicPalette.minimalLight.well),
+            "★多彩模式的内凹底要比简洁模式带色（这是两种皮肤在同一几何下的主要区分手段）")
+
+    // ── ⑦ 几何：两种皮肤共用，且几个尺寸间的关系不能被随手改坏
+    t.check(NeumorphicMetrics.switchKnobWidth < NeumorphicMetrics.switchTrackWidth,
+            "★★开关滑块必须窄于滑道，否则滑块会盖住整条轨道、看不出内凹")
+    t.check(NeumorphicMetrics.switchKnobHeight < NeumorphicMetrics.switchTrackHeight,
+            "★★开关滑块必须短于滑道，否则没有行程可走")
+    t.check(NeumorphicMetrics.switchTravel > 0, "★开关行程必须为正（上开下关各走一半）")
+    t.check(NeumorphicMetrics.switchKnobHeight + NeumorphicMetrics.switchTravel * 2
+            <= NeumorphicMetrics.switchTrackHeight,
+            "★★滑块在两个极限位置都不能越出滑道（实际会越出 \(NeumorphicMetrics.switchKnobHeight + NeumorphicMetrics.switchTravel * 2 - NeumorphicMetrics.switchTrackHeight)pt）")
+    t.check(abs(NeumorphicMetrics.searchRadius * 2 - NeumorphicMetrics.searchHeight) < 1e-9,
+            "★搜索框圆角必须是半高（设计稿要求椭圆形，不是圆角矩形）")
+    t.check(NeumorphicMetrics.segmentInset > 0 && NeumorphicMetrics.segmentInset < NeumorphicMetrics.segmentHeight / 2,
+            "★分段控件的滑块内缩必须落在 (0, 半高) 之间")
+    t.check(NeumorphicMetrics.dropShadowOffsetY > 0 && NeumorphicMetrics.highlightShadowOffsetY < 0,
+            "★★外阴影朝下、高光朝上——这是「光源在左上」的唯一编码，反了整套凹凸都会翻面")
+    t.check(NeumorphicMetrics.pressedShadowScale > 0 && NeumorphicMetrics.pressedShadowScale < 1,
+            "★按下时阴影收敛比例必须在 (0,1)（=「压平」而不是消失或变大）")
+}
+
 t.report()
