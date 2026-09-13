@@ -2193,14 +2193,20 @@ do {
             "★多彩模式的内凹底要比简洁模式带色（这是两种皮肤在同一几何下的主要区分手段）")
 
     // ── ⑦ 几何：两种皮肤共用，且几个尺寸间的关系不能被随手改坏
-    t.check(NeumorphicMetrics.switchKnobWidth < NeumorphicMetrics.switchTrackWidth,
-            "★★开关滑块必须窄于滑道，否则滑块会盖住整条轨道、看不出内凹")
-    t.check(NeumorphicMetrics.switchKnobHeight < NeumorphicMetrics.switchTrackHeight,
-            "★★开关滑块必须短于滑道，否则没有行程可走")
-    t.check(NeumorphicMetrics.switchTravel > 0, "★开关行程必须为正（上开下关各走一半）")
-    t.check(NeumorphicMetrics.switchKnobHeight + NeumorphicMetrics.switchTravel * 2
-            <= NeumorphicMetrics.switchTrackHeight,
-            "★★滑块在两个极限位置都不能越出滑道（实际会越出 \(NeumorphicMetrics.switchKnobHeight + NeumorphicMetrics.switchTravel * 2 - NeumorphicMetrics.switchTrackHeight)pt）")
+    // v2.11.7 hotfix9: 竖开关的 4 条滑道/滑块几何断言随 switch* 常量一起删除（改用 NeuPillToggle）。
+    // 换成下面这组「顶部 chrome 只有一种控件规格」的断言——这是 hotfix9 要守住的新不变量：
+    // 开关胶囊、自动切换、页面选择器、组标签、+ / 管理方块全部用 actionHeight / actionRadius，
+    // 任何一处改成自己的尺寸，这一行就又会出现「自成一派的异形控件」（正是用户说「怪」的那个）。
+    t.check(NeumorphicMetrics.statusDotSize >= 5 && NeumorphicMetrics.statusDotSize <= 8,
+            "★状态点直径守在 5~8pt（小于 5 在近黑胶囊上看不清，大于 8 会抢文字的视重）")
+    t.check(NeumorphicMetrics.statusDotSize < NeumorphicMetrics.actionHeight / 3,
+            "★★状态点必须远小于胶囊高度，它是状态指示而不是图标")
+    t.check(NeumorphicMetrics.actionRadius < NeumorphicMetrics.actionHeight / 2,
+            "★★操作控件必须是圆角矩形而不是全圆胶囊（半高圆角是搜索框的专属形状，两者要能区分）")
+    t.check(NeumorphicMetrics.iconTileRadius == NeumorphicMetrics.actionRadius,
+            "★图标方块与操作按钮圆角必须一致，否则同一行里出现两种圆角语言")
+    t.check(NeumorphicMetrics.segmentHeight < NeumorphicMetrics.actionHeight,
+            "★分段控件（组内/全局）必须矮于操作按钮：它嵌在搜索行里，是从属控件")
     t.check(abs(NeumorphicMetrics.searchRadius * 2 - NeumorphicMetrics.searchHeight) < 1e-9,
             "★搜索框圆角必须是半高（设计稿要求椭圆形，不是圆角矩形）")
     t.check(NeumorphicMetrics.segmentInset > 0 && NeumorphicMetrics.segmentInset < NeumorphicMetrics.segmentHeight / 2,

@@ -329,14 +329,25 @@ struct NeuSegmentedControl<T: Hashable>: View {
     }
 }
 
-// MARK: - 复合控件 2/2：垂直开关
+// MARK: - 复合控件 2/2：开关胶囊
 
-/// 垂直滑块开关：内凹滑道 + 黑色圆角滑块（中心一道白横杠），向上为开、向下为关。
+/// 开关胶囊：状态点 + 名称，开 = 近黑（多彩：品牌渐变）凸起胶囊上的反相字，关 = 与画布同色的凸起胶囊。
 ///
-/// 这是 v2.10.0 起沿用的「金属拨杆」的替代品。语义完全一致（点击切换、两档、上开下关），
-/// 换的只是材质：金属拨杆的高光/斜面在新拟物的哑光面板上显得格外突兀，是当前工具栏里
-/// 唯一还带「拟真金属」质感的元素。
-struct NeuVerticalSwitch: View {
+/// v2.11.7 hotfix9 —— 这里换掉的是 hotfix3 引入的 `NeuVerticalSwitch`（26×40 内凹竖滑道 + 黑滑块）。
+/// 用户的原话是「上面的那个有点怪」，放大截图后原因很具体，而且是三条叠在一起：
+///
+///   1. **窄条上的内凹会翻成「发亮」。** 滑道只有 26pt 宽、全圆角，凹陷靠「上暗边 + 下亮边」表达；
+///      在这个尺寸下白亮边沿着整个下半圈铺开，占比大到把整块滑道染得比画布还亮——本该「陷进去」，
+///      看起来却像贴了一颗白药片。凹凸语言在大面积上成立，在小面积上会失真。
+///   2. **滑块只占滑道的 42%**，剩下大半截空轨道就是那片发亮的白，成了整屏最抢眼的一块。
+///   3. **它是全窗口唯一的异形控件。** 顶部 chrome 其余控件（自动切换、页面选择、打包/导入/清空、
+///      组标签）在 hotfix8 之后已经全是同一规格的胶囊 / 方块，只剩这两个竖开关自成一派。
+///
+/// 所以不再修参数，直接把形态并入既有语言：和它右边那颗「自动切换」用**完全同一个规格**
+/// （actionHeight 高、actionRadius 圆角、selectedFill 选中态），只多一颗状态点——绿 = 自动存储、
+/// 蓝 = 自动粘贴，与卡片上的游标角标同色，这是「哪个游标在动」的唯一颜色线索，必须留。
+/// 点击切换、两档语义、无障碍标签与原竖开关逐字一致。
+struct NeuPillToggle: View {
     @Binding var isOn: Bool
     /// 开启时状态点的颜色（绿 = 自动存储、蓝 = 自动粘贴，与游标角标同色）。
     let statusColor: Color
@@ -344,45 +355,39 @@ struct NeuVerticalSwitch: View {
     var help: String? = nil
 
     @State private var isHovering = false
+    @GestureState private var isPressing = false
 
     var body: some View {
-        VStack(spacing: 6) {
-            HStack(spacing: 4) {
-                Circle()
-                    .fill(isOn ? statusColor : Neu.subtleInk.opacity(0.45))
-                    .frame(width: 5, height: 5)
-                Text(label)
-                    .font(.system(size: 9, weight: .semibold))
-                    .foregroundColor(isOn ? Neu.ink : Neu.subtleInk)
-                    .fixedSize()
-            }
-
-            ZStack {
-                RoundedRectangle(cornerRadius: NeumorphicMetrics.switchTrackWidth / 2, style: .continuous)
-                    .fill(Color.clear)
-                    .frame(width: NeumorphicMetrics.switchTrackWidth,
-                           height: NeumorphicMetrics.switchTrackHeight)
-                    .neuWell(radius: NeumorphicMetrics.switchTrackWidth / 2)
-
-                RoundedRectangle(cornerRadius: 6, style: .continuous)
-                    .fill(isOn ? Neu.selectedFill : AnyShapeStyle(Neu.raisedFill))
-                    .frame(width: NeumorphicMetrics.switchKnobWidth,
-                           height: NeumorphicMetrics.switchKnobHeight)
-                    .overlay(
-                        // 滑块中心的横杠：开时用滑块的反相色，关时用次要墨色——它是「滑块朝哪」之外
-                        // 第二个可读的开关信号，弱光下比位移更容易被注意到。
-                        Capsule()
-                            .fill(isOn ? Neu.sliderInk : Neu.subtleInk)
-                            .frame(width: 9, height: 2)
-                    )
-                    .offset(y: isOn ? -NeumorphicMetrics.switchTravel : NeumorphicMetrics.switchTravel)
-                    .animation(.spring(response: 0.28, dampingFraction: 0.72), value: isOn)
-            }
+        HStack(spacing: 5) {
+            Circle()
+                .fill(isOn ? statusColor : Neu.subtleInk.opacity(0.4))
+                .frame(width: NeumorphicMetrics.statusDotSize,
+                       height: NeumorphicMetrics.statusDotSize)
+                // 开启时补一圈同色描边（不是外发光——这个文件里没有外阴影）：
+                // 5pt 的点在近黑胶囊上太容易被忽略，一圈边把它的视重量抬到与文字相当。
+                .overlay(
+                    Circle().strokeBorder(isOn ? statusColor.opacity(0.45) : .clear, lineWidth: 2)
+                        .frame(width: NeumorphicMetrics.statusDotSize + 3,
+                               height: NeumorphicMetrics.statusDotSize + 3)
+                )
+            Text(label)
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundColor(isOn ? Neu.sliderInk : Neu.ink)
+                .fixedSize()
         }
-        .contentShape(Rectangle())
-        .scaleEffect(isHovering ? 1.03 : 1)
+        .padding(.horizontal, 10)
+        .frame(height: NeumorphicMetrics.actionHeight)
+        .neuRaised(radius: NeumorphicMetrics.actionRadius,
+                   pressed: isPressing,
+                   hovering: isHovering,
+                   fill: isOn ? Neu.selectedFill : nil)
+        .contentShape(RoundedRectangle(cornerRadius: NeumorphicMetrics.actionRadius, style: .continuous))
+        .scaleEffect(isPressing ? 0.96 : 1)
+        .animation(Anim.status, value: isOn)
         .animation(Anim.interactive, value: isHovering)
+        .animation(Anim.interactive, value: isPressing)
         .onHover { isHovering = $0 }
+        .simultaneousGesture(DragGesture(minimumDistance: 0).updating($isPressing) { _, st, _ in st = true })
         .onTapGesture { isOn.toggle() }
         .accessibilityElement()
         .accessibilityLabel(label)

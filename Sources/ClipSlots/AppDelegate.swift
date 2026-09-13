@@ -101,6 +101,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.regular)
 
+        // v2.11.7 hotfix9: 离屏渲染顶部 chrome 预览图后立刻退出（仅当设置了
+        // CLIPSLOTS_RENDER_PREVIEW）。用来在「窗口截不到图」的场景下验收观感，见 NeuPreviewRenderer。
+        if NeuPreviewRenderer.runIfRequested() {
+            NSApp.terminate(nil)
+            return
+        }
+
         // v2.10.91: 启动即把 App 主题同步到 NSApp.appearance，并持续跟随后续切换。
         // 修复「NSAlert 等 AppKit 弹窗不跟随 App 主题、没有浅色界面」。详见 applyAppAppearance。
         // hotfix6 起 willFinishLaunching 已经跑过一次，这里保留是为了「delegate 被晚装」的场景。

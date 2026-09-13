@@ -766,30 +766,30 @@ struct ContentView: View {
             Button {
                 showingPageSelector.toggle()
             } label: {
+                // v2.11.7 hotfix9: 这颗按钮外壳早就是新拟物了，里面却还塞着两个旧世界的零件——
+                // 一块 25pt 的浅色小方块托着页面图标、一颗半透明灰胶囊裹着组数。凸起按钮里再嵌两个
+                // 更小的「片」，材质就套了三层，是这一行看起来最杂的地方。现在图标去掉底板（图标本身
+                // 就够表意，底板纯装饰），组数换成**内凹**小胶囊——凹进按钮表面 = 「这是刻在按钮上的
+                // 附加信息」，和搜索框共用同一种凹陷语言，不再引入第三种材质。
                 HStack(spacing: 7) {
-                    ZStack {
-                        RoundedRectangle(cornerRadius: 6, style: .continuous)
-                            .fill(AppTheme.chromeAccentSoftFill)
-                            .frame(width: 25, height: 25)
-                        Image(systemName: "square.grid.2x2.fill")
-                            .font(.system(size: 10, weight: .semibold))
-                            .foregroundColor(AppTheme.chromeAccentInk)
-                    }
+                    Image(systemName: "square.grid.2x2.fill")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundColor(Neu.subtleInk)
                     Text(store.currentPage?.name ?? "默认页面")
                         .font(.system(size: 12, weight: .semibold))
                         .lineLimit(1)
                     Text("\(store.currentPageSlotGroups.count)")
                         .font(.system(size: 9, weight: .bold, design: .rounded))
-                        .foregroundColor(.secondary)
-                        .padding(.horizontal, 5)
+                        .foregroundColor(Neu.subtleInk)
+                        .padding(.horizontal, 6)
                         .padding(.vertical, 2)
-                        .background(Capsule().fill(Color.primary.opacity(0.08)))
+                        .neuWell(radius: 7)
                     Image(systemName: "chevron.down")
                         .font(.system(size: 8, weight: .bold))
-                        .foregroundColor(.secondary)
+                        .foregroundColor(Neu.subtleInk)
                 }
                 .foregroundColor(Neu.ink)
-                .padding(.leading, 5)
+                .padding(.leading, 9)
                 .padding(.trailing, 9)
                 .frame(height: NeumorphicMetrics.actionHeight)
                 // v2.11.8: 页面选择器与右侧操作按钮同为「凸起」层级，用同一套 neu 表面，
@@ -1086,17 +1086,13 @@ struct ContentView: View {
                 Button {
                     store.createQuickSpecialSlot()
                 } label: {
+                    // v2.11.7 hotfix9: 与组标签同规格的新拟物方块（原来是灰底薄片 + 闭合灰描边）。
                     Image(systemName: "plus")
-                        .font(.system(size: 11, weight: .semibold))
-                        .frame(width: 28, height: 28)
-                        .background(
-                            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                                .fill(Color.primary.opacity(0.055))
-                        )
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                                .stroke(Color.secondary.opacity(0.16), lineWidth: 0.8)
-                        )
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundColor(Neu.ink)
+                        .frame(width: NeumorphicMetrics.actionHeight,
+                               height: NeumorphicMetrics.actionHeight)
+                        .neuRaised(radius: NeumorphicMetrics.actionRadius)
                 }
                 .buttonStyle(.plain)
                 .disabled(store.currentPageSlotGroups.count >= store.specialSlotSettings.maxSpecialSlots)
@@ -1107,16 +1103,11 @@ struct ContentView: View {
                     showingSpecialSlotManagement = true
                 } label: {
                     Image(systemName: "slider.horizontal.3")
-                        .font(.system(size: 11, weight: .semibold))
-                        .frame(width: 28, height: 28)
-                        .background(
-                            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                                .fill(Color.primary.opacity(0.055))
-                        )
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                                .stroke(Color.secondary.opacity(0.16), lineWidth: 0.8)
-                        )
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundColor(Neu.subtleInk)
+                        .frame(width: NeumorphicMetrics.actionHeight,
+                               height: NeumorphicMetrics.actionHeight)
+                        .neuRaised(radius: NeumorphicMetrics.actionRadius)
                 }
                 .buttonStyle(.plain)
                 .help("管理槽位组")

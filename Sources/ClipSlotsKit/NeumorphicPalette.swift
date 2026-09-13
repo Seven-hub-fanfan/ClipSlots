@@ -195,15 +195,15 @@ public enum NeumorphicMetrics {
     public static let segmentHeight: CGFloat = 26
     public static let segmentInset: CGFloat = 3
 
-    /// 垂直开关：滑道尺寸、滑块尺寸、滑块行程。
-    public static let switchTrackWidth: CGFloat = 26
-    public static let switchTrackHeight: CGFloat = 40
-    public static let switchKnobWidth: CGFloat = 20
-    public static let switchKnobHeight: CGFloat = 17
-    /// 滑块从「关」到「开」的垂直位移（正负各一半）。
-    public static var switchTravel: CGFloat {
-        (switchTrackHeight - switchKnobHeight) / 2 - segmentInset
-    }
+    // v2.11.7 hotfix9: 垂直开关（switchTrack*/switchKnob*/switchTravel）的尺寸常量已删除。
+    // 26pt 宽的内凹滑道在这个尺寸上会「翻亮」——凹陷靠下沿的白亮边表达，窄条上白边占比过大，
+    // 整块滑道看起来比画布还亮，读成「贴上去的一颗白药片」而不是「陷进去的一道槽」。
+    // 自动存储 / 自动粘贴改用 `NeuPillToggle`，与「自动切换」共用 actionHeight / actionRadius，
+    // 顶部 chrome 从此只有一种控件规格。
+
+    /// 开关胶囊上的状态点直径（绿 = 自动存储、蓝 = 自动粘贴，与卡片游标角标同色）。
+    /// 6pt 是「在近黑胶囊上还能看清」与「不抢文字」之间的那一档。
+    public static let statusDotSize: CGFloat = 6
 
     // MARK: - 纯描边浮雕（v2.11.7 hotfix8）
     //
