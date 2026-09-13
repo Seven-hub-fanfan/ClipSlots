@@ -433,12 +433,14 @@ extension SlotContent {
             if isVideoFile { return "\(ext) 视频" }
             return "\(ext) 文件"
         }
-        if !preview.isEmpty {
-            let charCount = items.reduce(0) { $0 + $1.reduce(0) { $0 + $1.data.count } }
-            if charCount < 1024 { return "\(charCount) B 文本" }
-            if charCount < 1024 * 1024 { return "\(charCount / 1024) KB 文本" }
-            return "文本"
-        }
+        // v2.11.7 hotfix12: 纯文本槽位不再返回「0 B 文本 / 1.2 KB 文本」这类体积标签。
+        // 用户不需要在卡片上看到正文字节数——槽位卡片本来就把正文预览铺在上面，体积对使用
+        // 决策没有信息量，反而在每张卡片左下角占一行。
+        //
+        // 只去掉「文本体积」这一种；图片的「PNG · 512×512」和文件的「PDF 文件 / MP4 视频」
+        // 都保留：那是**看不出来**的信息（尺寸、真实类型），且用户没要求动。也正因为如此，
+        // 这里返回 "" 而不是删掉整个 metadataSummary —— SlotPreviewView / SlotThumbnailView
+        // 只在图片/文件分支里读它，行为完全不受影响。
         return ""
     }
 

@@ -1,7 +1,7 @@
 ---
 name: clipslots-manager
 description: 当需要以编程方式读取、写入、检索、加载或整理 macOS 剪贴板槽位管理器 ClipSlots 中的内容时使用。把文本/文件存进槽位、读出内容、搜索历史、把内容放到系统剪贴板、批量整理文件夹素材到槽位组/页面、删除槽位组/页面等。前置要求：macOS + 已安装 ClipSlots v2.9.33+，CLI 位于 /usr/local/bin/clipslots。
-version: 1.6.0
+version: 1.7.0
 compatibility: Requires macOS, ClipSlots, and /usr/local/bin/clipslots. Verified with ClipSlots CLI 2.11.7; probe version and command help at runtime.
 used_when: 当需要以编程方式读取、写入、检索、加载或整理 macOS 剪贴板槽位管理器 ClipSlots 中的槽位内容时使用（写文本/文件进槽位、读出内容、搜索历史、把内容放到系统剪贴板、批量整理文件夹素材到槽位组/页面、删除槽位组/页面等）。
 requires: macOS + 已安装 ClipSlots v2.9.33+，CLI 位于 /usr/local/bin/clipslots。
@@ -56,7 +56,39 @@ requires: macOS + 已安装 ClipSlots v2.9.33+，CLI 位于 /usr/local/bin/clips
 
 **首选工作流**：动手前先 `clipslots help` / `groups` / `list` 了解现状，再执行读写；写入前优先选空槽，避免覆盖。
 
-## 1. 命令参考（v2.11.4，共 18 个；每个子命令均支持 `--help`/`-h`）
+### 0.1 可直接复制的最短命令序列（实测于 CLI 2.11.7）
+
+下面 6 段是最常见的 6 个任务。**照抄、只替换引号里的中文和路径即可**，不要自行改写 flag 组合。
+
+```bash
+# ① 全库找一段内容（最常用；不加 --all-groups 就只搜 default 组，等于搜不到）
+clipslots search "关键词" --all-groups
+
+# ② 看某页有哪些组、哪些槽是空的（判空标准两步）
+clipslots groups --page-name "Q3项目"
+clipslots list --page-name "Q3项目"            # 每槽看 empty / attachmentCount
+
+# ③ 新建一个页面并直接把第一个组命名好（零废组），再写第 1 槽
+clipslots create-page "Q3项目" --group-name "品牌VI"
+clipslots write 1 --text "内容" --group-name "品牌VI" --page-name "Q3项目" --if-empty --label "主视觉"
+
+# ④ 往一个已有槽位加附件（多个文件按顺序传，不要打包成 ZIP）
+clipslots write-attachment 1 ~/Desktop/a.png ~/Desktop/b.pdf --group-name "品牌VI" --page-name "Q3项目"
+
+# ⑤ 一次写多个槽位（>3 个就用 --batch；注意 item 键名是 snake_case）
+echo '[{"slot":2,"text":"文案A","if_empty":true},{"slot":3,"text":"文案B","if_empty":true}]' \
+  | clipslots write --batch --group-name "品牌VI" --page-name "Q3项目"
+
+# ⑥ 取用：把某槽位送进系统剪贴板（不会自动粘贴，要提示用户按 Cmd+V）
+clipslots paste 1 --group-name "品牌VI" --page-name "Q3项目"
+```
+
+**三条硬规则（照做即可，不要自行推断）：**
+1. 只要涉及具体某个组，**永远同时带上 `--page-name`**（组名允许跨页重复；不带页面且撞名 → `AMBIGUOUS_GROUP` 直接失败）。
+2. 写文本一律先带 `--if-empty`；报 `SLOT_NOT_EMPTY` 就换空槽，或问用户是否覆盖（要覆盖才改用 `--overwrite-text`）。两个 flag 不能同时传。
+3. 每条命令执行后**先看 `ok` 字段**：`ok:true` 才算成功；`ok:false` 时按 `error_code` 处理（见 1.4 错误码对照表），不要重试同一条命令。
+
+## 1. 命令参考（实测于 CLI v2.11.7，共 19 个命令；每个子命令均支持 `--help`/`-h`）
 
 ### 只读
 ```bash
@@ -66,7 +98,18 @@ clipslots groups [--page <uuid>|--page-name <名称>]   # 所有槽位组，返�
 clipslots pages                                    # 所有页面，返回对象 {pages:[{id,name,current}]}
 clipslots list [--group <id>] [--page <uuid>|--page-name <名称>] [--page-size <N>] [--page-num <N>]   # 传 --group（或 --group-name）时返回单组顶层对象 {group,page,slots:[{slot,label,preview,type,attachmentCount,empty,hasManualThumbnail,thumbnailBytes}]}（注意 slots 是对象里的字段，不是裸数组）；empty 表示主体与附件都为空（v2.9.3+），每槽含 attachmentCount 字段。v2.11.2 起每槽还含 hasManualThumbnail(bool) 与 thumbnailBytes(int)，用于确认手动缩略图状态。只传 --page/--page-name 而不传组时（v2.9.32 A3）返回 {page,pageName,groupCount,groups:[{group,name,slots:[...]}]}（该页所有组各自的槽位），不再回落到全局 default 组。传 --page-size 后按页返回并附带 pagination:{pageNum,pageSize,total,totalPages,hasMore}（v2.9.7）。--page 按 UUID、--page-name 按名称指定页面，两者互斥
 clipslots read <slot> [--group <id>] [--page <uuid>|--page-name <名称>]               # 单槽完整内容 {slot,label,preview,text,htmlSource,types,attachmentCount,empty,hasManualThumbnail,thumbnailBytes}；empty 表示主体与附件都为空（v2.9.3+）；hasManualThumbnail/thumbnailBytes 为 v2.11.2 新增，是 set-thumbnail/clear-thumbnail 之后唯一的自检依据
-clipslots search <query> [--group <id>] [--page <uuid>|--page-name <名称>] [--all-groups] [--limit 50]   # 子串搜索（不分大小写），返回 {query,results:[{group,page,pageName,slot,label,preview}]}；命中范围含预览/正文/标签/附件文件名（v2.9.3+）。v2.9.58 起支持 --page/--page-name，采用与其它命令相同的「页面+组」定位规则（只传页面不传组时搜索该页所有组）；并修复了 --group <UUID> 精确过滤（早期 CLI 2.9.57 指定有效组 UUID 会错误返回空结果）
+clipslots search <query> [--group <id|name>] [--page <uuid>|--page-name <名称>] [--all-groups] [--limit 50]   # 子串搜索（不分大小写），返回 {query,results:[{group,page,pageName,slot,label,preview}]}；命中范围含预览/正文/标签/附件文件名（v2.9.3+）。v2.9.58 起支持 --page/--page-name，采用与其它命令相同的「页面+组」定位规则（只传页面不传组时搜索该页所有组）；并修复了 --group <UUID> 精确过滤（早期 CLI 2.9.57 指定有效组 UUID 会错误返回空结果）
+#   ⚠️【必读，v2.11.7 实测】search 匹配的是【全文】，不再只匹配 preview 的前 100 字：正文第 400 字处的词也能命中（已实测验证）。
+#   ⚠️【最容易出错的一条】不传任何范围参数时，search 只搜【default 组】，几乎必然返回空 results:[]，而不是搜全库。
+#      要搜全库必须显式加 --all-groups：  clipslots search "关键词" --all-groups
+#      只搜某页：clipslots search "关键词" --page-name "Q3项目"
+#      只搜某组：clipslots search "关键词" --group-name "品牌VI" --page-name "Q3项目"
+#      results 里的 preview 只是截断预览，命中的词可能不出现在 preview 里 —— 不要因为 preview 里看不到关键词就判定为误命中，要 read <slot> 看全文。
+#   --limit 必须为正整数，传 0 或负数返回 error_code:"INVALID_LIMIT"
+
+# 仅在索引(index.json)确实损坏时才修复；索引健康时不做任何改动、返回 {"ok":true,"action":"none","note":"index is healthy — no repair needed; no data was modified"}
+# 只在其他命令持续报索引/存储损坏类错误时才用它。它是只读安全的（健康即 no-op），但不要当常规步骤每次都跑。
+clipslots repair-index
 ```
 
 > **Agent 判空标准流程（v2.9.32）**：先 `groups --page-name <页名>` 列出该页所有组（`groups` 带页面参数即只返回该页的组，A4），再 `list --page-name <页名>` 看各组槽位的 `empty`/`attachmentCount`。`list` 只传页面不传组时会返回该页所有组各自的槽位（A3），**不再**回落到全局 `default` 组——旧版无组回落是"误判已满"的根因。要单组结果时显式带 `--group`/`--group-name`。
@@ -84,12 +127,30 @@ clipslots write <slot> --text "内容" [--group <id>] [--page <uuid>|--page-name
 
 # 批量写入多个槽位（v2.9.57+）：单进程内顺序执行，比循环逐条 write 更快更安全
 # ⚡ 超过 3 个槽位写入时，优先使用 --batch，避免循环启动多个进程
-# 输入：从 stdin 读取 JSON 数组，每项包含 slot/text/group/label/ifEmpty/overwriteText
+# 输入：从 stdin 读取 JSON 数组。
+#
+# ⚠️⚠️ 【实测于 CLI 2.11.7，最容易出错的一条】item 的键名必须是 snake_case，写错会被【静默忽略】：
+#   允许的键：slot(必填,int) / text(必填,string) / group(组名或组 id) / label(string)
+#              / if_empty(bool) / overwrite_text(bool)
+#   ✅ "if_empty": true      ❌ "ifEmpty": true      ← 写成 ifEmpty 不报错，但保护失效，会直接覆盖非空槽！
+#   ✅ "overwrite_text": true ❌ "overwriteText": true
+#   同一 item 同时给 if_empty 和 overwrite_text → 预检失败 INVALID_ARGUMENT_COMBINATION，整批零写入
+#
+# ⚠️ 【定位组只能用命令级 flag 或组 id】write --batch 的 item 里写 "page"/"page_name" 对组消歧【无效】：
+#   组名跨页重复时，item 里带 "page_name" 仍会返回 AMBIGUOUS_GROUP、整批零写入（实测 2.11.7）。
+#   正确写法二选一：
+#     ① 命令级带页面 + 组（推荐）：clipslots write --batch --group "组A" --page-name "测试页2"
+#     ② item 里直接给组 id（UUID）：{"slot":1,"text":"x","group":"special_XXXX-..."}
+#   注意：只给命令级 --page-name 而不给 --group/--group-name → GROUP_REQUIRED（批量不支持「只给页面」）
+#   （set-thumbnail --batch 相反：它的 item 支持 "page_name"/"page" 消歧，见缩略图小节）
+#
 # 预检：解析→去重→冲突→参数校验，预检失败整批零写入（preflight_passed:false）
+#   两个目标解析到同一 (group,slot) → BATCH_DUPLICATE_TARGET，返回体含 duplicates:[下标...]
+#   任一 if_empty 目标非空 → SLOT_NOT_EMPTY，整批零写入（written:0）
 # 执行期失败默认继续（failed 项标 status:"failed"），加 --stop-on-error 时其后项标 not_executed
 # 顺序保证：按数组下标顺序写入，不会乱序
-echo '[{"slot":1,"text":"内容A"},{"slot":2,"text":"内容B"}]' \
-  | clipslots write --batch --group <id> [--page-name <名称>] [--stop-on-error]
+echo '[{"slot":1,"text":"内容A","if_empty":true},{"slot":2,"text":"内容B","if_empty":true}]' \
+  | clipslots write --batch --group <id或组名> [--page-name <名称>] [--stop-on-error]
 
 # 向【槽位附件】追加一个或多个文件（按顺序），不改动主体；--replace 先清空旧附件
 # 返回 {slot,group,added:[文件名...],attachmentCount,slotBodyEmpty}
@@ -130,11 +191,16 @@ clipslots rename-group <group-id> --name <新名称> [--page-name <页面名>]
 # 删除一个槽位组（软删除）；其数据目录移动到 .trash（可人工恢复，v2.9.5 起 .trash 自动清理）
 # 成功返回 {"ok":true,"deleted":"<id>","movedToTrash":true}
 # id 不存在返回 {"ok":false,"error":"group <id> not found"}
+# ⚠️ 默认组 `default` 删不掉：返回 {"ok":false,"error_code":"DEFAULT_GROUP_PROTECTED"}（实测 2.11.7）。
+#    遇到它不要重试、不要换 --force，直接告诉用户「默认组受保护，只能清空槽位（clear）不能删组」。
+# ⚠️ 只接受组 id（位置参数），不接受组名，也没有 --group-name。要按名字删：先 groups 拿到该组 id 再删。
 clipslots delete-group <id>
 
 # 删除一个页面及其下所有槽位组（软删除）；相关数据目录移动到 .trash（可人工恢复，v2.9.5 起 .trash 自动清理）
 # 成功返回 {"ok":true,"deleted":"<id>","movedToTrash":true}
 # id 不存在返回 {"ok":false,"error":"page <id> not found"}
+# ⚠️ 默认页 `default_page` 删不掉：返回 {"ok":false,"error_code":"DEFAULT_PAGE_PROTECTED"}（实测 2.11.7），同样不要重试。
+# ⚠️ 只接受页面 id（位置参数），不接受页面名。要按名字删：先 pages 拿到该页 id 再删。
 clipslots delete-page <id>
 
 # 任意子命令加 --help / -h 返回该命令的用法与参数说明（v2.9.5）
@@ -157,8 +223,13 @@ clipslots set-thumbnail <slot> --image <path> [--group <id|name>] [--group-name 
 #   不带该 flag 则直接覆盖，返回体里 replaced:true 表示顶掉了旧封面。
 # 成功返回 {"ok":true,"slot":1,"group":"...","source":"/abs/path.png","thumbnailId":"...","thumbnailBytes":12160,"hasManualThumbnail":true,"replaced":false}
 
-# 批量设置（stdin 传 JSON 数组）。group / page / page_name / if_absent 每条可覆盖命令级同名 flag。
-echo '[{"slot":1,"image":"~/a.png","group":"设计稿","page":"素材"},{"slot":2,"image":"~/b.jpg","if_absent":true}]' \
+# 批量设置（stdin 传 JSON 数组）。item 键名必须是 snake_case（实测 2.11.7）：
+#   允许的键：slot(必填,int) / image(必填,path) / group(组名或 id) / page(页面 uuid) / page_name(页面名) / if_absent(bool)
+#   ✅ "page_name":"素材"  ❌ "pageName":"素材"（写成驼峰会被忽略；组名跨页重名时直接 AMBIGUOUS_GROUP、整批零写入）
+#   ✅ "if_absent":true    ❌ "ifAbsent":true（写成驼峰保护失效，会直接覆盖已有封面）
+#   注意与 write --batch 的差异：set-thumbnail --batch 的 item 支持 page/page_name 消歧（已实测生效）；
+#   write --batch 的 item 不支持，只能靠命令级 --page-name 或 item 里给组 id。
+echo '[{"slot":1,"image":"~/a.png","group":"设计稿","page_name":"素材"},{"slot":2,"image":"~/b.jpg","if_absent":true}]' \
   | clipslots set-thumbnail --batch [--stop-on-error]
 # 两阶段契约与 write --batch 一致：预检（路径存在性 + 可解码 + 组/页解析 + 重复目标 + if_absent 冲突）
 #   任一失败 → 整批零写入（preflight_passed:false, written:0）；执行期失败 → 前项成功、后项 not_executed。
@@ -192,8 +263,31 @@ clipslots clear-thumbnail <slot> [--group <id|name>] [--group-name <名称>] [--
 - ✅ **`paste` 支持纯附件槽位**：主体为空、仅有附件的槽位，`paste` 会把附件的文件 URL 写入系统剪贴板（`clearContents` 后 `writeObjects([NSURL])`），返回 `attachmentsCopied`（无法解析出文件路径的附件会被跳过并计入 `attachmentsSkipped`）。旧版"纯附件槽位无法 paste"的限制已在 v2.9.3 修复。
 - ✅ **`search` 命中附件文件名**：搜索的匹配范围已扩展到"预览 + 正文 + 标签 + 附件文件名"，因此模式C（纯附件）槽位可通过文件名被搜到。旧版"搜索不覆盖附件名"的限制已在 v2.9.3 修复。
 - ✅ **`search` 按组精确过滤修复 + 支持页面定位**（v2.9.58）：`search --group <UUID>` 在早期 CLI（2.9.57）中可能错误返回空结果，v2.9.58 已修复；现同时支持 `--page`/`--page-name`，采用与其它命令一致的「页面+组」定位规则（只传页面不传组时搜索该页所有组）。⚠️ 若在异常环境中遇到 `search` 按组返回异常，**不要静默扩大到 `--all-groups`**（会污染结果范围），应改用定向 `list`/`read` 替代核对。
+- ✅ **`search` 全文匹配**（v2.11.7 实测确认）：搜索匹配的是槽位**全文**，不再局限于 `preview` 的前 100 字——正文中后段（实测第 400 字处）的词也能命中，命中项的 `preview` 里可能看不到关键词，这是正常的，需要 `read <slot>` 看全文。⚠️ 但**范围不会自动放大**：不传 `--all-groups` / `--page-name` / `--group-name` 时只搜 `default` 组，全库搜索必须显式 `--all-groups`。
+- ⚠️ **`clipslots help` 文案里 `.trash` 写「最多 50 条」是旧文案**，实际上限自 v2.10.16 起为 **200 条**（保留 30 天不变）。以本节说明为准，不必据 help 文案调整删除策略。
 - ⚠️ **`write` 仅写纯文本主体**：`--text` 必填，仅接受 UTF-8 文本；`--text -` 从 stdin 读取时若不是合法 UTF-8（二进制）会返回 `ok:false` 且**不清空槽位**。把图片/文件放入槽位请用 `write-attachment`（或走 GUI）。
 - ✅ **`write` 覆盖写入前自动备份旧内容**（v2.10.16 新增）：`write` 覆盖已有槽位内容时，会在覆盖前把被覆盖槽位的旧内容软删除备份进 `.trash/`（30 天内可人工恢复），因此即使误覆盖也有回滚窗口。此备份同样受 `.trash` 自动清理约束（保留最近 30 天、最多 200 条）。仍建议写入前用 `--if-empty` 或 `read`/`list` 预检，把备份当作兜底而非常规回滚手段。
+
+## 1.4 错误码对照表（`ok:false` 时照此处理，实测于 CLI 2.11.7）
+
+失败返回体一定含 `error_code`（全大写下划线）。**按 `error_code` 分支，不要解析 `error` 文案**（文案会变，可能是中文也可能是英文）。
+
+| error_code | 含义 | 正确处理动作（不要重试原命令） |
+|---|---|---|
+| `AMBIGUOUS_GROUP` | 组名跨多页重复，没给页面 | 补 `--page-name <页名>` 重发；返回体的 `candidates:[{group,page,pageName}]` 已列出所有候选，也可直接用其中的 `group`（UUID）当 `--group` |
+| `GROUP_NOT_FOUND` | 该页里没有这个组 / 组 id 不存在 | 先 `groups --page-name <页名>` 看真实组名，再改名重发；不要新建同名组顶替 |
+| `GROUP_REQUIRED` | 只给了页面没给组（单槽操作与 `write --batch` 都不允许） | 补 `--group-name` 或 `--group` |
+| `SLOT_NOT_EMPTY` | `--if-empty` 命中非空槽（批量时整批零写入） | 换一个 `empty:true` 的空槽；确实要覆盖 → 问用户确认后改用 `--overwrite-text` |
+| `INVALID_ARGUMENT_COMBINATION` | `--if-empty` 与 `--overwrite-text` 同传 / 缺 `--text` / 传了不存在的 flag（拼错，如 `--lable`） | 读 `error` 里的 `allowed flags: ...`，或跑 `clipslots <cmd> --help` 后改正参数 |
+| `INVALID_SLOT` | 槽位号越界 | 槽位只有 1..10；超出请建续组 `-2` 而不是写 11 |
+| `INVALID_LIMIT` | `search --limit` 传了 0 或负数 | 传正整数（默认 50） |
+| `BATCH_DUPLICATE_TARGET` | 批量里两个 item 落到同一 (组,槽)，整批零写入 | 看返回体 `duplicates:[下标...]`，去重后重发整批 |
+| `DEFAULT_PAGE_PROTECTED` | 试图删默认页 `default_page` | 停手，告知用户默认页不可删；要清内容用 `clear` |
+| `DEFAULT_GROUP_PROTECTED` | 试图删默认组 `default` | 停手，告知用户默认组不可删；要清内容用 `clear` |
+| `THUMBNAIL_ALREADY_SET` | `set-thumbnail --if-absent` 且已有封面 | 想换封面 → 去掉 `--if-absent`（会覆盖，返回 `replaced:true`）；否则跳过 |
+| `NO_MANUAL_THUMBNAIL` | `clear-thumbnail` 但该槽本来就没手动封面 | 视为已达目标，跳过即可，不是错误状态 |
+| `INVALID_IMAGE` | 给 `set-thumbnail` 传了 SVG/PDF 等矢量或文档格式 | 先导出成 PNG/JPEG 再设；或告知用户该格式不支持 |
+| 文案含 `storage is busy (lock timeout)` | 另一进程（通常是 GUI）占着写锁约 5s | **这一条可以重试**：等 1~2 秒重发一次，不是数据损坏 |
 
 ## 1.5 环境与兼容（高级用法）
 
@@ -308,16 +402,17 @@ clipslots clear-thumbnail <slot> [--group <id|name>] [--group-name <名称>] [--
 1. **先读后写**（三步清单）：`① 读（list/read 查现有状态）→ ② 分析（判断目标槽位/页面/组）→ ③ 执行（write/create）`。优先写 `empty:true` 空槽，批量覆盖前与用户确认。新建页面时直接带 `--group-name` 给默认组命名（零废组，v2.9.42），无需额外 `rename-group`。
 2. **空槽判定**（详见第 0 节"空槽判定"）：一个槽位为空当且仅当**主体内容与附件列表都为空**；有主体或有附件都算非空。扫描空槽必须同时检查主体与附件——直接用 `empty:true` 判定即可（v2.9.3+ 的 `empty` 已含附件检查，`list` 另有 `attachmentCount`），不要只看主体。
 3. **存入位置**：先按第 2 节"存入位置决策流"决定存到哪个页面/组（默认最保守：只新建、不碰已有数据；冲突时给选项不自作主张），再按第 3 节判定模式A/B/C。
-4. **以 `ok` 判断成败**，`ok:false` 读 `error`；不要只看退出码文案。
-5. **槽位范围** 1..10，越界返回 `ok:false`。
+4. **以 `ok` 判断成败**，`ok:false` 时按 `error_code` 分支处理（对照第 1.4 节表格），`error` 文案只用于给用户解释，不要用来做程序判断。**同一条失败命令不要原样重试**（唯一例外：`storage is busy (lock timeout)`，等 1~2 秒可重试一次）。
+5. **槽位范围** 1..10，越界返回 `ok:false` + `error_code:"INVALID_SLOT"`。
 6. **主体 vs 附件**：`write` 改主体（保留附件）；`write-attachment` 只加附件（不动主体）；二者配合实现模式A/B/C。
 7. **paste 语义**：只送入剪贴板，不自动粘贴；需要真正粘贴时提示用户 Cmd+V。纯附件槽位（主体空）也可 `paste`，会把附件文件 URL 送入剪贴板（v2.9.3+）。
-8. **多组/多页**：优先使用 `--group-name` / `--page-name` 直接按名称操作，无需手动获取 UUID。
+8. **多组/多页**：优先使用 `--group-name` / `--page-name` 直接按名称操作，无需手动获取 UUID。**只要指定了组，就必须同时带 `--page-name`**（组名可跨页重复，漏带页面会 `AMBIGUOUS_GROUP` 或写到别的页）。两个例外必须用 id：`delete-group <id>` / `delete-page <id>` 只吃 id，`rename-group <group-id>` 也只吃 group id——先 `groups` / `pages` 拿 id 再操作。
 9. **容量与命名**：严格按第 4、5 节；溢出用 `-2/-3` 或新页面，命名遵守字数上限与阿拉伯数字序号。**每页必须优先填满 10 组再开新页**（第 4 节硬性约束），不得以「留余量」「均衡布局」等理由主动减少每页组数。
 10. **批量前先确认分页方案**：当批量操作涉及**多页 / 多组结构**（预计超过 1 页，或总组数 > 10）时，**必须先向用户输出完整的分页方案**——列明「每页几个组、每组几个槽、总槽数、共几页」——并**等待用户确认后再开始执行写入**。禁止在未确认结构的情况下直接批量建组/写入。批量建组前先 `groups --page-name <页名>` 确认当前页剩余组数（10 - 已有组数），不要等 `create-group` 报「页面已满」错误再处理。
 11. **富文本**：`read` 的 `htmlSource` 非空表示有 HTML 源；CLI `write` 只写纯文本，需保 HTML 走 GUI。
-13. **批量写入用 `--batch`**：当需要向同一组（或跨组）写入 **>3 个槽位**时，优先使用 `write --batch`（v2.9.57+），一次进程完成全部写入，比 shell 循环逐条 `write` 快得多且顺序有保证（按数组下标顺序，单进程内串行）。循环逐条 `write` 仅在 `--batch` 不可用时作为降级方案。
-12. **兜底规则**：任何不确定的情况下，使用 `--force` + 新建页面 + 新建组，每组只放 1 个槽位。污染用户已有数据比浪费空槽位更严重。（`--force` 当前用于跳过跨进程写锁；若冲突处理相关的 `--force` 语义未实现，则用等效的新建页/组方式规避冲突。）
+12. **批量写入用 `--batch`**：当需要向同一组（或跨组）写入 **>3 个槽位**时，优先使用 `write --batch`（v2.9.57+），一次进程完成全部写入，比 shell 循环逐条 `write` 快得多且顺序有保证（按数组下标顺序，单进程内串行）。循环逐条 `write` 仅在 `--batch` 不可用时作为降级方案。**item 键名必须是 snake_case（`if_empty` / `overwrite_text`），写成驼峰会被静默忽略导致误覆盖**，详见第 1 节 `write --batch` 说明。
+13. **搜索必须显式给范围**：`search "词"` 不带范围参数时只搜 `default` 组，通常返回空结果。全库搜用 `search "词" --all-groups`，限定页用 `--page-name`，限定组用 `--group-name` + `--page-name`。搜不到时先确认是不是漏了 `--all-groups`，再下"库里没有"的结论。
+14. **兜底规则**：任何不确定的情况下，**新建页面 + 新建组**，每组只放 1 个槽位。污染用户已有数据比浪费空槽位更严重。⚠️ 注意 `--force` **只用于跳过跨进程写锁**（`write`/`clear`/`write-attachment`/`set-thumbnail`/`clear-thumbnail` 支持），它**不能**用来解决 `SLOT_NOT_EMPTY`、`AMBIGUOUS_GROUP`、`DEFAULT_*_PROTECTED` 等冲突；正常情况下**不要加 `--force`**（会绕过 GUI/CLI 并发保护，有互相覆盖风险），遇到锁超时优先「等 1~2 秒重试」。
 
 ---
 > 本文件为随 App bundle 打包、供各 Agent 实际读取的正式版本，接口以 `clipslots help` 实际输出为准；场景部分按当前讨论整理，可再据实际使用微调。CLI 与 GUI 共享 `ClipSlotsKit` 数据层，随 app 版本演进。

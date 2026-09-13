@@ -178,12 +178,19 @@ struct SlotCardView: View {
             // title) down here just above the action buttons. It's a plain Button, so it
             // won't trigger the card's paste/edit/hover/drag.
             HStack(alignment: .lastTextBaseline, spacing: 6) {
-                Text(content.metadataSummary)
-                    .font(.caption2)
-                    .foregroundColor(.secondary.opacity(0.68))
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-                    .help(content.metadataSummary)
+                // v2.11.7 hotfix12: 纯文本槽位的 metadataSummary 现在是空串（不再显示
+                // 「0 B 文本」体积标签），所以这里显式判空——渲染一个空 Text 会留下一道
+                // 空基线占位，把右侧附件按钮的行高撑成一条空白行。图片/文件槽位仍照旧显示
+                // 「PNG · 512×512」/「PDF 文件」。
+                let summary = content.metadataSummary
+                if !summary.isEmpty {
+                    Text(summary)
+                        .font(.caption2)
+                        .foregroundColor(.secondary.opacity(0.68))
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                        .help(summary)
+                }
 
                 Spacer(minLength: 4)
 
