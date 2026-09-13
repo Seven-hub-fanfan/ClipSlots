@@ -1421,9 +1421,10 @@ struct ContentView: View {
                 hasConnections ? Color.white.opacity(0.35) : AppTheme.chromeAccentTileStroke,
                 lineWidth: 1)
         )
-        .shadow(
-            color: hasConnections ? Color.accentColor.opacity(0.35) : Color.black.opacity(0.06),
-            radius: hasConnections ? 6 : 2, x: 0, y: hasConnections ? 2 : 1)
+        // v2.11.7 hotfix8: 这颗按钮原来带一层外投影（无连接时黑 6%、有连接时强调色光晕）。
+        // 工具栏这一行已经全面去掉外部 Drop Shadow（见 NeumorphicKit 文件头第 2 条），
+        // 它是行内唯一还在投影的控件，留着就成了「一颗浮起来的胶囊」。状态信号不受影响：
+        // 有连接靠强调色渐变 + 计数文字，无连接靠中性底。
         .scaleEffect(hasConnections ? 1.02 : 1.0)
         .animation(Anim.transition, value: edgeCount)
         .help(hasConnections ? "当前槽位组已有 \(edgeCount) 条连接" : "打开节点连接工具")

@@ -14,10 +14,11 @@ import ClipSlotsKit
 //    整个界面只允许有一个光源方向，否则新拟物会立刻显出「贴纸感」。所有偏移量都写死在
 //    `NeumorphicMetrics`，不要在调用点各自传 offset。
 //
-// 2) **内凹的内阴影是手搓的。** SwiftUI 到 macOS 14 才有 `.fill(style.shadow(.inner))`，
-//    本项目最低支持 macOS 13（见 Package.swift），所以内阴影用「描边 + 模糊 + 渐变遮罩」
-//    的老办法实现：沿形状描一圈粗边，模糊后用上→下的渐变遮罩只留上半，就得到从上沿
-//    渗进来的暗影；再反向来一次得到下沿的亮边。这比叠两个半透明矩形稳，因为它天然贴合圆角。
+// 2) **这里一个外部 Drop Shadow 都不许有（v2.11.7 hotfix8）。** 整套凹凸只用「长在形状边界上的
+//    描边」表达：凸起 = 右下暗边（侧面厚度）+ 左上白亮边（受光棱）；内凹 = 上/左内暗边 + 下/右内亮边。
+//    外投影表达的是「物体离背后的平面有一段距离」，也就是**悬浮**——hotfix5/6/7 三轮都在调它的
+//    浓度 / blur / 对称性，用户三次的反馈都是「还是漂浮」，因为那是手段本身的语义，不是参数问题。
+//    改这个文件时如果手又伸向 `.shadow(...)`，先回头看这条。
 //
 // 3) **颜色全部走 `NeumorphicPalette`，几何全部走 `NeumorphicMetrics`。** 两种皮肤共用几何、
 //    只分颜色（多彩模式在同样的凹凸上掺品牌蓝紫、选中态用渐变）。皮肤差异不允许改尺寸——
@@ -84,43 +85,35 @@ enum Neu {
     static var dangerFill: Color { dyn(\.dangerFill) }
     static var dangerInk: Color { dyn(\.dangerInk) }
 
-    /// 右下投影。hotfix7 按设计稿定为**黑 15% / blur 8 / offset (3,3)**，与左上高光严格镜像。
-    /// 之前是黑 9% / blur 12：太淡又太散，成了「一圈灰晕」而不是「压下去的那一侧」。
-    static var dropShadow: Color {
-        dynAlpha(light: Color.black.opacity(0.15), dark: Color.black.opacity(0.6))
-    }
+    // v2.11.7 hotfix8: `dropShadow` / `lightShadow` 两个**外部投影**色 token 已删除。
+    // 理由见 `NeumorphicMetrics` 的「纯描边浮雕」注释：外投影表达的是「离底板有一段距离」，
+    // 也就是悬浮；无论怎么调浓度 / blur / 对称性，都改不掉这层语义。凸起感现在完全由
+    // `edgeThickness`（右下暗边）+ `edgeHighlight`（左上白亮边）表达，它们长在形状边界上，
+    // 不占形状之外任何一个像素，所以只能读成「厚度」。
 
-    /// 左上高光。hotfix7 提到**白 90% / blur 8 / offset (-3,-3)**，与右下投影等距等量——
-    /// 「凸起」这件事完全由这一对镜像阴影表达，任何一侧偏弱都会退回「浮」。
-    /// 深色档没有「更亮的白」可用，压到 9% 只点一下受光边。
-    static var lightShadow: Color {
-        dynAlpha(light: Color.white.opacity(0.9), dark: Color.white.opacity(0.09))
-    }
-
-    /// 内凹的**上/左内阴影**（设计稿：黑 8%）与**下/右内高光**（设计稿：白 60%）。
-    /// 深色档同样要放大：黑底上 8% 的黑等于什么都没有。
+    /// 内凹的**上/左内暗边**与**下/右内亮边**。hotfix8 起不再模糊：
+    /// 描边直接画在形状内沿，凹陷靠「上暗下亮」这对方向相反的硬边表达。
     static var wellInnerShadow: Color {
-        dynAlpha(light: Color.black.opacity(0.14), dark: Color.black.opacity(0.7))
+        dynAlpha(light: Color.black.opacity(0.16), dark: Color.black.opacity(0.7))
     }
     static var wellInnerGlow: Color {
-        dynAlpha(light: Color.white.opacity(0.9), dark: Color.white.opacity(0.08))
+        dynAlpha(light: Color.white.opacity(0.9), dark: Color.white.opacity(0.10))
     }
     /// 内凹最内圈那道收口的浓度（深色档要更实）。同样必须是动态色，理由见 `dynAlpha`。
     static var wellRimOpacity: Color {
         dynAlpha(light: wellShade.opacity(0.35), dark: wellShade.opacity(0.5))
     }
 
-    /// 凸起控件的**右下厚度边**（设计稿 image-a4ad5438：约 #CCCCCC、1.5pt、50%）。
-    /// 它模拟的是凸起物被我们看见的那个**侧面**，所以必须比高光边宽。
+    /// 凸起控件的**右下暗边**：凸起物背光那一侧的侧面。设计稿 image-ec308b07 = 黑 18%。
+    /// 这是 hotfix8 起「体积感」的主要承载者（外部投影已全部删除）。
     static var edgeThickness: Color {
-        dynAlpha(light: Color(.sRGB, white: 0.8, opacity: 0.5),
-                 dark: Color.black.opacity(0.55))
+        dynAlpha(light: Color.black.opacity(0.18), dark: Color.black.opacity(0.6))
     }
 
-    /// 凸起控件的**左上高光边**（设计稿：纯白、1pt、70%，锐利）。
-    /// 深色档没有「纯白受光面」可言，压到 14% 只留一线，否则按钮会像描了圈白框。
+    /// 凸起控件的**左上白亮边**：受光的棱。设计稿 = 白 85%、比暗边细、内缩压在轮廓内侧。
+    /// 深色档没有「纯白受光面」可言，压到 16% 只留一线，否则按钮会像描了圈白框。
     static var edgeHighlight: Color {
-        dynAlpha(light: Color.white.opacity(0.7), dark: Color.white.opacity(0.14))
+        dynAlpha(light: Color.white.opacity(0.85), dark: Color.white.opacity(0.16))
     }
 
     /// 面板描边。浅色档几乎不可见，只用来收边；深色档承担主要的轮廓感。
@@ -164,16 +157,15 @@ enum Neu {
 
 // MARK: - 表面 1/2：凸起
 
-/// 微凸表面：**与底板同色**的填充 + 左上白高光 + 右下柔投影。按下时两道投影一起收敛（“压平”）。
+/// 微凸表面：**与画布严格同色**的填充 + 右下暗边（侧面厚度）+ 左上白亮边（受光棱）。
+/// 没有任何外部投影。
 ///
-/// v2.11.7 hotfix5 把这里从「白薄片 + 灰描边 + 垂直投影」改成真正的新拟物：填充与画布同色、
-/// 投影 (4, 4)/radius 6、高光 (-2, -2)/radius 2。
+/// v2.11.7 hotfix8 —— 第四次返工，这次换的是**手段**而不是参数。
+/// hotfix5/6/7 分别调过投影浓度、补过描边、把双色投影改成严格镜像，用户三次的判断都一样：
+/// 「还是漂浮」。因为外部投影的语义就是「物体和它背后的平面之间有距离」；只要它在，缝隙就在。
+/// 设计稿 image-ec308b07 里按钮周围一片干净，凸起完全由两条长在边界上的边表达。
 ///
-/// v2.11.7 hotfix6 再补上**双侧描边**（设计稿 image-a4ad5438）：外阴影只交代「按钮周围的空气」，
-/// 交代不了「按钮自己有多厚」。所以在形状上再叠两圈方向相反的描边：
-///   - 右下 1.5pt 的灰边 = 凸起物的**侧面厚度**（看得见的那个立面）
-///   - 左上 1pt 的白边（再往左上挪 0.5pt）= **受光的棱**，锐利、不模糊
-/// 两条边都用方向渐变 mask 限制在各自半圈，否则就成了「描了一圈双色边框」——那是边框，不是体积。
+/// 按下时两条边一起收敛到 `pressedEdgeScale`（= 压平），悬停时暗边略微加宽（= 抬高一点点）。
 struct NeuRaisedBackground: View {
     var radius: CGFloat = NeumorphicMetrics.actionRadius
     var pressed: Bool = false
@@ -183,81 +175,82 @@ struct NeuRaisedBackground: View {
 
     var body: some View {
         let shape = RoundedRectangle(cornerRadius: radius, style: .continuous)
-        let scale = pressed ? NeumorphicMetrics.pressedShadowScale : 1
-        let hoverBoost: CGFloat = hovering ? 1.25 : 1
+        let scale = pressed ? NeumorphicMetrics.pressedEdgeScale : 1
+        let hoverBoost: CGFloat = hovering ? 1.35 : 1
         shape
             .fill(fill ?? AnyShapeStyle(Neu.raisedFill))
-            // 右下：厚度边（宽、灰、限制在下半/右半圈）
+            // 顶面极微弱的受光渐变（上亮下暗，幅度 2.5%）。它是可选项，量不出来才算对：
+            // 一旦看得出深浅，按钮就重新变成「一块颜色不同的薄片」。
+            .overlay(
+                shape.fill(LinearGradient(
+                    colors: [Color.white.opacity(NeumorphicMetrics.raisedSheenOpacity),
+                             Color.black.opacity(NeumorphicMetrics.raisedSheenOpacity)],
+                    startPoint: .top, endPoint: .bottom))
+            )
+            // 右下暗边：凸起物背光的**侧面**。用方向渐变 mask 限制在右下半圈——
+            // 描满一圈就成了边框，边框没有方向、也就没有光源。
             .overlay(
                 shape
-                    .strokeBorder(Neu.edgeThickness, lineWidth: NeumorphicMetrics.edgeThicknessWidth)
+                    .strokeBorder(Neu.edgeThickness,
+                                  lineWidth: NeumorphicMetrics.edgeDarkWidth * scale * hoverBoost)
                     .mask(shape.fill(LinearGradient(colors: [.clear, .black],
                                                     startPoint: .topLeading,
                                                     endPoint: .bottomTrailing)))
             )
-            // 左上：高光棱（窄、白、锐利，整体挪 -0.5pt 压到轮廓外沿）
+            // 左上白亮边：**受光的棱**。比暗边细，且往内缩 0.5pt 压在轮廓内侧——
+            // 往外挪就会溢到画布上变成一圈白晕，那还是「浮」。
             .overlay(
                 shape
-                    .strokeBorder(Neu.edgeHighlight, lineWidth: NeumorphicMetrics.edgeHighlightWidth)
-                    .offset(x: NeumorphicMetrics.edgeHighlightOffset,
-                            y: NeumorphicMetrics.edgeHighlightOffset)
+                    .inset(by: NeumorphicMetrics.edgeLightInset)
+                    .strokeBorder(Neu.edgeHighlight,
+                                  lineWidth: NeumorphicMetrics.edgeLightWidth * scale)
                     .mask(shape.fill(LinearGradient(colors: [.black, .clear],
                                                     startPoint: .topLeading,
                                                     endPoint: .center)))
             )
-            // 悬停时把投影推远一点点：新拟物里「浮得更高」比「变个颜色」更贴合材质语言。
-            .shadow(color: Neu.dropShadow,
-                    radius: NeumorphicMetrics.dropShadowRadius * scale * hoverBoost,
-                    x: NeumorphicMetrics.dropShadowOffsetX * scale * hoverBoost,
-                    y: NeumorphicMetrics.dropShadowOffsetY * scale * hoverBoost)
-            .shadow(color: Neu.lightShadow,
-                    radius: NeumorphicMetrics.highlightShadowRadius * scale,
-                    x: NeumorphicMetrics.highlightShadowOffsetX * scale,
-                    y: NeumorphicMetrics.highlightShadowOffsetY * scale)
+            .animation(Anim.interactive, value: pressed)
     }
 }
 
-// MARK: - 表面 3/3：内凹
+// MARK: - 表面 2/2：内凹
 
-/// 内凹容器：左上渗入暗影、右下透出亮边，看起来像陷进底板里。
+/// 内凹容器：上/左内暗边、下/右内亮边，看起来像陷进底板里。**没有内阴影、没有模糊。**
 ///
-/// 实现见文件头第 2 条约定（macOS 13 没有原生 inner shadow）：用「描边 + 高斯模糊 + 方向渐变
-/// mask」手搓。hotfix5 按设计稿把方向从「纯上/纯下」改成**左上 / 右下对角**，和按钮的双色投影
-/// 共用同一个光源；同时去掉外圈那道 `hairline` 描边——内凹的边界应该由内阴影自己交代，
-/// 描一圈灰边等于把「凹陷」画成「一个有边框的浅色块」，这正是之前搜索框没有内陷感的原因。
+/// hotfix8 之前这里是「描边 + 高斯模糊 + 方向渐变 mask」手搓的内阴影（macOS 13 没有原生
+/// inner shadow）。问题和按钮的外投影同源：模糊出来的是一圈灰晕，在 34pt 高的窄条搜索框上
+/// 会糊掉小半个高度，读成「脏」而不是「凹」。现在只在形状内沿画两条方向相反的硬边，
+/// 与按钮那两条边共用同一个左上光源，只是明暗对调（凹陷的上沿背光、下沿受光）。
 struct NeuWellBackground: View {
     var radius: CGFloat = NeumorphicMetrics.searchRadius
 
     var body: some View {
         let shape = RoundedRectangle(cornerRadius: radius, style: .continuous)
-        let d = NeumorphicMetrics.wellInnerOffset
         shape
             .fill(Neu.well)
-            // 左上内阴影：黑 8%、offset (+2, +2)、blur 5。offset 为正 = 阴影从左上边缘往内渗。
+            // 上/左内暗边：光被凹槽的上沿挡住，这里是凹陷最深的一侧。
             .overlay(
                 shape
-                    .stroke(Neu.wellInnerShadow, lineWidth: d * 2)
-                    .blur(radius: NeumorphicMetrics.wellInnerRadius)
-                    .offset(x: d, y: d)
+                    .strokeBorder(Neu.wellInnerShadow,
+                                  lineWidth: NeumorphicMetrics.wellEdgeDarkWidth)
                     .mask(shape.fill(LinearGradient(colors: [.black, .clear],
                                                     startPoint: .topLeading,
                                                     endPoint: .center)))
             )
-            // 右下内高光：白 60%、offset (-2, -2)、blur 5。凹陷的下沿正对着光源的反射面。
+            // 下/右内亮边：凹陷的下沿正对光源，是反射面。比暗边细。
             .overlay(
                 shape
-                    .stroke(Neu.wellInnerGlow, lineWidth: d * 2)
-                    .blur(radius: NeumorphicMetrics.wellInnerRadius)
-                    .offset(x: -d, y: -d)
+                    .strokeBorder(Neu.wellInnerGlow,
+                                  lineWidth: NeumorphicMetrics.wellEdgeLightWidth)
                     .mask(shape.fill(LinearGradient(colors: [.clear, .black],
                                                     startPoint: .center,
                                                     endPoint: .bottomTrailing)))
             )
-            // 只保留最内圈那条极暗的收口（wellShade），它是「凹进去的那道坎」，不是描边：
-            // 宽 0.6pt 且只出现在上半圈，不会形成闭合边框。
+            // 最内圈那道极暗的收口（wellShade）——「凹进去的那道坎」，只出现在上半圈，
+            // 不会形成闭合边框。
             .overlay(
                 shape
-                    .stroke(Neu.wellRimOpacity, lineWidth: 0.6)
+                    .inset(by: NeumorphicMetrics.wellEdgeDarkWidth)
+                    .strokeBorder(Neu.wellRimOpacity, lineWidth: 0.6)
                     .mask(shape.fill(LinearGradient(colors: [.black, .clear],
                                                     startPoint: .topLeading,
                                                     endPoint: .center)))
@@ -322,7 +315,6 @@ struct NeuSegmentedControl<T: Hashable>: View {
                             RoundedRectangle(cornerRadius: (NeumorphicMetrics.segmentHeight - NeumorphicMetrics.segmentInset * 2) / 2,
                                              style: .continuous)
                                 .fill(Neu.selectedFill)
-                                .shadow(color: Neu.dropShadow, radius: 3, y: 1.5)
                         }
                     }
                     .contentShape(Rectangle())
@@ -359,7 +351,6 @@ struct NeuVerticalSwitch: View {
                 Circle()
                     .fill(isOn ? statusColor : Neu.subtleInk.opacity(0.45))
                     .frame(width: 5, height: 5)
-                    .shadow(color: isOn ? statusColor.opacity(0.7) : .clear, radius: 2.5)
                 Text(label)
                     .font(.system(size: 9, weight: .semibold))
                     .foregroundColor(isOn ? Neu.ink : Neu.subtleInk)
@@ -384,7 +375,6 @@ struct NeuVerticalSwitch: View {
                             .fill(isOn ? Neu.sliderInk : Neu.subtleInk)
                             .frame(width: 9, height: 2)
                     )
-                    .shadow(color: Neu.dropShadow, radius: 3, y: 1.5)
                     .offset(y: isOn ? -NeumorphicMetrics.switchTravel : NeumorphicMetrics.switchTravel)
                     .animation(.spring(response: 0.28, dampingFraction: 0.72), value: isOn)
             }

@@ -2205,49 +2205,30 @@ do {
             "★搜索框圆角必须是半高（设计稿要求椭圆形，不是圆角矩形）")
     t.check(NeumorphicMetrics.segmentInset > 0 && NeumorphicMetrics.segmentInset < NeumorphicMetrics.segmentHeight / 2,
             "★分段控件的滑块内缩必须落在 (0, 半高) 之间")
-    t.check(NeumorphicMetrics.dropShadowOffsetY > 0 && NeumorphicMetrics.highlightShadowOffsetY < 0,
-            "★★外阴影朝下、高光朝上——这是「光源在左上」的唯一编码，反了整套凹凸都会翻面")
-    t.check(NeumorphicMetrics.pressedShadowScale > 0 && NeumorphicMetrics.pressedShadowScale < 1,
-            "★按下时阴影收敛比例必须在 (0,1)（=「压平」而不是消失或变大）")
+    t.check(NeumorphicMetrics.pressedEdgeScale > 0 && NeumorphicMetrics.pressedEdgeScale < 1,
+            "★按下时描边收敛比例必须在 (0,1)（=「压平」而不是消失或变粗）")
 
-    // ── ⑦b 双色投影的方向必须**互为反向**，且都是对角而非纯垂直（v2.11.7 hotfix5）。
+    // ── ⑦b 纯描边浮雕（v2.11.7 hotfix8）：**外部 Drop Shadow 全部删除**，凸起/内凹只用边。
     //
-    // 「光源在左上」这句话在代码里唯一的落点就是这四个偏移量的符号：高光往左上（负负）、
-    // 投影往右下（正正）。之前投影是 (0, 3) —— x 为 0 意味着纯垂直下坠，读起来是「悬空掉影子」
-    // 而不是「有一束光从左上打过来」，这也是用户说「感觉是垂直下坠的」的根因。
-    t.check(NeumorphicMetrics.highlightShadowOffsetX < 0 && NeumorphicMetrics.highlightShadowOffsetY < 0,
-            "★★左上高光的偏移必须同时为负（指向左上 = 光源方向）")
-    t.check(NeumorphicMetrics.dropShadowOffsetX > 0 && NeumorphicMetrics.dropShadowOffsetY > 0,
-            "★★右下投影的偏移必须同时为正（背光侧），且 x 不能是 0——纯垂直偏移会读成「下坠」")
-    // hotfix7：两层必须**严格镜像**——偏移等距、模糊等量，只有方向和颜色相反。
-    // 这是「凸」与「浮」的分界线：hotfix5/6 里投影偏得远(4)、糊得开(radius 6)、还比高光弱，
-    // 于是读成「一坨发散的灰晕托着一块板」。人眼对「一束光造成的一对镜像结果」极其敏感，
-    // 任何一侧被削弱都会立刻塌回贴层感，而这种失衡在代码里只是两个数字不相等，极难靠 review 抓到。
-    t.check(NeumorphicMetrics.dropShadowOffsetX == -NeumorphicMetrics.highlightShadowOffsetX,
-            "★★投影与高光的水平偏移必须等距反向（同一束光的一对镜像结果）")
-    t.check(NeumorphicMetrics.dropShadowOffsetY == -NeumorphicMetrics.highlightShadowOffsetY,
-            "★★投影与高光的垂直偏移必须等距反向")
-    t.check(NeumorphicMetrics.dropShadowRadius == NeumorphicMetrics.highlightShadowRadius,
-            "★★投影与高光的模糊半径必须相等（一侧更糊 = 光源不自洽 = 退回「浮」）")
-    t.check(NeumorphicMetrics.dropShadowRadius >= 3.5 && NeumorphicMetrics.dropShadowRadius <= 5,
-            "★阴影 blur 折算成 SwiftUI radius 应在 3.5～5（设计稿 blur 8，radius = blur/2）；太大就成大圆晕")
-    t.check(NeumorphicMetrics.dropShadowOffsetX <= NeumorphicMetrics.dropShadowRadius,
-            "★偏移不能大于模糊半径，否则阴影会脱开按钮变成一块独立的影子")
-    t.check(NeumorphicMetrics.wellInnerOffset > 0 && NeumorphicMetrics.wellInnerRadius > NeumorphicMetrics.wellInnerOffset,
-            "★内凹的内阴影必须「偏移小、模糊大」，否则会画成一条硬边而不是渗进去的阴影")
-
-    // ── ⑦c 双侧描边（v2.11.7 hotfix6）：厚度边必须比高光边**宽**，高光边必须往左上偏。
-    //
-    // 这两条边分别代表「凸起物的侧面」和「受光的棱」，物理上就不是一回事：侧面有厚度所以宽，
-    // 棱只是一条反光所以细。等宽的话按钮会读成「描了一圈双色边框」——是边框，不是体积。
-    t.check(NeumorphicMetrics.edgeThicknessWidth > NeumorphicMetrics.edgeHighlightWidth,
-            "★★右下厚度边必须比左上高光边宽（侧面有厚度，棱只是一条反光）")
-    t.check(NeumorphicMetrics.edgeHighlightOffset < 0,
-            "★★高光边的偏移必须为负（往左上压到轮廓外沿，边缘才锐）")
-    t.check(abs(NeumorphicMetrics.edgeHighlightOffset) <= NeumorphicMetrics.edgeHighlightWidth,
-            "★高光边的偏移不能超过它自身线宽，否则会脱开轮廓变成一条独立的白线")
-    t.check(NeumorphicMetrics.edgeThicknessWidth <= 2 && NeumorphicMetrics.edgeHighlightWidth >= 1,
-            "★描边宽度守在设计稿量级（厚度 ≤2pt、高光 ≥1pt）")
+    // hotfix5→hotfix7 三轮都在调那对外投影（浓度 / blur / 严格镜像），用户三次的判断一模一样：
+    // 「还是漂浮」。原因不在参数而在手段——外投影的语义就是「物体离背后的平面有一段距离」。
+    // 所以这一版把 dropShadow*/highlightShadow*/wellInner* 全部**从 metrics 里删掉**：
+    // 常量不存在，调用点就不可能悄悄把阴影加回来（Swift 编译期就挡住了，比 review 靠得住）。
+    // 下面这组断言钉住的是取代它的那套边的几何关系。
+    t.check(NeumorphicMetrics.edgeDarkWidth > NeumorphicMetrics.edgeLightWidth,
+            "★★右下暗边必须比左上白亮边宽（暗边是有体积的侧面，白亮边只是一条反光棱）")
+    t.check(NeumorphicMetrics.edgeLightInset > 0,
+            "★★白亮边必须**内缩**（正值）——往外挪就会溢到画布上变成一圈白晕，那还是「浮」")
+    t.check(NeumorphicMetrics.edgeLightInset <= NeumorphicMetrics.edgeDarkWidth,
+            "★白亮边的内缩量不能超过暗边线宽，否则两条边之间会露出一圈没交代的空白")
+    t.check(NeumorphicMetrics.edgeDarkWidth <= 1.5 && NeumorphicMetrics.edgeLightWidth >= 0.5,
+            "★描边宽度守在设计稿量级（暗边 ≤1.5pt、亮边 ≥0.5pt）；再宽就从「厚度」变成「边框」")
+    t.check(NeumorphicMetrics.wellEdgeDarkWidth > NeumorphicMetrics.wellEdgeLightWidth,
+            "★★内凹的上/左暗边必须比下/右亮边宽（凹槽最深的一侧背光）")
+    t.check(NeumorphicMetrics.wellEdgeDarkWidth <= NeumorphicMetrics.searchHeight / 8,
+            "★内凹描边不能超过槽高的 1/8，否则 34pt 的窄条搜索框会被边糊掉小半个高度")
+    t.check(NeumorphicMetrics.raisedSheenOpacity > 0 && NeumorphicMetrics.raisedSheenOpacity <= 0.03,
+            "★★凸起顶面渐变必须「量不出来」（≤3%）——看得出深浅就等于把 hotfix5 去掉的色差请回来了")
 
     // ── ⑧ 一体化（v2.11.7 hotfix4）：工具栏承载面必须与窗口底**逐值相同**。
     //

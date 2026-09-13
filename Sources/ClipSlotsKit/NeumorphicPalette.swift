@@ -205,41 +205,39 @@ public enum NeumorphicMetrics {
         (switchTrackHeight - switchKnobHeight) / 2 - segmentInset
     }
 
-    /// 阴影：外阴影（右下，光源左上）与高光（左上）。
-    // v2.11.7 hotfix7：双色阴影改成**严格对称**的一对（设计稿 image-a4ad5438 / image-333d9012）。
+    // MARK: - 纯描边浮雕（v2.11.7 hotfix8）
     //
-    // SwiftUI 的 `.shadow(radius:)` 是高斯 sigma，不是设计稿标的 blur 直径，两者差一半——
-    // 设计稿 blur 8 要写 radius 4。
+    // ⚠️ 这一版**彻底删掉了所有外部 Drop Shadow 常量**（dropShadow*/highlightShadow*/wellInner*）。
     //
-    // hotfix5/6 的问题不在「少了一层」（两层一直都在），而在**两层不对等**：
-    // 投影 (4,4)/blur 12/黑 9%，高光只有 (-2,-2)/blur 4/白 80%。投影比高光偏得远、糊得开、
-    // 又比高光弱，于是读出来是「一坨发散的灰晕托着一块板」——浮，而不是凸。
-    // 新拟物的凸起感来自「同一束光造成的一对镜像结果」：两层必须**偏移等距、模糊等量**，
-    // 只有方向和颜色相反。现在统一为 ±3 / blur 8 / 黑 15% vs 白 90%。
-    public static let dropShadowRadius: CGFloat = 4      // 设计稿 blur 8
-    public static let dropShadowOffsetX: CGFloat = 3
-    public static let dropShadowOffsetY: CGFloat = 3
-    public static let highlightShadowRadius: CGFloat = 4  // 与投影等量，这是「对称」的一半含义
-    public static let highlightShadowOffsetX: CGFloat = -3
-    public static let highlightShadowOffsetY: CGFloat = -3
-    /// 内凹的内阴影 / 内高光：与凸起同一套语言、方向相反，所以偏移 / 模糊也对称。
-    /// 凹槽比凸起浅一档（offset 3 → 2.5、blur 8 → 7），否则窄窄一条搜索框会被阴影糊满。
-    public static let wellInnerOffset: CGFloat = 2.5
-    public static let wellInnerRadius: CGFloat = 3.5
+    // hotfix5→hotfix7 一路都在调那对外阴影：换浓度、换 blur、改成严格镜像。三轮之后用户的判断
+    // 始终没变——「还是漂浮」。原因不在参数，而在**手段**：外部投影描述的是「物体与它背后的
+    // 平面之间有一段距离」，也就是**悬浮**。想表达的却是「按钮是从这张底板上冲压出来的」，
+    // 这件事根本不该由投影承担——只要投影存在，缝隙就存在，参数再准也只是把悬浮的高度调低。
+    //
+    // 设计稿（image-ec308b07）里按钮周围**一片干净**：底色与画布完全一致，体积感只由两条边给出：
+    //   - 右下一条暗边 = 凸起物背光的**侧面**
+    //   - 左上一条更细的白亮边 = **受光的棱**
+    // 边是长在形状上的，不占形状之外的任何一个像素，所以它只能读成「厚度」，不可能读成「距离」。
+    //
+    // 两条边宽度不同是必须的（1.0 vs 0.75）：侧面有体积所以宽，棱只是一条反光所以细；等宽就退化成
+    // 「描了一圈双色边框」。白亮边还要**内缩**半个线宽压在轮廓内侧，否则会溢出到画布上，
+    // 又变成一圈发光的外晕——那还是「浮」。
+    public static let edgeDarkWidth: CGFloat = 1.0
+    public static let edgeLightWidth: CGFloat = 0.75
+    /// 白亮边向内内缩量（正值 = 往形状内部收）。压在轮廓内侧，边缘才锐、才不外溢。
+    public static let edgeLightInset: CGFloat = 0.5
 
-    // MARK: - 双侧描边（v2.11.7 hotfix6，按设计稿 image-a4ad5438）
-    //
-    // 光影只交代「按钮周围的空气」，交代不了「按钮本身有多厚」。设计稿里每颗按钮都有两条边：
-    // 左上一条锐利白亮边（受光面），右下一条更宽的灰边（凸起物的侧面厚度）。这两条边叠起来
-    // 才有「从画布里冲压出来」的实体感——只有内外阴影时，按钮看着像一块贴纸。
-    //
-    // 关键是**两条边宽度不同**：厚度边必须比高光边宽（1.5 vs 1），因为它模拟的是有体积的侧面，
-    // 而高光只是一条反光。等宽会退化成「描了一圈双色边框」。
-    public static let edgeThicknessWidth: CGFloat = 1.5
-    public static let edgeHighlightWidth: CGFloat = 1
-    /// 高光边整体往左上挪半像素，让它压在形状轮廓外侧一点，边缘才「锐」。
-    public static let edgeHighlightOffset: CGFloat = -0.5
+    /// 内凹（搜索框 / 开关滑道）同样只用**内边描边**，不再用「描边 + 高斯模糊」手搓内阴影：
+    /// 模糊过的内阴影会在凹槽内侧糊出一圈灰晕，窄条搜索框上尤其明显，读成「脏」而不是「凹」。
+    /// 方向与凸起完全相反：上/左压暗边、下/右透亮边。
+    public static let wellEdgeDarkWidth: CGFloat = 1.0
+    public static let wellEdgeLightWidth: CGFloat = 0.75
 
-    /// 按下时凸起「压平」：阴影收敛到这个比例。
-    public static let pressedShadowScale: CGFloat = 0.3
+    /// 凸起顶面的**可选**极微弱垂直渐变（上亮下暗），用来交代「顶面也在受光」。
+    /// 幅度必须小到量不出来（≤3%）：一旦看得出深浅，按钮就重新变成「一块颜色不同的薄片」，
+    /// 也就把 hotfix5 好不容易去掉的色差请了回来。
+    public static let raisedSheenOpacity: Double = 0.025
+
+    /// 按下时凸起「压平」：两条边一起收敛到这个比例（不再有阴影可收）。
+    public static let pressedEdgeScale: CGFloat = 0.35
 }
