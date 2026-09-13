@@ -2709,4 +2709,70 @@ do {
     t.check(o.x.isFinite && o.y.isFinite, "超大卡片下 HUD 落点必须是有限值")
 }
 
+// MARK: - NOTICE-PALETTE (v2.11.7 hotfix14) 多彩皮肤 Toast 必须分明暗两档
+//
+// hotfix13 只给多彩皮肤做了深色一档（#1C1C1E @ 90%），浅色系统外观下那张近黑卡片贴在
+// 浅灰白画布上就是一块与界面无关的黑条。这里把「两档必须不同、且各自方向正确」钉住。
+do {
+    let dark = NoticePalette.colorfulSurface(dark: true)
+    let light = NoticePalette.colorfulSurface(dark: false)
+
+    t.check(dark != light, "★★多彩皮肤的明暗两档 Toast 外观必须不同（hotfix14 的核心）")
+    t.equal(dark, NoticePalette.colorfulDark, "dark=true 应取深色档")
+    t.equal(light, NoticePalette.colorfulLight, "dark=false 应取浅色档")
+
+    // 深色档 = hotfix13 的原设计，逐项钉死，防止后续改浅色档时顺手动了它。
+    t.check(dark.isDarkSurface, "深色档卡片底应标记为深色")
+    t.equal(dark.material, .ultraThin, "深色档应用 ultraThinMaterial")
+    t.equal(dark.tint.opacity, 0.90, "深色档染层不透明度应为 90%")
+    t.check(abs(dark.tint.red - 0.110) < 0.0005
+                && abs(dark.tint.green - 0.110) < 0.0005
+                && abs(dark.tint.blue - 0.118) < 0.0005,
+            "深色档染层应为 #1C1C1E")
+    t.equal(dark.border.red, 1, "深色档细边应为白色")
+    t.equal(dark.border.opacity, 0.15, "深色档细边应为白 15%")
+    t.equal(dark.shadow.opacity, 0.30, "深色档投影应为黑 30%")
+    t.equal(dark.shadow.radius, 12, "深色档投影 blur 应为 12")
+    t.equal(dark.titleInk.opacity, 1.0, "深色档标题应为纯白")
+    t.check(dark.titleInk.luminance > 0.9, "★★深色档标题必须是亮色文字")
+    t.check(dark.subtitleInk.luminance > 0.9 && dark.subtitleInk.opacity < 1.0,
+            "深色档副标题应为半透明白")
+
+    // 浅色档（hotfix14 新增）：白 95% + thinMaterial + 黑 8% 细边 + 黑 15% blur 8 + 深色文字。
+    t.check(!light.isDarkSurface, "★★浅色档卡片底不得再标记为深色")
+    t.equal(light.material, .thin, "浅色档应用 thinMaterial")
+    t.equal(light.tint.opacity, 0.95, "浅色档染层不透明度应为 95%")
+    t.check(light.tint.luminance > 0.99, "★★浅色档染层必须是白色")
+    t.equal(light.border.red, 0, "浅色档细边应为黑色系")
+    t.equal(light.border.opacity, 0.08, "浅色档细边应为黑 8%")
+    t.equal(light.shadow.opacity, 0.15, "浅色档投影应为黑 15%")
+    t.equal(light.shadow.radius, 8, "浅色档投影 blur 应为 8")
+    t.check(light.titleInk.luminance < 0.2, "★★浅色档标题必须是深色文字（这正是用户报的 bug）")
+    t.check(light.subtitleInk.luminance < 0.2 && light.subtitleInk.opacity < 1.0,
+            "浅色档副标题应为半透明深墨")
+
+    // 两档之间的方向性关系。
+    t.check(light.tint.luminance > dark.tint.luminance + 0.5,
+            "★★浅色档卡片底必须显著亮于深色档")
+    t.check(light.titleInk.luminance < dark.titleInk.luminance - 0.5,
+            "★★浅色档文字必须显著暗于深色档（否则白字白底）")
+    t.check(light.shadow.opacity < dark.shadow.opacity && light.shadow.radius < dark.shadow.radius,
+            "浅底上的投影必须比深色档更轻更紧")
+    t.equal(light.borderWidth, dark.borderWidth, "两档细边宽度应一致（几何不随皮肤/明暗变化）")
+
+    // 文字与卡片底的对比方向：任一档都不许出现「白字白底 / 黑字黑底」。
+    for (name, style) in [("dark", dark), ("light", light)] {
+        let gap = abs(style.titleInk.luminance - style.tint.luminance)
+        t.check(gap > 0.5, "★★\(name) 档标题与卡片底的亮度差必须足够（\(gap)）")
+        t.check(style.isDarkSurface == (style.titleInk.luminance > style.tint.luminance),
+                "\(name) 档 isDarkSurface 应与「亮字压深底」一致")
+    }
+
+    // 幂等：同一入参多次取值必须完全一致（纯数据，不读全局状态）。
+    for _ in 0..<3 {
+        t.equal(NoticePalette.colorfulSurface(dark: true), dark, "深色档取值应幂等")
+        t.equal(NoticePalette.colorfulSurface(dark: false), light, "浅色档取值应幂等")
+    }
+}
+
 t.report()

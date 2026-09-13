@@ -89,6 +89,9 @@ final class TransientUIStore: ObservableObject {
 struct TransientOverlayView: View {
     @ObservedObject var ui: TransientUIStore
 
+    /// hotfix14: Toast 胶囊在多彩皮肤下也要分明暗两档（见 `NoticePalette`）。
+    @Environment(\.colorScheme) private var colorScheme
+
     var body: some View {
         // v2.11.7 hotfix13: 原来是 ZStack(alignment: .top)，Toast 与浮层提示各自 padding(.top, 8)，
         // 两者同时在场时会**精确重叠**成一堆糊在一起的卡片（用户报的「重复弹出」是渲染通道重复，
@@ -126,10 +129,10 @@ struct TransientOverlayView: View {
         HStack(spacing: NoticeMetrics.iconTextSpacing) {
             Image(systemName: toastIcon(for: message))
                 .font(.system(size: NoticeMetrics.iconSize - 2, weight: .semibold))
-                .foregroundColor(NoticeInk.icon(.info))
+                .foregroundColor(NoticeInk.icon(.info, colorScheme))
             Text(message)
                 .font(.system(size: NoticeMetrics.titleFontSize, weight: .medium))
-                .foregroundColor(NoticeInk.title)
+                .foregroundColor(NoticeInk.title(colorScheme))
                 .lineLimit(1)
                 .truncationMode(.middle)
         }

@@ -52,7 +52,7 @@ struct FloatingNotice: Identifiable, Equatable {
     }
 }
 
-// MARK: - Toast 表面（v2.11.7 hotfix13）
+// MARK: - Toast 表面（v2.11.7 hotfix13，多彩分明暗 hotfix14）
 //
 // 两种皮肤两套材质，共用一套几何（`NoticeMetrics`）：
 //
@@ -62,47 +62,76 @@ struct FloatingNotice: Identifiable, Equatable {
 // 灰边 + `black 12% blur 8` 外投影，贴在深色内容上就是用户说的「抠图没抠干净」——白块与背景
 // 之间既没有材质过渡，也没有光源方向。
 //
-// **多彩模式**：`ultraThinMaterial` 磨砂玻璃 + `#1C1C1E @ 90%` 深色染层 + 白 15% 细边 +
-// 轻微柔阴影（black 30% / blur 12）。多彩模式本来就有品牌色与渐变，深色 HUD 卡片在明暗两档
-// 下都能压住底下的彩色卡片，不需要为浅色档再另做一版。
+// **多彩模式**：磨砂玻璃 + 染层 + 细边 + 柔投影，**明暗两档各一套**（见
+// `NoticePalette.colorfulSurface(dark:)`）。hotfix13 只做了深色那一档，理由是「深色卡片在
+// 明暗两档下都能压住底下的彩色卡片」——浅色档下这句话不成立，近黑卡片贴在浅灰白画布上就是
+// 一块和界面无关的黑条（用户 hotfix14 报的正是这个）。
+//
+// 明暗判据取 SwiftUI 环境值 `colorScheme` 而不是 `AppTheme.isDarkAppearance`：
+//   * 环境值是**响应式**的，明暗切换会自然触发重绘，不像读 `NSApp.effectiveAppearance` 那样
+//     把结果烘死进视图（NeumorphicKit 的 `dynAlpha` 注释记着这个坑）；
+//   * HUD 面板那条通道也拿得到正确值 —— `FloatingNoticeWindowController` 在 host 时已经按
+//     `appearanceMode` 显式注入了 `\.colorScheme`。
 struct NoticeSurface: View {
     var radius: CGFloat = NoticeMetrics.cornerRadius
+
+    @Environment(\.colorScheme) private var colorScheme
 
     var body: some View {
         if AppTheme.isMinimalSkin {
             NeuRaisedBackground(radius: radius)
         } else {
+            let style = NoticePalette.colorfulSurface(dark: colorScheme == .dark)
             let shape = RoundedRectangle(cornerRadius: radius, style: .continuous)
             shape
-                .fill(.ultraThinMaterial)
-                .overlay(shape.fill(NoticeInk.colorfulCardTint))
-                .overlay(shape.strokeBorder(NoticeInk.colorfulBorder, lineWidth: 1))
-                .shadow(color: Color.black.opacity(0.3), radius: 12, x: 0, y: 4)
+                .fill(NoticeInk.material(style))
+                .overlay(shape.fill(NoticeInk.color(style.tint)))
+                .overlay(shape.strokeBorder(NoticeInk.color(style.border), lineWidth: style.borderWidth))
+                .shadow(color: Color.black.opacity(style.shadow.opacity),
+                        radius: style.shadow.radius,
+                        x: 0,
+                        y: style.shadow.offsetY)
         }
     }
 }
 
-/// Toast 上的文字 / 图标色。简洁模式走中性墨色（深色字），多彩模式走白色系（深色卡片上）。
+/// Toast 上的文字 / 图标色。简洁模式走中性墨色（本身就是动态色，明暗各一档），
+/// 多彩模式按 `colorScheme` 从 `NoticePalette` 取对应那一档。
 enum NoticeInk {
 
-    /// 多彩模式的深色染层：#1C1C1E @ 90%。压在磨砂玻璃之上，既保留一点背景透色，
-    /// 又保证白字对比度足够。
-    static let colorfulCardTint = Color(.sRGB, red: 0.110, green: 0.110, blue: 0.118, opacity: 0.90)
+    static func color(_ rgba: NoticeSurfaceStyle.RGBA) -> Color {
+        Color(.sRGB, red: rgba.red, green: rgba.green, blue: rgba.blue, opacity: rgba.opacity)
+    }
 
-    /// 多彩模式的细边：白 15%。深色卡片在深色背景上唯一的轮廓来源。
-    static let colorfulBorder = Color.white.opacity(0.15)
+    /// 材质档位 → SwiftUI `Material`。两档是不同的具体类型，只能用 `AnyShapeStyle` 抹平。
+    static func material(_ style: NoticeSurfaceStyle) -> AnyShapeStyle {
+        switch style.material {
+        case .ultraThin: return AnyShapeStyle(.ultraThinMaterial)
+        case .thin:      return AnyShapeStyle(.thinMaterial)
+        }
+    }
 
-    static var title: Color { AppTheme.isMinimalSkin ? Neu.ink : .white }
+    static func title(_ scheme: ColorScheme) -> Color {
+        AppTheme.isMinimalSkin
+            ? Neu.ink
+            : color(NoticePalette.colorfulSurface(dark: scheme == .dark).titleInk)
+    }
 
-    static var subtitle: Color {
-        AppTheme.isMinimalSkin ? Neu.subtleInk : Color.white.opacity(0.72)
+    static func subtitle(_ scheme: ColorScheme) -> Color {
+        AppTheme.isMinimalSkin
+            ? Neu.subtleInk
+            : color(NoticePalette.colorfulSurface(dark: scheme == .dark).subtitleInk)
     }
 
     /// 状态图标色。它是整张卡片上唯一的语义信号（成功 / 警告 / 失败），两种皮肤都保留
     /// —— 简洁模式收掉的是**装饰性**上色（见 `NeuMiniButton`），不是功能性状态色。
-    /// 多彩模式在深色卡片上要提亮一档，AppTheme 那组饱和色直接放上去会发暗。
-    static func icon(_ kind: FloatingNoticeKind) -> Color {
+    /// 多彩 + 深色卡片上要提亮一档，AppTheme 那组饱和色直接放上去会发暗；多彩 + 浅色卡片
+    /// 反过来必须用原本的饱和色，提亮版（浅绿 / 浅黄）在白底上几乎看不见。
+    static func icon(_ kind: FloatingNoticeKind, _ scheme: ColorScheme) -> Color {
         if AppTheme.isMinimalSkin { return kind.iconColor }
+        guard NoticePalette.colorfulSurface(dark: scheme == .dark).isDarkSurface else {
+            return kind.iconColor
+        }
         switch kind {
         case .success: return Color(red: 0.36, green: 0.86, blue: 0.50)
         case .warning: return Color(red: 1.00, green: 0.76, blue: 0.28)
@@ -137,22 +166,25 @@ enum NoticeTextMeasure {
 struct FloatingNoticeView: View {
     let notice: FloatingNotice
 
+    /// hotfix14: 多彩皮肤的文字 / 图标色也分明暗两档，取环境值而不是读 `NSApp.effectiveAppearance`。
+    @Environment(\.colorScheme) private var colorScheme
+
     var body: some View {
         HStack(spacing: NoticeMetrics.iconTextSpacing) {
             Image(systemName: notice.kind.semanticIcon)
                 .font(.system(size: NoticeMetrics.iconSize, weight: .semibold))
-                .foregroundColor(NoticeInk.icon(notice.kind))
+                .foregroundColor(NoticeInk.icon(notice.kind, colorScheme))
 
             VStack(alignment: .leading, spacing: 2) {
                 Text(notice.title)
                     .font(.system(size: NoticeMetrics.titleFontSize, weight: .semibold))
-                    .foregroundColor(NoticeInk.title)
+                    .foregroundColor(NoticeInk.title(colorScheme))
                     .lineLimit(1)
 
                 if !notice.subtitle.isEmpty {
                     Text(notice.subtitle)
                         .font(.system(size: NoticeMetrics.subtitleFontSize, weight: .medium))
-                        .foregroundColor(NoticeInk.subtitle)
+                        .foregroundColor(NoticeInk.subtitle(colorScheme))
                         .lineLimit(1)
                         // 中间截断：保存类文案的**尾部**信息量最大（尺寸 / 文件名后缀），
                         // 尾部省略号会把它吃掉。

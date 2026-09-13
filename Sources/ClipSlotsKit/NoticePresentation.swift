@@ -72,6 +72,131 @@ public enum NoticePresentationRouter {
     }
 }
 
+// MARK: - 多彩皮肤 Toast 的明暗两档配色（v2.11.7 hotfix14）
+//
+// hotfix13 给多彩皮肤定的是**一张深色磨砂 HUD 卡片**（`#1C1C1E @ 90%` + 白 15% 描边），当时
+// 的判断是「多彩模式本来就有品牌色，深色卡片在明暗两档下都能压住底下的彩色卡片」。这个判断
+// 在浅色档是错的：多彩 + 浅色系统外观下整个界面是浅灰白底 + 品牌色点缀，往上贴一张近黑的卡片
+// 不是「压住」，而是一块与界面无关的黑条 —— 和 hotfix13 之前「白块贴在深色内容上」是同一种错，
+// 只是方向相反。
+//
+// 所以多彩皮肤也必须分明暗两档。简洁皮肤不需要：它的表面走 `NeuRaisedBackground`，颜色 token
+// 本来就是动态色，明暗两档早已各有一套。
+//
+// 这里只放**数据**（RGBA / 材质档位 / 投影参数），可以被 smoke 直接断言；SwiftUI 侧
+// （`NoticeSurface`）只负责把它翻成 `Color` / `Material` / `.shadow`。
+
+/// 与 SwiftUI `Material` 一一对应的材质档位（Kit 不依赖 SwiftUI，所以用枚举表达）。
+public enum NoticeMaterialLevel: String, Equatable, Sendable {
+    /// `.ultraThinMaterial`：透背景最多。深色档用它，让底下的彩色内容透上来一点，
+    /// 卡片才像「浮在内容之上的玻璃」而不是一块实心黑板。
+    case ultraThin
+    /// `.thinMaterial`：略实一档。浅色档用它，浅底 + 高透会让卡片和画布糊在一起。
+    case thin
+}
+
+/// 一档 Toast 表面的完整外观参数。
+public struct NoticeSurfaceStyle: Equatable, Sendable {
+
+    public struct RGBA: Equatable, Sendable {
+        public let red: Double
+        public let green: Double
+        public let blue: Double
+        public let opacity: Double
+
+        public init(red: Double, green: Double, blue: Double, opacity: Double) {
+            self.red = red
+            self.green = green
+            self.blue = blue
+            self.opacity = opacity
+        }
+
+        /// 感知亮度（Rec. 709），仅用于断言「浅色档的底真的比深色档亮」。
+        public var luminance: Double { 0.2126 * red + 0.7152 * green + 0.0722 * blue }
+    }
+
+    public struct Shadow: Equatable, Sendable {
+        public let opacity: Double
+        public let radius: CGFloat
+        public let offsetY: CGFloat
+
+        public init(opacity: Double, radius: CGFloat, offsetY: CGFloat) {
+            self.opacity = opacity
+            self.radius = radius
+            self.offsetY = offsetY
+        }
+    }
+
+    /// 底层磨砂材质档位。
+    public let material: NoticeMaterialLevel
+    /// 压在磨砂之上的染层（决定卡片是深色还是浅色）。
+    public let tint: RGBA
+    /// 一圈细边：卡片在同色系背景上唯一的轮廓来源。
+    public let border: RGBA
+    public let borderWidth: CGFloat
+    /// 外部柔投影。多彩皮肤保留投影（它本来就是「浮在内容上的 HUD」语义），
+    /// 与简洁皮肤的纯描边浮雕约定不冲突。
+    public let shadow: Shadow
+    /// 标题 / 副标题墨色。
+    public let titleInk: RGBA
+    public let subtitleInk: RGBA
+    /// 卡片底是不是深色 —— 决定状态图标要不要提亮一档。
+    public let isDarkSurface: Bool
+
+    public init(material: NoticeMaterialLevel,
+                tint: RGBA,
+                border: RGBA,
+                borderWidth: CGFloat,
+                shadow: Shadow,
+                titleInk: RGBA,
+                subtitleInk: RGBA,
+                isDarkSurface: Bool) {
+        self.material = material
+        self.tint = tint
+        self.border = border
+        self.borderWidth = borderWidth
+        self.shadow = shadow
+        self.titleInk = titleInk
+        self.subtitleInk = subtitleInk
+        self.isDarkSurface = isDarkSurface
+    }
+}
+
+/// 多彩皮肤 Toast 的配色表（纯数据）。
+public enum NoticePalette {
+
+    /// - Parameter dark: 系统外观是否为深色。
+    public static func colorfulSurface(dark: Bool) -> NoticeSurfaceStyle {
+        dark ? colorfulDark : colorfulLight
+    }
+
+    /// 深色档：hotfix13 的设计原样保留（`#1C1C1E @ 90%` / 白 15% 边 / 黑 30% blur 12）。
+    public static let colorfulDark = NoticeSurfaceStyle(
+        material: .ultraThin,
+        tint: .init(red: 0.110, green: 0.110, blue: 0.118, opacity: 0.90),
+        border: .init(red: 1, green: 1, blue: 1, opacity: 0.15),
+        borderWidth: 1,
+        shadow: .init(opacity: 0.30, radius: 12, offsetY: 4),
+        titleInk: .init(red: 1, green: 1, blue: 1, opacity: 1.0),
+        subtitleInk: .init(red: 1, green: 1, blue: 1, opacity: 0.72),
+        isDarkSurface: true
+    )
+
+    /// 浅色档（hotfix14 新增）：白 95% 染层 + `.thinMaterial`，黑 8% 细边，
+    /// 投影比深色档更轻更紧（黑 15% / blur 8）——浅底上浓投影会立刻显脏。
+    /// 文字换成 `#1C1C1E` 系深墨，与浅色多彩界面的正文同一档。
+    public static let colorfulLight = NoticeSurfaceStyle(
+        material: .thin,
+        tint: .init(red: 1, green: 1, blue: 1, opacity: 0.95),
+        border: .init(red: 0, green: 0, blue: 0, opacity: 0.08),
+        borderWidth: 1,
+        shadow: .init(opacity: 0.15, radius: 8, offsetY: 2),
+        titleInk: .init(red: 0.110, green: 0.110, blue: 0.118, opacity: 1.0),
+        subtitleInk: .init(red: 0.110, green: 0.110, blue: 0.118, opacity: 0.65),
+        isDarkSurface: false
+    )
+}
+
 /// Toast / 浮层通知的外观几何常量（v2.11.7 hotfix13 重新设计）。
 ///
 /// 两种皮肤**共用同一套几何**，只有颜色与材质不同 —— 与 `NeumorphicMetrics` 的约定一致：
