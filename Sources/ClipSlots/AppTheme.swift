@@ -121,6 +121,18 @@ enum AppTheme {
     /// 选中 / 悬停卡片的细描边（简洁模式唯一允许带颜色的表面：浅色淡紫、深色霓虹紫）。
     static let minimalSelectionBorder = minimal(\.selection)
 
+    /// 简洁模式下**鼠标悬停**卡片的描边（v2.11.7 hotfix15）：浅色黑 35%、深色白 35%。
+    ///
+    /// 从上面的紫色选中描边里拆出来的。悬停不是状态、只是光标位置的回声，用紫色等于让
+    /// 简洁模式里唯一的彩色出口跟着鼠标跑；闪烁定位与拖入目标那两种**真状态**仍然用紫色。
+    /// 具体色值与 alpha 见 `MinimalSkinPalette.CardHover`（smoke 有断言钉住中性与方向）。
+    static let minimalCardHoverBorder = dyn(
+        light: color(MinimalSkinPalette.CardHover.light.base)
+            .opacity(MinimalSkinPalette.CardHover.light.opacity),
+        dark: color(MinimalSkinPalette.CardHover.dark.base)
+            .opacity(MinimalSkinPalette.CardHover.dark.opacity)
+    )
+
     /// 空槽「保存到槽位 X」主行动按钮：浅色近黑底白字、深色白底黑字。
     ///
     /// 反相是刻意的。简洁模式的空卡片除了这枚按钮之外几乎没有别的元素，

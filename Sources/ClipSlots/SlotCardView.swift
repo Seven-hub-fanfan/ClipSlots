@@ -79,21 +79,36 @@ struct SlotCardView: View {
     private var isMinimalSkin: Bool { AppTheme.isMinimalSkin }
 
     /// 简洁模式下描边的高亮色：不跟槽位色，统一紫色（浅色淡紫 / 深色霓虹紫）。
+    /// 注意这条只管**闪烁定位 / 拖入目标**这两种真状态；鼠标悬停走下面中性的
+    /// `hoverOutlineColor`（v2.11.7 hotfix15）。
     private var outlineHighlight: Color {
         isMinimalSkin ? AppTheme.minimalSelectionBorder : slotAccent
+    }
+
+    /// 悬停描边色（v2.11.7 hotfix15）。
+    ///
+    /// 简洁模式下原来复用紫色选中描边，于是鼠标划过任意一张卡片都会亮一圈紫边——悬停不是
+    /// 状态、只是光标位置的回声，把简洁模式里唯一的彩色出口交给鼠标轨迹是错的。现在收成中性：
+    /// 浅色档黑 35%、深色档白 35%（`MinimalSkinPalette.CardHover`）。
+    /// 多彩模式不变，继续用槽位色——那本来就是它的品牌高亮语言。
+    private var hoverOutlineColor: Color {
+        isMinimalSkin ? AppTheme.minimalCardHoverBorder : outlineHighlight.opacity(0.72)
     }
 
     private var cardOutlineColor: Color {
         if isFlashHighlighted { return outlineHighlight }
         if isDropTargeted { return outlineHighlight.opacity(0.72) }
-        if isHovering { return outlineHighlight.opacity(0.72) }
+        if isHovering { return hoverOutlineColor }
         return AppTheme.subtleBorder
     }
 
     private var cardOutlineWidth: CGFloat {
         if isFlashHighlighted { return 2.5 }
         if isDropTargeted { return 1.2 }
-        return isHovering ? 1.5 : 1
+        // hotfix15: 简洁模式的悬停描边保持 1pt 细边（中性色本身已经够显眼，再加粗就成了「选中」）；
+        // 多彩模式沿用 1.5pt。
+        guard isHovering else { return 1 }
+        return isMinimalSkin ? MinimalSkinPalette.CardHover.light.width : 1.5
     }
 
     var body: some View {

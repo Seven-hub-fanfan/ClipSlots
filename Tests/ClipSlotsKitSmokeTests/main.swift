@@ -2775,4 +2775,53 @@ do {
     }
 }
 
+// MARK: - MINIMAL-HOVER (v2.11.7 hotfix15) 简洁模式卡片悬停描边必须是中性的
+//
+// 悬停描边原来复用 `MinimalSkinPalette.selection`（紫），于是鼠标划过任意一张卡片都亮一圈紫边——
+// 简洁模式里唯一的彩色出口变成了鼠标轨迹。现在拆成中性一档：浅色黑 35% / 深色白 35%。
+// 「闪烁定位」「拖入目标」这两种真状态仍然用紫色，所以这里同时钉住「hover 已经不再等于 selection」。
+do {
+    let light = MinimalSkinPalette.CardHover.light
+    let dark = MinimalSkinPalette.CardHover.dark
+
+    t.equal(MinimalSkinPalette.CardHover.stroke(dark: false), light, "dark=false 应取浅色档悬停描边")
+    t.equal(MinimalSkinPalette.CardHover.stroke(dark: true), dark, "dark=true 应取深色档悬停描边")
+
+    // 中性：三分量极差必须为 0（纯黑 / 纯白），一点色相都不许有。
+    t.equal(MinimalSkinPalette.neutrality(light.base), 0, "★★浅色档悬停描边必须是纯中性（不许再是紫色）")
+    t.equal(MinimalSkinPalette.neutrality(dark.base), 0, "★★深色档悬停描边必须是纯中性")
+
+    // 方向：浅色档压黑、深色档压白。
+    t.equal(light.base.red, 0, "浅色档悬停描边基色应为黑")
+    t.equal(light.base.green, 0, "浅色档悬停描边基色应为黑（G）")
+    t.equal(light.base.blue, 0, "浅色档悬停描边基色应为黑（B）")
+    t.equal(dark.base.red, 1, "深色档悬停描边基色应为白")
+    t.equal(dark.base.green, 1, "深色档悬停描边基色应为白（G）")
+    t.equal(dark.base.blue, 1, "深色档悬停描边基色应为白（B）")
+
+    // alpha 与线宽：两档一致，且是「细边」——加粗会读成选中态。
+    t.equal(light.opacity, 0.35, "浅色档悬停描边应为黑 35%")
+    t.equal(dark.opacity, 0.35, "深色档悬停描边应为白 35%")
+    t.equal(light.width, 1, "悬停描边应保持 1pt 细边")
+    t.equal(dark.width, light.width, "两档悬停描边线宽必须一致")
+
+    // 与卡片底的方向性：描边必须朝着与卡片底**相反**的方向压，否则在卡片上看不见。
+    let lightCard = MinimalSkinPalette.light.cardFilled
+    let darkCard = MinimalSkinPalette.dark.cardFilled
+    t.check(light.base.red < lightCard.red, "★★浅色档：悬停描边必须比卡片底暗")
+    t.check(dark.base.red > darkCard.red, "★★深色档：悬停描边必须比卡片底亮")
+
+    // 与紫色选中描边解绑：hover 不再等于 selection（这正是用户报的 bug）。
+    for (name, surfaces) in [("light", MinimalSkinPalette.light), ("dark", MinimalSkinPalette.dark)] {
+        let sel = surfaces.selection
+        let hover = MinimalSkinPalette.CardHover.stroke(dark: name == "dark").base
+        t.check(!(abs(sel.red - hover.red) < 0.001
+                    && abs(sel.green - hover.green) < 0.001
+                    && abs(sel.blue - hover.blue) < 0.001),
+                "★★\(name) 档悬停描边不得再等于紫色选中描边")
+        t.check(MinimalSkinPalette.neutrality(sel) > 0.1,
+                "\(name) 档 selection 仍应是带色相的紫（闪烁 / 拖入两种真状态还要用它）")
+    }
+}
+
 t.report()

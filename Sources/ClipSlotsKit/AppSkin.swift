@@ -134,4 +134,36 @@ public enum MinimalSkinPalette {
         let channels = [color.red, color.green, color.blue]
         return (channels.max() ?? 0) - (channels.min() ?? 0)
     }
+
+    // MARK: - 卡片悬停描边（v2.11.7 hotfix15）
+    //
+    // `selection`（紫）原来同时承担三种状态：闪烁定位、拖入目标、**鼠标悬停**。前两种是
+    // 「这里发生了事」的强信号，紫色合理；悬停不是状态、只是光标位置的回声，每划过一张卡片
+    // 就亮一次紫边，等于让简洁模式里唯一的彩色出口变成鼠标轨迹。
+    //
+    // 所以悬停描边从 `selection` 里拆出来，收成**中性**的一档：浅色档黑 35%、深色档白 35%。
+    // 两档都是「朝着与卡片底相反的方向压一层半透明中性色」——浅底压黑、深底压白，这样在
+    // 白卡片 / 近黑卡片上都能看出轮廓，又不会引入任何色相。
+    public enum CardHover {
+
+        public struct Stroke: Equatable {
+            /// 描边基色（不含 alpha）。这一档只允许纯黑或纯白。
+            public let base: RGB
+            public let opacity: Double
+            public let width: CGFloat
+
+            public init(base: RGB, opacity: Double, width: CGFloat) {
+                self.base = base
+                self.opacity = opacity
+                self.width = width
+            }
+        }
+
+        /// 浅色档：黑 35%。
+        public static let light = Stroke(base: RGB(0, 0, 0), opacity: 0.35, width: 1)
+        /// 深色档：白 35%。
+        public static let dark = Stroke(base: RGB(1, 1, 1), opacity: 0.35, width: 1)
+
+        public static func stroke(dark isDark: Bool) -> Stroke { isDark ? dark : light }
+    }
 }
