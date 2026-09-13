@@ -1,4 +1,5 @@
 import SwiftUI
+import ClipSlotsKit
 
 /// v2.10.52 (perf 第四批 · 巨型 @Published Store 拆分)
 ///
@@ -89,44 +90,58 @@ struct TransientOverlayView: View {
     @ObservedObject var ui: TransientUIStore
 
     var body: some View {
-        ZStack(alignment: .top) {
+        // v2.11.7 hotfix13: 原来是 ZStack(alignment: .top)，Toast 与浮层提示各自 padding(.top, 8)，
+        // 两者同时在场时会**精确重叠**成一堆糊在一起的卡片（用户报的「重复弹出」是渲染通道重复，
+        // 但这里的重叠会放大同一个观感）。改成 VStack 后同时在场就是上下排开。
+        VStack(spacing: 8) {
+            if let notice = ui.floatingNotice {
+                FloatingNoticeView(notice: notice)
+                    .allowsHitTesting(false)
+                    .transition(.move(edge: .top).combined(with: .opacity))
+                    .zIndex(101)
+            }
             if let message = ui.toastMessage {
                 toastView(message)
                     .transition(.move(edge: .top).combined(with: .opacity))
                     .zIndex(100)
             }
-            if let notice = ui.floatingNotice {
-                FloatingNoticeView(notice: notice)
-                    .allowsHitTesting(false)
-                    .padding(.top, 8)
-                    .transition(.opacity)
-                    .zIndex(101)
-            }
+            Spacer(minLength: 0)
         }
+        // 窗口顶部居中、距顶 16pt（`NoticeMetrics.topInset`）。HUD 面板用同一个数值贴主窗口顶部，
+        // 所以「App 在前台 / 不在前台」两种情况下 Toast 落点一致，不会在屏幕上跳。
+        .padding(.top, NoticeMetrics.topInset)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         // 覆盖层纯展示、不接受交互，避免顶部区域拦截下方槽位/工具栏点击。
         .allowsHitTesting(false)
         .animation(Anim.status, value: ui.toastMessage != nil)
         .animation(Anim.status, value: ui.floatingNotice != nil)
     }
 
-    // MARK: - Toast (从 ContentView 原样迁入，样式不变)
+    // MARK: - Toast
 
+    /// v2.11.7 hotfix13: 与浮层通知共用 `NoticeSurface`（简洁模式新拟物双描边 / 多彩模式磨砂深色）
+    /// 和 `NoticeMetrics` 的几何。原来这里是一颗 `.regularMaterial` 胶囊：同一个位置、同一类信息，
+    /// 却和浮层通知是两套材质语言，切皮肤时也完全不跟随。
     private func toastView(_ message: String) -> some View {
-        HStack(spacing: 6) {
+        HStack(spacing: NoticeMetrics.iconTextSpacing) {
             Image(systemName: toastIcon(for: message))
-                .font(.system(size: 11, weight: .semibold))
+                .font(.system(size: NoticeMetrics.iconSize - 2, weight: .semibold))
+                .foregroundColor(NoticeInk.icon(.info))
             Text(message)
-                .font(.system(size: 12, weight: .medium))
-                .foregroundColor(.primary)
+                .font(.system(size: NoticeMetrics.titleFontSize, weight: .medium))
+                .foregroundColor(NoticeInk.title)
+                .lineLimit(1)
+                .truncationMode(.middle)
         }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 8)
-        .background(
-            Capsule()
-                .fill(.regularMaterial)
-                .shadow(color: Color.black.opacity(0.12), radius: 6, y: 3)
-        )
-        .padding(.top, 8)
+        .padding(.horizontal, NoticeMetrics.horizontalPadding)
+        .padding(.vertical, NoticeMetrics.verticalPadding - 2)
+        .frame(width: NoticeMetrics.cardWidth(
+            titleTextWidth: NoticeTextMeasure.width(message,
+                                                    size: NoticeMetrics.titleFontSize,
+                                                    weight: .medium),
+            subtitleTextWidth: 0
+        ), alignment: .leading)
+        .background(NoticeSurface())
     }
 
     private func toastIcon(for message: String) -> String {

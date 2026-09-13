@@ -2542,4 +2542,171 @@ do {
     }
 }
 
+// MARK: - NOTICE-CHANNEL (v2.11.7 hotfix13) Toast 投递通道必须互斥
+
+// 用户截图里同一次「保存到槽位 1」弹出了两张一模一样的卡片。根因不在业务侧（`showFloatingNotice`
+// 只被调了一次），而在渲染层：v2.6.3 为「热键从 Finder 存图」加的全局 HUD 面板与主窗口内的
+// SwiftUI 覆盖层被**无条件同时**点亮。这组用例把「任何窗口状态下都只选出一条通道」钉死，
+// 并覆盖 4 个状态位的全部 16 种组合，防止以后再有人在某个分支里顺手把两条通道都打开。
+do {
+    let allStates: [NoticeWindowState] = {
+        var out: [NoticeWindowState] = []
+        for active in [true, false] {
+            for visible in [true, false] {
+                for mini in [true, false] {
+                    for occluded in [true, false] {
+                        out.append(NoticeWindowState(appActive: active,
+                                                     mainWindowVisible: visible,
+                                                     mainWindowMiniaturized: mini,
+                                                     mainWindowOccluded: occluded))
+                    }
+                }
+            }
+        }
+        return out
+    }()
+    t.equal(allStates.count, 16, "窗口状态组合应覆盖 16 种")
+
+    // 通道是枚举，天然互斥；这里断言的是「每种组合都能定出唯一通道」且判据符合预期。
+    for state in allStates {
+        let channel = NoticePresentationRouter.channel(for: state)
+        let expectInline = state.appActive
+            && state.mainWindowVisible
+            && !state.mainWindowMiniaturized
+            && !state.mainWindowOccluded
+        t.equal(channel, expectInline ? .inline : .hud,
+                "★★通道选择错误 active=\(state.appActive) visible=\(state.mainWindowVisible) mini=\(state.mainWindowMiniaturized) occluded=\(state.mainWindowOccluded)")
+    }
+
+    // 关键回归：人就在 App 里点保存（App 激活 + 窗口可见 + 未最小化 + 未被遮挡）
+    // 必须只走窗内通道，绝不能同时开 HUD —— 这正是重复弹窗的场景。
+    t.equal(NoticePresentationRouter.channel(for: NoticeWindowState(appActive: true,
+                                                                   mainWindowVisible: true,
+                                                                   mainWindowMiniaturized: false,
+                                                                   mainWindowOccluded: false)),
+            .inline,
+            "★★主窗口就在眼前时必须只走窗内通道（重复弹窗回归）")
+
+    // 热键从别的 App 触发：App 未激活 → 只能走 HUD，否则用户看不到任何反馈。
+    t.equal(NoticePresentationRouter.channel(for: NoticeWindowState(appActive: false,
+                                                                   mainWindowVisible: true,
+                                                                   mainWindowMiniaturized: false,
+                                                                   mainWindowOccluded: false)),
+            .hud,
+            "★★App 不在前台时必须走全局 HUD")
+
+    // 窗口可见但被别的窗口完全盖住：isVisible 仍是 true，只有 occlusionState 能看出来。
+    t.equal(NoticePresentationRouter.channel(for: NoticeWindowState(appActive: true,
+                                                                   mainWindowVisible: true,
+                                                                   mainWindowMiniaturized: false,
+                                                                   mainWindowOccluded: true)),
+            .hud,
+            "★★主窗口被完全遮挡时必须走 HUD（窗内卡片画了也看不见）")
+
+    t.equal(NoticePresentationRouter.channel(for: NoticeWindowState(appActive: true,
+                                                                   mainWindowVisible: true,
+                                                                   mainWindowMiniaturized: true,
+                                                                   mainWindowOccluded: false)),
+            .hud,
+            "★★主窗口最小化时必须走 HUD")
+}
+
+// MARK: - NOTICE-METRICS (v2.11.7 hotfix13) Toast 卡片宽度：贴合内容、封顶 280
+
+do {
+    t.equal(NoticeMetrics.maxWidth, 280, "Toast 最大宽度应为 280pt")
+    t.equal(NoticeMetrics.topInset, 16, "Toast 距窗口顶部应为 16pt")
+    t.equal(NoticeMetrics.cornerRadius, 12, "Toast 圆角应为 12pt")
+
+    // 短文案：不得被撑成 280（这是弃用 `frame(maxWidth:)` 的原因），但也不得比 minWidth 更窄。
+    let shortWidth = NoticeMetrics.cardWidth(titleTextWidth: 40, subtitleTextWidth: 0)
+    t.check(shortWidth < NoticeMetrics.maxWidth,
+            "★★短文案卡片不得被撑满 280（\(shortWidth)）")
+    t.equal(shortWidth, NoticeMetrics.minWidth, "短文案应落到最小宽度")
+
+    // 中等文案：按内容线性增长。
+    let midText: CGFloat = 150
+    let midWidth = NoticeMetrics.cardWidth(titleTextWidth: midText, subtitleTextWidth: 90)
+    t.equal(midWidth,
+            NoticeMetrics.horizontalPadding * 2 + NoticeMetrics.iconGlyphWidth
+                + NoticeMetrics.iconTextSpacing + midText,
+            "中等文案宽度应等于 内边距×2 + 图标 + 间距 + 最宽那行文字")
+    t.check(midWidth > shortWidth && midWidth < NoticeMetrics.maxWidth,
+            "★★中等文案宽度应介于最小与最大之间（\(midWidth)）")
+
+    // 取标题 / 副标题里更宽的那一行，而不是只看标题。
+    t.equal(NoticeMetrics.cardWidth(titleTextWidth: 60, subtitleTextWidth: 180),
+            NoticeMetrics.cardWidth(titleTextWidth: 180, subtitleTextWidth: 60),
+            "宽度应取标题与副标题中更宽的一行")
+
+    // 超长文案：封顶，不允许横贯窗口。
+    for w in [CGFloat(400), 900, 5000] {
+        t.equal(NoticeMetrics.cardWidth(titleTextWidth: w, subtitleTextWidth: w),
+                NoticeMetrics.maxWidth,
+                "★★超长文案（\(w)pt）必须封顶到 280")
+    }
+
+    // 单调不减：文字越宽卡片不能反而变窄。
+    var last: CGFloat = 0
+    for step in stride(from: CGFloat(0), through: 400, by: 20) {
+        let w = NoticeMetrics.cardWidth(titleTextWidth: step, subtitleTextWidth: 0)
+        t.check(w >= last, "★★卡片宽度必须随文字单调不减（\(step) → \(w)）")
+        last = w
+    }
+
+    t.check(NoticeMetrics.textColumnMaxWidth > 200,
+            "文字列在最大宽度下应至少有 200pt 可用（\(NoticeMetrics.textColumnMaxWidth)）")
+}
+
+// MARK: - NOTICE-HUD-ORIGIN (v2.11.7 hotfix13) HUD 面板定位
+
+// HUD 现在贴**主窗口**顶部居中（与窗内通道同一落点），主窗口不可见时才回退屏幕顶部；
+// 两种情况都必须夹在屏幕可见区内，贴边窗口不能把卡片带出屏幕。
+do {
+    let screen = CGRect(x: 0, y: 0, width: 1920, height: 1080)
+    let card = CGSize(width: 240 + NoticeMetrics.hudShadowPadding * 2,
+                      height: 58 + NoticeMetrics.hudShadowPadding * 2)
+
+    // 主窗口居中：水平居中、卡片顶沿距窗口顶沿 16pt。
+    let window = CGRect(x: 660, y: 300, width: 600, height: 500)
+    let origin = NoticeMetrics.hudOrigin(windowFrame: window,
+                                         contentSize: card,
+                                         screenVisibleFrame: screen)
+    t.check(abs((origin.x + card.width / 2) - window.midX) < 0.001,
+            "★★HUD 应与主窗口水平居中对齐")
+    let cardVisualTop = origin.y + card.height - NoticeMetrics.hudShadowPadding
+    t.check(abs((window.maxY - cardVisualTop) - NoticeMetrics.topInset) < 0.001,
+            "★★HUD 卡片顶沿距窗口顶沿应为 16pt（实际 \(window.maxY - cardVisualTop)）")
+
+    // 主窗口不可见：回退屏幕顶部居中。
+    let fallback = NoticeMetrics.hudOrigin(windowFrame: nil,
+                                           contentSize: card,
+                                           screenVisibleFrame: screen)
+    t.check(abs((fallback.x + card.width / 2) - screen.midX) < 0.001,
+            "★★无主窗口时 HUD 应屏幕水平居中")
+    t.check(fallback.y < origin.y || window.maxY < screen.maxY,
+            "无主窗口时 HUD 落点由屏幕顶部推算")
+
+    // 贴左边 / 贴右边 / 贴顶 / 部分出屏的窗口：结果必须仍在屏幕可见区内。
+    let edgeWindows = [
+        CGRect(x: -400, y: 200, width: 600, height: 500),
+        CGRect(x: 1800, y: 200, width: 600, height: 500),
+        CGRect(x: 300, y: 900, width: 600, height: 500),
+        CGRect(x: 0, y: 0, width: 200, height: 120),
+        CGRect(x: 1900, y: 1070, width: 600, height: 500)
+    ]
+    for w in edgeWindows {
+        let o = NoticeMetrics.hudOrigin(windowFrame: w, contentSize: card, screenVisibleFrame: screen)
+        t.check(o.x >= screen.minX - 0.001 && o.x + card.width <= screen.maxX + 0.001,
+                "★★HUD 水平必须夹在屏幕内（窗口 \(w) → x=\(o.x)）")
+        t.check(o.y >= screen.minY - 0.001 && o.y + card.height <= screen.maxY + 0.001,
+                "★★HUD 垂直必须夹在屏幕内（窗口 \(w) → y=\(o.y)）")
+    }
+
+    // 卡片比屏幕还宽这种极端情况不得算出 NaN / 崩溃，只要求落点有限。
+    let huge = CGSize(width: 4000, height: 3000)
+    let o = NoticeMetrics.hudOrigin(windowFrame: window, contentSize: huge, screenVisibleFrame: screen)
+    t.check(o.x.isFinite && o.y.isFinite, "超大卡片下 HUD 落点必须是有限值")
+}
+
 t.report()

@@ -2934,17 +2934,38 @@ final class SlotStoreObservable: ObservableObject {
     }
 
     /// v2.6.2: Show a floating notice with icon/title/subtitle, auto-dismiss.
+    ///
+    /// v2.11.7 hotfix13 —— **单通道投递**，修复「同一次保存弹出两张一模一样的卡片」。
+    ///
+    /// 原实现无条件同时点亮两个渲染通道：`transientUI.floatingNotice`（主窗口内的 SwiftUI 覆盖层）
+    /// 与 `FloatingNoticeWindowController`（跨 App 可见的 HUD 面板）。后者是 v2.6.3 为「热键从
+    /// Finder 存图、主窗口不在前台」补的，但它没有配套的「窗口在前台就不用 HUD」判断，于是最常见
+    /// 的「人就在 App 里点保存」场景下两张卡片同时出现 —— 业务侧只调了一次，重复发生在渲染层。
+    ///
+    /// 现在由 `NoticePresentationRouter` 按窗口可见性选出**唯一**通道，并且切换到某一通道时主动
+    /// 关掉另一通道的残留（上一条 HUD 还没到点自动消失时，新的一条可能选了窗内通道，两张会短暂叠住）。
     func showFloatingNotice(_ notice: FloatingNotice, duration: TimeInterval = 2.0) {
-        // v2.10.52: 瞬态状态迁至 transientUI（独立 ObservableObject），不再触发主 store 重绘。
-        transientUI.floatingNotice = notice
-        // v2.6.3: Also show global HUD so the notice is visible when
-        // ClipSlots main window is not in front (e.g. hotkey save from Finder).
-        FloatingNoticeWindowController.shared.show(notice: notice, duration: duration)
-        let noticeId = notice.id
-        DispatchQueue.main.asyncAfter(deadline: .now() + duration) { [weak self] in
-            if self?.transientUI.floatingNotice?.id == noticeId {
-                self?.transientUI.floatingNotice = nil
+        let state = NoticeWindowState.current()
+        let channel = NoticePresentationRouter.channel(for: state)
+        // 只在弹通知时打一行：以后再有人报「弹了两个 / 一个都没弹」，看这行就能定位是哪条通道。
+        NSLog("[ClipSlots] notice channel=\(channel.rawValue) active=\(state.appActive) visible=\(state.mainWindowVisible) mini=\(state.mainWindowMiniaturized) occluded=\(state.mainWindowOccluded) title=\(notice.title)")
+        switch channel {
+        case .inline:
+            // 窗内通道：先掐掉可能还挂在屏幕上的 HUD，保证同一时刻只有一张卡片。
+            FloatingNoticeWindowController.shared.dismiss()
+            // v2.10.52: 瞬态状态迁至 transientUI（独立 ObservableObject），不再触发主 store 重绘。
+            transientUI.floatingNotice = notice
+            let noticeId = notice.id
+            DispatchQueue.main.asyncAfter(deadline: .now() + duration) { [weak self] in
+                if self?.transientUI.floatingNotice?.id == noticeId {
+                    self?.transientUI.floatingNotice = nil
+                }
             }
+        case .hud:
+            // HUD 通道：主窗口看不见（热键场景 / 最小化 / 被完全遮挡）。窗内状态置空，
+            // 避免用户切回来时看到一张早该消失的卡片。
+            transientUI.floatingNotice = nil
+            FloatingNoticeWindowController.shared.show(notice: notice, duration: duration)
         }
     }
 
