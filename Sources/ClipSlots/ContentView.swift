@@ -590,17 +590,29 @@ struct ContentView: View {
             HStack(spacing: 14) {
                 ZStack {
                 // v2.11.7 hotfix2: 简洁模式直接展示 App 真实图标（白底 squircle + 黑色三叠石），
-                // 30pt，无底板 / 无描边 / 无投影 —— 上一轮给它套的中性灰底板在浅色简洁界面里
+                // 无底板 / 无描边 / 无投影 —— 上一轮给它套的中性灰底板在浅色简洁界面里
                 // 变成了一个「大白按钮」，看着像可点击的控件，而它其实只是个 logo。
                 //
                 // 图标从运行时的 `NSApp.applicationIconImage` 取，而不是 `Image("AppIcon")`：
                 // 本项目的图标是 `assets/AppIcon.icns` 在打包时拷进 bundle Resources 的（没有
                 // Assets.xcassets 目录，SwiftUI 按名字查资源目录会拿不到），而 applicationIconImage
                 // 读的就是当前 bundle 已注册的那份，换图标后自动跟着变，不会漏更新。
+                //
+                // hotfix2 二次调整：30pt → 44pt。这里有个容易踩的坑——`frame` 给的是图标
+                // **画布**边长，不是可见图案的边长。量过 assets/AppIcon.png（1024 画布）：
+                // 白色 squircle + 投影的 alpha 包围盒只有 886px（画布的 86.5%），黑色石头图案
+                // 更小，只有 474px（画布的 46%）。所以 30pt 画布下石头实际只有 ~14pt 高，
+                // 挨着 22pt bold 的标题就显得又小又单薄。44pt 画布下 squircle ≈38pt、
+                // 石头 ≈20pt，和标题文字的视觉体量基本齐平；同时正好等于多彩模式底板的 44pt，
+                // 两种皮肤来回切时左侧内容不会横向跳动。
+                //
+                // 垂直方向不需要额外处理：外层 HStack 默认 .center 对齐，ZStack 本身就是
+                // 图标的紧致边界，图标与右侧标题块自然垂直居中。
                 if AppTheme.isMinimalSkin {
                     Image(nsImage: NSApp.applicationIconImage)
                         .resizable()
-                        .frame(width: 30, height: 30)
+                        .interpolation(.high)
+                        .frame(width: 44, height: 44)
                 } else {
                     RoundedRectangle(cornerRadius: 12, style: .continuous)
                         .fill(AppTheme.chromeAccentTile)
