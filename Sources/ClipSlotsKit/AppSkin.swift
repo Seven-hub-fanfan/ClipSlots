@@ -141,9 +141,14 @@ public enum MinimalSkinPalette {
     // 「这里发生了事」的强信号，紫色合理；悬停不是状态、只是光标位置的回声，每划过一张卡片
     // 就亮一次紫边，等于让简洁模式里唯一的彩色出口变成鼠标轨迹。
     //
-    // 所以悬停描边从 `selection` 里拆出来，收成**中性**的一档：浅色档黑 35%、深色档白 35%。
-    // 两档都是「朝着与卡片底相反的方向压一层半透明中性色」——浅底压黑、深底压白，这样在
-    // 白卡片 / 近黑卡片上都能看出轮廓，又不会引入任何色相。
+    // 所以悬停描边从 `selection` 里拆出来，收成**中性**的一档：浅色档压黑、深色档压白，
+    // 「朝着与卡片底相反的方向压一层半透明中性色」，这样在白卡片 / 近黑卡片上都能看出轮廓，
+    // 又不会引入任何色相。
+    //
+    // hotfix16 调浓度：hotfix15 首版给的是 35% / 1pt，实机上太淡——静息态描边本身就是
+    // `border`（浅色 #DADADC ≈ 黑 15%、深色 #3B3B3E），悬停只比它浓一档，人眼在划过时
+    // 几乎看不出变化。现在提到浅色黑 65% / 深色白 60%，并把线宽给回 1.5pt：
+    // **悬停要能一眼看出来，同时仍然不带色相**（这是与紫色选中描边的唯一区别，不是「更淡」）。
     public enum CardHover {
 
         public struct Stroke: Equatable {
@@ -159,11 +164,16 @@ public enum MinimalSkinPalette {
             }
         }
 
-        /// 浅色档：黑 35%。
-        public static let light = Stroke(base: RGB(0, 0, 0), opacity: 0.35, width: 1)
-        /// 深色档：白 35%。
-        public static let dark = Stroke(base: RGB(1, 1, 1), opacity: 0.35, width: 1)
+        /// 浅色档：黑 65% / 1.5pt。
+        public static let light = Stroke(base: RGB(0, 0, 0), opacity: 0.65, width: 1.5)
+        /// 深色档：白 60% / 1.5pt。深色档比浅色档略低一点：白色在暗底上的视觉重量本来就更高，
+        /// 同 alpha 会比黑边显得更抢。
+        public static let dark = Stroke(base: RGB(1, 1, 1), opacity: 0.60, width: 1.5)
 
         public static func stroke(dark isDark: Bool) -> Stroke { isDark ? dark : light }
+
+        /// 静息态描边（`border`）的等效黑 / 白浓度，用于断言「悬停必须显著浓于静息」。
+        /// 浅色 #DADADC 相对白卡片 ≈ 黑 15%；深色 #3B3B3E 相对 #232325 卡片 ≈ 白 11%。
+        public static let restingEquivalentOpacity: (light: Double, dark: Double) = (0.15, 0.11)
     }
 }

@@ -2799,11 +2799,24 @@ do {
     t.equal(dark.base.green, 1, "深色档悬停描边基色应为白（G）")
     t.equal(dark.base.blue, 1, "深色档悬停描边基色应为白（B）")
 
-    // alpha 与线宽：两档一致，且是「细边」——加粗会读成选中态。
-    t.equal(light.opacity, 0.35, "浅色档悬停描边应为黑 35%")
-    t.equal(dark.opacity, 0.35, "深色档悬停描边应为白 35%")
-    t.equal(light.width, 1, "悬停描边应保持 1pt 细边")
+    // alpha 与线宽（hotfix16 提浓）：35% / 1pt 实机太淡，静息态描边本身就有黑 15% 的重量。
+    t.equal(light.opacity, 0.65, "浅色档悬停描边应为黑 65%")
+    t.equal(dark.opacity, 0.60, "深色档悬停描边应为白 60%")
+    t.equal(light.width, 1.5, "悬停描边线宽应为 1.5pt")
     t.equal(dark.width, light.width, "两档悬停描边线宽必须一致")
+
+    // 「一眼看得出」：悬停浓度必须显著高于静息态描边的等效浓度，否则划过时看不出变化。
+    let resting = MinimalSkinPalette.CardHover.restingEquivalentOpacity
+    t.check(light.opacity > resting.light * 3,
+            "★★浅色档悬停浓度必须显著高于静息描边（悬停 \(light.opacity) vs 静息 ~\(resting.light)）")
+    t.check(dark.opacity > resting.dark * 3,
+            "★★深色档悬停浓度必须显著高于静息描边（悬停 \(dark.opacity) vs 静息 ~\(resting.dark)）")
+    t.check(light.opacity > 0.5 && dark.opacity > 0.5,
+            "★★两档悬停浓度都必须过半（hotfix15 的 35% 被实机判定为太淡）")
+    // 但也不能推到纯黑 / 纯白：那就成了「边框描死」，比选中态还重。
+    t.check(light.opacity < 0.85 && dark.opacity < 0.85, "悬停描边不得浓到接近实色")
+    t.check(dark.opacity <= light.opacity,
+            "深色档不应比浅色档更浓（白色在暗底上的视觉重量本来更高）")
 
     // 与卡片底的方向性：描边必须朝着与卡片底**相反**的方向压，否则在卡片上看不见。
     let lightCard = MinimalSkinPalette.light.cardFilled

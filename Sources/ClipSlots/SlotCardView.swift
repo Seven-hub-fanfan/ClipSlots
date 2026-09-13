@@ -105,8 +105,9 @@ struct SlotCardView: View {
     private var cardOutlineWidth: CGFloat {
         if isFlashHighlighted { return 2.5 }
         if isDropTargeted { return 1.2 }
-        // hotfix15: 简洁模式的悬停描边保持 1pt 细边（中性色本身已经够显眼，再加粗就成了「选中」）；
-        // 多彩模式沿用 1.5pt。
+        // hotfix15/16: 简洁模式的悬停描边用中性色（浅色黑 65% / 深色白 60%），线宽与多彩模式
+        // 一样是 1.5pt——hotfix15 首版收成 1pt + 35% 实机太淡，静息态描边本身就有黑 15% 的重量，
+        // 悬停几乎看不出变化。加粗与提浓一起做，才是「一眼看得出」。
         guard isHovering else { return 1 }
         return isMinimalSkin ? MinimalSkinPalette.CardHover.light.width : 1.5
     }
