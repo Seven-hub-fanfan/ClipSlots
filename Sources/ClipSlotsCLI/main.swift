@@ -1391,10 +1391,13 @@ func cmdSearch(_ args: ParsedArgs) -> Never {
             let label = storage.getLabel(n, in: g.id) ?? content.label ?? ""
             // v2.9.3: also search attachment file names so mode-C (attachment-only)
             // slots become findable by filename.
-            let attachmentNames = content.attachments.map { $0.name }.joined(separator: "\n")
-            let haystack = [content.preview, content.plainText ?? "", label, attachmentNames]
-                .joined(separator: "\n").lowercased()
-            if haystack.contains(needle) {
+            // v2.11.7 hotfix11: haystack 构造下沉到 ClipSlotsKit.SlotSearchIndex，与 GUI 共用
+            // 同一份实现（此前 GUI 只搜 preview 的前 30 字，长文槽位搜不到）。CLI 侧收录范围
+            // 不变：label + 完整正文 + preview + 附件名（外加原本就隐含在 preview/正文里的
+            // 文件名 / URL），不含槽位号，避免 `search "1"` 命中所有槽位 1。
+            // 直接用 haystack + contains（而非 matchesContent），保持 CLI 原有的「不 trim 查询串」
+            // 语义完全不变：needle 就是 query.lowercased()。
+            if SlotSearchIndex.contentHaystack(content: content, label: label).contains(needle) {
                 results.append([
                     "group": g.id,
                     "page": g.pageId.isEmpty ? DEFAULT_PAGE : g.pageId,

@@ -1,7 +1,11 @@
 import Foundation
 import ClipSlotsKit
 
-// MARK: - Slot Search Matcher (v2.5)
+// MARK: - Slot Search Matcher (v2.5, 可搜索文本自 v2.11.7 hotfix11 下沉到 Kit)
+//
+// 匹配语义 = 类型过滤器 AND 关键词子串匹配。关键词部分统一走
+// `ClipSlotsKit.SlotSearchIndex`，与 CLI `clipslots search` 同一份实现（此前 GUI 只搜
+// content.preview，也就是正文前 30 字，导致长文槽位「基本搜不到」）。
 
 struct SlotSearchMatcher {
 
@@ -29,51 +33,15 @@ struct SlotSearchMatcher {
             return true
         }
 
-        let searchable = searchableText(slot: slot, content: content, label: label)
-        return searchable.localizedCaseInsensitiveContains(normalizedQuery)
+        return SlotSearchIndex.matches(
+            slot: slot,
+            content: content,
+            label: label,
+            query: normalizedQuery
+        )
     }
 
     // MARK: - Private
-
-    private static func searchableText(
-        slot: Int,
-        content: SlotContent,
-        label: String
-    ) -> String {
-        var parts: [String] = []
-
-        // Slot number
-        parts.append("\(slot)")
-        parts.append("槽位 \(slot)")
-
-        // Label (from store, not content.label)
-        if !label.isEmpty {
-            parts.append(label)
-        }
-
-        // Content preview
-        let preview = content.preview
-        if !preview.isEmpty {
-            parts.append(preview)
-        }
-
-        // File detection
-        if let url = content.primaryFileURL {
-            parts.append(url.lastPathComponent)
-            parts.append(url.path)
-            parts.append(url.pathExtension)
-        }
-
-        // Web URL detection (v2.5)
-        if let url = content.detectedWebURL {
-            parts.append(url.absoluteString)
-            if let host = url.host {
-                parts.append(host)
-            }
-        }
-
-        return parts.joined(separator: " ")
-    }
 
     private static func matchesFilter(
         content: SlotContent,

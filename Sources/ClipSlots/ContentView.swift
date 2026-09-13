@@ -1638,7 +1638,10 @@ struct ContentView: View {
 
         DispatchQueue.global(qos: .userInitiated).async {
             // Heavy per-slot expansion + cross-page filter + sort all run off the main thread.
-            let all = SlotStoreObservable.expandSearchableSlots(groupRefs)
+            // hotfix11: 匹配已下沉进 expandSearchableSlots（先扫磁盘匹配、命中后才补齐完整内容，
+            // 见该方法注释）。这里拿到的已经是命中集，filterAndSortGlobalSearch 的再次 filter
+            // 是幂等的，保留它是为了不动既有的排序 / 上下文加权路径。
+            let all = SlotStoreObservable.expandSearchableSlots(groupRefs, query: query, filter: filter)
             let results = ContentView.filterAndSortGlobalSearch(
                 all: all,
                 query: query,

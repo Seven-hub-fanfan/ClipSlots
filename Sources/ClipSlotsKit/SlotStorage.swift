@@ -130,6 +130,13 @@ public final class SlotStorage {
     // (CLI) is picked up on the very next read, even on coarse-mtime volumes where
     // the old modificationDate signal (P2-15, v2.10.8) missed same-second writes.
     private var cacheFingerprint: [Int: DirFingerprint] = [:]
+    // v2.11.7 hotfix11: 全局搜索扫描缓存（textOnly 内容，见 searchScanSnapshot）。与 `cache` 分开
+    // 存：`cache` 是「用户真的打开过这个槽位」的完整内容（含图片字节），扫描缓存只装文本，专门给
+    // 搜索用。GUI 每敲一个字符就重算一次全库搜索（0.2s 去抖），没有这层缓存的话 13 组 × 10 槽会
+    // 每次都重读一遍磁盘；有了它，后续按键只剩一次 stat 指纹比对。指纹变了立即重读，所以 CLI 或
+    // 其他进程的外部写入照样能在下一次搜索里出现。
+    private var scanCache: [Int: SlotContent] = [:]
+    private var scanCacheFingerprint: [Int: DirFingerprint] = [:]
     // P0-1 (v2.10.38): in-memory label cache + per-slot label.txt fingerprint. `getLabel`
     // previously took the cross-process StorageLock and synchronously read `label.txt` on
     // EVERY call. `allSearchableSlots()` (global search) invokes it once per slot on the main
@@ -496,6 +503,10 @@ public final class SlotStorage {
                     // disk re-read (the atomic swap changed the dir's inode/mtime/size).
                     let slotDir = baseURL.appendingPathComponent(String(slot))
                     cacheFingerprint[slot] = dirFingerprint(slotDir.path)
+                    // hotfix11: 丢弃这个槽的搜索扫描缓存。虽然它有指纹护栏，但不能把「改完能不能
+                    // 搜到新内容」这种正确性押在 mtime 粒度上——下次搜索走 `cache` 的新鲜命中即可。
+                    scanCache.removeValue(forKey: slot)
+                    scanCacheFingerprint.removeValue(forKey: slot)
                     NSLog("[ClipSlots] SlotStorage.set OK slot=\(slot) preview=\(content.preview)")
                     return true
                 } catch {
@@ -523,6 +534,9 @@ public final class SlotStorage {
                 // A-1 (v2.10.31): re-check invalidation inside the lock (TOCTOU, see set()).
                 if invalidated { return }
                 cache[slot] = SlotContent()
+                // hotfix11: 清空后立刻丢弃搜索扫描缓存，否则已删除的内容还能被搜出来。
+                scanCache.removeValue(forKey: slot)
+                scanCacheFingerprint.removeValue(forKey: slot)
                 // P0-1 (v2.10.38): the slot dir (incl. label.txt) is removed below; drop its
                 // label cache entry so getLabel doesn't serve a stale label for a cleared slot.
                 labelCache.removeValue(forKey: slot)
@@ -626,6 +640,69 @@ public final class SlotStorage {
         queue.sync { cache }
     }
 
+    // MARK: - Global search scan (v2.11.7 hotfix11)
+
+    /// 全局搜索用的**整组**槽位快照，缺失的槽位从磁盘补读。
+    ///
+    /// 为什么需要它：`snapshot()` 返回的是进程内 `cache`，而 `cache` 只有被 `get(_:)` 读过的槽位
+    /// 才有内容——也就是**本次会话里用户真正打开过的组**。全局搜索此前直接用 `snapshot()` 展开
+    /// 全库，于是从没访问过的组一律是空字典，搜索静默跳过。本机实测：冷启动后在「全局」范围搜
+    /// 默认组里的 `10%`、另一页 prompt 组里的 `骑马`，命中数都是 0，而 CLI（走磁盘）能搜到——
+    /// 用户反馈的「基本不能搜到想要的内容」有一半来自这里，另一半是 haystack 只有 preview 前 30 字。
+    ///
+    /// 内存：本机数据目录 11 GB，绝不能把整库负载读进常驻缓存。因此这里走 `textOnly` 读取——
+    /// 只取文本字节，图片 / 视频等只保留 type（过滤器判据够用），**且不写入 `cache`**，扫描结果
+    /// 随搜索结束即释放。命中的槽位由调用方用 `get(_:)` 完整补齐后再渲染。
+    ///
+    /// - Parameter slotCount: 每组槽位数（`config.slots`）。
+    public func searchScanSnapshot(slotCount: Int) -> [Int: SlotContent] {
+        guard slotCount > 0 else { return [:] }
+        var out: [Int: SlotContent] = [:]
+        for slot in 1...slotCount {
+            let slotDir = baseURL.appendingPathComponent(String(slot))
+            // 缓存里已有且指纹未变 → 直接用（完整内容，零额外 IO，也顺带让当前组的搜索保持原有精度）。
+            let diskFP = dirFingerprint(slotDir.path)
+            if let cached = queue.sync(execute: {
+                cache[slot].flatMap { cacheFingerprint[slot] == diskFP ? $0 : nil }
+            }) {
+                if !cached.isEmpty { out[slot] = cached }
+                continue
+            }
+            // 扫描缓存命中（指纹未变）→ 直接复用，逐字符搜索时这条路径承担绝大多数请求。
+            if let cachedScan = queue.sync(execute: {
+                scanCache[slot].flatMap { scanCacheFingerprint[slot] == diskFP ? $0 : nil }
+            }) {
+                if !cachedScan.isEmpty { out[slot] = cachedScan }
+                continue
+            }
+            // 冷槽位：在跨进程锁内做文本扫描，避免撞上并发的原子目录替换读到半个槽。
+            // 拿不到锁时跳过该槽（搜索是只读的尽力而为操作，绝不因为锁竞争阻塞或伪造空槽）。
+            guard let content = try? StorageLock.shared.withLock(
+                timeout: SlotStorage.readLockTimeout,
+                { readSlotContent(from: slotDir, textOnly: true) }
+            ) else { continue }
+            queue.sync {
+                scanCache[slot] = content
+                scanCacheFingerprint[slot] = diskFP
+            }
+            if !content.isEmpty { out[slot] = content }
+        }
+        return out
+    }
+
+    /// 搜索扫描时哪些 pasteboard type 的字节值得读。
+    ///
+    /// 命中的都是可能承载可搜索文字的类型：纯文本 / RTF / HTML，以及 file-url、url——后两者的
+    /// 负载本身就是一小段 URL 字符串，而且 `primaryFileURL` / `detectedWebURL` 这两个过滤器判据
+    /// 与「按文件名搜」都依赖它。其余（public.png、public.tiff、视频、自定义二进制…）只留 type。
+    public static func isSearchableTextType(_ type: String) -> Bool {
+        if type == "NSStringPboardType" { return true }
+        if type.hasSuffix(".file-url") || type.hasSuffix(".url") { return true }
+        let lower = type.lowercased()
+        return lower.contains("text") || lower.contains("rtf") || lower.contains("html")
+            || lower.contains("utf8") || lower.contains("utf16")
+    }
+
     /// v2.9.15 (fix): drop the in-memory SlotContent cache so the next `get(_:)`
     /// re-reads from disk. `get(_:)` serves cached SlotContent and never notices a
     /// change made by ANOTHER process (the `clipslots` CLI). The GUI's FSEvents watcher
@@ -641,6 +718,10 @@ public final class SlotStorage {
             cacheFingerprint.removeAll()
             labelCache.removeAll()
             labelCacheFingerprint.removeAll()
+            // hotfix11: 搜索扫描缓存同样要清，否则外部（CLI）写入后全局搜索会继续搜到旧文本。
+            // 它本身有指纹护栏，这里一起清只是让「显式失效」语义完整。
+            scanCache.removeAll()
+            scanCacheFingerprint.removeAll()
         }
     }
 
@@ -809,7 +890,12 @@ public final class SlotStorage {
 
     // MARK: - Internal Read/Write
 
-    private func readSlotContent(from slotDir: URL) -> SlotContent {
+    /// - Parameter textOnly: v2.11.7 hotfix11。`true` 时只读**文本类** item 负载字节，非文本
+    ///   （图片 / 视频 / 大二进制）只保留 `type` 而把 `data` 留空，并跳过任何懒迁移写盘。
+    ///   专供全局搜索的整库扫描使用：搜索只需要文本 + 类型（类型决定过滤器语义，且 file-url /
+    ///   url 本身就是文本），不需要把几百 MB 图片字节读进内存。命中的槽位由调用方再用 `get(_:)`
+    ///   走完整读取路径补齐，用于渲染。
+    private func readSlotContent(from slotDir: URL, textOnly: Bool = false) -> SlotContent {
         var content = SlotContent()
 
         var isSlotDir: ObjCBool = false
@@ -853,6 +939,13 @@ public final class SlotStorage {
             for file in files where file.pathExtension == "bin" {
                 let encodedType = file.deletingPathExtension().lastPathComponent
                 let typeName = decodeSafeFileName(encodedType)
+                // hotfix11: 搜索扫描只需要文本。非文本负载保留 type、data 留空——`hasImage` /
+                // `isImageFile` 等过滤器判据都只看 type，因此过滤语义不受影响；preview 里的
+                // 「[图片 N KB]」体积数字会变成 0KB，但扫描结果只用于匹配，命中后会重新完整读取。
+                if textOnly, !Self.isSearchableTextType(typeName) {
+                    items.append(PasteboardItem(type: typeName, data: Data()))
+                    continue
+                }
                 do {
                     let data = try Data(contentsOf: file)
                     items.append(PasteboardItem(type: typeName, data: data))
@@ -918,8 +1011,11 @@ public final class SlotStorage {
                 // 全程原子化、先落盘 .bin 再改写 JSON，中途崩溃不丢原始 data；无迁移需求时零写盘。
                 // P1-B (v2.10.44): 迁移后再按当前 slotDir 约定重建外置字节路径，消除「存量绝对
                 // 路径随数据目录迁移/换机/CLIPSLOTS_DATA_DIR 变更而全量断链」。
-                content.attachments = normalizeStoragePaths(
-                    migrateInlineAttachmentsIfNeeded(atts, slotDir: slotDir), slotDir: slotDir)
+                // hotfix11: 搜索扫描（textOnly）绝不触发懒迁移写盘——一次全局搜索会扫过整库
+                // 每个组，让只读的搜索路径顺手改写几十个槽位的 attachments.json 既意外也危险。
+                // 迁移仍由正常的 get(_:) 读取路径承担；搜索只需要附件**名字**，不受影响。
+                let normalizedAtts = textOnly ? atts : migrateInlineAttachmentsIfNeeded(atts, slotDir: slotDir)
+                content.attachments = normalizeStoragePaths(normalizedAtts, slotDir: slotDir)
                 // Clean decode clears any prior corruption poison for this slot.
                 if let s = slotNum { attachmentDecodeFailedSlots.remove(s) }
             } else {

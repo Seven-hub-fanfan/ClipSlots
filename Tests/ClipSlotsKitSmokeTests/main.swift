@@ -69,6 +69,16 @@ private func firstGroupId(_ storage: SpecialSlotStorage) -> String {
     storage.loadIndex().specialSlots.first!.id
 }
 
+/// v2.11.7 hotfix11: 造一个「冷缓存」SlotStorage——同一个组目录、全新实例，进程内缓存为空，
+/// 等价于「这个组本次会话从没被用户打开过」。全局搜索漏搜就发生在这种状态下。
+private func coldStorage(forGroup gid: String) -> SlotStorage {
+    let dataDir = ProcessInfo.processInfo.environment["CLIPSLOTS_DATA_DIR"]!
+    let dir = URL(fileURLWithPath: dataDir)
+        .appendingPathComponent("special_slots", isDirectory: true)
+        .appendingPathComponent(gid, isDirectory: true)
+    return SlotStorage(slotsDir: dir)
+}
+
 // MARK: - 用例
 
 let t = TestRunner()
@@ -2249,6 +2259,287 @@ do {
             "★★简洁·浅色：新拟物承载面必须等于窗口底（否则工具栏与卡片区之间会出现可见接缝）")
     t.check(NeumorphicPalette.minimalDark.ground == MinimalSkinPalette.dark.window,
             "★★简洁·深色：新拟物承载面必须等于窗口底")
+}
+
+
+// MARK: - SEARCH (v2.11.7 hotfix11) 槽位可搜索文本
+//
+// 用户反馈「搜索功能坏了，基本不能搜到想要的内容」。根因不是最近几轮 hotfix 动了搜索框——
+// SlotSearchBar 自 hotfix3 起只改了外观（内凹 well、范围选择器移到框外），TextField 的
+// `$searchText` 绑定与 ContentView 的 `.onChange(of: searchText)` 一行没动——而是 GUI 的
+// 可搜索文本自 v2.5 起只取 `content.preview`，也就是**正文前 30 字**。
+//
+// 于是长文槽位同时表现出两种「搜不到想要的」：
+//   ① 关键词在第 31 字之后 → 一条都搜不出来；
+//   ② 同批槽位共享开头（本机那批 prompt 全以 `| **编号** | **时间** …` 起头）→ 搜表头里的词
+//      把整组全部命中，等于没筛。
+//
+// 这组用例钉住的是「可搜索文本收录范围」。★★ 那几条在修复前会失败，是真正的回归防护；其余是
+// 防止这次扩大收录范围时把原有的匹配能力（槽位号 / label / 文件名 / URL）或 CLI 语义碰坏。
+// 注意搜索逻辑此前住在 App target（`SlotSearchMatcher`），smoke 根本测不到它——这也是这个 bug
+// 潜伏这么久的原因之一，所以本次把内容侧实现下沉到 Kit 的 `SlotSearchIndex`。
+
+do {
+    /// 复刻本机真实数据形态：一批 prompt 槽位共享 30 字以上的表头，正文两千余字。
+    let sharedHeader = "| **编号** | **时间** | **时长** | **画面** | **镜头调度** |"
+    let longBody = sharedHeader + """
+
+    | 01 | 00:00 | 3s | 荒原远景 | 三人骑马迎面而来 |
+    | 02 | 00:03 | 4s | 中景 | 马蹄扬尘，声音渐强 |
+    """
+    t.check(longBody.count > 30, "前置：测试正文必须超过 preview 的 30 字截断阈值")
+
+    let long = makeTextContent(longBody)
+
+    // ① ★★ 正文深处的关键词必须命中（修复前失败：preview 只有前 30 字）
+    //    这三个词就是用户实测「CLI 搜得到、GUI 搜不到」的那三个。
+    for keyword in ["镜头调度", "骑马", "声音"] {
+        t.check(SlotSearchIndex.matches(slot: 1, content: long, label: "", query: keyword),
+                "★★正文里的「\(keyword)」必须能搜到（在第 30 字之后，修复前搜不到）")
+    }
+
+    // ② preview 区间（前 30 字）内的关键词不能因为这次改动而丢
+    t.check(SlotSearchIndex.matches(slot: 1, content: long, label: "", query: "编号"),
+            "★正文开头的关键词仍要命中（不能为了搜全文把 preview 段落搞丢）")
+
+    // ③ 不匹配的词必须返回 false —— 否则「全命中」和「全不命中」一样没用
+    t.check(!SlotSearchIndex.matches(slot: 1, content: long, label: "", query: "螺旋桨"),
+            "★★正文里没有的词必须搜不到（守住筛选的意义，避免退化成「什么都匹配」）")
+
+    // ④ 大小写不敏感 + 查询串两端空白应被忽略（GUI 里用户复制粘贴关键词常带空格）
+    let mixed = makeTextContent("Deploy the STAGING cluster")
+    t.check(SlotSearchIndex.matches(slot: 1, content: mixed, label: "", query: "staging"),
+            "★大小写不敏感：小写 query 应命中正文里的大写词")
+    t.check(SlotSearchIndex.matches(slot: 1, content: mixed, label: "", query: "  STAGING  "),
+            "★query 两端空白应被忽略（粘贴关键词常带空格，否则用户以为搜不到）")
+    t.check(SlotSearchIndex.matches(slot: 1, content: mixed, label: "", query: "   "),
+            "★纯空白 query 视为「未搜索」→ 不筛选（不能把所有槽位都判为不匹配）")
+
+    // ⑤ ★★ 附件名必须可搜（纯附件槽位只能靠文件名被找到；CLI 从 v2.9.3 就支持，GUI 之前不支持）
+    var withAttachment = makeTextContent("参考资料")
+    withAttachment.attachments = [
+        SlotContent.SlotAttachment(name: "季度复盘-Q3.pdf", type: .file),
+        SlotContent.SlotAttachment(name: "封面草图.png", type: .image)
+    ]
+    t.check(SlotSearchIndex.matches(slot: 2, content: withAttachment, label: "", query: "季度复盘"),
+            "★★附件名必须可搜（修复前 GUI 搜不到附件，与 CLI 行为不一致）")
+    t.check(SlotSearchIndex.matches(slot: 2, content: withAttachment, label: "", query: "草图.png"),
+            "★★附件名含扩展名的片段也应命中")
+
+    // ⑥ label / 槽位号：GUI 原有能力，不能退化
+    t.check(SlotSearchIndex.matches(slot: 3, content: long, label: "分镜表", query: "分镜"),
+            "★label 必须可搜")
+    t.check(SlotSearchIndex.matches(slot: 7, content: makeTextContent("x"), label: "", query: "7"),
+            "★槽位号必须可搜（GUI 支持直接输数字定位槽位）")
+    t.check(SlotSearchIndex.matches(slot: 7, content: makeTextContent("x"), label: "", query: "槽位 7"),
+            "★「槽位 N」写法必须可搜")
+
+    // ⑦ 文件 URL：文件名 / 扩展名 / 路径片段
+    let fileItem = PasteboardItem(type: "public.file-url",
+                                  data: Data("file:///Users/demo/Documents/年报草稿.docx".utf8))
+    var fileContent = SlotContent()
+    fileContent.items = [[fileItem]]
+    fileContent.timestamp = Date()
+    for keyword in ["年报草稿", "docx", "Documents"] {
+        t.check(SlotSearchIndex.matches(slot: 4, content: fileContent, label: "", query: keyword),
+                "★文件槽位应能按「\(keyword)」搜到（文件名 / 扩展名 / 路径片段）")
+    }
+
+    // ⑧ 网址：完整 URL 与 host 都要可搜
+    let urlContent = makeTextContent("https://github.com/Seven-hub-fanfan/ClipSlots/releases")
+    t.check(SlotSearchIndex.matches(slot: 5, content: urlContent, label: "", query: "github.com"),
+            "★URL 槽位应能按 host 搜到")
+    t.check(SlotSearchIndex.matches(slot: 5, content: urlContent, label: "", query: "releases"),
+            "★URL 槽位应能按路径片段搜到")
+
+    // ⑨ ★★ GUI / CLI 同源：内容侧 haystack 是同一份实现，但槽位号只属于 GUI。
+    //    CLI 的 `clipslots search "1"` 不能因为这次重构突然命中所有槽位 1（那是行为契约破坏），
+    //    所以 contentHaystack 必须不含槽位号，而 slotHaystack = 槽位号 + contentHaystack。
+    let plain = makeTextContent("与数字无关的正文")
+    t.check(!SlotSearchIndex.matchesContent(content: plain, label: "", query: "9"),
+            "★★CLI 侧（contentHaystack）不得包含槽位号，否则 search \"9\" 会命中所有槽位 9")
+    t.check(SlotSearchIndex.matches(slot: 9, content: plain, label: "", query: "9"),
+            "★★GUI 侧（slotHaystack）必须包含槽位号")
+    let contentSide = SlotSearchIndex.contentHaystack(content: long, label: "分镜表")
+    let slotSide = SlotSearchIndex.slotHaystack(slot: 3, content: long, label: "分镜表")
+    t.check(slotSide.hasSuffix(contentSide),
+            "★★slotHaystack 必须以 contentHaystack 结尾（= 两侧共用同一份内容文本，不会再各写一套）")
+    t.equal(contentSide, contentSide.lowercased(),
+            "★haystack 必须已折叠大小写（匹配时只做一次 lowercased，避免每次按键重复折叠）")
+
+    // ⑩ 图片等非文本槽位：可读描述只存在于 preview（plainText 为 nil），必须仍可搜
+    var imageContent = SlotContent()
+    imageContent.items = [[PasteboardItem(type: "public.png", data: Data([0x89, 0x50, 0x4E, 0x47]))]]
+    imageContent.timestamp = Date()
+    t.check(imageContent.plainText == nil || imageContent.plainText?.isEmpty == true,
+            "前置：图片槽位没有正文（plainText 为空）")
+    let imageHaystack = SlotSearchIndex.contentHaystack(content: imageContent, label: "配图")
+    t.check(imageHaystack.contains("图片"),
+            "★★图片槽位的 preview 描述（如「[图片 742KB]」）必须收进 haystack，否则搜「图片」搜不到")
+    t.check(SlotSearchIndex.matches(slot: 6, content: imageContent, label: "配图", query: "配图"),
+            "★图片槽位仍应能按 label 搜到")
+
+    // ⑪ 缓存正确性：haystack 按 contentId::updatedAt 缓存，内容一改必须立刻反映
+    //    （缓存 key 忘记带 updatedAt 是 v2.10.64/65 「缩略图串组 / 不刷新」的同源坑，这里提前钉住。）
+    var v1 = makeTextContent("初版：地面外景")
+    v1.contentId = "fixed-content-id"
+    v1.updatedAt = 1000
+    t.check(SlotSearchIndex.matches(slot: 1, content: v1, label: "", query: "地面外景"),
+            "前置：初版正文可搜到")
+    var v2 = v1
+    v2.items = makeTextContent("改版：太空舱内景").items
+    v2.updatedAt = 2000  // 内容变了，updatedAt 必须同步推进
+    t.check(SlotSearchIndex.matches(slot: 1, content: v2, label: "", query: "太空舱"),
+            "★★改写正文后新词必须立即可搜（缓存要随 updatedAt 失效，否则搜索永远停留在旧内容）")
+    t.check(!SlotSearchIndex.matches(slot: 1, content: v2, label: "", query: "地面外景"),
+            "★★改写正文后旧词必须搜不到（陈旧缓存会让已删除的内容一直被搜出来）")
+
+    // ⑫ 空槽：任何非空关键词都不该命中（空槽由 .empty 过滤器负责，不该混进关键词结果）
+    let empty = SlotContent()
+    t.check(!SlotSearchIndex.matches(slot: 8, content: empty, label: "", query: "任意"),
+            "★空槽不应被关键词命中")
+    t.check(SlotSearchIndex.matches(slot: 8, content: empty, label: "", query: ""),
+            "★空 query 对空槽也返回 true（= 未搜索状态不做筛选，由过滤器决定是否展示）")
+}
+
+// MARK: - SEARCH-SCAN (v2.11.7 hotfix11) 全局搜索必须扫磁盘，而不是只扫进程内缓存
+//
+// 「搜索基本搜不到想要的内容」的第二处根因：全局搜索原来读 `SlotStorage.snapshot()`，而
+// `snapshot()` 返回的是**进程内缓存**——只有本次会话被 `get(_:)` 读过的槽位才在里面，也就是
+// 用户真正点开过的组。冷启动后在「全局」范围搜别的页 / 别的组，UI 一律 0 命中（本机实测搜默认组
+// 的 `10%`、另一页的 `骑马` 都是 0，而 CLI 走磁盘全都搜得到）。
+//
+// 这组用例用「新建一个 SlotStorage 实例」来精确模拟「这个组本次会话从没被打开过」的冷缓存状态。
+// ★★ 两条断言里，snapshot 那条固定住 bug 的形状（缓存确实是空的 → 旧实现必然搜不到），
+// searchScanSnapshot 那条是修复本身。
+do {
+    t.withFreshStore("SEARCH-SCAN") { storage in
+        let gid = firstGroupId(storage)
+        let body = "第 31 个字符之后才出现的关键词：" + String(repeating: "填充", count: 20) + "月球背面基地"
+        storage.set(1, content: makeTextContent(body), in: gid)
+        storage.set(2, content: makeTextContent("另一个槽位：深海热泉"), in: gid)
+
+        // 冷缓存：全新实例代表「这个组本次会话没被打开过」
+        let cold = coldStorage(forGroup: gid)
+        t.equal(cold.snapshot().count, 0,
+                "★★冷实例的 snapshot() 必须是空的（这正是旧全局搜索漏掉未访问组的原因）")
+
+        let scan = cold.searchScanSnapshot(slotCount: 10)
+        t.equal(scan.count, 2, "★★searchScanSnapshot 必须从磁盘补齐两个非空槽位")
+        t.check(scan[1].map {
+                    SlotSearchIndex.matches(slot: 1, content: $0, label: "", query: "月球背面基地")
+                } == true,
+                "★★冷缓存下也要能搜到正文深处的关键词（修复前全局搜索对未访问组 0 命中）")
+        t.check(scan[2].map {
+                    SlotSearchIndex.matches(slot: 2, content: $0, label: "", query: "深海热泉")
+                } == true,
+                "★★冷缓存下第二个槽位同样要能搜到")
+        t.check(scan[3] == nil, "★空槽位不该出现在扫描结果里（避免污染结果列表与计数）")
+
+        // 扫描是只读的：不得把内容灌进常驻缓存（否则全局搜索会把整库拉进内存，本机数据目录 11 GB）
+        t.equal(cold.snapshot().count, 0,
+                "★★searchScanSnapshot 不得污染常驻缓存（一次全局搜索会扫过整库，缓存整库 = 内存爆炸）")
+
+        // 文本槽位在扫描结果里必须是**完整**正文，不能被截断成 preview
+        if let scanned = scan[1] {
+            t.equal(scanned.plainText?.count ?? 0, body.count,
+                    "★扫描出的文本槽位必须是完整正文（截断就等于没修）")
+        }
+    }
+}
+
+// MARK: - SEARCH-SCAN-BINARY (v2.11.7 hotfix11) 扫描跳过大二进制但保住过滤器语义
+//
+// 扫描之所以敢扫全库，是因为它 textOnly：图片 / 视频只留 pasteboard type、不读字节。这组用例
+// 钉住这个取舍的两端——① 字节确实没被读进来（否则内存优化落空）；② 类型判据仍然成立，所以
+// 「图片 / 文件 / 网址」这些过滤器不会因为不读字节而失效。
+do {
+    t.withFreshStore("SEARCH-SCAN-BINARY") { storage in
+        let gid = firstGroupId(storage)
+
+        // 伪造一张「大图」：1.5 MB 的 PNG 负载
+        var image = SlotContent()
+        let fakePNG = Data([0x89, 0x50, 0x4E, 0x47] + [UInt8](repeating: 0xAB, count: 1_500_000))
+        image.items = [[PasteboardItem(type: "public.png", data: fakePNG)]]
+        image.timestamp = Date()
+        storage.set(1, content: image, in: gid)
+
+        // 文件槽位：负载是一小段 file URL 文本，必须照读（按文件名搜 + .file 过滤器都靠它）
+        var file = SlotContent()
+        file.items = [[PasteboardItem(type: "public.file-url",
+                                      data: Data("file:///Users/demo/年终总结.pdf".utf8))]]
+        file.timestamp = Date()
+        storage.set(2, content: file, in: gid)
+
+        let cold = coldStorage(forGroup: gid)
+        let scan = cold.searchScanSnapshot(slotCount: 10)
+
+        let scannedImage = scan[1]
+        t.check(scannedImage != nil, "图片槽位应出现在扫描结果里")
+        t.equal(scannedImage?.items.first?.first?.data.count ?? -1, 0,
+                "★★图片字节不得被读进扫描结果（1.5 MB × 全库 = 全局搜索一次吃光内存）")
+        // `hasImage` / `isImageFile` 这些过滤器判据住在 App target，Kit smoke 测不到；但它们全部
+        // 只看 pasteboard type，所以这里断言 type 原样保留 = 过滤器语义不受「不读字节」影响。
+        t.equal(scannedImage?.items.first?.first?.type, "public.png",
+                "★★不读字节也必须保留 pasteboard type（否则「图片」过滤器在未访问的组里失效）")
+
+        let scannedFile = scan[2]
+        t.equal(scannedFile?.primaryFileURL?.lastPathComponent, "年终总结.pdf",
+                "★★file-url 负载是文本，必须照读（按文件名搜 +「文件」过滤器都依赖它）")
+        t.check(SlotSearchIndex.matches(slot: 2, content: scannedFile ?? SlotContent(),
+                                        label: "", query: "年终总结"),
+                "★★冷缓存下也要能按文件名搜到")
+
+        // 类型判定函数本身的边界（它决定「读不读这段字节」，判错的代价是搜不到或内存爆炸）
+        for textual in ["public.utf8-plain-text", "NSStringPboardType", "public.rtf",
+                        "public.html", "public.file-url", "public.url"] {
+            t.check(SlotStorage.isSearchableTextType(textual), "★\(textual) 应被当作可搜索文本类型")
+        }
+        for binary in ["public.png", "public.tiff", "public.jpeg", "com.adobe.pdf",
+                       "public.mpeg-4"] {
+            t.check(!SlotStorage.isSearchableTextType(binary), "★\(binary) 不该被当作文本类型（应跳过字节）")
+        }
+    }
+}
+
+// MARK: - SEARCH-SCAN-FRESH (v2.11.7 hotfix11) 扫描缓存不得把搜索钉在旧内容上
+//
+// 扫描缓存是为了让「逐字符搜索」不至于每次按键都重读 13 组 × 10 槽（0.2s 去抖 + 全库磁盘扫描）。
+// 但缓存一旦失效不及时，症状会从「搜不到」变成更难查的「搜到的是旧的 / 已删的」。这组用例把
+// 「改写后能搜到新词、搜不到旧词」和「清空后彻底搜不到」钉死。
+do {
+    t.withFreshStore("SEARCH-SCAN-FRESH") { storage in
+        let gid = firstGroupId(storage)
+        storage.set(1, content: makeTextContent("初版关键词：赤道无风带"), in: gid)
+
+        let cold = coldStorage(forGroup: gid)
+        t.check(cold.searchScanSnapshot(slotCount: 10)[1].map {
+                    SlotSearchIndex.matches(slot: 1, content: $0, label: "", query: "赤道无风带")
+                } == true, "前置：首次扫描能搜到初版内容")
+
+        // 同实例改写（模拟 GUI 自己改）：新词要能搜到，旧词必须消失
+        cold.set(1, content: makeTextContent("改版关键词：极地涡旋"))
+        let afterEdit = cold.searchScanSnapshot(slotCount: 10)[1]
+        t.check(afterEdit.map {
+                    SlotSearchIndex.matches(slot: 1, content: $0, label: "", query: "极地涡旋")
+                } == true, "★★改写后新词必须立即可搜（扫描缓存要随写入失效）")
+        t.check(afterEdit.map {
+                    SlotSearchIndex.matches(slot: 1, content: $0, label: "", query: "赤道无风带")
+                } != true, "★★改写后旧词必须搜不到（陈旧扫描缓存会让改掉的内容继续被搜出来）")
+
+        // 外部进程写入（CLI 场景）：另一个实例改盘 + invalidateCache 后必须反映
+        let external = coldStorage(forGroup: gid)
+        external.set(2, content: makeTextContent("外部写入：季风槽"))
+        cold.invalidateCache()
+        t.check(cold.searchScanSnapshot(slotCount: 10)[2].map {
+                    SlotSearchIndex.matches(slot: 2, content: $0, label: "", query: "季风槽")
+                } == true, "★★外部（CLI）写入的槽位在失效后必须能被搜到")
+
+        // 清空：不能再被搜到，也不该以空内容占位
+        cold.clear(1)
+        let afterClear = cold.searchScanSnapshot(slotCount: 10)
+        t.check(afterClear[1] == nil, "★★清空后的槽位不得留在扫描结果里（否则已删内容还能搜到）")
+    }
 }
 
 t.report()

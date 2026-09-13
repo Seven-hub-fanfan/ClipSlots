@@ -6807,6 +6807,9 @@ final class SlotStoreObservable: ObservableObject {
         let groupName: String
         let groupOrder: Int
         let storage: SlotStorage
+        /// v2.11.7 hotfix11: 每组槽位数。全局搜索改为扫磁盘（见 expandSearchableSlots），
+        /// 需要知道要扫 1...slotCount；`config` 只在主线程读，所以在这里一起捕获。
+        let slotCount: Int
     }
 
     /// Capture the searchable-group list on the main thread. Cheap: reads the in-memory
@@ -6824,30 +6827,49 @@ final class SlotStoreObservable: ObservableObject {
                     groupId: group.id,
                     groupName: group.name,
                     groupOrder: group.order,
-                    storage: specialStorage.slotStorage(for: group.id)
+                    storage: specialStorage.slotStorage(for: group.id),
+                    slotCount: config.slots
                 ))
             }
         }
         return refs
     }
 
-    /// Expand captured group refs into per-slot search results. SAFE to call off the main
-    /// thread: `SlotStorage.snapshot()` and `getLabel()` are internally synchronized, and (since
-    /// v2.10.38) `getLabel()` serves from an in-memory, fingerprinted label cache without taking
-    /// the cross-process lock on the hot path. This is the heavy part that used to freeze the UI.
-    static func expandSearchableSlots(_ groups: [SearchableGroupRef]) -> [SlotGlobalSearchResult] {
+    /// 把捕获到的分组引用展开成「已命中」的逐槽搜索结果。SAFE to call off the main thread：
+    /// `searchScanSnapshot` / `get` / `getLabel` 都在内部串行队列 + 跨进程锁下同步。
+    ///
+    /// ★ v2.11.7 hotfix11（搜索修复的第二处根因）：此前这里读 `group.storage.snapshot()`，
+    /// 而 `snapshot()` 只是**进程内缓存**——只有本次会话被 `get(_:)` 读过的槽位才在里面，也就是
+    /// 用户真正打开过的组。于是「全局」搜索静默漏掉所有没访问过的组：冷启动后搜默认组的 `10%`、
+    /// 搜另一页 prompt 组的 `骑马`，UI 都是 0 命中，而 CLI（走磁盘）都能搜到。现在改为
+    /// `searchScanSnapshot(slotCount:)`，从磁盘扫全库。
+    ///
+    /// 内存：扫描是 textOnly 的（图片 / 视频只留 type，不读字节，也不进常驻缓存），所以扫全库
+    /// 不会把 11 GB 数据目录拉进内存；**命中的槽位**才用 `get(_:)` 完整读取，用于结果行渲染
+    /// （缩略图、内联图片、精确的 `[图片 N KB]` preview 都依赖真实字节）。
+    /// 这也是为什么匹配下沉到这里做：先匹配后补齐，才能让内存只随命中数增长。
+    static func expandSearchableSlots(_ groups: [SearchableGroupRef],
+                                      query: String,
+                                      filter: SlotFilterType) -> [SlotGlobalSearchResult] {
         var results: [SlotGlobalSearchResult] = []
         for group in groups {
-            let snapshot = group.storage.snapshot()
-            for (slot, content) in snapshot {
+            let scan = group.storage.searchScanSnapshot(slotCount: group.slotCount)
+            for (slot, scanned) in scan {
                 let label = group.storage.getLabel(slot) ?? ""
+                guard SlotSearchMatcher.matches(slot: slot,
+                                                content: scanned,
+                                                label: label,
+                                                query: query,
+                                                filter: filter) else { continue }
+                // 命中才补齐完整内容（含图片字节）；补读失败时退回扫描结果，至少还能展示与跳转。
+                let full = group.storage.get(slot)
                 results.append(SlotGlobalSearchResult(
                     pageId: group.pageId,
                     pageName: group.pageName,
                     groupId: group.groupId,
                     groupName: group.groupName,
                     slot: slot,
-                    content: content,
+                    content: full.isEmpty ? scanned : full,
                     label: label,
                     pageOrder: group.pageOrder,
                     groupOrder: group.groupOrder
@@ -6860,8 +6882,9 @@ final class SlotStoreObservable: ObservableObject {
     /// Return all searchable slots across all pages and groups (read-only). Convenience
     /// composition of `searchableGroupsSnapshot()` + `expandSearchableSlots(_:)` for callers
     /// that don't need the two-phase (main-capture / off-main-expand) split.
+    /// 空 query + `.all` 过滤器 = 不筛选，等价于「全部可搜索槽位」。
     func allSearchableSlots() -> [SlotGlobalSearchResult] {
-        SlotStoreObservable.expandSearchableSlots(searchableGroupsSnapshot())
+        SlotStoreObservable.expandSearchableSlots(searchableGroupsSnapshot(), query: "", filter: .all)
     }
 }
 
