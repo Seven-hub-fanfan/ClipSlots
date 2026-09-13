@@ -262,15 +262,18 @@ struct SlotCardView: View {
         // 修复：把横线放进一个与卡片等大的容器并按卡片圆角 clip，横线永远不可能画到卡片形状之外。
         // 位置、尺寸、配色一律不变（不动任何胶囊坐标），只是左端会被圆角自然切齐。
         .overlay {
-            if !isMinimalSkin {
-                Capsule()
-                    .fill(slotAccent)
-                    .frame(width: 34, height: 3)
-                    .padding(.leading, AppTheme.slotCardPadding)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-                    .clipShape(RoundedRectangle(cornerRadius: AppTheme.slotCardCornerRadius, style: .continuous))
-                    .allowsHitTesting(false)
-            }
+            // v2.11.7 hotfix2: 这条横线**两种皮肤完全一致**，不做任何差异化。
+            //
+            // 上一轮做简洁模式时把它当成「纯装饰」整条去掉了，这是判断错误：它的颜色跟着
+            // 槽位编号走，和编号是同一个身份标识的两次表达（一次在角上、一次在顶边），不是装饰。
+            // 简洁模式收的是**不携带信息**的品牌色，槽位身份色从来不在收编范围内。
+            Capsule()
+                .fill(slotAccent)
+                .frame(width: 34, height: 3)
+                .padding(.leading, AppTheme.slotCardPadding)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                .clipShape(RoundedRectangle(cornerRadius: AppTheme.slotCardCornerRadius, style: .continuous))
+                .allowsHitTesting(false)
         }
         // Hover state only; the composed-card transform is applied after every visual overlay.
         .onHover { hovering in

@@ -589,15 +589,28 @@ struct ContentView: View {
             // The edge clusters keep their intrinsic sizes and stay pinned to the title-bar edges.
             HStack(spacing: 14) {
                 ZStack {
-                RoundedRectangle(cornerRadius: 12, style: .continuous)
-                    // v2.11.7 hotfix: logo 底板是纯装饰的品牌渐变 → 简洁模式收成中性灰块。
-                    .fill(AppTheme.chromeAccentTile)
-                    .frame(width: 44, height: 44)
-                    .shadow(color: AppTheme.chromeAccentTileShadow, radius: 10, y: 4)
+                // v2.11.7 hotfix2: 简洁模式直接展示 App 真实图标（白底 squircle + 黑色三叠石），
+                // 30pt，无底板 / 无描边 / 无投影 —— 上一轮给它套的中性灰底板在浅色简洁界面里
+                // 变成了一个「大白按钮」，看着像可点击的控件，而它其实只是个 logo。
+                //
+                // 图标从运行时的 `NSApp.applicationIconImage` 取，而不是 `Image("AppIcon")`：
+                // 本项目的图标是 `assets/AppIcon.icns` 在打包时拷进 bundle Resources 的（没有
+                // Assets.xcassets 目录，SwiftUI 按名字查资源目录会拿不到），而 applicationIconImage
+                // 读的就是当前 bundle 已注册的那份，换图标后自动跟着变，不会漏更新。
+                if AppTheme.isMinimalSkin {
+                    Image(nsImage: NSApp.applicationIconImage)
+                        .resizable()
+                        .frame(width: 30, height: 30)
+                } else {
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .fill(AppTheme.chromeAccentTile)
+                        .frame(width: 44, height: 44)
+                        .shadow(color: AppTheme.chromeAccentTileShadow, radius: 10, y: 4)
 
-                Image(systemName: "rectangle.stack.fill")
-                    .font(.system(size: 20, weight: .semibold))
-                    .foregroundColor(AppTheme.chromeAccentTileInk)
+                    Image(systemName: "rectangle.stack.fill")
+                        .font(.system(size: 20, weight: .semibold))
+                        .foregroundColor(AppTheme.chromeAccentTileInk)
+                }
             }
 
             VStack(alignment: .leading, spacing: 4) {
