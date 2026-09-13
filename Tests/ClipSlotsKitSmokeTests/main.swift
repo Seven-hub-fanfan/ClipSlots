@@ -2118,18 +2118,31 @@ do {
 // 深色档尤其危险：那里没有「更亮的白」可用，凸起要靠**比面板更亮的灰**来表达，
 // 很容易一手滑就调得比面板还暗。
 //
+// v2.11.7 hotfix4 之后承载面变了：工具栏不再是浮动面板，而是**直接坐在画布上**，
+// 所以「凸起 / 内凹」的参照物从 panel 换成 ground，而 ground 必须与 App 层窗口底同源
+// （否则工具栏会重新变成一块颜色略不同的方块压在内容上）——这条也补成断言。
+//
 // 所以这一段把新拟物的三条硬约束全部写成断言，四套取值（简洁/多彩 × 浅色/深色）逐套过：
-//   ① 光源方向一致：raised > panel > well（亮度严格递减）
+//   ① 光源方向一致：raised > ground > well（亮度严格递减）
 //   ② 层级可辨：凸起与内凹之间必须有可察的亮度差，否则退化成「一片白」
 //   ③ 选中滑块与轨道、按钮文字与底色的对比度达标（滑块是「当前选哪个」的唯一信号）
 
 do {
-    // ── ① 光源方向：凸起比面板亮、内凹比面板暗。四套都必须成立。
+    // ── ① 光源方向：凸起比承载面亮、内凹比承载面暗。四套都必须成立。
+    // hotfix4 起承载面 = 画布（ground）。这条最容易在「去掉浮动面板」这类改动里悄悄翻面：
+    // 原来的 well 是相对**面板**调的，面板比画布亮，直接搬到画布上就可能比画布还亮
+    //（深色档尤其明显：原 #1B1B1D 压在 #161618 上其实是凸起，不是凹陷）。
     for (name, s) in NeumorphicPalette.allSurfaces {
-        t.check(s.raised.relativeLuminance > s.panel.relativeLuminance,
-                "★★\(name)：凸起必须比面板亮（光源在左上，顶面受光）")
-        t.check(s.well.relativeLuminance < s.panel.relativeLuminance,
-                "★★\(name)：内凹必须比面板暗")
+        t.check(s.raised.relativeLuminance > s.ground.relativeLuminance,
+                "★★\(name)：凸起必须比承载面（画布）亮（光源在左上，顶面受光）")
+        t.check(s.well.relativeLuminance < s.ground.relativeLuminance,
+                "★★\(name)：内凹必须比承载面（画布）暗")
+        let wellVsGround = s.ground.contrastRatio(to: s.well)
+        t.check(wellVsGround > 1.04,
+                "★\(name)：内凹要在画布上读得出来（实际 \(String(format: "%.3f", wellVsGround))）")
+        let raisedVsGround = s.raised.contrastRatio(to: s.ground)
+        t.check(raisedVsGround > 1.04,
+                "★\(name)：凸起要在画布上读得出来（实际 \(String(format: "%.3f", raisedVsGround))）")
         t.check(s.wellShade.relativeLuminance < s.well.relativeLuminance,
                 "★\(name)：内凹的上沿暗边必须比凹底更暗（内阴影的方向）")
         t.check(s.raisedHighlight.relativeLuminance >= s.raised.relativeLuminance,
@@ -2153,15 +2166,15 @@ do {
                 "★\(name)：滑块上的文字要达 WCAG AA 4.5:1（实际 \(String(format: "%.2f", inkOnSlider))）")
     }
 
-    // ── ④ 面板文字与危险操作
+    // ── ④ 承载面上的文字与危险操作（hotfix4 起文字直接压在画布上，不再压在白面板上）
     for (name, s) in NeumorphicPalette.allSurfaces {
-        t.check(s.ink.contrastRatio(to: s.panel) >= 4.5, "★\(name)：正文压在面板上要达 4.5:1")
-        t.check(s.subtleInk.contrastRatio(to: s.panel) >= 3.0, "★\(name)：次要文字压在面板上要达 3:1")
+        t.check(s.ink.contrastRatio(to: s.ground) >= 4.5, "★\(name)：正文压在画布上要达 4.5:1")
+        t.check(s.subtleInk.contrastRatio(to: s.ground) >= 3.0, "★\(name)：次要文字压在画布上要达 3:1")
         t.check(s.ink.contrastRatio(to: s.raised) >= 4.5, "★\(name)：正文压在凸起按钮上要达 4.5:1")
         // 「清空」是淡底 + 彩字，不是实心红底白字，所以要验的是彩字在淡底上的可读性。
         let danger = s.dangerInk.contrastRatio(to: s.dangerFill)
         t.check(danger >= 4.5, "★\(name)：危险操作的红字压在淡红底上要达 4.5:1（实际 \(String(format: "%.2f", danger))）")
-        t.check(s.dangerFill.contrastRatio(to: s.panel) < 2.0,
+        t.check(s.dangerFill.contrastRatio(to: s.ground) < 2.0,
                 "\(name)：危险操作的淡底不能重到抢过整行（它只是提示，不是主操作）")
     }
 
@@ -2198,6 +2211,17 @@ do {
             "★★外阴影朝下、高光朝上——这是「光源在左上」的唯一编码，反了整套凹凸都会翻面")
     t.check(NeumorphicMetrics.pressedShadowScale > 0 && NeumorphicMetrics.pressedShadowScale < 1,
             "★按下时阴影收敛比例必须在 (0,1)（=「压平」而不是消失或变大）")
+
+    // ── ⑧ 一体化（v2.11.7 hotfix4）：工具栏承载面必须与窗口底**逐值相同**。
+    //
+    // 这是「工具栏和内容区看不出接缝」的唯一硬条件，也是最容易在后续调色里悄悄失效的：
+    // 只要有人单独动了 MinimalSkinPalette.window 或 NeumorphicPalette.ground 之一，
+    // 工具栏区就会重新浮成一块颜色略不同的方块——差 1% 亮度肉眼说不出哪里怪，但确实割裂。
+    // 多彩模式那侧 AppTheme 直接引用 NeumorphicPalette.ground（App 层跑不了测试，只能靠引用同源）。
+    t.check(NeumorphicPalette.minimalLight.ground == MinimalSkinPalette.light.window,
+            "★★简洁·浅色：新拟物承载面必须等于窗口底（否则工具栏与卡片区之间会出现可见接缝）")
+    t.check(NeumorphicPalette.minimalDark.ground == MinimalSkinPalette.dark.window,
+            "★★简洁·深色：新拟物承载面必须等于窗口底")
 }
 
 t.report()

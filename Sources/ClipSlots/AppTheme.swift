@@ -223,8 +223,12 @@ enum AppTheme {
     // 计算属性；再由 `ContentView` 在皮肤变化时强制重建视图树（见 AppSkinCenter）。
     // 深浅切换依旧走动态色，零成本那条路径没有被牺牲。
 
-    private static let colorfulWindowBackground = dyn(light: Color(red: 0.965, green: 0.970, blue: 0.980),
-                                                      dark: Color(red: 0.075, green: 0.078, blue: 0.088))
+    // v2.11.7 hotfix4: 多彩模式的窗口底改为直接引用 NeumorphicPalette 的 `ground`。
+    // 工具栏去掉浮动面板后，它的承载面就是窗口底本身，两处必须**同源**——否则工具栏区
+    // 会重新变成一块颜色略不同的方块压在内容上（简洁模式那侧同源于 MinimalSkinPalette.window，
+    // 由 smoke 断言钉住两边相等）。取值与 hotfix4 之前逐位相同，视觉零变化。
+    private static let colorfulWindowBackground = dyn(light: color(NeumorphicPalette.colorfulLight.ground),
+                                                      dark: color(NeumorphicPalette.colorfulDark.ground))
     static var windowBackground: Color { isMinimalSkin ? minimalWindow : colorfulWindowBackground }
     static func windowBackground(_ scheme: ColorScheme) -> Color { windowBackground }
 

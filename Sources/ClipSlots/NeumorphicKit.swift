@@ -47,8 +47,8 @@ enum Neu {
         Color(.sRGB, red: rgb.red, green: rgb.green, blue: rgb.blue, opacity: 1)
     }
 
+    /// 画布 = 工具栏的承载面（hotfix4 起工具栏不再有自己的面板底）。
     static var ground: Color { dyn(\.ground) }
-    static var panel: Color { dyn(\.panel) }
     static var raised: Color { dyn(\.raised) }
     static var raisedHighlight: Color { dyn(\.raisedHighlight) }
     static var well: Color { dyn(\.well) }
@@ -98,23 +98,16 @@ enum Neu {
     }
 }
 
-// MARK: - 表面 1/3：浮动面板
+// MARK: - 表面 1/2：凸起
+//
+// v2.11.7 hotfix4: 原来这里还有第三种表面 `NeuPanelBackground`（白色大圆角浮动面板 +
+// 外阴影），工具栏和开关簇都挂在它上面。用户的判断很准：那块面板把工具栏做成了一个
+// **独立悬浮块**，和下面的卡片区分成两层，界面被生生切开。新拟物本来就有两种读法——
+// 「一块浮起来的板」和「同一张面上凹下去 / 凸起来」——设计稿走的其实是后者，
+// 我照着做成了前者。现在整块面板连同它的外阴影一起删掉：工具栏直接坐在画布上，
+// 只保留控件自身的凹凸（内凹搜索框 / 微凸按钮），层级感由控件表达，而不是由一块板表达。
 
-/// 白色大圆角浮动面板 + 柔和外阴影。工具栏与开关簇的承载面。
-struct NeuPanelBackground: View {
-    var radius: CGFloat = NeumorphicMetrics.panelRadius
-
-    var body: some View {
-        let shape = RoundedRectangle(cornerRadius: radius, style: .continuous)
-        shape
-            .fill(Neu.panel)
-            .overlay(shape.strokeBorder(Neu.hairline, lineWidth: 0.8))
-            .shadow(color: Neu.dropShadow, radius: 12, x: 0, y: 5)
-            .shadow(color: Neu.lightShadow, radius: 6, x: -3, y: -3)
-    }
-}
-
-// MARK: - 表面 2/3：凸起
+// MARK: - 表面 1/2：凸起
 
 /// 微凸表面：顶面受光的浅渐变 + 右下投影 + 左上高光。按下时投影收敛（“压平”）。
 struct NeuRaisedBackground: View {
@@ -178,11 +171,6 @@ struct NeuWellBackground: View {
 // MARK: - 便捷修饰器
 
 extension View {
-    /// 挂到浮动面板上。
-    func neuPanel(radius: CGFloat = NeumorphicMetrics.panelRadius) -> some View {
-        background(NeuPanelBackground(radius: radius))
-    }
-
     /// 挂成微凸控件。
     func neuRaised(radius: CGFloat = NeumorphicMetrics.actionRadius,
                    pressed: Bool = false,

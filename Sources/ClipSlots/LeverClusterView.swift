@@ -61,9 +61,12 @@ struct LeverClusterView: View {
                 resetHelp: "重置读游标：下次 Cmd+1 从当前组第一个非空槽重新开始"
             )
         }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 9)
-        .neuPanel(radius: 14)
+        // v2.11.7 hotfix4: 去掉这一簇自己的浮动面板底（原 `.neuPanel(radius: 14)`）。
+        // 它和工具栏面板一起构成了「小卡片浮在大面板上」的两层嵌套，是割裂感最重的地方。
+        // 现在两区直接坐在工具栏所在的画布上，分组关系只靠中间那条发丝线 + 各自的标题表达；
+        // 凹凸质感仍在（滑道内凹、滑块与游标按钮微凸），只是不再有「一块板」。
+        .padding(.horizontal, 4)
+        .padding(.vertical, 2)
         .fixedSize()
         .onChange(of: autoMode.autoStoreEnabled) { _ in
             DispatchQueue.main.async { store.recomputeAutoPreviews() }

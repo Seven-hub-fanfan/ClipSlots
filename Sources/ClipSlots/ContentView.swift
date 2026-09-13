@@ -516,33 +516,35 @@ struct ContentView: View {
 
     private var headerView: some View {
         VStack(spacing: 0) {
-            // v2.11.8: 工具栏两行（标题/搜索行 + 操作行）收进一块**浮动新拟物面板**里，
-            // 面板与窗口边缘留 12pt（NeumorphicMetrics.panelInset），靠这圈留白 + 外阴影浮起来。
+            // v2.11.7 hotfix4: 工具栏**不再是一块浮动面板**。
             //
-            // 行间那条分隔线刻意用 1px 的 Neu.hairline 而不是 Divider()：Divider 在 macOS 上是
-            // 系统分隔色的实线，压在白面板上比设计稿重一档，会把「一块完整面板」看成「两块拼起来的」。
-            VStack(spacing: 0) {
-                titleBar
-                    .padding(.horizontal, NeumorphicMetrics.panelPadding)
-                    .padding(.vertical, 10)
+            // hotfix3 把这两行（标题/搜索行 + 操作行）装进了白色大圆角面板 + 外阴影里，
+            // 结果工具栏成了压在内容上的独立悬浮块，和下面的卡片区分成两层——用户一眼就看出
+            // 「割裂」。现在改回一体化：没有面板底、没有圆角、没有外阴影，工具栏与卡片区共用
+            // 同一张画布底（见下面的 HeaderSurfaceBackground），左右留白也换成 `AppTheme.pagePadding`
+            // ——和卡片区同一个值，工具栏里的控件才会与下面第一列卡片左右对齐。
+            //
+            // 新拟物的质感全部下沉到控件自身：内凹搜索框、微凸按钮、内凹滑道。层级由控件表达，
+            // 不由一块板表达。
+            //
+            // 行间那条分隔线保持 1px 的 Neu.hairline 而不是 Divider()：Divider 是系统分隔色的实线，
+            // 在一体化的底上会重新读成「上下两块拼起来」。
+            titleBar
+                .padding(.horizontal, AppTheme.pagePadding)
+                .padding(.top, 10)
+                .padding(.bottom, 8)
 
-                Rectangle()
-                    .fill(Neu.hairline)
-                    .frame(height: 1)
-                    .padding(.horizontal, NeumorphicMetrics.panelPadding)
+            Rectangle()
+                .fill(Neu.hairline)
+                .frame(height: 1)
+                .padding(.horizontal, AppTheme.pagePadding)
 
-                actionBar
-                    // v2.10.24: 跨组游标提示胶囊叠在操作行上，水平居中，不占额外垂直空间
-                    // （仅在游标位于其他组时才有内容）。
-                    .overlay(crossGroupCursorHint)
-                    .padding(.horizontal, NeumorphicMetrics.panelPadding)
-                    .padding(.top, 8)
-                    .padding(.bottom, 8)
-            }
-            .neuPanel()
-            .padding(.horizontal, NeumorphicMetrics.panelInset)
-            .padding(.top, NeumorphicMetrics.panelInset)
-            .padding(.bottom, 6)
+            actionBar
+                // v2.10.24: 跨组游标提示胶囊叠在操作行上，水平居中，不占额外垂直空间
+                // （仅在游标位于其他组时才有内容）。
+                .overlay(crossGroupCursorHint)
+                .padding(.horizontal, AppTheme.pagePadding)
+                .padding(.vertical, 8)
 
             specialSlotTagBar
                 .padding(.horizontal, AppTheme.pagePadding)
@@ -552,12 +554,13 @@ struct ContentView: View {
             // It duplicated the bottom bar and consumed vertical space for slots.
             // activeHotkeyLayerNotice intentionally not rendered here.
 
-            Divider()
+            // hotfix4: 底部 Divider 也去掉。工具栏与卡片区同底、无描边、无阴影，
+            // 中间再压一条系统分隔线就等于把「一体化」又切回两块。
         }
-        // v2.10.81: 用独立矩形承载 .regularMaterial 并加 .id(colorScheme)，切主题时强制重建这层
-        // NSVisualEffectView——修复 AppKit 材质 appearance 滞后（顶部磨砂玻璃切主题后卡旧色）。
-        // .id 只作用于材质层，不波及 header 内容子树（搜索框文本/焦点、popover 状态不受影响）。
-        .background(HeaderMaterialBackground())
+        // v2.11.7 hotfix4: 顶部不再用磨砂材质，而是**和卡片区一样的窗口底色**——
+        // 一体化的前提是两边同底。材质层（NSVisualEffectView）会把桌面/窗后内容透上来，
+        // 明度天然与下面的不透明画布不同，看着就是「上面一条，下面一块」。
+        .background(HeaderSurfaceBackground())
         .popover(isPresented: $showingSpecialSlotManagement) {
             SpecialSlotManagementView(store: store)
         }
@@ -2314,15 +2317,20 @@ private struct ThemeCycleButton: View {
 /// 而且它写在 header 的 `.background` 里，导致整个 headerView 都要跟着 colorScheme 重算。
 /// 现在把这层单独隔离：colorScheme 的依赖只留在这一个叶子视图里，
 /// header 其余内容（搜索框、拨杆、组标签…）不再被主题切换牵连重算。
-private struct HeaderMaterialBackground: View {
+private struct HeaderSurfaceBackground: View {
     @Environment(\.colorScheme) private var colorScheme
 
     var body: some View {
-        // `.id(colorScheme)` 保留（v2.10.81 的不变量）：切主题时强制重建这层 NSVisualEffectView，
-        // 杜绝「顶部磨砂条卡旧色」。A/B 实测它对切主题耗时无可测影响（122 vs 131ms，噪声内），
-        // 而隔离成叶子视图后它不再牵连整个 headerView 重算，所以留着纯属保险。
+        // v2.11.7 hotfix4: 从 .regularMaterial 换成 AppTheme.windowBackground。
+        //
+        // 这个色值与卡片区滚动视图的底、以及新拟物调色板的 `ground` 三者同源
+        // （AppTheme 多彩窗口底直接引用 NeumorphicPalette.ground，简洁模式两边都取
+        // MinimalSkinPalette.window），所以工具栏和内容区是**同一张面**，接缝不可见。
+        //
+        // `.id(colorScheme)` 保留（v2.10.81 的不变量）：原本是为了强制重建磨砂层、杜绝
+        // 「顶部卡旧色」；现在虽是纯色，留着也无成本，且明暗切换时一定重算。
         Rectangle()
-            .fill(.regularMaterial)
+            .fill(AppTheme.windowBackground)
             .id(colorScheme)
     }
 }
