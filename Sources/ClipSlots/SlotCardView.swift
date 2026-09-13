@@ -418,30 +418,27 @@ struct SlotCardView: View {
         .help("这是最近一次粘贴的槽位")
     }
 
-    /// 槽位编号。简洁模式唯一保留颜色的元素（见 `isMinimalSkin` 的注释）。
+    /// 槽位编号。两种皮肤**共用同一套几何**：30pt 圆形角标 + 34pt 的左对齐占位宽。
     ///
-    /// 多彩模式是一个 26pt 的裸数字，靠字号占据视觉重心；简洁模式整屏没有别的颜色，同样的
-    /// 26pt 彩色数字会显得过于扎眼，所以改成 30pt 的圆形角标：色块面积小得多，色相却更清楚。
+    /// v2.11.7 hotfix2d：以前多彩模式是一个 26pt 的裸黑体数字，靠字号占视觉重心，而简洁模式
+    /// 是 30pt 圆形角标——两者的墨迹宽度不同（"1" 和 "10" 差别还很大），导致卡片标题
+    /// 在两种皮肤下的水平起点不一致，切皮肤时整行文字会左右跳。现在统一成圆形角标：
+    /// 编号宽度不再随位数变化，标题起点在两种皮肤下严格相同。
+    ///
+    /// 皮肤差异只留在**质感**上：多彩模式底色更饱和、描边更实、外加一层同色投影，
+    /// 保住原来那种「彩色卡片」的分量；简洁模式是淡淡的一小块色，不带投影。
     @ViewBuilder
     private var slotNumberBadge: some View {
-        if isMinimalSkin {
-            Text("\(slot)")
-                .font(.system(size: 14, weight: .bold, design: .rounded))
-                .foregroundColor(slotAccent)
-                .monospacedDigit()
-                .frame(width: 30, height: 30)
-                .background(Circle().fill(slotAccent.opacity(0.14)))
-                .overlay(Circle().strokeBorder(slotAccent.opacity(0.34), lineWidth: 1))
-                .frame(minWidth: 34, alignment: .leading)
-                .accessibilityLabel("槽位 \(slot)")
-        } else {
-            Text("\(slot)")
-                .font(.system(size: 26, weight: .black, design: .rounded))
-                .foregroundColor(slotAccent)
-                .monospacedDigit()
-                .frame(minWidth: 34, alignment: .leading)
-                .accessibilityLabel("槽位 \(slot)")
-        }
+        Text("\(slot)")
+            .font(.system(size: 14, weight: .bold, design: .rounded))
+            .foregroundColor(slotAccent)
+            .monospacedDigit()
+            .frame(width: 30, height: 30)
+            .background(Circle().fill(slotAccent.opacity(isMinimalSkin ? 0.14 : 0.20)))
+            .overlay(Circle().strokeBorder(slotAccent.opacity(isMinimalSkin ? 0.34 : 0.50), lineWidth: 1))
+            .shadow(color: isMinimalSkin ? .clear : slotAccent.opacity(0.22), radius: 3, y: 1)
+            .frame(minWidth: 34, alignment: .leading)
+            .accessibilityLabel("槽位 \(slot)")
     }
 
     private var headerRow: some View {

@@ -589,6 +589,10 @@ struct ContentView: View {
             // The edge clusters keep their intrinsic sizes and stay pinned to the title-bar edges.
             HStack(spacing: 14) {
                 ZStack {
+                // 两种皮肤的 logo **共用同一个 46×46pt 的盒子**（见下方 `.frame`），可见图形
+                // 也都收敛到 ~40pt，所以标题「ClipSlots」的水平起点在两种皮肤下完全一致，
+                // 切皮肤时右侧整块文字不会横向位移。
+                //
                 // v2.11.7 hotfix2: 简洁模式直接展示 App 真实图标（白底 squircle + 黑色三叠石），
                 // 无底板 / 无描边 / 无投影 —— 上一轮给它套的中性灰底板在浅色简洁界面里
                 // 变成了一个「大白按钮」，看着像可点击的控件，而它其实只是个 logo。
@@ -598,33 +602,30 @@ struct ContentView: View {
                 // Assets.xcassets 目录，SwiftUI 按名字查资源目录会拿不到），而 applicationIconImage
                 // 读的就是当前 bundle 已注册的那份，换图标后自动跟着变，不会漏更新。
                 //
-                // hotfix2 二次调整：30pt → 56pt。这里有个必须先量清楚的坑——`frame` 给的是
-                // 图标**画布**边长，不是可见图案的边长。量过 assets/AppIcon.png（1024 画布）：
-                // 白色 squircle 底板的实际包围盒只有 824px，即画布的 **80.5%**（余下是 macOS
-                // 图标规范要求的透明安全边 + 投影空间）；黑色石头图案更小，只占 474px（46%）。
+                // 尺寸账（务必先量再改）：`frame` 给图标的是**画布**边长，不是可见图案边长。
+                // 量过 assets/AppIcon.png（1024 画布）——白色 squircle 底板实际只有 824px，
+                // 即画布的 80.5%（余下是 macOS 图标规范的透明安全边 + 投影空间）。所以想让
+                // 可见底板落在 40pt，画布要给 40 / 0.805 ≈ 50pt。
                 //
-                // 对齐目标：多彩模式的 logo 是一个**实心铺满**的 44×44pt 渐变圆角块（已用截图
-                // 量过，可见高度 = 44pt 整）。要让简洁模式的可见白色 squircle 不小于它，画布得取
-                // 44 / 0.805 ≈ 54.7pt，所以这里给 56pt —— 可见底板约 45pt，宽高都不小于多彩模式。
-                //
-                // 垂直方向不需要额外处理：外层 HStack 默认 .center 对齐，ZStack 本身就是
-                // 图标的紧致边界，图标与右侧标题块自然垂直居中。
+                // hotfix2d：多彩模式的渐变块从 44pt 收到 40pt。它是**实心铺满**的，44pt 时
+                // 可见面积明显大于简洁模式的图标，把标题往右顶得更远，整个 header 显得臃肿。
                 if AppTheme.isMinimalSkin {
                     Image(nsImage: NSApp.applicationIconImage)
                         .resizable()
                         .interpolation(.high)
-                        .frame(width: 56, height: 56)
+                        .frame(width: 50, height: 50)
                 } else {
-                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    RoundedRectangle(cornerRadius: 11, style: .continuous)
                         .fill(AppTheme.chromeAccentTile)
-                        .frame(width: 44, height: 44)
-                        .shadow(color: AppTheme.chromeAccentTileShadow, radius: 10, y: 4)
+                        .frame(width: 40, height: 40)
+                        .shadow(color: AppTheme.chromeAccentTileShadow, radius: 9, y: 3)
 
                     Image(systemName: "rectangle.stack.fill")
-                        .font(.system(size: 20, weight: .semibold))
+                        .font(.system(size: 18, weight: .semibold))
                         .foregroundColor(AppTheme.chromeAccentTileInk)
                 }
             }
+            .frame(width: 46, height: 46)
 
             VStack(alignment: .leading, spacing: 4) {
                 Text("ClipSlots")
