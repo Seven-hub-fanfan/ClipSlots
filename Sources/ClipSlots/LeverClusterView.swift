@@ -46,11 +46,9 @@ struct LeverClusterView: View {
             )
 
             // 两区之间的细线分隔（设计稿里就一条发丝线，不是 Divider 的实线）。
-            // v2.11.7 hotfix9: 竖开关换成胶囊后这一簇矮了 14pt，分隔线跟着收到 58——
-            // 线比它分隔的内容高，就会读成「一条独立的装饰线」而不是「两区之间的界」。
             Rectangle()
                 .fill(Neu.hairlineStrong)
-                .frame(width: 1, height: 58)
+                .frame(width: 1, height: 74)
 
             switchColumn(
                 isOn: $autoMode.autoPasteEnabled,
@@ -93,7 +91,7 @@ struct LeverClusterView: View {
         resetHelp: String
     ) -> some View {
         VStack(spacing: 6) {
-            NeuPillToggle(isOn: isOn, statusColor: statusColor, label: label, help: help)
+            NeuVerticalSwitch(isOn: isOn, statusColor: statusColor, label: label, help: help)
 
             HStack(spacing: 5) {
                 NeuMiniButton(title: "回退", icon: "arrow.uturn.backward",

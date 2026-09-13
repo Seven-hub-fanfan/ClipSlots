@@ -72,18 +72,18 @@ private struct PreviewStrip: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            // ① Header：开关簇（hotfix9 从竖滑道换成胶囊）
-            HStack(alignment: .center, spacing: 10) {
+            // ① Header：开关簇（竖滑道开关，hotfix10 已还原成 hotfix3 的形态）
+            HStack(alignment: .top, spacing: 10) {
                 VStack(spacing: 6) {
-                    NeuPillToggle(isOn: $autoStore, statusColor: .green, label: "自动存储")
+                    NeuVerticalSwitch(isOn: $autoStore, statusColor: .green, label: "自动存储")
                     HStack(spacing: 5) {
                         NeuMiniButton(title: "回退", icon: "arrow.uturn.backward") {}
                         NeuMiniButton(title: "重置", icon: "arrow.counterclockwise") {}
                     }
                 }
-                Rectangle().fill(Neu.hairlineStrong).frame(width: 1, height: 58)
+                Rectangle().fill(Neu.hairlineStrong).frame(width: 1, height: 74)
                 VStack(spacing: 6) {
-                    NeuPillToggle(isOn: $autoPaste, statusColor: .blue, label: "自动粘贴")
+                    NeuVerticalSwitch(isOn: $autoPaste, statusColor: .blue, label: "自动粘贴")
                     HStack(spacing: 5) {
                         NeuMiniButton(title: "回退", icon: "arrow.uturn.backward") {}
                         NeuMiniButton(title: "重置", icon: "arrow.counterclockwise") {}

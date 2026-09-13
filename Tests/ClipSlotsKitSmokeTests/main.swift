@@ -2193,14 +2193,17 @@ do {
             "★多彩模式的内凹底要比简洁模式带色（这是两种皮肤在同一几何下的主要区分手段）")
 
     // ── ⑦ 几何：两种皮肤共用，且几个尺寸间的关系不能被随手改坏
-    // v2.11.7 hotfix9: 竖开关的 4 条滑道/滑块几何断言随 switch* 常量一起删除（改用 NeuPillToggle）。
-    // 换成下面这组「顶部 chrome 只有一种控件规格」的断言——这是 hotfix9 要守住的新不变量：
-    // 开关胶囊、自动切换、页面选择器、组标签、+ / 管理方块全部用 actionHeight / actionRadius，
-    // 任何一处改成自己的尺寸，这一行就又会出现「自成一派的异形控件」（正是用户说「怪」的那个）。
-    t.check(NeumorphicMetrics.statusDotSize >= 5 && NeumorphicMetrics.statusDotSize <= 8,
-            "★状态点直径守在 5~8pt（小于 5 在近黑胶囊上看不清，大于 8 会抢文字的视重）")
-    t.check(NeumorphicMetrics.statusDotSize < NeumorphicMetrics.actionHeight / 3,
-            "★★状态点必须远小于胶囊高度，它是状态指示而不是图标")
+    // v2.11.7 hotfix10: 竖开关（switchTrack*/switchKnob*）还原，这 4 条几何断言随之恢复。
+    t.check(NeumorphicMetrics.switchKnobWidth < NeumorphicMetrics.switchTrackWidth,
+            "★★开关滑块必须窄于滑道，否则滑块会盖住整条轨道、看不出内凹")
+    t.check(NeumorphicMetrics.switchKnobHeight < NeumorphicMetrics.switchTrackHeight,
+            "★★开关滑块必须短于滑道，否则没有行程可走")
+    t.check(NeumorphicMetrics.switchTravel > 0, "★开关行程必须为正（上开下关各走一半）")
+    t.check(NeumorphicMetrics.switchKnobHeight + NeumorphicMetrics.switchTravel * 2
+            <= NeumorphicMetrics.switchTrackHeight,
+            "★★滑块在两个极限位置都不能越出滑道（实际会越出 \(NeumorphicMetrics.switchKnobHeight + NeumorphicMetrics.switchTravel * 2 - NeumorphicMetrics.switchTrackHeight)pt）")
+    // 下面 3 条是 hotfix9 新增、与开关无关的规格断言，保留：组标签行并入新拟物后，
+    // 组标签 / + / 管理方块与操作按钮共用 actionHeight / actionRadius，任何一处跑偏就会破掉这一行的统一。
     t.check(NeumorphicMetrics.actionRadius < NeumorphicMetrics.actionHeight / 2,
             "★★操作控件必须是圆角矩形而不是全圆胶囊（半高圆角是搜索框的专属形状，两者要能区分）")
     t.check(NeumorphicMetrics.iconTileRadius == NeumorphicMetrics.actionRadius,

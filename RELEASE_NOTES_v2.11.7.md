@@ -326,3 +326,26 @@ CLIPSLOTS_RENDER_PREVIEW=/tmp/neu open -a ClipSlots
 
 - smoke：1299 条全绿
 - DMG SHA-256：`5814d52b6418b0068580b0de5d72079bbc351d1792ddf5a96622f2eadcc82fb5`
+
+
+## hotfix 10（同版本号重打包）· 还原顶部开关簇，只保留组标签行的改动
+
+hotfix9 我把「上面的那个有点怪」理解成了顶部那两个竖滑道开关，顺手换成了胶囊——理解错了，用户明确指出这块不该动。本轮**精确回退开关簇**，hotfix9 的其余改动保留。
+
+回退内容（逐字回到 hotfix8 的状态）：
+
+- `NeuVerticalSwitch`（26×40 内凹竖滑道 + 圆角滑块）恢复，`NeuPillToggle` 删除
+- `LeverClusterView` 恢复（含 74pt 分隔线高度）
+- `switchTrackWidth` / `switchTrackHeight` / `switchKnobWidth` / `switchKnobHeight` / `switchTravel` 五个常量恢复，`statusDotSize` 删除
+- smoke 恢复那 4 条滑道 / 滑块几何断言，删掉 2 条状态点断言
+
+hotfix9 保留下来的部分（**只有**这三处）：
+
+1. **组标签行并入新拟物**——组标签从「灰底薄片 + 闭合灰描边 + 裸写 `accentColor` 选中态」换成 neu 凸起 + `selectedFill` 选中态；`+` 与管理按钮从 28pt 灰方块换成同规格 30pt neu 方块。这是用户圈出来要优化的那一行。
+2. **页面选择器内部两个旧零件**——25pt 浅色小方块托着的页面图标去掉底板、半透明灰胶囊裹着的组数改成内凹小胶囊。
+3. **`NeuPreviewRenderer` 离屏预览渲染器**——与观感无关的开发工具，只在设置 `CLIPSLOTS_RENDER_PREVIEW` 时触发。
+
+教训记在 `NeumorphicMetrics` 的 switch 尺寸旁边：以后想「顺手统一」顶部控件规格，先确认用户要不要——改动范围超出用户圈定的地方，即使方向对也是错的。
+
+- smoke：1301 条全绿
+- DMG SHA-256：`aa27e02e0c69cae00542727cff9cc2eb13aa941ce0b02eae210fd880e80743e6`
