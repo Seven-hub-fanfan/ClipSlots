@@ -84,24 +84,26 @@ enum Neu {
     static var dangerFill: Color { dyn(\.dangerFill) }
     static var dangerInk: Color { dyn(\.dangerInk) }
 
-    /// 右下柔和投影。设计稿：黑 8%～10%、大模糊。浅色档取 9%——再深就从「柔和阴影」
-    /// 变成「深色描边」，按钮又浮起来了；深色档环境本身就黑，必须给到 55% 才看得出层次。
+    /// 右下投影。hotfix7 按设计稿定为**黑 15% / blur 8 / offset (3,3)**，与左上高光严格镜像。
+    /// 之前是黑 9% / blur 12：太淡又太散，成了「一圈灰晕」而不是「压下去的那一侧」。
     static var dropShadow: Color {
-        dynAlpha(light: Color.black.opacity(0.09), dark: Color.black.opacity(0.55))
+        dynAlpha(light: Color.black.opacity(0.15), dark: Color.black.opacity(0.6))
     }
 
-    /// 左上高光。设计稿：白 80%。深色档没有「更亮的白」可用，用低透明白点一下边缘即可。
+    /// 左上高光。hotfix7 提到**白 90% / blur 8 / offset (-3,-3)**，与右下投影等距等量——
+    /// 「凸起」这件事完全由这一对镜像阴影表达，任何一侧偏弱都会退回「浮」。
+    /// 深色档没有「更亮的白」可用，压到 9% 只点一下受光边。
     static var lightShadow: Color {
-        dynAlpha(light: Color.white.opacity(0.8), dark: Color.white.opacity(0.07))
+        dynAlpha(light: Color.white.opacity(0.9), dark: Color.white.opacity(0.09))
     }
 
     /// 内凹的**上/左内阴影**（设计稿：黑 8%）与**下/右内高光**（设计稿：白 60%）。
     /// 深色档同样要放大：黑底上 8% 的黑等于什么都没有。
     static var wellInnerShadow: Color {
-        dynAlpha(light: Color.black.opacity(0.08), dark: Color.black.opacity(0.65))
+        dynAlpha(light: Color.black.opacity(0.14), dark: Color.black.opacity(0.7))
     }
     static var wellInnerGlow: Color {
-        dynAlpha(light: Color.white.opacity(0.6), dark: Color.white.opacity(0.06))
+        dynAlpha(light: Color.white.opacity(0.9), dark: Color.white.opacity(0.08))
     }
     /// 内凹最内圈那道收口的浓度（深色档要更实）。同样必须是动态色，理由见 `dynAlpha`。
     static var wellRimOpacity: Color {

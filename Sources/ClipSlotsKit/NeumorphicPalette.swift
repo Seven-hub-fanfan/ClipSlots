@@ -206,24 +206,26 @@ public enum NeumorphicMetrics {
     }
 
     /// 阴影：外阴影（右下，光源左上）与高光（左上）。
-    // v2.11.7 hotfix5：阴影参数按设计稿 1:1 对齐。
+    // v2.11.7 hotfix7：双色阴影改成**严格对称**的一对（设计稿 image-a4ad5438 / image-333d9012）。
     //
-    // SwiftUI 的 `.shadow(radius:)` 是**高斯 sigma**，不是设计稿里的 blur 直径，两者差一半——
-    // 设计稿标 blur 12 就要写 radius 6。这个 2 倍关系搞错，阴影要么生硬要么糊成一团。
+    // SwiftUI 的 `.shadow(radius:)` 是高斯 sigma，不是设计稿标的 blur 直径，两者差一半——
+    // 设计稿 blur 8 要写 radius 4。
     //
-    // 右下投影：offset (4, 4)、blur 12（= radius 6）、黑 9%。之前是 (0, 3) + radius 5：
-    // 纯垂直偏移让按钮读成「向下坠」而不是「左上有光」，而且太近太实，像描了一圈深边。
-    public static let dropShadowRadius: CGFloat = 6
-    public static let dropShadowOffsetX: CGFloat = 4
-    public static let dropShadowOffsetY: CGFloat = 4
-    /// 左上高光：offset (-2, -2)、blur 4（= radius 2）、白 80%。它承担「材质厚度」那一半观感，
-    /// 缺了按钮就只有一团投影、边缘发平。
-    public static let highlightShadowRadius: CGFloat = 2
-    public static let highlightShadowOffsetX: CGFloat = -2
-    public static let highlightShadowOffsetY: CGFloat = -2
-    /// 内凹的内阴影 / 内高光：offset ±2、blur 5（= radius 2.5）。
-    public static let wellInnerOffset: CGFloat = 2
-    public static let wellInnerRadius: CGFloat = 2.5
+    // hotfix5/6 的问题不在「少了一层」（两层一直都在），而在**两层不对等**：
+    // 投影 (4,4)/blur 12/黑 9%，高光只有 (-2,-2)/blur 4/白 80%。投影比高光偏得远、糊得开、
+    // 又比高光弱，于是读出来是「一坨发散的灰晕托着一块板」——浮，而不是凸。
+    // 新拟物的凸起感来自「同一束光造成的一对镜像结果」：两层必须**偏移等距、模糊等量**，
+    // 只有方向和颜色相反。现在统一为 ±3 / blur 8 / 黑 15% vs 白 90%。
+    public static let dropShadowRadius: CGFloat = 4      // 设计稿 blur 8
+    public static let dropShadowOffsetX: CGFloat = 3
+    public static let dropShadowOffsetY: CGFloat = 3
+    public static let highlightShadowRadius: CGFloat = 4  // 与投影等量，这是「对称」的一半含义
+    public static let highlightShadowOffsetX: CGFloat = -3
+    public static let highlightShadowOffsetY: CGFloat = -3
+    /// 内凹的内阴影 / 内高光：与凸起同一套语言、方向相反，所以偏移 / 模糊也对称。
+    /// 凹槽比凸起浅一档（offset 3 → 2.5、blur 8 → 7），否则窄窄一条搜索框会被阴影糊满。
+    public static let wellInnerOffset: CGFloat = 2.5
+    public static let wellInnerRadius: CGFloat = 3.5
 
     // MARK: - 双侧描边（v2.11.7 hotfix6，按设计稿 image-a4ad5438）
     //

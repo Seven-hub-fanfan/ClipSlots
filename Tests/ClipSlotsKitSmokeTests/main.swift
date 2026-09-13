@@ -2219,14 +2219,20 @@ do {
             "★★左上高光的偏移必须同时为负（指向左上 = 光源方向）")
     t.check(NeumorphicMetrics.dropShadowOffsetX > 0 && NeumorphicMetrics.dropShadowOffsetY > 0,
             "★★右下投影的偏移必须同时为正（背光侧），且 x 不能是 0——纯垂直偏移会读成「下坠」")
-    t.check(NeumorphicMetrics.dropShadowOffsetX == -NeumorphicMetrics.highlightShadowOffsetX * 2,
-            "★投影与高光的水平偏移保持 2:1（设计稿：投影 4 / 高光 2）")
-    // 柔和度：投影必须明显比高光糊。投影是「柔和的大范围过渡」，高光是「贴边的一条亮线」，
-    // 两者糊成同一档，按钮边缘就会发平（hotfix5 之前 radius 5 vs 4，几乎没有区分）。
-    t.check(NeumorphicMetrics.dropShadowRadius >= NeumorphicMetrics.highlightShadowRadius * 2.5,
-            "★★右下投影的模糊半径要远大于左上高光（柔和 vs 贴边），至少 2.5 倍")
-    t.check(NeumorphicMetrics.dropShadowRadius >= 5 && NeumorphicMetrics.dropShadowRadius <= 7,
-            "★右下投影 blur 折算成 SwiftUI radius 应在 5～7（设计稿 blur 10~14，radius = blur/2）")
+    // hotfix7：两层必须**严格镜像**——偏移等距、模糊等量，只有方向和颜色相反。
+    // 这是「凸」与「浮」的分界线：hotfix5/6 里投影偏得远(4)、糊得开(radius 6)、还比高光弱，
+    // 于是读成「一坨发散的灰晕托着一块板」。人眼对「一束光造成的一对镜像结果」极其敏感，
+    // 任何一侧被削弱都会立刻塌回贴层感，而这种失衡在代码里只是两个数字不相等，极难靠 review 抓到。
+    t.check(NeumorphicMetrics.dropShadowOffsetX == -NeumorphicMetrics.highlightShadowOffsetX,
+            "★★投影与高光的水平偏移必须等距反向（同一束光的一对镜像结果）")
+    t.check(NeumorphicMetrics.dropShadowOffsetY == -NeumorphicMetrics.highlightShadowOffsetY,
+            "★★投影与高光的垂直偏移必须等距反向")
+    t.check(NeumorphicMetrics.dropShadowRadius == NeumorphicMetrics.highlightShadowRadius,
+            "★★投影与高光的模糊半径必须相等（一侧更糊 = 光源不自洽 = 退回「浮」）")
+    t.check(NeumorphicMetrics.dropShadowRadius >= 3.5 && NeumorphicMetrics.dropShadowRadius <= 5,
+            "★阴影 blur 折算成 SwiftUI radius 应在 3.5～5（设计稿 blur 8，radius = blur/2）；太大就成大圆晕")
+    t.check(NeumorphicMetrics.dropShadowOffsetX <= NeumorphicMetrics.dropShadowRadius,
+            "★偏移不能大于模糊半径，否则阴影会脱开按钮变成一块独立的影子")
     t.check(NeumorphicMetrics.wellInnerOffset > 0 && NeumorphicMetrics.wellInnerRadius > NeumorphicMetrics.wellInnerOffset,
             "★内凹的内阴影必须「偏移小、模糊大」，否则会画成一条硬边而不是渗进去的阴影")
 
