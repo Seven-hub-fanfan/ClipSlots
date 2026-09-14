@@ -79,6 +79,23 @@ final class TransientUIStore: ObservableObject {
     // 自己，主网格不再参与。视觉（0.38 黑底 + 居中面板 + radius 18 阴影 + .opacity 过渡 + Anim.status）
     // 与下沉前逐像素一致。
     @Published var isSettingsOverlayPresented: Bool = false
+
+    // ★ v2.11.7 (画布 MVP): Toast 的 store 侧入口。
+    //
+    // 历史上 Toast 只有 `SlotStoreObservable` 里那个 **private** `showToast`，于是任何不属于主
+    // store 的新子系统（画布、后续的生图管线）想弹一句提示，就只能自己 `toastMessage = x` 再手写
+    // 一遍延时清空 —— 那份延时逻辑里藏着一个容易漏的细节：清空前必须比对 `toastMessage` 是否仍是
+    // 自己那条，否则「A 弹出 → B 弹出 → A 的定时器到点」会把 B 的提示提前抹掉。把它收敛到这里，
+    // 让所有调用方共享同一份正确实现。主 store 的 private 版本保持原样（同名不冲突，它作用在
+    // SlotStoreObservable 上），避免动到既有的几十处调用。
+    func showToast(_ message: String, duration: TimeInterval = 1.2) {
+        toastMessage = message
+        let captured = message
+        DispatchQueue.main.asyncAfter(deadline: .now() + duration) { [weak self] in
+            // 仅当仍是自己这条时才清空，避免抹掉后来者的提示。
+            if self?.toastMessage == captured { self?.toastMessage = nil }
+        }
+    }
 }
 
 /// v2.10.52 (perf 第四批): 独立承载 Toast + 浮层提示的覆盖层子视图，只观察 `TransientUIStore`。

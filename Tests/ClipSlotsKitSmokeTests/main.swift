@@ -2837,4 +2837,336 @@ do {
     }
 }
 
+// MARK: - CANVAS-GEO：无限画布几何（v2.11.7）
+//
+// 为什么这组必须存在：轮盘布局（v2.11.0/v2.11.5）的教训是「极坐标数学写在 View 里，错了也测不出来，
+// 最后靠离屏截图对照才定位」。画布的视口变换比那更容易错且更难肉眼发现——缩放锚点、平移累积、
+// 网格对齐三者互相耦合，一个符号错的表现只是「缩放时画面往角落飘一点」，用户会以为是手势不准。
+// 所以几何全部下沉到 `CanvasGeometry` 纯函数，并在这里逐条钉死。
+
+func canvasApprox(_ a: CGFloat, _ b: CGFloat, _ tol: CGFloat = 0.0001) -> Bool {
+    abs(a - b) <= tol
+}
+
+// —— 缩放钳制 ——
+do {
+    t.equal(CanvasGeometry.clampZoom(1), 1, "clampZoom：区间内原样返回")
+    t.equal(CanvasGeometry.clampZoom(0.01), CanvasGeometry.zoomMin, "clampZoom：下溢钳到 zoomMin")
+    t.equal(CanvasGeometry.clampZoom(99), CanvasGeometry.zoomMax, "clampZoom：上溢钳到 zoomMax")
+    // ★ NaN 必须被拦住。一旦 NaN 流进 pan 的累加，画布会永久空白且无法靠继续操作恢复
+    //   （NaN 参与任何算术都还是 NaN），用户只能删数据文件——这是不可接受的死局。
+    t.equal(CanvasGeometry.clampZoom(.nan), 1, "★★clampZoom：NaN 必须回落到 1")
+    t.equal(CanvasGeometry.clampZoom(.infinity), CanvasGeometry.zoomMax, "clampZoom：+∞ 钳到 zoomMax")
+    t.equal(CanvasGeometry.clampZoom(-.infinity), CanvasGeometry.zoomMin, "clampZoom：-∞ 钳到 zoomMin")
+    t.equal(CanvasGeometry.clampZoom(-2), CanvasGeometry.zoomMin, "clampZoom：负数钳到 zoomMin（与 -∞ 口径一致）")
+    t.check(CanvasGeometry.zoomMin > 0, "zoomMin 必须为正（0 或负数会让坐标换算除零）")
+    t.check(CanvasGeometry.zoomMax > CanvasGeometry.zoomMin, "zoomMax 必须大于 zoomMin")
+}
+
+// —— 坐标换算互为逆运算 ——
+do {
+    let cases: [(CGPoint, CGSize, CGFloat)] = [
+        (CGPoint(x: 0, y: 0), .zero, 1),
+        (CGPoint(x: 137, y: -42), CGSize(width: 25, height: -80), 1),
+        (CGPoint(x: -1000, y: 2500), CGSize(width: -333, height: 777), 0.25),
+        (CGPoint(x: 12.5, y: 9.75), CGSize(width: 3.5, height: 0.5), 4),
+    ]
+    for (canvasPt, pan, zoom) in cases {
+        let screen = CanvasGeometry.screenPoint(canvas: canvasPt, pan: pan, zoom: zoom)
+        let back = CanvasGeometry.canvasPoint(screen: screen, pan: pan, zoom: zoom)
+        t.check(canvasApprox(back.x, canvasPt.x, 0.001) && canvasApprox(back.y, canvasPt.y, 0.001),
+                "★★screen/canvas 换算必须互为逆运算（pan=\(pan) zoom=\(zoom)，回程 \(back) vs 原 \(canvasPt)）")
+    }
+
+    // 公式钉死：screen = canvas * zoom + pan。这条式子是整套画布的地基，
+    // 任何「顺手」改成 (canvas + pan) * zoom 的重构都会让命中判定整体错位。
+    let s = CanvasGeometry.screenPoint(canvas: CGPoint(x: 100, y: 50),
+                                       pan: CGSize(width: 10, height: 20), zoom: 2)
+    t.check(canvasApprox(s.x, 210) && canvasApprox(s.y, 120),
+            "★★screenPoint 必须是 canvas*zoom+pan（实际 \(s)）")
+
+    // 矩形换算：尺寸也必须缩放，否则放大后卡片框会比卡片本身小。
+    let r = CanvasGeometry.screenRect(canvas: CGRect(x: 10, y: 20, width: 100, height: 200),
+                                      pan: CGSize(width: 5, height: 5), zoom: 2)
+    t.check(canvasApprox(r.minX, 25) && canvasApprox(r.minY, 45)
+                && canvasApprox(r.width, 200) && canvasApprox(r.height, 400),
+            "screenRect：原点与尺寸都要按 zoom 变换（实际 \(r)）")
+}
+
+// —— 锚点缩放：光标下的内容必须原地不动 ——
+do {
+    // 这是画布手感的命门。锚点算错的症状是「放大时想看的区域直接飞出屏幕」，
+    // 而且越放大偏得越远，但单帧看起来只是「有点飘」，极易被当成手势灵敏度问题。
+    let anchors = [CGPoint(x: 0, y: 0), CGPoint(x: 640, y: 360), CGPoint(x: 1280, y: 800)]
+    let zoomPairs: [(CGFloat, CGFloat)] = [(1, 2), (2, 1), (1, 0.25), (0.5, 4), (3, 3)]
+    for anchor in anchors {
+        for (oldZoom, newZoom) in zoomPairs {
+            let pan = CGSize(width: 37, height: -91)
+            // 锚点当前对应的画布点。
+            let underCursor = CanvasGeometry.canvasPoint(screen: anchor, pan: pan, zoom: oldZoom)
+            let newPan = CanvasGeometry.panForAnchoredZoom(anchorScreen: anchor, pan: pan,
+                                                           oldZoom: oldZoom, newZoom: newZoom)
+            // 缩放后，同一个画布点应当还落在锚点上。
+            let after = CanvasGeometry.screenPoint(canvas: underCursor, pan: newPan, zoom: newZoom)
+            t.check(canvasApprox(after.x, anchor.x, 0.001) && canvasApprox(after.y, anchor.y, 0.001),
+                    "★★锚点缩放必须保持锚点下内容不动（anchor=\(anchor) \(oldZoom)→\(newZoom)，实际落在 \(after)）")
+        }
+    }
+
+    // zoom 不变时 pan 也不该动（否则每帧微小抖动会累积成漂移）。
+    let stable = CanvasGeometry.panForAnchoredZoom(anchorScreen: CGPoint(x: 200, y: 100),
+                                                   pan: CGSize(width: 9, height: 8),
+                                                   oldZoom: 1.5, newZoom: 1.5)
+    t.check(canvasApprox(stable.width, 9) && canvasApprox(stable.height, 8),
+            "锚点缩放：zoom 未变时 pan 必须原样（实际 \(stable)）")
+}
+
+// —— 网格步长自适应 ——
+do {
+    // 网格的失败模式是两个极端：缩小时线密到糊成灰色一片（还会拖垮绘制），
+    // 放大时线稀到失去参照。所以屏幕步长必须被夹在一个可视区间里，而不是简单地 base*zoom。
+    for zoom in [CanvasGeometry.zoomMin, 0.4, 0.75, 1, 1.6, 2.5, CanvasGeometry.zoomMax] {
+        let step = CanvasGeometry.gridScreenStep(base: 40, zoom: zoom)
+        t.check(step >= 14 - 0.001 && step <= 96 + 0.001,
+                "★★网格屏幕步长必须落在 [14, 96]（zoom=\(zoom) 得到 \(step)）")
+        t.check(step > 0 && step.isFinite, "网格步长必须为有限正数（zoom=\(zoom)）")
+    }
+    // 极端 zoom 下也不能返回 0 / NaN —— 那会让 gridLineOffsets 陷入死循环。
+    t.check(CanvasGeometry.gridScreenStep(base: 40, zoom: 0).isFinite,
+            "★★zoom=0 时网格步长仍须有限（否则生成线坐标会死循环）")
+}
+
+// —— 网格线坐标 ——
+do {
+    let offsets = CanvasGeometry.gridLineOffsets(viewLength: 100, panComponent: 0, step: 25)
+    t.check(!offsets.isEmpty, "网格线坐标不应为空")
+    t.check(offsets.allSatisfy { $0 >= -25 && $0 <= 125 },
+            "网格线坐标应覆盖可视区且不过度外溢（实际 \(offsets)）")
+    // 覆盖性：首线 ≤ 0、末线 ≥ viewLength，否则边缘会出现没有网格的空白带。
+    t.check((offsets.first ?? 1) <= 0, "★★首条网格线必须 ≤ 0（否则左/上边缘留白）")
+    t.check((offsets.last ?? -1) >= 100, "★★末条网格线必须 ≥ 视图长度（否则右/下边缘留白）")
+    // 平移一整个步长，线的集合应当与原来重合（网格是周期性的），
+    // 否则平移时会看到网格「抖一下再对齐」。
+    let shifted = CanvasGeometry.gridLineOffsets(viewLength: 100, panComponent: 25, step: 25)
+    t.equal(shifted.count, offsets.count, "平移整数个步长后网格线数量应一致")
+    for (a, b) in zip(offsets, shifted) {
+        t.check(canvasApprox(a, b, 0.001), "★★平移一个整步长后网格线必须重合（\(a) vs \(b)）")
+    }
+    // 防死循环：step 非法时必须返回空而不是转圈。
+    t.check(CanvasGeometry.gridLineOffsets(viewLength: 100, panComponent: 0, step: 0).isEmpty,
+            "★★step=0 必须返回空数组（不得死循环）")
+}
+
+// —— 吸附 ——
+do {
+    t.equal(CanvasGeometry.snap(CGPoint(x: 11, y: 29), step: 10), CGPoint(x: 10, y: 30), "snap：就近取整到步长")
+    t.equal(CanvasGeometry.snap(CGPoint(x: -11, y: -29), step: 10), CGPoint(x: -10, y: -30), "snap：负坐标同样就近")
+    // step ≤ 0 时必须原样返回（除零保护）。
+    t.equal(CanvasGeometry.snap(CGPoint(x: 3.7, y: 4.2), step: 0), CGPoint(x: 3.7, y: 4.2),
+            "★★snap：step=0 时原样返回，不得产生 NaN")
+}
+
+// —— 4 张展开 ——
+do {
+    let origin = CGPoint(x: 100, y: 200)
+    let size = CanvasNode.defaultSize
+    let gap: CGFloat = 20
+    let frames = CanvasGeometry.fanOutFrames(origin: origin, nodeSize: size, count: 4, gap: gap)
+    t.equal(frames.count, 4, "fanOut：4 张应得 4 个 frame")
+    // 首个必须落在原位——「展开」的语义是原节点留在原地、其余向右生长，
+    // 不是整组重新排版；否则用户会觉得自己的节点被挪走了。
+    t.check(canvasApprox(frames[0].minX, origin.x) && canvasApprox(frames[0].minY, origin.y),
+            "★★fanOut：第一个 frame 必须保持在原点（实际 \(frames[0].origin)）")
+    // 横向等距、Y 对齐。
+    for i in 1..<frames.count {
+        t.check(canvasApprox(frames[i].minX - frames[i - 1].minX, size.width + gap),
+                "fanOut：相邻间距必须为 宽+gap（第 \(i) 个实际差 \(frames[i].minX - frames[i-1].minX)）")
+        t.check(canvasApprox(frames[i].minY, origin.y), "fanOut：所有 frame 必须同一 Y（横向展开）")
+    }
+    // 互不重叠。
+    for i in 0..<frames.count {
+        for j in (i + 1)..<frames.count {
+            t.check(!frames[i].intersects(frames[j]), "★★fanOut：展开出的节点不得互相重叠（\(i) vs \(j)）")
+        }
+    }
+    // count=1 应退化为单个原位 frame。
+    let single = CanvasGeometry.fanOutFrames(origin: origin, nodeSize: size, count: 1, gap: gap)
+    t.equal(single.count, 1, "fanOut：count=1 得单个 frame")
+    // 非法 count 不得崩、不得返回负数量。
+    t.check(CanvasGeometry.fanOutFrames(origin: origin, nodeSize: size, count: 0, gap: gap).count <= 1,
+            "fanOut：count=0 时不得产生多余 frame")
+
+    // bounds 必须正好包住全部 frame。
+    let bounds = CanvasGeometry.fanOutBounds(origin: origin, nodeSize: size, count: 4, gap: gap)
+    for (i, f) in frames.enumerated() {
+        t.check(bounds.contains(f) || canvasApprox(bounds.maxX, f.maxX, 0.001),
+                "fanOutBounds 必须包住第 \(i) 个 frame")
+    }
+    t.check(canvasApprox(bounds.width, size.width * 4 + gap * 3),
+            "fanOutBounds 宽度 = 4 张宽 + 3 个间隙（实际 \(bounds.width)）")
+}
+
+// —— 向右推挤 ——
+do {
+    let size = CanvasNode.defaultSize
+    let gap: CGFloat = 20
+    // 展开占位区落在 (0,0)-(560,300)，右侧原有两个节点会被撞到。
+    let bounds = CGRect(x: 0, y: 0, width: 560, height: size.height)
+    let existing = [
+        CGRect(x: 300, y: 0, width: size.width, height: size.height),   // 与 bounds 重叠 → 必须推
+        CGRect(x: 900, y: 0, width: size.width, height: size.height),   // 在右侧且不重叠 → 不该动
+        CGRect(x: -400, y: 0, width: size.width, height: size.height),  // 在左侧 → 不该动
+        CGRect(x: 300, y: 800, width: size.width, height: size.height), // 同 X 但另一行 → 不该动
+    ]
+    let offsets = CanvasGeometry.pushRightOffsets(existing: existing, bounds: bounds, gap: gap)
+
+    t.check(offsets[0] != nil && (offsets[0] ?? 0) > 0, "★★推挤：与展开区重叠的节点必须获得正向偏移")
+    if let d = offsets[0] {
+        let moved = existing[0].offsetBy(dx: d, dy: 0)
+        t.check(moved.minX >= bounds.maxX + gap - 0.001,
+                "★★推挤：被推后必须完全让出展开区并留出 gap（推后 minX=\(moved.minX)，要求 ≥ \(bounds.maxX + gap)）")
+        t.check(!moved.intersects(bounds), "★★推挤：推后不得再与展开区重叠")
+    }
+    t.check(offsets[1] == nil || canvasApprox(offsets[1] ?? 0, 0),
+            "推挤：右侧不重叠的节点不该被移动")
+    t.check(offsets[2] == nil || canvasApprox(offsets[2] ?? 0, 0),
+            "★★推挤：左侧节点绝不能被移动（会把用户已排好的内容打乱）")
+    t.check(offsets[3] == nil || canvasApprox(offsets[3] ?? 0, 0),
+            "★★推挤：不同行（Y 不相交）的节点不该被牵连")
+
+    // 空场景不该报出任何偏移。
+    t.check(CanvasGeometry.pushRightOffsets(existing: [], bounds: bounds, gap: gap).isEmpty,
+            "推挤：没有既存节点时返回空")
+
+    // —— 级联：被推的节点不能撞上它右边原本无关的邻居 ——
+    // 这是「只推重叠者」这种朴素实现会踩的坑：把 A 推开之后 A 撞上了 B，凭空造出新重叠。
+    do {
+        let chain = [
+            CGRect(x: 300, y: 0, width: size.width, height: size.height),  // 与展开区重叠
+            CGRect(x: 620, y: 0, width: size.width, height: size.height),  // 原本不重叠，但 A 推过来会撞上
+        ]
+        let cascade = CanvasGeometry.pushRightOffsets(existing: chain, bounds: bounds, gap: gap)
+        let moved = chain.enumerated().map { $0.element.offsetBy(dx: cascade[$0.offset] ?? 0, dy: 0) }
+        t.check(!moved[0].intersects(bounds) && !moved[1].intersects(bounds),
+                "★★级联推挤：推完后没有任何节点还压在展开区上")
+        t.check(!moved[0].intersects(moved[1]),
+                "★★级联推挤：推挤不得在既有节点之间造出新的重叠（\(moved[0]) vs \(moved[1])）")
+        t.check(moved[0].minX < moved[1].minX, "级联推挤：应保持原有左右次序")
+    }
+}
+
+// —— 适应窗口 ——
+do {
+    let content = CGRect(x: -100, y: -50, width: 800, height: 400)
+    let view = CGSize(width: 1000, height: 600)
+    let fit = CanvasGeometry.fitTransform(contentBounds: content, viewSize: view, padding: 40)
+    t.check(fit.zoom >= CanvasGeometry.zoomMin && fit.zoom <= CanvasGeometry.zoomMax,
+            "fit：zoom 必须在合法区间（实际 \(fit.zoom)）")
+    // 内容四角变换后必须都落在视图内（这才叫「适应窗口」）。
+    let corners = [
+        CGPoint(x: content.minX, y: content.minY), CGPoint(x: content.maxX, y: content.minY),
+        CGPoint(x: content.minX, y: content.maxY), CGPoint(x: content.maxX, y: content.maxY),
+    ]
+    for c in corners {
+        let s = CanvasGeometry.screenPoint(canvas: c, pan: fit.pan, zoom: fit.zoom)
+        t.check(s.x >= -0.5 && s.x <= view.width + 0.5 && s.y >= -0.5 && s.y <= view.height + 0.5,
+                "★★fit：内容四角变换后必须落在视图内（角 \(c) → \(s)，视图 \(view)）")
+    }
+    // 内容应大致居中：左右留白之差不该超过 1pt。
+    let lt = CanvasGeometry.screenPoint(canvas: CGPoint(x: content.minX, y: content.minY), pan: fit.pan, zoom: fit.zoom)
+    let rb = CanvasGeometry.screenPoint(canvas: CGPoint(x: content.maxX, y: content.maxY), pan: fit.pan, zoom: fit.zoom)
+    t.check(abs(lt.x - (view.width - rb.x)) < 1, "fit：内容应水平居中（左 \(lt.x) / 右 \(view.width - rb.x)）")
+    t.check(abs(lt.y - (view.height - rb.y)) < 1, "fit：内容应垂直居中")
+
+    // 退化输入：零尺寸内容 / 零尺寸视图都不能产出 NaN。
+    let degenerate = CanvasGeometry.fitTransform(contentBounds: .zero, viewSize: view)
+    t.check(degenerate.zoom.isFinite && degenerate.pan.width.isFinite && degenerate.pan.height.isFinite,
+            "★★fit：零尺寸内容不得产出 NaN/∞")
+    let noView = CanvasGeometry.fitTransform(contentBounds: content, viewSize: .zero)
+    t.check(noView.zoom.isFinite && noView.pan.width.isFinite && noView.pan.height.isFinite,
+            "★★fit：零尺寸视图不得产出 NaN/∞")
+}
+
+// —— 包围盒 ——
+do {
+    t.equal(CanvasGeometry.bounds(of: []), .zero, "bounds：空数组返回 zero")
+    let b = CanvasGeometry.bounds(of: [
+        CGRect(x: 10, y: 10, width: 100, height: 50),
+        CGRect(x: -30, y: 200, width: 20, height: 20),
+    ])
+    t.check(canvasApprox(b.minX, -30) && canvasApprox(b.minY, 10)
+                && canvasApprox(b.maxX, 110) && canvasApprox(b.maxY, 220),
+            "bounds：应为所有矩形的并集包围盒（实际 \(b)）")
+}
+
+// MARK: - CANVAS-DOC：画布模型与落盘
+
+do {
+    // 瞬态状态折叠：`running` / `queued` 落盘后必须变 idle。
+    // 不折叠的症状是重启后节点永远停在「生成中」——轮询进程早就没了，它永远不会变，
+    // 而用户看到「生成中」是不会去点重跑的，节点就成了僵尸。
+    for transient in [CanvasNodeState.idle, .queued(ahead: 3), .running(startedAt: Date())] {
+        var node = CanvasNode(x: 0, y: 0)
+        node.state = transient
+        let data = try! JSONEncoder().encode(node)
+        let back = try! JSONDecoder().decode(CanvasNode.self, from: data)
+        t.equal(back.state, .idle, "★★瞬态状态 \(transient) 落盘后必须折叠为 idle")
+    }
+    // 终态必须完整保留（含 payload）。
+    do {
+        var node = CanvasNode(x: 0, y: 0)
+        node.state = .succeeded(assetPath: "/tmp/a.png")
+        let back = try! JSONDecoder().decode(CanvasNode.self, from: try! JSONEncoder().encode(node))
+        t.equal(back.state, .succeeded(assetPath: "/tmp/a.png"), "succeeded 状态及产物路径必须保留")
+
+        node.state = .failed(reason: "配额不足")
+        let back2 = try! JSONDecoder().decode(CanvasNode.self, from: try! JSONEncoder().encode(node))
+        t.equal(back2.state, .failed(reason: "配额不足"), "★★failed 状态及原因必须保留（否则无法重跑排查）")
+    }
+
+    // frame / setFrameOrigin 一致性。
+    var n = CanvasNode(x: 5, y: 6, width: 10, height: 20)
+    t.equal(n.frame, CGRect(x: 5, y: 6, width: 10, height: 20), "CanvasNode.frame 与 x/y/w/h 一致")
+    n.setFrameOrigin(CGPoint(x: 50, y: 60))
+    t.check(canvasApprox(n.x, 50) && canvasApprox(n.y, 60), "setFrameOrigin 应改写 x/y")
+
+    // 存储往返。用独立临时目录，绝不碰真实数据目录。
+    let dir = FileManager.default.temporaryDirectory
+        .appendingPathComponent("clipslots_canvas_smoke_\(UUID().uuidString)", isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: dir) }
+    let storage = CanvasStorage(rootOverride: dir)
+
+    t.equal(storage.load().nodes.count, 0, "首次读取应得空画布")
+
+    var doc = CanvasDocument()
+    doc.nodes = [CanvasNode(id: "node_a", x: 12, y: 34, prompt: "一只猫", count: 4),
+                 CanvasNode(id: "node_b", x: -5, y: 0, prompt: "一只狗")]
+    doc.panX = 11; doc.panY = 22; doc.zoom = 1.5
+    t.check(storage.save(doc), "画布文档应保存成功")
+
+    // 换一个实例读（绕开内存缓存），验证真的落到了盘上。
+    let reread = CanvasStorage(rootOverride: dir).load()
+    t.equal(reread.nodes.count, 2, "★★重新读盘应拿回 2 个节点")
+    t.equal(reread.nodes.first?.id, "node_a", "节点顺序应保持")
+    t.equal(reread.nodes.first?.prompt, "一只猫", "prompt 应完整保留")
+    t.equal(reread.nodes.first?.count, 4, "张数参数应保留")
+    t.check(canvasApprox(reread.panX, 11) && canvasApprox(reread.panY, 22) && canvasApprox(reread.zoom, 1.5),
+            "★★视口（pan/zoom）应随文档持久化，下次进画布还在原处")
+    t.equal(reread.schemaVersion, CanvasDocument.currentSchemaVersion, "schemaVersion 应写入当前版本")
+
+    // 损坏文件：必须旁置 .corrupt 后按空画布继续，而不是崩溃或阻塞进入画布。
+    let file = dir.appendingPathComponent("canvas/canvas.json")
+    try! Data("{ 这不是 JSON".utf8).write(to: file)
+    let broken = CanvasStorage(rootOverride: dir)
+    t.equal(broken.load().nodes.count, 0, "★★损坏的画布文件应回落到空画布（画布是派生资产，不阻塞启动）")
+    t.check(FileManager.default.fileExists(atPath: file.path + ".corrupt"),
+            "★★损坏文件必须旁置为 .corrupt 供事后打捞")
+
+    // 缓存失效后应重新读盘。
+    let cached = CanvasStorage(rootOverride: dir)
+    _ = cached.load()
+    cached.invalidateCache()
+    t.check(cached.load().nodes.isEmpty, "invalidateCache 后应重新读盘")
+}
+
 t.report()

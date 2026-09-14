@@ -178,6 +178,21 @@ struct ContentView: View {
     // v2.7.2: Independent node canvas (does NOT draw lines on the main grid).
     @State private var showingNodeCanvas = false
 
+    // MARK: - v2.11.7 工作区三段切换（画布 / 编辑 / Agent）
+
+    /// 当前工作区。默认 `.edit` —— 编辑（槽位卡片）是这个 App 的本职工作，画布是新增能力，
+    /// 不该抢走冷启动后的第一屏。刻意用 `@State` 而不是 `@AppStorage`：MVP 阶段画布还没有真正的
+    /// 生图链路，把它记成「上次所在页」会让用户重开 App 直接落在一个半成品页面上。
+    @State private var workspaceMode: WorkspaceMode = .edit
+
+    /// 画布状态容器。用 `@StateObject` 由 ContentView 持有，生命周期与窗口一致：
+    /// 切到编辑再切回画布时视口与节点都还在（若放在 `CanvasWorkspaceView` 里，视图一销毁就重置）。
+    ///
+    /// 它是**独立** ObservableObject，不挂在 `store` 上 —— 主 store 有几十个 `@Published`，
+    /// 任一槽位变化都会重算整棵 body（项目已知技术债）；画布拖拽是每帧写坐标的高频操作，
+    /// 一旦并进去，拖一个节点就会连带重绘标题栏与整格槽位卡片。
+    @StateObject private var canvasStore = CanvasStore()
+
     // v2.9.17: theme switch now takes effect instantly with no transition effect.
     // The previous water-ripple overlay (v2.7.45) was removed per product request.
     /// v2.10.91: 有效主题（显式 dark/light 直接取用，system 回落到环境 colorScheme）。
@@ -265,79 +280,33 @@ struct ContentView: View {
                 // `.flexible()` 在布局阶段均分铺满整行。
                 // 结果：逐帧不再重建网格子树、不再冻结宽度（内容与窗口边框严格同步），
                 // 而列宽/边距与 v2.10.92 逐像素一致（已用进程内截图核对：5 列各 513px、左右边距均 40px）。
-                ScrollViewReader { scrollProxy in
-                        ScrollView {
-                        // v2.10.93: 显式 `VStack(spacing: 0)` 包住滚动内容。
-                        // ScrollView 的隐式容器默认带 8pt 间距，直接塞入下面那个零高度探针会凭空多出
-                        // 8pt、把整个网格下移——已用进程内截图对照发现并修正。
-                        VStack(spacing: 0) {
-                        // 内容宽度探针：零高度、不画任何东西；量到的是 ScrollView **内容区**可用宽
-                        // （已被滚动条预留槽扣掉），与外层宽度相减即得需要补偿的差值。
-                        GeometryReader { contentProxy in
-                            Color.clear
-                                .onAppear { syncScrollDeficit(contentWidth: contentProxy.size.width) }
-                                .onChange(of: contentProxy.size.width) { syncScrollDeficit(contentWidth: $0) }
-                        }
-                        .frame(height: 0)
-
-                        // v2.5: No results hint
-                        if searchScope == .currentGroup && isSearchActive && matchedSlotCount == 0 {
-                            noResultsView
-                                .padding(.top, 32)
-                        }
-
-                        LazyVGrid(
-                            columns: gridColumns,
-                            spacing: 14
-                        ) {
-                            ForEach(Array(stride(from: 1, through: store.config.slots, by: 1)), id: \.self) { slot in
-                                // v2.10.73（方案③）：卡片身份改回 `.id(slot)`——切组/切页时复用卡片、不整格
-                                // 重建（流畅）；缩略图正确性由 SlotThumbnailView 观察 ThumbnailProvider 保证。
-                                slotCardView(slot: slot)
-                                    .id(slot)
-                            }
-                        }
-                        .padding(.vertical, AppTheme.pagePadding)
-                        .padding(.leading, AppTheme.pagePadding)
-                        // 见 scrollContentDeficit 注释：把滚动条预留槽补回去，左右边距才对称。
-                        .padding(.trailing, AppTheme.pagePadding - scrollContentDeficit)
-                        // v2.10.47: 切组过渡——保留旧内容但轻微淡化，作为「切换中」骨架的底衬；期间禁用点击。
-                        // v2.10.76 (Phase 1 交互状态下沉): 淡化/禁点击/淡入动画迁入 GroupSwitchDimModifier，
-                        // 只观察 store.transientUI.isSwitchingGroup——切组状态变更不再触发整棵 ContentView.body
-                        // 重新求值。视觉与 v2.10.71 完全一致（0.35 透明度 + 0.16s easeInOut，无全网格模糊）。
-                        .modifier(GroupSwitchDimModifier(ui: store.transientUI))
-                        }
+                //
+                // ★ v2.11.7（工作区三段切换）：内容区按 `workspaceMode` 分流。
+                //
+                // 画布刻意**不**包在这个 `ScrollView` 里：无限画布自己管平移，外面再套一层滚动容器会
+                // 出现两套互相打架的手势（一次两指移动到底该滚 ScrollView 还是平移画布），而且
+                // ScrollView 会把子视图的高度需求当成内容高度，让画布无法铺满可用区域。所以三种模式
+                // 是**同级分支**，各自铺满内容区。
+                //
+                // `.animation(nil, value:)`：切换必须是**瞬时**的，不做跨淡入淡出。
+                // 上一版把切换包在 `withAnimation(Anim.transition)` 里（为了让分段控件的选中药丸滑动），
+                // 结果整格 10 张槽位卡片和整个画布同时参与 0.3s 的 opacity 交叉过渡——实测能看到画布上
+                // 半透明地叠着一层旧卡片，而且这一下要同时栅格化两棵重子树，正好撞在项目已知的
+                // 「全局重绘」技术债上。药丸的滑动动画留在切换控件内部即可，内容区不该跟着一起淡。
+                Group {
+                    switch workspaceMode {
+                    case .canvas:
+                        CanvasWorkspaceView(store: store, canvas: canvasStore)
+                    case .agent:
+                        AgentPlaceholderView()
+                    case .edit:
+                        editWorkspace
                     }
-                    .background(AppTheme.windowBackground)
-                    .transaction { $0.animation = nil }
-                    // v2.10.47: 切组过渡遮罩——柔和高光扫过淡化后的旧内容，表示「正在切换/加载」。
-                    // v2.10.76 (Phase 1): 遮罩显隐迁入 GroupSwitchVeilOverlay，只观察 store.transientUI。
-                    .overlay {
-                        GroupSwitchVeilOverlay(ui: store.transientUI)
-                    }
-                    // v2.9.37: when the footer "上次粘贴" button flashes a slot, scroll it
-                    // into view so the highlighted card is always visible after the jump.
-                    // v2.10.73（方案③）：卡片 .id 已改回 slot，scrollTo 目标同步用 slot 保持一致。
-                    .onChange(of: store.flashHighlightSlot) { target in
-                        guard let target else { return }
-                        withAnimation(Anim.status) {
-                            scrollProxy.scrollTo(target.slot, anchor: .center)
-                        }
-                    }
-                    // 列数探针：GeometryReader 放在 `.background` 里，只输出 Color.clear，
-                    // 因此它的 closure 重跑不会重建任何真实内容；只有跨列时才写一次 @State。
-                    .background(
-                        GeometryReader { proxy in
-                            Color.clear
-                                .onChange(of: proxy.size.width) { syncGridMetrics(outerWidth: $0) }
-                                .onAppear { syncGridMetrics(outerWidth: proxy.size.width) }
-                        }
-                    )
-                    // v2.10.93 (测量): 这一层的求值次数 = 「网格子树被重新构造」的次数。
-                    // 修好之后它应当**不再随窗口尺寸变化增长**（尺寸变化只走布局，不重建视图值）。
-                    .perfCount("gridSubtree")
                 }
+                .animation(nil, value: workspaceMode)
 
+                // 底栏在三种模式下都保留：它承载的是全局信息（快捷键提示 / 版本号 / 连接入口），
+                // 而且一旦按模式显隐，切模式就会引起内容区高度跳变（画布会先被压扁再弹开）。
                 bottomBar
             }
             .background(
@@ -514,6 +483,85 @@ struct ContentView: View {
 
     // MARK: - Header Layers
 
+    /// 编辑工作区（槽位卡片主界面）。
+    ///
+    /// v2.11.7：为了让内容区的三段 `switch` 保持可读，从 `body` 里**原样**抽成独立属性——
+    /// 内部实现、注释与 `.perfCount` 探针一字未改，只做了整体反缩进。
+    private var editWorkspace: some View {
+        ScrollViewReader { scrollProxy in
+                ScrollView {
+                // v2.10.93: 显式 `VStack(spacing: 0)` 包住滚动内容。
+                // ScrollView 的隐式容器默认带 8pt 间距，直接塞入下面那个零高度探针会凭空多出
+                // 8pt、把整个网格下移——已用进程内截图对照发现并修正。
+                VStack(spacing: 0) {
+                // 内容宽度探针：零高度、不画任何东西；量到的是 ScrollView **内容区**可用宽
+                // （已被滚动条预留槽扣掉），与外层宽度相减即得需要补偿的差值。
+                GeometryReader { contentProxy in
+                    Color.clear
+                        .onAppear { syncScrollDeficit(contentWidth: contentProxy.size.width) }
+                        .onChange(of: contentProxy.size.width) { syncScrollDeficit(contentWidth: $0) }
+                }
+                .frame(height: 0)
+
+                // v2.5: No results hint
+                if searchScope == .currentGroup && isSearchActive && matchedSlotCount == 0 {
+                    noResultsView
+                        .padding(.top, 32)
+                }
+
+                LazyVGrid(
+                    columns: gridColumns,
+                    spacing: 14
+                ) {
+                    ForEach(Array(stride(from: 1, through: store.config.slots, by: 1)), id: \.self) { slot in
+                        // v2.10.73（方案③）：卡片身份改回 `.id(slot)`——切组/切页时复用卡片、不整格
+                        // 重建（流畅）；缩略图正确性由 SlotThumbnailView 观察 ThumbnailProvider 保证。
+                        slotCardView(slot: slot)
+                            .id(slot)
+                    }
+                }
+                .padding(.vertical, AppTheme.pagePadding)
+                .padding(.leading, AppTheme.pagePadding)
+                // 见 scrollContentDeficit 注释：把滚动条预留槽补回去，左右边距才对称。
+                .padding(.trailing, AppTheme.pagePadding - scrollContentDeficit)
+                // v2.10.47: 切组过渡——保留旧内容但轻微淡化，作为「切换中」骨架的底衬；期间禁用点击。
+                // v2.10.76 (Phase 1 交互状态下沉): 淡化/禁点击/淡入动画迁入 GroupSwitchDimModifier，
+                // 只观察 store.transientUI.isSwitchingGroup——切组状态变更不再触发整棵 ContentView.body
+                // 重新求值。视觉与 v2.10.71 完全一致（0.35 透明度 + 0.16s easeInOut，无全网格模糊）。
+                .modifier(GroupSwitchDimModifier(ui: store.transientUI))
+                }
+            }
+            .background(AppTheme.windowBackground)
+            .transaction { $0.animation = nil }
+            // v2.10.47: 切组过渡遮罩——柔和高光扫过淡化后的旧内容，表示「正在切换/加载」。
+            // v2.10.76 (Phase 1): 遮罩显隐迁入 GroupSwitchVeilOverlay，只观察 store.transientUI。
+            .overlay {
+                GroupSwitchVeilOverlay(ui: store.transientUI)
+            }
+            // v2.9.37: when the footer "上次粘贴" button flashes a slot, scroll it
+            // into view so the highlighted card is always visible after the jump.
+            // v2.10.73（方案③）：卡片 .id 已改回 slot，scrollTo 目标同步用 slot 保持一致。
+            .onChange(of: store.flashHighlightSlot) { target in
+                guard let target else { return }
+                withAnimation(Anim.status) {
+                    scrollProxy.scrollTo(target.slot, anchor: .center)
+                }
+            }
+            // 列数探针：GeometryReader 放在 `.background` 里，只输出 Color.clear，
+            // 因此它的 closure 重跑不会重建任何真实内容；只有跨列时才写一次 @State。
+            .background(
+                GeometryReader { proxy in
+                    Color.clear
+                        .onChange(of: proxy.size.width) { syncGridMetrics(outerWidth: $0) }
+                        .onAppear { syncGridMetrics(outerWidth: proxy.size.width) }
+                }
+            )
+            // v2.10.93 (测量): 这一层的求值次数 = 「网格子树被重新构造」的次数。
+            // 修好之后它应当**不再随窗口尺寸变化增长**（尺寸变化只走布局，不重建视图值）。
+            .perfCount("gridSubtree")
+        }
+    }
+
     private var headerView: some View {
         VStack(spacing: 0) {
             // v2.11.7 hotfix4: 工具栏**不再是一块浮动面板**。
@@ -677,6 +725,15 @@ struct ContentView: View {
             .layoutPriority(2)
 
             LeverClusterView(store: store, autoMode: autoMode)
+                .fixedSize(horizontal: true, vertical: false)
+                .layoutPriority(2)
+
+            // ★ v2.11.7: 工作区三段切换。夹在「拨杆簇」与「搜索框」之间，两侧各一个 Spacer 顶到中间。
+            // 用 `fixedSize` + `layoutPriority(2)`：与左右两个簇同级，窗口变窄时先挤搜索框
+            // （搜索框是 `layoutPriority(0)`），不会把这三个字压成省略号。
+            Spacer(minLength: 8)
+
+            WorkspaceModeSwitcher(selection: $workspaceMode)
                 .fixedSize(horizontal: true, vertical: false)
                 .layoutPriority(2)
 
