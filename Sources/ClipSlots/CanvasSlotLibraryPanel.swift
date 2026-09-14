@@ -2,12 +2,16 @@ import SwiftUI
 import ClipSlotsKit
 
 /// 从槽位库拖到画布时携带的信息。
+///
+/// ★ v2.11.7 hotfix20：去掉了 `prompt`。画布节点就是槽位，正文永远当场从槽位读 —— 载荷里带一份
+/// 文本副本只会在"拖的那一刻"和"松手那一刻"之间产生一个必然会过期的快照，而它唯一的下游
+/// （`addNodeFromSlot`）已经不存在了。`name` 留下来只用于拖影与 toast 文案。
 struct CanvasSlotDragPayload {
     let pageId: String
     let groupId: String
     let slot: Int
-    let label: String?
-    let prompt: String
+    /// 展示名（Label / 正文首行 / 附件兜底），只用于拖影与提示，不是数据。
+    let name: String
 }
 
 /// 左侧浮动槽位库面板（v2.11.7）。
@@ -232,20 +236,19 @@ struct CanvasSlotLibraryPanel: View {
         return out
     }
 
-    /// 行标题。有 Label 用 Label；没有 Label 且**只有附件没有文本**时，用附件名兜底 ——
+    /// 行标题。有 Label 用 Label；没有 Label 且**只有入参文件没有文本**时，用文件数兜底 ——
     /// 否则这一行会显示成一片空白，用户完全不知道它是什么（hotfix19）。
     private func displayTitle(_ entry: SlotEntry) -> String {
         if let label = entry.label, !label.isEmpty { return label }
         if !entry.prompt.isEmpty { return entry.prompt }
-        return entry.attachmentCount > 0 ? "（\(entry.attachmentCount) 个附件）" : "（空）"
+        return entry.attachmentCount > 0 ? "（\(entry.attachmentCount) 个入参文件）" : "（空）"
     }
 
     private func slotRow(page: SlotPage, group: SpecialSlot, entry: SlotEntry) -> some View {
         let payload = CanvasSlotDragPayload(pageId: page.id,
                                            groupId: group.id,
                                            slot: entry.slot,
-                                           label: entry.label,
-                                           prompt: entry.prompt)
+                                           name: displayTitle(entry))
         let key = "\(group.id)#\(entry.slot)"
         return HStack(spacing: 5) {
             Text("\(entry.slot)")

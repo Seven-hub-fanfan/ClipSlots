@@ -586,17 +586,15 @@ struct ContentView: View {
         }
     }
 
-    /// 画布模式的窄顶栏（v2.11.7 hotfix18）。
+    /// 画布模式的窄顶栏（v2.11.7 hotfix18；hotfix20 改为居中）。
     ///
     /// 画布模式把 titleBar 整条摘掉了，切换器要是也跟着消失，用户就再也回不到编辑页（只能重启 App）。
-    /// 所以这里给它一条**只含切换器**的窄条：左对齐，和 Figma 把文件/页签放在左上角是同一套读法，
-    /// 也正好和它下方贴左边缘的槽位库侧栏对齐成一条视觉竖线。
+    /// 所以这里给它一条**只含切换器**的窄条。位置与编辑模式的 titleBar 保持一致 —— 都在水平正中，
+    /// 这样来回切页时那颗胶囊是**原地**换选中态，而不是从中间跳到左上角再跳回来。
     private var canvasTopBar: some View {
-        HStack(spacing: 0) {
-            WorkspaceModeSwitcher(selection: $workspaceMode)
-                .fixedSize(horizontal: true, vertical: true)
-            Spacer(minLength: 0)
-        }
+        WorkspaceModeSwitcher(selection: $workspaceMode)
+            .frame(width: WorkspaceModeSwitcher.preferredWidth)
+            .frame(maxWidth: .infinity, alignment: .center)
         .padding(.horizontal, AppTheme.pagePadding)
         .padding(.vertical, 8)
     }
@@ -767,19 +765,22 @@ struct ContentView: View {
                 .fixedSize(horizontal: true, vertical: false)
                 .layoutPriority(2)
 
-            // ★ v2.11.7 hotfix18: 工作区切换器回到这一行（logo/拨杆之后、搜索框之前）。
+            // ★ v2.11.7 hotfix20: 切换器移到**标题栏的几何正中线**（用户要求）。
             //
-            // 上一版把它拎出去独占一行，为的是「几何真居中」；但用户实际要的是**跟搜索框同一行**、
-            // 顶栏一眼扫过去就是「logo → 在哪个工作区 → 搜什么」这条动线。所以放弃绝对居中：
-            // 它现在是左簇的最后一员，和右侧搜索框同处一条 baseline。
-            // 画布模式没有这条 titleBar，切换器由 `canvasTopBar` 承载（见那里的注释）。
-            WorkspaceModeSwitcher(selection: $workspaceMode)
-                .fixedSize(horizontal: true, vertical: true)
-                .layoutPriority(2)
+            // 它不再是 HStack 的一员。左右两簇宽度并不相等（左：logo+检查更新+两个拨杆；
+            // 右：400pt 搜索框 + 四枚图标），若仍靠两个 Spacer 夹住，得到的是「剩余空间的中点」，
+            // 会比真正的中线偏左二三十点 —— 这种"差一点"的居中比明显靠左更刺眼。
+            // 所以真正显示的那一份挂在下面的 `.overlay(alignment: .center)`：overlay 的坐标系
+            // 就是整条标题栏，`.center` 就是几何中线，与两侧内容宽度无关。
+            //
+            // 流内这块透明占位不能省：overlay 不参与布局，没有它，窗口一窄左右两簇会直接压到
+            // 中央控件上（右侧搜索框 minWidth 是 0，会一路挤过来）。
+            Spacer(minLength: 8)
 
-            // v2.10.78: 唯一撑开用 Spacer 前移到搜索框之前，把 400pt 搜索框推到右侧、
-            // 紧挨右侧图标簇；左侧（logo/拨杆簇与搜索框之间）留白。
-            Spacer(minLength: 0)
+            Color.clear
+                .frame(width: WorkspaceModeSwitcher.preferredWidth, height: 1)
+
+            Spacer(minLength: 8)
 
             SlotSearchBar(
                 searchText: $searchText,
@@ -855,6 +856,11 @@ struct ContentView: View {
             .layoutPriority(2)
         }
         .frame(maxWidth: .infinity)
+        // 真正显示的那一份切换器（流内只有等宽透明占位，见上面 hotfix20 注释）。
+        .overlay(alignment: .center) {
+            WorkspaceModeSwitcher(selection: $workspaceMode)
+                .frame(width: WorkspaceModeSwitcher.preferredWidth)
+        }
     }
 
     // Layer 2: Page Selector + Actions

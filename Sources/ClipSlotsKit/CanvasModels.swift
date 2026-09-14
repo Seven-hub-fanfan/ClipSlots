@@ -97,8 +97,52 @@ extension CanvasNodeState: Codable {
 
 // MARK: - 节点
 
+/// 画布上的一个节点 = **一个槽位在画布上的摆位**（v2.11.7 hotfix20 架构调整）。
+///
+/// ## 为什么不再自带内容
+///
+/// hotfix19 之前节点自己存着 `prompt`，同时用 `sourceSlot` 指向溯源槽位，于是同一段文本有两份：
+/// 节点里一份、槽位里一份。这种结构注定要靠"同步代码"活着 —— 编辑页改了要推给画布、画布改了要
+/// 写回槽位、撤销时两边都要退、导入导出要考虑对不齐的情况。**每一条同步路径都是一个能静默产生
+/// 分歧的地方**，而分歧一旦发生，用户看到的是"画布上的字和编辑页不一样"，无法判断哪个是真的。
+///
+/// 所以这里把结构改成：
+///
+/// ```text
+///   内容（正文 / 入参文件 / Label）   →  只住在槽位里（ClipSlotsKit 的 SlotContent）
+///   摆位与出图参数（坐标 / 模型 / 状态）→  只住在这里
+/// ```
+///
+/// 节点**不缓存任何槽位内容**。卡片要显示正文就当场去问槽位，要改正文就直接写槽位。
+/// 没有副本，就没有同步，也就没有分歧 —— 双向同步不再是一个需要实现的功能，而是结构的自然结果。
+///
+/// ## 身份
+///
+/// `id` 由「槽位引用」派生（`groupId#slot`），不是独立的 UUID。直接后果是
+/// **同一个槽位在画布上最多只能有一个节点**。这是刻意的：两个节点指向同一份内容，改一个另一个
+/// 跟着变，用户没法解释谁是谁；真要"同一段提示词跑两次"，那是出图张数（`count`）的事。
+/// 入口层（`CanvasStore.placeSlot`）遇到重复会选中已有节点而不是再放一个。
+///
+/// 身份里刻意**不含 `pageId`**：组本身带 `pageId` 字段，组在页面间移动时槽位内容并没有变，
+/// 若把页面编进 id，一次移动就会让画布上的节点全部"消失"（id 对不上）。
 public struct CanvasNode: Codable, Identifiable, Equatable {
-    public var id: String
+
+    // MARK: 槽位引用（= 身份 + 内容来源）
+
+    /// 所属页面。**不参与身份**，只是给 UI 做「跳到那一页」用的导航提示。
+    public var pageId: String
+    /// 槽位组 id（全局唯一）。
+    public var groupId: String
+    /// 组内槽位号（1 起）。
+    public var slot: Int
+
+    /// 由槽位引用派生的稳定 id。
+    public var id: String { CanvasNode.makeId(groupId: groupId, slot: slot) }
+
+    public static func makeId(groupId: String, slot: Int) -> String {
+        "\(groupId)#\(slot)"
+    }
+
     public var kind: CanvasNodeKind
 
     /// 画布空间坐标（左上角）。与缩放/平移无关，这是持久化的唯一位置真值。
@@ -107,10 +151,9 @@ public struct CanvasNode: Codable, Identifiable, Equatable {
     public var width: CGFloat
     public var height: CGFloat
 
-    /// 提示词。批量场景下来自槽位主体文本。
-    public var prompt: String
-
-    // MARK: 参数（MVP 只落地参数栏要显示的三项；完整 schema 驱动见架构文档 9.6）
+    // MARK: 出图参数（MVP 只落地参数栏要显示的三项；完整 schema 驱动见架构文档 9.6）
+    //
+    // 这些**不是**槽位的概念（槽位只管内容），所以它们留在摆位里。
 
     /// 模型稳定 ID，例如 `seedream45`。
     public var model: String
@@ -120,6 +163,9 @@ public struct CanvasNode: Codable, Identifiable, Equatable {
     public var count: Int
 
     // MARK: 正文排版（v2.11.7 hotfix19）
+    //
+    // 字体也是"怎么显示"而不是"是什么内容"，同样属于摆位。同一个槽位在编辑页用系统字体、
+    // 在画布上用楷体，是合理的；把字体写进槽位反而会污染用户的内容资产。
 
     /// 正文字体族名（如 `HarmonyOS Sans SC`）。`nil` = 跟随系统字体。
     ///
@@ -133,13 +179,7 @@ public struct CanvasNode: Codable, Identifiable, Equatable {
     /// 正文字号。`nil` = `CanvasNode.defaultBodyFontSize`。
     public var fontSize: CGFloat?
 
-    // MARK: 来源与状态
-
-    /// 节点来源槽位（若由槽位库拖入 / 批量展开产生）。仅作溯源，不产生写回。
-    public var sourcePageId: String?
-    public var sourceGroupId: String?
-    public var sourceSlot: Int?
-    public var sourceLabel: String?
+    // MARK: 生成状态
 
     public var state: CanvasNodeState
     /// Crate 任务 ID，失败排查与「复制 taskId」用。
@@ -178,48 +218,123 @@ public struct CanvasNode: Codable, Identifiable, Equatable {
         return fontSize != nil
     }
 
-    public init(id: String = "node_" + UUID().uuidString,
+    public init(pageId: String,
+                groupId: String,
+                slot: Int,
                 kind: CanvasNodeKind = .image,
                 x: CGFloat,
                 y: CGFloat,
                 width: CGFloat = CanvasNode.defaultSize.width,
                 height: CGFloat = CanvasNode.defaultSize.height,
-                prompt: String = "",
                 model: String = "seedream45",
                 ratio: String = "1:1",
                 count: Int = 1,
                 fontName: String? = nil,
                 fontSize: CGFloat? = nil,
-                sourcePageId: String? = nil,
-                sourceGroupId: String? = nil,
-                sourceSlot: Int? = nil,
-                sourceLabel: String? = nil,
                 state: CanvasNodeState = .idle,
                 taskId: String? = nil,
                 seed: Int? = nil,
                 createdAt: Date = Date(),
                 updatedAt: Date = Date()) {
-        self.id = id
+        self.pageId = pageId
+        self.groupId = groupId
+        self.slot = slot
         self.kind = kind
         self.x = x
         self.y = y
         self.width = width
         self.height = height
-        self.prompt = prompt
         self.model = model
         self.ratio = ratio
         self.count = count
         self.fontName = fontName
         self.fontSize = fontSize.map(CanvasNode.clampBodyFontSize)
-        self.sourcePageId = sourcePageId
-        self.sourceGroupId = sourceGroupId
-        self.sourceSlot = sourceSlot
-        self.sourceLabel = sourceLabel
         self.state = state
         self.taskId = taskId
         self.seed = seed
         self.createdAt = createdAt
         self.updatedAt = updatedAt
+    }
+
+    // MARK: - Codable（含 hotfix19 及更早的旧文档迁移）
+
+    private enum CodingKeys: String, CodingKey {
+        case pageId, groupId, slot
+        case kind, x, y, width, height
+        case model, ratio, count
+        case fontName, fontSize
+        case state, taskId, seed
+        case createdAt, updatedAt
+        // 旧字段：hotfix19 及更早的节点自带内容与溯源信息。只在解码时读，从不写回。
+        case sourcePageId, sourceGroupId, sourceSlot
+    }
+
+    /// 手写解码是为了**迁移旧画布文档**。
+    ///
+    /// 旧结构里槽位引用叫 `sourceGroupId` / `sourceSlot`，而且允许为 nil（"未绑定节点"，内容存在
+    /// 节点自己的 `prompt` 里）。新结构下节点必须指向一个槽位，所以：
+    ///   - 有 `sourceGroupId` + `sourceSlot` → 平移成新字段，位置与出图参数原样保留。
+    ///   - 两者都没有（老的未绑定节点）→ **抛错**。它的内容住在 `prompt` 里，新结构没有地方放；
+    ///     与其凭空造一个槽位去承接（会污染用户的槽位资产），不如让它在文档级被跳过。
+    ///     `CanvasDocument` 的解码是逐节点容错的，跳过一个不会带走整张画布。
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+
+        if let gid = try c.decodeIfPresent(String.self, forKey: .groupId),
+           let s = try c.decodeIfPresent(Int.self, forKey: .slot) {
+            groupId = gid
+            slot = s
+            pageId = try c.decodeIfPresent(String.self, forKey: .pageId) ?? ""
+        } else if let gid = try c.decodeIfPresent(String.self, forKey: .sourceGroupId),
+                  let s = try c.decodeIfPresent(Int.self, forKey: .sourceSlot) {
+            groupId = gid
+            slot = s
+            pageId = try c.decodeIfPresent(String.self, forKey: .sourcePageId) ?? ""
+        } else {
+            throw DecodingError.dataCorruptedError(
+                forKey: .groupId, in: c,
+                debugDescription: "节点没有槽位引用（旧的未绑定节点），按约定跳过")
+        }
+
+        kind = try c.decodeIfPresent(CanvasNodeKind.self, forKey: .kind) ?? .image
+        x = try c.decodeIfPresent(CGFloat.self, forKey: .x) ?? 0
+        y = try c.decodeIfPresent(CGFloat.self, forKey: .y) ?? 0
+        width = try c.decodeIfPresent(CGFloat.self, forKey: .width) ?? CanvasNode.defaultSize.width
+        height = try c.decodeIfPresent(CGFloat.self, forKey: .height) ?? CanvasNode.defaultSize.height
+        model = try c.decodeIfPresent(String.self, forKey: .model) ?? "seedream45"
+        ratio = try c.decodeIfPresent(String.self, forKey: .ratio) ?? "1:1"
+        count = try c.decodeIfPresent(Int.self, forKey: .count) ?? 1
+        fontName = try c.decodeIfPresent(String.self, forKey: .fontName)
+        fontSize = try c.decodeIfPresent(CGFloat.self, forKey: .fontSize)
+        state = try c.decodeIfPresent(CanvasNodeState.self, forKey: .state) ?? .idle
+        taskId = try c.decodeIfPresent(String.self, forKey: .taskId)
+        seed = try c.decodeIfPresent(Int.self, forKey: .seed)
+        createdAt = try c.decodeIfPresent(Date.self, forKey: .createdAt) ?? Date()
+        updatedAt = try c.decodeIfPresent(Date.self, forKey: .updatedAt) ?? Date()
+    }
+
+    /// 编码只写新字段。旧的 `source*` / `prompt` 刻意不回写 —— 保留它们会让下一位读者以为
+    /// 那份副本还有人用，而"看起来还在用的死字段"是最容易被误当成真相的东西。
+    public func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(pageId, forKey: .pageId)
+        try c.encode(groupId, forKey: .groupId)
+        try c.encode(slot, forKey: .slot)
+        try c.encode(kind, forKey: .kind)
+        try c.encode(x, forKey: .x)
+        try c.encode(y, forKey: .y)
+        try c.encode(width, forKey: .width)
+        try c.encode(height, forKey: .height)
+        try c.encode(model, forKey: .model)
+        try c.encode(ratio, forKey: .ratio)
+        try c.encode(count, forKey: .count)
+        try c.encodeIfPresent(fontName, forKey: .fontName)
+        try c.encodeIfPresent(fontSize, forKey: .fontSize)
+        try c.encode(state, forKey: .state)
+        try c.encodeIfPresent(taskId, forKey: .taskId)
+        try c.encodeIfPresent(seed, forKey: .seed)
+        try c.encode(createdAt, forKey: .createdAt)
+        try c.encode(updatedAt, forKey: .updatedAt)
     }
 
     /// 画布空间的矩形。
@@ -268,6 +383,51 @@ public struct CanvasDocument: Codable, Equatable {
         self.panY = panY
         self.zoom = zoom
         self.updatedAt = updatedAt
+    }
+
+    // MARK: - Codable（逐节点容错 + 同槽去重）
+
+    private enum CodingKeys: String, CodingKey {
+        case schemaVersion, nodes, panX, panY, zoom, updatedAt
+    }
+
+    /// 单个节点的**容错解码包装**。
+    ///
+    /// hotfix20 起 `CanvasNode.init(from:)` 会对「没有槽位引用的旧节点」抛错（见那边的注释）。
+    /// 若 `nodes` 走默认的 `[CanvasNode]` 合成解码，**一个**坏节点会让整份文档解码失败 —— 而画布
+    /// 文档的兜底策略是「解不开就丢弃重建」，用户看到的就是升级后整张画布被清空。逐个解、坏的跳过，
+    /// 才能让迁移只损失真正没法承接的那几个节点。
+    private struct LenientNode: Decodable {
+        let node: CanvasNode?
+        init(from decoder: Decoder) throws {
+            node = try? CanvasNode(from: decoder)
+        }
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        schemaVersion = try c.decodeIfPresent(Int.self, forKey: .schemaVersion)
+            ?? CanvasDocument.currentSchemaVersion
+        let decoded = (try c.decodeIfPresent([LenientNode].self, forKey: .nodes) ?? [])
+            .compactMap(\.node)
+        nodes = CanvasDocument.dedupedBySlot(decoded)
+        panX = try c.decodeIfPresent(CGFloat.self, forKey: .panX) ?? 0
+        panY = try c.decodeIfPresent(CGFloat.self, forKey: .panY) ?? 0
+        zoom = try c.decodeIfPresent(CGFloat.self, forKey: .zoom) ?? 1
+        updatedAt = try c.decodeIfPresent(Date.self, forKey: .updatedAt) ?? Date()
+    }
+
+    /// 同一槽位只保留**第一个**摆位。
+    ///
+    /// 新结构下 `id == groupId#slot`，旧文档里完全可能有两个节点指向同一个槽位（老结构允许，
+    /// 因为那时 id 是 UUID）。留着重复项的后果不是"多一张卡片"，而是 SwiftUI `ForEach` 的
+    /// id 冲突：选中、拖动、删除都会作用到不确定的那一个，表现为"点 A 动 B"。
+    public static func dedupedBySlot(_ input: [CanvasNode]) -> [CanvasNode] {
+        var seen = Set<String>()
+        var out: [CanvasNode] = []
+        out.reserveCapacity(input.count)
+        for node in input where seen.insert(node.id).inserted { out.append(node) }
+        return out
     }
 
     public var pan: CGSize { CGSize(width: panX, height: panY) }

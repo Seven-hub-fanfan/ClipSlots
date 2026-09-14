@@ -3172,12 +3172,40 @@ do {
 
 // MARK: - CANVAS-DOC：画布模型与落盘
 
+/// 造一个画布节点。
+///
+/// ★ v2.11.7 hotfix20：`CanvasNode` 不再是「内容副本」而是**槽位摆位**——身份由
+/// `groupId#slot` 派生，正文/附件一律实时读槽位，节点里根本没有 `prompt` 字段了。
+/// 于是每次构造都必须交代它摆的是**哪一页哪一组的第几号槽位**。测试里绝大多数用例只关心
+/// 几何，所以用这个工厂把槽位身份收进默认值，只有需要区分身份的用例才显式传 `group`/`slot`。
+func canvasNode(slot: Int = 1,
+                group: String = "g1",
+                page: String = "p1",
+                x: CGFloat = 0,
+                y: CGFloat = 0,
+                width: CGFloat = CanvasNode.defaultSize.width,
+                height: CGFloat = CanvasNode.defaultSize.height,
+                count: Int = 1,
+                fontName: String? = nil,
+                fontSize: CGFloat? = nil) -> CanvasNode {
+    CanvasNode(pageId: page,
+               groupId: group,
+               slot: slot,
+               x: x,
+               y: y,
+               width: width,
+               height: height,
+               count: count,
+               fontName: fontName,
+               fontSize: fontSize)
+}
+
 do {
     // 瞬态状态折叠：`running` / `queued` 落盘后必须变 idle。
     // 不折叠的症状是重启后节点永远停在「生成中」——轮询进程早就没了，它永远不会变，
     // 而用户看到「生成中」是不会去点重跑的，节点就成了僵尸。
     for transient in [CanvasNodeState.idle, .queued(ahead: 3), .running(startedAt: Date())] {
-        var node = CanvasNode(x: 0, y: 0)
+        var node = canvasNode()
         node.state = transient
         let data = try! JSONEncoder().encode(node)
         let back = try! JSONDecoder().decode(CanvasNode.self, from: data)
@@ -3185,7 +3213,7 @@ do {
     }
     // 终态必须完整保留（含 payload）。
     do {
-        var node = CanvasNode(x: 0, y: 0)
+        var node = canvasNode()
         node.state = .succeeded(assetPath: "/tmp/a.png")
         let back = try! JSONDecoder().decode(CanvasNode.self, from: try! JSONEncoder().encode(node))
         t.equal(back.state, .succeeded(assetPath: "/tmp/a.png"), "succeeded 状态及产物路径必须保留")
@@ -3196,7 +3224,7 @@ do {
     }
 
     // frame / setFrameOrigin 一致性。
-    var n = CanvasNode(x: 5, y: 6, width: 10, height: 20)
+    var n = canvasNode(x: 5, y: 6, width: 10, height: 20)
     t.equal(n.frame, CGRect(x: 5, y: 6, width: 10, height: 20), "CanvasNode.frame 与 x/y/w/h 一致")
     n.setFrameOrigin(CGPoint(x: 50, y: 60))
     t.check(canvasApprox(n.x, 50) && canvasApprox(n.y, 60), "setFrameOrigin 应改写 x/y")
@@ -3210,20 +3238,23 @@ do {
     t.equal(storage.load().nodes.count, 0, "首次读取应得空画布")
 
     var doc = CanvasDocument()
-    doc.nodes = [CanvasNode(id: "node_a", x: 12, y: 34, prompt: "一只猫", count: 4),
-                 CanvasNode(id: "node_b", x: -5, y: 0, prompt: "一只狗")]
+    doc.nodes = [canvasNode(slot: 1, group: "grp_a", x: 12, y: 34, count: 4),
+                 canvasNode(slot: 7, group: "grp_b", x: -5, y: 0)]
     doc.panX = 11; doc.panY = 22; doc.zoom = 1.5
     t.check(storage.save(doc), "画布文档应保存成功")
 
     // 换一个实例读（绕开内存缓存），验证真的落到了盘上。
     let reread = CanvasStorage(rootOverride: dir).load()
     t.equal(reread.nodes.count, 2, "★★重新读盘应拿回 2 个节点")
-    t.equal(reread.nodes.first?.id, "node_a", "节点顺序应保持")
-    t.equal(reread.nodes.first?.prompt, "一只猫", "prompt 应完整保留")
+    t.equal(reread.nodes.first?.id, "grp_a#1", "★★节点身份应由 groupId#slot 派生，且顺序保持")
+    t.equal(reread.nodes.first?.groupId, "grp_a", "槽位组 id 应完整保留")
+    t.equal(reread.nodes.first?.slot, 1, "槽位号应完整保留")
+    t.equal(reread.nodes.first?.pageId, "p1", "★★页 id 必须保留——跨页放置的节点靠它找回槽位")
     t.equal(reread.nodes.first?.count, 4, "张数参数应保留")
     t.check(canvasApprox(reread.panX, 11) && canvasApprox(reread.panY, 22) && canvasApprox(reread.zoom, 1.5),
             "★★视口（pan/zoom）应随文档持久化，下次进画布还在原处")
     t.equal(reread.schemaVersion, CanvasDocument.currentSchemaVersion, "schemaVersion 应写入当前版本")
+
 
     // 损坏文件：必须旁置 .corrupt 后按空画布继续，而不是崩溃或阻塞进入画布。
     let file = dir.appendingPathComponent("canvas/canvas.json")
@@ -3251,8 +3282,10 @@ do {
 // 这三条在 UI 上都要靠人眼逐节点核对才能发现，所以必须在这里钉死。
 
 do {
+    // hotfix20：节点没有独立 id 了，身份 = groupId#slot。这里用「组名」当作以前的 id，
+    // 得到的节点 id 就是 "a#1" / "b#1"，仍然彼此不同，撤销栈只关心这一点。
     func node(_ id: String, _ x: CGFloat, _ y: CGFloat) -> CanvasNode {
-        CanvasNode(id: id, x: x, y: y)
+        canvasNode(group: id, x: x, y: y)
     }
     func entry(_ kind: CanvasHistoryEntry.Kind,
                _ detail: String,
@@ -3384,6 +3417,117 @@ do {
             "styleNode 的 rawValue 不可改名（历史条目 Codable 依赖它）")
 }
 
+// MARK: - CANVAS-PLACEMENT：节点 = 槽位摆位（v2.11.7 hotfix20）
+//
+// 为什么这组必须存在：这一版把「节点自带一份内容 + 用 sourceSlot 指回槽位」改成
+// 「节点就是槽位的一个摆位」。三类错误都不会当场报错，只会静默毁数据或静默丢画布：
+//   1. 身份口径写错（不是 groupId#slot）→ 同一槽位能被摆两次，SwiftUI ForEach 撞 id，
+//      两张卡片开始抢同一份数据，表现是"拖一张另一张跟着跳"。
+//   2. 旧文档迁移漏掉 `sourceGroupId/sourceSlot` → 用户升级后**整张画布变空**，
+//      而画布是派生资产，没有回收站可捞。
+//   3. 逐节点容错解码写成整份 throw → 一个老的"未绑定节点"就能带走整张画布。
+// 这三条都得在读写层钉死，UI 上只会看到"东西没了"，无从倒推。
+
+do {
+    // ── 身份口径
+    t.equal(CanvasNode.makeId(groupId: "grp", slot: 3), "grp#3",
+            "★★节点身份必须是 groupId#slot（画布去重、ForEach、选中集合全靠它）")
+    t.equal(canvasNode(slot: 3, group: "grp").id, "grp#3",
+            "node.id 应与 makeId 完全一致")
+    t.check(canvasNode(slot: 1, group: "a").id != canvasNode(slot: 1, group: "b").id,
+            "★★不同组的同号槽位必须是不同节点（否则跨组放置会互相顶掉）")
+    t.check(canvasNode(slot: 1, group: "a").id != canvasNode(slot: 2, group: "a").id,
+            "同组不同槽位必须是不同节点")
+
+    let enc = JSONEncoder()
+    let dec = JSONDecoder()
+
+    // ── 编码只写新字段：旧的 source* / prompt 不许回写。
+    // 回写的害处不是占空间，而是让下一位读者以为那份副本还有人维护。
+    do {
+        let data = try enc.encode(canvasNode(slot: 2, group: "g", page: "p"))
+        let raw = try JSONSerialization.jsonObject(with: data) as? [String: Any] ?? [:]
+        t.check(raw["groupId"] as? String == "g" && raw["slot"] as? Int == 2 && raw["pageId"] as? String == "p",
+                "新字段 pageId/groupId/slot 必须落盘")
+        t.check(raw["prompt"] == nil && raw["sourceSlot"] == nil && raw["sourceGroupId"] == nil
+                    && raw["sourcePageId"] == nil && raw["id"] == nil,
+                "★★不许再回写 prompt / source* / 独立 id（死字段会被误当成真相）")
+    } catch {
+        t.check(false, "节点编码不应抛错：\(error)")
+    }
+
+    // ── 旧文档迁移：hotfix19 的节点用 source* 指向槽位，必须平移过来，位置/参数不动。
+    do {
+        let legacy: [String: Any] = [
+            "id": "node_legacy",
+            "sourcePageId": "page_old",
+            "sourceGroupId": "group_old",
+            "sourceSlot": 5,
+            "prompt": "旧节点自带的正文",
+            "x": 120, "y": 240, "width": 300, "height": 200,
+            "model": "seedream45", "ratio": "16:9", "count": 3,
+        ]
+        let data = try JSONSerialization.data(withJSONObject: legacy)
+        let node = try dec.decode(CanvasNode.self, from: data)
+        t.equal(node.groupId, "group_old", "★★旧 sourceGroupId 必须迁到 groupId")
+        t.equal(node.slot, 5, "★★旧 sourceSlot 必须迁到 slot")
+        t.equal(node.pageId, "page_old", "旧 sourcePageId 必须迁到 pageId")
+        t.equal(node.id, "group_old#5", "迁移后的身份仍按 groupId#slot 派生")
+        t.check(canvasApprox(node.x, 120) && canvasApprox(node.y, 240)
+                    && canvasApprox(node.width, 300) && canvasApprox(node.height, 200),
+                "★★迁移必须原样保留几何——位置一变，用户升级后画布就乱了")
+        t.equal(node.count, 3, "出图参数应原样保留")
+        t.equal(node.ratio, "16:9", "比例参数应原样保留")
+    } catch {
+        t.check(false, "★★hotfix19 旧节点必须能迁移解码（实测抛错：\(error)）")
+    }
+
+    // ── 旧的「未绑定节点」：没有任何槽位引用，新结构没地方放它的 prompt。
+    // 约定是解码抛错、由文档级跳过；绝不能凭空造一个槽位去接（那是往用户资产里写脏数据）。
+    do {
+        let unbound: [String: Any] = ["id": "node_free", "prompt": "无处安放的正文", "x": 0, "y": 0]
+        let data = try JSONSerialization.data(withJSONObject: unbound)
+        _ = try dec.decode(CanvasNode.self, from: data)
+        t.check(false, "★★旧的未绑定节点应解码失败（约定由文档级跳过），实测却解出来了")
+    } catch {
+        t.check(true, "旧的未绑定节点按约定解码失败")
+    }
+
+    // ── 文档级逐节点容错：一个坏节点只该丢它自己。
+    do {
+        let good = try JSONSerialization.jsonObject(
+            with: try enc.encode(canvasNode(slot: 1, group: "ok"))) as? [String: Any] ?? [:]
+        let docRaw: [String: Any] = [
+            "schemaVersion": CanvasDocument.currentSchemaVersion,
+            "nodes": [good,
+                      ["id": "node_free", "prompt": "无处安放"],   // 老的未绑定节点
+                      ["x": "这不是数字"],                          // 彻底的脏数据
+                      good],                                       // 与第一个同槽 → 应被去重
+            "panX": 5, "panY": 6, "zoom": 2,
+        ]
+        let data = try JSONSerialization.data(withJSONObject: docRaw)
+        let doc = try dec.decode(CanvasDocument.self, from: data)
+        t.equal(doc.nodes.count, 1,
+                "★★坏节点逐个跳过、同槽重复去重后应只剩 1 个（实得 \(doc.nodes.count)）")
+        t.equal(doc.nodes.first?.id, "ok#1", "保留下来的应是那个合法节点")
+        t.check(canvasApprox(doc.panX, 5) && canvasApprox(doc.panY, 6) && canvasApprox(doc.zoom, 2),
+                "★★个别节点坏掉不该影响视口等文档级字段")
+    } catch {
+        t.check(false, "★★含坏节点的文档必须仍能解码（实测抛错：\(error)）")
+    }
+
+    // ── 去重口径：同一 groupId#slot 只保留**第一个**摆位，位置取先来的那个。
+    let deduped = CanvasDocument.dedupedBySlot([
+        canvasNode(slot: 1, group: "g", x: 10, y: 10),
+        canvasNode(slot: 1, group: "g", x: 999, y: 999),
+        canvasNode(slot: 2, group: "g", x: 20, y: 20),
+    ])
+    t.equal(deduped.count, 2, "★★同槽重复摆位必须去重（否则 ForEach 撞 id，两张卡片抢同一份数据）")
+    t.check(canvasApprox(deduped.first?.x ?? -1, 10),
+            "去重应保留先出现的那一个（位置 10 而不是 999）")
+    t.equal(Set(deduped.map(\.id)).count, deduped.count, "去重后 id 必须互不相同")
+}
+
 // MARK: - CANVAS-FONT：节点正文字体的模型层（v2.11.7 hotfix19）
 //
 // 为什么这组必须存在：用户报的 bug 是"字体选了但没保存"。这类 bug 的两个藏身处都是静默的：
@@ -3408,19 +3552,19 @@ do {
             "默认字号必须落在合法区间内")
 
     // ── 未设置字体时的解析口径
-    let plain = CanvasNode(x: 0, y: 0)
+    let plain = canvasNode()
     t.check(plain.fontName == nil, "新节点默认不带字体族（跟随系统）")
     t.check(!plain.hasCustomFont, "没设过字体的节点 hasCustomFont 应为 false")
     t.equal(plain.resolvedBodyFontSize, CanvasNode.defaultBodyFontSize,
             "未设字号时 resolvedBodyFontSize 应给默认值")
 
     // ── 构造时即夹取：越界值不该有机会进入内存，更不该落盘
-    let oversized = CanvasNode(x: 0, y: 0, fontName: "MiSans", fontSize: 400)
+    let oversized = canvasNode(fontName: "MiSans", fontSize: 400)
     t.equal(oversized.fontSize, CanvasNode.bodyFontSizeRange.upperBound,
             "★★init 也必须夹取字号，否则越界值会绕过 store 直接落盘")
 
     // ── Codable 往返：这一条挡住"重启后字体丢了"
-    var styled = CanvasNode(x: 12, y: 34, fontName: "HarmonyOS Sans SC", fontSize: 16)
+    var styled = canvasNode(x: 12, y: 34, fontName: "HarmonyOS Sans SC", fontSize: 16)
     styled.model = "seedream45"
     let enc = JSONEncoder()
     let dec = JSONDecoder()

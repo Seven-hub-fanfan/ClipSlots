@@ -69,41 +69,49 @@ final class CanvasStore: ObservableObject {
     // ★ 所有写操作都必须走 `commit(...)`：它负责「记一步撤销 + 落盘」这两件必须成对发生的事。
     // 直接改 `nodes` 而绕过 commit 的写法，症状是「这一步 Cmd+Z 撤不掉」，而且不会有任何报错。
 
-    func addNode(_ node: CanvasNode) {
-        commit(.addNode, detail: nodeTitle(node)) {
-            nodes.append(node)
-            selectedNodeIds = [node.id]
+    /// 把一个槽位**摆到画布上**（v2.11.7 hotfix20）。
+    ///
+    /// 这是画布上出现节点的**唯一**入口 —— 槽位库拖拽、Cmd+1~0、圆盘命令全部汇到这里。
+    /// 名字从 hotfix19 的 `addNodeFromSlot` 改成 `placeSlot` 不是措辞洁癖：旧方法真的会把槽位
+    /// 正文拷进 `node.prompt`，所以"创建节点"确实创建了一份内容；现在它只决定「这个槽位画在哪」，
+    /// 内容一直是槽位自己的，一个字都不复制。
+    ///
+    /// 同一槽位已经在画布上时**不再放第二个**（新 id 是 `groupId#slot`，放第二个会撞 id，
+    /// 表现为 SwiftUI `ForEach` 里"点 A 动 B"）。这时改为选中已有的那个，并把
+    /// `.alreadyPlaced` 返回给调用方，由它决定提示与视口跟随 —— store 不认识 UI 通道。
+    @discardableResult
+    func placeSlot(pageId: String,
+                   groupId: String,
+                   slot: Int,
+                   name: String,
+                   at canvasPoint: CGPoint,
+                   kind: CanvasNodeKind = .image) -> CanvasSlotPlacement {
+        let id = CanvasNode.makeId(groupId: groupId, slot: slot)
+        if let existing = nodes.first(where: { $0.id == id }) {
+            selectedNodeIds = [existing.id]
+            return .alreadyPlaced(node: existing, name: name)
         }
-    }
-
-    /// 从槽位创建节点。prompt 取槽位主体纯文本；空槽也允许拖入（生成前用户可自己补 prompt）。
-    func addNodeFromSlot(pageId: String,
-                         groupId: String,
-                         slot: Int,
-                         label: String?,
-                         prompt: String,
-                         at canvasPoint: CGPoint,
-                         kind: CanvasNodeKind = .image) {
         let size = CanvasNode.defaultSize
         // 落点即节点中心，符合「拖到哪儿就放哪儿」的直觉。
         let origin = CGPoint(x: canvasPoint.x - size.width / 2, y: canvasPoint.y - size.height / 2)
         let snapped = CanvasGeometry.snap(origin, step: CanvasStore.snapStep)
-        addNode(CanvasNode(kind: kind,
-                           x: snapped.x,
-                           y: snapped.y,
-                           prompt: prompt,
-                           sourcePageId: pageId,
-                           sourceGroupId: groupId,
-                           sourceSlot: slot,
-                           sourceLabel: label))
+        let node = CanvasNode(pageId: pageId,
+                              groupId: groupId,
+                              slot: slot,
+                              kind: kind,
+                              x: snapped.x,
+                              y: snapped.y)
+        commit(.addNode, detail: name) {
+            nodes.append(node)
+            selectedNodeIds = [node.id]
+        }
+        return .placed(node: node, name: name)
     }
 
-    /// 在视图中心新建一个空节点（工具栏 N / 快捷键）。
-    func addBlankNode(at canvasPoint: CGPoint) {
-        let size = CanvasNode.defaultSize
-        let origin = CGPoint(x: canvasPoint.x - size.width / 2, y: canvasPoint.y - size.height / 2)
-        let snapped = CanvasGeometry.snap(origin, step: CanvasStore.snapStep)
-        addNode(CanvasNode(x: snapped.x, y: snapped.y))
+    /// 某个槽位当前的摆位（没摆则 nil）。
+    func node(forGroupId groupId: String, slot: Int) -> CanvasNode? {
+        let id = CanvasNode.makeId(groupId: groupId, slot: slot)
+        return nodes.first { $0.id == id }
     }
 
     func moveNode(id: String, to origin: CGPoint) {
@@ -204,73 +212,20 @@ final class CanvasStore: ObservableObject {
         return nodes.first { $0.id == id }
     }
 
-    // MARK: - 节点文本 / 槽位注入
+    // MARK: - 节点正文（= 槽位正文）
 
-    /// 改节点自己的 prompt（**未绑定槽位**的节点走这条；绑定的节点由调用方写槽位数据）。
-    func updateNodePrompt(id: String, text: String, slotEdit: CanvasHistoryEntry.SlotTextEdit? = nil) {
-        guard let idx = nodes.firstIndex(where: { $0.id == id }) else { return }
-        guard nodes[idx].prompt != text || slotEdit != nil else { return }
-        let title = nodeTitle(nodes[idx])
-        commit(.editNode, detail: title, slotEdit: slotEdit) {
-            nodes[idx].prompt = text
-            nodes[idx].updatedAt = Date()
-        }
-    }
-
-    /// Cmd+数字 / 圆盘：把一个槽位的内容送进当前选中的节点。
+    /// 记一步「在画布里改了正文」的可撤销历史。
     ///
-    /// 语义分三种，按节点当前状态决定（每种都会在 toast 里说清楚，不做静默行为）：
-    ///   - 节点**已绑定**某槽位 → 改绑到新槽位（它本来就是那个槽位的镜像，追加会写脏槽位数据）。
-    ///   - 节点**未绑定且为空** → 绑定到该槽位，从此双向同步。
-    ///   - 节点**未绑定且有内容** → 把文本追加到末尾（用户在拼一段复合 prompt）。
+    /// ★ hotfix20 起**文本本身不由这里写**：节点没有 `prompt` 副本了，正文的唯一真相是槽位数据，
+    /// 由调用方（画布视图，它认识主 store）直接写进槽位。这里只负责历史 —— `before == after`
+    /// （节点数组一个字节都没变），撤销时靠 `slotEdit` 把槽位文本推回去。
     ///
-    /// **前置条件（hotfix19）**：调用方必须保证选中集合非空。选中为空时正确的行为是新建节点，
-    /// 那个决定需要视口尺寸（只有 View 层有），所以留在调用方而不是塞进这里。
-    @discardableResult
-    func injectSlot(pageId: String,
-                    groupId: String,
-                    slot: Int,
-                    label: String?,
-                    text: String) -> CanvasSlotInjection {
-        let targets = nodes.filter { selectedNodeIds.contains($0.id) }
-        guard !targets.isEmpty else { return .noSelection }
-
-        let name = label?.isEmpty == false ? label! : "槽位 \(slot)"
-        var modes: Set<CanvasSlotInjection.Mode> = []
-        commit(.bindSlot, detail: targets.count == 1 ? name : "\(name) → \(targets.count) 个节点") {
-            for idx in nodes.indices where selectedNodeIds.contains(nodes[idx].id) {
-                let isBound = nodes[idx].sourceSlot != nil
-                if isBound {
-                    modes.insert(.rebound)
-                    bind(&nodes[idx], pageId: pageId, groupId: groupId, slot: slot, label: label, text: text)
-                } else if nodes[idx].prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                    modes.insert(.bound)
-                    bind(&nodes[idx], pageId: pageId, groupId: groupId, slot: slot, label: label, text: text)
-                } else {
-                    modes.insert(.appended)
-                    nodes[idx].prompt += "\n" + text
-                    nodes[idx].updatedAt = Date()
-                }
-            }
-        }
-        // 多个节点混合命中多种语义时报最"重"的那个（改绑 > 追加 > 绑定），提示不能撒谎。
-        let mode: CanvasSlotInjection.Mode = modes.contains(.rebound) ? .rebound
-            : (modes.contains(.appended) ? .appended : .bound)
-        return .applied(mode: mode, name: name, count: targets.count)
-    }
-
-    private func bind(_ node: inout CanvasNode,
-                      pageId: String,
-                      groupId: String,
-                      slot: Int,
-                      label: String?,
-                      text: String) {
-        node.prompt = text
-        node.sourcePageId = pageId
-        node.sourceGroupId = groupId
-        node.sourceSlot = slot
-        node.sourceLabel = label
-        node.updatedAt = Date()
+    /// 把"写数据"和"记历史"拆到两处看着别扭，但另一种写法是让这个轻量 store 认识
+    /// `SlotStoreObservable`，那会把画布重新拖回「任一槽位变化触发全局重绘」的老路（见类型注释）。
+    func recordSlotTextEdit(nodeId: String, edit: CanvasHistoryEntry.SlotTextEdit) {
+        guard edit.before != edit.after else { return }
+        guard let node = nodes.first(where: { $0.id == nodeId }) else { return }
+        commit(.editNode, detail: nodeTitle(node), slotEdit: edit) { }
     }
 
     /// 外部（编辑页改了槽位）通知画布：绑定节点该重读槽位文本了。
@@ -369,78 +324,25 @@ final class CanvasStore: ObservableObject {
         }
     }
 
-    // MARK: - 多张展开（对齐 CLI --count 语义）
-
-    /// 把一个母节点按 `count` 展开成多个独立节点，并把挡路的既有节点向右推开。
-    ///
-    /// MVP 阶段这里只做布局，不真正提交任务 —— 生图接入见架构文档第三节。
-    func fanOut(nodeId: String) {
-        guard let idx = nodes.firstIndex(where: { $0.id == nodeId }) else { return }
-        let parent = nodes[idx]
-        let count = max(1, min(parent.count, 4))
-        guard count > 1 else { return }
-
-        commit(.fanOut, detail: "\(count) 个节点") {
-            let size = CGSize(width: parent.width, height: parent.height)
-            let bounds = CanvasGeometry.fanOutBounds(origin: parent.frame.origin,
-                                                    nodeSize: size,
-                                                    count: count,
-                                                    gap: CanvasStore.fanGap)
-
-            // 先推开挡路节点（排除母节点自身）。
-            var others = nodes
-            others.remove(at: idx)
-            let offsets = CanvasGeometry.pushRightOffsets(existing: others.map(\.frame),
-                                                         bounds: bounds,
-                                                         gap: CanvasStore.fanGap)
-            for (otherIdx, dx) in offsets {
-                let targetId = others[otherIdx].id
-                if let realIdx = nodes.firstIndex(where: { $0.id == targetId }) {
-                    nodes[realIdx].x += dx
-                    nodes[realIdx].updatedAt = Date()
-                }
-            }
-
-            // 母节点原地变成第 1 张，其余追加。
-            let frames = CanvasGeometry.fanOutFrames(origin: parent.frame.origin,
-                                                    nodeSize: size,
-                                                    count: count,
-                                                    gap: CanvasStore.fanGap)
-            if let parentIdx = nodes.firstIndex(where: { $0.id == nodeId }) {
-                nodes[parentIdx].count = 1
-                nodes[parentIdx].updatedAt = Date()
-            }
-            var newIds: Set<String> = [nodeId]
-            for frame in frames.dropFirst() {
-                var child = parent
-                child.id = "node_" + UUID().uuidString
-                child.x = frame.origin.x
-                child.y = frame.origin.y
-                child.count = 1
-                child.state = .idle
-                child.taskId = nil
-                child.seed = nil
-                child.createdAt = Date()
-                child.updatedAt = Date()
-                nodes.append(child)
-                newIds.insert(child.id)
-            }
-            selectedNodeIds = newIds
-        }
-    }
-
     // MARK: - 操作历史
 
-    /// 历史条目里显示的节点名。优先槽位 Label，其次 prompt 首行，最后兜底「空节点」。
-    private func nodeTitle(_ node: CanvasNode) -> String {
-        if let label = node.sourceLabel, !label.isEmpty { return label }
-        let firstLine = node.prompt
-            .split(separator: "\n", omittingEmptySubsequences: true)
-            .first
-            .map(String.init) ?? ""
-        let trimmed = firstLine.trimmingCharacters(in: .whitespaces)
-        if trimmed.isEmpty { return "空节点" }
-        return trimmed.count > 12 ? String(trimmed.prefix(12)) + "…" : trimmed
+    /// 节点标题解析钩子。由画布视图在 onAppear 注入（store 刻意不认识 `SlotStoreObservable`，
+    /// 见类型注释）。返回槽位 Label 或正文首行。
+    var slotTitleProvider: ((_ groupId: String, _ slot: Int) -> String?)?
+
+    /// 历史条目 / toast 里显示的节点名。
+    ///
+    /// hotfix20 起节点不缓存 Label 与正文了，名字只能当场去问槽位。问不到（钩子未注入、
+    /// 槽位组已删）就兜底「槽位 N」—— 兜底文案刻意仍带槽位号，因为历史面板上一排"空节点"
+    /// 根本没法定位是哪一步。
+    func nodeTitle(_ node: CanvasNode) -> String {
+        if let resolved = slotTitleProvider?(node.groupId, node.slot) {
+            let trimmed = resolved.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmed.isEmpty {
+                return trimmed.count > 12 ? String(trimmed.prefix(12)) + "…" : trimmed
+            }
+        }
+        return "槽位 \(node.slot)"
     }
 
     // MARK: - 落盘
@@ -483,57 +385,44 @@ final class CanvasStore: ObservableObject {
     /// 网格吸附步长（画布空间）。与背景网格基准一致，观感上「贴着线走」。
     /// 真值住在 `CanvasGeometry`（Kit 层）以便被 smoke 断言覆盖，这里只是就近别名。
     static let snapStep: CGFloat = CanvasGeometry.snapStep
-    /// 多张展开的节点间距。
-    static let fanGap: CGFloat = 20
     /// 背景网格基准步长。
     static let gridBase: CGFloat = 24
 }
 
-// MARK: - 槽位注入结果
+// MARK: - 摆位结果
 
-/// Cmd+数字 / 圆盘把槽位内容送进画布节点的结果。
+/// 把一个槽位摆到画布上的结果（v2.11.7 hotfix20）。
 ///
 /// 刻意把「结果」建模成一个值而不是让 store 直接弹 toast：store 不该认识 UI 层的提示通道，
-/// 而且同一个动作从热键、圆盘、右键菜单三处进来，提示文案得由各自的调用方按上下文决定。
-enum CanvasSlotInjection: Equatable {
-    /// 画布里没有选中节点。
-    ///
-    /// ★ v2.11.7 hotfix19 起这已经**不是一条会走到 UI 的路径**：调用方（`CanvasWorkspaceView`）
-    /// 在选中集合为空时改为直接新建节点，不再进 `injectSlot`。这一档保留下来纯粹是因为
-    /// `injectSlot` 作为 store 的公开方法不能对"没有目标"这种输入静默无动作 ——
-    /// 一个什么都不做又什么都不说的返回值，是下一个 bug 最舒服的藏身处。
-    case noSelection
-    case applied(mode: Mode, name: String, count: Int)
+/// 而且同一个动作从槽位库拖拽、热键、圆盘三处进来，提示文案得由各自的调用方按上下文决定。
+///
+/// ★ 取代了 hotfix19 的 `CanvasSlotInjection`。旧枚举有 `bound / rebound / appended` 三档，
+/// 那是"节点有自己的内容、槽位内容往里灌"才需要的区分；节点 = 槽位之后，「灌入」这个动作
+/// 根本不存在了，只剩「摆上去」和「已经在上面了」两种事实。
+enum CanvasSlotPlacement: Equatable {
+    /// 新摆上画布。
+    case placed(node: CanvasNode, name: String)
+    /// 该槽位已在画布上 —— 没有新建，只是选中了已有的那个。
+    case alreadyPlaced(node: CanvasNode, name: String)
 
-    enum Mode: Equatable, Hashable {
-        /// 空的未绑定节点 → 绑到该槽位，从此双向同步。
-        case bound
-        /// 已绑定其他槽位 → 改绑（不能追加，那会把别的槽位数据写脏）。
-        case rebound
-        /// 未绑定但已有文本 → 追加到末尾（用户在拼复合 prompt）。
-        case appended
+    var node: CanvasNode {
+        switch self {
+        case let .placed(node, _), let .alreadyPlaced(node, _): return node
+        }
+    }
+
+    var isNew: Bool {
+        if case .placed = self { return true }
+        return false
     }
 
     /// toast 文案。
     var message: String {
         switch self {
-        case .noSelection:
-            // 正常流程到不了这里（见 `noSelection` 的注释）。文案按"这是异常"来写，
-            // 而不是按"这是引导"来写 —— 真出现了说明调用方漏了新建分支。
-            return "没有可填入的节点"
-        case let .applied(mode, name, count):
-            let scope = count == 1 ? "" : "（\(count) 个节点）"
-            switch mode {
-            case .bound: return "已填入 \(name)\(scope)"
-            case .rebound: return "已改绑到 \(name)\(scope)"
-            case .appended: return "已追加 \(name)\(scope)"
-            }
+        case let .placed(_, name): return "已放入 \(name)"
+        // 提示必须说清"为什么没多出一张卡片"，否则用户会以为快捷键失灵而反复按。
+        case let .alreadyPlaced(_, name): return "\(name) 已在画布上，已选中"
         }
-    }
-
-    var isSuccess: Bool {
-        if case .applied = self { return true }
-        return false
     }
 }
 
@@ -550,7 +439,12 @@ enum CanvasSlotInjection: Equatable {
 enum CanvasTool: String, CaseIterable, Identifiable, Equatable {
     case select
     case hand
-    case newNode
+    /// 唤出槽位库。
+    ///
+    /// ★ hotfix20 前这里叫 `newNode`，点一下就在视口中央凭空造一个空节点。节点 = 槽位之后
+    /// 「凭空造节点」不存在了 —— 造节点就得造槽位，而槽位是用户的唯一资产，一个工具栏按钮
+    /// 顺手往里写一条空记录是不可接受的。所以它改成"从哪儿放"的入口：展开槽位库。
+    case pickSlot
 
     var id: String { rawValue }
 
@@ -558,7 +452,7 @@ enum CanvasTool: String, CaseIterable, Identifiable, Equatable {
         switch self {
         case .select: return "cursorarrow"
         case .hand: return "hand.raised"
-        case .newNode: return "plus.square.dashed"
+        case .pickSlot: return "tray.and.arrow.down"
         }
     }
 
@@ -566,7 +460,7 @@ enum CanvasTool: String, CaseIterable, Identifiable, Equatable {
         switch self {
         case .select: return "选区"
         case .hand: return "抓手"
-        case .newNode: return "新建节点"
+        case .pickSlot: return "放入槽位"
         }
     }
 
@@ -575,7 +469,7 @@ enum CanvasTool: String, CaseIterable, Identifiable, Equatable {
         switch self {
         case .select: return "V"
         case .hand: return "H"
-        case .newNode: return "N"
+        case .pickSlot: return "N"
         }
     }
 
@@ -585,7 +479,7 @@ enum CanvasTool: String, CaseIterable, Identifiable, Equatable {
         switch self {
         case .select: return "在空白处拖动画出选区"
         case .hand: return "左键拖动平移；任何工具下按住中键拖动同样可平移"
-        case .newNode: return nil
+        case .pickSlot: return "画布节点就是槽位：从左侧槽位库拖入，或按 Cmd+1~0 放入对应槽位"
         }
     }
 }

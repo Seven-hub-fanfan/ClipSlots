@@ -171,12 +171,16 @@ struct CanvasInspectorPanel: View {
             infoRow("类型", node.kind.displayName)
             infoRow("模型", node.model)
             infoRow("比例", node.ratio)
-            if let slot = node.sourceSlot {
-                infoRow("绑定槽位", node.sourceLabel.map { "\($0)（\(slot)）" } ?? "槽位 \(slot)")
-            } else {
-                infoRow("绑定槽位", "未绑定")
-            }
+            // ★ hotfix20：节点 = 槽位，「未绑定」这一档在数据结构层面就不存在了
+            // （`CanvasNode` 的 groupId/slot 是非可选的）。名字当场问槽位，见 `CanvasStore.nodeTitle`。
+            infoRow("槽位", slotDescription)
         }
+    }
+
+    private var slotDescription: String {
+        let fallback = "槽位 \(node.slot)"
+        let name = canvas.nodeTitle(node)
+        return name == fallback ? fallback : "\(name)（\(node.slot)）"
     }
 
     private func infoRow(_ title: String, _ value: String) -> some View {

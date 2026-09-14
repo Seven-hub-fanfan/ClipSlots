@@ -38,6 +38,13 @@ enum WorkspaceMode: String, CaseIterable, Identifiable, Equatable {
 struct WorkspaceModeSwitcher: View {
     @Binding var selection: WorkspaceMode
 
+    /// 控件的固定宽度。
+    ///
+    /// v2.11.7 hotfix20：顶栏改成「流内放等宽透明占位 + overlay 里放真控件」来实现几何真居中，
+    /// 两处必须**用同一个数**，否则占位与实体不等宽，居中就会差出那点差值。所以这里把宽度从
+    /// 「由内容自然撑开」改成一个显式常量：段宽 62 × 2 + 段间距 2 + 外圈 padding 3 × 2。
+    static let preferredWidth: CGFloat = 62 * 2 + 2 + 3 * 2
+
     @Namespace private var indicator
 
     var body: some View {

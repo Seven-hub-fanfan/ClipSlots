@@ -9,20 +9,20 @@ import ClipSlotsKit
 /// 统一施加。所以这里所有数值都按 1x 写，不要在内部再乘 zoom —— 那会导致文字与边框的缩放比例
 /// 不一致（`scaleEffect` 是位图级缩放，内部再算一遍等于缩放两次）。
 ///
-/// ## 关于文本的来源（v2.11.7 hotfix18）
+/// ## 关于文本的来源（v2.11.7 hotfix18 → hotfix20）
 ///
-/// 卡片**不读 `node.prompt`** 来显示正文，而是用外部传进来的 `text`。原因：绑定了槽位的节点，
-/// 它的正文就是那个槽位的主体数据本身（画布与编辑页双向同步），真相在 `SlotStoreObservable`
-/// 里而不在节点副本里。卡片自己去读槽位数据就得认识主 store，那会把画布重新拖回"任一槽位变化
-/// 触发全局重绘"的老路 —— 所以取数留在上层，卡片保持纯展示。
+/// 卡片**不缓存正文**，而是用外部传进来的 `text`。hotfix20 起这不再是"两份数据里选一份"的问题：
+/// 节点就是槽位，正文的唯一真相是 `SlotContent`，节点结构里根本没有 `prompt` 字段可读。
+/// 卡片自己去读槽位数据就得认识主 store，那会把画布重新拖回"任一槽位变化触发全局重绘"的老路
+/// —— 所以取数留在上层，卡片保持纯展示。
 struct CanvasNodeCardView: View {
     let node: CanvasNode
     let isSelected: Bool
-    /// 正文实时值。绑定槽位的节点 = 槽位主体文本；未绑定 = `node.prompt`。
+    /// 正文实时值 = 该槽位的主体文本。
     let text: String
-    /// 溯源槽位的实时 Label（编辑页改了 Label，这里跟着变）。
+    /// 槽位的实时 Label（编辑页改了 Label，这里跟着变）。
     let slotLabel: String?
-    /// 溯源槽位的实时附件列表（v2.11.7 hotfix19）。未绑定槽位的节点为空数组。
+    /// 槽位的实时附件列表 = 画布语境下的**入参文件**（v2.11.7 hotfix20 改名）。
     ///
     /// 与 `text` 同源同理：真相在槽位数据里，卡片只负责展示，取数留在上层。
     let attachments: [SlotContent.SlotAttachment]
@@ -31,11 +31,13 @@ struct CanvasNodeCardView: View {
     let onBeginEdit: () -> Void
     let onCommitEdit: (String) -> Void
     let onCancelEdit: () -> Void
+    /// 点「入参文件 N」胶囊。弹层由上层（`CanvasWorkspaceView`）呈现 —— 它需要 `SlotStoreObservable`
+    /// 才能增删改附件，而卡片刻意不认识主 store（见上面那段注释）。
+    let onOpenInputFiles: () -> Void
 
     @Environment(\.colorScheme) private var scheme
     @State private var isHovering = false
     @State private var draft = ""
-    @FocusState private var editorFocused: Bool
 
     private var isEmptyPreview: Bool {
         if case .succeeded = node.state { return false }
@@ -65,9 +67,7 @@ struct CanvasNodeCardView: View {
             typeRow
             previewArea
             promptArea
-            if !attachments.isEmpty {
-                CanvasNodeAttachmentStrip(attachments: attachments)
-            }
+            inputFilesRow
             // 正文字号被调大后（最大 24pt）会把下面的内容顶出卡片。加一个可压缩的 Spacer，
             // 让参数栏始终钉在卡片底边，被挤掉的是正文的第二行而不是整条参数栏。
             Spacer(minLength: 0)
@@ -88,14 +88,13 @@ struct CanvasNodeCardView: View {
                 x: 0, y: isSelected ? 5 : 3)
         .onHover { isHovering = $0 }
         .onChange(of: isEditing) { editing in
-            if editing {
-                draft = text
-                // 下一拍再抢焦点：本拍 TextEditor 还没进视图树，直接置 true 会被丢掉。
-                DispatchQueue.main.async { editorFocused = true }
-            }
+            // 进编辑态就把当前槽位正文灌进草稿。焦点由 `CanvasPromptEditor` 自己在挂载时抢
+            // （NSTextView 要等 window 就绪，SwiftUI 的 @FocusState 在被 scaleEffect 包裹的
+            // 子树里实测抢不稳）。
+            if editing { draft = text }
         }
         .onAppear {
-            if isEditing { draft = text; DispatchQueue.main.async { editorFocused = true } }
+            if isEditing { draft = text }
         }
     }
 
@@ -171,6 +170,17 @@ struct CanvasNodeCardView: View {
 
     // MARK: - 预览区
 
+    /// ## 为什么这里必须先 `.frame` 再 `.clipShape`（v2.11.7 hotfix20 修的「图片错位」）
+    ///
+    /// 用户反馈"节点里的图片错位、还把编辑按钮挡住点不到"。根因不是坐标算错，是 **`aspectRatio(.fill)`
+    /// 在 ZStack 里会溢出**：`.fill` 的语义是"短边贴合、长边超出"，一张 3:4 的竖图放进 168×148 的
+    /// 预览区，高度会被撑到 224 —— 而 `ZStack` **不裁剪**超出的子视图。此前那份代码把
+    /// `.clipShape` 直接挂在 `Image` 上，裁的是**图片自己那个 224 高的框**（等于没裁），于是图片
+    /// 上下各溢出 38pt，向上盖住类型标签行里的铅笔按钮（所以"无法编辑"），向下盖住正文。
+    ///
+    /// 正确的顺序是：**先用 `.frame(height:)` 把容器尺寸钉死，再在容器外层裁剪**。
+    /// 这里用 `Color.clear` 作为定尺层、图片走 `.overlay` —— 因为 `overlay` 的尺寸由被覆盖者
+    /// （`Color.clear`）决定，而不是反过来撑大父级，`.clipped()` 才有一个正确的边界可裁。
     private var previewArea: some View {
         ZStack {
             RoundedRectangle(cornerRadius: 10, style: .continuous)
@@ -178,26 +188,28 @@ struct CanvasNodeCardView: View {
 
             if case .succeeded(let path) = node.state,
                let img = NSImage(contentsOfFile: path) {
-                Image(nsImage: img)
-                    .resizable()
-                    .aspectRatio(contentMode: .fill)
-                    .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                fillImageBox {
+                    Image(nsImage: img)
+                        .resizable()
+                        .aspectRatio(contentMode: .fill)
+                }
             } else if let att = previewAttachment {
                 // ★ v2.11.7 hotfix19：槽位有图片附件时，预览区直接画它。
                 // 在此之前这里永远是斜纹占位，于是「只放了图、没写字」的槽位拖到画布上是一张
                 // 完全空白的卡片 —— 用户反馈的「看不到附件信息」最直观的那一半就是这个。
-                CanvasAttachmentPreviewImage(attachment: att)
-                    .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-                    // 左上角角标点明「这是输入附件，不是生成结果」，否则会被误读成已经出图了。
-                    .overlay(alignment: .topLeading) {
-                        Label("附件", systemImage: "paperclip")
-                            .font(.system(size: 8, weight: .semibold))
-                            .foregroundColor(AppTheme.onAccentText)
-                            .padding(.horizontal, 5)
-                            .padding(.vertical, 2)
-                            .background(Capsule(style: .continuous).fill(Color.black.opacity(0.45)))
-                            .padding(6)
-                    }
+                fillImageBox {
+                    CanvasAttachmentPreviewImage(attachment: att)
+                }
+                // 左上角角标点明「这是输入文件，不是生成结果」，否则会被误读成已经出图了。
+                .overlay(alignment: .topLeading) {
+                    Label("入参", systemImage: "tray.full")
+                        .font(.system(size: 8, weight: .semibold))
+                        .foregroundColor(AppTheme.onAccentText)
+                        .padding(.horizontal, 5)
+                        .padding(.vertical, 2)
+                        .background(Capsule(style: .continuous).fill(Color.black.opacity(0.45)))
+                        .padding(6)
+                }
             } else {
                 // 斜纹占位（对齐 C2 设计稿）：未生成状态一眼可辨，且不像「加载失败」。
                 DiagonalHatch()
@@ -223,13 +235,23 @@ struct CanvasNodeCardView: View {
             }
         }
         .frame(height: 148)
+        // 兜底再裁一层：即便未来有人往 ZStack 里塞了个会溢出的子视图，也出不了预览区。
+        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
         .overlay(
             RoundedRectangle(cornerRadius: 10, style: .continuous)
                 .stroke(AppTheme.subtleBorder.opacity(0.6), lineWidth: 0.5)
         )
     }
 
-    // MARK: - prompt
+    /// 「填充式图片盒」：用 `Color.clear` 定尺、内容走 overlay、再 `.clipped()`。见 `previewArea` 的注释。
+    private func fillImageBox<Content: View>(@ViewBuilder _ content: () -> Content) -> some View {
+        Color.clear
+            .overlay(content())
+            .clipped()
+            .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+    }
+
+    // MARK: - 提示词（= 槽位正文）
 
     @ViewBuilder
     private var promptArea: some View {
@@ -238,7 +260,7 @@ struct CanvasNodeCardView: View {
         } else {
             Group {
                 if text.isEmpty {
-                    Text(attachments.isEmpty ? "双击填写内容…" : "仅附件，无文本")
+                    Text(attachments.isEmpty ? "双击填写提示词…" : "仅入参文件，无提示词")
                         .font(bodyFont)
                         .foregroundColor(AppTheme.canvasCardMetaInk.opacity(0.75))
                 } else {
@@ -257,16 +279,29 @@ struct CanvasNodeCardView: View {
         }
     }
 
-    /// inline 编辑器。
+    /// inline 提示词编辑器（v2.11.7 hotfix20 重写）。
     ///
-    /// **提交时机 = 失焦**（点画布别处、切到另一个节点、Tab 走焦点），不是按 Enter —— 正文是多行
-    /// prompt，Enter 必须留给换行。Esc 放弃本次修改。
+    /// ## 键位契约
+    ///   - **回车 = 保存**（用户明确要求）。
+    ///   - **Shift+回车 = 换行**。
+    ///   - Esc = 放弃。
+    ///   - 失焦 = 保存（点画布别处、切到另一个节点）。
+    ///
+    /// ## 为什么不用 SwiftUI `TextEditor`
+    ///
+    /// `TextEditor` 会把 Return 直接吞掉插进文本，SwiftUI 在 macOS 13 上**没有**任何合法钩子能
+    /// 在它之前拿到这个键（`.onKeyPress` 是 macOS 14+；`.onSubmit` 对 `TextEditor` 不触发）。
+    /// 所以这里换成裹了 `NSTextView` 的 `CanvasPromptEditor`，在
+    /// `textView(_:doCommandBy:)` 里按修饰键分流 —— 这是唯一能同时满足"回车保存"和"Shift+回车换行"
+    /// 的路径，而这两条正是用户要的。
     private var editor: some View {
         VStack(alignment: .leading, spacing: 4) {
-            TextEditor(text: $draft)
-                .font(bodyFont)
-                .scrollContentBackground(.hidden)
-                .focused($editorFocused)
+            CanvasPromptEditor(text: $draft,
+                               font: CanvasFontCatalog.nsFont(family: node.fontName,
+                                                              size: node.resolvedBodyFontSize),
+                               onCommit: { onCommitEdit(draft) },
+                               onCancel: onCancelEdit,
+                               onBlur: { onCommitEdit(draft) })
                 .frame(height: 40)
                 .padding(.horizontal, 4)
                 .padding(.vertical, 2)
@@ -278,15 +313,12 @@ struct CanvasNodeCardView: View {
                     RoundedRectangle(cornerRadius: 6, style: .continuous)
                         .stroke(AppTheme.chromeAccentInk.opacity(0.5), lineWidth: 1)
                 )
-                .onChange(of: editorFocused) { focused in
-                    // 失焦即落库。这里不判 draft 是否变过 —— 判等交给下游（store 与槽位写入都会
-                    // 在无变化时提前返回），在这里判会漏掉"改了又改回来"之外的边界。
-                    if !focused { onCommitEdit(draft) }
-                }
-                .onExitCommand(perform: onCancelEdit)
 
             HStack(spacing: 6) {
-                Text(node.sourceSlot == nil ? "仅本节点" : "同步到槽位")
+                Text("回车保存")
+                    .font(.system(size: 8, weight: .medium))
+                    .foregroundColor(AppTheme.chromeAccentInk)
+                Text("⇧回车换行")
                     .font(.system(size: 8))
                     .foregroundColor(AppTheme.canvasCardMetaInk)
                 Spacer(minLength: 0)
@@ -297,6 +329,47 @@ struct CanvasNodeCardView: View {
         }
     }
 
+    // MARK: - 入参文件
+
+    /// 「入参文件 N」胶囊。
+    ///
+    /// ★ hotfix19 这里是一排缩略图（`CanvasNodeAttachmentStrip`），用户反馈"点了完全没反应"——
+    /// 它当时确实只是一排 `Image`，没有任何交互。改成一个明确的按钮：**看得出能点**，
+    /// 而且在 168pt 宽的卡片里，一个胶囊比 N 个 22pt 缩略图更能说清"这里有几个入参文件"。
+    /// 名字用「入参文件」而不是「附件」：画布语境下它们是喂给模型的输入，不是"顺带附上的东西"。
+    @ViewBuilder
+    private var inputFilesRow: some View {
+        Button(action: onOpenInputFiles) {
+            HStack(spacing: 4) {
+                Image(systemName: attachments.isEmpty ? "tray" : "tray.full")
+                    .font(.system(size: 8, weight: .semibold))
+                Text(attachments.isEmpty ? "入参文件" : "入参文件 \(attachments.count)")
+                    .font(.system(size: 9, weight: .medium))
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 6, weight: .bold))
+                    .opacity(0.6)
+            }
+            .foregroundColor(attachments.isEmpty
+                             ? AppTheme.canvasCardMetaInk
+                             : AppTheme.chromeAccentInk)
+            .padding(.horizontal, 7)
+            .padding(.vertical, 3)
+            .background(
+                Capsule(style: .continuous)
+                    .fill(attachments.isEmpty
+                          ? AppTheme.previewBackground
+                          : AppTheme.chromeAccentSoftFill)
+            )
+            .overlay(
+                Capsule(style: .continuous)
+                    .stroke(AppTheme.subtleBorder.opacity(attachments.isEmpty ? 0.7 : 0), lineWidth: 0.5)
+            )
+            .contentShape(Capsule(style: .continuous))
+        }
+        .buttonStyle(.plain)
+        .help("管理入参文件：增删、调整顺序（与该槽位的附件是同一份数据）")
+    }
+
     // MARK: - 参数芯片栏
 
     private var paramChips: some View {
@@ -305,18 +378,24 @@ struct CanvasNodeCardView: View {
             chip(node.ratio)
             if node.count > 1 { chip("×\(node.count)") }
             Spacer(minLength: 0)
-            if let label = slotLabel, !label.isEmpty {
-                // 溯源标记：这个节点绑的是哪个槽位。绑定后正文与该槽位双向同步。
-                HStack(spacing: 2) {
-                    Image(systemName: "tray.full")
-                        .font(.system(size: 7, weight: .semibold))
-                    Text(label)
-                        .font(.system(size: 8, weight: .medium))
-                        .lineLimit(1)
-                }
-                .foregroundColor(AppTheme.canvasCardMetaInk)
-            }
+            slotBadge
         }
+    }
+
+    /// 槽位标记：这张卡片是哪个槽位。
+    ///
+    /// hotfix20 起它不再是"溯源"信息而是**身份**信息 —— 节点就是这个槽位，所以永远显示，
+    /// 没有 Label 时退回「槽位 N」而不是整块消失（一张说不出自己是谁的卡片没法核对）。
+    private var slotBadge: some View {
+        let name = (slotLabel?.isEmpty == false) ? slotLabel! : "槽位 \(node.slot)"
+        return HStack(spacing: 2) {
+            Image(systemName: "square.grid.2x2")
+                .font(.system(size: 7, weight: .semibold))
+            Text(name)
+                .font(.system(size: 8, weight: .medium))
+                .lineLimit(1)
+        }
+        .foregroundColor(AppTheme.canvasCardMetaInk)
     }
 
     private func chip(_ text: String) -> some View {

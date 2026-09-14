@@ -2669,6 +2669,39 @@ final class SlotStoreObservable: ObservableObject {
         return true
     }
 
+    /// 把画布「入参文件」面板改好的附件列表写回**任意组**的槽位（v2.11.7 hotfix20）。
+    ///
+    /// 画布上的入参文件与槽位附件是**同一份数据**，所以这里没有第二套存储 —— 只是把
+    /// `setAttachments(_:for:)` 的能力扩展到非当前组。
+    ///
+    /// 当前组直接复用 `setAttachments`：那条路径上有乐观内存更新、写盘失败回滚、撤销快照、
+    /// `refreshTrigger` 重绘等一整套已经踩过坑的处理，重写一遍必然漏掉其中某一项。
+    /// 非当前组走 `specialStorage` 读改写：那些槽位不在内存 `slots` 里，没有内存视图要维护，
+    /// 也不参与编辑页重绘。
+    @discardableResult
+    func writeCanvasSlotAttachments(groupId: String,
+                                    slot: Int,
+                                    attachments: [SlotContent.SlotAttachment]) -> Bool {
+        guard slot >= 1, slot <= config.slots else { return false }
+
+        if groupId == currentSpecialSlotId {
+            setAttachments(attachments, for: slot)
+            return true
+        }
+
+        guard var content = specialStorage.getOrUnknown(slot, in: groupId) else {
+            NSLog("[ClipSlots] writeCanvasSlotAttachments slot=\(slot) group=\(groupId): storage UNKNOWN, aborting")
+            return false
+        }
+        content.attachments = attachments
+        // 身份字段必须刷新，否则 v2.10.52 起的增量 diff 会判等而跳过重绘（v2.10.53 同源坑）。
+        content.contentId = UUID().uuidString
+        content.updatedAt = Date().timeIntervalSince1970
+        let ok = specialStorage.set(slot, content: content, in: groupId)
+        if ok { refreshTrigger = UUID() }
+        return ok
+    }
+
     func importDroppedFiles(_ urls: [URL], toSlot slot: Int) {
         guard let first = urls.first else { return }
         // UNDO-1 (v2.10.95): 拖入文件会覆盖若干槽位主体，整批算一步撤销。

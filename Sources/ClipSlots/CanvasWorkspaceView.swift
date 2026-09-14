@@ -45,6 +45,8 @@ struct CanvasWorkspaceView: View {
     @State private var dragDelta: CGSize = .zero
     /// 正在 inline 编辑正文的节点。集中管理，保证同一时刻只有一个编辑器抢焦点。
     @State private var editingNodeId: String? = nil
+    /// 正在管理「入参文件」的节点 id。见 `openInputFiles(_:)` 说明为何弹层不挂在卡片里。
+    @State private var inputFilesNodeId: String? = nil
     /// 历史面板是否展开。
     @State private var showHistory = false
     /// 框选矩形（屏幕空间）。
@@ -80,6 +82,8 @@ struct CanvasWorkspaceView: View {
                 floatingLayer(size: proxy.size)
 
                 ghostOverlay
+
+                inputFilesAnchorOverlay
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .background(AppTheme.windowBackground)
@@ -112,6 +116,16 @@ struct CanvasWorkspaceView: View {
                 canvas.onRestoreSlotText = { groupId, slot, text in
                     _ = store.writeCanvasSlotText(groupId: groupId, slot: slot, text: text)
                 }
+                // 历史条目 / toast 里的节点名。hotfix20 起节点不再缓存 Label 与正文，
+                // 名字只能当场问槽位 —— 同样由认识主 store 的视图层注入。
+                canvas.slotTitleProvider = { groupId, slot in
+                    if let label = store.canvasSlotLabel(groupId: groupId, slot: slot),
+                       !label.isEmpty {
+                        return label
+                    }
+                    let text = store.canvasSlotText(groupId: groupId, slot: slot) ?? ""
+                    return text.split(separator: "\n", omittingEmptySubsequences: true).first.map(String.init)
+                }
                 // 登记「槽位命令」处理器：画布在台上时，Cmd+1~0 与圆盘选槽都改为填进选中节点。
                 CanvasCommandBridge.shared.slotCommandHandler = { slot in handleSlotCommand(slot) }
 
@@ -126,6 +140,7 @@ struct CanvasWorkspaceView: View {
                 // 表现是"热键静默失效"（既没粘贴，也没有任何提示）。
                 CanvasCommandBridge.shared.slotCommandHandler = nil
                 canvas.onRestoreSlotText = nil
+                canvas.slotTitleProvider = nil
                 canvas.flushSave()
             }
         }
@@ -150,7 +165,8 @@ struct CanvasWorkspaceView: View {
                                    isEditing: isEditing,
                                    onBeginEdit: { beginEdit(node) },
                                    onCommitEdit: { commitEdit(node, text: $0) },
-                                   onCancelEdit: { editingNodeId = nil })
+                                   onCancelEdit: { editingNodeId = nil },
+                                   onOpenInputFiles: { openInputFiles(node) })
                     .offset(x: node.x + (isDragging ? dragDelta.width : 0),
                             y: node.y + (isDragging ? dragDelta.height : 0))
                     // 被按住的那个压在最上层；同批一起走的排第二层，这样多选拖动时整组都浮在其他节点之上。
@@ -176,10 +192,8 @@ struct CanvasWorkspaceView: View {
 
     @ViewBuilder
     private func nodeContextMenu(_ node: CanvasNode) -> some View {
-        Button("编辑内容") { beginEdit(node) }
-        if node.count > 1 {
-            Button("展开为 \(node.count) 个节点") { canvas.fanOut(nodeId: node.id) }
-        }
+        Button("编辑提示词") { beginEdit(node) }
+        Button("管理入参文件") { openInputFiles(node) }
         Divider()
         Button("重跑") {
             // MVP：生图未接入，先给明确反馈而不是静默无响应。
@@ -373,6 +387,37 @@ struct CanvasWorkspaceView: View {
         }
     }
 
+    // MARK: - 入参文件弹层
+
+    /// 「入参文件」管理弹层的宿主。
+    ///
+    /// 它是一个 1×1 的透明锚点，位置按节点卡片底边中点换算到屏幕坐标 —— 见
+    /// `openInputFiles(_:)` 里为什么弹层不能挂在卡片自己身上。
+    ///
+    /// 锚点必须 `allowsHitTesting(false)`：它压在节点层之上，若能吃事件，卡片上那一小块
+    /// （恰好是底边中点，也就是入参文件胶囊附近）就会点不动。
+    @ViewBuilder
+    private var inputFilesAnchorOverlay: some View {
+        if let id = inputFilesNodeId, let node = canvas.nodes.first(where: { $0.id == id }) {
+            let anchor = inputFilesAnchor(node)
+            Color.clear
+                .frame(width: 1, height: 1)
+                .offset(x: anchor.x, y: anchor.y)
+                .allowsHitTesting(false)
+                .popover(isPresented: Binding(get: { inputFilesNodeId != nil },
+                                              set: { if !$0 { inputFilesNodeId = nil } }),
+                         arrowEdge: .bottom) {
+                    // 与编辑页槽位附件面板是**同一个组件**、同一份底层数据，只是换了称呼。
+                    // 复用而不是新写一份，才能保证增删 / 拖拽排序 / 断链角标 / 悬停预览这些
+                    // 已经踩过一轮坑的行为在两处完全一致。
+                    AttachmentManagerPopover(slot: node.slot,
+                                             store: store,
+                                             groupId: node.groupId,
+                                             isCanvasContext: true)
+                }
+        }
+    }
+
     // MARK: - 浮动层
 
     /// 左侧侧栏当前占据的宽度。其余浮动控件都要按它让位，否则会被压在侧栏底下（侧栏是不透明的）。
@@ -430,12 +475,12 @@ struct CanvasWorkspaceView: View {
                 Spacer()
                 CanvasFloatingToolbar(canvas: canvas,
                                       isHistoryOpen: $showHistory,
-                                      onAddNode: {
-                    // 新建落在**可见区域**中心，而不是视图中心：侧栏 240pt 展开时，视图中心可能
-                    // 就藏在侧栏后面，用户按下 ＋ 会看不到新节点。
-                    let center = CGPoint(x: sidebarWidth + (size.width - sidebarWidth) / 2,
-                                         y: size.height / 2)
-                    canvas.addBlankNode(at: CanvasGeometry.canvasPoint(screen: center, pan: pan, zoom: zoom))
+                                      onPickSlot: {
+                    // hotfix20：节点就是槽位，「放入槽位」不能再凭空造一个空节点（那会是一张
+                    // 不对应任何槽位的孤儿卡片）。这里改成把左侧槽位库展开，引导用户从库里拖，
+                    // 并顺手提示另一条更快的路（Cmd+1~0）。
+                    withAnimation(Anim.transition) { canvas.isLibraryExpanded = true }
+                    store.transientUI.showToast("从左侧槽位库拖入，或按 Cmd+1~0 放入槽位")
                 })
             }
             .frame(width: max(0, size.width - sidebarWidth))
@@ -502,54 +547,44 @@ struct CanvasWorkspaceView: View {
 
     private func handleSlotDragChanged(_ payload: CanvasSlotDragPayload?, at point: CGPoint) {
         if let payload {
-            let title = payload.label ?? "槽位 \(payload.slot)"
+            let title = payload.name.isEmpty ? "槽位 \(payload.slot)" : payload.name
             ghost = (title, point)
         } else {
             ghost = nil
         }
     }
 
-    /// 槽位库拖拽落到画布：把落点换算成画布坐标后建节点。
+    /// 槽位库拖拽落到画布：把落点换算成画布坐标后摆上去。
     private func handleSlotDrop(_ payload: CanvasSlotDragPayload, screenPoint: CGPoint) {
         ghost = nil
         let canvasPoint = CanvasGeometry.canvasPoint(screen: screenPoint, pan: pan, zoom: zoom)
-        canvas.addNodeFromSlot(pageId: payload.pageId,
-                               groupId: payload.groupId,
-                               slot: payload.slot,
-                               label: payload.label,
-                               prompt: payload.prompt,
-                               at: canvasPoint)
+        let result = canvas.placeSlot(pageId: payload.pageId,
+                                     groupId: payload.groupId,
+                                     slot: payload.slot,
+                                     name: payload.name,
+                                     at: canvasPoint)
+        // 拖了半天却没多出卡片，必须说清是"已经在上面了"而不是"拖丢了"。
+        if !result.isNew { store.transientUI.showToast(result.message) }
     }
 
-    // MARK: - 槽位双向同步（v2.11.7 hotfix18）
+    // MARK: - 槽位数据（v2.11.7 hotfix20：节点 = 槽位，画布只存摆位）
 
-    /// 节点正文的**实时**值。
+    /// 节点正文的**实时**值 = 该槽位的主体文本。
     ///
-    /// 绑定了槽位的节点：值来自槽位主体数据，`node.prompt` 只是缓存（拖进来那一刻的副本），
-    /// 这里刻意不读它 —— 否则用户在编辑页改了槽位文本，画布上还显示旧的，那就不是"同步"。
-    /// 槽位被清空时如实显示为空，而不是回落到旧副本（回落等于把已删除的内容又变出来）。
+    /// hotfix20 起这里不再有"读不到就回落节点副本"的分支：节点结构里已经没有 `prompt` 字段了。
+    /// 槽位被清空时如实显示为空 —— 回落旧副本等于把已删除的内容又变出来。
     private func liveText(for node: CanvasNode) -> String {
-        guard let slot = node.sourceSlot, let groupId = node.sourceGroupId else {
-            return node.prompt
-        }
-        return store.canvasSlotText(groupId: groupId, slot: slot) ?? ""
+        store.canvasSlotText(groupId: node.groupId, slot: node.slot) ?? ""
     }
 
-    /// 溯源 Label 的实时值。槽位已被改名 / 删名时跟着变；读不到就退回节点上的快照。
+    /// 槽位 Label 的实时值。槽位被改名 / 删名时跟着变。
     private func liveLabel(for node: CanvasNode) -> String? {
-        guard let slot = node.sourceSlot, let groupId = node.sourceGroupId else {
-            return node.sourceLabel
-        }
-        return store.canvasSlotLabel(groupId: groupId, slot: slot) ?? node.sourceLabel
+        store.canvasSlotLabel(groupId: node.groupId, slot: node.slot)
     }
 
-    /// 溯源槽位的**实时**附件列表（v2.11.7 hotfix19）。
-    ///
-    /// 与 `liveText` 同一条理由：真相在槽位数据里，节点上不存附件副本。未绑定槽位的节点没有附件
-    /// 概念（它的内容就是自己的 prompt），返回空数组。
+    /// 槽位的**实时**附件列表 = 画布语境下的入参文件。
     private func liveAttachments(for node: CanvasNode) -> [SlotContent.SlotAttachment] {
-        guard let slot = node.sourceSlot, let groupId = node.sourceGroupId else { return [] }
-        return store.canvasSlotAttachments(groupId: groupId, slot: slot)
+        store.canvasSlotAttachments(groupId: node.groupId, slot: node.slot)
     }
 
     private func beginEdit(_ node: CanvasNode) {
@@ -557,27 +592,43 @@ struct CanvasWorkspaceView: View {
         editingNodeId = node.id
     }
 
-    /// inline 编辑提交。
+    /// inline 提示词提交（回车 / 失焦）。
     ///
-    /// 绑定槽位的节点 → 写进**槽位主体**（编辑页立刻看到）；未绑定的节点 → 只改节点自己的 prompt。
-    /// 两条路都把这一步记进画布撤销栈，绑定的那条额外带上 `slotEdit`，这样 Cmd+Z 能把槽位文本
-    /// 一起退回去 —— 否则撤销后画布显示旧文本、编辑页还留着新文本，两边当场对不上。
+    /// 只有一条路：写进**槽位主体**，编辑页立刻看到。这一步记进画布撤销栈并带上 `slotEdit`，
+    /// 这样 Cmd+Z 能把槽位文本一起退回去 —— 否则撤销后画布显示旧文本、编辑页还留着新文本，
+    /// 两边当场对不上。
     private func commitEdit(_ node: CanvasNode, text: String) {
         editingNodeId = nil
         let old = liveText(for: node)
         guard old != text else { return }
 
-        if let slot = node.sourceSlot, let groupId = node.sourceGroupId {
-            guard store.writeCanvasSlotText(groupId: groupId, slot: slot, text: text) else {
-                store.transientUI.showToast("存储繁忙，未能保存")
-                return
-            }
-            let edit = CanvasHistoryEntry.SlotTextEdit(groupId: groupId, slot: slot, before: old, after: text)
-            canvas.updateNodePrompt(id: node.id, text: text, slotEdit: edit)
-            canvas.noteSlotDataChanged()
-        } else {
-            canvas.updateNodePrompt(id: node.id, text: text)
+        guard store.writeCanvasSlotText(groupId: node.groupId, slot: node.slot, text: text) else {
+            store.transientUI.showToast("存储繁忙，未能保存")
+            return
         }
+        let edit = CanvasHistoryEntry.SlotTextEdit(groupId: node.groupId,
+                                                  slot: node.slot,
+                                                  before: old,
+                                                  after: text)
+        canvas.recordSlotTextEdit(nodeId: node.id, edit: edit)
+        canvas.noteSlotDataChanged()
+    }
+
+    /// 打开「入参文件」管理弹层。
+    ///
+    /// 弹层刻意**不挂在卡片上**：它要增删改附件，得拿到 `SlotStoreObservable`，而卡片视图刻意
+    /// 不认识主 store（见 `CanvasNodeCardView` 的注释）。同时它也不能挂在缩放子树里 —— 附件行
+    /// 在 25% 缩放下只有几个像素高，以它为锚点的 popover 箭头会指到离谱的位置。所以统一由本视图
+    /// 在**未缩放的根层**上，按节点的屏幕坐标放一个 1×1 锚点来呈现。
+    private func openInputFiles(_ node: CanvasNode) {
+        canvas.select(id: node.id, additive: false)
+        inputFilesNodeId = node.id
+    }
+
+    /// 入参文件弹层的锚点在屏幕坐标里的位置（节点卡片底边中点）。
+    private func inputFilesAnchor(_ node: CanvasNode) -> CGPoint {
+        let center = CGPoint(x: node.x + node.width / 2, y: node.y + node.height)
+        return CanvasGeometry.screenPoint(canvas: center, pan: effectivePan, zoom: zoom)
     }
 
     // MARK: - 键盘 / 槽位命令
@@ -620,28 +671,24 @@ struct CanvasWorkspaceView: View {
         }
     }
 
-    /// Cmd+1~0 / 圆盘选槽：把槽位内容送进画布。
+    /// Cmd+1~0 / 圆盘选槽：把槽位摆到画布上。
     ///
     /// 返回 true 表示画布已经消费掉这次命令。**不能偷偷退回去写系统剪贴板** —— 那会在用户毫无
     /// 察觉的情况下改掉剪贴板，还可能往别的 App 里粘出东西。
     ///
-    /// ## ★ v2.11.7 hotfix19：没有选中节点时**直接新建**
+    /// ## ★ v2.11.7 hotfix20：语义收敛成一件事
     ///
-    /// 上一版在没有选中节点时提示「请先选中一个节点」。用户的反馈很直接：
-    /// 「我需要的是直接成为一个节点，不要先选一个节点再 Cmd+1」。
+    /// hotfix19 这里有两条分支：有选中节点 → 把槽位内容"填进"选中节点（含改绑 / 追加）；
+    /// 没选中 → 新建一个绑定该槽位的节点。节点 = 槽位之后，**"填进另一个节点"这件事不存在了**——
+    /// 把槽位 3 的内容填进"槽位 5 那张卡片"，要么是改写槽位 5 的数据（用户按 Cmd+3 绝不是想改
+    /// 槽位 5），要么是让一张卡片同时代表两个槽位（自相矛盾）。
     ///
-    /// 想清楚就会发现旧行为本来就是错的：Cmd+1 在编辑模式的语义是「把槽位内容拿出来用」，
-    /// 而画布上「用」的最小单位就是节点。要求用户先造一个空节点再往里填，等于把一次操作
-    /// 拆成两步，且第一步（新建空节点）本身没有任何意义。
-    ///
-    /// 所以新语义是：
-    ///   - 有选中节点 → 填进选中节点（保持 hotfix18 的行为，含改绑 / 追加）。
-    ///   - 没有选中节点 → 在**当前视口中央**新建一个绑定该槽位的节点，并选中它。
+    /// 所以现在只有一条语义：**Cmd+N = 把槽位 N 放到画布上**。已经在上面了就选中它并说明原因。
     private func handleSlotCommand(_ slot: Int) -> Bool {
         let groupId = store.activeHotkeySpecialSlotId
         let text = store.canvasSlotText(groupId: groupId, slot: slot) ?? ""
         let attachments = store.canvasSlotAttachments(groupId: groupId, slot: slot)
-        // 判空要把附件算进去：一个"只放了图、没写字"的槽位是**有内容**的，旧代码只看文本，
+        // 判空要把入参文件算进去：一个"只放了图、没写字"的槽位是**有内容**的，旧代码只看文本，
         // 于是这类槽位按 Cmd+1 会被当成空槽拒掉（正是 hotfix19 要修的第三个 bug 的同源问题）。
         guard !text.isEmpty || !attachments.isEmpty else {
             store.transientUI.showToast("槽位 \(slot) 是空的")
@@ -649,25 +696,32 @@ struct CanvasWorkspaceView: View {
         }
 
         let label = store.canvasSlotLabel(groupId: groupId, slot: slot)
-
-        guard !canvas.selectedNodeIds.isEmpty else {
-            canvas.addNodeFromSlot(pageId: store.currentPageId,
-                                   groupId: groupId,
-                                   slot: slot,
-                                   label: label,
-                                   prompt: text,
-                                   at: visibleCenterInCanvas())
-            store.transientUI.showToast("已新建节点：\(label ?? "槽位 \(slot)")")
-            return true
-        }
-
-        let result = canvas.injectSlot(pageId: store.currentPageId,
-                                      groupId: groupId,
-                                      slot: slot,
-                                      label: label,
-                                      text: text)
+        let name = (label?.isEmpty == false) ? label! : "槽位 \(slot)"
+        let result = canvas.placeSlot(pageId: store.currentPageId,
+                                     groupId: groupId,
+                                     slot: slot,
+                                     name: name,
+                                     at: visibleCenterInCanvas())
         store.transientUI.showToast(result.message)
+        // 已在画布上时只"选中"是不够的：它完全可能在视口外，用户看到的就是"按了没反应 + 一句
+        // 莫名的提示"。所以把视口平移到它身上，让"已选中"这句话在屏幕上有对应物。
+        if case let .alreadyPlaced(node, _) = result {
+            centerViewport(on: node)
+        }
         return true
+    }
+
+    /// 把视口平移到某个节点上（缩放不动 —— 用户自己定的缩放级别不该被一次快捷键改掉）。
+    private func centerViewport(on node: CanvasNode) {
+        guard viewSize.width > 0, viewSize.height > 0 else { return }
+        let target = CGPoint(x: sidebarWidth + (viewSize.width - sidebarWidth) / 2,
+                            y: viewSize.height / 2)
+        let nodeCenter = CGPoint(x: node.x + node.width / 2, y: node.y + node.height / 2)
+        withAnimation(Anim.transition) {
+            pan = CGSize(width: target.x - nodeCenter.x * zoom,
+                         height: target.y - nodeCenter.y * zoom)
+        }
+        canvas.updateViewport(pan: pan, zoom: zoom)
     }
 
     /// 当前**可见区域**中心对应的画布坐标。

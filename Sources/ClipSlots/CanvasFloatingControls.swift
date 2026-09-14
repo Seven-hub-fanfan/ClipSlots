@@ -77,11 +77,12 @@ struct CanvasGenerateButton: View {
 
 // MARK: - 底部工具栏
 
-/// 底部浮动工具栏：选择 / 抓手 / 新建节点 / 历史记录。
+/// 底部浮动工具栏：选择 / 抓手 / 放入槽位 / 历史记录。
 ///
-/// 「新建节点」与前两个语义不同——它是**一次性动作**而不是持续模式，所以点它不改 `activeTool`，
-/// 直接建一个节点。把它混在同一排是因为设计稿如此（也符合 Figma/Excalidraw 的习惯），但行为上
-/// 必须分开，否则用户点完会发现自己卡在一个「新建」模式里不知道怎么退出。
+/// 「放入槽位」与前两个语义不同——它是**一次性动作**而不是持续模式，所以点它不改 `activeTool`，
+/// 直接执行（hotfix20 起是展开左侧槽位库；此前是凭空建一个空节点，见 `CanvasTool.pickSlot`）。
+/// 把它混在同一排是因为设计稿如此（也符合 Figma/Excalidraw 的习惯），但行为上必须分开，
+/// 否则用户点完会发现自己卡在一个「新建」模式里不知道怎么退出。
 ///
 /// 末尾的历史记录同理是一次性动作（开关一个面板），所以也不进 `CanvasTool` 枚举 ——
 /// 那个枚举的语义是"当前处于哪种指针模式"，塞一个面板开关进去会让 `activeTool` 变成一个
@@ -89,14 +90,14 @@ struct CanvasGenerateButton: View {
 struct CanvasFloatingToolbar: View {
     @ObservedObject var canvas: CanvasStore
     @Binding var isHistoryOpen: Bool
-    let onAddNode: () -> Void
+    let onPickSlot: () -> Void
 
     var body: some View {
         HStack(spacing: 2) {
             ForEach(CanvasTool.allCases) { tool in
-                if tool == .newNode {
+                if tool == .pickSlot {
                     separator
-                    toolButton(tool, isActive: false) { onAddNode() }
+                    toolButton(tool, isActive: false) { onPickSlot() }
                 } else {
                     toolButton(tool, isActive: canvas.activeTool == tool) {
                         canvas.activeTool = tool
@@ -370,7 +371,7 @@ struct CanvasEmptyHint: View {
             Image(systemName: "square.on.square.dashed")
                 .font(.system(size: 26, weight: .light))
                 .foregroundColor(AppTheme.canvasChromeTertiaryInk.opacity(0.7))
-            Text("从左侧槽位库拖入内容，或点底部 ＋ 新建节点")
+            Text("画布节点就是槽位：从左侧槽位库拖入，或按 Cmd+1~0 放入对应槽位")
                 .font(.system(size: 11))
                 .foregroundColor(AppTheme.canvasChromeSecondaryInk)
             // ★ v2.11.7 hotfix17: 手势不是自解释的，必须写出来。

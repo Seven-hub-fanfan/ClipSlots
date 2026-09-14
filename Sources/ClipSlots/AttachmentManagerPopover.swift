@@ -52,6 +52,15 @@ extension SlotContent.AttachmentType {
 struct AttachmentManagerPopover: View {
     let slot: Int
     @ObservedObject var store: SlotStoreObservable
+    /// 目标槽位所在的槽位组。`nil` = 当前组（编辑页的用法）。
+    ///
+    /// ★ v2.11.7 hotfix20：画布上的节点可以来自任意页 / 任意组，所以这里必须能指定组。
+    /// 刻意用 `nil` 表示「当前组」而不是让调用方传 `store.currentSpecialSlotId` ——
+    /// 编辑页的用法必须跟着"当前组"实时漂移（切组时面板里的数据要跟着换），把 id 在
+    /// 构造时固化下来会让切组后面板继续读旧组。
+    let groupId: String?
+    /// 画布语境：把「附件」一律称作「入参文件」（用户口径，见 hotfix20 需求）。
+    let isCanvasContext: Bool
     @Environment(\.colorScheme) private var scheme
 
     // v2.8.0 (P1-5): the attachment list is derived live from the store instead of
@@ -79,15 +88,36 @@ struct AttachmentManagerPopover: View {
 
     enum InlineEditorKind: Equatable { case text, url, reference }
 
-    init(slot: Int, store: SlotStoreObservable) {
+    init(slot: Int,
+         store: SlotStoreObservable,
+         groupId: String? = nil,
+         isCanvasContext: Bool = false) {
         self.slot = slot
         self.store = store
+        self.groupId = groupId
+        self.isCanvasContext = isCanvasContext
     }
 
-    /// Live view of this slot's attachments straight from the store.
+    /// 本槽位附件的实时视图。`groupId` 为 nil 时读当前组。
     private var attachments: [SlotContent.SlotAttachment] {
-        store.attachments(for: slot)
+        if let groupId {
+            return store.canvasSlotAttachments(groupId: groupId, slot: slot)
+        }
+        return store.attachments(for: slot)
     }
+
+    /// 统一写入口。所有改动都是「读最新 → 改 → 整份写回」，绝不基于构造时的快照，
+    /// 否则别处（红叉清空 / 另一个面板 / CLI）的并发改动会被这里整份覆盖掉。
+    private func writeAttachments(_ list: [SlotContent.SlotAttachment]) {
+        if let groupId {
+            _ = store.writeCanvasSlotAttachments(groupId: groupId, slot: slot, attachments: list)
+        } else {
+            store.setAttachments(list, for: slot)
+        }
+    }
+
+    /// 语境相关的名词：画布上叫「入参文件」，编辑页叫「附件」。
+    private var noun: String { isCanvasContext ? "入参文件" : "附件" }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -114,10 +144,12 @@ struct AttachmentManagerPopover: View {
                 HStack(spacing: 6) {
                     Image(systemName: "paperclip")
                         .font(.system(size: 14, weight: .semibold))
-                    Text("附件")
+                    Text(noun)
                         .font(.system(size: 15, weight: .semibold))
                 }
-                Text("粘贴槽位 \(slot) 时会依次带出这些附件")
+                Text(isCanvasContext
+                     ? "生图时按此顺序作为入参；与槽位 \(slot) 的附件是同一份数据"
+                     : "粘贴槽位 \(slot) 时会依次带出这些附件")
                     .font(.caption)
                     .foregroundColor(.secondary)
             }
@@ -193,7 +225,7 @@ struct AttachmentManagerPopover: View {
                 .font(.system(size: 34, weight: .regular))
                 .foregroundColor(isDropTargeted ? .accentColor : .secondary.opacity(0.55))
             VStack(spacing: 4) {
-                Text(isDropTargeted ? "松开以添加附件" : "拖拽文件到这里")
+                Text(isDropTargeted ? "松开以添加\(noun)" : "拖拽文件到这里")
                     .font(.callout.weight(.medium))
                     .foregroundColor(isDropTargeted ? .accentColor : .secondary)
                 Text("或点击此区域选择文件（可多选）")
@@ -231,7 +263,7 @@ struct AttachmentManagerPopover: View {
             Image(systemName: isDropTargeted ? "square.and.arrow.down.fill" : "square.and.arrow.down")
                 .font(.system(size: 13, weight: .medium))
                 .foregroundColor(isDropTargeted ? .accentColor : .secondary)
-            Text(isDropTargeted ? "松开以添加附件" : "拖拽文件到此，或点击选择（可多选）")
+            Text(isDropTargeted ? "松开以添加\(noun)" : "拖拽文件到此，或点击选择（可多选）")
                 .font(.caption)
                 .foregroundColor(isDropTargeted ? .accentColor : .secondary)
             Spacer(minLength: 0)
@@ -335,7 +367,7 @@ struct AttachmentManagerPopover: View {
         }
         .buttonStyle(.plain)
         .foregroundColor(.primary)
-        .help("添加\(type.displayName)附件")
+        .help("添加\(type.displayName)\(noun)")
     }
 
     // MARK: Actions
@@ -380,9 +412,9 @@ struct AttachmentManagerPopover: View {
         }
         inlineError = nil
         withAnimation(Anim.transition) {
-            var current = store.attachments(for: slot)
+            var current = attachments
             current.append(att)
-            store.setAttachments(current, for: slot)
+            writeAttachments(current)
             inlineEditor = nil
         }
     }
@@ -396,7 +428,7 @@ struct AttachmentManagerPopover: View {
             panel.allowedContentTypes = [.image]
         }
         guard panel.runModal() == .OK else { return }
-        var current = store.attachments(for: slot)
+        var current = attachments
         for url in panel.urls {
             let type: SlotContent.AttachmentType = imagesOnly ? .image : .file
             let att = SlotContent.SlotAttachment(
@@ -406,7 +438,7 @@ struct AttachmentManagerPopover: View {
             )
             current.append(att)
         }
-        store.setAttachments(current, for: slot)
+        writeAttachments(current)
     }
 
     // v2.9.17: multi-select picker used by the dropzone (empty state + compact).
@@ -418,7 +450,7 @@ struct AttachmentManagerPopover: View {
         panel.canChooseDirectories = false
         panel.allowsMultipleSelection = true
         panel.prompt = "添加"
-        panel.message = "选择要作为附件添加的文件（可多选）"
+        panel.message = "选择要添加的文件（可多选）"
         guard panel.runModal() == .OK else { return }
         addFileURLs(panel.urls)
     }
@@ -430,7 +462,7 @@ struct AttachmentManagerPopover: View {
         let fileURLs = urls.filter { $0.isFileURL }
         guard !fileURLs.isEmpty else { return }
         withAnimation(Anim.transition) {
-            var current = store.attachments(for: slot)
+            var current = attachments
             for url in fileURLs {
                 let att = SlotContent.SlotAttachment(
                     name: url.lastPathComponent,
@@ -439,7 +471,7 @@ struct AttachmentManagerPopover: View {
                 )
                 current.append(att)
             }
-            store.setAttachments(current, for: slot)
+            writeAttachments(current)
         }
     }
 
@@ -486,9 +518,9 @@ struct AttachmentManagerPopover: View {
 
     private func remove(_ att: SlotContent.SlotAttachment) {
         withAnimation(Anim.transition) {
-            var current = store.attachments(for: slot)
+            var current = attachments
             current.removeAll { $0.id == att.id }
-            store.setAttachments(current, for: slot)
+            writeAttachments(current)
         }
     }
 
@@ -502,7 +534,7 @@ struct AttachmentManagerPopover: View {
         }
         dragTranslation = translation
         guard let start = dragStartIndex else { return }
-        var current = store.attachments(for: slot)
+        var current = attachments
         guard let cur = current.firstIndex(where: { $0.id == id }) else { return }
         // Target index derived from the fixed origin plus whole steps crossed.
         let steps = Int((translation / rowStep).rounded())
@@ -511,7 +543,7 @@ struct AttachmentManagerPopover: View {
             let moved = current.remove(at: cur)
             current.insert(moved, at: target)
             withAnimation(Anim.transition) {
-                store.setAttachments(current, for: slot)
+                writeAttachments(current)
             }
         }
     }
