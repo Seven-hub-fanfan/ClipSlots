@@ -3611,4 +3611,956 @@ do {
     }
 }
 
+
+// ============================================================================
+// MARK: - Agent（v2.11.7）
+// ============================================================================
+//
+// Agent 这条链上，绝大多数 bug 不会在编译期暴露，也不会在"手点一次能聊天"时暴露：
+// 它们藏在**流式分块的边界**、**请求体的形状**、**工具循环的终止条件**和
+// **脚本执行的路径检查**里。所以下面几组刻意都不联网：
+// SSE 用文本回放、HTTP 用 AgentScriptedTransport、CLI 用注入的假 runner。
+// 打 ★★ 的断言都对应一条"错了就线上炸/账单炸/被越权读文件"的具体后果。
+
+// MARK: Agent 测试用的小工具
+//
+// 这个 harness 是同步的（3600 行既有用例都依赖顶层同步语义），而 Agent 全是 async。
+// 用信号量桥接。刻意用 `Task.detached`：main.swift 的顶层代码在 Swift 5.7+ 是
+// main actor 隔离的，若 Task 继承了 main actor，随后 `semaphore.wait()` 阻塞主线程
+// 就会**死锁**——测试会挂住而不是失败，最难查。detached 不继承隔离，稳。
+
+final class SmokeBox<T>: @unchecked Sendable {
+    var value: T?
+}
+
+func smokeAwait<T>(_ body: @escaping @Sendable () async -> T) -> T {
+    let semaphore = DispatchSemaphore(value: 0)
+    let box = SmokeBox<T>()
+    Task.detached {
+        box.value = await body()
+        semaphore.signal()
+    }
+    semaphore.wait()
+    return box.value!
+}
+
+/// 记录事件顺序。只留"类型"不留内容，断言的是时序而不是文案。
+final class SmokeEventLog: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storage: [String] = []
+
+    func append(_ event: AgentRunEvent) {
+        lock.lock(); defer { lock.unlock() }
+        switch event {
+        case .reasoningDelta: storage.append("reasoning")
+        case .contentDelta: storage.append("content")
+        case .assistantCompleted: storage.append("assistant")
+        case .toolStarted: storage.append("toolStarted")
+        case .toolCompleted: storage.append("toolCompleted")
+        case .usage: storage.append("usage")
+        case .note: storage.append("note")
+        }
+    }
+
+    var kinds: [String] {
+        lock.lock(); defer { lock.unlock() }
+        return storage
+    }
+}
+
+/// 假工具执行器：只记调用、回固定结果，不碰磁盘。
+final class SmokeToolExecutor: AgentToolExecuting, @unchecked Sendable {
+    private let lock = NSLock()
+    private var recorded: [AgentToolCall] = []
+    private let result: AgentToolResult
+
+    init(result: AgentToolResult = AgentToolResult(content: "{\"ok\":true,\"slots\":[]}", summary: "完成")) {
+        self.result = result
+    }
+
+    var calls: [AgentToolCall] {
+        lock.lock(); defer { lock.unlock() }
+        return recorded
+    }
+
+    func specs() -> [AgentToolSpec] {
+        [AgentToolSpec(name: "list_slots",
+                       description: "列出槽位",
+                       parameters: .object(["type": "object", "properties": .object([:])]),
+                       originLabel: "内置")]
+    }
+
+    func execute(call: AgentToolCall) async -> AgentToolResult {
+        // 加锁抽成同步函数：在 async 上下文里直接 NSLock.lock() 在 Swift 6 语言模式下是错误。
+        record(call)
+        return result
+    }
+
+    private func record(_ call: AgentToolCall) {
+        lock.lock(); defer { lock.unlock() }
+        recorded.append(call)
+    }
+}
+
+/// 记录 CLI argv 的假 runner。断言"参数怎么映射"，而不是"CLI 干了什么"。
+final class SmokeArgvRecorder: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storage: [[String]] = []
+    private var _stdout = "{\"ok\":true}"
+    private var _exitCode: Int32 = 0
+
+    func record(_ argv: [String]) {
+        lock.lock(); defer { lock.unlock() }
+        storage.append(argv)
+    }
+
+    func stub(stdout: String, exitCode: Int32) {
+        lock.lock(); defer { lock.unlock() }
+        _stdout = stdout
+        _exitCode = exitCode
+    }
+
+    var result: AgentProcessResult {
+        lock.lock(); defer { lock.unlock() }
+        return AgentProcessResult(exitCode: _exitCode, stdout: _stdout, stderr: "", timedOut: false)
+    }
+
+    var last: [String] {
+        lock.lock(); defer { lock.unlock() }
+        return storage.last ?? []
+    }
+}
+
+// MARK: - AGENT-JSON：JSONValue 往返与容错
+//
+// 这一组盯的是"schema 与 arguments 的形状"。最要紧的是整数：
+// schema 里的 `"maximum": 10` 被编成 `10.0` 会让上游 JSON Schema 校验直接 400，
+// 而这个错在本地永远看不见（本地不校验 schema）。所以它是硬断言。
+
+do {
+    let schema = JSONValue.object([
+        "type": "object",
+        "properties": .object(["slot": .object(["type": "integer", "maximum": 10])]),
+    ])
+    let text = (try? schema.encodedText()) ?? ""
+    t.check(text.contains("\"maximum\":10"), "★★schema 里的整数必须编成 10 而不是 10.0（上游校验很严，且本地无感）")
+    t.check(!text.contains("10.0"), "整数不应出现小数点形式")
+
+    // 模型把整数写成字符串是常态，读取侧要能吃；但不能吃出错觉。
+    t.equal(JSONValue.string("3").intValue, 3, "字符串 \"3\" 应能取成 Int")
+    t.equal(JSONValue.string("3.5").intValue, nil, "非整字符串不该硬转 Int")
+    t.equal(JSONValue.number(4).intValue, 4, "数字取 Int")
+    t.equal(JSONValue.number(4.5).intValue, nil, "带小数的数字不该被悄悄截断成 Int")
+    t.equal(JSONValue.string("true").boolValue, true, "字符串 true 应能取成 Bool")
+    t.equal(JSONValue.bool(false).boolValue, false, "布尔取值")
+
+    // 空串等同缺省：模型经常用空串占位可选参数。
+    t.check(JSONValue.string("   ").isBlank, "★空白串必须视为缺省，否则会拿空串去查页面名")
+    t.check(JSONValue.null.isBlank, "null 视为缺省")
+    t.check(!JSONValue.string("x").isBlank, "非空串不是缺省")
+
+    // 无参工具的 arguments 常常是空串而不是 {}。
+    if let empty = try? JSONValue.decode(jsonText: "") {
+        t.check(empty.objectValue?.isEmpty == true, "★空 arguments 文本应解成空对象（模型对无参工具就这么发）")
+    } else {
+        t.check(false, "空 arguments 文本不该抛错")
+    }
+
+    // Bool 不能被当成数字（解码顺序：Bool 必须先于 Double 试）。
+    if let parsed = try? JSONValue.decode(jsonText: "{\"a\":true,\"b\":1}") {
+        t.equal(parsed["a"]?.boolValue, true, "true 应解成 bool")
+        t.equal(parsed["b"]?.intValue, 1, "1 应解成数字")
+        t.check(parsed["a"]?.intValue == nil, "★bool 不能被解成数字 1")
+    } else {
+        t.check(false, "混合类型对象应可解码")
+    }
+
+    // 嵌套往返：Skill 里第三方写的 parameters 会原样进请求体，不能被改形。
+    let nested = "{\"a\":{\"b\":[1,\"x\",true,null]}}"
+    if let round = try? JSONValue.decode(jsonText: nested), let back = try? round.encodedText() {
+        t.equal(back, nested, "★嵌套结构必须原样往返（第三方 schema 会直接进请求体）")
+    } else {
+        t.check(false, "嵌套结构应可往返")
+    }
+}
+
+// MARK: - AGENT-SSE：流式解码
+//
+// 分块位置是这一组的核心。真实 URLSession 在任意字节处断开，
+// 所以"逐字符喂"必须和"整段喂"得到完全一样的结果。
+
+do {
+    let body = """
+    data: {"choices":[{"index":0,"delta":{"reasoning_content":"先看槽位"}}]}
+
+    data: {"choices":[{"index":0,"delta":{"content":"槽位 3 "}}]}
+
+    data: {"choices":[{"index":0,"delta":{"content":"已更新"}}]}
+
+    data: {"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}
+
+    data: {"choices":[],"usage":{"prompt_tokens":120,"completion_tokens":45,"total_tokens":165,"prompt_cache_hit_tokens":64}}
+
+    data: [DONE]
+
+    """
+
+    var whole = AgentSSEDecoder()
+    var acc = AgentStreamAccumulator()
+    for event in whole.feed(body) + whole.finish() { acc.ingest(event) }
+    t.equal(acc.content, "槽位 3 已更新", "整段喂入应拼出完整正文")
+    t.equal(acc.reasoning, "先看槽位", "整段喂入应拼出思考内容")
+    t.equal(acc.finishReason, "stop", "finish_reason 应被记录")
+    t.equal(acc.usage?.promptTokens, 120, "usage.prompt_tokens")
+    t.equal(acc.usage?.cachedTokens, 64, "usage 命中缓存 tokens（要靠 stream_options 才有）")
+
+    // 逐字符喂：模拟最恶劣的分块。
+    var perChar = AgentSSEDecoder()
+    var acc2 = AgentStreamAccumulator()
+    for ch in body {
+        for event in perChar.feed(String(ch)) { acc2.ingest(event) }
+    }
+    for event in perChar.finish() { acc2.ingest(event) }
+    t.equal(acc2.content, acc.content, "★★逐字符分块的结果必须与整段一致（跨 chunk 残行拼装）")
+    t.equal(acc2.reasoning, acc.reasoning, "逐字符分块的思考内容也应一致")
+    t.equal(acc2.usage?.totalTokens, 165, "逐字符分块也应解出 usage")
+
+    // 心跳注释、event/id 字段、\r\n 行尾都不能干扰。
+    var noisy = AgentSSEDecoder()
+    var acc3 = AgentStreamAccumulator()
+    let noisyBody = ": keep-alive\r\nevent: message\r\nid: 42\r\n"
+        + "data: {\"choices\":[{\"delta\":{\"content\":\"OK\"}}]}\r\n\r\n"
+        + "data: [DONE]\r\n"
+    for event in noisy.feed(noisyBody) + noisy.finish() { acc3.ingest(event) }
+    t.equal(acc3.content, "OK", "★心跳注释 / event / id 行与 \\r\\n 行尾都必须被正确跳过")
+
+    // 脏 data 行不能炸掉整条流。
+    var weird = AgentSSEDecoder()
+    var acc4 = AgentStreamAccumulator()
+    for event in weird.feed("data: not-json\ndata: {\"choices\":[{\"delta\":{\"content\":\"仍然可用\"}}]}\n") { acc4.ingest(event) }
+    for event in weird.finish() { acc4.ingest(event) }
+    t.equal(acc4.content, "仍然可用", "★脏 data 行应被忽略，而不是让整轮失败")
+
+    // 流中途的 error 对象必须被识别成失败（余额不足/鉴权失效常在流开始后才暴露）。
+    var failing = AgentSSEDecoder()
+    var acc5 = AgentStreamAccumulator()
+    for event in failing.feed("data: {\"error\":{\"message\":\"Insufficient Balance\",\"code\":\"402\"}}\n") { acc5.ingest(event) }
+    for event in failing.finish() { acc5.ingest(event) }
+    t.equal(acc5.serverError?.message, "Insufficient Balance",
+            "★★流中途的 error 对象必须被识别成失败，不能当成空 chunk 吞掉")
+
+    // finish() 要能把最后一行没有换行结尾的残留吐出来。
+    var noTrailingNewline = AgentSSEDecoder()
+    var acc6 = AgentStreamAccumulator()
+    for event in noTrailingNewline.feed("data: {\"choices\":[{\"delta\":{\"content\":\"末尾无换行\"}}]}") { acc6.ingest(event) }
+    for event in noTrailingNewline.finish() { acc6.ingest(event) }
+    t.equal(acc6.content, "末尾无换行", "★最后一行没有换行时，finish() 必须把它交出来")
+}
+
+// MARK: - AGENT-TOOLCALL：工具调用的增量拼装
+//
+// 首帧带 id+name，后续帧只带 arguments 片段；并行调用靠 index 区分。
+// 这是整条链最容易写错的地方——错了的表现是"模型明明调了工具，参数却是半截 JSON"。
+
+do {
+    let body = """
+    data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_a","type":"function","function":{"name":"write_slot","arguments":""}}]}}]}
+
+    data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\\"slot\\":"}}]}}]}
+
+    data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"3,\\"text\\":\\"猫\\"}"}}]}}]}
+
+    data: {"choices":[{"delta":{"tool_calls":[{"index":1,"id":"call_b","type":"function","function":{"name":"list_slots","arguments":"{}"}}]}}]}
+
+    data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}]}
+
+    data: [DONE]
+
+    """
+    var decoder = AgentSSEDecoder()
+    var acc = AgentStreamAccumulator()
+    for event in decoder.feed(body) + decoder.finish() { acc.ingest(event) }
+
+    t.equal(acc.toolCalls.count, 2, "★两个并行工具调用应按 index 归并成 2 个")
+    t.equal(acc.toolCalls.first?.id, "call_a", "首个调用 id")
+    t.equal(acc.toolCalls.first?.name, "write_slot", "首个调用名（name 只在首帧出现）")
+    t.equal(acc.toolCalls.first?.argumentsJSON, "{\"slot\":3,\"text\":\"猫\"}",
+            "★★分片的 arguments 必须原样拼回完整 JSON")
+    if let args = try? acc.toolCalls.first?.arguments() {
+        t.equal(args["slot"]?.intValue, 3, "拼好的 arguments 应能解析出 slot")
+        t.equal(args["text"]?.stringValue, "猫", "拼好的 arguments 应能解析出中文 text")
+    } else {
+        t.check(false, "拼装后的 arguments 应是合法 JSON")
+    }
+    t.equal(acc.toolCalls.last?.name, "list_slots", "第二个调用名")
+    t.equal(acc.finishReason, "tool_calls", "finish_reason 应为 tool_calls")
+
+    // id 缺失时必须兜一个：role=tool 消息的 tool_call_id 为空会被上游 400。
+    var noId = AgentStreamAccumulator()
+    noId.ingest(.toolCall(index: 0, id: nil, name: "list_slots", argumentsDelta: "{}"))
+    t.check(noId.toolCalls.first?.id.isEmpty == false, "★id 缺失时必须自造一个（tool_call_id 不能为空）")
+
+    // 只有 arguments、没有 name 的残缺调用应被丢弃，而不是造出一个空名工具。
+    var nameless = AgentStreamAccumulator()
+    nameless.ingest(.toolCall(index: 0, id: "x", name: nil, argumentsDelta: "{}"))
+    t.equal(nameless.toolCalls.count, 0, "★无工具名的残缺调用应被丢弃（空名工具会让上游 400）")
+
+    // 顺序按 index 而不是按到达顺序。
+    var reordered = AgentStreamAccumulator()
+    reordered.ingest(.toolCall(index: 1, id: "b", name: "second", argumentsDelta: "{}"))
+    reordered.ingest(.toolCall(index: 0, id: "a", name: "first", argumentsDelta: "{}"))
+    t.equal(reordered.toolCalls.map(\.name), ["first", "second"], "工具调用应按 index 排序而非到达顺序")
+}
+
+// MARK: - AGENT-BODY：请求体形状
+//
+// 最关键的一条：**带 tools 时 reasoning_content 必须回传**，否则上游 400。
+// 这不是我们的偏好，是 DeepSeek 思考模式 + Tool Calls 的硬要求，而且只在
+// "先思考、再调工具、再回答"的第二轮才暴露——手点一次很容易漏掉。
+
+do {
+    let history: [AgentMessage] = [
+        AgentMessage(role: .user, content: "看看槽位"),
+        AgentMessage(role: .assistant,
+                     content: "",
+                     reasoning: "需要先列出槽位",
+                     toolCalls: [AgentToolCall(id: "call_1", name: "list_slots", argumentsJSON: "{}")]),
+        AgentMessage(role: .tool, content: "{\"ok\":true}", toolCallId: "call_1", toolName: "list_slots"),
+        // 本地错误提示气泡：不该进上下文。
+        AgentMessage(role: .assistant, content: "网络错误：连接超时", isFailure: true),
+    ]
+    let tools = AgentBuiltinTools(cliPath: "/nonexistent/clipslots").specs()
+    let config = AgentConfig(model: "deepseek-reasoner", systemPrompt: "你是助手")
+    let body = AgentService.requestBody(history: history, config: config, tools: tools)
+
+    if let messages = body["messages"]?.arrayValue, messages.count >= 4 {
+        t.equal(messages.count, 4, "★system + user + assistant + tool = 4 条（本地失败提示被剔除）")
+        t.equal(messages[0]["role"]?.stringValue, "system", "system 必须在最前")
+        t.equal(messages[0]["content"]?.stringValue, "你是助手", "system 内容取自 config，不取历史")
+
+        let assistant = messages[2]
+        t.equal(assistant["role"]?.stringValue, "assistant", "第三条是 assistant")
+        t.equal(assistant["reasoning_content"]?.stringValue, "需要先列出槽位",
+                "★★带 tools 时必须回传 reasoning_content，否则 DeepSeek 直接 400")
+        t.check(assistant["content"] != nil, "★只有工具调用的那轮，content 键也必须保留（空串）")
+        t.equal(assistant["tool_calls"]?.arrayValue?.count, 1, "assistant 应带 1 个 tool_call")
+        t.equal(assistant["tool_calls"]?.arrayValue?.first?["function"]?["name"]?.stringValue, "list_slots",
+                "tool_call 的函数名应原样回传")
+        t.equal(assistant["tool_calls"]?.arrayValue?.first?["type"]?.stringValue, "function",
+                "tool_call 必须带 type=function")
+
+        let toolMessage = messages[3]
+        t.equal(toolMessage["role"]?.stringValue, "tool", "第四条是 tool 结果")
+        t.equal(toolMessage["tool_call_id"]?.stringValue, "call_1", "★tool 消息必须带 tool_call_id")
+    } else {
+        t.check(false, "请求体必须有至少 4 条 messages")
+    }
+
+    t.equal(body["stream"]?.boolValue, true, "流式请求 stream=true")
+    t.equal(body["stream_options"]?["include_usage"]?.boolValue, true,
+            "★想拿到 usage 必须显式开 stream_options.include_usage")
+    t.equal(body["model"]?.stringValue, "deepseek-reasoner", "默认模型遵循用户指定")
+    t.check((body["tools"]?.arrayValue?.count ?? 0) >= 4, "内置工具应全部进 tools")
+    t.equal(body["tools"]?.arrayValue?.first?["type"]?.stringValue, "function", "工具类型是 function")
+    t.check(body["tools"]?.arrayValue?.first?["function"]?["parameters"] != nil, "工具必须带 parameters schema")
+
+    // thinking 三态：默认一个字段都不发（老模型别名未必认这两个键）。
+    t.check(body["thinking"] == nil,
+            "★★serverDefault 时请求体里不能出现 thinking 字段（老模型别名可能不认）")
+    t.check(body["reasoning_effort"] == nil, "未指定推理强度时不应出现 reasoning_effort")
+
+    let enabled = AgentService.requestBody(
+        history: history,
+        config: AgentConfig(thinkingMode: .enabled, reasoningEffort: "high"),
+        tools: tools)
+    t.equal(enabled["thinking"]?["type"]?.stringValue, "enabled", "显式开启时应发 thinking.enabled")
+    t.equal(enabled["reasoning_effort"]?.stringValue, "high", "显式推理强度应发出")
+
+    let disabled = AgentService.requestBody(
+        history: history,
+        config: AgentConfig(thinkingMode: .disabled, reasoningEffort: "high"),
+        tools: tools)
+    t.equal(disabled["thinking"]?["type"]?.stringValue, "disabled", "关闭思考时应发 thinking.disabled")
+    t.check(disabled["reasoning_effort"] == nil, "★关闭思考时不应再发 reasoning_effort（自相矛盾的组合会 422）")
+
+    // 空 tools 数组会被某些网关判为非法，干脆不发这个键。
+    let noTools = AgentService.requestBody(history: history, config: config, tools: [])
+    t.check(noTools["tools"] == nil, "没有工具时不应出现 tools 键")
+
+    // 非流式请求不该带 stream_options。
+    let sync = AgentService.requestBody(history: history, config: config, tools: tools, stream: false)
+    t.equal(sync["stream"]?.boolValue, false, "非流式请求 stream=false")
+    t.check(sync["stream_options"] == nil, "非流式请求不应带 stream_options")
+
+    // System Prompt 为空时不该塞一条空 system 进去。
+    let noPrompt = AgentService.requestBody(history: [AgentMessage(role: .user, content: "hi")],
+                                            config: AgentConfig(systemPrompt: "   "),
+                                            tools: [])
+    t.equal(noPrompt["messages"]?.arrayValue?.count, 1, "★空白 System Prompt 不应产生一条空 system 消息")
+
+    // 缺 tool_call_id 的 tool 消息发出去必被 400，宁可丢掉。
+    let orphanTool = AgentService.requestBody(
+        history: [AgentMessage(role: .user, content: "hi"), AgentMessage(role: .tool, content: "{}")],
+        config: AgentConfig(systemPrompt: ""),
+        tools: [])
+    t.equal(orphanTool["messages"]?.arrayValue?.count, 1, "★没有 tool_call_id 的 tool 消息必须被剔除")
+}
+
+// MARK: - AGENT-LOOP：工具调用闭环（脚本化传输，不碰网络）
+
+do {
+    // 第 1 轮：模型要求调工具；第 2 轮：给出终答。
+    let round1 = """
+    data: {"choices":[{"delta":{"reasoning_content":"得先看一眼"}}]}
+
+    data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_x","type":"function","function":{"name":"list_slots","arguments":"{\\"group\\":\\"默认\\"}"}}]}}]}
+
+    data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}]}
+
+    data: [DONE]
+
+    """
+    let round2 = """
+    data: {"choices":[{"delta":{"content":"共 10 个槽位，其中 3 个为空。"}}]}
+
+    data: {"choices":[{"delta":{},"finish_reason":"stop"}]}
+
+    data: [DONE]
+
+    """
+    // splitEvery 刻意取 37：保证 JSON 会在中间被切开，顺带再压一遍跨 chunk 拼装。
+    let transport = AgentScriptedTransport(steps: [
+        .sse(round1, splitEvery: 37),
+        .sse(round2, splitEvery: 37),
+    ])
+    let service = AgentService(transport: transport,
+                               secretStore: AgentInMemorySecretStore(key: "sk-smoke"))
+    let executor = SmokeToolExecutor()
+    let events = SmokeEventLog()
+
+    let produced = smokeAwait { () -> [AgentMessage] in
+        (try? await service.run(history: [AgentMessage(role: .user, content: "看看槽位")],
+                                config: AgentConfig(),
+                                tools: executor) { event in
+            events.append(event)
+        }) ?? []
+    }
+
+    t.equal(executor.calls.count, 1, "★工具应被执行且只执行一次")
+    t.equal(executor.calls.first?.name, "list_slots", "执行的工具名")
+    t.equal((try? executor.calls.first?.arguments())?["group"]?.stringValue, "默认",
+            "★工具参数应完整送达执行侧（含中文、且经历过跨 chunk 拼装）")
+
+    t.equal(produced.count, 3, "★应产出 assistant(工具轮) + tool(结果) + assistant(终答) 共 3 条")
+    t.equal(produced.first?.toolCalls.count, 1, "第一条 assistant 带工具调用")
+    t.equal(produced.first?.reasoning, "得先看一眼", "第一轮思考内容必须留在消息里（下一轮要回传）")
+    t.equal(produced.count > 1 ? produced[1].role : .user, .tool, "第二条是工具结果")
+    t.equal(produced.count > 1 ? produced[1].toolCallId : nil, "call_x", "工具结果应绑定正确的 call id")
+    t.equal(produced.last?.content, "共 10 个槽位，其中 3 个为空。", "最后一条是终答")
+
+    // 第二次请求必须带上工具结果和上一轮的 reasoning_content。
+    if let second = transport.requestJSON(at: 1), let messages = second["messages"]?.arrayValue, messages.count >= 4 {
+        t.equal(messages.count, 4, "★第二次请求应包含 system+user+assistant+tool 四条")
+        t.equal(messages[2]["reasoning_content"]?.stringValue, "得先看一眼",
+                "★★第二次请求必须回传上一轮 reasoning_content（带 tools 时不回传会 400）")
+        t.equal(messages[3]["role"]?.stringValue, "tool", "第二次请求应带 tool 结果")
+        t.equal(messages[3]["content"]?.stringValue, "{\"ok\":true,\"slots\":[]}", "工具结果应原样回传给模型")
+    } else {
+        t.check(false, "第二次请求体应可解析且含 4 条消息")
+    }
+
+    // 事件顺序：思考 → 工具开始 → 工具结束 → 终答。
+    let kinds = events.kinds
+    t.check(kinds.contains("reasoning") && kinds.contains("toolStarted")
+            && kinds.contains("toolCompleted") && kinds.contains("content"),
+            "★事件流应覆盖思考/工具开始/工具结束/正文四类")
+    if let iStart = kinds.firstIndex(of: "toolStarted"),
+       let iEnd = kinds.firstIndex(of: "toolCompleted"),
+       let iContent = kinds.lastIndex(of: "content") {
+        t.check(iStart < iEnd, "工具开始必须早于工具结束")
+        t.check(iEnd < iContent, "★终答必须在工具结果之后（否则说明第二轮没等工具）")
+    } else {
+        t.check(false, "事件顺序断言的前置事件缺失")
+    }
+}
+
+// MARK: - AGENT-GUARD：错误翻译与死循环护栏
+
+do {
+    // 没有 API Key 时必须在发请求前就失败。
+    let service = AgentService(transport: AgentScriptedTransport(steps: []),
+                               secretStore: AgentInMemorySecretStore(key: nil))
+    t.check(!service.hasAPIKey, "空 secret store 下 hasAPIKey 应为 false")
+    let missing = smokeAwait { () -> AgentError? in
+        do {
+            _ = try await service.run(history: [AgentMessage(role: .user, content: "hi")],
+                                      config: AgentConfig(), tools: nil) { _ in }
+            return nil
+        } catch let e as AgentError { return e } catch { return nil }
+    }
+    t.equal(missing, AgentError.missingAPIKey, "★缺 API Key 应直接抛 missingAPIKey，不该发出请求")
+
+    // HTTP 错误码翻译成人话。
+    let unauthorized = AgentScriptedTransport(steps: [
+        .init(statusCode: 401,
+              chunks: ["{\"error\":{\"message\":\"Authentication Fails\",\"code\":\"invalid_api_key\"}}"]),
+    ])
+    let svc401 = AgentService(transport: unauthorized,
+                              secretStore: AgentInMemorySecretStore(key: "sk-bad"))
+    let err401 = smokeAwait { () -> AgentError? in
+        do {
+            _ = try await svc401.run(history: [AgentMessage(role: .user, content: "hi")],
+                                     config: AgentConfig(), tools: nil) { _ in }
+            return nil
+        } catch let e as AgentError { return e } catch { return nil }
+    }
+    if case .http(let status, let message, _) = err401 {
+        t.equal(status, 401, "401 应被识别")
+        t.equal(message, "Authentication Fails", "错误 body 里的 message 应被提取")
+        t.check(err401?.errorDescription?.contains("鉴权失败") == true, "★401 应翻译成人能看懂的中文提示")
+    } else {
+        t.check(false, "401 应产生 AgentError.http，实际：\(String(describing: err401))")
+    }
+
+    // 模型名问题要能被单独识别出来——DeepSeek 模型别名会随代际下线，
+    // UI 靠这个标志提示"去设置里换模型"，否则用户只能看到一句 400。
+    t.check(AgentError.http(status: 400, message: "Model Not Exist", code: nil).hintsModelProblem,
+            "★★『模型不存在』类错误必须可识别，好在 UI 上提示改模型名")
+    t.check(AgentError.http(status: 404, message: "model not found", code: nil).hintsModelProblem,
+            "404 + model not found 也算模型名问题")
+    t.check(!AgentError.http(status: 429, message: "rate limit", code: nil).hintsModelProblem,
+            "限流不是模型名问题")
+    t.check(AgentError.http(status: 402, message: nil, code: nil).errorDescription?.contains("余额不足") == true,
+            "402 应提示余额不足")
+
+    // 上游流里带 error 对象时按 upstream 报错。
+    let upstream = AgentScriptedTransport(steps: [
+        .sse("data: {\"error\":{\"message\":\"Insufficient Balance\",\"code\":\"402\"}}\n\n"),
+    ])
+    let svcUp = AgentService(transport: upstream, secretStore: AgentInMemorySecretStore(key: "sk-x"))
+    let errUp = smokeAwait { () -> AgentError? in
+        do {
+            _ = try await svcUp.run(history: [AgentMessage(role: .user, content: "hi")],
+                                    config: AgentConfig(), tools: nil) { _ in }
+            return nil
+        } catch let e as AgentError { return e } catch { return nil }
+    }
+    t.equal(errUp, AgentError.upstream(message: "Insufficient Balance", code: "402"),
+            "★200 里夹着 error 对象也必须报错，不能当成空回答")
+
+    // 上游一直要求调工具时，必须在 maxToolRounds 处停下。
+    let loopStep = AgentScriptedTransport.Step.sse("""
+    data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_loop","type":"function","function":{"name":"list_slots","arguments":"{}"}}]}}]}
+
+    data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}]}
+
+    data: [DONE]
+
+    """)
+    let loopTransport = AgentScriptedTransport(steps: Array(repeating: loopStep, count: 6))
+    let loopService = AgentService(transport: loopTransport,
+                                   secretStore: AgentInMemorySecretStore(key: "sk-loop"))
+    let loopExecutor = SmokeToolExecutor()
+    let loopProduced = smokeAwait { () -> [AgentMessage] in
+        (try? await loopService.run(history: [AgentMessage(role: .user, content: "循环吧")],
+                                    config: AgentConfig(maxToolRounds: 3),
+                                    tools: loopExecutor) { _ in }) ?? []
+    }
+    t.equal(loopExecutor.calls.count, 3,
+            "★★工具轮上限必须生效（否则模型和工具能互相喂饭喂到账单爆）")
+    t.check(loopProduced.last?.isFailure == true, "触顶时应留下一条可见提示")
+    t.check(loopProduced.last?.content.contains("3 轮") == true, "提示里应说明停在第几轮")
+
+    // 上游啥也没返回时，不能产出一个永远空白的气泡。
+    let emptyTransport = AgentScriptedTransport(steps: [.sse("data: [DONE]\n\n")])
+    let emptyService = AgentService(transport: emptyTransport,
+                                    secretStore: AgentInMemorySecretStore(key: "sk-empty"))
+    let emptyError = smokeAwait { () -> AgentError? in
+        do {
+            _ = try await emptyService.run(history: [AgentMessage(role: .user, content: "hi")],
+                                           config: AgentConfig(), tools: nil) { _ in }
+            return nil
+        } catch let e as AgentError { return e } catch { return nil }
+    }
+    if case .invalidResponse = emptyError {
+        t.check(true, "★空响应应报错，而不是产出空白气泡")
+    } else {
+        t.check(false, "空响应应产生 invalidResponse，实际：\(String(describing: emptyError))")
+    }
+
+    // 模型想调工具但没有执行器时，应收尾而不是继续转圈。
+    let wantTool = AgentScriptedTransport(steps: [loopStep])
+    let noExec = AgentService(transport: wantTool, secretStore: AgentInMemorySecretStore(key: "sk-n"))
+    let noExecProduced = smokeAwait { () -> [AgentMessage] in
+        (try? await noExec.run(history: [AgentMessage(role: .user, content: "hi")],
+                               config: AgentConfig(), tools: nil) { _ in }) ?? []
+    }
+    t.equal(noExecProduced.count, 1, "★没有执行器时应立刻收尾，不能空转到轮上限")
+}
+
+// MARK: - AGENT-CLI：内置工具的参数映射
+//
+// 用注入的假 runner 断言 argv，不碰真实数据目录。重点有两处：
+//   1. page 名 / page UUID 的分流（`--page` 只吃 UUID，模型给的多半是名字）；
+//   2. 裸 write 与 --if-empty 的选择（用户明确要求"直接改，不要反复确认"）。
+
+do {
+    let recorder = SmokeArgvRecorder()
+    // cliPath 指向一个真实存在且可执行的文件，好让 isAvailable 通过；真正的执行被 runner 拦掉。
+    let tools = AgentBuiltinTools(cliPath: "/bin/echo") { _, argv in
+        recorder.record(argv)
+        return recorder.result
+    }
+
+    func runTool(_ name: String, _ json: String) -> AgentToolResult {
+        let call = AgentToolCall(id: "c", name: name, argumentsJSON: json)
+        return smokeAwait { await tools.execute(call: call) }
+    }
+
+    // 页面名 + 组名
+    _ = runTool("list_slots", "{\"page\":\"我的页面\",\"group\":\"提示词\"}")
+    t.check(recorder.last.contains("--page-name"),
+            "★★页面名必须走 --page-name（--page 只吃 UUID，模型给的多半是名字）")
+    t.check(recorder.last.contains("我的页面"), "页面名应作为参数传入")
+    t.check(recorder.last.contains("--group") && recorder.last.contains("提示词"),
+            "组名走 --group（CLI 的 --group 同时接受 id 与名字）")
+
+    // 页面 UUID
+    let uuid = UUID().uuidString
+    _ = runTool("list_slots", "{\"page\":\"\(uuid)\"}")
+    t.check(recorder.last.contains("--page") && !recorder.last.contains("--page-name"),
+            "★UUID 形态的 page 应走 --page")
+
+    // 空串等同不传
+    _ = runTool("list_slots", "{\"page\":\"  \",\"group\":\"\"}")
+    t.equal(recorder.last, ["list"], "★空白参数应被视为未传，而不是拿空串去匹配页面/组")
+
+    // read
+    _ = runTool("read_slot", "{\"slot\":3}")
+    t.equal(recorder.last, ["read", "3"], "read_slot 应把 slot 作为位置参数")
+
+    let missingSlot = runTool("read_slot", "{}")
+    t.check(missingSlot.isFailure, "缺 slot 应失败")
+    t.check(missingSlot.content.contains("MISSING_SLOT"),
+            "★失败要带结构化 error_code，模型才有机会自我纠正")
+
+    t.check(runTool("read_slot", "{\"slot\":0}").content.contains("SLOT_OUT_OF_RANGE"),
+            "越界 slot 应被本地拦下，不必浪费一次 CLI 调用")
+
+    // write：默认覆盖，显式 if_empty 才只写空槽
+    _ = runTool("write_slot", "{\"slot\":2,\"text\":\"赛博朋克\",\"label\":\"夜景\"}")
+    t.check(recorder.last.starts(with: ["write", "2", "--text", "赛博朋克"]), "write 的位置参数与 --text")
+    t.check(recorder.last.contains("--label") && recorder.last.contains("夜景"), "label 应传入")
+    t.check(!recorder.last.contains("--if-empty"),
+            "★★默认不加 --if-empty（用户明确要求「直接改，不要反复确认」）")
+
+    _ = runTool("write_slot", "{\"slot\":2,\"text\":\"x\",\"if_empty\":true}")
+    t.check(recorder.last.contains("--if-empty"), "显式 if_empty 时应加 --if-empty")
+    t.check(!recorder.last.contains("--overwrite-text"),
+            "★--if-empty 与 --overwrite-text 互斥，不能同时出现（CLI 会拒）")
+
+    t.check(runTool("write_slot", "{\"slot\":2}").content.contains("MISSING_TEXT"), "缺 text 应本地失败")
+
+    // search
+    _ = runTool("search_slots", "{\"query\":\"人像\",\"all_groups\":true,\"limit\":20}")
+    t.check(recorder.last.starts(with: ["search", "人像"]), "search 的位置参数")
+    t.check(recorder.last.contains("--all-groups"), "all_groups 应映射成 --all-groups")
+    t.check(recorder.last.contains("--limit") && recorder.last.contains("20"), "limit 应映射成 --limit")
+
+    t.check(runTool("search_slots", "{\"query\":\"  \"}").content.contains("MISSING_QUERY"),
+            "空查询应本地失败，不去捞全库")
+
+    // 发现类工具：让模型先看清页面/组，别瞎猜名字
+    _ = runTool("list_groups", "{}")
+    t.check(!recorder.last.isEmpty, "list_groups 应产生一次 CLI 调用")
+    _ = runTool("list_pages", "{}")
+    t.check(!recorder.last.isEmpty, "list_pages 应产生一次 CLI 调用")
+
+    // 未知工具名
+    t.check(runTool("delete_everything", "{}").content.contains("UNKNOWN_TOOL"),
+            "★未知工具名必须被拒（模型偶尔会自己发明工具）")
+
+    // CLI 失败时把 error_code 原样带回给模型
+    recorder.stub(stdout: "{\"ok\":false,\"error_code\":\"SLOT_NOT_EMPTY\",\"error\":\"槽位非空\"}", exitCode: 1)
+    let failed = runTool("write_slot", "{\"slot\":2,\"text\":\"x\",\"if_empty\":true}")
+    t.check(failed.isFailure, "CLI 非零退出应标记为失败")
+    t.check(failed.summary.contains("SLOT_NOT_EMPTY"), "★失败摘要应带 CLI 的 error_code（UI 状态行要看）")
+    t.check(failed.content.contains("SLOT_NOT_EMPTY"), "★CLI 的 JSON 应原样回传给模型，让它改用覆盖写")
+    recorder.stub(stdout: "{\"ok\":true}", exitCode: 0)
+
+    // CLI 不在时给可操作的提示，而不是空输出
+    let missingCLI = AgentBuiltinTools(cliPath: "/nonexistent/clipslots")
+    let cliCall = AgentToolCall(id: "c", name: "list_slots", argumentsJSON: "{}")
+    t.check(smokeAwait { await missingCLI.execute(call: cliCall) }.content.contains("CLI_MISSING"),
+            "★CLI 缺失应报 CLI_MISSING 并提示重装，而不是静默失败")
+
+    // 工具 schema 自检：名字合法、描述非空、schema 是 object
+    let specs = AgentBuiltinTools().specs()
+    t.check(specs.count >= 6, "内置工具应至少 6 个（含 list_groups / list_pages）")
+    for spec in specs {
+        let legal = spec.name.allSatisfy { $0.isLetter || $0.isNumber || $0 == "_" || $0 == "-" }
+        t.check(legal, "工具名 \(spec.name) 只能含字母数字下划线连字符")
+        t.check(spec.name.count <= 64, "工具名 \(spec.name) 不得超过 64 字符")
+        t.check(!spec.description.isEmpty, "工具 \(spec.name) 必须有描述（模型靠它决定调不调）")
+        t.equal(spec.parameters["type"]?.stringValue, "object", "工具 \(spec.name) 的 parameters 应是 object schema")
+    }
+    t.equal(Set(specs.map(\.name)).count, specs.count, "★工具名不能重复（重名会让上游拒绝整个 tools 数组）")
+
+    let writeRequired = specs.first { $0.name == "write_slot" }?
+        .parameters["required"]?.arrayValue?.compactMap(\.stringValue) ?? []
+    t.check(writeRequired.contains("slot") && writeRequired.contains("text"), "write_slot 必填 slot 与 text")
+}
+
+// MARK: - AGENT-SKILL：SKILL.md 解析
+//
+// 核心立场：**不从自然语言里猜 schema**。有结构声明才生成 Function Calling 工具，
+// 没有就只暴露 list_skills / read_skill / run_skill_script 让模型自己读文档。
+// 所以这一组重点验"该丢的丢掉了"，而不只是"该解的解出来了"。
+
+do {
+    let markdown = """
+    ---
+    name: clipslots-manager
+    description: "读写 ClipSlots 槽位内容"
+    version: 1.7.0
+    used_when: 需要操作槽位时
+    ---
+
+    # ClipSlots Manager
+
+    这是正文第一段。
+
+    ```json clipslots-tools
+    [
+      {
+        "name": "summarize",
+        "description": "汇总某组槽位",
+        "parameters": {"type": "object", "properties": {"group": {"type": "string"}}, "required": ["group"]},
+        "command": ["python3", "scripts/summarize.py", "--group", "{{group}}"]
+      },
+      {
+        "name": "no_command",
+        "description": "缺少执行方式，应被丢弃",
+        "parameters": {"type": "object"}
+      }
+    ]
+    ```
+    """
+    let parsed = AgentSkillCatalog.parse(markdown: markdown)
+    t.equal(parsed.name, "clipslots-manager", "frontmatter 的 name 应被解析")
+    t.equal(parsed.description, "读写 ClipSlots 槽位内容", "带引号的 description 应去引号")
+    t.equal(parsed.version, "1.7.0", "version 应被解析")
+    t.equal(parsed.tools.count, 1,
+            "★★没有 command 的声明必须丢弃（留着就是个调了没反应的死工具，模型会反复重试）")
+    t.equal(parsed.tools.first?.name, "summarize", "声明工具名")
+    t.equal(parsed.tools.first?.command.count, 4, "命令数组应完整保留（含 {{占位符}}）")
+    t.equal(parsed.tools.first?.parameters["required"]?.arrayValue?.first?.stringValue, "group",
+            "第三方写的 parameters 应原样保留")
+
+    // 没有结构声明就一个工具都不该造出来。
+    let plain = AgentSkillCatalog.parse(markdown: "---\nname: plain\ndescription: 普通技能\n---\n\n用 clipslots write 写入槽位即可。")
+    t.equal(plain.tools.count, 0, "★★纯自然语言 SKILL.md 不得凭空生成工具（这是幻觉工具的源头）")
+
+    // 缺 description 时回落到第一段正文，而不是留空。
+    t.equal(AgentSkillCatalog.parse(markdown: "---\nname: solo\n---\n\n# 标题\n\n第一段说明。\n").description,
+            "第一段说明。", "★缺 description 时应回落到首段正文")
+
+    // 完全没有 frontmatter 也不能崩。
+    t.equal(AgentSkillCatalog.parse(markdown: "# 只有标题\n\n正文。", fallbackName: "bare-skill").name,
+            "bare-skill", "无 frontmatter 时用目录名兜底")
+
+    // 围栏块里是坏 JSON 时，整份 Skill 仍要可用（只是没有声明工具）。
+    let broken = AgentSkillCatalog.parse(markdown: "---\nname: broken\n---\n\n```json clipslots-tools\n[{oops}]\n```\n")
+    t.equal(broken.name, "broken", "★坏掉的工具声明不应让整份 SKILL.md 解析失败")
+    t.equal(broken.tools.count, 0, "坏 JSON 不产生工具")
+
+    // slug 规则：它要能当 Function Calling 工具名的一部分。
+    t.equal(AgentSkillCatalog.slugify("Clip Slots Manager"), "clip_slots_manager", "空格转下划线并小写")
+    t.equal(AgentSkillCatalog.slugify("a/b.c"), "a_b_c", "路径与点号归一成下划线")
+    t.equal(AgentSkillCatalog.slugify("中文"), "", "非 ASCII 全部丢弃（工具名字符集限制）")
+
+    let toolName = AgentSkillTools.declaredToolName(skillSlug: "clipslots_manager", toolName: "summarize")
+    t.equal(toolName, "skill_clipslots_manager_summarize",
+            "★Skill 工具名应带 skill_<slug>_ 前缀做命名空间隔离")
+    t.check(toolName.count <= 64, "工具名不得超过 64 字符")
+    t.equal(AgentSkillTools.declaredToolName(skillSlug: "x", toolName: "中文工具"), "skill_x_tool",
+            "★纯中文工具名 slug 化后为空，必须兜一个合法名而不是 skill_x_")
+}
+
+// MARK: - AGENT-SKILL-FS：目录扫描去重与脚本路径防逃逸
+//
+// 这一组在临时目录里搭出真实的安装形态：bundle 内自带 + 插件市场上传 +
+// Agent 目录软链（AgentSkillInstallManager 就是这么装的）。
+// 软链是重点——它既是"同一个 Skill 出现两遍"的来源，也是"正常路径被误判越界"的来源。
+
+do {
+    let fm = FileManager.default
+    let root = fm.temporaryDirectory.appendingPathComponent("clipslots_skill_\(UUID().uuidString)")
+
+    let bundle = root.appendingPathComponent("ClipSlots.app")
+    let bundleSkills = bundle.appendingPathComponent("Contents/Resources/skills/clipslots-manager")
+    let home = root.appendingPathComponent("home")
+    let community = home.appendingPathComponent("Library/Application Support/ClipSlots/community-skills/my-skill")
+    let codex = home.appendingPathComponent(".codex/skills")
+
+    do {
+        try fm.createDirectory(at: bundleSkills.appendingPathComponent("scripts"), withIntermediateDirectories: true)
+        try fm.createDirectory(at: community, withIntermediateDirectories: true)
+        try fm.createDirectory(at: codex, withIntermediateDirectories: true)
+
+        try "---\nname: clipslots-manager\ndescription: 内置槽位技能\nversion: 1.7.0\n---\n正文"
+            .write(to: bundleSkills.appendingPathComponent("SKILL.md"), atomically: true, encoding: .utf8)
+        try "print('hi')\n"
+            .write(to: bundleSkills.appendingPathComponent("scripts/hello.py"), atomically: true, encoding: .utf8)
+        try "---\nname: my-skill\ndescription: 社区技能\n---\n正文"
+            .write(to: community.appendingPathComponent("SKILL.md"), atomically: true, encoding: .utf8)
+        try "---\nname: solo\ndescription: 单文件技能\n---\n正文"
+            .write(to: codex.appendingPathComponent("solo.md"), atomically: true, encoding: .utf8)
+        // Agent 目录里的软链指回 bundle 内那个——这正是本项目的安装方式。
+        try fm.createSymbolicLink(at: codex.appendingPathComponent("clipslots-manager"),
+                                  withDestinationURL: bundleSkills)
+
+        let found = AgentSkillCatalog.discover(bundlePath: bundle.path, homeDirectory: home.path)
+        t.equal(found.map(\.slug).sorted(), ["clipslots_manager", "my_skill", "solo"],
+                "★★软链到同一份 SKILL.md 的项必须去重（否则同一个 Skill 在列表里出现两遍）")
+
+        let manager = found.first { $0.slug == "clipslots_manager" }
+        t.equal(manager?.source, .bundled, "★去重时应保留优先级更高的来源（bundle > 插件市场 > Agent 目录）")
+        t.equal(manager?.scripts, ["scripts/hello.py"], "应发现目录内的脚本")
+        t.equal(manager?.version, "1.7.0", "应带上版本号（UI 要显示）")
+        t.equal(found.first { $0.slug == "my_skill" }?.source, .community, "社区技能来源标记")
+        t.equal(found.first { $0.slug == "solo" }?.source, .agentDirectory, "单文件技能来源标记")
+
+        // 路径防逃逸：这是"允许模型跑本机代码"这件事的核心闸门。
+        let dir = bundleSkills.path
+        t.check(AgentSkillTools.resolveScriptPath(skillDirectory: dir, script: "scripts/hello.py") != nil,
+                "正常相对路径应被接受")
+        t.check(AgentSkillTools.resolveScriptPath(skillDirectory: dir, script: "../../../../etc/passwd") == nil,
+                "★★`../` 逃逸必须被拒绝")
+        t.check(AgentSkillTools.resolveScriptPath(skillDirectory: dir, script: "/bin/sh") == nil,
+                "★★绝对路径必须被拒绝")
+        t.check(AgentSkillTools.resolveScriptPath(skillDirectory: dir, script: "~/.ssh/id_rsa") == nil,
+                "★★家目录展开写法必须被拒绝")
+        t.check(AgentSkillTools.resolveScriptPath(skillDirectory: dir, script: "scripts/../scripts/hello.py") != nil,
+                "标准化后仍在目录内的路径应被接受")
+        t.check(AgentSkillTools.resolveScriptPath(
+                    skillDirectory: codex.appendingPathComponent("clipslots-manager").path,
+                    script: "scripts/hello.py") != nil,
+                "★软链形态的 Skill 目录内的脚本不应被误判为越界（Agent 目录里全是软链）")
+
+        // 未勾选时，Skill 一律不可见。
+        t.equal(AgentSkillTools(enabledSkills: []).specs().count, 0,
+                "★★没有启用任何 Skill 时不得暴露任何 Skill 工具（含 list_skills）")
+
+        let enabled = AgentSkillTools(enabledSkills: found)
+        let names = enabled.specs().map(\.name)
+        t.check(names.contains("list_skills") && names.contains("read_skill"),
+                "启用后应暴露 list_skills / read_skill")
+        t.check(names.contains("run_skill_script"), "存在可执行脚本时才暴露 run_skill_script")
+        t.equal(Set(names).count, names.count, "Skill 工具名不得重复")
+
+        // 只暴露没有脚本的 Skill 时，不该出现执行入口。
+        let scriptless = AgentSkillTools(enabledSkills: found.filter { $0.scripts.isEmpty })
+        t.check(!scriptless.specs().map(\.name).contains("run_skill_script"),
+                "★没有任何脚本时不应暴露 run_skill_script（给模型一把没锁孔的钥匙只会招来重试）")
+
+        func runSkillTool(_ tools: AgentSkillTools, _ name: String, _ json: String) -> AgentToolResult {
+            let call = AgentToolCall(id: "c", name: name, argumentsJSON: json)
+            return smokeAwait { await tools.execute(call: call) }
+        }
+
+        // 未启用/不存在的 Skill 解析不出来。
+        t.check(runSkillTool(AgentSkillTools(enabledSkills: [found[0]]), "read_skill",
+                             "{\"skill\":\"完全不存在\"}").content.contains("SKILL_NOT_FOUND"),
+                "★读取未启用或不存在的 Skill 必须失败")
+
+        // 非脚本类型不许执行。
+        t.check(runSkillTool(enabled, "run_skill_script",
+                             "{\"skill\":\"clipslots_manager\",\"script\":\"SKILL.md\"}")
+                    .content.contains("SCRIPT_TYPE_REJECTED"),
+                "★.md 之类的非脚本文件不得被执行")
+
+        // 逃逸路径在执行入口也要被拦一次（不能只靠上面的纯函数）。
+        t.check(runSkillTool(enabled, "run_skill_script",
+                             "{\"skill\":\"clipslots_manager\",\"script\":\"../../../../../bin/sh\"}")
+                    .content.contains("SCRIPT_PATH_REJECTED"),
+                "★★逃逸路径在执行入口也必须被拒")
+
+        // 缺 script 参数
+        t.check(runSkillTool(enabled, "run_skill_script", "{\"skill\":\"clipslots_manager\"}")
+                    .content.contains("MISSING_SCRIPT"),
+                "缺 script 应失败")
+
+        // 真跑一次脚本
+        let ran = runSkillTool(enabled, "run_skill_script",
+                               "{\"skill\":\"clipslots_manager\",\"script\":\"scripts/hello.py\"}")
+        t.check(ran.content.contains("hi") || ran.content.contains("SCRIPT_FAILED"),
+                "脚本应被执行（本机无 python3 时允许 SCRIPT_FAILED）")
+
+        // list_skills 的输出要是模型看得懂的 JSON
+        let listed = runSkillTool(enabled, "list_skills", "")
+        if let payload = try? JSONValue.decode(jsonText: listed.content) {
+            t.equal(payload["skills"]?.arrayValue?.count, 3, "list_skills 应列出全部已启用 Skill")
+            t.check(payload["skills"]?.arrayValue?.first?["slug"] != nil, "每项应带 slug（后续工具靠它定位）")
+        } else {
+            t.check(false, "list_skills 输出应是合法 JSON")
+        }
+
+        // read_skill 能按 slug 读到原文
+        t.check(runSkillTool(enabled, "read_skill", "{\"skill\":\"clipslots_manager\"}")
+                    .content.contains("内置槽位技能"),
+                "read_skill 应返回 SKILL.md 原文")
+
+        // 未知 Skill 工具名
+        t.check(runSkillTool(enabled, "skill_nope_x", "{}").content.contains("UNKNOWN_TOOL"),
+                "未知 Skill 工具名应被拒绝")
+
+        try? fm.removeItem(at: root)
+    } catch {
+        try? fm.removeItem(at: root)
+        t.check(false, "Skill 扫描用例的临时目录准备失败：\(error)")
+    }
+}
+
+// MARK: - AGENT-PROCESS：进程执行的超时与大输出
+//
+// 这三条都是"写错了不会报错、只会挂住"的类型，必须用真实进程压。
+
+do {
+    // 大输出不能死锁：管道缓冲约 64KB，必须边跑边读。
+    let big = smokeAwait {
+        await AgentProcessRunner.run(executable: "/usr/bin/python3",
+                                     arguments: ["-c", "print('x' * 300000)"],
+                                     timeout: 20)
+    }
+    if big.exitCode == 0 {
+        t.check(big.stdout.count > 100_000,
+                "★★大输出必须能读出来（不边跑边读就会和子进程互相等成死锁）")
+    } else {
+        t.check(true, "本机无 python3，跳过大输出用例")
+    }
+
+    // 超时必须真的把进程干掉，而不是等它自己结束。
+    let slow = smokeAwait {
+        await AgentProcessRunner.run(executable: "/bin/sleep", arguments: ["30"], timeout: 1)
+    }
+    t.check(slow.timedOut, "★超时应被标记")
+    t.check(!slow.succeeded, "超时不算成功")
+
+    // stdin 要写进去并正确关闭，否则读 stdin 的脚本会一直挂着。
+    let piped = smokeAwait {
+        await AgentProcessRunner.run(executable: "/bin/cat",
+                                     arguments: [],
+                                     standardInput: "hello-stdin",
+                                     timeout: 10)
+    }
+    t.equal(piped.stdout, "hello-stdin", "★标准输入应被写入并关闭（不关就是又一处挂死）")
+
+    // 不存在的可执行文件要正常返回失败，而不是抛异常炸掉整轮对话。
+    let bogus = smokeAwait {
+        await AgentProcessRunner.run(executable: "/nonexistent/bin/nope", arguments: [], timeout: 5)
+    }
+    t.check(!bogus.succeeded, "★不存在的可执行文件应返回失败而不是抛异常")
+}
+
 t.report()

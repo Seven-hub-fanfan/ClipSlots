@@ -193,6 +193,30 @@ struct ContentView: View {
     /// 一旦并进去，拖一个节点就会连带重绘标题栏与整格槽位卡片。
     @StateObject private var canvasStore = CanvasStore()
 
+    // MARK: - v2.11.8 Agent 侧栏
+
+    /// 两条会话（编辑页 / 画布页）的持有者。
+    ///
+    /// `AgentSessionStore` 是 ObservableObject 但**没有任何 @Published**，所以挂在
+    /// `@StateObject` 上不会给 ContentView 建立任何刷新依赖 —— 这是刻意的：流式回答
+    /// 每秒推几十个 token，一旦 ContentView 订阅了会话状态，就等于每个 token 重算
+    /// 整棵 body（含 10 张槽位卡片），直接把项目已知的「全局重绘」技术债引爆。
+    /// token 级刷新被关在 `AgentSidebarView` 自己的 @ObservedObject 里。
+    @StateObject private var agentSessions = AgentSessionStore()
+
+    /// 侧栏显隐按页面分别记忆。这里用 `@AppStorage` 而不是 `@State`（与 workspaceMode 相反）：
+    /// 侧栏是个"工作习惯"开关，不像画布那样是半成品页面，记住它没有误导风险。
+    @AppStorage(AgentPreferences.editSidebarVisibleKey) private var editAgentVisible = false
+    @AppStorage(AgentPreferences.canvasSidebarVisibleKey) private var canvasAgentVisible = false
+
+    private var agentSidebarVisible: Bool {
+        workspaceMode == .canvas ? canvasAgentVisible : editAgentVisible
+    }
+
+    private var agentSidebarBinding: Binding<Bool> {
+        workspaceMode == .canvas ? $canvasAgentVisible : $editAgentVisible
+    }
+
     // v2.9.17: theme switch now takes effect instantly with no transition effect.
     // The previous water-ripple overlay (v2.7.45) was removed per product request.
     /// v2.10.91: 有效主题（显式 dark/light 直接取用，system 回落到环境 colorScheme）。
@@ -307,15 +331,34 @@ struct ContentView: View {
                 // 结果整格 10 张槽位卡片和整个画布同时参与 0.3s 的 opacity 交叉过渡——实测能看到画布上
                 // 半透明地叠着一层旧卡片，而且这一下要同时栅格化两棵重子树，正好撞在项目已知的
                 // 「全局重绘」技术债上。药丸的滑动动画留在切换控件内部即可，内容区不该跟着一起淡。
-                Group {
-                    switch workspaceMode {
-                    case .canvas:
-                        CanvasWorkspaceView(store: store, canvas: canvasStore)
-                    case .edit:
-                        editWorkspace
+                // ★ v2.11.8（Agent 侧栏）：内容区与右侧 Agent 侧栏并排。
+                //
+                // 侧栏挂在**内容区这一层**、而不是画布/编辑各自内部，理由有三：
+                //   1. 一个插入点，两个页面同时受益；
+                //   2. 画布的 GeometryReader 直接量到"变窄后"的宽度，右上「生成」按钮、
+                //      底部工具栏、缩放控件、历史面板全都自动让位，不必逐个改 padding
+                //      （画布里的浮动层控件是按 proxy.size 定位的）；
+                //   3. 编辑页保持顶栏/底栏通宽，侧栏只占卡片网格那一段高度——顶栏上的搜索框
+                //      与操作行本来就是"整窗级"控件，被侧栏截断反而错。
+                HStack(spacing: 0) {
+                    Group {
+                        switch workspaceMode {
+                        case .canvas:
+                            CanvasWorkspaceView(store: store,
+                                                canvas: canvasStore,
+                                                agentVisible: $canvasAgentVisible)
+                        case .edit:
+                            editWorkspace
+                        }
+                    }
+                    .animation(nil, value: workspaceMode)
+
+                    if agentSidebarVisible {
+                        AgentSidebarView(model: agentSessions.session(for: workspaceMode),
+                                         isVisible: agentSidebarBinding)
+                            .transition(.move(edge: .trailing))
                     }
                 }
-                .animation(nil, value: workspaceMode)
 
                 // ★ v2.11.7 hotfix17: 底栏只在编辑模式保留。
                 //
@@ -795,6 +838,22 @@ struct ContentView: View {
 
             HStack(spacing: 8) {
                 ThemeCycleButton(onCycle: cycleAppearanceMode)
+
+            // ★ v2.11.8（Agent）：编辑页的 Agent 入口，和外观/插件/键盘/设置同一簇图标。
+            // 放在这簇的最左（紧跟外观）而不是最右：右侧末位是「设置」，那是全局配置的固定位置，
+            // 十几个版本没变过，插在它后面会让肌肉记忆失效。
+            Button {
+                withAnimation(Anim.transition) { editAgentVisible.toggle() }
+            } label: {
+                Image(systemName: "sparkles")
+                    .font(.system(size: 14, weight: .semibold))
+                    // 展开时用主题色点亮，收起时和邻居一样是中性墨色——这枚图标是**有状态**的
+                    // （侧栏开/关），必须能从图标本身读出来，否则用户只能靠侧栏是否可见去反推。
+                    .foregroundColor(editAgentVisible ? AppTheme.chromeAccentInk : Neu.ink)
+                    .neuIconTile()
+            }
+            .buttonStyle(.plain)
+            .help(editAgentVisible ? "收起 Agent 侧栏" : "打开 Agent 侧栏")
 
             // v2.9.8: 插件入口（月亮与键盘图标之间）
             Button {

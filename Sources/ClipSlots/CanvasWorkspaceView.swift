@@ -13,6 +13,9 @@ import ClipSlotsKit
 struct CanvasWorkspaceView: View {
     @ObservedObject var store: SlotStoreObservable
     @ObservedObject var canvas: CanvasStore
+    /// 画布页 Agent 侧栏的显隐。侧栏本体由 ContentView 的内容区并排渲染，
+    /// 这里只持有开关：让"入口按钮"能待在画布右上（生成按钮旁），而布局让位交给外层 HStack。
+    @Binding var agentVisible: Bool
 
     /// 画布根坐标空间名。槽位库的拖拽手势也用它上报落点，两边共用一个空间才能对齐坐标。
     static let spaceName = "clipslots.canvas.root"
@@ -437,10 +440,30 @@ struct CanvasWorkspaceView: View {
                                    onDragChanged: handleSlotDragChanged,
                                    onDropSlot: handleSlotDrop)
 
-            // 右上：生成按钮
+            // 右上：Agent 入口 + 生成按钮
             VStack {
-                HStack {
+                HStack(spacing: 8) {
                     Spacer()
+                    // ★ v2.11.8：画布页的 Agent 入口紧贴「生成」左侧。
+                    // 侧栏本体挂在 ContentView 的内容区（见那边的注释），这里只是开关，
+                    // 因此侧栏展开后这一整排会随画布可用宽度自动左移，不需要手动补 padding。
+                    Button {
+                        withAnimation(Anim.transition) { agentVisible.toggle() }
+                    } label: {
+                        Image(systemName: "sparkles")
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundColor(agentVisible ? .white : AppTheme.chromeAccentInk)
+                            .frame(width: 28, height: 28)
+                            .background(agentVisible ? AppTheme.chromeAccentInk : AppTheme.canvasChromeSurface)
+                            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                    .stroke(AppTheme.subtleBorder, lineWidth: agentVisible ? 0 : 1))
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .help(agentVisible ? "收起 Agent 侧栏" : "打开 Agent 侧栏")
+
                     CanvasGenerateButton {
                         store.transientUI.showToast("生图功能开发中")
                     }
