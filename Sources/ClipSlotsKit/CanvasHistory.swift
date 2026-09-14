@@ -36,6 +36,11 @@ public struct CanvasHistoryEntry: Identifiable, Equatable {
         case editNode
         /// Cmd+数字 / 圆盘把某个槽位的内容送进了节点。
         case bindSlot
+        /// 改了节点正文的排版（字体 / 字号）。
+        ///
+        /// 刻意不并进 `editNode`：正文内容与正文样式的撤销粒度必须分开 —— 用户调了一次字号后
+        /// Cmd+Z，期望退回上一个字号，而不是把上一段文本编辑也一起吐出来。
+        case styleNode
 
         /// 面板里显示的动作名。
         public var title: String {
@@ -47,6 +52,7 @@ public struct CanvasHistoryEntry: Identifiable, Equatable {
             case .clear: return "清空画布"
             case .editNode: return "编辑内容"
             case .bindSlot: return "填入槽位"
+            case .styleNode: return "调整字体"
             }
         }
 
@@ -59,6 +65,7 @@ public struct CanvasHistoryEntry: Identifiable, Equatable {
             case .clear: return "xmark.bin"
             case .editNode: return "pencil"
             case .bindSlot: return "tray.and.arrow.down"
+            case .styleNode: return "textformat"
             }
         }
     }

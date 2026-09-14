@@ -109,7 +109,7 @@ struct CanvasFloatingToolbar: View {
             Button { isHistoryOpen.toggle() } label: {
                 Image(systemName: "clock.arrow.circlepath")
                     .font(.system(size: 12, weight: .medium))
-                    .foregroundColor(isHistoryOpen ? AppTheme.chromeAccentInk : .secondary.opacity(0.8))
+                    .foregroundColor(isHistoryOpen ? AppTheme.chromeAccentInk : AppTheme.canvasChromeSecondaryInk)
                     .frame(width: 28, height: 24)
                     .background(
                         RoundedRectangle(cornerRadius: 7, style: .continuous)
@@ -138,7 +138,7 @@ struct CanvasFloatingToolbar: View {
         Button(action: action) {
             Image(systemName: tool.symbolName)
                 .font(.system(size: 12, weight: .medium))
-                .foregroundColor(isActive ? AppTheme.chromeAccentInk : .secondary.opacity(0.8))
+                .foregroundColor(isActive ? AppTheme.chromeAccentInk : AppTheme.canvasChromeSecondaryInk)
                 .frame(width: 28, height: 24)
                 .background(
                     RoundedRectangle(cornerRadius: 7, style: .continuous)
@@ -172,10 +172,10 @@ struct CanvasHistoryPanel: View {
                 VStack(spacing: 6) {
                     Image(systemName: "clock")
                         .font(.system(size: 18, weight: .light))
-                        .foregroundColor(.secondary.opacity(0.4))
+                        .foregroundColor(AppTheme.canvasChromeTertiaryInk)
                     Text("还没有任何操作")
                         .font(.system(size: 11))
-                        .foregroundColor(.secondary.opacity(0.7))
+                        .foregroundColor(AppTheme.canvasChromeSecondaryInk)
                 }
                 .frame(maxWidth: .infinity)
                 .padding(.vertical, 26)
@@ -198,7 +198,7 @@ struct CanvasHistoryPanel: View {
         HStack(spacing: 6) {
             Text("操作历史")
                 .font(.system(size: 11, weight: .semibold))
-                .foregroundColor(.primary.opacity(0.8))
+                .foregroundColor(AppTheme.canvasChromeInk)
             Spacer(minLength: 0)
             stepButton("arrow.uturn.backward", help: "撤销（⌘Z）", enabled: canvas.canUndo) {
                 canvas.undo()
@@ -218,7 +218,7 @@ struct CanvasHistoryPanel: View {
         Button(action: action) {
             Image(systemName: symbol)
                 .font(.system(size: 10, weight: .semibold))
-                .foregroundColor(enabled ? AppTheme.chromeAccentInk : .secondary.opacity(0.35))
+                .foregroundColor(enabled ? AppTheme.chromeAccentInk : AppTheme.canvasChromeTertiaryInk.opacity(0.5))
                 .frame(width: 22, height: 20)
                 .contentShape(Rectangle())
         }
@@ -234,17 +234,18 @@ struct CanvasHistoryPanel: View {
             HStack(spacing: 7) {
                 Image(systemName: entry.kind.symbolName)
                     .font(.system(size: 10, weight: .medium))
-                    .foregroundColor(applied ? AppTheme.chromeAccentInk.opacity(0.8) : .secondary.opacity(0.35))
+                    .foregroundColor(applied ? AppTheme.chromeAccentInk.opacity(0.85) : AppTheme.canvasChromeTertiaryInk.opacity(0.6))
                     .frame(width: 14)
 
                 VStack(alignment: .leading, spacing: 1) {
                     Text(entry.kind.title)
                         .font(.system(size: 11, weight: .medium))
-                        .foregroundColor(applied ? .primary.opacity(0.85) : .secondary.opacity(0.45))
+                        .foregroundColor(applied ? AppTheme.canvasChromeInk : AppTheme.canvasChromeTertiaryInk.opacity(0.7))
                     if !entry.detail.isEmpty {
                         Text(entry.detail)
                             .font(.system(size: 9))
-                            .foregroundColor(.secondary.opacity(applied ? 0.7 : 0.35))
+                            .foregroundColor(applied ? AppTheme.canvasChromeSecondaryInk
+                                                     : AppTheme.canvasChromeTertiaryInk.opacity(0.6))
                             .lineLimit(1)
                     }
                 }
@@ -253,7 +254,8 @@ struct CanvasHistoryPanel: View {
 
                 Text(entry.stamp())
                     .font(.system(size: 9, design: .monospaced))
-                    .foregroundColor(.secondary.opacity(applied ? 0.55 : 0.3))
+                    .foregroundColor(applied ? AppTheme.canvasChromeTertiaryInk
+                                             : AppTheme.canvasChromeTertiaryInk.opacity(0.55))
             }
             .padding(.horizontal, 10)
             .padding(.vertical, 5)
@@ -285,7 +287,8 @@ struct CanvasZoomControl: View {
             Button(action: onReset) {
                 Text(percentText)
                     .font(.system(size: 10, weight: .medium, design: .rounded))
-                    .foregroundColor(.secondary)
+                    // ★ hotfix19：原来是 `.secondary`（深色下白 ~55%），压在浮层上偏灰到看不清。
+                    .foregroundColor(AppTheme.canvasChromeInk)
                     // 固定宽度：否则从 100% 跳到 25% 会让左右两个按钮横向抖动。
                     .frame(width: 40)
                     .contentShape(Rectangle())
@@ -317,7 +320,8 @@ struct CanvasZoomControl: View {
         Button(action: action) {
             Image(systemName: symbol)
                 .font(.system(size: 9, weight: .semibold))
-                .foregroundColor(.secondary.opacity(disabled ? 0.3 : 0.85))
+                .foregroundColor(disabled ? AppTheme.canvasChromeTertiaryInk.opacity(0.45)
+                                          : AppTheme.canvasChromeSecondaryInk)
                 .frame(width: 22, height: 20)
                 .contentShape(Rectangle())
         }
@@ -344,7 +348,7 @@ struct CanvasDragGhost: View {
                 .font(.system(size: 9, weight: .medium))
                 .lineLimit(1)
         }
-        .foregroundColor(.primary.opacity(0.85))
+        .foregroundColor(AppTheme.canvasChromeInk)
         .padding(.horizontal, 8)
         .padding(.vertical, 5)
         .background(Capsule(style: .continuous).fill(AppTheme.elevatedBackground))
@@ -365,15 +369,15 @@ struct CanvasEmptyHint: View {
         VStack(spacing: 8) {
             Image(systemName: "square.on.square.dashed")
                 .font(.system(size: 26, weight: .light))
-                .foregroundColor(.secondary.opacity(0.35))
+                .foregroundColor(AppTheme.canvasChromeTertiaryInk.opacity(0.7))
             Text("从左侧槽位库拖入内容，或点底部 ＋ 新建节点")
                 .font(.system(size: 11))
-                .foregroundColor(.secondary.opacity(0.55))
+                .foregroundColor(AppTheme.canvasChromeSecondaryInk)
             // ★ v2.11.7 hotfix17: 手势不是自解释的，必须写出来。
             // 中键平移这类约定，用户不被告知就永远发现不了（他会一直用抓手工具，或者以为画布不能动）。
             Text("滚轮上下翻 · 按住中键拖动平移 · Cmd + 滚轮缩放")
                 .font(.system(size: 10))
-                .foregroundColor(.secondary.opacity(0.4))
+                .foregroundColor(AppTheme.canvasChromeTertiaryInk)
         }
         .allowsHitTesting(false)
     }

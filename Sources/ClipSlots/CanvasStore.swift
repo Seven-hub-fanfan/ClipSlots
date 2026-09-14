@@ -173,6 +173,37 @@ final class CanvasStore: ObservableObject {
         scheduleSave()
     }
 
+    // MARK: - 节点排版（v2.11.7 hotfix19）
+
+    /// 改节点正文的字体 / 字号。
+    ///
+    /// 走 `commit` 而不是 `updateNode`：`updateNode` 只落盘、不记撤销栈，用它改字体的症状是
+    /// 「改完 Cmd+Z 撤不掉」。字号统一过 `clampBodyFontSize`，越界值到不了磁盘。
+    ///
+    /// 传 `fontName: .some(nil)` 表示**清空**（回到跟随系统），传 `nil` 表示本次不动这个字段 ——
+    /// 双层 Optional 是刻意的：单层的话「清空」与「不改」在类型上无法区分。
+    func updateNodeStyle(id: String, fontName: String?? = nil, fontSize: CGFloat?? = nil) {
+        guard let idx = nodes.firstIndex(where: { $0.id == id }) else { return }
+
+        let newName = fontName.map { $0?.isEmpty == true ? nil : $0 } ?? nodes[idx].fontName
+        let newSize = fontSize.map { $0.map(CanvasNode.clampBodyFontSize) } ?? nodes[idx].fontSize
+        guard newName != nodes[idx].fontName || newSize != nodes[idx].fontSize else { return }
+
+        let detail = newName ?? "跟随系统"
+        commit(.styleNode, detail: detail) {
+            nodes[idx].fontName = newName
+            nodes[idx].fontSize = newSize
+            nodes[idx].updatedAt = Date()
+        }
+    }
+
+    /// 当前选中的**唯一**节点。属性面板只在单选时出现 —— 多选时改字体要么只改一个（用户会以为
+    /// 没生效），要么全改（等于偷偷批量改），两种都不如不显示面板。
+    var soleSelectedNode: CanvasNode? {
+        guard selectedNodeIds.count == 1, let id = selectedNodeIds.first else { return nil }
+        return nodes.first { $0.id == id }
+    }
+
     // MARK: - 节点文本 / 槽位注入
 
     /// 改节点自己的 prompt（**未绑定槽位**的节点走这条；绑定的节点由调用方写槽位数据）。
@@ -192,6 +223,9 @@ final class CanvasStore: ObservableObject {
     ///   - 节点**已绑定**某槽位 → 改绑到新槽位（它本来就是那个槽位的镜像，追加会写脏槽位数据）。
     ///   - 节点**未绑定且为空** → 绑定到该槽位，从此双向同步。
     ///   - 节点**未绑定且有内容** → 把文本追加到末尾（用户在拼一段复合 prompt）。
+    ///
+    /// **前置条件（hotfix19）**：调用方必须保证选中集合非空。选中为空时正确的行为是新建节点，
+    /// 那个决定需要视口尺寸（只有 View 层有），所以留在调用方而不是塞进这里。
     @discardableResult
     func injectSlot(pageId: String,
                     groupId: String,
@@ -462,7 +496,12 @@ final class CanvasStore: ObservableObject {
 /// 刻意把「结果」建模成一个值而不是让 store 直接弹 toast：store 不该认识 UI 层的提示通道，
 /// 而且同一个动作从热键、圆盘、右键菜单三处进来，提示文案得由各自的调用方按上下文决定。
 enum CanvasSlotInjection: Equatable {
-    /// 画布里没有选中节点 —— 这个动作在画布模式下**没有默认目标**，不猜（猜错就是往错误节点写数据）。
+    /// 画布里没有选中节点。
+    ///
+    /// ★ v2.11.7 hotfix19 起这已经**不是一条会走到 UI 的路径**：调用方（`CanvasWorkspaceView`）
+    /// 在选中集合为空时改为直接新建节点，不再进 `injectSlot`。这一档保留下来纯粹是因为
+    /// `injectSlot` 作为 store 的公开方法不能对"没有目标"这种输入静默无动作 ——
+    /// 一个什么都不做又什么都不说的返回值，是下一个 bug 最舒服的藏身处。
     case noSelection
     case applied(mode: Mode, name: String, count: Int)
 
@@ -479,7 +518,9 @@ enum CanvasSlotInjection: Equatable {
     var message: String {
         switch self {
         case .noSelection:
-            return "请先选中一个节点"
+            // 正常流程到不了这里（见 `noSelection` 的注释）。文案按"这是异常"来写，
+            // 而不是按"这是引导"来写 —— 真出现了说明调用方漏了新建分支。
+            return "没有可填入的节点"
         case let .applied(mode, name, count):
             let scope = count == 1 ? "" : "（\(count) 个节点）"
             switch mode {

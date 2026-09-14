@@ -54,6 +54,12 @@ struct CanvasWorkspaceView: View {
     @State private var cursorScreen: CGPoint = .zero
     /// 槽位库拖拽的实时拖影。
     @State private var ghost: (title: String, point: CGPoint)? = nil
+    /// 最近一次已知的视图尺寸。
+    ///
+    /// `GeometryReader` 的 `proxy.size` 只在 `body` 里拿得到，而 Cmd+1 走的是 AppKit 事件监听
+    /// 回调（`inputRouter.onKeyAction` → `handleSlotCommand`），那条路径**不在 body 里**。
+    /// 没有这份镜像，热键就算不出"当前视口中央在画布的哪里"，只能把新节点扔到原点。
+    @State private var viewSize: CGSize = .zero
 
     var body: some View {
         GeometryReader { proxy in
@@ -111,7 +117,9 @@ struct CanvasWorkspaceView: View {
 
                 // 没有光标事件之前，锚点先取视图中心，避免首次捏合以 (0,0) 为锚点把画面甩到角上。
                 cursorScreen = CGPoint(x: proxy.size.width / 2, y: proxy.size.height / 2)
+                viewSize = proxy.size
             }
+            .onChange(of: proxy.size) { newSize in viewSize = newSize }
             .onDisappear {
                 inputRouter.stop()
                 // 必须撤销登记：留着它，切回编辑模式后 Cmd+1 会被一个已经下台的画布吃掉，
@@ -138,6 +146,7 @@ struct CanvasWorkspaceView: View {
                                    isSelected: canvas.selectedNodeIds.contains(node.id),
                                    text: liveText(for: node),
                                    slotLabel: liveLabel(for: node),
+                                   attachments: liveAttachments(for: node),
                                    isEditing: isEditing,
                                    onBeginEdit: { beginEdit(node) },
                                    onCommitEdit: { commitEdit(node, text: $0) },
@@ -396,6 +405,25 @@ struct CanvasWorkspaceView: View {
             .padding(.trailing, 16)
             .padding(.top, 14)
 
+            // 右侧：属性面板（v2.11.7 hotfix19）。
+            //
+            // 只在**单选**时出现，见 `CanvasStore.soleSelectedNode`。用 `if let` 而不是
+            // `.opacity(0)` 隐藏：面板里的 Picker 要枚举全机字体，不显示时就不该构建。
+            //
+            // 位置压在生成按钮下方 52pt：两者都贴右缘，重叠会让生成按钮点不到。
+            if let sole = canvas.soleSelectedNode {
+                VStack {
+                    HStack {
+                        Spacer()
+                        CanvasInspectorPanel(canvas: canvas, node: sole)
+                    }
+                    Spacer()
+                }
+                .padding(.trailing, 16)
+                .padding(.top, 62)
+                .transition(.opacity.combined(with: .move(edge: .trailing)))
+            }
+
             // 底部：工具栏。在**侧栏右侧的可见区域**里居中，不是在整个窗口里居中 ——
             // 否则侧栏一展开，工具栏看起来就是偏左的。
             VStack {
@@ -515,6 +543,15 @@ struct CanvasWorkspaceView: View {
         return store.canvasSlotLabel(groupId: groupId, slot: slot) ?? node.sourceLabel
     }
 
+    /// 溯源槽位的**实时**附件列表（v2.11.7 hotfix19）。
+    ///
+    /// 与 `liveText` 同一条理由：真相在槽位数据里，节点上不存附件副本。未绑定槽位的节点没有附件
+    /// 概念（它的内容就是自己的 prompt），返回空数组。
+    private func liveAttachments(for node: CanvasNode) -> [SlotContent.SlotAttachment] {
+        guard let slot = node.sourceSlot, let groupId = node.sourceGroupId else { return [] }
+        return store.canvasSlotAttachments(groupId: groupId, slot: slot)
+    }
+
     private func beginEdit(_ node: CanvasNode) {
         canvas.select(id: node.id, additive: false)
         editingNodeId = node.id
@@ -583,25 +620,70 @@ struct CanvasWorkspaceView: View {
         }
     }
 
-    /// Cmd+1~0 / 圆盘选槽：把槽位内容送进当前选中的节点。
+    /// Cmd+1~0 / 圆盘选槽：把槽位内容送进画布。
     ///
-    /// 返回 true 表示画布已经消费掉这次命令 —— 包括「没有选中节点」这种情况：画布在台上时这个
-    /// 手势的语义就是"填进节点"，找不到目标就提示用户去选一个，**不能偷偷退回去写系统剪贴板**
-    /// （那会在用户毫无察觉的情况下改掉剪贴板，还可能往别的 App 里粘出东西）。
+    /// 返回 true 表示画布已经消费掉这次命令。**不能偷偷退回去写系统剪贴板** —— 那会在用户毫无
+    /// 察觉的情况下改掉剪贴板，还可能往别的 App 里粘出东西。
+    ///
+    /// ## ★ v2.11.7 hotfix19：没有选中节点时**直接新建**
+    ///
+    /// 上一版在没有选中节点时提示「请先选中一个节点」。用户的反馈很直接：
+    /// 「我需要的是直接成为一个节点，不要先选一个节点再 Cmd+1」。
+    ///
+    /// 想清楚就会发现旧行为本来就是错的：Cmd+1 在编辑模式的语义是「把槽位内容拿出来用」，
+    /// 而画布上「用」的最小单位就是节点。要求用户先造一个空节点再往里填，等于把一次操作
+    /// 拆成两步，且第一步（新建空节点）本身没有任何意义。
+    ///
+    /// 所以新语义是：
+    ///   - 有选中节点 → 填进选中节点（保持 hotfix18 的行为，含改绑 / 追加）。
+    ///   - 没有选中节点 → 在**当前视口中央**新建一个绑定该槽位的节点，并选中它。
     private func handleSlotCommand(_ slot: Int) -> Bool {
         let groupId = store.activeHotkeySpecialSlotId
         let text = store.canvasSlotText(groupId: groupId, slot: slot) ?? ""
-        guard !text.isEmpty else {
-            store.transientUI.showToast("槽位 \(slot) 没有文本内容")
+        let attachments = store.canvasSlotAttachments(groupId: groupId, slot: slot)
+        // 判空要把附件算进去：一个"只放了图、没写字"的槽位是**有内容**的，旧代码只看文本，
+        // 于是这类槽位按 Cmd+1 会被当成空槽拒掉（正是 hotfix19 要修的第三个 bug 的同源问题）。
+        guard !text.isEmpty || !attachments.isEmpty else {
+            store.transientUI.showToast("槽位 \(slot) 是空的")
             return true
         }
+
+        let label = store.canvasSlotLabel(groupId: groupId, slot: slot)
+
+        guard !canvas.selectedNodeIds.isEmpty else {
+            canvas.addNodeFromSlot(pageId: store.currentPageId,
+                                   groupId: groupId,
+                                   slot: slot,
+                                   label: label,
+                                   prompt: text,
+                                   at: visibleCenterInCanvas())
+            store.transientUI.showToast("已新建节点：\(label ?? "槽位 \(slot)")")
+            return true
+        }
+
         let result = canvas.injectSlot(pageId: store.currentPageId,
                                       groupId: groupId,
                                       slot: slot,
-                                      label: store.canvasSlotLabel(groupId: groupId, slot: slot),
+                                      label: label,
                                       text: text)
         store.transientUI.showToast(result.message)
         return true
+    }
+
+    /// 当前**可见区域**中心对应的画布坐标。
+    ///
+    /// 用可见区域而不是视图中心：侧栏展开时占 240pt，视图中心可能正藏在侧栏后面，
+    /// 新建的节点会落在用户看不见的地方（看起来像"按了没反应"）。
+    ///
+    /// `viewSize` 尚未就绪（理论上只发生在首帧之前）时退化为视图原点 —— 那时画布必然是空的，
+    /// 节点落在原点附近反而是最容易被找到的位置。
+    private func visibleCenterInCanvas() -> CGPoint {
+        guard viewSize.width > 0, viewSize.height > 0 else {
+            return CanvasGeometry.canvasPoint(screen: .zero, pan: pan, zoom: zoom)
+        }
+        let center = CGPoint(x: sidebarWidth + (viewSize.width - sidebarWidth) / 2,
+                            y: viewSize.height / 2)
+        return CanvasGeometry.canvasPoint(screen: center, pan: pan, zoom: zoom)
     }
 }
 

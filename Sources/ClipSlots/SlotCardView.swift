@@ -667,17 +667,19 @@ struct SlotCardView: View {
                     Label("保存到槽位 \(slot)", systemImage: "square.and.arrow.down")
                         .frame(maxWidth: .infinity)
                 }
-                .buttonStyle(SlotActionButtonStyle(kind: .cta))
+                .buttonStyle(SlotActionButtonStyle(kind: .cta, layout: .hero))
                 .help(saveShortcut.isEmpty ? "保存当前剪贴板内容到槽位 \(slot)" : saveShortcut)
             } else {
+                // 多彩模式：配色换成槽位强调色，**尺寸与简洁模式完全相同**（同一个 `.hero`）。
+                // 原来这里用 `.compact` 尺寸 + 一块 `Color.clear` 撑满剩余高度，于是按钮只有
+                // 36pt、下方还空出一条 —— 与简洁模式肉眼可见地不一样高（hotfix19 修复）。
                 Button { onSave() } label: {
                     Label("保存到槽位 \(slot)", systemImage: "square.and.arrow.down")
                         .frame(maxWidth: .infinity)
                 }
-                .buttonStyle(SlotActionButtonStyle(kind: .accent(AppTheme.slotActionAccent(slot))))
+                .buttonStyle(SlotActionButtonStyle(kind: .accent(AppTheme.slotActionAccent(slot)),
+                                                  layout: .hero))
                 .help(saveShortcut.isEmpty ? "保存当前剪贴板内容到槽位 \(slot)" : saveShortcut)
-
-                Color.clear
             }
         }
         .frame(height: 52)
@@ -968,23 +970,43 @@ extension SlotCardView: Equatable {
 /// A compact rounded-rectangle style used by the card's primary actions.
 /// It intentionally avoids the system bordered styles so a slot keeps its own identity.
 private struct SlotActionButtonStyle: ButtonStyle {
+    /// **配色**语义。
     enum Kind {
         case accent(Color)
         case destructive
-        /// 简洁模式空槽的主行动按钮：反相大按钮（浅色近黑底白字 / 深色白底黑字），撑满卡片底部。
+        /// 简洁模式空槽的主行动按钮配色：反相（浅色近黑底白字 / 深色白底黑字）。
         case cta
     }
 
+    /// **尺寸**语义。
+    ///
+    /// ★ v2.11.7 hotfix19：尺寸从 `Kind` 里拆出来。
+    ///
+    /// 之前尺寸是由配色顺带决定的 —— `isCTA` 同时管着「反相配色」和「44pt 撑满高度」。
+    /// 于是简洁模式空槽（`.cta`）是一枚撑满 52pt 底部区的大按钮，而多彩模式空槽走
+    /// `.accent` 只有 36pt 再加一块 `Color.clear` 占位，两个皮肤下同一枚「保存到槽位 N」
+    /// 高矮不一。用户反馈的正是这个。
+    ///
+    /// 把两个维度分开之后，「配色随皮肤变、尺寸不随皮肤变」才能被表达出来。
+    enum Layout {
+        /// 与其他动作按钮并排时用（粘贴 / 复制 / 编辑 / 清空）：固定 36pt。
+        case compact
+        /// 空槽卡片上唯一的主行动按钮：撑满卡片底部动作区。
+        case hero
+    }
+
     let kind: Kind
+    var layout: Layout = .compact
 
     func makeBody(configuration: Configuration) -> some View {
-        SlotActionButtonBody(configuration: configuration, kind: kind)
+        SlotActionButtonBody(configuration: configuration, kind: kind, layout: layout)
     }
 }
 
 private struct SlotActionButtonBody: View {
     let configuration: ButtonStyle.Configuration
     let kind: SlotActionButtonStyle.Kind
+    let layout: SlotActionButtonStyle.Layout
 
     @Environment(\.isEnabled) private var isEnabled
     @State private var isHovering = false
@@ -994,10 +1016,13 @@ private struct SlotActionButtonBody: View {
         return false
     }
 
+    /// 是否用反相配色。**只影响颜色**，不再影响尺寸（尺寸看 `layout`）。
     private var isCTA: Bool {
         if case .cta = kind { return true }
         return false
     }
+
+    private var isHero: Bool { layout == .hero }
 
     private var backgroundColor: Color {
         guard isEnabled else {
@@ -1064,13 +1089,15 @@ private struct SlotActionButtonBody: View {
 
     var body: some View {
         configuration.label
-            .font(.system(size: isCTA ? 13 : 12, weight: .bold, design: .rounded))
+            // 字号 / 内边距 / 高度**只看 layout**，与皮肤和配色无关 —— 这是 hotfix19 的全部要点：
+            // 同一枚「保存到槽位 N」在多彩与简洁下必须一样大，差别只在颜色。
+            .font(.system(size: isHero ? 13 : 12, weight: .bold, design: .rounded))
             .labelStyle(.titleAndIcon)
             .foregroundStyle(foregroundColor)
             .padding(.horizontal, 12)
             .frame(maxWidth: .infinity,
-                   minHeight: isCTA ? 44 : 36,
-                   maxHeight: isCTA ? .infinity : 36)
+                   minHeight: isHero ? 44 : 36,
+                   maxHeight: isHero ? .infinity : 36)
             .background(
                 RoundedRectangle(cornerRadius: 10, style: .continuous)
                     .fill(backgroundColor)

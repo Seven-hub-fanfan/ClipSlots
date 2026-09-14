@@ -2607,6 +2607,20 @@ final class SlotStoreObservable: ObservableObject {
         return specialStorage.getLabel(slot, in: groupId)
     }
 
+    /// 读一个**任意组**槽位的附件列表，供画布节点卡片展示缩略图 / 文件名（v2.11.7 hotfix19）。
+    ///
+    /// 用户反馈「在画布上看不到附件信息」：槽位的图片 / 文件全在 `SlotContent.attachments` 里，
+    /// 而节点卡片此前只显示主体文本，于是一个"只有图片、没有文字"的槽位拖到画布上是一张空卡片。
+    ///
+    /// 取数口径与 `canvasSlotText` 完全一致（当前组读内存、其他组走 `SpecialSlotStorage`）：
+    /// 两个字段若走不同来源，就会出现「文字是新的、附件是旧的」这种半新半旧状态。
+    func canvasSlotAttachments(groupId: String, slot: Int) -> [SlotContent.SlotAttachment] {
+        if groupId == currentSpecialSlotId {
+            return contentForSlot(slot).attachments
+        }
+        return specialStorage.get(slot, in: groupId).attachments
+    }
+
     /// 把画布里编辑好的文本写回**任意组**的槽位主体。
     ///
     /// 与 `updateTextSlot` 的三点差别，每一点都是刻意的：

@@ -264,6 +264,42 @@ enum AppTheme {
                                                         dark: Color(red: 0.141, green: 0.145, blue: 0.157))
     static var canvasChromeSurface: Color { isMinimalSkin ? minimalCardEmpty : colorfulCanvasChromeSurface }
 
+    // MARK: 画布 chrome 上的文字墨色（v2.11.7 hotfix19）
+    //
+    // ★ 为什么不能继续用 `.primary` / `.secondary` 叠 opacity：
+    //   `.secondary` 在深色下本身就已经是「白色 ~55%」这一档了，再乘 0.65 相当于**白 36%**，
+    //   压在 0.14 的深灰侧栏上对比度约 3.4:1 —— 低于 WCAG AA 对正文的 4.5:1，实际观感就是
+    //   用户反馈的「多彩模式的暗色看不清」。opacity 叠加是复合的，`.secondary.opacity(x)`
+    //   读起来像「x 的浓度」，实际是 `0.55x`，这类错觉在深色主题里格外容易踩。
+    //
+    // 所以画布 chrome 的文字一律从**显式基色**起算（不再走 `.primary/.secondary` 的语义色），
+    // 三档墨色都直接给最终 alpha，深色一侧全部 ≥ white 60%。
+    private static let colorfulCanvasChromeInk = dyn(light: Color.black.opacity(0.88),
+                                                     dark: Color.white.opacity(0.93))
+    private static let colorfulCanvasChromeSecondaryInk = dyn(light: Color.black.opacity(0.66),
+                                                              dark: Color.white.opacity(0.78))
+    private static let colorfulCanvasChromeTertiaryInk = dyn(light: Color.black.opacity(0.50),
+                                                             dark: Color.white.opacity(0.62))
+
+    /// 画布 chrome 的主文字（侧栏标题、组名、缩放百分比）。
+    static var canvasChromeInk: Color { isMinimalSkin ? minimalControlInk : colorfulCanvasChromeInk }
+    /// 次级文字（槽位行、页面名、图标）。
+    static var canvasChromeSecondaryInk: Color {
+        isMinimalSkin ? minimalSecondaryInk : colorfulCanvasChromeSecondaryInk
+    }
+    /// 三级文字（展开箭头、拖拽把手、"无可用内容"这类占位）。仍保证深色下 ≥ white 60%。
+    static var canvasChromeTertiaryInk: Color {
+        isMinimalSkin ? minimalSecondaryInk : colorfulCanvasChromeTertiaryInk
+    }
+
+    /// 节点卡片底部元数据（模型名 / 比例 / 溯源槽位）的墨色。
+    ///
+    /// 单列一档是因为它的背景是**卡片**（`cardBackground`）而不是 chrome 侧栏，两者在多彩深色下
+    /// 差着一档明度；共用一个 token 必然有一侧偏灰。
+    private static let colorfulCanvasCardMetaInk = dyn(light: Color.black.opacity(0.58),
+                                                       dark: Color.white.opacity(0.72))
+    static var canvasCardMetaInk: Color { isMinimalSkin ? minimalSecondaryInk : colorfulCanvasCardMetaInk }
+
     private static let colorfulElevatedBackground = dyn(light: Color.white.opacity(0.82),
                                                         dark: Color.white.opacity(0.055))
     static var elevatedBackground: Color { isMinimalSkin ? minimalCardFilled : colorfulElevatedBackground }

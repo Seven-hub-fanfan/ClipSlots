@@ -3374,9 +3374,96 @@ do {
 
     // ── 历史条目展示信息完整性：面板要靠它们说清"撤销的是哪一步"
     for kind in [CanvasHistoryEntry.Kind.addNode, .moveNode, .removeNode,
-                 .fanOut, .clear, .editNode, .bindSlot] {
+                 .fanOut, .clear, .editNode, .bindSlot, .styleNode] {
         t.check(!kind.title.isEmpty, "\(kind.rawValue) 必须有中文动作名")
         t.check(!kind.symbolName.isEmpty, "\(kind.rawValue) 必须有图标名")
+    }
+    // `Kind` 是 Codable 的（随撤销栈条目一起序列化过），rawValue 一旦被改名，
+    // 老数据的历史条目就会解不出来。钉住新增这一档的字面量。
+    t.equal(CanvasHistoryEntry.Kind.styleNode.rawValue, "styleNode",
+            "styleNode 的 rawValue 不可改名（历史条目 Codable 依赖它）")
+}
+
+// MARK: - CANVAS-FONT：节点正文字体的模型层（v2.11.7 hotfix19）
+//
+// 为什么这组必须存在：用户报的 bug 是"字体选了但没保存"。这类 bug 的两个藏身处都是静默的：
+//   1. 字号越界 → 卡片正文被撑出容器或小到不可读，没有任何报错。
+//   2. 新增的可选字段没进 Codable → 落盘再读回来字体就丢了，**只在重启 App 后才暴露**，
+//      当场看起来完全正常。这是本次最需要机器盯住的一条。
+// 第三处（族名 → NSFont 的解析）依赖 AppKit，活在 App target 里，本 harness 覆盖不到；
+// 那部分靠 `CanvasFontCatalog` 只列"本机真的装了的字体" + 面板里的实时预览行兜住。
+
+do {
+    // ── 字号夹取
+    t.equal(CanvasNode.clampBodyFontSize(10), 10, "合法字号原样返回")
+    t.equal(CanvasNode.clampBodyFontSize(0), CanvasNode.bodyFontSizeRange.lowerBound,
+            "★★低于下限应夹到下限（0pt 的文字等于内容消失）")
+    t.equal(CanvasNode.clampBodyFontSize(999), CanvasNode.bodyFontSizeRange.upperBound,
+            "★★高于上限应夹到上限（超大字号会把卡片其余内容顶出容器）")
+    t.equal(CanvasNode.clampBodyFontSize(.nan), CanvasNode.defaultBodyFontSize,
+            "★★NaN 必须回落默认值（NaN 字号会让整张卡片布局失效且不报错）")
+    t.equal(CanvasNode.clampBodyFontSize(.infinity), CanvasNode.defaultBodyFontSize,
+            "★★无穷大同样回落默认值")
+    t.check(CanvasNode.bodyFontSizeRange.contains(CanvasNode.defaultBodyFontSize),
+            "默认字号必须落在合法区间内")
+
+    // ── 未设置字体时的解析口径
+    let plain = CanvasNode(x: 0, y: 0)
+    t.check(plain.fontName == nil, "新节点默认不带字体族（跟随系统）")
+    t.check(!plain.hasCustomFont, "没设过字体的节点 hasCustomFont 应为 false")
+    t.equal(plain.resolvedBodyFontSize, CanvasNode.defaultBodyFontSize,
+            "未设字号时 resolvedBodyFontSize 应给默认值")
+
+    // ── 构造时即夹取：越界值不该有机会进入内存，更不该落盘
+    let oversized = CanvasNode(x: 0, y: 0, fontName: "MiSans", fontSize: 400)
+    t.equal(oversized.fontSize, CanvasNode.bodyFontSizeRange.upperBound,
+            "★★init 也必须夹取字号，否则越界值会绕过 store 直接落盘")
+
+    // ── Codable 往返：这一条挡住"重启后字体丢了"
+    var styled = CanvasNode(x: 12, y: 34, fontName: "HarmonyOS Sans SC", fontSize: 16)
+    styled.model = "seedream45"
+    let enc = JSONEncoder()
+    let dec = JSONDecoder()
+    do {
+        let data = try enc.encode(styled)
+        let back = try dec.decode(CanvasNode.self, from: data)
+        t.equal(back.fontName, "HarmonyOS Sans SC", "★★字体族必须能 Codable 往返（否则重启即丢）")
+        t.equal(back.fontSize, 16, "★★字号必须能 Codable 往返")
+        t.check(back.hasCustomFont, "往返后仍应判定为自定义字体")
+    } catch {
+        t.check(false, "CanvasNode 带字体字段的 Codable 往返不应抛错：\(error)")
+    }
+
+    // ── 向后兼容：hotfix19 之前落盘的节点 JSON 里没有 fontName / fontSize 两个键。
+    // 新字段必须是「缺失即 nil」而不是「缺失即解码失败」—— 后者会让整份画布数据读不出来。
+    do {
+        let data = try enc.encode(plain)
+        var raw = try JSONSerialization.jsonObject(with: data) as? [String: Any] ?? [:]
+        raw.removeValue(forKey: "fontName")
+        raw.removeValue(forKey: "fontSize")
+        let legacy = try JSONSerialization.data(withJSONObject: raw)
+        let back = try dec.decode(CanvasNode.self, from: legacy)
+        t.check(back.fontName == nil && back.fontSize == nil,
+                "★★老数据缺 fontName/fontSize 时应解成 nil")
+        t.equal(back.resolvedBodyFontSize, CanvasNode.defaultBodyFontSize,
+                "老数据应回落默认字号")
+    } catch {
+        t.check(false, "★★缺少字体字段的老 JSON 必须仍能解码（实测抛错：\(error)）")
+    }
+
+    // ── 脏数据：磁盘上被手改成越界字号时，读取路径也要有出口。
+    // 解码本身不夹取（Codable 直接写 stored property），所以 `resolvedBodyFontSize`
+    // 必须是最后一道闸——渲染只认它。
+    do {
+        let data = try enc.encode(plain)
+        var raw = try JSONSerialization.jsonObject(with: data) as? [String: Any] ?? [:]
+        raw["fontSize"] = 900
+        let dirty = try JSONSerialization.data(withJSONObject: raw)
+        let back = try dec.decode(CanvasNode.self, from: dirty)
+        t.equal(back.resolvedBodyFontSize, CanvasNode.bodyFontSizeRange.upperBound,
+                "★★脏数据的越界字号必须在读取侧被夹住（渲染只认 resolvedBodyFontSize）")
+    } catch {
+        t.check(false, "越界字号的 JSON 解码不应抛错：\(error)")
     }
 }
 

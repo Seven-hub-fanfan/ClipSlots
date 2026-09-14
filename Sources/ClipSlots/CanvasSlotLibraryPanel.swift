@@ -102,7 +102,7 @@ struct CanvasSlotLibraryPanel: View {
             if canvas.isLibraryExpanded {
                 Text("槽位库")
                     .font(.system(size: 11, weight: .semibold))
-                    .foregroundColor(.primary.opacity(0.85))
+                    .foregroundColor(AppTheme.canvasChromeInk)
                     .lineLimit(1)
                 Spacer(minLength: 0)
             }
@@ -111,7 +111,7 @@ struct CanvasSlotLibraryPanel: View {
             } label: {
                 Image(systemName: canvas.isLibraryExpanded ? "chevron.left" : "chevron.right")
                     .font(.system(size: 9, weight: .bold))
-                    .foregroundColor(.secondary)
+                    .foregroundColor(AppTheme.canvasChromeSecondaryInk)
                     .frame(width: 16, height: 16)
                     .contentShape(Rectangle())
             }
@@ -130,7 +130,7 @@ struct CanvasSlotLibraryPanel: View {
         VStack(alignment: .leading, spacing: 2) {
             Text(page.name)
                 .font(.system(size: 9, weight: .semibold))
-                .foregroundColor(.secondary.opacity(0.65))
+                .foregroundColor(AppTheme.canvasChromeTertiaryInk)
                 .padding(.horizontal, 4)
                 .padding(.top, 4)
 
@@ -156,14 +156,14 @@ struct CanvasSlotLibraryPanel: View {
             HStack(spacing: 5) {
                 Image(systemName: expandedGroupIds.contains(group.id) ? "chevron.down" : "chevron.right")
                     .font(.system(size: 7, weight: .bold))
-                    .foregroundColor(.secondary.opacity(0.6))
+                    .foregroundColor(AppTheme.canvasChromeTertiaryInk)
                     .frame(width: 8)
                 Image(systemName: group.icon)
                     .font(.system(size: 9))
-                    .foregroundColor(.secondary.opacity(0.8))
+                    .foregroundColor(AppTheme.canvasChromeSecondaryInk)
                 Text(group.name)
                     .font(.system(size: 10, weight: .medium))
-                    .foregroundColor(.primary.opacity(0.8))
+                    .foregroundColor(AppTheme.canvasChromeInk)
                     .lineLimit(1)
                 Spacer(minLength: 0)
             }
@@ -181,7 +181,7 @@ struct CanvasSlotLibraryPanel: View {
         if entries.isEmpty {
             Text("无可用内容")
                 .font(.system(size: 9))
-                .foregroundColor(.secondary.opacity(0.45))
+                .foregroundColor(AppTheme.canvasChromeTertiaryInk)
                 .padding(.leading, 24)
                 .padding(.vertical, 3)
         } else {
@@ -195,6 +195,9 @@ struct CanvasSlotLibraryPanel: View {
         let slot: Int
         let label: String?
         let prompt: String
+        /// 附件数量。只做角标展示，不参与拖拽载荷 —— 节点建好后附件由卡片按槽位实时读取，
+        /// 在载荷里带一份计数只会多出一个会过期的副本。
+        let attachmentCount: Int
     }
 
     /// 读取某组的槽位内容。
@@ -221,9 +224,20 @@ struct CanvasSlotLibraryPanel: View {
             guard !text.isEmpty || hasAttachment else { continue }
             // label 优先取 SlotContent 自带的；扫描快照里没有时回落到存储层的独立 label 文件。
             let label = content.label ?? storage.getLabel(slot)
-            out.append(SlotEntry(slot: slot, label: label, prompt: text))
+            out.append(SlotEntry(slot: slot,
+                                 label: label,
+                                 prompt: text,
+                                 attachmentCount: content.attachments.count))
         }
         return out
+    }
+
+    /// 行标题。有 Label 用 Label；没有 Label 且**只有附件没有文本**时，用附件名兜底 ——
+    /// 否则这一行会显示成一片空白，用户完全不知道它是什么（hotfix19）。
+    private func displayTitle(_ entry: SlotEntry) -> String {
+        if let label = entry.label, !label.isEmpty { return label }
+        if !entry.prompt.isEmpty { return entry.prompt }
+        return entry.attachmentCount > 0 ? "（\(entry.attachmentCount) 个附件）" : "（空）"
     }
 
     private func slotRow(page: SlotPage, group: SpecialSlot, entry: SlotEntry) -> some View {
@@ -236,17 +250,29 @@ struct CanvasSlotLibraryPanel: View {
         return HStack(spacing: 5) {
             Text("\(entry.slot)")
                 .font(.system(size: 8, weight: .bold, design: .rounded))
-                .foregroundColor(.secondary)
+                .foregroundColor(AppTheme.canvasChromeInk)
                 .frame(width: 14, height: 14)
                 .background(Circle().fill(AppTheme.chipBackground))
-            Text(entry.label ?? entry.prompt)
+            Text(displayTitle(entry))
                 .font(.system(size: 9))
-                .foregroundColor(.primary.opacity(0.72))
+                // ★ hotfix19：原 `.primary.opacity(0.72)`。深色下 `.primary` 本身就不是纯白，
+                // 再乘 0.72 后压在 0.14 的侧栏底上，正文对比度掉到 AA 线以下。
+                .foregroundColor(AppTheme.canvasChromeSecondaryInk)
                 .lineLimit(1)
             Spacer(minLength: 0)
+            // 附件角标：让用户在拖之前就知道这个槽位带图 / 带文件（hotfix19）。
+            if entry.attachmentCount > 0 {
+                HStack(spacing: 1) {
+                    Image(systemName: "paperclip")
+                        .font(.system(size: 6, weight: .bold))
+                    Text("\(entry.attachmentCount)")
+                        .font(.system(size: 7, weight: .bold, design: .rounded))
+                }
+                .foregroundColor(AppTheme.canvasChromeTertiaryInk)
+            }
             Image(systemName: "line.3.horizontal")
                 .font(.system(size: 7))
-                .foregroundColor(.secondary.opacity(0.35))
+                .foregroundColor(AppTheme.canvasChromeTertiaryInk.opacity(0.7))
         }
         .padding(.horizontal, 5)
         .padding(.vertical, 3)

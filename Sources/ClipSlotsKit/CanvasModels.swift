@@ -119,6 +119,20 @@ public struct CanvasNode: Codable, Identifiable, Equatable {
     /// 张数（1 / 2 / 4）。对应 CLI 的 `--count`。
     public var count: Int
 
+    // MARK: 正文排版（v2.11.7 hotfix19）
+
+    /// 正文字体族名（如 `HarmonyOS Sans SC`）。`nil` = 跟随系统字体。
+    ///
+    /// 存**族名**而不是 PostScript 名：族名是用户在 picker 里看到的那个字符串，字号/字重变化时
+    /// 不需要重新解析；PostScript 名（`HarmonyOSSansSC-Regular`）反过来还得剥掉字重后缀才能显示。
+    /// 族名 → 可用字体的解析放在 App 层（需要 AppKit），Kit 只负责存取。
+    ///
+    /// **字体缺失时的约定**：不做「解析不到就清空字段」的自动纠正。用户换机后字体可能只是暂时没装，
+    /// 清空字段等于把设置悄悄丢了；保留族名 + 渲染时回落系统字体，装回字体就自动恢复。
+    public var fontName: String?
+    /// 正文字号。`nil` = `CanvasNode.defaultBodyFontSize`。
+    public var fontSize: CGFloat?
+
     // MARK: 来源与状态
 
     /// 节点来源槽位（若由槽位库拖入 / 批量展开产生）。仅作溯源，不产生写回。
@@ -138,6 +152,32 @@ public struct CanvasNode: Codable, Identifiable, Equatable {
 
     public static let defaultSize = CGSize(width: 260, height: 300)
 
+    /// 正文默认字号。卡片是 260pt 宽的定尺容器，10pt 是「两行能塞进 ~60 字」的经验值。
+    public static let defaultBodyFontSize: CGFloat = 10
+    /// 字号可选区间。
+    ///
+    /// 上限 24 不是随手写的：卡片正文区高度固定（约 26~40pt），字号再大就只剩一行且会被截断，
+    /// 用户以为「字变大了但内容没了」。下限 8 是 macOS 上还能辨认汉字的实际底线。
+    public static let bodyFontSizeRange: ClosedRange<CGFloat> = 8...24
+
+    /// 把任意输入夹到合法区间。**所有写入路径都必须过这一道** —— 字号是能被 stepper 连点、
+    /// 也能被历史数据带进来的量，越界值不会报错，只会渲染成一张不可读的卡片。
+    public static func clampBodyFontSize(_ value: CGFloat) -> CGFloat {
+        guard value.isFinite else { return defaultBodyFontSize }
+        return min(max(value, bodyFontSizeRange.lowerBound), bodyFontSizeRange.upperBound)
+    }
+
+    /// 实际生效的正文字号（含缺省与限幅）。
+    public var resolvedBodyFontSize: CGFloat {
+        CanvasNode.clampBodyFontSize(fontSize ?? CanvasNode.defaultBodyFontSize)
+    }
+
+    /// 是否显式设过字体（供 UI 显示「跟随系统」与否）。
+    public var hasCustomFont: Bool {
+        if let fontName, !fontName.trimmingCharacters(in: .whitespaces).isEmpty { return true }
+        return fontSize != nil
+    }
+
     public init(id: String = "node_" + UUID().uuidString,
                 kind: CanvasNodeKind = .image,
                 x: CGFloat,
@@ -148,6 +188,8 @@ public struct CanvasNode: Codable, Identifiable, Equatable {
                 model: String = "seedream45",
                 ratio: String = "1:1",
                 count: Int = 1,
+                fontName: String? = nil,
+                fontSize: CGFloat? = nil,
                 sourcePageId: String? = nil,
                 sourceGroupId: String? = nil,
                 sourceSlot: Int? = nil,
@@ -167,6 +209,8 @@ public struct CanvasNode: Codable, Identifiable, Equatable {
         self.model = model
         self.ratio = ratio
         self.count = count
+        self.fontName = fontName
+        self.fontSize = fontSize.map(CanvasNode.clampBodyFontSize)
         self.sourcePageId = sourcePageId
         self.sourceGroupId = sourceGroupId
         self.sourceSlot = sourceSlot

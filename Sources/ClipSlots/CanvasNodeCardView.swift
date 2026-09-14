@@ -22,6 +22,10 @@ struct CanvasNodeCardView: View {
     let text: String
     /// 溯源槽位的实时 Label（编辑页改了 Label，这里跟着变）。
     let slotLabel: String?
+    /// 溯源槽位的实时附件列表（v2.11.7 hotfix19）。未绑定槽位的节点为空数组。
+    ///
+    /// 与 `text` 同源同理：真相在槽位数据里，卡片只负责展示，取数留在上层。
+    let attachments: [SlotContent.SlotAttachment]
     /// 是否处于 inline 编辑态（由上层集中管理，保证同一时刻只有一个节点在编辑）。
     let isEditing: Bool
     let onBeginEdit: () -> Void
@@ -38,11 +42,35 @@ struct CanvasNodeCardView: View {
         return true
     }
 
+    /// 正文实际用的字体。
+    ///
+    /// **必须走 `CanvasFontCatalog`，不能写 `.font(.custom(node.fontName, size:))`** ——
+    /// `Font.custom` 收的是字体名 / PostScript 名，而这里存的是用户在 picker 里选的**族名**
+    /// （`HarmonyOS Sans SC`）。中文字体两者几乎从不相同，`Font.custom` 解析失败时会**静默**
+    /// 回落系统字体：没有崩溃、没有告警，表现就是用户反馈的「选了字体但一点变化都没有」。
+    private var bodyFont: Font {
+        CanvasFontCatalog.font(family: node.fontName, size: node.resolvedBodyFontSize)
+    }
+
+    /// 预览区要展示的附件大图（第一张图片类附件）。
+    ///
+    /// 只在**节点自己还没有生成结果**时启用：生成结果是产物、附件是输入，产物在就该显示产物。
+    private var previewAttachment: SlotContent.SlotAttachment? {
+        guard isEmptyPreview else { return nil }
+        return attachments.first { $0.canvasIsImageLike }
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             typeRow
             previewArea
             promptArea
+            if !attachments.isEmpty {
+                CanvasNodeAttachmentStrip(attachments: attachments)
+            }
+            // 正文字号被调大后（最大 24pt）会把下面的内容顶出卡片。加一个可压缩的 Spacer，
+            // 让参数栏始终钉在卡片底边，被挤掉的是正文的第二行而不是整条参数栏。
+            Spacer(minLength: 0)
             paramChips
         }
         .padding(12)
@@ -121,12 +149,12 @@ struct CanvasNodeCardView: View {
         case .idle:
             Text("未生成")
                 .font(.system(size: 9, weight: .medium))
-                .foregroundColor(.secondary.opacity(0.7))
+                .foregroundColor(AppTheme.canvasCardMetaInk)
         case .queued(let ahead):
             // 「前方 N 个」用的是 CLI 真字段 queue_ahead_count，不是估算。
             Label(ahead > 0 ? "排队 · 前方 \(ahead)" : "排队中", systemImage: "clock")
                 .font(.system(size: 9, weight: .medium))
-                .foregroundColor(.secondary)
+                .foregroundColor(AppTheme.canvasCardMetaInk)
         case .running(let startedAt):
             // 刻意不给百分比：CLI 不提供，编出来的进度在 10~20s 量级会明显失真。
             RunningBadge(startedAt: startedAt)
@@ -148,7 +176,29 @@ struct CanvasNodeCardView: View {
             RoundedRectangle(cornerRadius: 10, style: .continuous)
                 .fill(AppTheme.previewBackground)
 
-            if isEmptyPreview {
+            if case .succeeded(let path) = node.state,
+               let img = NSImage(contentsOfFile: path) {
+                Image(nsImage: img)
+                    .resizable()
+                    .aspectRatio(contentMode: .fill)
+                    .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+            } else if let att = previewAttachment {
+                // ★ v2.11.7 hotfix19：槽位有图片附件时，预览区直接画它。
+                // 在此之前这里永远是斜纹占位，于是「只放了图、没写字」的槽位拖到画布上是一张
+                // 完全空白的卡片 —— 用户反馈的「看不到附件信息」最直观的那一半就是这个。
+                CanvasAttachmentPreviewImage(attachment: att)
+                    .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                    // 左上角角标点明「这是输入附件，不是生成结果」，否则会被误读成已经出图了。
+                    .overlay(alignment: .topLeading) {
+                        Label("附件", systemImage: "paperclip")
+                            .font(.system(size: 8, weight: .semibold))
+                            .foregroundColor(AppTheme.onAccentText)
+                            .padding(.horizontal, 5)
+                            .padding(.vertical, 2)
+                            .background(Capsule(style: .continuous).fill(Color.black.opacity(0.45)))
+                            .padding(6)
+                    }
+            } else {
                 // 斜纹占位（对齐 C2 设计稿）：未生成状态一眼可辨，且不像「加载失败」。
                 DiagonalHatch()
                     .stroke(AppTheme.subtleBorder.opacity(0.55), lineWidth: 1)
@@ -168,14 +218,8 @@ struct CanvasNodeCardView: View {
                 } else {
                     Image(systemName: node.kind == .video ? "film" : "photo")
                         .font(.system(size: 18, weight: .light))
-                        .foregroundColor(.secondary.opacity(0.35))
+                        .foregroundColor(AppTheme.canvasCardMetaInk.opacity(0.5))
                 }
-            } else if case .succeeded(let path) = node.state,
-                      let img = NSImage(contentsOfFile: path) {
-                Image(nsImage: img)
-                    .resizable()
-                    .aspectRatio(contentMode: .fill)
-                    .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
             }
         }
         .frame(height: 148)
@@ -194,13 +238,13 @@ struct CanvasNodeCardView: View {
         } else {
             Group {
                 if text.isEmpty {
-                    Text("双击填写内容…")
-                        .font(.system(size: 10))
-                        .foregroundColor(.secondary.opacity(0.5))
+                    Text(attachments.isEmpty ? "双击填写内容…" : "仅附件，无文本")
+                        .font(bodyFont)
+                        .foregroundColor(AppTheme.canvasCardMetaInk.opacity(0.75))
                 } else {
                     Text(text)
-                        .font(.system(size: 10))
-                        .foregroundColor(.primary.opacity(0.82))
+                        .font(bodyFont)
+                        .foregroundColor(.primary.opacity(0.88))
                         .lineLimit(2)
                         .multilineTextAlignment(.leading)
                         .fixedSize(horizontal: false, vertical: true)
@@ -220,7 +264,7 @@ struct CanvasNodeCardView: View {
     private var editor: some View {
         VStack(alignment: .leading, spacing: 4) {
             TextEditor(text: $draft)
-                .font(.system(size: 10))
+                .font(bodyFont)
                 .scrollContentBackground(.hidden)
                 .focused($editorFocused)
                 .frame(height: 40)
@@ -244,11 +288,11 @@ struct CanvasNodeCardView: View {
             HStack(spacing: 6) {
                 Text(node.sourceSlot == nil ? "仅本节点" : "同步到槽位")
                     .font(.system(size: 8))
-                    .foregroundColor(.secondary.opacity(0.6))
+                    .foregroundColor(AppTheme.canvasCardMetaInk)
                 Spacer(minLength: 0)
                 Text("Esc 放弃")
                     .font(.system(size: 8))
-                    .foregroundColor(.secondary.opacity(0.5))
+                    .foregroundColor(AppTheme.canvasCardMetaInk.opacity(0.8))
             }
         }
     }
@@ -270,7 +314,7 @@ struct CanvasNodeCardView: View {
                         .font(.system(size: 8, weight: .medium))
                         .lineLimit(1)
                 }
-                .foregroundColor(.secondary.opacity(0.6))
+                .foregroundColor(AppTheme.canvasCardMetaInk)
             }
         }
     }
@@ -278,7 +322,7 @@ struct CanvasNodeCardView: View {
     private func chip(_ text: String) -> some View {
         Text(text)
             .font(.system(size: 8, weight: .medium))
-            .foregroundColor(.secondary)
+            .foregroundColor(AppTheme.canvasCardMetaInk)
             .lineLimit(1)
             .padding(.horizontal, 5)
             .padding(.vertical, 2)
@@ -305,7 +349,7 @@ private struct RunningBadge: View {
                     .frame(width: 8, height: 8)
                 Text("生成中 \(elapsed)s")
                     .font(.system(size: 9, weight: .medium))
-                    .foregroundColor(.secondary)
+                    .foregroundColor(AppTheme.canvasCardMetaInk)
             }
         }
     }
