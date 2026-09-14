@@ -72,6 +72,47 @@ public enum CanvasGeometry {
                       height: anchorScreen.y - canvasAnchor.y * nz)
     }
 
+    // MARK: - 滚轮
+
+    /// 把一次滚轮事件的 delta 归一化到「像素」量级。
+    ///
+    /// 触控板给的是**精确增量**（`hasPreciseScrollingDeltas == true`），单位已经是点，直接用。
+    /// 传统滚轮给的是**行数**（一格 ±1~3），若直接当点用，一格只能挪 3pt —— 实测就是「滚了半天
+    /// 画布几乎不动」。所以行数要乘上一个步长。
+    ///
+    /// 平移与缩放用**不同**的步长（平移 24pt/行接近系统文本滚动的手感；缩放 8/行 换算成
+    /// `exp(0.01 * 8) ≈ 1.083`，即一格约 8%），所以步长做成参数而不是写死。
+    public static func normalizedScrollDelta(_ delta: CGFloat, precise: Bool, lineStep: CGFloat) -> CGFloat {
+        guard delta.isFinite else { return 0 }
+        return precise ? delta : delta * lineStep
+    }
+
+    /// Cmd + 滚轮的缩放系数（v2.11.7 hotfix17）。
+    ///
+    /// 用**指数**而不是线性 `1 + delta * k`：缩放在感知上是乘性的，等量的滚动在 0.3x 和 3x 下应该
+    /// 产生同样的「视觉倍率变化」。线性写法在小 zoom 时几乎不动、大 zoom 时一格跳一大截。
+    ///
+    /// 单次事件的系数**必须钳制**。触控板的 `scrollingDeltaY` 在惯性阶段可以单帧给出上百的值，
+    /// 未钳制时 `exp(0.01 * 300) ≈ 20`，一帧就从 1x 冲到 zoomMax，用户看到的是「画布爆炸」。
+    /// 上下限取 ±25%：连续事件仍能快速缩放，单帧却不会失控。
+    public static func wheelZoomFactor(scrollDeltaY: CGFloat, sensitivity: CGFloat = 0.01) -> CGFloat {
+        guard scrollDeltaY.isFinite, sensitivity.isFinite else { return 1 }
+        let raw = exp(scrollDeltaY * sensitivity)
+        return min(max(raw, 0.8), 1.25)
+    }
+
+    /// 普通滚轮 / 双指滚动 → 平移（**不缩放**）。
+    ///
+    /// 直接把 `scrollingDelta` 累加到 pan 上，不取反：系统已经根据「自然滚动」偏好把方向处理好了，
+    /// 这里再翻一次符号就会让用户的系统设置失效（开了自然滚动的人反而得到反向的画布）。
+    public static func pannedViewport(pan: CGSize,
+                                      scrollDeltaX: CGFloat,
+                                      scrollDeltaY: CGFloat) -> CGSize {
+        let dx = scrollDeltaX.isFinite ? scrollDeltaX : 0
+        let dy = scrollDeltaY.isFinite ? scrollDeltaY : 0
+        return CGSize(width: pan.width + dx, height: pan.height + dy)
+    }
+
     // MARK: - 背景网格
 
     /// 网格在屏幕空间的实际步长。

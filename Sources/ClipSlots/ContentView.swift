@@ -225,6 +225,15 @@ struct ContentView: View {
     var body: some View {
         ZStack(alignment: .top) {
             VStack(spacing: 0) {
+                // ★ v2.11.7 hotfix17: 工作区切换独占顶部一行，两侧等权 Spacer → 几何真居中。
+                // 这一行在两种模式下都在（画布模式下它是**唯一**的 chrome），位置不随模式跳动。
+                workspaceBar
+
+                // ★ v2.11.7 hotfix17: 画布是一块**完全独立的全屏工作区**，不共享槽位界面的任何 chrome。
+                // 顶栏（logo/拨杆/搜索/筛选/设置）、操作行（页面/槽位组/自动切换/打包/导入/清空）、
+                // 页签行、底部快捷键条全部按模式摘掉——它们的每一个控件都在操作「当前槽位组」，
+                // 而画布上根本没有「当前槽位组」这个概念，留着只会诱导误操作（尤其「清空」）。
+                if workspaceMode != .canvas {
                 headerView
 
                 // Hotkey error banner
@@ -262,6 +271,7 @@ struct ContentView: View {
                     }
                 }
                 .animation(Anim.reveal, value: isSearchActive)
+                } // if workspaceMode != .canvas
 
                 // ★ v2.10.93（resize 丝滑第二刀）：这里原来是一个包住整个网格的 `GeometryReader`，
                 // 内部把容器宽度量化成 8pt 台阶写回两个 @State（quantizedGridWidth / gridColumnsState），
@@ -297,17 +307,20 @@ struct ContentView: View {
                     switch workspaceMode {
                     case .canvas:
                         CanvasWorkspaceView(store: store, canvas: canvasStore)
-                    case .agent:
-                        AgentPlaceholderView()
                     case .edit:
                         editWorkspace
                     }
                 }
                 .animation(nil, value: workspaceMode)
 
-                // 底栏在三种模式下都保留：它承载的是全局信息（快捷键提示 / 版本号 / 连接入口），
-                // 而且一旦按模式显隐，切模式就会引起内容区高度跳变（画布会先被压扁再弹开）。
-                bottomBar
+                // ★ v2.11.7 hotfix17: 底栏只在编辑模式保留。
+                //
+                // 上一版为了避免「切模式时内容区高度跳变」把它一直留着，但它整条都是槽位语义
+                // （保存/粘贴/圆盘/切组/上次粘贴），在画布上没有一个是可用动作。高度跳变的代价
+                // 由「切换本身是瞬时无动画」吸收掉了，不值得为它牺牲画布的全屏纯净。
+                if workspaceMode != .canvas {
+                    bottomBar
+                }
             }
             .background(
                 // ★ v2.10.91 (perf 第四轮): 整窗氛围层改为「显式传入主题 + EquatableView 短路」。
@@ -562,6 +575,25 @@ struct ContentView: View {
         }
     }
 
+    /// 顶部工作区切换行（v2.11.7 hotfix17）。
+    ///
+    /// 只放切换器，两侧是等权 `Spacer` —— 这是唯一能保证「几何真居中」的写法：只要行内还有别的
+    /// 固有宽度控件（logo、搜索框），中点就会被它们的宽度差拉偏。
+    ///
+    /// 画布模式下这一行是整个界面**仅剩的 chrome**，所以垂直留白给得比编辑模式松一点（画布没有
+    /// 紧随其后的分隔线和操作行，贴太紧会显得切换器像是被压在窗口边框上）。
+    private var workspaceBar: some View {
+        HStack(spacing: 0) {
+            Spacer(minLength: 0)
+            WorkspaceModeSwitcher(selection: $workspaceMode)
+                .fixedSize(horizontal: true, vertical: true)
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, AppTheme.pagePadding)
+        .padding(.top, workspaceMode == .canvas ? 10 : 8)
+        .padding(.bottom, workspaceMode == .canvas ? 10 : 2)
+    }
+
     private var headerView: some View {
         VStack(spacing: 0) {
             // v2.11.7 hotfix4: 工具栏**不再是一块浮动面板**。
@@ -728,14 +760,12 @@ struct ContentView: View {
                 .fixedSize(horizontal: true, vertical: false)
                 .layoutPriority(2)
 
-            // ★ v2.11.7: 工作区三段切换。夹在「拨杆簇」与「搜索框」之间，两侧各一个 Spacer 顶到中间。
-            // 用 `fixedSize` + `layoutPriority(2)`：与左右两个簇同级，窗口变窄时先挤搜索框
-            // （搜索框是 `layoutPriority(0)`），不会把这三个字压成省略号。
-            Spacer(minLength: 8)
-
-            WorkspaceModeSwitcher(selection: $workspaceMode)
-                .fixedSize(horizontal: true, vertical: false)
-                .layoutPriority(2)
+            // ★ v2.11.7 hotfix17: 工作区切换器已从这里**移出**，改为顶部独立一行（见 `workspaceBar`）。
+            //
+            // 夹在「拨杆簇」和「搜索框」之间时它永远不可能真正居中：HStack 里左簇（logo+标题+拨杆）
+            // 和右簇（搜索框+图标）的固有宽度天差地别，两个 Spacer 只会把它推到「剩余空间的中点」，
+            // 视觉上偏左。要真居中就得让它独占一行、两侧只有等权 Spacer。
+            // 更关键的是：画布模式要把整条工具栏藏掉，切换器如果长在里面就会跟着一起消失。
 
             // v2.10.78: 唯一撑开用 Spacer 前移到搜索框之前，把 400pt 搜索框推到右侧、
             // 紧挨右侧图标簇；左侧（logo/拨杆簇与搜索框之间）留白。

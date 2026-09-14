@@ -119,7 +119,7 @@ struct CanvasFloatingToolbar: View {
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .help("\(tool.title)（\(tool.shortcut)）")
+        .help(tool.hint.map { "\(tool.title)（\(tool.shortcut)）· \($0)" } ?? "\(tool.title)（\(tool.shortcut)）")
     }
 }
 
@@ -227,6 +227,11 @@ struct CanvasEmptyHint: View {
             Text("从左侧槽位库拖入内容，或点底部 ＋ 新建节点")
                 .font(.system(size: 11))
                 .foregroundColor(.secondary.opacity(0.55))
+            // ★ v2.11.7 hotfix17: 手势不是自解释的，必须写出来。
+            // 中键平移这类约定，用户不被告知就永远发现不了（他会一直用抓手工具，或者以为画布不能动）。
+            Text("滚轮上下翻 · 按住中键拖动平移 · Cmd + 滚轮缩放")
+                .font(.system(size: 10))
+                .foregroundColor(.secondary.opacity(0.4))
         }
         .allowsHitTesting(false)
     }

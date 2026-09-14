@@ -25,6 +25,10 @@ struct CanvasWorkspaceView: View {
     @State private var panGestureDelta: CGSize = .zero
     /// 捏合开始时的 pan / zoom 基准。锚点缩放必须基于「手势开始那一刻」的状态反算，
     /// 否则 `MagnificationGesture` 每帧给的是相对初始的累计比例，用当前 zoom 去乘会指数放大。
+    /// 滚轮 / 中键路由器。**必须是 `@StateObject`**：事件监听器的寿命要跨越视图重建
+    /// （实测本项目的画布子树每秒会被重建一次，监听器若绑在 NSView 挂载周期上会反复装卸并丢事件）。
+    @StateObject private var inputRouter = CanvasInputRouter()
+
     @State private var pinchBasePan: CGSize? = nil
     @State private var pinchBaseZoom: CGFloat = 1
 
@@ -62,6 +66,9 @@ struct CanvasWorkspaceView: View {
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .background(AppTheme.windowBackground)
+            // ★ v2.11.7 hotfix17: 滚轮 / 中键只能从 AppKit 拿（见 CanvasInputRouter）。
+            // 这里只放一个对鼠标透明的几何锚点，事件监听的寿命由 @StateObject 持有的路由器决定。
+            .background(CanvasInputAnchor(router: inputRouter))
             .contentShape(Rectangle())
             // 命名坐标空间：槽位库那边的 DragGesture 也报到这个空间，落点才能直接换算成画布坐标。
             .coordinateSpace(name: CanvasWorkspaceView.spaceName)
@@ -73,10 +80,21 @@ struct CanvasWorkspaceView: View {
             .onAppear {
                 pan = canvas.pan
                 zoom = canvas.zoom
+                // 闭包在这里绑一次即可：@State/@ObservedObject 的读写都走稳定的存储盒，
+                // 视图结构体后续被重建也不影响这几个闭包写到正确的地方。
+                inputRouter.onScroll = { dx, dy, precise, isZoom, point in
+                    handleScroll(deltaX: dx, deltaY: dy, precise: precise, isZoom: isZoom, at: point)
+                }
+                inputRouter.onMiddleDrag = { delta in handleMiddleDrag(delta) }
+                inputRouter.onMiddleDragEnded = { canvas.updateViewport(pan: pan, zoom: zoom) }
+                inputRouter.start()
                 // 没有光标事件之前，锚点先取视图中心，避免首次捏合以 (0,0) 为锚点把画面甩到角上。
                 cursorScreen = CGPoint(x: proxy.size.width / 2, y: proxy.size.height / 2)
             }
-            .onDisappear { canvas.flushSave() }
+            .onDisappear {
+                inputRouter.stop()
+                canvas.flushSave()
+            }
         }
     }
 
@@ -158,37 +176,74 @@ struct CanvasWorkspaceView: View {
             }
     }
 
-    /// 画布空白处拖拽。
+    /// 画布空白处的左键拖拽。
     ///
-    /// 工具语义：**框选(M) 拉框，其余（选择/抓手）平移**。
-    /// 之所以让「选择」也平移而不是像 Figma 那样拉框：这里的平移入口只有手势一条（没有滚轮/空格
-    /// 兜底），若默认工具下拖空白是拉框，用户就必须先找到并切到抓手才能挪动视图 —— 一个新界面里
-    /// 这一步很容易卡住。框选是明确的次要操作，交给显式的 M 工具。
+    /// ★ v2.11.7 hotfix17（语义反转）：**箭头(V) 拉选区，抓手(H) 平移**。
+    ///
+    /// 上一版是反的（箭头也平移、框选另设一个 M 工具），理由是「平移入口只有手势一条，默认工具下
+    /// 必须能挪动视图」。这条前提已经不成立了：现在平移有**中键拖动**和**滚轮**两个不依赖工具切换的
+    /// 入口（见 `CanvasEventInterceptor`），左键就可以还给选区 —— 与 Figma / Sketch / Crate 网页端
+    /// 一致，用户的肌肉记忆不用重学。
     private var canvasDragGesture: some Gesture {
         DragGesture(minimumDistance: 1, coordinateSpace: .named(CanvasWorkspaceView.spaceName))
             .onChanged { value in
-                if canvas.activeTool == .marquee {
+                if canvas.activeTool == .hand {
+                    panGestureDelta = value.translation
+                } else {
                     if marqueeStart == nil { marqueeStart = value.startLocation }
                     marqueeCurrent = value.location
-                } else {
-                    panGestureDelta = value.translation
                 }
             }
             .onEnded { value in
-                if canvas.activeTool == .marquee {
-                    if let start = marqueeStart {
-                        commitMarquee(from: start, to: value.location)
-                    }
-                    marqueeStart = nil
-                    marqueeCurrent = nil
-                } else {
+                if canvas.activeTool == .hand {
                     // 位移量本身就是屏幕空间的，直接加到 pan 上，不需要除 zoom。
                     pan.width += value.translation.width
                     pan.height += value.translation.height
                     panGestureDelta = .zero
                     canvas.updateViewport(pan: pan, zoom: zoom)
+                } else {
+                    if let start = marqueeStart {
+                        commitMarquee(from: start, to: value.location)
+                    }
+                    marqueeStart = nil
+                    marqueeCurrent = nil
                 }
             }
+    }
+
+    // MARK: - 滚轮 / 中键
+
+    /// 滚轮：裸滚 = 翻页式平移，Cmd + 滚 = 以光标为锚点缩放。
+    ///
+    /// 刻意**不做**「裸滚轮缩放」：那是画布类工具里最招人烦的默认值之一 —— 用户以为自己在向下看内容，
+    /// 结果整个画面在缩放。缩放必须显式按住 Cmd。
+    private func handleScroll(deltaX: CGFloat, deltaY: CGFloat, precise: Bool, isZoom: Bool, at point: CGPoint) {
+        if isZoom {
+            // 缩放步长（8/行）比平移小：一格 ≈ 8%，连续滚才快，单格不会跳档。
+            let dz = CanvasGeometry.normalizedScrollDelta(deltaY, precise: precise, lineStep: 8)
+            let target = CanvasGeometry.clampZoom(zoom * CanvasGeometry.wheelZoomFactor(scrollDeltaY: dz))
+            guard target != zoom else { return }
+            pan = CanvasGeometry.panForAnchoredZoom(anchorScreen: point,
+                                                    pan: pan,
+                                                    oldZoom: zoom,
+                                                    newZoom: target)
+            zoom = target
+        } else {
+            pan = CanvasGeometry.pannedViewport(
+                pan: pan,
+                scrollDeltaX: CanvasGeometry.normalizedScrollDelta(deltaX, precise: precise, lineStep: 24),
+                scrollDeltaY: CanvasGeometry.normalizedScrollDelta(deltaY, precise: precise, lineStep: 24)
+            )
+        }
+        // updateViewport 内部防抖，逐事件调用不会逐帧落盘。
+        canvas.updateViewport(pan: pan, zoom: zoom)
+    }
+
+    /// 中键拖动平移。增量直接落到 `pan` 上（而不是先攒进 `panGestureDelta`）：
+    /// 这条路径没有 SwiftUI 手势的 onEnded 保证，一旦中途丢事件，攒着的临时量就会永远留在视图上。
+    private func handleMiddleDrag(_ delta: CGSize) {
+        pan.width += delta.width
+        pan.height += delta.height
     }
 
     /// 框选提交。命中判定换算到**画布空间**再做，这样同一个框在任何缩放下选中的节点集合都一致。

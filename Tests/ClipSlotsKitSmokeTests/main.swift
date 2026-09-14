@@ -3087,6 +3087,77 @@ do {
             "★★fit：零尺寸视图不得产出 NaN/∞")
 }
 
+// —— 滚轮：Cmd+滚缩放 / 裸滚平移（v2.11.7 hotfix17）——
+do {
+    // 方向：上滚放大、下滚缩小、不滚不变。
+    t.check(CanvasGeometry.wheelZoomFactor(scrollDeltaY: 10) > 1, "wheelZoom：上滚（正 delta）应放大")
+    t.check(CanvasGeometry.wheelZoomFactor(scrollDeltaY: -10) < 1, "wheelZoom：下滚（负 delta）应缩小")
+    t.check(canvasApprox(CanvasGeometry.wheelZoomFactor(scrollDeltaY: 0), 1), "wheelZoom：零位移系数必须恰为 1")
+
+    // 单调性：滚得越多，系数越大。
+    t.check(CanvasGeometry.wheelZoomFactor(scrollDeltaY: 5) < CanvasGeometry.wheelZoomFactor(scrollDeltaY: 9),
+            "wheelZoom：系数应随 delta 单调递增")
+
+    // ★ 关键护栏：触控板惯性单帧可给出上百的 delta，未钳制会一帧冲到 zoomMax（观感=画布爆炸）。
+    let huge = CanvasGeometry.wheelZoomFactor(scrollDeltaY: 3000)
+    let tiny = CanvasGeometry.wheelZoomFactor(scrollDeltaY: -3000)
+    t.check(huge <= 1.25 + 1e-9, "★★wheelZoom：单次系数上限必须钳到 1.25（实际 \(huge)）")
+    t.check(tiny >= 0.8 - 1e-9, "★★wheelZoom：单次系数下限必须钳到 0.8（实际 \(tiny)）")
+    t.check(CanvasGeometry.wheelZoomFactor(scrollDeltaY: .nan) == 1, "★★wheelZoom：NaN 输入必须退化为 1")
+    t.check(CanvasGeometry.wheelZoomFactor(scrollDeltaY: .infinity) <= 1.25,
+            "★★wheelZoom：+∞ 输入不得越过上限")
+
+    // 与锚点缩放联立：Cmd+滚一次之后，光标下的画布内容必须还在光标下。
+    do {
+        let anchor = CGPoint(x: 640, y: 400)
+        let pan0 = CGSize(width: -120, height: 85)
+        let zoom0: CGFloat = 1.4
+        let z1 = CanvasGeometry.clampZoom(zoom0 * CanvasGeometry.wheelZoomFactor(scrollDeltaY: 8))
+        let pan1 = CanvasGeometry.panForAnchoredZoom(anchorScreen: anchor, pan: pan0, oldZoom: zoom0, newZoom: z1)
+        let before = CanvasGeometry.canvasPoint(screen: anchor, pan: pan0, zoom: zoom0)
+        let after = CanvasGeometry.canvasPoint(screen: anchor, pan: pan1, zoom: z1)
+        t.check(canvasApprox(before.x, after.x) && canvasApprox(before.y, after.y),
+                "★★Cmd+滚轮：缩放后光标下的画布点必须不动（前 \(before) / 后 \(after)）")
+    }
+
+    // 裸滚 = 纯平移，且不碰 zoom（缩放只允许 Cmd 触发）。
+    let panned = CanvasGeometry.pannedViewport(pan: CGSize(width: 30, height: -10),
+                                              scrollDeltaX: -4,
+                                              scrollDeltaY: 22)
+    t.check(canvasApprox(panned.width, 26) && canvasApprox(panned.height, 12),
+            "裸滚轮：delta 应直接累加到 pan（实际 \(panned)）")
+    // 不取反：系统已按「自然滚动」偏好处理过方向，这里再翻一次会让用户的系统设置失效。
+    t.check(CanvasGeometry.pannedViewport(pan: .zero, scrollDeltaX: 0, scrollDeltaY: 5).height > 0,
+            "★★裸滚轮：不得对 scrollingDelta 取反（否则自然滚动设置失效）")
+    let nanPan = CanvasGeometry.pannedViewport(pan: CGSize(width: 7, height: 9),
+                                              scrollDeltaX: .nan,
+                                              scrollDeltaY: .infinity)
+    t.check(canvasApprox(nanPan.width, 7) && canvasApprox(nanPan.height, 9),
+            "★★裸滚轮：非有限 delta 必须被忽略而不是污染 pan（实际 \(nanPan)）")
+}
+
+// —— 行滚动归一化（v2.11.7 hotfix17）——
+do {
+    // 触控板：精确增量已经是点，原样透传。
+    t.check(canvasApprox(CanvasGeometry.normalizedScrollDelta(-8.5, precise: true, lineStep: 24), -8.5),
+            "scrollNorm：精确增量必须原样透传")
+    // ★ 传统滚轮给的是行数：一格 ±1~3。若当点用，一格只挪 3pt（实测「滚半天画布不动」）。
+    t.check(canvasApprox(CanvasGeometry.normalizedScrollDelta(-3, precise: false, lineStep: 24), -72),
+            "★★scrollNorm：非精确增量必须按行步长放大（3 行 × 24 = 72pt）")
+    t.check(CanvasGeometry.normalizedScrollDelta(1, precise: false, lineStep: 24) > 20,
+            "★★scrollNorm：鼠标滚轮单格平移量不得小于 20pt（否则视觉上等于没动）")
+    // 方向不能被归一化改掉。
+    t.check(CanvasGeometry.normalizedScrollDelta(-1, precise: false, lineStep: 8) < 0,
+            "scrollNorm：符号必须保持")
+    t.check(CanvasGeometry.normalizedScrollDelta(.nan, precise: true, lineStep: 24) == 0,
+            "★★scrollNorm：NaN 必须归零，不得污染 pan/zoom")
+    // 缩放用更小的步长：鼠标滚轮一格约 8%，不至于一格跳一档。
+    let oneNotch = CanvasGeometry.wheelZoomFactor(
+        scrollDeltaY: CanvasGeometry.normalizedScrollDelta(1, precise: false, lineStep: 8))
+    t.check(oneNotch > 1.05 && oneNotch < 1.12,
+            "★★Cmd+滚轮：鼠标滚轮单格缩放应落在 5%~12%（实际 \((oneNotch - 1) * 100)%）")
+}
+
 // —— 包围盒 ——
 do {
     t.equal(CanvasGeometry.bounds(of: []), .zero, "bounds：空数组返回 zero")

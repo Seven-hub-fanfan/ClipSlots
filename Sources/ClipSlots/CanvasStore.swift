@@ -248,11 +248,17 @@ final class CanvasStore: ObservableObject {
 
 // MARK: - 工具
 
-/// 底部浮动工具栏的四个工具。
+/// 底部浮动工具栏的工具。
+///
+/// ★ v2.11.7 hotfix17（手势重定义）：原来的四个工具里，`select`（点选）与 `marquee`（框选）在
+/// 新语义下会变成**同一个东西** —— 箭头工具本身就要能在空白处拖出选区，那再留一个专门的
+/// 「框选」按钮就是一个点了没有任何区别的死按钮。所以 `marquee` 整个删掉，`select` 改名「选区」。
+///
+/// 平移不再依赖工具切换：**中键按住拖动**在任何工具下都能平移画布（见 `CanvasEventInterceptor`），
+/// `hand` 只是给「不想用中键、想用左键拖」的人保留的一条备用路径。
 enum CanvasTool: String, CaseIterable, Identifiable, Equatable {
     case select
     case hand
-    case marquee
     case newNode
 
     var id: String { rawValue }
@@ -261,16 +267,14 @@ enum CanvasTool: String, CaseIterable, Identifiable, Equatable {
         switch self {
         case .select: return "cursorarrow"
         case .hand: return "hand.raised"
-        case .marquee: return "selection.pin.in.out"
         case .newNode: return "plus.square.dashed"
         }
     }
 
     var title: String {
         switch self {
-        case .select: return "选择"
+        case .select: return "选区"
         case .hand: return "抓手"
-        case .marquee: return "框选"
         case .newNode: return "新建节点"
         }
     }
@@ -280,8 +284,17 @@ enum CanvasTool: String, CaseIterable, Identifiable, Equatable {
         switch self {
         case .select: return "V"
         case .hand: return "H"
-        case .marquee: return "M"
         case .newNode: return "N"
+        }
+    }
+
+    /// 工具按钮 tooltip 的补充说明：把「不靠工具切换也能用」的手势写在手边，
+    /// 否则用户只会以为平移必须先点抓手。
+    var hint: String? {
+        switch self {
+        case .select: return "在空白处拖动画出选区"
+        case .hand: return "左键拖动平移；任何工具下按住中键拖动同样可平移"
+        case .newNode: return nil
         }
     }
 }
