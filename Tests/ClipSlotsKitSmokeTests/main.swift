@@ -3240,4 +3240,144 @@ do {
     t.check(cached.load().nodes.isEmpty, "invalidateCache 后应重新读盘")
 }
 
+// MARK: - CANVAS-UNDO：撤销栈 + 键位判定 + 多选位移（v2.11.7 hotfix18）
+//
+// 为什么这组必须存在：撤销是**破坏性操作的唯一退路**，它自己写错就没有第二道防线了。
+// 三类错误都不会当场报错，只会静默丢数据：
+//   1. 游标模型算错 → 撤销后再做新动作，redo 分支没截断，栈里留着永远到不了的"未来"。
+//   2. 容量裁剪写错 → 裁掉的是新条目而不是最老的，用户按 Cmd+Z 直接跳回半小时前。
+//   3. 多选位移用「逐节点吸附新坐标」而不是「吸附 delta」→ 每个节点各自被吸到最近网格，
+//      选中集合的相对位置被悄悄改掉（两个相距 30pt 的节点拖完变成相距 24pt）。
+// 这三条在 UI 上都要靠人眼逐节点核对才能发现，所以必须在这里钉死。
+
+do {
+    func node(_ id: String, _ x: CGFloat, _ y: CGFloat) -> CanvasNode {
+        CanvasNode(id: id, x: x, y: y)
+    }
+    func entry(_ kind: CanvasHistoryEntry.Kind,
+               _ detail: String,
+               before: [CanvasNode] = [],
+               after: [CanvasNode] = [],
+               slotEdit: CanvasHistoryEntry.SlotTextEdit? = nil) -> CanvasHistoryEntry {
+        CanvasHistoryEntry(kind: kind, detail: detail, before: before, after: after, slotEdit: slotEdit)
+    }
+
+    // ── 空栈边界
+    var stack = CanvasUndoStack()
+    t.check(stack.isEmpty, "新栈应为空")
+    t.check(!stack.canUndo, "空栈不可撤销")
+    t.check(!stack.canRedo, "空栈不可重做")
+    t.check(stack.undo() == nil, "空栈 undo 应返回 nil 而不是崩")
+    t.check(stack.redo() == nil, "空栈 redo 应返回 nil 而不是崩")
+
+    // ── 基本游标推进
+    stack.push(entry(.addNode, "A", after: [node("a", 0, 0)]))
+    stack.push(entry(.addNode, "B", before: [node("a", 0, 0)], after: [node("a", 0, 0), node("b", 10, 10)]))
+    t.equal(stack.count, 2, "push 两条后应有 2 条")
+    t.equal(stack.cursor, 2, "push 后游标应指向末尾（全部已生效）")
+    t.check(stack.canUndo && !stack.canRedo, "刚 push 完：可撤销、不可重做")
+
+    let undone = stack.undo()
+    t.equal(undone?.detail, "B", "★★undo 应返回最新那条（B），而不是最老那条")
+    t.equal(stack.cursor, 1, "undo 后游标应回退 1")
+    t.check(stack.canUndo && stack.canRedo, "撤销一步后：两边都可走")
+    t.equal(stack.display.filter { !$0.applied }.count, 1, "display 里应有 1 条已撤销（置灰）条目")
+    t.equal(stack.display.first?.entry.detail, "B", "display 应新的在前")
+    t.equal(stack.display.first?.cursorAfter, 2, "★★display.cursorAfter 应是「推到这条做完」所需的游标值")
+
+    let redone = stack.redo()
+    t.equal(redone?.detail, "B", "redo 应把刚撤销的那条还回来")
+    t.equal(stack.cursor, 2, "redo 后游标应回到末尾")
+
+    // ── 撤销后再 push：redo 分支必须被截断
+    _ = stack.undo()                       // cursor = 1，B 处于可重做状态
+    stack.push(entry(.addNode, "C"))       // 在 A 之后开新分支
+    t.equal(stack.count, 2, "★★撤销后 push 新条目，必须截掉被撤销的分支（应剩 A + C）")
+    t.equal(stack.cursor, 2, "新分支 push 后游标应指向末尾")
+    t.check(!stack.canRedo, "★★开了新分支就不该还能 redo 到旧分支（那是两个互斥的未来）")
+    t.equal(stack.display.first?.entry.detail, "C", "新分支的条目应在最前")
+
+    // ── 容量：裁掉的必须是**最老**的
+    var big = CanvasUndoStack()
+    for i in 0..<(CanvasUndoStack.capacity + 10) {
+        big.push(entry(.moveNode, "step\(i)"))
+    }
+    t.equal(big.count, CanvasUndoStack.capacity, "栈长度应封顶在 capacity=\(CanvasUndoStack.capacity)")
+    t.equal(big.cursor, CanvasUndoStack.capacity, "满栈时游标应等于容量")
+    t.equal(big.display.first?.entry.detail, "step\(CanvasUndoStack.capacity + 9)",
+            "最新一条应保留在最前")
+    t.check(!big.entries.contains { $0.detail == "step0" },
+            "★★溢出时必须丢最老的（step0），而不是丢最新的")
+    t.equal(big.entries.first?.detail, "step10",
+            "★★裁剪后最老的应是 step10（丢掉了 step0~step9 共 10 条）")
+
+    // 满栈撤销到底：游标可以退到 0，且不越界
+    var drain = big
+    var steps = 0
+    while drain.undo() != nil { steps += 1 }
+    t.equal(steps, CanvasUndoStack.capacity, "应能一路撤销 capacity 步")
+    t.equal(drain.cursor, 0, "撤销到底游标应为 0")
+    t.check(!drain.canUndo && drain.canRedo, "撤销到底：不可再撤、全部可重做")
+
+    // ── slotEdit 必须原样带在条目上（撤销时要靠它回滚槽位主体文本）
+    var withSlot = CanvasUndoStack()
+    let edit = CanvasHistoryEntry.SlotTextEdit(groupId: "g1", slot: 3, before: "旧文本", after: "新文本")
+    withSlot.push(entry(.editNode, "标签", slotEdit: edit))
+    let popped = withSlot.undo()
+    t.equal(popped?.slotEdit?.before, "旧文本",
+            "★★撤销条目必须带回 slotEdit.before —— 否则画布退回旧文本、编辑页还留着新文本，两边对不上")
+    t.equal(popped?.slotEdit?.slot, 3, "slotEdit 的槽位号应保留")
+    t.equal(popped?.slotEdit?.groupId, "g1", "slotEdit 的组 id 应保留（可能是非当前组）")
+    t.equal(withSlot.redo()?.slotEdit?.after, "新文本", "重做应能拿到 slotEdit.after")
+
+    // ── 键位判定
+    typealias KB = CanvasKeyBinding
+    for code in KB.deleteKeyCodes {
+        t.equal(KB.action(keyCode: code, command: false, shift: false), .delete,
+                "keyCode \(code)（Delete/Backspace）应判为删除")
+    }
+    t.equal(KB.action(keyCode: KB.zKeyCode, command: true, shift: false), .undo, "⌘Z 应判为撤销")
+    t.equal(KB.action(keyCode: KB.zKeyCode, command: true, shift: true), .redo, "⇧⌘Z 应判为重做")
+    t.equal(KB.action(keyCode: KB.zKeyCode, command: false, shift: false), .none,
+            "★★裸 Z 不能判成撤销 —— 那会让用户在任何输入场景下打不出字母 z")
+    t.equal(KB.action(keyCode: KB.zKeyCode, command: true, shift: false, option: true), .none,
+            "⌥⌘Z 不是本 App 的绑定，应放行给系统")
+    // 删除键必须要求「无 Command」：⌘Delete 在 macOS 里是「移到废纸篓」类语义，不该被画布截走。
+    t.equal(KB.action(keyCode: 51, command: true, shift: false), .none,
+            "★★⌘Delete 不应判为画布删除（避免与系统语义打架）")
+    t.equal(KB.action(keyCode: 0, command: false, shift: false), .none, "无关键位应返回 .none")
+
+    // ── 多选位移：吸附 delta，而不是逐节点吸附新坐标
+    let step = CanvasGeometry.snapStep
+    t.check(step > 0, "snapStep 必须为正")
+    // 两个节点相距 30pt（非网格整数倍）。同一 delta 施加后，间距必须仍是 30pt。
+    let ax: CGFloat = 0, bx: CGFloat = 30
+    let rawDelta: CGFloat = 13
+    let snappedDelta = CanvasGeometry.snapScalar(rawDelta, step: step)
+    let newAx = ax + snappedDelta
+    let newBx = bx + snappedDelta
+    t.check(canvasApprox(newBx - newAx, bx - ax),
+            "★★多选位移必须吸附 delta：施加同一位移后两节点间距应仍为 \(bx - ax)（实得 \(newBx - newAx)）")
+    // 反例留档：如果改成逐节点吸附新坐标，间距就会被改掉。
+    let wrongAx = CanvasGeometry.snapScalar(ax + rawDelta, step: step)
+    let wrongBx = CanvasGeometry.snapScalar(bx + rawDelta, step: step)
+    t.check(!canvasApprox(wrongBx - wrongAx, bx - ax),
+            "★★反例校验：逐节点吸附新坐标确实会改变相对间距（\(wrongBx - wrongAx) ≠ \(bx - ax)），"
+            + "所以实现必须走 snapScalar(delta)")
+
+    // snapScalar 自身的边界
+    t.equal(CanvasGeometry.snapScalar(0, step: step), 0, "snapScalar：0 原样")
+    t.check(canvasApprox(CanvasGeometry.snapScalar(-13, step: 8), -16),
+            "snapScalar：负数应向最近网格取整（-13 → -16）")
+    t.equal(CanvasGeometry.snapScalar(7, step: 0), 7, "★★step<=0 时不能除零，应原样返回")
+    t.equal(CanvasGeometry.snapScalar(.nan, step: 8), 0, "★★NaN 应回落到 0（NaN 坐标会让节点整体消失）")
+
+    // ── 历史条目展示信息完整性：面板要靠它们说清"撤销的是哪一步"
+    for kind in [CanvasHistoryEntry.Kind.addNode, .moveNode, .removeNode,
+                 .fanOut, .clear, .editNode, .bindSlot] {
+        t.check(!kind.title.isEmpty, "\(kind.rawValue) 必须有中文动作名")
+        t.check(!kind.symbolName.isEmpty, "\(kind.rawValue) 必须有图标名")
+    }
+}
+
 t.report()

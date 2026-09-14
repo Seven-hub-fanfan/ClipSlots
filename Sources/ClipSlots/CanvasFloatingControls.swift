@@ -77,33 +77,61 @@ struct CanvasGenerateButton: View {
 
 // MARK: - 底部工具栏
 
-/// 底部浮动工具栏：选择 / 抓手 / 框选 / 新建节点。
+/// 底部浮动工具栏：选择 / 抓手 / 新建节点 / 历史记录。
 ///
-/// 「新建节点」与前三个语义不同——它是**一次性动作**而不是持续模式，所以点它不改 `activeTool`，
+/// 「新建节点」与前两个语义不同——它是**一次性动作**而不是持续模式，所以点它不改 `activeTool`，
 /// 直接建一个节点。把它混在同一排是因为设计稿如此（也符合 Figma/Excalidraw 的习惯），但行为上
 /// 必须分开，否则用户点完会发现自己卡在一个「新建」模式里不知道怎么退出。
+///
+/// 末尾的历史记录同理是一次性动作（开关一个面板），所以也不进 `CanvasTool` 枚举 ——
+/// 那个枚举的语义是"当前处于哪种指针模式"，塞一个面板开关进去会让 `activeTool` 变成一个
+/// 既表示模式又表示面板的四不像。
 struct CanvasFloatingToolbar: View {
     @ObservedObject var canvas: CanvasStore
-    let onCreateNode: () -> Void
+    @Binding var isHistoryOpen: Bool
+    let onAddNode: () -> Void
 
     var body: some View {
         HStack(spacing: 2) {
             ForEach(CanvasTool.allCases) { tool in
                 if tool == .newNode {
-                    Divider()
-                        .frame(height: 18)
-                        .padding(.horizontal, 3)
-                    toolButton(tool, isActive: false) { onCreateNode() }
+                    separator
+                    toolButton(tool, isActive: false) { onAddNode() }
                 } else {
                     toolButton(tool, isActive: canvas.activeTool == tool) {
                         canvas.activeTool = tool
                     }
                 }
             }
+
+            separator
+
+            Button { isHistoryOpen.toggle() } label: {
+                Image(systemName: "clock.arrow.circlepath")
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundColor(isHistoryOpen ? AppTheme.chromeAccentInk : .secondary.opacity(0.8))
+                    .frame(width: 28, height: 24)
+                    .background(
+                        RoundedRectangle(cornerRadius: 7, style: .continuous)
+                            .fill(isHistoryOpen ? AppTheme.chromeAccentSoftFill : Color.clear)
+                    )
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .help("操作历史（⌘Z 撤销 / ⇧⌘Z 重做）")
+            .popover(isPresented: $isHistoryOpen, arrowEdge: .top) {
+                CanvasHistoryPanel(canvas: canvas)
+            }
         }
         .padding(.horizontal, 6)
         .padding(.vertical, 5)
         .floatingSurface(cornerRadius: 13)
+    }
+
+    private var separator: some View {
+        Divider()
+            .frame(height: 18)
+            .padding(.horizontal, 3)
     }
 
     private func toolButton(_ tool: CanvasTool, isActive: Bool, action: @escaping () -> Void) -> some View {
@@ -120,6 +148,120 @@ struct CanvasFloatingToolbar: View {
         }
         .buttonStyle(.plain)
         .help(tool.hint.map { "\(tool.title)（\(tool.shortcut)）· \($0)" } ?? "\(tool.title)（\(tool.shortcut)）")
+    }
+}
+
+// MARK: - 历史记录面板
+
+/// 操作历史 + 撤销/重做（v2.11.7 hotfix18）。
+///
+/// 面板同时列出**已生效**与**已撤销**的条目（后者置灰），点任一条可把画布推到「那一条刚做完」的
+/// 状态。这比只给两个 undo/redo 按钮更有用：用户要退回五步前时，看得见目标比数着按五次可靠。
+///
+/// 刻意不做「删除某一条历史」：撤销栈是一条线性时间轴，抽掉中间一条就得重算它之后所有条目的
+/// 前后快照 —— 那是一个必然出错的操作，而收益仅仅是列表短一点。
+struct CanvasHistoryPanel: View {
+    @ObservedObject var canvas: CanvasStore
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            header
+            Divider()
+
+            if canvas.history.isEmpty {
+                VStack(spacing: 6) {
+                    Image(systemName: "clock")
+                        .font(.system(size: 18, weight: .light))
+                        .foregroundColor(.secondary.opacity(0.4))
+                    Text("还没有任何操作")
+                        .font(.system(size: 11))
+                        .foregroundColor(.secondary.opacity(0.7))
+                }
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 26)
+            } else {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 1) {
+                        ForEach(canvas.history.display, id: \.entry.id) { item in
+                            row(item.entry, applied: item.applied, cursorAfter: item.cursorAfter)
+                        }
+                    }
+                    .padding(.vertical, 4)
+                }
+                .frame(height: min(CGFloat(canvas.history.count) * 34 + 8, 260))
+            }
+        }
+        .frame(width: 250)
+    }
+
+    private var header: some View {
+        HStack(spacing: 6) {
+            Text("操作历史")
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundColor(.primary.opacity(0.8))
+            Spacer(minLength: 0)
+            stepButton("arrow.uturn.backward", help: "撤销（⌘Z）", enabled: canvas.canUndo) {
+                canvas.undo()
+            }
+            stepButton("arrow.uturn.forward", help: "重做（⇧⌘Z）", enabled: canvas.canRedo) {
+                canvas.redo()
+            }
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 8)
+    }
+
+    private func stepButton(_ symbol: String,
+                            help: String,
+                            enabled: Bool,
+                            action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: symbol)
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundColor(enabled ? AppTheme.chromeAccentInk : .secondary.opacity(0.35))
+                .frame(width: 22, height: 20)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .disabled(!enabled)
+        .help(help)
+    }
+
+    private func row(_ entry: CanvasHistoryEntry, applied: Bool, cursorAfter: Int) -> some View {
+        Button {
+            canvas.jump(toCursor: cursorAfter)
+        } label: {
+            HStack(spacing: 7) {
+                Image(systemName: entry.kind.symbolName)
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundColor(applied ? AppTheme.chromeAccentInk.opacity(0.8) : .secondary.opacity(0.35))
+                    .frame(width: 14)
+
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(entry.kind.title)
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundColor(applied ? .primary.opacity(0.85) : .secondary.opacity(0.45))
+                    if !entry.detail.isEmpty {
+                        Text(entry.detail)
+                            .font(.system(size: 9))
+                            .foregroundColor(.secondary.opacity(applied ? 0.7 : 0.35))
+                            .lineLimit(1)
+                    }
+                }
+
+                Spacer(minLength: 0)
+
+                Text(entry.stamp())
+                    .font(.system(size: 9, design: .monospaced))
+                    .foregroundColor(.secondary.opacity(applied ? 0.55 : 0.3))
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 5)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help(applied ? "点击退回到这一步之后" : "点击重做到这一步")
     }
 }
 

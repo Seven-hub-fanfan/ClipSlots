@@ -41,17 +41,23 @@ struct CanvasSlotLibraryPanel: View {
         store.specialSlots.filter { $0.pageId == page.id }.sorted { $0.order < $1.order }
     }
 
-    /// 面板宽度。展开 208 / 收起 132。
+    /// 侧栏宽度。展开 240 / 收起 44。
     ///
-    /// ★ 必须钉在**外层 VStack** 上，不能只钉在各个子视图上。第一版把 208 分别写在 `header` 和
+    /// ★ v2.11.7 hotfix18：从「浮动卡片 208/132」改成「贴边侧栏 240/44」。
+    ///   - 240 是 Figma / Sketch 这类画布工具左栏的实际量级。旧的 208 在三级缩进
+    ///     （页面 → 组 → 槽位）之后只剩 ~120pt 给文字，槽位 Label 一到 6 字就被省略号吃掉。
+    ///   - 收起态从 132 收到 44：132 是「窄面板」，还留着标题文字，占着地方又读不到内容；
+    ///     44 是**真正的图标轨**，只留库图标与展开箭头，视觉上明确表达「这里被折叠了」。
+    ///
+    /// ★ 必须钉在**外层 VStack** 上，不能只钉在各个子视图上。第一版把宽度分别写在 `header` 和
     /// `ScrollView` 上，结果面板铺满了整个画布宽度（实测 1290pt，把右上角的「生成」按钮吞进了自己的
-    /// 白底里，中间的空画布引导文字也被白底压没）。根因是中间那条 `Divider()`：它**没有固有宽度、
-    /// 会主动占满可用宽度**，于是 VStack 的宽度取三个子视图的最大值 = 无穷大。
-    /// 这是 SwiftUI 里很容易踩的一脚——Divider 在 HStack 里是根竖线（高度自适应），
+    /// 白底里）。根因是中间那条 `Divider()`：它**没有固有宽度、会主动占满可用宽度**，于是 VStack 的
+    /// 宽度取三个子视图的最大值 = 无穷大。Divider 在 HStack 里是根竖线（高度自适应），
     /// 在 VStack 里是根横线（宽度贪心）。
-    private var panelWidth: CGFloat {
-        canvas.isLibraryExpanded ? 208 : 132
-    }
+    private var panelWidth: CGFloat { Self.width(expanded: canvas.isLibraryExpanded) }
+
+    /// 供画布布局读取（缩放控件 / 工具栏要避开侧栏，不能各自硬编码一份宽度）。
+    static func width(expanded: Bool) -> CGFloat { expanded ? 240 : 44 }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -67,23 +73,23 @@ struct CanvasSlotLibraryPanel: View {
                     .padding(.vertical, 6)
                     .padding(.horizontal, 8)
                 }
-                // 高度上限：内容多时内部滚动，而不是把面板顶到画布底部去挤掉工具栏。
-                .frame(maxHeight: 420)
             }
+            // 撑满剩余高度：贴边侧栏要从顶栏下方一直落到窗口底边，内容少时下半截是空白底色，
+            // 而不是让侧栏缩成半截、露出下面的画布网格（那样就又变回浮动卡片了）。
+            Spacer(minLength: 0)
         }
         .frame(width: panelWidth)
-        .background(
-            RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .fill(AppTheme.elevatedBackground)
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .stroke(AppTheme.subtleBorder, lineWidth: 1)
-        )
-        .shadow(color: AppTheme.cardShadow(isEmpty: false), radius: 10, x: 0, y: 4)
-        // 固定宽度后仍要显式 fixedSize：外层 ZStack 会把可用宽度整个让给它，
-        // 少了这一句在某些父级布局下 frame 仍可能被放大。
-        .fixedSize(horizontal: true, vertical: true)
+        .frame(maxHeight: .infinity, alignment: .top)
+        // 贴边侧栏：不透明底 + 无圆角 + 无阴影。
+        // 不透明是硬要求 —— 多彩皮肤的整窗氛围层里有一枚 820pt 的蓝紫大圆，半透明底会把它透进
+        // 侧栏，看起来像侧栏自己染了一块蓝。
+        .background(AppTheme.canvasChromeSurface)
+        // 只在右侧留一条分隔线（左/上/下都贴着窗口边框，画描边只会变成双线）。
+        .overlay(alignment: .trailing) {
+            Rectangle()
+                .fill(AppTheme.subtleBorder)
+                .frame(width: 1)
+        }
     }
 
     // MARK: - 头部
@@ -93,10 +99,13 @@ struct CanvasSlotLibraryPanel: View {
             Image(systemName: "tray.full")
                 .font(.system(size: 10, weight: .semibold))
                 .foregroundColor(AppTheme.chromeAccentInk)
-            Text("槽位库")
-                .font(.system(size: 11, weight: .semibold))
-                .foregroundColor(.primary.opacity(0.85))
-            Spacer(minLength: 0)
+            if canvas.isLibraryExpanded {
+                Text("槽位库")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundColor(.primary.opacity(0.85))
+                    .lineLimit(1)
+                Spacer(minLength: 0)
+            }
             Button {
                 withAnimation(Anim.reveal) { canvas.isLibraryExpanded.toggle() }
             } label: {
@@ -109,7 +118,8 @@ struct CanvasSlotLibraryPanel: View {
             .buttonStyle(.plain)
             .help(canvas.isLibraryExpanded ? "收起槽位库" : "展开槽位库")
         }
-        .padding(.horizontal, 10)
+        // 收起态只有 44pt 宽，两侧各 10pt 内边距会把 16pt 的箭头挤出去；收起时改用 4pt。
+        .padding(.horizontal, canvas.isLibraryExpanded ? 10 : 4)
         .padding(.vertical, 8)
     }
 

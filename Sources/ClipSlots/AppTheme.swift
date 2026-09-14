@@ -244,6 +244,26 @@ enum AppTheme {
     static var windowBackground: Color { isMinimalSkin ? minimalWindow : colorfulWindowBackground }
     static func windowBackground(_ scheme: ColorScheme) -> Color { windowBackground }
 
+    // MARK: 画布底色（v2.11.7 hotfix18）
+    //
+    // ★ 为什么画布不能直接用 `windowBackground`：
+    //   多彩皮肤的整窗氛围层（RetroPosterAmbientBackground）里有一枚 **820pt 的蓝紫大圆**
+    //   （ContentView 里 offset(x:130,y:-40)、opacity 0.46、blur 仅 1.5，边缘很硬）。编辑模式下它被
+    //   槽位卡片网格压住基本看不出来；画布模式一去掉所有 chrome，这枚圆就直接糊在网格上 ——
+    //   用户反馈的「多彩模式有一个蓝色圆圈」就是它。`colorfulWindowBackground` 取自
+    //   NeumorphicPalette 的 ground，**带透明度**，盖不住它。
+    //
+    // 所以画布自己铺一层**完全不透明**的中性底：既根除蓝圆，也让白色网格线有稳定的对比基准。
+    // 刻意不改氛围层本身 —— 编辑模式的多彩海报是既有设计，不该被画布的需求牵连。
+    private static let colorfulCanvasSurface = dyn(light: Color(red: 0.957, green: 0.957, blue: 0.965),
+                                                   dark: Color(red: 0.106, green: 0.110, blue: 0.122))
+    static var canvasSurface: Color { isMinimalSkin ? minimalWindow : colorfulCanvasSurface }
+
+    /// 画布上「贴边 chrome」（左侧栏）的底色：比画布本体略浅/略深一档，形成层次但不靠阴影。
+    private static let colorfulCanvasChromeSurface = dyn(light: Color(red: 0.988, green: 0.988, blue: 0.992),
+                                                        dark: Color(red: 0.141, green: 0.145, blue: 0.157))
+    static var canvasChromeSurface: Color { isMinimalSkin ? minimalCardEmpty : colorfulCanvasChromeSurface }
+
     private static let colorfulElevatedBackground = dyn(light: Color.white.opacity(0.82),
                                                         dark: Color.white.opacity(0.055))
     static var elevatedBackground: Color { isMinimalSkin ? minimalCardFilled : colorfulElevatedBackground }

@@ -163,6 +163,23 @@ public enum CanvasGeometry {
                        y: (point.y / step).rounded() * step)
     }
 
+    /// 网格吸附步长（画布空间）。
+    ///
+    /// 住在 Kit 而不是 `CanvasStore`：吸附行为的正确性（尤其多选位移不改相对间距）要靠 smoke
+    /// 断言守住，而 smoke 只依赖 Kit。常量留在 App 层就意味着测试只能抄一份字面量，
+    /// 抄完之后改 App 层的值测试照样全绿 —— 那道防线就形同虚设了。
+    public static let snapStep: CGFloat = 12
+
+    /// 单个标量的吸附（多选批量位移用）。
+    ///
+    /// ★ 为什么批量移动必须吸附**位移量**、而不是各节点吸附自己的新坐标：后者会把原本错开
+    /// （比如相差 6pt）的两个节点吸到同一条格线上，选中集合内部的相对位置被悄悄改掉 ——
+    /// 用户框选两个节点拖一下，结果它们"对齐"了，这是数据被动改写，不是布局辅助。
+    public static func snapScalar(_ value: CGFloat, step: CGFloat) -> CGFloat {
+        guard step > 0, value.isFinite else { return value.isFinite ? value : 0 }
+        return (value / step).rounded() * step
+    }
+
     // MARK: - 多张展开布局
 
     /// 一次生成 N 张时，子节点在画布空间的落位（横向排开）。

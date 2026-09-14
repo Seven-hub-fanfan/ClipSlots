@@ -2585,6 +2585,76 @@ final class SlotStoreObservable: ObservableObject {
         showFloatingNotice(FloatingNotice(title: "已更新文本", subtitle: "槽位 \(slot)", iconName: "pencil.circle.fill", kind: .success))
     }
 
+    // MARK: - 画布 ⇄ 槽位双向同步（v2.11.7 hotfix18）
+
+    /// 读一个**任意组**槽位的主体纯文本，供画布节点卡片实时展示。
+    ///
+    /// 画布上绑定了槽位的节点，显示的就是槽位数据本身，不是拖进来那一刻的副本 —— 所以每次求值都
+    /// 从这里现取。当前组优先读内存里的 `slots`（编辑页刚改完还没落盘的那一瞬，盘上是旧值）；
+    /// 其他组走 `SpecialSlotStorage`（它自带内容缓存，不是每次都碰盘）。
+    func canvasSlotText(groupId: String, slot: Int) -> String? {
+        if groupId == currentSpecialSlotId {
+            return contentForSlot(slot).plainText
+        }
+        return specialStorage.get(slot, in: groupId).plainText
+    }
+
+    /// 读一个**任意组**槽位的 Label，供画布节点标题实时展示（用户在编辑页改了 Label，画布也要跟着改）。
+    func canvasSlotLabel(groupId: String, slot: Int) -> String? {
+        if groupId == currentSpecialSlotId {
+            return labels[slot] ?? specialStorage.getLabel(slot, in: groupId)
+        }
+        return specialStorage.getLabel(slot, in: groupId)
+    }
+
+    /// 把画布里编辑好的文本写回**任意组**的槽位主体。
+    ///
+    /// 与 `updateTextSlot` 的三点差别，每一点都是刻意的：
+    ///   1. **可跨组写**：画布节点可以绑到任何页任何组的槽位，不受"当前组"约束。
+    ///   2. **不弹 toast**：画布是边打字边失焦提交的编辑体验，每次提交弹一次「已更新文本」是噪声。
+    ///   3. **不进主 store 的撤销栈**：这一步由画布自己的撤销栈承载（连同节点状态一起回滚）。
+    ///      两个栈都记会导致按一次 Cmd+Z 只回滚一半，另一半要再按一次 —— 那是最糟的撤销体验。
+    ///
+    /// 保留原有 `SlotContent` 的附件 / Label / 手动缩略图：只换 `items`，不重建整条记录
+    /// （v2.7.74 就是重建整条记录静默丢附件踩出来的坑）。同时刷新 `contentId` / `updatedAt`，
+    /// 否则 v2.10.52 起的增量 diff 会判等而跳过重绘（v2.10.64/65 同源坑）。
+    @discardableResult
+    func writeCanvasSlotText(groupId: String, slot: Int, text: String) -> Bool {
+        guard slot >= 1, slot <= config.slots else { return false }
+
+        let existing: SlotContent?
+        if groupId == currentSpecialSlotId {
+            guard let current = contentForSlotOrUnknown(slot) else {
+                NSLog("[ClipSlots] writeCanvasSlotText slot=\(slot) group=\(groupId): storage UNKNOWN, aborting")
+                return false
+            }
+            existing = current
+        } else {
+            existing = specialStorage.getOrUnknown(slot, in: groupId)
+            guard existing != nil else {
+                NSLog("[ClipSlots] writeCanvasSlotText slot=\(slot) group=\(groupId): storage UNKNOWN, aborting")
+                return false
+            }
+        }
+
+        var content = existing ?? SlotContent()
+        let data = text.data(using: .utf8) ?? Data()
+        content.items = [[PasteboardItem(type: "public.utf8-plain-text", data: data)]]
+        // 文本被替换后旧的 HTML 源已经对不上了，留着会让「编辑 HTML」打开一份与正文不符的内容。
+        content.htmlSource = nil
+        content.timestamp = Date()
+        content.contentId = UUID().uuidString
+        content.updatedAt = Date().timeIntervalSince1970
+
+        if groupId == currentSpecialSlotId {
+            slots[slot] = content
+            persistCurrentSpecialSlotData()
+        } else {
+            _ = specialStorage.set(slot, content: content, in: groupId)
+        }
+        return true
+    }
+
     func importDroppedFiles(_ urls: [URL], toSlot slot: Int) {
         guard let first = urls.first else { return }
         // UNDO-1 (v2.10.95): 拖入文件会覆盖若干槽位主体，整批算一步撤销。

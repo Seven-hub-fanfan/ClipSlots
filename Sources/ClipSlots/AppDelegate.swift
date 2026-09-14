@@ -225,6 +225,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             onPaste: { [weak store] slot in
                 guard let store = store else { return }
                 NSLog("[ClipSlots] onPaste slot=\(slot) storeInstanceID=\(store.instanceID) activeHotkeySpecialSlotId=\(store.activeHotkeySpecialSlotId)")
+                // v2.11.7 hotfix18: 画布在台上时，Cmd+数字的语义变成「把该槽位填进当前选中的节点」，
+                // 而不是写系统剪贴板 —— 用户在画布里按 Cmd+1 想要的是内容进节点，不是进别的 App。
+                // 画布没接（没登记 / 没选中节点）就照旧走剪贴板，不改编辑模式的任何行为。
+                if CanvasCommandBridge.shared.handleSlotCommand(slot) { return }
                 // v2.10.0: 方案A —— 拨杆状态分流。拨杆2「自动粘贴」开 → 走游标自动粘贴；关 → 原有单槽粘贴。
                 if AutoModeState.shared.autoPasteEnabled {
                     store.autoPasteFromHotkey(slot)
@@ -292,6 +296,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 guard let self = self else { return }
                 NSLog("[ClipSlots] RADIAL selected slot=\(slot)")
                 self.radialMenuController.dismiss()
+
+                // v2.11.7 hotfix18: 画布在台上 → 内容填进当前选中的节点。
+                // **刻意不切回上一个 App**：目标就在 ClipSlots 自己的画布里，把前台让出去等于让用户
+                // 看不到刚才那一步的结果，还得手动切回来。
+                if CanvasCommandBridge.shared.handleSlotCommand(slot) { return }
 
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
                     if let previousApp = previousApp ?? self.store?.lastNonClipSlotsApp {

@@ -225,9 +225,13 @@ struct ContentView: View {
     var body: some View {
         ZStack(alignment: .top) {
             VStack(spacing: 0) {
-                // ★ v2.11.7 hotfix17: 工作区切换独占顶部一行，两侧等权 Spacer → 几何真居中。
-                // 这一行在两种模式下都在（画布模式下它是**唯一**的 chrome），位置不随模式跳动。
-                workspaceBar
+                // ★ v2.11.7 hotfix18: 编辑模式下工作区切换器**回到 titleBar 里**（logo 右侧、与搜索框同一行），
+                // 不再独占一行 —— 独占一行虽然能做到几何真居中，但为一个双段控件吃掉整条 34pt 高度，
+                // 在 900pt 高的窗口里等于白扔一行；而且它悬在 logo 上方，读起来像是「窗口标题」而不是
+                // 「当前工作区」。画布模式没有 titleBar，所以单独给它一条只含切换器的窄顶栏（见 canvasTopBar）。
+                if workspaceMode == .canvas {
+                    canvasTopBar
+                }
 
                 // ★ v2.11.7 hotfix17: 画布是一块**完全独立的全屏工作区**，不共享槽位界面的任何 chrome。
                 // 顶栏（logo/拨杆/搜索/筛选/设置）、操作行（页面/槽位组/自动切换/打包/导入/清空）、
@@ -345,8 +349,15 @@ struct ContentView: View {
                     // + 噪点贴图 + drawingGroup）正是「多彩」观感的来源，简洁模式换成一张纯净中性底
                     // ——顺带也省掉上面注释里实测的那 ~120ms/次离屏合成。用 if 而不是 .opacity(0)：
                     // 透明度为 0 的图层照样要走一遍模糊与栅格化。
-                    if AppTheme.isMinimalSkin {
-                        AppTheme.windowBackground
+                    //
+                    // ★ v2.11.7 hotfix18: **画布模式同样整层不渲染**。
+                    // 用户反馈的「多彩模式有一个蓝色圆圈」就是这一层里那枚 820pt 蓝紫大圆
+                    // （blur 只有 1.5，边缘很硬）。编辑模式下它被槽位卡片网格压着，属于既有设计；
+                    // 画布模式把 chrome 全摘了之后，它直接糊在网格上，还会在切到画布的瞬间闪一下
+                    // （用户视频 0:04 的「蓝色点击反馈圆圈」就是这个闪现，不是按钮的点击动画）。
+                    // 画布要的是一张能给网格线做对比基准的中性底，不是海报。
+                    if AppTheme.isMinimalSkin || workspaceMode == .canvas {
+                        AppTheme.canvasSurface
                     } else {
                         AmbientBackgroundHost(simplified: liveResize.isResizing)
                     }
@@ -575,23 +586,19 @@ struct ContentView: View {
         }
     }
 
-    /// 顶部工作区切换行（v2.11.7 hotfix17）。
+    /// 画布模式的窄顶栏（v2.11.7 hotfix18）。
     ///
-    /// 只放切换器，两侧是等权 `Spacer` —— 这是唯一能保证「几何真居中」的写法：只要行内还有别的
-    /// 固有宽度控件（logo、搜索框），中点就会被它们的宽度差拉偏。
-    ///
-    /// 画布模式下这一行是整个界面**仅剩的 chrome**，所以垂直留白给得比编辑模式松一点（画布没有
-    /// 紧随其后的分隔线和操作行，贴太紧会显得切换器像是被压在窗口边框上）。
-    private var workspaceBar: some View {
+    /// 画布模式把 titleBar 整条摘掉了，切换器要是也跟着消失，用户就再也回不到编辑页（只能重启 App）。
+    /// 所以这里给它一条**只含切换器**的窄条：左对齐，和 Figma 把文件/页签放在左上角是同一套读法，
+    /// 也正好和它下方贴左边缘的槽位库侧栏对齐成一条视觉竖线。
+    private var canvasTopBar: some View {
         HStack(spacing: 0) {
-            Spacer(minLength: 0)
             WorkspaceModeSwitcher(selection: $workspaceMode)
                 .fixedSize(horizontal: true, vertical: true)
             Spacer(minLength: 0)
         }
         .padding(.horizontal, AppTheme.pagePadding)
-        .padding(.top, workspaceMode == .canvas ? 10 : 8)
-        .padding(.bottom, workspaceMode == .canvas ? 10 : 2)
+        .padding(.vertical, 8)
     }
 
     private var headerView: some View {
@@ -760,12 +767,15 @@ struct ContentView: View {
                 .fixedSize(horizontal: true, vertical: false)
                 .layoutPriority(2)
 
-            // ★ v2.11.7 hotfix17: 工作区切换器已从这里**移出**，改为顶部独立一行（见 `workspaceBar`）。
+            // ★ v2.11.7 hotfix18: 工作区切换器回到这一行（logo/拨杆之后、搜索框之前）。
             //
-            // 夹在「拨杆簇」和「搜索框」之间时它永远不可能真正居中：HStack 里左簇（logo+标题+拨杆）
-            // 和右簇（搜索框+图标）的固有宽度天差地别，两个 Spacer 只会把它推到「剩余空间的中点」，
-            // 视觉上偏左。要真居中就得让它独占一行、两侧只有等权 Spacer。
-            // 更关键的是：画布模式要把整条工具栏藏掉，切换器如果长在里面就会跟着一起消失。
+            // 上一版把它拎出去独占一行，为的是「几何真居中」；但用户实际要的是**跟搜索框同一行**、
+            // 顶栏一眼扫过去就是「logo → 在哪个工作区 → 搜什么」这条动线。所以放弃绝对居中：
+            // 它现在是左簇的最后一员，和右侧搜索框同处一条 baseline。
+            // 画布模式没有这条 titleBar，切换器由 `canvasTopBar` 承载（见那里的注释）。
+            WorkspaceModeSwitcher(selection: $workspaceMode)
+                .fixedSize(horizontal: true, vertical: true)
+                .layoutPriority(2)
 
             // v2.10.78: 唯一撑开用 Spacer 前移到搜索框之前，把 400pt 搜索框推到右侧、
             // 紧挨右侧图标簇；左侧（logo/拨杆簇与搜索框之间）留白。

@@ -25,6 +25,15 @@ final class CanvasStore: ObservableObject {
     @Published var activeTool: CanvasTool = .select
     /// 左侧槽位库面板是否展开。
     @Published var isLibraryExpanded: Bool = true
+    /// 撤销栈 + 操作流水。**只活在本次会话内，刻意不落盘**：它是「我刚才干了什么」的记忆辅助，
+    /// 不是文档内容；持久化它就得回答「跨天该不该 Cmd+Z」「导出 pack 要不要带」这些没有好答案的问题。
+    @Published private(set) var history = CanvasUndoStack()
+    /// 槽位内容版本号。
+    ///
+    /// 绑定槽位的节点卡片显示的是**槽位实时文本**，而槽位数据住在主 store 里。画布子树不订阅主 store
+    /// （那会把这个轻量 store 拖回全局重绘），所以需要一个显式的「脏」信号：主 store 那边槽位一变，
+    /// 或撤销/重做把槽位文本改回去了，就 `+= 1`，绑定节点据此重读。
+    @Published private(set) var slotRevision: Int = 0
 
     // MARK: - 视口（非 @Published，见类型注释）
 
@@ -56,11 +65,15 @@ final class CanvasStore: ObservableObject {
     }
 
     // MARK: - 节点增删改
+    //
+    // ★ 所有写操作都必须走 `commit(...)`：它负责「记一步撤销 + 落盘」这两件必须成对发生的事。
+    // 直接改 `nodes` 而绕过 commit 的写法，症状是「这一步 Cmd+Z 撤不掉」，而且不会有任何报错。
 
     func addNode(_ node: CanvasNode) {
-        nodes.append(node)
-        selectedNodeIds = [node.id]
-        scheduleSave()
+        commit(.addNode, detail: nodeTitle(node)) {
+            nodes.append(node)
+            selectedNodeIds = [node.id]
+        }
     }
 
     /// 从槽位创建节点。prompt 取槽位主体纯文本；空槽也允许拖入（生成前用户可自己补 prompt）。
@@ -95,25 +108,205 @@ final class CanvasStore: ObservableObject {
 
     func moveNode(id: String, to origin: CGPoint) {
         guard let idx = nodes.firstIndex(where: { $0.id == id }) else { return }
-        nodes[idx].setFrameOrigin(CanvasGeometry.snap(origin, step: CanvasStore.snapStep))
-        scheduleSave()
+        let snapped = CanvasGeometry.snap(origin, step: CanvasStore.snapStep)
+        // 吸附后位置没变就不记流水：拖起来又放回原格（或只是点一下带了 2pt 抖动）不是一次「操作」，
+        // 记了只会把历史面板刷成一屏重复的「移动节点」，也会白占撤销栈。
+        guard snapped != nodes[idx].frame.origin else { return }
+        let title = nodeTitle(nodes[idx])
+        commit(.moveNode, detail: title) {
+            nodes[idx].setFrameOrigin(snapped)
+        }
+    }
+
+    /// 批量位移（多选拖动）。
+    ///
+    /// ★ v2.11.7 hotfix18 修 bug：框选两个节点后拖动其中一个，只有被按住的那个会走。
+    /// 根因是拖拽只提交了 `draggingNodeId` 一个节点的新坐标，`selectedNodeIds` 里的其他节点
+    /// 从头到尾没被碰过。
+    ///
+    /// 这里刻意接受**位移量 delta** 而不是「新坐标」：批量移动要保持选中集合内部的相对位置不变，
+    /// 逐个算新坐标就得在调用方留一份「拖拽开始时每个节点的原点」快照，而 delta 天然就是不变量。
+    /// 吸附也因此只能按 delta 吸附（对每个节点各自 snap 会把原本错开的节点吸到同一条格线上，
+    /// 相对位置被悄悄改掉）。
+    func moveNodes(ids: Set<String>, by rawDelta: CGSize) {
+        guard !ids.isEmpty else { return }
+        let delta = CGSize(width: CanvasGeometry.snapScalar(rawDelta.width, step: CanvasStore.snapStep),
+                           height: CanvasGeometry.snapScalar(rawDelta.height, step: CanvasStore.snapStep))
+        guard delta.width != 0 || delta.height != 0 else { return }
+        let moved = nodes.filter { ids.contains($0.id) }
+        guard !moved.isEmpty else { return }
+        let detail = moved.count == 1 ? nodeTitle(moved[0]) : "\(moved.count) 个节点"
+        commit(.moveNode, detail: detail) {
+            for idx in nodes.indices where ids.contains(nodes[idx].id) {
+                let origin = nodes[idx].frame.origin
+                nodes[idx].setFrameOrigin(CGPoint(x: origin.x + delta.width,
+                                                  y: origin.y + delta.height))
+            }
+        }
     }
 
     func removeNodes(ids: Set<String>) {
         guard !ids.isEmpty else { return }
-        nodes.removeAll { ids.contains($0.id) }
-        selectedNodeIds.subtract(ids)
-        scheduleSave()
+        let removed = nodes.filter { ids.contains($0.id) }
+        guard !removed.isEmpty else { return }
+        // 一次删多个只记一条，写成「3 个节点」而不是刷 3 行 —— 框选批量删是常态操作。
+        let detail = removed.count == 1 ? nodeTitle(removed[0]) : "\(removed.count) 个节点"
+        commit(.removeNode, detail: detail) {
+            nodes.removeAll { ids.contains($0.id) }
+            selectedNodeIds.subtract(ids)
+        }
     }
 
-    func removeSelected() {
-        removeNodes(ids: selectedNodeIds)
+    /// 删除全部选中节点（Delete / Backspace）。返回删掉的数量，便于调用方决定要不要提示。
+    @discardableResult
+    func removeSelected() -> Int {
+        let ids = selectedNodeIds
+        let count = nodes.filter { ids.contains($0.id) }.count
+        removeNodes(ids: ids)
+        return count
     }
 
     func updateNode(id: String, _ mutate: (inout CanvasNode) -> Void) {
         guard let idx = nodes.firstIndex(where: { $0.id == id }) else { return }
         mutate(&nodes[idx])
         nodes[idx].updatedAt = Date()
+        scheduleSave()
+    }
+
+    // MARK: - 节点文本 / 槽位注入
+
+    /// 改节点自己的 prompt（**未绑定槽位**的节点走这条；绑定的节点由调用方写槽位数据）。
+    func updateNodePrompt(id: String, text: String, slotEdit: CanvasHistoryEntry.SlotTextEdit? = nil) {
+        guard let idx = nodes.firstIndex(where: { $0.id == id }) else { return }
+        guard nodes[idx].prompt != text || slotEdit != nil else { return }
+        let title = nodeTitle(nodes[idx])
+        commit(.editNode, detail: title, slotEdit: slotEdit) {
+            nodes[idx].prompt = text
+            nodes[idx].updatedAt = Date()
+        }
+    }
+
+    /// Cmd+数字 / 圆盘：把一个槽位的内容送进当前选中的节点。
+    ///
+    /// 语义分三种，按节点当前状态决定（每种都会在 toast 里说清楚，不做静默行为）：
+    ///   - 节点**已绑定**某槽位 → 改绑到新槽位（它本来就是那个槽位的镜像，追加会写脏槽位数据）。
+    ///   - 节点**未绑定且为空** → 绑定到该槽位，从此双向同步。
+    ///   - 节点**未绑定且有内容** → 把文本追加到末尾（用户在拼一段复合 prompt）。
+    @discardableResult
+    func injectSlot(pageId: String,
+                    groupId: String,
+                    slot: Int,
+                    label: String?,
+                    text: String) -> CanvasSlotInjection {
+        let targets = nodes.filter { selectedNodeIds.contains($0.id) }
+        guard !targets.isEmpty else { return .noSelection }
+
+        let name = label?.isEmpty == false ? label! : "槽位 \(slot)"
+        var modes: Set<CanvasSlotInjection.Mode> = []
+        commit(.bindSlot, detail: targets.count == 1 ? name : "\(name) → \(targets.count) 个节点") {
+            for idx in nodes.indices where selectedNodeIds.contains(nodes[idx].id) {
+                let isBound = nodes[idx].sourceSlot != nil
+                if isBound {
+                    modes.insert(.rebound)
+                    bind(&nodes[idx], pageId: pageId, groupId: groupId, slot: slot, label: label, text: text)
+                } else if nodes[idx].prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    modes.insert(.bound)
+                    bind(&nodes[idx], pageId: pageId, groupId: groupId, slot: slot, label: label, text: text)
+                } else {
+                    modes.insert(.appended)
+                    nodes[idx].prompt += "\n" + text
+                    nodes[idx].updatedAt = Date()
+                }
+            }
+        }
+        // 多个节点混合命中多种语义时报最"重"的那个（改绑 > 追加 > 绑定），提示不能撒谎。
+        let mode: CanvasSlotInjection.Mode = modes.contains(.rebound) ? .rebound
+            : (modes.contains(.appended) ? .appended : .bound)
+        return .applied(mode: mode, name: name, count: targets.count)
+    }
+
+    private func bind(_ node: inout CanvasNode,
+                      pageId: String,
+                      groupId: String,
+                      slot: Int,
+                      label: String?,
+                      text: String) {
+        node.prompt = text
+        node.sourcePageId = pageId
+        node.sourceGroupId = groupId
+        node.sourceSlot = slot
+        node.sourceLabel = label
+        node.updatedAt = Date()
+    }
+
+    /// 外部（编辑页改了槽位）通知画布：绑定节点该重读槽位文本了。
+    func noteSlotDataChanged() {
+        slotRevision += 1
+    }
+
+    // MARK: - 撤销 / 重做
+
+    var canUndo: Bool { history.canUndo }
+    var canRedo: Bool { history.canRedo }
+
+    /// 槽位文本回写钩子。由画布视图在 onAppear 时注入（`CanvasStore` 刻意不认识 `SlotStoreObservable`，
+    /// 否则这个轻量 store 又会被主 store 的 60 个 `@Published` 拖回全局重绘的老路上）。
+    var onRestoreSlotText: ((_ groupId: String, _ slot: Int, _ text: String) -> Void)?
+
+    /// 撤销一步。返回被撤销的条目（调用方用它做 toast 文案），没得撤时返回 nil。
+    @discardableResult
+    func undo() -> CanvasHistoryEntry? {
+        guard let entry = history.undo() else { return nil }
+        apply(nodes: entry.before)
+        if let edit = entry.slotEdit {
+            onRestoreSlotText?(edit.groupId, edit.slot, edit.before)
+        }
+        return entry
+    }
+
+    @discardableResult
+    func redo() -> CanvasHistoryEntry? {
+        guard let entry = history.redo() else { return nil }
+        apply(nodes: entry.after)
+        if let edit = entry.slotEdit {
+            onRestoreSlotText?(edit.groupId, edit.slot, edit.after)
+        }
+        return entry
+    }
+
+    /// 历史面板点某一条 → 把画布状态推到「那一条刚做完」的时刻。
+    ///
+    /// 直接循环调 undo/redo，而不是一步跳到目标快照：`slotEdit` 的回写是**逐条**挂在条目上的，
+    /// 跳跃式还原会漏掉中间那些条目的槽位文本，导致画布节点与编辑页槽位对不上。
+    func jump(toCursor target: Int) {
+        let clamped = max(0, min(target, history.entries.count))
+        while history.cursor > clamped { if undo() == nil { break } }
+        while history.cursor < clamped { if redo() == nil { break } }
+    }
+
+    private func apply(nodes newNodes: [CanvasNode]) {
+        nodes = newNodes
+        // 选中集合里可能有已经不存在的 id（撤销"新建"之后），留着会让工具栏的"删除选中"对着空气生效。
+        let alive = Set(newNodes.map(\.id))
+        selectedNodeIds = selectedNodeIds.intersection(alive)
+        slotRevision += 1
+        scheduleSave()
+    }
+
+    /// 写操作的唯一入口：跑一遍变更、记一步撤销、落盘。
+    private func commit(_ kind: CanvasHistoryEntry.Kind,
+                        detail: String,
+                        slotEdit: CanvasHistoryEntry.SlotTextEdit? = nil,
+                        _ mutate: () -> Void) {
+        let before = nodes
+        mutate()
+        guard nodes != before || slotEdit != nil else { return }
+        history.push(CanvasHistoryEntry(kind: kind,
+                                        detail: detail,
+                                        before: before,
+                                        after: nodes,
+                                        slotEdit: slotEdit))
+        slotRevision += 1
         scheduleSave()
     }
 
@@ -153,52 +346,67 @@ final class CanvasStore: ObservableObject {
         let count = max(1, min(parent.count, 4))
         guard count > 1 else { return }
 
-        let size = CGSize(width: parent.width, height: parent.height)
-        let bounds = CanvasGeometry.fanOutBounds(origin: parent.frame.origin,
-                                                nodeSize: size,
-                                                count: count,
-                                                gap: CanvasStore.fanGap)
+        commit(.fanOut, detail: "\(count) 个节点") {
+            let size = CGSize(width: parent.width, height: parent.height)
+            let bounds = CanvasGeometry.fanOutBounds(origin: parent.frame.origin,
+                                                    nodeSize: size,
+                                                    count: count,
+                                                    gap: CanvasStore.fanGap)
 
-        // 先推开挡路节点（排除母节点自身）。
-        var others = nodes
-        others.remove(at: idx)
-        let offsets = CanvasGeometry.pushRightOffsets(existing: others.map(\.frame),
-                                                     bounds: bounds,
-                                                     gap: CanvasStore.fanGap)
-        for (otherIdx, dx) in offsets {
-            let targetId = others[otherIdx].id
-            if let realIdx = nodes.firstIndex(where: { $0.id == targetId }) {
-                nodes[realIdx].x += dx
-                nodes[realIdx].updatedAt = Date()
+            // 先推开挡路节点（排除母节点自身）。
+            var others = nodes
+            others.remove(at: idx)
+            let offsets = CanvasGeometry.pushRightOffsets(existing: others.map(\.frame),
+                                                         bounds: bounds,
+                                                         gap: CanvasStore.fanGap)
+            for (otherIdx, dx) in offsets {
+                let targetId = others[otherIdx].id
+                if let realIdx = nodes.firstIndex(where: { $0.id == targetId }) {
+                    nodes[realIdx].x += dx
+                    nodes[realIdx].updatedAt = Date()
+                }
             }
-        }
 
-        // 母节点原地变成第 1 张，其余追加。
-        let frames = CanvasGeometry.fanOutFrames(origin: parent.frame.origin,
-                                                nodeSize: size,
-                                                count: count,
-                                                gap: CanvasStore.fanGap)
-        if let parentIdx = nodes.firstIndex(where: { $0.id == nodeId }) {
-            nodes[parentIdx].count = 1
-            nodes[parentIdx].updatedAt = Date()
+            // 母节点原地变成第 1 张，其余追加。
+            let frames = CanvasGeometry.fanOutFrames(origin: parent.frame.origin,
+                                                    nodeSize: size,
+                                                    count: count,
+                                                    gap: CanvasStore.fanGap)
+            if let parentIdx = nodes.firstIndex(where: { $0.id == nodeId }) {
+                nodes[parentIdx].count = 1
+                nodes[parentIdx].updatedAt = Date()
+            }
+            var newIds: Set<String> = [nodeId]
+            for frame in frames.dropFirst() {
+                var child = parent
+                child.id = "node_" + UUID().uuidString
+                child.x = frame.origin.x
+                child.y = frame.origin.y
+                child.count = 1
+                child.state = .idle
+                child.taskId = nil
+                child.seed = nil
+                child.createdAt = Date()
+                child.updatedAt = Date()
+                nodes.append(child)
+                newIds.insert(child.id)
+            }
+            selectedNodeIds = newIds
         }
-        var newIds: Set<String> = [nodeId]
-        for frame in frames.dropFirst() {
-            var child = parent
-            child.id = "node_" + UUID().uuidString
-            child.x = frame.origin.x
-            child.y = frame.origin.y
-            child.count = 1
-            child.state = .idle
-            child.taskId = nil
-            child.seed = nil
-            child.createdAt = Date()
-            child.updatedAt = Date()
-            nodes.append(child)
-            newIds.insert(child.id)
-        }
-        selectedNodeIds = newIds
-        scheduleSave()
+    }
+
+    // MARK: - 操作历史
+
+    /// 历史条目里显示的节点名。优先槽位 Label，其次 prompt 首行，最后兜底「空节点」。
+    private func nodeTitle(_ node: CanvasNode) -> String {
+        if let label = node.sourceLabel, !label.isEmpty { return label }
+        let firstLine = node.prompt
+            .split(separator: "\n", omittingEmptySubsequences: true)
+            .first
+            .map(String.init) ?? ""
+        let trimmed = firstLine.trimmingCharacters(in: .whitespaces)
+        if trimmed.isEmpty { return "空节点" }
+        return trimmed.count > 12 ? String(trimmed.prefix(12)) + "…" : trimmed
     }
 
     // MARK: - 落盘
@@ -239,11 +447,53 @@ final class CanvasStore: ObservableObject {
     // MARK: - 常量
 
     /// 网格吸附步长（画布空间）。与背景网格基准一致，观感上「贴着线走」。
-    static let snapStep: CGFloat = 12
+    /// 真值住在 `CanvasGeometry`（Kit 层）以便被 smoke 断言覆盖，这里只是就近别名。
+    static let snapStep: CGFloat = CanvasGeometry.snapStep
     /// 多张展开的节点间距。
     static let fanGap: CGFloat = 20
     /// 背景网格基准步长。
     static let gridBase: CGFloat = 24
+}
+
+// MARK: - 槽位注入结果
+
+/// Cmd+数字 / 圆盘把槽位内容送进画布节点的结果。
+///
+/// 刻意把「结果」建模成一个值而不是让 store 直接弹 toast：store 不该认识 UI 层的提示通道，
+/// 而且同一个动作从热键、圆盘、右键菜单三处进来，提示文案得由各自的调用方按上下文决定。
+enum CanvasSlotInjection: Equatable {
+    /// 画布里没有选中节点 —— 这个动作在画布模式下**没有默认目标**，不猜（猜错就是往错误节点写数据）。
+    case noSelection
+    case applied(mode: Mode, name: String, count: Int)
+
+    enum Mode: Equatable, Hashable {
+        /// 空的未绑定节点 → 绑到该槽位，从此双向同步。
+        case bound
+        /// 已绑定其他槽位 → 改绑（不能追加，那会把别的槽位数据写脏）。
+        case rebound
+        /// 未绑定但已有文本 → 追加到末尾（用户在拼复合 prompt）。
+        case appended
+    }
+
+    /// toast 文案。
+    var message: String {
+        switch self {
+        case .noSelection:
+            return "请先选中一个节点"
+        case let .applied(mode, name, count):
+            let scope = count == 1 ? "" : "（\(count) 个节点）"
+            switch mode {
+            case .bound: return "已填入 \(name)\(scope)"
+            case .rebound: return "已改绑到 \(name)\(scope)"
+            case .appended: return "已追加 \(name)\(scope)"
+            }
+        }
+    }
+
+    var isSuccess: Bool {
+        if case .applied = self { return true }
+        return false
+    }
 }
 
 // MARK: - 工具

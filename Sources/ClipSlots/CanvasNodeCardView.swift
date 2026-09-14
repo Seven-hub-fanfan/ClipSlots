@@ -8,12 +8,30 @@ import ClipSlotsKit
 /// 关于尺寸：卡片在**画布空间**是固定尺寸（`CanvasNode.defaultSize`），缩放由外层 `scaleEffect`
 /// 统一施加。所以这里所有数值都按 1x 写，不要在内部再乘 zoom —— 那会导致文字与边框的缩放比例
 /// 不一致（`scaleEffect` 是位图级缩放，内部再算一遍等于缩放两次）。
+///
+/// ## 关于文本的来源（v2.11.7 hotfix18）
+///
+/// 卡片**不读 `node.prompt`** 来显示正文，而是用外部传进来的 `text`。原因：绑定了槽位的节点，
+/// 它的正文就是那个槽位的主体数据本身（画布与编辑页双向同步），真相在 `SlotStoreObservable`
+/// 里而不在节点副本里。卡片自己去读槽位数据就得认识主 store，那会把画布重新拖回"任一槽位变化
+/// 触发全局重绘"的老路 —— 所以取数留在上层，卡片保持纯展示。
 struct CanvasNodeCardView: View {
     let node: CanvasNode
     let isSelected: Bool
+    /// 正文实时值。绑定槽位的节点 = 槽位主体文本；未绑定 = `node.prompt`。
+    let text: String
+    /// 溯源槽位的实时 Label（编辑页改了 Label，这里跟着变）。
+    let slotLabel: String?
+    /// 是否处于 inline 编辑态（由上层集中管理，保证同一时刻只有一个节点在编辑）。
+    let isEditing: Bool
+    let onBeginEdit: () -> Void
+    let onCommitEdit: (String) -> Void
+    let onCancelEdit: () -> Void
 
     @Environment(\.colorScheme) private var scheme
     @State private var isHovering = false
+    @State private var draft = ""
+    @FocusState private var editorFocused: Bool
 
     private var isEmptyPreview: Bool {
         if case .succeeded = node.state { return false }
@@ -41,9 +59,20 @@ struct CanvasNodeCardView: View {
                 radius: isSelected ? 12 : 7,
                 x: 0, y: isSelected ? 5 : 3)
         .onHover { isHovering = $0 }
+        .onChange(of: isEditing) { editing in
+            if editing {
+                draft = text
+                // 下一拍再抢焦点：本拍 TextEditor 还没进视图树，直接置 true 会被丢掉。
+                DispatchQueue.main.async { editorFocused = true }
+            }
+        }
+        .onAppear {
+            if isEditing { draft = text; DispatchQueue.main.async { editorFocused = true } }
+        }
     }
 
     private var borderColor: Color {
+        if isEditing { return AppTheme.chromeAccentInk }
         if isSelected { return AppTheme.chromeAccentInk.opacity(0.85) }
         if isHovering { return AppTheme.minimalCardHoverBorder }
         return AppTheme.subtleBorder
@@ -67,6 +96,20 @@ struct CanvasNodeCardView: View {
             )
 
             Spacer(minLength: 0)
+
+            // 编辑入口。只在悬停 / 选中时出现：常驻一个铅笔会让每张卡片都多一件视觉噪声，
+            // 而画布上一屏可能有十几张卡片。
+            if !isEditing && (isHovering || isSelected) {
+                Button(action: onBeginEdit) {
+                    Image(systemName: "pencil")
+                        .font(.system(size: 9, weight: .semibold))
+                        .foregroundColor(AppTheme.chromeAccentInk)
+                        .padding(3)
+                        .background(Circle().fill(AppTheme.chromeAccentSoftFill))
+                }
+                .buttonStyle(.plain)
+                .help("编辑内容（也可双击文本）")
+            }
 
             statusBadge
         }
@@ -144,22 +187,70 @@ struct CanvasNodeCardView: View {
 
     // MARK: - prompt
 
+    @ViewBuilder
     private var promptArea: some View {
-        Group {
-            if node.prompt.isEmpty {
-                Text("点击填写提示词…")
-                    .font(.system(size: 10))
+        if isEditing {
+            editor
+        } else {
+            Group {
+                if text.isEmpty {
+                    Text("双击填写内容…")
+                        .font(.system(size: 10))
+                        .foregroundColor(.secondary.opacity(0.5))
+                } else {
+                    Text(text)
+                        .font(.system(size: 10))
+                        .foregroundColor(.primary.opacity(0.82))
+                        .lineLimit(2)
+                        .multilineTextAlignment(.leading)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            .frame(maxWidth: .infinity, minHeight: 26, alignment: .topLeading)
+            // 命中区要盖满整行，否则空节点只有那句灰字那么窄，双击基本点不中。
+            .contentShape(Rectangle())
+            .onTapGesture(count: 2, perform: onBeginEdit)
+        }
+    }
+
+    /// inline 编辑器。
+    ///
+    /// **提交时机 = 失焦**（点画布别处、切到另一个节点、Tab 走焦点），不是按 Enter —— 正文是多行
+    /// prompt，Enter 必须留给换行。Esc 放弃本次修改。
+    private var editor: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            TextEditor(text: $draft)
+                .font(.system(size: 10))
+                .scrollContentBackground(.hidden)
+                .focused($editorFocused)
+                .frame(height: 40)
+                .padding(.horizontal, 4)
+                .padding(.vertical, 2)
+                .background(
+                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        .fill(AppTheme.previewBackground)
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        .stroke(AppTheme.chromeAccentInk.opacity(0.5), lineWidth: 1)
+                )
+                .onChange(of: editorFocused) { focused in
+                    // 失焦即落库。这里不判 draft 是否变过 —— 判等交给下游（store 与槽位写入都会
+                    // 在无变化时提前返回），在这里判会漏掉"改了又改回来"之外的边界。
+                    if !focused { onCommitEdit(draft) }
+                }
+                .onExitCommand(perform: onCancelEdit)
+
+            HStack(spacing: 6) {
+                Text(node.sourceSlot == nil ? "仅本节点" : "同步到槽位")
+                    .font(.system(size: 8))
+                    .foregroundColor(.secondary.opacity(0.6))
+                Spacer(minLength: 0)
+                Text("Esc 放弃")
+                    .font(.system(size: 8))
                     .foregroundColor(.secondary.opacity(0.5))
-            } else {
-                Text(node.prompt)
-                    .font(.system(size: 10))
-                    .foregroundColor(.primary.opacity(0.82))
-                    .lineLimit(2)
-                    .multilineTextAlignment(.leading)
-                    .fixedSize(horizontal: false, vertical: true)
             }
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     // MARK: - 参数芯片栏
@@ -170,8 +261,8 @@ struct CanvasNodeCardView: View {
             chip(node.ratio)
             if node.count > 1 { chip("×\(node.count)") }
             Spacer(minLength: 0)
-            if let label = node.sourceLabel, !label.isEmpty {
-                // 溯源标记：这个节点来自哪个槽位。只读，不产生任何写回。
+            if let label = slotLabel, !label.isEmpty {
+                // 溯源标记：这个节点绑的是哪个槽位。绑定后正文与该槽位双向同步。
                 HStack(spacing: 2) {
                     Image(systemName: "tray.full")
                         .font(.system(size: 7, weight: .semibold))

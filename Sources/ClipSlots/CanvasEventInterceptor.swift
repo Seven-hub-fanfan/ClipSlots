@@ -1,7 +1,8 @@
 import SwiftUI
 import AppKit
+import ClipSlotsKit
 
-/// 画布的滚轮 / 中键输入路由（v2.11.7 hotfix17）。
+/// 画布的滚轮 / 中键 / 键盘输入路由（v2.11.7 hotfix17、hotfix18 扩展键盘）。
 ///
 /// ## 为什么需要它
 ///
@@ -31,6 +32,8 @@ final class CanvasInputRouter: ObservableObject {
     var onMiddleDrag: ((CGSize) -> Void)?
     /// 中键松开。
     var onMiddleDragEnded: (() -> Void)?
+    /// 键盘动作（Delete / Cmd+Z / Cmd+Shift+Z）。返回 true 表示已消费，事件不再下派。
+    var onKeyAction: ((CanvasKeyBinding.Action) -> Bool)?
 
     /// 几何参照物。弱引用：视图随时可能被 SwiftUI 摘掉，路由器不该把它吊住。
     weak var anchorView: NSView?
@@ -42,7 +45,7 @@ final class CanvasInputRouter: ObservableObject {
     func start() {
         guard monitor == nil else { return }
         monitor = NSEvent.addLocalMonitorForEvents(
-            matching: [.scrollWheel, .otherMouseDown, .otherMouseDragged, .otherMouseUp]
+            matching: [.scrollWheel, .otherMouseDown, .otherMouseDragged, .otherMouseUp, .keyDown]
         ) { [weak self] event in
             guard let self else { return event }
             return self.handle(event) ? nil : event
@@ -103,9 +106,32 @@ final class CanvasInputRouter: ObservableObject {
             onMiddleDragEnded?()
             return true
 
+        case .keyDown:
+            // 正在编辑文本时一律放行。Delete 在文本框里是「删一个字符」，Cmd+Z 是「撤销一次输入」；
+            // 这两件事必须让文本系统自己处理，否则用户在节点里改 prompt 时按退格会把整个节点删掉
+            // —— 这是不可撤回的破坏性误伤，不能靠事后 undo 兜。
+            guard !isEditingText(window: window) else { return false }
+            let action = CanvasKeyBinding.action(keyCode: event.keyCode,
+                                                command: event.modifierFlags.contains(.command),
+                                                shift: event.modifierFlags.contains(.shift),
+                                                option: event.modifierFlags.contains(.option))
+            guard action != .none else { return false }
+            return onKeyAction?(action) ?? false
+
         default:
             return false
         }
+    }
+
+    /// 焦点是否落在可编辑文本上。
+    ///
+    /// 判 `NSText.isEditable` 而不是判类型：SwiftUI 的 `TextField` 在获得焦点时把窗口的 field editor
+    /// （一个 `NSTextView`）设成 first responder，`TextEditor` 直接就是 `NSTextView`，两者都被这条
+    /// 覆盖；而只读的富文本展示视图（`isEditable == false`）不该拦住画布快捷键。
+    private func isEditingText(window: NSWindow) -> Bool {
+        guard let responder = window.firstResponder else { return false }
+        if let text = responder as? NSText { return text.isEditable }
+        return false
     }
 
     /// 光标是否停在某个 `NSScrollView`（= SwiftUI `ScrollView`）之上。

@@ -36,7 +36,17 @@ struct CanvasWorkspaceView: View {
 
     /// 拖拽中的节点位移（画布空间）。刻意不写进 store，松手才提交。
     @State private var draggingNodeId: String? = nil
+    /// 本次拖拽会一起走的节点集合。
+    ///
+    /// ★ v2.11.7 hotfix18 修 bug：框选两个节点后拖其中一个，只有被按住的那个动。
+    /// 根因是预览位移只加在 `draggingNodeId` 上、提交也只提交它一个。现在在 `onChanged` 的第一帧
+    /// 就把「这次要一起动谁」定下来（按下时的选中集合），拖拽过程中即使选中集合被别处改动也不受影响。
+    @State private var draggingIds: Set<String> = []
     @State private var dragDelta: CGSize = .zero
+    /// 正在 inline 编辑正文的节点。集中管理，保证同一时刻只有一个编辑器抢焦点。
+    @State private var editingNodeId: String? = nil
+    /// 历史面板是否展开。
+    @State private var showHistory = false
     /// 框选矩形（屏幕空间）。
     @State private var marqueeStart: CGPoint? = nil
     @State private var marqueeCurrent: CGPoint? = nil
@@ -53,7 +63,8 @@ struct CanvasWorkspaceView: View {
 
                 if canvas.nodes.isEmpty {
                     CanvasEmptyHint()
-                        .frame(width: proxy.size.width, height: proxy.size.height)
+                        .frame(width: max(0, proxy.size.width - sidebarWidth), height: proxy.size.height)
+                        .padding(.leading, sidebarWidth)
                 }
 
                 nodeLayer
@@ -87,12 +98,26 @@ struct CanvasWorkspaceView: View {
                 }
                 inputRouter.onMiddleDrag = { delta in handleMiddleDrag(delta) }
                 inputRouter.onMiddleDragEnded = { canvas.updateViewport(pan: pan, zoom: zoom) }
+                inputRouter.onKeyAction = { action in handleKeyAction(action) }
                 inputRouter.start()
+
+                // 撤销/重做要能把槽位主体文本一起回滚。store 层不认识 `SlotStoreObservable`
+                // （那会把画布重新绑回全局重绘的老路），所以由视图层把这条写回能力注入进去。
+                canvas.onRestoreSlotText = { groupId, slot, text in
+                    _ = store.writeCanvasSlotText(groupId: groupId, slot: slot, text: text)
+                }
+                // 登记「槽位命令」处理器：画布在台上时，Cmd+1~0 与圆盘选槽都改为填进选中节点。
+                CanvasCommandBridge.shared.slotCommandHandler = { slot in handleSlotCommand(slot) }
+
                 // 没有光标事件之前，锚点先取视图中心，避免首次捏合以 (0,0) 为锚点把画面甩到角上。
                 cursorScreen = CGPoint(x: proxy.size.width / 2, y: proxy.size.height / 2)
             }
             .onDisappear {
                 inputRouter.stop()
+                // 必须撤销登记：留着它，切回编辑模式后 Cmd+1 会被一个已经下台的画布吃掉，
+                // 表现是"热键静默失效"（既没粘贴，也没有任何提示）。
+                CanvasCommandBridge.shared.slotCommandHandler = nil
+                canvas.onRestoreSlotText = nil
                 canvas.flushSave()
             }
         }
@@ -107,14 +132,25 @@ struct CanvasWorkspaceView: View {
     private var nodeLayer: some View {
         ZStack(alignment: .topLeading) {
             ForEach(canvas.nodes) { node in
-                let isDragging = draggingNodeId == node.id
+                let isDragging = draggingIds.contains(node.id)
+                let isEditing = editingNodeId == node.id
                 CanvasNodeCardView(node: node,
-                                   isSelected: canvas.selectedNodeIds.contains(node.id))
+                                   isSelected: canvas.selectedNodeIds.contains(node.id),
+                                   text: liveText(for: node),
+                                   slotLabel: liveLabel(for: node),
+                                   isEditing: isEditing,
+                                   onBeginEdit: { beginEdit(node) },
+                                   onCommitEdit: { commitEdit(node, text: $0) },
+                                   onCancelEdit: { editingNodeId = nil })
                     .offset(x: node.x + (isDragging ? dragDelta.width : 0),
                             y: node.y + (isDragging ? dragDelta.height : 0))
-                    .zIndex(isDragging ? 10 : 0)
-                    .gesture(nodeDragGesture(node))
+                    // 被按住的那个压在最上层；同批一起走的排第二层，这样多选拖动时整组都浮在其他节点之上。
+                    .zIndex(draggingNodeId == node.id ? 10 : (isDragging ? 9 : (isEditing ? 8 : 0)))
+                    // 编辑中把手势整体屏蔽（`including: .none`）：TextEditor 里选文字是拖动，
+                    // 会被 DragGesture 抢走，表现是"想选中一段文字，结果把节点拖跑了"。
+                    .gesture(nodeDragGesture(node), including: isEditing ? .none : .all)
                     .onTapGesture {
+                        guard !isEditing else { return }
                         canvas.select(id: node.id, additive: NSEvent.modifierFlags.contains(.shift))
                     }
                     .contextMenu { nodeContextMenu(node) }
@@ -131,10 +167,11 @@ struct CanvasWorkspaceView: View {
 
     @ViewBuilder
     private func nodeContextMenu(_ node: CanvasNode) -> some View {
+        Button("编辑内容") { beginEdit(node) }
         if node.count > 1 {
             Button("展开为 \(node.count) 个节点") { canvas.fanOut(nodeId: node.id) }
-            Divider()
         }
+        Divider()
         Button("重跑") {
             // MVP：生图未接入，先给明确反馈而不是静默无响应。
             store.transientUI.showToast("生图功能开发中")
@@ -146,12 +183,22 @@ struct CanvasWorkspaceView: View {
             }
         }
         Divider()
-        Button("删除节点") { canvas.removeNodes(ids: [node.id]) }
+        // 右键点在选中集合里的某个节点上时，删除的是**整个选中集合** —— 与 Delete 键一致。
+        // 两条路径语义不同（一个删一个、一个删一片）是最容易被用户当成 bug 的那类不一致。
+        if canvas.selectedNodeIds.contains(node.id), canvas.selectedNodeIds.count > 1 {
+            Button("删除选中的 \(canvas.selectedNodeIds.count) 个节点") { canvas.removeSelected() }
+        } else {
+            Button("删除节点") { canvas.removeNodes(ids: [node.id]) }
+        }
     }
 
     // MARK: - 手势
 
     /// 节点拖动。位移必须**除以 zoom** 换算回画布空间 —— 否则放大到 2x 时节点会跑得比鼠标快一倍。
+    ///
+    /// ★ v2.11.7 hotfix18：支持多选整组拖动。按下的节点若在选中集合内，整个选中集合一起走；
+    /// 若不在（直接去拖一个未选中的节点），先把选择切成它自己 —— 这与 Figma 一致，也避免
+    /// "拖一个没选中的节点，却把别处选中的一堆节点也带走"这种完全意料之外的破坏。
     private func nodeDragGesture(_ node: CanvasNode) -> some Gesture {
         DragGesture(minimumDistance: 2, coordinateSpace: .named(CanvasWorkspaceView.spaceName))
             .onChanged { value in
@@ -162,16 +209,22 @@ struct CanvasWorkspaceView: View {
                     if !canvas.selectedNodeIds.contains(node.id) {
                         canvas.select(id: node.id, additive: false)
                     }
+                    // 一次性定下同批集合。此后不再读 selectedNodeIds：拖拽中途集合若变，
+                    // 预览与提交就会对不上（预览动了 3 个、提交只写 2 个）。
+                    draggingIds = canvas.selectedNodeIds.contains(node.id)
+                        ? canvas.selectedNodeIds
+                        : [node.id]
                 }
                 dragDelta = CGSize(width: value.translation.width / zoom,
                                    height: value.translation.height / zoom)
             }
             .onEnded { value in
                 guard draggingNodeId == node.id else { return }
-                let dx = value.translation.width / zoom
-                let dy = value.translation.height / zoom
-                canvas.moveNode(id: node.id, to: CGPoint(x: node.x + dx, y: node.y + dy))
+                let delta = CGSize(width: value.translation.width / zoom,
+                                   height: value.translation.height / zoom)
+                canvas.moveNodes(ids: draggingIds, by: delta)
                 draggingNodeId = nil
+                draggingIds = []
                 dragDelta = .zero
             }
     }
@@ -313,15 +366,22 @@ struct CanvasWorkspaceView: View {
 
     // MARK: - 浮动层
 
+    /// 左侧侧栏当前占据的宽度。其余浮动控件都要按它让位，否则会被压在侧栏底下（侧栏是不透明的）。
+    private var sidebarWidth: CGFloat {
+        CanvasSlotLibraryPanel.width(expanded: canvas.isLibraryExpanded)
+    }
+
     private func floatingLayer(size: CGSize) -> some View {
         ZStack(alignment: .topLeading) {
-            // 左上：槽位库
+            // 左侧：贴边槽位库侧栏（Figma 风格）。
+            //
+            // ★ v2.11.7 hotfix18：从「左上角的浮动卡片」改为「贴住窗口左缘、上下通高的侧栏」。
+            // 所以这里**不能再有 padding** —— 一点内边距就会露出后面的网格，那道缝隙正是浮动卡片
+            // 与贴边侧栏观感上的全部差别。
             CanvasSlotLibraryPanel(store: store,
                                    canvas: canvas,
                                    onDragChanged: handleSlotDragChanged,
                                    onDropSlot: handleSlotDrop)
-                .padding(.leading, 14)
-                .padding(.top, 14)
 
             // 右上：生成按钮
             VStack {
@@ -336,19 +396,25 @@ struct CanvasWorkspaceView: View {
             .padding(.trailing, 16)
             .padding(.top, 14)
 
-            // 底部居中：工具栏
+            // 底部：工具栏。在**侧栏右侧的可见区域**里居中，不是在整个窗口里居中 ——
+            // 否则侧栏一展开，工具栏看起来就是偏左的。
             VStack {
                 Spacer()
-                CanvasFloatingToolbar(canvas: canvas) {
-                    // 新建落在视图中心，而不是 (0,0)：用户平移到远处后按 ＋，节点该出现在他眼前。
-                    let center = CGPoint(x: size.width / 2, y: size.height / 2)
+                CanvasFloatingToolbar(canvas: canvas,
+                                      isHistoryOpen: $showHistory,
+                                      onAddNode: {
+                    // 新建落在**可见区域**中心，而不是视图中心：侧栏 240pt 展开时，视图中心可能
+                    // 就藏在侧栏后面，用户按下 ＋ 会看不到新节点。
+                    let center = CGPoint(x: sidebarWidth + (size.width - sidebarWidth) / 2,
+                                         y: size.height / 2)
                     canvas.addBlankNode(at: CanvasGeometry.canvasPoint(screen: center, pan: pan, zoom: zoom))
-                }
+                })
             }
-            .frame(width: size.width)
+            .frame(width: max(0, size.width - sidebarWidth))
+            .padding(.leading, sidebarWidth)
             .padding(.bottom, 16)
 
-            // 左下：缩放控件
+            // 左下：缩放控件（紧贴侧栏右侧）
             VStack {
                 Spacer()
                 HStack {
@@ -360,7 +426,7 @@ struct CanvasWorkspaceView: View {
                     Spacer()
                 }
             }
-            .padding(.leading, 14)
+            .padding(.leading, sidebarWidth + 14)
             .padding(.bottom, 16)
         }
         .frame(width: size.width, height: size.height, alignment: .topLeading)
@@ -425,6 +491,117 @@ struct CanvasWorkspaceView: View {
                                label: payload.label,
                                prompt: payload.prompt,
                                at: canvasPoint)
+    }
+
+    // MARK: - 槽位双向同步（v2.11.7 hotfix18）
+
+    /// 节点正文的**实时**值。
+    ///
+    /// 绑定了槽位的节点：值来自槽位主体数据，`node.prompt` 只是缓存（拖进来那一刻的副本），
+    /// 这里刻意不读它 —— 否则用户在编辑页改了槽位文本，画布上还显示旧的，那就不是"同步"。
+    /// 槽位被清空时如实显示为空，而不是回落到旧副本（回落等于把已删除的内容又变出来）。
+    private func liveText(for node: CanvasNode) -> String {
+        guard let slot = node.sourceSlot, let groupId = node.sourceGroupId else {
+            return node.prompt
+        }
+        return store.canvasSlotText(groupId: groupId, slot: slot) ?? ""
+    }
+
+    /// 溯源 Label 的实时值。槽位已被改名 / 删名时跟着变；读不到就退回节点上的快照。
+    private func liveLabel(for node: CanvasNode) -> String? {
+        guard let slot = node.sourceSlot, let groupId = node.sourceGroupId else {
+            return node.sourceLabel
+        }
+        return store.canvasSlotLabel(groupId: groupId, slot: slot) ?? node.sourceLabel
+    }
+
+    private func beginEdit(_ node: CanvasNode) {
+        canvas.select(id: node.id, additive: false)
+        editingNodeId = node.id
+    }
+
+    /// inline 编辑提交。
+    ///
+    /// 绑定槽位的节点 → 写进**槽位主体**（编辑页立刻看到）；未绑定的节点 → 只改节点自己的 prompt。
+    /// 两条路都把这一步记进画布撤销栈，绑定的那条额外带上 `slotEdit`，这样 Cmd+Z 能把槽位文本
+    /// 一起退回去 —— 否则撤销后画布显示旧文本、编辑页还留着新文本，两边当场对不上。
+    private func commitEdit(_ node: CanvasNode, text: String) {
+        editingNodeId = nil
+        let old = liveText(for: node)
+        guard old != text else { return }
+
+        if let slot = node.sourceSlot, let groupId = node.sourceGroupId {
+            guard store.writeCanvasSlotText(groupId: groupId, slot: slot, text: text) else {
+                store.transientUI.showToast("存储繁忙，未能保存")
+                return
+            }
+            let edit = CanvasHistoryEntry.SlotTextEdit(groupId: groupId, slot: slot, before: old, after: text)
+            canvas.updateNodePrompt(id: node.id, text: text, slotEdit: edit)
+            canvas.noteSlotDataChanged()
+        } else {
+            canvas.updateNodePrompt(id: node.id, text: text)
+        }
+    }
+
+    // MARK: - 键盘 / 槽位命令
+
+    /// 键盘动作。返回 true = 已消费，事件不再下派给系统。
+    private func handleKeyAction(_ action: CanvasKeyBinding.Action) -> Bool {
+        switch action {
+        case .delete:
+            // 正在 inline 编辑时退格属于文本编辑（`CanvasInputRouter` 已按 firstResponder 拦掉一层，
+            // 这里再兜一次：焦点抢占存在一帧空窗，那一帧误删是不可挽回的）。
+            guard editingNodeId == nil else { return false }
+            let removed = canvas.removeSelected()
+            if removed == 0 {
+                store.transientUI.showToast("请先选中要删除的节点")
+            } else {
+                store.transientUI.showToast(removed == 1 ? "已删除节点" : "已删除 \(removed) 个节点")
+            }
+            return true
+
+        case .undo:
+            guard editingNodeId == nil else { return false }
+            if let entry = canvas.undo() {
+                store.transientUI.showToast("已撤销：\(entry.kind.title)")
+            } else {
+                store.transientUI.showToast("没有可撤销的操作")
+            }
+            return true
+
+        case .redo:
+            guard editingNodeId == nil else { return false }
+            if let entry = canvas.redo() {
+                store.transientUI.showToast("已重做：\(entry.kind.title)")
+            } else {
+                store.transientUI.showToast("没有可重做的操作")
+            }
+            return true
+
+        case .none:
+            return false
+        }
+    }
+
+    /// Cmd+1~0 / 圆盘选槽：把槽位内容送进当前选中的节点。
+    ///
+    /// 返回 true 表示画布已经消费掉这次命令 —— 包括「没有选中节点」这种情况：画布在台上时这个
+    /// 手势的语义就是"填进节点"，找不到目标就提示用户去选一个，**不能偷偷退回去写系统剪贴板**
+    /// （那会在用户毫无察觉的情况下改掉剪贴板，还可能往别的 App 里粘出东西）。
+    private func handleSlotCommand(_ slot: Int) -> Bool {
+        let groupId = store.activeHotkeySpecialSlotId
+        let text = store.canvasSlotText(groupId: groupId, slot: slot) ?? ""
+        guard !text.isEmpty else {
+            store.transientUI.showToast("槽位 \(slot) 没有文本内容")
+            return true
+        }
+        let result = canvas.injectSlot(pageId: store.currentPageId,
+                                      groupId: groupId,
+                                      slot: slot,
+                                      label: store.canvasSlotLabel(groupId: groupId, slot: slot),
+                                      text: text)
+        store.transientUI.showToast(result.message)
+        return true
     }
 }
 
