@@ -263,6 +263,188 @@ public final class AgentBuiltinTools {
                     "type": .string("object"), "properties": .object([:]),
                 ]),
                 originLabel: "内置"),
+
+            // ★ v2.11.7 hotfix26: 补齐写侧工具。
+            //
+            // 此前只有"读 + 写文本"六个工具，模型被迫在能力边界上撒谎或绕路：用户说"清空槽位 3"，
+            // 它只能 write_slot 一个空字符串（结果是"内容为空但附件还在"，语义完全不同）；说"删掉这个组"，
+            // 它只能回一句"请手动删除"。工具集不全的代价不是少一个功能，而是模型会**编造替代方案**。
+            //
+            // 收录口径 = CLI 里所有真正操作数据的命令（clear / paste / create-group / create-page /
+            // rename-group / delete-group / delete-page / write-attachment / set-thumbnail /
+            // clear-thumbnail / repair-index）。刻意不收 version / help：工具的 schema 本身就是契约，
+            // 让模型再去读一遍 CLI 帮助只是多烧一轮 token。
+            //
+            // 同样刻意**不暴露** `--force`（跳过跨进程写锁）。它存在的意义是人类在锁泄漏时手工自救，
+            // 交给模型只会让它在 LOCK_TIMEOUT 时习惯性绕过锁，把并发写坏数据的风险常态化。
+            AgentToolSpec(
+                name: "clear_slot",
+                description: "清空一个槽位：正文、标签、附件全部移除，槽位回到「空槽」状态。"
+                    + "与 write_slot 的区别是——write_slot 是换内容（且保留附件），clear_slot 是彻底清空。"
+                    + "用户说「清空 / 清掉 / 腾空某个槽位」时用它，不要用 write_slot 写空字符串代替（那样附件还在）。"
+                    + "注意这是破坏性操作，旧内容会进 .trash（默认保留 30 天）但不要指望模型能自己恢复：动手前先确认用户指的是哪个槽位。",
+                parameters: .object([
+                    "type": .string("object"),
+                    "properties": .object(["page": Self.pageProperty,
+                                           "group": Self.groupProperty,
+                                           "slot": Self.slotProperty]),
+                    "required": .array([.string("slot")]),
+                ]),
+                originLabel: "内置"),
+            AgentToolSpec(
+                name: "paste_slot",
+                description: "把某个槽位的内容装进系统剪贴板，之后用户自己按 Command+V 粘贴。"
+                    + "注意：它只写剪贴板，**不会**模拟按键、也不会往任何输入框里直接落字 —— "
+                    + "所以别向用户承诺「已经帮你粘贴好了」，正确说法是「已复制到剪贴板，可以粘贴了」。",
+                parameters: .object([
+                    "type": .string("object"),
+                    "properties": .object(["page": Self.pageProperty,
+                                           "group": Self.groupProperty,
+                                           "slot": Self.slotProperty]),
+                    "required": .array([.string("slot")]),
+                ]),
+                originLabel: "内置"),
+            AgentToolSpec(
+                name: "create_group",
+                description: "在指定页面新建一个槽位组，返回新组的 id。"
+                    + "同一页面内组名不可重复（重名返回错误，可改名或加 -2 后缀）；页面已满（10 组）也会返回错误，此时改用 create_page 另起一页。"
+                    + "省略 page 时建在当前页面。",
+                parameters: .object([
+                    "type": .string("object"),
+                    "properties": .object([
+                        "name": .object(["type": .string("string"),
+                                         "description": .string("新槽位组的名称（建议不超过 8 个字）。")]),
+                        "page": Self.pageProperty,
+                    ]),
+                    "required": .array([.string("name")]),
+                ]),
+                originLabel: "内置"),
+            AgentToolSpec(
+                name: "create_page",
+                description: "新建一个页面，返回其 id，并顺带创建该页的第一个槽位组（返回值里的 defaultGroup 直接可用，不必再调 list_groups）。"
+                    + "页面名不可重复。传 first_group_name 可以把这个自动生成的组直接命名成想要的名字，省掉一次 rename_group。",
+                parameters: .object([
+                    "type": .string("object"),
+                    "properties": .object([
+                        "name": .object(["type": .string("string"),
+                                         "description": .string("新页面的名称（建议不超过 6 个字）。")]),
+                        "first_group_name": .object(["type": .string("string"),
+                                                     "description": .string("可选：把该页自动生成的第一个槽位组命名为此名称。")]),
+                    ]),
+                    "required": .array([.string("name")]),
+                ]),
+                originLabel: "内置"),
+            AgentToolSpec(
+                name: "rename_group",
+                description: "重命名一个槽位组。group 可以直接给组名（会自动解析成 id），同页面内组名不可重复。"
+                    + "组名在多个页面下重复时，请一并给 page 把范围收窄，否则会返回 AMBIGUOUS_GROUP 并列出候选。",
+                parameters: .object([
+                    "type": .string("object"),
+                    "properties": .object([
+                        "group": .object(["type": .string("string"),
+                                          "description": .string("要重命名的槽位组：组名或组 ID。")]),
+                        "new_name": .object(["type": .string("string"),
+                                             "description": .string("新的组名（建议不超过 8 个字）。")]),
+                        "page": Self.pageProperty,
+                    ]),
+                    "required": .array([.string("group"), .string("new_name")]),
+                ]),
+                originLabel: "内置"),
+            AgentToolSpec(
+                name: "delete_group",
+                description: "删除一个槽位组及其下所有槽位（软删除，数据进 .trash，默认保留 30 天）。"
+                    + "group 可以直接给组名（会自动解析成 id）；组名跨页面重复时请一并给 page，否则返回 AMBIGUOUS_GROUP。"
+                    + "默认槽位组（id 为 default）受保护、删不掉，CLI 会返回 DEFAULT_GROUP_PROTECTED —— 遇到就照实告诉用户，别改名或清空来「变相删除」。"
+                    + "一个页面的最后一个组也删不掉（CANNOT_DELETE_LAST_GROUP）：用户真想清掉整页时改用 delete_page。"
+                    + "这是破坏性操作：执行前必须先跟用户确认删的是哪个组，不要凭一句模糊指令就动手。",
+                parameters: .object([
+                    "type": .string("object"),
+                    "properties": .object([
+                        "group": .object(["type": .string("string"),
+                                          "description": .string("要删除的槽位组：组名或组 ID。")]),
+                        "page": Self.pageProperty,
+                    ]),
+                    "required": .array([.string("group")]),
+                ]),
+                originLabel: "内置"),
+            AgentToolSpec(
+                name: "delete_page",
+                description: "删除一个页面及其下所有槽位组（软删除，数据进 .trash，默认保留 30 天）。"
+                    + "page 可以直接给页面名（会自动解析成 id）。"
+                    + "默认页面（id 为 default_page）受保护、删不掉，CLI 会返回 DEFAULT_PAGE_PROTECTED —— 遇到就照实告诉用户。"
+                    + "这是本工具集里破坏性最强的一个（一次带走整页的全部组和槽位）：执行前必须先跟用户确认。",
+                parameters: .object([
+                    "type": .string("object"),
+                    "properties": .object([
+                        "page": .object(["type": .string("string"),
+                                         "description": .string("要删除的页面：页面名或页面 ID。")]),
+                    ]),
+                    "required": .array([.string("page")]),
+                ]),
+                originLabel: "内置"),
+            AgentToolSpec(
+                name: "write_attachment",
+                description: "给槽位追加一个或多个本地文件作为附件（按给定顺序），不改动槽位正文。图片扩展名归为 image 类型，其余为 file。"
+                    + "replace=true 时先清掉原有附件再写入。文件路径必须是这台机器上真实存在的路径（支持 ~ 与相对路径），"
+                    + "路径是用户给的、或前面工具返回的 —— 不要凭印象编造路径。",
+                parameters: .object([
+                    "type": .string("object"),
+                    "properties": .object([
+                        "page": Self.pageProperty,
+                        "group": Self.groupProperty,
+                        "slot": Self.slotProperty,
+                        "files": .object([
+                            "type": .string("array"),
+                            "description": .string("要追加的文件路径列表，按顺序写入。"),
+                            "items": .object(["type": .string("string")]),
+                        ]),
+                        "replace": .object(["type": .string("boolean"),
+                                            "description": .string("是否先清空原有附件，默认 false（追加）。")]),
+                        "label": .object(["type": .string("string"),
+                                          "description": .string("可选：同时给槽位设置标签。")]),
+                    ]),
+                    "required": .array([.string("slot"), .string("files")]),
+                ]),
+                originLabel: "内置"),
+            AgentToolSpec(
+                name: "set_thumbnail",
+                description: "给槽位设置手动缩略图（卡片与圆盘会优先展示它）。图片会被压成最长边 1024px 的 JPEG。"
+                    + "注意与 write_attachment 区分用途：set_thumbnail 是给槽位「配封面」、不改内容；要把图片本身存进槽位请用 write_attachment。"
+                    + "if_absent=true 时只在槽位尚无手动缩略图时写入，已有则返回 THUMBNAIL_ALREADY_SET。",
+                parameters: .object([
+                    "type": .string("object"),
+                    "properties": .object([
+                        "page": Self.pageProperty,
+                        "group": Self.groupProperty,
+                        "slot": Self.slotProperty,
+                        "image": .object(["type": .string("string"),
+                                          "description": .string("图片路径，支持 ~ 与相对路径。")]),
+                        "if_absent": .object(["type": .string("boolean"),
+                                              "description": .string("仅当槽位还没有手动缩略图时才写入，默认 false。")]),
+                    ]),
+                    "required": .array([.string("slot"), .string("image")]),
+                ]),
+                originLabel: "内置"),
+            AgentToolSpec(
+                name: "clear_thumbnail",
+                description: "移除槽位的手动缩略图，回落到自动生成的预览。槽位正文、附件、标签都不受影响。"
+                    + "槽位本来就没有手动缩略图时返回 NO_MANUAL_THUMBNAIL。",
+                parameters: .object([
+                    "type": .string("object"),
+                    "properties": .object(["page": Self.pageProperty,
+                                           "group": Self.groupProperty,
+                                           "slot": Self.slotProperty]),
+                    "required": .array([.string("slot")]),
+                ]),
+                originLabel: "内置"),
+            AgentToolSpec(
+                name: "repair_index",
+                description: "仅在别的工具回了索引损坏 / 写禁用一类错误时才用：检查索引（index.json），确实损坏才从备份恢复，健康时什么都不做并返回 action:none。"
+                    + "不要把它当「刷新」或「重试」用。",
+                parameters: .object([
+                    "type": .string("object"), "properties": .object([:]),
+                ]),
+                originLabel: "内置"),
         ]
     }
 
@@ -327,12 +509,208 @@ public final class AgentBuiltinTools {
             argv = ["search", query] + scopeArgs(args, includeGroup: true)
             if args["all_groups"]?.boolValue == true { argv.append("--all-groups") }
             if let limit = args["limit"]?.intValue, limit > 0 { argv += ["--limit", String(limit)] }
+
+        // ★ v2.11.7 hotfix26: 写侧工具的参数映射。
+        case "clear_slot":
+            switch Self.slotArg(args) {
+            case .bad(let f): return f
+            case .ok(let slot):
+                argv = ["clear", String(slot)] + scopeArgs(args, includeGroup: true)
+            }
+        case "paste_slot":
+            switch Self.slotArg(args) {
+            case .bad(let f): return f
+            case .ok(let slot):
+                argv = ["paste", String(slot)] + scopeArgs(args, includeGroup: true)
+            }
+        case "create_group":
+            guard let name = args["name"]?.stringValue?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  !name.isEmpty else {
+                return .failure("缺少 name 参数（新槽位组的名称）。", code: "MISSING_NAME")
+            }
+            // create-group 的 flag 白名单里没有 --group，所以只能带 page 作用域。
+            argv = ["create-group", name] + scopeArgs(args, includeGroup: false)
+        case "create_page":
+            guard let name = args["name"]?.stringValue?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  !name.isEmpty else {
+                return .failure("缺少 name 参数（新页面的名称）。", code: "MISSING_NAME")
+            }
+            argv = ["create-page", name]
+            if let first = args["first_group_name"]?.stringValue?
+                .trimmingCharacters(in: .whitespacesAndNewlines), !first.isEmpty {
+                argv += ["--group-name", first]
+            }
+        case "rename_group":
+            guard let rawGroup = args["group"]?.stringValue?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  !rawGroup.isEmpty else {
+                return .failure("缺少 group 参数（要重命名的组名或组 ID）。", code: "MISSING_GROUP")
+            }
+            guard let newName = args["new_name"]?.stringValue?
+                .trimmingCharacters(in: .whitespacesAndNewlines), !newName.isEmpty else {
+                return .failure("缺少 new_name 参数（新的组名）。", code: "MISSING_NEW_NAME")
+            }
+            switch await resolveGroupID(rawGroup, pageHint: args["page"]?.stringValue) {
+            case .bad(let f): return f
+            case .ok(let id):
+                // rename-group 的 flag 白名单只有 name/page-name/force：id 已经解析出来了，
+                // 页面作用域没必要再传（传 --page 会被 CLI 当非法 flag 拒掉）。
+                argv = ["rename-group", id, "--name", newName]
+            }
+        case "delete_group":
+            guard let rawGroup = args["group"]?.stringValue?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  !rawGroup.isEmpty else {
+                return .failure("缺少 group 参数（要删除的组名或组 ID）。", code: "MISSING_GROUP")
+            }
+            switch await resolveGroupID(rawGroup, pageHint: args["page"]?.stringValue) {
+            case .bad(let f): return f
+            case .ok(let id):
+                argv = ["delete-group", id]
+            }
+        case "delete_page":
+            guard let rawPage = args["page"]?.stringValue?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  !rawPage.isEmpty else {
+                return .failure("缺少 page 参数（要删除的页面名或页面 ID）。", code: "MISSING_PAGE")
+            }
+            switch await resolvePageID(rawPage) {
+            case .bad(let f): return f
+            case .ok(let id):
+                argv = ["delete-page", id]
+            }
+        case "write_attachment":
+            switch Self.slotArg(args) {
+            case .bad(let f): return f
+            case .ok(let slot):
+                let files = (args["files"]?.arrayValue ?? []).compactMap {
+                    $0.stringValue?.trimmingCharacters(in: .whitespacesAndNewlines)
+                }.filter { !$0.isEmpty }
+                guard !files.isEmpty else {
+                    return .failure("缺少 files 参数（至少一个文件路径）。", code: "MISSING_FILES")
+                }
+                argv = ["write-attachment", String(slot)] + files + scopeArgs(args, includeGroup: true)
+                if args["replace"]?.boolValue == true { argv.append("--replace") }
+                if let label = args["label"]?.stringValue, !label.isEmpty {
+                    argv += ["--label", label]
+                }
+            }
+        case "set_thumbnail":
+            switch Self.slotArg(args) {
+            case .bad(let f): return f
+            case .ok(let slot):
+                guard let image = args["image"]?.stringValue?
+                    .trimmingCharacters(in: .whitespacesAndNewlines), !image.isEmpty else {
+                    return .failure("缺少 image 参数（缩略图的图片路径）。", code: "MISSING_IMAGE")
+                }
+                argv = ["set-thumbnail", String(slot), "--image", image]
+                    + scopeArgs(args, includeGroup: true)
+                if args["if_absent"]?.boolValue == true { argv.append("--if-absent") }
+            }
+        case "clear_thumbnail":
+            switch Self.slotArg(args) {
+            case .bad(let f): return f
+            case .ok(let slot):
+                argv = ["clear-thumbnail", String(slot)] + scopeArgs(args, includeGroup: true)
+            }
+        case "repair_index":
+            argv = ["repair-index"]
         default:
             return .failure("未知的内置工具：\(call.name)", code: "UNKNOWN_TOOL")
         }
 
         let result = await runner(cliPath, argv)
         return Self.interpret(result: result, toolName: call.name)
+    }
+
+    // MARK: 参数校验 / 名称解析（v2.11.7 hotfix26）
+
+    /// 参数解析的两种结局：解析出值，或者一个「直接回给模型」的结构化结果。
+    ///
+    /// 刻意不用 `Result`：`Result.Failure` 必须是 `Error`，而 `AgentToolResult` 不是异常，
+    /// 它就是工具的正常返回值（模型要读里面的 error_code 自救）。为了套进 `Result` 而给
+    /// `AgentToolResult` 加 `Error` 一致性，等于在类型系统里撒谎。
+    private enum ToolArg<Value> {
+        case ok(Value)
+        case bad(AgentToolResult)
+    }
+
+    /// slot 参数的统一校验。写侧工具全都要它，逐个 guard 会把 execute 撑成一面墙。
+    ///
+    /// 只做形状兜底（1 起的正整数）。真正的上界是每组槽位数（config.slots，可配置），
+    /// 由 CLI 按实际配置校验并回结构化错误 —— 本地写死 10 会把合法的大槽位号误判掉。
+    private static func slotArg(_ args: JSONValue) -> ToolArg<Int> {
+        guard let slot = args["slot"]?.intValue else {
+            return .bad(.failure("缺少 slot 参数（1 起的整数）。", code: "MISSING_SLOT"))
+        }
+        guard slot >= 1, slot <= 99 else {
+            return .bad(.failure("slot 超出范围：\(slot)（应为 1 起的正整数）。", code: "SLOT_OUT_OF_RANGE"))
+        }
+        return .ok(slot)
+    }
+
+    /// 把"组名或组 ID"解析成组 ID。
+    ///
+    /// 为什么要在工具层做这件事：`delete-group` / `rename-group` 的位置参数**只吃 id**（其它命令的
+    /// `--group` 才同时接受名字）。如果不解析，模型必须自己先 list_groups、再从 JSON 里挑出 id 传进来 ——
+    /// 多一轮往返、且它经常挑错（把 pageId 当 groupId 是最常见的一种）。解析放在这里，模型就能一直用
+    /// 人类的说法（"删掉「设计稿」这个组"）。
+    ///
+    /// 三种结局都要显式回给模型：
+    ///   - 唯一命中 → id；
+    ///   - 同名多命中 → AMBIGUOUS_GROUP，并把候选（id + 所属页面）列出来让它带 page 重试；
+    ///   - 没命中 → GROUP_NOT_FOUND，并列出现有组名，避免它反复猜同一个错名字。
+    private func resolveGroupID(_ raw: String, pageHint: String?) async -> ToolArg<String> {
+        let needle = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        var listArgs: [String] = ["groups"]
+        if let page = pageHint?.trimmingCharacters(in: .whitespacesAndNewlines), !page.isEmpty {
+            listArgs += UUID(uuidString: page) != nil ? ["--page", page] : ["--page-name", page]
+        }
+        let listing = await runner(cliPath, listArgs)
+        guard listing.exitCode == 0,
+              let json = try? JSONValue.decode(jsonText: listing.stdout),
+              let groups = json["groups"]?.arrayValue else {
+            // 列举本身失败（页面名不存在、索引损坏等）：原样把 CLI 的结构化错误回给模型，
+            // 不要包装成"解析失败"——error_code 才是它能据以自救的信息。
+            return .bad(Self.interpret(result: listing, toolName: "list_groups"))
+        }
+        // id 完全命中优先：模型确实传了 id 时不该被同名组干扰。
+        if groups.contains(where: { $0["id"]?.stringValue == needle }) {
+            return .ok(needle)
+        }
+        let byName = groups.filter { $0["name"]?.stringValue == needle }
+        if byName.count == 1, let id = byName[0]["id"]?.stringValue {
+            return .ok(id)
+        }
+        if byName.count > 1 {
+            let candidates = byName.map {
+                "\($0["id"]?.stringValue ?? "?")（页面：\($0["pageName"]?.stringValue ?? "?")）"
+            }.joined(separator: "、")
+            return .bad(.failure("有多个槽位组都叫「\(needle)」：\(candidates)。请补上 page 参数缩小范围，或直接传组 ID。",
+                                     code: "AMBIGUOUS_GROUP"))
+        }
+        let known = groups.compactMap { $0["name"]?.stringValue }.joined(separator: "、")
+        return .bad(.failure("找不到槽位组「\(needle)」。\(known.isEmpty ? "该范围下没有任何槽位组。" : "现有的组有：\(known)。")",
+                                 code: "GROUP_NOT_FOUND"))
+    }
+
+    /// 把"页面名或页面 ID"解析成页面 ID（`delete-page` 的位置参数只吃 id，同 resolveGroupID）。
+    private func resolvePageID(_ raw: String) async -> ToolArg<String> {
+        let needle = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        let listing = await runner(cliPath, ["pages"])
+        guard listing.exitCode == 0,
+              let json = try? JSONValue.decode(jsonText: listing.stdout),
+              let pages = json["pages"]?.arrayValue else {
+            return .bad(Self.interpret(result: listing, toolName: "list_pages"))
+        }
+        if pages.contains(where: { $0["id"]?.stringValue == needle }) {
+            return .ok(needle)
+        }
+        // 页面名在 CLI 层就是唯一的（create-page 拒重名），所以不必处理同名多命中。
+        if let hit = pages.first(where: { $0["name"]?.stringValue == needle }),
+           let id = hit["id"]?.stringValue {
+            return .ok(id)
+        }
+        let known = pages.compactMap { $0["name"]?.stringValue }.joined(separator: "、")
+        return .bad(.failure("找不到页面「\(needle)」。\(known.isEmpty ? "当前没有任何页面。" : "现有的页面有：\(known)。")",
+                                 code: "PAGE_NOT_FOUND"))
     }
 
     /// page/group 作用域参数。

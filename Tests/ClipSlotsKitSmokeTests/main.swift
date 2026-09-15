@@ -3771,6 +3771,55 @@ final class SmokeArgvRecorder: @unchecked Sendable {
     }
 }
 
+/// argv 感知的假 CLI（v2.11.7 hotfix26）。
+///
+/// SmokeArgvRecorder 对所有命令返回同一份 stdout，验不了「先列举、再拿 id 执行」的两步链路：
+/// delete_group 传组名时，第一次调用必须拿到 groups 列表，第二次才是 delete-group。
+/// 这里按命令名分发 stdout，并保留**整轮**调用序列，好断言「歧义时第二步压根没发出去」。
+final class SmokeFakeCLI: @unchecked Sendable {
+    private let lock = NSLock()
+    private var _calls: [[String]] = []
+    private var _allCalls: [[String]] = []
+    var groupsJSON = "{\"ok\":true,\"groups\":[]}"
+    var pagesJSON = "{\"ok\":true,\"pages\":[]}"
+
+    /// 每次工具调用前清掉本轮序列（allCalls 仍累计，用于全局 --force 断言）。
+    func reset() {
+        lock.lock(); defer { lock.unlock() }
+        _calls = []
+    }
+
+    func run(_ argv: [String]) -> AgentProcessResult {
+        lock.lock()
+        _calls.append(argv)
+        _allCalls.append(argv)
+        let stdout: String
+        switch argv.first {
+        case "groups": stdout = groupsJSON
+        case "pages": stdout = pagesJSON
+        default: stdout = "{\"ok\":true}"
+        }
+        lock.unlock()
+        return AgentProcessResult(exitCode: 0, stdout: stdout, stderr: "", timedOut: false)
+    }
+
+    /// 本轮工具调用产生的 CLI 调用序列。
+    var calls: [[String]] {
+        lock.lock(); defer { lock.unlock() }
+        return _calls
+    }
+
+    var allCalls: [[String]] {
+        lock.lock(); defer { lock.unlock() }
+        return _allCalls
+    }
+
+    var last: [String] {
+        lock.lock(); defer { lock.unlock() }
+        return _calls.last ?? []
+    }
+}
+
 // MARK: - AGENT-JSON：JSONValue 往返与容错
 //
 // 这一组盯的是"schema 与 arguments 的形状"。最要紧的是整数：
@@ -4349,6 +4398,163 @@ do {
     let writeRequired = specs.first { $0.name == "write_slot" }?
         .parameters["required"]?.arrayValue?.compactMap(\.stringValue) ?? []
     t.check(writeRequired.contains("slot") && writeRequired.contains("text"), "write_slot 必填 slot 与 text")
+}
+
+// MARK: - AGENT-CLI hotfix26：写侧工具（清空 / 粘贴 / 建组建页 / 改名 / 删除 / 附件 / 缩略图）
+//
+// 这一组盯三件事：
+//   1. argv 映射：工具 schema 的参数名 ≠ CLI flag 名（new_name → --name、files → 位置参数…），
+//      错一个字就是一次「模型以为做了、其实 CLI 拒了」的无声失败；
+//   2. 名称 → ID 解析：delete-group / rename-group / delete-page 的位置参数**只吃 id**，
+//      而模型给的永远是人类说法（"删掉设计稿这个组"）。所以要验「先列举、再拿 id 执行」两步链路，
+//      以及同名多命中时**不许瞎猜**（必须回 AMBIGUOUS_GROUP 让它带 page 重试）；
+//   3. --force 绝不出现在任何 argv 里：它是跨进程写锁的逃生门，给模型等于把并发写坏数据常态化。
+do {
+    let fake = SmokeFakeCLI()
+    fake.groupsJSON = """
+    {"ok":true,"groups":[\
+    {"id":"g-design","name":"设计稿","pageName":"默认页面"},\
+    {"id":"g-copy","name":"文案","pageName":"默认页面"},\
+    {"id":"g-dup-a","name":"重名组","pageName":"甲页"},\
+    {"id":"g-dup-b","name":"重名组","pageName":"乙页"}]}
+    """
+    fake.pagesJSON = """
+    {"ok":true,"pages":[{"id":"default","name":"默认页面"},{"id":"p-draft","name":"草稿"}]}
+    """
+    let tools = AgentBuiltinTools(cliPath: "/bin/echo") { _, argv in fake.run(argv) }
+
+    func runTool(_ name: String, _ json: String) -> AgentToolResult {
+        fake.reset()
+        return smokeAwait { await tools.execute(call: AgentToolCall(id: "c", name: name, argumentsJSON: json)) }
+    }
+
+    // —— 清空 / 粘贴：都是「slot 位置参数 + page/group 作用域」
+    _ = runTool("clear_slot", "{\"slot\":3,\"page\":\"草稿\",\"group\":\"设计稿\"}")
+    t.equal(fake.last, ["clear", "3", "--page-name", "草稿", "--group", "设计稿"],
+            "★clear_slot 应映射成 clear <slot> + 作用域（不是 write --text \"\"，那样附件还留着）")
+    t.check(runTool("clear_slot", "{}").content.contains("MISSING_SLOT"), "clear_slot 缺 slot 应本地失败")
+
+    _ = runTool("paste_slot", "{\"slot\":5}")
+    t.equal(fake.last, ["paste", "5"], "paste_slot 应映射成 paste <slot>")
+
+    // —— 建组 / 建页
+    _ = runTool("create_group", "{\"name\":\"插画\",\"page\":\"草稿\"}")
+    t.equal(fake.last, ["create-group", "插画", "--page-name", "草稿"],
+            "create_group：名称走位置参数，页面走 --page-name")
+    _ = runTool("create_group", "{\"name\":\"插画\",\"group\":\"忽略我\"}")
+    t.check(!fake.last.contains("--group"),
+            "★create-group 的 flag 白名单里没有 --group，多传会被 CLI 当非法 flag 整条拒掉")
+    t.check(runTool("create_group", "{\"name\":\"  \"}").content.contains("MISSING_NAME"),
+            "空白组名应本地失败，不去 CLI 撞 INVALID_INPUT_FORMAT")
+
+    _ = runTool("create_page", "{\"name\":\"草稿2\",\"first_group_name\":\"首组\"}")
+    t.equal(fake.last, ["create-page", "草稿2", "--group-name", "首组"],
+            "★create_page 的 first_group_name 应映射成 --group-name（原子命名，省掉一次 rename）")
+    _ = runTool("create_page", "{\"name\":\"草稿3\"}")
+    t.equal(fake.last, ["create-page", "草稿3"], "不传 first_group_name 时不应凭空加 --group-name")
+
+    // —— 改名：组名 → id 的解析链路
+    _ = runTool("rename_group", "{\"group\":\"设计稿\",\"new_name\":\"插画\"}")
+    t.equal(fake.calls.count, 2, "★rename_group 传组名时应先 groups 列举、再执行，共两次 CLI 调用")
+    t.equal(fake.calls.first?.first, "groups", "第一次调用应是 groups 列举")
+    t.equal(fake.last, ["rename-group", "g-design", "--name", "插画"],
+            "★★组名必须被解析成 id（rename-group 的位置参数只吃 id），new_name 走 --name")
+    t.check(!fake.last.contains("--page") && !fake.last.contains("--page-name"),
+            "★id 已解析出来，再传页面作用域会被 CLI 的 flag 白名单拒掉")
+
+    _ = runTool("rename_group", "{\"group\":\"g-copy\",\"new_name\":\"正文\"}")
+    t.equal(fake.last, ["rename-group", "g-copy", "--name", "正文"],
+            "★传的本来就是 id 时应直接命中（id 优先于同名匹配）")
+    t.check(runTool("rename_group", "{\"group\":\"设计稿\"}").content.contains("MISSING_NEW_NAME"),
+            "rename_group 缺 new_name 应本地失败")
+
+    // —— 删组：歧义与不存在都要给模型可执行的下一步
+    _ = runTool("delete_group", "{\"group\":\"设计稿\"}")
+    t.equal(fake.last, ["delete-group", "g-design"], "delete_group 应把组名解析成 id")
+    _ = runTool("delete_group", "{\"group\":\"文案\",\"page\":\"默认页面\"}")
+    t.check(fake.calls.first?.contains("--page-name") == true,
+            "★带 page 时列举也要收窄范围，否则解析出的 id 可能来自别的页面")
+
+    let ambiguous = runTool("delete_group", "{\"group\":\"重名组\"}")
+    t.check(ambiguous.isFailure, "同名多命中必须失败，不能挑一个删")
+    t.check(ambiguous.content.contains("AMBIGUOUS_GROUP"), "★同名歧义要回 AMBIGUOUS_GROUP")
+    t.check(ambiguous.content.contains("g-dup-a") && ambiguous.content.contains("g-dup-b"),
+            "★★歧义错误要列出全部候选 id，模型才能直接带 id 重试而不是再问一轮用户")
+    t.equal(fake.calls.count, 1, "★歧义时只应停在列举，绝不能把 delete-group 发出去")
+
+    let notFound = runTool("delete_group", "{\"group\":\"不存在的组\"}")
+    t.check(notFound.content.contains("GROUP_NOT_FOUND"), "组不存在应回 GROUP_NOT_FOUND")
+    t.check(notFound.content.contains("设计稿") && notFound.content.contains("文案"),
+            "★找不到时要列出现有组名，避免模型反复猜同一个错名字")
+    t.check(runTool("delete_group", "{}").content.contains("MISSING_GROUP"), "delete_group 缺 group 应本地失败")
+
+    // —— 删页
+    _ = runTool("delete_page", "{\"page\":\"草稿\"}")
+    t.equal(fake.calls.first, ["pages"], "delete_page 应先 pages 列举")
+    t.equal(fake.last, ["delete-page", "p-draft"], "★页面名必须解析成 id（delete-page 只吃 id）")
+    _ = runTool("delete_page", "{\"page\":\"default\"}")
+    t.equal(fake.last, ["delete-page", "default"],
+            "传 id 时直接用；默认页保护交给 CLI 判定（DEFAULT_PAGE_PROTECTED），不在本地提前编造结论")
+    let pageMiss = runTool("delete_page", "{\"page\":\"没这页\"}")
+    t.check(pageMiss.content.contains("PAGE_NOT_FOUND"), "页面不存在应回 PAGE_NOT_FOUND")
+    t.check(pageMiss.content.contains("草稿"), "★找不到时要列出现有页面名")
+    t.check(runTool("delete_page", "{}").content.contains("MISSING_PAGE"), "delete_page 缺 page 应本地失败")
+
+    // —— 附件 / 缩略图
+    _ = runTool("write_attachment",
+                "{\"slot\":2,\"files\":[\"/tmp/a.png\",\"/tmp/b.png\"],\"replace\":true,\"label\":\"参考\"}")
+    t.check(fake.last.starts(with: ["write-attachment", "2", "/tmp/a.png", "/tmp/b.png"]),
+            "★write_attachment：文件路径是位置参数且必须保序（附件顺序就是用户看到的顺序）")
+    t.check(fake.last.contains("--replace") && fake.last.contains("--label"), "replace/label 应映射成同名 flag")
+    t.check(runTool("write_attachment", "{\"slot\":2,\"files\":[]}").content.contains("MISSING_FILES"),
+            "空 files 应本地失败，不发一条什么都不写的命令")
+
+    _ = runTool("set_thumbnail", "{\"slot\":1,\"image\":\"/tmp/c.png\",\"if_absent\":true}")
+    t.equal(fake.last, ["set-thumbnail", "1", "--image", "/tmp/c.png", "--if-absent"],
+            "set_thumbnail：image 走 --image，if_absent 走 --if-absent")
+    t.check(runTool("set_thumbnail", "{\"slot\":1}").content.contains("MISSING_IMAGE"),
+            "set_thumbnail 缺 image 应本地失败")
+    _ = runTool("clear_thumbnail", "{\"slot\":4}")
+    t.equal(fake.last, ["clear-thumbnail", "4"], "clear_thumbnail 应映射成 clear-thumbnail <slot>")
+    _ = runTool("repair_index", "{}")
+    t.equal(fake.last, ["repair-index"], "repair_index 无参数")
+
+    // —— schema 契约：工具齐不齐、描述有没有把「别做什么」写清楚
+    let specs = AgentBuiltinTools().specs()
+    let names = Set(specs.map(\.name))
+    for required in ["clear_slot", "paste_slot", "create_group", "create_page",
+                     "rename_group", "delete_group", "delete_page",
+                     "write_attachment", "set_thumbnail", "clear_thumbnail", "repair_index"] {
+        t.check(names.contains(required), "★内置工具集必须包含 \(required)（缺了模型只会编造替代方案）")
+    }
+    func spec(_ name: String) -> AgentToolSpec? { specs.first { $0.name == name } }
+    t.check(spec("clear_slot")?.description.contains("write_slot") == true,
+            "★★clear_slot 的描述必须点明与 write_slot 的区别，否则模型继续用「写空串」冒充清空")
+    t.check(spec("delete_group")?.description.contains("DEFAULT_GROUP_PROTECTED") == true,
+            "★delete_group 描述要写明默认组删不掉，模型才不会把 CLI 的拒绝当成自己参数错了反复重试")
+    t.check(spec("delete_page")?.description.contains("DEFAULT_PAGE_PROTECTED") == true,
+            "★delete_page 描述要写明默认页删不掉")
+    // 默认页的 id 是 default_page，默认组才是 default（CLI 里两个常量不同名）。实测 `delete-page default`
+    // 走的是 PAGE_NOT_FOUND 而不是保护分支 —— 描述里写错这个字符串，模型会把「保护」误读成「参数写错」。
+    t.check(spec("delete_page")?.description.contains("default_page") == true,
+            "★★默认页 id 是 default_page，不是 default（别照抄默认组的常量）")
+    t.check(spec("delete_group")?.description.contains("CANNOT_DELETE_LAST_GROUP") == true,
+            "★删到只剩一个组时 CLI 会拒（CANNOT_DELETE_LAST_GROUP），描述要给出「改用 delete_page」的出路")
+    t.check(spec("paste_slot")?.description.contains("剪贴板") == true,
+            "★paste_slot 只写剪贴板、不模拟按键，描述必须说清，避免模型谎报「已粘贴」")
+    t.equal(spec("delete_group")?.parameters["required"]?.arrayValue?.compactMap(\.stringValue), ["group"],
+            "delete_group 必填 group")
+    t.equal(spec("rename_group")?.parameters["required"]?.arrayValue?.compactMap(\.stringValue),
+            ["group", "new_name"], "rename_group 必填 group 与 new_name")
+    t.equal(spec("delete_page")?.parameters["required"]?.arrayValue?.compactMap(\.stringValue), ["page"],
+            "delete_page 必填 page")
+    for s in specs {
+        let props = s.parameters["properties"]?.objectValue ?? [:]
+        t.check(props["force"] == nil,
+                "★★工具 \(s.name) 不得暴露 force（跳过跨进程写锁是人类自救手段，交给模型等于常态化并发写坏数据）")
+    }
+    t.check(fake.allCalls.allSatisfy { !$0.contains("--force") },
+            "★★本组所有 CLI 调用都不该出现 --force")
 }
 
 // MARK: - AGENT-SKILL：SKILL.md 解析
