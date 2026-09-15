@@ -252,10 +252,17 @@ struct ContentView: View {
                 // ★ v2.11.7 hotfix18: 编辑模式下工作区切换器**回到 titleBar 里**（logo 右侧、与搜索框同一行），
                 // 不再独占一行 —— 独占一行虽然能做到几何真居中，但为一个双段控件吃掉整条 34pt 高度，
                 // 在 900pt 高的窗口里等于白扔一行；而且它悬在 logo 上方，读起来像是「窗口标题」而不是
-                // 「当前工作区」。画布模式没有 titleBar，所以单独给它一条只含切换器的窄顶栏（见 canvasTopBar）。
-                if workspaceMode == .canvas {
-                    canvasTopBar
-                }
+                // 「当前工作区」。
+                //
+                // ★ v2.11.7 hotfix21: 画布模式那条「只装切换器」的窄顶栏（canvasTopBar）**整条删掉**，
+                // 切换器改为浮在画布上（见下面内容区的 .overlay）。
+                //
+                // 根因记录（用户反馈「侧边栏顶部有一段空白缺口，没拉到头」）：左侧槽位库与右侧 Agent
+                // 侧栏都是**通高贴边**侧栏，但它们活在内容区里，而内容区又被这条 ~40pt 的顶栏往下压了
+                // 一截 —— 于是两条侧栏头顶各留出一道窗口底色的缺口，"贴边"的观感当场破功。
+                // 让内容区从窗口顶边起算、把切换器改成浮动 chrome（与画布右上「生成 / Agent」、
+                // 底部工具栏、左下缩放控件同属一层），缺口就不存在了，也不必给两条侧栏各自去补
+                // ignoresSafeArea / 负 padding 这类会把布局越修越脆的偏方。
 
                 // ★ v2.11.7 hotfix17: 画布是一块**完全独立的全屏工作区**，不共享槽位界面的任何 chrome。
                 // 顶栏（logo/拨杆/搜索/筛选/设置）、操作行（页面/槽位组/自动切换/打包/导入/清空）、
@@ -357,6 +364,17 @@ struct ContentView: View {
                         AgentSidebarView(model: agentSessions.session(for: workspaceMode),
                                          isVisible: agentSidebarBinding)
                             .transition(.move(edge: .trailing))
+                    }
+                }
+                // ★ v2.11.7 hotfix21: 画布模式的工作区切换器浮在内容区顶部正中。
+                //
+                // 挂在 **HStack 整体**（而不是画布子视图）上是刻意的：这样它是在「窗口内容宽度」里
+                // 几何居中，Agent 侧栏开合不会让它左右横跳 —— 顶部居中的 chrome 一旦跟着侧栏动，
+                // 读起来就像整个界面在抖。overlay 只占控件自身的命中区域，四周的透明 padding
+                // 不吃事件，画布该位置的节点照常可点。
+                .overlay(alignment: .top) {
+                    if workspaceMode == .canvas {
+                        canvasFloatingModeSwitcher
                     }
                 }
 
@@ -629,17 +647,23 @@ struct ContentView: View {
         }
     }
 
-    /// 画布模式的窄顶栏（v2.11.7 hotfix18；hotfix20 改为居中）。
+    /// 画布模式的工作区切换器（v2.11.7 hotfix18 起存在；hotfix21 由「窄顶栏」改为「浮动胶囊」）。
     ///
     /// 画布模式把 titleBar 整条摘掉了，切换器要是也跟着消失，用户就再也回不到编辑页（只能重启 App）。
-    /// 所以这里给它一条**只含切换器**的窄条。位置与编辑模式的 titleBar 保持一致 —— 都在水平正中，
-    /// 这样来回切页时那颗胶囊是**原地**换选中态，而不是从中间跳到左上角再跳回来。
-    private var canvasTopBar: some View {
+    /// 位置仍在水平正中 —— 与编辑模式 titleBar 里那颗胶囊同一水平位置，来回切页时它是**原地**换
+    /// 选中态，而不是从中间跳到左上角再跳回来。
+    ///
+    /// hotfix21 只改一件事：它不再占据一行布局高度（那一行正是两侧贴边侧栏头顶那道空白缺口的来源），
+    /// 改为浮在画布上方。为此必须自带**不透明底板**：切换器自身的 `chipBackground` 是半透明的，
+    /// 直接压在网格线上会透出格线，读起来像控件坏了。
+    private var canvasFloatingModeSwitcher: some View {
         WorkspaceModeSwitcher(selection: $workspaceMode)
-            .frame(width: WorkspaceModeSwitcher.preferredWidth)
-            .frame(maxWidth: .infinity, alignment: .center)
-        .padding(.horizontal, AppTheme.pagePadding)
-        .padding(.vertical, 8)
+            .background(
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .fill(AppTheme.canvasChromeSurface)
+                    .shadow(color: Color.black.opacity(0.12), radius: 5, x: 0, y: 2)
+            )
+            .padding(.top, 10)
     }
 
     private var headerView: some View {

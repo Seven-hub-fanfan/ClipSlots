@@ -72,6 +72,8 @@ struct CanvasWorkspaceView: View {
                 CanvasGridBackground(pan: effectivePan, zoom: zoom)
                     .allowsHitTesting(false)
 
+                blankClickCatcher
+
                 if canvas.nodes.isEmpty {
                     CanvasEmptyHint()
                         .frame(width: max(0, proxy.size.width - sidebarWidth), height: proxy.size.height)
@@ -151,6 +153,27 @@ struct CanvasWorkspaceView: View {
 
     private var effectivePan: CGSize {
         CGSize(width: pan.width + panGestureDelta.width, height: pan.height + panGestureDelta.height)
+    }
+
+    // MARK: - 空白单击
+
+    /// 「点空白取消选中」的承接层（v2.11.7 hotfix21）。
+    ///
+    /// 三个设计约束，缺一个就会引出新 bug：
+    ///   1. **必须是 ZStack 的最底层**。命中测试取最上面那一层，所以节点卡片、槽位库侧栏、
+    ///      右上按钮、底部工具栏、属性面板都在它之上 —— 点它们时事件根本到不了这里，
+    ///      不会出现「点属性面板里的字体下拉，结果选中被清空、面板当场消失」。
+    ///   2. **不能挂在 `CanvasGridBackground` 上**。网格层是 `allowsHitTesting(false)` 的
+    ///      （它压在整幅画布上，能吃事件就等于把整块画布点死），给它加 tap 收不到任何点击。
+    ///      所以另铺一张只负责收点击的透明层。
+    ///   3. **tap 而不是 drag**。框选是外层那条 `canvasDragGesture`（ancestor），SwiftUI 里
+    ///      后代手势优先，但 TapGesture 一旦位移超阈值就会失败并把比赛让给 ancestor 的
+    ///      DragGesture —— 于是「点一下 = 取消选中，拖出去 = 框选」天然分流，不需要额外的
+    ///      互斥判断。带抖动的单击由 `canvasDragGesture` 那侧的 click slop 兜住。
+    private var blankClickCatcher: some View {
+        Color.clear
+            .contentShape(Rectangle())
+            .onTapGesture { canvas.clearSelection() }
     }
 
     // MARK: - 节点层
@@ -263,12 +286,23 @@ struct CanvasWorkspaceView: View {
     /// 必须能挪动视图」。这条前提已经不成立了：现在平移有**中键拖动**和**滚轮**两个不依赖工具切换的
     /// 入口（见 `CanvasEventInterceptor`），左键就可以还给选区 —— 与 Figma / Sketch / Crate 网页端
     /// 一致，用户的肌肉记忆不用重学。
+    ///
+    /// ★ v2.11.7 hotfix21：松手时若位移**没过 click slop**，本次按下按「点空白」处理 → 取消选中。
+    ///
+    /// 为什么这条也要管取消选中：真正的原地单击由最底层那张 `blankClickCatcher` 的 tap 负责
+    /// （见 body），但鼠标单击常常带 1~3pt 的抖动，那已经足够让这条 `minimumDistance: 1` 的手势
+    /// 抢先赢下比赛、把 tap 挤掉。若这里不兜住，「点空白取消选中」就会时灵时不灵 —— 而"偶尔失效"
+    /// 的交互比"一直没有"更让人不信任。
+    ///
+    /// 抖动同时也不该点亮选框：`marqueeStart` 改为**越过 slop 才记**，否则每次单击都会在屏幕上
+    /// 闪一个 1~2pt 的选框。
     private var canvasDragGesture: some Gesture {
         DragGesture(minimumDistance: 1, coordinateSpace: .named(CanvasWorkspaceView.spaceName))
             .onChanged { value in
                 if canvas.activeTool == .hand {
                     panGestureDelta = value.translation
                 } else {
+                    guard !CanvasGeometry.isClickWithoutDrag(translation: value.translation) else { return }
                     if marqueeStart == nil { marqueeStart = value.startLocation }
                     marqueeCurrent = value.location
                 }
@@ -280,12 +314,17 @@ struct CanvasWorkspaceView: View {
                     pan.height += value.translation.height
                     panGestureDelta = .zero
                     canvas.updateViewport(pan: pan, zoom: zoom)
-                } else {
-                    if let start = marqueeStart {
-                        commitMarquee(from: start, to: value.location)
-                    }
+                } else if let start = marqueeStart {
+                    commitMarquee(from: start, to: value.location)
                     marqueeStart = nil
                     marqueeCurrent = nil
+                } else {
+                    // 走到这里 = 非抓手工具、且全程没越过 slop → 一次（带抖动的）空白单击。
+                    //
+                    // 刻意**不**顺手关掉 inline 编辑器：正在编辑的节点里，光标移动/选词都可能把
+                    // 事件带到这里，把编辑当场中断（且未保存）远比"选中框还亮着"糟糕。
+                    // 编辑的退出口是 Enter / Esc，保持单一。
+                    canvas.clearSelection()
                 }
             }
     }

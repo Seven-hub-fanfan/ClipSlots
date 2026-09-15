@@ -113,6 +113,30 @@ public enum CanvasGeometry {
         return CGSize(width: pan.width + dx, height: pan.height + dy)
     }
 
+    // MARK: - 单击 / 拖拽判别
+
+    /// 「按下又松开，但基本没动」的容差（屏幕空间，pt）。
+    ///
+    /// 4pt 是取舍出来的：鼠标单击时人手抖动通常在 1~2pt，触控板点按能到 3pt；而有意义的框选
+    /// 至少要划出十几 pt 才可能框到东西。取 4 既不会把点击误判成框选（否则「点空白取消选中」
+    /// 会时灵时不灵），也不会把一次真框选吞成点击（那会把刚框上的节点当场清空）。
+    public static let clickSlop: CGFloat = 4
+
+    /// 这次拖拽手势本质上是不是一次**原地单击**。
+    ///
+    /// 为什么需要它：画布空白处的「点一下取消选中」和「拖出选框」是同一条 `DragGesture`
+    /// （手势的 `minimumDistance` 必须放到 0，否则原地单击根本不会进入手势回调，点击事件会被
+    /// 底下那层什么都不做的背景吃掉）。既然同一条手势要承担两种语义，判别就只能靠位移量 ——
+    /// 而这个判别是纯数学，下沉到 Kit 才能被 smoke 测试盯住，不然它只能靠手点。
+    ///
+    /// 用**曼哈顿距离之外的欧氏距离**：斜向 45° 拖 3pt+3pt 的实际位移是 4.2pt，按分量判断会
+    /// 被当成点击（两个分量都小于 4），欧氏距离才与「人眼看到的移动量」一致。
+    public static func isClickWithoutDrag(translation: CGSize, slop: CGFloat = clickSlop) -> Bool {
+        let dx = translation.width.isFinite ? translation.width : 0
+        let dy = translation.height.isFinite ? translation.height : 0
+        return (dx * dx + dy * dy) <= slop * slop
+    }
+
     // MARK: - 背景网格
 
     /// 网格在屏幕空间的实际步长。

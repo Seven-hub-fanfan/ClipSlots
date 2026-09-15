@@ -45,15 +45,30 @@ struct WorkspaceModeSwitcher: View {
     /// 「由内容自然撑开」改成一个显式常量：段宽 62 × 2 + 段间距 2 + 外圈 padding 3 × 2。
     static let preferredWidth: CGFloat = 62 * 2 + 2 + 3 * 2
 
+    /// 单段的固定尺寸（v2.11.7 hotfix21）。
+    ///
+    /// ★ 为什么必须写死、不能让内容自然撑开：两段用的 SF Symbol 字形盒子不一样高
+    /// （`rectangle.stack` 偏扁，`square.grid.3x3.topleft.filled` 是个满格方块），
+    /// 而 `Image(systemName:)` 的固有高度是跟着字形盒子走的。段高一旦随字形变化，两段里
+    /// 「图标 + 文字」这组内容的垂直居中基准就各算各的，观感就是**「画布」整段往下沉一两个点**
+    /// ——正是用户反馈的那个对不齐。把段高、图标绘制盒都钉成常量后，两段的几何完全一致，
+    /// 换 symbol 也不会再把对齐带歪。
+    private static let segmentHeight: CGFloat = 26
+    private static let segmentWidth: CGFloat = 62
+    private static let iconBox: CGFloat = 13
+
     @Namespace private var indicator
 
     var body: some View {
-        HStack(spacing: 2) {
+        HStack(alignment: .center, spacing: 2) {
             ForEach(WorkspaceMode.allCases) { mode in
                 segment(mode)
             }
         }
         .padding(3)
+        // 控件自身高度也固定：外层（titleBar / 画布浮动层）拿它去做垂直居中时，
+        // 高度若随内容浮动，居中结果就会跟着一起浮动。
+        .frame(width: Self.preferredWidth, height: Self.segmentHeight + 3 * 2)
         .background(
             RoundedRectangle(cornerRadius: 10, style: .continuous)
                 .fill(AppTheme.chipBackground)
@@ -70,16 +85,19 @@ struct WorkspaceModeSwitcher: View {
             guard selection != mode else { return }
             withAnimation(Anim.transition) { selection = mode }
         } label: {
-            HStack(spacing: 5) {
+            HStack(alignment: .center, spacing: 5) {
                 Image(systemName: mode.symbolName)
                     .font(.system(size: 10, weight: .semibold))
+                    // 钉死绘制盒子 + 盒内居中：图标的视觉中心从此与文字的视觉中心同高，
+                    // 与具体 symbol 的字形高度无关。
+                    .frame(width: Self.iconBox, height: Self.iconBox, alignment: .center)
                 Text(mode.title)
                     .font(.system(size: 11, weight: .semibold))
+                    // 不允许被压缩/换行：一旦文字进入多行或省略号路径，它的基线会整体偏移。
+                    .fixedSize()
             }
             .foregroundColor(isSelected ? AppTheme.chromeAccentInk : .secondary.opacity(0.85))
-            .padding(.horizontal, 10)
-            .padding(.vertical, 5)
-            .frame(minWidth: 62)
+            .frame(width: Self.segmentWidth, height: Self.segmentHeight, alignment: .center)
             .background {
                 if isSelected {
                     // matchedGeometryEffect 让选中背景在两段之间**滑动**而不是闪现。

@@ -2957,6 +2957,46 @@ do {
             "★★step=0 必须返回空数组（不得死循环）")
 }
 
+// —— 单击 / 拖拽判别（v2.11.7 hotfix21：点空白取消选中） ——
+//
+// 这个判别是「点空白取消选中」与「拖出选框」的分水岭：判早了 → 一次真框选被当成点击，
+// 刚框上的节点当场被清空；判晚了 → 带手抖的单击被当成框选，取消选中时灵时不灵。
+// 两侧都是用户一眼能看见的坏行为，所以边界逐条钉死。
+do {
+    t.check(CanvasGeometry.clickSlop > 0, "clickSlop 必须为正（否则任何按下都会被判成拖拽）")
+    t.check(CanvasGeometry.clickSlop < 10,
+            "★★clickSlop 不能太大：超过 10pt 会把肉眼可见的小框选吞成点击")
+
+    t.check(CanvasGeometry.isClickWithoutDrag(translation: .zero),
+            "★★零位移必须判为单击（这是「点空白取消选中」的主路径）")
+    t.check(CanvasGeometry.isClickWithoutDrag(translation: CGSize(width: 2, height: 1)),
+            "鼠标单击的 1~2pt 抖动仍须判为单击")
+    t.check(CanvasGeometry.isClickWithoutDrag(translation: CGSize(width: -3, height: 0)),
+            "负方向抖动同样判为单击（判别只看距离，不看方向）")
+
+    // 边界：正好等于 slop 算单击（含等号），刚超过就算拖拽。
+    t.check(CanvasGeometry.isClickWithoutDrag(translation: CGSize(width: CanvasGeometry.clickSlop, height: 0)),
+            "位移正好等于 clickSlop 时判为单击（边界含等号）")
+    t.check(!CanvasGeometry.isClickWithoutDrag(translation: CGSize(width: CanvasGeometry.clickSlop + 0.01, height: 0)),
+            "★★刚超过 clickSlop 立刻判为拖拽")
+    t.check(!CanvasGeometry.isClickWithoutDrag(translation: CGSize(width: 40, height: 30)),
+            "★★一次正常框选（50pt 位移）必须判为拖拽，不能被当成点击清空选中")
+
+    // 斜向：必须按欧氏距离而不是分量判断。3,3 的实际位移 4.24 > 4，应算拖拽；
+    // 若按「每个分量都 < slop」判断就会错判成单击。
+    t.check(!CanvasGeometry.isClickWithoutDrag(translation: CGSize(width: 3, height: 3)),
+            "★★斜向 3+3（欧氏 4.24）必须判为拖拽 —— 证明用的是距离而非分量")
+
+    // NaN 防护：手势在极端情况下会喂进 NaN，此时按「没动」处理（清空选中是可恢复动作，
+    // 而放任 NaN 流进 commitMarquee 会用 NaN 矩形做命中判定，结果完全不可预期）。
+    t.check(CanvasGeometry.isClickWithoutDrag(translation: CGSize(width: CGFloat.nan, height: CGFloat.nan)),
+            "★★NaN 位移按单击处理，不得让 NaN 流进框选矩形")
+
+    // 自定义 slop 生效（供将来触控板/鼠标分档使用）。
+    t.check(CanvasGeometry.isClickWithoutDrag(translation: CGSize(width: 8, height: 0), slop: 12),
+            "自定义 slop 应生效")
+}
+
 // —— 吸附 ——
 do {
     t.equal(CanvasGeometry.snap(CGPoint(x: 11, y: 29), step: 10), CGPoint(x: 10, y: 30), "snap：就近取整到步长")
