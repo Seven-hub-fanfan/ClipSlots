@@ -268,45 +268,23 @@ struct ContentView: View {
                 // 顶栏（logo/拨杆/搜索/筛选/设置）、操作行（页面/槽位组/自动切换/打包/导入/清空）、
                 // 页签行、底部快捷键条全部按模式摘掉——它们的每一个控件都在操作「当前槽位组」，
                 // 而画布上根本没有「当前槽位组」这个概念，留着只会诱导误操作（尤其「清空」）。
+                // ★ v2.11.7 hotfix25: 头部只有「标题 / 搜索行」留在整窗级这一层。
+                //
+                // 操作行、槽位组页签、横幅、搜索结果面板全部下移进内容行的**左列**（见下面的 HStack），
+                // 于是右侧 Agent 侧栏的顶边与标题栏下沿齐平、通高贴边，不再在头顶留一道约 90pt 的
+                // 窗口底色缺口（用户反馈「整个侧边要到顶」）。
+                //
+                // 这不只是贴边好看的问题，而是把"作用域"摆正：标题栏那一行（logo / 搜索 / 主题 / 设置）
+                // 确实是**整窗级**控件，被侧栏截断反而错；但操作行（页面 / 槽位组 / 自动切换 / 打包 /
+                // 导入 / 清空）操作的对象是**中间工作区里那一组槽位**，本来就该与工作区同宽、跟着被
+                // 侧栏挤压。搜索结果面板同理 —— 它是工作区内容的一种呈现，不该压在侧栏底下。
+                //
+                // 注意：修法仍然是**改结构**，不是给侧栏补 `ignoresSafeArea(.top)` / 负 padding
+                // 去"顶穿"上面那几行。那类偏方会让侧栏画到别人的布局里（横幅一出现就当场对不齐），
+                // 而且缺口的真正来源是"侧栏起点被上面的行往下推"，不改层级就永远治不干净。
                 if workspaceMode != .canvas {
-                headerView
-
-                // Hotkey error banner
-                // v2.10.87（动画打磨）: 原为硬切——横幅出现/消失会瞬间把下方网格顶下去/弹上来。
-                // 用与搜索结果区同一套「淡入 + 自顶部展开」过渡，两处纵向插入的节奏保持一致。
-                Group {
-                    if !store.hotkeyRegistrationErrors.isEmpty {
-                        hotkeyErrorBanner
-                            .transition(.opacity.combined(with: .move(edge: .top)))
-                    }
+                    headerTitleSection
                 }
-                .animation(Anim.reveal, value: store.hotkeyRegistrationErrors.isEmpty)
-
-                // Search results remain in the content area; the controls themselves live in titleBar.
-                //
-                // v2.10.87（动画打磨）: 原实现是裸 `if isSearchActive { ... }`，无任何过渡——敲下第一个
-                // 搜索字符的瞬间，这一整块（组内计数提示 / 全局搜索结果面板）凭空出现，把下方槽位网格
-                // 硬生生往下顶一大截；清空搜索时又整块消失、网格「弹」回原位。这是搜索路径上观感最突兀
-                // 的一处跳变。
-                //
-                // 改为「淡入 + 自顶部展开」，并把 `.animation` 紧贴这个 Group 作用域：
-                // - 动画只由 isSearchActive 这一个布尔驱动，输入过程中逐字符改 searchText 不会反复触发；
-                // - 作用域限定在本 Group，父 VStack 的其它子项（标题栏 / 网格 / 底栏）不会被顺带纳入
-                //   隐式动画，只是跟着本块被动画的高度平滑让位，因此网格是「被推开」而不是「跳一下」；
-                // - 用 Anim.reveal（0.13s easeOut）而不是更长的 Anim.transition：这一下会带动 10 张卡片
-                //   所在容器的纵向布局，时长必须压短，既读得出动作又不拖慢连续输入的节奏。
-                //   v2.10.88：原为 Anim.status(0.2s easeInOut)，实测偏慢——大面积纵向位移的感知时长
-                //   天然比小控件更长，0.2s 在连续输入搜索词时会明显拖住节奏，故收紧到专用的 reveal 档。
-                Group {
-                    if isSearchActive {
-                        searchResultsSection
-                            .padding(.horizontal, AppTheme.pagePadding)
-                            .padding(.vertical, 6)
-                            .transition(.opacity.combined(with: .move(edge: .top)))
-                    }
-                }
-                .animation(Anim.reveal, value: isSearchActive)
-                } // if workspaceMode != .canvas
 
                 // ★ v2.10.93（resize 丝滑第二刀）：这里原来是一个包住整个网格的 `GeometryReader`，
                 // 内部把容器宽度量化成 8pt 台阶写回两个 @State（quantizedGridWidth / gridColumnsState），
@@ -345,20 +323,31 @@ struct ContentView: View {
                 //   2. 画布的 GeometryReader 直接量到"变窄后"的宽度，右上「生成」按钮、
                 //      底部工具栏、缩放控件、历史面板全都自动让位，不必逐个改 padding
                 //      （画布里的浮动层控件是按 proxy.size 定位的）；
-                //   3. 编辑页保持顶栏/底栏通宽，侧栏只占卡片网格那一段高度——顶栏上的搜索框
-                //      与操作行本来就是"整窗级"控件，被侧栏截断反而错。
+                //   3. 编辑页只让**标题栏 / 底栏**通宽；操作行与卡片网格同属左列，跟着侧栏一起变窄。
+                //      hotfix25 修正了此前的判断（"操作行是整窗级控件，被侧栏截断反而错"）——
+                //      操作行的每个控件都在操作"当前这一组槽位"，它的作用域就是工作区，同宽才对；
+                //      而让它通宽的代价是侧栏被它往下推、贴不到顶。
                 HStack(spacing: 0) {
-                    Group {
-                        switch workspaceMode {
-                        case .canvas:
-                            CanvasWorkspaceView(store: store,
-                                                canvas: canvasStore,
-                                                agentVisible: $canvasAgentVisible)
-                        case .edit:
-                            editWorkspace
+                    // ★ v2.11.7 hotfix25: 左列 = 编辑模式头部的下半段（操作行 / 槽位组页签 / 横幅 /
+                    // 搜索结果）+ 工作区本体。它整列被 Agent 侧栏挤压，而标题栏在上一层通宽不受影响 ——
+                    // 侧栏因此从标题栏下沿一路贴到底，头顶不再有缺口。
+                    VStack(spacing: 0) {
+                        if workspaceMode != .canvas {
+                            editHeaderRows
                         }
+
+                        Group {
+                            switch workspaceMode {
+                            case .canvas:
+                                CanvasWorkspaceView(store: store,
+                                                    canvas: canvasStore,
+                                                    agentVisible: $canvasAgentVisible)
+                            case .edit:
+                                editWorkspace
+                            }
+                        }
+                        .animation(nil, value: workspaceMode)
                     }
-                    .animation(nil, value: workspaceMode)
                     // ★ v2.11.7 hotfix24: 给工作区一条最小宽度，并把它的布局优先级抬到侧栏之上。
                     //
                     // Agent 侧栏是**定宽** 320pt（`AgentSidebarView.width`），不参与弹性分配；
@@ -369,6 +358,9 @@ struct ContentView: View {
                     //
                     // 注：当前顶栏所需宽度（~1058）远大于「工作区最小 + 侧栏 320」，所以实际生效的
                     // 窗口下限来自顶栏；这条 minWidth 是把不变量写进代码，防止以后顶栏瘦身后失守。
+                    //
+                    // hotfix25 起这条 minWidth 落在**整个左列**（含操作行）上而不只是工作区，语义正好：
+                    // 左列有多宽，操作行和卡片网格就有多宽。
                     .frame(minWidth: workspaceMode == .canvas
                            ? WindowLayoutMetrics.canvasViewportMinWidth
                            : WindowLayoutMetrics.editWorkspaceMinWidth)
@@ -694,21 +686,29 @@ struct ContentView: View {
             .padding(.top, WorkspaceModeSwitcher.pinnedTopInset)
     }
 
-    private var headerView: some View {
+    /// 头部上半段：标题 / 搜索行 + 那条 1px 分隔线（v2.11.7 hotfix25 从 `headerView` 拆出）。
+    ///
+    /// 这一段是**整窗级**的：logo、检查更新、两个拨杆、搜索框、主题 / Agent / 插件 / 键盘 / 设置，
+    /// 全都不属于任何一个工作区，所以留在最外层 VStack 里通宽显示，不被 Agent 侧栏截断。
+    /// 分隔线也留在这里通宽 —— 它划的是"标题栏 / 以下全部内容"这条界，而不是"标题栏 / 卡片区"。
+    ///
+    /// 搜索相关的 `onChange` 观察者都挂在这一段：它在编辑模式下始终挂载，不像下半段那样
+    /// 会随搜索态插入/移除，观察者的生命周期因此最稳。
+    private var headerTitleSection: some View {
+        // v2.11.7 hotfix4: 工具栏**不再是一块浮动面板**。
+        //
+        // hotfix3 把这两行（标题/搜索行 + 操作行）装进了白色大圆角面板 + 外阴影里，
+        // 结果工具栏成了压在内容上的独立悬浮块，和下面的卡片区分成两层——用户一眼就看出
+        // 「割裂」。现在改回一体化：没有面板底、没有圆角、没有外阴影，工具栏与卡片区共用
+        // 同一张画布底（见下面的 HeaderSurfaceBackground），左右留白也换成 `AppTheme.pagePadding`
+        // ——和卡片区同一个值，工具栏里的控件才会与下面第一列卡片左右对齐。
+        //
+        // 新拟物的质感全部下沉到控件自身：内凹搜索框、微凸按钮、内凹滑道。层级由控件表达，
+        // 不由一块板表达。
+        //
+        // 行间那条分隔线保持 1px 的 Neu.hairline 而不是 Divider()：Divider 是系统分隔色的实线，
+        // 在一体化的底上会重新读成「上下两块拼起来」。
         VStack(spacing: 0) {
-            // v2.11.7 hotfix4: 工具栏**不再是一块浮动面板**。
-            //
-            // hotfix3 把这两行（标题/搜索行 + 操作行）装进了白色大圆角面板 + 外阴影里，
-            // 结果工具栏成了压在内容上的独立悬浮块，和下面的卡片区分成两层——用户一眼就看出
-            // 「割裂」。现在改回一体化：没有面板底、没有圆角、没有外阴影，工具栏与卡片区共用
-            // 同一张画布底（见下面的 HeaderSurfaceBackground），左右留白也换成 `AppTheme.pagePadding`
-            // ——和卡片区同一个值，工具栏里的控件才会与下面第一列卡片左右对齐。
-            //
-            // 新拟物的质感全部下沉到控件自身：内凹搜索框、微凸按钮、内凹滑道。层级由控件表达，
-            // 不由一块板表达。
-            //
-            // 行间那条分隔线保持 1px 的 Neu.hairline 而不是 Divider()：Divider 是系统分隔色的实线，
-            // 在一体化的底上会重新读成「上下两块拼起来」。
             titleBar
                 .padding(.horizontal, AppTheme.pagePadding)
                 .padding(.top, 10)
@@ -717,33 +717,11 @@ struct ContentView: View {
             Rectangle()
                 .fill(Neu.hairline)
                 .frame(height: 1)
-                .padding(.horizontal, AppTheme.pagePadding)
-
-            actionBar
-                // v2.10.24: 跨组游标提示胶囊叠在操作行上，水平居中，不占额外垂直空间
-                // （仅在游标位于其他组时才有内容）。
-                .overlay(crossGroupCursorHint)
-                .padding(.horizontal, AppTheme.pagePadding)
-                .padding(.vertical, 8)
-
-            specialSlotTagBar
-                .padding(.horizontal, AppTheme.pagePadding)
-                .padding(.bottom, 4)
-
-            // v2.7.37: remove the upper shortcut hint completely.
-            // It duplicated the bottom bar and consumed vertical space for slots.
-            // activeHotkeyLayerNotice intentionally not rendered here.
-
-            // hotfix4: 底部 Divider 也去掉。工具栏与卡片区同底、无描边、无阴影，
-            // 中间再压一条系统分隔线就等于把「一体化」又切回两块。
         }
         // v2.11.7 hotfix4: 顶部不再用磨砂材质，而是**和卡片区一样的窗口底色**——
         // 一体化的前提是两边同底。材质层（NSVisualEffectView）会把桌面/窗后内容透上来，
         // 明度天然与下面的不透明画布不同，看着就是「上面一条，下面一块」。
         .background(HeaderSurfaceBackground())
-        .popover(isPresented: $showingSpecialSlotManagement) {
-            SpecialSlotManagementView(store: store)
-        }
         // v2.8.0 (perf M1/M2): drive the cached global-search results from explicit
         // input changes instead of recomputing inside the view body on every render.
         .onChange(of: searchText) { _ in
@@ -775,6 +753,81 @@ struct ContentView: View {
         // P2-26 (v2.10.9): 视图消失时取消尚未触发的搜索防抖 work item，避免其在视图销毁后再触发。
         .onDisappear {
             searchDebounce.cancel()
+        }
+        .perfCount("headerTitleSection.body")
+    }
+
+    /// 编辑模式头部的下半段 + 两个纵向插入块，整体活在内容行的**左列**（v2.11.7 hotfix25）。
+    ///
+    /// 顺序与 hotfix24 及以前完全一致（操作行 → 槽位组页签 → 热键横幅 → 搜索结果），只是整体
+    /// 从"整窗级"降到"左列级"，于是右侧 Agent 侧栏能贴到标题栏下沿。
+    private var editHeaderRows: some View {
+        VStack(spacing: 0) {
+            headerView
+
+            // Hotkey error banner
+            // v2.10.87（动画打磨）: 原为硬切——横幅出现/消失会瞬间把下方网格顶下去/弹上来。
+            // 用与搜索结果区同一套「淡入 + 自顶部展开」过渡，两处纵向插入的节奏保持一致。
+            Group {
+                if !store.hotkeyRegistrationErrors.isEmpty {
+                    hotkeyErrorBanner
+                        .transition(.opacity.combined(with: .move(edge: .top)))
+                }
+            }
+            .animation(Anim.reveal, value: store.hotkeyRegistrationErrors.isEmpty)
+
+            // Search results remain in the content area; the controls themselves live in titleBar.
+            //
+            // v2.10.87（动画打磨）: 原实现是裸 `if isSearchActive { ... }`，无任何过渡——敲下第一个
+            // 搜索字符的瞬间，这一整块（组内计数提示 / 全局搜索结果面板）凭空出现，把下方槽位网格
+            // 硬生生往下顶一大截；清空搜索时又整块消失、网格「弹」回原位。这是搜索路径上观感最突兀
+            // 的一处跳变。
+            //
+            // 改为「淡入 + 自顶部展开」，并把 `.animation` 紧贴这个 Group 作用域：
+            // - 动画只由 isSearchActive 这一个布尔驱动，输入过程中逐字符改 searchText 不会反复触发；
+            // - 作用域限定在本 Group，父 VStack 的其它子项（标题栏 / 网格 / 底栏）不会被顺带纳入
+            //   隐式动画，只是跟着本块被动画的高度平滑让位，因此网格是「被推开」而不是「跳一下」；
+            // - 用 Anim.reveal（0.13s easeOut）而不是更长的 Anim.transition：这一下会带动 10 张卡片
+            //   所在容器的纵向布局，时长必须压短，既读得出动作又不拖慢连续输入的节奏。
+            //   v2.10.88：原为 Anim.status(0.2s easeInOut)，实测偏慢——大面积纵向位移的感知时长
+            //   天然比小控件更长，0.2s 在连续输入搜索词时会明显拖住节奏，故收紧到专用的 reveal 档。
+            Group {
+                if isSearchActive {
+                    searchResultsSection
+                        .padding(.horizontal, AppTheme.pagePadding)
+                        .padding(.vertical, 6)
+                        .transition(.opacity.combined(with: .move(edge: .top)))
+                }
+            }
+            .animation(Anim.reveal, value: isSearchActive)
+        }
+    }
+
+    /// 头部下半段：操作行 + 槽位组页签（v2.11.7 hotfix25 起不含标题栏，见 `headerTitleSection`）。
+    private var headerView: some View {
+        VStack(spacing: 0) {
+            actionBar
+                // v2.10.24: 跨组游标提示胶囊叠在操作行上，水平居中，不占额外垂直空间
+                // （仅在游标位于其他组时才有内容）。
+                .overlay(crossGroupCursorHint)
+                .padding(.horizontal, AppTheme.pagePadding)
+                .padding(.vertical, 8)
+
+            specialSlotTagBar
+                .padding(.horizontal, AppTheme.pagePadding)
+                .padding(.bottom, 4)
+
+            // v2.7.37: remove the upper shortcut hint completely.
+            // It duplicated the bottom bar and consumed vertical space for slots.
+            // activeHotkeyLayerNotice intentionally not rendered here.
+
+            // hotfix4: 底部 Divider 也去掉。工具栏与卡片区同底、无描边、无阴影，
+            // 中间再压一条系统分隔线就等于把「一体化」又切回两块。
+        }
+        // 与标题栏同底（见 headerTitleSection 的注释）：一体化的前提是两边同底。
+        .background(HeaderSurfaceBackground())
+        .popover(isPresented: $showingSpecialSlotManagement) {
+            SpecialSlotManagementView(store: store)
         }
         .perfCount("headerView.body")
     }
