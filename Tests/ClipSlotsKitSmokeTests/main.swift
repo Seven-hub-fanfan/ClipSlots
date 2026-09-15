@@ -5304,6 +5304,47 @@ do {
             "被拒的删除/改名不应留下副作用，保留组仍在")
 }
 
+// MARK: - CANVAS-CARD-LAYOUT：卡片纵向分区比例（v2.11.8 三轮）
+//
+// 用户的三条硬约束：卡片区 ≤ 节点高度 35%、卡片区与文字区间距 8–12pt、正文区上下各 +8pt。
+// 这些数字改错了不会报错，只是"看起来又挤回去了"，而挤回去这件事用户已经反馈过一次 ——
+// 所以把约束本身写成断言，而不是指望下一个改这里的人读到注释。
+do {
+    t.equal(CanvasCardLayout.promptVerticalPadding, 8, "正文区上下各 8pt 呼吸（用户指定）")
+    t.check(CanvasCardLayout.previewToPromptGap >= 8 && CanvasCardLayout.previewToPromptGap <= 12,
+            "★卡片区与文字区间距落在用户给的 8–12pt 区间内")
+    t.equal(CanvasCardLayout.previewToPromptGap, 12, "取区间上限 12pt —— 卡片扇开会下探，间距不足会贴脸")
+
+    // ★★ 核心约束：任何合理节点高度下，预览区都不得超过总高的 35%。
+    // 这是用户原话"卡片高度控制在节点总高度 35% 以内"，也是这轮布局调整的全部目的。
+    for h in stride(from: CGFloat(120), through: CGFloat(900), by: CGFloat(17)) {
+        let ph = CanvasCardLayout.previewHeight(nodeHeight: h)
+        // 下限 72 在极矮节点上会突破 35%（此时保"看得出是一叠卡"优先），所以只在 >= 下限/比例
+        // 的高度区间上校验比例；这个分界点自身也断言一下，避免下限被人调高后静默吃掉整个正文区。
+        if h >= CanvasCardLayout.previewHeightFloor / CanvasCardLayout.previewHeightRatio {
+            t.check(ph <= h * 0.35 + 0.001, "★★节点高 \(Int(h)) 时预览区 \(Int(ph)) 不得超过 35%")
+        }
+        t.check(ph <= CanvasCardLayout.previewHeightCap + 0.001, "预览区不超过 132pt 上限")
+        t.check(ph >= CanvasCardLayout.previewHeightFloor - 0.001, "预览区不低于 72pt 下限")
+        t.check(ph < h, "预览区必须小于节点总高（否则正文区高度为负，布局直接塌）")
+    }
+
+    // 默认节点（300pt）下的实际取值：预览区 102，比二轮的固定 132 让出 30pt 给正文。
+    // 用容差比较：300 * 0.34 在二进制浮点里是 102.00000000000001，钉死等号只会得到一条假失败。
+    t.check(abs(CanvasCardLayout.previewHeight(nodeHeight: 300) - 102) < 0.001,
+            "★默认高度 300pt → 预览区 102pt（34%），比二轮固定 132 多让 30pt 给正文")
+    // 单调不减：把节点拉高，预览区不能反而变小（那会让"拉高节点"这个操作行为诡异）。
+    var last: CGFloat = 0
+    for h in stride(from: CGFloat(100), through: CGFloat(800), by: CGFloat(25)) {
+        let ph = CanvasCardLayout.previewHeight(nodeHeight: h)
+        t.check(ph >= last - 0.001, "预览区高度随节点高度单调不减（h=\(Int(h))）")
+        last = ph
+    }
+    // 很高的节点：预览区停在上限，多出来的高度**全部**进正文区 —— 这正是用户要的"空间给文字区"。
+    t.equal(CanvasCardLayout.previewHeight(nodeHeight: 600), CanvasCardLayout.previewHeightCap,
+            "★节点很高时预览区封顶在 132，多出来的高度全部归正文区")
+}
+
 // MARK: - CANVAS-CARD-TEXT：节点卡片文字加工（v2.11.8 二轮）
 //
 // 用户要求：卡片正文显示 4 行**纯文本**，去掉 Markdown 表格这类原始模板字样；顶部改成

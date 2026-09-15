@@ -120,8 +120,16 @@ struct CanvasNodeCardView: View {
                 // 一个不出图的节点摆一个"产物位"只会让人一直等一张永远不会来的图。
                 textNodeBody
             } else {
+                // ★ zIndex：堆叠卡片 hover 时会向两侧扇开、向上抬、还要浮出操作气泡和 `+N` 网格，
+                // 这些都溢出预览区。VStack 里**后声明的兄弟画在上面**，所以不置顶的话正文区（以及
+                // 编辑态那个带边框的输入框）会盖在飞出来的卡片上，把卡片下半截切掉一条 ——
+                // 用户反馈的"卡片被横线割裂"就是这个。预览区置顶后，卡片永远浮在正文区之上。
                 previewArea
+                    .zIndex(10)
                 promptArea
+                    // 卡片区与文字区之间留 12pt（VStack 已有 8pt，这里补 4pt）。
+                    // 卡片扇开时会略微下探，间距太小就会和正文首行"贴脸"。
+                    .padding(.top, s(previewToPromptGap - 8))  // VStack 自带 8pt
                 // 正文字号被调大后（最大 24pt）会把下面的内容顶出卡片。加一个可压缩的 Spacer，
                 // 让入参文件行始终钉在卡片底边，被挤掉的是正文的末行而不是整条按钮。
                 Spacer(minLength: 0)
@@ -256,25 +264,32 @@ struct CanvasNodeCardView: View {
                     .fill(AppTheme.canvasTextNodeFill)
 
                 if text.isEmpty {
-                    Text(attachments.isEmpty ? "双击填写文本…" : "仅入参文件，无文本")
+                    Text(attachments.isEmpty ? "点这里写文本…" : "仅入参文件，无文本")
                         .font(bodyFont)
                         .foregroundColor(.white.opacity(0.45))
-                        .padding(s(10))
+                        .padding(.horizontal, s(10))
+                        .padding(.vertical, s(10 + CanvasCardLayout.promptVerticalPadding))
                 } else {
                     Text(text)
                         .font(bodyFont)
                         .foregroundColor(.white.opacity(0.92))
                         .multilineTextAlignment(.leading)
                         .lineSpacing(s(2))
+                        .lineLimit(nil)
                         .frame(maxWidth: .infinity, alignment: .topLeading)
-                        .padding(s(10))
+                        // 宽度吃满、高度随内容：换行位置只由容器宽度决定，缩放过程中不参与宽度协商。
+                        .fixedSize(horizontal: false, vertical: true)
+                        // ★ 三轮：上下各多 8pt 呼吸（用户要求）。
+                        .padding(.horizontal, s(10))
+                        .padding(.vertical, s(10 + CanvasCardLayout.promptVerticalPadding))
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
             .clipShape(RoundedRectangle(cornerRadius: s(10), style: .continuous))
-            // 命中区盖满整块，否则空节点只有那句灰字那么窄，双击基本点不中。
+            // 命中区盖满整块，否则空节点只有那句灰字那么窄，点不中。
             .contentShape(RoundedRectangle(cornerRadius: s(10), style: .continuous))
-            .onTapGesture(count: 2, perform: onBeginEdit)
+            // ★ 三轮：双击 → 单击进编辑（同 `promptArea`，理由见那里的注释）。
+            .onTapGesture(perform: onBeginEdit)
         }
     }
 
@@ -297,8 +312,15 @@ struct CanvasNodeCardView: View {
     /// 要的"卡片飞出来"的反面。裁剪责任因此下移到**每个会溢出的图片分支自己**（`fillImageBox`）。
     private var previewArea: some View {
         ZStack {
+            // ★ 边框画在**底板上**（`.overlay` 挂在这个 shape 上），而不是挂在整个 ZStack 外面。
+            // 挂外面的话这条 0.5pt 的线会画在所有卡片之上：扇开的卡片下半截被这条线横穿，
+            // 观感就是用户说的"卡片被横线割裂"。放到底板层后，线永远在卡片之下。
             RoundedRectangle(cornerRadius: s(10), style: .continuous)
                 .fill(AppTheme.previewBackground)
+                .overlay(
+                    RoundedRectangle(cornerRadius: s(10), style: .continuous)
+                        .stroke(AppTheme.subtleBorder.opacity(0.6), lineWidth: s(0.5))
+                )
 
             if case .succeeded(let path) = node.state,
                let img = NSImage(contentsOfFile: path) {
@@ -337,18 +359,22 @@ struct CanvasNodeCardView: View {
             }
         }
         .frame(height: s(previewHeight))
-        .overlay(
-            RoundedRectangle(cornerRadius: s(10), style: .continuous)
-                .stroke(AppTheme.subtleBorder.opacity(0.6), lineWidth: s(0.5))
-        )
     }
+
+    /// 卡片区与文字区之间的间距（1x）。
+    private var previewToPromptGap: CGFloat { CanvasCardLayout.previewToPromptGap }
 
     /// 预览区高度（1x）。
     ///
     /// ★ 二轮从 148 降到 132：正文预览由 2 行变 4 行，多出来的两行高度得从某处来。删掉的参数栏
     /// 只值 ~18pt，剩下的从预览区借 —— 堆叠卡片本身是按这个高度收敛的（见 `fanCardSize`），
     /// 少 16pt 不影响可读性，而正文少两行会直接看不出这个节点是干什么的。
-    private var previewHeight: CGFloat { 132 }
+    ///
+    /// ★ 三轮改成**按节点高度取比例**（上限仍是 132）。比例/上下限连同理由都在
+    /// `CanvasCardLayout` 里，那边有 smoke 断言盯着"卡片区不得超过节点高度 35%"这条用户约束。
+    private var previewHeight: CGFloat {
+        CanvasCardLayout.previewHeight(nodeHeight: node.height)
+    }
 
     /// 「填充式图片盒」：用 `Color.clear` 定尺、内容走 overlay、再 `.clipped()`。见 `previewArea` 的注释。
     private func fillImageBox<Content: View>(@ViewBuilder _ content: () -> Content) -> some View {
@@ -367,7 +393,7 @@ struct CanvasNodeCardView: View {
         } else {
             Group {
                 if previewText.isEmpty {
-                    Text(attachments.isEmpty ? "双击填写提示词…" : "仅入参文件，无提示词")
+                    Text(attachments.isEmpty ? "点这里写提示词…" : "仅入参文件，无提示词")
                         .font(bodyFont)
                         .foregroundColor(AppTheme.canvasCardMetaInk.opacity(0.75))
                 } else {
@@ -380,13 +406,25 @@ struct CanvasNodeCardView: View {
                         .foregroundColor(.primary.opacity(0.88))
                         .lineLimit(CanvasCardText.previewLineLimit)
                         .multilineTextAlignment(.leading)
+                        // 只让高度跟着内容长，宽度**始终**吃满容器：这样换行位置只由容器宽度决定，
+                        // 不会因为"文字理想宽度"参与协商而在缩放过程中来回改主意。
                         .fixedSize(horizontal: false, vertical: true)
                 }
             }
             .frame(maxWidth: .infinity, minHeight: s(30), alignment: .topLeading)
-            // 命中区要盖满整行，否则空节点只有那句灰字那么窄，双击基本点不中。
+            // ★ 三轮：正文区上下各留 8pt 呼吸（用户要求）。padding 必须在 contentShape **之前**，
+            // 否则这 8pt 不算进命中区，等于白留。
+            .padding(.vertical, s(CanvasCardLayout.promptVerticalPadding))
+            // 命中区要盖满整行（含上面那 8pt padding），否则空节点只有那句灰字那么窄，点不中。
             .contentShape(Rectangle())
-            .onTapGesture(count: 2, perform: onBeginEdit)
+            // ★ 三轮：双击 → **单击**进编辑（用户要求"点一下就能直接打字"）。
+            //
+            // 原来写的是 `onTapGesture(count: 2)`，而**祖先**（节点整体）上挂着一个 count:1 的
+            // 选中手势。SwiftUI 里这两者共存时，count:2 会被上层的单击不断打断 —— 实测表现就是
+            // 用户说的"要点好几下才进得去"。改成单击后，内层手势优先级天然高于祖先，一击直达；
+            // `beginEdit` 本身会先 select 再置 editingNodeId，所以选中态不会丢。
+            // 拖拽不受影响：节点的 DragGesture 有 2pt 起步距离，位移一旦超过阈值 tap 就失败。
+            .onTapGesture(perform: onBeginEdit)
         }
     }
 
@@ -405,41 +443,33 @@ struct CanvasNodeCardView: View {
     /// 所以这里换成裹了 `NSTextView` 的 `CanvasPromptEditor`，在
     /// `textView(_:doCommandBy:)` 里按修饰键分流 —— 这是唯一能同时满足"回车保存"和"Shift+回车换行"
     /// 的路径，而这两条正是用户要的。
+    /// ## 三轮：底部那行「回车保存 / ⇧回车换行 / Esc 放弃」提示已删除（用户要求）
+    ///
+    /// 它是**一次性信息占了常驻位置**：这三个键位学一次就会了，而提示行在每次编辑时都要吃掉一行
+    /// 高度 —— 而正文区的高度正是这轮一直在抢的东西。键位契约本身没变，改挂到 `.help` 悬浮提示上，
+    /// 需要的人停一秒就能看到。
     private var editor: some View {
-        VStack(alignment: .leading, spacing: s(4)) {
-            // 编辑器字号同样乘 renderScale：光标与选区是 NSTextView 自己画的，字号不跟着缩放
-            // 会出现"放大后光标只有半个字高"这种一眼假的错位。
-            CanvasPromptEditor(text: $draft,
-                               font: CanvasFontCatalog.nsFont(family: node.fontName,
-                                                              size: node.resolvedBodyFontSize * renderScale),
-                               onCommit: { onCommitEdit(draft) },
-                               onCancel: onCancelEdit,
-                               onBlur: { onCommitEdit(draft) })
-                .frame(minHeight: s(40))
-                .padding(.horizontal, s(4))
-                .padding(.vertical, s(2))
-                .background(
-                    RoundedRectangle(cornerRadius: s(6), style: .continuous)
-                        .fill(AppTheme.previewBackground)
-                )
-                .overlay(
-                    RoundedRectangle(cornerRadius: s(6), style: .continuous)
-                        .stroke(AppTheme.chromeAccentInk.opacity(0.5), lineWidth: s(1))
-                )
-
-            HStack(spacing: s(6)) {
-                Text("回车保存")
-                    .font(.system(size: s(8), weight: .medium))
-                    .foregroundColor(AppTheme.chromeAccentInk)
-                Text("⇧回车换行")
-                    .font(.system(size: s(8)))
-                    .foregroundColor(AppTheme.canvasCardMetaInk)
-                Spacer(minLength: 0)
-                Text("Esc 放弃")
-                    .font(.system(size: s(8)))
-                    .foregroundColor(AppTheme.canvasCardMetaInk.opacity(0.8))
-            }
-        }
+        // 编辑器字号同样乘 renderScale：光标与选区是 NSTextView 自己画的，字号不跟着缩放
+        // 会出现"放大后光标只有半个字高"这种一眼假的错位。
+        CanvasPromptEditor(text: $draft,
+                           font: CanvasFontCatalog.nsFont(family: node.fontName,
+                                                          size: node.resolvedBodyFontSize * renderScale),
+                           onCommit: { onCommitEdit(draft) },
+                           onCancel: onCancelEdit,
+                           onBlur: { onCommitEdit(draft) })
+            .frame(minHeight: s(40))
+            .padding(.horizontal, s(4))
+            // ★ 三轮：上下各 8pt 呼吸，与非编辑态的正文区对齐 —— 否则一进编辑文字就往上跳一截。
+            .padding(.vertical, s(CanvasCardLayout.promptVerticalPadding))
+            .background(
+                RoundedRectangle(cornerRadius: s(6), style: .continuous)
+                    .fill(AppTheme.previewBackground)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: s(6), style: .continuous)
+                    .stroke(AppTheme.chromeAccentInk.opacity(0.5), lineWidth: s(1))
+            )
+            .help("回车保存 · ⇧回车换行 · Esc 放弃")
     }
 
     // MARK: - 入参文件（卡片最底部整行）
