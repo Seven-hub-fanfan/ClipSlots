@@ -215,6 +215,12 @@ public enum CanvasKeyBinding {
     /// 用键码而不是 `event.charactersIgnoringModifiers`：后者在中文输入法激活时可能拿不到 "z"。
     public static let zKeyCode: UInt16 = 6
 
+    /// `v` 的虚拟键码（Cmd+V 粘贴到画布，v2.11.8）。
+    public static let vKeyCode: UInt16 = 9
+
+    /// Esc 的虚拟键码（v2.11.8：收掉"编辑态卡住"）。
+    public static let escapeKeyCode: UInt16 = 53
+
     public static func isDeleteKey(_ keyCode: UInt16) -> Bool {
         deleteKeyCodes.contains(keyCode)
     }
@@ -224,6 +230,15 @@ public enum CanvasKeyBinding {
         case delete
         case undo
         case redo
+        /// Cmd+V：把剪贴板内容变成视口中心的一个新节点（v2.11.8）。
+        case paste
+        /// Esc：从"某个临时态"退出来（编辑中的节点 / 打开的浮层 / 选中态），见 `.cancel` 的使用处。
+        ///
+        /// 注意这条只在**焦点不在文本框里**时才会走到：真正在编辑器里按 Esc 由 NSTextView 自己
+        /// 处理（放弃本次编辑），事件根本到不了画布的键盘路由。这里收的是另一种情形——焦点已经
+        /// 从编辑器上溜走了、但视图还留在编辑态（点了画布空白处就会这样），此时用户按 Esc 期望
+        /// "退出来"，如果没人接就表现为节点永远卡在编辑框里、下游 + 号也一直不出现。
+        case cancel
         case none
     }
 
@@ -245,6 +260,15 @@ public enum CanvasKeyBinding {
         }
         if keyCode == zKeyCode, command, !option {
             return shift ? .redo : .undo
+        }
+        // ⌘V 必须是**干净的** ⌘V：⌘⇧V / ⌘⌥V 在各家 App 里是「粘贴为纯文本 / 匹配样式」这类
+        // 另一件事，画布把它们一并吃掉会挡住系统或未来自己的功能，而用户完全看不出是谁吃的。
+        if keyCode == vKeyCode, command, !shift, !option {
+            return .paste
+        }
+        // Esc 只认裸 Esc：带修饰键的 Esc 在系统里另有含义（如 ⌘Esc 语音控制）。
+        if keyCode == escapeKeyCode, !command, !shift, !option {
+            return .cancel
         }
         return .none
     }

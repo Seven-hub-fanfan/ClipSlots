@@ -4991,4 +4991,352 @@ do {
     t.check(!again, "重复探测保持 false（continuation 只 resume 一次）")
 }
 
+// MARK: - CANVAS-SPAWN：新节点落点几何（v2.11.8）
+//
+// 三个入口（双击空白 / Cmd+V / 选中节点下方的 +）算的是同一件事：一个点 → 一个不撞车的落点。
+// 这里锁死口径，防止三处各写一份后出现「双击建的节点对齐网格、粘贴的偏半格」。
+do {
+    // 视口中心：默认整视图中心。
+    let c1 = CanvasSpawnGeometry.viewportCenter(pan: .zero, zoom: 1,
+                                               viewportSize: CGSize(width: 1000, height: 600))
+    t.check(canvasApprox(c1.x, 500) && canvasApprox(c1.y, 300), "视口中心（无平移无缩放）= 视图中心")
+
+    // 缩放 + 平移后仍必须与 CanvasGeometry 的反变换一致（同一个公式，不能各算一套）。
+    let pan = CGSize(width: -120, height: 80)
+    let c2 = CanvasSpawnGeometry.viewportCenter(pan: pan, zoom: 2,
+                                               viewportSize: CGSize(width: 800, height: 400))
+    let expect2 = CanvasGeometry.canvasPoint(screen: CGPoint(x: 400, y: 200), pan: pan, zoom: 2)
+    t.check(canvasApprox(c2.x, expect2.x) && canvasApprox(c2.y, expect2.y),
+            "★视口中心必须等于 CanvasGeometry 反变换的结果（screen = canvas*zoom+pan 唯一口径）")
+
+    // 侧栏让位：槽位库展开占 240pt 时，中心要落在**可见区域**中心，不能藏到侧栏后面。
+    let c3 = CanvasSpawnGeometry.viewportCenter(pan: .zero, zoom: 1,
+                                               viewportSize: CGSize(width: 760, height: 600),
+                                               viewportOrigin: CGPoint(x: 240, y: 0))
+    t.check(canvasApprox(c3.x, 620), "★侧栏展开时落点取可见区域中心（240+760/2），否则新节点藏在侧栏后面")
+
+    // 中心 → 左上角。
+    let o1 = CanvasSpawnGeometry.origin(forCenter: CGPoint(x: 100, y: 100),
+                                       size: CGSize(width: 260, height: 300))
+    t.check(canvasApprox(o1.x, -30) && canvasApprox(o1.y, -50), "中心换算成左上角要各减半宽半高")
+
+    // 下游落点：左对齐 + 垂直间距 60（用户指定）。
+    let frame = CGRect(x: 40, y: 100, width: 260, height: 300)
+    let down = CanvasSpawnGeometry.downstreamOrigin(of: frame, newSize: CanvasNode.defaultSize)
+    t.check(canvasApprox(down.x, 40), "★下游节点与上游**左对齐**（中心对齐在卡片宽度不同时看起来像随机缩进）")
+    t.check(canvasApprox(down.y, 460), "下游节点在上游下方 60pt（100+300+60）")
+    t.equal(CanvasSpawnGeometry.downstreamGap, 60, "下游间距常量 = 60pt")
+
+    // 让位：没有既有节点时原样返回。
+    let keep = CanvasSpawnGeometry.nonOverlappingOrigin(desired: CGPoint(x: 10, y: 10), existing: [])
+    t.check(canvasApprox(keep.x, 10) && canvasApprox(keep.y, 10), "画布上没有节点时落点不动")
+
+    // 完全重合 → 斜向让位一步。
+    let moved = CanvasSpawnGeometry.nonOverlappingOrigin(desired: CGPoint(x: 10, y: 10),
+                                                        existing: [CGPoint(x: 10, y: 10)])
+    t.check(canvasApprox(moved.x, 38) && canvasApprox(moved.y, 38),
+            "★与已有节点完全重合时斜向让位一步（28,28），否则用户以为「点了没反应」")
+
+    // 相隔够远（> collisionRadius）就不让位：允许重叠是正常排版意图，只禁止完全重合。
+    let far = CanvasSpawnGeometry.nonOverlappingOrigin(desired: CGPoint(x: 10, y: 10),
+                                                      existing: [CGPoint(x: 60, y: 10)])
+    t.check(canvasApprox(far.x, 10), "★距离超过判定半径就不让位（部分重叠是合法排版，不该被系统擅自挪开）")
+
+    // 让位有上限：满屏都是重合点时接受重叠而不是无限循环 / 扔到视野外。
+    let crowd = (0..<200).map { CGPoint(x: 10 + CGFloat($0) * 28, y: 10 + CGFloat($0) * 28) }
+    let capped = CanvasSpawnGeometry.nonOverlappingOrigin(desired: CGPoint(x: 10, y: 10),
+                                                         existing: crowd,
+                                                         maxAttempts: 3)
+    t.check(canvasApprox(capped.x, 10 + 3 * 28), "★让位次数封顶后接受重叠（宁可叠着，也不能死循环或飞出视野）")
+
+    // 空槽位选择：1-based、从小到大、全满返回 nil。
+    t.equal(CanvasSpawnGeometry.firstFreeSlot(total: 10, occupied: []), 1, "空组取第 1 号槽位")
+    t.equal(CanvasSpawnGeometry.firstFreeSlot(total: 10, occupied: [1, 2, 4]), 3, "跳过已占用，取最小空号")
+    t.check(CanvasSpawnGeometry.firstFreeSlot(total: 3, occupied: [1, 2, 3]) == nil,
+            "★全部占满返回 nil —— 绝不覆盖已有槽位来满足一次「新建节点」")
+    t.check(CanvasSpawnGeometry.firstFreeSlot(total: 0, occupied: []) == nil,
+            "槽位数为 0（配置损坏）返回 nil，不能让 1...0 崩掉")
+}
+
+// MARK: - CANVAS-FAN：槽位节点扇形堆叠卡片（v2.11.8）
+//
+// 用户要求的交互：收拢叠放 → 整节点 hover 扇开 → 单卡 hover 抬起放大提层。
+// 几何放在 Kit 是为了能在这里断言"对称""不越界""hover 只影响那一张"。
+do {
+    // 张数夹取：0 也要给一张（空槽位显示虚线空卡），超过 4 张截断。
+    t.equal(CanvasFanGeometry.layouts(count: 0, expanded: false).count, 1,
+            "★0 张内容也返回 1 张卡片（空槽位要有一张空卡，否则节点预览区一片空白像坏了）")
+    t.equal(CanvasFanGeometry.layouts(count: 9, expanded: false).count, CanvasFanGeometry.maxCards,
+            "卡片数封顶 4 张（再多在 236pt 宽的预览区里只会糊成一团）")
+
+    // 角度关于中轴严格对称。
+    let four = CanvasFanGeometry.layouts(count: 4, expanded: true)
+    let angles = four.map { $0.angle }
+    t.check(canvasApprox(angles[0], -angles[3]) && canvasApprox(angles[1], -angles[2]),
+            "★展开角度关于中轴严格对称（不对称会让整叠卡片的视觉重心随张数奇偶左右跳）")
+    let three = CanvasFanGeometry.layouts(count: 3, expanded: true)
+    t.check(canvasApprox(three[1].angle, 0), "奇数张时中间那张角度为 0")
+    t.check(canvasApprox(three[1].offset.width, 0), "奇数张时中间那张水平位移为 0")
+
+    // 展开幅度必须大于收拢幅度，否则 hover 看不出变化。
+    let collapsed4 = CanvasFanGeometry.layouts(count: 4, expanded: false)
+    t.check(abs(four[0].angle) > abs(collapsed4[0].angle) * 2,
+            "★展开态张角显著大于收拢态（用户要的就是「扇开」这个动作被看见）")
+    t.check(abs(four[0].offset.width) > abs(collapsed4[0].offset.width),
+            "展开态水平错位也更大")
+
+    // 收拢态后卡下沉、展开态不下沉（要看清内容）。
+    t.check(collapsed4[0].offset.height > 0, "收拢态两侧卡片略微下沉，产生「被压在下面」的层次")
+    t.check(canvasApprox(four[0].offset.height, 0), "展开态不下沉（下沉会遮挡内容，与「看全每张卡」的目的冲突）")
+
+    // 单卡 hover：只动那一张，抬起 -8pt、放大 1.08、Z 层提到最上。
+    let hovered = CanvasFanGeometry.layouts(count: 4, expanded: true, hoveredIndex: 2)
+    t.check(canvasApprox(hovered[2].scale, 1.08), "★单卡 hover 放大 1.08（用户指定）")
+    t.check(canvasApprox(hovered[2].offset.height, -8), "★单卡 hover 上移 8pt（用户指定）")
+    t.check(hovered[2].zIndex > hovered[3].zIndex && hovered[2].zIndex > hovered[0].zIndex,
+            "★被悬停的卡片 Z 层最高（否则放大的那 8% 会被邻卡切掉，看起来像渲染错误）")
+    t.check(canvasApprox(hovered[0].scale, 1) && canvasApprox(hovered[1].offset.height, 0),
+            "hover 一张不该影响其他卡片的缩放/位移")
+    t.check(canvasApprox(hovered[3].angle, four[3].angle), "hover 不改变任何卡片的角度（只抬起放大）")
+
+    // 收拢态下的 zIndex 递增：后加的卡片压在前面的上面，最前那张才是 + 角标的宿主。
+    t.check(collapsed4[3].zIndex > collapsed4[0].zIndex, "堆叠顺序稳定（下标越大越靠前）")
+
+    // 文本分段：空行优先、其次换行、都没有就整段一张。
+    t.equal(CanvasFanGeometry.textSegments("").count, 0, "空文本不产生文本卡")
+    t.equal(CanvasFanGeometry.textSegments("   \n  ").count, 0, "纯空白文本不产生文本卡")
+    t.equal(CanvasFanGeometry.textSegments("只有一段话").count, 1, "单段文本 → 一张卡")
+    t.equal(CanvasFanGeometry.textSegments("第一段\n\n第二段\n\n第三段"), ["第一段", "第二段", "第三段"],
+            "★空行是用户手写的段落边界，最可信，优先按它切")
+    t.equal(CanvasFanGeometry.textSegments("a\nb\nc\nd").count, CanvasFanGeometry.maxTextCards,
+            "文本卡最多 3 张（超出部分不显示，卡片不是阅读器）")
+    t.equal(CanvasFanGeometry.textSegments("a\n\nb", limit: 1), ["a"], "limit 生效")
+
+    // 内容来源优先级：图片附件 > 正文分段 > 空卡。
+    t.equal(CanvasFanGeometry.cardSources(attachmentImageIndices: [0, 2], text: "一段文字"),
+            [.attachmentIndex(0), .attachmentIndex(2)],
+            "★有图片附件时优先成卡（图片是更具体的内容），且下标必须是原始附件下标而不是 0/1 重新编号")
+    t.equal(CanvasFanGeometry.cardSources(attachmentImageIndices: [], text: "甲\n\n乙"),
+            [.textSegment("甲"), .textSegment("乙")], "没有图片时正文分段成卡")
+    t.equal(CanvasFanGeometry.cardSources(attachmentImageIndices: [], text: "  "),
+            [.empty], "★空槽位返回一张空卡（而不是零张，零张会让预览区看起来像加载失败）")
+    t.equal(CanvasFanGeometry.cardSources(attachmentImageIndices: [0, 1, 2, 3, 4, 5], text: "").count,
+            CanvasFanGeometry.maxCards, "图片卡同样封顶 4 张")
+}
+
+// MARK: - CANVAS-PASTE：Cmd+V 类型判定（v2.11.8）
+//
+// 剪贴板通常同时带多种表示。这里锁死优先级：文件 > 位图 > 文本。
+// 判定写错的表现是「复制一张图进画布，得到一个内容是 img 标签的文本节点」。
+do {
+    let png = URL(fileURLWithPath: "/tmp/a.png")
+    let doc = URL(fileURLWithPath: "/tmp/a.pdf")
+
+    t.check(CanvasPasteClassifier.classify(CanvasPasteSnapshot()) == nil,
+            "★空剪贴板返回 nil（调用方要给提示，不能静默什么都不做）")
+    t.check(CanvasPasteClassifier.classify(CanvasPasteSnapshot(text: "   \n ")) == nil,
+            "只有空白字符 = 没内容")
+
+    t.equal(CanvasPasteClassifier.classify(CanvasPasteSnapshot(fileURLs: [png],
+                                                              hasBitmap: true,
+                                                              text: "<img src=x>")),
+            CanvasPasteIntent.imageNodeWithFiles([png]),
+            "★★同时有文件+位图+文本时取文件（最具体）—— 从浏览器复制图片就是这种三合一剪贴板")
+    t.equal(CanvasPasteClassifier.classify(CanvasPasteSnapshot(hasBitmap: true, text: "some html")),
+            CanvasPasteIntent.imageNodeWithBitmap,
+            "★位图优先于文本（截图没有文件路径，若判成文本就丢了整张图）")
+    t.equal(CanvasPasteClassifier.classify(CanvasPasteSnapshot(text: "  hello  ")),
+            CanvasPasteIntent.textNode("hello"),
+            "纯文本兜底，且首尾空白被去掉")
+    t.equal(CanvasPasteClassifier.classify(CanvasPasteSnapshot(fileURLs: [doc])),
+            CanvasPasteIntent.imageNodeWithFiles([doc]),
+            "非图片文件同样成节点（作为入参文件），不因为不是图片就丢弃")
+
+    t.check(CanvasPasteClassifier.isImageFile(png), "png 识别为图片")
+    t.check(CanvasPasteClassifier.isImageFile(URL(fileURLWithPath: "/tmp/B.JPEG")), "扩展名大小写不敏感")
+    t.check(!CanvasPasteClassifier.isImageFile(doc),
+            "★pdf 不算图像入参（NSImage 能打开它，但落进图像节点会得到一张莫名的首页缩略图）")
+    t.check(!CanvasPasteClassifier.isImageFile(URL(fileURLWithPath: "/tmp/a.svg")),
+            "svg 同理不算（矢量文件不是位图入参）")
+    t.check(!CanvasPasteClassifier.isImageFile(URL(fileURLWithPath: "/tmp/noext")), "无扩展名不算图片")
+}
+
+// MARK: - CANVAS-KEY-PASTE：Cmd+V 快捷键判定（v2.11.8）
+do {
+    let v = CanvasKeyBinding.vKeyCode
+    t.equal(CanvasKeyBinding.action(keyCode: v, command: true, shift: false), .paste, "⌘V = 粘贴")
+    t.equal(CanvasKeyBinding.action(keyCode: v, command: false, shift: false), .none,
+            "★裸 V 不是粘贴（它在画布类工具里是「选择工具」的肌肉记忆键，不能顺手占掉）")
+    t.equal(CanvasKeyBinding.action(keyCode: v, command: true, shift: true), .none,
+            "★⌘⇧V 不吃（各家 App 里是「粘贴为纯文本」，吞掉它用户查不出是谁吃的）")
+    t.equal(CanvasKeyBinding.action(keyCode: v, command: true, shift: false, option: true), .none,
+            "⌘⌥V 不吃（同理）")
+    // 与既有绑定互不干扰。
+    t.equal(CanvasKeyBinding.action(keyCode: CanvasKeyBinding.zKeyCode, command: true, shift: false), .undo,
+            "新增粘贴不影响 ⌘Z")
+    t.equal(CanvasKeyBinding.action(keyCode: 51, command: false, shift: false), .delete,
+            "新增粘贴不影响删除键")
+}
+
+// MARK: - CANVAS-TEXT-NODE：文本节点类型 + parentNodeId 血缘（v2.11.8）
+do {
+    t.equal(CanvasNodeKind.text.rawValue, "text", "文本节点的 rawValue 稳定（落盘值，改了等于旧数据读不出来）")
+    t.equal(CanvasNodeKind.text.displayName, "文本", "文本节点显示名")
+    t.check(!CanvasNodeKind.text.symbolName.isEmpty, "文本节点有图标")
+    t.check(!CanvasNodeKind.text.producesAsset,
+            "★文本节点不出图（它是「给下游用的一段文字」，把它当出图节点会让批量导出多出空文件）")
+    t.check(CanvasNodeKind.image.producesAsset, "图像节点出图")
+
+    // parentNodeId 往返。
+    var child = canvasNode(slot: 2)
+    child.parentNodeId = "g1#1"
+    let data = try! JSONEncoder().encode(child)
+    let back = try! JSONDecoder().decode(CanvasNode.self, from: data)
+    t.equal(back.parentNodeId, "g1#1", "parentNodeId 能落盘并读回（+ 号建的下游节点靠它记血缘）")
+
+    // 老数据（没有这个字段）必须解得出来，且为 nil。
+    let legacy = """
+    {"pageId":"p1","groupId":"g1","slot":3,"kind":"image","x":0,"y":0}
+    """.data(using: .utf8)!
+    let old = try! JSONDecoder().decode(CanvasNode.self, from: legacy)
+    t.check(old.parentNodeId == nil,
+            "★老画布数据没有 parentNodeId 也要能读（新字段可选是本项目的向后兼容口径，不靠版本分支）")
+    t.equal(old.slot, 3, "老数据其余字段正常解出")
+
+    // kind 也要向后兼容：老数据里没有 text 这个值，但新值必须能往返。
+    var textNode = canvasNode(slot: 4)
+    textNode.kind = .text
+    let td = try! JSONEncoder().encode(textNode)
+    t.equal(try! JSONDecoder().decode(CanvasNode.self, from: td).kind, .text, "text 类型能往返")
+}
+
+// MARK: - WINDOW-RESCUE：主窗口离屏 / 最小化自救几何（v2.11.8）
+do {
+    let primary = CGRect(x: 0, y: 0, width: 1512, height: 900)
+    let secondary = CGRect(x: 1512, y: 0, width: 1920, height: 1080)
+    let screens = [primary, secondary]
+
+    // 正常摆位：不许动窗口。
+    let ok = CGRect(x: 100, y: 80, width: 1300, height: 800)
+    t.check(!MainWindowRescueGeometry.needsRescue(window: ok, visibleFrames: screens),
+            "窗口完整落在主屏内不触发自救")
+    // 用户故意放副屏也不许动——这是最容易被自救逻辑「热心地」搬回主屏的场景。
+    let onSecondary = CGRect(x: 1600, y: 100, width: 1200, height: 800)
+    t.check(!MainWindowRescueGeometry.needsRescue(window: onSecondary, visibleFrames: screens),
+            "★窗口在副屏正常显示时不能被搬回主屏（否则每次启动都把用户的摆位打乱）")
+
+    // 复现线上那次「进程在跑但看不到窗口」：外接屏拔掉后窗口留在屏外。
+    let offscreen = CGRect(x: 1766, y: -1790, width: 1512, height: 974)
+    t.check(MainWindowRescueGeometry.needsRescue(window: offscreen, visibleFrames: [primary]),
+            "★窗口完全落在所有屏幕之外必须自救（现场表现为 App 有进程、无可见窗口）")
+    let fixed = MainWindowRescueGeometry.rescuedFrame(window: offscreen, visibleFrames: [primary])
+    t.check(primary.contains(fixed), "自救后窗口完整落在屏幕可见区域内")
+    t.check(abs(fixed.midX - primary.midX) < 0.5 && abs(fixed.midY - primary.midY) < 0.5,
+            "完全离屏时居中落点（贴边会让人以为窗口被挤坏了）")
+
+    // 只露一条边同样算看不见。
+    let sliver = CGRect(x: -1400, y: 100, width: 1500, height: 800)
+    t.check(MainWindowRescueGeometry.visibleFraction(window: sliver, visibleFrames: screens) < MainWindowRescueGeometry.minVisibleFraction,
+            "只露出一小条边时可见比例低于阈值")
+    t.check(MainWindowRescueGeometry.needsRescue(window: sliver, visibleFrames: screens), "露一条边也要自救")
+    let slid = MainWindowRescueGeometry.rescuedFrame(window: sliver, visibleFrames: screens)
+    t.check(primary.contains(slid), "部分离屏时夹回屏内")
+    t.check(abs(slid.height - sliver.height) < 0.5, "夹回时不无谓改变能装下的尺寸")
+
+    // 窗口比屏幕大：必须夹到屏幕尺寸，不能溢出。
+    let huge = CGRect(x: -500, y: -500, width: 4000, height: 3000)
+    let clamped = MainWindowRescueGeometry.rescuedFrame(window: huge, visibleFrames: [primary])
+    t.check(clamped.width <= primary.width + 0.5 && clamped.height <= primary.height + 0.5,
+            "★超过屏幕的窗口被夹到屏幕尺寸（否则自救完标题栏还在屏外，等于没救）")
+    t.check(primary.contains(clamped.insetBy(dx: -0.5, dy: -0.5).intersection(primary)), "夹完仍在屏内")
+
+    // 拿不到屏幕信息时保守不动。
+    t.check(!MainWindowRescueGeometry.needsRescue(window: offscreen, visibleFrames: []),
+            "★没有屏幕信息时不动窗口（宁可不救，也不要在异常态里乱搬）")
+    t.equal(MainWindowRescueGeometry.rescuedFrame(window: offscreen, visibleFrames: []), offscreen,
+            "无屏幕信息时原样返回")
+
+    // 尺寸退化的窗口（0×0）也要能救回可用大小。
+    let degenerate = CGRect(x: 5000, y: 5000, width: 0, height: 0)
+    t.check(MainWindowRescueGeometry.needsRescue(window: degenerate, visibleFrames: [primary]), "0 尺寸窗口需要自救")
+    let revived = MainWindowRescueGeometry.rescuedFrame(window: degenerate, visibleFrames: [primary])
+    t.check(revived.width > 0 && revived.height > 0, "自救后窗口有可用尺寸")
+    t.check(primary.contains(revived), "自救后窗口在屏内")
+}
+
+// MARK: - CANVAS-DBLCLICK：空白双击判定（v2.11.8，替代失效的 onTapGesture(count: 2)）
+do {
+    let interval: TimeInterval = 0.5
+    let p0 = CGPoint(x: 400, y: 300)
+    let first = CanvasClickCadence.Click(point: p0, time: 100.0)
+
+    t.check(!CanvasClickCadence.isDoubleClick(previous: nil,
+                                             current: first,
+                                             interval: interval),
+            "第一击不是双击（没有前一击时必须返回 false，否则一进画布点一下就弹菜单）")
+
+    t.check(CanvasClickCadence.isDoubleClick(previous: first,
+                                            current: .init(point: p0, time: 100.18),
+                                            interval: interval),
+            "同点位、间隔 0.18s 判为双击")
+
+    t.check(!CanvasClickCadence.isDoubleClick(previous: first,
+                                             current: .init(point: p0, time: 100.9),
+                                             interval: interval),
+            "★超过系统双击间隔就不算双击（慢慢点两下取消选中，不该弹出菜单）")
+
+    // 位置容差：手抖要容忍，跨半个画布点两下不能算双击。
+    let jitter = CGPoint(x: p0.x + 4, y: p0.y - 3)  // 位移 5 < slop 6
+    t.check(CanvasClickCadence.isDoubleClick(previous: first,
+                                            current: .init(point: jitter, time: 100.2),
+                                            interval: interval),
+            "落点抖动 5pt 仍判为双击（容差内）")
+    let farAway = CGPoint(x: p0.x + 220, y: p0.y + 40)
+    t.check(!CanvasClickCadence.isDoubleClick(previous: first,
+                                             current: .init(point: farAway, time: 100.2),
+                                             interval: interval),
+            "★画布两处各点一下不算双击（否则快速点两个不同位置会凭空弹菜单）")
+    // 容差边界：正好在 slop 上算命中，刚超出就不算。
+    let onEdge = CGPoint(x: p0.x + CanvasClickCadence.defaultSlop, y: p0.y)
+    t.check(CanvasClickCadence.isDoubleClick(previous: first,
+                                            current: .init(point: onEdge, time: 100.2),
+                                            interval: interval),
+            "位移正好等于容差算双击")
+    let overEdge = CGPoint(x: p0.x + CanvasClickCadence.defaultSlop + 0.5, y: p0.y)
+    t.check(!CanvasClickCadence.isDoubleClick(previous: first,
+                                             current: .init(point: overEdge, time: 100.2),
+                                             interval: interval),
+            "位移刚超出容差不算双击")
+
+    // 时间边界与时钟回拨。
+    t.check(CanvasClickCadence.isDoubleClick(previous: first,
+                                            current: .init(point: p0, time: 100.0 + interval),
+                                            interval: interval),
+            "间隔正好等于阈值算双击")
+    t.check(!CanvasClickCadence.isDoubleClick(previous: first,
+                                             current: .init(point: p0, time: 99.8),
+                                             interval: interval),
+            "★时间倒流（时钟回拨/传参顺序反了）不算双击，不能因为算出负数就当 0 秒")
+    t.check(CanvasClickCadence.defaultSlop > 0, "容差为正")
+}
+
+// MARK: - CANVAS-ESC：裸 Esc = 从临时态退出（v2.11.8 修「编辑态卡住」）
+do {
+    t.equal(CanvasKeyBinding.action(keyCode: CanvasKeyBinding.escapeKeyCode, command: false, shift: false), .cancel,
+            "裸 Esc 判为 cancel（用来收掉 inline 编辑残留态 / 关浮层 / 取消选中）")
+    t.equal(CanvasKeyBinding.escapeKeyCode, 53, "Esc 键码固定为 53")
+    // 带修饰键的 Esc 系统另有用途（⌘Esc 语音控制、⌥Esc 旁白），画布不许吃。
+    t.equal(CanvasKeyBinding.action(keyCode: CanvasKeyBinding.escapeKeyCode, command: true, shift: false), .none,
+            "★⌘Esc 不归画布（系统语音控制快捷键，吃掉了用户查不出是谁吃的）")
+    t.equal(CanvasKeyBinding.action(keyCode: CanvasKeyBinding.escapeKeyCode, command: false, shift: true), .none,
+            "⇧Esc 不归画布")
+    t.equal(CanvasKeyBinding.action(keyCode: CanvasKeyBinding.escapeKeyCode, command: false, shift: false, option: true), .none,
+            "⌥Esc 不归画布")
+    // 新增绑定不能影响既有的四条。
+    t.equal(CanvasKeyBinding.action(keyCode: CanvasKeyBinding.zKeyCode, command: true, shift: false), .undo, "Esc 绑定不影响 ⌘Z")
+    t.equal(CanvasKeyBinding.action(keyCode: CanvasKeyBinding.zKeyCode, command: true, shift: true), .redo, "Esc 绑定不影响 ⌘⇧Z")
+    t.equal(CanvasKeyBinding.action(keyCode: CanvasKeyBinding.vKeyCode, command: true, shift: false), .paste, "Esc 绑定不影响 ⌘V")
+    t.equal(CanvasKeyBinding.action(keyCode: 51, command: false, shift: false), .delete, "Esc 绑定不影响删除键")
+}
+
 t.report()

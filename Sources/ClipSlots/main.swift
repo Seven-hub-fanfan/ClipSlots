@@ -2645,6 +2645,32 @@ final class SlotStoreObservable: ObservableObject {
         return specialStorage.get(slot, in: groupId).attachments
     }
 
+    /// 画布新建节点时的「这个槽位能不能占」判定（v2.11.8）。
+    ///
+    /// ★ 为什么不能只看 `canvasSlotText` / `canvasSlotAttachments`
+    ///
+    /// 实测踩到的现场：Cmd+V 建节点时 `canvasSlotText(default, 5)` 返回空，于是槽位 5 被当成空槽
+    /// 占掉；可这个槽位里躺着用户几千字的正文——日志同一毫秒内先是
+    /// `contentForSlot storage slot=5 preview=(空)`、紧接着 `contentForSlot memory slot=5 preview=色彩…`。
+    /// 也就是说**内存与磁盘会短暂不一致**（内存已有内容、盘上还没落，或反之），而
+    /// `contentForSlot` 只挑一路读：挑到"空"的那一路，就会把有内容的槽位判成空槽。
+    ///
+    /// 空槽误判的后果是不可挽回的：节点建在别人家的槽位上，随后一次 inline 编辑 / 粘贴就把用户
+    /// 的正文覆盖掉。所以这里改成**两路都读、任一非空即视为被占**——宁可多跳过一个真空槽（用户
+    /// 只是换个槽位号，毫无损失），也绝不能覆盖已有内容。
+    func canvasSlotIsFree(groupId: String, slot: Int) -> Bool {
+        // 内存视图（当前组才有）。
+        if groupId == currentSpecialSlotId {
+            let mem = contentForSlot(slot)
+            if !(mem.plainText ?? "").isEmpty || !mem.attachments.isEmpty { return false }
+        }
+        // 磁盘 / 存储缓存视图。跨组节点本来就走这一路，当前组则用它兜住"内存还没同步"的情况。
+        let disk = specialStorage.get(slot, in: groupId)
+        if !(disk.plainText ?? "").isEmpty || !disk.attachments.isEmpty { return false }
+        // Label 不算内容：给槽位起了名但没放东西，仍然是空槽（命名是用户对"待放什么"的规划）。
+        return true
+    }
+
     /// 把画布里编辑好的文本写回**任意组**的槽位主体。
     ///
     /// 与 `updateTextSlot` 的三点差别，每一点都是刻意的：

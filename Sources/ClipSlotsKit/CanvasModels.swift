@@ -10,6 +10,8 @@ import CoreGraphics
 // MARK: - 节点类型
 
 public enum CanvasNodeKind: String, Codable, Equatable {
+    /// 纯文本 / Prompt 节点（v2.11.8）。自身不出图，是"给下游用的一段文字"。
+    case text
     /// 图像生成节点。
     case image
     /// 视频生成节点。
@@ -19,6 +21,7 @@ public enum CanvasNodeKind: String, Codable, Equatable {
 
     public var displayName: String {
         switch self {
+        case .text: return "文本"
         case .image: return "图像生成"
         case .video: return "视频生成"
         case .batchTemplate: return "批量模版"
@@ -28,9 +31,18 @@ public enum CanvasNodeKind: String, Codable, Equatable {
     /// 顶部类型标签用的 SF Symbol。
     public var symbolName: String {
         switch self {
+        case .text: return "text.alignleft"
         case .image: return "photo"
         case .video: return "film"
         case .batchTemplate: return "square.stack.3d.up"
+        }
+    }
+
+    /// 该类型的节点是否会产出资产（决定卡片上"预览区"的语义：产物位 vs 内容位）。
+    public var producesAsset: Bool {
+        switch self {
+        case .text: return false
+        case .image, .video, .batchTemplate: return true
         }
     }
 }
@@ -187,6 +199,16 @@ public struct CanvasNode: Codable, Identifiable, Equatable {
     /// 随机种子。实测 `--count n` 的每个任务 seed 各不相同，固定 seed 重跑依赖它。
     public var seed: Int?
 
+    /// 上游节点 id（v2.11.8）。
+    ///
+    /// 由「节点下方 + 号快速添加下游节点」写入：新节点记下它是从谁身上长出来的。
+    /// 连线的**渲染**尚未落地，但血缘关系必须在创建那一刻就记下来 —— 事后无法还原
+    /// （用户点完 + 就会拖动节点，位置关系立刻失去意义）。
+    ///
+    /// 刻意存 id 而不是双向的 children 数组：单向引用不会出现「父说有子、子说没父」的
+    /// 不一致，删节点时也只需要清理指向它的引用，不必维护两侧。
+    public var parentNodeId: String?
+
     public var createdAt: Date
     public var updatedAt: Date
 
@@ -234,6 +256,7 @@ public struct CanvasNode: Codable, Identifiable, Equatable {
                 state: CanvasNodeState = .idle,
                 taskId: String? = nil,
                 seed: Int? = nil,
+                parentNodeId: String? = nil,
                 createdAt: Date = Date(),
                 updatedAt: Date = Date()) {
         self.pageId = pageId
@@ -252,6 +275,7 @@ public struct CanvasNode: Codable, Identifiable, Equatable {
         self.state = state
         self.taskId = taskId
         self.seed = seed
+        self.parentNodeId = parentNodeId
         self.createdAt = createdAt
         self.updatedAt = updatedAt
     }
@@ -264,6 +288,7 @@ public struct CanvasNode: Codable, Identifiable, Equatable {
         case model, ratio, count
         case fontName, fontSize
         case state, taskId, seed
+        case parentNodeId
         case createdAt, updatedAt
         // 旧字段：hotfix19 及更早的节点自带内容与溯源信息。只在解码时读，从不写回。
         case sourcePageId, sourceGroupId, sourceSlot
@@ -309,6 +334,8 @@ public struct CanvasNode: Codable, Identifiable, Equatable {
         state = try c.decodeIfPresent(CanvasNodeState.self, forKey: .state) ?? .idle
         taskId = try c.decodeIfPresent(String.self, forKey: .taskId)
         seed = try c.decodeIfPresent(Int.self, forKey: .seed)
+        // v2.11.8 新增字段：老文档没有它，缺省 nil（= 没有上游），不需要版本分支。
+        parentNodeId = try c.decodeIfPresent(String.self, forKey: .parentNodeId)
         createdAt = try c.decodeIfPresent(Date.self, forKey: .createdAt) ?? Date()
         updatedAt = try c.decodeIfPresent(Date.self, forKey: .updatedAt) ?? Date()
     }
@@ -333,6 +360,7 @@ public struct CanvasNode: Codable, Identifiable, Equatable {
         try c.encode(state, forKey: .state)
         try c.encodeIfPresent(taskId, forKey: .taskId)
         try c.encodeIfPresent(seed, forKey: .seed)
+        try c.encodeIfPresent(parentNodeId, forKey: .parentNodeId)
         try c.encode(createdAt, forKey: .createdAt)
         try c.encode(updatedAt, forKey: .updatedAt)
     }

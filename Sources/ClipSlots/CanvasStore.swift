@@ -85,7 +85,9 @@ final class CanvasStore: ObservableObject {
                    slot: Int,
                    name: String,
                    at canvasPoint: CGPoint,
-                   kind: CanvasNodeKind = .image) -> CanvasSlotPlacement {
+                   kind: CanvasNodeKind = .image,
+                   parentNodeId: String? = nil,
+                   avoidOverlap: Bool = false) -> CanvasSlotPlacement {
         let id = CanvasNode.makeId(groupId: groupId, slot: slot)
         if let existing = nodes.first(where: { $0.id == id }) {
             selectedNodeIds = [existing.id]
@@ -93,19 +95,40 @@ final class CanvasStore: ObservableObject {
         }
         let size = CanvasNode.defaultSize
         // 落点即节点中心，符合「拖到哪儿就放哪儿」的直觉。
-        let origin = CGPoint(x: canvasPoint.x - size.width / 2, y: canvasPoint.y - size.height / 2)
+        var origin = CanvasSpawnGeometry.origin(forCenter: canvasPoint, size: size)
+        if avoidOverlap {
+            // v2.11.8: 「ADD NODE」菜单与 Cmd+V 走这条路 —— 它们的落点是算出来的（视口中心 /
+            // 上游节点下方），连续两次很容易落在同一格。拖拽落点不让位：那是用户亲手指的位置，
+            // 系统擅自挪开反而是 bug。
+            origin = CanvasSpawnGeometry.nonOverlappingOrigin(desired: origin,
+                                                             existing: nodes.map { CGPoint(x: $0.x, y: $0.y) })
+        }
         let snapped = CanvasGeometry.snap(origin, step: CanvasStore.snapStep)
         let node = CanvasNode(pageId: pageId,
                               groupId: groupId,
                               slot: slot,
                               kind: kind,
                               x: snapped.x,
-                              y: snapped.y)
+                              y: snapped.y,
+                              parentNodeId: parentNodeId)
         commit(.addNode, detail: name) {
             nodes.append(node)
             selectedNodeIds = [node.id]
         }
         return .placed(node: node, name: name)
+    }
+
+    /// 某个节点在画布上的即时快照（按 id）。
+    func node(id: String) -> CanvasNode? {
+        nodes.first { $0.id == id }
+    }
+
+    /// 当前页面里已经被画布占用的槽位号（按槽位组）。
+    ///
+    /// 「ADD NODE」要找空槽位，而"空"必须同时满足两件事：槽位里没内容、且没有别的节点已经绑了它。
+    /// 后者容易被忽略 —— 漏掉它的表现是新建节点时撞 id，SwiftUI `ForEach` 下会变成"点 A 动 B"。
+    func occupiedSlots(inGroup groupId: String) -> Set<Int> {
+        Set(nodes.filter { $0.groupId == groupId }.map { $0.slot })
     }
 
     /// 某个槽位当前的摆位（没摆则 nil）。

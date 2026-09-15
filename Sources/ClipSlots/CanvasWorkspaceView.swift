@@ -1,15 +1,24 @@
 import SwiftUI
 import ClipSlotsKit
 
-/// 无限画布工作区（v2.11.7 MVP · 版本 C2 极简浮动）。
+/// 无限画布工作区（v2.11.8 · 版本 C2 极简浮动）。
 ///
-/// 层级自下而上：网格背景 → 节点层 → 框选矩形 → 浮动 UI（左侧槽位库 / 右上生成 / 底部工具栏 /
-/// 缩放控件）→ 拖影。
+/// 层级自下而上：网格背景 → 空白点击层 → 节点层 → 框选矩形 → 下游 + 按钮 → 浮动 UI（左侧槽位库 /
+/// 右上生成 / 底部工具栏 / 缩放控件）→ 拖影 → 入参弹层锚点 → ADD NODE 菜单。
 ///
 /// **视口状态刻意留在本视图的 `@State`**，不放进 `CanvasStore` 的 `@Published`。缩放平移是每帧
-/// 事件，若走 `@Published`，一次捏合会让所有节点视图重新求值几十次。节点只关心自己的画布坐标，
-/// 视口变换统一由外层一个 `scaleEffect` + `offset` 施加 —— 这样缩放平移的成本与节点数量无关。
-/// 停手后才通过 `canvas.updateViewport` 落盘（内部防抖）。
+/// 事件，若走 `@Published`，一次捏合会让所有节点视图重新求值几十次。停手后才通过
+/// `canvas.updateViewport` 落盘（内部防抖）。
+///
+/// ## ★ v2.11.8：视口变换从「外层 scaleEffect」改为「逐节点算屏幕坐标 + 卡片内部按 zoom 排版」
+///
+/// 旧做法是整个节点层套一个 `scaleEffect(zoom)`，缩放成本与节点数量无关 —— 但它把文字也一起当
+/// 位图放大了，于是用户反馈「放大后节点模糊」。`scaleEffect` 是渲染期变换：1x 排版 → 光栅化 →
+/// 拉伸，200% 下看到的就是 2 倍放大的 1x 字形，糊是必然的，不是抗锯齿参数问题。
+///
+/// 现在：节点位置在这里直接算成屏幕坐标（`screen = canvas * zoom + pan`，与 `CanvasGeometry`
+/// 同一个公式），缩放通过 `renderScale` 传进卡片，由卡片把字号/内边距/线宽全部乘一遍重新排版。
+/// 代价是缩放时每张卡片重新布局而非只改一个变换矩阵 —— 这笔账必须付：清晰度是画布的基本可用性。
 struct CanvasWorkspaceView: View {
     @ObservedObject var store: SlotStoreObservable
     @ObservedObject var canvas: CanvasStore
@@ -66,6 +75,24 @@ struct CanvasWorkspaceView: View {
     /// 没有这份镜像，热键就算不出"当前视口中央在画布的哪里"，只能把新节点扔到原点。
     @State private var viewSize: CGSize = .zero
 
+    /// 「ADD NODE」菜单的待办请求（nil = 未打开）。
+    ///
+    /// 同时记 `screenPoint`（菜单画在哪）与 `canvasPoint`（节点建在哪）：两者在缩放/平移下不是
+    /// 同一个数，等到用户选完菜单项再换算就会用上"已经变了的" pan/zoom（菜单开着时中键仍可平移），
+    /// 节点会落在离双击点很远的地方。
+    @State private var addMenu: AddNodeRequest? = nil
+
+    /// 上一次「空白单击」的时间与位置，用来自己判定双击（见 `handleBlankTap`）。
+    @State private var lastBlankClick: CanvasClickCadence.Click? = nil
+
+    struct AddNodeRequest: Identifiable {
+        let id = UUID()
+        let screenPoint: CGPoint
+        let canvasPoint: CGPoint
+        /// 从「选中节点下方的 +」进来时，记住上游是谁。
+        let parentNodeId: String?
+    }
+
     var body: some View {
         GeometryReader { proxy in
             ZStack(alignment: .topLeading) {
@@ -84,11 +111,16 @@ struct CanvasWorkspaceView: View {
 
                 marqueeOverlay
 
+                downstreamPlusOverlay
+
                 floatingLayer(size: proxy.size)
 
                 ghostOverlay
 
                 inputFilesAnchorOverlay
+
+                // ADD NODE 菜单压在最上层：它是模态性质的浮层，被任何东西盖住都会变成"点了没反应"。
+                addNodeMenuOverlay(size: proxy.size)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .background(AppTheme.windowBackground)
@@ -173,7 +205,40 @@ struct CanvasWorkspaceView: View {
     private var blankClickCatcher: some View {
         Color.clear
             .contentShape(Rectangle())
-            .onTapGesture { canvas.clearSelection() }
+            // ★ v2.11.8：双击空白 = 在鼠标位置弹「ADD NODE」菜单。
+            //
+            // 只挂单击手势，双击靠 `CanvasClickCadence` 自己数 —— 原因见该类型的文档：
+            // 单击手势与 `onTapGesture(count: 2)` 共存时，双击在实测里**从不触发**。
+            //
+            // 位置取 `cursorScreen`（由 `.onContinuousHover` 实时更新）而不是手势的 location：
+            // macOS 13 的 `onTapGesture` 不给落点，而 hover 位置与点击落点在实践中是同一个像素
+            // （鼠标不会在按下与抬起之间跑掉）。锚点缩放一直用的也是这份坐标。
+            .onTapGesture { handleBlankTap() }
+    }
+
+    /// 空白单击 / 双击的分流。
+    ///
+    /// 第一击照旧取消选中（保持 hotfix21 的手感，不能让它等双击超时），第二击落在同一处且在系统
+    /// 双击间隔内就弹 ADD NODE 菜单。菜单弹出后把游标清空，避免"连点三下"弹第二个菜单。
+    private func handleBlankTap() {
+        // 正在 inline 编辑时，点空白处的语义是「写完了」——先按失焦保存收掉编辑态（否则编辑框会
+        // 一直挂在节点上，见 endInlineEditing 的注释），这一击不再兼作取消选中/双击判定。
+        if editingNodeId != nil {
+            endInlineEditing()
+            lastBlankClick = nil
+            return
+        }
+        let click = CanvasClickCadence.Click(point: cursorScreen,
+                                             time: Date().timeIntervalSinceReferenceDate)
+        if CanvasClickCadence.isDoubleClick(previous: lastBlankClick,
+                                            current: click,
+                                            interval: NSEvent.doubleClickInterval) {
+            lastBlankClick = nil
+            openAddMenu(atScreen: cursorScreen, parentNodeId: nil)
+            return
+        }
+        lastBlankClick = click
+        canvas.clearSelection()
     }
 
     // MARK: - 节点层
@@ -188,13 +253,18 @@ struct CanvasWorkspaceView: View {
                                    text: liveText(for: node),
                                    slotLabel: liveLabel(for: node),
                                    attachments: liveAttachments(for: node),
+                                   renderScale: zoom,
                                    isEditing: isEditing,
                                    onBeginEdit: { beginEdit(node) },
                                    onCommitEdit: { commitEdit(node, text: $0) },
                                    onCancelEdit: { editingNodeId = nil },
-                                   onOpenInputFiles: { openInputFiles(node) })
-                    .offset(x: node.x + (isDragging ? dragDelta.width : 0),
-                            y: node.y + (isDragging ? dragDelta.height : 0))
+                                   onOpenInputFiles: { openInputFiles(node) },
+                                   onPromoteInput: { promoteInput(node, index: $0) },
+                                   onToast: { store.transientUI.showToast($0) })
+                    // 屏幕坐标 = 画布坐标 * zoom + pan。**必须与 `CanvasGeometry.screenPoint` 同式**，
+                    // 否则命中判定（框选、拖拽落点、弹层锚点）会与眼睛看到的位置整体错开。
+                    .offset(x: (node.x + (isDragging ? dragDelta.width : 0)) * zoom + effectivePan.width,
+                            y: (node.y + (isDragging ? dragDelta.height : 0)) * zoom + effectivePan.height)
                     // 被按住的那个压在最上层；同批一起走的排第二层，这样多选拖动时整组都浮在其他节点之上。
                     .zIndex(draggingNodeId == node.id ? 10 : (isDragging ? 9 : (isEditing ? 8 : 0)))
                     // 编辑中把手势整体屏蔽（`including: .none`）：TextEditor 里选文字是拖动，
@@ -210,10 +280,16 @@ struct CanvasWorkspaceView: View {
         // 统一施加视口变换。锚点固定 `.topLeading` 是刻意的：`CanvasGeometry` 全部公式都建立在
         // `screen = canvas * zoom + pan` 之上，而这个式子只有在缩放锚点为原点时才成立。
         // 用 `.center` 会凭空引入一个「视图尺寸的一半」的偏移，让所有命中判定整体错位。
-        .scaleEffect(zoom, anchor: .topLeading)
-        .offset(x: effectivePan.width, y: effectivePan.height)
-        // 禁掉隐式动画：拖拽时每帧都在改 offset，一旦被动画接管就会有明显的橡皮筋滞后。
-        .transaction { $0.animation = nil }
+        //
+        // ★ v2.11.8：`scaleEffect` 已移除（见类型注释：它是放大模糊的根因），位置改为逐节点
+        // 直接算屏幕坐标。这里只剩「拖拽时禁掉隐式动画」。
+        //
+        // 而且这个禁用**必须收窄到拖拽期**：v2.11.8 之前是无条件 `$0.animation = nil`，它会连坐
+        // 掉子树里所有动画 —— 槽位节点的扇形展开（spring）正是子树里的动画，无条件禁用时它会
+        // 变成一帧到位的硬切，看起来像"动画没写"。
+        .transaction { t in
+            if draggingNodeId != nil { t.animation = nil }
+        }
     }
 
     @ViewBuilder
@@ -458,6 +534,299 @@ struct CanvasWorkspaceView: View {
                                              isCanvasContext: true)
                 }
         }
+    }
+
+    // MARK: - ADD NODE 菜单 / 下游 + 按钮（v2.11.8）
+
+    /// 「ADD NODE」浮层。两个入口（双击空白 / 选中节点下方的 +）共用。
+    ///
+    /// 菜单**不用 `.popover`**：popover 在 macOS 上会新开一个 NSWindow，它自带的箭头与系统配色
+    /// 跟画布的深色浮层完全不是一路，而且新窗口会抢走 key window —— 那会打断画布的 AppKit 事件
+    /// 监听（滚轮/中键路由器按 window 过滤事件），菜单一开画布就不能平移缩放了。
+    @ViewBuilder
+    private func addNodeMenuOverlay(size: CGSize) -> some View {
+        if let request = addMenu {
+            // 关闭层：铺满画布收走一切点击。少了它，点画布别处会直接落到 blankClickCatcher 上
+            // （取消选中、甚至再弹一个菜单），而用户的意图只是"把这个菜单关掉"。
+            // 不用 `Color.clear`：完全透明的视图在 macOS 上不参与命中测试。
+            Color.black.opacity(0.001)
+                .frame(width: max(size.width, 1), height: max(size.height, 1))
+                .contentShape(Rectangle())
+                .onTapGesture { addMenu = nil }
+
+            CanvasAddNodeMenu(onPick: { choice in handleAddNode(choice, request: request) },
+                              onDismiss: { addMenu = nil })
+                .offset(x: clamp(request.screenPoint.x,
+                                 min: 8,
+                                 max: max(8, size.width - CanvasAddNodeMenu.width - 8)),
+                        // 菜单高度按内容估的（3 项 + 标题 ≈ 168pt）。宁可估大：估小会让菜单在
+                        // 窗口底部被切掉最后一项，而估大只是让它离底边远一点。
+                        y: clamp(request.screenPoint.y,
+                                 min: 8,
+                                 max: max(8, size.height - 176)))
+                .transition(.scale(scale: 0.92, anchor: .topLeading).combined(with: .opacity))
+        }
+    }
+
+    /// 选中节点正下方的浮动圆形 +。
+    ///
+    /// 尺寸**刻意不随 zoom 缩放**：它是操作把手而不是画布内容，跟着缩到 25% 就变成一个点不中的
+    /// 小点。同理它画在节点层之外（屏幕坐标系），这样缩放时把手大小恒定。
+    @ViewBuilder
+    private var downstreamPlusOverlay: some View {
+        if let sole = canvas.soleSelectedNode,
+           editingNodeId == nil,
+           addMenu == nil,
+           draggingNodeId == nil,
+           inputFilesNodeId == nil {
+            let anchor = CanvasGeometry.screenPoint(canvas: CGPoint(x: sole.x + sole.width / 2,
+                                                                   y: sole.y + sole.height),
+                                                    pan: effectivePan,
+                                                    zoom: zoom)
+            Button {
+                let frame = CGRect(x: sole.x, y: sole.y, width: sole.width, height: sole.height)
+                let origin = CanvasSpawnGeometry.downstreamOrigin(of: frame, newSize: CanvasNode.defaultSize)
+                let center = CGPoint(x: origin.x + CanvasNode.defaultSize.width / 2,
+                                     y: origin.y + CanvasNode.defaultSize.height / 2)
+                openAddMenu(atScreen: CGPoint(x: anchor.x, y: anchor.y + 30),
+                            canvasPoint: center,
+                            parentNodeId: sole.id)
+            } label: {
+                Image(systemName: "plus")
+                    .font(.system(size: 12, weight: .bold))
+                    .foregroundColor(.white)
+                    .frame(width: 26, height: 26)
+                    .background(Circle().fill(AppTheme.chromeAccentInk))
+                    .overlay(Circle().stroke(Color.white.opacity(0.9), lineWidth: 1.5))
+                    .shadow(color: .black.opacity(0.25), radius: 5, x: 0, y: 2)
+                    .contentShape(Circle())
+            }
+            .buttonStyle(.plain)
+            .help("在下方新建一个节点（自动记为下游）")
+            .offset(x: anchor.x - 13, y: anchor.y + 8)
+        }
+    }
+
+    private func clamp(_ value: CGFloat, min lower: CGFloat, max upper: CGFloat) -> CGFloat {
+        Swift.min(Swift.max(value, lower), Swift.max(lower, upper))
+    }
+
+    private func openAddMenu(atScreen screenPoint: CGPoint,
+                             canvasPoint: CGPoint? = nil,
+                             parentNodeId: String?) {
+        let target = canvasPoint ?? CanvasGeometry.canvasPoint(screen: screenPoint, pan: effectivePan, zoom: zoom)
+        withAnimation(Anim.interactive) {
+            addMenu = AddNodeRequest(screenPoint: screenPoint,
+                                     canvasPoint: target,
+                                     parentNodeId: parentNodeId)
+        }
+    }
+
+    private func handleAddNode(_ choice: CanvasAddNodeMenu.Choice, request: AddNodeRequest) {
+        addMenu = nil
+        switch choice {
+        case .text:
+            // 文本节点建完直接进编辑态：用户选「文本节点」的下一个动作必然是打字，
+            // 让他再双击一次纯属多余。
+            createNode(kind: .text, at: request.canvasPoint, parentNodeId: request.parentNodeId, beginEditing: true)
+        case .image:
+            createNode(kind: .image, at: request.canvasPoint, parentNodeId: request.parentNodeId, beginEditing: false)
+        case .slot:
+            // 「从已有槽位创建」不能凭空挑一个槽位塞上来 —— 哪个槽位只有用户知道。
+            // 所以这一项的语义是**把选择器打开**：展开左侧槽位库，用户拖或按 Cmd+N 都行。
+            withAnimation(Anim.transition) { canvas.isLibraryExpanded = true }
+            store.transientUI.showToast("从左侧槽位库拖一个槽位到画布，或按 Cmd+1~0")
+        }
+    }
+
+    /// 新建一个节点（= 占用一个空槽位）。
+    ///
+    /// 返回 nil 表示没建成，调用方**不要**再往下写内容 —— 否则会写到一个不存在的槽位上。
+    @discardableResult
+    private func createNode(kind: CanvasNodeKind,
+                            at canvasPoint: CGPoint,
+                            parentNodeId: String?,
+                            beginEditing: Bool,
+                            quiet: Bool = false) -> CanvasNode? {
+        let groupId = store.activeHotkeySpecialSlotId
+        guard let slot = availableEmptySlot(in: groupId) else {
+            // 说清出路而不是只说失败：这条提示是用户唯一能看到的解释。
+            store.transientUI.showToast("当前槽位组没有空槽位了，清一个或换个组再试")
+            return nil
+        }
+        let label = store.canvasSlotLabel(groupId: groupId, slot: slot)
+        let name = (label?.isEmpty == false) ? label! : "槽位 \(slot)"
+        let result = canvas.placeSlot(pageId: store.currentPageId,
+                                     groupId: groupId,
+                                     slot: slot,
+                                     name: name,
+                                     at: canvasPoint,
+                                     kind: kind,
+                                     parentNodeId: parentNodeId,
+                                     avoidOverlap: true)
+        if beginEditing { editingNodeId = result.node.id }
+        if !quiet { store.transientUI.showToast("已新建\(kind.displayName)节点 · \(name)") }
+        return result.node
+    }
+
+    /// 找一个能用来承载新节点的槽位号。
+    ///
+    /// 「能用」= 既没被画布占用，**也没有任何内容**。绝不复用有内容的槽位：那等于用户点一下
+    /// 「新建节点」就悄悄改写了别处的数据，这个代价换不来任何便利。
+    private func availableEmptySlot(in groupId: String) -> Int? {
+        let total = store.config.slots
+        guard total >= 1 else { return nil }
+        var occupied = canvas.occupiedSlots(inGroup: groupId)
+        for slot in 1...total where !occupied.contains(slot) {
+            // 判空走 `canvasSlotIsFree`：它同时看内存与磁盘两路，任一非空就算被占。
+            // 只读一路会把"内存有内容、盘上还没落"的槽位判成空槽，节点建上去后一次编辑就把
+            // 用户正文覆盖了 —— 实测踩过，见该方法的注释。附件也一并算内容（hotfix19 同源）。
+            if !store.canvasSlotIsFree(groupId: groupId, slot: slot) { occupied.insert(slot) }
+        }
+        return CanvasSpawnGeometry.firstFreeSlot(total: total, occupied: occupied)
+    }
+
+    // MARK: - Cmd+V 粘贴（v2.11.8）
+
+    /// Cmd+V：把剪贴板变成**视口中心**的一个新节点。
+    ///
+    /// 位置必须是视口中心而不是画布原点：画布可以被平移到几千点之外，落在原点等于"粘贴了但看不见"。
+    ///
+    /// 类型优先级由 `CanvasPasteClassifier` 定（文件 > 位图 > 文本），不在这里现判 ——
+    /// 剪贴板通常同时带多种表示（复制一张图常常同时有 TIFF + 文件 URL + HTML + 一段说明文字），
+    /// 顺序写错就会把图片粘成一段文字。
+    private func handlePaste() -> Bool {
+        // 正在 inline 编辑 → 这次 Cmd+V 属于文本框（把文字粘进 prompt），不能被画布截走。
+        guard editingNodeId == nil else { return false }
+
+        let pb = NSPasteboard.general
+        var fileURLs = (pb.readObjects(forClasses: [NSURL.self],
+                                       options: [.urlReadingFileURLsOnly: true]) as? [URL]) ?? []
+        let text = pb.string(forType: .string)
+
+        // 从终端 / 属性面板拷来的往往是**一行绝对路径**，剪贴板里只有纯文本、没有 file URL。
+        // 存在这个文件就按文件处理，否则用户会得到一个内容是路径字符串的文本节点。
+        if fileURLs.isEmpty,
+           let raw = text?.trimmingCharacters(in: .whitespacesAndNewlines),
+           raw.hasPrefix("/"),
+           FileManager.default.fileExists(atPath: raw) {
+            fileURLs = [URL(fileURLWithPath: raw)]
+        }
+
+        // 远程图片链接：只存引用，**不下载**。下载要处理超时/重试/大小限制/证书，Cmd+V 这条
+        // 同步路径没有任何地方能把失败讲清楚；存 url 型入参既无损也不阻塞。
+        if fileURLs.isEmpty,
+           let raw = text?.trimmingCharacters(in: .whitespacesAndNewlines),
+           let url = URL(string: raw),
+           let scheme = url.scheme?.lowercased(),
+           scheme == "http" || scheme == "https",
+           CanvasPasteClassifier.isImageFile(url) {
+            guard let node = createNode(kind: .image,
+                                        at: visibleCenterInCanvas(),
+                                        parentNodeId: nil,
+                                        beginEditing: false,
+                                        quiet: true) else { return true }
+            appendAttachments([SlotContent.SlotAttachment(name: url.lastPathComponent,
+                                                          type: .url,
+                                                          url: raw)],
+                              to: node)
+            store.transientUI.showToast("已粘贴图片链接为入参")
+            return true
+        }
+
+        let snapshot = CanvasPasteSnapshot(fileURLs: fileURLs,
+                                           hasBitmap: pb.canReadObject(forClasses: [NSImage.self], options: nil),
+                                           text: text)
+        guard let intent = CanvasPasteClassifier.classify(snapshot) else {
+            store.transientUI.showToast("剪贴板里没有可粘贴到画布的内容")
+            return true
+        }
+
+        let center = visibleCenterInCanvas()
+        switch intent {
+        case .textNode(let value):
+            guard let node = createNode(kind: .text, at: center, parentNodeId: nil,
+                                        beginEditing: false, quiet: true) else { return true }
+            guard store.writeCanvasSlotText(groupId: node.groupId, slot: node.slot, text: value) else {
+                store.transientUI.showToast("存储繁忙，粘贴未写入")
+                return true
+            }
+            canvas.noteSlotDataChanged()
+            store.transientUI.showToast("已粘贴文本节点")
+
+        case .imageNodeWithFiles(let urls):
+            guard let node = createNode(kind: .image, at: center, parentNodeId: nil,
+                                        beginEditing: false, quiet: true) else { return true }
+            let atts = urls.map {
+                SlotContent.SlotAttachment(name: $0.lastPathComponent,
+                                           type: CanvasPasteClassifier.isImageFile($0) ? .image : .file,
+                                           path: $0.path)
+            }
+            appendAttachments(atts, to: node)
+            store.transientUI.showToast(urls.count == 1 ? "已粘贴文件为入参" : "已粘贴 \(urls.count) 个文件为入参")
+
+        case .imageNodeWithBitmap:
+            // 位图没有源文件，必须把字节存进附件。统一转 PNG：剪贴板给的常是 TIFF，
+            // 直接存会让一张截图占好几 MB。
+            guard let image = NSImage(pasteboard: pb),
+                  let tiff = image.tiffRepresentation,
+                  let rep = NSBitmapImageRep(data: tiff),
+                  let png = rep.representation(using: .png, properties: [:]) else {
+                store.transientUI.showToast("剪贴板里的图片读不出来")
+                return true
+            }
+            guard let node = createNode(kind: .image, at: center, parentNodeId: nil,
+                                        beginEditing: false, quiet: true) else { return true }
+            let stamp = Self.pasteStampFormatter.string(from: Date())
+            appendAttachments([SlotContent.SlotAttachment(name: "粘贴图片-\(stamp).png",
+                                                          type: .image,
+                                                          data: png)],
+                              to: node)
+            store.transientUI.showToast("已粘贴图片为入参")
+        }
+        return true
+    }
+
+    private static let pasteStampFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.dateFormat = "yyyyMMdd-HHmmss"
+        return f
+    }()
+
+    /// 往槽位的入参列表尾部追加。
+    ///
+    /// 读-改-写而不是直接覆盖：这个槽位刚被新建时是空的，但"刚才"与"现在"之间用户可能已经
+    /// 从别处塞了东西（比如 Agent 侧栏），覆盖会静默吃掉它们。
+    private func appendAttachments(_ new: [SlotContent.SlotAttachment], to node: CanvasNode) {
+        guard !new.isEmpty else { return }
+        var list = store.canvasSlotAttachments(groupId: node.groupId, slot: node.slot)
+        list.append(contentsOf: new)
+        guard store.writeCanvasSlotAttachments(groupId: node.groupId, slot: node.slot, attachments: list) else {
+            store.transientUI.showToast("存储繁忙，入参未写入")
+            return
+        }
+        canvas.noteSlotDataChanged()
+    }
+
+    /// 扇形卡片的「设为入参」：把这张挪到入参列表首位。
+    ///
+    /// 首位不是随便定的名分 —— 缩略图、圆盘预览、生成时取的第一张入参都看列表首位，
+    /// 所以"设为入参"落地成"挪到第 0 位"是这个词在本项目里唯一有实际后果的解释。
+    private func promoteInput(_ node: CanvasNode, index: Int) {
+        var list = store.canvasSlotAttachments(groupId: node.groupId, slot: node.slot)
+        guard list.indices.contains(index) else { return }
+        guard index != 0 else {
+            store.transientUI.showToast("它已经是首个入参了")
+            return
+        }
+        let item = list.remove(at: index)
+        list.insert(item, at: 0)
+        guard store.writeCanvasSlotAttachments(groupId: node.groupId, slot: node.slot, attachments: list) else {
+            store.transientUI.showToast("存储繁忙，稍后再试")
+            return
+        }
+        canvas.noteSlotDataChanged()
+        store.transientUI.showToast("已设为首个入参：\(item.name)")
     }
 
     // MARK: - 浮动层
@@ -728,9 +1097,50 @@ struct CanvasWorkspaceView: View {
             }
             return true
 
+        case .paste:
+            return handlePaste()
+
+        case .cancel:
+            // v2.11.8：把「编辑态卡住」收掉。
+            //
+            // 现场：新建文本节点会直接进 inline 编辑态；此时点画布空白处，SwiftUI 侧的
+            // `Color.clear` 并不会把 NSTextView 的 first responder 抢走，于是编辑器失去了
+            // 键盘焦点、`editingNodeId` 却还挂着 —— 节点永远显示编辑框，而下游 `+` 号、删除、
+            // 撤销全都以 `editingNodeId == nil` 为前提，一起失效。用户唯一的印象是"画布卡住了"。
+            //
+            // 真正在编辑器里按 Esc 走不到这里（`CanvasInputRouter` 按 firstResponder 放行给
+            // 文本系统），所以这条分支只处理"焦点已丢、状态还在"的残留态。
+            if editingNodeId != nil {
+                endInlineEditing()
+                return true
+            }
+            if addMenu != nil {
+                addMenu = nil
+                return true
+            }
+            if !canvas.selectedNodeIds.isEmpty {
+                canvas.clearSelection()
+                return true
+            }
+            return false
+
         case .none:
             return false
         }
+    }
+
+    /// 结束 inline 编辑（点空白 / Esc 残留态）。
+    ///
+    /// 焦点还在编辑器上时走 `makeFirstResponder(nil)`：这会触发 `textDidEndEditing`，编辑器
+    /// 沿既有的"失焦保存"路径把草稿写回槽位，不会丢用户刚打的字。焦点已经不在编辑器上（卡住态）
+    /// 时没有可触发的失焦事件，直接清状态。
+    private func endInlineEditing() {
+        guard editingNodeId != nil else { return }
+        let window = NSApp.keyWindow ?? NSApp.mainWindow
+        if let responder = window?.firstResponder as? NSTextView, responder.isEditable {
+            window?.makeFirstResponder(nil)
+        }
+        editingNodeId = nil
     }
 
     /// Cmd+1~0 / 圆盘选槽：把槽位摆到画布上。
@@ -797,9 +1207,13 @@ struct CanvasWorkspaceView: View {
         guard viewSize.width > 0, viewSize.height > 0 else {
             return CanvasGeometry.canvasPoint(screen: .zero, pan: pan, zoom: zoom)
         }
-        let center = CGPoint(x: sidebarWidth + (viewSize.width - sidebarWidth) / 2,
-                            y: viewSize.height / 2)
-        return CanvasGeometry.canvasPoint(screen: center, pan: pan, zoom: zoom)
+        // 走 Kit 里的纯函数（而不是在这儿再算一遍）：Cmd+1~0 与 Cmd+V 都要这个落点，
+        // 两处各算一份就是"快捷键建的节点偏半格、粘贴的不偏"这类无人写测试的分叉。
+        return CanvasSpawnGeometry.viewportCenter(pan: effectivePan,
+                                                 zoom: zoom,
+                                                 viewportSize: CGSize(width: max(0, viewSize.width - sidebarWidth),
+                                                                      height: viewSize.height),
+                                                 viewportOrigin: CGPoint(x: sidebarWidth, y: 0))
     }
 }
 

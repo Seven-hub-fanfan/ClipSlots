@@ -92,6 +92,59 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         apply(retry: 10)
     }
 
+    /// v2.11.8：主窗口离屏 / 最小化自救。
+    ///
+    /// 复现：上次退出时窗口停在外接 4K 屏上并被最小化，拔掉外接屏后启动，`System Events` 里
+    /// window 1 的 position 是 (1766, -816)、`AXMinimized = true`——进程活着、Dock 图标在，
+    /// 但用户屏幕上完全看不到窗口，体感就是「App 打不开」。系统的窗口状态恢复不保证落在当前屏幕排布内。
+    ///
+    /// 修法：拿到主窗口后，先 deminiaturize，再用 `MainWindowRescueGeometry` 判断窗口面积是否有
+    /// 足够比例落在某块屏幕的 visibleFrame 内，不够就夹/居中回可见区域。只在「确实看不见」时动窗口，
+    /// 正常摆位（含用户故意放副屏）一律不碰。
+    private func rescueMainWindowVisibility() {
+        func apply(retry: Int) {
+            guard let window = NSApp.windows.first(where: {
+                $0.styleMask.contains(.titled) && !($0 is NSPanel)
+            }) else {
+                guard retry > 0 else { return }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { apply(retry: retry - 1) }
+                return
+            }
+
+            if window.isMiniaturized {
+                window.deminiaturize(nil)
+            }
+
+            // 主屏放首位：完全离屏时的兜底落点用主屏，符合「窗口回到眼前」的直觉。
+            var frames: [CGRect] = []
+            if let main = NSScreen.main {
+                frames.append(main.visibleFrame)
+            }
+            for screen in NSScreen.screens where !frames.contains(screen.visibleFrame) {
+                frames.append(screen.visibleFrame)
+            }
+
+            let current = window.frame
+            guard MainWindowRescueGeometry.needsRescue(window: current, visibleFrames: frames) else { return }
+            let rescued = MainWindowRescueGeometry.rescuedFrame(window: current, visibleFrames: frames)
+            NSLog("[ClipSlots] rescue main window \(NSStringFromRect(current)) -> \(NSStringFromRect(rescued))")
+            window.setFrame(rescued, display: true)
+        }
+        apply(retry: 10)
+    }
+
+    /// 点 Dock 图标 / 重新打开时也走一次自救（此时窗口已存在，系统只是把它 order front，
+    /// 若它停在屏外照样看不见）。
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        rescueMainWindowVisibility()
+        if let window = NSApp.windows.first(where: {
+            $0.styleMask.contains(.titled) && !($0 is NSPanel)
+        }) {
+            window.makeKeyAndOrderFront(nil)
+        }
+        return true
+    }
+
     func applicationWillFinishLaunching(_ notification: Notification) {
         applyAppAppearance()
         // 皮肤缓存也在首帧前对齐，避免首帧用默认皮肤画一遍再被通知刷成用户选的那套。
@@ -115,6 +168,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         // v2.11.7 hotfix6: 窗口 chrome 与皮肤解绑（见 normalizeMainWindowChrome）。
         normalizeMainWindowChrome()
+        // v2.11.8: 窗口被系统恢复到当前屏幕排布之外 / 最小化时的自救，见 rescueMainWindowVisibility。
+        rescueMainWindowVisibility()
+        NotificationCenter.default.addObserver(
+            forName: NSApplication.didChangeScreenParametersNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            // 拔插外接屏、改分辨率/排布后，原本在副屏的窗口可能瞬间落到屏外。
+            self?.rescueMainWindowVisibility()
+        }
         NotificationCenter.default.addObserver(
             forName: AppSkinCenter.didChangeNotification,
             object: nil,
