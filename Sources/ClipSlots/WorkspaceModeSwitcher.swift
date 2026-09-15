@@ -57,6 +57,24 @@ struct WorkspaceModeSwitcher: View {
     private static let segmentWidth: CGFloat = 62
     private static let iconBox: CGFloat = 13
 
+    /// 控件总高（段高 + 外圈 padding × 2）。外层要按它算落位，所以必须公开且是常量。
+    static let preferredHeight: CGFloat = segmentHeight + 3 * 2
+
+    /// 切换器在**内容区顶边**下方的固定落位（pt，到胶囊顶边）。
+    ///
+    /// ★ v2.11.7 hotfix22：这颗胶囊全 App 只存在**一份**，挂在内容区根节点的
+    /// `.overlay(alignment: .top)` 上，编辑 / 画布共用同一个实例、同一个 inset —— 位置在数学上
+    /// 不可能随模式变化。此前是「编辑模式挂在 titleBar 的 .center、画布模式挂在内容区的 .top」
+    /// 两份实例：水平方向恰好都落在窗口中线（实测两模式 x 完全一致），但垂直方向差了 27.5pt，
+    /// 于是切页时胶囊上下窜一下 —— 用户看到的「按钮会跑，不像切换按钮」就是这个。
+    ///
+    /// 数值不是随手取的：编辑模式 titleBar 第一行（logo 50pt + 上下 padding）的垂直中心，
+    /// 实测（2x 截图量胶囊 ink 包围盒）距内容区顶边 53.5pt，减去半高 16pt = 37.5pt。
+    /// 以编辑模式为基准而不是反过来，是因为编辑模式那一行有 logo / 拨杆 / 搜索框做参照，
+    /// 胶囊必须与它们同一水平线；画布模式四周是空网格，跟过去反而更自然。
+    /// 改动 titleBar 的行高时必须重量这个值（改完跑一次两模式截图比对）。
+    static let pinnedTopInset: CGFloat = 37.5
+
     @Namespace private var indicator
 
     var body: some View {

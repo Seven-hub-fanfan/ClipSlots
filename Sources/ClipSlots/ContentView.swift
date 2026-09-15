@@ -366,17 +366,9 @@ struct ContentView: View {
                             .transition(.move(edge: .trailing))
                     }
                 }
-                // ★ v2.11.7 hotfix21: 画布模式的工作区切换器浮在内容区顶部正中。
-                //
-                // 挂在 **HStack 整体**（而不是画布子视图）上是刻意的：这样它是在「窗口内容宽度」里
-                // 几何居中，Agent 侧栏开合不会让它左右横跳 —— 顶部居中的 chrome 一旦跟着侧栏动，
-                // 读起来就像整个界面在抖。overlay 只占控件自身的命中区域，四周的透明 padding
-                // 不吃事件，画布该位置的节点照常可点。
-                .overlay(alignment: .top) {
-                    if workspaceMode == .canvas {
-                        canvasFloatingModeSwitcher
-                    }
-                }
+                // ★ v2.11.7 hotfix21→22: 这里曾挂过一份「画布模式专用」的浮动切换器。
+                // 已删除 —— 两份实例就是两套落位，正是「切页时胶囊会跑」的来源。
+                // 现在只有内容区根节点上那唯一一份（见 workspaceModeSwitcherPinned）。
 
                 // ★ v2.11.7 hotfix17: 底栏只在编辑模式保留。
                 //
@@ -425,6 +417,12 @@ struct ContentView: View {
                 }
                 .ignoresSafeArea()
             )
+            // ★ v2.11.7 hotfix22: 全 App **唯一一份**工作区切换器。
+            //
+            // 挂在内容区这棵 VStack 的顶边（两个模式共用的同一个几何原点），所以它的落位与
+            // 「当前是编辑还是画布」「搜索框在不在」「Agent 侧栏开没开」全都无关 —— 不是"算得准"，
+            // 是**没有第二个位置可算**。切页时它连一次 relayout 都不会发生，只有段内选中背景在滑。
+            .overlay(alignment: .top) { workspaceModeSwitcherPinned }
 
             // v2.10.52 (perf 第四批 · 巨型 @Published Store 拆分): Toast / 浮层提示改由独立子视图
             // TransientOverlayView 观察 store.transientUI 渲染。ContentView.body 不再读取
@@ -647,23 +645,28 @@ struct ContentView: View {
         }
     }
 
-    /// 画布模式的工作区切换器（v2.11.7 hotfix18 起存在；hotfix21 由「窄顶栏」改为「浮动胶囊」）。
+    /// 全 App 唯一一份工作区切换器（v2.11.7 hotfix22）。
     ///
-    /// 画布模式把 titleBar 整条摘掉了，切换器要是也跟着消失，用户就再也回不到编辑页（只能重启 App）。
-    /// 位置仍在水平正中 —— 与编辑模式 titleBar 里那颗胶囊同一水平位置，来回切页时它是**原地**换
-    /// 选中态，而不是从中间跳到左上角再跳回来。
+    /// 历史：hotfix18 把它放进编辑模式 titleBar 的 `.overlay(.center)`；hotfix21 又给画布模式单独
+    /// 加了一份浮动实例。两份实例的水平位置恰好都落在窗口中线（实测两模式胶囊 ink 的 x 完全一致），
+    /// 但垂直落位一个跟着 titleBar 行高、一个是内容区顶边 +10pt，差 27.5pt —— 切页时胶囊上下窜一下，
+    /// 读起来就不像"同一颗按钮在换挡"，而像"两个长得一样的按钮此消彼现"。
     ///
-    /// hotfix21 只改一件事：它不再占据一行布局高度（那一行正是两侧贴边侧栏头顶那道空白缺口的来源），
-    /// 改为浮在画布上方。为此必须自带**不透明底板**：切换器自身的 `chipBackground` 是半透明的，
-    /// 直接压在网格线上会透出格线，读起来像控件坏了。
-    private var canvasFloatingModeSwitcher: some View {
+    /// 现在只保留这一份，位置由 `WorkspaceModeSwitcher.pinnedTopInset` 一个常量决定，与模式无关。
+    ///
+    /// 底板只在画布模式给：编辑模式它落在 titleBar 表面上（本身不透明），再垫一层就会在标题栏里
+    /// 露出一块色差方块；画布模式它压在网格线上，不垫底会透出格线，读起来像控件坏了。
+    /// 注意底板是 `.background`，不参与布局 —— 加不加都不影响那颗胶囊的落位。
+    private var workspaceModeSwitcherPinned: some View {
         WorkspaceModeSwitcher(selection: $workspaceMode)
-            .background(
-                RoundedRectangle(cornerRadius: 10, style: .continuous)
-                    .fill(AppTheme.canvasChromeSurface)
-                    .shadow(color: Color.black.opacity(0.12), radius: 5, x: 0, y: 2)
-            )
-            .padding(.top, 10)
+            .background {
+                if workspaceMode == .canvas {
+                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        .fill(AppTheme.canvasChromeSurface)
+                        .shadow(color: Color.black.opacity(0.12), radius: 5, x: 0, y: 2)
+                }
+            }
+            .padding(.top, WorkspaceModeSwitcher.pinnedTopInset)
     }
 
     private var headerView: some View {
@@ -939,11 +942,11 @@ struct ContentView: View {
             .layoutPriority(2)
         }
         .frame(maxWidth: .infinity)
-        // 真正显示的那一份切换器（流内只有等宽透明占位，见上面 hotfix20 注释）。
-        .overlay(alignment: .center) {
-            WorkspaceModeSwitcher(selection: $workspaceMode)
-                .frame(width: WorkspaceModeSwitcher.preferredWidth)
-        }
+        // ★ v2.11.7 hotfix22: 这里原本挂着 `.overlay(alignment: .center) { WorkspaceModeSwitcher }`。
+        // 现在整个 App 只保留**一份**切换器，挂在内容区根节点上（见 body 里的
+        // `workspaceModeSwitcherPinned`），编辑 / 画布共用同一实例，位置不可能随模式变化。
+        // 流内那块透明占位（上面 hotfix20 注释处）**保留**：overlay 不参与布局，没有它，
+        // 窗口一窄左右两簇会直接压到中央胶囊底下。
     }
 
     // Layer 2: Page Selector + Actions
