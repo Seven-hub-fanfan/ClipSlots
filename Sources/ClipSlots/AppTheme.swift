@@ -300,6 +300,17 @@ enum AppTheme {
                                                        dark: Color.white.opacity(0.72))
     static var canvasCardMetaInk: Color { isMinimalSkin ? minimalSecondaryInk : colorfulCanvasCardMetaInk }
 
+    /// 纯文本节点的**深色内容框**底色（v2.11.8 二轮，用户指定"深色圆角纯文本框"）。
+    ///
+    /// 两个皮肤共用一档、且**不随浅/深色模式反相**：这块深底的作用是把文本从卡片里"抠"出来，
+    /// 并在画布上与出图节点的白色堆叠卡形成一眼可辨的区分。跟着系统模式变成浅色就同时失去这两件事
+    /// —— 浅色卡片上的浅色框既没有边界感，也不再能靠颜色区分节点类型。
+    /// 深色模式下比卡片底（0.105）略高一档，避免和卡片糊在一起。
+    static var canvasTextNodeFill: Color {
+        dyn(light: Color(red: 0.145, green: 0.148, blue: 0.16),
+            dark: Color(red: 0.175, green: 0.178, blue: 0.19))
+    }
+
     private static let colorfulElevatedBackground = dyn(light: Color.white.opacity(0.82),
                                                         dark: Color.white.opacity(0.055))
     static var elevatedBackground: Color { isMinimalSkin ? minimalCardFilled : colorfulElevatedBackground }

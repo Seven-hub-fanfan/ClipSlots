@@ -5067,7 +5067,7 @@ do {
     t.equal(CanvasFanGeometry.layouts(count: 0, expanded: false).count, 1,
             "★0 张内容也返回 1 张卡片（空槽位要有一张空卡，否则节点预览区一片空白像坏了）")
     t.equal(CanvasFanGeometry.layouts(count: 9, expanded: false).count, CanvasFanGeometry.maxCards,
-            "卡片数封顶 4 张（再多在 236pt 宽的预览区里只会糊成一团）")
+            "卡片数封顶 5 张（v2.11.8 二轮从 4 提到 5：溢出的进 +N 角标）")
 
     // 角度关于中轴严格对称。
     let four = CanvasFanGeometry.layouts(count: 4, expanded: true)
@@ -5092,7 +5092,8 @@ do {
     // 单卡 hover：只动那一张，抬起 -8pt、放大 1.08、Z 层提到最上。
     let hovered = CanvasFanGeometry.layouts(count: 4, expanded: true, hoveredIndex: 2)
     t.check(canvasApprox(hovered[2].scale, 1.08), "★单卡 hover 放大 1.08（用户指定）")
-    t.check(canvasApprox(hovered[2].offset.height, -8), "★单卡 hover 上移 8pt（用户指定）")
+    t.check(canvasApprox(hovered[2].offset.height, CanvasFanGeometry.hoverLift),
+            "★单卡 hover 上移 10pt（v2.11.8 二轮用户指定，从 8 提到 10）")
     t.check(hovered[2].zIndex > hovered[3].zIndex && hovered[2].zIndex > hovered[0].zIndex,
             "★被悬停的卡片 Z 层最高（否则放大的那 8% 会被邻卡切掉，看起来像渲染错误）")
     t.check(canvasApprox(hovered[0].scale, 1) && canvasApprox(hovered[1].offset.height, 0),
@@ -5108,8 +5109,8 @@ do {
     t.equal(CanvasFanGeometry.textSegments("只有一段话").count, 1, "单段文本 → 一张卡")
     t.equal(CanvasFanGeometry.textSegments("第一段\n\n第二段\n\n第三段"), ["第一段", "第二段", "第三段"],
             "★空行是用户手写的段落边界，最可信，优先按它切")
-    t.equal(CanvasFanGeometry.textSegments("a\nb\nc\nd").count, CanvasFanGeometry.maxTextCards,
-            "文本卡最多 3 张（超出部分不显示，卡片不是阅读器）")
+    t.equal(CanvasFanGeometry.textSegments("a\nb\nc\nd\ne\nf").count, CanvasFanGeometry.maxTextCards,
+            "文本卡最多 5 张（超出部分不显示，卡片不是阅读器）")
     t.equal(CanvasFanGeometry.textSegments("a\n\nb", limit: 1), ["a"], "limit 生效")
 
     // 内容来源优先级：图片附件 > 正文分段 > 空卡。
@@ -5121,7 +5122,287 @@ do {
     t.equal(CanvasFanGeometry.cardSources(attachmentImageIndices: [], text: "  "),
             [.empty], "★空槽位返回一张空卡（而不是零张，零张会让预览区看起来像加载失败）")
     t.equal(CanvasFanGeometry.cardSources(attachmentImageIndices: [0, 1, 2, 3, 4, 5], text: "").count,
-            CanvasFanGeometry.maxCards, "图片卡同样封顶 4 张")
+            CanvasFanGeometry.maxCards, "图片卡同样封顶 5 张")
+}
+
+// MARK: - CANVAS-FAN-2：二轮交互（命中多边形 / 轮播 / +N / A-B 风格）
+//
+// 用户实测反馈：一轮扇形"展开很难选到第二个""最后那个又没有办法选择中间的"。根因是各卡自己
+// onHover + 不透明白卡右压左，中间卡的独占可点区域只剩顶端一道窄楔形（见 CanvasSlotFanStack
+// 的 hitLayer 注释）。二轮的两条修法都在这里钉住：
+//   A 扇形：角度 20°、统一命中层按**旋转后的真实四边形**判定；
+//   B 轮播：水平铺开、同屏 3 张、循环翻页。
+do {
+    // ---- A：角度加大 ----
+    t.check(CanvasFanGeometry.expandedSpread >= 18 && CanvasFanGeometry.expandedSpread <= 22,
+            "★展开相邻卡角度落在用户指定的 18~22° 区间（小于 18° 中间卡就没有独占可点区域）")
+    let fan5 = CanvasFanGeometry.layouts(count: 5, expanded: true)
+    t.equal(fan5.count, 5, "扇形最多同时展开 5 张")
+    let gap01 = abs(fan5[1].angle - fan5[0].angle)
+    t.check(canvasApprox(gap01, CanvasFanGeometry.expandedSpread),
+            "相邻两卡的角度差就是 expandedSpread（等距，不是越往外越挤）")
+
+    // ---- A：旋转后多边形命中 ----
+    let cardSize = CGSize(width: 108, height: 132)
+    let box = CGSize(width: 236, height: 132)
+    let poly = CanvasFanGeometry.cardPolygon(layout: fan5[2], cardSize: cardSize, containerSize: box)
+    t.equal(poly.count, 4, "卡片命中形状是四边形（旋转后的矩形，不是包围盒）")
+    t.check(CanvasFanGeometry.polygonContains(poly, CGPoint(x: box.width / 2, y: box.height / 2)),
+            "中间那张卡的中心点必须命中它自己")
+    // 中轴上那张卡（index 2）角度为 0，因此它的多边形就是正矩形，宽高等于卡片本身。
+    let polyW = abs(poly[1].x - poly[0].x)
+    let polyH = abs(poly[3].y - poly[0].y)
+    t.check(canvasApprox(polyW, cardSize.width) && canvasApprox(polyH, cardSize.height),
+            "角度为 0 的卡片，命中多边形就是它自己的矩形（说明多边形构造没有引入额外缩放）")
+
+    // 旋转卡：包围盒会比真实卡片胖出一截，那块"胖出来的空白"不能命中。
+    let tiltedLayout = fan5[0]                      // 最左那张，倾角 -2*spread
+    let tilted = CanvasFanGeometry.cardPolygon(layout: tiltedLayout, cardSize: cardSize, containerSize: box)
+    let minX = tilted.map(\.x).min() ?? 0
+    let minY = tilted.map(\.y).min() ?? 0
+    t.check(!CanvasFanGeometry.polygonContains(tilted, CGPoint(x: minX + 0.5, y: minY + 0.5)),
+            "★倾斜卡片的包围盒左上角落在卡片之外（用包围盒判定会出现「点在空白处却选中了卡片」）")
+
+    // hitTest 必须按 zIndex 从高到低：看到谁点到谁。
+    let hi = CanvasFanGeometry.layouts(count: 3, expanded: true)
+    let center = CGPoint(x: box.width / 2, y: box.height / 2)
+    if let hit = CanvasFanGeometry.hitTest(point: center, layouts: hi, cardSize: cardSize, containerSize: box) {
+        let overlapping = hi.filter {
+            CanvasFanGeometry.polygonContains(
+                CanvasFanGeometry.cardPolygon(layout: $0, cardSize: cardSize, containerSize: box), center)
+        }
+        let topMost = overlapping.max(by: { $0.zIndex < $1.zIndex })?.index
+        t.equal(hit, topMost ?? hit,
+                "★命中的是所有覆盖该点的卡片中 zIndex 最高的那张（与视觉遮挡一致：看到谁点到谁）")
+    } else {
+        t.check(false, "容器正中必须命中某张卡片")
+    }
+    t.check(CanvasFanGeometry.hitTest(point: CGPoint(x: -50, y: -50),
+                                      layouts: hi, cardSize: cardSize, containerSize: box) == nil,
+            "容器外的点不命中任何卡片")
+
+    // ---- +N 溢出 ----
+    t.equal(CanvasFanGeometry.overflowCount(total: 3), 0, "不超过 5 张时没有 +N")
+    t.equal(CanvasFanGeometry.overflowCount(total: 5), 0, "正好 5 张时没有 +N")
+    t.equal(CanvasFanGeometry.overflowCount(total: 50), 45,
+            "★50 张时最外侧显示 +45（用户场景：多图 50+，扇形只展开 5 张）")
+    t.equal(CanvasFanGeometry.allCardSources(attachmentImageIndices: Array(0..<50), text: "").count, 50,
+            "★allCardSources 不截断 —— 截断了就算不出总数，+N 与轮播分页都会错")
+    t.equal(CanvasFanGeometry.cardSources(attachmentImageIndices: Array(0..<50), text: "").count,
+            CanvasFanGeometry.maxCards, "cardSources 仍按扇形上限截断（两个函数刻意分工）")
+
+    // ---- B：水平轮播 ----
+    t.equal(CanvasFanGeometry.carouselVisible, 3, "★同屏 3 张（用户指定）")
+    let car = CanvasFanGeometry.carouselLayouts(count: 3, cardWidth: 60)
+    t.equal(car.count, 3, "轮播布局逐张给出")
+    t.check(car.allSatisfy { canvasApprox($0.angle, 0) },
+            "★轮播卡片不旋转（旋转会重新引入扇形那个「相邻卡互相遮挡」的问题）")
+    let dx = car[1].offset.width - car[0].offset.width
+    let dx2 = car[2].offset.width - car[1].offset.width
+    t.check(canvasApprox(dx, dx2), "★卡片间距均匀（用户指定）")
+    t.check(dx >= 60, "★相邻卡水平间距 ≥ 卡宽 —— 物理上不重叠，每张都有完整点击区域（用户指定）")
+    t.check(canvasApprox(car[1].offset.width, 0), "3 张时中间那张居中")
+    t.check(car.allSatisfy { canvasApprox($0.offset.height, 0) }, "轮播静息态不做垂直位移")
+    let carHover = CanvasFanGeometry.carouselLayouts(count: 3, cardWidth: 60, hoveredIndex: 0)
+    t.check(canvasApprox(carHover[0].offset.height, CanvasFanGeometry.carouselHoverLift),
+            "★轮播单卡 hover 上移 8pt（用户指定）")
+    t.check(canvasApprox(carHover[0].scale, CanvasFanGeometry.hoverScale),
+            "★轮播单卡 hover 放大 1.08（用户指定）")
+    t.check(carHover[0].zIndex > carHover[1].zIndex, "被悬停的卡片 Z 层最高")
+    t.check(canvasApprox(carHover[1].offset.height, 0), "hover 一张不影响其他卡片")
+
+    // 分页：循环翻页，不越界。
+    t.equal(CanvasFanGeometry.carouselPageCount(total: 3), 1, "3 张 = 1 页")
+    t.equal(CanvasFanGeometry.carouselPageCount(total: 4), 2, "4 张 = 2 页（不足一页也算一页）")
+    t.equal(CanvasFanGeometry.carouselPageCount(total: 50), 17, "50 张 = 17 页")
+    t.equal(CanvasFanGeometry.carouselPage(current: 0, delta: -1, total: 50), 16,
+            "★首页往左翻回到末页（循环，用户指定「点击循环翻页」）")
+    t.equal(CanvasFanGeometry.carouselPage(current: 16, delta: 1, total: 50), 0, "末页往右翻回到首页")
+    t.equal(CanvasFanGeometry.carouselPage(current: 0, delta: 1, total: 2), 0,
+            "只有一页时翻页原地不动（而不是算出一个不存在的页码）")
+    let r0 = CanvasFanGeometry.carouselRange(page: 0, total: 50)
+    t.equal(r0.lowerBound, 0, "第 0 页从第 0 张开始")
+    t.equal(r0.count, 3, "整页 3 张")
+    let rLast = CanvasFanGeometry.carouselRange(page: 16, total: 50)
+    t.equal(rLast.lowerBound, 48, "末页起点 48")
+    t.equal(rLast.count, 2, "★末页只剩 2 张时就给 2 张（不能凑数或越界，越界直接崩）")
+    t.check(CanvasFanGeometry.carouselRange(page: 99, total: 50).count > 0,
+            "页码越界时仍返回有效区间（外部状态可能滞后于内容变化）")
+
+    // ---- A/B 风格枚举可持久化 ----
+    t.equal(CanvasFanGeometry.ExpandStyle.allCases.count, 2, "只有两种展开风格（A 扇形 / B 轮播）")
+    t.equal(CanvasFanGeometry.ExpandStyle.fanOut.rawValue, "fanOut", "★rawValue 是持久化格式，不能改")
+    t.equal(CanvasFanGeometry.ExpandStyle.carousel.rawValue, "carousel", "★rawValue 是持久化格式，不能改")
+
+    // ---- 节点上的 A/B 选择必须能落盘 ----
+    // 用户是逐节点切 A/B 的（右上角那个极小图标）。如果这个字段没进 Codable，
+    // 症状是"切完好用，重启全变回扇形"——切换本身没报错，所以只能靠断言兜。
+    do {
+        var node = canvasNode()
+        t.equal(node.animationStyle, .fanOut, "默认 A（扇形），保持一轮的观感")
+        node.toggleAnimationStyle()
+        t.equal(node.animationStyle, .carousel, "toggle 一次进 B（轮播）")
+        node.toggleAnimationStyle()
+        t.equal(node.animationStyle, .fanOut, "★toggle 两次回到 A（必须是二态互切，不能单向）")
+
+        node.animationStyle = .carousel
+        let back = try! JSONDecoder().decode(CanvasNode.self,
+                                            from: try! JSONEncoder().encode(node))
+        t.equal(back.animationStyle, .carousel, "★★逐节点的 A/B 选择必须随画布落盘")
+
+        // 老画布（v2.11.8 一轮及更早）里没有这个键，解码不能失败、必须给默认值。
+        let legacy = """
+        {"pageId":"p1","groupId":"g1","slot":1,"x":0,"y":0,
+         "width":260,"height":150,"count":1}
+        """.data(using: .utf8)!
+        let migrated = try? JSONDecoder().decode(CanvasNode.self, from: legacy)
+        t.equal(migrated?.animationStyle, .fanOut,
+                "★★老画布缺 animationStyle 键时要回落到 A，而不是整份文档解码失败")
+    }
+}
+
+// MARK: - CANVAS-UNFILED：「未入库」保留组（v2.11.8 二轮）
+//
+// 未入库是个真实存在的槽位组（id `__unfiled__`），只是在 UI/CLI 边界上被过滤掉了。
+// 这里锁三件事：id/名字/容量是持久化契约；ensure 幂等；保留组不能被删/改名。
+// 最后一条尤其要紧——用户在编辑页误删这个组，画布上所有未归槽节点的内容会一起没。
+do {
+    t.equal(SpecialSlotStorage.unfiledGroupId, "__unfiled__", "★保留组 id 是持久化契约，不能改")
+    t.equal(SpecialSlotStorage.unfiledGroupName, "未入库", "保留组显示名")
+    t.equal(SpecialSlotStorage.unfiledCapacity, 60, "未入库容量 60（远大于 10，画布可以堆很多散节点）")
+    t.check(SpecialSlotStorage.isReservedGroupId("__unfiled__"), "__unfiled__ 应被识别为保留组")
+    t.check(!SpecialSlotStorage.isReservedGroupId("g1"), "普通组不应被误判为保留组")
+
+    let dir = FileManager.default.temporaryDirectory
+        .appendingPathComponent("clipslots_unfiled_smoke_\(UUID().uuidString)", isDirectory: true)
+    try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+    setenv("CLIPSLOTS_DATA_DIR", dir.path, 1)
+    defer {
+        unsetenv("CLIPSLOTS_DATA_DIR")
+        try? FileManager.default.removeItem(at: dir)
+    }
+    let storage = SpecialSlotStorage()
+
+    let g1 = try! storage.ensureUnfiledGroup()
+    t.equal(g1.id, SpecialSlotStorage.unfiledGroupId, "ensure 应返回保留组")
+    t.equal(g1.name, SpecialSlotStorage.unfiledGroupName, "保留组名字应为「未入库」")
+
+    let g2 = try! storage.ensureUnfiledGroup()
+    t.equal(g2.id, g1.id, "★ensure 必须幂等（每次进画布都会调，不能越调越多组）")
+    let unfiledCount = storage.loadIndex().specialSlots
+        .filter { SpecialSlotStorage.isReservedGroupId($0.id) }.count
+    t.equal(unfiledCount, 1, "★★保留组只能有一份")
+
+    t.expectThrows("★★未入库组不允许删除（否则连带丢掉所有未归槽节点的内容）") {
+        try storage.deleteSpecialSlot(id: SpecialSlotStorage.unfiledGroupId)
+    }
+    t.expectThrows("未入库组不允许改名（名字是 UI 契约的一部分）") {
+        try storage.renameSpecialSlot(id: SpecialSlotStorage.unfiledGroupId, name: "随便改")
+    }
+
+    t.check(storage.loadIndex().specialSlots.contains { $0.id == SpecialSlotStorage.unfiledGroupId },
+            "被拒的删除/改名不应留下副作用，保留组仍在")
+}
+
+// MARK: - CANVAS-CARD-TEXT：节点卡片文字加工（v2.11.8 二轮）
+//
+// 用户要求：卡片正文显示 4 行**纯文本**，去掉 Markdown 表格这类原始模板字样；顶部改成
+// 「页面-槽位组-槽位」路径标识。这两件事的翻车方式都是"少一行 / 多一个竖线"——不报错、
+// 只是看起来有点怪，靠肉眼极难发现回归，所以必须有断言。
+do {
+    // 行数上限
+    t.equal(CanvasCardText.previewLineLimit, 4, "★正文预览 4 行（用户指定，从一轮的 2 行提上来）")
+    t.equal(CanvasCardText.previewLines("a\nb\nc\nd\ne\nf").count, 4, "超出 4 行截断")
+    t.equal(CanvasCardText.previewLines("a\nb", limit: 0).count, 0, "limit 0 返回空（不能崩）")
+
+    // Markdown 噪声清洗
+    t.equal(CanvasCardText.previewLines("| 字段 | 值 |\n|---|---|\n| 模型 | v3 |"),
+            ["字段 · 值", "模型 · v3"],
+            "★表格分隔行整行丢弃、数据行拆成「a · b」（用户要求去掉表格原始字样，但内容要留）")
+    t.equal(CanvasCardText.previewLines("### 标题\n正文"), ["标题", "正文"], "剥掉 # 标题标记")
+    t.equal(CanvasCardText.previewLines("- 第一项\n- 第二项"), ["第一项", "第二项"], "剥掉列表符")
+    t.equal(CanvasCardText.previewLines("1. 甲\n2. 乙"), ["甲", "乙"], "剥掉有序列表编号")
+    t.equal(CanvasCardText.previewLines("> 引用"), ["引用"], "剥掉引用标记")
+    t.equal(CanvasCardText.previewLines("**粗体**与`代码`"), ["粗体与代码"], "剥掉行内标记")
+    t.equal(CanvasCardText.previewLines("---\n***\n___\n有效内容"), ["有效内容"], "分隔线整行丢弃")
+    t.equal(CanvasCardText.previewLines("```swift\nlet a = 1\n```"), ["let a = 1"],
+            "代码栅栏行丢弃、代码内容保留（它可能就是用户的 prompt）")
+    t.equal(CanvasCardText.previewLines("-30% 折扣"), ["-30% 折扣"],
+            "★「-30%」不能被当成列表符吃掉第一个字符（列表符必须后跟空格）")
+    t.equal(CanvasCardText.previewLines("  \n\n  正文  \n\n"), ["正文"], "空行与首尾空白丢弃")
+    t.equal(CanvasCardText.previewText("甲\n乙"), "甲\n乙", "previewText = previewLines 用换行拼接")
+    t.equal(CanvasCardText.previewLines("").count, 0, "空文本 → 零行")
+
+    // 路径标识
+    t.equal(CanvasCardText.pathLabel(pageName: "默认页", groupName: "默认组", slot: 3),
+            "默认页 - 默认组 - 3", "★页面-槽位组-槽位（用户指定格式）")
+    t.equal(CanvasCardText.pathLabel(pageName: nil, groupName: "组", slot: 1), "组 - 1",
+            "页面名缺失时省略该段，而不是留一个空的「 - 」")
+    t.equal(CanvasCardText.pathLabel(pageName: "  ", groupName: "  ", slot: 7), "7",
+            "全空白等于缺失")
+    t.equal(CanvasCardText.pathLabel(pageName: "页", groupName: "组", slot: 2, isUnfiled: true),
+            "未入库 - 2",
+            "★未入库节点不冒用页面/组名（它不属于任何用户页面，写上去用户会去那一页找它然后找不到）")
+}
+
+// MARK: - CANVAS-ARCHIVE：拖节点进槽位库归槽的分栏几何（v2.11.8 二轮）
+//
+// 画分栏块的是侧栏、判松手落点的是画布根视图 —— 两处必须用同一份公式。
+// 各写一份的表现是"看起来在第 3 块上、松手却归到第 4 个槽位"，而且只在某些窗口高度下出现。
+do {
+    let panel = CGSize(width: 240, height: 800)
+    let blocks = CanvasArchiveDropGeometry.blocks(panelSize: panel, count: 10)
+    t.equal(blocks.count, 10, "★10 个分栏块对应槽位 1~10（用户指定）")
+    t.equal(blocks.first?.slot, 1, "槽位号 1 起")
+    t.equal(blocks.last?.slot, 10, "末块是槽位 10")
+
+    // 不重叠、不越界。
+    var overlap = false
+    for i in 1..<blocks.count where blocks[i].rect.minY < blocks[i - 1].rect.maxY { overlap = true }
+    t.check(!overlap, "★分栏块两两不重叠（重叠区域的命中判定必然与视觉不一致）")
+    t.check(blocks.last!.rect.maxY <= panel.height,
+            "★最后一块不越出侧栏底边（越出去的部分点不到，用户会以为槽位 10 不能用）")
+    t.check(blocks.first!.rect.minY >= CanvasArchiveDropGeometry.headerHeight,
+            "第一块在标题下方，不压住标题")
+    t.check(blocks.allSatisfy { $0.rect.width <= panel.width - 2 * CanvasArchiveDropGeometry.sidePadding + 0.01 },
+            "块宽不超出侧栏内容区")
+
+    // 渲染与命中一致：每块的中心点必须命中它自己。
+    var mismatched: [Int] = []
+    for b in blocks {
+        let hit = CanvasArchiveDropGeometry.blockIndex(at: CGPoint(x: b.rect.midX, y: b.rect.midY),
+                                                       panelSize: panel, count: 10)
+        if hit != b.slot { mismatched.append(b.slot) }
+    }
+    t.check(mismatched.isEmpty,
+            "★每个分栏块的中心点命中它自己（画块与判命中共用同一份公式的直接后果）")
+
+    // 块间的 5pt 间距不能是死区，否则高亮会一闪一闪。
+    let seamY = blocks[2].rect.maxY + CanvasArchiveDropGeometry.blockGap / 2
+    t.check(CanvasArchiveDropGeometry.blockIndex(at: CGPoint(x: 100, y: seamY),
+                                                panelSize: panel, count: 10) != nil,
+            "★块之间的缝隙也算命中（缝隙成死区 = 慢慢移动时高亮闪烁）")
+
+    // 侧栏之外不命中。
+    t.check(CanvasArchiveDropGeometry.blockIndex(at: CGPoint(x: 600, y: 300),
+                                                panelSize: panel, count: 10) == nil,
+            "★侧栏右侧（画布区域）不命中任何槽位块 —— 那是「移动节点」而不是「归槽」")
+    t.check(CanvasArchiveDropGeometry.blockIndex(at: CGPoint(x: 100, y: 4),
+                                                panelSize: panel, count: 10) == nil,
+            "标题区域不命中槽位块")
+    t.check(!CanvasArchiveDropGeometry.isInsidePanel(point: CGPoint(x: 241, y: 10), panelSize: panel),
+            "isInsidePanel 以侧栏右缘为界")
+    t.check(CanvasArchiveDropGeometry.isInsidePanel(point: CGPoint(x: 10, y: 10), panelSize: panel),
+            "侧栏内的点算进入归槽意图")
+
+    // 窗口被压矮时的退化行为：宁可溢出（可见异常），也不要把块压到点不中的高度。
+    let tiny = CanvasArchiveDropGeometry.blocks(panelSize: CGSize(width: 240, height: 120), count: 10)
+    t.check(tiny.allSatisfy { $0.rect.height >= CanvasArchiveDropGeometry.minBlockHeight },
+            "★极矮窗口下块高不低于下限（压到几 pt 的表现是「松手没反应」，用户只会认为功能坏了）")
+    t.equal(CanvasArchiveDropGeometry.blocks(panelSize: .zero, count: 10).count, 0,
+            "零尺寸返回空数组（不能崩）")
+    t.equal(CanvasArchiveDropGeometry.blocks(panelSize: panel, count: 0).count, 0,
+            "槽位数为 0（配置损坏）返回空数组")
 }
 
 // MARK: - CANVAS-PASTE：Cmd+V 类型判定（v2.11.8）

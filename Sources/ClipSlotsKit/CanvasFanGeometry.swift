@@ -1,10 +1,12 @@
 import Foundation
 import CoreGraphics
 
-/// 槽位节点「扇形堆叠卡片」的布局数学（v2.11.8）。
+/// 槽位节点「堆叠卡片」的布局数学（v2.11.8）。
 ///
-/// 用户要的效果：槽位的多条内容在节点里以一叠卡片呈现，鼠标悬停时以**底边中心为轴**向左右
-/// 扇形展开（fan-out），单张卡片再悬停会抬起放大。
+/// 用户要的效果：槽位的多条内容在节点里以一叠卡片呈现，鼠标悬停时展开。展开有**两种**风格，
+/// 由节点自身的 `animationStyle` 决定：
+///   - `.fanOut`   扇形：以**底边中心为轴**向左右扇开。
+///   - `.carousel` 轮播：水平铺开成一排，同屏 3 张，左右箭头翻页。
 ///
 /// 为什么这套数学必须下沉到 Kit（不是洁癖，是本项目踩过的坑）：
 /// v2.11.0 的轮盘缩略图翻车就是因为极坐标布局写在 View 里 —— 往 VStack 里加元素等于沿**屏幕
@@ -24,20 +26,46 @@ public enum CanvasFanGeometry {
 
     /// 收拢态相邻卡片的角度差。小到只是"一叠没对齐的纸"，不是扇形。
     public static let collapsedSpread: CGFloat = 4.5
+
     /// 展开态相邻卡片的角度差。
-    public static let expandedSpread: CGFloat = 17
+    ///
+    /// ★ v2.11.8 二轮：**17° → 20°**。用户实测反馈「展开很难选到第二个」「没有办法选择中间的」。
+    /// 根因是每张卡的**独立可点面积**太小：卡片宽 ≈ 高 × 0.82，绕底边中心转 17° 时，相邻两卡
+    /// 在下半部几乎完全重合，只有靠顶端一道窄楔形是"只属于自己"的；而 zIndex 是右压左，于是
+    /// 中间那几张剩下的可点区域就是几个像素宽的月牙。角度加到 20° 并把横向张开量提到 12pt 后，
+    /// 每张卡的独立楔形宽度大约翻倍。
+    ///
+    /// 为什么不继续加大：20° × 5 张 = 总张角 80°，最外侧卡片已经倒到接近水平，再大就不像"一叠卡"
+    /// 而像"散落一地"，且会大幅溢出预览区撞到相邻节点。
+    public static let expandedSpread: CGFloat = 20
+
     /// 收拢态相邻卡片的横向错位（露出后面卡片的边缘，提示"还有几张"）。
     public static let collapsedStagger: CGFloat = 3.5
+
     /// 展开态额外的横向张开量：只靠旋转的话，卡片顶端分开、底端仍然叠在一起。
-    public static let expandedStagger: CGFloat = 9
-    /// 单卡悬停时的抬起位移（用户指定 -8pt）。
-    public static let hoverLift: CGFloat = -8
+    /// ★ v2.11.8 二轮：9 → 12，与 20° 配套拉开独立可点区域。
+    public static let expandedStagger: CGFloat = 12
+
+    /// 单卡悬停时的抬起位移。
+    /// ★ v2.11.8 二轮：扇形态用户指定 -10pt（轮播态仍是 -8pt，见 `carouselHoverLift`）。
+    public static let hoverLift: CGFloat = -10
     /// 单卡悬停时的放大倍数（用户指定 1.08）。
     public static let hoverScale: CGFloat = 1.08
-    /// 最多同时展示的卡片数。超出的内容不进扇形 —— 5 张以上在 168pt 宽的节点里必然互相糊成一团。
-    public static let maxCards: Int = 4
-    /// 纯文本槽位最多切成几张卡片（用户指定 3）。
-    public static let maxTextCards: Int = 3
+
+    /// 扇形最多同时展开几张。
+    /// ★ v2.11.8 二轮：4 → 5（用户指定）。超出的张数收进最外侧那张的 `+N` 角标。
+    public static let maxCards: Int = 5
+
+    /// 轮播态同屏展示几张（用户指定 3）。
+    public static let carouselVisible: Int = 3
+    /// 轮播态单卡悬停抬起位移（用户指定 -8pt）。
+    public static let carouselHoverLift: CGFloat = -8
+    /// 轮播态卡片间距（pt，1x）。均匀、不重叠是这个模式的全部意义。
+    public static let carouselGap: CGFloat = 8
+
+    /// 纯文本槽位最多切成几张卡片。
+    /// ★ v2.11.8 二轮：3 → 5，与 `maxCards` 对齐（否则纯文本槽位永远吃不到第 4/5 张卡）。
+    public static let maxTextCards: Int = 5
 
     /// 旋转与缩放的锚点：底边中心。
     public static let pivotAnchor = CGPoint(x: 0.5, y: 1.0)
@@ -62,7 +90,15 @@ public enum CanvasFanGeometry {
         }
     }
 
-    /// 计算整叠卡片的布局。
+    /// 展开风格。持久化在 `CanvasNode.animationStyle`。
+    public enum ExpandStyle: String, Codable, CaseIterable, Equatable {
+        case fanOut
+        case carousel
+    }
+
+    // MARK: - 扇形布局
+
+    /// 计算整叠卡片的扇形布局。
     ///
     /// - Parameters:
     ///   - count: 卡片数量（会被夹到 `1...maxCards`；0 张也返回 1 张 —— 空槽位要显示一张虚线空卡）。
@@ -93,6 +129,152 @@ public enum CanvasFanGeometry {
                               // 否则放大 1.08 的那 8% 会被邻居切掉一条边，看起来像渲染错误。
                               zIndex: isHovered ? 100 : Double(i))
         }
+    }
+
+    // MARK: - 轮播布局
+
+    /// 计算水平轮播的布局（同屏 `carouselVisible` 张，均匀排列、互不重叠）。
+    ///
+    /// - Parameters:
+    ///   - count: 当前页实际要显示的卡片数（≤ `carouselVisible`）。
+    ///   - cardWidth: 单卡宽度（1x）。
+    ///   - hoveredIndex: 被悬停的卡片下标（页内下标，0 起）。
+    ///
+    /// 与扇形的关键差异：**角度恒为 0**。轮播的可点性来自"物理上不重叠"，一旦带了旋转，
+    /// 相邻卡片的角部就会互相探入，又回到扇形那个"看得见点不着"的问题。
+    public static func carouselLayouts(count: Int,
+                                       cardWidth: CGFloat,
+                                       hoveredIndex: Int? = nil) -> [CardLayout] {
+        let n = max(count, 1)
+        let step = cardWidth + carouselGap
+        let mid = CGFloat(n - 1) / 2
+        return (0..<n).map { i in
+            let k = CGFloat(i) - mid
+            let isHovered = (hoveredIndex == i)
+            return CardLayout(index: i,
+                              angle: 0,
+                              offset: CGSize(width: k * step,
+                                             height: isHovered ? carouselHoverLift : 0),
+                              scale: isHovered ? hoverScale : 1,
+                              zIndex: isHovered ? 100 : Double(i))
+        }
+    }
+
+    /// 轮播翻页：当前页码 + 方向 → 新页码（**循环**）。
+    ///
+    /// 用户明确要「循环翻页」：50 张的情况下左右翻即可，不需要全部展开。
+    public static func carouselPage(current: Int, delta: Int, total: Int) -> Int {
+        let pages = carouselPageCount(total: total)
+        guard pages > 0 else { return 0 }
+        let raw = (current + delta) % pages
+        return raw < 0 ? raw + pages : raw
+    }
+
+    public static func carouselPageCount(total: Int) -> Int {
+        guard total > 0 else { return 1 }
+        return (total + carouselVisible - 1) / carouselVisible
+    }
+
+    /// 某一页对应的原始下标区间。
+    public static func carouselRange(page: Int, total: Int) -> Range<Int> {
+        guard total > 0 else { return 0..<0 }
+        let pages = carouselPageCount(total: total)
+        let p = min(max(page, 0), pages - 1)
+        let start = p * carouselVisible
+        let end = min(start + carouselVisible, total)
+        return start..<end
+    }
+
+    // MARK: - 碰撞箱：旋转后的实际多边形
+
+    /// 一张卡片经过 `offset` / `rotation`（锚点=底边中心）/ `scale` 之后的四个顶点。
+    ///
+    /// ★ v2.11.8 二轮，用户明确要求：「碰撞箱改用**旋转后的实际多边形**（而不是原始矩形），
+    /// 按旋转角度计算 4 个顶点的真实坐标」。
+    ///
+    /// 为什么必须自己算而不能靠 SwiftUI 的命中测试：SwiftUI 对 `rotationEffect` 后的视图**确实**
+    /// 会做正确的逆变换命中，问题出在**遮挡**上 —— 相邻卡片是不透明的白卡，谁在上面谁吃掉事件，
+    /// 于是被压住的那几张只剩几像素可点。改成自己算多边形之后，命中层是**一整块**透明视图，
+    /// 由这里的 `hitTest` 从**最上层往下**找第一个包含鼠标点的卡片，语义与"看到谁就点到谁"完全一致，
+    /// 而且不会因为 SwiftUI 的子视图 hover 抢焦点而抖动。
+    ///
+    /// 变换顺序必须与渲染侧一致：`scaleEffect(anchor:.bottom)` → `rotationEffect(anchor:.bottom)`
+    /// → `offset`。顺序换了会在大角度时肉眼可见地错位。
+    ///
+    /// - Parameters:
+    ///   - layout: 该卡片的布局。
+    ///   - cardSize: 卡片原始尺寸（1x）。
+    ///   - containerSize: 命中层尺寸（1x）；卡片在其中**居中**摆放。
+    /// - Returns: 顺时针 4 顶点（容器坐标系，y 向下）。
+    public static func cardPolygon(layout: CardLayout,
+                                   cardSize: CGSize,
+                                   containerSize: CGSize) -> [CGPoint] {
+        // 卡片在容器里居中 → 未变换时的矩形。
+        let cx = containerSize.width / 2
+        let cy = containerSize.height / 2
+        let halfW = cardSize.width / 2
+        let halfH = cardSize.height / 2
+
+        // 锚点（底边中心）在容器坐标里的位置。scale / rotation 都绕它。
+        let pivot = CGPoint(x: cx, y: cy + halfH)
+
+        // 未变换的四角（相对锚点）。
+        let raw: [CGPoint] = [
+            CGPoint(x: -halfW, y: -cardSize.height),  // 左上
+            CGPoint(x:  halfW, y: -cardSize.height),  // 右上
+            CGPoint(x:  halfW, y: 0),                 // 右下
+            CGPoint(x: -halfW, y: 0)                  // 左下
+        ]
+
+        let rad = layout.angle * .pi / 180
+        let cosA = cos(rad), sinA = sin(rad)
+        let s = layout.scale
+
+        return raw.map { p in
+            // 1) 绕锚点缩放
+            let sx = p.x * s
+            let sy = p.y * s
+            // 2) 绕锚点顺时针旋转（y 向下的坐标系里顺时针就是标准旋转矩阵）
+            let rx = sx * cosA - sy * sinA
+            let ry = sx * sinA + sy * cosA
+            // 3) 回到容器坐标 + offset
+            return CGPoint(x: pivot.x + rx + layout.offset.width,
+                           y: pivot.y + ry + layout.offset.height)
+        }
+    }
+
+    /// 点是否落在凸多边形内（含边）。
+    ///
+    /// 用叉积同号法而不是射线法：卡片四边形一定是凸的，叉积法没有"射线正好穿过顶点"那类退化情况。
+    public static func polygonContains(_ polygon: [CGPoint], _ point: CGPoint) -> Bool {
+        guard polygon.count >= 3 else { return false }
+        var positive = false
+        var negative = false
+        for i in polygon.indices {
+            let a = polygon[i]
+            let b = polygon[(i + 1) % polygon.count]
+            let cross = (b.x - a.x) * (point.y - a.y) - (b.y - a.y) * (point.x - a.x)
+            if cross > 1e-9 { positive = true }
+            if cross < -1e-9 { negative = true }
+            if positive && negative { return false }
+        }
+        return true
+    }
+
+    /// 命中测试：鼠标点落在哪张卡片上。
+    ///
+    /// 从 **zIndex 最高**的卡片往下找第一个命中的 —— 与视觉遮挡关系严格一致（上面那张吃事件）。
+    /// 都没命中返回 nil（此时只算"悬停了节点"，不高亮任何卡片）。
+    public static func hitTest(point: CGPoint,
+                               layouts: [CardLayout],
+                               cardSize: CGSize,
+                               containerSize: CGSize) -> Int? {
+        let ordered = layouts.sorted { $0.zIndex > $1.zIndex }
+        for layout in ordered {
+            let poly = cardPolygon(layout: layout, cardSize: cardSize, containerSize: containerSize)
+            if polygonContains(poly, point) { return layout.index }
+        }
+        return nil
     }
 
     // MARK: - 内容 → 卡片
@@ -128,15 +310,28 @@ public enum CanvasFanGeometry {
         case empty
     }
 
-    public static func cardSources(attachmentImageIndices: [Int],
-                                   text: String) -> [CardSource] {
+    /// 全量卡片来源（**不截断**）。轮播模式与 `+N` 角标都要知道真实总数。
+    public static func allCardSources(attachmentImageIndices: [Int],
+                                      text: String) -> [CardSource] {
         if !attachmentImageIndices.isEmpty {
-            return attachmentImageIndices.prefix(maxCards).map { .attachmentIndex($0) }
+            return attachmentImageIndices.map { .attachmentIndex($0) }
         }
-        let segments = textSegments(text)
+        let segments = textSegments(text, limit: Int.max)
         if !segments.isEmpty {
             return segments.map { .textSegment($0) }
         }
         return [.empty]
+    }
+
+    /// 扇形模式实际渲染的卡片来源（截到 `maxCards`）。
+    public static func cardSources(attachmentImageIndices: [Int],
+                                   text: String) -> [CardSource] {
+        Array(allCardSources(attachmentImageIndices: attachmentImageIndices, text: text)
+                .prefix(maxCards))
+    }
+
+    /// 扇形模式最外侧那张卡上的 `+N` 数字（N = 总数 − maxCards）。0 表示不显示角标。
+    public static func overflowCount(total: Int) -> Int {
+        max(0, total - maxCards)
     }
 }

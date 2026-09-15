@@ -68,6 +68,11 @@ struct CanvasWorkspaceView: View {
     @State private var cursorScreen: CGPoint = .zero
     /// 槽位库拖拽的实时拖影。
     @State private var ghost: (title: String, point: CGPoint)? = nil
+    /// 「正在把节点往槽位库里拖」的状态（v2.11.8 二轮归槽）。
+    ///
+    /// 只在光标真的进入侧栏范围后才置起来：拖节点横穿侧栏上方是很常见的动作（把节点从右边挪到
+    /// 左边），一进入就把整条侧栏换成分栏块会让列表在拖拽途中不停闪。
+    @State private var archiveDrag: CanvasNodeArchiveDrag? = nil
     /// 最近一次已知的视图尺寸。
     ///
     /// `GeometryReader` 的 `proxy.size` 只在 `body` 里拿得到，而 Cmd+1 走的是 AppKit 事件监听
@@ -251,7 +256,7 @@ struct CanvasWorkspaceView: View {
                 CanvasNodeCardView(node: node,
                                    isSelected: canvas.selectedNodeIds.contains(node.id),
                                    text: liveText(for: node),
-                                   slotLabel: liveLabel(for: node),
+                                   pathLabel: pathLabel(for: node),
                                    attachments: liveAttachments(for: node),
                                    renderScale: zoom,
                                    isEditing: isEditing,
@@ -260,6 +265,7 @@ struct CanvasWorkspaceView: View {
                                    onCancelEdit: { editingNodeId = nil },
                                    onOpenInputFiles: { openInputFiles(node) },
                                    onPromoteInput: { promoteInput(node, index: $0) },
+                                   onToggleAnimationStyle: { canvas.toggleAnimationStyle(id: node.id) },
                                    onToast: { store.transientUI.showToast($0) })
                     // 屏幕坐标 = 画布坐标 * zoom + pan。**必须与 `CanvasGeometry.screenPoint` 同式**，
                     // 否则命中判定（框选、拖拽落点、弹层锚点）会与眼睛看到的位置整体错开。
@@ -342,9 +348,22 @@ struct CanvasWorkspaceView: View {
                 }
                 dragDelta = CGSize(width: value.translation.width / zoom,
                                    height: value.translation.height / zoom)
+                updateArchiveDrag(node: node, at: value.location)
             }
             .onEnded { value in
                 guard draggingNodeId == node.id else { return }
+                // 归槽优先：光标松在侧栏的某个槽位块上时，这次拖拽的语义是"把内容归进那个槽位"，
+                // 而**不是**移动节点位置。两件事都做的话，节点会先归槽再被挪到侧栏底下（被侧栏
+                // 盖住 = 用户眼里凭空消失）。
+                if let slot = archiveTargetSlot(at: value.location) {
+                    archiveDrag = nil
+                    draggingNodeId = nil
+                    draggingIds = []
+                    dragDelta = .zero
+                    archiveNode(node, toSlot: slot)
+                    return
+                }
+                archiveDrag = nil
                 let delta = CGSize(width: value.translation.width / zoom,
                                    height: value.translation.height / zoom)
                 canvas.moveNodes(ids: draggingIds, by: delta)
@@ -352,6 +371,130 @@ struct CanvasWorkspaceView: View {
                 draggingIds = []
                 dragDelta = .zero
             }
+    }
+
+    // MARK: - 归槽（v2.11.8 二轮：把画布节点拖进槽位库）
+
+    /// 侧栏在归槽模式下的尺寸。
+    ///
+    /// 宽度**固定取展开态**（240）而不是 `sidebarWidth`：归槽时侧栏会被强制展开（见
+    /// `updateArchiveDrag`），而 `canvas.isLibraryExpanded` 的变化要等下一轮 body 才反映到
+    /// `sidebarWidth` 上 —— 用它算命中会让拖入的第一帧按 44pt 判定，表现为"刚碰到侧栏那下没反应"。
+    private var archivePanelSize: CGSize {
+        CGSize(width: CanvasSlotLibraryPanel.width(expanded: true),
+               height: max(0, viewSize.height))
+    }
+
+    /// 拖拽过程中维护归槽状态：进入侧栏 → 展开侧栏并显示分栏块；离开 → 收掉。
+    private func updateArchiveDrag(node: CanvasNode, at point: CGPoint) {
+        guard CanvasArchiveDropGeometry.isInsidePanel(point: point, panelSize: archivePanelSize) else {
+            if archiveDrag != nil { archiveDrag = nil }
+            return
+        }
+        // 侧栏收起时只有 44pt 宽，10 个分栏块挤在里面既看不清也点不准，直接展开。
+        if !canvas.isLibraryExpanded {
+            withAnimation(Anim.reveal) { canvas.isLibraryExpanded = true }
+        }
+        let groupId = store.currentSpecialSlotId
+        let groupName = store.specialSlots.first { $0.id == groupId }?.name ?? "当前组"
+        archiveDrag = CanvasNodeArchiveDrag(title: canvas.nodeTitle(node),
+                                           point: point,
+                                           slotCount: max(1, store.config.slots),
+                                           groupName: groupName)
+    }
+
+    /// 松手点对应的槽位号（nil = 不在侧栏 / 不在任何块上）。
+    ///
+    /// 与侧栏渲染分栏块用的是**同一个** `CanvasArchiveDropGeometry`，不各写一份 —— 两份公式的
+    /// 差异会让"看起来在第 3 块上、却归到第 4 个槽位"，且只在某些窗口高度下出现（见那个类型的注释）。
+    private func archiveTargetSlot(at point: CGPoint) -> Int? {
+        guard archiveDrag != nil else { return nil }
+        return CanvasArchiveDropGeometry.blockIndex(at: point,
+                                                    panelSize: archivePanelSize,
+                                                    count: max(1, store.config.slots))
+    }
+
+    /// 归槽落地：把节点绑定的内容搬进当前组的第 `slot` 个槽位，节点跟着改绑。
+    ///
+    /// 顺序是**先搬内容、再改摆位**，且任一步失败就整体放弃：
+    ///   - 内容搬成功、摆位没改 → 画布上的节点指着一个已经空了的槽位，卡片变空白，用户以为内容丢了；
+    ///   - 摆位改成功、内容没搬 → 节点指向一个空槽，原槽位里还留着内容，等于凭空多出一份孤儿数据。
+    ///
+    /// 目标槽位非空时**不覆盖**（`canvasMoveSlotContent` 自己会拒绝），如实提示 —— 覆盖会静默毁掉
+    /// 用户资产，而此刻用户的注意力全在自己拖的那个节点上，根本不会发现另一份内容不见了。
+    private func archiveNode(_ node: CanvasNode, toSlot slot: Int) {
+        let targetGroup = store.currentSpecialSlotId
+        let targetPage = store.currentPageId
+
+        guard node.groupId != targetGroup || node.slot != slot else {
+            store.transientUI.showToast("已经在槽位 \(slot) 里了")
+            return
+        }
+        guard store.canvasSlotIsFree(groupId: targetGroup, slot: slot) else {
+            store.transientUI.showToast("槽位 \(slot) 已有内容，先清空或换一个")
+            return
+        }
+        // 目标槽位已经被另一个节点占着（内容为空但画布上有节点）→ 会撞 id，拒绝。
+        guard canvas.node(forGroupId: targetGroup, slot: slot) == nil else {
+            store.transientUI.showToast("槽位 \(slot) 已经在画布上了")
+            return
+        }
+
+        guard store.canvasMoveSlotContent(fromGroupId: node.groupId, fromSlot: node.slot,
+                                          toGroupId: targetGroup, toSlot: slot) else {
+            store.transientUI.showToast("存储繁忙，未能归入槽位 \(slot)")
+            return
+        }
+        guard canvas.rebindNode(id: node.id, toPageId: targetPage, groupId: targetGroup, slot: slot) else {
+            // 内容已经搬过去了，摆位没改成 —— 把内容搬回来，恢复到操作前的状态。
+            store.canvasMoveSlotContent(fromGroupId: targetGroup, fromSlot: slot,
+                                        toGroupId: node.groupId, toSlot: node.slot)
+            store.transientUI.showToast("未能归槽，已还原")
+            return
+        }
+        canvas.noteSlotDataChanged()
+        store.transientUI.showToast("已归入槽位 \(slot)")
+    }
+
+    /// 槽位库内的拖拽排序：交换同组两个槽位的内容，并让画布上的节点跟着换位。
+    ///
+    /// 节点也必须跟着换，否则"槽位 2 的节点"在交换后显示的是槽位 3 的内容 —— 而节点的身份就是
+    /// `groupId#slot`，它指向哪个槽位就必须显示哪个槽位。换法是**两步改绑经过一个空号**：
+    /// 直接互改会在中间态撞 id（两个节点同时叫 `g#2`），SwiftUI `ForEach` 遇到重复 id 的表现是
+    /// "点 A 动 B"，且这种损坏会留在撤销栈里。
+    private func handleSlotReorder(groupId: String, from: Int, to: Int) {
+        guard from != to else { return }
+        guard store.canvasSwapSlotContent(groupId: groupId, from, to) else {
+            store.transientUI.showToast("存储繁忙，未能调整顺序")
+            return
+        }
+        let nodeA = canvas.node(forGroupId: groupId, slot: from)
+        let nodeB = canvas.node(forGroupId: groupId, slot: to)
+        if let nodeA, let nodeB {
+            // 借一个未被占用的槽号做中转，避开中间态撞 id。
+            let occupied = canvas.occupiedSlots(inGroup: groupId)
+            let parking = (1...max(store.config.slots, max(from, to) + 1)).first {
+                !occupied.contains($0)
+            }
+            if let parking {
+                canvas.rebindNode(id: nodeA.id, toPageId: nodeA.pageId, groupId: groupId, slot: parking)
+                canvas.rebindNode(id: nodeB.id, toPageId: nodeB.pageId, groupId: groupId, slot: from)
+                let movedId = CanvasNode.makeId(groupId: groupId, slot: parking)
+                canvas.rebindNode(id: movedId, toPageId: nodeA.pageId, groupId: groupId, slot: to)
+            } else {
+                // 全部槽位都被节点占满，没有中转位。内容已经换好了，但节点换不了 ——
+                // 与其留下一半正确的状态，不如把内容也换回去。
+                store.canvasSwapSlotContent(groupId: groupId, from, to)
+                store.transientUI.showToast("画布槽位已满，无法调整顺序")
+                return
+            }
+        } else if let nodeA {
+            canvas.rebindNode(id: nodeA.id, toPageId: nodeA.pageId, groupId: groupId, slot: to)
+        } else if let nodeB {
+            canvas.rebindNode(id: nodeB.id, toPageId: nodeB.pageId, groupId: groupId, slot: from)
+        }
+        canvas.noteSlotDataChanged()
+        store.transientUI.showToast("已调整槽位顺序")
     }
 
     /// 画布空白处的左键拖拽。
@@ -639,7 +782,17 @@ struct CanvasWorkspaceView: View {
         }
     }
 
-    /// 新建一个节点（= 占用一个空槽位）。
+    /// 新建一个节点。
+    ///
+    /// ## ★ v2.11.8 二轮：新节点落到「未入库」，不再抢用户槽位
+    ///
+    /// 此前这里去 `activeHotkeySpecialSlotId`（当前组）里找空槽 —— 于是用户在画布上随手建三个
+    /// 节点，编辑页的槽位 3/4/5 就被占了，圆盘和 Cmd+3~5 也跟着变，而那三个节点还只是草稿。
+    /// 用户明确要求：**画布上没有对应槽位的独立节点归入「未入库」**。
+    ///
+    /// 于是新建一律落到未入库保留组（见 `SlotStoreObservable.canvasUnfiledGroupId`），
+    /// 之后由用户把它拖进槽位库的某个槽位块完成"归槽"。真实槽位从此只由用户显式指定
+    /// （槽位库拖拽 / Cmd+1~0），不会再被隐式占用。
     ///
     /// 返回 nil 表示没建成，调用方**不要**再往下写内容 —— 否则会写到一个不存在的槽位上。
     @discardableResult
@@ -648,14 +801,17 @@ struct CanvasWorkspaceView: View {
                             parentNodeId: String?,
                             beginEditing: Bool,
                             quiet: Bool = false) -> CanvasNode? {
-        let groupId = store.activeHotkeySpecialSlotId
-        guard let slot = availableEmptySlot(in: groupId) else {
-            // 说清出路而不是只说失败：这条提示是用户唯一能看到的解释。
-            store.transientUI.showToast("当前槽位组没有空槽位了，清一个或换个组再试")
+        let groupId = store.canvasUnfiledGroupId
+        guard store.ensureCanvasUnfiledGroup() else {
+            store.transientUI.showToast("存储繁忙，未能新建节点")
             return nil
         }
-        let label = store.canvasSlotLabel(groupId: groupId, slot: slot)
-        let name = (label?.isEmpty == false) ? label! : "槽位 \(slot)"
+        guard let slot = store.allocateUnfiledSlot(occupied: canvas.occupiedSlots(inGroup: groupId)) else {
+            // 说清出路而不是只说失败：这条提示是用户唯一能看到的解释。
+            store.transientUI.showToast("未入库已满，先把一些节点拖进槽位库归档")
+            return nil
+        }
+        let name = kind == .text ? "文本" : kind.displayName
         let result = canvas.placeSlot(pageId: store.currentPageId,
                                      groupId: groupId,
                                      slot: slot,
@@ -665,25 +821,8 @@ struct CanvasWorkspaceView: View {
                                      parentNodeId: parentNodeId,
                                      avoidOverlap: true)
         if beginEditing { editingNodeId = result.node.id }
-        if !quiet { store.transientUI.showToast("已新建\(kind.displayName)节点 · \(name)") }
+        if !quiet { store.transientUI.showToast("已新建\(kind.displayName)节点 · 未入库") }
         return result.node
-    }
-
-    /// 找一个能用来承载新节点的槽位号。
-    ///
-    /// 「能用」= 既没被画布占用，**也没有任何内容**。绝不复用有内容的槽位：那等于用户点一下
-    /// 「新建节点」就悄悄改写了别处的数据，这个代价换不来任何便利。
-    private func availableEmptySlot(in groupId: String) -> Int? {
-        let total = store.config.slots
-        guard total >= 1 else { return nil }
-        var occupied = canvas.occupiedSlots(inGroup: groupId)
-        for slot in 1...total where !occupied.contains(slot) {
-            // 判空走 `canvasSlotIsFree`：它同时看内存与磁盘两路，任一非空就算被占。
-            // 只读一路会把"内存有内容、盘上还没落"的槽位判成空槽，节点建上去后一次编辑就把
-            // 用户正文覆盖了 —— 实测踩过，见该方法的注释。附件也一并算内容（hotfix19 同源）。
-            if !store.canvasSlotIsFree(groupId: groupId, slot: slot) { occupied.insert(slot) }
-        }
-        return CanvasSpawnGeometry.firstFreeSlot(total: total, occupied: occupied)
     }
 
     // MARK: - Cmd+V 粘贴（v2.11.8）
@@ -846,7 +985,11 @@ struct CanvasWorkspaceView: View {
             CanvasSlotLibraryPanel(store: store,
                                    canvas: canvas,
                                    onDragChanged: handleSlotDragChanged,
-                                   onDropSlot: handleSlotDrop)
+                                   onDropSlot: handleSlotDrop,
+                                   archiveDrag: archiveDrag,
+                                   onReorder: { groupId, from, to in
+                                       handleSlotReorder(groupId: groupId, from: from, to: to)
+                                   })
 
             // 右上：Agent 入口 + 生成按钮
             VStack {
@@ -1011,6 +1154,25 @@ struct CanvasWorkspaceView: View {
     /// 槽位 Label 的实时值。槽位被改名 / 删名时跟着变。
     private func liveLabel(for node: CanvasNode) -> String? {
         store.canvasSlotLabel(groupId: node.groupId, slot: node.slot)
+    }
+
+    /// 节点卡片顶部居中的路径标识：`页面 - 槽位组 - 槽位`（v2.11.8 二轮）。
+    ///
+    /// 在这里拼而不是在卡片里拼：页面名与组名要查主 store，而卡片刻意不认识 store
+    /// （见 `CanvasNodeCardView` 的类型注释）。拼装规则本身在 `CanvasCardText.pathLabel`，
+    /// 带 smoke 断言。
+    ///
+    /// 未入库的节点走 `未入库 - N`：它不属于任何用户页面，硬给它编一个页面名只会误导
+    /// —— 用户会去那一页找这个节点，然后找不到。
+    private func pathLabel(for node: CanvasNode) -> String {
+        let isUnfiled = node.groupId == store.canvasUnfiledGroupId
+        if isUnfiled {
+            return CanvasCardText.pathLabel(pageName: nil, groupName: nil,
+                                            slot: node.slot, isUnfiled: true)
+        }
+        let pageName = store.pages.first { $0.id == node.pageId }?.name
+        let groupName = store.specialSlots.first { $0.id == node.groupId }?.name
+        return CanvasCardText.pathLabel(pageName: pageName, groupName: groupName, slot: node.slot)
     }
 
     /// 槽位的**实时**附件列表 = 画布语境下的入参文件。

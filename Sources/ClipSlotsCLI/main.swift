@@ -206,6 +206,20 @@ func parseArgs(_ raw: [String]) -> ParsedArgs {
 // MARK: - Domain helpers
 
 let storage = SpecialSlotStorage.shared
+
+/// v2.11.8 二轮：CLI 看到的索引里**不含**保留组「未入库」。
+///
+/// 未入库是画布侧的收件箱（承载没有归档到真实槽位的节点），在"槽位"语义下它不是用户资产：
+/// `list-groups` 列出它、`delete-group` 能删它、`search` 命中它里面的内容，都会让 CLI 的输出
+/// 与 GUI 的槽位视图不一致。所有 CLI 命令统一经由这个入口读索引，从源头剥掉。
+///
+/// 注意 `SpecialSlotStorage` 自己的读写路径**不**过滤（STG-2 需要它在 index 里才允许写入），
+/// 过滤只发生在 CLI 这一层。
+func cliLoadIndex() -> SpecialSlotIndex {
+    var index = storage.loadIndex()
+    index.specialSlots.removeAll { SpecialSlotStorage.isReservedGroupId($0.id) }
+    return index
+}
 let appConfig = AppConfig.load()
 let slotCount = max(1, min(10, appConfig.slots))
 
@@ -277,7 +291,7 @@ func uniqueTypes(_ c: SlotContent) -> [String] {
 /// page constraint (`inPage == nil`) behaviour is unchanged (global, backward
 /// compatible) — used by commands that have no page flags (search/clear/…).
 func resolveGroup(_ args: ParsedArgs, inPage pageId: String? = nil) -> String {
-    let index = storage.loadIndex()
+    let index = cliLoadIndex()
     let hasGroupFlag = args.flag("group") != nil || args.flag("group-name") != nil
 
     // F2 (契约3): single-slot ops (read/write/paste/clear/write-attachment) must name a
@@ -362,7 +376,7 @@ func resolvePageFlag(_ args: ParsedArgs, strict: Bool = false) -> String? {
     if hasPage && hasName {
         fail("specify only one of --page or --page-name", code: "INVALID_ARGUMENT_COMBINATION")
     }
-    let index = storage.loadIndex()
+    let index = cliLoadIndex()
     if let name = args.flag("page-name") {
         if let p = index.pages.first(where: { $0.name == name }) { return p.id }
         fail("no page named '\(name)'", code: "PAGE_NOT_FOUND")
@@ -654,7 +668,7 @@ func cmdCommandHelp(_ name: String) -> Never {
 }
 
 func cmdGroups(_ args: ParsedArgs) -> Never {
-    let index = storage.loadIndex()
+    let index = cliLoadIndex()
     let pageNames = Dictionary(uniqueKeysWithValues: index.pages.map { ($0.id, $0.name) })
     // v2.9.32 (A4): optional page filter. `groups --page/--page-name X` returns only
     // the groups that live on page X. This is the first-class primitive an agent uses
@@ -692,7 +706,7 @@ func cmdGroups(_ args: ParsedArgs) -> Never {
 }
 
 func cmdPages(_ args: ParsedArgs) -> Never {
-    let index = storage.loadIndex()
+    let index = cliLoadIndex()
     var pages: [[String: Any]] = []
     // P2-11 (v2.10.6): order 相同时补 .id 次级键，保证页面输出顺序稳定（与 groups / Kit 口径一致）。
     for p in index.pages.sorted(by: { $0.order != $1.order ? $0.order < $1.order : $0.id < $1.id }) {
@@ -740,7 +754,7 @@ func slotSummaries(in group: String) -> [[String: Any]] {
 }
 
 func cmdList(_ args: ParsedArgs) -> Never {
-    let index = storage.loadIndex()
+    let index = cliLoadIndex()
     let requestedPage = resolvePageFlag(args)
     let hasGroupFlag = args.flag("group") != nil || args.flag("group-name") != nil
 
@@ -866,7 +880,7 @@ enum GroupResolveFailure: Error {
 }
 
 func resolveGroupLiteralStrict(_ raw: String, inPage pageId: String?) throws -> String {
-    let index = storage.loadIndex()
+    let index = cliLoadIndex()
     let scope = pageId.map { pid in index.specialSlots.filter { $0.pageId == pid } }
                       ?? index.specialSlots
     // id match first (backward compatible with bare `default` etc.)
@@ -1335,7 +1349,7 @@ func cmdSearch(_ args: ParsedArgs) -> Never {
     } else {
         limit = 50
     }
-    let index = storage.loadIndex()
+    let index = cliLoadIndex()
     let pageNames = Dictionary(uniqueKeysWithValues: index.pages.map { ($0.id, $0.name) })
 
     // v2.9.58 (P1): search now supports --page/--page-name and uses the same
@@ -1560,7 +1574,7 @@ func cmdRenameGroup(_ args: ParsedArgs) -> Never {
     guard let newName = args.flag("name"), !newName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
         fail("missing new name (usage: rename-group <group-id> --name <新名称>)", code: "INVALID_ARGUMENT_COMBINATION")
     }
-    let index = storage.loadIndex()
+    let index = cliLoadIndex()
     guard let group = index.specialSlots.first(where: { $0.id == id }) else {
         fail("group \(id) not found", code: "GROUP_NOT_FOUND")
     }
@@ -1579,7 +1593,7 @@ func cmdRenameGroup(_ args: ParsedArgs) -> Never {
         // P2 (v2.10.13): 回显存储层写回后的真实组名（read-back），不在 CLI 侧二次 prefix(30)
         // 截断。renameSpecialSlot 成功后组必然存在，read-back 一定命中；兜底也用未截断的
         // trimmed（而非 prefix(30)），确保返回值不再出现 CLI 侧的二次截断口径。
-        let finalName = storage.loadIndex().specialSlots.first(where: { $0.id == id })?.name ?? trimmed
+        let finalName = cliLoadIndex().specialSlots.first(where: { $0.id == id })?.name ?? trimmed
         success(["group": ["id": id, "name": finalName]])
     } catch SpecialSlotError.duplicateName {
         fail("a group named '\(String(trimmed.prefix(30)))' already exists on this page", code: "DUPLICATE_NAME")
@@ -1988,7 +2002,7 @@ func cmdSetThumbnailBatch(_ args: ParsedArgs) -> Never {
                 emitPreflightFailure(offending: [idx], code: "INVALID_ARGUMENT_COMBINATION",
                                      message: "item \(idx): invalid 'page_name' (must be a string)")
             }
-            guard let p = storage.loadIndex().pages.first(where: { $0.name == name }) else {
+            guard let p = cliLoadIndex().pages.first(where: { $0.name == name }) else {
                 emitPreflightFailure(offending: [idx], code: "PAGE_NOT_FOUND", message: "item \(idx): no page named '\(name)'")
             }
             itemPage = p.id
@@ -1997,7 +2011,7 @@ func cmdSetThumbnailBatch(_ args: ParsedArgs) -> Never {
                 emitPreflightFailure(offending: [idx], code: "INVALID_ARGUMENT_COMBINATION",
                                      message: "item \(idx): invalid 'page' (must be a string)")
             }
-            guard let p = storage.loadIndex().pages.first(where: { $0.id == value || $0.name == value }) else {
+            guard let p = cliLoadIndex().pages.first(where: { $0.id == value || $0.name == value }) else {
                 emitPreflightFailure(offending: [idx], code: "PAGE_NOT_FOUND",
                                      message: "item \(idx): no page with id or name '\(value)'")
             }
@@ -2201,7 +2215,7 @@ func cmdDeleteGroup(_ args: ParsedArgs) -> Never {
         fail("the default group '\(DEFAULT_GROUP)' is protected and cannot be deleted", code: "DEFAULT_GROUP_PROTECTED")
     }
     // Validate existence first for a clear, agent-friendly error.
-    let index = storage.loadIndex()
+    let index = cliLoadIndex()
     guard index.specialSlots.contains(where: { $0.id == id }) else {
         fail("group \(id) not found", code: "GROUP_NOT_FOUND")
     }
@@ -2230,7 +2244,7 @@ func cmdDeletePage(_ args: ParsedArgs) -> Never {
     if id == DEFAULT_PAGE {
         fail("the default page '\(DEFAULT_PAGE)' is protected and cannot be deleted", code: "DEFAULT_PAGE_PROTECTED")
     }
-    let index = storage.loadIndex()
+    let index = cliLoadIndex()
     guard index.pages.contains(where: { $0.id == id }) else {
         fail("page \(id) not found", code: "PAGE_NOT_FOUND")
     }

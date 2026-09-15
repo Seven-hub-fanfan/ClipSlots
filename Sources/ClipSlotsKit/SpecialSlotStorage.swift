@@ -15,6 +15,40 @@ public enum SpecialSlotStorageError: Error {
 public final class SpecialSlotStorage {
     public static let shared = SpecialSlotStorage()
 
+    // MARK: - 保留组：「未入库」（v2.11.8 二轮）
+
+    /// 「未入库」收件箱组的**保留 id**。
+    ///
+    /// ## 为什么未入库节点还是"槽位"
+    /// 用户要的是「画布上没有对应槽位的独立节点归到未入库」。`CanvasNode.id` 是
+    /// `"\(groupId)#\(slot)"` 派生的 —— 节点在数据层**必须**指向一个槽位，否则它既没有身份也
+    /// 没有内容落点。把 id 改成可空是一次跨 Kit/CLI/存储/画布文档的大改，风险远大于收益。
+    ///
+    /// 所以未入库在数据层依然是一个正常的槽位组，只是：
+    ///   - id 固定为这个保留值（不是 `special_<UUID>`），任何地方都能 O(1) 认出它；
+    ///   - 从**所有面向用户的组列表里被过滤掉**（编辑页的组标签、切组快捷键、槽位库的页面分区、
+    ///     CLI 的 list-groups），所以用户永远不会在"槽位"语义下看见它；
+    ///   - 只在槽位库顶部那个「未入库」分区里以节点列表的形式露出。
+    ///
+    /// ## 为什么不能不进 index
+    /// 试过。`SpecialSlotStorage.set()` 有 STG-2 不变量：**目标组必须在 index 里**，否则拒写
+    /// （防的是"删组后幽灵复活"）。一个不在 index 的目录写不进任何内容，未入库节点就永远是空的。
+    /// 与其为它在存储层开后门，不如让它成为一个真实但被过滤的组 —— 不变量一条都不用破。
+    public static let unfiledGroupId = "__unfiled__"
+    /// 未入库组的展示名。
+    public static let unfiledGroupName = "未入库"
+    /// 未入库组的槽位容量。
+    ///
+    /// 普通组固定 10 个槽位（`Config.slots` 上限也是 10）。未入库是收件箱，用户可能连着建十几个
+    /// 节点再慢慢归档，卡在 10 会让「新建节点」直接失败。存储层本身没有 1...10 的硬校验
+    /// （槽位是一文件一槽），所以这里可以放宽；给 60 是因为再多的话槽位库里那一列会长到没法用。
+    public static let unfiledCapacity = 60
+
+    /// 是不是保留组（当前只有未入库一个）。
+    public static func isReservedGroupId(_ id: String) -> Bool {
+        id == unfiledGroupId
+    }
+
     private let baseDir: URL
     private let indexURL: URL
     private let encoder = JSONEncoder()
@@ -977,10 +1011,60 @@ public final class SpecialSlotStorage {
         }
     }
 
+    /// 保证「未入库」保留组存在，并返回它（v2.11.8 二轮）。
+    ///
+    /// 刻意**不走** `createSpecialSlot`：那条路径带着每页组数上限、同页重名校验、按 `requestedAt`
+    /// 插序等一整套面向用户的规则，而未入库既不占用户的组配额（它对用户不可见），也不该因为
+    /// 「这一页组满了」而创建失败 —— 那会让「新建节点」这个基本操作在某些页面上直接不可用。
+    ///
+    /// 幂等：已存在就直接返回，不动 index。
+    @discardableResult
+    public func ensureUnfiledGroup() throws -> SpecialSlot {
+        try storageLock.withLock {
+            var index = loadIndex()
+            if let existing = index.specialSlots.first(where: {
+                $0.id == SpecialSlotStorage.unfiledGroupId
+            }) {
+                return existing
+            }
+
+            // 挂在第一个页面下。挂哪页其实无所谓（它从所有页面分区里都被过滤掉），但字段不能空 ——
+            // 空 pageId 会让「按页面聚合」的那些 filter 把它归到一个不存在的页，之后想清理都找不到。
+            let hostPageId = index.pages.sorted { $0.order < $1.order }.first?.id
+                ?? index.currentPageId
+            let group = SpecialSlot(
+                id: SpecialSlotStorage.unfiledGroupId,
+                name: SpecialSlotStorage.unfiledGroupName,
+                icon: "tray",
+                colorHex: nil,
+                sourceType: .manual,
+                sourcePath: nil,
+                pageId: hostPageId,
+                // order 给一个极大值：万一将来某处漏了过滤，它也只会排在所有真实组之后，
+                // 而不会插到用户的第一个组前面把组标签栏顶乱。
+                order: 9_000,
+                requestedAt: Date(),
+                createdAt: Date(),
+                updatedAt: Date()
+            )
+
+            let dir = specialSlotDirectory(for: group.id)
+            try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+
+            index.specialSlots.append(group)
+            try saveIndex(index)
+            NSLog("[ClipSlots] ensureUnfiledGroup: created reserved group under page \(hostPageId)")
+            return group
+        }
+    }
+
     public func deleteSpecialSlot(id: String) throws {
         try storageLock.withLock {
             // F6 (契约5): default group is protected at the Kit layer too (双保险).
             if id == "default" { throw SpecialSlotError.defaultGroupProtected }
+            // v2.11.8 二轮：保留组（未入库）同样不允许删除。它不在任何用户可见的组列表里，
+            // 走到这里只可能是 CLI 手敲 id 或将来某处漏了过滤 —— 直接按「默认组受保护」拒掉。
+            if SpecialSlotStorage.isReservedGroupId(id) { throw SpecialSlotError.defaultGroupProtected }
             var index = loadIndex()
 
             guard let targetSlot = index.specialSlots.first(where: { $0.id == id }) else {
@@ -1046,6 +1130,8 @@ public final class SpecialSlotStorage {
 
     public func renameSpecialSlot(id: String, name: String) throws {
         try storageLock.withLock {
+            // v2.11.8 二轮：保留组（未入库）的名字是 UI 契约的一部分，不允许改。
+            if SpecialSlotStorage.isReservedGroupId(id) { throw SpecialSlotError.defaultGroupProtected }
             var index = loadIndex()
 
             guard let idx = index.specialSlots.firstIndex(where: { $0.id == id }) else {

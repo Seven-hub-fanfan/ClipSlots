@@ -1139,23 +1139,33 @@ final class SlotStoreObservable: ObservableObject {
         let newCurrentPage = index.pages.first { $0.id == newPageId }
         if currentPage != newCurrentPage { currentPage = newCurrentPage }
 
-        if specialSlots != index.specialSlots { specialSlots = index.specialSlots }
+        // v2.11.8 二轮：保留组「未入库」在这里就被挡在 UI 之外。
+        //
+        // 这是**唯一**的过滤点，刻意如此：`specialSlots` 是编辑页组标签、切组快捷键、槽位库页面分区、
+        // 组数上限统计等十几处的共同数据源。在每个消费点各写一遍 filter 迟早会漏（漏掉的那处表现是
+        // 用户突然在组标签栏看到一个叫「未入库」的组，还能往里存东西），所以在**发布边界**上一次性
+        // 剥掉。真正需要访问未入库的地方（槽位库的未入库分区、归档写入）走 `unfiledGroup` /
+        // `specialStorage`，不经由这个数组。
+        let visibleGroups = index.specialSlots.filter {
+            !SpecialSlotStorage.isReservedGroupId($0.id)
+        }
+        if specialSlots != visibleGroups { specialSlots = visibleGroups }
 
-        let fallbackId = index.specialSlots.first?.id ?? "default"
+        let fallbackId = visibleGroups.first?.id ?? "default"
 
         let selectedId = index.selectedSpecialSlotId ?? index.currentSpecialSlotId
         let activeId = index.activeHotkeySpecialSlotId ?? index.currentSpecialSlotId
 
         // If the persisted id no longer exists (e.g. after a delete), fall back.
-        let validSelectedId = index.specialSlots.contains(where: { $0.id == selectedId }) ? selectedId : fallbackId
-        let validActiveId = index.specialSlots.contains(where: { $0.id == activeId }) ? activeId : fallbackId
+        let validSelectedId = visibleGroups.contains(where: { $0.id == selectedId }) ? selectedId : fallbackId
+        let validActiveId = visibleGroups.contains(where: { $0.id == activeId }) ? activeId : fallbackId
 
         if currentSpecialSlotId != validSelectedId { currentSpecialSlotId = validSelectedId }
-        let newCurrentGroup = index.specialSlots.first { $0.id == validSelectedId }
+        let newCurrentGroup = visibleGroups.first { $0.id == validSelectedId }
         if currentSpecialSlot != newCurrentGroup { currentSpecialSlot = newCurrentGroup }
 
         if activeHotkeySpecialSlotId != validActiveId { activeHotkeySpecialSlotId = validActiveId }
-        let newActiveGroup = index.specialSlots.first { $0.id == validActiveId }
+        let newActiveGroup = visibleGroups.first { $0.id == validActiveId }
         if activeHotkeySpecialSlot != newActiveGroup { activeHotkeySpecialSlot = newActiveGroup }
 
         specialSlotSettings = index.settings
@@ -2684,7 +2694,7 @@ final class SlotStoreObservable: ObservableObject {
     /// 否则 v2.10.52 起的增量 diff 会判等而跳过重绘（v2.10.64/65 同源坑）。
     @discardableResult
     func writeCanvasSlotText(groupId: String, slot: Int, text: String) -> Bool {
-        guard slot >= 1, slot <= config.slots else { return false }
+        guard slot >= 1, slot <= canvasSlotCapacity(groupId: groupId) else { return false }
 
         let existing: SlotContent?
         if groupId == currentSpecialSlotId {
@@ -2732,7 +2742,7 @@ final class SlotStoreObservable: ObservableObject {
     func writeCanvasSlotAttachments(groupId: String,
                                     slot: Int,
                                     attachments: [SlotContent.SlotAttachment]) -> Bool {
-        guard slot >= 1, slot <= config.slots else { return false }
+        guard slot >= 1, slot <= canvasSlotCapacity(groupId: groupId) else { return false }
 
         if groupId == currentSpecialSlotId {
             setAttachments(attachments, for: slot)
@@ -2750,6 +2760,210 @@ final class SlotStoreObservable: ObservableObject {
         let ok = specialStorage.set(slot, content: content, in: groupId)
         if ok { refreshTrigger = UUID() }
         return ok
+    }
+
+    // MARK: - 未入库保留组 / 归槽 / 排序（v2.11.8 二轮）
+
+    /// 「未入库」保留组的 id。
+    ///
+    /// ## 为什么需要这么一个组
+    ///
+    /// 画布节点的身份是 `groupId#slot`（见 `CanvasNode`），也就是说**任何节点都必须站在一个槽位上**。
+    /// 于是 ADD NODE / Cmd+V 这类"凭空建一个节点"的操作，此前只能去当前组里抢一个空槽 —— 用户在
+    /// 画布上随手画三个想法，编辑页的槽位 3/4/5 就被占了，而那三个想法压根还没成型。用户的原话是
+    /// 要一个「未入库层级，存放不在槽位的节点」。
+    ///
+    /// 做法是给这些节点一个**保留组**当停车场：它是真实的槽位组（因此节点照常有 id、内容照常有
+    /// 落盘保障、撤销/导入导出全都免费继承），但被存储层标记为保留、被 UI 与 CLI 的发布边界过滤，
+    /// 因此不会出现在编辑页的组列表里，也不会被 `clipslots list` 列出来。
+    ///
+    /// 备选方案是给 `CanvasNode.id` 换成独立 UUID、让 groupId/slot 变成可空引用。那样更"干净"，
+    /// 但要动的是身份规则本身：selection、parentNodeId、撤销栈、`placeSlot` 的去重、持久化格式
+    /// 全部跟着变，而收益只是省掉一个保留组。不值。
+    var canvasUnfiledGroupId: String { SpecialSlotStorage.unfiledGroupId }
+
+    /// 某个组的槽位上限。
+    ///
+    /// 普通组是用户配置的 `config.slots`（默认 10，也是圆盘/快捷键的物理上限）；未入库组用
+    /// `unfiledCapacity`（60）—— 它不需要快捷键、不上圆盘，唯一的约束是"别无限膨胀"。
+    func canvasSlotCapacity(groupId: String) -> Int {
+        groupId == SpecialSlotStorage.unfiledGroupId
+            ? SpecialSlotStorage.unfiledCapacity
+            : config.slots
+    }
+
+    /// 确保「未入库」组存在。幂等，可以在每次要用它之前无脑调用。
+    @discardableResult
+    func ensureCanvasUnfiledGroup() -> Bool {
+        do {
+            _ = try specialStorage.ensureUnfiledGroup()
+            return true
+        } catch {
+            NSLog("[ClipSlots] ensureUnfiledGroup failed: \(error)")
+            return false
+        }
+    }
+
+    /// 在「未入库」组里挑一个空槽给新节点。
+    ///
+    /// - Parameter occupied: 画布上已被节点占用的槽位号。判空同样走 `canvasSlotIsFree`（两路都读，
+    ///   见那个方法的注释）—— 未入库组同样存的是用户真实内容，误判覆盖的后果一样不可挽回。
+    func allocateUnfiledSlot(occupied: Set<Int>) -> Int? {
+        guard ensureCanvasUnfiledGroup() else { return nil }
+        let cap = SpecialSlotStorage.unfiledCapacity
+        for slot in 1...cap {
+            if occupied.contains(slot) { continue }
+            if canvasSlotIsFree(groupId: SpecialSlotStorage.unfiledGroupId, slot: slot) { return slot }
+        }
+        return nil
+    }
+
+    /// 读一个任意组槽位的**完整** `SlotContent`（口径与 `canvasSlotText` 一致：当前组优先内存）。
+    ///
+    /// 返回 nil = 存储层报 UNKNOWN（读不出来），调用方必须中止而不是当成空内容 —— 把 UNKNOWN
+    /// 当空内容处理，等于用一份空白覆盖掉一份读不出来的真实数据。
+    private func canvasReadFullContent(groupId: String, slot: Int) -> SlotContent? {
+        if groupId == currentSpecialSlotId {
+            return contentForSlotOrUnknown(slot)
+        }
+        return specialStorage.getOrUnknown(slot, in: groupId)
+    }
+
+    /// 写一个任意组槽位的完整 `SlotContent`（含刷新身份字段）。
+    private func canvasWriteFullContent(groupId: String, slot: Int, content: SlotContent) -> Bool {
+        var c = content
+        c.contentId = UUID().uuidString
+        c.updatedAt = Date().timeIntervalSince1970
+        if groupId == currentSpecialSlotId {
+            slots[slot] = c
+            persistCurrentSpecialSlotData()
+            refreshTrigger = UUID()
+            return true
+        }
+        let ok = specialStorage.set(slot, content: c, in: groupId)
+        if ok { refreshTrigger = UUID() }
+        return ok
+    }
+
+    /// 清空一个任意组槽位（内容 + Label + 缩略图缓存）。
+    private func canvasClearSlot(groupId: String, slot: Int) {
+        _ = specialStorage.clear(slot, in: groupId)
+        _ = specialStorage.setLabel(slot, label: nil, in: groupId)
+        ThumbnailProvider.shared.invalidateSlot(specialSlotId: groupId, slot: slot)
+        if groupId == currentSpecialSlotId {
+            var newSlots = slots
+            newSlots[slot] = SlotContent()
+            slots = newSlots
+            var newLabels = labels
+            newLabels.removeValue(forKey: slot)
+            labels = newLabels
+        }
+        refreshTrigger = UUID()
+    }
+
+    /// 把一个槽位的**全部内容整体搬到**另一个槽位（跨组亦可）。
+    ///
+    /// 这是「从画布拖节点到槽位库某个槽位块」的数据侧动作：节点的摆位由 `CanvasStore.rebindNode`
+    /// 改，内容由这里搬。两者必须同时成功，所以调用方的顺序是「先搬内容、成功了再改摆位」。
+    ///
+    /// ## 三个不显然的地方
+    ///
+    /// 1. **先写目标、后清源**，顺序不能反。附件的字节以外置文件形式住在**源槽位目录**里
+    ///    （`{slotDir}/attachments/{id}.bin`），`SlotStorage.set` 遇到"带 storagePath 且文件存在"
+    ///    的附件会 clonefile 克隆一份进目标槽位。先清源就等于先把字节删了，写目标时只剩一堆断链附件。
+    /// 2. **手动缩略图必须显式带字节**。`stageManualThumbnail` 只会在**目标槽位自己的**目录里找
+    ///    既有 `.bin`，跨槽位搬迁时那里当然没有，于是它会判定 id 悬空、静默降级成"无缩略图"。
+    ///    所以这里主动把源槽位的缩略图字节读出来塞进 `pendingManualThumbnailData`。
+    ///    （这正是 v2.11.0 手动缩略图那批坑的同一族问题：id 在 content.json，字节在别处。）
+    /// 3. **Label 一起搬**。它是用户给这份内容起的名字，留在原地会变成一个指着空槽的孤儿标签。
+    ///
+    /// - Returns: 成功与否。目标非空、任一端读写失败都返回 false，且**不会**清空源槽位
+    ///   —— 失败时宁可"没搬动"，也不能出现"源清了、目标没写上"。
+    @discardableResult
+    func canvasMoveSlotContent(fromGroupId: String, fromSlot: Int,
+                               toGroupId: String, toSlot: Int) -> Bool {
+        guard fromGroupId != toGroupId || fromSlot != toSlot else { return true }
+        guard toSlot >= 1, toSlot <= canvasSlotCapacity(groupId: toGroupId) else { return false }
+        guard canvasSlotIsFree(groupId: toGroupId, slot: toSlot) else { return false }
+
+        guard var content = canvasReadFullContent(groupId: fromGroupId, slot: fromSlot) else {
+            NSLog("[ClipSlots] canvasMoveSlotContent: source \(fromGroupId)#\(fromSlot) UNKNOWN, aborting")
+            return false
+        }
+        let label = canvasSlotLabel(groupId: fromGroupId, slot: fromSlot)
+
+        // 见注释 2：把手动缩略图的字节随内容一起带走。
+        if let thumbId = content.manualThumbnailId, !thumbId.isEmpty,
+           let url = specialStorage.manualThumbnailURL(fromSlot, in: fromGroupId),
+           let bytes = try? Data(contentsOf: url), !bytes.isEmpty {
+            content.pendingManualThumbnailData = bytes
+        }
+
+        guard canvasWriteFullContent(groupId: toGroupId, slot: toSlot, content: content) else {
+            NSLog("[ClipSlots] canvasMoveSlotContent: write \(toGroupId)#\(toSlot) failed, source kept")
+            return false
+        }
+        if let label, !label.isEmpty {
+            _ = specialStorage.setLabel(toSlot, label: label, in: toGroupId)
+            if toGroupId == currentSpecialSlotId {
+                var newLabels = labels
+                newLabels[toSlot] = label
+                labels = newLabels
+            }
+        }
+        canvasClearSlot(groupId: fromGroupId, slot: fromSlot)
+        return true
+    }
+
+    /// 交换同一组内两个槽位的内容（槽位库里的拖拽排序）。
+    ///
+    /// ## 为什么是"交换"而不是"插入并顺移"
+    ///
+    /// 槽位号不是排序字段，而是**用户的肌肉记忆和快捷键**：Cmd+3 永远是第 3 个槽位，圆盘上第 3 格
+    /// 也是它。列表式的"插入到第 2 位、其后全部顺移"会让 7 个槽位的编号集体改变 —— 用户拖了一下，
+    /// 结果所有快捷键的指向全变了，这不是排序，这是洗牌。
+    ///
+    /// 交换只动两个槽位，语义是"把这两格的东西换一下位置"，与用户在实物槽位盒里做的动作一致。
+    /// 代价是拖 A 到 C 不会把 B 挤开，但那正是槽位这个隐喻本来的样子。
+    ///
+    /// 实现走「借道未入库组」的三步走，而不是直接互写：直接互写要么需要一个临时槽位，要么就得
+    /// 先把一边读到内存里再覆盖 —— 后者一旦中途失败（存储繁忙 / 写盘错误），被覆盖那一格的内容
+    /// 就只存在于内存变量里，此时任何一次退出都是数据丢失。借道一个真实槽位，每一步都是原子落盘，
+    /// 最坏情况是"内容暂时躺在未入库里"，用户能看到、能拖回来，没有任何字节消失。
+    @discardableResult
+    func canvasSwapSlotContent(groupId: String, _ a: Int, _ b: Int) -> Bool {
+        guard a != b else { return true }
+        let cap = canvasSlotCapacity(groupId: groupId)
+        guard a >= 1, a <= cap, b >= 1, b <= cap else { return false }
+
+        let aFree = canvasSlotIsFree(groupId: groupId, slot: a)
+        let bFree = canvasSlotIsFree(groupId: groupId, slot: b)
+        if aFree && bFree { return true }
+
+        // 有一边是空的：一次搬迁就够，不需要中转。
+        if bFree { return canvasMoveSlotContent(fromGroupId: groupId, fromSlot: a, toGroupId: groupId, toSlot: b) }
+        if aFree { return canvasMoveSlotContent(fromGroupId: groupId, fromSlot: b, toGroupId: groupId, toSlot: a) }
+
+        // 两边都有内容：借未入库组的一个空槽做中转。
+        guard ensureCanvasUnfiledGroup(),
+              let temp = allocateUnfiledSlot(occupied: []) else {
+            NSLog("[ClipSlots] canvasSwapSlotContent: no temp slot available")
+            return false
+        }
+        let unfiled = SpecialSlotStorage.unfiledGroupId
+        guard canvasMoveSlotContent(fromGroupId: groupId, fromSlot: a, toGroupId: unfiled, toSlot: temp) else {
+            return false
+        }
+        guard canvasMoveSlotContent(fromGroupId: groupId, fromSlot: b, toGroupId: groupId, toSlot: a) else {
+            // 回滚第一步，别把内容留在中转槽里。
+            canvasMoveSlotContent(fromGroupId: unfiled, fromSlot: temp, toGroupId: groupId, toSlot: a)
+            return false
+        }
+        guard canvasMoveSlotContent(fromGroupId: unfiled, fromSlot: temp, toGroupId: groupId, toSlot: b) else {
+            NSLog("[ClipSlots] canvasSwapSlotContent: stage-3 failed, content parked at \(unfiled)#\(temp)")
+            return false
+        }
+        return true
     }
 
     func importDroppedFiles(_ urls: [URL], toSlot slot: Int) {

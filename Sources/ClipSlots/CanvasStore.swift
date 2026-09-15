@@ -235,6 +235,72 @@ final class CanvasStore: ObservableObject {
         return nodes.first { $0.id == id }
     }
 
+    /// 切换某个节点的堆叠卡片展开风格（扇形 ⇄ 水平轮播，v2.11.8 二轮）。
+    ///
+    /// 走 `commit` 而不是 `updateNode`：和 `updateNodeStyle` 同理 —— 这是用户可感知的显式操作，
+    /// 用 `updateNode` 的症状是「切错了 Cmd+Z 撤不回来」，而这个图标只有 15pt，误点是常态。
+    func toggleAnimationStyle(id: String) {
+        guard let idx = nodes.firstIndex(where: { $0.id == id }) else { return }
+        let next: CanvasFanGeometry.ExpandStyle = nodes[idx].animationStyle == .fanOut ? .carousel : .fanOut
+        commit(.styleNode, detail: next == .fanOut ? "扇形展开" : "水平轮播") {
+            nodes[idx].animationStyle = next
+            nodes[idx].updatedAt = Date()
+        }
+    }
+
+    // MARK: - 归槽（v2.11.8 二轮：把画布节点拖进槽位库）
+
+    /// 把一个节点**改绑**到另一个槽位。
+    ///
+    /// 用户要的动作是「从画布拖一个节点到槽位库的某个槽位块上，内容就归到那个槽位里」。它由两半组成：
+    ///   1. **搬内容**（正文 + 入参文件从旧槽位挪到新槽位）—— 那是槽位数据，由认识主 store 的
+    ///      调用方做，这里碰不到（见类型注释：本 store 刻意不认识 `SlotStoreObservable`）。
+    ///   2. **改摆位**（节点从此指向新槽位）—— 就是这个方法。
+    ///
+    /// ## 为什么这件事不能写成 `updateNode { $0.slot = n }`
+    ///
+    /// 因为 `CanvasNode.id` 是**派生的**（`groupId#slot`）：改字段等于换身份。三处会静默失效：
+    ///   - `selectedNodeIds` 里还是旧 id → 拖完节点自己"取消选中"了；
+    ///   - 别人的 `parentNodeId` 还指着旧 id → 血缘断链，而这个信息事后无法还原；
+    ///   - 目标槽位若已有节点 → 撞 id，SwiftUI `ForEach` 下表现为"点 A 动 B"（`placeSlot`
+    ///     就是为此才做了 `.alreadyPlaced` 分支）。
+    ///
+    /// 所以这里三件事一起做，并在目标已被占用时**拒绝**（返回 false）而不是覆盖 —— 覆盖会让
+    /// 另一个节点凭空消失，而用户此刻的注意力全在自己拖的那一个上，根本不会发现。
+    ///
+    /// - Returns: 是否真的改绑了。false = 目标槽位已被别的节点占用（或节点不存在），调用方应据此
+    ///   放弃第 1 步的内容搬迁，否则会出现"内容搬了、节点没跟过去"的分歧。
+    @discardableResult
+    func rebindNode(id: String, toPageId pageId: String, groupId: String, slot: Int) -> Bool {
+        guard let idx = nodes.firstIndex(where: { $0.id == id }) else { return false }
+        let newId = CanvasNode.makeId(groupId: groupId, slot: slot)
+        if newId == id {
+            // 拖回原处：不是失败，但也没什么要改的。返回 true 让调用方按"成功"处理（内容搬迁是空操作）。
+            if nodes[idx].pageId != pageId {
+                updateNode(id: id) { $0.pageId = pageId }
+            }
+            return true
+        }
+        guard !nodes.contains(where: { $0.id == newId }) else { return false }
+
+        let title = nodeTitle(nodes[idx])
+        commit(.moveNode, detail: title) {
+            nodes[idx].pageId = pageId
+            nodes[idx].groupId = groupId
+            nodes[idx].slot = slot
+            nodes[idx].updatedAt = Date()
+            // 血缘引用跟着换 id，否则下游节点会指向一个不存在的父节点。
+            for i in nodes.indices where nodes[i].parentNodeId == id {
+                nodes[i].parentNodeId = newId
+            }
+            if selectedNodeIds.contains(id) {
+                selectedNodeIds.remove(id)
+                selectedNodeIds.insert(newId)
+            }
+        }
+        return true
+    }
+
     // MARK: - 节点正文（= 槽位正文）
 
     /// 记一步「在画布里改了正文」的可撤销历史。

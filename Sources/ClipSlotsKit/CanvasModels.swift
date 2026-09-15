@@ -234,6 +234,20 @@ public struct CanvasNode: Codable, Identifiable, Equatable {
         CanvasNode.clampBodyFontSize(fontSize ?? CanvasNode.defaultBodyFontSize)
     }
 
+    /// 槽位卡片的展开风格（v2.11.8 二轮）。
+    ///
+    /// 属于「怎么显示」而不是「是什么内容」，所以和 `model` / `fontName` 一样住在摆位里，
+    /// 不进槽位。同一个槽位在 A 节点上用扇形、在 B 节点上用轮播是合理的。
+    ///
+    /// 缺省 `.fanOut`：老文档没有这个字段，解码时补默认值即可，不需要 schema 版本分支。
+    public var animationStyle: CanvasFanGeometry.ExpandStyle
+
+    /// 切换展开风格（供右上角那个小图标用）。
+    public mutating func toggleAnimationStyle() {
+        animationStyle = (animationStyle == .fanOut) ? .carousel : .fanOut
+        updatedAt = Date()
+    }
+
     /// 是否显式设过字体（供 UI 显示「跟随系统」与否）。
     public var hasCustomFont: Bool {
         if let fontName, !fontName.trimmingCharacters(in: .whitespaces).isEmpty { return true }
@@ -257,6 +271,7 @@ public struct CanvasNode: Codable, Identifiable, Equatable {
                 taskId: String? = nil,
                 seed: Int? = nil,
                 parentNodeId: String? = nil,
+                animationStyle: CanvasFanGeometry.ExpandStyle = .fanOut,
                 createdAt: Date = Date(),
                 updatedAt: Date = Date()) {
         self.pageId = pageId
@@ -276,6 +291,7 @@ public struct CanvasNode: Codable, Identifiable, Equatable {
         self.taskId = taskId
         self.seed = seed
         self.parentNodeId = parentNodeId
+        self.animationStyle = animationStyle
         self.createdAt = createdAt
         self.updatedAt = updatedAt
     }
@@ -289,6 +305,7 @@ public struct CanvasNode: Codable, Identifiable, Equatable {
         case fontName, fontSize
         case state, taskId, seed
         case parentNodeId
+        case animationStyle
         case createdAt, updatedAt
         // 旧字段：hotfix19 及更早的节点自带内容与溯源信息。只在解码时读，从不写回。
         case sourcePageId, sourceGroupId, sourceSlot
@@ -336,6 +353,8 @@ public struct CanvasNode: Codable, Identifiable, Equatable {
         seed = try c.decodeIfPresent(Int.self, forKey: .seed)
         // v2.11.8 新增字段：老文档没有它，缺省 nil（= 没有上游），不需要版本分支。
         parentNodeId = try c.decodeIfPresent(String.self, forKey: .parentNodeId)
+        animationStyle = try c.decodeIfPresent(CanvasFanGeometry.ExpandStyle.self,
+                                               forKey: .animationStyle) ?? .fanOut
         createdAt = try c.decodeIfPresent(Date.self, forKey: .createdAt) ?? Date()
         updatedAt = try c.decodeIfPresent(Date.self, forKey: .updatedAt) ?? Date()
     }
@@ -361,6 +380,7 @@ public struct CanvasNode: Codable, Identifiable, Equatable {
         try c.encodeIfPresent(taskId, forKey: .taskId)
         try c.encodeIfPresent(seed, forKey: .seed)
         try c.encodeIfPresent(parentNodeId, forKey: .parentNodeId)
+        try c.encode(animationStyle, forKey: .animationStyle)
         try c.encode(createdAt, forKey: .createdAt)
         try c.encode(updatedAt, forKey: .updatedAt)
     }
