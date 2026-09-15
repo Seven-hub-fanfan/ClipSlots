@@ -60,6 +60,9 @@ struct PluginMarketItem: Identifiable, Equatable {
     /// Full description shown on the detail page.
     let detail: String
     /// Version string (empty when N/A).
+    ///
+    /// v2.11.8: 声明了 `githubRepo` 的条目这里留空 —— 版本号运行时从 GitHub latest release 取
+    /// （见 GitHubReleaseWatcher）。写死版本号会让「别的 App 发版」变成 ClipSlots 的发版事项。
     let version: String
     /// True when this item installs a Skill into agent environments (drives the
     /// "安装到 Agent" section on the detail page).
@@ -67,8 +70,15 @@ struct PluginMarketItem: Identifiable, Equatable {
     /// v2.9.53: 第三方/社区项目的主页或仓库地址（详情页展示「访问项目」链接）。nil 表示官方内置项。
     var projectURL: String? = nil
     /// v2.10.10: 第三方 App 在 /Applications 下的 bundle 名（如 "Espanso.app"）。
-    /// 用于真实检测该社区插件是否已安装（FileManager.fileExists），nil 表示无需真实检测。
-    var appName: String? = nil
+    /// 用于真实检测该社区插件是否已安装（FileManager.fileExists），空数组表示无需真实检测。
+    ///
+    /// v2.11.8 由单个 appName 改成候选列表：ScrollApp 的 bundle 实际叫 `Scrollapp.app`（小写 a），
+    /// 而仓库/展示名是 ScrollApp。默认 APFS 卷不区分大小写会掩盖这种拼写差异，一旦用户装在
+    /// 区分大小写的卷上就检测不到，于是「已安装」永远不亮。列表里把已知写法都放进去。
+    var appNames: [String] = []
+    /// v2.11.8: GitHub 仓库 slug（"owner/repo"）。声明后「获取」按钮会先问 latest release
+    /// 拿 .dmg 直链再打开浏览器（下载而不是落到 Release 页面），版本号也随之动态刷新。
+    var githubRepo: String? = nil
 
     static func == (lhs: PluginMarketItem, rhs: PluginMarketItem) -> Bool { lhs.id == rhs.id }
 }
@@ -76,7 +86,7 @@ struct PluginMarketItem: Identifiable, Equatable {
 /// The static catalog. Extend this array to add new market items.
 enum PluginCatalog {
     static var allItems: [PluginMarketItem] {
-        [clipSlotsSkill, espanso, massCode, monitorControl]
+        [clipSlotsSkill, scrollApp, espanso, massCode, monitorControl]
     }
 
     static func items(in category: PluginMarketCategory) -> [PluginMarketItem] {
@@ -104,6 +114,37 @@ enum PluginCatalog {
         installsToAgent: true
     )
 
+    // MARK: - Official Plugins（官方独立 App，v2.11.8 首批上架）
+
+    /// ScrollApp：左键长按滚动。
+    ///
+    /// 版本号和下载直链都**不写死**：`githubRepo` 交给 GitHubReleaseWatcher 在运行时问
+    /// latest release，点「获取」拿到的永远是当时的最新 DMG。硬编码 v2.2.3 的直链意味着
+    /// ScrollApp 每发一版，ClipSlots 都得跟着改源码重新发版，否则这里就是个过期指路牌。
+    static let scrollApp = PluginMarketItem(
+        id: "scrollapp-leftclick",
+        category: .officialPlugin,
+        emoji: "🖱️",
+        iconSystemName: "cursorarrow.motionlines",
+        name: "ScrollApp",
+        source: "官方 · scrollapp-leftclick",
+        summary: "左键长按滚动工具，让鼠标左键长按时像中键一样滚动页面",
+        detail: """
+        ScrollApp 把鼠标左键长按变成「滚动模式」：按住不放再移动鼠标，页面就跟着滚，松手即恢复正常点击。适合只有两键的鼠标、或者中键手感不好、以及需要长时间浏览长文档的场景。
+
+        点「获取」会实时向 GitHub 查询最新 Release，并直接开始下载 .dmg 安装包（不是跳到 Release 页面让你自己找文件）。下载后拖入「应用程序」即可；装好后这张卡片会自动变成「已安装」，可以直接从这里打开。
+
+        需要在「系统设置 → 隐私与安全性 → 辅助功能」里给 ScrollApp 授权，它才能接管鼠标事件。
+        """,
+        version: "",
+        installsToAgent: false,
+        projectURL: "https://github.com/Seven-hub-fanfan/scrollapp-leftclick",
+        // bundle 实际名是 Scrollapp.app（小写 a）；ScrollApp.app / scrollapp-leftclick.app 一并兜住，
+        // 免得将来产品名大小写规整或改名后「已安装」不亮。
+        appNames: ["Scrollapp.app", "ScrollApp.app", "scrollapp-leftclick.app"],
+        githubRepo: "Seven-hub-fanfan/scrollapp-leftclick"
+    )
+
     // MARK: - Community Plugins（第三方项目，v2.9.53 首批上架）
 
     static let espanso = PluginMarketItem(
@@ -122,7 +163,7 @@ enum PluginCatalog {
         version: "",
         installsToAgent: false,
         projectURL: "https://github.com/espanso/espanso",
-        appName: "Espanso.app"
+        appNames: ["Espanso.app"]
     )
 
     static let massCode = PluginMarketItem(
@@ -141,7 +182,7 @@ enum PluginCatalog {
         version: "",
         installsToAgent: false,
         projectURL: "https://github.com/massCodeIO/massCode",
-        appName: "massCode.app"
+        appNames: ["massCode.app"]
     )
 
     static let monitorControl = PluginMarketItem(
@@ -160,7 +201,7 @@ enum PluginCatalog {
         version: "",
         installsToAgent: false,
         projectURL: "https://github.com/MonitorControl/MonitorControl",
-        appName: "MonitorControl.app"
+        appNames: ["MonitorControl.app"]
     )
 }
 

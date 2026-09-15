@@ -63,11 +63,12 @@ final class CommunityPluginInstallStore: ObservableObject {
 
     /// 某插件对应 App 的实际磁盘路径（存在时返回，用于「打开」按钮）。
     func installedAppPath(for id: String) -> String? {
-        guard let appName = Self.appName(for: id) else { return nil }
-        for dir in searchDirectories {
-            let path = (dir as NSString).appendingPathComponent(appName)
-            if FileManager.default.fileExists(atPath: path) {
-                return path
+        for appName in Self.appNames(for: id) {
+            for dir in searchDirectories {
+                let path = (dir as NSString).appendingPathComponent(appName)
+                if FileManager.default.fileExists(atPath: path) {
+                    return path
+                }
             }
         }
         return nil
@@ -83,22 +84,26 @@ final class CommunityPluginInstallStore: ObservableObject {
 
     // MARK: - 扫描
 
-    /// 查表：插件 id → 对应 App bundle 名（来自 PluginCatalog）。
-    private static func appName(for id: String) -> String? {
-        PluginCatalog.allItems.first { $0.id == id }?.appName
+    /// 查表：插件 id → 候选 App bundle 名（来自 PluginCatalog）。
+    ///
+    /// v2.11.8 改成多候选：同一个产品的 bundle 名和展示名常有大小写差异（ScrollApp 的包实际叫
+    /// `Scrollapp.app`），默认不区分大小写的卷会掩盖这点，区分大小写的卷上就永远检测不到。
+    private static func appNames(for id: String) -> [String] {
+        PluginCatalog.allItems.first { $0.id == id }?.appNames ?? []
     }
 
-    /// 遍历目录检测所有声明了 appName 的社区插件是否安装。
+    /// 遍历目录检测所有声明了 appNames 的插件是否安装。
     private static func scan(searchDirectories: [String]) -> Set<String> {
         var result = Set<String>()
         let fm = FileManager.default
-        for item in PluginCatalog.allItems {
-            guard let appName = item.appName else { continue }
-            for dir in searchDirectories {
-                let path = (dir as NSString).appendingPathComponent(appName)
-                if fm.fileExists(atPath: path) {
-                    result.insert(item.id)
-                    break
+        for item in PluginCatalog.allItems where !item.appNames.isEmpty {
+            outer: for appName in item.appNames {
+                for dir in searchDirectories {
+                    let path = (dir as NSString).appendingPathComponent(appName)
+                    if fm.fileExists(atPath: path) {
+                        result.insert(item.id)
+                        break outer
+                    }
                 }
             }
         }

@@ -53,10 +53,17 @@ struct AgentSidebarView: View {
         }
         .sheet(isPresented: $showConfig) { AgentConfigView() }
         .onAppear {
-            // 用户要求：首次打开侧栏若无 API Key，直接弹配置页。
-            if !model.hasAPIKey { showConfig = true }
             AgentSkillLibrary.shared.refresh()
             inputFocused = true
+            // 用户要求：首次打开侧栏若无 API Key，直接弹配置页。
+            //
+            // v2.11.8: 这里**必须**异步探测。旧写法是同步 `if !model.hasAPIKey`，而钥匙串在
+            // 弹系统授权框时会阻塞调用线程 —— 侧栏是首帧渲染的，主线程一卡，主窗口在用户
+            // 点掉授权框前根本不显示（覆盖安装后必然复现，因为 adhoc 签名每次都变）。
+            Task {
+                let hasKey = await AgentKeychainProbe.hasAPIKey()
+                if !hasKey { showConfig = true }
+            }
         }
         .onChange(of: model.needsConfiguration) { needs in
             guard needs else { return }

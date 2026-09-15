@@ -102,6 +102,31 @@ public final class AgentKeychain: AgentSecretStore {
     }
 }
 
+/// 「钥匙串里有没有 key」的**非阻塞**探测。
+///
+/// v2.11.8：为什么必须有这么个东西 ——
+/// `SecItemCopyMatching` 在弹出系统授权框时会**阻塞调用线程直到用户回答**。而本项目每次
+/// adhoc 打包签名都变，覆盖安装后首次读取必然弹框（见文件头注释，这是系统行为，不绕）。
+/// 之前 Agent 侧栏在 `onAppear` 里同步问了一次 `hasAPIKey`，而侧栏是首帧就渲染的 ——
+/// 结果主线程卡死在钥匙串里，**主窗口在用户点掉授权框之前根本画不出来**，用户看到的是
+/// 「更新完点图标没反应／只有一个授权框」。
+///
+/// 这里不改变任何安全语义（照样走 ACL、照样弹框、照样只读钥匙串），只是把读操作挪到后台
+/// 线程：窗口先画出来，授权框浮在窗口上，用户点「始终允许」后 UI 再更新。
+public enum AgentKeychainProbe {
+    /// 后台线程读一次钥匙串，返回是否存在可用 key。用户拒绝授权/无 key 都返回 false。
+    public static func hasAPIKey(service: String = AgentKeychain.service,
+                                 account: String = AgentKeychain.account) async -> Bool {
+        await withCheckedContinuation { continuation in
+            // 刻意在闭包内部新建实例：不跨线程捕获 AgentKeychain（非 Sendable）。
+            DispatchQueue.global(qos: .userInitiated).async {
+                let exists = AgentKeychain(service: service, account: account).readAPIKey() != nil
+                continuation.resume(returning: exists)
+            }
+        }
+    }
+}
+
 public enum AgentKeychainError: LocalizedError, Equatable {
     case encodingFailed
     case osStatus(OSStatus)

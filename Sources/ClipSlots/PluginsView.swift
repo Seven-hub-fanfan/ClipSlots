@@ -26,6 +26,11 @@ struct PluginsView: View {
     // v2.9.54: 社区插件（第三方工具）安装状态标记（持久化到 UserDefaults）。
     @StateObject private var communityPlugins = CommunityPluginInstallStore()
 
+    // v2.11.8: 声明了 githubRepo 的条目，其版本号与 DMG 直链在运行时向 GitHub 查询。
+    // 用共享单例而非 @StateObject：市场是 popover，每次开关都会重建视图，挂在视图上等于
+    // 每次打开都重新打一次 API，并且「正在获取」的转圈状态会在重建时凭空消失。
+    @ObservedObject private var releases = GitHubReleaseWatcher.shared
+
     // 保留旧标记键以兼容历史用户（当前仅作展示，不联动 CLI）。
     @AppStorage("skill_clipslots_manager_enabled") private var skillEnabled = true
 
@@ -69,6 +74,9 @@ struct PluginsView: View {
             agentInstaller.syncInstalledSkillsOnLaunch()
             // v2.9.53: 扫描已上传的社区 Skill 及其在各 Agent 的安装状态。
             communitySkills.refresh()
+            // v2.11.8: 市场一打开就异步刷新一次动态版本号（只刷缓存已过期的仓库；先显示旧值，
+            // 拿到新值再替换）。GitHub 匿名 API 每小时 60 次/IP，所以不做无脑每次拉取。
+            releases.refreshStale(repos: PluginCatalog.allItems.compactMap(\.githubRepo))
         }
     }
 
@@ -297,8 +305,8 @@ struct PluginsView: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
 
                 HStack {
-                    if !item.version.isEmpty {
-                        Text("v\(item.version)")
+                    if let label = versionLabel(for: item) {
+                        Text(label)
                             .font(.system(size: 10))
                             .foregroundColor(.secondary)
                             .padding(.horizontal, 6)
@@ -418,6 +426,10 @@ struct PluginsView: View {
                 .buttonStyle(.plain)
                 .help("打开已安装的 \(item.name)")
             }
+        } else if let repo = item.githubRepo, releases.isResolving(repo) {
+            // v2.11.8: 直链要先问一次 GitHub API 才知道，所以「获取」必须有在途状态 ——
+            // 否则用户在网络慢时只能看到一个没反应的按钮，然后连点好几次、开出好几个下载。
+            badge(text: "获取中…", icon: "arrow.triangle.2.circlepath", color: .secondary)
         } else {
             Button {
                 fetchCommunityPlugin(item)
@@ -425,12 +437,39 @@ struct PluginsView: View {
                 badge(text: "获取", icon: "arrow.down.circle", color: .accentColor)
             }
             .buttonStyle(.plain)
-            .help("打开官网下载页（安装后状态自动更新为「已安装」）")
+            .help(item.githubRepo == nil
+                  ? "打开官网下载页（安装后状态自动更新为「已安装」）"
+                  : "查询最新版本并直接下载 .dmg（安装后状态自动更新为「已安装」）")
         }
     }
 
-    /// 打开第三方项目下载页（不产生任何虚假安装标记；用户真正装好后由 FSEvents 自动刷新为「已安装」）。
+    /// 卡片/详情页展示的版本号标签。nil 表示不展示。
+    ///
+    /// 声明了 githubRepo 的条目版本号是运行时查的：拿到就显示真实最新版，还没拿到（首次打开、
+    /// 缓存已被清）显示「获取中…」。刻意不显示一个写死的兜底版本号 —— 那会在 ScrollApp 发新版后
+    /// 变成一个看起来确定、实际过期的数字，比「获取中…」更误导人。
+    private func versionLabel(for item: PluginMarketItem) -> String? {
+        if let repo = item.githubRepo {
+            if let v = releases.version(for: repo) { return "v\(v)" }
+            return "获取中…"
+        }
+        return item.version.isEmpty ? nil : "v\(item.version)"
+    }
+
+    /// 点「获取」：声明了 githubRepo 的条目实时解析最新 .dmg 直链后打开浏览器（直接开始下载）；
+    /// 解析失败（离线 / 限流 / 该版本没有 dmg）降级到 Release 页面，让用户自己点 assets。
+    /// 其余（老社区插件）仍是打开项目主页。
     private func fetchCommunityPlugin(_ item: PluginMarketItem) {
+        if let repo = item.githubRepo {
+            Task {
+                if let url = await releases.resolveDownloadURL(repo: repo) {
+                    NSWorkspace.shared.open(url)
+                } else if let urlString = item.projectURL, let url = URL(string: urlString) {
+                    NSWorkspace.shared.open(url)
+                }
+            }
+            return
+        }
         if let urlString = item.projectURL, let url = URL(string: urlString) {
             NSWorkspace.shared.open(url)
         }
@@ -550,8 +589,8 @@ struct PluginsView: View {
                             HStack(spacing: 8) {
                                 Text(item.name)
                                     .font(.system(size: 18, weight: .bold))
-                                if !item.version.isEmpty {
-                                    Text("v\(item.version)")
+                                if let label = versionLabel(for: item) {
+                                    Text(label)
                                         .font(.caption2)
                                         .foregroundColor(.secondary)
                                         .padding(.horizontal, 6)
@@ -1343,7 +1382,11 @@ struct PluginsView: View {
     }
 
     private func isInstalled(_ item: PluginMarketItem) -> Bool {
-        guard item.installsToAgent else { return false }
-        return agentInstaller.aggregateState == .installed
+        // Skill 类条目看 Agent 目录的聚合安装状态。
+        if item.installsToAgent { return agentInstaller.aggregateState == .installed }
+        // v2.11.8: App 类条目（官方插件 / 社区插件）看磁盘上是否真实存在该 App。
+        // 旧实现在这里直接 return false，导致「仅显示已安装」开着时，明明装了的
+        // ScrollApp / Espanso 反而被过滤掉 —— 卡片上显示「已安装 ✓」，列表却说它没装。
+        return communityPlugins.isInstalled(item.id)
     }
 }

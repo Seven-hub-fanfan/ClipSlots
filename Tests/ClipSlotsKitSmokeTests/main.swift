@@ -4894,4 +4894,101 @@ do {
     t.equal(WindowLayoutMetrics.agentSidebarWidth, 320, "Agent 侧栏定宽 320（与 AgentSidebarView.width 同源）")
 }
 
+// MARK: - PLUGIN-RELEASE：GitHub latest release 解析（插件市场动态下载链接，v2.11.8）
+//
+// 这组盯两类风险：
+//   1. **挑错资产**：Release 里常混着 zip / txt / 校验和文件，挑错就是给用户下一个打不开的包；
+//   2. **开错链接**：`browser_download_url` 是从网络响应读出来、随后不经确认就交给
+//      NSWorkspace.open 的字符串。一旦 host / scheme 没校验，这个按钮就成了「一键下载任意
+//      文件」的启动器。所以 http、异站 host 必须一律判不可信，宁可降级到 Release 页面。
+do {
+    func json(_ s: String) -> Data { s.data(using: .utf8)! }
+
+    // 真实形状：取自 scrollapp-leftclick v2.2.3 的 API 响应（裁掉无关字段）。
+    let real = json("""
+    {"tag_name":"v2.2.3","name":"v2.2.3 · 弹窗彻底可关闭","assets":[
+      {"name":"Scrollapp-v2.2.3.dmg",
+       "browser_download_url":"https://github.com/Seven-hub-fanfan/scrollapp-leftclick/releases/download/v2.2.3/Scrollapp-v2.2.3.dmg"}]}
+    """)
+    let parsed = GitHubReleaseParser.parseLatest(real)
+    t.equal(parsed?.tag, "v2.2.3", "应解析出原始 tag")
+    t.equal(parsed?.version, "2.2.3", "★展示版本号要去掉 tag 的 v 前缀（卡片上再补一个 v，否则显示成 vv2.2.3）")
+    t.equal(parsed?.dmgURL.absoluteString,
+            "https://github.com/Seven-hub-fanfan/scrollapp-leftclick/releases/download/v2.2.3/Scrollapp-v2.2.3.dmg",
+            "★★必须是 asset 直链（浏览器打开即下载），不是 Release 页面 URL")
+
+    // 混合资产：非 dmg 在前，必须被跳过而不是拿第一个。
+    let mixed = json("""
+    {"tag_name":"v9.9.9","assets":[
+      {"name":"SHA256SUMS.txt","browser_download_url":"https://github.com/o/r/releases/download/v9.9.9/SHA256SUMS.txt"},
+      {"name":"Source-v9.9.9.zip","browser_download_url":"https://github.com/o/r/releases/download/v9.9.9/Source-v9.9.9.zip"},
+      {"name":"App-v9.9.9.DMG","browser_download_url":"https://github.com/o/r/releases/download/v9.9.9/App-v9.9.9.DMG"}]}
+    """)
+    t.equal(GitHubReleaseParser.parseLatest(mixed)?.dmgURL.lastPathComponent, "App-v9.9.9.DMG",
+            "★要跳过 txt/zip 挑出 dmg，且后缀判断大小写不敏感（.DMG 也算）")
+
+    // 没有 dmg → nil（调用方降级到 Release 页面，而不是打开一个 zip）
+    t.check(GitHubReleaseParser.parseLatest(json("""
+    {"tag_name":"v1.0","assets":[{"name":"app.zip","browser_download_url":"https://github.com/o/r/app.zip"}]}
+    """)) == nil, "★Release 里没有 dmg 时必须返回 nil，不能退而求其次给个 zip")
+
+    // 安全：http 与异站 host 一律不可信
+    t.check(GitHubReleaseParser.parseLatest(json("""
+    {"tag_name":"v1.0","assets":[{"name":"a.dmg","browser_download_url":"http://github.com/o/r/a.dmg"}]}
+    """)) == nil, "★★http 直链必须拒（明文可被中间人替换成任意文件）")
+    t.check(GitHubReleaseParser.parseLatest(json("""
+    {"tag_name":"v1.0","assets":[{"name":"a.dmg","browser_download_url":"https://evil.example.com/a.dmg"}]}
+    """)) == nil, "★★非 GitHub host 的直链必须拒（否则响应被改写就等于一键下载任意文件）")
+    t.check(GitHubReleaseParser.parseLatest(json("""
+    {"tag_name":"v1.0","assets":[{"name":"a.dmg","browser_download_url":"https://github.com.evil.example/a.dmg"}]}
+    """)) == nil, "★★host 校验必须按域名边界比对，github.com.evil.example 不算 GitHub")
+    t.check(GitHubReleaseParser.isTrustedDownloadURL(
+        URL(string: "https://objects.githubusercontent.com/xx/yy.dmg")!),
+            "★githubusercontent.com 子域是 GitHub 直链的实际落点，必须放行（否则 302 后就打不开了）")
+
+    // 畸形响应：缺 tag / 缺 assets / 根本不是 JSON
+    t.check(GitHubReleaseParser.parseLatest(json("""
+    {"assets":[{"name":"a.dmg","browser_download_url":"https://github.com/o/r/a.dmg"}]}
+    """)) == nil, "缺 tag_name 应返回 nil（版本号无从展示）")
+    t.check(GitHubReleaseParser.parseLatest(json("{\"tag_name\":\"v1.0\"}")) == nil, "缺 assets 应返回 nil")
+    t.check(GitHubReleaseParser.parseLatest(json("<html>rate limited</html>")) == nil,
+            "★非 JSON（限流页 / 网关错误页）应返回 nil 而不是崩")
+
+    // tag → 版本号
+    t.equal(GitHubReleaseParser.displayVersion(fromTag: "v2.2.3"), "2.2.3", "去 v 前缀")
+    t.equal(GitHubReleaseParser.displayVersion(fromTag: "2.2.3"), "2.2.3", "本来没前缀就原样返回")
+    t.equal(GitHubReleaseParser.displayVersion(fromTag: "V10.0"), "10.0", "大写 V 也要处理")
+    t.equal(GitHubReleaseParser.displayVersion(fromTag: "  v1.2  "), "1.2", "两端空白要修掉")
+
+    // 仓库 slug 校验：它会被拼进 api.github.com 的路径
+    t.check(GitHubReleaseParser.isValidRepoSlug("Seven-hub-fanfan/scrollapp-leftclick"), "正常 slug 应通过")
+    t.check(GitHubReleaseParser.isValidRepoSlug("o/r.dot_ok-1"), "点/下划线/连字符是合法仓库名字符")
+    for bad in ["owner", "a/b/c", "../etc", "o/..", "o/", "/r", "", "o/r?x=1", "o/r#f", "o r/x", "o/r/../../x"] {
+        t.check(!GitHubReleaseParser.isValidRepoSlug(bad), "★非法 slug 必须拒：\(bad.isEmpty ? "(空)" : bad)")
+    }
+    t.equal(GitHubReleaseParser.latestReleaseAPIURL(repo: "o/r")?.absoluteString,
+            "https://api.github.com/repos/o/r/releases/latest", "API 地址拼接")
+    t.equal(GitHubReleaseParser.latestReleasePageURL(repo: "o/r")?.absoluteString,
+            "https://github.com/o/r/releases/latest", "★降级页面用 releases/latest（永远指向最新版，不写死 tag）")
+    t.check(GitHubReleaseParser.latestReleaseAPIURL(repo: "o/../r") == nil,
+            "★★非法 slug 不得拼出 URL（否则请求会逃出 /repos/ 前缀打到别的 endpoint）")
+}
+
+// MARK: - KEYCHAIN-PROBE：钥匙串探测必须非阻塞（v2.11.8）
+//
+// 背景：adhoc 签名每次构建都变，覆盖安装后首次读钥匙串必然弹系统授权框，而
+// SecItemCopyMatching 会阻塞调用线程。Agent 侧栏原来在首帧同步读 → 主窗口在用户点掉
+// 授权框前画不出来。这里断言的是「探测接口存在且能在非主线程完成、不存在的条目返回
+// false 而不是抛/挂」；真实 ACL 弹框行为无法在无头测试里覆盖。
+do {
+    let service = "com.clipslots.smoke.keychain.probe.absent"
+    let account = "no-such-account-\(UUID().uuidString)"
+    let exists = smokeAwait { await AgentKeychainProbe.hasAPIKey(service: service, account: account) }
+    t.check(!exists, "★不存在的钥匙串条目探测应返回 false（errSecItemNotFound 不弹框、不抛）")
+
+    // 同一探测跑两次仍然是 false，且不会因为 continuation 被重复 resume 而崩。
+    let again = smokeAwait { await AgentKeychainProbe.hasAPIKey(service: service, account: account) }
+    t.check(!again, "重复探测保持 false（continuation 只 resume 一次）")
+}
+
 t.report()
