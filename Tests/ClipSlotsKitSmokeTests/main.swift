@@ -4603,4 +4603,89 @@ do {
     t.check(!bogus.succeeded, "★不存在的可执行文件应返回失败而不是抛异常")
 }
 
+// MARK: - WINDOW-WIDTH：主窗口宽度预算（v2.11.7 hotfix24）
+//
+// 为什么这组必须存在：用户反馈「缩小窗口（分有无智能体页面）会有 UI 错乱」，取证后发现根因是
+// **窗口允许被缩到比内容真正需要的宽度更窄**，而 SwiftUI 的 HStack 面对「放不下」是**静默溢出**、
+// 由窗口裁掉，不会把差额上报成父容器最小宽度（实测 contentMinSize 恒为 720、
+// NSHostingView.fittingSize 返回 0×0）。也就是说这类错乱**不会有任何运行时报错**，
+// 只会表现为「logo 缺一半、齿轮掉出右边、搜索栏里的菜单叠到图标底下、居中胶囊盖住拨杆标签」。
+//
+// 所以宽度预算的算术必须在这里钉死。三类错误都是静默的：
+//   1. 居中行最小宽度写成 `左 + 右`（而不是 `2 × max(左, 右)`）→ 居中控件不再落在中线上，
+//      窗口一窄就压住旁边的控件。这正是 hotfix20~23 那颗胶囊反复"跑位"的同一个坑。
+//   2. 两侧可用宽度算错 → 一侧被压到溢出，另一侧留着空白。
+//   3. 窗口最小宽度低于顶栏所需 → 回归到本次修复前的裁切状态。
+do {
+    // ── 居中行：最小宽度必须按"两侧对称"算
+    //
+    // 中线固定 ⇒ 左右两个槽位宽度必然相等 ⇒ 这个共同宽度必须容得下**较宽**的那一簇。
+    // 若误写成 左+右+中，窄侧会白拿空间、宽侧被压，居中控件也就不在中线上了。
+    t.equal(WindowLayoutMetrics.centerReservedRowMinWidth(leftMin: 300, rightMin: 400,
+                                                         centerWidth: 130, gap: 12),
+            2 * 400 + 130 + 24,
+            "★★居中行最小宽 = 2×max(左,右) + 中 + 2×留白（写成 左+右+中 就等于放弃真居中）")
+    t.equal(WindowLayoutMetrics.centerReservedRowMinWidth(leftMin: 400, rightMin: 300,
+                                                         centerWidth: 130, gap: 12),
+            2 * 400 + 130 + 24,
+            "左右互换结果必须一样（对称性）")
+    t.equal(WindowLayoutMetrics.centerReservedRowMinWidth(leftMin: 0, rightMin: 0,
+                                                         centerWidth: 130, gap: 12),
+            130 + 24,
+            "两簇为空时只剩中间控件与留白")
+    // 负数不能把最小宽度算成更小 —— 上游是 sizeThatFits 的返回值，理论上非负，
+    // 但一旦某个子树在测量期返回异常值，这里必须钳住而不是把窗口下限拉低。
+    t.check(WindowLayoutMetrics.centerReservedRowMinWidth(leftMin: -50, rightMin: -50,
+                                                         centerWidth: 130, gap: 12) >= 130,
+            "★负的子视图宽度不得把行最小宽算到比中间控件还小")
+
+    // ── 居中行：两侧各自可用宽度
+    let half = WindowLayoutMetrics.centerReservedHalfWidth(totalWidth: 1000, centerWidth: 130, gap: 12)
+    t.equal(half, (1000 - 130 - 24) / 2, "两侧可用宽 = (总宽 - 中 - 2×留白) / 2")
+    // 自洽性：行宽恰好等于最小宽时，两侧拿到的正好是各自的最小宽度 —— 这是"不会溢出"的关键不变量。
+    let lMin: CGFloat = 322, rMin: CGFloat = 432
+    let rowMin = WindowLayoutMetrics.centerReservedRowMinWidth(leftMin: lMin, rightMin: rMin,
+                                                              centerWidth: 130, gap: 12)
+    let halfAtMin = WindowLayoutMetrics.centerReservedHalfWidth(totalWidth: rowMin,
+                                                               centerWidth: 130, gap: 12)
+    t.check(halfAtMin >= lMin && halfAtMin >= rMin,
+            "★★行宽取最小值时，两侧可用宽必须仍 ≥ 各自最小宽（否则最小宽度公式本身就漏了）")
+    t.check(WindowLayoutMetrics.centerReservedHalfWidth(totalWidth: 50, centerWidth: 130, gap: 12) == 0,
+            "总宽小于中间控件时可用宽钳到 0，不得返回负数（负 proposal 会让子树布局发疯）")
+
+    // ── 内容区：工作区 + 侧栏
+    t.equal(WindowLayoutMetrics.contentRowMinWidth(canvas: false, libraryWidth: 0, agentVisible: false),
+            WindowLayoutMetrics.editWorkspaceMinWidth,
+            "编辑页不开侧栏时，内容区最小宽就是卡片区最小宽")
+    t.equal(WindowLayoutMetrics.contentRowMinWidth(canvas: false, libraryWidth: 0, agentVisible: true),
+            WindowLayoutMetrics.editWorkspaceMinWidth + WindowLayoutMetrics.agentSidebarWidth,
+            "★开 Agent 侧栏必须**加上**它的定宽，而不是让它挤占卡片区")
+    t.equal(WindowLayoutMetrics.contentRowMinWidth(canvas: true, libraryWidth: 240, agentVisible: true),
+            240 + WindowLayoutMetrics.canvasViewportMinWidth + WindowLayoutMetrics.agentSidebarWidth,
+            "★画布模式要同时容下左侧槽位库、可视区与右侧侧栏")
+    t.check(WindowLayoutMetrics.contentRowMinWidth(canvas: true, libraryWidth: 44, agentVisible: true)
+            < WindowLayoutMetrics.contentRowMinWidth(canvas: true, libraryWidth: 240, agentVisible: true),
+            "槽位库收起后内容区最小宽应变小")
+
+    // ── 窗口下限：必须真的挡住已知的错乱区间
+    //
+    // 720 是修复前写死的假下限，实测 720~840 顶栏被裁、~1058 以下搜索栏内容溢出。
+    // 这条断言的作用是：以后任何人想把窗口下限调回"手感更自由"的小数值时，测试会先拦住他。
+    t.check(WindowLayoutMetrics.minWindowContentWidth > 840,
+            "★★窗口最小宽必须高于实测的裁切区间上界（840），否则本次修复直接失效")
+    t.check(WindowLayoutMetrics.minWindowContentWidth >= 1058,
+            "★★窗口最小宽必须容得下编辑页顶栏实测所需的 1058pt")
+    // 下限也不能反过来大到把窗口顶出常见屏幕：1280 是仍在服役的最窄 Mac 逻辑宽度。
+    t.check(WindowLayoutMetrics.minWindowContentWidth <= 1280,
+            "★窗口最小宽不得超过 1280（再大就会在窄屏上顶出可见区域）")
+    // 顶栏所需宽度当前**大于**「内容区 + 侧栏」所需，实际生效的下限来自顶栏。
+    // 这条断言把这个前提写进测试：哪天顶栏瘦身了，它会提醒去重新评估窗口下限。
+    t.check(WindowLayoutMetrics.minWindowContentWidth
+            >= WindowLayoutMetrics.contentRowMinWidth(canvas: true, libraryWidth: 240, agentVisible: true),
+            "★★窗口最小宽必须同时兜住最吃宽度的内容区组合（画布 + 展开的槽位库 + Agent 侧栏）")
+
+    // 侧栏宽度只能有一个来源：AgentSidebarView.width 引用的就是这个常量。
+    t.equal(WindowLayoutMetrics.agentSidebarWidth, 320, "Agent 侧栏定宽 320（与 AgentSidebarView.width 同源）")
+}
+
 t.report()

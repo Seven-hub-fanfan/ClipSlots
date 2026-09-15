@@ -359,11 +359,29 @@ struct ContentView: View {
                         }
                     }
                     .animation(nil, value: workspaceMode)
+                    // ★ v2.11.7 hotfix24: 给工作区一条最小宽度，并把它的布局优先级抬到侧栏之上。
+                    //
+                    // Agent 侧栏是**定宽** 320pt（`AgentSidebarView.width`），不参与弹性分配；
+                    // 没有这条 minWidth 时，一旦窗口宽度不够，被压的只能是中间的工作区 ——
+                    // 编辑页的卡片列会被压到裁字，画布连一个节点都摆不下。有了它，SwiftUI 会把
+                    // 「放不下」上报成整行的最小宽度，与顶栏的下限一起决定窗口最小宽度，
+                    // 而不是默默把中间挤没。
+                    //
+                    // 注：当前顶栏所需宽度（~1058）远大于「工作区最小 + 侧栏 320」，所以实际生效的
+                    // 窗口下限来自顶栏；这条 minWidth 是把不变量写进代码，防止以后顶栏瘦身后失守。
+                    .frame(minWidth: workspaceMode == .canvas
+                           ? WindowLayoutMetrics.canvasViewportMinWidth
+                           : WindowLayoutMetrics.editWorkspaceMinWidth)
+                    .layoutPriority(1)
 
                     if agentSidebarVisible {
                         AgentSidebarView(model: agentSessions.session(for: workspaceMode),
                                          isVisible: agentSidebarBinding)
                             .transition(.move(edge: .trailing))
+                            // 侧栏自己是定宽的，这里再声明一次「不许被压」：没有它，SwiftUI 仍可能
+                            // 在总宽不足时给它一个更小的提案，让 320pt 的内容溢出到工作区上面。
+                            .fixedSize(horizontal: true, vertical: false)
+                            .layoutPriority(0)
                     }
                 }
                 // ★ v2.11.7 hotfix21→22: 这里曾挂过一份「画布模式专用」的浮动切换器。
@@ -466,6 +484,13 @@ struct ContentView: View {
         // v2.10.91: 显隐与「热键安全区」标志的同步统一由 store.setSettingsOverlay 负责。
         .onReceive(NotificationCenter.default.publisher(for: .openInAppSettings)) { _ in
             store.setSettingsOverlay(true)
+        }
+        // v2.11.7 hotfix24（诊断专用）：程序化切换工作区。
+        // 只有 PerfAutoTest 的 narrowshot 场景会发这条通知（见 main.swift 的通知名声明处）。
+        .onReceive(NotificationCenter.default.publisher(for: .setWorkspaceMode)) { note in
+            guard let raw = note.userInfo?["mode"] as? String,
+                  let mode = WorkspaceMode(rawValue: raw) else { return }
+            workspaceMode = mode
         }
         // v2.6.7: Import options sheet
         .sheet(item: $store.pendingImportSelection) { selection in
@@ -756,8 +781,19 @@ struct ContentView: View {
 
     // Layer 1: Title + Stats + Settings
     private var titleBar: some View {
-        HStack(spacing: 14) {
-            // The edge clusters keep their intrinsic sizes and stay pinned to the title-bar edges.
+        // ★ v2.11.7 hotfix24: 外层从 `HStack` 换成 `CenterReservedRow`。
+        //
+        // 原来是 `HStack(spacing: 14) { 左簇; 拨杆; Spacer(8); 透明占位; Spacer(8); 搜索栏; 图标簇 }`。
+        // 两个 Spacer 分的是「剩余空间」，于是让出来的空档并不在整行中线上，而真正显示的那颗胶囊
+        // （挂在内容区根节点的 overlay 上）却是按窗口中线定位的 —— 两者随窗口变窄越分越开，
+        // 实测 840pt 宽时胶囊已经盖住「自动粘贴」拨杆的标签。而且 HStack 放不下时是**静默溢出**、
+        // 由窗口裁掉，不会把「需要更宽」上报给窗口（详见 CenterReservedRow 与 WindowLayoutMetrics 的注释）。
+        //
+        // `CenterReservedRow` 把中间那块精确挖在 `midX`，并把两簇的最小宽度如实上报，
+        // 于是「胶囊压住控件」「两簇被裁」都变成构造上不可能。
+        CenterReservedRow(centerWidth: WorkspaceModeSwitcher.preferredWidth) {
+            // 左簇：logo + 标题/检查更新 + 两个拨杆。
+            HStack(spacing: 14) {
             HStack(spacing: 14) {
                 ZStack {
                 // 两种皮肤的 logo **共用同一个 46×46pt 的盒子**（见下方 `.frame`），可见图形
@@ -834,24 +870,21 @@ struct ContentView: View {
             LeverClusterView(store: store, autoMode: autoMode)
                 .fixedSize(horizontal: true, vertical: false)
                 .layoutPriority(2)
+            }
+            // 左簇整体贴左：`CenterReservedRow` 给它的槽位是「整行的左半」，比它实际需要的宽，
+            // 多出来的部分必须留在右侧（靠近中线那一侧），否则 logo 会往中间飘。
+            .frame(maxWidth: .infinity, alignment: .leading)
 
-            // ★ v2.11.7 hotfix20: 切换器移到**标题栏的几何正中线**（用户要求）。
+            // 右簇：搜索栏 + 图标簇。
             //
-            // 它不再是 HStack 的一员。左右两簇宽度并不相等（左：logo+检查更新+两个拨杆；
-            // 右：400pt 搜索框 + 四枚图标），若仍靠两个 Spacer 夹住，得到的是「剩余空间的中点」，
-            // 会比真正的中线偏左二三十点 —— 这种"差一点"的居中比明显靠左更刺眼。
-            // 所以真正显示的那一份挂在下面的 `.overlay(alignment: .center)`：overlay 的坐标系
-            // 就是整条标题栏，`.center` 就是几何中线，与两侧内容宽度无关。
-            //
-            // 流内这块透明占位不能省：overlay 不参与布局，没有它，窗口一窄左右两簇会直接压到
-            // 中央控件上（右侧搜索框 minWidth 是 0，会一路挤过来）。
-            Spacer(minLength: 8)
-
-            Color.clear
-                .frame(width: WorkspaceModeSwitcher.preferredWidth, height: 1)
-
-            Spacer(minLength: 8)
-
+            // ★ v2.11.7 hotfix24: 这一簇原来直接铺在顶栏 HStack 里，两处漏洞：
+            //   1. 图标簇（外观/Agent/插件/键盘/设置）**没有** fixedSize/layoutPriority，窗口一窄
+            //      就被压，5 枚 32pt 图标瓦片溢出到窗口右边被裁（实测 840pt 时齿轮已掉出去）。
+            //   2. 搜索栏写着 `minWidth: 0`，允许它被压成 0 宽；但它内部的窄变体本身要 ~232pt，
+            //      压过头后**内容溢出到框外**，「全部」筛选菜单直接叠在图标瓦片底下叠字。
+            // 现在：搜索栏去掉 `minWidth: 0`（让它如实上报窄变体的最小宽度），图标簇补上 fixedSize
+            // 与高优先级。两者的最小宽度之和会被 CenterReservedRow 上报为整行下限。
+            HStack(spacing: 8) {
             SlotSearchBar(
                 searchText: $searchText,
                 selectedFilter: $selectedFilter,
@@ -860,7 +893,11 @@ struct ContentView: View {
             // v2.10.77: 搜索框此前 maxWidth: .infinity 会横向铺满整行，观感过长。改为
             // 固定上限宽度 400pt。用固定上限而非随窗口宽度变化的比例值，配合 v2.10.75
             // resize 冻结，resize 时宽度稳定。
-            .frame(minWidth: 0, idealWidth: 400, maxWidth: 400)
+            //
+            // v2.11.7 hotfix24: 刻意**不写 minWidth** —— 让 SlotSearchBar 自己的
+            // `WidthThresholdLayout` 回答最小宽度（提案 width: 0 时它选窄变体，答 ~232pt）。
+            // 写死一个更小的 minWidth（哪怕 80）只会让它再次被压到内容溢出、菜单叠到图标底下。
+            .frame(idealWidth: 400, maxWidth: 400)
             .layoutPriority(0)
 
             HStack(spacing: 8) {
@@ -940,13 +977,18 @@ struct ContentView: View {
             }
             .fixedSize(horizontal: true, vertical: false)
             .layoutPriority(2)
+            }
+            // 右簇整体贴右：多出来的空间留在左侧（靠近中线那一侧）。
+            .frame(maxWidth: .infinity, alignment: .trailing)
         }
         .frame(maxWidth: .infinity)
         // ★ v2.11.7 hotfix22: 这里原本挂着 `.overlay(alignment: .center) { WorkspaceModeSwitcher }`。
         // 现在整个 App 只保留**一份**切换器，挂在内容区根节点上（见 body 里的
         // `workspaceModeSwitcherPinned`），编辑 / 画布共用同一实例，位置不可能随模式变化。
-        // 流内那块透明占位（上面 hotfix20 注释处）**保留**：overlay 不参与布局，没有它，
-        // 窗口一窄左右两簇会直接压到中央胶囊底下。
+        //
+        // ★ v2.11.7 hotfix24: 中间那块空档不再靠「Spacer + 透明占位」让位，改由外层
+        // `CenterReservedRow` 精确挖在整行中线上（原做法挖出来的位置随两簇宽度差偏左，
+        // 窗口一窄就和按窗口中线定位的胶囊错开、把拨杆标签盖住）。
     }
 
     // Layer 2: Page Selector + Actions

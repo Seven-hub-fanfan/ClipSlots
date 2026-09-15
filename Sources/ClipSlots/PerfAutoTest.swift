@@ -161,6 +161,73 @@ final class PerfAutoTest {
             steps.append(("截图-窄2", { Self.snapshotWindow(to: "\(dir)/\(tag)-narrow.png") }, 1.0))
         }
 
+        // ★ v2.11.7 hotfix24：窄窗口 UI 回归取证。
+        //
+        // 为什么需要它：「缩小窗口时 UI 错乱」这类问题的关键组合是 **模式 × Agent 侧栏 × 窗口宽度**
+        // 三维叉乘，手动复现一次要点五六下、还得记住每次的窗口宽度。而且本机根本没法从进程外驱动：
+        // AX 不给主窗口暴露 AXSize（实测 kAXErrorNoValue），System Events 看不到窗口，
+        // 主窗口又常在负坐标的外接屏上（`screencapture -R` 直接失败）。
+        // 所以改成在进程内 `setFrame` + `cacheDisplay` 出图：不依赖任何权限、不依赖窗口在哪块屏、
+        // 每次跑出来的图逐像素可比。
+        //
+        // 用法：
+        //   CLIPSLOTS_PERF_AUTOTEST=1 CLIPSLOTS_PERF_AUTOTEST_SCENARIO=narrowshot \
+        //   CLIPSLOTS_PERF_SHOT_DIR=/tmp/x CLIPSLOTS_PERF_SHOT_TAG=before \
+        //   CLIPSLOTS_PERF_NARROW_WIDTHS=560,640,720,820,980 /Applications/ClipSlots.app/Contents/MacOS/ClipSlots
+        if scenarios.contains("narrowshot") {
+            let dir = ProcessInfo.processInfo.environment["CLIPSLOTS_PERF_SHOT_DIR"] ?? "/tmp/cs-perf/shots"
+            let tag = ProcessInfo.processInfo.environment["CLIPSLOTS_PERF_SHOT_TAG"] ?? "run"
+            let widths: [CGFloat] = {
+                let raw = ProcessInfo.processInfo.environment["CLIPSLOTS_PERF_NARROW_WIDTHS"] ?? "560,640,720,820,980"
+                let parsed = raw.components(separatedBy: ",").compactMap { Double($0.trimmingCharacters(in: .whitespaces)) }
+                return parsed.isEmpty ? [560, 640, 720, 820, 980] : parsed.map { CGFloat($0) }
+            }()
+            let height: CGFloat = 640
+
+            for mode in ["edit", "canvas"] {
+                for agentOn in [false, true] {
+                    steps.append(("窄窗-切\(mode)-侧栏\(agentOn ? "开" : "关")", {
+                        UserDefaults.standard.set(agentOn, forKey: "agent.sidebarVisible.edit")
+                        UserDefaults.standard.set(agentOn, forKey: "agent.sidebarVisible.canvas")
+                        NotificationCenter.default.post(name: .setWorkspaceMode,
+                                                        object: nil,
+                                                        userInfo: ["mode": mode])
+                    }, 1.4))
+                    for w in widths {
+                        let label = "\(tag)-\(mode)-agent\(agentOn ? "1" : "0")-w\(Int(w))"
+                        steps.append(("窄窗-\(label)", {
+                            guard let win = NSApp.windows.first(where: { $0.canBecomeMain }) else { return }
+                            // 落位到屏幕左上，避免窄窗被推出可见区域后 AppKit 反过来改尺寸。
+                            let visible = (win.screen ?? NSScreen.main)?.visibleFrame ?? win.frame
+                            var f = win.frame
+                            f.size = NSSize(width: w, height: height)
+                            f.origin = CGPoint(x: visible.minX + 20, y: visible.maxY - height - 20)
+                            win.setFrame(f, display: true)
+                            // 真实拖拽会走 live-resize 分支（LiveResizeMonitor 的唯一输入是这两条通知），
+                            // 这里不补发：要看的是**停手后的稳定态**，降级渲染会掩盖真实的布局错乱。
+                            win.contentView?.layoutSubtreeIfNeeded()
+                            // fittingSize 就是 SwiftUI 那棵树的**内在最小尺寸**（NSHostingView 把
+                            // SwiftUI 的 min 提案翻译成 AppKit 的 fittingSize）。它 > 当前内容宽度时，
+                            // 说明内容已经放不下、正在被裁切 —— 这正是「窗口缩小 UI 错乱」的判据。
+                            let fitting = win.contentView?.fittingSize ?? .zero
+                            NSLog("[Perf] narrowshot \(label) 内容宽=\(Int(win.contentView?.bounds.width ?? 0))"
+                                  + " 内在最小=\(Int(fitting.width))x\(Int(fitting.height))"
+                                  + " contentMinSize=\(Int(win.contentMinSize.width))x\(Int(win.contentMinSize.height))")
+                        }, 0.9))
+                        steps.append(("窄窗-拍\(label)", {
+                            Self.snapshotWindow(to: "\(dir)/\(label).png")
+                        }, 0.5))
+                    }
+                }
+            }
+            // 收尾：把侧栏标志还原成关，免得取数把用户的真实偏好留在"开"上。
+            steps.append(("窄窗-还原", {
+                UserDefaults.standard.set(false, forKey: "agent.sidebarVisible.edit")
+                UserDefaults.standard.set(false, forKey: "agent.sidebarVisible.canvas")
+                NotificationCenter.default.post(name: .setWorkspaceMode, object: nil, userInfo: ["mode": "edit"])
+            }, 0.6))
+        }
+
         if scenarios.contains("themeshot") {
             // 切主题瞬间连拍：把「卡颜色」从主观描述变成可看的证据——
             // 在 16ms / 60ms / 140ms / 320ms / 700ms 各拍一张，肉眼即可看出哪一块区域晚变色。

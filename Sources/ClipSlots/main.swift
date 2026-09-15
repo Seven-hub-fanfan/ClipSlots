@@ -75,6 +75,15 @@ fileprivate func virtualKeyForCharacterV() -> CGKeyCode {
 // v2.9.12: request to open the in-app settings overlay (Cmd+, / menu).
 extension Notification.Name {
     static let openInAppSettings = Notification.Name("com.clipslots.openInAppSettings")
+
+    /// v2.11.7 hotfix24（诊断专用）：程序化切换工作区（`userInfo["mode"]` = "edit" / "canvas"）。
+    ///
+    /// 唯一用途是给 `PerfAutoTest` 的 `narrowshot` 场景当入口。窄窗口 UI 回归必须在**两个模式**下
+    /// 各拍一张，而 `workspaceMode` 是 `@State` 且刻意不持久化（理由见 ContentView 的声明处），
+    /// 外部既不能通过 UserDefaults 驱动，也无法从进程外可靠地点到那颗胶囊（本机 AX 不给主窗口
+    /// 暴露 AXSize/AXChildren，System Events 看不到窗口，合成点击的坐标又依赖窗口所在显示器）。
+    /// 用一条通知把切换入口打开，取数脚本才能复现「窄 + 画布 + 侧栏开」这类组合。
+    static let setWorkspaceMode = Notification.Name("com.clipslots.setWorkspaceMode")
 }
 
 @main
@@ -129,7 +138,22 @@ struct ClipSlotsApp: App {
                 // A/B 实测**更差**：每次切组累计主线程停顿 507ms → 615ms、最大单次停顿 210ms → 639ms。
                 // 原因推测是没有根部弹性 frame 后，hosting view 与窗口之间要反复协商内容尺寸，反而多了
                 // 布局往返。故保留原写法。
-                .frame(minWidth: 720, minHeight: 560)
+                //
+                // ★ v2.11.7 hotfix24: 数值从写死的 720×560 改为 `WindowLayoutMetrics` 常量。
+                //
+                // 720 是**假的下限** —— 编辑页顶栏一行（logo + 检查更新 + 两个拨杆 + 居中切换胶囊
+                // + 搜索栏 + 5 枚图标）实际要 ~1058pt 才放得下，于是 720~1058 这一段窗口都处于
+                // 「内容溢出、被窗口裁掉」的状态：logo 缺一半、齿轮掉出右边、页面行/组标签行/底栏
+                // 同时顶到边缘、搜索栏被压到 0 宽后内部「全部」菜单溢出到图标簇底下叠字、
+                // 窗口正中的切换胶囊盖住「自动粘贴」拨杆标签。用户看到的「缩小窗口 UI 错乱」就是这一段。
+                //
+                // 为什么必须是常量、不能靠内容自己顶：SwiftUI 的 HStack 面对「放不下」是静默溢出，
+                // **不会**把差额上报成父容器最小宽度（实测 contentMinSize 恒为 720、
+                // NSHostingView.fittingSize 返回 0×0）。而且画布模式根本没有顶栏，若让下限随模式
+                // 浮动，用户可以在画布里缩到很窄再切回编辑 —— 等于没修。所以取「编辑页顶栏所需宽度」
+                // 作为与模式无关的全局下限。数值推导见 WindowLayoutMetrics.minWindowContentWidth。
+                .frame(minWidth: WindowLayoutMetrics.minWindowContentWidth,
+                       minHeight: WindowLayoutMetrics.minWindowContentHeight)
                 // ★ v2.10.93（切主题「卡颜色」第三刀）：这里**故意不再设 `.preferredColorScheme`**。
                 //
                 // 自 v2.10.91 起主题已经由 `AppDelegate.applyAppAppearance()` 同步到 `NSApp.appearance`

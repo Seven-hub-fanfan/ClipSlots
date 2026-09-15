@@ -30,7 +30,9 @@ struct AgentSidebarView: View {
     @State private var showSkillPicker = false
     @FocusState private var inputFocused: Bool
 
-    static let width: CGFloat = 320
+    /// 侧栏定宽。v2.11.7 hotfix24 起改为引用 `WindowLayoutMetrics` 里的同一个常量 ——
+    /// 主窗口最小宽度的推导需要用到这个数，两处各写一遍迟早会对不上。
+    static let width: CGFloat = WindowLayoutMetrics.agentSidebarWidth
 
     private var enabledSlugs: Set<String> { AgentPreferences.decodeEnabledSlugs(enabledSkillsRaw) }
 
