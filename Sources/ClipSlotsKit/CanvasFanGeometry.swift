@@ -107,6 +107,23 @@ public enum CanvasFanGeometry {
     ///
     /// 角度构造为 `(i - (n-1)/2) * spread`：**关于中轴严格对称**，因此任意张数下这叠卡片的
     /// 视觉重心都在节点正中，不会随张数奇偶跳动。
+    ///
+    /// ## 层级方向：第 1 张在最上（★ v2.11.8 四轮，用户反馈）
+    ///
+    /// 四轮之前 `zIndex = Double(i)`，也就是**下标越大越靠前** —— 视觉上是"左底右顶"，最右边那张
+    /// （内容顺序里的最后一张）压在所有卡片之上。用户明确要反过来：「第 1 张卡片在最左侧且在视觉最顶层，
+    /// 后续卡片依次向右延伸且层级递减」。
+    ///
+    /// 所以现在是 `zIndex = Double(n - 1 - i)`：第 0 张最高，越往右越低。这不只是观感偏好 ——
+    /// 卡片顺序本身是有语义的（附件列表首位 = 缩略图 / 圆盘 / 生成时取的那一张，见"设为入参"），
+    /// 让首位那张被压在最底下等于把最重要的一张藏起来。
+    ///
+    /// **位置与角度刻意不动**：第 0 张本来就在最左（`k = -mid` → offset 为负），角度也已经是
+    /// 左倾。若按字面把角度一起取反，就会出现"卡片待在左边却向右倾"，相邻卡片互相穿插，
+    /// 观感是散落而不是一叠。扇形张开的方向（左→右）与"第 1 张在最左"本来就是一致的。
+    ///
+    /// `hitTest` 按 zIndex 从高到低遍历，所以命中优先级会**自动**跟着反转，不需要另外改 ——
+    /// 这正是当初把命中判定从"各卡自己 onHover"改成统一命中层的收益。
     public static func layouts(count: Int,
                                expanded: Bool,
                                hoveredIndex: Int? = nil) -> [CardLayout] {
@@ -132,7 +149,10 @@ public enum CanvasFanGeometry {
                               scale: isHovered ? hoverScale : 1,
                               // 被悬停的卡片必须压住相邻卡片的边缘（用户明确要求 Z 层提升），
                               // 否则放大 1.08 的那 8% 会被邻居切掉一条边，看起来像渲染错误。
-                              zIndex: isHovered ? 100 : Double(i))
+                              //
+                              // ★ 四轮：静息层级由 `Double(i)` 反转为 `Double(n - 1 - i)`
+                              // —— 第 1 张在最顶层，越靠右越靠底层（见类型注释）。
+                              zIndex: isHovered ? 100 : Double(n - 1 - i))
         }
     }
 
@@ -147,6 +167,10 @@ public enum CanvasFanGeometry {
     ///
     /// 与扇形的关键差异：**角度恒为 0**。轮播的可点性来自"物理上不重叠"，一旦带了旋转，
     /// 相邻卡片的角部就会互相探入，又回到扇形那个"看得见点不着"的问题。
+    ///
+    /// 层级同样是"第 1 张最高"（★ 四轮，与扇形保持一致）。轮播态卡片本来不重叠，层级平时看不出来，
+    /// 但 hover 放大 1.08 的瞬间会短暂相交 —— 两种风格用同一套层级方向，切换风格时才不会
+    /// 出现"同一叠卡的前后关系突然反过来"。
     public static func carouselLayouts(count: Int,
                                        cardWidth: CGFloat,
                                        hoveredIndex: Int? = nil) -> [CardLayout] {
@@ -161,7 +185,7 @@ public enum CanvasFanGeometry {
                               offset: CGSize(width: k * step,
                                              height: isHovered ? carouselHoverLift : 0),
                               scale: isHovered ? hoverScale : 1,
-                              zIndex: isHovered ? 100 : Double(i))
+                              zIndex: isHovered ? 100 : Double(n - 1 - i))
         }
     }
 

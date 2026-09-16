@@ -393,7 +393,9 @@ struct CanvasSlotFanStack: View {
     /// ## 为什么不能让每张卡片各自 `.onHover`（v2.11.8 二轮，用户实测反馈的根因）
     ///
     /// 一轮就是那么写的，用户的原话是「展开很难选到第二个」「最后那个又没有办法选择中间的」。
-    /// 录屏分析后确认：卡片是**不透明的白卡且右压左**（zIndex 递增），旋转 17° 后相邻两卡在下半部
+    /// 录屏分析后确认：卡片是**不透明的白卡且右压左**（当时 zIndex 递增；四轮已按用户要求翻成
+    /// 左压右，见 `CanvasFanGeometry.layouts` —— 下面这段讲的是"为什么不能各自 onHover"，
+    /// 与层级朝哪边无关，翻转后一字不改仍然成立），旋转 17° 后相邻两卡在下半部
     /// 几乎完全重合 —— 每张卡"只属于自己"的可点区域是靠顶端一道窄楔形。SwiftUI 的命中是逐视图的，
     /// 谁在上面谁吃事件，于是中间那几张剩下的有效面积只有几个像素宽；更糟的是鼠标横向移动时会
     /// 连续穿过好几张卡的边缘，`hoveredCard` 疯狂改写，卡片跟着抖，观感像是"选不中"。
@@ -468,6 +470,9 @@ struct CanvasSlotFanStack: View {
     ///
     /// 单独成层是因为卡片层被 `allowsHitTesting(false)` 关掉了事件 —— 角标是**要能点的**，
     /// 只能自己带着同一套变换独立渲染一遍。
+    ///
+    /// ★ 四轮：层级翻转后"最前面那张"由最右变成**最左**（下标 0），这里取的是 `zIndex` 最大者，
+    /// 所以角标自动跟着走 —— 千万别改成写死 `ls.last`，那样角标会被压到卡片底下变成点不着的死按钮。
     @ViewBuilder
     private func badgeLayer(_ ls: [CanvasFanGeometry.CardLayout],
                             cardSize: CGSize) -> some View {
@@ -551,6 +556,13 @@ struct CanvasSlotFanStack: View {
         .rotationEffect(.degrees(layout.angle), anchor: .bottom)
         .offset(x: s(layout.offset.width), y: s(layout.offset.height))
         // 压在牌面之上（它是入口，必须可点），但低于操作气泡。
+        //
+        // ★ v2.11.8 四轮：牌面层级反转成"第 1 张在最顶层、越靠右越靠底层"之后，这一格（最右）
+        // 按牌面规则本该是**最底层**。这里刻意不跟着沉下去，因为它不是一张牌面而是一个**控件**：
+        // 沉到底后，它被左边那张卡盖住，只剩约一个 `expandedStagger`（12pt）宽的斜边露在外面，
+        // 那正是本项目反复修过的"看得见点不着"（一轮扇形选不中第二张、hotfix19 附件条点了没反应）。
+        // 控件浮在内容之上是常规做法，代价只是它会盖住左邻卡的一条右边缘 —— 半透明灰 + 白描边
+        // 已经把"我不是牌面"说清楚了。
         .zIndex(350)
         .animation(activeSpring, value: expanded)
         .animation(activeSpring, value: windowStart)

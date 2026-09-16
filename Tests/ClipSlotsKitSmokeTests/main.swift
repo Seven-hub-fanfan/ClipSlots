@@ -5105,8 +5105,25 @@ do {
             "hover 一张不该影响其他卡片的缩放/位移")
     t.check(canvasApprox(hovered[3].angle, four[3].angle), "hover 不改变任何卡片的角度（只抬起放大）")
 
-    // 收拢态下的 zIndex 递增：后加的卡片压在前面的上面，最前那张才是 + 角标的宿主。
-    t.check(collapsed4[3].zIndex > collapsed4[0].zIndex, "堆叠顺序稳定（下标越大越靠前）")
+    // ★ 四轮：层级方向反转成「第 1 张在最顶层，越靠右越靠底层」（用户反馈：此前是"左底右顶"）。
+    //
+    // 这条不是审美偏好：卡片顺序有语义 —— 附件列表首位就是缩略图 / 圆盘 / 生成时取的那一张
+    // （"设为入参"就是把它挪到首位），把首位那张压在最底下等于把最重要的一张藏起来。
+    // 断言写成"逐位递减"而不是只比首尾：只比两端时，中间某一张写错顺序也能过。
+    for layouts in [collapsed4, four] {
+        t.check(zip(layouts, layouts.dropFirst()).allSatisfy { $0.zIndex > $1.zIndex },
+                "★层级逐位递减：第 1 张最顶、最后一张最底（收拢态与展开态都必须一致）")
+        t.equal(layouts.max(by: { $0.zIndex < $1.zIndex })?.index, 0,
+                "★最顶层是第 1 张 —— 收拢态的「+ 加入参」角标挂在最顶层那张上，方向反了角标会跑到被压住的卡上")
+        t.equal(layouts.min(by: { $0.zIndex < $1.zIndex })?.index, layouts.count - 1,
+                "最底层是最后一张")
+    }
+    // 位置/角度**没有**跟着一起取反：第 1 张仍在最左、仍左倾。
+    // 若按字面把角度也取反，就会出现"卡片待在左边却向右倾"，相邻卡互相穿插，观感是散落而不是一叠。
+    t.check(four[0].offset.width < 0 && four[3].offset.width > 0,
+            "★第 1 张仍在最左、最后一张仍在最右（层级反转不改变扇开方向）")
+    t.check(four[0].angle < 0 && four[3].angle > 0,
+            "★第 1 张仍左倾：角度与位置必须同向，否则卡片会与邻卡交叉")
 
     // 文本分段：空行优先、其次换行、都没有就整段一张。
     t.equal(CanvasFanGeometry.textSegments("").count, 0, "空文本不产生文本卡")
@@ -5185,6 +5202,25 @@ do {
     t.check(CanvasFanGeometry.hitTest(point: CGPoint(x: -50, y: -50),
                                       layouts: hi, cardSize: cardSize, containerSize: box) == nil,
             "容器外的点不命中任何卡片")
+
+    // ★ 四轮：层级反转后，重叠区归**下标更小**那张（第 1 张在最上）。
+    //
+    // 上面那条断言是"与 zIndex 一致"，方向无关 —— zIndex 整体写反了它照样通过。这里钉死方向：
+    // 命中错方向的症状是"点左边那张、选中的却是右边那张"，用户只会觉得"点不准"，很难说清是层级问题。
+    var checkedOverlap = false
+    for x in stride(from: CGFloat(4), through: box.width - 4, by: 4) {
+        let p = CGPoint(x: x, y: box.height - 20)
+        let covering = hi.filter {
+            CanvasFanGeometry.polygonContains(
+                CanvasFanGeometry.cardPolygon(layout: $0, cardSize: cardSize, containerSize: box), p)
+        }.map(\.index)
+        guard covering.count >= 2 else { continue }
+        checkedOverlap = true
+        t.equal(CanvasFanGeometry.hitTest(point: p, layouts: hi, cardSize: cardSize, containerSize: box),
+                covering.min(),
+                "★重叠处命中下标最小的那张（第 1 张压住后面的）")
+    }
+    t.check(checkedOverlap, "扇形展开态必须存在重叠区，否则上面那条方向断言等于没跑（间距被改大了要重新取样）")
 
     // ---- +N 溢出 ----
     t.equal(CanvasFanGeometry.overflowCount(total: 3), 0, "不超过 5 张时没有 +N")
