@@ -5222,6 +5222,96 @@ do {
     }
     t.check(checkedOverlap, "扇形展开态必须存在重叠区，否则上面那条方向断言等于没跑（间距被改大了要重新取样）")
 
+    // ---- ★ 五轮：「+N」灰卡沉到最底层，但必须还点得到 ----
+    //
+    // 三轮为了"翻页入口要能点"给灰卡单独设了 `zIndex(350)`（四轮还专门写注释重申了这个决定），
+    // 结果半透明灰卡压在右侧两三张内容卡上
+    // 把它们蒙暗了（用户截图 image-351a7cbf）。五轮把它沉回牌面规则里（最右 = 最底层），
+    // 于是必须证明另一件事：**沉下去之后它露出的面积仍然够点**。否则就是本项目反复出现的
+    // "看得见点不着"。这两条断言一起构成"既不压内容、又点得到"的双向护栏。
+    do {
+        let slotCount = CanvasFanGeometry.maxCards + 1   // 5 张牌面 + 1 张 +N
+        let overflow = slotCount - 1                     // +N 永远是最后一格
+        let ls = CanvasFanGeometry.layouts(count: slotCount, expanded: true)
+        let cardSize = CanvasFanGeometry.fanCardSize(boxHeight: 132)
+        let box = CGSize(width: 236, height: 132)        // 默认节点宽 260 - 左右各 12
+
+        t.equal(ls.count, slotCount, "第 6 格（+N）必须有布局，否则翻页入口整个不见")
+        t.equal(ls[overflow].zIndex, ls.map(\.zIndex).min(),
+                "★「+N」灰卡在所有卡片的**最底层**（半透明卡浮在内容上等于给内容蒙灰）")
+
+        // 逐点采样：统计「+N」那一格作为最上层被命中的面积。
+        var overflowHits = 0
+        var anyCardHits = 0
+        for x in stride(from: CGFloat(0), through: box.width, by: 2) {
+            for y in stride(from: CGFloat(0), through: box.height, by: 2) {
+                guard let hit = CanvasFanGeometry.hitTest(point: CGPoint(x: x, y: y),
+                                                         layouts: ls,
+                                                         cardSize: cardSize,
+                                                         containerSize: box) else { continue }
+                anyCardHits += 1
+                if hit == overflow { overflowHits += 1 }
+            }
+        }
+        let overflowArea = CGFloat(overflowHits) * 4     // 采样步长 2pt → 每个采样点 4pt²
+        t.check(overflowArea >= 500,
+                "★「+N」露出的可点面积 ≥ 500pt²（实测 \(Int(overflowArea))pt²）—— 沉到底层后仍然点得到")
+        let oneCardArea = cardSize.width * cardSize.height
+        t.check(overflowArea * 8 >= oneCardArea,
+                "★「+N」露出的面积 ≥ 单卡面积的 1/8（实测 \(Int(overflowArea))/\(Int(oneCardArea))）—— 不是只剩一条缝。"
+                + "三轮那句「沉下去只剩 12pt 斜边」是把 `expandedStagger` 当成了露出宽度、漏算了 20° 张角差")
+        t.check(anyCardHits > 0, "整叠必须有可点面积（采样步长若被改大到跳过全部卡片，上面的比例就没意义）")
+
+        // 露出的那块必须在**右侧**（用户要求"只露出右边缘"）。
+        var minHitX = box.width
+        for x in stride(from: CGFloat(0), through: box.width, by: 2) {
+            for y in stride(from: CGFloat(0), through: box.height, by: 2) {
+                if CanvasFanGeometry.hitTest(point: CGPoint(x: x, y: y),
+                                             layouts: ls,
+                                             cardSize: cardSize,
+                                             containerSize: box) == overflow {
+                    minHitX = min(minHitX, x)
+                }
+            }
+        }
+        t.check(minHitX > box.width / 2,
+                "★「+N」的可点区域整块落在容器右半边（实测最左命中 x=\(Int(minHitX))，容器宽 \(Int(box.width))）")
+
+        // 「+N」文字必须落在**露出**的那块楔形上：沉到牌面之下后，卡片正中是被邻卡盖住的地方，
+        // 居中的文字一个像素都看不见（实机截图 v5-crop 只剩一条白描边）。
+        let anchor = CanvasFanGeometry.overflowLabelAnchor
+        let anchorPoint = CanvasFanGeometry.cardPoint(layout: ls[overflow],
+                                                     cardSize: cardSize,
+                                                     containerSize: box,
+                                                     unit: anchor)
+        t.equal(CanvasFanGeometry.hitTest(point: anchorPoint,
+                                         layouts: ls, cardSize: cardSize, containerSize: box),
+                overflow,
+                "★「+N」文字锚点落在灰卡**露出**的部分（居中就会被左邻卡完全盖住，「还有更多」的信息丢失）")
+        t.check(CanvasFanGeometry.hitTest(point: CanvasFanGeometry.cardPoint(layout: ls[overflow],
+                                                                            cardSize: cardSize,
+                                                                            containerSize: box,
+                                                                            unit: CGPoint(x: 0.5, y: 0.5)),
+                                          layouts: ls, cardSize: cardSize, containerSize: box) != overflow,
+                "反证：灰卡的几何中心确实被邻卡盖住了（若哪天不盖了，锚点可以退回居中）")
+        // cardPoint 与 cardPolygon 必须是同一段数学（四角 = unit 的四个角）。
+        let poly = CanvasFanGeometry.cardPolygon(layout: ls[overflow], cardSize: cardSize, containerSize: box)
+        let corners: [CGPoint] = [CGPoint(x: 0, y: 0), CGPoint(x: 1, y: 0), CGPoint(x: 1, y: 1), CGPoint(x: 0, y: 1)]
+        for (i, unit) in corners.enumerated() {
+            let p = CanvasFanGeometry.cardPoint(layout: ls[overflow], cardSize: cardSize,
+                                                containerSize: box, unit: unit)
+            t.check(canvasApprox(p.x, poly[i].x) && canvasApprox(p.y, poly[i].y),
+                    "cardPoint 与 cardPolygon 同源（第 \(i) 个角）")
+        }
+
+        t.check(CanvasFanGeometry.overflowCardHotOpacity > CanvasFanGeometry.overflowCardOpacity,
+                "★hover 时「+N」提浓（它不再是 Button，这是唯一的「我能点」反馈）")
+        t.check(CanvasFanGeometry.overflowCardHotOpacity < 1.0,
+                "★但不能提到 1.0 —— 那看起来就变成一张真牌面了")
+        t.check(CanvasFanGeometry.arrowLaneInset > 0,
+                "★翻页箭头要往容器内收（贴边 = 伸手去点时容易过冲出节点边界）")
+    }
+
     // ---- +N 溢出 ----
     t.equal(CanvasFanGeometry.overflowCount(total: 3), 0, "不超过 5 张时没有 +N")
     t.equal(CanvasFanGeometry.overflowCount(total: 5), 0, "正好 5 张时没有 +N")
@@ -5231,6 +5321,75 @@ do {
             "★allCardSources 不截断 —— 截断了就算不出总数，+N 与轮播分页都会错")
     t.equal(CanvasFanGeometry.cardSources(attachmentIndices: Array(0..<50), text: "").count,
             CanvasFanGeometry.maxCards, "cardSources 仍按扇形上限截断（两个函数刻意分工）")
+
+    // ---- ★ 五轮：hover 维持区（CanvasNodeHover）----
+    //
+    // 录屏 20260916125646 逐帧定位到的根因：扇形收拢的每一次，光标都已越出节点卡片边框；
+    // 其中一次只越出 ~12px —— 那是用户正把鼠标往**左翻页箭头**上送的路上（箭头距边框仅 ~11px）。
+    // `.onHover` 边界即真理，出框那一帧扇形就收、箭头就没，动作被打断。
+    //
+    // 这组断言钉的是"维持区一定盖得住扇形能张到的地方"，参数（角度/间距/卡片尺寸）以后被人调大时，
+    // 会在这里失败而不是等用户再录一次屏。
+    do {
+        t.check(canvasApprox(CanvasNodeHover.leaveDelay, 0.2),
+                "★hover 离开宽限期 200ms（用户指定；治的是「快速穿过缝隙 / 边界抖一下」）")
+        t.check(CanvasNodeHover.sideSlop >= 20,
+                "★维持区外扩至少 20pt —— 录屏里那次误触只过冲了 12px")
+
+        for w in [CanvasNode.defaultSize.width, 180, 240, 320, 460] as [CGFloat] {
+            for h in [CanvasNode.defaultSize.height, 200, 320, 520] as [CGFloat] {
+                let n = canvasNode(x: 1000, y: 800, width: w, height: h)
+                let own = CanvasNodeHover.ownRect(node: n)
+                let hold = CanvasNodeHover.holdRect(node: n)
+                t.check(hold.contains(own), "维持区必须完整包住节点本体（w=\(Int(w)) h=\(Int(h))）")
+
+                // 扇形以预览区中心为轴张开，预览区左右各内缩 12pt → 与节点**同一条竖中轴**。
+                let box = CanvasCardLayout.previewHeight(nodeHeight: h)
+                let card = CanvasFanGeometry.fanCardSize(boxHeight: box)
+                let fanHalf = CanvasFanGeometry.expandedHalfWidth(slotCount: CanvasFanGeometry.maxCards + 1,
+                                                                 cardSize: card)
+                let axis = own.midX
+                t.check(hold.minX <= axis - fanHalf && hold.maxX >= axis + fanHalf,
+                        "★维持区横向盖住整个扇形包围盒（w=\(Int(w)) h=\(Int(h))，扇形半宽 \(Int(fanHalf))，节点半宽 \(Int(w/2))）")
+                t.check(hold.minX <= own.minX - 20 && hold.maxX >= own.maxX + 20,
+                        "★维持区左右各比本体多出 ≥20pt（够吸收「伸手点箭头」的过冲）")
+            }
+        }
+
+        // ── resolve：进入严、维持宽
+        let a = canvasNode(group: "A", x: 0, y: 0)
+        let far = canvasNode(group: "B", x: 4000, y: 4000)
+        let nodes = [a, far]
+        let aOwn = CanvasNodeHover.ownRect(node: a)
+        let aHold = CanvasNodeHover.holdRect(node: a)
+        let inside = CGPoint(x: aOwn.midX, y: aOwn.midY)
+        // 维持环：在维持区内、本体外（正是"扇形最外侧那张卡 / 翻页箭头过冲"落点）
+        let ring = CGPoint(x: aOwn.minX - (aOwn.minX - aHold.minX) / 2, y: aOwn.midY)
+        t.check(!aOwn.contains(ring) && aHold.contains(ring), "取样点必须落在「维持环」里，否则下面两条断言无意义")
+
+        t.equal(CanvasNodeHover.resolve(current: nil, point: inside, nodes: nodes), a.id,
+                "光标在本体里 → hover 该节点")
+        t.equal(CanvasNodeHover.resolve(current: a.id, point: ring, nodes: nodes), a.id,
+                "★已 hover 的节点，光标走到维持环里仍然维持（扇形不收、箭头不消失）")
+        t.equal(CanvasNodeHover.resolve(current: nil, point: ring, nodes: nodes), nil,
+                "★没在 hover 的节点，光标只是路过它旁边 30pt → **不**进入（否则画布上到处闪边框）")
+        t.equal(CanvasNodeHover.resolve(current: a.id, point: CGPoint(x: -9999, y: -9999), nodes: nodes), nil,
+                "光标跑远 → 释放维持")
+        t.equal(CanvasNodeHover.resolve(current: a.id, point: CGPoint(x: far.x + 10, y: far.y + 10), nodes: nodes),
+                far.id, "★本体命中优先于维持 —— 否则光标压在 B 上了 hover 还记在 A 头上，点 B 会没反应")
+
+        // 叠在一起的两个节点：取绘制顺序最上层那个（数组末尾在上）。
+        let lower = canvasNode(group: "low", x: 0, y: 0)
+        let upper = canvasNode(group: "up", x: 10, y: 10)
+        t.equal(CanvasNodeHover.resolve(current: nil,
+                                        point: CGPoint(x: lower.x + 40, y: lower.y + 40),
+                                        nodes: [lower, upper]),
+                upper.id, "★重叠时取最上层那个（与 ZStack 绘制顺序一致：数组末尾在上）")
+
+        // 节点被删掉后，维持对象必须自然失效（否则扇形会挂在一个不存在的 id 上）。
+        t.equal(CanvasNodeHover.resolve(current: "ghost#1", point: inside, nodes: [far]), nil,
+                "维持对象已不在节点列表里 → 返回 nil，不留悬空 hover")
+    }
 
     // ---- B：水平轮播 ----
     t.equal(CanvasFanGeometry.carouselVisible, 3, "★同屏 3 张（用户指定）")

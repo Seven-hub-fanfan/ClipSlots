@@ -84,6 +84,15 @@ struct CanvasWorkspaceView: View {
     @State private var marqueeCurrent: CGPoint? = nil
     /// 光标位置，供锚点缩放使用。
     @State private var cursorScreen: CGPoint = .zero
+    /// 当前"按坐标维持 hover"的节点（★ v2.11.8 五轮）。
+    ///
+    /// 与节点自身的 `.onHover` 是 OR 关系：`.onHover` 管进入，这个管**维持**。判定规则全在
+    /// `CanvasNodeHover`（本体矩形优先、维持区 = 节点 + 扇形包围盒 + 30pt）。
+    @State private var hoverHoldNodeId: String? = nil
+    /// 维持区的离开宽限期定时器（约 200ms）。
+    ///
+    /// 只给"离开"用，进入是立即的 —— 进入也加延迟会让整个画布的 hover 反馈变粘。
+    @State private var hoverLeaveTask: DispatchWorkItem? = nil
     /// 槽位库拖拽的实时拖影。
     @State private var ghost: (title: String, point: CGPoint)? = nil
     /// 「正在把节点往槽位库里拖」的状态（v2.11.8 二轮归槽）。
@@ -156,7 +165,17 @@ struct CanvasWorkspaceView: View {
             .gesture(canvasDragGesture)
             .simultaneousGesture(pinchGesture)
             .onContinuousHover { phase in
-                if case .active(let p) = phase { cursorScreen = p }
+                switch phase {
+                case .active(let p):
+                    cursorScreen = p
+                    // ★ 五轮：hover 维持区判定挂在这条本来就在跑的通路上（原本只用于捏合锚点），
+                    // 不新增任何可命中视图 —— 详见 `CanvasNodeHover` 里"为什么不用透明 halo"。
+                    updateHoverHold(at: p)
+                case .ended:
+                    // 光标离开整个画布（切窗口 / 移到侧栏外）：按"离开"处理，但仍走宽限期，
+                    // 免得贴边移动时的一次 ended/active 抖动把展开态打断。
+                    scheduleHoverHold(nil)
+                }
             }
             .onAppear {
                 pan = canvas.pan
@@ -307,7 +326,9 @@ struct CanvasWorkspaceView: View {
                                    onPromoteInput: { promoteInput(node, index: $0) },
                                    onDeleteInput: { deleteInput(node, index: $0) },
                                    onToggleAnimationStyle: { canvas.toggleAnimationStyle(id: node.id) },
-                                   onToast: { store.transientUI.showToast($0) })
+                                   onToast: { store.transientUI.showToast($0) },
+                                   isHoverHeld: hoverHoldNodeId == node.id,
+                                   onHoverChanged: { noteNodeHover(node, hovering: $0) })
                     // ★ 三轮：缩放过程中的「文字跳舞」修复 —— 排版用 `layoutZoom`，缩放差值用变换补。
                     //
                     // 症状（用户录屏）：缩放时节点里的文字一帧一个换行位置，整块文字在抖。
@@ -383,6 +404,67 @@ struct CanvasWorkspaceView: View {
         } else {
             Button("删除节点") { requestDelete(ids: [node.id]) }
         }
+    }
+
+    // MARK: - hover 维持区（★ v2.11.8 五轮）
+
+    /// 节点自身 `.onHover` 的回调：进入立刻把维持对象锁到它身上。
+    ///
+    /// 为什么"进入"要靠 `.onHover` 而不是也用坐标：坐标通路依赖画布那层 `.onContinuousHover`
+    /// 在光标压在节点上时仍然报点（SwiftUI 里祖先的 hover 不被子视图吃掉，实测如此），但这是个
+    /// 实现细节。让"进入"走视图自己的 hover，即使坐标通路哪天失效，也只是退回三轮的行为，
+    /// 而不是"节点永远不响应 hover"——这种降级方向的选择在本项目吃过教训（v2.11.0 轮盘）。
+    private func noteNodeHover(_ node: CanvasNode, hovering: Bool) {
+        if hovering {
+            hoverLeaveTask?.cancel()
+            hoverLeaveTask = nil
+            if hoverHoldNodeId != node.id { hoverHoldNodeId = node.id }
+        } else if hoverHoldNodeId == node.id {
+            // 出边框先别收：光标可能只是移到了扇形溢出的那张卡或翻页箭头上（都在维持区里）。
+            // 真正的判定交给 `updateHoverHold`（下一次光标移动）与宽限期定时器。
+            scheduleHoverHold(resolvedHoverHold(at: cursorScreen))
+        }
+    }
+
+    /// 光标移动时重算维持对象。
+    private func updateHoverHold(at screenPoint: CGPoint) {
+        let next = resolvedHoverHold(at: screenPoint)
+        guard next != hoverHoldNodeId else {
+            // 位置没变化也要把待执行的"离开"撤掉：鼠标已经回到维持区里了。
+            if next != nil, hoverLeaveTask != nil {
+                hoverLeaveTask?.cancel()
+                hoverLeaveTask = nil
+            }
+            return
+        }
+        scheduleHoverHold(next)
+    }
+
+    private func resolvedHoverHold(at screenPoint: CGPoint) -> String? {
+        let p = CanvasGeometry.canvasPoint(screen: screenPoint, pan: effectivePan, zoom: zoom)
+        return CanvasNodeHover.resolve(current: hoverHoldNodeId, point: p, nodes: canvas.nodes)
+    }
+
+    /// 应用维持结果：**进入立即、离开延迟 `CanvasNodeHover.leaveDelay`**。
+    ///
+    /// 宽限期治的是另一半症状：鼠标快速穿过卡片之间的缝隙、或在节点边界上抖一下。录屏里
+    /// f_035 展开 → f_036 收拢 → f_037 又展开，整个来回 0.33s —— 200ms 宽限期足以把它吃掉。
+    private func scheduleHoverHold(_ next: String?) {
+        hoverLeaveTask?.cancel()
+        hoverLeaveTask = nil
+        guard next == nil else {
+            hoverHoldNodeId = next
+            return
+        }
+        let task = DispatchWorkItem {
+            // 定时器到点时再确认一次：这 200ms 里鼠标可能又回来了（回来时 task 已被 cancel，
+            // 这里是双保险），也可能节点被删了。
+            let still = resolvedHoverHold(at: cursorScreen)
+            hoverHoldNodeId = still
+            hoverLeaveTask = nil
+        }
+        hoverLeaveTask = task
+        DispatchQueue.main.asyncAfter(deadline: .now() + CanvasNodeHover.leaveDelay, execute: task)
     }
 
     // MARK: - 手势

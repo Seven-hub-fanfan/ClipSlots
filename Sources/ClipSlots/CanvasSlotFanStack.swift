@@ -64,6 +64,9 @@ struct CanvasSlotFanStack: View {
     @State private var windowStart: Int = 0
     /// 本页是否由「⬅ 后退」到达。只影响参考卡摆头还是摆尾，见 `CanvasFanPaging`。
     @State private var arrivedBackward: Bool = false
+    /// 鼠标是否压在「+N」灰卡露出的那块楔形上（★ 五轮）。灰卡沉到牌面之下、不再是 Button 之后，
+    /// hover 反馈只能自己记 —— 没有反馈的话，那块灰楔形看起来就是"背景的一部分"。
+    @State private var overflowHot: Bool = false
 
     /// 扇形展开动画。用户明确指定的参数，不要顺手改成 `Anim.transition`。
     private static let fanSpring = Animation.spring(response: 0.35, dampingFraction: 0.72)
@@ -117,10 +120,10 @@ struct CanvasSlotFanStack: View {
 
     // MARK: - 尺寸
 
-    /// 扇形态卡片尺寸（1x）。比预览区窄一圈：扇开时靠旋转向两侧溢出，卡片本身再宽就会把邻卡完全盖住。
+    /// 扇形态卡片尺寸（1x）。★ 五轮搬到 Kit（`CanvasFanGeometry.fanCardSize`）——
+    /// hover 维持区要按"这叠卡能张多宽"外扩，两处各写一份 `0.82` 迟早会不一致。
     private var fanCardSize: CGSize {
-        let h = min(132, max(64, boxHeight - 10))
-        return CGSize(width: h * 0.82, height: h)
+        CanvasFanGeometry.fanCardSize(boxHeight: boxHeight)
     }
 
     /// 轮播态卡片尺寸（1x）：**由容器宽度倒算**，保证 3 张 + 2 个间距 + 两侧箭头正好放得下。
@@ -170,6 +173,13 @@ struct CanvasSlotFanStack: View {
                                          })
     }
 
+    /// 「+N」灰卡所在的 slot 下标（`nil` = 本页没有灰卡）。
+    ///
+    /// 布局里它永远是最后一格：`layouts(count:)` 的上界是 `maxCards + 1`，第 6 格专门留给它。
+    private var overflowSlot: Int? {
+        window.showsOverflowCard ? window.count : nil
+    }
+
     private var activeSpring: Animation {
         carouselActive ? CanvasSlotFanStack.carouselSpring : CanvasSlotFanStack.fanSpring
     }
@@ -185,23 +195,30 @@ struct CanvasSlotFanStack: View {
             let ls = layouts(containerWidth: box.width)
 
             ZStack {
+                // 0) 「+N」灰卡：★ 五轮**沉到所有牌面之下**。
+                //
+                //    三轮把它单独提到 `zIndex(350)`，理由是"翻页入口要能点"。那个理由是错的：
+                //    半透明灰卡压在牌面上，等于给右边两三张内容卡蒙了一层灰（用户截图 image-351a7cbf
+                //    里的照片卡和音频卡都被压暗了），把"还有更多"的提示做成了"内容看不清"。
+                //    它现在只是**纯展示**，可点性由命中层负责（见 hitLayer 的 overflowSlot 分支）——
+                //    灰卡在扇形最外侧、与邻卡差 20° 张角，右侧本来就露出一大块楔形，够点。
+                if window.showsOverflowCard, let slot = ls.last {
+                    overflowCardLayer(slot, cardSize: cardSize)
+                        .allowsHitTesting(false)
+                        .zIndex(-1)
+                }
+
                 // 1) 卡片层：纯展示，**不接事件**（见 hitLayer 注释）。
                 cardsLayer(ls, cardSize: cardSize)
                     .allowsHitTesting(false)
 
-                // 2) 命中层：整块透明，自己算落在哪张卡上。
+                // 2) 命中层：整块透明，自己算落在哪张卡上（含「+N」灰卡那一格）。
                 hitLayer(ls, cardSize: cardSize, box: box)
 
                 // 3) 角标层：收拢态的 +（加入参）。要能点，所以放在命中层之上。
                 badgeLayer(ls, cardSize: cardSize)
 
-                // 4) 「+N」灰卡：翻页入口本身要能点，所以它是独立一层压在命中层之上
-                //    （命中层按角度/多边形判定，只认牌面卡）。
-                if window.showsOverflowCard, let slot = ls.last {
-                    overflowCardLayer(slot, cardSize: cardSize)
-                }
-
-                // 5) 左右翻页箭头：★ 三轮起两种风格都有（用户要求「展示区左右」），
+                // 4) 左右翻页箭头：★ 三轮起两种风格都有（用户要求「展示区左右」），
                 //    不再是轮播专属。
                 if expanded && (window.hasPrev || window.hasNext) {
                     arrowsLayer(box: box)
@@ -219,6 +236,7 @@ struct CanvasSlotFanStack: View {
             if !hovering {
                 hoveredCard = nil
                 openedCard = nil
+                overflowHot = false
             }
         }
         // 内容变了（切槽位 / 附件增删）就重置交互态，否则 openedCard / windowStart 会指向已经不存在的卡。
@@ -428,12 +446,16 @@ struct CanvasSlotFanStack: View {
                                                         layouts: ls,
                                                         cardSize: cardSize,
                                                         containerSize: box)
+                    // ★ 五轮：「+N」灰卡不再是独立浮层，它就是 `ls` 的最后一格，可点性走这里。
+                    let onOverflow = (hit != nil && hit == overflowSlot)
+                    if overflowHot != onOverflow { overflowHot = onOverflow }
                     let global = hit.flatMap { local -> Int? in
                         visibleCards.indices.contains(local) ? visibleCards[local].index : nil
                     }
                     if hoveredCard != global { hoveredCard = global }
                 case .ended:
                     if hoveredCard != nil { hoveredCard = nil }
+                    if overflowHot { overflowHot = false }
                 }
             }
             .gesture(
@@ -444,10 +466,18 @@ struct CanvasSlotFanStack: View {
                         guard moved < 4 else { return }
                         let p1x = CGPoint(x: value.location.x / max(renderScale, 0.01),
                                           y: value.location.y / max(renderScale, 0.01))
-                        guard let local = CanvasFanGeometry.hitTest(point: p1x,
-                                                                    layouts: ls,
-                                                                    cardSize: cardSize,
-                                                                    containerSize: box),
+                        let local0 = CanvasFanGeometry.hitTest(point: p1x,
+                                                              layouts: ls,
+                                                              cardSize: cardSize,
+                                                              containerSize: box)
+                        // ★ 五轮：点在「+N」灰卡露出的那块楔形上 = 翻页。
+                        // 灰卡沉到牌面之下后，能被 hitTest 选中的只有它没被邻卡盖住的部分，
+                        // 语义正好是"看得见才点得到"，与其它卡一视同仁。
+                        if let local = local0, local == overflowSlot {
+                            pageForward()
+                            return
+                        }
+                        guard let local = local0,
                               visibleCards.indices.contains(local) else {
                             withAnimation(activeSpring) { openedCard = nil }
                             return
@@ -522,50 +552,56 @@ struct CanvasSlotFanStack: View {
     /// 它取代了二轮的「右下角 +N 角标 + hover 缩略图网格」。二轮那套的问题不是不好看：
     /// 网格里的小方格是**另一种呈现**，第 6 张卡从未以"卡片"形态出现过，所以用户的结论就是
     /// 「第 6 张以后看不到」。这张灰卡把"后面还有"直接放在卡叠的下一个位置上，点它就翻页。
+    /// ★ v2.11.8 五轮：**改成纯展示层，沉到所有牌面之下**（用户明确指出三轮的 `zIndex(350)` 是错的）。
+    ///
+    /// 三轮把它当"控件必须浮在最上层"处理，结果半透明灰卡给右侧两三张内容卡蒙了灰（截图
+    /// image-351a7cbf：照片卡、音频卡都被压暗）。用户的判断是对的 —— 它**不需要**浮起来：
+    /// 灰卡与左邻卡有 20° 张角差，右侧露出的是一整块楔形（不是"12pt 的斜边"，三轮那句注释
+    /// 把 `expandedStagger` 当成了露出宽度，漏算了旋转），命中层照样点得到。
+    ///
+    /// 于是这里不再是 `Button`：点击与 hover 都走 `hitLayer`（`overflowSlot` 分支），
+    /// 与其它卡片共用同一套"旋转后多边形 + zIndex 从高到低"的命中语义。
     private func overflowCardLayer(_ layout: CanvasFanGeometry.CardLayout,
                                    cardSize: CGSize) -> some View {
-        Button {
-            pageForward()
-        } label: {
-            ZStack {
-                RoundedRectangle(cornerRadius: s(17), style: .continuous)
-                    .fill(Color(red: 0.20, green: 0.21, blue: 0.23))
-                VStack(spacing: s(2)) {
-                    Text("+\(window.remaining)")
-                        .font(.system(size: s(20), weight: .bold))
-                        .foregroundColor(.white)
-                    Text("点击加载")
-                        .font(.system(size: s(8), weight: .medium))
-                        .foregroundColor(.white.opacity(0.85))
-                }
-                .allowsTightening(false)
-                .minimumScaleFactor(1.0)
+        ZStack {
+            RoundedRectangle(cornerRadius: s(17), style: .continuous)
+                .fill(Color(red: 0.20, green: 0.21, blue: 0.23))
+            VStack(spacing: s(2)) {
+                Text("+\(window.remaining)")
+                    .font(.system(size: s(18), weight: .bold))
+                    .foregroundColor(.white)
+                Text("点击加载")
+                    .font(.system(size: s(7.5), weight: .medium))
+                    .foregroundColor(.white.opacity(0.85))
             }
-            .frame(width: s(cardSize.width), height: s(cardSize.height))
-            // 半透明是"这不是一张真牌面"的唯一视觉线索，别顺手改成 1.0。
-            .opacity(CanvasFanGeometry.overflowCardOpacity)
-            .overlay(
-                RoundedRectangle(cornerRadius: s(17), style: .continuous)
-                    .stroke(Color.white.opacity(0.35), lineWidth: s(1.2))
-            )
-            .contentShape(RoundedRectangle(cornerRadius: s(17), style: .continuous))
+            .allowsTightening(false)
+            .minimumScaleFactor(1.0)
+            .fixedSize()
+            // ★ 五轮：文字挪到**露出的那块楔形**的重心上，不再居中。
+            //
+            // 沉到牌面之下后，卡片中心正好是被左邻卡盖住的地方 —— 居中的文字一个像素都看不见
+            // （实机截图 v5-crop 只剩一条白描边）。锚点由几何算出来（见 `overflowLabelAnchor`），
+            // 用比例而不是固定 pt：卡片尺寸随节点高度收敛，写死 18pt 在小节点上会顶出楔形。
+            .offset(x: s(cardSize.width * (CanvasFanGeometry.overflowLabelAnchor.x - 0.5)),
+                    y: s(cardSize.height * (CanvasFanGeometry.overflowLabelAnchor.y - 0.5)))
         }
-        .buttonStyle(.plain)
+        .frame(width: s(cardSize.width), height: s(cardSize.height))
+        // 半透明是"这不是一张真牌面"的唯一视觉线索，别顺手改成 1.0。
+        // 鼠标压在露出的楔形上时提浓一点 —— 沉到底层之后，这是"我可以点"的唯一反馈
+        // （原来是 Button，靠 hover 光标和整卡可点性表达）。
+        .opacity(overflowHot ? CanvasFanGeometry.overflowCardHotOpacity
+                             : CanvasFanGeometry.overflowCardOpacity)
+        .overlay(
+            RoundedRectangle(cornerRadius: s(17), style: .continuous)
+                .stroke(Color.white.opacity(overflowHot ? 0.6 : 0.35), lineWidth: s(1.2))
+        )
         .help("还有 \(window.remaining) 张，点击加载")
         .scaleEffect(layout.scale, anchor: .bottom)
         .rotationEffect(.degrees(layout.angle), anchor: .bottom)
         .offset(x: s(layout.offset.width), y: s(layout.offset.height))
-        // 压在牌面之上（它是入口，必须可点），但低于操作气泡。
-        //
-        // ★ v2.11.8 四轮：牌面层级反转成"第 1 张在最顶层、越靠右越靠底层"之后，这一格（最右）
-        // 按牌面规则本该是**最底层**。这里刻意不跟着沉下去，因为它不是一张牌面而是一个**控件**：
-        // 沉到底后，它被左边那张卡盖住，只剩约一个 `expandedStagger`（12pt）宽的斜边露在外面，
-        // 那正是本项目反复修过的"看得见点不着"（一轮扇形选不中第二张、hotfix19 附件条点了没反应）。
-        // 控件浮在内容之上是常规做法，代价只是它会盖住左邻卡的一条右边缘 —— 半透明灰 + 白描边
-        // 已经把"我不是牌面"说清楚了。
-        .zIndex(350)
         .animation(activeSpring, value: expanded)
         .animation(activeSpring, value: windowStart)
+        .animation(.easeOut(duration: 0.12), value: overflowHot)
     }
 
     // MARK: - 翻页
@@ -610,6 +646,10 @@ struct CanvasSlotFanStack: View {
                 arrowButton("chevron.right", forward: true)
             }
         }
+        // ★ 五轮：往里收 `arrowLaneInset`。原来箭头贴着预览区边缘 = 距节点边框只有 12pt，
+        // 录屏里那次误收缩就是"伸手去点左箭头、过冲 12px 出了节点边界"。维持区 + 宽限期已经能
+        // 兜住这种过冲，但让按钮本身离边界远一点是成本最低的一半。
+        .padding(.horizontal, s(CanvasFanGeometry.arrowLaneInset))
         .frame(width: s(box.width))
         .zIndex(400)
     }

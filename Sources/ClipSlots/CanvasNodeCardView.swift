@@ -79,6 +79,20 @@ struct CanvasNodeCardView: View {
     /// 轻提示（复制成功 / 断链等）。卡片不认识 `transientUI`，同上。
     let onToast: (String) -> Void
 
+    /// 上层按**光标坐标**判定的"这个节点仍应保持 hover"（★ v2.11.8 五轮）。
+    ///
+    /// 为什么需要它：`.onHover` 是边界即真理 —— 光标出节点边框那一帧就 `false`，扇形当场收拢、
+    /// 翻页箭头随之消失。而左箭头距节点边框只有 12pt，"伸手去点箭头"这个动作本身就有很大概率
+    /// 先摸出边界一下（录屏 20260916125646 f_035→f_036→f_037，0.33s 内闪了一次）。
+    /// 上层用画布那个本来就在跑的 `.onContinuousHover` 拿到光标位置，按
+    /// `CanvasNodeHover.holdRect`（节点 + 扇形包围盒 + 30pt）判定并带 200ms 宽限期。
+    ///
+    /// 两个信号是 **OR**：`.onHover` 负责"进入"（灵敏、零延迟），这个负责"维持"（宽容）。
+    /// 万一上层的坐标通路失效，退化成三轮的行为，不会变成"永远不展开"。
+    let isHoverHeld: Bool
+    /// 把本卡片自己的 `.onHover` 结果报给上层（上层据此把维持对象锁到本节点）。
+    let onHoverChanged: (Bool) -> Void
+
     @Environment(\.colorScheme) private var scheme
     @State private var isHovering = false
     @State private var draft = ""
@@ -87,6 +101,12 @@ struct CanvasNodeCardView: View {
 
     /// 纯文本节点：不出图，卡片主体就是一块文本框（用户二轮明确要求"不需要卡片预览的形式"）。
     private var isTextNode: Bool { node.kind == .text }
+
+    /// 本节点是否处于"活跃 hover"（★ 五轮）：自身 `.onHover` **或**上层坐标维持。
+    ///
+    /// 边框高亮 / 风格切换按钮也一起走这个值，而不是只让扇形走 —— 光标在维持区里（正伸向翻页箭头）
+    /// 时节点本来就该是活跃的；若边框先灭一下再亮回来，那种闪烁比扇形收拢更扎眼。
+    private var hoverActive: Bool { isHovering || isHoverHeld }
 
     /// 正文实际用的字体。
     ///
@@ -160,7 +180,10 @@ struct CanvasNodeCardView: View {
         .shadow(color: AppTheme.cardShadow(isEmpty: false),
                 radius: s(isSelected ? 12 : 7),
                 x: 0, y: s(isSelected ? 5 : 3))
-        .onHover { isHovering = $0 }
+        .onHover {
+            isHovering = $0
+            onHoverChanged($0)
+        }
         .onChange(of: isEditing) { editing in
             // 进编辑态就把当前槽位正文灌进草稿。焦点由 `CanvasPromptEditor` 自己在挂载时抢
             // （NSTextView 要等 window 就绪，SwiftUI 的 @FocusState 在深层子树里实测抢不稳）。
@@ -174,7 +197,7 @@ struct CanvasNodeCardView: View {
     private var borderColor: Color {
         if isEditing { return AppTheme.chromeAccentInk }
         if isSelected { return AppTheme.chromeAccentInk.opacity(0.85) }
-        if isHovering { return AppTheme.minimalCardHoverBorder }
+        if hoverActive { return AppTheme.minimalCardHoverBorder }
         return AppTheme.subtleBorder
     }
 
@@ -235,7 +258,7 @@ struct CanvasNodeCardView: View {
     /// 噪声（这正是二轮要删掉铅笔按钮的同一个理由），而文本节点根本没有展开动画可切。
     @ViewBuilder
     private var animationStyleToggle: some View {
-        if !isTextNode && (isHovering || isSelected) {
+        if !isTextNode && (hoverActive || isSelected) {
             Button(action: onToggleAnimationStyle) {
                 Image(systemName: node.animationStyle == .fanOut
                       ? "rectangle.on.rectangle.angled"
@@ -362,7 +385,7 @@ struct CanvasNodeCardView: View {
                 CanvasSlotFanStack(sources: fanSources,
                                    attachments: attachments,
                                    renderScale: renderScale,
-                                   nodeHovered: isHovering && !isEditing,
+                                   nodeHovered: hoverActive && !isEditing,
                                    boxHeight: previewHeight,
                                    style: node.animationStyle,
                                    onEditText: onBeginEdit,

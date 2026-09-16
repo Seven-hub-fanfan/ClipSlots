@@ -214,6 +214,41 @@ public enum CanvasFanGeometry {
         return start..<end
     }
 
+    // MARK: - 卡片尺寸与展开包围盒（★ v2.11.8 五轮）
+
+    /// 扇形态卡片尺寸（1x）。比预览区窄一圈：扇开时靠旋转向两侧溢出，卡片本身再宽就会把邻卡完全盖住。
+    ///
+    /// 五轮从 `CanvasSlotFanStack.fanCardSize` 搬到 Kit —— 不是为了整洁，是因为 hover 维持区
+    /// （`CanvasNodeHover.holdRect`）必须知道这叠卡到底会张到多宽，而那是 Kit 里的纯计算。
+    /// 留在 View 里就只能在两处各写一份同样的 `0.82`，改一处忘一处的下场是维持区比扇形窄，
+    /// 表现为"鼠标移到最外侧那张卡上，扇形突然收了"——正是五轮要修的 bug。
+    public static func fanCardSize(boxHeight: CGFloat) -> CGSize {
+        let h = min(132, max(64, boxHeight - 10))
+        return CGSize(width: h * 0.82, height: h)
+    }
+
+    /// 展开态整叠卡片相对**预览区中心**的最大横向半宽（1x，已含 hover 放大）。
+    ///
+    /// 用来回答一个具体问题：扇形会不会张到节点卡片的边框外面去？会的话 hover 维持区就得外扩，
+    /// 否则鼠标追着最外侧那张卡走出节点边界，`onHover` 判定为"离开"，扇形当场收拢。
+    ///
+    /// 取所有 slot、以及"每个 slot 分别被 hover"两种情况的顶点并集 —— hover 会放大 1.08，
+    /// 最外侧那张被 hover 时比静息时更宽。
+    public static func expandedHalfWidth(slotCount: Int, cardSize: CGSize) -> CGFloat {
+        var half: CGFloat = 0
+        // hoveredIndex = nil 先算一遍静息，再逐个 slot 算 hover 态。
+        let variants: [Int?] = [nil] + (0..<max(1, slotCount)).map { Optional($0) }
+        for hovered in variants {
+            let ls = layouts(count: slotCount, expanded: true, hoveredIndex: hovered)
+            for l in ls {
+                for p in cardPolygon(layout: l, cardSize: cardSize, containerSize: .zero) {
+                    half = max(half, abs(p.x))
+                }
+            }
+        }
+        return half
+    }
+
     // MARK: - 碰撞箱：旋转后的实际多边形
 
     /// 一张卡片经过 `offset` / `rotation`（锚点=底边中心）/ `scale` 之后的四个顶点。
@@ -270,6 +305,36 @@ public enum CanvasFanGeometry {
             return CGPoint(x: pivot.x + rx + layout.offset.width,
                            y: pivot.y + ry + layout.offset.height)
         }
+    }
+
+    /// 卡片自身归一化坐标（0…1，左上为原点）里的一点，变换到容器坐标。
+    ///
+    /// ★ 五轮新增。用途很具体：「+N」灰卡沉到牌面之下后，它**居中**的文字正好落在被邻卡盖住的
+    /// 那半边（实机截图 v5-crop：只看得见一条描边，`+2` 一个字都看不到）。要把文字挪到露出的楔形里，
+    /// 就得能在测试里回答"卡片上的某个相对位置，变换后落在容器的哪里、是不是还露着"——
+    /// 也就是 `hitTest(cardPoint(unit: 标签锚点)) == 灰卡那一格`。
+    ///
+    /// 变换与 `cardPolygon` 共用同一段数学（四角其实就是 unit = (0,0)/(1,0)/(1,1)/(0,1)）。
+    public static func cardPoint(layout: CardLayout,
+                                 cardSize: CGSize,
+                                 containerSize: CGSize,
+                                 unit: CGPoint) -> CGPoint {
+        let cx = containerSize.width / 2
+        let cy = containerSize.height / 2
+        let halfW = cardSize.width / 2
+        let halfH = cardSize.height / 2
+        let pivot = CGPoint(x: cx, y: cy + halfH)
+
+        // 相对锚点（底边中心）的未变换位置。
+        let raw = CGPoint(x: (unit.x - 0.5) * cardSize.width,
+                          y: (unit.y - 1.0) * cardSize.height)
+
+        let rad = layout.angle * .pi / 180
+        let cosA = cos(rad), sinA = sin(rad)
+        let sx = raw.x * layout.scale
+        let sy = raw.y * layout.scale
+        return CGPoint(x: pivot.x + (sx * cosA - sy * sinA) + layout.offset.width,
+                       y: pivot.y + (sx * sinA + sy * cosA) + layout.offset.height)
     }
 
     /// 点是否落在凸多边形内（含边）。

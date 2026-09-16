@@ -40,6 +40,31 @@ extension CanvasFanGeometry {
     public static let referenceDimOpacity: CGFloat = 0.4
     /// 「+N」灰卡自身的不透明度。用户指定 0.5。
     public static let overflowCardOpacity: CGFloat = 0.5
+    /// 鼠标压在「+N」灰卡露出部分时的不透明度（★ 五轮）。
+    ///
+    /// 灰卡沉到牌面之下、不再是 `Button` 之后，它失去了 hover 光标与整卡可点性这两种"我能点"的
+    /// 暗示。提浓 0.5 → 0.72 是替代方案：仍然明显比牌面淡（还是"不是真牌面"），但足以让人确认
+    /// 鼠标位置有效。不要提到 1.0 —— 那会让它看起来变成了一张真牌面。
+    public static let overflowCardHotOpacity: CGFloat = 0.72
+
+    /// 「+N」文字在灰卡自身归一化坐标里的锚点（★ 五轮）。
+    ///
+    /// 不是 (0.5, 0.5)。灰卡沉到牌面之下后，居中的文字正好落在被左邻卡盖住的那半边 ——
+    /// 实机截图 v5-crop 里只剩一条白描边，`+2` 一个字都看不见，"还有更多"这个信息就丢了。
+    ///
+    /// 这个值是算出来的：把露出的那块楔形（`hitTest` 判给灰卡的全部采样点）逆变换回卡片自身坐标，
+    /// 取重心 = (0.68, 0.36)。楔形集中在卡片右上偏中 —— 因为灰卡比左邻卡多转 20°，
+    /// 露出来的是"右上角那片扇形"，而不是想象中"右边一条竖缝"。
+    /// smoke 里用 `cardPoint` 正向验证这个锚点确实落在灰卡露出的部分上。
+    public static let overflowLabelAnchor = CGPoint(x: 0.68, y: 0.36)
+
+    /// 左右翻页箭头再往容器内收的距离（1x，★ 五轮）。
+    ///
+    /// 预览区本身只比节点边框内缩 12pt，箭头贴着预览区边缘就意味着按钮距**节点边界**只有 12pt。
+    /// 录屏 20260916125646 里那次"扇形突然收拢"就是伸手去点左箭头时过冲 12px 出了节点边界
+    /// （见 `CanvasNodeHover`）。这 6pt 不解决根因（根因靠 hover 维持区 + 宽限期），
+    /// 但把"必须精确摸到边缘"这个动作难度降下来。
+    public static let arrowLaneInset: CGFloat = 6
 
     /// 一屏窗口的解算结果。
     public struct CardWindow: Equatable {
