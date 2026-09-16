@@ -326,6 +326,12 @@ struct CanvasWorkspaceView: View {
                                    onPromoteInput: { promoteInput(node, index: $0) },
                                    onDeleteInput: { deleteInput(node, index: $0) },
                                    onToggleAnimationStyle: { canvas.toggleAnimationStyle(id: node.id) },
+                                   // ★ 六轮：卡片命中层独占点击后由它补选中（Shift 加选与祖先那条一致）。
+                                   onActivateNode: {
+                                       guard editingNodeId != node.id else { return }
+                                       canvas.select(id: node.id,
+                                                     additive: NSEvent.modifierFlags.contains(.shift))
+                                   },
                                    onToast: { store.transientUI.showToast($0) },
                                    isHoverHeld: hoverHoldNodeId == node.id,
                                    onHoverChanged: { noteNodeHover(node, hovering: $0) })

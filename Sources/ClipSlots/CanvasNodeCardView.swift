@@ -76,6 +76,9 @@ struct CanvasNodeCardView: View {
     let onDeleteInput: (Int) -> Void
     /// 切换 Hover 展开风格（扇形 ⇄ 轮播）。写的是节点自身属性，同样上抛给持有 `CanvasStore` 的上层。
     let onToggleAnimationStyle: () -> Void
+    /// 选中本节点。★ 六轮：堆叠卡片的命中层升级成 `highPriorityGesture` 独占点击后，祖先那条
+    /// `onTapGesture { canvas.select(...) }` 不再触发，"点卡片顺带选中节点"必须由卡片自己补上。
+    let onActivateNode: () -> Void
     /// 轻提示（复制成功 / 断链等）。卡片不认识 `transientUI`，同上。
     let onToast: (String) -> Void
 
@@ -388,8 +391,12 @@ struct CanvasNodeCardView: View {
                                    nodeHovered: hoverActive && !isEditing,
                                    boxHeight: previewHeight,
                                    style: node.animationStyle,
+                                   // 节点身份 = `groupId#slot`（`CanvasNode.id`）。翻页窗口按它存活，
+                                   // 右键 / 页面切换导致的重建不会把用户翻到的那一页打回第一页。
+                                   stateKey: node.id,
                                    onEditText: onBeginEdit,
                                    onOpenInputFiles: onOpenInputFiles,
+                                   onActivateNode: onActivateNode,
                                    onPromoteInput: onPromoteInput,
                                    onDeleteInput: onDeleteInput,
                                    onToast: onToast)

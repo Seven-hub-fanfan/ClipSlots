@@ -6100,4 +6100,139 @@ do {
             "两个按钮都有文案（强制删除 / 取消）")
 }
 
+// MARK: - CANVAS-ORDER-6：卡片顺序绑定持久化 + 翻页窗口跨重建存活（v2.11.8 六轮）
+//
+// 用户报的现象：「向节点拖入新图片后，图片处于第 1 张。但点击右键、然后切到其他页面再切回来，
+// 新图片变成了第 2 张，旧卡片翻到第 1 张 —— 顺序反了。」
+//
+// 这里把两条不变量钉死：
+//   1. 顺序的唯一真相 = 持久化数组下标。JSON 落盘/读回、重复构建视图数据源，顺序必须逐项相同。
+//   2. 决定"你现在看到哪几张"的翻页窗口不能是活不过重建的 `@State`：右键（.contextMenu 重新求值）
+//      与画布↔编辑页切换（unmount/remount）之后必须还在原来那一页。
+do {
+    // ---- 1) 持久化顺序：JSON round-trip 不许重排 ----
+    func att(_ name: String) -> SlotContent.SlotAttachment {
+        SlotContent.SlotAttachment(name: name, type: .image, path: "/tmp/\(name)")
+    }
+    let nodeText = "prompt"
+    var content = SlotContent()
+    content.attachments = [att("a.png"), att("b.png"), att("c.png")]
+    let fp0 = CanvasSlotOrder.fingerprint(content.attachments)
+    t.equal(fp0, "0:a.png|1:b.png|2:c.png", "指纹就是「下标:名字」，顺序信息不丢")
+
+    let encoded = try! JSONEncoder().encode(content)
+    let decoded = try! JSONDecoder().decode(SlotContent.self, from: encoded)
+    t.equal(CanvasSlotOrder.fingerprint(decoded.attachments), fp0,
+            "★落盘再读回来顺序必须逐项相同 —— 这就是「显示顺序绑定持久化字段」的实现方式（数组下标）")
+
+    // 新附件落在**尾部**：首位有语义（缩略图 / 圆盘 / 「设为入参」取的那张），拖入不许顶掉它。
+    t.equal(CanvasSlotOrder.insertionIndex(currentCount: content.attachments.count), 3,
+            "★新入参插到尾部，不是插到第 1 张")
+    var grown = content
+    grown.attachments.append(att("new.png"))
+    t.equal(CanvasSlotOrder.fingerprint(grown.attachments), fp0 + "|3:new.png",
+            "★添加一张只在尾部追加，前三张的下标一个都不动（这才叫顺序稳定）")
+
+    // ---- 2) unmount/remount 模拟：同一份数据两次独立构建，卡片来源顺序必须一致 ----
+    // 视图数据源就是 `allCardSources`（画布节点卡片实际用的那个），拿它做"重绘"更贴近真实路径。
+    func sourcesFingerprint(_ atts: [SlotContent.SlotAttachment], text: String) -> String {
+        CanvasFanGeometry.allCardSources(attachmentIndices: Array(atts.indices), text: text)
+            .map { src -> String in
+                switch src {
+                case .attachmentIndex(let i): return "att\(i)"
+                case .textSegment(let seg): return "txt\(seg.count)"
+                case .empty: return "empty"
+                }
+            }
+            .joined(separator: ">")
+    }
+    let mount1 = sourcesFingerprint(grown.attachments, text: nodeText)
+    // 「切到其他页面再切回来」= 从同一份持久化数据重新构建一次（这里连解码都重走一遍）。
+    let reDecoded = try! JSONDecoder().decode(SlotContent.self,
+                                              from: try! JSONEncoder().encode(grown))
+    let mount2 = sourcesFingerprint(reDecoded.attachments, text: nodeText)
+    t.equal(mount2, mount1,
+            "★unmount/remount 模拟：顺序与添加时一致（用户 Bug 一的验收条件）")
+    t.check(mount1.hasSuffix("att3"),
+            "★刚添加的那张仍在末位 —— 重绘不会把它换到别处（换位置就是用户说的「顺序反了」）")
+
+    // ---- 3) 窗口钳制 ----
+    t.equal(CanvasFanWindowState.clamp(start: 0, total: 3, capacity: 5), 0, "不够一页时起点只能是 0")
+    t.equal(CanvasFanWindowState.clamp(start: 9, total: 8, capacity: 5), 3,
+            "★越界起点钳到最后一页（不钳的话 CardWindow 切出 0 张 = 预览区突然空白）")
+    t.equal(CanvasFanWindowState.clamp(start: -4, total: 8, capacity: 5), 0, "负起点钳到 0")
+    t.equal(CanvasFanWindowState.clamp(start: 2, total: 0, capacity: 5), 0, "空槽位起点归 0（且不能崩）")
+
+    // ---- 4) 数量变化：变多要露出新增那张，变少只钳制 ----
+    t.equal(CanvasFanWindowState.startAfterCountChange(oldTotal: 8, newTotal: 9, start: 0, capacity: 5),
+            4,
+            "★拖入第 9 张（下标 8）时窗口推到 [4,9) 把它露出来 —— 旧代码这里写 0，新图片被翻页藏起来")
+    t.equal(CanvasFanWindowState.startAfterCountChange(oldTotal: 3, newTotal: 4, start: 0, capacity: 5),
+            0,
+            "总数不到一页时不需要动窗口")
+    t.equal(CanvasFanWindowState.startAfterCountChange(oldTotal: 9, newTotal: 8, start: 4, capacity: 5),
+            3,
+            "★删一张只钳制，不跳回第一页（连删几张不该每次都翻回去重新找）")
+    t.equal(CanvasFanWindowState.startAfterCountChange(oldTotal: 9, newTotal: 2, start: 4, capacity: 5),
+            0,
+            "删到不够一页时回到 0")
+    t.equal(CanvasFanWindowState.startAfterCountChange(oldTotal: 9, newTotal: 9, start: 4, capacity: 5),
+            4,
+            "数量没变（改名 / 换路径）时窗口原地不动 —— 动一下就是卡片自己跳")
+
+    // ---- 5) startRevealing：最小改动 ----
+    t.equal(CanvasFanWindowState.startRevealing(index: 6, start: 4, total: 9, capacity: 5), 4,
+            "已经在窗口里就不动（避免「后台刷新把用户看的那页对齐走」）")
+    t.equal(CanvasFanWindowState.startRevealing(index: 1, start: 4, total: 9, capacity: 5), 1,
+            "目标在窗口左边 → 起点挪到它")
+    t.equal(CanvasFanWindowState.startRevealing(index: 8, start: 0, total: 9, capacity: 5), 4,
+            "目标在窗口右边 → 把它顶到末位")
+
+    // ---- 6) 登记处：模拟一次右键 / 页面切换导致的视图重建 ----
+    let reg = CanvasFanWindowRegistry()
+    let keyFan = CanvasFanWindowState.key(nodeId: "grp#3", styleTag: "fan")
+    let keyCarousel = CanvasFanWindowState.key(nodeId: "grp#3", styleTag: "carousel")
+    t.check(keyFan != keyCarousel, "★扇形与轮播容量不同（5/3），必须各记各的，否则切风格开在半页上")
+    t.equal(reg.start(for: keyFan, total: 9, capacity: 5), 0, "没记录过就是第一页")
+    reg.set(4, for: keyFan)
+    // 「重建」= 视图 @State 全归零后重新 onAppear 读一次。
+    t.equal(reg.start(for: keyFan, total: 9, capacity: 5), 4,
+            "★重建后仍在第 2 页（用户 Bug 一里那句「切到其他页面再切回来」）")
+    t.equal(reg.start(for: keyCarousel, total: 9, capacity: 3), 0, "另一种风格不受影响")
+    t.equal(reg.start(for: keyFan, total: 5, capacity: 5), 0,
+            "★别处（CLI / 编辑页）删到只剩 5 张时读回来当场钳制，不会切出空窗口")
+    reg.forget(keyFan)
+    t.equal(reg.start(for: keyFan, total: 9, capacity: 5), 0, "forget 之后回到默认页")
+
+    // 不同节点互不串档 —— 串了就是"另一个节点的翻页把我的窗口顶走了"。
+    let keyOther = CanvasFanWindowState.key(nodeId: "grp#4", styleTag: "fan")
+    reg.set(3, for: keyFan)
+    reg.set(0, for: keyOther)
+    t.equal(reg.start(for: keyFan, total: 9, capacity: 5), 3, "节点 A 的窗口不被节点 B 影响")
+
+    // ---- 7) 「+N」= 总数 - 窗口尾部，≤5 张不出现 ----
+    for total in 1...5 {
+        let w = CanvasFanGeometry.cardWindow(total: total, start: 0)
+        t.check(!w.showsOverflowCard && w.remaining == 0,
+                "★\(total) 张（≤5）不画 +N 灰卡（用户 Bug 二修法 4）")
+        t.equal(w.slotCount, total, "\(total) 张时位置数就是张数，不留 +N 的坑位")
+    }
+    let w9 = CanvasFanGeometry.cardWindow(total: 9, start: 0)
+    t.equal(w9.remaining, 9 - (w9.start + w9.count),
+            "★+N 的 N = 总数 − 窗口尾部下标（用户 Bug 二修法 3）")
+    t.equal(w9.remaining, 4, "9 张、第一页 5 张 → +4")
+    let w9p2 = CanvasFanGeometry.cardWindow(total: 9, start: CanvasFanGeometry.forwardStart(from: w9))
+    t.equal(w9p2.remaining, 9 - (w9p2.start + w9p2.count), "翻一页后 N 重新按同一口径算")
+    t.equal(w9p2.start, 4, "翻页步长 = 5-1（保留参考卡）")
+    t.equal(w9p2.remaining, 0, "[4,9) 已到底 → 不再有 +N")
+    t.check(!w9p2.showsOverflowCard, "到底后灰卡消失，否则点它翻不动会被当成卡死")
+
+    // 「+N」那一格的下标 = 本页牌面数（它就是 layouts 的最后一格，也是命中层认的那一格）。
+    t.equal(w9.slotCount - 1, w9.count, "★+N 格下标 == 本页牌面数（命中层用 overflowSlot 判定的依据）")
+    let ls9 = CanvasFanGeometry.layouts(count: w9.slotCount, expanded: true)
+    t.equal(ls9.count, 6, "5 张牌面 + 1 张灰卡")
+    t.equal(ls9[w9.count].zIndex, ls9.map(\.zIndex).min(),
+            "★+N 灰卡仍是全叠最底层（五轮的结论不许被六轮的改动带回去）")
+}
+
 t.report()

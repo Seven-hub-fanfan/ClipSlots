@@ -2776,6 +2776,16 @@ final class SlotStoreObservable: ObservableObject {
 
         if groupId == currentSpecialSlotId {
             setAttachments(attachments, for: slot)
+            // ★ v2.11.8 六轮：**当前组**这条分支此前只有 `setAttachments` 里那个
+            // `refreshTrigger`（早就不发通知了），没有 bump `canvasSlotRevision` ——
+            // 于是"在画布上给当前组的节点拖入一张新入参"写盘成功、但节点卡片不重读槽位：
+            // 屏幕上还是旧的那几张卡。用户随后一次右键（`.contextMenu` 重新求值）或切页面
+            // （unmount/remount）才让卡片读到真数据，观感就是「顺序自己变了」——
+            // 实际是"变化被压住了几秒，然后一次性补上"。
+            //
+            // 下面这个组的分支从三轮起就 bump 了，两条分支的刷新口径必须一致：同一个面板、
+            // 同一个动作，只因为"节点在不在当前组"而一条即时刷新一条不刷，是纯粹的实现泄漏。
+            bumpCanvasSlotRevision()
             return true
         }
 

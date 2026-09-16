@@ -46,9 +46,14 @@ struct CanvasSlotFanStack: View {
     let boxHeight: CGFloat
     /// 展开风格（A/B）。
     let style: CanvasFanGeometry.ExpandStyle
+    /// 节点身份（`groupId#slot`）。★ 六轮：翻页窗口按它存活，见 `CanvasFanWindowState`。
+    let stateKey: String
 
     let onEditText: () -> Void
     let onOpenInputFiles: () -> Void
+    /// 选中所属节点。★ 六轮：命中层升级成 `highPriorityGesture` 后祖先那条
+    /// `onTapGesture { canvas.select(...) }` 再也不会触发，选中必须由这里显式补上。
+    let onActivateNode: () -> Void
     /// 把第 N 个附件挪到列表首位。首位 = 缩略图/圆盘取的那一张，所以这件事等于"设为主入参"。
     let onPromoteInput: (Int) -> Void
     /// 删除第 N 个附件（★ v2.11.8 三轮）。只动附件列表，节点/槽位正文不受影响 ——
@@ -67,6 +72,19 @@ struct CanvasSlotFanStack: View {
     /// 鼠标是否压在「+N」灰卡露出的那块楔形上（★ 五轮）。灰卡沉到牌面之下、不再是 Button 之后，
     /// hover 反馈只能自己记 —— 没有反馈的话，那块灰楔形看起来就是"背景的一部分"。
     @State private var overflowHot: Bool = false
+    /// 上一次见到的附件总数。★ 六轮：数量变化要区分"变多（露出新增那张）"和"变少（只钳制）"，
+    /// `onChange(of:)` 只给新值，旧值得自己记。
+    @State private var lastSourceCount: Int = -1
+
+    /// 窗口起点在登记处里的 key。见 `CanvasFanWindowState` 顶部注释：`@State` 活不过右键与页面切换。
+    private var windowKey: String {
+        CanvasFanWindowState.key(nodeId: stateKey, styleTag: style == .carousel ? "carousel" : "fan")
+    }
+
+    /// 把当前起点写回登记处。所有改 `windowStart` 的地方都要走这里，漏一处就等于那条路径"不记得"。
+    private func persistWindowStart(_ v: Int) {
+        CanvasFanWindowRegistry.shared.set(v, for: windowKey)
+    }
 
     /// 扇形展开动画。用户明确指定的参数，不要顺手改成 `Anim.transition`。
     private static let fanSpring = Animation.spring(response: 0.35, dampingFraction: 0.72)
@@ -239,19 +257,41 @@ struct CanvasSlotFanStack: View {
                 overflowHot = false
             }
         }
-        // 内容变了（切槽位 / 附件增删）就重置交互态，否则 openedCard / windowStart 会指向已经不存在的卡。
-        .onChange(of: sources.count) { _ in
+        // ★ 六轮：视图重建（右键 `.contextMenu` 重新求值 / 画布↔编辑页 unmount-remount）后把窗口
+        // 起点从登记处读回来。此前它是纯 `@State`，重建即归零 —— 用户看到的就是"卡片顺序自己变了"。
+        .onAppear {
+            lastSourceCount = sources.count
+            let restored = CanvasFanWindowRegistry.shared.start(for: windowKey,
+                                                               total: sources.count,
+                                                               capacity: windowCapacity)
+            if restored != windowStart { windowStart = restored }
+        }
+        // 内容变了（切槽位 / 附件增删）就重置**交互态**；但窗口起点不再无条件归零。
+        //
+        // 旧代码这里写 `windowStart = 0`：拖入一张新图（数组尾部）→ 窗口跳回第一页 → 新图片被翻页
+        // 藏起来，用户的观感就是"我刚拖进来的图不在第 1 张、顺序乱了"。现在按数量的变化方向处理：
+        // 变多 → 把新增那张露出来；变少 → 只钳制（连删几张不该每删一次都翻回第一页）。
+        .onChange(of: sources.count) { newCount in
             hoveredCard = nil
             openedCard = nil
-            windowStart = 0
+            let old = lastSourceCount < 0 ? newCount : lastSourceCount
+            lastSourceCount = newCount
+            let next = CanvasFanWindowState.startAfterCountChange(oldTotal: old,
+                                                                  newTotal: newCount,
+                                                                  start: windowStart,
+                                                                  capacity: windowCapacity)
             arrivedBackward = false
+            if next != windowStart { windowStart = next }
+            persistWindowStart(next)
         }
         .onChange(of: style) { _ in
             hoveredCard = nil
             openedCard = nil
             // 两种风格的窗口容量不同（5 / 3），起点留着会让轮播开在半页上。
+            // key 里带了风格，所以两种风格各记各的，来回切不会互相污染。
             windowStart = 0
             arrivedBackward = false
+            persistWindowStart(0)
         }
     }
 
@@ -458,7 +498,28 @@ struct CanvasSlotFanStack: View {
                     if overflowHot { overflowHot = false }
                 }
             }
-            .gesture(
+            // ★ 六轮：`gesture` → `highPriorityGesture`，把这块区域的点击**独占**下来。
+            //
+            // ## 用户报的现象
+            //
+            // 「点击『+2 点击加载』灰卡后，弹出了导入文件侧边栏，触发了新建导入流程」。
+            //
+            // ## 为什么普通 `.gesture` 不够
+            //
+            // 节点卡片的祖先上挂着两个东西（`CanvasWorkspaceView.nodeLayer`）：
+            // `onTapGesture { canvas.select(...) }` 和 `.contextMenu { ... }`。
+            // 默认优先级下 SwiftUI 会让这两条与命中层的 `DragGesture` **同时参与识别**，实测后果是
+            // 一次点击既走了翻页、又把节点选中了 —— 选中会改 `canvas.selectedNodeIds`（@Published），
+            // 节点子树跟着重新求值，`isHovering` / `windowStart` 这些 `@State` 在重建里被打回初值：
+            // 扇形当场收拢回一叠。收拢态右下角那颗 `+` 角标（`plusBadge` → `onOpenInputFiles`）
+            // 正好落在用户刚才点的那片区域，紧接着的第二下就点进了「入参文件」面板 ——
+            // 用户看到的"点 +N 弹出导入文件侧边栏"就是这么来的。
+            //
+            // `highPriorityGesture` 让命中层**先于祖先**吃掉这次点击：不再触发选中、不再重建、
+            // 扇形不收拢，`+N` 老老实实翻页。选中这件事不能就这么丢掉，所以下面在"非 +N"的分支里
+            // 显式调 `onActivateNode()` 补回来 —— 唯独点 `+N` 不选中：翻页是纯浏览动作，
+            // 没有任何理由顺手改选中状态、顺手触发一轮全局重绘。
+            .highPriorityGesture(
                 DragGesture(minimumDistance: 0)
                     .onEnded { value in
                         // 拖动过就不算点击：画布上按住卡片拖是"移动节点"，不该顺手弹个气泡。
@@ -473,11 +534,17 @@ struct CanvasSlotFanStack: View {
                         // ★ 五轮：点在「+N」灰卡露出的那块楔形上 = 翻页。
                         // 灰卡沉到牌面之下后，能被 hitTest 选中的只有它没被邻卡盖住的部分，
                         // 语义正好是"看得见才点得到"，与其它卡一视同仁。
-                        if let local = local0, local == overflowSlot {
+                        //
+                        // ★ 六轮：只在**展开态**认这一格。收拢态下这张灰卡完全埋在牌面之下、
+                        // 一个像素都看不见，此时"点到看不见的东西然后页面自己翻了"是纯粹的意外。
+                        if expanded, let local = local0, local == overflowSlot {
                             pageForward()
                             return
                         }
+                        // 走到这里说明点的是真牌面或空白 —— 把祖先被抢掉的"选中节点"补回来。
+                        onActivateNode()
                         guard let local = local0,
+                              local != overflowSlot,
                               visibleCards.indices.contains(local) else {
                             withAnimation(activeSpring) { openedCard = nil }
                             return
@@ -607,6 +674,10 @@ struct CanvasSlotFanStack: View {
     // MARK: - 翻页
 
     /// 前进一页。步长 = 本页张数 - 1（**保留最后一张当参考卡**），到底则回到开头（用户指定）。
+    ///
+    /// ★ 六轮：这里**只翻页**。用户报的「点『+2 点击加载』弹出了导入文件侧边栏」是命中被祖先
+    /// 手势抢走后的连锁反应（详见 `hitLayer` 里 `highPriorityGesture` 的注释）——
+    /// 这个函数从来不碰导入，也绝不允许以后往里加。
     private func pageForward() {
         let target = CanvasFanGeometry.forwardStart(from: window)
         withAnimation(activeSpring) {
@@ -615,6 +686,7 @@ struct CanvasSlotFanStack: View {
             arrivedBackward = false
             windowStart = target
         }
+        persistWindowStart(target)
     }
 
     /// 后退一页。同样重叠一张：新窗口的**尾部**是当前页的第一张，标灰当参考。
@@ -626,6 +698,7 @@ struct CanvasSlotFanStack: View {
             arrivedBackward = true
             windowStart = target
         }
+        persistWindowStart(target)
     }
 
     // MARK: - 左右翻页箭头
