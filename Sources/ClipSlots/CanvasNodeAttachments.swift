@@ -157,10 +157,19 @@ struct CanvasAttachmentPreviewImage: View {
     var maxPixel: CGFloat = 480
 
     @State private var image: NSImage?
+    /// 当前 `image` 属于哪个附件。★ 七轮：防"迟到的异步回调把上一张图贴到已经换了内容的卡片上"。
+    ///
+    /// 用户报「翻页后同屏出现两张一模一样的图」。窗口下标本身没问题（`CardWindow.indicesAreSane`），
+    /// 问题出在这里：`request()` 的完成回调闭包捕获的是**调用那一刻的 self 快照**，所以
+    /// 闭包里读 `attachment` 永远是老附件，光靠 `guard` 比不出新旧；而 `@State` 的存储是跨结构体
+    /// 实例共享的，翻页后视图被复用时旧回调一落地就把老图写进了新位置 —— 那张老图往往正好也在
+    /// 新窗口里，于是同屏出现两张相同的图。把"这张图属于谁"一起存下来，渲染时和当前 `attachment.id`
+    /// 对不上就当没有图，脏图无法上屏。
+    @State private var shownId: UUID?
 
     var body: some View {
         ZStack {
-            if let image {
+            if let image, shownId == attachment.id {
                 Image(nsImage: image)
                     .resizable()
                     .aspectRatio(contentMode: .fill)
@@ -174,20 +183,26 @@ struct CanvasAttachmentPreviewImage: View {
             }
         }
         .onAppear { request() }
-        // 附件换了（切换绑定槽位 / 槽位内容被替换）就重新取，否则会一直显示上一份附件的图。
+        // 附件换了（切换绑定槽位 / 槽位内容被替换 / 卡叠翻页）就重新取，否则会一直显示上一份附件的图。
         .onChange(of: attachment.id) { _ in
             image = nil
+            shownId = nil
             request()
         }
     }
 
     private func request() {
+        let requested = attachment.id
         if let hit = CanvasAttachmentThumbnails.cached(attachment, maxPixel: maxPixel) {
             image = hit
+            shownId = requested
             return
         }
         CanvasAttachmentThumbnails.load(attachment, maxPixel: maxPixel) { loaded in
-            if let loaded { image = loaded }
+            if let loaded {
+                image = loaded
+                shownId = requested
+            }
         }
     }
 }

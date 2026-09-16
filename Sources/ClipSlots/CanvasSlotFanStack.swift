@@ -68,7 +68,6 @@ struct CanvasSlotFanStack: View {
     /// 参考卡），页号乘以容量的算法表达不了这种重叠。
     @State private var windowStart: Int = 0
     /// 本页是否由「⬅ 后退」到达。只影响参考卡摆头还是摆尾，见 `CanvasFanPaging`。
-    @State private var arrivedBackward: Bool = false
     /// 鼠标是否压在「+N」灰卡露出的那块楔形上（★ 五轮）。灰卡沉到牌面之下、不再是 Button 之后，
     /// hover 反馈只能自己记 —— 没有反馈的话，那块灰楔形看起来就是"背景的一部分"。
     @State private var overflowHot: Bool = false
@@ -118,7 +117,6 @@ struct CanvasSlotFanStack: View {
     private var window: CanvasFanGeometry.CardWindow {
         CanvasFanGeometry.cardWindow(total: sources.count,
                                      start: windowStart,
-                                     arrivedBackward: arrivedBackward,
                                      maxCards: windowCapacity)
     }
 
@@ -129,11 +127,6 @@ struct CanvasSlotFanStack: View {
     private var visibleCards: [(index: Int, source: CanvasFanGeometry.CardSource)] {
         guard !sources.isEmpty else { return [(index: 0, source: .empty)] }
         return window.indices.map { (index: $0, source: sources[$0]) }
-    }
-
-    /// 某张牌面是否是**参考卡**（上一页残留下来的那张，按用户要求打灰遮罩）。
-    private func isReferenceCard(slot: Int) -> Bool {
-        window.referenceSlot == slot
     }
 
     // MARK: - 尺寸
@@ -280,7 +273,6 @@ struct CanvasSlotFanStack: View {
                                                                   newTotal: newCount,
                                                                   start: windowStart,
                                                                   capacity: windowCapacity)
-            arrivedBackward = false
             if next != windowStart { windowStart = next }
             persistWindowStart(next)
         }
@@ -290,7 +282,6 @@ struct CanvasSlotFanStack: View {
             // 两种风格的窗口容量不同（5 / 3），起点留着会让轮播开在半页上。
             // key 里带了风格，所以两种风格各记各的，来回切不会互相污染。
             windowStart = 0
-            arrivedBackward = false
             persistWindowStart(0)
         }
     }
@@ -303,22 +294,45 @@ struct CanvasSlotFanStack: View {
             // 只渲染牌面位（`visibleCards`）。当 `window.showsOverflowCard` 时 `ls` 会多出最后一格，
             // 那一格属于「+N」灰卡，由 `overflowCardLayer` 单独画（它要能点，不能待在这个
             // `allowsHitTesting(false)` 的层里）。
-            ForEach(ls.filter { visibleCards.indices.contains($0.index) }, id: \.index) { layout in
+            // ★ 七轮：`id` 从"位置下标"改成"位置 + 内容身份"。
+            //
+            // 用户报「翻页后同屏出现两张一模一样的图」。窗口本身摊开是严格递增无重复的
+            // （`CardWindow.indicesAreSane` 钉住），所以重复只可能出现在渲染层：
+            // 以位置为 id 时，翻页只是"同一个视图换了 source"，SwiftUI 复用视图实例、
+            // `CanvasAttachmentPreviewImage` 里那个 `@State image` 跟着留在原位，
+            // 于是新附件的缩略图解出来之前（甚至旧附件的异步回调迟到时）位置上显示的是**上一页那张图**
+            // —— 而那张图往往正好也在新窗口里，同屏就出现两张相同的图。
+            // 把内容身份编进 id 后，换内容 = 换视图，旧的 @State 一并作废。
+            ForEach(ls.filter { visibleCards.indices.contains($0.index) },
+                    id: \.index) { layout in
                 let card = visibleCards[layout.index]
                 cardView(layout,
                          globalIndex: card.index,
                          source: card.source,
-                         cardSize: cardSize,
-                         isReference: isReferenceCard(slot: layout.index))
+                         cardSize: cardSize)
+                    .id("\(layout.index)#\(cardIdentity(card.source, globalIndex: card.index))")
             }
+        }
+    }
+
+    /// 牌面内容身份：喂给 SwiftUI 的 `.id`，用来在翻页时强制**替换**而不是复用视图（★ 七轮）。
+    private func cardIdentity(_ source: CanvasFanGeometry.CardSource, globalIndex: Int) -> String {
+        switch source {
+        case .empty:
+            return "empty"
+        case .textSegment(let text):
+            // 文本段没有稳定 id，用"全量下标 + 内容哈希"：内容一样就没必要重建。
+            return "text-\(globalIndex)-\(text.hashValue)"
+        case .attachmentIndex(let index):
+            let a = index < attachments.count ? attachments[index] : nil
+            return "att-\(index)-\(a?.id.uuidString ?? "nil")"
         }
     }
 
     private func cardView(_ layout: CanvasFanGeometry.CardLayout,
                           globalIndex: Int,
                           source: CanvasFanGeometry.CardSource,
-                          cardSize: CGSize,
-                          isReference: Bool) -> some View {
+                          cardSize: CGSize) -> some View {
         let isHot = (hoveredCard == globalIndex)
         return cardBody(source)
             .frame(width: s(cardSize.width), height: s(cardSize.height))
@@ -336,14 +350,11 @@ struct CanvasSlotFanStack: View {
                 RoundedRectangle(cornerRadius: s(17), style: .continuous)
                     .stroke(Color.black.opacity(0.10), lineWidth: s(0.6))
             )
-            // ★ 三轮：参考卡（上一页残留的那张）压一层灰遮罩。
+            // ★ 七轮：参考卡的灰遮罩已整套删除。
             //
-            // 遮罩而不是降 opacity：降整卡 opacity 会让下面那张卡从它身上透出来（卡片是重叠的），
-            // 看起来像渲染错误；盖一层灰色不透明层则明确表达"这张是上一页的，已经看过"。
-            .overlay(
-                RoundedRectangle(cornerRadius: s(17), style: .continuous)
-                    .fill(Color.black.opacity(isReference ? CanvasFanGeometry.referenceDimOpacity : 0))
-            )
+            // 三~六轮这里压着一层 `Color.black.opacity(0.4)`，目的是标记"这张是上一页残留的参考卡"。
+            // 用户录屏实测的观感是「点了 +2 之后第一张图片变灰」并明确要求去掉，所以牌面现在一律全亮 ——
+            // 不加遮罩、也不降 opacity（降 opacity 会让下面那张卡透出来，看着像渲染错误）。
             .shadow(color: Color.black.opacity(isHot ? 0.26 : 0.16),
                     radius: s(isHot ? 9 : 5),
                     x: 0, y: s(isHot ? 5 : 2.5))
@@ -683,7 +694,6 @@ struct CanvasSlotFanStack: View {
         withAnimation(activeSpring) {
             hoveredCard = nil
             openedCard = nil
-            arrivedBackward = false
             windowStart = target
         }
         persistWindowStart(target)
@@ -695,7 +705,6 @@ struct CanvasSlotFanStack: View {
         withAnimation(activeSpring) {
             hoveredCard = nil
             openedCard = nil
-            arrivedBackward = true
             windowStart = target
         }
         persistWindowStart(target)

@@ -5936,11 +5936,12 @@ do {
             "没有附件时才轮到正文成卡（优先级不变）")
 }
 
-// MARK: - CANVAS-FAN-PAGE：+N 灰卡翻页 & 永远保留参考卡（v2.11.8 三轮）
+// MARK: - CANVAS-FAN-PAGE：+N 灰卡翻页（v2.11.8 三轮建立，★七轮改为纯窗口平移）
 //
-// 用户否掉了二轮的「+N 角标 → 缩略图网格浮层」：那是另一种呈现，第 6 张之后从未以卡片形态出现。
-// 三轮改成窗口滑动 + 第 6 位放灰色 +N 卡；并两次强调「无论向前还是向后翻页，展示区第一个或最后一个
-// 位置必须保留上一页的最后一张（或第一张）作为参考卡，永远不会整页替换」。
+// 三轮建立窗口翻页（取代二轮那个「+N 角标 → 缩略图网格浮层」，用户实测「第 6 张以后看不到」）。
+// 七轮按用户要求删掉参考卡：录屏里点完「+2 点击加载」最顶层那张图立刻变灰并一直灰着，
+// 原话「这个可以直接去掉这个变灰的逻辑」。于是翻页步长从 count-1 改成 count，遮罩整套删除。
+// 同时把「同一帧内窗口下标不能重复」钉成断言 —— 用户报的第二个 bug 就是同屏两张一样的图。
 do {
     let cap = CanvasFanGeometry.maxCards
     t.equal(cap, 5, "★同屏最多 5 张牌面（用户指定）")
@@ -5950,7 +5951,8 @@ do {
     t.equal(w3.count, 3, "3 张全显示")
     t.equal(w3.slotCount, 3, "没有溢出时不占第 6 个位置")
     t.check(!w3.showsOverflowCard && !w3.hasNext && !w3.hasPrev, "3 张时无 +N、无前后页")
-    t.check(w3.referenceSlot == nil, "开头页没有参考卡（本来就是第一张，无所谓参照）")
+    t.equal(w3.windowIndices, [0, 1, 2], "★窗口摊开就是 [0,1,2]")
+    t.check(w3.indicesAreSane, "★下标严格递增、无重复、不越界")
     let w5 = CanvasFanGeometry.cardWindow(total: 5, start: 0)
     t.check(!w5.showsOverflowCard, "正好 5 张不出现 +N（+0 是噪声）")
 
@@ -5963,82 +5965,147 @@ do {
     t.check(CanvasFanGeometry.layouts(count: w6.slotCount, expanded: true).count == 6,
             "★layouts 上限必须放到 maxCards+1，否则 +N 卡在几何层被静默丢弃（改完忘记这条 = 灰卡不显示）")
 
-    // ---- 12 张的完整翻页序列：步长 = count-1，永远重叠一张 ----
+    // ---- 12 张的完整翻页序列：★七轮步长 = count（纯平移，不再重叠参考卡）----
     var start = 0
     let total = 12
     var page = CanvasFanGeometry.cardWindow(total: total, start: start)
     t.equal(page.indices, 0..<5, "第一页 [0,5)")
     t.equal(page.remaining, 7, "+7")
-    t.check(page.referenceSlot == nil, "第一页无参考卡")
+    t.equal(page.windowIndices, [0, 1, 2, 3, 4], "第一页下标")
 
     start = CanvasFanGeometry.forwardStart(from: page)
     page = CanvasFanGeometry.cardWindow(total: total, start: start)
-    t.equal(page.start, 4, "★前进步长是 4（= 5-1）而不是 5：把本页最后一张留到下一页当参考")
-    t.equal(page.indices, 4..<9, "第二页 [4,9)")
-    t.equal(page.referenceSlot, 0, "★前进时参考卡在**头部**（新卡从右边进来，视线跟着走）")
+    t.equal(page.start, 5, "★前进步长 = 5（整窗平移），不再是 4（旧的 count-1 留参考卡）")
+    t.equal(page.indices, 5..<10, "第二页 [5,10)")
+    t.equal(page.windowIndices, [5, 6, 7, 8, 9], "第二页下标，与第一页零交集")
     t.check(page.hasPrev && page.hasNext, "中间页前后箭头都有")
 
     start = CanvasFanGeometry.forwardStart(from: page)
     page = CanvasFanGeometry.cardWindow(total: total, start: start)
-    t.equal(page.indices, 7..<12, "第三页 [7,12) —— 末页仍是满 5 张，起点被夹到 total-cap")
+    t.equal(page.indices, 10..<12, "★末页 [10,12) 只有 2 张 —— 栅格分页，末页允许不满")
+    t.equal(page.windowIndices, [10, 11], "★末页下标与前两页零重叠（旧的满窗规则会给出 [7,12)，重叠 3 张 = 用户看到的重复图）")
     t.equal(page.remaining, 0, "末页无 +N")
     t.check(!page.hasNext, "末页没有下一页")
-    t.equal(page.referenceSlot, 0, "末页头部仍是参考卡（不是整页替换）")
 
     // ★ 到末尾再点 ➡ 回到开头（用户指定）。
     t.equal(CanvasFanGeometry.forwardStart(from: page), 0,
             "★已在末页时前进 → 回到开头（用户：到末尾继续点 ➡ 直接跑到开头）")
 
-    // ---- 后退：参考卡换到尾部 ----
+    // ---- 后退：整页后退，落回栅格 ----
     let back = CanvasFanGeometry.cardWindow(total: total,
-                                            start: CanvasFanGeometry.backwardStart(from: page),
-                                            arrivedBackward: true)
-    t.equal(back.start, 3, "后退步长同样重叠一张（7-4=3）")
-    t.equal(back.referenceSlot, back.count - 1,
-            "★后退时参考卡在**尾部**（它是下一页的第一张）—— 这是用户补充要求里点名的另一半")
+                                            start: CanvasFanGeometry.backwardStart(from: page))
+    t.equal(back.start, 5, "★后退步长 = 5（10-5=5），落回上一页起点")
+    t.equal(back.windowIndices, [5, 6, 7, 8, 9], "后退回到第二页，下标与去时完全一致")
     t.check(back.hasNext && back.hasPrev, "后退到中间页，两个箭头都在")
 
-    // 后退到开头：不再有参考卡，也不能越界成负数。
+    // 后退到开头：不能越界成负数。
     let head = CanvasFanGeometry.cardWindow(total: total,
-                                            start: CanvasFanGeometry.backwardStart(from: back),
-                                            arrivedBackward: true)
+                                            start: CanvasFanGeometry.backwardStart(from: back))
     t.equal(head.start, 0, "★后退不会算出负起点")
     t.check(!head.hasPrev, "回到开头后左箭头消失")
 
-    // 任何一页都不能整页替换：相邻两页必须有交集（这是用户"永远有参照"要求的形式化表述）。
-    var cursor = 0
-    var pages: [Range<Int>] = []
-    var guardCount = 0
-    var wnd = CanvasFanGeometry.cardWindow(total: total, start: cursor)
-    pages.append(wnd.indices)
-    while wnd.hasNext && guardCount < 20 {
-        cursor = CanvasFanGeometry.forwardStart(from: wnd)
-        wnd = CanvasFanGeometry.cardWindow(total: total, start: cursor)
-        pages.append(wnd.indices)
-        guardCount += 1
+    // ---- ★ 七轮核心断言：任何一页的 windowIndices 都不能有重复 / 越界 ----
+    //
+    // 用户报「初始 3 张，点 +2 变 5 张，第 2 张和第 4 张完全一样」。窗口层若算出重复下标，
+    // 同一帧就会渲染两张同样的卡；这里把所有 总数 × 容量 × 起点 的组合全扫一遍钉死。
+    var sweepPages = 0
+    for totalN in 0...14 {
+        for capN in 1...6 {
+            for startN in -3...16 {
+                let w = CanvasFanGeometry.cardWindow(total: totalN, start: startN, maxCards: capN)
+                sweepPages += 1
+                if totalN == 0 {
+                    t.check(w.count == 1 && w.total == 0, "空槽位固定 1 个空卡位")
+                    continue
+                }
+                t.check(w.indicesAreSane,
+                        "★total=\(totalN) cap=\(capN) start=\(startN)：窗口下标必须严格递增、无重复、不越界")
+                t.check(w.start % capN == 0, "★起点必须落在翻页栅格上（total=\(totalN) cap=\(capN) start=\(startN)）")
+                t.check(w.count == min(capN, totalN - w.start), "count = min(cap, 剩下几张)")
+                t.check(w.start + w.count <= totalN, "窗口尾部不能越过总数")
+                t.check(w.remaining == totalN - (w.start + w.count), "+N 的 N = 总数 − 窗口尾部下标")
+            }
+        }
     }
-    t.check(guardCount < 20, "翻页必须收敛（步长 ≥1 保证不死循环）")
-    t.check(zip(pages, pages.dropFirst()).allSatisfy { prev, next in
-                prev.overlaps(next)
-            },
-            "★相邻两页始终有交集 —— 形式化了用户那句「永远不会整页替换，用户始终有参照」")
-    t.equal(pages.last!.upperBound, total, "★翻到底必须能看到最后一张（差一错误会让末张永远看不到，正是要修的 bug）")
+    t.check(sweepPages > 1000, "★组合扫描确实跑了（\(sweepPages) 个窗口）")
+
+    // 连续翻页（前进到底再后退到头）全程无重复下标、能看到最后一张。
+    for capN in [3, 5] {
+        for totalN in [1, 4, 6, 7, 11, 12, 23] {
+            var cursor = 0
+            var wnd = CanvasFanGeometry.cardWindow(total: totalN, start: cursor, maxCards: capN)
+            var seenPages: [[Int]] = [wnd.windowIndices]
+            var hops = 0
+            while wnd.hasNext && hops < 40 {
+                cursor = CanvasFanGeometry.forwardStart(from: wnd)
+                wnd = CanvasFanGeometry.cardWindow(total: totalN, start: cursor, maxCards: capN)
+                seenPages.append(wnd.windowIndices)
+                hops += 1
+            }
+            t.check(hops < 40, "翻页必须收敛（total=\(totalN) cap=\(capN)）")
+            t.check(seenPages.allSatisfy { Set($0).count == $0.count },
+                    "★每一页内部都不能有重复下标（total=\(totalN) cap=\(capN)）")
+            t.equal(seenPages.last!.last!, totalN - 1,
+                    "★翻到底必须能看到最后一张（差一错误会让末张永远看不到）")
+            // ★ 七轮：从头翻到尾必须是一个**划分** —— 每张卡恰好出现一次，顺序还原成 0..<total。
+            let flat = seenPages.flatMap { $0 }
+            t.equal(flat, Array(0..<totalN),
+                    "★从头翻到尾 = 每张卡恰好出现一次且顺序不变（total=\(totalN) cap=\(capN)）—— 这条直接钉死"
+                    + "用户报的「翻页后出现两张完全相同的图片」")
+            // 再一路后退，回到开头。
+            var backHops = 0
+            while wnd.hasPrev && backHops < 40 {
+                cursor = CanvasFanGeometry.backwardStart(from: wnd, maxCards: capN)
+                wnd = CanvasFanGeometry.cardWindow(total: totalN, start: cursor, maxCards: capN)
+                t.check(wnd.indicesAreSane, "后退过程中窗口也必须合法")
+                backHops += 1
+            }
+            t.equal(wnd.start, 0, "★一路后退必须回到开头（total=\(totalN) cap=\(capN)）")
+        }
+    }
+
+    // ---- 用户录屏那一幕：轮播 3 张 + 「+2」 ----
+    let rec0 = CanvasFanGeometry.cardWindow(total: 5, start: 0, maxCards: 3)
+    t.equal(rec0.windowIndices, [0, 1, 2], "录屏初态：同屏 3 张")
+    t.equal(rec0.remaining, 2, "灰卡写「+2」")
+    let rec1 = CanvasFanGeometry.cardWindow(total: 5,
+                                           start: CanvasFanGeometry.forwardStart(from: rec0),
+                                           maxCards: 3)
+    t.equal(rec1.windowIndices, [3, 4], "★点「+2」后正好加载那 2 张（[3,4]），与上一页零重叠")
+    t.equal(rec1.remaining, 0, "翻到底，灰卡消失")
+    t.check(rec1.indicesAreSane, "★这一帧的下标必须干净（用户报的重复图就发生在这一步）")
+    let rec2 = CanvasFanGeometry.cardWindow(total: 5,
+                                           start: CanvasFanGeometry.backwardStart(from: rec1, maxCards: 3),
+                                           maxCards: 3)
+    t.equal(rec2.windowIndices, [0, 1, 2], "★再点左箭头原样回到 [0,1,2]（用户报的第二次重复就在这一步）")
+
+    // ★ 录屏里那个节点：入参文件 7、扇形容量 5 —— 用户点「+2」后期望看到的正是剩下那 2 张。
+    let rec7a = CanvasFanGeometry.cardWindow(total: 7, start: 0)
+    t.equal(rec7a.remaining, 2, "7 张 → 首页 5 张 + 灰卡「+2」")
+    let rec7b = CanvasFanGeometry.cardWindow(total: 7, start: CanvasFanGeometry.forwardStart(from: rec7a))
+    t.equal(rec7b.windowIndices, [5, 6],
+            "★点「+2」后就是第 6、7 张两张（旧规则会给出 [2,7)，与首页重叠 3 张 —— 正是录屏里"
+            + "「第 2 张和第 4 张一模一样」的来源）")
 
     // ---- 边界与鲁棒性 ----
     let empty = CanvasFanGeometry.cardWindow(total: 0, start: 0)
     t.equal(empty.count, 1, "空槽位仍给 1 个位置（外部画虚线空卡；给 0 会让预览区像加载失败）")
     t.check(!empty.showsOverflowCard && !empty.hasNext, "空槽位没有翻页")
     let over = CanvasFanGeometry.cardWindow(total: 7, start: 999)
-    t.equal(over.start, 2, "越界起点被夹到末页起点（删卡后 start 可能残留在越界值，不能崩也不能显示空白页）")
+    t.equal(over.start, 5, "越界起点被夹到末页起点（删卡后 start 可能残留在越界值，不能崩也不能显示空白页）")
+    t.equal(over.windowIndices, [5, 6], "末页就 2 张")
     let neg = CanvasFanGeometry.cardWindow(total: 7, start: -5)
     t.equal(neg.start, 0, "负起点夹到 0")
     let cap3 = CanvasFanGeometry.cardWindow(total: 10, start: 0, maxCards: 3)
     t.equal(cap3.count, 3, "窗口容量可配（轮播用 3）")
-    t.equal(CanvasFanGeometry.forwardStart(from: cap3), 2, "容量 3 时步长 2，同样重叠一张")
+    t.equal(CanvasFanGeometry.forwardStart(from: cap3), 3, "★容量 3 时步长 3（整页平移）")
+    // 非栅格起点（历史遗留 / 登记处里的旧值）要被吸附回栅格，而不是切出一页"半页错位"的窗口。
+    t.equal(CanvasFanGeometry.cardWindow(total: 12, start: 3).start, 0, "★起点 3 吸附回 0（栅格对齐）")
+    t.equal(CanvasFanGeometry.cardWindow(total: 12, start: 6).start, 5, "★起点 6 吸附回 5")
 
-    // 遮罩透明度按用户给的数值钉住（改了就会出现"参考卡看起来跟新卡一样"或"灰得看不见内容"）。
-    t.check(abs(CanvasFanGeometry.referenceDimOpacity - 0.4) < 0.001, "参考卡遮罩 0.4")
+    // 灰卡透明度按用户给的数值钉住；★参考卡遮罩已删除，不再有 referenceDimOpacity。
     t.check(abs(CanvasFanGeometry.overflowCardOpacity - 0.5) < 0.001, "+N 灰卡 0.5")
+    t.check(abs(CanvasFanGeometry.overflowCardHotOpacity - 0.72) < 0.001, "+N 灰卡 hover 提浓到 0.72")
 }
 
 // MARK: - CANVAS-DEL-LINK：删节点前的断链确认（v2.11.8 三轮）
@@ -6156,37 +6223,40 @@ do {
     t.check(mount1.hasSuffix("att3"),
             "★刚添加的那张仍在末位 —— 重绘不会把它换到别处（换位置就是用户说的「顺序反了」）")
 
-    // ---- 3) 窗口钳制 ----
+    // ---- 3) 窗口钳制（★ 七轮改为栅格对齐：[0,cap) [cap,2cap) …）----
     t.equal(CanvasFanWindowState.clamp(start: 0, total: 3, capacity: 5), 0, "不够一页时起点只能是 0")
-    t.equal(CanvasFanWindowState.clamp(start: 9, total: 8, capacity: 5), 3,
-            "★越界起点钳到最后一页（不钳的话 CardWindow 切出 0 张 = 预览区突然空白）")
+    t.equal(CanvasFanWindowState.clamp(start: 9, total: 8, capacity: 5), 5,
+            "★越界起点钳到最后一页起点（栅格 5 的倍数；不钳的话 CardWindow 切出 0 张 = 预览区突然空白）")
     t.equal(CanvasFanWindowState.clamp(start: -4, total: 8, capacity: 5), 0, "负起点钳到 0")
     t.equal(CanvasFanWindowState.clamp(start: 2, total: 0, capacity: 5), 0, "空槽位起点归 0（且不能崩）")
+    t.equal(CanvasFanWindowState.clamp(start: 3, total: 12, capacity: 5), 0,
+            "★非栅格起点吸附回本页起点（3 → 0），否则相邻两页会重叠 = 用户看到重复图")
+    t.equal(CanvasFanWindowState.clamp(start: 7, total: 12, capacity: 5), 5, "7 → 5")
 
     // ---- 4) 数量变化：变多要露出新增那张，变少只钳制 ----
     t.equal(CanvasFanWindowState.startAfterCountChange(oldTotal: 8, newTotal: 9, start: 0, capacity: 5),
-            4,
-            "★拖入第 9 张（下标 8）时窗口推到 [4,9) 把它露出来 —— 旧代码这里写 0，新图片被翻页藏起来")
+            5,
+            "★拖入第 9 张（下标 8）时跳到它所在那一页 [5,9) 把它露出来 —— 旧代码这里写 0，新图片被翻页藏起来")
     t.equal(CanvasFanWindowState.startAfterCountChange(oldTotal: 3, newTotal: 4, start: 0, capacity: 5),
             0,
             "总数不到一页时不需要动窗口")
-    t.equal(CanvasFanWindowState.startAfterCountChange(oldTotal: 9, newTotal: 8, start: 4, capacity: 5),
-            3,
+    t.equal(CanvasFanWindowState.startAfterCountChange(oldTotal: 9, newTotal: 8, start: 5, capacity: 5),
+            5,
             "★删一张只钳制，不跳回第一页（连删几张不该每次都翻回去重新找）")
-    t.equal(CanvasFanWindowState.startAfterCountChange(oldTotal: 9, newTotal: 2, start: 4, capacity: 5),
+    t.equal(CanvasFanWindowState.startAfterCountChange(oldTotal: 9, newTotal: 2, start: 5, capacity: 5),
             0,
             "删到不够一页时回到 0")
-    t.equal(CanvasFanWindowState.startAfterCountChange(oldTotal: 9, newTotal: 9, start: 4, capacity: 5),
-            4,
+    t.equal(CanvasFanWindowState.startAfterCountChange(oldTotal: 9, newTotal: 9, start: 5, capacity: 5),
+            5,
             "数量没变（改名 / 换路径）时窗口原地不动 —— 动一下就是卡片自己跳")
 
-    // ---- 5) startRevealing：最小改动 ----
-    t.equal(CanvasFanWindowState.startRevealing(index: 6, start: 4, total: 9, capacity: 5), 4,
-            "已经在窗口里就不动（避免「后台刷新把用户看的那页对齐走」）")
-    t.equal(CanvasFanWindowState.startRevealing(index: 1, start: 4, total: 9, capacity: 5), 1,
-            "目标在窗口左边 → 起点挪到它")
-    t.equal(CanvasFanWindowState.startRevealing(index: 8, start: 0, total: 9, capacity: 5), 4,
-            "目标在窗口右边 → 把它顶到末位")
+    // ---- 5) startRevealing：跳到目标所在的那一页 ----
+    t.equal(CanvasFanWindowState.startRevealing(index: 6, start: 5, total: 9, capacity: 5), 5,
+            "已经在本页里就不动（避免「后台刷新把用户看的那页对齐走」）")
+    t.equal(CanvasFanWindowState.startRevealing(index: 1, start: 5, total: 9, capacity: 5), 0,
+            "目标在前一页 → 跳回那一页起点")
+    t.equal(CanvasFanWindowState.startRevealing(index: 8, start: 0, total: 9, capacity: 5), 5,
+            "目标在后一页 → 跳到那一页起点")
 
     // ---- 6) 登记处：模拟一次右键 / 页面切换导致的视图重建 ----
     let reg = CanvasFanWindowRegistry()
@@ -6194,9 +6264,9 @@ do {
     let keyCarousel = CanvasFanWindowState.key(nodeId: "grp#3", styleTag: "carousel")
     t.check(keyFan != keyCarousel, "★扇形与轮播容量不同（5/3），必须各记各的，否则切风格开在半页上")
     t.equal(reg.start(for: keyFan, total: 9, capacity: 5), 0, "没记录过就是第一页")
-    reg.set(4, for: keyFan)
+    reg.set(5, for: keyFan)
     // 「重建」= 视图 @State 全归零后重新 onAppear 读一次。
-    t.equal(reg.start(for: keyFan, total: 9, capacity: 5), 4,
+    t.equal(reg.start(for: keyFan, total: 9, capacity: 5), 5,
             "★重建后仍在第 2 页（用户 Bug 一里那句「切到其他页面再切回来」）")
     t.equal(reg.start(for: keyCarousel, total: 9, capacity: 3), 0, "另一种风格不受影响")
     t.equal(reg.start(for: keyFan, total: 5, capacity: 5), 0,
@@ -6206,9 +6276,9 @@ do {
 
     // 不同节点互不串档 —— 串了就是"另一个节点的翻页把我的窗口顶走了"。
     let keyOther = CanvasFanWindowState.key(nodeId: "grp#4", styleTag: "fan")
-    reg.set(3, for: keyFan)
+    reg.set(5, for: keyFan)
     reg.set(0, for: keyOther)
-    t.equal(reg.start(for: keyFan, total: 9, capacity: 5), 3, "节点 A 的窗口不被节点 B 影响")
+    t.equal(reg.start(for: keyFan, total: 9, capacity: 5), 5, "节点 A 的窗口不被节点 B 影响")
 
     // ---- 7) 「+N」= 总数 - 窗口尾部，≤5 张不出现 ----
     for total in 1...5 {
@@ -6223,7 +6293,8 @@ do {
     t.equal(w9.remaining, 4, "9 张、第一页 5 张 → +4")
     let w9p2 = CanvasFanGeometry.cardWindow(total: 9, start: CanvasFanGeometry.forwardStart(from: w9))
     t.equal(w9p2.remaining, 9 - (w9p2.start + w9p2.count), "翻一页后 N 重新按同一口径算")
-    t.equal(w9p2.start, 4, "翻页步长 = 5-1（保留参考卡）")
+    t.equal(w9p2.start, 5, "★七轮：翻页步长 = 5（整页平移，不再是 5-1 留参考卡）")
+    t.equal(w9p2.windowIndices, [5, 6, 7, 8], "★9 张的第二页就是剩下那 4 张，与第一页零重叠")
     t.equal(w9p2.remaining, 0, "[4,9) 已到底 → 不再有 +N")
     t.check(!w9p2.showsOverflowCard, "到底后灰卡消失，否则点它翻不动会被当成卡死")
 

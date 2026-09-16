@@ -31,28 +31,30 @@ import Foundation
 /// 视图自己的 `@State` 驱动动画），它只承担"重建后我还记得你翻到哪了"这一件事。
 public enum CanvasFanWindowState {
 
-    /// 把窗口起点钳制到合法区间 `[0, max(0, total - capacity)]`。
+    /// 把起点夹回合法范围，并**对齐到翻页栅格**（★ 七轮）。
     ///
     /// 越界起点的后果不是"显示错"而是"显示空"：`CardWindow` 会切出 0 张卡，节点预览区突然变空白。
+    ///
+    /// 七轮之前这里是 `min(start, total - capacity)`：末页永远保持满窗。那条规则制造了用户报的
+    /// 「翻页后出现两张完全相同的图片」—— 总 7 张、容量 5 时点「+2」，起点 5 被夹回 2，
+    /// 新页 `[2,7)` 与旧页 `[0,5)` 有 3 张重叠，用户看到的就是"刚才那几张又出现了一遍"。
+    ///
+    /// 现在窗口按**固定栅格**分页：`[0,cap) [cap,2cap) …`。同一张卡只属于一页，翻页前后零重叠，
+    /// 末页允许不满（总 7 容量 5 → 末页就 2 张，正好对上灰卡上那个「+2」）。
     public static func clamp(start: Int, total: Int, capacity: Int) -> Int {
         guard total > 0, capacity > 0 else { return 0 }
-        let last = max(0, total - capacity)
-        return min(max(0, start), last)
+        let idx = min(max(0, start), total - 1)
+        return (idx / capacity) * capacity
     }
 
-    /// 让某个下标**可见**的最小改动起点：已经在窗口里就原地不动，否则把它挪进来。
+    /// 让某个下标**可见**的最小改动起点：算出它所在的那一页的起点。
     ///
-    /// 原地不动这件事是刻意的 —— 用户正看着第 2 页，某个后台刷新若把窗口"对齐"到别的页，
-    /// 表现就是卡片自己跳了一下。
+    /// ★ 七轮：栅格分页之后"让它可见"就等于"跳到它所在的页"，不再需要"已经在窗口里就原地不动"
+    /// 那套判断（栅格页本身就满足这一点：同一页里的下标算出来的起点相同）。
     public static func startRevealing(index: Int, start: Int, total: Int, capacity: Int) -> Int {
         guard total > 0, capacity > 0 else { return 0 }
         let idx = min(max(0, index), total - 1)
-        let cur = clamp(start: start, total: total, capacity: capacity)
-        if idx < cur { return clamp(start: idx, total: total, capacity: capacity) }
-        if idx > cur + capacity - 1 {
-            return clamp(start: idx - capacity + 1, total: total, capacity: capacity)
-        }
-        return cur
+        return (idx / capacity) * capacity
     }
 
     /// 附件数量变化后的新起点。
