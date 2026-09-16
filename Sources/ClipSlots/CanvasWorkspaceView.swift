@@ -72,6 +72,11 @@ struct CanvasWorkspaceView: View {
     @State private var editingNodeId: String? = nil
     /// 正在管理「入参文件」的节点 id。见 `openInputFiles(_:)` 说明为何弹层不挂在卡片里。
     @State private var inputFilesNodeId: String? = nil
+    /// 「删了会断开连接」的确认弹窗（★ v2.11.8 三轮）。非 nil = 正在等用户拍板。
+    ///
+    /// 存一份**待删 id 集合**而不是只存个 Bool：弹窗弹出后用户可能改动选中集合（点了别处），
+    /// 确认时若再去读 `canvas.selectedNodeIds` 就会删掉与提示文案不符的那批节点。
+    @State private var pendingDeletion: PendingDeletion? = nil
     /// 历史面板是否展开。
     @State private var showHistory = false
     /// 框选矩形（屏幕空间）。
@@ -157,7 +162,7 @@ struct CanvasWorkspaceView: View {
                 pan = canvas.pan
                 zoom = canvas.zoom
                 // 排版缩放必须与初始 zoom 对齐，否则首帧 ratio ≠ 1，节点会以一个错误的比例被拉伸。
-                layoutZoom = canvas.zoom
+                layoutZoom = CanvasZoomLayout.bucket(for: canvas.zoom)
                 // 闭包在这里绑一次即可：@State/@ObservedObject 的读写都走稳定的存储盒，
                 // 视图结构体后续被重建也不影响这几个闭包写到正确的地方。
                 inputRouter.onScroll = { dx, dy, precise, isZoom, point in
@@ -200,7 +205,27 @@ struct CanvasWorkspaceView: View {
                 canvas.slotTitleProvider = nil
                 canvas.flushSave()
             }
+            // ★ 三轮：删除节点会断开下游连接时的确认（用户要求「弹 Alert，可强制删除或取消」）。
+            //
+            // 用 `.alert(item:)` 而不是自绘浮层：这是一个真正需要打断用户的破坏性确认，系统 Alert
+            // 自带 Esc/回车键盘语义与"点外面不会误关"的模态行为，自绘一遍等于重新实现一遍还容易漏。
+            .alert(item: $pendingDeletion) { pending in
+                Alert(title: Text(CanvasNodeDeletion.confirmTitle),
+                      message: Text(CanvasNodeDeletion.confirmMessage(referrerCount: pending.referrerCount)),
+                      primaryButton: .destructive(Text(CanvasNodeDeletion.confirmPrimary)) {
+                          performDelete(ids: pending.ids)
+                      },
+                      secondaryButton: .cancel(Text(CanvasNodeDeletion.confirmCancel)))
+            }
         }
+    }
+
+    /// 等待用户确认的删除请求。
+    struct PendingDeletion: Identifiable {
+        let id = UUID()
+        let ids: Set<String>
+        /// 会因此断链的下游节点数量。只用于文案，判定另存在 Kit。
+        let referrerCount: Int
     }
 
     private var effectivePan: CGSize {
@@ -280,6 +305,7 @@ struct CanvasWorkspaceView: View {
                                    onCancelEdit: { editingNodeId = nil },
                                    onOpenInputFiles: { openInputFiles(node) },
                                    onPromoteInput: { promoteInput(node, index: $0) },
+                                   onDeleteInput: { deleteInput(node, index: $0) },
                                    onToggleAnimationStyle: { canvas.toggleAnimationStyle(id: node.id) },
                                    onToast: { store.transientUI.showToast($0) })
                     // ★ 三轮：缩放过程中的「文字跳舞」修复 —— 排版用 `layoutZoom`，缩放差值用变换补。
@@ -351,9 +377,11 @@ struct CanvasWorkspaceView: View {
         // 右键点在选中集合里的某个节点上时，删除的是**整个选中集合** —— 与 Delete 键一致。
         // 两条路径语义不同（一个删一个、一个删一片）是最容易被用户当成 bug 的那类不一致。
         if canvas.selectedNodeIds.contains(node.id), canvas.selectedNodeIds.count > 1 {
-            Button("删除选中的 \(canvas.selectedNodeIds.count) 个节点") { canvas.removeSelected() }
+            Button("删除选中的 \(canvas.selectedNodeIds.count) 个节点") {
+                requestDelete(ids: canvas.selectedNodeIds)
+            }
         } else {
-            Button("删除节点") { canvas.removeNodes(ids: [node.id]) }
+            Button("删除节点") { requestDelete(ids: [node.id]) }
         }
     }
 
@@ -706,7 +734,16 @@ struct CanvasWorkspaceView: View {
                 .offset(x: anchor.x, y: anchor.y)
                 .allowsHitTesting(false)
                 .popover(isPresented: Binding(get: { inputFilesNodeId != nil },
-                                              set: { if !$0 { inputFilesNodeId = nil } }),
+                                              set: {
+                                                  if !$0 {
+                                                      inputFilesNodeId = nil
+                                                      // 面板里增删过入参 → 关闭时让绑定节点重读槽位。
+                                                      // （面板期间的实时刷新由 store 的
+                                                      // `canvasSlotRevision` @Published 承担，
+                                                      // 这里是关闭后的一道兜底。）
+                                                      canvas.noteSlotDataChanged()
+                                                  }
+                                              }),
                          arrowEdge: .bottom) {
                     // 与编辑页槽位附件面板是**同一个组件**、同一份底层数据，只是换了称呼。
                     // 复用而不是新写一份，才能保证增删 / 拖拽排序 / 断链角标 / 悬停预览这些
@@ -1008,6 +1045,24 @@ struct CanvasWorkspaceView: View {
         store.transientUI.showToast("已设为首个入参：\(item.name)")
     }
 
+    /// 扇形卡片气泡里的「删除」：删掉这**一个入参文件**（★ v2.11.8 三轮）。
+    ///
+    /// 刻意**不弹确认**：用户明确要求「卡片内单张图片的删除（非整个节点删除），应该允许直接删除，
+    /// 不影响节点本身」。删除只改附件列表 —— 节点、槽位正文、连线全都不动，且 `write` 路径本身
+    /// 会把旧内容备份进 `.trash`（v2.10.16 起），误删有得救。要弹 Alert 的是**删节点**那条路
+    /// （见 `deleteSelectedNodes`），两者语义不同，别合并。
+    private func deleteInput(_ node: CanvasNode, index: Int) {
+        var list = store.canvasSlotAttachments(groupId: node.groupId, slot: node.slot)
+        guard list.indices.contains(index) else { return }
+        let item = list.remove(at: index)
+        guard store.writeCanvasSlotAttachments(groupId: node.groupId, slot: node.slot, attachments: list) else {
+            store.transientUI.showToast("存储繁忙，稍后再试")
+            return
+        }
+        canvas.noteSlotDataChanged()
+        store.transientUI.showToast("已删除入参：\(item.name)")
+    }
+
     // MARK: - 浮动层
 
     /// 左侧侧栏当前占据的宽度。其余浮动控件都要按它让位，否则会被压在侧栏底下（侧栏是不透明的）。
@@ -1131,23 +1186,31 @@ struct CanvasWorkspaceView: View {
     private func settleLayoutZoom(to value: CGFloat) {
         zoomSettleWork?.cancel()
         zoomSettleWork = nil
-        guard layoutZoom != value else { return }
+        // ★ 三轮 hotfix2：不再把排版缩放钉到"任意实数 zoom"，而是钉到 `CanvasZoomLayout` 的档位。
+        //
+        // 二轮那版（`layoutZoom = value`）在鼠标滚轮下等于每一格都重排一次文字，因为滚轮事件是
+        // 离散且稀疏的，每一格之间都会走完 0.15s 防抖被当成"已停手"。量化 + 迟滞后，同一档内的
+        // 多次缩放**一次都不重排**（下面那个 guard 直接返回）。理由与代价见 CanvasZoomLayout。
+        let target = CanvasZoomLayout.settled(current: layoutZoom, zoom: value)
+        guard layoutZoom != target else { return }
         var tx = Transaction()
         tx.disablesAnimations = true
         tx.animation = nil
-        withTransaction(tx) { layoutZoom = value }
+        withTransaction(tx) { layoutZoom = target }
     }
 
     /// 连续缩放（捏合 / Cmd+滚轮）停手后再落定排版缩放。
     ///
     /// 期间 `layoutZoom` 保持不动 → 文字一次都不重排；`scaleEffect` 的 ratio 跟着手势实时变化，
-    /// 所以手感仍然是连续的，只是过程中略软。防抖 0.15s：比人眼察觉软化的时间短，又足够长到
-    /// 一次连续滚动/捏合中间不会被误判成"停手"。
+    /// 所以手感仍然是连续的，只是过程中略软。
+    ///
+    /// ★ 三轮 hotfix2：防抖 0.15s → `CanvasZoomLayout.settleDelay`(0.32s)，并且落定时走档位量化。
+    /// 单靠防抖修不掉抖动 —— 鼠标滚轮相邻两格常隔 0.15~0.3s，每一格都会被判成"停手"然后重排一次。
     private func scheduleLayoutZoomSettle() {
         zoomSettleWork?.cancel()
         let work = DispatchWorkItem { settleLayoutZoom(to: zoom) }
         zoomSettleWork = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15, execute: work)
+        DispatchQueue.main.asyncAfter(deadline: .now() + CanvasZoomLayout.settleDelay, execute: work)
     }
 
     /// 按钮缩放以**视图中心**为锚点（没有正在移动的光标可依据时，中心是唯一合理选择）。
@@ -1280,6 +1343,33 @@ struct CanvasWorkspaceView: View {
         canvas.noteSlotDataChanged()
     }
 
+    // MARK: - 删除节点（带断链确认）
+
+    /// 删除节点的**唯一入口**。有下游引用时先弹确认，没有就直接删。
+    ///
+    /// 三个调用点（Delete 键 / 右键"删除节点" / 右键"删除选中的 N 个"）全部收敛到这里 ——
+    /// 之前它们各自调 `canvas.removeNodes` / `removeSelected`，任何一条漏加确认都等于
+    /// 用户从那条路径删掉引用节点时静默断链，而断链事后无法还原（见 `CanvasNode.parentNodeId`）。
+    private func requestDelete(ids: Set<String>) {
+        let targets = ids.filter { id in canvas.nodes.contains { $0.id == id } }
+        guard !targets.isEmpty else { return }
+        let links = CanvasNodeDeletion.brokenLinks(deleting: targets, nodes: canvas.nodes)
+        guard links.referrers.isEmpty else {
+            pendingDeletion = PendingDeletion(ids: targets, referrerCount: links.referrers.count)
+            return
+        }
+        performDelete(ids: targets)
+    }
+
+    /// 真正执行删除（确认之后，或本来就无需确认）。
+    private func performDelete(ids: Set<String>) {
+        pendingDeletion = nil
+        let count = canvas.nodes.filter { ids.contains($0.id) }.count
+        guard count > 0 else { return }
+        canvas.removeNodes(ids: ids)
+        store.transientUI.showToast(count == 1 ? "已删除节点" : "已删除 \(count) 个节点")
+    }
+
     /// 打开「入参文件」管理弹层。
     ///
     /// 弹层刻意**不挂在卡片上**：它要增删改附件，得拿到 `SlotStoreObservable`，而卡片视图刻意
@@ -1306,12 +1396,12 @@ struct CanvasWorkspaceView: View {
             // 正在 inline 编辑时退格属于文本编辑（`CanvasInputRouter` 已按 firstResponder 拦掉一层，
             // 这里再兜一次：焦点抢占存在一帧空窗，那一帧误删是不可挽回的）。
             guard editingNodeId == nil else { return false }
-            let removed = canvas.removeSelected()
-            if removed == 0 {
+            guard !canvas.selectedNodeIds.isEmpty else {
                 store.transientUI.showToast("请先选中要删除的节点")
-            } else {
-                store.transientUI.showToast(removed == 1 ? "已删除节点" : "已删除 \(removed) 个节点")
+                return true
             }
+            // ★ 三轮：走统一入口，有下游引用先弹确认（toast 由 performDelete 负责）。
+            requestDelete(ids: canvas.selectedNodeIds)
             return true
 
         case .undo:

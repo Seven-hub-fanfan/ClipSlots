@@ -110,7 +110,12 @@ public enum CanvasFanGeometry {
     public static func layouts(count: Int,
                                expanded: Bool,
                                hoveredIndex: Int? = nil) -> [CardLayout] {
-        let n = min(max(count, 1), maxCards)
+        // ★ v2.11.8 三轮：上界从 `maxCards` 放到 `maxCards + 1`。
+        //
+        // 多出来的那一格是翻页用的灰色「+N」卡（见 `CanvasFanPaging`）—— 它必须和牌面卡走**同一套**
+        // 扇形数学，否则它的角度/错位与旁边的卡对不上，看起来像一张歪掉的卡而不是"这叠还有后续"。
+        // 夹到 maxCards 的旧上界会让第 6 格被静默丢掉（症状：翻页入口整个不见）。
+        let n = min(max(count, 1), maxCards + 1)
         let spread = expanded ? expandedSpread : collapsedSpread
         let stagger = expanded ? expandedStagger : collapsedStagger
         let mid = CGFloat(n - 1) / 2
@@ -302,8 +307,8 @@ public enum CanvasFanGeometry {
 
     /// 一个槽位在画布上应该显示几张卡片、每张是什么。
     ///
-    /// 优先级刻意与项目既有的「存入逻辑」同向：**图片附件是最具体的内容，优先成卡**；没有图片
-    /// 附件时才把正文切段；两者都没有（空槽）→ 一张空卡。
+    /// 优先级刻意与项目既有的「存入逻辑」同向：**入参文件是最具体的内容，优先成卡**；没有附件时
+    /// 才把正文切段；两者都没有（空槽）→ 一张空卡。
     public enum CardSource: Equatable {
         case attachmentIndex(Int)
         case textSegment(String)
@@ -311,10 +316,15 @@ public enum CanvasFanGeometry {
     }
 
     /// 全量卡片来源（**不截断**）。轮播模式与 `+N` 角标都要知道真实总数。
-    public static func allCardSources(attachmentImageIndices: [Int],
+    ///
+    /// ★ v2.11.8 三轮：入参从 `attachmentImageIndices` 改名为 `attachmentIndices` —— 语义从
+    /// 「只有图片类附件成卡」放宽到「**所有**附件都成卡」。改名而不是沿用旧标签，是因为旧名字会
+    /// 继续引导调用方在外面先按 `canvasIsImageLike` 过一遍，而这正是用户反馈的
+    /// 「卡片不显示非图像文件」的根因：面板说 5 项、卡叠只画 3 张（见 `CanvasAttachmentKind`）。
+    public static func allCardSources(attachmentIndices: [Int],
                                       text: String) -> [CardSource] {
-        if !attachmentImageIndices.isEmpty {
-            return attachmentImageIndices.map { .attachmentIndex($0) }
+        if !attachmentIndices.isEmpty {
+            return attachmentIndices.map { .attachmentIndex($0) }
         }
         let segments = textSegments(text, limit: Int.max)
         if !segments.isEmpty {
@@ -324,9 +334,9 @@ public enum CanvasFanGeometry {
     }
 
     /// 扇形模式实际渲染的卡片来源（截到 `maxCards`）。
-    public static func cardSources(attachmentImageIndices: [Int],
+    public static func cardSources(attachmentIndices: [Int],
                                    text: String) -> [CardSource] {
-        Array(allCardSources(attachmentImageIndices: attachmentImageIndices, text: text)
+        Array(allCardSources(attachmentIndices: attachmentIndices, text: text)
                 .prefix(maxCards))
     }
 

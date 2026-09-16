@@ -51,15 +51,19 @@ struct CanvasSlotFanStack: View {
     let onOpenInputFiles: () -> Void
     /// 把第 N 个附件挪到列表首位。首位 = 缩略图/圆盘取的那一张，所以这件事等于"设为主入参"。
     let onPromoteInput: (Int) -> Void
+    /// 删除第 N 个附件（★ v2.11.8 三轮）。只动附件列表，节点/槽位正文不受影响 ——
+    /// 用户明确要求「卡片内单张图片的删除，允许直接删除，不影响节点本身」。
+    let onDeleteInput: (Int) -> Void
     let onToast: (String) -> Void
 
     @State private var hoveredCard: Int? = nil
     /// 打开了操作气泡的卡片下标（**全量数组的下标**）。
     @State private var openedCard: Int? = nil
-    /// 轮播当前页。
-    @State private var page: Int = 0
-    /// `+N` 缩略图网格浮层是否展开。
-    @State private var showOverflowGrid = false
+    /// 翻页窗口起点（全量下标）。★ v2.11.8 三轮取代旧的 `page`：翻页步长是"容量 - 1"（重叠一张
+    /// 参考卡），页号乘以容量的算法表达不了这种重叠。
+    @State private var windowStart: Int = 0
+    /// 本页是否由「⬅ 后退」到达。只影响参考卡摆头还是摆尾，见 `CanvasFanPaging`。
+    @State private var arrivedBackward: Bool = false
 
     /// 扇形展开动画。用户明确指定的参数，不要顺手改成 `Anim.transition`。
     private static let fanSpring = Animation.spring(response: 0.35, dampingFraction: 0.72)
@@ -80,30 +84,35 @@ struct CanvasSlotFanStack: View {
 
     private var total: Int { max(sources.count, 1) }
 
-    /// 扇形模式实际渲染的卡片（截到 5 张）。
-    private var fanSources: [CanvasFanGeometry.CardSource] {
-        Array(sources.prefix(CanvasFanGeometry.maxCards))
+    /// 窗口容量：扇形 5 张，轮播同屏 3 张。
+    private var windowCapacity: Int {
+        carouselActive ? CanvasFanGeometry.carouselVisible : CanvasFanGeometry.maxCards
     }
 
-    private var overflowCount: Int {
-        CanvasFanGeometry.overflowCount(total: sources.count)
-    }
-
-    /// 当前页对应的原始下标区间（轮播模式）。
-    private var pageRange: Range<Int> {
-        CanvasFanGeometry.carouselRange(page: page, total: sources.count)
+    /// 当前翻页窗口（★ v2.11.8 三轮，取代二轮的「前 5 张 + `+N` 网格浮层」）。
+    ///
+    /// 二轮把超出的卡片收进一个缩略图网格浮层，用户实测的结论是「第 6 张以后看不到」——
+    /// 网格是另一种呈现，第 6 张从未以卡片形态出现。三轮改成真正的窗口翻页，几何与边界在
+    /// `CanvasFanPaging` 里，本视图只负责把窗口翻译成 SwiftUI。
+    private var window: CanvasFanGeometry.CardWindow {
+        CanvasFanGeometry.cardWindow(total: sources.count,
+                                     start: windowStart,
+                                     arrivedBackward: arrivedBackward,
+                                     maxCards: windowCapacity)
     }
 
     /// 当前渲染的卡片：`(全量下标, 内容)`。
     ///
-    /// 带着**全量下标**走是关键：操作气泡、`onPromoteInput` 都要作用到真实附件，
+    /// 带着**全量下标**走是关键：操作气泡、`onPromoteInput`、单卡删除都要作用到真实附件，
     /// 页内下标一旦泄漏到这些地方，翻到第 2 页点"设为入参"就会置顶错的那张图。
     private var visibleCards: [(index: Int, source: CanvasFanGeometry.CardSource)] {
-        if carouselActive {
-            return pageRange.map { (index: $0, source: sources[$0]) }
-        }
-        if fanSources.isEmpty { return [(index: 0, source: .empty)] }
-        return fanSources.enumerated().map { (index: $0.offset, source: $0.element) }
+        guard !sources.isEmpty else { return [(index: 0, source: .empty)] }
+        return window.indices.map { (index: $0, source: sources[$0]) }
+    }
+
+    /// 某张牌面是否是**参考卡**（上一页残留下来的那张，按用户要求打灰遮罩）。
+    private func isReferenceCard(slot: Int) -> Bool {
+        window.referenceSlot == slot
     }
 
     // MARK: - 尺寸
@@ -136,19 +145,29 @@ struct CanvasSlotFanStack: View {
 
     // MARK: - 布局
 
+    /// 本页要摆的全部位置的布局。
+    ///
+    /// ★ 三轮：位置数 = 牌面数 + （需要「+N」灰卡时的 1）。多出来的那一格由 `overflowCardLayer`
+    /// 渲染，但**必须走同一套几何**，否则灰卡的角度/错位跟旁边的牌面对不上。
     private func layouts(containerWidth: CGFloat) -> [CanvasFanGeometry.CardLayout] {
+        let slotCount = sources.isEmpty ? 1 : window.slotCount
         if carouselActive {
             return CanvasFanGeometry.carouselLayouts(
-                count: visibleCards.count,
+                count: slotCount,
                 cardWidth: carouselCardSize(containerWidth: containerWidth).width,
                 hoveredIndex: hoveredCard.flatMap { global in
                     // 命中层给的是全量下标，轮播布局要的是页内下标。
                     visibleCards.firstIndex { $0.index == global }
                 })
         }
-        return CanvasFanGeometry.layouts(count: visibleCards.count,
+        return CanvasFanGeometry.layouts(count: slotCount,
                                          expanded: expanded,
-                                         hoveredIndex: hoveredCard)
+                                         // 同轮播分支：命中层记的是**全量**下标，布局要的是页内位置。
+                                         // 翻到第 2 页后（windowStart=4）不换算的话，hover 第 5 张
+                                         // 会去抬起页内第 5 格 —— 那是「+N」灰卡，抬错人。
+                                         hoveredIndex: hoveredCard.flatMap { global in
+                                             visibleCards.firstIndex { $0.index == global }
+                                         })
     }
 
     private var activeSpring: Animation {
@@ -173,21 +192,24 @@ struct CanvasSlotFanStack: View {
                 // 2) 命中层：整块透明，自己算落在哪张卡上。
                 hitLayer(ls, cardSize: cardSize, box: box)
 
-                // 3) 角标层：收拢态的 +（加入参）、扇形溢出的 +N。要能点，所以放在命中层之上。
+                // 3) 角标层：收拢态的 +（加入参）。要能点，所以放在命中层之上。
                 badgeLayer(ls, cardSize: cardSize)
 
-                if carouselActive && CanvasFanGeometry.carouselPageCount(total: sources.count) > 1 {
+                // 4) 「+N」灰卡：翻页入口本身要能点，所以它是独立一层压在命中层之上
+                //    （命中层按角度/多边形判定，只认牌面卡）。
+                if window.showsOverflowCard, let slot = ls.last {
+                    overflowCardLayer(slot, cardSize: cardSize)
+                }
+
+                // 5) 左右翻页箭头：★ 三轮起两种风格都有（用户要求「展示区左右」），
+                //    不再是轮播专属。
+                if expanded && (window.hasPrev || window.hasNext) {
                     arrowsLayer(box: box)
                 }
 
                 if let opened = openedCard {
                     actionBubble(for: opened)
                         .zIndex(500)
-                }
-
-                if showOverflowGrid {
-                    overflowGrid(box: box)
-                        .zIndex(600)
                 }
             }
             .frame(width: geo.size.width, height: geo.size.height)
@@ -197,20 +219,21 @@ struct CanvasSlotFanStack: View {
             if !hovering {
                 hoveredCard = nil
                 openedCard = nil
-                showOverflowGrid = false
             }
         }
-        // 内容变了（切槽位 / 附件增删）就重置交互态，否则 openedCard / page 会指向已经不存在的卡。
+        // 内容变了（切槽位 / 附件增删）就重置交互态，否则 openedCard / windowStart 会指向已经不存在的卡。
         .onChange(of: sources.count) { _ in
             hoveredCard = nil
             openedCard = nil
-            showOverflowGrid = false
-            page = 0
+            windowStart = 0
+            arrivedBackward = false
         }
         .onChange(of: style) { _ in
             hoveredCard = nil
             openedCard = nil
-            showOverflowGrid = false
+            // 两种风格的窗口容量不同（5 / 3），起点留着会让轮播开在半页上。
+            windowStart = 0
+            arrivedBackward = false
         }
     }
 
@@ -219,11 +242,16 @@ struct CanvasSlotFanStack: View {
     private func cardsLayer(_ ls: [CanvasFanGeometry.CardLayout],
                             cardSize: CGSize) -> some View {
         ZStack {
-            ForEach(ls, id: \.index) { layout in
-                let card = visibleCards.indices.contains(layout.index)
-                    ? visibleCards[layout.index]
-                    : (index: 0, source: CanvasFanGeometry.CardSource.empty)
-                cardView(layout, globalIndex: card.index, source: card.source, cardSize: cardSize)
+            // 只渲染牌面位（`visibleCards`）。当 `window.showsOverflowCard` 时 `ls` 会多出最后一格，
+            // 那一格属于「+N」灰卡，由 `overflowCardLayer` 单独画（它要能点，不能待在这个
+            // `allowsHitTesting(false)` 的层里）。
+            ForEach(ls.filter { visibleCards.indices.contains($0.index) }, id: \.index) { layout in
+                let card = visibleCards[layout.index]
+                cardView(layout,
+                         globalIndex: card.index,
+                         source: card.source,
+                         cardSize: cardSize,
+                         isReference: isReferenceCard(slot: layout.index))
             }
         }
     }
@@ -231,7 +259,8 @@ struct CanvasSlotFanStack: View {
     private func cardView(_ layout: CanvasFanGeometry.CardLayout,
                           globalIndex: Int,
                           source: CanvasFanGeometry.CardSource,
-                          cardSize: CGSize) -> some View {
+                          cardSize: CGSize,
+                          isReference: Bool) -> some View {
         let isHot = (hoveredCard == globalIndex)
         return cardBody(source)
             .frame(width: s(cardSize.width), height: s(cardSize.height))
@@ -249,6 +278,14 @@ struct CanvasSlotFanStack: View {
                 RoundedRectangle(cornerRadius: s(17), style: .continuous)
                     .stroke(Color.black.opacity(0.10), lineWidth: s(0.6))
             )
+            // ★ 三轮：参考卡（上一页残留的那张）压一层灰遮罩。
+            //
+            // 遮罩而不是降 opacity：降整卡 opacity 会让下面那张卡从它身上透出来（卡片是重叠的），
+            // 看起来像渲染错误；盖一层灰色不透明层则明确表达"这张是上一页的，已经看过"。
+            .overlay(
+                RoundedRectangle(cornerRadius: s(17), style: .continuous)
+                    .fill(Color.black.opacity(isReference ? CanvasFanGeometry.referenceDimOpacity : 0))
+            )
             .shadow(color: Color.black.opacity(isHot ? 0.26 : 0.16),
                     radius: s(isHot ? 9 : 5),
                     x: 0, y: s(isHot ? 5 : 2.5))
@@ -258,7 +295,7 @@ struct CanvasSlotFanStack: View {
             .zIndex(layout.zIndex)
             .animation(activeSpring, value: expanded)
             .animation(activeSpring, value: hoveredCard)
-            .animation(activeSpring, value: page)
+            .animation(activeSpring, value: windowStart)
     }
 
     @ViewBuilder
@@ -266,13 +303,23 @@ struct CanvasSlotFanStack: View {
         switch source {
         case .attachmentIndex(let idx):
             if attachments.indices.contains(idx) {
-                // 用 Color.clear 定尺 + overlay 承载图片 + clipped：`aspectRatio(.fill)` 会溢出，
-                // 而 ZStack 不裁剪 —— 这正是 hotfix20「图片错位盖住按钮」的根因，别改回去。
-                Color.clear
-                    .overlay(CanvasAttachmentPreviewImage(attachment: attachments[idx], maxPixel: 360))
-                    .clipped()
-                    .clipShape(RoundedRectangle(cornerRadius: s(14), style: .continuous))
-                    .padding(s(2.6))
+                let att = attachments[idx]
+                // ★ 三轮：按类别分两种牌面。
+                //
+                // 三轮之前只有图片这一条路，非图像附件（用户截图里的 `.command` / `.md` / `.mp3`）
+                // 压根不进 `sources`，卡片上凭空少两张 —— 而堆叠卡片的全部意义就是把"装了几件东西"
+                // 变成视觉信息，少画就等于报了个错的数（见 `CanvasAttachmentKind`）。
+                if att.canvasIsImageLike {
+                    // 用 Color.clear 定尺 + overlay 承载图片 + clipped：`aspectRatio(.fill)` 会溢出，
+                    // 而 ZStack 不裁剪 —— 这正是 hotfix20「图片错位盖住按钮」的根因，别改回去。
+                    Color.clear
+                        .overlay(CanvasAttachmentPreviewImage(attachment: att, maxPixel: 360))
+                        .clipped()
+                        .clipShape(RoundedRectangle(cornerRadius: s(14), style: .continuous))
+                        .padding(s(2.6))
+                } else {
+                    fileCardBody(att)
+                }
             } else {
                 emptyCardBody
             }
@@ -283,12 +330,44 @@ struct CanvasSlotFanStack: View {
                 .foregroundColor(.black.opacity(0.78))
                 .lineLimit(7)
                 .multilineTextAlignment(.leading)
+                // ★ 三轮：卡内文字也禁自动收紧 / 自动缩字，理由同节点正文（见 CanvasNodeCardView）。
+                .allowsTightening(false)
+                .minimumScaleFactor(1.0)
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
                 .padding(s(8))
 
         case .empty:
             emptyCardBody
         }
+    }
+
+    /// 非图像入参文件的牌面：深灰卡 + 类型图标 + 文件名（最多 2 行）。
+    ///
+    /// 用户指定「背景用深灰色卡片，和图片卡片风格一致」：所以外框圆角/描边/阴影完全沿用
+    /// `cardView` 那一套（本视图只画内容），这里只把内容区铺成深灰。
+    private func fileCardBody(_ att: SlotContent.SlotAttachment) -> some View {
+        let name = att.name.isEmpty ? (att.path.map { ($0 as NSString).lastPathComponent } ?? "文件") : att.name
+        let kind = CanvasAttachmentKind.from(fileName: att.path ?? att.name)
+        return RoundedRectangle(cornerRadius: s(14), style: .continuous)
+            .fill(Color(red: 0.16, green: 0.17, blue: 0.19))
+            .overlay(
+                VStack(spacing: s(6)) {
+                    Image(systemName: kind.symbolName)
+                        .font(.system(size: s(19), weight: .regular))
+                        .foregroundColor(.white.opacity(0.92))
+                    Text(name)
+                        .font(.system(size: s(8.5), weight: .medium))
+                        .foregroundColor(.white.opacity(0.78))
+                        .lineLimit(CanvasAttachmentKind.cardNameLineLimit)
+                        .multilineTextAlignment(.center)
+                        .truncationMode(.middle)
+                        .allowsTightening(false)
+                        .minimumScaleFactor(1.0)
+                }
+                .padding(.horizontal, s(6))
+            )
+            .padding(s(2.6))
+            .help("\(kind.displayName)：\(name)")
     }
 
     private var emptyCardBody: some View {
@@ -381,20 +460,21 @@ struct CanvasSlotFanStack: View {
 
     // MARK: - 角标层
 
-    /// 角标层：
-    ///   - 收拢态：最前面那张卡的右下角一个 `+`（直通入参文件面板）。
-    ///   - 扇形展开且有溢出：最外侧那张卡上一个 `+N`，hover 弹缩略图网格。
+    /// 角标层：**只剩**收拢态最前面那张卡右下角的 `+`（直通入参文件面板）。
+    ///
+    /// ★ 三轮删掉了展开态的 `+N` 角标 —— 它被第 6 个位置上那张真正可翻页的灰卡取代
+    /// （见 `overflowCardLayer`）。角标 + 缩略图网格那套是"另一种呈现"，用户的判断是
+    /// 「第 6 张以后看不到」，因为第 6 张从来没以卡片形态出现过。
     ///
     /// 单独成层是因为卡片层被 `allowsHitTesting(false)` 关掉了事件 —— 角标是**要能点的**，
     /// 只能自己带着同一套变换独立渲染一遍。
     @ViewBuilder
     private func badgeLayer(_ ls: [CanvasFanGeometry.CardLayout],
                             cardSize: CGSize) -> some View {
+        // ★ 三轮：展开态不再画 `+N` 角标（它被真正的翻页卡取代，见 overflowCardLayer）。
+        // 收拢态照旧只有「+ 加入参」。
         if !expanded, let top = ls.max(by: { $0.zIndex < $1.zIndex }) {
             badgeAnchor(top, cardSize: cardSize) { plusBadge }
-        } else if style == .fanOut, expanded, overflowCount > 0,
-                  let outer = ls.last {
-            badgeAnchor(outer, cardSize: cardSize) { overflowBadge }
         }
     }
 
@@ -429,145 +509,102 @@ struct CanvasSlotFanStack: View {
         .offset(x: s(5), y: s(5))
     }
 
-    /// `+N` 角标：扇形最多展开 5 张，剩下的都收在这里。
+    // MARK: - 「+N」翻页卡（v2.11.8 三轮）
+
+    /// 第 6 个位置那张**灰色半透明「+N」卡**（用户逐条指定的样式：深灰、opacity 0.5、
+    /// 中心大号 `+N` 白字、下面小字「点击加载」、形状与其他卡完全一致）。
     ///
-    /// hover（不是点击）就弹缩略图网格 —— 用户要的是"快速看全"，点击在这个位置容易和
-    /// 卡片本身的操作气泡混淆。
-    private var overflowBadge: some View {
-        Text("+\(overflowCount)")
-            .font(.system(size: s(9.5), weight: .bold))
-            .foregroundColor(.white)
-            .padding(.horizontal, s(5))
-            .frame(height: s(19))
-            .background(Capsule(style: .continuous).fill(Color.black.opacity(0.72)))
-            .overlay(Capsule(style: .continuous).stroke(Color.white.opacity(0.85), lineWidth: s(1.4)))
-            .shadow(color: .black.opacity(0.25), radius: s(2), x: 0, y: s(1))
-            .contentShape(Capsule(style: .continuous))
-            .offset(x: s(5), y: s(5))
-            // 只负责"打开"。关闭交给网格自己的 onHover（鼠标从角标移进网格的途中会短暂离开
-            // 角标，若在这里同时负责关闭，浮层会在打开的同一瞬间被收掉，表现为"闪一下就没了"。）
-            .onHover { inside in
-                guard inside else { return }
-                withAnimation(.easeOut(duration: 0.12)) { showOverflowGrid = true }
-            }
-            .help("还有 \(overflowCount) 张，悬停查看全部")
-    }
-
-    // MARK: - 溢出缩略图网格
-
-    /// `+N` 的缩略图网格浮层：可滚动，看全所有卡片。
-    ///
-    /// 覆盖整个预览区而不是做成一个小气泡：50 张图的时候小气泡里一次只能看 6 张，还是得滚半天。
-    private func overflowGrid(box: CGSize) -> some View {
-        let cell = s(38)
-        return VStack(spacing: 0) {
-            HStack(spacing: s(4)) {
-                Text("全部 \(sources.count) 项")
-                    .font(.system(size: s(9), weight: .semibold))
-                    .foregroundColor(.white.opacity(0.9))
-                Spacer(minLength: 0)
-                Button {
-                    showOverflowGrid = false
-                } label: {
-                    Image(systemName: "xmark")
-                        .font(.system(size: s(8), weight: .bold))
-                        .foregroundColor(.white.opacity(0.8))
-                        .padding(s(3))
-                        .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-            }
-            .padding(.horizontal, s(7))
-            .padding(.top, s(5))
-            .padding(.bottom, s(3))
-
-            ScrollView(.vertical, showsIndicators: false) {
-                LazyVGrid(columns: [GridItem(.adaptive(minimum: cell), spacing: s(5))],
-                          spacing: s(5)) {
-                    ForEach(Array(sources.enumerated()), id: \.offset) { pair in
-                        overflowCell(index: pair.offset, source: pair.element, side: cell)
-                    }
-                }
-                .padding(.horizontal, s(7))
-                .padding(.bottom, s(7))
-            }
-        }
-        .frame(width: s(box.width), height: s(box.height))
-        .background(
-            RoundedRectangle(cornerRadius: s(10), style: .continuous)
-                .fill(Color(red: 0.09, green: 0.09, blue: 0.10).opacity(0.95))
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: s(10), style: .continuous)
-                .stroke(Color.white.opacity(0.14), lineWidth: s(0.8))
-        )
-        // 鼠标从角标移进网格的过程中不能收起来，否则这个浮层根本用不了。
-        .onHover { inside in
-            if !inside { showOverflowGrid = false }
-        }
-        .transition(.opacity.combined(with: .scale(scale: 0.96)))
-    }
-
-    private func overflowCell(index: Int,
-                              source: CanvasFanGeometry.CardSource,
-                              side: CGFloat) -> some View {
+    /// 它取代了二轮的「右下角 +N 角标 + hover 缩略图网格」。二轮那套的问题不是不好看：
+    /// 网格里的小方格是**另一种呈现**，第 6 张卡从未以"卡片"形态出现过，所以用户的结论就是
+    /// 「第 6 张以后看不到」。这张灰卡把"后面还有"直接放在卡叠的下一个位置上，点它就翻页。
+    private func overflowCardLayer(_ layout: CanvasFanGeometry.CardLayout,
+                                   cardSize: CGSize) -> some View {
         Button {
-            showOverflowGrid = false
-            withAnimation(activeSpring) { openedCard = index }
+            pageForward()
         } label: {
             ZStack {
-                RoundedRectangle(cornerRadius: s(5), style: .continuous)
-                    .fill(Color.white.opacity(0.10))
-                switch source {
-                case .attachmentIndex(let ai):
-                    if attachments.indices.contains(ai) {
-                        Color.clear
-                            .overlay(CanvasAttachmentPreviewImage(attachment: attachments[ai],
-                                                                  maxPixel: 160))
-                            .clipped()
-                            .clipShape(RoundedRectangle(cornerRadius: s(5), style: .continuous))
-                    }
-                case .textSegment(let t):
-                    Text(t)
-                        .font(.system(size: s(7)))
-                        .foregroundColor(.white.opacity(0.8))
-                        .lineLimit(4)
-                        .padding(s(3))
-                case .empty:
-                    Image(systemName: "tray")
-                        .font(.system(size: s(11), weight: .light))
-                        .foregroundColor(.white.opacity(0.5))
+                RoundedRectangle(cornerRadius: s(17), style: .continuous)
+                    .fill(Color(red: 0.20, green: 0.21, blue: 0.23))
+                VStack(spacing: s(2)) {
+                    Text("+\(window.remaining)")
+                        .font(.system(size: s(20), weight: .bold))
+                        .foregroundColor(.white)
+                    Text("点击加载")
+                        .font(.system(size: s(8), weight: .medium))
+                        .foregroundColor(.white.opacity(0.85))
                 }
+                .allowsTightening(false)
+                .minimumScaleFactor(1.0)
             }
-            .frame(width: side, height: side)
-            .contentShape(RoundedRectangle(cornerRadius: s(5), style: .continuous))
+            .frame(width: s(cardSize.width), height: s(cardSize.height))
+            // 半透明是"这不是一张真牌面"的唯一视觉线索，别顺手改成 1.0。
+            .opacity(CanvasFanGeometry.overflowCardOpacity)
+            .overlay(
+                RoundedRectangle(cornerRadius: s(17), style: .continuous)
+                    .stroke(Color.white.opacity(0.35), lineWidth: s(1.2))
+            )
+            .contentShape(RoundedRectangle(cornerRadius: s(17), style: .continuous))
         }
         .buttonStyle(.plain)
+        .help("还有 \(window.remaining) 张，点击加载")
+        .scaleEffect(layout.scale, anchor: .bottom)
+        .rotationEffect(.degrees(layout.angle), anchor: .bottom)
+        .offset(x: s(layout.offset.width), y: s(layout.offset.height))
+        // 压在牌面之上（它是入口，必须可点），但低于操作气泡。
+        .zIndex(350)
+        .animation(activeSpring, value: expanded)
+        .animation(activeSpring, value: windowStart)
     }
 
-    // MARK: - 轮播箭头
+    // MARK: - 翻页
 
-    /// 左右翻页箭头。**常驻**（用户明确要求）而不是 hover 才出：轮播模式下"还有更多"这件事
-    /// 必须一眼看见，否则用户以为总共就 3 张。
+    /// 前进一页。步长 = 本页张数 - 1（**保留最后一张当参考卡**），到底则回到开头（用户指定）。
+    private func pageForward() {
+        let target = CanvasFanGeometry.forwardStart(from: window)
+        withAnimation(activeSpring) {
+            hoveredCard = nil
+            openedCard = nil
+            arrivedBackward = false
+            windowStart = target
+        }
+    }
+
+    /// 后退一页。同样重叠一张：新窗口的**尾部**是当前页的第一张，标灰当参考。
+    private func pageBackward() {
+        let target = CanvasFanGeometry.backwardStart(from: window, maxCards: windowCapacity)
+        withAnimation(activeSpring) {
+            hoveredCard = nil
+            openedCard = nil
+            arrivedBackward = true
+            windowStart = target
+        }
+    }
+
+    // MARK: - 左右翻页箭头
+
+    /// 左右翻页箭头。★ 三轮起两种风格都有，并且**只在该方向确实有内容时出现**（用户指定）。
+    ///
+    /// 一个例外：到达末尾后右箭头仍然显示 —— 它此时的语义是"回到开头"（用户明确要求这个循环），
+    /// 若按"没有下一页就藏起来"处理，用户翻到底就只能一路 ⬅ 退回去。
     private func arrowsLayer(box: CGSize) -> some View {
         HStack {
-            arrowButton("chevron.left", delta: -1)
+            if window.hasPrev {
+                arrowButton("chevron.left", forward: false)
+            } else {
+                Spacer().frame(width: s(18))
+            }
             Spacer(minLength: 0)
-            arrowButton("chevron.right", delta: 1)
+            if window.hasNext || window.hasPrev {
+                arrowButton("chevron.right", forward: true)
+            }
         }
         .frame(width: s(box.width))
         .zIndex(400)
     }
 
-    private func arrowButton(_ symbol: String, delta: Int) -> some View {
+    private func arrowButton(_ symbol: String, forward: Bool) -> some View {
         Button {
-            withAnimation(CanvasSlotFanStack.carouselSpring) {
-                hoveredCard = nil
-                openedCard = nil
-                page = CanvasFanGeometry.carouselPage(current: page,
-                                                      delta: delta,
-                                                      total: sources.count)
-            }
+            if forward { pageForward() } else { pageBackward() }
         } label: {
             Image(systemName: symbol)
                 .font(.system(size: s(9), weight: .bold))
@@ -578,7 +615,7 @@ struct CanvasSlotFanStack: View {
                 .contentShape(Circle())
         }
         .buttonStyle(.plain)
-        .help(delta < 0 ? "上一组" : "下一组")
+        .help(forward ? (window.hasNext ? "后面几张" : "回到开头") : "前面几张")
     }
 
     // MARK: - 操作气泡
@@ -604,9 +641,24 @@ struct CanvasSlotFanStack: View {
             }
             if case .attachmentIndex(let ai) = source {
                 bubbleDivider
+                bubbleButton("打开", "arrow.up.forward.app") {
+                    openedCard = nil
+                    openCard(ai)
+                }
+                bubbleDivider
                 bubbleButton("设为入参", "star") {
                     openedCard = nil
                     onPromoteInput(ai)
+                }
+                bubbleDivider
+                // ★ 三轮：单卡删除。
+                //
+                // 用户明确区分了两件事：「卡片内单张图片的删除（非整个节点删除），允许直接删除
+                // （不影响节点本身）」。所以这里**不弹确认**（删的只是一个入参引用，节点、槽位、
+                // 正文都不动，且有 .trash 兜底），与"删节点"那条要弹 Alert 的路径是两套语义。
+                bubbleButton("删除", "trash") {
+                    openedCard = nil
+                    onDeleteInput(ai)
                 }
             }
         }
@@ -688,6 +740,36 @@ struct CanvasSlotFanStack: View {
 
         case .empty:
             onToast("空槽位没有可复制的内容")
+        }
+    }
+
+    /// 「打开」的落地：用系统默认程序打开这个入参文件（★ v2.11.8 三轮，用户指定
+    /// `NSWorkspace.shared.open(url)`）。
+    ///
+    /// 内嵌字节（无磁盘路径）的附件先落到临时目录再打开 —— 否则音频 / 文档这类不能内嵌预览的
+    /// 附件在卡片上"点了没反应"，和三轮修的那个"入参文件入口点不开"是同一种体感。
+    private func openCard(_ idx: Int) {
+        guard attachments.indices.contains(idx) else { return }
+        let att = attachments[idx]
+        if let path = att.path, !path.isEmpty,
+           FileManager.default.fileExists(atPath: path) {
+            NSWorkspace.shared.open(URL(fileURLWithPath: path))
+            return
+        }
+        guard let data = att.resolveData() else {
+            onToast("这个入参文件已断链，无法打开")
+            return
+        }
+        let name = att.name.isEmpty ? "入参文件" : att.name
+        let tmp = FileManager.default.temporaryDirectory
+            .appendingPathComponent("clipslots-open-\(UUID().uuidString.prefix(8))", isDirectory: true)
+        do {
+            try FileManager.default.createDirectory(at: tmp, withIntermediateDirectories: true)
+            let dst = tmp.appendingPathComponent(name)
+            try data.write(to: dst)
+            NSWorkspace.shared.open(dst)
+        } catch {
+            onToast("打开失败：\(error.localizedDescription)")
         }
     }
 }

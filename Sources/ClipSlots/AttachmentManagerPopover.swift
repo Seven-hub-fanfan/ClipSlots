@@ -210,6 +210,7 @@ struct AttachmentManagerPopover: View {
             dragActive: draggingId != nil,
             dragOffset: isDragging ? liveDragOffset : 0,
             onDelete: { remove(att) },
+            onOpen: { openInDefaultApp(att) },
             onDragChanged: { translation in handleDragChanged(att.id, translation) },
             onDragEnded: { handleDragEnded() }
         )
@@ -516,6 +517,51 @@ struct AttachmentManagerPopover: View {
         return true
     }
 
+    /// 用系统默认程序打开这个附件（★ v2.11.8 三轮，用户要求「点击具体文件用
+    /// `NSWorkspace.shared.open(url)` 系统默认程序打开」）。
+    ///
+    /// 三条路，按"最不失真"排序：
+    ///   1. 有可用磁盘路径 → 直接开原文件（用户在 Finder 里改了它，下次打开看到的还是同一个文件）；
+    ///   2. 链接类附件 → 开浏览器；
+    ///   3. 只有内嵌字节（本 App 把字节外置存在槽位目录里，`path` 可能早已被清理）→ 先落到临时
+    ///      目录再开。不落盘就没有 URL 可交给 `NSWorkspace`，音频 / 文档这类点了会毫无反应。
+    ///
+    /// 文本类附件不落临时文件，直接进本地预览窗 —— 给 `.txt` 拉起一个外部编辑器是过度反应。
+    private func openInDefaultApp(_ att: SlotContent.SlotAttachment) {
+        if att.type == .url, let raw = att.url, let url = URL(string: raw) {
+            NSWorkspace.shared.open(url)
+            return
+        }
+        if att.type == .text {
+            AttachmentPreviewWindowController.shared.hide()
+            if let text = att.resolveTextString() {
+                let tmp = FileManager.default.temporaryDirectory
+                    .appendingPathComponent("clipslots-\(UUID().uuidString.prefix(8)).txt")
+                if (try? text.write(to: tmp, atomically: true, encoding: .utf8)) != nil {
+                    NSWorkspace.shared.open(tmp)
+                }
+            }
+            return
+        }
+        if let path = att.path, !path.isEmpty,
+           FileManager.default.fileExists(atPath: path) {
+            NSWorkspace.shared.open(URL(fileURLWithPath: path))
+            return
+        }
+        guard let data = att.resolveData(), !data.isEmpty else { return }
+        let name = att.name.isEmpty ? "attachment" : att.name
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("clipslots-open-\(UUID().uuidString.prefix(8))", isDirectory: true)
+        do {
+            try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+            let dst = dir.appendingPathComponent(name)
+            try data.write(to: dst)
+            NSWorkspace.shared.open(dst)
+        } catch {
+            // 打开失败不弹错：这是一个"顺手"操作，面板里已有悬停预览作为看内容的主路径。
+        }
+    }
+
     private func remove(_ att: SlotContent.SlotAttachment) {
         withAnimation(Anim.transition) {
             var current = attachments
@@ -569,6 +615,10 @@ struct AttachmentRow: View {
     // v2.8.7: vertical offset so the dragged row follows the finger.
     let dragOffset: CGFloat
     let onDelete: () -> Void
+    /// 单击行的「文件名 / 缩略图」区域 → 用系统默认程序打开（★ v2.11.8 三轮，用户点名要
+    /// `NSWorkspace.shared.open(url)`）。删除按钮和拖拽手柄在右侧，各自有自己的命中区，
+    /// 所以这个点击区**刻意只覆盖到 `Spacer` 之前**，不会跟它们抢事件。
+    let onOpen: () -> Void
     let onDragChanged: (CGFloat) -> Void
     let onDragEnded: () -> Void
 
@@ -593,6 +643,13 @@ struct AttachmentRow: View {
         HStack(spacing: 10) {
             AttachmentThumbnail(attachment: attachment)
                 .frame(width: 32, height: 32)
+                // ★ v2.11.8 三轮：单击缩略图 / 文件名 = 用默认程序打开。
+                //
+                // 为什么不用 SwiftUI 的 `.onTapGesture`：这个面板挂在 NSPopover 里，popover 还不是
+                // key window 时 SwiftUI 会把第一次 mouseDown 吞掉只为了激活窗口 —— 用户的体感就是
+                // 「第一下点了没反应」，与 v2.8.9 修删除按钮时踩的是同一个坑（见下面那段注释）。
+                // 所以复用同一个 acceptsFirstMouse 的 AppKit 命中层。
+                .overlay(FirstMouseClickHandle(action: onOpen))
                 // v2.10.37: 断链本地文件引用（源文件已移动/删除）——缩略图淡出，配合下方角标提示。
                 .opacity(isBrokenRef ? 0.4 : 1)
                 .task(id: attachment.id) {
@@ -635,8 +692,13 @@ struct AttachmentRow: View {
                         .lineLimit(1)
                 }
             }
+            .contentShape(Rectangle())
+            .overlay(FirstMouseClickHandle(action: onOpen))
 
             Spacer(minLength: 4)
+                // ★ 三轮：把 Spacer 也纳入「打开」的命中区，行的空白处点了也能开 ——
+                // 否则文件名短的时候一行里有一大片死区，用户点了没反应。
+                .overlay(FirstMouseClickHandle(action: onOpen))
 
             // v2.8.9: the delete affordance is a plain visual whose click is
             // driven by a first-mouse AppKit overlay. Inside an NSPopover that

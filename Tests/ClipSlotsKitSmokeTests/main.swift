@@ -5066,8 +5066,13 @@ do {
     // 张数夹取：0 也要给一张（空槽位显示虚线空卡），超过 4 张截断。
     t.equal(CanvasFanGeometry.layouts(count: 0, expanded: false).count, 1,
             "★0 张内容也返回 1 张卡片（空槽位要有一张空卡，否则节点预览区一片空白像坏了）")
-    t.equal(CanvasFanGeometry.layouts(count: 9, expanded: false).count, CanvasFanGeometry.maxCards,
-            "卡片数封顶 5 张（v2.11.8 二轮从 4 提到 5：溢出的进 +N 角标）")
+    // ★ 三轮把上限从 maxCards 放到 maxCards+1：第 6 个位置留给那张灰色「+N」翻页卡。
+    // 不放开这一格，+N 卡会在几何层被静默裁掉 —— 界面上表现为"超过 5 张后就没有任何翻页入口"，
+    // 也就是用户反馈的「第 6 张以后看不到」。牌面本身仍然只有 5 张（见 cardWindow.count）。
+    t.equal(CanvasFanGeometry.layouts(count: 9, expanded: false).count, CanvasFanGeometry.maxCards + 1,
+            "★布局位封顶 6 = 5 张牌面 + 1 张 +N 灰卡")
+    t.equal(CanvasFanGeometry.cardWindow(total: 9, start: 0).count, CanvasFanGeometry.maxCards,
+            "真实牌面仍然只有 5 张（+N 那一格不是内容卡）")
 
     // 角度关于中轴严格对称。
     let four = CanvasFanGeometry.layouts(count: 4, expanded: true)
@@ -5114,15 +5119,15 @@ do {
     t.equal(CanvasFanGeometry.textSegments("a\n\nb", limit: 1), ["a"], "limit 生效")
 
     // 内容来源优先级：图片附件 > 正文分段 > 空卡。
-    t.equal(CanvasFanGeometry.cardSources(attachmentImageIndices: [0, 2], text: "一段文字"),
+    t.equal(CanvasFanGeometry.cardSources(attachmentIndices: [0, 2], text: "一段文字"),
             [.attachmentIndex(0), .attachmentIndex(2)],
-            "★有图片附件时优先成卡（图片是更具体的内容），且下标必须是原始附件下标而不是 0/1 重新编号")
-    t.equal(CanvasFanGeometry.cardSources(attachmentImageIndices: [], text: "甲\n\n乙"),
-            [.textSegment("甲"), .textSegment("乙")], "没有图片时正文分段成卡")
-    t.equal(CanvasFanGeometry.cardSources(attachmentImageIndices: [], text: "  "),
+            "★有入参文件时优先成卡（附件是更具体的内容），且下标必须是原始附件下标而不是 0/1 重新编号")
+    t.equal(CanvasFanGeometry.cardSources(attachmentIndices: [], text: "甲\n\n乙"),
+            [.textSegment("甲"), .textSegment("乙")], "没有附件时正文分段成卡")
+    t.equal(CanvasFanGeometry.cardSources(attachmentIndices: [], text: "  "),
             [.empty], "★空槽位返回一张空卡（而不是零张，零张会让预览区看起来像加载失败）")
-    t.equal(CanvasFanGeometry.cardSources(attachmentImageIndices: [0, 1, 2, 3, 4, 5], text: "").count,
-            CanvasFanGeometry.maxCards, "图片卡同样封顶 5 张")
+    t.equal(CanvasFanGeometry.cardSources(attachmentIndices: [0, 1, 2, 3, 4, 5], text: "").count,
+            CanvasFanGeometry.maxCards, "附件卡同样封顶 5 张")
 }
 
 // MARK: - CANVAS-FAN-2：二轮交互（命中多边形 / 轮播 / +N / A-B 风格）
@@ -5186,9 +5191,9 @@ do {
     t.equal(CanvasFanGeometry.overflowCount(total: 5), 0, "正好 5 张时没有 +N")
     t.equal(CanvasFanGeometry.overflowCount(total: 50), 45,
             "★50 张时最外侧显示 +45（用户场景：多图 50+，扇形只展开 5 张）")
-    t.equal(CanvasFanGeometry.allCardSources(attachmentImageIndices: Array(0..<50), text: "").count, 50,
+    t.equal(CanvasFanGeometry.allCardSources(attachmentIndices: Array(0..<50), text: "").count, 50,
             "★allCardSources 不截断 —— 截断了就算不出总数，+N 与轮播分页都会错")
-    t.equal(CanvasFanGeometry.cardSources(attachmentImageIndices: Array(0..<50), text: "").count,
+    t.equal(CanvasFanGeometry.cardSources(attachmentIndices: Array(0..<50), text: "").count,
             CanvasFanGeometry.maxCards, "cardSources 仍按扇形上限截断（两个函数刻意分工）")
 
     // ---- B：水平轮播 ----
@@ -5659,6 +5664,245 @@ do {
     t.equal(CanvasKeyBinding.action(keyCode: CanvasKeyBinding.zKeyCode, command: true, shift: true), .redo, "Esc 绑定不影响 ⌘⇧Z")
     t.equal(CanvasKeyBinding.action(keyCode: CanvasKeyBinding.vKeyCode, command: true, shift: false), .paste, "Esc 绑定不影响 ⌘V")
     t.equal(CanvasKeyBinding.action(keyCode: 51, command: false, shift: false), .delete, "Esc 绑定不影响删除键")
+}
+
+// MARK: - CANVAS-ZOOM-LADDER：排版缩放量化 + 迟滞（v2.11.8 三轮，修「缩放时文字跳舞」）
+//
+// 二轮已经把"排版 zoom"和"视觉 zoom"拆开了，但落定策略是「停手 0.15s 后把 layoutZoom 钉到当前 zoom」。
+// 鼠标滚轮是**离散且稀疏**的（一格 ≈8%，相邻两格常隔 0.15~0.3s），于是每一格都被判成"已停手"、
+// 每一格都重排一次文字 —— 用户第二次录屏里正文换行位置来回跳、文本块底边上下抽动就是这个。
+// 三轮把排版档位量化到几何阶梯 + 迟滞，同档内一次都不重排。这里钉死那些边界。
+do {
+    // 阶梯本身：单调递增、含 1.0、覆盖 CanvasGeometry 的 zoom 区间。
+    let ladder = CanvasZoomLayout.ladder
+    t.check(ladder.count >= 8, "阶梯至少覆盖 8 档，否则每档跨度太大、软化会被看出来")
+    t.check(zip(ladder, ladder.dropFirst()).allSatisfy { $0 < $1 }, "阶梯严格递增")
+    t.check(ladder.contains(1.0),
+            "★阶梯必须含 1.0 —— 画布绝大多数时间停在 100%，这一档要做到零软化（排版=视觉）")
+    // 用 clampZoom 反推区间端点：Kit 只暴露 clamp，没有单独的 min/max 常量。
+    t.check(ladder.first! <= CanvasGeometry.clampZoom(0.0001) + 0.001,
+            "阶梯下界不高于最小 zoom，否则缩到最小时排版档会被钉在比 zoom 大的档上（放大后一片模糊）")
+    t.check(ladder.last! >= CanvasGeometry.clampZoom(9999) - 0.001, "阶梯上界覆盖最大 zoom")
+
+    // bucket 在对数尺度取最近档。
+    t.equal(CanvasZoomLayout.bucket(for: 1.0), 1.0, "100% 落在 1.0 档")
+    t.check(ladder.contains(CanvasZoomLayout.bucket(for: 1.7)), "任意 zoom 的 bucket 一定是阶梯上的值")
+    t.check(CanvasZoomLayout.bucket(for: 0.001) == ladder.first!, "远低于下界时夹到最低档（不返回 0/NaN）")
+    t.check(CanvasZoomLayout.bucket(for: 99) == ladder.last!, "远高于上界时夹到最高档")
+    // 对数取最近的实质检验：1.12 距 1.0 与 1.26 的线性距离分别是 0.12 / 0.14（选 1.0），
+    // 但比例距离是 1.12 与 1.125（几乎相等）。取一个明确偏向的点来验证方向正确即可。
+    t.equal(CanvasZoomLayout.bucket(for: 1.05), 1.0, "1.05 更靠近 1.0 档")
+    t.equal(CanvasZoomLayout.bucket(for: 1.22), 1.26, "1.22 更靠近 1.26 档")
+
+    // ★ 迟滞：同档内的滚轮微调**必须返回原档**（返回原档 = 调用方跳过 state 写入 = 一次重排都不发生）。
+    t.equal(CanvasZoomLayout.settled(current: 1.0, zoom: 1.08), 1.0,
+            "★一格滚轮（+8%）不换档 —— 这一条直接对应用户抱怨的「文字跳舞」")
+    t.equal(CanvasZoomLayout.settled(current: 1.0, zoom: 0.93), 1.0, "反向一格也不换档")
+    t.equal(CanvasZoomLayout.settled(current: 1.0, zoom: 1.17), 1.0,
+            "迟滞窗（1.18）内不换档，避免刚过半档就换、换完又被滚回来的边界震荡")
+    t.check(CanvasZoomLayout.settled(current: 1.0, zoom: 1.6) != 1.0, "跨出迟滞窗后必须换档，否则位图软化会累积到看得见")
+    t.equal(CanvasZoomLayout.settled(current: 1.0, zoom: 1.6), CanvasZoomLayout.bucket(for: 1.6),
+            "换档时钉到目标 zoom 的最近档，而不是相邻档逐级爬（连续捏合一下到 3 倍不该只换一档）")
+    t.equal(CanvasZoomLayout.settled(current: 0, zoom: 2.1), CanvasZoomLayout.bucket(for: 2.1),
+            "current 非法（0/未初始化）时直接取 bucket，不能返回 0 —— 0 会让 scaleEffect 除零")
+    t.check(CanvasZoomLayout.hysteresis > 1, "迟滞系数必须 > 1，否则每次都换档等于没有迟滞")
+    t.check(CanvasZoomLayout.settleDelay >= 0.3,
+            "★落定延时 ≥0.3s：鼠标滚轮相邻两格间隔常达 0.3s，短于它就会把一次连续缩放切成许多段")
+}
+
+// MARK: - CANVAS-ATT-KIND：非图像入参文件也要成卡（v2.11.8 三轮）
+//
+// 用户截图现场：面板写「入参文件 5 项」（含 .command / .md），卡叠只画了 3 张图 —— 非图像文件
+// 凭空消失。堆叠卡片的全部意义是把"这里装了几件东西"变成视觉信息，漏掉就等于显示了错的数字。
+do {
+    t.equal(CanvasAttachmentKind.from(fileName: "038.png"), .image, "png → 图片")
+    t.equal(CanvasAttachmentKind.from(fileName: "多节日.webp"), .image, "webp → 图片（中文名不影响判定）")
+    t.equal(CanvasAttachmentKind.from(fileName: "a.JPEG"), .image, "扩展名大小写不敏感")
+    t.equal(CanvasAttachmentKind.from(fileName: "voice.mp3"), .audio, "mp3 → 音频")
+    t.equal(CanvasAttachmentKind.from(fileName: "voice.m4a"), .audio, "m4a → 音频")
+    t.equal(CanvasAttachmentKind.from(fileName: "clip.mp4"), .video, "mp4 → 视频")
+    t.equal(CanvasAttachmentKind.from(fileName: "clip.MOV"), .video, "mov → 视频")
+    t.equal(CanvasAttachmentKind.from(fileName: "启动 Harness.command"), .file, "★.command → 通用文件（正是用户截图里消失的那一个）")
+    t.equal(CanvasAttachmentKind.from(fileName: "图库打标平台兼容 Prompt_中文_v2.md"), .file, "★.md → 通用文件")
+    t.equal(CanvasAttachmentKind.from(fileName: "README"), .file, "无扩展名 → 通用文件（不能崩、不能算成图片）")
+    t.equal(CanvasAttachmentKind.from(fileName: ""), .file, "空文件名 → 通用文件")
+    t.equal(CanvasAttachmentKind.from(fileName: "/tmp/dir.png/x.mp3"), .audio, "按最后一段的扩展名判定，不被路径里的假扩展名骗到")
+
+    // 图标必须一类一个，混用会让"音频看起来像文档"。
+    let symbols = Set(CanvasAttachmentKind.allCases.map(\.symbolName))
+    t.equal(symbols.count, CanvasAttachmentKind.allCases.count, "四个类别四个不同图标")
+    t.check(CanvasAttachmentKind.allCases.allSatisfy { !$0.displayName.isEmpty }, "每个类别都有中文名（tooltip 用）")
+    t.equal(CanvasAttachmentKind.cardNameLineLimit, 2, "★卡片上文件名最多 2 行（用户指定）")
+
+    // ★ 全量附件都成卡：这是"卡片不显示非图像文件"的根治点。
+    t.equal(CanvasFanGeometry.allCardSources(attachmentIndices: [0, 1, 2, 3, 4], text: "正文").count, 5,
+            "★5 个附件（含非图像）→ 5 张卡，与面板的「入参文件 5 项」一致")
+    t.equal(CanvasFanGeometry.allCardSources(attachmentIndices: [], text: "只有文字").count, 1,
+            "没有附件时才轮到正文成卡（优先级不变）")
+}
+
+// MARK: - CANVAS-FAN-PAGE：+N 灰卡翻页 & 永远保留参考卡（v2.11.8 三轮）
+//
+// 用户否掉了二轮的「+N 角标 → 缩略图网格浮层」：那是另一种呈现，第 6 张之后从未以卡片形态出现。
+// 三轮改成窗口滑动 + 第 6 位放灰色 +N 卡；并两次强调「无论向前还是向后翻页，展示区第一个或最后一个
+// 位置必须保留上一页的最后一张（或第一张）作为参考卡，永远不会整页替换」。
+do {
+    let cap = CanvasFanGeometry.maxCards
+    t.equal(cap, 5, "★同屏最多 5 张牌面（用户指定）")
+
+    // ---- 不超过 5 张：没有 +N、没有箭头 ----
+    let w3 = CanvasFanGeometry.cardWindow(total: 3, start: 0)
+    t.equal(w3.count, 3, "3 张全显示")
+    t.equal(w3.slotCount, 3, "没有溢出时不占第 6 个位置")
+    t.check(!w3.showsOverflowCard && !w3.hasNext && !w3.hasPrev, "3 张时无 +N、无前后页")
+    t.check(w3.referenceSlot == nil, "开头页没有参考卡（本来就是第一张，无所谓参照）")
+    let w5 = CanvasFanGeometry.cardWindow(total: 5, start: 0)
+    t.check(!w5.showsOverflowCard, "正好 5 张不出现 +N（+0 是噪声）")
+
+    // ---- 6 张：第 6 个位置是灰色 +1 卡 ----
+    let w6 = CanvasFanGeometry.cardWindow(total: 6, start: 0)
+    t.equal(w6.count, 5, "6 张时第一页画 5 张")
+    t.equal(w6.remaining, 1, "★+1（第 6 张，正是用户说的「第 6 张以后看不到」）")
+    t.check(w6.showsOverflowCard, "有剩余就必须出现 +N 灰卡")
+    t.equal(w6.slotCount, 6, "★含 +N 卡共 6 个位置 —— 扇形几何必须按 6 排角度，否则灰卡被裁掉")
+    t.check(CanvasFanGeometry.layouts(count: w6.slotCount, expanded: true).count == 6,
+            "★layouts 上限必须放到 maxCards+1，否则 +N 卡在几何层被静默丢弃（改完忘记这条 = 灰卡不显示）")
+
+    // ---- 12 张的完整翻页序列：步长 = count-1，永远重叠一张 ----
+    var start = 0
+    let total = 12
+    var page = CanvasFanGeometry.cardWindow(total: total, start: start)
+    t.equal(page.indices, 0..<5, "第一页 [0,5)")
+    t.equal(page.remaining, 7, "+7")
+    t.check(page.referenceSlot == nil, "第一页无参考卡")
+
+    start = CanvasFanGeometry.forwardStart(from: page)
+    page = CanvasFanGeometry.cardWindow(total: total, start: start)
+    t.equal(page.start, 4, "★前进步长是 4（= 5-1）而不是 5：把本页最后一张留到下一页当参考")
+    t.equal(page.indices, 4..<9, "第二页 [4,9)")
+    t.equal(page.referenceSlot, 0, "★前进时参考卡在**头部**（新卡从右边进来，视线跟着走）")
+    t.check(page.hasPrev && page.hasNext, "中间页前后箭头都有")
+
+    start = CanvasFanGeometry.forwardStart(from: page)
+    page = CanvasFanGeometry.cardWindow(total: total, start: start)
+    t.equal(page.indices, 7..<12, "第三页 [7,12) —— 末页仍是满 5 张，起点被夹到 total-cap")
+    t.equal(page.remaining, 0, "末页无 +N")
+    t.check(!page.hasNext, "末页没有下一页")
+    t.equal(page.referenceSlot, 0, "末页头部仍是参考卡（不是整页替换）")
+
+    // ★ 到末尾再点 ➡ 回到开头（用户指定）。
+    t.equal(CanvasFanGeometry.forwardStart(from: page), 0,
+            "★已在末页时前进 → 回到开头（用户：到末尾继续点 ➡ 直接跑到开头）")
+
+    // ---- 后退：参考卡换到尾部 ----
+    let back = CanvasFanGeometry.cardWindow(total: total,
+                                            start: CanvasFanGeometry.backwardStart(from: page),
+                                            arrivedBackward: true)
+    t.equal(back.start, 3, "后退步长同样重叠一张（7-4=3）")
+    t.equal(back.referenceSlot, back.count - 1,
+            "★后退时参考卡在**尾部**（它是下一页的第一张）—— 这是用户补充要求里点名的另一半")
+    t.check(back.hasNext && back.hasPrev, "后退到中间页，两个箭头都在")
+
+    // 后退到开头：不再有参考卡，也不能越界成负数。
+    let head = CanvasFanGeometry.cardWindow(total: total,
+                                            start: CanvasFanGeometry.backwardStart(from: back),
+                                            arrivedBackward: true)
+    t.equal(head.start, 0, "★后退不会算出负起点")
+    t.check(!head.hasPrev, "回到开头后左箭头消失")
+
+    // 任何一页都不能整页替换：相邻两页必须有交集（这是用户"永远有参照"要求的形式化表述）。
+    var cursor = 0
+    var pages: [Range<Int>] = []
+    var guardCount = 0
+    var wnd = CanvasFanGeometry.cardWindow(total: total, start: cursor)
+    pages.append(wnd.indices)
+    while wnd.hasNext && guardCount < 20 {
+        cursor = CanvasFanGeometry.forwardStart(from: wnd)
+        wnd = CanvasFanGeometry.cardWindow(total: total, start: cursor)
+        pages.append(wnd.indices)
+        guardCount += 1
+    }
+    t.check(guardCount < 20, "翻页必须收敛（步长 ≥1 保证不死循环）")
+    t.check(zip(pages, pages.dropFirst()).allSatisfy { prev, next in
+                prev.overlaps(next)
+            },
+            "★相邻两页始终有交集 —— 形式化了用户那句「永远不会整页替换，用户始终有参照」")
+    t.equal(pages.last!.upperBound, total, "★翻到底必须能看到最后一张（差一错误会让末张永远看不到，正是要修的 bug）")
+
+    // ---- 边界与鲁棒性 ----
+    let empty = CanvasFanGeometry.cardWindow(total: 0, start: 0)
+    t.equal(empty.count, 1, "空槽位仍给 1 个位置（外部画虚线空卡；给 0 会让预览区像加载失败）")
+    t.check(!empty.showsOverflowCard && !empty.hasNext, "空槽位没有翻页")
+    let over = CanvasFanGeometry.cardWindow(total: 7, start: 999)
+    t.equal(over.start, 2, "越界起点被夹到末页起点（删卡后 start 可能残留在越界值，不能崩也不能显示空白页）")
+    let neg = CanvasFanGeometry.cardWindow(total: 7, start: -5)
+    t.equal(neg.start, 0, "负起点夹到 0")
+    let cap3 = CanvasFanGeometry.cardWindow(total: 10, start: 0, maxCards: 3)
+    t.equal(cap3.count, 3, "窗口容量可配（轮播用 3）")
+    t.equal(CanvasFanGeometry.forwardStart(from: cap3), 2, "容量 3 时步长 2，同样重叠一张")
+
+    // 遮罩透明度按用户给的数值钉住（改了就会出现"参考卡看起来跟新卡一样"或"灰得看不见内容"）。
+    t.check(abs(CanvasFanGeometry.referenceDimOpacity - 0.4) < 0.001, "参考卡遮罩 0.4")
+    t.check(abs(CanvasFanGeometry.overflowCardOpacity - 0.5) < 0.001, "+N 灰卡 0.5")
+}
+
+// MARK: - CANVAS-DEL-LINK：删节点前的断链确认（v2.11.8 三轮）
+//
+// 用户要求：「删除失败时不要只给错误提示，改成弹 Alert：该内容已作为入参被其他节点引用，删除将断开
+// 连接，是否继续？允许强制删除或取消」。判定必须精确 —— 误判会让"删一个刚建错的空节点"变成两步操作，
+// 漏判会静默断链且事后无法还原（parentNodeId 是单向血缘，删掉就没了）。
+do {
+    var parent = canvasNode(slot: 1)
+    var child = canvasNode(slot: 2)
+    var lone = canvasNode(slot: 3)
+    child.parentNodeId = parent.id
+
+    // 无引用 → 直接删，不弹。
+    t.check(!CanvasNodeDeletion.needsConfirm(deleting: [lone.id], nodes: [parent, child, lone]),
+            "★没有下游引用时**不弹确认** —— 删空节点是高频操作，无脑确认等于把删除变两步")
+    t.check(!CanvasNodeDeletion.needsConfirm(deleting: [child.id], nodes: [parent, child, lone]),
+            "删叶子节点不弹（它没有下游）")
+
+    // 被引用 → 弹。
+    t.check(CanvasNodeDeletion.needsConfirm(deleting: [parent.id], nodes: [parent, child, lone]),
+            "★删掉被别人当入参的节点必须弹确认")
+    let links = CanvasNodeDeletion.brokenLinks(deleting: [parent.id], nodes: [parent, child, lone])
+    t.equal(links.referrers, [child.id], "引用者是那个 parentNodeId 指过来的节点")
+    t.equal(links.referenced, [parent.id], "被引用者就是被删的那个")
+
+    // ★ 父子一起删 → 不弹：删完没有任何断链，弹了纯属噪声。
+    t.check(!CanvasNodeDeletion.needsConfirm(deleting: [parent.id, child.id], nodes: [parent, child, lone]),
+            "★父子同时被删时不弹 —— 框选一片子图整体删除是常见操作，不该被拦")
+
+    // 多个下游 → 数量进文案。
+    var child2 = canvasNode(slot: 4)
+    child2.parentNodeId = parent.id
+    let multi = CanvasNodeDeletion.brokenLinks(deleting: [parent.id], nodes: [parent, child, child2])
+    t.equal(multi.referrers.count, 2, "两个下游都被算进来")
+    t.check(CanvasNodeDeletion.confirmMessage(referrerCount: 2).contains("2"),
+            "★多个下游时文案带数量：2 个和 47 个是完全不同的决定，不给数字等于让用户盲选")
+    t.check(CanvasNodeDeletion.confirmMessage(referrerCount: 1)
+                .contains("该内容已作为入参被其他节点引用，删除将断开连接，是否继续？"),
+            "★单个下游时用用户给的原文案，不擅自改写")
+
+    // 悬空引用 / 空集 / 不存在的 id 都不能误判。
+    var orphan = canvasNode(slot: 5)
+    orphan.parentNodeId = "already-deleted-id"
+    t.check(!CanvasNodeDeletion.needsConfirm(deleting: [lone.id], nodes: [orphan, lone]),
+            "已经悬空的 parentNodeId 不会把无关删除拖进确认流程")
+    t.check(!CanvasNodeDeletion.needsConfirm(deleting: [], nodes: [parent, child]),
+            "空集不弹（也不能崩）")
+    t.check(!CanvasNodeDeletion.needsConfirm(deleting: ["ghost"], nodes: [parent, child]),
+            "删一个不存在的 id 不弹")
+
+    // 自引用（数据异常）不能把自己算成自己的引用者 → 否则任何删除都会弹。
+    var selfRef = canvasNode(slot: 6)
+    selfRef.parentNodeId = selfRef.id
+    t.check(!CanvasNodeDeletion.needsConfirm(deleting: [selfRef.id], nodes: [selfRef]),
+            "★自引用（脏数据）不算断链，否则删它永远弹确认且删完也不会有人断链")
+
+    t.check(!CanvasNodeDeletion.confirmPrimary.isEmpty && !CanvasNodeDeletion.confirmCancel.isEmpty,
+            "两个按钮都有文案（强制删除 / 取消）")
 }
 
 t.report()

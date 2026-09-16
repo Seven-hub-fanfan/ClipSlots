@@ -71,6 +71,9 @@ struct CanvasNodeCardView: View {
     let onOpenInputFiles: () -> Void
     /// 把第 N 个附件挪到入参列表首位（堆叠卡片的「设为入参」）。写数据同样上抛。
     let onPromoteInput: (Int) -> Void
+    /// 删掉第 N 个入参文件（堆叠卡片气泡里的「删除」）。★ v2.11.8 三轮：只动附件列表，
+    /// **不删节点** —— 用户明确要求单张图片可以直接删掉且不影响节点本身。
+    let onDeleteInput: (Int) -> Void
     /// 切换 Hover 展开风格（扇形 ⇄ 轮播）。写的是节点自身属性，同样上抛给持有 `CanvasStore` 的上层。
     let onToggleAnimationStyle: () -> Void
     /// 轻提示（复制成功 / 断链等）。卡片不认识 `transientUI`，同上。
@@ -95,15 +98,20 @@ struct CanvasNodeCardView: View {
         CanvasFontCatalog.font(family: node.fontName, size: node.resolvedBodyFontSize * renderScale)
     }
 
-    /// 图片类附件在 `attachments` 里的下标。堆叠卡片按它取图。
-    private var imageAttachmentIndices: [Int] {
-        attachments.enumerated().compactMap { $0.element.canvasIsImageLike ? $0.offset : nil }
+    /// 全部入参文件在 `attachments` 里的下标（★ v2.11.8 三轮：不再只筛图片）。
+    ///
+    /// 三轮之前这里是 `canvasIsImageLike` 过滤后的图片下标，于是 `.command` / `.md` / `.mp3`
+    /// 这类附件**根本进不了卡叠**：面板写着「入参文件 5 项」，卡片却只叠 3 张。用户的反馈原话是
+    /// 「卡片不显示非图像文件」。非图像附件的牌面长什么样由 `CanvasSlotFanStack.fileCardBody`
+    /// （深灰卡 + 类型图标 + 文件名）负责，这里只要把它们放进来。
+    private var attachmentCardIndices: [Int] {
+        Array(attachments.indices)
     }
 
     /// **全量**卡片来源（不截断）。`CanvasSlotFanStack` 自己决定扇形截到 5 张、轮播怎么分页 ——
-    /// 在这里就截断会让"总共有几张"丢失，`+N` 角标和分页都算不出来。
+    /// 在这里就截断会让"总共有几张"丢失，`+N` 灰卡和翻页窗口都算不出来。
     private var fanSources: [CanvasFanGeometry.CardSource] {
-        CanvasFanGeometry.allCardSources(attachmentImageIndices: imageAttachmentIndices, text: text)
+        CanvasFanGeometry.allCardSources(attachmentIndices: attachmentCardIndices, text: text)
     }
 
     /// 正文预览（最多 4 行，已剥掉 Markdown 原始标记）。几何/字符串加工在 Kit 里，可被 smoke 断言。
@@ -183,6 +191,8 @@ struct CanvasNodeCardView: View {
             .foregroundColor(AppTheme.canvasCardMetaInk)
             .lineLimit(1)
             .truncationMode(.middle)
+            // 单行也要禁字距自适应：不然缩放时"页面 - 组 - 槽位"这行会时紧时松地呼吸。
+            .canvasStableLabel()
             // 给两侧控件留出通道，否则长路径会压在图标上。
             .padding(.horizontal, s(24))
             .frame(maxWidth: .infinity, alignment: .center)
@@ -267,6 +277,7 @@ struct CanvasNodeCardView: View {
                     Text(attachments.isEmpty ? "点这里写文本…" : "仅入参文件，无文本")
                         .font(bodyFont)
                         .foregroundColor(.white.opacity(0.45))
+                        .canvasStableLabel()
                         .padding(.horizontal, s(10))
                         .padding(.vertical, s(10 + CanvasCardLayout.promptVerticalPadding))
                 } else {
@@ -277,8 +288,10 @@ struct CanvasNodeCardView: View {
                         .lineSpacing(s(2))
                         .lineLimit(nil)
                         .frame(maxWidth: .infinity, alignment: .topLeading)
-                        // 宽度吃满、高度随内容：换行位置只由容器宽度决定，缩放过程中不参与宽度协商。
-                        .fixedSize(horizontal: false, vertical: true)
+                        // 宽度吃满、高度随内容 + 禁止字距收紧/字号自适应：换行位置只由容器宽度决定。
+                        // ★ 三轮 hotfix2：光有 fixedSize 不够 —— 见 `canvasStableText()` 的注释，
+                        // `allowsTightening` / `minimumScaleFactor` 是"同一宽度下换行来回跳"的另一半肇因。
+                        .canvasStableText()
                         // ★ 三轮：上下各多 8pt 呼吸（用户要求）。
                         .padding(.horizontal, s(10))
                         .padding(.vertical, s(10 + CanvasCardLayout.promptVerticalPadding))
@@ -355,6 +368,7 @@ struct CanvasNodeCardView: View {
                                    onEditText: onBeginEdit,
                                    onOpenInputFiles: onOpenInputFiles,
                                    onPromoteInput: onPromoteInput,
+                                   onDeleteInput: onDeleteInput,
                                    onToast: onToast)
             }
         }
@@ -396,6 +410,7 @@ struct CanvasNodeCardView: View {
                     Text(attachments.isEmpty ? "点这里写提示词…" : "仅入参文件，无提示词")
                         .font(bodyFont)
                         .foregroundColor(AppTheme.canvasCardMetaInk.opacity(0.75))
+                        .canvasStableLabel()
                 } else {
                     // ★ 二轮：2 行 → 4 行，且显示的是**剥掉 Markdown 标记**的纯文本
                     // （用户要求"中间去掉 Markdown 表格等原始模板字样"）。加工逻辑在
@@ -406,9 +421,10 @@ struct CanvasNodeCardView: View {
                         .foregroundColor(.primary.opacity(0.88))
                         .lineLimit(CanvasCardText.previewLineLimit)
                         .multilineTextAlignment(.leading)
-                        // 只让高度跟着内容长，宽度**始终**吃满容器：这样换行位置只由容器宽度决定，
-                        // 不会因为"文字理想宽度"参与协商而在缩放过程中来回改主意。
-                        .fixedSize(horizontal: false, vertical: true)
+                        // 只让高度跟着内容长，宽度**始终**吃满容器；同时禁掉字距收紧与字号自适应。
+                        // 这样换行位置只由容器宽度决定，不会因为"文字理想宽度"参与协商而在缩放过程中
+                        // 来回改主意 —— 用户录屏里「快速推进」/「快速推进(」两种断行反复横跳就是它。
+                        .canvasStableText()
                 }
             }
             .frame(maxWidth: .infinity, minHeight: s(30), alignment: .topLeading)
@@ -490,6 +506,7 @@ struct CanvasNodeCardView: View {
                     .font(.system(size: s(9), weight: .semibold))
                 Text(attachments.isEmpty ? "入参文件" : "入参文件 \(attachments.count)")
                     .font(.system(size: s(9.5), weight: .medium))
+                    .canvasStableLabel()
                 Spacer(minLength: 0)
                 Image(systemName: "chevron.right")
                     .font(.system(size: s(7), weight: .bold))

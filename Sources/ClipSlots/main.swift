@@ -333,6 +333,33 @@ final class SlotStoreObservable: ObservableObject {
     // 纯粹的内部代次计数器。
     var refreshTrigger = UUID()
 
+    /// 画布语境下**跨组槽位数据**的代次（★ v2.11.8 三轮 hotfix2，修「删了附件面板不刷新」）。
+    ///
+    /// ## 为什么必须新增一个 @Published，而不是复用 `refreshTrigger`
+    ///
+    /// 用户反馈：在画布的「入参文件」面板里点删除，磁盘数据确实删掉了（重开面板就没了），
+    /// 但**面板当场没有任何变化**，卡片看起来还在。根因是一条纯观察链路问题：
+    ///   - `AttachmentManagerPopover.attachments` 是 computed property，读的是
+    ///     `store.canvasSlotAttachments(groupId:slot:)`（跨组时走 `specialStorage`）；
+    ///   - 跨组写入走 `writeCanvasSlotAttachments` 的非当前组分支 → `specialStorage.set` +
+    ///     `refreshTrigger = UUID()`；
+    ///   - 而 `refreshTrigger` 在 v2.10.91 为了性能**去掉了 @Published**（见上面那段注释）。
+    /// 于是这条路径上**一次 objectWillChange 都没有发出**，SwiftUI 没有任何理由重新求值 body，
+    /// computed property 也就永远不会被重新读一次 —— 数据是新的，界面是旧的。
+    ///
+    /// 不把 `refreshTrigger` 改回 @Published：它在全仓有 23 处写入、且分布在高频路径上
+    /// （切组 / 保存 / 批量导入的 `for slot in 1...10` 循环），改回去等于把 v2.10.91 那次
+    /// 60~200ms/次的整树重绘回归全量退回来。
+    ///
+    /// 这个字段的写入点被刻意限制在**画布跨组写**这一处（用户点一次删除 / 提交一次编辑 = 一次），
+    /// 频率是"人手速"级别，付一次重绘完全划算。
+    @Published private(set) var canvasSlotRevision: Int = 0
+
+    /// 手动宣告「跨组槽位数据变了」。见 `canvasSlotRevision`。
+    func bumpCanvasSlotRevision() {
+        canvasSlotRevision &+= 1
+    }
+
     // Special slot state
     @Published var specialSlots: [SpecialSlot] = []
     @Published var currentSpecialSlotId: String = "default"  // UI preview layer
@@ -2725,6 +2752,9 @@ final class SlotStoreObservable: ObservableObject {
             persistCurrentSpecialSlotData()
         } else {
             _ = specialStorage.set(slot, content: content, in: groupId)
+            // 同 writeCanvasSlotAttachments：跨组写没有任何 @Published 变更，任何以 computed
+            // property 读这个槽位的视图都不会自己醒过来。见 `canvasSlotRevision`。
+            bumpCanvasSlotRevision()
         }
         return true
     }
@@ -2758,7 +2788,13 @@ final class SlotStoreObservable: ObservableObject {
         content.contentId = UUID().uuidString
         content.updatedAt = Date().timeIntervalSince1970
         let ok = specialStorage.set(slot, content: content, in: groupId)
-        if ok { refreshTrigger = UUID() }
+        // ★ 三轮 hotfix2：除了那个已经不发通知的 `refreshTrigger`，这里必须再 bump 一个**真的**
+        // @Published，否则「入参文件」面板（computed property 读 store）删完不会重新求值。
+        // 详见 `canvasSlotRevision` 的注释。
+        if ok {
+            refreshTrigger = UUID()
+            bumpCanvasSlotRevision()
+        }
         return ok
     }
 
