@@ -116,6 +116,57 @@ public enum CanvasScreenText {
         visualShortSide(cardSize, zoom: zoom) >= threshold
     }
 
+    // MARK: - 八轮 hotfix：固定字号「塞不进那一行」时也要隐藏
+
+    /// 行高系数（含行距）。SwiftUI 的 `Text` 实际行高约为字号的 1.2~1.3 倍，取 1.2 是保守下界 ——
+    /// 系数取小了会放过"刚好卡住"的情形（表现是字被竖直切半），取大了会让文字过早消失。
+    public static let lineHeightFactor: CGFloat = 1.2
+
+    /// 固定字号文字占的行高。
+    public static func lineHeight(_ fontSize: CGFloat) -> CGFloat {
+        max(0, fontSize) * lineHeightFactor
+    }
+
+    /// 一行固定字号的文字，塞不塞得进它在卡片里分到的那条横带。
+    ///
+    /// ## 为什么只有 `textVisible`（按节点视觉短边）不够
+    ///
+    /// 真机复测（8 个缩放停位逐帧量化）打回过一次：25%~28% 缩放下节点视觉短边仍有 60~70pt、
+    /// 远高于 40pt 阈值，所以文字照画；但**卡片纵向分区是按 renderScale 缩的**（路径行 14pt ×
+    /// 0.28 ≈ 3.9pt），而字号已经被固定成 9.5pt（行高 ≈11.4pt）。父容器是定高的，SwiftUI 于是
+    /// 把这行文字压缩到 3.9pt —— 屏幕上就是"副标题被竖直切了一半"。
+    ///
+    /// 结论：屏幕固定字号下，可见性必须**同时**看"节点够不够大"和"这一行的分配高度够不够放一行字"。
+    /// 后者与节点大小无关，只与 `renderScale` 有关，所以必须单独判。
+    ///
+    /// - Parameters:
+    ///   - rowHeight: 该横带的**设计**高度（未乘 renderScale），如 `CanvasCardLayout.headerRowHeight`。
+    ///   - fontSize: 该行的**设计**字号（= 屏幕字号，固定不缩）。
+    ///   - renderScale: 当前排版缩放。
+    public static func rowTextVisible(rowHeight: CGFloat,
+                                     fontSize: CGFloat,
+                                     renderScale: CGFloat) -> Bool {
+        let available = max(0, rowHeight) * max(0.01, renderScale)
+        return available + 0.001 >= lineHeight(fontSize)
+    }
+
+    /// 多行文字块塞不塞得进给定盒子（`+N 点击加载` 这种"大数字 + 小字"的两行块）。
+    ///
+    /// - Parameters:
+    ///   - fontSizes: 各行的设计字号（固定不缩）。
+    ///   - spacing: 行间距的**设计**值（会乘 renderScale，因为它是几何量）。
+    ///   - boxHeight: 盒子的**设计**高度（会乘 renderScale）。
+    public static func blockTextVisible(fontSizes: [CGFloat],
+                                       spacing: CGFloat,
+                                       boxHeight: CGFloat,
+                                       renderScale: CGFloat) -> Bool {
+        guard !fontSizes.isEmpty else { return true }
+        let scale = max(0.01, renderScale)
+        let need = fontSizes.reduce(0) { $0 + lineHeight($1) }
+            + max(0, spacing) * scale * CGFloat(fontSizes.count - 1)
+        return max(0, boxHeight) * scale + 0.001 >= need
+    }
+
     /// 便于视图直接 `.opacity(...)`：可见 1，不可见 0。
     ///
     /// 用 opacity 而不是 `if` 分支是刻意的：分支会改变 VStack 的子视图数量，缩放跨过阈值那一帧

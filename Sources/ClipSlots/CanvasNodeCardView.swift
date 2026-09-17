@@ -61,6 +61,12 @@ struct CanvasNodeCardView: View {
     let attachments: [SlotContent.SlotAttachment]
     /// 当前画布缩放。见类型注释：卡片按它**重新布局**，不靠位图缩放。
     let renderScale: CGFloat
+    /// 文字的反向缩放（★ 八轮需求 1 的收口）= `CanvasZoomLayout.textCounterScale(zoom:layoutZoom:)`。
+    ///
+    /// 节点层挂着 `scaleEffect(zoom / layoutZoom)`，它会把已经固定成设计 pt 的字号再连带放大 ——
+    /// 这一项就是用来抵掉那个残差的，恒 ≤ 1（推导见 `CanvasZoomLayout.floorBucket`）。
+    /// 默认 1 = 不补偿，方便预览/测试构造。
+    var textCounter: CGFloat = 1
     /// 是否处于 inline 编辑态（由上层集中管理，保证同一时刻只有一个节点在编辑）。
     let isEditing: Bool
     let onBeginEdit: () -> Void
@@ -127,6 +133,24 @@ struct CanvasNodeCardView: View {
 
     /// 见 `CanvasScreenText.textOpacity`：用 opacity 而不是 `if` 分支，避免跨阈值那一帧整卡重排。
     private var textOpacity: Double { textVisible ? 1 : 0 }
+
+    /// 顶部路径行的可见性：除了"节点够大"，还要求**这一行分到的高度放得下固定字号的一行字**。
+    ///
+    /// 真机复测在 25%~28% 缩放下抓到过"副标题被竖直切一半"：节点短边 60~70pt 远超 40pt 阈值，
+    /// 但路径行的分配高度只有 14pt × 0.28 ≈ 3.9pt，而 9.5pt 的固定字号需要约 11.4pt。
+    /// 定高父容器把文字压扁，屏幕上就是半截字。判据与推导见 `CanvasScreenText.rowTextVisible`。
+    private var headerTextOpacity: Double {
+        (textVisible && CanvasScreenText.rowTextVisible(rowHeight: CanvasCardLayout.headerRowHeight,
+                                                        fontSize: 9.5,
+                                                        renderScale: renderScale)) ? 1 : 0
+    }
+
+    /// 底部「入参文件 N」行的可见性，理由同 `headerTextOpacity`（这一行分到 26pt，比路径行宽裕）。
+    private var footerTextOpacity: Double {
+        (textVisible && CanvasScreenText.rowTextVisible(rowHeight: CanvasCardLayout.inputFilesRowHeight,
+                                                        fontSize: 9.5,
+                                                        renderScale: renderScale)) ? 1 : 0
+    }
 
     /// 纯文本节点：不出图，卡片主体就是一块文本框（用户二轮明确要求"不需要卡片预览的形式"）。
     private var isTextNode: Bool { node.kind == .text }
@@ -246,8 +270,10 @@ struct CanvasNodeCardView: View {
             .truncationMode(.middle)
             // 单行也要禁字距自适应：不然缩放时"页面 - 组 - 槽位"这行会时紧时松地呼吸。
             .canvasStableLabel()
-            // ★ 八轮：节点缩到 40pt 以下就别写字了（见 `CanvasScreenText`）。
-            .opacity(textOpacity)
+            // ★ 八轮：抹掉节点层缩放残差，屏幕字号严格恒定（见 `canvasScreenFixedText`）。
+            .canvasScreenFixedText(textCounter)
+            // ★ 八轮：节点缩到 40pt 以下、或这一行放不下一行固定字号的字，就别写字了。
+            .opacity(headerTextOpacity)
             // 给两侧控件留出通道，否则长路径会压在图标上。
             .padding(.horizontal, s(24))
             .frame(maxWidth: .infinity, alignment: .center)
@@ -270,10 +296,14 @@ struct CanvasNodeCardView: View {
             Label(ahead > 0 ? "前方 \(ahead)" : "排队", systemImage: "clock")
                 .font(.system(size: fs(9), weight: .medium))
                 .foregroundColor(AppTheme.canvasCardMetaInk)
+                .canvasScreenFixedText(textCounter, anchor: .leading)
                 .opacity(textOpacity)
         case .running(let startedAt):
             // 刻意不给百分比：CLI 不提供，编出来的进度在 10~20s 量级会明显失真。
-            RunningBadge(startedAt: startedAt, renderScale: renderScale, textOpacity: textOpacity)
+            RunningBadge(startedAt: startedAt,
+                         renderScale: renderScale,
+                         textCounter: textCounter,
+                         textOpacity: textOpacity)
         case .succeeded:
             Image(systemName: "checkmark.circle.fill")
                 .font(.system(size: s(10), weight: .semibold))
@@ -282,6 +312,7 @@ struct CanvasNodeCardView: View {
             Label("失败", systemImage: "exclamationmark.triangle.fill")
                 .font(.system(size: fs(9), weight: .medium))
                 .foregroundColor(.red.opacity(0.85))
+                .canvasScreenFixedText(textCounter, anchor: .leading)
                 .opacity(textOpacity)
         }
     }
@@ -335,6 +366,7 @@ struct CanvasNodeCardView: View {
                         .font(bodyFont)
                         .foregroundColor(.white.opacity(0.45))
                         .canvasStableLabel()
+                        .canvasScreenFixedText(textCounter, anchor: .topLeading)
                         .opacity(textOpacity)
                         .padding(.horizontal, s(10))
                         .padding(.vertical, s(10 + CanvasCardLayout.promptVerticalPadding))
@@ -342,6 +374,7 @@ struct CanvasNodeCardView: View {
                     Text(text)
                         .font(bodyFont)
                         .foregroundColor(.white.opacity(0.92))
+                        .canvasScreenFixedText(textCounter, anchor: .topLeading)
                         .multilineTextAlignment(.leading)
                         .lineSpacing(s(2))
                         .lineLimit(nil)
@@ -414,6 +447,7 @@ struct CanvasNodeCardView: View {
                         .font(.system(size: fs(9)))
                         .lineLimit(2)
                         .multilineTextAlignment(.center)
+                        .canvasScreenFixedText(textCounter)
                         .opacity(textOpacity)
                 }
                 .foregroundColor(.red.opacity(0.75))
@@ -423,6 +457,7 @@ struct CanvasNodeCardView: View {
                 CanvasSlotFanStack(sources: fanSources,
                                    attachments: attachments,
                                    renderScale: renderScale,
+                                   textCounter: textCounter,
                                    nodeHovered: hoverActive && !isEditing,
                                    boxHeight: previewHeight,
                                    style: node.animationStyle,
@@ -476,6 +511,7 @@ struct CanvasNodeCardView: View {
                         .font(bodyFont)
                         .foregroundColor(AppTheme.canvasCardMetaInk.opacity(0.75))
                         .canvasStableLabel()
+                        .canvasScreenFixedText(textCounter, anchor: .topLeading)
                 } else {
                     // ★ 二轮：2 行 → 4 行，且显示的是**剥掉 Markdown 标记**的纯文本
                     // （用户要求"中间去掉 Markdown 表格等原始模板字样"）。加工逻辑在
@@ -490,6 +526,9 @@ struct CanvasNodeCardView: View {
                         // 这样换行位置只由容器宽度决定，不会因为"文字理想宽度"参与协商而在缩放过程中
                         // 来回改主意 —— 用户录屏里「快速推进」/「快速推进(」两种断行反复横跳就是它。
                         .canvasStableText()
+                        // ★ 八轮：整块正文按左上角反向缩放 —— 锚点必须是 topLeading，用 center 会让
+                        // 文字块在缩小时朝中心收，看起来像"正文自己在卡里游动"。
+                        .canvasScreenFixedText(textCounter, anchor: .topLeading)
                 }
             }
             .frame(maxWidth: .infinity, minHeight: s(30), alignment: .topLeading)
@@ -585,7 +624,8 @@ struct CanvasNodeCardView: View {
                 Text(attachments.isEmpty ? "入参文件" : "入参文件 \(attachments.count)")
                     .font(.system(size: fs(9.5), weight: .medium))
                     .canvasStableLabel()
-                    .opacity(textOpacity)
+                    .canvasScreenFixedText(textCounter, anchor: .leading)
+                    .opacity(footerTextOpacity)
                 Spacer(minLength: 0)
                 Image(systemName: "chevron.right")
                     .font(.system(size: s(7), weight: .bold))
@@ -621,6 +661,8 @@ struct CanvasNodeCardView: View {
 private struct RunningBadge: View {
     let startedAt: Date
     var renderScale: CGFloat = 1
+    /// ★ 八轮：文字反向缩放，见 `CanvasZoomLayout.textCounterScale`。
+    var textCounter: CGFloat = 1
     /// ★ 八轮：节点太小时秒数一起隐掉（与卡片上其它文字同一条阈值）。
     var textOpacity: Double = 1
 
@@ -637,6 +679,7 @@ private struct RunningBadge: View {
                     .font(.system(size: CanvasScreenText.layoutFontSize(9, renderScale: renderScale),
                                   weight: .medium))
                     .foregroundColor(AppTheme.canvasCardMetaInk)
+                    .canvasScreenFixedText(textCounter, anchor: .leading)
                     .opacity(textOpacity)
             }
         }

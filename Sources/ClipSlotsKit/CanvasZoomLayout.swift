@@ -77,6 +77,60 @@ public enum CanvasZoomLayout {
         return bucket(for: zoom)
     }
 
+    // MARK: - 八轮：给「屏幕固定字号」用的向下取档 + 反向补偿
+
+    /// 换档余量（向下取档时允许档位比 zoom 高出的比例），同时充当迟滞带宽。
+    ///
+    /// 6% 是"看不出来"与"不要为了 3% 的差把整张卡降一档（等于 26% 的位图放大）"之间的折中。
+    public static let floorTolerance: CGFloat = 1.06
+
+    /// **向下**取档：返回不超过 `zoom * floorTolerance` 的最大档位。
+    ///
+    /// ## 为什么八轮要从「最近档」改成「向下取档」
+    ///
+    /// 八轮要求"文字在屏幕上的视觉大小恒定"。文字排版字号已经固定成设计 pt（见 `CanvasScreenText`），
+    /// 但节点层还挂着 `scaleEffect(zoom / layoutZoom)` —— 这个**残差**会照样把文字连带放大/缩小。
+    /// 实测（真机像素量化）：zoom 1.08 档位 1.26（残差 0.86）与 zoom 2.12 档位 2.0（残差 1.06）
+    /// 两处，同一行字的屏幕高度差 **1.23×** —— 方向对了但没到"恒定"。
+    ///
+    /// 要抹掉残差，只能给文字再乘一个 `1/残差` 的反向变换（`textCounterScale`）。而反向变换
+    /// **只能缩小、不能放大**：放大意味着文字会溢出它自己的版面盒子（标题会压到右上角的样式按钮上，
+    /// 正文会漫过卡片圆角），那是比"字略小 6%"严重得多的观感事故。
+    /// 所以档位必须**永不高于 zoom**（残差 ≥ 1，反向变换 ≤ 1）—— 这就是向下取档。
+    ///
+    /// 代价：档位与 zoom 的最大差从「最近档」的 ±18% 变成「向下」的 0%~26%，即位图放大的上限
+    /// 从 1.18 抬到 1.26（只在两档之间的 zoom 上出现，落在档位上依然是 1.0 逐字号清晰）。
+    /// 换来的是文字屏幕尺寸偏差从 1.39× 收到 1.06× 以内。
+    public static func floorBucket(for zoom: CGFloat) -> CGFloat {
+        let limit = max(0.01, zoom) * floorTolerance
+        var best = ladder[0]
+        for step in ladder where step <= limit { best = step }
+        return best
+    }
+
+    /// 向下取档版的 `settled`：仍在「当前档 ≤ zoom < 下一档」区间内就不换档（带 6% 下沉余量）。
+    ///
+    /// 返回值等于 `current` 表示**不需要重排**。下沉余量只加在下边界：上边界一旦被跨过就立刻换档，
+    /// 否则残差会超过一整档，位图放大失控。
+    public static func settledFloor(current: CGFloat, zoom: CGFloat) -> CGFloat {
+        guard current > 0.01 else { return floorBucket(for: zoom) }
+        let z = max(0.01, zoom)
+        let next = ladder.first(where: { $0 > current }) ?? .greatestFiniteMagnitude
+        if z * floorTolerance >= current && z < next { return current }
+        return floorBucket(for: zoom)
+    }
+
+    /// 文字要额外乘的反向缩放 = `layoutZoom / zoom`，**夹到 (0, 1]**。
+    ///
+    /// 屏幕字号 = 设计 pt × 残差(`zoom/layoutZoom`) × 本函数。残差 ≥ 1 时二者恰好抵消（严格恒定）；
+    /// 残差 < 1（zoom 落在档位下方 6% 余量里）时不做补偿 —— 补偿意味着放大、放大意味着溢出，
+    /// 宁可让字小 6%（9.5pt 上是 0.6pt，肉眼不可分辨）。
+    public static func textCounterScale(zoom: CGFloat, layoutZoom: CGFloat) -> CGFloat {
+        let z = max(0.01, zoom)
+        let l = max(0.01, layoutZoom)
+        return min(1, l / z)
+    }
+
     /// 连续手势（触控板捏合 / 滚轮）停手后多久才允许换档。
     ///
     /// 0.15s → 0.32s：鼠标滚轮的相邻两格间隔常在 0.15~0.3s，旧值让"一次连续缩放"被切成许多段。

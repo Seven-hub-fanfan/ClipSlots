@@ -49,4 +49,16 @@ extension View {
             .allowsTightening(false)
             .minimumScaleFactor(1.0)
     }
+
+    /// ★ 八轮：抹掉节点层 `scaleEffect(zoom / layoutZoom)` 残差，让文字的**屏幕**尺寸恒定。
+    ///
+    /// `counter` 来自 `CanvasZoomLayout.textCounterScale(zoom:layoutZoom:)`，恒 ≤ 1（见那边的注释：
+    /// 只许缩、不许放，否则文字会溢出自己的版面盒子）。这是**渲染期变换**，不改版面、不触发重排 ——
+    /// 用改字号的方式去抵消残差会让每次缩放落定都重排一次文字，正是三轮修掉的「字体乱动」。
+    ///
+    /// `anchor` 必须与该文字块在卡片里的对齐方式一致：居中的文字用 `.center`，左对齐的正文用
+    /// `.topLeading`。锚点选错的表现是"字变小的同时整块往某个方向缩过去"，看起来像布局在跳。
+    func canvasScreenFixedText(_ counter: CGFloat, anchor: UnitPoint = .center) -> some View {
+        scaleEffect(counter, anchor: anchor)
+    }
 }

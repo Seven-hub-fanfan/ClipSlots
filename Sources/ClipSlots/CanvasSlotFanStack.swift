@@ -45,6 +45,9 @@ struct CanvasSlotFanStack: View {
     let attachments: [SlotContent.SlotAttachment]
     /// 当前缩放（= 画布 zoom）。所有尺寸乘它，保证放大后是**重新排版**而不是位图拉伸。
     let renderScale: CGFloat
+    /// 文字反向缩放（★ 八轮需求 1 的收口）：抵掉节点层 `scaleEffect(zoom / layoutZoom)` 的残差，
+    /// 恒 ≤ 1。推导见 `CanvasZoomLayout.floorBucket` / `textCounterScale`。
+    var textCounter: CGFloat = 1
     /// 整个节点是否被悬停（展开的唯一开关）。
     let nodeHovered: Bool
     /// 预览区可用高度（1x）。卡片按它收敛，避免在小节点上戳出卡片外。
@@ -374,6 +377,14 @@ struct CanvasSlotFanStack: View {
                          source: card.source,
                          cardSize: cardSize)
                     .id("\(layout.index)#\(cardIdentity(card.source, globalIndex: card.index))")
+                    // ★ 八轮需求 2 hotfix：侧滑转场必须挂在 `.id(...)` **外面**。
+                    //
+                    // 第一版把 `.transition` 写在 `cardView` 内部（也就是 `.id` 的里面），真机
+                    // 40 帧连拍（28ms/帧）抓到的结果是"两帧之间直接换成新内容"，一帧过渡都没有：
+                    // `.id` 是身份边界，翻页时被销毁/新建的是**它标识的那个节点**，而转场信息挂在
+                    // 边界内部的子节点上，父级 diff 时看不到它，于是退化成硬切。
+                    // 挂到外面后，插入/移除发生在带转场的那个节点上，spring 才有东西可以插值。
+                    .transition(slideTransition)
             }
         }
     }
@@ -444,14 +455,6 @@ struct CanvasSlotFanStack: View {
             .rotationEffect(.degrees(layout.angle), anchor: .bottom)
             .offset(x: s(layout.offset.width), y: s(layout.offset.height))
             .zIndex(layout.zIndex)
-            // ★ 八轮需求 2：轮播翻页的**侧滑转场**。
-            //
-            // 为什么必须靠 transition 而不是只调 spring：七轮给牌面的 `.id` 编进了"位置 + 内容身份"
-            // （防止 SwiftUI 复用旧视图把上一页的图贴到新卡上）。身份一变，SwiftUI 走的是
-            // **销毁 + 新建**而不是"同一个视图属性动画"，所以位移动画根本无从插值 —— 这就是用户
-            // 说的"硬切"。补上 insertion/removal 转场后，新卡从进入侧滑入、旧卡朝相反侧滑出，
-            // 方向由 `slideInsertFromTrailing` 统一给（带 smoke 断言，避免把方向写反）。
-            .transition(slideTransition)
             .animation(activeSpring, value: expanded)
             .animation(activeSpring, value: hoveredCard)
             .animation(pagingSpring, value: windowStart)
@@ -508,6 +511,7 @@ struct CanvasSlotFanStack: View {
                 .minimumScaleFactor(1.0)
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
                 .padding(s(8))
+                .canvasScreenFixedText(textCounter, anchor: .topLeading)
                 // 卡片缩到指甲盖大小就别写字了（阈值见 `CanvasScreenText`）。
                 .opacity(cardTextVisible(fanCardSize))
 
@@ -533,6 +537,7 @@ struct CanvasSlotFanStack: View {
                     Text(name)
                         .font(.system(size: fs(8.5), weight: .medium))
                         .foregroundColor(.white.opacity(0.78))
+                        .canvasScreenFixedText(textCounter)
                         .opacity(cardTextVisible(fanCardSize))
                         .lineLimit(CanvasAttachmentKind.cardNameLineLimit)
                         .multilineTextAlignment(.center)
@@ -556,6 +561,7 @@ struct CanvasSlotFanStack: View {
                         .font(.system(size: s(15), weight: .light))
                     Text("空槽位")
                         .font(.system(size: fs(9), weight: .medium))
+                        .canvasScreenFixedText(textCounter)
                         .opacity(cardTextVisible(fanCardSize))
                 }
                 .foregroundColor(Color.black.opacity(0.35))
@@ -763,6 +769,14 @@ struct CanvasSlotFanStack: View {
             .allowsTightening(false)
             .minimumScaleFactor(1.0)
             .fixedSize()
+            .canvasScreenFixedText(textCounter)
+            // ★ 八轮 hotfix：`fixedSize()` 让这个两行块保持固定字号的自然尺寸 —— 缩小画布时它
+            // 会比灰卡本身还大，于是漫出卡片、糊在邻卡上（真机 25% 缩放实拍到）。塞不下就整块不画，
+            // 判据见 `CanvasScreenText.blockTextVisible`（灰卡照旧显示，用户仍看得到"后面还有"）。
+            .opacity(CanvasScreenText.blockTextVisible(fontSizes: [18, 7.5],
+                                                       spacing: 2,
+                                                       boxHeight: cardSize.height,
+                                                       renderScale: renderScale) ? 1 : 0)
             // ★ 五轮：文字挪到**露出的那块楔形**的重心上，不再居中。
             //
             // 沉到牌面之下后，卡片中心正好是被左邻卡盖住的地方 —— 居中的文字一个像素都看不见
@@ -952,6 +966,7 @@ struct CanvasSlotFanStack: View {
                     // 气泡按钮只在 hover 出现（此时节点必然够大），字号仍按屏幕固定处理，
                     // 保证与卡片上其它文字同一视觉尺寸。
                     .font(.system(size: fs(9.5), weight: .medium))
+                    .canvasScreenFixedText(textCounter, anchor: .leading)
             }
             .foregroundColor(.white.opacity(0.94))
             .padding(.horizontal, s(6))

@@ -44,6 +44,17 @@ struct CanvasWorkspaceView: View {
     ///     动画由 ratio 从 `旧/新` 收到 1 来演；
     ///   - **连续缩放**（触控板捏合、Cmd+滚轮）：停手 `zoomSettleDelay` 后落定。
     @State private var layoutZoom: CGFloat = 1
+    /// ★ 八轮需求 1：文字的反向缩放 = `layoutZoom / zoom`（夹到 ≤ 1）。
+    ///
+    /// 节点层的 `scaleEffect(zoom / layoutZoom)` 是"排版档位"与"真实缩放"之间的差值补偿，它对
+    /// 卡片里的一切生效 —— 包括已经被固定成设计 pt 的字号。八轮真机量化的结论：只固定字号还不够，
+    /// 两个不同缩放停位上同一行字的屏幕高度仍差 1.23×，那个 1.23 就是两处残差之比。
+    /// 这里把残差的倒数传进卡片，由文字自己乘回去，屏幕字号才真正恒定。
+    ///
+    /// 之所以敢每帧变：它只作用在 `scaleEffect` 上，是**渲染期变换**，不改版面、不触发重新折行。
+    private var textCounter: CGFloat {
+        CanvasZoomLayout.textCounterScale(zoom: zoom, layoutZoom: layoutZoom)
+    }
     /// 连续缩放的落定防抖任务。新事件进来就取消上一个 —— 手势期间反复推迟，只有真的停手才落定。
     @State private var zoomSettleWork: DispatchWorkItem? = nil
     /// 平移手势进行中的临时量。手势结束才合并进 `pan`，避免逐帧累加带来的漂移。
@@ -181,7 +192,7 @@ struct CanvasWorkspaceView: View {
                 pan = canvas.pan
                 zoom = canvas.zoom
                 // 排版缩放必须与初始 zoom 对齐，否则首帧 ratio ≠ 1，节点会以一个错误的比例被拉伸。
-                layoutZoom = CanvasZoomLayout.bucket(for: canvas.zoom)
+                layoutZoom = CanvasZoomLayout.floorBucket(for: canvas.zoom)
                 // 闭包在这里绑一次即可：@State/@ObservedObject 的读写都走稳定的存储盒，
                 // 视图结构体后续被重建也不影响这几个闭包写到正确的地方。
                 inputRouter.onScroll = { dx, dy, precise, isZoom, point in
@@ -318,6 +329,10 @@ struct CanvasWorkspaceView: View {
                                    pathLabel: pathLabel(for: node),
                                    attachments: liveAttachments(for: node),
                                    renderScale: layoutZoom,
+                                   // ★ 八轮需求 1：文字的屏幕尺寸要恒定，就得抵掉下面那句
+                                   // `scaleEffect(zoom / layoutZoom)` 的残差。这里传的是它的倒数
+                                   // （夹到 ≤ 1，只许缩不许放，理由见 CanvasZoomLayout）。
+                                   textCounter: textCounter,
                                    isEditing: isEditing,
                                    onBeginEdit: { beginEdit(node) },
                                    onCommitEdit: { commitEdit(node, text: $0) },
@@ -1298,7 +1313,7 @@ struct CanvasWorkspaceView: View {
         // 二轮那版（`layoutZoom = value`）在鼠标滚轮下等于每一格都重排一次文字，因为滚轮事件是
         // 离散且稀疏的，每一格之间都会走完 0.15s 防抖被当成"已停手"。量化 + 迟滞后，同一档内的
         // 多次缩放**一次都不重排**（下面那个 guard 直接返回）。理由与代价见 CanvasZoomLayout。
-        let target = CanvasZoomLayout.settled(current: layoutZoom, zoom: value)
+        let target = CanvasZoomLayout.settledFloor(current: layoutZoom, zoom: value)
         guard layoutZoom != target else { return }
         var tx = Transaction()
         tx.disablesAnimations = true
