@@ -8,22 +8,17 @@ import ClipSlotsKit
 /// 文件、可以是三段文字，卡片上却只画第一张图 —— 用户在画布上根本看不出这个槽位到底装了几件
 /// 东西，得点开入参文件面板才知道。堆叠卡片把「数量」变成了视觉信息。
 ///
-/// ## 三种展开风格（由 `CanvasNode.animationStyle` 决定；二轮两种，★ 八轮加第三种）
+/// ## 展开风格：只有扇形（★ v2.11.8 九轮）
 ///
 /// 一轮只有扇形，用户实测反馈「展开很难选到第二个」「最后那个没有办法选择中间的」。视频分析确认了
-/// 根因（见 `hitLayer` 的注释）。二轮的处理是**两条腿**：
-///   - **A `.fanOut`** 修好扇形：角度 20°、横向张开 12pt，并把命中判定从"各卡自己 onHover"
-///     换成**统一透明命中层 + 旋转后多边形**。
-///   - **B `.carousel`** 提供一个"物理上不重叠"的选项：hover 后水平铺开，同屏 3 张 + 左右箭头翻页。
-///     对 50 张图这种量级，扇形无论怎么调都不好点，轮播才是对的形态。
-///     ★ 八轮：翻页从"硬切"改成**带方向的侧滑**（`slideTransition` + `carouselPageSpring`）。
-///   - **C `.stackedScatter`**（★ 八轮新增，用户需求 3）交替旋转叠加：卡片横向铺开、相邻遮挡约
-///     1/4、旋转角正负交替（幅度由下标伪随机取 3°~8°），中间那张层级最高，投影更柔。
-///     它是扇形（几乎全重叠）与轮播（完全不重叠）之间的第三档：既保留"一摊卡"的手感，
-///     每张又都留着 3/4 卡宽的独立可点区域。几何在 `CanvasFanGeometry.scatterLayouts`。
+/// 根因（见 `hitLayer` 的注释），二轮的处理是把扇形修好：角度 20°、横向张开 12pt，并把命中判定
+/// 从"各卡自己 onHover"换成**统一透明命中层 + 旋转后多边形**。
 ///
-/// 两种风格的**收拢态完全一样**（一叠略微错位的卡）—— 收拢态本来就不需要可点性，
-/// 保持一致可以让"切换风格"这件事只在 hover 时才有视觉差异，不至于让静息画布看起来两种节点两个样。
+/// 二~八轮另外并存过「水平轮播」与「交替叠放」两种风格 + 一个切换按钮 + 一个右键子菜单。
+/// 用户九轮明确要求**只留扇形**、删掉切换入口，所以本文件里所有 `carouselActive` /
+/// `scatterActive` 分支、轮播专用的侧滑转场与倒算卡宽都已删除（左右翻页箭头**保留** ——
+/// 它是扇形自己的固定栅格分页入口，跟风格无关）。`style` 入参也随之去掉 ——
+/// 留一个恒等于 `.fanOut` 的参数只会让下一位读者以为这里还有分支。
 ///
 /// ## 刻意的取舍
 ///   - **展开只是视觉溢出，不改布局**。卡片全部走 `offset`/`rotationEffect`（渲染期变换），
@@ -45,15 +40,14 @@ struct CanvasSlotFanStack: View {
     let attachments: [SlotContent.SlotAttachment]
     /// 当前缩放（= 画布 zoom）。所有尺寸乘它，保证放大后是**重新排版**而不是位图拉伸。
     let renderScale: CGFloat
-    /// 文字反向缩放（★ 八轮需求 1 的收口）：抵掉节点层 `scaleEffect(zoom / layoutZoom)` 的残差，
-    /// 恒 ≤ 1。推导见 `CanvasZoomLayout.floorBucket` / `textCounterScale`。
+    /// 文字反向缩放（★ 九轮需求 1 的收口）：抵掉节点层 `scaleEffect(zoom / layoutZoom)` 的残差。
+    /// 精确倒数、不钳制（静息 ≤1，缩小手势中 >1）。牌面卡内的文字**不要直接用它** ——
+    /// 卡片自己还挂着 `scaleEffect(layout.scale)`，要走 `cardTextCounter(_:)`。
     var textCounter: CGFloat = 1
     /// 整个节点是否被悬停（展开的唯一开关）。
     let nodeHovered: Bool
     /// 预览区可用高度（1x）。卡片按它收敛，避免在小节点上戳出卡片外。
     let boxHeight: CGFloat
-    /// 展开风格（A/B）。
-    let style: CanvasFanGeometry.ExpandStyle
     /// 节点身份（`groupId#slot`）。★ 六轮：翻页窗口按它存活，见 `CanvasFanWindowState`。
     let stateKey: String
 
@@ -70,12 +64,6 @@ struct CanvasSlotFanStack: View {
     let onToast: (String) -> Void
 
     @State private var hoveredCard: Int? = nil
-    /// 最近一次翻页的方向（true = 向后 / 看更后面的内容）。★ 八轮需求 2：侧滑转场的方向来源。
-    ///
-    /// 为什么是 `@State` 而不是从窗口差值推：`+N` 灰卡、右箭头、"翻到底回到开头"三条路径最终都
-    /// 落到 `windowStart` 的一次赋值，回到开头那次的差值是**负**的（4 → 0），但用户的动作是
-    /// "继续往后翻"，按差值取方向会让循环那一下反向滑，观感是"卡片弹回去了"。
-    @State private var pageForwardLast: Bool = true
     /// 打开了操作气泡的卡片下标（**全量数组的下标**）。
     @State private var openedCard: Int? = nil
     /// 翻页窗口起点（全量下标）。★ v2.11.8 三轮取代旧的 `page`：翻页步长是"容量 - 1"（重叠一张
@@ -91,11 +79,10 @@ struct CanvasSlotFanStack: View {
 
     /// 窗口起点在登记处里的 key。见 `CanvasFanWindowState` 顶部注释：`@State` 活不过右键与页面切换。
     ///
-    /// ★ 八轮：新增的「交替叠放」**共用 `fan` 这个 tag**，因为它的窗口容量与扇形相同（5 张）。
-    /// 分不分 tag 的判据只有一条：容量不同才必须分（同一个起点在不同容量下含义不同，会造成
-    /// 半页错位）。同容量下共用反而更好 —— 用户翻到第 2 页再切个风格，页码不会莫名跳回第 1 页。
+    /// ★ 九轮：风格只剩扇形，`styleTag` 恒为 `fan`（八轮那个按风格分 tag 的三元表达式随
+    /// 「水平轮播」一起删了）。tag 保留在 key 里是为了不让老的窗口起点记录串到别的语义上去。
     private var windowKey: String {
-        CanvasFanWindowState.key(nodeId: stateKey, styleTag: style == .carousel ? "carousel" : "fan")
+        CanvasFanWindowState.key(nodeId: stateKey, styleTag: "fan")
     }
 
     /// 把当前起点写回登记处。所有改 `windowStart` 的地方都要走这里，漏一处就等于那条路径"不记得"。
@@ -105,31 +92,7 @@ struct CanvasSlotFanStack: View {
 
     /// 扇形展开动画。用户明确指定的参数，不要顺手改成 `Anim.transition`。
     private static let fanSpring = Animation.spring(response: 0.35, dampingFraction: 0.72)
-    /// 轮播动画：用户明确指定 stiffness=220 / damping=20（"快进慢出、带轻微回弹"）。
-    ///
-    /// 必须用 `interpolatingSpring` 而不是 `spring(response:dampingFraction:)` —— 后者收的是
-    /// 归一化参数，没有地方放 stiffness/damping 原值，硬换算出来的曲线不带回弹（临界阻尼），
-    /// 正是用户不要的那种"匀速滑过去"。
-    private static let carouselSpring = Animation.interpolatingSpring(stiffness: 220, damping: 20)
-
-    /// 轮播**翻页**动画（★ 八轮需求 2）：用户在需求里直接给了 `.spring(response: 0.35, dampingFraction: 0.8)`。
-    ///
-    /// 为什么翻页要和 hover/展开分用两条曲线：`carouselSpring`（stiffness 220 / damping 20）带
-    /// 明显回弹，那是"抽起一张卡"想要的手感；整排卡片横向平移时同样的回弹会让**整页一起晃**，
-    /// 观感是"卡片没粘住轨道"。翻页要的是"推一把、稳稳停住"，所以用阻尼更高（0.8）的曲线。
-    private static let carouselPageSpring = Animation.spring(
-        response: CanvasFanGeometry.carouselPageResponse,
-        dampingFraction: CanvasFanGeometry.carouselPageDamping)
-
-    /// 「交替叠放」动画（★ 八轮需求 3）：比扇形略慢、阻尼略低 —— 这个风格 hover 时是"把一张卡从
-    /// 一摊里抽出来、旁边的让开"，一点过冲反而像纸片被拨动。
-    private static let scatterSpring = Animation.spring(response: 0.34, dampingFraction: 0.75)
-
     private var expanded: Bool { nodeHovered }
-    /// 是否处于**轮播展开**态（收拢态三种风格共用扇形收拢布局）。
-    private var carouselActive: Bool { style == .carousel && expanded }
-    /// 是否处于**交替叠放展开**态（★ 八轮需求 3）。
-    private var scatterActive: Bool { style == .stackedScatter && expanded }
 
     private func s(_ v: CGFloat) -> CGFloat { max(0.01, v * renderScale) }
 
@@ -139,6 +102,16 @@ struct CanvasSlotFanStack: View {
     }
 
     /// 卡片在屏幕上是否大到值得写字（阈值比节点那条更低，见 `CanvasScreenText`）。
+    /// **卡内**文字的反向补偿（★ 九轮）。
+    ///
+    /// `textCounter` 只抵掉了节点层那层 `scaleEffect(zoom / layoutZoom)`。牌面卡自己还挂着
+    /// `scaleEffect(layout.scale, anchor: .bottom)`（hover 时 1.08），文字实际经历的是**两层**
+    /// 缩放的乘积。用户九轮的口径是"抵消文字实际经历的所有上层缩放"，漏掉这一层的表现就是
+    /// 「鼠标移到某张卡上，那张卡的字比邻卡大 8%」—— 仍然是"字会变大小"。
+    private func cardTextCounter(_ layout: CanvasFanGeometry.CardLayout) -> CGFloat {
+        textCounter / max(0.01, layout.scale)
+    }
+
     private func cardTextVisible(_ cardSize: CGSize) -> Double {
         CanvasScreenText.cardTextVisible(cardSize: cardSize, zoom: renderScale) ? 1 : 0
     }
@@ -147,13 +120,8 @@ struct CanvasSlotFanStack: View {
 
     private var total: Int { max(sources.count, 1) }
 
-    /// 窗口容量：扇形 5 张，轮播同屏 3 张，交替叠放同扇形（5 张）。
-    ///
-    /// 交替叠放刻意复用 5：它和扇形一样是"重叠着摞"，同屏张数越多越有"一摊"的意思；
-    /// 而轮播那 3 张是被"不重叠 + 两侧箭头通道"倒算出来的硬约束。
-    private var windowCapacity: Int {
-        carouselActive ? CanvasFanGeometry.carouselVisible : CanvasFanGeometry.maxCards
-    }
+    /// 窗口容量：扇形 5 张（★ 九轮：轮播的 3 张随风格一起删了）。
+    private var windowCapacity: Int { CanvasFanGeometry.maxCards }
 
     /// 当前翻页窗口（★ v2.11.8 三轮，取代二轮的「前 5 张 + `+N` 网格浮层」）。
     ///
@@ -183,26 +151,19 @@ struct CanvasSlotFanStack: View {
         CanvasFanGeometry.fanCardSize(boxHeight: boxHeight)
     }
 
-    /// 轮播态卡片尺寸（1x）：**由容器宽度倒算**，保证 3 张 + 2 个间距 + 两侧箭头正好放得下。
+    /// `+N / 点击加载` 这两行固定字号的文字块，在给定灰卡尺寸下装不装得下（**整块**判定）。
     ///
-    /// 用户要求"卡片间距均匀、不重叠、有完整点击区域"——这三件事等价于一句话：宽度必须是算出来的，
-    /// 不能沿用扇形那个靠旋转溢出的尺寸（3 张 108pt 卡片需要 340pt，而容器只有 236pt，
-    /// 直接铺开必然重叠，那就退回一轮那个"看得见点不着"的老问题）。
-    private func carouselCardSize(containerWidth: CGFloat) -> CGSize {
-        let usable = max(60, containerWidth - 2 * CanvasSlotFanStack.arrowLane)
-        let n = CGFloat(CanvasFanGeometry.carouselVisible)
-        let w = max(36, (usable - CanvasFanGeometry.carouselGap * (n - 1)) / n)
-        let h = min(boxHeight - 10, w / 0.82)
-        return CGSize(width: w, height: max(48, h))
+    /// 量纲说明：`cardSize` 是 1x 设计值，灰卡的排版高度 = `cardSize.height × renderScale`；
+    /// 文字块的高度**不随缩放变化**（字号已固定成设计 pt），只有块内那 2pt 间距是几何、要缩。
+    /// 两个量纲不同的东西比大小，正是八轮"文字漫出灰卡"的根因，所以这里写清楚各自乘没乘 rs。
+    private func overflowLabelFits(_ cardSize: CGSize) -> Bool {
+        let need = CanvasScreenText.lineHeight(18) + CanvasScreenText.lineHeight(7.5) + 2 * renderScale
+        return cardSize.height * renderScale >= need
     }
 
-    /// 两侧留给箭头的通道宽度（1x）。
-    private static let arrowLane: CGFloat = 22
-
-    private func activeCardSize(containerWidth: CGFloat) -> CGSize {
-        // 交替叠放沿用扇形卡尺寸：它靠"横向步长 = 74% 卡宽"拉开，不需要像轮播那样倒算宽度。
-        carouselActive ? carouselCardSize(containerWidth: containerWidth) : fanCardSize
-    }
+    /// ★ 九轮：风格只剩扇形，卡尺寸不再随风格分叉。签名保留 `containerWidth` 是因为调用点
+    /// 都在 `GeometryReader` 里，留着它以后要做"按容器收敛"不用再改一圈调用方。
+    private func activeCardSize(containerWidth: CGFloat) -> CGSize { fanCardSize }
 
     // MARK: - 布局
 
@@ -212,24 +173,6 @@ struct CanvasSlotFanStack: View {
     /// 渲染，但**必须走同一套几何**，否则灰卡的角度/错位跟旁边的牌面对不上。
     private func layouts(containerWidth: CGFloat) -> [CanvasFanGeometry.CardLayout] {
         let slotCount = sources.isEmpty ? 1 : window.slotCount
-        if carouselActive {
-            return CanvasFanGeometry.carouselLayouts(
-                count: slotCount,
-                cardWidth: carouselCardSize(containerWidth: containerWidth).width,
-                hoveredIndex: hoveredCard.flatMap { global in
-                    // 命中层给的是全量下标，轮播布局要的是页内下标。
-                    visibleCards.firstIndex { $0.index == global }
-                })
-        }
-        if scatterActive {
-            return CanvasFanGeometry.scatterLayouts(
-                count: slotCount,
-                cardWidth: fanCardSize.width,
-                hoveredIndex: hoveredCard.flatMap { global in
-                    // 命中层给的是全量下标，布局要页内下标。
-                    visibleCards.firstIndex { $0.index == global }
-                })
-        }
         return CanvasFanGeometry.layouts(count: slotCount,
                                          expanded: expanded,
                                          // 同轮播分支：命中层记的是**全量**下标，布局要的是页内位置。
@@ -247,19 +190,11 @@ struct CanvasSlotFanStack: View {
         window.showsOverflowCard ? window.count : nil
     }
 
-    private var activeSpring: Animation {
-        if carouselActive { return CanvasSlotFanStack.carouselSpring }
-        if scatterActive { return CanvasSlotFanStack.scatterSpring }
-        return CanvasSlotFanStack.fanSpring
-    }
+    private var activeSpring: Animation { CanvasSlotFanStack.fanSpring }
 
-    /// **翻页**用的曲线（★ 八轮需求 2）。
-    ///
-    /// 只有轮播换成了专用的 `carouselPageSpring`：扇形/交替叠放翻页时卡片是"原地换内容"，
-    /// 平移量很小，用展开曲线足够；轮播翻页是整排横向滑动，是唯一需要"有方向感的侧滑"的形态。
-    private var pagingSpring: Animation {
-        carouselActive ? CanvasSlotFanStack.carouselPageSpring : activeSpring
-    }
+    /// **翻页**用的曲线。★ 九轮：轮播那条专用侧滑曲线随风格删除，扇形翻页是"原地换内容"，
+    /// 平移量很小，直接用展开曲线。
+    private var pagingSpring: Animation { activeSpring }
 
     // MARK: - body
 
@@ -342,14 +277,6 @@ struct CanvasSlotFanStack: View {
             if next != windowStart { windowStart = next }
             persistWindowStart(next)
         }
-        .onChange(of: style) { _ in
-            hoveredCard = nil
-            openedCard = nil
-            // 两种风格的窗口容量不同（5 / 3），起点留着会让轮播开在半页上。
-            // key 里带了风格，所以两种风格各记各的，来回切不会互相污染。
-            windowStart = 0
-            persistWindowStart(0)
-        }
     }
 
     // MARK: - 卡片层
@@ -377,14 +304,12 @@ struct CanvasSlotFanStack: View {
                          source: card.source,
                          cardSize: cardSize)
                     .id("\(layout.index)#\(cardIdentity(card.source, globalIndex: card.index))")
-                    // ★ 八轮需求 2 hotfix：侧滑转场必须挂在 `.id(...)` **外面**。
+                    // 翻页转场：★ 九轮起只剩扇形，卡片是"原地换内容"，纯淡入淡出即可
+                    // （八轮那套带方向的侧滑是轮播专用的，随风格一起删了）。
                     //
-                    // 第一版把 `.transition` 写在 `cardView` 内部（也就是 `.id` 的里面），真机
-                    // 40 帧连拍（28ms/帧）抓到的结果是"两帧之间直接换成新内容"，一帧过渡都没有：
-                    // `.id` 是身份边界，翻页时被销毁/新建的是**它标识的那个节点**，而转场信息挂在
-                    // 边界内部的子节点上，父级 diff 时看不到它，于是退化成硬切。
-                    // 挂到外面后，插入/移除发生在带转场的那个节点上，spring 才有东西可以插值。
-                    .transition(slideTransition)
+                    // 仍然挂在 `.id(...)` **外面**：`.id` 是身份边界，翻页时被销毁/新建的是它标识的
+                    // 那个节点，转场写在边界内部会被父级 diff 忽略，退化成硬切（八轮真机踩过）。
+                    .transition(.opacity)
             }
         }
     }
@@ -408,7 +333,7 @@ struct CanvasSlotFanStack: View {
                           source: CanvasFanGeometry.CardSource,
                           cardSize: CGSize) -> some View {
         let isHot = (hoveredCard == globalIndex)
-        return cardBody(source)
+        return cardBody(source, counter: cardTextCounter(layout))
             .frame(width: s(cardSize.width), height: s(cardSize.height))
             // ★ 八轮：牌面内容按卡片轮廓裁剪。
             //
@@ -436,21 +361,12 @@ struct CanvasSlotFanStack: View {
             // 三~六轮这里压着一层 `Color.black.opacity(0.4)`，目的是标记"这张是上一页残留的参考卡"。
             // 用户录屏实测的观感是「点了 +2 之后第一张图片变灰」并明确要求去掉，所以牌面现在一律全亮 ——
             // 不加遮罩、也不降 opacity（降 opacity 会让下面那张卡透出来，看着像渲染错误）。
-            // ★ 八轮：交替叠放要"柔和 Drop Shadow"（用户指定）—— 半径更大、更淡、下沉更多。
-            //
-            // 为什么不是全局改大：扇形态卡片几乎完全重叠，大半径投影会互相叠加成一团灰雾
-            // （五轮那次"灰卡压暗牌面"就是同一类视觉事故）。交替叠放只重叠 1/4，投影正好用来
-            // 表达"谁在上面"。
-            .shadow(color: Color.black.opacity(scatterActive
-                                               ? (isHot ? 0.28 : CanvasFanGeometry.scatterShadowOpacity)
-                                               : (isHot ? 0.26 : 0.16)),
-                    radius: s(scatterActive
-                              ? (isHot ? 13 : CanvasFanGeometry.scatterShadowRadius)
-                              : (isHot ? 9 : 5)),
+            // 投影刻意保持"小半径、偏淡"：扇形态卡片几乎完全重叠，大半径投影会互相叠加成一团
+            // 灰雾（五轮那次"灰卡压暗牌面"就是同一类视觉事故）。
+            .shadow(color: Color.black.opacity(isHot ? 0.26 : 0.16),
+                    radius: s(isHot ? 9 : 5),
                     x: 0,
-                    y: s(scatterActive
-                         ? (isHot ? 6 : CanvasFanGeometry.scatterShadowOffsetY)
-                         : (isHot ? 5 : 2.5)))
+                    y: s(isHot ? 5 : 2.5))
             .scaleEffect(layout.scale, anchor: .bottom)
             .rotationEffect(.degrees(layout.angle), anchor: .bottom)
             .offset(x: s(layout.offset.width), y: s(layout.offset.height))
@@ -460,21 +376,8 @@ struct CanvasSlotFanStack: View {
             .animation(pagingSpring, value: windowStart)
     }
 
-    /// 翻页转场（★ 八轮需求 2）。
-    ///
-    /// 非轮播风格保持纯淡入淡出：扇形/交替叠放的卡片是"原地换内容"，让它们也横向飞进飞出会
-    /// 把整叠卡搅成一片乱飞的纸。
-    private var slideTransition: AnyTransition {
-        guard carouselActive else { return .opacity }
-        let inFromTrailing = CanvasFanGeometry.slideInsertFromTrailing(forward: pageForwardLast)
-        let outToTrailing = CanvasFanGeometry.slideRemoveToTrailing(forward: pageForwardLast)
-        return .asymmetric(
-            insertion: .move(edge: inFromTrailing ? .trailing : .leading).combined(with: .opacity),
-            removal: .move(edge: outToTrailing ? .trailing : .leading).combined(with: .opacity))
-    }
-
     @ViewBuilder
-    private func cardBody(_ source: CanvasFanGeometry.CardSource) -> some View {
+    private func cardBody(_ source: CanvasFanGeometry.CardSource, counter: CGFloat) -> some View {
         switch source {
         case .attachmentIndex(let idx):
             if attachments.indices.contains(idx) {
@@ -493,10 +396,10 @@ struct CanvasSlotFanStack: View {
                         .clipShape(RoundedRectangle(cornerRadius: s(14), style: .continuous))
                         .padding(s(2.6))
                 } else {
-                    fileCardBody(att)
+                    fileCardBody(att, counter: counter)
                 }
             } else {
-                emptyCardBody
+                emptyCardBody(counter: counter)
             }
 
         case .textSegment(let text):
@@ -511,12 +414,12 @@ struct CanvasSlotFanStack: View {
                 .minimumScaleFactor(1.0)
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
                 .padding(s(8))
-                .canvasScreenFixedText(textCounter, anchor: .topLeading)
+                .canvasScreenFixedText(counter, anchor: .topLeading)
                 // 卡片缩到指甲盖大小就别写字了（阈值见 `CanvasScreenText`）。
                 .opacity(cardTextVisible(fanCardSize))
 
         case .empty:
-            emptyCardBody
+            emptyCardBody(counter: counter)
         }
     }
 
@@ -524,7 +427,7 @@ struct CanvasSlotFanStack: View {
     ///
     /// 用户指定「背景用深灰色卡片，和图片卡片风格一致」：所以外框圆角/描边/阴影完全沿用
     /// `cardView` 那一套（本视图只画内容），这里只把内容区铺成深灰。
-    private func fileCardBody(_ att: SlotContent.SlotAttachment) -> some View {
+    private func fileCardBody(_ att: SlotContent.SlotAttachment, counter: CGFloat) -> some View {
         let name = att.name.isEmpty ? (att.path.map { ($0 as NSString).lastPathComponent } ?? "文件") : att.name
         let kind = CanvasAttachmentKind.from(fileName: att.path ?? att.name)
         return RoundedRectangle(cornerRadius: s(14), style: .continuous)
@@ -537,7 +440,7 @@ struct CanvasSlotFanStack: View {
                     Text(name)
                         .font(.system(size: fs(8.5), weight: .medium))
                         .foregroundColor(.white.opacity(0.78))
-                        .canvasScreenFixedText(textCounter)
+                        .canvasScreenFixedText(counter)
                         .opacity(cardTextVisible(fanCardSize))
                         .lineLimit(CanvasAttachmentKind.cardNameLineLimit)
                         .multilineTextAlignment(.center)
@@ -551,7 +454,7 @@ struct CanvasSlotFanStack: View {
             .help("\(kind.displayName)：\(name)")
     }
 
-    private var emptyCardBody: some View {
+    private func emptyCardBody(counter: CGFloat) -> some View {
         RoundedRectangle(cornerRadius: s(14), style: .continuous)
             .strokeBorder(style: StrokeStyle(lineWidth: s(1.4), dash: [s(4), s(3)]))
             .foregroundColor(Color.black.opacity(0.22))
@@ -561,7 +464,7 @@ struct CanvasSlotFanStack: View {
                         .font(.system(size: s(15), weight: .light))
                     Text("空槽位")
                         .font(.system(size: fs(9), weight: .medium))
-                        .canvasScreenFixedText(textCounter)
+                        .canvasScreenFixedText(counter)
                         .opacity(cardTextVisible(fanCardSize))
                 }
                 .foregroundColor(Color.black.opacity(0.35))
@@ -769,14 +672,14 @@ struct CanvasSlotFanStack: View {
             .allowsTightening(false)
             .minimumScaleFactor(1.0)
             .fixedSize()
-            .canvasScreenFixedText(textCounter)
-            // ★ 八轮 hotfix：`fixedSize()` 让这个两行块保持固定字号的自然尺寸 —— 缩小画布时它
-            // 会比灰卡本身还大，于是漫出卡片、糊在邻卡上（真机 25% 缩放实拍到）。塞不下就整块不画，
-            // 判据见 `CanvasScreenText.blockTextVisible`（灰卡照旧显示，用户仍看得到"后面还有"）。
-            .opacity(CanvasScreenText.blockTextVisible(fontSizes: [18, 7.5],
-                                                       spacing: 2,
-                                                       boxHeight: cardSize.height,
-                                                       renderScale: renderScale) ? 1 : 0)
+            .canvasScreenFixedText(cardTextCounter(layout))
+            // `fixedSize()` 让这个两行块保持固定字号的自然尺寸 —— 缩小画布时它会比灰卡本身还大，
+            // 于是漫出卡片、糊在邻卡上（八轮真机 25% 缩放实拍到）。
+            //
+            // ★ 九轮：判据从"逐行塞不下就藏那一行"改成**整块**判定 —— 灰卡的排版高度装不下整块
+            // 就整块不画（灰卡照旧显示，用户仍看得到"后面还有几张"）。这与用户九轮的规格同构：
+            // 隐藏的粒度是"一个文字块"，不是"块里的某一行"。
+            .opacity(overflowLabelFits(cardSize) ? 1 : 0)
             // ★ 五轮：文字挪到**露出的那块楔形**的重心上，不再居中。
             //
             // 沉到牌面之下后，卡片中心正好是被左邻卡盖住的地方 —— 居中的文字一个像素都看不见
@@ -812,12 +715,8 @@ struct CanvasSlotFanStack: View {
     /// 手势抢走后的连锁反应（详见 `hitLayer` 里 `highPriorityGesture` 的注释）——
     /// 这个函数从来不碰导入，也绝不允许以后往里加。
     ///
-    /// ★ 八轮：翻页前先记方向（`pageForwardLast`），转场靠它决定从哪一侧滑入。
-    /// 方向必须在改 `windowStart` **之前**记：`slideTransition` 是在下一次求 body 时被读的，
-    /// 那时旧窗口已经没了，无法再反推方向。
     private func pageForward() {
         let target = CanvasFanGeometry.forwardStart(from: window)
-        pageForwardLast = true
         withAnimation(pagingSpring) {
             hoveredCard = nil
             openedCard = nil
@@ -829,7 +728,6 @@ struct CanvasSlotFanStack: View {
     /// 后退一页（整页回退，见 `CanvasFanGeometry.backwardStart`）。
     private func pageBackward() {
         let target = CanvasFanGeometry.backwardStart(from: window, maxCards: windowCapacity)
-        pageForwardLast = false
         withAnimation(pagingSpring) {
             hoveredCard = nil
             openedCard = nil
@@ -840,7 +738,7 @@ struct CanvasSlotFanStack: View {
 
     // MARK: - 左右翻页箭头
 
-    /// 左右翻页箭头。★ 三轮起两种风格都有，并且**只在该方向确实有内容时出现**（用户指定）。
+    /// 左右翻页箭头。**只在该方向确实有内容时出现**（用户指定）。
     ///
     /// 一个例外：到达末尾后右箭头仍然显示 —— 它此时的语义是"回到开头"（用户明确要求这个循环），
     /// 若按"没有下一页就藏起来"处理，用户翻到底就只能一路 ⬅ 退回去。

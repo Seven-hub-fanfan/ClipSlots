@@ -26,9 +26,11 @@ import CoreGraphics
 /// 光栅化的，边缘是清的；挂 `scaleEffect` 则是"按 13·z 光栅化再缩回去"，缩小时丢像素、
 /// 放大时糊边，正是一轮删掉整层 scaleEffect 的那个坑。
 ///
-/// 代价（如实记录）：缩放手势**进行中**，节点层那层差值 `zoom / layoutZoom` 会把文字一起短暂
-/// 拉伸（最多 ±18%，`CanvasZoomLayout` 的阶梯宽度），手势 settle 后回到固定字号。这个瞬时形变
-/// 换来的是"不重新布局每一帧"—— 而每帧重排文字正是 `CanvasZoomLayout` 那一轮修掉的抖动 bug。
+/// 残差怎么处理（★ 九轮收口）：节点层那层差值 `zoom / layoutZoom` 对文字一样生效，所以文字再乘
+/// `CanvasZoomLayout.textCounterScale` = 它的**精确倒数**。八轮把这个补偿钳成 `min(1, ·)`，
+/// 于是缩小手势进行中（`layoutZoom` 还冻结在旧档、残差 <1）完全不补偿，文字跟着画布缩小 ——
+/// 用户四次打回的"字体缩放仍未生效"就是它。九轮取消钳制后，任意 (zoom, layoutZoom) 组合下
+/// 屏幕字号都严格等于设计 pt，`CANVAS-TEXT-EXACT` 那组测试逐点扫过两侧残差把这一点钉住。
 ///
 /// ## 为什么要有"太小就隐藏"
 ///
@@ -116,55 +118,34 @@ public enum CanvasScreenText {
         visualShortSide(cardSize, zoom: zoom) >= threshold
     }
 
-    // MARK: - 八轮 hotfix：固定字号「塞不进那一行」时也要隐藏
+    // MARK: - 固定字号的行高与「装得下几行」
 
-    /// 行高系数（含行距）。SwiftUI 的 `Text` 实际行高约为字号的 1.2~1.3 倍，取 1.2 是保守下界 ——
-    /// 系数取小了会放过"刚好卡住"的情形（表现是字被竖直切半），取大了会让文字过早消失。
+    /// 行高系数（含行距）。SwiftUI 的 `Text` 实际行高约为字号的 1.2~1.3 倍，取 1.2 是保守下界。
     public static let lineHeightFactor: CGFloat = 1.2
 
-    /// 固定字号文字占的行高。
+    /// 固定字号文字占的行高（屏幕 pt = 排版 pt，因为字号不缩）。
     public static func lineHeight(_ fontSize: CGFloat) -> CGFloat {
         max(0, fontSize) * lineHeightFactor
     }
 
-    /// 一行固定字号的文字，塞不塞得进它在卡片里分到的那条横带。
+    /// 给定盒子高度（**排版**单位）装得下几行固定字号的文字。
     ///
-    /// ## 为什么只有 `textVisible`（按节点视觉短边）不够
+    /// ## 这个函数取代了八轮的 `rowTextVisible` / `blockTextVisible`
     ///
-    /// 真机复测（8 个缩放停位逐帧量化）打回过一次：25%~28% 缩放下节点视觉短边仍有 60~70pt、
-    /// 远高于 40pt 阈值，所以文字照画；但**卡片纵向分区是按 renderScale 缩的**（路径行 14pt ×
-    /// 0.28 ≈ 3.9pt），而字号已经被固定成 9.5pt（行高 ≈11.4pt）。父容器是定高的，SwiftUI 于是
-    /// 把这行文字压缩到 3.9pt —— 屏幕上就是"副标题被竖直切了一半"。
+    /// 八轮的思路是"这一行塞不下就把这一行藏起来"。用户九轮明确否掉了：
+    /// 「节点视觉尺寸 < 40pt 时文字整体 opacity = 0，**不是逐行隐藏**」。
     ///
-    /// 结论：屏幕固定字号下，可见性必须**同时**看"节点够不够大"和"这一行的分配高度够不够放一行字"。
-    /// 后者与节点大小无关，只与 `renderScale` 有关，所以必须单独判。
+    /// 逐行隐藏本来就是在治症状。真正的病根是**版面预算算错了**：字号被固定成设计 pt（不随
+    /// `renderScale` 缩），但卡片的纵向分区仍然整个乘 `renderScale`，于是缩小到一定程度后
+    /// "各行要的高度之和" > "卡片总高"，定高父容器只能把某几行压扁 —— 屏幕上就是半截字。
     ///
-    /// - Parameters:
-    ///   - rowHeight: 该横带的**设计**高度（未乘 renderScale），如 `CanvasCardLayout.headerRowHeight`。
-    ///   - fontSize: 该行的**设计**字号（= 屏幕字号，固定不缩）。
-    ///   - renderScale: 当前排版缩放。
-    public static func rowTextVisible(rowHeight: CGFloat,
-                                     fontSize: CGFloat,
-                                     renderScale: CGFloat) -> Bool {
-        let available = max(0, rowHeight) * max(0.01, renderScale)
-        return available + 0.001 >= lineHeight(fontSize)
-    }
-
-    /// 多行文字块塞不塞得进给定盒子（`+N 点击加载` 这种"大数字 + 小字"的两行块）。
-    ///
-    /// - Parameters:
-    ///   - fontSizes: 各行的设计字号（固定不缩）。
-    ///   - spacing: 行间距的**设计**值（会乘 renderScale，因为它是几何量）。
-    ///   - boxHeight: 盒子的**设计**高度（会乘 renderScale）。
-    public static func blockTextVisible(fontSizes: [CGFloat],
-                                       spacing: CGFloat,
-                                       boxHeight: CGFloat,
-                                       renderScale: CGFloat) -> Bool {
-        guard !fontSizes.isEmpty else { return true }
-        let scale = max(0.01, renderScale)
-        let need = fontSizes.reduce(0) { $0 + lineHeight($1) }
-            + max(0, spacing) * scale * CGFloat(fontSizes.count - 1)
-        return max(0, boxHeight) * scale + 0.001 >= need
+    /// 九轮的修法是让预算自己算对：文字行按**固定高度**参与分配（`CanvasCardLayout.verticalPlan`），
+    /// 可伸缩的预览区/正文区去让位。文字行因此永远有完整的行高，一个字都不会被切。
+    /// 本函数只用来决定**正文块显示几行**（装不下第 4 行就只画 3 行，而不是画 3.4 行）。
+    public static func fittingLineCount(boxHeight: CGFloat, fontSize: CGFloat) -> Int {
+        let lh = lineHeight(fontSize)
+        guard lh > 0 else { return 0 }
+        return max(0, Int((max(0, boxHeight) + 0.001) / lh))
     }
 
     /// 便于视图直接 `.opacity(...)`：可见 1，不可见 0。

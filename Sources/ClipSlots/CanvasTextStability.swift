@@ -50,10 +50,12 @@ extension View {
             .minimumScaleFactor(1.0)
     }
 
-    /// ★ 八轮：抹掉节点层 `scaleEffect(zoom / layoutZoom)` 残差，让文字的**屏幕**尺寸恒定。
+    /// ★ 九轮：抹掉文字实际经历的**全部**上层缩放，让文字的**屏幕**尺寸精确恒定。
     ///
-    /// `counter` 来自 `CanvasZoomLayout.textCounterScale(zoom:layoutZoom:)`，恒 ≤ 1（见那边的注释：
-    /// 只许缩、不许放，否则文字会溢出自己的版面盒子）。这是**渲染期变换**，不改版面、不触发重排 ——
+    /// `counter` 来自 `CanvasZoomLayout.textCounterScale(zoom:layoutZoom:)`（牌面卡还要再除掉
+    /// 自己那层 `scaleEffect(layout.scale)`，见 `CanvasSlotFanStack.cardTextCounter`）。
+    /// 它是精确倒数：静息态 ≤1，缩小手势进行中 >1 —— 九轮**取消了**八轮的 `min(1, ·)` 钳制，
+    /// 因为那正是"缩小时文字仍跟着变小"的根因。这是**渲染期变换**，不改版面、不触发重排 ——
     /// 用改字号的方式去抵消残差会让每次缩放落定都重排一次文字，正是三轮修掉的「字体乱动」。
     ///
     /// `anchor` 必须与该文字块在卡片里的对齐方式一致：居中的文字用 `.center`，左对齐的正文用

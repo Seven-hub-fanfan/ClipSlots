@@ -61,10 +61,12 @@ struct CanvasNodeCardView: View {
     let attachments: [SlotContent.SlotAttachment]
     /// 当前画布缩放。见类型注释：卡片按它**重新布局**，不靠位图缩放。
     let renderScale: CGFloat
-    /// 文字的反向缩放（★ 八轮需求 1 的收口）= `CanvasZoomLayout.textCounterScale(zoom:layoutZoom:)`。
+    /// 文字的反向缩放（★ 九轮需求 1 的收口）= `CanvasZoomLayout.textCounterScale(zoom:layoutZoom:)`。
     ///
-    /// 节点层挂着 `scaleEffect(zoom / layoutZoom)`，它会把已经固定成设计 pt 的字号再连带放大 ——
-    /// 这一项就是用来抵掉那个残差的，恒 ≤ 1（推导见 `CanvasZoomLayout.floorBucket`）。
+    /// 节点层挂着 `scaleEffect(zoom / layoutZoom)`，它会把已经固定成设计 pt 的字号再连带缩放 ——
+    /// 这一项是那个残差的**精确倒数**：静息态 ≤1（档位不高于 zoom），缩小手势进行中会 >1
+    /// （`layoutZoom` 冻结在旧档时必须放大补偿）。九轮起**不再钳制**，推导见
+    /// `CanvasZoomLayout.textCounterScale`。
     /// 默认 1 = 不补偿，方便预览/测试构造。
     var textCounter: CGFloat = 1
     /// 是否处于 inline 编辑态（由上层集中管理，保证同一时刻只有一个节点在编辑）。
@@ -80,8 +82,6 @@ struct CanvasNodeCardView: View {
     /// 删掉第 N 个入参文件（堆叠卡片气泡里的「删除」）。★ v2.11.8 三轮：只动附件列表，
     /// **不删节点** —— 用户明确要求单张图片可以直接删掉且不影响节点本身。
     let onDeleteInput: (Int) -> Void
-    /// 切换 Hover 展开风格（扇形 ⇄ 轮播）。写的是节点自身属性，同样上抛给持有 `CanvasStore` 的上层。
-    let onToggleAnimationStyle: () -> Void
     /// 选中本节点。★ 六轮：堆叠卡片的命中层升级成 `highPriorityGesture` 独占点击后，祖先那条
     /// `onTapGesture { canvas.select(...) }` 不再触发，"点卡片顺带选中节点"必须由卡片自己补上。
     let onActivateNode: () -> Void
@@ -131,25 +131,42 @@ struct CanvasNodeCardView: View {
                                      zoom: renderScale)
     }
 
-    /// 见 `CanvasScreenText.textOpacity`：用 opacity 而不是 `if` 分支，避免跨阈值那一帧整卡重排。
-    private var textOpacity: Double { textVisible ? 1 : 0 }
-
-    /// 顶部路径行的可见性：除了"节点够大"，还要求**这一行分到的高度放得下固定字号的一行字**。
-    ///
-    /// 真机复测在 25%~28% 缩放下抓到过"副标题被竖直切一半"：节点短边 60~70pt 远超 40pt 阈值，
-    /// 但路径行的分配高度只有 14pt × 0.28 ≈ 3.9pt，而 9.5pt 的固定字号需要约 11.4pt。
-    /// 定高父容器把文字压扁，屏幕上就是半截字。判据与推导见 `CanvasScreenText.rowTextVisible`。
-    private var headerTextOpacity: Double {
-        (textVisible && CanvasScreenText.rowTextVisible(rowHeight: CanvasCardLayout.headerRowHeight,
-                                                        fontSize: 9.5,
-                                                        renderScale: renderScale)) ? 1 : 0
+    /// 卡片纵向分区预算（★ 九轮）。文字行按固定行高先扣，可伸缩的预览区/正文区让位 ——
+    /// 这样"某一行没有完整行高"从结构上不可能发生，不再需要八轮那套逐行隐藏。
+    /// 推导见 `CanvasCardLayout.verticalPlan`。
+    private var plan: CanvasCardLayout.VerticalPlan {
+        CanvasCardLayout.verticalPlan(nodeHeight: node.height,
+                                      renderScale: renderScale,
+                                      headerFontSize: 9.5,
+                                      footerFontSize: 9.5)
     }
 
-    /// 底部「入参文件 N」行的可见性，理由同 `headerTextOpacity`（这一行分到 26pt，比路径行宽裕）。
-    private var footerTextOpacity: Double {
-        (textVisible && CanvasScreenText.rowTextVisible(rowHeight: CanvasCardLayout.inputFilesRowHeight,
-                                                        fontSize: 9.5,
-                                                        renderScale: renderScale)) ? 1 : 0
+    /// **整卡**文字可见性（★ 九轮，用户明确要求"整体 opacity = 0，不是逐行隐藏"）。
+    ///
+    /// 两个条件取 AND，都是整体判定：
+    ///   - 节点视觉短边 ≥ 40pt（用户给的显式规格）；
+    ///   - 卡片高度至少装得下"两行字 + 留白"（几何兜底，极扁的节点短边可能够 40pt 但高度不够）。
+    ///
+    /// 用 opacity 而不是 `if` 分支：避免跨阈值那一帧整卡重排。
+    private var textOpacity: Double {
+        // 文本节点没有预览区，用它自己那套预算判定 —— 拿出图节点的 `verticalPlan` 去判会**过早**
+        // 隐藏（后者要为预览区/正文间距预留 52pt chrome，文本节点根本没有这些）。
+        let fits = isTextNode ? textNodeFitPlan.fitsText : plan.fitsText
+        return (textVisible && fits) ? 1 : 0
+    }
+
+    /// 文本节点文字可见性判定用的预算（**只**用于 opacity，不用于 frame）。
+    ///
+    /// 真正排版的那份在 `textNodeStack` 里由 `GeometryReader` 量出容器高度后重算 —— 这里用
+    /// `node.height` 反推是为了让 opacity 不必穿透到子视图；差一帧对布尔判定无影响
+    /// （相反，逐帧变化的容器高度会让文字在阈值附近闪烁）。
+    private var textNodeFitPlan: CanvasCardLayout.TextNodePlan {
+        let inner = node.height * renderScale - 2 * CanvasCardLayout.cardPadding * renderScale
+        return CanvasCardLayout.textNodePlan(availableHeight: inner,
+                                             renderScale: renderScale,
+                                             headerFontSize: 9.5,
+                                             footerFontSize: 9.5,
+                                             bodyFontSize: node.resolvedBodyFontSize)
     }
 
     /// 纯文本节点：不出图，卡片主体就是一块文本框（用户二轮明确要求"不需要卡片预览的形式"）。
@@ -182,7 +199,7 @@ struct CanvasNodeCardView: View {
         Array(attachments.indices)
     }
 
-    /// **全量**卡片来源（不截断）。`CanvasSlotFanStack` 自己决定扇形截到 5 张、轮播怎么分页 ——
+    /// **全量**卡片来源（不截断）。`CanvasSlotFanStack` 自己决定扇形截到 5 张、多出来的怎么翻页 ——
     /// 在这里就截断会让"总共有几张"丢失，`+N` 灰卡和翻页窗口都算不出来。
     private var fanSources: [CanvasFanGeometry.CardSource] {
         CanvasFanGeometry.allCardSources(attachmentIndices: attachmentCardIndices, text: text)
@@ -194,32 +211,17 @@ struct CanvasNodeCardView: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: s(8)) {
-            headerRow
-
+        Group {
             if isTextNode {
-                // 文本节点：整块深色文本框吃掉全部剩余高度。没有预览区、没有堆叠卡片 ——
-                // 一个不出图的节点摆一个"产物位"只会让人一直等一张永远不会来的图。
-                textNodeBody
+                // ★ 九轮（用户问题 2）：文本节点单独走一套**按实测容器高度**分配的布局。
+                // 以前它和出图节点共用同一个 VStack，文本框写 `maxHeight: .infinity`：
+                // 路径行/入参文件行的高度不随缩放收缩（固定字号），文本框又要"吃掉全部剩余"，
+                // 把节点拖矮到一定程度三者之和就超过定高 frame —— 屏幕上就是用户报的
+                // 「虚线『+』区和输入框重叠、错位、跳变」。推导见 `CanvasCardLayout.textNodePlan`。
+                textNodeStack
             } else {
-                // ★ zIndex：堆叠卡片 hover 时会向两侧扇开、向上抬、还要浮出操作气泡和 `+N` 网格，
-                // 这些都溢出预览区。VStack 里**后声明的兄弟画在上面**，所以不置顶的话正文区（以及
-                // 编辑态那个带边框的输入框）会盖在飞出来的卡片上，把卡片下半截切掉一条 ——
-                // 用户反馈的"卡片被横线割裂"就是这个。预览区置顶后，卡片永远浮在正文区之上。
-                previewArea
-                    .zIndex(10)
-                promptArea
-                    // 卡片区与文字区之间留 12pt（VStack 已有 8pt，这里补 4pt）。
-                    // 卡片扇开时会略微下探，间距太小就会和正文首行"贴脸"。
-                    .padding(.top, s(previewToPromptGap - 8))  // VStack 自带 8pt
-                // 正文字号被调大后（最大 24pt）会把下面的内容顶出卡片。加一个可压缩的 Spacer，
-                // 让入参文件行始终钉在卡片底边，被挤掉的是正文的末行而不是整条按钮。
-                Spacer(minLength: 0)
+                imageNodeStack
             }
-
-            // ★ 二轮：入参文件从"参数栏旁边的小胶囊"改成**卡片最底部独立一行**（用户明确要求）。
-            // 它是这张卡上唯一的写操作入口，之前挤在一排芯片中间，点击目标只有 60pt 宽。
-            inputFilesRow
         }
         .padding(s(12))
         .frame(width: s(node.width), height: s(node.height), alignment: .top)
@@ -248,6 +250,69 @@ struct CanvasNodeCardView: View {
         }
     }
 
+    // MARK: - 两种节点的纵向骨架
+
+    /// 出图节点：路径行 / 预览区（堆叠卡片）/ 正文区 / 入参文件行。
+    private var imageNodeStack: some View {
+        VStack(alignment: .leading, spacing: s(8)) {
+            headerRow
+
+                // ★ zIndex：堆叠卡片 hover 时会向两侧扇开、向上抬、还要浮出操作气泡和 `+N` 网格，
+                // 这些都溢出预览区。VStack 里**后声明的兄弟画在上面**，所以不置顶的话正文区（以及
+                // 编辑态那个带边框的输入框）会盖在飞出来的卡片上，把卡片下半截切掉一条 ——
+                // 用户反馈的"卡片被横线割裂"就是这个。预览区置顶后，卡片永远浮在正文区之上。
+                previewArea
+                    .zIndex(10)
+                promptArea
+                    // 卡片区与文字区之间留 12pt（VStack 已有 8pt，这里补 4pt）。
+                    // 卡片扇开时会略微下探，间距太小就会和正文首行"贴脸"。
+                    .padding(.top, s(previewToPromptGap - 8))  // VStack 自带 8pt
+                // 正文字号被调大后（最大 24pt）会把下面的内容顶出卡片。加一个可压缩的 Spacer，
+                // 让入参文件行始终钉在卡片底边，被挤掉的是正文的末行而不是整条按钮。
+                Spacer(minLength: 0)
+
+            // ★ 二轮：入参文件从"参数栏旁边的小胶囊"改成**卡片最底部独立一行**（用户明确要求）。
+            // 它是这张卡上唯一的写操作入口，之前挤在一排芯片中间，点击目标只有 60pt 宽。
+            inputFilesRow
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+    }
+
+    /// 文本节点：路径行 / 深色文本框 / 入参文件行，三段高度由 `textNodePlan` **精确**分配。
+    ///
+    /// 为什么必须 `GeometryReader` 而不是拿 `node.width/height` 自己算：拖拽缩放手柄时
+    /// `node.height` 是**上一帧提交后**的值，而外层 `.frame` 已经按新值布好 —— 用它算预算会
+    /// 慢一帧，那一帧的三段之和不等于容器高度，正是用户看到的"跳变"。`GeometryReader`
+    /// 量到的是**当前帧真实容器**，三段之和恒等于它，所以任何一帧都不可能重叠出界。
+    ///
+    /// `.clipped()` 是最后一道保险：即使文本框里的字比 `boxHeight` 高（长文本），
+    /// 也只会被裁在框内，不会漫出去压到入参文件行。
+    private var textNodeStack: some View {
+        GeometryReader { geo in
+            let plan = CanvasCardLayout.textNodePlan(availableHeight: geo.size.height,
+                                                     renderScale: renderScale,
+                                                     headerFontSize: 9.5,
+                                                     footerFontSize: 9.5,
+                                                     bodyFontSize: node.resolvedBodyFontSize)
+            VStack(alignment: .leading, spacing: plan.spacing) {
+                headerRow
+                    .frame(height: plan.headerHeight)
+
+                textNodeBody
+                    .frame(height: plan.boxHeight)
+                    .clipped()
+
+                // 高度不够时**整行让位**给输入框（用户指定的优先级）。用 `if` 而不是 opacity：
+                // 这一行必须真正从布局里消失，只是透明的话它仍占着 26pt，等于没让位。
+                if plan.showFooter {
+                    inputFilesRow
+                        .frame(height: plan.footerHeight)
+                }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        }
+    }
+
     private var borderColor: Color {
         if isEditing { return AppTheme.chromeAccentInk }
         if isSelected { return AppTheme.chromeAccentInk.opacity(0.85) }
@@ -273,12 +338,11 @@ struct CanvasNodeCardView: View {
             // ★ 八轮：抹掉节点层缩放残差，屏幕字号严格恒定（见 `canvasScreenFixedText`）。
             .canvasScreenFixedText(textCounter)
             // ★ 八轮：节点缩到 40pt 以下、或这一行放不下一行固定字号的字，就别写字了。
-            .opacity(headerTextOpacity)
+            .opacity(textOpacity)
             // 给两侧控件留出通道，否则长路径会压在图标上。
             .padding(.horizontal, s(24))
             .frame(maxWidth: .infinity, alignment: .center)
             .overlay(alignment: .leading) { statusBadge }
-            .overlay(alignment: .trailing) { animationStyleToggle }
             .help(pathLabel)
     }
 
@@ -314,30 +378,6 @@ struct CanvasNodeCardView: View {
                 .foregroundColor(.red.opacity(0.85))
                 .canvasScreenFixedText(textCounter, anchor: .leading)
                 .opacity(textOpacity)
-        }
-    }
-
-    /// 右上角的**极小**展开风格切换（用户明确要求"极小"）。
-    ///
-    /// 只在 hover / 选中时出现，且只对有堆叠卡片的节点出现：常驻一个图标会让每张卡都多一件视觉
-    /// 噪声（这正是二轮要删掉铅笔按钮的同一个理由），而文本节点根本没有展开动画可切。
-    ///
-    /// ★ 八轮：二态互切 → **三态循环**（扇形 → 水平轮播 → 交替叠放）。图标与文案全部取自
-    /// `ExpandStyle`（Kit），不在这里写 `if ... else` —— 三个分支各写一遍图标名的写法，
-    /// 加第四种风格时必漏。
-    @ViewBuilder
-    private var animationStyleToggle: some View {
-        if !isTextNode && (hoverActive || isSelected) {
-            Button(action: onToggleAnimationStyle) {
-                Image(systemName: node.animationStyle.symbolName)
-                    .font(.system(size: s(8.5), weight: .semibold))
-                    .foregroundColor(AppTheme.chromeAccentInk)
-                    .frame(width: s(15), height: s(15))
-                    .background(Circle().fill(AppTheme.chromeAccentSoftFill))
-                    .contentShape(Circle())
-            }
-            .buttonStyle(.plain)
-            .help("展开动画：\(node.animationStyle.displayName)（点击切换为\(node.animationStyle.next.displayName)）")
         }
     }
 
@@ -459,8 +499,9 @@ struct CanvasNodeCardView: View {
                                    renderScale: renderScale,
                                    textCounter: textCounter,
                                    nodeHovered: hoverActive && !isEditing,
-                                   boxHeight: previewHeight,
-                                   style: node.animationStyle,
+                                   // ★ 九轮：卡叠整套按 1x 收敛（内部自己乘 renderScale），
+                                   // 这里必须给 1x 量纲，不能给排版单位（会乘两次）。
+                                   boxHeight: plan.previewHeight1x,
                                    // 节点身份 = `groupId#slot`（`CanvasNode.id`）。翻页窗口按它存活，
                                    // 右键 / 页面切换导致的重建不会把用户翻到的那一页打回第一页。
                                    stateKey: node.id,
@@ -472,7 +513,7 @@ struct CanvasNodeCardView: View {
                                    onToast: onToast)
             }
         }
-        .frame(height: s(previewHeight))
+        .frame(height: previewHeight)
     }
 
     /// 卡片区与文字区之间的间距（1x）。
@@ -486,9 +527,12 @@ struct CanvasNodeCardView: View {
     ///
     /// ★ 三轮改成**按节点高度取比例**（上限仍是 132）。比例/上下限连同理由都在
     /// `CanvasCardLayout` 里，那边有 smoke 断言盯着"卡片区不得超过节点高度 35%"这条用户约束。
-    private var previewHeight: CGFloat {
-        CanvasCardLayout.previewHeight(nodeHeight: node.height)
-    }
+    /// 预览区高度（**排版单位**，已由 `plan` 扣掉固定字号的文字行）。
+    ///
+    /// ★ 九轮：以前这里返回 1x 设计值、调用点再 `s(...)` 乘 renderScale。现在预算里混着
+    /// "缩的几何"和"不缩的文字行"两种量纲，只能整段在 `verticalPlan` 里算完再拿过来，
+    /// 调用点**不要**再乘 renderScale（乘两次的症状是缩小时预览区消失、放大时溢出卡片）。
+    private var previewHeight: CGFloat { plan.previewHeight }
 
     /// 「填充式图片盒」：用 `Color.clear` 定尺、内容走 overlay、再 `.clipped()`。见 `previewArea` 的注释。
     private func fillImageBox<Content: View>(@ViewBuilder _ content: () -> Content) -> some View {
@@ -537,7 +581,7 @@ struct CanvasNodeCardView: View {
             // 缩小画布时字号不再跟着缩，4 行正文的实际需求高度会超过正文区在小节点里分到的那点
             // 空间；`VStack` 不裁剪，多出来的部分会把底部「入参文件」行顶出卡片、甚至溢到卡片外
             // 压在相邻节点上。上限的算法（节点高 - 其它固定分区）在 `CanvasCardLayout` 里，带断言。
-            .frame(maxHeight: s(CanvasCardLayout.promptMaxHeight(nodeHeight: node.height)),
+            .frame(maxHeight: plan.promptMaxHeight,
                    alignment: .topLeading)
             .clipped()
             // ★ 八轮：节点太小就不画字（阈值见 `CanvasScreenText`）。
@@ -625,7 +669,7 @@ struct CanvasNodeCardView: View {
                     .font(.system(size: fs(9.5), weight: .medium))
                     .canvasStableLabel()
                     .canvasScreenFixedText(textCounter, anchor: .leading)
-                    .opacity(footerTextOpacity)
+                    .opacity(textOpacity)
                 Spacer(minLength: 0)
                 Image(systemName: "chevron.right")
                     .font(.system(size: s(7), weight: .bold))

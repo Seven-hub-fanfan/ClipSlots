@@ -44,12 +44,15 @@ struct CanvasWorkspaceView: View {
     ///     动画由 ratio 从 `旧/新` 收到 1 来演；
     ///   - **连续缩放**（触控板捏合、Cmd+滚轮）：停手 `zoomSettleDelay` 后落定。
     @State private var layoutZoom: CGFloat = 1
-    /// ★ 八轮需求 1：文字的反向缩放 = `layoutZoom / zoom`（夹到 ≤ 1）。
+    /// ★ 九轮需求 1：文字的反向缩放 = `layoutZoom / zoom`（**精确倒数，不钳制**）。
     ///
     /// 节点层的 `scaleEffect(zoom / layoutZoom)` 是"排版档位"与"真实缩放"之间的差值补偿，它对
-    /// 卡片里的一切生效 —— 包括已经被固定成设计 pt 的字号。八轮真机量化的结论：只固定字号还不够，
-    /// 两个不同缩放停位上同一行字的屏幕高度仍差 1.23×，那个 1.23 就是两处残差之比。
-    /// 这里把残差的倒数传进卡片，由文字自己乘回去，屏幕字号才真正恒定。
+    /// 卡片里的一切生效 —— 包括已经被固定成设计 pt 的字号。所以文字必须再乘回它的倒数。
+    ///
+    /// ★ 八轮在这里写的是 `min(1, layoutZoom / zoom)`，用户四次打回的"字体缩放仍未生效"就出在
+    /// 这个 `min` 上：`layoutZoom` 是**落定后**才更新的，缩小手势进行中它还冻结在旧档（例如从
+    /// 200% 捏到 50%，`layoutZoom` 仍是 2.0），此时精确补偿是 4.0，被钳成 1 等于完全不补偿 ——
+    /// 文字跟着画布缩到 1/4，手一停又"啪"地跳回来。详细推导见 `CanvasZoomLayout.textCounterScale`。
     ///
     /// 之所以敢每帧变：它只作用在 `scaleEffect` 上，是**渲染期变换**，不改版面、不触发重新折行。
     private var textCounter: CGFloat {
@@ -329,9 +332,9 @@ struct CanvasWorkspaceView: View {
                                    pathLabel: pathLabel(for: node),
                                    attachments: liveAttachments(for: node),
                                    renderScale: layoutZoom,
-                                   // ★ 八轮需求 1：文字的屏幕尺寸要恒定，就得抵掉下面那句
-                                   // `scaleEffect(zoom / layoutZoom)` 的残差。这里传的是它的倒数
-                                   // （夹到 ≤ 1，只许缩不许放，理由见 CanvasZoomLayout）。
+                                   // ★ 九轮需求 1：文字的屏幕尺寸要恒定，就得抵掉下面那句
+                                   // `scaleEffect(zoom / layoutZoom)` 的残差 —— 这里传的是它的
+                                   // **精确倒数**（不钳制；八轮那个 min(1, ·) 正是"缩小时字仍在变"的根因）。
                                    textCounter: textCounter,
                                    isEditing: isEditing,
                                    onBeginEdit: { beginEdit(node) },
@@ -340,7 +343,6 @@ struct CanvasWorkspaceView: View {
                                    onOpenInputFiles: { openInputFiles(node) },
                                    onPromoteInput: { promoteInput(node, index: $0) },
                                    onDeleteInput: { deleteInput(node, index: $0) },
-                                   onToggleAnimationStyle: { canvas.toggleAnimationStyle(id: node.id) },
                                    // ★ 六轮：卡片命中层独占点击后由它补选中（Shift 加选与祖先那条一致）。
                                    onActivateNode: {
                                        guard editingNodeId != node.id else { return }
@@ -404,25 +406,6 @@ struct CanvasWorkspaceView: View {
     private func nodeContextMenu(_ node: CanvasNode) -> some View {
         Button("编辑提示词") { beginEdit(node) }
         Button("管理入参文件") { openInputFiles(node) }
-        // ★ 八轮需求 3：三种展开样式在右键菜单里并列可选。
-        //
-        // 为什么不只留右上角那颗 15pt 的循环按钮：三态循环意味着"想要第三种得连点两下、还要盯着
-        // 图标猜自己现在在哪一态"。菜单是**直接选择**，且能显示当前值（✓）—— 而按钮保留是因为
-        // 它在 hover 时就在手边，两条路径落到同一个 store 方法（同一条撤销记录）。
-        // 文本节点没有卡叠，不给这一项（与右上角按钮的显示条件一致）。
-        if node.kind != .text {
-            Menu("展开样式") {
-                ForEach(CanvasFanGeometry.ExpandStyle.allCases, id: \.self) { style in
-                    Button {
-                        canvas.setAnimationStyle(id: node.id, style: style)
-                    } label: {
-                        // macOS 13 的 Menu 里 Button 没有原生 checkmark 通路（Toggle 在 contextMenu
-                        // 里样式不统一），用前缀标记当前项 —— 宽度用不换行的全角空格对齐。
-                        Text(node.animationStyle == style ? "✓ \(style.displayName)" : "　\(style.displayName)")
-                    }
-                }
-            }
-        }
         Divider()
         Button("重跑") {
             // MVP：生图未接入，先给明确反馈而不是静默无响应。

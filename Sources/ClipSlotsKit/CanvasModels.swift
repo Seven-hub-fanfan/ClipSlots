@@ -236,22 +236,11 @@ public struct CanvasNode: Codable, Identifiable, Equatable {
 
     /// 槽位卡片的展开风格（v2.11.8 二轮）。
     ///
-    /// 属于「怎么显示」而不是「是什么内容」，所以和 `model` / `fontName` 一样住在摆位里，
-    /// 不进槽位。同一个槽位在 A 节点上用扇形、在 B 节点上用轮播是合理的。
-    ///
-    /// 缺省 `.fanOut`：老文档没有这个字段，解码时补默认值即可，不需要 schema 版本分支。
+    /// ★ 九轮：风格只剩「扇形」一种，用户侧的切换入口（右上角按钮 + 右键子菜单）已删除，
+    /// 所以这个字段现在恒为 `.fanOut`。字段本身**保留**，理由见 `ExpandStyle` 的注释 ——
+    /// 老文档里存着 `carousel` / `stackedScatter`，得有个类型接住并迁移，删字段会让解码报
+    /// "unknown key"（`CanvasNode` 用的是自定义解码，多余键其实无害，但迁移语义会丢）。
     public var animationStyle: CanvasFanGeometry.ExpandStyle
-
-    /// 切换展开风格（供右上角那个小图标用）。
-    ///
-    /// ★ v2.11.8 八轮：二态互切 → **三态循环**（扇形 → 轮播 → 交替叠放 → 扇形）。
-    /// 顺序委托给 `ExpandStyle.next`（即 `allCases` 的顺序），这样以后再加第四种风格时
-    /// 不需要回来改这里 —— 二态时代那句 `== .fanOut ? .carousel : .fanOut` 正是
-    /// "加一个枚举项，切换按钮却永远切不到它"的经典写法。
-    public mutating func toggleAnimationStyle() {
-        animationStyle = animationStyle.next
-        updatedAt = Date()
-    }
 
     /// 是否显式设过字体（供 UI 显示「跟随系统」与否）。
     public var hasCustomFont: Bool {
@@ -358,6 +347,8 @@ public struct CanvasNode: Codable, Identifiable, Equatable {
         seed = try c.decodeIfPresent(Int.self, forKey: .seed)
         // v2.11.8 新增字段：老文档没有它，缺省 nil（= 没有上游），不需要版本分支。
         parentNodeId = try c.decodeIfPresent(String.self, forKey: .parentNodeId)
+        // ★ 九轮：只剩扇形一种风格；老文档里的 `carousel` / `stackedScatter` 由
+        // `ExpandStyle.init(from:)` 迁移成 `.fanOut`（不抛错，见那边注释）。
         animationStyle = try c.decodeIfPresent(CanvasFanGeometry.ExpandStyle.self,
                                                forKey: .animationStyle) ?? .fanOut
         createdAt = try c.decodeIfPresent(Date.self, forKey: .createdAt) ?? Date()
