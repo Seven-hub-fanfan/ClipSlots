@@ -243,8 +243,13 @@ public struct CanvasNode: Codable, Identifiable, Equatable {
     public var animationStyle: CanvasFanGeometry.ExpandStyle
 
     /// 切换展开风格（供右上角那个小图标用）。
+    ///
+    /// ★ v2.11.8 八轮：二态互切 → **三态循环**（扇形 → 轮播 → 交替叠放 → 扇形）。
+    /// 顺序委托给 `ExpandStyle.next`（即 `allCases` 的顺序），这样以后再加第四种风格时
+    /// 不需要回来改这里 —— 二态时代那句 `== .fanOut ? .carousel : .fanOut` 正是
+    /// "加一个枚举项，切换按钮却永远切不到它"的经典写法。
     public mutating func toggleAnimationStyle() {
-        animationStyle = (animationStyle == .fanOut) ? .carousel : .fanOut
+        animationStyle = animationStyle.next
         updatedAt = Date()
     }
 

@@ -57,4 +57,40 @@ public enum CanvasCardLayout {
     public static func previewHeight(nodeHeight: CGFloat) -> CGFloat {
         min(previewHeightCap, max(previewHeightFloor, nodeHeight * previewHeightRatio))
     }
+
+    // MARK: - 正文区高度上限（★ v2.11.8 八轮）
+
+    /// 卡片四周内边距（1x）。与视图里的 `s(12)` 对应。
+    public static let cardPadding: CGFloat = 12
+    /// 路径标识行的高度预算（1x）。
+    public static let headerRowHeight: CGFloat = 14
+    /// VStack 的行间距（1x）。与视图里的 `spacing: s(8)` 对应。
+    public static let rowSpacing: CGFloat = 8
+    /// 底部「入参文件」整行的高度预算（1x）。
+    public static let inputFilesRowHeight: CGFloat = 26
+
+    /// 正文区允许占用的最大高度（1x）。
+    ///
+    /// ## 为什么八轮才需要这个数
+    ///
+    /// 需求 1 把正文改成了**屏幕固定字号**（排版时不再乘 zoom）。它有一个必然的副作用：
+    /// 缩小画布时，正文相对卡片会越来越大 —— zoom 0.4 时节点排版高度只有 220pt 的量级不变，
+    /// 但字号从 "13×0.4=5.2pt" 变回 13pt，4 行正文要 60pt 以上。SwiftUI 的 `VStack` 不裁剪，
+    /// 于是正文会把底部那行「入参文件」顶出卡片、甚至溢到卡片外面去（用户看到的是"字压在别的
+    /// 节点上"）。
+    ///
+    /// 所以正文区必须有一个**上限 + 裁剪**：宁可少显示一行字，也不能破坏卡片的纵向分区。
+    /// 这个上限就是"节点高度减掉其它固定分区"，全部分区常量都在本文件里，和视图里的
+    /// `s(...)` 一一对应（改视图忘了改这里的表现是"正文被多裁/少裁一点"，smoke 只能盯住
+    /// 单调性与非负，因此常量必须成对修改）。
+    public static func promptMaxHeight(nodeHeight: CGFloat) -> CGFloat {
+        let fixed = cardPadding * 2               // 上下内边距
+            + headerRowHeight                     // 路径标识行
+            + rowSpacing                          // header ↔ 预览区
+            + previewHeight(nodeHeight: nodeHeight)
+            + previewToPromptGap                  // 预览区 ↔ 正文
+            + rowSpacing                          // 正文 ↔ 入参文件行
+            + inputFilesRowHeight
+        return max(0, nodeHeight - fixed)
+    }
 }

@@ -389,6 +389,25 @@ struct CanvasWorkspaceView: View {
     private func nodeContextMenu(_ node: CanvasNode) -> some View {
         Button("编辑提示词") { beginEdit(node) }
         Button("管理入参文件") { openInputFiles(node) }
+        // ★ 八轮需求 3：三种展开样式在右键菜单里并列可选。
+        //
+        // 为什么不只留右上角那颗 15pt 的循环按钮：三态循环意味着"想要第三种得连点两下、还要盯着
+        // 图标猜自己现在在哪一态"。菜单是**直接选择**，且能显示当前值（✓）—— 而按钮保留是因为
+        // 它在 hover 时就在手边，两条路径落到同一个 store 方法（同一条撤销记录）。
+        // 文本节点没有卡叠，不给这一项（与右上角按钮的显示条件一致）。
+        if node.kind != .text {
+            Menu("展开样式") {
+                ForEach(CanvasFanGeometry.ExpandStyle.allCases, id: \.self) { style in
+                    Button {
+                        canvas.setAnimationStyle(id: node.id, style: style)
+                    } label: {
+                        // macOS 13 的 Menu 里 Button 没有原生 checkmark 通路（Toggle 在 contextMenu
+                        // 里样式不统一），用前缀标记当前项 —— 宽度用不换行的全角空格对齐。
+                        Text(node.animationStyle == style ? "✓ \(style.displayName)" : "　\(style.displayName)")
+                    }
+                }
+            }
+        }
         Divider()
         Button("重跑") {
             // MVP：生图未接入，先给明确反馈而不是静默无响应。

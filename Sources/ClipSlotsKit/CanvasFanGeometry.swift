@@ -91,9 +91,44 @@ public enum CanvasFanGeometry {
     }
 
     /// 展开风格。持久化在 `CanvasNode.animationStyle`。
+    ///
+    /// ★ v2.11.8 八轮新增第三种 `.stackedScatter`（用户需求 3「交替旋转叠加」）。
+    ///
+    /// `rawValue` 是**落盘契约**，不能改名（老画布 JSON 里存的就是这几个字符串）。
+    /// 新增枚举项对老文件是安全的：`CanvasNode` 解码走 `decodeIfPresent ?? .fanOut`，
+    /// 老文件没有这个键 → 回落扇形；反向（新文件被旧版本读）不在支持范围内。
     public enum ExpandStyle: String, Codable, CaseIterable, Equatable {
         case fanOut
         case carousel
+        case stackedScatter
+
+        /// 右键菜单条目 / 撤销栈描述用的名字。
+        ///
+        /// 放在 Kit 而不是各视图里各写一份：三处（右上角按钮 help、右键菜单、撤销条目 detail）
+        /// 文案一旦漂移，用户就会以为"按钮切的和菜单选的是两回事"。
+        public var displayName: String {
+            switch self {
+            case .fanOut: return "扇形展开"
+            case .carousel: return "水平轮播"
+            case .stackedScatter: return "交替叠放"
+            }
+        }
+
+        /// 节点右上角风格按钮的 SF Symbol。
+        public var symbolName: String {
+            switch self {
+            case .fanOut: return "rectangle.on.rectangle.angled"
+            case .carousel: return "rectangle.split.3x1"
+            case .stackedScatter: return "square.stack.3d.down.right"
+            }
+        }
+
+        /// 点一下按钮切到的下一个风格（**循环**，顺序即 `allCases`）。
+        public var next: ExpandStyle {
+            let all = ExpandStyle.allCases
+            guard let i = all.firstIndex(of: self) else { return .fanOut }
+            return all[(i + 1) % all.count]
+        }
     }
 
     // MARK: - 扇形布局
@@ -214,6 +249,125 @@ public enum CanvasFanGeometry {
         return start..<end
     }
 
+    // MARK: - 轮播翻页的侧滑方向（★ v2.11.8 八轮 · 需求 2）
+
+    /// 轮播翻页动画的 spring 参数（用户在需求里直接指定了这两个数）。
+    public static let carouselPageResponse: Double = 0.35
+    public static let carouselPageDamping: Double = 0.8
+
+    /// 翻页时**新进来**的卡片从哪一侧滑入。
+    ///
+    /// 只有两行，但它是"方向感"的全部：向后翻（看更后面的内容）时新卡从**右**边进、旧卡向**左**
+    /// 边出，等于把这一叠卡想象成一条向左滚动的胶片；向前翻则整套镜像。写反了不会报错，
+    /// 观感是"点右箭头，内容却从左边冒出来"—— 这类方向错误在人眼里非常明显，
+    /// 但没有断言时改代码的人极容易把 `forward` 传成上一次的方向（`windowStart` 已经变过了）。
+    ///
+    /// - Returns: true = 从 trailing（右）侧进入。
+    public static func slideInsertFromTrailing(forward: Bool) -> Bool { forward }
+
+    /// 翻页时**被换走**的卡片向哪一侧滑出（与进入侧相反）。
+    public static func slideRemoveToTrailing(forward: Bool) -> Bool { !forward }
+
+    // MARK: - 交替旋转叠加（★ v2.11.8 八轮 · 需求 3）
+
+    /// 相邻卡片的遮挡比例（用户要求 20%~30%，取中间值）。
+    ///
+    /// 横向步长 = `cardWidth × (1 - 遮挡比例)`。这是这个风格与轮播（间距 8pt、完全不重叠）
+    /// 和扇形（几乎完全重叠、靠旋转分开）之间的第三种取舍：有重叠所以像"一摊摞着的照片"，
+    /// 但重叠只有 1/4，每张卡都留着 3/4 宽度的独立可点区域。
+    public static let scatterOverlapRatio: CGFloat = 0.26
+
+    /// 单卡旋转角的幅度区间（度，用户指定 ±3°~±8°）。
+    public static let scatterAngleMin: CGFloat = 3
+    public static let scatterAngleMax: CGFloat = 8
+
+    /// 纵向错落幅度（pt，1x）。纯旋转的一排卡看起来仍然"排得太齐"，一点上下抖动才像随手摞的。
+    public static let scatterJitterY: CGFloat = 3
+
+    /// 被悬停卡片的上浮位移与放大（比扇形/轮播更明显：这个风格重叠更多，需要更强的"抽出来"感）。
+    public static let scatterHoverLift: CGFloat = -12
+    public static let scatterHoverScale: CGFloat = 1.14
+
+    /// 悬停时其余卡片向两侧让开的量（用户要求"其余卡片轻微散开"）。
+    public static let scatterSpread: CGFloat = 10
+
+    /// 柔和投影参数（用户要求"带柔和 Drop Shadow"）。扇形/轮播用的是更紧的默认投影。
+    public static let scatterShadowRadius: CGFloat = 9
+    public static let scatterShadowOpacity: Double = 0.20
+    public static let scatterShadowOffsetY: CGFloat = 4
+
+    /// 基于下标的**伪随机**（0…1）。
+    ///
+    /// 为什么不用 `Double.random` / `sin(index)`：
+    ///   - `random` 每次求值都变，SwiftUI 一帧一帧地重新求 body，卡片会**持续抖动**
+    ///     （用户在需求里专门点了"保证稳定不抖动"）。
+    ///   - `sin` 的尾数在不同架构 / 优化级别下可能差最后一两位，测试里做等值断言会偶发失败。
+    ///
+    /// 所以用整数哈希（Knuth 乘法散列）取千分位：同一个 index 永远同一个值，且相邻 index
+    /// 的结果毫无关联（这正是"看起来随手摞的"所需要的）。
+    public static func scatterNoise(_ index: Int, salt: Int = 0) -> CGFloat {
+        let mixed = (index &+ 1) &* 2_654_435_761 &+ (salt &+ 1) &* 40_503
+        let h = UInt32(truncatingIfNeeded: mixed)
+        return CGFloat(h % 1000) / 1000
+    }
+
+    /// 第 i 张卡的静息旋转角（度）。
+    ///
+    /// **符号严格交替**（偶数正、奇数负），幅度伪随机落在 `scatterAngleMin...scatterAngleMax`。
+    /// 用户给的例子是 `+4°, -6°, +3°, -5°` —— 交替是形态的关键，幅度随机只是为了不像机器排的。
+    /// 只随机幅度、不随机符号：符号也随机的话会出现连续两张同向，那两张在视觉上会粘成一张厚卡。
+    public static func scatterAngle(_ index: Int) -> CGFloat {
+        let t = scatterNoise(index, salt: 1)
+        let mag = scatterAngleMin + t * (scatterAngleMax - scatterAngleMin)
+        return (index % 2 == 0 ? 1 : -1) * mag
+    }
+
+    /// 计算「交替旋转叠加」的布局。
+    ///
+    /// - Parameters:
+    ///   - count: 卡片数量（同 `layouts`：夹到 `1...maxCards + 1`，第 `maxCards + 1` 格是 `+N` 灰卡）。
+    ///   - cardWidth: 单卡宽度（1x）。
+    ///   - hoveredIndex: 被单独悬停的卡片下标（页内下标）。
+    ///
+    /// ## 层级：中间最高（用户指定）
+    ///
+    /// 与扇形/轮播的"第 1 张最高"**刻意不同** —— 这个风格的重心在中间（卡片对称铺开、两端各自
+    /// 向外倒），让中间压住两侧才是"一摊卡的中心那张最完整"的观感。对称位置（左右各一张）的
+    /// 层级用 0.5 打破平局，且**左压右**，与其它两种风格的"靠前的压住靠后的"方向保持一致；
+    /// 不打破平局的话 ZStack 会按声明顺序让右边那张压住左边，切换风格时前后关系会突然反过来。
+    ///
+    /// ## 旋转锚点仍是底边中心（`pivotAnchor`）
+    ///
+    /// 观感上"散落"更像绕卡片自身中心转，但命中判定（`cardPolygon` / `hitTest`）整套数学都建立在
+    /// 底边锚点上。为一个风格单独引入第二个锚点，等于让命中层出现"这张卡按中心转、那张按底边转"
+    /// 两套变换 —— v2.11.0 轮盘那次翻车就是因为几何在视图里各写一份。±8° 绕底边转在 132pt 高的
+    /// 卡片上把顶边推开约 18pt，足够读出"歪着摞"的味道，不值得为此把命中层弄成两套。
+    public static func scatterLayouts(count: Int,
+                                      cardWidth: CGFloat,
+                                      hoveredIndex: Int? = nil) -> [CardLayout] {
+        let n = min(max(count, 1), maxCards + 1)
+        let step = max(1, cardWidth) * (1 - scatterOverlapRatio)
+        let mid = CGFloat(n - 1) / 2
+        return (0..<n).map { i in
+            let k = CGFloat(i) - mid
+            let isHovered = (hoveredIndex == i)
+            // 悬停时邻卡朝远离悬停卡的方向让开（左边的更左、右边的更右）。
+            var x = k * step
+            if let h = hoveredIndex, h != i {
+                x += (i < h ? -scatterSpread : scatterSpread)
+            }
+            let jitter = (scatterNoise(i, salt: 2) - 0.5) * 2 * scatterJitterY
+            // 中间最高；同距的左右两张里左边略高（+0.5 只用于打平局，不会跨过相邻层级）。
+            let rest = Double(n) - Double(abs(k)) - (k > 0 ? 0.5 : 0)
+            return CardLayout(index: i,
+                              angle: isHovered ? 0 : scatterAngle(i),
+                              offset: CGSize(width: x,
+                                             height: jitter + (isHovered ? scatterHoverLift : 0)),
+                              scale: isHovered ? scatterHoverScale : 1,
+                              zIndex: isHovered ? 100 : rest)
+        }
+    }
+
     // MARK: - 卡片尺寸与展开包围盒（★ v2.11.8 五轮）
 
     /// 扇形态卡片尺寸（1x）。比预览区窄一圈：扇开时靠旋转向两侧溢出，卡片本身再宽就会把邻卡完全盖住。
@@ -240,6 +394,28 @@ public enum CanvasFanGeometry {
         let variants: [Int?] = [nil] + (0..<max(1, slotCount)).map { Optional($0) }
         for hovered in variants {
             let ls = layouts(count: slotCount, expanded: true, hoveredIndex: hovered)
+            for l in ls {
+                for p in cardPolygon(layout: l, cardSize: cardSize, containerSize: .zero) {
+                    half = max(half, abs(p.x))
+                }
+            }
+        }
+        return half
+    }
+
+    /// 「交替叠放」展开态的最大横向半宽（1x，已含 hover 放大与邻卡让开）。
+    ///
+    /// 与 `expandedHalfWidth` 同一个用途：hover 维持区（`CanvasNodeHover.holdRect`）必须盖住
+    /// **实际会张到的最宽形态**，否则鼠标追着最外侧那张卡走出维持区，整叠当场收拢。
+    /// 这个风格靠横向铺开（步长 74% 卡宽）拉开，比扇形更宽 —— 五轮那个 bug 换个风格就会复现，
+    /// 所以维持区必须对两种风格取并集（见 `holdRect`）。
+    public static func scatterHalfWidth(slotCount: Int, cardSize: CGSize) -> CGFloat {
+        var half: CGFloat = 0
+        let variants: [Int?] = [nil] + (0..<max(1, slotCount)).map { Optional($0) }
+        for hovered in variants {
+            let ls = scatterLayouts(count: slotCount,
+                                    cardWidth: cardSize.width,
+                                    hoveredIndex: hovered)
             for l in ls {
                 for p in cardPolygon(layout: l, cardSize: cardSize, containerSize: .zero) {
                     half = max(half, abs(p.x))

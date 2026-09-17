@@ -5429,10 +5429,13 @@ do {
     t.check(CanvasFanGeometry.carouselRange(page: 99, total: 50).count > 0,
             "页码越界时仍返回有效区间（外部状态可能滞后于内容变化）")
 
-    // ---- A/B 风格枚举可持久化 ----
-    t.equal(CanvasFanGeometry.ExpandStyle.allCases.count, 2, "只有两种展开风格（A 扇形 / B 轮播）")
+    // ---- 风格枚举可持久化（★ 八轮：两种 → 三种） ----
+    t.equal(CanvasFanGeometry.ExpandStyle.allCases.count, 3,
+            "三种展开风格（扇形 / 水平轮播 / 交替叠放）")
     t.equal(CanvasFanGeometry.ExpandStyle.fanOut.rawValue, "fanOut", "★rawValue 是持久化格式，不能改")
     t.equal(CanvasFanGeometry.ExpandStyle.carousel.rawValue, "carousel", "★rawValue 是持久化格式，不能改")
+    t.equal(CanvasFanGeometry.ExpandStyle.stackedScatter.rawValue, "stackedScatter",
+            "★rawValue 是持久化格式，不能改")
 
     // ---- 节点上的 A/B 选择必须能落盘 ----
     // 用户是逐节点切 A/B 的（右上角那个极小图标）。如果这个字段没进 Codable，
@@ -5443,7 +5446,9 @@ do {
         node.toggleAnimationStyle()
         t.equal(node.animationStyle, .carousel, "toggle 一次进 B（轮播）")
         node.toggleAnimationStyle()
-        t.equal(node.animationStyle, .fanOut, "★toggle 两次回到 A（必须是二态互切，不能单向）")
+        t.equal(node.animationStyle, .stackedScatter, "★toggle 两次进 C（交替叠放，八轮新增）")
+        node.toggleAnimationStyle()
+        t.equal(node.animationStyle, .fanOut, "★★toggle 三次回到 A（必须是闭环，不能停在最后一态）")
 
         node.animationStyle = .carousel
         let back = try! JSONDecoder().decode(CanvasNode.self,
@@ -6304,6 +6309,244 @@ do {
     t.equal(ls9.count, 6, "5 张牌面 + 1 张灰卡")
     t.equal(ls9[w9.count].zIndex, ls9.map(\.zIndex).min(),
             "★+N 灰卡仍是全叠最底层（五轮的结论不许被六轮的改动带回去）")
+}
+
+// MARK: - CANVAS-TEXT-FIXED：画布文字屏幕固定字号（★ v2.11.8 八轮 · 需求 1）
+//
+// 用户要的是"缩放画布时文字在屏幕上大小不变"。这件事的翻车方式极其安静：
+// 只要有人"顺手"把字号也乘上 renderScale（本文件其它几何量的铁律就是必须乘），
+// 行为就悄悄退回旧版，而截图上除了字大一点没有任何异常。所以这里把**屏幕字号**
+// 这个不变量直接钉住：无论 zoom 是 0.25 还是 4，屏幕字号恒等于设计值。
+do {
+    let design: CGFloat = 13
+
+    // 1) 排版字号与 renderScale 无关（这就是"不乘"的形式化表达）。
+    for z in [0.25, 0.5, 1.0, 1.5, 2.0, 4.0] as [CGFloat] {
+        let layout = CanvasScreenText.layoutFontSize(design, renderScale: z)
+        t.check(abs(layout - design) < 0.0001,
+                "★zoom=\(z) 时排版字号仍是 13（屏幕固定 = 排版侧不乘 zoom）")
+    }
+
+    // 2) 静息（zoom == renderScale，缩放已落定）时屏幕字号恒为设计值。
+    for z in [0.25, 0.4, 1.0, 2.0, 4.0] as [CGFloat] {
+        let screen = CanvasScreenText.screenFontSize(designPt: design, renderScale: z, zoom: z)
+        t.check(abs(screen - design) < 0.0001,
+                "★★zoom=\(z) 静息时屏幕字号 = 13pt（这就是需求 1 本身）")
+    }
+
+    // 3) 对照：旧行为（乘 renderScale）在 4x 下是 52pt —— 保留这条是为了说明"差别有多大"，
+    //    以免有人觉得两种写法反正差不多。
+    t.equal(CanvasScreenText.screenFontSize(layoutPt: design * 4, renderScale: 4, zoom: 4),
+            design * 4, "旧行为（字号乘 zoom）在 4x 下屏幕字号是 52pt，正是用户不要的那个")
+
+    // 4) 缩放手势进行中（zoom ≠ layoutZoom）允许瞬时形变，但必须落在量化阶梯的量级内，
+    //    不能出现"手势里字号翻倍"这种视觉爆炸。
+    let mid = CanvasScreenText.screenFontSize(designPt: design, renderScale: 1.0, zoom: 1.18)
+    t.check(mid > design && mid < design * 1.25,
+            "手势进行中最多按 CanvasZoomLayout 的阶梯宽度（±18%）短暂偏离，settle 后回到 13pt")
+
+    // 5) 退化输入不能算出 0 / NaN / 负数字号（SwiftUI 收到 0 字号会直接不画）。
+    t.check(CanvasScreenText.layoutFontSize(design, renderScale: 0) > 0, "renderScale=0 也要给正字号")
+    t.check(CanvasScreenText.layoutFontSize(0, renderScale: 1) > 0, "设计字号 0 也要给正字号")
+
+    // 6) 阈值：节点视觉短边 < 40pt 不画字（用户给的建议值）。
+    t.equal(CanvasScreenText.hideBelowVisualSize, 40, "阈值 40pt（用户指定）")
+    let node = CGSize(width: 320, height: 220)
+    t.check(CanvasScreenText.textVisible(nodeSize: node, zoom: 1), "100% 缩放当然要画字")
+    t.check(CanvasScreenText.textVisible(nodeSize: node, zoom: 0.25),
+            "0.25 缩放下短边 55pt ≥ 40 → 仍然画字（此时靠限高裁剪兜住溢出）")
+    t.check(!CanvasScreenText.textVisible(nodeSize: node, zoom: 0.15),
+            "★0.15 缩放下短边 33pt < 40 → 隐藏文字（避免糊成噪点）")
+    // 边界严格用 >=：正好 40pt 要显示，否则阈值附近会出现"看起来该显示却没显示"。
+    t.check(CanvasScreenText.textVisible(nodeSize: CGSize(width: 100, height: 40), zoom: 1),
+            "短边正好 40pt → 显示（边界含等号）")
+    t.check(!CanvasScreenText.textVisible(nodeSize: CGSize(width: 100, height: 39.9), zoom: 1),
+            "短边 39.9pt → 隐藏")
+    // 用**短边**而不是宽度：又宽又矮的节点同样读不了字。
+    t.check(!CanvasScreenText.textVisible(nodeSize: CGSize(width: 2000, height: 20), zoom: 1),
+            "★2000×20 的扁节点也要隐藏（判据是短边，不是面积/宽度）")
+    t.equal(CanvasScreenText.textOpacity(nodeSize: node, zoom: 1), 1, "可见 → opacity 1")
+    t.equal(CanvasScreenText.textOpacity(nodeSize: node, zoom: 0.05), 0, "不可见 → opacity 0")
+
+    // 7) 卡叠里单卡的阈值更低，且必须**严格**低于节点阈值：否则会出现"节点还有字、卡片先没字"
+    //    这种在很宽的缩放区间里都成立的不一致。
+    t.check(CanvasScreenText.hideCardTextBelowVisualSize < CanvasScreenText.hideBelowVisualSize,
+            "★卡片阈值必须比节点阈值低（卡片本来就比节点小一大截）")
+    let card = CanvasFanGeometry.fanCardSize(boxHeight: 132)
+    t.check(CanvasScreenText.cardTextVisible(cardSize: card, zoom: 1), "100% 下卡片写字")
+    t.check(!CanvasScreenText.cardTextVisible(cardSize: card, zoom: 0.2),
+            "0.2 缩放下卡片短边约 21pt < 24 → 卡内文字隐藏")
+}
+
+// MARK: - CANVAS-PROMPT-CLIP：正文区限高（★ 八轮 · 需求 1 的副作用兜底）
+//
+// 屏幕固定字号在缩小画布时会让正文相对变大，SwiftUI 的 VStack 不裁剪，
+// 不限高的表现是"正文把入参文件行顶出卡片、甚至溢到别的节点上"。
+do {
+    for h in [150.0, 220.0, 400.0, 900.0] as [CGFloat] {
+        let maxH = CanvasCardLayout.promptMaxHeight(nodeHeight: h)
+        t.check(maxH >= 0, "正文限高不能是负数（节点 \(h)pt）")
+        let used = CanvasCardLayout.cardPadding * 2
+            + CanvasCardLayout.headerRowHeight
+            + CanvasCardLayout.rowSpacing * 2
+            + CanvasCardLayout.previewHeight(nodeHeight: h)
+            + CanvasCardLayout.previewToPromptGap
+            + CanvasCardLayout.inputFilesRowHeight
+            + maxH
+        // 正文还分到高度时，各分区必须**正好**铺满节点（不多不少）。
+        // 分到 0 的情形是合法的：极矮节点上 `previewHeightFloor`（72pt）优先保住"还认得出是一叠卡"，
+        // 此时正文让位到 0 —— 这正是限高要拦住的那种情况（不限高就会溢出）。
+        if maxH > 0 {
+            t.check(abs(used - h) < 0.001,
+                    "★节点 \(h)pt：分区之和正好等于节点高度（多了会溢出、少了是白浪费）")
+        } else {
+            t.check(used - maxH > h,
+                    "★节点 \(h)pt：矮到连正文都放不下时，正文限高必须钳到 0（否则会把入参文件行顶出卡片）")
+        }
+    }
+    t.check(CanvasCardLayout.promptMaxHeight(nodeHeight: 400) >
+            CanvasCardLayout.promptMaxHeight(nodeHeight: 220),
+            "★节点拉高，多出来的空间要给正文（这是 previewHeight 按比例的初衷）")
+    t.equal(CanvasCardLayout.promptMaxHeight(nodeHeight: 60), 0,
+            "极矮节点：正文分不到高度就给 0（而不是负数 → SwiftUI frame 会报无效值）")
+}
+
+// MARK: - CANVAS-CAROUSEL-SLIDE：轮播翻页侧滑方向（★ 八轮 · 需求 2）
+//
+// 方向写反不会报错，观感是"点右箭头内容从左边冒出来"。而且它极易被改坏：
+// 转场是在**下一次求 body** 时才被读的，那时旧窗口已经没了。
+do {
+    t.equal(CanvasFanGeometry.carouselPageResponse, 0.35, "spring response = 0.35（用户指定）")
+    t.equal(CanvasFanGeometry.carouselPageDamping, 0.8, "spring dampingFraction = 0.8（用户指定）")
+
+    t.check(CanvasFanGeometry.slideInsertFromTrailing(forward: true),
+            "★向后翻页：新卡从右（trailing）滑入")
+    t.check(!CanvasFanGeometry.slideRemoveToTrailing(forward: true),
+            "★向后翻页：旧卡向左（leading）滑出")
+    t.check(!CanvasFanGeometry.slideInsertFromTrailing(forward: false),
+            "★向前翻页：新卡从左滑入")
+    t.check(CanvasFanGeometry.slideRemoveToTrailing(forward: false),
+            "★向前翻页：旧卡向右滑出")
+    // 进入侧与离开侧必须相反 —— 同侧的话两张卡会从同一边挤进来，看起来像"卡片重叠着抖了一下"。
+    for forward in [true, false] {
+        t.check(CanvasFanGeometry.slideInsertFromTrailing(forward: forward)
+                != CanvasFanGeometry.slideRemoveToTrailing(forward: forward),
+                "★进入侧与离开侧永远相反（forward=\(forward)）")
+    }
+}
+
+// MARK: - CANVAS-SCATTER：交替旋转叠加（★ 八轮 · 需求 3）
+//
+// 这一组的价值和 v2.11.5 花瓣几何一样：这些数错了不会崩，只是"看起来有点怪"，
+// 靠肉眼比对几乎不可能定位（用户给的规格是交替符号 + 3°~8° + 20~30% 遮挡 + 中间最高）。
+do {
+    let cardW: CGFloat = 108
+
+    // ---- 1) 张数夹取，与扇形同口径（第 maxCards+1 格是 +N 灰卡） ----
+    t.equal(CanvasFanGeometry.scatterLayouts(count: 0, cardWidth: cardW).count, 1,
+            "0 张也给 1 张（空槽位那张虚线卡）")
+    t.equal(CanvasFanGeometry.scatterLayouts(count: 99, cardWidth: cardW).count,
+            CanvasFanGeometry.maxCards + 1,
+            "★上界 = maxCards + 1（灰卡必须和牌面走同一套几何，否则它会歪在一边）")
+
+    // ---- 2) 旋转角：符号严格交替、幅度落在 ±3°~±8° ----
+    for i in 0..<12 {
+        let a = CanvasFanGeometry.scatterAngle(i)
+        t.check(abs(a) >= CanvasFanGeometry.scatterAngleMin - 0.0001
+                && abs(a) <= CanvasFanGeometry.scatterAngleMax + 0.0001,
+                "★第 \(i) 张的旋转幅度落在 3°~8°（实际 \(a)）")
+        t.check(i % 2 == 0 ? a > 0 : a < 0,
+                "★★符号必须交替（偶数正、奇数负）：连续两张同向会粘成一张厚卡")
+    }
+    // 稳定性：同一个下标两次求值必须完全相同，否则 SwiftUI 每帧重求 body 时卡片会抖。
+    t.equal(CanvasFanGeometry.scatterAngle(3), CanvasFanGeometry.scatterAngle(3),
+            "★伪随机必须稳定（不能用 Double.random，否则卡片持续抖动）")
+    t.check(CanvasFanGeometry.scatterAngle(0) != CanvasFanGeometry.scatterAngle(2),
+            "同符号的两张幅度不该完全一样（否则看起来像机器排的）")
+    for i in 0..<20 {
+        let n = CanvasFanGeometry.scatterNoise(i)
+        t.check(n >= 0 && n < 1, "噪声落在 [0,1)（第 \(i) 个：\(n)）")
+    }
+
+    // ---- 3) 横向铺开：步长 = 卡宽 ×(1 - 遮挡比例)，遮挡落在用户给的 20%~30% ----
+    t.check(CanvasFanGeometry.scatterOverlapRatio >= 0.20
+            && CanvasFanGeometry.scatterOverlapRatio <= 0.30,
+            "★遮挡比例在 20%~30%（用户指定）")
+    let ls = CanvasFanGeometry.scatterLayouts(count: 5, cardWidth: cardW)
+    let expectedStep = cardW * (1 - CanvasFanGeometry.scatterOverlapRatio)
+    for i in 1..<ls.count {
+        let d = ls[i].offset.width - ls[i - 1].offset.width
+        t.check(abs(d - expectedStep) < 0.0001,
+                "★相邻卡横向步长恒为 \(expectedStep)pt（实际 \(d)）")
+        t.check(d < cardW, "★步长必须小于卡宽，否则就没有重叠了（那是轮播，不是叠放）")
+    }
+    // 关于中轴对称：重心不随张数奇偶跳动（与扇形同一条设计约束）。
+    for n in 1...(CanvasFanGeometry.maxCards + 1) {
+        let l = CanvasFanGeometry.scatterLayouts(count: n, cardWidth: cardW)
+        let sum = l.reduce(0) { $0 + $1.offset.width }
+        t.check(abs(sum) < 0.0001, "★\(n) 张时横向位移和为 0（关于中轴严格对称）")
+    }
+
+    // ---- 4) 层级：中间最高，且左压右（同距时） ----
+    let l5 = CanvasFanGeometry.scatterLayouts(count: 5, cardWidth: cardW)
+    let center = l5[2]
+    for (i, l) in l5.enumerated() where i != 2 {
+        t.check(center.zIndex > l.zIndex, "★中间那张层级最高（用户指定），第 \(i) 张必须更低")
+    }
+    t.check(l5[1].zIndex > l5[3].zIndex,
+            "★同距的左右两张：左边压右边（与扇形『靠前的压住靠后的』方向一致，不靠声明顺序）")
+    t.equal(Set(l5.map(\.zIndex)).count, l5.count,
+            "★★层级必须两两不同：并列时 ZStack 退回声明顺序，切换风格会让前后关系突然反过来")
+
+    // ---- 5) hover：目标卡上浮 + 旋转归零，其余卡向两侧让开 ----
+    let hovered = CanvasFanGeometry.scatterLayouts(count: 5, cardWidth: cardW, hoveredIndex: 2)
+    t.equal(hovered[2].angle, 0, "★hover 的卡旋转归零（用户指定：上浮 + 转正）")
+    t.check(hovered[2].scale > 1, "★hover 的卡放大")
+    t.check(hovered[2].offset.height < l5[2].offset.height, "★hover 的卡上浮（y 更负）")
+    t.check(hovered[2].zIndex > hovered.filter { $0.index != 2 }.map(\.zIndex).max()!,
+            "★hover 的卡必须压在所有卡之上（否则抽出来还是被盖住）")
+    t.check(hovered[0].offset.width < l5[0].offset.width, "★左侧的卡向更左让开")
+    t.check(hovered[4].offset.width > l5[4].offset.width, "★右侧的卡向更右让开")
+    t.check(hovered[1].angle != 0 && hovered[3].angle != 0, "未被 hover 的卡保持倾斜")
+
+    // ---- 6) hover 维持区必须盖住这个风格（它比扇形铺得更宽） ----
+    let box = CanvasCardLayout.previewHeight(nodeHeight: 220)
+    let card = CanvasFanGeometry.fanCardSize(boxHeight: box)
+    let slots = CanvasFanGeometry.maxCards + 1
+    let scatterHalf = CanvasFanGeometry.scatterHalfWidth(slotCount: slots, cardSize: card)
+    let fanHalf = CanvasFanGeometry.expandedHalfWidth(slotCount: slots, cardSize: card)
+    t.check(scatterHalf > fanHalf,
+            "★交替叠放比扇形更宽（步长 74% 卡宽 × 6 格），所以维持区不能只按扇形算")
+    var node = canvasNode()
+    node.width = 320
+    node.height = 220
+    let hold = CanvasNodeHover.holdRect(node: node)
+    t.check(hold.minX <= node.x - (scatterHalf - node.width / 2),
+            "★★维持区左边界要盖住交替叠放的最左顶点（否则鼠标追卡片就把整叠收了 —— 五轮那个 bug）")
+    t.check(hold.maxX >= node.x + node.width + (scatterHalf - node.width / 2),
+            "★★维持区右边界同理")
+
+    // ---- 7) 三种风格的展示名/图标各不相同（右键菜单靠它区分） ----
+    let names = CanvasFanGeometry.ExpandStyle.allCases.map(\.displayName)
+    t.equal(Set(names).count, 3, "★三种风格的名字不能重名（菜单里会变成两个一样的条目）")
+    let symbols = CanvasFanGeometry.ExpandStyle.allCases.map(\.symbolName)
+    t.equal(Set(symbols).count, 3, "★三种风格的图标不能一样（右上角按钮靠它告诉用户当前是哪种）")
+    for st in CanvasFanGeometry.ExpandStyle.allCases {
+        t.check(!st.displayName.isEmpty && !st.symbolName.isEmpty, "\(st) 的名字/图标不能为空")
+        t.check(st.next != st, "★next 必须真的换一种（否则按钮点了没反应）")
+    }
+    // 闭环：从任意风格出发，连点 allCases.count 次必须回到原点。
+    for st in CanvasFanGeometry.ExpandStyle.allCases {
+        var cur = st
+        for _ in 0..<CanvasFanGeometry.ExpandStyle.allCases.count { cur = cur.next }
+        t.equal(cur, st, "★★\(st) 循环一圈回到自己（三态循环不能有终点）")
+    }
+    // 新增枚举项对老画布必须无害（八轮新增 stackedScatter 时这条是主要风险）。
+    var scatterNode = canvasNode()
+    scatterNode.animationStyle = .stackedScatter
+    let roundTrip = try! JSONDecoder().decode(
+        CanvasNode.self, from: try! JSONEncoder().encode(scatterNode))
+    t.equal(roundTrip.animationStyle, .stackedScatter, "★★交替叠放要能随画布落盘（重启不能变回扇形）")
 }
 
 t.report()

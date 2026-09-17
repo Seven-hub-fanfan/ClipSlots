@@ -235,15 +235,24 @@ final class CanvasStore: ObservableObject {
         return nodes.first { $0.id == id }
     }
 
-    /// 切换某个节点的堆叠卡片展开风格（扇形 ⇄ 水平轮播，v2.11.8 二轮）。
+    /// 切换某个节点的堆叠卡片展开风格（★ 八轮：扇形 → 水平轮播 → 交替叠放 → 扇形，三态循环）。
     ///
     /// 走 `commit` 而不是 `updateNode`：和 `updateNodeStyle` 同理 —— 这是用户可感知的显式操作，
     /// 用 `updateNode` 的症状是「切错了 Cmd+Z 撤不回来」，而这个图标只有 15pt，误点是常态。
     func toggleAnimationStyle(id: String) {
         guard let idx = nodes.firstIndex(where: { $0.id == id }) else { return }
-        let next: CanvasFanGeometry.ExpandStyle = nodes[idx].animationStyle == .fanOut ? .carousel : .fanOut
-        commit(.styleNode, detail: next == .fanOut ? "扇形展开" : "水平轮播") {
-            nodes[idx].animationStyle = next
+        setAnimationStyle(id: id, style: nodes[idx].animationStyle.next)
+    }
+
+    /// 直接指定展开风格（★ 八轮：右键菜单用 —— 三种风格靠"点两下按钮循环"去挑太笨）。
+    ///
+    /// 与 `toggleAnimationStyle` 共用同一条落盘/撤销路径，撤销条目的文案统一取
+    /// `ExpandStyle.displayName`（Kit），不在这里再写一份中文。
+    func setAnimationStyle(id: String, style: CanvasFanGeometry.ExpandStyle) {
+        guard let idx = nodes.firstIndex(where: { $0.id == id }) else { return }
+        guard nodes[idx].animationStyle != style else { return }
+        commit(.styleNode, detail: style.displayName) {
+            nodes[idx].animationStyle = style
             nodes[idx].updatedAt = Date()
         }
     }

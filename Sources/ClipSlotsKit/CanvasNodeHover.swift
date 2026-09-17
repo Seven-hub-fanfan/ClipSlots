@@ -74,9 +74,13 @@ public enum CanvasNodeHover {
         let box = CanvasCardLayout.previewHeight(nodeHeight: node.height)
         let card = CanvasFanGeometry.fanCardSize(boxHeight: box)
         // 扇形最多 maxCards + 1 个 slot（第 6 格是 `+N` 翻页卡），按最宽的情况算。
-        let fanHalf = CanvasFanGeometry.expandedHalfWidth(slotCount: CanvasFanGeometry.maxCards + 1,
-                                                          cardSize: card)
-        let need = fanHalf - max(1, node.width) / 2 + fanGrace
+        let slots = CanvasFanGeometry.maxCards + 1
+        let fanHalf = CanvasFanGeometry.expandedHalfWidth(slotCount: slots, cardSize: card)
+        // ★ 八轮：「交替叠放」比扇形铺得更宽（横向步长 74% 卡宽）。维持区取**两种风格的并集** ——
+        // 按当前风格分别算会让"切一下风格、维持区跟着变"，而 hover 维持是逐帧判定的，
+        // 风格切换那一帧的边界跳变会表现为"刚切完风格，鼠标没动，扇形自己收了"。
+        let scatterHalf = CanvasFanGeometry.scatterHalfWidth(slotCount: slots, cardSize: card)
+        let need = max(fanHalf, scatterHalf) - max(1, node.width) / 2 + fanGrace
         let slop = max(sideSlop, need)
         return ownRect(node: node).insetBy(dx: -slop, dy: -slop)
     }

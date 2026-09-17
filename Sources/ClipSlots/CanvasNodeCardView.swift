@@ -102,6 +102,32 @@ struct CanvasNodeCardView: View {
 
     private func s(_ v: CGFloat) -> CGFloat { max(0.01, v * renderScale) }
 
+    /// **文字**专用字号（★ v2.11.8 八轮 · 需求 1「画布文字不跟随缩放」）。
+    ///
+    /// 与 `s(_:)` 的唯一区别：**刻意不乘 renderScale**。为什么这是"抵消画布缩放"而不是"漏乘"，
+    /// 完整推导见 `CanvasScreenText` 的类型注释（一句话版本：本项目静息时排版尺寸 = 屏幕尺寸，
+    /// 所以想让屏幕字号恒为 13pt，排版时就得写 13）。
+    ///
+    /// 铁律更新：**几何量过 `s(_:)`，字号过 `fs(_:)`**。图标（SF Symbol）仍走 `s(_:)` ——
+    /// 它们是按钮/角标的一部分，尺寸必须跟着容器走，否则放大后会出现"20pt 的圆里一个 8pt 的勾"。
+    private func fs(_ v: CGFloat) -> CGFloat {
+        CanvasScreenText.layoutFontSize(v, renderScale: renderScale)
+    }
+
+    /// 节点在屏幕上是否大到值得写字（★ 八轮需求 1 的第二半）。
+    ///
+    /// 用 `renderScale`（= `layoutZoom`）当 zoom 的替身，而不是把真正的实时 zoom 传进来：
+    /// 实时 zoom 每帧都在变，用它做布尔判定会让缩放手势跨过阈值时文字**闪烁**；
+    /// `layoutZoom` 是量化后的阶梯值（`CanvasZoomLayout`），最多与实时 zoom 差 18%，
+    /// 落在 40pt 阈值上的误差远小于"文字该不该看得清"这件事本身的模糊度。
+    private var textVisible: Bool {
+        CanvasScreenText.textVisible(nodeSize: CGSize(width: node.width, height: node.height),
+                                     zoom: renderScale)
+    }
+
+    /// 见 `CanvasScreenText.textOpacity`：用 opacity 而不是 `if` 分支，避免跨阈值那一帧整卡重排。
+    private var textOpacity: Double { textVisible ? 1 : 0 }
+
     /// 纯文本节点：不出图，卡片主体就是一块文本框（用户二轮明确要求"不需要卡片预览的形式"）。
     private var isTextNode: Bool { node.kind == .text }
 
@@ -118,7 +144,8 @@ struct CanvasNodeCardView: View {
     /// （`HarmonyOS Sans SC`）。中文字体两者几乎从不相同，`Font.custom` 解析失败时会**静默**
     /// 回落系统字体：没有崩溃、没有告警，表现就是用户反馈的「选了字体但一点变化都没有」。
     private var bodyFont: Font {
-        CanvasFontCatalog.font(family: node.fontName, size: node.resolvedBodyFontSize * renderScale)
+        // ★ 八轮：字号走 `fs(_:)`（屏幕固定），不再乘 renderScale。
+        CanvasFontCatalog.font(family: node.fontName, size: fs(node.resolvedBodyFontSize))
     }
 
     /// 全部入参文件在 `attachments` 里的下标（★ v2.11.8 三轮：不再只筛图片）。
@@ -213,12 +240,14 @@ struct CanvasNodeCardView: View {
     /// 居中的东西必须相对**卡片**居中，不是相对"剩下的空间"居中。
     private var headerRow: some View {
         Text(pathLabel)
-            .font(.system(size: s(9.5), weight: .semibold))
+            .font(.system(size: fs(9.5), weight: .semibold))
             .foregroundColor(AppTheme.canvasCardMetaInk)
             .lineLimit(1)
             .truncationMode(.middle)
             // 单行也要禁字距自适应：不然缩放时"页面 - 组 - 槽位"这行会时紧时松地呼吸。
             .canvasStableLabel()
+            // ★ 八轮：节点缩到 40pt 以下就别写字了（见 `CanvasScreenText`）。
+            .opacity(textOpacity)
             // 给两侧控件留出通道，否则长路径会压在图标上。
             .padding(.horizontal, s(24))
             .frame(maxWidth: .infinity, alignment: .center)
@@ -239,33 +268,37 @@ struct CanvasNodeCardView: View {
         case .queued(let ahead):
             // 「前方 N 个」用的是 CLI 真字段 queue_ahead_count，不是估算。
             Label(ahead > 0 ? "前方 \(ahead)" : "排队", systemImage: "clock")
-                .font(.system(size: s(9), weight: .medium))
+                .font(.system(size: fs(9), weight: .medium))
                 .foregroundColor(AppTheme.canvasCardMetaInk)
+                .opacity(textOpacity)
         case .running(let startedAt):
             // 刻意不给百分比：CLI 不提供，编出来的进度在 10~20s 量级会明显失真。
-            RunningBadge(startedAt: startedAt, renderScale: renderScale)
+            RunningBadge(startedAt: startedAt, renderScale: renderScale, textOpacity: textOpacity)
         case .succeeded:
             Image(systemName: "checkmark.circle.fill")
                 .font(.system(size: s(10), weight: .semibold))
                 .foregroundColor(.green.opacity(0.85))
         case .failed:
             Label("失败", systemImage: "exclamationmark.triangle.fill")
-                .font(.system(size: s(9), weight: .medium))
+                .font(.system(size: fs(9), weight: .medium))
                 .foregroundColor(.red.opacity(0.85))
+                .opacity(textOpacity)
         }
     }
 
-    /// 右上角的**极小** A/B 动画风格切换（用户明确要求"极小"）。
+    /// 右上角的**极小**展开风格切换（用户明确要求"极小"）。
     ///
     /// 只在 hover / 选中时出现，且只对有堆叠卡片的节点出现：常驻一个图标会让每张卡都多一件视觉
     /// 噪声（这正是二轮要删掉铅笔按钮的同一个理由），而文本节点根本没有展开动画可切。
+    ///
+    /// ★ 八轮：二态互切 → **三态循环**（扇形 → 水平轮播 → 交替叠放）。图标与文案全部取自
+    /// `ExpandStyle`（Kit），不在这里写 `if ... else` —— 三个分支各写一遍图标名的写法，
+    /// 加第四种风格时必漏。
     @ViewBuilder
     private var animationStyleToggle: some View {
         if !isTextNode && (hoverActive || isSelected) {
             Button(action: onToggleAnimationStyle) {
-                Image(systemName: node.animationStyle == .fanOut
-                      ? "rectangle.on.rectangle.angled"
-                      : "rectangle.split.3x1")
+                Image(systemName: node.animationStyle.symbolName)
                     .font(.system(size: s(8.5), weight: .semibold))
                     .foregroundColor(AppTheme.chromeAccentInk)
                     .frame(width: s(15), height: s(15))
@@ -273,9 +306,7 @@ struct CanvasNodeCardView: View {
                     .contentShape(Circle())
             }
             .buttonStyle(.plain)
-            .help(node.animationStyle == .fanOut
-                  ? "展开动画：扇形（点击切换为水平轮播）"
-                  : "展开动画：水平轮播（点击切换为扇形）")
+            .help("展开动画：\(node.animationStyle.displayName)（点击切换为\(node.animationStyle.next.displayName)）")
         }
     }
 
@@ -304,6 +335,7 @@ struct CanvasNodeCardView: View {
                         .font(bodyFont)
                         .foregroundColor(.white.opacity(0.45))
                         .canvasStableLabel()
+                        .opacity(textOpacity)
                         .padding(.horizontal, s(10))
                         .padding(.vertical, s(10 + CanvasCardLayout.promptVerticalPadding))
                 } else {
@@ -318,6 +350,8 @@ struct CanvasNodeCardView: View {
                         // ★ 三轮 hotfix2：光有 fixedSize 不够 —— 见 `canvasStableText()` 的注释，
                         // `allowsTightening` / `minimumScaleFactor` 是"同一宽度下换行来回跳"的另一半肇因。
                         .canvasStableText()
+                        // ★ 八轮：屏幕固定字号 + 太小就不画（深色底板保留，它是"这是文本节点"的标识）。
+                        .opacity(textOpacity)
                         // ★ 三轮：上下各多 8pt 呼吸（用户要求）。
                         .padding(.horizontal, s(10))
                         .padding(.vertical, s(10 + CanvasCardLayout.promptVerticalPadding))
@@ -377,9 +411,10 @@ struct CanvasNodeCardView: View {
                     Image(systemName: "exclamationmark.triangle")
                         .font(.system(size: s(14), weight: .semibold))
                     Text(reason)
-                        .font(.system(size: s(9)))
+                        .font(.system(size: fs(9)))
                         .lineLimit(2)
                         .multilineTextAlignment(.center)
+                        .opacity(textOpacity)
                 }
                 .foregroundColor(.red.opacity(0.75))
                 .padding(.horizontal, s(8))
@@ -458,6 +493,16 @@ struct CanvasNodeCardView: View {
                 }
             }
             .frame(maxWidth: .infinity, minHeight: s(30), alignment: .topLeading)
+            // ★ 八轮：正文改成屏幕固定字号后必须**限高 + 裁剪**。
+            //
+            // 缩小画布时字号不再跟着缩，4 行正文的实际需求高度会超过正文区在小节点里分到的那点
+            // 空间；`VStack` 不裁剪，多出来的部分会把底部「入参文件」行顶出卡片、甚至溢到卡片外
+            // 压在相邻节点上。上限的算法（节点高 - 其它固定分区）在 `CanvasCardLayout` 里，带断言。
+            .frame(maxHeight: s(CanvasCardLayout.promptMaxHeight(nodeHeight: node.height)),
+                   alignment: .topLeading)
+            .clipped()
+            // ★ 八轮：节点太小就不画字（阈值见 `CanvasScreenText`）。
+            .opacity(textOpacity)
             // ★ 三轮：正文区上下各留 8pt 呼吸（用户要求）。padding 必须在 contentShape **之前**，
             // 否则这 8pt 不算进命中区，等于白留。
             .padding(.vertical, s(CanvasCardLayout.promptVerticalPadding))
@@ -495,11 +540,14 @@ struct CanvasNodeCardView: View {
     /// 高度 —— 而正文区的高度正是这轮一直在抢的东西。键位契约本身没变，改挂到 `.help` 悬浮提示上，
     /// 需要的人停一秒就能看到。
     private var editor: some View {
-        // 编辑器字号同样乘 renderScale：光标与选区是 NSTextView 自己画的，字号不跟着缩放
-        // 会出现"放大后光标只有半个字高"这种一眼假的错位。
+        // ★ 八轮：编辑器字号也走屏幕固定（`fs`）。
+        //
+        // 一定要和非编辑态用**同一个**字号来源：两边不一致的表现是"点进编辑，字突然变大/变小一截"，
+        // 而正文的字号在编辑态还决定光标高度与换行位置 —— 换行位置一变，用户就会以为自己的文本
+        // 被改了。（此前这里乘 renderScale，是与旧的"文字跟随缩放"配套的。）
         CanvasPromptEditor(text: $draft,
                            font: CanvasFontCatalog.nsFont(family: node.fontName,
-                                                          size: node.resolvedBodyFontSize * renderScale),
+                                                          size: fs(node.resolvedBodyFontSize)),
                            onCommit: { onCommitEdit(draft) },
                            onCancel: onCancelEdit,
                            onBlur: { onCommitEdit(draft) })
@@ -535,8 +583,9 @@ struct CanvasNodeCardView: View {
                 Image(systemName: attachments.isEmpty ? "tray" : "tray.full")
                     .font(.system(size: s(9), weight: .semibold))
                 Text(attachments.isEmpty ? "入参文件" : "入参文件 \(attachments.count)")
-                    .font(.system(size: s(9.5), weight: .medium))
+                    .font(.system(size: fs(9.5), weight: .medium))
                     .canvasStableLabel()
+                    .opacity(textOpacity)
                 Spacer(minLength: 0)
                 Image(systemName: "chevron.right")
                     .font(.system(size: s(7), weight: .bold))
@@ -572,6 +621,8 @@ struct CanvasNodeCardView: View {
 private struct RunningBadge: View {
     let startedAt: Date
     var renderScale: CGFloat = 1
+    /// ★ 八轮：节点太小时秒数一起隐掉（与卡片上其它文字同一条阈值）。
+    var textOpacity: Double = 1
 
     var body: some View {
         TimelineView(.periodic(from: startedAt, by: 1)) { context in
@@ -582,8 +633,11 @@ private struct RunningBadge: View {
                     .scaleEffect(0.6 * renderScale)
                     .frame(width: 8 * renderScale, height: 8 * renderScale)
                 Text("\(elapsed)s")
-                    .font(.system(size: max(0.01, 9 * renderScale), weight: .medium))
+                    // ★ 八轮：屏幕固定字号（不乘 renderScale），与卡片上其它文字一致。
+                    .font(.system(size: CanvasScreenText.layoutFontSize(9, renderScale: renderScale),
+                                  weight: .medium))
                     .foregroundColor(AppTheme.canvasCardMetaInk)
+                    .opacity(textOpacity)
             }
         }
     }
