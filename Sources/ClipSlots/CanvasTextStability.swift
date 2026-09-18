@@ -50,6 +50,11 @@ extension View {
             .minimumScaleFactor(1.0)
     }
 
+    /// ⚠️ **v2.11.10 起这个修饰器已退化为空操作**：`counter` 恒为 1（见
+    /// `CanvasZoomLayout.textCounterScale`），因为画布文字已改回“随缩放等比”的矢量模型
+    /// （见 `CanvasScreenText.layoutFontSize`）。下面这段描述的是八轮/九轮的旧模型，保留作为
+    /// “为何曾经需要它”的档案；调用点也保留，将来若要恢复屏幕恒定字号只需改回两个函数。
+    ///
     /// ★ 九轮：抹掉文字实际经历的**全部**上层缩放，让文字的**屏幕**尺寸精确恒定。
     ///
     /// `counter` 来自 `CanvasZoomLayout.textCounterScale(zoom:layoutZoom:)`（牌面卡还要再除掉

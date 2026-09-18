@@ -109,7 +109,12 @@ struct CanvasSlotFanStack: View {
     /// 缩放的乘积。用户九轮的口径是"抵消文字实际经历的所有上层缩放"，漏掉这一层的表现就是
     /// 「鼠标移到某张卡上，那张卡的字比邻卡大 8%」—— 仍然是"字会变大小"。
     private func cardTextCounter(_ layout: CanvasFanGeometry.CardLayout) -> CGFloat {
-        textCounter / max(0.01, layout.scale)
+        // ★ v2.11.10：不再除 `layout.scale`。牌面文字现在与牌面同比例缩放（整个画布统一改成
+        // 等比矢量模型，见 `CanvasScreenText.layoutFontSize`）。继续除的话，后面那几张被缩小的
+        // 牌面上会顶着一个与牌面不成比例的大字，文件名既盖图又溢出牌边。
+        // 太小时由 `cardTextVisible` 直接隐掉，不靠放大字号救。
+        _ = layout
+        return textCounter
     }
 
     private func cardTextVisible(_ cardSize: CGSize) -> Double {

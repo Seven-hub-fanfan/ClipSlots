@@ -173,10 +173,19 @@ public enum CanvasZoomLayout {
     /// 于是静息态 counter ≤ 1，不存在溢出；counter > 1 只出现在"正在往回缩"的手势中途，
     /// 那恰恰是**必须**放大才能保持屏幕字号恒定的时刻，而且是瞬态。
     /// 宁可手势中途有几帧文字略微探出盒子，也不能让用户看着文字跟着画布一起缩。
+    /// ★ v2.11.10：**恒返 1，不再反向补偿**。
+    ///
+    /// 反向补偿存在的意义是“让文字屏幕字号恒定”，而字号已经改成随画布等比
+    /// （见 `CanvasScreenText.layoutFontSize`），再除一次就又把它拉回恒定，等于改了一半。
+    ///
+    /// 保留函数而不删：它是卡片/卡叠两处 `canvasScreenFixedText(_:)` 的入参源头，恒返 1
+    /// 让那些修饰器退化成“只禁字距收紧 / 禁字号自适应”（那部分仍然需要 —— 它们防的是
+    /// 亚像素宽度抖动引起的抖动），而 `scaleEffect(1)` 本身无开销。将来若要恢复屏幕恒定字号，
+    /// 只需把这里改回 `l / z`、并把 `layoutFontSize` 改回不乘 renderScale，两行。
     public static func textCounterScale(zoom: CGFloat, layoutZoom: CGFloat) -> CGFloat {
-        let z = max(0.01, zoom)
-        let l = max(0.01, layoutZoom)
-        return l / z
+        _ = zoom
+        _ = layoutZoom
+        return 1
     }
 
     /// 连续手势（触控板捏合 / 滚轮）停手后多久才允许换档。

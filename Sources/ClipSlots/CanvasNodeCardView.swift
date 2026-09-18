@@ -232,9 +232,19 @@ struct CanvasNodeCardView: View {
     /// 命中区一起撑大），所以正文区实际占的是 `promptMaxHeight + 16pt`。不扣这 16pt 的话，
     /// 当 `Spacer` 没有宽余时底部入参行会被顶出卡片。
     private var promptLineLimit: Int {
-        let inner = plan.promptMaxHeight - 2 * s(CanvasCardLayout.promptVerticalPadding)
+        // ★ v2.11.10：在 **1x 基准**上算，不用当前缩放后的尺寸。
+        //
+        // v2.11.9 用的是 `plan.promptMaxHeight`（已乘 renderScale）除 `fs(字号)`。当时字号是屏幕
+        // 恒定的，于是分子随缩放变、分母不变 —— 行数直接随缩放跳（4 行 ↔ 9 行），正是用户报的
+        // “文字放大放小动态响应”里最刺眼的一部分。
+        //
+        // 现在字号也随缩放等比了，分子分母同乘 renderScale，比值本就不变；但 `ceil` 的舍入误差
+        // 仍可能在某些缩放值上把结果抹差一行。直接除回 1x 再算，行数就是**节点自身高度的
+        // 纯函数**，与 zoom 严格无关 —— 缩放时永远不会多一行少一行，底部入参行也就不会被顶得抽搜。
+        let inner = plan.promptMaxHeight / max(0.01, renderScale)
+            - 2 * CanvasCardLayout.promptVerticalPadding
         let font = CanvasFontCatalog.nsFont(family: node.fontName,
-                                           size: fs(node.resolvedBodyFontSize))
+                                           size: node.resolvedBodyFontSize)
         let lineHeight = max(1, ceil(font.ascender - font.descender + font.leading))
         let fits = Int((max(0, inner) / lineHeight).rounded(.down))
         return min(CanvasCardText.previewLineCap, max(1, fits))
@@ -365,7 +375,8 @@ struct CanvasNodeCardView: View {
             .truncationMode(.middle)
             // 单行也要禁字距自适应：不然缩放时"页面 - 组 - 槽位"这行会时紧时松地呼吸。
             .canvasStableLabel()
-            // ★ 八轮：抹掉节点层缩放残差，屏幕字号严格恒定（见 `canvasScreenFixedText`）。
+            // ★ v2.11.10：`textCounter` 恒为 1，这里已是空操作（文字随画布等比）。保留调用位置是
+            // 为了保留 `canvasStableText` 那一组“禁字距收紧 / 禁字号自适应”的防抖语义。
             .canvasScreenFixedText(textCounter)
             // ★ 八轮：节点缩到 40pt 以下、或这一行放不下一行固定字号的字，就别写字了。
             .opacity(textOpacity)
