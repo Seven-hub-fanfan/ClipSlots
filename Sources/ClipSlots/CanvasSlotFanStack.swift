@@ -38,12 +38,12 @@ struct CanvasSlotFanStack: View {
     let sources: [CanvasFanGeometry.CardSource]
     /// 槽位的完整附件列表。`sources` 里的 `attachmentIndex` 是它的下标。
     let attachments: [SlotContent.SlotAttachment]
-    /// 当前缩放（= 画布 zoom）。所有尺寸乘它，保证放大后是**重新排版**而不是位图拉伸。
-    let renderScale: CGFloat
-    /// 文字反向缩放（★ 九轮需求 1 的收口）：抵掉节点层 `scaleEffect(zoom / layoutZoom)` 的残差。
-    /// 精确倒数、不钳制（静息 ≤1，缩小手势中 >1）。牌面卡内的文字**不要直接用它** ——
-    /// 卡片自己还挂着 `scaleEffect(layout.scale)`，要走 `cardTextCounter(_:)`。
-    var textCounter: CGFloat = 1
+    /// 可见性闸门用的**量化** zoom（`CanvasNodeText.gateZoom`）。
+    ///
+    /// ★ v2.11.8 十轮：与 `CanvasNodeCardView.gateZoom` 同一个契约 —— 本视图里**唯一**知道画布
+    /// 缩放的量，且只能参与"卡内文字写不写"的布尔判定。扇形的一切几何（卡片尺寸、张角、错位、
+    /// 命中多边形）都是设计稿单位，缩放由节点层唯一那层 `scaleEffect(zoom)` 承担。
+    var gateZoom: CGFloat = 1
     /// 整个节点是否被悬停（展开的唯一开关）。
     let nodeHovered: Bool
     /// 预览区可用高度（1x）。卡片按它收敛，避免在小节点上戳出卡片外。
@@ -94,26 +94,19 @@ struct CanvasSlotFanStack: View {
     private static let fanSpring = Animation.spring(response: 0.35, dampingFraction: 0.72)
     private var expanded: Bool { nodeHovered }
 
-    private func s(_ v: CGFloat) -> CGFloat { max(0.01, v * renderScale) }
+    /// 几何量直通（★ 十轮：不再乘 `renderScale`，理由见 `CanvasNodeCardView` 的类型注释）。
+    private func s(_ v: CGFloat) -> CGFloat { max(0.01, v) }
 
-    /// **文字**专用字号：屏幕固定，刻意不乘 renderScale（★ 八轮需求 1，推导见 `CanvasScreenText`）。
-    private func fs(_ v: CGFloat) -> CGFloat {
-        CanvasScreenText.layoutFontSize(v, renderScale: renderScale)
-    }
+    /// 字号直通（设计 pt）。文字与卡片等比缩放，不做任何反向补偿。
+    private func fs(_ v: CGFloat) -> CGFloat { max(1, v) }
 
-    /// 卡片在屏幕上是否大到值得写字（阈值比节点那条更低，见 `CanvasScreenText`）。
-    /// **卡内**文字的反向补偿（★ 九轮）。
+    /// 卡片在屏幕上是否大到值得写字（阈值比节点那条更低，见 `CanvasNodeText`）。
     ///
-    /// `textCounter` 只抵掉了节点层那层 `scaleEffect(zoom / layoutZoom)`。牌面卡自己还挂着
-    /// `scaleEffect(layout.scale, anchor: .bottom)`（hover 时 1.08），文字实际经历的是**两层**
-    /// 缩放的乘积。用户九轮的口径是"抵消文字实际经历的所有上层缩放"，漏掉这一层的表现就是
-    /// 「鼠标移到某张卡上，那张卡的字比邻卡大 8%」—— 仍然是"字会变大小"。
-    private func cardTextCounter(_ layout: CanvasFanGeometry.CardLayout) -> CGFloat {
-        textCounter / max(0.01, layout.scale)
-    }
-
+    /// ★ 十轮：九轮这里还有一个 `cardTextCounter(_:)`，用来把 hover 的 `scaleEffect(1.08)`
+    /// 也反向抵掉（否则"鼠标扫过的那张卡字比邻卡大 8%"）。等比缩放架构下这个问题自动消失：
+    /// 文字跟着卡片一起放大 8% 本来就是 hover 该有的效果。
     private func cardTextVisible(_ cardSize: CGSize) -> Double {
-        CanvasScreenText.cardTextVisible(cardSize: cardSize, zoom: renderScale) ? 1 : 0
+        CanvasNodeText.cardTextVisible(cardSize: cardSize, zoom: gateZoom) ? 1 : 0
     }
 
     // MARK: - 卡片来源切片
@@ -153,12 +146,12 @@ struct CanvasSlotFanStack: View {
 
     /// `+N / 点击加载` 这两行固定字号的文字块，在给定灰卡尺寸下装不装得下（**整块**判定）。
     ///
-    /// 量纲说明：`cardSize` 是 1x 设计值，灰卡的排版高度 = `cardSize.height × renderScale`；
-    /// 文字块的高度**不随缩放变化**（字号已固定成设计 pt），只有块内那 2pt 间距是几何、要缩。
-    /// 两个量纲不同的东西比大小，正是八轮"文字漫出灰卡"的根因，所以这里写清楚各自乘没乘 rs。
+    /// ★ 十轮：全仓统一设计单位后，这里就是同一量纲的两个数直接比大小 —— 八轮"文字漫出灰卡"
+    /// 那个 bug（一边乘缩放一边不乘）在架构层面已经不可能再出现，这个判定只剩"字号太大/卡太小"
+    /// 这一种真实情形（`+N` 用 18pt，灰卡在小节点上可能只有十几 pt 高）。
     private func overflowLabelFits(_ cardSize: CGSize) -> Bool {
-        let need = CanvasScreenText.lineHeight(18) + CanvasScreenText.lineHeight(7.5) + 2 * renderScale
-        return cardSize.height * renderScale >= need
+        let need = CanvasNodeText.lineHeight(18) + CanvasNodeText.lineHeight(7.5) + 2
+        return cardSize.height >= need
     }
 
     /// ★ 九轮：风格只剩扇形，卡尺寸不再随风格分叉。签名保留 `containerWidth` 是因为调用点
@@ -201,8 +194,7 @@ struct CanvasSlotFanStack: View {
     var body: some View {
         GeometryReader { geo in
             // 命中数学全在 1x 空间做（几何常量都是 1x），所以进来先把容器尺寸还原成 1x。
-            let box = CGSize(width: geo.size.width / max(renderScale, 0.01),
-                             height: geo.size.height / max(renderScale, 0.01))
+            let box = geo.size
             let cardSize = activeCardSize(containerWidth: box.width)
             let ls = layouts(containerWidth: box.width)
 
@@ -333,7 +325,7 @@ struct CanvasSlotFanStack: View {
                           source: CanvasFanGeometry.CardSource,
                           cardSize: CGSize) -> some View {
         let isHot = (hoveredCard == globalIndex)
-        return cardBody(source, counter: cardTextCounter(layout))
+        return cardBody(source)
             .frame(width: s(cardSize.width), height: s(cardSize.height))
             // ★ 八轮：牌面内容按卡片轮廓裁剪。
             //
@@ -377,7 +369,7 @@ struct CanvasSlotFanStack: View {
     }
 
     @ViewBuilder
-    private func cardBody(_ source: CanvasFanGeometry.CardSource, counter: CGFloat) -> some View {
+    private func cardBody(_ source: CanvasFanGeometry.CardSource) -> some View {
         switch source {
         case .attachmentIndex(let idx):
             if attachments.indices.contains(idx) {
@@ -396,15 +388,15 @@ struct CanvasSlotFanStack: View {
                         .clipShape(RoundedRectangle(cornerRadius: s(14), style: .continuous))
                         .padding(s(2.6))
                 } else {
-                    fileCardBody(att, counter: counter)
+                    fileCardBody(att)
                 }
             } else {
-                emptyCardBody(counter: counter)
+                emptyCardBody()
             }
 
         case .textSegment(let text):
             Text(text)
-                // ★ 八轮需求 1：卡内文字也是屏幕固定字号（不乘 renderScale）。
+                // ★ 十轮：卡内文字与卡片等比缩放（设计 pt 直通）。
                 .font(.system(size: fs(10.5)))
                 .foregroundColor(.black.opacity(0.78))
                 .lineLimit(7)
@@ -414,12 +406,11 @@ struct CanvasSlotFanStack: View {
                 .minimumScaleFactor(1.0)
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
                 .padding(s(8))
-                .canvasScreenFixedText(counter, anchor: .topLeading)
-                // 卡片缩到指甲盖大小就别写字了（阈值见 `CanvasScreenText`）。
+                // 卡片缩到指甲盖大小就别写字了（阈值见 `CanvasNodeText`）。
                 .opacity(cardTextVisible(fanCardSize))
 
         case .empty:
-            emptyCardBody(counter: counter)
+            emptyCardBody()
         }
     }
 
@@ -427,7 +418,7 @@ struct CanvasSlotFanStack: View {
     ///
     /// 用户指定「背景用深灰色卡片，和图片卡片风格一致」：所以外框圆角/描边/阴影完全沿用
     /// `cardView` 那一套（本视图只画内容），这里只把内容区铺成深灰。
-    private func fileCardBody(_ att: SlotContent.SlotAttachment, counter: CGFloat) -> some View {
+    private func fileCardBody(_ att: SlotContent.SlotAttachment) -> some View {
         let name = att.name.isEmpty ? (att.path.map { ($0 as NSString).lastPathComponent } ?? "文件") : att.name
         let kind = CanvasAttachmentKind.from(fileName: att.path ?? att.name)
         return RoundedRectangle(cornerRadius: s(14), style: .continuous)
@@ -440,7 +431,6 @@ struct CanvasSlotFanStack: View {
                     Text(name)
                         .font(.system(size: fs(8.5), weight: .medium))
                         .foregroundColor(.white.opacity(0.78))
-                        .canvasScreenFixedText(counter)
                         .opacity(cardTextVisible(fanCardSize))
                         .lineLimit(CanvasAttachmentKind.cardNameLineLimit)
                         .multilineTextAlignment(.center)
@@ -454,7 +444,7 @@ struct CanvasSlotFanStack: View {
             .help("\(kind.displayName)：\(name)")
     }
 
-    private func emptyCardBody(counter: CGFloat) -> some View {
+    private func emptyCardBody() -> some View {
         RoundedRectangle(cornerRadius: s(14), style: .continuous)
             .strokeBorder(style: StrokeStyle(lineWidth: s(1.4), dash: [s(4), s(3)]))
             .foregroundColor(Color.black.opacity(0.22))
@@ -464,7 +454,6 @@ struct CanvasSlotFanStack: View {
                         .font(.system(size: s(15), weight: .light))
                     Text("空槽位")
                         .font(.system(size: fs(9), weight: .medium))
-                        .canvasScreenFixedText(counter)
                         .opacity(cardTextVisible(fanCardSize))
                 }
                 .foregroundColor(Color.black.opacity(0.35))
@@ -502,8 +491,7 @@ struct CanvasSlotFanStack: View {
             .onContinuousHover(coordinateSpace: .local) { phase in
                 switch phase {
                 case .active(let p):
-                    let p1x = CGPoint(x: p.x / max(renderScale, 0.01),
-                                      y: p.y / max(renderScale, 0.01))
+                    let p1x = p
                     // 收拢态不做单卡 hover：卡片几乎完全重叠，此时"单卡放大"只会让最前面那张
                     // 无缘无故抖一下，用户根本分不清自己指的是哪一张。
                     guard expanded else {
@@ -553,8 +541,7 @@ struct CanvasSlotFanStack: View {
                         // 拖动过就不算点击：画布上按住卡片拖是"移动节点"，不该顺手弹个气泡。
                         let moved = hypot(value.translation.width, value.translation.height)
                         guard moved < 4 else { return }
-                        let p1x = CGPoint(x: value.location.x / max(renderScale, 0.01),
-                                          y: value.location.y / max(renderScale, 0.01))
+                        let p1x = value.location
                         let local0 = CanvasFanGeometry.hitTest(point: p1x,
                                                               layouts: ls,
                                                               cardSize: cardSize,
@@ -672,7 +659,6 @@ struct CanvasSlotFanStack: View {
             .allowsTightening(false)
             .minimumScaleFactor(1.0)
             .fixedSize()
-            .canvasScreenFixedText(cardTextCounter(layout))
             // `fixedSize()` 让这个两行块保持固定字号的自然尺寸 —— 缩小画布时它会比灰卡本身还大，
             // 于是漫出卡片、糊在邻卡上（八轮真机 25% 缩放实拍到）。
             //
@@ -864,7 +850,6 @@ struct CanvasSlotFanStack: View {
                     // 气泡按钮只在 hover 出现（此时节点必然够大），字号仍按屏幕固定处理，
                     // 保证与卡片上其它文字同一视觉尺寸。
                     .font(.system(size: fs(9.5), weight: .medium))
-                    .canvasScreenFixedText(textCounter, anchor: .leading)
             }
             .foregroundColor(.white.opacity(0.94))
             .padding(.horizontal, s(6))

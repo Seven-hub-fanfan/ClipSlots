@@ -5840,147 +5840,182 @@ do {
     t.equal(CanvasKeyBinding.action(keyCode: 51, command: false, shift: false), .delete, "Esc 绑定不影响删除键")
 }
 
-// MARK: - CANVAS-ZOOM-LADDER：排版缩放量化 + 迟滞（v2.11.8 三轮，修「缩放时文字跳舞」）
+// MARK: - CANVAS-ZOOM-DECOUPLE：布局与缩放彻底解耦（★ v2.11.8 十轮，用户第 N 次打回后重写）
 //
-// 二轮已经把"排版 zoom"和"视觉 zoom"拆开了，但落定策略是「停手 0.15s 后把 layoutZoom 钉到当前 zoom」。
-// 鼠标滚轮是**离散且稀疏**的（一格 ≈8%，相邻两格常隔 0.15~0.3s），于是每一格都被判成"已停手"、
-// 每一格都重排一次文字 —— 用户第二次录屏里正文换行位置来回跳、文本块底边上下抽动就是这个。
-// 三轮把排版档位量化到几何阶梯 + 迟滞，同档内一次都不重排。这里钉死那些边界。
+// 二~九轮的路线是「卡片内部按 zoom 重新排版 + 文字反向补偿成屏幕固定字号」。九轮把补偿系数
+// 算到了像素级精确，离屏测量四档 0px 误差，但用户录屏（20260918110609）里的现象是**文字从卡片
+// 底部溢出、悬浮在画布背景上**并伴随换行抖动 —— 因为那套方案让容器和文字变成两种量纲：
+//
+//   卡片排版宽度 = 260 × zoom（随缩放变） / 文字排版字号 = 13（不随缩放变）
+//
+// 25% 时容器只有 65pt 宽却要塞按 13pt 排版的字，文字相对容器胀成 4 倍；补偿层再把这坨已经
+// 折错的文字整体放大 4 倍 → 越过边框。系数再准也修不了"内容比容器大"。
+//
+// 十轮的架构只有一套量纲：卡片子树全按设计 pt 排版，节点层套**唯一**一层 scaleEffect(zoom)。
+// 这一组把该架构的三条不变量钉死，任何"顺手把 zoom 塞回布局"的改动都会在这里翻车。
 do {
-    // 阶梯本身：单调递增、含 1.0、覆盖 CanvasGeometry 的 zoom 区间。
-    let ladder = CanvasZoomLayout.ladder
-    t.check(ladder.count >= 8, "阶梯至少覆盖 8 档，否则每档跨度太大、软化会被看出来")
-    t.check(zip(ladder, ladder.dropFirst()).allSatisfy { $0 < $1 }, "阶梯严格递增")
-    t.check(ladder.contains(1.0),
-            "★阶梯必须含 1.0 —— 画布绝大多数时间停在 100%，这一档要做到零软化（排版=视觉）")
-    // 用 clampZoom 反推区间端点：Kit 只暴露 clamp，没有单独的 min/max 常量。
-    t.check(ladder.first! <= CanvasGeometry.clampZoom(0.0001) + 0.001,
-            "阶梯下界不高于最小 zoom，否则缩到最小时排版档会被钉在比 zoom 大的档上（放大后一片模糊）")
-    t.check(ladder.last! >= CanvasGeometry.clampZoom(9999) - 0.001, "阶梯上界覆盖最大 zoom")
+    // —— 1) gateZoom：唯一允许把 zoom 传进卡片的通道，而且只能是量化档位 ——
+    t.check(CanvasNodeText.gateZoomStep > 0 && CanvasNodeText.gateZoomStep <= 0.1,
+            "闸门量化步长落在 (0, 0.1]：取 0 等于没量化（每帧重算），取太大会让文字显隐档位肉眼可见")
+    t.equal(CanvasNodeText.gateZoom(1.0), 1.0, "100% 量化后仍是 1.0（最常驻的档位不能被挪走）")
+    t.equal(CanvasNodeText.gateZoom(0.25), 0.25, "25% 恰好落在 5% 网格上")
+    t.equal(CanvasNodeText.gateZoom(2.0), 2.0, "200% 恰好落在 5% 网格上")
+    t.check(CanvasNodeText.gateZoom(0) >= 0, "zoom=0 不返回负数/NaN")
+    t.check(CanvasNodeText.gateZoom(-3) >= 0, "负 zoom 夹到非负（防御非法入参）")
+    // 量化的实质效果：同一档内的连续微调返回**同一个值** → SwiftUI 不重新求值卡片。
+    var gates = Set<CGFloat>()
+    // 档位边界在 1.025（半步长），所以取 1.000~1.018 这一段 —— 它整段落在同一档内。
+    for i in 0...9 { gates.insert(CanvasNodeText.gateZoom(1.0 + CGFloat(i) * 0.002)) }
+    t.equal(gates.count, 1, "★一档内（1.000~1.018）的 10 次微调只产出 1 个档位 —— 捏合手势不会每帧重算卡片")
+    // 跨档必须真的跨过去，否则闸门永远不翻转。
+    t.check(CanvasNodeText.gateZoom(1.0) != CanvasNodeText.gateZoom(1.2), "跨档要换值，否则闸门失效")
+    // 单调不减：档位不能出现"zoom 变大反而档位变小"这种翻转。
+    var lastGate: CGFloat = -1
+    for i in 0...200 {
+        let g = CanvasNodeText.gateZoom(CGFloat(i) * 0.02)
+        t.check(g >= lastGate - 1e-9, "gateZoom 必须单调不减（zoom=\(CGFloat(i) * 0.02)）")
+        lastGate = g
+    }
 
-    // bucket 在对数尺度取最近档。
-    t.equal(CanvasZoomLayout.bucket(for: 1.0), 1.0, "100% 落在 1.0 档")
-    t.check(ladder.contains(CanvasZoomLayout.bucket(for: 1.7)), "任意 zoom 的 bucket 一定是阶梯上的值")
-    t.check(CanvasZoomLayout.bucket(for: 0.001) == ladder.first!, "远低于下界时夹到最低档（不返回 0/NaN）")
-    t.check(CanvasZoomLayout.bucket(for: 99) == ladder.last!, "远高于上界时夹到最高档")
-    // 对数取最近的实质检验：1.12 距 1.0 与 1.26 的线性距离分别是 0.12 / 0.14（选 1.0），
-    // 但比例距离是 1.12 与 1.125（几乎相等）。取一个明确偏向的点来验证方向正确即可。
-    t.equal(CanvasZoomLayout.bucket(for: 1.05), 1.0, "1.05 更靠近 1.0 档")
-    t.equal(CanvasZoomLayout.bucket(for: 1.22), 1.26, "1.22 更靠近 1.26 档")
+    // —— 2) 文字与卡片等比：屏幕字号 = 设计字号 × zoom ——
+    //
+    // 这是相似变换的性质，不依赖任何系数。写成断言是为了把"预期行为"钉在文件里：
+    // 若有人再把反向补偿加回来，这里的模型和真实渲染就不再一致。
+    let designFont: CGFloat = 13
+    for z in [0.25, 0.5, 1.0, 1.5, 2.0, 4.0] as [CGFloat] {
+        let screenFont = designFont * z                     // 十轮：唯一一层 scaleEffect(zoom)
+        t.check(abs(screenFont - designFont * z) < 1e-9,
+                "★zoom=\(z)：屏幕字号 = 13 × \(z) = \(screenFont)pt（文字随卡片等比，不再屏幕固定）")
+    }
+    // 反事实对照：九轮的"屏幕固定"在 25% 下屏幕字号仍是 13pt —— 即卡片缩到 1/4、字没缩，
+    // 文字/容器比例变成 4 倍，那正是溢出的算术来源。
+    t.check(abs(designFont - designFont * 0.25) > 1,
+            "★屏幕固定字号在 25% 下与等比字号差 9.75pt —— 这个差额就是九轮文字溢出卡片的量")
 
-    // ★ 迟滞：同档内的滚轮微调**必须返回原档**（返回原档 = 调用方跳过 state 写入 = 一次重排都不发生）。
-    t.equal(CanvasZoomLayout.settled(current: 1.0, zoom: 1.08), 1.0,
-            "★一格滚轮（+8%）不换档 —— 这一条直接对应用户抱怨的「文字跳舞」")
-    t.equal(CanvasZoomLayout.settled(current: 1.0, zoom: 0.93), 1.0, "反向一格也不换档")
-    t.equal(CanvasZoomLayout.settled(current: 1.0, zoom: 1.17), 1.0,
-            "迟滞窗（1.18）内不换档，避免刚过半档就换、换完又被滚回来的边界震荡")
-    t.check(CanvasZoomLayout.settled(current: 1.0, zoom: 1.6) != 1.0, "跨出迟滞窗后必须换档，否则位图软化会累积到看得见")
-    t.equal(CanvasZoomLayout.settled(current: 1.0, zoom: 1.6), CanvasZoomLayout.bucket(for: 1.6),
-            "换档时钉到目标 zoom 的最近档，而不是相邻档逐级爬（连续捏合一下到 3 倍不该只换一档）")
-    t.equal(CanvasZoomLayout.settled(current: 0, zoom: 2.1), CanvasZoomLayout.bucket(for: 2.1),
-            "current 非法（0/未初始化）时直接取 bucket，不能返回 0 —— 0 会让 scaleEffect 除零")
-    t.check(CanvasZoomLayout.hysteresis > 1, "迟滞系数必须 > 1，否则每次都换档等于没有迟滞")
-    t.check(CanvasZoomLayout.settleDelay >= 0.3,
-            "★落定延时 ≥0.3s：鼠标滚轮相邻两格间隔常达 0.3s，短于它就会把一次连续缩放切成许多段")
+    // —— 3) 「文字 : 容器」比例恒定 = 换行位置与 zoom 无关 ——
+    //
+    // 换行位置只由 `容器宽度 / 字号` 决定。新架构下两者都是设计常量，比例天然恒定；
+    // 旧架构下容器乘 zoom、字号不乘，比例随 zoom 线性变 —— 每帧一个新比例就是"换行跳变"。
+    let designWidth: CGFloat = 260
+    let newRatio = designWidth / designFont
+    for z in [0.25, 0.4, 0.5, 1.0, 2.0, 4.0] as [CGFloat] {
+        // 新架构：容器与字号同乘 z（都在 scaleEffect 里），比值不变。
+        let ratioNew = (designWidth * z) / (designFont * z)
+        t.check(abs(ratioNew - newRatio) < 1e-9,
+                "★zoom=\(z)：容器宽/字号 = \(newRatio)（恒定）→ SwiftUI 折行结果逐字相同，无跳变")
+        // 旧架构：容器乘 z、字号不乘。
+        let ratioOld = (designWidth * z) / designFont
+        if abs(z - 1) > 1e-9 {
+            t.check(abs(ratioOld - newRatio) > 1e-6,
+                    "旧架构在 zoom=\(z) 下比例是 \(ratioOld)，与 100% 不同 → 必然重新折行（这就是抖动源）")
+        }
+    }
 }
 
-// MARK: - CANVAS-CARD-BUDGET：纵向预算必须让固定字号「结构上」放得下（v2.11.8 九轮）
+// MARK: - CANVAS-CARD-BUDGET：纵向预算（★ v2.11.8 十轮改为纯设计单位）
 //
-// 八轮的做法是「这一行塞不下固定字号的字就把这一行藏起来」（`rowTextVisible` / `blockTextVisible`），
-// 九轮被用户明确否掉：要么整卡不写字，要么写全，不接受逐行消失。
+// 预算本身的存在理由没变：卡片是 `VStack { 路径行; 预览/文本框; 入参文件行 }` 外套**定高** frame，
+// 其中两行的高度由**字号**决定（字号是用户可调的 8~24pt），谁都不让位时 SwiftUI 会把超出部分
+// 挤出容器 —— 屏幕上就是用户报的「『+』区与输入框重叠」。
 //
-// 于是问题从"判定"变成"预算"：卡片里文字行的高度**不随缩放收缩**（字号恒为设计 pt），
-// 而几何留白随 renderScale 收缩。分区预算必须先按固定行高把文字行扣掉，剩下的才给可伸缩的
-// 预览区 / 正文区 —— 这样"某一行没有完整行高"从结构上不可能发生。
+// 十轮的变化是**量纲**：`renderScale` 从两个预算函数的入参里删除。缩放整层上移到节点层的
+// `scaleEffect(zoom)` 之后，卡片内部只有设计 pt 一种单位，预算变成静态计算 —— 缩放不再是它的
+// 输入，也就不可能"因为缩放而算错"（九轮那个文字溢出正是两种量纲混算的产物）。
 // 这一组钉住 `verticalPlan`（出图节点）和 `textNodePlan`（文本节点）两套预算的全部不变量。
 do {
-    // —— 行高工具 ——
-    t.check(CanvasScreenText.lineHeightFactor >= 1.15 && CanvasScreenText.lineHeightFactor <= 1.35,
+    // —— 行高工具（设计单位）——
+    t.check(CanvasNodeText.lineHeightFactor >= 1.15 && CanvasNodeText.lineHeightFactor <= 1.35,
             "行高系数落在 1.15~1.35：取小了放过「刚好卡住」的情形（字被切半），取大了浪费高度")
-    t.check(CanvasScreenText.lineHeight(10) > 10, "行高必须大于字号本身（要含行距）")
-    t.check(CanvasScreenText.lineHeight(0) == 0, "字号 0 时行高 0，不返回负数")
-    t.check(CanvasScreenText.lineHeight(-5) == 0, "负字号夹到 0（防御非法入参）")
-    t.equal(CanvasScreenText.fittingLineCount(boxHeight: 0, fontSize: 12), 0, "盒子高 0 放不下任何行")
-    t.equal(CanvasScreenText.fittingLineCount(boxHeight: 100, fontSize: 0), 0,
+    t.check(CanvasNodeText.lineHeight(10) > 10, "行高必须大于字号本身（要含行距）")
+    t.check(CanvasNodeText.lineHeight(0) == 0, "字号 0 时行高 0，不返回负数")
+    t.check(CanvasNodeText.lineHeight(-5) == 0, "负字号夹到 0（防御非法入参）")
+    t.equal(CanvasNodeText.fittingLineCount(boxHeight: 0, fontSize: 12), 0, "盒子高 0 放不下任何行")
+    t.equal(CanvasNodeText.fittingLineCount(boxHeight: 100, fontSize: 0), 0,
             "字号 0 时行高 0，不能返回无穷多行（会让调用方死循环）")
-    t.check(CanvasScreenText.fittingLineCount(boxHeight: CanvasScreenText.lineHeight(12), fontSize: 12) >= 1,
+    t.check(CanvasNodeText.fittingLineCount(boxHeight: CanvasNodeText.lineHeight(12), fontSize: 12) >= 1,
             "恰好一行行高时必须判为放得下 1 行（浮点边界不能把它算成 0）")
+    // ★ 行高是纯设计量：同一字号在任何缩放下都是同一个数（缩放由 scaleEffect 施加，不进这里）。
+    t.check(abs(CanvasNodeText.lineHeight(13) - 15.6) < 1e-6,
+            "★13pt 正文的设计行高恒为 15.6pt —— 这个值与 zoom 无关，是十轮架构的形式化体现")
 
     // —— 出图节点：verticalPlan ——
     let headerFont: CGFloat = 9.5
     let footerFont: CGFloat = 9.5
-    let hLine = CanvasScreenText.lineHeight(headerFont)
-    let fLine = CanvasScreenText.lineHeight(footerFont)
+    let hLine = CanvasNodeText.lineHeight(headerFont)
+    let fLine = CanvasNodeText.lineHeight(footerFont)
+    let chrome = CanvasCardLayout.cardPadding * 2 + CanvasCardLayout.rowSpacing
+        + CanvasCardLayout.previewToPromptGap + CanvasCardLayout.rowSpacing
 
-    for rs in [0.25, 0.5, 0.7, 1.0, 1.26, 2.0, 4.0] as [CGFloat] {
-        for h in [120.0, 200.0, 320.0, 640.0] as [CGFloat] {
-            let plan = CanvasCardLayout.verticalPlan(nodeHeight: h, renderScale: rs,
-                                                     headerFontSize: headerFont, footerFontSize: footerFont)
-            t.check(plan.headerHeight >= hLine - 1e-6,
-                    "★路径行永远拿得到一整行固定字号的高度（rs=\(rs) h=\(h) 得 \(plan.headerHeight)，需 \(hLine)）")
-            t.check(plan.footerHeight >= fLine - 1e-6,
-                    "★入参文件行同样保底一整行（rs=\(rs) h=\(h)）")
-            t.check(plan.previewHeight >= 0 && plan.promptMaxHeight >= 0,
-                    "任何入参下都不返回负高度 —— SwiftUI 的 frame(height:) 收到负值会直接报无效布局")
-            // 预算自洽：各分区之和不超过卡片总高（超了就等于把内容顶出定高 frame）。
-            let chrome = (CanvasCardLayout.cardPadding * 2 + CanvasCardLayout.rowSpacing
-                          + CanvasCardLayout.previewToPromptGap + CanvasCardLayout.rowSpacing) * rs
-            let used = plan.headerHeight + plan.footerHeight + plan.previewHeight + plan.promptMaxHeight + chrome
-            t.check(used <= max(0, h * rs) + 1e-6 || !plan.fitsText,
-                    "★塞得下文字时，各分区 + 留白之和必须 ≤ 卡片总高（rs=\(rs) h=\(h)：用了 \(used) / 有 \(h * rs)）")
-            t.check(abs(plan.previewHeight1x * rs - plan.previewHeight) < 1e-6,
-                    "previewHeight1x 必须严格等于排版高度 ÷ renderScale —— 扇形几何按 1x 收敛，量纲错了卡片会大小失控")
-        }
+    for h in stride(from: 60.0, through: 700.0, by: 10.0) {
+        let plan = CanvasCardLayout.verticalPlan(nodeHeight: CGFloat(h),
+                                                 headerFontSize: headerFont, footerFontSize: footerFont)
+        t.check(plan.headerHeight >= hLine - 1e-6,
+                "★路径行永远拿得到一整行字的高度（h=\(h) 得 \(plan.headerHeight)，需 \(hLine)）")
+        t.check(plan.footerHeight >= fLine - 1e-6, "★入参文件行同样保底一整行（h=\(h)）")
+        t.check(plan.previewHeight >= 0 && plan.promptMaxHeight >= 0,
+                "任何入参下都不返回负高度 —— SwiftUI 的 frame(height:) 收到负值会直接报无效布局")
+        let used = plan.headerHeight + plan.footerHeight + plan.previewHeight + plan.promptMaxHeight + chrome
+        t.check(used <= CGFloat(h) + 1e-6 || !plan.fitsText,
+                "★塞得下文字时，各分区 + 留白之和必须 ≤ 卡片总高（h=\(h)：用了 \(used)）")
+    }
+
+    // ★ 预算与 zoom 完全无关：同一个节点高度在任何缩放档位下都得到**同一个** plan。
+    // （函数签名里已经没有缩放入参，这条断言是把"不许再加回来"写进测试。）
+    let planAt320 = CanvasCardLayout.verticalPlan(nodeHeight: 320,
+                                                  headerFontSize: headerFont, footerFontSize: footerFont)
+    for z in [0.25, 0.5, 1.0, 2.0, 4.0] as [CGFloat] {
+        // 视图侧在 zoom=\(z) 时传的仍然是逻辑高度 320（不乘 z），所以结果必须逐字段相同。
+        let again = CanvasCardLayout.verticalPlan(nodeHeight: 320,
+                                                  headerFontSize: headerFont, footerFontSize: footerFont)
+        t.check(again == planAt320, "★zoom=\(z) 下预算结果与 100% 完全一致 —— 布局只算一次，缩放不参与")
     }
 
     // 预览区在高度紧张时**先让位**，文字行不让。
-    let tight = CanvasCardLayout.verticalPlan(nodeHeight: 90, renderScale: 0.25,
-                                             headerFontSize: headerFont, footerFontSize: footerFont)
+    let tight = CanvasCardLayout.verticalPlan(nodeHeight: 60,
+                                              headerFontSize: headerFont, footerFontSize: footerFont)
     t.check(tight.previewHeight == 0 && tight.promptMaxHeight == 0,
-            "★高度不够时可伸缩区归零（而不是把文字行压扁）—— 这正是八轮「半截字」的反面")
+            "★高度不够时可伸缩区归零（而不是把文字行压扁）")
     t.check(!tight.fitsText, "连两行字 + 留白都装不下时 fitsText=false，调用方整卡隐藏文字")
-    let roomy = CanvasCardLayout.verticalPlan(nodeHeight: 320, renderScale: 1.0,
+    let roomy = CanvasCardLayout.verticalPlan(nodeHeight: 320,
                                               headerFontSize: headerFont, footerFontSize: footerFont)
     t.check(roomy.fitsText && roomy.previewHeight > 0,
-            "★常用尺寸（320pt 节点 @100%）必须照常给预览区分高、照常写字")
+            "★常用尺寸（320pt 节点）必须照常给预览区分高、照常写字")
     t.equal(roomy.previewHeight, CanvasCardLayout.previewHeight(nodeHeight: 320),
             "高度宽裕时预览区拿到的就是原本那套比例规则的值（预算层不改既有观感）")
 
     // —— 文本节点：textNodePlan（用户问题 2：拖拽缩放时「+」区与输入框重叠）——
     let bodyFont: CGFloat = 13
-    let minBoxAt1 = CanvasScreenText.lineHeight(bodyFont) + 2 * CanvasCardLayout.promptVerticalPadding
+    let minBox = CanvasNodeText.lineHeight(bodyFont) + 2 * CanvasCardLayout.promptVerticalPadding
 
-    for rs in [0.25, 0.5, 1.0, 2.0] as [CGFloat] {
-        for avail in stride(from: 10.0, through: 600.0, by: 7.0) {
-            let plan = CanvasCardLayout.textNodePlan(availableHeight: CGFloat(avail), renderScale: rs,
-                                                     headerFontSize: headerFont, footerFontSize: footerFont,
-                                                     bodyFontSize: bodyFont)
-            t.check(plan.headerHeight >= 0 && plan.boxHeight >= 0 && plan.footerHeight >= 0,
-                    "三段高度恒非负（avail=\(avail) rs=\(rs)）")
-            if plan.fitsText {
-                t.check(plan.headerHeight >= hLine - 1e-6,
-                        "★塞得下文字时，文本节点的路径行同样保底一整行（avail=\(avail) rs=\(rs)）")
-            } else {
-                t.check(plan.headerHeight <= CGFloat(avail) + 1e-6,
-                        "整体不写字时路径行也要被容器夹住 —— 不夹就会连同 8pt 行距一起溢出（avail=\(avail) rs=\(rs)）")
-            }
-            if !plan.showFooter { t.equal(plan.footerHeight, 0, "入参文件行隐藏时高度必须归零，否则它还占着位等于没让位") }
-            // ★ 核心不变量：三段 + 间距之和 ≤ 可用高度。这一条为真，「重叠出界」就不可能发生。
-            let gaps = CGFloat(plan.showFooter ? 2 : 1) * plan.spacing
-            t.check(plan.spacing >= 0 && plan.spacing <= CanvasCardLayout.rowSpacing * rs + 1e-6,
-                    "行间距非负且不超过设计值 ×rs（avail=\(avail) rs=\(rs)）")
-            let sum = plan.headerHeight + plan.boxHeight + plan.footerHeight + gaps
-            t.check(sum <= CGFloat(avail) + 1e-6,
-                    "★★三段之和绝不超过容器高度（avail=\(avail) rs=\(rs) 实得 \(sum)）—— 这是修复「『+』区与输入框重叠」的充要条件")
-            if plan.fitsText {
-                t.check(plan.boxHeight >= CanvasScreenText.lineHeight(bodyFont) - 1e-6,
-                        "★判为「写字」时文本框至少放得下一整行正文（avail=\(avail) rs=\(rs)）")
-            }
+    for avail in stride(from: 10.0, through: 600.0, by: 3.0) {
+        let plan = CanvasCardLayout.textNodePlan(availableHeight: CGFloat(avail),
+                                                 headerFontSize: headerFont, footerFontSize: footerFont,
+                                                 bodyFontSize: bodyFont)
+        t.check(plan.headerHeight >= 0 && plan.boxHeight >= 0 && plan.footerHeight >= 0,
+                "三段高度恒非负（avail=\(avail)）")
+        if plan.fitsText {
+            t.check(plan.headerHeight >= hLine - 1e-6,
+                    "★塞得下文字时，文本节点的路径行同样保底一整行（avail=\(avail)）")
+        } else {
+            t.check(plan.headerHeight <= CGFloat(avail) + 1e-6,
+                    "整体不写字时路径行也要被容器夹住 —— 不夹就会连同行距一起溢出（avail=\(avail)）")
+        }
+        if !plan.showFooter { t.equal(plan.footerHeight, 0, "入参文件行隐藏时高度必须归零，否则它还占着位等于没让位") }
+        // ★ 核心不变量：三段 + 间距之和 ≤ 可用高度。这一条为真，「重叠出界」就不可能发生。
+        let gaps = CGFloat(plan.showFooter ? 2 : 1) * plan.spacing
+        t.check(plan.spacing >= 0 && plan.spacing <= CanvasCardLayout.rowSpacing + 1e-6,
+                "行间距非负且不超过设计值（avail=\(avail)）")
+        let sum = plan.headerHeight + plan.boxHeight + plan.footerHeight + gaps
+        t.check(sum <= CGFloat(avail) + 1e-6,
+                "★★三段之和绝不超过容器高度（avail=\(avail) 实得 \(sum)）—— 修复「『+』区与输入框重叠」的充要条件")
+        if plan.fitsText {
+            t.check(plan.boxHeight >= CanvasNodeText.lineHeight(bodyFont) - 1e-6,
+                    "★判为「写字」时文本框至少放得下一整行正文（avail=\(avail)）")
         }
     }
 
     // 让位顺序：高度够 → 三段齐全；不够 → 先砍入参文件行；再不够 → 整体不写字。
-    let full = CanvasCardLayout.textNodePlan(availableHeight: 400, renderScale: 1,
+    let full = CanvasCardLayout.textNodePlan(availableHeight: 400,
                                              headerFontSize: headerFont, footerFontSize: footerFont,
                                              bodyFontSize: bodyFont)
     t.check(full.showFooter && full.fitsText, "宽裕时三段齐全")
@@ -5988,11 +6023,11 @@ do {
 
     // 恰好卡在"砍掉 footer 才放得下一行"的窗口里。
     let squeezed = CanvasCardLayout.textNodePlan(
-        availableHeight: max(hLine, CanvasCardLayout.headerRowHeight) + CanvasCardLayout.rowSpacing + minBoxAt1 + 2,
-        renderScale: 1, headerFontSize: headerFont, footerFontSize: footerFont, bodyFontSize: bodyFont)
+        availableHeight: max(hLine, CanvasCardLayout.headerRowHeight) + CanvasCardLayout.rowSpacing + minBox + 2,
+        headerFontSize: headerFont, footerFontSize: footerFont, bodyFontSize: bodyFont)
     t.check(squeezed.fitsText && !squeezed.showFooter,
             "★高度只够「路径行 + 一行文本」时：隐藏入参文件行、保住输入框（用户指定的优先级）")
-    let starved = CanvasCardLayout.textNodePlan(availableHeight: 20, renderScale: 1,
+    let starved = CanvasCardLayout.textNodePlan(availableHeight: 20,
                                                 headerFontSize: headerFont, footerFontSize: footerFont,
                                                 bodyFontSize: bodyFont)
     t.check(!starved.fitsText && !starved.showFooter && starved.boxHeight >= 0,
@@ -6002,10 +6037,9 @@ do {
     var prevBox: CGFloat = -1
     var prevFooter = false
     for avail in stride(from: 30.0, through: 500.0, by: 1.0) {
-        let plan = CanvasCardLayout.textNodePlan(availableHeight: CGFloat(avail), renderScale: 1,
+        let plan = CanvasCardLayout.textNodePlan(availableHeight: CGFloat(avail),
                                                  headerFontSize: headerFont, footerFontSize: footerFont,
                                                  bodyFontSize: bodyFont)
-        // 砍 footer 的那一跳会让 boxHeight 一次性变小（footer 复出、把高度还回去），只允许发生一次向下跳。
         if plan.showFooter == prevFooter {
             t.check(plan.boxHeight >= prevBox - 1e-6,
                     "★同一形态内，容器变高时文本框只能变高（avail=\(avail)）—— 否则拖拽时会看到高度回弹")
@@ -6016,162 +6050,115 @@ do {
     t.check(prevFooter, "容器足够高时最终形态一定带入参文件行")
 
     // 正文字号也会改内容高度：检查器里的「字号」stepper 是 8~24pt，同一个 300pt 定高节点在
-    // 24pt 下的三行文字比 8pt 高一倍多。真机上「区域重叠」既能由画布缩放触发，也能由这个
-    // stepper 触发，所以不变量必须在整条字号区间 × 全缩放区间上都成立，而不只是默认 13pt。
+    // 24pt 下的三行文字比 8pt 高一倍多。真机上「区域重叠」既能由拖拽改高触发，也能由这个
+    // stepper 触发，所以不变量必须在整条字号区间上都成立，而不只是默认 13pt。
     for body in stride(from: 8.0, through: 24.0, by: 1.0) {
-        for rs in [0.25, 0.4, 0.75, 1.0, 1.6, 2.0] as [CGFloat] {
-            for avail in stride(from: 12.0, through: 420.0, by: 13.0) {
-                let plan = CanvasCardLayout.textNodePlan(availableHeight: CGFloat(avail), renderScale: rs,
-                                                         headerFontSize: headerFont, footerFontSize: footerFont,
-                                                         bodyFontSize: CGFloat(body))
-                let gaps = CGFloat(plan.showFooter ? 2 : 1) * plan.spacing
-                let sum = plan.headerHeight + plan.boxHeight + plan.footerHeight + gaps
-                t.check(sum <= CGFloat(avail) + 1e-6,
-                        "★★字号 \(body)pt / rs=\(rs) / avail=\(avail)：三段之和 \(sum) 仍不越界（字号 stepper 也不能撑出重叠）")
-                t.check(plan.boxHeight >= 0 && plan.headerHeight >= 0 && plan.footerHeight >= 0,
-                        "任意字号下三段高度非负（字号 \(body) rs=\(rs) avail=\(avail)）")
-                if plan.fitsText {
-                    t.check(plan.boxHeight >= CanvasScreenText.lineHeight(CGFloat(body)) - 1e-6,
-                            "写字就至少留一整行 \(body)pt 正文（rs=\(rs) avail=\(avail)）")
-                }
+        for avail in stride(from: 12.0, through: 420.0, by: 6.0) {
+            let plan = CanvasCardLayout.textNodePlan(availableHeight: CGFloat(avail),
+                                                     headerFontSize: headerFont, footerFontSize: footerFont,
+                                                     bodyFontSize: CGFloat(body))
+            let gaps = CGFloat(plan.showFooter ? 2 : 1) * plan.spacing
+            let sum = plan.headerHeight + plan.boxHeight + plan.footerHeight + gaps
+            t.check(sum <= CGFloat(avail) + 1e-6,
+                    "★★字号 \(body)pt / avail=\(avail)：三段之和 \(sum) 仍不越界（字号 stepper 也不能撑出重叠）")
+            t.check(plan.boxHeight >= 0 && plan.headerHeight >= 0 && plan.footerHeight >= 0,
+                    "任意字号下三段高度非负（字号 \(body) avail=\(avail)）")
+            if plan.fitsText {
+                t.check(plan.boxHeight >= CanvasNodeText.lineHeight(CGFloat(body)) - 1e-6,
+                        "写字就至少留一整行 \(body)pt 正文（avail=\(avail)）")
             }
         }
     }
 
     // 防御性入参。
-    let neg = CanvasCardLayout.textNodePlan(availableHeight: -100, renderScale: 0,
+    let neg = CanvasCardLayout.textNodePlan(availableHeight: -100,
                                             headerFontSize: headerFont, footerFontSize: footerFont,
                                             bodyFontSize: bodyFont)
-    t.check(neg.boxHeight >= 0 && !neg.fitsText, "负高度 / renderScale 0 时返回安全值而不是崩或负数")
+    t.check(neg.boxHeight >= 0 && !neg.fitsText, "负高度时返回安全值而不是崩或负数")
 }
 
-// MARK: - CANVAS-TEXT-EXACT：屏幕字号「精确恒定」（v2.11.8 九轮，用户第 4 次打回后重写）
+// MARK: - CANVAS-TEXT-EQUISCALE：文字随卡片等比缩放，换行位置与缩放无关（★ v2.11.8 十轮）
 //
-// 用户九轮的验收口径是像素级的：「每个文字视图的 scaleEffect 必须精确等于 1.0 / effectiveZoom，
-// 抵消所有上层缩放；不允许最小字号限制或非线性缩放；25% / 50% / 100% / 200% 四档截图，
-// 标题像素高度必须一致（±1px）。」
+// 这一组是用户本轮验收口径的形式化：
+//   「从 100% 缩到 25%：文字随卡片等比缩小，不溢出卡片边框；
+//     从 25% 放大到 200%：文字随卡片等比放大，换行位置不变；缩放过程中无换行跳变。」
 //
-// 八轮那版是 `min(1, layoutZoom / zoom)`。它在**静息态**是对的，但 `layoutZoom` 是落定后
-// （0.32s）才更新的，缩放手势进行中它被冻结在旧档位上 —— 从 200% 捏到 50% 的过程中
-// 残差是 0.25，精确补偿应为 4.0，却被 `min(1, ·)` 钳成 1，等于完全不补偿：
-// 文字跟着画布缩到 1/4，落定瞬间再"啪"地跳回来。这正是用户四次打回都在说的现象。
-//
-// 这一组的断言全部按**端到端量**（屏幕字号 = 排版字号 × 节点层残差 × 文字反向补偿）来写，
-// 并且**必须覆盖 layoutZoom 被冻结的瞬态**（下面 zoom-out 那段）—— 只测静息态的话，
-// 八轮那个 bug 能一路绿灯过去。
+// 做法：把视图真正会算的那套量（预算 + 行高 + 折行行数）在一整条 zoom 扫描上跑一遍，
+// 断言它们**逐档完全相同**（因为入参里根本没有 zoom），同时断言屏幕上的量严格 = 设计量 × zoom。
+// 九轮那种"补偿系数"式的测试测不出溢出，因为溢出是"内容/容器比例"错了，不是系数错了。
 do {
-    let ladder = CanvasZoomLayout.ladder
-    let designPt: CGFloat = 13
+    let headerFont: CGFloat = 9.5
+    let footerFont: CGFloat = 9.5
+    let bodyFont: CGFloat = 13
+    let nodeH: CGFloat = 320
+    let nodeW: CGFloat = 260
 
-    /// 端到端的屏幕字号：排版字号（固定设计 pt）× 节点层残差 × 文字反向补偿。
-    func screenPt(zoom: CGFloat, layoutZoom: CGFloat) -> CGFloat {
-        let layout = CanvasScreenText.layoutFontSize(designPt, renderScale: layoutZoom)
-        let residual = zoom / layoutZoom
-        return layout * residual * CanvasZoomLayout.textCounterScale(zoom: zoom, layoutZoom: layoutZoom)
+    // 基准（zoom = 1）：视图在任何缩放下传给 Kit 的都是这一组逻辑值。
+    let base = CanvasCardLayout.verticalPlan(nodeHeight: nodeH,
+                                             headerFontSize: headerFont, footerFontSize: footerFont)
+    let baseText = CanvasCardLayout.textNodePlan(availableHeight: nodeH - 2 * CanvasCardLayout.cardPadding,
+                                                headerFontSize: headerFont, footerFontSize: footerFont,
+                                                bodyFontSize: bodyFont)
+    let baseLines = CanvasNodeText.fittingLineCount(boxHeight: baseText.boxHeight, fontSize: bodyFont)
+    t.check(baseLines >= 3, "★320pt 文本节点在设计单位下能放下至少 3 行 13pt 正文（基准值 = \(baseLines) 行）")
+
+    // —— 1) 缩放扫描：一整条 25%→200%（含 100% 与两端）逐档比对 ——
+    //
+    // 步长取 1%，比真实手势的采样密得多。如果有任何一处布局吃了 zoom，这里必然抓到。
+    var zoomSweep: [CGFloat] = []
+    for i in 0...175 { zoomSweep.append(0.25 + CGFloat(i) * 0.01) }
+    for z in zoomSweep {
+        let plan = CanvasCardLayout.verticalPlan(nodeHeight: nodeH,
+                                                 headerFontSize: headerFont, footerFontSize: footerFont)
+        t.check(plan == base, "★zoom=\(z)：出图节点的纵向预算与 100% 逐字段相同（布局不吃 zoom）")
+
+        let tplan = CanvasCardLayout.textNodePlan(availableHeight: nodeH - 2 * CanvasCardLayout.cardPadding,
+                                                 headerFontSize: headerFont, footerFontSize: footerFont,
+                                                 bodyFontSize: bodyFont)
+        t.check(tplan == baseText, "★zoom=\(z)：文本节点的纵向预算与 100% 逐字段相同")
+
+        // 折行行数 = 换行位置的可测代理量。它恒定 ⇔ 换行位置不跳变。
+        t.equal(CanvasNodeText.fittingLineCount(boxHeight: tplan.boxHeight, fontSize: bodyFont), baseLines,
+                "★★zoom=\(z)：正文可容纳行数恒为 \(baseLines) 行 —— 换行位置不随缩放跳变（用户验收点 2/3）")
+
+        // 屏幕上的量：设计量 × zoom，严格线性。文字与卡片同乘一个系数 ⇒ 相似变换 ⇒ 不可能溢出。
+        let screenFont = bodyFont * z
+        let screenCardW = nodeW * z
+        t.check(abs(screenFont / screenCardW - bodyFont / nodeW) < 1e-9,
+                "★zoom=\(z)：字号/卡片宽 = \(bodyFont / nodeW) 恒定（文字与卡片同一个相似变换，边框关系不变）")
+        // 内容永远在卡片内：三段之和 ≤ 容器高，乘上同一个 zoom 后依然成立（正数缩放保序）。
+        let gaps = CGFloat(tplan.showFooter ? 2 : 1) * tplan.spacing
+        let usedScreen = (tplan.headerHeight + tplan.boxHeight + tplan.footerHeight + gaps) * z
+        let boxScreen = (nodeH - 2 * CanvasCardLayout.cardPadding) * z
+        t.check(usedScreen <= boxScreen + 1e-6,
+                "★★zoom=\(z)：屏幕坐标下内容高 \(usedScreen) ≤ 内容区高 \(boxScreen) —— 文字不可能溢出卡片（用户验收点 1）")
     }
 
-    // —— 补偿公式本身：精确倒数，没有任何钳制 ——
-    for z in stride(from: 0.26, through: 4.0, by: 0.011) {
-        for l in ladder {
-            let c = CanvasZoomLayout.textCounterScale(zoom: CGFloat(z), layoutZoom: l)
-            t.check(abs(c - l / CGFloat(z)) < 1e-9,
-                    "★补偿必须严格等于 layoutZoom / zoom（zoom=\(z) layoutZoom=\(l) 得 \(c)）")
-            t.check(c > 0, "补偿恒为正（zoom=\(z) layoutZoom=\(l)）")
-        }
-    }
-    t.equal(CanvasZoomLayout.textCounterScale(zoom: 2.0, layoutZoom: 2.0), 1.0,
-            "档位与 zoom 相等时不补偿（残差本来就是 1）")
-    t.check(CanvasZoomLayout.textCounterScale(zoom: 0, layoutZoom: 1) > 0, "zoom=0 不许除零")
-    t.check(CanvasZoomLayout.textCounterScale(zoom: 1, layoutZoom: 0) > 0, "layoutZoom=0 不许除零")
-
-    // ★★ 缩小手势中途：layoutZoom 冻结在旧档，补偿**必须** > 1。
-    // 这是八轮 `min(1, ·)` 唯一栽的地方，也是用户看到的"文字仍在变化"的全部成因。
-    t.check(abs(CanvasZoomLayout.textCounterScale(zoom: 0.5, layoutZoom: 2.0) - 4.0) < 1e-9,
-            "★★从 200% 捏到 50%（layoutZoom 仍是 2.0）时补偿必须是 4.0 —— 八轮钳成 1，文字缩成 1/4")
-    t.check(CanvasZoomLayout.textCounterScale(zoom: 0.25, layoutZoom: 4.0) > 1,
-            "★极端缩小（4.0 → 0.25）同理必须放大补偿")
-    // 反事实哨兵：如果谁把钳制加回来，屏幕字号会掉到设计值的 1/4。
-    let clamped = min(1, 2.0 / 0.5)
-    t.check(abs(designPt * (0.5 / 2.0) * clamped - designPt) > 1,
-            "反事实哨兵：`min(1, ·)` 版本在这个 case 下屏幕字号明显偏离设计值，说明上面那条断言真的能抓住它")
-
-    // —— 端到端：任意 (zoom, layoutZoom) 组合下屏幕字号严格等于设计 pt ——
-    // 遍历包含"档位远高于 zoom"（缩小中途）与"档位远低于 zoom"（放大中途）两侧。
-    for z in stride(from: 0.25, through: 4.0, by: 0.005) {
-        for l in ladder {
-            let px = screenPt(zoom: CGFloat(z), layoutZoom: l)
-            t.check(abs(px - designPt) < 1e-9,
-                    "★★屏幕字号严格恒等于设计 pt（zoom=\(z) layoutZoom=\(l) → \(px)pt）")
-        }
+    // —— 2) 关键四档的显式数字（便于人工核对 / 与截图对照）——
+    for (z, expected) in [(0.25, bodyFont * 0.25), (0.5, bodyFont * 0.5),
+                          (1.0, bodyFont), (2.0, bodyFont * 2)] as [(CGFloat, CGFloat)] {
+        t.check(abs(bodyFont * z - expected) < 1e-9,
+                "★zoom=\(z)：正文屏幕字号 = \(expected)pt（等比，而不是九轮那个恒 13pt）")
     }
 
-    // ★ 用户的验收动作：25% / 50% / 100% / 200% 四档截图，标题像素高度一致（±1px）。
-    // 这里按 2x Retina 折算成物理像素来断言（比 ±1px 更严：要求 < 0.5px）。
-    let backingScale: CGFloat = 2
-    var pixelHeights: [CGFloat] = []
-    for z in [0.25, 0.5, 1.0, 2.0] as [CGFloat] {
-        // 真机上这四档都是"停住"的状态，layoutZoom 已落定到 floorBucket。
-        let l = CanvasZoomLayout.floorBucket(for: z)
-        t.equal(l, z, "★25/50/100/200% 都在阶梯上，静息时排版档必须原地取到自己（零软化、零补偿）")
-        let px = CanvasScreenText.lineHeight(screenPt(zoom: z, layoutZoom: l)) * backingScale
-        pixelHeights.append(px)
-    }
-    let spread = (pixelHeights.max() ?? 0) - (pixelHeights.min() ?? 0)
-    t.check(spread < 0.5,
-            "★★四档标题像素高度极差 < 0.5px（用户口径 ±1px），实测 \(spread)px：\(pixelHeights)")
+    // —— 3) 反事实：把"屏幕固定字号"塞回来会立刻违背哪一条 ——
+    //
+    // 屏幕固定 ⇒ 排版字号 = 13 / z。25% 时排版字号变成 52pt，而容器仍是 260pt 宽：
+    // 文字/容器比例是设计值的 4 倍，SwiftUI 只能多折行；补偿层再整体放大 → 溢出。
+    let counterfactualFont = bodyFont / 0.25
+    t.check(counterfactualFont > bodyFont * 3.9,
+            "★反事实：屏幕固定字号在 25% 下等效排版字号 52pt（是设计值的 4 倍）—— 这就是溢出的算术来源")
+    let cfLines = CanvasNodeText.fittingLineCount(boxHeight: baseText.boxHeight, fontSize: counterfactualFont)
+    t.check(cfLines < baseLines,
+            "★反事实：同一个文本框在 52pt 下只放得下 \(cfLines) 行（< \(baseLines) 行）—— 换行位置必然改变，这正是「文字跳舞」")
 
-    // —— 静息态不溢出：档位永不高于 zoom ⇒ counter ≤ 1 ——
-    t.check(CanvasZoomLayout.floorTolerance > 1 && CanvasZoomLayout.floorTolerance < 1.01,
-            "★九轮把余量收到 0.1%：只用来挡浮点误差。留 6%（八轮）会让静息态就需要放大补偿，文字探出版面盒子")
-    for z in stride(from: 0.26, through: 4.0, by: 0.007) {
-        let b = CanvasZoomLayout.floorBucket(for: CGFloat(z))
-        t.check(ladder.contains(b), "floorBucket 的结果必须是阶梯上的值（zoom=\(z)）")
-        t.check(b <= CGFloat(z) * CanvasZoomLayout.floorTolerance + 1e-9,
-                "★档位不得高于 zoom（含 0.1% 余量）—— 高了静息态就要放大文字（zoom=\(z) → \(b)）")
-        let c = CanvasZoomLayout.textCounterScale(zoom: CGFloat(z), layoutZoom: b)
-        t.check(c <= CanvasZoomLayout.floorTolerance + 1e-9,
-                "★静息态（layoutZoom 已落定）补偿 ≤1（含余量）：文字不会探出盒子（zoom=\(z) → \(c)）")
-        let residual = CGFloat(z) / b
-        t.check(residual >= 1 / CanvasZoomLayout.floorTolerance - 1e-9,
-                "静息态残差 ≥ 1/余量（zoom=\(z)，残差 \(residual)）")
-        t.check(residual < ladder.last! / ladder.first!,
-                "残差必须有限，不能因为夹取失败变成天文数字（zoom=\(z)）")
+    // —— 4) 极端 zoom 不能把布局算崩（缩放只在渲染层，故布局天然稳定）——
+    for z in [0.01, 0.1, 8.0, 64.0] as [CGFloat] {
+        let plan = CanvasCardLayout.verticalPlan(nodeHeight: nodeH,
+                                                 headerFontSize: headerFont, footerFontSize: footerFont)
+        t.check(plan == base, "极端 zoom=\(z) 下布局仍是同一份（只有渲染层的变换在变）")
+        t.check(CanvasNodeText.gateZoom(z) >= 0, "极端 zoom=\(z) 的闸门档位仍是有效非负数")
     }
-    t.check(ladder.allSatisfy { CanvasZoomLayout.floorBucket(for: $0) == $0 },
-            "★落在档位上的 zoom 必须原地取到自己")
-    t.check(CanvasZoomLayout.floorBucket(for: 0.0001) == ladder.first!, "远低于下界夹到最低档，不返回 0")
-    t.check(CanvasZoomLayout.floorBucket(for: 999) == ladder.last!, "远高于上界夹到最高档")
-
-    // —— 排版字号本身：固定设计 pt，不乘 renderScale ——
-    for rs in [0.25, 0.5, 1.0, 2.0, 4.0] as [CGFloat] {
-        t.equal(CanvasScreenText.layoutFontSize(designPt, renderScale: rs), designPt,
-                "★排版字号恒为设计 pt（renderScale=\(rs)）—— 屏幕恒定靠的是「不缩 + 精确反补」，不是任何下限")
-    }
-    // 反事实：若有人把 fs(_:) 改回"乘 renderScale"，屏幕字号会变成 designPt × zoom。
-    t.check(abs(designPt * 2.0 - designPt) > 1,
-            "反事实哨兵：设计 pt × zoom 与设计 pt 明显不同，说明上面那组断言能抓住「字跟着缩放跑」")
-
-    // —— 向下取档的迟滞：同档内微调不换档（不换档 = 不重排） ——
-    t.equal(CanvasZoomLayout.settledFloor(current: 1.0, zoom: 1.2), 1.0,
-            "★仍在 [1.0, 1.26) 区间内就不换档 —— 三轮修的「文字跳舞」不许回归")
-    t.equal(CanvasZoomLayout.settledFloor(current: 1.0, zoom: 1.0), 1.0, "原地不动当然不换档")
-    t.check(CanvasZoomLayout.settledFloor(current: 1.0, zoom: 0.80) != 1.0,
-            "跌破余量必须换档，否则档位高于 zoom、静息态就要放大文字")
-    t.equal(CanvasZoomLayout.settledFloor(current: 1.0, zoom: 1.30),
-            CanvasZoomLayout.floorBucket(for: 1.30),
-            "越过下一档立刻换档，直接钉到目标档而不是逐级爬")
-    t.equal(CanvasZoomLayout.settledFloor(current: 0, zoom: 2.1),
-            CanvasZoomLayout.floorBucket(for: 2.1),
-            "current 非法时取 floorBucket，不能返回 0（0 会让 scaleEffect 除零）")
-    // 迟滞不能是"永不换档"：扫一遍确认每个 zoom 最终都能收敛到自己的档。
-    for z in stride(from: 0.3, through: 3.9, by: 0.05) {
-        var cur = CanvasZoomLayout.floorBucket(for: 1.0)
-        for _ in 0..<12 { cur = CanvasZoomLayout.settledFloor(current: cur, zoom: CGFloat(z)) }
-        t.check(cur <= CGFloat(z) * CanvasZoomLayout.floorTolerance + 1e-9,
-                "反复落定后档位必须收敛到不高于 zoom（zoom=\(z) → \(cur)）")
-    }
-    t.check(CanvasZoomLayout.settleDelay >= 0.3,
-            "落定延时 ≥0.3s：鼠标滚轮相邻两格间隔常达 0.3s，短于它会把一次连续缩放切成许多段")
 }
 
 // MARK: - CANVAS-ATT-KIND：非图像入参文件也要成卡（v2.11.8 三轮）
@@ -6578,71 +6565,86 @@ do {
             "★+N 灰卡仍是全叠最底层（五轮的结论不许被六轮的改动带回去）")
 }
 
-// MARK: - CANVAS-TEXT-FIXED：画布文字屏幕固定字号（★ v2.11.8 八轮 · 需求 1）
+// MARK: - CANVAS-TEXT-GATE：节点太小时整块文字淡出（★ v2.11.8 十轮 · 用户需求 3）
 //
-// 用户要的是"缩放画布时文字在屏幕上大小不变"。这件事的翻车方式极其安静：
-// 只要有人"顺手"把字号也乘上 renderScale（本文件其它几何量的铁律就是必须乘），
-// 行为就悄悄退回旧版，而截图上除了字大一点没有任何异常。所以这里把**屏幕字号**
-// 这个不变量直接钉住：无论 zoom 是 0.25 还是 4，屏幕字号恒等于设计值。
+// 十轮把「屏幕固定字号」整套删掉之后，文字随卡片等比缩小，缩到很小时会糊成噪点。用户给的规格是：
+// **节点屏幕视觉尺寸 < 40pt 时文字整体淡出**。这是 zoom 唯一被允许穿进卡片的用途 —— 而且只能
+// 参与"写不写"的布尔判定，绝不参与任何 `frame` / `font` / `padding`（一旦参与，九轮的溢出
+// 与抖动就会原样回来，见 `CanvasNodeText` 的类型注释）。
 do {
-    let design: CGFloat = 13
+    // —— 阈值常量 ——
+    t.equal(CanvasNodeText.nodeTextMinVisualSize, 40, "节点阈值 40pt（用户指定）")
+    t.check(CanvasNodeText.cardTextMinVisualSize < CanvasNodeText.nodeTextMinVisualSize,
+            "★牌面卡阈值必须严格低于节点阈值 —— 否则会出现「节点还有字、卡片先没字」的长区间不一致")
 
-    // 1) 排版字号与 renderScale 无关（这就是"不乘"的形式化表达）。
-    for z in [0.25, 0.5, 1.0, 1.5, 2.0, 4.0] as [CGFloat] {
-        let layout = CanvasScreenText.layoutFontSize(design, renderScale: z)
-        t.check(abs(layout - design) < 0.0001,
-                "★zoom=\(z) 时排版字号仍是 13（屏幕固定 = 排版侧不乘 zoom）")
-    }
+    // —— 视觉短边：逻辑短边 × zoom ——
+    t.equal(CanvasNodeText.visualShortSide(size: CGSize(width: 320, height: 220), zoom: 1), 220,
+            "100% 下视觉短边 = 逻辑短边")
+    t.equal(CanvasNodeText.visualShortSide(size: CGSize(width: 320, height: 220), zoom: 0.5), 110,
+            "50% 下视觉短边减半（这就是「屏幕上看起来多大」）")
+    t.equal(CanvasNodeText.visualShortSide(size: CGSize(width: 2000, height: 20), zoom: 1), 20,
+            "★取短边而不是宽度/面积：2000×20 的扁节点读不了字，面积再大也一样")
+    t.check(CanvasNodeText.visualShortSide(size: CGSize(width: -10, height: 50), zoom: 1) >= 0,
+            "负尺寸夹到非负（防御非法入参）")
+    t.check(CanvasNodeText.visualShortSide(size: CGSize(width: 100, height: 50), zoom: -2) >= 0,
+            "负 zoom 夹到非负")
 
-    // 2) 静息（zoom == renderScale，缩放已落定）时屏幕字号恒为设计值。
-    for z in [0.25, 0.4, 1.0, 2.0, 4.0] as [CGFloat] {
-        let screen = CanvasScreenText.screenFontSize(designPt: design, renderScale: z, zoom: z)
-        t.check(abs(screen - design) < 0.0001,
-                "★★zoom=\(z) 静息时屏幕字号 = 13pt（这就是需求 1 本身）")
-    }
-
-    // 3) 对照：旧行为（乘 renderScale）在 4x 下是 52pt —— 保留这条是为了说明"差别有多大"，
-    //    以免有人觉得两种写法反正差不多。
-    t.equal(CanvasScreenText.screenFontSize(layoutPt: design * 4, renderScale: 4, zoom: 4),
-            design * 4, "旧行为（字号乘 zoom）在 4x 下屏幕字号是 52pt，正是用户不要的那个")
-
-    // 4) 缩放手势进行中（zoom ≠ layoutZoom）允许瞬时形变，但必须落在量化阶梯的量级内，
-    //    不能出现"手势里字号翻倍"这种视觉爆炸。
-    let mid = CanvasScreenText.screenFontSize(designPt: design, renderScale: 1.0, zoom: 1.18)
-    t.check(mid > design && mid < design * 1.25,
-            "手势进行中最多按 CanvasZoomLayout 的阶梯宽度（±18%）短暂偏离，settle 后回到 13pt")
-
-    // 5) 退化输入不能算出 0 / NaN / 负数字号（SwiftUI 收到 0 字号会直接不画）。
-    t.check(CanvasScreenText.layoutFontSize(design, renderScale: 0) > 0, "renderScale=0 也要给正字号")
-    t.check(CanvasScreenText.layoutFontSize(0, renderScale: 1) > 0, "设计字号 0 也要给正字号")
-
-    // 6) 阈值：节点视觉短边 < 40pt 不画字（用户给的建议值）。
-    t.equal(CanvasScreenText.hideBelowVisualSize, 40, "阈值 40pt（用户指定）")
+    // —— 节点闸门 ——
     let node = CGSize(width: 320, height: 220)
-    t.check(CanvasScreenText.textVisible(nodeSize: node, zoom: 1), "100% 缩放当然要画字")
-    t.check(CanvasScreenText.textVisible(nodeSize: node, zoom: 0.25),
-            "0.25 缩放下短边 55pt ≥ 40 → 仍然画字（此时靠限高裁剪兜住溢出）")
-    t.check(!CanvasScreenText.textVisible(nodeSize: node, zoom: 0.15),
-            "★0.15 缩放下短边 33pt < 40 → 隐藏文字（避免糊成噪点）")
-    // 边界严格用 >=：正好 40pt 要显示，否则阈值附近会出现"看起来该显示却没显示"。
-    t.check(CanvasScreenText.textVisible(nodeSize: CGSize(width: 100, height: 40), zoom: 1),
+    t.check(CanvasNodeText.nodeTextVisible(nodeSize: node, zoom: 1), "100% 缩放当然要写字")
+    t.check(CanvasNodeText.nodeTextVisible(nodeSize: node, zoom: 0.25),
+            "★25% 下短边 55pt ≥ 40 → 仍然写字（用户验收点 1 要求缩到 25% 还能看到文字随卡片缩小）")
+    t.check(CanvasNodeText.nodeTextVisible(nodeSize: node, zoom: 2), "200% 当然写字（用户验收点 2）")
+    t.check(!CanvasNodeText.nodeTextVisible(nodeSize: node, zoom: 0.15),
+            "★15% 下短边 33pt < 40 → 整块文字淡出（避免糊成噪点）")
+    // 边界含等号：正好 40pt 要显示，否则阈值附近会出现"看起来该显示却没显示"。
+    t.check(CanvasNodeText.nodeTextVisible(nodeSize: CGSize(width: 100, height: 40), zoom: 1),
             "短边正好 40pt → 显示（边界含等号）")
-    t.check(!CanvasScreenText.textVisible(nodeSize: CGSize(width: 100, height: 39.9), zoom: 1),
+    t.check(!CanvasNodeText.nodeTextVisible(nodeSize: CGSize(width: 100, height: 39.9), zoom: 1),
             "短边 39.9pt → 隐藏")
-    // 用**短边**而不是宽度：又宽又矮的节点同样读不了字。
-    t.check(!CanvasScreenText.textVisible(nodeSize: CGSize(width: 2000, height: 20), zoom: 1),
-            "★2000×20 的扁节点也要隐藏（判据是短边，不是面积/宽度）")
-    t.equal(CanvasScreenText.textOpacity(nodeSize: node, zoom: 1), 1, "可见 → opacity 1")
-    t.equal(CanvasScreenText.textOpacity(nodeSize: node, zoom: 0.05), 0, "不可见 → opacity 0")
+    t.check(!CanvasNodeText.nodeTextVisible(nodeSize: CGSize(width: 2000, height: 20), zoom: 1),
+            "★2000×20 的扁节点也要隐藏（判据是短边）")
 
-    // 7) 卡叠里单卡的阈值更低，且必须**严格**低于节点阈值：否则会出现"节点还有字、卡片先没字"
-    //    这种在很宽的缩放区间里都成立的不一致。
-    t.check(CanvasScreenText.hideCardTextBelowVisualSize < CanvasScreenText.hideBelowVisualSize,
-            "★卡片阈值必须比节点阈值低（卡片本来就比节点小一大截）")
+    // 闸门单调：缩得越小越不该写字，不允许出现"更小反而又显示了"的翻转。
+    var seenHidden = false
+    var z: CGFloat = 2.0
+    while z >= 0.02 {
+        let visible = CanvasNodeText.nodeTextVisible(nodeSize: node, zoom: z)
+        if !visible { seenHidden = true }
+        if seenHidden {
+            t.check(!visible, "★闸门单调：一旦在某个 zoom 隐藏，更小的 zoom（\(z)）不能又显示回来")
+        }
+        z -= 0.02
+    }
+    t.check(seenHidden, "扫到足够小的 zoom 时必须已经隐藏（否则阈值形同虚设）")
+
+    // —— 不透明度：只有 0 / 1 两态，不做逐行裁剪 ——
+    t.equal(CanvasNodeText.textOpacity(nodeSize: node, zoom: 1), 1, "可见 → opacity 1")
+    t.equal(CanvasNodeText.textOpacity(nodeSize: node, zoom: 0.05), 0, "不可见 → opacity 0")
+    t.equal(CanvasNodeText.textOpacity(nodeSize: node, zoom: 1, fitsBox: false), 0,
+            "★几何兜底：短边够 40pt 但预算判定塞不下（fitsBox=false）时同样整块隐藏 —— 两个判据取 AND")
+    for zz in [0.05, 0.1, 0.2, 0.5, 1.0, 2.0, 4.0] as [CGFloat] {
+        let o = CanvasNodeText.textOpacity(nodeSize: node, zoom: zz)
+        t.check(o == 0 || o == 1, "★opacity 只能是 0/1（zoom=\(zz) 得 \(o)）—— 不允许半透明渐变或逐行消失")
+    }
+
+    // —— 牌面卡闸门 ——
     let card = CanvasFanGeometry.fanCardSize(boxHeight: 132)
-    t.check(CanvasScreenText.cardTextVisible(cardSize: card, zoom: 1), "100% 下卡片写字")
-    t.check(!CanvasScreenText.cardTextVisible(cardSize: card, zoom: 0.2),
+    t.check(CanvasNodeText.cardTextVisible(cardSize: card, zoom: 1), "100% 下牌面卡写字")
+    t.check(!CanvasNodeText.cardTextVisible(cardSize: card, zoom: 0.2),
             "0.2 缩放下卡片短边约 21pt < 24 → 卡内文字隐藏")
+    t.check(CanvasNodeText.cardTextVisible(cardSize: CGSize(width: 100, height: 24), zoom: 1),
+            "卡片短边正好 24pt → 显示（边界含等号）")
+    t.check(!CanvasNodeText.cardTextVisible(cardSize: CGSize(width: 100, height: 23.9), zoom: 1),
+            "卡片短边 23.9pt → 隐藏")
+    // 同一个 zoom 下，卡片阈值更宽松 ⇒ 存在一个区间：节点隐藏了、但卡片（若还画）也必然隐藏。
+    // 换句话说卡片绝不会比节点先隐藏。
+    for zz in [0.1, 0.2, 0.3, 0.5, 1.0] as [CGFloat] {
+        if !CanvasNodeText.cardTextVisible(cardSize: card, zoom: zz) {
+            t.check(!CanvasNodeText.nodeTextVisible(nodeSize: card, zoom: zz),
+                    "★同尺寸同 zoom 下，卡片隐藏则节点判据也一定隐藏（阈值序不能反）（zoom=\(zz)）")
+        }
+    }
 }
 
 // MARK: - CANVAS-PROMPT-CLIP：正文区限高（★ 八轮 · 需求 1 的副作用兜底）

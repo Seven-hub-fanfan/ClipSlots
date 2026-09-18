@@ -10,15 +10,20 @@ import ClipSlotsKit
 /// 事件，若走 `@Published`，一次捏合会让所有节点视图重新求值几十次。停手后才通过
 /// `canvas.updateViewport` 落盘（内部防抖）。
 ///
-/// ## ★ v2.11.8：视口变换从「外层 scaleEffect」改为「逐节点算屏幕坐标 + 卡片内部按 zoom 排版」
+/// ## ★ v2.11.8 十轮：视口变换回到「布局与缩放彻底分离」
 ///
-/// 旧做法是整个节点层套一个 `scaleEffect(zoom)`，缩放成本与节点数量无关 —— 但它把文字也一起当
-/// 位图放大了，于是用户反馈「放大后节点模糊」。`scaleEffect` 是渲染期变换：1x 排版 → 光栅化 →
-/// 拉伸，200% 下看到的就是 2 倍放大的 1x 字形，糊是必然的，不是抗锯齿参数问题。
+/// 二~九轮把 zoom 下沉成**排版参数**（卡片内部宽高/字号/内边距全乘一遍），为的是放大后文字锐利。
+/// 代价被用户连续多轮录屏证伪：排版容器宽度随 zoom 每帧变化 → SwiftUI 每帧重新折行 → 文字换行
+/// 位置跳变、抖动，甚至溢出卡片边框悬浮在画布背景上。反向补偿文字（`textCounter`）只是让两种
+/// 量纲并存，问题更深。
 ///
-/// 现在：节点位置在这里直接算成屏幕坐标（`screen = canvas * zoom + pan`，与 `CanvasGeometry`
-/// 同一个公式），缩放通过 `renderScale` 传进卡片，由卡片把字号/内边距/线宽全部乘一遍重新排版。
-/// 代价是缩放时每张卡片重新布局而非只改一个变换矩阵 —— 这笔账必须付：清晰度是画布的基本可用性。
+/// 现在的规则**只有两条**，任何后续改动都不得违反：
+///   1. 节点位置在这里算成屏幕坐标：`screen = canvas * zoom + pan`（与 `CanvasGeometry` 同公式）；
+///   2. 卡片子树完全按设计稿 pt 排版（`frame(width: node.width, height: node.height)`，字号是常量），
+///      缩放由节点层**唯一一层** `.scaleEffect(zoom, anchor: .topLeading)` 施加。
+///
+/// 于是文字与卡片始终是同一个相似变换的一部分：视觉字号 = 设计字号 × zoom，换行位置与 zoom 无关。
+/// zoom 唯一允许进入卡片的形式是 `gateZoom` —— 只用于"太小了就别写字"的布尔判定。
 struct CanvasWorkspaceView: View {
     @ObservedObject var store: SlotStoreObservable
     @ObservedObject var canvas: CanvasStore
@@ -33,33 +38,16 @@ struct CanvasWorkspaceView: View {
 
     @State private var pan: CGSize = .zero
     @State private var zoom: CGFloat = 1
-    /// **排版用的缩放**（三轮新增，修「缩放时文字跳舞」）。
+    /// 卡片文字可见性闸门用的**量化** zoom。
     ///
-    /// 与 `zoom` 的区别只有一个：它**只在缩放落定后才更新**。节点卡片内部的一切尺寸（宽高、字号、
-    /// padding、线宽）都按这个值排版，缩放过程中的差值由节点层的 `scaleEffect(zoom / layoutZoom)`
-    /// 补上 —— 变换是渲染期的，不会触发重新折行。详见 `nodeLayer` 里那段注释。
+    /// ★ v2.11.8 十轮：整个画布的缩放只有一个来源 —— 节点层的 `scaleEffect(zoom)`。
+    /// 卡片内部一律按设计稿排版，唯一还需要知道缩放的是"节点在屏幕上是不是已经小到不该写字"
+    /// 这个布尔判定，而它只需要一个粗档位（量化到 5%），不必每帧跟着 zoom 变。
     ///
-    /// 落定时机：
-    ///   - **离散缩放**（工具栏 +/-、100%、适应内容）：目标值当场就知道，立刻落定，
-    ///     动画由 ratio 从 `旧/新` 收到 1 来演；
-    ///   - **连续缩放**（触控板捏合、Cmd+滚轮）：停手 `zoomSettleDelay` 后落定。
-    @State private var layoutZoom: CGFloat = 1
-    /// ★ 九轮需求 1：文字的反向缩放 = `layoutZoom / zoom`（**精确倒数，不钳制**）。
-    ///
-    /// 节点层的 `scaleEffect(zoom / layoutZoom)` 是"排版档位"与"真实缩放"之间的差值补偿，它对
-    /// 卡片里的一切生效 —— 包括已经被固定成设计 pt 的字号。所以文字必须再乘回它的倒数。
-    ///
-    /// ★ 八轮在这里写的是 `min(1, layoutZoom / zoom)`，用户四次打回的"字体缩放仍未生效"就出在
-    /// 这个 `min` 上：`layoutZoom` 是**落定后**才更新的，缩小手势进行中它还冻结在旧档（例如从
-    /// 200% 捏到 50%，`layoutZoom` 仍是 2.0），此时精确补偿是 4.0，被钳成 1 等于完全不补偿 ——
-    /// 文字跟着画布缩到 1/4，手一停又"啪"地跳回来。详细推导见 `CanvasZoomLayout.textCounterScale`。
-    ///
-    /// 之所以敢每帧变：它只作用在 `scaleEffect` 上，是**渲染期变换**，不改版面、不触发重新折行。
-    private var textCounter: CGFloat {
-        CanvasZoomLayout.textCounterScale(zoom: zoom, layoutZoom: layoutZoom)
-    }
-    /// 连续缩放的落定防抖任务。新事件进来就取消上一个 —— 手势期间反复推迟，只有真的停手才落定。
-    @State private var zoomSettleWork: DispatchWorkItem? = nil
+    /// 三轮~九轮这里曾经有 `layoutZoom`（量化的排版档位）+ `textCounter`（文字反向补偿）+
+    /// 一套落定防抖，整套已删除：那条路线让容器与文字变成两种量纲，是"文字溢出卡片 + 换行抖动"
+    /// 的根因（完整推导见 `CanvasNodeText` 的类型注释）。
+    private var gateZoom: CGFloat { CanvasNodeText.gateZoom(zoom) }
     /// 平移手势进行中的临时量。手势结束才合并进 `pan`，避免逐帧累加带来的漂移。
     @State private var panGestureDelta: CGSize = .zero
     /// 捏合开始时的 pan / zoom 基准。锚点缩放必须基于「手势开始那一刻」的状态反算，
@@ -194,8 +182,6 @@ struct CanvasWorkspaceView: View {
             .onAppear {
                 pan = canvas.pan
                 zoom = canvas.zoom
-                // 排版缩放必须与初始 zoom 对齐，否则首帧 ratio ≠ 1，节点会以一个错误的比例被拉伸。
-                layoutZoom = CanvasZoomLayout.floorBucket(for: canvas.zoom)
                 // 闭包在这里绑一次即可：@State/@ObservedObject 的读写都走稳定的存储盒，
                 // 视图结构体后续被重建也不影响这几个闭包写到正确的地方。
                 inputRouter.onScroll = { dx, dy, precise, isZoom, point in
@@ -331,11 +317,9 @@ struct CanvasWorkspaceView: View {
                                    text: liveText(for: node),
                                    pathLabel: pathLabel(for: node),
                                    attachments: liveAttachments(for: node),
-                                   renderScale: layoutZoom,
-                                   // ★ 九轮需求 1：文字的屏幕尺寸要恒定，就得抵掉下面那句
-                                   // `scaleEffect(zoom / layoutZoom)` 的残差 —— 这里传的是它的
-                                   // **精确倒数**（不钳制；八轮那个 min(1, ·) 正是"缩小时字仍在变"的根因）。
-                                   textCounter: textCounter,
+                                   // ★ 十轮：只传"可见性闸门"用的量化 zoom。卡片的排版尺寸全是
+                                   // 设计稿常量，缩放由下面那唯一一层 `scaleEffect(zoom)` 施加。
+                                   gateZoom: gateZoom,
                                    isEditing: isEditing,
                                    onBeginEdit: { beginEdit(node) },
                                    onCommitEdit: { commitEdit(node, text: $0) },
@@ -352,25 +336,20 @@ struct CanvasWorkspaceView: View {
                                    onToast: { store.transientUI.showToast($0) },
                                    isHoverHeld: hoverHoldNodeId == node.id,
                                    onHoverChanged: { noteNodeHover(node, hovering: $0) })
-                    // ★ 三轮：缩放过程中的「文字跳舞」修复 —— 排版用 `layoutZoom`，缩放差值用变换补。
+                    // ★ v2.11.8 十轮：**唯一**的缩放来源。
                     //
-                    // 症状（用户录屏）：缩放时节点里的文字一帧一个换行位置，整块文字在抖。
-                    // 根因：v2.11.8 为了消除放大模糊，把 zoom 做成了**排版参数**（卡片宽度、字号
-                    // 全乘 zoom）。这在缩放**稳定**时是对的（每个字号都重新排版 → 清晰），但缩放
-                    // **过程中** zoom 每帧都在变，等于每帧拿一个新宽度重新折行 —— 折行位置在
-                    // "第 N 个字" 和 "第 N+1 个字" 之间反复跳，看起来就是文字在跳舞。
+                    // 卡片子树按设计稿尺寸排版（与 zoom 无关），这里整体缩放。于是：
+                    //   - zoom 不进入任何 `frame` / `font` / `padding` → SwiftUI 没有任何理由
+                    //     重新折行 → 换行位置在 25% 与 200% 下逐字相同，"文字跳舞"从结构上消失；
+                    //   - 文字与卡片是**同一个**相似变换的一部分 → 文字永远不可能相对卡片胀大、
+                    //     溢出边框（用户第 N 次录屏里的现象）。
                     //
-                    // 修法（业界画布通用做法）：把"排版"和"动画"分开。
-                    //   - `layoutZoom` 只在缩放**落定**后才更新（离散缩放立即落定，连续手势
-                    //     停手 0.15s 后落定），所以文字在整段缩放里**只排版一次**；
-                    //   - 视觉上的连续变化交给 `scaleEffect(zoom / layoutZoom)`，这是渲染期变换，
-                    //     不触发任何重新排版。
-                    // 于是：缩放中不抖（代价是过程中略软），落定后 ratio 回到 1，恢复逐字号清晰排版
-                    // —— v2.11.8 修掉的"放大模糊"不会回来，因为那说的是**稳定态**。
+                    // 代价：放大后文字是位图变换、略软。二~九轮为了这点清晰度把缩放下沉进布局，
+                    // 结果引出了溢出与抖动 —— 用户本轮明确选择了这个取舍，不要再改回去。
                     //
                     // 锚点必须 `.topLeading`：下面那行 `.offset` 定位的是节点左上角，用 `.center`
                     // 缩放会让节点绕自己中心胀缩，与 `screen = canvas * zoom + pan` 不再自洽。
-                    .scaleEffect(zoom / max(layoutZoom, 0.01), anchor: .topLeading)
+                    .scaleEffect(zoom, anchor: .topLeading)
                     // 屏幕坐标 = 画布坐标 * zoom + pan。**必须与 `CanvasGeometry.screenPoint` 同式**，
                     // 否则命中判定（框选、拖拽落点、弹层锚点）会与眼睛看到的位置整体错开。
                     .offset(x: (node.x + (isDragging ? dragDelta.width : 0)) * zoom + effectivePan.width,
@@ -732,8 +711,8 @@ struct CanvasWorkspaceView: View {
                                                     oldZoom: zoom,
                                                     newZoom: target)
             zoom = target
-            // 连续缩放：排版缩放不跟着每一格滚动走，停手后才落定（见 scheduleLayoutZoomSettle）。
-            scheduleLayoutZoomSettle()
+            // ★ 十轮：Cmd+滚轮不再需要"落定/重排"钩子。卡片按设计稿排版，zoom 只进节点层的
+            // `scaleEffect`，所以每一格滚动都只是变换系数在动，没有任何重新折行的机会。
         } else {
             pan = CanvasGeometry.pannedViewport(
                 pan: pan,
@@ -781,13 +760,11 @@ struct CanvasWorkspaceView: View {
                                                         oldZoom: pinchBaseZoom,
                                                         newZoom: target)
                 zoom = target
-                // 捏合期间不重排文字（见 layoutZoom 的注释），松手后才落定。
-                scheduleLayoutZoomSettle()
+                // ★ 十轮：这里不再需要任何"落定/重排"处理 —— 卡片内部与 zoom 完全解耦，
+                // 缩放只是节点层的一次相似变换，捏合过程中不存在重新折行的机会。
             }
             .onEnded { _ in
                 pinchBasePan = nil
-                // 松手立刻落定，不必再等防抖那 0.15s —— 手势结束是最明确的"缩放稳定"信号。
-                settleLayoutZoom(to: zoom)
                 canvas.updateViewport(pan: pan, zoom: zoom)
             }
     }
@@ -1281,49 +1258,11 @@ struct CanvasWorkspaceView: View {
 
     // MARK: - 动作
 
-    /// 立刻把排版缩放钉到目标值（**不带动画**）。
-    ///
-    /// 用于离散缩放：目标值当场就知道，所以文字直接按终值排版一次，视觉上的渐变交给节点层那个
-    /// `scaleEffect(zoom / layoutZoom)`（ratio 从 `旧/新` 动画到 1）。
-    ///
-    /// `withTransaction` 里把 animation 显式清成 nil 是必须的：这个函数经常在 `withAnimation`
-    /// 的调用点附近执行，一旦被外层事务捕获，卡片的宽高字号就会跟着动画逐帧变 —— 那正是要修的抖动。
-    private func settleLayoutZoom(to value: CGFloat) {
-        zoomSettleWork?.cancel()
-        zoomSettleWork = nil
-        // ★ 三轮 hotfix2：不再把排版缩放钉到"任意实数 zoom"，而是钉到 `CanvasZoomLayout` 的档位。
-        //
-        // 二轮那版（`layoutZoom = value`）在鼠标滚轮下等于每一格都重排一次文字，因为滚轮事件是
-        // 离散且稀疏的，每一格之间都会走完 0.15s 防抖被当成"已停手"。量化 + 迟滞后，同一档内的
-        // 多次缩放**一次都不重排**（下面那个 guard 直接返回）。理由与代价见 CanvasZoomLayout。
-        let target = CanvasZoomLayout.settledFloor(current: layoutZoom, zoom: value)
-        guard layoutZoom != target else { return }
-        var tx = Transaction()
-        tx.disablesAnimations = true
-        tx.animation = nil
-        withTransaction(tx) { layoutZoom = target }
-    }
-
-    /// 连续缩放（捏合 / Cmd+滚轮）停手后再落定排版缩放。
-    ///
-    /// 期间 `layoutZoom` 保持不动 → 文字一次都不重排；`scaleEffect` 的 ratio 跟着手势实时变化，
-    /// 所以手感仍然是连续的，只是过程中略软。
-    ///
-    /// ★ 三轮 hotfix2：防抖 0.15s → `CanvasZoomLayout.settleDelay`(0.32s)，并且落定时走档位量化。
-    /// 单靠防抖修不掉抖动 —— 鼠标滚轮相邻两格常隔 0.15~0.3s，每一格都会被判成"停手"然后重排一次。
-    private func scheduleLayoutZoomSettle() {
-        zoomSettleWork?.cancel()
-        let work = DispatchWorkItem { settleLayoutZoom(to: zoom) }
-        zoomSettleWork = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + CanvasZoomLayout.settleDelay, execute: work)
-    }
-
     /// 按钮缩放以**视图中心**为锚点（没有正在移动的光标可依据时，中心是唯一合理选择）。
     private func applyZoomStep(_ factor: CGFloat, size: CGSize) {
         let anchor = CGPoint(x: size.width / 2, y: size.height / 2)
         let target = CanvasGeometry.clampZoom(zoom * factor)
         let newPan = CanvasGeometry.panForAnchoredZoom(anchorScreen: anchor, pan: pan, oldZoom: zoom, newZoom: target)
-        settleLayoutZoom(to: target)
         withAnimation(Anim.interactive) {
             pan = newPan
             zoom = target
@@ -1335,7 +1274,6 @@ struct CanvasWorkspaceView: View {
     private func resetZoom(size: CGSize) {
         let anchor = CGPoint(x: size.width / 2, y: size.height / 2)
         let newPan = CanvasGeometry.panForAnchoredZoom(anchorScreen: anchor, pan: pan, oldZoom: zoom, newZoom: 1)
-        settleLayoutZoom(to: 1)
         withAnimation(Anim.transition) {
             pan = newPan
             zoom = 1
@@ -1345,14 +1283,12 @@ struct CanvasWorkspaceView: View {
 
     private func fitToContent(size: CGSize) {
         guard !canvas.nodes.isEmpty else {
-            settleLayoutZoom(to: 1)
             withAnimation(Anim.transition) { pan = .zero; zoom = 1 }
             canvas.updateViewport(pan: .zero, zoom: 1)
             return
         }
         let bounds = CanvasGeometry.bounds(of: canvas.nodes.map(\.frame))
         let fit = CanvasGeometry.fitTransform(contentBounds: bounds, viewSize: size)
-        settleLayoutZoom(to: fit.zoom)
         withAnimation(Anim.transition) {
             pan = fit.pan
             zoom = fit.zoom

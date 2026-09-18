@@ -25,20 +25,30 @@ import ClipSlotsKit
 /// 删掉之后腾出来的高度给了**正文预览 2 行 → 4 行**，这是用户明确要的：画布上扫一眼就能认出
 /// 哪个节点装的是哪段提示词，而两行经常连主语都截断。
 ///
-/// ## 关于尺寸：为什么每个数值都要乘 `renderScale`（v2.11.8 修「放大变模糊」）
+/// ## 关于尺寸：卡片只按**设计稿**排版（★ v2.11.8 十轮的架构定稿）
 ///
-/// 此前的做法是卡片内部一律按 1x 写，缩放由节点层外面一个 `scaleEffect(zoom)` 统一施加。那样确实
-/// 省事，代价是**放大后全糊**：`scaleEffect` 是渲染期的仿射变换 —— SwiftUI 先按 1x 布局把文字光栅化
-/// 成位图，再把位图放大 2 倍，于是 200% 缩放下看到的是 2 倍放大的 1x 字形，边缘发虚、细边框糊成灰带。
-/// 这不是"设置项没打开抗锯齿"，是像素本来就不存在。
+/// 这一节的历史值得留着，因为它记录了一条走过五轮的弯路。
 ///
-/// 唯一的解法是把缩放**下沉到布局**：字号、内边距、圆角、线宽全部按当前 zoom 重算，让 SwiftUI 在
-/// 真实像素尺寸上重新排版并重新光栅化文字。代价是缩放时每张卡片都要重新布局（此前只是改一个变换
-/// 矩阵）—— 这笔账必须付：矢量清晰度是画布的基本可用性，而节点数量在这个 App 的量级（几十张）
-/// 下重排一次仍在一帧内。
+/// 1. **最初**：卡片内部按 1x 写，节点层一个 `scaleEffect(zoom)` 统一缩放。简单，但放大后文字偏软
+///    （`scaleEffect` 是渲染期仿射变换：先按 1x 光栅化再拉伸）。
+/// 2. **二~九轮**：为了清晰度把缩放**下沉到布局** —— 卡片内部一切尺寸乘 `renderScale` 重新排版；
+///    又因为用户要"文字屏幕字号恒定"，唯独字号**不乘**，再挂一层反向 `scaleEffect` 补偿。
+///    这就同时引入了两种量纲：容器随缩放变、文字不变。缩到 25% 时容器只有 65pt 宽而文字仍是 13pt，
+///    文字相对容器胀成 4 倍 —— 屏幕上就是用户录屏里的**文字溢出卡片、悬浮在画布背景上**，
+///    而且每帧宽度都在变 → 每帧重新折行 → 持续抖动。补偿系数算得再精确也修不掉，因为它是量纲问题。
+/// 3. **十轮（当前）**：回到单一量纲，但把这条铁律写死 ——
 ///
-/// 所以本文件的铁律：**所有几何量都过 `s(_:)`，不要出现裸的常量尺寸**。漏乘一个的表现是"放大后
-/// 某个边距/字号不跟着变"，在 100% 缩放下完全看不出来。
+/// ```text
+///   卡片内部：全部按设计稿尺寸排版（260pt 宽、13pt 字、8pt 内边距……），与 zoom 完全无关
+///   节点层：  唯一一层 scaleEffect(zoom)
+/// ```
+///
+/// 于是 zoom 不进入任何 `frame` / `font` / `padding`，SwiftUI 没有任何理由重新折行：**换行位置在
+/// 25% 和 200% 下逐字相同**，文字与卡片严格等比（相似变换），溢出在结构上不可能发生。
+/// 代价是放大后文字偏软 —— 这是用户本轮明确选择的取舍：宁可略软，也不要溢出和抖动。
+///
+/// 所以本文件的铁律：**几何量过 `s(_:)`、字号过 `fs(_:)`，两者都只做合法性兜底，不乘任何缩放**；
+/// 唯一允许知道 zoom 的是 `gateZoom`，且只能参与"文字写不写"的布尔判定。
 ///
 /// ## 关于文本的来源（v2.11.7 hotfix18 → hotfix20）
 ///
@@ -59,16 +69,16 @@ struct CanvasNodeCardView: View {
     ///
     /// 与 `text` 同源同理：真相在槽位数据里，卡片只负责展示，取数留在上层。
     let attachments: [SlotContent.SlotAttachment]
-    /// 当前画布缩放。见类型注释：卡片按它**重新布局**，不靠位图缩放。
-    let renderScale: CGFloat
-    /// 文字的反向缩放（★ 九轮需求 1 的收口）= `CanvasZoomLayout.textCounterScale(zoom:layoutZoom:)`。
+    /// 可见性闸门用的**量化** zoom（`CanvasNodeText.gateZoom`）。
     ///
-    /// 节点层挂着 `scaleEffect(zoom / layoutZoom)`，它会把已经固定成设计 pt 的字号再连带缩放 ——
-    /// 这一项是那个残差的**精确倒数**：静息态 ≤1（档位不高于 zoom），缩小手势进行中会 >1
-    /// （`layoutZoom` 冻结在旧档时必须放大补偿）。九轮起**不再钳制**，推导见
-    /// `CanvasZoomLayout.textCounterScale`。
-    /// 默认 1 = 不补偿，方便预览/测试构造。
-    var textCounter: CGFloat = 1
+    /// ★ v2.11.8 十轮：这是整张卡片里**唯一**知道画布缩放的量，而且只允许参与"文字写不写"的
+    /// 布尔判定，**禁止**进入任何 `frame` / `font` / `padding`。卡片的所有尺寸都是设计稿常量，
+    /// 缩放由节点层唯一的那层 `scaleEffect(zoom)` 承担 —— 这条约束就是本轮修复的全部内容，
+    /// 一旦有人把它乘进某个几何量，"缩放时文字溢出卡片 + 换行抖动"会立刻回来（见
+    /// `CanvasNodeText` 的类型注释）。
+    ///
+    /// 默认 1 = 100%，方便预览/测试构造。
+    var gateZoom: CGFloat = 1
     /// 是否处于 inline 编辑态（由上层集中管理，保证同一时刻只有一个节点在编辑）。
     let isEditing: Bool
     let onBeginEdit: () -> Void
@@ -106,29 +116,31 @@ struct CanvasNodeCardView: View {
     @State private var isHovering = false
     @State private var draft = ""
 
-    private func s(_ v: CGFloat) -> CGFloat { max(0.01, v * renderScale) }
+    /// 几何量直通（只兜住非法值）。
+    ///
+    /// ★ 十轮：这里曾经是 `v * renderScale` —— 卡片内部按缩放重新排版的入口。删掉那个乘法就是
+    /// 本轮的架构改动：**布局只按设计稿算一次**，缩放交给节点层的 `scaleEffect(zoom)`。
+    /// 保留这层包装而不是就地写常量，是为了留一个"哪些数值属于卡片几何"的集中标记 ——
+    /// 万一以后又想引入缩放感知的排版，改动点只有这一个函数（以及 `fs(_:)`），
+    /// 而不是散在 50 多处调用点里。
+    private func s(_ v: CGFloat) -> CGFloat { max(0.01, v) }
 
-    /// **文字**专用字号（★ v2.11.8 八轮 · 需求 1「画布文字不跟随缩放」）。
+    /// 字号直通（设计 pt，最小 1pt）。
     ///
-    /// 与 `s(_:)` 的唯一区别：**刻意不乘 renderScale**。为什么这是"抵消画布缩放"而不是"漏乘"，
-    /// 完整推导见 `CanvasScreenText` 的类型注释（一句话版本：本项目静息时排版尺寸 = 屏幕尺寸，
-    /// 所以想让屏幕字号恒为 13pt，排版时就得写 13）。
-    ///
-    /// 铁律更新：**几何量过 `s(_:)`，字号过 `fs(_:)`**。图标（SF Symbol）仍走 `s(_:)` ——
-    /// 它们是按钮/角标的一部分，尺寸必须跟着容器走，否则放大后会出现"20pt 的圆里一个 8pt 的勾"。
-    private func fs(_ v: CGFloat) -> CGFloat {
-        CanvasScreenText.layoutFontSize(v, renderScale: renderScale)
-    }
+    /// ★ 十轮：文字与卡片**等比缩放** —— 屏幕上看到的字号 = 设计 pt × zoom，与卡片同一个比例，
+    /// 所以文字永远不可能相对容器变大、也就不可能溢出边框。八~九轮那套"字号在屏幕上恒定 13pt"
+    /// （排版时不乘缩放 + 反向 `scaleEffect` 补偿）已整体删除：它让文字与容器变成两种量纲，
+    /// 缩小时文字相对容器胀到 4 倍，正是用户录屏里"文字飘到卡片外面"的根因。
+    private func fs(_ v: CGFloat) -> CGFloat { max(1, v) }
 
-    /// 节点在屏幕上是否大到值得写字（★ 八轮需求 1 的第二半）。
+    /// 节点在屏幕上是否大到值得写字（用户需求 3：视觉短边 < 40pt 就整块淡出）。
     ///
-    /// 用 `renderScale`（= `layoutZoom`）当 zoom 的替身，而不是把真正的实时 zoom 传进来：
-    /// 实时 zoom 每帧都在变，用它做布尔判定会让缩放手势跨过阈值时文字**闪烁**；
-    /// `layoutZoom` 是量化后的阶梯值（`CanvasZoomLayout`），最多与实时 zoom 差 18%，
-    /// 落在 40pt 阈值上的误差远小于"文字该不该看得清"这件事本身的模糊度。
+    /// 用量化后的 `gateZoom` 而不是实时 zoom：实时值每帧都在变，会让缩放手势跨过阈值时文字
+    /// 反复闪烁，也会让整棵卡片子树每帧重新求值。量化到 5% 一档，误差远小于"文字该不该看得清"
+    /// 这件事本身的模糊度。
     private var textVisible: Bool {
-        CanvasScreenText.textVisible(nodeSize: CGSize(width: node.width, height: node.height),
-                                     zoom: renderScale)
+        CanvasNodeText.nodeTextVisible(nodeSize: CGSize(width: node.width, height: node.height),
+                                       zoom: gateZoom)
     }
 
     /// 卡片纵向分区预算（★ 九轮）。文字行按固定行高先扣，可伸缩的预览区/正文区让位 ——
@@ -136,7 +148,6 @@ struct CanvasNodeCardView: View {
     /// 推导见 `CanvasCardLayout.verticalPlan`。
     private var plan: CanvasCardLayout.VerticalPlan {
         CanvasCardLayout.verticalPlan(nodeHeight: node.height,
-                                      renderScale: renderScale,
                                       headerFontSize: 9.5,
                                       footerFontSize: 9.5)
     }
@@ -161,9 +172,8 @@ struct CanvasNodeCardView: View {
     /// `node.height` 反推是为了让 opacity 不必穿透到子视图；差一帧对布尔判定无影响
     /// （相反，逐帧变化的容器高度会让文字在阈值附近闪烁）。
     private var textNodeFitPlan: CanvasCardLayout.TextNodePlan {
-        let inner = node.height * renderScale - 2 * CanvasCardLayout.cardPadding * renderScale
+        let inner = node.height - 2 * CanvasCardLayout.cardPadding
         return CanvasCardLayout.textNodePlan(availableHeight: inner,
-                                             renderScale: renderScale,
                                              headerFontSize: 9.5,
                                              footerFontSize: 9.5,
                                              bodyFontSize: node.resolvedBodyFontSize)
@@ -185,7 +195,7 @@ struct CanvasNodeCardView: View {
     /// （`HarmonyOS Sans SC`）。中文字体两者几乎从不相同，`Font.custom` 解析失败时会**静默**
     /// 回落系统字体：没有崩溃、没有告警，表现就是用户反馈的「选了字体但一点变化都没有」。
     private var bodyFont: Font {
-        // ★ 八轮：字号走 `fs(_:)`（屏幕固定），不再乘 renderScale。
+        // ★ 十轮：字号走 `fs(_:)` = 设计 pt 直通，缩放由节点层统一施加。
         CanvasFontCatalog.font(family: node.fontName, size: fs(node.resolvedBodyFontSize))
     }
 
@@ -290,7 +300,6 @@ struct CanvasNodeCardView: View {
     private var textNodeStack: some View {
         GeometryReader { geo in
             let plan = CanvasCardLayout.textNodePlan(availableHeight: geo.size.height,
-                                                     renderScale: renderScale,
                                                      headerFontSize: 9.5,
                                                      footerFontSize: 9.5,
                                                      bodyFontSize: node.resolvedBodyFontSize)
@@ -336,7 +345,6 @@ struct CanvasNodeCardView: View {
             // 单行也要禁字距自适应：不然缩放时"页面 - 组 - 槽位"这行会时紧时松地呼吸。
             .canvasStableLabel()
             // ★ 八轮：抹掉节点层缩放残差，屏幕字号严格恒定（见 `canvasScreenFixedText`）。
-            .canvasScreenFixedText(textCounter)
             // ★ 八轮：节点缩到 40pt 以下、或这一行放不下一行固定字号的字，就别写字了。
             .opacity(textOpacity)
             // 给两侧控件留出通道，否则长路径会压在图标上。
@@ -360,14 +368,10 @@ struct CanvasNodeCardView: View {
             Label(ahead > 0 ? "前方 \(ahead)" : "排队", systemImage: "clock")
                 .font(.system(size: fs(9), weight: .medium))
                 .foregroundColor(AppTheme.canvasCardMetaInk)
-                .canvasScreenFixedText(textCounter, anchor: .leading)
                 .opacity(textOpacity)
         case .running(let startedAt):
             // 刻意不给百分比：CLI 不提供，编出来的进度在 10~20s 量级会明显失真。
-            RunningBadge(startedAt: startedAt,
-                         renderScale: renderScale,
-                         textCounter: textCounter,
-                         textOpacity: textOpacity)
+            RunningBadge(startedAt: startedAt, textOpacity: textOpacity)
         case .succeeded:
             Image(systemName: "checkmark.circle.fill")
                 .font(.system(size: s(10), weight: .semibold))
@@ -376,7 +380,6 @@ struct CanvasNodeCardView: View {
             Label("失败", systemImage: "exclamationmark.triangle.fill")
                 .font(.system(size: fs(9), weight: .medium))
                 .foregroundColor(.red.opacity(0.85))
-                .canvasScreenFixedText(textCounter, anchor: .leading)
                 .opacity(textOpacity)
         }
     }
@@ -406,7 +409,6 @@ struct CanvasNodeCardView: View {
                         .font(bodyFont)
                         .foregroundColor(.white.opacity(0.45))
                         .canvasStableLabel()
-                        .canvasScreenFixedText(textCounter, anchor: .topLeading)
                         .opacity(textOpacity)
                         .padding(.horizontal, s(10))
                         .padding(.vertical, s(10 + CanvasCardLayout.promptVerticalPadding))
@@ -414,7 +416,6 @@ struct CanvasNodeCardView: View {
                     Text(text)
                         .font(bodyFont)
                         .foregroundColor(.white.opacity(0.92))
-                        .canvasScreenFixedText(textCounter, anchor: .topLeading)
                         .multilineTextAlignment(.leading)
                         .lineSpacing(s(2))
                         .lineLimit(nil)
@@ -487,7 +488,6 @@ struct CanvasNodeCardView: View {
                         .font(.system(size: fs(9)))
                         .lineLimit(2)
                         .multilineTextAlignment(.center)
-                        .canvasScreenFixedText(textCounter)
                         .opacity(textOpacity)
                 }
                 .foregroundColor(.red.opacity(0.75))
@@ -496,12 +496,10 @@ struct CanvasNodeCardView: View {
                 // ★ v2.11.8：入参不再只画"第一张图"，而是整叠可展开的卡片。见 CanvasSlotFanStack。
                 CanvasSlotFanStack(sources: fanSources,
                                    attachments: attachments,
-                                   renderScale: renderScale,
-                                   textCounter: textCounter,
+                                   gateZoom: gateZoom,
                                    nodeHovered: hoverActive && !isEditing,
-                                   // ★ 九轮：卡叠整套按 1x 收敛（内部自己乘 renderScale），
                                    // 这里必须给 1x 量纲，不能给排版单位（会乘两次）。
-                                   boxHeight: plan.previewHeight1x,
+                                   boxHeight: plan.previewHeight,
                                    // 节点身份 = `groupId#slot`（`CanvasNode.id`）。翻页窗口按它存活，
                                    // 右键 / 页面切换导致的重建不会把用户翻到的那一页打回第一页。
                                    stateKey: node.id,
@@ -527,11 +525,10 @@ struct CanvasNodeCardView: View {
     ///
     /// ★ 三轮改成**按节点高度取比例**（上限仍是 132）。比例/上下限连同理由都在
     /// `CanvasCardLayout` 里，那边有 smoke 断言盯着"卡片区不得超过节点高度 35%"这条用户约束。
-    /// 预览区高度（**排版单位**，已由 `plan` 扣掉固定字号的文字行）。
+    /// 预览区高度（设计 pt，已由 `plan` 扣掉按字号定高的文字行）。
     ///
-    /// ★ 九轮：以前这里返回 1x 设计值、调用点再 `s(...)` 乘 renderScale。现在预算里混着
-    /// "缩的几何"和"不缩的文字行"两种量纲，只能整段在 `verticalPlan` 里算完再拿过来，
-    /// 调用点**不要**再乘 renderScale（乘两次的症状是缩小时预览区消失、放大时溢出卡片）。
+    /// ★ 十轮：全仓统一成设计单位后，这里不再需要任何"换算回 1x"的补丁 —— 预算、扇形几何、
+    /// `frame` 三者同一个量纲，调用点直接用。
     private var previewHeight: CGFloat { plan.previewHeight }
 
     /// 「填充式图片盒」：用 `Color.clear` 定尺、内容走 overlay、再 `.clipped()`。见 `previewArea` 的注释。
@@ -555,7 +552,6 @@ struct CanvasNodeCardView: View {
                         .font(bodyFont)
                         .foregroundColor(AppTheme.canvasCardMetaInk.opacity(0.75))
                         .canvasStableLabel()
-                        .canvasScreenFixedText(textCounter, anchor: .topLeading)
                 } else {
                     // ★ 二轮：2 行 → 4 行，且显示的是**剥掉 Markdown 标记**的纯文本
                     // （用户要求"中间去掉 Markdown 表格等原始模板字样"）。加工逻辑在
@@ -572,7 +568,6 @@ struct CanvasNodeCardView: View {
                         .canvasStableText()
                         // ★ 八轮：整块正文按左上角反向缩放 —— 锚点必须是 topLeading，用 center 会让
                         // 文字块在缩小时朝中心收，看起来像"正文自己在卡里游动"。
-                        .canvasScreenFixedText(textCounter, anchor: .topLeading)
                 }
             }
             .frame(maxWidth: .infinity, minHeight: s(30), alignment: .topLeading)
@@ -584,7 +579,7 @@ struct CanvasNodeCardView: View {
             .frame(maxHeight: plan.promptMaxHeight,
                    alignment: .topLeading)
             .clipped()
-            // ★ 八轮：节点太小就不画字（阈值见 `CanvasScreenText`）。
+            // ★ 十轮：节点在屏幕上太小就整块不画字（阈值见 `CanvasNodeText`）。
             .opacity(textOpacity)
             // ★ 三轮：正文区上下各留 8pt 呼吸（用户要求）。padding 必须在 contentShape **之前**，
             // 否则这 8pt 不算进命中区，等于白留。
@@ -623,11 +618,9 @@ struct CanvasNodeCardView: View {
     /// 高度 —— 而正文区的高度正是这轮一直在抢的东西。键位契约本身没变，改挂到 `.help` 悬浮提示上，
     /// 需要的人停一秒就能看到。
     private var editor: some View {
-        // ★ 八轮：编辑器字号也走屏幕固定（`fs`）。
-        //
-        // 一定要和非编辑态用**同一个**字号来源：两边不一致的表现是"点进编辑，字突然变大/变小一截"，
-        // 而正文的字号在编辑态还决定光标高度与换行位置 —— 换行位置一变，用户就会以为自己的文本
-        // 被改了。（此前这里乘 renderScale，是与旧的"文字跟随缩放"配套的。）
+        // 编辑器字号必须和非编辑态用**同一个**来源（都是 `fs(_:)`）：两边不一致的表现是
+        // "点进编辑，字突然变大/变小一截"，而正文字号在编辑态还决定光标高度与换行位置 ——
+        // 换行位置一变，用户就会以为自己的文本被改了。
         CanvasPromptEditor(text: $draft,
                            font: CanvasFontCatalog.nsFont(family: node.fontName,
                                                           size: fs(node.resolvedBodyFontSize)),
@@ -668,7 +661,6 @@ struct CanvasNodeCardView: View {
                 Text(attachments.isEmpty ? "入参文件" : "入参文件 \(attachments.count)")
                     .font(.system(size: fs(9.5), weight: .medium))
                     .canvasStableLabel()
-                    .canvasScreenFixedText(textCounter, anchor: .leading)
                     .opacity(textOpacity)
                 Spacer(minLength: 0)
                 Image(systemName: "chevron.right")
@@ -704,26 +696,22 @@ struct CanvasNodeCardView: View {
 /// 已用秒数会自己走字。用独立小视图承载 `TimelineView`，避免每秒重绘整张卡片。
 private struct RunningBadge: View {
     let startedAt: Date
-    var renderScale: CGFloat = 1
-    /// ★ 八轮：文字反向缩放，见 `CanvasZoomLayout.textCounterScale`。
-    var textCounter: CGFloat = 1
-    /// ★ 八轮：节点太小时秒数一起隐掉（与卡片上其它文字同一条阈值）。
+    /// ★ 十轮：节点太小时秒数一起隐掉（与卡片上其它文字同一条阈值）。
     var textOpacity: Double = 1
 
     var body: some View {
         TimelineView(.periodic(from: startedAt, by: 1)) { context in
             let elapsed = max(0, Int(context.date.timeIntervalSince(startedAt)))
-            HStack(spacing: 3 * renderScale) {
+            // ★ 十轮：这里曾经全部乘 `renderScale`。现在角标与整张卡片一样只按设计稿写，
+            // 缩放由节点层统一施加 —— 尺寸与卡片其它元素严格同比，不会出现"放大后角标不跟着变"。
+            HStack(spacing: 3) {
                 ProgressView()
                     .controlSize(.mini)
-                    .scaleEffect(0.6 * renderScale)
-                    .frame(width: 8 * renderScale, height: 8 * renderScale)
+                    .scaleEffect(0.6)
+                    .frame(width: 8, height: 8)
                 Text("\(elapsed)s")
-                    // ★ 八轮：屏幕固定字号（不乘 renderScale），与卡片上其它文字一致。
-                    .font(.system(size: CanvasScreenText.layoutFontSize(9, renderScale: renderScale),
-                                  weight: .medium))
+                    .font(.system(size: 9, weight: .medium))
                     .foregroundColor(AppTheme.canvasCardMetaInk)
-                    .canvasScreenFixedText(textCounter, anchor: .leading)
                     .opacity(textOpacity)
             }
         }
