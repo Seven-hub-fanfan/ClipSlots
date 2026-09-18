@@ -79,8 +79,18 @@ struct CanvasSlotLibraryPanel: View {
         store.pages.sorted { $0.order < $1.order }
     }
 
+    /// 某页面下**用户可见**的槽位组。
+    ///
+    /// ★ v2.11.15 修：必须滤掉「未入库」保留组。它在数据层是个正常槽位组（原因见
+    /// `SpecialSlotStorage.unfiledGroupId`），并且为了字段不为空被挂在了"第一个页面"下 ——
+    /// 于是它同时出现在两个地方：底部的专属分区 **和** 默认页面的组列表里。后者是纯粹的漏网：
+    /// 用户看到的是"一个本该只存放游离节点的保留组，混在自己建的组中间"，而且点进去还能像普通
+    /// 组一样操作。`ensureUnfiledGroup` 的注释里写着"它从所有页面分区里都被过滤掉"，这里补上
+    /// 那个从来没写过的过滤。
     private func groups(for page: SlotPage) -> [SpecialSlot] {
-        store.specialSlots.filter { $0.pageId == page.id }.sorted { $0.order < $1.order }
+        store.specialSlots
+            .filter { $0.pageId == page.id && $0.id != store.canvasUnfiledGroupId }
+            .sorted { $0.order < $1.order }
     }
 
     /// 侧栏宽度。展开 240 / 收起 44。
@@ -109,10 +119,12 @@ struct CanvasSlotLibraryPanel: View {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 2) {
                         // 未入库排在最前：它是"待整理"的收件箱，压在页面列表下面就等于没有。
-                        unfiledSection
+                        // ★ v2.11.15：页面在上、「未入库」在最下面（用户要求）。
+                        // 它是个待整理的暂存区而不是入口，放顶部会天天挡在真正要点的页面前面。
                         ForEach(pages) { page in
                             pageSection(page)
                         }
+                        unfiledSection
                     }
                     .padding(.vertical, 6)
                     .padding(.horizontal, 8)
@@ -242,9 +254,28 @@ struct CanvasSlotLibraryPanel: View {
 
     /// 未入库组的条目。容量是 60（`unfiledCapacity`）而不是 10 —— 它是暂存区，不受圆盘/快捷键
     /// 那 10 格的物理约束。
+    /// 「未入库」分区的条目。
+    ///
+    /// ★ v2.11.15 修「新建节点不出现在这个分类里」：`slotEntries(groupId:capacity:)` 会跳过
+    /// **没有内容**的槽位（`text.isEmpty && attachments.isEmpty` 就 continue）—— 那条规则对
+    /// 普通组是对的（空槽位不该在树里占一行），但对未入库恰好相反：画布上"新建节点"落的就是
+    /// 一个空槽位，于是节点明明在画布上躺着，未入库里却什么都没有，用户自然认为这个分类坏了。
+    ///
+    /// 这里补上第二个来源：**画布上归属未入库的节点**。两个来源按槽位号合并去重，
+    /// 空节点的行标题由 `displayTitle` 兜底成「（空）」。
     private var unfiledEntries: [SlotEntry] {
-        slotEntries(groupId: store.canvasUnfiledGroupId,
-                    capacity: SpecialSlotStorage.unfiledCapacity)
+        let gid = store.canvasUnfiledGroupId
+        var out = slotEntries(groupId: gid, capacity: SpecialSlotStorage.unfiledCapacity)
+        var known = Set(out.map(\.slot))
+        let storage = store.specialStorage.slotStorage(for: gid)
+        for node in canvas.nodes where node.groupId == gid && !known.contains(node.slot) {
+            known.insert(node.slot)
+            out.append(SlotEntry(slot: node.slot,
+                                 label: storage.getLabel(node.slot),
+                                 prompt: "",
+                                 attachmentCount: 0))
+        }
+        return out.sorted { $0.slot < $1.slot }
     }
 
     // MARK: - 页面 / 组 / 槽位
