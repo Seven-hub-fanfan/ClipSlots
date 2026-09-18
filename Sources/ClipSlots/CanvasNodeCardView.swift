@@ -69,6 +69,9 @@ struct CanvasNodeCardView: View {
     /// `CanvasZoomLayout.textCounterScale`。
     /// 默认 1 = 不补偿，方便预览/测试构造。
     var textCounter: CGFloat = 1
+    /// ★ v2.11.13：真实缩放。**不参与任何排版**（排版一律走常量基准 `layoutBaseScale`），
+    /// 只用来判断"节点在屏幕上小到什么程度就别写字了"。
+    var viewZoom: CGFloat = 1
     /// 是否处于 inline 编辑态（由上层集中管理，保证同一时刻只有一个节点在编辑）。
     let isEditing: Bool
     let onBeginEdit: () -> Void
@@ -120,14 +123,6 @@ struct CanvasNodeCardView: View {
         CanvasScreenText.layoutFontSize(v, renderScale: renderScale)
     }
 
-    /// 文字块的**布局尺度**（★ v2.11.12）= `min(1, renderScale)`，与字号同源。
-    /// 字号和文本盒子同乘它 ⇒ 每行字数与 zoom 无关 ⇒ 换行位置/行数永不变。推导见
-    /// `CanvasScreenText.textScale`。
-    private var textScale: CGFloat { CanvasScreenText.textScale(renderScale) }
-
-    /// 文字块专用的几何换算（对应几何量的 `s(_:)`）。
-    private func ts(_ v: CGFloat) -> CGFloat { max(0.01, v * textScale) }
-
     /// **1x 基准**的纵向预算：正文文本块的尺寸只许由它决定，不许看 renderScale。
     private var plan1x: CanvasCardLayout.VerticalPlan {
         CanvasCardLayout.verticalPlan(nodeHeight: node.height,
@@ -141,24 +136,14 @@ struct CanvasNodeCardView: View {
         max(1, plan1x.promptMaxHeight - 2 * CanvasCardLayout.promptVerticalPadding)
     }
 
-    /// 正文文本块的排版尺寸（★ v2.11.12 的核心）。
+    /// 节点在屏幕上是否大到值得写字。
     ///
-    /// 宽度 = 1x 卡片内宽 × textScale；高度 = 1x 正文预算 × textScale。两者与字号同尺度，
-    /// 所以 zoom ≥ 1 时它在屏幕上是一个**尺寸恒定**的块（字号也恒定），zoom < 1 时与卡片等比。
-    private var promptTextBoxSize: CGSize {
-        let w = node.width - 2 * CanvasCardLayout.cardPadding
-        return CGSize(width: max(1, ts(w)), height: max(1, ts(promptTextBoxHeight1x)))
-    }
-
-    /// 节点在屏幕上是否大到值得写字（★ 八轮需求 1 的第二半）。
-    ///
-    /// 用 `renderScale`（= `layoutZoom`）当 zoom 的替身，而不是把真正的实时 zoom 传进来：
-    /// 实时 zoom 每帧都在变，用它做布尔判定会让缩放手势跨过阈值时文字**闪烁**；
-    /// `layoutZoom` 是量化后的阶梯值（`CanvasZoomLayout`），最多与实时 zoom 差 18%，
-    /// 落在 40pt 阈值上的误差远小于"文字该不该看得清"这件事本身的模糊度。
+    /// ★ v2.11.13：判定改用 `viewZoom`（真实缩放）。`renderScale` 已经是常量基准，用它判断
+    /// 等于永远显示文字 —— 缩到很小时会退化成一片灰噪。这里用真实 zoom 做**布尔**判定，
+    /// 阈值两侧留着 `CanvasScreenText` 里的滞回/透明度过渡来防闪。
     private var textVisible: Bool {
         CanvasScreenText.textVisible(nodeSize: CGSize(width: node.width, height: node.height),
-                                     zoom: renderScale)
+                                     zoom: viewZoom)
     }
 
     /// 卡片纵向分区预算（★ 九轮）。文字行按固定行高先扣，可伸缩的预览区/正文区让位 ——
@@ -282,11 +267,11 @@ struct CanvasNodeCardView: View {
     ///
     /// 附带好处：缩放导致行数变化时，新增/消失的那行正好处在渐隐区（不足一成不透明度），
     /// 不再是一整行字“啖”地冒出来。
-    /// ★ v2.11.12：行数改成按 **1x** 基准算 —— 与 zoom 完全无关。
+    /// 正文行数 = 盒子能装的行数 + 1（多给一行、底部渐隐收边，见 `promptFadeMask`）。
     ///
-    /// v2.11.11 用的是 `promptBoxHeight`（随 zoom 变）÷ 屏幕恒定行高，于是缩放时行数会增减：
-    /// 哪怕有渐隐遮罩，用户看到的仍然是“文字在动”。行数一旦是常量，配合同样冻结的文本列宽，
-    /// 正文在整个缩放区间里就是**同一份排版**。
+    /// ★ v2.11.13：按 1x 基准算 —— 而且现在"1x 基准"和"实际排版基准"只差一个常数因子
+    /// （`layoutBaseScale`），行高与盒子高同乘它，比值不变 ⇒ 行数是**编译期就定死**的常量，
+    /// 缩放时不可能出现"多冒一行/少一行"。
     private var promptLineLimit: Int {
         let font = CanvasFontCatalog.nsFont(family: node.fontName,
                                            size: max(0.01, node.resolvedBodyFontSize))
@@ -598,6 +583,7 @@ struct CanvasNodeCardView: View {
                                    attachments: attachments,
                                    renderScale: renderScale,
                                    textCounter: textCounter,
+                                   viewZoom: viewZoom,
                                    // ★ v2.11.9：去掉 `&& !isEditing`。这个条件的后果是用户在正文上点一下
                                    // （指针根本没动），图片扇形就“啖”地**反向收回去** —— 而且因为
                                    // hover 只在指针**移动**时重算，不动就永远展不回来。于是一次单击
@@ -678,19 +664,10 @@ struct CanvasNodeCardView: View {
                         // 这样换行位置只由容器宽度决定，不会因为"文字理想宽度"参与协商而在缩放过程中
                         // 来回改主意 —— 用户录屏里「快速推进」/「快速推进(」两种断行反复横跳就是它。
                         .canvasStableText()
-                        // ★★ v2.11.12：文本块**定宽定高**，且尺寸只由 1x 基准 × textScale 决定
-                        // （见 `promptTextBoxSize`）。换行宽度从此与 zoom 解耦 —— 这一行才是
-                        // “缩放时文字不再重排”的根，前面所有轮次（档位量化、禁字距收紧、定高盒子、
-                        // 底部渐隐）都只是在掩盖重排的后果。
-                        .frame(width: promptTextBoxSize.width,
-                               height: promptTextBoxSize.height,
-                               alignment: .topLeading)
-                        // 多给的那一行（见 `promptLineLimit`）在这里被裁掉、并由渐隐收边，
-                        // 于是文本块永远是满的，而且“满”的方式与缩放无关。
-                        .clipped()
-                        .mask(promptFadeMask)
-                        // ★ 八轮：整块正文按左上角反向缩放 —— 锚点必须是 topLeading，用 center 会让
-                        // 文字块在缩小时朝中心收，看起来像"正文自己在卡里游动"。
+                        // ★ v2.11.13：v2.11.12 那套"定宽定高文本块"连同它带来的右下留白一起撤掉 ——
+                        // 排版尺度已经是常量，文本吃满容器也不会再重排，没必要再牺牲版面。
+                        // `textCounter` 现在恒为 1（见 `CanvasZoomLayout.textCounterScale`），
+                        // 这个修饰器只是个空操作，保留调用点以便将来查证。
                         .canvasScreenFixedText(textCounter, anchor: .topLeading)
                 }
             }
@@ -706,8 +683,9 @@ struct CanvasNodeCardView: View {
             // 裁剪也必须保留：手势进行中文字被反向补偿放大时会瞬时超出盒子。
             .frame(height: promptBoxHeight, alignment: .topLeading)
             .clipped()
-            // ★ v2.11.12：渐隐已改挂在文本块上（连同定宽定高），这里不再叠第二层遮罩 ——
-            // 外层盒子的高度仍随 zoom 变，遮罩挂这里会让渐隐边界随缩放上下爬，又是一处“会动”。
+            // 底部渐隐：让"多给的那一行"落在看不清的地带（见 `promptFadeMask`）。
+            // v2.11.13 起盒子高度与 zoom 无关（排版基准是常量），渐隐边界自然也不会爬。
+            .mask(promptFadeMask)
             // ★ 八轮：节点太小就不画字（阈值见 `CanvasScreenText`）。
             .opacity(textOpacity)
             // ★ 三轮：正文区上下各留 8pt 呼吸（用户要求）。padding 必须在 contentShape **之前**，
@@ -831,6 +809,9 @@ private struct RunningBadge: View {
     var renderScale: CGFloat = 1
     /// ★ 八轮：文字反向缩放，见 `CanvasZoomLayout.textCounterScale`。
     var textCounter: CGFloat = 1
+    /// ★ v2.11.13：真实缩放。**不参与任何排版**（排版一律走常量基准 `layoutBaseScale`），
+    /// 只用来判断"节点在屏幕上小到什么程度就别写字了"。
+    var viewZoom: CGFloat = 1
     /// ★ 八轮：节点太小时秒数一起隐掉（与卡片上其它文字同一条阈值）。
     var textOpacity: Double = 1
 

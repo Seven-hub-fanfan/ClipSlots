@@ -44,6 +44,8 @@ struct CanvasSlotFanStack: View {
     /// 精确倒数、不钳制（静息 ≤1，缩小手势中 >1）。牌面卡内的文字**不要直接用它** ——
     /// 卡片自己还挂着 `scaleEffect(layout.scale)`，要走 `cardTextCounter(_:)`。
     var textCounter: CGFloat = 1
+    /// ★ v2.11.13：真实缩放，仅用于"牌面小到什么程度就别写字了"的判定（排版一律走基准）。
+    var viewZoom: CGFloat = 1
     /// 整个节点是否被悬停（展开的唯一开关）。
     let nodeHovered: Bool
     /// 预览区可用高度（1x）。卡片按它收敛，避免在小节点上戳出卡片外。
@@ -109,12 +111,16 @@ struct CanvasSlotFanStack: View {
     /// 缩放的乘积。用户九轮的口径是"抵消文字实际经历的所有上层缩放"，漏掉这一层的表现就是
     /// 「鼠标移到某张卡上，那张卡的字比邻卡大 8%」—— 仍然是"字会变大小"。
     private func cardTextCounter(_ layout: CanvasFanGeometry.CardLayout) -> CGFloat {
-        // ★ v2.11.11：随屏幕恒定字号一起恢复“再除牌面自己那层 scale”。
-        textCounter / max(0.01, layout.scale)
+        // ★ v2.11.13：不再除牌面自己那层 scale —— 牌面文字跟着牌面等比走。
+        // 除掉它意味着"文字屏幕尺寸恒定"，而牌面宽度是随 scale 变的，于是文件名的换行/截断
+        // 会在展开/悬停动画里变来变去（同一个重排病，只是发生在小卡上）。
+        _ = layout
+        return textCounter
     }
 
     private func cardTextVisible(_ cardSize: CGSize) -> Double {
-        CanvasScreenText.cardTextVisible(cardSize: cardSize, zoom: renderScale) ? 1 : 0
+        // ★ v2.11.13：`renderScale` 已是常量，判定必须用真实缩放。
+        CanvasScreenText.cardTextVisible(cardSize: cardSize, zoom: viewZoom) ? 1 : 0
     }
 
     // MARK: - 卡片来源切片

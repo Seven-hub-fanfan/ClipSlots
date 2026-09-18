@@ -43,7 +43,14 @@ struct CanvasWorkspaceView: View {
     ///   - **离散缩放**（工具栏 +/-、100%、适应内容）：目标值当场就知道，立刻落定，
     ///     动画由 ratio 从 `旧/新` 收到 1 来演；
     ///   - **连续缩放**（触控板捏合、Cmd+滚轮）：停手 `zoomSettleDelay` 后落定。
-    @State private var layoutZoom: CGFloat = 1
+    /// ★★ v2.11.13：从 `@State` 变成**常量** —— 排版尺度不再跟 zoom 有任何关系。
+    ///
+    /// 这一行是本轮的全部要害。此前它会在缩放落定后更新，于是每次落定都重算一次卡片排版，
+    /// 用户看到的"停手瞬间文字跳一下/换行变了"就是它。钉成常量后：
+    ///   - 卡片内部排版（宽高、字号、padding、行数、换行位置）**全生命周期只算一次**；
+    ///   - 视觉缩放 100% 交给 `nodeLayer` 的 `scaleEffect(zoom / layoutZoom)`，那是渲染期变换，
+    ///     不参与布局协商，物理上不可能触发重新折行。
+    private var layoutZoom: CGFloat { CanvasZoomLayout.layoutBaseScale }
     /// ★ 九轮需求 1：文字的反向缩放 = `layoutZoom / zoom`（**精确倒数，不钳制**）。
     ///
     /// 节点层的 `scaleEffect(zoom / layoutZoom)` 是"排版档位"与"真实缩放"之间的差值补偿，它对
@@ -194,9 +201,8 @@ struct CanvasWorkspaceView: View {
             .onAppear {
                 pan = canvas.pan
                 zoom = canvas.zoom
-                // 排版缩放必须与初始 zoom 对齐，否则首帧 ratio ≠ 1，节点会以一个错误的比例被拉伸。
-                // ★ v2.11.9：与 `settleLayoutZoom` 一致 —— 钉精确值，首帧残差恒为 1。
-                layoutZoom = max(0.01, canvas.zoom)
+                // ★ v2.11.13：`layoutZoom` 已是常量基准，这里无须（也无法）再对齐 zoom。
+                // 首帧的 ratio = zoom / base ≠ 1 是**故意**的：卡片按基准排版、由变换缩到位。
                 // 闭包在这里绑一次即可：@State/@ObservedObject 的读写都走稳定的存储盒，
                 // 视图结构体后续被重建也不影响这几个闭包写到正确的地方。
                 inputRouter.onScroll = { dx, dy, precise, isZoom, point in
@@ -332,11 +338,13 @@ struct CanvasWorkspaceView: View {
                                    text: liveText(for: node),
                                    pathLabel: pathLabel(for: node),
                                    attachments: liveAttachments(for: node),
+                                   // ★★ v2.11.13：常量基准。卡片内部排版只算这一次，
+                                   // 之后 zoom 怎么变都只走下面那句 `scaleEffect`。
                                    renderScale: layoutZoom,
-                                   // ★ 九轮需求 1：文字的屏幕尺寸要恒定，就得抵掉下面那句
-                                   // `scaleEffect(zoom / layoutZoom)` 的残差 —— 这里传的是它的
-                                   // **精确倒数**（不钳制；八轮那个 min(1, ·) 正是"缩小时字仍在变"的根因）。
+                                   // 恒为 1（`textCounterScale` 已退休），留着调用点便于查证。
                                    textCounter: textCounter,
+                                   // 真实缩放：只用于"要不要写字"的判定。
+                                   viewZoom: zoom,
                                    isEditing: isEditing,
                                    onBeginEdit: { beginEdit(node) },
                                    onCommitEdit: { commitEdit(node, text: $0) },
@@ -1311,12 +1319,10 @@ struct CanvasWorkspaceView: View {
         // `layoutZoom` 照旧冻结，见 `scheduleLayoutZoomSettle`），下面那道 0.5% 死区又吃掉了
         // 浮点噪声带来的无意义重排。代价是离散滚轮每一格会重排一次文字 —— 而在八轮
         // “屏幕字号恒定”之后这本来就是**必然**的：卡片变宽而字号不变，每行能装的字数真的变了。
-        let target = max(0.01, value)
-        guard abs(target - layoutZoom) > layoutZoom * 0.005 else { return }
-        var tx = Transaction()
-        tx.disablesAnimations = true
-        tx.animation = nil
-        withTransaction(tx) { layoutZoom = target }
+        // ★★ v2.11.13：排版尺度已是常量（`layoutZoom` 现在是 `layoutBaseScale`），
+        // "落定后重排一次"这件事本身被取消了 —— 它正是用户看到的"停手瞬间文字跳一下"。
+        // 保留函数壳是因为调用点散在离散缩放/手势结束/适应内容等七八处，全删容易漏。
+        _ = max(0.01, value)
     }
 
     /// 连续缩放（捏合 / Cmd+滚轮）停手后再落定排版缩放。

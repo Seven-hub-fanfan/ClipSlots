@@ -109,7 +109,13 @@ public enum CanvasScreenText {
         // 剩下的唯一可见变化：停手后段内“哪个词跑到下一行”会变一次。这一条在字号恒定的
         // 前提下是数学上不可消除的（除非让正文列不填满卡片、留一道随缩放变宽的右侧空白，
         // 那是一个**常驻**的丑，比一次性的重排更难忍）。
-        return max(0.01, designPt * textScale(renderScale))
+        // ★★ v2.11.13：回到"字号 × 排版尺度"的朴素等比关系。
+        //
+        // 这不是又一次摇摆：v2.11.10 的等比之所以还会抖，是因为当时 `renderScale`（= layoutZoom）
+        // 仍会随缩放落定而换档，换档就重算一次排版，字体度量/像素对齐的微小差异就够让换行位置
+        // 变一下。v2.11.13 把 `renderScale` 钉成常量 `CanvasZoomLayout.layoutBaseScale`，排版
+        // 从此**只算一次**，等比关系才真正兑现成"永不重排"。
+        return max(0.01, designPt * max(0.01, renderScale))
     }
 
     /// 文字的**布局尺度** = `min(1, zoom)`（★ v2.11.12 · 用户第 6 次打回「还是会动」）。
@@ -136,8 +142,11 @@ public enum CanvasScreenText {
     /// 代价（写清楚，别再当 bug 排查）：zoom > 1 时文本列宽仍是 1x，正文区右侧/下方会出现
     /// 随缩放变大的留白。这是“字号恒定 + 绝不重排”的必然找零；若哪天用户更在意填满，
     /// 唯一的自洽出路是让**整张卡片**屏幕尺寸恒定（缩放只改卡片间距），而不是回到重排。
+    /// ⚠️ v2.11.13 起**恒返 1**：排版尺度已由 `CanvasZoomLayout.layoutBaseScale` 统一接管，
+    /// 文字不再有自己的一套尺度。保留符号只为不打断历史调用点/测试。
     public static func textScale(_ zoom: CGFloat) -> CGFloat {
-        min(1, max(0.01, zoom))
+        _ = zoom
+        return 1
     }
 
     /// 排版字号 → 用户**在屏幕上实际看到**的字号。
