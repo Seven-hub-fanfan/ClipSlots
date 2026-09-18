@@ -6811,4 +6811,327 @@ do {
 }
 
 
+// MARK: - CRATE：Crate CLI 生图链路的纯逻辑（v2.11.17）
+//
+// 这一组守的是"静默错误"：少一个 `--no-wait` 会让提交阻塞 10 分钟，状态码看反会把成功当失败，
+// seed 取不到会让「重跑」变成"再随机一张"。样本 JSON 全部来自本机实测（crate v0.6.1）。
+
+// 实测样本：提交（--no-wait --json）
+let crateSubmitSample = """
+{
+  "input": {
+    "biz_info": { "biz_id": "unknown", "biz_type": 1 },
+    "config": {},
+    "extra_params": {},
+    "extra_params_json": "{\\"seed\\":625766}",
+    "generation_type": 0,
+    "height": "2048",
+    "model": "ep-20260113155529-w7slv",
+    "prompt": "a tiny red cube on white background",
+    "ratio": "1:1",
+    "width": "2048"
+  },
+  "success": true,
+  "taskId": "7686781578974134535"
+}
+"""
+
+// 实测样本：运行中 / 成功
+let crateRunningSample = """
+{"taskInfo":{"queue_ahead_count":"0","queue_phase":"RUNNING","retry_after_ms":"0","task_id":"7686781719957029138","task_status":1}}
+"""
+let crateSucceededSample = """
+{"taskInfo":{"results":[{"content":"https://lf-crate.ibytedtos.com/obj/tt-crate-aigc-tool-prod-us/aigc_tool/files/crate_v1_0_20260918075926_ea7108ce.jpeg","content_type":0,"media_type":0}],"task_id":"7686781719957029138","task_status":2}}
+"""
+
+do {
+    let req = CrateImageRequest(model: "seedream45",
+                                prompt: "  a tiny red cube  ",
+                                ratio: "1:1",
+                                count: 1,
+                                imagePaths: ["/tmp/a.png", "/tmp/b.png"],
+                                seed: 42)
+    let args = try CrateGeneration.submitArguments(req)
+    t.check(args.prefix(2) == ["generate", "image"], "CRATE-1 提交命令是 generate image")
+    t.check(args.contains("--no-wait"),
+            "★CRATE-2 提交必须带 --no-wait（漏了就退化成阻塞模式：拿不到排队信息，进程被杀连 taskId 都留不下）")
+    t.check(args.contains("--json"), "CRATE-3 提交必须带 --json（否则 stdout 不是可解析的 JSON）")
+    t.check(args.contains("a tiny red cube"),
+            "★CRATE-4 提示词前后空白要裁掉，但内部空格原样保留")
+    t.equal(args.filter { $0 == "--image" }.count, 2, "CRATE-5 --image 可重复传（多张入参图）")
+    t.check(args.contains("seed=42"), "CRATE-6 seed 用 --param seed=N 传（复现同一张图）")
+
+    let noRatio = try CrateGeneration.submitArguments(
+        CrateImageRequest(model: "seedream45", prompt: "x", ratio: "   "))
+    t.check(!noRatio.contains("--ratio"),
+            "★CRATE-7 比例为空时不传 --ratio（传空串会被 CLI 当成非法 preset 直接拒绝）")
+} catch {
+    t.check(false, "CRATE-1~7 抛出异常：\(error)")
+}
+
+t.expectThrows("CRATE-8 空提示词直接拒绝，不浪费一次提交") {
+    _ = try CrateGeneration.submitArguments(CrateImageRequest(model: "seedream45", prompt: "   \n "))
+}
+t.expectThrows("CRATE-9 模型为空直接拒绝（UI 出 bug 时不要把锅甩给服务端）") {
+    _ = try CrateGeneration.submitArguments(CrateImageRequest(model: " ", prompt: "x"))
+}
+t.expectThrows("★CRATE-10 count>1 明确拒绝（--count n = n 个独立任务，而节点身份是 groupId#slot，同槽位放不下第二个节点）") {
+    _ = try CrateGeneration.submitArguments(CrateImageRequest(model: "m", prompt: "x", count: 4))
+}
+
+t.equal(CrateGeneration.taskGetArguments(taskId: "768"), ["task", "get", "768", "--json"],
+        "CRATE-11 单任务查询参数")
+t.equal(CrateGeneration.taskQueryArguments(taskIds: ["a", "b"]),
+        ["task", "query", "--ids", "a,b", "--json"],
+        "CRATE-12 批量查询用逗号连 id（多节点并发时只起一个进程）")
+t.equal(CrateGeneration.authStatusArguments(), ["auth", "status", "--json"], "CRATE-13 登录体检参数")
+
+do {
+    let result = try CrateGeneration.parseSubmitResponse(crateSubmitSample)
+    t.equal(result.taskId, "7686781578974134535", "CRATE-14 taskId 从顶层取")
+    t.equal(result.seed, 625766,
+            "★CRATE-15 seed 藏在 input.extra_params_json 这个被转义的 JSON 字符串里，要二次解析")
+} catch {
+    t.check(false, "CRATE-14~15 抛出异常：\(error)")
+}
+
+do {
+    // CLI 真实输出里进度提示走 stderr，stdout 是纯 JSON；这条守的是将来 CLI 变动后的余量。
+    let noisy = "Submitting generation...\n" + crateSubmitSample + "\ntrailing noise"
+    let result = try CrateGeneration.parseSubmitResponse(noisy)
+    t.equal(result.taskId, "7686781578974134535", "CRATE-16 前后有噪声时仍能裁出第一个 JSON 对象")
+} catch {
+    t.check(false, "CRATE-16 抛出异常：\(error)")
+}
+
+t.expectThrows("CRATE-17 success=false 视为提交被拒") {
+    _ = try CrateGeneration.parseSubmitResponse("{\"success\":false,\"message\":\"quota\"}")
+}
+t.expectThrows("CRATE-18 没有 taskId 要报错（后续轮询无从下手）") {
+    _ = try CrateGeneration.parseSubmitResponse("{\"success\":true}")
+}
+t.expectThrows("CRATE-19 非 JSON 输出要报错并保留原文") {
+    _ = try CrateGeneration.parseSubmitResponse("command not found: crate")
+}
+
+do {
+    t.equal(try CrateGeneration.parseTaskStatus(crateRunningSample), .running,
+            "★CRATE-20 task_status=1 且前方 0 个 = 生成中（不是排队）")
+    let queued = try CrateGeneration.parseTaskStatus(
+        "{\"taskInfo\":{\"queue_ahead_count\":\"3\",\"task_status\":1}}")
+    t.equal(queued, .queued(ahead: 3),
+            "★CRATE-21 queue_ahead_count 实测是字符串 \"3\" 而 task_status 是数字，两种都要宽容取值")
+    let ok = try CrateGeneration.parseTaskStatus(crateSucceededSample)
+    if case .succeeded(let urls) = ok {
+        t.equal(urls.count, 1, "CRATE-22 成功时取出 results[].content")
+        t.check(urls[0].hasPrefix("https://"), "CRATE-23 产物地址是可直接下载的 http(s) URL")
+    } else {
+        t.check(false, "CRATE-22 task_status=2 应该是 succeeded，实际 \(ok)")
+    }
+} catch {
+    t.check(false, "CRATE-20~23 抛出异常：\(error)")
+}
+
+do {
+    let empty = try CrateGeneration.parseTaskStatus("{\"taskInfo\":{\"task_status\":2,\"results\":[]}}")
+    if case .failed = empty {
+        t.check(true, "★CRATE-24 说成功却没给产物 → 按失败报（显示一张空白卡片更糟）")
+    } else {
+        t.check(false, "CRATE-24 期望 failed，实际 \(empty)")
+    }
+    let unknown = try CrateGeneration.parseTaskStatus(
+        "{\"taskInfo\":{\"task_status\":3,\"fail_reason\":\"内容审核未通过\"}}")
+    t.equal(unknown, .failed(reason: "内容审核未通过"),
+            "★CRATE-25 未知状态码取服务端原话（本机抓不到失败样本，所以只认两个已实测状态码、其余一律失败）")
+    let bare = try CrateGeneration.parseTaskStatus("{\"taskInfo\":{\"task_status\":9}}")
+    if case .failed(let reason) = bare {
+        t.check(reason.contains("9"), "CRATE-26 没有文案时失败原因带上状态码，便于排查")
+    } else {
+        t.check(false, "CRATE-26 期望 failed，实际 \(bare)")
+    }
+} catch {
+    t.check(false, "CRATE-24~26 抛出异常：\(error)")
+}
+
+do {
+    let batch = try CrateGeneration.parseBatchTaskStatus(
+        "{\"taskInfos\":[{\"task_id\":\"a\",\"task_status\":1,\"queue_ahead_count\":\"0\"},"
+        + "{\"task_id\":\"b\",\"task_status\":2,\"results\":[{\"content\":\"https://x/y.png\"}]}]}")
+    t.equal(batch.count, 2, "CRATE-27 批量查询解析成 taskId → 进展的字典")
+    t.equal(batch["a"], .running, "CRATE-28 批量结果按 task_id 对齐（顺序不可信）")
+} catch {
+    t.check(false, "CRATE-27~28 抛出异常：\(error)")
+}
+
+let crateHome = "/Users/tester"
+let crateCandidates = CrateGeneration.binaryCandidates(homeDirectory: crateHome)
+t.equal(crateCandidates.first, "/Users/tester/.local/bin/crate",
+        "★CRATE-29 首选 ~/.local/bin/crate（本机实测安装位置；App 从 Finder 启动时 PATH 里没有它，必须走绝对路径）")
+t.check(crateCandidates.allSatisfy { $0.hasPrefix("/") },
+        "CRATE-30 候选路径全是绝对路径（launchd 的精简 PATH 下相对查找必然失败）")
+
+let cratePath = CrateGeneration.searchPath(homeDirectory: crateHome, inherited: "/usr/bin:/custom")
+t.check(cratePath.split(separator: ":").contains("/Users/tester/bin"),
+        "★CRATE-31 PATH 要含 ~/bin：crate 入口是 #!/usr/bin/env node，子进程得自己找得到 node")
+t.equal(cratePath.split(separator: ":").filter { $0 == "/usr/bin" }.count, 1,
+        "CRATE-32 继承来的 PATH 去重后保持顺序")
+t.check(cratePath.split(separator: ":").contains("/custom"),
+        "CRATE-33 继承的自定义目录不丢（用户可能把 node 装在别处）")
+t.equal(cratePath.split(separator: ":").first.map(String.init), "/usr/bin",
+        "★CRATE-34 登录 shell 的 PATH 排在静态兜底前面（用户终端里那套 nvm/自建目录才是真环境）")
+
+// CRATE-35~37：node 查找。守的是"断链软链"——路径在、软链在，但目标已删，probe 必须如实说没有。
+let crateProbePath = "/Users/tester/.local/bin:/Users/tester/bin/node-v22/bin:/usr/bin"
+t.equal(CrateGeneration.resolveDirectory(containing: "node", in: crateProbePath) {
+            // 模拟本机实测：~/.local/bin/node 是断链软链，真 node 在 ~/bin/node-v22/bin。
+            $0 == "/Users/tester/bin/node-v22/bin/node"
+        },
+        "/Users/tester/bin/node-v22/bin",
+        "★CRATE-35 断链软链所在目录要被跳过（实测 ~/.local/bin/node 指向已删除的 ~/.hermes/…，只认目录列表必然 exit 127）")
+t.equal(CrateGeneration.resolveDirectory(containing: "node", in: crateProbePath) { _ in false }, nil,
+        "CRATE-36 一个都找不到时返回 nil（上层据此报「没找到 node」而不是让子进程 exit 127）")
+t.equal(CrateGeneration.resolveDirectory(containing: "node", in: "::/usr/bin:") {
+            $0 == "/usr/bin/node"
+        },
+        "/usr/bin",
+        "CRATE-37 PATH 里的空段要忽略（拼接出来的 PATH 常带多余冒号）")
+
+t.equal(CrateGeneration.fileExtension(forURL: "https://x/y/crate_v1.jpeg?sign=abc.php"), "jpeg",
+        "★CRATE-38 扩展名只从路径段取、且走白名单（查询串里的 .php 不能被当成扩展名）")
+t.equal(CrateGeneration.fileExtension(forURL: "https://x/y/noext"), nil, "CRATE-39 取不到扩展名返回 nil")
+t.equal(CrateGeneration.assetFileName(taskId: "768/../x", index: 0, urlString: "https://x/a.png"),
+        "crate_768x.png",
+        "★CRATE-40 taskId 进文件名前要过滤路径字符（否则产物能写出槽位目录）")
+t.equal(CrateGeneration.assetFileName(taskId: "768", index: 1, urlString: "https://x/a"),
+        "crate_768_2.jpg",
+        "CRATE-41 多张产物用序号后缀，扩展名取不到时兜底 jpg")
+
+t.equal(CrateGeneration.firstJSONObject("{\"a\":\"}\"}"), "{\"a\":\"}\"}",
+        "★CRATE-42 花括号配平要跳过字符串内部（提示词里带 } 时不能被截断）")
+t.equal(CrateGeneration.firstJSONObject("no json here"), nil, "CRATE-43 没有 JSON 时返回 nil")
+t.equal(CrateGeneration.clip(String(repeating: "x", count: 300)).count, 201,
+        "CRATE-44 报错原文截断到 200 字符 + 省略号（别把整页 JSON 塞进 Toast）")
+
+// MARK: - CRATE-IO：入参 / 产物的区分（v2.11.17）
+//
+// 这一组盯的是整条链路里最容易「静默跑偏」的地方：产物也住在槽位附件里，一旦不做区分，
+// 重跑就会把上一轮的出图当入参，文生图变图生图 —— 出的图还是图，没有任何报错，
+// 用户只会觉得"这模型怎么越跑越像上一张"。
+do {
+    func att(_ name: String,
+             type: SlotContent.AttachmentType = .image,
+             storage: String? = nil,
+             path: String? = nil,
+             original: String? = nil) -> SlotContent.SlotAttachment {
+        SlotContent.SlotAttachment(name: name, type: type, path: path,
+                                   originalPath: original, storagePath: storage)
+    }
+    let exists: (String) -> Bool = { !$0.hasPrefix("/gone/") }
+
+    let input = att("in.png", storage: "/store/in.bin")
+    let output = att("crate_768.jpeg", storage: "/store/out.bin")
+    let all = [input, output]
+
+    t.equal(CrateGeneration.inputImagePaths(from: all, excludingAttachmentIds: [], fileExists: exists),
+            ["/store/in.bin", "/store/out.bin"],
+            "CRATE-IO-1 没有产物标记时（老画布数据）全部图片都算入参，保持旧行为")
+    t.equal(CrateGeneration.inputImagePaths(from: all,
+                                           excludingAttachmentIds: [output.id.uuidString],
+                                           fileExists: exists),
+            ["/store/in.bin"],
+            "★CRATE-IO-2 被标记为产物的附件不能再当入参（否则重跑静默变图生图）")
+    t.equal(CrateGeneration.inputImagePaths(from: all,
+                                           excludingAttachmentIds: [input.id.uuidString,
+                                                                    output.id.uuidString],
+                                           fileExists: exists),
+            [],
+            "CRATE-IO-3 全被标记时入参为空（纯文生图，不是报错）")
+
+    // 非图片附件不上传：CLI 的 --image 只接图片，把 PDF 递上去换回来的是一句上传失败。
+    let doc = att("spec.pdf", type: .file, storage: "/store/spec.bin")
+    t.equal(CrateGeneration.inputImagePaths(from: [doc], excludingAttachmentIds: [], fileExists: exists),
+            [], "CRATE-IO-4 非 image 型附件不进入参")
+
+    // 路径优先级 + 断链跳过。
+    let multi = att("m.png", storage: "/gone/m.bin", path: "/real/m.png", original: "/orig/m.png")
+    t.equal(CrateGeneration.inputImagePaths(from: [multi], excludingAttachmentIds: [], fileExists: exists),
+            ["/real/m.png"],
+            "★CRATE-IO-5 storagePath 断链要顺位退到 path（存储层字节丢了不等于这张图没了）")
+    let broken = att("b.png", storage: "/gone/b.bin", path: "/gone/b.png")
+    t.equal(CrateGeneration.inputImagePaths(from: [broken], excludingAttachmentIds: [], fileExists: exists),
+            [], "★CRATE-IO-6 全部路径都断链时整条剔掉，不把不存在的路径递给 CLI")
+    let emptyPath = att("e.png", storage: "", path: "/real/e.png")
+    t.equal(CrateGeneration.inputImagePaths(from: [emptyPath], excludingAttachmentIds: [], fileExists: exists),
+            ["/real/e.png"], "CRATE-IO-7 空字符串路径视作缺失（历史数据里存在）")
+
+    // 顺序必须是附件顺序：多图模型（如图生图参考 + 蒙版）对入参顺序敏感。
+    let a = att("a.png", storage: "/store/a.bin")
+    let b = att("b.png", storage: "/store/b.bin")
+    t.equal(CrateGeneration.inputImagePaths(from: [a, b], excludingAttachmentIds: [], fileExists: exists),
+            ["/store/a.bin", "/store/b.bin"], "CRATE-IO-8 入参顺序就是附件顺序")
+
+    // 节点字段本身的往返 + 向后兼容。
+    var node = canvasNode(slot: 5)
+    node.outputAttachmentIds = ["id-1", "id-2"]
+    let data = try! JSONEncoder().encode(node)
+    let back = try! JSONDecoder().decode(CanvasNode.self, from: data)
+    t.equal(back.outputAttachmentIds, ["id-1", "id-2"],
+            "★CRATE-IO-9 产物 id 必须落盘（画布重开后重跑仍要认得出哪张是产物）")
+    t.check(!String(data: data, encoding: .utf8)!.contains("\"outputAttachmentIds\":[]"),
+            "CRATE-IO-10 空集合不写盘（没出过图的节点不该多一行）")
+    let legacy = """
+    {"pageId":"p1","groupId":"g1","slot":6,"kind":"image","x":0,"y":0}
+    """.data(using: .utf8)!
+    t.equal(try! JSONDecoder().decode(CanvasNode.self, from: legacy).outputAttachmentIds, [],
+            "CRATE-IO-11 老画布数据没有这个字段也要能读，缺省空集合")
+}
+
+// MARK: - CRATE-SEED：模型不收 seed（v2.11.17 · e2e 抓到的真实坑）
+//
+// 首次生成不带 seed，成功；「重跑」刻意复用 seed，于是 --param seed=N 被 CLI 当场拒掉：
+// `Model seedream45 does not publish parameter "seed"`。也就是说这个坑**只在重跑时炸**，
+// 表现为"生成能用、重跑坏了"。两道保险都要有测试盯着。
+do {
+    t.equal(CrateGeneration.modelDescribeArguments(model: "seedream45"),
+            ["model", "describe", "seedream45", "--json"],
+            "CRATE-SEED-1 模型参数表查询命令")
+
+    let describe = """
+    {"id":"seedream45","parameters":[{"name":"prompt","required":true},
+     {"name":"ratio"},{"name":"width"},{"name":"height"}]}
+    """
+    let names = try! CrateGeneration.parseModelParameterNames(describe)
+    t.check(names.contains("prompt") && names.contains("ratio"), "CRATE-SEED-2 参数名解析")
+    t.check(!names.contains(CrateGeneration.seedParameterName),
+            "★CRATE-SEED-3 seedream45 的参数表里确实没有 seed（实测口径，改了要重新验）")
+    t.equal(try! CrateGeneration.parseModelParameterNames("{\"id\":\"x\"}"), [],
+            "CRATE-SEED-4 没有 parameters 字段时返回空集（= 问不出来，交给重试兜底，别默默阉掉 seed）")
+
+    // 报错识别：CLI 原文 + 几种常见变体都要认出来，无关报错不能误判。
+    t.check(CrateGeneration.isUnsupportedParameterError(
+                "Error: Model seedream45 does not publish parameter \"seed\""),
+            "★CRATE-SEED-5 认得出 CLI 拒收 seed 的原话（这是重试兜底的唯一触发条件）")
+    t.check(CrateGeneration.isUnsupportedParameterError("unknown parameter: seed"),
+            "CRATE-SEED-6 认得出 unknown parameter 变体")
+    t.check(!CrateGeneration.isUnsupportedParameterError("Error: network timeout"),
+            "★CRATE-SEED-7 无关报错不能被当成「seed 不支持」而去重试（否则把网络故障重试成两次提交）")
+    t.check(!CrateGeneration.isUnsupportedParameterError(
+                "does not publish parameter \"ratio\""),
+            "★CRATE-SEED-8 别的参数被拒不能算 seed 被拒（去掉 seed 重试对它毫无帮助）")
+
+    // 去 seed 后其余参数一个都不能动。
+    let req = CrateImageRequest(model: "seedream45", prompt: "p", ratio: "16:9",
+                                count: 1, imagePaths: ["/a.png"], seed: 42)
+    let dropped = CrateGeneration.droppingSeed(req)
+    t.check(dropped.seed == nil, "CRATE-SEED-9 droppingSeed 去掉 seed")
+    t.equal(dropped.model, req.model, "CRATE-SEED-10 模型不变")
+    t.equal(dropped.prompt, req.prompt, "CRATE-SEED-11 提示词不变")
+    t.equal(dropped.ratio, req.ratio, "CRATE-SEED-12 比例不变")
+    t.equal(dropped.imagePaths, req.imagePaths, "★CRATE-SEED-13 入参图不能在重试里丢掉")
+    let args = try! CrateGeneration.submitArguments(dropped)
+    t.check(!args.contains("--param"), "★CRATE-SEED-14 去 seed 后的命令行里不能再出现 --param")
+    t.check(args.contains("--no-wait") && args.contains("--json"),
+            "CRATE-SEED-15 重试仍然是 --no-wait + --json")
+}
+
 t.report()
