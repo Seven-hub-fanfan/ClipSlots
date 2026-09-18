@@ -231,23 +231,46 @@ struct CanvasNodeCardView: View {
     /// 减掉上下各 `promptVerticalPadding`：那两块 padding 挂在 `maxHeight` frame **外面**（为了把
     /// 命中区一起撑大），所以正文区实际占的是 `promptMaxHeight + 16pt`。不扣这 16pt 的话，
     /// 当 `Spacer` 没有宽余时底部入参行会被顶出卡片。
+    /// 正文盒子的**定高**（★ v2.11.11）。
+    ///
+    /// 以前这里是 `maxHeight`：文字多就高、少就矮。字号屏幕恒定时，行数会随缩放变
+    /// （盒子宽度随 zoom 变、字号不变 → 每行字数变 → 行数变），于是正文块忽高忽矮，
+    /// **把底部「入参文件」行顶得上下抽搜** —— 用户录屏里最刺眼的就是这个，而不是换行本身。
+    /// 钉成定高后，排版怎么变都关在盒子里，卡片内部的其他分区一个像素都不会动。
+    ///
+    /// 减掉上下各一份 `promptVerticalPadding`：那两块 padding 挂在这个高度 frame **外面**
+    /// （为了把命中区一起撑大），不扣的话正文区实际占高 = 预算 + 16pt，会把底部顶出卡片。
+    private var promptBoxHeight: CGFloat {
+        max(0, plan.promptMaxHeight - 2 * s(CanvasCardLayout.promptVerticalPadding))
+    }
+
+    /// 正文行数 = **盒子能装的行数 + 1**（★ v2.11.11）。
+    ///
+    /// 为何 +1：盒子是定高的，而“能装几行”是个向下取整的估算，只填到 `fits` 行会在
+    /// 盒子底部剩下不足一行的空白；多给一行并交由 `.clipped()` 裁掉，盒子就**永远是满的**。
+    /// 那半行不会难看：底部挂了一道渐隐遮罩（`promptFadeMask`），看上去就是“下面还有”。
+    ///
+    /// 附带好处：缩放导致行数变化时，新增/消失的那行正好处在渐隐区（不足一成不透明度），
+    /// 不再是一整行字“啖”地冒出来。
     private var promptLineLimit: Int {
-        // ★ v2.11.10：在 **1x 基准**上算，不用当前缩放后的尺寸。
-        //
-        // v2.11.9 用的是 `plan.promptMaxHeight`（已乘 renderScale）除 `fs(字号)`。当时字号是屏幕
-        // 恒定的，于是分子随缩放变、分母不变 —— 行数直接随缩放跳（4 行 ↔ 9 行），正是用户报的
-        // “文字放大放小动态响应”里最刺眼的一部分。
-        //
-        // 现在字号也随缩放等比了，分子分母同乘 renderScale，比值本就不变；但 `ceil` 的舍入误差
-        // 仍可能在某些缩放值上把结果抹差一行。直接除回 1x 再算，行数就是**节点自身高度的
-        // 纯函数**，与 zoom 严格无关 —— 缩放时永远不会多一行少一行，底部入参行也就不会被顶得抽搜。
-        let inner = plan.promptMaxHeight / max(0.01, renderScale)
-            - 2 * CanvasCardLayout.promptVerticalPadding
         let font = CanvasFontCatalog.nsFont(family: node.fontName,
-                                           size: node.resolvedBodyFontSize)
+                                           size: fs(node.resolvedBodyFontSize))
         let lineHeight = max(1, ceil(font.ascender - font.descender + font.leading))
-        let fits = Int((max(0, inner) / lineHeight).rounded(.down))
-        return min(CanvasCardText.previewLineCap, max(1, fits))
+        let fits = Int((promptBoxHeight / lineHeight).rounded(.down))
+        return min(CanvasCardText.previewLineCap, max(1, fits + 1))
+    }
+
+    /// 底部渐隐遮罩（★ v2.11.11）：最后 ~10pt 渐逐透明。
+    ///
+    /// 作用有两层：一是把 `+1 行` 被裁切的那半行变成“刻意的渐隐”；二是缩放时行数变化、
+    /// 手势中文字块被反向补偿拉长拉短时，变化都发生在低不透明度区，观感上几乎不可见。
+    private var promptFadeMask: LinearGradient {
+        let fade = min(0.28, s(10) / max(1, promptBoxHeight))
+        return LinearGradient(stops: [
+            .init(color: .black, location: 0),
+            .init(color: .black, location: max(0, 1 - fade)),
+            .init(color: .black.opacity(0), location: 1)
+        ], startPoint: .top, endPoint: .bottom)
     }
 
     var body: some View {
@@ -624,15 +647,20 @@ struct CanvasNodeCardView: View {
                         .canvasScreenFixedText(textCounter, anchor: .topLeading)
                 }
             }
-            .frame(maxWidth: .infinity, minHeight: s(30), alignment: .topLeading)
-            // ★ 八轮：正文改成屏幕固定字号后必须**限高 + 裁剪**。
+            .frame(maxWidth: .infinity, alignment: .topLeading)
+            // ★ v2.11.11：`maxHeight` → **定高**。这是本轮的核心一行。
             //
-            // 缩小画布时字号不再跟着缩，4 行正文的实际需求高度会超过正文区在小节点里分到的那点
-            // 空间；`VStack` 不裁剪，多出来的部分会把底部「入参文件」行顶出卡片、甚至溢到卡片外
-            // 压在相邻节点上。上限的算法（节点高 - 其它固定分区）在 `CanvasCardLayout` 里，带断言。
-            .frame(maxHeight: plan.promptMaxHeight,
-                   alignment: .topLeading)
+            // 字号屏幕恒定（用户硬要求）意味着缩放时每行字数、从而行数必然变。旧的 `maxHeight`
+            // 让盒子高度跟着行数走，于是一个排版变化会传导成**整张卡片内部的位移**：底部蓝色
+            // 「入参文件」行上下抽搜、图片区边距变。钉成定高后，重排的影响被关进这个盒子，
+            // 外面一个像素都不动 —— “观感不适”里真正刺眼的那一半就没了。
+            //
+            // 高度源头仍是 `CanvasCardLayout` 的预算（节点高 - 其它固定分区），带断言；
+            // 裁剪也必须保留：手势进行中文字被反向补偿放大时会瞬时超出盒子。
+            .frame(height: promptBoxHeight, alignment: .topLeading)
             .clipped()
+            // 底部渐隐：让“多给的那一行”以及行数变化都发生在看不清的地带（见 `promptFadeMask`）。
+            .mask(promptFadeMask)
             // ★ 八轮：节点太小就不画字（阈值见 `CanvasScreenText`）。
             .opacity(textOpacity)
             // ★ 三轮：正文区上下各留 8pt 呼吸（用户要求）。padding 必须在 contentShape **之前**，

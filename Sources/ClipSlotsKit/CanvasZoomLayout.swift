@@ -182,10 +182,15 @@ public enum CanvasZoomLayout {
     /// 让那些修饰器退化成“只禁字距收紧 / 禁字号自适应”（那部分仍然需要 —— 它们防的是
     /// 亚像素宽度抖动引起的抖动），而 `scaleEffect(1)` 本身无开销。将来若要恢复屏幕恒定字号，
     /// 只需把这里改回 `l / z`、并把 `layoutFontSize` 改回不乘 renderScale，两行。
+    /// ★ v2.11.11：恢复为精确倒数（v2.11.10 的恒返 1 随等比字号一起回滚）。
+    ///
+    /// 落定后 `layoutZoom == zoom` → 返 1（零开销、静息态逐像素清晰）；
+    /// 只有**手势进行中**（排版冻结、视觉靠残差变换过渡）它才≠ 1，作用是把那一层
+    /// `scaleEffect(zoom / layoutZoom)` 从文字上抵消掉，让文字在整个手势过程中屏幕尺寸纹不动。
     public static func textCounterScale(zoom: CGFloat, layoutZoom: CGFloat) -> CGFloat {
-        _ = zoom
-        _ = layoutZoom
-        return 1
+        let z = max(0.01, zoom)
+        let l = max(0.01, layoutZoom)
+        return l / z
     }
 
     /// 连续手势（触控板捏合 / 滚轮）停手后多久才允许换档。
