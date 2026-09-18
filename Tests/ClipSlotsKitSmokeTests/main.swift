@@ -5058,6 +5058,46 @@ do {
             "槽位数为 0（配置损坏）返回 nil，不能让 1...0 崩掉")
 }
 
+// MARK: - CANVAS-POPOVER-ANCHOR：浮层锚点夹取（★ v2.11.17）
+//
+// 用户反馈「点击入参文件的这个卡片是不是应该出现在节点旁边而不是默认左上角」。
+// 真正的肇因在 View 层（`.offset` 不改 frame，而 popover 定位读 frame —— 见
+// `CanvasWorkspaceView.inputFilesAnchorOverlay` 的注释），这里钉的是配套那半：
+// 锚点得先夹进可视区，否则节点被平移到窗口外时 AppKit 会把弹层硬塞到屏幕边缘，
+// 症状又退回"弹层出现在莫名其妙的位置"。
+do {
+    let size = CGSize(width: 1200, height: 800)
+
+    // 视区内的点原样不动 —— 夹取绝不能顺手"纠正"本来就对的锚点。
+    let inside = CGPoint(x: 600, y: 400)
+    t.check(CanvasGeometry.clampedPopoverAnchor(inside, viewSize: size, leftInset: 240) == inside,
+            "★视区内的锚点原样返回（夹取只兜底，不修改正常情形）")
+
+    // 节点被拖到窗口左外侧 / 上方：夹回来，且左边界要让开侧栏。
+    let far = CanvasGeometry.clampedPopoverAnchor(CGPoint(x: -500, y: -80),
+                                                 viewSize: size, leftInset: 240)
+    t.check(far.x >= 240, "★夹回来时左边界让开侧栏（弹层压在侧栏上正是用户报的观感）")
+    t.check(far.y >= 0 && far.y <= size.height, "纵向也夹进视区")
+
+    let farRight = CanvasGeometry.clampedPopoverAnchor(CGPoint(x: 9999, y: 9999),
+                                                       viewSize: size, leftInset: 240)
+    t.check(farRight.x < size.width && farRight.y < size.height,
+            "右下角外侧同样夹回视区内（留边距，免得弹层的箭头贴在窗口边上）")
+
+    // ★ 首帧还没量到尺寸时必须原样放过。
+    // 这条是防"修一个左上角、修出另一个左上角"：viewSize 在 onAppear 之前是 .zero，
+    // 若此时把锚点夹到 [margin, 0-margin] 这种空区间里，结果就是 (24,24) —— 又回到左上角。
+    let unmeasured = CGPoint(x: 777, y: 333)
+    t.check(CanvasGeometry.clampedPopoverAnchor(unmeasured, viewSize: .zero, leftInset: 240) == unmeasured,
+            "★viewSize 未量到（首帧 .zero）时锚点原样返回，绝不夹成左上角")
+
+    // 窗口比边距还小（用户把窗口拖到极窄）也不能吐出 NaN / 反向区间。
+    let tiny = CanvasGeometry.clampedPopoverAnchor(CGPoint(x: 50, y: 50),
+                                                   viewSize: CGSize(width: 30, height: 20),
+                                                   leftInset: 240)
+    t.check(tiny.x.isFinite && tiny.y.isFinite, "极窄窗口下不产生 NaN（夹取区间会反向，必须自己兜住）")
+}
+
 // MARK: - CANVAS-FAN：槽位节点扇形堆叠卡片（v2.11.8）
 //
 // 用户要求的交互：收拢叠放 → 整节点 hover 扇开 → 单卡 hover 抬起放大提层。

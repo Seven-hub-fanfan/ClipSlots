@@ -839,14 +839,25 @@ struct CanvasWorkspaceView: View {
     ///
     /// 锚点必须 `allowsHitTesting(false)`：它压在节点层之上，若能吃事件，卡片上那一小块
     /// （恰好是底边中点，也就是入参文件胶囊附近）就会点不动。
+    ///
+    /// ## ★ v2.11.17：为什么这里必须是 `.position` 而不是 `.offset`
+    ///
+    /// 用户反馈「点击入参文件的卡片出现在默认左上角，不是节点旁边」。锚点坐标一直算得是对的，
+    /// 错的是摆放方式：**`.offset` 是渲染期变换，不改变视图的 layout frame**，而 `.popover`
+    /// 定位读的正是 frame。于是这个 1×1 锚点无论 offset 多少，frame 永远待在
+    /// `ZStack(alignment: .topLeading)` 的左上角 —— popover 就永远贴在窗口左上（压在侧栏上）。
+    ///
+    /// `.position` 是 layout 修饰符，真的把子视图的 frame 放到那个点上，popover 才跟得住。
+    ///
+    /// 顺序也有讲究：`.popover` 必须挂在 **1×1 的那一层**、`.position` 套在外面。反过来写
+    /// （先 position 再 popover）等于把 popover 挂到 position 撑满整块画布的那层容器上，
+    /// 锚点会退化成"整个画布的边"，弹层又跑偏 —— 换成 position 时最容易踩的就是这一脚。
     @ViewBuilder
     private var inputFilesAnchorOverlay: some View {
         if let id = inputFilesNodeId, let node = canvas.nodes.first(where: { $0.id == id }) {
             let anchor = inputFilesAnchor(node)
             Color.clear
                 .frame(width: 1, height: 1)
-                .offset(x: anchor.x, y: anchor.y)
-                .allowsHitTesting(false)
                 .popover(isPresented: Binding(get: { inputFilesNodeId != nil },
                                               set: {
                                                   if !$0 {
@@ -867,6 +878,11 @@ struct CanvasWorkspaceView: View {
                                              groupId: node.groupId,
                                              isCanvasContext: true)
                 }
+                // ★ v2.11.17：position 在 popover 外层（理由见上方注释）。
+                .position(x: anchor.x, y: anchor.y)
+                // position 会让这一层撑满画布，所以"不吃事件"这件事更不能少 ——
+                // 否则整块画布被一张透明布盖住，节点全都点不动。
+                .allowsHitTesting(false)
         }
     }
 
@@ -1508,9 +1524,17 @@ struct CanvasWorkspaceView: View {
     }
 
     /// 入参文件弹层的锚点在屏幕坐标里的位置（节点卡片底边中点）。
+    ///
+    /// ★ v2.11.17：算完再夹到可视区内。节点可以被平移到窗口外（甚至负坐标），锚点跟着跑出屏幕后
+    /// AppKit 只能把 popover 硬塞到屏幕边上 —— 表现又变成"弹层出现在莫名其妙的地方"。
+    /// 夹一下之后最坏情况是"贴着窗口边、离节点近的那一侧"，语义仍然成立。
+    /// 左边界额外让开侧栏：弹层压在侧栏上就是这次要修的那个观感。
     private func inputFilesAnchor(_ node: CanvasNode) -> CGPoint {
         let center = CGPoint(x: node.x + node.width / 2, y: node.y + node.height)
-        return CanvasGeometry.screenPoint(canvas: center, pan: effectivePan, zoom: zoom)
+        let raw = CanvasGeometry.screenPoint(canvas: center, pan: effectivePan, zoom: zoom)
+        return CanvasGeometry.clampedPopoverAnchor(raw,
+                                                  viewSize: viewSize,
+                                                  leftInset: sidebarWidth)
     }
 
     // MARK: - 键盘 / 槽位命令

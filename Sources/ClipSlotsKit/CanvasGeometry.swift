@@ -301,6 +301,31 @@ public enum CanvasGeometry {
     }
 
     /// 一组节点的包围盒。空集返回 `.zero`。
+    /// 把浮层锚点夹进可视区（★ v2.11.17）。
+    ///
+    /// 用在「入参文件」弹层上：锚点是节点底边中点换算出来的屏幕坐标，而节点完全可以被平移到窗口外
+    /// （画布无限大，坐标可以是负的）。锚点跑出窗口后 AppKit 会把 popover 硬塞到屏幕边缘，
+    /// 用户看到的就是"弹层出现在莫名其妙的位置"。
+    ///
+    /// - Parameters:
+    ///   - point: 原始锚点（屏幕坐标）。
+    ///   - viewSize: 画布可视尺寸；`.zero`（首帧还没量到）时原样返回，绝不把锚点夹成 0
+    ///     —— 那会把弹层钉在左上角，正是本轮要修的症状。
+    ///   - leftInset: 左侧要让开的宽度（侧栏）。弹层压在侧栏上就是用户报的那个观感。
+    ///   - margin: 离边界留的余量。
+    public static func clampedPopoverAnchor(_ point: CGPoint,
+                                           viewSize: CGSize,
+                                           leftInset: CGFloat = 0,
+                                           margin: CGFloat = 24) -> CGPoint {
+        guard viewSize.width > 1, viewSize.height > 1 else { return point }
+        let minX = min(leftInset + margin, max(viewSize.width - margin, 0))
+        let maxX = max(viewSize.width - margin, minX)
+        let minY = min(margin, max(viewSize.height - margin, 0))
+        let maxY = max(viewSize.height - margin, minY)
+        return CGPoint(x: min(max(point.x, minX), maxX),
+                       y: min(max(point.y, minY), maxY))
+    }
+
     public static func bounds(of rects: [CGRect]) -> CGRect {
         guard let first = rects.first else { return .zero }
         return rects.dropFirst().reduce(first) { $0.union($1) }
