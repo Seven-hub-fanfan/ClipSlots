@@ -174,9 +174,17 @@ extension CanvasWorkspaceView {
     /// 规则本体在 `CrateGeneration.inputImagePaths`（Kit 层，带 smoke 覆盖）；这里只负责取数据。
     private func inputImagePaths(for node: CanvasNode) -> [String] {
         let attachments = store.canvasSlotAttachments(groupId: node.groupId, slot: node.slot)
-        return CrateGeneration.inputImagePaths(from: attachments,
-                                              excludingAttachmentIds: Set(node.outputAttachmentIds),
-                                              fileExists: { FileManager.default.fileExists(atPath: $0) })
+        let paths = CrateGeneration.inputImagePaths(from: attachments,
+                                                   excludingAttachmentIds: Set(node.outputAttachmentIds),
+                                                   fileExists: { FileManager.default.fileExists(atPath: $0) })
+        // 「文生图」与「图生图」的分岔就在这一行，而它完全取决于产物判定这个纯数据判断。判错了
+        // UI 上看不出任何异常 —— 只是出图莫名变成"在上一张基础上改"。留一条日志，出问题时
+        // `log show --predicate 'eventMessage CONTAINS "[ClipSlots][crate]"'` 能一眼看出取了几张。
+        let images = attachments.filter { $0.type == .image }
+        if !images.isEmpty {
+            NSLog("[ClipSlots][crate] slot \(node.slot): 图片附件 \(images.count) 张 → 入参 \(paths.count) 张，判为产物跳过 \(images.count - paths.count) 张")
+        }
+        return paths
     }
 
     /// 产物落地：写成槽位附件 → 节点置 `.succeeded`。
