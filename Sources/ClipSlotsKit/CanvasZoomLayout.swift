@@ -187,10 +187,16 @@ public enum CanvasZoomLayout {
     /// 落定后 `layoutZoom == zoom` → 返 1（零开销、静息态逐像素清晰）；
     /// 只有**手势进行中**（排版冻结、视觉靠残差变换过渡）它才≠ 1，作用是把那一层
     /// `scaleEffect(zoom / layoutZoom)` 从文字上抵消掉，让文字在整个手势过程中屏幕尺寸纹不动。
+    /// ★ v2.11.12：补偿的目标由「屏幕字号 = 设计 pt」改成「屏幕字号 = 设计 pt × min(1, zoom)」
+    /// （见 `CanvasScreenText.textScale`），公式随之变成
+    /// `(textScale(zoom) / textScale(layoutZoom)) × (layoutZoom / zoom)`：
+    ///   - zoom、档位都 ≥ 1 → 退化成老的 `l / z`（手势中抵消残差，静息态为 1）；
+    ///   - zoom、档位都 < 1 → 恒为 1（等比模型下残差本身就是对的，补了反而把字拉回恒定）；
+    ///   - 一大一小（手势跨过 100%）→ 连续过渡，不会在 100% 处跳一下。
     public static func textCounterScale(zoom: CGFloat, layoutZoom: CGFloat) -> CGFloat {
         let z = max(0.01, zoom)
         let l = max(0.01, layoutZoom)
-        return l / z
+        return (CanvasScreenText.textScale(z) / CanvasScreenText.textScale(l)) * (l / z)
     }
 
     /// 连续手势（触控板捏合 / 滚轮）停手后多久才允许换档。

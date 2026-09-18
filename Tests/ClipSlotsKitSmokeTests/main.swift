@@ -6063,20 +6063,30 @@ do {
     let ladder = CanvasZoomLayout.ladder
     let designPt: CGFloat = 13
 
-    /// 端到端的屏幕字号：排版字号（固定设计 pt）× 节点层残差 × 文字反向补偿。
+    /// 端到端的屏幕字号：排版字号 × 节点层残差 × 文字反向补偿。
     func screenPt(zoom: CGFloat, layoutZoom: CGFloat) -> CGFloat {
         let layout = CanvasScreenText.layoutFontSize(designPt, renderScale: layoutZoom)
         let residual = zoom / layoutZoom
         return layout * residual * CanvasZoomLayout.textCounterScale(zoom: zoom, layoutZoom: layoutZoom)
     }
 
-    // —— 补偿公式本身：精确倒数，没有任何钳制 ——
+    // —— 补偿公式本身（★ v2.11.12 起目标是 `设计 pt × min(1, zoom)`）——
     for z in stride(from: 0.26, through: 4.0, by: 0.011) {
         for l in ladder {
-            let c = CanvasZoomLayout.textCounterScale(zoom: CGFloat(z), layoutZoom: l)
-            t.check(abs(c - l / CGFloat(z)) < 1e-9,
-                    "★补偿必须严格等于 layoutZoom / zoom（zoom=\(z) layoutZoom=\(l) 得 \(c)）")
+            let zz = CGFloat(z)
+            let c = CanvasZoomLayout.textCounterScale(zoom: zz, layoutZoom: l)
+            let want = (CanvasScreenText.textScale(zz) / CanvasScreenText.textScale(l)) * (l / zz)
+            t.check(abs(c - want) < 1e-9,
+                    "★补偿必须等于 (textScale(z)/textScale(l))·(l/z)（zoom=\(z) layoutZoom=\(l) 得 \(c)）")
             t.check(c > 0, "补偿恒为正（zoom=\(z) layoutZoom=\(l)）")
+            if zz >= 1 && l >= 1 {
+                t.check(abs(c - l / zz) < 1e-9,
+                        "★放大区间退化成老的 l/z（zoom=\(z) layoutZoom=\(l)）")
+            }
+            if zz < 1 && l < 1 {
+                t.check(abs(c - 1) < 1e-9,
+                        "★缩小区间等比模型下不需要补偿（zoom=\(z) layoutZoom=\(l)）")
+            }
         }
     }
     t.equal(CanvasZoomLayout.textCounterScale(zoom: 2.0, layoutZoom: 2.0), 1.0,
@@ -6086,13 +6096,16 @@ do {
 
     // ★★ 缩小手势中途：layoutZoom 冻结在旧档，补偿**必须** > 1。
     // 这是八轮 `min(1, ·)` 唯一栽的地方，也是用户看到的"文字仍在变化"的全部成因。
-    t.check(abs(CanvasZoomLayout.textCounterScale(zoom: 0.5, layoutZoom: 2.0) - 4.0) < 1e-9,
-            "★★从 200% 捏到 50%（layoutZoom 仍是 2.0）时补偿必须是 4.0 —— 八轮钳成 1，文字缩成 1/4")
+    // ★ v2.11.12：目标字号在 zoom<1 时是 `设计 pt × zoom`，所以这里的精确补偿由 4.0 变成 2.0
+    // （= textScale(0.5)/textScale(2.0) × 2.0/0.5 = 0.5 × 4）。关键仍是 **> 1**：手势中途必须
+    // 反向放大，否则文字会跟着画布一路缩到 1/4，落定再“啪”地跳回来。
+    t.check(abs(CanvasZoomLayout.textCounterScale(zoom: 0.5, layoutZoom: 2.0) - 2.0) < 1e-9,
+            "★★从 200% 捏到 50%（layoutZoom 仍是 2.0）时补偿必须是 2.0，且必须 > 1")
     t.check(CanvasZoomLayout.textCounterScale(zoom: 0.25, layoutZoom: 4.0) > 1,
             "★极端缩小（4.0 → 0.25）同理必须放大补偿")
     // 反事实哨兵：如果谁把钳制加回来，屏幕字号会掉到设计值的 1/4。
     let clamped = min(1, 2.0 / 0.5)
-    t.check(abs(designPt * (0.5 / 2.0) * clamped - designPt) > 1,
+    t.check(abs(designPt * (0.5 / 2.0) * clamped - designPt * 0.5) > 1,
             "反事实哨兵：`min(1, ·)` 版本在这个 case 下屏幕字号明显偏离设计值，说明上面那条断言真的能抓住它")
 
     // —— 端到端：任意 (zoom, layoutZoom) 组合下屏幕字号严格等于设计 pt ——
@@ -6100,25 +6113,44 @@ do {
     for z in stride(from: 0.25, through: 4.0, by: 0.005) {
         for l in ladder {
             let px = screenPt(zoom: CGFloat(z), layoutZoom: l)
+            let want = designPt * CanvasScreenText.textScale(CGFloat(z))
+            t.check(abs(px - want) < 1e-9,
+                    "★★屏幕字号 = 设计 pt × min(1, zoom)（zoom=\(z) layoutZoom=\(l) → \(px)pt）")
+        }
+    }
+    // ★★ zoom ≥ 1（用户读字的区间）必须是**严格恒定**：这是“不想让文字变大变小”那条硬约束。
+    for z in stride(from: 1.0, through: 4.0, by: 0.003) {
+        for l in ladder {
+            let px = screenPt(zoom: CGFloat(z), layoutZoom: l)
             t.check(abs(px - designPt) < 1e-9,
-                    "★★屏幕字号严格恒等于设计 pt（zoom=\(z) layoutZoom=\(l) → \(px)pt）")
+                    "★★放大区间屏幕字号恒为设计 pt（zoom=\(z) layoutZoom=\(l) → \(px)pt）")
         }
     }
 
     // ★ 用户的验收动作：25% / 50% / 100% / 200% 四档截图，标题像素高度一致（±1px）。
     // 这里按 2x Retina 折算成物理像素来断言（比 ±1px 更严：要求 < 0.5px）。
     let backingScale: CGFloat = 2
-    var pixelHeights: [CGFloat] = []
-    for z in [0.25, 0.5, 1.0, 2.0] as [CGFloat] {
-        // 真机上这四档都是"停住"的状态，layoutZoom 已落定到 floorBucket。
+    var zoomInHeights: [CGFloat] = []
+    for z in [1.0, 1.5, 2.0, 3.0, 4.0] as [CGFloat] {
+        // 真机上这些档都是"停住"的状态，layoutZoom 已落定到 floorBucket。
         let l = CanvasZoomLayout.floorBucket(for: z)
-        t.equal(l, z, "★25/50/100/200% 都在阶梯上，静息时排版档必须原地取到自己（零软化、零补偿）")
         let px = CanvasScreenText.lineHeight(screenPt(zoom: z, layoutZoom: l)) * backingScale
-        pixelHeights.append(px)
+        zoomInHeights.append(px)
     }
-    let spread = (pixelHeights.max() ?? 0) - (pixelHeights.min() ?? 0)
+    let spread = (zoomInHeights.max() ?? 0) - (zoomInHeights.min() ?? 0)
     t.check(spread < 0.5,
-            "★★四档标题像素高度极差 < 0.5px（用户口径 ±1px），实测 \(spread)px：\(pixelHeights)")
+            "★★100%~400% 各档字高像素极差 < 0.5px（用户口径 ±1px），实测 \(spread)px：\(zoomInHeights)")
+    // 缩小区间：与画布**等比**（不是恒定）—— 这是 v2.11.12 为“绝不重排”付的、且用户能接受的那部分。
+    for z in [0.25, 0.5, 0.8] as [CGFloat] {
+        let l = CanvasZoomLayout.floorBucket(for: z)
+        let px = screenPt(zoom: z, layoutZoom: l)
+        t.check(abs(px - designPt * z) < 1e-9,
+                "★缩小时文字与卡片等比（zoom=\(z) → \(px)pt，期望 \(designPt * z)pt）")
+    }
+    for z in [0.25, 0.5, 1.0, 2.0] as [CGFloat] {
+        t.equal(CanvasZoomLayout.floorBucket(for: z), z,
+                "★25/50/100/200% 都在阶梯上，静息时排版档必须原地取到自己（零软化、零补偿）")
+    }
 
     // —— 静息态不溢出：档位永不高于 zoom ⇒ counter ≤ 1 ——
     t.check(CanvasZoomLayout.floorTolerance > 1 && CanvasZoomLayout.floorTolerance < 1.01,
@@ -6142,10 +6174,15 @@ do {
     t.check(CanvasZoomLayout.floorBucket(for: 0.0001) == ladder.first!, "远低于下界夹到最低档，不返回 0")
     t.check(CanvasZoomLayout.floorBucket(for: 999) == ladder.last!, "远高于上界夹到最高档")
 
-    // —— 排版字号本身：固定设计 pt，不乘 renderScale ——
+    // —— 排版字号本身：设计 pt × min(1, renderScale)（★ v2.11.12）——
     for rs in [0.25, 0.5, 1.0, 2.0, 4.0] as [CGFloat] {
+        t.equal(CanvasScreenText.layoutFontSize(designPt, renderScale: rs),
+                designPt * CanvasScreenText.textScale(rs),
+                "★排版字号 = 设计 pt × min(1, renderScale)（renderScale=\(rs)）")
+    }
+    for rs in [1.0, 1.26, 2.0, 4.0] as [CGFloat] {
         t.equal(CanvasScreenText.layoutFontSize(designPt, renderScale: rs), designPt,
-                "★排版字号恒为设计 pt（renderScale=\(rs)）—— 屏幕恒定靠的是「不缩 + 精确反补」，不是任何下限")
+                "★放大区间排版字号仍是设计 pt（renderScale=\(rs)）")
     }
     // 反事实：若有人把 fs(_:) 改回"乘 renderScale"，屏幕字号会变成 designPt × zoom。
     t.check(abs(designPt * 2.0 - designPt) > 1,
@@ -6587,19 +6624,41 @@ do {
 do {
     let design: CGFloat = 13
 
-    // 1) 排版字号与 renderScale 无关（这就是"不乘"的形式化表达）。
+    // 1) 排版字号 = 设计 pt × min(1, renderScale)（★ v2.11.12）。
     for z in [0.25, 0.5, 1.0, 1.5, 2.0, 4.0] as [CGFloat] {
         let layout = CanvasScreenText.layoutFontSize(design, renderScale: z)
-        t.check(abs(layout - design) < 0.0001,
-                "★zoom=\(z) 时排版字号仍是 13（屏幕固定 = 排版侧不乘 zoom）")
+        t.check(abs(layout - design * min(1, z)) < 0.0001,
+                "★zoom=\(z) 时排版字号 = 13 × min(1, zoom)")
     }
 
-    // 2) 静息（zoom == renderScale，缩放已落定）时屏幕字号恒为设计值。
-    for z in [0.25, 0.4, 1.0, 2.0, 4.0] as [CGFloat] {
+    // 2) 静息时：**放大区间**屏幕字号恒为设计值（用户硬约束），缩小区间与画布等比。
+    for z in [1.0, 1.5, 2.0, 4.0] as [CGFloat] {
         let screen = CanvasScreenText.screenFontSize(designPt: design, renderScale: z, zoom: z)
         t.check(abs(screen - design) < 0.0001,
-                "★★zoom=\(z) 静息时屏幕字号 = 13pt（这就是需求 1 本身）")
+                "★★zoom=\(z) 静息时屏幕字号 = 13pt（“不想让文字变大变小”）")
     }
+    for z in [0.25, 0.4, 0.8] as [CGFloat] {
+        let screen = CanvasScreenText.screenFontSize(designPt: design, renderScale: z, zoom: z)
+        t.check(abs(screen - design * z) < 0.0001,
+                "★zoom=\(z) 静息时文字与卡片等比（\(screen)pt）")
+    }
+
+    // 2.5) ★★★ v2.11.12 的核心不变量：**每行能装的字数与 zoom 无关** ⇒ 文字永不重排。
+    //
+    // 卡片内宽（1x）与字号同乘 `textScale`，所以「盒子宽 / 字号」这个比值必须是常数。
+    // 这条断言是本轮唯一真正解决用户「还是会动」的东西：只要有人把文本列宽改回
+    // “吃满随 zoom 变的容器”，比值立刻不再守恒，这里就会红。
+    let innerWidth1x: CGFloat = 320 - 2 * CanvasCardLayout.cardPadding
+    var ratios: [CGFloat] = []
+    for z in stride(from: 0.25, through: 4.0, by: 0.01) {
+        let sc = CanvasScreenText.textScale(CGFloat(z))
+        let boxW = innerWidth1x * sc
+        let font = CanvasScreenText.layoutFontSize(design, renderScale: CGFloat(z))
+        ratios.append(boxW / font)
+    }
+    let rSpread = (ratios.max() ?? 0) - (ratios.min() ?? 0)
+    t.check(rSpread < 1e-9,
+            "★★★「每行字数 = 文本列宽 / 字号」必须与 zoom 严格无关（极差 \(rSpread)）—— 这就是“文字不再重排”")
 
     // 3) 对照：旧行为（乘 renderScale）在 4x 下是 52pt —— 保留这条是为了说明"差别有多大"，
     //    以免有人觉得两种写法反正差不多。
@@ -6609,7 +6668,7 @@ do {
     // 4) 缩放手势进行中（zoom ≠ layoutZoom）允许瞬时形变，但必须落在量化阶梯的量级内，
     //    不能出现"手势里字号翻倍"这种视觉爆炸。
     let mid = CanvasScreenText.screenFontSize(designPt: design, renderScale: 1.0, zoom: 1.18)
-    t.check(mid > design && mid < design * 1.25,
+    t.check(mid >= design && mid < design * 1.25,
             "手势进行中最多按 CanvasZoomLayout 的阶梯宽度（±18%）短暂偏离，settle 后回到 13pt")
 
     // 5) 退化输入不能算出 0 / NaN / 负数字号（SwiftUI 收到 0 字号会直接不画）。
