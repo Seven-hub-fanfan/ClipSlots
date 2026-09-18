@@ -93,7 +93,19 @@ struct CanvasSlotFanStack: View {
     }
 
     /// 扇形展开动画。用户明确指定的参数，不要顺手改成 `Anim.transition`。
+    /// **展开**曲线：留一点弹性，"划开"的手感靠它。
     private static let fanSpring = Animation.spring(response: 0.35, dampingFraction: 0.72)
+
+    /// **收起**曲线（★ v2.11.14 · 用户反馈"卡片收起来的动画有点慢"）。
+    ///
+    /// 此前收起与展开共用 `fanSpring`(0.35/0.72)。同一条曲线在两个方向上的**观感并不对称**：
+    /// 展开时几张牌朝不同方向散开，位移大、注意力被吸引，0.35s 显得利落；收起时它们要挤回同一
+    /// 个垛口，末段全是几个 px 的收敛微动，欠阻尼的尾巴（0.72 会有轻微过冲）就变成肉眼可见的
+    /// "缓缓归位"，录屏里量到接近 0.8~1.0s 的感受时长。
+    ///
+    /// 所以收起改成**更短 + 几乎临界阻尼**：0.18s / 0.95 —— 没有过冲、没有长尾，牌"啪"地合上。
+    /// 展开保持原样，动画的不对称是刻意的（进场要有表现力，退场要干净）。
+    private static let fanCollapseSpring = Animation.spring(response: 0.18, dampingFraction: 0.95)
     private var expanded: Bool { nodeHovered }
 
     private func s(_ v: CGFloat) -> CGFloat { max(0.01, v * renderScale) }
@@ -197,7 +209,11 @@ struct CanvasSlotFanStack: View {
         window.showsOverflowCard ? window.count : nil
     }
 
-    private var activeSpring: Animation { CanvasSlotFanStack.fanSpring }
+    /// ★ v2.11.14：按方向取曲线。`.animation(_, value:)` 求值时 `expanded` 已经是**新值**，
+    /// 所以 `false` 那次变化拿到的正是收起曲线。
+    private var activeSpring: Animation {
+        expanded ? CanvasSlotFanStack.fanSpring : CanvasSlotFanStack.fanCollapseSpring
+    }
 
     /// **翻页**用的曲线。★ 九轮：轮播那条专用侧滑曲线随风格删除，扇形翻页是"原地换内容"，
     /// 平移量很小，直接用展开曲线。

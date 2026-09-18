@@ -5331,8 +5331,8 @@ do {
     // 这组断言钉的是"维持区一定盖得住扇形能张到的地方"，参数（角度/间距/卡片尺寸）以后被人调大时，
     // 会在这里失败而不是等用户再录一次屏。
     do {
-        t.check(canvasApprox(CanvasNodeHover.leaveDelay, 0.2),
-                "★hover 离开宽限期 200ms（用户指定；治的是「快速穿过缝隙 / 边界抖一下」）")
+        t.check(canvasApprox(CanvasNodeHover.leaveDelay, 0.12),
+                "★hover 离开宽限期 120ms（★v2.11.14 由 200ms 下调，用户嫌收起慢；仍盖得住「快速穿过缝隙 / 边界抖一下」）")
         t.check(CanvasNodeHover.sideSlop >= 20,
                 "★维持区外扩至少 20pt —— 录屏里那次误触只过冲了 12px")
 
