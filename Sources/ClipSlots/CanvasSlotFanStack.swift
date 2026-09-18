@@ -227,8 +227,11 @@ struct CanvasSlotFanStack: View {
                 // 2) 命中层：整块透明，自己算落在哪张卡上（含「+N」灰卡那一格）。
                 hitLayer(ls, cardSize: cardSize, box: box)
 
-                // 3) 角标层：收拢态的 +（加入参）。要能点，所以放在命中层之上。
-                badgeLayer(ls, cardSize: cardSize)
+                // 3) ★ v2.11.9：收拢态右下角那颗蓝色 `+` 角标**已删除**（用户：“这个蓝色加号
+                //    可以去掉无用”）。它触发的动作与卡片底部那条通樏「入参文件 N」完全一样
+                //    （都是 `onOpenInputFiles`），而后者永远可见、命中区大一个量级；这颗 19pt 的小角标
+                //    反而正好压在最前面那张牌面的图上，也是六轮那个“点 +N 却弹出导入侧边栏”
+                //    连环误触的最后一环。少一个重复入口 = 少一类误触。
 
                 // 4) 左右翻页箭头：★ 三轮起两种风格都有（用户要求「展示区左右」），
                 //    不再是轮播专属。
@@ -585,59 +588,13 @@ struct CanvasSlotFanStack: View {
             )
     }
 
-    // MARK: - 角标层
-
-    /// 角标层：**只剩**收拢态最前面那张卡右下角的 `+`（直通入参文件面板）。
-    ///
-    /// ★ 三轮删掉了展开态的 `+N` 角标 —— 它被第 6 个位置上那张真正可翻页的灰卡取代
-    /// （见 `overflowCardLayer`）。角标 + 缩略图网格那套是"另一种呈现"，用户的判断是
-    /// 「第 6 张以后看不到」，因为第 6 张从来没以卡片形态出现过。
-    ///
-    /// 单独成层是因为卡片层被 `allowsHitTesting(false)` 关掉了事件 —— 角标是**要能点的**，
-    /// 只能自己带着同一套变换独立渲染一遍。
-    ///
-    /// ★ 四轮：层级翻转后"最前面那张"由最右变成**最左**（下标 0），这里取的是 `zIndex` 最大者，
-    /// 所以角标自动跟着走 —— 千万别改成写死 `ls.last`，那样角标会被压到卡片底下变成点不着的死按钮。
-    @ViewBuilder
-    private func badgeLayer(_ ls: [CanvasFanGeometry.CardLayout],
-                            cardSize: CGSize) -> some View {
-        // ★ 三轮：展开态不再画 `+N` 角标（它被真正的翻页卡取代，见 overflowCardLayer）。
-        // 收拢态照旧只有「+ 加入参」。
-        if !expanded, let top = ls.max(by: { $0.zIndex < $1.zIndex }) {
-            badgeAnchor(top, cardSize: cardSize) { plusBadge }
-        }
-    }
-
-    /// 把角标摆到某张卡片的右下角：用一个与卡片同尺寸的透明框走同一套变换，再 overlay 角标。
-    private func badgeAnchor<Content: View>(_ layout: CanvasFanGeometry.CardLayout,
-                                            cardSize: CGSize,
-                                            @ViewBuilder _ content: () -> Content) -> some View {
-        Color.clear
-            .frame(width: s(cardSize.width), height: s(cardSize.height))
-            .overlay(alignment: .bottomTrailing) { content() }
-            .scaleEffect(layout.scale, anchor: .bottom)
-            .rotationEffect(.degrees(layout.angle), anchor: .bottom)
-            .offset(x: s(layout.offset.width), y: s(layout.offset.height))
-            .animation(activeSpring, value: expanded)
-            .zIndex(300)
-    }
-
-    /// 右下角 + 角标：把「这叠卡还能加东西」摆到明处，点它直通入参文件面板。
-    private var plusBadge: some View {
-        Button(action: onOpenInputFiles) {
-            Image(systemName: "plus")
-                .font(.system(size: s(9), weight: .bold))
-                .foregroundColor(.white)
-                .frame(width: s(19), height: s(19))
-                .background(Circle().fill(AppTheme.chromeAccentInk))
-                .overlay(Circle().stroke(Color.white, lineWidth: s(1.6)))
-                .shadow(color: .black.opacity(0.2), radius: s(2), x: 0, y: s(1))
-                .contentShape(Circle())
-        }
-        .buttonStyle(.plain)
-        .help("添加入参文件")
-        .offset(x: s(5), y: s(5))
-    }
+    // MARK: - 角标层（已清空，★ v2.11.9）
+    //
+    // 原来这里有 `badgeLayer` / `badgeAnchor` / `plusBadge` 三个成员，职责是在收拢态最前面那张
+    // 牌面的右下角画一颗蓝底白边的 `+`，点它直通入参文件面板。用户明确要求去掉（“无用”），
+    // 理由在上面那个编号 3) 的注释里。三个成员一并删干净而不是只把调用注掉：留着一个
+    // 没人调的 `plusBadge` 下一个人会以为它只是临时关掉了，下次重构又把它挂回去。
+    // 真需要“在卡叠上直接加入参”时，正确的位置是底部那条入参文件行，或者右键菜单。
 
     // MARK: - 「+N」翻页卡（v2.11.8 三轮）
 

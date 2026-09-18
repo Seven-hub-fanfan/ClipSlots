@@ -195,7 +195,8 @@ struct CanvasWorkspaceView: View {
                 pan = canvas.pan
                 zoom = canvas.zoom
                 // 排版缩放必须与初始 zoom 对齐，否则首帧 ratio ≠ 1，节点会以一个错误的比例被拉伸。
-                layoutZoom = CanvasZoomLayout.floorBucket(for: canvas.zoom)
+                // ★ v2.11.9：与 `settleLayoutZoom` 一致 —— 钉精确值，首帧残差恒为 1。
+                layoutZoom = max(0.01, canvas.zoom)
                 // 闭包在这里绑一次即可：@State/@ObservedObject 的读写都走稳定的存储盒，
                 // 视图结构体后续被重建也不影响这几个闭包写到正确的地方。
                 inputRouter.onScroll = { dx, dy, precise, isZoom, point in
@@ -1296,8 +1297,22 @@ struct CanvasWorkspaceView: View {
         // 二轮那版（`layoutZoom = value`）在鼠标滚轮下等于每一格都重排一次文字，因为滚轮事件是
         // 离散且稀疏的，每一格之间都会走完 0.15s 防抖被当成"已停手"。量化 + 迟滞后，同一档内的
         // 多次缩放**一次都不重排**（下面那个 guard 直接返回）。理由与代价见 CanvasZoomLayout。
-        let target = CanvasZoomLayout.settledFloor(current: layoutZoom, zoom: value)
-        guard layoutZoom != target else { return }
+        // ★ v2.11.9（用户：「放大看文字开始模糊」）：落定时钉到**精确 zoom**，不再量化到档位。
+        //
+        // 档位量化的代价此前被低估了：`layoutZoom = floorBucket(zoom)` 意味着**静息态也留着**一个
+        // 最大 1.26 倍的残差 `scaleEffect(zoom / layoutZoom)`。卡片、边框、以及文字都是先按
+        // `layoutZoom` 光栅化、再被这个残差放大 —— 于是任何落在两档之间的缩放（150% → 档位
+        // 1.26，残差 1.19）静息时看到的就是一张被拉大 19% 的位图。文字更惨：它还多走了一道
+        // `canvasScreenFixedText(textCounter)`（counter = layoutZoom / zoom < 1）—— 先缩小光栅化、再放大回去，
+        // 两次重采样叠在一起，正是用户看到的“字发虚”。
+        //
+        // 钉精确值后：残差 ≡ 1，`textCounterScale` 也 ≡ 1，静息态严格 1:1 逐像素清晰。
+        // 这**不是**退回二轮的“每一格都重排”：重排仍只发生在停手之后（连续手势期间
+        // `layoutZoom` 照旧冻结，见 `scheduleLayoutZoomSettle`），下面那道 0.5% 死区又吃掉了
+        // 浮点噪声带来的无意义重排。代价是离散滚轮每一格会重排一次文字 —— 而在八轮
+        // “屏幕字号恒定”之后这本来就是**必然**的：卡片变宽而字号不变，每行能装的字数真的变了。
+        let target = max(0.01, value)
+        guard abs(target - layoutZoom) > layoutZoom * 0.005 else { return }
         var tx = Transaction()
         tx.disablesAnimations = true
         tx.animation = nil

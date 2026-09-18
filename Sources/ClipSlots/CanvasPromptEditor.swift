@@ -57,7 +57,29 @@ struct CanvasPromptEditor: NSViewRepresentable {
         textView.textColor = NSColor.labelColor
         textView.insertionPointColor = NSColor.controlAccentColor
         // 全选，符合"点编辑就想整段重写"的常见意图；想追加的话按一下 → 即可。
-        textView.selectAll(nil)
+        // ★ v2.11.9：**不再全选**，而是把插入点放到文本开头。
+        //
+        // ## 修的是什么（用户录屏 20260918114939）
+        //
+        // 点进正文后：边框一下就变成聚焦蓝，但**看不到光标**；约 1s 后整段文字“啖”地变成
+        // 蓝底全选；想正常打字得**再点一次**把选区收成插入点。三个现象同一个根因：
+        // 这里开就 `selectAll`，而选区高亮只在成为 first responder 后才画、抢焦点又是异步的
+        // （见 `FocusGrabbingTextView`）—— 于是“无光标的一秒” + “延迟冒出的全选”。
+        //
+        // ## 为什么全选不只是“怪”，而是危险
+        //
+        // 全选状态下用户随便敲一个字，**整段 prompt 当场被替掉**（几千字的分镜表只剩一个字）。
+        // 提交还是回车/失焦自动写回槽位的，等用户反应过来已经落盘。“双击全选”是短标题输入框
+        // 的习惯（改名），套到一整篇提示词上就是一个隐形的“清空”按钮。
+        //
+        // ## 为什么放开头而不是“点哪里就在哪里”
+        //
+        // 预览态看到的是**清洗过的渲染文本**（`CanvasCardText` 剥了 `|`/`**`/`|:---|`），
+        // 而编辑态是**原始 Markdown**，两边字符不一一对应 —— 把点击坐标映射成原文下标只能猬，
+        // 猬错了光标就落在别的句子里，比固定开头更令人困惑。开头至少是**可预测**的，
+        // 而且与预览态看到的第一行对得上（预览就是从头截的）。
+        textView.setSelectedRange(NSRange(location: 0, length: 0))
+        textView.scrollRangeToVisible(NSRange(location: 0, length: 0))
 
         scroll.documentView = textView
         context.coordinator.textView = textView
@@ -148,6 +170,15 @@ private final class FocusGrabbingTextView: NSTextView {
         super.viewDidMoveToWindow()
         guard !hasGrabbedFocus, let window else { return }
         hasGrabbedFocus = true
+
+        // ★ v2.11.9：先**同帧同步**抢一次。
+        //
+        // 下面那个 `DispatchQueue.main.async` 是兵不是主力：它让“进编辑态”和“拿到键盘焦点”
+        // 差了一个 runloop 以上（录屏里实测差了约 1s，SwiftUI 在上屏前先构好了 NSView），
+        // 用户的感受就是“框亮了但打不了字”。先同步抢一次，绝大多数情况当帧就有光标；
+        // 异步那次保留作为兼底（此时 `window` 可能还不是 key window，同步抢会失败），
+        // 幂等：已经是 first responder 时 `makeFirstResponder` 不会重置选区。
+        window.makeFirstResponder(self)
         // 异步一拍：`viewDidMoveToWindow` 时视图层级还在装配，同步 makeFirstResponder 会被
         // 随后的布局回合抢回去。
         DispatchQueue.main.async { [weak self] in

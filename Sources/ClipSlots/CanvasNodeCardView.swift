@@ -205,9 +205,39 @@ struct CanvasNodeCardView: View {
         CanvasFanGeometry.allCardSources(attachmentIndices: attachmentCardIndices, text: text)
     }
 
-    /// 正文预览（最多 4 行，已剥掉 Markdown 原始标记）。几何/字符串加工在 Kit 里，可被 smoke 断言。
+    /// 正文预览（行数自适应，已剥掉 Markdown 原始标记）。几何/字符串加工在 Kit 里，可被 smoke 断言。
     private var previewText: String {
-        CanvasCardText.previewText(text, limit: CanvasCardText.previewLineLimit)
+        CanvasCardText.previewText(text, limit: promptLineLimit)
+    }
+
+    /// 正文预览行数 = **正文区实际分到的高度里能装几行**（★ v2.11.9）。
+    ///
+    /// ## 修的是什么
+    ///
+    /// 用户截图 image-242bbdf5：正文只写了 4 行，下面空了差不多同样高的一大块，一直空到
+    /// 底部「入参文件」行。根因不是预算算错了，而是 `lineLimit` 写死成 4：4 行是用户当初提的
+    /// “至少要看到多少”（二轮从 2 行改成 4 行），被当成上限用了。而 `plan.promptMaxHeight`
+    /// 把“除预览区/路径行/入参行之外的全部剩余”都给了正文区，默认节点高度下那是 7~8 行。
+    /// 差额就是红框里的空白。空白不是审美问题：卡片上能区分“这个节点装的是哪段提示词”的
+    /// 信息只有正文，白留的每一行都是本可读到的内容。
+    ///
+    /// ## 为什么行高要取真字体度量，不能用 `fontSize × 1.2`
+    ///
+    /// `CanvasScreenText.lineHeightFactor`(1.2) 是给预算估算用的保守值，但中文字体
+    /// （HarmonyOS Sans SC / 苹方）的实际行高在 1.35~1.45 倍之间 —— 用 1.2 会多算出一行，
+    /// 表现是最后一行被 `.clipped()` 切成半截，比留白更难看。`ascender - descender + leading`
+    /// 是排版引擎真正用的行高，与字体无关地准。
+    ///
+    /// 减掉上下各 `promptVerticalPadding`：那两块 padding 挂在 `maxHeight` frame **外面**（为了把
+    /// 命中区一起撑大），所以正文区实际占的是 `promptMaxHeight + 16pt`。不扣这 16pt 的话，
+    /// 当 `Spacer` 没有宽余时底部入参行会被顶出卡片。
+    private var promptLineLimit: Int {
+        let inner = plan.promptMaxHeight - 2 * s(CanvasCardLayout.promptVerticalPadding)
+        let font = CanvasFontCatalog.nsFont(family: node.fontName,
+                                           size: fs(node.resolvedBodyFontSize))
+        let lineHeight = max(1, ceil(font.ascender - font.descender + font.leading))
+        let fits = Int((max(0, inner) / lineHeight).rounded(.down))
+        return min(CanvasCardText.previewLineCap, max(1, fits))
     }
 
     var body: some View {
@@ -498,7 +528,13 @@ struct CanvasNodeCardView: View {
                                    attachments: attachments,
                                    renderScale: renderScale,
                                    textCounter: textCounter,
-                                   nodeHovered: hoverActive && !isEditing,
+                                   // ★ v2.11.9：去掉 `&& !isEditing`。这个条件的后果是用户在正文上点一下
+                                   // （指针根本没动），图片扇形就“啖”地**反向收回去** —— 而且因为
+                                   // hover 只在指针**移动**时重算，不动就永远展不回来。于是一次单击
+                                   // 同时发生三件事（扇形收、正文变 Markdown、面板冒出），看起来就是
+                                   // “我是不是点错了”。编辑态与卡叠展开本来也不冲突：卡叠在预览区、
+                                   // 编辑框在正文区，两个矩形不重叠。
+                                   nodeHovered: hoverActive,
                                    // ★ 九轮：卡叠整套按 1x 收敛（内部自己乘 renderScale），
                                    // 这里必须给 1x 量纲，不能给排版单位（会乘两次）。
                                    boxHeight: plan.previewHeight1x,
@@ -564,7 +600,9 @@ struct CanvasNodeCardView: View {
                     Text(previewText)
                         .font(bodyFont)
                         .foregroundColor(.primary.opacity(0.88))
-                        .lineLimit(CanvasCardText.previewLineLimit)
+                        // ★ v2.11.9：行数改成按实际可用高度算（见 `promptLineLimit`），
+                        // 写死 4 行就是用户报的“文字下面一大片空白”。
+                        .lineLimit(promptLineLimit)
                         .multilineTextAlignment(.leading)
                         // 只让高度跟着内容长，宽度**始终**吃满容器；同时禁掉字距收紧与字号自适应。
                         // 这样换行位置只由容器宽度决定，不会因为"文字理想宽度"参与协商而在缩放过程中
