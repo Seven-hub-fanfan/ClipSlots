@@ -228,6 +228,34 @@ final class CanvasStore: ObservableObject {
         }
     }
 
+    /// 改节点的出图参数（模型 / 比例）。
+    ///
+    /// 与 `updateNodeStyle` 同构：走 `commit` 进撤销栈，而不是只落盘的 `updateNode`（用后者的
+    /// 症状是"改完 Cmd+Z 撤不掉"）。
+    ///
+    /// ★ 模型与比例**一次写**，不拆成两个方法
+    ///
+    /// 换模型经常要顺带把比例改掉 —— 新模型不一定认旧比例（判定在
+    /// `CrateModelCatalog.resolvedRatio`）。分两次 commit 的后果是撤销栈里多出一条"用户从没做过"
+    /// 的中间态：Cmd+Z 一次只退回比例、模型还留在新的，而那个组合可能压根不合法。
+    ///
+    /// `ratio` 允许是空串：那是"该模型不吃比例"的合法取值，提交时就不会带 `--ratio`。
+    func updateNodeGeneration(id: String, model: String? = nil, ratio: String? = nil) {
+        guard let idx = nodes.firstIndex(where: { $0.id == id }) else { return }
+
+        let newModel = (model?.trimmingCharacters(in: .whitespacesAndNewlines)).flatMap { $0.isEmpty ? nil : $0 }
+            ?? nodes[idx].model
+        let newRatio = ratio?.trimmingCharacters(in: .whitespacesAndNewlines) ?? nodes[idx].ratio
+        guard newModel != nodes[idx].model || newRatio != nodes[idx].ratio else { return }
+
+        let detail = newRatio.isEmpty ? newModel : "\(newModel) · \(newRatio)"
+        commit(.paramNode, detail: detail) {
+            nodes[idx].model = newModel
+            nodes[idx].ratio = newRatio
+            nodes[idx].updatedAt = Date()
+        }
+    }
+
     /// 当前选中的**唯一**节点。属性面板只在单选时出现 —— 多选时改字体要么只改一个（用户会以为
     /// 没生效），要么全改（等于偷偷批量改），两种都不如不显示面板。
     var soleSelectedNode: CanvasNode? {

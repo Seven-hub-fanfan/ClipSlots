@@ -7179,4 +7179,111 @@ do {
             "★CRATE-NAME-10 id 标记为空时（旧版本读写过画布），产物仍然不会被当入参上传")
 }
 
+// MARK: - CRATE-CAT：模型目录 = 模型/尺寸选择器的选项来源（v2.11.18）
+//
+// 这一组盯的是「选项从哪来」。之前模型写死 seedream45、比例写死 1:1，参数栏只是两行只读文字；
+// 现在两个都是选择器，而选项**不能由 App 猜**：
+//   - 比例选项是每个模型各自声明的（seedream4 有 1K，seedream45 没有；gpt-image-1.5 只有三档）；
+//   - 有一类出图模型压根没有 ratio 参数（走 width/height），对它们必须不传 --ratio。
+// 下面的 fixture 字段口径全部照抄本机 `crate model list --json` 的实测输出。
+do {
+    t.equal(CrateModelCatalog.listArguments(), ["model", "list", "--json"],
+            "CRATE-CAT-1 目录查询命令")
+
+    let json = """
+    [
+      {"id":"seedancePro1","name":"Seedance Pro 1","family":"Seed3.0","enabled":true,
+       "generationTypes":["text-2-video","image-to-video"],
+       "parameters":[{"name":"prompt"},{"name":"ratio","options":[{"label":"16:9","value":"16:9"}]},
+                     {"name":"duration"}]},
+      {"id":"seedream45","name":"Seedream 4.5","family":"Seed3.0","enabled":true,
+       "generationTypes":["text-2-image","image-2-image","background-fusion"],
+       "parameters":[{"name":"prompt","required":true},
+                     {"name":"ratio","options":[{"label":"2K","value":"2K"},{"label":"4K","value":"4K"},
+                                                {"label":"1:1","value":"1:1"},{"label":"4:3","value":"4:3"},
+                                                {"label":"3:4","value":"3:4"}]},
+                     {"name":"width"},{"name":"height"}]},
+      {"id":"gpt-image-1.5","name":"GPT Image 1.5","family":"GPT-4","enabled":true,
+       "generationTypes":["text-2-image","image-2-image"],
+       "parameters":[{"name":"prompt"},
+                     {"name":"ratio","options":[{"label":"1:1","value":"1:1"},{"label":"3:2","value":"3:2"},
+                                                {"label":"2:3","value":"2:3"}]},
+                     {"name":"quality"}]},
+      {"id":"t2i_qwen_image","name":"Qwen Text-to-Image","family":"Qwen","enabled":true,
+       "generationTypes":["text-2-image"],
+       "parameters":[{"name":"prompt"},{"name":"width"},{"name":"height"},{"name":"seed"}]},
+      {"id":"retired_model","name":"Retired","family":"Old","enabled":false,
+       "generationTypes":["text-2-image"],
+       "parameters":[{"name":"prompt"},{"name":"ratio","options":[{"label":"1:1","value":"1:1"}]}]},
+      {"garbage":true}
+    ]
+    """
+
+    let all = try! CrateModelCatalog.parse(json)
+    t.equal(all.count, 5, "★CRATE-CAT-2 缺 id 的坏条目跳过而不是整批失败（一个新字段不该让 picker 空掉）")
+
+    let picks = CrateModelCatalog.imageModels(all)
+    t.equal(picks.map { $0.id }, ["seedream45", "gpt-image-1.5", "t2i_qwen_image"],
+            "★CRATE-CAT-3 只留 enabled 的出图模型：视频模型不进图像节点的 picker，已下线的也不进（选了只会在提交时报错）")
+    t.check(picks.map { $0.id } == ["seedream45", "gpt-image-1.5", "t2i_qwen_image"],
+            "CRATE-CAT-4 顺序保持 CLI 原序（重排成字母序会把 seedream 家族打散）")
+
+    let sd45 = picks[0]
+    t.equal(sd45.displayName, "Seedream 4.5", "CRATE-CAT-5 展示名取 CLI 的 name")
+    t.equal(sd45.family, "Seed3.0", "CRATE-CAT-6 系列名用于 picker 分组")
+    t.check(sd45.supportsRatio, "CRATE-CAT-7 seedream45 吃 ratio")
+    t.check(!sd45.supportsSeed, "★CRATE-CAT-8 seedream45 不吃 seed（与 CRATE-SEED 那组同一个实测口径）")
+    t.check(sd45.acceptsImageInput, "CRATE-CAT-9 seedream45 收参考图")
+    t.equal(sd45.ratioOptions.map { $0.value }, ["2K", "4K", "1:1", "4:3", "3:4"],
+            "CRATE-CAT-10 比例选项按 CLI 原序（那是策划过的推荐顺序）")
+    t.check(sd45.ratioOptions[0].isResolutionPreset && !sd45.ratioOptions[2].isResolutionPreset,
+            "★CRATE-CAT-11 2K 是分辨率档、1:1 是宽高比 —— picker 要分组显示，混在一列里用户会以为选 2K 还是方图")
+
+    let qwen = picks[2]
+    t.check(!qwen.supportsRatio,
+            "★CRATE-CAT-12 走 width/height 的模型不吃 ratio（给它塞 --ratio 会被当场拒掉）")
+    t.check(qwen.supportsSeed, "CRATE-CAT-13 qwen 吃 seed")
+    t.check(!qwen.acceptsImageInput, "CRATE-CAT-14 纯文生图模型不收参考图")
+
+    // 换模型时比例怎么落 —— 这是最容易出"选项看着能选、提交被拒"的地方。
+    t.equal(CrateModelCatalog.resolvedRatio(current: "4:3", for: sd45), "4:3",
+            "CRATE-CAT-15 旧比例仍在新模型选项里 → 原样保留（换模型不该悄悄改构图）")
+    t.equal(CrateModelCatalog.resolvedRatio(current: "4:3", for: picks[1]), "1:1",
+            "★CRATE-CAT-16 旧比例不在新模型选项里 → 退到 1:1（方图最中性，不会把横图偷偷变竖图）")
+    t.equal(CrateModelCatalog.resolvedRatio(current: "9:16", for: qwen), "",
+            "★CRATE-CAT-17 新模型不吃 ratio → 清空（提交时就不会带 --ratio）")
+    t.equal(CrateModelCatalog.resolvedRatio(current: "  2K  ", for: sd45), "2K",
+            "CRATE-CAT-18 比例值前后空白裁掉")
+
+    // 只有 ratio 参数、没给选项（CLI 只允许自由输入）时，不能把用户已有的值抹掉。
+    let freeform = CrateModelCatalog.ModelInfo(id: "free", displayName: "Free", family: "",
+                                               generationTypes: ["text-2-image"],
+                                               parameterNames: ["prompt", "ratio"],
+                                               ratioOptions: [], enabled: true)
+    t.equal(CrateModelCatalog.resolvedRatio(current: "21:9", for: freeform), "21:9",
+            "★CRATE-CAT-19 吃 ratio 但没给选项时保留原值，交给 CLI 裁决（别替 CLI 做收窄）")
+
+    // 提交侧：ratio 为空串就不带 --ratio（= "该模型不吃比例"的落地形态）。
+    var req = CrateImageRequest(model: "t2i_qwen_image", prompt: "猫", ratio: "1:1", count: 1)
+    t.check(try! CrateGeneration.submitArguments(req).contains("--ratio"), "CRATE-CAT-20 有比例时带 --ratio")
+    req = CrateGeneration.droppingRatio(req)
+    t.check(!(try! CrateGeneration.submitArguments(req).contains("--ratio")),
+            "★CRATE-CAT-21 droppingRatio 后不带 --ratio（老画布存着新模型不认的比例时的退路）")
+    t.check(CrateGeneration.isUnsupportedParameterError(
+                "Model t2i_qwen_image does not publish parameter \"ratio\"", parameter: "ratio"),
+            "CRATE-CAT-22 CLI 拒收 ratio 的报错认得出")
+    t.check(!CrateGeneration.isUnsupportedParameterError(
+                "Model x does not publish parameter \"seed\"", parameter: "ratio"),
+            "★CRATE-CAT-23 拒 seed 的报错不能被当成拒 ratio（否则会白白丢掉用户选的尺寸）")
+
+    // 根是数组，不能复用 jsonObject 那条路径。
+    t.check(CrateModelCatalog.firstJSONArray("noise\n[{\"id\":\"a\"}] trailing") == "[{\"id\":\"a\"}]",
+            "CRATE-CAT-24 从 stdout 里截出配平的数组片段")
+    t.check(CrateModelCatalog.firstJSONArray("[{\"name\":\"a]b\"}]") == "[{\"name\":\"a]b\"}]",
+            "★CRATE-CAT-25 字符串里的 ] 不参与配平")
+    var threw = false
+    do { _ = try CrateModelCatalog.parse("not json at all") } catch { threw = true }
+    t.check(threw, "CRATE-CAT-26 不是 JSON 时抛错（让 UI 能显示原因，而不是静默空列表）")
+}
+
 t.report()

@@ -212,6 +212,18 @@ public enum CrateGeneration {
         return out
     }
 
+    /// 去掉 ratio 的同一份请求。
+    ///
+    /// 与 seed 那道保险同构，但触发路径不同：ratio 是**用户在尺寸选择器里选的**，正常情况下一定
+    /// 来自该模型自己声明的选项（见 `CrateModelCatalog.resolvedRatio`）。这条退路是给两种落差
+    /// 兜底：画布里存着老模型时代的比例（换机 / 导入的画布 / 模型下线换了选项集），以及模型目录
+    /// 一时问不出来时 UI 只能原样保留旧值。宁可"少一个比例参数但图出来了"，也不要整次生成硬失败。
+    public static func droppingRatio(_ req: CrateImageRequest) -> CrateImageRequest {
+        var out = req
+        out.ratio = ""
+        return out
+    }
+
     // MARK: 可执行文件与 PATH
 
     /// crate 可执行文件的候选位置，按优先级。

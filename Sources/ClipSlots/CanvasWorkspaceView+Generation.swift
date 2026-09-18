@@ -105,6 +105,10 @@ extension CanvasWorkspaceView {
                     if submission.droppedSeed {
                         store.transientUI.showToast("\(node.model) 不支持固定 seed，本次用新种子", duration: 2.6)
                     }
+                    // 尺寸被拒同理：选择器里明明写着 4:3，出来却是模型默认尺寸，不说一声就是"选项失灵"。
+                    if submission.droppedRatio {
+                        store.transientUI.showToast("\(node.model) 不支持比例 \(node.ratio)，本次用模型默认尺寸", duration: 2.6)
+                    }
                 }
 
                 let urls = try await service.waitForCompletion(taskId: submitted.taskId) { progress in

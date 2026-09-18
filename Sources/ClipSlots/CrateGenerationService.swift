@@ -224,6 +224,30 @@ final class CrateGenerationService {
     struct Submission {
         let result: CrateGeneration.SubmitResult
         let droppedSeed: Bool
+        /// 比例被 CLI 拒收、已去掉重试。出图尺寸与用户在选择器里选的不一致，必须说一声。
+        let droppedRatio: Bool
+    }
+
+    /// 取回模型目录（`model list --json`）。
+    ///
+    /// 刻意**不做 preflight**：目录查询本身就是"还能不能用"的探针，先跑一遍 auth status 只是把
+    /// 一次进程调用变成两次，而失败原因（缺 crate / 未登录）在这一次里同样会说清楚。
+    /// 缓存与状态在 `CrateModelCatalogStore`（App/UI 层），这一层每次都真跑。
+    func fetchModelCatalog() async throws -> [CrateModelCatalog.ModelInfo] {
+        let output = try await run(CrateModelCatalog.listArguments(),
+                                  timeout: CrateModelCatalog.listTimeout,
+                                  stage: "查询模型目录")
+        do {
+            let models = try CrateModelCatalog.parse(output)
+            // 顺手把参数表喂进 seed 门禁的缓存：目录里已经带了完整 parameters，再为同一个模型
+            // 单独 describe 一次纯属浪费（也是"点生成要等两次进程"的一个来源）。
+            for m in models where !m.parameterNames.isEmpty {
+                modelParameterCache[m.id] = m.parameterNames
+            }
+            return models
+        } catch let err as CrateResponseError {
+            throw ServiceError.response(err)
+        }
     }
 
     /// 提交一次生成。
@@ -240,13 +264,30 @@ final class CrateGenerationService {
         }
 
         do {
-            return Submission(result: try await submitOnce(effective), droppedSeed: dropped)
+            return Submission(result: try await submitOnce(effective), droppedSeed: dropped, droppedRatio: false)
         } catch let err as ServiceError {
-            guard effective.seed != nil, case .processFailed(_, let detail) = err,
-                  CrateGeneration.isUnsupportedParameterError(detail) else { throw err }
-            NSLog("[ClipSlots][crate] model \(effective.model) rejected seed; retrying without it")
-            let result = try await submitOnce(CrateGeneration.droppingSeed(effective))
-            return Submission(result: result, droppedSeed: true)
+            guard case .processFailed(_, let detail) = err else { throw err }
+
+            // 两个参数各有一条退路，且可能同时命中（老画布 + 重跑）。挨个摘掉再试，最多一次重试。
+            var retry = effective
+            var retriedSeed = false
+            var retriedRatio = false
+            if retry.seed != nil, CrateGeneration.isUnsupportedParameterError(detail) {
+                retry = CrateGeneration.droppingSeed(retry)
+                retriedSeed = true
+            }
+            if !retry.ratio.isEmpty,
+               CrateGeneration.isUnsupportedParameterError(detail, parameter: CrateModelCatalog.ratioParameterName) {
+                retry = CrateGeneration.droppingRatio(retry)
+                retriedRatio = true
+            }
+            guard retriedSeed || retriedRatio else { throw err }
+
+            NSLog("[ClipSlots][crate] model \(effective.model) rejected"
+                  + (retriedSeed ? " seed" : "") + (retriedRatio ? " ratio" : "")
+                  + "; retrying without it")
+            let result = try await submitOnce(retry)
+            return Submission(result: result, droppedSeed: dropped || retriedSeed, droppedRatio: retriedRatio)
         }
     }
 

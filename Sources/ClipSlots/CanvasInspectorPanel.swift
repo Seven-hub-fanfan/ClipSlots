@@ -23,6 +23,10 @@ struct CanvasInspectorPanel: View {
     @ObservedObject var canvas: CanvasStore
     let node: CanvasNode
 
+    /// 模型目录。进程级共享（理由见 `CrateModelCatalogStore` 的类型注释：面板随选中节点重建，
+    /// 状态放这里才不会每点一个节点就重跑一次 `crate model list`）。
+    @ObservedObject private var catalog = CrateModelCatalogStore.shared
+
     /// 数据里存着、但本机没装的字体。单独列出来是为了给它一个 tag ——
     /// 否则 Picker 找不到匹配 selection 的 tag 会**显示空白**，看起来正好像「设置没保存」。
     private var missingCurrentFamily: String? {
@@ -37,6 +41,14 @@ struct CanvasInspectorPanel: View {
             Divider().opacity(0.6)
 
             VStack(alignment: .leading, spacing: 10) {
+                // 出图参数放最上面：它是这类节点最常改的东西（字体是一次性设定，模型/尺寸是每次
+                // 出图前都要看一眼的）。非出图节点（文本节点）没有这一段。
+                // 只给图像节点：生图链路目前只实现了 image（视频节点的 model/ratio 还没有对应的
+                // 提交路径，给它一个能改但改了不生效的选择器是负收益）。
+                if node.kind == .image {
+                    generationSection
+                    Divider().opacity(0.4)
+                }
                 fontSection
                 Divider().opacity(0.4)
                 infoSection
@@ -70,6 +82,175 @@ struct CanvasInspectorPanel: View {
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 8)
+    }
+
+    // MARK: 出图参数（v2.11.18）
+    //
+    // 在此之前模型写死 seedream45、比例写死 1:1，参数栏是只读的两行字 —— 也就是"能生图，但只能
+    // 生一种图"。这一段把它们变成选择器，选项**全部来自 CLI 现问的模型目录**，理由见
+    // `CrateModelCatalog`（各模型的比例选项互不相同，还有一类模型压根不吃 ratio）。
+
+    private var generationSection: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 4) {
+                sectionTitle("出图模型")
+                Spacer(minLength: 0)
+                if catalog.isLoading {
+                    ProgressView()
+                        .controlSize(.mini)
+                        .scaleEffect(0.7)
+                        .frame(width: 12, height: 12)
+                } else {
+                    // 手动刷新的用途很具体：用户刚在终端 `crate auth login` 完，或者刚上线了新模型。
+                    // 没有它，只能等 10 分钟软过期或重启 App。
+                    Button { catalog.reload() } label: {
+                        Image(systemName: "arrow.clockwise")
+                            .font(.system(size: 9, weight: .semibold))
+                            .foregroundColor(AppTheme.chromeAccentInk)
+                    }
+                    .buttonStyle(.plain)
+                    .help("重新读取模型列表")
+                }
+            }
+
+            Picker("", selection: modelBinding) {
+                // 数据里存着、但目录里没有的模型（已下线 / 目录没加载出来）必须自带一个 tag，
+                // 否则 Picker 匹配不到 selection 会**显示空白** —— 那个症状看起来正好像"设置丢了"。
+                // 与上面字体那段的 `missingCurrentFamily` 是同一个坑。
+                if needsUnlistedModelTag {
+                    Text(node.model).tag(node.model)
+                }
+                ForEach(modelFamilies, id: \.name) { family in
+                    if family.name.isEmpty {
+                        ForEach(family.models) { m in
+                            Text(m.displayName).tag(m.id)
+                        }
+                    } else {
+                        Section(family.name) {
+                            ForEach(family.models) { m in
+                                Text(m.displayName).tag(m.id)
+                            }
+                        }
+                    }
+                }
+            }
+            .labelsHidden()
+            .pickerStyle(.menu)
+            .controlSize(.small)
+
+            if let note = modelNote {
+                Label(note, systemImage: "exclamationmark.triangle")
+                    .font(.system(size: 9))
+                    .foregroundColor(.orange.opacity(0.9))
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            sectionTitle("尺寸")
+
+            Picker("", selection: ratioBinding) {
+                if ratioOptions.isEmpty {
+                    // 没有可选项时也要有一个能匹配 selection 的 tag（空白 Picker 同上）。
+                    Text(node.ratio.isEmpty ? "模型默认" : node.ratio).tag(node.ratio)
+                } else {
+                    if unlistedRatio {
+                        Text("\(node.ratio)（当前）").tag(node.ratio)
+                    }
+                    // 比例与分辨率档分组：`2K` / `4K` 不是宽高比，混在一列里会让人以为选了 2K
+                    // 就还是方图（实际构图比例由模型自己定）。
+                    let ratios = ratioOptions.filter { !$0.isResolutionPreset }
+                    let presets = ratioOptions.filter { $0.isResolutionPreset }
+                    if presets.isEmpty {
+                        ForEach(ratios) { opt in Text(opt.label).tag(opt.value) }
+                    } else {
+                        Section("比例") {
+                            ForEach(ratios) { opt in Text(opt.label).tag(opt.value) }
+                        }
+                        Section("分辨率") {
+                            ForEach(presets) { opt in Text(opt.label).tag(opt.value) }
+                        }
+                    }
+                }
+            }
+            .labelsHidden()
+            .pickerStyle(.menu)
+            .controlSize(.small)
+            .disabled(ratioOptions.isEmpty)
+
+            if let note = ratioNote {
+                Text(note)
+                    .font(.system(size: 9))
+                    .foregroundColor(AppTheme.canvasChromeTertiaryInk)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .onAppear { catalog.loadIfNeeded() }
+    }
+
+    /// 按系列分组，**组内与组间都保持 CLI 原序**（那是策划过的顺序，重排成字母序会把 seedream
+    /// 家族打散）。这里不用 `Dictionary(grouping:)`：它的 key 顺序是随机的，会导致每次打开面板
+    /// 菜单里的分组顺序都不一样。
+    private struct ModelFamily { let name: String; let models: [CrateModelCatalog.ModelInfo] }
+
+    private var modelFamilies: [ModelFamily] {
+        var order: [String] = []
+        var buckets: [String: [CrateModelCatalog.ModelInfo]] = [:]
+        for m in catalog.imageModels {
+            if buckets[m.family] == nil { order.append(m.family) }
+            buckets[m.family, default: []].append(m)
+        }
+        return order.map { ModelFamily(name: $0, models: buckets[$0] ?? []) }
+    }
+
+    /// 当前模型在目录里的条目。`nil` = 目录没加载出来，或这个模型已经不在目录里了。
+    private var currentModel: CrateModelCatalog.ModelInfo? { catalog.model(id: node.model) }
+
+    /// 要不要给"目录里没有的当前模型"补一个 tag。目录未加载 / 加载失败时也为 true —— 那两种情况下
+    /// 列表是空的，不补 tag 的话 Picker 会显示空白。
+    private var needsUnlistedModelTag: Bool { currentModel == nil }
+
+    private var ratioOptions: [CrateModelCatalog.RatioOption] { currentModel?.ratioOptions ?? [] }
+
+    /// 当前比例不在选项里（老画布 / 换了模型但值还没落定）。
+    private var unlistedRatio: Bool {
+        !node.ratio.isEmpty && !ratioOptions.contains { $0.value == node.ratio }
+    }
+
+    private var modelNote: String? {
+        switch catalog.state {
+        case .failed(let reason): return "模型列表读取失败：\(reason)"
+        case .loaded where currentModel == nil: return "「\(node.model)」不在当前可用模型里，建议换一个"
+        default: return nil
+        }
+    }
+
+    private var ratioNote: String? {
+        if ratioOptions.isEmpty {
+            guard let model = currentModel else { return "模型列表未加载，暂时沿用当前尺寸" }
+            return model.supportsRatio ? "该模型未提供预设比例" : "该模型按宽高出图，不接受比例预设"
+        }
+        if unlistedRatio { return "当前值不在该模型的预设里，生成时可能被忽略" }
+        return nil
+    }
+
+    private var modelBinding: Binding<String> {
+        Binding(
+            get: { node.model },
+            set: { picked in
+                // 换模型时顺带把比例落到新模型真的接受的值上 —— 各模型选项不同，留着旧值会在提交
+                // 时被拒。两个字段**一次写进撤销栈**（理由见 `updateNodeGeneration`）。
+                let ratio = catalog.model(id: picked).map {
+                    CrateModelCatalog.resolvedRatio(current: node.ratio, for: $0)
+                }
+                canvas.updateNodeGeneration(id: node.id, model: picked, ratio: ratio)
+            }
+        )
+    }
+
+    private var ratioBinding: Binding<String> {
+        Binding(
+            get: { node.ratio },
+            set: { canvas.updateNodeGeneration(id: node.id, ratio: $0) }
+        )
     }
 
     // MARK: 字体
@@ -169,8 +350,8 @@ struct CanvasInspectorPanel: View {
     private var infoSection: some View {
         VStack(alignment: .leading, spacing: 4) {
             infoRow("类型", node.kind.displayName)
-            infoRow("模型", node.model)
-            infoRow("比例", node.ratio)
+            // 模型 / 比例不再列在只读区 —— 它们上面已经是选择器了，同一个值在一个面板里出现两次
+            // 只会让人怀疑哪个才算数。
             // ★ hotfix20：节点 = 槽位，「未绑定」这一档在数据结构层面就不存在了
             // （`CanvasNode` 的 groupId/slot 是非可选的）。名字当场问槽位，见 `CanvasStore.nodeTitle`。
             infoRow("槽位", slotDescription)

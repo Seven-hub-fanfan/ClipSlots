@@ -42,6 +42,12 @@ public struct CanvasHistoryEntry: Identifiable, Equatable {
         /// Cmd+Z，期望退回上一个字号，而不是把上一段文本编辑也一起吐出来。
         case styleNode
 
+        /// 改了出图参数（模型 / 比例）。
+        ///
+        /// 与 `styleNode` 分开的理由同上：调完比例 Cmd+Z，期望退回上一个比例，而不是连带把上一次
+        /// 字号调整也吐出来。
+        case paramNode
+
         /// 面板里显示的动作名。
         public var title: String {
             switch self {
@@ -53,6 +59,7 @@ public struct CanvasHistoryEntry: Identifiable, Equatable {
             case .editNode: return "编辑内容"
             case .bindSlot: return "填入槽位"
             case .styleNode: return "调整字体"
+            case .paramNode: return "调整出图参数"
             }
         }
 
@@ -66,6 +73,7 @@ public struct CanvasHistoryEntry: Identifiable, Equatable {
             case .editNode: return "pencil"
             case .bindSlot: return "tray.and.arrow.down"
             case .styleNode: return "textformat"
+            case .paramNode: return "slider.horizontal.3"
             }
         }
     }
