@@ -386,9 +386,10 @@ struct CanvasWorkspaceView: View {
         Button("编辑提示词") { beginEdit(node) }
         Button("管理入参文件") { openInputFiles(node) }
         Divider()
-        Button("重跑") {
-            // MVP：生图未接入，先给明确反馈而不是静默无响应。
-            store.transientUI.showToast("生图功能开发中")
+        Button(node.state == .idle ? "生成" : "重跑") {
+            // v2.11.10：接上 Crate CLI。重跑刻意复用已记录的 seed —— 「重跑」的语义是
+            // "同样的输入再来一次"，换个随机 seed 出一张完全不同的图会让人以为参数没生效。
+            startGeneration(node, reusingSeed: true)
         }
         if let taskId = node.taskId {
             Button("复制 taskId") {
@@ -1193,7 +1194,7 @@ struct CanvasWorkspaceView: View {
                     .help(agentVisible ? "收起 Agent 侧栏" : "打开 Agent 侧栏")
 
                     CanvasGenerateButton {
-                        store.transientUI.showToast("生图功能开发中")
+                        runGenerationForSelection()
                     }
                 }
                 Spacer()

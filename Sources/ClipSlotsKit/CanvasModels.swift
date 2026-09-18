@@ -209,6 +209,19 @@ public struct CanvasNode: Codable, Identifiable, Equatable {
     /// 不一致，删节点时也只需要清理指向它的引用，不必维护两侧。
     public var parentNodeId: String?
 
+    /// 本节点**生成产物**在槽位附件列表里的 id（v2.11.10）。
+    ///
+    /// 产物必须写回槽位（画布文档是派生资产，损坏即丢弃重建，不能当用户资产的唯一载体），
+    /// 但槽位附件在画布语境下就是「入参文件」—— 不做区分的话，**重跑会把上一轮的出图当成
+    /// 这一轮的入参**，文生图会在用户毫不知情的情况下变成图生图（第三轮起还会叠上两张）。
+    ///
+    /// 因此这里只记 id，不记路径：路径会被存储层改写（`attachments/{id}.bin` 的摄取），
+    /// id 是附件唯一不变的身份。生成链路据此把产物从入参集合里剔掉。
+    ///
+    /// 刻意**不**顺手把产物从卡片的「入参文件」行里藏掉：那一行是「这个槽位里有哪些文件」的
+    /// 如实呈现，藏起来用户就无法删除自己不想要的出图了。区分只发生在**提交任务**这一刻。
+    public var outputAttachmentIds: [String]
+
     public var createdAt: Date
     public var updatedAt: Date
 
@@ -265,6 +278,7 @@ public struct CanvasNode: Codable, Identifiable, Equatable {
                 taskId: String? = nil,
                 seed: Int? = nil,
                 parentNodeId: String? = nil,
+                outputAttachmentIds: [String] = [],
                 animationStyle: CanvasFanGeometry.ExpandStyle = .fanOut,
                 createdAt: Date = Date(),
                 updatedAt: Date = Date()) {
@@ -285,6 +299,7 @@ public struct CanvasNode: Codable, Identifiable, Equatable {
         self.taskId = taskId
         self.seed = seed
         self.parentNodeId = parentNodeId
+        self.outputAttachmentIds = outputAttachmentIds
         self.animationStyle = animationStyle
         self.createdAt = createdAt
         self.updatedAt = updatedAt
@@ -299,6 +314,7 @@ public struct CanvasNode: Codable, Identifiable, Equatable {
         case fontName, fontSize
         case state, taskId, seed
         case parentNodeId
+        case outputAttachmentIds
         case animationStyle
         case createdAt, updatedAt
         // 旧字段：hotfix19 及更早的节点自带内容与溯源信息。只在解码时读，从不写回。
@@ -347,6 +363,8 @@ public struct CanvasNode: Codable, Identifiable, Equatable {
         seed = try c.decodeIfPresent(Int.self, forKey: .seed)
         // v2.11.8 新增字段：老文档没有它，缺省 nil（= 没有上游），不需要版本分支。
         parentNodeId = try c.decodeIfPresent(String.self, forKey: .parentNodeId)
+        // v2.11.10 新增：老文档没有产物标记，缺省空集合（= 全部附件都算入参，与老行为一致）。
+        outputAttachmentIds = try c.decodeIfPresent([String].self, forKey: .outputAttachmentIds) ?? []
         // ★ 九轮：只剩扇形一种风格；老文档里的 `carousel` / `stackedScatter` 由
         // `ExpandStyle.init(from:)` 迁移成 `.fanOut`（不抛错，见那边注释）。
         animationStyle = try c.decodeIfPresent(CanvasFanGeometry.ExpandStyle.self,
@@ -376,6 +394,10 @@ public struct CanvasNode: Codable, Identifiable, Equatable {
         try c.encodeIfPresent(taskId, forKey: .taskId)
         try c.encodeIfPresent(seed, forKey: .seed)
         try c.encodeIfPresent(parentNodeId, forKey: .parentNodeId)
+        // 空集合不写：绝大多数节点没出过图，写一个空数组只会让每个节点都胖一行。
+        if !outputAttachmentIds.isEmpty {
+            try c.encode(outputAttachmentIds, forKey: .outputAttachmentIds)
+        }
         try c.encode(animationStyle, forKey: .animationStyle)
         try c.encode(createdAt, forKey: .createdAt)
         try c.encode(updatedAt, forKey: .updatedAt)
