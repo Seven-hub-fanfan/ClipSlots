@@ -383,6 +383,14 @@ public enum CrateGeneration {
     /// 2. **断链剔除**：附件可能只有一个指向用户原始文件的路径引用，而原文件已被移走/删除。
     ///    把不存在的路径交给 CLI，换回来的是一句上传失败，用户读不出到底哪张图没了。
     ///
+    /// ★ 产物有**两个**独立标记，缺一不可
+    ///
+    /// 一个是节点上的 `outputAttachmentIds`（精确），另一个是产物文件名（`crate_<taskId>.<ext>`，
+    /// 兜底）。为什么需要兜底：画布文档会被**不认识这个字段的版本**读写 —— Codable 遇到未知 key
+    /// 只会丢掉，于是"用旧版本打开一次画布"就足以把全部产物标记抹掉，下一次重跑立刻退化成
+    /// 图生图（实测发生过：迁移前的 v2.11.17 打开过画布，三张历史产物就全被当成入参上传了）。
+    /// 文件名是我们自己在 `assetFileName` 里定的，跟着字节走进槽位，不受画布文档往返影响。
+    ///
     /// 路径优先级 `storagePath > path > originalPath`：`storagePath` 是存储层自有的字节副本
     /// （`attachments/{id}.bin`），它不会因为用户整理桌面而失效。`.bin` 扩展名不影响 CLI 上传，
     /// 服务端按内容判类型。
@@ -396,6 +404,7 @@ public enum CrateGeneration {
         attachments.compactMap { att -> String? in
             guard att.type == .image else { return nil }
             guard !outputs.contains(att.id.uuidString) else { return nil }
+            guard !isGeneratedAssetName(att.name) else { return nil }
             for candidate in [att.storagePath, att.path, att.originalPath] {
                 if let path = candidate, !path.isEmpty, fileExists(path) { return path }
             }
@@ -411,6 +420,21 @@ public enum CrateGeneration {
         let safeId = taskId.filter { $0.isNumber || $0.isLetter || $0 == "-" || $0 == "_" }
         let id = safeId.isEmpty ? "task" : safeId
         return index == 0 ? "crate_\(id).\(ext)" : "crate_\(id)_\(index + 1).\(ext)"
+    }
+
+    /// 这个附件名是不是我们自己生成出来的产物？
+    ///
+    /// 与 `assetFileName` **成对维护**：改了那边的命名就必须改这里，否则兜底标记会静默失效。
+    /// 刻意只认 `crate_` 前缀 + 图片扩展名这一种极窄形态，宁可漏判（还有 id 那道精确标记）
+    /// 也不误判用户自己拖进来的图 —— 误判的后果是"用户明明挂了参考图，却被当产物忽略"。
+    public static func isGeneratedAssetName(_ name: String) -> Bool {
+        let lower = name.lowercased()
+        guard lower.hasPrefix("crate_") else { return false }
+        guard let ext = fileExtension(forURL: lower) else { return false }
+        // crate_<taskId>[_序号].<ext>：中段只允许数字 / 字母 / - / _（assetFileName 过滤后的形态）。
+        let stem = String(lower.dropFirst("crate_".count).dropLast(ext.count + 1))
+        guard !stem.isEmpty else { return false }
+        return stem.allSatisfy { $0.isNumber || $0.isLetter || $0 == "-" || $0 == "_" }
     }
 
     /// 从 URL 猜扩展名。只认白名单，避免把查询串里的垃圾当扩展名（`?x=a.php` 这种）。

@@ -17,6 +17,7 @@ assets/AppIcon.iconset/
 # Build DMG artifacts
 build/*.dmg
 build/dmg_staging/
+build/backup/
 build/perf/
 
 # UI screenshots

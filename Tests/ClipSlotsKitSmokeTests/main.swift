@@ -7029,12 +7029,14 @@ do {
     let exists: (String) -> Bool = { !$0.hasPrefix("/gone/") }
 
     let input = att("in.png", storage: "/store/in.bin")
-    let output = att("crate_768.jpeg", storage: "/store/out.bin")
+    // 刻意不用 crate_*.jpeg 当这一组的产物：那个名字会被"第二道标记"（文件名）直接拦下，
+    // 就测不到 id 标记本身了。名字兜底那条链路由 CRATE-NAME 组单独盯。
+    let output = att("outcome.jpeg", storage: "/store/out.bin")
     let all = [input, output]
 
     t.equal(CrateGeneration.inputImagePaths(from: all, excludingAttachmentIds: [], fileExists: exists),
             ["/store/in.bin", "/store/out.bin"],
-            "CRATE-IO-1 没有产物标记时（老画布数据）全部图片都算入参，保持旧行为")
+            "CRATE-IO-1 两道标记都没命中时，图片一律算入参（用户自己拖进来的图必须原样上传）")
     t.equal(CrateGeneration.inputImagePaths(from: all,
                                            excludingAttachmentIds: [output.id.uuidString],
                                            fileExists: exists),
@@ -7132,6 +7134,49 @@ do {
     t.check(!args.contains("--param"), "★CRATE-SEED-14 去 seed 后的命令行里不能再出现 --param")
     t.check(args.contains("--no-wait") && args.contains("--json"),
             "CRATE-SEED-15 重试仍然是 --no-wait + --json")
+}
+
+// MARK: - CRATE-NAME：产物的第二道标记 = 文件名（v2.11.17）
+//
+// 为什么不能只靠节点上的 outputAttachmentIds：画布文档会被不认识这个字段的版本读写，Codable
+// 丢掉未知 key 之后，标记就没了 —— 实测迁移前的 v2.11.17 打开过一次画布，三张历史产物立刻
+// 在下次重跑里被当成入参上传（文生图静默变图生图）。文件名跟着字节走，不受文档往返影响。
+do {
+    // 与 assetFileName 成对：先按真实命名生成，再要求判定认得出来。
+    let single = CrateGeneration.assetFileName(taskId: "7686810757249515784", index: 0,
+                                              urlString: "https://x/y/a.jpeg")
+    let second = CrateGeneration.assetFileName(taskId: "7686810757249515784", index: 1,
+                                               urlString: "https://x/y/a.png")
+    t.check(CrateGeneration.isGeneratedAssetName(single),
+            "★CRATE-NAME-1 assetFileName 生成的名字必须被认成产物（两个函数成对维护）")
+    t.check(CrateGeneration.isGeneratedAssetName(second),
+            "CRATE-NAME-2 带序号后缀的产物名同样认得出")
+    t.check(CrateGeneration.isGeneratedAssetName("CRATE_768.JPEG"),
+            "CRATE-NAME-3 大小写不敏感（用户可能在 Finder 里改过大小写）")
+
+    // 用户自己的图一律不能被误判 —— 误判 = 明明挂了参考图却被当产物忽略。
+    t.check(!CrateGeneration.isGeneratedAssetName("crate_768.txt"),
+            "CRATE-NAME-4 非图片扩展名不算产物")
+    t.check(!CrateGeneration.isGeneratedAssetName("crate_.jpeg"), "CRATE-NAME-5 空 taskId 段不算")
+    t.check(!CrateGeneration.isGeneratedAssetName("my_crate_768.jpeg"),
+            "★CRATE-NAME-6 前缀必须在开头（用户的 my_crate_768.jpeg 是入参，不是产物）")
+    t.check(!CrateGeneration.isGeneratedAssetName("crate 768.jpeg"),
+            "CRATE-NAME-7 中段有空格不算（assetFileName 不会产出这种）")
+    t.check(!CrateGeneration.isGeneratedAssetName("参考图.png"), "CRATE-NAME-8 普通文件名不算")
+    t.check(!CrateGeneration.isGeneratedAssetName("crate_7686810757249515784.jpeg.png"),
+            "CRATE-NAME-9 中段带点不算（避免把 xxx.jpeg.png 这种双扩展名误收）")
+
+    // 端到端：id 标记丢了（模拟被旧版本抹掉），仍然靠名字把产物挡在入参之外。
+    func att(_ name: String, storage: String) -> SlotContent.SlotAttachment {
+        SlotContent.SlotAttachment(name: name, type: .image, storagePath: storage)
+    }
+    let mine = att("参考图.png", storage: "/store/ref.bin")
+    let produced = att(single, storage: "/store/out.bin")
+    let paths = CrateGeneration.inputImagePaths(from: [mine, produced],
+                                               excludingAttachmentIds: [],
+                                               fileExists: { _ in true })
+    t.equal(paths, ["/store/ref.bin"],
+            "★CRATE-NAME-10 id 标记为空时（旧版本读写过画布），产物仍然不会被当入参上传")
 }
 
 t.report()
