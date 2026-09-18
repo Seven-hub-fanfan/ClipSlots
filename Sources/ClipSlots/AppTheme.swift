@@ -300,15 +300,37 @@ enum AppTheme {
                                                        dark: Color.white.opacity(0.72))
     static var canvasCardMetaInk: Color { isMinimalSkin ? minimalSecondaryInk : colorfulCanvasCardMetaInk }
 
-    /// 纯文本节点的**深色内容框**底色（v2.11.8 二轮，用户指定"深色圆角纯文本框"）。
+    /// 纯文本节点的内容框底色。
     ///
-    /// 两个皮肤共用一档、且**不随浅/深色模式反相**：这块深底的作用是把文本从卡片里"抠"出来，
-    /// 并在画布上与出图节点的白色堆叠卡形成一眼可辨的区分。跟着系统模式变成浅色就同时失去这两件事
-    /// —— 浅色卡片上的浅色框既没有边界感，也不再能靠颜色区分节点类型。
-    /// 深色模式下比卡片底（0.105）略高一档，避免和卡片糊在一起。
+    /// ★ v2.11.16 修（用户反馈"亮色模式的文本节点颜色有黑色"）：原先两个模式共用一档深色，
+    /// 理由是"深底把文本从卡片里抠出来、并与出图节点的白卡形成区分"。但它带来两个真问题：
+    ///   1. 亮色模式下画布上凭空多出一块纯黑矩形，和整套浅色 UI 割裂；
+    ///   2. **编辑态并不是深色**（编辑器底走 `canvasTextNodeFill` 之前用的是 `previewBackground`），
+    ///      于是点一下正文，底色从黑"啪"地跳成浅色、白字跳成黑字 —— 用户以为是渲染 bug。
+    ///
+    /// 现在浅色模式给一档**比卡片白略沉的灰**，边界感交给 `canvasTextNodeStroke` 的描边来做；
+    /// 深色模式保持原来那档（比卡片底 0.105 高一档，不与卡片糊在一起）。
+    /// "一眼分辨节点类型"这件事由"整块内容区带描边的浅灰底"继续承担，不再依赖反相的黑。
     static var canvasTextNodeFill: Color {
-        dyn(light: Color(red: 0.145, green: 0.148, blue: 0.16),
+        dyn(light: Color(red: 0.961, green: 0.965, blue: 0.973),
             dark: Color(red: 0.175, green: 0.178, blue: 0.19))
+    }
+
+    /// 纯文本节点内容框的描边（★ v2.11.16）：浅色模式靠它划出"这里是内容区"的边界。
+    static var canvasTextNodeStroke: Color {
+        dyn(light: Color.black.opacity(0.10), dark: Color.white.opacity(0.08))
+    }
+
+    /// 纯文本节点的正文色（★ v2.11.16）：跟随模式，不再钉死白色。
+    static var canvasTextNodeInk: Color {
+        dyn(light: Color(red: 0.12, green: 0.13, blue: 0.15).opacity(0.92),
+            dark: Color.white.opacity(0.92))
+    }
+
+    /// 纯文本节点的占位文案色（★ v2.11.16）。
+    static var canvasTextNodePlaceholderInk: Color {
+        dyn(light: Color(red: 0.12, green: 0.13, blue: 0.15).opacity(0.42),
+            dark: Color.white.opacity(0.45))
     }
 
     private static let colorfulElevatedBackground = dyn(light: Color.white.opacity(0.82),

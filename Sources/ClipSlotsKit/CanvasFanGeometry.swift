@@ -146,9 +146,23 @@ public enum CanvasFanGeometry {
     ///
     /// `hitTest` 按 zIndex 从高到低遍历，所以命中优先级会**自动**跟着反转，不需要另外改 ——
     /// 这正是当初把命中判定从"各卡自己 onHover"改成统一命中层的收益。
+    /// - Parameter pagingCards: 这 `count` 个位置里，末尾有几个是**翻页用的「+N」灰卡**（0 或 1）。
+    ///
+    /// ★ v2.11.16（用户反馈"卡片展开有点偏左，希望看起来居中"）：这个参数是修偏左的关键。
+    ///
+    /// 扇形按 `k = i - (n-1)/2` 关于中轴对称，本来是居中的 —— 但当这叠卡有后续、末尾多出一张
+    /// 「+N」灰卡时，`n` 把灰卡也算进去了，于是**真正的牌面**（前 n-1 张）的重心落在
+    /// `k = -1/2`，也就是比预览区中心左偏 `stagger/2`（展开态 = 6pt，在 163% 缩放下约 10px）。
+    /// 用户看到的"偏左"就是它：灰卡颜色浅、面积又被压在最底层，视觉上不参与"这叠卡在哪"，
+    /// 可几何上它却把整叠卡往左推了半格。
+    ///
+    /// 修法不是拍一个魔法偏移量，而是**把重心还给牌面**：整叠（含灰卡）统一右移
+    /// `pagingCards × stagger / 2`，于是牌面严格居中，灰卡顺势落在右侧外缘 —— 它本来就是
+    /// "还有更多"的方向指示，靠右反而更符合语义。
     public static func layouts(count: Int,
                                expanded: Bool,
-                               hoveredIndex: Int? = nil) -> [CardLayout] {
+                               hoveredIndex: Int? = nil,
+                               pagingCards: Int = 0) -> [CardLayout] {
         // ★ v2.11.8 三轮：上界从 `maxCards` 放到 `maxCards + 1`。
         //
         // 多出来的那一格是翻页用的灰色「+N」卡（见 `CanvasFanPaging`）—— 它必须和牌面卡走**同一套**
@@ -158,6 +172,8 @@ public enum CanvasFanGeometry {
         let spread = expanded ? expandedSpread : collapsedSpread
         let stagger = expanded ? expandedStagger : collapsedStagger
         let mid = CGFloat(n - 1) / 2
+        // ★ v2.11.16：把「+N」灰卡占掉的半格还回来，让**牌面**（而不是"牌面+灰卡"）居中。
+        let nudge = CGFloat(max(0, min(pagingCards, n - 1))) * stagger / 2
 
         return (0..<n).map { i in
             let k = CGFloat(i) - mid
@@ -167,7 +183,7 @@ public enum CanvasFanGeometry {
             let lift: CGFloat = isHovered ? hoverLift : 0
             return CardLayout(index: i,
                               angle: k * spread,
-                              offset: CGSize(width: k * stagger, height: sink + lift),
+                              offset: CGSize(width: k * stagger + nudge, height: sink + lift),
                               scale: isHovered ? hoverScale : 1,
                               // 被悬停的卡片必须压住相邻卡片的边缘（用户明确要求 Z 层提升），
                               // 否则放大 1.08 的那 8% 会被邻居切掉一条边，看起来像渲染错误。
@@ -203,10 +219,16 @@ public enum CanvasFanGeometry {
         // hoveredIndex = nil 先算一遍静息，再逐个 slot 算 hover 态。
         let variants: [Int?] = [nil] + (0..<max(1, slotCount)).map { Optional($0) }
         for hovered in variants {
-            let ls = layouts(count: slotCount, expanded: true, hoveredIndex: hovered)
-            for l in ls {
-                for p in cardPolygon(layout: l, cardSize: cardSize, containerSize: .zero) {
-                    half = max(half, abs(p.x))
+            // ★ v2.11.16：`pagingCards` 会把整叠右移 stagger/2，右缘因此比不带灰卡时更远。
+            // 维持区必须按**两种情形的并集**算，否则鼠标追着最右那张卡走出维持区，扇形当场收拢
+            // （这正是五轮修过的那个 bug 的新入口）。
+            for paging in [0, 1] {
+                let ls = layouts(count: slotCount, expanded: true,
+                                 hoveredIndex: hovered, pagingCards: paging)
+                for l in ls {
+                    for p in cardPolygon(layout: l, cardSize: cardSize, containerSize: .zero) {
+                        half = max(half, abs(p.x))
+                    }
                 }
             }
         }

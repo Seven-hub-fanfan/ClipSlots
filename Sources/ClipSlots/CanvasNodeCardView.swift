@@ -468,11 +468,12 @@ struct CanvasNodeCardView: View {
 
     // MARK: - 纯文本节点主体
 
-    /// 深色圆角纯文本框（用户二轮明确要求）。
+    /// 圆角纯文本框（用户二轮要求"把内容区从卡片里抠出来"）。
     ///
-    /// 为什么是**深色**而不是跟随卡片底色：文本节点没有图，整张卡就是一片留白，浅色文本框在浅色
-    /// 卡片上没有边界感，一眼看不出"这里是内容"。深底把内容区从卡片里"抠"出来，同时也和画布上
-    /// 出图节点的白色堆叠卡形成一眼可辨的区分 —— 用户扫画布时不需要读字就知道哪个是文本节点。
+    /// 二轮的实现是**两个模式都用深色**，理由是"浅色框在浅色卡片上没有边界感"。
+    /// ★ v2.11.16 修：用户反馈"亮色模式的文本节点颜色有黑色"—— 亮色画布上凭空一块黑矩形，
+    /// 割裂感比"没有边界感"严重得多。现在浅色模式用**比卡片略沉的灰底 + 一道描边**来做边界，
+    /// 深色模式保持原来那档深色；"一眼分辨文本节点"这件事由"整块带描边的内容区"继续承担。
     ///
     /// 行数不设死上限（`lineLimit(nil)` + 高度自适应到剩余空间）：文本节点的全部价值就是那段文字，
     /// 截断它等于让节点失去意义；真的超长时由 `frame` 裁掉尾部，而不是提前省略。
@@ -485,11 +486,14 @@ struct CanvasNodeCardView: View {
             ZStack(alignment: .topLeading) {
                 RoundedRectangle(cornerRadius: s(10), style: .continuous)
                     .fill(AppTheme.canvasTextNodeFill)
+                // ★ v2.11.16：浅色模式下底色不再是黑块，边界感改由描边承担。
+                RoundedRectangle(cornerRadius: s(10), style: .continuous)
+                    .strokeBorder(AppTheme.canvasTextNodeStroke, lineWidth: s(1))
 
                 if text.isEmpty {
                     Text(attachments.isEmpty ? "点这里写文本…" : "仅入参文件，无文本")
                         .font(bodyFont)
-                        .foregroundColor(.white.opacity(0.45))
+                        .foregroundColor(AppTheme.canvasTextNodePlaceholderInk)
                         .canvasStableLabel()
                         .canvasScreenFixedText(textCounter, anchor: .topLeading)
                         .opacity(textOpacity)
@@ -498,7 +502,7 @@ struct CanvasNodeCardView: View {
                 } else {
                     Text(text)
                         .font(bodyFont)
-                        .foregroundColor(.white.opacity(0.92))
+                        .foregroundColor(AppTheme.canvasTextNodeInk)
                         .canvasScreenFixedText(textCounter, anchor: .topLeading)
                         .multilineTextAlignment(.leading)
                         .lineSpacing(s(2))

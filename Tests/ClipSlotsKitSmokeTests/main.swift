@@ -5074,6 +5074,71 @@ do {
     t.equal(CanvasFanGeometry.cardWindow(total: 9, start: 0).count, CanvasFanGeometry.maxCards,
             "真实牌面仍然只有 5 张（+N 那一格不是内容卡）")
 
+    // ---- ★ v2.11.16：「牌面」居中，而不是「牌面 + 灰卡」居中 ----
+    //
+    // 用户反馈"卡片展开有点偏左，可以稍微往右边移动一些，让看起来居中"（截图 image-57202dac）。
+    // 根因很反直觉：扇形数学本来就关于中轴严格对称（上面那几条断言一直是绿的），偏的不是公式，
+    // 是**被算进对称中心的那张「+N」灰卡**。灰卡半透明、又沉在最底层，视觉上它不参与"这叠卡在哪"，
+    // 几何上却占了一格，于是前 n-1 张真牌面的重心落在 k = -1/2，比预览区中心左偏 stagger/2。
+    //
+    // 所以这里断言的是"**牌面**重心为 0"。只测整叠对称是测不出这个 bug 的 —— 这正是它躲过
+    // 前面所有断言的原因，也是为什么下面要按"有/无灰卡"两种情形分别验。
+    do {
+        let stagger = CanvasFanGeometry.expandedStagger
+
+        // (1) 无灰卡：行为必须与 v2.11.15 逐项一致（新参数默认值不许改变既有布局）。
+        let plain = CanvasFanGeometry.layouts(count: 5, expanded: true)
+        let plain0 = CanvasFanGeometry.layouts(count: 5, expanded: true, pagingCards: 0)
+        t.check(plain == plain0,
+                "★pagingCards 默认 0 时布局与旧版完全一致（新参数不得偷偷改变无灰卡的情形）")
+        t.check(canvasApprox(plain.map(\.offset.width).reduce(0, +), 0),
+                "无灰卡时整叠重心就在中轴（这条本来就是绿的，留作对照）")
+
+        // (2) 有灰卡：末尾那一格是 +N，前 5 张才是牌面。
+        let paged = CanvasFanGeometry.layouts(count: 6, expanded: true, pagingCards: 1)
+        let faces = paged.dropLast()           // 5 张牌面
+        t.equal(faces.count, 5, "6 格 - 1 张灰卡 = 5 张牌面")
+        t.check(canvasApprox(faces.map(\.offset.width).reduce(0, +), 0),
+                "★★牌面的横向重心必须在中轴上（这就是用户看到的「偏左」被修掉的判据）")
+
+        // 修之前牌面重心在 -stagger/2；修法是整叠右移 stagger/2，量必须精确，不是随手调的魔法数。
+        let before = CanvasFanGeometry.layouts(count: 6, expanded: true, pagingCards: 0)
+        t.check(canvasApprox(before.map(\.offset.width).reduce(0, +), 0),
+                "对照：不声明灰卡时，是「牌面+灰卡」整体居中（即旧行为）")
+        for (a, b) in zip(before, paged) {
+            t.check(canvasApprox(b.offset.width - a.offset.width, stagger / 2),
+                    "★右移量恰好 = stagger/2（灰卡占掉的半格），每一格位移相同 —— 扇形形状不变，只是整体平移")
+            t.check(canvasApprox(b.angle, a.angle),
+                    "★只平移、不动角度（动角度会让卡片「待在左边却向右倾」，观感是散落而非一叠）")
+        }
+
+        // 灰卡顺势落到右侧最外缘 —— 它是"还有更多"的方向指示，靠右符合语义，也仍然露得出楔形可点。
+        t.check(paged.last!.offset.width > faces.map(\.offset.width).max()!,
+                "「+N」灰卡在牌面右侧外缘（沉底 + 靠右 = 看得见、点得到、不压内容）")
+
+        // 收拢态同样要处理，否则一叠卡在静息状态就偏左半格（用户看的第一眼就是收拢态）。
+        let collapsedPaged = CanvasFanGeometry.layouts(count: 6, expanded: false, pagingCards: 1)
+        t.check(canvasApprox(collapsedPaged.dropLast().map(\.offset.width).reduce(0, +), 0),
+                "★收拢态的牌面也居中（静息态偏半格 = 用户第一眼就看到歪的）")
+
+        // hover 维持区必须覆盖右移后的右缘。这是本项目修了五轮的那个 bug 的新入口：
+        // 维持区比扇形窄 → 鼠标追着最右那张卡走出维持区 → 扇形当场收拢。
+        let cardSize = CanvasFanGeometry.fanCardSize(boxHeight: 132)
+        let half = CanvasFanGeometry.expandedHalfWidth(slotCount: 6, cardSize: cardSize)
+        var maxX: CGFloat = 0
+        for hovered in [nil] + (0..<6).map(Optional.init) {
+            for l in CanvasFanGeometry.layouts(count: 6, expanded: true,
+                                               hoveredIndex: hovered, pagingCards: 1) {
+                for pt in CanvasFanGeometry.cardPolygon(layout: l, cardSize: cardSize,
+                                                        containerSize: .zero) {
+                    maxX = max(maxX, abs(pt.x))
+                }
+            }
+        }
+        t.check(half >= maxX - 0.001,
+                "★expandedHalfWidth 必须覆盖右移后的最远顶点，否则 hover 维持区比扇形窄 → 鼠标移到最右那张卡上扇形自己收了")
+    }
+
     // 角度关于中轴严格对称。
     let four = CanvasFanGeometry.layouts(count: 4, expanded: true)
     let angles = four.map { $0.angle }

@@ -199,7 +199,14 @@ struct CanvasSlotFanStack: View {
                                          // 会去抬起页内第 5 格 —— 那是「+N」灰卡，抬错人。
                                          hoveredIndex: hoveredCard.flatMap { global in
                                              visibleCards.firstIndex { $0.index == global }
-                                         })
+                                         },
+                                         // ★ v2.11.16：告诉几何层"末尾这张是翻页灰卡"，
+                                         // 好让**牌面**居中，而不是"牌面 + 灰卡"整体居中
+                                         // （用户反馈"卡片展开有点偏左"，根因见 layouts 的注释）。
+                                         //
+                                         // `sources.isEmpty` 的空卡分支走 slotCount = 1，
+                                         // 此时 showsOverflowCard 必为 false，不会误报。
+                                         pagingCards: window.showsOverflowCard ? 1 : 0)
     }
 
     /// 「+N」灰卡所在的 slot 下标（`nil` = 本页没有灰卡）。
