@@ -6,7 +6,8 @@ struct NodeConnectionCanvas: View {
     let nodeFrames: [Int: CGRect]
     let activeDrag: NodeCanvasDrag?
     let hoveredTarget: SlotPortTarget?
-    // v2.9.20: 被 hover 的连线（用于 hover 删除入口）整条变红加粗，给出明确的"将删除此线"反馈。
+    // v2.16.3：被 hover 的连线只轻微提亮；旧版整条变红加粗太像流程图编辑器，
+    // 与 TapNow 的低存在感关系线不一致。真正删除仍由中点按钮/菜单表达。
     var hoveredEdgeId: UUID? = nil
 
     var body: some View {
@@ -22,12 +23,15 @@ struct NodeConnectionCanvas: View {
         let end = nodeAnchorPoint(for: edge.toPort, in: toRect)
         let path = nodeConnectionPath(start: start, startPort: edge.fromPort, end: end, endPort: edge.toPort)
         let isHovered = hoveredEdgeId == edge.id
-        let color = isHovered ? Color.red : SlotConnectionColor.color(for: edge.colorId)
-        let lineWidth: CGFloat = isHovered ? 3.4 : 2.4
+        let baseColor = SlotConnectionColor.color(for: edge.colorId)
+        let color = isHovered ? baseColor.opacity(0.85) : baseColor.opacity(0.58)
+        let lineWidth: CGFloat = isHovered ? 1.6 : 1.2
+        if isHovered {
+            context.stroke(path,
+                           with: .color(baseColor.opacity(0.18)),
+                           style: StrokeStyle(lineWidth: 5.0, lineCap: .round, lineJoin: .round))
+        }
         context.stroke(path, with: .color(color), style: StrokeStyle(lineWidth: lineWidth, lineCap: .round, lineJoin: .round))
-        // 起点保留小圆点，终点用方向箭头（output → input）表达数据流向。
-        context.fill(Path(ellipseIn: CGRect(x: start.x - 3, y: start.y - 3, width: 6, height: 6)), with: .color(color))
-        drawArrow(at: end, towards: edge.toPort, color: color, in: &context)
     }
 
     private func draw(_ drag: NodeCanvasDrag, in context: inout GraphicsContext) {
@@ -48,13 +52,18 @@ struct NodeConnectionCanvas: View {
         // v2.7.3: avoid drawing a long line from the canvas edge when frames are not ready.
         guard start.x.isFinite, start.y.isFinite, end.x.isFinite, end.y.isFinite else { return }
         let path = nodeConnectionPath(start: start, startPort: drag.fromPort, end: end, endPort: endPort)
-        // v2.9.20: 吸附命中时预览线加粗为实线并画出方向箭头，明确"这一放会连到哪"；
-        // 未吸附时用较细的虚线表示仍在自由拖拽。
+        // v2.16.3：拖线预览与成品线保持同一套轻量语言。命中目标时提亮，
+        // 悬空时用短疏虚线表达“还没落地”，避免旧版粗蓝箭头的工程图感。
         if snapped {
-            context.stroke(path, with: .color(.accentColor), style: StrokeStyle(lineWidth: 3.0, lineCap: .round, lineJoin: .round))
-            drawArrow(at: end, towards: endPort, color: .accentColor, in: &context)
+            context.stroke(path,
+                           with: .color(.white.opacity(0.86)),
+                           style: StrokeStyle(lineWidth: 1.6, lineCap: .round, lineJoin: .round))
+            context.fill(Path(ellipseIn: CGRect(x: end.x - 3.5, y: end.y - 3.5, width: 7, height: 7)),
+                         with: .color(.white.opacity(0.86)))
         } else {
-            context.stroke(path, with: .color(.accentColor.opacity(0.85)), style: StrokeStyle(lineWidth: 2.0, lineCap: .round, lineJoin: .round, dash: [6, 5]))
+            context.stroke(path,
+                           with: .color(.white.opacity(0.46)),
+                           style: StrokeStyle(lineWidth: 1.2, lineCap: .round, lineJoin: .round, dash: [3, 6]))
         }
     }
 

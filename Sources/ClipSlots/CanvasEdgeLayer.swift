@@ -132,13 +132,17 @@ private struct CanvasEdgeShapeView: View {
                 .contextMenu {
                     ForEach(roleOptions, id: \.self) { role in
                         Button {
+                            onSelect()
                             onSetRole(role)
                         } label: {
                             Label(role.displayName, systemImage: edge.role == role ? "checkmark" : role.symbolName)
                         }
                     }
                     Divider()
-                    Button(role: .destructive) { onDisconnect() } label: {
+                    Button(role: .destructive) {
+                        onSelect()
+                        onDisconnect()
+                    } label: {
                         Label("断开连接", systemImage: "scissors")
                     }
                 }

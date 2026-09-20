@@ -1,6 +1,6 @@
 import SwiftUI
 import Combine
-import ClipSlotsKit
+@preconcurrency import ClipSlotsKit
 
 /// 无限画布的状态容器（v2.11.7）。
 ///
@@ -57,6 +57,9 @@ final class CanvasStore: ObservableObject {
     private let storage: CanvasStorage
     private let projectStorage: CanvasProjectStorage
     private var saveTask: Task<Void, Never>?
+    /// 画布文档写入队列。防抖任务一旦把 IO 派出去就不能再取消，必须让所有写入串行，
+    /// 否则旧快照可能比新快照更晚写完，把用户刚拖好的位置覆盖回去。
+    private let saveQueue = DispatchQueue(label: "com.clipslots.canvas.save", qos: .utility)
     /// 防抖窗口。拖拽松手 / 缩放停止后 0.4s 落盘，避免高频写。
     private let saveDebounce: Duration = .milliseconds(400)
 
@@ -641,7 +644,38 @@ final class CanvasStore: ObservableObject {
 
     /// 槽位文本回写钩子。由画布视图在 onAppear 时注入（`CanvasStore` 刻意不认识 `SlotStoreObservable`，
     /// 否则这个轻量 store 又会被主 store 的 60 个 `@Published` 拖回全局重绘的老路上）。
-    var onRestoreSlotText: ((_ groupId: String, _ slot: Int, _ text: String) -> Void)?
+    private var onRestoreSlotText: ((_ groupId: String, _ slot: Int, _ text: String) -> Void)?
+    private var slotTextRestorerToken: UUID?
+    private var pendingSlotTextRestores: [PendingSlotTextRestore] = []
+
+    /// 安装槽位文本回写钩子。用 token 绑定视图实例，避免 SwiftUI 重建时旧视图的 `onDisappear`
+    /// 把新视图刚注入的 handler 清掉；如果离场期间发生过撤销/重做，则在新 handler 到位后补写。
+    func installSlotTextRestorer(id: UUID, _ restore: @escaping (_ groupId: String, _ slot: Int, _ text: String) -> Void) {
+        slotTextRestorerToken = id
+        onRestoreSlotText = restore
+        guard !pendingSlotTextRestores.isEmpty else { return }
+        let pending = pendingSlotTextRestores
+        pendingSlotTextRestores = []
+        for item in pending {
+            restore(item.groupId, item.slot, item.text)
+        }
+        slotRevision += 1
+    }
+
+    /// 只清理由同一个视图实例安装的回写钩子。旧实例晚到的 `onDisappear` 不得抹掉新实例。
+    func clearSlotTextRestorer(id: UUID) {
+        guard slotTextRestorerToken == id else { return }
+        slotTextRestorerToken = nil
+        onRestoreSlotText = nil
+    }
+
+    private func restoreSlotText(groupId: String, slot: Int, text: String) {
+        if let onRestoreSlotText {
+            onRestoreSlotText(groupId, slot, text)
+        } else {
+            pendingSlotTextRestores.append(PendingSlotTextRestore(groupId: groupId, slot: slot, text: text))
+        }
+    }
 
     /// 撤销一步。返回被撤销的条目（调用方用它做 toast 文案），没得撤时返回 nil。
     @discardableResult
@@ -649,7 +683,7 @@ final class CanvasStore: ObservableObject {
         guard let entry = history.undo() else { return nil }
         apply(nodes: entry.before, edges: entry.beforeEdges)
         if let edit = entry.slotEdit {
-            onRestoreSlotText?(edit.groupId, edit.slot, edit.before)
+            restoreSlotText(groupId: edit.groupId, slot: edit.slot, text: edit.before)
         }
         return entry
     }
@@ -659,7 +693,7 @@ final class CanvasStore: ObservableObject {
         guard let entry = history.redo() else { return nil }
         apply(nodes: entry.after, edges: entry.afterEdges)
         if let edit = entry.slotEdit {
-            onRestoreSlotText?(edit.groupId, edit.slot, edit.after)
+            restoreSlotText(groupId: edit.groupId, slot: edit.slot, text: edit.after)
         }
         return entry
     }
@@ -780,10 +814,10 @@ final class CanvasStore: ObservableObject {
             // 刻意用 GCD 而不是 `Task.detached`：`CanvasStorage` 是带 NSLock 的 class（非 Sendable），
             // 塞进 detached task 会吃一串并发检查警告，而这里根本不需要结构化并发的取消传播 ——
             // 取消已经由外层 `saveTask?.cancel()` 承担。
-            DispatchQueue.global(qos: .utility).async {
+            guard let self else { return }
+            self.saveQueue.async {
                 storage.save(snapshot, projectId: projectId)
             }
-            _ = self
         }
     }
 
@@ -795,7 +829,9 @@ final class CanvasStore: ObservableObject {
                                       panX: pan.width,
                                       panY: pan.height,
                                       zoom: zoom)
-        storage.save(snapshot, projectId: activeProjectId)
+        _ = saveQueue.sync {
+            storage.save(snapshot, projectId: activeProjectId)
+        }
     }
 
     // MARK: - 常量
@@ -816,6 +852,12 @@ final class CanvasStore: ObservableObject {
 
     /// 背景网格基准步长。
     static let gridBase: CGFloat = 24
+}
+
+private struct PendingSlotTextRestore {
+    let groupId: String
+    let slot: Int
+    let text: String
 }
 
 // MARK: - 摆位结果

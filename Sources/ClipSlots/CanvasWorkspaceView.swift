@@ -74,6 +74,8 @@ struct CanvasWorkspaceView: View {
     /// 滚轮 / 中键路由器。**必须是 `@StateObject`**：事件监听器的寿命要跨越视图重建
     /// （实测本项目的画布子树每秒会被重建一次，监听器若绑在 NSView 挂载周期上会反复装卸并丢事件）。
     @StateObject private var inputRouter = CanvasInputRouter()
+    /// 绑定本视图安装到 `CanvasStore` 的闭包，避免旧视图晚到的 onDisappear 清掉新视图的 handler。
+    @State private var slotTextRestorerToken = UUID()
 
     @State private var pinchBasePan: CGSize? = nil
     @State private var pinchBaseZoom: CGFloat = 1
@@ -241,7 +243,7 @@ struct CanvasWorkspaceView: View {
 
                 // 撤销/重做要能把槽位主体文本一起回滚。store 层不认识 `SlotStoreObservable`
                 // （那会把画布重新绑回全局重绘的老路），所以由视图层把这条写回能力注入进去。
-                canvas.onRestoreSlotText = { groupId, slot, text in
+                canvas.installSlotTextRestorer(id: slotTextRestorerToken) { groupId, slot, text in
                     _ = store.writeCanvasSlotText(groupId: groupId, slot: slot, text: text)
                 }
                 // 历史条目 / toast 里的节点名。hotfix20 起节点不再缓存 Label 与正文，
@@ -278,7 +280,7 @@ struct CanvasWorkspaceView: View {
                 // 必须撤销登记：留着它，切回编辑模式后 Cmd+1 会被一个已经下台的画布吃掉，
                 // 表现是"热键静默失效"（既没粘贴，也没有任何提示）。
                 CanvasCommandBridge.shared.slotCommandHandler = nil
-                canvas.onRestoreSlotText = nil
+                canvas.clearSlotTextRestorer(id: slotTextRestorerToken)
                 canvas.slotTitleProvider = nil
                 canvas.flushSave()
             }
