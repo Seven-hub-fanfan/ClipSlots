@@ -29,6 +29,22 @@ public enum CanvasNodeDeletion {
     ///   两个都为空 = 可以直接删。
     public static func brokenLinks(deleting ids: Set<String>,
                                    nodes: [CanvasNode]) -> (referrers: Set<String>, referenced: Set<String>) {
+        brokenLinks(deleting: ids, nodes: nodes, edges: [])
+    }
+
+    /// 同上，但把 v2.12.0 的**连线**一起算进来。
+    ///
+    /// 两个来源取并集而不是二选一：连线是新的真相，但 `parentNodeId` 仍然可能存在没有对应边的情况
+    /// （用户手动删掉了那条线，血缘字段还留着 —— 那时它已经不是"入参引用"了）。所以判定标准统一成
+    /// **"删掉它会让别的节点少一个输入"**：
+    ///   - 存在 `edge.from ∈ ids` 且 `edge.to ∉ ids` → `to` 会少一个输入；
+    ///   - 存在 `node.parentNodeId ∈ ids` 且该节点不在删除批次里 → 同上（老数据兜底）。
+    ///
+    /// 反方向（`edge.to ∈ ids`）**不算**：下游被删只是上游少了个消费者，上游自己的内容一点没变，
+    /// 为此弹确认纯属噪声（这条规矩从初版就立着：无脑确认是最招人烦的写法）。
+    public static func brokenLinks(deleting ids: Set<String>,
+                                   nodes: [CanvasNode],
+                                   edges: [CanvasEdge]) -> (referrers: Set<String>, referenced: Set<String>) {
         guard !ids.isEmpty else { return ([], []) }
         var referrers: Set<String> = []
         var referenced: Set<String> = []
@@ -39,12 +55,19 @@ public enum CanvasNodeDeletion {
             referrers.insert(node.id)
             referenced.insert(parent)
         }
+        for edge in edges {
+            guard ids.contains(edge.fromNodeId), !ids.contains(edge.toNodeId) else { continue }
+            referrers.insert(edge.toNodeId)
+            referenced.insert(edge.fromNodeId)
+        }
         return (referrers, referenced)
     }
 
     /// 删除前是否需要弹确认。
-    public static func needsConfirm(deleting ids: Set<String>, nodes: [CanvasNode]) -> Bool {
-        !brokenLinks(deleting: ids, nodes: nodes).referrers.isEmpty
+    public static func needsConfirm(deleting ids: Set<String>,
+                                   nodes: [CanvasNode],
+                                   edges: [CanvasEdge] = []) -> Bool {
+        !brokenLinks(deleting: ids, nodes: nodes, edges: edges).referrers.isEmpty
     }
 
     /// Alert 正文。文案主体按用户给的原话，只在末尾补上"几个"这种量化信息 ——

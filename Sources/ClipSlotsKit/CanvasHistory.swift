@@ -48,6 +48,15 @@ public struct CanvasHistoryEntry: Identifiable, Equatable {
         /// 字号调整也吐出来。
         case paramNode
 
+        /// 连了一条线（v2.12.0）。
+        ///
+        /// 连线 / 断线 / 改角色三件事分成三个 kind，不合并成一个 `edge`：历史面板的价值全在
+        /// "我刚才干了什么"这一行字上，三个动作的后果截然不同（连线会让下游多一个输入、断线会让它
+        /// 少一个、改角色只改怎么用），写成同一个"调整连线"等于让用户自己去画布上比对。
+        case connect
+        case disconnect
+        case edgeRole
+
         /// 面板里显示的动作名。
         public var title: String {
             switch self {
@@ -60,6 +69,9 @@ public struct CanvasHistoryEntry: Identifiable, Equatable {
             case .bindSlot: return "填入槽位"
             case .styleNode: return "调整字体"
             case .paramNode: return "调整出图参数"
+            case .connect: return "连接节点"
+            case .disconnect: return "断开连接"
+            case .edgeRole: return "调整连线用途"
             }
         }
 
@@ -74,6 +86,9 @@ public struct CanvasHistoryEntry: Identifiable, Equatable {
             case .bindSlot: return "tray.and.arrow.down"
             case .styleNode: return "textformat"
             case .paramNode: return "slider.horizontal.3"
+            case .connect: return "point.topleft.down.curvedto.point.bottomright.up"
+            case .disconnect: return "scissors"
+            case .edgeRole: return "arrow.triangle.branch"
             }
         }
     }
@@ -101,6 +116,15 @@ public struct CanvasHistoryEntry: Identifiable, Equatable {
     /// 操作前后的完整节点快照。
     public let before: [CanvasNode]
     public let after: [CanvasNode]
+    /// 操作前后的完整连线快照（v2.12.0）。
+    ///
+    /// 和节点走同一条"全量快照"的路，理由也一样（见类型注释）：连线的逆运算看着简单（连了就断掉），
+    /// 但"删一个节点顺带清掉的 3 条线"「改绑节点时被重映射的线」这些都得各写一份逆运算 ——
+    /// 而这类错误的症状是撤销后画布悄悄少一条线，用户不会去核对。
+    ///
+    /// 默认空数组：v2.11.x 时代写下的历史条目不带这两个字段，回放时"空 → 空"是正确的行为。
+    public let beforeEdges: [CanvasEdge]
+    public let afterEdges: [CanvasEdge]
     public let slotEdit: SlotTextEdit?
 
     public init(id: String = UUID().uuidString,
@@ -109,6 +133,8 @@ public struct CanvasHistoryEntry: Identifiable, Equatable {
                 at: Date = Date(),
                 before: [CanvasNode] = [],
                 after: [CanvasNode] = [],
+                beforeEdges: [CanvasEdge] = [],
+                afterEdges: [CanvasEdge] = [],
                 slotEdit: SlotTextEdit? = nil) {
         self.id = id
         self.kind = kind
@@ -116,6 +142,8 @@ public struct CanvasHistoryEntry: Identifiable, Equatable {
         self.at = at
         self.before = before
         self.after = after
+        self.beforeEdges = beforeEdges
+        self.afterEdges = afterEdges
         self.slotEdit = slotEdit
     }
 

@@ -21,7 +21,18 @@ final class CanvasStore: ObservableObject {
     // MARK: - 发布状态
 
     @Published private(set) var nodes: [CanvasNode] = []
+    /// 节点之间的连线（v2.12.0）。
+    ///
+    /// 与 `nodes` 同级发布：连线是**内容**（决定生成入参），不是装饰，拖动一个节点时连线要跟着动
+    /// —— 但那条通路走的是 View 侧 `dragOffset`（与节点自身相同的办法），不经过这个数组。
+    /// 这里只在"真的增删改了一条线"时才变。
+    @Published private(set) var edges: [CanvasEdge] = []
     @Published var selectedNodeIds: Set<String> = []
+    /// 当前选中的连线（一次只选一条）。
+    ///
+    /// 刻意**不与 `selectedNodeIds` 合并成一个"选中对象"集合**：两者能做的操作几乎不重叠
+    /// （连线没有移动/改参数/生成，节点没有角色），混在一起会让每个操作入口都得先判类型。
+    @Published var selectedEdgeId: String?
     @Published var activeTool: CanvasTool = .select
     /// 左侧槽位库面板是否展开。
     @Published var isLibraryExpanded: Bool = true
@@ -52,6 +63,9 @@ final class CanvasStore: ObservableObject {
         self.storage = storage
         let doc = storage.load()
         self.nodes = doc.nodes
+        // 文档解码时已经做过规整与 `parentNodeId` 迁移（见 `CanvasDocument.init(from:)`），
+        // 这里直接取用；在 store 里再规整一遍只会掩盖那边出的问题。
+        self.edges = doc.edges
         self.pan = doc.pan
         self.zoom = CanvasGeometry.clampZoom(doc.zoom)
     }
@@ -118,6 +132,19 @@ final class CanvasStore: ObservableObject {
         commit(.addNode, detail: name) {
             nodes.append(node)
             selectedNodeIds = [node.id]
+            // v2.12.0：上游不再只写进 `parentNodeId`，同时落一条真实连线。
+            //
+            // 两个字段都写是刻意的：`parentNodeId` 仍然是"这个节点是从谁身上长出来的"这一 UI 事实
+            // （降级回 v2.11.x 时血缘还在），连线才是参与生成的那份真相。迁移函数会判重，不会因此
+            // 每次打开画布都多一条。
+            if let parentNodeId, nodes.contains(where: { $0.id == parentNodeId }) {
+                if CanvasEdgeGraph.canConnect(from: parentNodeId,
+                                              to: node.id,
+                                              edges: edges,
+                                              nodeIds: Set(nodes.map(\.id))) == nil {
+                    edges.append(CanvasEdge(fromNodeId: parentNodeId, toNodeId: node.id, role: .auto))
+                }
+            }
         }
         return .placed(node: node, name: name)
     }
@@ -189,6 +216,12 @@ final class CanvasStore: ObservableObject {
         commit(.removeNode, detail: detail) {
             nodes.removeAll { ids.contains($0.id) }
             selectedNodeIds.subtract(ids)
+            // 连线跟着节点走。留下野线的症状是画布上有一条连到虚空的曲线，而它长得跟正常线一样 ——
+            // 取入参时那条线又什么都拿不到，于是"生成结果莫名少了一张参考图"。
+            edges = CanvasEdgeGraph.removing(nodeIds: ids, from: edges)
+            if let selected = selectedEdgeId, !edges.contains(where: { $0.id == selected }) {
+                selectedEdgeId = nil
+            }
         }
     }
 
@@ -206,6 +239,69 @@ final class CanvasStore: ObservableObject {
         mutate(&nodes[idx])
         nodes[idx].updatedAt = Date()
         scheduleSave()
+    }
+
+    // MARK: - 连线（v2.12.0）
+
+    /// 连一条线。
+    ///
+    /// 返回值区分"连上了"与"为什么连不上"，而不是返回 `Bool` —— 用户拖了一条线却什么都没发生时，
+    /// 唯一有用的信息就是原因（是环？是重复？），调用方拿它做 toast。
+    @discardableResult
+    func connect(from: String, to: String, role: CanvasEdgeRole = .auto) -> CanvasEdgeGraph.Rejection? {
+        let ids = Set(nodes.map(\.id))
+        if let rejection = CanvasEdgeGraph.canConnect(from: from, to: to, edges: edges, nodeIds: ids) {
+            return rejection
+        }
+        let detail = connectionDetail(from: from, to: to)
+        let edge = CanvasEdge(fromNodeId: from, toNodeId: to, role: role)
+        commit(.connect, detail: detail) {
+            edges.append(edge)
+            selectedEdgeId = edge.id
+        }
+        return nil
+    }
+
+    /// 断开一条线。
+    @discardableResult
+    func disconnect(edgeId: String) -> Bool {
+        guard let edge = edges.first(where: { $0.id == edgeId }) else { return false }
+        let detail = connectionDetail(from: edge.fromNodeId, to: edge.toNodeId)
+        commit(.disconnect, detail: detail) {
+            edges.removeAll { $0.id == edgeId }
+            if selectedEdgeId == edgeId { selectedEdgeId = nil }
+        }
+        return true
+    }
+
+    /// 改一条线的用途（首帧 / 尾帧 / 参考图 / 提示词 / 自动）。
+    func setEdgeRole(edgeId: String, role: CanvasEdgeRole) {
+        guard let idx = edges.firstIndex(where: { $0.id == edgeId }), edges[idx].role != role else { return }
+        let detail = "\(connectionDetail(from: edges[idx].fromNodeId, to: edges[idx].toNodeId)) · \(role.displayName)"
+        commit(.edgeRole, detail: detail) {
+            edges[idx].role = role
+        }
+    }
+
+    func edge(id: String) -> CanvasEdge? {
+        edges.first { $0.id == id }
+    }
+
+    /// 指向某节点的入边（已按生成语义定序）。
+    func incomingEdges(of nodeId: String) -> [CanvasEdge] {
+        CanvasEdgeGraph.incoming(of: nodeId, edges: edges)
+    }
+
+    /// 从某节点出发的出边。
+    func outgoingEdges(of nodeId: String) -> [CanvasEdge] {
+        CanvasEdgeGraph.outgoing(of: nodeId, edges: edges)
+    }
+
+    /// 历史条目 / toast 用的「A → B」描述。
+    private func connectionDetail(from: String, to: String) -> String {
+        let source = node(id: from).map { nodeTitle($0) } ?? "节点"
+        let target = node(id: to).map { nodeTitle($0) } ?? "节点"
+        return "\(source) → \(target)"
     }
 
     // MARK: - 节点排版（v2.11.7 hotfix19）
@@ -338,6 +434,9 @@ final class CanvasStore: ObservableObject {
             for i in nodes.indices where nodes[i].parentNodeId == id {
                 nodes[i].parentNodeId = newId
             }
+            // 连线的两端同理（v2.12.0）。这里是 hotfix 注释里列的第二个坑在连线时代的翻版：
+            // 不改就是"把节点归档到另一个槽位后，它的线全断了"，而断链事后无法还原。
+            edges = CanvasEdgeGraph.remapping(nodeId: id, to: newId, edges: edges)
             if selectedNodeIds.contains(id) {
                 selectedNodeIds.remove(id)
                 selectedNodeIds.insert(newId)
@@ -380,7 +479,7 @@ final class CanvasStore: ObservableObject {
     @discardableResult
     func undo() -> CanvasHistoryEntry? {
         guard let entry = history.undo() else { return nil }
-        apply(nodes: entry.before)
+        apply(nodes: entry.before, edges: entry.beforeEdges)
         if let edit = entry.slotEdit {
             onRestoreSlotText?(edit.groupId, edit.slot, edit.before)
         }
@@ -390,7 +489,7 @@ final class CanvasStore: ObservableObject {
     @discardableResult
     func redo() -> CanvasHistoryEntry? {
         guard let entry = history.redo() else { return nil }
-        apply(nodes: entry.after)
+        apply(nodes: entry.after, edges: entry.afterEdges)
         if let edit = entry.slotEdit {
             onRestoreSlotText?(edit.groupId, edit.slot, edit.after)
         }
@@ -407,27 +506,40 @@ final class CanvasStore: ObservableObject {
         while history.cursor < clamped { if redo() == nil { break } }
     }
 
-    private func apply(nodes newNodes: [CanvasNode]) {
+    private func apply(nodes newNodes: [CanvasNode], edges newEdges: [CanvasEdge]) {
         nodes = newNodes
         // 选中集合里可能有已经不存在的 id（撤销"新建"之后），留着会让工具栏的"删除选中"对着空气生效。
         let alive = Set(newNodes.map(\.id))
         selectedNodeIds = selectedNodeIds.intersection(alive)
+        // 连线快照里可能有指向已不存在节点的线（老条目不带 edges 时是空数组，那是对的；
+        // 带了也可能与节点快照错位）。规整一次，宁可少一条线也不留野线。
+        edges = CanvasEdgeGraph.normalized(newEdges, nodeIds: alive)
+        if let selected = selectedEdgeId, !edges.contains(where: { $0.id == selected }) {
+            selectedEdgeId = nil
+        }
         slotRevision += 1
         scheduleSave()
     }
 
     /// 写操作的唯一入口：跑一遍变更、记一步撤销、落盘。
+    ///
+    /// v2.12.0 起快照里**同时**带节点与连线。两者必须一起进同一条条目：删一个节点会顺带清掉它的线，
+    /// 若分成两条历史条目，用户 Cmd+Z 一次只回来节点、线还是没了（而且第二次 Cmd+Z 才补回来 ——
+    /// 中间那一帧的画布是从未存在过的状态）。
     private func commit(_ kind: CanvasHistoryEntry.Kind,
                         detail: String,
                         slotEdit: CanvasHistoryEntry.SlotTextEdit? = nil,
                         _ mutate: () -> Void) {
         let before = nodes
+        let beforeEdges = edges
         mutate()
-        guard nodes != before || slotEdit != nil else { return }
+        guard nodes != before || edges != beforeEdges || slotEdit != nil else { return }
         history.push(CanvasHistoryEntry(kind: kind,
                                         detail: detail,
                                         before: before,
                                         after: nodes,
+                                        beforeEdges: beforeEdges,
+                                        afterEdges: edges,
                                         slotEdit: slotEdit))
         slotRevision += 1
         scheduleSave()
@@ -444,8 +556,9 @@ final class CanvasStore: ObservableObject {
     }
 
     func clearSelection() {
-        guard !selectedNodeIds.isEmpty else { return }
-        selectedNodeIds = []
+        if !selectedNodeIds.isEmpty { selectedNodeIds = [] }
+        // 连线选中一并清掉：两种选中互斥（Delete 键必须有唯一答案），而"清空"只应该有一个入口。
+        if selectedEdgeId != nil { selectedEdgeId = nil }
     }
 
     /// 框选：命中判定在画布空间做，避免受缩放影响。
@@ -485,6 +598,7 @@ final class CanvasStore: ObservableObject {
     private func scheduleSave() {
         saveTask?.cancel()
         let snapshot = CanvasDocument(nodes: nodes,
+                                      edges: edges,
                                       panX: pan.width,
                                       panY: pan.height,
                                       zoom: zoom)
@@ -508,6 +622,7 @@ final class CanvasStore: ObservableObject {
     func flushSave() {
         saveTask?.cancel()
         let snapshot = CanvasDocument(nodes: nodes,
+                                      edges: edges,
                                       panX: pan.width,
                                       panY: pan.height,
                                       zoom: zoom)

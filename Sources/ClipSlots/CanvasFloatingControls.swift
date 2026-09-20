@@ -71,7 +71,7 @@ struct CanvasGenerateButton: View {
         .onHover { hovering in
             withAnimation(Anim.interactive) { isHovering = hovering }
         }
-        .help("生成（开发中）")
+        .help("生成选中的图像 / 视频节点（也可以直接用节点上的「生成」）")
     }
 }
 

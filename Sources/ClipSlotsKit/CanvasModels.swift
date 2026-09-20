@@ -489,6 +489,12 @@ public struct CanvasDocument: Codable, Equatable {
     public var schemaVersion: Int
     public var nodes: [CanvasNode]
 
+    /// 节点之间的连线（v2.12.0 新增）。
+    ///
+    /// 老文档没有这个字段，解码时由 `parentNodeId` 迁移补齐（见 `init(from:)`）。新字段用默认值
+    /// 承接兼容、不递增 `schemaVersion`，遵循本文件开头立的规矩。
+    public var edges: [CanvasEdge]
+
     /// 视口。存下来是为了下次进画布还在原处 —— 每次都回到原点会让「我刚才在看哪」丢失。
     public var panX: CGFloat
     public var panY: CGFloat
@@ -498,17 +504,20 @@ public struct CanvasDocument: Codable, Equatable {
 
     public static let empty = CanvasDocument(schemaVersion: CanvasDocument.currentSchemaVersion,
                                             nodes: [],
+                                            edges: [],
                                             panX: 0, panY: 0, zoom: 1,
                                             updatedAt: Date())
 
     public init(schemaVersion: Int = CanvasDocument.currentSchemaVersion,
                 nodes: [CanvasNode] = [],
+                edges: [CanvasEdge] = [],
                 panX: CGFloat = 0,
                 panY: CGFloat = 0,
                 zoom: CGFloat = 1,
                 updatedAt: Date = Date()) {
         self.schemaVersion = schemaVersion
         self.nodes = nodes
+        self.edges = edges
         self.panX = panX
         self.panY = panY
         self.zoom = zoom
@@ -518,7 +527,7 @@ public struct CanvasDocument: Codable, Equatable {
     // MARK: - Codable（逐节点容错 + 同槽去重）
 
     private enum CodingKeys: String, CodingKey {
-        case schemaVersion, nodes, panX, panY, zoom, updatedAt
+        case schemaVersion, nodes, edges, panX, panY, zoom, updatedAt
     }
 
     /// 单个节点的**容错解码包装**。
@@ -534,6 +543,14 @@ public struct CanvasDocument: Codable, Equatable {
         }
     }
 
+    /// 单条连线的容错解码包装。理由同 `LenientNode`。
+    private struct LenientEdge: Decodable {
+        let edge: CanvasEdge?
+        init(from decoder: Decoder) throws {
+            edge = try? CanvasEdge(from: decoder)
+        }
+    }
+
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         schemaVersion = try c.decodeIfPresent(Int.self, forKey: .schemaVersion)
@@ -541,10 +558,30 @@ public struct CanvasDocument: Codable, Equatable {
         let decoded = (try c.decodeIfPresent([LenientNode].self, forKey: .nodes) ?? [])
             .compactMap(\.node)
         nodes = CanvasDocument.dedupedBySlot(decoded)
+        // 连线必须在节点定稿**之后**再规整：野线（端点指向被去重/被跳过的节点）要在这里被丢掉，
+        // 否则画布上会留一条连到虚空的线，而它在屏幕上看起来跟正常线一模一样。
+        let decodedEdges = (try c.decodeIfPresent([LenientEdge].self, forKey: .edges) ?? [])
+            .compactMap(\.edge)
+        edges = CanvasEdgeGraph.migratedFromParentLinks(
+            nodes: nodes,
+            edges: CanvasEdgeGraph.normalized(decodedEdges, nodeIds: Set(nodes.map(\.id))))
         panX = try c.decodeIfPresent(CGFloat.self, forKey: .panX) ?? 0
         panY = try c.decodeIfPresent(CGFloat.self, forKey: .panY) ?? 0
         zoom = try c.decodeIfPresent(CGFloat.self, forKey: .zoom) ?? 1
         updatedAt = try c.decodeIfPresent(Date.self, forKey: .updatedAt) ?? Date()
+    }
+
+    /// 编码。空连线集合不写 —— 与 `CanvasNode.outputAttachmentIds` 同一条规矩：让"从没连过线"
+    /// 在文件里长得和 v2.11.x 一样，降级回老版本时不会多出一个它不认识的空数组。
+    public func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(schemaVersion, forKey: .schemaVersion)
+        try c.encode(nodes, forKey: .nodes)
+        if !edges.isEmpty { try c.encode(edges, forKey: .edges) }
+        try c.encode(panX, forKey: .panX)
+        try c.encode(panY, forKey: .panY)
+        try c.encode(zoom, forKey: .zoom)
+        try c.encode(updatedAt, forKey: .updatedAt)
     }
 
     /// 同一槽位只保留**第一个**摆位。

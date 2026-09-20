@@ -71,9 +71,23 @@ extension CanvasWorkspaceView {
             return
         }
 
-        let prompt = store.canvasSlotText(groupId: node.groupId, slot: node.slot) ?? ""
+        // ★ v2.12.0：入参先过一遍连线
+        //
+        // v2.11.x 的这条链路只读本节点槽位 —— 于是画布上那些连线纯属装饰：把文本节点连到出图节点，
+        // 出来的图跟没连一样。这里是"连线真的有数据流"的落点：上游文本拼进提示词，上游产物按角色
+        // 占住首帧 / 尾帧 / 参考图位。
+        let edgeInputs = resolveEdgeInputs(for: node)
+        let ownPrompt = store.canvasSlotText(groupId: node.groupId, slot: node.slot) ?? ""
+        let prompt = CanvasEdgeInputs.mergedPrompt(own: ownPrompt, upstream: edgeInputs.promptFragments)
         guard !prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-            store.transientUI.showToast(CrateRequestError.emptyPrompt.userMessage)
+            // 连了线却凑不出提示词，最常见的原因是上游还没跑完。报"提示词为空"会把用户引到
+            // 输入框去找一个不存在的问题 —— 而他要做的是先点上游那个节点。
+            if edgeInputs.pendingUpstreamCount > 0 {
+                store.transientUI.showToast("有 \(edgeInputs.pendingUpstreamCount) 个上游节点还没出结果，先把它们跑完",
+                                            duration: 2.8)
+            } else {
+                store.transientUI.showToast(CrateRequestError.emptyPrompt.userMessage)
+            }
             return
         }
         guard node.count == 1 else {
@@ -85,7 +99,7 @@ extension CanvasWorkspaceView {
         }
 
         if node.kind == .video {
-            startVideoGeneration(node, prompt: prompt, reusingSeed: reusingSeed)
+            startVideoGeneration(node, prompt: prompt, edgeInputs: edgeInputs, reusingSeed: reusingSeed)
             return
         }
 
@@ -93,7 +107,9 @@ extension CanvasWorkspaceView {
                                        prompt: prompt,
                                        ratio: node.ratio,
                                        count: node.count,
-                                       imagePaths: inputImagePaths(for: node),
+                                       imagePaths: CanvasEdgeInputs.imageReferences(
+                                           edgeInputs: edgeInputs,
+                                           slotImages: inputImagePaths(for: node)),
                                        seed: reusingSeed ? node.seed : nil)
         let nodeId = node.id
         let groupId = node.groupId
@@ -179,23 +195,35 @@ extension CanvasWorkspaceView {
     /// 第 4 点依赖模型目录。目录还没加载好（首次打开画布、或 `model list` 失败）时的选择是
     /// **照用户存的值传**：目录只是"能不能传"的最优判据，不是必要条件，而把用户选的 4k 因为
     /// 一次元数据请求失败就悄悄丢掉，比让 CLI 报一次明确的错更糟。服务层还有一层按报错重试的退路。
-    private func startVideoGeneration(_ node: CanvasNode, prompt: String, reusingSeed: Bool) {
+    private func startVideoGeneration(_ node: CanvasNode,
+                                      prompt: String,
+                                      edgeInputs: CanvasEdgeInputs.Resolved,
+                                      reusingSeed: Bool) {
         // 直接读单例而不是挂 `@ObservedObject`：这是"点生成这一刻"的一次性查表，不需要反应式
         // 刷新（视图里没有任何东西显示它）。把它挂成 ObservedObject 反而会让整个画布跟着模型
         // 目录的加载状态重绘一次。
         let info = CrateModelCatalogStore.shared.videoModels.first { $0.id == node.model }
-        if let info, info.requiresImageInput, inputImagePaths(for: node).isEmpty {
+        let slotImages = inputImagePaths(for: node)
+
+        // 图位分配改走 `CanvasEdgeInputs.videoFrames`（v2.12.0）：**连线优先、槽位补位**。
+        // 不能直接把两边的图拼成数组喂给 `assignVideoFrames` —— 那个函数按**位置**分配
+        // （第 1 张=首帧、第 2 张=尾帧），一条只设了"尾帧"的连线会被当成首帧，而那正是用户
+        // 唯一明确指定过的位置。
+        let frames: (first: String?, last: String?, references: [String])
+        if let info {
+            frames = CanvasEdgeInputs.videoFrames(edgeInputs: edgeInputs, slotImages: slotImages, model: info)
+        } else {
+            // 目录缺席时只敢认首帧：尾帧 / 参考图是"模型声明了才有"的角色，瞎传会被拒。
+            frames = (edgeInputs.firstFramePath ?? slotImages.first, nil, [])
+        }
+
+        // 「必须有输入图」的门禁按**最终图位**判，不按槽位附件判：一个纯靠上游喂图的节点槽位里
+        // 一张图都没有，只看槽位会把它拦在门口——而它其实什么都不缺。
+        if let info, info.requiresImageInput,
+           frames.first == nil, frames.last == nil, frames.references.isEmpty {
             store.transientUI.showToast(CrateRequestError.missingRequiredImage(model: node.model).userMessage,
                                         duration: 2.8)
             return
-        }
-
-        let frames: (first: String?, last: String?, references: [String])
-        if let info {
-            frames = CrateModelCatalog.assignVideoFrames(imagePaths: inputImagePaths(for: node), model: info)
-        } else {
-            // 目录缺席时只敢认首帧：尾帧 / 参考图是"模型声明了才有"的角色，瞎传会被拒。
-            frames = (inputImagePaths(for: node).first, nil, [])
         }
 
         let request = CrateVideoRequest(
@@ -303,6 +331,45 @@ extension CanvasWorkspaceView {
             // 终态由 startGeneration 的主流程统一落（要先把产物下载并写进槽位，才算真成功）。
             break
         }
+    }
+
+    /// 入边 → 生成入参（v2.12.0）。
+    ///
+    /// 规则本体在 `CanvasEdgeInputs.resolve`（Kit 层，带 smoke 覆盖）。这里只干一件事：把每个上游
+    /// 节点的**正文**（槽位里读）与**产物路径**（节点状态里读）凑成一份快照。这两样一个属于用户
+    /// 的槽位数据、一个属于画布文档，而这里是唯一同时持有两者的地方。
+    ///
+    /// 产物路径会先 `fileExists` 过一遍：节点状态是落盘的，用户在访达里把产物删掉之后状态仍然是
+    /// `.succeeded`。不检查就会把一条死路径当首帧传给 CLI，换来一次"文件不存在"的整体失败——
+    /// 而正确的行为是把它算成"上游还没出结果"。
+    private func resolveEdgeInputs(for node: CanvasNode) -> CanvasEdgeInputs.Resolved {
+        let incoming = canvas.incomingEdges(of: node.id)
+        guard !incoming.isEmpty else { return CanvasEdgeInputs.Resolved() }
+
+        var upstreams: [String: CanvasEdgeInputs.Upstream] = [:]
+        for edge in incoming {
+            // 同一对节点只会有一条边（`CanvasEdgeGraph` 拦重复），这里的去重是防御性的：
+            // 同一个上游被查两次槽位正文没有收益。
+            guard upstreams[edge.fromNodeId] == nil,
+                  let up = canvas.node(id: edge.fromNodeId) else { continue }
+            var assetPath: String? = nil
+            if case .succeeded(let path) = up.state, !path.isEmpty,
+               FileManager.default.fileExists(atPath: path) {
+                assetPath = path
+            }
+            upstreams[edge.fromNodeId] = CanvasEdgeInputs.Upstream(
+                nodeId: up.id,
+                kind: up.kind,
+                text: store.canvasSlotText(groupId: up.groupId, slot: up.slot) ?? "",
+                assetPath: assetPath)
+        }
+
+        let resolved = CanvasEdgeInputs.resolve(incoming: incoming,
+                                                upstreams: upstreams,
+                                                downstreamKind: node.kind)
+        // 这条日志是"连线到底喂进去了什么"的唯一可观测点：喂错了 UI 上看不出异常，只是出图不对。
+        NSLog("[ClipSlots][crate] node=\(node.id) 上游 \(incoming.count) 条 → 文本 \(resolved.promptFragments.count) 段 / 图 \(resolved.assetPaths.count) 张 / 待产 \(resolved.pendingUpstreamCount)")
+        return resolved
     }
 
     /// 入参图片：槽位里 image 型附件的本地路径，**剔除本节点自己的历史产物**。

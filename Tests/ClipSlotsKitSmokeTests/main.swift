@@ -7541,4 +7541,246 @@ do {
             "★CRATE-VID-66 视频默认 16:9 而不是 1:1：方图视频是异类，而 7 个模型都支持 16:9")
 }
 
+// MARK: - CANVAS-EDGE：连线是真的（v2.12.0 第一档）
+//
+// 用户原话：「我感觉现在让我去用画布很蹩脚」。审下来根因是 v2.11.x 的 `parentNodeId` 只是一个
+// **看不见也不参与生成**的字段 —— 画布上把文本节点摆在出图节点上面，连了也白连。v2.12.0 把它换成
+// 真实的 `edges`，于是这一层的每条规则都直接决定「这次出图到底喂了什么进去」。
+//
+// 为什么必须靠断言而不靠手测：喂错了 **UI 上看不出异常**，只是出的图不对。用户不会报 bug，
+// 只会觉得「这模型不听话」，然后再也不用画布了 —— 这正是这次要修的那个感受。
+do {
+    var a = canvasNode(slot: 1)
+    var b = canvasNode(slot: 2)
+    var c = canvasNode(slot: 3)
+    a.kind = .text
+    b.kind = .image
+    c.kind = .video
+    let nodeIds: Set<String> = [a.id, b.id, c.id]
+
+    // ---- 编解码（画布文档是派生资产，但连线是用户手画的关系，丢了要重画）----
+    let e0 = CanvasEdge(fromNodeId: a.id, toNodeId: b.id, role: .prompt)
+    let blob = try! JSONEncoder().encode(e0)
+    let back = try! JSONDecoder().decode(CanvasEdge.self, from: blob)
+    t.equal(back.fromNodeId, a.id, "CANVAS-EDGE-1 连线编解码保住上游")
+    t.equal(back.role, CanvasEdgeRole.prompt, "CANVAS-EDGE-2 角色编解码")
+
+    // 缺字段的旧/脏数据不能让整张画布解不开。
+    let partial = #"{"fromNodeId":"x","toNodeId":"y"}"#.data(using: .utf8)!
+    if let lenient = try? JSONDecoder().decode(CanvasEdge.self, from: partial) {
+        t.check(!lenient.id.isEmpty, "★CANVAS-EDGE-3 缺 id 时补一个 UUID，而不是让整张画布解码失败")
+        t.equal(lenient.role, CanvasEdgeRole.auto, "CANVAS-EDGE-4 缺角色 → auto")
+    } else {
+        t.check(false, "★CANVAS-EDGE-3 缺字段的连线必须能容错解码（画布损坏即全丢，代价是用户手画的关系）")
+    }
+
+    // ---- 连接合法性 ----
+    t.check(CanvasEdgeGraph.canConnect(from: a.id, to: b.id, edges: [], nodeIds: nodeIds) == nil,
+            "CANVAS-EDGE-5 正常连接放行")
+    t.check(CanvasEdgeGraph.canConnect(from: a.id, to: a.id, edges: [], nodeIds: nodeIds) != nil,
+            "★CANVAS-EDGE-6 自环要拦：自己喂自己会让解析时读到「上一次的产物」，语义上无法定义")
+    let existing = [CanvasEdge(fromNodeId: a.id, toNodeId: b.id)]
+    t.check(CanvasEdgeGraph.canConnect(from: a.id, to: b.id, edges: existing, nodeIds: nodeIds) != nil,
+            "★CANVAS-EDGE-7 重复连接要拦：同一对节点两条线会让同一段文本被拼两遍")
+    t.check(CanvasEdgeGraph.canConnect(from: b.id, to: a.id, edges: existing, nodeIds: nodeIds) != nil,
+            "★CANVAS-EDGE-8 反向成环要拦：a→b 已存在时再连 b→a，解析会无限递归")
+    t.check(CanvasEdgeGraph.canConnect(from: "ghost", to: b.id, edges: [], nodeIds: nodeIds) != nil,
+            "CANVAS-EDGE-9 端点不存在要拦")
+
+    // 三节点长环：a→b→c→a。逐条加的时候只有最后一条能发现问题。
+    let chain = [CanvasEdge(fromNodeId: a.id, toNodeId: b.id),
+                 CanvasEdge(fromNodeId: b.id, toNodeId: c.id)]
+    t.check(CanvasEdgeGraph.wouldCreateCycle(from: c.id, to: a.id, edges: chain),
+            "★CANVAS-EDGE-10 长链成环也要认出来（只查直接反向连接会漏掉 a→b→c→a）")
+    t.check(!CanvasEdgeGraph.wouldCreateCycle(from: a.id, to: c.id, edges: chain),
+            "CANVAS-EDGE-11 菱形（a→b→c 再加 a→c）不是环，不能误拦")
+
+    // ---- 规范化：脏数据进来要能自愈 ----
+    let dirty = [CanvasEdge(id: "k1", fromNodeId: a.id, toNodeId: a.id),
+                 CanvasEdge(id: "k2", fromNodeId: a.id, toNodeId: "ghost"),
+                 CanvasEdge(id: "k3", fromNodeId: a.id, toNodeId: b.id),
+                 CanvasEdge(id: "k4", fromNodeId: a.id, toNodeId: b.id)]
+    let clean = CanvasEdgeGraph.normalized(dirty, nodeIds: nodeIds)
+    t.equal(clean.map(\.id), ["k3"],
+            "★CANVAS-EDGE-12 规范化剔掉自环/悬空/重复，保留最早那条 —— 画布文档可能被手改或跨版本回滚")
+
+    // ---- parentNodeId → edges 迁移（老文档不能一升级就丢关系）----
+    var child = canvasNode(slot: 4)
+    child.parentNodeId = a.id
+    let migrated = CanvasEdgeGraph.migratedFromParentLinks(nodes: [a, child], edges: [])
+    t.equal(migrated.count, 1, "★CANVAS-EDGE-13 老文档的 parentNodeId 迁移成一条真连线")
+    t.equal(migrated.first?.role, CanvasEdgeRole.auto, "CANVAS-EDGE-14 迁移出来的是自动角色")
+    let twice = CanvasEdgeGraph.migratedFromParentLinks(nodes: [a, child], edges: migrated)
+    t.equal(twice.count, 1,
+            "★CANVAS-EDGE-15 迁移必须幂等：parentNodeId 刻意保留（血缘展示 + 回滚兼容），每次打开都迁一遍会翻倍")
+
+    // ---- 删节点 / 改绑定要带着连线走 ----
+    let pruned = CanvasEdgeGraph.removing(nodeIds: [b.id], from: clean)
+    t.check(pruned.isEmpty, "CANVAS-EDGE-16 删节点顺带删掉它的连线（留着就是悬空线）")
+    let remapped = CanvasEdgeGraph.remapping(nodeId: b.id, to: c.id, edges: clean)
+    t.equal(remapped.first?.toNodeId, c.id,
+            "★CANVAS-EDGE-17 节点改绑槽位后 id 会变，连线要跟着改 —— 否则关系静默断在用户看不见的地方")
+
+    // ---- 入边顺序按 createdAt，不按数组下标 ----
+    let t0 = Date(timeIntervalSince1970: 1000)
+    let older = CanvasEdge(id: "old", fromNodeId: a.id, toNodeId: c.id, createdAt: t0)
+    let newer = CanvasEdge(id: "new", fromNodeId: b.id, toNodeId: c.id, createdAt: t0.addingTimeInterval(60))
+    t.equal(CanvasEdgeGraph.incoming(of: c.id, edges: [newer, older]).map(\.id), ["old", "new"],
+            "★CANVAS-EDGE-18 入边按建立时间排序：靠数组下标的话，一次撤销/重做就能让首帧悄悄换人")
+
+    // ---- 删节点确认：新旧两套链路都要认 ----
+    let byEdge = CanvasNodeDeletion.brokenLinks(deleting: [a.id],
+                                                nodes: [a, b],
+                                                edges: [CanvasEdge(fromNodeId: a.id, toNodeId: b.id)])
+    t.equal(byEdge.referrers, [b.id], "CANVAS-EDGE-19 断链确认认新的 edges")
+    let byParent = CanvasNodeDeletion.brokenLinks(deleting: [a.id], nodes: [a, child], edges: [])
+    t.equal(byParent.referrers, [child.id],
+            "★CANVAS-EDGE-20 也要继续认老的 parentNodeId：升级前存的画布没有 edges，漏判等于静默断链")
+
+    // ---- 历史项：连线的每一步都要能撤 ----
+    t.check(!CanvasHistoryEntry.Kind.connect.title.isEmpty
+                && !CanvasHistoryEntry.Kind.disconnect.title.isEmpty
+                && !CanvasHistoryEntry.Kind.edgeRole.title.isEmpty,
+            "CANVAS-EDGE-21 连线/断开/改角色都有历史文案（撤销面板里不能出现空行）")
+}
+
+// MARK: - CANVAS-EDGE-IN：连线 → 生成入参（v2.12.0 第二档）
+//
+// 这一组是整次改动里最不容易靠手测发现问题的地方：角色消歧错了不会崩、不会报错，只会让出图
+// 不符合预期。
+do {
+    var text = canvasNode(slot: 1); text.kind = .text
+    var img1 = canvasNode(slot: 2); img1.kind = .image
+    var img2 = canvasNode(slot: 3); img2.kind = .image
+    var waitingNode = canvasNode(slot: 4); waitingNode.kind = .image
+
+    let ups: [String: CanvasEdgeInputs.Upstream] = [
+        text.id: .init(nodeId: text.id, kind: .text, text: "赛博朋克 霓虹", assetPath: nil),
+        img1.id: .init(nodeId: img1.id, kind: .image, text: "", assetPath: "/a.png"),
+        img2.id: .init(nodeId: img2.id, kind: .image, text: "", assetPath: "/b.png"),
+        waitingNode.id: .init(nodeId: waitingNode.id, kind: .image, text: "", assetPath: nil),
+    ]
+
+    // ---- 显式角色先落座 ----
+    // 只扫一轮的话，前面那条 .auto 图边会抢到首帧，用户明确设成首帧的那条只能降级成参考图。
+    let mixed = [CanvasEdge(fromNodeId: img1.id, toNodeId: "v", role: .auto),
+                 CanvasEdge(fromNodeId: img2.id, toNodeId: "v", role: .firstFrame)]
+    let rv = CanvasEdgeInputs.resolve(incoming: mixed, upstreams: ups, downstreamKind: .video)
+    t.equal(rv.firstFramePath, "/b.png",
+            "★CANVAS-EDGE-IN-1 显式首帧优先于自动补位，否则就是「我明明设了首帧，它却当参考图用了」")
+    t.equal(rv.referencePaths, ["/a.png"], "CANVAS-EDGE-IN-2 被挤下来的自动图进参考图")
+
+    // ---- 自动角色：视频下游第一张图当首帧，图像下游一律参考图 ----
+    let autoOnly = [CanvasEdge(fromNodeId: img1.id, toNodeId: "v", role: .auto),
+                    CanvasEdge(fromNodeId: img2.id, toNodeId: "v", role: .auto)]
+    let rAutoVid = CanvasEdgeInputs.resolve(incoming: autoOnly, upstreams: ups, downstreamKind: .video)
+    t.equal(rAutoVid.firstFramePath, "/a.png",
+            "★CANVAS-EDGE-IN-3 视频下游的第一张自动图当首帧（「把这张图动起来」是最常见的意图）")
+    let rAutoImg = CanvasEdgeInputs.resolve(incoming: autoOnly, upstreams: ups, downstreamKind: .image)
+    t.check(rAutoImg.firstFramePath == nil && rAutoImg.referencePaths == ["/a.png", "/b.png"],
+            "★CANVAS-EDGE-IN-4 图像下游没有首帧概念，全进参考图")
+
+    // ---- 文本上游进提示词；角色与类型不匹配时按语义归位 ----
+    let textAsFrame = [CanvasEdge(fromNodeId: text.id, toNodeId: "v", role: .firstFrame)]
+    let rText = CanvasEdgeInputs.resolve(incoming: textAsFrame, upstreams: ups, downstreamKind: .video)
+    t.equal(rText.promptFragments, ["赛博朋克 霓虹"],
+            "★CANVAS-EDGE-IN-5 把线设成首帧后又换成文本上游：不报错也不丢，按上游真拿得出的东西归位")
+    t.equal(rText.pendingUpstreamCount, 0, "CANVAS-EDGE-IN-6 文本上游不算「待产」")
+
+    // ---- 待产计数：失败文案要指向真正的原因 ----
+    let waiting = [CanvasEdge(fromNodeId: waitingNode.id, toNodeId: "v", role: .auto)]
+    let rWait = CanvasEdgeInputs.resolve(incoming: waiting, upstreams: ups, downstreamKind: .video)
+    t.equal(rWait.pendingUpstreamCount, 1,
+            "★CANVAS-EDGE-IN-7 上游还没出图要单独记数，否则报「提示词为空」会让用户去改一个没问题的输入框")
+
+    // ---- 提示词合并：上游在前 ----
+    t.equal(CanvasEdgeInputs.mergedPrompt(own: "一只猫", upstream: ["水墨风格", "  "]),
+            "水墨风格\n\n一只猫",
+            "★CANVAS-EDGE-IN-8 上游（共享风格设定）在前、本节点（这一张的要求）在后，空段剔除")
+    t.equal(CanvasEdgeInputs.mergedPrompt(own: "", upstream: []), "",
+            "CANVAS-EDGE-IN-9 都空 → 空串（交给上层报「提示词为空」）")
+
+    // ---- 视频图位：连线优先、槽位补位 ----
+    let s25 = CrateModelCatalog.ModelInfo(id: "seedance25", displayName: "S", family: "seedance",
+                                          generationTypes: ["image-to-video"],
+                                          parameterNames: ["prompt", "ratio"],
+                                          ratioOptions: [], supportsLastFrame: true,
+                                          referenceImageMaxCount: 50,
+                                          framesExcludeReferences: true, enabled: true)
+    var lastOnly = CanvasEdgeInputs.Resolved()
+    lastOnly.lastFramePath = "/edge-last.png"
+    let vf = CanvasEdgeInputs.videoFrames(edgeInputs: lastOnly,
+                                          slotImages: ["/slot1.png", "/slot2.png"],
+                                          model: s25)
+    t.equal(vf.last, "/edge-last.png",
+            "★CANVAS-EDGE-IN-10 只设了尾帧的连线不能被当成首帧 —— 那是用户唯一明确指定过的位置")
+    t.equal(vf.first, "/slot1.png", "CANVAS-EDGE-IN-11 首帧空着由槽位附件补位")
+    t.check(vf.references.isEmpty,
+            "★CANVAS-EDGE-IN-12 互斥模型有首尾帧就不带参考图（硬凑会被整次拒收）")
+
+    var dupEdge = CanvasEdgeInputs.Resolved()
+    dupEdge.firstFramePath = "/same.png"
+    let dedup = CanvasEdgeInputs.videoFrames(edgeInputs: dupEdge, slotImages: ["/same.png"], model: s25)
+    t.check(dedup.first == "/same.png" && dedup.last == nil,
+            "★CANVAS-EDGE-IN-13 同一张图既在连线又在槽位时只用一次（否则首尾帧同图 = 一段静止视频）")
+
+    // ---- 图像参考图：连线在前、去重 ----
+    var refs = CanvasEdgeInputs.Resolved()
+    refs.referencePaths = ["/e1.png", "/e2.png"]
+    t.equal(CanvasEdgeInputs.imageReferences(edgeInputs: refs, slotImages: ["/e2.png", "/s1.png"]),
+            ["/e1.png", "/e2.png", "/s1.png"],
+            "★CANVAS-EDGE-IN-14 顺序有语义（多参考图模型按序理解权重），连线在前且去重")
+}
+
+// MARK: - CANVAS-EDGE-GEO：连线几何（v2.12.0）
+//
+// 教训来源：v2.11.0 把极坐标数学写在 SwiftUI View 里，扇区角偏差 25°~30° 却没有任何测试能发现
+// （见 `RadialSegmentLayout`）。贝塞尔命中更隐蔽 —— 偏一点只表现为「这条线点不中」，不会有人报。
+do {
+    let from = CGRect(x: 0, y: 0, width: 100, height: 60)
+    let to = CGRect(x: 300, y: 0, width: 100, height: 60)
+
+    let sides = CanvasEdgeGeometry.sides(from: from, to: to)
+    t.check(sides.out == .right && sides.in == .left,
+            "★CANVAS-EDGE-GEO-1 水平错开时走左右边：走上下边会让线从卡片顶上绕一圈，读不出方向")
+    let stacked = CanvasEdgeGeometry.sides(from: from, to: CGRect(x: 0, y: 300, width: 100, height: 60))
+    t.check(stacked.out == .bottom && stacked.in == .top,
+            "CANVAS-EDGE-GEO-2 垂直错开时走上下边")
+
+    let start = CanvasEdgeGeometry.anchor(of: from, side: sides.out)
+    let end = CanvasEdgeGeometry.anchor(of: to, side: sides.in)
+    t.check(start == CGPoint(x: 100, y: 30) && end == CGPoint(x: 300, y: 30),
+            "CANVAS-EDGE-GEO-3 端点贴在边中点")
+
+    let cps = CanvasEdgeGeometry.controlPoints(start: start, end: end, outSide: sides.out, inSide: sides.in)
+    t.check(cps.0.x > start.x && cps.1.x < end.x,
+            "★CANVAS-EDGE-GEO-4 控制点沿各自边的外法向推出去 —— 反了会让曲线先向后倒一下")
+
+    let mid = CanvasEdgeGeometry.badgeAnchor(start: start, c1: cps.0, c2: cps.1, end: end)
+    t.check(abs(mid.x - 200) < 1 && abs(mid.y - 30) < 1, "CANVAS-EDGE-GEO-5 角标挂在曲线中点")
+
+    t.check(CanvasEdgeGeometry.hitTest(point: mid, start: start, c1: cps.0, c2: cps.1, end: end),
+            "CANVAS-EDGE-GEO-6 曲线上的点命中")
+    t.check(!CanvasEdgeGeometry.hitTest(point: CGPoint(x: 200, y: 200),
+                                        start: start, c1: cps.0, c2: cps.1, end: end),
+            "CANVAS-EDGE-GEO-7 离得远的点不命中")
+    t.check(CanvasEdgeGeometry.hitTest(point: CGPoint(x: 200, y: 38),
+                                       start: start, c1: cps.0, c2: cps.1, end: end),
+            "★CANVAS-EDGE-GEO-8 容差 10pt 内算命中：1.6pt 的线要求像素级精准会让选中一条线变成运气活")
+
+    // 退化：四点重合时不能产出 NaN —— SwiftUI 对 NaN 几何的表现是整层静默空白，极难定位。
+    let z = CGPoint.zero
+    let arrow = CanvasEdgeGeometry.arrowHead(start: z, c1: z, c2: z, end: z)
+    t.check(!arrow.tip.x.isNaN && !arrow.left.y.isNaN && !arrow.right.x.isNaN,
+            "★CANVAS-EDGE-GEO-9 退化几何不产出 NaN（NaN 会让整条连线层静默不渲染）")
+
+    let normal = CanvasEdgeGeometry.arrowHead(start: start, c1: cps.0, c2: cps.1, end: end)
+    t.check(normal.tip.x > cps.1.x,
+            "CANVAS-EDGE-GEO-10 箭头尖端在终点附近（t=0.99，不压在卡片描边下）")
+
+    // 出口把手挂在卡片右边中点：拖线的起点与连线起点必须是同一个点，否则拖出来的线会跳一下。
+    t.equal(CanvasEdgeGeometry.outputHandle(of: from), CGPoint(x: 100, y: 30),
+            "CANVAS-EDGE-GEO-11 出口把手 = 右边中点（与连线起点同一个点）")
+}
+
 t.report()

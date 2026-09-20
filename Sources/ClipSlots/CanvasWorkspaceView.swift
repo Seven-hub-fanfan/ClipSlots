@@ -32,7 +32,7 @@ struct CanvasWorkspaceView: View {
     // MARK: 视口
 
     @State private var pan: CGSize = .zero
-    @State private var zoom: CGFloat = 1
+    @State var zoom: CGFloat = 1
     /// **排版用的缩放**（三轮新增，修「缩放时文字跳舞」）。
     ///
     /// 与 `zoom` 的区别只有一个：它**只在缩放落定后才更新**。节点卡片内部的一切尺寸（宽高、字号、
@@ -81,23 +81,28 @@ struct CanvasWorkspaceView: View {
     // MARK: 交互
 
     /// 拖拽中的节点位移（画布空间）。刻意不写进 store，松手才提交。
-    @State private var draggingNodeId: String? = nil
+    @State var draggingNodeId: String? = nil
     /// 本次拖拽会一起走的节点集合。
     ///
     /// ★ v2.11.7 hotfix18 修 bug：框选两个节点后拖其中一个，只有被按住的那个动。
     /// 根因是预览位移只加在 `draggingNodeId` 上、提交也只提交它一个。现在在 `onChanged` 的第一帧
     /// 就把「这次要一起动谁」定下来（按下时的选中集合），拖拽过程中即使选中集合被别处改动也不受影响。
-    @State private var draggingIds: Set<String> = []
-    @State private var dragDelta: CGSize = .zero
+    @State var draggingIds: Set<String> = []
+    @State var dragDelta: CGSize = .zero
     /// 正在 inline 编辑正文的节点。集中管理，保证同一时刻只有一个编辑器抢焦点。
-    @State private var editingNodeId: String? = nil
+    @State var editingNodeId: String? = nil
     /// 正在管理「入参文件」的节点 id。见 `openInputFiles(_:)` 说明为何弹层不挂在卡片里。
-    @State private var inputFilesNodeId: String? = nil
+    @State var inputFilesNodeId: String? = nil
     /// 「删了会断开连接」的确认弹窗（★ v2.11.8 三轮）。非 nil = 正在等用户拍板。
     ///
     /// 存一份**待删 id 集合**而不是只存个 Bool：弹窗弹出后用户可能改动选中集合（点了别处），
     /// 确认时若再去读 `canvas.selectedNodeIds` 就会删掉与提示文案不符的那批节点。
     @State private var pendingDeletion: PendingDeletion? = nil
+    /// 正在拖的那条连线（v2.12.0）。nil = 没在拖。
+    ///
+    /// 全程只活在 View 的 `@State`：拖线是每帧更新光标的高频操作，塞进 `CanvasStore` 的
+    /// `@Published` 会让每一帧都重绘所有节点视图（与视口 pan/zoom 留在 View 里同一个理由）。
+    @State var linkDrag: LinkDrag? = nil
     /// 历史面板是否展开。
     @State private var showHistory = false
     /// 框选矩形（屏幕空间）。
@@ -109,7 +114,7 @@ struct CanvasWorkspaceView: View {
     ///
     /// 与节点自身的 `.onHover` 是 OR 关系：`.onHover` 管进入，这个管**维持**。判定规则全在
     /// `CanvasNodeHover`（本体矩形优先、维持区 = 节点 + 扇形包围盒 + 30pt）。
-    @State private var hoverHoldNodeId: String? = nil
+    @State var hoverHoldNodeId: String? = nil
     /// 维持区的离开宽限期定时器（约 200ms）。
     ///
     /// 只给"离开"用，进入是立即的 —— 进入也加延迟会让整个画布的 hover 反馈变粘。
@@ -133,7 +138,7 @@ struct CanvasWorkspaceView: View {
     /// 同时记 `screenPoint`（菜单画在哪）与 `canvasPoint`（节点建在哪）：两者在缩放/平移下不是
     /// 同一个数，等到用户选完菜单项再换算就会用上"已经变了的" pan/zoom（菜单开着时中键仍可平移），
     /// 节点会落在离双击点很远的地方。
-    @State private var addMenu: AddNodeRequest? = nil
+    @State var addMenu: AddNodeRequest? = nil
 
     /// 上一次「空白单击」的时间与位置，用来自己判定双击（见 `handleBlankTap`）。
     @State private var lastBlankClick: CanvasClickCadence.Click? = nil
@@ -160,11 +165,17 @@ struct CanvasWorkspaceView: View {
                         .padding(.leading, sidebarWidth)
                 }
 
+                edgeLayer
+
                 nodeLayer
 
-                marqueeOverlay
+                linkDragOverlay
 
-                downstreamPlusOverlay
+                outputPortOverlay
+
+                actionBarOverlay
+
+                marqueeOverlay
 
                 floatingLayer(size: proxy.size)
 
@@ -268,7 +279,19 @@ struct CanvasWorkspaceView: View {
         let referrerCount: Int
     }
 
-    private var effectivePan: CGSize {
+    /// 一次进行中的拖线（v2.12.0）。
+    struct LinkDrag {
+        /// 从哪个节点拖出来的。
+        let fromNodeId: String
+        /// 出发点（屏幕坐标，= 出口把手位置）。
+        let start: CGPoint
+        /// 当前光标（屏幕坐标）。
+        var cursor: CGPoint
+        /// 光标此刻压在哪个节点上（且那个节点可以接这条线）。nil = 落空。
+        var targetNodeId: String?
+    }
+
+    var effectivePan: CGSize {
         CGSize(width: pan.width + panGestureDelta.width, height: pan.height + panGestureDelta.height)
     }
 
@@ -919,52 +942,13 @@ struct CanvasWorkspaceView: View {
         }
     }
 
-    /// 选中节点正下方的浮动圆形 +。
-    ///
-    /// 尺寸**刻意不随 zoom 缩放**：它是操作把手而不是画布内容，跟着缩到 25% 就变成一个点不中的
-    /// 小点。同理它画在节点层之外（屏幕坐标系），这样缩放时把手大小恒定。
-    @ViewBuilder
-    private var downstreamPlusOverlay: some View {
-        if let sole = canvas.soleSelectedNode,
-           editingNodeId == nil,
-           addMenu == nil,
-           draggingNodeId == nil,
-           inputFilesNodeId == nil {
-            let anchor = CanvasGeometry.screenPoint(canvas: CGPoint(x: sole.x + sole.width / 2,
-                                                                   y: sole.y + sole.height),
-                                                    pan: effectivePan,
-                                                    zoom: zoom)
-            Button {
-                let frame = CGRect(x: sole.x, y: sole.y, width: sole.width, height: sole.height)
-                let origin = CanvasSpawnGeometry.downstreamOrigin(of: frame, newSize: CanvasNode.defaultSize)
-                let center = CGPoint(x: origin.x + CanvasNode.defaultSize.width / 2,
-                                     y: origin.y + CanvasNode.defaultSize.height / 2)
-                openAddMenu(atScreen: CGPoint(x: anchor.x, y: anchor.y + 30),
-                            canvasPoint: center,
-                            parentNodeId: sole.id)
-            } label: {
-                Image(systemName: "plus")
-                    .font(.system(size: 12, weight: .bold))
-                    .foregroundColor(.white)
-                    .frame(width: 26, height: 26)
-                    .background(Circle().fill(AppTheme.chromeAccentInk))
-                    .overlay(Circle().stroke(Color.white.opacity(0.9), lineWidth: 1.5))
-                    .shadow(color: .black.opacity(0.25), radius: 5, x: 0, y: 2)
-                    .contentShape(Circle())
-            }
-            .buttonStyle(.plain)
-            .help("在下方新建一个节点（自动记为下游）")
-            .offset(x: anchor.x - 13, y: anchor.y + 8)
-        }
-    }
-
     private func clamp(_ value: CGFloat, min lower: CGFloat, max upper: CGFloat) -> CGFloat {
         Swift.min(Swift.max(value, lower), Swift.max(lower, upper))
     }
 
-    private func openAddMenu(atScreen screenPoint: CGPoint,
-                             canvasPoint: CGPoint? = nil,
-                             parentNodeId: String?) {
+    func openAddMenu(atScreen screenPoint: CGPoint,
+                     canvasPoint: CGPoint? = nil,
+                     parentNodeId: String?) {
         let target = canvasPoint ?? CanvasGeometry.canvasPoint(screen: screenPoint, pan: effectivePan, zoom: zoom)
         withAnimation(Anim.interactive) {
             addMenu = AddNodeRequest(screenPoint: screenPoint,
@@ -1498,7 +1482,9 @@ struct CanvasWorkspaceView: View {
     private func requestDelete(ids: Set<String>) {
         let targets = ids.filter { id in canvas.nodes.contains { $0.id == id } }
         guard !targets.isEmpty else { return }
-        let links = CanvasNodeDeletion.brokenLinks(deleting: targets, nodes: canvas.nodes)
+        let links = CanvasNodeDeletion.brokenLinks(deleting: targets,
+                                                  nodes: canvas.nodes,
+                                                  edges: canvas.edges)
         guard links.referrers.isEmpty else {
             pendingDeletion = PendingDeletion(ids: targets, referrerCount: links.referrers.count)
             return
@@ -1549,8 +1535,14 @@ struct CanvasWorkspaceView: View {
             // 正在 inline 编辑时退格属于文本编辑（`CanvasInputRouter` 已按 firstResponder 拦掉一层，
             // 这里再兜一次：焦点抢占存在一帧空窗，那一帧误删是不可挽回的）。
             guard editingNodeId == nil else { return false }
+            // 选中的是一条连线时，Delete 的语义是「断开它」（v2.12.0）。两种选中互斥
+            // （见 `CanvasStore.clearSelection`），所以这里不会出现"该删哪个"的歧义。
+            if let edgeId = canvas.selectedEdgeId, canvas.selectedNodeIds.isEmpty {
+                disconnectEdge(edgeId)
+                return true
+            }
             guard !canvas.selectedNodeIds.isEmpty else {
-                store.transientUI.showToast("请先选中要删除的节点")
+                store.transientUI.showToast("请先选中要删除的节点或连线")
                 return true
             }
             // ★ 三轮：走统一入口，有下游引用先弹确认（toast 由 performDelete 负责）。
