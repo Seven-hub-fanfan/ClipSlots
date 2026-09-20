@@ -167,8 +167,11 @@ final class CanvasStore: ObservableObject {
     func deleteProject(id: String) -> CanvasProject? {
         let index = CanvasProjectIndex(projects: projects, activeProjectId: activeProjectId)
         guard index.canDelete(id), let victim = projects.first(where: { $0.id == id }) else { return nil }
-        // 删的是当前项目 → 先把待落盘的改动丢掉，不然防抖任务会在切走之后把旧节点写进新项目的文档。
-        if id == activeProjectId { saveTask?.cancel() }
+        // 删的是当前项目 → 先把最新状态同步落进即将被 trash 的项目文档。
+        // v2.16.2：这里不能只 cancel 防抖任务。用户最后一次拖动/缩放/连线可能还停在 400ms
+        // 防抖窗口里；直接 cancel 会让 .trash 里的备份少掉最后一步，等价于把“删除前最后状态”丢了。
+        // 先 flush 到当前 projectId，再 trash 该项目目录；activeProjectId 尚未切走，不会串写到下一项目。
+        if id == activeProjectId { flushSave() }
 
         var next = CanvasProjectIndex(projects: projects.filter { $0.id != id },
                                      activeProjectId: id == activeProjectId ? "" : activeProjectId)
@@ -347,15 +350,18 @@ final class CanvasStore: ObservableObject {
     /// 2. 即使把预览也改成吸附（另一种自洽方案），拖动就会变成逐格跳 —— 实测 TapNow 是**连续**的，
     ///    它的卡片左边缘落在 16pt 网格的非整数倍上，根本没有吸附这回事。
     ///
-    /// 保留 0.5pt 取整只为了别让浮点噪声（`…x = 132.40000000000003`）进存档，它在视觉上等于连续。
+    /// v2.16.2：这 0.5pt 也不能是**画布空间固定 0.5pt**。在 8x 放大时，0.5 canvas pt
+    /// 会变成 4 screen pt 的跳格，TapNow 那种像素级微调感就没了。现在按当前 zoom 换算成
+    /// "约 0.5 screen pt" 的落盘精度：足够吞掉浮点尾巴，但放大后仍然跟手。
     ///
     /// 吸附并没有从项目里消失：**新建节点**仍然走 `CanvasGeometry.snap`（见 `placeSlot`）。
     /// 那里是对的 —— 算出来的落点本来就没有"用户的手"可以尊重，对齐让批量新建看起来整齐。
     /// 区别在于：吸附该服务于"系统自己决定的位置"，而不该覆盖"用户亲手指定的位置"。
     func moveNodes(ids: Set<String>, by rawDelta: CGSize) {
         guard !ids.isEmpty else { return }
-        let delta = CGSize(width: (rawDelta.width * 2).rounded() / 2,
-                           height: (rawDelta.height * 2).rounded() / 2)
+        let step = CanvasStore.dragPersistenceStep(forZoom: zoom)
+        let delta = CGSize(width: CanvasStore.roundDragDelta(rawDelta.width, step: step),
+                           height: CanvasStore.roundDragDelta(rawDelta.height, step: step))
         guard delta.width != 0 || delta.height != 0 else { return }
         let moved = nodes.filter { ids.contains($0.id) }
         guard !moved.isEmpty else { return }
@@ -797,6 +803,17 @@ final class CanvasStore: ObservableObject {
     /// 网格吸附步长（画布空间）。与背景网格基准一致，观感上「贴着线走」。
     /// 真值住在 `CanvasGeometry`（Kit 层）以便被 smoke 断言覆盖，这里只是就近别名。
     static let snapStep: CGFloat = CanvasGeometry.snapStep
+
+    /// 拖动落盘的量化步长：固定到屏幕 0.5pt，而不是画布 0.5pt。
+    private static func dragPersistenceStep(forZoom zoom: CGFloat) -> CGFloat {
+        0.5 / max(0.01, zoom)
+    }
+
+    private static func roundDragDelta(_ value: CGFloat, step: CGFloat) -> CGFloat {
+        guard step.isFinite, step > 0 else { return value }
+        return (value / step).rounded() * step
+    }
+
     /// 背景网格基准步长。
     static let gridBase: CGFloat = 24
 }

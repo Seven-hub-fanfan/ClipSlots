@@ -83,8 +83,15 @@ struct CanvasAddNodeMenu: View {
         .padding(.bottom, 6)
         .frame(width: CanvasAddNodeMenu.width, alignment: .leading)
         .background(
-            RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .fill(Color(red: 0.11, green: 0.11, blue: 0.12).opacity(0.98))
+            ZStack {
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .fill(.ultraThinMaterial)
+                // v2.16.2：TapNow 的 ADD NODE 浮层不是一块死实底，而是黑玻璃。
+                // 纯 material 在纯黑画布上层次不够，叠一层低透明深色 tint，既保留毛玻璃高光，
+                // 又不让下层节点文字透得影响可读性。
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .fill(Color(red: 0.09, green: 0.09, blue: 0.10).opacity(0.72))
+            }
         )
         .overlay(
             RoundedRectangle(cornerRadius: 14, style: .continuous)
