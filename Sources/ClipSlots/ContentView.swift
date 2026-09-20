@@ -342,6 +342,9 @@ struct ContentView: View {
                                 CanvasWorkspaceView(store: store,
                                                     canvas: canvasStore,
                                                     agentVisible: $canvasAgentVisible)
+                                    // v2.16.0: 画布固定纯黑，标题栏也跟着钉深色，
+                                    // 免得浅色主题下白标题栏压在黑画布上。见 CanvasWindowAppearancePin。
+                                    .background(CanvasWindowAppearancePin().frame(width: 0, height: 0))
                             case .edit:
                                 editWorkspace
                             }

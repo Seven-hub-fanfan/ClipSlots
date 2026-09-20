@@ -1,30 +1,43 @@
 import SwiftUI
 import ClipSlotsKit
 
-/// 画布连线层（v2.12.0）。
+/// 画布连线层（v2.12.0 建立 · **v2.16.0 按 TapNow 实测重做线型**）。
 ///
 /// ## 为什么它是独立的一层而不是画在卡片里
 ///
 /// 连线跨两张卡片，画在任何一张里都要突破自己的 frame（`clipped` 一开就断），而卡片内部的排版预算
-/// 是被 smoke 断言逐像素盯着的（见 `CanvasCardLayout`）—— 往里塞跨界元素是自找麻烦。
+/// 是被 smoke 断言逐像素盯着的 —— 往里塞跨界元素是自找麻烦。
 ///
 /// 它压在**节点层下面**：线从卡片边缘出发，压在卡片上会盖住内容（而卡片里正是产物预览）。代价是
 /// 被卡片遮住的那段线点不中，这是对的 —— 那段线在视觉上本来就不存在。
 ///
+/// ## v2.16.0 把 v2.15.0 的三件事全部删了
+///
+/// v2.15.0 我按"节点编辑器常识"给线加了**末端箭头 + 起点实心圆 + 运行中流动虚线**，理由写得挺像
+/// 那么回事（"讲清方向"、"讲清出发点"、"讲清正在输送"）。实测 TapNow 之后发现方向正好相反：
+/// **它的线就是一条 1pt 的灰色贝塞尔，什么都没有。**
+///
+/// 想明白之后这事是有道理的：
+/// - **箭头**：连线两端接的是卡片的右边和左边，方向已经由"从右出、从左进"这个布局事实确定了，
+///   箭头是在重复一遍已知信息。而箭头有实体面积，一屏十条线就是十个黑三角在卡片缝隙里晃。
+/// - **起点圆**：同理，出发点就是卡片右边缘，圆点只是把它描了一遍。
+/// - **流动虚线**：生成状态在**卡片上**已经讲得很清楚了（遮罩 + 转圈 + 秒数）。线上再跑一串亮点，
+///   是同一件事说第二遍，而这一遍是**动的**——画布上任何持续运动都在抢注意力，代价远高于收益。
+///
+/// 留下的唯一一点状态表达是 `isFlowing` 时线**变亮**（`#909090` → `#E6E6E6`）。它是静态的、
+/// 零运动的，只在用户主动去看这条线时才被读到。
+///
 /// ## 坐标系
 ///
-/// 全程屏幕坐标。线宽 / 箭头 / 命中带**不随 zoom 缩放**：它们是操作尺度而不是画布内容，
-/// 25% 视图下跟着缩到 0.4pt 就成了看不见也点不中的发丝。
+/// 全程屏幕坐标。线宽 / 命中带**不随 zoom 缩放**：它们是操作尺度而不是画布内容，25% 视图下跟着
+/// 缩到 0.25pt 就成了看不见也点不中的发丝。
 struct CanvasEdgeLayer: View {
 
     let edges: [CanvasEdge]
     /// 节点 id → 它此刻的**屏幕矩形**（已含拖拽中的临时位移）。
     let frames: [String: CGRect]
     let selectedEdgeId: String?
-    /// 这条线此刻是否"正在被使用"——下游节点在排队 / 生成中（v2.15.0）。
-    ///
-    /// 用闭包而不是让本视图直接拿 `CanvasStore`：连线层是纯渲染层，它对节点状态的唯一需求就是
-    /// 这一个布尔值。把整个 store 塞进来会让它随任意节点的任意字段变化重绘整张网。
+    /// 下游节点此刻在排队 / 生成中。只用来让线变亮一档，见类型注释。
     let isFlowing: (CanvasEdge) -> Bool
     /// 这条线的下游节点接受哪些角色（视频下游才有首帧 / 尾帧）。
     let roleOptions: (CanvasEdge) -> [CanvasEdgeRole]
@@ -66,8 +79,6 @@ private struct CanvasEdgeShapeView: View {
     let onDisconnect: () -> Void
 
     @State private var hovering = false
-    /// 流动虚线的相位。动的是 `dashPhase`，不是整条路径 —— 路径每帧重算会让曲线抖。
-    @State private var dashPhase: CGFloat = 0
 
     private var geometry: (start: CGPoint, c1: CGPoint, c2: CGPoint, end: CGPoint) {
         let sides = CanvasEdgeGeometry.sides(from: fromRect, to: toRect)
@@ -80,14 +91,17 @@ private struct CanvasEdgeShapeView: View {
         return (start, controls.0, controls.1, end)
     }
 
+    /// 线宽。实测 TapNow 是 1pt；选中 / 悬停只加到 1.4pt。
+    ///
+    /// v2.15.0 这里是 1.6 / 2.2 / 2.6 —— 三档都太粗。粗线在纯黑底上是**结构**，会把画布读成
+    /// 流程图；细线是**关系**，读起来是"这两张图有关联"。差别就在这一个 pt 上。
     private var lineWidth: CGFloat {
-        if isSelected { return 2.6 }
-        return hovering ? 2.2 : 1.6
+        (isSelected || hovering) ? TapSkin.edgeWidthActive : TapSkin.edgeWidth
     }
 
     private var lineColor: Color {
-        if isSelected { return AppTheme.chromeAccentInk }
-        return AppTheme.chromeAccentInk.opacity(hovering ? 0.80 : 0.55)
+        if isSelected || hovering || isFlowing { return TapSkin.edgeInkActive }
+        return TapSkin.edgeInk
     }
 
     var body: some View {
@@ -97,44 +111,20 @@ private struct CanvasEdgeShapeView: View {
                 .stroke(lineColor, style: StrokeStyle(lineWidth: lineWidth, lineCap: .round))
                 .allowsHitTesting(false)
 
-            // ★ v2.15.0：运行中流动虚线。
+            // 角色角标只在非自动态出现（`badgeText` 自己返回 nil 就不画）。
             //
-            // 叠在实线**之上**而不是替换它：替换会让线在生成开始的那一刻"变细变虚"，看着像断开了；
-            // 叠加则是实线上跑过一串亮点，语义是"这条线上正有东西在走"。
-            if isFlowing {
-                CanvasEdgeCurve(start: g.start, c1: g.c1, c2: g.c2, end: g.end)
-                    .stroke(AppTheme.chromeAccentInk.opacity(0.95),
-                            style: StrokeStyle(lineWidth: lineWidth + 0.6,
-                                               lineCap: .round,
-                                               dash: [5, 9],
-                                               dashPhase: dashPhase))
-                    .allowsHitTesting(false)
-            }
-
-            CanvasEdgeArrow(start: g.start, c1: g.c1, c2: g.c2, end: g.end)
-                .fill(lineColor)
-                .allowsHitTesting(false)
-
-            // ★ v2.15.0：起点端点圆。
-            //
-            // 末端已经有箭头，起点却是一条线"凭空长出来"——线贴着卡片边缘时分不清它是从这张卡出发、
-            // 还是只是路过被卡片压住了。一枚 6pt 的实心圆把"出发点"讲清楚，代价是零交互（不可点）。
-            Circle()
-                .fill(lineColor)
-                .frame(width: 6, height: 6)
-                .overlay(Circle().stroke(AppTheme.canvasChromeSurface, lineWidth: 1.2))
-                .position(x: g.start.x, y: g.start.y)
-                .allowsHitTesting(false)
-
-            // 角色角标只在非自动态出现（`badgeText` 自己返回 nil 就不画）。刻意不按 hover 过滤：
-            // 它携带的是"这条线当首帧用"这种一眼就要看到的事实，藏起来等于没有。
+            // 这是**我们有、TapNow 没有**的东西，刻意保留：「这条线当首帧用」是一个无法从布局推断
+            // 的事实，不写出来用户就只能靠记。它与被删掉的箭头/端点圆的区别正在这里——那些是在
+            // 重复已知信息，这个是在提供未知信息。
             if let badge = edge.role.badgeText {
                 roleBadge(badge, at: CanvasEdgeGeometry.badgeAnchor(start: g.start, c1: g.c1, c2: g.c2, end: g.end))
             }
 
-            // 命中带：把曲线加粗成一条 16pt 的不可见丝带。
-            // 用 `strokedPath` 生成实心形状而不是给可见线加 `contentShape`：后者在 macOS 上对
-            // 细线的命中仍然按描边路径算，实测要压到 1pt 精度才点得中。
+            // 命中带：把曲线加粗成一条不可见丝带。
+            //
+            // 与视觉宽度**刻意脱钩**（1pt 线 / 14pt 命中带）。用 `strokedPath` 生成实心形状而不是
+            // 给可见线加 `contentShape`：后者在 macOS 上对细线的命中仍然按描边路径算，实测要压到
+            // 1pt 精度才点得中——而线越细，这个问题越致命，正好是这一版把线改细之后最该补的一刀。
             CanvasEdgeHitBand(start: g.start, c1: g.c1, c2: g.c2, end: g.end)
                 .fill(Color.white.opacity(0.001))
                 .onHover { hovering = $0 }
@@ -153,40 +143,18 @@ private struct CanvasEdgeShapeView: View {
                     }
                 }
         }
-        // 只在流动态起动画，并且在停下时把相位**归零**：留着非零相位会让下一次开始流动时
-        // 虚线从半截处接上，看着像丢了一帧。
-        .onAppear { syncFlowAnimation() }
-        .onChange(of: isFlowing) { _ in syncFlowAnimation() }
-    }
-
-    /// 起 / 停流动动画。
-    ///
-    /// `repeatForever(autoreverses: false)` + 负向位移 = 虚线顺着线的方向（起点→终点）跑。
-    /// 正向会让它倒着跑，观感是"下游在往上游倒灌"。
-    private func syncFlowAnimation() {
-        guard isFlowing else {
-            withAnimation(.linear(duration: 0.12)) { dashPhase = 0 }
-            return
-        }
-        dashPhase = 0
-        withAnimation(.linear(duration: 0.85).repeatForever(autoreverses: false)) {
-            // 一个完整 dash 周期（5 + 9）：位移刚好一个周期时首尾无缝，不会在循环边界跳一下。
-            dashPhase = -14
-        }
+        .animation(TapSkin.stateAnim, value: hovering)
+        .animation(TapSkin.stateAnim, value: isSelected)
     }
 
     @ViewBuilder
     private func roleBadge(_ text: String, at point: CGPoint) -> some View {
         Text(text)
-            .font(.system(size: 9.5, weight: .semibold))
-            .foregroundColor(AppTheme.chromeAccentInk)
+            .font(.system(size: 9.5, weight: .medium))
+            .foregroundColor(TapSkin.chromeInk)
             .padding(.horizontal, 6)
             .padding(.vertical, 2.5)
-            .background(
-                Capsule(style: .continuous)
-                    .fill(AppTheme.canvasChromeSurface)
-                    .overlay(Capsule(style: .continuous).stroke(AppTheme.chromeAccentInk.opacity(0.35), lineWidth: 1))
-            )
+            .background(Capsule(style: .continuous).fill(TapSkin.chromeFill))
             .position(x: point.x, y: point.y)
             .allowsHitTesting(false)
     }
@@ -209,24 +177,6 @@ struct CanvasEdgeCurve: Shape {
     }
 }
 
-/// 末端箭头。
-struct CanvasEdgeArrow: Shape {
-    let start: CGPoint
-    let c1: CGPoint
-    let c2: CGPoint
-    let end: CGPoint
-
-    func path(in rect: CGRect) -> Path {
-        let head = CanvasEdgeGeometry.arrowHead(start: start, c1: c1, c2: c2, end: end)
-        var path = Path()
-        path.move(to: head.tip)
-        path.addLine(to: head.left)
-        path.addLine(to: head.right)
-        path.closeSubpath()
-        return path
-    }
-}
-
 /// 命中带：曲线加粗后的实心形状。
 struct CanvasEdgeHitBand: Shape {
     let start: CGPoint
@@ -238,20 +188,25 @@ struct CanvasEdgeHitBand: Shape {
         var line = Path()
         line.move(to: start)
         line.addCurve(to: end, control1: c1, control2: c2)
-        return line.strokedPath(StrokeStyle(lineWidth: 16, lineCap: .round))
+        return line.strokedPath(StrokeStyle(lineWidth: TapSkin.edgeHitSlop * 2, lineCap: .round))
     }
 }
 
 // MARK: - 拖线预览
 
-/// 从出口把手拖出来、还没落地的那条线。
+/// 从出口端口拖出来、还没落地的那条线。
 ///
-/// 用虚线是因为它表达的是"意图"而不是"事实"：实线会让人以为已经连上了，松手落空时那条线消失
-/// 就变成"我连的线丢了"。
+/// ## v2.16.0：从虚线改回实线
+///
+/// 原来用虚线，理由是"它表达的是意图而不是事实"。听起来成立，实际观感是**这条线在闪**——虚线
+/// 跟着光标走的时候，每一段短划都在重新分布，视觉上像一条坏掉的线。TapNow 拖线时用的就是与
+/// 成品线完全相同的线型，"意图 vs 事实"由**末端那枚圆点**表达（有目标才实心），而不是由线型表达。
+///
+/// 这样还有一个实际好处：拖的过程和松手之后的结果长得一模一样，用户在松手前就已经看到最终形态。
 struct CanvasLinkDragPreview: View {
     let start: CGPoint
     let cursor: CGPoint
-    /// 光标是否正悬在一个可接受的目标上（决定颜色 + 端点那枚小圆）。
+    /// 光标是否正悬在一个可接受的目标上。
     let hasTarget: Bool
 
     var body: some View {
@@ -263,80 +218,60 @@ struct CanvasLinkDragPreview: View {
                                                        inSide: sides.in)
         ZStack(alignment: .topLeading) {
             CanvasEdgeCurve(start: start, c1: controls.0, c2: controls.1, end: cursor)
-                .stroke(AppTheme.chromeAccentInk.opacity(hasTarget ? 0.95 : 0.6),
-                        style: StrokeStyle(lineWidth: 2, lineCap: .round, dash: [6, 4]))
+                .stroke(hasTarget ? TapSkin.edgeInkActive : TapSkin.edgeInk,
+                        style: StrokeStyle(lineWidth: TapSkin.edgeWidthActive, lineCap: .round))
+            // 末端圆点：唯一区分"已瞄准"与"悬空"的元素。悬空时空心（还没落地），
+            // 瞄准时实心（松手就连上）。
             Circle()
-                .fill(hasTarget ? AppTheme.chromeAccentInk : AppTheme.canvasChromeSurface)
-                .overlay(Circle().stroke(AppTheme.chromeAccentInk, lineWidth: 1.5))
-                .frame(width: 9, height: 9)
+                .fill(hasTarget ? TapSkin.edgeInkActive : Color.black)
+                .overlay(Circle().stroke(hasTarget ? TapSkin.edgeInkActive : TapSkin.edgeInk, lineWidth: 1.2))
+                .frame(width: 7, height: 7)
                 .position(x: cursor.x, y: cursor.y)
         }
         .allowsHitTesting(false)
     }
 }
 
-// MARK: - 端口把手
+// MARK: - 端口
 
-/// 节点左侧的**入口端口**（v2.15.0）。
+/// 节点左右两侧的 **⊕ 端口**（v2.16.0 重做）。
 ///
-/// ## 为什么以前没有、现在要加
+/// ## 实测数据
 ///
-/// v2.12.0 只画了出口把手：连线是"从右边拖出去"的单向动作，入口不需要被抓住。但用户这一轮明确
-/// 提到"节点间的连接显示"—— 缺口在于**静态时看不出一个节点能不能接东西**：线从别处飞来，落在
-/// 卡片左缘某处，而卡片上没有任何标记说"这里是入口"。拖线时更明显：候选目标只有整张卡在等着，
-/// 落点全凭猜。
+/// TapNow 的端口是一枚**空心圆 + 细十字**，直径约 18pt，圆心落在卡片左右边缘**外侧约 28pt**
+/// 处的垂直中线上。v2.15.0 我做的是 14/15pt 的圆、贴着卡片边缘（偏移 8~9pt），且入口画成
+/// 带数字的实心圆。三处都不对：
 ///
-/// 它刻意**不可拖动**（`allowsHitTesting(false)` 由调用方给）：入口是被连的一端，从入口反向拖出
-/// 一条线意味着要在这里再做一套"反向连接"语义，而那与出口把手完全重复。
-struct CanvasInputPort: View {
-    /// 已有几条上游连线。0 时画成空心（"能接但还没接"），>0 画成实心并写数字。
-    let incomingCount: Int
-    /// 是否正被拖线瞄准。
-    let isTargeted: Bool
+/// 1. **太小**。18pt 的圆在 100% 视图下是一个"舒服的点击目标"，14pt 是"需要瞄一下"。
+///    而这枚圆是连线操作的**唯一**入口，它的可命中性直接决定"连线顺不顺手"。
+/// 2. **太近**。贴边 8pt 时圆压在卡片轮廓上，圆和卡片的圆角混在一起，看不出它是个独立控件；
+///    推到 28pt 之后它悬在黑底上，边界干净。更要紧的是拖拽：贴边意味着"起手那几个像素还在
+///    卡片范围内"，手势容易被卡片的拖动手势抢走。
+/// 3. **数字是噪声**。入口上写"2"是在回答一个用户没问的问题（"这里接了几条线"——线自己就在
+///    那儿，数得出来）。改成"空心 = 还没接 / 中心实点 = 已接"，同样的信息量，零文字。
+struct CanvasPort: View {
+    /// 端口是否处于活跃态（正被拖 / 正被瞄准 / 已有连线）。
+    let isActive: Bool
+    /// 已经连上了东西（决定中心画不画那个实点）。
+    let isConnected: Bool
 
     var body: some View {
         ZStack {
-            Circle()
-                .fill(isTargeted ? AppTheme.chromeAccentInk : AppTheme.canvasChromeSurface)
-            Circle()
-                .stroke(AppTheme.chromeAccentInk.opacity(isTargeted ? 1 : (incomingCount > 0 ? 0.85 : 0.45)),
-                        lineWidth: 1.4)
-            if incomingCount > 0 {
-                Text("\(min(incomingCount, 9))")
-                    .font(.system(size: 8, weight: .bold))
-                    .foregroundColor(isTargeted ? .white : AppTheme.chromeAccentInk)
-            } else if isTargeted {
+            // 底：纯黑填充。不用透明——端口会压在连线上，透明会让线从圆心穿过去，
+            // 看起来像"线把端口串起来了"。
+            Circle().fill(Color.black)
+            Circle().stroke(isActive ? TapSkin.portStrokeActive : TapSkin.portStroke,
+                            lineWidth: TapSkin.portStrokeWidth)
+            if isConnected {
+                Circle()
+                    .fill(isActive ? TapSkin.portStrokeActive : TapSkin.portStroke)
+                    .frame(width: TapSkin.portDiameter * 0.3, height: TapSkin.portDiameter * 0.3)
+            } else {
                 Image(systemName: "plus")
-                    .font(.system(size: 7, weight: .black))
-                    .foregroundColor(.white)
+                    .font(.system(size: TapSkin.portGlyphSize, weight: .medium))
+                    .foregroundColor(isActive ? TapSkin.portStrokeActive : TapSkin.portStroke)
             }
         }
-        .frame(width: 14, height: 14)
-        .shadow(color: Color.black.opacity(0.16), radius: 2, x: 0, y: 1)
-        .help(incomingCount > 0 ? "有 \(incomingCount) 条上游连线" : "可接收上游连线")
-    }
-}
-
-/// 节点右侧的「拖我连线」把手。
-///
-/// 位置固定在右边中点（而不是跟着渲染端点跑）：把手要形成肌肉记忆，位置必须可预测。渲染端点则
-/// 顺着两张卡片的相对位置选边，两者刻意分开，见 `CanvasEdgeGeometry.outputHandle` 的注释。
-struct CanvasOutputPort: View {
-    let isActive: Bool
-
-    var body: some View {
-        ZStack {
-            Circle()
-                .fill(AppTheme.canvasChromeSurface)
-            Circle()
-                .stroke(AppTheme.chromeAccentInk.opacity(isActive ? 1 : 0.65), lineWidth: 1.6)
-            Circle()
-                .fill(AppTheme.chromeAccentInk)
-                .frame(width: 5, height: 5)
-                .opacity(isActive ? 1 : 0.75)
-        }
-        .frame(width: 15, height: 15)
-        .shadow(color: Color.black.opacity(0.18), radius: 2, x: 0, y: 1)
-        .help("拖动连到另一个节点")
+        .frame(width: TapSkin.portDiameter, height: TapSkin.portDiameter)
     }
 }

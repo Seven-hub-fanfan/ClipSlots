@@ -309,17 +309,39 @@ struct CanvasNodeCardView: View {
         }
         .padding(s(12))
         .frame(width: s(node.width), height: s(node.height), alignment: .top)
+        // ── v2.16.0：外壳换 TapNow 皮（圆角 12 / 无描边 / 极轻阴影）
+        //
+        // 这张卡（槽位节点）保留了它的内部结构 —— 那是 ClipSlots 自己的东西（一叠槽位、扇形展开、
+        // 入参文件行），TapNow 里没有对应物，见 `CanvasWorkspaceView.nodeCard` 的注释。
+        // 但**外壳**必须和媒体/文本卡完全一致，否则同一块画布上会有两种边框语言。
+        //
+        // 三处变化，每一处都是减法：
+        //   · 圆角 14 → 12：与 `TapSkin.cardRadius` 同源（实测 TapNow）。差 2pt 看似无关紧要，
+        //     但两种圆角同屏出现时，眼睛会把它读成"这两张卡不是一类东西"。
+        //   · **描边整条删掉**。这是实测里最反直觉的一条：TapNow 的卡片在 idle/hover/选中三态下
+        //     边界逐像素相同，根本没有描边。选中态由"操作条 + 端口出现"表达 —— 那两样东西信息量
+        //     更大（它们是能点的），而描边只是把"我被选中了"说了一遍。
+        //     顺带解决一个老毛病：`isSelected ? 1.6 : 1` 的线宽跳变会让卡片在选中瞬间**胀一下**。
+        //   · 阴影从 `cardShadow`（为浅色底设计，偏淡）换成纯黑重影。纯黑画布上淡阴影等于没有，
+        //     而卡片需要一点"浮起"来和底纹分层。
         .background(
-            RoundedRectangle(cornerRadius: s(14), style: .continuous)
-                .fill(AppTheme.cardBackground(isEmpty: false))
+            RoundedRectangle(cornerRadius: s(TapSkin.cardRadius), style: .continuous)
+                .fill(isSelected ? TapSkin.cardEmptySelectedFill : TapSkin.cardEmptyFill)
         )
-        .overlay(
-            RoundedRectangle(cornerRadius: s(14), style: .continuous)
-                .stroke(borderColor, lineWidth: s(isSelected ? 1.6 : 1))
-        )
-        .shadow(color: AppTheme.cardShadow(isEmpty: false),
-                radius: s(isSelected ? 12 : 7),
+        .shadow(color: Color.black.opacity(isSelected ? 0.6 : 0.45),
+                radius: s(isSelected ? 14 : 9),
                 x: 0, y: s(isSelected ? 5 : 3))
+        // v2.16.0：卡外名签。与 `CanvasTapNodeCard` 共用同一个视图，两张卡的名签必须逐像素一致 ——
+        // 它是用户判断"这些是同一类东西"的主要线索。
+        .overlay(alignment: .topLeading) {
+            CanvasNodeNameTag(symbol: node.kind.symbolName,
+                              label: pathLabel,
+                              isActive: hoverActive || isSelected,
+                              cardWidth: node.width,
+                              renderScale: renderScale,
+                              textCounter: textCounter)
+                .opacity(textOpacity)
+        }
         .onHover {
             isHovering = $0
             onHoverChanged($0)
@@ -404,35 +426,30 @@ struct CanvasNodeCardView: View {
         return AppTheme.subtleBorder
     }
 
-    // MARK: - 顶部：路径标识行
+    // MARK: - 顶部：状态行（v2.16.0 起路径标识已移到卡外名签）
 
-    /// 顶行 = **居中**的 `页面 - 槽位组 - 槽位`，左侧挂非 idle 状态角标，右侧挂动画风格切换。
+    /// 顶行原来是 **居中的 `页面 - 槽位组 - 槽位`**，左挂状态角标、右挂字数。
     ///
-    /// 用 `overlay` 而不是 `HStack` 排三段是刻意的：HStack 里居中那段的实际位置取决于左右两侧的
-    /// 宽度，而状态角标的宽度是变的（"排队 · 前方 3" 比 "失败" 宽一倍），路径标识会跟着左右晃。
-    /// 居中的东西必须相对**卡片**居中，不是相对"剩下的空间"居中。
+    /// ## v2.16.0：路径标识搬到卡片外面去了
+    ///
+    /// 搬迁理由见 `CanvasNodeNameTag` 的注释（名字进卡里就得从内容区切一条横带，卡片于是从
+    /// "一块内容"变成"一个带标题的控件"）。这里**只留状态角标**，因为它和路径标识是两类东西：
+    ///
+    /// - 路径标识说的是"我是谁"—— 这是**身份**，卡外名签的职责。
+    /// - 状态角标说的是"我此刻怎么了"（排队 / 生成中 / 失败）—— 这是**内容的状态**，必须压在
+    ///   内容上。挂到卡外名签旁边会离它描述的对象太远，而且名签只有 14pt 高，塞不下。
+    ///
+    /// 保留 `overlay` 而不改回 `HStack` 的原因没变：居中的东西必须相对**卡片**居中，
+    /// 不是相对"剩下的空间"居中（状态角标宽度是变的，"排队 · 前方 3" 比 "失败" 宽一倍）。
     private var headerRow: some View {
-        Text(pathLabel)
+        // 占位的空 Text 而不是 Spacer：这一行的高度由字号决定（`CanvasCardLayout` 的纵向预算
+        // 按 header 行高算过），换成 Spacer 会让它塌成 0 高，卡内所有内容整体上移 ~13pt，
+        // 而那套预算是被 smoke 断言逐像素钉住的。
+        Text(" ")
             .font(.system(size: fs(9.5), weight: .semibold))
-            .foregroundColor(AppTheme.canvasCardMetaInk)
-            .lineLimit(1)
-            .truncationMode(.middle)
-            // 单行也要禁字距自适应：不然缩放时"页面 - 组 - 槽位"这行会时紧时松地呼吸。
-            .canvasStableLabel()
-            // ★ v2.11.10：`textCounter` 恒为 1，这里已是空操作（文字随画布等比）。保留调用位置是
-            // 为了保留 `canvasStableText` 那一组“禁字距收紧 / 禁字号自适应”的防抖语义。
-            .canvasScreenFixedText(textCounter)
-            // ★ 八轮：节点缩到 40pt 以下、或这一行放不下一行固定字号的字，就别写字了。
-            .opacity(textOpacity)
-            // 给两侧控件留出通道，否则长路径会压在图标上。
-            .padding(.horizontal, s(24))
             .frame(maxWidth: .infinity, alignment: .center)
             .overlay(alignment: .leading) { statusBadge }
-            // ★ v2.15.0：文本节点右上角挂字数。
-            // 媒体节点的"尺寸 · 比例 · 时长 · 体积"角标画在媒体区上，文本节点没有媒体区，
-            // 而"这段有多长"是它唯一等价的量级信息 —— 25% 缩放下不用点开就能判断哪张是长文。
             .overlay(alignment: .trailing) { textCountBadge }
-            .help(pathLabel)
     }
 
     /// 字数角标（仅文本节点、且有字时）。

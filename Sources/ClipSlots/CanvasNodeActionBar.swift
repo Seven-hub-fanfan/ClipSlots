@@ -96,10 +96,10 @@ struct CanvasNodeActionBar: View {
     let onCopyText: (() -> Void)?
 
     var body: some View {
-        HStack(spacing: 6) {
+        HStack(spacing: TapSkin.toolbarItemSpacing) {
             runControl
             if node.kind.producesAsset {
-                Divider().frame(height: 16).opacity(0.35)
+                barDivider
                 modelChip
                 if currentModel?.supportsRatio ?? true { ratioChip }
                 if isVideo {
@@ -108,7 +108,7 @@ struct CanvasNodeActionBar: View {
                     if currentModel?.supportsAudio ?? false { audioChip }
                 }
             }
-            Divider().frame(height: 16).opacity(0.35)
+            barDivider
             spawnButton
             // ★ v2.15.0：全屏 / 入库。两者都放在「产物动作」这一档里 —— 它们的对象是**节点的内容**
             // 而不是节点的参数，和 `spawnButton` / `revealButton` 同类。
@@ -120,15 +120,31 @@ struct CanvasNodeActionBar: View {
             }
             if upstreamCount > 0 { upstreamBadge }
         }
-        .padding(.horizontal, 8)
-        .padding(.vertical, 5)
+        .padding(.horizontal, 14)
+        // v2.16.0：固定 44pt 高（实测 TapNow），不再由内容撑出高度。
+        //
+        // 原来是 `.padding(.vertical, 5)`，高度取决于里面最高的那个 chip —— 于是同一个画布上
+        // 不同节点的操作条高矮不一（文本节点没有模型 chip，矮一截），hover 在两张卡之间来回移动时
+        // 那条胶囊在上下跳。固定高度让它变成一个**稳定的容器**，这正是"丝滑"的一部分：
+        // 界面元素不应该因为内容不同而改变自己的骨架。
+        .frame(height: TapSkin.toolbarHeight)
         .background(
             Capsule(style: .continuous)
-                .fill(AppTheme.canvasChromeSurface)
-                .overlay(Capsule(style: .continuous).stroke(AppTheme.subtleBorder.opacity(0.9), lineWidth: 1))
-                .shadow(color: Color.black.opacity(0.16), radius: 6, x: 0, y: 2)
+                .fill(TapSkin.chromeFill)
+                // 不描边。纯黑画布上，`#1E1E1E` 的胶囊自己就有清晰边界；加一圈亮边等于给
+                // 一个临时浮层画上"控件框"，而 TapNow 全套 chrome 都没有描边。
+                // 阴影也压到最轻：它的作用只是把胶囊从卡片上"抬起来"半毫米。
+                .shadow(color: Color.black.opacity(0.55), radius: 10, x: 0, y: 3)
         )
         .onAppear { catalog.loadIfNeeded() }
+    }
+
+    /// 分组分隔。用一条 1pt 竖线而不是 `Divider()`：`Divider` 在 `HStack` 里会去问环境要
+    /// 系统分隔色（浅色模式下接近黑），压在 `#1E1E1E` 上看不见。
+    private var barDivider: some View {
+        Rectangle()
+            .fill(TapSkin.chromeDivider)
+            .frame(width: 1, height: 18)
     }
 
     // MARK: 跑

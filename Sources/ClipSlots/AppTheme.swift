@@ -244,7 +244,7 @@ enum AppTheme {
     static var windowBackground: Color { isMinimalSkin ? minimalWindow : colorfulWindowBackground }
     static func windowBackground(_ scheme: ColorScheme) -> Color { windowBackground }
 
-    // MARK: 画布底色（v2.11.7 hotfix18）
+    // MARK: 画布底色（v2.11.7 hotfix18 · v2.16.0 钉死深色）
     //
     // ★ 为什么画布不能直接用 `windowBackground`：
     //   多彩皮肤的整窗氛围层（RetroPosterAmbientBackground）里有一枚 **820pt 的蓝紫大圆**
@@ -255,14 +255,22 @@ enum AppTheme {
     //
     // 所以画布自己铺一层**完全不透明**的中性底：既根除蓝圆，也让白色网格线有稳定的对比基准。
     // 刻意不改氛围层本身 —— 编辑模式的多彩海报是既有设计，不该被画布的需求牵连。
-    private static let colorfulCanvasSurface = dyn(light: Color(red: 0.957, green: 0.957, blue: 0.965),
-                                                   dark: Color(red: 0.106, green: 0.110, blue: 0.122))
-    static var canvasSurface: Color { isMinimalSkin ? minimalWindow : colorfulCanvasSurface }
+    //
+    // ★★ v2.16.0：画布底改成纯黑（`TapSkin.void`）之后，下面这一整组 `canvas*` token 全部
+    //    **不再跟随系统浅色/深色**，一律取原来的深色那一档。
+    //
+    //    这不是顺手统一风格，是一条硬约束：画布已经是纯黑的了，而 `dyn(light:dark:)` 在浅色模式下
+    //    会把文字给成 `Color.black.opacity(0.88)`。黑字压在纯黑底上 = **完全看不见**。
+    //    浅色模式用户一进画布，侧栏、操作条、菜单上的字会整片消失。
+    //
+    //    换句话说：底色一旦脱离主题体系，压在它上面的每一个墨色都必须跟着脱离，否则就是半套。
+    //    v2.15.0 之前画布底是 `dyn` 的，所以这组 token 也是 `dyn` 的，两边是配套的；现在一起改。
+    //    保留 `isMinimalSkin` 分支已无意义（简洁皮肤那侧同样会给浅色值），一并去掉。
+    static var canvasSurface: Color { Color(red: 0.106, green: 0.110, blue: 0.122) }
 
     /// 画布上「贴边 chrome」（左侧栏）的底色：比画布本体略浅/略深一档，形成层次但不靠阴影。
-    private static let colorfulCanvasChromeSurface = dyn(light: Color(red: 0.988, green: 0.988, blue: 0.992),
-                                                        dark: Color(red: 0.141, green: 0.145, blue: 0.157))
-    static var canvasChromeSurface: Color { isMinimalSkin ? minimalCardEmpty : colorfulCanvasChromeSurface }
+    /// ★ v2.16.0：钉死深色，理由见上面 `canvasSurface` 的注释（纯黑画布上不能有浅色面）。
+    static var canvasChromeSurface: Color { Color(red: 0.141, green: 0.145, blue: 0.157) }
 
     // MARK: 画布 chrome 上的文字墨色（v2.11.7 hotfix19）
     //
@@ -274,31 +282,25 @@ enum AppTheme {
     //
     // 所以画布 chrome 的文字一律从**显式基色**起算（不再走 `.primary/.secondary` 的语义色），
     // 三档墨色都直接给最终 alpha，深色一侧全部 ≥ white 60%。
-    private static let colorfulCanvasChromeInk = dyn(light: Color.black.opacity(0.88),
-                                                     dark: Color.white.opacity(0.93))
-    private static let colorfulCanvasChromeSecondaryInk = dyn(light: Color.black.opacity(0.66),
-                                                              dark: Color.white.opacity(0.78))
-    private static let colorfulCanvasChromeTertiaryInk = dyn(light: Color.black.opacity(0.50),
-                                                             dark: Color.white.opacity(0.62))
+    // ★ v2.16.0：三档墨色全部钉死为白系。浅色那一档（黑字）压在纯黑画布上就是隐形，
+    // 见 `canvasSurface` 注释里那条硬约束。
+    private static let colorfulCanvasChromeInk = Color.white.opacity(0.93)
+    private static let colorfulCanvasChromeSecondaryInk = Color.white.opacity(0.78)
+    private static let colorfulCanvasChromeTertiaryInk = Color.white.opacity(0.62)
 
     /// 画布 chrome 的主文字（侧栏标题、组名、缩放百分比）。
-    static var canvasChromeInk: Color { isMinimalSkin ? minimalControlInk : colorfulCanvasChromeInk }
+    static var canvasChromeInk: Color { colorfulCanvasChromeInk }
     /// 次级文字（槽位行、页面名、图标）。
-    static var canvasChromeSecondaryInk: Color {
-        isMinimalSkin ? minimalSecondaryInk : colorfulCanvasChromeSecondaryInk
-    }
+    static var canvasChromeSecondaryInk: Color { colorfulCanvasChromeSecondaryInk }
     /// 三级文字（展开箭头、拖拽把手、"无可用内容"这类占位）。仍保证深色下 ≥ white 60%。
-    static var canvasChromeTertiaryInk: Color {
-        isMinimalSkin ? minimalSecondaryInk : colorfulCanvasChromeTertiaryInk
-    }
+    static var canvasChromeTertiaryInk: Color { colorfulCanvasChromeTertiaryInk }
 
     /// 节点卡片底部元数据（模型名 / 比例 / 溯源槽位）的墨色。
     ///
     /// 单列一档是因为它的背景是**卡片**（`cardBackground`）而不是 chrome 侧栏，两者在多彩深色下
     /// 差着一档明度；共用一个 token 必然有一侧偏灰。
-    private static let colorfulCanvasCardMetaInk = dyn(light: Color.black.opacity(0.58),
-                                                       dark: Color.white.opacity(0.72))
-    static var canvasCardMetaInk: Color { isMinimalSkin ? minimalSecondaryInk : colorfulCanvasCardMetaInk }
+    /// ★ v2.16.0：钉死白系（同上）。
+    static var canvasCardMetaInk: Color { Color.white.opacity(0.72) }
 
     /// 纯文本节点的内容框底色。
     ///
@@ -322,27 +324,17 @@ enum AppTheme {
     /// 都跟着走），也顺带跟两套皮肤（多彩 / 简洁）保持一致。这条是本项目反复验证过的规律：
     /// **内容面用透明度压出来，别硬写不透明色**——硬写的那一刻就和皮肤 / 卡片底色脱钩了。
     /// 深色模式那一档保持不变（它要比卡片底更**亮**一档，用黑色叠加做不到，只能给实色）。
-    static var canvasTextNodeFill: Color {
-        dyn(light: Color.black.opacity(0.035),
-            dark: Color(red: 0.175, green: 0.178, blue: 0.19))
-    }
+    /// ★ v2.16.0：钉死深色（同上）。
+    static var canvasTextNodeFill: Color { Color(red: 0.175, green: 0.178, blue: 0.19) }
 
     /// 纯文本节点内容框的描边（★ v2.11.16）：浅色模式靠它划出"这里是内容区"的边界。
-    static var canvasTextNodeStroke: Color {
-        dyn(light: Color.black.opacity(0.10), dark: Color.white.opacity(0.08))
-    }
+    static var canvasTextNodeStroke: Color { Color.white.opacity(0.08) }
 
     /// 纯文本节点的正文色（★ v2.11.16）：跟随模式，不再钉死白色。
-    static var canvasTextNodeInk: Color {
-        dyn(light: Color(red: 0.12, green: 0.13, blue: 0.15).opacity(0.92),
-            dark: Color.white.opacity(0.92))
-    }
+    static var canvasTextNodeInk: Color { Color.white.opacity(0.92) }
 
     /// 纯文本节点的占位文案色（★ v2.11.16）。
-    static var canvasTextNodePlaceholderInk: Color {
-        dyn(light: Color(red: 0.12, green: 0.13, blue: 0.15).opacity(0.42),
-            dark: Color.white.opacity(0.45))
-    }
+    static var canvasTextNodePlaceholderInk: Color { Color.white.opacity(0.45) }
 
     private static let colorfulElevatedBackground = dyn(light: Color.white.opacity(0.82),
                                                         dark: Color.white.opacity(0.055))

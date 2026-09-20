@@ -3469,23 +3469,39 @@ do {
             "★★⌘Delete 不应判为画布删除（避免与系统语义打架）")
     t.equal(KB.action(keyCode: 0, command: false, shift: false), .none, "无关键位应返回 .none")
 
-    // ── 多选位移：吸附 delta，而不是逐节点吸附新坐标
+    // ── 多选位移：**不吸附**，且相对间距必须守恒（v2.16.0 改）
+    //
+    // v2.15.0 之前这里断言的是"多选位移必须吸附 delta"。v2.16.0 取消了拖动吸附
+    // （见 `CanvasStore.moveNodes` 的注释：预览不吸附而提交吸附 ⇒ 每次松手卡片往回跳半格，
+    // 这是"不丝滑"最直接的来源；实测 TapNow 也完全没有吸附）。
+    //
+    // 契约因此变成两条：
+    //   1. 位移**按原值**施加（只做 0.5pt 取整挡浮点噪声），不得再吸到格线上；
+    //   2. 相对间距守恒 —— 这一条**没变**，而且比原来更重要：它原先是靠"吸附 delta 而非吸附
+    //      每个新坐标"间接保证的，现在是靠"施加同一个 delta"直接保证的。
     let step = CanvasGeometry.snapStep
-    t.check(step > 0, "snapStep 必须为正")
+    t.check(step > 0, "snapStep 必须为正（新建节点落点仍然吸附，见 placeSlot）")
     // 两个节点相距 30pt（非网格整数倍）。同一 delta 施加后，间距必须仍是 30pt。
     let ax: CGFloat = 0, bx: CGFloat = 30
     let rawDelta: CGFloat = 13
-    let snappedDelta = CanvasGeometry.snapScalar(rawDelta, step: step)
-    let newAx = ax + snappedDelta
-    let newBx = bx + snappedDelta
+    // 与 `CanvasStore.moveNodes` 里的实现同式：0.5pt 取整。
+    let appliedDelta = (rawDelta * 2).rounded() / 2
+    t.check(canvasApprox(appliedDelta, rawDelta),
+            "★★v2.16.0：拖动位移不得吸附到网格（13pt 应原样施加，实得 \(appliedDelta)）。"
+            + "若这条失败，说明 moveNodes 又把 snapScalar 加回去了，松手回跳的手感会一起回来")
+    let newAx = ax + appliedDelta
+    let newBx = bx + appliedDelta
     t.check(canvasApprox(newBx - newAx, bx - ax),
-            "★★多选位移必须吸附 delta：施加同一位移后两节点间距应仍为 \(bx - ax)（实得 \(newBx - newAx)）")
-    // 反例留档：如果改成逐节点吸附新坐标，间距就会被改掉。
+            "★★多选位移必须保持相对间距：施加同一位移后两节点间距应仍为 \(bx - ax)（实得 \(newBx - newAx)）")
+    // 反例留档：如果改成逐节点吸附新坐标，间距就会被改掉 —— 这是当年引入"吸附 delta"的原因，
+    // 现在吸附整体退场，这个反例作为"为什么不能对坐标做任何逐点取整"的依据继续留着。
     let wrongAx = CanvasGeometry.snapScalar(ax + rawDelta, step: step)
     let wrongBx = CanvasGeometry.snapScalar(bx + rawDelta, step: step)
     t.check(!canvasApprox(wrongBx - wrongAx, bx - ax),
-            "★★反例校验：逐节点吸附新坐标确实会改变相对间距（\(wrongBx - wrongAx) ≠ \(bx - ax)），"
-            + "所以实现必须走 snapScalar(delta)")
+            "★★反例校验：逐节点吸附新坐标确实会改变相对间距（\(wrongBx - wrongAx) ≠ \(bx - ax)）")
+    // 0.5pt 取整确实在挡浮点噪声（这是保留它的唯一理由）。
+    t.check(canvasApprox(((132.40000000000003 as CGFloat) * 2).rounded() / 2, 132.5),
+            "0.5pt 取整应把浮点噪声收成干净值")
 
     // snapScalar 自身的边界
     t.equal(CanvasGeometry.snapScalar(0, step: step), 0, "snapScalar：0 原样")

@@ -335,12 +335,27 @@ final class CanvasStore: ObservableObject {
     ///
     /// 这里刻意接受**位移量 delta** 而不是「新坐标」：批量移动要保持选中集合内部的相对位置不变，
     /// 逐个算新坐标就得在调用方留一份「拖拽开始时每个节点的原点」快照，而 delta 天然就是不变量。
-    /// 吸附也因此只能按 delta 吸附（对每个节点各自 snap 会把原本错开的节点吸到同一条格线上，
-    /// 相对位置被悄悄改掉）。
+    ///
+    /// ## ★ v2.16.0：**取消网格吸附**
+    ///
+    /// 原来这里对 delta 做 `snapScalar(step: snapStep)`。它是 ClipSlots 画布"不丝滑"最直接的一个
+    /// 来源，而且是双重的：
+    ///
+    /// 1. **拖拽过程中预览用的是原始位移**（`CanvasWorkspaceView.dragDelta` 没有吸附），
+    ///    提交时才吸附 —— 于是每次松手，卡片都会**往回跳**最多半格。用户的手已经把卡片放在了
+    ///    他想要的位置，屏幕上却在最后一刻挪了一下。这不是"整齐"，这是"不听话"。
+    /// 2. 即使把预览也改成吸附（另一种自洽方案），拖动就会变成逐格跳 —— 实测 TapNow 是**连续**的，
+    ///    它的卡片左边缘落在 16pt 网格的非整数倍上，根本没有吸附这回事。
+    ///
+    /// 保留 0.5pt 取整只为了别让浮点噪声（`…x = 132.40000000000003`）进存档，它在视觉上等于连续。
+    ///
+    /// 吸附并没有从项目里消失：**新建节点**仍然走 `CanvasGeometry.snap`（见 `placeSlot`）。
+    /// 那里是对的 —— 算出来的落点本来就没有"用户的手"可以尊重，对齐让批量新建看起来整齐。
+    /// 区别在于：吸附该服务于"系统自己决定的位置"，而不该覆盖"用户亲手指定的位置"。
     func moveNodes(ids: Set<String>, by rawDelta: CGSize) {
         guard !ids.isEmpty else { return }
-        let delta = CGSize(width: CanvasGeometry.snapScalar(rawDelta.width, step: CanvasStore.snapStep),
-                           height: CanvasGeometry.snapScalar(rawDelta.height, step: CanvasStore.snapStep))
+        let delta = CGSize(width: (rawDelta.width * 2).rounded() / 2,
+                           height: (rawDelta.height * 2).rounded() / 2)
         guard delta.width != 0 || delta.height != 0 else { return }
         let moved = nodes.filter { ids.contains($0.id) }
         guard !moved.isEmpty else { return }

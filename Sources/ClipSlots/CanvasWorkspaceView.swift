@@ -199,7 +199,10 @@ struct CanvasWorkspaceView: View {
                 fullscreenPreviewOverlay
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .background(AppTheme.windowBackground)
+            // v2.16.0：画布底改**纯黑**，且不再跟随 AppTheme 的浅色/深色模式。
+            // 理由见 `TapSkin` 的注释：画布是摄影棚，主角是用户的图片和视频，浅色底会把媒体的
+            // 对比度吃掉一半。这是全 App 唯一一处刻意脱离主题体系的界面。
+            .background(TapSkin.void)
             // ★ v2.11.7 hotfix17: 滚轮 / 中键只能从 AppKit 拿（见 CanvasInputRouter）。
             // 这里只放一个对鼠标透明的几何锚点，事件监听的寿命由 @StateObject 持有的路由器决定。
             .background(CanvasInputAnchor(router: inputRouter))
@@ -472,44 +475,34 @@ struct CanvasWorkspaceView: View {
         archiveNode(node, toSlot: slot)
     }
 
-    // MARK: - 节点卡片分派（v2.15.0）
+    // MARK: - 节点卡片分派（v2.15.0 建立 · v2.16.0 收敛为两张卡）
 
     /// 按 `kind.cardForm` 选卡片。
     ///
+    /// ## v2.16.0：三张卡并成两张
+    ///
+    /// v2.15.0 是「通用槽位卡 + 媒体卡」两个视图、三种形态（`.slotStack` / `.text` / `.media`），
+    /// 但 `.text` 走的是通用卡 —— 于是文本节点继承了一整套它用不上的结构（path 标题行、入参文件行、
+    /// 扇形槽位堆）。实测 TapNow 之后这个分法站不住了：TapNow 的文本节点和图片节点**外形完全相同**，
+    /// 区别只在"中间画字还是画图"。
+    ///
+    /// 所以 `.text` / `.media` 一起交给 `CanvasTapNodeCard`（它内部就是一个 `switch`），
+    /// `.slotStack` 留给 `CanvasNodeCardView`。
+    ///
+    /// ## 为什么 `.slotStack` **不**一起并过去
+    ///
+    /// 槽位节点不是"一块内容"，它是**一叠内容**（一个槽位组里的多个槽位，可扇形展开、可翻页、
+    /// 可提升/删除入参）。这些交互是 ClipSlots 自己的东西，TapNow 里没有对应物，硬塞进
+    /// 「一块圆角媒体」的模型里会把它做残。它需要的是**按 TapNow 的皮肤重绘**（去边框、去标题栏、
+    /// 名签外置），而不是换一个模型 —— 皮肤和模型是两件事，这一版只统一皮肤。
+    ///
     /// ## 为什么分派在这里而不是在卡片内部
     ///
-    /// 媒体卡（`CanvasMediaNodeCard`）多了一条通用卡没有的出口：**全屏预览**。全屏层的状态
-    /// （`previewTarget`）住在本视图里，因为它要盖在整个工作区之上、还要能被 `Esc` 关掉 ——
-    /// 这些都不是一张卡片能负责的。若把分派藏进 `CanvasNodeCardView`，那个回调就得穿透一层
-    /// 只为了转交，而通用卡自己永远不会用到它。
-    ///
-    /// 顺带的好处：`CanvasNodeCardView` 从此不再需要知道"媒体节点长什么样"，它的
-    /// `imageNodeStack` 重新变成名副其实的"槽位卡"。
+    /// 全屏层的状态（`previewTarget`）住在本视图里，因为它要盖在整个工作区之上、还要能被 `Esc`
+    /// 关掉 —— 这些都不是一张卡片能负责的。若把分派藏进卡片，那个回调就得穿透一层只为了转交。
     @ViewBuilder
     private func nodeCard(_ node: CanvasNode, isEditing: Bool) -> some View {
-        if node.kind.isMediaNode {
-            CanvasMediaNodeCard(node: node,
-                                isSelected: canvas.selectedNodeIds.contains(node.id),
-                                isEditing: isEditing,
-                                text: liveText(for: node),
-                                pathLabel: pathLabel(for: node),
-                                attachments: liveAttachments(for: node),
-                                renderScale: layoutZoom,
-                                textCounter: textCounter,
-                                viewZoom: zoom,
-                                isHoverHeld: hoverHoldNodeId == node.id,
-                                onHoverChanged: { noteNodeHover(node, hovering: $0) },
-                                onBeginEdit: { beginEdit(node) },
-                                onCommitEdit: { commitEdit(node, text: $0) },
-                                onCancelEdit: { editingNodeId = nil },
-                                onOpenInputFiles: { openInputFiles(node) },
-                                onOpenFullscreen: { openFullscreen(node, attachment: $0) },
-                                onActivateNode: {
-                                    guard editingNodeId != node.id else { return }
-                                    canvas.select(id: node.id,
-                                                  additive: NSEvent.modifierFlags.contains(.shift))
-                                })
-        } else {
+        if node.kind.cardForm == .slotStack {
             CanvasNodeCardView(node: node,
                                isSelected: canvas.selectedNodeIds.contains(node.id),
                                text: liveText(for: node),
@@ -538,6 +531,24 @@ struct CanvasWorkspaceView: View {
                                onToast: { store.transientUI.showToast($0) },
                                isHoverHeld: hoverHoldNodeId == node.id,
                                onHoverChanged: { noteNodeHover(node, hovering: $0) })
+        } else {
+            CanvasTapNodeCard(node: node,
+                              isSelected: canvas.selectedNodeIds.contains(node.id),
+                              isEditing: isEditing,
+                              text: liveText(for: node),
+                              pathLabel: pathLabel(for: node),
+                              attachments: liveAttachments(for: node),
+                              renderScale: layoutZoom,
+                              textCounter: textCounter,
+                              viewZoom: zoom,
+                              isHoverHeld: hoverHoldNodeId == node.id,
+                              canArchive: canArchiveToLibrary(node),
+                              onHoverChanged: { noteNodeHover(node, hovering: $0) },
+                              onBeginEdit: { beginEdit(node) },
+                              onCommitEdit: { commitEdit(node, text: $0) },
+                              onCancelEdit: { editingNodeId = nil },
+                              onOpenFullscreen: { openFullscreen(node, attachment: $0) },
+                              onArchive: { archiveNodeToLibrary(node) })
         }
     }
 
@@ -702,6 +713,14 @@ struct CanvasWorkspaceView: View {
                 guard canvas.activeTool == .select else { return }
                 if draggingNodeId != node.id {
                     draggingNodeId = node.id
+                    // v2.16.0：抓起来的瞬间换握拳光标。
+                    //
+                    // 这里用 `push/pop` 而不是 `CursorArea`（悬停那档走 `CursorArea`，见
+                    // `TapSkin` 里的说明）—— 拖拽是一段**有明确起止**的操作，起点在这个 if 里
+                    // （只进一次），终点在 `onEnded` 里（必然执行，含归槽早退那条路径），
+                    // push/pop 严格配对。悬停不同：`onHover(false)` 会在窗口失焦等情况下漏发，
+                    // 那才是 push/pop 会漏栈的场景。
+                    NSCursor.closedHand.push()
                     if !canvas.selectedNodeIds.contains(node.id) {
                         canvas.select(id: node.id, additive: false)
                     }
@@ -716,7 +735,10 @@ struct CanvasWorkspaceView: View {
                 updateArchiveDrag(node: node, at: value.location)
             }
             .onEnded { value in
+                // 这条 guard 同时也是 `NSCursor` 栈的配对保证：`draggingNodeId` 只在 onChanged
+                // 里紧跟 `push()` 之后被赋值，所以走到这里必然恰好 push 过一次。
                 guard draggingNodeId == node.id else { return }
+                NSCursor.pop()
                 // 归槽优先：光标松在侧栏的某个槽位块上时，这次拖拽的语义是"把内容归进那个槽位"，
                 // 而**不是**移动节点位置。两件事都做的话，节点会先归槽再被挪到侧栏底下（被侧栏
                 // 盖住 = 用户眼里凭空消失）。
@@ -1945,31 +1967,51 @@ struct CanvasWorkspaceView: View {
     }
 }
 
-// MARK: - 网格背景
+// MARK: - 点阵背景
 
-/// 细网格。用 `Canvas`（Core Graphics 直绘）而不是成百上千个 `Divider` —— 后者在缩小时会瞬间
-/// 创建几千个视图节点把主线程打满。
+/// 画布底纹：**点阵**（v2.16.0 由实线网格改成点阵）。
+///
+/// ## 为什么从线改成点
+///
+/// 实线网格会把画布切成一格一格的**表格**，视线沿着线条跑，节点变成"填在格子里的东西"。
+/// TapNow 用点阵：点之间没有连续路径，眼睛抓不住方向，于是底纹退回成纯粹的"这里有一片空间"
+/// 的质感提示，注意力全部留给内容。实测 TapNow 就是点阵，间距 16pt、点径约 1.2pt、色约 `#4A4A4A`。
+///
+/// 还有一条实际好处：线网格在缩小时，相邻两条线会落进同一个物理像素并互相叠加，出现"某几条
+/// 突然变粗"的摩尔纹；点阵缩小只是变稀，不会互相干涉。
+///
+/// ## 为什么点也**不**随缩放变小
+///
+/// `dotSize` 直接用屏幕点，不乘 zoom。底纹的作用是给出一个恒定的"纸面颗粒"参照——缩小时如果
+/// 点也跟着缩，到 0.4x 就全部消失，画布会变成一块什么都没有的黑布，用户失去"我还在画布上，
+/// 只是拉远了"的感知。间距跟着缩（由 `gridScreenStep` 在 14…96pt 之间按 2 的幂折叠），
+/// 点径不跟着缩，是这两个需求的交点。
 struct CanvasGridBackground: View {
     let pan: CGSize
     let zoom: CGFloat
 
     var body: some View {
         Canvas { context, canvasSize in
-            let step = CanvasGeometry.gridScreenStep(base: CanvasStore.gridBase, zoom: zoom)
+            let step = CanvasGeometry.gridScreenStep(base: TapSkin.gridStep, zoom: zoom)
             let xs = CanvasGeometry.gridLineOffsets(viewLength: canvasSize.width,
                                                     panComponent: pan.width, step: step)
             let ys = CanvasGeometry.gridLineOffsets(viewLength: canvasSize.height,
                                                     panComponent: pan.height, step: step)
+            // 上限保护：xs × ys 在极端窗口尺寸下可能上万，`Path` 里塞太多子路径会拖慢每帧。
+            // 4000 个点已经远超"看得出是点阵"所需（1440×900 的窗口按 16pt 间距约 5000 个，
+            // 到这个量级视觉上早已饱和，少画一些完全看不出来）。
+            let budget = 4000
             var path = Path()
-            for x in xs {
-                path.move(to: CGPoint(x: x, y: 0))
-                path.addLine(to: CGPoint(x: x, y: canvasSize.height))
+            var drawn = 0
+            let d = TapSkin.gridDotSize
+            outer: for y in ys {
+                for x in xs {
+                    path.addEllipse(in: CGRect(x: x - d / 2, y: y - d / 2, width: d, height: d))
+                    drawn += 1
+                    if drawn >= budget { break outer }
+                }
             }
-            for y in ys {
-                path.move(to: CGPoint(x: 0, y: y))
-                path.addLine(to: CGPoint(x: canvasSize.width, y: y))
-            }
-            context.stroke(path, with: .color(AppTheme.subtleBorder.opacity(0.45)), lineWidth: 0.5)
+            context.fill(path, with: .color(TapSkin.gridDot))
         }
     }
 }

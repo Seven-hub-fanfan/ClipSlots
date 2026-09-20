@@ -54,8 +54,19 @@ struct CanvasPromptEditor: NSViewRepresentable {
         textView.isHorizontallyResizable = false
         textView.autoresizingMask = [.width]
         textView.textContainer?.widthTracksTextView = true
-        textView.textColor = NSColor.labelColor
+        // ★ v2.16.0：墨色**写死为亮色**，不能用 `NSColor.labelColor`。
+        //
+        // `labelColor` 是动态色，跟随视图的 `NSAppearance`。画布在 v2.16.0 之前也跟着系统深浅走，
+        // 所以它是对的；现在画布固定纯黑、卡片固定 `#1F1F1F`（见 `AppTheme.canvasSurface` 的
+        // 注释），浅色模式下 `labelColor` 解析成近黑 —— **在深色卡片上编辑提示词时看不见自己
+        // 打的字**。装机实测发现的：编辑态那张卡上只有一个闪动的光标。
+        //
+        // 同时把整个滚动视图的 appearance 钉成 darkAqua。只改 `textColor` 不够：选区高亮
+        // （`selectedTextBackgroundColor`）和滚动条也是动态色，浅色模式下选中一段文字会得到
+        // 一块浅蓝底 + 近黑字，对比度比不选还差。appearance 一钉，这些派生色全部跟着走对。
+        textView.textColor = NSColor.white.withAlphaComponent(0.92)
         textView.insertionPointColor = NSColor.controlAccentColor
+        scroll.appearance = NSAppearance(named: .darkAqua)
         // 全选，符合"点编辑就想整段重写"的常见意图；想追加的话按一下 → 即可。
         // ★ v2.11.9：**不再全选**，而是把插入点放到文本开头。
         //

@@ -108,9 +108,14 @@ extension CanvasWorkspaceView {
            inputFilesNodeId == nil {
             let rect = screenFrame(of: node)
             let anchor = CanvasEdgeGeometry.outputHandle(of: rect)
-            CanvasOutputPort(isActive: linkDrag?.fromNodeId == node.id)
-                .position(x: anchor.x + 9, y: anchor.y)
+            CanvasPort(isActive: linkDrag?.fromNodeId == node.id,
+                       isConnected: !canvas.outgoingEdges(of: node.id).isEmpty)
+                // v2.16.0：圆心推到卡片右缘**外侧 28pt**（实测 TapNow 约 29pt）。
+                // 贴边的旧位置（+9pt）有两个毛病：圆压在卡片圆角上分不清是控件还是装饰；
+                // 起手那几个像素仍在卡片内，节点拖动手势会把拖线抢走。
+                .position(x: anchor.x + TapSkin.portOffset, y: anchor.y)
                 .gesture(linkDragGesture(from: node))
+                .tapCursor(.crosshair)
                 .zIndex(20)
         }
     }
@@ -128,9 +133,9 @@ extension CanvasWorkspaceView {
             ForEach(linkCandidates(from: drag.fromNodeId), id: \.id) { node in
                 let rect = screenFrame(of: node)
                 let anchor = CanvasEdgeGeometry.inputHandle(of: rect)
-                CanvasInputPort(incomingCount: canvas.incomingEdges(of: node.id).count,
-                                isTargeted: drag.targetNodeId == node.id)
-                    .position(x: anchor.x - 8, y: anchor.y)
+                CanvasPort(isActive: drag.targetNodeId == node.id,
+                           isConnected: !canvas.incomingEdges(of: node.id).isEmpty)
+                    .position(x: anchor.x - TapSkin.portOffset, y: anchor.y)
                     .allowsHitTesting(false)
                     .zIndex(20)
             }
@@ -141,9 +146,9 @@ extension CanvasWorkspaceView {
                   inputFilesNodeId == nil {
             let rect = screenFrame(of: node)
             let anchor = CanvasEdgeGeometry.inputHandle(of: rect)
-            CanvasInputPort(incomingCount: canvas.incomingEdges(of: node.id).count,
-                            isTargeted: false)
-                .position(x: anchor.x - 8, y: anchor.y)
+            CanvasPort(isActive: false,
+                       isConnected: !canvas.incomingEdges(of: node.id).isEmpty)
+                .position(x: anchor.x - TapSkin.portOffset, y: anchor.y)
                 .allowsHitTesting(false)
                 .zIndex(20)
         }
@@ -302,9 +307,23 @@ extension CanvasWorkspaceView {
         }
     }
 
+    /// 操作条的 y（屏幕坐标，胶囊中心）。
+    ///
+    /// ## 为什么这个数是"堆出来"的而不是拍一个
+    ///
+    /// v2.16.0 起卡片**上方 20pt 被名签占了**（`tagGap 6 + tagHeight 14`，见 `CanvasTapNodeCard`）。
+    /// 旧版 `rect.minY - 20` 正好把操作条压在名签上，于是每次 hover 都会遮住"这是哪个节点"——
+    /// 恰恰是操作条最需要用户确认的那条信息。
+    ///
+    /// 所以高度是逐段累加的：名签带 20 + 呼吸 `toolbarGap` 10 + 胶囊自身半高 22 = 52。
+    /// 写成表达式而不是常量 52，是为了改任一段时不用重新做这道算术。
     private func actionBarY(for rect: CGRect) -> CGFloat {
-        let above = rect.minY - 20
-        return above < 28 ? rect.maxY + 20 : above
+        let tagBand = TapSkin.tagGap + TapSkin.tagHeight
+        let above = rect.minY - tagBand - TapSkin.toolbarGap - TapSkin.toolbarHeight / 2
+        // 顶到视口外的操作条等于没有，而这一条正是"节点即执行单元"的落点，不能因为卡片拖到
+        // 顶部就消失 —— 翻到下边缘。下边缘没有名签，所以只需要让开 `toolbarGap`。
+        guard above < TapSkin.toolbarHeight / 2 + 6 else { return above }
+        return rect.maxY + TapSkin.toolbarGap + TapSkin.toolbarHeight / 2
     }
 
     /// 「以它为输入新建下游节点」：等价于旧版卡片下方那个 `+`，但入口挪到了操作条上。
