@@ -41,11 +41,11 @@ struct CanvasInspectorPanel: View {
             Divider().opacity(0.6)
 
             VStack(alignment: .leading, spacing: 10) {
-                // 出图参数放最上面：它是这类节点最常改的东西（字体是一次性设定，模型/尺寸是每次
-                // 出图前都要看一眼的）。非出图节点（文本节点）没有这一段。
-                // 只给图像节点：生图链路目前只实现了 image（视频节点的 model/ratio 还没有对应的
-                // 提交路径，给它一个能改但改了不生效的选择器是负收益）。
-                if node.kind == .image {
+                // 出图/出视频参数放最上面：它是这类节点最常改的东西（字体是一次性设定，
+                // 模型/尺寸是每次生成前都要看一眼的）。文本节点没有这一段。
+                // v2.11.19：视频节点接上了提交路径，于是这一段对 image / video 同时开放，
+                // 差别在于视频多了分辨率 / 时长 / 配音三项（且只在模型真的声明了对应参数时出现）。
+                if node.kind.producesAsset {
                     generationSection
                     Divider().opacity(0.4)
                 }
@@ -93,7 +93,7 @@ struct CanvasInspectorPanel: View {
     private var generationSection: some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 4) {
-                sectionTitle("出图模型")
+                sectionTitle(isVideoNode ? "视频模型" : "出图模型")
                 Spacer(minLength: 0)
                 if catalog.isLoading {
                     ProgressView()
@@ -145,7 +145,7 @@ struct CanvasInspectorPanel: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
 
-            sectionTitle("尺寸")
+            sectionTitle(isVideoNode ? "画面比例" : "尺寸")
 
             Picker("", selection: ratioBinding) {
                 if ratioOptions.isEmpty {
@@ -182,8 +182,151 @@ struct CanvasInspectorPanel: View {
                     .foregroundColor(AppTheme.canvasChromeTertiaryInk)
                     .fixedSize(horizontal: false, vertical: true)
             }
+
+            if isVideoNode {
+                videoSection
+            }
         }
         .onAppear { catalog.loadIfNeeded() }
+    }
+
+    // MARK: 视频参数（v2.11.19）
+    //
+    // 三项都**按模型声明条件出现**，不是"灰掉"：传模型没声明的参数会被 CLI 当场拒收
+    // （实测给 seedancePro1 传 generate_audio 直接报 `does not publish parameter`），
+    // 一个永远点不动的开关只会让人反复怀疑自己哪里没配对。
+
+    private var videoSection: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            if let model = currentModel, model.supportsResolution {
+                sectionTitle("分辨率")
+                Picker("", selection: resolutionBinding) {
+                    if model.resolutionOptions.isEmpty {
+                        Text(node.resolution.isEmpty ? "模型默认" : node.resolution).tag(node.resolution)
+                    } else {
+                        if unlistedResolution {
+                            Text("\(node.resolution)（当前）").tag(node.resolution)
+                        }
+                        ForEach(model.resolutionOptions) { opt in
+                            Text(opt.label).tag(opt.value)
+                        }
+                    }
+                }
+                .labelsHidden()
+                .pickerStyle(.menu)
+                .controlSize(.small)
+                .disabled(model.resolutionOptions.isEmpty)
+            }
+
+            if let model = currentModel, model.supportsDuration, let spec = model.durationSpec {
+                sectionTitle("时长")
+                Picker("", selection: durationBinding) {
+                    // `-1`（交给服务端定）与"不传"是两件事，但对用户是同一个意思："我不指定"。
+                    // 所以 UI 只给一个「模型默认」档，值用 0 当哨兵，binding 里翻译成 nil。
+                    Text(durationDefaultLabel(model)).tag(0)
+                    ForEach(spec.selectableValues, id: \.self) { sec in
+                        Text("\(sec) 秒").tag(sec)
+                    }
+                }
+                .labelsHidden()
+                .pickerStyle(.menu)
+                .controlSize(.small)
+
+                if let hint = durationHint(model) {
+                    Text(hint)
+                        .font(.system(size: 9))
+                        .foregroundColor(AppTheme.canvasChromeTertiaryInk)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+
+            if let model = currentModel, model.supportsAudio {
+                Toggle(isOn: audioBinding) {
+                    Text("生成配音 / 音效")
+                        .font(.system(size: 10))
+                        .foregroundColor(AppTheme.canvasChromeSecondaryInk)
+                }
+                .toggleStyle(.switch)
+                .controlSize(.mini)
+            }
+
+            // 输入图的语义必须写出来：同一个槽位里的图，第 1 张是首帧、第 2 张是尾帧，
+            // 这个顺序约定在界面上看不出来（槽位里只是"几张图"）。
+            if let model = currentModel, model.acceptsVideoImageInput {
+                Text(frameHint(model))
+                    .font(.system(size: 9))
+                    .foregroundColor(AppTheme.canvasChromeTertiaryInk)
+                    .fixedSize(horizontal: false, vertical: true)
+            } else if currentModel != nil {
+                Text("该模型只做文生视频，槽位里的图会被忽略")
+                    .font(.system(size: 9))
+                    .foregroundColor(AppTheme.canvasChromeTertiaryInk)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            if let model = currentModel, model.requiresImageInput {
+                Label("该模型必须有输入图，空槽位会直接报错", systemImage: "exclamationmark.triangle")
+                    .font(.system(size: 9))
+                    .foregroundColor(.orange.opacity(0.9))
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+    }
+
+    private var isVideoNode: Bool { node.kind == .video }
+
+    private func durationDefaultLabel(_ model: CrateModelCatalog.ModelInfo) -> String {
+        guard let def = model.durationDefault, def > 0 else { return "模型默认" }
+        return "模型默认（\(def) 秒）"
+    }
+
+    private func durationHint(_ model: CrateModelCatalog.ModelInfo) -> String? {
+        guard case .range(_, _, _, let special) = model.durationSpec, special.contains(-1) else { return nil }
+        return "该模型支持自动时长，选「模型默认」即交给服务端决定"
+    }
+
+    private func frameHint(_ model: CrateModelCatalog.ModelInfo) -> String {
+        var parts = ["槽位第 1 张图 = 首帧"]
+        if model.supportsLastFrame { parts.append("第 2 张 = 尾帧") }
+        // 互斥模型（实测 5/7）不能同时给首尾帧和参考图，多出来的图会被丢掉。
+        // 这一句必须写出来：否则用户挂了 5 张图、只生效两张，会以为是 bug。
+        if model.framesExcludeReferences {
+            parts.append("其余会被忽略（该模型首尾帧与参考图不能共用）")
+        } else if model.referenceImageMaxCount > 0 {
+            parts.append("其余作参考图（最多 \(model.referenceImageMaxCount) 张）")
+        }
+        return parts.joined(separator: "，")
+    }
+
+    private var unlistedResolution: Bool {
+        guard let model = currentModel else { return false }
+        return !node.resolution.isEmpty && !model.resolutionOptions.contains { $0.value == node.resolution }
+    }
+
+    private var resolutionBinding: Binding<String> {
+        Binding(
+            get: { node.resolution },
+            set: { canvas.updateNodeGeneration(id: node.id, resolution: $0) }
+        )
+    }
+
+    /// 时长绑定。`0` 是"模型默认"的哨兵值（见 picker 里的注释）—— 不用 `Optional<Int>` 当
+    /// selection 是刻意的：SwiftUI 对可选选中值的 tag 匹配要求类型完全一致，`Int?` 的 tag
+    /// 写成 `Int` 会静默显示空白，那个症状看起来正好像"设置没保存"（与字体那段同一个坑）。
+    private var durationBinding: Binding<Int> {
+        Binding(
+            get: { node.duration ?? 0 },
+            set: { canvas.updateNodeGeneration(id: node.id, duration: .some($0 <= 0 ? nil : $0)) }
+        )
+    }
+
+    /// 配音开关。默认值取模型自己的倾向（seedance2.5 默认开），所以 nil 时显示成"开"要看模型 ——
+    /// 但一旦用户碰过，就写成显式 true/false，不再随模型漂移。
+    private var audioBinding: Binding<Bool> {
+        Binding(
+            get: { node.generateAudio ?? true },
+            set: { canvas.updateNodeGeneration(id: node.id, generateAudio: .some($0)) }
+        )
     }
 
     /// 按系列分组，**组内与组间都保持 CLI 原序**（那是策划过的顺序，重排成字母序会把 seedream
@@ -191,10 +334,14 @@ struct CanvasInspectorPanel: View {
     /// 菜单里的分组顺序都不一样。
     private struct ModelFamily { let name: String; let models: [CrateModelCatalog.ModelInfo] }
 
+    private var availableModels: [CrateModelCatalog.ModelInfo] {
+        isVideoNode ? catalog.videoModels : catalog.imageModels
+    }
+
     private var modelFamilies: [ModelFamily] {
         var order: [String] = []
         var buckets: [String: [CrateModelCatalog.ModelInfo]] = [:]
-        for m in catalog.imageModels {
+        for m in availableModels {
             if buckets[m.family] == nil { order.append(m.family) }
             buckets[m.family, default: []].append(m)
         }
@@ -202,7 +349,12 @@ struct CanvasInspectorPanel: View {
     }
 
     /// 当前模型在目录里的条目。`nil` = 目录没加载出来，或这个模型已经不在目录里了。
-    private var currentModel: CrateModelCatalog.ModelInfo? { catalog.model(id: node.model) }
+    ///
+    /// **限定在本节点这一类里查**（视频节点只认视频模型）：`catalog.model(id:)` 两类都查，
+    /// 用它会让视频节点把一个图像模型认成"当前模型"，进而按图像模型的参数表渲染选择器。
+    private var currentModel: CrateModelCatalog.ModelInfo? {
+        availableModels.first { $0.id == node.model }
+    }
 
     /// 要不要给"目录里没有的当前模型"补一个 tag。目录未加载 / 加载失败时也为 true —— 那两种情况下
     /// 列表是空的，不补 tag 的话 Picker 会显示空白。
@@ -237,11 +389,27 @@ struct CanvasInspectorPanel: View {
             get: { node.model },
             set: { picked in
                 // 换模型时顺带把比例落到新模型真的接受的值上 —— 各模型选项不同，留着旧值会在提交
-                // 时被拒。两个字段**一次写进撤销栈**（理由见 `updateNodeGeneration`）。
-                let ratio = catalog.model(id: picked).map {
-                    CrateModelCatalog.resolvedRatio(current: node.ratio, for: $0)
+                // 时被拒。几个字段**一次写进撤销栈**（理由见 `updateNodeGeneration`）。
+                // v2.11.19：视频还要一起落分辨率与时长（30s 的 seedance25 换成 12s 上限的 Pro 1
+                // 时不夹一下，提交就会被拒），并且"不支持"要落成空/nil 而不是留着旧值。
+                guard let target = availableModels.first(where: { $0.id == picked }) else {
+                    canvas.updateNodeGeneration(id: node.id, model: picked)
+                    return
                 }
-                canvas.updateNodeGeneration(id: node.id, model: picked, ratio: ratio)
+                let ratio = CrateModelCatalog.resolvedRatio(current: node.ratio, for: target)
+                guard isVideoNode else {
+                    canvas.updateNodeGeneration(id: node.id, model: picked, ratio: ratio)
+                    return
+                }
+                let resolution = CrateModelCatalog.resolvedResolution(current: node.resolution, for: target)
+                let duration = CrateModelCatalog.resolvedDuration(current: node.duration, for: target)
+                let audio: Bool? = target.supportsAudio ? node.generateAudio : nil
+                canvas.updateNodeGeneration(id: node.id,
+                                            model: picked,
+                                            ratio: ratio,
+                                            resolution: resolution,
+                                            duration: .some(duration),
+                                            generateAudio: .some(audio))
             }
         )
     }

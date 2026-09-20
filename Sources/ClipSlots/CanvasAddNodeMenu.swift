@@ -13,12 +13,13 @@ struct CanvasAddNodeMenu: View {
 
     /// 可创建的节点类型。
     ///
-    /// **刻意只有三项**，与项目的数据模型对齐：画布上的节点就是槽位，所以"新建节点"要么新占一个
-    /// 空槽位（文本 / 图像），要么把已有槽位摆上来（槽位）。视频 / 批量模版节点在生图链路接通前
-    /// 建了也没有意义，不放进来。
+    /// **四项**（v2.11.19 加入视频），与项目的数据模型对齐：画布上的节点就是槽位，所以"新建节点"
+    /// 要么新占一个空槽位（文本 / 图像 / 视频），要么把已有槽位摆上来（槽位）。
+    /// 批量模版节点仍然不放进来——它自身不出图，建了也没有意义。
     enum Choice: String, Identifiable, CaseIterable {
         case text
         case image
+        case video
         case slot
 
         var id: String { rawValue }
@@ -27,6 +28,7 @@ struct CanvasAddNodeMenu: View {
             switch self {
             case .text: return "文本节点"
             case .image: return "图像节点"
+            case .video: return "视频节点"
             case .slot: return "槽位节点"
             }
         }
@@ -35,6 +37,7 @@ struct CanvasAddNodeMenu: View {
             switch self {
             case .text: return "纯文本 / Prompt，占用一个空槽位"
             case .image: return "图像生成，入参文件挂在同一槽位"
+            case .video: return "视频生成，挂图即首帧 / 尾帧"
             case .slot: return "从左侧槽位库把已有槽位摆上画布"
             }
         }
@@ -43,6 +46,7 @@ struct CanvasAddNodeMenu: View {
             switch self {
             case .text: return "text.alignleft"
             case .image: return "photo"
+            case .video: return "film"
             case .slot: return "square.grid.2x2"
             }
         }

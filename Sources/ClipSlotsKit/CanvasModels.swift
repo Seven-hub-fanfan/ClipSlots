@@ -174,6 +174,26 @@ public struct CanvasNode: Codable, Identifiable, Equatable {
     /// 张数（1 / 2 / 4）。对应 CLI 的 `--count`。
     public var count: Int
 
+    // MARK: 出视频参数（v2.11.19）
+    //
+    // 为什么不塞进上面那三项里复用：`ratio` 两条链路语义相同（都是构图比例），可以共用；
+    // 而分辨率在图像链路里是**混在 ratio 选项里给的**（`2K` / `16:9 4K` 都是 ratio 的取值），
+    // 视频链路才有独立的 `--resolution`。共用一个字段的后果是图像节点存着一个永远不传的值，
+    // 换链路时还要猜它该怎么迁移。
+
+    /// 分辨率档，例如 `720p` / `4k` / `768P`。空串 = 不传，用模型默认。
+    ///
+    /// **原样存 CLI 给的大小写**：各模型写法不统一（seedance 的 `4k` vs minimax 的 `2K`），
+    /// 而 CLI 校验是精确匹配。存的时候归一化，提交时就得反查回去，等于凭空造一层映射表。
+    public var resolution: String
+    /// 时长（秒）。`nil` = 不传，用模型默认值（各模型 5/8/10 不等）。
+    public var duration: Int?
+    /// 要不要生成配音。`nil` = 不传。
+    ///
+    /// 三态而不是 Bool：`generate_audio` 只有 Seedance 2.x 声明，对其他模型传它 CLI 当场拒收。
+    /// 「没设过」必须与「显式关掉」区分开——后者要传 `false`（模型默认是开），前者不能传。
+    public var generateAudio: Bool?
+
     // MARK: 正文排版（v2.11.7 hotfix19）
     //
     // 字体也是"怎么显示"而不是"是什么内容"，同样属于摆位。同一个槽位在编辑页用系统字体、
@@ -272,6 +292,9 @@ public struct CanvasNode: Codable, Identifiable, Equatable {
                 model: String = "seedream45",
                 ratio: String = "1:1",
                 count: Int = 1,
+                resolution: String = "",
+                duration: Int? = nil,
+                generateAudio: Bool? = nil,
                 fontName: String? = nil,
                 fontSize: CGFloat? = nil,
                 state: CanvasNodeState = .idle,
@@ -293,6 +316,9 @@ public struct CanvasNode: Codable, Identifiable, Equatable {
         self.model = model
         self.ratio = ratio
         self.count = count
+        self.resolution = resolution
+        self.duration = duration
+        self.generateAudio = generateAudio
         self.fontName = fontName
         self.fontSize = fontSize.map(CanvasNode.clampBodyFontSize)
         self.state = state
@@ -305,12 +331,36 @@ public struct CanvasNode: Codable, Identifiable, Equatable {
         self.updatedAt = updatedAt
     }
 
+    /// 某个节点类型的默认模型（v2.11.19）。
+    ///
+    /// 视频节点不能沿用 `seedream45`：那是个出图模型，提交时 CLI 会报
+    /// `Model seedream45 does not support video generation`，而用户什么都没改过——
+    /// 「新建节点、点生成、报错」是最劝退的一种首体验。
+    public static func defaultModel(for kind: CanvasNodeKind) -> String {
+        switch kind {
+        case .video: return CrateGeneration.defaultVideoModel
+        default: return CrateGeneration.defaultModel
+        }
+    }
+
+    /// 某个节点类型的默认比例。
+    ///
+    /// 视频给 `16:9` 而不是图像那个 `1:1`：方形视频在任何播放场景里都是异类，而 `16:9` 是
+    /// 全部 7 个视频模型都声明了的档位（方图 `1:1` 反而不是每个都有）。
+    public static func defaultRatio(for kind: CanvasNodeKind) -> String {
+        switch kind {
+        case .video: return "16:9"
+        default: return "1:1"
+        }
+    }
+
     // MARK: - Codable（含 hotfix19 及更早的旧文档迁移）
 
     private enum CodingKeys: String, CodingKey {
         case pageId, groupId, slot
         case kind, x, y, width, height
         case model, ratio, count
+        case resolution, duration, generateAudio
         case fontName, fontSize
         case state, taskId, seed
         case parentNodeId
@@ -353,9 +403,16 @@ public struct CanvasNode: Codable, Identifiable, Equatable {
         y = try c.decodeIfPresent(CGFloat.self, forKey: .y) ?? 0
         width = try c.decodeIfPresent(CGFloat.self, forKey: .width) ?? CanvasNode.defaultSize.width
         height = try c.decodeIfPresent(CGFloat.self, forKey: .height) ?? CanvasNode.defaultSize.height
-        model = try c.decodeIfPresent(String.self, forKey: .model) ?? "seedream45"
-        ratio = try c.decodeIfPresent(String.self, forKey: .ratio) ?? "1:1"
+        // 缺省值跟着 kind 走（v2.11.19）：v2.11.18 及更早的文档里视频节点存的是出图默认值
+        // `seedream45` / `1:1`（那时视频链路还没有提交路径，这两个字段对它是死值）。按 kind 取默认
+        // 只影响"字段压根不存在"的情况，不会覆盖用户显式选过的值。
+        model = try c.decodeIfPresent(String.self, forKey: .model) ?? CanvasNode.defaultModel(for: kind)
+        ratio = try c.decodeIfPresent(String.self, forKey: .ratio) ?? CanvasNode.defaultRatio(for: kind)
         count = try c.decodeIfPresent(Int.self, forKey: .count) ?? 1
+        // v2.11.19 新增：老文档没有，缺省"不传"（空串 / nil），等价于沿用模型自己的默认值。
+        resolution = try c.decodeIfPresent(String.self, forKey: .resolution) ?? ""
+        duration = try c.decodeIfPresent(Int.self, forKey: .duration)
+        generateAudio = try c.decodeIfPresent(Bool.self, forKey: .generateAudio)
         fontName = try c.decodeIfPresent(String.self, forKey: .fontName)
         fontSize = try c.decodeIfPresent(CGFloat.self, forKey: .fontSize)
         state = try c.decodeIfPresent(CanvasNodeState.self, forKey: .state) ?? .idle
@@ -388,6 +445,13 @@ public struct CanvasNode: Codable, Identifiable, Equatable {
         try c.encode(model, forKey: .model)
         try c.encode(ratio, forKey: .ratio)
         try c.encode(count, forKey: .count)
+        // 空 / nil 不写：与 `outputAttachmentIds` 同一条规矩。更重要的是这让"没设过"在文件里
+        // 就是"字段不存在"，而不是一个需要靠约定解释的空串——图像节点的文档因此完全不变。
+        if !resolution.isEmpty {
+            try c.encode(resolution, forKey: .resolution)
+        }
+        try c.encodeIfPresent(duration, forKey: .duration)
+        try c.encodeIfPresent(generateAudio, forKey: .generateAudio)
         try c.encodeIfPresent(fontName, forKey: .fontName)
         try c.encodeIfPresent(fontSize, forKey: .fontSize)
         try c.encode(state, forKey: .state)

@@ -104,12 +104,16 @@ final class CanvasStore: ObservableObject {
                                                              existing: nodes.map { CGPoint(x: $0.x, y: $0.y) })
         }
         let snapped = CanvasGeometry.snap(origin, step: CanvasStore.snapStep)
+        // 出图参数按 kind 取默认（v2.11.19）：视频节点拿到 `seedream45` 会在第一次点生成时
+        // 直接被 CLI 拒收，而用户什么都没改过。
         let node = CanvasNode(pageId: pageId,
                               groupId: groupId,
                               slot: slot,
                               kind: kind,
                               x: snapped.x,
                               y: snapped.y,
+                              model: CanvasNode.defaultModel(for: kind),
+                              ratio: CanvasNode.defaultRatio(for: kind),
                               parentNodeId: parentNodeId)
         commit(.addNode, detail: name) {
             nodes.append(node)
@@ -240,18 +244,44 @@ final class CanvasStore: ObservableObject {
     /// 的中间态：Cmd+Z 一次只退回比例、模型还留在新的，而那个组合可能压根不合法。
     ///
     /// `ratio` 允许是空串：那是"该模型不吃比例"的合法取值，提交时就不会带 `--ratio`。
-    func updateNodeGeneration(id: String, model: String? = nil, ratio: String? = nil) {
+    ///
+    /// ★ 为什么每个视频参数都是双层可选（`Int??` / `Bool??`，v2.11.19）
+    ///
+    /// 这三个视频字段本身就是可选的（nil = 不传，用模型默认），所以"不改这个字段"与"把这个字段
+    /// 改成 nil"是两件**都要能表达**的事。单层可选下 `duration: nil` 二义，调用方想显式清空时
+    /// 只能另开一个 `clearDuration: Bool` 参数——那是把类型问题挪到参数列表里。
+    ///
+    /// 约定：外层 nil = 不动；内层 nil = 显式清空。
+    func updateNodeGeneration(id: String,
+                              model: String? = nil,
+                              ratio: String? = nil,
+                              resolution: String? = nil,
+                              duration: Int?? = nil,
+                              generateAudio: Bool?? = nil) {
         guard let idx = nodes.firstIndex(where: { $0.id == id }) else { return }
 
         let newModel = (model?.trimmingCharacters(in: .whitespacesAndNewlines)).flatMap { $0.isEmpty ? nil : $0 }
             ?? nodes[idx].model
         let newRatio = ratio?.trimmingCharacters(in: .whitespacesAndNewlines) ?? nodes[idx].ratio
-        guard newModel != nodes[idx].model || newRatio != nodes[idx].ratio else { return }
+        let newResolution = resolution?.trimmingCharacters(in: .whitespacesAndNewlines) ?? nodes[idx].resolution
+        let newDuration = duration ?? nodes[idx].duration
+        let newAudio = generateAudio ?? nodes[idx].generateAudio
+        guard newModel != nodes[idx].model
+                || newRatio != nodes[idx].ratio
+                || newResolution != nodes[idx].resolution
+                || newDuration != nodes[idx].duration
+                || newAudio != nodes[idx].generateAudio else { return }
 
-        let detail = newRatio.isEmpty ? newModel : "\(newModel) · \(newRatio)"
+        // 撤销栈里的描述只取「模型 · 尺寸/分辨率」两项：时长与音频改动频繁，全塞进来会让撤销
+        // 菜单变成一行读不完的长句，而用户认这条记录靠的就是前两项。
+        let sizeHint = newResolution.isEmpty ? newRatio : newResolution
+        let detail = sizeHint.isEmpty ? newModel : "\(newModel) · \(sizeHint)"
         commit(.paramNode, detail: detail) {
             nodes[idx].model = newModel
             nodes[idx].ratio = newRatio
+            nodes[idx].resolution = newResolution
+            nodes[idx].duration = newDuration
+            nodes[idx].generateAudio = newAudio
             nodes[idx].updatedAt = Date()
         }
     }

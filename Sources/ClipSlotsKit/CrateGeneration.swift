@@ -59,18 +59,89 @@ public struct CrateImageRequest: Equatable {
     }
 }
 
+/// 一次视频生成请求（v2.11.19）。
+///
+/// ★ 为什么不复用 `CrateImageRequest` 加几个可选字段
+///
+/// 两条链路的**必填与拒绝条件不同**：视频这边 `duration` / `resolution` 各模型区间不一样
+/// （2~12 / 4~15 / 4~30，veo 还是 4/6/8 枚举），`veo-3.1-generate-preview` 更是**必须带图**
+/// （`inputs.image.required = true`）。把这些挤进同一个结构，`submitArguments` 就得靠
+/// `if isVideo` 分叉，而那正是"图像链路改一行把视频链路带崩"的经典形态。两个结构 + 两个
+/// 拼参数函数，各自被 smoke 钉死，反而是更小的维护面。
+///
+/// ★ 首帧 / 尾帧 / 参考图的分工
+///
+/// 槽位里的图片附件按顺序映射：第 1 张 → `--first-frame`，第 2 张 → `--last-frame`
+/// （模型声明了 `last_frame` 角色才给），再往后 → `--reference-image`（按模型的
+/// `reference_image.maxCount` 截断）。刻意不用 `--image`：视频模型的 `inputs.image` 只是
+/// 一个"总数上限"的声明，真正决定语义的是 references 里的角色名，把 9 张图一股脑
+/// `--image` 传进去，服务端怎么理解它们是不确定的。
+public struct CrateVideoRequest: Equatable {
+    /// 模型 stable id，如 `seedance2`。
+    public var model: String
+    /// 提示词。
+    public var prompt: String
+    /// 已发布的比例，如 `16:9` / `adaptive`。空串 = 不传。
+    public var ratio: String
+    /// 已发布的分辨率档，如 `720p` / `4k` / `768P`。空串 = 不传。
+    ///
+    /// **大小写按 CLI 原样传**：实测同一个概念在不同模型里写法不同（seedance2 是 `4k`，
+    /// minimax 是 `2K` / `768P`），CLI 的校验是精确匹配（`resolution must be one of: …`），
+    /// 顺手 `.lowercased()` 会把 minimax 的选项全部打成非法值。
+    public var resolution: String
+    /// 时长（秒）。nil = 不传，用模型默认值。`-1` 是部分模型（seedance2 / seedance25）声明的
+    /// 特殊值，语义是"让服务端自己定"，因此不做正数校验。
+    public var duration: Int?
+    /// 要不要生成配音。nil = 不传（模型不声明这个参数时必须是 nil，否则 CLI 当场拒收）。
+    public var generateAudio: Bool?
+    /// 首帧图本地路径。
+    public var firstFramePath: String?
+    /// 尾帧图本地路径。
+    public var lastFramePath: String?
+    /// 参考图本地路径（已按模型上限截断）。
+    public var referenceImagePaths: [String]
+    /// 复现用 seed。nil = 让服务端随机。
+    public var seed: Int?
+
+    public init(model: String,
+                prompt: String,
+                ratio: String = "",
+                resolution: String = "",
+                duration: Int? = nil,
+                generateAudio: Bool? = nil,
+                firstFramePath: String? = nil,
+                lastFramePath: String? = nil,
+                referenceImagePaths: [String] = [],
+                seed: Int? = nil) {
+        self.model = model
+        self.prompt = prompt
+        self.ratio = ratio
+        self.resolution = resolution
+        self.duration = duration
+        self.generateAudio = generateAudio
+        self.firstFramePath = firstFramePath
+        self.lastFramePath = lastFramePath
+        self.referenceImagePaths = referenceImagePaths
+        self.seed = seed
+    }
+}
+
 /// 参数层面的拒绝原因。刻意区分得这么细，是因为每一种对应用户完全不同的下一步动作：
 /// 空提示词要去填正文，张数不支持要去改参数栏，模型空是 UI 出了 bug。
 public enum CrateRequestError: Error, Equatable {
     case emptyPrompt
     case emptyModel
     case unsupportedCount(Int)
+    /// 模型要求必须带输入图，但槽位里没有可用图片（实测只有 `veo-3.1-generate-preview`）。
+    case missingRequiredImage(model: String)
 
     public var userMessage: String {
         switch self {
         case .emptyPrompt: return "槽位正文是空的，先写提示词再生成"
         case .emptyModel: return "没有选择模型"
         case .unsupportedCount(let n): return "当前版本一次只出 1 张（现在是 \(n) 张）"
+        case .missingRequiredImage(let model):
+            return "\(model) 必须带一张输入图，先往这个槽位挂张图片"
         }
     }
 }
@@ -116,6 +187,12 @@ public enum CrateGeneration {
 
     /// 节点参数栏的默认模型。与 `CanvasNode.model` 的默认值保持一致。
     public static let defaultModel = "seedream45"
+    /// 视频节点的默认模型（v2.11.19）。
+    ///
+    /// 选 `seedance2` 而不是更新的 `seedance25`：2.0 的时长上限 15s、分辨率到 4k，已经覆盖绝大多数
+    /// 用法，而 2.5 的卖点（30s 长视频 / 50 份参考素材 / edit+extend）目前在本 App 里都还没有入口，
+    /// 默认给它只会让每次出片都更慢更贵。
+    public static let defaultVideoModel = "seedance2"
     /// 提交进程的超时。提交本身只是一次 HTTP，给 120s 是为了容忍 Node 冷启动 + 网络抖动。
     public static let submitTimeout: TimeInterval = 120
     /// 单次轮询进程的超时。
@@ -123,6 +200,13 @@ public enum CrateGeneration {
     /// 轮询间隔 / 总时限：与 CLI 自己的默认值（5s / 600s）对齐，避免两套节奏。
     public static let pollInterval: TimeInterval = 5
     public static let pollTimeout: TimeInterval = 600
+    /// 视频任务的总时限（v2.11.19）。
+    ///
+    /// 图像那 600s 对视频是**不够的**：实测 seedance2-mini 480p/4s 这种最便宜的组合就要 ~80s，
+    /// 而 seedance25 允许 30s 时长、seedance2 允许 4k，排队高峰时十几分钟是正常的。600s 超时的
+    /// 症状特别恶劣——任务在服务端**已经成功并扣了额度**，App 这边却报"超时失败"，用户只会再点
+    /// 一次重跑，于是扣两份。给 1800s 是"宁可等久点也别误判"，用户想放弃随时能取消。
+    public static let videoPollTimeout: TimeInterval = 1800
     /// 模型参数表查询（`model describe`）的超时。它只是一次元数据请求，超时也不致命（有重试兜底）。
     public static let describeTimeout: TimeInterval = 20
     /// 前置体检（`auth status`）的超时。它只读本地 session + 一次轻请求，超过 20s 基本是网络挂了。
@@ -152,6 +236,67 @@ public enum CrateGeneration {
         }
         for path in req.imagePaths where !path.isEmpty {
             args += ["--image", path]
+        }
+        if let seed = req.seed {
+            args += ["--param", "seed=\(seed)"]
+        }
+        args += ["--no-wait", "--json"]
+        return args
+    }
+
+    /// 提交一次**视频**生成（v2.11.19）。
+    ///
+    /// ★ 只用"被 CLI 校验过"的旗标
+    ///
+    /// 实测（crate v0.6.1，2026-09-20）：**未知旗标不会报错，而是被静默忽略并照常提交**——
+    /// `crate generate video --model seedance2-mini --prompt test --bogus-xyz 1 --no-wait` 直接
+    /// 提交成功。这意味着"拼错参数名"的症状不是报错，而是**参数默默不生效**（用户选了 4k 拿回
+    /// 720p，选了 10s 拿回 5s，而且额度已经扣了）。所以这里每一个旗标都用"传非法值看 CLI 报不报"
+    /// 的方式验证过其真实存在：
+    ///
+    ///   - `--ratio` → `ratio must be one of: adaptive, 16:9, …`
+    ///   - `--resolution` → `resolution must be one of: 480p, 720p`
+    ///   - `--duration` → `duration must be at most 15`
+    ///   - `--generate-audio` → `--generate-audio must be true or false`
+    ///   - `--param seed=N` → 模型不声明时 `does not publish parameter "seed"`
+    ///
+    /// 新增旗标前请照这个方式验一遍，别照文档抄。
+    ///
+    /// ★ 为什么 `generateAudio` 是 `Bool?` 而不是 `Bool`
+    ///
+    /// `generate_audio` 只有 Seedance 2.x 家族声明。对 Pro 1 / VEO / MiniMax 传它，CLI 当场拒收
+    /// （`Model seedancePro1 does not publish parameter "generate_audio"`），整次生成失败。
+    /// 所以"不传"必须是可表达的状态，判断"该不该传"的责任在调用方（按模型目录的 `supportsAudio`）。
+    public static func submitArguments(_ req: CrateVideoRequest) throws -> [String] {
+        let prompt = req.prompt.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !prompt.isEmpty else { throw CrateRequestError.emptyPrompt }
+        let model = req.model.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !model.isEmpty else { throw CrateRequestError.emptyModel }
+
+        var args = ["generate", "video", "--model", model, "--prompt", prompt]
+        let ratio = req.ratio.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !ratio.isEmpty {
+            args += ["--ratio", ratio]
+        }
+        let resolution = req.resolution.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !resolution.isEmpty {
+            args += ["--resolution", resolution]
+        }
+        if let duration = req.duration {
+            args += ["--duration", "\(duration)"]
+        }
+        if let audio = req.generateAudio {
+            args += ["--generate-audio", audio ? "true" : "false"]
+        }
+        // 首帧 / 尾帧 / 参考图的顺序就是 CLI 的语义顺序，不能靠"反正都是图"随便排。
+        if let first = req.firstFramePath, !first.isEmpty {
+            args += ["--first-frame", first]
+        }
+        if let last = req.lastFramePath, !last.isEmpty {
+            args += ["--last-frame", last]
+        }
+        for path in req.referenceImagePaths where !path.isEmpty {
+            args += ["--reference-image", path]
         }
         if let seed = req.seed {
             args += ["--param", "seed=\(seed)"]
@@ -221,6 +366,44 @@ public enum CrateGeneration {
     public static func droppingRatio(_ req: CrateImageRequest) -> CrateImageRequest {
         var out = req
         out.ratio = ""
+        return out
+    }
+
+    /// 视频请求的两道同构退路（v2.11.19）。
+    ///
+    /// 语义与图像那两个完全一致，但**必须分开写**：`CrateVideoRequest` 多了 resolution / duration /
+    /// generateAudio 三个字段，用泛型或协议把两者统一起来的收益只是省掉这十行，代价是把
+    /// "退哪个参数"这件事从编译期可见变成运行时可见。
+    public static func droppingSeed(_ req: CrateVideoRequest) -> CrateVideoRequest {
+        var out = req
+        out.seed = nil
+        return out
+    }
+
+    public static func droppingRatio(_ req: CrateVideoRequest) -> CrateVideoRequest {
+        var out = req
+        out.ratio = ""
+        return out
+    }
+
+    /// 去掉 resolution 的同一份请求。
+    ///
+    /// 比图像那两道更容易被触发：视频模型的分辨率选项集**互不兼容且大小写不一致**
+    /// （seedance 是 `480p/720p/1080p/4k`，minimax 是 `768P/2K`，veo 的 1080p/4K 还只在 8s 时长下
+    /// 可用）。画布里存着换模型前的旧值、或模型目录问不出来时 UI 原样保留旧值，都会走到这里。
+    public static func droppingResolution(_ req: CrateVideoRequest) -> CrateVideoRequest {
+        var out = req
+        out.resolution = ""
+        return out
+    }
+
+    /// 去掉 generate_audio 的同一份请求。
+    ///
+    /// 专治 `Model X does not publish parameter "generate_audio"`：模型目录问不出来时 UI 可能把
+    /// 音频开关当成"所有视频模型都有"，这条退路保证那种情况下只是"没有配音"而不是整次失败。
+    public static func droppingAudio(_ req: CrateVideoRequest) -> CrateVideoRequest {
+        var out = req
+        out.generateAudio = nil
         return out
     }
 
@@ -427,8 +610,15 @@ public enum CrateGeneration {
     // MARK: 文件命名
 
     /// 产物落盘用的文件名。带 taskId 是为了出问题时能从文件名反查到任务。
-    public static func assetFileName(taskId: String, index: Int, urlString: String) -> String {
-        let ext = fileExtension(forURL: urlString) ?? "jpg"
+    ///
+    /// `fallbackExtension` 只在 URL 里认不出扩展名时才用得上，但它**必须跟着链路类型走**：
+    /// 视频产物兜底成 `.jpg` 的后果不是"名字难看"，而是 `CanvasAttachmentKind` 按扩展名判类别时
+    /// 把一个 mp4 认成图片，于是卡片拿 `NSImage` 去读它、读不出来、预览区空白（v2.11.19）。
+    public static func assetFileName(taskId: String,
+                                    index: Int,
+                                    urlString: String,
+                                    fallbackExtension: String = "jpg") -> String {
+        let ext = fileExtension(forURL: urlString) ?? fallbackExtension
         let safeId = taskId.filter { $0.isNumber || $0.isLetter || $0 == "-" || $0 == "_" }
         let id = safeId.isEmpty ? "task" : safeId
         return index == 0 ? "crate_\(id).\(ext)" : "crate_\(id)_\(index + 1).\(ext)"

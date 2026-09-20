@@ -558,13 +558,33 @@ struct CanvasNodeCardView: View {
                 )
 
             if case .succeeded(let path) = node.state,
-               let img = NSImage(contentsOfFile: path) {
+               let img = previewImage(forAssetPath: path) {
                 // 产物在就显示产物：生成结果是这个节点的成品，入参堆叠此时让位。
                 fillImageBox {
                     Image(nsImage: img)
                         .resizable()
                         .aspectRatio(contentMode: .fill)
                 }
+                // 视频产物额外盖一层播放标识 + 时长角标（v2.11.19）。
+                //
+                // 必须有这一层：首帧抽出来就是一张静态图，与图像产物**在视觉上完全无法区分**，
+                // 用户会以为视频节点出的是图片、或者以为视频"没生成出来只剩一张封面"。
+                if let badge = videoBadge(forAssetPath: path) {
+                    videoOverlay(duration: badge)
+                }
+            } else if case .succeeded(let path) = node.state, isVideoAsset(path) {
+                // 视频产物抽帧失败（文件损坏 / 编码不支持）。刻意与"生成失败"分开显示：这里任务是
+                // **成功**的、文件也在槽位里，只是本地取不到预览。显示成失败会让用户去重跑，
+                // 白白再扣一次额度。
+                VStack(spacing: s(3)) {
+                    Image(systemName: "film")
+                        .font(.system(size: s(16), weight: .regular))
+                    Text("视频已生成")
+                        .font(.system(size: fs(9)))
+                        .canvasScreenFixedText(textCounter)
+                        .opacity(textOpacity)
+                }
+                .foregroundColor(AppTheme.canvasCardMetaInk.opacity(0.8))
             } else if case .failed(let reason) = node.state {
                 DiagonalHatch(spacing: s(7))
                     .stroke(AppTheme.subtleBorder.opacity(0.55), lineWidth: s(1))
@@ -614,6 +634,80 @@ struct CanvasNodeCardView: View {
 
     /// 卡片区与文字区之间的间距（1x）。
     private var previewToPromptGap: CGFloat { CanvasCardLayout.previewToPromptGap }
+
+    // MARK: - 产物预览的取图（v2.11.19）
+
+    /// 这个产物是视频吗。按扩展名判——与 `CanvasAttachmentKind` 同一套口径。
+    private func isVideoAsset(_ path: String) -> Bool {
+        CanvasAttachmentKind.from(fileName: path) == .video
+    }
+
+    /// 产物的预览图：图片直接读，视频抽首帧。
+    ///
+    /// 两条路径合成一个函数（而不是在 `previewArea` 里分支两次）是因为调用点在 `if case` 的绑定
+    /// 条件里——那个位置只能放一个表达式，分支写在这里才能让上面那段保持可读。
+    private func previewImage(forAssetPath path: String) -> NSImage? {
+        if isVideoAsset(path) {
+            return VideoThumbnailProvider.thumbnail(forFile: path)
+        }
+        return NSImage(contentsOfFile: path)
+    }
+
+    /// 视频角标要显示的时长文本。非视频、或时长取不到时返回 nil。
+    ///
+    /// 取不到时长仍然要显示播放标识（那是"这是视频"的唯一提示），所以返回空串而不是 nil——
+    /// nil 专门留给"这压根不是视频"。
+    private func videoBadge(forAssetPath path: String) -> String? {
+        guard isVideoAsset(path) else { return nil }
+        guard let seconds = VideoThumbnailProvider.duration(forFile: path) else { return "" }
+        return VideoThumbnailProvider.formattedDuration(seconds)
+    }
+
+    /// 首帧上盖的播放标识 + 时长角标。
+    ///
+    /// 刻意**不做成可点播放的播放器**：卡片是画布上的一个缩略图，在 260pt 宽的卡片里内嵌
+    /// `AVPlayerView` 会带来一串新问题（滚动时几十个播放器同时解码、缩放时图层错位、快捷键抢焦点）。
+    /// 想看片子走「在访达中显示 / 双击打开」那条既有路径，由系统播放器负责。
+    @ViewBuilder
+    private func videoOverlay(duration: String) -> some View {
+        ZStack {
+            // 播放三角放正中：半透明黑底 + 白色三角是跨平台通用的"这是视频"符号，不需要文字解释。
+            Circle()
+                .fill(Color.black.opacity(0.32))
+                .frame(width: s(26), height: s(26))
+                .overlay(
+                    Image(systemName: "play.fill")
+                        .font(.system(size: s(11), weight: .semibold))
+                        .foregroundColor(.white.opacity(0.92))
+                        // 三角形的视觉重心偏左，往右挪一点才像居中。
+                        .offset(x: s(1))
+                )
+
+            if !duration.isEmpty {
+                VStack {
+                    Spacer(minLength: 0)
+                    HStack {
+                        Spacer(minLength: 0)
+                        Text(duration)
+                            .font(.system(size: fs(8), weight: .medium))
+                            .foregroundColor(.white.opacity(0.95))
+                            .padding(.horizontal, s(4))
+                            .padding(.vertical, s(1.5))
+                            .background(
+                                RoundedRectangle(cornerRadius: s(3), style: .continuous)
+                                    .fill(Color.black.opacity(0.45))
+                            )
+                            .canvasScreenFixedText(textCounter)
+                            .opacity(textOpacity)
+                    }
+                }
+                .padding(s(5))
+            }
+        }
+        // 角标不吃事件：预览区的点击语义（激活节点 / 打开入参）在 v2.11.8 就定好了，
+        // 这一层只是装饰，抢到事件会让"点卡片选中节点"变成"点了个没反应的三角"。
+        .allowsHitTesting(false)
+    }
 
     /// 预览区高度（1x）。
     ///

@@ -18,29 +18,32 @@ extension CanvasWorkspaceView {
 
     /// 右上「生成」按钮。
     ///
-    /// 选取规则：有选中就跑选中的图像节点；没选中且画布上只有一个图像节点就跑它；其余情况明确
+    /// 选取规则：有选中就跑选中的可生成节点；没选中且画布上只有一个就跑它；其余情况明确
     /// 要求先选中——刻意不做"全部一起跑"，那会在一次误点后烧掉一堆额度。
+    ///
+    /// v2.11.19 起「可生成」= 图像节点 ∪ 视频节点。刻意**不做类型混检**（选中 3 图 + 2 视频就
+    /// 五个一起提交）：用户的选区就是他的意图，而这两类的产物都各自写回自己的槽位，互不干扰。
     func runGenerationForSelection() {
-        let imageNodes = canvas.nodes.filter { $0.kind == .image }
-        let selected = imageNodes.filter { canvas.selectedNodeIds.contains($0.id) }
+        let runnable = canvas.nodes.filter { $0.kind.producesAsset }
+        let selected = runnable.filter { canvas.selectedNodeIds.contains($0.id) }
 
         let targets: [CanvasNode]
         if !selected.isEmpty {
             targets = selected
-        } else if imageNodes.count == 1 {
-            targets = imageNodes
-        } else if imageNodes.isEmpty {
-            store.transientUI.showToast("画布上还没有图像生成节点")
+        } else if runnable.count == 1 {
+            targets = runnable
+        } else if runnable.isEmpty {
+            store.transientUI.showToast("画布上还没有图像 / 视频生成节点")
             return
         } else {
-            store.transientUI.showToast("先选中要生成的图像节点")
+            store.transientUI.showToast("先选中要生成的节点")
             return
         }
 
         // 选区里混了别的类型时说一声，否则用户会以为文本节点也提交了。
         let skipped = canvas.selectedNodeIds.count - targets.count
         if skipped > 0 {
-            store.transientUI.showToast("已提交 \(targets.count) 个图像节点（跳过 \(skipped) 个非图像节点）")
+            store.transientUI.showToast("已提交 \(targets.count) 个节点（跳过 \(skipped) 个不可生成节点）")
         }
         for node in targets {
             startGeneration(node)
@@ -48,8 +51,12 @@ extension CanvasWorkspaceView {
     }
 
     /// 单个节点的生成 / 重跑。
+    ///
+    /// v2.11.19 起按 kind 分流到两条链路。分流点放在这里（而不是各自一个入口方法）是因为前面那
+    /// 五道门禁（运行中 / 排队中 / 空提示词 / 张数 / 类型）两条链路完全一样，而它们每一条都对应
+    /// 一个具体的历史 bug，复制一份只会让下次改动漏掉一侧。
     func startGeneration(_ node: CanvasNode, reusingSeed: Bool = false) {
-        guard node.kind == .image else {
+        guard node.kind.producesAsset else {
             store.transientUI.showToast("\(node.kind.displayName)节点还没接入生成")
             return
         }
@@ -74,6 +81,11 @@ extension CanvasWorkspaceView {
             // n 张 = n 个独立任务（CLI 的 --count 语义），而节点身份是 groupId#slot，
             // 同一槽位放不下第二个节点——这个冲突留给批量模版节点一起解决。
             store.transientUI.showToast(CrateRequestError.unsupportedCount(node.count).userMessage)
+            return
+        }
+
+        if node.kind == .video {
+            startVideoGeneration(node, prompt: prompt, reusingSeed: reusingSeed)
             return
         }
 
@@ -151,6 +163,126 @@ extension CanvasWorkspaceView {
         }
     }
 
+    // MARK: - 视频链路（v2.11.19）
+
+    /// 视频节点的生成 / 重跑。
+    ///
+    /// 与图像链路结构相同（提交 → 轮询 → 下载 → 写回槽位），四处刻意不同：
+    ///
+    ///   1. **入参图按角色分配**（首帧 / 尾帧 / 参考图），而不是一把 `--image`；
+    ///   2. **轮询时限 1800s** 而不是 600s（视频动辄几分钟，600s 会把成功的任务误判成超时）；
+    ///   3. **产物兜底扩展名是 mp4**，否则 URL 认不出扩展名时会落成 `.jpg`，卡片按扩展名判类别
+    ///      就会拿 `NSImage` 去读一个 mp4，预览区空白；
+    ///   4. **参数按模型能力裁剪**——分辨率 / 时长 / 配音三项只在模型声明了对应参数时才传，
+    ///      否则 CLI 当场拒收整次请求（`does not publish parameter`）。
+    ///
+    /// 第 4 点依赖模型目录。目录还没加载好（首次打开画布、或 `model list` 失败）时的选择是
+    /// **照用户存的值传**：目录只是"能不能传"的最优判据，不是必要条件，而把用户选的 4k 因为
+    /// 一次元数据请求失败就悄悄丢掉，比让 CLI 报一次明确的错更糟。服务层还有一层按报错重试的退路。
+    private func startVideoGeneration(_ node: CanvasNode, prompt: String, reusingSeed: Bool) {
+        // 直接读单例而不是挂 `@ObservedObject`：这是"点生成这一刻"的一次性查表，不需要反应式
+        // 刷新（视图里没有任何东西显示它）。把它挂成 ObservedObject 反而会让整个画布跟着模型
+        // 目录的加载状态重绘一次。
+        let info = CrateModelCatalogStore.shared.videoModels.first { $0.id == node.model }
+        if let info, info.requiresImageInput, inputImagePaths(for: node).isEmpty {
+            store.transientUI.showToast(CrateRequestError.missingRequiredImage(model: node.model).userMessage,
+                                        duration: 2.8)
+            return
+        }
+
+        let frames: (first: String?, last: String?, references: [String])
+        if let info {
+            frames = CrateModelCatalog.assignVideoFrames(imagePaths: inputImagePaths(for: node), model: info)
+        } else {
+            // 目录缺席时只敢认首帧：尾帧 / 参考图是"模型声明了才有"的角色，瞎传会被拒。
+            frames = (inputImagePaths(for: node).first, nil, [])
+        }
+
+        let request = CrateVideoRequest(
+            model: node.model,
+            prompt: prompt,
+            ratio: node.ratio,
+            resolution: (info?.supportsResolution ?? true) ? node.resolution : "",
+            duration: (info?.supportsDuration ?? true) ? node.duration : nil,
+            generateAudio: (info?.supportsAudio ?? false) ? node.generateAudio : nil,
+            firstFramePath: frames.first,
+            lastFramePath: frames.last,
+            referenceImagePaths: frames.references,
+            seed: reusingSeed ? node.seed : nil)
+
+        let nodeId = node.id
+        let groupId = node.groupId
+        let slot = node.slot
+        let modelName = node.model
+
+        canvas.updateNode(id: nodeId) { $0.state = .running(startedAt: Date()) }
+
+        Task {
+            let service = CrateGenerationService.shared
+            do {
+                try await service.preflight()
+                let submission = try await service.submit(request)
+                let submitted = submission.result
+                await MainActor.run {
+                    canvas.updateNode(id: nodeId) {
+                        $0.taskId = submitted.taskId
+                        if let seed = submitted.seed { $0.seed = seed }
+                    }
+                    if submission.droppedSeed {
+                        store.transientUI.showToast("\(modelName) 不支持固定 seed，本次用新种子", duration: 2.6)
+                    }
+                    // 合成一条而不是每项一条 Toast：Toast 是串行队列，四条依次弹完要十几秒，
+                    // 而这几项本来就是同一件事（"这些参数这个模型不吃"）。
+                    if !submission.droppedParameters.isEmpty {
+                        let list = submission.droppedParameters.joined(separator: "、")
+                        store.transientUI.showToast("\(modelName) 不支持 \(list)，本次用模型默认值", duration: 2.8)
+                    }
+                }
+
+                let urls = try await service.waitForCompletion(
+                    taskId: submitted.taskId,
+                    timeout: CrateGeneration.videoPollTimeout
+                ) { progress in
+                    Task { @MainActor in
+                        applyProgress(progress, toNodeId: nodeId)
+                    }
+                }
+                guard let first = urls.first else {
+                    throw CrateGenerationService.ServiceError.taskFailed(reason: "任务完成但没有产物")
+                }
+
+                let file = try await service.download(urlString: first,
+                                                      taskId: submitted.taskId,
+                                                      index: 0,
+                                                      fallbackExtension: "mp4")
+                await MainActor.run {
+                    finishGeneration(nodeId: nodeId,
+                                     groupId: groupId,
+                                     slot: slot,
+                                     downloadedFile: file,
+                                     taskId: submitted.taskId)
+                }
+            } catch is CancellationError {
+                await MainActor.run {
+                    canvas.updateNode(id: nodeId) { $0.state = .failed(reason: "已取消") }
+                }
+            } catch let err as CrateGenerationService.ServiceError {
+                NSLog("[ClipSlots][crate] video node=\(nodeId) 失败：\(err.logDetail)")
+                await MainActor.run {
+                    canvas.updateNode(id: nodeId) { $0.state = .failed(reason: err.userMessage) }
+                    store.transientUI.showToast(err.userMessage, duration: 2.6)
+                }
+            } catch {
+                NSLog("[ClipSlots][crate] video node=\(nodeId) 失败：\(error)")
+                await MainActor.run {
+                    let reason = error.localizedDescription
+                    canvas.updateNode(id: nodeId) { $0.state = .failed(reason: reason) }
+                    store.transientUI.showToast(reason, duration: 2.6)
+                }
+            }
+        }
+    }
+
     // MARK: - 中间步骤
 
     /// 服务端观测 → 节点状态。
@@ -216,8 +348,19 @@ extension CanvasWorkspaceView {
             store.transientUI.showToast(reason, duration: 2.6)
             return
         }
+        // 附件类型按**扩展名**判，不按节点 kind 判（v2.11.19）。
+        //
+        // `SlotContent.AttachmentType` 只有 `.image` / `.file` 两个取值（那是槽位
+        // 数据的历史 schema，给它加 `.video` 会让新写的数据在旧版本 App 里解不出来），所以 mp4
+        // 一律进 `.file`。卡片上的视频图标与首帧预览走的是另一套判定
+        // （`CanvasAttachmentKind.from(fileName:)`，按扩展名），两者互不依赖。
+        //
+        // 按扩展名而不是按 kind 的好处是：将来 transform 链路（去背 / 超分）产出的文件类型与节点
+        // 类型不一定对应（视频节点吐 mp4、图像节点吐 svg），这条规则不用跟着改。
+        let attachmentType: SlotContent.AttachmentType =
+            CanvasAttachmentKind.from(fileName: downloadedFile.lastPathComponent) == .image ? .image : .file
         let attachment = SlotContent.SlotAttachment(name: downloadedFile.lastPathComponent,
-                                                    type: .image,
+                                                    type: attachmentType,
                                                     data: bytes)
         var attachments = store.canvasSlotAttachments(groupId: groupId, slot: slot)
         attachments.append(attachment)

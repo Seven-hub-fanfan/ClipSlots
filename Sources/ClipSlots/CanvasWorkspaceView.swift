@@ -982,6 +982,8 @@ struct CanvasWorkspaceView: View {
             createNode(kind: .text, at: request.canvasPoint, parentNodeId: request.parentNodeId, beginEditing: true)
         case .image:
             createNode(kind: .image, at: request.canvasPoint, parentNodeId: request.parentNodeId, beginEditing: false)
+        case .video:
+            createNode(kind: .video, at: request.canvasPoint, parentNodeId: request.parentNodeId, beginEditing: false)
         case .slot:
             // 「从已有槽位创建」不能凭空挑一个槽位塞上来 —— 哪个槽位只有用户知道。
             // 所以这一项的语义是**把选择器打开**：展开左侧槽位库，用户拖或按 Cmd+N 都行。

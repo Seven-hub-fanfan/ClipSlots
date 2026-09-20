@@ -51,10 +51,21 @@ final class CrateModelCatalogStore: ObservableObject {
         return CrateModelCatalog.imageModels(all)
     }
 
+    /// 当前可选的出视频模型（v2.11.19）。与 `imageModels` 是两份互不相交的清单：
+    /// 实测没有任何模型同时声明 `text-2-image` 与 `text-2-video`，所以不必担心一个模型
+    /// 在两个 picker 里都出现。
+    var videoModels: [CrateModelCatalog.ModelInfo] {
+        guard case .loaded(let all) = state else { return [] }
+        return CrateModelCatalog.videoModels(all)
+    }
+
     var isLoading: Bool { state == .loading }
 
+    /// 按 id 查模型。**出图与出视频一起查**：调用方（属性面板 / 生成流水线）拿到节点上存的
+    /// model 字段时并不总知道它属于哪一类（老画布里可能存着任意值），只查一半会让视频节点
+    /// 永远"查不到模型" —— UI 上表现为分辨率/时长选择器凭空消失。
     func model(id: String) -> CrateModelCatalog.ModelInfo? {
-        imageModels.first { $0.id == id }
+        imageModels.first { $0.id == id } ?? videoModels.first { $0.id == id }
     }
 
     /// 需要时才加载（已加载且未过期 → 直接返回）。面板 `onAppear` 调它。

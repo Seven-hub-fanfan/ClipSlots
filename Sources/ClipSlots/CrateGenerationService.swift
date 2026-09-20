@@ -39,7 +39,10 @@ final class CrateGenerationService {
         case response(CrateResponseError)
         case taskFailed(reason: String)
         /// 轮询到时限还没终态。刻意带上 taskId：节点右键的「复制 taskId」还要用它去 Crate 网页端查。
-        case pollTimeout(taskId: String)
+        ///
+        /// `seconds` 也要带上（v2.11.19）：图像与视频的时限不同（600 / 1800），文案里写死一个常量的
+        /// 后果是视频等了半小时、提示却说"超时（600s）"，用户会以为是另一个 bug。
+        case pollTimeout(taskId: String, seconds: TimeInterval)
         case downloadFailed(detail: String)
 
         /// 给用户看的一句话。每一种失败对应的下一步动作都不同，所以不合并成一句通用文案。
@@ -61,8 +64,8 @@ final class CrateGenerationService {
                 return err.userMessage
             case .taskFailed(let reason):
                 return reason
-            case .pollTimeout(let taskId):
-                return "等待超时（\(Int(CrateGeneration.pollTimeout))s），任务仍在跑：\(taskId)"
+            case .pollTimeout(let taskId, let seconds):
+                return "等待超时（\(Int(seconds))s），任务仍在跑：\(taskId)"
             case .downloadFailed(let detail):
                 return "产物下载失败：\(detail)"
             }
@@ -87,8 +90,8 @@ final class CrateGenerationService {
                 return "\(err)"
             case .taskFailed(let reason):
                 return reason
-            case .pollTimeout(let taskId):
-                return "poll timeout, taskId=\(taskId)"
+            case .pollTimeout(let taskId, let seconds):
+                return "poll timeout after \(Int(seconds))s, taskId=\(taskId)"
             case .downloadFailed(let detail):
                 return detail
             }
@@ -228,6 +231,17 @@ final class CrateGenerationService {
         let droppedRatio: Bool
     }
 
+    /// 视频提交结果（v2.11.19）。
+    ///
+    /// 用 `[String]` 而不是几个 Bool：视频这边可能被摘掉的参数有 4 个（seed / 比例 / 分辨率 / 配音），
+    /// 再往下加（task_type / 参考素材）也不用改结构。字符串直接是给用户看的中文名，Toast 里
+    /// `已忽略：分辨率、配音` 拼起来就能用。
+    struct VideoSubmission {
+        let result: CrateGeneration.SubmitResult
+        let droppedSeed: Bool
+        let droppedParameters: [String]
+    }
+
     /// 取回模型目录（`model list --json`）。
     ///
     /// 刻意**不做 preflight**：目录查询本身就是"还能不能用"的探针，先跑一遍 auth status 只是把
@@ -306,6 +320,75 @@ final class CrateGenerationService {
         }
     }
 
+    /// 提交一次**视频**生成（v2.11.19）。
+    ///
+    /// 退路比图像那条多两级（resolution / generate_audio），原因是视频这边"参数与模型不匹配"的
+    /// 概率本来就高得多：分辨率选项集各模型互不兼容且大小写不统一，音频参数只有 Seedance 2.x 有。
+    /// 每一级退路都只摘掉**被 CLI 明确点名**的那一个参数，绝不"报错就全摘干净"——那样用户选的
+    /// 4k 会在一次无关的报错后静默变成默认档。
+    func submit(_ request: CrateVideoRequest) async throws -> VideoSubmission {
+        var effective = request
+        var droppedSeed = false
+        if request.seed != nil, await modelRejectsSeed(model: request.model) == true {
+            effective = CrateGeneration.droppingSeed(request)
+            droppedSeed = true
+        }
+
+        do {
+            return VideoSubmission(result: try await submitOnce(effective),
+                                   droppedSeed: droppedSeed,
+                                   droppedParameters: [])
+        } catch let err as ServiceError {
+            guard case .processFailed(_, let detail) = err else { throw err }
+
+            var retry = effective
+            var dropped: [String] = []
+            if retry.seed != nil, CrateGeneration.isUnsupportedParameterError(detail) {
+                retry = CrateGeneration.droppingSeed(retry)
+                droppedSeed = true
+            }
+            if !retry.ratio.isEmpty,
+               CrateGeneration.isUnsupportedParameterError(detail, parameter: CrateModelCatalog.ratioParameterName) {
+                retry = CrateGeneration.droppingRatio(retry)
+                dropped.append("比例")
+            }
+            if !retry.resolution.isEmpty,
+               CrateGeneration.isUnsupportedParameterError(detail,
+                                                          parameter: CrateModelCatalog.resolutionParameterName) {
+                retry = CrateGeneration.droppingResolution(retry)
+                dropped.append("分辨率")
+            }
+            if retry.generateAudio != nil,
+               CrateGeneration.isUnsupportedParameterError(detail,
+                                                          parameter: CrateModelCatalog.audioParameterName) {
+                retry = CrateGeneration.droppingAudio(retry)
+                dropped.append("配音")
+            }
+            guard droppedSeed || !dropped.isEmpty else { throw err }
+
+            NSLog("[ClipSlots][crate] video model \(effective.model) rejected "
+                  + (droppedSeed ? "seed " : "") + dropped.joined(separator: "/")
+                  + "; retrying without it")
+            let result = try await submitOnce(retry)
+            return VideoSubmission(result: result, droppedSeed: droppedSeed, droppedParameters: dropped)
+        }
+    }
+
+    private func submitOnce(_ request: CrateVideoRequest) async throws -> CrateGeneration.SubmitResult {
+        let args: [String]
+        do {
+            args = try CrateGeneration.submitArguments(request)
+        } catch let err as CrateRequestError {
+            throw ServiceError.request(err)
+        }
+        let output = try await run(args, timeout: CrateGeneration.submitTimeout, stage: "提交任务")
+        do {
+            return try CrateGeneration.parseSubmitResponse(output)
+        } catch let err as CrateResponseError {
+            throw ServiceError.response(err)
+        }
+    }
+
     /// 这个模型是不是不收 seed？`nil` = 问不出来（不确定时不做任何取舍，交给重试兜底）。
     private func modelRejectsSeed(model: String) async -> Bool? {
         if let cached = modelParameterCache[model] {
@@ -330,9 +413,13 @@ final class CrateGenerationService {
     ///
     /// 每次观测都回调 `onProgress`（在**调用方线程**，节点状态的 MainActor 跳转由调用方负责），
     /// 这样卡片能实时显示「前方 N 个」→「生成中 12s」。
+    ///
+    /// `timeout` 由调用方给（v2.11.19）：图像 600s、视频 1800s。写死在这里的话，视频链路要么
+    /// 跟着图像一起超时误判（任务其实成功了、额度也扣了），要么图像链路被拖成半小时才肯报错。
     func waitForCompletion(taskId: String,
+                           timeout: TimeInterval = CrateGeneration.pollTimeout,
                            onProgress: @escaping (CrateTaskProgress) -> Void) async throws -> [String] {
-        let deadline = Date().addingTimeInterval(CrateGeneration.pollTimeout)
+        let deadline = Date().addingTimeInterval(timeout)
         while Date() < deadline {
             try await Task.sleep(nanoseconds: UInt64(CrateGeneration.pollInterval * 1_000_000_000))
             if Task.isCancelled { throw CancellationError() }
@@ -357,11 +444,19 @@ final class CrateGenerationService {
                 throw ServiceError.taskFailed(reason: reason)
             }
         }
-        throw ServiceError.pollTimeout(taskId: taskId)
+        throw ServiceError.pollTimeout(taskId: taskId, seconds: timeout)
     }
 
     /// 把产物下载到临时目录。返回的文件由调用方负责搬进槽位附件后删除。
-    func download(urlString: String, taskId: String, index: Int) async throws -> URL {
+    ///
+    /// `fallbackExtension` 跟着链路类型走（v2.11.19，理由见 `CrateGeneration.assetFileName`）。
+    /// 视频这边还有一层现实原因：mp4 比图片大一两个数量级，`URLSession.data(from:)` 是**整包进
+    /// 内存**的。实测 720p/10s 在 10MB 量级，仍在可接受范围内，所以这一版不改成流式下载——
+    /// 等 4k/30s（可能上百 MB）成为常用组合再说，那时要换的是 `download(to:)` 落盘式 API。
+    func download(urlString: String,
+                  taskId: String,
+                  index: Int,
+                  fallbackExtension: String = "jpg") async throws -> URL {
         guard let url = URL(string: urlString) else {
             throw ServiceError.downloadFailed(detail: "URL 非法：\(CrateGeneration.clip(urlString))")
         }
@@ -379,7 +474,10 @@ final class CrateGenerationService {
             throw ServiceError.downloadFailed(detail: "内容为空")
         }
 
-        let name = CrateGeneration.assetFileName(taskId: taskId, index: index, urlString: urlString)
+        let name = CrateGeneration.assetFileName(taskId: taskId,
+                                                index: index,
+                                                urlString: urlString,
+                                                fallbackExtension: fallbackExtension)
         let dir = FileManager.default.temporaryDirectory
             .appendingPathComponent("clipslots_crate_\(UUID().uuidString)", isDirectory: true)
         do {

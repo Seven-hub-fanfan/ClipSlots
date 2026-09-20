@@ -16,9 +16,34 @@ import ClipSlotsKit
 // current release. This is the single source of truth surfaced by `version`,
 // `help` and per-command help (all reference CLI_VERSION), so no other literal
 // needs bumping.
-// v2.10.66: keep in lockstep with the app's CFBundleShortVersionString on every
-// release — this constant had drifted (2.10.58) behind the app (2.10.65).
-let CLI_VERSION = "2.11.8"
+// v2.11.19: stop relying on a human to keep this literal in lockstep. The comment
+// above has asked for exactly that since v2.10.30 and the constant still drifted
+// three times (2.10.16 → 2.10.58 → 2.11.8 while the app was at 2.11.18). Read the
+// real version out of the enclosing app bundle instead — the only supported install
+// is /usr/local/bin/clipslots → ClipSlots.app/Contents/MacOS/clipslots-cli, so
+// Contents/Info.plist sits exactly two levels up from the executable and is the same
+// single source of truth the GUI uses (AppVersion.current).
+//
+// `Bundle.main` is useless here: for a bare executable inside MacOS/ it resolves to
+// the executable itself and carries no infoDictionary. The fallback literal only
+// applies to `swift run` / standalone copies, where there is no bundle to ask.
+let CLI_VERSION: String = {
+    // `Bundle.main.executableURL` rather than argv[0]: argv[0] is whatever the caller
+    // passed (a bare "clipslots" when invoked through PATH by some shells), which would
+    // resolve against the cwd and silently miss the bundle.
+    let exe = (Bundle.main.executableURL ?? URL(fileURLWithPath: CommandLine.arguments[0]))
+        .resolvingSymlinksInPath()
+    let plist = exe.deletingLastPathComponent()      // …/Contents/MacOS
+        .deletingLastPathComponent()                 // …/Contents
+        .appendingPathComponent("Info.plist")
+    if let data = try? Data(contentsOf: plist),
+       let dict = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any],
+       let v = dict["CFBundleShortVersionString"] as? String,
+       !v.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+        return v
+    }
+    return "2.11.19"
+}()
 let DEFAULT_GROUP = "default"
 let DEFAULT_PAGE = "default_page"
 

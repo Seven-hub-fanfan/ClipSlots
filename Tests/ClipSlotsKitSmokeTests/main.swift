@@ -1852,9 +1852,30 @@ do {
         return j
     }
 
-    // ── 版本号必须与本次发布一致（历史上 CLI_VERSION 漂移过好几次）
+    // ── 版本号必须与本次发布一致。
+    //
+    // v2.11.19：期望值不再写死字面量。这条断言本来就是为了盯 CLI_VERSION 漂移，结果
+    // 它自己也跟着漂（写死 2.11.8，而 App 已经到 2.11.18）—— 两个字面量要人手动同步的
+    // 制度，漏同步一次就变成"测试跟实现一起错"。现在直接拿 Info.plist（发布流水线真正
+    // 改的那个文件）做期望值：它与 GUI 的 `AppVersion.current` 同源。
+    //
+    // 注意这里跑的是 `swift build` 产物（不在 .app 里），所以它抿的是 CLI 里的编译期
+    // 兑底值——这正好是要盯的那一个（装进 bundle 后它会自己读 plist，不会错）。
+    let expectedVersion: String = {
+        let plist = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()   // Tests/ClipSlotsKitSmokeTests
+            .deletingLastPathComponent()   // Tests
+            .deletingLastPathComponent()   // repo root
+            .appendingPathComponent("Info.plist")
+        guard let data = try? Data(contentsOf: plist),
+              let dict = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any],
+              let v = dict["CFBundleShortVersionString"] as? String else { return "" }
+        return v
+    }()
+    t.check(!expectedVersion.isEmpty, "★读得到 Info.plist 里的发布版本号（读不到的话下一条断言会变成空跑）")
     let ver = runCLI(["version"])
-    t.equal(ver.json["version"] as? String, "2.11.8", "★CLI_VERSION 必须与 App 版本同步为 2.11.8")
+    t.equal(ver.json["version"] as? String, expectedVersion,
+            "★CLI 版本号必须与 Info.plist 同步（CLI_VERSION 历史上漂移过三次：2.10.16 / 2.10.58 / 2.11.8）")
 
     // ── ① 落盘回读
     let set1 = runCLI(["set-thumbnail", "1", "--image", imgA.path])
@@ -7284,6 +7305,240 @@ do {
     var threw = false
     do { _ = try CrateModelCatalog.parse("not json at all") } catch { threw = true }
     t.check(threw, "CRATE-CAT-26 不是 JSON 时抛错（让 UI 能显示原因，而不是静默空列表）")
+}
+
+
+// MARK: - CRATE-VID：视频生成链路（v2.11.19）
+//
+// 视频与图像共用「提交 → 轮询 → 下载 → 写回槽位」的骨架，但四处不同，每一处都是静默错误的温床：
+//   1. 参数按模型裁剪：传模型没声明的参数会被 CLI 当场拒收（实测给 seedancePro1 传
+//      generate_audio 报 `does not publish parameter "generate_audio"`），整次生成失败；
+//   2. 时长有两种形态：6 个 seedance/minimax 给 min/max/step，veo 给 options [4,6,8]；
+//   3. 输入图按角色分（首帧 / 尾帧 / 参考图），而且 5/7 的模型首尾帧与参考图互斥；
+//   4. 产物是 mp4：兜底扩展名写成 jpg 会让卡片拿 NSImage 去读视频，预览区空白。
+// fixture 字段口径全部照抄本机 `crate model list --json` 的实测输出（crate v0.6.1）。
+do {
+    // ---- 提交参数 ----
+    let full = CrateVideoRequest(model: "seedance25",
+                                 prompt: "海浪拍打礁石",
+                                 ratio: "16:9",
+                                 resolution: "720p",
+                                 duration: 5,
+                                 generateAudio: true,
+                                 firstFramePath: "/tmp/a.png",
+                                 lastFramePath: "/tmp/b.png",
+                                 referenceImagePaths: ["/tmp/c.png", "/tmp/d.png"],
+                                 seed: 42)
+    let args = try! CrateGeneration.submitArguments(full)
+    t.equal(Array(args.prefix(6)),
+            ["generate", "video", "--model", "seedance25", "--prompt", "海浪拍打礁石"],
+            "CRATE-VID-1 视频提交走 generate video（写成 image 时 CLI 报的是「未知模型」，极难定位）")
+    t.check(args.suffix(2) == ["--no-wait", "--json"],
+            "★CRATE-VID-2 必须带 --no-wait：视频动辄几分钟，前台等 CLI 返回等于把 App 挂死")
+    t.check(args.contains("--ratio") && args.contains("16:9"), "CRATE-VID-3 比例")
+    t.check(args.contains("--resolution") && args.contains("720p"), "CRATE-VID-4 分辨率")
+    t.check(args.contains("--duration") && args.contains("5"), "CRATE-VID-5 时长")
+    t.check(args.contains("--generate-audio") && args.contains("true"), "CRATE-VID-6 配音开关")
+    t.check(args.contains("--first-frame") && args.contains("--last-frame"),
+            "CRATE-VID-7 首帧 / 尾帧各有专属 flag（不是一把 --image）")
+    t.equal(args.filter { $0 == "--reference-image" }.count, 2,
+            "CRATE-VID-8 每张参考图一个 --reference-image")
+    t.check(args.contains("--param") && args.contains("seed=42"),
+            "CRATE-VID-9 seed 仍走 --param（与图像同一条通道）")
+
+    // 空值 / nil 一律不传 —— 这是「该模型不吃这个参数」的落地形态。
+    let bare = try! CrateGeneration.submitArguments(
+        CrateVideoRequest(model: "seedancePro1", prompt: "x", ratio: "  ", resolution: "  "))
+    t.check(!bare.contains("--ratio") && !bare.contains("--resolution"),
+            "★CRATE-VID-10 空白比例/分辨率不传（传空串会被 CLI 当非法值拒掉）")
+    t.check(!bare.contains("--duration") && !bare.contains("--generate-audio"),
+            "★CRATE-VID-11 duration/audio 为 nil 时不传：Pro 1 压根没有 generate_audio，传了整次请求报废")
+    let autoDuration = try! CrateGeneration.submitArguments(
+        CrateVideoRequest(model: "seedance25", prompt: "x", duration: -1))
+    t.check(autoDuration.contains("--duration") && autoDuration.contains("-1"),
+            "★CRATE-VID-12 -1 是 seedance 声明的合法特殊值（服务端自己定时长），不能被当成非法数据滤掉")
+    let audioOff = try! CrateGeneration.submitArguments(
+        CrateVideoRequest(model: "seedance25", prompt: "x", generateAudio: false))
+    t.check(audioOff.contains("--generate-audio") && audioOff.contains("false"),
+            "★CRATE-VID-13 关配音要显式传 false（漏传 = 用模型默认值，而 seedance2.5 默认开）")
+
+    var threwEmpty = false
+    do { _ = try CrateGeneration.submitArguments(CrateVideoRequest(model: "m", prompt: "  \n ")) }
+    catch { threwEmpty = true }
+    t.check(threwEmpty, "CRATE-VID-14 空提示词在参数层就拦住（与图像同一道门禁）")
+
+    // ---- 退路：参数降级 ----
+    var req = full
+    req = CrateGeneration.droppingResolution(req)
+    t.check(!(try! CrateGeneration.submitArguments(req)).contains("--resolution"),
+            "★CRATE-VID-15 droppingResolution 后不传分辨率（各模型选项大小写都不一致：seedance 4k / minimax 2K）")
+    req = CrateGeneration.droppingAudio(req)
+    t.check(!(try! CrateGeneration.submitArguments(req)).contains("--generate-audio"),
+            "CRATE-VID-16 droppingAudio 后不传配音")
+    req = CrateGeneration.droppingRatio(CrateGeneration.droppingSeed(req))
+    let stripped = try! CrateGeneration.submitArguments(req)
+    t.check(!stripped.contains("--ratio") && !stripped.contains("--param"),
+            "CRATE-VID-17 视频的 droppingRatio / droppingSeed 与图像同构")
+    t.check(stripped.contains("--first-frame"),
+            "★CRATE-VID-18 降级只降参数，不降输入图（把用户挂的首帧丢掉等于换了一次生成语义）")
+
+    // ---- 产物命名 ----
+    t.equal(CrateGeneration.assetFileName(taskId: "768", index: 0,
+                                          urlString: "https://x/y/out.mp4", fallbackExtension: "mp4"),
+            "crate_768.mp4", "CRATE-VID-19 URL 带扩展名时按 URL 来")
+    t.equal(CrateGeneration.assetFileName(taskId: "768", index: 0,
+                                          urlString: "https://x/y/noext?sig=1", fallbackExtension: "mp4"),
+            "crate_768.mp4",
+            "★CRATE-VID-20 认不出扩展名时兜底 mp4：兜成 jpg 会让卡片拿 NSImage 读视频，预览区空白且看不出原因")
+    t.equal(CrateGeneration.assetFileName(taskId: "768", index: 0, urlString: "https://x/y/noext"),
+            "crate_768.jpg", "CRATE-VID-21 图像链路的兜底不变（默认参数）")
+    t.check(CrateGeneration.videoPollTimeout > CrateGeneration.pollTimeout * 2,
+            "★CRATE-VID-22 视频时限远大于图像：600s 的症状是服务端已成功扣额度、App 报超时，用户会再点一次")
+
+    // ---- 模型目录：视频侧字段 ----
+    let vjson = """
+    [
+      {"id":"seedance25","name":"Seedance 2.5","family":"Seed3.0","enabled":true,
+       "generationTypes":["text-2-video","image-to-video"],
+       "parameters":[{"name":"prompt"},
+                     {"name":"ratio","options":[{"value":"adaptive","label":"Adaptive"},{"value":"16:9","label":"16:9"}]},
+                     {"name":"resolution","defaultValue":"720p",
+                      "options":[{"value":"480p","label":"480p"},{"value":"720p","label":"720p"}]},
+                     {"name":"generate_audio","defaultValue":true},
+                     {"name":"duration","defaultValue":5,"min":4,"max":30,"step":1,"specialValues":[-1]}],
+       "inputs":{"image":{"required":false,"maxCount":50}},
+       "references":{"roles":[{"role":"first_frame","maxCount":1},{"role":"last_frame","maxCount":1},
+                              {"role":"reference_image","maxCount":50}],
+                     "constraints":[{"type":"mutually-exclusive-groups",
+                                     "groups":[["first_frame","last_frame"],["reference_image","reference_video"]],
+                                     "message":"First/last frames cannot be combined with multimodal references."}]}},
+      {"id":"veo-3.1-generate-preview","name":"VEO 3.1","family":"GPT","enabled":true,
+       "generationTypes":["image-to-video"],
+       "parameters":[{"name":"prompt"},{"name":"seed","defaultValue":100},
+                     {"name":"ratio","options":[{"value":"16:9","label":"16:9"},{"value":"9:16","label":"9:16"}]},
+                     {"name":"duration","defaultValue":8,
+                      "options":[{"value":4,"label":"4s"},{"value":6,"label":"6s"},{"value":8,"label":"8s"}]},
+                     {"name":"resolution","defaultValue":"720p",
+                      "options":[{"value":"720p","label":"720p"},{"value":"1080p","label":"1080p"}]}],
+       "inputs":{"image":{"required":true,"maxCount":3}},
+       "references":{"roles":[{"role":"first_frame","maxCount":1},{"role":"reference_image","maxCount":3}]}},
+      {"id":"seedance2-mini","name":"Seedance 2 Mini","family":"Seed3.0","enabled":true,
+       "generationTypes":["text-2-video","image-to-video"],
+       "parameters":[{"name":"prompt"},
+                     {"name":"resolution","options":[{"value":"480p","label":"480p"},{"value":"720p","label":"720p"}]},
+                     {"name":"duration","defaultValue":5,"min":4,"max":15,"step":1}],
+       "inputs":{"image":{"required":false,"maxCount":9}},
+       "references":{"roles":[{"role":"first_frame","maxCount":1},{"role":"last_frame","maxCount":1},
+                              {"role":"reference_image","maxCount":9}]}},
+      {"id":"simple_editor-video_remove_bg","name":"Video Remove BG","family":"Tools","enabled":true,
+       "generationTypes":["video-remove-bg"],"parameters":[]},
+      {"id":"seedream45","name":"Seedream 4.5","family":"Seed3.0","enabled":true,
+       "generationTypes":["text-2-image","image-2-image"],
+       "parameters":[{"name":"prompt"},{"name":"ratio","options":[{"value":"1:1","label":"1:1"}]}]}
+    ]
+    """
+    let vall = try! CrateModelCatalog.parse(vjson)
+    let vids = CrateModelCatalog.videoModels(vall)
+    t.equal(vids.map { $0.id }, ["seedance25", "veo-3.1-generate-preview", "seedance2-mini"],
+            "★CRATE-VID-23 只留出视频模型：出图模型不进视频 picker，去背这类 transform 也不进（它走另一条子命令，没有 prompt/时长）")
+    t.check(!CrateModelCatalog.imageModels(vall).contains { $0.isVideoGenerator },
+            "CRATE-VID-24 两个 picker 的清单互不污染")
+
+    let s25 = vids[0]
+    t.check(s25.supportsResolution && s25.supportsDuration && s25.supportsAudio,
+            "CRATE-VID-25 seedance2.5 三项参数都有")
+    t.equal(s25.resolutionOptions.map { $0.value }, ["480p", "720p"],
+            "CRATE-VID-26 分辨率选项按 CLI 原序（首项即最低档 → 换模型不会悄悄把成本翻几倍）")
+    t.equal(s25.durationDefault, 5, "CRATE-VID-27 时长默认值取 CLI 的 defaultValue")
+    t.check(s25.durationSpec == .range(min: 4, max: 30, step: 1, specialValues: [-1]),
+            "★CRATE-VID-28 seedance 给的是连续区间 + 特殊值 -1")
+    t.check(s25.supportsLastFrame && s25.referenceImageMaxCount == 50,
+            "CRATE-VID-29 角色表解析：尾帧 + 参考图上限")
+    t.check(s25.framesExcludeReferences,
+            "★CRATE-VID-30 首尾帧与参考图互斥要认出来（硬凑成 --first-frame + --reference-image 会被整次拒收）")
+    t.check(!s25.requiresImageInput, "CRATE-VID-31 seedance 可以纯文生视频")
+
+    let veo = vids[1]
+    t.check(veo.requiresImageInput,
+            "★CRATE-VID-32 veo 必须带输入图：空槽位要在点生成时就拦住，不能扣一次额度换一条英文报错")
+    t.check(veo.acceptsVideoImageInput, "CRATE-VID-33 veo 是图生视频")
+    t.check(veo.durationSpec == .options([4, 6, 8]),
+            "★CRATE-VID-34 veo 给的是离散枚举：用 min/max 去套它会让 UI 允许选 5s、提交才被拒")
+    t.check(!veo.supportsAudio, "CRATE-VID-35 veo 没有 generate_audio（传了会被拒）")
+    t.check(veo.supportsSeed, "CRATE-VID-36 veo 吃 seed（重跑能复现）")
+    t.check(!veo.supportsLastFrame,
+            "CRATE-VID-37 没声明 last_frame 角色时不能给尾帧")
+
+    let mini = vids[2]
+    t.check(!mini.framesExcludeReferences,
+            "★CRATE-VID-38 seedance2-mini 没声明互斥（实测确实没有）→ 首尾帧可与参考图共存，不能一把按互斥处理")
+
+    // ---- 时长规格的三种用法 ----
+    let vrange = CrateModelCatalog.DurationSpec.range(min: 4, max: 30, step: 1, specialValues: [-1])
+    t.check(vrange.allows(4) && vrange.allows(30) && vrange.allows(-1), "CRATE-VID-39 区间端点与特殊值合法")
+    t.check(!vrange.allows(3) && !vrange.allows(31), "CRATE-VID-40 越界不合法")
+    let stepped = CrateModelCatalog.DurationSpec.range(min: 2, max: 12, step: 2, specialValues: [])
+    t.check(stepped.allows(4) && !stepped.allows(5), "CRATE-VID-41 步长格点")
+    t.equal(stepped.clamped(11), 10, "★CRATE-VID-42 夹到格点要向下取（向上会越过 max）")
+    t.equal(vrange.clamped(40), 30, "CRATE-VID-43 超上限夹到 max")
+    t.equal(vrange.clamped(-1), -1, "★CRATE-VID-44 特殊值不参与夹取（-1 不能被夹成 4）")
+    let vopts = CrateModelCatalog.DurationSpec.options([4, 6, 8])
+    t.equal(vopts.clamped(7), 6, "★CRATE-VID-45 枚举取最近档，平手取小的那侧（少花钱）")
+    t.equal(vopts.clamped(8), 8, "CRATE-VID-46 已在枚举里原样保留")
+    t.equal(vrange.selectableValues.first, 4, "CRATE-VID-47 UI 候选从 min 开始")
+    t.check(!vrange.selectableValues.contains(-1),
+            "★CRATE-VID-48 -1 不进候选列表（picker 里显示负数秒毫无意义，它属于「自动」那一档）")
+
+    // ---- 换模型时的落值 ----
+    t.equal(CrateModelCatalog.resolvedResolution(current: "720p", for: s25), "720p",
+            "CRATE-VID-49 旧分辨率仍在新模型选项里 → 保留")
+    t.equal(CrateModelCatalog.resolvedResolution(current: "4k", for: s25), "480p",
+            "★CRATE-VID-50 旧值不在选项里 → 退到首项（最低档），而不是留着一个会被拒的 4k")
+    t.equal(CrateModelCatalog.resolvedResolution(current: "720p", for: mini), "720p",
+            "CRATE-VID-51 mini 也有 720p")
+    let noRes = CrateModelCatalog.ModelInfo(id: "x", displayName: "X", family: "",
+                                            generationTypes: ["text-2-video"],
+                                            parameterNames: ["prompt"], ratioOptions: [], enabled: true)
+    t.equal(CrateModelCatalog.resolvedResolution(current: "720p", for: noRes), "",
+            "★CRATE-VID-52 新模型不吃 resolution → 清空（留着旧值提交时整次被拒）")
+    t.equal(CrateModelCatalog.resolvedDuration(current: 30, for: veo), 8,
+            "★CRATE-VID-53 30s 换到 veo 要夹成 8s（枚举最近档），否则提交被拒")
+    t.check(CrateModelCatalog.resolvedDuration(current: nil, for: s25) == nil,
+            "★CRATE-VID-54 nil 进 nil 出：没设过时长是要保留的状态（提交时不传 → 用模型默认值）")
+    t.check(CrateModelCatalog.resolvedDuration(current: 10, for: noRes) == nil,
+            "CRATE-VID-55 新模型不吃 duration → 清空")
+
+    // ---- 槽位图片按角色分配 ----
+    let three = ["/1.png", "/2.png", "/3.png"]
+    let fa = CrateModelCatalog.assignVideoFrames(imagePaths: three, model: s25)
+    t.equal(fa.first, "/1.png", "CRATE-VID-56 第 1 张 = 首帧")
+    t.equal(fa.last, "/2.png", "CRATE-VID-57 第 2 张 = 尾帧")
+    t.check(fa.references.isEmpty,
+            "★CRATE-VID-58 互斥模型：多出来的图丢掉而不是塞成参考图（丢图 → 用户看到只用了前两张；硬塞 → 整次被拒）")
+    let fb = CrateModelCatalog.assignVideoFrames(imagePaths: three, model: mini)
+    t.equal(fb.references, ["/3.png"], "CRATE-VID-59 非互斥模型：余下的进参考图")
+    let fc = CrateModelCatalog.assignVideoFrames(imagePaths: three, model: veo)
+    t.check(fc.first == "/1.png" && fc.last == nil && fc.references == ["/2.png", "/3.png"],
+            "★CRATE-VID-60 不声明尾帧角色时第 2 张退回参考图队列（不能硬给 --last-frame）")
+    let fone = CrateModelCatalog.assignVideoFrames(imagePaths: ["/1.png"], model: s25)
+    t.check(fone.first == "/1.png" && fone.last == nil,
+            "★CRATE-VID-61 只有一张图时不能凑尾帧（一张图当首尾帧会生成一段静止视频）")
+    let fnone = CrateModelCatalog.assignVideoFrames(imagePaths: [], model: s25)
+    t.check(fnone.first == nil && fnone.references.isEmpty, "CRATE-VID-62 没图就全空（纯文生视频）")
+    let textOnly = CrateModelCatalog.ModelInfo(id: "t", displayName: "T", family: "",
+                                               generationTypes: ["text-2-video"],
+                                               parameterNames: ["prompt"], ratioOptions: [], enabled: true)
+    let fd = CrateModelCatalog.assignVideoFrames(imagePaths: three, model: textOnly)
+    t.check(fd.first == nil && fd.last == nil && fd.references.isEmpty,
+            "★CRATE-VID-63 只会文生视频的模型一张图都不传（被静默忽略比报错更糟：用户以为图生效了）")
+
+    // ---- 默认值 ----
+    t.equal(CanvasNode.defaultModel(for: .video), CrateGeneration.defaultVideoModel,
+            "CRATE-VID-64 视频节点默认模型走视频常量（给 seedream45 会让首次生成直接失败）")
+    t.equal(CanvasNode.defaultModel(for: .image), CrateGeneration.defaultModel,
+            "CRATE-VID-65 图像节点默认值不变")
+    t.equal(CanvasNode.defaultRatio(for: .video), "16:9",
+            "★CRATE-VID-66 视频默认 16:9 而不是 1:1：方图视频是异类，而 7 个模型都支持 16:9")
 }
 
 t.report()
