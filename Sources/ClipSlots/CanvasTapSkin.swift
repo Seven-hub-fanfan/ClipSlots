@@ -94,6 +94,12 @@ enum TapSkin {
     static let chromeInkDim = Color(red: 0.62, green: 0.62, blue: 0.62)
     static let chromeDivider = Color(red: 0.29, green: 0.29, blue: 0.29)
     static let toolbarHeight: CGFloat = 44
+
+    /// 画布走 `fullSizeContentView`（黑到窗口顶边，见 `CanvasWindowAppearancePin`）之后，
+    /// 窗口顶部这 28pt 归标题栏所有：红绿灯画在这里，点这里是拖窗口而不是点内容。
+    /// 所以画布上的 chrome（侧栏、项目切换器、右上按钮）都要从这条线以下开始排，
+    /// 而网格与节点照旧 full-bleed 铺到顶边 —— TapNow 就是这样：点阵到顶，控件避开。
+    static let titlebarInset: CGFloat = 28
     static let toolbarRadius: CGFloat = 22
     static let toolbarIconSize: CGFloat = 14
     static let toolbarItemSpacing: CGFloat = 12
@@ -191,73 +197,206 @@ extension View {
 /// 视图销毁（切回编辑）时还原为 `nil`，即重新继承 `NSApp.appearance`，用户的主题偏好与
 /// `applyAppAppearance()` 的语义都不受影响。不动 `styleMask`，因此 `normalizeMainWindowChrome()`
 /// 钉下的「标题栏由 AppKit 画、不做 fullSizeContentView」那套约定继续成立。
+/// 画布模式下的窗口 chrome 管理者（v2.16.1 重写）。
+///
+/// ## 为什么是「单例 + 引用计数」而不是每个视图各存一份原值
+///
+/// v2.16.0 的写法是把原值存在 `NSViewRepresentable` 的 `Host` 实例里：`pin()` 时记下来，
+/// `dismantleNSView` 时还原。看着对称，实际在 SwiftUI 里是坏的 —— 宿主视图**会被反复重建**
+/// （`.background(...)` 里的 representable 随外层状态刷新而换实例），而重建的顺序是
+/// **先 make 新的、后 dismantle 旧的**。于是每次刷新都在做：
+///
+///   新 Host.pin()   → 透明标题栏 + darkAqua ✅
+///   旧 Host.unpin() → 按它自己记的「原值」还原成不透明 + appearance=nil ❌（把新的覆盖掉）
+///
+/// 净效果就是钉不住。实测日志（同一个窗口 `0xc7733c600`，写完同步读是生效的，隔 0.8s 再读
+/// 就回去了）：
+///
+/// ```text
+/// sync@pin  before(transparent=1 app=DarkAqua)  afterSyncRead(transparent=1 app=DarkAqua)
+/// +0.8      before(transparent=0 app=Aqua)      afterSyncRead(transparent=1 app=DarkAqua)
+/// +2.5      before(transparent=0 app=Aqua)      afterSyncRead(transparent=1 app=DarkAqua)
+/// ```
+///
+/// 屏幕上的表现是标题栏始终是浅色横带 (231,231,232)、红绿灯是浅色版，和纯黑画布顶边硬碰一条缝。
+/// 顺带解释了 v2.16.0 那条「fullSizeContentView 没生效」的错觉 —— `styleMask` 其实进去了
+/// （contentView 高度等于窗口高度），只有 `titlebarAppearsTransparent` 被还原掉了。
+///
+/// 所以原值必须是**窗口维度的、全局一份**，并且用引用计数决定何时还原：
+/// 画布在台上期间任意多次重建都只是 `retain +1/-1`，计数归零（真的离开画布）才还原。
+///
+/// ## 为什么这里**不**碰 `titlebarAppearsTransparent` 和 `window.appearance`
+///
+/// 碰不过 —— 这两项由 SwiftUI 自己按场景环境算，每次环境更新都会重写回去。swizzle setter
+/// 抓到的调用栈（v2.16.1 实测）：
+///
+/// ```text
+/// setTitlebarAppearsTransparent(false)  <- SwiftUI.BarAppearanceBridge.updateWindowToolbar…
+/// setAppearance(nil)                    <- SwiftUI.AppKitWindowController.hostingView(_:willUpdate:)
+/// ```
+///
+/// 手写值在同一个 runloop 里读回来是对的，隔一帧就被刷掉，所以这条路是死的。正确的开关在
+/// SwiftUI 那一侧，画布视图上挂：
+///
+/// ・`.toolbarBackground(.hidden, for: .windowToolbar)` → 标题栏不再画那层浅色材质，
+///   `fullSizeContentView` 铺到顶的黑画布直接透出来；
+/// ・`.preferredColorScheme(.dark)` → 让 SwiftUI 自己把窗口 appearance 设成深色（红绿灯、
+///   系统菜单跟着深色走），而不是我们去写 `window.appearance`。
+///
+/// 留给这个类的就只有 SwiftUI 不管的两项：`styleMask` 的 `fullSizeContentView` 和窗口底色。
+///
+/// 只在主线程使用（SwiftUI 的 representable 回调与 AppDelegate 都在主线程）。
+final class CanvasChromePin {
+    static let shared = CanvasChromePin()
+
+    private struct Saved {
+        let hadFullSizeContentView: Bool
+        let titleVisibility: NSWindow.TitleVisibility
+        let backgroundColor: NSColor?
+    }
+
+    /// 改 `styleMask` 会连带改「内容区」的高度：插入 `fullSizeContentView` 时内容区多出标题栏
+    /// 那 28pt，移除时又少回去。SwiftUI 紧接着会按内容的理想尺寸反推窗口大小，于是**每进出一次
+    /// 画布，窗口就长高一截**（v2.16.1 实测连续三次启动：904 → 932 → 949）。
+    /// 所以每次动 styleMask 都把 frame 原样按回去。
+    private func preservingFrame(_ window: NSWindow, _ body: () -> Void) {
+        let frame = window.frame
+        body()
+        if window.frame != frame {
+            window.setFrame(frame, display: false)
+        }
+    }
+
+    private weak var window: NSWindow?
+    private var saved: Saved?
+    private var retainCount = 0
+
+    private init() {}
+
+    /// 画布是否正在钉窗口 chrome。`AppDelegate.normalizeMainWindowChrome()` 要认这个标记，
+    /// 否则它会在启动 retry 与每次皮肤切换时把 chrome 掰回「不透明标题栏」。
+    var isActive: Bool { retainCount > 0 }
+
+    func acquire(_ window: NSWindow) {
+        if self.window !== window {
+            // 换窗口了（多窗口 / 窗口重建）：先把上一个还原干净，避免把别人的 chrome 留在深色上。
+            restoreIfNeeded()
+            self.window = window
+            saved = Saved(hadFullSizeContentView: window.styleMask.contains(.fullSizeContentView),
+                          titleVisibility: window.titleVisibility,
+                          backgroundColor: window.backgroundColor)
+        }
+        retainCount += 1
+        apply(to: window)
+    }
+
+    /// 视图刷新 / 皮肤切换后重新压一遍。计数为 0 时什么都不做。
+    func reapply(_ window: NSWindow) {
+        guard retainCount > 0, self.window === window else { return }
+        apply(to: window)
+    }
+
+    func release() {
+        guard retainCount > 0 else { return }
+        retainCount -= 1
+        guard retainCount == 0 else { return }
+        restoreIfNeeded()
+    }
+
+    /// TapNow 的窗口没有标题栏那条横带：纯黑一直铺到窗口顶边，只剩红绿灯浮在画布上。
+    ///
+    /// 写之前都先判等：`updateNSView` 每帧都会调进来，无脑重写会让 AppKit 反复重画 chrome。
+    private func apply(to window: NSWindow) {
+        if !window.styleMask.contains(.fullSizeContentView) {
+            preservingFrame(window) { window.styleMask.insert(.fullSizeContentView) }
+        }
+        if window.titleVisibility != .hidden {
+            window.titleVisibility = .hidden
+        }
+        if window.backgroundColor != .black {
+            window.backgroundColor = .black
+        }
+    }
+
+    private func restoreIfNeeded() {
+        guard let window, let saved else {
+            self.window = nil
+            self.saved = nil
+            return
+        }
+        if !saved.hadFullSizeContentView {
+            preservingFrame(window) { window.styleMask.remove(.fullSizeContentView) }
+        }
+        window.titleVisibility = saved.titleVisibility
+        window.backgroundColor = saved.backgroundColor ?? .windowBackgroundColor
+        self.window = nil
+        self.saved = nil
+    }
+}
+
+/// 把 `CanvasChromePin` 挂到画布视图树上的零尺寸宿主。
+///
+/// 它只负责「画布在不在台上」这一个事实：挂上 = acquire，拆掉 = release，刷新 = reapply。
+/// 原值与还原时机都在 `CanvasChromePin` 里，见那边关于重建顺序的注释。
 struct CanvasWindowAppearancePin: NSViewRepresentable {
     final class Host: NSView {
-        /// 记住实际被改过的那个窗口 + 它的原值，还原时只还原它，不去动别人。
-        private weak var pinned: NSWindow?
-        private var savedTitlebarTransparent: Bool?
-        private var savedBackground: NSColor?
+        private var acquired = false
+        private var skinObserver: NSObjectProtocol?
 
         /// SwiftUI 建窗晚于 `makeNSView`，视图挂上窗口这一刻才是能拿到 window 的时机。
         override func viewDidMoveToWindow() {
             super.viewDidMoveToWindow()
-            pin()
+            attach()
         }
 
-        func pin() {
-            guard let window = window, pinned !== window else { return }
-            pinned = window
-            if savedTitlebarTransparent == nil {
-                savedTitlebarTransparent = window.titlebarAppearsTransparent
-                savedBackground = window.backgroundColor
+        func attach() {
+            guard let window else { return }
+            if acquired {
+                CanvasChromePin.shared.reapply(window)
+            } else {
+                acquired = true
+                CanvasChromePin.shared.acquire(window)
             }
-            // 只设 appearance 不够：实测 `window.appearance = .darkAqua` 之后
-            // `effectiveAppearance` 确实变成 NSAppearanceNameDarkAqua，但标题栏仍旧渲染成
-            // 亮度 241 的浅色条——AppKit 没有按新 appearance 重画这块 chrome。
-            // 所以改成让标题栏**透明**、由窗口底色透上来，底色钉黑，从而拿到 TapNow 那种
-            // 「标题栏与画布连成一片」的整窗纯黑；appearance 仍设深色，好让标题文字与
-            // 红绿灯按钮切到深色底应有的配色。
-            window.appearance = NSAppearance(named: .darkAqua)
-            window.titlebarAppearsTransparent = true
-            window.backgroundColor = .black
-            // 为什么还要逐级往上设 appearance：只设 `window.appearance` 时实测
-            // `NSTitlebarView.effectiveAppearance` 已经是 DarkAqua，可那块 chrome 仍旧画成
-            // 亮度 241 的浅色条；显式给 `NSTitlebarView` / `NSTitlebarContainerView` / `NSThemeFrame`
-            // 各设一次 darkAqua 之后才真正重画成深色（实测 49,49,49）。
-            //
-            // 到 49 就是这条路的地板：试过给 NSTitlebarView 开 layer 再把底色钉成纯黑，
-            // 实测仍是 49 —— 标题栏的材质层画在图层底色之上，盖不住。真要做到 TapNow 那种
-            // 「黑到窗口顶边、只剩红绿灯浮在画布上」，得上 fullSizeContentView + 隐藏标题，
-            // 同时给侧栏/画布 chrome 补一条约 28pt 顶部内缩避开红绿灯，属于布局改动，留给后续版本。
-            var node: NSView? = window.standardWindowButton(.closeButton)?.superview
-            while let view = node {
-                view.appearance = NSAppearance(named: .darkAqua)
-                node = view.superview
+            if skinObserver == nil {
+                // 皮肤切换会触发 `normalizeMainWindowChrome()`；它是异步 retry 的，
+                // 所以排到它之后再压一遍。
+                skinObserver = NotificationCenter.default.addObserver(
+                    forName: AppSkinCenter.didChangeNotification,
+                    object: nil,
+                    queue: .main
+                ) { [weak self] _ in
+                    DispatchQueue.main.async {
+                        guard let self, let window = self.window else { return }
+                        CanvasChromePin.shared.reapply(window)
+                    }
+                }
             }
         }
 
-        func unpin() {
-            guard let window = pinned else { return }
-            window.appearance = nil
-            if let t = savedTitlebarTransparent { window.titlebarAppearsTransparent = t }
-            window.backgroundColor = savedBackground ?? .windowBackgroundColor
-            savedTitlebarTransparent = nil
-            savedBackground = nil
-            pinned = nil
+        func detach() {
+            if let skinObserver {
+                NotificationCenter.default.removeObserver(skinObserver)
+                self.skinObserver = nil
+            }
+            guard acquired else { return }
+            acquired = false
+            CanvasChromePin.shared.release()
         }
     }
 
     func makeNSView(context: Context) -> Host {
         let view = Host()
-        view.pin()
+        view.attach()
         return view
     }
 
     func updateNSView(_ view: Host, context: Context) {
-        view.pin()
+        view.attach()
     }
 
     static func dismantleNSView(_ view: Host, coordinator: ()) {
-        view.unpin()
+        view.detach()
     }
 }
+
+

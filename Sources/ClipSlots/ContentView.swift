@@ -342,9 +342,32 @@ struct ContentView: View {
                                 CanvasWorkspaceView(store: store,
                                                     canvas: canvasStore,
                                                     agentVisible: $canvasAgentVisible)
-                                    // v2.16.0: 画布固定纯黑，标题栏也跟着钉深色，
-                                    // 免得浅色主题下白标题栏压在黑画布上。见 CanvasWindowAppearancePin。
+                                    // 画布固定纯黑，窗口 chrome 跟着让位：`fullSizeContentView`
+                                    // 让内容铺到窗口顶边、标题栏不再切走那 28pt。见 CanvasChromePin
+                                    // （含「哪些项 SwiftUI 会抢、只能用它的开关」的实测记录）。
                                     .background(CanvasWindowAppearancePin().frame(width: 0, height: 0))
+                                    // ★ v2.16.1：画布子树**强制深色**。
+                                    //
+                                    // 画布的墨色是写死的白（`canvasChromeInk` = white 93%），因为 TapNow 的
+                                    // 画布恒定纯黑；但浮层的**底板**走的是皮肤动态色（`elevatedBackground`
+                                    // 等，`dyn(light:dark:)` 按 appearance 取值）。浅色主题下这两者撞在一起
+                                    // 就是**白底白字**：实测项目切换器、底部工具栏、缩放条全成了空白胶囊
+                                    // （采样 255,255,255，文字完全看不见）。
+                                    //
+                                    // 不逐个改那 59 处 token 调用，而是把整棵画布子树的 colorScheme 钉成
+                                    // 深色：各皮肤的深色档本来就是设计过、有对比度断言的那一套，直接用它。
+                                    // 窗口 appearance 那层仍然要设（红绿灯配色），但不能只依赖它 ——
+                                    // 它被 normalize 掰回去过一次，画布就整片瞎了。
+                                    .environment(\.colorScheme, .dark)
+                                    // ★ v2.16.1：标题栏那层浅色材质要用 SwiftUI 的开关关掉，
+                                    // 手写 `titlebarAppearsTransparent` 会被 SwiftUI 每帧刷回去
+                                    // （调用栈见 CanvasChromePin 注释）。关掉之后
+                                    // `fullSizeContentView` 铺到窗口顶边的黑画布才真的透出来，
+                                    // 红绿灯浮在画布上 —— 这就是 TapNow 的顶边。
+                                    .toolbarBackground(.hidden, for: .windowToolbar)
+                                    // 窗口级 appearance 同理交给 SwiftUI：红绿灯 / 系统右键菜单
+                                    // 跟着深色走。
+                                    .preferredColorScheme(.dark)
                             case .edit:
                                 editWorkspace
                             }
@@ -472,6 +495,13 @@ struct ContentView: View {
             .zIndex(200)
 
         }
+        // ★ v2.16.1：窗口标题按模式取值。
+        //
+        // 画布模式要空标题（TapNow 顶边只有红绿灯，`titleVisibility = .hidden` 会被 SwiftUI
+        // 刷回去，得从 title 本身下手）；但**不能只在画布分支里设**——那样切回编辑模式后
+        // SwiftUI 保留最后一次的值，窗口就永远没名字了（实测：进过一次画布之后窗口标题一直是
+        // 空的，窗口菜单与调度中心里都是无名窗口）。所以放在根上，两种模式各给一个值。
+        .navigationTitle(workspaceMode == .canvas ? "" : "ClipSlots")
         .onAppear {
             AppearanceDefaults.ensureDefaultDarkIfNeeded()
         }

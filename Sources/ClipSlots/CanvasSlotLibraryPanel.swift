@@ -115,7 +115,12 @@ struct CanvasSlotLibraryPanel: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
+            // v2.16.1: 画布改走 `fullSizeContentView` 之后，窗口顶部 28pt 是标题栏拖拽区、
+            // 红绿灯就画在这块（见 `TapSkin.titlebarInset`）。侧栏的**底色照旧铺到顶边**
+            // （padding 加在 header 上而不是整块面板上，不然顶边会露出后面的画布网格），
+            // 只把内容压到红绿灯下面 —— 否则"槽位库"标题和折叠按钮正好被三颗灯盖住。
             header
+                .padding(.top, TapSkin.titlebarInset)
             if canvas.isLibraryExpanded {
                 Divider().opacity(0.5)
                 ScrollView {

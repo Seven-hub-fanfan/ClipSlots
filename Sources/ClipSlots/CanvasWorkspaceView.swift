@@ -1406,7 +1406,9 @@ struct CanvasWorkspaceView: View {
                                   onRename: handleRenameProject,
                                   onDelete: handleDeleteProject)
                 .padding(.leading, sidebarWidth + 12)
-                .padding(.top, 12)
+                // v2.16.1: +titlebarInset —— 画布现在黑到窗口顶边，这条 chrome 要落到
+                // 标题栏拖拽区下面，否则点它等于在拖窗口。
+                .padding(.top, 12 + TapSkin.titlebarInset)
 
             // 右上：Agent 入口 + 生成按钮
             VStack {
@@ -1439,7 +1441,7 @@ struct CanvasWorkspaceView: View {
                 Spacer()
             }
             .padding(.trailing, 16)
-            .padding(.top, 14)
+            .padding(.top, 14 + TapSkin.titlebarInset)
 
             // 右侧：属性面板（v2.11.7 hotfix19）。
             //
@@ -1456,7 +1458,7 @@ struct CanvasWorkspaceView: View {
                     Spacer()
                 }
                 .padding(.trailing, 16)
-                .padding(.top, 62)
+                .padding(.top, 62 + TapSkin.titlebarInset)
                 .transition(.opacity.combined(with: .move(edge: .trailing)))
             }
 

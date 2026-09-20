@@ -84,6 +84,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { apply(retry: retry - 1) }
                 return
             }
+            // v2.16.1：画布模式把 chrome 钉成了「透明标题栏 + fullSizeContentView」，
+            // 这里再掰回去就等于把画布顶边那条黑带又切掉一截，见 CanvasChromePin。
+            guard !CanvasChromePin.shared.isActive else { return }
             window.styleMask.remove(.fullSizeContentView)
             window.titlebarAppearsTransparent = false
             window.titleVisibility = .visible
@@ -133,15 +136,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         apply(retry: 10)
     }
 
-    /// 点 Dock 图标 / 重新打开时也走一次自救（此时窗口已存在，系统只是把它 order front，
+    /// 点 Dock 图标 / 重新打开时也走一次自救（窗口已存在时系统只是把它 order front，
     /// 若它停在屏外照样看不见）。
+    ///
+    /// v2.16.1：**一个窗口都没有时必须返回 `false`**。
+    /// `applicationShouldTerminateAfterLastWindowClosed` 为 `false`（关掉窗口 App 继续驻留），
+    /// 所以「⌘W 关窗」之后进程还活着但零窗口。此前这里无条件 `return true`，含义是
+    /// 「reopen 我自己处理了」——但它只对**已存在**的窗口 `makeKeyAndOrderFront`，零窗口时
+    /// 什么都没做，还把 SwiftUI `WindowGroup` 默认的「reopen 时补一个窗口」给挡掉了。
+    /// 返回 `false` = 交还系统默认行为，SwiftUI 会新建窗口，界面能回来。
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
         rescueMainWindowVisibility()
-        if let window = NSApp.windows.first(where: {
+        guard let window = NSApp.windows.first(where: {
             $0.styleMask.contains(.titled) && !($0 is NSPanel)
-        }) {
-            window.makeKeyAndOrderFront(nil)
+        }) else {
+            return false
         }
+        window.makeKeyAndOrderFront(nil)
         return true
     }
 

@@ -195,12 +195,19 @@ struct CanvasTapNodeCard: View {
 
     @ViewBuilder
     private var promptEditor: some View {
+        // ★ v2.16.1：`draft` 必须在编辑器**出现时**也种一次，不能只靠下面那个
+        // `onChange(of: isEditing)`。`onChange` 只在值**发生变化**时触发；如果卡片是在
+        // 「已经处于编辑态」的情况下才被创建出来的，它一次都不会响。而这条路径真实存在：
+        // 节点身份是 `groupId#slot`，槽位重排会 `rebindNode` 改 id，SwiftUI 于是销毁旧卡、
+        // 建一张新卡 —— 新卡的 `draft` 是空串，`isEditing` 已经是 true，接着 `onBlur` 会拿
+        // 这个空串去 `onCommitEdit`，把节点原有文字**整段清掉**。
         CanvasPromptEditor(text: $draft,
                            font: CanvasFontCatalog.nsFont(family: node.fontName,
                                                           size: max(0.01, fs(node.resolvedBodyFontSize))),
                            onCommit: { onCommitEdit(draft) },
                            onCancel: onCancelEdit,
                            onBlur: { onCommitEdit(draft) })
+            .onAppear { draft = text }
             .padding(s(8))
     }
 
