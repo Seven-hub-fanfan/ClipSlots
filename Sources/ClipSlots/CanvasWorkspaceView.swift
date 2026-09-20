@@ -245,6 +245,19 @@ struct CanvasWorkspaceView: View {
                 // 没有光标事件之前，锚点先取视图中心，避免首次捏合以 (0,0) 为锚点把画面甩到角上。
                 cursorScreen = CGPoint(x: proxy.size.width / 2, y: proxy.size.height / 2)
                 viewSize = proxy.size
+
+                // ★ v2.13.0：进画布时清一次私有组里的无主内容。
+                //
+                // 这条不只是"顺手打扫"：v2.12.x 删节点不清内容，老用户的暂存区里已经堆了一批
+                // 残留（用户截图里 9 条），而那些节点早就不在画布上了，只靠"删除时清扫"永远清不到。
+                // 一次清扫覆盖所有历史成因（删节点 / 改绑 / 上个版本的脏数据）。
+                //
+                // 有提示：清扫会动用户内容（进 `.trash`，30 天可恢复），静默执行就是在用户背后
+                // 删东西 —— 哪怕删的是垃圾，也必须让他知道发生了什么。
+                let swept = sweepPrivateSlots()
+                if !swept.isEmpty {
+                    store.transientUI.showToast("已清理 \(swept.count) 项无主的暂存内容（可在回收站恢复）")
+                }
             }
             .onChange(of: proxy.size) { newSize in viewSize = newSize }
             .onDisappear {
@@ -978,15 +991,20 @@ struct CanvasWorkspaceView: View {
 
     /// 新建一个节点。
     ///
-    /// ## ★ v2.11.8 二轮：新节点落到「未入库」，不再抢用户槽位
+    /// ## ★ v2.11.8 二轮：新节点落到保留组，不再抢用户槽位
     ///
     /// 此前这里去 `activeHotkeySpecialSlotId`（当前组）里找空槽 —— 于是用户在画布上随手建三个
     /// 节点，编辑页的槽位 3/4/5 就被占了，圆盘和 Cmd+3~5 也跟着变，而那三个节点还只是草稿。
-    /// 用户明确要求：**画布上没有对应槽位的独立节点归入「未入库」**。
+    /// 用户明确要求：**画布上没有对应槽位的独立节点归入暂存区**。
     ///
-    /// 于是新建一律落到未入库保留组（见 `SlotStoreObservable.canvasUnfiledGroupId`），
-    /// 之后由用户把它拖进槽位库的某个槽位块完成"归槽"。真实槽位从此只由用户显式指定
-    /// （槽位库拖拽 / Cmd+1~0），不会再被隐式占用。
+    /// 于是新建一律落到保留组，之后由用户把它拖进槽位库的某个槽位块完成"归槽"。真实槽位从此
+    /// 只由用户显式指定（槽位库拖拽 / Cmd+1~0），不会再被隐式占用。
+    ///
+    /// ## ★ v2.13.0：落到**当前项目**的私有组
+    ///
+    /// 从全局唯一的「未入库」改成 `canvas.privateGroupId`（默认项目仍是 `__unfiled__`）。
+    /// 两个原因：60 个槽位不再被所有项目共享（三个项目各 25 个节点就撞墙），以及"删掉整个项目"
+    /// 能把它的内容一起带走。
     ///
     /// 返回 nil 表示没建成，调用方**不要**再往下写内容 —— 否则会写到一个不存在的槽位上。
     @discardableResult
@@ -995,14 +1013,15 @@ struct CanvasWorkspaceView: View {
                             parentNodeId: String?,
                             beginEditing: Bool,
                             quiet: Bool = false) -> CanvasNode? {
-        let groupId = store.canvasUnfiledGroupId
-        guard store.ensureCanvasUnfiledGroup() else {
+        let groupId = canvas.privateGroupId
+        guard store.ensureCanvasPrivateGroup(id: groupId, name: canvas.activeProject.privateGroupName) else {
             store.transientUI.showToast("存储繁忙，未能新建节点")
             return nil
         }
-        guard let slot = store.allocateUnfiledSlot(occupied: canvas.occupiedSlots(inGroup: groupId)) else {
+        guard let slot = store.allocateCanvasPrivateSlot(groupId: groupId,
+                                                         occupied: canvas.occupiedSlots(inGroup: groupId)) else {
             // 说清出路而不是只说失败：这条提示是用户唯一能看到的解释。
-            store.transientUI.showToast("未入库已满，先把一些节点拖进槽位库归档")
+            store.transientUI.showToast("本项目暂存区已满（60），先把一些节点拖进槽位库归档")
             return nil
         }
         let name = kind == .text ? "文本" : kind.displayName
@@ -1015,7 +1034,7 @@ struct CanvasWorkspaceView: View {
                                      parentNodeId: parentNodeId,
                                      avoidOverlap: true)
         if beginEditing { editingNodeId = result.node.id }
-        if !quiet { store.transientUI.showToast("已新建\(kind.displayName)节点 · 未入库") }
+        if !quiet { store.transientUI.showToast("已新建\(kind.displayName)节点") }
         return result.node
     }
 
@@ -1202,6 +1221,18 @@ struct CanvasWorkspaceView: View {
                                    onReorder: { groupId, from, to in
                                        handleSlotReorder(groupId: groupId, from: from, to: to)
                                    })
+
+            // 左上（紧挨侧栏）：项目切换器。
+            //
+            // 贴在画布内容区左上角而不是 App 顶栏：项目是**画布的文档单位**，和顶栏那一排
+            // 「页 / 组」不是同一维度（那两级是槽位容器），并排摆会让人以为有从属关系。
+            CanvasProjectSwitcher(canvas: canvas,
+                                  onSwitch: handleSwitchProject,
+                                  onCreate: handleCreateProject,
+                                  onRename: handleRenameProject,
+                                  onDelete: handleDeleteProject)
+                .padding(.leading, sidebarWidth + 12)
+                .padding(.top, 12)
 
             // 右上：Agent 入口 + 生成按钮
             VStack {
@@ -1427,10 +1458,13 @@ struct CanvasWorkspaceView: View {
     /// （见 `CanvasNodeCardView` 的类型注释）。拼装规则本身在 `CanvasCardText.pathLabel`，
     /// 带 smoke 断言。
     ///
-    /// 未入库的节点走 `未入库 - N`：它不属于任何用户页面，硬给它编一个页面名只会误导
+    /// 暂存区的节点走 `未入库 - N`：它不属于任何用户页面，硬给它编一个页面名只会误导
     /// —— 用户会去那一页找这个节点，然后找不到。
+    ///
+    /// v2.13.0：判定改成"是不是保留组"。除了当前项目的私有组，还要盖住**别的项目**的私有组
+    /// ——跨项目的节点不该出现在画布上，但真出现了（数据异常）也不能给它编一个不存在的页面名。
     private func pathLabel(for node: CanvasNode) -> String {
-        let isUnfiled = node.groupId == store.canvasUnfiledGroupId
+        let isUnfiled = SpecialSlotStorage.isReservedGroupId(node.groupId)
         if isUnfiled {
             return CanvasCardText.pathLabel(pageName: nil, groupName: nil,
                                             slot: node.slot, isUnfiled: true)
@@ -1472,6 +1506,52 @@ struct CanvasWorkspaceView: View {
         canvas.noteSlotDataChanged()
     }
 
+    // MARK: - 项目（v2.13.0）
+
+    /// 切项目。
+    ///
+    /// `CanvasStore.switchProject` 内部会先把当前项目落盘、再换文档、并清掉撤销栈
+    /// （跨项目 Cmd+Z 会把 A 的节点写进 B 的文档，见那边的注释）。
+    private func handleSwitchProject(_ id: String) {
+        guard canvas.switchProject(to: id) else { return }
+        // 视口是文档的一部分（每个项目各记自己的 pan/zoom），换文档后必须把 View 侧的
+        // `@State` 同步过来 —— 否则新项目会用上一个项目的视口打开，看起来像"节点全不见了"。
+        pan = canvas.pan
+        zoom = canvas.zoom
+        store.transientUI.showToast("已切到项目「\(canvas.activeProject.name)」")
+    }
+
+    private func handleCreateProject(_ name: String) {
+        let project = canvas.createProject(name: name)
+        pan = canvas.pan
+        zoom = canvas.zoom
+        // 私有组当场建好：不等到"第一次新建节点"时才建，是为了让删项目那条路径永远有东西可删
+        // （否则会出现"组不存在 → 删除静默失败"的分支，而那条分支只有极少数项目会走到，最容易腐坏）。
+        _ = store.ensureCanvasPrivateGroup(id: project.privateGroupId, name: project.privateGroupName)
+        store.transientUI.showToast("已新建项目「\(project.name)」")
+    }
+
+    private func handleRenameProject(_ name: String) {
+        guard canvas.renameProject(id: canvas.activeProjectId, name: name) else { return }
+        store.transientUI.showToast("已重命名为「\(canvas.activeProject.name)」")
+    }
+
+    /// 删项目：画布文档 + 私有槽位组一起删，都走软删除。
+    ///
+    /// 顺序刻意是"先删文档/索引，再删私有组"：反过来的话，一旦删组成功而删文档失败，画布上会留着
+    /// 一批指向已消失组的节点（`groupId#slot` 找不到内容 → 满屏空卡片）。而现在这个顺序下最坏的
+    /// 结果是留下一个不再被任何项目引用的私有组，那是可以被下次清理收拾的静默残留，不影响使用。
+    private func handleDeleteProject(_ project: CanvasProject) {
+        guard let deleted = canvas.deleteProject(id: project.id) else {
+            store.transientUI.showToast("至少要保留一个项目")
+            return
+        }
+        pan = canvas.pan
+        zoom = canvas.zoom
+        _ = store.deleteCanvasPrivateGroup(id: deleted.privateGroupId)
+        store.transientUI.showToast("已删除项目「\(deleted.name)」（内容可在回收站恢复）")
+    }
+
     // MARK: - 删除节点（带断链确认）
 
     /// 删除节点的**唯一入口**。有下游引用时先弹确认，没有就直接删。
@@ -1498,7 +1578,29 @@ struct CanvasWorkspaceView: View {
         let count = canvas.nodes.filter { ids.contains($0.id) }.count
         guard count > 0 else { return }
         canvas.removeNodes(ids: ids)
-        store.transientUI.showToast(count == 1 ? "已删除节点" : "已删除 \(count) 个节点")
+        // ★ v2.13.0：画布私有内容必须跟着节点一起消失（用户原话：「在画布中删除应该就消失了才可以」）。
+        // 刚删掉的节点仍在撤销栈里 → 它的槽位这一轮会被保护住，等撤销栈把它挤出去才真正清除。
+        // 这是刻意的：内容比整洁重要，Cmd+Z 必须能把节点**连内容**一起恢复。
+        let swept = sweepPrivateSlots()
+        if swept.isEmpty {
+            store.transientUI.showToast(count == 1 ? "已删除节点" : "已删除 \(count) 个节点")
+        } else {
+            store.transientUI.showToast(count == 1
+                ? "已删除节点，并清理 \(swept.count) 项暂存内容"
+                : "已删除 \(count) 个节点，并清理 \(swept.count) 项暂存内容")
+        }
+    }
+
+    /// 清扫当前项目私有组里已经没人引用的内容。
+    ///
+    /// 规则、安全闸与"为什么不在删除路径上直接清"都在 `CanvasPrivateSlotSweep` 的类型注释里；
+    /// 这里只是把 store 两侧的输入接起来。
+    @discardableResult
+    private func sweepPrivateSlots() -> [Int] {
+        store.sweepCanvasPrivateSlots(groupId: canvas.privateGroupId,
+                                      referencedByNodes: canvas.privateSlotsReferencedByNodes(),
+                                      referencedByHistory: canvas.privateSlotsReferencedByHistory(),
+                                      documentLoadFailed: canvas.documentLoadFailed)
     }
 
     /// 打开「入参文件」管理弹层。

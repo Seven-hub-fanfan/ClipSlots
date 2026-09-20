@@ -3295,17 +3295,19 @@ do {
         .appendingPathComponent("clipslots_canvas_smoke_\(UUID().uuidString)", isDirectory: true)
     defer { try? FileManager.default.removeItem(at: dir) }
     let storage = CanvasStorage(rootOverride: dir)
+    // v2.13.0：文档按项目分文件，读写都要带 projectId。默认项目沿用固定 id "default"。
+    let pid = CanvasProject.defaultId
 
-    t.equal(storage.load().nodes.count, 0, "首次读取应得空画布")
+    t.equal(storage.load(projectId: pid).nodes.count, 0, "首次读取应得空画布")
 
     var doc = CanvasDocument()
     doc.nodes = [canvasNode(slot: 1, group: "grp_a", x: 12, y: 34, count: 4),
                  canvasNode(slot: 7, group: "grp_b", x: -5, y: 0)]
     doc.panX = 11; doc.panY = 22; doc.zoom = 1.5
-    t.check(storage.save(doc), "画布文档应保存成功")
+    t.check(storage.save(doc, projectId: pid), "画布文档应保存成功")
 
     // 换一个实例读（绕开内存缓存），验证真的落到了盘上。
-    let reread = CanvasStorage(rootOverride: dir).load()
+    let reread = CanvasStorage(rootOverride: dir).load(projectId: pid)
     t.equal(reread.nodes.count, 2, "★★重新读盘应拿回 2 个节点")
     t.equal(reread.nodes.first?.id, "grp_a#1", "★★节点身份应由 groupId#slot 派生，且顺序保持")
     t.equal(reread.nodes.first?.groupId, "grp_a", "槽位组 id 应完整保留")
@@ -3318,18 +3320,44 @@ do {
 
 
     // 损坏文件：必须旁置 .corrupt 后按空画布继续，而不是崩溃或阻塞进入画布。
-    let file = dir.appendingPathComponent("canvas/canvas.json")
+    let file = dir.appendingPathComponent("canvas/projects/\(pid)/canvas.json")
     try! Data("{ 这不是 JSON".utf8).write(to: file)
     let broken = CanvasStorage(rootOverride: dir)
-    t.equal(broken.load().nodes.count, 0, "★★损坏的画布文件应回落到空画布（画布是派生资产，不阻塞启动）")
+    t.equal(broken.load(projectId: pid).nodes.count, 0, "★★损坏的画布文件应回落到空画布（画布是派生资产，不阻塞启动）")
     t.check(FileManager.default.fileExists(atPath: file.path + ".corrupt"),
             "★★损坏文件必须旁置为 .corrupt 供事后打捞")
+    // ★★ v2.13.0：回落成空画布这件事必须能被问出来。私有槽位清扫把"画布上没有节点引用"
+    // 当成"这些内容无主了"，如果一次损坏能静默变成空画布，清扫就会把整个项目的内容抹掉。
+    t.check(broken.lastLoadFailed(projectId: pid),
+            "★★★损坏回落后 lastLoadFailed 必须为 true（否则私有槽位清扫会误删整个项目的内容）")
+    t.check(!CanvasStorage(rootOverride: dir).lastLoadFailed(projectId: "another"),
+            "没读过 / 不存在的项目不算加载失败")
 
     // 缓存失效后应重新读盘。
     let cached = CanvasStorage(rootOverride: dir)
-    _ = cached.load()
+    _ = cached.load(projectId: pid)
     cached.invalidateCache()
-    t.check(cached.load().nodes.isEmpty, "invalidateCache 后应重新读盘")
+    t.check(cached.load(projectId: pid).nodes.isEmpty, "invalidateCache 后应重新读盘")
+
+    // 多项目隔离：两个项目各自一份文档，互不串。
+    let iso = CanvasStorage(rootOverride: dir)
+    var docA = CanvasDocument(); docA.nodes = [canvasNode(slot: 2, group: "grp_a")]
+    var docB = CanvasDocument(); docB.nodes = [canvasNode(slot: 3, group: "grp_b"), canvasNode(slot: 4, group: "grp_b")]
+    t.check(iso.save(docA, projectId: "proj_a"), "项目 A 文档应保存成功")
+    t.check(iso.save(docB, projectId: "proj_b"), "项目 B 文档应保存成功")
+    let freshIso = CanvasStorage(rootOverride: dir)
+    t.equal(freshIso.load(projectId: "proj_a").nodes.count, 1, "★★项目 A 只应读回自己的 1 个节点")
+    t.equal(freshIso.load(projectId: "proj_b").nodes.count, 2, "★★项目 B 只应读回自己的 2 个节点")
+    t.equal(freshIso.load(projectId: "proj_b").nodes.first?.groupId, "grp_b", "项目之间不得串组")
+    // 写成功要把"加载失败"标记清掉：用户已经在这个项目上产生了新的真实状态，
+    // 继续锁死清扫会让残留永远清不掉。
+    // 重新造一份损坏文件（上一份已经被旁置成 .corrupt 了）。
+    try! Data("{ 又坏了".utf8).write(to: file)
+    let recovered = CanvasStorage(rootOverride: dir)
+    _ = recovered.load(projectId: pid)
+    t.check(recovered.lastLoadFailed(projectId: pid), "前置条件：新造的损坏文件应被标记为加载失败")
+    t.check(recovered.save(CanvasDocument(), projectId: pid), "保存应成功")
+    t.check(!recovered.lastLoadFailed(projectId: pid), "★★保存成功后应清掉加载失败标记（否则清扫永久失效）")
 }
 
 // MARK: - CANVAS-UNDO：撤销栈 + 键位判定 + 多选位移（v2.11.7 hotfix18）
@@ -7781,6 +7809,213 @@ do {
     // 出口把手挂在卡片右边中点：拖线的起点与连线起点必须是同一个点，否则拖出来的线会跳一下。
     t.equal(CanvasEdgeGeometry.outputHandle(of: from), CGPoint(x: 100, y: 30),
             "CANVAS-EDGE-GEO-11 出口把手 = 右边中点（与连线起点同一个点）")
+}
+
+// MARK: - CANVAS-PROJ：多项目（v2.13.0）
+//
+// 为什么这组必须存在：项目索引是**所有画布的目录**。它坏一次、或者归一化写错一次，用户看到的
+// 不是"某个功能不好用"，而是"我的画布全不见了"（文件还在盘上，只是没人知道它们的存在）。
+// 三类错误都不会当场报错：
+//   1. 归一化漏掉"列表空"或"activeId 失效" → 画布 UI 打开时没有当前项目，一片空白且建不出来。
+//   2. 私有组 id 规则写错 → 节点内容落到别的项目的暂存区（跨项目串数据，静默）。
+//   3. 迁移漏了 v2.12 的单画布文件 → 老用户升级后画布空了。
+do {
+    // ---- 私有组 id：持久化契约 ----
+    let def = CanvasProject(id: CanvasProject.defaultId, name: "随便改个名")
+    t.equal(def.privateGroupId, SpecialSlotStorage.unfiledGroupId,
+            "★★★CANVAS-PROJ-1 默认项目的私有组必须仍是 __unfiled__（老用户的画布内容全在那里，换 id 就得整组搬家）")
+    t.equal(def.privateGroupName, SpecialSlotStorage.unfiledGroupName,
+            "CANVAS-PROJ-2 默认项目的私有组名仍是「未入库」")
+    let p1 = CanvasProject(id: "AAA", name: "片子一")
+    t.equal(p1.privateGroupId, "__canvas__AAA",
+            "★CANVAS-PROJ-3 非默认项目的私有组 = 前缀 + 项目 id（每个项目各占一个 60 槽的池子）")
+    t.check(SpecialSlotStorage.isReservedGroupId(p1.privateGroupId),
+            "★★★CANVAS-PROJ-4 项目私有组必须被认成保留组——这是它对用户隐身（组列表/页面树/CLI 全过滤）的唯一判定点")
+    t.check(SpecialSlotStorage.isReservedGroupId(SpecialSlotStorage.unfiledGroupId),
+            "CANVAS-PROJ-5 未入库仍是保留组")
+    t.check(!SpecialSlotStorage.isReservedGroupId("special_1234"),
+            "CANVAS-PROJ-6 普通组不是保留组（否则用户的正式组会从自己的界面里消失）")
+
+    // ---- 名字：去重 + 截断 ----
+    t.equal(CanvasProject.uniqueName(base: "项目", existing: ["项目"]), "项目 2",
+            "CANVAS-PROJ-7 重名自动加序号（身份是 id，但两行同名等于让用户抓瞎）")
+    t.equal(CanvasProject.uniqueName(base: "项目", existing: ["项目", "项目 2"]), "项目 3",
+            "CANVAS-PROJ-8 序号取第一个空位")
+    t.equal(CanvasProject.uniqueName(base: "  ", existing: []), "未命名项目",
+            "CANVAS-PROJ-9 空白名回落到占位名（空名字在切换器里是一行看不见的东西）")
+    t.check(CanvasProject.uniqueName(base: String(repeating: "长", count: 50), existing: []).count
+                <= CanvasProject.maxNameLength,
+            "CANVAS-PROJ-10 名字截断到上限（否则切换器被一个 50 字的名字撑爆）")
+
+    // ---- 索引归一化：列表非空 + activeId 有效 ----
+    let empty = CanvasProjectIndex.normalized(CanvasProjectIndex(projects: [], activeProjectId: ""))
+    t.equal(empty.projects.count, 1,
+            "★★★CANVAS-PROJ-11 空列表必须补出默认项目——整个画布 UI 建立在「当前一定有一个项目」之上")
+    t.equal(empty.projects.first?.id, CanvasProject.defaultId, "CANVAS-PROJ-12 补出来的是默认项目")
+    t.equal(empty.activeProjectId, CanvasProject.defaultId, "CANVAS-PROJ-13 activeId 指向它")
+
+    let stale = CanvasProjectIndex.normalized(
+        CanvasProjectIndex(projects: [p1], activeProjectId: "不存在的 id"))
+    t.equal(stale.activeProjectId, "AAA",
+            "★★CANVAS-PROJ-14 activeId 失效时回落到第一个项目（失效 id 会让画布打开时没有文档可读）")
+
+    let dup = CanvasProjectIndex.normalized(
+        CanvasProjectIndex(projects: [p1, CanvasProject(id: "AAA", name: "重复 id")],
+                           activeProjectId: "AAA"))
+    t.equal(dup.projects.count, 1,
+            "★★CANVAS-PROJ-15 重复 id 必须去重（两个项目共用一份画布文档 = 互相覆盖）")
+
+    // ---- 删除守卫 ----
+    let single = CanvasProjectIndex(projects: [p1], activeProjectId: "AAA")
+    t.check(!single.canDelete("AAA"),
+            "★★CANVAS-PROJ-16 最后一个项目不可删（删空之后没有任何界面能把它建回来）")
+    let two = CanvasProjectIndex(projects: [p1, CanvasProject(id: "BBB", name: "片子二")],
+                                 activeProjectId: "AAA")
+    t.check(two.canDelete("AAA"), "CANVAS-PROJ-17 有两个时可删")
+    t.check(!two.canDelete("不存在"), "CANVAS-PROJ-18 不存在的 id 不可删")
+
+    // ---- 展示顺序：最近打开在前 ----
+    let old = CanvasProject(id: "old", name: "旧", createdAt: Date(timeIntervalSince1970: 0),
+                            updatedAt: Date(timeIntervalSince1970: 100))
+    let fresh = CanvasProject(id: "fresh", name: "新", createdAt: Date(timeIntervalSince1970: 0),
+                              updatedAt: Date(timeIntervalSince1970: 999))
+    t.equal(CanvasProjectIndex(projects: [old, fresh], activeProjectId: "old").displayOrder.first?.id,
+            "fresh", "CANVAS-PROJ-19 切换器按最近打开倒序")
+
+    // ---- 存储：迁移 / 隔离 / 损坏打捞 ----
+    let dir = FileManager.default.temporaryDirectory
+        .appendingPathComponent("clipslots_proj_smoke_\(UUID().uuidString)", isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: dir) }
+
+    // v2.12 的单画布文件：迁移后必须能在默认项目里读到它的节点。
+    let legacyDir = dir.appendingPathComponent("canvas", isDirectory: true)
+    try! FileManager.default.createDirectory(at: legacyDir, withIntermediateDirectories: true)
+    var legacyDoc = CanvasDocument()
+    legacyDoc.nodes = [canvasNode(slot: 5, group: "grp_legacy")]
+    try! JSONEncoder().encode(legacyDoc).write(to: legacyDir.appendingPathComponent("canvas.json"))
+
+    let ps = CanvasProjectStorage(rootOverride: dir)
+    let migrated = ps.load()
+    t.equal(migrated.projects.count, 1, "CANVAS-PROJ-20 首次加载补出一个项目")
+    t.equal(migrated.activeProjectId, CanvasProject.defaultId, "CANVAS-PROJ-21 迁移落到默认项目")
+    let migratedDoc = CanvasStorage(rootOverride: dir).load(projectId: CanvasProject.defaultId)
+    t.equal(migratedDoc.nodes.count, 1,
+            "★★★CANVAS-PROJ-22 v2.12 的老画布必须被迁进默认项目（漏了 = 老用户升级后画布空了）")
+    t.equal(migratedDoc.nodes.first?.slot, 5, "CANVAS-PROJ-23 迁移的是内容本身，不是空壳")
+    t.check(FileManager.default.fileExists(atPath: legacyDir.appendingPathComponent("canvas.json").path),
+            "★CANVAS-PROJ-24 老文件是**复制**不是移动——留着它当隐式备份，迁移写坏了还能手工捞回来")
+
+    // 索引往返。
+    var idx = ps.load()
+    idx.projects.append(CanvasProject(id: "BBB", name: "片子二"))
+    idx.activeProjectId = "BBB"
+    t.check(ps.save(idx), "CANVAS-PROJ-25 索引应保存成功")
+    let reread = CanvasProjectStorage(rootOverride: dir).load()
+    t.equal(reread.projects.count, 2, "★CANVAS-PROJ-26 换实例重读应拿回 2 个项目")
+    t.equal(reread.activeProjectId, "BBB", "CANVAS-PROJ-27 activeId 应持久化（下次打开还在同一个项目）")
+
+    // 索引损坏：不能"丢弃重来"，必须扫目录把孤儿项目捞回来。
+    let indexURL = dir.appendingPathComponent("canvas/projects.json")
+    // 先给 BBB 建出文档目录，让它成为"盘上真实存在的项目"。
+    _ = CanvasStorage(rootOverride: dir).save(CanvasDocument(), projectId: "BBB")
+    try! Data("{ 坏了".utf8).write(to: indexURL)
+    let recovered = CanvasProjectStorage(rootOverride: dir).load()
+    t.check(recovered.projects.contains { $0.id == "BBB" },
+            "★★★CANVAS-PROJ-28 索引损坏必须扫 projects/ 把孤儿项目捞回来（丢弃重来 = 用户所有画布一起失踪）")
+    t.check(FileManager.default.fileExists(atPath: indexURL.path + ".corrupt"),
+            "CANVAS-PROJ-29 损坏的索引旁置为 .corrupt 供事后打捞")
+
+    // 删项目文档：进 canvas/.trash，不是真删。
+    let ps2 = CanvasProjectStorage(rootOverride: dir)
+    ps2.trashProjectDocs(projectId: "BBB")
+    t.check(!FileManager.default.fileExists(atPath: dir.appendingPathComponent("canvas/projects/BBB/canvas.json").path),
+            "CANVAS-PROJ-30 删项目后原文档路径应为空")
+    let trash = (try? FileManager.default.contentsOfDirectory(atPath: dir.appendingPathComponent("canvas/.trash").path)) ?? []
+    t.check(trash.contains { $0.contains("BBB") },
+            "★★CANVAS-PROJ-31 项目文档必须进 .trash（删项目是破坏性操作，唯一的安全感来源就是可恢复）")
+}
+
+// MARK: - CANVAS-SWEEP：画布私有内容的清扫（v2.13.0）
+//
+// 用户原话：「未入库这一部分有问题，我的开始只是希望有一个存放不在槽位的节点，在画布中删除应该
+// 就消失了才可以」。
+//
+// 这组是全文件**最危险**的逻辑：它按"没人引用"删用户内容。三种写错方式都会静默丢数据：
+//   1. 没看撤销栈 → Cmd+Z 把节点恢复回来，里面是空的（比残留严重得多）。
+//   2. 没拦"文档加载失败" → 空画布 = 没有任何引用 = 整个项目的内容一次抹掉。
+//   3. 认错组 → 清到用户的正式槽位上（那是真实资产，画布无权处置）。
+do {
+    let gid = "__canvas__AAA"
+
+    // 基本规则：占用了但没人引用 → 清。
+    var input = CanvasPrivateSlotSweep.Input(privateGroupId: gid,
+                                             occupiedSlots: [1, 2, 3, 4],
+                                             referencedByNodes: [1],
+                                             referencedByHistory: [2],
+                                             documentLoadFailed: false)
+    t.equal(CanvasPrivateSlotSweep.slotsToClear(input), [3, 4],
+            "★★CANVAS-SWEEP-1 只清「既没有节点引用、也不在撤销栈里」的槽位")
+
+    // 撤销栈里的必须留住。
+    input.referencedByHistory = [2, 3, 4]
+    t.equal(CanvasPrivateSlotSweep.slotsToClear(input), [],
+            "★★★CANVAS-SWEEP-2 撤销/重做还能恢复出来的内容一个都不能清（否则 Cmd+Z 恢复出空节点）")
+
+    // 安全闸 1：文档加载失败 → 什么都不做。
+    input.referencedByHistory = []
+    input.referencedByNodes = []
+    input.documentLoadFailed = true
+    t.equal(CanvasPrivateSlotSweep.slotsToClear(input), [],
+            "★★★CANVAS-SWEEP-3 画布文档加载失败时一个都不清——那时「没有节点引用」是假象，清扫会抹掉整个项目")
+    input.documentLoadFailed = false
+    t.equal(CanvasPrivateSlotSweep.slotsToClear(input), [1, 2, 3, 4],
+            "CANVAS-SWEEP-4 同样的输入、文档正常时才清（确认上一条真的是那个开关在起作用）")
+
+    // 安全闸 2：只清保留组。
+    let formal = CanvasPrivateSlotSweep.Input(privateGroupId: "special_用户的正式组",
+                                             occupiedSlots: [1, 2, 3],
+                                             referencedByNodes: [],
+                                             referencedByHistory: [],
+                                             documentLoadFailed: false)
+    t.equal(CanvasPrivateSlotSweep.slotsToClear(formal), [],
+            "★★★CANVAS-SWEEP-5 非保留组一个都不清——从槽位库拖上画布的节点，内容属于用户，画布无权处置")
+
+    // 引用集合的提取：只认本组，跨组节点不能算进来。
+    let nodes = [canvasNode(slot: 1, group: gid),
+                 canvasNode(slot: 2, group: gid),
+                 canvasNode(slot: 9, group: "special_别人家")]
+    t.equal(CanvasPrivateSlotSweep.slots(of: nodes, in: gid), Set([1, 2]),
+            "★CANVAS-SWEEP-6 只统计落在本私有组里的节点（把别组的槽位号算进来会挡住本组的清扫）")
+
+    // 历史快照：before / after 两个方向都要看。
+    let entry = CanvasHistoryEntry(kind: .removeNode,
+                                  detail: "删了一个",
+                                  before: [canvasNode(slot: 7, group: gid)],
+                                  after: [],
+                                  beforeEdges: [],
+                                  afterEdges: [])
+    t.equal(CanvasPrivateSlotSweep.slots(ofHistory: [entry], in: gid), Set([7]),
+            "★★CANVAS-SWEEP-7 撤销方向（before）引用的槽位要保住——刚删的节点靠它才能被 Cmd+Z 恢复出内容")
+    let redoEntry = CanvasHistoryEntry(kind: .addNode,
+                                       detail: "建了一个",
+                                       before: [],
+                                       after: [canvasNode(slot: 8, group: gid)],
+                                       beforeEdges: [],
+                                       afterEdges: [])
+    t.equal(CanvasPrivateSlotSweep.slots(ofHistory: [redoEntry], in: gid), Set([8]),
+            "★★CANVAS-SWEEP-8 重做方向（after）同样要保住（少看一边 = 重做出空节点）")
+
+    // slotEdit：文本编辑的回滚目标可能已经不在任何节点快照里了。
+    let editEntry = CanvasHistoryEntry(kind: .editNode,
+                                       detail: "改了文本",
+                                       before: [],
+                                       after: [],
+                                       beforeEdges: [],
+                                       afterEdges: [],
+                                       slotEdit: .init(groupId: gid, slot: 4,
+                                                       before: "旧文本", after: "新文本"))
+    t.equal(CanvasPrivateSlotSweep.slots(ofHistory: [editEntry], in: gid), Set([4]),
+            "★★CANVAS-SWEEP-9 文本编辑条目引用的槽位也要保住（撤销要把旧文本写回去，槽位得还活着）")
 }
 
 t.report()

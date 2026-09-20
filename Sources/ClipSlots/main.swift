@@ -2830,10 +2830,14 @@ final class SlotStoreObservable: ObservableObject {
 
     /// 某个组的槽位上限。
     ///
-    /// 普通组是用户配置的 `config.slots`（默认 10，也是圆盘/快捷键的物理上限）；未入库组用
+    /// 普通组是用户配置的 `config.slots`（默认 10，也是圆盘/快捷键的物理上限）；**保留组**用
     /// `unfiledCapacity`（60）—— 它不需要快捷键、不上圆盘，唯一的约束是"别无限膨胀"。
+    ///
+    /// v2.13.0：判定从"等于未入库"放宽成"是不是保留组"。每个画布项目各有一个私有保留组
+    /// （`CanvasProject.privateGroupId`），漏掉它们会让那些组被当成 10 槽的普通组，
+    /// 表现为"第 11 个节点建不出来"。
     func canvasSlotCapacity(groupId: String) -> Int {
-        groupId == SpecialSlotStorage.unfiledGroupId
+        SpecialSlotStorage.isReservedGroupId(groupId)
             ? SpecialSlotStorage.unfiledCapacity
             : config.slots
     }
@@ -2841,27 +2845,120 @@ final class SlotStoreObservable: ObservableObject {
     /// 确保「未入库」组存在。幂等，可以在每次要用它之前无脑调用。
     @discardableResult
     func ensureCanvasUnfiledGroup() -> Bool {
+        ensureCanvasPrivateGroup(id: SpecialSlotStorage.unfiledGroupId,
+                                 name: SpecialSlotStorage.unfiledGroupName)
+    }
+
+    /// 确保某个**画布项目私有组**存在（v2.13.0）。幂等。
+    ///
+    /// 名字只写在 `index.json` 里给翻磁盘的人看 —— 这个组从所有用户可见的列表里被过滤掉
+    /// （`SpecialSlotStorage.isReservedGroupId`）。
+    @discardableResult
+    func ensureCanvasPrivateGroup(id: String, name: String) -> Bool {
         do {
-            _ = try specialStorage.ensureUnfiledGroup()
+            _ = try specialStorage.ensureReservedGroup(id: id, name: name)
             return true
         } catch {
-            NSLog("[ClipSlots] ensureUnfiledGroup failed: \(error)")
+            NSLog("[ClipSlots] ensureCanvasPrivateGroup(\(id)) failed: \(error)")
             return false
         }
     }
 
-    /// 在「未入库」组里挑一个空槽给新节点。
+    /// 在「未入库」组里挑一个空槽（组内换位借的中转槽走这里）。
+    func allocateUnfiledSlot(occupied: Set<Int>) -> Int? {
+        allocateCanvasPrivateSlot(groupId: SpecialSlotStorage.unfiledGroupId, occupied: occupied)
+    }
+
+    /// 在某个画布私有组里挑一个空槽给新节点（v2.13.0）。
     ///
     /// - Parameter occupied: 画布上已被节点占用的槽位号。判空同样走 `canvasSlotIsFree`（两路都读，
-    ///   见那个方法的注释）—— 未入库组同样存的是用户真实内容，误判覆盖的后果一样不可挽回。
-    func allocateUnfiledSlot(occupied: Set<Int>) -> Int? {
-        guard ensureCanvasUnfiledGroup() else { return nil }
+    ///   见那个方法的注释）—— 私有组同样存的是用户真实内容，误判覆盖的后果一样不可挽回。
+    func allocateCanvasPrivateSlot(groupId: String, occupied: Set<Int>) -> Int? {
+        guard SpecialSlotStorage.isReservedGroupId(groupId) else { return nil }
         let cap = SpecialSlotStorage.unfiledCapacity
         for slot in 1...cap {
             if occupied.contains(slot) { continue }
-            if canvasSlotIsFree(groupId: SpecialSlotStorage.unfiledGroupId, slot: slot) { return slot }
+            if canvasSlotIsFree(groupId: groupId, slot: slot) { return slot }
         }
         return nil
+    }
+
+    /// 删掉一个画布项目的私有组（删项目时调用，v2.13.0）。
+    ///
+    /// 走 `.trash` 软删除，30 天内可恢复。
+    ///
+    /// ## 默认项目的分支
+    ///
+    /// 默认项目的私有组就是历史上的 `__unfiled__`（`CanvasProject.privateGroupId`），Kit 层拒绝
+    /// 删除它 —— 它不是"某个项目的附属目录"，而是从 v2.11.8 一路留下来的保留组，还被组内换位的
+    /// 中转槽等路径依赖着。但「删掉默认项目」是允许的（只要不是最后一个项目），所以这里给它一条
+    /// 单独的路：**清空内容、保留组本身**。
+    ///
+    /// 反过来做（把组删掉）会留下一个更糟的状态：`ensureUnfiledGroup` 下次会把它凭空建回来，
+    /// 而那时 index 里的 order/pageId 都是新的，等于悄悄换了一个同名对象。
+    @discardableResult
+    func deleteCanvasPrivateGroup(id: String) -> Bool {
+        do {
+            if id == SpecialSlotStorage.unfiledGroupId {
+                try specialStorage.clearAllSlots(in: id)
+            } else {
+                try specialStorage.deleteCanvasPrivateGroup(id: id)
+            }
+            refreshTrigger = UUID()
+            bumpCanvasSlotRevision()
+            return true
+        } catch {
+            NSLog("[ClipSlots] deleteCanvasPrivateGroup(\(id)) failed: \(error)")
+            return false
+        }
+    }
+
+    /// 清扫画布私有组里**已经没人引用**的槽位内容（v2.13.0）。
+    ///
+    /// ## 它修的是什么
+    ///
+    /// 用户原话：「未入库这一部分有问题……在画布中删除应该就消失了才可以」。v2.12.x 删节点只删
+    /// 节点、不碰槽位，于是未入库里堆了一地删过的节点残留。
+    ///
+    /// ## 为什么不在删除路径上顺手清
+    ///
+    /// 会和撤销打架 —— 详见 `CanvasPrivateSlotSweep` 的类型注释。这里执行的是那条**声明式不变量**：
+    /// 私有组里只允许留下"画布上有节点引用的"与"撤销/重做还能恢复的"。
+    ///
+    /// ## 三层安全
+    ///
+    /// 1. 规则判定全在 Kit 层的纯函数里（带 smoke 断言），本方法只负责读磁盘 / 写磁盘。
+    /// 2. `documentLoadFailed` 为真 → 纯函数返回空集合，一个都不清。
+    /// 3. 真正的清除走 `canvasClearSlot` → `SpecialSlotStorage.clear`，旧内容整目录克隆进 `.trash`
+    ///    （30 天可恢复）。
+    ///
+    /// - Returns: 实际清掉的槽位号（升序）。调用方据此决定要不要提示用户。
+    @discardableResult
+    func sweepCanvasPrivateSlots(groupId: String,
+                                 referencedByNodes: Set<Int>,
+                                 referencedByHistory: Set<Int>,
+                                 documentLoadFailed: Bool) -> [Int] {
+        guard SpecialSlotStorage.isReservedGroupId(groupId) else { return [] }
+        // 组还不存在（全新项目一个节点都没建过）→ 无事可做。不能让"组不存在"走进下面的循环，
+        // 那会对着一个 ghost 组做 60 次读。
+        guard specialStorage.loadIndex().specialSlots.contains(where: { $0.id == groupId }) else { return [] }
+
+        var occupied = Set<Int>()
+        let cap = SpecialSlotStorage.unfiledCapacity
+        for slot in 1...cap where !canvasSlotIsFree(groupId: groupId, slot: slot) {
+            occupied.insert(slot)
+        }
+
+        let victims = CanvasPrivateSlotSweep.slotsToClear(.init(privateGroupId: groupId,
+                                                                occupiedSlots: occupied,
+                                                                referencedByNodes: referencedByNodes,
+                                                                referencedByHistory: referencedByHistory,
+                                                                documentLoadFailed: documentLoadFailed))
+        guard !victims.isEmpty else { return [] }
+        for slot in victims { canvasClearSlot(groupId: groupId, slot: slot) }
+        bumpCanvasSlotRevision()
+        NSLog("[ClipSlots][canvas] 已清扫私有组 \(groupId) 的无主内容：\(victims)")
+        return victims
     }
 
     /// 读一个任意组槽位的**完整** `SlotContent`（口径与 `canvasSlotText` 一致：当前组优先内存）。

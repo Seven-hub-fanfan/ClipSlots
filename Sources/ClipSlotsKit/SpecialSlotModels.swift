@@ -244,6 +244,8 @@ public enum SpecialSlotError: Error, LocalizedError {
     case duplicateName
     case indexCorrupted
     case defaultGroupProtected
+    /// 组 id 不符合调用方要求的形态（v2.13.0：`ensureReservedGroup` 只接受保留组 id）。
+    case invalidGroupId
 
     public var errorDescription: String? {
         switch self {
@@ -254,6 +256,7 @@ public enum SpecialSlotError: Error, LocalizedError {
         case .duplicateName: return "当前页面已存在同名槽位组"
         case .indexCorrupted: return "槽位组索引文件损坏"
         case .defaultGroupProtected: return "默认槽位组受保护，无法删除"
+        case .invalidGroupId: return "槽位组 id 无效"
         }
     }
 }

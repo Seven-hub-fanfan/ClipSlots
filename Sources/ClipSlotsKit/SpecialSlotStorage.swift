@@ -44,9 +44,28 @@ public final class SpecialSlotStorage {
     /// （槽位是一文件一槽），所以这里可以放宽；给 60 是因为再多的话槽位库里那一列会长到没法用。
     public static let unfiledCapacity = 60
 
-    /// 是不是保留组（当前只有未入库一个）。
+    /// 画布**项目私有组**的 id 前缀（v2.13.0）。
+    ///
+    /// v2.11.8~v2.12.x 只有一个全局保留组「未入库」。引入多项目（`CanvasProject`）之后它有两个
+    /// 问题：60 个槽位变成所有项目共享的池子（三个项目各 25 个节点就撞墙），而且"删掉整个项目"
+    /// 没法干净地把它那部分内容一起带走。于是每个项目各自持有一个私有保留组。
+    ///
+    /// 默认项目**沿用** `__unfiled__`（见 `CanvasProject.privateGroupId`）：老用户的画布内容全在
+    /// 那里，换 id 就得整组搬家，而搬家是有损操作（附件外置、Label、缩略图都要跟着走）。
+    public static let canvasGroupPrefix = "__canvas__"
+
+    /// 某个画布项目的私有组 id。
+    public static func canvasGroupId(forProject projectId: String) -> String {
+        canvasGroupPrefix + projectId
+    }
+
+    /// 是不是保留组。
+    ///
+    /// ★ 这是整个"保留组对用户隐身"机制的**唯一判定点**：槽位库的组列表、页面分区、CLI 的
+    /// `list-groups` 全都靠它过滤（搜 `isReservedGroupId` 能看到所有消费方）。新增一类保留组
+    /// 只需要改这里，不需要去每个边界各补一次特判 —— 那才是会漏的写法。
     public static func isReservedGroupId(_ id: String) -> Bool {
-        id == unfiledGroupId
+        id == unfiledGroupId || id.hasPrefix(canvasGroupPrefix)
     }
 
     private let baseDir: URL
@@ -1013,18 +1032,32 @@ public final class SpecialSlotStorage {
 
     /// 保证「未入库」保留组存在，并返回它（v2.11.8 二轮）。
     ///
+    /// v2.13.0 起它只是 `ensureReservedGroup` 的一个调用点：默认画布项目的私有组就是未入库
+    /// （见 `CanvasProject.privateGroupId`）。
+    @discardableResult
+    public func ensureUnfiledGroup() throws -> SpecialSlot {
+        try ensureReservedGroup(id: SpecialSlotStorage.unfiledGroupId,
+                                name: SpecialSlotStorage.unfiledGroupName)
+    }
+
+    /// 保证某个**保留组**存在，并返回它。
+    ///
     /// 刻意**不走** `createSpecialSlot`：那条路径带着每页组数上限、同页重名校验、按 `requestedAt`
-    /// 插序等一整套面向用户的规则，而未入库既不占用户的组配额（它对用户不可见），也不该因为
+    /// 插序等一整套面向用户的规则，而保留组既不占用户的组配额（它对用户不可见），也不该因为
     /// 「这一页组满了」而创建失败 —— 那会让「新建节点」这个基本操作在某些页面上直接不可用。
     ///
     /// 幂等：已存在就直接返回，不动 index。
+    ///
+    /// - Throws: id 不是保留组 id 时抛 `invalidGroupId`。这不是防御性代码洁癖 —— 这条路径绕开了
+    ///   所有面向用户的组规则，一旦能拿它创建普通组，就等于开了一个"绕过每页组数上限"的后门。
     @discardableResult
-    public func ensureUnfiledGroup() throws -> SpecialSlot {
-        try storageLock.withLock {
+    public func ensureReservedGroup(id: String, name: String, icon: String = "tray") throws -> SpecialSlot {
+        guard SpecialSlotStorage.isReservedGroupId(id) else {
+            throw SpecialSlotError.invalidGroupId
+        }
+        return try storageLock.withLock {
             var index = loadIndex()
-            if let existing = index.specialSlots.first(where: {
-                $0.id == SpecialSlotStorage.unfiledGroupId
-            }) {
+            if let existing = index.specialSlots.first(where: { $0.id == id }) {
                 return existing
             }
 
@@ -1033,9 +1066,9 @@ public final class SpecialSlotStorage {
             let hostPageId = index.pages.sorted { $0.order < $1.order }.first?.id
                 ?? index.currentPageId
             let group = SpecialSlot(
-                id: SpecialSlotStorage.unfiledGroupId,
-                name: SpecialSlotStorage.unfiledGroupName,
-                icon: "tray",
+                id: id,
+                name: name,
+                icon: icon,
                 colorHex: nil,
                 sourceType: .manual,
                 sourcePath: nil,
@@ -1053,8 +1086,46 @@ public final class SpecialSlotStorage {
 
             index.specialSlots.append(group)
             try saveIndex(index)
-            NSLog("[ClipSlots] ensureUnfiledGroup: created reserved group under page \(hostPageId)")
+            NSLog("[ClipSlots] ensureReservedGroup: created \(id) under page \(hostPageId)")
             return group
+        }
+    }
+
+    /// 删掉一个**画布项目私有组**（删项目时用，v2.13.0）。
+    ///
+    /// 为什么不复用 `deleteSpecialSlot`：那条路径明确拒绝所有保留组（防的是 CLI 手敲 id 把用户的
+    /// 画布暂存区删了），而且带着"不能删本页最后一个组"这类面向用户的规则 —— 私有组对用户不可见，
+    /// 那条规则在这里毫无意义，却会让"删项目"在某些页面上直接失败。
+    ///
+    /// 三条硬约束：
+    /// - **只接受 `canvasGroupPrefix` 开头的 id**。`__unfiled__` 是默认项目的私有组，而默认项目
+    ///   不可删（`CanvasProjectIndex.canDelete` 保证至少留一个），这里再拦一道：万一将来某处
+    ///   放宽了那个不变量，也不能让未入库的历史内容被一次删掉。
+    /// - 目录走 `.trash` 软删除，与删组同一套语义（30 天可恢复）。
+    /// - 先落盘 index 再动目录（顺序理由见 `deleteSpecialSlot` 里 P2-3 那段注释）。
+    public func deleteCanvasPrivateGroup(id: String) throws {
+        guard id.hasPrefix(SpecialSlotStorage.canvasGroupPrefix) else {
+            throw SpecialSlotError.defaultGroupProtected
+        }
+        try storageLock.withLock {
+            var index = loadIndex()
+            guard index.specialSlots.contains(where: { $0.id == id }) else { return }
+            index.specialSlots.removeAll { $0.id == id }
+            // 私有组永远不会是 current/selected/hotkey 组（它从不出现在切组路径里），但游标有可能
+            // 指向它 —— 自动存储的游标是按 index 顺序遍历的，遍历到过就会留下记录。
+            if index.autoStoreCursor?.groupId == id { index.autoStoreCursor = nil }
+            if index.autoStoreCursorPrev?.groupId == id { index.autoStoreCursorPrev = nil }
+            if index.autoPasteCursor?.groupId == id { index.autoPasteCursor = nil }
+            if index.autoPasteCursorPrev?.groupId == id { index.autoPasteCursorPrev = nil }
+            try saveIndex(index)
+
+            let dir = specialSlotDirectory(for: id)
+            let trashDir = baseDir.appendingPathComponent(".trash")
+            try? FileManager.default.createDirectory(at: trashDir, withIntermediateDirectories: true)
+            let target = trashDir.appendingPathComponent("deleted_\(id)_\(Int(Date().timeIntervalSince1970))")
+            try? FileManager.default.moveItem(at: dir, to: target)
+            evictStorageCacheAndNotifyGroupDeletion(groupId: id)
+            NSLog("[ClipSlots] deleteCanvasPrivateGroup: \(id) 已移入 .trash")
         }
     }
 

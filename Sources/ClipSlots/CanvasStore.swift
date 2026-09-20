@@ -55,19 +55,167 @@ final class CanvasStore: ObservableObject {
     // MARK: - 依赖
 
     private let storage: CanvasStorage
+    private let projectStorage: CanvasProjectStorage
     private var saveTask: Task<Void, Never>?
     /// 防抖窗口。拖拽松手 / 缩放停止后 0.4s 落盘，避免高频写。
     private let saveDebounce: Duration = .milliseconds(400)
 
-    init(storage: CanvasStorage = .shared) {
+    init(storage: CanvasStorage = .shared, projectStorage: CanvasProjectStorage = .shared) {
         self.storage = storage
-        let doc = storage.load()
+        self.projectStorage = projectStorage
+        // 项目索引先读：它决定该打开哪一份画布文档（并在首次运行时把 v2.12 的单画布迁移过来）。
+        let index = projectStorage.load()
+        self.projects = index.displayOrder
+        self.activeProjectId = index.activeProjectId
+        let doc = storage.load(projectId: index.activeProjectId)
         self.nodes = doc.nodes
         // 文档解码时已经做过规整与 `parentNodeId` 迁移（见 `CanvasDocument.init(from:)`），
         // 这里直接取用；在 store 里再规整一遍只会掩盖那边出的问题。
         self.edges = doc.edges
         self.pan = doc.pan
         self.zoom = CanvasGeometry.clampZoom(doc.zoom)
+    }
+
+    // MARK: - 项目（v2.13.0）
+
+    /// 全部项目，按"最近打开"倒序（`CanvasProjectIndex.displayOrder`）。
+    @Published private(set) var projects: [CanvasProject] = []
+    /// 当前打开的项目 id。
+    @Published private(set) var activeProjectId: String = CanvasProject.defaultId
+
+    /// 当前项目。
+    ///
+    /// 刻意返回非可空：整个画布 UI 都建立在"当前一定有一个项目"之上（见
+    /// `CanvasProjectIndex.normalized` 的注释），每个调用点各写一次 `?? fallback` 只是把同一个
+    /// 不变量抄了 N 遍。索引侧已经保证列表非空且 activeId 有效，这里的兜底只在内存被改坏时生效。
+    var activeProject: CanvasProject {
+        projects.first { $0.id == activeProjectId }
+            ?? projects.first
+            ?? CanvasProject(id: CanvasProject.defaultId, name: CanvasProject.defaultName)
+    }
+
+    /// 当前项目的**私有槽位组** id：画布上"凭空新建"的节点落在这里。
+    ///
+    /// 默认项目就是历史上的「未入库」（`__unfiled__`），见 `CanvasProject.privateGroupId`。
+    var privateGroupId: String { activeProject.privateGroupId }
+
+    /// 当前项目的画布文档这次加载是否失败过。
+    ///
+    /// ★ 清扫私有槽位前**必须**问它（`CanvasPrivateSlotSweep` 的安全闸 1）：文档读不出来时
+    /// `nodes` 是空的，此时清扫会把整个项目的内容一次抹掉。
+    var documentLoadFailed: Bool { storage.lastLoadFailed(projectId: activeProjectId) }
+
+    /// 本项目私有组里**当前画布节点占用**的槽位号。
+    ///
+    /// 见 `CanvasPrivateSlotSweep` 的类型注释：清扫是声明式的（"只允许这些存在"），
+    /// 而不是在删除路径上做命令式清理 —— 后者和撤销打架。
+    func privateSlotsReferencedByNodes() -> Set<Int> {
+        CanvasPrivateSlotSweep.slots(of: nodes, in: privateGroupId)
+    }
+
+    /// 本项目私有组里**撤销/重做还能恢复出来**的槽位号。
+    ///
+    /// 和上面那个分开返回（而不是并成一个集合），是为了让"这条为什么没被清掉"在日志里能分辨：
+    /// 被节点引用 = 正在用；被历史引用 = 等着可能的 Cmd+Z。
+    func privateSlotsReferencedByHistory() -> Set<Int> {
+        CanvasPrivateSlotSweep.slots(ofHistory: history.entries, in: privateGroupId)
+    }
+
+    /// 新建项目并切过去。
+    ///
+    /// 返回新项目。名字会去重（`CanvasProject.uniqueName`）——重名不影响数据（身份是 id），
+    /// 但切换器里两行一模一样的名字等于让用户抓瞎。
+    @discardableResult
+    func createProject(name: String) -> CanvasProject {
+        // 先把当前项目落盘：新项目一旦切过去，`nodes` 就被换掉了，没落盘的改动再也找不回来。
+        flushSave()
+        let unique = CanvasProject.uniqueName(base: name, existing: projects.map(\.name))
+        let project = CanvasProject(name: unique)
+        var index = CanvasProjectIndex(projects: projects + [project], activeProjectId: project.id)
+        index = CanvasProjectIndex.normalized(index)
+        projectStorage.save(index)
+        projects = index.displayOrder
+        adoptProject(id: project.id)
+        return project
+    }
+
+    /// 切到另一个项目。返回是否真的切了（id 不存在 / 已经是它 → false）。
+    @discardableResult
+    func switchProject(to id: String) -> Bool {
+        guard id != activeProjectId, projects.contains(where: { $0.id == id }) else { return false }
+        flushSave()
+        touchProject(id: id)
+        adoptProject(id: id)
+        return true
+    }
+
+    @discardableResult
+    func renameProject(id: String, name: String) -> Bool {
+        guard let idx = projects.firstIndex(where: { $0.id == id }) else { return false }
+        let others = projects.enumerated().filter { $0.offset != idx }.map(\.element.name)
+        let unique = CanvasProject.uniqueName(base: name, existing: others)
+        guard unique != projects[idx].name else { return false }
+        projects[idx].name = unique
+        projects[idx].updatedAt = Date()
+        persistProjectIndex()
+        return true
+    }
+
+    /// 删除项目。
+    ///
+    /// 只负责**索引与画布文档**（文档目录进 `canvas/.trash`）。它的**私有槽位组**由调用方删
+    /// （`SlotStoreObservable.deleteCanvasPrivateGroup`）—— 这个 store 刻意不认识槽位存储层，
+    /// 见类型注释。所以这里把被删的项目返回出去，让调用方拿到 `privateGroupId`。
+    ///
+    /// 返回 nil = 没删（最后一个项目不能删，见 `CanvasProjectIndex.canDelete`）。
+    @discardableResult
+    func deleteProject(id: String) -> CanvasProject? {
+        let index = CanvasProjectIndex(projects: projects, activeProjectId: activeProjectId)
+        guard index.canDelete(id), let victim = projects.first(where: { $0.id == id }) else { return nil }
+        // 删的是当前项目 → 先把待落盘的改动丢掉，不然防抖任务会在切走之后把旧节点写进新项目的文档。
+        if id == activeProjectId { saveTask?.cancel() }
+
+        var next = CanvasProjectIndex(projects: projects.filter { $0.id != id },
+                                     activeProjectId: id == activeProjectId ? "" : activeProjectId)
+        next = CanvasProjectIndex.normalized(next)
+        projectStorage.save(next)
+        projectStorage.trashProjectDocs(projectId: id)
+        projects = next.displayOrder
+        if id == activeProjectId {
+            adoptProject(id: next.activeProjectId)
+        }
+        return victim
+    }
+
+    /// 把某个项目的文档读进来当作当前状态。
+    ///
+    /// 撤销栈**整条清掉**：它的快照是"那个项目的节点数组"，留着跨项目 Cmd+Z 会把 A 项目的节点
+    /// 写进 B 项目的文档（而且 id 是 `groupId#slot`，撞上就是静默串数据）。历史刻意不落盘
+    /// （见 `history` 的注释），所以这里没有"保存 A 的历史"这个选项。
+    private func adoptProject(id: String) {
+        activeProjectId = id
+        let doc = storage.load(projectId: id)
+        nodes = doc.nodes
+        edges = doc.edges
+        pan = doc.pan
+        zoom = CanvasGeometry.clampZoom(doc.zoom)
+        selectedNodeIds = []
+        selectedEdgeId = nil
+        history.removeAll()
+        slotRevision += 1
+    }
+
+    /// 更新"最近打开"时间（切换器的排序依据）。
+    private func touchProject(id: String) {
+        guard let idx = projects.firstIndex(where: { $0.id == id }) else { return }
+        projects[idx].updatedAt = Date()
+        persistProjectIndex()
+    }
+
+    private func persistProjectIndex() {
+        let index = CanvasProjectIndex(projects: projects, activeProjectId: activeProjectId)
+        projectStorage.save(index)
+        projects = CanvasProjectIndex.normalized(index).displayOrder
     }
 
     // MARK: - 视口更新
@@ -603,6 +751,7 @@ final class CanvasStore: ObservableObject {
                                       panY: pan.height,
                                       zoom: zoom)
         let storage = self.storage
+        let projectId = activeProjectId
         let delay = saveDebounce
         saveTask = Task { [weak self] in
             try? await Task.sleep(for: delay)
@@ -612,13 +761,13 @@ final class CanvasStore: ObservableObject {
             // 塞进 detached task 会吃一串并发检查警告，而这里根本不需要结构化并发的取消传播 ——
             // 取消已经由外层 `saveTask?.cancel()` 承担。
             DispatchQueue.global(qos: .utility).async {
-                storage.save(snapshot)
+                storage.save(snapshot, projectId: projectId)
             }
             _ = self
         }
     }
 
-    /// 立即落盘（离开画布 / App 退出时调用，不等防抖）。
+    /// 立即落盘（离开画布 / App 退出 / 切项目时调用，不等防抖）。
     func flushSave() {
         saveTask?.cancel()
         let snapshot = CanvasDocument(nodes: nodes,
@@ -626,7 +775,7 @@ final class CanvasStore: ObservableObject {
                                       panX: pan.width,
                                       panY: pan.height,
                                       zoom: zoom)
-        storage.save(snapshot)
+        storage.save(snapshot, projectId: activeProjectId)
     }
 
     // MARK: - 常量

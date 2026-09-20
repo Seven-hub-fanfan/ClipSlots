@@ -89,7 +89,9 @@ struct CanvasSlotLibraryPanel: View {
     /// 那个从来没写过的过滤。
     private func groups(for page: SlotPage) -> [SpecialSlot] {
         store.specialSlots
-            .filter { $0.pageId == page.id && $0.id != store.canvasUnfiledGroupId }
+            // v2.13.0：过滤条件从"不是未入库"放宽成"不是保留组"。每个画布项目各有一个私有
+            // 保留组，漏掉它们会让别的项目的暂存区以普通组的形态出现在页面树里。
+            .filter { $0.pageId == page.id && !SpecialSlotStorage.isReservedGroupId($0.id) }
             .sorted { $0.order < $1.order }
     }
 
@@ -198,7 +200,7 @@ struct CanvasSlotLibraryPanel: View {
     @ViewBuilder
     private var unfiledSection: some View {
         let entries = unfiledEntries
-        let gid = store.canvasUnfiledGroupId
+        let gid = canvas.privateGroupId
         let isOpen = expandedGroupIds.contains(gid)
         VStack(alignment: .leading, spacing: 2) {
             Button {
@@ -214,7 +216,12 @@ struct CanvasSlotLibraryPanel: View {
                     Circle()
                         .fill(entries.isEmpty ? AppTheme.canvasChromeTertiaryInk.opacity(0.5) : Color.orange)
                         .frame(width: 6, height: 6)
-                    Text(SpecialSlotStorage.unfiledGroupName)
+                    // v2.13.0：标题跟着当前项目走。默认项目仍叫「未入库」（老用户的心智不变），
+                    // 其他项目显示「暂存区」——在项目切换器已经写着项目名的前提下，
+                    // 这里再重复一遍项目名只会让 240pt 宽的侧栏被省略号吃掉。
+                    Text(canvas.activeProject.id == CanvasProject.defaultId
+                         ? SpecialSlotStorage.unfiledGroupName
+                         : "暂存区")
                         .font(.system(size: 10, weight: .semibold))
                         .foregroundColor(entries.isEmpty
                                          ? AppTheme.canvasChromeSecondaryInk
@@ -230,7 +237,7 @@ struct CanvasSlotLibraryPanel: View {
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
-            .help("画布上还没归到任何槽位的节点。把节点拖到槽位库里可以归到具体槽位。")
+            .help("本项目里还没归到正式槽位的节点。把节点拖到槽位库里可以归到具体槽位；在画布上删除节点，这里的内容也会一起清掉。")
 
             if isOpen {
                 if entries.isEmpty {
@@ -264,7 +271,7 @@ struct CanvasSlotLibraryPanel: View {
     /// 这里补上第二个来源：**画布上归属未入库的节点**。两个来源按槽位号合并去重，
     /// 空节点的行标题由 `displayTitle` 兜底成「（空）」。
     private var unfiledEntries: [SlotEntry] {
-        let gid = store.canvasUnfiledGroupId
+        let gid = canvas.privateGroupId
         var out = slotEntries(groupId: gid, capacity: SpecialSlotStorage.unfiledCapacity)
         var known = Set(out.map(\.slot))
         let storage = store.specialStorage.slotStorage(for: gid)

@@ -42,7 +42,7 @@ let CLI_VERSION: String = {
        !v.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
         return v
     }
-    return "2.12.0"
+    return "2.13.0"
 }()
 let DEFAULT_GROUP = "default"
 let DEFAULT_PAGE = "default_page"
@@ -142,6 +142,7 @@ func codeForSpecialSlotError(_ e: SpecialSlotError) -> String {
     case .cannotDeleteLastSpecialSlot: return "CANNOT_DELETE_LAST_GROUP"
     case .invalidSpecialSlotName: return "INVALID_INPUT_FORMAT"
     case .indexCorrupted: return "INDEX_CORRUPTED"
+    case .invalidGroupId: return "INVALID_INPUT_FORMAT"
     }
 }
 func codeForPageError(_ e: PageError) -> String {
