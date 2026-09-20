@@ -41,6 +41,14 @@ final class CanvasInputRouter: ObservableObject {
     private var monitor: Any?
     private var middleDragging = false
     private var lastMiddlePoint: CGPoint = .zero
+    /// 一次滚轮/触控板平移手势是否已经归属给画布。
+    ///
+    /// v2.16.4：此前每个 scrollWheel 事件都会重新命中测试。如果长距离双指平移时光标扫过
+    /// 左侧槽位库里的 `NSScrollView`，事件会突然改派给列表，画布平移当场中断。设计类画布（TapNow /
+    /// Figma / Freeform）更接近「手势开始归谁，结束前就一直归谁」；所以这里在画布消费首帧后锁定
+    /// 本次滚动序列，直到系统发出 ended/cancelled，或一小段时间内没有后续滚轮事件。
+    private var scrollLockedToCanvas = false
+    private var scrollUnlockWork: DispatchWorkItem?
 
     func start() {
         guard monitor == nil else { return }
@@ -73,9 +81,13 @@ final class CanvasInputRouter: ObservableObject {
 
         switch event.type {
         case .scrollWheel:
-            guard anchor.bounds.contains(local) else { return false }
-            // 光标停在左侧槽位库上时，滚轮应该滚那个列表而不是平移画布。
-            guard !pointerIsOverScrollView(event, window: window) else { return false }
+            guard anchor.bounds.contains(local) || scrollLockedToCanvas else { return false }
+            // 光标停在左侧槽位库上时，普通单次滚动应该滚那个列表而不是平移画布；
+            // 但如果这一串滚动手势已经由画布接手，就继续交给画布，避免长距离双指平移
+            // 扫过侧栏时突然中断。
+            if !scrollLockedToCanvas && pointerIsOverScrollView(event, window: window) { return false }
+            scrollLockedToCanvas = true
+            scheduleScrollUnlock(for: event)
             onScroll?(event.scrollingDeltaX,
                       event.scrollingDeltaY,
                       event.hasPreciseScrollingDeltas,
@@ -132,6 +144,22 @@ final class CanvasInputRouter: ObservableObject {
         guard let responder = window.firstResponder else { return false }
         if let text = responder as? NSText { return text.isEditable }
         return false
+    }
+
+    private func scheduleScrollUnlock(for event: NSEvent) {
+        scrollUnlockWork?.cancel()
+        if event.phase.contains(.ended) || event.phase.contains(.cancelled)
+            || event.momentumPhase.contains(.ended) || event.momentumPhase.contains(.cancelled) {
+            scrollLockedToCanvas = false
+            scrollUnlockWork = nil
+            return
+        }
+        let work = DispatchWorkItem { [weak self] in
+            self?.scrollLockedToCanvas = false
+            self?.scrollUnlockWork = nil
+        }
+        scrollUnlockWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.18, execute: work)
     }
 
     /// 光标是否停在某个 `NSScrollView`（= SwiftUI `ScrollView`）之上。
