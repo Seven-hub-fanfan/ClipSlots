@@ -246,18 +246,16 @@ struct CanvasWorkspaceView: View {
                 cursorScreen = CGPoint(x: proxy.size.width / 2, y: proxy.size.height / 2)
                 viewSize = proxy.size
 
-                // ★ v2.13.0：进画布时清一次私有组里的无主内容。
+                // ★ v2.14.0：进画布时对一次账。
                 //
-                // 这条不只是"顺手打扫"：v2.12.x 删节点不清内容，老用户的暂存区里已经堆了一批
-                // 残留（用户截图里 9 条），而那些节点早就不在画布上了，只靠"删除时清扫"永远清不到。
-                // 一次清扫覆盖所有历史成因（删节点 / 改绑 / 上个版本的脏数据）。
+                // 这条不只是"顺手打扫"：v2.12.x 删节点不清内容、v2.13.0 又给撤销栈开了豁免，
+                // 老用户的私有库里已经堆了一批无主残留（用户截图里 9 条），而那些节点早就不在
+                // 画布上了，只靠"删除时清理"永远清不到。一次对账覆盖所有历史成因。
                 //
-                // 有提示：清扫会动用户内容（进 `.trash`，30 天可恢复），静默执行就是在用户背后
-                // 删东西 —— 哪怕删的是垃圾，也必须让他知道发生了什么。
-                let swept = sweepPrivateSlots()
-                if !swept.isEmpty {
-                    store.transientUI.showToast("已清理 \(swept.count) 项无主的暂存内容（可在回收站恢复）")
-                }
+                // 这里**不弹 toast**：搬进暂存区不是"清理掉了"，Cmd+Z 还能拿回来，而且刚进画布
+                // 就弹一句"已清理 N 项"只会让用户以为自己丢了东西。真正需要告知的是删除那一刻
+                // （见 `performDelete`）。
+                _ = reconcilePrivateContents()
             }
             .onChange(of: proxy.size) { newSize in viewSize = newSize }
             .onDisappear {
@@ -1021,7 +1019,7 @@ struct CanvasWorkspaceView: View {
         guard let slot = store.allocateCanvasPrivateSlot(groupId: groupId,
                                                          occupied: canvas.occupiedSlots(inGroup: groupId)) else {
             // 说清出路而不是只说失败：这条提示是用户唯一能看到的解释。
-            store.transientUI.showToast("本项目暂存区已满（60），先把一些节点拖进槽位库归档")
+            store.transientUI.showToast("本项目「未入库」已满（60），先把一些节点拖进槽位库归档")
             return nil
         }
         let name = kind == .text ? "文本" : kind.displayName
@@ -1518,6 +1516,8 @@ struct CanvasWorkspaceView: View {
         // `@State` 同步过来 —— 否则新项目会用上一个项目的视口打开，看起来像"节点全不见了"。
         pan = canvas.pan
         zoom = canvas.zoom
+        // 切过来的项目也要对一次账：它上次退出前可能删过节点而没轮到对账（崩溃 / 强退）。
+        _ = reconcilePrivateContents()
         store.transientUI.showToast("已切到项目「\(canvas.activeProject.name)」")
     }
 
@@ -1578,29 +1578,26 @@ struct CanvasWorkspaceView: View {
         let count = canvas.nodes.filter { ids.contains($0.id) }.count
         guard count > 0 else { return }
         canvas.removeNodes(ids: ids)
-        // ★ v2.13.0：画布私有内容必须跟着节点一起消失（用户原话：「在画布中删除应该就消失了才可以」）。
-        // 刚删掉的节点仍在撤销栈里 → 它的槽位这一轮会被保护住，等撤销栈把它挤出去才真正清除。
-        // 这是刻意的：内容比整洁重要，Cmd+Z 必须能把节点**连内容**一起恢复。
-        let swept = sweepPrivateSlots()
-        if swept.isEmpty {
-            store.transientUI.showToast(count == 1 ? "已删除节点" : "已删除 \(count) 个节点")
-        } else {
-            store.transientUI.showToast(count == 1
-                ? "已删除节点，并清理 \(swept.count) 项暂存内容"
-                : "已删除 \(count) 个节点，并清理 \(swept.count) 项暂存内容")
-        }
+        // ★ v2.14.0：画布私有内容**当场**跟着节点消失（用户原话：「在画布中删除应该就消失了才可以」、
+        // 「暂存区还是不会同步删除」）。内容被搬进不可见的撤销暂存区而不是留在原地：
+        // 用户视角是"删掉了"，Cmd+Z 视角是"还在，能原样搬回来"。
+        _ = reconcilePrivateContents()
+        store.transientUI.showToast(count == 1 ? "已删除节点" : "已删除 \(count) 个节点")
     }
 
-    /// 清扫当前项目私有组里已经没人引用的内容。
+    /// 让当前项目的画布私有内容与画布节点对账（v2.14.0）。
     ///
-    /// 规则、安全闸与"为什么不在删除路径上直接清"都在 `CanvasPrivateSlotSweep` 的类型注释里；
-    /// 这里只是把 store 两侧的输入接起来。
+    /// 不变量是「可见内容 == 当前节点引用的内容」：多的搬进撤销暂存区（列表立刻少一条），
+    /// 少的从暂存区搬回来（Cmd+Z 把节点带回来时，内容跟着回来）。规则与安全闸见 Kit 里的
+    /// `CanvasPrivateReconcile`，这里只是把 store 两侧的输入接起来。
+    ///
+    /// 必须在**每一次节点集合可能变化之后**调用：删除、撤销、重做、切项目、进画布。漏掉任何一处，
+    /// 那条路径上就会出现"内容与节点不一致"的可见 bug（v2.13.0 漏的是删除之后那一下）。
     @discardableResult
-    private func sweepPrivateSlots() -> [Int] {
-        store.sweepCanvasPrivateSlots(groupId: canvas.privateGroupId,
-                                      referencedByNodes: canvas.privateSlotsReferencedByNodes(),
-                                      referencedByHistory: canvas.privateSlotsReferencedByHistory(),
-                                      documentLoadFailed: canvas.documentLoadFailed)
+    private func reconcilePrivateContents() -> (stashed: [Int], restored: [Int]) {
+        store.reconcileCanvasPrivateContents(groupId: canvas.privateGroupId,
+                                             referencedByNodes: canvas.privateSlotsReferencedByNodes(),
+                                             documentLoadFailed: canvas.documentLoadFailed)
     }
 
     /// 打开「入参文件」管理弹层。
@@ -1654,6 +1651,9 @@ struct CanvasWorkspaceView: View {
         case .undo:
             guard editingNodeId == nil else { return false }
             if let entry = canvas.undo() {
+                // 撤销把节点带回来了 → 把它的内容从暂存区搬回槽位（反之，撤销掉一次"新建节点"
+                // 会让内容重新变成无主的，同一次对账顺手搬进暂存区）。
+                _ = reconcilePrivateContents()
                 store.transientUI.showToast("已撤销：\(entry.kind.title)")
             } else {
                 store.transientUI.showToast("没有可撤销的操作")
@@ -1663,6 +1663,7 @@ struct CanvasWorkspaceView: View {
         case .redo:
             guard editingNodeId == nil else { return false }
             if let entry = canvas.redo() {
+                _ = reconcilePrivateContents()
                 store.transientUI.showToast("已重做：\(entry.kind.title)")
             } else {
                 store.transientUI.showToast("没有可重做的操作")

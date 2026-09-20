@@ -15,41 +15,78 @@ public enum SpecialSlotStorageError: Error {
 public final class SpecialSlotStorage {
     public static let shared = SpecialSlotStorage()
 
-    // MARK: - 保留组：「未入库」（v2.11.8 二轮）
+    // MARK: - 两个存储根（v2.14.0）
 
-    /// 「未入库」收件箱组的**保留 id**。
+    /// 这个实例扮演的角色。
     ///
-    /// ## 为什么未入库节点还是"槽位"
-    /// 用户要的是「画布上没有对应槽位的独立节点归到未入库」。`CanvasNode.id` 是
-    /// `"\(groupId)#\(slot)"` 派生的 —— 节点在数据层**必须**指向一个槽位，否则它既没有身份也
-    /// 没有内容落点。把 id 改成可空是一次跨 Kit/CLI/存储/画布文档的大改，风险远大于收益。
+    /// 一个进程里有**两个** `SpecialSlotStorage` 实例，各管一个磁盘根：
     ///
-    /// 所以未入库在数据层依然是一个正常的槽位组，只是：
-    ///   - id 固定为这个保留值（不是 `special_<UUID>`），任何地方都能 O(1) 认出它；
-    ///   - 从**所有面向用户的组列表里被过滤掉**（编辑页的组标签、切组快捷键、槽位库的页面分区、
-    ///     CLI 的 list-groups），所以用户永远不会在"槽位"语义下看见它；
-    ///   - 只在槽位库顶部那个「未入库」分区里以节点列表的形式露出。
+    ///   - `.main` → `special_slots/`：用户的槽位库（页面 / 组 / 槽位），唯一资产，死保。
+    ///   - `.canvasPrivate` → `canvas/private_slots/`：画布上「没有对应槽位的节点」的内容落点。
+    ///     它对槽位库完全不可见 —— 不是被过滤，而是不在同一张索引里（见 `ClipSlotsPaths.canvasPrivateSlots`）。
     ///
-    /// ## 为什么不能不进 index
-    /// 试过。`SpecialSlotStorage.set()` 有 STG-2 不变量：**目标组必须在 index 里**，否则拒写
-    /// （防的是"删组后幽灵复活"）。一个不在 index 的目录写不进任何内容，未入库节点就永远是空的。
-    /// 与其为它在存储层开后门，不如让它成为一个真实但被过滤的组 —— 不变量一条都不用破。
+    /// 角色不是装饰：`.canvasPrivate` 要跳过两件**只对槽位库成立**的事 ——
+    ///   1. 首启时把 legacy `slots/` 目录迁移成"默认槽位组"（画布私有库里凭空多一份用户数据副本）；
+    ///   2. `repairDefaultsIfNeeded()` 强行补出「默认页面 / 默认槽位组」（画布私有库不需要默认组，
+    ///      它的组全部由画布项目按需创建）。
+    public enum Role: String {
+        case main
+        case canvasPrivate
+    }
+
+    public let role: Role
+
+    /// 画布私有内容的存储（v2.14.0）。惰性单例：只有真的用到画布时才建目录。
+    public static let canvasPrivate = SpecialSlotStorage(baseDirectory: ClipSlotsPaths.canvasPrivateSlots,
+                                                        role: .canvasPrivate)
+
+    /// 按组 id 选存储 —— **所有**拿着"任意组 id"读写内容的代码都必须经过这里（v2.14.0）。
+    ///
+    /// 保留组 id（`__unfiled__` / `__canvas__*`）的内容在画布私有库里，普通组在槽位库里。
+    /// 调用方（画布卡片、缩略图、附件面板、生成结果回写……）不需要知道这件事，只要别直接抓
+    /// `SpecialSlotStorage.shared`。
+    public static func storage(forGroupId id: String) -> SpecialSlotStorage {
+        isReservedGroupId(id) ? canvasPrivate : shared
+    }
+
+    // MARK: - 画布私有组（v2.11.8 二轮引入，v2.14.0 搬出槽位库）
+
+    /// 「未入库」的**保留 id**，也是默认画布项目的私有组 id。
+    ///
+    /// ## 画布节点的内容为什么还是"槽位形状"
+    /// `CanvasNode.id` 是 `"\(groupId)#\(slot)"` 派生的 —— 节点在数据层必须指向一个内容落点，
+    /// 否则它既没有身份也没有内容。把 id 改成可空是一次跨 Kit/CLI/存储/画布文档的大改。
+    /// 所以画布私有内容沿用"组 + 槽位"的物理形状，好处是附件外置、Label、手动缩略图、`.trash`
+    /// 兜底、跨进程锁全都免费继承。
+    ///
+    /// ## ★ v2.14.0：形状一样，但**不在同一个库里**
+    /// v2.13.x 之前这些组就在 `special_slots/index.json` 里，靠"发布边界过滤"对用户隐身。
+    /// 那是错的：过滤点不止一处（漏了两条旁路赋值），它们还挂在真实页面下、被算进这一页的组数。
+    /// 用户的反馈很直接 —— 「未入库和暂存区都会占用槽位组的创建，不应该显示在默认页面中」。
+    ///
+    /// 现在它们活在 `canvas/private_slots/index.json`（`SpecialSlotStorage.canvasPrivate`）：
+    /// 槽位库的索引里**没有任何记录**，所以编辑页组标签栏、页面组数、切组快捷键、`list-groups`
+    /// 结构性地看不到它 —— 不需要过滤。`isReservedGroupId` 的职责也随之从"过滤"变成"选存储"
+    /// （见 `storage(forGroupId:)`）。
     public static let unfiledGroupId = "__unfiled__"
-    /// 未入库组的展示名。
+    /// 画布私有内容分区的展示名。所有项目统一叫这个（v2.14.0 起不再有「暂存区」这种第二种叫法）。
     public static let unfiledGroupName = "未入库"
-    /// 未入库组的槽位容量。
+    /// 单个画布项目的私有内容容量。
     ///
-    /// 普通组固定 10 个槽位（`Config.slots` 上限也是 10）。未入库是收件箱，用户可能连着建十几个
+    /// 普通槽位组固定 10 个（`Config.slots` 上限也是 10）。画布是草稿区，用户可能连着建十几个
     /// 节点再慢慢归档，卡在 10 会让「新建节点」直接失败。存储层本身没有 1...10 的硬校验
-    /// （槽位是一文件一槽），所以这里可以放宽；给 60 是因为再多的话槽位库里那一列会长到没法用。
+    /// （槽位是一文件一槽），所以这里可以放宽；给 60 是因为再多的话侧栏那一列会长到没法用。
     public static let unfiledCapacity = 60
+
+    /// 画布私有库里的**宿主页面** id（v2.14.0）。
+    ///
+    /// `SpecialSlot.pageId` 非空是字段约束，而画布私有库根本没有"页面"这个概念，所以给它一个
+    /// 固定的宿主页面。它只存在于 `canvas/private_slots/index.json` 里，永远不会出现在任何 UI。
+    public static let canvasPrivatePageId = "canvas_private_page"
 
     /// 画布**项目私有组**的 id 前缀（v2.13.0）。
     ///
-    /// v2.11.8~v2.12.x 只有一个全局保留组「未入库」。引入多项目（`CanvasProject`）之后它有两个
-    /// 问题：60 个槽位变成所有项目共享的池子（三个项目各 25 个节点就撞墙），而且"删掉整个项目"
-    /// 没法干净地把它那部分内容一起带走。于是每个项目各自持有一个私有保留组。
-    ///
+    /// 每个项目各自持有一个私有组：容量互不挤占，删项目时能把它那部分内容整块带走。
     /// 默认项目**沿用** `__unfiled__`（见 `CanvasProject.privateGroupId`）：老用户的画布内容全在
     /// 那里，换 id 就得整组搬家，而搬家是有损操作（附件外置、Label、缩略图都要跟着走）。
     public static let canvasGroupPrefix = "__canvas__"
@@ -59,16 +96,19 @@ public final class SpecialSlotStorage {
         canvasGroupPrefix + projectId
     }
 
-    /// 是不是保留组。
+    /// 是不是画布私有组的 id。
     ///
-    /// ★ 这是整个"保留组对用户隐身"机制的**唯一判定点**：槽位库的组列表、页面分区、CLI 的
-    /// `list-groups` 全都靠它过滤（搜 `isReservedGroupId` 能看到所有消费方）。新增一类保留组
-    /// 只需要改这里，不需要去每个边界各补一次特判 —— 那才是会漏的写法。
+    /// ★ v2.14.0 起它的用途是**选存储**（`storage(forGroupId:)`）而不是"从列表里过滤掉"：
+    /// 这类 id 的内容在 `canvas/private_slots` 里，普通组在 `special_slots` 里。历史上散落的
+    /// 过滤点保留着当第二道防线（老数据在迁移前仍可能在主索引里带着它们）。
     public static func isReservedGroupId(_ id: String) -> Bool {
         id == unfiledGroupId || id.hasPrefix(canvasGroupPrefix)
     }
 
     private let baseDir: URL
+
+    /// 这个实例的磁盘根（v2.14.0）。迁移代码要在两个根之间搬目录，所以必须能读到。
+    public var storageRoot: URL { baseDir }
     private let indexURL: URL
     private let encoder = JSONEncoder()
     private let decoder = JSONDecoder()
@@ -110,10 +150,15 @@ public final class SpecialSlotStorage {
     }
     public var didRepairDefaults: Bool { !lastRepairActions.isEmpty }
 
-    public init() {
+    public convenience init() {
         // v2.9.29: honor CLIPSLOTS_DATA_DIR via ClipSlotsPaths (env > default).
-        let appSupport = ClipSlotsPaths.specialSlots
-        baseDir = appSupport
+        self.init(baseDirectory: ClipSlotsPaths.specialSlots, role: .main)
+    }
+
+    /// v2.14.0：带根目录 + 角色的初始化。画布私有库（`.canvasPrivate`）走这条。
+    public init(baseDirectory: URL, role: Role) {
+        self.role = role
+        baseDir = baseDirectory
         indexURL = baseDir.appendingPathComponent("index.json")
 
         try? FileManager.default.createDirectory(at: baseDir, withIntermediateDirectories: true)
@@ -121,7 +166,12 @@ public final class SpecialSlotStorage {
         // F7 (契约5): detect + auto-repair a missing default page / default group on
         // every process init (before trash cleanup so a repaired install is fully
         // consistent for the command about to run).
-        repairDefaultsIfNeeded()
+        //
+        // v2.14.0：画布私有库不走这一步。它没有"默认组"的概念（组 = 画布项目，按需创建），
+        // 补出来的「默认槽位组」只会变成一个永远空着、谁都不认识的目录。
+        if role == .main {
+            repairDefaultsIfNeeded()
+        }
         // v2.9.5 (Feature #1): opportunistic trash cleanup at startup so a long-idle
         // install still shrinks accumulated `.trash` even without a new delete.
         cleanupTrash()
@@ -136,12 +186,44 @@ public final class SpecialSlotStorage {
             // 只有一个进程真正建库，另一个直接跳过，避免 copyItem 目标已存在报错或 index 半写。
             try? storageLock.withLock {
                 guard !FileManager.default.fileExists(atPath: indexURL.path) else { return }
+                // v2.14.0：画布私有库**绝不能**走 legacy 迁移。那条路径会把 `slots/`（老版本的
+                // 扁平槽位目录）整体拷成"默认槽位组"—— 在画布私有库里等于凭空多出一份用户数据副本。
+                if role == .canvasPrivate {
+                    try? createCanvasPrivateIndex()
+                    return
+                }
                 migrateLegacySlotsOrCreateDefault()
             }
             return
         }
+        // v2.14.0：画布私有库天生就是 schema 2，也没有"当前页 / 当前组"这种面向用户的游标，
+        // v2.4 迁移与页面级修复对它都是空转（而且每次启动都会判定 changed=true 白写一次索引）。
+        if role == .canvasPrivate { return }
         // v2.4 migration: upgrade existing index to schemaVersion 2
         migrateToV2SchemaIfNeeded()
+    }
+
+    /// 画布私有库的初始索引（v2.14.0）。
+    ///
+    /// 只有一个**宿主页面**、零个组：组等于画布项目，按需由 `ensureReservedGroup` 创建。
+    /// 宿主页面纯粹是为了满足 `SpecialSlot.pageId` 非空这个字段约束 —— 它永远不会被任何 UI 渲染，
+    /// 因为槽位库的页面列表来自主索引，而这里是另一个索引文件。
+    private func createCanvasPrivateIndex() throws {
+        let page = SlotPage(id: SpecialSlotStorage.canvasPrivatePageId,
+                            name: "画布私有内容",
+                            order: 0,
+                            createdAt: Date(),
+                            updatedAt: Date())
+        let index = SpecialSlotIndex(
+            schemaVersion: 2,
+            version: 4,
+            currentPageId: SpecialSlotStorage.canvasPrivatePageId,
+            pages: [page],
+            currentSpecialSlotId: "",
+            specialSlots: [],
+            settings: .default
+        )
+        try saveIndex(index)
     }
 
     /// v2.4 migration: add Page layer on top of existing SpecialSlots.
@@ -1040,19 +1122,27 @@ public final class SpecialSlotStorage {
                                 name: SpecialSlotStorage.unfiledGroupName)
     }
 
-    /// 保证某个**保留组**存在，并返回它。
+    /// 保证某个**画布私有组**存在，并返回它。
     ///
     /// 刻意**不走** `createSpecialSlot`：那条路径带着每页组数上限、同页重名校验、按 `requestedAt`
-    /// 插序等一整套面向用户的规则，而保留组既不占用户的组配额（它对用户不可见），也不该因为
-    /// 「这一页组满了」而创建失败 —— 那会让「新建节点」这个基本操作在某些页面上直接不可用。
+    /// 插序等一整套面向用户的规则，而画布私有组既不占用户的组配额（它压根不在槽位库里），也不该
+    /// 因为「这一页组满了」而创建失败 —— 那会让「新建节点」这个基本操作直接不可用。
     ///
     /// 幂等：已存在就直接返回，不动 index。
     ///
-    /// - Throws: id 不是保留组 id 时抛 `invalidGroupId`。这不是防御性代码洁癖 —— 这条路径绕开了
-    ///   所有面向用户的组规则，一旦能拿它创建普通组，就等于开了一个"绕过每页组数上限"的后门。
+    /// - Throws:
+    ///   - `invalidGroupId`：id 不是画布私有组 id。这不是代码洁癖 —— 这条路径绕开了所有面向用户的
+    ///     组规则，一旦能拿它创建普通组，就等于开了一个"绕过每页组数上限"的后门。
+    ///   - `invalidGroupId`：在**主存储**（`.main`）上调用。★ v2.14.0 的核心不变量：画布私有组
+    ///     只能存在于 `canvas/private_slots`。这个 guard 就是防止老代码（或未来某个手滑的调用）
+    ///     又往用户的槽位库索引里插一个「未入库」组 —— 那正是用户反馈的 bug。
     @discardableResult
     public func ensureReservedGroup(id: String, name: String, icon: String = "tray") throws -> SpecialSlot {
         guard SpecialSlotStorage.isReservedGroupId(id) else {
+            throw SpecialSlotError.invalidGroupId
+        }
+        guard role == .canvasPrivate else {
+            NSLog("[ClipSlots] ensureReservedGroup(\(id)) 被拒绝：画布私有组只能建在画布私有库里，不能进槽位库索引")
             throw SpecialSlotError.invalidGroupId
         }
         return try storageLock.withLock {
@@ -1061,10 +1151,10 @@ public final class SpecialSlotStorage {
                 return existing
             }
 
-            // 挂在第一个页面下。挂哪页其实无所谓（它从所有页面分区里都被过滤掉），但字段不能空 ——
-            // 空 pageId 会让「按页面聚合」的那些 filter 把它归到一个不存在的页，之后想清理都找不到。
+            // 挂在私有库的宿主页面下。`pageId` 不能为空（空 pageId 会让"按页面聚合"的 filter 把它
+            // 归到一个不存在的页，之后想清理都找不到），而私有库里本来就只有这一个页面。
             let hostPageId = index.pages.sorted { $0.order < $1.order }.first?.id
-                ?? index.currentPageId
+                ?? SpecialSlotStorage.canvasPrivatePageId
             let group = SpecialSlot(
                 id: id,
                 name: name,
@@ -1073,8 +1163,6 @@ public final class SpecialSlotStorage {
                 sourceType: .manual,
                 sourcePath: nil,
                 pageId: hostPageId,
-                // order 给一个极大值：万一将来某处漏了过滤，它也只会排在所有真实组之后，
-                // 而不会插到用户的第一个组前面把组标签栏顶乱。
                 order: 9_000,
                 requestedAt: Date(),
                 createdAt: Date(),
@@ -1084,9 +1172,15 @@ public final class SpecialSlotStorage {
             let dir = specialSlotDirectory(for: group.id)
             try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
 
+            // 宿主页面缺失（比如 index 是 v2.13 迁移过来的半成品）时补出来，否则这个组会挂在一个
+            // 不存在的页面上。
+            if !index.pages.contains(where: { $0.id == hostPageId }) {
+                index.pages.append(SlotPage(id: hostPageId, name: "画布私有内容", order: 0,
+                                            createdAt: Date(), updatedAt: Date()))
+            }
             index.specialSlots.append(group)
             try saveIndex(index)
-            NSLog("[ClipSlots] ensureReservedGroup: created \(id) under page \(hostPageId)")
+            NSLog("[ClipSlots] ensureReservedGroup: created \(id) in canvas private store")
             return group
         }
     }
@@ -1107,6 +1201,8 @@ public final class SpecialSlotStorage {
         guard id.hasPrefix(SpecialSlotStorage.canvasGroupPrefix) else {
             throw SpecialSlotError.defaultGroupProtected
         }
+        // v2.14.0：画布私有组只活在画布私有库里。在主存储上调用说明调用方拿错了实例。
+        guard role == .canvasPrivate else { throw SpecialSlotError.invalidGroupId }
         try storageLock.withLock {
             var index = loadIndex()
             guard index.specialSlots.contains(where: { $0.id == id }) else { return }
@@ -1124,9 +1220,157 @@ public final class SpecialSlotStorage {
             try? FileManager.default.createDirectory(at: trashDir, withIntermediateDirectories: true)
             let target = trashDir.appendingPathComponent("deleted_\(id)_\(Int(Date().timeIntervalSince1970))")
             try? FileManager.default.moveItem(at: dir, to: target)
+            // 连带把这个组的撤销暂存（v2.14.0）一起收走，否则删完项目后 `.canvas_undo` 里还挂着
+            // 一份谁都不认识的孤儿内容。
+            let stashDir = canvasUndoStashDirectory(forGroup: id)
+            if FileManager.default.fileExists(atPath: stashDir.path) {
+                let stashTarget = trashDir.appendingPathComponent("undo_stash_\(id)_\(Int(Date().timeIntervalSince1970))")
+                try? FileManager.default.moveItem(at: stashDir, to: stashTarget)
+            }
             evictStorageCacheAndNotifyGroupDeletion(groupId: id)
             NSLog("[ClipSlots] deleteCanvasPrivateGroup: \(id) 已移入 .trash")
         }
+    }
+
+    // MARK: - 画布撤销暂存区（v2.14.0）
+
+    /// 画布撤销暂存区的根目录：`<画布私有库>/.canvas_undo/<groupId>/<slot>/`。
+    ///
+    /// ## 它解决什么
+    ///
+    /// 用户要的是「在画布中删除节点，内容就该跟着消失」。v2.13.0 用的是"声明式清扫 + 撤销栈豁免"：
+    /// 被撤销栈引用的内容留在原地不清 —— 于是用户删了 24 个节点，侧栏里 24 条内容一条不少（他的
+    /// 录屏就是这个），只有重启后才被清掉。撤销安全是对的，表现是错的。
+    ///
+    /// v2.14.0 换成**搬走而不是留下**：删节点时把那个槽位目录整体 `moveItem` 进暂存区。
+    ///
+    ///   - 用户视角：内容立刻从列表里消失（槽位目录不在了，`get` 读到空）。
+    ///   - 撤销视角：Cmd+Z 把目录原样搬回来，**字节级无损** —— 附件外置文件、Label、手动缩略图
+    ///     全都在那个目录里，所以不存在"恢复出一个附件指向已被删文件的残废内容"这种问题。
+    ///     这也是为什么用目录搬移而不是"把 SlotContent 快照进内存"。
+    ///   - 崩溃视角：暂存区在磁盘上，进程挂了也不会丢；下次启动 `purgeCanvasUndoStash()` 把它整体
+    ///     移进 `.trash`（30 天可恢复），因为画布撤销栈是内存态，重启后谁也撤不回来了。
+    private func canvasUndoStashDirectory(forGroup groupId: String) -> URL {
+        baseDir.appendingPathComponent(".canvas_undo", isDirectory: true)
+            .appendingPathComponent(groupId, isDirectory: true)
+    }
+
+    /// 把一个槽位的内容搬进撤销暂存区（v2.14.0）。
+    ///
+    /// - Returns: 真的搬走了内容返回 `true`；槽位本来就没内容（目录不存在）返回 `false`。
+    @discardableResult
+    public func stashSlotForCanvasUndo(_ slot: Int, in groupId: String) -> Bool {
+        guard role == .canvasPrivate, SpecialSlotStorage.isReservedGroupId(groupId) else { return false }
+        let fm = FileManager.default
+        let source = specialSlotDirectory(for: groupId).appendingPathComponent(String(slot), isDirectory: true)
+        guard fm.fileExists(atPath: source.path) else { return false }
+        do {
+            return try storageLock.withLock {
+                let stash = canvasUndoStashDirectory(forGroup: groupId)
+                    .appendingPathComponent(String(slot), isDirectory: true)
+                // 同一个槽位不该出现两份暂存（暂存中的槽位在 `allocateCanvasPrivateSlot` 里算"已占用"，
+                // 所以不会被重新分配）。真撞上了就把旧的那份送进 `.trash`，绝不覆盖。
+                if fm.fileExists(atPath: stash.path) {
+                    let trashDir = baseDir.appendingPathComponent(".trash")
+                    try? fm.createDirectory(at: trashDir, withIntermediateDirectories: true)
+                    let target = trashDir.appendingPathComponent(
+                        "undo_stash_conflict_\(groupId)_\(slot)_\(Int(Date().timeIntervalSince1970))")
+                    try? fm.moveItem(at: stash, to: target)
+                }
+                try fm.createDirectory(at: stash.deletingLastPathComponent(),
+                                       withIntermediateDirectories: true)
+                try fm.moveItem(at: source, to: stash)
+                // 缓存不用手动失效：`SlotStorage` 的缓存带目录指纹（inode + mtime + size），
+                // 目录被搬走后指纹对不上，下一次 `get` 自动重读成空内容。
+                NSLog("[ClipSlots] canvas undo stash: \(groupId)#\(slot) 已搬入暂存区")
+                return true
+            }
+        } catch {
+            NSLog("[ClipSlots] canvas undo stash 失败 \(groupId)#\(slot)：\(error.localizedDescription)")
+            return false
+        }
+    }
+
+    /// 把暂存区里的内容搬回槽位（撤销，v2.14.0）。
+    ///
+    /// 目标槽位已经有内容时**拒绝**恢复（返回 `false`）：那说明这个槽位在删除之后被重新用上了，
+    /// 搬回去会覆盖用户新写的东西。宁可让撤销出来的节点是空的。
+    @discardableResult
+    public func restoreCanvasUndoStash(_ slot: Int, in groupId: String) -> Bool {
+        guard role == .canvasPrivate, SpecialSlotStorage.isReservedGroupId(groupId) else { return false }
+        let fm = FileManager.default
+        let stash = canvasUndoStashDirectory(forGroup: groupId)
+            .appendingPathComponent(String(slot), isDirectory: true)
+        guard fm.fileExists(atPath: stash.path) else { return false }
+        do {
+            return try storageLock.withLock {
+                let target = specialSlotDirectory(for: groupId)
+                    .appendingPathComponent(String(slot), isDirectory: true)
+                if fm.fileExists(atPath: target.path) {
+                    let items = (try? fm.contentsOfDirectory(atPath: target.path)) ?? []
+                    guard items.isEmpty else {
+                        NSLog("[ClipSlots] canvas undo restore 拒绝：\(groupId)#\(slot) 已有新内容")
+                        return false
+                    }
+                    try? fm.removeItem(at: target)
+                }
+                try fm.createDirectory(at: target.deletingLastPathComponent(),
+                                       withIntermediateDirectories: true)
+                try fm.moveItem(at: stash, to: target)
+                NSLog("[ClipSlots] canvas undo restore: \(groupId)#\(slot) 已恢复")
+                return true
+            }
+        } catch {
+            NSLog("[ClipSlots] canvas undo restore 失败 \(groupId)#\(slot)：\(error.localizedDescription)")
+            return false
+        }
+    }
+
+    /// 某个画布私有组当前被暂存起来的槽位号（v2.14.0）。
+    ///
+    /// 两个用途：① 撤销时判断"这个节点的内容能不能捞回来"；② 分配新槽位时把它们算作已占用，
+    /// 避免新节点占了一个等着被撤销恢复的槽位号。
+    public func stashedCanvasUndoSlots(in groupId: String) -> Set<Int> {
+        guard role == .canvasPrivate else { return [] }
+        let dir = canvasUndoStashDirectory(forGroup: groupId)
+        guard let names = try? FileManager.default.contentsOfDirectory(atPath: dir.path) else { return [] }
+        return Set(names.compactMap(Int.init))
+    }
+
+    /// 启动时清空撤销暂存区（v2.14.0）。
+    ///
+    /// 画布的撤销栈是内存态，重启后一条都撤不回来，所以上次会话留下的暂存内容不再有恢复入口。
+    /// 整体移进 `.trash`（而不是直接 `removeItem`）：万一用户其实想要那份内容，30 天内还能捞。
+    public func purgeCanvasUndoStash() {
+        guard role == .canvasPrivate else { return }
+        let fm = FileManager.default
+        let root = baseDir.appendingPathComponent(".canvas_undo", isDirectory: true)
+        guard fm.fileExists(atPath: root.path) else { return }
+        guard let groups = try? fm.contentsOfDirectory(atPath: root.path), !groups.isEmpty else { return }
+        try? storageLock.withLock {
+            let trashDir = baseDir.appendingPathComponent(".trash")
+            try? fm.createDirectory(at: trashDir, withIntermediateDirectories: true)
+            let stamp = Int(Date().timeIntervalSince1970)
+            let target = trashDir.appendingPathComponent("undo_stash_purged_\(stamp)")
+            do {
+                try fm.moveItem(at: root, to: target)
+                NSLog("[ClipSlots] canvas undo stash: 上次会话的 \(groups.count) 组暂存内容已移入 .trash")
+            } catch {
+                NSLog("[ClipSlots] canvas undo stash 清理失败：\(error.localizedDescription)")
+            }
+        }
+    }
+
+    /// 启动时清暂存区的**惰性入口**（v2.14.0）。
+    ///
+    /// 先在磁盘上看一眼 `.canvas_undo` 存不存在，再决定要不要求值 `canvasPrivate` 单例 ——
+    /// 后者一被触碰就会建出 `canvas/private_slots/` 和索引文件。从没打开过画布的用户不该因为
+    /// 一次"清理"而凭空多一个数据目录。
+    public static func purgeCanvasUndoStashIfPresent() {
+        let root = ClipSlotsPaths.canvasPrivateSlots.appendingPathComponent(".canvas_undo",
+                                                                           isDirectory: true)
+        guard FileManager.default.fileExists(atPath: root.path) else { return }
+        canvasPrivate.purgeCanvasUndoStash()
     }
 
     public func deleteSpecialSlot(id: String) throws {
@@ -1507,6 +1751,15 @@ public final class SpecialSlotStorage {
     /// connection state. SlotConnectionStorage lives in the GUI target and CANNOT
     /// be imported from ClipSlotsKit, so cross-module signalling is done via
     /// NotificationCenter; the GUI observer performs the actual connection cleanup.
+    /// 迁移专用：把某个组的存储句柄从缓存里踢掉（v2.14.0）。
+    ///
+    /// `CanvasPrivateStoreMigration` 把组目录整棵搬到另一个库之后，本实例缓存里那个 `SlotStorage`
+    /// 还指着已经不存在的老路径。谁再拿到它写一笔，就会在 `special_slots/<组>/` 下凭空重建出目录 ——
+    /// 等于把刚搬走的组又"复活"在槽位库里。
+    public func evictGroupStorageCacheAfterMigration(groupId: String) {
+        evictStorageCacheAndNotifyGroupDeletion(groupId: groupId)
+    }
+
     private func evictStorageCacheAndNotifyGroupDeletion(groupId: String) {
         storageCacheLock.lock()
         let evicted = storageCache.removeValue(forKey: groupId)

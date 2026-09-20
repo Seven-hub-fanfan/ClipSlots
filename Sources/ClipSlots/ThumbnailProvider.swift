@@ -274,8 +274,12 @@ final class ThumbnailProvider: ObservableObject {
         //    key 尾部已编入 `::m{id}`（见 SlotContent.thumbnailKey），换图/清图自然失效。
         // 2. 空槽守卫在其后 —— 空槽也能有手动封面图，不会被 `content.isEmpty` 提前短路掉。
         // 3. 磁盘字节缺失时不 return，而是**继续往下走自动逻辑**，等价于优雅降级而非白屏。
+        // v2.14.0：手动缩略图的字节按**组 id 选库**取。画布私有组的内容住在
+        // `canvas/private_slots`，写死 `.shared` 会让画布私有节点的手动封面图永远取不到文件，
+        // 静默降级成自动缩略图 —— 一个只在画布里出现、且看起来像"图没设上"的 bug。
         if let manualId = content.manualThumbnailId, !manualId.isEmpty,
-           let manualURL = SpecialSlotStorage.shared.manualThumbnailURL(slot, in: specialSlotId) {
+           let manualURL = SpecialSlotStorage.storage(forGroupId: specialSlotId)
+               .manualThumbnailURL(slot, in: specialSlotId) {
             Task {
                 let decoded = await ThumbnailDecodeLimiter.shared.run {
                     await Task.detached(priority: .userInitiated) { () -> NSImage? in

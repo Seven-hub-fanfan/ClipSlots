@@ -216,12 +216,11 @@ struct CanvasSlotLibraryPanel: View {
                     Circle()
                         .fill(entries.isEmpty ? AppTheme.canvasChromeTertiaryInk.opacity(0.5) : Color.orange)
                         .frame(width: 6, height: 6)
-                    // v2.13.0：标题跟着当前项目走。默认项目仍叫「未入库」（老用户的心智不变），
-                    // 其他项目显示「暂存区」——在项目切换器已经写着项目名的前提下，
-                    // 这里再重复一遍项目名只会让 240pt 宽的侧栏被省略号吃掉。
-                    Text(canvas.activeProject.id == CanvasProject.defaultId
-                         ? SpecialSlotStorage.unfiledGroupName
-                         : "暂存区")
+                    // v2.14.0：所有项目一律叫「未入库」（用户原话：「我希望每个项目都是未入库的
+                    // 形式，不要暂存区」）。v2.13.0 给非默认项目起名「暂存区」是自作聪明 ——
+                    // 同一个东西在不同项目里换名字，只会让用户以为那是两种不同的容器。
+                    // 项目身份由顶部的项目切换器表达，这一行不必也不该重复它。
+                    Text(SpecialSlotStorage.unfiledGroupName)
                         .font(.system(size: 10, weight: .semibold))
                         .foregroundColor(entries.isEmpty
                                          ? AppTheme.canvasChromeSecondaryInk
@@ -237,7 +236,7 @@ struct CanvasSlotLibraryPanel: View {
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
-            .help("本项目里还没归到正式槽位的节点。把节点拖到槽位库里可以归到具体槽位；在画布上删除节点，这里的内容也会一起清掉。")
+            .help("本项目里还没归到正式槽位的节点，只存在于画布，不占用任何槽位页面或槽位组。把节点拖到下面的槽位库即可正式归档；在画布上删除节点，这里的内容会立刻一起消失（Cmd+Z 可连内容一起撤回）。")
 
             if isOpen {
                 if entries.isEmpty {
@@ -274,7 +273,7 @@ struct CanvasSlotLibraryPanel: View {
         let gid = canvas.privateGroupId
         var out = slotEntries(groupId: gid, capacity: SpecialSlotStorage.unfiledCapacity)
         var known = Set(out.map(\.slot))
-        let storage = store.specialStorage.slotStorage(for: gid)
+        let storage = slotStorage(for: gid)
         for node in canvas.nodes where node.groupId == gid && !known.contains(node.slot) {
             known.insert(node.slot)
             out.append(SlotEntry(slot: node.slot,
@@ -362,9 +361,18 @@ struct CanvasSlotLibraryPanel: View {
         let attachmentCount: Int
     }
 
+    /// 某个组的槽位存储句柄（v2.14.0 起要先选库）。
+    ///
+    /// 画布私有组（`__unfiled__` / `__canvas__*`）的内容住在 `canvas/private_slots/`，普通组住在
+    /// `special_slots/`。走 `store.canvasStorage(groupId:)` 这一个路由，而不是在这里各自判断 ——
+    /// 侧栏和画布读到的必须是同一份数据，两处各写一遍判断迟早会分叉。
+    private func slotStorage(for groupId: String) -> SlotStorage {
+        store.canvasStorage(groupId: groupId).slotStorage(for: groupId)
+    }
+
     /// 读取某组的槽位内容。
     ///
-    /// ★ 关键：必须用 `specialStorage.slotStorage(for: groupId)` 拿**该组自己的**存储句柄。
+    /// ★ 关键：必须用 `slotStorage(for: groupId)` 拿**该组自己的**存储句柄。
     /// 一开始这里写的是 `store.storage`，那是「当前所在组」的句柄 —— 于是展开任意一个组，列出来的
     /// 全是当前组的内容（同一份数据被贴上了 10 个不同组的标签），拖出去的节点 prompt 全错。这个错法
     /// 在 UI 上极难察觉，因为默认组恰好就是当前组，只有切到第二个组才暴露。
@@ -376,7 +384,7 @@ struct CanvasSlotLibraryPanel: View {
     /// 另外刻意**不切组去读** `store.slots`：切组是用户可见的副作用（会改变主界面所在位置）。
     private func slotEntries(groupId: String, capacity: Int) -> [SlotEntry] {
         let slotCount = max(1, capacity)
-        let storage = store.specialStorage.slotStorage(for: groupId)
+        let storage = slotStorage(for: groupId)
         let snapshot = storage.searchScanSnapshot(slotCount: slotCount)
         var out: [SlotEntry] = []
         for slot in 1...slotCount {

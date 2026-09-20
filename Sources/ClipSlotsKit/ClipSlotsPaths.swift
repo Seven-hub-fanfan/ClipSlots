@@ -18,6 +18,31 @@ public enum ClipSlotsPaths {
     }
     public static var specialSlots: URL { dataRoot.appendingPathComponent("special_slots", isDirectory: true) }
     public static var slots: URL { dataRoot.appendingPathComponent("slots", isDirectory: true) }
+
+    /// 画布数据根（`canvas/`）：项目索引、各项目的画布文档，以及 v2.14.0 起的**画布私有内容**。
+    public static var canvas: URL { dataRoot.appendingPathComponent("canvas", isDirectory: true) }
+
+    /// 画布私有内容的存储根（v2.14.0）。
+    ///
+    /// ## 为什么它必须是一个**独立的根**，而不是 `special_slots/` 里的一个保留组
+    ///
+    /// v2.11.8~v2.13.x 把画布上「没有对应槽位的节点」寄存在 `special_slots/` 的保留组里
+    /// （`__unfiled__` / `__canvas__<projectId>`），靠"在发布边界上过滤掉"来对用户隐身。
+    /// 这个做法在产品上是错的，实践也证明了：
+    ///
+    ///   - 过滤点不止一处（`specialSlots` 有两条旁路赋值没过滤），漏一处用户就在编辑页的组标签栏
+    ///     看到「未入库」「画布·项目」这种组，还会被算进"这一页有几个组"的计数里；
+    ///   - 它们挂在某个真实页面下（字段不能为空），所以天然"占用槽位页面"；
+    ///   - 用户的诉求是「画布里的东西只在画布里管」，而不是「在槽位库里藏好」。
+    ///
+    /// 所以 v2.14.0 起画布私有内容搬到这里：**槽位库的索引（`special_slots/index.json`）里再也
+    /// 没有它们的任何记录**，页面数、组数、组标签栏、切组快捷键、`clipslots list-groups` 全部
+    /// 结构性地看不见它 —— 不是被过滤掉，而是压根不在那张表里。
+    ///
+    /// 复用 `SpecialSlotStorage`（换一个 baseDir）而不是另写一套存储，是因为画布节点要的能力
+    /// （内容落盘 + 附件外置 + Label + 手动缩略图 + `.trash` 兜底 + 跨进程锁）它全都有；重写一份
+    /// 只会得到一套没被验证过的、少了一半安全网的存储。
+    public static var canvasPrivateSlots: URL { canvas.appendingPathComponent("private_slots", isDirectory: true) }
     public static var lockFile: URL { specialSlots.appendingPathComponent(".storage.lock") }
     /// UNDO-1/2 的撤销 + 重做栈落盘目录（v2.10.95 起）。
     public static var undoDir: URL { specialSlots.appendingPathComponent(".undo", isDirectory: true) }

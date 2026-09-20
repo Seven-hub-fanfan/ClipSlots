@@ -5594,11 +5594,12 @@ do {
     }
 }
 
-// MARK: - CANVAS-UNFILED：「未入库」保留组（v2.11.8 二轮）
+// MARK: - CANVAS-UNFILED：「未入库」保留组（v2.11.8 二轮，v2.14.0 改到画布私有库）
 //
-// 未入库是个真实存在的槽位组（id `__unfiled__`），只是在 UI/CLI 边界上被过滤掉了。
-// 这里锁三件事：id/名字/容量是持久化契约；ensure 幂等；保留组不能被删/改名。
-// 最后一条尤其要紧——用户在编辑页误删这个组，画布上所有未归槽节点的内容会一起没。
+// 「未入库」是个真实存在的槽位组（id `__unfiled__`），但从 v2.14.0 起它**不在用户的槽位库里** ——
+// 它住在 `canvas/private_slots`（见 CANVAS-PRIV 组）。这里锁三件事：id/名字/容量是持久化契约；
+// ensure 幂等；保留组不能被删/改名。最后一条尤其要紧 —— 误删这个组，画布上所有未归槽节点的
+// 内容会一起没。
 do {
     t.equal(SpecialSlotStorage.unfiledGroupId, "__unfiled__", "★保留组 id 是持久化契约，不能改")
     t.equal(SpecialSlotStorage.unfiledGroupName, "未入库", "保留组显示名")
@@ -5614,7 +5615,10 @@ do {
         unsetenv("CLIPSLOTS_DATA_DIR")
         try? FileManager.default.removeItem(at: dir)
     }
-    let storage = SpecialSlotStorage()
+    // v2.14.0：保留组只能建在画布私有库上，所以这组用例的主角换成 `.canvasPrivate` 实例。
+    // 槽位库那侧的行为（拒绝创建）由 CANVAS-PRIV-8 盯着。
+    let storage = SpecialSlotStorage(baseDirectory: dir.appendingPathComponent("canvas/private_slots"),
+                                     role: .canvasPrivate)
 
     let g1 = try! storage.ensureUnfiledGroup()
     t.equal(g1.id, SpecialSlotStorage.unfiledGroupId, "ensure 应返回保留组")
@@ -7935,87 +7939,241 @@ do {
             "★★CANVAS-PROJ-31 项目文档必须进 .trash（删项目是破坏性操作，唯一的安全感来源就是可恢复）")
 }
 
-// MARK: - CANVAS-SWEEP：画布私有内容的清扫（v2.13.0）
+// MARK: - CANVAS-RECON：画布私有内容与节点的对账（v2.14.0）
 //
-// 用户原话：「未入库这一部分有问题，我的开始只是希望有一个存放不在槽位的节点，在画布中删除应该
-// 就消失了才可以」。
+// 用户原话，两轮：
+//   1.「我的开始只是希望有一个存放不在槽位的节点，在画布中删除应该就消失了才可以」
+//   2.「并且发现暂存区还是不会同步删除」
 //
-// 这组是全文件**最危险**的逻辑：它按"没人引用"删用户内容。三种写错方式都会静默丢数据：
-//   1. 没看撤销栈 → Cmd+Z 把节点恢复回来，里面是空的（比残留严重得多）。
-//   2. 没拦"文档加载失败" → 空画布 = 没有任何引用 = 整个项目的内容一次抹掉。
-//   3. 认错组 → 清到用户的正式槽位上（那是真实资产，画布无权处置）。
+// v2.13.0 用「清扫 + 撤销栈豁免」实现第 1 条，结果撞上第 2 条：删掉的节点还躺在撤销栈里，
+// 内容一条都不少。v2.14.0 改成「搬进不可见的撤销暂存区」——可见性与可撤销性不再互斥。
+//
+// 这组是全文件**最危险**的逻辑：它按「没人引用」搬走用户内容。三种写错方式都会静默丢数据：
+//   1. 没拦「文档加载失败」→ 空画布 = 没有任何引用 = 整个项目的内容一次全搬走。
+//   2. 认错组 → 动到用户的正式槽位（那是真实资产，画布无权处置）。
+//   3. 恢复时覆盖 → 槽位号被新内容复用后又把老内容搬回去，新内容没了。
 do {
     let gid = "__canvas__AAA"
 
-    // 基本规则：占用了但没人引用 → 清。
-    var input = CanvasPrivateSlotSweep.Input(privateGroupId: gid,
-                                             occupiedSlots: [1, 2, 3, 4],
-                                             referencedByNodes: [1],
-                                             referencedByHistory: [2],
-                                             documentLoadFailed: false)
-    t.equal(CanvasPrivateSlotSweep.slotsToClear(input), [3, 4],
-            "★★CANVAS-SWEEP-1 只清「既没有节点引用、也不在撤销栈里」的槽位")
+    // 基本规则：有内容但没节点引用 → 搬进暂存区。★ 与 v2.13.0 的分水岭：撤销栈**不再**是豁免理由。
+    var input = CanvasPrivateReconcile.Input(privateGroupId: gid,
+                                            occupiedSlots: [1, 2, 3, 4],
+                                            stashedSlots: [],
+                                            referencedByNodes: [1],
+                                            documentLoadFailed: false)
+    t.equal(CanvasPrivateReconcile.plan(input).toStash, [2, 3, 4],
+            "★★★CANVAS-RECON-1 没有节点引用的内容一律搬进暂存区（v2.13.0 给撤销栈开豁免 = 用户删了一批节点、列表一条没少）")
+    t.equal(CanvasPrivateReconcile.plan(input).toRestore, [],
+            "CANVAS-RECON-2 暂存区是空的，没什么可恢复")
 
-    // 撤销栈里的必须留住。
-    input.referencedByHistory = [2, 3, 4]
-    t.equal(CanvasPrivateSlotSweep.slotsToClear(input), [],
-            "★★★CANVAS-SWEEP-2 撤销/重做还能恢复出来的内容一个都不能清（否则 Cmd+Z 恢复出空节点）")
+    // 撤销把节点带回来了 → 内容从暂存区搬回槽位。
+    input = CanvasPrivateReconcile.Input(privateGroupId: gid,
+                                         occupiedSlots: [1],
+                                         stashedSlots: [2, 3],
+                                         referencedByNodes: [1, 2],
+                                         documentLoadFailed: false)
+    t.equal(CanvasPrivateReconcile.plan(input).toRestore, [2],
+            "★★★CANVAS-RECON-3 Cmd+Z 带回来的节点，内容必须从暂存区搬回（漏了 = 撤销出一个空节点，比残留严重）")
+    t.equal(CanvasPrivateReconcile.plan(input).toStash, [],
+            "CANVAS-RECON-4 节点引用着的内容不搬走")
+    t.check(!CanvasPrivateReconcile.plan(input).toRestore.contains(3),
+            "CANVAS-RECON-5 暂存区里没有节点引用的那份继续躺着，等它自己那次撤销")
+
+    // 恢复不能覆盖：槽位号已经被新内容用上了就放弃恢复。
+    input = CanvasPrivateReconcile.Input(privateGroupId: gid,
+                                         occupiedSlots: [2],
+                                         stashedSlots: [2],
+                                         referencedByNodes: [2],
+                                         documentLoadFailed: false)
+    t.equal(CanvasPrivateReconcile.plan(input).toRestore, [],
+            "★★★CANVAS-RECON-6 槽位已有内容时不恢复（搬回去会盖掉用户新写的东西，宁可让撤销出来的节点是空的）")
 
     // 安全闸 1：文档加载失败 → 什么都不做。
-    input.referencedByHistory = []
-    input.referencedByNodes = []
-    input.documentLoadFailed = true
-    t.equal(CanvasPrivateSlotSweep.slotsToClear(input), [],
-            "★★★CANVAS-SWEEP-3 画布文档加载失败时一个都不清——那时「没有节点引用」是假象，清扫会抹掉整个项目")
+    input = CanvasPrivateReconcile.Input(privateGroupId: gid,
+                                         occupiedSlots: [1, 2, 3, 4],
+                                         stashedSlots: [],
+                                         referencedByNodes: [],
+                                         documentLoadFailed: true)
+    t.check(CanvasPrivateReconcile.plan(input).isEmpty,
+            "★★★CANVAS-RECON-7 画布文档加载失败时一个都不动——那时「没有节点引用」是假象，对账会把整个项目搬空")
     input.documentLoadFailed = false
-    t.equal(CanvasPrivateSlotSweep.slotsToClear(input), [1, 2, 3, 4],
-            "CANVAS-SWEEP-4 同样的输入、文档正常时才清（确认上一条真的是那个开关在起作用）")
+    t.equal(CanvasPrivateReconcile.plan(input).toStash, [1, 2, 3, 4],
+            "CANVAS-RECON-8 同样的输入、文档正常时才搬（确认上一条真的是那个开关在起作用）")
 
-    // 安全闸 2：只清保留组。
-    let formal = CanvasPrivateSlotSweep.Input(privateGroupId: "special_用户的正式组",
+    // 安全闸 2：只动画布私有组。
+    let formal = CanvasPrivateReconcile.Input(privateGroupId: "special_用户的正式组",
                                              occupiedSlots: [1, 2, 3],
+                                             stashedSlots: [],
                                              referencedByNodes: [],
-                                             referencedByHistory: [],
                                              documentLoadFailed: false)
-    t.equal(CanvasPrivateSlotSweep.slotsToClear(formal), [],
-            "★★★CANVAS-SWEEP-5 非保留组一个都不清——从槽位库拖上画布的节点，内容属于用户，画布无权处置")
+    t.check(CanvasPrivateReconcile.plan(formal).isEmpty,
+            "★★★CANVAS-RECON-9 非私有组一个都不动——从槽位库拖上画布的节点，内容属于用户")
 
     // 引用集合的提取：只认本组，跨组节点不能算进来。
     let nodes = [canvasNode(slot: 1, group: gid),
                  canvasNode(slot: 2, group: gid),
                  canvasNode(slot: 9, group: "special_别人家")]
-    t.equal(CanvasPrivateSlotSweep.slots(of: nodes, in: gid), Set([1, 2]),
-            "★CANVAS-SWEEP-6 只统计落在本私有组里的节点（把别组的槽位号算进来会挡住本组的清扫）")
+    t.equal(CanvasPrivateReconcile.slots(of: nodes, in: gid), Set([1, 2]),
+            "★CANVAS-RECON-10 只统计落在本私有组里的节点（把别组的槽位号算进来会挡住本组的对账）")
+}
 
-    // 历史快照：before / after 两个方向都要看。
-    let entry = CanvasHistoryEntry(kind: .removeNode,
-                                  detail: "删了一个",
-                                  before: [canvasNode(slot: 7, group: gid)],
-                                  after: [],
-                                  beforeEdges: [],
-                                  afterEdges: [])
-    t.equal(CanvasPrivateSlotSweep.slots(ofHistory: [entry], in: gid), Set([7]),
-            "★★CANVAS-SWEEP-7 撤销方向（before）引用的槽位要保住——刚删的节点靠它才能被 Cmd+Z 恢复出内容")
-    let redoEntry = CanvasHistoryEntry(kind: .addNode,
-                                       detail: "建了一个",
-                                       before: [],
-                                       after: [canvasNode(slot: 8, group: gid)],
-                                       beforeEdges: [],
-                                       afterEdges: [])
-    t.equal(CanvasPrivateSlotSweep.slots(ofHistory: [redoEntry], in: gid), Set([8]),
-            "★★CANVAS-SWEEP-8 重做方向（after）同样要保住（少看一边 = 重做出空节点）")
+/// 这两组用例要同时摆弄**两个**存储根（槽位库 + 画布私有库），`withFreshStore` 那套
+/// 「一个 storage 实例 + CLIPSLOTS_DATA_DIR」的封装套不上，所以直接给一个裸临时目录。
+private func canvasPrivateTmpDir(_ tag: String) -> URL {
+    let dir = FileManager.default.temporaryDirectory
+        .appendingPathComponent("clipslots_smoke_\(tag)_\(UUID().uuidString)", isDirectory: true)
+    try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+    return dir
+}
 
-    // slotEdit：文本编辑的回滚目标可能已经不在任何节点快照里了。
-    let editEntry = CanvasHistoryEntry(kind: .editNode,
-                                       detail: "改了文本",
-                                       before: [],
-                                       after: [],
-                                       beforeEdges: [],
-                                       afterEdges: [],
-                                       slotEdit: .init(groupId: gid, slot: 4,
-                                                       before: "旧文本", after: "新文本"))
-    t.equal(CanvasPrivateSlotSweep.slots(ofHistory: [editEntry], in: gid), Set([4]),
-            "★★CANVAS-SWEEP-9 文本编辑条目引用的槽位也要保住（撤销要把旧文本写回去，槽位得还活着）")
+// MARK: - CANVAS-PRIV：画布私有内容独立成库（v2.14.0）
+//
+// 用户原话：「不占用槽位页面的任何页面和槽位组的形式，只在画布模式中进行一个管理」。
+//
+// v2.13.0 的画布私有组就住在 `special_slots/index.json` 里，靠「在发布边界上过滤」隐身 —— 而那个
+// 过滤漏了两处，于是「未入库」「画布·项目」真的出现在默认页面的组标签栏里，还被算进每页组数。
+// 这组把新不变量钉死：**画布私有组不存在于槽位库索引**，不是看不见，是不在那张表里。
+do {
+    let dir = canvasPrivateTmpDir("canvas-private-store")
+    let main = SpecialSlotStorage(baseDirectory: dir.appendingPathComponent("special_slots"), role: .main)
+    let priv = SpecialSlotStorage(baseDirectory: dir.appendingPathComponent("canvas/private_slots"),
+                                  role: .canvasPrivate)
+
+    // 路由：组 id 决定进哪个库。这是全套设计的枢纽，写错一个分支就等于回到 v2.13.0。
+    t.equal(SpecialSlotStorage.storage(forGroupId: SpecialSlotStorage.unfiledGroupId).role, .canvasPrivate,
+            "★★★CANVAS-PRIV-1 「未入库」必须路由到画布私有库")
+    t.equal(SpecialSlotStorage.storage(forGroupId: "__canvas__AAA").role, .canvasPrivate,
+            "★★★CANVAS-PRIV-2 项目私有组必须路由到画布私有库")
+    t.equal(SpecialSlotStorage.storage(forGroupId: "special_用户的组").role, .main,
+            "★★★CANVAS-PRIV-3 普通槽位组必须留在槽位库（错一步就把用户资产写进画布私有目录）")
+
+    // 私有库建组：只登记在私有索引里。
+    let created = try? priv.ensureReservedGroup(id: "__canvas__AAA",
+                                                name: SpecialSlotStorage.unfiledGroupName)
+    t.check(created != nil, "CANVAS-PRIV-4 画布私有库应能建出私有组")
+    t.equal(created?.name, "未入库",
+            "★CANVAS-PRIV-5 所有项目的私有分区统一叫「未入库」（用户明确否掉了「暂存区」这个第二名字）")
+    t.check(priv.loadIndex().specialSlots.contains { $0.id == "__canvas__AAA" },
+            "CANVAS-PRIV-6 私有组登记在画布私有库索引里")
+    t.check(!main.loadIndex().specialSlots.contains { SpecialSlotStorage.isReservedGroupId($0.id) },
+            "★★★CANVAS-PRIV-7 槽位库索引里一个私有组都不能有（这就是用户要的「不占用槽位组」）")
+
+    // 主库拒绝建私有组：防止老代码、或将来某次手滑的调用又把「未入库」塞回用户的槽位库。
+    var mainRefused = false
+    do { _ = try main.ensureReservedGroup(id: "__canvas__BBB", name: "未入库") }
+    catch { mainRefused = true }
+    t.check(mainRefused,
+            "★★★CANVAS-PRIV-8 在槽位库上建私有组必须抛错（这条 guard 是 v2.14.0 不变量的最后一道门）")
+
+    // 内容往返：写进私有库的内容不该在槽位库目录里留下任何痕迹。
+    _ = priv.set(1, content: makeTextContent("画布里的散内容"), in: "__canvas__AAA")
+    t.equal(extractText(priv.get(1, in: "__canvas__AAA")), "画布里的散内容",
+            "CANVAS-PRIV-9 私有库内容应可读回")
+    t.check(!FileManager.default.fileExists(
+                atPath: dir.appendingPathComponent("special_slots/__canvas__AAA").path),
+            "★★CANVAS-PRIV-10 私有组目录不能出现在 special_slots/ 下（物理隔离，不是逻辑过滤）")
+
+    // 撤销暂存区往返：删 → 列表立刻空；撤销 → 原样回来。
+    t.check(priv.stashSlotForCanvasUndo(1, in: "__canvas__AAA"),
+            "CANVAS-PRIV-11 删除节点时内容应能搬进撤销暂存区")
+    t.equal(extractText(priv.get(1, in: "__canvas__AAA")) ?? "", "",
+            "★★★CANVAS-PRIV-12 搬进暂存区后槽位立刻读成空（这就是用户要的「在画布中删除应该就消失了」）")
+    t.equal(priv.stashedCanvasUndoSlots(in: "__canvas__AAA"), Set([1]),
+            "CANVAS-PRIV-13 暂存区应报告这个槽位被暂存着（撤销判断与新槽位号避让都靠它）")
+    t.check(priv.restoreCanvasUndoStash(1, in: "__canvas__AAA"),
+            "CANVAS-PRIV-14 撤销应能把内容搬回槽位")
+    t.equal(extractText(priv.get(1, in: "__canvas__AAA")), "画布里的散内容",
+            "★★★CANVAS-PRIV-15 Cmd+Z 恢复出来的必须是原内容（搬目录而不是存快照，就是为了这一条字节级无损）")
+
+    // 正式组不许走暂存区：那是用户资产，删画布节点不该动它。
+    t.check(!priv.stashSlotForCanvasUndo(1, in: "special_用户的组"),
+            "★★★CANVAS-PRIV-16 正式槽位组不允许被搬进画布暂存区")
+    t.check(!main.stashSlotForCanvasUndo(1, in: "__canvas__AAA"),
+            "★★CANVAS-PRIV-17 槽位库实例不提供画布暂存能力（避免两个库各搬一份、互相覆盖）")
+
+    // 启动清理：上次会话的暂存内容已经没有恢复入口了（撤销栈是内存态），整体进 .trash 而不是直接删。
+    _ = priv.stashSlotForCanvasUndo(1, in: "__canvas__AAA")
+    priv.purgeCanvasUndoStash()
+    t.check(priv.stashedCanvasUndoSlots(in: "__canvas__AAA").isEmpty,
+            "CANVAS-PRIV-18 启动清理后暂存区应为空")
+    let privTrash = (try? FileManager.default.contentsOfDirectory(
+        atPath: dir.appendingPathComponent("canvas/private_slots/.trash").path)) ?? []
+    t.check(privTrash.contains { $0.hasPrefix("undo_stash_purged_") },
+            "★★CANVAS-PRIV-19 清理是「移进 .trash」不是「删掉」（30 天内用户还能捞回那份内容）")
+}
+
+/// 造一个索引条目。`SpecialSlot` 的 init 要求显式给 `sourceType/createdAt/updatedAt`，
+/// 这几个字段对本组用例完全无关，摊开写会把断言埋掉。
+private func smokeGroup(_ id: String, _ name: String, _ order: Int,
+                        pageId: String = "default_page") -> SpecialSlot {
+    SpecialSlot(id: id, name: name, sourceType: .manual,
+                pageId: pageId, order: order,
+                createdAt: Date(), updatedAt: Date())
+}
+
+// MARK: - CANVAS-MIG：v2.13 → v2.14 迁移（把私有组搬出槽位库）
+//
+// 老用户的 `special_slots/index.json` 里现在就躺着 `__unfiled__` 和 `__canvas__<projectId>`
+// （用户本机实测两个都在）。升级后必须把它们搬走，而且**不能丢内容** —— 附件是外置文件、Label 是
+// 独立文件，所以搬的是整棵目录，不是「导出再导入」。
+do {
+    var index = SpecialSlotIndex(schemaVersion: 2,
+                                 currentPageId: "default_page",
+                                 pages: [SlotPage(id: "default_page", name: "默认页面", order: 0,
+                                                  createdAt: Date(), updatedAt: Date())],
+                                 currentSpecialSlotId: "__unfiled__",
+                                 specialSlots: [
+                                    smokeGroup("default", "默认槽位组", 0),
+                                    smokeGroup("__unfiled__", "未入库", 1),
+                                    smokeGroup("__canvas__AAA", "画布·项目", 2)
+                                 ],
+                                 settings: SpecialSlotSettings())
+    index.selectedSpecialSlotId = "__canvas__AAA"
+    index.activeHotkeySpecialSlotId = "__unfiled__"
+
+    let plan = CanvasPrivateStoreMigration.plan(mainIndex: index)
+    t.equal(plan.groupsToMove.map(\.id).sorted(), ["__canvas__AAA", "__unfiled__"],
+            "★★★CANVAS-MIG-1 两个私有组都要搬走（漏一个 = 那个项目的「未入库」继续占着槽位组）")
+    t.check(!plan.mainIndexAfter.specialSlots.contains { SpecialSlotStorage.isReservedGroupId($0.id) },
+            "★★★CANVAS-MIG-2 搬完后的槽位库索引里不能剩下任何私有组")
+    t.equal(plan.mainIndexAfter.specialSlots.count, 1,
+            "CANVAS-MIG-3 用户自己的组一个都不能少")
+    t.equal(plan.mainIndexAfter.currentSpecialSlotId, "default",
+            "★★★CANVAS-MIG-4 当前组指向被搬走的组时要退回普通组（悬空的 currentSpecialSlotId 会让编辑页打不开任何内容）")
+    t.equal(plan.mainIndexAfter.selectedSpecialSlotId, "default",
+            "★★CANVAS-MIG-5 预览选中游标同样要修（否则圆盘指向一个不存在的组）")
+    t.equal(plan.mainIndexAfter.activeHotkeySpecialSlotId, "default",
+            "★★CANVAS-MIG-6 快捷键归属组要修（否则 Cmd+1~0 写进一个已经搬走的组）")
+    t.check(plan.needsWrite, "CANVAS-MIG-7 有东西要搬时必须落盘")
+
+    // 幂等：已经迁移过的索引不该再被改写。
+    let clean = CanvasPrivateStoreMigration.plan(mainIndex: plan.mainIndexAfter)
+    t.check(clean.groupsToMove.isEmpty && !clean.needsWrite,
+            "★★CANVAS-MIG-8 已迁移过的索引必须是不动点（否则每次启动都要多写一遍索引）")
+
+    // 真实文件系统：目录整棵搬过去，内容与 Label 都不丢。
+    let dir = canvasPrivateTmpDir("canvas-private-migrate")
+    let main = SpecialSlotStorage(baseDirectory: dir.appendingPathComponent("special_slots"), role: .main)
+    let priv = SpecialSlotStorage(baseDirectory: dir.appendingPathComponent("canvas/private_slots"),
+                                  role: .canvasPrivate)
+    var live = main.loadIndex()
+    live.specialSlots.append(smokeGroup("__unfiled__", "未入库", 9,
+                                       pageId: live.pages.first?.id ?? "default_page"))
+    try? main.saveIndex(live)
+    _ = main.set(2, content: makeTextContent("老版本留下的散内容"), in: "__unfiled__")
+    _ = main.setLabel(2, label: "散内容", in: "__unfiled__")
+
+    let moved = CanvasPrivateStoreMigration.run(main: main, canvasPrivate: priv)
+    t.equal(moved, 1, "CANVAS-MIG-9 应搬走 1 个组")
+    t.equal(extractText(priv.get(2, in: "__unfiled__")), "老版本留下的散内容",
+            "★★★CANVAS-MIG-10 搬完之后内容必须在新库里读得到（丢内容是本次重构唯一不可接受的失败）")
+    t.equal(priv.getLabel(2, in: "__unfiled__"), "散内容",
+            "★★CANVAS-MIG-11 Label 是独立文件，整棵目录搬移才能带上它")
+    t.check(!main.loadIndex().specialSlots.contains { $0.id == "__unfiled__" },
+            "★★★CANVAS-MIG-12 迁移后槽位库索引里不能再有「未入库」（用户截图里那个组必须消失）")
+    t.check(!FileManager.default.fileExists(
+                atPath: dir.appendingPathComponent("special_slots/__unfiled__").path),
+            "★★CANVAS-MIG-13 老目录要真的搬走、不是复制（留着会在下次迁移时变成「目标已存在」的分叉）")
 }
 
 t.report()

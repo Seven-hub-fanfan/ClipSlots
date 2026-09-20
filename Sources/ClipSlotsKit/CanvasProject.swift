@@ -51,7 +51,7 @@ public struct CanvasProject: Codable, Identifiable, Equatable {
         self.updatedAt = updatedAt
     }
 
-    /// 该项目的私有保留组 id（画布自有内容的落点）。
+    /// 该项目私有内容组的 id（画布自有内容的落点，存储在 `canvas/private_slots`）。
     ///
     /// 默认项目认领历史上的 `__unfiled__`，理由见类型注释。
     public var privateGroupId: String {
@@ -60,13 +60,12 @@ public struct CanvasProject: Codable, Identifiable, Equatable {
             : SpecialSlotStorage.canvasGroupPrefix + id
     }
 
-    /// 私有组在存储层的展示名。用户看不到（组被过滤掉了），但它会进 `index.json`，
-    /// 留一个可读的名字是为了有人翻磁盘时能看懂这堆目录是什么。
-    public var privateGroupName: String {
-        id == CanvasProject.defaultId
-            ? SpecialSlotStorage.unfiledGroupName
-            : "画布·\(name)"
-    }
+    /// 私有内容组在存储层的展示名。
+    ///
+    /// ★ v2.14.0：所有项目**统一**叫「未入库」。v2.13.0 给非默认项目起名「画布·<项目名>」，并在
+    /// 侧栏里把它显示成「暂存区」，结果同一个东西有了两个名字；用户的反馈是「我希望每个项目都是
+    /// 未入库的形式，不要暂存区」。名字只有一个，心智才只有一个。
+    public var privateGroupName: String { SpecialSlotStorage.unfiledGroupName }
 
     private enum CodingKeys: String, CodingKey {
         case id, name, createdAt, updatedAt

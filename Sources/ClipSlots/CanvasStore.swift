@@ -101,24 +101,19 @@ final class CanvasStore: ObservableObject {
 
     /// 当前项目的画布文档这次加载是否失败过。
     ///
-    /// ★ 清扫私有槽位前**必须**问它（`CanvasPrivateSlotSweep` 的安全闸 1）：文档读不出来时
-    /// `nodes` 是空的，此时清扫会把整个项目的内容一次抹掉。
+    /// ★ 对账私有内容前**必须**问它（`CanvasPrivateReconcile` 的安全闸 1）：文档读不出来时
+    /// `nodes` 是空的，此时对账会把整个项目的内容一次全搬进暂存区。
     var documentLoadFailed: Bool { storage.lastLoadFailed(projectId: activeProjectId) }
 
     /// 本项目私有组里**当前画布节点占用**的槽位号。
     ///
-    /// 见 `CanvasPrivateSlotSweep` 的类型注释：清扫是声明式的（"只允许这些存在"），
-    /// 而不是在删除路径上做命令式清理 —— 后者和撤销打架。
-    func privateSlotsReferencedByNodes() -> Set<Int> {
-        CanvasPrivateSlotSweep.slots(of: nodes, in: privateGroupId)
-    }
-
-    /// 本项目私有组里**撤销/重做还能恢复出来**的槽位号。
+    /// 这是 v2.14.0 对账的唯一真源：可见内容 == 这个集合（见 `CanvasPrivateReconcile`）。
     ///
-    /// 和上面那个分开返回（而不是并成一个集合），是为了让"这条为什么没被清掉"在日志里能分辨：
-    /// 被节点引用 = 正在用；被历史引用 = 等着可能的 Cmd+Z。
-    func privateSlotsReferencedByHistory() -> Set<Int> {
-        CanvasPrivateSlotSweep.slots(ofHistory: history.entries, in: privateGroupId)
+    /// v2.13.0 还额外给撤销栈引用到的槽位开了豁免口，结果"删了节点内容不消失"——那个豁免已经
+    /// 连同 `privateSlotsReferencedByHistory()` 一起删掉：撤销安全现在靠**磁盘暂存区**兜，
+    /// 不靠"把内容留在原地"。
+    func privateSlotsReferencedByNodes() -> Set<Int> {
+        CanvasPrivateReconcile.slots(of: nodes, in: privateGroupId)
     }
 
     /// 新建项目并切过去。

@@ -706,6 +706,19 @@ final class SlotStoreObservable: ObservableObject {
         SlotStorage.didWriteLiveSlotDir = { [weak self] in
             self?.suppressWatcher()
         }
+        // ★ v2.14.0：把画布私有组从槽位库搬进画布私有库，**必须在 loadSpecialSlots() 之前**。
+        //
+        // 顺序不是风格问题：迁移改的正是 `loadSpecialSlots()` 要读的那份 `special_slots/index.json`。
+        // 放在后面等于让第一帧拿着旧索引渲染（组标签栏闪出「未入库」「画布·项目」），还得再补一次
+        // reload 才能收回去。`runOnce()` 自带进程内幂等，重复调用是安全的。
+        let movedGroups = CanvasPrivateStoreMigration.runOnce()
+        if movedGroups > 0 {
+            NSLog("[ClipSlots] v2.14.0 迁移：\(movedGroups) 个画布私有组已从槽位库搬到 canvas/private_slots")
+        }
+        // 上次会话留在撤销暂存区里的内容已经没有恢复入口了（画布撤销栈是内存态），启动时整体
+        // 移进 `.trash`，30 天内仍可捞回。必须在这里做而不是"进画布时做"：进画布可能发生在
+        // 本次会话已经产生了新暂存之后，那时清理会把用户正等着 Cmd+Z 的内容一起端走。
+        SpecialSlotStorage.purgeCanvasUndoStashIfPresent()
         loadSpecialSlots()
         // P0-1 (v2.10.50): 启动首帧读盘异步化。原 init 同步 loadSlots 会在主线程逐槽抢跨进程 flock——
         // 冷启动瞬间若恰逢 CLI 批量写盘 / 另一实例持锁，主线程最长可被卡死 ~N×5s（启动即转圈、甚至被
@@ -1413,7 +1426,12 @@ final class SlotStoreObservable: ObservableObject {
         currentSpecialSlot = index.specialSlots.first { $0.id == id }
         activeHotkeySpecialSlotId = id
         activeHotkeySpecialSlot = index.specialSlots.first { $0.id == id }
-        if specialSlots != index.specialSlots { specialSlots = index.specialSlots }
+        // v2.14.0：这里也要走发布边界过滤。迁移后主索引里本不该再有保留组（画布私有内容已搬到
+        // `canvas/private_slots`），但「主索引一定干净」是个**运行期才成立**的不变量：迁移失败、
+        // 旧版本二进制回写、用户手改 JSON 都能破坏它。而 `specialSlots` 一旦被污染，组标签栏就会
+        // 冒出「未入库」——正是用户反复反馈的那个现象。过滤的成本是一次 filter，别省。
+        let visibleGroups = index.specialSlots.filter { !SpecialSlotStorage.isReservedGroupId($0.id) }
+        if specialSlots != visibleGroups { specialSlots = visibleGroups }
         specialSlotSettings = index.settings
 
         // PERF-1 (v2.10.84): 同 selectSpecialSlotForPreview——移除切组时对「离开组」缩略图缓存的
@@ -2648,6 +2666,19 @@ final class SlotStoreObservable: ObservableObject {
 
     // MARK: - 画布 ⇄ 槽位双向同步（v2.11.7 hotfix18）
 
+    /// 画布内容读写的**存储路由**（v2.14.0）。
+    ///
+    /// 从 v2.14.0 起画布私有内容（`__unfiled__` / `__canvas__*`）不再住在用户的槽位库里，而是
+    /// 独立的 `canvas/private_slots/`（见 `SpecialSlotStorage.canvasPrivate`）。画布侧的每一处
+    /// 内容读写都必须经过这个路由，直接写 `specialStorage` 会把私有内容重新塞回槽位库索引 ——
+    /// 那正是用户否掉 v2.13.0 的原因（「不占用槽位页面的任何页面和槽位组的形式」）。
+    ///
+    /// 普通组仍然原样落在 `specialStorage`：画布与编辑页看的是同一份槽位数据，这是 v2.11.7 起
+    /// 「画布节点显示槽位本身而不是副本」的基础。
+    func canvasStorage(groupId: String) -> SpecialSlotStorage {
+        SpecialSlotStorage.storage(forGroupId: groupId)
+    }
+
     /// 读一个**任意组**槽位的主体纯文本，供画布节点卡片实时展示。
     ///
     /// 画布上绑定了槽位的节点，显示的就是槽位数据本身，不是拖进来那一刻的副本 —— 所以每次求值都
@@ -2657,15 +2688,15 @@ final class SlotStoreObservable: ObservableObject {
         if groupId == currentSpecialSlotId {
             return contentForSlot(slot).plainText
         }
-        return specialStorage.get(slot, in: groupId).plainText
+        return canvasStorage(groupId: groupId).get(slot, in: groupId).plainText
     }
 
     /// 读一个**任意组**槽位的 Label，供画布节点标题实时展示（用户在编辑页改了 Label，画布也要跟着改）。
     func canvasSlotLabel(groupId: String, slot: Int) -> String? {
         if groupId == currentSpecialSlotId {
-            return labels[slot] ?? specialStorage.getLabel(slot, in: groupId)
+            return labels[slot] ?? canvasStorage(groupId: groupId).getLabel(slot, in: groupId)
         }
-        return specialStorage.getLabel(slot, in: groupId)
+        return canvasStorage(groupId: groupId).getLabel(slot, in: groupId)
     }
 
     /// 读一个**任意组**槽位的附件列表，供画布节点卡片展示缩略图 / 文件名（v2.11.7 hotfix19）。
@@ -2679,7 +2710,7 @@ final class SlotStoreObservable: ObservableObject {
         if groupId == currentSpecialSlotId {
             return contentForSlot(slot).attachments
         }
-        return specialStorage.get(slot, in: groupId).attachments
+        return canvasStorage(groupId: groupId).get(slot, in: groupId).attachments
     }
 
     /// 画布新建节点时的「这个槽位能不能占」判定（v2.11.8）。
@@ -2702,7 +2733,7 @@ final class SlotStoreObservable: ObservableObject {
             if !(mem.plainText ?? "").isEmpty || !mem.attachments.isEmpty { return false }
         }
         // 磁盘 / 存储缓存视图。跨组节点本来就走这一路，当前组则用它兜住"内存还没同步"的情况。
-        let disk = specialStorage.get(slot, in: groupId)
+        let disk = canvasStorage(groupId: groupId).get(slot, in: groupId)
         if !(disk.plainText ?? "").isEmpty || !disk.attachments.isEmpty { return false }
         // Label 不算内容：给槽位起了名但没放东西，仍然是空槽（命名是用户对"待放什么"的规划）。
         return true
@@ -2731,7 +2762,7 @@ final class SlotStoreObservable: ObservableObject {
             }
             existing = current
         } else {
-            existing = specialStorage.getOrUnknown(slot, in: groupId)
+            existing = canvasStorage(groupId: groupId).getOrUnknown(slot, in: groupId)
             guard existing != nil else {
                 NSLog("[ClipSlots] writeCanvasSlotText slot=\(slot) group=\(groupId): storage UNKNOWN, aborting")
                 return false
@@ -2751,7 +2782,7 @@ final class SlotStoreObservable: ObservableObject {
             slots[slot] = content
             persistCurrentSpecialSlotData()
         } else {
-            _ = specialStorage.set(slot, content: content, in: groupId)
+            _ = canvasStorage(groupId: groupId).set(slot, content: content, in: groupId)
             // 同 writeCanvasSlotAttachments：跨组写没有任何 @Published 变更，任何以 computed
             // property 读这个槽位的视图都不会自己醒过来。见 `canvasSlotRevision`。
             bumpCanvasSlotRevision()
@@ -2789,7 +2820,7 @@ final class SlotStoreObservable: ObservableObject {
             return true
         }
 
-        guard var content = specialStorage.getOrUnknown(slot, in: groupId) else {
+        guard var content = canvasStorage(groupId: groupId).getOrUnknown(slot, in: groupId) else {
             NSLog("[ClipSlots] writeCanvasSlotAttachments slot=\(slot) group=\(groupId): storage UNKNOWN, aborting")
             return false
         }
@@ -2797,7 +2828,7 @@ final class SlotStoreObservable: ObservableObject {
         // 身份字段必须刷新，否则 v2.10.52 起的增量 diff 会判等而跳过重绘（v2.10.53 同源坑）。
         content.contentId = UUID().uuidString
         content.updatedAt = Date().timeIntervalSince1970
-        let ok = specialStorage.set(slot, content: content, in: groupId)
+        let ok = canvasStorage(groupId: groupId).set(slot, content: content, in: groupId)
         // ★ 三轮 hotfix2：除了那个已经不发通知的 `refreshTrigger`，这里必须再 bump 一个**真的**
         // @Published，否则「入参文件」面板（computed property 读 store）删完不会重新求值。
         // 详见 `canvasSlotRevision` 的注释。
@@ -2851,12 +2882,11 @@ final class SlotStoreObservable: ObservableObject {
 
     /// 确保某个**画布项目私有组**存在（v2.13.0）。幂等。
     ///
-    /// 名字只写在 `index.json` 里给翻磁盘的人看 —— 这个组从所有用户可见的列表里被过滤掉
-    /// （`SpecialSlotStorage.isReservedGroupId`）。
+    /// ★ v2.14.0：建在**画布私有库**（`canvas/private_slots`）里，不再往用户的槽位库索引写东西。
     @discardableResult
     func ensureCanvasPrivateGroup(id: String, name: String) -> Bool {
         do {
-            _ = try specialStorage.ensureReservedGroup(id: id, name: name)
+            _ = try SpecialSlotStorage.canvasPrivate.ensureReservedGroup(id: id, name: name)
             return true
         } catch {
             NSLog("[ClipSlots] ensureCanvasPrivateGroup(\(id)) failed: \(error)")
@@ -2873,11 +2903,16 @@ final class SlotStoreObservable: ObservableObject {
     ///
     /// - Parameter occupied: 画布上已被节点占用的槽位号。判空同样走 `canvasSlotIsFree`（两路都读，
     ///   见那个方法的注释）—— 私有组同样存的是用户真实内容，误判覆盖的后果一样不可挽回。
+    ///
+    /// ★ v2.14.0：**撤销暂存区里的槽位号也算占用**。删掉一个节点后它的内容被搬进暂存区等着
+    /// Cmd+Z，如果这个槽位号立刻被新节点抢走，撤销就只能恢复出一个空节点（`restoreCanvasUndoStash`
+    /// 拒绝覆盖已有内容）。避开它们的代价只是"槽位号跳一个"，用户看不见。
     func allocateCanvasPrivateSlot(groupId: String, occupied: Set<Int>) -> Int? {
         guard SpecialSlotStorage.isReservedGroupId(groupId) else { return nil }
         let cap = SpecialSlotStorage.unfiledCapacity
+        let stashed = SpecialSlotStorage.canvasPrivate.stashedCanvasUndoSlots(in: groupId)
         for slot in 1...cap {
-            if occupied.contains(slot) { continue }
+            if occupied.contains(slot) || stashed.contains(slot) { continue }
             if canvasSlotIsFree(groupId: groupId, slot: slot) { return slot }
         }
         return nil
@@ -2885,24 +2920,21 @@ final class SlotStoreObservable: ObservableObject {
 
     /// 删掉一个画布项目的私有组（删项目时调用，v2.13.0）。
     ///
-    /// 走 `.trash` 软删除，30 天内可恢复。
+    /// 走画布私有库自己的 `.trash` 软删除，30 天内可恢复。
     ///
     /// ## 默认项目的分支
     ///
     /// 默认项目的私有组就是历史上的 `__unfiled__`（`CanvasProject.privateGroupId`），Kit 层拒绝
-    /// 删除它 —— 它不是"某个项目的附属目录"，而是从 v2.11.8 一路留下来的保留组，还被组内换位的
+    /// 删除它 —— 它不是"某个项目的附属目录"，而是从 v2.11.8 一路留下来的组，还被组内换位的
     /// 中转槽等路径依赖着。但「删掉默认项目」是允许的（只要不是最后一个项目），所以这里给它一条
     /// 单独的路：**清空内容、保留组本身**。
-    ///
-    /// 反过来做（把组删掉）会留下一个更糟的状态：`ensureUnfiledGroup` 下次会把它凭空建回来，
-    /// 而那时 index 里的 order/pageId 都是新的，等于悄悄换了一个同名对象。
     @discardableResult
     func deleteCanvasPrivateGroup(id: String) -> Bool {
         do {
             if id == SpecialSlotStorage.unfiledGroupId {
-                try specialStorage.clearAllSlots(in: id)
+                try SpecialSlotStorage.canvasPrivate.clearAllSlots(in: id)
             } else {
-                try specialStorage.deleteCanvasPrivateGroup(id: id)
+                try SpecialSlotStorage.canvasPrivate.deleteCanvasPrivateGroup(id: id)
             }
             refreshTrigger = UUID()
             bumpCanvasSlotRevision()
@@ -2913,35 +2945,27 @@ final class SlotStoreObservable: ObservableObject {
         }
     }
 
-    /// 清扫画布私有组里**已经没人引用**的槽位内容（v2.13.0）。
+    /// 让画布私有内容与画布节点对账（v2.14.0，取代 v2.13.0 的 `sweepCanvasPrivateSlots`）。
     ///
     /// ## 它修的是什么
     ///
-    /// 用户原话：「未入库这一部分有问题……在画布中删除应该就消失了才可以」。v2.12.x 删节点只删
-    /// 节点、不碰槽位，于是未入库里堆了一地删过的节点残留。
+    /// 用户原话：「暂存区还是不会同步删除」。v2.13.0 的清扫会豁免"撤销栈还能恢复的内容"，于是刚
+    /// 删掉的节点内容全都留在列表里 —— 逻辑安全，观感全错。
     ///
-    /// ## 为什么不在删除路径上顺手清
+    /// v2.14.0 的不变量是：**可见内容 == 当前节点引用的内容**。多的搬进撤销暂存区（立刻消失、
+    /// Cmd+Z 能原样搬回来），少的从暂存区搬回来。规则判定在 Kit 的纯函数 `CanvasPrivateReconcile`
+    /// 里（带 smoke 断言），这里只负责读盘 / 搬盘。
     ///
-    /// 会和撤销打架 —— 详见 `CanvasPrivateSlotSweep` 的类型注释。这里执行的是那条**声明式不变量**：
-    /// 私有组里只允许留下"画布上有节点引用的"与"撤销/重做还能恢复的"。
-    ///
-    /// ## 三层安全
-    ///
-    /// 1. 规则判定全在 Kit 层的纯函数里（带 smoke 断言），本方法只负责读磁盘 / 写磁盘。
-    /// 2. `documentLoadFailed` 为真 → 纯函数返回空集合，一个都不清。
-    /// 3. 真正的清除走 `canvasClearSlot` → `SpecialSlotStorage.clear`，旧内容整目录克隆进 `.trash`
-    ///    （30 天可恢复）。
-    ///
-    /// - Returns: 实际清掉的槽位号（升序）。调用方据此决定要不要提示用户。
+    /// - Returns: `(stashed, restored)` 两组槽位号（升序），调用方据此决定要不要提示用户。
     @discardableResult
-    func sweepCanvasPrivateSlots(groupId: String,
-                                 referencedByNodes: Set<Int>,
-                                 referencedByHistory: Set<Int>,
-                                 documentLoadFailed: Bool) -> [Int] {
-        guard SpecialSlotStorage.isReservedGroupId(groupId) else { return [] }
+    func reconcileCanvasPrivateContents(groupId: String,
+                                        referencedByNodes: Set<Int>,
+                                        documentLoadFailed: Bool) -> (stashed: [Int], restored: [Int]) {
+        guard SpecialSlotStorage.isReservedGroupId(groupId) else { return ([], []) }
+        let store = SpecialSlotStorage.canvasPrivate
         // 组还不存在（全新项目一个节点都没建过）→ 无事可做。不能让"组不存在"走进下面的循环，
         // 那会对着一个 ghost 组做 60 次读。
-        guard specialStorage.loadIndex().specialSlots.contains(where: { $0.id == groupId }) else { return [] }
+        guard store.loadIndex().specialSlots.contains(where: { $0.id == groupId }) else { return ([], []) }
 
         var occupied = Set<Int>()
         let cap = SpecialSlotStorage.unfiledCapacity
@@ -2949,16 +2973,26 @@ final class SlotStoreObservable: ObservableObject {
             occupied.insert(slot)
         }
 
-        let victims = CanvasPrivateSlotSweep.slotsToClear(.init(privateGroupId: groupId,
-                                                                occupiedSlots: occupied,
-                                                                referencedByNodes: referencedByNodes,
-                                                                referencedByHistory: referencedByHistory,
-                                                                documentLoadFailed: documentLoadFailed))
-        guard !victims.isEmpty else { return [] }
-        for slot in victims { canvasClearSlot(groupId: groupId, slot: slot) }
+        let plan = CanvasPrivateReconcile.plan(.init(privateGroupId: groupId,
+                                                    occupiedSlots: occupied,
+                                                    stashedSlots: store.stashedCanvasUndoSlots(in: groupId),
+                                                    referencedByNodes: referencedByNodes,
+                                                    documentLoadFailed: documentLoadFailed))
+        guard !plan.isEmpty else { return ([], []) }
+
+        var restored: [Int] = []
+        for slot in plan.toRestore where store.restoreCanvasUndoStash(slot, in: groupId) {
+            restored.append(slot)
+        }
+        var stashed: [Int] = []
+        for slot in plan.toStash where store.stashSlotForCanvasUndo(slot, in: groupId) {
+            stashed.append(slot)
+        }
+        guard !restored.isEmpty || !stashed.isEmpty else { return ([], []) }
         bumpCanvasSlotRevision()
-        NSLog("[ClipSlots][canvas] 已清扫私有组 \(groupId) 的无主内容：\(victims)")
-        return victims
+        refreshTrigger = UUID()
+        NSLog("[ClipSlots][canvas] 私有内容对账 \(groupId)：搬入暂存 \(stashed)，撤销恢复 \(restored)")
+        return (stashed, restored)
     }
 
     /// 读一个任意组槽位的**完整** `SlotContent`（口径与 `canvasSlotText` 一致：当前组优先内存）。
@@ -2969,7 +3003,7 @@ final class SlotStoreObservable: ObservableObject {
         if groupId == currentSpecialSlotId {
             return contentForSlotOrUnknown(slot)
         }
-        return specialStorage.getOrUnknown(slot, in: groupId)
+        return canvasStorage(groupId: groupId).getOrUnknown(slot, in: groupId)
     }
 
     /// 写一个任意组槽位的完整 `SlotContent`（含刷新身份字段）。
@@ -2983,15 +3017,16 @@ final class SlotStoreObservable: ObservableObject {
             refreshTrigger = UUID()
             return true
         }
-        let ok = specialStorage.set(slot, content: c, in: groupId)
+        let ok = canvasStorage(groupId: groupId).set(slot, content: c, in: groupId)
         if ok { refreshTrigger = UUID() }
         return ok
     }
 
     /// 清空一个任意组槽位（内容 + Label + 缩略图缓存）。
     private func canvasClearSlot(groupId: String, slot: Int) {
-        _ = specialStorage.clear(slot, in: groupId)
-        _ = specialStorage.setLabel(slot, label: nil, in: groupId)
+        let store = canvasStorage(groupId: groupId)
+        _ = store.clear(slot, in: groupId)
+        _ = store.setLabel(slot, label: nil, in: groupId)
         ThumbnailProvider.shared.invalidateSlot(specialSlotId: groupId, slot: slot)
         if groupId == currentSpecialSlotId {
             var newSlots = slots
@@ -3037,7 +3072,7 @@ final class SlotStoreObservable: ObservableObject {
 
         // 见注释 2：把手动缩略图的字节随内容一起带走。
         if let thumbId = content.manualThumbnailId, !thumbId.isEmpty,
-           let url = specialStorage.manualThumbnailURL(fromSlot, in: fromGroupId),
+           let url = canvasStorage(groupId: fromGroupId).manualThumbnailURL(fromSlot, in: fromGroupId),
            let bytes = try? Data(contentsOf: url), !bytes.isEmpty {
             content.pendingManualThumbnailData = bytes
         }
@@ -3047,7 +3082,7 @@ final class SlotStoreObservable: ObservableObject {
             return false
         }
         if let label, !label.isEmpty {
-            _ = specialStorage.setLabel(toSlot, label: label, in: toGroupId)
+            _ = canvasStorage(groupId: toGroupId).setLabel(toSlot, label: label, in: toGroupId)
             if toGroupId == currentSpecialSlotId {
                 var newLabels = labels
                 newLabels[toSlot] = label
@@ -7078,7 +7113,10 @@ final class SlotStoreObservable: ObservableObject {
                 guard let self = self else { return }
                 // Refresh state (must touch @Published on the main thread)
                 let refreshedIndex = self.specialStorage.loadIndex()
-                self.specialSlots = refreshedIndex.specialSlots
+                // v2.14.0：同 selectAndActivateSpecialSlot —— 保留组永不进 `specialSlots`。
+                self.specialSlots = refreshedIndex.specialSlots.filter {
+                    !SpecialSlotStorage.isReservedGroupId($0.id)
+                }
                 self.pages = refreshedIndex.pages
 
                 // v2.10.87 (perf): 原 v2.10.60 在此循环写 slotRenderTokens 的代码已删除，理由同批量导入
