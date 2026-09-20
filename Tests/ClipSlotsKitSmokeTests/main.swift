@@ -8176,4 +8176,190 @@ do {
             "★★CANVAS-MIG-13 老目录要真的搬走、不是复制（留着会在下次迁移时变成「目标已存在」的分叉）")
 }
 
+// MARK: - CANVAS-KIND：.slot 与老文档迁移（v2.15.0）
+//
+// 这一组守的是一条**升级后不能变脸**的承诺：用户这一轮把现有那张通用卡命名为「槽位节点」，于是
+// 老文档里所有 `.image` 节点（v2.14.x 及以前，它们画出来就是那张通用卡）必须在读取时变成 `.slot`。
+// 漏了这一步的表现是：用户升级后打开老画布，每张卡都换成了 TapNow 风格媒体卡 —— 内容没丢，
+// 但"我的画布被改了"这件事本身就是回归。
+do {
+    // 老文档：没有 schemaVersion 字段（v2.11.x 之前）+ 一个 image 节点。
+    let legacyNoVersion = """
+    {"nodes":[{"pageId":"p","groupId":"g","slot":1,"kind":"image","x":0,"y":0}]}
+    """
+    if let doc = try? JSONDecoder().decode(CanvasDocument.self, from: Data(legacyNoVersion.utf8)) {
+        t.equal(doc.nodes.count, 1, "CANVAS-KIND-1 老文档应能解出 1 个节点")
+        t.equal(doc.nodes.first?.kind, .slot,
+                "★★★CANVAS-KIND-2 缺 schemaVersion 的老文档按 1 处理，.image 必须迁成 .slot（否则升级后老画布集体变脸）")
+        t.check(doc.schemaVersion >= 2,
+                "★★CANVAS-KIND-3 读完要把版本抬到 2（否则下次打开又迁一遍，而那时 .image 已是「用户真的建了图片节点」）")
+    } else {
+        t.check(false, "CANVAS-KIND-1 老文档解码失败")
+    }
+
+    // schema 1 显式声明。
+    let legacyV1 = """
+    {"schemaVersion":1,"nodes":[{"pageId":"p","groupId":"g","slot":2,"kind":"image","x":0,"y":0},
+    {"pageId":"p","groupId":"g","slot":3,"kind":"video","x":0,"y":0},
+    {"pageId":"p","groupId":"g","slot":4,"kind":"text","x":0,"y":0}]}
+    """
+    if let doc = try? JSONDecoder().decode(CanvasDocument.self, from: Data(legacyV1.utf8)) {
+        t.equal(doc.nodes.first(where: { $0.slot == 2 })?.kind, .slot,
+                "★★★CANVAS-KIND-4 schema 1 的 .image → .slot")
+        t.equal(doc.nodes.first(where: { $0.slot == 3 })?.kind, .video,
+                "★★CANVAS-KIND-5 .video 不迁（老视频节点本来就是显式选的视频）")
+        t.equal(doc.nodes.first(where: { $0.slot == 4 })?.kind, .text,
+                "★★CANVAS-KIND-6 .text 不迁")
+    } else {
+        t.check(false, "CANVAS-KIND-4 schema 1 文档解码失败")
+    }
+
+    // schema 2 之后：.image 是用户显式建的图片节点，必须原样保留。
+    let modern = """
+    {"schemaVersion":2,"nodes":[{"pageId":"p","groupId":"g","slot":5,"kind":"image","x":0,"y":0}]}
+    """
+    if let doc = try? JSONDecoder().decode(CanvasDocument.self, from: Data(modern.utf8)) {
+        t.equal(doc.nodes.first?.kind, .image,
+                "★★★CANVAS-KIND-7 schema ≥2 的 .image 必须保留为图片节点（再迁一次就把用户新建的媒体卡打回槽位卡了）")
+    } else {
+        t.check(false, "CANVAS-KIND-7 schema 2 文档解码失败")
+    }
+
+    // 默认 kind 与卡片形态。
+    let fresh = CanvasNode(pageId: "p", groupId: "g", slot: 1, x: 0, y: 0)
+    t.equal(fresh.kind, .slot,
+            "★★CANVAS-KIND-8 不指定 kind 建出来的是槽位节点（从槽位库拖上来走的就是这条路）")
+    t.equal(CanvasNodeKind.slot.cardForm, .slotStack, "CANVAS-KIND-9 .slot 用槽位堆叠卡形态")
+    t.equal(CanvasNodeKind.image.cardForm, .media, "CANVAS-KIND-10 .image 用媒体卡形态")
+    t.equal(CanvasNodeKind.video.cardForm, .media, "CANVAS-KIND-11 .video 用媒体卡形态")
+    t.equal(CanvasNodeKind.text.cardForm, .text, "CANVAS-KIND-12 .text 用文本卡形态")
+    t.check(CanvasNodeKind.image.isMediaNode && CanvasNodeKind.video.isMediaNode,
+            "CANVAS-KIND-13 图片/视频才是媒体节点")
+    t.check(!CanvasNodeKind.slot.isMediaNode && !CanvasNodeKind.text.isMediaNode,
+            "★★CANVAS-KIND-14 槽位/文本节点不是媒体节点（它们不能被路由到媒体卡，否则用户的槽位卡会消失）")
+    t.check(CanvasNodeKind.slot.producesAsset,
+            "★★CANVAS-KIND-15 槽位节点仍能出图（它继承的是 v2.14.x 的 .image 能力，少一样就是功能退化）")
+    t.equal(CanvasNode.defaultSize(for: .image), CanvasMediaCardLayout.defaultSize,
+            "CANVAS-KIND-16 媒体节点默认尺寸走媒体卡那张表")
+    t.equal(CanvasNode.defaultSize(for: .slot), CanvasNode.defaultSize,
+            "CANVAS-KIND-17 槽位节点默认尺寸不变（老画布与新建卡摆在一起不能大小不一）")
+}
+
+// MARK: - CANVAS-MEDIA：媒体信息格式化（v2.15.0）
+do {
+    t.equal(CanvasMediaInfo.sizeLabel(CGSize(width: 1024, height: 1024)), "1024×1024",
+            "CANVAS-MEDIA-1 尺寸用 × 连接")
+    t.check(CanvasMediaInfo.sizeLabel(CGSize(width: 0, height: 512)) == nil,
+            "★★CANVAS-MEDIA-2 非正尺寸返回 nil（「0×512」是「没读到」，不该当成信息显示）")
+
+    t.equal(CanvasMediaInfo.ratioLabel(CGSize(width: 1024, height: 1024)), "1:1",
+            "CANVAS-MEDIA-3 方形")
+    t.equal(CanvasMediaInfo.ratioLabel(CGSize(width: 1024, height: 576)), "16:9",
+            "CANVAS-MEDIA-4 标准 16:9")
+    t.equal(CanvasMediaInfo.ratioLabel(CGSize(width: 576, height: 1024)), "9:16",
+            "★★CANVAS-MEDIA-5 竖版要贴到 9:16（档位表必须成对，否则竖图退化成小数）")
+    t.equal(CanvasMediaInfo.ratioLabel(CGSize(width: 1360, height: 768)), "16:9",
+            "★★★CANVAS-MEDIA-6 1360×768 贴档 16:9（老实约分是 85:48，技术正确、对人无用）")
+    t.equal(CanvasMediaInfo.ratioLabel(CGSize(width: 1024, height: 768)), "4:3",
+            "CANVAS-MEDIA-7 4:3")
+    t.equal(CanvasMediaInfo.ratioLabel(CGSize(width: 1000, height: 3)), "333.33:1",
+            "★★CANVAS-MEDIA-8 贴不上、约分项又过大时退成小数写法（1000:3 约分不了，85:48 那类才是要躲开的）")
+    t.equal(CanvasMediaInfo.ratioLabel(CGSize(width: 2000, height: 1000)), "2:1",
+            "CANVAS-MEDIA-8b 整数倍关系走档位表")
+    t.check(CanvasMediaInfo.ratioLabel(CGSize(width: 100, height: 0)) == nil,
+            "CANVAS-MEDIA-9 零高返回 nil")
+
+    t.equal(CanvasMediaInfo.durationLabel(8), "0:08", "CANVAS-MEDIA-10 8 秒写成 0:08")
+    t.equal(CanvasMediaInfo.durationLabel(65), "1:05", "CANVAS-MEDIA-11 65 秒写成 1:05")
+    t.equal(CanvasMediaInfo.durationLabel(3723), "1:02:03", "CANVAS-MEDIA-12 超过一小时带小时段")
+    t.check(CanvasMediaInfo.durationLabel(-1) == nil,
+            "★★CANVAS-MEDIA-13 负数返回 nil（显示 0:00 会被读成「这是个零长视频」）")
+    t.check(CanvasMediaInfo.durationLabel(Double.nan) == nil, "CANVAS-MEDIA-14 NaN 返回 nil")
+
+    t.equal(CanvasMediaInfo.byteLabel(912), "912 B", "CANVAS-MEDIA-15 不足 1KB 用 B")
+    t.equal(CanvasMediaInfo.byteLabel(1024 * 912), "912 KB", "CANVAS-MEDIA-16 KB")
+    t.equal(CanvasMediaInfo.byteLabel(Int64(2.4 * 1024 * 1024)), "2.4 MB",
+            "★★CANVAS-MEDIA-17 固定 1024 进制（不跟系统设置走，否则同一文件在两台机上显示不同）")
+    t.equal(CanvasMediaInfo.byteLabel(Int64(24.3 * 1024 * 1024)), "24 MB",
+            "CANVAS-MEDIA-18 ≥10 取整")
+    t.check(CanvasMediaInfo.byteLabel(0) == nil, "CANVAS-MEDIA-19 零字节返回 nil")
+
+    t.equal(CanvasMediaInfo.formatLabel(fileName: "a.png"), "PNG", "CANVAS-MEDIA-20 后缀转大写")
+    t.check(CanvasMediaInfo.formatLabel(fileName: "noext") == nil, "CANVAS-MEDIA-21 无后缀返回 nil")
+
+    t.equal(CanvasMediaInfo.badgeLine(["1024×1024", nil, "  ", "PNG"]), "1024×1024 · PNG",
+            "★★★CANVAS-MEDIA-22 空片段必须在这里被滤掉（否则屏幕上出现「1024×1024 ·  · PNG」的空档）")
+    t.equal(CanvasMediaInfo.badgeLine([nil, nil]), "", "CANVAS-MEDIA-23 全空得空串")
+
+    t.equal(CanvasMediaInfo.size(fromRatioString: "9:16"), CGSize(width: 9, height: 16),
+            "★★CANVAS-MEDIA-24 比例串要能解析（空态占位框靠它按用户选的比例画）")
+    t.check(CanvasMediaInfo.size(fromRatioString: "auto") == nil, "CANVAS-MEDIA-25 非法比例串返回 nil")
+    t.check(CanvasMediaInfo.size(fromRatioString: "16:0") == nil, "CANVAS-MEDIA-26 零分母返回 nil")
+}
+
+// MARK: - CANVAS-MCARD：媒体卡纵向预算（v2.15.0）
+do {
+    let h: CGFloat = 16
+    let p: CGFloat = 9
+
+    // 方案 1：默认尺寸下三段齐全。
+    let roomy = CanvasMediaCardLayout.plan(availableHeight: 300, renderScale: 1,
+                                           headerFontSize: h, promptFontSize: p)
+    t.check(roomy.showHeader && roomy.showPrompt && roomy.fitsText,
+            "CANVAS-MCARD-1 默认高度下三段齐全")
+    t.check(roomy.mediaHeight >= CanvasMediaCardLayout.mediaMinHeight,
+            "CANVAS-MCARD-2 媒体区不低于地板")
+    let sum1 = roomy.headerHeight + roomy.mediaHeight + roomy.promptHeight + 2 * roomy.spacing
+    t.check(abs(sum1 - 300) < 0.01,
+            "★★★CANVAS-MCARD-3 三段+间距之和必须恰好等于可用高度（取 .infinity 会让区块互相压住——v2.11.8 修了九轮的那个 bug）")
+
+    // 方案 2：先砍提示词条，媒体区保命。
+    var cut: CanvasMediaCardLayout.Plan? = nil
+    for total in stride(from: CGFloat(120), through: 40, by: -2) {
+        let plan = CanvasMediaCardLayout.plan(availableHeight: total, renderScale: 1,
+                                              headerFontSize: h, promptFontSize: p)
+        if !plan.showPrompt && plan.showHeader { cut = plan; break }
+    }
+    t.check(cut != nil,
+            "★★★CANVAS-MCARD-4 高度收紧时必须存在「砍提示词、留媒体+路径」这一档（让位顺序与通用卡相反，是媒体卡存在的理由）")
+    if let cut {
+        t.equal(cut.promptHeight, 0, "CANVAS-MCARD-5 砍掉的那段预算必须归零，不能留空白")
+        t.check(abs(cut.headerHeight + cut.mediaHeight + cut.spacing
+                    - (cut.headerHeight + cut.mediaHeight + cut.spacing)) < 0.01,
+                "CANVAS-MCARD-6 两段预算自洽")
+    }
+
+    // 方案 3：极矮容器 → 媒体独占、文字全隐。
+    let tiny = CanvasMediaCardLayout.plan(availableHeight: 24, renderScale: 1,
+                                          headerFontSize: h, promptFontSize: p)
+    t.check(!tiny.showHeader && !tiny.showPrompt && !tiny.fitsText,
+            "★★CANVAS-MCARD-7 极矮时文字整体隐藏（留半行被切掉的字比不画更糟）")
+    t.equal(tiny.mediaHeight, 24, "★★CANVAS-MCARD-8 媒体独占全部高度")
+    t.equal(tiny.spacing, 0, "CANVAS-MCARD-9 独占时没有间距可言")
+
+    // 高缩放下间距也要被夹住。
+    let zoomed = CanvasMediaCardLayout.plan(availableHeight: 20, renderScale: 2,
+                                            headerFontSize: h, promptFontSize: p)
+    t.check(zoomed.spacing <= 20 / 4 + 0.01,
+            "★★CANVAS-MCARD-10 间距被容器夹住（rs=2 时 rowSpacing×rs=10pt 会超过 8pt 的可用高度）")
+    t.check(zoomed.mediaHeight >= 0, "CANVAS-MCARD-11 媒体高度不能为负")
+
+    // aspect-fit。
+    t.equal(CanvasMediaCardLayout.fittedSize(content: CGSize(width: 100, height: 50),
+                                             in: CGSize(width: 200, height: 200)),
+            CGSize(width: 200, height: 100),
+            "CANVAS-MCARD-12 横图按宽度铺满")
+    t.equal(CanvasMediaCardLayout.fittedSize(content: CGSize(width: 50, height: 100),
+                                             in: CGSize(width: 200, height: 200)),
+            CGSize(width: 100, height: 200),
+            "CANVAS-MCARD-13 竖图按高度铺满")
+    t.equal(CanvasMediaCardLayout.fittedSize(content: CGSize(width: 9, height: 16),
+                                             in: CGSize(width: 240, height: 120)),
+            CGSize(width: 67.5, height: 120),
+            "★★CANVAS-MCARD-14 空态占位框按 ratio 算（选了 9:16 却看到横框会被读成「参数没生效」）")
+    t.equal(CanvasMediaCardLayout.fittedSize(content: .zero, in: CGSize(width: 10, height: 10)),
+            .zero,
+            "★★CANVAS-MCARD-15 量不到内容尺寸时返回 .zero（画一个瞎猜的框比不画更误导）")
+}
+
 t.report()

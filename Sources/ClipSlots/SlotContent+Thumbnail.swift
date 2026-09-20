@@ -52,6 +52,16 @@ enum ClipSlotsImageIO {
         return pixelSize(source: source)
     }
 
+    /// Same, straight from a file URL (v2.15.0).
+    ///
+    /// 画布媒体节点的尺寸角标走这条：产物图躺在槽位目录里，先 `Data(contentsOf:)` 再读头部
+    /// 等于把整份字节（可能几十 MB）搬进内存只为读两个整数。`CGImageSourceCreateWithURL`
+    /// 是**惰性**的，只会 mmap 到文件头。
+    static func pixelSize(url: URL) -> CGSize? {
+        guard let source = CGImageSourceCreateWithURL(url as CFURL, nil) else { return nil }
+        return pixelSize(source: source)
+    }
+
     private static func pixelSize(source: CGImageSource) -> CGSize? {
         guard let props = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
               let w = (props[kCGImagePropertyPixelWidth] as? NSNumber)?.doubleValue,

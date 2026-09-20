@@ -428,7 +428,27 @@ struct CanvasNodeCardView: View {
             .padding(.horizontal, s(24))
             .frame(maxWidth: .infinity, alignment: .center)
             .overlay(alignment: .leading) { statusBadge }
+            // ★ v2.15.0：文本节点右上角挂字数。
+            // 媒体节点的"尺寸 · 比例 · 时长 · 体积"角标画在媒体区上，文本节点没有媒体区，
+            // 而"这段有多长"是它唯一等价的量级信息 —— 25% 缩放下不用点开就能判断哪张是长文。
+            .overlay(alignment: .trailing) { textCountBadge }
             .help(pathLabel)
+    }
+
+    /// 字数角标（仅文本节点、且有字时）。
+    ///
+    /// 用 `count` 而不是按词切分：内容以中文为主，词数对中文没有意义，而字数与"卡片里能看到多少"
+    /// 直接相关。空文本不显示 "0 字" —— 那一格此刻正显示着"点这里写文本…"，再补一句 0 是噪声。
+    @ViewBuilder
+    private var textCountBadge: some View {
+        if isTextNode, !text.isEmpty {
+            Text("\(text.count) 字")
+                .font(.system(size: fs(8.5), weight: .medium))
+                .foregroundColor(AppTheme.canvasCardMetaInk.opacity(0.75))
+                .canvasStableLabel()
+                .canvasScreenFixedText(textCounter, anchor: .trailing)
+                .opacity(textOpacity)
+        }
     }
 
     /// 状态角标。
@@ -902,7 +922,10 @@ struct CanvasNodeCardView: View {
 // MARK: - 生成中角标
 
 /// 已用秒数会自己走字。用独立小视图承载 `TimelineView`，避免每秒重绘整张卡片。
-private struct RunningBadge: View {
+/// ★ v2.15.0：从 `private` 放开到模块可见 —— 媒体节点卡（`CanvasMediaNodeCard`）是另一个文件里的
+/// 独立视图，但"生成中 N 秒"这个角标必须和通用卡长得一模一样。抄一份的代价不是重复代码，
+/// 而是两张卡在同一次生成里显示出不同的秒数格式 / 不同的转圈大小，用户会以为是两种不同的状态。
+struct RunningBadge: View {
     let startedAt: Date
     var renderScale: CGFloat = 1
     /// ★ 八轮：文字反向缩放，见 `CanvasZoomLayout.textCounterScale`。

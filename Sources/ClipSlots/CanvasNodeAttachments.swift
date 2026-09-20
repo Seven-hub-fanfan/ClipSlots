@@ -155,6 +155,12 @@ struct CanvasAttachmentPreviewImage: View {
     let attachment: SlotContent.SlotAttachment
     /// 解码上限（像素）。预览区在 1x 下约 236×148，取 480 兼顾 Retina 与放大后的清晰度。
     var maxPixel: CGFloat = 480
+    /// 填充模式（v2.15.0）。
+    ///
+    /// 默认 `.fill` 是槽位卡堆叠预览的需求：那里的卡片是**固定尺寸的小卡**，留白会让一叠卡片
+    /// 显得参差不齐。媒体节点相反 —— 它要传达"这张图是什么形状"，裁掉边缘就是在骗人（用户还会
+    /// 对着旁边的 `9:16` 角标怀疑角标错了）。所以媒体卡显式传 `.fit`。
+    var contentMode: ContentMode = .fill
 
     @State private var image: NSImage?
     /// 当前 `image` 属于哪个附件。★ 七轮：防"迟到的异步回调把上一张图贴到已经换了内容的卡片上"。
@@ -172,7 +178,7 @@ struct CanvasAttachmentPreviewImage: View {
             if let image, shownId == attachment.id {
                 Image(nsImage: image)
                     .resizable()
-                    .aspectRatio(contentMode: .fill)
+                    .aspectRatio(contentMode: contentMode)
             } else if CanvasAttachmentThumbnails.isKnownMiss(attachment, maxPixel: maxPixel) {
                 Image(systemName: attachment.canvasFallbackSymbol)
                     .font(.system(size: 20, weight: .light))

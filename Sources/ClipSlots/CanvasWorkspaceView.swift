@@ -93,6 +93,11 @@ struct CanvasWorkspaceView: View {
     @State var editingNodeId: String? = nil
     /// 正在管理「入参文件」的节点 id。见 `openInputFiles(_:)` 说明为何弹层不挂在卡片里。
     @State var inputFilesNodeId: String? = nil
+    /// 正在全屏预览的媒体（v2.15.0）。nil = 没在预览。
+    ///
+    /// 住在 View 而不是 `CanvasStore`：它是纯粹的**观看态**，既不进撤销栈也不该被持久化
+    /// （下次进画布还停在一张全屏图上是莫名其妙的）。
+    @State private var previewTarget: CanvasPreviewTarget? = nil
     /// 「删了会断开连接」的确认弹窗（★ v2.11.8 三轮）。非 nil = 正在等用户拍板。
     ///
     /// 存一份**待删 id 集合**而不是只存个 Bool：弹窗弹出后用户可能改动选中集合（点了别处），
@@ -172,6 +177,8 @@ struct CanvasWorkspaceView: View {
                 linkDragOverlay
 
                 outputPortOverlay
+                // v2.15.0：入口端口。与出口把手同层（节点之上），静态只画一枚、拖线时画全部合法落点。
+                inputPortOverlay
 
                 actionBarOverlay
 
@@ -185,6 +192,11 @@ struct CanvasWorkspaceView: View {
 
                 // ADD NODE 菜单压在最上层：它是模态性质的浮层，被任何东西盖住都会变成"点了没反应"。
                 addNodeMenuOverlay(size: proxy.size)
+
+                // 全屏预览比 ADD NODE 菜单还高一层：它是**全屏模态**，预览期间下面的一切都不该
+                // 能被点到（包括那个菜单）。铺满整个 proxy 而不是只铺画布区 —— 侧边槽位库面板
+                // 也必须被盖住，否则"全屏"这个词就名不副实。
+                fullscreenPreviewOverlay
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .background(AppTheme.windowBackground)
@@ -360,6 +372,175 @@ struct CanvasWorkspaceView: View {
         canvas.clearSelection()
     }
 
+    // MARK: - 全屏预览（v2.15.0）
+
+    @ViewBuilder
+    private var fullscreenPreviewOverlay: some View {
+        if let target = previewTarget {
+            CanvasFullscreenPreview(target: target,
+                                    onClose: { previewTarget = nil },
+                                    onArchive: { archiveFromPreview(target) })
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .zIndex(900)
+        }
+    }
+
+    /// 打开全屏预览。
+    ///
+    /// 顺手把节点选中：关掉浮层后用户通常紧接着要对这个节点做事（重跑 / 入库 / 连线），
+    /// 而"我刚才看的是哪个"在一屏几十个节点里并不显然。
+    func openFullscreen(_ node: CanvasNode, attachment: SlotContent.SlotAttachment) {
+        canvas.select(id: node.id, additive: false)
+        previewTarget = CanvasPreviewTarget(nodeId: node.id,
+                                           attachment: attachment,
+                                           pathLabel: pathLabel(for: node),
+                                           canArchive: canArchiveToLibrary(node))
+    }
+
+    /// 这个节点有没有"能全屏看"的东西 —— 有则返回该展示哪一份。
+    ///
+    /// 不按 `kind` 卡门槛：槽位节点（`.slot`）里躺着一张生成好的图是最常见的情形，而用户这一轮的
+    /// 诉求是"全屏显示图片和视频"，不是"只有图片节点才能全屏"。文本节点自然返回 nil，操作条上的
+    /// 全屏按钮也就跟着消失。
+    ///
+    /// 挑选逻辑委托给 `CanvasMediaPick`，与媒体卡**画在脸上的那张图**共用一套规则 —— 否则会出现
+    /// "卡片显示产物、点全屏弹出参考图"。
+    func previewableMedia(of node: CanvasNode) -> SlotContent.SlotAttachment? {
+        CanvasMediaPick.primary(node: node, attachments: liveAttachments(for: node))
+    }
+
+    /// 全屏态里点「入库」。
+    ///
+    /// 入库会把节点重新绑到正式槽位（`node.groupId/slot` 变），于是 `previewTarget.nodeId`
+    /// 立刻失效 —— 所以先关浮层再入库，而不是入库后留着一个指向旧 id 的浮层。
+    private func archiveFromPreview(_ target: CanvasPreviewTarget) {
+        guard let node = canvas.nodes.first(where: { $0.id == target.nodeId }) else {
+            previewTarget = nil
+            return
+        }
+        previewTarget = nil
+        archiveNodeToLibrary(node)
+    }
+
+    // MARK: - 入库（v2.15.0）
+
+    /// 这个节点还能不能入库。
+    ///
+    /// 已经在正式槽位组里的节点返回 false：它**本来就在槽位库里**，再"入库"一次没有任何语义。
+    /// 想换组换槽仍然可以拖到左侧面板的目标槽位上（那条路一直都在）。
+    func canArchiveToLibrary(_ node: CanvasNode) -> Bool {
+        SpecialSlotStorage.isReservedGroupId(node.groupId)
+    }
+
+    /// 一键入库：把「未入库」节点的内容搬进**当前槽位组**的第一个空槽。
+    ///
+    /// ## 为什么要有这个按钮（拖拽不是已经能做了吗）
+    ///
+    /// v2.11.8 起确实可以把节点拖到左侧槽位库的目标槽位上归档。但那条路有两个前提：用户得知道
+    /// 左侧面板能当放置目标，而且得自己挑一个空槽。用户这一轮的要求是"所有节点都兼容入库"——
+    /// 一个**可发现的**动作，而不是一个需要被告知的手势。所以按钮替用户挑槽位，拖拽继续保留给
+    /// "我要精确放到第 7 格"的场合。
+    ///
+    /// ## 为什么是"当前组"而不是弹个选择器
+    ///
+    /// 画布左侧面板此刻就显示着当前组（以及它的空槽），入库结果所在的位置对用户是**可见的**。
+    /// 弹选择器意味着每次入库都要做一次决策，而绝大多数时候答案就是"随便，先存下来"。
+    /// 当前组满了再如实提示 —— 这时候用户确实需要做决定（换组或清空一个槽）。
+    func archiveNodeToLibrary(_ node: CanvasNode) {
+        guard canArchiveToLibrary(node) else {
+            store.transientUI.showToast("这个节点已经在槽位库里了")
+            return
+        }
+        let targetGroup = store.currentSpecialSlotId
+        guard !SpecialSlotStorage.isReservedGroupId(targetGroup) else {
+            // 理论上进不来（保留组不会成为 currentSpecialSlotId），但真进来了也不能把内容
+            // 从一个私有组搬到另一个私有组 —— 那看起来"成功了"，实际还是没入库。
+            store.transientUI.showToast("当前没有可入库的槽位组")
+            return
+        }
+        // 画布上已被别的节点占住的槽位号也要跳过：那些槽位此刻可能是空的（节点还没写内容），
+        // 但一旦入库到那里，两个节点就指向同一个槽位，`CanvasNode.id` 撞车。
+        let taken = Set(canvas.nodes.filter { $0.groupId == targetGroup }.map(\.slot))
+        let free = (1...10).first { slot in
+            !taken.contains(slot) && store.canvasSlotIsFree(groupId: targetGroup, slot: slot)
+        }
+        guard let slot = free else {
+            let name = store.specialSlots.first { $0.id == targetGroup }?.name ?? "当前槽位组"
+            store.transientUI.showToast("「\(name)」没有空槽位了，换个组或先腾一个")
+            return
+        }
+        archiveNode(node, toSlot: slot)
+    }
+
+    // MARK: - 节点卡片分派（v2.15.0）
+
+    /// 按 `kind.cardForm` 选卡片。
+    ///
+    /// ## 为什么分派在这里而不是在卡片内部
+    ///
+    /// 媒体卡（`CanvasMediaNodeCard`）多了一条通用卡没有的出口：**全屏预览**。全屏层的状态
+    /// （`previewTarget`）住在本视图里，因为它要盖在整个工作区之上、还要能被 `Esc` 关掉 ——
+    /// 这些都不是一张卡片能负责的。若把分派藏进 `CanvasNodeCardView`，那个回调就得穿透一层
+    /// 只为了转交，而通用卡自己永远不会用到它。
+    ///
+    /// 顺带的好处：`CanvasNodeCardView` 从此不再需要知道"媒体节点长什么样"，它的
+    /// `imageNodeStack` 重新变成名副其实的"槽位卡"。
+    @ViewBuilder
+    private func nodeCard(_ node: CanvasNode, isEditing: Bool) -> some View {
+        if node.kind.isMediaNode {
+            CanvasMediaNodeCard(node: node,
+                                isSelected: canvas.selectedNodeIds.contains(node.id),
+                                isEditing: isEditing,
+                                text: liveText(for: node),
+                                pathLabel: pathLabel(for: node),
+                                attachments: liveAttachments(for: node),
+                                renderScale: layoutZoom,
+                                textCounter: textCounter,
+                                viewZoom: zoom,
+                                isHoverHeld: hoverHoldNodeId == node.id,
+                                onHoverChanged: { noteNodeHover(node, hovering: $0) },
+                                onBeginEdit: { beginEdit(node) },
+                                onCommitEdit: { commitEdit(node, text: $0) },
+                                onCancelEdit: { editingNodeId = nil },
+                                onOpenInputFiles: { openInputFiles(node) },
+                                onOpenFullscreen: { openFullscreen(node, attachment: $0) },
+                                onActivateNode: {
+                                    guard editingNodeId != node.id else { return }
+                                    canvas.select(id: node.id,
+                                                  additive: NSEvent.modifierFlags.contains(.shift))
+                                })
+        } else {
+            CanvasNodeCardView(node: node,
+                               isSelected: canvas.selectedNodeIds.contains(node.id),
+                               text: liveText(for: node),
+                               pathLabel: pathLabel(for: node),
+                               attachments: liveAttachments(for: node),
+                               // ★★ v2.11.13：常量基准。卡片内部排版只算这一次，
+                               // 之后 zoom 怎么变都只走下面那句 `scaleEffect`。
+                               renderScale: layoutZoom,
+                               // 恒为 1（`textCounterScale` 已退休），留着调用点便于查证。
+                               textCounter: textCounter,
+                               // 真实缩放：只用于"要不要写字"的判定。
+                               viewZoom: zoom,
+                               isEditing: isEditing,
+                               onBeginEdit: { beginEdit(node) },
+                               onCommitEdit: { commitEdit(node, text: $0) },
+                               onCancelEdit: { editingNodeId = nil },
+                               onOpenInputFiles: { openInputFiles(node) },
+                               onPromoteInput: { promoteInput(node, index: $0) },
+                               onDeleteInput: { deleteInput(node, index: $0) },
+                               // ★ 六轮：卡片命中层独占点击后由它补选中（Shift 加选与祖先那条一致）。
+                               onActivateNode: {
+                                   guard editingNodeId != node.id else { return }
+                                   canvas.select(id: node.id,
+                                                 additive: NSEvent.modifierFlags.contains(.shift))
+                               },
+                               onToast: { store.transientUI.showToast($0) },
+                               isHoverHeld: hoverHoldNodeId == node.id,
+                               onHoverChanged: { noteNodeHover(node, hovering: $0) })
+        }
+    }
+
     // MARK: - 节点层
 
     private var nodeLayer: some View {
@@ -367,34 +548,7 @@ struct CanvasWorkspaceView: View {
             ForEach(canvas.nodes) { node in
                 let isDragging = draggingIds.contains(node.id)
                 let isEditing = editingNodeId == node.id
-                CanvasNodeCardView(node: node,
-                                   isSelected: canvas.selectedNodeIds.contains(node.id),
-                                   text: liveText(for: node),
-                                   pathLabel: pathLabel(for: node),
-                                   attachments: liveAttachments(for: node),
-                                   // ★★ v2.11.13：常量基准。卡片内部排版只算这一次，
-                                   // 之后 zoom 怎么变都只走下面那句 `scaleEffect`。
-                                   renderScale: layoutZoom,
-                                   // 恒为 1（`textCounterScale` 已退休），留着调用点便于查证。
-                                   textCounter: textCounter,
-                                   // 真实缩放：只用于"要不要写字"的判定。
-                                   viewZoom: zoom,
-                                   isEditing: isEditing,
-                                   onBeginEdit: { beginEdit(node) },
-                                   onCommitEdit: { commitEdit(node, text: $0) },
-                                   onCancelEdit: { editingNodeId = nil },
-                                   onOpenInputFiles: { openInputFiles(node) },
-                                   onPromoteInput: { promoteInput(node, index: $0) },
-                                   onDeleteInput: { deleteInput(node, index: $0) },
-                                   // ★ 六轮：卡片命中层独占点击后由它补选中（Shift 加选与祖先那条一致）。
-                                   onActivateNode: {
-                                       guard editingNodeId != node.id else { return }
-                                       canvas.select(id: node.id,
-                                                     additive: NSEvent.modifierFlags.contains(.shift))
-                                   },
-                                   onToast: { store.transientUI.showToast($0) },
-                                   isHoverHeld: hoverHoldNodeId == node.id,
-                                   onHoverChanged: { noteNodeHover(node, hovering: $0) })
+                nodeCard(node, isEditing: isEditing)
                     // ★ 三轮：缩放过程中的「文字跳舞」修复 —— 排版用 `layoutZoom`，缩放差值用变换补。
                     //
                     // 症状（用户录屏）：缩放时节点里的文字一帧一个换行位置，整块文字在抖。
@@ -980,10 +1134,10 @@ struct CanvasWorkspaceView: View {
         case .video:
             createNode(kind: .video, at: request.canvasPoint, parentNodeId: request.parentNodeId, beginEditing: false)
         case .slot:
-            // 「从已有槽位创建」不能凭空挑一个槽位塞上来 —— 哪个槽位只有用户知道。
-            // 所以这一项的语义是**把选择器打开**：展开左侧槽位库，用户拖或按 Cmd+N 都行。
-            withAnimation(Anim.transition) { canvas.isLibraryExpanded = true }
-            store.transientUI.showToast("从左侧槽位库拖一个槽位到画布，或按 Cmd+1~0")
+            // ★ v2.15.0：直接建一张空槽位卡，不再只是"展开左侧槽位库+弹提示"。
+            // 不进编辑态：槽位卡的下一步动作不确定（写提示词 / 拖文件 / 连线），
+            // 抢焦点到提示词框会让"拖一张图进来"多一次 Esc。
+            createNode(kind: .slot, at: request.canvasPoint, parentNodeId: request.parentNodeId, beginEditing: false)
         }
     }
 
@@ -1441,7 +1595,8 @@ struct CanvasWorkspaceView: View {
     ///
     /// hotfix20 起这里不再有"读不到就回落节点副本"的分支：节点结构里已经没有 `prompt` 字段了。
     /// 槽位被清空时如实显示为空 —— 回落旧副本等于把已删除的内容又变出来。
-    private func liveText(for node: CanvasNode) -> String {
+    // internal（非 private）：`CanvasWorkspaceView+Edges` 的「复制全文」也要读它。
+    func liveText(for node: CanvasNode) -> String {
         store.canvasSlotText(groupId: node.groupId, slot: node.slot) ?? ""
     }
 

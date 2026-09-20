@@ -242,7 +242,9 @@ final class CanvasStore: ObservableObject {
                    slot: Int,
                    name: String,
                    at canvasPoint: CGPoint,
-                   kind: CanvasNodeKind = .image,
+                   // ★ v2.15.0：默认槽位节点。从左侧槽位库拖上来 / 「摆到画布」按钮走的都是这条路，
+                   // 它们摆的就是"已有槽位的展台"，不是图片生成节点（理由见 `CanvasNodeKind.slot`）。
+                   kind: CanvasNodeKind = .slot,
                    parentNodeId: String? = nil,
                    avoidOverlap: Bool = false) -> CanvasSlotPlacement {
         let id = CanvasNode.makeId(groupId: groupId, slot: slot)
@@ -250,7 +252,7 @@ final class CanvasStore: ObservableObject {
             selectedNodeIds = [existing.id]
             return .alreadyPlaced(node: existing, name: name)
         }
-        let size = CanvasNode.defaultSize
+        let size = CanvasNode.defaultSize(for: kind)
         // 落点即节点中心，符合「拖到哪儿就放哪儿」的直觉。
         var origin = CanvasSpawnGeometry.origin(forCenter: canvasPoint, size: size)
         if avoidOverlap {
@@ -269,6 +271,8 @@ final class CanvasStore: ObservableObject {
                               kind: kind,
                               x: snapped.x,
                               y: snapped.y,
+                              width: size.width,
+                              height: size.height,
                               model: CanvasNode.defaultModel(for: kind),
                               ratio: CanvasNode.defaultRatio(for: kind),
                               parentNodeId: parentNodeId)

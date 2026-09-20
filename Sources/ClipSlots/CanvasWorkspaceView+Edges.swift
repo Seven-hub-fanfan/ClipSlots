@@ -49,6 +49,7 @@ extension CanvasWorkspaceView {
             CanvasEdgeLayer(edges: canvas.edges,
                             frames: nodeScreenFrames,
                             selectedEdgeId: canvas.selectedEdgeId,
+                            isFlowing: { edgeIsFlowing($0) },
                             roleOptions: { roleOptions(for: $0) },
                             onSelect: { id in
                                 // 顺序要紧：`clearSelection` 会把连线选中一起清掉（两种选中互斥），
@@ -58,6 +59,17 @@ extension CanvasWorkspaceView {
                             },
                             onSetRole: { id, role in canvas.setEdgeRole(edgeId: id, role: role) },
                             onDisconnect: { id in disconnectEdge(id) })
+        }
+    }
+
+    /// 这条线此刻是否在"输送"（v2.15.0）：下游节点排队中或生成中。
+    ///
+    /// 判定放在**下游**而不是上游：一条线的意义是"上游的内容作为下游的输入"，真正在耗时的是下游
+    /// 那次生成。上游跑完早已落盘，它自己的忙碌与这条线无关。
+    func edgeIsFlowing(_ edge: CanvasEdge) -> Bool {
+        switch canvas.node(id: edge.toNodeId)?.state {
+        case .queued, .running: return true
+        default: return false
         }
     }
 
@@ -100,6 +112,52 @@ extension CanvasWorkspaceView {
                 .position(x: anchor.x + 9, y: anchor.y)
                 .gesture(linkDragGesture(from: node))
                 .zIndex(20)
+        }
+    }
+
+    /// 入口端口层（v2.15.0）。
+    ///
+    /// 两种时机画：
+    /// - **静态**：只给当前交互节点画一枚（与出口把手成对出现）。给所有节点都画会让画布变成一片
+    ///   小圆点 —— 这正是 `outputPortOverlay` 当初拒绝全量绘制的理由。
+    /// - **拖线中**：给所有**合法落点**都画。这一刻用户要的恰恰是"我能往哪儿落"，一片小圆点在此
+    ///   不是噪声而是答案；非法目标（重复 / 成环 / 自己）不画，于是"没圆点的卡就是连不上的卡"。
+    @ViewBuilder
+    var inputPortOverlay: some View {
+        if let drag = linkDrag {
+            ForEach(linkCandidates(from: drag.fromNodeId), id: \.id) { node in
+                let rect = screenFrame(of: node)
+                let anchor = CanvasEdgeGeometry.inputHandle(of: rect)
+                CanvasInputPort(incomingCount: canvas.incomingEdges(of: node.id).count,
+                                isTargeted: drag.targetNodeId == node.id)
+                    .position(x: anchor.x - 8, y: anchor.y)
+                    .allowsHitTesting(false)
+                    .zIndex(20)
+            }
+        } else if let node = interactionNode,
+                  editingNodeId == nil,
+                  addMenu == nil,
+                  draggingNodeId == nil,
+                  inputFilesNodeId == nil {
+            let rect = screenFrame(of: node)
+            let anchor = CanvasEdgeGeometry.inputHandle(of: rect)
+            CanvasInputPort(incomingCount: canvas.incomingEdges(of: node.id).count,
+                            isTargeted: false)
+                .position(x: anchor.x - 8, y: anchor.y)
+                .allowsHitTesting(false)
+                .zIndex(20)
+        }
+    }
+
+    /// 从某个节点出发，此刻能连到哪些节点。
+    ///
+    /// 复用 `CanvasEdgeGraph.canConnect` 而不是自己判重 / 判环：落点高亮与真正的连接必须同一个
+    /// 判据，否则会出现"圆点亮着、松手却弹「连不上」"。
+    func linkCandidates(from sourceId: String) -> [CanvasNode] {
+        let ids = Set(canvas.nodes.map(\.id))
+        return canvas.nodes.filter { node in
+            node.id != sourceId
+                && CanvasEdgeGraph.canConnect(from: sourceId, to: node.id, edges: canvas.edges, nodeIds: ids) == nil
         }
     }
 
@@ -213,12 +271,34 @@ extension CanvasWorkspaceView {
                                 upstreamCount: canvas.incomingEdges(of: node.id).count,
                                 onRun: { startGeneration(node, reusingSeed: false) },
                                 onSpawnDownstream: { spawnDownstream(from: node) },
-                                onRevealAsset: { revealAsset($0) })
+                                onRevealAsset: { revealAsset($0) },
+                                canArchive: canArchiveToLibrary(node),
+                                onArchive: { archiveNodeToLibrary(node) },
+                                onOpenFullscreen: previewableMedia(of: node).map { media in
+                                    { openFullscreen(node, attachment: media) }
+                                },
+                                onCopyText: copyTextAction(for: node))
                 .fixedSize()
                 // 贴在卡片上边缘外侧。靠上没地方了就翻到下边缘 —— 顶到视口外的操作条等于没有，
                 // 而这一条正是"节点即执行单元"的落点，不能因为卡片拖到顶部就消失。
                 .position(x: rect.midX, y: actionBarY(for: rect))
                 .zIndex(18)
+        }
+    }
+
+    /// 文本节点的「复制全文」动作；非文本节点或空文本返回 nil（按钮随之消失）。
+    ///
+    /// 走剪贴板而不是"导出成文件"：文本节点的下游几乎总是另一个输入框（另一个节点的提示词、
+    /// 聊天窗口、代码编辑器），而 Cmd+V 是那条路上唯一不需要解释的动作。
+    func copyTextAction(for node: CanvasNode) -> (() -> Void)? {
+        guard node.kind == .text else { return nil }
+        let content = liveText(for: node)
+        guard !content.isEmpty else { return nil }
+        return {
+            let pb = NSPasteboard.general
+            pb.clearContents()
+            pb.setString(content, forType: .string)
+            store.transientUI.showToast("已复制全文（\(content.count) 字）")
         }
     }
 

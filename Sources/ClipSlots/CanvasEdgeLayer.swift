@@ -21,6 +21,11 @@ struct CanvasEdgeLayer: View {
     /// 节点 id → 它此刻的**屏幕矩形**（已含拖拽中的临时位移）。
     let frames: [String: CGRect]
     let selectedEdgeId: String?
+    /// 这条线此刻是否"正在被使用"——下游节点在排队 / 生成中（v2.15.0）。
+    ///
+    /// 用闭包而不是让本视图直接拿 `CanvasStore`：连线层是纯渲染层，它对节点状态的唯一需求就是
+    /// 这一个布尔值。把整个 store 塞进来会让它随任意节点的任意字段变化重绘整张网。
+    let isFlowing: (CanvasEdge) -> Bool
     /// 这条线的下游节点接受哪些角色（视频下游才有首帧 / 尾帧）。
     let roleOptions: (CanvasEdge) -> [CanvasEdgeRole]
     let onSelect: (String) -> Void
@@ -35,6 +40,7 @@ struct CanvasEdgeLayer: View {
                                         fromRect: from,
                                         toRect: to,
                                         isSelected: edge.id == selectedEdgeId,
+                                        isFlowing: isFlowing(edge),
                                         roleOptions: roleOptions(edge),
                                         onSelect: { onSelect(edge.id) },
                                         onSetRole: { onSetRole(edge.id, $0) },
@@ -53,12 +59,15 @@ private struct CanvasEdgeShapeView: View {
     let fromRect: CGRect
     let toRect: CGRect
     let isSelected: Bool
+    let isFlowing: Bool
     let roleOptions: [CanvasEdgeRole]
     let onSelect: () -> Void
     let onSetRole: (CanvasEdgeRole) -> Void
     let onDisconnect: () -> Void
 
     @State private var hovering = false
+    /// 流动虚线的相位。动的是 `dashPhase`，不是整条路径 —— 路径每帧重算会让曲线抖。
+    @State private var dashPhase: CGFloat = 0
 
     private var geometry: (start: CGPoint, c1: CGPoint, c2: CGPoint, end: CGPoint) {
         let sides = CanvasEdgeGeometry.sides(from: fromRect, to: toRect)
@@ -88,8 +97,33 @@ private struct CanvasEdgeShapeView: View {
                 .stroke(lineColor, style: StrokeStyle(lineWidth: lineWidth, lineCap: .round))
                 .allowsHitTesting(false)
 
+            // ★ v2.15.0：运行中流动虚线。
+            //
+            // 叠在实线**之上**而不是替换它：替换会让线在生成开始的那一刻"变细变虚"，看着像断开了；
+            // 叠加则是实线上跑过一串亮点，语义是"这条线上正有东西在走"。
+            if isFlowing {
+                CanvasEdgeCurve(start: g.start, c1: g.c1, c2: g.c2, end: g.end)
+                    .stroke(AppTheme.chromeAccentInk.opacity(0.95),
+                            style: StrokeStyle(lineWidth: lineWidth + 0.6,
+                                               lineCap: .round,
+                                               dash: [5, 9],
+                                               dashPhase: dashPhase))
+                    .allowsHitTesting(false)
+            }
+
             CanvasEdgeArrow(start: g.start, c1: g.c1, c2: g.c2, end: g.end)
                 .fill(lineColor)
+                .allowsHitTesting(false)
+
+            // ★ v2.15.0：起点端点圆。
+            //
+            // 末端已经有箭头，起点却是一条线"凭空长出来"——线贴着卡片边缘时分不清它是从这张卡出发、
+            // 还是只是路过被卡片压住了。一枚 6pt 的实心圆把"出发点"讲清楚，代价是零交互（不可点）。
+            Circle()
+                .fill(lineColor)
+                .frame(width: 6, height: 6)
+                .overlay(Circle().stroke(AppTheme.canvasChromeSurface, lineWidth: 1.2))
+                .position(x: g.start.x, y: g.start.y)
                 .allowsHitTesting(false)
 
             // 角色角标只在非自动态出现（`badgeText` 自己返回 nil 就不画）。刻意不按 hover 过滤：
@@ -118,6 +152,26 @@ private struct CanvasEdgeShapeView: View {
                         Label("断开连接", systemImage: "scissors")
                     }
                 }
+        }
+        // 只在流动态起动画，并且在停下时把相位**归零**：留着非零相位会让下一次开始流动时
+        // 虚线从半截处接上，看着像丢了一帧。
+        .onAppear { syncFlowAnimation() }
+        .onChange(of: isFlowing) { _ in syncFlowAnimation() }
+    }
+
+    /// 起 / 停流动动画。
+    ///
+    /// `repeatForever(autoreverses: false)` + 负向位移 = 虚线顺着线的方向（起点→终点）跑。
+    /// 正向会让它倒着跑，观感是"下游在往上游倒灌"。
+    private func syncFlowAnimation() {
+        guard isFlowing else {
+            withAnimation(.linear(duration: 0.12)) { dashPhase = 0 }
+            return
+        }
+        dashPhase = 0
+        withAnimation(.linear(duration: 0.85).repeatForever(autoreverses: false)) {
+            // 一个完整 dash 周期（5 + 9）：位移刚好一个周期时首尾无缝，不会在循环边界跳一下。
+            dashPhase = -14
         }
     }
 
@@ -222,6 +276,46 @@ struct CanvasLinkDragPreview: View {
 }
 
 // MARK: - 端口把手
+
+/// 节点左侧的**入口端口**（v2.15.0）。
+///
+/// ## 为什么以前没有、现在要加
+///
+/// v2.12.0 只画了出口把手：连线是"从右边拖出去"的单向动作，入口不需要被抓住。但用户这一轮明确
+/// 提到"节点间的连接显示"—— 缺口在于**静态时看不出一个节点能不能接东西**：线从别处飞来，落在
+/// 卡片左缘某处，而卡片上没有任何标记说"这里是入口"。拖线时更明显：候选目标只有整张卡在等着，
+/// 落点全凭猜。
+///
+/// 它刻意**不可拖动**（`allowsHitTesting(false)` 由调用方给）：入口是被连的一端，从入口反向拖出
+/// 一条线意味着要在这里再做一套"反向连接"语义，而那与出口把手完全重复。
+struct CanvasInputPort: View {
+    /// 已有几条上游连线。0 时画成空心（"能接但还没接"），>0 画成实心并写数字。
+    let incomingCount: Int
+    /// 是否正被拖线瞄准。
+    let isTargeted: Bool
+
+    var body: some View {
+        ZStack {
+            Circle()
+                .fill(isTargeted ? AppTheme.chromeAccentInk : AppTheme.canvasChromeSurface)
+            Circle()
+                .stroke(AppTheme.chromeAccentInk.opacity(isTargeted ? 1 : (incomingCount > 0 ? 0.85 : 0.45)),
+                        lineWidth: 1.4)
+            if incomingCount > 0 {
+                Text("\(min(incomingCount, 9))")
+                    .font(.system(size: 8, weight: .bold))
+                    .foregroundColor(isTargeted ? .white : AppTheme.chromeAccentInk)
+            } else if isTargeted {
+                Image(systemName: "plus")
+                    .font(.system(size: 7, weight: .black))
+                    .foregroundColor(.white)
+            }
+        }
+        .frame(width: 14, height: 14)
+        .shadow(color: Color.black.opacity(0.16), radius: 2, x: 0, y: 1)
+        .help(incomingCount > 0 ? "有 \(incomingCount) 条上游连线" : "可接收上游连线")
+    }
+}
 
 /// 节点右侧的「拖我连线」把手。
 ///

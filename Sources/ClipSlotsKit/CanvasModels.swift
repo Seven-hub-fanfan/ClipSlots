@@ -9,6 +9,25 @@ import CoreGraphics
 
 // MARK: - 节点类型
 
+/// 节点卡片的**形态**（v2.15.0）。
+///
+/// v2.14.x 之前 `CanvasNodeKind` 同时扛了两件事：「这个节点产出什么」和「这张卡片长什么样」。
+/// 两者在那时是一对一的，所以没人觉得别扭 —— 直到用户要求「图片 / 视频节点要像 TapNow 那样
+/// 媒体占满整张卡」，而**通用槽位卡片**（路径行 → 堆叠卡片 → 提示词 → 入参文件）必须原样保留。
+/// 这时 `.image` 一个 case 要同时表达两种完全不同的排版，只能靠视图里写 `if` ——
+/// 而卡片形态是有 smoke 断言盯着纵向预算的，靠 `if` 分叉等于把预算表复制一份。
+///
+/// 所以形态被抽成独立维度：`kind` 继续管语义（跑什么模型、要不要出图），`cardForm` 管排版。
+public enum CanvasNodeCardForm: Equatable {
+    /// 通用槽位卡：路径行 → 扇形堆叠卡片 → 提示词正文 → 入参文件行。
+    /// 这是 v2.11.8 至 v2.14.x 所有节点共用的那张卡（用户截图里的形态）。
+    case slotStack
+    /// 纯文本卡：路径行 → 深色文本框（占满）→ 入参文件行。
+    case text
+    /// 媒体卡（v2.15.0）：媒体铺满卡片 + 悬浮信息角标 + 底部单行提示词条。
+    case media
+}
+
 public enum CanvasNodeKind: String, Codable, Equatable {
     /// 纯文本 / Prompt 节点（v2.11.8）。自身不出图，是"给下游用的一段文字"。
     case text
@@ -18,6 +37,19 @@ public enum CanvasNodeKind: String, Codable, Equatable {
     case video
     /// 批量模版节点（自身不出图，是批量任务的母体）。
     case batchTemplate
+    /// 槽位节点（v2.15.0）。
+    ///
+    /// ## 它为什么是一个独立的 kind，而不是"就是 `.image`"
+    ///
+    /// 用户的原话是把现有这张卡「作为槽位节点」，然后让文本 / 图片 / 视频三种节点按 TapNow 的形态
+    /// 重做。也就是说，**现有形态从"所有节点的样子"降格成"其中一种节点的样子"**。如果不给它一个
+    /// 名字，就只能靠"绑在正式槽位组上的才算槽位节点"这类启发式去猜 —— 而节点一旦入库就会从
+    /// 私有组换到正式组，靠组名猜身份意味着**入库会改变卡片长相**，这是用户最不该遇到的惊喜。
+    ///
+    /// 语义上它是"通用格子"：既能装提示词跑出图，也能只当一份内容的展台。因此 `producesAsset`
+    /// 为 true、模型清单走图像档 —— 它继承的正是 v2.14.x 时 `.image` 的全部能力，
+    /// 老文档迁到这里不会少任何一个功能（见 `CanvasDocument.migrateKinds`）。
+    case slot
 
     public var displayName: String {
         switch self {
@@ -25,6 +57,7 @@ public enum CanvasNodeKind: String, Codable, Equatable {
         case .image: return "图像生成"
         case .video: return "视频生成"
         case .batchTemplate: return "批量模版"
+        case .slot: return "槽位"
         }
     }
 
@@ -35,6 +68,7 @@ public enum CanvasNodeKind: String, Codable, Equatable {
         case .image: return "photo"
         case .video: return "film"
         case .batchTemplate: return "square.stack.3d.up"
+        case .slot: return "square.grid.2x2"
         }
     }
 
@@ -42,9 +76,26 @@ public enum CanvasNodeKind: String, Codable, Equatable {
     public var producesAsset: Bool {
         switch self {
         case .text: return false
-        case .image, .video, .batchTemplate: return true
+        case .image, .video, .batchTemplate, .slot: return true
         }
     }
+
+    /// 这个类型用哪种卡片形态渲染（v2.15.0）。
+    ///
+    /// `batchTemplate` 跟着 `.slot` 走通用卡：它本身不出图，卡上要看的是"这批任务的母本提示词 +
+    /// 入参"，正是通用卡擅长的；给它一张媒体卡会留下一大块永远空着的媒体区。
+    public var cardForm: CanvasNodeCardForm {
+        switch self {
+        case .text: return .text
+        case .image, .video: return .media
+        case .slot, .batchTemplate: return .slotStack
+        }
+    }
+
+    /// 是否是 v2.15.0 的媒体节点（图片 / 视频）。
+    ///
+    /// 媒体节点独有的三件事都挂在这个判定上：全屏预览、媒体信息角标、媒体区点击语义。
+    public var isMediaNode: Bool { cardForm == .media }
 }
 
 // MARK: - 节点状态
@@ -247,6 +298,16 @@ public struct CanvasNode: Codable, Identifiable, Equatable {
 
     public static let defaultSize = CGSize(width: 260, height: 300)
 
+    /// 按节点类型取默认尺寸（v2.15.0）。
+    ///
+    /// 媒体节点（图片 / 视频）比槽位卡宽一点：它的主视觉是一张 aspect-fit 的图，而槽位卡的主视觉
+    /// 是一叠槽位缩略图 + 提示词。同样 260pt 宽下，媒体区扣掉 header 与 prompt 条后只剩很扁的一条，
+    /// 竖图会被压成一根签子 —— 这正是 `CanvasMediaCardLayout` 让位顺序要处理的那个窘境，
+    /// 与其生下来就触发让位，不如一开始给足。
+    public static func defaultSize(for kind: CanvasNodeKind) -> CGSize {
+        kind.isMediaNode ? CanvasMediaCardLayout.defaultSize : defaultSize
+    }
+
     /// 正文默认字号。卡片是 260pt 宽的定尺容器，10pt 是「两行能塞进 ~60 字」的经验值。
     public static let defaultBodyFontSize: CGFloat = 10
     /// 字号可选区间。
@@ -284,7 +345,10 @@ public struct CanvasNode: Codable, Identifiable, Equatable {
     public init(pageId: String,
                 groupId: String,
                 slot: Int,
-                kind: CanvasNodeKind = .image,
+                // ★ v2.15.0：默认从 `.image` 改成 `.slot`。默认值服务的是"没指定类型就摆一个格子上去"
+                // 这条路径（从左侧槽位库拖 / 「摆到画布」按钮），那本来就是槽位节点；
+                // 真要图片 / 视频节点的调用方一律显式传 kind。
+                kind: CanvasNodeKind = .slot,
                 x: CGFloat,
                 y: CGFloat,
                 width: CGFloat = CanvasNode.defaultSize.width,
@@ -484,7 +548,12 @@ public struct CanvasNode: Codable, Identifiable, Equatable {
 /// 一张画布的完整持久化内容。
 public struct CanvasDocument: Codable, Equatable {
     /// 当前 schema 版本。新增字段不需要动它；只有**语义不兼容**的变更才递增。
-    public static let currentSchemaVersion = 1
+    ///
+    /// - `1`：v2.11.7 ~ v2.14.x。
+    /// - `2`：v2.15.0。`.image` 的**含义变了** —— 它从"所有节点的默认类型"变成"TapNow 式媒体卡"，
+    ///   所以老文档里的 `.image` 必须迁成 `.slot`（见 `migrateKinds`）。这正是"语义不兼容"
+    ///   的教科书案例：字段没动、值没动，但同一个值现在渲染出完全不同的卡片。
+    public static let currentSchemaVersion = 2
 
     public var schemaVersion: Int
     public var nodes: [CanvasNode]
@@ -553,11 +622,16 @@ public struct CanvasDocument: Codable, Equatable {
 
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
-        schemaVersion = try c.decodeIfPresent(Int.self, forKey: .schemaVersion)
-            ?? CanvasDocument.currentSchemaVersion
+        // 缺字段按 **1** 兜底，不是按 current。写入路径永远写 `schemaVersion`，所以"字段不存在"
+        // 只可能来自最早那批文档 —— 把它们当成最新版等于跳过全部迁移，而迁移的代价是
+        // 用户画布上每张卡片都换了形态（见 `migrateKinds`）。
+        let declaredVersion = try c.decodeIfPresent(Int.self, forKey: .schemaVersion) ?? 1
         let decoded = (try c.decodeIfPresent([LenientNode].self, forKey: .nodes) ?? [])
             .compactMap(\.node)
-        nodes = CanvasDocument.dedupedBySlot(decoded)
+        nodes = CanvasDocument.migrateKinds(CanvasDocument.dedupedBySlot(decoded),
+                                            fromSchemaVersion: declaredVersion)
+        // 迁移完就报最新版：否则每次打开都要再跑一遍（幂等，但会让"这份文档是什么年代的"永远说不清）。
+        schemaVersion = max(declaredVersion, CanvasDocument.currentSchemaVersion)
         // 连线必须在节点定稿**之后**再规整：野线（端点指向被去重/被跳过的节点）要在这里被丢掉，
         // 否则画布上会留一条连到虚空的线，而它在屏幕上看起来跟正常线一模一样。
         let decodedEdges = (try c.decodeIfPresent([LenientEdge].self, forKey: .edges) ?? [])
@@ -582,6 +656,34 @@ public struct CanvasDocument: Codable, Equatable {
         try c.encode(panY, forKey: .panY)
         try c.encode(zoom, forKey: .zoom)
         try c.encode(updatedAt, forKey: .updatedAt)
+    }
+
+    /// schema 1 → 2：把 `.image` 迁成 `.slot`（v2.15.0）。
+    ///
+    /// ## 为什么要迁，以及为什么**只**迁 `.image`
+    ///
+    /// v2.14.x 里 `.image` 是 `CanvasNode.init` 的**默认 kind**，也是解码缺字段时的兜底值 ——
+    /// 换句话说它是个catch-all 桶：从左侧槽位库拖上画布的节点、ADD NODE 建的图像节点、
+    /// 最早那批没写 kind 的节点，全在里面。而这些节点在屏幕上长的是**同一张**通用卡
+    /// （路径行 → 堆叠卡片 → 提示词 → 入参文件），也就是用户截图里点名要保留的「槽位节点」形态。
+    ///
+    /// v2.15.0 起 `.image` 改渲染 TapNow 式媒体卡。若不迁移，用户升级后打开画布会发现**每一张**
+    /// 卡片都换了形态 —— 包括那些只装了一段文字、根本没有图的节点（媒体区一片空）。迁到 `.slot`
+    /// 的效果恰好相反：**视觉零变化**，能力也零损失（`.slot` 继承了 `.image` 的出图链路）。
+    ///
+    /// `.video` 刻意**不迁**：它从来只能由 ADD NODE →「视频节点」显式产生，不是兜底值，
+    /// 所以桶里装的确实都是"用户当初就想要一个视频节点"的那些。它们换成媒体卡是升级而不是意外。
+    /// `.text` / `.batchTemplate` 同理，各自形态本来就是专属的。
+    ///
+    /// 幂等：schema ≥ 2 直接原样返回。
+    public static func migrateKinds(_ input: [CanvasNode], fromSchemaVersion version: Int) -> [CanvasNode] {
+        guard version < 2 else { return input }
+        return input.map { node in
+            guard node.kind == .image else { return node }
+            var migrated = node
+            migrated.kind = .slot
+            return migrated
+        }
     }
 
     /// 同一槽位只保留**第一个**摆位。

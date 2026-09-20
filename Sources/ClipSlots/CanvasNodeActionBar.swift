@@ -82,6 +82,18 @@ struct CanvasNodeActionBar: View {
     let onRun: () -> Void
     let onSpawnDownstream: () -> Void
     let onRevealAsset: (String) -> Void
+    /// 这个节点此刻能不能入库（已经在正式槽位库里的就不能，也不需要）。
+    /// nil 之外的两个值都有意义，所以用 Bool 而不是"按钮存在与否"来表达。
+    let canArchive: Bool
+    /// 入库到槽位库（v2.15.0）。
+    let onArchive: () -> Void
+    /// 全屏预览（v2.15.0）。没有可预览的媒体时为 nil，按钮不出现。
+    let onOpenFullscreen: (() -> Void)?
+    /// 复制全文（v2.15.0，对齐 TapNow 文本节点的「复制全部」）。文本为空时为 nil。
+    ///
+    /// 只给文本节点：出图节点卡上的那段文字是**提示词**，用户要复制它时通常是要改一版，
+    /// 双击进编辑态全选更直接；而文本节点的文字本身就是产物，"整段拿走"是它的主用途。
+    let onCopyText: (() -> Void)?
 
     var body: some View {
         HStack(spacing: 6) {
@@ -98,6 +110,11 @@ struct CanvasNodeActionBar: View {
             }
             Divider().frame(height: 16).opacity(0.35)
             spawnButton
+            // ★ v2.15.0：全屏 / 入库。两者都放在「产物动作」这一档里 —— 它们的对象是**节点的内容**
+            // 而不是节点的参数，和 `spawnButton` / `revealButton` 同类。
+            if let onCopyText { copyTextButton(onCopyText) }
+            if let onOpenFullscreen { fullscreenButton(onOpenFullscreen) }
+            if canArchive { archiveButton }
             if case .succeeded(let path) = node.state, !path.isEmpty {
                 revealButton(path)
             }
@@ -283,6 +300,43 @@ struct CanvasNodeActionBar: View {
         }
         .buttonStyle(.plain)
         .help("以它为输入新建下游节点")
+    }
+
+    /// 入库。
+    ///
+    /// 图标用 `tray.and.arrow.down`（"收进托盘"）而不是 `square.and.arrow.down`（"下载/存到磁盘"）：
+    /// 卡片底部的入参文件入口已经在用托盘系图标表达"槽位里的东西"，同一套隐喻让"入库"一眼可读。
+    private var archiveButton: some View {
+        Button(action: onArchive) {
+            Image(systemName: "tray.and.arrow.down")
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundColor(AppTheme.canvasChromeInk)
+                .frame(width: 20, height: 20)
+        }
+        .buttonStyle(.plain)
+        .help("入库：把内容存进当前槽位组的空槽")
+    }
+
+    private func copyTextButton(_ action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: "doc.on.doc")
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundColor(AppTheme.canvasChromeInk)
+                .frame(width: 20, height: 20)
+        }
+        .buttonStyle(.plain)
+        .help("复制全文")
+    }
+
+    private func fullscreenButton(_ action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: "arrow.up.left.and.arrow.down.right")
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundColor(AppTheme.canvasChromeInk)
+                .frame(width: 20, height: 20)
+        }
+        .buttonStyle(.plain)
+        .help("全屏查看")
     }
 
     private func revealButton(_ path: String) -> some View {
