@@ -2839,6 +2839,58 @@ final class SlotStoreObservable: ObservableObject {
         return ok
     }
 
+    // MARK: - 画布附件编辑的撤销暂存桥（v2.16.5）
+
+    /// 删除入参附件**之前**，把被删附件的外置字节复制进暂存区。
+    ///
+    /// 存储根按组选择：普通组在 `special_slots/`、画布私有组在 `canvas/private_slots/`，
+    /// 暂存区统一在 `canvas/.attach_stash/<token>/`。
+    /// - Returns: 实际找到并复制成功的附件 id（找不到 .bin 的被跳过）。
+    @discardableResult
+    func copyCanvasAttachmentBinsToStash(groupId: String,
+                                         slot: Int,
+                                         ids: [String],
+                                         token: String) -> [String] {
+        let storage = canvasStorage(groupId: groupId)
+        return CanvasAttachmentStash.copyRemovedBins(ids: ids,
+                                                     storageBase: storage.storageRoot,
+                                                     groupId: groupId,
+                                                     slot: slot,
+                                                     token: token)
+    }
+
+    /// 撤销 / 重做附件编辑：先在槽位与暂存区间归位 `.bin`，再写入目标附件列表。
+    ///
+    /// - Parameters:
+    ///   - stashAwayIds: 目标列表不再引用、需从槽位移入暂存的 id。
+    ///   - restoreIds: 目标列表重新引用、需从暂存复制回槽位的 id。
+    @discardableResult
+    func applyCanvasAttachmentEdit(groupId: String,
+                                   slot: Int,
+                                   attachments: [SlotContent.SlotAttachment],
+                                   stashToken: String,
+                                   stashAwayIds: [String],
+                                   restoreIds: [String]) -> Bool {
+        let storage = canvasStorage(groupId: groupId)
+        do {
+            try CanvasAttachmentStash.swap(stashAwayIds: stashAwayIds,
+                                           restoreIds: restoreIds,
+                                           storageBase: storage.storageRoot,
+                                           groupId: groupId,
+                                           slot: slot,
+                                           token: stashToken)
+        } catch {
+            NSLog("[ClipSlots] applyCanvasAttachmentEdit 字节归位失败：\(error.localizedDescription)")
+            return false
+        }
+        return writeCanvasSlotAttachments(groupId: groupId, slot: slot, attachments: attachments)
+    }
+
+    /// 历史条目消失（截断 / 清栈）时收走对应的暂存字节。
+    func discardCanvasAttachmentStash(token: String) {
+        CanvasAttachmentStash.discard(token: token)
+    }
+
     // MARK: - 未入库保留组 / 归槽 / 排序（v2.11.8 二轮）
 
     /// 「未入库」保留组的 id。

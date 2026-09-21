@@ -76,6 +76,7 @@ struct CanvasWorkspaceView: View {
     @StateObject private var inputRouter = CanvasInputRouter()
     /// 绑定本视图安装到 `CanvasStore` 的闭包，避免旧视图晚到的 onDisappear 清掉新视图的 handler。
     @State private var slotTextRestorerToken = UUID()
+    @State private var attachmentBridgeToken = UUID()
 
     @State private var pinchBasePan: CGSize? = nil
     @State private var pinchBaseZoom: CGFloat = 1
@@ -246,6 +247,19 @@ struct CanvasWorkspaceView: View {
                 canvas.installSlotTextRestorer(id: slotTextRestorerToken) { groupId, slot, text in
                     _ = store.writeCanvasSlotText(groupId: groupId, slot: slot, text: text)
                 }
+
+                // 附件编辑（增删入参 / 提升主体）的撤销回滚桥（v2.16.5）。
+                canvas.installAttachmentBridge(id: attachmentBridgeToken, apply: { groupId, slot, attachments, token, stashAway, restore in
+                    _ = store.applyCanvasAttachmentEdit(groupId: groupId,
+                                                        slot: slot,
+                                                        attachments: attachments,
+                                                        stashToken: token,
+                                                        stashAwayIds: stashAway,
+                                                        restoreIds: restore)
+                    canvas.noteSlotDataChanged()
+                }, discard: { token in
+                    store.discardCanvasAttachmentStash(token: token)
+                })
                 // 历史条目 / toast 里的节点名。hotfix20 起节点不再缓存 Label 与正文，
                 // 名字只能当场问槽位 —— 同样由认识主 store 的视图层注入。
                 canvas.slotTitleProvider = { groupId, slot in
@@ -281,6 +295,7 @@ struct CanvasWorkspaceView: View {
                 // 表现是"热键静默失效"（既没粘贴，也没有任何提示）。
                 CanvasCommandBridge.shared.slotCommandHandler = nil
                 canvas.clearSlotTextRestorer(id: slotTextRestorerToken)
+                canvas.clearAttachmentBridge(id: attachmentBridgeToken)
                 canvas.slotTitleProvider = nil
                 canvas.flushSave()
             }
@@ -1327,12 +1342,22 @@ struct CanvasWorkspaceView: View {
     /// 从别处塞了东西（比如 Agent 侧栏），覆盖会静默吃掉它们。
     private func appendAttachments(_ new: [SlotContent.SlotAttachment], to node: CanvasNode) {
         guard !new.isEmpty else { return }
-        var list = store.canvasSlotAttachments(groupId: node.groupId, slot: node.slot)
+        let before = store.canvasSlotAttachments(groupId: node.groupId, slot: node.slot)
+        var list = before
         list.append(contentsOf: new)
+        // v2.16.5：附件列表改动可撤销。纯新增正向无需预暂存，撤销时把新附件移入暂存。
+        let token = attachmentBridgeToken.uuidString
         guard store.writeCanvasSlotAttachments(groupId: node.groupId, slot: node.slot, attachments: list) else {
             store.transientUI.showToast("存储繁忙，入参未写入")
             return
         }
+        canvas.recordSlotAttachmentEdit(
+            nodeId: node.id,
+            edit: CanvasHistoryEntry.SlotAttachmentEdit(groupId: node.groupId,
+                                                        slot: node.slot,
+                                                        before: before,
+                                                        after: list,
+                                                        stashToken: token))
         canvas.noteSlotDataChanged()
     }
 
@@ -1341,18 +1366,28 @@ struct CanvasWorkspaceView: View {
     /// 首位不是随便定的名分 —— 缩略图、圆盘预览、生成时取的第一张入参都看列表首位，
     /// 所以"设为入参"落地成"挪到第 0 位"是这个词在本项目里唯一有实际后果的解释。
     private func promoteInput(_ node: CanvasNode, index: Int) {
-        var list = store.canvasSlotAttachments(groupId: node.groupId, slot: node.slot)
+        let before = store.canvasSlotAttachments(groupId: node.groupId, slot: node.slot)
+        var list = before
         guard list.indices.contains(index) else { return }
         guard index != 0 else {
             store.transientUI.showToast("它已经是首个入参了")
             return
         }
+        // v2.16.5：入参排序改动可撤销。纯重排不丢字节，暂存 swap 为空操作。
         let item = list.remove(at: index)
         list.insert(item, at: 0)
+        let token = attachmentBridgeToken.uuidString
         guard store.writeCanvasSlotAttachments(groupId: node.groupId, slot: node.slot, attachments: list) else {
             store.transientUI.showToast("存储繁忙，稍后再试")
             return
         }
+        canvas.recordSlotAttachmentEdit(
+            nodeId: node.id,
+            edit: CanvasHistoryEntry.SlotAttachmentEdit(groupId: node.groupId,
+                                                        slot: node.slot,
+                                                        before: before,
+                                                        after: list,
+                                                        stashToken: token))
         canvas.noteSlotDataChanged()
         store.transientUI.showToast("已设为首个入参：\(item.name)")
     }
@@ -1364,13 +1399,28 @@ struct CanvasWorkspaceView: View {
     /// 会把旧内容备份进 `.trash`（v2.10.16 起），误删有得救。要弹 Alert 的是**删节点**那条路
     /// （见 `deleteSelectedNodes`），两者语义不同，别合并。
     private func deleteInput(_ node: CanvasNode, index: Int) {
-        var list = store.canvasSlotAttachments(groupId: node.groupId, slot: node.slot)
+        let before = store.canvasSlotAttachments(groupId: node.groupId, slot: node.slot)
+        var list = before
         guard list.indices.contains(index) else { return }
         let item = list.remove(at: index)
+        // v2.16.5：删除入参可撤销。写入前先把被删附件的外置字节复制进暂存（必须在任何
+        // set 之前：set 的 staging 会克隆全部引用的 .bin）；旧内容另由 write 路径备份进 .trash。
+        let token = attachmentBridgeToken.uuidString
+        _ = store.copyCanvasAttachmentBinsToStash(groupId: node.groupId,
+                                                  slot: node.slot,
+                                                  ids: [item.id.uuidString],
+                                                  token: token)
         guard store.writeCanvasSlotAttachments(groupId: node.groupId, slot: node.slot, attachments: list) else {
             store.transientUI.showToast("存储繁忙，稍后再试")
             return
         }
+        canvas.recordSlotAttachmentEdit(
+            nodeId: node.id,
+            edit: CanvasHistoryEntry.SlotAttachmentEdit(groupId: node.groupId,
+                                                        slot: node.slot,
+                                                        before: before,
+                                                        after: list,
+                                                        stashToken: token))
         canvas.noteSlotDataChanged()
         store.transientUI.showToast("已删除入参：\(item.name)")
     }

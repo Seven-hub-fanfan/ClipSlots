@@ -8378,4 +8378,149 @@ do {
             "★★CANVAS-MCARD-15 量不到内容尺寸时返回 .zero（画一个瞎猜的框比不画更误导）")
 }
 
+
+// MARK: - v2.16.5：连线长距命中采样自适应
+
+do {
+    // 8000pt 的超长连线：固定 24 段时弦误差远超 10pt 容差，曲线中点会点不中。
+    let longStart = CGPoint(x: 0, y: 0)
+    let longC = CGPoint(x: 4000, y: 0)
+    let longEnd = CGPoint(x: 8000, y: 0)
+    t.check(CanvasEdgeGeometry.hitTest(point: CGPoint(x: 4000, y: 5),
+                                        start: longStart, c1: longC, c2: longC, end: longEnd,
+                                        tolerance: 10),
+            "★EDGE-ADAPT-1 8000pt 长连线中点仍可命中（采样按长度加密）")
+    t.check(CanvasEdgeGeometry.hitTest(point: CGPoint(x: 2000, y: 5),
+                                        start: longStart, c1: longC, c2: longC, end: longEnd,
+                                        tolerance: 10),
+            "EDGE-ADAPT-2 长连线 1/4 处可命中")
+    t.check(!CanvasEdgeGeometry.hitTest(point: CGPoint(x: 4000, y: 30),
+                                         start: longStart, c1: longC, c2: longC, end: longEnd,
+                                         tolerance: 10),
+            "EDGE-ADAPT-3 偏离 30pt 不得误命中")
+
+    // 退化曲线（4 点重合）不能 NaN / crash，且命中点本身。
+    let p = CGPoint(x: 100, y: 100)
+    t.check(CanvasEdgeGeometry.hitTest(point: p, start: p, c1: p, c2: p, end: p, tolerance: 5),
+            "EDGE-ADAPT-4 退化曲线命中自身不产出 NaN")
+
+    // 短曲线常规命中。
+    let s = CGPoint(x: 0, y: 0), c1 = CGPoint(x: 50, y: 60), c2 = CGPoint(x: 150, y: 60), e = CGPoint(x: 200, y: 0)
+    t.check(CanvasEdgeGeometry.hitTest(point: CGPoint(x: 100, y: 44),
+                                        start: s, c1: c1, c2: c2, end: e, tolerance: 8),
+            "EDGE-ADAPT-5 短曲线拱顶可命中")
+}
+
+// MARK: - v2.16.5：历史条目携带附件编辑并随 undo/redo 往返
+
+do {
+    var history = CanvasUndoStack()
+    func att(_ idSeed: Int, name: String) -> SlotContent.SlotAttachment {
+        // 用确定性 UUID 构造，便于差集计算。
+        SlotContent.SlotAttachment(id: UUID(uuidString: "00000000-0000-0000-0000-00000000000\(idSeed)")!,
+                                    name: name, type: .image)
+    }
+    let before = [att(1, name: "ref-a"), att(2, name: "ref-b")]
+    let after = [att(2, name: "ref-b"), att(3, name: "ref-c")]
+    let edit = CanvasHistoryEntry.SlotAttachmentEdit(groupId: "g1", slot: 4,
+                                                      before: before, after: after,
+                                                      stashToken: "tok-xyz")
+    history.push(CanvasHistoryEntry(id: "tok-xyz",
+                                     kind: .editAttachments,
+                                     detail: "节点4",
+                                     before: [],
+                                     after: [],
+                                     attachmentEdit: edit))
+    t.equal(history.entries.count, 1, "HIST-ATT-1 条目入栈")
+    t.equal(history.undoTarget?.kind.title, "编辑入参文件", "HIST-ATT-2 新 kind 有面板文案")
+
+    guard let undone = history.undo() else {
+        t.check(false, "HIST-ATT-3 undo 返回条目")
+        fatalError("stop")
+    }
+    t.equal(undone.attachmentEdit?.before.count, 2, "HIST-ATT-4 undo 条目携带 before 附件元数据")
+    t.equal(undone.attachmentEdit?.after.count, 2, "HIST-ATT-5 undo 条目携带 after 附件元数据")
+    t.equal(undone.attachmentEdit?.stashToken, "tok-xyz", "HIST-ATT-6 stash token 原样往返")
+
+    guard let redone = history.redo() else {
+        t.check(false, "HIST-ATT-7 redo 返回条目")
+        fatalError("stop")
+    }
+    t.equal(redone.attachmentEdit, edit, "HIST-ATT-8 redo 附件编辑与原条目相等")
+
+    // 撤销后做新动作 → 旧 redo 分支被截断，这是 push 的既有语义（不新增断言，只确认不崩）。
+    history.undo()
+    history.push(CanvasHistoryEntry(kind: .moveNode, before: [], after: []))
+    t.equal(history.entries.count, 1, "HIST-ATT-9 新动作截断已撤销分支，只留新条目")
+}
+
+// MARK: - v2.16.5：附件撤销字节暂存的磁盘生命周期
+
+do {
+    let root = FileManager.default.temporaryDirectory
+        .appendingPathComponent("clipslots_stash_smoke_\(UUID().uuidString)", isDirectory: true)
+    try? FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    setenv("CLIPSLOTS_DATA_DIR", root.path, 1)
+    defer {
+        unsetenv("CLIPSLOTS_DATA_DIR")
+        try? FileManager.default.removeItem(at: root)
+    }
+
+    let fm = FileManager.default
+    let storageBase = ClipSlotsPaths.specialSlots
+    let bins = CanvasAttachmentStash.slotBinsDirectory(storageBase: storageBase,
+                                                       groupId: "g1", slot: 3)
+    try fm.createDirectory(at: bins, withIntermediateDirectories: true)
+    // 场景：正向删除 id1 前，槽位里同时有 id1/id2 两个附件。
+    let id1 = "00000000-0000-0000-0000-000000000001"
+    let id2 = "00000000-0000-0000-0000-000000000002"
+    try "id1-bytes".data(using: .utf8)!.write(to: bins.appendingPathComponent("\(id1).bin"))
+    try "id2-bytes".data(using: .utf8)!.write(to: bins.appendingPathComponent("\(id2).bin"))
+
+    // 正向预暂存：id1 复制进 stash，原件保留（随后的 set 才会丢弃它）。
+    let copied = CanvasAttachmentStash.copyRemovedBins(ids: [id1],
+                                                       storageBase: storageBase,
+                                                       groupId: "g1", slot: 3,
+                                                       token: "tok1")
+    t.equal(copied, [id1], "STASH-1 被删附件字节复制成功")
+    t.check(fm.fileExists(atPath: bins.appendingPathComponent("\(id1).bin").path),
+            "STASH-2 预暂存保留槽位原件")
+    let stashed1 = CanvasAttachmentStash.directory(token: "tok1")
+        .appendingPathComponent("\(id1).bin")
+    t.check(fm.fileExists(atPath: stashed1.path), "STASH-3 暂存区已有被删字节")
+
+    // 模拟正向 set 完成后旧目录被 swap 删除：手工删掉槽位里的 id1。
+    try fm.removeItem(at: bins.appendingPathComponent("\(id1).bin"))
+
+    // 撤销（after→before）：id2 是 after 独有 → 移入暂存；id1 是 before 独有 → 复制回槽位。
+    try CanvasAttachmentStash.swap(stashAwayIds: [id2],
+                                   restoreIds: [id1],
+                                   storageBase: storageBase,
+                                   groupId: "g1", slot: 3,
+                                   token: "tok1")
+    t.check(fm.fileExists(atPath: bins.appendingPathComponent("\(id1).bin").path),
+            "★STASH-4 撤销后被删附件字节级还原到槽位")
+    t.check(!fm.fileExists(atPath: bins.appendingPathComponent("\(id2).bin").path),
+            "STASH-5 撤销后 after 独有附件已移出槽位")
+    t.check(fm.fileExists(atPath: CanvasAttachmentStash.directory(token: "tok1")
+                            .appendingPathComponent("\(id2).bin").path),
+            "STASH-6 after 独有附件字节在暂存区兜住，可重做")
+
+    // 重做（before→after）：id1 再入暂存、id2 回到槽位。
+    try CanvasAttachmentStash.swap(stashAwayIds: [id1],
+                                   restoreIds: [id2],
+                                   storageBase: storageBase,
+                                   groupId: "g1", slot: 3,
+                                   token: "tok1")
+    t.check(fm.fileExists(atPath: bins.appendingPathComponent("\(id2).bin").path),
+            "★STASH-7 重做后字节回到 after 状态")
+    t.check(!fm.fileExists(atPath: bins.appendingPathComponent("\(id1).bin").path),
+            "STASH-8 重做后 before 独有附件再入暂存")
+
+    // 条目消失：discard 清掉整个 token 目录。
+    CanvasAttachmentStash.discard(token: "tok1")
+    t.check(!fm.fileExists(atPath: CanvasAttachmentStash.directory(token: "tok1").path),
+            "STASH-9 discard 收走暂存字节")
+}
+
 t.report()

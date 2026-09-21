@@ -180,7 +180,13 @@ final class CanvasStore: ObservableObject {
                                      activeProjectId: id == activeProjectId ? "" : activeProjectId)
         next = CanvasProjectIndex.normalized(next)
         projectStorage.save(next)
-        projectStorage.trashProjectDocs(projectId: id)
+        // v2.16.5：文档移入 .trash 失败时盘上还留着该项目文档；若继续按「已删」推进，索引里
+        // 再无它的记录，文档将成为永久孤儿。回滚索引（内存状态此刻尚未改变），放弃删除。
+        guard projectStorage.trashProjectDocs(projectId: id) else {
+            projectStorage.save(index)
+            NSLog("[ClipSlots] deleteProject: 项目文档移入 .trash 失败，已回滚项目索引 \(id)")
+            return nil
+        }
         projects = next.displayOrder
         if id == activeProjectId {
             adoptProject(id: next.activeProjectId)
@@ -202,6 +208,12 @@ final class CanvasStore: ObservableObject {
         zoom = CanvasGeometry.clampZoom(doc.zoom)
         selectedNodeIds = []
         selectedEdgeId = nil
+        // 撤销/重做栈不能跨项目共享；切项目前收走所有附件暂存字节（条目全部消失）。
+        for entry in history.entries {
+            if let token = entry.attachmentEdit?.stashToken {
+                discardAttachmentStash(token)
+            }
+        }
         history.removeAll()
         slotRevision += 1
     }
@@ -637,6 +649,38 @@ final class CanvasStore: ObservableObject {
         slotRevision += 1
     }
 
+    /// 记一步「在画布里增 / 删了入参附件」的可撤销历史（v2.16.5）。
+    ///
+    /// 与文本编辑同构：附件列表已由调用方（画布视图）直接写进槽位，这里只挂历史；
+    /// 被删附件的字节在写入前已由调用方复制进 `CanvasAttachmentStash`。
+    func recordSlotAttachmentEdit(nodeId: String,
+                                  edit: CanvasHistoryEntry.SlotAttachmentEdit) {
+        guard edit.before != edit.after else {
+            discardAttachmentStash(edit.stashToken)
+            return
+        }
+        guard let node = nodes.first(where: { $0.id == nodeId }) else {
+            discardAttachmentStash(edit.stashToken)
+            return
+        }
+        commit(.editAttachments, detail: nodeTitle(node), attachmentEdit: edit) { }
+    }
+
+    /// 记一步「入参文件提升为主体」（v2.16.5）。
+    ///
+    /// 提升动作在**同一次槽位写入**里改了正文与附件列表，所以必须进同一条历史 —— 拆成两条
+    /// 会让一次 Cmd+Z 只回滚一边，画布出现「正文回来了、附件还缺着」的中间态。
+    func recordSlotPromotion(nodeId: String,
+                             textEdit: CanvasHistoryEntry.SlotTextEdit,
+                             attachmentEdit: CanvasHistoryEntry.SlotAttachmentEdit) {
+        guard let node = nodes.first(where: { $0.id == nodeId }) else {
+            discardAttachmentStash(attachmentEdit.stashToken)
+            return
+        }
+        commit(.editAttachments, detail: nodeTitle(node),
+               slotEdit: textEdit, attachmentEdit: attachmentEdit) { }
+    }
+
     // MARK: - 撤销 / 重做
 
     var canUndo: Bool { history.canUndo }
@@ -669,6 +713,94 @@ final class CanvasStore: ObservableObject {
         onRestoreSlotText = nil
     }
 
+    // MARK: - 附件编辑回滚桥（v2.16.5）
+    //
+    // 与槽位文本回写完全同一套「按视图实例 token 注册 + 离场补写」设计：undo/redo 发生在
+    // 无画布视图在场时，附件列表改动排队，等重新进画布后补写。
+
+    typealias AttachmentEditApply = (_ groupId: String,
+                                     _ slot: Int,
+                                     _ attachments: [SlotContent.SlotAttachment],
+                                     _ stashToken: String,
+                                     _ stashAwayIds: [String],
+                                     _ restoreIds: [String]) -> Void
+    typealias AttachmentStashDiscard = (_ token: String) -> Void
+
+    private struct PendingAttachmentEdit {
+        let groupId: String
+        let slot: Int
+        let attachments: [SlotContent.SlotAttachment]
+        let stashToken: String
+        let stashAwayIds: [String]
+        let restoreIds: [String]
+    }
+
+    private var onApplyAttachmentEdit: AttachmentEditApply?
+    private var onDiscardAttachmentStash: AttachmentStashDiscard?
+    private var attachmentBridgeToken: UUID?
+    private var pendingAttachmentEdits: [PendingAttachmentEdit] = []
+
+    /// 安装附件编辑回滚桥。token 绑定视图实例；离场期间产生的回滚排队，重新挂载后补写。
+    func installAttachmentBridge(id: UUID,
+                                 apply: @escaping AttachmentEditApply,
+                                 discard: @escaping AttachmentStashDiscard) {
+        attachmentBridgeToken = id
+        onApplyAttachmentEdit = apply
+        onDiscardAttachmentStash = discard
+        guard !pendingAttachmentEdits.isEmpty else { return }
+        let queued = pendingAttachmentEdits
+        pendingAttachmentEdits = []
+        for item in queued {
+            apply(item.groupId, item.slot, item.attachments, item.stashToken,
+                  item.stashAwayIds, item.restoreIds)
+        }
+        slotRevision += 1
+    }
+
+    /// 只清掉同一视图实例安装的附件桥。
+    func clearAttachmentBridge(id: UUID) {
+        guard attachmentBridgeToken == id else { return }
+        attachmentBridgeToken = nil
+        onApplyAttachmentEdit = nil
+        onDiscardAttachmentStash = nil
+    }
+
+    private func applyAttachmentEdit(groupId: String,
+                                     slot: Int,
+                                     attachments: [SlotContent.SlotAttachment],
+                                     stashToken: String,
+                                     stashAwayIds: [String],
+                                     restoreIds: [String]) {
+        if let bridge = onApplyAttachmentEdit {
+            bridge(groupId, slot, attachments, stashToken, stashAwayIds, restoreIds)
+        } else {
+            pendingAttachmentEdits.append(
+                PendingAttachmentEdit(groupId: groupId, slot: slot,
+                                      attachments: attachments,
+                                      stashToken: stashToken,
+                                      stashAwayIds: stashAwayIds,
+                                      restoreIds: restoreIds))
+        }
+    }
+
+    private func discardAttachmentStash(_ token: String) {
+        if let bridge = onDiscardAttachmentStash {
+            bridge(token)
+        }
+        // 无桥时不删：暂存目录要等画布视图重新挂载、且条目仍在栈中时才能安全收走。
+    }
+
+    /// source → target 两个附件列表的 id 差集。
+    /// - Returns: `stash` = source 独有（字节需移入暂存）；`restore` = target 独有（需从暂存恢复）。
+    private func attachmentIdDiff(source: [SlotContent.SlotAttachment],
+                                  target: [SlotContent.SlotAttachment])
+    -> (stash: [String], restore: [String]) {
+        let sourceIds = Set(source.map { $0.id.uuidString })
+        let targetIds = Set(target.map { $0.id.uuidString })
+        return (Array(sourceIds.subtracting(targetIds)),
+                Array(targetIds.subtracting(sourceIds)))
+    }
+
     private func restoreSlotText(groupId: String, slot: Int, text: String) {
         if let onRestoreSlotText {
             onRestoreSlotText(groupId, slot, text)
@@ -685,6 +817,12 @@ final class CanvasStore: ObservableObject {
         if let edit = entry.slotEdit {
             restoreSlotText(groupId: edit.groupId, slot: edit.slot, text: edit.before)
         }
+        if let edit = entry.attachmentEdit {
+            let diff = attachmentIdDiff(source: edit.after, target: edit.before)
+            applyAttachmentEdit(groupId: edit.groupId, slot: edit.slot,
+                                attachments: edit.before, stashToken: edit.stashToken,
+                                stashAwayIds: diff.stash, restoreIds: diff.restore)
+        }
         return entry
     }
 
@@ -694,6 +832,12 @@ final class CanvasStore: ObservableObject {
         apply(nodes: entry.after, edges: entry.afterEdges)
         if let edit = entry.slotEdit {
             restoreSlotText(groupId: edit.groupId, slot: edit.slot, text: edit.after)
+        }
+        if let edit = entry.attachmentEdit {
+            let diff = attachmentIdDiff(source: edit.before, target: edit.after)
+            applyAttachmentEdit(groupId: edit.groupId, slot: edit.slot,
+                                attachments: edit.after, stashToken: edit.stashToken,
+                                stashAwayIds: diff.stash, restoreIds: diff.restore)
         }
         return entry
     }
@@ -731,18 +875,28 @@ final class CanvasStore: ObservableObject {
     private func commit(_ kind: CanvasHistoryEntry.Kind,
                         detail: String,
                         slotEdit: CanvasHistoryEntry.SlotTextEdit? = nil,
+                        attachmentEdit: CanvasHistoryEntry.SlotAttachmentEdit? = nil,
                         _ mutate: () -> Void) {
         let before = nodes
         let beforeEdges = edges
         mutate()
-        guard nodes != before || edges != beforeEdges || slotEdit != nil else { return }
+        guard nodes != before || edges != beforeEdges
+                || slotEdit != nil || attachmentEdit != nil else { return }
+        let tokensBefore = Set(history.entries.compactMap { $0.attachmentEdit?.stashToken })
         history.push(CanvasHistoryEntry(kind: kind,
                                         detail: detail,
                                         before: before,
                                         after: nodes,
                                         beforeEdges: beforeEdges,
                                         afterEdges: edges,
-                                        slotEdit: slotEdit))
+                                        slotEdit: slotEdit,
+                                        attachmentEdit: attachmentEdit))
+        // push 会截断已撤销分支 / 在超限时丢最旧条目：那些条目的暂存字节必须同步收走，
+        // 否则 redo 已不可能，磁盘上只剩无人引用的孤儿字节。
+        let tokensAfter = Set(history.entries.compactMap { $0.attachmentEdit?.stashToken })
+        for token in tokensBefore.subtracting(tokensAfter) {
+            discardAttachmentStash(token)
+        }
         slotRevision += 1
         scheduleSave()
     }

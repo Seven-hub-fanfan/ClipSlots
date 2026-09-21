@@ -89,7 +89,8 @@ public struct SlotContent: Codable {
 
     // MARK: - Slot Attachment
 
-    public struct SlotAttachment: Codable, Identifiable {
+    // v2.16.5：Equatable 用于画布撤销栈条目的附件编辑比较（全部字段本身 Equatable）。
+    public struct SlotAttachment: Codable, Identifiable, Equatable {
         public var id: UUID = UUID()
         public var name: String
         public var type: AttachmentType

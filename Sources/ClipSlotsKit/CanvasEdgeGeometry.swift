@@ -156,8 +156,15 @@ public enum CanvasEdgeGeometry {
                                c1: CGPoint,
                                c2: CGPoint,
                                end: CGPoint,
-                               samples: Int = 24) -> CGFloat {
-        let n = max(samples, 2)
+                               samples: Int? = nil) -> CGFloat {
+        // v2.16.5：采样数按控制点多边形长度自适应。固定 24 段在 >1000pt 的长连线上，
+        // 折线弦长误差会超过 10pt 命中容差，曲线中点会点不中。约每 24pt 一段，
+        // 下限 12（短连线：命中判定在 hover 通路每帧跑，不白烧 CPU），上限 200（极端坐标护栏）。
+        let polygonLength = hypot(c1.x - start.x, c1.y - start.y)
+            + hypot(c2.x - c1.x, c2.y - c1.y)
+            + hypot(end.x - c2.x, end.y - c2.y)
+        let requested = samples ?? Int((polygonLength / 24).rounded(.up)) + 2
+        let n = min(max(requested, 12), 200)
         var best = CGFloat.greatestFiniteMagnitude
         var previous = start
         for i in 1...n {

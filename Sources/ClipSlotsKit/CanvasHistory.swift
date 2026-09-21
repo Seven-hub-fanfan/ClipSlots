@@ -56,6 +56,8 @@ public struct CanvasHistoryEntry: Identifiable, Equatable {
         case connect
         case disconnect
         case edgeRole
+        /// 改了节点的入参附件列表（增 / 删入参文件、入参提升为主体，v2.16.5）。
+        case editAttachments
 
         /// 面板里显示的动作名。
         public var title: String {
@@ -72,6 +74,7 @@ public struct CanvasHistoryEntry: Identifiable, Equatable {
             case .connect: return "连接节点"
             case .disconnect: return "断开连接"
             case .edgeRole: return "调整连线用途"
+            case .editAttachments: return "编辑入参文件"
             }
         }
 
@@ -89,6 +92,7 @@ public struct CanvasHistoryEntry: Identifiable, Equatable {
             case .connect: return "point.topleft.down.curvedto.point.bottomright.up"
             case .disconnect: return "scissors"
             case .edgeRole: return "arrow.triangle.branch"
+            case .editAttachments: return "paperclip"
             }
         }
     }
@@ -105,6 +109,32 @@ public struct CanvasHistoryEntry: Identifiable, Equatable {
             self.slot = slot
             self.before = before
             self.after = after
+        }
+    }
+
+    /// 需要一并回滚 / 重放的**入参附件列表**改动（v2.16.5，仅画布附件增删改会带）。
+    ///
+    /// 只存附件**元数据**（id / 名称 / 类型 / 路径，data 已外置为 nil）；被删附件的字节
+    /// 由 `CanvasAttachmentStash`（`stashToken` = 条目 id）在磁盘上兜住，因此撤销可以
+    /// 字节级还原，而不必把可能几 MB 的附件塞进内存历史。
+    public struct SlotAttachmentEdit: Equatable {
+        public let groupId: String
+        public let slot: Int
+        public let before: [SlotContent.SlotAttachment]
+        public let after: [SlotContent.SlotAttachment]
+        /// 磁盘暂存 token；历史条目 id 与之一致，由 `CanvasStore` 在条目消失时清理。
+        public let stashToken: String
+
+        public init(groupId: String,
+                    slot: Int,
+                    before: [SlotContent.SlotAttachment],
+                    after: [SlotContent.SlotAttachment],
+                    stashToken: String) {
+            self.groupId = groupId
+            self.slot = slot
+            self.before = before
+            self.after = after
+            self.stashToken = stashToken
         }
     }
 
@@ -126,6 +156,7 @@ public struct CanvasHistoryEntry: Identifiable, Equatable {
     public let beforeEdges: [CanvasEdge]
     public let afterEdges: [CanvasEdge]
     public let slotEdit: SlotTextEdit?
+    public let attachmentEdit: SlotAttachmentEdit?
 
     public init(id: String = UUID().uuidString,
                 kind: Kind,
@@ -135,7 +166,8 @@ public struct CanvasHistoryEntry: Identifiable, Equatable {
                 after: [CanvasNode] = [],
                 beforeEdges: [CanvasEdge] = [],
                 afterEdges: [CanvasEdge] = [],
-                slotEdit: SlotTextEdit? = nil) {
+                slotEdit: SlotTextEdit? = nil,
+                attachmentEdit: SlotAttachmentEdit? = nil) {
         self.id = id
         self.kind = kind
         self.detail = detail
@@ -145,6 +177,7 @@ public struct CanvasHistoryEntry: Identifiable, Equatable {
         self.beforeEdges = beforeEdges
         self.afterEdges = afterEdges
         self.slotEdit = slotEdit
+        self.attachmentEdit = attachmentEdit
     }
 
     /// 相对时间戳文案。
