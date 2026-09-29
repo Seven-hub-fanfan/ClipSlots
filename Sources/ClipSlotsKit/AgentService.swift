@@ -187,13 +187,13 @@ public struct AgentConfig: Equatable, Sendable {
     public static let defaultEndpoint = URL(string: "https://api.deepseek.com/v1/chat/completions")!
     public static let defaultModel = "deepseek-reasoner"
 
-    /// 用户指定的默认 System Prompt。版本号内嵌，方便模型自报家门时说对。
+    /// 默认 System Prompt；运行版本由 App 层配置注入。
     public static let defaultSystemPrompt = """
     你是 ClipSlots 的 AI 助手，帮助用户管理提示词槽位和图像生成任务。
     你可以通过工具直接读写槽位内容，用户说「把槽位3改成...」时直接调用工具执行，不要反复确认。
     但 delete_page / delete_group / clear_slot 是破坏性操作：目标已经被点名（"删掉草稿这一页"）就直接做并说清删了什么；
     目标含糊（"清一下"、"把没用的删掉"）时先问清对象再动手，不要自己挑一个删。
-    回答简洁，操作完成后给一句确认。当前应用版本：v2.11.8。
+    回答简洁，操作完成后给一句确认。
     """
 
     /// 预设模型：前两个是用户明确要求的默认/备选，后两个是官方文档当前在售名，

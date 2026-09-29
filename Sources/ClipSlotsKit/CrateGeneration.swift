@@ -132,6 +132,7 @@ public enum CrateRequestError: Error, Equatable {
     case emptyPrompt
     case emptyModel
     case unsupportedCount(Int)
+    case incompatibleImageInput
     /// 模型要求必须带输入图，但槽位里没有可用图片（实测只有 `veo-3.1-generate-preview`）。
     case missingRequiredImage(model: String)
 
@@ -140,6 +141,7 @@ public enum CrateRequestError: Error, Equatable {
         case .emptyPrompt: return "槽位正文是空的，先写提示词再生成"
         case .emptyModel: return "没有选择模型"
         case .unsupportedCount(let n): return "当前版本一次只出 1 张（现在是 \(n) 张）"
+        case .incompatibleImageInput: return "图片入参包含视频文件，请先提取图片再生成"
         case .missingRequiredImage(let model):
             return "\(model) 必须带一张输入图，先往这个槽位挂张图片"
         }
@@ -228,6 +230,9 @@ public enum CrateGeneration {
         let model = req.model.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !model.isEmpty else { throw CrateRequestError.emptyModel }
         guard req.count == 1 else { throw CrateRequestError.unsupportedCount(req.count) }
+        guard !req.imagePaths.contains(where: { CanvasAttachmentKind.from(fileName: $0) == .video }) else {
+            throw CrateRequestError.incompatibleImageInput
+        }
 
         var args = ["generate", "image", "--model", model, "--prompt", prompt]
         let ratio = req.ratio.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -272,6 +277,10 @@ public enum CrateGeneration {
         guard !prompt.isEmpty else { throw CrateRequestError.emptyPrompt }
         let model = req.model.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !model.isEmpty else { throw CrateRequestError.emptyModel }
+        let images = [req.firstFramePath, req.lastFramePath].compactMap { $0 } + req.referenceImagePaths
+        guard !images.contains(where: { CanvasAttachmentKind.from(fileName: $0) == .video }) else {
+            throw CrateRequestError.incompatibleImageInput
+        }
 
         var args = ["generate", "video", "--model", model, "--prompt", prompt]
         let ratio = req.ratio.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -592,14 +601,17 @@ public enum CrateGeneration {
     ///
     /// - Parameters:
     ///   - outputs: 本节点历史产物的附件 id（`CanvasNode.outputAttachmentIds`）。
+    ///   - includingGeneratedAssets: 显式引用上游槽位时包括生成图；本节点重跑仍排除历史产物。
     ///   - fileExists: 文件存在性探针，注入以便测试不碰真实磁盘。
     public static func inputImagePaths(from attachments: [SlotContent.SlotAttachment],
                                       excludingAttachmentIds outputs: Set<String>,
+                                      includingGeneratedAssets: Bool = false,
                                       fileExists: (String) -> Bool) -> [String] {
         attachments.compactMap { att -> String? in
-            guard att.type == .image else { return nil }
+            guard att.type == .image ||
+                    (att.type == .file && CanvasAttachmentKind.from(fileName: att.name) == .image) else { return nil }
             guard !outputs.contains(att.id.uuidString) else { return nil }
-            guard !isGeneratedAssetName(att.name) else { return nil }
+            guard includingGeneratedAssets || !isGeneratedAssetName(att.name) else { return nil }
             for candidate in [att.storagePath, att.path, att.originalPath] {
                 if let path = candidate, !path.isEmpty, fileExists(path) { return path }
             }

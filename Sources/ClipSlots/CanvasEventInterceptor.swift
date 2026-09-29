@@ -34,6 +34,14 @@ final class CanvasInputRouter: ObservableObject {
     var onMiddleDragEnded: (() -> Void)?
     /// 键盘动作（Delete / Cmd+Z / Cmd+Shift+Z）。返回 true 表示已消费，事件不再下派。
     var onKeyAction: ((CanvasKeyBinding.Action) -> Bool)?
+    var blocksCanvasInput: (() -> Bool)?
+    var usesHandTool: (() -> Bool)?
+    var onPointer: ((NSEvent, CGPoint) -> Bool)?
+    var canPanAt: ((CGPoint) -> Bool)?
+    var onCancelPointer: (() -> Void)?
+    var allowsEditorFocus: (() -> Bool)?
+    /// 非发布属性：光标移动本身无需触发任何 SwiftUI 更新。
+    var cursorPoint: CGPoint = .zero
 
     /// 几何参照物。弱引用：视图随时可能被 SwiftUI 摘掉，路由器不该把它吊住。
     weak var anchorView: NSView?
@@ -49,24 +57,63 @@ final class CanvasInputRouter: ObservableObject {
     /// 本次滚动序列，直到系统发出 ended/cancelled，或一小段时间内没有后续滚轮事件。
     private var scrollLockedToCanvas = false
     private var scrollUnlockWork: DispatchWorkItem?
+    private var spaceHeld = false
+    private var spaceDragging = false
+    private var resignObserver: NSObjectProtocol?
 
     func start() {
         guard monitor == nil else { return }
         monitor = NSEvent.addLocalMonitorForEvents(
-            matching: [.scrollWheel, .otherMouseDown, .otherMouseDragged, .otherMouseUp, .keyDown]
+            matching: [.scrollWheel, .otherMouseDown, .otherMouseDragged, .otherMouseUp,
+                       .leftMouseDown, .leftMouseDragged, .leftMouseUp, .keyDown, .keyUp]
         ) { [weak self] event in
             guard let self else { return event }
-            return self.handle(event) ? nil : event
+            let consumed = self.handle(event)
+            // #region debug-point B-C:control-delivery
+            #if DEBUG
+            if ProcessInfo.processInfo.environment["CLIPSLOTS_CONTROL_PROBE"] == "1", event.type == .leftMouseDown || event.type == .leftMouseUp { var r = URLRequest(url: URL(string: "http://127.0.0.1:7784/event")!); r.httpMethod = "POST"; r.httpBody = try? JSONSerialization.data(withJSONObject: ["sessionId": "slot-input-controls", "runId": ProcessInfo.processInfo.environment["CANVAS_DEBUG_RUN"] ?? "pre-fix", "hypothesisId": "B-C", "msg": "[DEBUG] native control delivery", "data": ["type": event.type.rawValue, "point": NSStringFromPoint(event.locationInWindow), "consumed": consumed, "key": event.window?.isKeyWindow ?? false, "active": NSApp.isActive, "hit": String(describing: event.window?.contentView?.hitTest(event.locationInWindow))]]); URLSession.shared.dataTask(with: r).resume() }
+            #endif
+            // #endregion
+            return consumed ? nil : event
+        }
+        resignObserver = NotificationCenter.default.addObserver(
+            forName: NSWindow.didResignKeyNotification, object: nil, queue: .main
+        ) { [weak self] notification in
+            // #region debug-point B:resign
+            #if DEBUG
+            if ProcessInfo.processInfo.environment["CLIPSLOTS_CANVAS_REGRESSION"] == "1" { var r = URLRequest(url: URL(string: "http://127.0.0.1:7780/event")!); r.httpMethod = "POST"; r.httpBody = try? JSONSerialization.data(withJSONObject: ["sessionId": "canvas-overlay-hit", "runId": ProcessInfo.processInfo.environment["CANVAS_DEBUG_RUN"] ?? "pre-fix", "hypothesisId": "B", "msg": "[DEBUG] window resign", "data": ["window": (notification.object as? NSWindow)?.windowNumber ?? -1, "anchor": self?.anchorView?.window?.windowNumber ?? -1]]); URLSession.shared.dataTask(with: r).resume() }
+            #endif
+            // #endregion
+            guard let self, notification.object as? NSWindow === self.anchorView?.window else { return }
+            self.resetHand()
+            self.onCancelPointer?()
         }
     }
 
     func stop() {
         if let monitor { NSEvent.removeMonitor(monitor) }
         monitor = nil
+        scrollUnlockWork?.cancel()
+        scrollLockedToCanvas = false
         middleDragging = false
+        resetHand()
+        if let resignObserver { NotificationCenter.default.removeObserver(resignObserver) }
+        resignObserver = nil
     }
 
     deinit { stop() }
+
+    private func resetHand() {
+        if spaceHeld { NSCursor.pop() }
+        if spaceDragging || middleDragging { onMiddleDragEnded?() }
+        spaceHeld = false
+        spaceDragging = false
+        middleDragging = false
+    }
+
+    #if DEBUG
+    func routeForRegression(_ event: NSEvent) -> Bool { handle(event) }
+    #endif
 
     /// 返回 true 表示事件已被画布吃掉，不再往下派发。
     private func handle(_ event: NSEvent) -> Bool {
@@ -78,8 +125,55 @@ final class CanvasInputRouter: ObservableObject {
         else { return false }
 
         let local = anchor.convert(event.locationInWindow, from: nil)
+        // #region debug-point A:router
+        #if DEBUG
+        if event.type == .leftMouseDown, ProcessInfo.processInfo.environment["CLIPSLOTS_CANVAS_REGRESSION"] == "1" { var r = URLRequest(url: URL(string: "http://127.0.0.1:7777/event")!); r.httpMethod = "POST"; r.httpBody = try? JSONSerialization.data(withJSONObject: ["sessionId": "canvas-pointer-routing", "runId": ProcessInfo.processInfo.environment["CANVAS_DEBUG_RUN"] ?? "pre-fix", "hypothesisId": "A", "msg": "[DEBUG] router", "data": ["local": NSStringFromPoint(local), "bounds": NSStringFromRect(anchor.bounds)]]); URLSession.shared.dataTask(with: r).resume() }
+        #endif
+        // #endregion
+        if event.type == .keyUp, event.keyCode == 49 {
+            let consumed = spaceHeld
+            resetHand()
+            return consumed
+        }
+        guard window.attachedSheet == nil else { return false }
+        if blocksCanvasInput?() == true {
+            resetHand()
+            if event.type == .keyDown, event.keyCode == 53 {
+                return onKeyAction?(.cancel) ?? false
+            }
+            // 模态层自行处理点击、滚轮；键盘不再穿透到节点。
+            return event.type == .keyDown
+        }
 
         switch event.type {
+        case .leftMouseDown:
+            cursorPoint = local
+            if allowsEditorFocus?() != false,
+               let editor = editorUnderPointer(in: window.contentView, point: local, anchor: anchor) {
+                // SwiftUI 的浮层宿主有时先吃掉 first mouse；焦点按实际 NSTextView 几何补齐。
+                // 事件继续下派，文本系统仍负责插入点、拖选和输入法。
+                window.makeFirstResponder(editor)
+                return false
+            }
+            guard spaceHeld || usesHandTool?() == true, anchor.bounds.contains(local),
+                  canPanAt?(local) != false,
+                  !pointerIsOverScrollView(event, window: window) else { return onPointer?(event, local) ?? false }
+            spaceDragging = true
+            lastMiddlePoint = local
+            NSCursor.closedHand.set()
+            return true
+        case .leftMouseDragged:
+            guard spaceDragging else { return onPointer?(event, local) ?? false }
+            onMiddleDrag?(CGSize(width: local.x - lastMiddlePoint.x,
+                                 height: local.y - lastMiddlePoint.y))
+            lastMiddlePoint = local
+            return true
+        case .leftMouseUp:
+            guard spaceDragging else { return onPointer?(event, local) ?? false }
+            spaceDragging = false
+            onMiddleDragEnded?()
+            NSCursor.openHand.set()
+            return true
         case .scrollWheel:
             guard anchor.bounds.contains(local) || scrollLockedToCanvas else { return false }
             // 光标停在左侧槽位库上时，普通单次滚动应该滚那个列表而不是平移画布；
@@ -123,6 +217,11 @@ final class CanvasInputRouter: ObservableObject {
             // 这两件事必须让文本系统自己处理，否则用户在节点里改 prompt 时按退格会把整个节点删掉
             // —— 这是不可撤回的破坏性误伤，不能靠事后 undo 兜。
             guard !isEditingText(window: window) else { return false }
+            guard !event.modifierFlags.contains(.control) else { return false }
+            if event.keyCode == 49, event.modifierFlags.intersection([.command, .option, .shift]).isEmpty {
+                if !spaceHeld { spaceHeld = true; NSCursor.openHand.push() }
+                return true
+            }
             let action = CanvasKeyBinding.action(keyCode: event.keyCode,
                                                 command: event.modifierFlags.contains(.command),
                                                 shift: event.modifierFlags.contains(.shift),
@@ -144,6 +243,17 @@ final class CanvasInputRouter: ObservableObject {
         guard let responder = window.firstResponder else { return false }
         if let text = responder as? NSText { return text.isEditable }
         return false
+    }
+
+    private func editorUnderPointer(in view: NSView?, point: CGPoint, anchor: NSView) -> NSTextView? {
+        guard let view, !view.isHiddenOrHasHiddenAncestor else { return nil }
+        for child in view.subviews.reversed() {
+            if let editor = editorUnderPointer(in: child, point: point, anchor: anchor) { return editor }
+        }
+        guard let editor = view as? NSTextView, editor.isEditable,
+              editor.visibleRect.width > 0, editor.visibleRect.height > 0,
+              anchor.convert(editor.visibleRect, from: editor).contains(point) else { return nil }
+        return editor
     }
 
     private func scheduleScrollUnlock(for event: NSEvent) {

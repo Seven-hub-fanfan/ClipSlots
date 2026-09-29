@@ -22,6 +22,7 @@ public final class CanvasStorage {
     private var cache: [String: CanvasDocument] = [:]
     /// projectId → 这个项目最近一次 `load()` 是否因为文件损坏而回落成空画布。
     private var loadFailed: [String: Bool] = [:]
+    private var saveErrors: [String: String] = [:]
 
     /// 覆盖数据目录，仅供测试使用。
     private let rootOverride: URL?
@@ -53,6 +54,12 @@ public final class CanvasStorage {
         cacheLock.lock()
         defer { cacheLock.unlock() }
         return loadFailed[projectId] ?? false
+    }
+
+    public func lastSaveError(projectId: String) -> String? {
+        cacheLock.lock()
+        defer { cacheLock.unlock() }
+        return saveErrors[projectId]
     }
 
     // MARK: - 读
@@ -109,25 +116,28 @@ public final class CanvasStorage {
         toWrite.schemaVersion = CanvasDocument.currentSchemaVersion
         toWrite.updatedAt = Date()
 
-        cacheLock.lock()
-        cache[projectId] = toWrite
-        // 成功写过一次就不再是"加载失败"状态：用户已经在这个项目上产生了新的真实状态，
-        // 继续把清扫锁死反而会让残留永远清不掉。
-        loadFailed[projectId] = false
-        cacheLock.unlock()
-
         let url = fileURL(projectId: projectId)
         do {
             let data = try JSONEncoder().encode(toWrite)
-            return (try? StorageLock.shared.withLock {
+            return try StorageLock.shared.withLock {
                 try FileManager.default.createDirectory(at: url.deletingLastPathComponent(),
                                                        withIntermediateDirectories: true)
                 // 写前比对：画布拖拽会高频触发保存，内容没变就不碰磁盘。
-                if let old = try? Data(contentsOf: url), old == data { return true }
-                try data.write(to: url, options: .atomic)
+                if (try? Data(contentsOf: url)) != data {
+                    try data.write(to: url, options: .atomic)
+                }
+                // 缓存只代表已落盘内容；失败不能解除加载失败保护或伪装成保存成功。
+                cacheLock.lock()
+                cache[projectId] = toWrite
+                loadFailed[projectId] = false
+                saveErrors.removeValue(forKey: projectId)
+                cacheLock.unlock()
                 return true
-            }) ?? false
+            }
         } catch {
+            cacheLock.lock()
+            saveErrors[projectId] = error.localizedDescription
+            cacheLock.unlock()
             return false
         }
     }

@@ -41,8 +41,7 @@ public enum CanvasEdgeGeometry {
 
     /// 拖线用的**出口把手**位置：固定在右边中点。
     ///
-    /// 与 `anchor(of:side:)` 算出来的渲染端点刻意分开：把手是"从哪儿开始拖"的固定约定（固定位置
-    /// 才形成肌肉记忆），渲染端点则要顺着两个节点的实际相对位置走才好看。
+    /// 与渲染端点共用固定位置，拖拽、预览和最终连线始终对齐。
     public static func outputHandle(of rect: CGRect) -> CGPoint {
         anchor(of: rect, side: .right)
     }
@@ -54,16 +53,15 @@ public enum CanvasEdgeGeometry {
 
     /// 两个卡片之间该从哪条边出、进哪条边。
     ///
-    /// 以水平（右→左）为**默认**，只有当两者明显是上下关系时才改走竖直。阈值取 1.6 倍而不是 1.0：
-    /// 画布上"下游节点"由 `CanvasSpawnGeometry` 放在正下方偏右，dx/dy 接近时用 1.0 会让这一批线
-    /// 在水平与竖直之间反复横跳（拖动时每帧都可能翻一次），而线型突变比线型不最优难受得多。
+    /// 输出固定右侧、输入固定左侧；节点移动时只改变曲线，不改变端口语义。
     public static func sides(from: CGRect, to: CGRect) -> (out: Side, in: Side) {
-        let dx = to.midX - from.midX
-        let dy = to.midY - from.midY
-        if abs(dy) > 1.6 * abs(dx) {
-            return dy >= 0 ? (.bottom, .top) : (.top, .bottom)
-        }
-        return dx >= 0 ? (.right, .left) : (.left, .right)
+        // 连接语义固定：右侧输出，左侧输入。移动节点不能让端点换边。
+        (.right, .left)
+    }
+
+    public static func hitsInput(_ point: CGPoint, rect: CGRect, radius: CGFloat = 24) -> Bool {
+        let port = inputHandle(of: rect)
+        return rect.contains(point) || hypot(point.x - port.x, point.y - port.y) <= radius
     }
 
     // MARK: - 曲线

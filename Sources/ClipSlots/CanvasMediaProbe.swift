@@ -19,13 +19,25 @@ extension SlotContent.SlotAttachment {
     /// 磁盘上真实存在的文件 URL；只有内嵌字节时返回 nil。
     var canvasLocalURL: URL? {
         let fm = FileManager.default
+        if let url = storageFileURL, fm.fileExists(atPath: url.path) { return url }
         if let path, !path.isEmpty, fm.fileExists(atPath: path) {
             return URL(fileURLWithPath: path)
         }
-        if let url = storageFileURL, fm.fileExists(atPath: url.path) {
-            return url
-        }
         return nil
+    }
+
+    /// 无 IO 的附件身份用于 SwiftUI task；磁盘版本只在后台加载时计算。
+    var canvasSourceIdentity: String {
+        "\(id)|\(type.rawValue)|\(name)|\(storagePath ?? "")|\(path ?? "")|\(data?.hashValue ?? 0)"
+    }
+
+    var canvasSourceVersion: String {
+        let paths = [storageFileURL?.path, path].compactMap { $0 }.filter { !$0.isEmpty }
+        return canvasSourceIdentity + paths.map { path in
+            let attrs = (try? FileManager.default.attributesOfItem(atPath: path)) ?? [:]
+            let modified = (attrs[.modificationDate] as? Date)?.timeIntervalSince1970 ?? 0
+            return "|\(path):\(modified):\(attrs[.size] ?? 0):\(attrs[.systemFileNumber] ?? 0)"
+        }.joined()
     }
 
     /// 在画布上是否按「视频」呈现。
@@ -59,35 +71,42 @@ struct CanvasMediaFacts: Equatable {
 
 /// 媒体元信息探测（v2.15.0）。
 ///
-/// ## 为什么是「同步 + 内存缓存 + 负结果也缓存」
-///
-/// 这套结构是照抄 `VideoThumbnailProvider` 的，理由也一样，而且在这里更充分：
-///   - 探测的成本是**读文件头 / 读轨道属性**，不解码任何像素，在本地文件上是几十微秒量级；
-///   - 做成异步就要引入加载态 + 占位 + 完成回调触发重绘，而这个信息只是角标上的一行小字 ——
-///     为一行小字引入一条异步链路，换来的是"缩放/拖拽时角标闪烁"这种更糟的观感；
-///   - **负结果必须记住**：缺失文件、只有内嵌字节的视频永远量不到时长，不记的话每次视图求值
-///     都会白跑一次 AVFoundation。这正是画布卡顿最隐蔽的来源（v2.11.19 在缩略图上踩过）。
-///
-/// ## 缓存键为什么带 mtime + size
-///
-/// 同一槽位重跑生成会**覆盖**同一个 `attachments/{id}.bin`，路径和附件 id 都不变。只认 id 的话
-/// 角标会一直显示上一条产物的尺寸 —— 而"图换了、尺寸没换"比"没有尺寸"更容易误导人。
+/// UI 通过 load 在后台读取文件版本、轨道和文件头。512 项 LRU 按真实来源共享，
+/// 外部覆盖文件后仅失效对应项，负结果同样有界缓存。
 enum CanvasMediaProbe {
 
     private struct CacheKey: Hashable {
-        let id: String
+        let source: String
         let modified: TimeInterval
         let size: Int64
+        let fileNumber: UInt64
     }
 
     private static var cache: [CacheKey: CanvasMediaFacts] = [:]
-    private static let maxCachedItems = 96
+    private static var accesses: [CacheKey: UInt64] = [:]
+    private static var clock: UInt64 = 0
+    private static let maxCachedItems = 512
+    private static let lock = NSLock()
+    private static let queue = DispatchQueue(label: "com.clipslots.media.facts", qos: .utility)
+
+    static func load(for att: SlotContent.SlotAttachment) async -> (facts: CanvasMediaFacts, version: String) {
+        await withCheckedContinuation { continuation in
+            queue.async {
+                let version = att.canvasSourceVersion
+                continuation.resume(returning: (facts(for: att), version))
+            }
+        }
+    }
 
     /// 探测。失败返回 `isEmpty == true` 的空事实而不是 nil：调用方只需判断 `isEmpty`，
     /// 不必再区分"量不到"和"没量"。
     static func facts(for att: SlotContent.SlotAttachment) -> CanvasMediaFacts {
         let url = att.canvasLocalURL
         let key = makeKey(att, url: url)
+        lock.lock()
+        defer { lock.unlock() }
+        clock &+= 1
+        accesses[key] = clock
         if let hit = cache[key] { return hit }
 
         var facts = CanvasMediaFacts()
@@ -96,8 +115,8 @@ enum CanvasMediaProbe {
         if let url {
             facts.byteCount = fileSize(url)
             if att.canvasIsVideoLike {
-                facts.duration = VideoThumbnailProvider.duration(forFile: url.path)
-                facts.pixelSize = videoPixelSize(url)
+                facts.duration = VideoThumbnailProvider.duration(forFile: url.path, fileName: att.name)
+                facts.pixelSize = videoPixelSize(CanvasVideoAsset.shared.url(for: url, fileName: att.name))
             } else {
                 facts.pixelSize = ClipSlotsImageIO.pixelSize(url: url)
             }
@@ -109,7 +128,10 @@ enum CanvasMediaProbe {
             }
         }
 
-        if cache.count >= maxCachedItems { cache.removeAll(keepingCapacity: true) }
+        if cache.count >= maxCachedItems, let oldest = cache.keys.min(by: { accesses[$0, default: 0] < accesses[$1, default: 0] }) {
+            cache.removeValue(forKey: oldest)
+            accesses.removeValue(forKey: oldest)
+        }
         cache[key] = facts
         return facts
     }
@@ -120,7 +142,10 @@ enum CanvasMediaProbe {
     /// 一眼区分两个节点。格式（PNG/MP4）刻意**不进角标** —— 它在文件名里已经有了，
     /// 而角标的横向空间在 280pt 宽的卡片上非常紧。
     static func badgeLine(for att: SlotContent.SlotAttachment) -> String {
-        let f = facts(for: att)
+        badgeLine(facts: facts(for: att))
+    }
+
+    static func badgeLine(facts f: CanvasMediaFacts) -> String {
         guard !f.isEmpty else { return "" }
         return CanvasMediaInfo.badgeLine([
             f.pixelSize.flatMap { CanvasMediaInfo.sizeLabel($0) },
@@ -140,11 +165,13 @@ enum CanvasMediaProbe {
     private static func makeKey(_ att: SlotContent.SlotAttachment, url: URL?) -> CacheKey {
         guard let url,
               let attrs = try? FileManager.default.attributesOfItem(atPath: url.path) else {
-            return CacheKey(id: att.id.uuidString, modified: 0, size: 0)
+            return CacheKey(source: att.canvasSourceIdentity, modified: 0, size: Int64(att.data?.count ?? 0), fileNumber: 0)
         }
         let modified = (attrs[.modificationDate] as? Date)?.timeIntervalSince1970 ?? 0
         let size = (attrs[.size] as? NSNumber)?.int64Value ?? 0
-        return CacheKey(id: att.id.uuidString, modified: modified, size: size)
+        return CacheKey(source: "\(url.standardizedFileURL.path)|\(att.canvasIsVideoLike)|\(displayFileName(att))",
+                        modified: modified, size: size,
+                        fileNumber: (attrs[.systemFileNumber] as? NSNumber)?.uint64Value ?? 0)
     }
 
     private static func fileSize(_ url: URL) -> Int64? {

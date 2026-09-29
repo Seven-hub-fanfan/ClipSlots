@@ -61,6 +61,7 @@ struct AttachmentManagerPopover: View {
     let groupId: String?
     /// 画布语境：把「附件」一律称作「入参文件」（用户口径，见 hotfix20 需求）。
     let isCanvasContext: Bool
+    private let onWrite: (([SlotContent.SlotAttachment]) -> Bool)?
     @Environment(\.colorScheme) private var scheme
 
     // v2.8.0 (P1-5): the attachment list is derived live from the store instead of
@@ -80,6 +81,8 @@ struct AttachmentManagerPopover: View {
     @State private var draggingId: UUID? = nil
     @State private var dragTranslation: CGFloat = 0
     @State private var dragStartIndex: Int? = nil
+    @State private var dragPreview: [SlotContent.SlotAttachment]?
+    @State private var dragOriginalIDs: [UUID] = []
     // v2.9.17: drag-and-drop / click upload target highlight. True while a file
     // drag hovers the dropzone (empty state) or the compact bottom dropzone.
     @State private var isDropTargeted = false
@@ -91,15 +94,21 @@ struct AttachmentManagerPopover: View {
     init(slot: Int,
          store: SlotStoreObservable,
          groupId: String? = nil,
-         isCanvasContext: Bool = false) {
+         isCanvasContext: Bool = false,
+         onWrite: (([SlotContent.SlotAttachment]) -> Bool)? = nil) {
         self.slot = slot
         self.store = store
         self.groupId = groupId
         self.isCanvasContext = isCanvasContext
+        self.onWrite = onWrite
     }
 
     /// 本槽位附件的实时视图。`groupId` 为 nil 时读当前组。
     private var attachments: [SlotContent.SlotAttachment] {
+        dragPreview ?? storedAttachments
+    }
+
+    private var storedAttachments: [SlotContent.SlotAttachment] {
         if let groupId {
             return store.canvasSlotAttachments(groupId: groupId, slot: slot)
         }
@@ -109,11 +118,21 @@ struct AttachmentManagerPopover: View {
     /// 统一写入口。所有改动都是「读最新 → 改 → 整份写回」，绝不基于构造时的快照，
     /// 否则别处（红叉清空 / 另一个面板 / CLI）的并发改动会被这里整份覆盖掉。
     private func writeAttachments(_ list: [SlotContent.SlotAttachment]) {
-        if let groupId {
-            _ = store.writeCanvasSlotAttachments(groupId: groupId, slot: slot, attachments: list)
+        // #region debug-point C:attachment-write
+        #if DEBUG
+        if ProcessInfo.processInfo.environment["CLIPSLOTS_OPTIMIZATION_PROBE"] == "1" { var r = URLRequest(url: URL(string: "http://127.0.0.1:7785/event")!); r.httpMethod = "POST"; r.httpBody = try? JSONSerialization.data(withJSONObject: ["sessionId": "optimization-repairs", "runId": ProcessInfo.processInfo.environment["CANVAS_DEBUG_RUN"] ?? "pre-fix", "hypothesisId": "C", "msg": "[DEBUG] attachment panel write", "data": ["canvas": isCanvasContext, "beforeCount": attachments.count, "afterCount": list.count]]); URLSession.shared.dataTask(with: r).resume() }
+        #endif
+        // #endregion
+        let ok: Bool
+        if let onWrite {
+            ok = onWrite(list)
+        } else if let groupId {
+            ok = store.writeCanvasSlotAttachments(groupId: groupId, slot: slot, attachments: list)
         } else {
             store.setAttachments(list, for: slot)
+            ok = true
         }
+        if !ok { store.transientUI.showToast("入参保存失败，修改未应用，请重试") }
     }
 
     /// 语境相关的名词：画布上叫「入参文件」，编辑页叫「附件」。
@@ -577,6 +596,8 @@ struct AttachmentManagerPopover: View {
         if draggingId != id {
             draggingId = id
             dragStartIndex = attachments.firstIndex(where: { $0.id == id })
+            dragOriginalIDs = storedAttachments.map(\.id)
+            dragPreview = storedAttachments
         }
         dragTranslation = translation
         guard let start = dragStartIndex else { return }
@@ -589,12 +610,20 @@ struct AttachmentManagerPopover: View {
             let moved = current.remove(at: cur)
             current.insert(moved, at: target)
             withAnimation(Anim.transition) {
-                writeAttachments(current)
+                dragPreview = current
             }
         }
     }
 
     private func handleDragEnded() {
+        let proposed = dragPreview
+        let unchanged = storedAttachments.map(\.id) == dragOriginalIDs
+        dragPreview = nil
+        if let proposed, unchanged {
+            writeAttachments(proposed)
+        } else if proposed != nil {
+            store.transientUI.showToast("附件已在其它位置变化，请重新排序")
+        }
         withAnimation(Anim.transition) {
             draggingId = nil
             dragTranslation = 0
@@ -825,12 +854,16 @@ private struct AttachmentThumbnail: View {
             }
         }
         .frame(width: 32, height: 32)
-        .task(id: attachment.id) {
-            let att = attachment
-            let loaded = await Task.detached(priority: .utility) {
-                AttachmentThumbnailProvider.thumbnail(for: att, maxPixel: 64)
-            }.value
-            if !Task.isCancelled { image = loaded }
+        .task(id: attachment.canvasSourceIdentity) {
+            image = nil
+            while !Task.isCancelled {
+                let loaded = await withCheckedContinuation { continuation in
+                    CanvasAttachmentThumbnails.load(attachment, maxPixel: 64) { continuation.resume(returning: $0) }
+                }
+                guard !Task.isCancelled else { return }
+                if image !== loaded { image = loaded }
+                try? await Task.sleep(for: .seconds(2))
+            }
         }
     }
 }
@@ -839,48 +872,14 @@ enum AttachmentThumbnailProvider {
     /// Returns a small NSImage suitable as a leading cell, or nil to fall back to
     /// the semantic icon. `maxPixel` bounds the longest edge for memory safety.
     static func thumbnail(for att: SlotContent.SlotAttachment, maxPixel: CGFloat) -> NSImage? {
-        switch att.type {
-        case .image:
-            // C-5 (v2.10.31): 之前用 NSImage(contentsOfFile:) / NSImage(data:) 把原图整张
-            // 全尺寸解码进内存再缩小，超大图片会瞬时占用巨量内存甚至 OOM 崩溃。改用
-            // CGImageSourceCreateThumbnailAtIndex 直接解码出受 maxPixel 限制的缩略图，
-            // 全程不做全尺寸解码。
-            // ATT-3 (v2.10.32): 移除失败回退里的 NSImage(contentsOfFile:) / NSImage(data:)
-            // 整图全尺寸解码——这正是 C-5 残留、快速划过大图列表时叠加多份全分辨率缓冲的根因。
-            // 缩略图生成失败（极少数非标准格式）时返回 nil 回退到语义图标，绝不整张解码。
-            if let path = att.path, !path.isEmpty {
-                if let thumb = downsampledThumbnail(path: path, maxPixel: maxPixel) { return thumb }
-            }
-            // P2-D (v2.10.44): 外置字节（storagePath → `{slotDir}/attachments/{id}.bin`，`path` 为 nil）
-            // 按文件 URL 交给 ImageIO 增量下采样，而不是先 resolveData() 把整份 .bin 读进内存再解码。
-            if let url = att.storageFileURL,
-               let thumb = downsampledThumbnail(path: url.path, maxPixel: maxPixel) { return thumb }
-            if let data = att.resolveData() {
-                if let thumb = downsampledThumbnail(data: data, maxPixel: maxPixel) { return thumb }
-            }
-            return nil
-        case .file:
-            guard let path = att.path, !path.isEmpty else { return nil }
-            let url = URL(fileURLWithPath: path)
-            if isVideo(url), let frame = videoFrame(url: url, maxPixel: maxPixel) {
-                return frame
-            }
-            // v2.8.9: many attachments arrive as `.file` even though they are
-            // actually images (e.g. dragged / spilled PNGs). Decode the real
-            // pixels so they render a true thumbnail instead of the generic
-            // Finder "PNG" document icon.
-            // C-5 (v2.10.31): 同样改走缩略图解码。
-            // ATT-3 (v2.10.32): 失败不再回退整图解码，直接落到下方 Finder 图标。
-            if isImage(url) {
-                if let thumb = downsampledThumbnail(path: path, maxPixel: maxPixel) { return thumb }
-            }
-            // Finder icon is always available even for missing files.
-            let icon = NSWorkspace.shared.icon(forFile: path)
-            icon.size = NSSize(width: maxPixel, height: maxPixel)
-            return icon
-        default:
-            return nil
+        if att.type == .image || att.type == .file, let image = mediaPreview(for: att, maxPixel: maxPixel) {
+            return image
         }
+        guard att.type == .file, !att.canvasIsImageLike, !att.canvasIsVideoLike,
+              let path = att.canvasLocalURL?.path else { return nil }
+        let icon = NSWorkspace.shared.icon(forFile: path)
+        icon.size = NSSize(width: maxPixel, height: maxPixel)
+        return icon
     }
 
     // C-5 (v2.10.31): 用 ImageIO 直接从文件/数据解码出缩略图，避免全尺寸解码。
@@ -912,23 +911,8 @@ enum AttachmentThumbnailProvider {
     }
 
     static func fullImage(for att: SlotContent.SlotAttachment) -> NSImage? {
-        switch att.type {
-        case .image:
-            if let path = att.path, !path.isEmpty, let img = NSImage(contentsOfFile: path) { return img }
-            // P2-D (v2.10.44): 外置字节按文件 URL 解码，避免 resolveData() 先把整份 .bin 拷进内存。
-            if let url = att.storageFileURL, let img = NSImage(contentsOf: url) { return img }
-            if let data = att.resolveData(), let img = NSImage(data: data) { return img }
-            return nil
-        case .file:
-            guard let path = att.path, !path.isEmpty else { return nil }
-            let url = URL(fileURLWithPath: path)
-            if isVideo(url) { return videoFrame(url: url, maxPixel: 640) }
-            // v2.8.9: image files stored as `.file` still get a rich preview.
-            if isImage(url), let img = NSImage(contentsOfFile: path) { return img }
-            return nil
-        default:
-            return nil
-        }
+        guard att.type == .image || att.type == .file else { return nil }
+        return mediaPreview(for: att, maxPixel: 4096)
     }
 
     // ATT-3 (v2.10.32): the hover preview panel is only ~340-640pt, but `fullImage`
@@ -940,25 +924,8 @@ enum AttachmentThumbnailProvider {
     // memory and finishes quickly. Falls back to nil (→ card fallback) on failure —
     // never a full-resolution decode.
     static func previewImage(for att: SlotContent.SlotAttachment, maxPixel: CGFloat) -> NSImage? {
-        switch att.type {
-        case .image:
-            if let path = att.path, !path.isEmpty,
-               let thumb = downsampledThumbnail(path: path, maxPixel: maxPixel) { return thumb }
-            // P2-D (v2.10.44): 外置字节按文件 URL 增量下采样，避免整份 .bin 读进内存再解码。
-            if let url = att.storageFileURL,
-               let thumb = downsampledThumbnail(path: url.path, maxPixel: maxPixel) { return thumb }
-            if let data = att.resolveData(),
-               let thumb = downsampledThumbnail(data: data, maxPixel: maxPixel) { return thumb }
-            return nil
-        case .file:
-            guard let path = att.path, !path.isEmpty else { return nil }
-            let url = URL(fileURLWithPath: path)
-            if isVideo(url) { return videoFrame(url: url, maxPixel: maxPixel) }
-            if isImage(url) { return downsampledThumbnail(path: path, maxPixel: maxPixel) }
-            return nil
-        default:
-            return nil
-        }
+        guard att.type == .image || att.type == .file else { return nil }
+        return mediaPreview(for: att, maxPixel: maxPixel)
     }
 
     static func isImage(_ url: URL) -> Bool {
@@ -966,6 +933,21 @@ enum AttachmentThumbnailProvider {
             return type.conforms(to: .image)
         }
         return false
+    }
+
+    private static func mediaPreview(for att: SlotContent.SlotAttachment, maxPixel: CGFloat) -> NSImage? {
+        let candidates = [att.storageFileURL, att.path.flatMap { $0.isEmpty ? nil : URL(fileURLWithPath: $0) }].compactMap { $0 }
+        for url in candidates where FileManager.default.fileExists(atPath: url.path) {
+            if att.canvasIsVideoLike {
+                if let frame = VideoThumbnailProvider.thumbnail(forFile: url.path, fileName: att.name) { return frame }
+            } else if let image = downsampledThumbnail(path: url.path, maxPixel: maxPixel) {
+                return image
+            }
+        }
+        if !att.canvasIsVideoLike, let data = att.data {
+            return downsampledThumbnail(data: data, maxPixel: maxPixel)
+        }
+        return nil
     }
 
     static func isVideo(_ url: URL) -> Bool {
@@ -1045,13 +1027,11 @@ private struct AttachmentPreviewContent: View {
 
     @ViewBuilder
     private var fileContent: some View {
-        if let path = attachment.path, !path.isEmpty,
-           AttachmentThumbnailProvider.isVideo(URL(fileURLWithPath: path)) {
+        if attachment.canvasIsVideoLike {
             AsyncPreviewImage(attachment: attachment) {
                 fileCard(icon: "play.rectangle.fill", title: "视频")
             }
-        } else if let path = attachment.path, !path.isEmpty,
-                  AttachmentThumbnailProvider.isImage(URL(fileURLWithPath: path)) {
+        } else if attachment.canvasIsImageLike {
             AsyncPreviewImage(attachment: attachment) {
                 fileCard(icon: "photo", title: "图片")
             }
@@ -1187,6 +1167,15 @@ private struct FirstMouseClickHandle: NSViewRepresentable {
 final class ClickHandleNSView: NSView {
     var action: (() -> Void)?
 
+    // #region debug-point C:native-hit
+    #if DEBUG
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        let hit = super.hitTest(point)
+        if ProcessInfo.processInfo.environment["CLIPSLOTS_OPTIMIZATION_PROBE"] == "1", bounds.width == 22 { var r = URLRequest(url: URL(string: "http://127.0.0.1:7785/event")!); r.httpMethod = "POST"; r.httpBody = try? JSONSerialization.data(withJSONObject: ["sessionId": "optimization-repairs", "runId": ProcessInfo.processInfo.environment["CANVAS_DEBUG_RUN"] ?? "pre-fix", "hypothesisId": "C", "msg": "[DEBUG] native delete hit", "data": ["point": NSStringFromPoint(point), "frame": NSStringFromRect(frame), "hit": hit != nil]]); URLSession.shared.dataTask(with: r).resume() }
+        return hit
+    }
+    #endif
+    // #endregion
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 
     override func resetCursorRects() {

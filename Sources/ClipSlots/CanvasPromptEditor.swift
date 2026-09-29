@@ -30,6 +30,9 @@ struct CanvasPromptEditor: NSViewRepresentable {
     let onCancel: () -> Void
     /// 失焦。与 `onCommit` 分开传是为了让调用方能给两条路径不同语义（当前两者都保存）。
     let onBlur: () -> Void
+    var autoFocus: Bool = true
+    var placeholder: String? = nil
+    var onFocus: (() -> Void)? = nil
 
     func makeNSView(context: Context) -> NSScrollView {
         let scroll = NSScrollView()
@@ -40,6 +43,9 @@ struct CanvasPromptEditor: NSViewRepresentable {
         scroll.autohidesScrollers = true
 
         let textView = FocusGrabbingTextView()
+        textView.autoFocus = autoFocus
+        textView.placeholder = placeholder
+        textView.onFocus = onFocus
         textView.delegate = context.coordinator
         textView.string = text
         textView.font = font
@@ -54,19 +60,10 @@ struct CanvasPromptEditor: NSViewRepresentable {
         textView.isHorizontallyResizable = false
         textView.autoresizingMask = [.width]
         textView.textContainer?.widthTracksTextView = true
-        // ★ v2.16.0：墨色**写死为亮色**，不能用 `NSColor.labelColor`。
-        //
-        // `labelColor` 是动态色，跟随视图的 `NSAppearance`。画布在 v2.16.0 之前也跟着系统深浅走，
-        // 所以它是对的；现在画布固定纯黑、卡片固定 `#1F1F1F`（见 `AppTheme.canvasSurface` 的
-        // 注释），浅色模式下 `labelColor` 解析成近黑 —— **在深色卡片上编辑提示词时看不见自己
-        // 打的字**。装机实测发现的：编辑态那张卡上只有一个闪动的光标。
-        //
-        // 同时把整个滚动视图的 appearance 钉成 darkAqua。只改 `textColor` 不够：选区高亮
-        // （`selectedTextBackgroundColor`）和滚动条也是动态色，浅色模式下选中一段文字会得到
-        // 一块浅蓝底 + 近黑字，对比度比不选还差。appearance 一钉，这些派生色全部跟着走对。
-        textView.textColor = NSColor.white.withAlphaComponent(0.92)
+        // V2.17.4: 编辑正文、占位和选区跟随宿主外观，切换主题不替换编辑器或丢失光标。
+        textView.textColor = NSColor(TapSkin.ink)
         textView.insertionPointColor = NSColor.controlAccentColor
-        scroll.appearance = NSAppearance(named: .darkAqua)
+        scroll.appearance = nil
         // 全选，符合"点编辑就想整段重写"的常见意图；想追加的话按一下 → 即可。
         // ★ v2.11.9：**不再全选**，而是把插入点放到文本开头。
         //
@@ -100,6 +97,16 @@ struct CanvasPromptEditor: NSViewRepresentable {
     func updateNSView(_ scroll: NSScrollView, context: Context) {
         guard let textView = scroll.documentView as? NSTextView else { return }
         context.coordinator.parent = self
+        if let view = textView as? FocusGrabbingTextView {
+            view.onFocus = onFocus
+            view.placeholder = placeholder
+            let shouldFocus = autoFocus && !view.autoFocus
+            view.autoFocus = autoFocus
+            if shouldFocus { DispatchQueue.main.async { [weak view] in
+                guard let view, view.autoFocus else { return }
+                view.window?.makeFirstResponder(view)
+            } }
+        }
         if textView.font != font { textView.font = font }
         // ★ 只在**外部**值与视图内容不一致时才回写，且必须跳过"正在输入"的情形。
         // 无条件 `textView.string = text` 会在每次 SwiftUI 重建时把光标弹回开头（打一个字跳一次），
@@ -116,6 +123,7 @@ struct CanvasPromptEditor: NSViewRepresentable {
         weak var textView: NSTextView?
         /// 用户正在这个控件里打字。用来挡掉 `updateNSView` 的回写（见那边注释）。
         var isEditing = false
+        private var finished = false
 
         init(parent: CanvasPromptEditor) {
             self.parent = parent
@@ -123,6 +131,7 @@ struct CanvasPromptEditor: NSViewRepresentable {
 
         func textDidBeginEditing(_ notification: Notification) {
             isEditing = true
+            finished = false
         }
 
         func textDidChange(_ notification: Notification) {
@@ -133,7 +142,14 @@ struct CanvasPromptEditor: NSViewRepresentable {
 
         func textDidEndEditing(_ notification: Notification) {
             guard let tv = notification.object as? NSTextView else { return }
+            // #region debug-point E:composer-blur
+            #if DEBUG
+            if ProcessInfo.processInfo.environment["CLIPSLOTS_MEDIA_THEME_PROBE"] == "1" { var r = URLRequest(url: URL(string: "http://127.0.0.1:7785/event")!); r.httpMethod = "POST"; r.httpBody = try? JSONSerialization.data(withJSONObject: ["sessionId": "optimization-repairs", "runId": ProcessInfo.processInfo.environment["CANVAS_DEBUG_RUN"] ?? "", "hypothesisId": "E", "msg": "[DEBUG] composer blur", "data": ["length": tv.string.count, "finished": finished]]); URLSession.shared.dataTask(with: r).resume() }
+            #endif
+            // #endregion
             isEditing = false
+            guard !finished else { return }
+            finished = true
             parent.text = tv.string
             // 失焦即落库。不判"改没改"—— 下游（槽位写入）本身在无变化时提前返回，
             // 在这里判反而会漏掉边界（比如 IME 组字刚提交就切走）。
@@ -153,7 +169,9 @@ struct CanvasPromptEditor: NSViewRepresentable {
                 }
                 parent.text = textView.string
                 isEditing = false
+                finished = true
                 parent.onCommit()
+                textView.window?.makeFirstResponder(nil)
                 return true
 
             case #selector(NSResponder.insertLineBreak(_:)):
@@ -163,7 +181,9 @@ struct CanvasPromptEditor: NSViewRepresentable {
 
             case #selector(NSResponder.cancelOperation(_:)):
                 isEditing = false
+                finished = true
                 parent.onCancel()
+                textView.window?.makeFirstResponder(nil)
                 return true
 
             default:
@@ -176,10 +196,28 @@ struct CanvasPromptEditor: NSViewRepresentable {
 /// 挂到窗口上就自己抢焦点的 NSTextView。见 `CanvasPromptEditor` 的「焦点」一节。
 private final class FocusGrabbingTextView: NSTextView {
     private var hasGrabbedFocus = false
+    var autoFocus = true
+    var placeholder: String?
+    var onFocus: (() -> Void)?
+
+    override func becomeFirstResponder() -> Bool {
+        let accepted = super.becomeFirstResponder()
+        if accepted { DispatchQueue.main.async { [weak self] in self?.onFocus?() } }
+        return accepted
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        super.draw(dirtyRect)
+        if string.isEmpty, let placeholder {
+            (placeholder as NSString).draw(at: CGPoint(x: textContainerInset.width + 5, y: textContainerInset.height),
+                                          withAttributes: [.font: font ?? NSFont.systemFont(ofSize: 13),
+                                                           .foregroundColor: NSColor(TapSkin.faintInk)])
+        }
+    }
 
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
-        guard !hasGrabbedFocus, let window else { return }
+        guard autoFocus, !hasGrabbedFocus, let window else { return }
         hasGrabbedFocus = true
 
         // ★ v2.11.9：先**同帧同步**抢一次。

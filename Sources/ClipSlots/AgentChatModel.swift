@@ -54,7 +54,8 @@ enum AgentPreferences {
         return AgentConfig(
             endpoint: url,
             model: trimmedModel.isEmpty ? AgentConfig.defaultModel : trimmedModel,
-            systemPrompt: systemPrompt,
+            systemPrompt: systemPrompt.replacingOccurrences(of: "当前应用版本：v2.11.8。", with: "")
+                + "\n当前应用版本：v\(AppVersion.current)。",
             thinkingMode: AgentThinkingMode(rawValue: thinkingRaw) ?? .serverDefault,
             // 空串表示"不发 reasoning_effort"，见 AgentService 文件头约定 2。
             reasoningEffort: reasoningEffort.isEmpty ? nil : reasoningEffort)
@@ -97,7 +98,7 @@ final class AgentSkillLibrary: ObservableObject {
 // MARK: - 工具执行状态（UI 用）
 
 struct AgentToolActivity: Identifiable, Equatable {
-    enum State: Equatable { case running, success, failure }
+    enum State: Equatable { case running, success, failure, stopped }
     let id: String          // tool_call id
     let name: String
     let argumentsPreview: String
@@ -109,14 +110,37 @@ struct AgentToolActivity: Identifiable, Equatable {
 
 @MainActor
 final class AgentChatModel: ObservableObject {
+    struct SavedConversation: Codable, Identifiable {
+        var id: UUID
+        var messages: [AgentMessage]
+        var draft: String
+        var updatedAt: Date
+        var title: String { String((messages.first { $0.role == .user }?.content ?? draft).prefix(30)) }
+    }
+    private struct SavedSessions: Codable {
+        var current: SavedConversation
+        var recent: [SavedConversation]
+    }
+    private static let instances = NSHashTable<AgentChatModel>.weakObjects()
+    static func flushAll() -> Bool { instances.allObjects.map { $0.flushSession() }.allSatisfy { $0 } }
+    @Published private(set) var recentConversations: [SavedConversation] = []
+    @Published private(set) var persistenceError: String?
+    private var conversationId = UUID()
+    private let persistenceURL: URL?
+    private let persistenceQueue = DispatchQueue(label: "com.clipslots.agent.sessions", qos: .utility)
+    private var persistenceTask: Task<Void, Never>?
+    private var restoring = false
+    private var unreadableHistory = false
     /// 完整线上下文（含 role=tool 的消息）。UI 渲染时再折叠成气泡 + 工具行。
     /// 刻意保存完整历史而不是"只留展示用的部分"：工具结果是模型下一轮的依据，
     /// 丢了它模型就会重复调用同一个工具。
-    @Published private(set) var messages: [AgentMessage] = []
+    @Published private(set) var messages: [AgentMessage] = [] { didSet { schedulePersistence() } }
     @Published private(set) var streamingContent = ""
     @Published private(set) var streamingReasoning = ""
     @Published private(set) var liveActivities: [AgentToolActivity] = []
     @Published private(set) var isRunning = false
+    /// 草稿跟随会话存活；收起侧栏、切换皮肤重建视图时保留。
+    @Published var draft = "" { didSet { schedulePersistence() } }
     @Published var errorText: String?
     /// 上一轮 token 用量，显示在输入区上方（让用户对成本有感知）。
     @Published private(set) var usageLine: String?
@@ -127,13 +151,96 @@ final class AgentChatModel: ObservableObject {
     private let service: AgentService
     private let registry: AgentToolRegistry
     private var runTask: Task<Void, Never>?
+    private var currentRunID: UUID?
 
     init(displayName: String,
          service: AgentService = AgentService(),
-         registry: AgentToolRegistry = AgentToolRegistry()) {
+         registry: AgentToolRegistry = AgentToolRegistry(),
+         persistenceURL: URL? = nil) {
         self.displayName = displayName
         self.service = service
         self.registry = registry
+        self.persistenceURL = persistenceURL
+        restoring = true
+        if let persistenceURL, FileManager.default.fileExists(atPath: persistenceURL.path) {
+            do {
+                let saved = try JSONDecoder().decode(SavedSessions.self, from: Data(contentsOf: persistenceURL))
+                conversationId = saved.current.id
+                messages = saved.current.messages
+                draft = saved.current.draft
+                recentConversations = saved.recent
+                settleUnfinishedTools()
+            } catch {
+                unreadableHistory = true
+                persistenceError = "会话历史读取失败，原文件已保留：\(error.localizedDescription)"
+            }
+        }
+        restoring = false
+        Self.instances.add(self)
+    }
+
+    private var snapshot: SavedConversation {
+        .init(id: conversationId, messages: messages, draft: draft, updatedAt: Date())
+    }
+
+    private func schedulePersistence() {
+        guard persistenceURL != nil, !restoring else { return }
+        persistenceTask?.cancel()
+        persistenceTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .milliseconds(300))
+            guard !Task.isCancelled, let self else { return }
+            self.flushSession()
+        }
+    }
+
+    @discardableResult
+    func flushSession() -> Bool {
+        persistenceTask?.cancel()
+        persistenceTask = nil
+        guard let persistenceURL else { return true }
+        do {
+            let data = try JSONEncoder().encode(SavedSessions(current: snapshot, recent: recentConversations))
+            let preserveUnreadable = unreadableHistory
+            try persistenceQueue.sync {
+                let fm = FileManager.default
+                try fm.createDirectory(at: persistenceURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+                if preserveUnreadable {
+                    try fm.copyItem(at: persistenceURL, to: persistenceURL.appendingPathExtension("unreadable-\(UUID().uuidString)"))
+                }
+                try data.write(to: persistenceURL, options: .atomic)
+                try fm.setAttributes([.posixPermissions: 0o600], ofItemAtPath: persistenceURL.path)
+            }
+            unreadableHistory = false
+            persistenceError = nil
+            return true
+        } catch {
+            persistenceError = "会话尚未保存：\(error.localizedDescription)"
+            return false
+        }
+    }
+
+    private func archiveCurrent() {
+        guard !messages.isEmpty || !draft.isEmpty else { return }
+        recentConversations.removeAll { $0.id == conversationId }
+        recentConversations.insert(snapshot, at: 0)
+        recentConversations = Array(recentConversations.prefix(30))
+    }
+
+    func openConversation(id: UUID) {
+        guard let saved = recentConversations.first(where: { $0.id == id }) else { return }
+        stop()
+        archiveCurrent()
+        restoring = true
+        recentConversations.removeAll { $0.id == id }
+        conversationId = saved.id
+        messages = saved.messages
+        draft = saved.draft
+        settleUnfinishedTools()
+        liveActivities = []
+        errorText = nil
+        usageLine = nil
+        restoring = false
+        flushSession()
     }
 
     var hasAPIKey: Bool { service.hasAPIKey }
@@ -177,6 +284,8 @@ final class AgentChatModel: ObservableObject {
         liveActivities = []
 
         let history = messages
+        let runID = UUID()
+        currentRunID = runID
         runTask = Task { [weak self] in
             guard let self else { return }
             do {
@@ -184,40 +293,63 @@ final class AgentChatModel: ObservableObject {
                 try await self.service.run(history: history,
                                            config: config,
                                            tools: self.registry) { event in
-                    await self.apply(event)
+                    await self.apply(event, runID: runID)
                 }
-                await MainActor.run { self.completeRun() }
+                await MainActor.run {
+                    guard self.currentRunID == runID else { return }
+                    self.completeRun()
+                }
             } catch let error as AgentError {
-                await MainActor.run { self.failRun(error) }
+                await MainActor.run {
+                    guard self.currentRunID == runID else { return }
+                    self.failRun(error)
+                }
             } catch is CancellationError {
-                await MainActor.run { self.failRun(AgentError.cancelled) }
+                await MainActor.run {
+                    guard self.currentRunID == runID else { return }
+                    self.failRun(AgentError.cancelled)
+                }
             } catch {
-                await MainActor.run { self.failRun(AgentError.network(error.localizedDescription)) }
+                await MainActor.run {
+                    guard self.currentRunID == runID else { return }
+                    self.failRun(AgentError.network(error.localizedDescription))
+                }
             }
         }
     }
 
     func stop() {
+        guard isRunning else { return }
+        // Some transports finish their stream normally on cancellation. Settle here
+        // and invalidate queued callbacks so a stopped answer cannot resume.
+        currentRunID = nil
         runTask?.cancel()
-        runTask = nil
-        // 不在这里改 isRunning：让 catch 分支统一收尾，避免"UI 已恢复但流还在写"的错位。
+        failRun(.cancelled)
     }
 
     func clearHistory() {
+        currentRunID = nil
         stop()
+        archiveCurrent()
+        restoring = true
+        conversationId = UUID()
         messages = []
         streamingContent = ""
         streamingReasoning = ""
         liveActivities = []
         errorText = nil
         usageLine = nil
+        draft = ""
         isRunning = false
+        restoring = false
+        flushSession()
     }
 
     // MARK: 事件
 
-    private func apply(_ event: AgentRunEvent) async {
+    private func apply(_ event: AgentRunEvent, runID: UUID) async {
         await MainActor.run {
+            guard self.currentRunID == runID else { return }
             switch event {
             case .reasoningDelta(let text):
                 streamingReasoning += text
@@ -254,13 +386,16 @@ final class AgentChatModel: ObservableObject {
     }
 
     private func completeRun() {
+        settleUnfinishedTools()
         isRunning = false
         runTask = nil
         streamingContent = ""
         streamingReasoning = ""
+        flushSession()
     }
 
     private func failRun(_ error: AgentError) {
+        settleUnfinishedTools()
         isRunning = false
         runTask = nil
         // 已经流出来的半截回答保留成一条消息，不要连同错误一起丢——
@@ -277,6 +412,22 @@ final class AgentChatModel: ObservableObject {
         } else {
             errorText = error.errorDescription
             if error == .missingAPIKey { needsConfiguration = true }
+        }
+        flushSession()
+    }
+
+    /// 中断只说明没有收到结果，不能声称有副作用的工具已撤销或未执行。
+    private func settleUnfinishedTools() {
+        let completed = Set(messages.filter { $0.role == .tool }.compactMap(\.toolCallId))
+        let missing = messages.flatMap(\.toolCalls).filter { !completed.contains($0.id) }
+        for call in missing {
+            messages.append(AgentMessage(role: .tool,
+                content: #"{"error_code":"interrupted","message":"本地跟踪已停止，执行结果未知；继续操作前请检查槽位实际内容，勿直接重复修改。"}"#,
+                toolCallId: call.id, toolName: call.name, isFailure: true))
+        }
+        for index in liveActivities.indices where liveActivities[index].state == .running {
+            liveActivities[index].state = .stopped
+            liveActivities[index].summary = "已停止 · 结果未知"
         }
     }
 
@@ -328,7 +479,7 @@ final class AgentChatModel: ObservableObject {
                             id: call.id,
                             name: call.name,
                             argumentsPreview: Self.preview(call.argumentsJSON),
-                            state: result == nil ? .running : (result!.isFailure ? .failure : .success),
+                            state: result == nil ? .running : (Self.wasInterrupted(result!) ? .stopped : (result!.isFailure ? .failure : .success)),
                             summary: result.map { Self.summarize($0) })
                     }
                     items.append(TranscriptItem(id: message.id.uuidString + "_tools", kind: .tools(rows)))
@@ -341,6 +492,7 @@ final class AgentChatModel: ObservableObject {
     }
 
     static func summarize(_ toolMessage: AgentMessage) -> String {
+        if wasInterrupted(toolMessage) { return "已停止 · 结果未知" }
         if toolMessage.isFailure {
             if let code = (try? JSONValue.decode(jsonText: toolMessage.content))?["error_code"]?.stringValue {
                 return "失败（\(code)）"
@@ -348,6 +500,10 @@ final class AgentChatModel: ObservableObject {
             return "失败"
         }
         return "完成"
+    }
+
+    private static func wasInterrupted(_ message: AgentMessage) -> Bool {
+        (try? JSONValue.decode(jsonText: message.content))?["error_code"]?.stringValue == "interrupted"
     }
 }
 
@@ -358,8 +514,10 @@ final class AgentChatModel: ObservableObject {
 
 @MainActor
 final class AgentSessionStore: ObservableObject {
-    let edit = AgentChatModel(displayName: "编辑页")
-    let canvas = AgentChatModel(displayName: "画布页")
+    let edit = AgentChatModel(displayName: "编辑页",
+        persistenceURL: ClipSlotsPaths.dataRoot.appendingPathComponent("agent-sessions/edit.json"))
+    let canvas = AgentChatModel(displayName: "画布页",
+        persistenceURL: ClipSlotsPaths.dataRoot.appendingPathComponent("agent-sessions/canvas.json"))
 
     func session(for mode: WorkspaceMode) -> AgentChatModel {
         mode == .canvas ? canvas : edit

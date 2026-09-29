@@ -30,6 +30,17 @@ enum AppSkinCenter {
     /// 若此时缓存还是旧值，重建出来的第一帧会用旧皮肤画，紧接着又被通知刷一次——闪一下。
     static func apply(_ skin: AppSkin) {
         guard skin != current else { return }
+        // #region debug-point E:theme-editor-focus
+        #if DEBUG
+        if ProcessInfo.processInfo.environment["CLIPSLOTS_MEDIA_THEME_PROBE"] == "1" { var r = URLRequest(url: URL(string: "http://127.0.0.1:7785/event")!); r.httpMethod = "POST"; r.httpBody = try? JSONSerialization.data(withJSONObject: ["sessionId": "optimization-repairs", "runId": ProcessInfo.processInfo.environment["CANVAS_DEBUG_RUN"] ?? "", "hypothesisId": "E", "msg": "[DEBUG] theme change editor focus", "data": ["windows": NSApp.windows.filter(\.isVisible).map { ["key": $0.isKeyWindow, "window": String(describing: type(of: $0)), "responder": String(describing: type(of: $0.firstResponder)), "textLength": ($0.firstResponder as? NSTextView)?.string.count ?? -1] }]]); URLSession.shared.dataTask(with: r).resume() }
+        #endif
+        // #endregion
+        // 外观弹层可能已拿走 keyWindow，主窗口仍保留编辑器；重建所有宿主前逐个提交。
+        for window in NSApp.windows {
+            if let text = window.firstResponder as? NSTextView, text.isEditable {
+                window.makeFirstResponder(nil)
+            }
+        }
         current = skin
         skin.store(in: .standard)
         NotificationCenter.default.post(name: didChangeNotification, object: nil)

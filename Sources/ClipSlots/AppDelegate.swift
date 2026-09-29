@@ -261,6 +261,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         setupHotKeys()
     }
 
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        let canvasSaved = CanvasStore.flushAll()
+        let agentSaved = AgentChatModel.flushAll()
+        guard !canvasSaved || !agentSaved else { return .terminateNow }
+        let alert = NSAlert()
+        alert.messageText = canvasSaved ? "Agent 会话尚未保存" : "画布尚未保存"
+        alert.informativeText = "写入失败，修改仍保留在内存中。请检查存储位置或磁盘空间后重试。"
+        alert.addButton(withTitle: "返回继续编辑")
+        alert.addButton(withTitle: "重试保存")
+        if alert.runModal() == .alertSecondButtonReturn {
+            let canvasSaved = CanvasStore.flushAll()
+            let agentSaved = AgentChatModel.flushAll()
+            if canvasSaved && agentSaved { return .terminateNow }
+        }
+        return .terminateCancel
+    }
+
     func applicationWillTerminate(_ notification: Notification) {
         hotkeyManager.unregisterAll()
         radialMenuController.dismiss()

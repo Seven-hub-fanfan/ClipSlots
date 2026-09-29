@@ -73,7 +73,8 @@ enum CanvasGenerationParamEdits {
 /// 放在外面还有一个好处：尺寸**不随 zoom 缩放**。25% 视图下跟着缩的按钮点不中，而"跑一下"
 /// 是这条链路上最高频的动作 —— 操作把手属于"操作尺度"，不属于画布内容。
 struct CanvasNodeActionBar: View {
-
+    @AppStorage(AgentPreferences.modelKey) private var textModel = AgentConfig.defaultModel
+    @State private var showingAspectPicker = false
     let node: CanvasNode
     @ObservedObject var canvas: CanvasStore
     @ObservedObject var catalog: CrateModelCatalogStore
@@ -96,10 +97,8 @@ struct CanvasNodeActionBar: View {
     let onCopyText: (() -> Void)?
 
     var body: some View {
-        HStack(spacing: TapSkin.toolbarItemSpacing) {
-            runControl
+        HStack(spacing: 10) {
             if node.kind.producesAsset {
-                barDivider
                 modelChip
                 if currentModel?.supportsRatio ?? true { ratioChip }
                 if isVideo {
@@ -107,35 +106,29 @@ struct CanvasNodeActionBar: View {
                     if currentModel?.supportsDuration ?? false { durationChip }
                     if currentModel?.supportsAudio ?? false { audioChip }
                 }
+            } else {
+                Menu {
+                    ForEach(AgentConfig.modelPresets) { preset in
+                        Button(preset.id) { textModel = preset.id }
+                    }
+                } label: {
+                    Label(textModel, systemImage: "sparkles")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundColor(TapSkin.chromeInk)
+                }
+                .menuStyle(.borderlessButton)
+                .menuIndicator(.hidden)
+                .fixedSize()
+                .help("提示词优化模型")
+                Text("生图 Prompt")
+                    .font(.system(size: 11))
+                    .foregroundColor(TapSkin.chromeInkDim)
             }
-            barDivider
-            spawnButton
-            // ★ v2.15.0：全屏 / 入库。两者都放在「产物动作」这一档里 —— 它们的对象是**节点的内容**
-            // 而不是节点的参数，和 `spawnButton` / `revealButton` 同类。
-            if let onCopyText { copyTextButton(onCopyText) }
-            if let onOpenFullscreen { fullscreenButton(onOpenFullscreen) }
-            if canArchive { archiveButton }
-            if case .succeeded(let path) = node.state, !path.isEmpty {
-                revealButton(path)
-            }
+            Spacer(minLength: 0)
             if upstreamCount > 0 { upstreamBadge }
+            runControl
         }
-        .padding(.horizontal, 14)
-        // v2.16.0：固定 44pt 高（实测 TapNow），不再由内容撑出高度。
-        //
-        // 原来是 `.padding(.vertical, 5)`，高度取决于里面最高的那个 chip —— 于是同一个画布上
-        // 不同节点的操作条高矮不一（文本节点没有模型 chip，矮一截），hover 在两张卡之间来回移动时
-        // 那条胶囊在上下跳。固定高度让它变成一个**稳定的容器**，这正是"丝滑"的一部分：
-        // 界面元素不应该因为内容不同而改变自己的骨架。
-        .frame(height: TapSkin.toolbarHeight)
-        .background(
-            Capsule(style: .continuous)
-                .fill(TapSkin.chromeFill)
-                // 不描边。纯黑画布上，`#1E1E1E` 的胶囊自己就有清晰边界；加一圈亮边等于给
-                // 一个临时浮层画上"控件框"，而 TapNow 全套 chrome 都没有描边。
-                // 阴影也压到最轻：它的作用只是把胶囊从卡片上"抬起来"半毫米。
-                .shadow(color: Color.black.opacity(0.55), radius: 10, x: 0, y: 3)
-        )
+        .frame(height: 34)
         .onAppear { catalog.loadIfNeeded() }
     }
 
@@ -155,7 +148,7 @@ struct CanvasNodeActionBar: View {
     /// 就是"它到底在跑吗、跑了多久"（节点状态里存的 `startedAt` 正是为此）。
     @ViewBuilder
     private var runControl: some View {
-        if !node.kind.producesAsset {
+        if node.kind == .slot {
             // 文本节点没有"跑"这件事。给一句说明而不是留空：空白会让人以为按钮没加载出来。
             Label("文本节点", systemImage: "text.alignleft")
                 .labelStyle(.titleAndIcon)
@@ -166,24 +159,35 @@ struct CanvasNodeActionBar: View {
             case .queued, .running:
                 HStack(spacing: 4) {
                     ProgressView().controlSize(.small).scaleEffect(0.7).frame(width: 12, height: 12)
-                    Text(runningLabel)
+                    Text(canvas.isStoppingGeneration(node) ? "正在停止跟踪" : runningLabel)
                         .font(.system(size: 11, weight: .medium))
                         .foregroundColor(AppTheme.chromeAccentInk)
+                    if node.kind.producesAsset {
+                        Button { canvas.stopGeneration(node) } label: {
+                            Image(systemName: "stop.fill").frame(width: 28, height: 28)
+                        }
+                        .buttonStyle(.plain)
+                        .disabled(canvas.isStoppingGeneration(node))
+                        .help("停止本地跟踪，远端任务仍可能继续；稍后可继续查询")
+                    }
                 }
                 .padding(.horizontal, 4)
             default:
                 Button(action: onRun) {
-                    Label(isRerun ? "重跑" : "生成",
-                          systemImage: isRerun ? "arrow.clockwise" : "play.fill")
-                        .labelStyle(.titleAndIcon)
-                        .font(.system(size: 11, weight: .semibold))
-                        .foregroundColor(.white)
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 3)
-                        .background(Capsule(style: .continuous).fill(AppTheme.chromeAccentInk))
+                    HStack(spacing: 5) {
+                        if node.needsGenerationRecovery { Text("继续查询").font(.system(size: 11, weight: .medium)) }
+                        Image(systemName: node.needsGenerationRecovery ? "arrow.clockwise" : "arrow.up")
+                            .font(.system(size: 16, weight: .semibold))
+                    }
+                    .foregroundColor(TapSkin.onAccent)
+                    .padding(.horizontal, node.needsGenerationRecovery ? 10 : 0)
+                    .frame(minWidth: 34, minHeight: 34)
+                    .background(Capsule().fill(TapSkin.accent))
                 }
                 .buttonStyle(.plain)
-                .help(isRerun ? "用当前参数重新生成" : "生成")
+                .help(node.needsGenerationRecovery ? "继续查询已提交任务，不重新提交" :
+                        (node.kind == .text ? "优化为生图提示词" : (isRerun ? "用当前参数重新生成" : "生成")))
+                .canvasControlRegion("composer-run")
             }
         }
     }
@@ -200,7 +204,7 @@ struct CanvasNodeActionBar: View {
         case .queued(let ahead): return ahead > 0 ? "排队 \(ahead)" : "排队中"
         case .running(let startedAt):
             let secs = max(0, Int(Date().timeIntervalSince(startedAt)))
-            return "生成中 \(secs)s"
+            return node.kind == .text ? "优化中 \(secs)s" : "生成中 \(secs)s"
         default: return ""
         }
     }
@@ -229,22 +233,22 @@ struct CanvasNodeActionBar: View {
     }
 
     private var ratioChip: some View {
-        Menu {
-            if ratioOptions.isEmpty { Text("该模型未公布比例档位") }
-            ForEach(ratioOptions, id: \.value) { option in
-                Button {
-                    canvas.updateNodeGeneration(id: node.id, ratio: option.value)
-                } label: {
-                    Label(option.label, systemImage: option.value == node.ratio ? "checkmark" : "aspectratio")
-                }
-            }
+        Button {
+            showingAspectPicker.toggle()
         } label: {
             chipLabel(text: node.ratio.isEmpty ? "比例" : node.ratio, systemImage: "aspectratio")
         }
-        .menuStyle(.borderlessButton)
-        .menuIndicator(.hidden)
+        .buttonStyle(.plain)
         .fixedSize()
-        .help("比例")
+        .help("调整画面比例和节点尺寸")
+        .accessibilityLabel("画面比例选择器")
+        .canvasControlRegion("composer-aspect")
+        .popover(isPresented: $showingAspectPicker, arrowEdge: .bottom) {
+            CanvasAspectPicker(options: ratioOptions, selected: node.ratio) { value in
+                canvas.updateNodeGeneration(id: node.id, ratio: value)
+                showingAspectPicker = false
+            }
+        }
     }
 
     private var resolutionChip: some View {
@@ -389,12 +393,12 @@ struct CanvasNodeActionBar: View {
             Image(systemName: systemImage).font(.system(size: 9, weight: .semibold))
             Text(text).font(.system(size: 10.5, weight: .medium)).lineLimit(1)
         }
-        .foregroundColor(emphasized ? AppTheme.chromeAccentInk : AppTheme.canvasChromeInk)
+        .foregroundColor(TapSkin.chromeInk)
         .padding(.horizontal, 6)
         .padding(.vertical, 3)
         .background(
             Capsule(style: .continuous)
-                .fill(emphasized ? AppTheme.chromeAccentSoftFill : AppTheme.previewBackground)
+                .fill(emphasized ? TapSkin.accent.opacity(0.12) : TapSkin.subtleFill)
         )
     }
 

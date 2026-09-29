@@ -17,17 +17,14 @@ import ClipSlotsKit
 /// 选中变化时会被反复求值。直接在 `body` 里调它，等于每帧都在主线程上解码几十张图 —— 表现是
 /// 拖动节点时整个画布卡成幻灯片。
 ///
-/// 所以这里的契约是：
-///   - `body` **只读缓存**，命中就同步返回（这条路径必须零 IO）。
-///   - 未命中时把解码丢到后台串行队列，完成后回主线程写 `@State` 触发一次重绘。
-///   - **失败也要记住**（`misses`）：不少附件（缺失文件、非标准格式）永远生不出缩略图，
-///     不记负结果的话每次视图重建都会重跑一遍失败的解码，成本与成功路径一样高却毫无收益。
+/// `body` 只读本地状态。文件版本检查、缓存与解码全部在后台串行队列，
+/// 完成后回主线程。失败结果按文件版本缓存，原图恢复或被覆盖后可以重试。
 enum CanvasAttachmentThumbnails {
 
     /// 缓存键必须带 `maxPixel`：同一个附件在预览区（240px）和芯片（40px）要两种尺寸，
     /// 只用 id 做键会让先加载的那个尺寸把另一处也顶掉（芯片里塞进 240px 大图，或预览区被拉花）。
     private static func key(_ att: SlotContent.SlotAttachment, maxPixel: CGFloat) -> String {
-        "\(att.id.uuidString)::\(Int(maxPixel.rounded()))"
+        "\(att.canvasSourceVersion)::\(Int(maxPixel.rounded()))"
     }
 
     private static let cache: NSCache<NSString, NSImage> = {
@@ -39,61 +36,33 @@ enum CanvasAttachmentThumbnails {
 
     /// 「这张生不出缩略图」的记忆。见类型注释。
     private static var misses = Set<String>()
-    /// 正在解码中的键。同一附件在预览区与芯片里可能同时出现，去重后避免重复解码同一份数据。
-    private static var inFlight = Set<String>()
-    private static let lock = NSLock()
 
     /// 解码队列刻意是**串行**的：并发解码多张大图会瞬时占用数倍内存（ATT-3 那次 OOM 的同源风险），
     /// 而缩略图本来就只需要「在一两帧之内陆续出现」，不需要并行。
     private static let queue = DispatchQueue(label: "clipslots.canvas.attachment.thumbnail",
                                             qos: .userInitiated)
 
-    /// 只读缓存。`body` 里唯一允许调的入口。
-    static func cached(_ att: SlotContent.SlotAttachment, maxPixel: CGFloat) -> NSImage? {
-        cache.object(forKey: key(att, maxPixel: maxPixel) as NSString)
-    }
-
-    /// 是否已经确定这张没有缩略图（可以直接画语义图标，不必再等）。
-    static func isKnownMiss(_ att: SlotContent.SlotAttachment, maxPixel: CGFloat) -> Bool {
-        let k = key(att, maxPixel: maxPixel)
-        lock.lock(); defer { lock.unlock() }
-        return misses.contains(k)
-    }
-
     /// 请求加载。已命中缓存 / 已知失败 / 正在加载中都会**立即返回且不重复排队**。
     static func load(_ att: SlotContent.SlotAttachment,
                      maxPixel: CGFloat,
                      completion: @escaping (NSImage?) -> Void) {
-        let k = key(att, maxPixel: maxPixel)
-        if let hit = cache.object(forKey: k as NSString) {
-            completion(hit)
-            return
-        }
-
-        lock.lock()
-        if misses.contains(k) {
-            lock.unlock()
-            completion(nil)
-            return
-        }
-        if inFlight.contains(k) {
-            // 已有同键任务在跑。这里不排第二份，也不给 completion —— 调用方会在对方完成写入缓存后
-            // 的下一次视图求值里读到结果。
-            lock.unlock()
-            return
-        }
-        inFlight.insert(k)
-        lock.unlock()
-
         queue.async {
-            let image = AttachmentThumbnailProvider.thumbnail(for: att, maxPixel: maxPixel)
-            if let image {
-                cache.setObject(image, forKey: k as NSString)
+            // stat 与解码都在串行后台队列。每次请求检查文件版本，失败文件恢复后也能重新加载。
+            let k = key(att, maxPixel: maxPixel)
+            if let hit = cache.object(forKey: k as NSString) {
+                DispatchQueue.main.async { completion(hit) }
+                return
             }
-            lock.lock()
-            inFlight.remove(k)
-            if image == nil { misses.insert(k) }
-            lock.unlock()
+            if misses.contains(k) {
+                DispatchQueue.main.async { completion(nil) }
+                return
+            }
+            let image = AttachmentThumbnailProvider.thumbnail(for: att, maxPixel: maxPixel)
+            if let image { cache.setObject(image, forKey: k as NSString) }
+            else {
+                if misses.count >= 256 { misses.remove(misses.first!) }
+                misses.insert(k)
+            }
             DispatchQueue.main.async { completion(image) }
         }
     }
@@ -108,8 +77,8 @@ extension SlotContent.SlotAttachment {
     /// 只信 type 会让一半图片显示成 Finder 文档图标（v2.8.9 已经在附件面板里踩过这个坑）。
     var canvasIsImageLike: Bool {
         if type == .image { return true }
-        guard type == .file, let path, !path.isEmpty else { return false }
-        let ext = (path as NSString).pathExtension.lowercased()
+        guard type == .file else { return false }
+        let ext = ((path?.isEmpty == false ? path! : name) as NSString).pathExtension.lowercased()
         return ["png", "jpg", "jpeg", "gif", "heic", "heif", "webp", "tiff", "bmp"].contains(ext)
     }
 
@@ -118,8 +87,7 @@ extension SlotContent.SlotAttachment {
         switch type {
         case .image: return "photo"
         case .file:
-            guard let path, !path.isEmpty else { return "doc" }
-            let ext = (path as NSString).pathExtension.lowercased()
+            let ext = ((path?.isEmpty == false ? path! : name) as NSString).pathExtension.lowercased()
             if ["mp4", "mov", "m4v", "avi", "mkv", "webm"].contains(ext) { return "film" }
             if ["pdf"].contains(ext) { return "doc.richtext" }
             if ["zip", "rar", "7z", "tar", "gz"].contains(ext) { return "doc.zipper" }
@@ -179,35 +147,26 @@ struct CanvasAttachmentPreviewImage: View {
                 Image(nsImage: image)
                     .resizable()
                     .aspectRatio(contentMode: contentMode)
-            } else if CanvasAttachmentThumbnails.isKnownMiss(attachment, maxPixel: maxPixel) {
+            } else {
                 Image(systemName: attachment.canvasFallbackSymbol)
                     .font(.system(size: 20, weight: .light))
                     .foregroundColor(AppTheme.canvasCardMetaInk.opacity(0.55))
-            } else {
-                // 加载中不放 ProgressView：一屏十几张卡片同时转圈是纯噪声，静默占位更安静。
-                Color.clear
             }
         }
-        .onAppear { request() }
-        // 附件换了（切换绑定槽位 / 槽位内容被替换 / 卡叠翻页）就重新取，否则会一直显示上一份附件的图。
-        .onChange(of: attachment.id) { _ in
+        .task(id: "\(attachment.canvasSourceIdentity)|\(maxPixel)") {
             image = nil
             shownId = nil
-            request()
-        }
-    }
-
-    private func request() {
-        let requested = attachment.id
-        if let hit = CanvasAttachmentThumbnails.cached(attachment, maxPixel: maxPixel) {
-            image = hit
-            shownId = requested
-            return
-        }
-        CanvasAttachmentThumbnails.load(attachment, maxPixel: maxPixel) { loaded in
-            if let loaded {
-                image = loaded
-                shownId = requested
+            // 只对在屏幕上的预览检查版本；没有变化时不发布状态、不重新解码。
+            while !Task.isCancelled {
+                let loaded = await withCheckedContinuation { continuation in
+                    CanvasAttachmentThumbnails.load(attachment, maxPixel: maxPixel) { continuation.resume(returning: $0) }
+                }
+                guard !Task.isCancelled else { return }
+                if image !== loaded || shownId != attachment.id {
+                    image = loaded
+                    shownId = attachment.id
+                }
+                try? await Task.sleep(for: .seconds(2))
             }
         }
     }

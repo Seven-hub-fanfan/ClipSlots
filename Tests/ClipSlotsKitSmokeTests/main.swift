@@ -3358,6 +3358,18 @@ do {
     t.check(recovered.lastLoadFailed(projectId: pid), "前置条件：新造的损坏文件应被标记为加载失败")
     t.check(recovered.save(CanvasDocument(), projectId: pid), "保存应成功")
     t.check(!recovered.lastLoadFailed(projectId: pid), "★★保存成功后应清掉加载失败标记（否则清扫永久失效）")
+
+    let blockedRoot = dir.appendingPathComponent("blocked-root")
+    try! Data("file, not directory".utf8).write(to: blockedRoot)
+    let failing = CanvasStorage(rootOverride: blockedRoot)
+    _ = failing.load(projectId: pid)
+    t.check(!failing.save(docA, projectId: pid), "保存目录不可写时返回失败")
+    t.check(failing.load(projectId: pid).nodes.isEmpty, "保存失败不得提前污染已持久化缓存")
+    t.check(failing.lastSaveError(projectId: pid) != nil, "保存失败提供具体原因")
+    try! FileManager.default.removeItem(at: blockedRoot)
+    t.check(failing.save(docA, projectId: pid), "存储路径恢复后可以重试同一快照")
+    t.equal(CanvasStorage(rootOverride: blockedRoot).load(projectId: pid).nodes.count, 1, "重试确实落盘")
+    t.check(failing.lastSaveError(projectId: pid) == nil, "成功重试清除失败状态")
 }
 
 // MARK: - CANVAS-UNDO：撤销栈 + 键位判定 + 多选位移（v2.11.7 hotfix18）
@@ -4956,7 +4968,7 @@ do {
             "★★窗口最小宽必须同时兜住最吃宽度的内容区组合（画布 + 展开的槽位库 + Agent 侧栏）")
 
     // 侧栏宽度只能有一个来源：AgentSidebarView.width 引用的就是这个常量。
-    t.equal(WindowLayoutMetrics.agentSidebarWidth, 320, "Agent 侧栏定宽 320（与 AgentSidebarView.width 同源）")
+    t.equal(WindowLayoutMetrics.agentSidebarWidth, 480, "Agent 侧栏定宽 480（与录屏布局和窗口预算同源）")
 }
 
 // MARK: - PLUGIN-RELEASE：GitHub latest release 解析（插件市场动态下载链接，v2.11.8）
@@ -5840,8 +5852,8 @@ do {
 do {
     let v = CanvasKeyBinding.vKeyCode
     t.equal(CanvasKeyBinding.action(keyCode: v, command: true, shift: false), .paste, "⌘V = 粘贴")
-    t.equal(CanvasKeyBinding.action(keyCode: v, command: false, shift: false), .none,
-            "★裸 V 不是粘贴（它在画布类工具里是「选择工具」的肌肉记忆键，不能顺手占掉）")
+    t.equal(CanvasKeyBinding.action(keyCode: v, command: false, shift: false), .selectTool,
+            "裸 V 切选择工具，不触发粘贴")
     t.equal(CanvasKeyBinding.action(keyCode: v, command: true, shift: true), .none,
             "★⌘⇧V 不吃（各家 App 里是「粘贴为纯文本」，吞掉它用户查不出是谁吃的）")
     t.equal(CanvasKeyBinding.action(keyCode: v, command: true, shift: false, option: true), .none,
@@ -7141,6 +7153,20 @@ do {
     t.equal(CrateGeneration.inputImagePaths(from: [a, b], excludingAttachmentIds: [], fileExists: exists),
             ["/store/a.bin", "/store/b.bin"], "CRATE-IO-8 入参顺序就是附件顺序")
 
+    let fileImage = att("photo.JPG", type: .file, storage: "/store/photo.bin")
+    let generated = att("crate_previous.png", storage: "/store/generated.bin")
+    let movie = att("clip.mp4", type: .file, storage: "/store/clip.bin")
+    t.equal(CrateGeneration.inputImagePaths(from: [fileImage, movie, generated],
+                                           excludingAttachmentIds: [], fileExists: exists),
+            ["/store/photo.bin"], "CRATE-IO-9 文件型图片也可入参，本节点重跑仍过滤生成图和视频")
+    t.equal(CrateGeneration.inputImagePaths(from: [fileImage, movie, generated, broken],
+                                           excludingAttachmentIds: [], includingGeneratedAssets: true, fileExists: exists),
+            ["/store/photo.bin", "/store/generated.bin"], "CRATE-IO-10 显式引用槽位含生成图，仍剔除断链和视频")
+    t.equal(CrateGeneration.inputImagePaths(from: [generated],
+                                           excludingAttachmentIds: [generated.id.uuidString],
+                                           includingGeneratedAssets: true, fileExists: exists),
+            [], "CRATE-IO-11 明确的产物排除标记始终生效")
+
     // 节点字段本身的往返 + 向后兼容。
     var node = canvasNode(slot: 5)
     node.outputAttachmentIds = ["id-1", "id-2"]
@@ -7740,6 +7766,35 @@ do {
     let rWait = CanvasEdgeInputs.resolve(incoming: waiting, upstreams: ups, downstreamKind: .video)
     t.equal(rWait.pendingUpstreamCount, 1,
             "★CANVAS-EDGE-IN-7 上游还没出图要单独记数，否则报「提示词为空」会让用户去改一个没问题的输入框")
+    t.check(rWait.blockingReason != nil, "有自身提示词也必须阻止缺少上游图片的提交")
+    let videoSource = CanvasEdgeInputs.Upstream(nodeId: "movie", kind: .video, text: "视频提示词", assetPath: "/movie.mp4")
+    let videoInput = CanvasEdgeInputs.resolve(incoming: [.init(fromNodeId: "movie", toNodeId: "image")],
+                                               upstreams: ["movie": videoSource], downstreamKind: .image)
+    t.check(videoInput.assetPaths.isEmpty && videoInput.blockingReason != nil, "视频产物不得作为图片入参")
+    let videoPrompt = CanvasEdgeInputs.resolve(incoming: [.init(fromNodeId: "movie", toNodeId: "image", role: .prompt)],
+                                                upstreams: ["movie": videoSource], downstreamKind: .image)
+    t.check(videoPrompt.promptFragments == ["视频提示词"] && videoPrompt.blockingReason == nil, "视频节点仍可显式引用提示词")
+    t.check((try? CrateGeneration.submitArguments(CrateImageRequest(model: "test", prompt: "p", imagePaths: ["/movie.mp4"]))) == nil,
+            "参数构造层拒绝误传视频")
+    let dependencyNodes = (1...3).map { CanvasNode(pageId: "p", groupId: "g", slot: $0, kind: .image, x: 0, y: 0) }
+    let dependencyEdges = [
+        CanvasEdge(fromNodeId: dependencyNodes[0].id, toNodeId: dependencyNodes[1].id),
+        CanvasEdge(fromNodeId: dependencyNodes[1].id, toNodeId: dependencyNodes[2].id)
+    ]
+    t.equal(CanvasEdgeInputs.generationOrder(nodes: dependencyNodes.reversed(), edges: dependencyEdges)?.map(\.id),
+            dependencyNodes.map(\.id), "多选逆序排列仍按上游先生成")
+    t.check(CanvasEdgeInputs.generationOrder(nodes: dependencyNodes, edges: dependencyEdges + [
+        CanvasEdge(fromNodeId: dependencyNodes[2].id, toNodeId: dependencyNodes[0].id)
+    ]) == nil, "损坏文档的循环依赖不提交任务")
+    var submitted = dependencyNodes[0]
+    submitted.state = .running(startedAt: Date())
+    submitted.taskId = "submitted-task"
+    let reloaded = try JSONDecoder().decode(CanvasNode.self, from: JSONEncoder().encode(submitted))
+    t.check(reloaded.needsGenerationRecovery, "重启未完成任务优先恢复")
+    submitted.state = .failed(reason: "查询超时")
+    t.check(submitted.needsGenerationRecovery, "超时保留任务恢复入口")
+    submitted.state = .succeeded(assetPath: "/saved.png")
+    t.check(!submitted.needsGenerationRecovery, "已成功产物可正常重新生成")
 
     // ---- 提示词合并：上游在前 ----
     t.equal(CanvasEdgeInputs.mergedPrompt(own: "一只猫", upstream: ["水墨风格", "  "]),
@@ -7765,6 +7820,16 @@ do {
     t.equal(vf.first, "/slot1.png", "CANVAS-EDGE-IN-11 首帧空着由槽位附件补位")
     t.check(vf.references.isEmpty,
             "★CANVAS-EDGE-IN-12 互斥模型有首尾帧就不带参考图（硬凑会被整次拒收）")
+    let unknown = CanvasEdgeInputs.videoFrames(edgeInputs: lastOnly,
+                                               slotImages: ["/first.png", "/ref.png"], model: nil)
+    t.check(unknown.first == "/first.png" && unknown.last == "/edge-last.png" && unknown.references == ["/ref.png"],
+            "模型目录不可用时保留首帧、显式尾帧与参考图")
+    var referencesOnly = CanvasEdgeInputs.Resolved()
+    referencesOnly.referencePaths = ["/ref-1.png", "/ref-2.png"]
+    let referenceFrames = CanvasEdgeInputs.videoFrames(edgeInputs: referencesOnly, slotImages: [], model: s25)
+    t.check(referenceFrames.first == nil && referenceFrames.last == nil
+            && referenceFrames.references == referencesOnly.referencePaths,
+            "首尾帧互斥模型没有帧输入时仍可使用显式参考图")
 
     var dupEdge = CanvasEdgeInputs.Resolved()
     dupEdge.firstFramePath = "/same.png"
@@ -7778,6 +7843,48 @@ do {
     t.equal(CanvasEdgeInputs.imageReferences(edgeInputs: refs, slotImages: ["/e2.png", "/s1.png"]),
             ["/e1.png", "/e2.png", "/s1.png"],
             "★CANVAS-EDGE-IN-14 顺序有语义（多参考图模型按序理解权重），连线在前且去重")
+
+    let seven = (1...7).map { "/slot\($0).png" }
+    let slots: [String: CanvasEdgeInputs.Upstream] = [
+        "slot": .init(nodeId: "slot", kind: .slot, text: "  槽位正文  ", assetPath: nil,
+                      imagePaths: seven + [seven[0], ""]),
+        "text-slot": .init(nodeId: "text-slot", kind: .slot, text: "纯文本槽位", assetPath: nil),
+        "empty-slot": .init(nodeId: "empty-slot", kind: .slot, text: "", assetPath: nil),
+        "image": .init(nodeId: "image", kind: .image, text: "不应自动引用此提示词", assetPath: seven[0])
+    ]
+    func slotInputs(_ roles: [(String, CanvasEdgeRole)], _ kind: CanvasNodeKind = .image) -> CanvasEdgeInputs.Resolved {
+        CanvasEdgeInputs.resolve(incoming: roles.map { CanvasEdge(fromNodeId: $0.0, toNodeId: "out", role: $0.1) },
+                                 upstreams: slots, downstreamKind: kind)
+    }
+    let composite = slotInputs([("slot", .auto)])
+    t.equal(composite.promptFragments, ["槽位正文"], "SLOT-IN-1 自动连线传递槽位正文")
+    t.equal(composite.referencePaths, seven, "SLOT-IN-2 七张图片按附件顺序全部入参并去重")
+    t.equal(composite.pendingUpstreamCount, 0, "SLOT-IN-3 槽位不需要先生成")
+    let promptOnly = slotInputs([("slot", .prompt)])
+    t.check(promptOnly.promptFragments == ["槽位正文"] && promptOnly.assetPaths.isEmpty,
+            "SLOT-IN-4 显式提示词只传正文")
+    let imagesOnly = slotInputs([("slot", .reference)])
+    t.check(imagesOnly.promptFragments.isEmpty && imagesOnly.referencePaths == seven,
+            "SLOT-IN-5 显式参考图只传图片")
+    let fallback = slotInputs([("text-slot", .auto), ("empty-slot", .auto)])
+    t.check(fallback.promptFragments == ["纯文本槽位"] && fallback.pendingUpstreamCount == 0,
+            "SLOT-IN-6 纯文本和空槽位不报上游待生成")
+    let video = slotInputs([("slot", .auto)], .video)
+    t.check(video.firstFramePath == seven[0] && video.referencePaths == Array(seven.dropFirst()),
+            "SLOT-IN-7 视频自动取槽位第一图为首帧，其余为参考")
+    let explicit = slotInputs([("slot", .auto), ("image", .firstFrame)], .video)
+    t.check(explicit.firstFramePath == seven[0] && explicit.referencePaths == Array(seven.dropFirst()),
+            "SLOT-IN-8 显式首帧优先并从槽位参考图中去重")
+    let last = slotInputs([("slot", .lastFrame)], .video)
+    t.check(last.lastFramePath == seven[0] && last.firstFramePath == nil &&
+            last.referencePaths == Array(seven.dropFirst()), "SLOT-IN-9 槽位指定尾帧时只取第一图，其余仍为参考")
+    t.equal(slotInputs([("slot", .auto), ("image", .auto)]).promptFragments, ["槽位正文"],
+            "SLOT-IN-10 图片节点的提示词不会意外拼入下游")
+    t.equal(CanvasEdgeInputs.imageReferences(edgeInputs: composite, slotImages: [seven[0], "/own.png"]),
+            seven + ["/own.png"], "SLOT-IN-11 槽位与本节点重复图不重复上传")
+    let missingImages = slotInputs([("text-slot", .reference), ("empty-slot", .firstFrame)], .video)
+    t.check(missingImages.isEmpty && missingImages.pendingUpstreamCount == 0,
+            "SLOT-IN-12 槽位明确只传图片时，没有图片不能悄悄改成正文")
 }
 
 // MARK: - CANVAS-EDGE-GEO：连线几何（v2.12.0）
@@ -7792,8 +7899,8 @@ do {
     t.check(sides.out == .right && sides.in == .left,
             "★CANVAS-EDGE-GEO-1 水平错开时走左右边：走上下边会让线从卡片顶上绕一圈，读不出方向")
     let stacked = CanvasEdgeGeometry.sides(from: from, to: CGRect(x: 0, y: 300, width: 100, height: 60))
-    t.check(stacked.out == .bottom && stacked.in == .top,
-            "CANVAS-EDGE-GEO-2 垂直错开时走上下边")
+    t.check(stacked.out == .right && stacked.in == .left,
+            "CANVAS-EDGE-GEO-2 垂直移动仍贴固定输入输出端口")
 
     let start = CanvasEdgeGeometry.anchor(of: from, side: sides.out)
     let end = CanvasEdgeGeometry.anchor(of: to, side: sides.in)
@@ -8522,5 +8629,99 @@ do {
     t.check(!fm.fileExists(atPath: CanvasAttachmentStash.directory(token: "tok1").path),
             "STASH-9 discard 收走暂存字节")
 }
+
+// MARK: - V2.17.1：端口容差、边缘面板、任务身份与导航
+do {
+    let card = CGRect(x: 300, y: 100, width: 260, height: 200)
+    t.check(CanvasEdgeGeometry.hitsInput(CGPoint(x: 280, y: 200), rect: card), "端口外 20pt 可以吸附")
+    t.check(!CanvasEdgeGeometry.hitsInput(CGPoint(x: 270, y: 200), rect: card), "端口外 30pt 不误连")
+    t.check(!CanvasEdgeGeometry.hitsInput(CGPoint(x: 290, y: 110), rect: card), "卡片左上角之外不误吸附到端口")
+    let viewport = CGRect(x: 240, y: 60, width: 500, height: 500)
+    let size = CGSize(width: 400, height: 200)
+    let panel = CanvasInteractionGeometry.panelOrigin(node: card, panel: size, viewport: viewport)
+    t.equal(panel.y, card.maxY + 12, "空间足够时面板位于媒体下方")
+    for point in [CGPoint(x: -800, y: -500), CGPoint(x: 2000, y: 900), CGPoint(x: 650, y: 400)] {
+        let origin = CanvasInteractionGeometry.panelOrigin(node: CGRect(origin: point, size: card.size),
+                                                            panel: size, viewport: viewport)
+        t.check(viewport.contains(CGRect(origin: origin, size: size)), "面板避让侧栏及窗口四边")
+    }
+    t.check(CanvasInteractionGeometry.isVisible(card, viewport: viewport), "视口内节点渲染")
+    t.check(!CanvasInteractionGeometry.isVisible(card.offsetBy(dx: 3000, dy: 0), viewport: viewport), "屏外远处节点裁剪")
+    let node = CanvasNode(pageId: "p", groupId: "g", slot: 1, x: 0, y: 0)
+    let ticket = CanvasGenerationTicket(projectId: "project-a", node: node)
+    t.check(ticket.matches(node, projectId: "project-a"), "任务绑定原项目原节点")
+    t.check(!ticket.matches(node, projectId: "project-b"), "同名节点不能跨项目写回")
+    var recreated = node
+    recreated.createdAt = node.createdAt.addingTimeInterval(1)
+    t.check(!ticket.matches(recreated, projectId: "project-a"), "删除后复用槽位不能接收旧结果")
+    var rebound = node
+    rebound.slot = 2
+    t.check(!ticket.matches(rebound, projectId: "project-a"), "归槽要显式迁移任务归属")
+    t.equal(CanvasKeyBinding.action(keyCode: 4, command: false, shift: false), .handTool, "H 抓手")
+    t.equal(CanvasKeyBinding.action(keyCode: 45, command: false, shift: false), .newNode, "N 新节点")
+    t.equal(CanvasKeyBinding.action(keyCode: 0, command: true, shift: false), .selectAll, "Cmd+A 全选")
+    t.equal(CanvasKeyBinding.action(keyCode: 18, command: false, shift: true), .fitContent, "Shift+1 适应内容")
+    t.equal(CanvasKeyBinding.action(keyCode: 19, command: false, shift: true), .fitSelection, "Shift+2 适应选区")
+}
+
+// 文本指令是独立生成参数，旧画布无需迁移主体文本。
+do {
+    let legacy = Data(#"{"pageId":"p","groupId":"g","slot":1,"kind":"text"}"#.utf8)
+    let decoded = try JSONDecoder().decode(CanvasNode.self, from: legacy)
+    t.equal(decoded.textGenerationPrompt, "", "旧文本节点没有生成指令时保持空值")
+    var configured = decoded
+    configured.textGenerationPrompt = "写一段品牌文案\n保留换行与中文"
+    let data = try JSONEncoder().encode(configured)
+    let restored = try JSONDecoder().decode(CanvasNode.self, from: data)
+    t.equal(restored.textGenerationPrompt, configured.textGenerationPrompt, "文本生成指令跨保存重载保留")
+    t.equal(restored.id, decoded.id, "新增生成指令不改变旧节点身份")
+} catch {
+    t.check(false, "文本节点兼容解码失败：\(error)")
+}
+
+// V2.17.3: catalog ratio parsing and text-only image prompt outputs.
+do {
+    for (ratio, expected) in [("1:1", 1.0), ("16:9 4K", 16.0/9), ("9:16", 9.0/16), ("3：4", 0.75), ("3/2", 1.5)] {
+        let size = CanvasNodeSizing.size(ratio: ratio)!
+        t.check(abs(size.width / size.height - expected) < 0.0001, "\(ratio) matches canvas shape")
+        t.equal(min(size.width, size.height), CanvasNodeSizing.defaultShortSide, "ratio keeps short side stable")
+    }
+    for value in ["adaptive", "2K", "0:1", "1:0", "NaN", "100000:1"] {
+        t.check(CanvasNodeSizing.size(ratio: value) == nil, "unknown/invalid aspect does not resize: \(value)")
+    }
+    let prompt = "一只橘猫坐在窗边，柔和的自然光照亮毛发，浅景深写实摄影。"
+    t.equal(try CanvasImagePrompt.normalized("```text\n\(prompt)\n```"), prompt, "harmless text fence is removed")
+    for bad in ["```svg\n<svg/>```\n", "<svg><path d=''/></svg>", "<html>猫</html>",
+                "{\"prompt\":\"cat\"}", "data:image/png;base64,AAAA", "橘猫\u{fffd}窗边", ""] {
+        t.check((try? CanvasImagePrompt.normalized(bad)) == nil, "code and corrupted output rejected")
+    }
+    let request = CanvasImagePrompt.request(intent: "换成水彩", existing: prompt, references: ["保留橘色"])
+    t.check(request.contains(prompt) && request.contains("换成水彩") && request.contains("保留橘色"), "refinement retains intent and reference constraints")
+    t.check(!CanvasImagePrompt.request(intent: "生成橘猫", existing: "<svg/>", references: []).contains("<svg"), "legacy SVG excluded from prompt refinement")
+    let viewport = CGRect(x: 0, y: 0, width: 1500, height: 700)
+    let tall = CGRect(x: 30, y: 50, width: 320, height: 640)
+    let panel = CGRect(origin: CanvasInteractionGeometry.panelOrigin(node: tall, panel: CGSize(width: 640, height: 204), viewport: viewport),
+                       size: CGSize(width: 640, height: 204))
+    t.check(viewport.contains(panel) && !panel.intersects(tall), "tall portrait uses free side space")
+} catch {
+    t.check(false, "prompt and ratio test failed: \(error)")
+}
+
+do {
+    let video = URL(fileURLWithPath: "/tmp/scene.MP4")
+    let image = URL(fileURLWithPath: "/tmp/scene.png")
+    t.equal(CanvasPasteClassifier.classify(.init(fileURLs: [video], hasBitmap: true, text: "thumbnail")),
+            .videoNodeWithFiles([video]), "video file takes precedence over clipboard thumbnail")
+    t.equal(CanvasPasteClassifier.classify(.init(fileURLs: [video, image])),
+            .videoNodeWithFiles([video, image]), "mixed paste follows first media identity")
+    t.equal(CanvasPasteClassifier.classify(.init(fileURLs: [image, video])),
+            .imageNodeWithFiles([image, video]), "image reference with video preserves image intent")
+    var node = CanvasNode(pageId: "p", groupId: "g", slot: 1, kind: .video, x: 0, y: 0)
+    node.mediaLayoutAttachmentID = UUID().uuidString
+    let restored = try JSONDecoder().decode(CanvasNode.self, from: JSONEncoder().encode(node))
+    t.equal(restored.mediaLayoutAttachmentID, node.mediaLayoutAttachmentID, "native media layout identity persists")
+    let legacy = try JSONDecoder().decode(CanvasNode.self, from: Data(#"{"pageId":"p","groupId":"g","slot":1,"kind":"video"}"#.utf8))
+    t.check(legacy.mediaLayoutAttachmentID == nil, "legacy media remains eligible for native geometry repair")
+} catch { t.check(false, "media identity test: \(error)") }
 
 t.report()

@@ -17,6 +17,19 @@ import Combine
 ///     任何节点视图重新求值。
 @MainActor
 final class CanvasStore: ObservableObject {
+    private static let instances = NSHashTable<CanvasStore>.weakObjects()
+    static func flushAll() -> Bool {
+        let results = instances.allObjects.map { $0.flushSave() }
+        return results.allSatisfy { $0 }
+    }
+
+    enum SaveStatus: Equatable {
+        case saved, saving, failed(String)
+    }
+    @Published private(set) var saveStatus: SaveStatus = .saved
+    private var pendingDocuments: [String: CanvasDocument] = [:]
+    private var saveVersions: [String: UUID] = [:]
+    private var saveFailures: [String: String] = [:]
 
     // MARK: - 发布状态
 
@@ -60,6 +73,10 @@ final class CanvasStore: ObservableObject {
     /// 画布文档写入队列。防抖任务一旦把 IO 派出去就不能再取消，必须让所有写入串行，
     /// 否则旧快照可能比新快照更晚写完，把用户刚拖好的位置覆盖回去。
     private let saveQueue = DispatchQueue(label: "com.clipslots.canvas.save", qos: .utility)
+    private var generationTickets: [UUID: CanvasGenerationTicket] = [:]
+    private var generationTasks: [UUID: Task<Void, Never>] = [:]
+    @Published private var stoppedGenerations = Set<UUID>()
+    var selectionGenerationTask: Task<Void, Never>?
     /// 防抖窗口。拖拽松手 / 缩放停止后 0.4s 落盘，避免高频写。
     private let saveDebounce: Duration = .milliseconds(400)
 
@@ -77,6 +94,7 @@ final class CanvasStore: ObservableObject {
         self.edges = doc.edges
         self.pan = doc.pan
         self.zoom = CanvasGeometry.clampZoom(doc.zoom)
+        Self.instances.add(self)
     }
 
     // MARK: - 项目（v2.13.0）
@@ -126,7 +144,7 @@ final class CanvasStore: ObservableObject {
     @discardableResult
     func createProject(name: String) -> CanvasProject {
         // 先把当前项目落盘：新项目一旦切过去，`nodes` 就被换掉了，没落盘的改动再也找不回来。
-        flushSave()
+        guard flushSave() else { return activeProject }
         let unique = CanvasProject.uniqueName(base: name, existing: projects.map(\.name))
         let project = CanvasProject(name: unique)
         var index = CanvasProjectIndex(projects: projects + [project], activeProjectId: project.id)
@@ -141,7 +159,7 @@ final class CanvasStore: ObservableObject {
     @discardableResult
     func switchProject(to id: String) -> Bool {
         guard id != activeProjectId, projects.contains(where: { $0.id == id }) else { return false }
-        flushSave()
+        guard flushSave() else { return false }
         touchProject(id: id)
         adoptProject(id: id)
         return true
@@ -174,12 +192,13 @@ final class CanvasStore: ObservableObject {
         // v2.16.2：这里不能只 cancel 防抖任务。用户最后一次拖动/缩放/连线可能还停在 400ms
         // 防抖窗口里；直接 cancel 会让 .trash 里的备份少掉最后一步，等价于把“删除前最后状态”丢了。
         // 先 flush 到当前 projectId，再 trash 该项目目录；activeProjectId 尚未切走，不会串写到下一项目。
-        if id == activeProjectId { flushSave() }
+        if id == activeProjectId, !flushSave() { return nil }
 
         var next = CanvasProjectIndex(projects: projects.filter { $0.id != id },
                                      activeProjectId: id == activeProjectId ? "" : activeProjectId)
         next = CanvasProjectIndex.normalized(next)
         projectStorage.save(next)
+        saveQueue.sync {}
         // v2.16.5：文档移入 .trash 失败时盘上还留着该项目文档；若继续按「已删」推进，索引里
         // 再无它的记录，文档将成为永久孤儿。回滚索引（内存状态此刻尚未改变），放弃删除。
         guard projectStorage.trashProjectDocs(projectId: id) else {
@@ -187,6 +206,7 @@ final class CanvasStore: ObservableObject {
             NSLog("[ClipSlots] deleteProject: 项目文档移入 .trash 失败，已回滚项目索引 \(id)")
             return nil
         }
+        generationTickets = generationTickets.filter { $0.value.projectId != id }
         projects = next.displayOrder
         if id == activeProjectId {
             adoptProject(id: next.activeProjectId)
@@ -201,7 +221,7 @@ final class CanvasStore: ObservableObject {
     /// （见 `history` 的注释），所以这里没有"保存 A 的历史"这个选项。
     private func adoptProject(id: String) {
         activeProjectId = id
-        let doc = storage.load(projectId: id)
+        let doc = pendingDocuments[id] ?? storage.load(projectId: id)
         nodes = doc.nodes
         edges = doc.edges
         pan = doc.pan
@@ -264,13 +284,15 @@ final class CanvasStore: ObservableObject {
                    // 它们摆的就是"已有槽位的展台"，不是图片生成节点（理由见 `CanvasNodeKind.slot`）。
                    kind: CanvasNodeKind = .slot,
                    parentNodeId: String? = nil,
+                   parentNodeIds: [String] = [],
                    avoidOverlap: Bool = false) -> CanvasSlotPlacement {
         let id = CanvasNode.makeId(groupId: groupId, slot: slot)
         if let existing = nodes.first(where: { $0.id == id }) {
+            selectedEdgeId = nil
             selectedNodeIds = [existing.id]
             return .alreadyPlaced(node: existing, name: name)
         }
-        let size = CanvasNode.defaultSize(for: kind)
+        let size = CanvasNodeSizing.initialSize(for: kind)
         // 落点即节点中心，符合「拖到哪儿就放哪儿」的直觉。
         var origin = CanvasSpawnGeometry.origin(forCenter: canvasPoint, size: size)
         if avoidOverlap {
@@ -296,13 +318,15 @@ final class CanvasStore: ObservableObject {
                               parentNodeId: parentNodeId)
         commit(.addNode, detail: name) {
             nodes.append(node)
+            selectedEdgeId = nil
             selectedNodeIds = [node.id]
             // v2.12.0：上游不再只写进 `parentNodeId`，同时落一条真实连线。
             //
             // 两个字段都写是刻意的：`parentNodeId` 仍然是"这个节点是从谁身上长出来的"这一 UI 事实
             // （降级回 v2.11.x 时血缘还在），连线才是参与生成的那份真相。迁移函数会判重，不会因此
             // 每次打开画布都多一条。
-            if let parentNodeId, nodes.contains(where: { $0.id == parentNodeId }) {
+            for parentNodeId in Set(parentNodeIds + [parentNodeId].compactMap { $0 }).sorted()
+                where nodes.contains(where: { $0.id == parentNodeId }) {
                 if CanvasEdgeGraph.canConnect(from: parentNodeId,
                                               to: node.id,
                                               edges: edges,
@@ -394,10 +418,16 @@ final class CanvasStore: ObservableObject {
         guard !ids.isEmpty else { return }
         let removed = nodes.filter { ids.contains($0.id) }
         guard !removed.isEmpty else { return }
+        generationTickets = generationTickets.filter {
+            $0.value.projectId != activeProjectId || !ids.contains($0.value.nodeId)
+        }
         // 一次删多个只记一条，写成「3 个节点」而不是刷 3 行 —— 框选批量删是常态操作。
         let detail = removed.count == 1 ? nodeTitle(removed[0]) : "\(removed.count) 个节点"
         commit(.removeNode, detail: detail) {
             nodes.removeAll { ids.contains($0.id) }
+            for idx in nodes.indices {
+                if let parent = nodes[idx].parentNodeId, ids.contains(parent) { nodes[idx].parentNodeId = nil }
+            }
             selectedNodeIds.subtract(ids)
             // 连线跟着节点走。留下野线的症状是画布上有一条连到虚空的曲线，而它长得跟正常线一样 ——
             // 取入参时那条线又什么都拿不到，于是"生成结果莫名少了一张参考图"。
@@ -419,9 +449,83 @@ final class CanvasStore: ObservableObject {
 
     func updateNode(id: String, _ mutate: (inout CanvasNode) -> Void) {
         guard let idx = nodes.firstIndex(where: { $0.id == id }) else { return }
-        mutate(&nodes[idx])
-        nodes[idx].updatedAt = Date()
+        var next = nodes[idx]
+        mutate(&next)
+        guard next != nodes[idx] else { return }
+        next.updatedAt = Date()
+        nodes[idx] = next
         scheduleSave()
+    }
+
+    func beginGeneration(_ node: CanvasNode, recovering: Bool = false, restarting: Bool = false) -> CanvasGenerationTicket? {
+        guard let current = self.node(id: node.id), current.createdAt == node.createdAt,
+              recovering || restarting || !current.needsGenerationRecovery,
+              !generationTickets.values.contains(where: { $0.matches(current, projectId: activeProjectId) })
+        else { return nil }
+        let ticket = CanvasGenerationTicket(projectId: activeProjectId, node: current)
+        generationTickets[ticket.token] = ticket
+        updateNode(id: node.id) {
+            $0.state = .running(startedAt: Date())
+            if !recovering { $0.taskId = nil }
+        }
+        return ticket
+    }
+
+    /// 非活跃项目从独立文档读取，绝不使用当前画布的同名节点。
+    func generationNode(_ token: UUID) -> CanvasNode? {
+        guard let ticket = generationTickets[token],
+              projects.contains(where: { $0.id == ticket.projectId }) else { return nil }
+        let candidates = ticket.projectId == activeProjectId ? nodes
+            : (pendingDocuments[ticket.projectId] ?? storage.load(projectId: ticket.projectId)).nodes
+        return candidates.first { ticket.matches($0, projectId: ticket.projectId) }
+    }
+
+    func updateGeneration(_ token: UUID, _ mutate: (inout CanvasNode) -> Void) {
+        guard let ticket = generationTickets[token], generationNode(token) != nil else { return }
+        if ticket.projectId == activeProjectId {
+            updateNode(id: ticket.nodeId, mutate)
+        } else {
+            var doc = pendingDocuments[ticket.projectId] ?? storage.load(projectId: ticket.projectId)
+            guard let idx = doc.nodes.firstIndex(where: { ticket.matches($0, projectId: ticket.projectId) }) else { return }
+            var next = doc.nodes[idx]
+            mutate(&next)
+            guard next != doc.nodes[idx] else { return }
+            next.updatedAt = Date()
+            doc.nodes[idx] = next
+            let version = retainPending(doc, projectId: ticket.projectId)
+            let ok = saveQueue.sync { storage.save(doc, projectId: ticket.projectId) }
+            completeSave(projectId: ticket.projectId, version: version, success: ok)
+        }
+    }
+
+    func trackGeneration(_ task: Task<Void, Never>, token: UUID) {
+        generationTasks[token] = task
+    }
+
+    func shouldTrackGeneration(_ token: UUID) -> Bool {
+        generationNode(token) != nil && !stoppedGenerations.contains(token)
+    }
+
+    func isStoppingGeneration(_ node: CanvasNode) -> Bool {
+        generationTickets.values.contains { $0.matches(node, projectId: activeProjectId) && stoppedGenerations.contains($0.token) }
+    }
+
+    func stopGeneration(_ node: CanvasNode) {
+        guard let ticket = generationTickets.values.first(where: { $0.matches(node, projectId: activeProjectId) }) else { return }
+        stoppedGenerations.insert(ticket.token)
+        // submit 尚未返回时让它交还 taskId；取消这个过程会丢失远端身份。
+        if generationNode(ticket.token)?.taskId != nil {
+            generationTasks[ticket.token]?.cancel()
+            updateGeneration(ticket.token) { $0.state = .idle }
+            flushSave()
+        }
+    }
+
+    func endGeneration(_ token: UUID) {
+        if stoppedGenerations.contains(token) { updateGeneration(token) { $0.state = .idle } }
+        generationTickets.removeValue(forKey: token)
+        generationTasks.removeValue(forKey: token)
+        stoppedGenerations.remove(token)
     }
 
     // MARK: - 连线（v2.12.0）
@@ -440,6 +544,7 @@ final class CanvasStore: ObservableObject {
         let edge = CanvasEdge(fromNodeId: from, toNodeId: to, role: role)
         commit(.connect, detail: detail) {
             edges.append(edge)
+            selectedNodeIds = []
             selectedEdgeId = edge.id
         }
         return nil
@@ -452,6 +557,11 @@ final class CanvasStore: ObservableObject {
         let detail = connectionDetail(from: edge.fromNodeId, to: edge.toNodeId)
         commit(.disconnect, detail: detail) {
             edges.removeAll { $0.id == edgeId }
+            // 清掉旧版血缘，避免解码迁移把用户断开的连接重新生成。
+            if let idx = nodes.firstIndex(where: { $0.id == edge.toNodeId }),
+               nodes[idx].parentNodeId == edge.fromNodeId {
+                nodes[idx].parentNodeId = nil
+            }
             if selectedEdgeId == edgeId { selectedEdgeId = nil }
         }
         return true
@@ -545,17 +655,29 @@ final class CanvasStore: ObservableObject {
         let newResolution = resolution?.trimmingCharacters(in: .whitespacesAndNewlines) ?? nodes[idx].resolution
         let newDuration = duration ?? nodes[idx].duration
         let newAudio = generateAudio ?? nodes[idx].generateAudio
+        let newSize = nodes[idx].kind.producesAsset && ratio != nil
+            ? CanvasNodeSizing.size(ratio: newRatio, shortSide: min(nodes[idx].width, nodes[idx].height)) : nil
         guard newModel != nodes[idx].model
                 || newRatio != nodes[idx].ratio
                 || newResolution != nodes[idx].resolution
                 || newDuration != nodes[idx].duration
-                || newAudio != nodes[idx].generateAudio else { return }
+                || newAudio != nodes[idx].generateAudio
+                || (newSize != nil && newSize != nodes[idx].frame.size) else { return }
 
         // 撤销栈里的描述只取「模型 · 尺寸/分辨率」两项：时长与音频改动频繁，全塞进来会让撤销
         // 菜单变成一行读不完的长句，而用户认这条记录靠的就是前两项。
         let sizeHint = newResolution.isEmpty ? newRatio : newResolution
         let detail = sizeHint.isEmpty ? newModel : "\(newModel) · \(sizeHint)"
         commit(.paramNode, detail: detail) {
+            // The card, ports and composer share the persisted frame. Keep the short side
+            // and center stable when changing portrait/landscape; one undo restores both.
+            if let size = newSize {
+                let center = CGPoint(x: nodes[idx].frame.midX, y: nodes[idx].frame.midY)
+                nodes[idx].width = size.width
+                nodes[idx].height = size.height
+                nodes[idx].x = center.x - size.width / 2
+                nodes[idx].y = center.y - size.height / 2
+            }
             nodes[idx].model = newModel
             nodes[idx].ratio = newRatio
             nodes[idx].resolution = newResolution
@@ -606,6 +728,11 @@ final class CanvasStore: ObservableObject {
             return true
         }
         guard !nodes.contains(where: { $0.id == newId }) else { return false }
+        for token in Array(generationTickets.keys) {
+            if generationTickets[token]?.matches(nodes[idx], projectId: activeProjectId) == true {
+                generationTickets[token]?.nodeId = newId
+            }
+        }
 
         let title = nodeTitle(nodes[idx])
         commit(.moveNode, detail: title) {
@@ -647,6 +774,32 @@ final class CanvasStore: ObservableObject {
     /// 外部（编辑页改了槽位）通知画布：绑定节点该重读槽位文本了。
     func noteSlotDataChanged() {
         slotRevision += 1
+    }
+
+    func setTextGenerationPrompt(id: String, text: String) {
+        guard let index = nodes.firstIndex(where: { $0.id == id }),
+              nodes[index].textGenerationPrompt != text else { return }
+        commit(.editNode, detail: "文本生成提示词") {
+            nodes[index].textGenerationPrompt = text
+        }
+    }
+
+    /// 对齐/排列作为一个历史操作，整组选中保持不变。
+    func arrangeSelection(vertically: Bool) {
+        let selected = nodes.filter { selectedNodeIds.contains($0.id) }
+            .sorted { vertically ? $0.y < $1.y : $0.x < $1.x }
+        guard selected.count > 1 else { return }
+        let left = selected.map(\.x).min()!
+        let top = selected.map(\.y).min()!
+        commit(.moveNode, detail: "排列 \(selected.count) 个节点") {
+            var cursor = vertically ? top : left
+            for node in selected {
+                guard let index = nodes.firstIndex(where: { $0.id == node.id }) else { continue }
+                nodes[index].x = vertically ? left : cursor
+                nodes[index].y = vertically ? cursor : top
+                cursor += (vertically ? node.height : node.width) + 48
+            }
+        }
     }
 
     /// 记一步「在画布里增 / 删了入参附件」的可撤销历史（v2.16.5）。
@@ -808,12 +961,14 @@ final class CanvasStore: ObservableObject {
             pendingSlotTextRestores.append(PendingSlotTextRestore(groupId: groupId, slot: slot, text: text))
         }
     }
+    var onRestoreDocument: (() -> Void)?
 
     /// 撤销一步。返回被撤销的条目（调用方用它做 toast 文案），没得撤时返回 nil。
     @discardableResult
     func undo() -> CanvasHistoryEntry? {
         guard let entry = history.undo() else { return nil }
         apply(nodes: entry.before, edges: entry.beforeEdges)
+        onRestoreDocument?()
         if let edit = entry.slotEdit {
             restoreSlotText(groupId: edit.groupId, slot: edit.slot, text: edit.before)
         }
@@ -830,6 +985,7 @@ final class CanvasStore: ObservableObject {
     func redo() -> CanvasHistoryEntry? {
         guard let entry = history.redo() else { return nil }
         apply(nodes: entry.after, edges: entry.afterEdges)
+        onRestoreDocument?()
         if let edit = entry.slotEdit {
             restoreSlotText(groupId: edit.groupId, slot: edit.slot, text: edit.after)
         }
@@ -853,7 +1009,37 @@ final class CanvasStore: ObservableObject {
     }
 
     private func apply(nodes newNodes: [CanvasNode], edges newEdges: [CanvasEdge]) {
-        nodes = newNodes
+        let current = nodes
+        nodes = newNodes.map { restored in
+            var next = restored
+            // 历史只回滚编辑动作；已经完成的任务结果和正在跑的任务元数据不倒退。
+            let sameBirth = current.filter { $0.createdAt == restored.createdAt }
+            let live = sameBirth.first { $0.id == restored.id }
+                ?? (sameBirth.count == 1 ? sameBirth.first : nil)
+            if let live {
+                next.state = live.state
+                next.taskId = live.taskId
+                next.seed = live.seed
+                next.outputAttachmentIds = live.outputAttachmentIds
+            } else {
+                switch next.state {
+                case .running, .queued: next.state = .idle
+                default: break
+                }
+            }
+            return next
+        }
+        for token in Array(generationTickets.keys) {
+            guard let ticket = generationTickets[token], ticket.projectId == activeProjectId else { continue }
+            let sameBirth = nodes.filter { $0.createdAt == ticket.createdAt }
+            let owner = sameBirth.first { $0.id == ticket.nodeId }
+                ?? (sameBirth.count == 1 ? sameBirth.first : nil)
+            if let owner {
+                generationTickets[token]?.nodeId = owner.id
+            } else {
+                generationTickets.removeValue(forKey: token)
+            }
+        }
         // 选中集合里可能有已经不存在的 id（撤销"新建"之后），留着会让工具栏的"删除选中"对着空气生效。
         let alive = Set(newNodes.map(\.id))
         selectedNodeIds = selectedNodeIds.intersection(alive)
@@ -904,6 +1090,7 @@ final class CanvasStore: ObservableObject {
     // MARK: - 选择
 
     func select(id: String, additive: Bool) {
+        selectedEdgeId = nil
         if additive {
             if selectedNodeIds.contains(id) { selectedNodeIds.remove(id) } else { selectedNodeIds.insert(id) }
         } else {
@@ -919,6 +1106,7 @@ final class CanvasStore: ObservableObject {
 
     /// 框选：命中判定在画布空间做，避免受缩放影响。
     func selectNodes(inCanvasRect rect: CGRect, additive: Bool) {
+        selectedEdgeId = nil
         let hit = nodes.filter { $0.frame.intersects(rect) }.map(\.id)
         if additive {
             selectedNodeIds.formUnion(hit)
@@ -960,6 +1148,7 @@ final class CanvasStore: ObservableObject {
                                       zoom: zoom)
         let storage = self.storage
         let projectId = activeProjectId
+        let version = retainPending(snapshot, projectId: projectId)
         let delay = saveDebounce
         saveTask = Task { [weak self] in
             try? await Task.sleep(for: delay)
@@ -970,21 +1159,53 @@ final class CanvasStore: ObservableObject {
             // 取消已经由外层 `saveTask?.cancel()` 承担。
             guard let self else { return }
             self.saveQueue.async {
-                storage.save(snapshot, projectId: projectId)
+                let ok = storage.save(snapshot, projectId: projectId)
+                Task { @MainActor [weak self] in
+                    self?.completeSave(projectId: projectId, version: version, success: ok)
+                }
             }
         }
     }
 
     /// 立即落盘（离开画布 / App 退出 / 切项目时调用，不等防抖）。
-    func flushSave() {
+    @discardableResult
+    func flushSave() -> Bool {
         saveTask?.cancel()
         let snapshot = CanvasDocument(nodes: nodes,
                                       edges: edges,
                                       panX: pan.width,
                                       panY: pan.height,
                                       zoom: zoom)
-        _ = saveQueue.sync {
-            storage.save(snapshot, projectId: activeProjectId)
+        _ = retainPending(snapshot, projectId: activeProjectId)
+        // 先排空已派出的写入，再保存所有失败/未完成快照。后台任务属于其它项目时也不能丢。
+        for (projectId, doc) in pendingDocuments {
+            let version = saveVersions[projectId]!
+            let ok = saveQueue.sync { storage.save(doc, projectId: projectId) }
+            completeSave(projectId: projectId, version: version, success: ok)
+        }
+        return pendingDocuments.isEmpty
+    }
+
+    private func retainPending(_ doc: CanvasDocument, projectId: String) -> UUID {
+        let version = UUID()
+        pendingDocuments[projectId] = doc
+        saveVersions[projectId] = version
+        if saveFailures.isEmpty { saveStatus = .saving }
+        return version
+    }
+
+    private func completeSave(projectId: String, version: UUID, success: Bool) {
+        guard saveVersions[projectId] == version else { return }
+        if success {
+            pendingDocuments.removeValue(forKey: projectId)
+            saveFailures.removeValue(forKey: projectId)
+        } else {
+            saveFailures[projectId] = storage.lastSaveError(projectId: projectId) ?? "无法写入画布文件"
+        }
+        if let failure = saveFailures.values.first {
+            saveStatus = .failed(failure)
+        } else {
+            saveStatus = pendingDocuments.isEmpty ? .saved : .saving
         }
     }
 
@@ -1077,7 +1298,7 @@ enum CanvasTool: String, CaseIterable, Identifiable, Equatable {
         switch self {
         case .select: return "cursorarrow"
         case .hand: return "hand.raised"
-        case .pickSlot: return "tray.and.arrow.down"
+        case .pickSlot: return "plus"
         }
     }
 
@@ -1085,7 +1306,7 @@ enum CanvasTool: String, CaseIterable, Identifiable, Equatable {
         switch self {
         case .select: return "选区"
         case .hand: return "抓手"
-        case .pickSlot: return "放入槽位"
+        case .pickSlot: return "新建节点"
         }
     }
 
@@ -1103,8 +1324,8 @@ enum CanvasTool: String, CaseIterable, Identifiable, Equatable {
     var hint: String? {
         switch self {
         case .select: return "在空白处拖动画出选区"
-        case .hand: return "左键拖动平移；任何工具下按住中键拖动同样可平移"
-        case .pickSlot: return "画布节点就是槽位：从左侧槽位库拖入，或按 Cmd+1~0 放入对应槽位"
+        case .hand: return "左键拖动平移；按住空格或中键可临时抓手"
+        case .pickSlot: return "新建文本、图像、视频或槽位节点（N）；也可双击空白"
         }
     }
 }

@@ -127,8 +127,8 @@ private struct CanvasEdgeShapeView: View {
             // 1pt 精度才点得中——而线越细，这个问题越致命，正好是这一版把线改细之后最该补的一刀。
             CanvasEdgeHitBand(start: g.start, c1: g.c1, c2: g.c2, end: g.end)
                 .fill(Color.white.opacity(0.001))
+                .contentShape(CanvasEdgeHitBand(start: g.start, c1: g.c1, c2: g.c2, end: g.end))
                 .onHover { hovering = $0 }
-                .onTapGesture { onSelect() }
                 .contextMenu {
                     ForEach(roleOptions, id: \.self) { role in
                         Button {
@@ -227,7 +227,7 @@ struct CanvasLinkDragPreview: View {
             // 末端圆点：唯一区分"已瞄准"与"悬空"的元素。悬空时空心（还没落地），
             // 瞄准时实心（松手就连上）。
             Circle()
-                .fill(hasTarget ? TapSkin.edgeInkActive : Color.black)
+                .fill(hasTarget ? TapSkin.edgeInkActive : TapSkin.void)
                 .overlay(Circle().stroke(hasTarget ? TapSkin.edgeInkActive : TapSkin.edgeInk, lineWidth: 1.2))
                 .frame(width: 7, height: 7)
                 .position(x: cursor.x, y: cursor.y)
@@ -263,7 +263,7 @@ struct CanvasPort: View {
         ZStack {
             // 底：纯黑填充。不用透明——端口会压在连线上，透明会让线从圆心穿过去，
             // 看起来像"线把端口串起来了"。
-            Circle().fill(Color.black)
+            Circle().fill(TapSkin.void)
             Circle().stroke(isActive ? TapSkin.portStrokeActive : TapSkin.portStroke,
                             lineWidth: TapSkin.portStrokeWidth)
             if isConnected {
@@ -277,5 +277,8 @@ struct CanvasPort: View {
             }
         }
         .frame(width: TapSkin.portDiameter, height: TapSkin.portDiameter)
+        .frame(width: 32, height: 32)
+        .contentShape(Circle())
+        .help("拖动连到另一个节点")
     }
 }

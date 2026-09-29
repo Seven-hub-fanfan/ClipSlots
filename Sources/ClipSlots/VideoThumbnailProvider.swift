@@ -51,13 +51,16 @@ enum VideoThumbnailProvider {
     private static var failed: Set<CacheKey> = []
 
     /// 取首帧。不是视频、文件不存在、抽帧失败都返回 nil（调用方按"没有预览"处理）。
-    static func thumbnail(forFile path: String) -> NSImage? {
-        guard CanvasAttachmentKind.from(fileName: path) == .video else { return nil }
+    static func thumbnail(forFile path: String, fileName: String? = nil) -> NSImage? {
+        guard CanvasAttachmentKind.from(fileName: fileName ?? path) == .video else { return nil }
         guard let key = makeKey(path) else { return nil }
+        cacheLock.lock()
+        defer { cacheLock.unlock() }
         if let hit = cache[key] { return hit }
         if failed.contains(key) { return nil }
 
-        guard let image = extractFirstFrame(path) else {
+        let url = CanvasVideoAsset.shared.url(for: URL(fileURLWithPath: path), fileName: fileName ?? path)
+        guard let image = extractFirstFrame(url.path) else {
             failed.insert(key)
             return nil
         }
@@ -73,10 +76,11 @@ enum VideoThumbnailProvider {
     ///
     /// 与首帧共用一次 `AVURLAsset` 本来更省，但时长是**在首帧之前**就要用到的（角标先画、图后到），
     /// 而且 `asset.duration` 不涉及解码，成本比抽帧低一个量级，分开取更简单。
-    static func duration(forFile path: String) -> Double? {
-        guard CanvasAttachmentKind.from(fileName: path) == .video else { return nil }
+    static func duration(forFile path: String, fileName: String? = nil) -> Double? {
+        guard CanvasAttachmentKind.from(fileName: fileName ?? path) == .video else { return nil }
         guard FileManager.default.fileExists(atPath: path) else { return nil }
-        let asset = AVURLAsset(url: URL(fileURLWithPath: path))
+        let asset = AVURLAsset(url: CanvasVideoAsset.shared.url(
+            for: URL(fileURLWithPath: path), fileName: fileName ?? path))
         let seconds = CMTimeGetSeconds(asset.duration)
         guard seconds.isFinite, seconds > 0 else { return nil }
         return seconds
@@ -89,6 +93,7 @@ enum VideoThumbnailProvider {
     }
 
     // MARK: - 内部
+    private static let cacheLock = NSLock()
 
     private static func makeKey(_ path: String) -> CacheKey? {
         guard let attrs = try? FileManager.default.attributesOfItem(atPath: path) else { return nil }

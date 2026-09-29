@@ -105,6 +105,13 @@ final class CrateGenerationService {
 
     /// 找到 crate 可执行文件。结果缓存，找不到时不缓存（用户装完不必重启 App）。
     func resolveBinary() throws -> String {
+        #if DEBUG
+        if ProcessInfo.processInfo.environment["CLIPSLOTS_CANVAS_REGRESSION"] == "1",
+           let fixture = ProcessInfo.processInfo.environment["CLIPSLOTS_CRATE_FIXTURE"],
+           FileManager.default.isExecutableFile(atPath: fixture) {
+            return fixture
+        }
+        #endif
         binaryLock.lock()
         let cached = cachedBinary
         binaryLock.unlock()
@@ -124,6 +131,19 @@ final class CrateGenerationService {
     /// 模型参数表缓存（`model describe` 的结果）。模型的参数表在一次会话里不会变，而每次重跑都问
     /// 一遍要多等一个 Node 冷启动。
     private var modelParameterCache: [String: Set<String>] = [:]
+    private let parameterLock = NSLock()
+
+    private func cachedParameters(_ model: String) -> Set<String>? {
+        parameterLock.lock()
+        defer { parameterLock.unlock() }
+        return modelParameterCache[model]
+    }
+
+    private func cacheParameters(_ names: Set<String>, for model: String) {
+        parameterLock.lock()
+        defer { parameterLock.unlock() }
+        modelParameterCache[model] = names
+    }
 
     private let envLock = NSLock()
     private var cachedSearchPath: String?
@@ -256,7 +276,7 @@ final class CrateGenerationService {
             // 顺手把参数表喂进 seed 门禁的缓存：目录里已经带了完整 parameters，再为同一个模型
             // 单独 describe 一次纯属浪费（也是"点生成要等两次进程"的一个来源）。
             for m in models where !m.parameterNames.isEmpty {
-                modelParameterCache[m.id] = m.parameterNames
+                cacheParameters(m.parameterNames, for: m.id)
             }
             return models
         } catch let err as CrateResponseError {
@@ -391,7 +411,7 @@ final class CrateGenerationService {
 
     /// 这个模型是不是不收 seed？`nil` = 问不出来（不确定时不做任何取舍，交给重试兜底）。
     private func modelRejectsSeed(model: String) async -> Bool? {
-        if let cached = modelParameterCache[model] {
+        if let cached = cachedParameters(model) {
             return !cached.contains(CrateGeneration.seedParameterName)
         }
         do {
@@ -401,7 +421,7 @@ final class CrateGenerationService {
             let names = try CrateGeneration.parseModelParameterNames(output)
             // 空表按"问不出来"处理：宁可让提交去试，也不要因为解析口径变了就默默阉掉 seed。
             guard !names.isEmpty else { return nil }
-            modelParameterCache[model] = names
+            cacheParameters(names, for: model)
             return !names.contains(CrateGeneration.seedParameterName)
         } catch {
             NSLog("[ClipSlots][crate] model describe \(model) failed: \(error)")
@@ -420,8 +440,12 @@ final class CrateGenerationService {
                            timeout: TimeInterval = CrateGeneration.pollTimeout,
                            onProgress: @escaping (CrateTaskProgress) -> Void) async throws -> [String] {
         let deadline = Date().addingTimeInterval(timeout)
+        var firstPoll = true
         while Date() < deadline {
-            try await Task.sleep(nanoseconds: UInt64(CrateGeneration.pollInterval * 1_000_000_000))
+            if !firstPoll {
+                try await Task.sleep(nanoseconds: UInt64(CrateGeneration.pollInterval * 1_000_000_000))
+            }
+            firstPoll = false
             if Task.isCancelled { throw CancellationError() }
 
             let output = try await run(CrateGeneration.taskGetArguments(taskId: taskId),
@@ -460,17 +484,18 @@ final class CrateGenerationService {
         guard let url = URL(string: urlString) else {
             throw ServiceError.downloadFailed(detail: "URL 非法：\(CrateGeneration.clip(urlString))")
         }
-        let data: Data
+        let temporaryFile: URL
         let response: URLResponse
         do {
-            (data, response) = try await URLSession.shared.data(from: url)
+            (temporaryFile, response) = try await URLSession.shared.download(from: url)
         } catch {
             throw ServiceError.downloadFailed(detail: error.localizedDescription)
         }
+        defer { try? FileManager.default.removeItem(at: temporaryFile) }
         if let http = response as? HTTPURLResponse, !(200...299).contains(http.statusCode) {
             throw ServiceError.downloadFailed(detail: "HTTP \(http.statusCode)")
         }
-        guard !data.isEmpty else {
+        guard (try? temporaryFile.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0 > 0 else {
             throw ServiceError.downloadFailed(detail: "内容为空")
         }
 
@@ -483,9 +508,10 @@ final class CrateGenerationService {
         do {
             try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
             let file = dir.appendingPathComponent(name)
-            try data.write(to: file, options: .atomic)
+            try FileManager.default.moveItem(at: temporaryFile, to: file)
             return file
         } catch {
+            try? FileManager.default.removeItem(at: dir)
             throw ServiceError.downloadFailed(detail: error.localizedDescription)
         }
     }

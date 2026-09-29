@@ -10,6 +10,23 @@ import Foundation
 /// 角色消歧（显式角色优先、自动角色补位、多余的降级成参考图）是一组纯规则，错了不会崩：
 /// 首帧被悄悄当成参考图，用户只会觉得"这个模型不听话"。这种错误必须靠断言盯，不能靠手测。
 public enum CanvasEdgeInputs {
+    /// 只排序本次选中的节点；独立节点保持选择前的文档顺序。nil 表示损坏文档中存在环。
+    public static func generationOrder(nodes: [CanvasNode], edges: [CanvasEdge]) -> [CanvasNode]? {
+        let ids = Set(nodes.map(\.id))
+        var remaining = nodes
+        var done = Set<String>()
+        var ordered: [CanvasNode] = []
+        while !remaining.isEmpty {
+            guard let index = remaining.firstIndex(where: { node in
+                edges.filter { $0.toNodeId == node.id && ids.contains($0.fromNodeId) }
+                    .allSatisfy { done.contains($0.fromNodeId) }
+            }) else { return nil }
+            let next = remaining.remove(at: index)
+            ordered.append(next)
+            done.insert(next.id)
+        }
+        return ordered
+    }
 
     // MARK: - 上游快照
 
@@ -24,12 +41,22 @@ public enum CanvasEdgeInputs {
         public var text: String
         /// 已成功产出的资产本地路径。nil = 还没出图。
         public var assetPath: String?
+        /// 槽位是正文与附件的组合，不需要先执行生成；顺序即附件顺序。
+        public var imagePaths: [String]
 
-        public init(nodeId: String, kind: CanvasNodeKind, text: String, assetPath: String?) {
+        public init(nodeId: String, kind: CanvasNodeKind, text: String, assetPath: String?,
+                    imagePaths: [String] = []) {
             self.nodeId = nodeId
             self.kind = kind
             self.text = text
             self.assetPath = assetPath
+            self.imagePaths = imagePaths
+        }
+
+        var assets: [String] {
+            let paths = kind == .slot ? imagePaths : assetPath.map { [$0] } ?? []
+            var used = Set<String>()
+            return paths.filter { !$0.isEmpty && used.insert($0).inserted }
         }
     }
 
@@ -50,6 +77,16 @@ public enum CanvasEdgeInputs {
         /// 单独记一个数是为了让编排层能把失败原因写准：用户连了三条线却报"提示词为空"，
         /// 他会以为是提示词的问题，而真正的原因是上游还没跑。
         public var pendingUpstreamCount: Int = 0
+        public var unavailableUpstreamCount: Int = 0
+        public var incompatibleUpstreamCount: Int = 0
+
+        /// 提交与界面共用的阻断原因，与本节点是否已有提示词无关。
+        public var blockingReason: String? {
+            if incompatibleUpstreamCount > 0 { return "视频不能直接作为图片入参，请先提取图片，或将连线改为仅引用提示词" }
+            if unavailableUpstreamCount > 0 { return "有 \(unavailableUpstreamCount) 个上游入参不可用，请检查连线和图片文件" }
+            if pendingUpstreamCount > 0 { return "有 \(pendingUpstreamCount) 个上游还没出结果，请先完成上游生成" }
+            return nil
+        }
 
         public var assetPaths: [String] {
             var out: [String] = []
@@ -86,67 +123,87 @@ public enum CanvasEdgeInputs {
         var out = Resolved()
         // 带上序号，最后按序号还原"连线顺序"——两轮扫描会打乱 append 的先后。
         var fragments: [(Int, String)] = []
-        var references: [(Int, String)] = []
+        var references: [(edge: Int, attachment: Int, path: String)] = []
         var first: (Int, String)?
         var last: (Int, String)?
         var pending = 0
 
         let isVideo = downstreamKind == .video
+        let usable = incoming.filter { edge in
+            guard let up = upstreams[edge.fromNodeId] else {
+                out.unavailableUpstreamCount += 1
+                return false
+            }
+            if edge.role != .prompt, up.kind == .video {
+                out.incompatibleUpstreamCount += 1
+                return false
+            }
+            return true
+        }
 
-        func placeAsset(_ index: Int, _ path: String, role: CanvasEdgeRole) {
+        func placeAsset(_ index: Int, _ attachment: Int, _ path: String, role: CanvasEdgeRole) {
             switch role {
             case .firstFrame where isVideo:
-                if first == nil { first = (index, path) } else { references.append((index, path)) }
+                if first == nil { first = (index, path) } else { references.append((index, attachment, path)) }
             case .lastFrame where isVideo:
-                if last == nil { last = (index, path) } else { references.append((index, path)) }
+                if last == nil { last = (index, path) } else { references.append((index, attachment, path)) }
             default:
-                references.append((index, path))
+                references.append((index, attachment, path))
             }
         }
 
         // 第一轮：显式角色。
-        for (index, edge) in incoming.enumerated() {
+        for (index, edge) in usable.enumerated() {
             guard edge.role != .auto, let up = upstreams[edge.fromNodeId] else { continue }
             if edge.role == .prompt {
                 let text = up.text.trimmingCharacters(in: .whitespacesAndNewlines)
                 if !text.isEmpty { fragments.append((index, text)) }
                 continue
             }
-            guard let path = up.assetPath, !path.isEmpty else {
+            let paths = up.assets
+            guard !paths.isEmpty else {
                 // 明确要图但上游没图：文本上游退回提示词（至少把内容传下去），出图上游记一笔待产。
                 if up.kind == .text {
                     let text = up.text.trimmingCharacters(in: .whitespacesAndNewlines)
                     if !text.isEmpty { fragments.append((index, text)) }
-                } else {
+                } else if up.kind != .slot {
                     pending += 1
                 }
                 continue
             }
-            placeAsset(index, path, role: edge.role)
+            for (attachment, path) in paths.enumerated() {
+                placeAsset(index, attachment, path, role: attachment == 0 ? edge.role : .reference)
+            }
         }
 
         // 第二轮：自动角色补位。
-        for (index, edge) in incoming.enumerated() {
+        for (index, edge) in usable.enumerated() {
             guard edge.role == .auto, let up = upstreams[edge.fromNodeId] else { continue }
-            if up.kind == .text {
+            if up.kind == .text || up.kind == .slot {
                 let text = up.text.trimmingCharacters(in: .whitespacesAndNewlines)
                 if !text.isEmpty { fragments.append((index, text)) }
-                continue
+                if up.kind == .text { continue }
             }
-            guard let path = up.assetPath, !path.isEmpty else {
-                pending += 1
+            let paths = up.assets
+            guard !paths.isEmpty else {
+                if up.kind != .slot { pending += 1 }
                 continue
             }
             // 视频下游的第一张自动图当首帧（"把这张图动起来"是最常见的意图）；
             // 图像下游没有首帧概念，一律参考图。
-            let resolvedRole: CanvasEdgeRole = (isVideo && first == nil) ? .firstFrame : .reference
-            placeAsset(index, path, role: resolvedRole)
+            for (attachment, path) in paths.enumerated() {
+                let resolvedRole: CanvasEdgeRole = (isVideo && first == nil) ? .firstFrame : .reference
+                placeAsset(index, attachment, path, role: resolvedRole)
+            }
         }
 
         out.promptFragments = fragments.sorted { $0.0 < $1.0 }.map(\.1)
         out.firstFramePath = first?.1
         out.lastFramePath = last?.1
-        out.referencePaths = references.sorted { $0.0 < $1.0 }.map(\.1)
+        var used = Set([first?.1, last?.1].compactMap { $0 })
+        out.referencePaths = references.sorted {
+            ($0.edge, $0.attachment) < ($1.edge, $1.attachment)
+        }.map(\.path).filter { used.insert($0).inserted }
         out.pendingUpstreamCount = pending
         return out
     }
@@ -209,7 +266,7 @@ public enum CanvasEdgeInputs {
         if !supportsLast { resolvedLast = nil }
 
         // 互斥模型：有首/尾帧就不能再带参考图（见 `framesExcludeReferences`）。
-        if model?.framesExcludeReferences == true {
+        if model?.framesExcludeReferences == true, resolvedFirst != nil || resolvedLast != nil {
             return (resolvedFirst, resolvedLast, [])
         }
         var refs: [String] = []

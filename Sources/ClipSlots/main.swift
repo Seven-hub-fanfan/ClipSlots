@@ -2805,22 +2805,10 @@ final class SlotStoreObservable: ObservableObject {
                                     attachments: [SlotContent.SlotAttachment]) -> Bool {
         guard slot >= 1, slot <= canvasSlotCapacity(groupId: groupId) else { return false }
 
-        if groupId == currentSpecialSlotId {
-            setAttachments(attachments, for: slot)
-            // ★ v2.11.8 六轮：**当前组**这条分支此前只有 `setAttachments` 里那个
-            // `refreshTrigger`（早就不发通知了），没有 bump `canvasSlotRevision` ——
-            // 于是"在画布上给当前组的节点拖入一张新入参"写盘成功、但节点卡片不重读槽位：
-            // 屏幕上还是旧的那几张卡。用户随后一次右键（`.contextMenu` 重新求值）或切页面
-            // （unmount/remount）才让卡片读到真数据，观感就是「顺序自己变了」——
-            // 实际是"变化被压住了几秒，然后一次性补上"。
-            //
-            // 下面这个组的分支从三轮起就 bump 了，两条分支的刷新口径必须一致：同一个面板、
-            // 同一个动作，只因为"节点在不在当前组"而一条即时刷新一条不刷，是纯粹的实现泄漏。
-            bumpCanvasSlotRevision()
-            return true
-        }
-
-        guard var content = canvasStorage(groupId: groupId).getOrUnknown(slot, in: groupId) else {
+        let targetStorage = canvasStorage(groupId: groupId)
+        guard var content = groupId == currentSpecialSlotId
+                ? contentForSlotOrUnknown(slot)
+                : targetStorage.getOrUnknown(slot, in: groupId) else {
             NSLog("[ClipSlots] writeCanvasSlotAttachments slot=\(slot) group=\(groupId): storage UNKNOWN, aborting")
             return false
         }
@@ -2828,15 +2816,20 @@ final class SlotStoreObservable: ObservableObject {
         // 身份字段必须刷新，否则 v2.10.52 起的增量 diff 会判等而跳过重绘（v2.10.53 同源坑）。
         content.contentId = UUID().uuidString
         content.updatedAt = Date().timeIntervalSince1970
-        let ok = canvasStorage(groupId: groupId).set(slot, content: content, in: groupId)
+        let snapshot = content
+        // 画布需要明确的事务完成结果才能推进撤销栈；与编辑侧写队列保序，不再返回乐观成功。
+        let persisted: SlotContent? = slotWriteQueue.sync {
+            guard targetStorage.set(slot, content: snapshot, in: groupId) else { return nil }
+            return targetStorage.getOrUnknown(slot, in: groupId)
+        }
         // ★ 三轮 hotfix2：除了那个已经不发通知的 `refreshTrigger`，这里必须再 bump 一个**真的**
         // @Published，否则「入参文件」面板（computed property 读 store）删完不会重新求值。
         // 详见 `canvasSlotRevision` 的注释。
-        if ok {
-            refreshTrigger = UUID()
-            bumpCanvasSlotRevision()
-        }
-        return ok
+        guard let persisted else { return false }
+        if loadedSpecialSlotId == groupId { slots[slot] = persisted }
+        refreshTrigger = UUID()
+        bumpCanvasSlotRevision()
+        return true
     }
 
     // MARK: - 画布附件编辑的撤销暂存桥（v2.16.5）
@@ -2892,6 +2885,29 @@ final class SlotStoreObservable: ObservableObject {
     }
 
     // MARK: - 未入库保留组 / 归槽 / 排序（v2.11.8 二轮）
+
+    /// 生成下载的临时文件必须等存储摄取完成才能删除；普通附件入口是乐观异步写，不能用于此处。
+    func appendCanvasGeneratedAttachment(_ attachment: SlotContent.SlotAttachment,
+                                         groupId: String, slot: Int) -> SlotContent.SlotAttachment? {
+        guard slot >= 1, slot <= canvasSlotCapacity(groupId: groupId) else { return nil }
+        let targetStorage = canvasStorage(groupId: groupId)
+        guard var content = groupId == currentSpecialSlotId
+                ? Optional(contentForSlot(slot))
+                : targetStorage.getOrUnknown(slot, in: groupId) else { return nil }
+        content.attachments.append(attachment)
+        content.contentId = UUID().uuidString
+        content.updatedAt = Date().timeIntervalSince1970
+        let snapshot = content
+        // 与现有写队列保序；大文件由 SlotStorage 的 clonefile 路径摄取，不分配整包 Data。
+        let persisted: SlotContent? = slotWriteQueue.sync {
+            guard targetStorage.set(slot, content: snapshot, in: groupId) else { return nil }
+            return targetStorage.getOrUnknown(slot, in: groupId)
+        }
+        guard let persisted else { return nil }
+        if loadedSpecialSlotId == groupId { slots[slot] = persisted }
+        bumpCanvasSlotRevision()
+        return persisted.attachments.first { $0.id == attachment.id }
+    }
 
     /// 「未入库」保留组的 id。
     ///

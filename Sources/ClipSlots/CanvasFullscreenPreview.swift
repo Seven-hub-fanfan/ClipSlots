@@ -57,6 +57,7 @@ struct CanvasFullscreenPreview: View {
     @State private var pinchBase: CGFloat = 1
     @State private var player: AVPlayer?
     @State private var fullImage: NSImage?
+    @State private var badgeLine = ""
 
     private var isVideo: Bool { target.attachment.canvasIsVideoLike }
 
@@ -88,6 +89,15 @@ struct CanvasFullscreenPreview: View {
         )
         .transition(.opacity)
         .onAppear { prepare() }
+        .task(id: target.attachment.canvasSourceIdentity) {
+            while !Task.isCancelled {
+                let result = await CanvasMediaProbe.load(for: target.attachment)
+                guard !Task.isCancelled else { return }
+                let line = CanvasMediaProbe.badgeLine(facts: result.facts)
+                if line != badgeLine { badgeLine = line }
+                try? await Task.sleep(for: .seconds(2))
+            }
+        }
         .onDisappear {
             player?.pause()
             player = nil
@@ -243,8 +253,6 @@ struct CanvasFullscreenPreview: View {
         return att.name
     }
 
-    private var badgeLine: String { CanvasMediaProbe.badgeLine(for: target.attachment) }
-
     // MARK: - 动作
 
     /// 图片解码在**主线程同步**做一次。
@@ -254,7 +262,7 @@ struct CanvasFullscreenPreview: View {
     /// 那边是一屏十几张、每帧都可能重算，两者的取舍前提完全不同。
     private func prepare() {
         if isVideo {
-            if let url = target.attachment.canvasLocalURL {
+            if let url = target.attachment.canvasPlaybackURL {
                 let p = AVPlayer(url: url)
                 player = p
                 p.play()

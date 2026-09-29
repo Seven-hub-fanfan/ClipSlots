@@ -57,7 +57,7 @@ public enum WindowLayoutMetrics {
 
     /// 右侧 Agent 侧栏宽度（固定，不参与弹性分配）。
     /// 与 `AgentSidebarView.width` 必须一致 —— 后者引用本常量，避免两处各写一个数字。
-    public static let agentSidebarWidth: CGFloat = 320
+    public static let agentSidebarWidth: CGFloat = 480
 
     /// 编辑页卡片区的最小可用宽度：一列卡片 + 左右内边距。再窄卡片本身就要被裁。
     public static let editWorkspaceMinWidth: CGFloat = 300

@@ -22,3 +22,9 @@ build/perf/
 
 # UI screenshots
 build/uishots/
+
+# v2.17.4 additions: transient validation & debug artifacts
+build/validation/
+build/dmg_background/
+.dbg/
+debug-*.md

@@ -2,6 +2,7 @@ import Foundation
 import AppKit
 import SwiftUI
 import Combine
+import ClipSlotsKit
 
 // MARK: - v2.10.91 (perf 第四轮) 交互自测驱动
 //
@@ -84,6 +85,21 @@ final class PerfAutoTest {
     }
 
     private func buildAndRun(store: SlotStoreObservable) {
+        #if DEBUG
+        if ProcessInfo.processInfo.environment["CLIPSLOTS_CANVAS_REGRESSION"] == "1" {
+            UserDefaults.standard.set(false, forKey: AgentPreferences.canvasSidebarVisibleKey)
+            UserDefaults.standard.set(false, forKey: AgentPreferences.editSidebarVisibleKey)
+            if let raw = ProcessInfo.processInfo.environment["CLIPSLOTS_TEST_SKIN"],
+               let skin = AppSkin(rawValue: raw) { AppSkinCenter.apply(skin) }
+            if let raw = ProcessInfo.processInfo.environment["CLIPSLOTS_TEST_APPEARANCE"],
+               let mode = ThemeMode(rawValue: raw) {
+                UserDefaults.standard.set(raw, forKey: AppearanceDefaults.key)
+                NSApp.appearance = mode.nsAppearance
+            }
+            NotificationCenter.default.post(name: .setWorkspaceMode, object: nil, userInfo: ["mode": "canvas"])
+            return
+        }
+        #endif
         // v2.10.93: 场景选择。`CLIPSLOTS_PERF_AUTOTEST_SCENARIO` 支持逗号分隔的
         // `group` / `settings` / `resize` / `theme`；未设置时保持 v2.10.91 的默认行为
         // （切组 + 开关设置），以免破坏既有取数脚本。

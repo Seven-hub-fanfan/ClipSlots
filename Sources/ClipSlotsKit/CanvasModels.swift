@@ -224,6 +224,11 @@ public struct CanvasNode: Codable, Identifiable, Equatable {
     public var ratio: String
     /// 张数（1 / 2 / 4）。对应 CLI 的 `--count`。
     public var count: Int
+    /// 文本生成的指令。生成的正文仍只存槽位，两者不能互相覆盖。
+    public var textGenerationPrompt: String = ""
+    /// Identifies the displayed asset whose native geometry has already been adopted.
+    /// Explicit later ratio changes remain intact until the displayed media changes.
+    public var mediaLayoutAttachmentID: String?
 
     // MARK: 出视频参数（v2.11.19）
     //
@@ -267,6 +272,12 @@ public struct CanvasNode: Codable, Identifiable, Equatable {
     public var state: CanvasNodeState
     /// Crate 任务 ID，失败排查与「复制 taskId」用。
     public var taskId: String?
+    /// 已提交但没有成功写回产物的任务，默认继续查询，不能悄悄重新提交。
+    public var needsGenerationRecovery: Bool {
+        guard kind.producesAsset, let taskId, !taskId.isEmpty else { return false }
+        if case .succeeded = state { return false }
+        return true
+    }
     /// 随机种子。实测 `--count n` 的每个任务 seed 各不相同，固定 seed 重跑依赖它。
     public var seed: Int?
 
@@ -423,7 +434,7 @@ public struct CanvasNode: Codable, Identifiable, Equatable {
     private enum CodingKeys: String, CodingKey {
         case pageId, groupId, slot
         case kind, x, y, width, height
-        case model, ratio, count
+        case model, ratio, count, textGenerationPrompt, mediaLayoutAttachmentID
         case resolution, duration, generateAudio
         case fontName, fontSize
         case state, taskId, seed
@@ -473,6 +484,8 @@ public struct CanvasNode: Codable, Identifiable, Equatable {
         model = try c.decodeIfPresent(String.self, forKey: .model) ?? CanvasNode.defaultModel(for: kind)
         ratio = try c.decodeIfPresent(String.self, forKey: .ratio) ?? CanvasNode.defaultRatio(for: kind)
         count = try c.decodeIfPresent(Int.self, forKey: .count) ?? 1
+        textGenerationPrompt = try c.decodeIfPresent(String.self, forKey: .textGenerationPrompt) ?? ""
+        mediaLayoutAttachmentID = try c.decodeIfPresent(String.self, forKey: .mediaLayoutAttachmentID)
         // v2.11.19 新增：老文档没有，缺省"不传"（空串 / nil），等价于沿用模型自己的默认值。
         resolution = try c.decodeIfPresent(String.self, forKey: .resolution) ?? ""
         duration = try c.decodeIfPresent(Int.self, forKey: .duration)
@@ -509,6 +522,10 @@ public struct CanvasNode: Codable, Identifiable, Equatable {
         try c.encode(model, forKey: .model)
         try c.encode(ratio, forKey: .ratio)
         try c.encode(count, forKey: .count)
+        try c.encodeIfPresent(mediaLayoutAttachmentID, forKey: .mediaLayoutAttachmentID)
+        if !textGenerationPrompt.isEmpty {
+            try c.encode(textGenerationPrompt, forKey: .textGenerationPrompt)
+        }
         // 空 / nil 不写：与 `outputAttachmentIds` 同一条规矩。更重要的是这让"没设过"在文件里
         // 就是"字段不存在"，而不是一个需要靠约定解释的空串——图像节点的文档因此完全不变。
         if !resolution.isEmpty {

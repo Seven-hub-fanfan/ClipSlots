@@ -58,6 +58,7 @@ struct CanvasTapNodeCard: View {
 
     @State private var isHovering = false
     @State private var draft = ""
+    @State private var mediaInfoLine = ""
 
     // MARK: - 缩放换算
 
@@ -93,12 +94,28 @@ struct CanvasTapNodeCard: View {
             .frame(width: s(node.width), height: s(node.height))
             .background(cardFill)
             .clipShape(RoundedRectangle(cornerRadius: s(TapSkin.cardRadius), style: .continuous))
+            .overlay {
+                RoundedRectangle(cornerRadius: s(TapSkin.cardRadius))
+                    .stroke(isSelected ? TapSkin.nodeAccent(node.kind).opacity(0.7) : TapSkin.border.opacity(0.6), lineWidth: s(1))
+                    .allowsHitTesting(false)
+            }
             .overlay(statusVeil)
             .overlay(alignment: .topTrailing) { hoverChips }
             // 信息角标的位置**随内容而变**，原因见 `infoBadge` 注释末尾那段。
             .overlay(alignment: media == nil ? .bottomLeading : .topLeading) { infoBadge }
             .overlay(alignment: .bottom) { promptVeil }
             .overlay(alignment: .topLeading) { nameTag }
+            .task(id: media?.canvasSourceIdentity) {
+                mediaInfoLine = ""
+                guard let media else { return }
+                while !Task.isCancelled {
+                    let result = await CanvasMediaProbe.load(for: media)
+                    guard !Task.isCancelled else { return }
+                    let line = CanvasMediaProbe.badgeLine(facts: result.facts)
+                    if line != mediaInfoLine { mediaInfoLine = line }
+                    try? await Task.sleep(for: .seconds(2))
+                }
+            }
             // 光标：卡片上是"可以抓起来"的开手，正在拖是握拳（握拳那一档由工作区在拖拽时接管）。
             .tapCursor(.openHand)
             .onHover { hovering in
@@ -117,10 +134,8 @@ struct CanvasTapNodeCard: View {
     /// 有媒体时**不画填充**：媒体自己就是那块面，底下再垫一层灰只会在 aspect 不匹配的边缘露出来。
     @ViewBuilder
     private var cardFill: some View {
-        if media != nil && !isEditing {
+        if media != nil {
             Color.black
-        } else if isSelected {
-            TapSkin.cardEmptySelectedFill
         } else {
             TapSkin.cardEmptyFill
         }
@@ -130,7 +145,7 @@ struct CanvasTapNodeCard: View {
 
     @ViewBuilder
     private var content: some View {
-        if isEditing {
+        if isEditing && node.kind == .text {
             promptEditor
         } else if let media {
             mediaBody(media)
@@ -149,7 +164,7 @@ struct CanvasTapNodeCard: View {
     @ViewBuilder
     private func mediaBody(_ att: SlotContent.SlotAttachment) -> some View {
         ZStack {
-            CanvasAttachmentPreviewImage(attachment: att, maxPixel: 900, contentMode: .fill)
+            CanvasAttachmentPreviewImage(attachment: att, maxPixel: 900, contentMode: .fit)
                 .frame(width: s(node.width), height: s(node.height))
                 .clipped()
             if att.canvasIsVideoLike, !isBusy {
@@ -171,7 +186,7 @@ struct CanvasTapNodeCard: View {
         Text(text)
             .font(CanvasFontCatalog.font(family: node.fontName,
                                          size: fs(node.resolvedBodyFontSize)))
-            .foregroundColor(Color(red: 0.91, green: 0.91, blue: 0.91))
+            .foregroundColor(TapSkin.ink)
             .lineSpacing(s(2))
             .multilineTextAlignment(.leading)
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
@@ -185,12 +200,22 @@ struct CanvasTapNodeCard: View {
 
     @ViewBuilder
     private var emptyGlyph: some View {
-        Image(systemName: node.kind.symbolName)
-            .font(.system(size: s(TapSkin.cardEmptyGlyphSize), weight: .light))
-            .foregroundColor(TapSkin.cardEmptyGlyph)
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .contentShape(Rectangle())
-            .onTapGesture(count: 2) { onBeginEdit() }
+        Group {
+            if node.kind == .text {
+                Text("双击开始编辑…")
+                    .font(.system(size: fs(12)))
+                    .foregroundColor(TapSkin.chromeInkDim)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                    .padding(s(12))
+            } else {
+                Image(systemName: node.kind.symbolName)
+                    .font(.system(size: s(TapSkin.cardEmptyGlyphSize), weight: .light))
+                    .foregroundColor(TapSkin.cardEmptyGlyph)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
+        }
+        .contentShape(Rectangle())
+        .onTapGesture(count: 2) { onBeginEdit() }
     }
 
     @ViewBuilder
@@ -216,7 +241,7 @@ struct CanvasTapNodeCard: View {
     @ViewBuilder
     private var nameTag: some View {
         CanvasNodeNameTag(symbol: node.kind.symbolName,
-                          label: pathLabel,
+                          label: node.kind == .text ? "TEXT" : (node.kind == .video ? "VIDEO" : "IMAGE"),
                           isActive: hoverActive || isSelected,
                           cardWidth: node.width,
                           renderScale: renderScale,
@@ -264,7 +289,7 @@ struct CanvasTapNodeCard: View {
     }
 
     private var infoLine: String? {
-        if let media { return CanvasMediaProbe.badgeLine(for: media) }
+        if media != nil { return mediaInfoLine.isEmpty ? nil : mediaInfoLine }
         guard !text.isEmpty else { return nil }
         return "\(text.count) 字"
     }
@@ -288,6 +313,7 @@ struct CanvasTapNodeCard: View {
                 }
             }
             .padding(s(TapSkin.chipInset))
+            .canvasControlRegion("node-chips-\(node.id)")
             .transition(.opacity)
         }
     }
@@ -448,7 +474,7 @@ struct CanvasNodeNameTag: View {
                 .lineLimit(1)
                 .truncationMode(.middle)
         }
-        .foregroundColor(isActive ? TapSkin.tagInkActive : TapSkin.tagInk)
+        .foregroundColor(TapSkin.colorful ? TapSkin.nodeAccent(symbol == "film" ? .video : symbol == "photo" ? .image : symbol == "text.alignleft" ? .text : .slot) : (isActive ? TapSkin.tagInkActive : TapSkin.tagInk))
         .frame(maxWidth: s(cardWidth), alignment: .leading)
         .canvasStableLabel()
         .canvasScreenFixedText(textCounter, anchor: .bottomLeading)

@@ -14,6 +14,7 @@ import Foundation
 public enum CanvasPasteIntent: Equatable {
     /// 建图像节点，把这些文件作为入参文件。
     case imageNodeWithFiles([URL])
+    case videoNodeWithFiles([URL])
     /// 建图像节点，把这段位图数据作为入参文件（附件名由上层生成）。
     case imageNodeWithBitmap
     /// 建文本节点，正文 = 这段文字。
@@ -56,9 +57,17 @@ public enum CanvasPasteClassifier {
         imageExtensions.contains(url.pathExtension.lowercased())
     }
 
+    public static func isVideoFile(_ url: URL) -> Bool {
+        ["mp4", "mov", "m4v", "avi", "mkv", "webm", "mpeg", "mpg"].contains(url.pathExtension.lowercased())
+    }
+
     /// 判定粘贴意图。返回 nil = 剪贴板里没有任何可用内容（调用方应给出提示而不是静默）。
     public static func classify(_ snapshot: CanvasPasteSnapshot) -> CanvasPasteIntent? {
         if !snapshot.fileURLs.isEmpty {
+            if let firstMedia = snapshot.fileURLs.first(where: { isImageFile($0) || isVideoFile($0) }),
+               isVideoFile(firstMedia) {
+                return .videoNodeWithFiles(snapshot.fileURLs)
+            }
             return .imageNodeWithFiles(snapshot.fileURLs)
         }
         if snapshot.hasBitmap {

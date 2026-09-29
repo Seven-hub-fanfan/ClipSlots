@@ -308,6 +308,7 @@ public enum CanvasKeyBinding {
         /// 从编辑器上溜走了、但视图还留在编辑态（点了画布空白处就会这样），此时用户按 Esc 期望
         /// "退出来"，如果没人接就表现为节点永远卡在编辑框里、下游 + 号也一直不出现。
         case cancel
+        case selectTool, handTool, newNode, selectAll, fitContent, fitSelection
         case none
     }
 
@@ -338,6 +339,16 @@ public enum CanvasKeyBinding {
         // Esc 只认裸 Esc：带修饰键的 Esc 在系统里另有含义（如 ⌘Esc 语音控制）。
         if keyCode == escapeKeyCode, !command, !shift, !option {
             return .cancel
+        }
+        if keyCode == 0, command, !shift, !option { return .selectAll }
+        if !command, !option {
+            if shift, keyCode == 18 { return .fitContent }
+            if shift, keyCode == 19 { return .fitSelection }
+            if !shift {
+                if keyCode == vKeyCode { return .selectTool }
+                if keyCode == 4 { return .handTool }
+                if keyCode == 45 { return .newNode }
+            }
         }
         return .none
     }

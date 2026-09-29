@@ -3,12 +3,9 @@ import ClipSlotsKit
 
 /// 「ADD NODE」菜单（v2.11.8 · 对齐 Crate 画布）。
 ///
-/// 两个入口共用这一个视图：**双击画布空白处**、**选中节点下方的 + 号**。共用不是为了省代码，
-/// 是为了让两条路径的选项集合与文案永远一致 —— 两份菜单的实际后果是"双击能建文本节点、+ 号
-/// 不能"这类无人察觉的行为分叉。
+/// 空白处添加素材节点；从节点端口进入时引用上游生成。两种入口有不同文案和分区。
 ///
-/// 样式刻意写死深色（不跟随浅色模式）：用户明确要求 Crate 风格的深色浮层，而 Crate 的菜单在
-/// 亮色画布上也是深色的 —— 它是"悬在画布之上的工具"，与画布内容形成对比才立得住。
+/// 表面与细边跟随画布外观，浅色模式避免深色光晕。
 struct CanvasAddNodeMenu: View {
 
     /// 可创建的节点类型。
@@ -27,24 +24,38 @@ struct CanvasAddNodeMenu: View {
         case image
         case video
         case slot
+        case audio
+        case threeD
+        case timeline
+        case stage
+        case upload
 
         var id: String { rawValue }
 
         var title: String {
             switch self {
-            case .text: return "文本节点"
-            case .image: return "图像节点"
-            case .video: return "视频节点"
+            case .text: return "文本"
+            case .image: return "图片"
+            case .video: return "视频"
             case .slot: return "槽位节点"
+            case .audio: return "音频"
+            case .threeD: return "3D"
+            case .timeline: return "剪辑时间线"
+            case .stage: return "3D 片场"
+            case .upload: return "上传"
             }
         }
 
+        func title(referencing: Bool) -> String {
+            referencing && [.text, .image, .video].contains(self) ? title + "生成" : title
+        }
+
+        var isAvailable: Bool { [.text, .image, .video, .slot, .upload].contains(self) }
+
         var subtitle: String {
             switch self {
-            case .text: return "纯文本 / Prompt，占用一个空槽位"
-            case .image: return "图像生成，入参文件挂在同一槽位"
-            case .video: return "视频生成，挂图即首帧 / 尾帧"
-            case .slot: return "空槽位卡：先建卡再放内容，可一键入库"
+            case .text: return "将画面想法优化为生图 Prompt"
+            default: return ""
             }
         }
 
@@ -54,34 +65,44 @@ struct CanvasAddNodeMenu: View {
             case .image: return "photo"
             case .video: return "film"
             case .slot: return "square.grid.2x2"
+            case .audio: return "waveform"
+            case .threeD: return "cube"
+            case .timeline: return "film"
+            case .stage: return "globe"
+            case .upload: return "square.and.arrow.up"
             }
         }
     }
 
+    var parentCount: Int = 0
+    var maxHeight: CGFloat = 560
     let onPick: (Choice) -> Void
     let onDismiss: () -> Void
 
     @State private var hovered: Choice? = nil
 
     /// 菜单宽度。够放两行文字（标题 + 说明）而不换行，再宽就会盖住半张画布。
-    static let width: CGFloat = 236
+    static let width: CGFloat = 260
+    static func height(parentCount: Int) -> CGFloat { parentCount > 0 ? 304 : 596 }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 2) {
-            Text("ADD NODE")
-                .font(.system(size: 9.5, weight: .bold))
-                .tracking(1.2)
-                .foregroundColor(Color.white.opacity(0.45))
-                .padding(.horizontal, 12)
-                .padding(.top, 10)
-                .padding(.bottom, 4)
-
-            ForEach(Choice.allCases) { choice in
-                row(choice)
+        ScrollView(.vertical, showsIndicators: false) {
+            VStack(alignment: .leading, spacing: 2) {
+                sectionTitle(parentCount > 1 ? "引用所有选中的节点生成" : (parentCount == 1 ? "引用该节点生成" : "添加节点"))
+                ForEach([Choice.text, .image, .video, .audio, .threeD]) { row($0) }
+                if parentCount == 0 {
+                    sectionTitle("辅助工具")
+                    row(.timeline)
+                    row(.stage)
+                    row(.slot)
+                    sectionTitle("添加资源")
+                    row(.upload)
+                }
             }
+            .padding(.bottom, 6)
         }
-        .padding(.bottom, 6)
         .frame(width: CanvasAddNodeMenu.width, alignment: .leading)
+        .frame(height: min(maxHeight, Self.height(parentCount: parentCount)))
         .background(
             ZStack {
                 RoundedRectangle(cornerRadius: 14, style: .continuous)
@@ -90,17 +111,25 @@ struct CanvasAddNodeMenu: View {
                 // 纯 material 在纯黑画布上层次不够，叠一层低透明深色 tint，既保留毛玻璃高光，
                 // 又不让下层节点文字透得影响可读性。
                 RoundedRectangle(cornerRadius: 14, style: .continuous)
-                    .fill(Color(red: 0.09, green: 0.09, blue: 0.10).opacity(0.72))
+                    .fill(TapSkin.menuFill)
             }
         )
         .overlay(
             RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .stroke(Color.white.opacity(0.12), lineWidth: 1)
+                .stroke(TapSkin.border, lineWidth: 1)
         )
-        .shadow(color: Color.black.opacity(0.42), radius: 22, x: 0, y: 12)
         // Esc 关闭。菜单是浮层，没有它就只能靠点空白关掉 —— 而"点空白"在这里恰好又是
         // 再次触发双击建节点的手势区，容易连环误触。
-        .background(CanvasMenuEscapeCatcher(onEscape: onDismiss))
+        .canvasControlRegion("add-menu")
+    }
+
+    private func sectionTitle(_ title: String) -> some View {
+        Text(title)
+            .font(.system(size: 12, weight: .regular))
+            .foregroundColor(TapSkin.secondaryInk)
+            .padding(.horizontal, 12)
+            .padding(.top, 10)
+            .padding(.bottom, 4)
     }
 
     private func row(_ choice: Choice) -> some View {
@@ -109,37 +138,46 @@ struct CanvasAddNodeMenu: View {
         } label: {
             HStack(spacing: 10) {
                 Image(systemName: choice.symbol)
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundColor(.white.opacity(0.92))
-                    .frame(width: 26, height: 26)
+                    .font(.system(size: 16, weight: .regular))
+                    .foregroundColor(TapSkin.ink)
+                    .frame(width: 36, height: 36)
                     .background(
-                        RoundedRectangle(cornerRadius: 7, style: .continuous)
-                            .fill(Color.white.opacity(hovered == choice ? 0.18 : 0.09))
+                        RoundedRectangle(cornerRadius: 11, style: .continuous)
+                            .fill(TapSkin.subtleFill)
                     )
 
                 VStack(alignment: .leading, spacing: 1) {
-                    Text(choice.title)
-                        .font(.system(size: 12.5, weight: .semibold))
-                        .foregroundColor(.white.opacity(0.95))
-                    Text(choice.subtitle)
-                        .font(.system(size: 10))
-                        .foregroundColor(.white.opacity(0.5))
+                    Text(choice.title(referencing: parentCount > 0))
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundColor(TapSkin.ink)
+                    if !choice.subtitle.isEmpty { Text(choice.subtitle)
+                        .font(.system(size: 11))
+                        .foregroundColor(TapSkin.secondaryInk)
                         .lineLimit(2)
-                        .fixedSize(horizontal: false, vertical: true)
+                        .fixedSize(horizontal: false, vertical: true) }
                 }
 
                 Spacer(minLength: 0)
+                if !choice.isAvailable {
+                    Text("暂未接入")
+                        .font(.system(size: 10))
+                        .foregroundColor(TapSkin.secondaryInk)
+                }
             }
             .padding(.horizontal, 10)
-            .padding(.vertical, 7)
+            .padding(.vertical, 8)
             .background(
                 RoundedRectangle(cornerRadius: 9, style: .continuous)
-                    .fill(Color.white.opacity(hovered == choice ? 0.10 : 0))
+                    .fill(hovered == choice ? TapSkin.menuRowHoverFill : .clear)
             )
             .padding(.horizontal, 6)
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        .disabled(!choice.isAvailable)
+        .opacity(choice.isAvailable ? 1 : 0.4)
+        .help(choice.isAvailable ? choice.title(referencing: parentCount > 0) : "\(choice.title)暂未接入")
+        .canvasControlRegion("add-menu-row-\(choice.rawValue)")
         .onHover { hovered = $0 ? choice : (hovered == choice ? nil : hovered) }
     }
 }

@@ -104,6 +104,8 @@ struct CanvasNodeCardView: View {
     let isHoverHeld: Bool
     /// 把本卡片自己的 `.onHover` 结果报给上层（上层据此把维持对象锁到本节点）。
     let onHoverChanged: (Bool) -> Void
+    let onPreviewDragChanged: (CGSize, CGPoint) -> Void
+    let onPreviewDragEnded: (CGSize, CGPoint) -> Void
 
     @Environment(\.colorScheme) private var scheme
     @State private var isHovering = false
@@ -309,28 +311,17 @@ struct CanvasNodeCardView: View {
         }
         .padding(s(12))
         .frame(width: s(node.width), height: s(node.height), alignment: .top)
-        // ── v2.16.0：外壳换 TapNow 皮（圆角 12 / 无描边 / 极轻阴影）
-        //
-        // 这张卡（槽位节点）保留了它的内部结构 —— 那是 ClipSlots 自己的东西（一叠槽位、扇形展开、
-        // 入参文件行），TapNow 里没有对应物，见 `CanvasWorkspaceView.nodeCard` 的注释。
-        // 但**外壳**必须和媒体/文本卡完全一致，否则同一块画布上会有两种边框语言。
-        //
-        // 三处变化，每一处都是减法：
-        //   · 圆角 14 → 12：与 `TapSkin.cardRadius` 同源（实测 TapNow）。差 2pt 看似无关紧要，
-        //     但两种圆角同屏出现时，眼睛会把它读成"这两张卡不是一类东西"。
-        //   · **描边整条删掉**。这是实测里最反直觉的一条：TapNow 的卡片在 idle/hover/选中三态下
-        //     边界逐像素相同，根本没有描边。选中态由"操作条 + 端口出现"表达 —— 那两样东西信息量
-        //     更大（它们是能点的），而描边只是把"我被选中了"说了一遍。
-        //     顺带解决一个老毛病：`isSelected ? 1.6 : 1` 的线宽跳变会让卡片在选中瞬间**胀一下**。
-        //   · 阴影从 `cardShadow`（为浅色底设计，偏淡）换成纯黑重影。纯黑画布上淡阴影等于没有，
-        //     而卡片需要一点"浮起"来和底纹分层。
+        // V2.17.4：表面和固定细边分层，选中只改颜色，不再叠黑色阴影。
         .background(
             RoundedRectangle(cornerRadius: s(TapSkin.cardRadius), style: .continuous)
                 .fill(isSelected ? TapSkin.cardEmptySelectedFill : TapSkin.cardEmptyFill)
         )
-        .shadow(color: Color.black.opacity(isSelected ? 0.6 : 0.45),
-                radius: s(isSelected ? 14 : 9),
-                x: 0, y: s(isSelected ? 5 : 3))
+        .overlay(
+            RoundedRectangle(cornerRadius: s(TapSkin.cardRadius), style: .continuous)
+                .strokeBorder(isSelected ? TapSkin.accent.opacity(0.65) : TapSkin.border.opacity(0.65),
+                              lineWidth: s(1))
+                .allowsHitTesting(false)
+        )
         // v2.16.0：卡外名签。与 `CanvasTapNodeCard` 共用同一个视图，两张卡的名签必须逐像素一致 ——
         // 它是用户判断"这些是同一类东西"的主要线索。
         .overlay(alignment: .topLeading) {
@@ -638,6 +629,17 @@ struct CanvasNodeCardView: View {
                 }
                 .foregroundColor(.red.opacity(0.75))
                 .padding(.horizontal, s(8))
+            } else if attachments.isEmpty && text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                VStack(spacing: s(8)) {
+                    Image(systemName: "tray")
+                        .font(.system(size: s(23), weight: .light))
+                    Text("添加素材，开始创作")
+                        .font(.system(size: fs(10)))
+                        .canvasScreenFixedText(textCounter)
+                        .opacity(textOpacity)
+                }
+                .foregroundColor(TapSkin.faintInk)
+                .allowsHitTesting(false)
             } else {
                 // ★ v2.11.8：入参不再只画"第一张图"，而是整叠可展开的卡片。见 CanvasSlotFanStack。
                 CanvasSlotFanStack(sources: fanSources,
@@ -663,7 +665,10 @@ struct CanvasNodeCardView: View {
                                    onActivateNode: onActivateNode,
                                    onPromoteInput: onPromoteInput,
                                    onDeleteInput: onDeleteInput,
-                                   onToast: onToast)
+                                   onToast: onToast,
+                                   onDragChanged: onPreviewDragChanged,
+                                   onDragEnded: onPreviewDragEnded)
+                    .canvasControlRegion("slot-fan-\(node.id)")
             }
         }
         .frame(height: previewHeight)
@@ -828,14 +833,8 @@ struct CanvasNodeCardView: View {
             .padding(.vertical, s(CanvasCardLayout.promptVerticalPadding))
             // 命中区要盖满整行（含上面那 8pt padding），否则空节点只有那句灰字那么窄，点不中。
             .contentShape(Rectangle())
-            // ★ 三轮：双击 → **单击**进编辑（用户要求"点一下就能直接打字"）。
-            //
-            // 原来写的是 `onTapGesture(count: 2)`，而**祖先**（节点整体）上挂着一个 count:1 的
-            // 选中手势。SwiftUI 里这两者共存时，count:2 会被上层的单击不断打断 —— 实测表现就是
-            // 用户说的"要点好几下才进得去"。改成单击后，内层手势优先级天然高于祖先，一击直达；
-            // `beginEdit` 本身会先 select 再置 editingNodeId，所以选中态不会丢。
-            // 拖拽不受影响：节点的 DragGesture 有 2pt 起步距离，位移一旦超过阈值 tap 就失败。
-            .onTapGesture(perform: onBeginEdit)
+            // 路由在松手时分流：单击编辑，拖动移动节点，避免 SwiftUI 祖先手势互抢。
+            .canvasControlRegion("slot-prompt-\(node.id)")
         }
     }
 
@@ -884,6 +883,7 @@ struct CanvasNodeCardView: View {
                     .stroke(AppTheme.chromeAccentInk.opacity(0.5), lineWidth: s(1))
             )
             .help("回车保存 · ⇧回车换行 · Esc 放弃")
+            .canvasControlRegion("slot-editor-\(node.id)")
     }
 
     // MARK: - 入参文件（卡片最底部整行）
@@ -933,6 +933,7 @@ struct CanvasNodeCardView: View {
         }
         .buttonStyle(.plain)
         .help("管理入参文件：增删、调整顺序（与该槽位的附件是同一份数据）")
+        .canvasControlRegion("slot-input-\(node.id)")
     }
 }
 

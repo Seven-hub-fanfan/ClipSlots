@@ -91,6 +91,30 @@ final class AttachmentManagerPanelController: NSObject, NSPopoverDelegate {
 
     var isVisible: Bool { popover?.isShown ?? false }
 
+    /// 画布以未缩放的原生锚点呈现，避免 SwiftUI 透明布局层的命中特性传入弹层。
+    func showCanvas(anchor: NSView, point: CGPoint, content: AttachmentManagerPopover,
+                    slot: Int, onClose: @escaping () -> Void) {
+        guard anchor.window != nil else { return }
+        pendingShowToken &+= 1
+        hardCloseFadingOut()
+        close()
+        tearDownHosting()
+        let hosting = NSHostingController(rootView: content)
+        hosting.view = AttachmentManagerHostingView(rootView: content)
+        let pop = NSPopover()
+        pop.contentViewController = hosting
+        pop.contentSize = NSSize(width: 360, height: 480)
+        pop.behavior = .semitransient
+        pop.animates = false
+        pop.delegate = self
+        self.onClose = onClose
+        self.currentSlot = slot
+        self.hosting = hosting
+        self.popover = pop
+        pop.show(relativeTo: NSRect(origin: point, size: NSSize(width: 1, height: 1)),
+                 of: anchor, preferredEdge: .maxY)
+    }
+
     /// 指定槽位的面板是否正在显示（点同一个附件按钮时用于切换关闭）。
     func isVisible(forSlot slot: Int) -> Bool {
         isVisible && currentSlot == slot
@@ -192,7 +216,9 @@ final class AttachmentManagerPanelController: NSObject, NSPopoverDelegate {
         // building a new one so switching content can't leak SwiftUI render trees.
         tearDownHosting()
 
-        let hosting = NSHostingController(rootView: AttachmentManagerPopover(slot: slot, store: store))
+        let content = AttachmentManagerPopover(slot: slot, store: store)
+        let hosting = NSHostingController(rootView: content)
+        hosting.view = AttachmentManagerHostingView(rootView: content)
         let pop = NSPopover()
         pop.contentViewController = hosting
         pop.contentSize = NSSize(width: 360, height: 480)
@@ -250,5 +276,24 @@ final class AttachmentManagerPanelController: NSObject, NSPopoverDelegate {
             pendingShow = nil
             DispatchQueue.main.async(execute: pending)
         }
+    }
+}
+
+/// SwiftUI 滚动容器会吞掉行内 NSViewRepresentable 的命中；只把明确的原生控件交还其自身。
+private final class AttachmentManagerHostingView: NSHostingView<AttachmentManagerPopover> {
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        let local = convert(point, from: superview)
+        guard bounds.contains(local) else { return nil }
+        func control(in view: NSView) -> NSView? {
+            guard !view.isHidden, view.alphaValue > 0 else { return nil }
+            if view is NSClipView, !view.bounds.contains(view.convert(local, from: self)) { return nil }
+            for child in view.subviews.reversed() {
+                if let hit = control(in: child) { return hit }
+            }
+            if view is ClickHandleNSView || view is DragHandleNSView,
+               view.bounds.contains(view.convert(local, from: self)) { return view }
+            return nil
+        }
+        return control(in: self) ?? super.hitTest(point)
     }
 }

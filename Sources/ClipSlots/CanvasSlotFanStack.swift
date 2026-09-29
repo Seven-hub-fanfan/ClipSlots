@@ -64,7 +64,11 @@ struct CanvasSlotFanStack: View {
     /// 用户明确要求「卡片内单张图片的删除，允许直接删除，不影响节点本身」。
     let onDeleteInput: (Int) -> Void
     let onToast: (String) -> Void
+    let onDragChanged: (CGSize, CGPoint) -> Void
+    let onDragEnded: (CGSize, CGPoint) -> Void
 
+    @Environment(\.colorScheme) private var scheme
+    @State private var draggingPreview = false
     @State private var hoveredCard: Int? = nil
     /// 打开了操作气泡的卡片下标（**全量数组的下标**）。
     @State private var openedCard: Int? = nil
@@ -255,7 +259,8 @@ struct CanvasSlotFanStack: View {
                     .allowsHitTesting(false)
 
                 // 2) 命中层：整块透明，自己算落在哪张卡上（含「+N」灰卡那一格）。
-                hitLayer(ls, cardSize: cardSize, box: box)
+                hitLayer(ls, cardSize: cardSize, box: box,
+                         canvasFrame: geo.frame(in: .named(CanvasWorkspaceView.spaceName)))
 
                 // 3) ★ v2.11.9：收拢态右下角那颗蓝色 `+` 角标**已删除**（用户：“这个蓝色加号
                 //    可以去掉无用”）。它触发的动作与卡片底部那条通樏「入参文件 N」完全一样
@@ -377,11 +382,11 @@ struct CanvasSlotFanStack: View {
             .clipShape(RoundedRectangle(cornerRadius: s(17), style: .continuous))
             .background(
                 RoundedRectangle(cornerRadius: s(17), style: .continuous)
-                    .fill(Color.white)
+                    .fill(TapSkin.cardEmptyFill)
             )
             .overlay(
                 RoundedRectangle(cornerRadius: s(17), style: .continuous)
-                    .stroke(Color.white, lineWidth: s(2.6))
+                    .stroke(TapSkin.border, lineWidth: s(1))
             )
             // 卡片边缘再压一道极淡的灰线：纯白卡叠在浅色预览底上时，白描边本身是看不见的，
             // 少了这道线整叠卡会糊成一团。
@@ -396,10 +401,10 @@ struct CanvasSlotFanStack: View {
             // 不加遮罩、也不降 opacity（降 opacity 会让下面那张卡透出来，看着像渲染错误）。
             // 投影刻意保持"小半径、偏淡"：扇形态卡片几乎完全重叠，大半径投影会互相叠加成一团
             // 灰雾（五轮那次"灰卡压暗牌面"就是同一类视觉事故）。
-            .shadow(color: Color.black.opacity(isHot ? 0.26 : 0.16),
-                    radius: s(isHot ? 9 : 5),
+            .shadow(color: Color.black.opacity(scheme == .dark ? 0.14 : 0.04),
+                    radius: s(isHot ? 4 : 2),
                     x: 0,
-                    y: s(isHot ? 5 : 2.5))
+                    y: s(1))
             .scaleEffect(layout.scale, anchor: .bottom)
             .rotationEffect(.degrees(layout.angle), anchor: .bottom)
             .offset(x: s(layout.offset.width), y: s(layout.offset.height))
@@ -439,7 +444,7 @@ struct CanvasSlotFanStack: View {
             Text(text)
                 // ★ 八轮需求 1：卡内文字也是屏幕固定字号（不乘 renderScale）。
                 .font(.system(size: fs(10.5)))
-                .foregroundColor(.black.opacity(0.78))
+                .foregroundColor(TapSkin.ink)
                 .lineLimit(7)
                 .multilineTextAlignment(.leading)
                 // ★ 三轮：卡内文字也禁自动收紧 / 自动缩字，理由同节点正文（见 CanvasNodeCardView）。
@@ -490,7 +495,7 @@ struct CanvasSlotFanStack: View {
     private func emptyCardBody(counter: CGFloat) -> some View {
         RoundedRectangle(cornerRadius: s(14), style: .continuous)
             .strokeBorder(style: StrokeStyle(lineWidth: s(1.4), dash: [s(4), s(3)]))
-            .foregroundColor(Color.black.opacity(0.22))
+            .foregroundColor(TapSkin.border)
             .overlay(
                 VStack(spacing: s(4)) {
                     Image(systemName: "tray")
@@ -500,7 +505,7 @@ struct CanvasSlotFanStack: View {
                         .canvasScreenFixedText(counter)
                         .opacity(cardTextVisible(fanCardSize))
                 }
-                .foregroundColor(Color.black.opacity(0.35))
+                .foregroundColor(TapSkin.faintInk)
             )
             .padding(s(3))
     }
@@ -529,7 +534,8 @@ struct CanvasSlotFanStack: View {
     /// **拿不到点击坐标**，而这里的全部前提就是"我需要知道你点在哪"。
     private func hitLayer(_ ls: [CanvasFanGeometry.CardLayout],
                           cardSize: CGSize,
-                          box: CGSize) -> some View {
+                          box: CGSize,
+                          canvasFrame: CGRect) -> some View {
         Color.clear
             .contentShape(Rectangle())
             .onContinuousHover(coordinateSpace: .local) { phase in
@@ -581,13 +587,22 @@ struct CanvasSlotFanStack: View {
             // 显式调 `onActivateNode()` 补回来 —— 唯独点 `+N` 不选中：翻页是纯浏览动作，
             // 没有任何理由顺手改选中状态、顺手触发一轮全局重绘。
             .highPriorityGesture(
-                DragGesture(minimumDistance: 0)
+                DragGesture(minimumDistance: 0, coordinateSpace: .named(CanvasWorkspaceView.spaceName))
+                    .onChanged { value in
+                        if draggingPreview || hypot(value.translation.width, value.translation.height) >= 4 {
+                            draggingPreview = true
+                            openedCard = nil
+                            onDragChanged(value.translation, value.location)
+                        }
+                    }
                     .onEnded { value in
-                        // 拖动过就不算点击：画布上按住卡片拖是"移动节点"，不该顺手弹个气泡。
-                        let moved = hypot(value.translation.width, value.translation.height)
-                        guard moved < 4 else { return }
-                        let p1x = CGPoint(x: value.location.x / max(renderScale, 0.01),
-                                          y: value.location.y / max(renderScale, 0.01))
+                        if draggingPreview {
+                            draggingPreview = false
+                            onDragEnded(value.translation, value.location)
+                            return
+                        }
+                        let p1x = CGPoint(x: (value.location.x - canvasFrame.minX) / max(viewZoom, 0.01),
+                                          y: (value.location.y - canvasFrame.minY) / max(viewZoom, 0.01))
                         let local0 = CanvasFanGeometry.hitTest(point: p1x,
                                                               layouts: ls,
                                                               cardSize: cardSize,
@@ -819,7 +834,7 @@ struct CanvasSlotFanStack: View {
             RoundedRectangle(cornerRadius: s(11), style: .continuous)
                 .stroke(Color.white.opacity(0.14), lineWidth: s(0.8))
         )
-        .shadow(color: .black.opacity(0.35), radius: s(10), x: 0, y: s(4))
+        .shadow(color: .black.opacity(scheme == .dark ? 0.12 : 0.04), radius: s(4), x: 0, y: s(2))
         .offset(y: -s(bubbleLift))
         .transition(.scale(scale: 0.85, anchor: .bottom).combined(with: .opacity))
     }

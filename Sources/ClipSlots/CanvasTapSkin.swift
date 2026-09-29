@@ -1,45 +1,48 @@
 import SwiftUI
 import AppKit
+import ClipSlotsKit
 
-/// 画布的 **TapNow 皮肤**（v2.16.0）——一处集中的视觉常量表。
-///
-/// ## 为什么是独立一套 token，而不是继续用 `AppTheme`
-///
-/// `AppTheme` 是**双皮肤 × 双色彩模式**的矩阵（`colorful/minimal` × `light/dark`），
-/// 每个颜色都得在四个格子里都说得通。画布不是这样的地方：它是一块**摄影棚**——
-/// TapNow / Figma 暗色 / Crate 全都是"永远深色、内容自己发光"，因为画布上的主角是
-/// 用户的图片和视频，任何浅色底都会把媒体的对比度吃掉一半。
-///
-/// 所以这套 token **不随系统色彩模式变**。这不是偷懒，是刻意：v2.15.0 之前画布跟着
-/// `AppTheme.canvasSurface` 走，浅色模式下同一张卡要在 `#F5F5F7` 和 `#1B1C1F` 两种底上
-/// 都好看，结果两边都只能算"能看"。
-///
-/// ## 数值来源
-///
-/// 全部**实测**自本机安装的 TapNow.app（Retina 2x 截图 → 逐像素采样 → 除 2 换算成点）：
-/// 画布底 `#000000`、点阵间距 16pt / 直径 1.2pt / 色 `#4A4A4A`、卡片圆角 12pt、
-/// 空卡填充 `#1F1F1F`（选中 `#343434`）、名签 `#939393`、连线 `#909090` 1pt、
-/// 工具条 44pt 高 / `#1E1E1E`、端口圆 18pt / 圆心距卡边 28pt。
-///
-/// ## 三条实测得到的**反直觉**结论（它们是这一版返工的主因）
-///
-/// 1. **卡片在任何状态下都没有描边** —— idle / hover / 选中三张截图在卡片边界处逐像素相同。
-///    我第一眼以为看到了"选中高亮环"，实际是图片自身亮部贴着纯黑底产生的错觉。
-///    选中与否靠**工具条和端口出现**来表达，卡片本身永远是一块干净的圆角媒体。
-/// 2. **连线没有箭头、没有端点圆、没有流动虚线**，就是一条 1pt 灰线。v2.15.0 我按"节点编辑器
-///    常识"加的箭头 + 起点圆 + 运行流动虚线，方向正好是反的。
-/// 3. **拖动节点不吸附网格** —— 实测卡片左边缘落在 16pt 网格的非整数倍上。吸附是 ClipSlots
-///    "不丝滑"的一大来源：每一步都在最近格点上跳。
+/// 画布统一外观。V2.17.4 支持浅/深 × 简洁/多彩，颜色在绘制时解析。
+/// 几何沿用 TapNow 参考：16pt 点阵、12pt 卡片圆角、44pt 工具条、
+/// 18pt 端口与 28pt 偏移；连线使用细实线曲线，拖动不吸附网格。
+/// 简洁主题使用中性色，多彩主题以节点类型色和蓝紫操作色区分层次。
 enum TapSkin {
+    /// Appearance is resolved at paint time. Skin changes rebuild the existing host once.
+    static func tone(_ light: UInt32, _ dark: UInt32) -> Color {
+        func rgb(_ hex: UInt32) -> NSColor {
+            NSColor(srgbRed: CGFloat((hex >> 16) & 255) / 255,
+                    green: CGFloat((hex >> 8) & 255) / 255, blue: CGFloat(hex & 255) / 255, alpha: 1)
+        }
+        let a = rgb(light), b = rgb(dark)
+        return Color(nsColor: NSColor(name: nil) { appearance in
+            appearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua ? b : a
+        })
+    }
+    static var colorful: Bool { AppSkinCenter.current == .colorful }
+    static var ink: Color { tone(0x25262b, 0xf0f1f4) }
+    static var secondaryInk: Color { tone(0x666970, 0xb0b3bc) }
+    static var faintInk: Color { tone(0x7a7d85, 0x90949e) }
+    static var border: Color { tone(0xd4d6dd, 0x3b3e47) }
+    static var subtleFill: Color { tone(0xedeef2, 0x292c33) }
+    static var accent: Color { colorful ? tone(0x4e5de4, 0x9aa5ff) : ink }
+    static var onAccent: Color { colorful ? tone(0xffffff, 0x101425) : tone(0xffffff, 0x17181b) }
+    static func nodeAccent(_ kind: CanvasNodeKind) -> Color {
+        guard colorful else { return ink }
+        switch kind {
+        case .text: return tone(0x8454c7, 0xbb9bea)
+        case .image: return tone(0x147d76, 0x75c8bf)
+        case .video: return tone(0x3869c8, 0x91b4fc)
+        case .slot, .batchTemplate: return tone(0xa86b18, 0xe7be7a)
+        }
+    }
 
     // MARK: - 画布
 
-    /// 画布底：纯黑。不是 `#0A0A0A` 之类的"近黑"——实测就是 0,0,0。
-    /// 纯黑的意义在于媒体卡的圆角不需要抗锯齿混色，边缘看起来是刀切的。
-    static let void = Color.black
+    /// 不透明底色，避免编辑区的装饰背景透进画布。
+    static var void: Color { colorful ? tone(0xf1f3f9, 0x10131b) : tone(0xf3f3f3, 0x080808) }
 
     /// 点阵网格颜色。`#4A4A4A` 看着很亮，但点只有 1.2pt，视觉密度极低。
-    static let gridDot = Color(red: 0.29, green: 0.29, blue: 0.29)
+    static var gridDot: Color { colorful ? tone(0xc2c7d6, 0x3b4256) : tone(0xc7c7c7, 0x404040) }
     /// 网格间距（画布坐标，会随 zoom 缩放）。
     static let gridStep: CGFloat = 16
     /// 点直径。低于 1pt 在非 Retina 上会被抹掉，高于 1.5pt 就开始"有颗粒感"。
@@ -49,19 +52,19 @@ enum TapSkin {
 
     static let cardRadius: CGFloat = 12
     /// 空卡填充（没有媒体时那块灰）。
-    static let cardEmptyFill = Color(red: 0.122, green: 0.122, blue: 0.122)     // #1F1F1F
+    static var cardEmptyFill: Color { colorful ? tone(0xffffff, 0x20242f) : tone(0xffffff, 0x1f1f1f) }
     /// 选中时空卡提亮一档。实测 `#343434`——这是**唯一**一处选中态改了卡片本身的地方，
     /// 而且只在空卡上看得出来（有媒体时媒体自己盖住了填充）。
-    static let cardEmptySelectedFill = Color(red: 0.204, green: 0.204, blue: 0.204) // #343434
+    static var cardEmptySelectedFill: Color { colorful ? tone(0xf3f4ff, 0x2c3040) : tone(0xf9f9f9, 0x292929) }
     /// 空态中心 glyph。
-    static let cardEmptyGlyph = Color(red: 0.42, green: 0.42, blue: 0.42)
+    static var cardEmptyGlyph: Color { faintInk }
     static let cardEmptyGlyphSize: CGFloat = 24
 
     // MARK: - 名签（卡片外、上方）
 
-    static let tagInk = Color(red: 0.576, green: 0.576, blue: 0.576)            // #939393
+    static var tagInk: Color { secondaryInk }
     /// hover / 选中时名签提亮。TapNow 实测 hover 态名签明显比 idle 亮。
-    static let tagInkActive = Color(red: 0.902, green: 0.902, blue: 0.902)      // #E6E6E6
+    static var tagInkActive: Color { ink }
     static let tagFontSize: CGFloat = 11
     static let tagGlyphSize: CGFloat = 10.5
     /// 名签基线到卡片顶的间距。
@@ -70,8 +73,8 @@ enum TapSkin {
 
     // MARK: - 连线
 
-    static let edgeInk = Color(red: 0.565, green: 0.565, blue: 0.565)           // #909090
-    static let edgeInkActive = Color(red: 0.902, green: 0.902, blue: 0.902)
+    static var edgeInk: Color { tone(0x9a9ea9, 0x787e8b) }
+    static var edgeInkActive: Color { accent }
     static let edgeWidth: CGFloat = 1
     static let edgeWidthActive: CGFloat = 1.4
     /// 命中带半宽。线只有 1pt，靠视觉宽度去点是点不中的；这一条与视觉宽度**刻意脱钩**。
@@ -82,17 +85,17 @@ enum TapSkin {
     static let portDiameter: CGFloat = 18
     /// 端口圆心到卡片边缘的距离。实测 29pt，取 28。
     static let portOffset: CGFloat = 28
-    static let portStroke = Color(red: 0.541, green: 0.541, blue: 0.541)
-    static let portStrokeActive = Color.white
+    static var portStroke: Color { secondaryInk }
+    static var portStrokeActive: Color { accent }
     static let portStrokeWidth: CGFloat = 1.4
     static let portGlyphSize: CGFloat = 9
 
     // MARK: - 工具条 / 浮层
 
-    static let chromeFill = Color(red: 0.118, green: 0.118, blue: 0.118)       // #1E1E1E
-    static let chromeInk = Color(red: 0.941, green: 0.941, blue: 0.941)
-    static let chromeInkDim = Color(red: 0.62, green: 0.62, blue: 0.62)
-    static let chromeDivider = Color(red: 0.29, green: 0.29, blue: 0.29)
+    static var chromeFill: Color { colorful ? tone(0xfefeff, 0x222632) : tone(0xfefefe, 0x222222) }
+    static var chromeInk: Color { ink }
+    static var chromeInkDim: Color { secondaryInk }
+    static var chromeDivider: Color { border }
     static let toolbarHeight: CGFloat = 44
 
     /// 画布走 `fullSizeContentView`（黑到窗口顶边，见 `CanvasWindowAppearancePin`）之后，
@@ -107,19 +110,19 @@ enum TapSkin {
     static let toolbarGap: CGFloat = 10
 
     /// 卡内浮动 chip（hover 才出现的「替换 / 入库」那类）。
-    static let chipFill = Color(red: 0.173, green: 0.173, blue: 0.173).opacity(0.92)
-    static let chipInk = Color.white
+    static var chipFill: Color { subtleFill }
+    static var chipInk: Color { ink }
     static let chipHeight: CGFloat = 26
     static let chipRadius: CGFloat = 13
     static let chipInset: CGFloat = 8
     static let chipFontSize: CGFloat = 11
 
     /// 菜单面板。
-    static let menuFill = Color(red: 0.11, green: 0.11, blue: 0.11)
+    static var menuFill: Color { chromeFill }
     static let menuRadius: CGFloat = 14
-    static let menuRowHoverFill = Color(red: 0.149, green: 0.149, blue: 0.149)
-    static let menuTileFill = Color(red: 0.169, green: 0.169, blue: 0.169)
-    static let menuSectionInk = Color(red: 0.49, green: 0.49, blue: 0.49)
+    static var menuRowHoverFill: Color { subtleFill }
+    static var menuTileFill: Color { subtleFill }
+    static var menuSectionInk: Color { secondaryInk }
 
     // MARK: - 动效
 
@@ -177,11 +180,16 @@ struct CursorArea: NSViewRepresentable {
 extension View {
     /// 悬停在这块区域上时的光标。
     func tapCursor(_ cursor: NSCursor) -> some View {
-        overlay(CursorArea(cursor: cursor).allowsHitTesting(false))
+        onHover { inside in
+            if NSEvent.pressedMouseButtons == 0 {
+                (inside ? cursor : NSCursor.arrow).set()
+            }
+        }
     }
 }
 
-/// v2.16.0：进入画布时把**窗口标题栏**也钉成深色。
+/// 管理画布期间的窗口几何与背景；V2.17.4 的明暗由全局外观决定。
+/// 以下 v2.16.0/1 记录说明引用计数的由来，其中强制深色策略已撤销。
 ///
 /// 画布本体在 v2.16.0 已脱离主题体系固定纯黑（见 `TapSkin.void` 与 `AppTheme` 里那批钉死的
 /// canvas chrome token），但窗口 chrome 仍由 `NSApp.appearance` 决定。于是「App 主题＝浅色」时
@@ -313,8 +321,8 @@ final class CanvasChromePin {
         if window.titleVisibility != .hidden {
             window.titleVisibility = .hidden
         }
-        if window.backgroundColor != .black {
-            window.backgroundColor = .black
+        if window.backgroundColor != NSColor(TapSkin.void) {
+            window.backgroundColor = NSColor(TapSkin.void)
         }
     }
 
@@ -398,5 +406,3 @@ struct CanvasWindowAppearancePin: NSViewRepresentable {
         view.detach()
     }
 }
-
-
