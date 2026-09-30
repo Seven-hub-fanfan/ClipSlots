@@ -20,6 +20,11 @@ import Security
 // 用户点"始终允许"即可，这是系统行为，不能靠代码绕过（绕过就等于放弃 ACL 保护）。
 // 代码这边要做的只有一件事：把 errSecAuthFailed / errSecInteractionNotAllowed
 // 翻译成人能看懂的提示，而不是甩一个 -25293。
+//
+// v2.17.6：在此之上加了**进程内内存缓存**，见 `AgentKeychain.readAPIKey()` 头注释。
+// 每次构建首次授权框仍然会弹一次（ACL 语义没变），但同一次进程运行内后续读取
+// 全部走内存缓存，不再重复调 `SecItemCopyMatching`——彻底修掉"点了始终允许还
+// 反复弹"的问题。
 
 public protocol AgentSecretStore: AnyObject {
     func readAPIKey() -> String?
@@ -37,29 +42,75 @@ public final class AgentKeychain: AgentSecretStore {
     private let service: String
     private let account: String
 
+    // v2.17.6：进程内内存缓存。
+    //
+    // 为什么必须缓存 ——
+    // 本项目 ad-hoc 签名，每次构建 code signing identity 都变，覆盖安装后钥匙串 ACL
+    // 会重新弹授权框（这个绕不掉，属于系统语义）。但**同一次进程运行内**不应该反复
+    // 弹：以前每次 `readAPIKey()` 都调 `SecItemCopyMatching`，而 UI（SwiftUI computed
+    // property、config 面板刷新、侧栏 onAppear）与每次 API 调用（AgentService.callAPI
+    // 里 `secretStore.readAPIKey()`）都会读一次。不同调用栈 / 不同线程下，系统
+    // authorization prompt 的缓存并不总能命中——结果是同一 build 里用户仍会被反复
+    // 弹「始终允许」。
+    //
+    // 缓存策略：
+    // - 首次成功读取后把明文放到进程内存里（进程退出即消失，磁盘/日志/导出都不落）。
+    // - 写 / 删同步更新缓存，避免"写完再回头问一次钥匙串"。
+    // - 缓存命中完全不碰 SecItem，从根本上没有二次弹框的机会。
+    // - 授权失败 / 被用户拒绝时**不写缓存**——用户可能刚点了"始终允许"，下次调用要能重试。
+    //
+    // 安全语义没变：Keychain ACL 保护的是"把 secret 从磁盘读出"，一旦进程合法读出，
+    // 明文本来就在内存里；这里只是把已经在做的事显式化，不放宽任何权限。
+    private let cacheLock = NSLock()
+    private var cachedKey: String? = nil
+    private var cacheLoaded: Bool = false
+
     public init(service: String = AgentKeychain.service, account: String = AgentKeychain.account) {
         self.service = service
         self.account = account
     }
 
     public func readAPIKey() -> String? {
+        // 命中内存缓存：直接返回，绝不触发 SecItemCopyMatching → 没有二次弹框。
+        cacheLock.lock()
+        if cacheLoaded {
+            let v = cachedKey
+            cacheLock.unlock()
+            return v
+        }
+        cacheLock.unlock()
+
         var query = baseQuery()
         query[kSecReturnData as String] = true
         query[kSecMatchLimit as String] = kSecMatchLimitOne
 
         var item: CFTypeRef?
         let status = SecItemCopyMatching(query as CFDictionary, &item)
-        guard status == errSecSuccess,
-              let data = item as? Data,
-              let text = String(data: data, encoding: .utf8) else {
-            if status != errSecItemNotFound {
-                // 只记状态码，绝不记内容。
-                NSLog("[ClipSlots][Agent] keychain read failed: \(status)")
-            }
+        var result: String? = nil
+        if status == errSecSuccess,
+           let data = item as? Data,
+           let text = String(data: data, encoding: .utf8) {
+            let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+            result = trimmed.isEmpty ? nil : trimmed
+        } else if status != errSecItemNotFound {
+            // 只记状态码，绝不记内容。
+            NSLog("[ClipSlots][Agent] keychain read failed: \(status)")
+            // 授权失败不缓存：用户可能马上会点"始终允许"，下次调用要能重试。
             return nil
         }
-        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        return trimmed.isEmpty ? nil : trimmed
+        cacheLock.lock()
+        cachedKey = result
+        cacheLoaded = true
+        cacheLock.unlock()
+        return result
+    }
+
+    /// 供"用户可能刚在钥匙串访问里改过条目"的场景强制清缓存重读。UI 常规路径不需要调。
+    public func invalidateCache() {
+        cacheLock.lock()
+        cachedKey = nil
+        cacheLoaded = false
+        cacheLock.unlock()
     }
 
     public func writeAPIKey(_ key: String) throws {
@@ -71,7 +122,11 @@ public final class AgentKeychain: AgentSecretStore {
         // delete+add 会重建 ACL，等于每次保存都让用户重新授权一遍。
         let update: [String: Any] = [kSecValueData as String: data]
         let updateStatus = SecItemUpdate(baseQuery() as CFDictionary, update as CFDictionary)
-        if updateStatus == errSecSuccess { return }
+        if updateStatus == errSecSuccess {
+            // 写成功 → 同步进内存缓存，后续读走不到 SecItem。
+            cacheLock.lock(); cachedKey = trimmed; cacheLoaded = true; cacheLock.unlock()
+            return
+        }
         if updateStatus != errSecItemNotFound {
             throw AgentKeychainError.osStatus(updateStatus)
         }
@@ -84,6 +139,7 @@ public final class AgentKeychain: AgentSecretStore {
         insert[kSecAttrLabel as String] = "ClipSlots Agent · DeepSeek API Key"
         let addStatus = SecItemAdd(insert as CFDictionary, nil)
         guard addStatus == errSecSuccess else { throw AgentKeychainError.osStatus(addStatus) }
+        cacheLock.lock(); cachedKey = trimmed; cacheLoaded = true; cacheLock.unlock()
     }
 
     public func deleteAPIKey() throws {
@@ -91,6 +147,7 @@ public final class AgentKeychain: AgentSecretStore {
         guard status == errSecSuccess || status == errSecItemNotFound else {
             throw AgentKeychainError.osStatus(status)
         }
+        cacheLock.lock(); cachedKey = nil; cacheLoaded = true; cacheLock.unlock()
     }
 
     private func baseQuery() -> [String: Any] {
@@ -113,12 +170,25 @@ public final class AgentKeychain: AgentSecretStore {
 ///
 /// 这里不改变任何安全语义（照样走 ACL、照样弹框、照样只读钥匙串），只是把读操作挪到后台
 /// 线程：窗口先画出来，授权框浮在窗口上，用户点「始终允许」后 UI 再更新。
+///
+/// v2.17.6 追加：探测走的是 `AgentKeychain.shared`（走缓存路径），所以本次进程内
+/// 后续所有对 `hasAPIKey` / `readAPIKey` 的调用都会命中内存缓存，不再触发 SecItem。
 public enum AgentKeychainProbe {
     /// 后台线程读一次钥匙串，返回是否存在可用 key。用户拒绝授权/无 key 都返回 false。
+    /// v2.17.6：改用 `AgentKeychain.shared`——原来每次 new 一个 AgentKeychain 实例
+    /// 走空缓存，等于每次都真的问一次钥匙串；用 shared 后首次问过就一直命中缓存。
     public static func hasAPIKey(service: String = AgentKeychain.service,
                                  account: String = AgentKeychain.account) async -> Bool {
-        await withCheckedContinuation { continuation in
-            // 刻意在闭包内部新建实例：不跨线程捕获 AgentKeychain（非 Sendable）。
+        // 只有默认 service/account 才复用 shared（保留可注入语义给测试）。
+        if service == AgentKeychain.service && account == AgentKeychain.account {
+            return await withCheckedContinuation { continuation in
+                DispatchQueue.global(qos: .userInitiated).async {
+                    let exists = AgentKeychain.shared.readAPIKey() != nil
+                    continuation.resume(returning: exists)
+                }
+            }
+        }
+        return await withCheckedContinuation { continuation in
             DispatchQueue.global(qos: .userInitiated).async {
                 let exists = AgentKeychain(service: service, account: account).readAPIKey() != nil
                 continuation.resume(returning: exists)

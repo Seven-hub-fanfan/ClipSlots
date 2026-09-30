@@ -213,10 +213,16 @@ struct AgentConfigView: View {
     // MARK: Keychain 动作
 
     private func reloadKeyState() {
-        if let key = keychain.readAPIKey(), key.count >= 4 {
-            storedKeySuffix = String(key.suffix(4))
+        // v2.17.6：只读一次钥匙串。旧写法在 else 分支又调了一次 readAPIKey()，
+        // 每次刷新面板等于 2 次读取——在 ad-hoc 签名 + 授权 prompt 场景下会翻倍
+        // 弹框机率。现在 AgentKeychain 有进程内缓存兑底也不该重复读。
+        let key = keychain.readAPIKey()
+        if let k = key, k.count >= 4 {
+            storedKeySuffix = String(k.suffix(4))
+        } else if key != nil {
+            storedKeySuffix = "••••"
         } else {
-            storedKeySuffix = keychain.readAPIKey() == nil ? nil : "••••"
+            storedKeySuffix = nil
         }
     }
 
