@@ -124,6 +124,21 @@ final class CanvasInputRouter: ObservableObject {
               event.window === window
         else { return false }
 
+        // v2.17.5: 修复「最小化按钮点不动 / 点击程序坞图标唤不回窗口」。
+        // v2.17.4 起本 monitor 开始拦截 `.leftMouseDown`，它是全 App 级 local monitor：
+        // **先于** AppKit 的 sendEvent 触发，返回 nil 就把事件吞掉。画布模式下窗口开着
+        // `fullSizeContentView`，红绿灯（miniaturize / close / zoom）和标题栏拖拽区都
+        // 浮在画布之上，坐标同样会落进 anchor.bounds；只要 `handle` 里任意一个分支返回 true，
+        // 那些系统按钮当场失灵，用户体感就是「最小化没反应」。
+        //
+        // 判据：`contentView.hitTest` 只认 contentView 的 subview 树，红绿灯挂在 titlebar
+        // container 上 → 对这些点位返回 nil。命中 nil = 事件不属于 SwiftUI 内容层，一律放行，
+        // 交回 AppKit 默认路由，标题栏拖拽、红绿灯、resize 边框都能正常工作。
+        if event.type == .leftMouseDown,
+           window.contentView?.hitTest(event.locationInWindow) == nil {
+            return false
+        }
+
         let local = anchor.convert(event.locationInWindow, from: nil)
         // #region debug-point A:router
         #if DEBUG

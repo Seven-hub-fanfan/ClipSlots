@@ -153,6 +153,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return false
         }
         window.makeKeyAndOrderFront(nil)
+        // v2.17.5: Dock 图标点击 / reopen 时若窗口刚从 miniaturized 复原，仅 makeKeyAndOrderFront
+        // 常常只把窗口 order 到前面而不把 App 激活到 frontmost，用户体感是「点程序坞没反应」。
+        // 显式 activate 一次，与用户从 Dock 打开 App 的默认体验对齐。
+        NSApp.activate(ignoringOtherApps: true)
         return true
     }
 
