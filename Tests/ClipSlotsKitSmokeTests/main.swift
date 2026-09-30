@@ -8724,4 +8724,366 @@ do {
     t.check(legacy.mediaLayoutAttachmentID == nil, "legacy media remains eligible for native geometry repair")
 } catch { t.check(false, "media identity test: \(error)") }
 
+// ============================================================================
+// MARK: - AGENT-TIKA-JSON (v2.17.7)：tikacli chat --json 流分帧 + 事件识别
+// ============================================================================
+//
+// 这一组盯死的是"分块位置"。tikacli 是 pretty-print，一个 JSON 对象在 stdout 里跨几十行，
+// 而子进程读到的 stdout 是任意字节位置切开的分片。逐字节喂进去必须与整段喂结果一致，
+// 且字符串里出现的 `{`/`}` 不能把大括号计数搞乱。
+
+do {
+    let sample = """
+    {
+      "type": "start",
+      "chat_id": "cid",
+      "model": "seed_2.0_pro",
+      "agent_detail": {
+        "agent_id": "1509440157188",
+        "agent_name": "default"
+      }
+    }
+    {
+      "type": "text-delta",
+      "text": "你好{世界}"
+    }
+    {"type":"finish","reason":"stop"}
+    """
+
+    // 一次性喂：应吐出 3 帧
+    do {
+        var d = TikaJSONFramingDecoder()
+        let frames = d.feed(sample)
+        t.equal(frames.count, 3, "★整段喂应识别 3 个 JSON 对象")
+    }
+
+    // 逐字符喂：结果一致
+    do {
+        var d = TikaJSONFramingDecoder()
+        var frames: [String] = []
+        for ch in sample { frames.append(contentsOf: d.feed(String(ch))) }
+        t.equal(frames.count, 3, "★逐字符喂也应识别 3 个 JSON 对象")
+    }
+
+    // 字符串里的 `{` `}` 不能干扰大括号计数
+    do {
+        var d = TikaJSONFramingDecoder()
+        let frames = d.feed(#"{"type":"text-delta","text":"a { b } c { d"}"#)
+        t.equal(frames.count, 1, "★字符串字段里的 `{`/`}` 不能计入深度")
+        t.check(frames.first?.contains("a { b } c { d") == true, "字符串内容原样保留")
+    }
+
+    // 反斜杠转义在字符串里：`\"` 不能把字符串状态切换关掉
+    do {
+        var d = TikaJSONFramingDecoder()
+        let frames = d.feed(#"{"type":"text-delta","text":"say \"hi\" then }"}"#)
+        t.equal(frames.count, 1, "★字符串内 `\\\"` 不能把字符串状态提前收尾")
+    }
+
+    // 未闭合的对象：不出帧但也不崩
+    do {
+        var d = TikaJSONFramingDecoder()
+        var frames = d.feed(#"{"type":"start","chat_id":"c"#)
+        t.equal(frames.count, 0, "半个对象暂不出帧")
+        frames = d.feed(#"id"}"#)
+        t.equal(frames.count, 1, "补齐后立刻吐出")
+        t.check(d.hasPending == false, "吐完对象后 pending 为空")
+    }
+
+    // 事件识别（用完整 start 帧，而不是从多帧字符串里切片）
+    let startFrame = """
+    {"type":"start","chat_id":"cid","model":"seed_2.0_pro","agent_detail":{"agent_id":"1509440157188","agent_name":"default"}}
+    """
+    let startEvt = TikaEventDecoder.decode(frame: startFrame)
+    if case let .start(_, model, agentId, agentName)? = startEvt {
+        t.equal(model, "seed_2.0_pro", "start 事件模型")
+        t.equal(agentId, "1509440157188", "start 事件 agent id")
+        t.equal(agentName, "default", "start 事件 agent name")
+    } else {
+        t.check(false, "start 事件应能识别")
+    }
+
+    let deltaEvt = TikaEventDecoder.decode(frame: #"{"type":"text-delta","text":"hi"}"#)
+    if case let .textDelta(s)? = deltaEvt { t.equal(s, "hi", "text-delta 文本") }
+    else { t.check(false, "text-delta 应能识别") }
+
+    let finishEvt = TikaEventDecoder.decode(frame: #"{"type":"finish","reason":"stop"}"#)
+    if case let .finish(reason)? = finishEvt { t.equal(reason, "stop", "finish 原因") }
+    else { t.check(false, "finish 应能识别") }
+
+    // 别名字段：event vs type、reason vs finish_reason
+    let aliasFinish = TikaEventDecoder.decode(frame: #"{"event":"done","finish_reason":"length"}"#)
+    if case let .finish(reason)? = aliasFinish { t.equal(reason, "length", "done + finish_reason 别名") }
+    else { t.check(false, "done + finish_reason 别名应识别为 .finish") }
+
+    // 心跳与未知事件不能崩
+    t.check(TikaEventDecoder.decode(frame: #"{"type":"ping"}"#) == .some(.ping), "ping 识别")
+    if case .unknown? = TikaEventDecoder.decode(frame: #"{"type":"future-thing"}"#) {
+        t.check(true, "未知事件走 .unknown 不崩")
+    } else {
+        t.check(false, "未知事件应走 .unknown")
+    }
+
+    // 非法 JSON 帧：返回 nil
+    t.check(TikaEventDecoder.decode(frame: "not-json") == nil, "非法 JSON 返回 nil")
+
+    // 累积器
+    var acc = TikaAssistantAccumulator()
+    acc.apply(.start(chatId: "c", model: "seed_2.0_pro", agentId: "a1", agentName: "default"))
+    acc.apply(.textDelta("你好"))
+    acc.apply(.textDelta("，"))
+    acc.apply(.textDelta("Tika。"))
+    acc.apply(.textEnd)
+    acc.apply(.reasoningDelta("想了想"))
+    acc.apply(.toolInputAvailable(toolName: "execute", callId: "t1"))
+    acc.apply(.finish(reason: "stop"))
+    t.equal(acc.text, "你好，Tika。", "★text-delta 拼接")
+    t.equal(acc.reasoning, "想了想", "reasoning 拼接")
+    t.check(acc.pendingCloudToolWarnings.count == 1, "★云端 execute 工具应被记警告（不能静默）")
+    t.check(acc.pendingCloudToolWarnings[0].contains("execute"), "警告文案带工具名")
+    t.check(acc.renderContent().hasPrefix("你好，Tika。"), "renderContent 保留原文")
+    t.check(acc.renderContent().contains("⚠️"), "renderContent 尾巴挂警告")
+    t.check(acc.finished, "finish 后 finished=true")
+    t.equal(acc.agentId, "a1", "agent id 记住")
+}
+
+// ============================================================================
+// MARK: - AGENT-TIKA-XML (v2.17.7)：<clipslots-call> 提取 + shell-lex + 白名单
+// ============================================================================
+//
+// 这一组盯的是"Agent 输出到 App 侧的唯一契约"。任何一处松掉都会变成安全或行为问题：
+// 白名单破了 → 模型能编 `rm -rf`；shell-lex 破了 → 参数被切错；实体解码破了 → `&quot;`
+// 会原样进 argv 变成不可解析的引号字面量。
+
+do {
+    // 单个自闭合
+    let e1 = ClipSlotsToolScanner.scan(#"我来查一下：<clipslots-call cmd="clipslots list --json"/> 好了。"#)
+    t.equal(e1.items.count, 1, "★一段文本里的一个 <clipslots-call> 必须被找到")
+    if case let .ok(call) = e1.items[0].payload {
+        t.equal(call.subcommand, "list", "子命令")
+        t.equal(call.argv, ["list", "--json"], "★argv 里不带 'clipslots' 前缀（要直接喂给 CLI）")
+    } else { t.check(false, "第一个应是成功 call") }
+
+    // 多个 call 按顺序
+    let e2 = ClipSlotsToolScanner.scan(
+        #"步骤 A：<clipslots-call cmd="clipslots pages --json"/>；步骤 B：<clipslots-call cmd="clipslots read 3"/>。"#)
+    t.equal(e2.callsOnly.count, 2, "两个 call 都要抓到")
+    t.equal(e2.callsOnly[0].subcommand, "pages", "顺序 1")
+    t.equal(e2.callsOnly[1].subcommand, "read", "顺序 2")
+
+    // XML 实体解码（模型嵌双引号的合法写法）
+    let e3 = ClipSlotsToolScanner.scan(#"<clipslots-call cmd="clipslots write 3 --text &quot;hello world&quot;"/>"#)
+    if case let .ok(call) = e3.items.first?.payload {
+        t.equal(call.argv, ["write", "3", "--text", "hello world"], "★&quot; 必须解回真双引号再 shell-lex")
+    } else { t.check(false, "&quot; 转义 call 应成功") }
+
+    // 单引号包整个 cmd（避免转义）
+    let e4 = ClipSlotsToolScanner.scan(#"<clipslots-call cmd='clipslots write 3 --text "hello"'/>"#)
+    if case let .ok(call) = e4.items.first?.payload {
+        t.equal(call.argv, ["write", "3", "--text", "hello"], "★单引号包裹的 cmd 也要能解")
+    } else { t.check(false, "单引号 cmd 应识别") }
+
+    // 白名单拒 —— 模型编造的 `set` / `rm` / `sudo` 都必须拒
+    for bad in ["clipslots set 3 hello", "clipslots update 1", "clipslots rm 3", "sudo rm -rf /", "rm 3"] {
+        let e = ClipSlotsToolScanner.scan("<clipslots-call cmd=\"\(bad)\"/>")
+        if case let .error(err) = e.items.first?.payload {
+            t.equal(err.code, "COMMAND_NOT_ALLOWED", "★白名单外命令必须回 COMMAND_NOT_ALLOWED：\(bad)")
+        } else { t.check(false, "拒执行未生效：\(bad)") }
+    }
+
+    // 白名单接 —— 全部命令都必须过
+    let allAllowed = ["list","groups","pages","read","search","version","help",
+                      "write","clear","paste",
+                      "create-group","create-page","rename-group",
+                      "delete-group","delete-page",
+                      "write-attachment","set-thumbnail","clear-thumbnail",
+                      "repair-index"]
+    for cmd in allAllowed {
+        let e = ClipSlotsToolScanner.scan(#"<clipslots-call cmd="clipslots \#(cmd)"/>"#)
+        if case let .ok(call) = e.items.first?.payload {
+            t.equal(call.subcommand, cmd, "白名单成员 \(cmd) 必须通过")
+        } else { t.check(false, "白名单成员却被拒：\(cmd)") }
+    }
+
+    // 缺失 cmd 属性
+    let e5 = ClipSlotsToolScanner.scan(#"<clipslots-call>缺 cmd</clipslots-call>"#)
+    if case let .error(err) = e5.items.first?.payload {
+        t.equal(err.code, "MISSING_CMD_ATTRIBUTE", "缺 cmd 属性")
+    } else { t.check(false, "缺 cmd 应报错") }
+
+    // 双标签形式也接
+    let e6 = ClipSlotsToolScanner.scan(#"<clipslots-call cmd="clipslots list">忽略正文</clipslots-call>"#)
+    if case let .ok(call) = e6.items.first?.payload {
+        t.equal(call.subcommand, "list", "双标签形式也识别")
+    } else { t.check(false, "双标签形式应识别") }
+
+    // 空 cmd
+    let e7 = ClipSlotsToolScanner.scan(#"<clipslots-call cmd=""/>"#)
+    if case let .error(err) = e7.items.first?.payload {
+        t.equal(err.code, "EMPTY_COMMAND", "空 cmd")
+    } else { t.check(false, "空 cmd 应报错") }
+
+    // 只写 clipslots 没子命令
+    let e8 = ClipSlotsToolScanner.scan(#"<clipslots-call cmd="clipslots"/>"#)
+    if case let .error(err) = e8.items.first?.payload {
+        t.equal(err.code, "EMPTY_COMMAND", "只写 clipslots")
+    } else { t.check(false, "只写 clipslots 应报错") }
+
+    // shell-lex：混合引号
+    let tokens = (try? shellSplit(#"write 3 --text "有空格 的 内容" --label 'label'"#)) ?? []
+    t.equal(tokens, ["write", "3", "--text", "有空格 的 内容", "--label", "label"], "★shell-lex 混合引号")
+
+    // shell-lex：转义
+    let tokens2 = (try? shellSplit(#"echo \"a\" b\ c"#)) ?? []
+    t.equal(tokens2, ["echo", "\"a\"", "b c"], "★shell-lex 反斜杠转义（不吃 `\"` 的语义，只做字符收编）")
+
+    // shell-lex：未闭合引号抛错
+    t.expectThrows("★未闭合双引号必须抛 MALFORMED_CMD") {
+        _ = try shellSplit(#"write 3 --text "缺右引号"#)
+    }
+
+    // shell-lex：POSIX 特殊字符只是普通字符（无注入面）
+    let tokens3 = (try? shellSplit(#"write 3 --text "; rm -rf /""#)) ?? []
+    t.equal(tokens3, ["write", "3", "--text", "; rm -rf /"], "★shell 特殊字符只作为普通参数字面量")
+
+    // 允许 argv[0] 直接省略 clipslots
+    let e9 = ClipSlotsToolScanner.scan(#"<clipslots-call cmd="list --json"/>"#)
+    if case let .ok(call) = e9.items.first?.payload {
+        t.equal(call.subcommand, "list", "省略 'clipslots' 前缀也接")
+    } else { t.check(false, "省略 clipslots 前缀应识别") }
+}
+
+// ============================================================================
+// MARK: - AGENT-TIKA-GUARD (v2.17.7)：结果 XML 回喂 + CDATA 转义
+// ============================================================================
+//
+// 这一组盯 Agent 自愈闭环：拒执行时回什么、执行完把 stdout 塞回去时不能把 CDATA 塞坏。
+
+do {
+    // 拒执行的 result 与 rejection 构造
+    let rejection = ClipSlotsToolExecutionResult.rejection(
+        .init(rawCommand: "clipslots rm 3", code: "COMMAND_NOT_ALLOWED",
+              message: "rm 不在白名单")
+    )
+    t.check(rejection.ok == false, "rejection ok=false")
+    t.equal(rejection.code, "COMMAND_NOT_ALLOWED", "rejection code 透传")
+    t.equal(rejection.exitCode, -2, "rejection exit=-2 便于区分真实进程退出")
+
+    // 渲染 XML
+    let rejectXML = ClipSlotsResultEnvelope.render(rejection, command: "clipslots rm 3")
+    t.check(rejectXML.contains(#"ok="false""#), "★渲染带 ok=false")
+    t.check(rejectXML.contains(#"code="COMMAND_NOT_ALLOWED""#), "带 code")
+    t.check(rejectXML.contains("<![CDATA["), "带 CDATA 开头")
+    t.check(rejectXML.contains("]]>"), "带 CDATA 结尾")
+
+    // 成功结果的 stdout 是 JSON，包裹进 CDATA 原样出
+    let ok = ClipSlotsToolExecutionResult(
+        ok: true, code: "", exitCode: 0,
+        stdout: #"{"ok":true,"slots":[{"slot":1,"empty":true}]}"#,
+        stderr: "", timedOut: false)
+    let okXML = ClipSlotsResultEnvelope.render(ok, command: "clipslots list --json")
+    t.check(okXML.contains(#"ok="true""#), "成功 ok=true")
+    t.check(okXML.contains(#"{"ok":true"#), "★stdout 内容原样进 CDATA")
+
+    // 极端：stdout 里带 `]]>`（clipslots 不可能真出，但契约要求安全）
+    let dangerous = ClipSlotsToolExecutionResult(
+        ok: true, code: "", exitCode: 0,
+        stdout: "before ]]> after", stderr: "", timedOut: false)
+    let xml = ClipSlotsResultEnvelope.render(dangerous, command: "x")
+    t.check(!xml.contains("before ]]> after"), "★原始 `]]>` 不能原样保留（否则 CDATA 提前收尾）")
+    t.check(xml.contains("]]]]><![CDATA[>"), "★用 CDATA 分割规避 `]]>`")
+
+    // XML 属性里的双引号 / 尖括号必须转义（否则 Agent 端解析会崩）
+    let odd = ClipSlotsToolExecutionResult(
+        ok: false, code: "SOMETHING", exitCode: 1,
+        stdout: "", stderr: "boom", timedOut: false)
+    let odd_xml = ClipSlotsResultEnvelope.render(odd, command: #"cmd "with quote""#)
+    t.check(odd_xml.contains("&quot;"), "★命令里的双引号在 cmd 属性中必须 &quot; 化")
+    t.check(odd_xml.contains("stderr: boom"), "★失败且 stdout 为空时把 stderr 带回去")
+}
+
+
+// ============================================================================
+// MARK: - AGENT-TIKA-E2E (v2.17.7)：mock tikacli → XML → 本地 runner → 回喂
+// ============================================================================
+
+do {
+    let dir = FileManager.default.temporaryDirectory
+        .appendingPathComponent("clipslots_tika_mock_\(UUID().uuidString)", isDirectory: true)
+    try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: dir) }
+
+    let fakeCLI = dir.appendingPathComponent("tikacli")
+    let script = #"""
+#!/bin/sh
+case "$*" in
+  *clipslots-result*)
+    printf '%s\n' '{"type":"text-delta","text":"已找到 1 个槽位"}' '{"type":"finish","reason":"stop"}'
+    ;;
+  *)
+    printf '%s\n' '{"type":"text-delta","text":"<clipslots-call cmd=\u0027clipslots list\u0027/>"}' '{"type":"finish","reason":"tool"}'
+    ;;
+esac
+"""#
+    try? Data(script.utf8).write(to: fakeCLI)
+    try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: fakeCLI.path)
+
+    final class LocalCallRecorder: @unchecked Sendable {
+        private let lock = NSLock()
+        private var value: [(String, [String])] = []
+        func record(_ path: String, _ argv: [String]) { lock.lock(); value.append((path, argv)); lock.unlock() }
+        func snapshot() -> [(String, [String])] { lock.lock(); defer { lock.unlock() }; return value }
+    }
+    let recorder = LocalCallRecorder()
+    let backend = TikaCLIService(
+        config: TikaBackendConfig(cliPath: fakeCLI.path, perTurnTimeout: 3),
+        clipslotsCLIPath: "/mock/clipslots",
+        localRunner: { path, argv in
+            recorder.record(path, argv)
+            return AgentProcessResult(exitCode: 0,
+                                      stdout: #"{"ok":true,"slots":[{"slot":1}]}"#,
+                                      stderr: "", timedOut: false)
+        })
+
+    let e2eResult: Result<[AgentMessage], Error> = smokeAwait {
+        do {
+            return .success(try await backend.run(
+                history: [AgentMessage(role: .user, content: "列出槽位")],
+                config: AgentConfig(systemPrompt: ""), tools: nil, onEvent: { _ in }))
+        } catch { return .failure(error) }
+    }
+    switch e2eResult {
+    case .success(let produced):
+        let calls = recorder.snapshot()
+        t.equal(calls.count, 1, "★Tika E2E 只执行一次本地 clipslots")
+        if let first = calls.first {
+            t.equal(first.0, "/mock/clipslots", "★Tika E2E 使用注入的 localRunner 路径")
+            t.equal(first.1, ["list"], "★XML argv 原样交给注入 runner")
+        }
+        t.equal(produced.count, 3, "★Tika E2E 产生 assistant + tool + assistant")
+        t.check(produced.last?.content.contains("已找到 1 个槽位") == true,
+                "★clipslots-result 应回喂并得到最终回答")
+    case .failure(let error):
+        t.check(false, "Tika E2E 不应抛错：\(error)")
+    }
+
+    let slowCLI = dir.appendingPathComponent("tikacli-slow")
+    try? Data("#!/bin/sh\nexec /bin/sleep 5\n".utf8).write(to: slowCLI)
+    try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: slowCLI.path)
+    let slow = TikaCLIService(config: TikaBackendConfig(cliPath: slowCLI.path, perTurnTimeout: 0.2))
+    let started = Date()
+    let timeoutError: Error? = smokeAwait {
+        do {
+            _ = try await slow.run(history: [AgentMessage(role: .user, content: "hi")],
+                                   config: AgentConfig(systemPrompt: ""), tools: nil, onEvent: { _ in })
+            return nil
+        } catch { return error }
+    }
+    if case TikaBackendError.timedOut? = timeoutError {
+        t.check(Date().timeIntervalSince(started) < 3, "★Tika 超时应在 SIGTERM 宽限内及时返回")
+    } else {
+        t.check(false, "Tika 超时应映射为 timedOut，实际：\(String(describing: timeoutError))")
+    }
+}
+
 t.report()

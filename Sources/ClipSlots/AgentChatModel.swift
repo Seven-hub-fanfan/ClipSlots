@@ -148,17 +148,27 @@ final class AgentChatModel: ObservableObject {
     @Published var needsConfiguration = false
 
     let displayName: String
-    private let service: AgentService
+    /// v2.17.7 起：具体后端由 `AgentBackendCoordinator` 决定，可运行时切换（DeepSeek / Tika）。
+    /// UI 里选完保存会调 `setBackend(_:)`；测试 / smoke 直接从 init 注入。
+    private var backend: any AgentBackend
     private let registry: AgentToolRegistry
     private var runTask: Task<Void, Never>?
     private var currentRunID: UUID?
 
     init(displayName: String,
-         service: AgentService = AgentService(),
+         service: AgentService? = nil,
+         backend: (any AgentBackend)? = nil,
          registry: AgentToolRegistry = AgentToolRegistry(),
          persistenceURL: URL? = nil) {
         self.displayName = displayName
-        self.service = service
+        // 优先 backend；没给 backend 但给了 service 就用 service；都没给就走 Coordinator 读偏好。
+        if let backend {
+            self.backend = backend
+        } else if let service {
+            self.backend = service
+        } else {
+            self.backend = AgentBackendCoordinator.currentBackend()
+        }
         self.registry = registry
         self.persistenceURL = persistenceURL
         restoring = true
@@ -243,7 +253,11 @@ final class AgentChatModel: ObservableObject {
         flushSession()
     }
 
-    var hasAPIKey: Bool { service.hasAPIKey }
+    /// v2.17.7 起：只有 DeepSeek 后端需要 API Key；Tika 后端由 tikacli 自己管认证。
+    var hasAPIKey: Bool {
+        if let ds = backend as? AgentService { return ds.hasAPIKey }
+        return true
+    }
 
     var isEmpty: Bool { messages.isEmpty }
 
@@ -252,7 +266,9 @@ final class AgentChatModel: ObservableObject {
     func send(text: String, config: AgentConfig, enabledSkills: [AgentSkill]) {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty, !isRunning else { return }
-        guard service.hasAPIKey else {
+        // DeepSeek 后端需要 API Key；Tika 后端 tikacli 自己管认证，先跳过这道检查
+        // （若 tikacli 未登录，run() 内部会抛 notAuthenticated，走 failRun 显示提示）。
+        if let ds = backend as? AgentService, !ds.hasAPIKey {
             needsConfiguration = true
             errorText = AgentError.missingAPIKey.errorDescription
             return
@@ -290,7 +306,7 @@ final class AgentChatModel: ObservableObject {
             guard let self else { return }
             do {
                 // 事件回调是 @Sendable，且会在任意线程被调用，所以统一 hop 回主线程。
-                try await self.service.run(history: history,
+                try await self.backend.run(history: history,
                                            config: config,
                                            tools: self.registry) { event in
                     await self.apply(event, runID: runID)
@@ -505,6 +521,14 @@ final class AgentChatModel: ObservableObject {
     private static func wasInterrupted(_ message: AgentMessage) -> Bool {
         (try? JSONValue.decode(jsonText: message.content))?["error_code"]?.stringValue == "interrupted"
     }
+// MARK: - 后端切换
+    //
+    // UI 里保存"AI 后端"选择时调用。刻意做成运行时可切：不重启 App、不影响当前 conversation
+    // history；下一次 `send` 时就走新后端。**如果当前有正在跑的请求**，切换只影响未来 turn，
+    // 已经在流上的那一轮跑到完成再算数（不 mid-stream 换传输，避免半截消息状态紊乱）。
+    func setBackend(_ backend: any AgentBackend) {
+        self.backend = backend
+    }
 }
 
 // MARK: - 会话仓库
@@ -518,6 +542,24 @@ final class AgentSessionStore: ObservableObject {
         persistenceURL: ClipSlotsPaths.dataRoot.appendingPathComponent("agent-sessions/edit.json"))
     let canvas = AgentChatModel(displayName: "画布页",
         persistenceURL: ClipSlotsPaths.dataRoot.appendingPathComponent("agent-sessions/canvas.json"))
+
+    /// v2.17.7：监听后端切换通知。**独立实例**分给 edit / canvas——Tika 后端会在实例里持有
+    /// tikacli session state（首轮 `--new`、后续复用同一 session-id），共用会互相污染。
+    private var backendObserver: NSObjectProtocol?
+
+    init() {
+        backendObserver = NotificationCenter.default.addObserver(
+            forName: AgentBackendCoordinator.backendChangedNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in
+                guard let self else { return }
+                self.edit.setBackend(AgentBackendCoordinator.currentBackend())
+                self.canvas.setBackend(AgentBackendCoordinator.currentBackend())
+            }
+        }
+    }
 
     func session(for mode: WorkspaceMode) -> AgentChatModel {
         mode == .canvas ? canvas : edit
