@@ -4,7 +4,7 @@
 
 ## 当前版本
 
-- **当前版本：v2.10.93**
+- **当前版本：v2.17.7**
 - 平台：macOS（Swift / SwiftUI，SPM 构建，macOS 13+）
 - 单一版本号事实来源：`Info.plist` 的 `CFBundleShortVersionString`（`AppVersion.current` 动态读取，`AppVersion.fallback` 为编译期兜底）。CLI 版本号见 `Sources/ClipSlotsCLI/main.swift` 的 `CLI_VERSION`。
 
@@ -16,6 +16,20 @@
 - 另一条铁律：**装机的包必须与将要发布的版本号严格对应**。曾出现「装进 /Applications 的 2.10.91 里含未提交代码」的脏包，与 GitHub 上的 2.10.91 不是同一个东西，排查时极易误判。
 
 ## 版本要点（近期）
+
+### v2.17.7 — Tika Agent 双后端（★当前正式发布版）
+
+- Agent 设置新增 **DeepSeek / Tika Agent** 切换；运行时通知会让编辑页、画布页立即换后端，无需重启。
+- Tika 走本机 `tikacli chat --json --auto-approve`，认证仍由 tikacli 管理；App 不保存 Tika 凭据。
+- Tika Web 已创建 **ClipSlots 本地助手**（Agent ID `3247763614212`，Tika SOTA Medium，V2 已发布）；instructions 源文件为 `docs/tika-agent-system-prompt.md`。
+- 云端 Agent 不能直接触达 Mac，工具桥使用 `<clipslots-call cmd="..."/>` → App 端 XML 提取 / shell-lex / 子命令白名单 → 本地 `/usr/local/bin/clipslots` argv 直传 → `<clipslots-result>` 回喂。**禁止通过 shell 拼接执行。**
+- `tikacli` 0.6.x 没有显式 `--session-id`。为避免编辑页 / 画布页并发争抢全局 cached session，每个工具轮都 `--new`，并重发自包含 transcript；历史中的 tool 结果也必须保留，才能支持后续追问。
+- JSON 输出不是 NDJSON，而是多行 pretty-print JSON 对象串；`TikaJSONFramingDecoder` 必须按字符串状态 + 大括号深度切帧。实测 `text-delta` 正文字段是 `delta`（兼容旧样本 `text`）。
+- 子进程实现必须在启动前挂 termination handler、stdout/stderr 同时 drain、关闭父进程 pipe 写端，并提供超时 / cancellation / SIGKILL 兜底，避免大输出和 EOF 死锁。
+- ClipSlots CLI 默认就是 JSON 输出，**不能额外加 `--json`**（`list` 会报 unknown flag）；Tika Agent instructions V2 已修正。
+- 验证：`swift build` 通过；smoke **32427 通过 / 0 失败**；真实 tikacli XML → 本机 CLI → 结果回喂链路通过；DMG 深度校验、codesign 与装机验证通过。
+- commit `7ba2474`；Release：https://github.com/Seven-hub-fanfan/ClipSlots/releases/tag/v2.17.7
+- DMG SHA256：`6c97ac5fa88a144ba563059cf5b7322ac6cdd7556fff9dcebc0237813912f7d2`（已核对 `releases/latest` asset digest）。
 
 ### v2.10.93 — ★全方位丝滑：窗口缩放 3.5x / 切主题「卡颜色」根治 / 切组 3.7x（★当前正式发布版）
 
