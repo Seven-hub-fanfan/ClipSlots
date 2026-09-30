@@ -114,10 +114,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 return
             }
 
-            if window.isMiniaturized {
-                window.deminiaturize(nil)
-            }
-
             // 主屏放首位：完全离屏时的兜底落点用主屏，符合「窗口回到眼前」的直觉。
             var frames: [CGRect] = []
             if let main = NSScreen.main {
@@ -127,8 +123,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 frames.append(screen.visibleFrame)
             }
 
+            // v2.17.5 修复「点最小化按钮之后窗口又自动弹回来」。
+            // 触发链：某些系统构型下（外接屏 / Stage Manager / Dock magnification）
+            // Dock 加/减最小化 tile 会顺带发出 `didChangeScreenParametersNotification`；
+            // 这条通知我们订了 `rescueMainWindowVisibility`，旧版本不判位置就 `deminiaturize`
+            // 任何 miniaturized 窗口——用户按下最小化 ~0.6s 后被系统 Dock 回填反弹上来，
+            // 用户体感就是"最小化按钮点了没反应"。
+            //
+            // 修法：只在真正需要重新定位窗口时才 deminiaturize。miniaturized 状态下 window.frame
+            // 仍是入 Dock 之前的位置，`needsRescue` 可以直接用它判断；不需要救就是用户自愿的
+            // 最小化，一律不碰。只有确实检测到离屏（例如从副屏 restore 到无副屏排布）时，
+            // 才先 deminiaturize 再 setFrame，保留原自救语义。
             let current = window.frame
             guard MainWindowRescueGeometry.needsRescue(window: current, visibleFrames: frames) else { return }
+            if window.isMiniaturized {
+                window.deminiaturize(nil)
+            }
             let rescued = MainWindowRescueGeometry.rescuedFrame(window: current, visibleFrames: frames)
             NSLog("[ClipSlots] rescue main window \(NSStringFromRect(current)) -> \(NSStringFromRect(rescued))")
             window.setFrame(rescued, display: true)
@@ -146,16 +156,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// 什么都没做，还把 SwiftUI `WindowGroup` 默认的「reopen 时补一个窗口」给挡掉了。
     /// 返回 `false` = 交还系统默认行为，SwiftUI 会新建窗口，界面能回来。
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
-        rescueMainWindowVisibility()
+        // #region debug-point B:window-reopen
+        #if DEBUG
+        if ProcessInfo.processInfo.environment["CLIPSLOTS_WINDOW_PROBE"] == "1" { var r = URLRequest(url: URL(string: "http://127.0.0.1:7786/event")!); r.httpMethod = "POST"; r.httpBody = try? JSONSerialization.data(withJSONObject: ["sessionId": "window-lifecycle", "runId": ProcessInfo.processInfo.environment["CANVAS_DEBUG_RUN"] ?? "pre-fix", "hypothesisId": "B", "msg": "[DEBUG] reopen requested", "data": ["hasVisibleWindows": flag, "active": sender.isActive, "windows": sender.windows.map { ["number": $0.windowNumber, "class": String(describing: type(of: $0)), "visible": $0.isVisible, "mini": $0.isMiniaturized, "titled": $0.styleMask.contains(.titled)] }]]); URLSession.shared.dataTask(with: r).resume() }
+        #endif
+        // #endregion
         guard let window = NSApp.windows.first(where: {
             $0.styleMask.contains(.titled) && !($0 is NSPanel)
         }) else {
             return false
         }
+        // v2.17.5：Dock 图标点击 / reopen 是「把窗口拉回眼前」的显式语义，必须无条件
+        // deminiaturize。`rescueMainWindowVisibility` 从 v2.17.5 起只在真正离屏时才动
+        // miniaturized 状态（否则用户主动最小化会被 didChangeScreenParametersNotification
+        // 触发的自救弹回来），Dock 唤回不能再依赖它来出 Dock。
+        if window.isMiniaturized {
+            window.deminiaturize(nil)
+        }
+        // 顺带救一次几何：万一窗口停在已消失的副屏上。此时 isMiniaturized 已经是 false，
+        // 走「只 setFrame」的路径。
+        rescueMainWindowVisibility()
         window.makeKeyAndOrderFront(nil)
-        // v2.17.5: Dock 图标点击 / reopen 时若窗口刚从 miniaturized 复原，仅 makeKeyAndOrderFront
-        // 常常只把窗口 order 到前面而不把 App 激活到 frontmost，用户体感是「点程序坞没反应」。
-        // 显式 activate 一次，与用户从 Dock 打开 App 的默认体验对齐。
+        // 只 orderFront 常常只把窗口 order 到前面而不把 App 激活到 frontmost，加一次 activate
+        // 与从 Dock 打开 App 的默认体验对齐。
         NSApp.activate(ignoringOtherApps: true)
         return true
     }
@@ -167,6 +190,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // #region debug-point A-C:window-lifecycle
+        #if DEBUG
+        if ProcessInfo.processInfo.environment["CLIPSLOTS_WINDOW_PROBE"] == "1" {
+            for name in [NSWindow.willMiniaturizeNotification, NSWindow.didMiniaturizeNotification, NSWindow.didDeminiaturizeNotification, NSWindow.willCloseNotification, NSWindow.didBecomeKeyNotification, NSApplication.didBecomeActiveNotification, NSApplication.didResignActiveNotification] {
+                NotificationCenter.default.addObserver(forName: name, object: nil, queue: .main) { note in
+                    var r = URLRequest(url: URL(string: "http://127.0.0.1:7786/event")!); r.httpMethod = "POST"; r.httpBody = try? JSONSerialization.data(withJSONObject: ["sessionId": "window-lifecycle", "runId": ProcessInfo.processInfo.environment["CANVAS_DEBUG_RUN"] ?? "pre-fix", "hypothesisId": "A-C", "msg": "[DEBUG] window lifecycle event", "data": ["event": name.rawValue, "active": NSApp.isActive, "window": (note.object as? NSWindow)?.windowNumber ?? -1, "windows": NSApp.windows.map { ["number": $0.windowNumber, "class": String(describing: type(of: $0)), "visible": $0.isVisible, "mini": $0.isMiniaturized, "mask": $0.styleMask.rawValue] }]]); URLSession.shared.dataTask(with: r).resume()
+                }
+            }
+        }
+        #endif
+        // #endregion
         NSApp.setActivationPolicy(.regular)
 
         // v2.11.7 hotfix9: 离屏渲染顶部 chrome 预览图后立刻退出（仅当设置了

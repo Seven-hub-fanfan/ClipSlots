@@ -69,6 +69,11 @@ final class CanvasInputRouter: ObservableObject {
         ) { [weak self] event in
             guard let self else { return event }
             let consumed = self.handle(event)
+            // #region debug-point A:window-button-routing
+            #if DEBUG
+            if ProcessInfo.processInfo.environment["CLIPSLOTS_WINDOW_PROBE"] == "1", event.type == .leftMouseDown || event.type == .leftMouseUp { var r = URLRequest(url: URL(string: "http://127.0.0.1:7786/event")!); r.httpMethod = "POST"; r.httpBody = try? JSONSerialization.data(withJSONObject: ["sessionId": "window-lifecycle", "runId": ProcessInfo.processInfo.environment["CANVAS_DEBUG_RUN"] ?? "pre-fix", "hypothesisId": "A", "msg": "[DEBUG] window button pointer routing", "data": ["type": event.type.rawValue, "point": NSStringFromPoint(event.locationInWindow), "consumed": consumed, "contentHit": String(describing: event.window?.contentView?.hitTest(event.locationInWindow)), "frameHit": String(describing: event.window?.contentView?.superview?.hitTest(event.locationInWindow)), "inCanvas": self.anchorView.map { $0.bounds.contains($0.convert(event.locationInWindow, from: nil)) } ?? false]]); URLSession.shared.dataTask(with: r).resume() }
+            #endif
+            // #endregion
             // #region debug-point B-C:control-delivery
             #if DEBUG
             if ProcessInfo.processInfo.environment["CLIPSLOTS_CONTROL_PROBE"] == "1", event.type == .leftMouseDown || event.type == .leftMouseUp { var r = URLRequest(url: URL(string: "http://127.0.0.1:7784/event")!); r.httpMethod = "POST"; r.httpBody = try? JSONSerialization.data(withJSONObject: ["sessionId": "slot-input-controls", "runId": ProcessInfo.processInfo.environment["CANVAS_DEBUG_RUN"] ?? "pre-fix", "hypothesisId": "B-C", "msg": "[DEBUG] native control delivery", "data": ["type": event.type.rawValue, "point": NSStringFromPoint(event.locationInWindow), "consumed": consumed, "key": event.window?.isKeyWindow ?? false, "active": NSApp.isActive, "hit": String(describing: event.window?.contentView?.hitTest(event.locationInWindow))]]); URLSession.shared.dataTask(with: r).resume() }

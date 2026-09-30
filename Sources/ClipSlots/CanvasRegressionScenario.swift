@@ -30,6 +30,10 @@ extension CanvasWorkspaceView {
             await settle(1)
             inputRouter.anchorView?.window?.setContentSize(CGSize(width: 1440, height: 900))
             let directory = URL(fileURLWithPath: folder, isDirectory: true)
+            if env["CLIPSLOTS_WINDOW_PROBE"] == "1" {
+                await runWindowLifecycleProbe(directory: directory)
+                return
+            }
             if env["CLIPSLOTS_NATIVE_CONTROLS"] == "1" {
                 try? await Self.makeRegressionMedia(in: directory)
                 await runNativeControlsProbe(directory: directory)
