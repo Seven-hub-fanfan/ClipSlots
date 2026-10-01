@@ -58,6 +58,15 @@ finally:
         mouse_driver.terminate()
         mouse_driver.wait(timeout=5)
 report = json.loads((fixtures / "report.json").read_text())
+if env.get("CLIPSLOTS_AGENT_PERF") == "1":
+    output = repo / "build/validation"
+    output.mkdir(parents=True, exist_ok=True)
+    suffix = env.get("CANVAS_DEBUG_RUN", "pre-fix")
+    shutil.copy(root / "run.log", output / f"agent-perf-{suffix}.log")
+    shutil.copy(fixtures / "report.json", output / f"agent-perf-{suffix}.json")
+    print(json.dumps(report, ensure_ascii=False, indent=2))
+    print(f"Evidence: {fixtures}")
+    raise SystemExit(1 if report["failures"] else 0)
 if env.get("CLIPSLOTS_WINDOW_PROBE") == "1":
     output = repo / "build/validation"
     output.mkdir(parents=True, exist_ok=True)

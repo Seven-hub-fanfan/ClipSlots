@@ -111,16 +111,29 @@ public final class TikaCLIService: NSObject, AgentBackend, @unchecked Sendable {
                                                onEvent: onEvent)
             totalTurns += 1
 
+            try Task.checkCancellation()
+            // 先分配稳定的工具 ID，完成后历史与中断恢复才能按 assistant/tool 配对。
+            let extraction = ClipSlotsToolScanner.scan(outcome.accumulator.text)
+            let toolCalls = extraction.items.map { item -> AgentToolCall in
+                switch item.payload {
+                case .ok(let call):
+                    return AgentToolCall(id: UUID().uuidString,
+                        name: "clipslots_" + call.subcommand.replacingOccurrences(of: "-", with: "_"),
+                        argumentsJSON: "{\"argv\":\(argvToJSON(call.argv))}")
+                case .error:
+                    return AgentToolCall(id: UUID().uuidString, name: "clipslots_rejected", argumentsJSON: "{}")
+                }
+            }
             // 3a. 收集 assistant 消息（附加 XML 警告尾巴）
             let assistantText = outcome.accumulator.renderContent()
             let assistantMsg = AgentMessage(role: .assistant,
                                             content: assistantText,
-                                            reasoning: outcome.accumulator.reasoning.isEmpty ? nil : outcome.accumulator.reasoning)
+                                            reasoning: outcome.accumulator.reasoning.isEmpty ? nil : outcome.accumulator.reasoning,
+                                            toolCalls: toolCalls)
             await onEvent(.assistantCompleted(assistantMsg))
             produced.append(assistantMsg)
 
             // 3b. 扫 XML，看是否需要继续
-            let extraction = ClipSlotsToolScanner.scan(outcome.accumulator.text)
             if extraction.isEmpty {
                 // 没工具调用，本次 run 结束
                 return produced
@@ -128,15 +141,12 @@ public final class TikaCLIService: NSObject, AgentBackend, @unchecked Sendable {
 
             // 3c. 逐个执行（提示词要求一次一个，但宽容支持多个）
             var resultFragments: [String] = []
-            for item in extraction.items {
+            for (item, toolCall) in zip(extraction.items, toolCalls) {
+                try Task.checkCancellation()
                 switch item.payload {
                 case .ok(let call):
-                    let toolCall = AgentToolCall(
-                        id: UUID().uuidString,
-                        name: "clipslots_" + call.subcommand.replacingOccurrences(of: "-", with: "_"),
-                        argumentsJSON: "{\"argv\":\(argvToJSON(call.argv))}")
                     await onEvent(.toolStarted(toolCall))
-
+                    try Task.checkCancellation()
                     let exec = await localRunner(clipslotsCLIPath, call.argv)
                     let ok = exec.succeeded
                     let cliResult = ClipSlotsToolExecutionResult(
@@ -169,9 +179,6 @@ public final class TikaCLIService: NSObject, AgentBackend, @unchecked Sendable {
                     resultFragments.append(envelope)
 
                     // 也上报为一次失败的 tool call，方便用户看到"Agent 编了个 rm，被拒了"
-                    let toolCall = AgentToolCall(id: UUID().uuidString,
-                                                 name: "clipslots_rejected",
-                                                 argumentsJSON: "{}")
                     await onEvent(.toolStarted(toolCall))
                     let failedResult = AgentToolResult.failure(err.message, code: err.code)
                     await onEvent(.toolCompleted(callId: toolCall.id, name: toolCall.name, result: failedResult))
@@ -290,7 +297,7 @@ public final class TikaCLIService: NSObject, AgentBackend, @unchecked Sendable {
             while true {
                 let data = stdout.fileHandleForReading.availableData
                 if data.isEmpty { break }
-                await box.ingest(String(decoding: data, as: UTF8.self), onEvent: onEvent)
+                await box.ingest(data, onEvent: onEvent)
             }
         }
         let stderrReader = Task.detached(priority: .utility) {
@@ -431,7 +438,7 @@ private actor TurnBox {
     private var accumulator = TikaAssistantAccumulator()
     private var stderrBuffer = ""
 
-    func ingest(_ chunk: String,
+    func ingest(_ chunk: Data,
                 onEvent: @Sendable (AgentRunEvent) async -> Void) async {
         let frames = decoder.feed(chunk)
         for frame in frames {

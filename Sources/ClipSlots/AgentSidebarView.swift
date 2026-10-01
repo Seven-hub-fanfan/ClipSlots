@@ -14,6 +14,13 @@ import ClipSlotsKit
 //      "调了什么、成没成"。想看原文可以展开那一行。
 
 struct AgentSidebarView: View {
+    // #region debug-point A:sidebar-counts
+    #if DEBUG
+    static var debugBodies = 0
+    static var debugScrolls = 0
+    static var debugBottom: CGFloat?
+    #endif
+    // #endregion
     @ObservedObject var model: AgentChatModel
     /// 由宿主页面控制显隐（编辑页/画布页各自持有）。
     @Binding var isVisible: Bool
@@ -35,6 +42,12 @@ struct AgentSidebarView: View {
     @State private var suggestionPage = 0
     @State private var followsLatest = true
     @State private var inputFocusRequest = 0
+    @State private var scrollTask: Task<Void, Never>?
+    private final class ScrollPosition {
+        var bottom: CGFloat?
+        var viewportHeight: CGFloat = 0
+    }
+    @State private var scrollPosition = ScrollPosition()
 
     /// 侧栏定宽。v2.11.7 hotfix24 起改为引用 `WindowLayoutMetrics` 里的同一个常量 ——
     /// 主窗口最小宽度的推导需要用到这个数，两处各写一遍迟早会对不上。
@@ -50,6 +63,11 @@ struct AgentSidebarView: View {
     }
 
     var body: some View {
+        // #region debug-point A:sidebar-body
+        #if DEBUG
+        let _ = ProcessInfo.processInfo.environment["CLIPSLOTS_AGENT_PERF"] == "1" ? { Self.debugBodies += 1 }() : ()
+        #endif
+        // #endregion
         VStack(spacing: 0) {
             header
             transcript
@@ -65,6 +83,7 @@ struct AgentSidebarView: View {
         }
         .sheet(isPresented: $showConfig) { AgentConfigView() }
         .onChange(of: workspaceMode) { _ in suggestionPage = 0 }
+        .onDisappear { scrollTask?.cancel(); scrollTask = nil }
         .onAppear {
             AgentSkillLibrary.shared.refresh()
             inputFocusRequest += 1
@@ -150,10 +169,7 @@ struct AgentSidebarView: View {
     }
 
     private var conversationTitle: String {
-        for item in model.transcript {
-            if case .user(let text) = item.kind { return String(text.prefix(14)) }
-        }
-        return "新建对话"
+        model.messages.first(where: { $0.role == .user }).map { String($0.content.prefix(14)) } ?? "新建对话"
     }
 
     private func newConversation() {
@@ -181,20 +197,23 @@ struct AgentSidebarView: View {
         ScrollViewReader { proxy in
             GeometryReader { geometry in
                 ScrollView(showsIndicators: false) {
-                    VStack(alignment: .leading, spacing: 22) {
+                    LazyVStack(alignment: .leading, spacing: 22) {
                         if welcomesUser {
                             emptyState
                                 .frame(minHeight: max(0, geometry.size.height - 60))
                         }
 
                         ForEach(model.transcript) { item in
-                            switch item.kind {
-                            case .user(let text):
-                                userBubble(text)
-                            case .assistant(let text, let reasoning, let isFailure):
-                                assistantBubble(text: text, reasoning: reasoning, isFailure: isFailure)
-                            case .tools(let rows):
-                                toolRows(rows)
+                            // 每条历史始终对应一个布局节点，避免条件分支影响 lazy 滚动定位。
+                            VStack(alignment: .leading, spacing: 0) {
+                                switch item.kind {
+                                case .user(let text):
+                                    userBubble(text)
+                                case .assistant(let text, let reasoning, let isFailure):
+                                    assistantBubble(text: text, reasoning: reasoning, isFailure: isFailure)
+                                case .tools(let rows):
+                                    toolRows(rows)
+                                }
                             }
                         }
 
@@ -211,10 +230,29 @@ struct AgentSidebarView: View {
                             }
                         }
                         Color.clear.frame(height: 1).id("agent_bottom")
+                            .background(GeometryReader { marker in
+                                Color.clear.preference(key: AgentTranscriptBottomKey.self,
+                                    value: marker.frame(in: .named("agentTranscript")).maxY)
+                            })
                     }
                     .padding(.horizontal, 18)
                     .padding(.vertical, 14)
                     .background(AgentTranscriptScrollObserver { followsLatest = $0 })
+                }
+                .coordinateSpace(name: "agentTranscript")
+                .onPreferenceChange(AgentTranscriptBottomKey.self) { bottom in
+                    scrollPosition.bottom = bottom
+                    scrollPosition.viewportHeight = geometry.size.height
+                    // #region debug-point A:bottom-position
+                    #if DEBUG
+                    if ProcessInfo.processInfo.environment["CLIPSLOTS_AGENT_PERF"] == "1" { Self.debugBottom = bottom }
+                    #endif
+                    // #endregion
+                    // Lazy 历史在滚到末尾后会修正估算高度；继续跟随真实末尾，直到进入可视区。
+                    let needsCorrection = bottom.map { $0 > geometry.size.height + 2 || $0 < 0 } ?? true
+                    if followsLatest && needsCorrection {
+                        scrollToBottom(proxy)
+                    }
                 }
                 .overlay(alignment: .bottom) {
                     if !followsLatest && !model.isEmpty {
@@ -242,8 +280,24 @@ struct AgentSidebarView: View {
     }
 
     private func scrollToBottom(_ proxy: ScrollViewProxy) {
-        // 不加动画：流式追加时每个 token 都要滚，带动画会互相打断成抖动。
-        proxy.scrollTo("agent_bottom", anchor: .bottom)
+        guard scrollTask == nil else { return }
+        scrollTask = Task { @MainActor in
+            // 首次合并高频请求；高度估算修正后最多再定位几帧，避免长消息完成时末尾离屏。
+            for pass in 0..<6 {
+                try? await Task.sleep(for: .milliseconds(pass == 0 ? 80 : 16))
+                guard !Task.isCancelled else { return }
+                guard followsLatest else { break }
+                if pass > 0, let bottom = scrollPosition.bottom,
+                   bottom >= 0, bottom <= scrollPosition.viewportHeight + 2 { break }
+                // #region debug-point A:sidebar-scroll
+                #if DEBUG
+                if ProcessInfo.processInfo.environment["CLIPSLOTS_AGENT_PERF"] == "1" { Self.debugScrolls += 1 }
+                #endif
+                // #endregion
+                proxy.scrollTo("agent_bottom", anchor: .bottom)
+            }
+            scrollTask = nil
+        }
     }
 
     private var emptyState: some View {
@@ -341,6 +395,7 @@ struct AgentSidebarView: View {
                 }
                 if !text.isEmpty {
                     AgentMarkdownText(text: text)
+                        .equatable()
                         .textSelection(.enabled)
                 }
             }
@@ -381,6 +436,7 @@ struct AgentSidebarView: View {
                 }
                 if !model.streamingContent.isEmpty {
                     AgentMarkdownText(text: model.streamingContent)
+                        .equatable()
                 } else if model.streamingReasoning.isEmpty {
                     HStack(spacing: 5) {
                         ProgressView().controlSize(.small).scaleEffect(0.5).frame(width: 10, height: 10)
@@ -634,6 +690,11 @@ private struct AgentSuggestion {
     ]
 }
 
+private struct AgentTranscriptBottomKey: PreferenceKey {
+    static var defaultValue: CGFloat? { nil }
+    static func reduce(value: inout CGFloat?, nextValue: () -> CGFloat?) { value = nextValue() ?? value }
+}
+
 /// 只由用户滚动改变跟随状态，内容增长不会把“跟随最新”误判为离开底部。
 private struct AgentTranscriptScrollObserver: NSViewRepresentable {
     let onScroll: (Bool) -> Void
@@ -717,7 +778,13 @@ private struct ReasoningDisclosure: View {
 // 用 AttributedString 的 inline markdown + 手工分块就够，且没有新依赖。
 // 表格/图片这类不支持的语法会原样显示——这比渲染成错的更好。
 
-struct AgentMarkdownText: View {
+struct AgentMarkdownText: View, Equatable {
+    // #region debug-point A:markdown-counts
+    #if DEBUG
+    static var debugParses = 0
+    static var debugParseBytes = 0
+    #endif
+    // #endregion
     let text: String
 
     private enum Block: Identifiable {
@@ -746,12 +813,17 @@ struct AgentMarkdownText: View {
                 case .lines(let lines):
                     VStack(alignment: .leading, spacing: 3) {
                         ForEach(Array(lines.enumerated()), id: \.offset) { _, line in
-                            Self.lineView(line)
+                            Line(text: line).equatable()
                         }
                     }
                 }
             }
         }
+    }
+
+    private struct Line: View, Equatable {
+        let text: String
+        var body: some View { AgentMarkdownText.lineView(text) }
     }
 
     @ViewBuilder
@@ -777,7 +849,12 @@ struct AgentMarkdownText: View {
     /// 用 `inlineOnlyPreservingWhitespace` 而不是默认选项：默认会把整段当块级结构解析，
     /// 结果是自己吃掉换行，和上层"按行渲染"打架。
     static func inline(_ s: String) -> AttributedString {
-        (try? AttributedString(markdown: s,
+        // #region debug-point A:markdown-parse
+        #if DEBUG
+        if ProcessInfo.processInfo.environment["CLIPSLOTS_AGENT_PERF"] == "1" { Self.debugParses += 1; Self.debugParseBytes += s.utf8.count }
+        #endif
+        // #endregion
+        return (try? AttributedString(markdown: s,
                                options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)))
             ?? AttributedString(s)
     }

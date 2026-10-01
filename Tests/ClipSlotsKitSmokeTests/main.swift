@@ -8765,6 +8765,37 @@ do {
         t.equal(frames.count, 3, "★逐字符喂也应识别 3 个 JSON 对象")
     }
 
+    // 管道按字节切分，可能在中文、emoji、组合字符中间断开。
+    do {
+        let text = "你好🙂👩🏽‍💻e\u{301}，引号\"和转义\\，{括号}\n第二行"
+        let payload = try JSONSerialization.data(withJSONObject: ["type": "text-delta", "delta": text])
+        for split in 0...payload.count {
+            var d = TikaJSONFramingDecoder()
+            let frames = d.feed(Data(payload.prefix(split))) + d.feed(Data(payload.dropFirst(split)))
+            t.equal(frames.compactMap { TikaEventDecoder.decode(frame: $0) }, [.textDelta(text)],
+                    "UTF8 任意字节分块保真 \(split)")
+            t.check(!d.hasPending, "完整 UTF8 帧无残留 \(split)")
+        }
+        var d = TikaJSONFramingDecoder()
+        var frames: [String] = []
+        for byte in payload { frames += d.feed(Data([byte])) }
+        t.equal(frames.compactMap { TikaEventDecoder.decode(frame: $0) }, [.textDelta(text)],
+                "UTF8 逐字节输入不产生替代字符")
+
+        let large = String(repeating: text, count: 1500)
+        let largeFrame = try JSONSerialization.data(withJSONObject: ["type": "text-delta", "delta": large])
+        var batch = Data("diagnostic line\n".utf8)
+        batch.append(largeFrame)
+        batch.append(contentsOf: "\n{\"type\":\"finish\"}\n{\"type\":\"text-delta\",\"delta\":\"".utf8)
+        var batched = TikaJSONFramingDecoder()
+        let events = batched.feed(batch).compactMap { TikaEventDecoder.decode(frame: $0) }
+        t.equal(events, [.textDelta(large), .finish(reason: nil)], "大帧、批量帧和半帧同时输入")
+        t.check(batched.hasPending, "批量帧后半帧保留")
+        t.equal(batched.feed(Data("尾部🙂\"}".utf8)).compactMap { TikaEventDecoder.decode(frame: $0) },
+                [.textDelta("尾部🙂")], "压缩缓冲后半帧继续解码")
+        t.check(!batched.hasPending, "大批量解码最终无残留")
+    } catch { t.check(false, "UTF8 framing: \(error)") }
+
     // 字符串里的 `{` `}` 不能干扰大括号计数
     do {
         var d = TikaJSONFramingDecoder()
@@ -9063,6 +9094,8 @@ esac
         t.equal(produced.count, 3, "★Tika E2E 产生 assistant + tool + assistant")
         t.check(produced.last?.content.contains("已找到 1 个槽位") == true,
                 "★clipslots-result 应回喂并得到最终回答")
+        t.equal(produced.first?.toolCalls.first?.id, produced.first(where: { $0.role == .tool })?.toolCallId,
+                "Tika 工具必须关联到 assistant，完成后历史可显示状态")
     case .failure(let error):
         t.check(false, "Tika E2E 不应抛错：\(error)")
     }
@@ -9084,6 +9117,46 @@ esac
     } else {
         t.check(false, "Tika 超时应映射为 timedOut，实际：\(String(describing: timeoutError))")
     }
+
+    let cancelBackend = TikaCLIService(config: .init(cliPath: slowCLI.path, perTurnTimeout: 10))
+    let cancellationStart = Date()
+    let cancellationOK: Bool = smokeAwait {
+        let task = Task {
+            try await cancelBackend.run(history: [.init(role: .user, content: "stop")],
+                                        config: AgentConfig(), tools: nil, onEvent: { _ in })
+        }
+        try? await Task.sleep(for: .milliseconds(60))
+        task.cancel()
+        do { _ = try await task.value; return false }
+        catch is CancellationError { return true }
+        catch { return false }
+    }
+    t.check(cancellationOK && Date().timeIntervalSince(cancellationStart) < 3,
+            "Tika 停止及时终止正在等待的子进程")
+
+    let batchCLI = dir.appendingPathComponent("tikacli-batch")
+    try? Data(#"""
+#!/bin/sh
+printf '%s\n' '{"type":"text-delta","text":"<clipslots-call cmd=\u0027clipslots list\u0027/><clipslots-call cmd=\u0027clipslots list\u0027/>"}' '{"type":"finish"}'
+"""#.utf8).write(to: batchCLI)
+    try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: batchCLI.path)
+    let cancelledCalls = LocalCallRecorder()
+    let batchBackend = TikaCLIService(config: .init(cliPath: batchCLI.path, perTurnTimeout: 3),
+        localRunner: { path, args in
+            cancelledCalls.record(path, args)
+            withUnsafeCurrentTask { $0?.cancel() }
+            return AgentProcessResult(exitCode: 0, stdout: "{}", stderr: "", timedOut: false)
+        })
+    let batchCancelled: Bool = smokeAwait {
+        do {
+            _ = try await batchBackend.run(history: [.init(role: .user, content: "batch")],
+                                           config: AgentConfig(), tools: nil, onEvent: { _ in })
+            return false
+        } catch is CancellationError { return true }
+        catch { return false }
+    }
+    t.check(batchCancelled && cancelledCalls.snapshot().count == 1,
+            "Tika 同一批工具执行中停止后不再启动下一条命令")
 }
 
 t.report()

@@ -45,75 +45,74 @@ import Foundation
 /// 这个策略对 NDJSON、单行紧凑 JSON 也天然兼容——都是 `{...}` 的顶层序列而已。
 public struct TikaJSONFramingDecoder {
 
-    private var buffer: String = ""
-    private var index: String.Index
+    private var buffer: [UInt8] = []
+    private var index = 0
 
     // 状态
     private var depth: Int = 0
     private var inString: Bool = false
     private var escapeNext: Bool = false
     /// 当前对象的起点（在 buffer 里的偏移）。depth 从 0 → 1 时记下来。
-    private var currentStart: String.Index?
+    private var currentStart: Int?
 
-    public init() {
-        self.index = buffer.startIndex
-    }
+    public init() {}
 
     /// 灌入新的 stdout 分片，返回本次可以吐出的完整 JSON 帧（可能 0 到 N 帧）。
     public mutating func feed(_ chunk: String) -> [String] {
-        // 直接 append。为了避免每次都重扫头部，用一个游标 index 跟踪进度；
-        // 完成一帧后把 buffer 头部截掉（O(n) 但 n 是"距离下一个不完整对象起点"，通常很小）。
-        buffer.append(chunk)
+        feed(Data(chunk.utf8))
+    }
+
+    /// JSON 结构标记均为 ASCII。先按字节分帧，完整帧才解 UTF-8，避免多字节字符跨管道读取时损坏。
+    /// 每个字节只检查一次，不能在循环里调用 String.count / index(startIndex, offsetBy:)。
+    public mutating func feed(_ chunk: Data) -> [String] {
+        // #region debug-point D:tika-framing-cost
+        #if DEBUG
+        let debugStart = CFAbsoluteTimeGetCurrent()
+        defer { if ProcessInfo.processInfo.environment["CLIPSLOTS_AGENT_PERF"] == "1", CFAbsoluteTimeGetCurrent() - debugStart > 0.005 { var r = URLRequest(url: URL(string: "http://127.0.0.1:7787/event")!); r.httpMethod = "POST"; r.httpBody = try? JSONSerialization.data(withJSONObject: ["sessionId": "agent-stream-lag", "runId": ProcessInfo.processInfo.environment["CANVAS_DEBUG_RUN"] ?? "pre-fix", "hypothesisId": "D", "msg": "[DEBUG] tika framing cost", "data": ["chunkBytes": chunk.count, "pendingBytes": buffer.count, "milliseconds": (CFAbsoluteTimeGetCurrent() - debugStart) * 1000, "mainThread": Thread.isMainThread]]); URLSession.shared.dataTask(with: r).resume() } }
+        #endif
+        // #endregion
+        buffer.append(contentsOf: chunk)
         var frames: [String] = []
-
-        // append 后 index 可能失效（Swift String 的 index 与底层存储绑定）——
-        // 保险起见用整数偏移续扫。
-        var offset = buffer.distance(from: buffer.startIndex, to: index)
-
-        while offset < buffer.count {
-            let i = buffer.index(buffer.startIndex, offsetBy: offset)
-            let ch = buffer[i]
-
+        while index < buffer.count {
+            let ch = buffer[index]
+            if depth == 0 {
+                if ch == 0x7B { currentStart = index; depth = 1 }
+                index += 1
+                continue
+            }
             if inString {
                 if escapeNext {
                     escapeNext = false
-                } else if ch == "\\" {
+                } else if ch == 0x5C {
                     escapeNext = true
-                } else if ch == "\"" {
+                } else if ch == 0x22 {
                     inString = false
                 }
             } else {
                 switch ch {
-                case "\"":
+                case 0x22:
                     inString = true
-                case "{":
-                    if depth == 0 { currentStart = i }
+                case 0x7B:
                     depth += 1
-                case "}":
-                    if depth > 0 {
-                        depth -= 1
-                        if depth == 0, let start = currentStart {
-                            // 截出这一帧
-                            let endExclusive = buffer.index(after: i)
-                            frames.append(String(buffer[start..<endExclusive]))
-                            currentStart = nil
-                            // 把已消费的头部剪掉，保持 buffer 不无限增长
-                            buffer.removeSubrange(buffer.startIndex..<endExclusive)
-                            offset = 0
-                            continue
-                        }
+                case 0x7D:
+                    depth -= 1
+                    if depth == 0, let start = currentStart {
+                        frames.append(String(decoding: buffer[start...index], as: UTF8.self))
+                        currentStart = nil
                     }
-                    // depth == 0 出现 `}`：说明是垃圾字符，跳过；下一轮如果开头还是垃圾会被再跳
                 default:
                     break
                 }
             }
-
-            offset += 1
+            index += 1
         }
-
-        // 保存续扫游标
-        index = buffer.index(buffer.startIndex, offsetBy: offset)
+        // 一批只压缩一次；保留未闭合帧的字节与游标，不保留帧外垃圾。
+        if let start = currentStart {
+            if start > 0 { buffer.removeFirst(start); index -= start; currentStart = 0 }
+        } else {
+            buffer.removeAll(keepingCapacity: true)
+            index = 0
+        }
         return frames
     }
 

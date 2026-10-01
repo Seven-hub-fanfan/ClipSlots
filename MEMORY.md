@@ -4,7 +4,7 @@
 
 ## 当前版本
 
-- **当前版本：v2.17.7**
+- **当前版本：v2.17.8**
 - 平台：macOS（Swift / SwiftUI，SPM 构建，macOS 13+）
 - 单一版本号事实来源：`Info.plist` 的 `CFBundleShortVersionString`（`AppVersion.current` 动态读取，`AppVersion.fallback` 为编译期兜底）。CLI 版本号见 `Sources/ClipSlotsCLI/main.swift` 的 `CLI_VERSION`。
 
@@ -17,7 +17,17 @@
 
 ## 版本要点（近期）
 
-### v2.17.7 — Tika Agent 双后端（★当前正式发布版）
+### v2.17.8 — Agent 流式输出与长历史性能优化
+
+- Tika JSON 分帧按 UTF-8 字节游标单次扫描，完整帧再解码；避免 `String.count` / 从头偏移索引构成平方成本，也保留任意分块的中文、emoji。
+- Agent 正文/思考文本最多每50ms合批发布，完成或停止立即收尾；历史转写仅随messages更新，不随每个delta重建。
+- 历史按需布局、Markdown及行级Equatable复用；滚动80ms合并，必要时校正lazy估算的末尾位置，上滚查看历史停止跟随。
+- Tika预先分配稳定toolCall ID并关联assistant/tool历史；逐条命令前检查取消，停止后不继续启动同批后续命令。
+- 验证：核心smoke **32645通过/0失败**；界面/会话 **27通过/0失败**，包含生成中输入、停止保留尾片段、历史滚动、草稿与保存恢复。
+- 同负载本地模拟：DeepSeek/Tika原版75秒截止仍未完成，优化后5.24/6.51秒全文一致；最大主线程探针间隔1757/598ms → 100/93ms。不能外推为真实云端推理加速。
+- 版本统一为2.17.8，构建号217800；发布说明见`RELEASE_NOTES_v2.17.8.md`，复现入口`CLIPSLOTS_AGENT_PERF=1 CLIPSLOTS_AGENT_INTERACTION=1 python3 scripts/canvas_regression.py`。
+
+### v2.17.7 — Tika Agent 双后端
 
 - Agent 设置新增 **DeepSeek / Tika Agent** 切换；运行时通知会让编辑页、画布页立即换后端，无需重启。
 - Tika 走本机 `tikacli chat --json --auto-approve`，认证仍由 tikacli 管理；App 不保存 Tika 凭据。

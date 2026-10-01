@@ -24,7 +24,11 @@ func runAgentModelProbe(directory: URL, check: (Bool, String) -> Void) async {
     check(model.transcript.count == 2, "transcript keeps user and assistant roles")
 
     model.send(text: "继续创作", config: AgentConfig(), enabledSkills: [])
-    await settle(0.24)
+    // First content arrives at 220ms, then the UI can batch it for another 50ms.
+    let visibleDeadline = Date().addingTimeInterval(0.4)
+    while model.isRunning && model.streamingContent.isEmpty && Date() < visibleDeadline {
+        await settle(0.01)
+    }
     check(model.isRunning && !model.streamingContent.isEmpty, "streaming answer is visible before completion")
     model.stop()
     await settle(0.3)
@@ -46,6 +50,17 @@ func runAgentModelProbe(directory: URL, check: (Bool, String) -> Void) async {
     await settle()
     check(retry.errorText == nil && retry.messages.last?.content == "重试成功，继续创作。",
           "retry completes without duplicating user message")
+
+    let buffered = AgentChatModel(displayName: "尾片段", backend: AgentBufferedProbeBackend())
+    buffered.send(text: "停止前的最后片段", config: AgentConfig(), enabledSkills: [])
+    await settle(0.015)
+    buffered.stop()
+    check(buffered.messages.contains { $0.content == "尚未刷新🙂" && $0.reasoning == "思考尾片段" },
+          "stop flushes content and reasoning still waiting in the UI batch")
+    buffered.clearHistory()
+    await settle(0.12)
+    check(buffered.messages.isEmpty && buffered.streamingContent.isEmpty && buffered.streamingReasoning.isEmpty,
+          "cancelled stream publication cannot leak into a new conversation")
 
     model.send(text: "新会话", config: AgentConfig(), enabledSkills: [])
     await settle(0.85)
@@ -82,6 +97,16 @@ func runAgentModelProbe(directory: URL, check: (Bool, String) -> Void) async {
         check(editor.string == "外部建议填入", "suggestion replaces draft in focused editor")
     } else { check(false, "draft editor mounts with restored text") }
     window.close()
+}
+
+private final class AgentBufferedProbeBackend: AgentBackend, @unchecked Sendable {
+    func run(history: [AgentMessage], config: AgentConfig, tools: AgentToolExecuting?,
+             onEvent: @escaping @Sendable (AgentRunEvent) async -> Void) async throws -> [AgentMessage] {
+        await onEvent(.contentDelta("尚未刷新🙂"))
+        await onEvent(.reasoningDelta("思考尾片段"))
+        try await Task.sleep(for: .seconds(1))
+        return []
+    }
 }
 
 private struct AgentPanelProbeTransport: AgentTransport {

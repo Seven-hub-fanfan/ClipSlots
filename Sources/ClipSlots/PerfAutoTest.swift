@@ -86,6 +86,13 @@ final class PerfAutoTest {
 
     private func buildAndRun(store: SlotStoreObservable) {
         #if DEBUG
+        if ProcessInfo.processInfo.environment["CLIPSLOTS_AGENT_PERF"] == "1",
+           Bundle.main.bundleIdentifier == "com.clipslots.app.canvas-v2174-test",
+           let folder = ProcessInfo.processInfo.environment["CLIPSLOTS_FIXTURE_DIR"],
+           ProcessInfo.processInfo.environment["CLIPSLOTS_DATA_DIR"]?.hasPrefix("/tmp/clipslots-v2174-") == true {
+            Task { await runAgentPerformanceRegression(directory: URL(fileURLWithPath: folder)) }
+            return
+        }
         if ProcessInfo.processInfo.environment["CLIPSLOTS_CANVAS_REGRESSION"] == "1" {
             UserDefaults.standard.set(false, forKey: AgentPreferences.canvasSidebarVisibleKey)
             UserDefaults.standard.set(false, forKey: AgentPreferences.editSidebarVisibleKey)

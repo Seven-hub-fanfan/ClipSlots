@@ -110,6 +110,13 @@ struct AgentToolActivity: Identifiable, Equatable {
 
 @MainActor
 final class AgentChatModel: ObservableObject {
+    // #region debug-point A-C:agent-work-counts
+    #if DEBUG
+    var debugReceivedEvents = 0
+    var debugTranscriptReads = 0
+    var debugPersistenceMS: [Double] = []
+    #endif
+    // #endregion
     struct SavedConversation: Codable, Identifiable {
         var id: UUID
         var messages: [AgentMessage]
@@ -134,7 +141,10 @@ final class AgentChatModel: ObservableObject {
     /// 完整线上下文（含 role=tool 的消息）。UI 渲染时再折叠成气泡 + 工具行。
     /// 刻意保存完整历史而不是"只留展示用的部分"：工具结果是模型下一轮的依据，
     /// 丢了它模型就会重复调用同一个工具。
-    @Published private(set) var messages: [AgentMessage] = [] { didSet { schedulePersistence() } }
+    @Published private(set) var messages: [AgentMessage] = [] {
+        didSet { cachedTranscript = buildTranscript(); schedulePersistence() }
+    }
+    private var cachedTranscript: [TranscriptItem] = []
     @Published private(set) var streamingContent = ""
     @Published private(set) var streamingReasoning = ""
     @Published private(set) var liveActivities: [AgentToolActivity] = []
@@ -154,6 +164,9 @@ final class AgentChatModel: ObservableObject {
     private let registry: AgentToolRegistry
     private var runTask: Task<Void, Never>?
     private var currentRunID: UUID?
+    private var pendingContent = ""
+    private var pendingReasoning = ""
+    private var streamPublishTask: Task<Void, Never>?
 
     init(displayName: String,
          service: AgentService? = nil,
@@ -205,6 +218,12 @@ final class AgentChatModel: ObservableObject {
 
     @discardableResult
     func flushSession() -> Bool {
+        // #region debug-point C:session-save-cost
+        #if DEBUG
+        let debugStart = CFAbsoluteTimeGetCurrent()
+        defer { if ProcessInfo.processInfo.environment["CLIPSLOTS_AGENT_PERF"] == "1" { debugPersistenceMS.append((CFAbsoluteTimeGetCurrent() - debugStart) * 1000) } }
+        #endif
+        // #endregion
         persistenceTask?.cancel()
         persistenceTask = nil
         guard let persistenceURL else { return true }
@@ -294,6 +313,7 @@ final class AgentChatModel: ObservableObject {
     }
 
     private func beginRun(config: AgentConfig) {
+        clearPendingStream()
         isRunning = true
         streamingContent = ""
         streamingReasoning = ""
@@ -346,6 +366,7 @@ final class AgentChatModel: ObservableObject {
     func clearHistory() {
         currentRunID = nil
         stop()
+        clearPendingStream()
         archiveCurrent()
         restoring = true
         conversationId = UUID()
@@ -366,12 +387,20 @@ final class AgentChatModel: ObservableObject {
     private func apply(_ event: AgentRunEvent, runID: UUID) async {
         await MainActor.run {
             guard self.currentRunID == runID else { return }
+            // #region debug-point A:event-count
+            #if DEBUG
+            if ProcessInfo.processInfo.environment["CLIPSLOTS_AGENT_PERF"] == "1" { debugReceivedEvents += 1 }
+            #endif
+            // #endregion
             switch event {
             case .reasoningDelta(let text):
-                streamingReasoning += text
+                pendingReasoning.append(text)
+                scheduleStreamPublish(runID: runID)
             case .contentDelta(let text):
-                streamingContent += text
+                pendingContent.append(text)
+                scheduleStreamPublish(runID: runID)
             case .assistantCompleted(let message):
+                clearPendingStream()
                 // 历史完全由事件构建（service 的返回值被丢弃），保证只有一个真相来源。
                 messages.append(message)
                 streamingContent = ""
@@ -402,6 +431,7 @@ final class AgentChatModel: ObservableObject {
     }
 
     private func completeRun() {
+        publishPendingStream()
         settleUnfinishedTools()
         isRunning = false
         runTask = nil
@@ -411,6 +441,7 @@ final class AgentChatModel: ObservableObject {
     }
 
     private func failRun(_ error: AgentError) {
+        publishPendingStream()
         settleUnfinishedTools()
         isRunning = false
         runTask = nil
@@ -430,6 +461,30 @@ final class AgentChatModel: ObservableObject {
             if error == .missingAPIKey { needsConfiguration = true }
         }
         flushSession()
+    }
+
+    /// 输入事件保持顺序，UI最多每50ms发布一次；完成/停止时立即收齐最后一批。
+    private func scheduleStreamPublish(runID: UUID) {
+        guard streamPublishTask == nil, !pendingContent.isEmpty || !pendingReasoning.isEmpty else { return }
+        streamPublishTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .milliseconds(50))
+            guard !Task.isCancelled, let self, self.currentRunID == runID else { return }
+            self.publishPendingStream()
+        }
+    }
+
+    private func publishPendingStream() {
+        streamPublishTask?.cancel()
+        streamPublishTask = nil
+        if !pendingContent.isEmpty { streamingContent.append(pendingContent); pendingContent = "" }
+        if !pendingReasoning.isEmpty { streamingReasoning.append(pendingReasoning); pendingReasoning = "" }
+    }
+
+    private func clearPendingStream() {
+        streamPublishTask?.cancel()
+        streamPublishTask = nil
+        pendingContent = ""
+        pendingReasoning = ""
     }
 
     /// 中断只说明没有收到结果，不能声称有副作用的工具已撤销或未执行。
@@ -469,6 +524,15 @@ final class AgentChatModel: ObservableObject {
     }
 
     var transcript: [TranscriptItem] {
+        // #region debug-point A:transcript-count
+        #if DEBUG
+        if ProcessInfo.processInfo.environment["CLIPSLOTS_AGENT_PERF"] == "1" { debugTranscriptReads += 1 }
+        #endif
+        // #endregion
+        return cachedTranscript
+    }
+
+    private func buildTranscript() -> [TranscriptItem] {
         var items: [TranscriptItem] = []
         // 先把 tool 结果按 call id 索引，供 assistant 轮次配对。
         var results: [String: AgentMessage] = [:]
