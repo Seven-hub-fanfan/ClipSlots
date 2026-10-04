@@ -19,6 +19,7 @@ import ClipSlotsKit
 
 struct AgentConfigView: View {
     @Environment(\.dismiss) private var dismiss
+    var isWorkspace = false
 
     // DeepSeek 相关
     @AppStorage(AgentPreferences.modelKey) private var model = AgentConfig.defaultModel
@@ -28,7 +29,8 @@ struct AgentConfigView: View {
     @AppStorage(AgentPreferences.endpointKey) private var endpoint = AgentConfig.defaultEndpoint.absoluteString
 
     // v2.17.7：后端选择
-    @AppStorage(TikaBackendPreferences.backendKindKey) private var backendKindRaw = AgentBackendKind.deepseek.rawValue
+    @AppStorage(TikaBackendPreferences.backendKindKey) private var sidebarBackendRaw = AgentBackendKind.deepseek.rawValue
+    @AppStorage(CodexPreferences.workspaceBackendKey) private var workspaceBackendRaw = AgentBackendKind.codex.rawValue
     @AppStorage(TikaBackendPreferences.tikaAgentIdKey) private var tikaAgentId = ""
     @AppStorage(TikaBackendPreferences.tikaCLIPathKey) private var tikaCLIPath = "tikacli"
     @AppStorage(TikaBackendPreferences.tikaSystemPromptKey) private var tikaSystemPrompt = ""
@@ -38,8 +40,17 @@ struct AgentConfigView: View {
     @State private var storedKeySuffix: String?
     @State private var errorText: String?
     @State private var savedHint: String?
+    @State private var isKeyBusy = false
+    @State private var keyReadFailed = false
 
     private let keychain = AgentKeychain.shared
+    private var backendKindRaw: String {
+        get { isWorkspace ? workspaceBackendRaw : sidebarBackendRaw }
+        nonmutating set {
+            if isWorkspace { workspaceBackendRaw = newValue }
+            else { sidebarBackendRaw = newValue }
+        }
+    }
 
     private var currentBackend: AgentBackendKind {
         AgentBackendKind(rawValue: backendKindRaw) ?? .deepseek
@@ -61,6 +72,8 @@ struct AgentConfigView: View {
                         thinkingSection
                         systemPromptSection
                         endpointSection
+                    } else if currentBackend == .codex {
+                        CodexAccountView()
                     } else {
                         tikaSection
                         tikaSystemPromptSection
@@ -74,7 +87,9 @@ struct AgentConfigView: View {
         }
         .frame(width: 460, height: 640)
         .background(AppTheme.windowBackground)
-        .onAppear(perform: reloadKeyState)
+        .task(id: backendKindRaw) {
+            if currentBackend == .deepseek { await reloadKeyState() }
+        }
         .onChange(of: backendKindRaw) { _ in
             AgentBackendCoordinator.broadcastChange()
         }
@@ -110,8 +125,8 @@ struct AgentConfigView: View {
 
     // v2.17.7 新增
     private var backendSection: some View {
-        section("AI 后端", note: "DeepSeek 走 HTTPS + API Key；Tika 走本机 tikacli 子进程（无需 API Key，先 `tikacli auth login`）。切换后立刻生效。") {
-            Picker("", selection: $backendKindRaw) {
+        section("AI 后端", note: isWorkspace ? "独立 Agent 页的设置，切换后下一条消息生效。" : "编辑和画布助手的设置，切换后下一条消息生效。") {
+            Picker("", selection: Binding(get: { backendKindRaw }, set: { backendKindRaw = $0 })) {
                 ForEach(AgentBackendKind.allCases, id: \.rawValue) { kind in
                     Text(kind.displayName).tag(kind.rawValue)
                 }
@@ -176,7 +191,19 @@ struct AgentConfigView: View {
             }
 
             HStack(spacing: 10) {
-                if let suffix = storedKeySuffix {
+                if isKeyBusy {
+                    ProgressView().controlSize(.small)
+                    Text("正在访问钥匙串…").font(.system(size: 11))
+                } else if keyReadFailed {
+                    Label("尚未获得钥匙串授权", systemImage: "lock")
+                        .font(.system(size: 11))
+                        .foregroundColor(.orange)
+                    Button("重新授权") {
+                        Task { await reloadKeyState(retryAfterFailure: true) }
+                    }
+                    .buttonStyle(.link)
+                    .controlSize(.small)
+                } else if let suffix = storedKeySuffix {
                     Label("已保存 · 末 4 位 \(suffix)", systemImage: "checkmark.seal.fill")
                         .font(.system(size: 11))
                         .foregroundColor(.green)
@@ -200,6 +227,7 @@ struct AgentConfigView: View {
                 Text(errorText).font(.system(size: 11)).foregroundColor(.red)
             }
         }
+        .disabled(isKeyBusy)
     }
 
     private var modelSection: some View {
@@ -274,7 +302,7 @@ struct AgentConfigView: View {
         HStack(spacing: 6) {
             Image(systemName: "lock.shield")
                 .font(.system(size: 10))
-            Text(currentBackend == .tika
+            Text(currentBackend == .codex ? "Codex 使用独立的官方登录；不需要填写 DeepSeek API Key。" : currentBackend == .tika
                  ? "Tika 走本机 tikacli，认证与云端调度由 tikacli 自己处理；本 App 不持有任何 Tika 凭据。"
                  : "API Key 仅保存在本机钥匙串；ad-hoc 签名下版本更新后首次读取会弹系统授权，点「始终允许」即可。")
                 .font(.system(size: 10))
@@ -304,43 +332,56 @@ struct AgentConfigView: View {
 
     // MARK: Keychain 动作
 
-    private func reloadKeyState() {
-        // v2.17.6：只读一次钥匙串。旧写法在 else 分支又调了一次 readAPIKey()，
-        // 每次刷新面板等于 2 次读取——在 ad-hoc 签名 + 授权 prompt 场景下会翻倍
-        // 弹框机率。现在 AgentKeychain 有进程内缓存兑底也不该重复读。
-        let key = keychain.readAPIKey()
-        if let k = key, k.count >= 4 {
-            storedKeySuffix = String(k.suffix(4))
-        } else if key != nil {
-            storedKeySuffix = "••••"
-        } else {
-            storedKeySuffix = nil
-        }
+    @MainActor
+    private func reloadKeyState(retryAfterFailure: Bool = false) async {
+        guard !isKeyBusy else { return }
+        isKeyBusy = true
+        defer { isKeyBusy = false }
+        applyKeyState(await AgentKeychainProbe.keyState(retryAfterFailure: retryAfterFailure))
+    }
+
+    private func applyKeyState(_ state: AgentKeychainState) {
+        storedKeySuffix = state.suffix
+        keyReadFailed = state.error != nil
+        errorText = state.error?.localizedDescription
     }
 
     private func saveKey() {
         let trimmed = keyDraft.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return }
-        do {
+        guard !trimmed.isEmpty, !isKeyBusy else { return }
+        changeKey(hint: "已保存到钥匙串", clearDraft: true) {
             try keychain.writeAPIKey(trimmed)
-            keyDraft = ""
-            errorText = nil
-            savedHint = "已保存到钥匙串"
-            reloadKeyState()
-        } catch {
-            savedHint = nil
-            errorText = error.localizedDescription
         }
     }
 
     private func deleteKey() {
-        do {
+        guard !isKeyBusy else { return }
+        changeKey(hint: "已从钥匙串删除", clearDraft: false) {
             try keychain.deleteAPIKey()
-            savedHint = "已从钥匙串删除"
-            errorText = nil
-            reloadKeyState()
-        } catch {
-            errorText = error.localizedDescription
+        }
+    }
+
+    private func changeKey(hint: String, clearDraft: Bool, operation: @escaping () throws -> Void) {
+        isKeyBusy = true
+        savedHint = nil
+        Task { @MainActor in
+            let result: Result<AgentKeychainState, Error> = await withCheckedContinuation { continuation in
+                DispatchQueue.global(qos: .userInitiated).async {
+                    continuation.resume(returning: Result {
+                        try operation()
+                        return keychain.keyState()
+                    })
+                }
+            }
+            isKeyBusy = false
+            switch result {
+            case .success(let state):
+                if clearDraft { keyDraft = "" }
+                applyKeyState(state)
+                savedHint = hint
+            case .failure(let error):
+                errorText = error.localizedDescription
+            }
         }
     }
 }

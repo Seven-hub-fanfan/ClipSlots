@@ -2,6 +2,20 @@ import Foundation
 import AppKit
 import ClipSlotsKit
 
+// Handle stdio before initializing the GUI-compatible data stores.
+if CommandLine.arguments.dropFirst().first == "agent-mcp" {
+    let exe = (Bundle.main.executableURL ?? URL(fileURLWithPath: CommandLine.arguments[0])).resolvingSymlinksInPath()
+    let slugs = CommandLine.arguments.dropFirst(2).first.flatMap { try? JSONValue.decode(jsonText: $0) }?
+        .arrayValue?.compactMap(\.stringValue) ?? []
+    Task.detached {
+        await AgentMCPServer.serve(cliPath: exe.path,
+            bundlePath: exe.deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent().path,
+            skillSlugs: Set(slugs))
+        exit(0)
+    }
+    dispatchMain()
+}
+
 // clipslots — standalone command-line interface for the ClipSlots data layer.
 //
 // This binary reuses the SAME on-disk storage as the ClipSlots GUI app by
@@ -42,7 +56,7 @@ let CLI_VERSION: String = {
        !v.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
         return v
     }
-    return "2.17.8"
+    return "2.17.9"
 }()
 let DEFAULT_GROUP = "default"
 let DEFAULT_PAGE = "default_page"

@@ -104,11 +104,6 @@ struct CanvasWorkspaceView: View {
     /// 住在 View 而不是 `CanvasStore`：它是纯粹的**观看态**，既不进撤销栈也不该被持久化
     /// （下次进画布还停在一张全屏图上是莫名其妙的）。
     @State private var previewTarget: CanvasPreviewTarget? = nil
-    /// 「删了会断开连接」的确认弹窗（★ v2.11.8 三轮）。非 nil = 正在等用户拍板。
-    ///
-    /// 存一份**待删 id 集合**而不是只存个 Bool：弹窗弹出后用户可能改动选中集合（点了别处），
-    /// 确认时若再去读 `canvas.selectedNodeIds` 就会删掉与提示文案不符的那批节点。
-    @State private var pendingDeletion: PendingDeletion? = nil
     /// 正在拖的那条连线（v2.12.0）。nil = 没在拖。
     ///
     /// 全程只活在 View 的 `@State`：拖线是每帧更新光标的高频操作，塞进 `CanvasStore` 的
@@ -312,6 +307,14 @@ struct CanvasWorkspaceView: View {
             }
             .onChange(of: proxy.size) { newSize in viewSize = newSize }
             .onChange(of: canvas.slotRevision) { _ in synchronizeMediaLayouts() }
+            .onChange(of: canvas.agentFocusRequest) { request in
+                if let request, let node = canvas.nodes.first(where: { $0.id == request.nodeID }) {
+                    centerViewport(on: node)
+                }
+            }
+            .onChange(of: canvas.agentHistoryError) { error in
+                if let error { store.transientUI.showToast(error) }
+            }
             .onChange(of: canvas.activeProjectId) { _ in synchronizeMediaLayouts() }
             .task(id: canvas.activeProjectId) {
                 while !Task.isCancelled {
@@ -333,27 +336,7 @@ struct CanvasWorkspaceView: View {
                 canvas.slotTitleProvider = nil
                 canvas.flushSave()
             }
-            // ★ 三轮：删除节点会断开下游连接时的确认（用户要求「弹 Alert，可强制删除或取消」）。
-            //
-            // 用 `.alert(item:)` 而不是自绘浮层：这是一个真正需要打断用户的破坏性确认，系统 Alert
-            // 自带 Esc/回车键盘语义与"点外面不会误关"的模态行为，自绘一遍等于重新实现一遍还容易漏。
-            .alert(item: $pendingDeletion) { pending in
-                Alert(title: Text(CanvasNodeDeletion.confirmTitle),
-                      message: Text(CanvasNodeDeletion.confirmMessage(referrerCount: pending.referrerCount)),
-                      primaryButton: .destructive(Text(CanvasNodeDeletion.confirmPrimary)) {
-                          performDelete(ids: pending.ids)
-                      },
-                      secondaryButton: .cancel(Text(CanvasNodeDeletion.confirmCancel)))
-            }
         }
-    }
-
-    /// 等待用户确认的删除请求。
-    struct PendingDeletion: Identifiable {
-        let id = UUID()
-        let ids: Set<String>
-        /// 会因此断链的下游节点数量。只用于文案，判定另存在 Kit。
-        let referrerCount: Int
     }
 
     /// 一次进行中的拖线（v2.12.0）。
@@ -678,14 +661,16 @@ struct CanvasWorkspaceView: View {
 
     @ViewBuilder
     private func nodeContextMenu(_ node: CanvasNode) -> some View {
-        Button("编辑提示词") { beginEdit(node) }
+        Button(node.isMediaSource ? "上传 / 替换素材" : "编辑提示词") { beginEdit(node) }
         Button("节点属性") {
             canvas.select(id: node.id, additive: false)
             showInspector = true
         }
-        Button("管理入参文件") { openInputFiles(node) }
+        if !node.isMediaSource {
+            Button("管理入参文件") { openInputFiles(node) }
+        }
         Divider()
-        if node.kind.producesAsset {
+        if node.canGenerate {
             if node.needsGenerationRecovery {
                 Button("继续查询已提交任务") { recoverGeneration(node) }
             }
@@ -1296,7 +1281,7 @@ struct CanvasWorkspaceView: View {
                                      parentNodeIds: parentNodeIds,
                                      avoidOverlap: true)
         if beginEditing { editingNodeId = result.node.id }
-        if !quiet { store.transientUI.showToast("已新建\(kind.displayName)节点") }
+        if !quiet { store.transientUI.showToast("已新建\(result.node.displayName)节点") }
         return result.node
     }
 
@@ -1369,22 +1354,23 @@ struct CanvasWorkspaceView: View {
             store.transientUI.showToast("已粘贴文本节点")
 
         case .imageNodeWithFiles(let urls), .videoNodeWithFiles(let urls):
-            let kind: CanvasNodeKind = { if case .videoNodeWithFiles = intent { return .video }; return .image }()
-            guard let node = createNode(kind: kind, at: center, parentNodeId: nil,
-                                        beginEditing: false, quiet: true) else { return true }
-            let atts = urls.map {
-                SlotContent.SlotAttachment(name: $0.lastPathComponent,
-                                           type: CanvasPasteClassifier.isImageFile($0) ? .image : .file,
-                                           path: $0.path)
+            for (index, url) in urls.enumerated() {
+                let kind: CanvasNodeKind = CanvasAttachmentKind.from(fileName: url.lastPathComponent) == .video ? .video : .image
+                let point = CGPoint(x: center.x + CGFloat(index) * 48, y: center.y + CGFloat(index) * 48)
+                guard let node = createNode(kind: kind, at: point, parentNodeId: nil,
+                                            beginEditing: false, quiet: true) else { return true }
+                let atts = [SlotContent.SlotAttachment(name: url.lastPathComponent,
+                                                       type: kind == .image ? .image : .file,
+                                                       path: url.path)]
+                appendAttachments(atts, to: node)
+                synchronizeMediaLayouts()
+                // #region debug-point A-B:paste-media
+                #if DEBUG
+                if ProcessInfo.processInfo.environment["CLIPSLOTS_MEDIA_THEME_PROBE"] == "1" { var r = URLRequest(url: URL(string: "http://127.0.0.1:7782/event")!); r.httpMethod = "POST"; r.httpBody = try? JSONSerialization.data(withJSONObject: ["sessionId": "canvas-media-theme", "runId": ProcessInfo.processInfo.environment["CANVAS_DEBUG_RUN"] ?? "pre-fix", "hypothesisId": "A-B", "msg": "[DEBUG] pasted media", "data": ["kind": node.kind.rawValue, "frame": NSStringFromRect(canvas.node(id: node.id)!.frame), "media": atts.first.map { NSStringFromSize(CanvasMediaProbe.facts(for: $0).pixelSize ?? .zero) } ?? "", "appearance": inputRouter.anchorView?.window?.effectiveAppearance.name.rawValue ?? ""]]); URLSession.shared.dataTask(with: r).resume() }
+                #endif
+                // #endregion
             }
-            appendAttachments(atts, to: node)
-            synchronizeMediaLayouts()
-            // #region debug-point A-B:paste-media
-            #if DEBUG
-            if ProcessInfo.processInfo.environment["CLIPSLOTS_MEDIA_THEME_PROBE"] == "1" { var r = URLRequest(url: URL(string: "http://127.0.0.1:7782/event")!); r.httpMethod = "POST"; r.httpBody = try? JSONSerialization.data(withJSONObject: ["sessionId": "canvas-media-theme", "runId": ProcessInfo.processInfo.environment["CANVAS_DEBUG_RUN"] ?? "pre-fix", "hypothesisId": "A-B", "msg": "[DEBUG] pasted media", "data": ["kind": node.kind.rawValue, "frame": NSStringFromRect(canvas.node(id: node.id)!.frame), "media": atts.first.map { NSStringFromSize(CanvasMediaProbe.facts(for: $0).pixelSize ?? .zero) } ?? "", "appearance": inputRouter.anchorView?.window?.effectiveAppearance.name.rawValue ?? ""]]); URLSession.shared.dataTask(with: r).resume() }
-            #endif
-            // #endregion
-            store.transientUI.showToast(urls.count == 1 ? "已粘贴文件为入参" : "已粘贴 \(urls.count) 个文件为入参")
+            store.transientUI.showToast("已粘贴 \(urls.count) 个素材节点")
 
         case .imageNodeWithBitmap:
             // 位图没有源文件，必须把字节存进附件。统一转 PNG：剪贴板给的常是 TIFF，
@@ -1404,7 +1390,7 @@ struct CanvasWorkspaceView: View {
                                                           data: png)],
                               to: node)
             synchronizeMediaLayouts()
-            store.transientUI.showToast("已粘贴图片为入参")
+            store.transientUI.showToast("已粘贴图片节点")
         }
         return true
     }
@@ -1417,9 +1403,21 @@ struct CanvasWorkspaceView: View {
 
     /// 面板与扇形卡片共用事务：保全删除字节 → 写入成功 → 记录一次历史。
     @discardableResult
-    private func replaceAttachments(_ list: [SlotContent.SlotAttachment], for node: CanvasNode) -> Bool {
-        guard canvas.node(id: node.id)?.createdAt == node.createdAt else { return false }
+    private func replaceAttachments(_ list: [SlotContent.SlotAttachment], for node: CanvasNode,
+                                    addingInputs: Bool = true) -> Bool {
+        guard let live = canvas.node(id: node.id), live.createdAt == node.createdAt,
+              live.groupId == node.groupId, live.slot == node.slot else { return false }
         let before = store.canvasSlotAttachments(groupId: node.groupId, slot: node.slot)
+        if live.isMediaSource {
+            // 旧文档里的多附件原样保留；本次写入只能是删除旧项或替换为一份同类素材。
+            let removingOnly = list.allSatisfy { before.contains($0) } && list.count < before.count
+            guard removingOnly || list.isEmpty || (list.count == 1 && list.allSatisfy {
+                if live.kind == .video { return $0.canvasIsVideoLike }
+                if $0.canvasIsImageLike { return true }
+                // 保留既有 Cmd+V 图片链接功能；链接仍只存引用，不在此处下载。
+                return $0.type == .url && $0.url.flatMap { URL(string: $0) }.map(CanvasPasteClassifier.isImageFile) == true
+            }) else { return false }
+        }
         guard before != list else { return true }
         let token = UUID().uuidString
         let remaining = Set(list.map(\.id))
@@ -1439,7 +1437,14 @@ struct CanvasWorkspaceView: View {
         }
         let saved = store.canvasSlotAttachments(groupId: node.groupId, slot: node.slot)
         canvas.recordSlotAttachmentEdit(nodeId: node.id, edit: .init(
-            groupId: node.groupId, slot: node.slot, before: before, after: saved, stashToken: token))
+            groupId: node.groupId, slot: node.slot, before: before, after: saved, stashToken: token),
+            addingInputs: addingInputs && !live.isMediaSource)
+        let updated = canvas.node(id: node.id) ?? live
+        // #region debug-point B-C:input-upload-write
+        #if DEBUG
+        if ProcessInfo.processInfo.environment["CLIPSLOTS_INPUT_UPLOAD_PROBE"] == "1" { var r = URLRequest(url: URL(string: "http://127.0.0.1:7791/event")!); r.httpMethod = "POST"; r.httpBody = try? JSONSerialization.data(withJSONObject: ["sessionId": "canvas-input-upload", "runId": ProcessInfo.processInfo.environment["CANVAS_DEBUG_RUN"] ?? "pre-fix", "hypothesisId": "B-C", "msg": "[DEBUG] reference attachment write", "data": ["kind": node.kind.rawValue, "before": before.count, "after": saved.count, "outputCount": updated.outputAttachmentIds.count, "inputCount": inputImagePaths(for: updated).count, "preview": CanvasMediaPick.primary(node: updated, attachments: saved)?.name ?? "none"]]); URLSession.shared.dataTask(with: r).resume() }
+        #endif
+        // #endregion
         canvas.noteSlotDataChanged()
         return true
     }
@@ -1453,7 +1458,7 @@ struct CanvasWorkspaceView: View {
         let before = store.canvasSlotAttachments(groupId: node.groupId, slot: node.slot)
         var list = before
         list.append(contentsOf: new)
-        guard replaceAttachments(list, for: node) else {
+        guard replaceAttachments(list, for: node, addingInputs: false) else {
             store.transientUI.showToast("存储繁忙，入参未写入")
             return
         }
@@ -1821,6 +1826,11 @@ struct CanvasWorkspaceView: View {
     }
 
     func beginEdit(_ node: CanvasNode) {
+        if node.isMediaSource {
+            canvas.select(id: node.id, additive: false)
+            addInputFiles(node)
+            return
+        }
         if composingNodeId != nil || (editingNodeId != nil && editingNodeId != node.id) {
             endInlineEditing()
         }
@@ -1918,29 +1928,22 @@ struct CanvasWorkspaceView: View {
         store.transientUI.showToast("已删除项目「\(deleted.name)」（内容可在回收站恢复）")
     }
 
-    // MARK: - 删除节点（带断链确认）
+    // MARK: - 删除节点
 
-    /// 删除节点的**唯一入口**。有下游引用时先弹确认，没有就直接删。
-    ///
-    /// 三个调用点（Delete 键 / 右键"删除节点" / 右键"删除选中的 N 个"）全部收敛到这里 ——
-    /// 之前它们各自调 `canvas.removeNodes` / `removeSelected`，任何一条漏加确认都等于
-    /// 用户从那条路径删掉引用节点时静默断链，而断链事后无法还原（见 `CanvasNode.parentNodeId`）。
+    /// 键盘与右键菜单共用直接删除入口；节点、连线和私有内容仍可共同撤销。
     private func requestDelete(ids: Set<String>) {
+        // #region debug-point C:delete-request
+        #if DEBUG
+        if ProcessInfo.processInfo.environment["CLIPSLOTS_REFERENCE_DELETE_PROBE"] == "1" { var r = URLRequest(url: URL(string: "http://127.0.0.1:7792/event")!); r.httpMethod = "POST"; r.httpBody = try? JSONSerialization.data(withJSONObject: ["sessionId": "canvas-reference-delete", "runId": ProcessInfo.processInfo.environment["CANVAS_DEBUG_RUN"] ?? "pre-fix", "hypothesisId": "C", "msg": "[DEBUG] delete request", "data": ["targets": ids.sorted(), "referrers": CanvasNodeDeletion.brokenLinks(deleting: ids, nodes: canvas.nodes, edges: canvas.edges).referrers.count]]); URLSession.shared.dataTask(with: r).resume() }
+        #endif
+        // #endregion
         let targets = ids.filter { id in canvas.nodes.contains { $0.id == id } }
         guard !targets.isEmpty else { return }
-        let links = CanvasNodeDeletion.brokenLinks(deleting: targets,
-                                                  nodes: canvas.nodes,
-                                                  edges: canvas.edges)
-        guard links.referrers.isEmpty else {
-            pendingDeletion = PendingDeletion(ids: targets, referrerCount: links.referrers.count)
-            return
-        }
         performDelete(ids: targets)
     }
 
-    /// 真正执行删除（确认之后，或本来就无需确认）。
+    /// 删除及附件暂存属于同一次操作，Cmd+Z 原样恢复。
     private func performDelete(ids: Set<String>) {
-        pendingDeletion = nil
         let count = canvas.nodes.filter { ids.contains($0.id) }.count
         guard count > 0 else { return }
         canvas.removeNodes(ids: ids)
@@ -1966,6 +1969,62 @@ struct CanvasWorkspaceView: View {
                                              documentLoadFailed: canvas.documentLoadFailed)
     }
 
+    /// 生成面板的 + 直接选文件；记录发起时的项目及节点身份，避免迟到的选择写到别处。
+    func addInputFiles(_ node: CanvasNode) {
+        guard let window = inputRouter.anchorView?.window, window.attachedSheet == nil else { return }
+        endInlineEditing()
+        AttachmentManagerPanelController.shared.close()
+        let project = canvas.activeProjectId
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = !node.isMediaSource
+        panel.prompt = node.isMediaSource ? "使用素材" : "添加"
+        panel.message = node.isMediaSource
+            ? (node.kind == .video ? "选择一个视频" : "选择一张图片")
+            : "选择参考文件（可多选）"
+        if node.isMediaSource {
+            panel.allowedContentTypes = node.kind == .video ? [.movie] : [.image]
+        }
+        // #region debug-point A:input-picker
+        #if DEBUG
+        if ProcessInfo.processInfo.environment["CLIPSLOTS_INPUT_UPLOAD_PROBE"] == "1" { var r = URLRequest(url: URL(string: "http://127.0.0.1:7791/event")!); r.httpMethod = "POST"; r.httpBody = try? JSONSerialization.data(withJSONObject: ["sessionId": "canvas-input-upload", "runId": ProcessInfo.processInfo.environment["CANVAS_DEBUG_RUN"] ?? "post-fix", "hypothesisId": "A", "msg": "[DEBUG] direct input picker opened", "data": ["kind": node.kind.rawValue]]); URLSession.shared.dataTask(with: r).resume() }
+        #endif
+        // #endregion
+        panel.beginSheetModal(for: window) { response in
+            guard response == .OK else { return }
+            importInputFiles(panel.urls, to: node, projectId: project)
+        }
+    }
+
+    @discardableResult
+    private func importInputFiles(_ urls: [URL], to node: CanvasNode, projectId: String) -> Bool {
+        guard canvas.activeProjectId == projectId,
+              let live = canvas.node(id: node.id), live.createdAt == node.createdAt else { return false }
+        let files = urls.filter { $0.isFileURL && (try? $0.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile) == true }
+        guard !files.isEmpty else { return false }
+        if live.isMediaSource {
+            guard urls.count == 1, files.count == 1,
+                  CanvasAttachmentKind.from(fileName: files[0].lastPathComponent) == (live.kind == .video ? .video : .image) else {
+                store.transientUI.showToast(live.kind == .video ? "视频节点只能上传一个视频" : "图片节点只能上传一张图片")
+                return false
+            }
+        }
+        let accesses = files.filter { $0.startAccessingSecurityScopedResource() }
+        defer { accesses.forEach { $0.stopAccessingSecurityScopedResource() } }
+        let added = files.map {
+            SlotContent.SlotAttachment(name: $0.lastPathComponent,
+                type: CanvasAttachmentKind.from(fileName: $0.lastPathComponent) == .image ? .image : .file,
+                path: $0.path)
+        }
+        let current = store.canvasSlotAttachments(groupId: live.groupId, slot: live.slot)
+        guard replaceAttachments(live.isMediaSource ? added : current + added, for: live) else {
+            store.transientUI.showToast("文件未能写入，请重试")
+            return false
+        }
+        synchronizeMediaLayouts()
+        return true
+    }
+
     /// 打开「入参文件」管理弹层。
     ///
     /// 弹层刻意**不挂在卡片上**：它要增删改附件，得拿到 `SlotStoreObservable`，而卡片视图刻意
@@ -1973,13 +2032,23 @@ struct CanvasWorkspaceView: View {
     /// 在 25% 缩放下只有几个像素高，以它为锚点的 popover 箭头会指到离谱的位置。所以统一由本视图
     /// 在**未缩放的根层**上，按节点的屏幕坐标放一个 1×1 锚点来呈现。
     func openInputFiles(_ node: CanvasNode) {
+        if node.isMediaSource { addInputFiles(node); return }
         guard let anchor = inputRouter.anchorView else { return }
+        let project = canvas.activeProjectId
+        // #region debug-point A:input-manager
+        #if DEBUG
+        if ProcessInfo.processInfo.environment["CLIPSLOTS_INPUT_UPLOAD_PROBE"] == "1" { var r = URLRequest(url: URL(string: "http://127.0.0.1:7791/event")!); r.httpMethod = "POST"; r.httpBody = try? JSONSerialization.data(withJSONObject: ["sessionId": "canvas-input-upload", "runId": ProcessInfo.processInfo.environment["CANVAS_DEBUG_RUN"] ?? "pre-fix", "hypothesisId": "A", "msg": "[DEBUG] input manager opened", "data": ["kind": node.kind.rawValue]]); URLSession.shared.dataTask(with: r).resume() }
+        #endif
+        // #endregion
         canvas.select(id: node.id, additive: false)
         AttachmentManagerPanelController.shared.showCanvas(
             anchor: anchor, point: inputFilesAnchor(node),
             content: AttachmentManagerPopover(slot: node.slot, store: store, groupId: node.groupId,
                                                isCanvasContext: true,
-                                               onWrite: { replaceAttachments($0, for: node) }),
+                                               onWrite: {
+                                                   guard canvas.activeProjectId == project else { return false }
+                                                   return replaceAttachments($0, for: node)
+                                               }),
             slot: node.slot) {
                 inputFilesNodeId = nil
                 canvas.noteSlotDataChanged()
@@ -2005,11 +2074,15 @@ struct CanvasWorkspaceView: View {
 
     /// 键盘动作。返回 true = 已消费，事件不再下派给系统。
     func handleKeyAction(_ action: CanvasKeyBinding.Action) -> Bool {
+        // #region debug-point B-C:key-action
+        #if DEBUG
+        if ProcessInfo.processInfo.environment["CLIPSLOTS_REFERENCE_DELETE_PROBE"] == "1" { var r = URLRequest(url: URL(string: "http://127.0.0.1:7792/event")!); r.httpMethod = "POST"; r.httpBody = try? JSONSerialization.data(withJSONObject: ["sessionId": "canvas-reference-delete", "runId": ProcessInfo.processInfo.environment["CANVAS_DEBUG_RUN"] ?? "pre-fix", "hypothesisId": "B-C", "msg": "[DEBUG] canvas key action", "data": ["action": String(describing: action), "editing": editingNodeId ?? "", "composing": composingNodeId ?? "", "selected": canvas.selectedNodeIds.sorted()]]); URLSession.shared.dataTask(with: r).resume() }
+        #endif
+        // #endregion
         if previewTarget != nil {
             if action == .cancel { previewTarget = nil }
             return true
         }
-        if pendingDeletion != nil { return false }
         // 添加菜单是当前操作目标；快捷键不能穿透删除或撤销后方节点。
         if addMenu != nil, action != .cancel { return true }
         switch action {
@@ -2044,7 +2117,7 @@ struct CanvasWorkspaceView: View {
                 store.transientUI.showToast("请先选中要删除的节点或连线")
                 return true
             }
-            // ★ 三轮：走统一入口，有下游引用先弹确认（toast 由 performDelete 负责）。
+            // 有下游引用也直接删除，断开的连线随节点一起进入撤销历史。
             requestDelete(ids: canvas.selectedNodeIds)
             return true
 
@@ -2240,3 +2313,529 @@ struct CanvasGridBackground: View {
         }
     }
 }
+
+#if DEBUG
+extension CanvasWorkspaceView {
+    @MainActor func runInputUploadProbe(directory: URL) async {
+        if ProcessInfo.processInfo.environment["CLIPSLOTS_REFERENCE_DELETE_PROBE"] == "1" {
+            await runReferenceDeleteProbe(directory: directory)
+            return
+        }
+        var passed = 0
+        var failures: [String] = []
+        let run = ProcessInfo.processInfo.environment["CANVAS_DEBUG_RUN"] ?? "pre-fix"
+        func check(_ condition: Bool, _ label: String, data: [String: Any] = [:]) {
+            if condition { passed += 1 } else { failures.append(label) }
+            // #region debug-point A-C:input-upload-probe
+            var r = URLRequest(url: URL(string: "http://127.0.0.1:7791/event")!); r.httpMethod = "POST"; r.httpBody = try? JSONSerialization.data(withJSONObject: ["sessionId": "canvas-input-upload", "runId": run, "hypothesisId": "A-C", "msg": "[DEBUG] \(label)", "data": data.merging(["passed": condition]) { _, new in new }]); URLSession.shared.dataTask(with: r).resume()
+            // #endregion
+        }
+        func settle() async { try? await Task.sleep(for: .milliseconds(500)) }
+        guard let window = inputRouter.anchorView?.window else { return }
+        NSApp.activate(ignoringOtherApps: true)
+        window.makeKeyAndOrderFront(nil)
+        canvas.isLibraryExpanded = false
+        agentVisible = false
+        pan = CGSize(width: 80, height: 65)
+        zoom = 0.8
+        if ProcessInfo.processInfo.environment["CLIPSLOTS_MEDIA_ROLE_PROBE"] == "1" {
+            func click(_ rect: CGRect) async {
+                guard let anchor = inputRouter.anchorView else { return }
+                let point = anchor.convert(CGPoint(x: rect.midX, y: rect.midY), to: nil)
+                for type in [NSEvent.EventType.leftMouseDown, .leftMouseUp] {
+                    NSApp.postEvent(NSEvent.mouseEvent(with: type, location: point, modifierFlags: [],
+                        timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber,
+                        context: nil, eventNumber: 1, clickCount: 1, pressure: 1)!, atStart: false)
+                    try? await Task.sleep(for: .milliseconds(100))
+                }
+                await settle()
+            }
+            func screenshot(_ name: String) {
+                if let root = window.contentView, let rep = root.bitmapImageRepForCachingDisplay(in: root.bounds) {
+                    root.cacheDisplay(in: root.bounds, to: rep)
+                    try? rep.representation(using: .png, properties: [:])?.write(to: directory.appendingPathComponent(name))
+                }
+            }
+            let request = AddNodeRequest(screenPoint: .zero, canvasPoint: CGPoint(x: 400, y: 250), parentNodeId: nil)
+            addMenu = request
+            handleAddNode(.image, request: request)
+            guard let source = canvas.soleSelectedNode else { return }
+            await settle()
+            check(source.isMediaSource && !source.canGenerate, "blank-menu image is persistent source")
+            if let region = controlRegions["source-upload-\(source.id)"] {
+                await click(region)
+                let picker = NSApp.windows.compactMap { $0 as? NSOpenPanel }.first { $0.isVisible }
+                check(picker != nil && picker?.allowsMultipleSelection == false, "source upload click opens single picker")
+                check(picker?.allowedContentTypes == [.image], "source picker restricts images")
+                check(!AttachmentManagerPanelController.shared.isVisible, "source picker skips manager")
+                picker?.cancel(nil)
+                await settle()
+            } else { check(false, "source upload control exists") }
+            let photo = directory.appendingPathComponent("fixture.png")
+            let movie = directory.appendingPathComponent("fixture.mp4")
+            let portrait = directory.appendingPathComponent("portrait.png")
+            let image = NSImage(size: CGSize(width: 120, height: 240))
+            image.lockFocus()
+            NSColor.systemTeal.setFill()
+            NSBezierPath(rect: CGRect(x: 0, y: 0, width: 120, height: 240)).fill()
+            image.unlockFocus()
+            if let data = image.tiffRepresentation,
+               let png = NSBitmapImageRep(data: data)?.representation(using: .png, properties: [:]) {
+                try? png.write(to: portrait)
+            }
+            check(importInputFiles([photo], to: source, projectId: canvas.activeProjectId), "source upload succeeds")
+            await settle()
+            check(previewableMedia(of: canvas.node(id: source.id)!) != nil, "blank-menu image displays uploaded source")
+            check(composerFrame == nil, "source has no generation composer")
+            check(canvas.node(id: source.id)?.ratio == "16:9", "source image adopts native aspect ratio")
+            check(inputAttachments(for: canvas.node(id: source.id)!).isEmpty, "source file is not a local generation input")
+            check(startGeneration(source) == nil, "source cannot submit generation")
+            let original = liveAttachments(for: source)
+            let history = canvas.history.cursor
+            check(!importInputFiles([movie], to: source, projectId: canvas.activeProjectId), "image source rejects video")
+            check(!importInputFiles([photo, photo], to: source, projectId: canvas.activeProjectId), "source rejects multiple files")
+            check(canvas.history.cursor == history && liveAttachments(for: source) == original, "rejected source uploads are atomic")
+            let next = AddNodeRequest(screenPoint: .zero, canvasPoint: CGPoint(x: 900, y: 250),
+                                      parentNodeId: nil, parentNodeIds: [source.id])
+            addMenu = next
+            handleAddNode(.image, request: next)
+            guard let generated = canvas.soleSelectedNode else { return }
+            check(generated.mediaRole == .generation && generated.canGenerate, "parent-array menu creates generation node")
+            check(resolveEdgeInputs(for: generated).assetPaths.count == 1, "downstream receives uploaded source")
+            check(importInputFiles([photo], to: generated, projectId: canvas.activeProjectId), "generation upload succeeds")
+            check(previewableMedia(of: canvas.node(id: generated.id)!) == nil, "generation input stays out of main preview")
+            check(importInputFiles([portrait], to: source, projectId: canvas.activeProjectId), "source replacement succeeds")
+            await settle()
+            let replaced = liveAttachments(for: source)
+            let sourceNow = canvas.node(id: source.id)!
+            check(replaced.count == 1 && replaced.first?.name == "portrait.png", "replacement leaves one source file")
+            check(sourceNow.ratio == "1:2" && abs(sourceNow.width / sourceNow.height - 0.5) < 0.001,
+                  "replacement adopts portrait geometry")
+            check(sourceNow.inputAttachmentIds.isEmpty, "replacement retains source identity")
+            check(resolveEdgeInputs(for: generated).assetPaths == [replaced[0].canvasLocalURL!.path],
+                  "downstream follows replacement source")
+            canvas.undo()
+            await settle()
+            check(liveAttachments(for: source).map(\.id) == original.map(\.id)
+                  && liveAttachments(for: source).first?.resolveData() == (try? Data(contentsOf: photo)),
+                  "source undo restores original identity and bytes")
+            check(canvas.node(id: source.id)?.ratio == "16:9", "source undo restores original ratio")
+            canvas.redo()
+            await settle()
+            check(liveAttachments(for: source).map(\.id) == replaced.map(\.id)
+                  && liveAttachments(for: source).first?.resolveData() == (try? Data(contentsOf: portrait)),
+                  "source redo restores replacement identity and bytes")
+            canvas.select(id: source.id, additive: false)
+            await settle()
+            screenshot("canvas-source-image.png")
+            commitEdit(generated, text: "保持构图，暖色调")
+            if let task = startGeneration(canvas.node(id: generated.id)!) {
+                await task.value
+                check(previewableMedia(of: canvas.node(id: generated.id)!)?.canvasIsImageLike == true,
+                      "image generation displays only generated output")
+                let commands = (try? String(contentsOf: directory.appendingPathComponent("commands.jsonl"))) ?? ""
+                check(commands.contains(replaced[0].canvasLocalURL!.path), "mock Crate receives actual uploaded source path")
+                let output = previewableMedia(of: canvas.node(id: generated.id)!)?.id
+                check(importInputFiles([portrait], to: generated, projectId: canvas.activeProjectId), "generation accepts further input")
+                check(previewableMedia(of: canvas.node(id: generated.id)!)?.id == output, "generation input preserves output")
+            } else { check(false, "source-connected image generation starts") }
+            let videoRequest = AddNodeRequest(screenPoint: .zero, canvasPoint: CGPoint(x: 550, y: 600), parentNodeId: nil)
+            addMenu = videoRequest
+            handleAddNode(.video, request: videoRequest)
+            guard let sourceVideo = canvas.soleSelectedNode else { return }
+            check(sourceVideo.isMediaSource, "blank-menu video creates source")
+            await settle()
+            addInputFiles(sourceVideo)
+            await settle()
+            let videoPicker = NSApp.windows.compactMap { $0 as? NSOpenPanel }.first { $0.isVisible }
+            check(videoPicker != nil && videoPicker?.allowsMultipleSelection == false
+                  && videoPicker?.allowedContentTypes == [.movie], "video picker selects one movie")
+            videoPicker?.cancel(nil)
+            await settle()
+            check(!importInputFiles([photo], to: sourceVideo, projectId: canvas.activeProjectId), "video source rejects image")
+            check(importInputFiles([movie], to: sourceVideo, projectId: canvas.activeProjectId), "video source upload succeeds")
+            await settle()
+            let videoNow = canvas.node(id: sourceVideo.id)!
+            check(previewableMedia(of: videoNow)?.canvasIsVideoLike == true && videoNow.ratio == "16:9", "video source shows video with native ratio")
+            check(composerFrame == nil && inputAttachments(for: videoNow).isEmpty, "video source has no generation inputs or composer")
+            if let media = previewableMedia(of: videoNow) {
+                check((CanvasMediaProbe.facts(for: media).duration ?? 0) > 0, "uploaded video duration is readable")
+                openFullscreen(videoNow, attachment: media)
+                await settle()
+                check(previewTarget != nil, "uploaded video supports fullscreen preview")
+                previewTarget = nil
+            }
+            screenshot("canvas-source-video.png")
+            let originalMovie = liveAttachments(for: sourceVideo)
+            var legacyVideo = videoNow
+            legacyVideo.kind = .image
+            legacyVideo.inputAttachmentIds = originalMovie.map { $0.id.uuidString }
+            check(CanvasMediaPick.primary(node: legacyVideo, attachments: originalMovie)?.canvasIsVideoLike == true,
+                  "legacy image-kind video source remains available for type migration")
+            check(importInputFiles([movie], to: sourceVideo, projectId: canvas.activeProjectId), "video source can replace its movie")
+            check(liveAttachments(for: sourceVideo).count == 1
+                  && liveAttachments(for: sourceVideo).first?.id != originalMovie.first?.id, "video replacement retains exactly one file")
+            canvas.undo()
+            await settle()
+            check(liveAttachments(for: sourceVideo).first?.id == originalMovie.first?.id
+                  && liveAttachments(for: sourceVideo).first?.resolveData() == (try? Data(contentsOf: movie)),
+                  "video replacement undo restores original bytes")
+            for parent in [source.id, sourceVideo.id] {
+                let childRequest = AddNodeRequest(screenPoint: .zero, canvasPoint: CGPoint(x: 1100, y: 700),
+                                                 parentNodeId: nil, parentNodeIds: [parent])
+                addMenu = childRequest
+                handleAddNode(.video, request: childRequest)
+                let child = canvas.soleSelectedNode!
+                check(child.mediaRole == .generation, "media-linked menu creates video generation")
+                check(importInputFiles([photo, portrait], to: child, projectId: canvas.activeProjectId), "video generation accepts multiple input images")
+                check(previewableMedia(of: canvas.node(id: child.id)!) == nil, "video generation inputs stay outside preview")
+                if let edge = canvas.incomingEdges(of: child.id).first {
+                    _ = canvas.disconnect(edgeId: edge.id)
+                    check(canvas.node(id: child.id)?.mediaRole == .generation, "disconnect preserves generation role")
+                }
+            }
+            if let edge = canvas.incomingEdges(of: generated.id).first { _ = canvas.disconnect(edgeId: edge.id) }
+            canvas.flushSave()
+            let loaded = CanvasStorage(rootOverride: URL(fileURLWithPath: ProcessInfo.processInfo.environment["CLIPSLOTS_DATA_DIR"]!))
+                .load(projectId: canvas.activeProjectId)
+            check(loaded.nodes.first { $0.id == source.id }?.isMediaSource == true, "source role survives reload")
+            check(loaded.nodes.first { $0.id == generated.id }?.mediaRole == .generation, "disconnected generation role survives reload")
+            if let reloaded = loaded.nodes.first(where: { $0.id == source.id }) {
+                check(CanvasMediaPick.primary(node: reloaded, attachments: replaced)?.id == replaced[0].id, "source preview survives reload")
+            }
+            canvas.select(id: generated.id, additive: false)
+            await settle()
+            screenshot("canvas-input-upload.png")
+            let pasteboard = NSPasteboard.general
+            let savedPasteboard = (pasteboard.pasteboardItems ?? []).map { item -> NSPasteboardItem in
+                let copy = NSPasteboardItem()
+                for type in item.types { if let data = item.data(forType: type) { copy.setData(data, forType: type) } }
+                return copy
+            }
+            let previousNodes = Set(canvas.nodes.map(\.id))
+            pasteboard.clearContents()
+            pasteboard.writeObjects([photo as NSURL, movie as NSURL])
+            _ = handlePaste()
+            let pasted = canvas.nodes.filter { !previousNodes.contains($0.id) }
+            check(pasted.count == 2 && Set(pasted.map { $0.kind.rawValue }) == ["image", "video"], "mixed media paste creates one node per file")
+            check(pasted.allSatisfy { $0.isMediaSource && liveAttachments(for: $0).count == 1 },
+                  "pasted sources each contain only one file")
+            pasteboard.clearContents()
+            pasteboard.setString("https://example.invalid/reference.png", forType: .string)
+            _ = handlePaste()
+            check(canvas.soleSelectedNode.map { liveAttachments(for: $0).count == 1 } == true,
+                  "image URL paste retains its single stored reference")
+            pasteboard.clearContents()
+            pasteboard.writeObjects(savedPasteboard)
+            try? JSONSerialization.data(withJSONObject: ["passed": passed, "failures": failures], options: [.prettyPrinted, .sortedKeys])
+                .write(to: directory.appendingPathComponent("report.json"))
+            await settle()
+            NSApp.terminate(nil)
+            return
+        }
+        guard let prompt = createNode(kind: .text, at: CGPoint(x: 100, y: 200),
+                                      parentNodeId: nil, beginEditing: false, quiet: true) else { return }
+        guard let video = createNode(kind: .video, at: CGPoint(x: 450, y: 200),
+                                     parentNodeId: prompt.id, beginEditing: false, quiet: true) else { return }
+        commitEdit(video, text: "镜头缓慢推进")
+        canvas.select(id: video.id, additive: false)
+        await settle()
+        let initialHistory = canvas.history.cursor
+        if let anchor = inputRouter.anchorView, let rect = composerFrame {
+            let point = anchor.convert(CGPoint(x: rect.minX + 32, y: rect.minY + 32), to: nil)
+            for type in [NSEvent.EventType.leftMouseDown, .leftMouseUp] {
+                let event = NSEvent.mouseEvent(with: type, location: point, modifierFlags: [],
+                    timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber,
+                    context: nil, eventNumber: 1, clickCount: 1, pressure: 1)!
+                NSApp.postEvent(event, atStart: false)
+                try? await Task.sleep(for: .milliseconds(100))
+            }
+            await settle()
+            check(!AttachmentManagerPanelController.shared.isVisible, "plus skips attachment manager")
+            let picker = NSApp.windows.compactMap { $0 as? NSOpenPanel }.first { $0.isVisible }
+            check(picker != nil, "plus directly opens native file picker")
+            check(picker?.allowsMultipleSelection == true, "file picker supports multiple files")
+            picker?.cancel(nil)
+            AttachmentManagerPanelController.shared.close()
+            await settle()
+        } else { check(false, "composer exposes add reference button") }
+        check(canvas.history.cursor == initialHistory && liveAttachments(for: video).isEmpty,
+              "cancelling picker leaves attachments and history unchanged")
+        let text = liveText(for: video)
+        let photo = directory.appendingPathComponent("fixture.png")
+        let previousOutput = directory.appendingPathComponent("crate_reference.png")
+        let note = directory.appendingPathComponent("notes.txt")
+        try? FileManager.default.copyItem(at: photo, to: previousOutput)
+        try? "参考说明".write(to: note, atomically: true, encoding: .utf8)
+        check(importInputFiles([photo, previousOutput, note], to: video, projectId: canvas.activeProjectId),
+              "multiple reference files use upload transaction")
+        await settle()
+        let saved = store.canvasSlotAttachments(groupId: video.groupId, slot: video.slot)
+        let current = canvas.node(id: video.id)!
+        check(inputImagePaths(for: current).count == 2, "uploaded images including previous generated file are generation inputs")
+        check(saved.count == 3 && current.inputAttachmentIds.count == 3, "all files have explicit input identity")
+        check(canvas.history.cursor == initialHistory + 1, "multiple files create one undo transaction")
+        check(current.ratio == video.ratio && current.frame == video.frame, "reference upload preserves video size and generation ratio")
+        check(liveText(for: video) == text && video.outputAttachmentIds.isEmpty,
+              "upload preserves prompt and output identity")
+        check(previewableMedia(of: canvas.node(id: video.id)!) == nil, "input image does not replace video preview",
+              data: ["preview": previewableMedia(of: canvas.node(id: video.id)!)?.name ?? "none"])
+        canvas.undo()
+        check(store.canvasSlotAttachments(groupId: video.groupId, slot: video.slot).isEmpty, "undo removes uploaded input")
+        check(canvas.node(id: video.id)?.inputAttachmentIds.isEmpty == true, "undo removes input identity")
+        canvas.redo()
+        check(store.canvasSlotAttachments(groupId: video.groupId, slot: video.slot).map(\.id) == saved.map(\.id),
+              "redo restores input order")
+        check(store.canvasSlotAttachments(groupId: video.groupId, slot: video.slot).first?.resolveData()
+              == (try? Data(contentsOf: directory.appendingPathComponent("fixture.png"))), "redo restores input bytes")
+        check(canvas.node(id: video.id)?.inputAttachmentIds == current.inputAttachmentIds, "redo restores input identity")
+        await settle()
+        for att in saved {
+            check(controlRegions["composer-input-\(att.id.uuidString)"] != nil, "composer displays \(att.name) as input")
+        }
+        if let region = saved.first.flatMap({ controlRegions["composer-input-\($0.id.uuidString)"] }),
+           let anchor = inputRouter.anchorView {
+            for type in [NSEvent.EventType.leftMouseDown, .leftMouseUp] {
+                NSApp.postEvent(NSEvent.mouseEvent(with: type,
+                    location: anchor.convert(CGPoint(x: region.midX, y: region.midY), to: nil),
+                    modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
+                    windowNumber: window.windowNumber, context: nil, eventNumber: 1, clickCount: 1, pressure: 1)!, atStart: false)
+                try? await Task.sleep(for: .milliseconds(100))
+            }
+            await settle()
+            check(previewTarget != nil, "native thumbnail click previews input independently")
+            previewTarget = nil
+            await settle()
+        }
+        if let root = window.contentView, let rep = root.bitmapImageRepForCachingDisplay(in: root.bounds) {
+            root.cacheDisplay(in: root.bounds, to: rep)
+            try? rep.representation(using: .png, properties: [:])?.write(to: directory.appendingPathComponent("canvas-input-upload.png"))
+        }
+        check(replaceAttachments(Array(saved.reversed()), for: current), "manager can reorder inputs")
+        canvas.undo()
+        check(liveAttachments(for: current).map(\.id) == saved.map(\.id), "undo restores input order after reorder")
+        check(replaceAttachments(Array(saved.dropFirst()), for: current), "manager can delete an input")
+        canvas.undo()
+        check(liveAttachments(for: current).first?.resolveData() == (try? Data(contentsOf: photo)),
+              "undo deletion restores file bytes")
+        check(canvas.node(id: video.id)?.inputAttachmentIds == current.inputAttachmentIds,
+              "undo deletion restores reference identity")
+        canvas.flushSave()
+        let loaded = CanvasStorage(rootOverride: URL(fileURLWithPath: ProcessInfo.processInfo.environment["CLIPSLOTS_DATA_DIR"]!))
+            .load(projectId: canvas.activeProjectId)
+        if let node = loaded.nodes.first(where: { $0.id == video.id }) {
+            check(node.inputAttachmentIds == current.inputAttachmentIds && CanvasMediaPick.primary(node: node, attachments: saved) == nil,
+                  "reload retains inputs without creating main preview")
+        } else { check(false, "saved node reloads") }
+        canvas.updateNode(id: video.id) { $0.model = "seedance2-mini" }
+        if let task = startGeneration(canvas.node(id: video.id)!) {
+            await task.value
+            let generated = canvas.node(id: video.id)!
+            check(!generated.outputAttachmentIds.isEmpty && previewableMedia(of: generated)?.canvasIsVideoLike == true,
+                  "mock video generation shows output as main preview")
+            check(inputImagePaths(for: generated).count == 2, "generated result stays out of next input set")
+            let commands = (try? String(contentsOf: directory.appendingPathComponent("commands.jsonl"), encoding: .utf8)) ?? ""
+            check(inputImagePaths(for: generated).first.map { commands.contains($0) } == true,
+                  "mock Crate receives uploaded first frame path")
+            let output = previewableMedia(of: generated)?.id
+            check(importInputFiles([photo], to: generated, projectId: canvas.activeProjectId),
+                  "can add more inputs after generation")
+            check(previewableMedia(of: canvas.node(id: video.id)!)?.id == output, "adding input preserves generated preview")
+            canvas.undo()
+            check(previewableMedia(of: canvas.node(id: video.id)!)?.id == output && inputImagePaths(for: canvas.node(id: video.id)!).count == 2,
+                  "undo post-generation upload preserves output and previous inputs")
+        } else { check(false, "mock generation starts") }
+        importCanvasResource(photo, at: CGPoint(x: 950, y: 200))
+        if let imported = canvas.soleSelectedNode, imported.id != video.id {
+            let media = previewableMedia(of: imported)?.id
+            check(media != nil && imported.inputAttachmentIds.isEmpty, "standalone imported image retains preview")
+            check(importInputFiles([previousOutput], to: imported, projectId: canvas.activeProjectId),
+                  "source image accepts replacement")
+            check(previewableMedia(of: canvas.node(id: imported.id)!)?.id != media && liveAttachments(for: imported).count == 1,
+                  "source replacement changes primary and keeps one file")
+        }
+        if let empty = createNode(kind: .image, at: CGPoint(x: 1200, y: 200),
+                                   parentNodeId: prompt.id, beginEditing: false, quiet: true) {
+            check(importInputFiles([photo], to: empty, projectId: canvas.activeProjectId), "empty image node accepts input")
+            check(previewableMedia(of: canvas.node(id: empty.id)!) == nil, "empty image node input does not become output")
+        }
+        check(!importInputFiles([photo], to: current, projectId: "stale-project"), "stale project picker response is rejected")
+        canvas.removeNodes(ids: [current.id])
+        check(!importInputFiles([photo], to: current, projectId: canvas.activeProjectId), "deleted node picker response is rejected")
+        try? JSONSerialization.data(withJSONObject: ["passed": passed, "failures": failures], options: [.prettyPrinted, .sortedKeys])
+            .write(to: directory.appendingPathComponent("report.json"))
+        await settle()
+        NSApp.terminate(nil)
+    }
+
+    @MainActor func runReferenceDeleteProbe(directory: URL) async {
+        var passed = 0
+        var failures: [String] = []
+        let run = ProcessInfo.processInfo.environment["CANVAS_DEBUG_RUN"] ?? "pre-fix"
+        func check(_ condition: Bool, _ label: String) {
+            if condition { passed += 1 } else { failures.append(label) }
+            // #region debug-point A-C:reference-delete-probe
+            var r = URLRequest(url: URL(string: "http://127.0.0.1:7792/event")!); r.httpMethod = "POST"; r.httpBody = try? JSONSerialization.data(withJSONObject: ["sessionId": "canvas-reference-delete", "runId": run, "hypothesisId": "A-C", "msg": "[DEBUG] \(label)", "data": ["passed": condition, "editing": editingNodeId ?? "", "composing": composingNodeId ?? "", "sheet": inputRouter.anchorView?.window?.attachedSheet != nil, "selected": canvas.selectedNodeIds.sorted(), "responder": inputRouter.anchorView?.window?.firstResponder.map { String(describing: type(of: $0)) } ?? "nil"]]); URLSession.shared.dataTask(with: r).resume()
+            // #endregion
+        }
+        func settle() async { try? await Task.sleep(for: .milliseconds(500)) }
+        guard let window = inputRouter.anchorView?.window else { return }
+        func click(_ point: CGPoint, modifiers: NSEvent.ModifierFlags = []) async {
+            guard let anchor = inputRouter.anchorView else { return }
+            for type in [NSEvent.EventType.leftMouseDown, .leftMouseUp] {
+                NSApp.postEvent(NSEvent.mouseEvent(with: type, location: anchor.convert(point, to: nil),
+                    modifierFlags: modifiers, timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber,
+                    context: nil, eventNumber: 1, clickCount: 1, pressure: 1)!, atStart: false)
+                try? await Task.sleep(for: .milliseconds(100))
+            }
+            await settle()
+        }
+        func key(_ code: UInt16, modifiers: NSEvent.ModifierFlags = []) async {
+            let characters = code == 6 ? "z" : code == 51 ? "\u{7f}" : "\u{f728}"
+            NSApp.postEvent(NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: modifiers,
+                timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber,
+                context: nil, characters: characters,
+                charactersIgnoringModifiers: characters, isARepeat: false, keyCode: code)!, atStart: false)
+            await settle()
+        }
+        func thumbnailVisible(_ node: CanvasNode, _ media: SlotContent.SlotAttachment) -> Bool {
+            controlRegions["composer-reference-media-\(node.id)-\(media.id.uuidString)"] != nil
+        }
+        func screenshot(_ name: String) {
+            if let root = window.contentView, let rep = root.bitmapImageRepForCachingDisplay(in: root.bounds) {
+                root.cacheDisplay(in: root.bounds, to: rep)
+                try? rep.representation(using: .png, properties: [:])?.write(to: directory.appendingPathComponent(name))
+            }
+        }
+        NSApp.activate(ignoringOtherApps: true)
+        window.makeKeyAndOrderFront(nil)
+        canvas.isLibraryExpanded = false
+        agentVisible = false
+        pan = CGSize(width: 80, height: 65)
+        zoom = 0.8
+        importCanvasResource(directory.appendingPathComponent("fixture.png"), at: CGPoint(x: 350, y: 280))
+        guard let source = canvas.soleSelectedNode,
+              let generated = createNode(kind: .video, at: CGPoint(x: 1100, y: 280),
+                                         parentNodeId: source.id, beginEditing: false, quiet: true) else { return }
+        commitEdit(generated, text: "缓慢推进")
+        await settle()
+        guard let original = previewableMedia(of: source) else { return }
+        check(thumbnailVisible(source, original), "connected source displays thumbnail")
+        screenshot("canvas-input-upload.png")
+        let rect = screenFrame(of: canvas.node(id: generated.id)!)
+        await click(CGPoint(x: rect.midX, y: rect.midY))
+        check(canvas.selectedNodeIds == [generated.id], "native click selects generation node")
+        await key(51)
+        check(canvas.node(id: generated.id) == nil, "Delete directly removes selected generation node")
+        if canvas.node(id: generated.id) == nil { canvas.undo(); await settle() }
+        await click(CGPoint(x: rect.midX, y: rect.midY))
+        if let frame = composerFrame {
+            await click(CGPoint(x: frame.minX + 100, y: frame.minY + 85))
+            check(window.firstResponder is NSTextView, "native prompt click focuses editor")
+            if let editor = window.firstResponder as? NSTextView {
+                editor.setSelectedRange(NSRange(location: editor.string.utf16.count, length: 0))
+                let before = editor.string
+                await key(51)
+                check(canvas.node(id: generated.id) != nil && editor.string != before,
+                      "Delete while editing only removes prompt character")
+            }
+            await click(CGPoint(x: rect.midX, y: rect.midY))
+            await key(117)
+            check(canvas.node(id: generated.id) == nil, "Forward Delete after editor blur removes selected node")
+            if canvas.node(id: generated.id) == nil { canvas.undo(); await settle() }
+        } else { check(false, "reselected node exposes composer") }
+        endInlineEditing()
+        let sourceRect = screenFrame(of: canvas.node(id: source.id)!)
+        await click(CGPoint(x: sourceRect.midX, y: sourceRect.midY))
+        check(canvas.selectedNodeIds == [source.id], "native click selects connected source")
+        let edgesBefore = canvas.edges
+        let bytesBefore = original.resolveData()
+        let historyBefore = canvas.history.cursor
+        await key(51)
+        check(window.attachedSheet == nil && canvas.node(id: source.id) == nil,
+              "Delete connected source skips confirmation")
+        check(canvas.node(id: generated.id) != nil && canvas.incomingEdges(of: generated.id).isEmpty,
+              "source deletion keeps downstream and removes connection")
+        check(canvas.history.cursor == historyBefore + 1, "source deletion records one undo entry")
+        await key(6, modifiers: .command)
+        check(canvas.node(id: source.id) != nil && canvas.edges == edgesBefore
+              && liveAttachments(for: source).first?.resolveData() == bytesBefore,
+              "keyboard undo restores connected source and attachment bytes")
+        await key(6, modifiers: [.command, .shift])
+        check(canvas.node(id: source.id) == nil && canvas.incomingEdges(of: generated.id).isEmpty,
+              "keyboard redo removes source and connection")
+        await key(6, modifiers: .command)
+        await click(CGPoint(x: sourceRect.midX, y: sourceRect.midY))
+        await click(CGPoint(x: rect.midX, y: rect.midY), modifiers: .shift)
+        check(canvas.selectedNodeIds == [source.id, generated.id], "shift click selects both connected nodes")
+        await key(117)
+        check(canvas.node(id: source.id) == nil && canvas.node(id: generated.id) == nil && window.attachedSheet == nil,
+              "Forward Delete removes multiselection without confirmation")
+        await key(6, modifiers: .command)
+        check(canvas.node(id: source.id) != nil && canvas.node(id: generated.id) != nil
+              && canvas.edges == edgesBefore && liveAttachments(for: source).first?.resolveData() == bytesBefore,
+              "one keyboard undo restores multiselection connections and bytes")
+        await click(CGPoint(x: rect.midX, y: rect.midY))
+        if let button = controlRegions["composer-reference-\(source.id)"] {
+            await click(CGPoint(x: button.midX, y: button.midY))
+            check(canvas.selectedNodeIds == [source.id], "thumbnail click selects its connected source")
+        } else { check(false, "reference thumbnail button exists") }
+        canvas.select(id: generated.id, additive: false)
+        let portrait = directory.appendingPathComponent("portrait.png")
+        let image = NSImage(size: CGSize(width: 120, height: 240))
+        image.lockFocus()
+        NSColor.systemTeal.setFill()
+        NSBezierPath(rect: CGRect(x: 0, y: 0, width: 120, height: 240)).fill()
+        image.unlockFocus()
+        if let data = image.tiffRepresentation {
+            try? NSBitmapImageRep(data: data)?.representation(using: .png, properties: [:])?.write(to: portrait)
+        }
+        check(importInputFiles([portrait], to: source, projectId: canvas.activeProjectId), "replace upstream source while composer stays open")
+        await settle()
+        guard let replacement = previewableMedia(of: canvas.node(id: source.id)!) else { return }
+        check(thumbnailVisible(source, replacement) && !thumbnailVisible(source, original),
+              "open composer refreshes replaced source identity")
+        screenshot("canvas-source-image.png")
+        canvas.undo()
+        await settle()
+        check(thumbnailVisible(source, original) && !thumbnailVisible(source, replacement),
+              "source replacement undo refreshes thumbnail")
+        importCanvasResource(directory.appendingPathComponent("fixture.mp4"), at: CGPoint(x: 350, y: 800))
+        guard let video = canvas.soleSelectedNode, let movie = previewableMedia(of: video) else { return }
+        if let edge = canvas.incomingEdges(of: generated.id).first { canvas.disconnect(edgeId: edge.id) }
+        canvas.connect(from: video.id, to: generated.id)
+        canvas.select(id: generated.id, additive: false)
+        await settle()
+        check(thumbnailVisible(video, movie) && !thumbnailVisible(source, original),
+              "same-count connection swap refreshes video thumbnail")
+        screenshot("canvas-source-video.png")
+        guard let text = createNode(kind: .text, at: CGPoint(x: 700, y: 800), parentNodeId: nil, beginEditing: false, quiet: true),
+              let upstream = createNode(kind: .image, at: CGPoint(x: 1100, y: 800),
+                                        parentNodeId: text.id, beginEditing: false, quiet: true) else { return }
+        canvas.connect(from: text.id, to: generated.id)
+        canvas.connect(from: upstream.id, to: generated.id)
+        canvas.select(id: generated.id, additive: false)
+        check(importInputFiles([portrait], to: upstream, projectId: canvas.activeProjectId), "upload upstream generation input")
+        await settle()
+        check(controlRegions["composer-reference-\(text.id)"] != nil
+              && !controlRegions.keys.contains { $0.hasPrefix("composer-reference-media-\(text.id)-") },
+              "text connection retains text entry")
+        check(controlRegions["composer-reference-\(upstream.id)"] != nil
+              && !controlRegions.keys.contains { $0.hasPrefix("composer-reference-media-\(upstream.id)-") },
+              "upstream generation input is not shown as its output thumbnail")
+        commitEdit(upstream, text: "生成构图参考")
+        if let task = startGeneration(canvas.node(id: upstream.id)!) {
+            await task.value
+            await settle()
+            if let output = previewableMedia(of: canvas.node(id: upstream.id)!) {
+                check(thumbnailVisible(upstream, output), "upstream generated output appears in open composer")
+            } else { check(false, "upstream generation has output") }
+        } else { check(false, "upstream mock generation starts") }
+        let sessionLocked = (CGSessionCopyCurrentDictionary() as? [String: Any])?["CGSSessionScreenIsLocked"] as? Bool ?? false
+        try? JSONSerialization.data(withJSONObject: ["passed": passed, "failures": failures, "sessionLocked": sessionLocked], options: [.prettyPrinted, .sortedKeys])
+            .write(to: directory.appendingPathComponent("report.json"))
+        await settle()
+        NSApp.terminate(nil)
+    }
+}
+#endif

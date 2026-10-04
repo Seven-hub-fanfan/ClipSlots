@@ -122,6 +122,11 @@ final class CanvasInputRouter: ObservableObject {
 
     /// 返回 true 表示事件已被画布吃掉，不再往下派发。
     private func handle(_ event: NSEvent) -> Bool {
+        // #region debug-point B:delete-routing
+        #if DEBUG
+        if event.type == .keyDown, ProcessInfo.processInfo.environment["CLIPSLOTS_REFERENCE_DELETE_PROBE"] == "1" { var r = URLRequest(url: URL(string: "http://127.0.0.1:7792/event")!); r.httpMethod = "POST"; r.httpBody = try? JSONSerialization.data(withJSONObject: ["sessionId": "canvas-reference-delete", "runId": ProcessInfo.processInfo.environment["CANVAS_DEBUG_RUN"] ?? "pre-fix", "hypothesisId": "B", "msg": "[DEBUG] key routing", "data": ["keyCode": event.keyCode, "window": event.windowNumber, "anchorWindow": anchorView?.window?.windowNumber ?? -1, "responder": anchorView?.window?.firstResponder.map { String(describing: type(of: $0)) } ?? "nil", "editingText": anchorView?.window.map { isEditingText(window: $0) } ?? false]]); URLSession.shared.dataTask(with: r).resume() }
+        #endif
+        // #endregion
         guard let anchor = anchorView,
               let window = anchor.window,
               // 只处理落在**本窗口**的事件：App 还有 HUD / 圆盘等其它窗口，

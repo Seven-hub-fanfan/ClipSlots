@@ -34,5 +34,11 @@ let package = Package(
             dependencies: ["ClipSlotsKit"],
             path: "Tests/ClipSlotsKitSmokeTests"
         ),
+        .executableTarget(
+            name: "CodexProtocolRegression",
+            dependencies: ["ClipSlotsKit"],
+            path: "Tests/CodexProtocolRegression",
+            exclude: ["fixture.py"]
+        ),
     ]
 )

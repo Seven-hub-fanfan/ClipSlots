@@ -30,6 +30,15 @@ extension CanvasWorkspaceView {
             await settle(1)
             inputRouter.anchorView?.window?.setContentSize(CGSize(width: 1440, height: 900))
             let directory = URL(fileURLWithPath: folder, isDirectory: true)
+            if env["CLIPSLOTS_AGENT_WORKSPACE_PROBE"] == "1" {
+                await runAgentWorkspaceProbe(directory: directory)
+                return
+            }
+            if env["CLIPSLOTS_INPUT_UPLOAD_PROBE"] == "1" {
+                try? await Self.makeRegressionMedia(in: directory)
+                await runInputUploadProbe(directory: directory)
+                return
+            }
             if env["CLIPSLOTS_WINDOW_PROBE"] == "1" {
                 await runWindowLifecycleProbe(directory: directory)
                 return
@@ -107,7 +116,7 @@ extension CanvasWorkspaceView {
                 canvas.updateNode(id: image.id) { $0.state = .idle; $0.taskId = nil }
             }
             if let disposable = createNode(kind: .image, at: CGPoint(x: 1500, y: 100),
-                                             parentNodeId: nil, beginEditing: false, quiet: true),
+                                             parentNodeId: text.id, beginEditing: false, quiet: true),
                let ticket = canvas.beginGeneration(disposable) {
                 canvas.removeNodes(ids: [disposable.id])
                 check(canvas.generationNode(ticket.token) == nil, "deleted node invalidates task")
@@ -323,8 +332,20 @@ extension CanvasWorkspaceView {
                 let originalImage = canvas.node(id: image.id)!.frame
                 await drag(CGPoint(x: imageRect.midX, y: imageRect.midY),
                            CGPoint(x: imageRect.midX + 40, y: imageRect.midY + 24))
-                check(abs(canvas.node(id: text.id)!.x - text.x - 40 / zoom) < 0.6
-                      && abs(canvas.node(id: image.id)!.x - originalImage.minX - 40 / zoom) < 0.6,
+                NSLog("[CanvasRegression] multi-drag beforeText=%@ afterText=%@ beforeImage=%@ afterImage=%@ zoom=%f selection=%@",
+                      NSStringFromRect(text.frame), NSStringFromRect(canvas.node(id: text.id)!.frame),
+                      NSStringFromRect(originalImage), NSStringFromRect(canvas.node(id: image.id)!.frame),
+                      Double(zoom), canvas.selectedNodeIds.sorted().joined(separator: ","))
+                let textMove = CGSize(width: canvas.node(id: text.id)!.x - text.x,
+                                      height: canvas.node(id: text.id)!.y - text.y)
+                let imageMove = CGSize(width: canvas.node(id: image.id)!.x - originalImage.minX,
+                                       height: canvas.node(id: image.id)!.y - originalImage.minY)
+                // 原生事件会取整坐标（本机实测40×24派送为41×24.5屏幕点）。
+                // 同组位移必须精确一致，目标距离按屏幕点容许1点取整误差，避免低缩放放大误差。
+                check(abs(textMove.width - imageMove.width) < 0.001
+                      && abs(textMove.height - imageMove.height) < 0.001
+                      && abs(textMove.width * zoom - 40) < 1.1
+                      && abs(textMove.height * zoom - 24) < 1.1,
                       "native multi-selection drag moves every selected node")
                 _ = canvas.undo()
                 check(canvas.node(id: text.id)!.frame == text.frame && canvas.node(id: image.id)!.frame == originalImage,
@@ -550,6 +571,9 @@ extension CanvasWorkspaceView {
                                        beginEditing: false, quiet: true)!
                 let parent = createNode(kind: .image, at: CGPoint(x: 2000, y: 1500), parentNodeId: nil,
                                         beginEditing: false, quiet: true)!
+                // 此场景模拟断线后仍保留身份的生成节点，不是独立上传素材。
+                canvas.updateNode(id: child.id) { $0.mediaRole = .generation }
+                canvas.updateNode(id: parent.id) { $0.mediaRole = .generation }
                 commitEdit(child, text: "根据上游图片调整光线")
                 commitEdit(parent, text: "测试上游图片")
                 _ = canvas.connect(from: parent.id, to: child.id)

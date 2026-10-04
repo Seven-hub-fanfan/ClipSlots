@@ -98,6 +98,12 @@ public enum CanvasNodeKind: String, Codable, Equatable {
     public var isMediaNode: Bool { cardForm == .media }
 }
 
+/// 媒体的用途在创建时确定；断开连线、移动和重启都不会改变它。
+public enum CanvasMediaRole: String, Codable, Equatable {
+    case source
+    case generation
+}
+
 // MARK: - 节点状态
 
 /// 节点生命周期。与 Crate CLI 的任务状态对应关系见架构文档 9.3。
@@ -208,6 +214,14 @@ public struct CanvasNode: Codable, Identifiable, Equatable {
 
     public var kind: CanvasNodeKind
 
+    /// nil 仅用于读取没有角色字段的旧文档，由文档层结合连线完成迁移。
+    public var mediaRole: CanvasMediaRole?
+    public var isMediaSource: Bool { kind.isMediaNode && mediaRole == .source }
+    public var canGenerate: Bool { kind.producesAsset && !isMediaSource }
+    public var displayName: String {
+        isMediaSource ? (kind == .video ? "视频" : "图片") : kind.displayName
+    }
+
     /// 画布空间坐标（左上角）。与缩放/平移无关，这是持久化的唯一位置真值。
     public var x: CGFloat
     public var y: CGFloat
@@ -274,7 +288,7 @@ public struct CanvasNode: Codable, Identifiable, Equatable {
     public var taskId: String?
     /// 已提交但没有成功写回产物的任务，默认继续查询，不能悄悄重新提交。
     public var needsGenerationRecovery: Bool {
-        guard kind.producesAsset, let taskId, !taskId.isEmpty else { return false }
+        guard canGenerate, let taskId, !taskId.isEmpty else { return false }
         if case .succeeded = state { return false }
         return true
     }
@@ -303,6 +317,10 @@ public struct CanvasNode: Codable, Identifiable, Equatable {
     /// 刻意**不**顺手把产物从卡片的「入参文件」行里藏掉：那一行是「这个槽位里有哪些文件」的
     /// 如实呈现，藏起来用户就无法删除自己不想要的出图了。区分只发生在**提交任务**这一刻。
     public var outputAttachmentIds: [String]
+
+    /// 从「添加参考文件」显式加入的附件。它们可参与生成，但不能接管节点的主预览。
+    /// 独立导入画布的媒体不在此集合；旧文档缺省空集合，保留已有素材预览。
+    public var inputAttachmentIds: [String]
 
     public var createdAt: Date
     public var updatedAt: Date
@@ -360,6 +378,7 @@ public struct CanvasNode: Codable, Identifiable, Equatable {
                 // 这条路径（从左侧槽位库拖 / 「摆到画布」按钮），那本来就是槽位节点；
                 // 真要图片 / 视频节点的调用方一律显式传 kind。
                 kind: CanvasNodeKind = .slot,
+                mediaRole: CanvasMediaRole = .generation,
                 x: CGFloat,
                 y: CGFloat,
                 width: CGFloat = CanvasNode.defaultSize.width,
@@ -377,6 +396,7 @@ public struct CanvasNode: Codable, Identifiable, Equatable {
                 seed: Int? = nil,
                 parentNodeId: String? = nil,
                 outputAttachmentIds: [String] = [],
+                inputAttachmentIds: [String] = [],
                 animationStyle: CanvasFanGeometry.ExpandStyle = .fanOut,
                 createdAt: Date = Date(),
                 updatedAt: Date = Date()) {
@@ -384,6 +404,7 @@ public struct CanvasNode: Codable, Identifiable, Equatable {
         self.groupId = groupId
         self.slot = slot
         self.kind = kind
+        self.mediaRole = kind.isMediaNode ? mediaRole : nil
         self.x = x
         self.y = y
         self.width = width
@@ -401,6 +422,7 @@ public struct CanvasNode: Codable, Identifiable, Equatable {
         self.seed = seed
         self.parentNodeId = parentNodeId
         self.outputAttachmentIds = outputAttachmentIds
+        self.inputAttachmentIds = inputAttachmentIds
         self.animationStyle = animationStyle
         self.createdAt = createdAt
         self.updatedAt = updatedAt
@@ -433,13 +455,13 @@ public struct CanvasNode: Codable, Identifiable, Equatable {
 
     private enum CodingKeys: String, CodingKey {
         case pageId, groupId, slot
-        case kind, x, y, width, height
+        case kind, mediaRole, x, y, width, height
         case model, ratio, count, textGenerationPrompt, mediaLayoutAttachmentID
         case resolution, duration, generateAudio
         case fontName, fontSize
         case state, taskId, seed
         case parentNodeId
-        case outputAttachmentIds
+        case outputAttachmentIds, inputAttachmentIds
         case animationStyle
         case createdAt, updatedAt
         // 旧字段：hotfix19 及更早的节点自带内容与溯源信息。只在解码时读，从不写回。
@@ -474,6 +496,7 @@ public struct CanvasNode: Codable, Identifiable, Equatable {
         }
 
         kind = try c.decodeIfPresent(CanvasNodeKind.self, forKey: .kind) ?? .image
+        mediaRole = try c.decodeIfPresent(CanvasMediaRole.self, forKey: .mediaRole)
         x = try c.decodeIfPresent(CGFloat.self, forKey: .x) ?? 0
         y = try c.decodeIfPresent(CGFloat.self, forKey: .y) ?? 0
         width = try c.decodeIfPresent(CGFloat.self, forKey: .width) ?? CanvasNode.defaultSize.width
@@ -499,6 +522,7 @@ public struct CanvasNode: Codable, Identifiable, Equatable {
         parentNodeId = try c.decodeIfPresent(String.self, forKey: .parentNodeId)
         // v2.11.17 新增：老文档没有产物标记，缺省空集合（= 全部附件都算入参，与老行为一致）。
         outputAttachmentIds = try c.decodeIfPresent([String].self, forKey: .outputAttachmentIds) ?? []
+        inputAttachmentIds = try c.decodeIfPresent([String].self, forKey: .inputAttachmentIds) ?? []
         // ★ 九轮：只剩扇形一种风格；老文档里的 `carousel` / `stackedScatter` 由
         // `ExpandStyle.init(from:)` 迁移成 `.fanOut`（不抛错，见那边注释）。
         animationStyle = try c.decodeIfPresent(CanvasFanGeometry.ExpandStyle.self,
@@ -515,6 +539,7 @@ public struct CanvasNode: Codable, Identifiable, Equatable {
         try c.encode(groupId, forKey: .groupId)
         try c.encode(slot, forKey: .slot)
         try c.encode(kind, forKey: .kind)
+        try c.encodeIfPresent(mediaRole, forKey: .mediaRole)
         try c.encode(x, forKey: .x)
         try c.encode(y, forKey: .y)
         try c.encode(width, forKey: .width)
@@ -542,6 +567,9 @@ public struct CanvasNode: Codable, Identifiable, Equatable {
         // 空集合不写：绝大多数节点没出过图，写一个空数组只会让每个节点都胖一行。
         if !outputAttachmentIds.isEmpty {
             try c.encode(outputAttachmentIds, forKey: .outputAttachmentIds)
+        }
+        if !inputAttachmentIds.isEmpty {
+            try c.encode(inputAttachmentIds, forKey: .inputAttachmentIds)
         }
         try c.encode(animationStyle, forKey: .animationStyle)
         try c.encode(createdAt, forKey: .createdAt)
@@ -656,6 +684,15 @@ public struct CanvasDocument: Codable, Equatable {
         edges = CanvasEdgeGraph.migratedFromParentLinks(
             nodes: nodes,
             edges: CanvasEdgeGraph.normalized(decodedEdges, nodeIds: Set(nodes.map(\.id))))
+        let destinations = Set(edges.map(\.toNodeId))
+        for index in nodes.indices where nodes[index].kind.isMediaNode && nodes[index].mediaRole == nil {
+            let node = nodes[index]
+            let hasTask = node.taskId?.isEmpty == false || !node.outputAttachmentIds.isEmpty
+            let hasResult: Bool
+            if case .succeeded = node.state { hasResult = true } else { hasResult = false }
+            nodes[index].mediaRole = destinations.contains(node.id) || node.parentNodeId != nil || hasTask || hasResult
+                ? .generation : .source
+        }
         panX = try c.decodeIfPresent(CGFloat.self, forKey: .panX) ?? 0
         panY = try c.decodeIfPresent(CGFloat.self, forKey: .panY) ?? 0
         zoom = try c.decodeIfPresent(CGFloat.self, forKey: .zoom) ?? 1

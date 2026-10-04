@@ -205,25 +205,35 @@ enum CanvasMediaProbe {
 /// 产物图、点全屏弹出来的是参考图"——而这两张图在同一个节点上共存是常态。
 enum CanvasMediaPick {
 
-    /// 优先级：**最新产物** > 与节点类型同类的附件 > 任意图/视频附件。
-    ///
-    /// - 产物优先：媒体节点通常同时挂着入参（参考图 / 首帧）和产物，而入参往往先加进去、排在前面。
-    ///   展示入参会让人误以为"生成出来就是这样"。
-    /// - 取 `last` 而不是 `first`：重跑会往 `outputAttachmentIds` 追加，最后一个才是最新一版。
-    /// - 退到普通附件：App 重启后 `node.state` 回到 `.idle`（状态不持久化），只认 `.succeeded`
-    ///   会让"重启后图都不见了"。磁盘上的附件才是真相。
+    /// 素材节点显示匹配类型的文件；生成节点只显示产物。通用槽位仍可展示全部媒体。
     static func primary(node: CanvasNode,
                         attachments: [SlotContent.SlotAttachment]) -> SlotContent.SlotAttachment? {
+        let matches: (SlotContent.SlotAttachment) -> Bool = {
+            node.kind == .video ? $0.canvasIsVideoLike : $0.canvasIsImageLike
+        }
+        if node.isMediaSource {
+            // 兼容 217802 曾误标为入参的素材；迁移不删除历史附件。
+            if let source = attachments.first(where: matches) { return source }
+            // 旧版粘贴曾把视频放进 image 节点；既有布局同步会把此类素材修正为 video。
+            return node.kind == .image ? attachments.first(where: \.canvasIsVideoLike) : nil
+        }
         let outputs = Set(node.outputAttachmentIds)
-        if let produced = attachments.last(where: { outputs.contains($0.id.uuidString) }) {
+        if let produced = attachments.last(where: {
+            outputs.contains($0.id.uuidString) && (!node.kind.isMediaNode || matches($0))
+        }) {
             return produced
         }
-        let wantsVideo = node.kind == .video
-        if let sameKind = attachments.first(where: {
-            wantsVideo ? $0.canvasIsVideoLike : $0.canvasIsImageLike
-        }) {
-            return sameKind
+        if node.kind.isMediaNode {
+            // 最早期已成功任务可能没有 outputAttachmentIds，仅允许其明确的产物路径。
+            if case .succeeded(let path) = node.state, !path.isEmpty {
+                return attachments.last {
+                    matches($0) && [$0.storagePath, $0.path].contains(path)
+                        && !node.inputAttachmentIds.contains($0.id.uuidString)
+                }
+            }
+            return nil
         }
-        return attachments.first(where: { $0.canvasIsImageLike || $0.canvasIsVideoLike })
+        return attachments.first(where: \.canvasIsImageLike)
+            ?? attachments.first(where: \.canvasIsVideoLike)
     }
 }

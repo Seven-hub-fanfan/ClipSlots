@@ -15,6 +15,8 @@ struct CanvasRenderBoundary<Content: View>: View, Equatable {
         let currentGroup: String
         let currentContentId: String?
         let path: String
+        var referenceNodes: [CanvasNode] = []
+        var referenceEdges: [CanvasEdge] = []
     }
     let key: Key
     @ViewBuilder let content: () -> Content

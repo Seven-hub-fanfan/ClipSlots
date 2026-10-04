@@ -33,6 +33,11 @@ info["CFBundleName"] = "ClipSlots V2.17.4 Test"
 (contents / "Info.plist").write_bytes(plistlib.dumps(info))
 shutil.copy(options.binary or repo / ".build/debug/ClipSlots", contents / "MacOS/ClipSlots")
 shutil.copy(repo / "assets/AppIcon.icns", contents / "Resources/AppIcon.icns")
+if os.environ.get("CLIPSLOTS_AGENT_WORKSPACE_PROBE") == "1":
+    skill = contents / "Resources/skills/composer-fixture/SKILL.md"
+    skill.parent.mkdir(parents=True)
+    skill.write_text("---\nname: composer-fixture\ndescription: 原生输入回归专用技能\n---\n"
+                     "COMPOSER_SNAPSHOT_SENTINEL\n用三个镜头描述场景。\n")
 subprocess.run(["codesign", "--force", "--deep", "--sign", "-", str(contents.parent)], check=True)
 fixture_cli = repo / "scripts/crate_canvas_fixture.py"
 if not os.access(fixture_cli, os.X_OK):
@@ -58,6 +63,26 @@ finally:
         mouse_driver.terminate()
         mouse_driver.wait(timeout=5)
 report = json.loads((fixtures / "report.json").read_text())
+if env.get("CLIPSLOTS_AGENT_WORKSPACE_PROBE") == "1":
+    output = repo / "build/validation/agent-workspace"
+    output.mkdir(parents=True, exist_ok=True)
+    for source in fixtures.glob("*.png"):
+        shutil.copy(source, output / source.name)
+    shutil.copy(root / "run.log", output / "run.log")
+    shutil.copy(fixtures / "report.json", output / "report.json")
+    print(json.dumps(report, ensure_ascii=False, indent=2))
+    print(f"Evidence: {output}")
+    raise SystemExit(1 if report["failures"] else 0)
+if env.get("CLIPSLOTS_INPUT_UPLOAD_PROBE") == "1":
+    output = repo / "build/validation"
+    output.mkdir(parents=True, exist_ok=True)
+    suffix = env.get("CANVAS_DEBUG_RUN", "pre-fix")
+    for name in ["report.json", "canvas-input-upload.png", "canvas-source-image.png", "canvas-source-video.png"]:
+        if (fixtures / name).exists():
+            shutil.copy(fixtures / name, output / f"input-upload-{suffix}-{name}")
+    print(json.dumps(report, ensure_ascii=False, indent=2))
+    print(f"Evidence: {fixtures}")
+    raise SystemExit(1 if report["failures"] else 0)
 if env.get("CLIPSLOTS_AGENT_PERF") == "1":
     output = repo / "build/validation"
     output.mkdir(parents=True, exist_ok=True)

@@ -10,12 +10,16 @@ struct CanvasNodeComposer<Controls: View>: View {
     var inputSummary: String? = nil
     var inputDetail: String = ""
     let referenceNodes: [CanvasNode]
+    let referenceMedia: [String: SlotContent.SlotAttachment]
+    let inputAttachments: [SlotContent.SlotAttachment]
     let slotImageCounts: [String: Int]
     let onReference: (CanvasNode) -> Void
+    let onInputPreview: (SlotContent.SlotAttachment) -> Void
     let onBegin: () -> Void
     let onCommit: (String) -> Void
     let onCancel: () -> Void
     let onInputs: () -> Void
+    let onManageInputs: () -> Void
     let onRecover: (() -> Void)?
     var onRestart: (() -> Void)? = nil
     @ViewBuilder let controls: () -> Controls
@@ -25,27 +29,6 @@ struct CanvasNodeComposer<Controls: View>: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack {
-                ForEach(Array(referenceNodes.prefix(4))) { reference in
-                    Button { onReference(reference) } label: {
-                        HStack(spacing: 4) {
-                            Image(systemName: reference.kind.symbolName)
-                            if reference.kind == .slot {
-                                let count = slotImageCounts[reference.id] ?? 0
-                                Text(count > 0 ? "槽位 · \(count) 图" : "槽位")
-                            }
-                        }
-                        .font(.system(size: 11))
-                        .padding(.horizontal, 8)
-                        .frame(height: 28)
-                        .background(RoundedRectangle(cornerRadius: 6).fill(TapSkin.nodeAccent(reference.kind).opacity(0.12)))
-                        .contentShape(Rectangle())
-                    }
-                    .buttonStyle(.plain)
-                    .help("查看引用\(reference.kind == .slot ? "槽位" : (reference.kind == .text ? "文本" : (reference.kind == .image ? "图片" : "视频")))")
-                }
-                if referenceNodes.count > 4 {
-                    Text("+\(referenceNodes.count - 4)").font(.system(size: 11)).foregroundColor(TapSkin.chromeInkDim)
-                }
                 Button(action: onInputs) {
                     Image(systemName: "plus")
                         .font(.system(size: 14))
@@ -55,11 +38,80 @@ struct CanvasNodeComposer<Controls: View>: View {
                 }
                 .buttonStyle(.plain)
                 .help("添加参考文件")
+                .accessibilityLabel("添加参考文件")
+                .canvasControlRegion("composer-add-input")
+                if !referenceNodes.isEmpty || !inputAttachments.isEmpty {
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        HStack(spacing: 6) {
+                            ForEach(referenceNodes) { reference in
+                                Button { onReference(reference) } label: {
+                                    HStack(spacing: 4) {
+                                        if let media = referenceMedia[reference.id] {
+                                            CanvasAttachmentPreviewImage(attachment: media, maxPixel: 80)
+                                                .frame(width: 32, height: 32)
+                                                .background(TapSkin.subtleFill)
+                                                .clipShape(RoundedRectangle(cornerRadius: 7))
+                                                .overlay(alignment: .bottomTrailing) {
+                                                    if media.canvasIsVideoLike {
+                                                        Image(systemName: "play.fill")
+                                                            .font(.system(size: 7))
+                                                            .foregroundColor(.white)
+                                                            .padding(3)
+                                                            .background(Circle().fill(.black.opacity(0.6)))
+                                                            .padding(2)
+                                                    }
+                                                }
+                                                .canvasControlRegion("composer-reference-media-\(reference.id)-\(media.id.uuidString)")
+                                        } else {
+                                            Image(systemName: reference.kind.symbolName)
+                                                .frame(width: 32, height: 32)
+                                        }
+                                        if reference.kind == .slot {
+                                            let count = slotImageCounts[reference.id] ?? 0
+                                            Text(count > 0 ? "槽位 · \(count) 图" : "槽位")
+                                                .padding(.trailing, 8)
+                                        }
+                                    }
+                                    .font(.system(size: 11))
+                                    .background(RoundedRectangle(cornerRadius: 7).fill(TapSkin.nodeAccent(reference.kind).opacity(0.12)))
+                                    .overlay(RoundedRectangle(cornerRadius: 7).stroke(TapSkin.border))
+                                    .contentShape(Rectangle())
+                                }
+                                .buttonStyle(.plain)
+                                .help("查看引用\(reference.kind == .slot ? "槽位" : (reference.kind == .text ? "文本" : (reference.kind == .image ? "图片" : "视频")))")
+                                .accessibilityLabel("连接的\(reference.kind.displayName)")
+                                .canvasControlRegion("composer-reference-\(reference.id)")
+                            }
+                            ForEach(inputAttachments) { attachment in
+                                Button { onInputPreview(attachment) } label: {
+                                    CanvasAttachmentPreviewImage(attachment: attachment, maxPixel: 80)
+                                        .frame(width: 32, height: 32)
+                                        .background(RoundedRectangle(cornerRadius: 7).fill(TapSkin.subtleFill))
+                                        .clipShape(RoundedRectangle(cornerRadius: 7))
+                                        .overlay(RoundedRectangle(cornerRadius: 7).stroke(TapSkin.border))
+                                }
+                                .buttonStyle(.plain)
+                                .help("入参：\(attachment.name)")
+                                .accessibilityLabel("参考文件 \(attachment.name)")
+                                .canvasControlRegion("composer-input-\(attachment.id.uuidString)")
+                            }
+                        }
+                    }.frame(height: 32)
+                }
                 if inputCount > 0 || inputSummary != nil {
                     Text(inputSummary ?? "\(inputCount) 张参考图")
                         .font(.system(size: 11)).foregroundColor(TapSkin.chromeInkDim)
+                        .lineLimit(1)
                         .help(inputDetail)
                 }
+                Button(action: onManageInputs) {
+                    Image(systemName: "slider.horizontal.3")
+                        .font(.system(size: 12))
+                        .frame(width: 28, height: 32)
+                }
+                .buttonStyle(.plain)
+                .help("管理入参文件")
+                .accessibilityLabel("管理入参文件")
                 Spacer()
                 if case .failed(let reason) = node.state {
                     Button("错误详情") { showingError = true }
@@ -145,7 +197,7 @@ extension CanvasWorkspaceView {
     }
 
     var composerFrame: CGRect? {
-        guard let node = canvas.soleSelectedNode, node.kind != .slot,
+        guard let node = canvas.soleSelectedNode, node.kind != .slot, !node.isMediaSource,
               addMenu == nil, linkDrag == nil, draggingNodeId == nil, inputFilesNodeId == nil else { return nil }
         let size = CGSize(width: min(max(640, min(900, screenFrame(of: node).width + 48)), canvasContentViewport.width), height: 204)
         return CGRect(origin: CanvasInteractionGeometry.panelOrigin(node: screenFrame(of: node),
@@ -155,28 +207,41 @@ extension CanvasWorkspaceView {
     @ViewBuilder var composerOverlay: some View {
         if let node = canvas.soleSelectedNode, let frame = composerFrame {
             let isComposing = node.kind == .text ? composingNodeId == node.id : editingNodeId == node.id
-            let references = canvas.incomingEdges(of: node.id).compactMap { canvas.node(id: $0.fromNodeId) }
-            let slotCounts = Dictionary(references.filter { $0.kind == .slot }.map {
-                ($0.id, Set(slotReferenceImagePaths(for: $0)).count)
-            }, uniquingKeysWith: { first, _ in first })
+            let edges = canvas.incomingEdges(of: node.id)
+            let references = edges.compactMap { canvas.node(id: $0.fromNodeId) }
             CanvasRenderBoundary(key: .init(
                 node: node, selected: true, editing: isComposing,
                 hovered: false, textVisible: true, slotRevision: canvas.slotRevision,
                 contentRevision: store.canvasSlotRevision, currentGroup: store.currentSpecialSlotId,
                 currentContentId: node.groupId == store.currentSpecialSlotId ? store.slots[node.slot]?.contentId : nil,
-                path: videoInputSummary(node)?.detail ?? ""
+                path: videoInputSummary(node)?.detail ?? "",
+                referenceNodes: references, referenceEdges: edges
             )) {
+                // 沿用主卡片的媒体选择与缩略图缓存；上游身份变化才重读内容。
+                let media = Dictionary(references.compactMap { reference in
+                    reference.kind == .text ? nil : previewableMedia(of: reference).map { (reference.id, $0) }
+                }, uniquingKeysWith: { first, _ in first })
+                let slotCounts = Dictionary(references.filter { $0.kind == .slot }.map {
+                    ($0.id, Set(slotReferenceImagePaths(for: $0)).count)
+                }, uniquingKeysWith: { first, _ in first })
                 CanvasNodeComposer(node: node, text: node.kind == .text ? node.textGenerationPrompt : liveText(for: node),
                                editing: isComposing,
                                inputCount: CanvasEdgeInputs.imageReferences(edgeInputs: resolveEdgeInputs(for: node),
                                                                            slotImages: inputImagePaths(for: node)).count,
                                inputSummary: videoInputSummary(node)?.title,
                                inputDetail: videoInputSummary(node)?.detail ?? "",
-                               referenceNodes: references, slotImageCounts: slotCounts,
+                               referenceNodes: references, referenceMedia: media,
+                               inputAttachments: inputAttachments(for: node),
+                               slotImageCounts: slotCounts,
                                onReference: { reference in
                                    endInlineEditing()
                                    canvas.select(id: reference.id, additive: false)
                                    if !canvasContentViewport.intersects(screenFrame(of: reference)) { _ = handleKeyAction(.fitSelection) }
+                               },
+                               onInputPreview: { attachment in
+                                   if attachment.canvasIsImageLike || attachment.canvasIsVideoLike {
+                                       openFullscreen(node, attachment: attachment)
+                                   } else { openInputFiles(node) }
                                },
                                onBegin: {
                                    if node.kind == .text {
@@ -191,7 +256,8 @@ extension CanvasWorkspaceView {
                                    } else { commitEdit(node, text: $0) }
                                },
                                onCancel: { editingNodeId = nil; composingNodeId = nil },
-                               onInputs: { openInputFiles(node) },
+                               onInputs: { addInputFiles(node) },
+                               onManageInputs: { openInputFiles(node) },
                                onRecover: node.taskId == nil || node.needsGenerationRecovery ? nil : { _ = recoverGeneration(node) },
                                onRestart: node.needsGenerationRecovery ? { _ = startGeneration(node, restarting: true) } : nil) {
                     nodeActions(node)

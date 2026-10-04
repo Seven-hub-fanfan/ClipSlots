@@ -32,6 +32,7 @@ verify_app_bundle() {
   test -d "$app" || die "$app missing"
   test -x "$app/Contents/MacOS/$APP_NAME" || die "$APP_NAME executable missing or not executable"
   test -x "$app/Contents/MacOS/clipslots-cli" || die "bundled clipslots-cli missing or not executable in $app"
+  test -x "$app/Contents/Resources/codex-runtime/bin/codex" || die "bundled Codex missing in $app"
   test -f "$app/Contents/Resources/skills/clipslots-manager/SKILL.md" || die "bundled skill missing in $app"
   plutil -lint "$app/Contents/Info.plist" >/dev/null
   test -f "$app/Contents/Resources/AppIcon.icns" || die "AppIcon.icns missing in app bundle"
@@ -42,10 +43,12 @@ sign_app_bundle() {
   local app="$1"
   if [ -n "$SIGN_IDENTITY" ]; then
     echo "==> Sign app with Developer ID: $SIGN_IDENTITY"
-    codesign --force --deep --timestamp --options runtime --sign "$SIGN_IDENTITY" "$app"
+    codesign --force --timestamp --options runtime --sign "$SIGN_IDENTITY" "$app/Contents/MacOS/clipslots-cli"
+    codesign --force --timestamp --options runtime --sign "$SIGN_IDENTITY" "$app"
   else
     echo "==> Sign app adhoc (set SIGN_IDENTITY for Gatekeeper-safe release)"
-    codesign --force --deep --timestamp=none --sign - "$app"
+    # Keep official Codex signatures stable across ClipSlots updates (Keychain identity).
+    codesign --force --timestamp=none --sign - "$app"
   fi
   verify_app_bundle "$app"
 }
@@ -88,6 +91,10 @@ png=b'\x89PNG\r\n\x1a\n'+chunk(b'IHDR', struct.pack('>IIBBBBB', W,H,8,2,0,0,0))+
 out.write_bytes(png)
 PY
 }
+
+echo "==> Sync bundled skill"
+bash "$ROOT_DIR/scripts/sync-skill.sh"
+bash "$ROOT_DIR/scripts/sync-skill.sh" --check
 
 echo "==> Clean"
 detach_if_mounted "/Volumes/$VOLUME_NAME"
@@ -144,6 +151,13 @@ codesign --force --timestamp=none --sign - "$CLI_DST"
 test -x "$CLI_DST" || die "bundled clipslots-cli missing or not executable at $CLI_DST"
 echo "  OK: bundled clipslots-cli -> $CLI_DST"
 
+echo "==> Bundle pinned official Codex runtime"
+CODEX_BUNDLE_ARGS=(--bundle "$APP_DIR")
+if [ -n "${CODEX_RUNTIME_ARCHIVE:-}" ]; then
+  CODEX_BUNDLE_ARGS+=(--archive "$CODEX_RUNTIME_ARCHIVE")
+fi
+python3 "$ROOT_DIR/scripts/bundle_codex_runtime.py" "${CODEX_BUNDLE_ARGS[@]}"
+
 # ---------------------------------------------------------------------------
 # v2.9.28: 把内置 Skill 目录打进 App bundle。
 # 根因：同上，v2.9.27 脚本重写遗漏了 skills 拷贝，导致 Skill 市场"安装到 Agent"
@@ -180,6 +194,8 @@ export BACKGROUND_PNG
 create_dmg_background
 
 echo "==> Create and layout DMG"
+APP_SIZE_MB="$(du -sm "$APP_DIR" | awk '{print $1}')"
+DMG_SIZE="$((APP_SIZE_MB + 96))m"
 # Ensure no stale mount
 detach_if_mounted "/Volumes/$VOLUME_NAME"
 sleep 1

@@ -58,6 +58,37 @@ final class CanvasStore: ObservableObject {
     /// （那会把这个轻量 store 拖回全局重绘），所以需要一个显式的「脏」信号：主 store 那边槽位一变，
     /// 或撤销/重做把槽位文本改回去了，就 `+= 1`，绑定节点据此重读。
     @Published private(set) var slotRevision: Int = 0
+    struct AgentFocusRequest: Equatable {
+        let id = UUID()
+        let nodeID: String
+    }
+    @Published private(set) var agentFocusRequest: AgentFocusRequest?
+    @Published private(set) var agentHistoryError: String?
+    private var agentBodyEdits: [String: (undo: () throws -> Void, redo: () throws -> Void)] = [:]
+
+    func focusAgentNode(_ id: String) {
+        guard nodes.contains(where: { $0.id == id }) else { return }
+        selectedNodeIds = [id]
+        agentFocusRequest = AgentFocusRequest(nodeID: id)
+    }
+
+    /// Body writes have already succeeded before recording. Never advance the
+    /// history cursor if a later compare-and-exchange refuses undo or redo.
+    func recordAgentBodyEdit(detail: String, undo: @escaping () throws -> Void,
+                             redo: @escaping () throws -> Void) -> String {
+        let entry = CanvasHistoryEntry(kind: .editNode, detail: "Agent · " + detail,
+            before: nodes, after: nodes, beforeEdges: edges, afterEdges: edges)
+        let oldTokens = Set(history.entries.compactMap { $0.attachmentEdit?.stashToken })
+        history.push(entry)
+        let retained = Set(history.entries.map(\.id))
+        agentBodyEdits = agentBodyEdits.filter { retained.contains($0.key) }
+        agentBodyEdits[entry.id] = (undo, redo)
+        let newTokens = Set(history.entries.compactMap { $0.attachmentEdit?.stashToken })
+        for token in oldTokens.subtracting(newTokens) { discardAttachmentStash(token) }
+        agentHistoryError = nil
+        noteSlotDataChanged()
+        return entry.id
+    }
 
     // MARK: - 视口（非 @Published，见类型注释）
 
@@ -235,6 +266,9 @@ final class CanvasStore: ObservableObject {
             }
         }
         history.removeAll()
+        agentBodyEdits.removeAll()
+        agentHistoryError = nil
+        agentFocusRequest = nil
         slotRevision += 1
     }
 
@@ -309,6 +343,7 @@ final class CanvasStore: ObservableObject {
                               groupId: groupId,
                               slot: slot,
                               kind: kind,
+                              mediaRole: parentNodeId == nil && parentNodeIds.isEmpty ? .source : .generation,
                               x: snapped.x,
                               y: snapped.y,
                               width: size.width,
@@ -459,6 +494,7 @@ final class CanvasStore: ObservableObject {
 
     func beginGeneration(_ node: CanvasNode, recovering: Bool = false, restarting: Bool = false) -> CanvasGenerationTicket? {
         guard let current = self.node(id: node.id), current.createdAt == node.createdAt,
+              current.canGenerate || current.kind == .text,
               recovering || restarting || !current.needsGenerationRecovery,
               !generationTickets.values.contains(where: { $0.matches(current, projectId: activeProjectId) })
         else { return nil }
@@ -807,7 +843,8 @@ final class CanvasStore: ObservableObject {
     /// 与文本编辑同构：附件列表已由调用方（画布视图）直接写进槽位，这里只挂历史；
     /// 被删附件的字节在写入前已由调用方复制进 `CanvasAttachmentStash`。
     func recordSlotAttachmentEdit(nodeId: String,
-                                  edit: CanvasHistoryEntry.SlotAttachmentEdit) {
+                                  edit: CanvasHistoryEntry.SlotAttachmentEdit,
+                                  addingInputs: Bool = true) {
         guard edit.before != edit.after else {
             discardAttachmentStash(edit.stashToken)
             return
@@ -816,7 +853,18 @@ final class CanvasStore: ObservableObject {
             discardAttachmentStash(edit.stashToken)
             return
         }
-        commit(.editAttachments, detail: nodeTitle(node), attachmentEdit: edit) { }
+        commit(.editAttachments, detail: nodeTitle(node), attachmentEdit: edit) {
+            guard let index = nodes.firstIndex(where: { $0.id == nodeId }) else { return }
+            let beforeIds = Set(edit.before.map { $0.id.uuidString })
+            let alive = Set(edit.after.map { $0.id.uuidString })
+            nodes[index].inputAttachmentIds.removeAll { !alive.contains($0) }
+            if node.isMediaSource {
+                nodes[index].inputAttachmentIds = []
+            } else if addingInputs {
+                nodes[index].inputAttachmentIds += edit.after.map { $0.id.uuidString }
+                    .filter { !beforeIds.contains($0) && !nodes[index].outputAttachmentIds.contains($0) }
+            }
+        }
     }
 
     /// 记一步「入参文件提升为主体」（v2.16.5）。
@@ -966,6 +1014,11 @@ final class CanvasStore: ObservableObject {
     /// 撤销一步。返回被撤销的条目（调用方用它做 toast 文案），没得撤时返回 nil。
     @discardableResult
     func undo() -> CanvasHistoryEntry? {
+        agentHistoryError = nil
+        if let target = history.undoTarget, let edit = agentBodyEdits[target.id] {
+            do { try edit.undo() }
+            catch { agentHistoryError = error.localizedDescription; return nil }
+        }
         guard let entry = history.undo() else { return nil }
         apply(nodes: entry.before, edges: entry.beforeEdges)
         onRestoreDocument?()
@@ -983,6 +1036,11 @@ final class CanvasStore: ObservableObject {
 
     @discardableResult
     func redo() -> CanvasHistoryEntry? {
+        agentHistoryError = nil
+        if let target = history.redoTarget, let edit = agentBodyEdits[target.id] {
+            do { try edit.redo() }
+            catch { agentHistoryError = error.localizedDescription; return nil }
+        }
         guard let entry = history.redo() else { return nil }
         apply(nodes: entry.after, edges: entry.afterEdges)
         onRestoreDocument?()
@@ -1080,6 +1138,8 @@ final class CanvasStore: ObservableObject {
         // push 会截断已撤销分支 / 在超限时丢最旧条目：那些条目的暂存字节必须同步收走，
         // 否则 redo 已不可能，磁盘上只剩无人引用的孤儿字节。
         let tokensAfter = Set(history.entries.compactMap { $0.attachmentEdit?.stashToken })
+        let retainedIDs = Set(history.entries.map(\.id))
+        agentBodyEdits = agentBodyEdits.filter { retainedIDs.contains($0.key) }
         for token in tokensBefore.subtracting(tokensAfter) {
             discardAttachmentStash(token)
         }

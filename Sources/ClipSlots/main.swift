@@ -3067,11 +3067,31 @@ final class SlotStoreObservable: ObservableObject {
     ///
     /// 返回 nil = 存储层报 UNKNOWN（读不出来），调用方必须中止而不是当成空内容 —— 把 UNKNOWN
     /// 当空内容处理，等于用一份空白覆盖掉一份读不出来的真实数据。
-    private func canvasReadFullContent(groupId: String, slot: Int) -> SlotContent? {
+    func canvasReadFullContent(groupId: String, slot: Int) -> SlotContent? {
         if groupId == currentSpecialSlotId {
             return contentForSlotOrUnknown(slot)
         }
         return canvasStorage(groupId: groupId).getOrUnknown(slot, in: groupId)
+    }
+
+    /// Fence already queued snapshots before CAS. A bounded wait refuses a busy
+    /// editor instead of letting an older queued snapshot overwrite the Agent result.
+    func exchangeCanvasAgentBody(groupId: String, slot: Int, expected: AgentSlotBody,
+                                 replacement: AgentSlotBody) throws {
+        precondition(Thread.isMainThread)
+        let drained = DispatchSemaphore(value: 0)
+        slotWriteQueue.async { drained.signal() }
+        guard drained.wait(timeout: .now() + 0.12) == .success else { throw AgentCanvasError.busy }
+        guard let visible = canvasReadFullContent(groupId: groupId, slot: slot) else {
+            throw AgentCanvasError.unavailable
+        }
+        guard AgentSlotBody(visible) == expected else { throw AgentCanvasError.conflict }
+        let content = try canvasStorage(groupId: groupId).exchangeAgentBody(
+            slot, in: groupId, expected: expected, replacement: replacement)
+        suppressWatcher()
+        if groupId == currentSpecialSlotId { slots[slot] = content }
+        bumpCanvasSlotRevision()
+        refreshTrigger = UUID()
     }
 
     /// 写一个任意组槽位的完整 `SlotContent`（含刷新身份字段）。

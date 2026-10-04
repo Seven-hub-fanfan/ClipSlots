@@ -210,7 +210,7 @@ struct ContentView: View {
     @AppStorage(AgentPreferences.canvasSidebarVisibleKey) private var canvasAgentVisible = false
 
     private var agentSidebarVisible: Bool {
-        workspaceMode == .canvas ? canvasAgentVisible : editAgentVisible
+        workspaceMode == .agent ? false : (workspaceMode == .canvas ? canvasAgentVisible : editAgentVisible)
     }
 
     private var agentSidebarBinding: Binding<Bool> {
@@ -282,7 +282,7 @@ struct ContentView: View {
                 // 注意：修法仍然是**改结构**，不是给侧栏补 `ignoresSafeArea(.top)` / 负 padding
                 // 去"顶穿"上面那几行。那类偏方会让侧栏画到别人的布局里（横幅一出现就当场对不齐），
                 // 而且缺口的真正来源是"侧栏起点被上面的行往下推"，不改层级就永远治不干净。
-                if workspaceMode != .canvas {
+                if workspaceMode == .edit {
                     headerTitleSection
                 }
 
@@ -332,7 +332,7 @@ struct ContentView: View {
                     // 搜索结果）+ 工作区本体。它整列被 Agent 侧栏挤压，而标题栏在上一层通宽不受影响 ——
                     // 侧栏因此从标题栏下沿一路贴到底，头顶不再有缺口。
                     VStack(spacing: 0) {
-                        if workspaceMode != .canvas {
+                        if workspaceMode == .edit {
                             editHeaderRows
                         }
 
@@ -355,6 +355,8 @@ struct ContentView: View {
                                     .toolbarBackground(.hidden, for: .windowToolbar)
                             case .edit:
                                 editWorkspace
+                            case .agent:
+                                AgentWorkspaceView(model: agentSessions.agent)
                             }
                         }
                         .animation(nil, value: workspaceMode)
@@ -378,8 +380,12 @@ struct ContentView: View {
                     .layoutPriority(1)
 
                     if agentSidebarVisible {
-                        AgentSidebarView(model: agentSessions.session(for: workspaceMode),
-                                         isVisible: agentSidebarBinding, workspaceMode: workspaceMode)
+                        AgentSidebarView(model: workspaceMode == .canvas
+                                         ? agentSessions.canvasSession(canvas: canvasStore, store: store)
+                                         : agentSessions.session(for: workspaceMode),
+                                         isVisible: agentSidebarBinding, workspaceMode: workspaceMode,
+                                         legacyCanvasModel: workspaceMode == .canvas ? agentSessions.canvas : nil)
+                            .id(workspaceMode == .canvas ? canvasStore.activeProjectId : workspaceMode.rawValue)
                             .ignoresSafeArea(.container, edges: workspaceMode == .canvas ? .top : [])
                             .transition(.move(edge: .trailing))
                             // 侧栏自己是定宽的，这里再声明一次「不许被压」：没有它，SwiftUI 仍可能
@@ -397,7 +403,7 @@ struct ContentView: View {
                 // 上一版为了避免「切模式时内容区高度跳变」把它一直留着，但它整条都是槽位语义
                 // （保存/粘贴/圆盘/切组/上次粘贴），在画布上没有一个是可用动作。高度跳变的代价
                 // 由「切换本身是瞬时无动画」吸收掉了，不值得为它牺牲画布的全屏纯净。
-                if workspaceMode != .canvas {
+                if workspaceMode == .edit {
                     bottomBar
                 }
             }
@@ -431,7 +437,7 @@ struct ContentView: View {
                     // 画布模式把 chrome 全摘了之后，它直接糊在网格上，还会在切到画布的瞬间闪一下
                     // （用户视频 0:04 的「蓝色点击反馈圆圈」就是这个闪现，不是按钮的点击动画）。
                     // 画布要的是一张能给网格线做对比基准的中性底，不是海报。
-                    if AppTheme.isMinimalSkin || workspaceMode == .canvas {
+                    if AppTheme.isMinimalSkin || workspaceMode != .edit {
                         AppTheme.canvasSurface
                     } else {
                         AmbientBackgroundHost(simplified: liveResize.isResizing)

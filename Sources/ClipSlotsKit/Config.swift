@@ -14,8 +14,13 @@ public struct AppConfig: Codable {
 
     public init() {}
 
-    private static let configURL = FileManager.default.homeDirectoryForCurrentUser
-        .appendingPathComponent(".config/clipslots/config.toml")
+    private static var configURL: URL {
+        if let path = ProcessInfo.processInfo.environment["CLIPSLOTS_CONFIG_PATH"],
+           !path.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return URL(fileURLWithPath: (path as NSString).expandingTildeInPath)
+        }
+        return FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".config/clipslots/config.toml")
+    }
 
     public static func load() -> AppConfig {
         guard let content = try? String(contentsOf: Self.configURL, encoding: .utf8) else {

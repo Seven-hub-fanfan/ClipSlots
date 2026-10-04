@@ -7,12 +7,11 @@ import ClipSlotsKit
 ///   - `.edit`   槽位卡片主界面（默认）
 ///   - `.canvas` 无限画布（生图工作台）
 ///
-/// ★ 为什么删掉了 Agent 段：Agent 不是第三个页面，而是要**嵌进每个页面的侧边栏**。放在这里当第三段
-/// 会把它误传达成「和编辑/画布并列的另一块工作区」，而且一个永远点不动的灰段在顶栏正中央只是噪声。
-/// 等侧边栏落地时它会出现在两个页面各自的右侧，而不是回到这个控件里。
+/// Agent 提供独立会话工作区；编辑和画布原有的右侧助手仍各自保留。
 enum WorkspaceMode: String, CaseIterable, Identifiable, Equatable {
     case edit
     case canvas
+    case agent
 
     var id: String { rawValue }
 
@@ -20,6 +19,7 @@ enum WorkspaceMode: String, CaseIterable, Identifiable, Equatable {
         switch self {
         case .edit: return "编辑"
         case .canvas: return "画布"
+        case .agent: return "Agent"
         }
     }
 
@@ -27,6 +27,7 @@ enum WorkspaceMode: String, CaseIterable, Identifiable, Equatable {
         switch self {
         case .edit: return "rectangle.stack"
         case .canvas: return "square.grid.3x3.topleft.filled"
+        case .agent: return "sparkles"
         }
     }
 }
@@ -42,8 +43,8 @@ struct WorkspaceModeSwitcher: View {
     ///
     /// v2.11.7 hotfix20：顶栏改成「流内放等宽透明占位 + overlay 里放真控件」来实现几何真居中，
     /// 两处必须**用同一个数**，否则占位与实体不等宽，居中就会差出那点差值。所以这里把宽度从
-    /// 「由内容自然撑开」改成一个显式常量：段宽 62 × 2 + 段间距 2 + 外圈 padding 3 × 2。
-    static let preferredWidth: CGFloat = 62 * 2 + 2 + 3 * 2
+    /// 「由内容自然撑开」改成一个显式常量：段宽 62 × 3 + 段间距 2 × 2 + 外圈 padding 3 × 2。
+    static let preferredWidth: CGFloat = 196
 
     /// 单段的固定尺寸（v2.11.7 hotfix21）。
     ///
@@ -135,6 +136,8 @@ struct WorkspaceModeSwitcher: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        .accessibilityLabel(mode.title)
+        .accessibilityIdentifier("workspace-\(mode.rawValue)")
         .help(mode.title)
     }
 }

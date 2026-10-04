@@ -83,6 +83,11 @@ private func coldStorage(forGroup gid: String) -> SlotStorage {
 
 let t = TestRunner()
 
+if CommandLine.arguments.contains("--tika-only") {
+    runTikaLifecycleTests(t)
+    t.report()
+}
+
 // 纯逻辑：SlotContent 空槽判定
 do {
     t.check(SlotContent().isEmpty, "新建 SlotContent 应为空")
@@ -3769,6 +3774,8 @@ final class SmokeEventLog: @unchecked Sendable {
     func append(_ event: AgentRunEvent) {
         lock.lock(); defer { lock.unlock() }
         switch event {
+        case .interactionRequested: storage.append("interaction")
+        case .sessionStarted: storage.append("session")
         case .reasoningDelta: storage.append("reasoning")
         case .contentDelta: storage.append("content")
         case .assistantCompleted: storage.append("assistant")
@@ -7166,14 +7173,24 @@ do {
                                            excludingAttachmentIds: [generated.id.uuidString],
                                            includingGeneratedAssets: true, fileExists: exists),
             [], "CRATE-IO-11 明确的产物排除标记始终生效")
+    t.equal(CrateGeneration.inputImagePaths(from: [generated],
+                                           excludingAttachmentIds: [], explicitInputIds: [generated.id.uuidString],
+                                           fileExists: exists),
+            ["/store/generated.bin"], "CANVAS-INPUT-1 显式上传旧生成图可用作新的参考文件")
+    t.equal(CrateGeneration.inputImagePaths(from: [generated],
+                                           excludingAttachmentIds: [generated.id.uuidString],
+                                           explicitInputIds: [generated.id.uuidString], fileExists: exists),
+            [], "CANVAS-INPUT-2 本节点产物标记始终优先，重跑不会隐式加入上轮输出")
 
     // 节点字段本身的往返 + 向后兼容。
     var node = canvasNode(slot: 5)
     node.outputAttachmentIds = ["id-1", "id-2"]
+    node.inputAttachmentIds = ["reference-1", "reference-2"]
     let data = try! JSONEncoder().encode(node)
     let back = try! JSONDecoder().decode(CanvasNode.self, from: data)
     t.equal(back.outputAttachmentIds, ["id-1", "id-2"],
             "★CRATE-IO-9 产物 id 必须落盘（画布重开后重跑仍要认得出哪张是产物）")
+    t.equal(back.inputAttachmentIds, node.inputAttachmentIds, "CANVAS-INPUT-3 重启保留显式入参身份与顺序")
     t.check(!String(data: data, encoding: .utf8)!.contains("\"outputAttachmentIds\":[]"),
             "CRATE-IO-10 空集合不写盘（没出过图的节点不该多一行）")
     let legacy = """
@@ -7181,6 +7198,34 @@ do {
     """.data(using: .utf8)!
     t.equal(try! JSONDecoder().decode(CanvasNode.self, from: legacy).outputAttachmentIds, [],
             "CRATE-IO-11 老画布数据没有这个字段也要能读，缺省空集合")
+    t.equal(try! JSONDecoder().decode(CanvasNode.self, from: legacy).inputAttachmentIds, [],
+            "CANVAS-INPUT-4 旧素材节点不被推断为新增入参")
+
+    // 旧文档仅在加载时推断一次角色，显式角色永远不受后续断线/连线影响。
+    let oldRoles = """
+    {"schemaVersion":2,"nodes":[
+      {"pageId":"p","groupId":"g","slot":1,"kind":"image","inputAttachmentIds":["old-input"]},
+      {"pageId":"p","groupId":"g","slot":2,"kind":"video"},
+      {"pageId":"p","groupId":"g","slot":3,"kind":"image","taskId":"submitted"},
+      {"pageId":"p","groupId":"g","slot":4,"kind":"image","outputAttachmentIds":["output"]},
+      {"pageId":"p","groupId":"g","slot":5,"kind":"image","mediaRole":"generation"},
+      {"pageId":"p","groupId":"g","slot":6,"kind":"video","mediaRole":"source"}
+    ],"edges":[
+      {"id":"e1","fromNodeId":"g#1","toNodeId":"g#2","role":"auto"},
+      {"id":"e2","fromNodeId":"g#1","toNodeId":"g#6","role":"auto"}
+    ]}
+    """
+    let roles = try! JSONDecoder().decode(CanvasDocument.self, from: Data(oldRoles.utf8))
+    t.equal(roles.nodes.map(\.mediaRole), [.source, .generation, .generation, .generation, .generation, .source],
+            "CANVAS-ROLE-1 旧入参标记不误判素材，连线/任务/产物迁为生成，显式角色优先")
+    t.equal(roles.nodes.map(\.canGenerate), [false, true, true, true, true, false],
+            "CANVAS-ROLE-2 素材不参与生成")
+    t.equal(roles.nodes[0].inputAttachmentIds, ["old-input"], "CANVAS-ROLE-3 迁移不删旧附件身份")
+    var disconnected = roles
+    disconnected.edges = []
+    let reopened = try! JSONDecoder().decode(CanvasDocument.self, from: JSONEncoder().encode(disconnected))
+    t.equal(reopened.nodes.map(\.mediaRole), roles.nodes.map(\.mediaRole),
+            "CANVAS-ROLE-4 断线后重启不改变角色")
 }
 
 // MARK: - CRATE-SEED：模型不收 seed（v2.11.17 · e2e 抓到的真实坑）
@@ -9157,6 +9202,23 @@ printf '%s\n' '{"type":"text-delta","text":"<clipslots-call cmd=\u0027clipslots 
     }
     t.check(batchCancelled && cancelledCalls.snapshot().count == 1,
             "Tika 同一批工具执行中停止后不再启动下一条命令")
+
+    let previewCalls = LocalCallRecorder()
+    let previewBackend = TikaCLIService(config: .init(cliPath: batchCLI.path, perTurnTimeout: 3, maxToolTurns: 1),
+        localRunner: { path, args in
+            previewCalls.record(path, args)
+            return AgentProcessResult(exitCode: 0, stdout: "{}", stderr: "", timedOut: false)
+        })
+    let previewMessages: [AgentMessage] = smokeAwait {
+        var config = AgentConfig()
+        config.canvasPreviewOnly = true
+        return (try? await previewBackend.run(history: [.init(role: .user, content: "canvas preview")],
+                                              config: config, tools: nil, onEvent: { _ in })) ?? []
+    }
+    t.check(previewCalls.snapshot().isEmpty && previewMessages.filter { $0.role == .tool && $0.isFailure }.count == 2,
+            "画布预览拒绝 Tika XML 直接工具调用")
 }
 
+runTikaLifecycleTests(t)
+runAgentCanvasTests(t)
 t.report()

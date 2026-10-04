@@ -45,7 +45,7 @@ struct CanvasInspectorPanel: View {
                 // 模型/尺寸是每次生成前都要看一眼的）。文本节点没有这一段。
                 // v2.11.19：视频节点接上了提交路径，于是这一段对 image / video 同时开放，
                 // 差别在于视频多了分辨率 / 时长 / 配音三项（且只在模型真的声明了对应参数时出现）。
-                if node.kind.producesAsset {
+                if node.canGenerate {
                     generationSection
                     Divider().opacity(0.4)
                 }
@@ -517,7 +517,8 @@ struct CanvasInspectorPanel: View {
 
     private var infoSection: some View {
         VStack(alignment: .leading, spacing: 4) {
-            infoRow("类型", node.kind.displayName)
+            infoRow("类型", node.displayName)
+            if node.isMediaSource { infoRow("比例", node.ratio) }
             // 模型 / 比例不再列在只读区 —— 它们上面已经是选择器了，同一个值在一个面板里出现两次
             // 只会让人怀疑哪个才算数。
             // ★ hotfix20：节点 = 槽位，「未绑定」这一档在数据结构层面就不存在了

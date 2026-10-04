@@ -98,7 +98,7 @@ struct CanvasNodeActionBar: View {
 
     var body: some View {
         HStack(spacing: 10) {
-            if node.kind.producesAsset {
+            if node.canGenerate {
                 modelChip
                 if currentModel?.supportsRatio ?? true { ratioChip }
                 if isVideo {
@@ -106,7 +106,7 @@ struct CanvasNodeActionBar: View {
                     if currentModel?.supportsDuration ?? false { durationChip }
                     if currentModel?.supportsAudio ?? false { audioChip }
                 }
-            } else {
+            } else if node.kind == .text {
                 Menu {
                     ForEach(AgentConfig.modelPresets) { preset in
                         Button(preset.id) { textModel = preset.id }
@@ -126,7 +126,7 @@ struct CanvasNodeActionBar: View {
             }
             Spacer(minLength: 0)
             if upstreamCount > 0 { upstreamBadge }
-            runControl
+            if node.canGenerate || node.kind == .text { runControl }
         }
         .frame(height: 34)
         .onAppear { catalog.loadIfNeeded() }
@@ -162,7 +162,7 @@ struct CanvasNodeActionBar: View {
                     Text(canvas.isStoppingGeneration(node) ? "正在停止跟踪" : runningLabel)
                         .font(.system(size: 11, weight: .medium))
                         .foregroundColor(AppTheme.chromeAccentInk)
-                    if node.kind.producesAsset {
+                    if node.canGenerate {
                         Button { canvas.stopGeneration(node) } label: {
                             Image(systemName: "stop.fill").frame(width: 28, height: 28)
                         }

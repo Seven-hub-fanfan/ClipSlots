@@ -4,7 +4,7 @@
 
 ## 当前版本
 
-- **当前版本：v2.17.8**
+- **当前版本：v2.17.9**
 - 平台：macOS（Swift / SwiftUI，SPM 构建，macOS 13+）
 - 单一版本号事实来源：`Info.plist` 的 `CFBundleShortVersionString`（`AppVersion.current` 动态读取，`AppVersion.fallback` 为编译期兜底）。CLI 版本号见 `Sources/ClipSlotsCLI/main.swift` 的 `CLI_VERSION`。
 
@@ -16,6 +16,16 @@
 - 另一条铁律：**装机的包必须与将要发布的版本号严格对应**。曾出现「装进 /Applications 的 2.10.91 里含未提交代码」的脏包，与 GitHub 上的 2.10.91 不是同一个东西，排查时极易误判。
 
 ## 版本要点（近期）
+
+### v2.17.9 — Agent 工作区与画布文字闭环
+
+- 将 21781103 已验收候选及此前本机迭代正式发布，版本 2.17.9、构建号 217900。
+- 独立 Codex 工作区、官方历史/项目/审查、Skills/MCP、本机定时任务；保留官方运行程序签名，内置固定版本 0.160.0。
+- 画布按项目隔离会话，显式引用 1～3 节点，文字预览/冲突检测/应用/撤销，保留附件和标签。
+- Enter 发送、Shift+Enter 换行、IME 选字保护，恢复 `/` 指令及 `$` Skill 规范快照；删除不可用 Work 入口，统一创作欢迎页。
+- 候选原生 247/247、核心 32743/32743、Codex 协议 128/128 通过；均不代表付费真实模型效果评测。
+- 尚未实现完整画布图结构读取或工作流生成保存 Skill；详见 `RELEASE_NOTES_v2.17.9.md`。
+- 发布前运行 `scripts/sync-skill.sh`；当前 Skill 以 `skills/clipslots-manager/SKILL.md` 为源，`build/` 全部忽略，禁止提交本机备份和用户资料。
 
 ### v2.17.8 — Agent 流式输出与长历史性能优化
 

@@ -339,7 +339,8 @@ extension CanvasWorkspaceView {
             HStack(spacing: 10) {
                 Circle().fill(TapSkin.nodeAccent(node.kind)).frame(width: 16, height: 16).padding(.horizontal, 6)
                 Rectangle().fill(TapSkin.chromeDivider).frame(width: 1, height: 18)
-                canvasIconButton("text.cursor", help: "编辑内容") { beginEdit(node) }
+                canvasIconButton(node.isMediaSource ? "arrow.up.doc" : "text.cursor",
+                                 help: node.isMediaSource ? "上传 / 替换素材" : "编辑内容") { beginEdit(node) }
                 canvasIconButton("doc.on.doc", help: "复制内容") { copySelectionContents() }
                 if canArchiveToLibrary(node) {
                     canvasIconButton("folder.badge.plus", help: "加入槽位库") { archiveNodeToLibrary(node) }

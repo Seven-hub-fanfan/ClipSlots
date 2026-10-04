@@ -149,7 +149,7 @@ struct CanvasTapNodeCard: View {
             promptEditor
         } else if let media {
             mediaBody(media)
-        } else if !text.isEmpty {
+        } else if !node.kind.isMediaNode && !text.isEmpty {
             textBody
         } else {
             emptyGlyph
@@ -207,6 +207,21 @@ struct CanvasTapNodeCard: View {
                     .foregroundColor(TapSkin.chromeInkDim)
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
                     .padding(s(12))
+            } else if node.isMediaSource {
+                Button(action: onBeginEdit) {
+                    VStack(spacing: s(10)) {
+                        Image(systemName: "plus")
+                            .font(.system(size: s(24), weight: .light))
+                        Text(node.kind == .video ? "上传视频" : "上传图片")
+                            .font(.system(size: fs(12)))
+                    }
+                    .foregroundColor(TapSkin.chromeInkDim)
+                    .frame(width: s(120), height: s(80))
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .canvasControlRegion("source-upload-\(node.id)")
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
                 Image(systemName: node.kind.symbolName)
                     .font(.system(size: s(TapSkin.cardEmptyGlyphSize), weight: .light))
@@ -241,7 +256,9 @@ struct CanvasTapNodeCard: View {
     @ViewBuilder
     private var nameTag: some View {
         CanvasNodeNameTag(symbol: node.kind.symbolName,
-                          label: node.kind == .text ? "TEXT" : (node.kind == .video ? "VIDEO" : "IMAGE"),
+                          label: node.kind == .text ? "TEXT" : (node.isMediaSource
+                            ? (node.kind == .video ? "VIDEO" : "IMAGE")
+                            : (node.kind == .video ? "生成视频" : "生成图片")),
                           isActive: hoverActive || isSelected,
                           cardWidth: node.width,
                           renderScale: renderScale,
@@ -273,7 +290,7 @@ struct CanvasTapNodeCard: View {
     /// 所以两者各让一边 —— 位置跟着"这张卡的哪一侧是空的"走，而不是图省事取一个统一值。
     @ViewBuilder
     private var infoBadge: some View {
-        if hoverActive, !isEditing, textVisible, let line = infoLine {
+        if hoverActive || isSelected, !isEditing, textVisible, let line = infoLine {
             Text(line)
                 .font(.system(size: fs(9.5), weight: .medium))
                 .foregroundColor(TapSkin.chipInk)
@@ -305,6 +322,9 @@ struct CanvasTapNodeCard: View {
     private var hoverChips: some View {
         if hoverActive, !isEditing, textVisible {
             HStack(spacing: s(5)) {
+                if node.isMediaSource, media != nil {
+                    chip("替换", glyph: "arrow.triangle.2.circlepath", action: onBeginEdit)
+                }
                 if canArchive {
                     chip("入库", glyph: "tray.and.arrow.down", action: onArchive)
                 }

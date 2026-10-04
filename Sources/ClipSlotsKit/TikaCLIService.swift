@@ -14,14 +14,11 @@ import Foundation
 //        → App 拦截、白名单校验、本地跑 clipslots
 //        → 把 stdout 塞回 `<clipslots-result>` XML 作为下一 user turn 发给 tikacli。
 //      这个循环在这里完成，对外呈现的 `AgentRunEvent` 与 DeepSeek 完全一致。
-//   3. **多轮历史用"每轮拼一次"策略**。tikacli 内部有 session cache，但为了让 `run()`
-//      调用可重入（用户随时开新会话）、不依赖 tikacli 侧的 session 生命周期，
-//      每次 App 层 `run()`：首轮加 `--new`，把整段 AgentChatModel history 拼成
-//      "背景 + 当前问题"发给 tikacli；后续工具循环用同一 tikacli cached session
-//      连续发 `<clipslots-result>` XML。
+//   3. **多轮历史用"每轮拼一次"策略**。每轮都用 `--new` 加自包含 transcript，
+//      避免编辑页/画布页争抢 tikacli 的全局 cached session。
 //
 // **护栏**（顺序对应上面各点）：
-//   - tikacli 子进程超时按 `TikaBackendConfig.perTurnTimeout` 走；触发就 SIGTERM 并当失败上报。
+//   - stdout 空闲超时按 `perTurnTimeout` 走，活跃请求另受 `maxTurnDuration` 硬上限保护。
 //   - Agent 输出里的 XML 强制过白名单（ClipSlotsCommandGuard），未白名单命令不执行，
 //     直接回喂 `code="COMMAND_NOT_ALLOWED"`，让 Agent 自愈。
 //   - 工具循环最多 `maxToolTurns` 轮，避免 Agent 死循环耗光调用额度。
@@ -36,6 +33,8 @@ public enum TikaBackendError: LocalizedError {
     case notAuthenticated
     case processFailed(exit: Int32, stderr: String)
     case timedOut
+    case turnDurationExceeded
+    case serverError(String)
     case emptyResponse
     case protocolViolation(String)
 
@@ -49,7 +48,11 @@ public enum TikaBackendError: LocalizedError {
             let trimmed = stderr.trimmingCharacters(in: .whitespacesAndNewlines)
             return "tikacli 进程失败（exit=\(exit)）\(trimmed.isEmpty ? "" : "：\(trimmed)")"
         case .timedOut:
-            return "tikacli 响应超时。可能是云端排队或网络问题，稍后重试；持续出现请检查企业网络。"
+            return "tikacli 长时间没有新的输出，已停止等待。请稍后重试；若已有工具执行结果，请先核对进度再继续。"
+        case .turnDurationExceeded:
+            return "tikacli 本轮持续时间已达上限，已停止等待。请缩小本次任务范围后继续。"
+        case .serverError(let message):
+            return "Tika 服务返回错误：\(message)"
         case .emptyResponse:
             return "tikacli 无响应文本。可能是 Agent 只输出了工具调用没有正文（不常见），请再问一次。"
         case .protocolViolation(let m):
@@ -96,7 +99,8 @@ public final class TikaCLIService: NSObject, AgentBackend, @unchecked Sendable {
 
         // 2. 首轮：把 history 拼成完整 primer 发过去，`--new` 起独立 session。
         //    只有最后一条 user 消息是当前问题，前面都是"背景"。
-        let primer = renderPrimer(from: history, systemPrompt: config.supplementalSystemPrompt)
+        let primer = renderPrimer(from: history, systemPrompt: config.supplementalSystemPrompt
+            + (sessionConfig.canvasPreviewOnly ? "\n" + sessionConfig.systemPrompt : ""))
         // 每个工具轮都以 --new 启动，并把到目前为止的完整 transcript 重发。
         // tikacli 0.6.x 没有 --session-id；依赖它的全局 cached session 会让编辑页/画布页并发串话。
         // 自包含 transcript 稍多耗一点 token，但换来确定的会话隔离。
@@ -139,7 +143,7 @@ public final class TikaCLIService: NSObject, AgentBackend, @unchecked Sendable {
                 return produced
             }
 
-            // 3c. 逐个执行（提示词要求一次一个，但宽容支持多个）
+            // 3c. 同一轮可包含多条独立命令；顺序执行、逐条回报并检查取消。
             var resultFragments: [String] = []
             for (item, toolCall) in zip(extraction.items, toolCalls) {
                 try Task.checkCancellation()
@@ -147,6 +151,14 @@ public final class TikaCLIService: NSObject, AgentBackend, @unchecked Sendable {
                 case .ok(let call):
                     await onEvent(.toolStarted(toolCall))
                     try Task.checkCancellation()
+                    if sessionConfig.canvasPreviewOnly {
+                        let rejection = AgentToolResult.failure("请只返回待预览的正文，用户确认后才会应用到画布。", code: "PREVIEW_REQUIRED")
+                        await onEvent(.toolCompleted(callId: toolCall.id, name: toolCall.name, result: rejection))
+                        produced.append(AgentMessage(role: .tool, content: rejection.content,
+                            toolCallId: toolCall.id, toolName: toolCall.name, isFailure: true))
+                        resultFragments.append(rejection.content)
+                        continue
+                    }
                     let exec = await localRunner(clipslotsCLIPath, call.argv)
                     let ok = exec.succeeded
                     let cliResult = ClipSlotsToolExecutionResult(
@@ -232,17 +244,28 @@ public final class TikaCLIService: NSObject, AgentBackend, @unchecked Sendable {
         let filtered = history.filter { $0.role != .system }
         for (idx, msg) in filtered.enumerated() {
             if idx == filtered.count - 1 && msg.role == .user {
-                currentQuestion = msg.content
+                currentQuestion = msg.wireContent
             } else {
                 priorTurns.append(msg)
             }
         }
         if currentQuestion.isEmpty, let last = filtered.last {
-            currentQuestion = last.content
+            currentQuestion = last.wireContent
             priorTurns = Array(filtered.dropLast())
         }
 
-        var parts: [String] = []
+        var parts: [String] = ["""
+        【ClipSlots 本地工具协议】
+        本机工具只能在正文中输出 <clipslots-call cmd="clipslots 子命令 参数"/>，等待本地结果后再确认完成。
+        不要用云端 shell/skill 读取本机文件或查操作规范。命令默认输出JSON，不添加 --json，不使用管道或脚本。
+        一组最多10个槽位，每页最多10组；31个独立序号应分到4组，槽位号始终1..10。
+        create-page "页名" --group-name "首组名" 同时创建首组；create-group "组名" --page-name "页名" 建后续组。
+        write <槽位> --text "正文" --page-name "页名" --group "组名" --if-empty 写入空槽。
+        list --page-name "页名" --group "组名" 查看槽位；groups --page-name "页名" 查看组；pages 查看页面。
+        cmd属性内部的双引号用 &quot; 转义。同页不同槽位的独立写入可在同一回复输出多条XML（建议每批≤32条）。
+        创建页/组等依赖操作先等成功结果，再输出依赖它的写入；每条命令都有独立结果，失败必须如实说明。
+        新任务先查必要状态；同一任务收到成功结果后不重复建页、建组或逐槽回读，独立操作尽量合批。
+        """]
         if !systemPrompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             parts.append("【补充系统指示（来自 App 端配置，与 Tika Agent 的 instructions 一起遵守）】\n" + systemPrompt)
         }
@@ -250,7 +273,7 @@ public final class TikaCLIService: NSObject, AgentBackend, @unchecked Sendable {
             var lines: [String] = []
             for m in priorTurns {
                 switch m.role {
-                case .user:     lines.append("用户：" + m.content)
+                case .user:     lines.append("用户：" + m.wireContent)
                 case .assistant: lines.append("Agent：" + m.content)
                 case .tool: lines.append("工具 \(m.toolName ?? "clipslots")：" + m.content)
                 default: break
@@ -293,11 +316,19 @@ public final class TikaCLIService: NSObject, AgentBackend, @unchecked Sendable {
         process.standardInput = FileHandle.nullDevice
 
         let box = TurnBox()
+        let waiter = TikaProcessWaiter(process: process, timeout: config.perTurnTimeout,
+                                      maxDuration: config.maxTurnDuration)
+        // #region debug-point A:turn-start
+        #if DEBUG
+        await box.debugReport("turn-start", extra: ["promptBytes": userMessage.utf8.count, "timeout": config.perTurnTimeout])
+        #endif
+        // #endregion
         let stdoutReader = Task.detached(priority: .userInitiated) {
             while true {
                 let data = stdout.fileHandleForReading.availableData
                 if data.isEmpty { break }
-                await box.ingest(data, onEvent: onEvent)
+                waiter.receivedOutput()
+                if await box.ingest(data, onEvent: onEvent) { waiter.streamCompleted() }
             }
         }
         let stderrReader = Task.detached(priority: .utility) {
@@ -308,7 +339,6 @@ public final class TikaCLIService: NSObject, AgentBackend, @unchecked Sendable {
             }
         }
 
-        let waiter = TikaProcessWaiter(process: process, timeout: config.perTurnTimeout)
         do {
             try await withTaskCancellationHandler {
                 try await waiter.runAndWait {
@@ -328,6 +358,11 @@ public final class TikaCLIService: NSObject, AgentBackend, @unchecked Sendable {
             }
             _ = await stdoutReader.result
             _ = await stderrReader.result
+            // #region debug-point A:turn-failure
+            #if DEBUG
+            await box.debugReport("turn-failure", extra: ["errorType": String(describing: type(of: error)), "timedOut": (error as? TikaBackendError).map { if case .timedOut = $0 { return true }; return false } ?? false])
+            #endif
+            // #endregion
             throw error
         }
 
@@ -337,12 +372,24 @@ public final class TikaCLIService: NSObject, AgentBackend, @unchecked Sendable {
         let exitCode = process.terminationStatus
         let acc = await box.snapshot()
         let stderrText = await box.snapshotStderr()
+        // #region debug-point C:turn-exit
+        #if DEBUG
+        await box.debugReport("turn-exit", extra: ["exitCode": exitCode])
+        #endif
+        // #endregion
 
+        if let message = acc.errorMessage { throw TikaBackendError.serverError(message) }
         if exitCode != 0 && stderrText.lowercased().contains("not authenticated") {
             throw TikaBackendError.notAuthenticated
         }
-        if exitCode != 0 && acc.text.isEmpty {
+        if exitCode != 0 && !acc.finished {
             throw TikaBackendError.processFailed(exit: exitCode, stderr: stderrText)
+        }
+        guard acc.finished else {
+            throw TikaBackendError.protocolViolation("输出流在完成信号前结束，本轮工具未执行。")
+        }
+        guard !acc.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw TikaBackendError.emptyResponse
         }
         return TurnOutcome(accumulator: acc)
     }
@@ -373,34 +420,86 @@ public final class TikaCLIService: NSObject, AgentBackend, @unchecked Sendable {
 private final class TikaProcessWaiter: @unchecked Sendable {
     private let process: Process
     private let timeout: TimeInterval
+    private let maxDuration: TimeInterval
     private let lock = NSLock()
     private var continuation: CheckedContinuation<Void, Error>?
-    private var finished = false
+    private var completion: Result<Void, Error>?
+    private var startedAt = ProcessInfo.processInfo.systemUptime
+    private var lastOutputAt = ProcessInfo.processInfo.systemUptime
+    private var streamEnded = false
 
-    init(process: Process, timeout: TimeInterval) {
+    init(process: Process, timeout: TimeInterval, maxDuration: TimeInterval) {
         self.process = process
         self.timeout = max(0.1, timeout)
+        self.maxDuration = max(0.1, maxDuration)
     }
 
     func runAndWait(onStarted: @escaping @Sendable () -> Void) async throws {
         try await withCheckedThrowingContinuation { continuation in
             lock.lock()
+            // cancel 可能发生在 continuation 安装前。保留完成结果，既不丢唤醒也不再启动进程。
+            if let completion {
+                lock.unlock()
+                continuation.resume(with: completion)
+                return
+            }
             self.continuation = continuation
-            lock.unlock()
-
             process.terminationHandler = { [weak self] _ in self?.finish(.success(())) }
             do {
+                // 启动与取消串行化，避免 cancel 检查到尚未运行、随后却启动了进程。
                 try process.run()
+                startedAt = ProcessInfo.processInfo.systemUptime
+                lastOutputAt = startedAt
+                lock.unlock()
                 onStarted()
             } catch {
+                lock.unlock()
                 finish(.failure(TikaBackendError.cliNotFound(process.executableURL?.path ?? "tikacli")))
                 return
             }
 
-            DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + timeout) { [weak self] in
-                guard let self else { return }
-                if self.finish(.failure(TikaBackendError.timedOut)) { self.stopProcess() }
-            }
+            scheduleDeadlineCheck(after: min(timeout, maxDuration))
+        }
+    }
+
+    func receivedOutput() {
+        lock.lock()
+        lastOutputAt = ProcessInfo.processInfo.systemUptime
+        lock.unlock()
+    }
+
+    /// finish/error 已表示本轮结束。给 CLI 短暂退出时间，再回收挂起的进程；
+    /// 仍通过 terminationHandler 完成等待，并 drain 两个 pipe 保留尾帧。
+    func streamCompleted() {
+        lock.lock()
+        guard completion == nil, !streamEnded else { lock.unlock(); return }
+        streamEnded = true
+        lock.unlock()
+        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 0.25) { [weak self] in
+            self?.stopProcess()
+        }
+    }
+
+    private func scheduleDeadlineCheck(after delay: TimeInterval) {
+        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + delay) { [weak self] in
+            self?.checkDeadline()
+        }
+    }
+
+    private func checkDeadline() {
+        lock.lock()
+        guard completion == nil, !streamEnded else { lock.unlock(); return }
+        let now = ProcessInfo.processInfo.systemUptime
+        let idleRemaining = timeout - (now - lastOutputAt)
+        let totalRemaining = maxDuration - (now - startedAt)
+        lock.unlock()
+        if totalRemaining <= 0 {
+            if finish(.failure(TikaBackendError.turnDurationExceeded)) { stopProcess() }
+        } else if idleRemaining <= 0 {
+            if finish(.failure(TikaBackendError.timedOut)) { stopProcess() }
+        } else {
+            // 输出只更新时间戳，不为每个token创建新timer。
+            scheduleDeadlineCheck(after: min(idleRemaining, totalRemaining))
         }
     }
 
@@ -411,8 +510,8 @@ private final class TikaProcessWaiter: @unchecked Sendable {
     @discardableResult
     private func finish(_ result: Result<Void, Error>) -> Bool {
         lock.lock()
-        guard !finished else { lock.unlock(); return false }
-        finished = true
+        guard completion == nil else { lock.unlock(); return false }
+        completion = result
         let continuation = self.continuation
         self.continuation = nil
         lock.unlock()
@@ -438,11 +537,41 @@ private actor TurnBox {
     private var accumulator = TikaAssistantAccumulator()
     private var stderrBuffer = ""
 
+    // #region debug-point A:stream-observation
+    #if DEBUG
+    private let debugStart = ProcessInfo.processInfo.systemUptime
+    private let debugTrace = UUID().uuidString
+    private var debugLastChunk: Double = 0
+    private var debugBytes = 0
+    private var debugEvents = 0
+    func debugReport(_ phase: String, extra: [String: Any] = [:]) {
+        if ProcessInfo.processInfo.environment["CLIPSLOTS_TIKA_DEBUG"] == "1" { var r = URLRequest(url: URL(string: ProcessInfo.processInfo.environment["DEBUG_SERVER_URL"] ?? "http://127.0.0.1:7788/event")!); r.httpMethod = "POST"; r.httpBody = try? JSONSerialization.data(withJSONObject: ["sessionId": "tika-batch-timeout", "runId": ProcessInfo.processInfo.environment["TIKA_DEBUG_RUN"] ?? "pre-fix", "hypothesisId": "A/B/C", "traceId": debugTrace, "msg": "[DEBUG] " + phase, "data": ["elapsed": ProcessInfo.processInfo.systemUptime - debugStart, "lastChunkAt": debugLastChunk, "bytes": debugBytes, "events": debugEvents, "textBytes": accumulator.text.utf8.count, "reasoningBytes": accumulator.reasoning.utf8.count, "finished": accumulator.finished, "serverError": accumulator.errorMessage != nil].merging(extra) { _, new in new }]); URLSession.shared.dataTask(with: r).resume() }
+    }
+    #endif
+    // #endregion
+
     func ingest(_ chunk: Data,
-                onEvent: @Sendable (AgentRunEvent) async -> Void) async {
+                onEvent: @Sendable (AgentRunEvent) async -> Void) async -> Bool {
+        // #region debug-point A:stream-observation
+        #if DEBUG
+        debugLastChunk = ProcessInfo.processInfo.systemUptime - debugStart
+        debugBytes += chunk.count
+        #endif
+        // #endregion
         let frames = decoder.feed(chunk)
         for frame in frames {
             guard let event = TikaEventDecoder.decode(frame: frame) else { continue }
+            // #region debug-point C:stream-terminal
+            #if DEBUG
+            debugEvents += 1
+            switch event {
+            case .finish: debugReport("finish-event")
+            case .serverError: debugReport("server-error-event")
+            case .toolInputAvailable: debugReport("cloud-tool-event")
+            default: break
+            }
+            #endif
+            // #endregion
             switch event {
             case .textDelta(let s):
                 accumulator.apply(event)
@@ -454,6 +583,7 @@ private actor TurnBox {
                 accumulator.apply(event)
             }
         }
+        return accumulator.finished || accumulator.errorMessage != nil
     }
 
     func appendStderr(_ s: String) {

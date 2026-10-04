@@ -22,12 +22,14 @@ import Foundation
 public enum AgentBackendKind: String, Codable, CaseIterable, Sendable {
     case deepseek
     case tika
+    case codex
 
     /// UI 展示名——@AppStorage 是纯字符串，UI 上要展示更友好的名字用这个。
     public var displayName: String {
         switch self {
         case .deepseek: return "DeepSeek"
         case .tika: return "Tika Agent"
+        case .codex: return "Codex"
         }
     }
 }
@@ -93,8 +95,10 @@ public struct TikaBackendConfig: Equatable, Sendable {
     public var agentId: String?
     /// 目标 Space。为 nil 时 tikacli 用当前 default space。
     public var spaceId: String?
-    /// 每轮子进程超时。tikacli 内部还会串到云端排队，别设太紧；60s 是安全值。
+    /// 每轮 stdout 的空闲超时；持续输出推理或正文会续期，不限制活跃生成的总时长。
     public var perTurnTimeout: TimeInterval
+    /// 每轮硬上限，即使持续有心跳/输出也不能无限占用进程。
+    public var maxTurnDuration: TimeInterval
     /// 一次对话里允许的 XML 工具调用最大轮数——护栏，避免 Agent 死循环耗光额度。
     public var maxToolTurns: Int
     /// 是否自动审批 Tika 云端工具（`--auto-approve`）。默认 true，方便对话不被 approval 卡住；
@@ -107,13 +111,15 @@ public struct TikaBackendConfig: Equatable, Sendable {
                 agentId: String? = nil,
                 spaceId: String? = nil,
                 perTurnTimeout: TimeInterval = 60,
-                maxToolTurns: Int = 8,
+                maxTurnDuration: TimeInterval = 600,
+                maxToolTurns: Int = 48,
                 autoApprove: Bool = true,
                 supplementalSystemPrompt: String = "") {
         self.cliPath = cliPath
         self.agentId = agentId
         self.spaceId = spaceId
         self.perTurnTimeout = perTurnTimeout
+        self.maxTurnDuration = maxTurnDuration
         self.maxToolTurns = maxToolTurns
         self.autoApprove = autoApprove
         self.supplementalSystemPrompt = supplementalSystemPrompt

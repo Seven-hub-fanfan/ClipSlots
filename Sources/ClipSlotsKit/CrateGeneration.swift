@@ -606,12 +606,14 @@ public enum CrateGeneration {
     public static func inputImagePaths(from attachments: [SlotContent.SlotAttachment],
                                       excludingAttachmentIds outputs: Set<String>,
                                       includingGeneratedAssets: Bool = false,
+                                      explicitInputIds: Set<String> = [],
                                       fileExists: (String) -> Bool) -> [String] {
         attachments.compactMap { att -> String? in
             guard att.type == .image ||
                     (att.type == .file && CanvasAttachmentKind.from(fileName: att.name) == .image) else { return nil }
             guard !outputs.contains(att.id.uuidString) else { return nil }
-            guard includingGeneratedAssets || !isGeneratedAssetName(att.name) else { return nil }
+            guard includingGeneratedAssets || explicitInputIds.contains(att.id.uuidString)
+                    || !isGeneratedAssetName(att.name) else { return nil }
             for candidate in [att.storagePath, att.path, att.originalPath] {
                 if let path = candidate, !path.isEmpty, fileExists(path) { return path }
             }

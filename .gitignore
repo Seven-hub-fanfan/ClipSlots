@@ -2,6 +2,8 @@
 dist/
 *.dSYM/
 .DS_Store
+# All local bundles, validation data and personal installation backups.
+/build/
 build/ClipSlots.app/
 build/ClipSlots.iconset/
 # App icon generated temp files
@@ -25,6 +27,8 @@ build/uishots/
 
 # v2.17.4 additions: transient validation & debug artifacts
 build/validation/
+build/local-agent-workspace-*/
+build/local-codex-desktop-*/
 build/dmg_background/
 .dbg/
 debug-*.md

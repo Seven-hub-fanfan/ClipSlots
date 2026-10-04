@@ -5,7 +5,7 @@ import ClipSlotsKit
 extension CanvasWorkspaceView {
     func runGenerationForSelection() {
         inputRouter.anchorView?.window?.makeFirstResponder(nil)
-        let runnable = canvas.nodes.filter { $0.kind.producesAsset || $0.kind == .text }
+        let runnable = canvas.nodes.filter { $0.canGenerate || $0.kind == .text }
         let selected = runnable.filter { canvas.selectedNodeIds.contains($0.id) }
         let targets = selected.isEmpty && canvas.selectedNodeIds.isEmpty && runnable.count == 1 ? runnable : selected
         guard !targets.isEmpty else {
@@ -52,7 +52,7 @@ extension CanvasWorkspaceView {
     @discardableResult
     func startGeneration(_ snapshot: CanvasNode, reusingSeed: Bool = false, restarting: Bool = false) -> Task<Void, Never>? {
         guard let node = canvas.node(id: snapshot.id), node.createdAt == snapshot.createdAt,
-              node.kind.producesAsset else { return nil }
+              node.canGenerate else { return nil }
         if node.needsGenerationRecovery && !restarting && !reusingSeed {
             return recoverGeneration(node)
         }
@@ -80,9 +80,7 @@ extension CanvasWorkspaceView {
             return nil
         }
         let slotImages = inputImagePaths(for: node)
-        let ownImages = store.canvasSlotAttachments(groupId: node.groupId, slot: node.slot)
-            .filter { $0.canvasIsImageLike && !node.outputAttachmentIds.contains($0.id.uuidString)
-                && !CrateGeneration.isGeneratedAssetName($0.name) }
+        let ownImages = inputAttachments(for: node).filter(\.canvasIsImageLike)
         if ownImages.count > slotImages.count {
             store.transientUI.showToast("本节点有参考图片不可用，请在入参文件中检查或重新添加", duration: 4)
             return nil
@@ -126,6 +124,7 @@ extension CanvasWorkspaceView {
     @discardableResult
     func recoverGeneration(_ snapshot: CanvasNode) -> Task<Void, Never>? {
         guard let node = canvas.node(id: snapshot.id), node.createdAt == snapshot.createdAt,
+              node.canGenerate,
               let taskId = node.taskId, !taskId.isEmpty else { return nil }
         return executeGeneration(node, recovering: true) { (taskId, node.seed, []) }
     }
@@ -211,7 +210,10 @@ extension CanvasWorkspaceView {
         for edge in incoming {
             guard upstreams[edge.fromNodeId] == nil, let up = canvas.node(id: edge.fromNodeId) else { continue }
             var path: String?
-            if case .succeeded(let asset) = up.state, !asset.isEmpty,
+            if up.kind.isMediaNode,
+               let media = CanvasMediaPick.primary(node: up, attachments: store.canvasSlotAttachments(groupId: up.groupId, slot: up.slot)) {
+                path = media.canvasLocalURL?.path
+            } else if !up.kind.isMediaNode, case .succeeded(let asset) = up.state, !asset.isEmpty,
                FileManager.default.fileExists(atPath: asset) { path = asset }
             upstreams[up.id] = .init(nodeId: up.id, kind: up.kind,
                                      text: store.canvasSlotText(groupId: up.groupId, slot: up.slot) ?? "",
@@ -229,10 +231,27 @@ extension CanvasWorkspaceView {
         return resolved
     }
 
+    /// 生成和 composer 共用入参集合；显式上传的历史生成文件可再次作为参考。
+    func inputAttachments(for node: CanvasNode) -> [SlotContent.SlotAttachment] {
+        guard !node.isMediaSource else { return [] }
+        let outputs = Set(node.outputAttachmentIds)
+        let explicitInputs = Set(node.inputAttachmentIds)
+        return store.canvasSlotAttachments(groupId: node.groupId, slot: node.slot).filter {
+            !outputs.contains($0.id.uuidString)
+                && (explicitInputs.contains($0.id.uuidString) || !CrateGeneration.isGeneratedAssetName($0.name))
+        }
+    }
+
     func inputImagePaths(for node: CanvasNode) -> [String] {
-        CrateGeneration.inputImagePaths(
-            from: store.canvasSlotAttachments(groupId: node.groupId, slot: node.slot),
+        // #region debug-point C:input-paths
+        #if DEBUG
+        if ProcessInfo.processInfo.environment["CLIPSLOTS_INPUT_UPLOAD_PROBE"] == "1" { var r = URLRequest(url: URL(string: "http://127.0.0.1:7791/event")!); r.httpMethod = "POST"; r.httpBody = try? JSONSerialization.data(withJSONObject: ["sessionId": "canvas-input-upload", "runId": ProcessInfo.processInfo.environment["CANVAS_DEBUG_RUN"] ?? "pre-fix", "hypothesisId": "C", "msg": "[DEBUG] resolved generation inputs", "data": ["kind": node.kind.rawValue, "count": CrateGeneration.inputImagePaths(from: inputAttachments(for: node), excludingAttachmentIds: Set(node.outputAttachmentIds), explicitInputIds: Set(node.inputAttachmentIds), fileExists: { FileManager.default.fileExists(atPath: $0) }).count]]); URLSession.shared.dataTask(with: r).resume() }
+        #endif
+        // #endregion
+        return CrateGeneration.inputImagePaths(
+            from: inputAttachments(for: node),
             excludingAttachmentIds: Set(node.outputAttachmentIds),
+            explicitInputIds: Set(node.inputAttachmentIds),
             fileExists: { FileManager.default.fileExists(atPath: $0) })
     }
 

@@ -1790,6 +1790,26 @@ public final class SpecialSlotStorage {
         slotStorage(for: specialSlotId).getOrUnknown(slot)
     }
 
+    /// Compare and exchange under the same lock used by GUI and CLI writes.
+    /// The body snapshot includes rich pasteboard formats; unrelated live metadata survives.
+    public func exchangeAgentBody(_ slot: Int, in groupID: String,
+                                  expected: AgentSlotBody, replacement: AgentSlotBody) throws -> SlotContent {
+        try storageLock.withLock(timeout: 0.15) {
+            guard !storageLock.isDegraded else { throw AgentCanvasError.busy }
+            guard slot >= 1, slot <= (Self.isReservedGroupId(groupID) ? Self.unfiledCapacity : 10),
+                  loadIndex().specialSlots.contains(where: { $0.id == groupID }),
+                  var current = getOrUnknown(slot, in: groupID) else { throw AgentCanvasError.unavailable }
+            guard AgentSlotBody(current) == expected else { throw AgentCanvasError.conflict }
+            current.items = replacement.items
+            current.htmlSource = replacement.htmlSource
+            current.contentId = UUID().uuidString
+            current.updatedAt = Date().timeIntervalSince1970
+            current.timestamp = Date()
+            guard set(slot, content: current, in: groupID) else { throw AgentCanvasError.writeFailed }
+            return current
+        }
+    }
+
     /// v2.11.0「槽位缩略图手动上传」：某槽位手动缩略图字节文件的 URL；未设置或字节缺失返回 nil。
     /// 供 GUI 的 ThumbnailProvider（卡片主预览）与轮盘扇区按需解码使用。
     public func manualThumbnailURL(_ slot: Int, in specialSlotId: String) -> URL? {

@@ -20,14 +20,15 @@ enum AgentBackendCoordinator {
 
     /// 读取当前 App 偏好，构造对应后端。**幂等**：连调多次会拿到不同实例但配置一致；
     /// AgentChatModel 每次切换会 keep 一个引用直到下次切换。
-    static func currentBackend() -> any AgentBackend {
+    static func currentBackend(workspace: Bool = false) -> any AgentBackend {
         let defaults = UserDefaults.standard
-        let kindRaw = defaults.string(forKey: TikaBackendPreferences.backendKindKey) ?? AgentBackendKind.deepseek.rawValue
-        let kind = AgentBackendKind(rawValue: kindRaw) ?? .deepseek
+        let kind = kind(workspace: workspace)
 
         switch kind {
         case .deepseek:
             return AgentService()
+        case .codex:
+            return CodexAgentService(configuration: codexConfiguration())
         case .tika:
             let cliPath = defaults.string(forKey: TikaBackendPreferences.tikaCLIPathKey)
                 .flatMap { $0.isEmpty ? nil : $0 } ?? "tikacli"
@@ -43,8 +44,31 @@ enum AgentBackendCoordinator {
 
     /// 当前配置下的后端类型。UI 可以拿它决定"要不要展示 Tika 分段"。
     static var currentKind: AgentBackendKind {
-        let raw = UserDefaults.standard.string(forKey: TikaBackendPreferences.backendKindKey) ?? AgentBackendKind.deepseek.rawValue
-        return AgentBackendKind(rawValue: raw) ?? .deepseek
+        kind()
+    }
+
+    static func kind(workspace: Bool = false) -> AgentBackendKind {
+        let key = workspace ? CodexPreferences.workspaceBackendKey : TikaBackendPreferences.backendKindKey
+        let fallback: AgentBackendKind = workspace ? .codex : .deepseek
+        return UserDefaults.standard.string(forKey: key).flatMap(AgentBackendKind.init(rawValue:)) ?? fallback
+    }
+
+    static func codexConfiguration() -> CodexServerConfiguration {
+        let custom = UserDefaults.standard.string(forKey: CodexPreferences.cliPathKey) ?? ""
+        var configuration = CodexServerConfiguration(
+            executable: CodexPreferences.executable(customPath: custom) ?? "/missing/codex",
+            workingDirectory: ClipSlotsPaths.dataRoot.appendingPathComponent("agent-workspace").path)
+        configuration.followsInstalledRuntime = true
+        if custom.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            configuration.fallbackExecutable = Bundle.main.bundlePath + "/Contents/Resources/codex-runtime/bin/codex"
+        }
+        let cli = Bundle.main.bundlePath + "/Contents/MacOS/clipslots-cli"
+        if FileManager.default.isExecutableFile(atPath: cli) { configuration.bridgeExecutable = cli }
+        configuration.bridgeSkillSlugs = Array(AgentPreferences.decodeEnabledSlugs(
+            UserDefaults.standard.string(forKey: AgentPreferences.enabledSkillsKey) ?? ""))
+        configuration.sandbox = UserDefaults.standard.string(forKey: CodexPreferences.sandboxKey) == "workspace-write"
+            ? "workspace-write" : "read-only"
+        return configuration
     }
 
     /// 通知名。AgentConfigView 保存偏好后 post，AgentSessionStore 里的 model 收到后 setBackend。

@@ -22,9 +22,7 @@ import Security
 // 翻译成人能看懂的提示，而不是甩一个 -25293。
 //
 // v2.17.6：在此之上加了**进程内内存缓存**，见 `AgentKeychain.readAPIKey()` 头注释。
-// 每次构建首次授权框仍然会弹一次（ACL 语义没变），但同一次进程运行内后续读取
-// 全部走内存缓存，不再重复调 `SecItemCopyMatching`——彻底修掉"点了始终允许还
-// 反复弹"的问题。
+// 更新后的系统授权仍然保留；同一次进程运行内的并发读取也必须共用缓存。
 
 public protocol AgentSecretStore: AnyObject {
     func readAPIKey() -> String?
@@ -32,7 +30,27 @@ public protocol AgentSecretStore: AnyObject {
     func deleteAPIKey() throws
 }
 
-public final class AgentKeychain: AgentSecretStore {
+// 全部可变状态和系统操作由 cacheLock 串行保护。
+public final class AgentKeychain: AgentSecretStore, @unchecked Sendable {
+    /// 仅供模块内的隔离回归注入；正式实例始终调用系统 Security API。
+    struct Operations {
+        var read: (CFDictionary) -> (OSStatus, Data?)
+        var update: (CFDictionary, CFDictionary) -> OSStatus
+        var add: (CFDictionary) -> OSStatus
+        var delete: (CFDictionary) -> OSStatus
+
+        static let system = Operations(
+            read: { query in
+                var item: CFTypeRef?
+                let status = SecItemCopyMatching(query, &item)
+                return (status, item as? Data)
+            },
+            update: { SecItemUpdate($0, $1) },
+            add: { SecItemAdd($0, nil) },
+            delete: { SecItemDelete($0) }
+        )
+    }
+
     /// 用户指定的固定坐标，不做可配置——可配置只会让"key 到底存哪了"变成新的支持问题。
     public static let service = "com.clipslots.agent"
     public static let account = "deepseek_api_key"
@@ -41,6 +59,7 @@ public final class AgentKeychain: AgentSecretStore {
 
     private let service: String
     private let account: String
+    private let operations: Operations
 
     // v2.17.6：进程内内存缓存。
     //
@@ -57,51 +76,91 @@ public final class AgentKeychain: AgentSecretStore {
     // - 首次成功读取后把明文放到进程内存里（进程退出即消失，磁盘/日志/导出都不落）。
     // - 写 / 删同步更新缓存，避免"写完再回头问一次钥匙串"。
     // - 缓存命中完全不碰 SecItem，从根本上没有二次弹框的机会。
-    // - 授权失败 / 被用户拒绝时**不写缓存**——用户可能刚点了"始终允许"，下次调用要能重试。
+    // - 锁覆盖整个系统操作：首次并发读取只请求一次，写删不会被迟到读取覆盖。
+    // - 失败也保存状态；自动探测不重复弹框，用户通过「重新授权」显式重试。
     //
     // 安全语义没变：Keychain ACL 保护的是"把 secret 从磁盘读出"，一旦进程合法读出，
     // 明文本来就在内存里；这里只是把已经在做的事显式化，不放宽任何权限。
     private let cacheLock = NSLock()
     private var cachedKey: String? = nil
     private var cacheLoaded: Bool = false
+    private var cachedReadError: AgentKeychainError?
 
-    public init(service: String = AgentKeychain.service, account: String = AgentKeychain.account) {
+    public convenience init(service: String = AgentKeychain.service, account: String = AgentKeychain.account) {
+        self.init(service: service, account: account, operations: .system)
+    }
+
+    init(service: String, account: String, operations: Operations) {
         self.service = service
         self.account = account
+        self.operations = operations
     }
 
     public func readAPIKey() -> String? {
-        // 命中内存缓存：直接返回，绝不触发 SecItemCopyMatching → 没有二次弹框。
         cacheLock.lock()
+        defer { cacheLock.unlock() }
+        return readLocked()
+    }
+
+    /// UI 只取展示状态。调用可能等待系统授权，必须在后台线程运行。
+    public func keyState(retryAfterFailure: Bool = false) -> AgentKeychainState {
+        cacheLock.lock()
+        defer { cacheLock.unlock() }
+        if retryAfterFailure, cachedReadError != nil {
+            cacheLoaded = false
+            cachedReadError = nil
+        }
+        let key = readLocked()
+        return AgentKeychainState(
+            suffix: key.map { $0.count >= 4 ? String($0.suffix(4)) : "••••" },
+            error: cachedReadError
+        )
+    }
+
+    /// 调用方持锁直至结果写入缓存；UI 使用后台探测接口，不能在主线程等待此锁。
+    private func readLocked() -> String? {
         if cacheLoaded {
             let v = cachedKey
-            cacheLock.unlock()
+            // #region debug-point A:credential-cache-hit
+            #if DEBUG
+            if ProcessInfo.processInfo.environment["CLIPSLOTS_KEYCHAIN_PROBE"] == "1" { var r = URLRequest(url: URL(string: "http://127.0.0.1:7793/event")!); r.httpMethod = "POST"; r.httpBody = try? JSONSerialization.data(withJSONObject: ["sessionId": "keychain-single-unlock", "runId": ProcessInfo.processInfo.environment["CANVAS_DEBUG_RUN"] ?? "pre-fix", "hypothesisId": "A", "msg": "[DEBUG] credential cache hit", "data": ["instance": String(describing: ObjectIdentifier(self)), "mainThread": Thread.isMainThread]]); URLSession.shared.dataTask(with: r).resume() }
+            #endif
+            // #endregion
             return v
         }
-        cacheLock.unlock()
 
         var query = baseQuery()
         query[kSecReturnData as String] = true
         query[kSecMatchLimit as String] = kSecMatchLimitOne
 
-        var item: CFTypeRef?
-        let status = SecItemCopyMatching(query as CFDictionary, &item)
+        // #region debug-point A-B:credential-read-start
+        #if DEBUG
+        if ProcessInfo.processInfo.environment["CLIPSLOTS_KEYCHAIN_PROBE"] == "1" { var r = URLRequest(url: URL(string: "http://127.0.0.1:7793/event")!); r.httpMethod = "POST"; r.httpBody = try? JSONSerialization.data(withJSONObject: ["sessionId": "keychain-single-unlock", "runId": ProcessInfo.processInfo.environment["CANVAS_DEBUG_RUN"] ?? "pre-fix", "hypothesisId": "A-B", "msg": "[DEBUG] credential system read start", "data": ["instance": String(describing: ObjectIdentifier(self)), "mainThread": Thread.isMainThread]]); URLSession.shared.dataTask(with: r).resume() }
+        #endif
+        // #endregion
+        let (status, data) = operations.read(query as CFDictionary)
+        // #region debug-point A-B:credential-read-end
+        #if DEBUG
+        if ProcessInfo.processInfo.environment["CLIPSLOTS_KEYCHAIN_PROBE"] == "1" { var r = URLRequest(url: URL(string: "http://127.0.0.1:7793/event")!); r.httpMethod = "POST"; r.httpBody = try? JSONSerialization.data(withJSONObject: ["sessionId": "keychain-single-unlock", "runId": ProcessInfo.processInfo.environment["CANVAS_DEBUG_RUN"] ?? "pre-fix", "hypothesisId": "A-B", "msg": "[DEBUG] credential system read end", "data": ["instance": String(describing: ObjectIdentifier(self)), "status": status]]); URLSession.shared.dataTask(with: r).resume() }
+        #endif
+        // #endregion
         var result: String? = nil
         if status == errSecSuccess,
-           let data = item as? Data,
+           let data,
            let text = String(data: data, encoding: .utf8) {
             let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
             result = trimmed.isEmpty ? nil : trimmed
         } else if status != errSecItemNotFound {
             // 只记状态码，绝不记内容。
             NSLog("[ClipSlots][Agent] keychain read failed: \(status)")
-            // 授权失败不缓存：用户可能马上会点"始终允许"，下次调用要能重试。
+            cachedKey = nil
+            cachedReadError = status == errSecSuccess ? .encodingFailed : .osStatus(status)
+            cacheLoaded = true
             return nil
         }
-        cacheLock.lock()
         cachedKey = result
+        cachedReadError = nil
         cacheLoaded = true
-        cacheLock.unlock()
         return result
     }
 
@@ -109,6 +168,7 @@ public final class AgentKeychain: AgentSecretStore {
     public func invalidateCache() {
         cacheLock.lock()
         cachedKey = nil
+        cachedReadError = nil
         cacheLoaded = false
         cacheLock.unlock()
     }
@@ -117,14 +177,18 @@ public final class AgentKeychain: AgentSecretStore {
         let trimmed = key.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { try deleteAPIKey(); return }
         guard let data = trimmed.data(using: .utf8) else { throw AgentKeychainError.encodingFailed }
+        cacheLock.lock()
+        defer { cacheLock.unlock() }
 
         // 先尝试更新已有项。顺序刻意是"update 再 add"而不是"delete 再 add"：
         // delete+add 会重建 ACL，等于每次保存都让用户重新授权一遍。
         let update: [String: Any] = [kSecValueData as String: data]
-        let updateStatus = SecItemUpdate(baseQuery() as CFDictionary, update as CFDictionary)
+        let updateStatus = operations.update(baseQuery() as CFDictionary, update as CFDictionary)
         if updateStatus == errSecSuccess {
             // 写成功 → 同步进内存缓存，后续读走不到 SecItem。
-            cacheLock.lock(); cachedKey = trimmed; cacheLoaded = true; cacheLock.unlock()
+            cachedKey = trimmed
+            cachedReadError = nil
+            cacheLoaded = true
             return
         }
         if updateStatus != errSecItemNotFound {
@@ -137,17 +201,23 @@ public final class AgentKeychain: AgentSecretStore {
         insert[kSecAttrAccessible as String] = kSecAttrAccessibleWhenUnlocked
         insert[kSecAttrSynchronizable as String] = false
         insert[kSecAttrLabel as String] = "ClipSlots Agent · DeepSeek API Key"
-        let addStatus = SecItemAdd(insert as CFDictionary, nil)
+        let addStatus = operations.add(insert as CFDictionary)
         guard addStatus == errSecSuccess else { throw AgentKeychainError.osStatus(addStatus) }
-        cacheLock.lock(); cachedKey = trimmed; cacheLoaded = true; cacheLock.unlock()
+        cachedKey = trimmed
+        cachedReadError = nil
+        cacheLoaded = true
     }
 
     public func deleteAPIKey() throws {
-        let status = SecItemDelete(baseQuery() as CFDictionary)
+        cacheLock.lock()
+        defer { cacheLock.unlock() }
+        let status = operations.delete(baseQuery() as CFDictionary)
         guard status == errSecSuccess || status == errSecItemNotFound else {
             throw AgentKeychainError.osStatus(status)
         }
-        cacheLock.lock(); cachedKey = nil; cacheLoaded = true; cacheLock.unlock()
+        cachedKey = nil
+        cachedReadError = nil
+        cacheLoaded = true
     }
 
     private func baseQuery() -> [String: Any] {
@@ -157,6 +227,13 @@ public final class AgentKeychain: AgentSecretStore {
             kSecAttrAccount as String: account,
         ]
     }
+}
+
+/// 配置页所需的脱敏状态；不包含完整凭据，也不持久化。
+public struct AgentKeychainState {
+    public let suffix: String?
+    public let error: AgentKeychainError?
+    public var hasKey: Bool { suffix != nil }
 }
 
 /// 「钥匙串里有没有 key」的**非阻塞**探测。
@@ -179,19 +256,17 @@ public enum AgentKeychainProbe {
     /// 走空缓存，等于每次都真的问一次钥匙串；用 shared 后首次问过就一直命中缓存。
     public static func hasAPIKey(service: String = AgentKeychain.service,
                                  account: String = AgentKeychain.account) async -> Bool {
-        // 只有默认 service/account 才复用 shared（保留可注入语义给测试）。
-        if service == AgentKeychain.service && account == AgentKeychain.account {
-            return await withCheckedContinuation { continuation in
-                DispatchQueue.global(qos: .userInitiated).async {
-                    let exists = AgentKeychain.shared.readAPIKey() != nil
-                    continuation.resume(returning: exists)
-                }
-            }
-        }
+        await keyState(service: service, account: account).hasKey
+    }
+
+    public static func keyState(service: String = AgentKeychain.service,
+                                account: String = AgentKeychain.account,
+                                retryAfterFailure: Bool = false) async -> AgentKeychainState {
+        let store = service == AgentKeychain.service && account == AgentKeychain.account
+            ? AgentKeychain.shared : AgentKeychain(service: service, account: account)
         return await withCheckedContinuation { continuation in
             DispatchQueue.global(qos: .userInitiated).async {
-                let exists = AgentKeychain(service: service, account: account).readAPIKey() != nil
-                continuation.resume(returning: exists)
+                continuation.resume(returning: store.keyState(retryAfterFailure: retryAfterFailure))
             }
         }
     }
@@ -210,7 +285,7 @@ public enum AgentKeychainError: LocalizedError, Equatable {
             case errSecAuthFailed, errSecInteractionNotAllowed:
                 return "钥匙串拒绝访问（\(status)）。ClipSlots 使用 ad-hoc 签名，版本更新后首次读写需要在系统弹窗里点「始终允许」。"
             case errSecUserCanceled:
-                return "已取消钥匙串授权，API Key 未保存。"
+                return "已取消钥匙串授权。可在设置中点「重新授权」重试。"
             case errSecDuplicateItem:
                 return "钥匙串中已存在同名条目，请先在「钥匙串访问」里删除 com.clipslots.agent 后重试。"
             default:

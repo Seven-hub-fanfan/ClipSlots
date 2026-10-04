@@ -22,7 +22,7 @@ Release: `gh release create vX.Y.Z --title "..." --notes "..." ClipSlots_vX.Y.Z.
 
 A standalone command-line tool for agents lives in target **`ClipSlotsCLI`** (`Sources/ClipSlotsCLI/main.swift`). It reuses the exact data layer via the shared library target **`ClipSlotsKit`** (moved data files: `ClipboardManager`, `SlotStorage`, `SpecialSlotStorage`, `SpecialSlotModels`, `Config`, `HotkeyTemplate`, `SlotContent+*Detection`). Both `ClipSlots` (GUI) and `ClipSlotsCLI` depend on `ClipSlotsKit`.
 
-Commands: `version help groups pages list read write search paste clear create-group create-page write-attachment`. All output a single JSON object (`{"ok":true,...}` / `{"ok":false,"error":...}`). See `docs/clipslots-cli-skill-draft.md` for the agent usage skill + storage rules.
+Commands: `version help groups pages list read write search paste clear create-group create-page write-attachment`. All output a single JSON object (`{"ok":true,...}` / `{"ok":false,"error":...}`). See `skills/clipslots-manager/SKILL.md` for the agent usage skill + storage rules.
 
 Install (built product is `.build/debug/ClipSlotsCLI`):
 ```bash
@@ -138,7 +138,7 @@ https://bytedance.sg.larkoffice.com/docx/...  执行
 
 After implementing all changes, execute this exact sequence. Each step is required:
 
-0. **Sync Skill**: `./scripts/sync-skill.sh` — 把 `docs/clipslots-cli-skill-draft.md` 同步到 `skills/clipslots-manager/SKILL.md`（App bundle 打包源）。**发版前必须运行**，否则 bundle 里会残留旧版 SKILL.md，Agent 通过软链接拿到的就是旧 Skill。可用 `./scripts/sync-skill.sh --check` 校验一致性。
+0. **Sync Skill**: `./scripts/sync-skill.sh` — 校验 `skills/clipslots-manager/SKILL.md`（当前唯一内容源、App bundle 打包源）；若旧工作树仍有 `docs/clipslots-cli-skill-draft.md`，先同步草稿。**发版前必须运行**，可用 `./scripts/sync-skill.sh --check` 校验一致性。
 1. **Build**: `swift build` — fix real errors, ignore SourceKit "Cannot find type 'X'" spurious errors
 2. **Sign**: `codesign --force --deep --sign - .build/debug/ClipSlots`
 3. **Install**: `cp -f .build/debug/ClipSlots /Applications/ClipSlots.app/Contents/MacOS/ClipSlots`

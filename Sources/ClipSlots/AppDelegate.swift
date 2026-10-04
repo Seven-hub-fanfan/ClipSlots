@@ -237,6 +237,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         startObservingAppearancePreference()
 
         setupMemoryPressureMonitor()
+        CodexAutomationModel.shared.start()
 
         // P2-9 (v2.10.9): 跨进程存储锁降级为「无锁」时，另一 Agent 侧的 StorageLock 会且仅会
         // post 一次 Notification.Name("ClipSlotsStorageLockLockless")。这里注册 GUI 观察者，

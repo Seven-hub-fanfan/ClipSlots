@@ -22,6 +22,13 @@ elif args[:2] == ["model", "list"]:
             ("seedance2-mini", "Seedance 2 Mini", "text-2-video")
         ]
     ]
+    if os.environ.get("CLIPSLOTS_INPUT_UPLOAD_PROBE") == "1":
+        result[1]["generationTypes"].append("image-to-video")
+        result[1]["references"] = {"roles": [
+            {"role": "first_frame", "maxCount": 1},
+            {"role": "last_frame", "maxCount": 1},
+            {"role": "reference_image", "maxCount": 4},
+        ]}
 elif args[:2] == ["model", "describe"]:
     result = {"parameters": []}
 elif args[:2] == ["task", "get"]:
