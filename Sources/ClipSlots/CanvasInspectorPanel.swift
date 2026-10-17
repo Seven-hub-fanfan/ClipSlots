@@ -20,12 +20,16 @@ import ClipSlotsKit
 /// 一律走 `canvas.updateNodeStyle`（内部 `commit`，进撤销栈），**不碰 `updateNode`** ——
 /// 后者只落盘不记历史，用它改字体的症状是「改完 Cmd+Z 撤不掉」。
 struct CanvasInspectorPanel: View {
+    private typealias TapSkin = CanvasSkin
+    private typealias AppTheme = CanvasTheme
     @ObservedObject var canvas: CanvasStore
     let node: CanvasNode
 
     /// 模型目录。进程级共享（理由见 `CrateModelCatalogStore` 的类型注释：面板随选中节点重建，
     /// 状态放这里才不会每点一个节点就重跑一次 `crate model list`）。
     @ObservedObject private var catalog = CrateModelCatalogStore.shared
+    @State private var showingModels = false
+    @State private var showingRatios = false
 
     /// 数据里存着、但本机没装的字体。单独列出来是为了给它一个 tag ——
     /// 否则 Picker 找不到匹配 selection 的 tag 会**显示空白**，看起来正好像「设置没保存」。
@@ -64,6 +68,7 @@ struct CanvasInspectorPanel: View {
         .overlay(
             RoundedRectangle(cornerRadius: 12, style: .continuous)
                 .stroke(AppTheme.subtleBorder, lineWidth: 1)
+                .allowsHitTesting(false)
         )
         .shadow(color: AppTheme.cardShadow(isEmpty: false), radius: 12, x: 0, y: 4)
     }
@@ -91,15 +96,26 @@ struct CanvasInspectorPanel: View {
     // `CrateModelCatalog`（各模型的比例选项互不相同，还有一类模型压根不吃 ratio）。
 
     private var generationSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            sectionTitle("生成来源")
+            CanvasGenerationSourceControls(node: node, canvas: canvas)
+            if node.generationProvider == .crate { crateGenerationSection }
+            else {
+                Picker("生成次数", selection: Binding(get: { node.count },
+                    set: { canvas.updateNodeGeneration(id: node.id, count: $0) })) {
+                    ForEach(1...4, id: \.self) { Text("\($0) 次").tag($0) }
+                }.pickerStyle(.segmented)
+            }
+        }
+    }
+
+    private var crateGenerationSection: some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 4) {
                 sectionTitle(isVideoNode ? "视频模型" : "出图模型")
                 Spacer(minLength: 0)
                 if catalog.isLoading {
-                    ProgressView()
-                        .controlSize(.mini)
-                        .scaleEffect(0.7)
-                        .frame(width: 12, height: 12)
+                    CreativeLoadingMark().frame(width: 20, height: 20)
                 } else {
                     // 手动刷新的用途很具体：用户刚在终端 `crate auth login` 完，或者刚上线了新模型。
                     // 没有它，只能等 10 分钟软过期或重启 App。
@@ -113,30 +129,23 @@ struct CanvasInspectorPanel: View {
                 }
             }
 
-            Picker("", selection: modelBinding) {
-                // 数据里存着、但目录里没有的模型（已下线 / 目录没加载出来）必须自带一个 tag，
-                // 否则 Picker 匹配不到 selection 会**显示空白** —— 那个症状看起来正好像"设置丢了"。
-                // 与上面字体那段的 `missingCurrentFamily` 是同一个坑。
-                if needsUnlistedModelTag {
-                    Text(node.model).tag(node.model)
-                }
-                ForEach(modelFamilies, id: \.name) { family in
-                    if family.name.isEmpty {
-                        ForEach(family.models) { m in
-                            Text(m.displayName).tag(m.id)
-                        }
-                    } else {
-                        Section(family.name) {
-                            ForEach(family.models) { m in
-                                Text(m.displayName).tag(m.id)
-                            }
-                        }
-                    }
+            Button { showingRatios = false; showingModels.toggle() } label: {
+                HStack {
+                    Text(currentModel?.displayName ?? node.model).lineLimit(1)
+                    Spacer(minLength: 0)
+                    Image(systemName: "chevron.down").font(.system(size: 8))
+                }.font(.system(size: 11)).padding(8)
+                    .background(TapSkin.subtleFill, in: RoundedRectangle(cornerRadius: 8))
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .popover(isPresented: $showingModels) {
+                CreativeModelPicker(options: availableModels.map(CreativeModelOption.init),
+                                    selected: node.model, loading: catalog.isLoading) { id in
+                    modelBinding.wrappedValue = id
+                    showingModels = false
                 }
             }
-            .labelsHidden()
-            .pickerStyle(.menu)
-            .controlSize(.small)
 
             if let note = modelNote {
                 Label(note, systemImage: "exclamationmark.triangle")
@@ -146,35 +155,38 @@ struct CanvasInspectorPanel: View {
             }
 
             sectionTitle(isVideoNode ? "画面比例" : "尺寸")
+            Picker("生成次数", selection: Binding(
+                get: { min(4, max(1, node.count)) },
+                set: { canvas.updateNodeGeneration(id: node.id, count: $0) })) {
+                ForEach(1...4, id: \.self) { Text("\($0) 次").tag($0) }
+            }
+            .pickerStyle(.segmented)
 
-            Picker("", selection: ratioBinding) {
-                if ratioOptions.isEmpty {
-                    // 没有可选项时也要有一个能匹配 selection 的 tag（空白 Picker 同上）。
-                    Text(node.ratio.isEmpty ? "模型默认" : node.ratio).tag(node.ratio)
-                } else {
-                    if unlistedRatio {
-                        Text("\(node.ratio)（当前）").tag(node.ratio)
+            Button { showingModels = false; showingRatios.toggle() } label: {
+                HStack {
+                    CanvasAspectGlyph(ratio: node.ratio)
+                    Text(splitImageSize ? "\(imageSelection.ratio) · \(imageSelection.quality)"
+                         : (node.ratio.isEmpty ? "模型默认" : node.ratio)).lineLimit(1)
+                    Spacer(minLength: 0)
+                    Image(systemName: "chevron.down").font(.system(size: 8))
+                }.font(.system(size: 11)).padding(8)
+                    .background(TapSkin.subtleFill, in: RoundedRectangle(cornerRadius: 8))
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .disabled(ratioOptions.isEmpty)
+            .accessibilityIdentifier("canvas-inspector-size")
+            .canvasParameterPopover(isPresented: $showingRatios) {
+                if splitImageSize {
+                    CanvasImageSizePicker(selection: imageSelection) { ratio, quality in
+                        CanvasGenerationParamEdits.applyImageSize(ratio: ratio, quality: quality, node: node, canvas: canvas)
                     }
-                    // 比例与分辨率档分组：`2K` / `4K` 不是宽高比，混在一列里会让人以为选了 2K
-                    // 就还是方图（实际构图比例由模型自己定）。
-                    let ratios = ratioOptions.filter { !$0.isResolutionPreset }
-                    let presets = ratioOptions.filter { $0.isResolutionPreset }
-                    if presets.isEmpty {
-                        ForEach(ratios) { opt in Text(opt.label).tag(opt.value) }
-                    } else {
-                        Section("比例") {
-                            ForEach(ratios) { opt in Text(opt.label).tag(opt.value) }
-                        }
-                        Section("分辨率") {
-                            ForEach(presets) { opt in Text(opt.label).tag(opt.value) }
-                        }
+                } else {
+                    CanvasAspectPicker(options: ratioOptions, selected: node.ratio) { value in
+                        ratioBinding.wrappedValue = value
                     }
                 }
             }
-            .labelsHidden()
-            .pickerStyle(.menu)
-            .controlSize(.small)
-            .disabled(ratioOptions.isEmpty)
 
             if let note = ratioNote {
                 Text(note)
@@ -274,6 +286,10 @@ struct CanvasInspectorPanel: View {
     }
 
     private var isVideoNode: Bool { node.kind == .video }
+    private var splitImageSize: Bool { !isVideoNode && CanvasImageConfiguration.supportsSplit(currentModel) }
+    private var imageSelection: CanvasImageConfiguration.Selection {
+        CanvasImageConfiguration.selection(ratio: node.ratio, resolution: node.resolution)
+    }
 
     private func durationDefaultLabel(_ model: CrateModelCatalog.ModelInfo) -> String {
         guard let def = model.durationDefault, def > 0 else { return "模型默认" }
@@ -329,23 +345,8 @@ struct CanvasInspectorPanel: View {
         )
     }
 
-    /// 按系列分组，**组内与组间都保持 CLI 原序**（那是策划过的顺序，重排成字母序会把 seedream
-    /// 家族打散）。这里不用 `Dictionary(grouping:)`：它的 key 顺序是随机的，会导致每次打开面板
-    /// 菜单里的分组顺序都不一样。
-    private struct ModelFamily { let name: String; let models: [CrateModelCatalog.ModelInfo] }
-
     private var availableModels: [CrateModelCatalog.ModelInfo] {
         isVideoNode ? catalog.videoModels : catalog.imageModels
-    }
-
-    private var modelFamilies: [ModelFamily] {
-        var order: [String] = []
-        var buckets: [String: [CrateModelCatalog.ModelInfo]] = [:]
-        for m in availableModels {
-            if buckets[m.family] == nil { order.append(m.family) }
-            buckets[m.family, default: []].append(m)
-        }
-        return order.map { ModelFamily(name: $0, models: buckets[$0] ?? []) }
     }
 
     /// 当前模型在目录里的条目。`nil` = 目录没加载出来，或这个模型已经不在目录里了。
@@ -355,10 +356,6 @@ struct CanvasInspectorPanel: View {
     private var currentModel: CrateModelCatalog.ModelInfo? {
         availableModels.first { $0.id == node.model }
     }
-
-    /// 要不要给"目录里没有的当前模型"补一个 tag。目录未加载 / 加载失败时也为 true —— 那两种情况下
-    /// 列表是空的，不补 tag 的话 Picker 会显示空白。
-    private var needsUnlistedModelTag: Bool { currentModel == nil }
 
     private var ratioOptions: [CrateModelCatalog.RatioOption] { currentModel?.ratioOptions ?? [] }
 
@@ -388,28 +385,7 @@ struct CanvasInspectorPanel: View {
         Binding(
             get: { node.model },
             set: { picked in
-                // 换模型时顺带把比例落到新模型真的接受的值上 —— 各模型选项不同，留着旧值会在提交
-                // 时被拒。几个字段**一次写进撤销栈**（理由见 `updateNodeGeneration`）。
-                // v2.11.19：视频还要一起落分辨率与时长（30s 的 seedance25 换成 12s 上限的 Pro 1
-                // 时不夹一下，提交就会被拒），并且"不支持"要落成空/nil 而不是留着旧值。
-                guard let target = availableModels.first(where: { $0.id == picked }) else {
-                    canvas.updateNodeGeneration(id: node.id, model: picked)
-                    return
-                }
-                let ratio = CrateModelCatalog.resolvedRatio(current: node.ratio, for: target)
-                guard isVideoNode else {
-                    canvas.updateNodeGeneration(id: node.id, model: picked, ratio: ratio)
-                    return
-                }
-                let resolution = CrateModelCatalog.resolvedResolution(current: node.resolution, for: target)
-                let duration = CrateModelCatalog.resolvedDuration(current: node.duration, for: target)
-                let audio: Bool? = target.supportsAudio ? node.generateAudio : nil
-                canvas.updateNodeGeneration(id: node.id,
-                                            model: picked,
-                                            ratio: ratio,
-                                            resolution: resolution,
-                                            duration: .some(duration),
-                                            generateAudio: .some(audio))
+                CanvasGenerationParamEdits.applyModel(picked, node: node, canvas: canvas, catalog: catalog)
             }
         )
     }

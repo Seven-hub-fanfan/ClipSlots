@@ -22,11 +22,37 @@ import Foundation
 ///
 /// ## 身份
 ///
-/// `id` 是独立 UUID，不像节点那样从内容派生。理由：同一对 (from, to) 在语义上唯一（`canConnect`
+/// `id` 是独立 UUID，不像节点那样从内容派生。理由：同一组 (from, to, purpose) 在语义上唯一（`canConnect`
 /// 会拒重复），但**角色可以改**，而派生 id 会让"改角色"变成"换身份"，撤销栈与选中态都会当场失配
 /// （节点身份派生已经吃过这个教训，见 `CanvasStore.rebindNode`）。
 
 // MARK: - 连线角色
+
+/// Purpose is separate from the media role used by a generation input.
+public enum CanvasEdgePurpose: String, Codable, Equatable, Hashable, CaseIterable {
+    case generationInput = "generation-input"
+    case draftReference = "draft-reference"
+
+    public var isGenerationDependency: Bool { self == .generationInput }
+}
+
+public enum CanvasEdgeCapability: Hashable {
+    case generationInput
+    case draftReferenceInput
+    case draftReferenceOutput
+}
+
+/// A non-nil value opts a video target into draft references. An empty value
+/// represents a disconnected target, not a generation dependency.
+public struct CanvasDraftReference: Codable, Equatable {
+    public var sourceNodeID: String?
+    public var videoID: String?
+
+    public init(sourceNodeID: String? = nil, videoID: String? = nil) {
+        self.sourceNodeID = sourceNodeID
+        self.videoID = videoID
+    }
+}
 
 /// 上游产物在下游节点里**充当什么**。
 ///
@@ -87,27 +113,43 @@ public struct CanvasEdge: Codable, Identifiable, Equatable {
     public var fromNodeId: String
     /// 下游节点 id。
     public var toNodeId: String
+    public var purpose: CanvasEdgePurpose
     public var role: CanvasEdgeRole
+    public var animated: Bool
     /// 建立时间。**参与生成语义**：同一节点的多条入边按它排序，决定"第几张参考图"。
     ///
     /// 不靠数组下标是因为数组顺序会被撤销/重做、删除节点后的 prune、以及未来任何一次
     /// `edges.sort` 悄悄改掉 —— 那会表现为"我没动过，重跑一次首帧变了"。
     public var createdAt: Date
+    /// Preserve the original slot-library wiring when importing a whole group.
+    public var sourceFromPort: String?
+    public var sourceToPort: String?
+    public var sourceColorID: Int?
 
     public init(id: String = UUID().uuidString,
                 fromNodeId: String,
                 toNodeId: String,
                 role: CanvasEdgeRole = .auto,
-                createdAt: Date = Date()) {
+                purpose: CanvasEdgePurpose = .generationInput,
+                createdAt: Date = Date(),
+                sourceFromPort: String? = nil,
+                sourceToPort: String? = nil,
+                sourceColorID: Int? = nil,
+                animated: Bool = false) {
         self.id = id
         self.fromNodeId = fromNodeId
         self.toNodeId = toNodeId
+        self.purpose = purpose
         self.role = role
+        self.animated = animated
         self.createdAt = createdAt
+        self.sourceFromPort = sourceFromPort
+        self.sourceToPort = sourceToPort
+        self.sourceColorID = sourceColorID
     }
 
     private enum CodingKeys: String, CodingKey {
-        case id, fromNodeId, toNodeId, role, createdAt
+        case id, fromNodeId, toNodeId, purpose, role, animated, createdAt, sourceFromPort, sourceToPort, sourceColorID
     }
 
     /// 容错解码：缺 id / 缺角色 / 缺时间都不算坏数据（画布是派生资产，宁可补默认值也不要
@@ -117,8 +159,14 @@ public struct CanvasEdge: Codable, Identifiable, Equatable {
         id = try c.decodeIfPresent(String.self, forKey: .id) ?? UUID().uuidString
         fromNodeId = try c.decode(String.self, forKey: .fromNodeId)
         toNodeId = try c.decode(String.self, forKey: .toNodeId)
+        // Only absence defaults. Unknown future purposes must not become execution inputs.
+        purpose = try c.decodeIfPresent(CanvasEdgePurpose.self, forKey: .purpose) ?? .generationInput
         role = (try? c.decode(CanvasEdgeRole.self, forKey: .role)) ?? .auto
+        animated = try c.decodeIfPresent(Bool.self, forKey: .animated) ?? false
         createdAt = try c.decodeIfPresent(Date.self, forKey: .createdAt) ?? Date(timeIntervalSince1970: 0)
+        sourceFromPort = try c.decodeIfPresent(String.self, forKey: .sourceFromPort)
+        sourceToPort = try c.decodeIfPresent(String.self, forKey: .sourceToPort)
+        sourceColorID = try c.decodeIfPresent(Int.self, forKey: .sourceColorID)
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -126,8 +174,13 @@ public struct CanvasEdge: Codable, Identifiable, Equatable {
         try c.encode(id, forKey: .id)
         try c.encode(fromNodeId, forKey: .fromNodeId)
         try c.encode(toNodeId, forKey: .toNodeId)
+        if purpose != .generationInput { try c.encode(purpose, forKey: .purpose) }
         try c.encode(role, forKey: .role)
+        if animated { try c.encode(true, forKey: .animated) }
         try c.encode(createdAt, forKey: .createdAt)
+        try c.encodeIfPresent(sourceFromPort, forKey: .sourceFromPort)
+        try c.encodeIfPresent(sourceToPort, forKey: .sourceToPort)
+        try c.encodeIfPresent(sourceColorID, forKey: .sourceColorID)
     }
 }
 
@@ -144,15 +197,20 @@ public enum CanvasEdgeGraph {
     // MARK: 连线合法性
 
     /// 为什么连不上。
-    public enum Rejection: Equatable {
+    public enum Rejection: Error, Equatable {
         /// 自己连自己。
         case selfLoop
-        /// 这两个节点之间已经有一条同向的线了。
+        /// 这两个节点之间已经有一条同向同用途的线了。
         case duplicate
         /// 会形成环。
         case cycle
         /// 端点不存在（节点刚被删 / id 过期）。
         case missingNode
+        case disabled
+        case incompatibleType
+        case unsupportedCapability
+        case unsupportedPurpose
+        case editBlocked
 
         public var message: String {
             switch self {
@@ -160,6 +218,11 @@ public enum CanvasEdgeGraph {
             case .duplicate: return "这两个节点已经连上了"
             case .cycle: return "不能连成环（那样取入参会绕回自己）"
             case .missingNode: return "节点不存在"
+            case .disabled: return "当前策略不允许连线"
+            case .incompatibleType: return "节点类型与连线角色不兼容"
+            case .unsupportedCapability: return "节点不具备此连线需要的能力"
+            case .unsupportedPurpose: return "目标节点不接受此用途的连线"
+            case .editBlocked: return "请先完成当前内容保存后再连线"
             }
         }
     }
@@ -170,12 +233,135 @@ public enum CanvasEdgeGraph {
     public static func canConnect(from: String,
                                  to: String,
                                  edges: [CanvasEdge],
-                                 nodeIds: Set<String> = []) -> Rejection? {
+                                 nodeIds: Set<String> = [],
+                                 purpose: CanvasEdgePurpose = .generationInput) -> Rejection? {
         if from == to { return .selfLoop }
         if !nodeIds.isEmpty, !nodeIds.contains(from) || !nodeIds.contains(to) { return .missingNode }
-        if edges.contains(where: { $0.fromNodeId == from && $0.toNodeId == to }) { return .duplicate }
-        if wouldCreateCycle(from: from, to: to, edges: edges) { return .cycle }
+        if edges.contains(where: { $0.fromNodeId == from && $0.toNodeId == to && $0.purpose == purpose }) {
+            return .duplicate
+        }
+        if purpose.isGenerationDependency, wouldCreateCycle(from: from, to: to, edges: edges) { return .cycle }
         return nil
+    }
+
+    public static func capabilities(of node: CanvasNode) -> Set<CanvasEdgeCapability> {
+        var capabilities = Set<CanvasEdgeCapability>()
+        if node.kind == .text || node.canGenerate { capabilities.insert(.generationInput) }
+        if node.kind == .video {
+            if node.canGenerate, node.draftReference != nil { capabilities.insert(.draftReferenceInput) }
+            if node.draftReference == nil,
+               let videoID = node.draftVideoID, !videoID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+               case .succeeded(let path) = node.state, !path.isEmpty {
+                capabilities.insert(.draftReferenceOutput)
+            }
+        }
+        return capabilities
+    }
+
+    /// Typed validation for actual edits. The ID-only overload above remains
+    /// available for legacy graph algorithms; it cannot prove capabilities.
+    public static func canConnect(from: String, to: String, nodes: [CanvasNode], edges: [CanvasEdge],
+                                  purpose: CanvasEdgePurpose = .generationInput,
+                                  role: CanvasEdgeRole = .auto, connectable: Bool = true) -> Rejection? {
+        guard connectable else { return .disabled }
+        if from == to { return .selfLoop }
+        guard let source = nodes.first(where: { $0.id == from }),
+              let target = nodes.first(where: { $0.id == to }) else { return .missingNode }
+        if let rejection = canConnect(from: from, to: to, edges: edges, purpose: purpose) { return rejection }
+        if purpose == .draftReference {
+            guard source.kind == .video, target.kind == .video, role == .auto else { return .incompatibleType }
+            guard target.draftReference != nil else { return .unsupportedPurpose }
+            guard capabilities(of: source).contains(.draftReferenceOutput),
+                  capabilities(of: target).contains(.draftReferenceInput) else { return .unsupportedCapability }
+            // A target's draft parameter is single-valued; generation inputs remain independent.
+            if edges.contains(where: { $0.toNodeId == to && $0.purpose == .draftReference }) { return .duplicate }
+            return nil
+        }
+        guard capabilities(of: target).contains(.generationInput) else { return .unsupportedCapability }
+        if role == .prompt { return nil }
+        if target.kind == .text {
+            return role == .firstFrame || role == .lastFrame ? .incompatibleType : nil
+        }
+        switch role {
+        case .auto:
+            guard source.kind == .text || source.kind == .image || source.kind == .slot else {
+                return .incompatibleType
+            }
+        case .firstFrame, .lastFrame:
+            guard target.kind == .video, source.kind == .image || source.kind == .slot else {
+                return .incompatibleType
+            }
+        case .reference:
+            guard source.kind == .image || source.kind == .slot else { return .incompatibleType }
+        case .prompt: break
+        }
+        return nil
+    }
+
+    public static func defaultPurpose(for target: CanvasNode) -> CanvasEdgePurpose {
+        target.kind == .video && target.draftReference != nil ? .draftReference : .generationInput
+    }
+
+    /// Nodes (including target params) and edges are one value change for the
+    /// store's existing history/save transaction.
+    public struct Edit: Equatable {
+        public let nodes: [CanvasNode]
+        public let edges: [CanvasEdge]
+    }
+
+    public static func connecting(_ edge: CanvasEdge, nodes: [CanvasNode], edges: [CanvasEdge],
+                                  at date: Date = Date()) -> Result<Edit, Rejection> {
+        if let rejection = canConnect(from: edge.fromNodeId, to: edge.toNodeId, nodes: nodes, edges: edges,
+                                      purpose: edge.purpose, role: edge.role) {
+            return .failure(rejection)
+        }
+        var next = nodes
+        if edge.purpose == .draftReference,
+           let source = nodes.first(where: { $0.id == edge.fromNodeId }),
+           let index = next.firstIndex(where: { $0.id == edge.toNodeId }) {
+            next[index].draftReference = CanvasDraftReference(sourceNodeID: source.id, videoID: source.draftVideoID)
+            next[index].duration = source.duration
+            next[index].ratio = source.ratio
+            next[index].generateAudio = source.generateAudio
+            next[index].updatedAt = date
+        }
+        return .success(Edit(nodes: next, edges: edges + [edge]))
+    }
+
+    public static func disconnecting(edgeID: String, nodes: [CanvasNode], edges: [CanvasEdge],
+                                     at date: Date = Date()) -> Edit? {
+        guard let edge = edges.first(where: { $0.id == edgeID }) else { return nil }
+        let remaining = edges.filter { $0.id != edgeID }
+        var next = nodes
+        if let index = next.firstIndex(where: { $0.id == edge.toNodeId }) {
+            if edge.purpose == .draftReference, next[index].draftReference?.sourceNodeID == edge.fromNodeId {
+                next[index].draftReference = CanvasDraftReference()
+                next[index].updatedAt = date
+            }
+            if edge.purpose == .generationInput, next[index].parentNodeId == edge.fromNodeId,
+               !remaining.contains(where: {
+                   $0.fromNodeId == edge.fromNodeId && $0.toNodeId == edge.toNodeId && $0.purpose == .generationInput
+               }) {
+                next[index].parentNodeId = nil
+            }
+        }
+        return Edit(nodes: next, edges: remaining)
+    }
+
+    /// Reconcile identity-only references after reload, deletion or remapping.
+    /// Do not recopy generation parameters when a source changes later.
+    public static func reconcilingDraftReferences(nodes: [CanvasNode], edges: [CanvasEdge]) -> [CanvasNode] {
+        nodes.map { node in
+            guard node.draftReference != nil else { return node }
+            var next = node
+            if let edge = incoming(of: node.id, edges: edges).first(where: { $0.purpose == .draftReference }),
+               nodes.contains(where: { $0.id == edge.fromNodeId }) {
+                next.draftReference?.sourceNodeID = edge.fromNodeId
+            } else {
+                next.draftReference = CanvasDraftReference()
+            }
+            return next
+        }
     }
 
     /// 加上 `from → to` 之后会不会有环。
@@ -185,7 +371,9 @@ public enum CanvasEdgeGraph {
     public static func wouldCreateCycle(from: String, to: String, edges: [CanvasEdge]) -> Bool {
         if from == to { return true }
         var adjacency: [String: [String]] = [:]
-        for e in edges { adjacency[e.fromNodeId, default: []].append(e.toNodeId) }
+        for e in edges where e.purpose.isGenerationDependency {
+            adjacency[e.fromNodeId, default: []].append(e.toNodeId)
+        }
         var stack = [to]
         var visited: Set<String> = [to]
         while let current = stack.popLast() {
@@ -199,12 +387,12 @@ public enum CanvasEdgeGraph {
 
     // MARK: 规整
 
-    /// 丢掉自环、野线（端点不存在）与同向重复线。
+    /// 丢掉自环、野线（端点不存在）与同向同用途重复线；只打断执行依赖环。
     ///
     /// `nodeIds` 传空集合时跳过野线检查（用于只想去重的场合）。顺序保持输入顺序 —— 重复项
     /// **留第一条**，因为它才是用户先连的那条（角色也可能已经改过）。
     public static func normalized(_ edges: [CanvasEdge], nodeIds: Set<String>) -> [CanvasEdge] {
-        var seen = Set<String>()
+        var seen = Set<EdgeKey>()
         var out: [CanvasEdge] = []
         out.reserveCapacity(edges.count)
         for e in edges {
@@ -212,13 +400,13 @@ public enum CanvasEdgeGraph {
             if !nodeIds.isEmpty {
                 guard nodeIds.contains(e.fromNodeId), nodeIds.contains(e.toNodeId) else { continue }
             }
-            guard seen.insert("\(e.fromNodeId)->\(e.toNodeId)").inserted else { continue }
+            guard seen.insert(EdgeKey(from: e.fromNodeId, to: e.toNodeId, purpose: e.purpose)).inserted else { continue }
             out.append(e)
         }
         return breakingCycles(out)
     }
 
-    /// 把历史脏数据里的环打断（保留先建立的边）。
+    /// 把历史脏数据里的执行依赖环打断（保留先建立的边）。引用边不参与。
     ///
     /// 正常路径上 `canConnect` 已经挡住了环，但**节点改绑**会把 id 整体重映射
     /// （`CanvasStore.rebindNode`），理论上能撞出环；而带环的图会让取入参的递归下不来。
@@ -231,7 +419,7 @@ public enum CanvasEdgeGraph {
         var kept: [CanvasEdge] = []
         var dropped = Set<String>()
         for e in ordered {
-            if wouldCreateCycle(from: e.fromNodeId, to: e.toNodeId, edges: kept) {
+            if e.purpose.isGenerationDependency, wouldCreateCycle(from: e.fromNodeId, to: e.toNodeId, edges: kept) {
                 dropped.insert(e.id)
             } else {
                 kept.append(e)
@@ -252,11 +440,13 @@ public enum CanvasEdgeGraph {
     /// 与用户当初建节点的顺序一致。
     public static func migratedFromParentLinks(nodes: [CanvasNode], edges: [CanvasEdge]) -> [CanvasEdge] {
         let ids = Set(nodes.map(\.id))
-        var existing = Set(edges.map { "\($0.fromNodeId)->\($0.toNodeId)" })
+        var existing = Set(edges.filter { $0.purpose == .generationInput }.map {
+            EdgeKey(from: $0.fromNodeId, to: $0.toNodeId, purpose: .generationInput)
+        })
         var out = edges
         for node in nodes {
             guard let parent = node.parentNodeId, parent != node.id, ids.contains(parent) else { continue }
-            let key = "\(parent)->\(node.id)"
+            let key = EdgeKey(from: parent, to: node.id, purpose: .generationInput)
             guard existing.insert(key).inserted else { continue }
             out.append(CanvasEdge(fromNodeId: parent,
                                   toNodeId: node.id,
@@ -304,5 +494,11 @@ public enum CanvasEdgeGraph {
             return copy
         }
         return normalized(mapped, nodeIds: [])
+    }
+
+    private struct EdgeKey: Hashable {
+        let from: String
+        let to: String
+        let purpose: CanvasEdgePurpose
     }
 }

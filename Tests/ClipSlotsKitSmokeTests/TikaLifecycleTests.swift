@@ -45,6 +45,33 @@ esac
             config: config, tools: nil, onEvent: { _ in })) ?? []
     }
     t.equal(skillResult.last?.content, "skill received", "Tika actual subprocess receives selected skill snapshot")
+    for (name, payload) in [
+        ("pure", #"{"type":"text-delta","text":"完整自然语言润色正文"}"#),
+        ("local-tool", #"{"type":"text-delta","text":"<clipslots-call cmd=\u0027clipslots pages\u0027/>"}"#),
+        ("cloud-tool", #"{"type":"tool-input-available","toolName":"shell","toolCallId":"bad"}"#)
+    ] {
+        let path = cli("polish-\(name)", #"""
+case "$*" in *--auto-approve*) exit 9;; esac
+case "$*" in *POLISH_SYSTEM_MARK*) ;; *) exit 8;; esac
+printf '%s\n' '
+"""# + payload + #"""
+' '{"type":"finish"}'
+"""#)
+        let success = smokeAwait {
+            var config = AgentConfig(systemPrompt: "POLISH_SYSTEM_MARK")
+            config.taskPolicy = .textPolish
+            let backend = TikaCLIService(config: .init(cliPath: path), localRunner: { _, _ in
+                t.check(false, "Polish must never run a local tool")
+                return .init(exitCode: 0, stdout: "", stderr: "", timedOut: false)
+            })
+            do {
+                let messages = try await backend.run(history: [.init(role: .user, content: "橘猫")],
+                    config: config, tools: nil, onEvent: { _ in })
+                return messages.last?.content == "完整自然语言润色正文"
+            } catch { return false }
+        }
+        t.equal(success, name == "pure", "Tika polish \(name) honors pure-text contract and forwards task prompt")
+    }
     let active = cli("active", #"""
 i=0
 while [ "$i" -lt 12 ]; do
@@ -82,6 +109,32 @@ exec /bin/sleep 5
     let finishedResult = run(finished)
     t.check(succeeded(finishedResult) && Date().timeIntervalSince(finishStart) < 3,
             "Tika finish 后子进程挂起不能误报响应超时：\(finishedResult)")
+
+    let delayedCallbacks = cli("finished-slow-callback", #"""
+printf '%s\n' '{"type":"text-delta","text":"第一段"}' '{"type":"text-delta","text":"第二段"}' '{"type":"finish"}'
+exec /bin/sleep 5
+"""#)
+    let delivered = smokeAwait {
+        var events: [String] = []
+        let collector = TikaCallbackCollector()
+        // Leave time for native process/pipe startup; the UI callback still
+        // exceeds the idle limit, so this exercises the same lifecycle failure.
+        let backend = TikaCLIService(config: .init(cliPath: delayedCallbacks, perTurnTimeout: 1))
+        do {
+            let messages = try await backend.run(history: [.init(role: .user, content: "本地回调测试")],
+                config: AgentConfig(), tools: nil, onEvent: { event in
+                    if case .contentDelta(let text) = event {
+                        await collector.append(text)
+                        if text == "第一段" { try? await Task.sleep(for: .milliseconds(1500)) }
+                    }
+                })
+            events = await collector.snapshot()
+            return (messages.last?.content, events, true, "")
+        } catch { return (nil as String?, await collector.snapshot(), false, String(describing: error)) }
+    }
+    t.check(delivered.2, "Tika 已收到 finish 时慢速界面回调不触发空闲超时：\(delivered.3)")
+    t.equal(delivered.0, "第一段第二段", "Tika 慢速回调仍完整保留已完成正文")
+    t.equal(delivered.1, ["第一段", "第二段"], "Tika 慢速回调按原事件顺序完成")
 
     final class Calls: @unchecked Sendable {
         private let lock = NSLock()
@@ -242,4 +295,10 @@ printf '%s\n' '{"type":"finish"}'
             t.equal(text, String(value), "Tika 序号\(value)落盘值与分组正确")
         } else { t.check(content.isEmpty, "Tika 末组剩余槽位\(value)保持空白") }
     }
+}
+
+private actor TikaCallbackCollector {
+    private var values: [String] = []
+    func append(_ value: String) { values.append(value) }
+    func snapshot() -> [String] { values }
 }

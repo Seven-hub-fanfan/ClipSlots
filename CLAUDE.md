@@ -38,7 +38,11 @@ The Settings page ("命令行工具 (CLI)" section, `CLIInstallManager.swift`) l
 
 ### In-App "Install to Agent" (v2.9.14+)
 
-The Plugins page ("ClipSlots Skill" section, `AgentSkillInstallManager.swift`) lets users one-click install the skill into detected agent environments (Claude Code `~/.claude`, Cursor `~/.cursor`, Codex `~/.codex`, Gemini CLI `~/.gemini`). Install = create a **symlink** `<agent>/skills/clipslots-manager` → the bundled skill dir `ClipSlots.app/Contents/Resources/skills/clipslots-manager`, so App upgrades of SKILL.md auto-sync to agents. Symlink is tried without privilege first (home dir is writable); falls back to a macOS admin-auth dialog on permission error. **Release pipeline must bundle the skill**: after building, `mkdir -p /Applications/ClipSlots.app/Contents/Resources/skills && rm -rf .../skills/clipslots-manager && cp -R skills/clipslots-manager /Applications/ClipSlots.app/Contents/Resources/skills/clipslots-manager`.
+The Plugins page ("ClipSlots Skill" section, `AgentSkillInstallManager.swift`) lets users one-click install the skill into detected agent environments (Claude Code `~/.claude`, Cursor `~/.cursor`, Gemini CLI `~/.gemini`). Install = create a **symlink** `<agent>/skills/clipslots-manager` → the bundled skill dir `ClipSlots.app/Contents/Resources/skills/clipslots-manager`, so App upgrades of SKILL.md auto-sync to agents. Symlink is tried without privilege first (home dir is writable); falls back to a macOS admin-auth dialog on permission error. **Release pipeline must bundle the skill**: after building, `mkdir -p /Applications/ClipSlots.app/Contents/Resources/skills && rm -rf .../skills/clipslots-manager && cp -R skills/clipslots-manager /Applications/ClipSlots.app/Contents/Resources/skills/clipslots-manager`.
+
+As of v2.17.12, the sidebar and full Agent workspace support DeepSeek and Tika.
+The Codex backend, desktop integration, scheduled tasks, review tools and runtime
+are removed. Legacy conversation metadata is preserved only for data compatibility.
 
 ## Architecture
 

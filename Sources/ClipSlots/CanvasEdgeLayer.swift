@@ -1,45 +1,21 @@
 import SwiftUI
+import AppKit
 import ClipSlotsKit
 
-/// 画布连线层（v2.12.0 建立 · **v2.16.0 按 TapNow 实测重做线型**）。
-///
-/// ## 为什么它是独立的一层而不是画在卡片里
-///
-/// 连线跨两张卡片，画在任何一张里都要突破自己的 frame（`clipped` 一开就断），而卡片内部的排版预算
-/// 是被 smoke 断言逐像素盯着的 —— 往里塞跨界元素是自找麻烦。
-///
-/// 它压在**节点层下面**：线从卡片边缘出发，压在卡片上会盖住内容（而卡片里正是产物预览）。代价是
-/// 被卡片遮住的那段线点不中，这是对的 —— 那段线在视觉上本来就不存在。
-///
-/// ## v2.16.0 把 v2.15.0 的三件事全部删了
-///
-/// v2.15.0 我按"节点编辑器常识"给线加了**末端箭头 + 起点实心圆 + 运行中流动虚线**，理由写得挺像
-/// 那么回事（"讲清方向"、"讲清出发点"、"讲清正在输送"）。实测 TapNow 之后发现方向正好相反：
-/// **它的线就是一条 1pt 的灰色贝塞尔，什么都没有。**
-///
-/// 想明白之后这事是有道理的：
-/// - **箭头**：连线两端接的是卡片的右边和左边，方向已经由"从右出、从左进"这个布局事实确定了，
-///   箭头是在重复一遍已知信息。而箭头有实体面积，一屏十条线就是十个黑三角在卡片缝隙里晃。
-/// - **起点圆**：同理，出发点就是卡片右边缘，圆点只是把它描了一遍。
-/// - **流动虚线**：生成状态在**卡片上**已经讲得很清楚了（遮罩 + 转圈 + 秒数）。线上再跑一串亮点，
-///   是同一件事说第二遍，而这一遍是**动的**——画布上任何持续运动都在抢注意力，代价远高于收益。
-///
-/// 留下的唯一一点状态表达是 `isFlowing` 时线**变亮**（`#909090` → `#E6E6E6`）。它是静态的、
-/// 零运动的，只在用户主动去看这条线时才被读到。
-///
-/// ## 坐标系
-///
-/// 全程屏幕坐标。线宽 / 命中带**不随 zoom 缩放**：它们是操作尺度而不是画布内容，25% 视图下跟着
-/// 缩到 0.25pt 就成了看不见也点不中的发丝。
+/// Static edges, command previews and flow all stay below the node layer.
+/// Only connected edge leaves observe handle motion; Core Animation drives flow.
 struct CanvasEdgeLayer: View {
-
     let edges: [CanvasEdge]
-    /// 节点 id → 它此刻的**屏幕矩形**（已含拖拽中的临时位移）。
     let frames: [String: CGRect]
     let selectedEdgeId: String?
-    /// 下游节点此刻在排队 / 生成中。只用来让线变亮一档，见类型注释。
+    let selectedNodeIDs: Set<String>
+    let visibleOutputIDs: Set<String>
+    let visibleInputIDs: Set<String>
+    let frozenOutputPoints: [String: CGPoint]
+    let frozenInputPoints: [String: CGPoint]
+    let portMotions: CanvasPortMotions
+    let zoom: CGFloat
     let isFlowing: (CanvasEdge) -> Bool
-    /// 这条线的下游节点接受哪些角色（视频下游才有首帧 / 尾帧）。
     let roleOptions: (CanvasEdge) -> [CanvasEdgeRole]
     let onSelect: (String) -> Void
     let onSetRole: (String, CanvasEdgeRole) -> Void
@@ -49,236 +25,272 @@ struct CanvasEdgeLayer: View {
         ZStack(alignment: .topLeading) {
             ForEach(edges) { edge in
                 if let from = frames[edge.fromNodeId], let to = frames[edge.toNodeId] {
-                    CanvasEdgeShapeView(edge: edge,
-                                        fromRect: from,
-                                        toRect: to,
-                                        isSelected: edge.id == selectedEdgeId,
-                                        isFlowing: isFlowing(edge),
-                                        roleOptions: roleOptions(edge),
-                                        onSelect: { onSelect(edge.id) },
-                                        onSetRole: { onSetRole(edge.id, $0) },
-                                        onDisconnect: { onDisconnect(edge.id) })
+                    CanvasEdgeShapeView(
+                        edge: edge, fromRect: from, toRect: to,
+                        isSelected: edge.id == selectedEdgeId,
+                        endpointSelected: selectedNodeIDs.contains(edge.fromNodeId) || selectedNodeIDs.contains(edge.toNodeId),
+                        isFlowing: isFlowing(edge), zoom: zoom,
+                        outputVisible: visibleOutputIDs.contains(edge.fromNodeId),
+                        inputVisible: visibleInputIDs.contains(edge.toNodeId),
+                        sourceFrozen: frozenOutputPoints[edge.fromNodeId],
+                        targetFrozen: frozenInputPoints[edge.toNodeId],
+                        fromMotion: portMotions.motion(nodeID: edge.fromNodeId, output: true),
+                        toMotion: portMotions.motion(nodeID: edge.toNodeId, output: false),
+                        roleOptions: roleOptions(edge),
+                        onSelect: { onSelect(edge.id) },
+                        onSetRole: { onSetRole(edge.id, $0) },
+                        onDisconnect: { onDisconnect(edge.id) })
                 }
             }
         }
     }
 }
 
-// MARK: - 单条连线
-
 private struct CanvasEdgeShapeView: View {
-
     let edge: CanvasEdge
     let fromRect: CGRect
     let toRect: CGRect
     let isSelected: Bool
+    let endpointSelected: Bool
     let isFlowing: Bool
+    let zoom: CGFloat
+    let outputVisible: Bool
+    let inputVisible: Bool
+    let sourceFrozen: CGPoint?
+    let targetFrozen: CGPoint?
+    @ObservedObject var fromMotion: CanvasPortMotion
+    @ObservedObject var toMotion: CanvasPortMotion
     let roleOptions: [CanvasEdgeRole]
     let onSelect: () -> Void
     let onSetRole: (CanvasEdgeRole) -> Void
     let onDisconnect: () -> Void
-
-    @State private var hovering = false
-
-    private var geometry: (start: CGPoint, c1: CGPoint, c2: CGPoint, end: CGPoint) {
-        let sides = CanvasEdgeGeometry.sides(from: fromRect, to: toRect)
-        let start = CanvasEdgeGeometry.anchor(of: fromRect, side: sides.out)
-        let end = CanvasEdgeGeometry.anchor(of: toRect, side: sides.in)
-        let controls = CanvasEdgeGeometry.controlPoints(start: start,
-                                                       end: end,
-                                                       outSide: sides.out,
-                                                       inSide: sides.in)
-        return (start, controls.0, controls.1, end)
-    }
-
-    /// 线宽。实测 TapNow 是 1pt；选中 / 悬停只加到 1.4pt。
-    ///
-    /// v2.15.0 这里是 1.6 / 2.2 / 2.6 —— 三档都太粗。粗线在纯黑底上是**结构**，会把画布读成
-    /// 流程图；细线是**关系**，读起来是"这两张图有关联"。差别就在这一个 pt 上。
-    private var lineWidth: CGFloat {
-        (isSelected || hovering) ? TapSkin.edgeWidthActive : TapSkin.edgeWidth
-    }
-
-    private var lineColor: Color {
-        if isSelected || hovering || isFlowing { return TapSkin.edgeInkActive }
-        return TapSkin.edgeInk
-    }
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
-        let g = geometry
+        let sourceOffset = fromMotion.presentationOffset(output: true)
+        let targetOffset = toMotion.presentationOffset(output: false)
+        let start = sourceFrozen ?? CGPoint(x: fromRect.maxX + (outputVisible ? CanvasSkin.portOffset + sourceOffset.x : 0),
+                            y: fromRect.midY + (outputVisible ? sourceOffset.y : 0))
+        let end = targetFrozen ?? CGPoint(x: toRect.minX + (inputVisible ? -CanvasSkin.portOffset + targetOffset.x : 0),
+                          y: toRect.midY + (inputVisible ? targetOffset.y : 0))
+        let c = CanvasEdgeGeometry.controlPoints(start: start, end: end, outSide: .right, inSide: .left,
+                                                 coordinateScale: zoom)
+        let curve = CanvasEdgeCurve(start: start, c1: c.0, c2: c.1, end: end)
+        let active = isSelected || endpointSelected
+        let ink = active ? Color.white.opacity(isSelected ? 1 : 0.565) : CanvasSkin.edgeInk
+        let width = 2.5 * zoom
+        let band = CanvasEdgeHitBand(start: start, c1: c.0, c2: c.1, end: end, width: 20 * zoom)
         ZStack(alignment: .topLeading) {
-            CanvasEdgeCurve(start: g.start, c1: g.c1, c2: g.c2, end: g.end)
-                .stroke(lineColor, style: StrokeStyle(lineWidth: lineWidth, lineCap: .round))
+            curve.stroke(ink, style: StrokeStyle(lineWidth: width, lineCap: .round))
                 .allowsHitTesting(false)
-
-            // 角色角标只在非自动态出现（`badgeText` 自己返回 nil 就不画）。
-            //
-            // 这是**我们有、TapNow 没有**的东西，刻意保留：「这条线当首帧用」是一个无法从布局推断
-            // 的事实，不写出来用户就只能靠记。它与被删掉的箭头/端点圆的区别正在这里——那些是在
-            // 重复已知信息，这个是在提供未知信息。
-            if let badge = edge.role.badgeText {
-                roleBadge(badge, at: CanvasEdgeGeometry.badgeAnchor(start: g.start, c1: g.c1, c2: g.c2, end: g.end))
+            if isFlowing && endpointSelected && !reduceMotion {
+                CanvasFlowStroke(start: start, c1: c.0, c2: c.1, end: end, width: width, active: true)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .allowsHitTesting(false)
             }
-
-            // 命中带：把曲线加粗成一条不可见丝带。
-            //
-            // 与视觉宽度**刻意脱钩**（1pt 线 / 14pt 命中带）。用 `strokedPath` 生成实心形状而不是
-            // 给可见线加 `contentShape`：后者在 macOS 上对细线的命中仍然按描边路径算，实测要压到
-            // 1pt 精度才点得中——而线越细，这个问题越致命，正好是这一版把线改细之后最该补的一刀。
-            CanvasEdgeHitBand(start: g.start, c1: g.c1, c2: g.c2, end: g.end)
-                .fill(Color.white.opacity(0.001))
-                .contentShape(CanvasEdgeHitBand(start: g.start, c1: g.c1, c2: g.c2, end: g.end))
-                .onHover { hovering = $0 }
+            CanvasEdgeArrow(start: start, c1: c.0, c2: c.1, end: end, size: 8 * zoom)
+                .fill(ink).allowsHitTesting(false)
+            if let badge = edge.role.badgeText {
+                Text(badge).font(.system(size: 9.5, weight: .medium))
+                    .foregroundColor(CanvasSkin.chromeInk)
+                    .padding(.horizontal, 6).padding(.vertical, 2.5)
+                    .background(Capsule().fill(CanvasSkin.chromeFill))
+                    .position(CanvasEdgeGeometry.badgeAnchor(start: start, c1: c.0, c2: c.1, end: end))
+                    .allowsHitTesting(false)
+            }
+            band.fill(Color.white.opacity(0.001)).contentShape(band)
+                .onTapGesture(perform: onSelect)
                 .contextMenu {
                     ForEach(roleOptions, id: \.self) { role in
-                        Button {
-                            onSelect()
-                            onSetRole(role)
-                        } label: {
+                        Button { onSelect(); onSetRole(role) } label: {
                             Label(role.displayName, systemImage: edge.role == role ? "checkmark" : role.symbolName)
                         }
                     }
                     Divider()
-                    Button(role: .destructive) {
-                        onSelect()
-                        onDisconnect()
-                    } label: {
+                    Button(role: .destructive) { onSelect(); onDisconnect() } label: {
                         Label("断开连接", systemImage: "scissors")
                     }
                 }
         }
-        .animation(TapSkin.stateAnim, value: hovering)
-        .animation(TapSkin.stateAnim, value: isSelected)
-    }
-
-    @ViewBuilder
-    private func roleBadge(_ text: String, at point: CGPoint) -> some View {
-        Text(text)
-            .font(.system(size: 9.5, weight: .medium))
-            .foregroundColor(TapSkin.chromeInk)
-            .padding(.horizontal, 6)
-            .padding(.vertical, 2.5)
-            .background(Capsule(style: .continuous).fill(TapSkin.chromeFill))
-            .position(x: point.x, y: point.y)
-            .allowsHitTesting(false)
     }
 }
 
-// MARK: - 形状
+/// Padded user-space gradient allows stops outside [0,1] without clipping the
+/// original -0.5/-0.3/-0.1 → 1/1.2/1.4 animation to CAGradientLayer's bounds.
+private struct CanvasFlowStroke: NSViewRepresentable {
+    let start: CGPoint, c1: CGPoint, c2: CGPoint, end: CGPoint
+    let width: CGFloat
+    let active: Bool
 
-/// 连线曲线。几何全部来自 Kit（`CanvasEdgeGeometry`），这里只把点翻译成 `Path`。
+    func makeNSView(context: Context) -> FlowView { FlowView() }
+    func updateNSView(_ view: FlowView, context: Context) {
+        view.configure(start: start, c1: c1, c2: c2, end: end, width: width, active: active)
+    }
+    final class FlowView: NSView {
+        override var isFlipped: Bool { true }
+        override func hitTest(_ point: NSPoint) -> NSView? { nil }
+        private let gradient = CAGradientLayer()
+        private let maskLayer = CAShapeLayer()
+        private var source = CGPoint.zero, destination = CGPoint.zero
+        private var requested = false
+        private var notifications: [NSObjectProtocol] = []
+
+        override init(frame: NSRect) {
+            super.init(frame: frame)
+            wantsLayer = true
+            gradient.colors = [
+                NSColor(calibratedRed: 82/255, green: 82/255, blue: 91/255, alpha: 0).cgColor,
+                NSColor.white.cgColor,
+                NSColor(calibratedRed: 82/255, green: 82/255, blue: 91/255, alpha: 0).cgColor
+            ]
+            gradient.locations = [0, 0.1, 0.2]
+            maskLayer.fillColor = nil
+            maskLayer.strokeColor = NSColor.white.cgColor
+            maskLayer.lineCap = .round
+            gradient.mask = maskLayer
+            layer?.addSublayer(gradient)
+            for name in [NSWindow.didBecomeKeyNotification, NSWindow.didResignKeyNotification,
+                         NSWindow.didMiniaturizeNotification, NSWindow.didDeminiaturizeNotification,
+                         NSApplication.didHideNotification, NSApplication.didUnhideNotification] {
+                notifications.append(NotificationCenter.default.addObserver(forName: name, object: nil, queue: .main) {
+                    [weak self] _ in self?.updateClock()
+                })
+            }
+        }
+        required init?(coder: NSCoder) { nil }
+        deinit { notifications.forEach(NotificationCenter.default.removeObserver) }
+        override func viewDidMoveToWindow() { super.viewDidMoveToWindow(); updateClock() }
+        override func layout() { super.layout(); updateGeometry(); updateClock() }
+
+        func configure(start: CGPoint, c1: CGPoint, c2: CGPoint, end: CGPoint, width: CGFloat, active: Bool) {
+            source = start; destination = end; requested = active
+            let path = CGMutablePath()
+            path.move(to: start); path.addCurve(to: end, control1: c1, control2: c2)
+            CATransaction.begin(); CATransaction.setDisableActions(true)
+            maskLayer.path = path; maskLayer.lineWidth = width
+            updateGeometry()
+            CATransaction.commit()
+            updateClock()
+        }
+        private func updateGeometry() {
+            guard bounds.width > 0, bounds.height > 0 else { return }
+            CATransaction.begin(); CATransaction.setDisableActions(true)
+            gradient.frame = bounds; maskLayer.frame = bounds
+            let dx = destination.x - source.x, dy = destination.y - source.y
+            gradient.startPoint = CGPoint(x: (source.x - dx * 0.5) / bounds.width,
+                                          y: (source.y - dy * 0.5) / bounds.height)
+            gradient.endPoint = CGPoint(x: (source.x + dx * 1.5) / bounds.width,
+                                        y: (source.y + dy * 1.5) / bounds.height)
+            CATransaction.commit()
+        }
+        private func updateClock() {
+            let pathVisible = maskLayer.path.map {
+                $0.boundingBoxOfPath.insetBy(dx: -maskLayer.lineWidth, dy: -maskLayer.lineWidth).intersects(bounds)
+            } ?? false
+            let enabled = requested && pathVisible && window?.isKeyWindow == true
+                && window?.isMiniaturized == false && !NSApp.isHidden
+            #if DEBUG
+            if ProcessInfo.processInfo.environment["CLIPSLOTS_GROUP_REPLICA_PROBE"] == "1", requested {
+                NSLog("[FlowProbe] bounds=%@ path=%@ key=%@ visible=%@ hidden=%@ enabled=%@",
+                      NSStringFromRect(bounds), NSStringFromRect(maskLayer.path?.boundingBoxOfPath ?? .zero),
+                      String(window?.isKeyWindow == true), String(pathVisible), String(NSApp.isHidden), String(enabled))
+            }
+            #endif
+            gradient.isHidden = !enabled
+            if enabled {
+                guard gradient.animation(forKey: "flow") == nil else { return }
+                let animation = CABasicAnimation(keyPath: "locations")
+                animation.fromValue = [0, 0.1, 0.2]
+                animation.toValue = [0.75, 0.85, 0.95]
+                animation.duration = 2
+                animation.repeatCount = .infinity
+                animation.timingFunction = CAMediaTimingFunction(name: .linear)
+                gradient.add(animation, forKey: "flow")
+            } else {
+                gradient.removeAnimation(forKey: "flow")
+            }
+        }
+    }
+}
+
 struct CanvasEdgeCurve: Shape {
-    let start: CGPoint
-    let c1: CGPoint
-    let c2: CGPoint
-    let end: CGPoint
-
+    let start: CGPoint, c1: CGPoint, c2: CGPoint, end: CGPoint
     func path(in rect: CGRect) -> Path {
         var path = Path()
-        path.move(to: start)
-        path.addCurve(to: end, control1: c1, control2: c2)
+        path.move(to: start); path.addCurve(to: end, control1: c1, control2: c2)
         return path
     }
 }
 
-/// 命中带：曲线加粗后的实心形状。
-struct CanvasEdgeHitBand: Shape {
-    let start: CGPoint
-    let c1: CGPoint
-    let c2: CGPoint
-    let end: CGPoint
-
+struct CanvasEdgeArrow: Shape {
+    let start: CGPoint, c1: CGPoint, c2: CGPoint, end: CGPoint
+    let size: CGFloat
     func path(in rect: CGRect) -> Path {
-        var line = Path()
-        line.move(to: start)
-        line.addCurve(to: end, control1: c1, control2: c2)
-        return line.strokedPath(StrokeStyle(lineWidth: TapSkin.edgeHitSlop * 2, lineCap: .round))
+        let arrow = CanvasEdgeGeometry.arrowHead(start: start, c1: c1, c2: c2, end: end, size: size)
+        var p = Path()
+        p.move(to: arrow.tip); p.addLine(to: arrow.left); p.addLine(to: arrow.right); p.closeSubpath()
+        return p
     }
 }
 
-// MARK: - 拖线预览
+struct CanvasEdgeHitBand: Shape {
+    let start: CGPoint, c1: CGPoint, c2: CGPoint, end: CGPoint
+    var width: CGFloat = 20
+    func path(in rect: CGRect) -> Path {
+        CanvasEdgeCurve(start: start, c1: c1, c2: c2, end: end).path(in: rect)
+            .strokedPath(StrokeStyle(lineWidth: width, lineCap: .round))
+    }
+}
 
-/// 从出口端口拖出来、还没落地的那条线。
-///
-/// ## v2.16.0：从虚线改回实线
-///
-/// 原来用虚线，理由是"它表达的是意图而不是事实"。听起来成立，实际观感是**这条线在闪**——虚线
-/// 跟着光标走的时候，每一段短划都在重新分布，视觉上像一条坏掉的线。TapNow 拖线时用的就是与
-/// 成品线完全相同的线型，"意图 vs 事实"由**末端那枚圆点**表达（有目标才实心），而不是由线型表达。
-///
-/// 这样还有一个实际好处：拖的过程和松手之后的结果长得一模一样，用户在松手前就已经看到最终形态。
 struct CanvasLinkDragPreview: View {
     let start: CGPoint
     let cursor: CGPoint
-    /// 光标是否正悬在一个可接受的目标上。
     let hasTarget: Bool
-
+    var zoom: CGFloat = 1
+    var fromInput = false
     var body: some View {
-        let sides = CanvasEdgeGeometry.sides(from: CGRect(x: start.x - 1, y: start.y - 1, width: 2, height: 2),
-                                             to: CGRect(x: cursor.x - 1, y: cursor.y - 1, width: 2, height: 2))
-        let controls = CanvasEdgeGeometry.controlPoints(start: start,
-                                                       end: cursor,
-                                                       outSide: sides.out,
-                                                       inSide: sides.in)
-        ZStack(alignment: .topLeading) {
-            CanvasEdgeCurve(start: start, c1: controls.0, c2: controls.1, end: cursor)
-                .stroke(hasTarget ? TapSkin.edgeInkActive : TapSkin.edgeInk,
-                        style: StrokeStyle(lineWidth: TapSkin.edgeWidthActive, lineCap: .round))
-            // 末端圆点：唯一区分"已瞄准"与"悬空"的元素。悬空时空心（还没落地），
-            // 瞄准时实心（松手就连上）。
-            Circle()
-                .fill(hasTarget ? TapSkin.edgeInkActive : TapSkin.void)
-                .overlay(Circle().stroke(hasTarget ? TapSkin.edgeInkActive : TapSkin.edgeInk, lineWidth: 1.2))
-                .frame(width: 7, height: 7)
-                .position(x: cursor.x, y: cursor.y)
-        }
-        .allowsHitTesting(false)
+        let c = CanvasEdgeGeometry.controlPoints(start: start, end: cursor,
+                                                 outSide: fromInput ? .left : .right,
+                                                 inSide: fromInput ? .right : .left,
+                                                 coordinateScale: zoom)
+        CanvasEdgeCurve(start: start, c1: c.0, c2: c.1, end: cursor)
+            .stroke(hasTarget ? CanvasSkin.edgeInkActive : CanvasSkin.edgeInk,
+                    style: StrokeStyle(lineWidth: 2.5 * zoom, lineCap: .round))
+            .allowsHitTesting(false)
     }
 }
 
-// MARK: - 端口
+struct CanvasMovingLinkPreview: View {
+    @ObservedObject var motion: CanvasPortMotion
+    let start: CGPoint
+    let targetHome: CGPoint
+    let zoom: CGFloat
+    let fromInput: Bool
+    var body: some View {
+        let offset = motion.presentationOffset(output: fromInput)
+        CanvasLinkDragPreview(start: start,
+                              cursor: CGPoint(x: targetHome.x + offset.x, y: targetHome.y + offset.y),
+                              hasTarget: true, zoom: zoom, fromInput: fromInput)
+    }
+}
 
-/// 节点左右两侧的 **⊕ 端口**（v2.16.0 重做）。
-///
-/// ## 实测数据
-///
-/// TapNow 的端口是一枚**空心圆 + 细十字**，直径约 18pt，圆心落在卡片左右边缘**外侧约 28pt**
-/// 处的垂直中线上。v2.15.0 我做的是 14/15pt 的圆、贴着卡片边缘（偏移 8~9pt），且入口画成
-/// 带数字的实心圆。三处都不对：
-///
-/// 1. **太小**。18pt 的圆在 100% 视图下是一个"舒服的点击目标"，14pt 是"需要瞄一下"。
-///    而这枚圆是连线操作的**唯一**入口，它的可命中性直接决定"连线顺不顺手"。
-/// 2. **太近**。贴边 8pt 时圆压在卡片轮廓上，圆和卡片的圆角混在一起，看不出它是个独立控件；
-///    推到 28pt 之后它悬在黑底上，边界干净。更要紧的是拖拽：贴边意味着"起手那几个像素还在
-///    卡片范围内"，手势容易被卡片的拖动手势抢走。
-/// 3. **数字是噪声**。入口上写"2"是在回答一个用户没问的问题（"这里接了几条线"——线自己就在
-///    那儿，数得出来）。改成"空心 = 还没接 / 中心实点 = 已接"，同样的信息量，零文字。
 struct CanvasPort: View {
-    /// 端口是否处于活跃态（正被拖 / 正被瞄准 / 已有连线）。
     let isActive: Bool
-    /// 已经连上了东西（决定中心画不画那个实点）。
     let isConnected: Bool
-
     var body: some View {
         ZStack {
-            // 底：纯黑填充。不用透明——端口会压在连线上，透明会让线从圆心穿过去，
-            // 看起来像"线把端口串起来了"。
-            Circle().fill(TapSkin.void)
-            Circle().stroke(isActive ? TapSkin.portStrokeActive : TapSkin.portStroke,
-                            lineWidth: TapSkin.portStrokeWidth)
+            Circle().fill(CanvasSkin.void)
+            Circle().stroke(isActive ? CanvasSkin.portStrokeActive : CanvasSkin.portStroke,
+                            lineWidth: CanvasSkin.portStrokeWidth)
             if isConnected {
-                Circle()
-                    .fill(isActive ? TapSkin.portStrokeActive : TapSkin.portStroke)
-                    .frame(width: TapSkin.portDiameter * 0.3, height: TapSkin.portDiameter * 0.3)
+                Circle().fill(isActive ? CanvasSkin.portStrokeActive : CanvasSkin.portStroke)
+                    .frame(width: CanvasSkin.portDiameter * 0.3, height: CanvasSkin.portDiameter * 0.3)
             } else {
-                Image(systemName: "plus")
-                    .font(.system(size: TapSkin.portGlyphSize, weight: .medium))
-                    .foregroundColor(isActive ? TapSkin.portStrokeActive : TapSkin.portStroke)
+                Image(systemName: "plus").font(.system(size: CanvasSkin.portGlyphSize, weight: .medium))
+                    .foregroundColor(isActive ? CanvasSkin.portStrokeActive : CanvasSkin.portStroke)
             }
         }
-        .frame(width: TapSkin.portDiameter, height: TapSkin.portDiameter)
-        .frame(width: 32, height: 32)
-        .contentShape(Circle())
-        .help("拖动连到另一个节点")
+        .frame(width: CanvasSkin.portDiameter, height: CanvasSkin.portDiameter)
+        .frame(width: 32, height: 32).contentShape(Circle()).help("点击新建，或拖动连到另一个节点")
     }
 }

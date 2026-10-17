@@ -460,7 +460,7 @@ public final class SlotStorage {
     }
 
     @discardableResult
-    public func set(_ slot: Int, content: SlotContent) -> Bool {
+    public func set(_ slot: Int, content: SlotContent, replacingLabel: Bool = false) -> Bool {
         // DS-3 / CR-3 (v2.10.30): a deleted group's storage must never write again.
         if isInvalidated {
             NSLog("[ClipSlots] SlotStorage.set slot=\(slot): refused — storage invalidated (group deleted)")
@@ -483,7 +483,7 @@ public final class SlotStorage {
                     return false
                 }
                 do {
-                    let persisted = try writeSlotContent(content, to: slot)
+                    let persisted = try writeSlotContent(content, to: slot, replacingLabel: replacingLabel)
                     // P2-C (v2.10.44): cache the PERSISTED attachments (data=nil, storagePath →
                     // on-disk `.bin`) rather than the caller's `content`, which still carries the
                     // inline attachment bytes. Caching `content` kept those bytes resident until
@@ -636,11 +636,39 @@ public final class SlotStorage {
         }
     }
 
+    /// A staged owner must drain diagnostic IO before renaming its entire directory.
+    public func finishPendingWritesBeforeMovingDirectory() {
+        manifestQueue.sync {}
+    }
+
     public func snapshot() -> [Int: SlotContent] {
         queue.sync { cache }
     }
 
     // MARK: - Global search scan (v2.11.7 hotfix11)
+
+    /// Unlike best-effort search, a generation preview must report an incomplete scan.
+    /// Lock one slot at a time so a large library doesn't monopolize GUI/CLI storage.
+    public func batchGenerationSnapshot(slotCount: Int) throws -> [Int: SlotContent] {
+        guard slotCount > 0 else { return [:] }
+        var result: [Int: SlotContent] = [:]
+        for slot in 1...slotCount {
+            let content = try StorageLock.shared.withLock(timeout: Self.readLockTimeout) {
+                guard !StorageLock.shared.isDegraded else { throw AgentCanvasError.busy }
+                return queue.sync {
+                    let directory = baseURL.appendingPathComponent(String(slot))
+                    let fingerprint = dirFingerprint(directory.path)
+                    if let cached = cache[slot], cacheFingerprint[slot] == fingerprint { return cached }
+                    if let cached = scanCache[slot], scanCacheFingerprint[slot] == fingerprint { return cached }
+                    let content = readSlotContent(from: directory, textOnly: true)
+                    scanCache[slot] = content; scanCacheFingerprint[slot] = fingerprint
+                    return content
+                }
+            }
+            if !content.isEmpty { result[slot] = content }
+        }
+        return result
+    }
 
     /// 全局搜索用的**整组**槽位快照，缺失的槽位从磁盘补读。
     ///
@@ -869,6 +897,10 @@ public final class SlotStorage {
         // 走 decodeIfPresent 自动回落 nil，完全向后兼容；编码时 nil 会被省略，因此没设置
         // 手动缩略图的槽位其 content.json 与升级前逐字节一致。
         var manualThumbnailId: String? = nil
+        // Body CAS/undo must survive cache invalidation and restart, including HTML
+        // and pasteboard format priority. Older metadata decodes these as nil.
+        var htmlSource: String? = nil
+        var itemTypeOrder: [[String]]? = nil
     }
 
     /// v2.11.0：手动缩略图在槽位目录内的字节文件路径（不校验存在性）。
@@ -969,6 +1001,16 @@ public final class SlotStorage {
            let meta = try? JSONDecoder().decode(SlotContentMeta.self, from: metaData) {
             content.contentId = meta.contentId
             content.updatedAt = meta.updatedAt
+            content.htmlSource = meta.htmlSource
+            if let order = meta.itemTypeOrder, order.count == content.items.count {
+                for index in content.items.indices {
+                    let positions = Dictionary(order[index].enumerated().map { ($0.element, $0.offset) },
+                                               uniquingKeysWith: { first, _ in first })
+                    content.items[index].sort {
+                        (positions[$0.type] ?? Int.max, $0.type) < (positions[$1.type] ?? Int.max, $1.type)
+                    }
+                }
+            }
             // v2.11.0: 恢复手动缩略图身份，并**校验字节文件确实存在**。
             // 为什么要校验：manualThumbnailId 在 content.json 里，字节在 attachments/{id}.bin 里，
             // 二者虽随同一次原子 swap 生效（不会半写），但用户手动清理数据目录、外部同步工具漏传、
@@ -1070,7 +1112,7 @@ public final class SlotStorage {
     /// caches this shape so the freshly-written slot doesn't keep inline bytes resident (P2-C).
     /// A slot with no attachments returns the (empty) `content.attachments` unchanged.
     @discardableResult
-    private func writeSlotContent(_ content: SlotContent, to slot: Int) throws -> PersistedSlotShape {
+    private func writeSlotContent(_ content: SlotContent, to slot: Int, replacingLabel: Bool = false) throws -> PersistedSlotShape {
         let slotDir = baseURL.appendingPathComponent(String(slot))
         // P2-C (v2.10.44): the attachment shape actually written to disk. Defaults to the
         // caller's attachments (covers the no-attachment / non-externalized paths); the
@@ -1091,7 +1133,7 @@ public final class SlotStorage {
         // `getLabel` here re-entered `queue.sync` on the queue-owning thread and
         // crashed with "dispatch_sync called on queue already owned by current
         // thread" during pack import (v2.10.39).
-        let existingLabel = getLabelOnQueue(slot)
+        let existingLabel = replacingLabel ? content.label : getLabelOnQueue(slot)
 
         // P1-3 (v2.10.8): atomic write. The old implementation removed `slotDir`
         // first and then rebuilt it file-by-file. If the process crashed / was
@@ -1138,7 +1180,9 @@ public final class SlotStorage {
                 // Persist content identity so thumbnail keys survive app restarts.
                 let meta = SlotContentMeta(contentId: content.contentId,
                                            updatedAt: content.updatedAt,
-                                           manualThumbnailId: effectiveManualThumbnailId)
+                                           manualThumbnailId: effectiveManualThumbnailId,
+                                           htmlSource: content.htmlSource,
+                                           itemTypeOrder: content.items.map { $0.map(\.type) })
                 let metaData = try JSONEncoder().encode(meta)
                 try metaData.write(to: stagingDir.appendingPathComponent("content.json"), options: .atomic)
 

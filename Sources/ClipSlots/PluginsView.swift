@@ -1,6 +1,7 @@
 import SwiftUI
 import AppKit
 import UniformTypeIdentifiers
+import ClipSlotsKit
 
 // v2.9.17: Plugin marketplace (Obsidian community-plugins style).
 //
@@ -14,6 +15,13 @@ import UniformTypeIdentifiers
 // Stays an independent popover (NOT embedded into the settings window).
 struct PluginsView: View {
     var onClose: () -> Void
+
+    init(onClose: @escaping () -> Void, initialCategory: PluginMarketCategory = .officialSkill,
+         initialItemID: String? = nil) {
+        self.onClose = onClose
+        _selectedCategory = State(initialValue: initialCategory)
+        _selectedItemID = State(initialValue: initialItemID)
+    }
 
     @Environment(\.colorScheme) private var scheme
 
@@ -30,6 +38,8 @@ struct PluginsView: View {
     // 用共享单例而非 @StateObject：市场是 popover，每次开关都会重建视图，挂在视图上等于
     // 每次打开都重新打一次 API，并且「正在获取」的转圈状态会在重建时凭空消失。
     @ObservedObject private var releases = GitHubReleaseWatcher.shared
+    @ObservedObject private var toolEnvironment = EnvironmentSetupManager.shared
+    @State private var showingEnvironment = false
 
     // 保留旧标记键以兼容历史用户（当前仅作展示，不联动 CLI）。
     @AppStorage("skill_clipslots_manager_enabled") private var skillEnabled = true
@@ -69,11 +79,13 @@ struct PluginsView: View {
         }
         .frame(width: 560, height: 588)
         .background(AppTheme.windowBackground(scheme))
+        .sheet(isPresented: $showingEnvironment) { EnvironmentSetupView(includeREA: true) }
         // v2.9.30: 进入 Skill 市场页时也静默同步一次，确保已安装的 Skill 用到最新决策流。
         .onAppear {
             agentInstaller.syncInstalledSkillsOnLaunch()
             // v2.9.53: 扫描已上传的社区 Skill 及其在各 Agent 的安装状态。
             communitySkills.refresh()
+            toolEnvironment.check()
             // v2.11.8: 市场一打开就异步刷新一次动态版本号（只刷缓存已过期的仓库；先显示旧值，
             // 拿到新值再替换）。GitHub 匿名 API 每小时 60 次/IP，所以不做无脑每次拉取。
             releases.refreshStale(repos: PluginCatalog.allItems.compactMap(\.githubRepo))
@@ -111,6 +123,10 @@ struct PluginsView: View {
                     .foregroundColor(.secondary)
             }
             Spacer()
+            Button { showingEnvironment = true } label: {
+                Label("环境检测", systemImage: "wrench.and.screwdriver")
+                    .font(.system(size: 11))
+            }
             Button { onClose() } label: {
                 Image(systemName: "xmark")
                     .font(.system(size: 12, weight: .bold))
@@ -229,6 +245,7 @@ struct PluginsView: View {
             .contentShape(Capsule())
         }
         .buttonStyle(.plain)
+        .accessibilityIdentifier("plugins-category-\(category.rawValue)")
     }
 
     // MARK: List
@@ -331,16 +348,18 @@ struct PluginsView: View {
             .onTapGesture {
                 selectedItemID = item.id
             }
+            .accessibilityIdentifier("plugins-card-\(item.id)")
     }
 
+    @ViewBuilder
     private func itemIcon(_ item: PluginMarketItem, size: CGFloat, corner: CGFloat) -> some View {
-        let appearance = iconAppearance(for: item)
-        return marketIcon(
-            systemName: appearance.systemName,
-            colors: appearance.colors,
-            size: size,
-            corner: corner
-        )
+        if item.id == "rea", let url = REAIntegration.iconURL, let image = NSImage(contentsOf: url) {
+            Image(nsImage: image).resizable().scaledToFit().frame(width: size, height: size)
+                .accessibilityLabel("REA 原项目图标")
+        } else {
+            let appearance = iconAppearance(for: item)
+            marketIcon(systemName: appearance.systemName, colors: appearance.colors, size: size, corner: corner)
+        }
     }
 
     private func iconAppearance(for item: PluginMarketItem) -> (systemName: String, colors: [Color]) {
@@ -415,7 +434,17 @@ struct PluginsView: View {
     // 由 FSEvents 监听 /Applications 自动刷新状态。
     @ViewBuilder
     private func pluginInstallControl(for item: PluginMarketItem, compact: Bool) -> some View {
-        if communityPlugins.isInstalled(item.id) {
+        if item.id == "rea" {
+            Button {
+                if toolEnvironment.statuses[.rea]?.ready == true { selectedItemID = item.id }
+                else { showingEnvironment = true }
+            } label: {
+                badge(text: toolEnvironment.statuses[.rea]?.ready == true ? "打开分析" : "启用",
+                      icon: toolEnvironment.statuses[.rea]?.ready == true ? "checkmark.circle" : "arrow.down.circle",
+                      color: .accentColor)
+            }
+            .buttonStyle(.plain)
+        } else if communityPlugins.isInstalled(item.id) {
             HStack(spacing: 8) {
                 badge(text: "已安装 ✓", icon: "checkmark.circle.fill", color: .green)
                 Button {
@@ -637,6 +666,11 @@ struct PluginsView: View {
                         }
                     }
 
+                    if item.id == "rea" {
+                        Divider()
+                        REAPluginView()
+                    }
+
                     if item.installsToAgent {
                         Divider()
                         agentInstallSection
@@ -709,7 +743,7 @@ struct PluginsView: View {
                     Image(systemName: "magnifyingglass")
                         .font(.system(size: 12))
                         .foregroundColor(.secondary)
-                    Text("未检测到已安装的 Agent（Claude Code / Cursor / Codex / Gemini CLI）")
+                    Text("未检测到已安装的 Agent（Claude Code / Cursor / Gemini CLI）")
                         .font(.caption2)
                         .foregroundColor(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
@@ -1295,7 +1329,7 @@ struct PluginsView: View {
             }
 
             if communitySkills.detectedAgents.isEmpty {
-                Text("未检测到任何 Agent（Claude Code / Cursor / Codex / Gemini CLI）。")
+                Text("未检测到任何 Agent（Claude Code / Cursor / Gemini CLI）。")
                     .font(.system(size: 11.5))
                     .foregroundColor(.secondary)
             } else {
@@ -1382,6 +1416,7 @@ struct PluginsView: View {
     }
 
     private func isInstalled(_ item: PluginMarketItem) -> Bool {
+        if item.id == "rea" { return toolEnvironment.statuses[.rea]?.ready == true }
         // Skill 类条目看 Agent 目录的聚合安装状态。
         if item.installsToAgent { return agentInstaller.aggregateState == .installed }
         // v2.11.8: App 类条目（官方插件 / 社区插件）看磁盘上是否真实存在该 App。

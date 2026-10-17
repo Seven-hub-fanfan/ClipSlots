@@ -1,238 +1,48 @@
-import Foundation
 import AppKit
-import SwiftUI
+import ApplicationServices
+import Foundation
 
-// v2.9.8: 方案 Y — Accessibility permission guidance on launch.
-//
-// Every launch we check `AXIsProcessTrusted()`. If the app is NOT trusted
-// (permission revoked or never granted — which frequently happens after an
-// app update because macOS ties the grant to the binary), we:
-//   1. open the system Accessibility settings pane, and
-//   2. show a clear in-app guide alert telling the user exactly what to do
-//      (find ClipSlots → enable the checkbox).
-//
-// This removes the pain of users hunting through System Settings after every
-// update wondering why hotkeys stopped working.
 @MainActor
 enum AccessibilityPermissionGuide {
-
-    /// System Preferences / Settings Accessibility pane.
-    private static let settingsURLString =
-        "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"
-    private static let prefPanePath = "/System/Library/PreferencePanes/Security.prefPane"
-
-    /// v2.9.9: 保证一个进程生命周期内只引导一次。ContentView 的 onAppear 可能重复触发
-    /// （窗口重建 / 场景切换），若不加此守卫会重复弹窗骚扰用户。
     private static var didGuide = false
 
-    /// ★ MODAL-STALL (v2.10.92): 非模态展示时持有引导面板，防止 `presentGuideAlert` 返回后被释放。
-    /// 面板关闭（点「打开设置」或「本次已知晓」）时置 nil。
-    private static var guidePanel: NSPanel?
-
-    /// Call once on app launch (from the App scene onAppear).
     static func checkAndGuideOnLaunch() {
-        guard !didGuide else { return }
-        // v2.10.91 (perf): 性能自测模式下不弹权限引导面板——它会盖在主窗口上并抢焦点，
-        // 干扰切组/设置转场的取数。仅在 CLIPSLOTS_PERF_AUTOTEST=1 时生效，正常运行不受影响。
-        guard !PerfAutoTest.isEnabled else { return }
+        guard !didGuide, !PerfAutoTest.isEnabled else { return }
         didGuide = true
-        // v2.10.10: 读取并清除「自动更新后待重新授权」标记，用于展示更贴切的更新文案。
-        let afterUpdate = UserDefaults.standard.bool(
+        let legacyAfterUpdate = UserDefaults.standard.bool(
             forKey: UserPreferenceKeys.pendingAccessibilityReauthAfterUpdate)
-        if afterUpdate {
-            UserDefaults.standard.set(false, forKey: UserPreferenceKeys.pendingAccessibilityReauthAfterUpdate)
-        }
-        // Small delay so the main window is on screen before the alert appears.
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) {
-            guard !AXIsProcessTrusted() else { return }
-            // v2.9.9: 先弹说明 alert，由用户主动点「打开设置」再跳转，避免一启动就被弹到系统设置。
-            presentGuideAlert(afterUpdate: afterUpdate)
+        UserDefaults.standard.set(false, forKey: UserPreferenceKeys.pendingAccessibilityReauthAfterUpdate)
+        let url = Bundle.main.bundleURL
+        let previous = PermissionUpgradeState.shared.previous
+        Task {
+            let inspection = await Task.detached(priority: .utility) {
+                guard let current = try? CodeIdentityInspector.inspect(url) else { return nil as (AppCodeIdentity, Bool)? }
+                return (current, previous.map { CodeIdentityInspector.satisfies($0, at: url) } ?? false)
+            }.value
+            var afterUpdate = legacyAfterUpdate
+            if let (current, satisfiesPrevious) = inspection {
+                PermissionUpgradeState.shared.observe(current, satisfiesPrevious: satisfiesPrevious)
+                afterUpdate = afterUpdate || PermissionUpgradeState.shared.consumeMigrationGuidance()
+            }
+            try? await Task.sleep(for: .milliseconds(800))
+            let model = PermissionCenter.model
+            model.refresh()
+            PermissionUpgradeState.shared.completeIfReady(model.authorized.count == AppPermission.allCases.count)
+            if afterUpdate {
+                guard let missing = AppPermission.allCases.first(where: { !model.authorized.contains($0) }) else { return }
+                PermissionCenter.present(for: missing, afterUpdate: true)
+            } else if !model.authorized.contains(.accessibility) {
+                PermissionCenter.present(for: .accessibility)
+            }
         }
     }
 
-    /// Open the Accessibility settings page. Prefer the modern URL scheme, fall
-    /// back to opening the Security preference pane directly.
+    static func present() {
+        guard !AXIsProcessTrusted() else { return }
+        PermissionCenter.present(for: .accessibility)
+    }
+
     static func openAccessibilitySettings() {
-        if let url = URL(string: settingsURLString), NSWorkspace.shared.open(url) {
-            return
-        }
-        NSWorkspace.shared.open(URL(fileURLWithPath: prefPanePath))
-    }
-
-    // v2.9.25: 权限弹窗彻底视觉重做——用自定义 SwiftUI 磁玻璃面板替换 NSAlert：
-    // 顶部 48pt+ 大图标、加大加粗标题、宽松行距副文本、数字圆圈步骤列表、
-    // 蓝色填充主按钮 +「本次已知晓」文字次要按钮、16pt+ 圆角与充裕内边距。
-    // ★ MODAL-STALL (v2.10.92): **不再使用 `NSApp.runModal(for:)`**。
-    //
-    // 实测（`sample ClipSlots` 抓到的主线程栈）：只要这个引导面板还开着，主线程就一直停在
-    // `runModalForWindow:` → `_doModalLoop:` 里。`runModal` 跑的是 `NSModalPanelRunLoopMode`
-    // 嵌套 run loop，而 `DispatchQueue.main.async` / `asyncAfter` 的块只在 common modes 下被
-    // drain —— 于是**整个 App 的异步主线程工作全部堆积不执行**：存储 watcher 的 0.3s 去抖
-    // reload 一次都跑不了，外部进程（CLI）写盘后 GUI 不刷新，哨兵轮询也白跑（它同样要回主线程）。
-    //
-    // 这个面板尤其致命：它在**启动时未经用户触发**就弹出（每次 App 更新后 macOS 都会撤销辅助功能
-    // 授权），用户完全可能让它挂在那儿几小时 —— 那段时间里 App 的外部写刷新契约整体失效，
-    // 而且从外部看只是「GUI 不刷新」，极难归因。（此前排查中「FSEvents 回调进得来但主队列不转」
-    // 的诡异现象，根因就是这里。）
-    //
-    // 改为非模态：`makeKeyAndOrderFront` 展示 + `.modalPanel` 层级保证它仍浮在最上层，用静态
-    // 属性持有面板防止被释放，按钮回调里关闭并置 nil。视觉与交互（含回车触发「打开设置」）不变，
-    // 但主线程 run loop 保持常规模式，异步刷新链路照常工作。
-    private static func presentGuideAlert(afterUpdate: Bool = false) {
-        // 已有面板在展示（理论上已被 didGuide 挡住，这里是纵深防御）→ 只前置，不重复创建。
-        if let existing = guidePanel {
-            existing.makeKeyAndOrderFront(nil)
-            return
-        }
-
-        let card = AccessibilityGuideCard(
-            afterUpdate: afterUpdate,
-            onOpenSettings: {
-                dismissGuidePanel()
-                openAccessibilitySettings()
-            },
-            onDismiss: {
-                dismissGuidePanel()
-            }
-        )
-
-        let hosting = NSHostingView(rootView: card)
-        let fitting = hosting.fittingSize
-        let size = NSSize(
-            width: fitting.width > 0 ? fitting.width : 428,
-            height: fitting.height > 0 ? fitting.height : 480
-        )
-
-        let panel = GuidePanel(
-            contentRect: NSRect(origin: .zero, size: size),
-            styleMask: [.borderless, .nonactivatingPanel],
-            backing: .buffered,
-            defer: false
-        )
-        panel.isOpaque = false
-        panel.backgroundColor = .clear
-        panel.hasShadow = false
-        panel.isMovableByWindowBackground = true
-        panel.level = .modalPanel
-        // 非模态展示后 App 可能被切走，面板跟着隐藏/恢复，避免盖住别的 App。
-        panel.hidesOnDeactivate = true
-        hosting.frame = NSRect(origin: .zero, size: size)
-        hosting.autoresizingMask = [.width, .height]
-        panel.contentView = hosting
-        panel.center()
-        guidePanel = panel
-        panel.makeKeyAndOrderFront(nil)
-    }
-
-    /// 关闭引导面板并释放持有（幂等）。
-    private static func dismissGuidePanel() {
-        guard let panel = guidePanel else { return }
-        guidePanel = nil
-        panel.orderOut(nil)
-    }
-}
-
-// ★ MODAL-STALL (v2.10.92): borderless + nonactivating 的 NSPanel 默认 `canBecomeKey == false`。
-// 此前靠 `runModal` 的模态会话强制它成为 key window；去掉 runModal 后必须显式允许成为 key，
-// 否则按钮的键盘默认动作（回车触发「打开设置」）会失效。
-private final class GuidePanel: NSPanel {
-    override var canBecomeKey: Bool { true }
-}
-
-// MARK: - v2.9.25 Custom permission guide card
-
-private struct AccessibilityGuideCard: View {
-    // v2.10.10: 是否为「自动更新后」触发（展示更新专属文案）。
-    var afterUpdate: Bool = false
-    var onOpenSettings: () -> Void
-    var onDismiss: () -> Void
-
-    var body: some View {
-        VStack(spacing: 18) {
-            Image(systemName: "lock.shield.fill")
-                .font(.system(size: 52, weight: .semibold))
-                .foregroundStyle(Color.accentColor)
-                .padding(.top, 2)
-
-            VStack(spacing: 8) {
-                Text(afterUpdate ? "App 更新后需重新授权「辅助功能」" : "需要开启「辅助功能」权限")
-                    .font(.system(size: 21, weight: .bold))
-                    .multilineTextAlignment(.center)
-                Text(afterUpdate
-                     ? "ClipSlots 刚刚完成更新。macOS 会在 App 更新后解除旧版本的辅助功能授权，需要重新勾选才能恢复全局快捷键、复制与粘贴。"
-                     : "ClipSlots 需要此权限来注册全局快捷键、模拟复制与粘贴。")
-                    .font(.system(size: 13))
-                    .foregroundColor(.secondary)
-                    .multilineTextAlignment(.center)
-                    .lineSpacing(5)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-
-            VStack(alignment: .leading, spacing: 14) {
-                stepRow(number: 1, text: afterUpdate
-                        ? "在「隐私与安全性 → 辅助功能」中重新勾选 ClipSlots（如有旧的失效条目，先用「-」移除）"
-                        : "在「隐私与安全性 → 辅助功能」中打开 ClipSlots 的开关")
-                stepRow(number: 2, text: "若列表里没有，点「+」添加 /Applications/ClipSlots.app")
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.top, 2)
-
-            Text("无需重启即可生效；每次更新 App 后可能需要重新勾选。")
-                .font(.system(size: 11))
-                .foregroundColor(.secondary.opacity(0.9))
-                .multilineTextAlignment(.center)
-                .lineSpacing(3)
-                .fixedSize(horizontal: false, vertical: true)
-
-            VStack(spacing: 6) {
-                Button(action: onOpenSettings) {
-                    Text("打开设置")
-                        .font(.system(size: 14, weight: .semibold))
-                        .frame(maxWidth: .infinity)
-                        .frame(height: 24)
-                }
-                .buttonStyle(.borderedProminent)
-                .controlSize(.large)
-                .keyboardShortcut(.defaultAction)
-
-                Button(action: onDismiss) {
-                    Text("本次已知晓")
-                        .font(.system(size: 12.5))
-                        .foregroundColor(.secondary)
-                        .frame(maxWidth: .infinity)
-                        .frame(height: 26)
-                }
-                .buttonStyle(.plain)
-            }
-            .padding(.top, 4)
-        }
-        .padding(28)
-        .frame(width: 372)
-        .background(.ultraThinMaterial)
-        .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: 18, style: .continuous)
-                .strokeBorder(Color.primary.opacity(0.08), lineWidth: 1)
-        )
-        // v2.9.25 hotfix: 阴影从 radius 26 / opacity 0.28 收敛到 radius 10 / opacity 0.15，
-        // 避免浅色模式下大面积扩散产生灰色"脏边"，保持轻盈克制的投影。
-        .shadow(color: .black.opacity(0.15), radius: 10, x: 0, y: 4)
-        .padding(24)
-    }
-
-    private func stepRow(number: Int, text: String) -> some View {
-        HStack(alignment: .top, spacing: 12) {
-            Text("\(number)")
-                .font(.system(size: 13, weight: .bold))
-                .foregroundColor(.white)
-                .frame(width: 24, height: 24)
-                .background(Circle().fill(Color.accentColor))
-            Text(text)
-                .font(.system(size: 13))
-                .foregroundColor(.primary)
-                .lineSpacing(3)
-                .fixedSize(horizontal: false, vertical: true)
-                .frame(maxWidth: .infinity, alignment: .leading)
-        }
+        PermissionCenter.authorize(.accessibility)
     }
 }

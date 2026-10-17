@@ -62,6 +62,29 @@ public final class CanvasStorage {
         return saveErrors[projectId]
     }
 
+    /// A user-confirmed gateway command compares the graph on disk while the
+    /// cross-process storage lock is held. A concurrent writer wins instead of
+    /// being silently overwritten by a delayed Agent response.
+    public func saveComparingGraph(_ document: CanvasDocument, expectedRevision: String,
+                                   projectId: String) throws {
+        let url = fileURL(projectId: projectId)
+        try StorageLock.shared.withLock {
+            let existing = try JSONDecoder().decode(CanvasDocument.self, from: Data(contentsOf: url))
+            guard AgentCanvasSync.revision(existing) == expectedRevision else {
+                throw AgentOperationError("画布已被另一进程修改，请重新检查预览后应用。")
+            }
+            var next = document
+            next.schemaVersion = CanvasDocument.currentSchemaVersion
+            next.updatedAt = Date()
+            try JSONEncoder().encode(next).write(to: url, options: .atomic)
+            cacheLock.lock()
+            cache[projectId] = next
+            loadFailed[projectId] = false
+            saveErrors.removeValue(forKey: projectId)
+            cacheLock.unlock()
+        }
+    }
+
     // MARK: - 读
 
     /// 读取画布文档。缓存命中直接返回；未命中读盘（**不持 cacheLock 做 IO**，避免同步磁盘
@@ -77,6 +100,17 @@ public final class CanvasStorage {
         let url = fileURL(projectId: projectId)
         var loaded: CanvasDocument? = nil
         var failed = false
+        do {
+            try WorkflowProjectTransaction(root: rootOverride ?? ClipSlotsPaths.dataRoot).recover(projectID: projectId)
+            try CanvasStructureCopyTransaction(root: rootOverride ?? ClipSlotsPaths.dataRoot).recover(projectID: projectId)
+        } catch {
+            // Keep graph/content/journal intact for recovery. In particular, never run private reconciliation.
+            cacheLock.lock()
+            loadFailed[projectId] = true
+            cacheLock.unlock()
+            NSLog("[ClipSlots][canvas] 工作流事务恢复失败，保留原数据：\(error)")
+            return .empty
+        }
         if FileManager.default.fileExists(atPath: url.path) {
             do {
                 let data = try Data(contentsOf: url)

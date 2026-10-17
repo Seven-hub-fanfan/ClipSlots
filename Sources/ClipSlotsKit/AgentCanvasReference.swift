@@ -61,11 +61,18 @@ public enum AgentCanvasError: LocalizedError {
     }
 }
 
-/// No executable capabilities in the canvas preview workflow, including Skills.
+/// Only concrete immutable readers may pass. A registry or custom executor cannot
+/// opt into preview privileges by advertising read-like tool names.
 public final class AgentPreviewTools: AgentToolExecuting {
     public init() {}
+    public static func restricted(_ tools: AgentToolExecuting?) -> AgentToolExecuting {
+        if let reader = tools as? CanvasAgentReadTools { return reader }
+        if let directory = tools as? AgentDirectoryTools { return directory.restrictedForPreview() }
+        if let journaled = tools as? AgentJournaledTools { return journaled.restrictedForPreview() }
+        return AgentPreviewTools()
+    }
     public func specs() -> [AgentToolSpec] { [] }
     public func execute(call: AgentToolCall) async -> AgentToolResult {
-        .failure("画布结果需要由用户预览并确认应用。此会话不执行工具。", code: "PREVIEW_REQUIRED")
+        .failure("画布结果需要由用户预览并确认应用。此会话只允许固定快照读取工具。", code: "PREVIEW_REQUIRED")
     }
 }

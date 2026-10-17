@@ -18,8 +18,8 @@ public enum AppSkin: String, CaseIterable, Codable, Sendable {
     /// UserDefaults 键名。
     public static let defaultsKey = "appearanceSkin"
 
-    /// 老用户升级上来不应该被换皮肤，所以默认值是多彩模式。
-    public static let fallback: AppSkin = .colorful
+    /// 新安装与每次更新的默认外观为简洁模式。
+    public static let fallback: AppSkin = .minimal
 
     public var title: String {
         switch self {
@@ -42,7 +42,7 @@ public enum AppSkin: String, CaseIterable, Codable, Sendable {
         }
     }
 
-    /// 从 UserDefaults 读取。未设置或值非法时回落到多彩模式。
+    /// 从 UserDefaults 读取。未设置或值非法时回落到简洁模式。
     public static func load(from defaults: UserDefaults) -> AppSkin {
         guard let raw = defaults.string(forKey: defaultsKey) else { return fallback }
         return AppSkin(rawValue: raw) ?? fallback

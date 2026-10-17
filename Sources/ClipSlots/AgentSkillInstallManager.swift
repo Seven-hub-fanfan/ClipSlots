@@ -70,11 +70,6 @@ final class AgentSkillInstallManager: ObservableObject {
               iconSystemName: "cursorarrow.rays",
               detectPath: home(".cursor"),
               skillsDir: home(".cursor/skills")),
-        Agent(id: "codex",
-              displayName: "Codex",
-              iconSystemName: "chevron.left.forwardslash.chevron.right",
-              detectPath: home(".codex"),
-              skillsDir: home(".codex/skills")),
         Agent(id: "gemini",
               displayName: "Gemini CLI",
               iconSystemName: "diamond",
@@ -421,7 +416,7 @@ final class AgentSkillInstallManager: ObservableObject {
     func rescan() {
         refresh()
         if detectedAgents.isEmpty {
-            report("已重新扫描：未检测到已安装的 Agent（Claude Code / Cursor / Codex / Gemini CLI）", isError: false)
+            report("已重新扫描：未检测到已安装的 Agent（Claude Code / Cursor / Gemini CLI）", isError: false)
         } else {
             let names = detectedAgents.map(\.displayName).joined(separator: "、")
             report("已重新扫描，检测到 \(detectedAgents.count) 个 Agent：\(names)", isError: false)
@@ -437,7 +432,7 @@ final class AgentSkillInstallManager: ObservableObject {
         }
         let agents = detectedAgents
         guard !agents.isEmpty else {
-            report("未检测到已安装的 Agent，请先安装 Claude Code / Cursor / Codex / Gemini CLI。", isError: true)
+            report("未检测到已安装的 Agent，请先安装 Claude Code / Cursor / Gemini CLI。", isError: true)
             return
         }
 
@@ -519,7 +514,7 @@ final class AgentSkillInstallManager: ObservableObject {
         refresh()
         let agents = detectedAgents
         guard !agents.isEmpty else {
-            report("未检测到已安装的 Agent，请先安装 Claude Code / Cursor / Codex / Gemini CLI。", isError: true)
+            report("未检测到已安装的 Agent，请先安装 Claude Code / Cursor / Gemini CLI。", isError: true)
             return
         }
 
@@ -657,6 +652,10 @@ final class AgentSkillInstallManager: ObservableObject {
     ///     其余情况（用户自建目录等）一律跳过，避免误伤用户数据；
     ///   - 未安装的 Agent 不做自动安装（尊重用户从未安装过的选择）。
     func syncInstalledSkillsOnLaunch() {
+        guard Bundle.main.object(forInfoDictionaryKey: "ClipSlotsIsolatedCandidate") as? Bool != true else {
+            NSLog("[ClipSlots][SkillSync] isolated candidate, skip external agent skill auto-sync")
+            return
+        }
         guard let source = bundledSkillDir else {
             NSLog("[ClipSlots][SkillSync] bundled skill dir not found, skip auto-sync")
             return

@@ -11,6 +11,33 @@ extension CanvasWorkspaceView {
             if ok { passed += 1 } else { failures.append(label) }
             NSLog("[MediaTheme] \(ok ? "PASS" : "FAIL") \(label)")
         }
+        let axControls = ProcessInfo.processInfo.environment["CLIPSLOTS_MEDIA_AX_CONTROLS"] == "1"
+        func elements(_ node: AnyObject, depth: Int = 0) -> [AnyObject] {
+            guard depth < 35 else { return [] }
+            let children = node.accessibilityChildren?() ?? []
+            let fallback = (node as? NSView)?.subviews ?? []
+            return [node] + (children.isEmpty ? fallback : children).flatMap {
+                elements($0 as AnyObject, depth: depth + 1)
+            }
+        }
+        func press(_ title: String, in view: NSView) -> Bool {
+            for node in elements(view) where node.accessibilityRole?() == .button {
+                if (node.accessibilityLabel?() ?? "") == title
+                    || (node.accessibilityTitle?() ?? "") == title {
+                    return node.accessibilityPerformPress?() == true
+                }
+            }
+            return false
+        }
+        if axControls {
+            _ = await AgentProcessRunner.run(executable: "/usr/bin/swift", arguments: ["-e", """
+                import ApplicationServices
+                let app = AXUIElementCreateApplication(pid_t(CommandLine.arguments[1])!)
+                print(AXUIElementSetAttributeValue(app, "AXEnhancedUserInterface" as CFString, kCFBooleanTrue).rawValue)
+                var windows: CFTypeRef?
+                print(AXUIElementCopyAttributeValue(app, kAXWindowsAttribute as CFString, &windows).rawValue)
+                """, String(ProcessInfo.processInfo.processIdentifier)], timeout: 15)
+        }
         func waitForLayout(_ id: String) async {
             // 槽位通知可替换正在等待的任务；等待实际布局就绪，不能只等某个已取消的句柄。
             for _ in 0..<100 {
@@ -158,19 +185,25 @@ extension CanvasWorkspaceView {
             check(restored.nodes.first { $0.id == movieID }?.kind == .video, "video type survives document reload")
         }
         let draft = "主题切换后保留这段尚未按回车的提示词"
-        if let movieID {
-            canvas.select(id: movieID, additive: false)
+        // Imported source media intentionally has no prompt composer. Exercise
+        // draft retention on a real downstream generation node instead.
+        let draftNodeID = createNode(kind: .video, at: CGPoint(x: 420, y: 180),
+                                     parentNodeId: movieID, beginEditing: false, quiet: true)?.id
+        if let draftNodeID {
+            canvas.select(id: draftNodeID, additive: false)
             try? await Task.sleep(nanoseconds: 350_000_000)
             if let frame = composerFrame, let anchor = inputRouter.anchorView {
                 await click(CGPoint(x: frame.minX + 90, y: frame.minY + 85), in: anchor)
                 if let editor = anchor.window?.firstResponder as? NSTextView {
                     editor.insertText(draft, replacementRange: NSRange(location: 0, length: (editor.string as NSString).length))
+                    check(editor.string == draft && editingNodeId == draftNodeID,
+                          "native generation composer receives unsubmitted draft")
                     // #region debug-point E:draft-inserted
-                    var r = URLRequest(url: URL(string: "http://127.0.0.1:7785/event")!); r.httpMethod = "POST"; r.httpBody = try? JSONSerialization.data(withJSONObject: ["sessionId": "optimization-repairs", "runId": ProcessInfo.processInfo.environment["CANVAS_DEBUG_RUN"] ?? "", "hypothesisId": "E", "msg": "[DEBUG] draft entered before theme switch", "data": ["editor": String(describing: type(of: editor)), "expectedDraft": editor.string == draft, "editingMovie": editingNodeId == movieID, "savedDraft": canvas.node(id: movieID).map { liveText(for: $0) == draft } ?? false]]); URLSession.shared.dataTask(with: r).resume()
+                    var r = URLRequest(url: URL(string: "http://127.0.0.1:7785/event")!); r.httpMethod = "POST"; r.httpBody = try? JSONSerialization.data(withJSONObject: ["sessionId": "optimization-repairs", "runId": ProcessInfo.processInfo.environment["CANVAS_DEBUG_RUN"] ?? "", "hypothesisId": "E", "msg": "[DEBUG] draft entered before theme switch", "data": ["editor": String(describing: type(of: editor)), "expectedDraft": editor.string == draft, "editingMovie": editingNodeId == draftNodeID, "savedDraft": canvas.node(id: draftNodeID).map { liveText(for: $0) == draft } ?? false]]); URLSession.shared.dataTask(with: r).resume()
                     // #endregion
                 } else { check(false, "composer accepts draft before theme switch") }
-            }
-        }
+            } else { check(false, "generation composer has visible input geometry") }
+        } else { check(false, "generation draft node exists") }
         let originalSkin = AppSkinCenter.current
         if let bounds = controlRegions["appearance"], let anchor = inputRouter.anchorView {
             await click(CGPoint(x: bounds.midX, y: bounds.midY), in: anchor)
@@ -186,18 +219,21 @@ extension CanvasWorkspaceView {
                 @MainActor func popupPoint(_ x: CGFloat, _ y: CGFloat) -> CGPoint {
                     CGPoint(x: x, y: view.isFlipped ? y : view.bounds.height - y)
                 }
-                await click(popupPoint(otherMode == "dark" ? 254 : 158, 68), in: view, canvasCoordinates: false)
+                if axControls { _ = press(otherMode == "dark" ? "深色" : "浅色", in: view) }
+                else { await click(popupPoint(otherMode == "dark" ? 254 : 158, 68), in: view, canvasCoordinates: false) }
                 try? await Task.sleep(nanoseconds: 350_000_000)
                 check(UserDefaults.standard.string(forKey: AppearanceDefaults.key) == otherMode,
                       "native mode control changes appearance preference")
                 let nowDark = anchor.window?.effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
                 check(nowDark == (otherMode == "dark"), "native mode control updates canvas appearance")
-                await click(popupPoint(mode == "dark" ? 254 : 158, 68), in: view, canvasCoordinates: false)
+                if axControls { _ = press(mode == "dark" ? "深色" : "浅色", in: view) }
+                else { await click(popupPoint(mode == "dark" ? 254 : 158, 68), in: view, canvasCoordinates: false) }
                 let otherSkin: AppSkin = originalSkin == .minimal ? .colorful : .minimal
-                await click(popupPoint(otherSkin == .colorful ? 232 : 86, 172), in: view, canvasCoordinates: false)
+                if axControls { _ = press(otherSkin.title, in: view) }
+                else { await click(popupPoint(otherSkin == .colorful ? 232 : 86, 172), in: view, canvasCoordinates: false) }
                 try? await Task.sleep(nanoseconds: 450_000_000)
                 check(AppSkinCenter.current == otherSkin, "native theme tile changes app skin")
-                if let movieID, let movie = canvas.node(id: movieID) {
+                if let draftNodeID, let movie = canvas.node(id: draftNodeID) {
                     check(liveText(for: movie) == draft, "theme switching preserves unsubmitted composer text")
                 }
                 if popup.isVisible { popup.close() }
@@ -208,7 +244,10 @@ extension CanvasWorkspaceView {
         NotificationCenter.default.post(name: .setWorkspaceMode, object: nil, userInfo: ["mode": "edit"])
         try? await Task.sleep(nanoseconds: 500_000_000)
         PerfAutoTest.snapshotWindow(to: directory.appendingPathComponent("canvas-editor-\(schemeName).png").path)
-        try? JSONSerialization.data(withJSONObject: ["passed": passed, "failures": failures], options: .prettyPrinted).write(to: directory.appendingPathComponent("report.json"))
+        let locked = (CGSessionCopyCurrentDictionary() as? [String: Any])?["CGSSessionScreenIsLocked"] as? Bool ?? false
+        try? JSONSerialization.data(withJSONObject: ["passed": passed, "failures": failures,
+            "appearanceEventDelivery": axControls ? "AX actions on real controls; no desktop mouse claim" : "native event queue",
+            "sessionLocked": locked], options: .prettyPrinted).write(to: directory.appendingPathComponent("report.json"))
         try? await Task.sleep(nanoseconds: 200_000_000)
         NSApp.terminate(nil)
     }

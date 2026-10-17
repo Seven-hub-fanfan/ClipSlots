@@ -10,15 +10,20 @@ import Foundation
 /// 角色消歧（显式角色优先、自动角色补位、多余的降级成参考图）是一组纯规则，错了不会崩：
 /// 首帧被悄悄当成参考图，用户只会觉得"这个模型不听话"。这种错误必须靠断言盯，不能靠手测。
 public enum CanvasEdgeInputs {
+    public static func generationEdges(_ edges: [CanvasEdge]) -> [CanvasEdge] {
+        edges.filter { $0.purpose.isGenerationDependency }
+    }
+
     /// 只排序本次选中的节点；独立节点保持选择前的文档顺序。nil 表示损坏文档中存在环。
     public static func generationOrder(nodes: [CanvasNode], edges: [CanvasEdge]) -> [CanvasNode]? {
+        let dependencies = generationEdges(edges)
         let ids = Set(nodes.map(\.id))
         var remaining = nodes
         var done = Set<String>()
         var ordered: [CanvasNode] = []
         while !remaining.isEmpty {
             guard let index = remaining.firstIndex(where: { node in
-                edges.filter { $0.toNodeId == node.id && ids.contains($0.fromNodeId) }
+                dependencies.filter { $0.toNodeId == node.id && ids.contains($0.fromNodeId) }
                     .allSatisfy { done.contains($0.fromNodeId) }
             }) else { return nil }
             let next = remaining.remove(at: index)
@@ -62,6 +67,15 @@ public enum CanvasEdgeInputs {
 
     // MARK: - 解析结果
 
+    /// Produced by the same resolver as the request, not inferred from the final prompt.
+    public struct Binding: Codable, Equatable {
+        public var edgeID: String
+        public var sourceNodeID: String
+        public var role: CanvasEdgeRole
+        public var text: String?
+        public var path: String?
+    }
+
     public struct Resolved: Equatable {
         /// 空结果（没有入边时用）。`Resolved` 的成员全有默认值，但结构体的隐式 memberwise init
         /// 是 internal，跨模块（App target）拿不到 —— 必须显式给一个。
@@ -72,6 +86,7 @@ public enum CanvasEdgeInputs {
         public var firstFramePath: String?
         public var lastFramePath: String?
         public var referencePaths: [String] = []
+        public var bindings: [Binding] = []
         /// 有几条上游"本该给图但还没出图"。
         ///
         /// 单独记一个数是为了让编排层能把失败原因写准：用户连了三条线却报"提示词为空"，
@@ -130,6 +145,7 @@ public enum CanvasEdgeInputs {
 
         let isVideo = downstreamKind == .video
         let usable = incoming.filter { edge in
+            guard edge.purpose.isGenerationDependency else { return false }
             guard let up = upstreams[edge.fromNodeId] else {
                 out.unavailableUpstreamCount += 1
                 return false
@@ -156,16 +172,16 @@ public enum CanvasEdgeInputs {
         for (index, edge) in usable.enumerated() {
             guard edge.role != .auto, let up = upstreams[edge.fromNodeId] else { continue }
             if edge.role == .prompt {
-                let text = up.text.trimmingCharacters(in: .whitespacesAndNewlines)
-                if !text.isEmpty { fragments.append((index, text)) }
+                let text = up.text
+                if !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { fragments.append((index, text)) }
                 continue
             }
             let paths = up.assets
             guard !paths.isEmpty else {
                 // 明确要图但上游没图：文本上游退回提示词（至少把内容传下去），出图上游记一笔待产。
                 if up.kind == .text {
-                    let text = up.text.trimmingCharacters(in: .whitespacesAndNewlines)
-                    if !text.isEmpty { fragments.append((index, text)) }
+                    let text = up.text
+                    if !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { fragments.append((index, text)) }
                 } else if up.kind != .slot {
                     pending += 1
                 }
@@ -180,8 +196,8 @@ public enum CanvasEdgeInputs {
         for (index, edge) in usable.enumerated() {
             guard edge.role == .auto, let up = upstreams[edge.fromNodeId] else { continue }
             if up.kind == .text || up.kind == .slot {
-                let text = up.text.trimmingCharacters(in: .whitespacesAndNewlines)
-                if !text.isEmpty { fragments.append((index, text)) }
+                let text = up.text
+                if !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { fragments.append((index, text)) }
                 if up.kind == .text { continue }
             }
             let paths = up.assets
@@ -204,6 +220,18 @@ public enum CanvasEdgeInputs {
         out.referencePaths = references.sorted {
             ($0.edge, $0.attachment) < ($1.edge, $1.attachment)
         }.map(\.path).filter { used.insert($0).inserted }
+        func binding(_ index: Int, role: CanvasEdgeRole, text: String? = nil, path: String? = nil) -> Binding {
+            Binding(edgeID: usable[index].id, sourceNodeID: usable[index].fromNodeId,
+                    role: role, text: text, path: path)
+        }
+        out.bindings = fragments.sorted { $0.0 < $1.0 }.map { binding($0.0, role: .prompt, text: $0.1) }
+        if let first { out.bindings.append(binding(first.0, role: .firstFrame, path: first.1)) }
+        if let last { out.bindings.append(binding(last.0, role: .lastFrame, path: last.1)) }
+        var bound = Set([first?.1, last?.1].compactMap { $0 })
+        for ref in references.sorted(by: { ($0.edge, $0.attachment) < ($1.edge, $1.attachment) })
+            where bound.insert(ref.path).inserted {
+            out.bindings.append(binding(ref.edge, role: .reference, path: ref.path))
+        }
         out.pendingUpstreamCount = pending
         return out
     }
@@ -219,11 +247,9 @@ public enum CanvasEdgeInputs {
     public static func mergedPrompt(own: String, upstream: [String]) -> String {
         var parts: [String] = []
         for fragment in upstream {
-            let trimmed = fragment.trimmingCharacters(in: .whitespacesAndNewlines)
-            if !trimmed.isEmpty { parts.append(trimmed) }
+            if !fragment.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { parts.append(fragment) }
         }
-        let mine = own.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !mine.isEmpty { parts.append(mine) }
+        if !own.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { parts.append(own) }
         return parts.joined(separator: "\n\n")
     }
 

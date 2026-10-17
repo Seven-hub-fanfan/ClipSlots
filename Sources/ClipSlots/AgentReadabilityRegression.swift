@@ -3,7 +3,7 @@ import AppKit
 import SwiftUI
 import ClipSlotsKit
 
-/// Local text fixtures only: never resume a real Codex thread or issue a generation request.
+/// Local text fixtures only: never issue a remote generation request.
 @MainActor
 func runAgentReadabilityProbe(directory: URL, check: (Bool, String) -> Void) async {
     func settle() async { try? await Task.sleep(for: .milliseconds(350)) }
@@ -68,16 +68,16 @@ func runAgentReadabilityProbe(directory: URL, check: (Bool, String) -> Void) asy
 
     接下来可以选择一个分组继续。🙂
     """
-    let backend = CodexAgentService(configuration: .init(executable: "/missing", workingDirectory: directory.path))
-    let model = AgentChatModel(displayName: "排版验收", backend: backend)
-    let thread = CodexThreadSummary(["id": "readability-fixture", "name": "整理素材",
-        "cwd": .string(directory.path), "status": ["type": "idle"]])!
     let messages = [
         AgentMessage(role: .user, content: skill + " 请帮我整理素材，保留原始文件。"),
         AgentMessage(role: .assistant, content: "", reasoning: reasoning),
         AgentMessage(role: .assistant, content: answer)
     ]
-    model.openCodexThread(thread, messages: messages)
+    let path = directory.appendingPathComponent("readability-history.json")
+    try? writeAgentHistoryFixture(messages, to: path, title: "整理素材")
+    let model = AgentChatModel(displayName: "排版验收",
+        backend: AgentService(transport: AgentScriptedTransport(steps: []),
+                              secretStore: AgentInMemorySecretStore(key: "fixture")), persistenceURL: path)
     let host = NSHostingView(rootView: AgentWorkspaceView(model: model))
     let window = NSWindow(contentRect: NSRect(x: 80, y: 60, width: 1280, height: 900),
         styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)

@@ -9,6 +9,10 @@ public struct AgentSkillReference: Codable, Equatable, Identifiable, Sendable {
     public static let maximumCount = 4
     public static let maximumBytes = 65_536
 
+    public init(name: String, path: String, markdown: String) {
+        self.name = name; self.path = path; self.markdown = markdown
+    }
+
     public static func load(name: String, path: String) throws -> Self {
         let url = URL(fileURLWithPath: path).resolvingSymlinksInPath()
         let values = try url.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey])

@@ -32,7 +32,6 @@ verify_app_bundle() {
   test -d "$app" || die "$app missing"
   test -x "$app/Contents/MacOS/$APP_NAME" || die "$APP_NAME executable missing or not executable"
   test -x "$app/Contents/MacOS/clipslots-cli" || die "bundled clipslots-cli missing or not executable in $app"
-  test -x "$app/Contents/Resources/codex-runtime/bin/codex" || die "bundled Codex missing in $app"
   test -f "$app/Contents/Resources/skills/clipslots-manager/SKILL.md" || die "bundled skill missing in $app"
   plutil -lint "$app/Contents/Info.plist" >/dev/null
   test -f "$app/Contents/Resources/AppIcon.icns" || die "AppIcon.icns missing in app bundle"
@@ -41,15 +40,7 @@ verify_app_bundle() {
 }
 sign_app_bundle() {
   local app="$1"
-  if [ -n "$SIGN_IDENTITY" ]; then
-    echo "==> Sign app with Developer ID: $SIGN_IDENTITY"
-    codesign --force --timestamp --options runtime --sign "$SIGN_IDENTITY" "$app/Contents/MacOS/clipslots-cli"
-    codesign --force --timestamp --options runtime --sign "$SIGN_IDENTITY" "$app"
-  else
-    echo "==> Sign app adhoc (set SIGN_IDENTITY for Gatekeeper-safe release)"
-    # Keep official Codex signatures stable across ClipSlots updates (Keychain identity).
-    codesign --force --timestamp=none --sign - "$app"
-  fi
+  SIGN_IDENTITY="$SIGN_IDENTITY" python3 "$ROOT_DIR/scripts/sign_app_bundle.py" "$app"
   verify_app_bundle "$app"
 }
 notarize_and_staple_if_configured() {
@@ -121,6 +112,8 @@ mkdir -p "$APP_DIR/Contents/Resources"
 
 cp "$ROOT_DIR/.build/release/$APP_NAME" "$APP_DIR/Contents/MacOS/$APP_NAME"
 cp "$ROOT_DIR/Info.plist" "$APP_DIR/Contents/Info.plist"
+test -d "$ROOT_DIR/.build/release/ClipSlots_ClipSlotsKit.bundle" || die "SPM resources missing"
+ditto "$ROOT_DIR/.build/release/ClipSlots_ClipSlotsKit.bundle" "$APP_DIR/Contents/Resources/ClipSlots_ClipSlotsKit.bundle"
 
 if [ -f "$ROOT_DIR/assets/AppIcon.icns" ]; then
   cp "$ROOT_DIR/assets/AppIcon.icns" "$APP_DIR/Contents/Resources/AppIcon.icns"
@@ -147,16 +140,8 @@ CLI_DST="$APP_DIR/Contents/MacOS/clipslots-cli"
 test -f "$CLI_SRC" || die "CLI binary not found at $CLI_SRC (SPM target ClipSlotsCLI). Did 'swift build -c release' succeed?"
 cp "$CLI_SRC" "$CLI_DST"
 chmod +x "$CLI_DST"
-codesign --force --timestamp=none --sign - "$CLI_DST"
 test -x "$CLI_DST" || die "bundled clipslots-cli missing or not executable at $CLI_DST"
 echo "  OK: bundled clipslots-cli -> $CLI_DST"
-
-echo "==> Bundle pinned official Codex runtime"
-CODEX_BUNDLE_ARGS=(--bundle "$APP_DIR")
-if [ -n "${CODEX_RUNTIME_ARCHIVE:-}" ]; then
-  CODEX_BUNDLE_ARGS+=(--archive "$CODEX_RUNTIME_ARCHIVE")
-fi
-python3 "$ROOT_DIR/scripts/bundle_codex_runtime.py" "${CODEX_BUNDLE_ARGS[@]}"
 
 # ---------------------------------------------------------------------------
 # v2.9.28: 把内置 Skill 目录打进 App bundle。
@@ -215,7 +200,7 @@ echo "==> Copy app and Applications link into mounted DMG"
 ditto "$APP_DIR" "$MNTPNT/$APP_NAME.app"
 ensure_applications_symlink "$MNTPNT"
 xattr -cr "$MNTPNT/$APP_NAME.app" 2>/dev/null || true
-sign_app_bundle "$MNTPNT/$APP_NAME.app"
+verify_app_bundle "$MNTPNT/$APP_NAME.app"
 
 test -d "$MNTPNT/$APP_NAME.app" || die "$APP_NAME.app missing before layout"
 test -L "$MNTPNT/Applications" || die "Applications symlink missing before layout"
@@ -302,9 +287,11 @@ if [ -x "$ROOT_DIR/scripts/verify_release_dmg.sh" ]; then
 fi
 
 echo "==> Gatekeeper note"
-echo "  This DMG is ad-hoc signed, not Developer ID notarized."
-echo "  If users download via Chrome/Safari, macOS may attach quarantine."
-echo "  For zero Gatekeeper warnings, use Developer ID signing + notarization."
+if [ -z "$SIGN_IDENTITY" ]; then
+  echo "  Explicit local ad-hoc build: cross-version permission continuity is not guaranteed."
+elif [ "$SKIP_NOTARIZE" = "1" ]; then
+  echo "  Certificate signed local build; not notarized."
+fi
 
 echo "==> SHA256"
 shasum -a 256 "$DMG_PATH"

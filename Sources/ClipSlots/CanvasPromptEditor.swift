@@ -33,12 +33,16 @@ struct CanvasPromptEditor: NSViewRepresentable {
     var autoFocus: Bool = true
     var placeholder: String? = nil
     var onFocus: (() -> Void)? = nil
+    var returnInsertsNewline = false
+    var allowsLiveReplacement = false
+    var maximumHeight: CGFloat = 260
+    var onHeightChange: ((CGFloat) -> Void)? = nil
 
     func makeNSView(context: Context) -> NSScrollView {
         let scroll = NSScrollView()
         scroll.drawsBackground = false
         scroll.borderType = .noBorder
-        scroll.hasVerticalScroller = false
+        scroll.hasVerticalScroller = returnInsertsNewline
         scroll.hasHorizontalScroller = false
         scroll.autohidesScrollers = true
 
@@ -51,6 +55,7 @@ struct CanvasPromptEditor: NSViewRepresentable {
         textView.font = font
         textView.drawsBackground = false
         textView.isRichText = false
+        textView.allowsUndo = true
         textView.isAutomaticQuoteSubstitutionEnabled = false
         textView.isAutomaticDashSubstitutionEnabled = false
         textView.isAutomaticTextReplacementEnabled = false
@@ -60,6 +65,7 @@ struct CanvasPromptEditor: NSViewRepresentable {
         textView.isHorizontallyResizable = false
         textView.autoresizingMask = [.width]
         textView.textContainer?.widthTracksTextView = true
+        textView.layoutManager?.allowsNonContiguousLayout = true
         // V2.17.4: 编辑正文、占位和选区跟随宿主外观，切换主题不替换编辑器或丢失光标。
         textView.textColor = NSColor(TapSkin.ink)
         textView.insertionPointColor = NSColor.controlAccentColor
@@ -91,6 +97,8 @@ struct CanvasPromptEditor: NSViewRepresentable {
 
         scroll.documentView = textView
         context.coordinator.textView = textView
+        textView.onLayout = { [weak coordinator = context.coordinator] in coordinator?.measureHeight() }
+        context.coordinator.measureHeight()
         return scroll
     }
 
@@ -108,12 +116,21 @@ struct CanvasPromptEditor: NSViewRepresentable {
             } }
         }
         if textView.font != font { textView.font = font }
+        textView.textColor = NSColor(TapSkin.ink)
+        textView.insertionPointColor = NSColor.controlAccentColor
         // ★ 只在**外部**值与视图内容不一致时才回写，且必须跳过"正在输入"的情形。
         // 无条件 `textView.string = text` 会在每次 SwiftUI 重建时把光标弹回开头（打一个字跳一次），
         // 这是 NSViewRepresentable 包文本控件最经典的翻车点。
-        if textView.string != text && !context.coordinator.isEditing {
+        if textView.string != text && !textView.hasMarkedText()
+            && (!context.coordinator.isEditing || allowsLiveReplacement) {
+            let selection = textView.selectedRange()
             textView.string = text
+            let length = (text as NSString).length
+            let location = min(selection.location, length)
+            textView.setSelectedRange(NSRange(location: location, length: min(selection.length, length - location)))
+            textView.undoManager?.removeAllActions()
         }
+        context.coordinator.measureHeight()
     }
 
     func makeCoordinator() -> Coordinator { Coordinator(parent: self) }
@@ -124,6 +141,7 @@ struct CanvasPromptEditor: NSViewRepresentable {
         /// 用户正在这个控件里打字。用来挡掉 `updateNSView` 的回写（见那边注释）。
         var isEditing = false
         private var finished = false
+        private var measuredHeight: CGFloat = 0
 
         init(parent: CanvasPromptEditor) {
             self.parent = parent
@@ -137,7 +155,25 @@ struct CanvasPromptEditor: NSViewRepresentable {
         func textDidChange(_ notification: Notification) {
             guard let tv = notification.object as? NSTextView else { return }
             isEditing = true
-            parent.text = tv.string
+            // IME owns marked text until candidate commit. Never persist pinyin
+            // or replace its marked range during a SwiftUI refresh.
+            if !tv.hasMarkedText() { parent.text = tv.string }
+            measureHeight()
+        }
+
+        func measureHeight() {
+            guard let view = textView, let container = view.textContainer,
+                  let layout = view.layoutManager, parent.onHeightChange != nil else { return }
+            let ceiling = parent.maximumHeight
+            layout.ensureLayout(forBoundingRect: CGRect(x: 0, y: 0,
+                width: max(1, container.containerSize.width), height: ceiling), in: container)
+            let height = min(ceiling, max(112, ceil(layout.usedRect(for: container).height + view.textContainerInset.height * 2 + 8)))
+            guard abs(height - measuredHeight) > 1 else { return }
+            measuredHeight = height
+            DispatchQueue.main.async { [weak self] in
+                guard let self, self.measuredHeight == height else { return }
+                self.parent.onHeightChange?(height)
+            }
         }
 
         func textDidEndEditing(_ notification: Notification) {
@@ -160,6 +196,12 @@ struct CanvasPromptEditor: NSViewRepresentable {
         func textView(_ textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
             switch commandSelector {
             case #selector(NSResponder.insertNewline(_:)):
+                if textView.hasMarkedText() { return false }
+                if parent.returnInsertsNewline {
+                    // Enter/Shift+Enter are ordinary editing; no key starts AI.
+                    // Cmd+Enter saves and leaves the editor.
+                    if NSApp.currentEvent?.modifierFlags.contains(.command) != true { return false }
+                }
                 // Shift+回车 → 换行。判定必须看**当前事件**的修饰键：AppKit 对
                 // Return 与 Shift+Return 默认发的是同一个 `insertNewline:`，光看 selector 分不开。
                 let shift = NSApp.currentEvent?.modifierFlags.contains(.shift) ?? false
@@ -180,6 +222,7 @@ struct CanvasPromptEditor: NSViewRepresentable {
                 return true
 
             case #selector(NSResponder.cancelOperation(_:)):
+                if textView.hasMarkedText() { return false }
                 isEditing = false
                 finished = true
                 parent.onCancel()
@@ -199,6 +242,12 @@ private final class FocusGrabbingTextView: NSTextView {
     var autoFocus = true
     var placeholder: String?
     var onFocus: (() -> Void)?
+    var onLayout: (() -> Void)?
+
+    override func setFrameSize(_ newSize: NSSize) {
+        super.setFrameSize(newSize)
+        onLayout?()
+    }
 
     override func becomeFirstResponder() -> Bool {
         let accepted = super.becomeFirstResponder()
@@ -239,4 +288,9 @@ private final class FocusGrabbingTextView: NSTextView {
     /// 画布上的卡片经常不在活跃窗口的第一响应链里，用户往往是"一下点进来就开始打字"。
     /// 接受 first mouse 能省掉那次"第一下只是激活"的空点。
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+
+    override func resetCursorRects() {
+        super.resetCursorRects()
+        addCursorRect(bounds, cursor: .iBeam)
+    }
 }

@@ -12,12 +12,14 @@ struct CanvasSlotDragPayload {
     let slot: Int
     /// 展示名（Label / 正文首行 / 附件兜底），只用于拖影与提示，不是数据。
     let name: String
+    var slots: [Int] = []
+    var isGroup: Bool { !slots.isEmpty }
 }
 
 /// 「正在把画布节点往槽位库里拖」的状态（v2.11.8 二轮）。
 ///
 /// 由 `CanvasWorkspaceView` 的节点拖拽手势产出并下传：手势的整个生命周期归它，侧栏只是被动
-/// 渲染分栏块与高亮。命中判定两边共用 `CanvasArchiveDropGeometry`，不各写一份（见那个类型的注释）。
+/// 渲染归档提示。命中判定共用 `CanvasArchiveDropGeometry`。
 struct CanvasNodeArchiveDrag {
     /// 被拖节点的展示名，画在分栏标题上（"把〈xxx〉归入…"）。
     let title: String
@@ -38,11 +40,11 @@ struct CanvasNodeArchiveDrag {
 ///   1. **未入库层级**：顶部一个特殊分组，装那些"还没归到任何槽位"的画布节点（见
 ///      `SlotStoreObservable.canvasUnfiledGroupId` 的注释）。橙点标识 —— 它是个待整理的暂存区，
 ///      不是一个正常的组。
-///   2. **从画布拖节点进来归槽**：侧栏在拖入时整体变成 10 个槽位分栏块，悬停放大、松手归入。
+///   2. **从画布拖节点进来归槽**：松手后打开页面 → 槽位组 → 槽位选择器。
 ///   3. **组内拖拽排序**：把一行拖到同组另一行上 = 交换两个槽位的内容（为什么是交换而不是
 ///      插入顺移，见 `SlotStoreObservable.canvasSwapSlotContent`）。
 ///
-/// 三件事的**数据操作一律上抛**（`onArchive` / `onReorder`）：写槽位要走 `SlotStoreObservable`
+/// 数据操作一律由画布和 `onReorder` 回调处理：写槽位要走 `SlotStoreObservable`
 /// 的一整套落盘/撤销/缩略图失效流程，面板只负责表达意图。
 ///
 /// 拖拽刻意用 `DragGesture` 而非 `.onDrag` / `NSItemProvider`：面板与画布在同一个 SwiftUI 视图树里，
@@ -53,6 +55,8 @@ struct CanvasNodeArchiveDrag {
 /// **拖影不画在本面板里**：面板自身有 `clipShape` 语义的圆角背景与有限尺寸，画在这里的拖影一出
 /// 面板边界就被裁掉。所以本视图只上报「拖到哪了」（`onDragChanged`），拖影由画布根视图渲染。
 struct CanvasSlotLibraryPanel: View {
+    private typealias TapSkin = CanvasSkin
+    private typealias AppTheme = CanvasTheme
     @ObservedObject var store: SlotStoreObservable
     @ObservedObject var canvas: CanvasStore
     /// 拖拽进行中的回调。`nil` payload 表示拖拽结束/取消。坐标在 `CanvasWorkspaceView.spaceName` 空间。
@@ -74,6 +78,7 @@ struct CanvasSlotLibraryPanel: View {
     /// 走 `PreferenceKey` 收集而不是给每行加 `.onHover`：`onHover` 在**按住鼠标拖拽期间**不投递
     /// （AppKit 的 mouseEntered/Exited 在拖拽会话里被抑制），而排序的全部动作都发生在按住的时候。
     @State private var rowFrames: [String: CGRect] = [:]
+    @State private var groupDragPayload: CanvasSlotDragPayload?
 
     private var pages: [SlotPage] {
         store.pages.sorted { $0.order < $1.order }
@@ -310,7 +315,8 @@ struct CanvasSlotLibraryPanel: View {
     }
 
     private func groupRow(page: SlotPage, group: SpecialSlot) -> some View {
-        Button {
+        HStack(spacing: 2) {
+          Button {
             withAnimation(Anim.reveal) {
                 if expandedGroupIds.contains(group.id) {
                     expandedGroupIds.remove(group.id)
@@ -337,7 +343,32 @@ struct CanvasSlotLibraryPanel: View {
             .padding(.vertical, 4)
             .contentShape(Rectangle())
         }
-        .buttonStyle(.plain)
+          .buttonStyle(.plain)
+          Image(systemName: "square.stack.3d.up")
+              .font(.system(size: 11))
+              .foregroundColor(AppTheme.canvasChromeSecondaryInk)
+              .frame(width: 28, height: 28).contentShape(Rectangle())
+              .help("拖出整组非空槽位，自动编组并保留连线")
+              .accessibilityLabel("拖出槽位组 \(group.name)")
+              .accessibilityIdentifier("slot-group-drag-\(group.id)")
+              .gesture(DragGesture(minimumDistance: 4, coordinateSpace: .named(CanvasWorkspaceView.spaceName))
+                  .onChanged { value in
+                      if groupDragPayload == nil {
+                          let slots = slotEntries(groupId: group.id, capacity: max(1, store.config.slots)).map(\.slot)
+                          guard let first = slots.first else { return }
+                          groupDragPayload = CanvasSlotDragPayload(pageId: page.id, groupId: group.id,
+                              slot: first, name: group.name, slots: slots)
+                      }
+                      onDragChanged(groupDragPayload, value.location)
+                  }
+                  .onEnded { value in
+                      let payload = groupDragPayload
+                      groupDragPayload = nil
+                      onDragChanged(nil, value.location)
+                      guard let payload, value.location.x > panelWidth else { return }
+                      onDropSlot(payload, value.location)
+                  })
+        }
     }
 
     /// 槽位行。只列**非空**槽位 —— 空槽没有 prompt，拖到画布也是个空节点，先不干扰列表。
@@ -395,13 +426,12 @@ struct CanvasSlotLibraryPanel: View {
         for slot in 1...slotCount {
             guard let content = snapshot[slot] else { continue }
             let text = content.plainText?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-            let hasAttachment = !content.attachments.isEmpty
-            guard !text.isEmpty || hasAttachment else { continue }
+            guard !content.isEmpty else { continue }
             // label 优先取 SlotContent 自带的；扫描快照里没有时回落到存储层的独立 label 文件。
             let label = content.label ?? storage.getLabel(slot)
             out.append(SlotEntry(slot: slot,
                                  label: label,
-                                 prompt: text,
+                                 prompt: text.isEmpty && content.attachments.isEmpty ? "媒体内容" : text,
                                  attachmentCount: content.attachments.count))
         }
         return out
@@ -553,77 +583,20 @@ struct CanvasSlotLibraryPanel: View {
     /// （`.position`）而不是 VStack，就是为了让渲染与那份公式**逐像素一致** —— VStack 的实际分配
     /// 受字体行高、内边距舍入影响，和一份独立的数学公式对不齐。
     private func archiveOverlay(_ drag: CanvasNodeArchiveDrag) -> some View {
-        GeometryReader { geo in
-            let size = geo.size
-            let blocks = CanvasArchiveDropGeometry.blocks(panelSize: size, count: drag.slotCount)
-            let hovered = CanvasArchiveDropGeometry.blockIndex(at: drag.point,
-                                                              panelSize: size,
-                                                              count: drag.slotCount)
-            ZStack(alignment: .topLeading) {
-                AppTheme.canvasChromeSurface.opacity(0.97)
-
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("归入槽位")
-                        .font(.system(size: 11, weight: .semibold))
-                        .foregroundColor(AppTheme.canvasChromeInk)
-                    Text("\(drag.groupName) · \(drag.title)")
-                        .font(.system(size: 9))
-                        .foregroundColor(AppTheme.canvasChromeTertiaryInk)
-                        .lineLimit(1)
-                }
-                .padding(.horizontal, CanvasArchiveDropGeometry.sidePadding)
-                .padding(.top, 8)
-
-                ForEach(blocks, id: \.slot) { block in
-                    archiveBlock(block, hovered: hovered == block.slot)
-                        .frame(width: block.rect.width, height: block.rect.height)
-                        .position(x: block.rect.midX, y: block.rect.midY)
-                }
-            }
+        VStack(spacing: 14) {
+            Image(systemName: "tray.and.arrow.down").font(.system(size: 28))
+            Text("松开以选择存放位置").font(.system(size: 13, weight: .semibold))
+            Text("页面 → 槽位组 → 槽位").font(.system(size: 12))
+            Text(drag.title).font(.system(size: 11)).lineLimit(2)
         }
+        .foregroundColor(AppTheme.canvasChromeInk)
+        .padding(20).frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(AppTheme.canvasChromeSurface.opacity(0.96))
+        .overlay(Rectangle().stroke(Color.blue.opacity(0.4), lineWidth: 2))
+        .allowsHitTesting(false)
         .transition(.opacity)
     }
 
-    private func archiveBlock(_ block: CanvasArchiveDropGeometry.Block, hovered: Bool) -> some View {
-        let occupied = !store.canvasSlotIsFree(groupId: store.currentSpecialSlotId, slot: block.slot)
-        let name = store.canvasSlotLabel(groupId: store.currentSpecialSlotId, slot: block.slot)
-        return HStack(spacing: 6) {
-            Text("\(block.slot)")
-                .font(.system(size: 10, weight: .bold, design: .rounded))
-                .foregroundColor(hovered ? .white : AppTheme.canvasChromeInk)
-                .frame(width: 18, height: 18)
-                .background(Circle().fill(hovered ? AppTheme.chromeAccentInk : AppTheme.chipBackground))
-            Text(name?.isEmpty == false ? name! : (occupied ? "已有内容" : "空槽位"))
-                .font(.system(size: 9, weight: hovered ? .semibold : .regular))
-                .foregroundColor(occupied ? AppTheme.canvasChromeTertiaryInk : AppTheme.canvasChromeSecondaryInk)
-                .lineLimit(1)
-            Spacer(minLength: 0)
-            // 已占用的槽位画一个禁入标记：归槽不覆盖已有内容（覆盖会静默毁掉用户资产），
-            // 与其让用户松手后才收到一句"槽位已被占用"，不如在他移过去的路上就说清楚。
-            if occupied {
-                Image(systemName: "nosign")
-                    .font(.system(size: 8, weight: .semibold))
-                    .foregroundColor(AppTheme.canvasChromeTertiaryInk.opacity(0.8))
-            }
-        }
-        .padding(.horizontal, 8)
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
-        .background(
-            RoundedRectangle(cornerRadius: 7, style: .continuous)
-                .fill(hovered && !occupied
-                      ? AppTheme.chromeAccentSoftFill
-                      : AppTheme.chipBackground.opacity(occupied ? 0.4 : 0.75))
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 7, style: .continuous)
-                .stroke(hovered ? (occupied ? Color.orange : AppTheme.chromeAccentInk) : AppTheme.subtleBorder,
-                        lineWidth: hovered ? 1.6 : 0.8)
-        )
-        // 悬停放大（用户明确要求"hover 某槽位高亮块时该块放大高亮"）。1.04 而不是更大：
-        // 块之间只有 5pt 间距，放大过头会互相压住，反而看不清当前落点是哪个。
-        .scaleEffect(hovered ? 1.04 : 1, anchor: .center)
-        .animation(.spring(response: 0.22, dampingFraction: 0.8), value: hovered)
-    }
 }
 
 /// 收集槽位行矩形的 PreferenceKey（排序命中判定用）。见 `CanvasSlotLibraryPanel.rowFrames`。

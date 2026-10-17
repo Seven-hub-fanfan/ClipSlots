@@ -3,6 +3,25 @@ import AppKit
 import ClipSlotsKit
 
 // Handle stdio before initializing the GUI-compatible data stores.
+if CommandLine.arguments.dropFirst().first == "--mcp" {
+    do {
+        let configuration = try AgentExternalReadOnlyMCPConfiguration.parse(arguments: Array(CommandLine.arguments.dropFirst(2)))
+        Task.detached {
+            do {
+                try await AgentMCPServer.serveReadOnly(configuration: configuration)
+                exit(0)
+            } catch {
+                FileHandle.standardError.write(Data("ClipSlots 项目只读 MCP 启动失败：\(error.localizedDescription)\n".utf8))
+                exit(1)
+            }
+        }
+        dispatchMain()
+    } catch {
+        FileHandle.standardError.write(Data("用法：clipslots --mcp --project-id ID --canvas-id ID [--snapshot-id UUID] [--session-id UUID]\n".utf8))
+        exit(2)
+    }
+}
+
 if CommandLine.arguments.dropFirst().first == "agent-mcp" {
     let exe = (Bundle.main.executableURL ?? URL(fileURLWithPath: CommandLine.arguments[0])).resolvingSymlinksInPath()
     let slugs = CommandLine.arguments.dropFirst(2).first.flatMap { try? JSONValue.decode(jsonText: $0) }?
@@ -56,7 +75,7 @@ let CLI_VERSION: String = {
        !v.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
         return v
     }
-    return "2.17.9"
+    return "2.17.40"
 }()
 let DEFAULT_GROUP = "default"
 let DEFAULT_PAGE = "default_page"

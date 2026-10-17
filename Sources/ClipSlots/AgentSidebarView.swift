@@ -19,6 +19,8 @@ struct AgentSidebarView: View {
     static var debugBodies = 0
     static var debugScrolls = 0
     static var debugBottom: CGFloat?
+    static var debugWidthWrites = 0
+    static var debugLiveWidth: CGFloat?
     #endif
     // #endregion
     @ObservedObject var model: AgentChatModel
@@ -26,7 +28,18 @@ struct AgentSidebarView: View {
     @Binding var isVisible: Bool
     var workspaceMode: WorkspaceMode = .canvas
     var legacyCanvasModel: AgentChatModel?
+    var isReadOnly = false
     @State private var showLegacyCanvas = false
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @AppStorage("agent.panel.requestedWidth") private var requestedWidth = 440.0
+    @State private var windowWidth = WindowLayoutMetrics.minWindowContentWidth
+    @State private var dragStartWidth: CGFloat?
+    @State private var liveWidth: CGFloat?
+    @State private var showRename = false
+    @State private var renameTitle = ""
+    @State private var editingQueueID: UUID?
+    @State private var queueEditText = ""
+    @State private var showQueueEdit = false
 
     @AppStorage(AgentPreferences.modelKey) private var modelName = AgentConfig.defaultModel
     @AppStorage(AgentPreferences.systemPromptKey) private var systemPrompt = AgentConfig.defaultSystemPrompt
@@ -34,15 +47,6 @@ struct AgentSidebarView: View {
     @AppStorage(AgentPreferences.reasoningEffortKey) private var reasoningEffort = ""
     @AppStorage(AgentPreferences.endpointKey) private var endpoint = AgentConfig.defaultEndpoint.absoluteString
     @AppStorage(AgentPreferences.enabledSkillsKey) private var enabledSkillsRaw = ""
-    @AppStorage(CodexPreferences.modelKey) private var codexModel = ""
-    @AppStorage(CodexPreferences.effortKey) private var codexEffort = ""
-    @AppStorage(CodexPreferences.sandboxKey) private var codexSandbox = "read-only"
-    @ObservedObject private var desktop = CodexWorkspaceModel.shared
-    @State private var showDesktopTools = false
-    @State private var showCustomModel = false
-    @State private var customModelDraft = ""
-    @AppStorage(TikaBackendPreferences.backendKindKey) private var sidebarBackendRaw = "deepseek"
-    @AppStorage(CodexPreferences.workspaceBackendKey) private var workspaceBackendRaw = "codex"
 
     private var draft: String {
         get { model.draft }
@@ -50,6 +54,8 @@ struct AgentSidebarView: View {
     }
     @State private var showConfig = false
     @State private var showSkillPicker = false
+    @State private var showReferencePicker = false
+    @State private var showModelPicker = false
     @StateObject private var completion = AgentComposerCompletion()
     @ObservedObject private var skillLibrary = AgentSkillLibrary.shared
     @State private var suggestionPage = 0
@@ -66,25 +72,19 @@ struct AgentSidebarView: View {
     /// 侧栏定宽。v2.11.7 hotfix24 起改为引用 `WindowLayoutMetrics` 里的同一个常量 ——
     /// 主窗口最小宽度的推导需要用到这个数，两处各写一遍迟早会对不上。
     static let width: CGFloat = WindowLayoutMetrics.agentSidebarWidth
+    private var panelWidth: CGFloat {
+        WindowLayoutMetrics.agentPanelWidth(requested: liveWidth ?? requestedWidth, windowWidth: windowWidth)
+    }
     private var isFullPage: Bool { workspaceMode == .agent }
     private var textStyle: AgentTextStyle { isFullPage ? .body : .compact }
-    private var backendKind: AgentBackendKind {
-        AgentBackendKind(rawValue: isFullPage ? workspaceBackendRaw : sidebarBackendRaw) ?? .deepseek
-    }
+    private var backendKind: AgentBackendKind { model.backendKind }
     private var modelLabel: String {
         switch backendKind {
-        case .codex:
-            let selected = model.codexContext?.model ?? codexModel
-            return selected.isEmpty ? (desktop.settings.model.isEmpty ? "Codex · 自动" : desktop.settings.model) : selected
         case .tika: return "Tika Agent"
         case .deepseek: return modelName
+        case .gateway: return "可恢复 Agent"
         }
     }
-    private var composerCwd: String {
-        if let cwd = model.codexContext?.cwd, !cwd.isEmpty { return cwd }
-        return ClipSlotsPaths.dataRoot.appendingPathComponent("agent-workspace").path
-    }
-
     private var enabledSlugs: Set<String> { AgentPreferences.decodeEnabledSlugs(enabledSkillsRaw) }
     private var panelFill: Color { isFullPage ? TapSkin.tone(0xffffff, 0x121212) : TapSkin.tone(0xfafafa, 0x111111) }
     private var inputFill: Color { isFullPage ? TapSkin.tone(0xffffff, 0x202020) : TapSkin.tone(0xf0f1f3, 0x1a1a1a) }
@@ -103,10 +103,12 @@ struct AgentSidebarView: View {
         VStack(spacing: 0) {
             if !isFullPage || !model.isEmpty { header }
             transcript
+            if !isReadOnly { AgentReplicaControls(model: model, onDismiss: { inputFocusRequest += 1 }) }
             inputArea.frame(maxWidth: isFullPage ? 800 : .infinity)
                 .frame(maxWidth: .infinity)
+                .disabled(isReadOnly)
         }
-        .frame(width: isFullPage ? nil : Self.width)
+        .frame(width: isFullPage ? nil : panelWidth)
         .frame(maxWidth: isFullPage ? .infinity : nil)
         .frame(maxHeight: .infinity, alignment: .top)
         .background(panelFill)
@@ -115,29 +117,54 @@ struct AgentSidebarView: View {
         .overlay(alignment: .leading) {
             Rectangle().fill(AppTheme.subtleBorder).frame(width: 1)
         }
-        .sheet(isPresented: $showConfig) { AgentConfigView(isWorkspace: isFullPage) }
-        .sheet(isPresented: $showDesktopTools) { CodexToolsView(chat: model) }
+        .background(AgentPanelWindowWidthProbe { windowWidth = $0 })
+        .overlay(alignment: .leading) {
+            if !isFullPage {
+                Color.clear.frame(width: 8).contentShape(Rectangle())
+                    .gesture(DragGesture(minimumDistance: 0, coordinateSpace: .global)
+                        .onChanged { value in
+                            if dragStartWidth == nil { dragStartWidth = panelWidth }
+                            liveWidth = WindowLayoutMetrics.agentPanelWidth(
+                                requested: (dragStartWidth ?? panelWidth) - value.translation.width,
+                                windowWidth: windowWidth)
+                            #if DEBUG
+                            Self.debugLiveWidth = liveWidth
+                            #endif
+                        }
+                        .onEnded { _ in commitPanelWidth() })
+                    .onHover { hovering in
+                        if hovering { NSCursor.resizeLeftRight.set() } else { NSCursor.arrow.set() }
+                    }
+                    .accessibilityLabel("调整 Agent 面板宽度")
+                    .accessibilityIdentifier("agent-panel-resize")
+            }
+        }
+        .sheet(isPresented: $showConfig) { AgentConfigView(isWorkspace: model.usesWorkspaceBackend) }
+        .alert("重命名对话", isPresented: $showRename) {
+            TextField("对话标题", text: $renameTitle)
+            Button("保存") { model.renameConversation(model.selectedConversationID, title: renameTitle) }
+            Button("取消", role: .cancel) {}
+        }
+        .alert("编辑待发送消息", isPresented: $showQueueEdit) {
+            TextField("消息内容", text: $queueEditText)
+            Button("保存") { if let id = editingQueueID { model.editQueuedSubmission(id, text: queueEditText) } }
+            Button("取消", role: .cancel) {}
+        }
         .sheet(isPresented: $showLegacyCanvas) {
             if let legacyCanvasModel {
                 LegacyCanvasHistoryView(model: legacyCanvasModel)
             }
         }
-        .alert("自定义模型", isPresented: $showCustomModel) {
-            TextField("模型 ID", text: $customModelDraft)
-            Button("取消", role: .cancel) {}
-            Button("使用") { setModelChoice(model: customModelDraft.trimmingCharacters(in: .whitespacesAndNewlines), effort: "") }
-        } message: {
-            Text("使用当前模型服务支持的模型 ID。")
-        }
         .onChange(of: workspaceMode) { _ in suggestionPage = 0 }
-        .onChange(of: composerCwd) { _ in refreshComposerSkills() }
         .onChange(of: backendKind) { _ in refreshComposerSkills() }
         .onChange(of: model.selectedConversationID) { _ in
             followsLatest = true
             completion.dismiss()
+            showReferencePicker = false
+            showModelPicker = false
             inputFocusRequest += 1
         }
-        .onDisappear { scrollTask?.cancel(); scrollTask = nil }
+        .onDisappear { commitPanelWidth(); scrollTask?.cancel(); scrollTask = nil }
         .onAppear {
             AgentSkillLibrary.shared.refresh()
             refreshComposerSkills()
@@ -154,17 +181,28 @@ struct AgentSidebarView: View {
             // v2.11.8: 这里**必须**异步探测。旧写法是同步 `if !model.hasAPIKey`，而钥匙串在
             // 弹系统授权框时会阻塞调用线程 —— 侧栏是首帧渲染的，主线程一卡，主窗口在用户
             // 点掉授权框前根本不显示（覆盖安装后必然复现，因为 adhoc 签名每次都变）。
-            guard model.requiresAPIKey else { return }
+            guard !isReadOnly, model.requiresAPIKey else { return }
             Task {
                 let hasKey = await AgentKeychainProbe.hasAPIKey()
                 if !hasKey, model.requiresAPIKey { showConfig = true }
             }
         }
         .onChange(of: model.needsConfiguration) { needs in
-            guard needs else { return }
+            guard needs, !isReadOnly else { return }
             showConfig = true
             model.needsConfiguration = false
         }
+    }
+
+    private func commitPanelWidth() {
+        if let liveWidth, requestedWidth != Double(liveWidth) {
+            requestedWidth = Double(liveWidth)
+            #if DEBUG
+            Self.debugWidthWrites += 1
+            #endif
+        }
+        liveWidth = nil
+        dragStartWidth = nil
     }
 
     // MARK: 头部
@@ -172,7 +210,13 @@ struct AgentSidebarView: View {
     private var header: some View {
         HStack(spacing: 8) {
             Menu {
-                Button("新建对话", action: newConversation)
+                Button("新建对话", action: newConversation).disabled(isReadOnly)
+                Button("重命名对话") {
+                    renameTitle = model.currentConversationTitle; showRename = true
+                }.disabled(isReadOnly)
+                Button("从当前对话创建分支") { model.forkConversation() }.disabled(isReadOnly || model.isEmpty)
+                Button("删除当前对话", role: .destructive) { model.deleteConversation(model.selectedConversationID) }
+                    .disabled(isReadOnly)
                 if legacyCanvasModel != nil {
                     Button("查看旧版画布记录") { showLegacyCanvas = true }
                 }
@@ -218,7 +262,7 @@ struct AgentSidebarView: View {
             .help("会话操作")
             Spacer(minLength: 0)
             iconButton("slider.horizontal.3", help: "Agent 设置") { showConfig = true }
-            iconButton("square.and.pencil", help: "新建对话", action: newConversation)
+            iconButton("square.and.pencil", help: "新建对话", action: newConversation).disabled(isReadOnly)
             if !isFullPage {
                 iconButton("arrow.up.right.and.arrow.down.left", help: "收起侧栏") {
                     withAnimation(Anim.transition) { isVisible = false }
@@ -232,7 +276,7 @@ struct AgentSidebarView: View {
     private var conversationTitle: String { model.currentConversationTitle }
 
     private func newConversation() {
-        if isFullPage { desktop.cancelSelection() }
+        guard !isReadOnly else { return }
         model.clearHistory()
         draft = ""
         followsLatest = true
@@ -259,7 +303,7 @@ struct AgentSidebarView: View {
                 ScrollView(showsIndicators: false) {
                     LazyVStack(alignment: .leading, spacing: isFullPage ? 16 : 18) {
                         if welcomesUser {
-                            emptyState
+                            emptyState(width: geometry.size.width - (isFullPage ? 48 : 36))
                                 .frame(minHeight: max(0, geometry.size.height - 60))
                         }
 
@@ -269,6 +313,11 @@ struct AgentSidebarView: View {
                                 switch item.kind {
                                 case .user(let text):
                                     userBubble(text)
+                                    if let context = model.canvasContext,
+                                       let turn = model.messages.first(where: { $0.id.uuidString == item.id })?.canvasTurn {
+                                        CanvasAgentCoverageView(turn: turn, receipts: model.canvasReadReceipts(for: turn),
+                                                                context: context)
+                                    }
                                     if let context = model.canvasContext,
                                        let message = model.messages.first(where: { $0.id.uuidString == item.id }),
                                        let refs = message.canvasReferences {
@@ -284,13 +333,21 @@ struct AgentSidebarView: View {
                                 case .assistant(let text, let reasoning, let isFailure):
                                     assistantBubble(text: text, reasoning: reasoning, isFailure: isFailure)
                                     if let context = model.canvasContext, !isFailure, !text.isEmpty {
-                                        Button("预览并填入选中节点") {
-                                            context.prepare(text: text, conversationID: model.selectedConversationID)
+                                        HStack(spacing: 16) {
+                                            Button("预览并填入选中节点") {
+                                                context.prepare(text: text, conversationID: model.selectedConversationID)
+                                            }.accessibilityIdentifier("agent-canvas-preview")
+                                            Button("保存为 Skill") { model.prepareWorkflowSkill(messageID: item.id) }
+                                                .accessibilityIdentifier("agent-save-workflow-skill")
                                         }
                                         .font(.system(size: 11)).buttonStyle(.plain)
                                         .foregroundColor(TapSkin.accent).padding(.top, 8)
-                                        .disabled(model.isRunning)
-                                        .accessibilityIdentifier("agent-canvas-preview")
+                                        .disabled(model.isRunning || isReadOnly)
+                                    }
+                                    if !isFailure, let message = model.messages.first(where: { $0.id.uuidString == item.id }) {
+                                        Button("从这里创建分支") { model.forkConversation(through: message.id) }
+                                            .font(.system(size: 10)).buttonStyle(.plain).foregroundColor(TapSkin.faintInk)
+                                            .disabled(isReadOnly || model.isRunning).padding(.top, 5)
                                     }
                                 case .tools(let rows):
                                     toolRows(rows)
@@ -395,8 +452,10 @@ struct AgentSidebarView: View {
         }
     }
 
-    private var emptyState: some View {
-        VStack(alignment: .leading, spacing: 16) {
+    private func emptyState(width: CGFloat) -> some View {
+        let compact = min(width, isFullPage ? 560 : Self.width) < 428
+        let layout = compact ? AnyLayout(VStackLayout(spacing: 20)) : AnyLayout(HStackLayout(spacing: 12))
+        return VStack(alignment: .leading, spacing: 16) {
             VStack(alignment: .leading, spacing: 12) {
                 Label("Hi，欢迎回来", systemImage: "sparkles")
                     .font(.system(size: 21, weight: .regular))
@@ -404,26 +463,28 @@ struct AgentSidebarView: View {
                 Text(workspaceMode == .edit ? "今天想怎样编辑槽位？" : "今天一起创作点什么？")
                     .font(.system(size: 26, weight: .medium))
             }
-            HStack(spacing: 12) {
-                suggestionCard(suggestionPages[suggestionPage][0], angle: -2)
-                suggestionCard(suggestionPages[suggestionPage][1], angle: 2)
+            .modifier(CreativeWelcomeReveal(token: model.selectedConversationID))
+            layout {
+                suggestionCard(suggestionPages[suggestionPage][0], index: 0, compact: compact)
+                suggestionCard(suggestionPages[suggestionPage][1], index: 1, compact: compact)
             }
             .padding(.top, 6)
             HStack {
                 Spacer()
                 iconButton("arrow.2.squarepath", help: "换一组建议") {
-                    withAnimation(.easeInOut(duration: 0.18)) {
-                        suggestionPage = (suggestionPage + 1) % suggestionPages.count
-                    }
+                    suggestionPage = (suggestionPage + 1) % suggestionPages.count
                 }
+                .accessibilityIdentifier("agent-refresh-suggestions")
             }
         }
         .frame(maxWidth: isFullPage ? 560 : .infinity, alignment: .leading)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
-    private func suggestionCard(_ suggestion: AgentSuggestion, angle: Double) -> some View {
-        Button {
+    private func suggestionCard(_ suggestion: AgentSuggestion, index: Int, compact: Bool) -> some View {
+        CreativeSuggestionCard(category: suggestion.category, symbol: suggestion.symbol,
+                               title: suggestion.title, detail: suggestion.detail,
+                               index: index, compact: compact, fill: inputFill) {
             // #region debug-point C-D:suggestion-action
             #if DEBUG
             if ProcessInfo.processInfo.environment["CLIPSLOTS_CONTROL_PROBE"] == "1" { var r = URLRequest(url: URL(string: "http://127.0.0.1:7784/event")!); r.httpMethod = "POST"; r.httpBody = try? JSONSerialization.data(withJSONObject: ["sessionId": "slot-input-controls", "runId": ProcessInfo.processInfo.environment["CANVAS_DEBUG_RUN"] ?? "pre-fix", "hypothesisId": "C-D", "msg": "[DEBUG] suggestion action", "data": ["session": model.displayName, "title": suggestion.title]]); URLSession.shared.dataTask(with: r).resume() }
@@ -431,37 +492,7 @@ struct AgentSidebarView: View {
             // #endregion
             draft = suggestion.prompt
             inputFocusRequest += 1
-        } label: {
-            VStack(alignment: .leading, spacing: 8) {
-                HStack {
-                    Label(suggestion.category, systemImage: suggestion.symbol)
-                        .font(.system(size: 12))
-                    Spacer(minLength: 0)
-                    Image(systemName: "arrow.right").font(.system(size: 11))
-                }
-                .foregroundColor(TapSkin.faintInk)
-                Text(suggestion.title)
-                    .font(.system(size: 14, weight: .medium))
-                    .foregroundColor(TapSkin.ink)
-                    .lineLimit(2)
-                Text(suggestion.detail)
-                    .font(.system(size: 12))
-                    .foregroundColor(TapSkin.secondaryInk)
-                    .lineLimit(2)
-                Spacer(minLength: 0)
-            }
-            .multilineTextAlignment(.leading)
-            .padding(14)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .frame(height: 140)
-            .background(inputFill, in: RoundedRectangle(cornerRadius: 16))
-            .overlay(RoundedRectangle(cornerRadius: 16).stroke(hairline, lineWidth: 1))
-            .contentShape(Rectangle())
         }
-        .buttonStyle(.plain)
-        .rotationEffect(.degrees(angle))
-        .accessibilityLabel(suggestion.title)
-        .help("填入输入框，编辑后发送")
     }
 
     // MARK: 气泡
@@ -487,7 +518,7 @@ struct AgentSidebarView: View {
     private func assistantBubble(text: String, reasoning: String?, isFailure: Bool) -> some View {
         VStack(alignment: .leading, spacing: 8) {
             if !isFullPage {
-                Label(backendKind == .codex ? "Codex" : "ClipSlots", systemImage: "sparkles")
+                Label("ClipSlots", systemImage: "sparkles")
                     .font(.system(size: 12, weight: .medium))
                     .foregroundColor(TapSkin.secondaryInk)
             }
@@ -538,7 +569,7 @@ struct AgentSidebarView: View {
                         .equatable()
                 } else if model.streamingReasoning.isEmpty {
                     HStack(spacing: 8) {
-                        ProgressView().controlSize(.small).scaleEffect(0.65).frame(width: 14, height: 14)
+                        CreativeLoadingMark().frame(width: 24, height: 24)
                         Text("正在处理…").font(.system(size: 13)).foregroundColor(TapSkin.secondaryInk)
                     }
                 }
@@ -579,10 +610,12 @@ struct AgentSidebarView: View {
                     }
                     Text(toolTitle(row.name))
                         .font(.system(size: 12, weight: .medium))
-                    Text(row.argumentsPreview)
-                        .font(.system(size: 12, design: .monospaced))
-                        .foregroundColor(AppTheme.canvasCardMetaInk)
-                        .lineLimit(1)
+                    if !row.name.hasPrefix("canvas_") {
+                        Text(row.argumentsPreview)
+                            .font(.system(size: 12, design: .monospaced))
+                            .foregroundColor(AppTheme.canvasCardMetaInk)
+                            .lineLimit(1)
+                    }
                     Spacer(minLength: 0)
                     if let summary = row.summary {
                         Text(summary)
@@ -601,7 +634,10 @@ struct AgentSidebarView: View {
 
     private func toolTitle(_ name: String) -> String {
         ["commandExecution": "运行命令", "fileChange": "文件更改",
-         "mcpToolCall": "调用工具", "webSearch": "搜索网页"][name] ?? name
+         "mcpToolCall": "调用工具", "webSearch": "搜索网页",
+         "canvas_overview": "查看画布概览", "canvas_nodes": "读取节点目录",
+         "canvas_edges": "读取连线", "canvas_read_node": "读取节点资料",
+         "canvas_read_run": "读取生成记录"][name] ?? name
     }
 
     private func errorBanner(_ text: String) -> some View {
@@ -616,6 +652,7 @@ struct AgentSidebarView: View {
             HStack(spacing: 10) {
                 Button("重试") { model.retryLast(config: currentConfig, enabledSkills: currentSkills) }
                     .controlSize(.small)
+                    .disabled(isReadOnly)
                 Button("打开设置") { showConfig = true }
                     .buttonStyle(.link)
                     .controlSize(.small)
@@ -631,15 +668,9 @@ struct AgentSidebarView: View {
 
     private var inputArea: some View {
         VStack(alignment: .leading, spacing: isFullPage ? 0 : 6) {
+            if !model.queuedSubmissions.isEmpty { queueView }
             if let context = model.canvasContext {
                 CanvasAgentComposer(model: model, context: context)
-            }
-            if isFullPage && backendKind == .codex {
-                projectPicker
-            }
-            if model.remoteIsActive {
-                Text("桌面端正在运行此会话 · 完成后刷新继续")
-                    .font(.system(size: 11)).foregroundColor(.secondary).padding(10)
             }
             if let usage = model.usageLine {
                 Text(usage)
@@ -648,28 +679,17 @@ struct AgentSidebarView: View {
             }
 
             VStack(spacing: 8) {
+                composerToolbar
+                    .padding(.horizontal, 10).padding(.top, 9)
+                if let error = model.polishError {
+                    Text(error).font(.system(size: 11)).foregroundColor(.orange)
+                        .lineLimit(2).help(error)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.horizontal, 12)
+                }
                 if completion.isOpen {
                     AgentComposerMenu(completion: completion, isScanning: skillLibrary.isScanning)
                         .padding(.horizontal, 8).padding(.top, 8)
-                }
-                if !model.draftSkillReferences.isEmpty {
-                    ScrollView(.horizontal, showsIndicators: false) {
-                        HStack(spacing: 6) {
-                            ForEach(model.draftSkillReferences) { skill in
-                                HStack(spacing: 5) {
-                                    Image(systemName: "sparkles")
-                                    Text(skill.name).lineLimit(1)
-                                    Button {
-                                        model.draftSkillReferences.removeAll { $0.id == skill.id }
-                                    } label: { Image(systemName: "xmark") }
-                                    .buttonStyle(.plain).help("移除技能引用")
-                                }
-                                .font(.system(size: 11)).padding(8)
-                                .background(TapSkin.accent.opacity(0.1), in: Capsule())
-                                .help("本轮引用 · " + skill.path)
-                            }
-                        }
-                    }.padding(.horizontal, 12).padding(.top, 8)
                 }
                 if !model.draftAttachments.isEmpty {
                     ScrollView(.horizontal, showsIndicators: false) {
@@ -690,49 +710,26 @@ struct AgentSidebarView: View {
                     }.padding(.horizontal, 12).padding(.top, 10)
                 }
                 AgentDraftEditor(text: $model.draft, focusRequest: inputFocusRequest,
+                                 conversationID: model.selectedConversationID,
+                                 replacementID: model.polishReplacementID,
+                                 isEditable: !isReadOnly,
                                  placeholder: "输入消息，/ 快捷操作，$ 引用技能",
                                  completion: completion, completionItems: composerItems,
                                  onCompletion: performComposerAction, onSend: send)
                     .frame(height: draftHeight)
                     .padding(.horizontal, 9)
-                    .padding(.top, 12)
+                    .padding(.top, 2)
                     .accessibilityLabel("Agent 输入")
 
                 HStack(spacing: 8) {
-                    if isFullPage {
-                        Button(action: chooseAttachments) {
-                            Image(systemName: "paperclip").font(.system(size: 15)).frame(width: 30, height: 32)
-                        }
-                        .buttonStyle(.plain)
-                        .help("添加图片或文件 · 最多 8 个，每个 20 MB")
-                        .accessibilityLabel("添加附件")
-                        .disabled(backendKind != .codex || model.isAddingAttachments)
-                        if model.isAddingAttachments { ProgressView().controlSize(.small) }
-                    }
-                    if isFullPage && backendKind == .codex {
-                        Button { showDesktopTools = true } label: {
-                            Image(systemName: "plus").font(.system(size: 16)).frame(width: 26, height: 32)
-                        }.buttonStyle(.plain).help("Skills 与 MCP")
-                        permissionPicker
-                    }
-                    skillButton
-                    if model.isAddingSkill { ProgressView().controlSize(.small) }
+                    AgentWorkingDirectoryPicker(model: model, directories: model.workingDirectories)
                     Spacer(minLength: 0)
-                    if isFullPage && backendKind == .codex {
-                        modelPicker
-                    } else {
-                    Button { showConfig = true } label: {
-                        HStack(spacing: 5) {
-                            Text(modelLabel).lineLimit(1)
-                            Image(systemName: "chevron.down").font(.system(size: 8))
-                        }
-                        .font(.system(size: 11, weight: .medium))
-                        .foregroundColor(TapSkin.secondaryInk)
-                        .frame(height: 32)
-                        .contentShape(Rectangle())
-                    }
-                    .buttonStyle(.plain)
-                    .help("模型与推理设置")
+                    modelPicker
+                    if model.isRunning {
+                        Button(action: send) {
+                            Image(systemName: "text.badge.plus").frame(width: 30, height: 30)
+                        }.buttonStyle(.plain).disabled(!canSend).help("加入待发送队列 · Enter")
+                            .accessibilityIdentifier("agent-enqueue")
                     }
                     Button {
                         if model.isRunning { model.stop() } else { send() }
@@ -752,25 +749,94 @@ struct AgentSidebarView: View {
                 .padding(.horizontal, 10)
                 .padding(.bottom, 10)
             }
-            .background(inputFill, in: RoundedRectangle(cornerRadius: isFullPage ? 24 : 18))
-            .overlay(RoundedRectangle(cornerRadius: isFullPage ? 24 : 18).stroke(hairline.opacity(0.7), lineWidth: 1))
-            .shadow(color: .black.opacity(isFullPage ? 0.035 : 0), radius: 12, y: 2)
+            .frame(maxWidth: .infinity)
+            .background {
+                RoundedRectangle(cornerRadius: 16)
+                    .fill(inputFill)
+                    .shadow(color: .black.opacity(isFullPage ? 0.035 : 0), radius: 12, y: 2)
+                    .overlay {
+                        ComposerEntranceGlow(token: "\(model.selectedConversationID):\(model.isPolishing)",
+                                             active: model.isPolishing || (model.isEmpty && !model.isRunning),
+                                             repeating: model.isPolishing)
+                            .allowsHitTesting(false).accessibilityHidden(true)
+                    }
+            }
+            .overlay(RoundedRectangle(cornerRadius: 16).stroke(hairline.opacity(0.7), lineWidth: 0.5))
         }
         .padding(.horizontal, 10)
         .padding(.bottom, isFullPage ? 20 : 10)
         .padding(.top, 6)
     }
 
+    /// A bounded horizontal strip keeps references from changing the editor's
+    /// vertical position or pushing the polish control outside a narrow panel.
+    private var composerToolbar: some View {
+        HStack(spacing: 8) {
+            skillButton.fixedSize(horizontal: true, vertical: false)
+            if model.isAddingSkill {
+                ProgressView().controlSize(.small).frame(width: 16, height: 30)
+            }
+            if model.draftSkillReferences.isEmpty {
+                Spacer(minLength: 0)
+            } else {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 6) {
+                        ForEach(model.draftSkillReferences) { skill in
+                            HStack(spacing: 5) {
+                                Image(systemName: "sparkles")
+                                Text(skill.name).lineLimit(1).truncationMode(.middle)
+                                    .frame(maxWidth: 180)
+                                Button {
+                                    model.draftSkillReferences.removeAll { $0.id == skill.id }
+                                } label: {
+                                    Image(systemName: "xmark").frame(width: 18, height: 26)
+                                }
+                                .buttonStyle(.plain)
+                                .help("移除技能引用")
+                                .accessibilityLabel("移除技能引用 · " + skill.name)
+                                .accessibilityIdentifier("agent-remove-skill-\(skill.id)")
+                            }
+                            .font(.system(size: 11, weight: .medium))
+                            .padding(.leading, 8).padding(.trailing, 4)
+                            .frame(height: 30)
+                            .background(TapSkin.accent.opacity(0.10),
+                                        in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+                            .help("本轮引用 · " + skill.path)
+                        }
+                    }
+                }
+                .frame(minWidth: 0, maxWidth: .infinity)
+                .frame(height: 30)
+                .accessibilityIdentifier("agent-skill-references")
+            }
+            if model.isPolishing {
+                Button("取消") { model.cancelPolish() }
+                    .buttonStyle(.plain).font(.system(size: 11))
+                    .fixedSize()
+            }
+            AgentPolishButton(busy: model.isPolishing,
+                              enabled: !model.isRunning && !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty) {
+                completion.dismiss()
+                model.polishDraft(config: currentConfig)
+            }
+            .fixedSize(horizontal: true, vertical: false)
+            .accessibilityIdentifier("agent-ai-polish")
+            .help("使用当前会话模型润色草稿；润色后可编辑再发送")
+        }
+        .frame(height: 32)
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("agent-composer-toolbar")
+    }
+
     private var canSend: Bool {
-        (!draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !model.draftAttachments.isEmpty
+        !isReadOnly && (!draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !model.draftAttachments.isEmpty
             || !model.draftReferences.isEmpty || !model.draftSkillReferences.isEmpty)
-            && !model.isAddingAttachments && !model.isAddingSkill
-            && (!model.isCodex || !model.remoteIsActive)
+            && !model.isAddingSkill && !model.isPolishing
     }
 
     private var draftHeight: CGFloat {
         let bounds = (draft as NSString).boundingRect(
-            with: CGSize(width: Self.width - 54, height: .greatestFiniteMagnitude),
+            with: CGSize(width: (isFullPage ? 760 : panelWidth) - 54, height: .greatestFiniteMagnitude),
             options: [.usesLineFragmentOrigin, .usesFontLeading],
             attributes: [.font: NSFont.systemFont(ofSize: 13)])
         return min(180, max(isFullPage ? 84 : 60, ceil(bounds.height) + 8))
@@ -778,13 +844,15 @@ struct AgentSidebarView: View {
 
     private var skillButton: some View {
         Button {
-            completion.openSkills()
+            completion.dismiss()
+            showModelPicker = false
+            showReferencePicker.toggle()
         } label: {
             HStack(spacing: 4) {
-                Image(systemName: "plus")
-                    .font(.system(size: 15, weight: .regular))
-                Text("技能")
-                    .font(.system(size: 10, weight: .medium))
+                Image(systemName: "sparkles")
+                    .font(.system(size: 12, weight: .regular))
+                Text("Skills")
+                    .font(.system(size: 11, weight: .medium))
                 if !model.draftSkillReferences.isEmpty {
                     Text("\(model.draftSkillReferences.count)")
                         .font(.system(size: 9, weight: .bold))
@@ -795,15 +863,23 @@ struct AgentSidebarView: View {
                 }
             }
             .padding(.horizontal, 8)
-            .frame(height: 32)
+            .frame(height: 30)
             .foregroundColor(TapSkin.secondaryInk)
-            .clipShape(Capsule())
-            .contentShape(Capsule())
+            .background(showReferencePicker ? CreativeMenuStyle.hover : .clear,
+                        in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+            .contentShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
         }
         .buttonStyle(.plain)
         .help("引用本轮技能 · 也可输入 $ 搜索")
         .accessibilityIdentifier("agent-reference-skill")
         .disabled(model.isAddingSkill)
+        .popover(isPresented: $showReferencePicker, arrowEdge: .top) {
+            AgentReferenceSkillPicker(items: composerItems, isScanning: skillLibrary.isScanning) { action in
+                showReferencePicker = false
+                performComposerAction(action)
+                inputFocusRequest += 1
+            }
+        }
         .contextMenu {
             if model.canvasProjectID == nil {
                 Button("管理可执行技能…") { showSkillPicker = true }
@@ -820,21 +896,16 @@ struct AgentSidebarView: View {
             .init(id: "model", title: "/model", detail: "模型与推理设置", action: .model),
             .init(id: "new", title: "/new", detail: "保存当前对话并新建", action: .newConversation)
         ]
-        if isFullPage && backendKind == .codex {
-            items += [
-                .init(id: "mcp", title: "/mcp", detail: "管理本机 Skills 与 MCP", action: .tools),
-                .init(id: "attach", title: "/attach", detail: "添加图片或文件", action: .attachment)
-            ]
+        if model.canvasContext != nil {
+            items.append(.init(id: "summarize", title: "/summarize", detail: "总结画布创作方法，预览后保存 Skill", action: .summarize))
         }
         // Local catalog is cached; no scanning or network requests on keystrokes.
         var seen = Set<String>()
-        if backendKind == .codex && desktop.skillsCwd == composerCwd {
-            for skill in desktop.skills where skill.enabled {
-                let path = skill.id
-                guard seen.insert(path).inserted else { continue }
-                items.append(.init(id: path, title: "$" + skill.name, detail: skill.description,
-                                   action: .skill(name: skill.name, path: path)))
-            }
+        for entry in skillLibrary.workflowEntries[model.canvasProjectID ?? ""] ?? [] {
+            let path = WorkflowSkillStore().markdownURL(entry).path
+            seen.insert(path)
+            items.append(.init(id: path, title: "$" + entry.name, detail: entry.sourceLabel + " · " + entry.summary,
+                               action: .skill(name: entry.name, path: path)))
         }
         for skill in skillLibrary.skills {
             let path = skill.markdownPath
@@ -848,118 +919,77 @@ struct AgentSidebarView: View {
     private func performComposerAction(_ action: AgentComposerItem.Action) {
         switch action {
         case .skills: break // Native editor already replaced /skills with $.
-        case .model: showConfig = true
+        case .model:
+            showReferencePicker = false
+            completion.dismiss()
+            showModelPicker = true
         case .newConversation: newConversation()
-        case .tools: showDesktopTools = true
-        case .attachment: chooseAttachments()
-        case .skill(let name, let path): model.addSkillReference(name: name, path: path)
+        case .summarize: draft = CanvasAgentContext.summarizePrompt
+        case .skill(let name, let path):
+            let entry = (skillLibrary.workflowEntries[model.canvasProjectID ?? ""] ?? []).first {
+                WorkflowSkillStore().markdownURL($0).path == path
+            }
+            model.addSkillReference(name: name, path: path, workflow: entry)
         }
     }
 
     private func refreshComposerSkills() {
-        if backendKind == .codex { desktop.refreshTools(cwd: composerCwd) }
+        skillLibrary.refreshWorkflows(projectID: model.canvasProjectID)
     }
 
     // MARK: 动作
 
     private var currentConfig: AgentConfig {
-        var config = AgentPreferences.config(model: modelName,
+        AgentPreferences.config(model: modelName,
                                 systemPrompt: systemPrompt,
                                 thinkingRaw: thinkingRaw,
                                 reasoningEffort: reasoningEffort,
                                 endpoint: endpoint)
-        if backendKind == .codex {
-            config.model = (model.codexContext?.model ?? codexModel).trimmingCharacters(in: .whitespacesAndNewlines)
-            if model.codexContext?.model == "" { config.model = desktop.settings.model }
-            let effort = model.codexContext?.effort ?? codexEffort
-            config.reasoningEffort = effort.isEmpty ? nil : effort
-        }
-        return config
-    }
-
-    private var projectPicker: some View {
-        Menu {
-            ForEach(desktop.projects) { project in
-                Button(project.name + " · " + project.path) {
-                    desktop.cancelSelection()
-                    model.selectProject(project)
-                }
-            }
-            Divider()
-            Button("选择文件夹…") { desktop.chooseProject(chat: model) }
-        } label: {
-            Label(model.codexContext?.cwd.isEmpty == false
-                  ? URL(fileURLWithPath: model.codexContext!.cwd).lastPathComponent : "选择项目",
-                  systemImage: "folder")
-        }
-        .menuStyle(.borderlessButton).menuIndicator(.hidden)
-        .font(.system(size: 12)).foregroundColor(TapSkin.secondaryInk)
-        .padding(.horizontal, 16)
-        .frame(maxWidth: .infinity, alignment: .leading).frame(height: 36)
-        .background(TapSkin.tone(0xf5f5f5, 0x191919), in: RoundedRectangle(cornerRadius: 14))
-        .padding(.horizontal, 14)
-        .disabled(model.isRunning)
-        .help(model.codexThreadID == nil ? "选择当前工作目录" : "选择项目会新建对话并保存当前草稿")
-    }
-
-    private var permissionPicker: some View {
-        Menu {
-            Button("终端只读") { codexSandbox = "read-only" }
-            Button("可编辑项目文件") { codexSandbox = "workspace-write" }
-        } label: {
-            Label(codexSandbox == "workspace-write" ? "可编辑项目" : "终端只读", systemImage: "shield.lefthalf.filled")
-                .font(.system(size: 11))
-                .foregroundColor(codexSandbox == "workspace-write" ? .orange : TapSkin.secondaryInk)
-        }.menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
-            .disabled(model.isRunning)
-            .help("槽位操作通过 ClipSlots 工具；此处控制终端对项目文件的权限。")
     }
 
     private var modelPicker: some View {
-        Menu {
-            Section("模型") {
-                Button("跟随本机默认") { setModelChoice(model: "", effort: "") }
-                ForEach(desktop.models) { option in
-                    Button(option.title) { setModelChoice(model: option.id, effort: "") }
-                }
-                Button("自定义模型…") { customModelDraft = modelLabel; showCustomModel = true }
-            }
-            Section("推理强度") {
-                Button("默认") { setModelChoice(model: model.codexContext?.model ?? codexModel, effort: "") }
-                ForEach(desktop.models.first(where: { $0.id == modelLabel })?.efforts ?? ["low", "medium", "high"], id: \.self) { effort in
-                    Button(effortLabel(effort)) { setModelChoice(model: model.codexContext?.model ?? codexModel, effort: effort) }
-                }
-            }
+        Button {
+            showReferencePicker = false
+            completion.dismiss()
+            showModelPicker.toggle()
         } label: {
-            Text(modelLabel + " " + effortLabel(model.codexContext?.effort ?? (codexEffort.isEmpty ? desktop.settings.effort : codexEffort)) + " ⌄")
-                .lineLimit(1)
-        }.menuStyle(.borderlessButton).menuIndicator(.hidden)
-            .font(.system(size: 11)).frame(height: 32).fixedSize()
+            HStack(spacing: 5) {
+                Text(modelLabel).lineLimit(1).truncationMode(.middle)
+                Image(systemName: "chevron.down").font(.system(size: 8))
+            }.font(.system(size: 11, weight: .medium))
+                .foregroundColor(TapSkin.secondaryInk).frame(height: 32).contentShape(Rectangle())
+        }.buttonStyle(.plain)
             .disabled(model.isRunning)
+            .accessibilityIdentifier("agent-model-picker")
+            .popover(isPresented: $showModelPicker, arrowEdge: .top) {
+                CreativeModelPicker(options: agentModelOptions,
+                    selected: modelLabel,
+                    onSettings: { showModelPicker = false; showConfig = true }) { choice in
+                        showModelPicker = false
+                        if backendKind == .deepseek { modelName = choice }
+                        inputFocusRequest += 1
+                    }
+            }
     }
 
-    private func effortLabel(_ value: String) -> String {
-        ["low": "低", "medium": "中", "high": "高", "xhigh": "极高", "minimal": "最小", "none": "无"][value] ?? value
-    }
-
-    private func setModelChoice(model choice: String, effort: String) {
-        if model.codexContext == nil {
-            model.codexContext = .init(cwd: "", provider: desktop.settings.provider)
-        }
-        model.codexContext?.model = choice
-        model.codexContext?.effort = effort
-        model.codexContext?.hasLocalModelChoice = true
-        if choice.isEmpty { model.codexContext?.provider = desktop.settings.provider }
-    }
-
-    private func chooseAttachments() {
-        let panel = NSOpenPanel()
-        panel.canChooseDirectories = false
-        panel.allowsMultipleSelection = true
-        panel.prompt = "添加"
-        panel.begin { response in
-            guard response == .OK else { return }
-            model.addAttachments(panel.urls)
+    private var agentModelOptions: [CreativeModelOption] {
+        switch backendKind {
+        case .tika:
+            return [.init(id: "Tika Agent", title: "Tika Agent", subtitle: "当前 Tika 服务",
+                          details: ["模型由 Tika 后端配置。可在服务设置中管理连接。"])]
+        case .gateway:
+            return [.init(id: "可恢复 Agent", title: "可恢复 Agent", subtitle: "自建网关",
+                          details: ["模型与服务地址在 Agent 设置中配置。"])]
+        case .deepseek:
+            var presets = AgentConfig.modelPresets.map {
+                CreativeModelOption(id: $0.id, title: $0.id, subtitle: $0.note,
+                                    details: [$0.note, "通过当前 API 服务发送请求；可用性取决于服务配置。"])
+            }
+            if !presets.contains(where: { $0.id == modelName }) {
+                presets.insert(.init(id: modelName, title: modelName, subtitle: "当前自定义模型",
+                                     details: ["使用已保存的模型 ID 和服务连接"]), at: 0)
+            }
+            return presets
         }
     }
 
@@ -969,9 +999,42 @@ struct AgentSidebarView: View {
 
     private func send() {
         let text = draft
-        guard canSend, !model.isRunning else { return }
+        guard canSend else { return }
         followsLatest = true
         if model.send(text: text, config: currentConfig, enabledSkills: currentSkills) { draft = "" }
+    }
+
+    private var queueView: some View {
+        DisclosureGroup("待发送 · \(model.queuedSubmissions.count)") {
+            ForEach(Array(model.queuedSubmissions.enumerated()), id: \.element.id) { index, submission in
+                HStack(spacing: 6) {
+                    Text("\(index + 1)").foregroundColor(TapSkin.faintInk)
+                    Text(submission.text).lineLimit(2).frame(maxWidth: .infinity, alignment: .leading)
+                    Button {
+                        editingQueueID = submission.id; queueEditText = submission.text; showQueueEdit = true
+                    } label: { Image(systemName: "pencil") }.help("编辑")
+                    if backendKind == .gateway && (model.isRunning || model.canResumeGateway) {
+                        Button("立即调整方向") { model.steerQueuedSubmission(submission.id) }
+                            .disabled(model.isControllingRun || isReadOnly)
+                            .accessibilityIdentifier("agent-gateway-steer")
+                    }
+                    Button { model.moveQueuedSubmission(submission.id, by: -1) } label: {
+                        Image(systemName: "arrow.up")
+                    }.disabled(index == 0).help("上移")
+                    Button { model.removeQueuedSubmission(submission.id) } label: {
+                        Image(systemName: "xmark")
+                    }.help("移除")
+                }.buttonStyle(.plain).padding(.vertical, 4)
+            }
+            if let reason = model.queuePauseReason {
+                Text(reason).foregroundColor(.orange)
+                Button("继续发送") { model.resumeQueue() }
+                    .disabled(model.isRunning || model.canResumeGateway || model.isControllingRun || isReadOnly)
+            }
+        }
+        .font(.system(size: 11)).padding(10)
+        .background(inputFill, in: RoundedRectangle(cornerRadius: 10))
+        .accessibilityIdentifier("agent-queue")
     }
 }
 

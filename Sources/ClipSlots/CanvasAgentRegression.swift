@@ -60,7 +60,13 @@ func runCanvasAgentProbe(store: SlotStoreObservable, directory: URL, check: (Boo
         check(!model.isRunning && model.draftReferences.isEmpty, "send freezes and consumes reference draft")
         check(backend.lastHistory.first?.canvasReferences?.first?.text == before.plainText,
               "backend sees frozen reference snapshot")
-        check(backend.previewOnly && backend.toolCount == 0, "canvas run has no executable capabilities")
+        check(backend.previewOnly && backend.toolCount == 5 && backend.writeDenied,
+              "canvas run exposes only immutable readers and refuses mutation")
+        let turn = model.messages.first?.canvasTurn
+        check(turn?.nodeCount == 4 && turn?.projectID == canvas.activeProjectId,
+              "send freezes full graph metadata beyond explicit references")
+        check(turn.map { model.canvasReadReceipts(for: $0).contains { $0.field == "body" } } == true,
+              "read receipt reaches project conversation")
         check(store.canvasSlotText(groupId: group.id, slot: 1) == before.plainText, "reply alone never changes slot")
         let answer = model.messages.last?.content ?? ""
 
@@ -74,6 +80,13 @@ func runCanvasAgentProbe(store: SlotStoreObservable, directory: URL, check: (Boo
         await settle()
         check(elements(host).contains { ($0.accessibilityIdentifier?() ?? "") == "agent-add-canvas-reference" },
               "native reference button accessible")
+        check(elements(host).contains { ($0.accessibilityIdentifier?() ?? "") == "agent-canvas-coverage" },
+              "native snapshot coverage visible")
+        if let rep = host.bitmapImageRepForCachingDisplay(in: host.bounds) {
+            host.cacheDisplay(in: host.bounds, to: rep)
+            try? rep.representation(using: .png, properties: [:])?
+                .write(to: directory.appendingPathComponent("canvas-agent-workflow-context.png"))
+        }
         let previewButton = elements(host).first { ($0.accessibilityIdentifier?() ?? "") == "agent-canvas-preview" }
         check(previewButton?.accessibilityPerformPress?() == true, "native response opens preview")
         await settle()
@@ -106,6 +119,13 @@ func runCanvasAgentProbe(store: SlotStoreObservable, directory: URL, check: (Boo
         context.prepare(text: "下一份结果", conversationID: model.selectedConversationID)
         canvas.selectedNodeIds = [canvas.nodes[1].id]
         check(store.writeCanvasSlotText(groupId: group.id, slot: 1, text: "后续手改"), "manual body edit fixture")
+        if let turn {
+            let frozen = try context.reader(for: turn).snapshot.graph
+            check(frozen.nodes.first { $0.id == node.id }?.bodyText == before.plainText,
+                  "reading old turn after edits uses original frozen body")
+            context.locate(nodeID: node.id, turn: turn)
+            check(canvas.agentFocusRequest?.nodeID == node.id, "read source locates live matching node")
+        }
         let cursor = canvas.history.cursor
         check(!context.apply(conversationID: model.selectedConversationID) && canvas.history.cursor == cursor,
               "preview conflict never adds history")
@@ -132,6 +152,9 @@ func runCanvasAgentProbe(store: SlotStoreObservable, directory: URL, check: (Boo
         check(!model.isRunning && model.streamingContent.isEmpty, "project switch stops in-flight run")
         context.addSelection(to: model)
         check(context.error != nil, "inactive project cannot read another project's selection")
+        if let turn {
+            check((try? context.reader(for: turn)) == nil, "inactive project cannot create snapshot reader")
+        }
         // Restore a reference-only draft to verify it survives the round trip.
         model.draftReferences = model.messages.first?.canvasReferences ?? []
         let other = sessions.canvasSession(canvas: canvas, store: store)
@@ -147,12 +170,22 @@ func runCanvasAgentProbe(store: SlotStoreObservable, directory: URL, check: (Boo
         let restarted = AgentSessionStore().canvasSession(canvas: canvas, store: store)
         check(restarted.draft == returned.draft && restarted.draftReferences == returned.draftReferences,
               "restart retains project-scoped draft references")
+        check(restarted.messages.first?.canvasTurn == turn, "restart retains frozen turn metadata")
         check(model.messages.first?.canvasReferences?.first?.text == before.plainText, "later edits never alter sent snapshot")
         let currentGroup = store.currentSpecialSlotId
         check(store.writeCanvasSlotText(groupId: currentGroup, slot: 10, text: "排队中的原文"),
               "current-group write enqueued")
-        try store.exchangeCanvasAgentBody(groupId: currentGroup, slot: 10,
-            expected: AgentSlotBody(text: "排队中的原文"), replacement: AgentSlotBody(text: "排队后的应用"))
+        for attempt in 0..<10 {
+            do {
+                try store.exchangeCanvasAgentBody(groupId: currentGroup, slot: 10,
+                    expected: AgentSlotBody(text: "排队中的原文"), replacement: AgentSlotBody(text: "排队后的应用"))
+                break
+            } catch AgentCanvasError.busy where attempt < 9 {
+                // The production 120 ms drain is deliberately bounded. A busy result
+                // is safe; let queued writes finish before explicitly retrying.
+                await settle()
+            }
+        }
         await settle()
         check(store.canvasSlotText(groupId: currentGroup, slot: 10) == "排队后的应用"
               && store.specialStorage.get(10, in: currentGroup).plainText == "排队后的应用",
@@ -165,6 +198,7 @@ private final class CanvasAgentFixtureBackend: AgentBackend, @unchecked Sendable
     var lastHistory: [AgentMessage] = []
     var previewOnly = false
     var toolCount = -1
+    var writeDenied = false
     var delay = false
     func run(history: [AgentMessage], config: AgentConfig, tools: AgentToolExecuting?,
              onEvent: @escaping @Sendable (AgentRunEvent) async -> Void) async throws -> [AgentMessage] {
@@ -172,6 +206,17 @@ private final class CanvasAgentFixtureBackend: AgentBackend, @unchecked Sendable
         previewOnly = config.canvasPreviewOnly
         toolCount = tools?.specs().count ?? -1
         if delay { try await Task.sleep(for: .milliseconds(500)) }
+        if let tools, let turn = history.last(where: { $0.role == .user })?.canvasTurn,
+           let node = turn.directory.first {
+            let args: JSONValue = ["snapshot_id": .string(turn.snapshotID.uuidString),
+                                   "node_id": .string(node.id), "field": "body"]
+            let call = AgentToolCall(id: UUID().uuidString, name: "canvas_read_node", argumentsJSON: try args.encodedText())
+            await onEvent(.assistantCompleted(.init(role: .assistant, content: "", toolCalls: [call])))
+            await onEvent(.toolStarted(call))
+            let result = await tools.execute(call: call)
+            await onEvent(.toolCompleted(callId: call.id, name: call.name, result: result))
+            writeDenied = await tools.execute(call: .init(id: "denied", name: "write_slot", argumentsJSON: "{}")).isFailure
+        }
         let answer = AgentMessage(role: .assistant, content: "镜头缓缓掠过旧码头，海风吹起衣角，远处的灯塔亮起暖光。")
         await onEvent(.assistantCompleted(answer))
         return [answer]

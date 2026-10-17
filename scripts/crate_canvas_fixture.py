@@ -4,15 +4,27 @@ import json
 import os
 import pathlib
 import sys
+import time
 import uuid
+import atexit
 
 root = pathlib.Path(os.environ["CLIPSLOTS_FIXTURE_DIR"])
 args = sys.argv[1:]
+if os.environ.get("CLIPSLOTS_BATCH_PROBE") == "1":
+    def record_process(event):
+        with (root / "process-events.jsonl").open("a") as log:
+            log.write(json.dumps({"event": event, "pid": os.getpid(), "at": time.time()}) + "\n")
+    record_process("start")
+    atexit.register(record_process, "end")
 with (root / "commands.jsonl").open("a") as log:
     log.write(json.dumps(args) + "\n")
 if args[:2] == ["auth", "status"]:
     result = {"username": "canvas-test"}
 elif args[:2] == ["model", "list"]:
+    if os.environ.get("CLIPSLOTS_GENERATION_CHAIN_PROBE") == "1":
+        result = json.loads(pathlib.Path(os.environ["CLIPSLOTS_CHAIN_MODEL_CATALOG"]).read_text())
+        print(json.dumps(result))
+        sys.exit(0)
     result = [
         {"id": ident, "name": name, "generationTypes": [cap], "parameters": [
             {"name": "ratio", "options": [{"value": "16:9"}, {"value": "1:1"}, {"value": "9:16"}]}
@@ -22,6 +34,27 @@ elif args[:2] == ["model", "list"]:
             ("seedance2-mini", "Seedance 2 Mini", "text-2-video")
         ]
     ]
+    if os.environ.get("CLIPSLOTS_REPLICA_PROBE") == "1" or os.environ.get("CLIPSLOTS_NODE_DESIGN_PROBE") == "1":
+        result.append({
+            "id": "seedream5", "name": "Seedream 5.0", "enabled": True,
+            "generationTypes": ["text-2-image", "image-2-image"],
+            "parameters": [
+                {"name": "ratio", "options": [{"value": ratio} for ratio in
+                    ["1:1", "4:3", "3:4", "16:9", "9:16", "3:2", "2:3", "21:9"]]},
+                {"name": "width", "min": 16, "max": 16384},
+                {"name": "height", "min": 16, "max": 16384},
+            ],
+        })
+    if os.environ.get("CLIPSLOTS_NODE_DESIGN_PROBE") == "1":
+        # Published Seedance 2 Mini catalog captured on 2026-10-11.
+        result[1]["parameters"] = [
+            {"name": "ratio", "options": [{"value": ratio} for ratio in
+                ["adaptive", "16:9", "4:3", "1:1", "3:4", "9:16", "21:9"]]},
+            {"name": "resolution", "defaultValue": "720p",
+             "options": [{"value": "480p"}, {"value": "720p"}]},
+            {"name": "generate_audio", "type": "boolean", "defaultValue": True},
+            {"name": "duration", "type": "number", "min": 4, "max": 15, "step": 1},
+        ]
     if os.environ.get("CLIPSLOTS_INPUT_UPLOAD_PROBE") == "1":
         result[1]["generationTypes"].append("image-to-video")
         result[1]["references"] = {"roles": [
@@ -37,8 +70,84 @@ elif args[:2] == ["task", "get"]:
     result = {"taskInfo": {"task_status": 2, "task_id": ident, "results": [
         {"content": f"http://127.0.0.1:{os.environ['CLIPSLOTS_FIXTURE_PORT']}/fixture.{suffix}"}
     ]}}
+    if os.environ.get("CLIPSLOTS_GENERATION_CHAIN_PROBE") == "1":
+        task = json.loads((root / (ident + ".json")).read_text())
+        result["taskInfo"]["results"][0]["content"] = (
+            f"http://127.0.0.1:{os.environ['CLIPSLOTS_FIXTURE_PORT']}/{task['file']}")
+    if "batch-fail" in ident:
+        result = {"taskInfo": {"task_status": 3, "task_id": ident, "fail_reason": "fixture generation failed"}}
+    if (root / (ident + ".png")).exists():
+        result["taskInfo"]["results"][0]["content"] = (
+            f"http://127.0.0.1:{os.environ['CLIPSLOTS_FIXTURE_PORT']}/{ident}.png")
 elif "generate" in args:
-    ident = ("video" if "video" in args else "image") + uuid.uuid4().hex[:12]
+    prompt = args[args.index("--prompt") + 1] if "--prompt" in args else ""
+    if os.environ.get("CLIPSLOTS_BATCH_PROBE") == "1" and "BATCH_SLOW" in prompt:
+        time.sleep(0.5)
+    if os.environ.get("CLIPSLOTS_BATCH_PROBE") == "1" and "BATCH_UNKNOWN" in prompt:
+        print("fixture: response interrupted after submission")
+        sys.exit(0)
+    if os.environ.get("CLIPSLOTS_BATCH_PROBE") == "1" and "BATCH_RATE" in prompt:
+        import fcntl
+        with (root / "rate-attempts").open("a+") as counter:
+            fcntl.flock(counter, fcntl.LOCK_EX)
+            counter.seek(0)
+            attempt = int(counter.read() or "0") + 1
+            counter.seek(0)
+            counter.truncate()
+            counter.write(str(attempt))
+        if "BATCH_RATE_ALWAYS" in prompt or attempt < 3:
+            print("API error (429): Too many requests", file=sys.stderr)
+            sys.exit(1)
+    marker = "batch-fail" if os.environ.get("CLIPSLOTS_BATCH_PROBE") == "1" and "BATCH_FAIL" in prompt else ""
+    ident = ("video" if "video" in args else "image") + marker + uuid.uuid4().hex[:12]
+    if os.environ.get("CLIPSLOTS_BATCH_PROBE") == "1" and "BATCH_PARALLEL" in prompt:
+        import hashlib
+        import struct
+        import zlib
+        time.sleep(0.15)
+        def chunk(kind, data):
+            return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", zlib.crc32(kind + data))
+        color = hashlib.sha256(prompt.encode()).digest()[:3]
+        image = b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", 1, 1, 8, 2, 0, 0, 0))
+        image += chunk(b"IDAT", zlib.compress(b"\x00" + color)) + chunk(b"IEND", b"")
+        (root / (ident + ".png")).write_bytes(image)
+    if os.environ.get("CLIPSLOTS_GENERATION_CHAIN_PROBE") == "1":
+        import subprocess
+        parsed = subprocess.check_output(
+            ["node", os.environ["CLIPSLOTS_CHAIN_PARAMETER_DRIVER"], json.dumps(args)], text=True)
+        parameters = json.loads(parsed)
+        from PIL import Image
+        if args[1] == "image":
+            width, height = parameters.get("width", 2048), parameters.get("height", 2048)
+            filename = ident + ".png"
+            # A different deterministic image per task catches wrong-thumbnail
+            # reuse and any previous-result leakage in persisted/downloaded bytes.
+            color = "#" + ident[-6:]
+            if os.environ.get("CLIPSLOTS_CHAIN_MODE") == "independence":
+                # Neutral shades avoid display P3/sRGB gamut conversion affecting
+                # the screen identity assertion; every attempt has its own value.
+                import fcntl
+                with (root / "image-sequence").open("a+") as sequence_file:
+                    fcntl.flock(sequence_file, fcntl.LOCK_EX)
+                    sequence_file.seek(0)
+                    sequence = int(sequence_file.read() or "0")
+                    sequence_file.seek(0)
+                    sequence_file.truncate()
+                    sequence_file.write(str(sequence + 1))
+                    sequence_file.flush()
+                shade = min(232, 24 + sequence * 27)
+                color = "#{0:02x}{0:02x}{0:02x}".format(shade)
+            image = Image.new("RGB", (width, height), color)
+            from PIL import ImageDraw
+            draw = ImageDraw.Draw(image)
+            draw.ellipse((width//4, height//4, 3*width//4, 3*height//4), fill="#f4f0e6")
+            image.save(root / filename)
+        else:
+            filename = "fixture.mp4"
+        task = {"parameters": parameters, "file": filename, "arguments": args}
+        (root / (ident + ".json")).write_text(json.dumps(task))
+        with (root / "effective-parameters.jsonl").open("a") as log:
+            log.write(json.dumps(task) + "\n")
     result = {"success": True, "taskId": ident}
 else:
     print(json.dumps({"error": "Unexpected fixture command", "args": args}))

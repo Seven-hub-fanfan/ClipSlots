@@ -21,6 +21,8 @@ public final class CanvasProjectStorage {
         self.rootOverride = rootOverride
     }
 
+    public var dataRoot: URL { rootOverride ?? ClipSlotsPaths.dataRoot }
+
     private var canvasDir: URL {
         (rootOverride ?? ClipSlotsPaths.dataRoot).appendingPathComponent("canvas", isDirectory: true)
     }

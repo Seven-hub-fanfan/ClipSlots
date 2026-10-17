@@ -24,6 +24,8 @@ extension CanvasWorkspaceView {
                                                        shortSide: min(node.width, node.height)) else { continue }
                 let onlyVideoReference = primary.canvasIsVideoLike && !latestAttachments.contains(where: \.canvasIsImageLike)
                     && node.outputAttachmentIds.isEmpty && node.taskId == nil
+                let isBatchResult = node.generationSourceID != nil
+                    || canvas.adjacentLastResultIDs[node.id]?.contains(node.id) == true
                 canvas.updateNode(id: node.id) { current in
                     if current.kind == .image && onlyVideoReference {
                         current.kind = .video
@@ -31,18 +33,20 @@ extension CanvasWorkspaceView {
                         current.resolution = ""
                     }
                     let center = CGPoint(x: current.frame.midX, y: current.frame.midY)
+                    let originalOrigin = current.frame.origin
                     // 旧版仅存附件 ID 时保留用户已经选择的比例，并升级版本标记。
                     if current.mediaLayoutAttachmentID != primary.id.uuidString {
                         current.width = size.width
                         current.height = size.height
-                        current.x = center.x - size.width / 2
-                        current.y = center.y - size.height / 2
+                        current.x = isBatchResult ? originalOrigin.x : center.x - size.width / 2
+                        current.y = isBatchResult ? originalOrigin.y : center.y - size.height / 2
                         if node.outputAttachmentIds.isEmpty {
                             current.ratio = CanvasMediaInfo.ratioLabel(pixels) ?? "\(Int(pixels.width)):\(Int(pixels.height))"
                         }
                     }
                     current.mediaLayoutAttachmentID = result.version
                 }
+                if isBatchResult { canvas.reserveSpaceForResult(id: node.id) }
             }
         }
     }

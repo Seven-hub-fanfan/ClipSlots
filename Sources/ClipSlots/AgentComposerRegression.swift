@@ -37,8 +37,16 @@ func runAgentComposerProbe(directory: URL, check: (Bool, String) -> Void) async 
         })
         let model = AgentChatModel(displayName: "键盘测试",
             service: AgentService(transport: transport, secretStore: AgentInMemorySecretStore(key: "fixture")),
-            persistenceURL: directory.appendingPathComponent("composer-\(label).json"),
-            canvasProjectID: mode == .canvas ? "fixture-project" : nil)
+            persistenceURL: directory.appendingPathComponent("composer-\(label).json"))
+        // This checks the canvas-styled editor without a live project. Project
+        // tool boundaries are covered by runCanvasAgentProbe with a real context.
+        func finishReply() async {
+            for _ in 0..<100 {
+                if !model.isRunning { break }
+                await settle(0.05)
+            }
+            await settle(0.05)
+        }
         let host = NSHostingView(rootView: AgentSidebarView(model: model, isVisible: .constant(true), workspaceMode: mode))
         let window = NSWindow(contentRect: NSRect(x: 140, y: 100, width: mode == .agent ? 900 : 430, height: 900),
                               styleMask: [.titled, .closable], backing: .buffered, defer: false)
@@ -46,6 +54,10 @@ func runAgentComposerProbe(directory: URL, check: (Bool, String) -> Void) async 
         window.contentView = host
         window.makeKeyAndOrderFront(nil)
         await settle(0.4)
+        for _ in 0..<50 {
+            if editors(host).first?.completion != nil { break }
+            await settle(0.05)
+        }
         guard let editor = editors(host).first, let completion = editor.completion else {
             check(false, "\(label) composer menu mounted"); window.close(); continue
         }
@@ -59,7 +71,7 @@ func runAgentComposerProbe(directory: URL, check: (Bool, String) -> Void) async 
         key(editor, 36)
         key(editor, 36) // Same event-loop: running guard must prevent a second request.
         check(model.messages.filter { $0.role == .user }.count == 1, "\(label) Return submits exactly once while busy")
-        await settle(0.3)
+        await finishReply()
         check(model.draft.isEmpty && editor.string.isEmpty, "\(label) successful Return clears native draft")
         check(transport.lastRequestJSON()?["messages"]?.arrayValue?.last?["content"]?.stringValue == "第一行🙂\n第二行",
               "\(label) native multiline text reaches request")
@@ -71,11 +83,11 @@ func runAgentComposerProbe(directory: URL, check: (Bool, String) -> Void) async 
         key(editor, 36, repeatKey: true)
         check(model.messages.filter { $0.role == .user }.count == 1, "\(label) repeated key does not submit")
         key(editor, 76)
-        await settle(0.3)
+        await finishReply()
         check(model.messages.filter { $0.role == .user }.count == 2, "\(label) keypad Enter sends")
         replace("兼容快捷键")
         key(editor, 36, .command)
-        await settle(0.3)
+        await finishReply()
         check(model.messages.filter { $0.role == .user }.count == 3, "\(label) Command Enter still sends once")
 
         replace("")
@@ -105,7 +117,12 @@ func runAgentComposerProbe(directory: URL, check: (Bool, String) -> Void) async 
         let skillButton = elements(host).first { ($0.accessibilityIdentifier?() ?? "") == "agent-reference-skill" }
         check(skillButton?.accessibilityPerformPress?() == true, "\(label) visible skill button responds to native press")
         await settle()
-        check(completion.isOpen, "\(label) skill button reopens dismissed search")
+        let skillSearch = NSApp.windows.compactMap(\.contentView).flatMap { elements($0) }
+            .first { ($0.accessibilityIdentifier?() ?? "") == "agent-skill-search" }
+        check(skillSearch != nil && !completion.isOpen && model.draft == "$",
+              "\(label) skill button opens independent search and preserves draft")
+        _ = skillButton?.accessibilityPerformPress?()
+        await settle()
         replace("$no-such-fixture-123")
         key(editor, 36)
         check(model.messages.filter { $0.role == .user }.count == 3 && !model.draft.isEmpty,
@@ -145,16 +162,13 @@ func runAgentComposerProbe(directory: URL, check: (Bool, String) -> Void) async 
                 .write(to: directory.appendingPathComponent("canvas-agent-composer-\(label).png"))
         }
         key(editor, 36)
-        await settle(0.3)
+        await finishReply()
         let sent = model.messages.last { $0.role == .user }
         let body = transport.lastRequestJSON()?["messages"]?.arrayValue?.last?["content"]?.stringValue ?? ""
         check(sent?.skillReferences?.count == 1 && body.contains("COMPOSER_SNAPSHOT_SENTINEL"),
               "\(label) selected skill snapshot reaches actual backend request")
         check(model.draftSkillReferences.isEmpty && model.transcript.count > 0,
               "\(label) sent skill moves from composer into history")
-        if mode == .canvas {
-            check(transport.lastRequestJSON()?["tools"] == nil, "canvas skill reference keeps tool list empty")
-        }
         replace("/")
         await settle()
         if let image = host.bitmapImageRepForCachingDisplay(in: host.bounds) {
@@ -179,8 +193,8 @@ func runAgentComposerProbe(directory: URL, check: (Bool, String) -> Void) async 
     await settle()
     check(isolated.draftSkillReferences.count == 1, "duplicate skill selection is idempotent")
     let frozen = AgentMessage(role: .user, content: "应用", skillReferences: isolated.draftSkillReferences)
-    check(CodexAgentService.input(for: frozen).first?["text"]?.stringValue?.contains("三个镜头") == true,
-          "Codex input includes frozen skill instructions")
+    check(AgentService.requestBody(history: [frozen], config: AgentConfig(systemPrompt: ""), tools: [])["messages"]?.arrayValue?.first?["content"]?.stringValue?.contains("三个镜头") == true,
+          "DeepSeek input includes frozen skill instructions")
     check((try? JSONDecoder().decode(AgentMessage.self, from: JSONEncoder().encode(frozen))) == frozen,
           "skill message persists all snapshot fields")
     isolated.draftSkillReferences = []

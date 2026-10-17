@@ -33,9 +33,11 @@ final class TestRunner {
         let dir = FileManager.default.temporaryDirectory
             .appendingPathComponent("clipslots_smoke_\(UUID().uuidString)", isDirectory: true)
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let previousDataRoot = ProcessInfo.processInfo.environment["CLIPSLOTS_DATA_DIR"]
         setenv("CLIPSLOTS_DATA_DIR", dir.path, 1)
         defer {
-            unsetenv("CLIPSLOTS_DATA_DIR")
+            if let previousDataRoot { setenv("CLIPSLOTS_DATA_DIR", previousDataRoot, 1) }
+            else { unsetenv("CLIPSLOTS_DATA_DIR") }
             try? FileManager.default.removeItem(at: dir)
         }
         do { try body(SpecialSlotStorage()) }
@@ -82,6 +84,95 @@ private func coldStorage(forGroup gid: String) -> SlotStorage {
 // MARK: - 用例
 
 let t = TestRunner()
+
+runCanvasEdgePurposeTests(t)
+if CommandLine.arguments.contains("--canvas-edge-purpose-only") {
+    t.report()
+}
+
+if CommandLine.arguments.contains("--prompt-contract-only") {
+    runGenerationPromptContractTests(t)
+    t.report()
+}
+
+if CommandLine.arguments.contains("--gateway-only") {
+    runAgentRunGatewayTests(t)
+    t.report()
+}
+
+if CommandLine.arguments.contains("--artifacts-only") {
+    runAgentArtifactTests(t)
+    runAgentArtifactGatewayPayloadTests(t)
+    t.report()
+}
+
+if CommandLine.arguments.contains("--execution-journal-only") {
+    runAgentExecutionJournalTests(t)
+    t.report()
+}
+
+if CommandLine.arguments.contains("--nested-groups-only") {
+    runCanvasNestedGroupTests(t)
+    t.report()
+}
+
+if CommandLine.arguments.contains("--canvas-sync-only") {
+    runAgentCanvasSyncTests(t)
+    t.report()
+}
+
+if CommandLine.arguments.contains("--pile-only") {
+    runCanvasPileTests(t)
+    t.report()
+}
+
+if CommandLine.arguments.contains("--tapnow-replica-only") {
+    runTapNowReplicaTests(t)
+    t.report()
+}
+
+if CommandLine.arguments.contains("--ba-provision-live") {
+    runByteArtistLiveTests(t)
+    t.report()
+}
+
+if CommandLine.arguments.contains("--ba-canvas-only") {
+    runByteArtistCanvasTests(t)
+    t.report()
+}
+
+if CommandLine.arguments.contains("--directories-only") {
+    runAgentDirectoryTests(t)
+    t.report()
+}
+
+if CommandLine.arguments.contains("--adapters-only") || CommandLine.arguments.contains("--adapters-live") {
+    runGenerationAdapterTests(t, live: CommandLine.arguments.contains("--adapters-live"))
+    t.report()
+}
+
+if CommandLine.arguments.contains("--toolchain-only") || CommandLine.arguments.contains("--toolchain-live") {
+    runLocalToolchainTests(t, live: CommandLine.arguments.contains("--toolchain-live"))
+    t.report()
+}
+
+if CommandLine.arguments.contains("--groups-only") {
+    runCanvasGroupTests(t)
+    t.report()
+}
+
+if CommandLine.arguments.contains("--batch-only") {
+    runBatchGenerationTests(t)
+    t.report()
+}
+
+if CommandLine.arguments.contains("--workflow-only") {
+    runCanvasWorkflowTests(t)
+    runCanvasAgentReadTests(t)
+    runWorkflowSkillTests(t)
+    runWorkflowProjectTests(t)
+    t.report()
+}
 
 if CommandLine.arguments.contains("--tika-only") {
     runTikaLifecycleTests(t)
@@ -690,9 +781,11 @@ do {
         let dir = fm.temporaryDirectory
             .appendingPathComponent("clipslots_smoke_\(UUID().uuidString)", isDirectory: true)
         try? fm.createDirectory(at: dir, withIntermediateDirectories: true)
+        let previousDataRoot = ProcessInfo.processInfo.environment["CLIPSLOTS_DATA_DIR"]
         setenv("CLIPSLOTS_DATA_DIR", dir.path, 1)
         defer {
-            unsetenv("CLIPSLOTS_DATA_DIR")
+            if let previousDataRoot { setenv("CLIPSLOTS_DATA_DIR", previousDataRoot, 1) }
+            else { unsetenv("CLIPSLOTS_DATA_DIR") }
             try? fm.removeItem(at: dir)
         }
         do { try body(SpecialSlotStorage(), dir) }
@@ -2034,7 +2127,7 @@ do {
     t.equal(AppSkin.defaultsKey, "appearanceSkin", "★皮肤的 defaults 键名必须是 appearanceSkin")
     t.check(AppSkin.defaultsKey != "appearanceMode",
             "★★皮肤键名绝不能撞上 ThemeMode 的 appearanceMode（深浅与风格是两个正交维度）")
-    t.equal(AppSkin.fallback, .colorful, "★默认值必须是多彩模式——老用户升级上来不该被换皮肤")
+    t.equal(AppSkin.fallback, .minimal, "★新安装默认值必须是简洁模式")
     t.equal(AppSkin.allCases.count, 2, "皮肤只有多彩 / 简洁两种")
     t.equal(AppSkin.colorful.rawValue, "colorful", "rawValue 是持久化格式，不能改")
     t.equal(AppSkin.minimal.rawValue, "minimal", "rawValue 是持久化格式，不能改")
@@ -2043,7 +2136,7 @@ do {
     if let defaults = UserDefaults(suiteName: suiteName) {
         defer { defaults.removePersistentDomain(forName: suiteName) }
 
-        t.equal(AppSkin.load(from: defaults), .colorful, "空 defaults 应回退到多彩模式")
+        t.equal(AppSkin.load(from: defaults), .minimal, "空 defaults 应回退到简洁模式")
 
         AppSkin.minimal.store(in: defaults)
         t.equal(AppSkin.load(from: defaults), .minimal, "★写入后必须能原样读回")
@@ -2051,7 +2144,7 @@ do {
                 "落盘的必须是 rawValue 字符串（便于 defaults write 手工调试）")
 
         defaults.set("rainbow", forKey: AppSkin.defaultsKey)
-        t.equal(AppSkin.load(from: defaults), .colorful, "★脏值必须回退到默认皮肤，而不是崩或空白界面")
+        t.equal(AppSkin.load(from: defaults), .minimal, "★脏值必须回退到默认皮肤，而不是崩或空白界面")
 
         AppSkin.colorful.store(in: defaults)
         t.equal(AppSkin.load(from: defaults), .colorful, "切回多彩模式应正常")
@@ -3762,7 +3855,11 @@ func smokeAwait<T>(_ body: @escaping @Sendable () async -> T) -> T {
         box.value = await body()
         semaphore.signal()
     }
-    semaphore.wait()
+    if Thread.isMainThread {
+        while semaphore.wait(timeout: .now()) == .timedOut {
+            _ = RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.002))
+        }
+    } else { semaphore.wait() }
     return box.value!
 }
 
@@ -3776,6 +3873,9 @@ final class SmokeEventLog: @unchecked Sendable {
         switch event {
         case .interactionRequested: storage.append("interaction")
         case .sessionStarted: storage.append("session")
+        case .runState: storage.append("runState")
+        case .artifactUpdated: storage.append("artifactUpdated")
+        case .canvasChanged: storage.append("canvasChanged")
         case .reasoningDelta: storage.append("reasoning")
         case .contentDelta: storage.append("content")
         case .assistantCompleted: storage.append("assistant")
@@ -4010,7 +4110,7 @@ do {
     // 脏 data 行不能炸掉整条流。
     var weird = AgentSSEDecoder()
     var acc4 = AgentStreamAccumulator()
-    for event in weird.feed("data: not-json\ndata: {\"choices\":[{\"delta\":{\"content\":\"仍然可用\"}}]}\n") { acc4.ingest(event) }
+    for event in weird.feed("data: not-json\n\ndata: {\"choices\":[{\"delta\":{\"content\":\"仍然可用\"}}]}\n\n") { acc4.ingest(event) }
     for event in weird.finish() { acc4.ingest(event) }
     t.equal(acc4.content, "仍然可用", "★脏 data 行应被忽略，而不是让整轮失败")
 
@@ -4210,11 +4310,15 @@ do {
                                secretStore: AgentInMemorySecretStore(key: "sk-smoke"))
     let executor = SmokeToolExecutor()
     let events = SmokeEventLog()
+    let invocation = AgentInvocationContext(
+        history: [AgentMessage(role: .user, content: "看看槽位")],
+        config: AgentConfig(),
+        tools: executor)
+    t.equal(invocation.history.first?.content, "看看槽位", "统一调用上下文保留完整历史")
+    t.check(invocation.tools.map { $0 === executor } == true, "统一调用上下文保留同一个工具执行器")
 
     let produced = smokeAwait { () -> [AgentMessage] in
-        (try? await service.run(history: [AgentMessage(role: .user, content: "看看槽位")],
-                                config: AgentConfig(),
-                                tools: executor) { event in
+        (try? await service.run(context: invocation) { event in
             events.append(event)
         }) ?? []
     }
@@ -4731,12 +4835,12 @@ do {
     let bundleSkills = bundle.appendingPathComponent("Contents/Resources/skills/clipslots-manager")
     let home = root.appendingPathComponent("home")
     let community = home.appendingPathComponent("Library/Application Support/ClipSlots/community-skills/my-skill")
-    let codex = home.appendingPathComponent(".codex/skills")
+    let claude = home.appendingPathComponent(".claude/skills")
 
     do {
         try fm.createDirectory(at: bundleSkills.appendingPathComponent("scripts"), withIntermediateDirectories: true)
         try fm.createDirectory(at: community, withIntermediateDirectories: true)
-        try fm.createDirectory(at: codex, withIntermediateDirectories: true)
+        try fm.createDirectory(at: claude, withIntermediateDirectories: true)
 
         try "---\nname: clipslots-manager\ndescription: 内置槽位技能\nversion: 1.7.0\n---\n正文"
             .write(to: bundleSkills.appendingPathComponent("SKILL.md"), atomically: true, encoding: .utf8)
@@ -4745,9 +4849,9 @@ do {
         try "---\nname: my-skill\ndescription: 社区技能\n---\n正文"
             .write(to: community.appendingPathComponent("SKILL.md"), atomically: true, encoding: .utf8)
         try "---\nname: solo\ndescription: 单文件技能\n---\n正文"
-            .write(to: codex.appendingPathComponent("solo.md"), atomically: true, encoding: .utf8)
+            .write(to: claude.appendingPathComponent("solo.md"), atomically: true, encoding: .utf8)
         // Agent 目录里的软链指回 bundle 内那个——这正是本项目的安装方式。
-        try fm.createSymbolicLink(at: codex.appendingPathComponent("clipslots-manager"),
+        try fm.createSymbolicLink(at: claude.appendingPathComponent("clipslots-manager"),
                                   withDestinationURL: bundleSkills)
 
         let found = AgentSkillCatalog.discover(bundlePath: bundle.path, homeDirectory: home.path)
@@ -4774,7 +4878,7 @@ do {
         t.check(AgentSkillTools.resolveScriptPath(skillDirectory: dir, script: "scripts/../scripts/hello.py") != nil,
                 "标准化后仍在目录内的路径应被接受")
         t.check(AgentSkillTools.resolveScriptPath(
-                    skillDirectory: codex.appendingPathComponent("clipslots-manager").path,
+                    skillDirectory: claude.appendingPathComponent("clipslots-manager").path,
                     script: "scripts/hello.py") != nil,
                 "★软链形态的 Skill 目录内的脚本不应被误判为越界（Agent 目录里全是软链）")
 
@@ -4975,7 +5079,7 @@ do {
             "★★窗口最小宽必须同时兜住最吃宽度的内容区组合（画布 + 展开的槽位库 + Agent 侧栏）")
 
     // 侧栏宽度只能有一个来源：AgentSidebarView.width 引用的就是这个常量。
-    t.equal(WindowLayoutMetrics.agentSidebarWidth, 480, "Agent 侧栏定宽 480（与录屏布局和窗口预算同源）")
+    t.equal(WindowLayoutMetrics.agentSidebarWidth, 440, "Agent 侧栏默认 440（REA QD）")
 }
 
 // MARK: - PLUGIN-RELEASE：GitHub latest release 解析（插件市场动态下载链接，v2.11.8）
@@ -5645,9 +5749,11 @@ do {
     let dir = FileManager.default.temporaryDirectory
         .appendingPathComponent("clipslots_unfiled_smoke_\(UUID().uuidString)", isDirectory: true)
     try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+    let previousDataRoot = ProcessInfo.processInfo.environment["CLIPSLOTS_DATA_DIR"]
     setenv("CLIPSLOTS_DATA_DIR", dir.path, 1)
     defer {
-        unsetenv("CLIPSLOTS_DATA_DIR")
+        if let previousDataRoot { setenv("CLIPSLOTS_DATA_DIR", previousDataRoot, 1) }
+        else { unsetenv("CLIPSLOTS_DATA_DIR") }
         try? FileManager.default.removeItem(at: dir)
     }
     // v2.14.0：保留组只能建在画布私有库上，所以这组用例的主角换成 `.canvasPrivate` 实例。
@@ -6944,8 +7050,8 @@ do {
     t.check(args.contains("--no-wait"),
             "★CRATE-2 提交必须带 --no-wait（漏了就退化成阻塞模式：拿不到排队信息，进程被杀连 taskId 都留不下）")
     t.check(args.contains("--json"), "CRATE-3 提交必须带 --json（否则 stdout 不是可解析的 JSON）")
-    t.check(args.contains("a tiny red cube"),
-            "★CRATE-4 提示词前后空白要裁掉，但内部空格原样保留")
+    t.check(args.contains(req.prompt),
+            "★CRATE-4 提示词按当前精确传递契约保留首尾与内部空白")
     t.equal(args.filter { $0 == "--image" }.count, 2, "CRATE-5 --image 可重复传（多张入参图）")
     t.check(args.contains("seed=42"), "CRATE-6 seed 用 --param seed=N 传（复现同一张图）")
 
@@ -7271,7 +7377,8 @@ do {
     t.equal(dropped.ratio, req.ratio, "CRATE-SEED-12 比例不变")
     t.equal(dropped.imagePaths, req.imagePaths, "★CRATE-SEED-13 入参图不能在重试里丢掉")
     let args = try! CrateGeneration.submitArguments(dropped)
-    t.check(!args.contains("--param"), "★CRATE-SEED-14 去 seed 后的命令行里不能再出现 --param")
+    t.check(!args.contains(where: { $0.hasPrefix("seed=") }) && args.contains("ratio=16:9"),
+            "★CRATE-SEED-14 去 seed 后仍保留所选比例参数")
     t.check(args.contains("--no-wait") && args.contains("--json"),
             "CRATE-SEED-15 重试仍然是 --no-wait + --json")
 }
@@ -7405,7 +7512,8 @@ do {
 
     // 提交侧：ratio 为空串就不带 --ratio（= "该模型不吃比例"的落地形态）。
     var req = CrateImageRequest(model: "t2i_qwen_image", prompt: "猫", ratio: "1:1", count: 1)
-    t.check(try! CrateGeneration.submitArguments(req).contains("--ratio"), "CRATE-CAT-20 有比例时带 --ratio")
+    t.check(try! CrateGeneration.submitArguments(req).contains("ratio=1:1"),
+            "CRATE-CAT-20 比例作为模型公布的 ratio 参数传入")
     req = CrateGeneration.droppingRatio(req)
     t.check(!(try! CrateGeneration.submitArguments(req).contains("--ratio")),
             "★CRATE-CAT-21 droppingRatio 后不带 --ratio（老画布存着新模型不认的比例时的退路）")
@@ -7454,7 +7562,7 @@ do {
             "CRATE-VID-1 视频提交走 generate video（写成 image 时 CLI 报的是「未知模型」，极难定位）")
     t.check(args.suffix(2) == ["--no-wait", "--json"],
             "★CRATE-VID-2 必须带 --no-wait：视频动辄几分钟，前台等 CLI 返回等于把 App 挂死")
-    t.check(args.contains("--ratio") && args.contains("16:9"), "CRATE-VID-3 比例")
+    t.check(args.contains("--param") && args.contains("ratio=16:9"), "CRATE-VID-3 比例")
     t.check(args.contains("--resolution") && args.contains("720p"), "CRATE-VID-4 分辨率")
     t.check(args.contains("--duration") && args.contains("5"), "CRATE-VID-5 时长")
     t.check(args.contains("--generate-audio") && args.contains("true"), "CRATE-VID-6 配音开关")
@@ -7902,11 +8010,11 @@ do {
                                  upstreams: slots, downstreamKind: kind)
     }
     let composite = slotInputs([("slot", .auto)])
-    t.equal(composite.promptFragments, ["槽位正文"], "SLOT-IN-1 自动连线传递槽位正文")
+    t.equal(composite.promptFragments, ["  槽位正文  "], "SLOT-IN-1 自动连线原样传递槽位正文")
     t.equal(composite.referencePaths, seven, "SLOT-IN-2 七张图片按附件顺序全部入参并去重")
     t.equal(composite.pendingUpstreamCount, 0, "SLOT-IN-3 槽位不需要先生成")
     let promptOnly = slotInputs([("slot", .prompt)])
-    t.check(promptOnly.promptFragments == ["槽位正文"] && promptOnly.assetPaths.isEmpty,
+    t.check(promptOnly.promptFragments == ["  槽位正文  "] && promptOnly.assetPaths.isEmpty,
             "SLOT-IN-4 显式提示词只传正文")
     let imagesOnly = slotInputs([("slot", .reference)])
     t.check(imagesOnly.promptFragments.isEmpty && imagesOnly.referencePaths == seven,
@@ -7923,7 +8031,7 @@ do {
     let last = slotInputs([("slot", .lastFrame)], .video)
     t.check(last.lastFramePath == seven[0] && last.firstFramePath == nil &&
             last.referencePaths == Array(seven.dropFirst()), "SLOT-IN-9 槽位指定尾帧时只取第一图，其余仍为参考")
-    t.equal(slotInputs([("slot", .auto), ("image", .auto)]).promptFragments, ["槽位正文"],
+    t.equal(slotInputs([("slot", .auto), ("image", .auto)]).promptFragments, ["  槽位正文  "],
             "SLOT-IN-10 图片节点的提示词不会意外拼入下游")
     t.equal(CanvasEdgeInputs.imageReferences(edgeInputs: composite, slotImages: [seven[0], "/own.png"]),
             seven + ["/own.png"], "SLOT-IN-11 槽位与本节点重复图不重复上传")
@@ -8612,9 +8720,11 @@ do {
     let root = FileManager.default.temporaryDirectory
         .appendingPathComponent("clipslots_stash_smoke_\(UUID().uuidString)", isDirectory: true)
     try? FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    let previousDataRoot = ProcessInfo.processInfo.environment["CLIPSLOTS_DATA_DIR"]
     setenv("CLIPSLOTS_DATA_DIR", root.path, 1)
     defer {
-        unsetenv("CLIPSLOTS_DATA_DIR")
+        if let previousDataRoot { setenv("CLIPSLOTS_DATA_DIR", previousDataRoot, 1) }
+        else { unsetenv("CLIPSLOTS_DATA_DIR") }
         try? FileManager.default.removeItem(at: root)
     }
 
@@ -9221,4 +9331,23 @@ printf '%s\n' '{"type":"text-delta","text":"<clipslots-call cmd=\u0027clipslots 
 
 runTikaLifecycleTests(t)
 runAgentCanvasTests(t)
+runCanvasWorkflowTests(t)
+runCanvasAgentReadTests(t)
+runWorkflowSkillTests(t)
+runWorkflowProjectTests(t)
+runBatchGenerationTests(t)
+runCanvasGroupTests(t)
+runLocalToolchainTests(t)
+runGenerationAdapterTests(t)
+runByteArtistCanvasTests(t)
+runAgentDirectoryTests(t)
+runTapNowReplicaTests(t)
+runCanvasPileTests(t)
+runAgentExecutionJournalTests(t)
+runAgentCanvasSyncTests(t)
+runCanvasNestedGroupTests(t)
+runAgentRunGatewayTests(t)
+runAgentArtifactTests(t)
+runAgentArtifactGatewayPayloadTests(t)
+runGenerationPromptContractTests(t)
 t.report()

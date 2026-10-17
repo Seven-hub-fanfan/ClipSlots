@@ -24,45 +24,33 @@ import Foundation
 // 这个 decoder 是纯值语义、无网络依赖的，因此可以被 smoke 测试直接喂字符串。
 
 public struct AgentSSEDecoder {
-    /// 跨 chunk 的残行缓冲。
-    private var pending = ""
+    private var framer = AgentSSEFramer()
+    private var failed = false
 
     public init() {}
 
     /// 喂入一段原始字节（可以是任意切分位置），返回本次能确定解析出的事件。
     public mutating func feed(_ data: Data) -> [AgentStreamEvent] {
-        feed(String(decoding: data, as: UTF8.self))
+        guard !failed else { return [] }
+        do { return try framer.feed(data).flatMap { Self.parseLine("data: " + $0.data) ?? [] } }
+        catch {
+            failed = true
+            return [.serverError(message: "SSE 字节流不合法或超过容量限制", code: "SSE_FRAMING")]
+        }
     }
 
     public mutating func feed(_ text: String) -> [AgentStreamEvent] {
-        // CRLF 必须先归一成 LF，这不是"顺手做的整洁事"，是必须做的事：
-        // Swift 的 Character 是字素簇，`"\r\n"` 是**一个** Character 且不等于 `"\n"`，
-        // 所以 `firstIndex(of: "\n")` 在 CRLF 流上永远找不到换行——所有内容会一直
-        // 堆在 pending 里，直到 finish() 才被当成一整行解析（然后解析失败）。
-        // 表现是"Agent 一个字都不吐"，而且日志里毫无异常。DeepSeek 目前发 LF，
-        // 但中间任何代理/网关改写成 CRLF 就会踩到，所以在入口就抹平。
-        // 归一化作用在 pending 整体而非本次 text 上：chunk 边界可能正好切在 \r 和 \n 之间。
-        pending += text
-        pending = pending.replacingOccurrences(of: "\r\n", with: "\n")
-        var events: [AgentStreamEvent] = []
-
-        // 只处理已经出现换行的完整行，剩下的留在 pending 等下一个 chunk。
-        while let newlineIndex = pending.firstIndex(of: "\n") {
-            let rawLine = String(pending[pending.startIndex..<newlineIndex])
-            pending = String(pending[pending.index(after: newlineIndex)...])
-            if let parsed = Self.parseLine(rawLine) {
-                events.append(contentsOf: parsed)
-            }
-        }
-        return events
+        feed(Data(text.utf8))
     }
 
     /// 流结束时调用：把最后一行没有换行结尾的残留也解出来。
     public mutating func finish() -> [AgentStreamEvent] {
-        let rest = pending
-        pending = ""
-        guard !rest.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return [] }
-        return Self.parseLine(rest) ?? []
+        guard !failed else { return [] }
+        do { return try framer.finish(flushUnterminated: true).flatMap { Self.parseLine("data: " + $0.data) ?? [] } }
+        catch {
+            failed = true
+            return [.serverError(message: "SSE 末尾字节不完整", code: "SSE_FRAMING")]
+        }
     }
 
     // MARK: 单行解析
@@ -229,6 +217,7 @@ public struct AgentStreamAccumulator {
     public private(set) var finishReason: String?
     public private(set) var usage: AgentUsage?
     public private(set) var serverError: (message: String, code: String?)?
+    public private(set) var receivedDone = false
 
     /// 按 index 存放拼装中的工具调用。用字典而不是数组：服务端不保证 index 从 0 连续。
     private var partialToolCalls: [Int: (id: String, name: String, args: String)] = [:]
@@ -241,7 +230,7 @@ public struct AgentStreamAccumulator {
         case .content(let c): content += c
         case .toolCall(let index, let id, let name, let argsDelta):
             if partialToolCalls[index] == nil {
-                partialToolCalls[index] = (id: "", name: "", args: "")
+                partialToolCalls[index] = (id: "call_\(index)_\(UUID().uuidString.prefix(8))", name: "", args: "")
             }
             if let id, !id.isEmpty { partialToolCalls[index]?.id = id }
             if let name, !name.isEmpty { partialToolCalls[index]?.name += name }
@@ -249,7 +238,7 @@ public struct AgentStreamAccumulator {
         case .finish(let reason): finishReason = reason
         case .usage(let u): usage = u
         case .serverError(let m, let c): serverError = (m, c)
-        case .done: break
+        case .done: receivedDone = true
         }
     }
 
@@ -261,8 +250,7 @@ public struct AgentStreamAccumulator {
             guard let p = partialToolCalls[index], !p.name.isEmpty else { return nil }
             // id 缺失时兜一个：后续 role=tool 消息必须带 tool_call_id，
             // 否则上游 400。宁可自造也不能空。
-            let id = p.id.isEmpty ? "call_\(index)_\(UUID().uuidString.prefix(8))" : p.id
-            return AgentToolCall(id: id, name: p.name, argumentsJSON: p.args)
+            return AgentToolCall(id: p.id, name: p.name, argumentsJSON: p.args)
         }
     }
 

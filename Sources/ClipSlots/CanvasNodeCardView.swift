@@ -46,6 +46,8 @@ import ClipSlotsKit
 /// 卡片自己去读槽位数据就得认识主 store，那会把画布重新拖回"任一槽位变化触发全局重绘"的老路
 /// —— 所以取数留在上层，卡片保持纯展示。
 struct CanvasNodeCardView: View {
+    private typealias TapSkin = CanvasSkin
+    private typealias AppTheme = CanvasTheme
     let node: CanvasNode
     let isSelected: Bool
     /// 正文实时值 = 该槽位的主体文本。

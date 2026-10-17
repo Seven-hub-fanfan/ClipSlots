@@ -33,11 +33,13 @@ import ClipSlotsKit
 /// 那是图片亮部贴着纯黑底的错觉。选中与否完全靠"工具条 + 端口出现"表达。
 /// 这一条很关键：只要给卡片补上描边，整体气质立刻从"内容"退回"控件"。
 struct CanvasTapNodeCard: View {
+    private typealias TapSkin = CanvasSkin
 
     let node: CanvasNode
     let isSelected: Bool
     let isEditing: Bool
     let text: String
+    var textDocument: CanvasTextDocument? = nil
     /// 名签上的名字。沿用既有的 `pathLabel`（「未入库 · 2」/「灵感 · 3」这类）。
     let pathLabel: String
     let attachments: [SlotContent.SlotAttachment]
@@ -48,6 +50,7 @@ struct CanvasTapNodeCard: View {
     let isHoverHeld: Bool
     /// 这个节点能不能"入库"（只有画布私有节点能）。
     let canArchive: Bool
+    let inlinePlayback: CanvasInlinePlayback
 
     let onHoverChanged: (Bool) -> Void
     let onBeginEdit: () -> Void
@@ -69,6 +72,7 @@ struct CanvasTapNodeCard: View {
     }
 
     private var hoverActive: Bool { isHovering || isHoverHeld }
+    private var isGeneratedImage: Bool { node.kind == .image && !node.isMediaSource }
 
     /// 节点在屏幕上太小就不写字（与旧卡同一规格）。
     private var textVisible: Bool {
@@ -96,10 +100,16 @@ struct CanvasTapNodeCard: View {
             .clipShape(RoundedRectangle(cornerRadius: s(TapSkin.cardRadius), style: .continuous))
             .overlay {
                 RoundedRectangle(cornerRadius: s(TapSkin.cardRadius))
-                    .stroke(isSelected ? TapSkin.nodeAccent(node.kind).opacity(0.7) : TapSkin.border.opacity(0.6), lineWidth: s(1))
+                    .stroke(isEditing ? TapSkin.nodeAccent(node.kind) :
+                                isSelected ? TapSkin.nodeAccent(node.kind).opacity(0.7) : TapSkin.border.opacity(0.6),
+                            lineWidth: s(isEditing ? 1.5 : 1))
                     .allowsHitTesting(false)
             }
-            .overlay(statusVeil)
+            .overlay {
+                // Text polishing is indicated by the composer's shared blue glow.
+                // Keep the live text readable and editable while it runs.
+                if node.kind != .text { statusVeil }
+            }
             .overlay(alignment: .topTrailing) { hoverChips }
             // 信息角标的位置**随内容而变**，原因见 `infoBadge` 注释末尾那段。
             .overlay(alignment: media == nil ? .bottomLeading : .topLeading) { infoBadge }
@@ -116,8 +126,9 @@ struct CanvasTapNodeCard: View {
                     try? await Task.sleep(for: .seconds(2))
                 }
             }
-            // 光标：卡片上是"可以抓起来"的开手，正在拖是握拳（握拳那一档由工作区在拖拽时接管）。
-            .tapCursor(.openHand)
+            // 文本节点单击即编辑，必须用 I-beam 明确表达输入语义；媒体卡仍可抓取移动。
+            // 真正发生拖拽时，握拳光标由工作区统一接管。
+            .tapCursor(node.kind == .text ? .iBeam : .openHand)
             .onHover { hovering in
                 isHovering = hovering
                 onHoverChanged(hovering)
@@ -125,6 +136,13 @@ struct CanvasTapNodeCard: View {
             .onChange(of: isEditing) { editing in
                 if editing { draft = text }
             }
+            .onChange(of: media?.canvasSourceIdentity) {
+                inlinePlayback.invalidate(nodeID: node.id, sourceIdentity: $0)
+            }
+            .onChange(of: isBusy) { busy in
+                if busy { inlinePlayback.stop(nodeID: node.id) }
+            }
+            .onDisappear { inlinePlayback.stop(nodeID: node.id) }
             .animation(TapSkin.stateAnim, value: hoverActive)
             .animation(TapSkin.stateAnim, value: isSelected)
     }
@@ -145,7 +163,23 @@ struct CanvasTapNodeCard: View {
 
     @ViewBuilder
     private var content: some View {
-        if isEditing && node.kind == .text {
+        if node.kind == .text, let document = textDocument {
+            CanvasLiveDocumentView(document: document) { value, binding in
+                if isEditing {
+                    CanvasPromptEditor(text: binding,
+                        font: CanvasFontCatalog.nsFont(family: node.fontName, size: max(0.01, fs(node.resolvedBodyFontSize))),
+                        onCommit: { onCommitEdit(document.text) },
+                        onCancel: { document.saveSoon(); onCancelEdit() },
+                        onBlur: { onCommitEdit(document.text) },
+                        placeholder: "输入文字…", returnInsertsNewline: true, allowsLiveReplacement: true)
+                        .padding(s(8))
+                } else if value.isEmpty {
+                    emptyGlyph
+                } else {
+                    textPreview(value)
+                }
+            }
+        } else if isEditing && node.kind == .text {
             promptEditor
         } else if let media {
             mediaBody(media)
@@ -165,27 +199,33 @@ struct CanvasTapNodeCard: View {
     private func mediaBody(_ att: SlotContent.SlotAttachment) -> some View {
         ZStack {
             CanvasAttachmentPreviewImage(attachment: att, maxPixel: 900, contentMode: .fit)
+                .id(att.canvasSourceIdentity)
                 .frame(width: s(node.width), height: s(node.height))
                 .clipped()
             if att.canvasIsVideoLike, !isBusy {
-                // 视频的播放标记。实心白三角压在半透明黑圆上：视频首帧可能是任意亮度，
-                // 纯白三角在雪景首帧上会消失。
-                Image(systemName: "play.fill")
-                    .font(.system(size: s(13)))
-                    .foregroundColor(.white)
-                    .padding(s(9))
-                    .background(Circle().fill(Color.black.opacity(0.45)))
+                CanvasInlineVideoPreview(playback: inlinePlayback, nodeID: node.id,
+                                         sourceIdentity: att.canvasSourceIdentity,
+                                         scale: renderScale, hovered: hoverActive)
+                    .frame(width: s(node.width), height: s(node.height))
             }
         }
+        .canvasControlRegion(isGeneratedImage ? "canvas-image-pixels-\(node.id)" : "canvas-media-\(node.id)")
         .contentShape(Rectangle())
         .onTapGesture(count: 2) { onOpenFullscreen(att) }
     }
 
     @ViewBuilder
     private var textBody: some View {
-        Text(text)
+        textPreview(text)
+    }
+
+    private func textPreview(_ value: String) -> some View {
+        // A card displays only its visible lines. Do not ask SwiftUI to shape an
+        // entire long document on every keystroke; the native editor keeps it all.
+        Text(String(value.prefix(2000)))
             .font(CanvasFontCatalog.font(family: node.fontName,
                                          size: fs(node.resolvedBodyFontSize)))
+            .lineLimit(max(1, min(100, Int((node.height - 24) / max(1, node.resolvedBodyFontSize + 2)))))
             .foregroundColor(TapSkin.ink)
             .lineSpacing(s(2))
             .multilineTextAlignment(.leading)
@@ -202,7 +242,7 @@ struct CanvasTapNodeCard: View {
     private var emptyGlyph: some View {
         Group {
             if node.kind == .text {
-                Text("双击开始编辑…")
+                Text(isSelected ? "单击输入文字…" : "双击输入文字…")
                     .font(.system(size: fs(12)))
                     .foregroundColor(TapSkin.chromeInkDim)
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
@@ -246,7 +286,8 @@ struct CanvasTapNodeCard: View {
                                                           size: max(0.01, fs(node.resolvedBodyFontSize))),
                            onCommit: { onCommitEdit(draft) },
                            onCancel: onCancelEdit,
-                           onBlur: { onCommitEdit(draft) })
+                           onBlur: { onCommitEdit(draft) },
+                           placeholder: "输入文字…")
             .onAppear { draft = text }
             .padding(s(8))
     }
@@ -290,7 +331,7 @@ struct CanvasTapNodeCard: View {
     /// 所以两者各让一边 —— 位置跟着"这张卡的哪一侧是空的"走，而不是图省事取一个统一值。
     @ViewBuilder
     private var infoBadge: some View {
-        if hoverActive || isSelected, !isEditing, textVisible, let line = infoLine {
+        if !isGeneratedImage, hoverActive || isSelected, !isEditing, textVisible, let line = infoLine {
             Text(line)
                 .font(.system(size: fs(9.5), weight: .medium))
                 .foregroundColor(TapSkin.chipInk)
@@ -320,7 +361,7 @@ struct CanvasTapNodeCard: View {
     /// 二十个灰点就是噪声。
     @ViewBuilder
     private var hoverChips: some View {
-        if hoverActive, !isEditing, textVisible {
+        if !isGeneratedImage, hoverActive, !isEditing, textVisible {
             HStack(spacing: s(5)) {
                 if node.isMediaSource, media != nil {
                     chip("替换", glyph: "arrow.triangle.2.circlepath", action: onBeginEdit)
@@ -369,7 +410,7 @@ struct CanvasTapNodeCard: View {
     /// 而"这张图是用什么提示词出来的"仍然一抬手就能看到。
     @ViewBuilder
     private var promptVeil: some View {
-        if hoverActive, !isEditing, !text.isEmpty, media != nil, textVisible {
+        if !isGeneratedImage, hoverActive, !isEditing, !text.isEmpty, media != nil, textVisible {
             HStack(spacing: 0) {
                 Text(text)
                     .font(.system(size: fs(10.5)))
@@ -472,6 +513,7 @@ struct CanvasTapNodeCard: View {
 /// `CanvasNodeCardView`（槽位）。两张卡内部结构完全不同，但名签必须逐像素一致 ——
 /// 它是用户判断"这两个是同一类东西"的主要线索。
 struct CanvasNodeNameTag: View {
+    private typealias TapSkin = CanvasSkin
     let symbol: String
     let label: String
     let isActive: Bool

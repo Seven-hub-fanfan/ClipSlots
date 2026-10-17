@@ -14,6 +14,7 @@ struct CanvasPreviewTarget: Identifiable, Equatable {
     let pathLabel: String
     /// 这个节点此刻能不能入库（已经在正式槽位库里的就不能，也不需要）。
     let canArchive: Bool
+    var isGeneratedImage = false
 
     var id: String { "\(nodeId)::\(attachment.id.uuidString)" }
 
@@ -216,7 +217,9 @@ struct CanvasFullscreenPreview: View {
                 barButton("plus.magnifyingglass", help: "放大") { stepZoom(1) }
                 barButton("arrow.counterclockwise", help: "复位（也可双击图片）") { resetTransform() }
             }
-            if target.canArchive {
+            if target.isGeneratedImage {
+                barButton("arrow.down.to.line", help: "下载原图") { onArchive() }
+            } else if target.canArchive {
                 barButton("tray.and.arrow.down", help: "入库到槽位库") { onArchive() }
             }
             if target.attachment.canvasLocalURL != nil {

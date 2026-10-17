@@ -22,19 +22,43 @@ import Foundation
 public enum AgentBackendKind: String, Codable, CaseIterable, Sendable {
     case deepseek
     case tika
-    case codex
+    case gateway
 
     /// UI 展示名——@AppStorage 是纯字符串，UI 上要展示更友好的名字用这个。
     public var displayName: String {
         switch self {
         case .deepseek: return "DeepSeek"
         case .tika: return "Tika Agent"
-        case .codex: return "Codex"
+        case .gateway: return "自建网关"
         }
     }
 }
 
 // MARK: - 后端抽象
+
+public enum AgentTaskPolicy: String, Codable, Sendable {
+    case chat
+    /// Fresh context, no tools/approvals, complete plain-text output required.
+    case textPolish
+}
+
+/// A complete, immutable snapshot of one backend call.
+///
+/// Every caller builds this value before starting async work, so a preference
+/// change cannot mix a new backend with an old configuration or tool context.
+public struct AgentInvocationContext {
+    public let history: [AgentMessage]
+    public let config: AgentConfig
+    public let tools: (any AgentToolExecuting)?
+
+    public init(history: [AgentMessage],
+                config: AgentConfig,
+                tools: (any AgentToolExecuting)?) {
+        self.history = history
+        self.config = config
+        self.tools = tools
+    }
+}
 
 /// 上层（AgentChatModel）看到的"一次运行"接口。DeepSeek / Tika 都要实现这个协议。
 ///
@@ -57,6 +81,19 @@ public protocol AgentBackend: AnyObject, Sendable {
 
 /// 让现有的 DeepSeek 实现符合 `AgentBackend`，不改任何一行 AgentService 内部实现。
 extension AgentService: AgentBackend {}
+
+public extension AgentBackend {
+    /// Unified call entry used by app features. The protocol's original method
+    /// remains available so existing backend implementations stay source-compatible.
+    @discardableResult
+    func run(context: AgentInvocationContext,
+             onEvent: @escaping @Sendable (AgentRunEvent) async -> Void) async throws -> [AgentMessage] {
+        try await run(history: context.history,
+                      config: context.config,
+                      tools: context.tools,
+                      onEvent: onEvent)
+    }
+}
 
 // MARK: - Tika 后端偏好键 / 会话配置
 

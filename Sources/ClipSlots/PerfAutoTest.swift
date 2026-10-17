@@ -45,6 +45,9 @@ final class PerfAutoTest {
     /// 若窗口因所在 Space 被全屏应用占据等原因没有出现，onAppear 不会触发，取数就会空转。
     func startAtLaunch(store: SlotStoreObservable) {
         guard Self.isEnabled else { return }
+        #if DEBUG
+        CanvasPileProbeWindow.schedule(store: store)
+        #endif
         DispatchQueue.main.async { [weak self] in self?.start(store: store) }
     }
 

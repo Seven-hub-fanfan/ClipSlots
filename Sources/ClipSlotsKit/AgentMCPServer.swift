@@ -1,7 +1,7 @@
 import Foundation
 
 /// Stdio MCP adapter for resumed desktop threads, which cannot add dynamic tools.
-/// Reuses the same registry and CLI locking as the app; writes no Codex config.
+/// Reuses the same registry and CLI locking as the app; does not modify client configuration.
 public enum AgentMCPServer {
     public static func response(to request: JSONValue, tools: AgentToolExecuting) async -> JSONValue? {
         guard let id = request["id"] else { return nil }
@@ -9,7 +9,7 @@ public enum AgentMCPServer {
         switch request["method"]?.stringValue {
         case "initialize":
             result = ["protocolVersion": "2024-11-05", "capabilities": ["tools": [:]],
-                      "serverInfo": ["name": "clipslots", "version": "2.17.8"]]
+                      "serverInfo": ["name": "clipslots", "version": "2.17.37"]]
         case "ping": result = [:]
         case "tools/list":
             result = ["tools": .array(tools.specs().map {
@@ -35,6 +35,16 @@ public enum AgentMCPServer {
         let skills = AgentSkillCatalog.discover(bundlePath: bundlePath).filter { skillSlugs.contains($0.slug) }
         let registry = AgentToolRegistry(builtin: AgentBuiltinTools(cliPath: cliPath),
                                          skills: AgentSkillTools(enabledSkills: skills))
+        await serve(tools: registry)
+    }
+
+    public static func serveReadOnly(configuration: AgentExternalReadOnlyMCPConfiguration,
+                                     dataRoot: URL = ClipSlotsPaths.dataRoot) async throws {
+        let tools = try AgentExternalReadOnlyMCPTools(configuration: configuration, dataRoot: dataRoot)
+        await serve(tools: tools)
+    }
+
+    public static func serve(tools: AgentToolExecuting) async {
         var buffer = Data()
         while true {
             let data = FileHandle.standardInput.availableData
@@ -45,7 +55,7 @@ public enum AgentMCPServer {
                 let line = Data(buffer[..<newline])
                 buffer.removeSubrange(...newline)
                 guard let request = try? JSONDecoder().decode(JSONValue.self, from: line),
-                      let response = await response(to: request, tools: registry),
+                      let response = await response(to: request, tools: tools),
                       var encoded = try? JSONEncoder().encode(response) else { continue }
                 encoded.append(10)
                 do { try FileHandle.standardOutput.write(contentsOf: encoded) } catch { return }

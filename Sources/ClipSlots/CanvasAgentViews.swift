@@ -41,6 +41,7 @@ struct LegacyCanvasHistoryView: View {
 struct CanvasAgentComposer: View {
     @ObservedObject var model: AgentChatModel
     @ObservedObject var context: CanvasAgentContext
+    @State private var showWorkflowSkills = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 7) {
@@ -53,8 +54,24 @@ struct CanvasAgentComposer: View {
                 Spacer()
                 Text("\(model.draftReferences.count)/3").foregroundColor(.secondary)
             }
-            Text("仅发送所选正文与附件名称 · 结果确认后应用")
+            Label(model.supportsCanvasReadTools ? "全图可按需读取 · 发送时固定快照" : "当前后端仅支持引用正文",
+                  systemImage: "point.3.connected.trianglepath.dotted")
+                .accessibilityIdentifier("agent-canvas-scope")
                 .font(.system(size: 10)).foregroundColor(.secondary)
+            HStack(spacing: 14) {
+                Button("总结创作方法") { model.draft = CanvasAgentContext.summarizePrompt }
+                    .disabled(model.isRunning || !model.supportsCanvasReadTools)
+                    .accessibilityIdentifier("agent-summarize-workflow")
+                Button("我的创作 Skill") { showWorkflowSkills = true }
+                    .accessibilityIdentifier("agent-workflow-skills")
+            }.foregroundColor(TapSkin.accent)
+            ForEach(context.pendingGraphPreviews.filter {
+                $0.conversationID == model.selectedConversationID
+            }) { preview in
+                Button("预览画布变更 · \(preview.mutation.changes.count) 个节点 · \(preview.mutation.groupChanges.count) 个编组") {
+                    context.presentMutation(preview, conversationID: model.selectedConversationID)
+                }.accessibilityIdentifier("agent-canvas-sync-preview")
+            }
             ForEach(model.draftReferences) { ref in
                 HStack(alignment: .top, spacing: 6) {
                     DisclosureGroup {
@@ -83,6 +100,76 @@ struct CanvasAgentComposer: View {
                                     set: { if !$0 { context.dismissPreview() } })) {
             CanvasAgentPreviewView(context: context, conversationID: model.selectedConversationID)
         }
+        .sheet(item: $context.skillDraft) { source in
+            WorkflowSkillEditor(draft: source.skill, context: context, source: source)
+        }
+        .sheet(isPresented: Binding(get: { context.graphPreview != nil },
+                                    set: { if !$0 { context.graphPreview = nil } })) {
+            AgentCanvasMutationPreview(context: context, conversationID: model.selectedConversationID)
+        }
+        .sheet(isPresented: $showWorkflowSkills) {
+            WorkflowSkillLibraryView(model: model, context: context)
+        }
+    }
+}
+
+struct CanvasAgentCoverageView: View {
+    let turn: CanvasAgentTurn
+    let receipts: [CanvasReadReceipt]
+    @ObservedObject var context: CanvasAgentContext
+
+    private var deliveredIDs: Set<String> {
+        Set(turn.directory.map(\.id) + receipts.flatMap(\.nodeIDs))
+    }
+    private var bodyIDs: Set<String> {
+        Set(receipts.filter { $0.field == "body" }.flatMap(\.nodeIDs))
+    }
+    private var completeBodies: Int {
+        bodyIDs.filter { id in
+            CanvasReadReceipt.isComplete(receipts.filter { $0.field == "body" && $0.subject == id })
+        }.count
+    }
+    private var completeEdges: Bool {
+        CanvasReadReceipt.isComplete(receipts.filter { $0.field == "edges" && $0.subject.hasPrefix("all:") })
+    }
+
+    var body: some View {
+        DisclosureGroup {
+            VStack(alignment: .leading, spacing: 7) {
+                Text("固定于 \(turn.capturedAt.formatted(date: .omitted, time: .shortened)) · 重试沿用此快照")
+                Text("目录 \(deliveredIDs.count)/\(turn.nodeCount) · 工具完整正文 \(completeBodies) · 部分正文 \(bodyIDs.count - completeBodies)")
+                Text(completeEdges ? "全图连线已交付：\(turn.edgeCount) 条" : "连线：\(receipts.filter { $0.field == "edges" }.count) 次分页读取")
+                Text("图片、视频和音轨尚未读取内容。").foregroundColor(.secondary)
+                if !turn.supportsTools {
+                    Text("当前后端不支持全图工具；切换 DeepSeek 后可重试。").foregroundColor(.orange)
+                }
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 6) {
+                        ForEach(deliveredIDs.sorted(), id: \.self) { id in
+                            HStack(spacing: 6) {
+                                Text(turn.directory.first { $0.id == id }?.title
+                                     ?? receipts.lazy.compactMap { $0.nodeTitles?[id] }.first ?? id)
+                                    .lineLimit(1)
+                                Spacer(minLength: 4)
+                                let fields = Set(receipts.filter { $0.nodeIDs.contains(id) }.map(\.field))
+                                Text(fields.contains("body") ? "正文" : "目录").foregroundColor(.secondary)
+                                Button { context.locate(nodeID: id, turn: turn) } label: {
+                                    Image(systemName: "scope")
+                                }.help("定位来源节点").buttonStyle(.plain)
+                            }
+                        }
+                    }
+                }.frame(maxHeight: 150)
+            }.padding(.top, 5)
+        } label: {
+            Label("画布快照 · \(turn.nodeCount) 节点 · \(turn.edgeCount) 连线", systemImage: "square.stack.3d.up")
+        }
+        .font(.system(size: 11))
+        .foregroundColor(TapSkin.secondaryInk)
+        .padding(10)
+        .background(TapSkin.tone(0xf2f2f2, 0x222222), in: RoundedRectangle(cornerRadius: 10))
+        .padding(.top, 8)
+        .accessibilityIdentifier("agent-canvas-coverage")
     }
 }
 

@@ -78,7 +78,7 @@ struct AgentSkillPickerView: View {
         VStack(alignment: .leading, spacing: 6) {
             Text(library.isScanning ? "正在扫描…" : "没有发现已安装的 Skill")
                 .font(.system(size: 12, weight: .medium))
-            Text("可在「插件」面板上传 Skill（.zip 或 SKILL.md），或安装到 ~/.codex/skills 后回来刷新。")
+            Text("可在「插件」面板上传 Skill（.zip 或 SKILL.md），或安装到 ~/.claude/skills 后回来刷新。")
                 .font(.system(size: 10))
                 .foregroundColor(AppTheme.canvasCardMetaInk)
                 .fixedSize(horizontal: false, vertical: true)

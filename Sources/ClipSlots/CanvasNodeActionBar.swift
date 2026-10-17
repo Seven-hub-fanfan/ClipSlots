@@ -28,9 +28,12 @@ enum CanvasGenerationParamEdits {
             canvas.updateNodeGeneration(id: node.id, model: picked)
             return
         }
-        let ratio = CrateModelCatalog.resolvedRatio(current: node.ratio, for: info)
+        let split = node.kind == .image && CanvasImageConfiguration.supportsSplit(info)
+        let selection = CanvasImageConfiguration.selection(ratio: node.ratio, resolution: node.resolution)
+        let ratio = split ? selection.ratio : CrateModelCatalog.resolvedRatio(current: node.ratio, for: info)
         // 分辨率与时长：新模型不吃就清空/归零（0 = 交给模型默认），吃但当前值不在档位里也清掉。
         let resolution: String = {
+            if split { return CanvasImageConfiguration.qualities.contains(selection.quality) ? selection.quality : "2K" }
             guard info.supportsResolution else { return "" }
             if node.resolution.isEmpty { return "" }
             guard info.resolutionOptions.isEmpty
@@ -50,6 +53,10 @@ enum CanvasGenerationParamEdits {
                                     resolution: resolution,
                                     duration: duration,
                                     generateAudio: .some(audio))
+    }
+
+    static func applyImageSize(ratio: String, quality: String, node: CanvasNode, canvas: CanvasStore) {
+        canvas.updateNodeGeneration(id: node.id, ratio: ratio, resolution: quality)
     }
 }
 
@@ -73,8 +80,13 @@ enum CanvasGenerationParamEdits {
 /// 放在外面还有一个好处：尺寸**不随 zoom 缩放**。25% 视图下跟着缩的按钮点不中，而"跑一下"
 /// 是这条链路上最高频的动作 —— 操作把手属于"操作尺度"，不属于画布内容。
 struct CanvasNodeActionBar: View {
+    private typealias TapSkin = CanvasSkin
+    private typealias AppTheme = CanvasTheme
     @AppStorage(AgentPreferences.modelKey) private var textModel = AgentConfig.defaultModel
     @State private var showingAspectPicker = false
+    @State private var showingModels = false
+    @State private var showingCount = false
+    @State private var hoveringAspect = false
     let node: CanvasNode
     @ObservedObject var canvas: CanvasStore
     @ObservedObject var catalog: CrateModelCatalogStore
@@ -97,14 +109,17 @@ struct CanvasNodeActionBar: View {
     let onCopyText: (() -> Void)?
 
     var body: some View {
-        HStack(spacing: 10) {
+        HStack(spacing: 8) {
             if node.canGenerate {
-                modelChip
-                if currentModel?.supportsRatio ?? true { ratioChip }
-                if isVideo {
-                    if currentModel?.supportsResolution ?? false { resolutionChip }
-                    if currentModel?.supportsDuration ?? false { durationChip }
-                    if currentModel?.supportsAudio ?? false { audioChip }
+                CanvasGenerationSourceControls(node: node, canvas: canvas)
+                if node.generationProvider == .crate {
+                    modelChip
+                    if currentModel?.supportsRatio ?? true { ratioChip }
+                    if isVideo {
+                        if currentModel?.supportsResolution ?? false { resolutionChip }
+                        if currentModel?.supportsDuration ?? false { durationChip }
+                        if currentModel?.supportsAudio ?? false { audioChip }
+                    }
                 }
             } else if node.kind == .text {
                 Menu {
@@ -125,8 +140,10 @@ struct CanvasNodeActionBar: View {
                     .foregroundColor(TapSkin.chromeInkDim)
             }
             Spacer(minLength: 0)
-            if upstreamCount > 0 { upstreamBadge }
-            if node.canGenerate || node.kind == .text { runControl }
+            if node.canGenerate {
+                countChip
+                runControl
+            }
         }
         .frame(height: 34)
         .onAppear { catalog.loadIfNeeded() }
@@ -148,7 +165,17 @@ struct CanvasNodeActionBar: View {
     /// 就是"它到底在跑吗、跑了多久"（节点状态里存的 `startedAt` 正是为此）。
     @ViewBuilder
     private var runControl: some View {
-        if node.kind == .slot {
+        if canvas.adjacentGenerationIDs[node.id] != nil, node.generationTask == nil,
+           node.generationDiagnostic?.stage == "preparing" {
+            HStack(spacing: 5) {
+                CreativeLoadingMark().frame(width: 22, height: 22)
+                Text("检查输入").font(.system(size: 11, weight: .medium))
+                Button {
+                    canvas.adjacentGenerationTasks[node.id]?.cancel()
+                } label: { Image(systemName: "stop.fill").frame(width: 24, height: 28) }
+                .buttonStyle(.plain).help("取消提交前检查")
+            }.foregroundColor(TapSkin.chromeInkDim)
+        } else if node.kind == .slot {
             // 文本节点没有"跑"这件事。给一句说明而不是留空：空白会让人以为按钮没加载出来。
             Label("文本节点", systemImage: "text.alignleft")
                 .labelStyle(.titleAndIcon)
@@ -158,7 +185,7 @@ struct CanvasNodeActionBar: View {
             switch node.state {
             case .queued, .running:
                 HStack(spacing: 4) {
-                    ProgressView().controlSize(.small).scaleEffect(0.7).frame(width: 12, height: 12)
+                    CreativeLoadingMark().frame(width: 22, height: 22)
                     Text(canvas.isStoppingGeneration(node) ? "正在停止跟踪" : runningLabel)
                         .font(.system(size: 11, weight: .medium))
                         .foregroundColor(AppTheme.chromeAccentInk)
@@ -175,7 +202,7 @@ struct CanvasNodeActionBar: View {
             default:
                 Button(action: onRun) {
                     HStack(spacing: 5) {
-                        if node.needsGenerationRecovery { Text("继续查询").font(.system(size: 11, weight: .medium)) }
+                        if node.needsGenerationRecovery { Text(node.recoveryLabel).font(.system(size: 11, weight: .medium)) }
                         Image(systemName: node.needsGenerationRecovery ? "arrow.clockwise" : "arrow.up")
                             .font(.system(size: 16, weight: .semibold))
                     }
@@ -185,6 +212,7 @@ struct CanvasNodeActionBar: View {
                     .background(Capsule().fill(TapSkin.accent))
                 }
                 .buttonStyle(.plain)
+                .accessibilityIdentifier("canvas-generate")
                 .help(node.needsGenerationRecovery ? "继续查询已提交任务，不重新提交" :
                         (node.kind == .text ? "优化为生图提示词" : (isRerun ? "用当前参数重新生成" : "生成")))
                 .canvasControlRegion("composer-run")
@@ -200,6 +228,8 @@ struct CanvasNodeActionBar: View {
     }
 
     private var runningLabel: String {
+        if node.generationTask?.context.provider == .byteartist || node.generationProvider == .byteartist,
+           let diagnostic = node.generationDiagnostic { return diagnostic.stageLabel }
         switch node.state {
         case .queued(let ahead): return ahead > 0 ? "排队 \(ahead)" : "排队中"
         case .running(let startedAt):
@@ -212,41 +242,65 @@ struct CanvasNodeActionBar: View {
     // MARK: 参数 chip
 
     private var modelChip: some View {
-        Menu {
-            if models.isEmpty {
-                Text(catalog.isLoading ? "正在取模型清单…" : "模型清单不可用")
-            }
-            ForEach(models, id: \.id) { info in
-                Button {
-                    CanvasGenerationParamEdits.applyModel(info.id, node: node, canvas: canvas, catalog: catalog)
-                } label: {
-                    Label(info.displayName, systemImage: info.id == node.model ? "checkmark" : "cube")
-                }
-            }
+        Button {
+            showingAspectPicker = false
+            showingCount = false
+            showingModels.toggle()
         } label: {
-            chipLabel(text: currentModel?.displayName ?? node.model, systemImage: "cube")
+            HStack(spacing: 5) {
+                Image(systemName: isVideo ? "film" : "waveform").font(.system(size: 12))
+                Text(currentModel?.displayName ?? node.model)
+                    .font(.system(size: 12, weight: .medium)).lineLimit(1)
+            }
+            .foregroundColor(TapSkin.chromeInk)
+            .frame(height: 28).contentShape(Rectangle())
         }
-        .menuStyle(.borderlessButton)
-        .menuIndicator(.hidden)
-        .fixedSize()
+        .buttonStyle(.plain)
+        .layoutPriority(1)
         .help("模型")
+        .accessibilityIdentifier("canvas-model-picker")
+        .canvasControlRegion("composer-model")
+        .popover(isPresented: $showingModels, arrowEdge: .bottom) {
+            CreativeModelPicker(options: models.map(CreativeModelOption.init),
+                                selected: node.model, loading: catalog.isLoading) { id in
+                CanvasGenerationParamEdits.applyModel(id, node: node, canvas: canvas, catalog: catalog)
+                showingModels = false
+            }
+        }
     }
 
     private var ratioChip: some View {
         Button {
+            showingModels = false
+            showingCount = false
             showingAspectPicker.toggle()
         } label: {
-            chipLabel(text: node.ratio.isEmpty ? "比例" : node.ratio, systemImage: "aspectratio")
+            HStack(spacing: 4) {
+                CanvasAspectGlyph(ratio: node.ratio)
+                Text(splitImageSize ? "\(imageSelection.ratio) · \(imageSelection.quality)"
+                     : (node.ratio.isEmpty ? "比例" : node.ratio)).font(.system(size: 12, weight: .medium))
+            }
+            .foregroundColor(TapSkin.chromeInk)
+            .padding(.horizontal, 4).frame(height: 28)
+            .background(hoveringAspect || showingAspectPicker ? TapSkin.subtleFill : .clear,
+                        in: RoundedRectangle(cornerRadius: 10))
+            .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .fixedSize()
-        .help("调整画面比例和节点尺寸")
+        .onHover { hoveringAspect = $0 }
+        .help(splitImageSize ? "画面比例 \(imageSelection.ratio)，画质 \(imageSelection.quality)" : "调整画面比例和节点尺寸")
         .accessibilityLabel("画面比例选择器")
         .canvasControlRegion("composer-aspect")
-        .popover(isPresented: $showingAspectPicker, arrowEdge: .bottom) {
-            CanvasAspectPicker(options: ratioOptions, selected: node.ratio) { value in
-                canvas.updateNodeGeneration(id: node.id, ratio: value)
-                showingAspectPicker = false
+        .canvasParameterPopover(isPresented: $showingAspectPicker) {
+            if splitImageSize {
+                CanvasImageSizePicker(selection: imageSelection) { ratio, quality in
+                    CanvasGenerationParamEdits.applyImageSize(ratio: ratio, quality: quality, node: node, canvas: canvas)
+                }
+            } else {
+                CanvasAspectPicker(options: ratioOptions, selected: node.ratio) { value in
+                    canvas.updateNodeGeneration(id: node.id, ratio: value)
+                }
             }
         }
     }
@@ -272,6 +326,29 @@ struct CanvasNodeActionBar: View {
         .menuIndicator(.hidden)
         .fixedSize()
         .help("分辨率")
+        .accessibilityIdentifier("canvas-video-resolution")
+    }
+
+    private var countChip: some View {
+        Button {
+            showingAspectPicker = false; showingModels = false; showingCount.toggle()
+        } label: {
+            Text("\(min(4, max(1, node.count)))×")
+                .font(.system(size: 14, weight: .medium))
+                .foregroundColor(TapSkin.chromeInk)
+                .frame(width: 30, height: 28).contentShape(Rectangle())
+        }
+        .buttonStyle(.plain).fixedSize()
+        .help("生成次数")
+        .accessibilityLabel("生成次数")
+        .accessibilityIdentifier("canvas-generation-count")
+        .canvasControlRegion("composer-count")
+        .popover(isPresented: $showingCount, arrowEdge: .bottom) {
+            CanvasGenerationCountPicker(count: node.count) { value in
+                canvas.updateNodeGeneration(id: node.id, count: value)
+                showingCount = false
+            }
+        }
     }
 
     private var durationChip: some View {
@@ -295,6 +372,7 @@ struct CanvasNodeActionBar: View {
         .menuIndicator(.hidden)
         .fixedSize()
         .help("时长")
+        .accessibilityIdentifier("canvas-video-duration")
     }
 
     private var audioChip: some View {
@@ -307,6 +385,7 @@ struct CanvasNodeActionBar: View {
         }
         .buttonStyle(.plain)
         .help("是否生成配音")
+        .accessibilityIdentifier("canvas-video-audio")
     }
 
     // MARK: 产物动作
@@ -394,12 +473,13 @@ struct CanvasNodeActionBar: View {
             Text(text).font(.system(size: 10.5, weight: .medium)).lineLimit(1)
         }
         .foregroundColor(TapSkin.chromeInk)
-        .padding(.horizontal, 6)
-        .padding(.vertical, 3)
+        .padding(.horizontal, 4)
+        .frame(height: 28)
         .background(
-            Capsule(style: .continuous)
-                .fill(emphasized ? TapSkin.accent.opacity(0.12) : TapSkin.subtleFill)
+            RoundedRectangle(cornerRadius: 6)
+                .fill(emphasized ? TapSkin.accent.opacity(0.12) : .clear)
         )
+        .contentShape(Rectangle())
     }
 
     /// 配音开关的当前值。`nil` 当 true —— 与属性面板同一口径（见 `CanvasInspectorPanel`）：
@@ -407,6 +487,10 @@ struct CanvasNodeActionBar: View {
     private var audioOn: Bool { node.generateAudio ?? true }
 
     private var isVideo: Bool { node.kind == .video }
+    private var splitImageSize: Bool { !isVideo && CanvasImageConfiguration.supportsSplit(currentModel) }
+    private var imageSelection: CanvasImageConfiguration.Selection {
+        CanvasImageConfiguration.selection(ratio: node.ratio, resolution: node.resolution)
+    }
 
     private var models: [CrateModelCatalog.ModelInfo] {
         CanvasGenerationParamEdits.models(for: node.kind, catalog: catalog)

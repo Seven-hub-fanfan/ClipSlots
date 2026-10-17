@@ -12,6 +12,7 @@ import ClipSlotsKit
 /// 浮层的统一底座。抽出来是为了让三个控件的圆角/描边/阴影**只有一份定义**——之前项目里
 /// 类似的浮层散落在多处各写一遍，改一次主题要追五个地方。
 private struct FloatingSurface: ViewModifier {
+    private typealias AppTheme = CanvasTheme
     var cornerRadius: CGFloat = 12
 
     func body(content: Content) -> some View {
@@ -23,6 +24,7 @@ private struct FloatingSurface: ViewModifier {
             .overlay(
                 RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
                     .stroke(AppTheme.subtleBorder, lineWidth: 1)
+                    .allowsHitTesting(false)
             )
             .shadow(color: AppTheme.cardShadow(isEmpty: false), radius: 10, x: 0, y: 4)
     }
@@ -41,6 +43,7 @@ private extension View {
 /// MVP 阶段它是**占位**：生图链路尚未接入，点击只弹 Toast。刻意不做成 disabled 灰按钮——
 /// disabled 按钮既不响应也不解释，用户只会反复点它然后以为 App 卡了；给一句明确反馈更诚实。
 struct CanvasGenerateButton: View {
+    private typealias AppTheme = CanvasTheme
     let action: () -> Void
 
     @State private var isHovering = false
@@ -88,6 +91,7 @@ struct CanvasGenerateButton: View {
 /// 那个枚举的语义是"当前处于哪种指针模式"，塞一个面板开关进去会让 `activeTool` 变成一个
 /// 既表示模式又表示面板的四不像。
 struct CanvasFloatingToolbar: View {
+    private typealias AppTheme = CanvasTheme
     @ObservedObject var canvas: CanvasStore
     @Binding var isHistoryOpen: Bool
     let onPickSlot: () -> Void
@@ -162,6 +166,7 @@ struct CanvasFloatingToolbar: View {
 /// 刻意不做「删除某一条历史」：撤销栈是一条线性时间轴，抽掉中间一条就得重算它之后所有条目的
 /// 前后快照 —— 那是一个必然出错的操作，而收益仅仅是列表短一点。
 struct CanvasHistoryPanel: View {
+    private typealias AppTheme = CanvasTheme
     @ObservedObject var canvas: CanvasStore
 
     var body: some View {
@@ -275,6 +280,7 @@ struct CanvasHistoryPanel: View {
 /// 百分比是**只读展示**而不是可编辑输入框：MVP 阶段一个能输入任意数字的框会引出一堆边界
 /// （空串、负数、10000%），而它带来的价值不如旁边的「适应窗口」。点百分比等价于重置到 100%。
 struct CanvasZoomControl: View {
+    private typealias AppTheme = CanvasTheme
     let zoom: CGFloat
     let onZoomOut: () -> Void
     let onZoomIn: () -> Void
@@ -339,6 +345,7 @@ struct CanvasZoomControl: View {
 /// 刻意做成**固定尺寸、不随画布缩放**：它表达的是「手上正拿着什么」，属于光标的延伸而非画布内容。
 /// 若跟着 zoom 缩放，在 0.25x 下会缩成一个看不清的小点。
 struct CanvasDragGhost: View {
+    private typealias AppTheme = CanvasTheme
     let title: String
 
     var body: some View {
@@ -366,6 +373,7 @@ struct CanvasDragGhost: View {
 /// 不放 `nodeLayer` 里——它不该跟着缩放平移跑掉；空画布下用户还没有任何空间感，
 /// 一个会飘走的提示只会加深迷惑。
 struct CanvasEmptyHint: View {
+    private typealias AppTheme = CanvasTheme
     var body: some View {
         VStack(spacing: 8) {
             Image(systemName: "square.on.square.dashed")

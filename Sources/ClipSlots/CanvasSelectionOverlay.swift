@@ -3,14 +3,18 @@ import ClipSlotsKit
 
 extension CanvasWorkspaceView {
     var selectedCanvasNodes: [CanvasNode] {
-        canvas.nodes.filter { canvas.selectedNodeIds.contains($0.id) }
+        let ids = canvas.expandedNodeIDs(canvas.selectedNodeIds)
+        return canvas.nodes.filter { ids.contains($0.id) }
     }
 
     var selectionScreenBounds: CGRect? {
-        let nodes = selectedCanvasNodes
-        guard nodes.count > 1, let first = nodes.first else { return nil }
-        return nodes.dropFirst().reduce(screenFrame(of: first)) { $0.union(screenFrame(of: $1)) }
-            .insetBy(dx: -12, dy: -26)
+        guard canvas.selectedGroupID == nil, canvas.selectedPile == nil,
+              canvas.selectedNodeIds.count > 1 else { return nil }
+        let frames = canvas.nodes.filter {
+            canvas.selectedNodeIds.contains($0.id) && !canvas.piledMemberIDs.contains($0.id)
+        }.map(screenFrame) + canvas.piles.filter { canvas.selectedNodeIds.contains($0.id) }.map(pileScreenFrame)
+        guard !frames.isEmpty else { return nil }
+        return CanvasGeometry.bounds(of: frames).insetBy(dx: -12, dy: -26)
     }
 
     var selectionJunction: CGPoint? {
@@ -32,9 +36,9 @@ extension CanvasWorkspaceView {
                 .position(x: rect.midX, y: rect.midY)
                 .allowsHitTesting(false)
         }
-        if let junction = selectionJunction, draggingNodeId == nil, linkDrag == nil {
+        if let junction = selectionJunction, draggingNodeId == nil, pileDragID == nil, linkDrag == nil {
             ForEach(selectedCanvasNodes) { node in
-                let rect = screenFrame(of: node)
+                let rect = canvas.pile(containing: node.id).map(pileScreenFrame) ?? screenFrame(of: node)
                 let start = CGPoint(x: rect.maxX, y: rect.midY)
                 let controls = CanvasEdgeGeometry.controlPoints(start: start, end: junction,
                                                                 outSide: .right, inSide: .left)
@@ -47,7 +51,7 @@ extension CanvasWorkspaceView {
 
     @ViewBuilder var selectionActionsOverlay: some View {
         if let bounds = selectionScreenBounds, let junction = selectionJunction,
-           draggingNodeId == nil, linkDrag == nil {
+           draggingNodeId == nil, pileDragID == nil, linkDrag == nil {
             Button { spawnSelectionDownstream() } label: {
                 Image(systemName: "plus")
                     .font(.system(size: 13, weight: .semibold))
@@ -62,56 +66,10 @@ extension CanvasWorkspaceView {
             .help("引用所有选中的节点生成")
             .zIndex(22)
             if addMenu == nil, selectionLinkPoint == nil {
-                HStack(spacing: 10) {
-                    Menu {
-                        Button("水平排列") { canvas.arrangeSelection(vertically: false) }
-                        Button("垂直排列") { canvas.arrangeSelection(vertically: true) }
-                    } label: {
-                        Image(systemName: "rectangle.3.group").frame(width: 28, height: 28)
-                    }
-                    .menuStyle(.borderlessButton)
-                    .menuIndicator(.hidden)
-                    .fixedSize()
-                    canvasIconButton("text.alignleft", help: "垂直排列") { canvas.arrangeSelection(vertically: true) }
-                    canvasIconButton("doc.on.doc", help: "复制选中内容") { copySelectionContents() }
-                    Rectangle().fill(TapSkin.chromeDivider).frame(width: 1, height: 18)
-                    canvasIconButton("folder.badge.plus", help: "加入槽位库") {
-                        for node in selectedCanvasNodes where canArchiveToLibrary(node) { archiveNodeToLibrary(node) }
-                    }
-                    canvasIconButton("arrow.up.left.and.arrow.down.right", help: "适应选区") {
-                        _ = handleKeyAction(.fitSelection)
-                    }
-                }
-                .foregroundColor(TapSkin.chromeInk)
-                .padding(.horizontal, 12)
-                .frame(height: 44)
-                .background(Capsule().fill(TapSkin.chromeFill))
-                .overlay(Capsule().stroke(TapSkin.border.opacity(0.7), lineWidth: 1))
-                .canvasControlRegion("selection-toolbar")
-                .position(x: max(canvasContentViewport.minX + 114,
-                                 min(bounds.midX, canvasContentViewport.maxX - 114)),
-                          y: max(canvasContentViewport.minY + 22, bounds.minY - 32))
+                selectionToolbar(at: CGPoint(x: bounds.midX,
+                    y: bounds.minY - (selectionIsWholeGroup ? 78 : 34) - (actionToolbarHeight - 42) / 2))
             }
         }
-    }
-
-    func canvasIconButton(_ symbol: String, help: String, action: @escaping () -> Void) -> some View {
-        Button {
-            // #region debug-point C:toolbar-action
-            #if DEBUG
-            if ProcessInfo.processInfo.environment["CLIPSLOTS_CONTROL_PROBE"] == "1" { var r = URLRequest(url: URL(string: "http://127.0.0.1:7784/event")!); r.httpMethod = "POST"; r.httpBody = try? JSONSerialization.data(withJSONObject: ["sessionId": "slot-input-controls", "runId": ProcessInfo.processInfo.environment["CANVAS_DEBUG_RUN"] ?? "pre-fix", "hypothesisId": "C", "msg": "[DEBUG] toolbar action", "data": ["symbol": symbol]]); URLSession.shared.dataTask(with: r).resume() }
-            #endif
-            // #endregion
-            action()
-        } label: {
-            Image(systemName: symbol)
-                .font(.system(size: 14))
-                .foregroundColor(TapSkin.chromeInk)
-                .frame(width: 28, height: 28)
-                .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .help(help)
     }
 
     func spawnSelectionDownstream(at point: CGPoint? = nil) {
@@ -126,7 +84,8 @@ extension CanvasWorkspaceView {
 
     /// 媒体走文件剪贴板，文本按画布顺序复制完整正文。
     func copySelectionContents() {
-        let nodes = selectedCanvasNodes.sorted { $0.y == $1.y ? $0.x < $1.x : $0.y < $1.y }
+        let nodes = canvas.selectedPile.map { CanvasPileGeometry.members($0, nodes: canvas.nodes) }
+            ?? selectedCanvasNodes.sorted { $0.y == $1.y ? $0.x < $1.x : $0.y < $1.y }
         let text = nodes.map { liveText(for: $0) }.filter { !$0.isEmpty }.joined(separator: "\n\n")
         let urls = nodes.compactMap { previewableMedia(of: $0)?.canvasLocalURL as NSURL? }
         let board = NSPasteboard.general

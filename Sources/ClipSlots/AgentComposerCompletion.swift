@@ -3,7 +3,7 @@ import SwiftUI
 
 struct AgentComposerItem: Identifiable, Equatable {
     enum Action: Equatable {
-        case skills, model, newConversation, tools, attachment
+        case skills, model, newConversation, summarize
         case skill(name: String, path: String)
     }
     let id: String
@@ -81,6 +81,7 @@ final class AgentComposerCompletion: ObservableObject {
 struct AgentComposerMenu: View {
     @ObservedObject var completion: AgentComposerCompletion
     let isScanning: Bool
+    @State private var hoveredID: String?
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
             HStack {
@@ -111,17 +112,19 @@ struct AgentComposerMenu: View {
                                     }
                                     .padding(.horizontal, 10).padding(.vertical, 7)
                                     .frame(maxWidth: .infinity, alignment: .leading)
-                                    .background(completion.selected == index ? TapSkin.accent.opacity(0.13) : .clear,
-                                                in: RoundedRectangle(cornerRadius: 7))
+                                    .background(completion.selected == index || hoveredID == item.id ? CreativeMenuStyle.hover : .clear,
+                                                in: RoundedRectangle(cornerRadius: 10))
                                     .contentShape(Rectangle())
                                 }
                                 .buttonStyle(.plain).id(item.id)
+                                .onHover { if $0 { hoveredID = item.id } else if hoveredID == item.id { hoveredID = nil } }
                                 .accessibilityIdentifier("agent-completion-" + item.id)
                             }
                         }.padding(.horizontal, 4)
                     }
                     .frame(height: min(230, CGFloat(completion.rows.count) * 48))
                     .onChange(of: completion.selected) { index in
+                        hoveredID = nil
                         if completion.rows.indices.contains(index) {
                             proxy.scrollTo(completion.rows[index].id)
                         }
@@ -130,8 +133,8 @@ struct AgentComposerMenu: View {
             }
         }
         .padding(4)
-        .background(TapSkin.tone(0xffffff, 0x262628), in: RoundedRectangle(cornerRadius: 12))
-        .overlay(RoundedRectangle(cornerRadius: 12).stroke(TapSkin.faintInk.opacity(0.2)))
+        .background(CreativeMenuStyle.fill, in: RoundedRectangle(cornerRadius: 16))
+        .overlay(RoundedRectangle(cornerRadius: 16).stroke(CreativeMenuStyle.border, lineWidth: 0.5))
         .accessibilityIdentifier("agent-completion-menu")
     }
 }

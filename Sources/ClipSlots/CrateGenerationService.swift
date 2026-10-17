@@ -31,7 +31,7 @@ final class CrateGenerationService {
         /// 以 exit 127 + "env: node: No such file or directory" 死掉，那个报错对用户毫无意义，
         /// 所以这里提前拦住并说清楚缺的是什么。
         case nodeMissing(searchPath: String)
-        /// `auth status` 失败：未登录或 JWT 过期。GUI 内无法代劳（登录走 bytedcli），只能引导去终端。
+        /// `auth status` 失败：未登录或 JWT 过期，可在环境面板发起浏览器授权。
         case notAuthenticated(detail: String)
         case processFailed(stage: String, detail: String)
         case processTimeout(stage: String, seconds: Int)
@@ -44,16 +44,17 @@ final class CrateGenerationService {
         /// 后果是视频等了半小时、提示却说"超时（600s）"，用户会以为是另一个 bug。
         case pollTimeout(taskId: String, seconds: TimeInterval)
         case downloadFailed(detail: String)
+        case inputChanged
 
         /// 给用户看的一句话。每一种失败对应的下一步动作都不同，所以不合并成一句通用文案。
         var userMessage: String {
             switch self {
             case .cliMissing:
-                return "没找到 crate 命令，先装好 Crate CLI（npm i -g @byted-opero/crate-cli）"
+                return "未安装 Crate CLI，请打开「环境检测」一键安装。"
             case .nodeMissing:
-                return "没找到 node，Crate CLI 需要 Node.js 运行时"
+                return "缺少 Node.js，请打开「环境检测」一键配置。"
             case .notAuthenticated:
-                return "Crate 未登录或登录已过期，去终端跑一次 crate auth login"
+                return "Crate 未登录或登录已过期，请在「环境检测」中点击「浏览器登录」。"
             case .processFailed(let stage, let detail):
                 return "\(stage)失败：\(detail)"
             case .processTimeout(let stage, let seconds):
@@ -68,6 +69,8 @@ final class CrateGenerationService {
                 return "等待超时（\(Int(seconds))s），任务仍在跑：\(taskId)"
             case .downloadFailed(let detail):
                 return "产物下载失败：\(detail)"
+            case .inputChanged:
+                return "提交前参考素材已变化或不可用，请检查素材后重新生成"
             }
         }
 
@@ -94,6 +97,8 @@ final class CrateGenerationService {
                 return "poll timeout after \(Int(seconds))s, taskId=\(taskId)"
             case .downloadFailed(let detail):
                 return detail
+            case .inputChanged:
+                return "Input resource changed before submission"
             }
         }
     }
@@ -118,7 +123,8 @@ final class CrateGenerationService {
         if let cached, FileManager.default.isExecutableFile(atPath: cached) { return cached }
 
         let home = FileManager.default.homeDirectoryForCurrentUser.path
-        let candidates = CrateGeneration.binaryCandidates(homeDirectory: home)
+        let candidates = [LocalToolchain().resolve(.crate)].compactMap { $0 }
+            + CrateGeneration.binaryCandidates(homeDirectory: home)
         for path in candidates where FileManager.default.isExecutableFile(atPath: path) {
             binaryLock.lock(); cachedBinary = path; binaryLock.unlock()
             return path
@@ -148,6 +154,11 @@ final class CrateGenerationService {
     private let envLock = NSLock()
     private var cachedSearchPath: String?
 
+    func invalidateEnvironment() {
+        binaryLock.lock(); cachedBinary = nil; binaryLock.unlock()
+        envLock.lock(); cachedSearchPath = nil; envLock.unlock()
+    }
+
     /// 子进程用的 PATH，带缓存（登录 shell 要起一个进程，不该每次轮询都付这个成本）。
     ///
     /// ★ 为什么非得问登录 shell
@@ -164,7 +175,8 @@ final class CrateGenerationService {
 
         let home = FileManager.default.homeDirectoryForCurrentUser.path
         let inherited = Self.loginShellPath() ?? ProcessInfo.processInfo.environment["PATH"]
-        let path = CrateGeneration.searchPath(homeDirectory: home, inherited: inherited)
+        let path = LocalToolchain().searchPath(
+            inherited: CrateGeneration.searchPath(homeDirectory: home, inherited: inherited))
 
         envLock.lock(); cachedSearchPath = path; envLock.unlock()
         return path
@@ -289,8 +301,9 @@ final class CrateGenerationService {
     /// seed 走**两道保险**：先查模型参数表（`model describe`，结果缓存），不支持就别传；查不到时
     /// 照常传，提交真被拒了再去掉 seed 重试一次。单靠任何一道都不够 —— 只查表的话，CLI 改字段
     /// 或离线就会把重跑变成硬失败；只靠重试的话，每次重跑都要先白跑一次失败的提交。
-    func submit(_ request: CrateImageRequest) async throws -> Submission {
+    func submit(_ request: CrateImageRequest, recording: GenerationRunContext? = nil) async throws -> Submission {
         var effective = request
+        let requested = GenerationRequestRecord(request, resourceIDs: recording?.resourceIDs ?? [:])
         var dropped = false
         if request.seed != nil, await modelRejectsSeed(model: request.model) == true {
             effective = CrateGeneration.droppingSeed(request)
@@ -298,46 +311,38 @@ final class CrateGenerationService {
         }
 
         do {
-            return Submission(result: try await submitOnce(effective), droppedSeed: dropped, droppedRatio: false)
+            return Submission(result: try await submitOnce(effective, recording: recording, requested: requested),
+                              droppedSeed: dropped, droppedRatio: false)
         } catch let err as ServiceError {
             guard case .processFailed(_, let detail) = err else { throw err }
 
-            // 两个参数各有一条退路，且可能同时命中（老画布 + 重跑）。挨个摘掉再试，最多一次重试。
+            // Seed is optional metadata; the user's output aspect is mandatory.
             var retry = effective
             var retriedSeed = false
-            var retriedRatio = false
             if retry.seed != nil, CrateGeneration.isUnsupportedParameterError(detail) {
                 retry = CrateGeneration.droppingSeed(retry)
                 retriedSeed = true
             }
-            if !retry.ratio.isEmpty,
-               CrateGeneration.isUnsupportedParameterError(detail, parameter: CrateModelCatalog.ratioParameterName) {
-                retry = CrateGeneration.droppingRatio(retry)
-                retriedRatio = true
-            }
-            guard retriedSeed || retriedRatio else { throw err }
+            // A selected aspect is part of the requested output. Never silently
+            // retry with a square model default when the CLI rejects it.
+            guard retriedSeed else { throw err }
 
-            NSLog("[ClipSlots][crate] model \(effective.model) rejected"
-                  + (retriedSeed ? " seed" : "") + (retriedRatio ? " ratio" : "")
-                  + "; retrying without it")
-            let result = try await submitOnce(retry)
-            return Submission(result: result, droppedSeed: dropped || retriedSeed, droppedRatio: retriedRatio)
+            NSLog("[ClipSlots][crate] model \(effective.model) rejected seed; retrying without seed")
+            let result = try await submitOnce(retry, recording: recording, requested: requested)
+            return Submission(result: result, droppedSeed: dropped || retriedSeed, droppedRatio: false)
         }
     }
 
-    private func submitOnce(_ request: CrateImageRequest) async throws -> CrateGeneration.SubmitResult {
+    private func submitOnce(_ request: CrateImageRequest, recording: GenerationRunContext?,
+                            requested: GenerationRequestRecord) async throws -> CrateGeneration.SubmitResult {
         let args: [String]
         do {
             args = try CrateGeneration.submitArguments(request)
         } catch let err as CrateRequestError {
             throw ServiceError.request(err)
         }
-        let output = try await run(args, timeout: CrateGeneration.submitTimeout, stage: "提交任务")
-        do {
-            return try CrateGeneration.parseSubmitResponse(output)
-        } catch let err as CrateResponseError {
-            throw ServiceError.response(err)
-        }
+        return try await recordedSubmit(args, recording: recording, requested: requested,
+            effective: GenerationRequestRecord(request, resourceIDs: recording?.resourceIDs ?? [:]))
     }
 
     /// 提交一次**视频**生成（v2.11.19）。
@@ -346,8 +351,9 @@ final class CrateGenerationService {
     /// 概率本来就高得多：分辨率选项集各模型互不兼容且大小写不统一，音频参数只有 Seedance 2.x 有。
     /// 每一级退路都只摘掉**被 CLI 明确点名**的那一个参数，绝不"报错就全摘干净"——那样用户选的
     /// 4k 会在一次无关的报错后静默变成默认档。
-    func submit(_ request: CrateVideoRequest) async throws -> VideoSubmission {
+    func submit(_ request: CrateVideoRequest, recording: GenerationRunContext? = nil) async throws -> VideoSubmission {
         var effective = request
+        let requested = GenerationRequestRecord(request, resourceIDs: recording?.resourceIDs ?? [:])
         var droppedSeed = false
         if request.seed != nil, await modelRejectsSeed(model: request.model) == true {
             effective = CrateGeneration.droppingSeed(request)
@@ -355,7 +361,7 @@ final class CrateGenerationService {
         }
 
         do {
-            return VideoSubmission(result: try await submitOnce(effective),
+            return VideoSubmission(result: try await submitOnce(effective, recording: recording, requested: requested),
                                    droppedSeed: droppedSeed,
                                    droppedParameters: [])
         } catch let err as ServiceError {
@@ -363,15 +369,13 @@ final class CrateGenerationService {
 
             var retry = effective
             var dropped: [String] = []
+            var retriedSeed = false
             if retry.seed != nil, CrateGeneration.isUnsupportedParameterError(detail) {
                 retry = CrateGeneration.droppingSeed(retry)
                 droppedSeed = true
+                retriedSeed = true
             }
-            if !retry.ratio.isEmpty,
-               CrateGeneration.isUnsupportedParameterError(detail, parameter: CrateModelCatalog.ratioParameterName) {
-                retry = CrateGeneration.droppingRatio(retry)
-                dropped.append("比例")
-            }
+            // Keep the requested video aspect through any compatibility retry.
             if !retry.resolution.isEmpty,
                CrateGeneration.isUnsupportedParameterError(detail,
                                                           parameter: CrateModelCatalog.resolutionParameterName) {
@@ -384,29 +388,85 @@ final class CrateGenerationService {
                 retry = CrateGeneration.droppingAudio(retry)
                 dropped.append("配音")
             }
-            guard droppedSeed || !dropped.isEmpty else { throw err }
+            guard retriedSeed || !dropped.isEmpty else { throw err }
 
             NSLog("[ClipSlots][crate] video model \(effective.model) rejected "
                   + (droppedSeed ? "seed " : "") + dropped.joined(separator: "/")
                   + "; retrying without it")
-            let result = try await submitOnce(retry)
+            let result = try await submitOnce(retry, recording: recording, requested: requested)
             return VideoSubmission(result: result, droppedSeed: droppedSeed, droppedParameters: dropped)
         }
     }
 
-    private func submitOnce(_ request: CrateVideoRequest) async throws -> CrateGeneration.SubmitResult {
+    private func submitOnce(_ request: CrateVideoRequest, recording: GenerationRunContext?,
+                            requested: GenerationRequestRecord) async throws -> CrateGeneration.SubmitResult {
         let args: [String]
         do {
             args = try CrateGeneration.submitArguments(request)
         } catch let err as CrateRequestError {
             throw ServiceError.request(err)
         }
-        let output = try await run(args, timeout: CrateGeneration.submitTimeout, stage: "提交任务")
-        do {
-            return try CrateGeneration.parseSubmitResponse(output)
-        } catch let err as CrateResponseError {
-            throw ServiceError.response(err)
+        return try await recordedSubmit(args, recording: recording, requested: requested,
+            effective: GenerationRequestRecord(request, resourceIDs: recording?.resourceIDs ?? [:]))
+    }
+
+    private func recordedSubmit(_ args: [String], recording: GenerationRunContext?,
+                                requested: GenerationRequestRecord,
+                                effective: GenerationRequestRecord, retryCount: Int = 0) async throws -> CrateGeneration.SubmitResult {
+        try Task.checkCancellation()
+        if let recording, !recording.inputsAreCurrent(effective) { throw ServiceError.inputChanged }
+        let attempt = try recording.map {
+            try GenerationRunStore.shared.beginAttempt(context: $0, requested: requested, effective: effective)
         }
+        do {
+            let output = try await run(args, timeout: CrateGeneration.submitTimeout, stage: "提交任务")
+            let result: CrateGeneration.SubmitResult
+            do { result = try CrateGeneration.parseSubmitResponse(output) }
+            catch let error as CrateResponseError { throw ServiceError.response(error) }
+            if let recording, let attempt {
+                // Never lose a known task ID to a post-submission disk failure. The caller also saves it on the node.
+                do {
+                    try GenerationRunStore.shared.finishAttempt(context: recording, attemptID: attempt,
+                        status: .accepted, taskID: result.taskId, seed: result.seed)
+                } catch { NSLog("[ClipSlots][crate] accepted task history could not be saved: \(error)") }
+            }
+            return result
+        } catch {
+            if let recording, let attempt {
+                let rejected: Bool
+                switch error {
+                case ServiceError.processFailed(_, let detail):
+                    rejected = Self.isRateLimit(error) || ["seed", "ratio", "resolution", "generate_audio"].contains {
+                        CrateGeneration.isUnsupportedParameterError(detail, parameter: $0)
+                    }
+                case ServiceError.response(.submissionRejected): rejected = true
+                // run() drains a launched submit even after cancellation to retain its ID.
+                // CancellationError here therefore means the process permit was never used.
+                case is CancellationError: rejected = true
+                case ServiceError.notAuthenticated, ServiceError.request: rejected = true
+                default: rejected = false
+                }
+                // Timeout/ambiguous exit/invalid JSON are not proof of rejection.
+                try? GenerationRunStore.shared.finishAttempt(context: recording, attemptID: attempt,
+                    status: rejected ? .rejected : .unknown,
+                    detail: error is CancellationError ? "未启动进程，已取消提交" :
+                        (rejected ? "提交被明确拒绝" : "提交结果未知，需核对 Crate 任务后再决定是否重提"))
+            }
+            // Retry only an explicit server rejection. Ambiguous submit exits
+            // and timeouts retain the existing no-resubmission policy.
+            if Self.isRateLimit(error), retryCount < 2 {
+                try await Task.sleep(for: .seconds(pow(2, Double(retryCount + 1))))
+                return try await recordedSubmit(args, recording: recording, requested: requested,
+                                                effective: effective, retryCount: retryCount + 1)
+            }
+            throw error
+        }
+    }
+
+    static func isRateLimit(_ error: Error) -> Bool {
+        guard case ServiceError.processFailed(_, let detail) = error else { return false }
+        let text = detail.lowercased()
+        return text.contains("http 429") || text.contains("api error (429)") || text.contains("too many requests")
     }
 
     /// 这个模型是不是不收 seed？`nil` = 问不出来（不确定时不做任何取舍，交给重试兜底）。
@@ -438,6 +498,7 @@ final class CrateGenerationService {
     /// 跟着图像一起超时误判（任务其实成功了、额度也扣了），要么图像链路被拖成半小时才肯报错。
     func waitForCompletion(taskId: String,
                            timeout: TimeInterval = CrateGeneration.pollTimeout,
+                           recordingProject: String? = nil,
                            onProgress: @escaping (CrateTaskProgress) -> Void) async throws -> [String] {
         let deadline = Date().addingTimeInterval(timeout)
         var firstPoll = true
@@ -463,8 +524,16 @@ final class CrateGenerationService {
             case .queued, .running:
                 continue
             case .succeeded(let urls):
+                if let recordingProject {
+                    try? GenerationRunStore.shared.updateTask(project: recordingProject, taskID: taskId,
+                                                              outcome: "succeeded-awaiting-download")
+                }
                 return urls
             case .failed(let reason):
+                if let recordingProject {
+                    try? GenerationRunStore.shared.updateTask(project: recordingProject, taskID: taskId,
+                                                              outcome: "failed: \(reason)")
+                }
                 throw ServiceError.taskFailed(reason: reason)
             }
         }
@@ -526,10 +595,12 @@ final class CrateGenerationService {
     ///      路径不够，它自己还得找到 node。
     ///   3. stdout / stderr **并发抽干**。crate 的 `model list --json` 能有几十 KB，顺序读会在
     ///      pipe 缓冲区满时死锁（这个坑 `UpdateInstaller` 已经踩过，此处沿用同一套 DispatchGroup）。
+    private let processLimiter = GenerationProcessBudget.shared
     private func run(_ arguments: [String], timeout: TimeInterval, stage: String) async throws -> String {
         let binary = try resolveBinary()
         let path = searchPath()
-        return try await withCheckedThrowingContinuation { continuation in
+        return try await processLimiter.withPermit {
+          try await withCheckedThrowingContinuation { continuation in
             DispatchQueue.global(qos: .userInitiated).async {
                 do {
                     let output = try Self.runSync(binary: binary,
@@ -542,6 +613,7 @@ final class CrateGenerationService {
                     continuation.resume(throwing: error)
                 }
             }
+          }
         }
     }
 

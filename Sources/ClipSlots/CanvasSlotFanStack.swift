@@ -29,6 +29,7 @@ import ClipSlotsKit
 ///   - **卡片自己不认识 store**。改数据的三件事（编辑正文 / 打开入参面板 / 置为首个入参）全部
 ///     以闭包上抛，与 `CanvasNodeCardView` 的既有约定一致。
 struct CanvasSlotFanStack: View {
+    private typealias TapSkin = CanvasSkin
 
     /// **全量**卡片来源（不截断）。扇形模式内部再截到 `maxCards`，剩下的进 `+N` 角标；
     /// 轮播模式按页取。

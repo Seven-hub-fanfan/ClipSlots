@@ -88,6 +88,12 @@ extension Notification.Name {
 
 @main
 struct ClipSlotsApp: App {
+    init() {
+        #if DEBUG
+        CanvasNestedGroupRegression.runIfRequested()
+        #endif
+        LaunchDefaults.applyForUpdate()
+    }
     @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
     @StateObject private var store = SlotStoreObservable()
 
@@ -118,9 +124,7 @@ struct ClipSlotsApp: App {
         store.redoLastUndoIfPossible()
     }
 
-    // v2.7.54: startup entry must also default to dark.
-    // v2.7.47 changed ContentView/SettingsView, but App root still defaulted to
-    // system, so first launch could render as light before ContentView appeared.
+    // Each updated build starts in minimal light before the first rendered frame.
     // v2.10.93: App 根不再持有 `@AppStorage("appearanceMode")`。
     // 它唯一的用途是喂 `.preferredColorScheme`，而那条路径已按上面的注释移除；
     // 留着 @AppStorage 只会让**整个 Scene** 在切主题时重新求值一次（连带重新下发 ContentView 值）。
@@ -171,7 +175,7 @@ struct ClipSlotsApp: App {
                 // NSApp.appearance 决定，SwiftUI 的 `\.colorScheme` 环境值会从窗口 effectiveAppearance
                 // 推导出来，与原先一致。（子窗口如环形菜单/悬浮提示仍各自设 preferredColorScheme，不受影响。）
                 .onAppear {
-                    AppearanceDefaults.ensureDefaultDarkIfNeeded()
+                    AppearanceDefaults.ensureDefaultLightIfNeeded()
                     appDelegate.store = store
                     appDelegate.setupHotKeysAfterStoreReady()
                     store.installLocalHotkeyGuardIfNeeded()
@@ -693,7 +697,9 @@ final class SlotStoreObservable: ObservableObject {
     // 提交但较晚抢到锁」的旧快照会覆盖较新快照，磁盘与内存缓存双双回退成陈旧值（数据永久丢失）。改为把
     // 所有 App 自身的槽位写盘（persist 快照 / 自动存储 / 文件夹导入 / 单槽保存 / 批量保存）都排入这一条
     // 串行队列：入队顺序即主线程发起编辑的顺序，串行执行保证 last-write-wins 与编辑顺序一致，彻底消除错序。
-    private let slotWriteQueue = DispatchQueue(label: "com.clipslots.slotwrite", qos: .userInitiated)
+    let slotWriteQueue = DispatchQueue(label: "com.clipslots.slotwrite", qos: .userInitiated)
+    var canvasTextDocuments: [String: CanvasTextDocument] = [:]
+    var canvasTextDidPersist: ((String, Int, String, String) -> Void)?
     // UNDO-1 (v2.10.95): 撤销栈落盘专用串行队列。快照可能较大（含内联附件字节），编码 + 写盘
     // 不能占用主线程，也不应挤在 slotWriteQueue 上拖慢槽位写盘热路径。
     private let undoPersistQueue = DispatchQueue(label: "com.clipslots.undopersist", qos: .utility)
@@ -2567,6 +2573,7 @@ final class SlotStoreObservable: ObservableObject {
     }
 
     private func persistCurrentSpecialSlotData() {
+        guard flushCanvasTextDocuments() else { return }
         suppressWatcher() // v2.9.4 (#2): our own write — don't let it trigger a reload
         let activeId = currentSpecialSlotId
         // MT-1 (v2.10.30): 逐槽写盘（每次 set/setLabel 需拿跨进程写锁，锁竞争时最长各阻塞 ~5s）此前直接
@@ -2685,6 +2692,9 @@ final class SlotStoreObservable: ObservableObject {
     /// 从这里现取。当前组优先读内存里的 `slots`（编辑页刚改完还没落盘的那一瞬，盘上是旧值）；
     /// 其他组走 `SpecialSlotStorage`（它自带内容缓存，不是每次都碰盘）。
     func canvasSlotText(groupId: String, slot: Int) -> String? {
+        if let draft = canvasTextDocuments["\(groupId)#\(slot)"], draft.isDirty {
+            return draft.text
+        }
         if groupId == currentSpecialSlotId {
             return contentForSlot(slot).plainText
         }
@@ -2727,14 +2737,15 @@ final class SlotStoreObservable: ObservableObject {
     /// 的正文覆盖掉。所以这里改成**两路都读、任一非空即视为被占**——宁可多跳过一个真空槽（用户
     /// 只是换个槽位号，毫无损失），也绝不能覆盖已有内容。
     func canvasSlotIsFree(groupId: String, slot: Int) -> Bool {
+        if let draft = canvasTextDocuments["\(groupId)#\(slot)"], draft.isDirty, !draft.text.isEmpty { return false }
         // 内存视图（当前组才有）。
         if groupId == currentSpecialSlotId {
             let mem = contentForSlot(slot)
-            if !(mem.plainText ?? "").isEmpty || !mem.attachments.isEmpty { return false }
+            if !mem.isEmpty { return false }
         }
         // 磁盘 / 存储缓存视图。跨组节点本来就走这一路，当前组则用它兜住"内存还没同步"的情况。
-        let disk = canvasStorage(groupId: groupId).get(slot, in: groupId)
-        if !(disk.plainText ?? "").isEmpty || !disk.attachments.isEmpty { return false }
+        guard let disk = canvasStorage(groupId: groupId).getOrUnknown(slot, in: groupId) else { return false }
+        if !disk.isEmpty { return false }
         // Label 不算内容：给槽位起了名但没放东西，仍然是空槽（命名是用户对"待放什么"的规划）。
         return true
     }
@@ -2753,41 +2764,23 @@ final class SlotStoreObservable: ObservableObject {
     @discardableResult
     func writeCanvasSlotText(groupId: String, slot: Int, text: String) -> Bool {
         guard slot >= 1, slot <= canvasSlotCapacity(groupId: groupId) else { return false }
-
-        let existing: SlotContent?
-        if groupId == currentSpecialSlotId {
-            guard let current = contentForSlotOrUnknown(slot) else {
-                NSLog("[ClipSlots] writeCanvasSlotText slot=\(slot) group=\(groupId): storage UNKNOWN, aborting")
-                return false
+        let document = canvasTextDocuments["\(groupId)#\(slot)"]
+        guard document?.flush() != false else { return false }
+        // Explicit writes use the same FIFO and checked body exchange as live drafts.
+        slotWriteQueue.sync {}
+        guard let existing = canvasReadFullContent(groupId: groupId, slot: slot) else { return false }
+        do {
+            let saved = try slotWriteQueue.sync {
+                try canvasStorage(groupId: groupId).exchangeAgentBody(slot, in: groupId,
+                    expected: AgentSlotBody(existing), replacement: AgentSlotBody(text: text))
             }
-            existing = current
-        } else {
-            existing = canvasStorage(groupId: groupId).getOrUnknown(slot, in: groupId)
-            guard existing != nil else {
-                NSLog("[ClipSlots] writeCanvasSlotText slot=\(slot) group=\(groupId): storage UNKNOWN, aborting")
-                return false
-            }
-        }
-
-        var content = existing ?? SlotContent()
-        let data = text.data(using: .utf8) ?? Data()
-        content.items = [[PasteboardItem(type: "public.utf8-plain-text", data: data)]]
-        // 文本被替换后旧的 HTML 源已经对不上了，留着会让「编辑 HTML」打开一份与正文不符的内容。
-        content.htmlSource = nil
-        content.timestamp = Date()
-        content.contentId = UUID().uuidString
-        content.updatedAt = Date().timeIntervalSince1970
-
-        if groupId == currentSpecialSlotId {
-            slots[slot] = content
-            persistCurrentSpecialSlotData()
-        } else {
-            _ = canvasStorage(groupId: groupId).set(slot, content: content, in: groupId)
-            // 同 writeCanvasSlotAttachments：跨组写没有任何 @Published 变更，任何以 computed
-            // property 读这个槽位的视图都不会自己醒过来。见 `canvasSlotRevision`。
+            if groupId == currentSpecialSlotId { slots[slot] = saved }
+            document?.refreshFromStorage(saved)
             bumpCanvasSlotRevision()
+            return true
+        } catch {
+            return false
         }
-        return true
     }
 
     /// 把画布「入参文件」面板改好的附件列表写回**任意组**的槽位（v2.11.7 hotfix20）。
@@ -2804,6 +2797,7 @@ final class SlotStoreObservable: ObservableObject {
                                     slot: Int,
                                     attachments: [SlotContent.SlotAttachment]) -> Bool {
         guard slot >= 1, slot <= canvasSlotCapacity(groupId: groupId) else { return false }
+        guard canvasTextDocuments["\(groupId)#\(slot)"]?.flush() != false else { return false }
 
         let targetStorage = canvasStorage(groupId: groupId)
         guard var content = groupId == currentSpecialSlotId
@@ -2907,6 +2901,34 @@ final class SlotStoreObservable: ObservableObject {
         if loadedSpecialSlotId == groupId { slots[slot] = persisted }
         bumpCanvasSlotRevision()
         return persisted.attachments.first { $0.id == attachment.id }
+    }
+
+    /// The foreground editor may have a newer snapshot awaiting the serial write queue.
+    func batchVisibleSourceIsCurrent(_ source: BatchGenerationSource) -> Bool {
+        guard loadedSpecialSlotId == source.groupID, let visible = slots[source.slot] else { return true }
+        return BatchGenerationSource.revision(of: visible) == source.revision
+    }
+
+    @MainActor
+    func appendBatchGeneratedAttachment(_ attachment: SlotContent.SlotAttachment,
+                                         source: BatchGenerationSource) async throws {
+        guard source.slot > 0, source.slot <= config.slots else { throw AgentCanvasError.unavailable }
+        // Yield while previous editor writes drain. The final CAS and memory publish are
+        // one main-actor turn so no editor snapshot can interleave and discard the append.
+        await withCheckedContinuation { continuation in
+            slotWriteQueue.async { continuation.resume() }
+        }
+        try Task.checkCancellation()
+        if loadedSpecialSlotId == source.groupID, let visible = slots[source.slot],
+           !visible.attachments.contains(where: { $0.id == attachment.id }),
+           BatchGenerationSource.revision(of: visible) != source.revision {
+            throw AgentCanvasError.conflict
+        }
+        let persisted = try specialStorage.appendBatchOutput(attachment, source: source)
+        suppressWatcher()
+        if loadedSpecialSlotId == source.groupID { slots[source.slot] = persisted }
+        bumpCanvasSlotRevision()
+        refreshTrigger = UUID()
     }
 
     /// 「未入库」保留组的 id。
@@ -3057,6 +3079,9 @@ final class SlotStoreObservable: ObservableObject {
             stashed.append(slot)
         }
         guard !restored.isEmpty || !stashed.isEmpty else { return ([], []) }
+        for slot in restored + stashed {
+            canvasTextDocuments["\(groupId)#\(slot)"]?.refreshFromStorage(store.get(slot, in: groupId))
+        }
         bumpCanvasSlotRevision()
         refreshTrigger = UUID()
         NSLog("[ClipSlots][canvas] 私有内容对账 \(groupId)：搬入暂存 \(stashed)，撤销恢复 \(restored)")
@@ -3079,6 +3104,9 @@ final class SlotStoreObservable: ObservableObject {
     func exchangeCanvasAgentBody(groupId: String, slot: Int, expected: AgentSlotBody,
                                  replacement: AgentSlotBody) throws {
         precondition(Thread.isMainThread)
+        guard canvasTextDocuments["\(groupId)#\(slot)"]?.flush() != false else {
+            throw AgentCanvasError.writeFailed
+        }
         let drained = DispatchSemaphore(value: 0)
         slotWriteQueue.async { drained.signal() }
         guard drained.wait(timeout: .now() + 0.12) == .success else { throw AgentCanvasError.busy }
@@ -3090,6 +3118,7 @@ final class SlotStoreObservable: ObservableObject {
             slot, in: groupId, expected: expected, replacement: replacement)
         suppressWatcher()
         if groupId == currentSpecialSlotId { slots[slot] = content }
+        canvasTextDocuments["\(groupId)#\(slot)"]?.refreshFromStorage(content)
         bumpCanvasSlotRevision()
         refreshTrigger = UUID()
     }
@@ -3124,6 +3153,7 @@ final class SlotStoreObservable: ObservableObject {
             newLabels.removeValue(forKey: slot)
             labels = newLabels
         }
+        canvasTextDocuments["\(groupId)#\(slot)"]?.refreshFromStorage(store.get(slot, in: groupId))
         refreshTrigger = UUID()
     }
 
@@ -3662,6 +3692,7 @@ final class SlotStoreObservable: ObservableObject {
     /// refresh in-memory state so the node canvas updates immediately.
     func setAttachments(_ attachments: [SlotContent.SlotAttachment], for slot: Int) {
         let activeId = currentSpecialSlotId
+        guard canvasTextDocuments["\(activeId)#\(slot)"]?.flush() != false else { return }
         suppressWatcher() // v2.9.4 (#2): self-write
         // P1-1 (v2.10.36): 修复 v2.10.35 P1-4 引入的附件 lost-update 回归。
         // 上一版把 get + set 整体挪到 slotWriteQueue，并把内存视图 slots[slot] 的更新推迟到「异步写盘完成
@@ -3751,8 +3782,7 @@ final class SlotStoreObservable: ObservableObject {
     }
 
     private func promptAccessibilityPermissionIfNeeded() {
-        let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary
-        _ = AXIsProcessTrustedWithOptions(options)
+        DispatchQueue.main.async { AccessibilityPermissionGuide.present() }
     }
 
     private func waitUntilFrontmost(
@@ -7608,10 +7638,10 @@ private extension String {
 enum AppearanceDefaults {
     static let key = "appearanceMode"
 
-    static func ensureDefaultDarkIfNeeded() {
+    static func ensureDefaultLightIfNeeded() {
         let defaults = UserDefaults.standard
         guard defaults.object(forKey: key) == nil else { return }
-        defaults.set(ThemeMode.dark.rawValue, forKey: key)
+        defaults.set(ThemeMode.light.rawValue, forKey: key)
     }
 
     /// v2.10.93: 直读/直写主题档位。
@@ -7619,7 +7649,7 @@ enum AppearanceDefaults {
     /// 用 `@AppStorage` 会让宿主视图订阅主题变化，从而在切主题时被迫整棵重算；
     /// 而动作只在被点击时读一次当前值，没有订阅的必要。
     static var currentRawValue: String {
-        get { UserDefaults.standard.string(forKey: key) ?? ThemeMode.dark.rawValue }
+        get { UserDefaults.standard.string(forKey: key) ?? ThemeMode.light.rawValue }
         set { UserDefaults.standard.set(newValue, forKey: key) }
     }
 }

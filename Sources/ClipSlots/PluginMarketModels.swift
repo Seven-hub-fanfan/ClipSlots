@@ -86,7 +86,7 @@ struct PluginMarketItem: Identifiable, Equatable {
 /// The static catalog. Extend this array to add new market items.
 enum PluginCatalog {
     static var allItems: [PluginMarketItem] {
-        [clipSlotsSkill, scrollApp, espanso, massCode, monitorControl]
+        [clipSlotsSkill, scrollApp, rea, espanso, massCode, monitorControl]
     }
 
     static func items(in category: PluginMarketCategory) -> [PluginMarketItem] {
@@ -106,7 +106,7 @@ enum PluginCatalog {
         detail: """
         通过命令行工具 clipslots 以编程方式操作 ClipSlots：读取/写入/检索槽位内容、把内容加载到系统剪贴板、批量整理素材到「页面→槽位组→槽位」三层结构、创建/删除页面与槽位组。专为智能体（Agent）调用设计，输出结构化 JSON。
 
-        安装后以软链接方式接入 Agent（Claude Code / Cursor / Codex / Gemini CLI），App 升级 SKILL.md 时 Agent 侧自动同步，无需重复安装。
+        安装后以软链接方式接入 Agent（Claude Code / Cursor / Gemini CLI），App 升级 SKILL.md 时 Agent 侧自动同步，无需重复安装。
 
         提示：此标记暂不影响 CLI（clipslots）的实际行为，仅作展示。CLI 与 App 共享本地数据，安装后始终可被智能体调用。
         """,
@@ -146,6 +146,24 @@ enum PluginCatalog {
     )
 
     // MARK: - Community Plugins（第三方项目，v2.9.53 首批上架）
+
+    static let rea = PluginMarketItem(
+        id: "rea",
+        category: .community,
+        emoji: nil,
+        iconSystemName: "doc.text.magnifyingglass",
+        name: "REA · Reverse Engineer",
+        source: "社区 · morluto · MIT",
+        summary: "内置本地分析入口，识别应用结构、分析 JavaScript / Electron，导出分析报告。",
+        detail: """
+        REA（Reverse Engineer）是开源的逆向分析工具。ClipSlots 内置其社区插件界面与项目原始图标，首次启用时自动下载运行组件。
+
+        在下方选择本地文件、应用或目录即可开始静态分析。分析结果保存到本机报告目录，可直接打开查看。更深入的原生反编译需要另外配置对应分析器。
+        """,
+        version: "6.3.0",
+        installsToAgent: false,
+        projectURL: "https://github.com/morluto/rea"
+    )
 
     static let espanso = PluginMarketItem(
         id: "espanso",

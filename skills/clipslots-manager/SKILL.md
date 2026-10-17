@@ -397,7 +397,21 @@ clipslots clear-thumbnail <slot> [--group <id|name>] [--group-name <名称>] [--
 - 组名用接收者/任务名（≤10字），页面可按「交付对象」或日期组织（页面名 ≤10字）。
 - 交付后可 `paste` 关键文件到剪贴板，或直接告知对方在 GUI 对应组/页取用。
 
-## 7. 智能体使用规则
+## 7. 项目只读 MCP（v2.17.35）
+
+从画布助手的「交给外部 Agent」取得固定项目、画布和快照配置后，可以启动本地 stdio MCP：
+
+```sh
+clipslots --mcp --project-id PROJECT --canvas-id CANVAS --snapshot-id UUID --session-id UUID
+```
+
+先调用 `clipslots_context` 读取实际绑定，再用 `canvas_overview`、`canvas_nodes`、`canvas_edges`、
+`canvas_read_node`、`canvas_read_run` 按工具 schema 传入 `snapshot_id`。分页读取以返回的偏移为准。
+`artifact_list`、`artifact_metadata`、`artifact_read` 只访问同一项目与画布，读取时指定确切 revision。
+快照固定于启动时，重新交接可获得新快照。此入口只提供读取，不执行普通槽位写入或 Skill 脚本。
+原有 `agent-mcp [enabledSkillSlugsJSON]` 入口保持兼容。
+
+## 8. 智能体使用规则
 
 1. **先读后写**（三步清单）：`① 读（list/read 查现有状态）→ ② 分析（判断目标槽位/页面/组）→ ③ 执行（write/create）`。优先写 `empty:true` 空槽，批量覆盖前与用户确认。新建页面时直接带 `--group-name` 给默认组命名（零废组，v2.9.42），无需额外 `rename-group`。
 2. **空槽判定**（详见第 0 节"空槽判定"）：一个槽位为空当且仅当**主体内容与附件列表都为空**；有主体或有附件都算非空。扫描空槽必须同时检查主体与附件——直接用 `empty:true` 判定即可（v2.9.3+ 的 `empty` 已含附件检查，`list` 另有 `attachmentCount`），不要只看主体。

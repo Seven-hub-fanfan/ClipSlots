@@ -234,12 +234,19 @@ public struct CanvasNode: Codable, Identifiable, Equatable {
 
     /// 模型稳定 ID，例如 `seedream45`。
     public var model: String
+    public var generationProvider: GenerationProviderID = .crate
+    public var byteArtist = ByteArtistCanvasConfiguration()
     /// 比例，例如 `1:1`。
     public var ratio: String
-    /// 张数（1 / 2 / 4）。对应 CLI 的 `--count`。
+    /// 生成次数（1 / 2 / 3 / 4），由 App 编排为独立结果节点和单次请求。
     public var count: Int
     /// 文本生成的指令。生成的正文仍只存槽位，两者不能互相覆盖。
     public var textGenerationPrompt: String = ""
+    /// Explicit draft output capability, not inferred from a model name or task ID.
+    public var draftVideoID: String?
+    /// Non-nil opts a video target into draft-reference wiring. Parameters and
+    /// the edge live in the same document/history snapshot.
+    public var draftReference: CanvasDraftReference?
     /// Identifies the displayed asset whose native geometry has already been adopted.
     /// Explicit later ratio changes remain intact until the displayed media changes.
     public var mediaLayoutAttachmentID: String?
@@ -286,6 +293,14 @@ public struct CanvasNode: Codable, Identifiable, Equatable {
     public var state: CanvasNodeState
     /// Crate 任务 ID，失败排查与「复制 taskId」用。
     public var taskId: String?
+    /// Immutable remote ownership; selection only affects the next submission.
+    public var generationTask: GenerationTaskHandle?
+    public var generationRawOutput: JSONValue?
+    public var generationDiagnostic: GenerationTaskDiagnostic?
+    public var recoveryLabel: String {
+        if generationTask?.context.provider == .byteartist { return "继续查询 BA" }
+        return "继续查询"
+    }
     /// 已提交但没有成功写回产物的任务，默认继续查询，不能悄悄重新提交。
     public var needsGenerationRecovery: Bool {
         guard canGenerate, let taskId, !taskId.isEmpty else { return false }
@@ -304,6 +319,10 @@ public struct CanvasNode: Codable, Identifiable, Equatable {
     /// 刻意存 id 而不是双向的 children 数组：单向引用不会出现「父说有子、子说没父」的
     /// 不一致，删节点时也只需要清理指向它的引用，不必维护两侧。
     public var parentNodeId: String?
+    /// A generated result copies its configuration inputs at submission time.
+    /// The origin edge records lineage without feeding the result's own output
+    /// back into the next request.
+    public var generationSourceID: String?
 
     /// 本节点**生成产物**在槽位附件列表里的 id（v2.11.17）。
     ///
@@ -457,10 +476,12 @@ public struct CanvasNode: Codable, Identifiable, Equatable {
         case pageId, groupId, slot
         case kind, mediaRole, x, y, width, height
         case model, ratio, count, textGenerationPrompt, mediaLayoutAttachmentID
+        case draftVideoID, draftReference
+        case generationProvider, byteArtist, generationTask, generationRawOutput, generationDiagnostic
         case resolution, duration, generateAudio
         case fontName, fontSize
         case state, taskId, seed
-        case parentNodeId
+        case parentNodeId, generationSourceID
         case outputAttachmentIds, inputAttachmentIds
         case animationStyle
         case createdAt, updatedAt
@@ -505,9 +526,16 @@ public struct CanvasNode: Codable, Identifiable, Equatable {
         // `seedream45` / `1:1`（那时视频链路还没有提交路径，这两个字段对它是死值）。按 kind 取默认
         // 只影响"字段压根不存在"的情况，不会覆盖用户显式选过的值。
         model = try c.decodeIfPresent(String.self, forKey: .model) ?? CanvasNode.defaultModel(for: kind)
+        generationProvider = try c.decodeIfPresent(GenerationProviderID.self, forKey: .generationProvider) ?? .crate
+        byteArtist = try c.decodeIfPresent(ByteArtistCanvasConfiguration.self, forKey: .byteArtist) ?? .init()
+        generationTask = try c.decodeIfPresent(GenerationTaskHandle.self, forKey: .generationTask)
+        generationRawOutput = try c.decodeIfPresent(JSONValue.self, forKey: .generationRawOutput)
+        generationDiagnostic = try c.decodeIfPresent(GenerationTaskDiagnostic.self, forKey: .generationDiagnostic)
         ratio = try c.decodeIfPresent(String.self, forKey: .ratio) ?? CanvasNode.defaultRatio(for: kind)
         count = try c.decodeIfPresent(Int.self, forKey: .count) ?? 1
         textGenerationPrompt = try c.decodeIfPresent(String.self, forKey: .textGenerationPrompt) ?? ""
+        draftVideoID = try c.decodeIfPresent(String.self, forKey: .draftVideoID)
+        draftReference = try c.decodeIfPresent(CanvasDraftReference.self, forKey: .draftReference)
         mediaLayoutAttachmentID = try c.decodeIfPresent(String.self, forKey: .mediaLayoutAttachmentID)
         // v2.11.19 新增：老文档没有，缺省"不传"（空串 / nil），等价于沿用模型自己的默认值。
         resolution = try c.decodeIfPresent(String.self, forKey: .resolution) ?? ""
@@ -517,9 +545,11 @@ public struct CanvasNode: Codable, Identifiable, Equatable {
         fontSize = try c.decodeIfPresent(CGFloat.self, forKey: .fontSize)
         state = try c.decodeIfPresent(CanvasNodeState.self, forKey: .state) ?? .idle
         taskId = try c.decodeIfPresent(String.self, forKey: .taskId)
+        if let generationTask { taskId = generationTask.taskID }
         seed = try c.decodeIfPresent(Int.self, forKey: .seed)
         // v2.11.8 新增字段：老文档没有它，缺省 nil（= 没有上游），不需要版本分支。
         parentNodeId = try c.decodeIfPresent(String.self, forKey: .parentNodeId)
+        generationSourceID = try c.decodeIfPresent(String.self, forKey: .generationSourceID)
         // v2.11.17 新增：老文档没有产物标记，缺省空集合（= 全部附件都算入参，与老行为一致）。
         outputAttachmentIds = try c.decodeIfPresent([String].self, forKey: .outputAttachmentIds) ?? []
         inputAttachmentIds = try c.decodeIfPresent([String].self, forKey: .inputAttachmentIds) ?? []
@@ -545,8 +575,15 @@ public struct CanvasNode: Codable, Identifiable, Equatable {
         try c.encode(width, forKey: .width)
         try c.encode(height, forKey: .height)
         try c.encode(model, forKey: .model)
+        if generationProvider != .crate { try c.encode(generationProvider, forKey: .generationProvider) }
+        if !byteArtist.workflowID.isEmpty { try c.encode(byteArtist, forKey: .byteArtist) }
+        try c.encodeIfPresent(generationTask, forKey: .generationTask)
+        try c.encodeIfPresent(generationRawOutput, forKey: .generationRawOutput)
+        try c.encodeIfPresent(generationDiagnostic, forKey: .generationDiagnostic)
         try c.encode(ratio, forKey: .ratio)
         try c.encode(count, forKey: .count)
+        try c.encodeIfPresent(draftVideoID, forKey: .draftVideoID)
+        try c.encodeIfPresent(draftReference, forKey: .draftReference)
         try c.encodeIfPresent(mediaLayoutAttachmentID, forKey: .mediaLayoutAttachmentID)
         if !textGenerationPrompt.isEmpty {
             try c.encode(textGenerationPrompt, forKey: .textGenerationPrompt)
@@ -564,6 +601,7 @@ public struct CanvasNode: Codable, Identifiable, Equatable {
         try c.encodeIfPresent(taskId, forKey: .taskId)
         try c.encodeIfPresent(seed, forKey: .seed)
         try c.encodeIfPresent(parentNodeId, forKey: .parentNodeId)
+        try c.encodeIfPresent(generationSourceID, forKey: .generationSourceID)
         // 空集合不写：绝大多数节点没出过图，写一个空数组只会让每个节点都胖一行。
         if !outputAttachmentIds.isEmpty {
             try c.encode(outputAttachmentIds, forKey: .outputAttachmentIds)
@@ -608,6 +646,11 @@ public struct CanvasDocument: Codable, Equatable {
     /// 老文档没有这个字段，解码时由 `parentNodeId` 迁移补齐（见 `init(from:)`）。新字段用默认值
     /// 承接兼容、不递增 `schemaVersion`，遵循本文件开头立的规矩。
     public var edges: [CanvasEdge]
+    public var groups: [CanvasNodeGroup]
+    public var piles: [CanvasPile]
+    /// Bounded identities of confirmed remote graph commands. Undo does not
+    /// erase receipt identity, so replay cannot reapply an undone command.
+    public var appliedAgentMutationIDs: [String]
 
     /// 视口。存下来是为了下次进画布还在原处 —— 每次都回到原点会让「我刚才在看哪」丢失。
     public var panX: CGFloat
@@ -625,6 +668,9 @@ public struct CanvasDocument: Codable, Equatable {
     public init(schemaVersion: Int = CanvasDocument.currentSchemaVersion,
                 nodes: [CanvasNode] = [],
                 edges: [CanvasEdge] = [],
+                groups: [CanvasNodeGroup] = [],
+                piles: [CanvasPile] = [],
+                appliedAgentMutationIDs: [String] = [],
                 panX: CGFloat = 0,
                 panY: CGFloat = 0,
                 zoom: CGFloat = 1,
@@ -632,6 +678,9 @@ public struct CanvasDocument: Codable, Equatable {
         self.schemaVersion = schemaVersion
         self.nodes = nodes
         self.edges = edges
+        self.groups = CanvasNodeGroup.normalized(groups, nodeIDs: Set(nodes.map(\.id)))
+        self.piles = CanvasPile.normalized(piles, nodes: nodes)
+        self.appliedAgentMutationIDs = Array(appliedAgentMutationIDs.suffix(1000))
         self.panX = panX
         self.panY = panY
         self.zoom = zoom
@@ -641,7 +690,7 @@ public struct CanvasDocument: Codable, Equatable {
     // MARK: - Codable（逐节点容错 + 同槽去重）
 
     private enum CodingKeys: String, CodingKey {
-        case schemaVersion, nodes, edges, panX, panY, zoom, updatedAt
+        case schemaVersion, nodes, edges, groups, piles, appliedAgentMutationIDs, panX, panY, zoom, updatedAt
     }
 
     /// 单个节点的**容错解码包装**。
@@ -665,6 +714,16 @@ public struct CanvasDocument: Codable, Equatable {
         }
     }
 
+    private struct LenientGroup: Decodable {
+        let group: CanvasNodeGroup?
+        init(from decoder: Decoder) throws { group = try? CanvasNodeGroup(from: decoder) }
+    }
+
+    private struct LenientPile: Decodable {
+        let pile: CanvasPile?
+        init(from decoder: Decoder) throws { pile = try? CanvasPile(from: decoder) }
+    }
+
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         // 缺字段按 **1** 兜底，不是按 current。写入路径永远写 `schemaVersion`，所以"字段不存在"
@@ -684,7 +743,18 @@ public struct CanvasDocument: Codable, Equatable {
         edges = CanvasEdgeGraph.migratedFromParentLinks(
             nodes: nodes,
             edges: CanvasEdgeGraph.normalized(decodedEdges, nodeIds: Set(nodes.map(\.id))))
-        let destinations = Set(edges.map(\.toNodeId))
+        nodes = CanvasEdgeGraph.reconcilingDraftReferences(nodes: nodes, edges: edges)
+        groups = CanvasNodeGroup.normalized(
+            (try c.decodeIfPresent([LenientGroup].self, forKey: .groups) ?? []).compactMap(\.group),
+            nodeIDs: Set(nodes.map(\.id)))
+        piles = CanvasPile.normalized(
+            (try c.decodeIfPresent([LenientPile].self, forKey: .piles) ?? []).compactMap(\.pile), nodes: nodes)
+        appliedAgentMutationIDs = Array((try c.decodeIfPresent([String].self, forKey: .appliedAgentMutationIDs) ?? []).suffix(1000))
+        let groupIDs = Set(groups.map(\.id))
+        for index in piles.indices where piles[index].groupID.map({ !groupIDs.contains($0) }) == true {
+            piles[index].groupID = nil
+        }
+        let destinations = Set(edges.filter { $0.purpose.isGenerationDependency }.map(\.toNodeId))
         for index in nodes.indices where nodes[index].kind.isMediaNode && nodes[index].mediaRole == nil {
             let node = nodes[index]
             let hasTask = node.taskId?.isEmpty == false || !node.outputAttachmentIds.isEmpty
@@ -706,6 +776,9 @@ public struct CanvasDocument: Codable, Equatable {
         try c.encode(schemaVersion, forKey: .schemaVersion)
         try c.encode(nodes, forKey: .nodes)
         if !edges.isEmpty { try c.encode(edges, forKey: .edges) }
+        if !groups.isEmpty { try c.encode(groups, forKey: .groups) }
+        if !piles.isEmpty { try c.encode(piles, forKey: .piles) }
+        if !appliedAgentMutationIDs.isEmpty { try c.encode(appliedAgentMutationIDs, forKey: .appliedAgentMutationIDs) }
         try c.encode(panX, forKey: .panX)
         try c.encode(panY, forKey: .panY)
         try c.encode(zoom, forKey: .zoom)

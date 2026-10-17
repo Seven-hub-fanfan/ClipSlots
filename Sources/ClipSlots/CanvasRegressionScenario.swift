@@ -8,6 +8,10 @@ private enum CanvasRegression {
     static var started = false
 }
 
+enum CanvasMenuLatencyObservation {
+    static var pickedAt: Double?
+}
+
 extension CanvasWorkspaceView {
     /// 本进程场景走实际画布/存储/CLI 路径，只允许独立测试 bundle 与临时数据目录。
     func runCanvasRegressionIfRequested() {
@@ -28,8 +32,101 @@ extension CanvasWorkspaceView {
                 try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
             }
             await settle(1)
+            if let window = inputRouter.anchorView?.window {
+                for _ in 0..<20 {
+                    NSRunningApplication.current.activate(options: [.activateAllWindows, .activateIgnoringOtherApps])
+                    window.makeKeyAndOrderFront(nil)
+                    await settle(0.05)
+                    if window.isKeyWindow && NSApp.isActive { break }
+                }
+                window.makeKey()
+            }
             inputRouter.anchorView?.window?.setContentSize(CGSize(width: 1440, height: 900))
             let directory = URL(fileURLWithPath: folder, isDirectory: true)
+            if env["CLIPSLOTS_STRUCTURE_REPLICA_PROBE"] == "1" {
+                await runStructureReplicaProbe(directory: directory)
+                return
+            }
+            if env["CLIPSLOTS_AGENT_CONTINUATION_PROBE"] == "1" {
+                await runAgentGatewayContinuationProbe(store: store, directory: directory, check: check)
+                let report: [String: Any] = [
+                    "passed": passed, "failures": failures, "complete": true,
+                    "expectedCrateSubmissions": 0,
+                    "mediaProbeEnabled": env["CLIPSLOTS_ARTIFACT_MEDIA_FIXTURES"] != nil,
+                    "scope": "native Agent gateway continuation: restart/resume, HTML artifact preview, confirmed graph mutation and undo"
+                        + (env["CLIPSLOTS_ARTIFACT_MEDIA_FIXTURES"] != nil
+                           ? "; local AVPlayer video/audio decode, playback, seek and copy cleanup" : ""),
+                    "transport": "in-process fixture AgentGatewayTransport; no live gateway validation"
+                ]
+                do {
+                    let bytes = try JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys])
+                    try bytes.write(to: directory.appendingPathComponent("report.json"))
+                } catch {
+                    check(false, "Agent continuation report: \(error.localizedDescription)")
+                }
+                NSLog("[CanvasRegression] AGENT CONTINUATION COMPLETE passed=\(passed) failed=\(failures.count)")
+                NSApp.terminate(nil)
+                return
+            }
+            if env["CLIPSLOTS_PILE_PROBE"] == "1" {
+                await runPileProbe(directory: directory)
+                return
+            }
+            if env["CLIPSLOTS_SIDEBAR_PORT_PROBE"] == "1" {
+                await runSidebarPortProbe(directory: directory)
+                return
+            }
+            if env["CLIPSLOTS_COMPOSER_LAYER_PROBE"] == "1" {
+                await runComposerLayerProbe(directory: directory)
+                return
+            }
+            if env["CLIPSLOTS_CONNECTION_INTERACTION_PROBE"] == "1" {
+                await runConnectionInteractionProbe(directory: directory)
+                return
+            }
+            if env["CLIPSLOTS_GROUP_REPLICA_PROBE"] == "1" {
+                await runGroupReplicaProbe(directory: directory)
+                return
+            }
+            if env["CLIPSLOTS_GENERATION_CHAIN_PROBE"] == "1" {
+                try? await Self.makeRegressionMedia(in: directory)
+                await runGenerationChainProbe(directory: directory)
+                return
+            }
+            if env["CLIPSLOTS_NODE_DESIGN_PROBE"] == "1" {
+                await runNodeDesignProbe(directory: directory)
+                return
+            }
+            if env["CLIPSLOTS_REPLICA_PROBE"] == "1" {
+                do { try await Self.makeRegressionMedia(in: directory) }
+                catch { NSLog("[CanvasReplica] fixture error: \(error)") }
+                await runReplicaProbe(directory: directory)
+                return
+            }
+            if env["CLIPSLOTS_AGENT_GROUPS_PROBE"] == "1" {
+                await runAgentGroupsProbe(directory: directory)
+                return
+            }
+            if env["CLIPSLOTS_ADVANCED_TEXT_PROBE"] == "1" {
+                await runAdvancedTextProbe(directory: directory)
+                return
+            }
+            if env["CLIPSLOTS_TEXT_INPUT_PROBE"] == "1" {
+                await runTextInputProbe(directory: directory)
+                return
+            }
+            if env["CLIPSLOTS_MENU_LATENCY_PROBE"] == "1" {
+                await runMenuLatencyProbe(directory: directory)
+                return
+            }
+            if env["CLIPSLOTS_CREATIVE_PROBE"] == "1" {
+                await runCreativeVisualProbe(directory: directory)
+                return
+            }
+            if env["CLIPSLOTS_BATCH_PROBE"] == "1" {
+                await runBatchGenerationProbe(directory: directory)
+                return
+            }
             if env["CLIPSLOTS_AGENT_WORKSPACE_PROBE"] == "1" {
                 await runAgentWorkspaceProbe(directory: directory)
                 return
@@ -115,6 +212,28 @@ extension CanvasWorkspaceView {
                 canvas.endGeneration(ticket.token)
                 canvas.updateNode(id: image.id) { $0.state = .idle; $0.taskId = nil }
             }
+            // Switching projects rebuilds ContentView's canvas identity. Continue
+            // against its mounted State/NSView instead of the detached old copy.
+            await settle()
+            await (CanvasAgentGroupsProbeBridge.current ?? self).runCanvasRegressionInputStage(
+                text: text, image: image, video: video, initialPassed: passed,
+                initialFailures: failures, env: env, folder: folder)
+        }
+    }
+
+    @MainActor private func runCanvasRegressionInputStage(
+        text: CanvasNode, image: CanvasNode, video: CanvasNode,
+        initialPassed: Int, initialFailures: [String], env: [String: String], folder: String
+    ) async {
+            var passed = initialPassed, failures = initialFailures
+            let directory = URL(fileURLWithPath: folder, isDirectory: true)
+            func check(_ condition: Bool, _ message: String) {
+                if condition { passed += 1 } else { failures.append(message) }
+                NSLog("[CanvasRegression] \(condition ? "PASS" : "FAIL") \(message)")
+            }
+            func settle(_ seconds: Double = 0.6) async {
+                try? await Task.sleep(for: .seconds(seconds))
+            }
             if let disposable = createNode(kind: .image, at: CGPoint(x: 1500, y: 100),
                                              parentNodeId: text.id, beginEditing: false, quiet: true),
                let ticket = canvas.beginGeneration(disposable) {
@@ -142,6 +261,18 @@ extension CanvasWorkspaceView {
             startGeneration(canvas.node(id: video.id)!)
             // 运行中归到正式槽位，任务应跟随新身份，且当前组异步写不再吞掉临时文件。
             archiveNodeToLibrary(canvas.node(id: video.id)!)
+            check(archiveRequest != nil, "running video opens archive target picker")
+            archiveRequest = nil
+            if let slot = (1...10).first(where: {
+                store.canvasSlotIsFree(groupId: store.currentSpecialSlotId, slot: $0)
+                    && canvas.node(forGroupId: store.currentSpecialSlotId, slot: $0) == nil
+            }) {
+                do {
+                    try archiveNode(canvas.node(id: video.id)!, pageID: store.currentPageId,
+                                    groupID: store.currentSpecialSlotId, slot: slot)
+                    check(true, "running video archives to selected target")
+                } catch { check(false, "running video archive: \(error)") }
+            }
             let videoNow = canvas.nodes.first { $0.createdAt == video.createdAt }!
             for _ in 0..<100 {
                 if case .succeeded = canvas.node(id: videoNow.id)?.state { break }
@@ -171,6 +302,14 @@ extension CanvasWorkspaceView {
             pan = CGSize(width: 80, height: 65)
             zoom = 0.85
             await settle()
+            var stablePasses = 0, previousBodies = CanvasRenderDiagnostics.count
+            for _ in 0..<12 {
+                await settle(0.2)
+                let count = CanvasRenderDiagnostics.count
+                stablePasses = count == previousBodies ? stablePasses + 1 : 0
+                previousBodies = count
+                if stablePasses >= 3 { break }
+            }
             let renderBefore = CanvasRenderDiagnostics.count
             for step in 1...30 {
                 pan.width = 80 + CGFloat(step)
@@ -313,14 +452,21 @@ extension CanvasWorkspaceView {
                     finishLinkDrag(from: text, at: covered, target: videoNow.id)
                     check(canvas.edges.count == before && addMenu == nil, "dropping a wire on composer does not connect behind it")
                 }
+                // The expanded text input can legitimately cover a port at this
+                // zoom. Hover after deselection exposes the actual source handle.
+                canvas.clearSelection()
+                hoverHoldNodeId = text.id
+                await settle()
+                let sourcePort = outputPortPoint ?? CGPoint(x: textRect.maxX + TapSkin.portOffset, y: textRect.midY)
+                check(outputPortPoint != nil, "native link starts from a displayed source handle")
                 let videoRect = screenFrame(of: canvas.node(id: videoNow.id)!)
-                await drag(CGPoint(x: textRect.maxX + TapSkin.portOffset, y: textRect.midY),
+                await drag(sourcePort,
                            CGPoint(x: videoRect.minX - TapSkin.portOffset, y: videoRect.midY))
                 check(canvas.edges.contains { $0.fromNodeId == text.id && $0.toNodeId == videoNow.id },
                       "native port drag connects at displayed input circle")
                 check(canvas.node(id: text.id)?.frame == text.frame, "port drag does not move source node")
                 let edgeCount = canvas.edges.count
-                await drag(CGPoint(x: textRect.maxX + TapSkin.portOffset, y: textRect.midY),
+                await drag(sourcePort,
                            CGPoint(x: videoRect.minX - TapSkin.portOffset, y: videoRect.midY))
                 check(canvas.edges.count == edgeCount && addMenu == nil, "duplicate native link does not create another edge or menu")
                 addMenu = nil
@@ -378,10 +524,10 @@ extension CanvasWorkspaceView {
                 _ = handleKeyAction(.cancel)
                 canvas.select(id: text.id, additive: false)
                 await settle()
-                mouse(.leftMouseDown, CGPoint(x: textRect.midX, y: textRect.midY), clickCount: 2)
-                mouse(.leftMouseUp, CGPoint(x: textRect.midX, y: textRect.midY), clickCount: 2)
+                mouse(.leftMouseDown, CGPoint(x: textRect.midX, y: textRect.midY))
+                mouse(.leftMouseUp, CGPoint(x: textRect.midX, y: textRect.midY))
                 await settle()
-                check(editingNodeId == text.id, "native double click text enters editor")
+                check(editingNodeId == text.id, "native single click text enters editor")
                 await click(blank)
                 canvas.select(id: image.id, additive: false)
                 await settle()
@@ -414,7 +560,8 @@ extension CanvasWorkspaceView {
                 let top = screenFrame(of: canvas.node(id: image.id)!)
                 let bottom = screenFrame(of: canvas.node(id: videoNow.id)!)
                 await click(CGPoint(x: viewSize.width - 60, y: 130))
-                await drag(CGPoint(x: top.minX - 14, y: top.minY - 32),
+                // Start inside the canvas, clear of the sidebar's native hit region.
+                await drag(CGPoint(x: sidebarWidth + 24, y: top.minY - 32),
                            CGPoint(x: bottom.maxX + 14, y: bottom.maxY + 32))
                 check(canvas.selectedNodeIds.count == 3, "recording 36 percent marquee selects three nodes")
                 for attempt in 1...2 {
@@ -444,12 +591,13 @@ extension CanvasWorkspaceView {
                 if let panel = controlRegions["composer"] {
                     let coveredRect = screenFrame(of: canvas.node(id: videoNow.id)!)
                     let covered = CGPoint(x: coveredRect.midX, y: coveredRect.midY)
-                    // 先处于下方卡片的 hover，再让面板遮住它（与录屏里平移后的状态一致）。
+                    // Recording 2: cards remain exposed above another node's
+                    // generation form and can be selected in one press.
                     hoverHoldNodeId = videoNow.id
                     inputRouter.cursorPoint = covered
                     mouse(.mouseMoved, covered)
                     await settle()
-                    check(interactionNode?.id != videoNow.id, "composer occludes hover of the card behind it")
+                    check(interactionNode?.id == videoNow.id, "adjacent card keeps hover over prior composer bounds")
                     check(!portIsExposed(CGPoint(x: coveredRect.maxX + TapSkin.portOffset, y: coveredRect.midY),
                                          nodeId: videoNow.id), "covered output port is not drawn or hittable")
                     PerfAutoTest.snapshotWindow(to: "\(folder)/canvas-covered-ports.png")
@@ -457,8 +605,8 @@ extension CanvasWorkspaceView {
                     var r = URLRequest(url: URL(string: "http://127.0.0.1:7780/event")!); r.httpMethod = "POST"; r.httpBody = try? JSONSerialization.data(withJSONObject: ["sessionId": "canvas-overlay-hit", "runId": env["CANVAS_DEBUG_RUN"] ?? "pre-fix", "hypothesisId": "C", "msg": "[DEBUG] covered port", "data": ["covered": panel.contains(covered), "point": NSStringFromPoint(covered), "panel": NSStringFromRect(panel), "hover": hoverHoldNodeId ?? "", "interaction": interactionNode?.id ?? "", "selected": Array(canvas.selectedNodeIds)]]); URLSession.shared.dataTask(with: r).resume()
                     // #endregion
                     await click(covered)
-                    check(canvas.selectedNodeIds == [image.id] && addMenu == nil,
-                          "covered port click stays in composer")
+                    check(canvas.selectedNodeIds == [videoNow.id] && addMenu == nil,
+                          "adjacent body click directly selects it over prior composer bounds")
                 }
                 endInlineEditing()
                 // 复刻参考中的纵向多选布局，给汇聚菜单留下可见空间。
@@ -504,21 +652,40 @@ extension CanvasWorkspaceView {
                     }
                 }
                 // 单节点菜单也必须经过真实点击、选择菜单行、创建，不能仅检测 addMenu 状态。
-                canvas.select(id: text.id, additive: false)
-                hoverHoldNodeId = text.id
+                for _ in 0..<max(1, Int(env["CLIPSLOTS_MENU_HIT_REPEATS"] ?? "") ?? 1) {
+                // 加号跟随 hover，可能与选中节点不同。锁屏时队列中的 mouseMoved
+                // 也不会移动系统光标；始终按实际显示的端口所属节点核验引用关系。
+                // Undo can restore this source as already selected. Its next body click
+                // now edits; first leave selection so this step exercises port selection.
+                await click(CGPoint(x: viewSize.width - 60, y: 130))
+                check(canvas.selectedNodeIds.isEmpty && editingNodeId == nil,
+                      "outside click exits editing before choosing source port")
+                let sourceFrame = screenFrame(of: canvas.node(id: text.id)!)
+                await click(CGPoint(x: sourceFrame.midX, y: sourceFrame.midY))
                 await settle()
-                if let port = outputPortPoint {
+                check(canvas.selectedNodeIds == [text.id], "native source click selects text node")
+                hoverHoldNodeId = text.id
+                mouse(.mouseMoved, CGPoint(x: sourceFrame.midX, y: sourceFrame.midY))
+                await settle(0.1)
+                if let displayedSource = interactionNode, let port = outputPortPoint {
                     await click(port)
-                    check(addMenu?.allParentIds == [text.id], "single node output click opens reference menu")
+                    check(addMenu?.allParentIds == [displayedSource.id], "single node output click opens reference menu")
                     if let row = controlRegions["add-menu-row-video"] {
+                        // #region debug-point A:reference-menu-hit
+                        if let endpoint = env["CLIPSLOTS_MENU_HIT_URL"], let url = URL(string: endpoint) { var r = URLRequest(url: url); r.httpMethod = "POST"; r.httpBody = try? JSONSerialization.data(withJSONObject: ["sessionId": "reference-menu-hit", "runId": env["CANVAS_DEBUG_RUN"] ?? "pre-fix", "hypothesisId": "A", "msg": "[DEBUG] target video row before click", "data": ["row": NSStringFromRect(row), "menu": NSStringFromRect(controlRegions["add-menu"] ?? .zero), "imageRow": NSStringFromRect(controlRegions["add-menu-row-image"] ?? .zero), "selection": Array(canvas.selectedNodeIds)]]); URLSession.shared.dataTask(with: r).resume() }
+                        // #endregion
                         await click(CGPoint(x: row.midX, y: row.midY))
+                        // #region debug-point C:reference-menu-hit
+                        if let endpoint = env["CLIPSLOTS_MENU_HIT_URL"], let url = URL(string: endpoint) { var r = URLRequest(url: url); r.httpMethod = "POST"; r.httpBody = try? JSONSerialization.data(withJSONObject: ["sessionId": "reference-menu-hit", "runId": env["CANVAS_DEBUG_RUN"] ?? "pre-fix", "hypothesisId": "C", "msg": "[DEBUG] state after video row click", "data": ["menuOpen": addMenu != nil, "currentVideoRow": NSStringFromRect(controlRegions["add-menu-row-video"] ?? .zero), "selectedKind": canvas.soleSelectedNode?.kind.rawValue ?? "none", "parents": canvas.soleSelectedNode.map { canvas.incomingEdges(of: $0.id).map(\.fromNodeId) } ?? []]]); URLSession.shared.dataTask(with: r).resume() }
+                        // #endregion
                         if let child = canvas.soleSelectedNode {
-                            check(child.kind == .video && canvas.incomingEdges(of: child.id).map(\.fromNodeId) == [text.id],
+                            check(child.kind == .video && canvas.incomingEdges(of: child.id).map(\.fromNodeId) == [displayedSource.id],
                                   "native single reference menu creates connected video")
                             _ = canvas.undo()
                         }
                     }
                 } else { check(false, "single output control is visible") }
+                }
                 canvas.select(id: text.id, additive: false)
                 zoom = 0.65
                 pan = CGSize(width: 450, height: -20)
@@ -633,7 +800,6 @@ extension CanvasWorkspaceView {
             canvas.flushSave()
             NSLog("[CanvasRegression] COMPLETE passed=\(passed) failed=\(failures.count)")
             NSApp.terminate(nil)
-        }
     }
 
     private static func makeRegressionMedia(in directory: URL) async throws {

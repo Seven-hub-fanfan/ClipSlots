@@ -43,19 +43,29 @@ public struct CrateImageRequest: Equatable {
     public var imagePaths: [String]
     /// 复现用 seed。nil = 让服务端随机。
     public var seed: Int?
+    public var width: Int?
+    public var height: Int?
+    /// UI quality label; actual CLI image sizing is --param width/height.
+    public var resolution: String?
 
     public init(model: String,
                 prompt: String,
                 ratio: String = "",
                 count: Int = 1,
                 imagePaths: [String] = [],
-                seed: Int? = nil) {
+                seed: Int? = nil,
+                width: Int? = nil,
+                height: Int? = nil,
+                resolution: String? = nil) {
         self.model = model
         self.prompt = prompt
         self.ratio = ratio
         self.count = count
         self.imagePaths = imagePaths
         self.seed = seed
+        self.width = width
+        self.height = height
+        self.resolution = resolution
     }
 }
 
@@ -132,6 +142,7 @@ public enum CrateRequestError: Error, Equatable {
     case emptyPrompt
     case emptyModel
     case unsupportedCount(Int)
+    case invalidImageDimensions
     case incompatibleImageInput
     /// 模型要求必须带输入图，但槽位里没有可用图片（实测只有 `veo-3.1-generate-preview`）。
     case missingRequiredImage(model: String)
@@ -141,6 +152,7 @@ public enum CrateRequestError: Error, Equatable {
         case .emptyPrompt: return "槽位正文是空的，先写提示词再生成"
         case .emptyModel: return "没有选择模型"
         case .unsupportedCount(let n): return "当前版本一次只出 1 张（现在是 \(n) 张）"
+        case .invalidImageDimensions: return "图像宽高必须成对设置为 16–16384 像素"
         case .incompatibleImageInput: return "图片入参包含视频文件，请先提取图片再生成"
         case .missingRequiredImage(let model):
             return "\(model) 必须带一张输入图，先往这个槽位挂张图片"
@@ -225,11 +237,17 @@ public enum CrateGeneration {
     /// 刻意始终带 `--no-wait`：阻塞模式把提交、轮询、下载揉进一个进程，App 拿不到中间的排队
     /// 信息，进程被杀掉连 taskId 都留不下——那等于放弃 `queued(ahead:)` 与「复制 taskId」。
     public static func submitArguments(_ req: CrateImageRequest) throws -> [String] {
-        let prompt = req.prompt.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !prompt.isEmpty else { throw CrateRequestError.emptyPrompt }
+        let prompt = req.prompt
+        guard !prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { throw CrateRequestError.emptyPrompt }
         let model = req.model.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !model.isEmpty else { throw CrateRequestError.emptyModel }
         guard req.count == 1 else { throw CrateRequestError.unsupportedCount(req.count) }
+        if req.width != nil || req.height != nil {
+            guard let width = req.width, let height = req.height,
+                  (16...16384).contains(width), (16...16384).contains(height) else {
+                throw CrateRequestError.invalidImageDimensions
+            }
+        }
         guard !req.imagePaths.contains(where: { CanvasAttachmentKind.from(fileName: $0) == .video }) else {
             throw CrateRequestError.incompatibleImageInput
         }
@@ -237,7 +255,11 @@ public enum CrateGeneration {
         var args = ["generate", "image", "--model", model, "--prompt", prompt]
         let ratio = req.ratio.trimmingCharacters(in: .whitespacesAndNewlines)
         if !ratio.isEmpty {
-            args += ["--ratio", ratio]
+            // Published raw model parameter also supports legacy/combined presets.
+            args += ["--param", "ratio=\(ratio)"]
+        }
+        if let width = req.width, let height = req.height {
+            args += ["--param", "width=\(width)", "--param", "height=\(height)"]
         }
         for path in req.imagePaths where !path.isEmpty {
             args += ["--image", path]
@@ -273,8 +295,8 @@ public enum CrateGeneration {
     /// （`Model seedancePro1 does not publish parameter "generate_audio"`），整次生成失败。
     /// 所以"不传"必须是可表达的状态，判断"该不该传"的责任在调用方（按模型目录的 `supportsAudio`）。
     public static func submitArguments(_ req: CrateVideoRequest) throws -> [String] {
-        let prompt = req.prompt.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !prompt.isEmpty else { throw CrateRequestError.emptyPrompt }
+        let prompt = req.prompt
+        guard !prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { throw CrateRequestError.emptyPrompt }
         let model = req.model.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !model.isEmpty else { throw CrateRequestError.emptyModel }
         let images = [req.firstFramePath, req.lastFramePath].compactMap { $0 } + req.referenceImagePaths
@@ -285,7 +307,7 @@ public enum CrateGeneration {
         var args = ["generate", "video", "--model", model, "--prompt", prompt]
         let ratio = req.ratio.trimmingCharacters(in: .whitespacesAndNewlines)
         if !ratio.isEmpty {
-            args += ["--ratio", ratio]
+            args += ["--param", "ratio=\(ratio)"]
         }
         let resolution = req.resolution.trimmingCharacters(in: .whitespacesAndNewlines)
         if !resolution.isEmpty {

@@ -5,6 +5,9 @@ import SwiftUI
 struct AgentDraftEditor: NSViewRepresentable {
     @Binding var text: String
     var focusRequest: Int
+    var conversationID: UUID? = nil
+    var replacementID: UUID? = nil
+    var isEditable = true
     var placeholder = "随心输入"
     var completion: AgentComposerCompletion? = nil
     var completionItems: [AgentComposerItem] = []
@@ -27,6 +30,8 @@ struct AgentDraftEditor: NSViewRepresentable {
         editor.insertionPointColor = NSColor(TapSkin.ink)
         editor.drawsBackground = false
         editor.isRichText = false
+        editor.isEditable = isEditable
+        editor.allowsUndo = true
         editor.isAutomaticQuoteSubstitutionEnabled = false
         editor.isAutomaticDashSubstitutionEnabled = false
         editor.isAutomaticTextReplacementEnabled = false
@@ -39,6 +44,7 @@ struct AgentDraftEditor: NSViewRepresentable {
         editor.textContainer?.lineFragmentPadding = 5
         editor.setAccessibilityLabel("Agent 输入")
         editor.onSend = onSend
+        editor.isEditable = isEditable
         configureCompletion(editor)
         scroll.documentView = editor
         return scroll
@@ -48,19 +54,35 @@ struct AgentDraftEditor: NSViewRepresentable {
         guard let editor = scroll.documentView as? Editor else { return }
         context.coordinator.parent = self
         editor.onSend = onSend
+        editor.isEditable = isEditable
         configureCompletion(editor)
         editor.placeholder = placeholder
         editor.placeholderColor = NSColor(TapSkin.faintInk)
         editor.textColor = NSColor(TapSkin.ink)
         editor.insertionPointColor = NSColor(TapSkin.ink)
+        let changedConversation = context.coordinator.conversationID != conversationID
+        if changedConversation {
+            editor.unmarkText()
+            editor.undoManager?.removeAllActions()
+        }
         if editor.string != text && !editor.hasMarkedText() {
-            editor.string = text
-            editor.setSelectedRange(NSRange(location: (text as NSString).length, length: 0))
+            if !changedConversation, context.coordinator.replacementID != replacementID {
+                editor.breakUndoCoalescing()
+                editor.insertText(text, replacementRange: NSRange(location: 0, length: (editor.string as NSString).length))
+                editor.undoManager?.setActionName("AI 润色")
+                editor.breakUndoCoalescing()
+            } else {
+                editor.string = text
+                editor.undoManager?.removeAllActions()
+                editor.setSelectedRange(NSRange(location: (text as NSString).length, length: 0))
+            }
             editor.needsDisplay = true
         }
+        context.coordinator.conversationID = conversationID
+        context.coordinator.replacementID = replacementID
         // Updating SwiftUI state during representable reconciliation is invalid.
         DispatchQueue.main.async { [weak editor] in editor?.updateCompletion() }
-        if context.coordinator.lastFocusRequest != focusRequest {
+        if isEditable, context.coordinator.lastFocusRequest != focusRequest {
             context.coordinator.lastFocusRequest = focusRequest
             DispatchQueue.main.async { [weak editor] in
                 guard let editor, let window = editor.window else { return }
@@ -81,10 +103,16 @@ struct AgentDraftEditor: NSViewRepresentable {
     final class Coordinator: NSObject, NSTextViewDelegate {
         var parent: AgentDraftEditor
         var lastFocusRequest: Int?
-        init(_ parent: AgentDraftEditor) { self.parent = parent }
+        var conversationID: UUID?
+        var replacementID: UUID?
+        init(_ parent: AgentDraftEditor) {
+            self.parent = parent
+            conversationID = parent.conversationID
+            replacementID = parent.replacementID
+        }
         func textDidChange(_ notification: Notification) {
             guard let editor = notification.object as? NSTextView else { return }
-            parent.text = editor.string
+            if parent.text != editor.string { parent.text = editor.string }
         }
         func textViewDidChangeSelection(_ notification: Notification) {
             guard let editor = notification.object as? Editor else { return }

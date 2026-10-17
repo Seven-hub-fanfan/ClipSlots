@@ -202,7 +202,7 @@ struct ContentView: View {
     /// 每秒推几十个 token，一旦 ContentView 订阅了会话状态，就等于每个 token 重算
     /// 整棵 body（含 10 张槽位卡片），直接把项目已知的「全局重绘」技术债引爆。
     /// token 级刷新被关在 `AgentSidebarView` 自己的 @ObservedObject 里。
-    @StateObject private var agentSessions = AgentSessionStore()
+    @StateObject private var agentSessions = AgentSessionStore.shared
 
     /// 侧栏显隐按页面分别记忆。这里用 `@AppStorage` 而不是 `@State`（与 workspaceMode 相反）：
     /// 侧栏是个"工作习惯"开关，不像画布那样是半成品页面，记住它没有误导风险。
@@ -356,7 +356,7 @@ struct ContentView: View {
                             case .edit:
                                 editWorkspace
                             case .agent:
-                                AgentWorkspaceView(model: agentSessions.agent)
+                                AgentWorkspaceView(sessions: agentSessions, canvas: canvasStore, store: store)
                             }
                         }
                         .animation(nil, value: workspaceMode)
@@ -495,7 +495,7 @@ struct ContentView: View {
         // 空的，窗口菜单与调度中心里都是无名窗口）。所以放在根上，两种模式各给一个值。
         .navigationTitle(workspaceMode == .canvas ? "" : "ClipSlots")
         .onAppear {
-            AppearanceDefaults.ensureDefaultDarkIfNeeded()
+            AppearanceDefaults.ensureDefaultLightIfNeeded()
         }
         // v2.9.12: Cmd+, / "设置…" menu opens the in-app overlay.
         // v2.10.91: 显隐与「热键安全区」标志的同步统一由 store.setSettingsOverlay 负责。
@@ -2579,7 +2579,7 @@ private struct RetroPosterGrain: View {
 /// drawingGroup 纹理，绝不卡旧色），又不再把「整棵 ContentView」拖进主题切换的重算范围。
 private struct AmbientBackgroundHost: View {
     let simplified: Bool
-    @AppStorage("appearanceMode") private var appearanceModeRaw = ThemeMode.dark.rawValue
+    @AppStorage("appearanceMode") private var appearanceModeRaw = ThemeMode.light.rawValue
     @Environment(\.colorScheme) private var colorScheme
 
     private var effectiveScheme: ColorScheme {
@@ -2597,7 +2597,7 @@ private struct AmbientBackgroundHost: View {
 /// 让这份依赖不再牵连整个 titleBar 重算。
 private struct ThemeCycleButton: View {
     let onCycle: () -> Void
-    @AppStorage("appearanceMode") private var appearanceModeRaw = ThemeMode.dark.rawValue
+    @AppStorage("appearanceMode") private var appearanceModeRaw = ThemeMode.light.rawValue
 
     private var mode: ThemeMode { ThemeMode(rawValue: appearanceModeRaw) ?? .system }
 

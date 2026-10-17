@@ -28,7 +28,7 @@ import Foundation
 //   4. 有超时与输出截断。
 // 这些约束写在 AgentToolRegistry 里执行，本文件只负责"看见了什么"。
 
-public struct AgentSkillDeclaredTool: Equatable, Sendable {
+public struct AgentSkillDeclaredTool: Equatable, Codable, Sendable {
     public let name: String
     public let description: String
     public let parameters: JSONValue
@@ -44,20 +44,24 @@ public struct AgentSkillDeclaredTool: Equatable, Sendable {
     }
 }
 
-public struct AgentSkill: Identifiable, Equatable, Sendable {
-    public enum Source: String, Equatable, Sendable {
+public struct AgentSkill: Identifiable, Equatable, Codable, Sendable {
+    public enum Source: String, Equatable, Codable, Sendable {
         /// App bundle 内自带（Contents/Resources/skills）。
         case bundled
         /// 插件市场上传的社区 Skill（~/Library/Application Support/ClipSlots/community-skills）。
         case community
-        /// 各 Agent 的 skills 目录（~/.codex/skills 等）。
+        /// 各 Agent 的 skills 目录（~/.claude/skills 等）。
         case agentDirectory
+        case personal
+        case project
 
         public var displayName: String {
             switch self {
             case .bundled: return "内置"
             case .community: return "插件市场"
             case .agentDirectory: return "Agent 目录"
+            case .personal: return "个人 Skill"
+            case .project: return "当前项目"
             }
         }
     }
@@ -111,8 +115,7 @@ public struct AgentSkillCatalog {
         }
         roots.append(((homeDirectory as NSString)
             .appendingPathComponent("Library/Application Support/ClipSlots/community-skills"), .community))
-        for agentDir in ["\(homeDirectory)/.codex/skills",
-                         "\(homeDirectory)/.claude/skills",
+        for agentDir in ["\(homeDirectory)/.claude/skills",
                          "\(homeDirectory)/.cursor/skills",
                          "\(homeDirectory)/.gemini/skills"] {
             roots.append((agentDir, .agentDirectory))

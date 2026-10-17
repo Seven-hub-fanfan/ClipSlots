@@ -31,8 +31,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// `.system` 时置 nil，保持「跟随系统」语义不变。这只影响外观呈现，不改变任何主题偏好的存储与语义。
     private func applyAppAppearance() {
         let raw = UserDefaults.standard.string(forKey: "appearanceMode")
-            ?? ThemeMode.dark.rawValue
-        let mode = ThemeMode(rawValue: raw) ?? .dark
+            ?? ThemeMode.light.rawValue
+        let mode = ThemeMode(rawValue: raw) ?? .light
         lastAppliedAppearanceRaw = raw
         NSApp.appearance = mode.nsAppearance
     }
@@ -51,7 +51,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // `defaults write ... appearanceSkin`，或将来多窗口场景下另一处入口改了它。
             AppSkinCenter.syncFromDefaults()
             let raw = UserDefaults.standard.string(forKey: "appearanceMode")
-                ?? ThemeMode.dark.rawValue
+                ?? ThemeMode.light.rawValue
             guard raw != self.lastAppliedAppearanceRaw else { return }
             self.applyAppAppearance()
         }
@@ -184,6 +184,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillFinishLaunching(_ notification: Notification) {
+        LaunchDefaults.applyForUpdate()
         applyAppAppearance()
         // 皮肤缓存也在首帧前对齐，避免首帧用默认皮肤画一遍再被通知刷成用户选的那套。
         AppSkinCenter.syncFromDefaults()
@@ -209,6 +210,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             NSApp.terminate(nil)
             return
         }
+
+        #if DEBUG
+        if PermissionRegression.startIfRequested() { return }
+        #endif
 
         // v2.10.91: 启动即把 App 主题同步到 NSApp.appearance，并持续跟随后续切换。
         // 修复「NSAlert 等 AppKit 弹窗不跟随 App 主题、没有浅色界面」。详见 applyAppAppearance。
@@ -237,7 +242,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         startObservingAppearancePreference()
 
         setupMemoryPressureMonitor()
-        CodexAutomationModel.shared.start()
 
         // P2-9 (v2.10.9): 跨进程存储锁降级为「无锁」时，另一 Agent 侧的 StorageLock 会且仅会
         // post 一次 Notification.Name("ClipSlotsStorageLockLockless")。这里注册 GUI 观察者，

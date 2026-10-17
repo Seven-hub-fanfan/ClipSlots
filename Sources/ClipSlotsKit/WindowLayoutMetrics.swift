@@ -55,9 +55,17 @@ public enum WindowLayoutMetrics {
 
     // MARK: - 内容区：工作区 + 侧栏
 
-    /// 右侧 Agent 侧栏宽度（固定，不参与弹性分配）。
-    /// 与 `AgentSidebarView.width` 必须一致 —— 后者引用本常量，避免两处各写一个数字。
-    public static let agentSidebarWidth: CGFloat = 480
+    public static let agentSidebarWidth: CGFloat = 440
+    public static let agentSidebarMinimumWidth: CGFloat = 360
+
+    /// On unusually narrow hosts the panel never exceeds its available space.
+    /// Normal windows use the recovered 360 / 440 / 48% policy.
+    public static func agentPanelWidth(requested: CGFloat, windowWidth: CGFloat) -> CGFloat {
+        let available = windowWidth.isFinite ? max(0, windowWidth) : minWindowContentWidth
+        let maximum = min(available, max(agentSidebarMinimumWidth, available * 0.48))
+        let minimum = min(agentSidebarMinimumWidth, maximum)
+        return min(max(requested.isFinite ? requested : agentSidebarWidth, minimum), maximum)
+    }
 
     /// 编辑页卡片区的最小可用宽度：一列卡片 + 左右内边距。再窄卡片本身就要被裁。
     public static let editWorkspaceMinWidth: CGFloat = 300

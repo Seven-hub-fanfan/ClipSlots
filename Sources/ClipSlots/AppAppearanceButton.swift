@@ -4,10 +4,12 @@ import ClipSlotsKit
 /// Shared appearance control for the editor and canvas.
 struct AppAppearanceButton: View {
     var compact = false
-    @AppStorage(AppearanceDefaults.key) private var appearance = ThemeMode.dark.rawValue
+    var canvasPalette = false
+    @AppStorage(AppearanceDefaults.key) private var appearance = ThemeMode.light.rawValue
     @AppStorage(AppSkin.defaultsKey) private var skin = AppSkin.fallback.rawValue
     @State private var presented = false
     private var mode: ThemeMode { ThemeMode(rawValue: appearance) ?? .system }
+    private var chromeFill: Color { canvasPalette ? CanvasSkin.chromeFill : TapSkin.chromeFill }
 
     var body: some View {
         Button { presented.toggle() } label: {
@@ -15,7 +17,7 @@ struct AppAppearanceButton: View {
                 .font(.system(size: compact ? 13 : 14, weight: .medium))
                 .foregroundColor(TapSkin.ink)
                 .frame(width: compact ? 30 : 34, height: compact ? 30 : 34)
-                .background(RoundedRectangle(cornerRadius: 9).fill(TapSkin.chromeFill))
+                .background(RoundedRectangle(cornerRadius: 9).fill(chromeFill))
                 .overlay(RoundedRectangle(cornerRadius: 9).stroke(TapSkin.border.opacity(0.7), lineWidth: 1))
                 .contentShape(Rectangle())
         }

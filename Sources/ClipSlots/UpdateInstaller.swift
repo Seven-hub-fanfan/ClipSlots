@@ -202,6 +202,28 @@ final class UpdateInstaller {
                 return
             }
 
+            let oldIdentity: AppCodeIdentity
+            let newIdentity: AppCodeIdentity
+            let identityTransition: CodeIdentityInspector.Transition
+            do {
+                try Self.runProcess("/usr/bin/codesign", ["--verify", "--deep", "--strict", mountedApp], timeout: 30)
+                oldIdentity = try CodeIdentityInspector.inspect(Bundle.main.bundleURL)
+                newIdentity = try CodeIdentityInspector.inspect(URL(fileURLWithPath: mountedApp))
+                guard newIdentity.bundleID == PermissionRepairCoordinator.bundleIdentifier else {
+                    throw InstallError(message: "更新包应用标识不符")
+                }
+                identityTransition = CodeIdentityInspector.transition(from: oldIdentity, to: newIdentity,
+                    satisfiesPrevious: CodeIdentityInspector.satisfies(oldIdentity, at: URL(fileURLWithPath: mountedApp)))
+                guard identityTransition != .rejected else {
+                    throw InstallError(message: "更新包签名身份与当前版本不兼容，已中止自动安装。")
+                }
+            } catch {
+                Self.detachAndCleanup(mountPoint)
+                fail(error.localizedDescription)
+                return
+            }
+            NSLog("[UpdateInstaller] 代码身份核对：\(identityTransition.rawValue)")
+
             // 3. 替换。先尝试无鉴权（App 在用户可写目录时可行），失败再用管理员授权。
             var installError: String? = nil
             do {
@@ -210,6 +232,7 @@ final class UpdateInstaller {
                 // 校验 staging 完整性，再用 replaceItemAt（原子）/moveItem 落到目标；任意步骤抛错
                 // 都会移除 staging（原 App 原样保留）并转入管理员分支。
                 let staging = "/Applications/.ClipSlots.app.new-\(UUID().uuidString)"
+                defer { try? FileManager.default.removeItem(atPath: staging) }
                 // (1) ditto 到 staging，先清理可能残留的同名 staging。
                 try? FileManager.default.removeItem(atPath: staging)
                 try Self.runProcess("/usr/bin/ditto", [mountedApp, staging])
@@ -220,6 +243,7 @@ final class UpdateInstaller {
                 }
                 // (3) 原子落地：目标存在用 replaceItemAt（原子替换），否则 moveItem。
                 let stagingURL = URL(fileURLWithPath: staging)
+                _ = try CodeIdentityInspector.inspect(stagingURL)
                 let targetURL = URL(fileURLWithPath: targetApp)
                 if FileManager.default.fileExists(atPath: targetApp) {
                     _ = try FileManager.default.replaceItemAt(targetURL, withItemAt: stagingURL)
@@ -247,6 +271,7 @@ final class UpdateInstaller {
                     + "rm -rf '\(qStaging)'; "
                     + "/usr/bin/ditto '\(qMounted)' '\(qStaging)'; "
                     + "[ -x '\(qStaging)/Contents/MacOS/ClipSlots' ] || { rm -rf '\(qStaging)'; exit 1; }; "
+                    + "/usr/bin/codesign --verify --deep --strict '\(qStaging)'; "
                     + "if [ -e '\(qTarget)' ]; then mv '\(qTarget)' '\(qBackup)'; fi; "
                     + "if mv '\(qStaging)' '\(qTarget)'; then rm -rf '\(qBackup)'; "
                     + "else if [ -e '\(qBackup)' ]; then mv '\(qBackup)' '\(qTarget)'; fi; rm -rf '\(qStaging)'; exit 1; fi"
@@ -275,12 +300,11 @@ final class UpdateInstaller {
 
             // 5. 重启新版本 App 后结束当前进程。
             DispatchQueue.main.async {
-                // v2.10.10: 更新替换 bundle 后 macOS 会把「辅助功能」授权与旧二进制解绑，
-                // 新版本首次启动通常需要重新授权。置标记，供下次启动弹出「更新后重新授权」引导；
-                // 同时在安装面板文案里提前告知用户「重启后请重新授权辅助功能」。
-                UserDefaults.standard.set(true, forKey: UserPreferenceKeys.pendingAccessibilityReauthAfterUpdate)
-                progress("更新完成，正在重启…（重启后如快捷键失效，请重新授权「辅助功能」）")
-                NSLog("[UpdateInstaller] 安装完成，重启后请重新授权辅助功能（隐私与安全性 → 辅助功能）")
+                PermissionUpgradeState.shared.recordInstalled(from: oldIdentity, to: newIdentity,
+                                                               transition: identityTransition)
+                UserDefaults.standard.set(false, forKey: UserPreferenceKeys.pendingAccessibilityReauthAfterUpdate)
+                progress("更新完成，正在重启…")
+                NSLog("[UpdateInstaller] 安装完成；权限以新版系统预检为准，不自动清除授权")
 
                 // P2-5 (v2.10.8): relaunch 时序加固。旧版用固定 `sleep 1` 猜测退出耗时，
                 // 若本进程退出慢于 1s，open 会命中「App 仍在运行」而无法拉起新实例（甚至

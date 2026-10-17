@@ -27,6 +27,7 @@ import ClipSlotsKit
 /// 弹窗（改名输入、删除确认）留在内部：它们纯粹是本控件的交互细节，外抛只会让调用方多背两个
 /// `@State`。
 struct CanvasProjectSwitcher: View {
+    private typealias AppTheme = CanvasTheme
 
     @ObservedObject var canvas: CanvasStore
 
@@ -258,6 +259,7 @@ struct CanvasProjectSwitcher: View {
 /// 抽出来是因为 `Button` 在 popover 里默认只有文字可点、且没有悬停反馈 —— 而"整行可点"是所有
 /// 原生菜单的基本手感，缺了它用户会以为这一行是标题。
 private struct HoverRow<Content: View>: View {
+    private typealias AppTheme = CanvasTheme
     var enabled: Bool = true
     let action: () -> Void
     @ViewBuilder let content: () -> Content

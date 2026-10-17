@@ -14,6 +14,7 @@ private final class SecurityFixture {
     var releaseRead: DispatchSemaphore?
     var mutationStarted: DispatchSemaphore?
     private(set) var reads = 0
+    private(set) var updates = 0
     private(set) var adds = 0
     private(set) var deletes = 0
 
@@ -33,6 +34,7 @@ private final class SecurityFixture {
         }, update: { _, attributes in
             self.lock.lock()
             defer { self.lock.unlock() }
+            self.updates += 1
             self.mutationStarted?.signal()
             guard self.writeStatus == errSecSuccess else { return self.writeStatus }
             guard self.value != nil else { return errSecItemNotFound }
@@ -104,6 +106,9 @@ private enum KeychainRegression {
         try store.writeAPIKey("  synthetic-new\n")
         check(store.readAPIKey() == "synthetic-new", "write did not update cache")
         check(success.reads == 2 && success.adds == 0, "update must preserve the existing item")
+        let updates = success.updates
+        try store.writeAPIKey("synthetic-new")
+        check(success.updates == updates, "saving an unchanged cached key must not authorize another update")
         try store.writeAPIKey(" \n")
         check(store.readAPIKey() == nil && success.deletes == 1, "blank write must delete without deadlock")
 

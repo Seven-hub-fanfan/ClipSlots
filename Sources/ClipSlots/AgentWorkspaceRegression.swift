@@ -50,15 +50,139 @@ extension CanvasWorkspaceView {
             mainWindow.makeKeyAndOrderFront(nil)
             await settle(0.15)
         }
+        if ProcessInfo.processInfo.environment["CLIPSLOTS_BA_CANVAS_PROBE"] == "1" {
+            await runByteArtistCanvasProbe(directory: directory, check: check)
+            let report: [String: Any] = ["passed": passed, "failures": failures,
+                                         "scope": "BA canvas routing, recovery, field selection, media saving and themed native UI"]
+            try? JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys])
+                .write(to: directory.appendingPathComponent("report.json"))
+            NSApp.terminate(nil)
+            return
+        }
+        if ProcessInfo.processInfo.environment["CLIPSLOTS_DIRECTORY_PROBE"] == "1" {
+            await runAgentDirectoryProbe(directory: directory, check: check)
+            let report: [String: Any] = ["passed": passed, "failures": failures,
+                                         "scope": "OS bookmarks, conversation routing, local file tools and native directory UI"]
+            try? JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys])
+                .write(to: directory.appendingPathComponent("report.json"))
+            NSApp.terminate(nil)
+            return
+        }
+        if ProcessInfo.processInfo.environment["CLIPSLOTS_SESSION_SYNC_PROBE"] == "1" {
+            await runAgentSessionSyncProbe(canvas: canvas, store: store, directory: directory, check: check)
+            let locked = (CGSessionCopyCurrentDictionary() as? [String: Any])?["CGSSessionScreenIsLocked"] as? Bool ?? false
+            let report: [String: Any] = [
+                "passed": passed, "failures": failures, "sessionLocked": locked,
+                "desktopFocused": mainWindow.isKeyWindow && NSApp.isActive,
+                "systemInputValidated": false,
+                "scope": "Isolated session files, project routing, native view actions and local backend fixtures"]
+            try? JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys])
+                .write(to: directory.appendingPathComponent("report.json"))
+            NSApp.terminate(nil)
+            return
+        }
+        if ProcessInfo.processInfo.environment["CLIPSLOTS_SKILL_LAYOUT_PROBE"] == "1" {
+            let desktopFocused = mainWindow.isKeyWindow && NSApp.isActive
+            await runAgentComposerLayoutProbe(directory: directory, check: check)
+            let sessions = AgentSessionStore()
+            check(sessions.session(for: .edit) === sessions.edit
+                  && sessions.session(for: .agent) === sessions.agent
+                  && sessions.edit !== sessions.agent && sessions.canvas !== sessions.agent,
+                  "workspace and sidebars have independent session identities")
+            sessions.edit.draft = "编辑侧栏独立草稿"
+            sessions.agent.draft = "顶部 Agent 独立草稿"
+            sessions.edit.clearHistory()
+            check(sessions.edit.recentConversations.first?.draft == "编辑侧栏独立草稿"
+                  && sessions.agent.draft == "顶部 Agent 独立草稿"
+                  && sessions.agent.recentConversations.isEmpty,
+                  "archiving a sidebar conversation does not copy it into workspace history")
+            check(sessions.agent.flushSession(), "workspace draft persists to its own file")
+            let reopened = AgentSessionStore()
+            check(reopened.agent.draft == "顶部 Agent 独立草稿"
+                  && reopened.edit.recentConversations.first?.draft == "编辑侧栏独立草稿",
+                  "restart restores separate workspace and sidebar histories")
+            let locked = (CGSessionCopyCurrentDictionary() as? [String: Any])?["CGSSessionScreenIsLocked"] as? Bool ?? false
+            let report: [String: Any] = [
+                "passed": passed, "failures": failures, "sessionLocked": locked,
+                "desktopFocused": desktopFocused, "systemInputValidated": false,
+                "geometryCases": 72,
+                "scope": "Offscreen native view geometry and process-local accessibility actions"]
+            try? JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys])
+                .write(to: directory.appendingPathComponent("report.json"))
+            NSApp.terminate(nil)
+            return
+        }
         check(mainWindow.isKeyWindow && NSApp.isActive, "native desktop focus")
+        if ProcessInfo.processInfo.environment["CLIPSLOTS_WORKFLOW_SKILL_PROBE"] == "1" {
+            await runWorkflowSkillProbe(store: store, canvas: canvas, directory: directory, check: check)
+            let locked = (CGSessionCopyCurrentDictionary() as? [String: Any])?["CGSSessionScreenIsLocked"] as? Bool ?? false
+            let report: [String: Any] = ["passed": passed, "failures": failures, "sessionLocked": locked]
+            try? JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys])
+                .write(to: directory.appendingPathComponent("report.json"))
+            NSApp.terminate(nil)
+            return
+        }
         check(WorkspaceMode.allCases.map(\.rawValue) == ["edit", "canvas", "agent"], "three workspace routes")
+        let defaults = UserDefaults.standard
+        let oldSidebarBackend = defaults.string(forKey: TikaBackendPreferences.backendKindKey)
+        let oldWorkspaceBackend = defaults.string(forKey: AgentPreferences.workspaceBackendKey)
+        defaults.set(AgentBackendKind.deepseek.rawValue, forKey: TikaBackendPreferences.backendKindKey)
+        defaults.set(AgentBackendKind.deepseek.rawValue, forKey: AgentPreferences.workspaceBackendKey)
         let sessions = AgentSessionStore()
         check(sessions.session(for: .agent) === sessions.agent && sessions.agent !== sessions.edit
               && sessions.agent !== sessions.canvas, "three isolated sessions")
-        let oldBackend = UserDefaults.standard.string(forKey: TikaBackendPreferences.backendKindKey)
-        UserDefaults.standard.set("codex", forKey: CodexPreferences.workspaceBackendKey)
-        check(UserDefaults.standard.string(forKey: TikaBackendPreferences.backendKindKey) == oldBackend,
-              "workspace backend does not change sidebars")
+        check(AgentBackendScope(workspaceMode: .edit) == .sidebar
+              && AgentBackendScope(workspaceMode: .canvas) == .sidebar
+              && AgentBackendScope(workspaceMode: .agent) == .workspace,
+              "workspace routes share explicit backend scopes")
+
+        defaults.set("codex", forKey: AgentPreferences.workspaceBackendKey)
+        let legacySelection = AgentBackendCoordinator.selection(for: .workspace)
+        check(legacySelection.kind == .deepseek && legacySelection.backend is AgentService,
+              "legacy backend safely falls back as one selection")
+
+        AgentBackendCoordinator.setKind(.tika, for: .workspace)
+        await settle()
+        check(sessions.agent.backendKind == .tika && sessions.edit.backendKind == .deepseek
+              && sessions.canvas.backendKind == .deepseek,
+              "workspace backend notification updates only workspace")
+        var baseConfig = AgentConfig(model: "deepseek-reasoner",
+                                     thinkingMode: .enabled,
+                                     reasoningEffort: "high")
+        let question = AgentMessage(role: .user, content: "保持上下文")
+        let tikaSelection = AgentBackendCoordinator.selection(for: .workspace)
+        let invocation = tikaSelection.invocation(
+            history: [question], config: baseConfig, tools: nil)
+        baseConfig.model = "changed-after-snapshot"
+        check(tikaSelection.backend is TikaCLIService
+              && invocation.history == [question]
+              && invocation.config.model.isEmpty
+              && invocation.config.reasoningEffort == nil
+              && invocation.config.thinkingMode == .serverDefault,
+              "selection atomically normalizes backend invocation context")
+
+        AgentBackendCoordinator.setKind(.tika, for: .sidebar)
+        await settle()
+        check(sessions.edit.backendKind == .tika && sessions.canvas.backendKind == .tika
+              && sessions.agent.backendKind == .tika,
+              "sidebar backend notification preserves workspace selection")
+        AgentBackendCoordinator.setKind(.deepseek, for: .workspace)
+        await settle()
+        check(sessions.agent.backendKind == .deepseek && sessions.edit.backendKind == .tika,
+              "workspace change leaves sidebar context unchanged")
+
+        if let oldSidebarBackend {
+            defaults.set(oldSidebarBackend, forKey: TikaBackendPreferences.backendKindKey)
+        } else {
+            defaults.removeObject(forKey: TikaBackendPreferences.backendKindKey)
+        }
+        if let oldWorkspaceBackend {
+            defaults.set(oldWorkspaceBackend, forKey: AgentPreferences.workspaceBackendKey)
+        } else {
+            defaults.removeObject(forKey: AgentPreferences.workspaceBackendKey)
+        }
+        AgentBackendCoordinator.broadcastChange()
+        await settle()
         for mode in WorkspaceMode.allCases {
             NotificationCenter.default.post(name: .setWorkspaceMode, object: nil, userInfo: ["mode": mode.rawValue])
             await settle(0.5)
@@ -85,17 +209,18 @@ extension CanvasWorkspaceView {
         check(model.messages.last?.content.contains("镜头") == true, "workspace streaming completes")
         check(model.transcript.count == 3, "workspace includes tool result in transcript")
         check(model.flushSession(), "workspace persists history")
-        let codex = CodexAgentService(configuration: .init(executable: "/missing", workingDirectory: directory.path))
-        let restored = AgentChatModel(displayName: "恢复", backend: codex, persistenceURL: path)
-        check(restored.messages == model.messages && codex.sessionID == "workspace-fixture-thread", "restart restores history and Codex thread")
+        let restored = AgentChatModel(displayName: "恢复", backend: AgentWorkspaceFixtureBackend(), persistenceURL: path)
+        check(restored.messages == model.messages, "restart restores complete local history")
+        let beforeRead = try? Data(contentsOf: path)
+        check(restored.flushSession() && beforeRead == (try? Data(contentsOf: path)),
+              "opening and flushing unchanged history preserves original bytes")
         restored.setBackend(AgentService(transport: AgentScriptedTransport(steps: [
             .sse("data: {\"choices\":[{\"delta\":{\"content\":\"来自另一后端的回答\"}}]}\n\ndata: [DONE]\n\n")
         ]), secretStore: AgentInMemorySecretStore(key: "local-fixture")))
         restored.send(text: "切到另一后端补充上下文", config: AgentConfig(), enabledSkills: [])
         await settle()
-        restored.setBackend(codex)
-        check(codex.sessionID == nil && restored.messages.last?.content == "来自另一后端的回答",
-              "provider switch rebuilds Codex context from full local history")
+        check(restored.messages.last?.content == "来自另一后端的回答",
+              "provider switch preserves history and completes through DeepSeek")
 
         model.clearHistory()
         let savedID = model.recentConversations.first?.id
@@ -103,13 +228,8 @@ extension CanvasWorkspaceView {
         model.draft = "下一段创作的草稿"
         let file = directory.appendingPathComponent("notes.md")
         try? "附件内容".write(to: file, atomically: true, encoding: .utf8)
-        model.addAttachments([file])
-        for _ in 0..<50 {
-            if !model.isAddingAttachments { break }
-            await settle(0.02)
-        }
-        check(model.draftAttachments.count == 1, "attachment imports into draft")
-        check(model.draftAttachments.first?.path != file.path, "attachment has durable private copy")
+        model.draftAttachments = [.init(path: file.path, name: "notes.md")]
+        check(model.draftAttachments.count == 1, "legacy draft attachment fixture loaded")
         model.clearHistory()
         let draftID = model.recentConversations.first?.id
         if let savedID { model.openConversation(id: savedID) }
@@ -117,37 +237,6 @@ extension CanvasWorkspaceView {
               "opening conversation restores its own text and attachments")
         if let draftID { model.openConversation(id: draftID) }
         check(model.draft == "下一段创作的草稿" && model.draftAttachments.count == 1, "draft attachments restore after switching")
-        let imported = AgentChatModel(displayName: "桌面联动", backend: codex,
-            persistenceURL: directory.appendingPathComponent("agent-sessions/imported.json"))
-        imported.draft = "保留本地未发送草稿"
-        let desktopThread = CodexThreadSummary([
-            "id": "desktop-import", "name": "桌面历史", "cwd": .string(directory.path),
-            "modelProvider": "custom", "model": "custom-model", "reasoningEffort": "high",
-            "status": ["type": "idle"]
-        ])!
-        let importedMessages = [AgentMessage(role: .user, content: "桌面消息"), AgentMessage(role: .assistant, content: "桌面答复")]
-        imported.openCodexThread(desktopThread, messages: importedMessages)
-        check(imported.recentConversations.first?.draft == "保留本地未发送草稿", "desktop import archives local draft")
-        check(imported.codexContext?.provider == "custom" && imported.codexContext?.model == "custom-model",
-              "desktop import preserves provider and model")
-        imported.draft = "桌面续聊草稿"
-        imported.openCodexThread(desktopThread, messages: importedMessages + [AgentMessage(role: .assistant, content: "另一客户端更新")])
-        check(imported.draft == "桌面续聊草稿" && imported.messages.last?.content == "另一客户端更新",
-              "desktop refresh updates history while preserving draft")
-        imported.flushSession()
-        let reloaded = AgentChatModel(displayName: "桌面恢复", backend: codex,
-            persistenceURL: directory.appendingPathComponent("agent-sessions/imported.json"))
-        check(reloaded.codexContext?.cwd == directory.path && reloaded.transcript.count == 3,
-              "desktop metadata and transcript survive restart")
-        let busyThread = CodexThreadSummary(["id": "desktop-import", "cwd": .string(directory.path), "status": ["type": "active"]])!
-        imported.openCodexThread(busyThread, messages: importedMessages)
-        check(!imported.send(text: "不能重入", config: AgentConfig(), enabledSkills: []) && imported.draft == "桌面续聊草稿",
-              "active desktop thread refuses send without losing draft")
-        imported.selectProject(.init(id: directory.path, name: "项目", path: directory.path, isOfficial: false))
-        check(imported.codexThreadID == nil && imported.isEmpty && imported.codexContext?.cwd == directory.path,
-              "project switch creates independent conversation")
-        imported.openCodexThread(desktopThread, messages: importedMessages)
-        check(imported.draft == "桌面续聊草稿", "reopening desktop history restores its local draft")
         check(!model.send(text: model.draft, config: AgentConfig(), enabledSkills: []) && model.draftAttachments.count == 1,
               "unsupported backend does not silently send attachments")
         model.draftAttachments = []
@@ -219,8 +308,8 @@ extension CanvasWorkspaceView {
             fieldEditor?.deleteBackward(nil)
             await settle()
         } else { check(false, "history search is accessible") }
-        check(nodes.contains { ($0.accessibilityLabel?() ?? "") == "添加附件" },
-              "attachment control is accessible")
+        check(!nodes.contains { ($0.accessibilityLabel?() ?? "") == "添加附件" },
+              "unsupported file-upload control is removed")
         if let button = nodes.first(where: { ($0.accessibilityIdentifier?() ?? "") == "agent-new-conversation" }) {
             let previous = model.selectedConversationID
             check(button.accessibilityPerformPress?() == true, "native new conversation button responds")
@@ -230,46 +319,17 @@ extension CanvasWorkspaceView {
         } else { check(false, "new conversation button is accessible") }
         let preservedDraft = "页面切换后保留草稿"
         model.draft = preservedDraft
-        for (identifier, expected) in [
-            ("codex-nav-定时任务", "定时任务"),
-            ("codex-page-link-projects", "项目"),
-            ("codex-page-link-review", "代码审查"),
-            ("codex-page-link-tools", "Skills 与 MCP")
-        ] {
-            let control = elements(host).first { ($0.accessibilityIdentifier?() ?? "") == identifier }
-            check(control?.accessibilityPerformPress?() == true, "\(expected) navigation responds")
-            await settle(0.4)
-            let pageNodes = elements(host)
-            let text = pageNodes.flatMap { node in
-                [node.accessibilityLabel?(), node.accessibilityTitle?(),
-                 (node as? NSAccessibilityProtocol)?.accessibilityValue() as? String].compactMap { $0 }
-            }
-            check(text.contains(expected), "\(expected) real page mounts")
-            check(model.draft == preservedDraft, "\(expected) preserves chat draft")
-            if let image = host.bitmapImageRepForCachingDisplay(in: host.bounds) {
-                host.cacheDisplay(in: host.bounds, to: image)
-                try? image.representation(using: .png, properties: [:])?
-                    .write(to: directory.appendingPathComponent("canvas-codex-page-\(expected).png"))
-            }
-            if expected == "定时任务" {
-                let create = pageNodes.first { ($0.accessibilityIdentifier?() ?? "") == "codex-automation-create" }
-                check(create?.accessibilityPerformPress?() == true, "automation create responds")
-                await settle()
-                check(!window.sheets.isEmpty, "automation editor opens natively")
-                if let sheet = window.sheets.first, let content = sheet.contentView {
-                    let cancel = elements(content).first {
-                        ($0.accessibilityLabel?() ?? $0.accessibilityTitle?() ?? "") == "取消"
-                    }
-                    _ = cancel?.accessibilityPerformPress?()
-                    await settle()
-                    if !window.sheets.isEmpty { window.endSheet(sheet) }
-                }
-            }
-        }
-        let back = elements(host).first { ($0.accessibilityIdentifier?() ?? "") == "codex-page-link-chat" }
-        check(back?.accessibilityPerformPress?() == true, "return to Codex responds")
+        let toggle = elements(host).first { ($0.accessibilityIdentifier?() ?? "") == "agent-nav-展开或收起会话栏" }
+        check(toggle?.accessibilityPerformPress?() == true, "conversation rail toggles")
         await settle()
-        check(editors(host).count == 1 && model.draft == preservedDraft, "return restores native composer and draft")
+        check(model.draft == preservedDraft && editors(host).count == 1, "rail toggle preserves composer draft")
+        let home = elements(host).first { ($0.accessibilityIdentifier?() ?? "") == "agent-nav-主页" }
+        check(home?.accessibilityPerformPress?() == true, "home restores conversation rail")
+        await settle()
+        check(elements(host).contains { ($0.accessibilityIdentifier?() ?? "") == "agent-history-search" },
+              "home restores history search")
+        check(!elements(host).contains { ($0.accessibilityIdentifier?() ?? "").hasPrefix("codex-") },
+              "workspace contains no Codex controls")
         for skin in [AppSkin.minimal, .colorful] {
             AppSkinCenter.apply(skin)
             for appearance in ["light", "dark"] {
@@ -287,41 +347,13 @@ extension CanvasWorkspaceView {
             }
         }
         window.close()
-        do {
-            let fixture = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
-                .deletingLastPathComponent().deletingLastPathComponent()
-                .appendingPathComponent("Tests/CodexProtocolRegression/fixture.py")
-            let taskStore = try CodexAutomationStore(url: directory.appendingPathComponent("schedule-regression/tasks.json"))
-            let config = CodexServerConfiguration(executable: "/usr/bin/python3", workingDirectory: directory.path,
-                codexHome: directory.appendingPathComponent("schedule-empty-home").path,
-                arguments: [fixture.path, "task", directory.appendingPathComponent("schedule-rpc.jsonl").path])
-            let scheduler = CodexAutomationModel(store: taskStore, configuration: config)
-            var job = CodexAutomation()
-            job.name = "原生定时验收"; job.prompt = "本地模拟"; job.cwd = directory.path
-            job.frequency = .once; job.nextRun = Date().addingTimeInterval(-1)
-            check(scheduler.save(job), "native schedule save")
-            scheduler.tick()
-            scheduler.tick()
-            for _ in 0..<100 {
-                if scheduler.activeID == nil { break }
-                await settle(0.05)
-            }
-            check(scheduler.runs.count == 1 && scheduler.runs.first?.status == .completed,
-                  "native scheduler due tick executes exactly once")
-            check(scheduler.runs.first?.output.contains("完成") == true
-                  && scheduler.runs.first?.threadID == "fixture-thread", "scheduled result and thread persist")
-            scheduler.toggle(scheduler.tasks[0])
-            scheduler.toggle(scheduler.tasks[0])
-            scheduler.tick(now: Date().addingTimeInterval(3600))
-            check(scheduler.runs.count == 1, "paused schedule never executes")
-            scheduler.delete(job.id)
-            check(scheduler.tasks.isEmpty && scheduler.runs.count == 1, "native delete retains run results")
-        } catch { check(false, "native scheduler: \(error.localizedDescription)") }
         await runAgentReadabilityProbe(directory: directory, check: check)
         await runAgentModelProbe(directory: directory, check: check)
         await runAgentComposerProbe(directory: directory, check: check)
         await runAgentInteractionProbe(directory: directory, check: check)
         await runCanvasAgentProbe(store: store, directory: directory, check: check)
+        await runWorkflowSkillProbe(store: store, canvas: canvas, directory: directory, check: check)
+        await runRetainedAgentProbe(directory: directory, check: check)
         let locked = (CGSessionCopyCurrentDictionary() as? [String: Any])?["CGSSessionScreenIsLocked"] as? Bool ?? false
         let report: [String: Any] = ["passed": passed, "failures": failures, "sessionLocked": locked]
         try? JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys])

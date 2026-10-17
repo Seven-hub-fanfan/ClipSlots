@@ -4,6 +4,12 @@ import ClipSlotsKit
 
 @MainActor
 final class CanvasAgentContext: ObservableObject {
+    static let summarizePrompt = """
+    总结这个项目可复用的创作方法。先分页读取全图目录和连线，再读取关键流程的正文、文本优化指令、合成 prompt、参数及已有真实运行记录。
+    按适用场景、可变输入、稳定步骤、连线依据、审美约束、验收标准、已知限制组织结果。
+    分开列出图事实、用户已确认的决策和待确认的推测；关键结论附来源节点 ID。
+    列出读取范围和遗漏，不把媒体索引说成看过画面。只输出供我预览的 Skill 方法草稿。
+    """
     struct Preview: Identifiable {
         let id = UUID()
         let target: AgentCanvasReference
@@ -13,6 +19,23 @@ final class CanvasAgentContext: ObservableObject {
         var appliedHistoryID: String?
     }
     @Published var preview: Preview?
+    struct SkillDraft: Identifiable {
+        let id = UUID()
+        let snapshot: CanvasAgentSnapshot
+        let turn: CanvasAgentTurn
+        let skill: WorkflowSkill
+    }
+    @Published var skillDraft: SkillDraft?
+    struct GraphPreview: Identifiable {
+        var id: String { mutation.mutationID }
+        let mutation: AgentCanvasMutation
+        let conversationID: UUID
+        let runID: String
+        var plan: AgentCanvasSync.Plan
+        var isApplied = false
+    }
+    @Published private(set) var pendingGraphPreviews: [GraphPreview] = []
+    @Published var graphPreview: GraphPreview?
     @Published private(set) var error: String?
     @Published private(set) var status: String?
     private weak var canvas: CanvasStore?
@@ -28,11 +51,59 @@ final class CanvasAgentContext: ObservableObject {
         projectObserver = canvas.$activeProjectId.sink { [weak self] next in
             guard let self, next != self.projectID else { return }
             self.dismissPreview()
+            self.skillDraft = nil
             self.onLeaveProject?()
         }
     }
 
     var isActive: Bool { canvas?.activeProjectId == projectID }
+
+    func belongs(to canvas: CanvasStore) -> Bool { self.canvas === canvas }
+
+    func captureTurn(supportsTools: Bool) throws -> CanvasAgentTurn {
+        guard isActive, let canvas, let store else { throw AgentCanvasError.staleTarget }
+        let runs = GenerationRunStore.shared.runs(project: projectID)
+        let (graph, _) = CanvasWorkflowCapture.snapshot(canvas: canvas, store: store, runs: runs)
+        let snapshot = CanvasAgentSnapshot(graph: graph, runs: runs)
+        try CanvasAgentSnapshotStore().save(snapshot)
+        return CanvasAgentTurn(snapshot: graph, supportsTools: supportsTools)
+    }
+
+    func reader(for turn: CanvasAgentTurn) throws -> CanvasAgentReadTools {
+        guard isActive, turn.projectID == projectID else { throw AgentCanvasError.staleTarget }
+        let snapshot = try CanvasAgentSnapshotStore().load(project: projectID, id: turn.snapshotID)
+        guard snapshot.graph.graphRevision == turn.graphRevision else {
+            throw AgentOperationError("快照内容与消息修订不匹配，请重新发送。")
+        }
+        return CanvasAgentReadTools(snapshot: snapshot)
+    }
+
+    func locate(nodeID: String, turn: CanvasAgentTurn) {
+        do {
+            let graph = try reader(for: turn).snapshot.graph
+            guard let source = graph.nodes.first(where: { $0.id == nodeID }),
+                  canvas?.nodes.contains(where: {
+                      $0.id == nodeID && $0.createdAt == source.configuration.createdAt
+                      && $0.groupId == source.configuration.groupId && $0.slot == source.configuration.slot
+                  }) == true else { throw AgentCanvasError.staleTarget }
+            canvas?.focusAgentNode(nodeID)
+            error = nil
+        } catch { self.error = error.localizedDescription }
+    }
+
+    func prepareSkill(method: String, messageID: UUID, turn: CanvasAgentTurn, receipts: [CanvasReadReceipt]) {
+        do {
+            let snapshot = try reader(for: turn).snapshot
+            let skill = try WorkflowSkill(snapshot: snapshot, method: method, messageID: messageID, receipts: receipts)
+            skillDraft = SkillDraft(snapshot: snapshot, turn: turn, skill: skill)
+            error = nil
+        } catch { self.error = error.localizedDescription }
+    }
+
+    func createWorkflowProject(name: String, instance: WorkflowSkill.Instance) async throws {
+        guard isActive, let canvas else { throw AgentCanvasError.staleTarget }
+        try await canvas.createWorkflowProject(name: name, instance: instance)
+    }
 
     func reference(for node: CanvasNode) throws -> AgentCanvasReference {
         guard isActive, let store,
@@ -144,8 +215,57 @@ final class CanvasAgentContext: ObservableObject {
         error = nil
     }
 
+    func prepareMutation(_ payload: JSONValue, conversationID: UUID, runID: String) {
+        do {
+            guard isActive, let canvas else { throw AgentCanvasError.staleTarget }
+            let mutation = try JSONDecoder().decode(AgentCanvasMutation.self, from: JSONEncoder().encode(payload))
+            let plan = try AgentCanvasSync.plan(mutation, current: canvas.gatewayDocument(),
+                expectedProject: projectID, expectedConversation: conversationID.uuidString, expectedRun: runID)
+            guard !plan.alreadyApplied else { return }
+            let preview = GraphPreview(mutation: mutation, conversationID: conversationID, runID: runID, plan: plan)
+            if !pendingGraphPreviews.contains(where: {
+                $0.id == preview.id && $0.conversationID == conversationID && $0.runID == runID
+            }) { pendingGraphPreviews.append(preview) }
+            pendingGraphPreviews = Array(pendingGraphPreviews.suffix(100))
+        } catch { self.error = error.localizedDescription }
+    }
+
+    func presentMutation(_ source: GraphPreview, conversationID: UUID) {
+        guard source.conversationID == conversationID, isActive else { return }
+        do {
+            guard let canvas else { throw AgentCanvasError.unavailable }
+            var source = source
+            source.plan = try AgentCanvasSync.plan(source.mutation, current: canvas.gatewayDocument(),
+                expectedProject: projectID, expectedConversation: conversationID.uuidString, expectedRun: source.runID)
+            graphPreview = source
+            status = nil
+            error = nil
+        } catch { self.error = error.localizedDescription }
+    }
+
+    func applyMutation(conversationID: UUID) {
+        do {
+            guard var preview = graphPreview, preview.conversationID == conversationID,
+                  !preview.isApplied, isActive, let canvas, let store else { return }
+            let plan = try canvas.applyGatewayMutation(preview.mutation,
+                conversationID: conversationID.uuidString, runID: preview.runID) { node in
+                    store.canvasReadFullContent(groupId: node.groupId, slot: node.slot) != nil
+                }
+            preview.plan = plan
+            preview.isApplied = true
+            graphPreview = preview
+            pendingGraphPreviews.removeAll {
+                $0.id == preview.id && $0.conversationID == conversationID && $0.runID == preview.runID
+            }
+            status = plan.alreadyApplied ? "此变更已应用。" : "已同步画布，支持从画布历史撤销。"
+            error = nil
+        } catch { self.error = error.localizedDescription }
+    }
+
     func dismissPreview() {
         preview = nil
+        graphPreview = nil
+        pendingGraphPreviews = []
         status = nil
         error = nil
     }

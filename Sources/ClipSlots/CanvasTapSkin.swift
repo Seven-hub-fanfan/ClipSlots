@@ -137,52 +137,20 @@ enum TapSkin {
     static let placeAnim: Animation = .interactiveSpring(response: 0.26, dampingFraction: 0.86)
 }
 
-/// 给一块区域挂 `NSCursor`（v2.16.0）。
-///
-/// ## 为什么不用 `.onHover { NSCursor.x.push()/pop() }`
-///
-/// 那是这个项目原来的做法在其他页面上能凑合，但在画布上不行：
-/// - `onHover` 的 false 事件在**快速划过**时会丢（SwiftUI 已知行为），push/pop 不配对，
-///   于是手型光标黏在屏幕上直到用户去点别的窗口；
-/// - 拖拽过程中鼠标已经被系统捕获，`onHover` 根本不再触发，而"拖动时要变成握拳手"恰恰
-///   发生在这段时间里。
-///
-/// `NSView.addCursorRect` + `cursorUpdate` 是 AppKit 为此提供的正规通道：矩形跟随布局，
-/// 光标由窗口统一管理，不存在配对问题。
-struct CursorArea: NSViewRepresentable {
-    var cursor: NSCursor
-
-    func makeNSView(context: Context) -> CursorNSView {
-        let v = CursorNSView()
-        v.cursor = cursor
-        return v
-    }
-
-    func updateNSView(_ nsView: CursorNSView, context: Context) {
-        guard nsView.cursor != cursor else { return }
-        nsView.cursor = cursor
-        nsView.window?.invalidateCursorRects(for: nsView)
-    }
-
-    final class CursorNSView: NSView {
-        var cursor: NSCursor = .arrow
-
-        /// 光标区域必须**不**参与命中测试：它铺在卡片之上，参与命中就会把点击、双击、
-        /// 拖拽全吃掉——那是比"光标不对"严重得多的故障。
-        override func hitTest(_ point: NSPoint) -> NSView? { nil }
-
-        override func resetCursorRects() {
-            addCursorRect(bounds, cursor: cursor)
-        }
-    }
-}
-
 extension View {
     /// 悬停在这块区域上时的光标。
     func tapCursor(_ cursor: NSCursor) -> some View {
-        onHover { inside in
-            if NSEvent.pressedMouseButtons == 0 {
-                (inside ? cursor : NSCursor.arrow).set()
+        onContinuousHover { phase in
+            guard NSEvent.pressedMouseButtons == 0 else { return }
+            let ended: Bool
+            switch phase {
+            case .active: ended = false
+            case .ended: ended = true
+            }
+            let next = ended ? NSCursor.arrow : cursor
+            DispatchQueue.main.async {
+                guard NSEvent.pressedMouseButtons == 0 else { return }
+                next.set()
             }
         }
     }
@@ -255,6 +223,7 @@ extension View {
 ///
 /// 只在主线程使用（SwiftUI 的 representable 回调与 AppDelegate 都在主线程）。
 final class CanvasChromePin {
+    private typealias TapSkin = CanvasSkin
     static let shared = CanvasChromePin()
 
     private struct Saved {

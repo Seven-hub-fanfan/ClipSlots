@@ -16,7 +16,7 @@ public enum CanvasGeometry {
 
     // MARK: - 缩放边界
 
-    public static let zoomMin: CGFloat = 0.25
+    public static let zoomMin: CGFloat = 0.15
     public static let zoomMax: CGFloat = 4.0
 
     /// 把任意缩放值钳制到合法区间。

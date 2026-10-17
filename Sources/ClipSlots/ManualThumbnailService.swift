@@ -137,8 +137,8 @@ enum ManualThumbnailMaker {
         //
         // TCC 归因到发起进程（ClipSlots），未授权时直接跑 screencapture 会由系统弹出
         // 「ClipSlots 想要录制此电脑的屏幕」授权窗——那是个普通层级窗口，实测经常被主窗口压在
-        // 后面，用户只看到「点了截图什么都没发生」。所以这里不去触发它，改弹我们自己的置顶
-        // 引导面板（level = .screenSaver，盖过 App 全部窗口），把用户直接送到设置页。
+        // 后面，用户只看到「点了截图什么都没发生」。所以先展示统一的非模态权限面板，
+        // 由用户主动授权；授权后不会自动重放截图操作。
         //
         // 注意顺序：预检必须在隐藏窗口**之前**，否则面板会在一片空屏上弹出。
         guard ScreenRecordingPermission.isAuthorized else {

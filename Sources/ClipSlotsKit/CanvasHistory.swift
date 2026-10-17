@@ -58,6 +58,9 @@ public struct CanvasHistoryEntry: Identifiable, Equatable {
         case edgeRole
         /// 改了节点的入参附件列表（增 / 删入参文件、入参提升为主体，v2.16.5）。
         case editAttachments
+        case groupNodes
+        case pileNodes
+        case duplicate
 
         /// 面板里显示的动作名。
         public var title: String {
@@ -75,6 +78,9 @@ public struct CanvasHistoryEntry: Identifiable, Equatable {
             case .disconnect: return "断开连接"
             case .edgeRole: return "调整连线用途"
             case .editAttachments: return "编辑入参文件"
+            case .groupNodes: return "调整编组"
+            case .pileNodes: return "调整堆叠"
+            case .duplicate: return "复制结构"
             }
         }
 
@@ -93,6 +99,9 @@ public struct CanvasHistoryEntry: Identifiable, Equatable {
             case .disconnect: return "scissors"
             case .edgeRole: return "arrow.triangle.branch"
             case .editAttachments: return "paperclip"
+            case .groupNodes: return "rectangle.3.group"
+            case .pileNodes: return "square.stack.3d.up"
+            case .duplicate: return "plus.square.on.square"
             }
         }
     }
@@ -155,6 +164,10 @@ public struct CanvasHistoryEntry: Identifiable, Equatable {
     /// 默认空数组：v2.11.x 时代写下的历史条目不带这两个字段，回放时"空 → 空"是正确的行为。
     public let beforeEdges: [CanvasEdge]
     public let afterEdges: [CanvasEdge]
+    public let beforeGroups: [CanvasNodeGroup]
+    public let afterGroups: [CanvasNodeGroup]
+    public let beforePiles: [CanvasPile]
+    public let afterPiles: [CanvasPile]
     public let slotEdit: SlotTextEdit?
     public let attachmentEdit: SlotAttachmentEdit?
 
@@ -166,6 +179,10 @@ public struct CanvasHistoryEntry: Identifiable, Equatable {
                 after: [CanvasNode] = [],
                 beforeEdges: [CanvasEdge] = [],
                 afterEdges: [CanvasEdge] = [],
+                beforeGroups: [CanvasNodeGroup] = [],
+                afterGroups: [CanvasNodeGroup] = [],
+                beforePiles: [CanvasPile] = [],
+                afterPiles: [CanvasPile] = [],
                 slotEdit: SlotTextEdit? = nil,
                 attachmentEdit: SlotAttachmentEdit? = nil) {
         self.id = id
@@ -176,6 +193,10 @@ public struct CanvasHistoryEntry: Identifiable, Equatable {
         self.after = after
         self.beforeEdges = beforeEdges
         self.afterEdges = afterEdges
+        self.beforeGroups = beforeGroups
+        self.afterGroups = afterGroups
+        self.beforePiles = beforePiles
+        self.afterPiles = afterPiles
         self.slotEdit = slotEdit
         self.attachmentEdit = attachmentEdit
     }
@@ -301,6 +322,7 @@ public enum CanvasKeyBinding {
         case redo
         /// Cmd+V：把剪贴板内容变成视口中心的一个新节点（v2.11.8）。
         case paste
+        case copy, duplicate
         /// Esc：从"某个临时态"退出来（编辑中的节点 / 打开的浮层 / 选中态），见 `.cancel` 的使用处。
         ///
         /// 注意这条只在**焦点不在文本框里**时才会走到：真正在编辑器里按 Esc 由 NSTextView 自己
@@ -309,6 +331,7 @@ public enum CanvasKeyBinding {
         /// "退出来"，如果没人接就表现为节点永远卡在编辑框里、下游 + 号也一直不出现。
         case cancel
         case selectTool, handTool, newNode, selectAll, fitContent, fitSelection
+        case group, ungroup, pile
         case none
     }
 
@@ -331,11 +354,15 @@ public enum CanvasKeyBinding {
         if keyCode == zKeyCode, command, !option {
             return shift ? .redo : .undo
         }
+        // TapNow's Mod+G creates a Pile. Group has its own toolbar entry.
+        if keyCode == 5, command, !shift, !option { return .pile }
         // ⌘V 必须是**干净的** ⌘V：⌘⇧V / ⌘⌥V 在各家 App 里是「粘贴为纯文本 / 匹配样式」这类
         // 另一件事，画布把它们一并吃掉会挡住系统或未来自己的功能，而用户完全看不出是谁吃的。
         if keyCode == vKeyCode, command, !shift, !option {
             return .paste
         }
+        if keyCode == 8, command, !shift, !option { return .copy }
+        if keyCode == 2, command, !shift, !option { return .duplicate }
         // Esc 只认裸 Esc：带修饰键的 Esc 在系统里另有含义（如 ⌘Esc 语音控制）。
         if keyCode == escapeKeyCode, !command, !shift, !option {
             return .cancel

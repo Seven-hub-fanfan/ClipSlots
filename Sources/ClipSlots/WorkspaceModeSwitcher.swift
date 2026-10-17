@@ -38,6 +38,7 @@ enum WorkspaceMode: String, CaseIterable, Identifiable, Equatable {
 /// 而这里只需要一个纯粹的视图路由器；两边各自演化互不牵连。
 struct WorkspaceModeSwitcher: View {
     @Binding var selection: WorkspaceMode
+    private var canvasPalette: Bool { selection == .canvas }
 
     /// 控件的固定宽度。
     ///
@@ -97,11 +98,11 @@ struct WorkspaceModeSwitcher: View {
         .frame(width: Self.preferredWidth, height: Self.segmentHeight + 3 * 2)
         .background(
             RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .fill(AppTheme.chipBackground)
+                .fill(canvasPalette ? CanvasTheme.chipBackground : AppTheme.chipBackground)
         )
         .overlay(
             RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .stroke(AppTheme.subtleBorder, lineWidth: 1)
+                .stroke(canvasPalette ? CanvasTheme.subtleBorder : AppTheme.subtleBorder, lineWidth: 1)
         )
     }
 
@@ -122,13 +123,13 @@ struct WorkspaceModeSwitcher: View {
                     // 不允许被压缩/换行：一旦文字进入多行或省略号路径，它的基线会整体偏移。
                     .fixedSize()
             }
-            .foregroundColor(isSelected ? AppTheme.chromeAccentInk : .secondary.opacity(0.85))
+            .foregroundColor(isSelected ? (canvasPalette ? CanvasTheme.chromeAccentInk : AppTheme.chromeAccentInk) : .secondary.opacity(0.85))
             .frame(width: Self.segmentWidth, height: Self.segmentHeight, alignment: .center)
             .background {
                 if isSelected {
                     // matchedGeometryEffect 让选中背景在两段之间**滑动**而不是闪现。
                     RoundedRectangle(cornerRadius: 8, style: .continuous)
-                        .fill(AppTheme.elevatedBackground)
+                        .fill(canvasPalette ? CanvasTheme.elevatedBackground : AppTheme.elevatedBackground)
                         .shadow(color: AppTheme.cardShadow(isEmpty: true), radius: 3, x: 0, y: 1)
                         .matchedGeometryEffect(id: "workspaceModeIndicator", in: indicator)
                 }

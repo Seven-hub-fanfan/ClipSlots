@@ -4,120 +4,227 @@ import ClipSlotsKit
 /// Crate 的提交、查询和写回共用一条执行链；内容仍由槽位存储持有。
 extension CanvasWorkspaceView {
     func runGenerationForSelection() {
+        runGeneration(nodeIDs: canvas.selectedNodeIds)
+    }
+
+    func runGeneration(nodeIDs: Set<String>, groupID: String? = nil) {
         inputRouter.anchorView?.window?.makeFirstResponder(nil)
-        let runnable = canvas.nodes.filter { $0.canGenerate || $0.kind == .text }
-        let selected = runnable.filter { canvas.selectedNodeIds.contains($0.id) }
-        let targets = selected.isEmpty && canvas.selectedNodeIds.isEmpty && runnable.count == 1 ? runnable : selected
+        let runnable = canvas.nodes.filter { $0.canGenerate }
+        let selected = runnable.filter { nodeIDs.contains($0.id) }
+        let targets = selected.isEmpty && nodeIDs.isEmpty && groupID == nil && runnable.count == 1 ? runnable : selected
         guard !targets.isEmpty else {
-            store.transientUI.showToast("先选中要生成的文本、图片或视频节点")
-            return
-        }
-        let promptNodes = targets.filter { $0.kind == .text }
-        if !promptNodes.isEmpty {
-            for node in promptNodes { startTextGeneration(node) }
-            if targets.count > promptNodes.count {
-                store.transientUI.showToast("先优化生图提示词，确认后再选择图片或视频节点生成", duration: 4)
-            }
+            store.transientUI.showToast("请选择图片或视频节点；文本润色请点击输入框右上角的“AI润色”")
             return
         }
         guard canvas.selectionGenerationTask == nil else {
             store.transientUI.showToast("选中节点正在按依赖顺序生成")
             return
         }
-        guard let ordered = CanvasEdgeInputs.generationOrder(nodes: targets, edges: canvas.edges) else {
+        guard let ordered = CanvasEdgeInputs.generationOrder(nodes: targets, edges: canvas.interactionEdges) else {
             store.transientUI.showToast("连线中存在循环，请断开循环后重试")
             return
         }
         let projectId = canvas.activeProjectId
         let selectedIds = Set(ordered.map(\.id))
+        let edges = CanvasEdgeInputs.generationEdges(canvas.interactionEdges)
+        let runID = UUID()
+        canvas.selectionGenerationID = runID
+        canvas.runningGroupID = groupID
+        canvas.selectionGenerationNodes = ordered
         canvas.selectionGenerationTask = Task { @MainActor in
-            defer { canvas.selectionGenerationTask = nil }
+            defer {
+                if canvas.selectionGenerationID == runID {
+                    canvas.selectionGenerationTask = nil
+                    canvas.selectionGenerationID = nil
+                    canvas.runningGroupID = nil
+                    canvas.selectionGenerationNodes = []
+                }
+            }
             var succeeded = Set<String>()
+            var upstreamResults: [String: String] = [:]
             for snapshot in ordered {
-                guard !Task.isCancelled, canvas.activeProjectId == projectId else { return }
-                let required = canvas.incomingEdges(of: snapshot.id)
+                guard !Task.isCancelled, canvas.activeProjectId == projectId,
+                      canvas.selectionGenerationID == runID else { return }
+                let required = edges.filter { $0.toNodeId == snapshot.id }
                     .map(\.fromNodeId).filter { selectedIds.contains($0) }
                 guard required.allSatisfy({ succeeded.contains($0) }) else {
                     store.transientUI.showToast("上游未完成，已跳过依赖它的节点", duration: 4)
                     continue
                 }
-                guard let task = startGeneration(snapshot) else { continue }
+                guard let live = canvas.selectionGenerationNode(snapshot),
+                      let task = generateAdjacentResults(live, upstreamResults: upstreamResults) else { continue }
                 await task.value
-                if let current = canvas.node(id: snapshot.id), current.createdAt == snapshot.createdAt,
-                   case .succeeded = current.state { succeeded.insert(snapshot.id) }
+                if let result = (canvas.adjacentLastResultIDs[live.id] ?? [])
+                    .compactMap({ canvas.node(id: $0) }).last(where: {
+                        if case .succeeded = $0.state { return true }; return false
+                    }) {
+                    succeeded.insert(snapshot.id)
+                    upstreamResults[live.id] = result.id
+                } else if !live.kind.isMediaNode, let current = canvas.selectionGenerationNode(snapshot),
+                          case .succeeded = current.state { succeeded.insert(snapshot.id) }
             }
         }
     }
 
+    /// The selected node is attempt one; count N allocates N-1 later results.
+    /// Recovery remains attached to the existing task and never creates a batch.
     @discardableResult
-    func startGeneration(_ snapshot: CanvasNode, reusingSeed: Bool = false, restarting: Bool = false) -> Task<Void, Never>? {
-        guard let node = canvas.node(id: snapshot.id), node.createdAt == snapshot.createdAt,
-              node.canGenerate else { return nil }
-        if node.needsGenerationRecovery && !restarting && !reusingSeed {
-            return recoverGeneration(node)
+    func generateAdjacentResults(_ snapshot: CanvasNode,
+                                 upstreamResults: [String: String] = [:],
+                                 preparedByteArtist: PreparedGenerationRequest? = nil) -> Task<Void, Never>? {
+        guard let source = canvas.node(id: snapshot.id), source.createdAt == snapshot.createdAt,
+              source.canGenerate else { return nil }
+        if source.needsGenerationRecovery { return recoverGeneration(source) }
+        guard source.kind.isMediaNode else { return startGeneration(source) }
+        guard GenerationRunStore.shared.latest(project: canvas.activeProjectId, node: source)?
+            .requiresSubmissionReconciliation != true else {
+            store.transientUI.showToast("上次提交结果未知，请先核对任务后再重新生成", duration: 4)
+            return nil
         }
-        let inputs = resolveEdgeInputs(for: node)
-        // #region debug-point A:resolved-inputs
-        #if DEBUG
-        if ProcessInfo.processInfo.environment["CLIPSLOTS_CONTROL_PROBE"] == "1" { var r = URLRequest(url: URL(string: "http://127.0.0.1:7784/event")!); r.httpMethod = "POST"; r.httpBody = try? JSONSerialization.data(withJSONObject: ["sessionId": "slot-input-controls", "runId": ProcessInfo.processInfo.environment["CANVAS_DEBUG_RUN"] ?? "pre-fix", "hypothesisId": "A", "msg": "[DEBUG] resolved generation inputs", "data": ["kind": node.kind.rawValue, "incoming": canvas.incomingEdges(of: node.id).count, "promptFragments": inputs.promptFragments.count, "images": inputs.assetPaths.count, "pending": inputs.pendingUpstreamCount]]); URLSession.shared.dataTask(with: r).resume() }
-        #endif
-        // #endregion
-        if let reason = inputs.blockingReason {
+        guard canvas.adjacentGenerationIDs[source.id] == nil else {
+            store.transientUI.showToast("本次生成已开始，请在结果节点查看进度")
+            return nil
+        }
+        guard store.flushCanvasTextDocuments() else { return nil }
+        var single = source
+        single.count = 1
+        let plan = CanvasWorkflowCapture.plan(node: single, canvas: canvas, store: store,
+                                             upstreamResults: upstreamResults)
+        if let reason = plan.blockingReasons.first {
             store.transientUI.showToast(reason, duration: 4)
             return nil
         }
-        let prompt = CanvasEdgeInputs.mergedPrompt(
-            own: store.canvasSlotText(groupId: node.groupId, slot: node.slot) ?? "",
-            upstream: inputs.promptFragments)
-        guard !prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-            store.transientUI.showToast(inputs.pendingUpstreamCount > 0
-                ? "上游还没出结果，先生成上游节点"
-                : CrateRequestError.emptyPrompt.userMessage)
-            return nil
+        if source.generationProvider == .byteartist {
+            do { _ = try validateByteArtist(source, plan: plan) }
+            catch { store.transientUI.showToast(error.localizedDescription, duration: 4); return nil }
+            if preparedByteArtist == nil {
+                return prepareByteArtistBatch(source, plan: plan, upstreamResults: upstreamResults)
+            }
         }
-        guard node.count == 1 else {
-            store.transientUI.showToast(CrateRequestError.unsupportedCount(node.count).userMessage)
-            return nil
-        }
-        let slotImages = inputImagePaths(for: node)
-        let ownImages = inputAttachments(for: node).filter(\.canvasIsImageLike)
-        if ownImages.count > slotImages.count {
-            store.transientUI.showToast("本节点有参考图片不可用，请在入参文件中检查或重新添加", duration: 4)
-            return nil
-        }
-        if node.kind == .video {
-            let info = CrateModelCatalogStore.shared.videoModels.first { $0.id == node.model }
-            let frames = CanvasEdgeInputs.videoFrames(edgeInputs: inputs, slotImages: slotImages, model: info)
-            if let info, info.requiresImageInput, frames.first == nil, frames.last == nil, frames.references.isEmpty {
-                store.transientUI.showToast(CrateRequestError.missingRequiredImage(model: node.model).userMessage)
+        let group = canvas.privateGroupId
+        guard store.ensureCanvasPrivateGroup(id: group, name: canvas.activeProject.privateGroupName) else { return nil }
+        var occupied = canvas.occupiedSlots(inGroup: group)
+        var slots: [Int] = []
+        for _ in 0..<(min(4, max(1, source.count)) - 1) {
+            guard let slot = store.allocateCanvasPrivateSlot(groupId: group, occupied: occupied) else {
+                store.transientUI.showToast("没有足够空槽创建本次生成结果")
                 return nil
             }
-            let request = CrateVideoRequest(
-                model: node.model, prompt: prompt, ratio: node.ratio,
-                resolution: (info?.supportsResolution ?? true) ? node.resolution : "",
-                duration: (info?.supportsDuration ?? true) ? node.duration : nil,
-                generateAudio: (info?.supportsAudio ?? false) ? node.generateAudio : nil,
-                firstFramePath: frames.first, lastFramePath: frames.last,
-                referenceImagePaths: frames.references, seed: reusingSeed ? node.seed : nil)
+            slots.append(slot)
+            occupied.insert(slot)
+        }
+        let inputs = inputAttachments(for: source)
+        let prompt = liveText(for: source)
+        var preparedSlots: [Int] = []
+        var createdResults = false
+        defer {
+            if !createdResults {
+                for slot in preparedSlots {
+                    _ = SpecialSlotStorage.canvasPrivate.clear(slot, in: group)
+                }
+            }
+        }
+        var inputIDs: [Int: [String]] = [:]
+        for slot in slots {
+            preparedSlots.append(slot)
+            guard store.writeCanvasSlotText(groupId: group, slot: slot, text: prompt) else {
+                store.transientUI.showToast("提示词保存失败，未提交生成")
+                return nil
+            }
+            var copies = inputs.map { attachment -> SlotContent.SlotAttachment in
+                var copy = SlotContent.SlotAttachment(name: attachment.name, type: attachment.type)
+                copy.storagePath = attachment.storageFileURL?.path ?? attachment.storagePath
+                copy.path = attachment.path
+                copy.originalPath = attachment.originalPath
+                copy.data = attachment.data
+                copy.url = attachment.url
+                return copy
+            }
+            if !copies.isEmpty {
+                guard store.writeCanvasSlotAttachments(groupId: group, slot: slot, attachments: copies) else {
+                    store.transientUI.showToast("参考文件保存失败，未提交生成")
+                    return nil
+                }
+                copies = store.canvasSlotAttachments(groupId: group, slot: slot)
+                inputIDs[slot] = copies.map { $0.id.uuidString }
+            }
+        }
+        let children = slots.isEmpty ? [] : canvas.addGenerationResults(
+            source: source, slots: slots, inputIDs: inputIDs, upstreamResults: upstreamResults)
+        guard children.count == slots.count else { return nil }
+        createdResults = true
+        let resultNodes = [source] + children
+        canvas.adjacentLastResultIDs[source.id] = resultNodes.map(\.id)
+        let batchID = UUID()
+        canvas.adjacentGenerationIDs[source.id] = batchID
+        // Capture every request before submitting any task. Batch siblings never
+        // inherit an output that finishes while another request is being prepared.
+        let tasks = resultNodes.compactMap {
+            startGeneration(canvas.node(id: $0.id) ?? $0, upstreamResults: upstreamResults,
+                            preparedPlan: plan, preparedByteArtist: preparedByteArtist)
+        }
+        let aggregate = Task { @MainActor in
+            defer {
+                if canvas.adjacentGenerationIDs[source.id] == batchID {
+                    canvas.adjacentGenerationIDs[source.id] = nil
+                    canvas.adjacentGenerationTasks[source.id] = nil
+                }
+            }
+            for task in tasks {
+                // Never cancel a submit that has not returned its remote ID.
+                // CanvasStore.stopGeneration owns the safe stop/recovery path.
+                await task.value
+            }
+        }
+        canvas.adjacentGenerationTasks[source.id] = aggregate
+        return aggregate
+    }
+
+    @discardableResult
+    func startGeneration(_ snapshot: CanvasNode, reusingSeed: Bool = false, restarting: Bool = false,
+                         upstreamResults: [String: String] = [:],
+                         preparedPlan: CanvasWorkflowResolver.Plan? = nil,
+                         preparedByteArtist: PreparedGenerationRequest? = nil) -> Task<Void, Never>? {
+        guard let node = canvas.node(id: snapshot.id), node.createdAt == snapshot.createdAt,
+              node.canGenerate else { return nil }
+        guard store.flushCanvasTextDocuments() else { return nil }
+        if node.needsGenerationRecovery && !restarting && !reusingSeed {
+            return recoverGeneration(node)
+        }
+        if !restarting && !reusingSeed,
+           GenerationRunStore.shared.latest(project: canvas.activeProjectId, node: node)?.requiresSubmissionReconciliation == true {
+            store.transientUI.showToast("上次提交结果未知，请先在原平台核对任务；确认需要新任务后使用“重新生成”。", duration: 5)
+            return nil
+        }
+        let plan = preparedPlan ?? CanvasWorkflowCapture.plan(node: node, canvas: canvas, store: store,
+                                             reusingSeed: reusingSeed, upstreamResults: upstreamResults)
+        if let reason = plan.blockingReasons.first {
+            store.transientUI.showToast(reason, duration: 4)
+            return nil
+        }
+        if node.generationProvider == .byteartist {
+            return startByteArtistGeneration(node, plan: plan, restarting: restarting || reusingSeed,
+                                             prepared: preparedByteArtist)
+        }
+        let (workflow, paths) = CanvasWorkflowCapture.snapshot(canvas: canvas, store: store)
+        let recording = GenerationRunContext(snapshot: workflow, node: node, resourceIDs: paths)
+        if let request = plan.videoRequest {
             return executeGeneration(node, restarting: restarting || reusingSeed) {
-                let submission = try await CrateGenerationService.shared.submit(request)
+                let submission = try await CrateGenerationService.shared.submit(request, recording: recording)
                 var warnings = submission.droppedParameters
                 if submission.droppedSeed { warnings.append("固定 seed") }
                 return (submission.result.taskId, submission.result.seed, warnings)
             }
-        } else {
-            let request = CrateImageRequest(
-                model: node.model, prompt: prompt, ratio: node.ratio, count: node.count,
-                imagePaths: CanvasEdgeInputs.imageReferences(edgeInputs: inputs, slotImages: slotImages),
-                seed: reusingSeed ? node.seed : nil)
+        } else if let request = plan.imageRequest {
             return executeGeneration(node, restarting: restarting || reusingSeed) {
-                let submission = try await CrateGenerationService.shared.submit(request)
+                let submission = try await CrateGenerationService.shared.submit(request, recording: recording)
                 var warnings: [String] = []
                 if submission.droppedSeed { warnings.append("固定 seed") }
                 if submission.droppedRatio { warnings.append("比例 \(node.ratio)") }
                 return (submission.result.taskId, submission.result.seed, warnings)
             }
         }
+        return nil
     }
 
     /// 只查询旧任务，不走 submit，超时和下载失败后不必再扣一次生成额度。
@@ -126,6 +233,9 @@ extension CanvasWorkspaceView {
         guard let node = canvas.node(id: snapshot.id), node.createdAt == snapshot.createdAt,
               node.canGenerate,
               let taskId = node.taskId, !taskId.isEmpty else { return nil }
+        if let task = node.generationTask, task.context.provider == .byteartist {
+            return executeByteArtistGeneration(node, recovering: task)
+        }
         return executeGeneration(node, recovering: true) { (taskId, node.seed, []) }
     }
 
@@ -146,6 +256,8 @@ extension CanvasWorkspaceView {
                 let submitted = try await submit()
                 canvas.updateGeneration(ticket.token) {
                     $0.taskId = submitted.taskId
+                    $0.generationTask = try? GenerationTaskHandle(context: .crate, taskID: submitted.taskId,
+                        capabilityID: node.model, kind: node.kind == .video ? .video : .image, seed: submitted.seed)
                     if let seed = submitted.seed { $0.seed = seed }
                 }
                 // 提交身份必须立即落盘：重启后“取回结果”可以继续查询，避免再次提交。
@@ -156,7 +268,8 @@ extension CanvasWorkspaceView {
                 guard canvas.shouldTrackGeneration(ticket.token) else { return }
                 let urls = try await service.waitForCompletion(
                     taskId: submitted.taskId,
-                    timeout: node.kind == .video ? CrateGeneration.videoPollTimeout : CrateGeneration.pollTimeout
+                    timeout: node.kind == .video ? CrateGeneration.videoPollTimeout : CrateGeneration.pollTimeout,
+                    recordingProject: ticket.projectId
                 ) { progress in
                     Task { @MainActor in
                         self.applyProgress(progress, token: ticket.token)
@@ -170,7 +283,7 @@ extension CanvasWorkspaceView {
                                                       index: 0, fallbackExtension: node.kind == .video ? "mp4" : "jpg")
                 defer { try? FileManager.default.removeItem(at: file.deletingLastPathComponent()) }
                 guard canvas.shouldTrackGeneration(ticket.token) else { return }
-                finishGeneration(token: ticket.token, file: file, taskId: submitted.taskId)
+                try await finishGeneration(token: ticket.token, file: file, taskId: submitted.taskId, projectID: ticket.projectId)
             } catch {
                 guard canvas.shouldTrackGeneration(ticket.token) else { return }
                 let serviceError = error as? CrateGenerationService.ServiceError
@@ -205,41 +318,13 @@ extension CanvasWorkspaceView {
     }
 
     func resolveEdgeInputs(for node: CanvasNode) -> CanvasEdgeInputs.Resolved {
-        let incoming = canvas.incomingEdges(of: node.id)
-        var upstreams: [String: CanvasEdgeInputs.Upstream] = [:]
-        for edge in incoming {
-            guard upstreams[edge.fromNodeId] == nil, let up = canvas.node(id: edge.fromNodeId) else { continue }
-            var path: String?
-            if up.kind.isMediaNode,
-               let media = CanvasMediaPick.primary(node: up, attachments: store.canvasSlotAttachments(groupId: up.groupId, slot: up.slot)) {
-                path = media.canvasLocalURL?.path
-            } else if !up.kind.isMediaNode, case .succeeded(let asset) = up.state, !asset.isEmpty,
-               FileManager.default.fileExists(atPath: asset) { path = asset }
-            upstreams[up.id] = .init(nodeId: up.id, kind: up.kind,
-                                     text: store.canvasSlotText(groupId: up.groupId, slot: up.slot) ?? "",
-                                     assetPath: path,
-                                     imagePaths: up.kind == .slot ? slotReferenceImagePaths(for: up) : [])
-        }
-        var resolved = CanvasEdgeInputs.resolve(incoming: incoming, upstreams: upstreams, downstreamKind: node.kind)
-        // 缺失的槽位图片不能被筛掉后伪装成纯文本输入。
-        for id in Set(incoming.filter { $0.role != .prompt }.map(\.fromNodeId)) {
-            guard let upstream = canvas.node(id: id), upstream.kind == .slot else { continue }
-            let expected = store.canvasSlotAttachments(groupId: upstream.groupId, slot: upstream.slot)
-                .filter(\.canvasIsImageLike).count
-            if (upstreams[id]?.imagePaths.count ?? 0) < expected { resolved.unavailableUpstreamCount += 1 }
-        }
-        return resolved
+        CanvasWorkflowCapture.plan(node: node, canvas: canvas, store: store).edgeInputs
     }
 
     /// 生成和 composer 共用入参集合；显式上传的历史生成文件可再次作为参考。
     func inputAttachments(for node: CanvasNode) -> [SlotContent.SlotAttachment] {
-        guard !node.isMediaSource else { return [] }
-        let outputs = Set(node.outputAttachmentIds)
-        let explicitInputs = Set(node.inputAttachmentIds)
-        return store.canvasSlotAttachments(groupId: node.groupId, slot: node.slot).filter {
-            !outputs.contains($0.id.uuidString)
-                && (explicitInputs.contains($0.id.uuidString) || !CrateGeneration.isGeneratedAssetName($0.name))
-        }
+        CanvasWorkflowCapture.inputAttachments(node: node,
+            attachments: store.canvasSlotAttachments(groupId: node.groupId, slot: node.slot))
     }
 
     func inputImagePaths(for node: CanvasNode) -> [String] {
@@ -255,8 +340,16 @@ extension CanvasWorkspaceView {
             fileExists: { FileManager.default.fileExists(atPath: $0) })
     }
 
-    private func finishGeneration(token: UUID, file: URL, taskId: String) {
+    func finishGeneration(token: UUID, file: URL, taskId: String, projectID: String,
+                          provider: GenerationProviderContext = .crate,
+                          marksCompleted: Bool = true) async throws {
         guard let owner = canvas.generationNode(token) else { return }
+        if owner.kind == .image {
+            let downloadID = provider.provider == .crate ? taskId
+                : "ba-" + CanvasWorkflowSnapshot.digest(Data("\(provider)|\(taskId)|\(file.lastPathComponent)".utf8))
+            _ = try await CanvasImageDownloads.shared.save(file: file, taskID: downloadID)
+            guard canvas.shouldTrackGeneration(token) else { return }
+        }
         let type: SlotContent.AttachmentType = CanvasAttachmentKind.from(fileName: file.lastPathComponent) == .image ? .image : .file
         // storagePath 交给既有外置附件摄取器克隆到正式槽位；视频不再整包读入主线程内存。
         var attachment = SlotContent.SlotAttachment(name: file.lastPathComponent, type: type)
@@ -267,27 +360,58 @@ extension CanvasWorkspaceView {
             $0.name == file.lastPathComponent && owner.outputAttachmentIds.contains($0.id.uuidString)
                 && ($0.storagePath.map { FileManager.default.fileExists(atPath: $0) } ?? false)
         }) {
-            canvas.updateGeneration(token) { $0.state = .succeeded(assetPath: saved.storagePath ?? "") }
+            if marksCompleted {
+                canvas.updateGeneration(token) { $0.state = .succeeded(assetPath: saved.storagePath ?? "") }
+            }
+            try? GenerationRunStore.shared.updateTask(project: projectID, taskID: taskId,
+                outcome: marksCompleted ? "succeeded" : "saving", outputIDs: owner.outputAttachmentIds, provider: provider)
             return
         }
         attachments.append(attachment)
         guard let saved = store.appendCanvasGeneratedAttachment(attachment, groupId: owner.groupId, slot: owner.slot),
               let path = saved.storagePath, path != file.path,
               FileManager.default.fileExists(atPath: path) else {
-            canvas.updateGeneration(token) { $0.state = .failed(reason: "产物写入失败，可用“取回结果”重试") }
-            store.transientUI.showToast("产物写入失败，可用“取回结果”重试")
-            return
+            throw CrateGenerationService.ServiceError.taskFailed(reason: "产物写入失败，可用“取回结果”重试")
         }
         let alive = Set(attachments.map { $0.id.uuidString })
         canvas.updateGeneration(token) {
-            $0.state = .succeeded(assetPath: path)
+            if marksCompleted { $0.state = .succeeded(assetPath: path) }
             $0.taskId = taskId
             $0.outputAttachmentIds = $0.outputAttachmentIds.filter { alive.contains($0) }
             if !$0.outputAttachmentIds.contains(attachment.id.uuidString) {
                 $0.outputAttachmentIds.append(attachment.id.uuidString)
             }
         }
+        try? GenerationRunStore.shared.updateTask(project: projectID, taskID: taskId,
+            outcome: marksCompleted ? "succeeded" : "saving", outputIDs: canvas.generationNode(token)?.outputAttachmentIds ?? [],
+            provider: provider)
         canvas.noteSlotDataChanged()
-        store.transientUI.showToast("生成完成")
+        if marksCompleted {
+            store.transientUI.showToast(owner.kind == .image ? "生成完成，原图已保存到下载文件夹" : "生成完成")
+        }
+    }
+
+    func downloadGeneratedImages(_ nodes: [CanvasNode]) {
+        let images = nodes.filter { $0.kind == .image && !$0.isMediaSource }
+        let files = images.compactMap { node -> (URL, String)? in
+            guard let media = previewableMedia(of: node), let url = media.canvasLocalURL else { return nil }
+            return (url, node.taskId ?? media.id.uuidString)
+        }
+        guard !files.isEmpty else {
+            store.transientUI.showToast("图片生成完成后会自动保存到下载文件夹")
+            return
+        }
+        Task { @MainActor in
+            do {
+                var saved: [URL] = []
+                for (file, taskID) in files {
+                    saved.append(try await CanvasImageDownloads.shared.save(file: file, taskID: taskID))
+                }
+                NSWorkspace.shared.activateFileViewerSelecting(saved)
+                store.transientUI.showToast("已保存 \(saved.count) 张原图")
+            } catch {
+                store.transientUI.showToast("原图下载保存失败：\(error.localizedDescription)", duration: 4)
+            }
+        }
     }
 }

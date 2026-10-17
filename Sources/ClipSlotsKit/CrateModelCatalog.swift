@@ -140,6 +140,8 @@ public enum CrateModelCatalog {
         /// 互斥的模型只能拿前两张当首尾帧、余下的必须丢掉，硬凑成
         /// `--first-frame + --reference-image` 会被整次拒收。
         public let framesExcludeReferences: Bool
+        /// Minimum image area declared by the CLI model; nil when unspecified.
+        public let imageMinimumPixels: Int?
         public let enabled: Bool
 
         public init(id: String,
@@ -155,6 +157,7 @@ public enum CrateModelCatalog {
                     supportsLastFrame: Bool = false,
                     referenceImageMaxCount: Int = 0,
                     framesExcludeReferences: Bool = false,
+                    imageMinimumPixels: Int? = nil,
                     enabled: Bool) {
             self.id = id
             self.displayName = displayName
@@ -169,6 +172,7 @@ public enum CrateModelCatalog {
             self.supportsLastFrame = supportsLastFrame
             self.referenceImageMaxCount = referenceImageMaxCount
             self.framesExcludeReferences = framesExcludeReferences
+            self.imageMinimumPixels = imageMinimumPixels
             self.enabled = enabled
         }
 
@@ -298,6 +302,8 @@ public enum CrateModelCatalog {
                              supportsLastFrame: hasLastFrame,
                              referenceImageMaxCount: refImageMax,
                              framesExcludeReferences: exclusive,
+                             imageMinimumPixels: (dict["dimensions"] as? [String: Any])
+                                .flatMap { intValue($0["minimumPixels"]) },
                              // 缺字段按可用处理：漏掉一个能用的模型，比凭空多显示一个更难被发现。
                              enabled: (dict["enabled"] as? Bool) ?? true)
         }

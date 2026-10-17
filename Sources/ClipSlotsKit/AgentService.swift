@@ -79,9 +79,11 @@ public struct AgentMessage: Identifiable, Equatable, Codable, Sendable {
     public var attachments: [AgentAttachment]?
     public var canvasReferences: [AgentCanvasReference]?
     public var skillReferences: [AgentSkillReference]?
+    public var canvasTurn: CanvasAgentTurn?
 
     public var wireContent: String {
         var text = content
+        if let canvasTurn { text += "\n\n" + canvasTurn.wireText }
         if let canvasReferences, !canvasReferences.isEmpty,
            let data = try? JSONEncoder().encode(canvasReferences),
            let json = String(data: data, encoding: .utf8) {
@@ -106,7 +108,8 @@ public struct AgentMessage: Identifiable, Equatable, Codable, Sendable {
                 createdAt: Date = Date(),
                 attachments: [AgentAttachment]? = nil,
                 canvasReferences: [AgentCanvasReference]? = nil,
-                skillReferences: [AgentSkillReference]? = nil) {
+                skillReferences: [AgentSkillReference]? = nil,
+                canvasTurn: CanvasAgentTurn? = nil) {
         self.id = id
         self.role = role
         self.content = content
@@ -119,6 +122,7 @@ public struct AgentMessage: Identifiable, Equatable, Codable, Sendable {
         self.attachments = attachments
         self.canvasReferences = canvasReferences
         self.skillReferences = skillReferences
+        self.canvasTurn = canvasTurn
     }
 
     /// 这条消息是否需要出现在发给上游的 messages 里。
@@ -165,7 +169,7 @@ public struct AgentToolSpec: Equatable, Sendable {
     }
 }
 
-public struct AgentToolResult: Equatable, Sendable {
+public struct AgentToolResult: Equatable, Codable, Sendable {
     /// 回给模型的内容（一般是 JSON 文本）。
     public let content: String
     /// 是否失败。失败也照样回给模型——让它有机会自我纠正，而不是把整轮对话打断。
@@ -219,7 +223,7 @@ public struct AgentModelPreset: Identifiable, Equatable, Sendable {
     public init(id: String, note: String) { self.id = id; self.note = note }
 }
 
-public struct AgentConfig: Equatable, Sendable {
+public struct AgentConfig: Equatable, Codable, Sendable {
     public static let defaultEndpoint = URL(string: "https://api.deepseek.com/v1/chat/completions")!
     public static let defaultModel = "deepseek-reasoner"
 
@@ -244,7 +248,13 @@ public struct AgentConfig: Equatable, Sendable {
     public var endpoint: URL
     public var model: String
     public var systemPrompt: String
+    /// User-authorized root captured once by the host, never inferred from model output.
+    public var workingDirectory: String?
     public var canvasPreviewOnly = false
+    /// Explicit task contract shared by every backend. Chat keeps its existing
+    /// partial-output/tool behavior; polishing must finish without side effects.
+    public var taskPolicy: AgentTaskPolicy = .chat
+    public var isolatedReadOnly: Bool { canvasPreviewOnly || taskPolicy == .textPolish }
     public var thinkingMode: AgentThinkingMode
     /// nil = 不发 reasoning_effort。取值 low/high/max。
     public var reasoningEffort: String?
@@ -280,6 +290,11 @@ public enum AgentRunEvent: Sendable {
     case usage(AgentUsage)
     /// 达到轮上限之类的运行提示，直接进 UI 作为系统气泡。
     case note(String)
+    /// Metadata for a configured run gateway. Existing providers keep their
+    /// original event mapping; payloads never execute arbitrary UI actions.
+    case runState(phase: String, runID: String, cursor: String?)
+    case artifactUpdated(JSONValue)
+    case canvasChanged(JSONValue)
 }
 
 // MARK: - 传输层
@@ -320,11 +335,17 @@ public struct URLSessionAgentTransport: AgentTransport {
         let stream = AsyncThrowingStream<Data, Error> { continuation in
             let task = Task {
                 do {
-                    // 按行读：SSE 本身是行协议，逐字节 yield 只是白烧 CPU。
-                    // 下游 decoder 仍然按"任意切分"处理，所以这里的行边界只是优化。
-                    for try await line in bytes.lines {
-                        continuation.yield(Data((line + "\n").utf8))
+                    // Preserve blank lines, CRLF and raw UTF-8. Decoding through
+                    // AsyncBytes.lines would make the transport a second framer.
+                    var chunk = Data()
+                    for try await byte in bytes {
+                        chunk.append(byte)
+                        if byte == 10 || byte == 13 || chunk.count >= 8192 {
+                            continuation.yield(chunk)
+                            chunk.removeAll(keepingCapacity: true)
+                        }
                     }
+                    if !chunk.isEmpty { continuation.yield(chunk) }
                     continuation.finish()
                 } catch {
                     continuation.finish(throwing: error)
@@ -345,6 +366,7 @@ public enum AgentError: LocalizedError, Equatable {
     case upstream(message: String, code: String?)
     case network(String)
     case invalidResponse(String)
+    case interrupted(String)
     case cancelled
 
     public var errorDescription: String? {
@@ -379,6 +401,8 @@ public enum AgentError: LocalizedError, Equatable {
             return "网络错误：\(message)"
         case .invalidResponse(let message):
             return "响应无法解析：\(message)"
+        case .interrupted(let message):
+            return "回答中断，结果尚未确认：\(message)"
         case .cancelled:
             return "已停止本次回答。"
         }
@@ -497,7 +521,8 @@ public final class AgentService: @unchecked Sendable {
                     tools: AgentToolExecuting?,
                     onEvent: @escaping @Sendable (AgentRunEvent) async -> Void) async throws -> [AgentMessage] {
         guard let apiKey = secretStore.readAPIKey() else { throw AgentError.missingAPIKey }
-        let tools: AgentToolExecuting? = config.canvasPreviewOnly ? AgentPreviewTools() : tools
+        let tools: AgentToolExecuting? = config.taskPolicy == .textPolish ? nil
+            : config.canvasPreviewOnly ? AgentPreviewTools.restricted(tools) : tools
 
         var working = history
         var produced: [AgentMessage] = []
@@ -514,6 +539,11 @@ public final class AgentService: @unchecked Sendable {
 
             if let err = accumulator.serverError {
                 throw AgentError.upstream(message: err.message, code: err.code)
+            }
+            if config.taskPolicy == .textPolish {
+                guard accumulator.finishReason == "stop", accumulator.toolCalls.isEmpty else {
+                    throw AgentError.invalidResponse("润色未完整结束，已保留原文，请重试")
+                }
             }
 
             let assistant = accumulator.assistantMessage()
@@ -620,18 +650,21 @@ public final class AgentService: @unchecked Sendable {
             throw AgentError.cancelled
         } catch let urlError as URLError {
             if urlError.code == .cancelled { throw AgentError.cancelled }
-            // 已经流出一部分内容时不算彻底失败：保留已收到的部分，让上层展示。
-            if accumulator.content.isEmpty && accumulator.toolCalls.isEmpty {
-                throw AgentError.network(urlError.localizedDescription)
-            }
-            await onEvent(.note("连接中断，以下内容可能不完整：\(urlError.localizedDescription)"))
+            throw AgentError.interrupted(urlError.localizedDescription)
         } catch {
-            if accumulator.content.isEmpty && accumulator.toolCalls.isEmpty {
-                throw AgentError.network(error.localizedDescription)
-            }
-            await onEvent(.note("流读取中断：\(error.localizedDescription)"))
+            throw AgentError.interrupted(error.localizedDescription)
         }
 
+        if let error = accumulator.serverError {
+            throw AgentError.upstream(message: error.message, code: error.code)
+        }
+        guard accumulator.receivedDone || accumulator.finishReason != nil else {
+            throw AgentError.interrupted("连接已结束，但未收到完成事件。已保留收到的文字；未完成的工具调用不会执行。")
+        }
+        // DONE alone does not make an unfinished function call safe to execute.
+        if !accumulator.toolCalls.isEmpty, accumulator.finishReason != "tool_calls" {
+            throw AgentError.interrupted("工具参数尚未明确收齐，请检查本轮结果。")
+        }
         return accumulator
     }
 

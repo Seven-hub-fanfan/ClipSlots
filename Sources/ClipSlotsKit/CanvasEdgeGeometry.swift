@@ -66,21 +66,21 @@ public enum CanvasEdgeGeometry {
 
     // MARK: - 曲线
 
-    /// 三次贝塞尔的两个控制点。
-    ///
-    /// 控制点沿各自边的外法向推出去，推多远 = 端点距离的 45%，夹在 [40, 180]。
-    ///   - 不夹下限：两个节点贴在一起时曲线退化成直线折角，看不出方向；
-    ///   - 不夹上限：跨半个画布的连线会甩出两个大弧线，压在中间所有卡片上。
+    /// TapNow 0.4.99 / Cf + ko. Compute in world units before applying
+    /// the viewport scale; reverse connections use the square-root branch.
     public static func controlPoints(start: CGPoint,
                                      end: CGPoint,
                                      outSide: Side,
-                                     inSide: Side) -> (CGPoint, CGPoint) {
-        let dist = hypot(end.x - start.x, end.y - start.y)
-        let k = min(max(dist * 0.45, 40), 180)
-        let n1 = outSide.outwardNormal
-        let n2 = inSide.outwardNormal
-        return (CGPoint(x: start.x + n1.x * k, y: start.y + n1.y * k),
-                CGPoint(x: end.x + n2.x * k, y: end.y + n2.y * k))
+                                     inSide: Side,
+                                     coordinateScale: CGFloat = 1) -> (CGPoint, CGPoint) {
+        let scale = coordinateScale.isFinite && coordinateScale > 0 ? coordinateScale : 1
+        func control(_ own: CGPoint, _ other: CGPoint, _ side: Side) -> CGPoint {
+            let normal = side.outwardNormal
+            let distance = ((other.x - own.x) * normal.x + (other.y - own.y) * normal.y) / scale
+            let offset = (distance >= 0 ? distance * 0.5 : 6.25 * sqrt(-distance)) * scale
+            return CGPoint(x: own.x + normal.x * offset, y: own.y + normal.y * offset)
+        }
+        return (control(start, end, outSide), control(end, start, inSide))
     }
 
     /// 曲线上 `t ∈ [0,1]` 处的点。

@@ -3,7 +3,7 @@ import ClipSlotsKit
 
 // v2.9.12: in-app settings categories for the Obsidian-style two-pane layout.
 enum SettingsCategory: String, CaseIterable, Identifiable {
-    case appearance, slot, shortcut, notification, connection, advanced, cli
+    case appearance, slot, shortcut, permission, notification, connection, advanced, cli
 
     var id: String { rawValue }
 
@@ -12,6 +12,7 @@ enum SettingsCategory: String, CaseIterable, Identifiable {
         case .appearance: return "外观"
         case .slot: return "槽位"
         case .shortcut: return "快捷键"
+        case .permission: return "系统权限"
         case .notification: return "提示与确认"
         case .connection: return "槽位连接"
         case .advanced: return "高级"
@@ -24,6 +25,7 @@ enum SettingsCategory: String, CaseIterable, Identifiable {
         case .appearance: return "主题与界面显示方式"
         case .slot: return "槽位数量与基础行为"
         case .shortcut: return "全局操作与键盘录入"
+        case .permission: return "授权状态与功能访问"
         case .notification: return "确认流程与操作反馈"
         case .connection: return "槽位之间的串联能力"
         case .advanced: return "日志调试与操作历史"
@@ -36,6 +38,7 @@ enum SettingsCategory: String, CaseIterable, Identifiable {
         case .appearance: return "paintbrush.fill"
         case .slot: return "rectangle.stack.fill"
         case .shortcut: return "keyboard.fill"
+        case .permission: return "lock.shield"
         case .notification: return "bell.fill"
         case .connection: return "point.3.connected.trianglepath.dotted"
         case .advanced: return "slider.horizontal.3"
@@ -92,7 +95,7 @@ struct SettingsView: View {
 
     // v2.7.47: align Settings with first-launch default dark mode.
     // Existing persisted appearanceMode remains unchanged.
-    @AppStorage("appearanceMode") private var appearanceModeRaw = ThemeMode.dark.rawValue
+    @AppStorage("appearanceMode") private var appearanceModeRaw = ThemeMode.light.rawValue
 
     private var appearanceModeBinding: Binding<ThemeMode> {
         Binding(
@@ -115,7 +118,7 @@ struct SettingsView: View {
     }
 
     init(config: AppConfig, onSave: @escaping (AppConfig) -> Void, onClose: (() -> Void)? = nil, onOpenPlugins: (() -> Void)? = nil) {
-        AppearanceDefaults.ensureDefaultDarkIfNeeded()
+        AppearanceDefaults.ensureDefaultLightIfNeeded()
         self.config = config
         self.onSave = onSave
         self.onClose = onClose
@@ -351,6 +354,7 @@ struct SettingsView: View {
         case .shortcut:
             shortcutSection
             helpSection
+        case .permission: PermissionSettingsSection()
         case .notification: notificationPreferencesSection
         case .connection: connectionSection
         case .advanced: advancedSection

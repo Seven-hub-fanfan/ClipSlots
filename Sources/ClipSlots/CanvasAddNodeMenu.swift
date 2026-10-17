@@ -7,6 +7,7 @@ import ClipSlotsKit
 ///
 /// 表面与细边跟随画布外观，浅色模式避免深色光晕。
 struct CanvasAddNodeMenu: View {
+    private typealias TapSkin = CanvasSkin
 
     /// 可创建的节点类型。
     ///
@@ -75,6 +76,7 @@ struct CanvasAddNodeMenu: View {
     }
 
     var parentCount: Int = 0
+    var upstream: Bool = false
     var maxHeight: CGFloat = 560
     let onPick: (Choice) -> Void
     let onDismiss: () -> Void
@@ -83,14 +85,14 @@ struct CanvasAddNodeMenu: View {
 
     /// 菜单宽度。够放两行文字（标题 + 说明）而不换行，再宽就会盖住半张画布。
     static let width: CGFloat = 260
-    static func height(parentCount: Int) -> CGFloat { parentCount > 0 ? 304 : 596 }
+    static func height(parentCount: Int, upstream: Bool = false) -> CGFloat { upstream ? 160 : parentCount > 0 ? 304 : 596 }
 
     var body: some View {
         ScrollView(.vertical, showsIndicators: false) {
             VStack(alignment: .leading, spacing: 2) {
-                sectionTitle(parentCount > 1 ? "引用所有选中的节点生成" : (parentCount == 1 ? "引用该节点生成" : "添加节点"))
-                ForEach([Choice.text, .image, .video, .audio, .threeD]) { row($0) }
-                if parentCount == 0 {
+                sectionTitle(upstream ? "添加上下文" : parentCount > 1 ? "引用所有选中的节点生成" : (parentCount == 1 ? "引用该节点生成" : "添加节点"))
+                ForEach(upstream ? [Choice.text, .image] : [Choice.text, .image, .video, .audio, .threeD]) { row($0) }
+                if parentCount == 0 && !upstream {
                     sectionTitle("辅助工具")
                     row(.timeline)
                     row(.stage)
@@ -102,7 +104,7 @@ struct CanvasAddNodeMenu: View {
             .padding(.bottom, 6)
         }
         .frame(width: CanvasAddNodeMenu.width, alignment: .leading)
-        .frame(height: min(maxHeight, Self.height(parentCount: parentCount)))
+        .frame(height: min(maxHeight, Self.height(parentCount: parentCount, upstream: upstream)))
         .background(
             ZStack {
                 RoundedRectangle(cornerRadius: 14, style: .continuous)
@@ -147,10 +149,10 @@ struct CanvasAddNodeMenu: View {
                     )
 
                 VStack(alignment: .leading, spacing: 1) {
-                    Text(choice.title(referencing: parentCount > 0))
+                    Text(upstream ? (choice == .text ? "文本生成" : "图片处理") : choice.title(referencing: parentCount > 0))
                         .font(.system(size: 14, weight: .semibold))
                         .foregroundColor(TapSkin.ink)
-                    if !choice.subtitle.isEmpty { Text(choice.subtitle)
+                    if upstream || !choice.subtitle.isEmpty { Text(upstream ? (choice == .text ? "生成或编辑文本" : "生成或上传图片") : choice.subtitle)
                         .font(.system(size: 11))
                         .foregroundColor(TapSkin.secondaryInk)
                         .lineLimit(2)

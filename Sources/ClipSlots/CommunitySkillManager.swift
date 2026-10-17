@@ -83,8 +83,6 @@ final class CommunitySkillManager: ObservableObject {
               detectPath: home(".claude"), skillsDir: home(".claude/skills")),
         Agent(id: "cursor", displayName: "Cursor",
               detectPath: home(".cursor"), skillsDir: home(".cursor/skills")),
-        Agent(id: "codex", displayName: "Codex",
-              detectPath: home(".codex"), skillsDir: home(".codex/skills")),
         Agent(id: "gemini", displayName: "Gemini CLI",
               detectPath: home(".gemini"), skillsDir: home(".gemini/skills")),
     ]
@@ -486,7 +484,7 @@ final class CommunitySkillManager: ObservableObject {
         let agents = detectedAgents
         guard !agents.isEmpty else {
             if !silent {
-                report("未检测到已安装的 Agent，请先安装 Claude Code / Cursor / Codex / Gemini CLI。", isError: true)
+                report("未检测到已安装的 Agent，请先安装 Claude Code / Cursor / Gemini CLI。", isError: true)
             }
             return
         }
@@ -720,10 +718,10 @@ final class CommunitySkillManager: ObservableObject {
 
     private func trySymlinkWithoutPrivilege(source: String, target: String, skillsDir: String) -> Bool {
         do {
-            // v2.9.54: 确保父目录存在（如 ~/.codex/skills/ 首次安装时可能不存在）。
+            // v2.9.54: 确保父目录存在（如 ~/.claude/skills/ 首次安装时可能不存在）。
             try fm.createDirectory(atPath: skillsDir, withIntermediateDirectories: true)
             // P1 (v2.10.13) 安全护栏：仅删除软链本身；真实目录/文件绝不递归删除，避免误删
-            // 用户手动放置在 ~/.codex/skills/<slug> 的同名 Skill。真实目录由调用方拦截进 skipped，
+            // 用户手动放置在 ~/.claude/skills/<slug> 的同名 Skill。真实目录由调用方拦截进 skipped，
             // 此处 return false 作为纵深防御（不会误删也不会安装）。
             if isSymlink(target) {
                 try fm.removeItem(atPath: target)

@@ -7,7 +7,8 @@ let package = Package(
     targets: [
         .target(
             name: "ClipSlotsKit",
-            path: "Sources/ClipSlotsKit"
+            path: "Sources/ClipSlotsKit",
+            resources: [.copy("Resources")]
         ),
         .executableTarget(
             name: "ClipSlots",
@@ -33,12 +34,6 @@ let package = Package(
             name: "ClipSlotsKitSmokeTests",
             dependencies: ["ClipSlotsKit"],
             path: "Tests/ClipSlotsKitSmokeTests"
-        ),
-        .executableTarget(
-            name: "CodexProtocolRegression",
-            dependencies: ["ClipSlotsKit"],
-            path: "Tests/CodexProtocolRegression",
-            exclude: ["fixture.py"]
         ),
     ]
 )

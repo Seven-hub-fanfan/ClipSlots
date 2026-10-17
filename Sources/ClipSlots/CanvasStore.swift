@@ -17,6 +17,11 @@ import Combine
 ///     任何节点视图重新求值。
 @MainActor
 final class CanvasStore: ObservableObject {
+    /// Legacy batch lineage edges never represented an image reference.
+    /// Keep the document intact while excluding them from visible/input controls.
+    var interactionEdges: [CanvasEdge] {
+        edges.filter { node(id: $0.toNodeId)?.generationSourceID != $0.fromNodeId }
+    }
     private static let instances = NSHashTable<CanvasStore>.weakObjects()
     static func flushAll() -> Bool {
         let results = instances.allObjects.map { $0.flushSave() }
@@ -27,6 +32,7 @@ final class CanvasStore: ObservableObject {
         case saved, saving, failed(String)
     }
     @Published private(set) var saveStatus: SaveStatus = .saved
+    var flushTextDocuments: (() -> Bool)?
     private var pendingDocuments: [String: CanvasDocument] = [:]
     private var saveVersions: [String: UUID] = [:]
     private var saveFailures: [String: String] = [:]
@@ -40,7 +46,22 @@ final class CanvasStore: ObservableObject {
     /// —— 但那条通路走的是 View 侧 `dragOffset`（与节点自身相同的办法），不经过这个数组。
     /// 这里只在"真的增删改了一条线"时才变。
     @Published private(set) var edges: [CanvasEdge] = []
-    @Published var selectedNodeIds: Set<String> = []
+    @Published private(set) var groups: [CanvasNodeGroup] = []
+    @Published private(set) var piles: [CanvasPile] = []
+    private var appliedAgentMutationIDs: [String] = []
+    private var groupMeasurements: [String: CGSize] = [:]
+    private var groupMeasurementProjectID: String?
+    private var suppressedServerGroupLayouts = Set<String>()
+    @Published private(set) var serverGroupLayoutStates: [String: CanvasServerGroupLayout.State] = [:]
+    @Published var selectedGroupID: String?
+    @Published var selectedNodeIds: Set<String> = [] {
+        didSet {
+            if let id = selectedGroupID,
+               groupMemberIDs(id) != selectedNodeIds {
+                selectedGroupID = nil
+            }
+        }
+    }
     /// 当前选中的连线（一次只选一条）。
     ///
     /// 刻意**不与 `selectedNodeIds` 合并成一个"选中对象"集合**：两者能做的操作几乎不重叠
@@ -63,8 +84,10 @@ final class CanvasStore: ObservableObject {
         let nodeID: String
     }
     @Published private(set) var agentFocusRequest: AgentFocusRequest?
+    @Published private(set) var workflowFitRequest: UUID?
     @Published private(set) var agentHistoryError: String?
     private var agentBodyEdits: [String: (undo: () throws -> Void, redo: () throws -> Void)] = [:]
+    private var workflowEdits: [String: (WorkflowProjectTransaction, WorkflowProjectTransaction.Receipt)] = [:]
 
     func focusAgentNode(_ id: String) {
         guard nodes.contains(where: { $0.id == id }) else { return }
@@ -72,12 +95,17 @@ final class CanvasStore: ObservableObject {
         agentFocusRequest = AgentFocusRequest(nodeID: id)
     }
 
+    func completeWorkflowFit(_ request: UUID) {
+        if workflowFitRequest == request { workflowFitRequest = nil }
+    }
+
     /// Body writes have already succeeded before recording. Never advance the
     /// history cursor if a later compare-and-exchange refuses undo or redo.
     func recordAgentBodyEdit(detail: String, undo: @escaping () throws -> Void,
                              redo: @escaping () throws -> Void) -> String {
         let entry = CanvasHistoryEntry(kind: .editNode, detail: "Agent · " + detail,
-            before: nodes, after: nodes, beforeEdges: edges, afterEdges: edges)
+            before: nodes, after: nodes, beforeEdges: edges, afterEdges: edges,
+            beforeGroups: groups, afterGroups: groups, beforePiles: piles, afterPiles: piles)
         let oldTokens = Set(history.entries.compactMap { $0.attachmentEdit?.stashToken })
         history.push(entry)
         let retained = Set(history.entries.map(\.id))
@@ -90,6 +118,72 @@ final class CanvasStore: ObservableObject {
         return entry.id
     }
 
+    func gatewayDocument() -> CanvasDocument {
+        CanvasDocument(nodes: nodes, edges: edges, groups: groups, piles: piles,
+                       appliedAgentMutationIDs: appliedAgentMutationIDs,
+                       panX: pan.width, panY: pan.height, zoom: zoom)
+    }
+
+    func appendStructure(_ capture: CanvasStructureCapture, slots: [Int], delta: CGSize) throws {
+        guard !documentLoadFailed, flushSave() else { throw AgentCanvasError.writeFailed }
+        let before = gatewayDocument()
+        let next = try saveQueue.sync {
+            try CanvasStructureCopyTransaction(root: projectStorage.dataRoot).append(
+                capture, to: before, projectID: activeProjectId, slots: slots, delta: delta)
+        }
+        storage.invalidateCache()
+        // flushSave already fenced the editor; do not invoke its callback again
+        // after the durable graph commit.
+        let flusher = flushTextDocuments
+        flushTextDocuments = nil
+        defer { flushTextDocuments = flusher }
+        commit(.duplicate, detail: "\(slots.count) 个节点") {
+            nodes = next.nodes; edges = next.edges; groups = next.groups; piles = next.piles
+        }
+        let newGroups = groups.filter { group in !before.groups.contains { $0.id == group.id } }
+        if let root = newGroups.first(where: { $0.parentGroupID == nil }) { selectGroup(root.id) }
+        else {
+            selectedGroupID = nil
+            let newPiles = piles.filter { pile in !before.piles.contains { $0.id == pile.id } }
+            let piled = Set(newPiles.flatMap(\.memberIDs))
+            selectedNodeIds = Set(nodes.filter { node in !before.nodes.contains { $0.id == node.id }
+                && !piled.contains(node.id) }.map(\.id) + newPiles.map(\.id))
+        }
+    }
+
+    /// Invoked only after the user has reviewed a typed graph proposal.
+    func applyGatewayMutation(_ mutation: AgentCanvasMutation, conversationID: String,
+                              runID: String, contentAvailable: (CanvasNode) -> Bool) throws -> AgentCanvasSync.Plan {
+        guard mutation.projectID == activeProjectId, !documentLoadFailed,
+              flushSave() else { throw AgentCanvasError.staleTarget }
+        let before = gatewayDocument()
+        let plan = try AgentCanvasSync.plan(mutation, current: before, expectedProject: activeProjectId,
+                                           expectedConversation: conversationID, expectedRun: runID)
+        guard !plan.alreadyApplied else { return plan }
+        for change in mutation.changes {
+            if let after = change.after {
+                guard contentAvailable(after) else {
+                    throw AgentOperationError("节点引用的内容不在本地可用范围，未应用不完整快照。")
+                }
+            }
+        }
+        saveTask?.cancel()
+        let project = activeProjectId
+        try saveQueue.sync {
+            try storage.saveComparingGraph(plan.document,
+                expectedRevision: AgentCanvasSync.revision(before), projectId: project)
+        }
+        appliedAgentMutationIDs = plan.document.appliedAgentMutationIDs
+        suppressedServerGroupLayouts.subtract(plan.changedGroupIDs)
+        commit(.editNode, detail: "Agent · \(plan.changedNodeIDs.count) 个节点 · \(plan.changedGroupIDs.count) 个编组变更") {
+            nodes = plan.document.nodes
+            edges = plan.document.edges
+            groups = plan.document.groups
+            piles = plan.document.piles
+        }
+        return plan
+    }
+
     // MARK: - 视口（非 @Published，见类型注释）
 
     /// 视口只在进出画布与防抖落盘时读写，不参与视图订阅。
@@ -100,6 +194,11 @@ final class CanvasStore: ObservableObject {
 
     private let storage: CanvasStorage
     private let projectStorage: CanvasProjectStorage
+    private var workflowPrivateStorage: SpecialSlotStorage {
+        if projectStorage.dataRoot.standardizedFileURL == ClipSlotsPaths.dataRoot.standardizedFileURL { return .canvasPrivate }
+        return SpecialSlotStorage(baseDirectory: projectStorage.dataRoot.appendingPathComponent("canvas/private_slots"),
+                                  role: .canvasPrivate)
+    }
     private var saveTask: Task<Void, Never>?
     /// 画布文档写入队列。防抖任务一旦把 IO 派出去就不能再取消，必须让所有写入串行，
     /// 否则旧快照可能比新快照更晚写完，把用户刚拖好的位置覆盖回去。
@@ -107,7 +206,36 @@ final class CanvasStore: ObservableObject {
     private var generationTickets: [UUID: CanvasGenerationTicket] = [:]
     private var generationTasks: [UUID: Task<Void, Never>] = [:]
     @Published private var stoppedGenerations = Set<UUID>()
-    var selectionGenerationTask: Task<Void, Never>?
+    @Published var selectionGenerationTask: Task<Void, Never>?
+    @Published var runningGroupID: String?
+    var selectionGenerationID: UUID?
+    var selectionGenerationNodes: [CanvasNode] = []
+    var adjacentGenerationIDs: [String: UUID] = [:]
+    var adjacentGenerationTasks: [String: Task<Void, Never>] = [:]
+    var adjacentLastResultIDs: [String: [String]] = [:]
+    var recoverGenerationAction: ((CanvasNode) -> Void)?
+    var byteArtistInputPlan: ((CanvasNode) -> CanvasWorkflowResolver.Plan)?
+    private var generationHistoryResults: [String: CanvasNode] = [:]
+
+    func selectionGenerationNode(_ snapshot: CanvasNode) -> CanvasNode? {
+        let sameBirth = nodes.filter { $0.createdAt == snapshot.createdAt }
+        return sameBirth.first { $0.id == snapshot.id }
+            ?? (sameBirth.count == 1 ? sameBirth.first : nil)
+    }
+
+    func stopSelectionGeneration() {
+        selectionGenerationID = nil
+        selectionGenerationTask?.cancel()
+        selectionGenerationTask = nil
+        runningGroupID = nil
+        for snapshot in selectionGenerationNodes {
+            if let node = selectionGenerationNode(snapshot) { stopGeneration(node) }
+            for resultID in adjacentLastResultIDs[snapshot.id] ?? [] {
+                if let result = node(id: resultID) { stopGeneration(result) }
+            }
+        }
+        selectionGenerationNodes = []
+    }
     /// 防抖窗口。拖拽松手 / 缩放停止后 0.4s 落盘，避免高频写。
     private let saveDebounce: Duration = .milliseconds(400)
 
@@ -123,6 +251,9 @@ final class CanvasStore: ObservableObject {
         // 文档解码时已经做过规整与 `parentNodeId` 迁移（见 `CanvasDocument.init(from:)`），
         // 这里直接取用；在 store 里再规整一遍只会掩盖那边出的问题。
         self.edges = doc.edges
+        self.groups = doc.groups
+        self.piles = doc.piles
+        self.appliedAgentMutationIDs = doc.appliedAgentMutationIDs
         self.pan = doc.pan
         self.zoom = CanvasGeometry.clampZoom(doc.zoom)
         Self.instances.add(self)
@@ -184,6 +315,44 @@ final class CanvasStore: ObservableObject {
         projects = index.displayOrder
         adoptProject(id: project.id)
         return project
+    }
+
+    func createWorkflowProject(name: String, instance: WorkflowSkill.Instance) async throws {
+        guard flushSave() else { throw AgentCanvasError.writeFailed }
+        let origin = activeProjectId
+        let expected = CanvasProjectIndex(projects: projects, activeProjectId: origin)
+        let unique = CanvasProject.uniqueName(base: name, existing: projects.map(\.name))
+        let transaction = WorkflowProjectTransaction(root: projectStorage.dataRoot)
+        let prepared = try await Task.detached(priority: .userInitiated) {
+            try transaction.prepare(name: unique, instance: instance)
+        }.value
+        guard activeProjectId == origin, !Task.isCancelled else {
+            transaction.discard(prepared); throw AgentCanvasError.staleTarget
+        }
+        do {
+            guard flushSave() else { throw AgentCanvasError.writeFailed }
+            // Index ordering on disk may differ from the displayed recent-project ordering.
+            let diskIndex = projectStorage.load()
+            guard Set(diskIndex.projects.map(\.id)) == Set(expected.projects.map(\.id)),
+                  diskIndex.activeProjectId == origin else { throw AgentCanvasError.staleTarget }
+            let privateContents = workflowPrivateStorage
+            let receipt = try transaction.commit(prepared, expected: diskIndex, privateStorage: privateContents)
+            projectStorage.invalidateCache()
+            storage.invalidateCache()
+            privateContents.invalidateContentCaches()
+            projects = projectStorage.load().displayOrder
+            adoptProject(id: receipt.project.id)
+            let entry = CanvasHistoryEntry(kind: .addNode, detail: "Skill · \(receipt.document.nodes.count) 个节点与连线",
+                before: [], after: receipt.document.nodes, beforeEdges: [], afterEdges: receipt.document.edges)
+            history.push(entry)
+            workflowEdits[entry.id] = (transaction, receipt)
+            selectedNodeIds = Set(nodes.map(\.id))
+            workflowFitRequest = UUID()
+        } catch {
+            transaction.discard(prepared)
+            projectStorage.invalidateCache()
+            throw error
+        }
     }
 
     /// 切到另一个项目。返回是否真的切了（id 不存在 / 已经是它 → false）。
@@ -251,10 +420,19 @@ final class CanvasStore: ObservableObject {
     /// 写进 B 项目的文档（而且 id 是 `groupId#slot`，撞上就是静默串数据）。历史刻意不落盘
     /// （见 `history` 的注释），所以这里没有"保存 A 的历史"这个选项。
     private func adoptProject(id: String) {
+        stopSelectionGeneration()
+        generationHistoryResults = [:]
+        groupMeasurements = [:]
+        groupMeasurementProjectID = nil
+        suppressedServerGroupLayouts = []
+        serverGroupLayoutStates = [:]
         activeProjectId = id
         let doc = pendingDocuments[id] ?? storage.load(projectId: id)
         nodes = doc.nodes
         edges = doc.edges
+        groups = doc.groups
+        piles = doc.piles
+        appliedAgentMutationIDs = doc.appliedAgentMutationIDs
         pan = doc.pan
         zoom = CanvasGeometry.clampZoom(doc.zoom)
         selectedNodeIds = []
@@ -267,8 +445,10 @@ final class CanvasStore: ObservableObject {
         }
         history.removeAll()
         agentBodyEdits.removeAll()
+        workflowEdits.removeAll()
         agentHistoryError = nil
         agentFocusRequest = nil
+        workflowFitRequest = nil
         slotRevision += 1
     }
 
@@ -374,6 +554,437 @@ final class CanvasStore: ObservableObject {
     }
 
     /// 某个节点在画布上的即时快照（按 id）。
+    @discardableResult
+    func groupNodes(_ ids: Set<String>, name: String = "新建组", allowSingle: Bool = false) -> CanvasNodeGroup? {
+        let ids = expandedNodeIDs(ids)
+        let members = nodes.filter { ids.contains($0.id) }.map(\.id)
+        guard members.count >= (allowSingle ? 1 : 2), members.count <= 50,
+              flushTextDocuments?() != false else { return nil }
+        if let existing = groups.first(where: { Set($0.nodeIDs) == Set(members) }) {
+            selectGroup(existing.id); return existing
+        }
+        let touched = groups.filter { !ids.isDisjoint(with: $0.nodeIDs) }
+        var group = touched.count == 1 ? touched[0] : CanvasNodeGroup(name: name, nodeIDs: members, createdBy: .client)
+        if touched.count == 1 { group.nodeIDs = Array(Set(group.nodeIDs + members)).sorted() }
+        guard group.nodeIDs.count <= 50 else { return nil }
+        let descendantIDs = groupMemberIDs(group.id).union(group.nodeIDs)
+        group.containerFrame = CanvasGroupGeometry.enclosing(layoutNodes(descendantIDs))
+        group.layoutType = group.layoutType ?? .horizontal
+        group.autoLayoutEnabled = false
+        commit(.groupNodes, detail: "\(name) · \(members.count) 个节点") {
+            assignGroup(group)
+            selectGroup(group.id)
+        }
+        return group
+    }
+
+    private func assignGroup(_ group: CanvasNodeGroup) {
+        let members = Set(group.nodeIDs)
+        for index in groups.indices { groups[index].nodeIDs.removeAll { members.contains($0) } }
+        groups.removeAll { $0.id == group.id }
+        groups.append(group)
+        for index in piles.indices where Set(piles[index].memberIDs).isSubset(of: members) {
+            piles[index].groupID = group.id
+        }
+    }
+
+    var piledMemberIDs: Set<String> { Set(piles.flatMap(\.memberIDs)) }
+    var visibleEntityIDs: Set<String> {
+        Set(nodes.map(\.id)).subtracting(piledMemberIDs).union(piles.map(\.id))
+    }
+    var selectedPile: CanvasPile? {
+        guard selectedNodeIds.count == 1 else { return nil }
+        return piles.first { selectedNodeIds.contains($0.id) }
+    }
+    func pile(containing id: String) -> CanvasPile? { piles.first { $0.memberIDs.contains(id) } }
+    func expandedNodeIDs(_ ids: Set<String>) -> Set<String> {
+        var result = ids.intersection(Set(nodes.map(\.id)))
+        for pile in piles where ids.contains(pile.id) { result.formUnion(pile.memberIDs) }
+        return result
+    }
+
+    /// Geometry-only copies use a real top member's ID so layout engines do not
+    /// need synthetic slot references. They are never persisted as nodes.
+    func layoutNodes(_ ids: Set<String>) -> [CanvasNode] {
+        let expanded = expandedNodeIDs(ids)
+        var result = nodes.filter { expanded.contains($0.id) && !piledMemberIDs.contains($0.id) }
+        for pile in piles where ids.contains(pile.id) || Set(pile.memberIDs).isSubset(of: expanded) {
+            guard var proxy = node(id: pile.memberIDs.last ?? "") else { continue }
+            let frame = CanvasPileGeometry.frame(pile, nodes: nodes)
+            proxy.setFrameOrigin(frame.origin); proxy.width = frame.width; proxy.height = frame.height
+            result.append(proxy)
+        }
+        return result
+    }
+
+    private var layoutEdges: [CanvasEdge] {
+        interactionEdges.compactMap { edge in
+            var projected = edge
+            projected.fromNodeId = pile(containing: edge.fromNodeId)?.memberIDs.last ?? edge.fromNodeId
+            projected.toNodeId = pile(containing: edge.toNodeId)?.memberIDs.last ?? edge.toNodeId
+            return projected.fromNodeId == projected.toNodeId ? nil : projected
+        }
+    }
+
+    private func applyLayoutOrigins(_ origins: [String: CGPoint]) {
+        for index in piles.indices {
+            if let top = piles[index].memberIDs.last, let origin = origins[top] {
+                piles[index].x = origin.x; piles[index].y = origin.y
+            }
+        }
+        let hidden = piledMemberIDs
+        for index in nodes.indices where !hidden.contains(nodes[index].id) {
+            if let origin = origins[nodes[index].id] { nodes[index].setFrameOrigin(origin) }
+        }
+    }
+
+    @discardableResult
+    func createPile(_ ids: Set<String>) -> CanvasPile? {
+        // Stable paint/document order, rather than Set iteration order.
+        let ordered = nodes.filter { ids.contains($0.id) }.map(\.id)
+            + piles.filter { ids.contains($0.id) }.map(\.id)
+        guard flushTextDocuments?() != false,
+              let pile = CanvasPileGeometry.creation(sourceIDs: ordered, nodes: nodes, piles: piles, groups: groups)
+        else { return nil }
+        commit(.pileNodes, detail: "堆叠 · \(pile.memberIDs.count) 个节点") {
+            piles.removeAll { ids.contains($0.id) }
+            piles.append(pile)
+            // Different parents detach; a shared parent is retained.
+            for index in groups.indices where groups[index].id != pile.groupID {
+                groups[index].nodeIDs.removeAll { pile.memberIDs.contains($0) }
+            }
+            selectedGroupID = nil; selectedEdgeId = nil; selectedNodeIds = [pile.id]
+        }
+        return pile
+    }
+
+    func unpile(_ id: String) {
+        guard let pile = piles.first(where: { $0.id == id }) else { return }
+        let origins = CanvasPileGeometry.unstackOrigins(pile, nodes: nodes)
+        commit(.pileNodes, detail: "展开堆叠 · \(pile.memberIDs.count) 个节点") {
+            for index in nodes.indices {
+                if let origin = origins[nodes[index].id] { nodes[index].setFrameOrigin(origin) }
+            }
+            piles.removeAll { $0.id == id }
+            for index in groups.indices { groups[index].nodeIDs.removeAll { pile.memberIDs.contains($0) } }
+            selectedGroupID = nil; selectedNodeIds = Set(pile.memberIDs)
+        }
+    }
+
+    func movePileMemberToTop(_ pileID: String, memberID: String) {
+        guard let index = piles.firstIndex(where: { $0.id == pileID }),
+              piles[index].memberIDs.contains(memberID), piles[index].memberIDs.last != memberID else { return }
+        commit(.pileNodes, detail: "成员置顶") {
+            piles[index].memberIDs.removeAll { $0 == memberID }
+            piles[index].memberIDs.append(memberID)
+        }
+    }
+
+    func extractPileMember(_ pileID: String, memberID: String, at origin: CGPoint) {
+        guard origin.x.isFinite, origin.y.isFinite,
+              let index = piles.firstIndex(where: { $0.id == pileID }),
+              piles[index].memberIDs.contains(memberID),
+              let member = nodes.firstIndex(where: { $0.id == memberID }) else { return }
+        let center = CanvasPileGeometry.frame(piles[index], nodes: nodes)
+        commit(.pileNodes, detail: "抽出成员") {
+            nodes[member].setFrameOrigin(origin)
+            piles[index].memberIDs.removeAll { $0 == memberID }
+            if piles[index].memberIDs.count < 2 {
+                for i in nodes.indices where piles[index].memberIDs.contains(nodes[i].id) {
+                    nodes[i].setFrameOrigin(CGPoint(x: center.midX - nodes[i].width / 2,
+                                                   y: center.midY - nodes[i].height / 2))
+                }
+                piles.remove(at: index)
+            } else {
+                let size = CanvasPileGeometry.frame(piles[index], nodes: nodes).size
+                piles[index].x = center.midX - size.width / 2
+                piles[index].y = center.midY - size.height / 2
+            }
+            for i in groups.indices { groups[i].nodeIDs.removeAll { $0 == memberID } }
+            selectedGroupID = nil; selectedNodeIds = [memberID]
+        }
+    }
+
+    /// CGe/EGe append incoming members on top and preserve the target's center.
+    @discardableResult
+    func addToPile(_ id: String, entityIDs: Set<String>) -> Bool {
+        guard let index = piles.firstIndex(where: { $0.id == id }), !entityIDs.contains(id) else { return false }
+        let old = piles[index], incoming = expandedNodeIDs(entityIDs)
+        let ordered = nodes.filter { entityIDs.contains($0.id) }.map(\.id)
+            + piles.filter { entityIDs.contains($0.id) }.flatMap(\.memberIDs)
+        var seen = Set(old.memberIDs)
+        let newIDs = ordered.filter { seen.insert($0).inserted }
+        guard !newIDs.isEmpty, old.memberIDs.count + newIDs.count <= 50,
+              newIDs.allSatisfy({ memberID in
+                  guard let node = node(id: memberID), CanvasPileGeometry.isEligible(node) else { return false }
+                  return pile(containing: memberID).map { entityIDs.contains($0.id) } ?? true
+              }) else { return false }
+        let center = CanvasPileGeometry.frame(old, nodes: nodes)
+        commit(.pileNodes, detail: "合入堆叠 · \(newIDs.count) 个节点") {
+            piles[index].memberIDs += newIDs
+            let size = CanvasPileGeometry.frame(piles[index], nodes: nodes).size
+            piles[index].x = center.midX - size.width / 2; piles[index].y = center.midY - size.height / 2
+            piles.removeAll { entityIDs.contains($0.id) }
+            for i in groups.indices where groups[i].id != old.groupID {
+                groups[i].nodeIDs.removeAll { incoming.contains($0) }
+            }
+            if let parent = old.groupID, let group = groups.firstIndex(where: { $0.id == parent }) {
+                groups[group].nodeIDs += newIDs.filter { !groups[group].nodeIDs.contains($0) }
+            }
+            selectedGroupID = nil; selectedNodeIds = [id]
+        }
+        return true
+    }
+
+    func movePile(_ id: String, by delta: CGSize) {
+        guard delta.width.isFinite, delta.height.isFinite, delta != .zero,
+              let index = piles.firstIndex(where: { $0.id == id }) else { return }
+        commit(.moveNode, detail: "移动堆叠") {
+            piles[index].x += delta.width; piles[index].y += delta.height
+            if let parent = piles[index].groupID,
+               let group = groups.first(where: { $0.id == parent }),
+               let frame = CanvasGroupGeometry.frame(group, nodes: nodes),
+               CanvasGroupGeometry.completelyOutside(CanvasPileGeometry.frame(piles[index], nodes: nodes), container: frame) {
+                let ids = Set(piles[index].memberIDs)
+                for i in groups.indices where groups[i].id == parent { groups[i].nodeIDs.removeAll { ids.contains($0) } }
+                piles[index].groupID = nil
+            }
+        }
+    }
+
+    func ungroupNodes(_ ids: Set<String>) {
+        let ids = expandedNodeIDs(ids)
+        if let id = selectedGroupID, groupMemberIDs(id) == ids {
+            ungroupGroup(id); return
+        }
+        guard groups.contains(where: { !ids.isDisjoint(with: $0.nodeIDs) }) else { return }
+        commit(.groupNodes, detail: "解除编组") {
+            let removed = Set(groups.filter { !ids.isDisjoint(with: $0.nodeIDs) }.map(\.id))
+            groups = CanvasGroupHierarchy.dissolving(removed, groups: groups)
+            selectedGroupID = nil
+        }
+    }
+
+    func ungroupGroup(_ id: String) {
+        guard groups.contains(where: { $0.id == id }) else { return }
+        commit(.groupNodes, detail: "解除编组") {
+            groups = CanvasGroupHierarchy.dissolving([id], groups: groups)
+            selectedGroupID = nil
+        }
+    }
+
+    func groupMemberIDs(_ id: String) -> Set<String> {
+        CanvasGroupHierarchy.memberIDs(id, groups: groups)
+    }
+
+    func groupDragEntityIDs(_ id: String) -> Set<String> {
+        let containers = CanvasGroupHierarchy.subtreeIDs(id, groups: groups)
+        return groupMemberIDs(id).union(piles.filter { $0.groupID.map(containers.contains) == true }.map(\.id))
+    }
+
+    func renameGroup(_ id: String, name: String) {
+        guard !name.isEmpty, let index = groups.firstIndex(where: { $0.id == id }),
+              groups[index].name != name else { return }
+        commit(.groupNodes, detail: name) { groups[index].name = name }
+    }
+
+    func selectGroup(_ id: String) {
+        guard groups.contains(where: { $0.id == id }) else { return }
+        selectedGroupID = nil
+        selectedNodeIds = groupMemberIDs(id)
+        selectedGroupID = id
+        selectedEdgeId = nil
+    }
+
+    func setGroupColor(_ id: String, color: CanvasGroupColor?) {
+        guard let index = groups.firstIndex(where: { $0.id == id }) else { return }
+        commit(.groupNodes, detail: "编组背景色") { groups[index].color = color }
+    }
+
+    func attachGroupWorkflow(_ id: String, skillID: UUID) {
+        guard let index = groups.firstIndex(where: { $0.id == id }) else { return }
+        commit(.groupNodes, detail: "关联编组工作流") { groups[index].workflowSkillID = skillID }
+    }
+
+    func resizeGroup(_ id: String, frame: CGRect) {
+        guard CanvasGroupGeometry.isValid(frame), let index = groups.firstIndex(where: { $0.id == id }) else { return }
+        if CanvasGroupHierarchy.hasHierarchy(id, groups: groups) || groups[index].provenance == .server {
+            do {
+                let next = try CanvasGroupHierarchy.resizing(id, to: frame, in: gatewayDocument())
+                commit(.groupNodes, detail: "调整多层编组边界") {
+                    nodes = next.nodes; groups = next.groups; piles = next.piles
+                    freezeGroupAutoLayout(id)
+                }
+            } catch { agentHistoryError = error.localizedDescription }
+            return
+        }
+        commit(.groupNodes, detail: "调整编组边界") { groups[index].containerFrame = frame }
+    }
+
+    func moveGroup(_ id: String, by delta: CGSize) {
+        guard delta.width.isFinite, delta.height.isFinite, delta != .zero,
+              let group = groups.first(where: { $0.id == id }) else { return }
+        do {
+            let next = try CanvasGroupHierarchy.moving(id, by: delta, in: gatewayDocument())
+            commit(.moveNode, detail: "移动编组 · \(group.name)") {
+                nodes = next.nodes; groups = next.groups; piles = next.piles
+                freezeGroupAutoLayout(id)
+            }
+        } catch { agentHistoryError = error.localizedDescription }
+    }
+
+    func arrangeGroup(_ id: String, layout: CanvasGroupLayoutType) {
+        guard let index = groups.firstIndex(where: { $0.id == id }),
+              let frame = CanvasGroupGeometry.frame(groups[index], nodes: nodes) else { return }
+        if CanvasGroupHierarchy.hasHierarchy(id, groups: groups) {
+            do {
+                let next = try CanvasServerGroupLayout.arranging(id, layout: layout, in: gatewayDocument())
+                commit(.moveNode, detail: "多层编组布局") {
+                    nodes = next.nodes; groups = next.groups; piles = next.piles
+                    freezeGroupAutoLayout(id)
+                }
+            } catch { agentHistoryError = error.localizedDescription }
+            return
+        }
+        let members = layoutNodes(Set(groups[index].nodeIDs))
+        let result: (origins: [String: CGPoint], frame: CGRect)
+        if layout == .grid {
+            result = CanvasGroupGeometry.grid(nodes: members, at: frame.origin)
+        } else {
+            guard let layout = CanvasDagreLayout.layout(nodes: members, edges: layoutEdges, at: frame.origin) else {
+                agentHistoryError = "横向布局引擎加载失败，请重试。"; return
+            }
+            result = (layout.origins, layout.frame)
+        }
+        commit(.moveNode, detail: layout == .grid ? "方格布局" : "横向布局") {
+            applyLayoutOrigins(result.origins)
+            groups[index].layoutType = layout
+            groups[index].containerFrame = result.frame
+            freezeGroupAutoLayout(id)
+        }
+    }
+
+    private func freezeGroupAutoLayout(_ id: String) {
+        var affected = CanvasGroupHierarchy.subtreeIDs(id, groups: groups)
+        var parent = groups.first(where: { $0.id == id })?.parentGroupID
+        while let value = parent, affected.insert(value).inserted {
+            parent = groups.first(where: { $0.id == value })?.parentGroupID
+        }
+        for i in groups.indices where affected.contains(groups[i].id) && groups[i].provenance == .server {
+            groups[i].autoLayoutEnabled = false
+        }
+    }
+
+    /// Actual rendered node sizes, scoped to the active project. No fallback to
+    /// default model sizes and no layout writes while a pointer gesture is live.
+    func updateGroupMeasurements(_ measurements: [String: CGSize], projectID: String, allowLayout: Bool) {
+        guard projectID == activeProjectId else { return }
+        groupMeasurementProjectID = projectID
+        groupMeasurements = measurements
+        if allowLayout { reconcileMeasuredServerGroups() }
+    }
+
+    func reconcileMeasuredServerGroups() {
+        guard groupMeasurementProjectID == activeProjectId, !documentLoadFailed,
+              groups.contains(where: { $0.provenance == .server && $0.autoLayoutEnabled != false }) else { return }
+        do {
+            let result = try CanvasServerGroupLayout.reconcile(gatewayDocument(), measurements: groupMeasurements,
+                suppressedGroupIDs: suppressedServerGroupLayouts)
+            if serverGroupLayoutStates != result.states { serverGroupLayoutStates = result.states }
+            guard !result.appliedGroupIDs.isEmpty else { return }
+            commit(.groupNodes, detail: "服务端编组布局 · " + result.appliedGroupIDs.joined(separator: "、")) {
+                nodes = result.document.nodes
+                groups = result.document.groups
+                piles = result.document.piles
+            }
+        } catch { agentHistoryError = error.localizedDescription }
+    }
+
+    /// Membership changes share the movement transaction; nodes and edges keep
+    /// world coordinates. Keep a frozen frame when upgrading an old document.
+    private func updateGroupMembership(movedIDs: Set<String>, frames: [String: CGRect]) {
+        for group in groups where !movedIDs.isDisjoint(with: group.nodeIDs) { freezeGroupAutoLayout(group.id) }
+        for node in nodes where movedIDs.contains(node.id) {
+            if let owner = groups.firstIndex(where: { $0.nodeIDs.contains(node.id) }),
+               let frame = frames[groups[owner].id] {
+                if !CanvasGroupGeometry.completelyOutside(node.frame, container: frame) { continue }
+                groups[owner].nodeIDs.removeAll { $0 == node.id }
+                continue
+            }
+            let candidate = groups.indices.filter {
+                groups[$0].nodeIDs.count < 50 && frames[groups[$0].id]?.contains(node.frame) == true
+            }.min {
+                let a = frames[groups[$0].id]!, b = frames[groups[$1].id]!
+                return a.width * a.height < b.width * b.height
+            }
+            if let candidate {
+                groups[candidate].nodeIDs.append(node.id)
+                freezeGroupAutoLayout(groups[candidate].id)
+            }
+        }
+        for i in groups.indices { groups[i].containerFrame = frames[groups[i].id] ?? groups[i].containerFrame }
+    }
+
+    /// One transaction for a whole library drag: deduplicate nodes, import real
+    /// connections, arrange and group. Existing node configuration is untouched.
+    @discardableResult
+    func placeSlotGroup(pageID: String, groupID: String, slots: [Int], name: String,
+                        edges imported: [CanvasEdge], at point: CGPoint) -> CanvasNodeGroup? {
+        let slots = Array(Set(slots.filter { $0 > 0 })).sorted()
+        guard !slots.isEmpty, flushTextDocuments?() != false else { return nil }
+        let ids = Set(slots.map { CanvasNode.makeId(groupId: groupID, slot: $0) })
+        let previousGroup = groups.first { Set($0.nodeIDs) == ids }
+        var group = previousGroup ?? CanvasNodeGroup(name: name, nodeIDs: slots.map { CanvasNode.makeId(groupId: groupID, slot: $0) }, createdBy: .client)
+        commit(.addNode, detail: "\(name) · \(slots.count) 个槽位") {
+            for slot in slots where !nodes.contains(where: { $0.groupId == groupID && $0.slot == slot }) {
+                nodes.append(CanvasNode(pageId: pageID, groupId: groupID, slot: slot, x: point.x, y: point.y))
+            }
+            let allowedEdges = imported.filter { ids.contains($0.fromNodeId) && ids.contains($0.toNodeId) }
+            edges = CanvasEdgeGraph.normalized(edges + allowedEdges, nodeIds: Set(nodes.map(\.id)))
+            let selected = nodes.filter { ids.contains($0.id) }
+            let origins = CanvasGroupLayout.origins(nodes: selected, edges: edges, at: point)
+            for index in nodes.indices {
+                if let origin = origins[nodes[index].id] { nodes[index].setFrameOrigin(origin) }
+            }
+            group.containerFrame = CanvasGroupGeometry.enclosing(nodes.filter { ids.contains($0.id) })
+            group.layoutType = group.layoutType ?? .horizontal
+            assignGroup(group)
+            selectGroup(group.id)
+        }
+        return group
+    }
+
+    func autoArrange(_ ids: Set<String>) {
+        if let id = selectedGroupID, groupMemberIDs(id) == expandedNodeIDs(ids),
+           let group = groups.first(where: { $0.id == id }) {
+            arrangeGroup(id, layout: group.layoutType ?? .horizontal); return
+        }
+        if let group = groups.first(where: { Set($0.nodeIDs) == expandedNodeIDs(ids) }) {
+            arrangeGroup(group.id, layout: group.layoutType ?? .horizontal); return
+        }
+        let selected = layoutNodes(ids)
+        guard selected.count > 1, let left = selected.map(\.x).min(), let top = selected.map(\.y).min() else { return }
+        let origins = CanvasGroupLayout.origins(nodes: selected, edges: layoutEdges, at: CGPoint(x: left, y: top))
+        commit(.moveNode, detail: "自动排布 \(selected.count) 个节点") {
+            applyLayoutOrigins(origins)
+        }
+    }
+
+    func resetNodeSizes(_ ids: Set<String>) {
+        commit(.styleNode, detail: "重置节点尺寸") {
+            for index in nodes.indices where ids.contains(nodes[index].id) {
+                let node = nodes[index]
+                let size: CGSize
+                if node.kind.isMediaNode, node.width > 0, node.height > 0 {
+                    let factor = CanvasNodeSizing.defaultShortSide / min(node.width, node.height)
+                    size = CGSize(width: node.width * factor, height: node.height * factor)
+                } else { size = CanvasNodeSizing.initialSize(for: node.kind) }
+                nodes[index].width = size.width
+                nodes[index].height = size.height
+            }
+        }
+    }
+
     func node(id: String) -> CanvasNode? {
         nodes.first { $0.id == id }
     }
@@ -399,8 +1010,12 @@ final class CanvasStore: ObservableObject {
         // 记了只会把历史面板刷成一屏重复的「移动节点」，也会白占撤销栈。
         guard snapped != nodes[idx].frame.origin else { return }
         let title = nodeTitle(nodes[idx])
+        let frames = Dictionary(uniqueKeysWithValues: groups.compactMap { group in
+            CanvasGroupGeometry.frame(group, nodes: nodes).map { (group.id, $0) }
+        })
         commit(.moveNode, detail: title) {
             nodes[idx].setFrameOrigin(snapped)
+            updateGroupMembership(movedIDs: [id], frames: frames)
         }
     }
 
@@ -432,24 +1047,49 @@ final class CanvasStore: ObservableObject {
     /// 那里是对的 —— 算出来的落点本来就没有"用户的手"可以尊重，对齐让批量新建看起来整齐。
     /// 区别在于：吸附该服务于"系统自己决定的位置"，而不该覆盖"用户亲手指定的位置"。
     func moveNodes(ids: Set<String>, by rawDelta: CGSize) {
+        guard rawDelta.width.isFinite, rawDelta.height.isFinite else { return }
+        if ids.count == 1, let id = ids.first, piles.contains(where: { $0.id == id }) {
+            movePile(id, by: rawDelta); return
+        }
+        if let id = selectedGroupID, groupMemberIDs(id) == ids {
+            moveGroup(id, by: rawDelta); return
+        }
         guard !ids.isEmpty else { return }
         let step = CanvasStore.dragPersistenceStep(forZoom: zoom)
         let delta = CGSize(width: CanvasStore.roundDragDelta(rawDelta.width, step: step),
                            height: CanvasStore.roundDragDelta(rawDelta.height, step: step))
         guard delta.width != 0 || delta.height != 0 else { return }
-        let moved = nodes.filter { ids.contains($0.id) }
-        guard !moved.isEmpty else { return }
-        let detail = moved.count == 1 ? nodeTitle(moved[0]) : "\(moved.count) 个节点"
+        let moved = nodes.filter { ids.contains($0.id) && !piledMemberIDs.contains($0.id) }
+        let movedPiles = piles.filter { ids.contains($0.id) }
+        guard !moved.isEmpty || !movedPiles.isEmpty else { return }
+        let detail = moved.count == 1 && movedPiles.isEmpty ? nodeTitle(moved[0])
+            : "\(moved.count + movedPiles.count) 个对象"
+        let frames = Dictionary(uniqueKeysWithValues: groups.compactMap { group in
+            CanvasGroupGeometry.frame(group, nodes: nodes).map { (group.id, $0) }
+        })
         commit(.moveNode, detail: detail) {
-            for idx in nodes.indices where ids.contains(nodes[idx].id) {
+            for idx in nodes.indices where moved.contains(where: { $0.id == nodes[idx].id }) {
                 let origin = nodes[idx].frame.origin
                 nodes[idx].setFrameOrigin(CGPoint(x: origin.x + delta.width,
                                                   y: origin.y + delta.height))
             }
+            for index in piles.indices where ids.contains(piles[index].id) {
+                piles[index].x += delta.width; piles[index].y += delta.height
+                if let parent = piles[index].groupID, let frame = frames[parent],
+                   CanvasGroupGeometry.completelyOutside(CanvasPileGeometry.frame(piles[index], nodes: nodes), container: frame) {
+                    let members = Set(piles[index].memberIDs)
+                    for group in groups.indices where groups[group].id == parent {
+                        groups[group].nodeIDs.removeAll { members.contains($0) }
+                    }
+                    piles[index].groupID = nil
+                }
+            }
+            updateGroupMembership(movedIDs: Set(moved.map(\.id)), frames: frames)
         }
     }
 
     func removeNodes(ids: Set<String>) {
+        let ids = expandedNodeIDs(ids)
         guard !ids.isEmpty else { return }
         let removed = nodes.filter { ids.contains($0.id) }
         guard !removed.isEmpty else { return }
@@ -459,6 +1099,14 @@ final class CanvasStore: ObservableObject {
         // 一次删多个只记一条，写成「3 个节点」而不是刷 3 行 —— 框选批量删是常态操作。
         let detail = removed.count == 1 ? nodeTitle(removed[0]) : "\(removed.count) 个节点"
         commit(.removeNode, detail: detail) {
+            for pile in piles {
+                let remaining = pile.memberIDs.filter { !ids.contains($0) }
+                if remaining.count == 1, let last = nodes.firstIndex(where: { $0.id == remaining[0] }) {
+                    let frame = CanvasPileGeometry.frame(pile, nodes: nodes)
+                    nodes[last].setFrameOrigin(CGPoint(x: frame.midX - nodes[last].width / 2,
+                                                      y: frame.midY - nodes[last].height / 2))
+                }
+            }
             nodes.removeAll { ids.contains($0.id) }
             for idx in nodes.indices {
                 if let parent = nodes[idx].parentNodeId, ids.contains(parent) { nodes[idx].parentNodeId = nil }
@@ -467,6 +1115,7 @@ final class CanvasStore: ObservableObject {
             // 连线跟着节点走。留下野线的症状是画布上有一条连到虚空的曲线，而它长得跟正常线一样 ——
             // 取入参时那条线又什么都拿不到，于是"生成结果莫名少了一张参考图"。
             edges = CanvasEdgeGraph.removing(nodeIds: ids, from: edges)
+            nodes = CanvasEdgeGraph.reconcilingDraftReferences(nodes: nodes, edges: edges)
             if let selected = selectedEdgeId, !edges.contains(where: { $0.id == selected }) {
                 selectedEdgeId = nil
             }
@@ -476,7 +1125,7 @@ final class CanvasStore: ObservableObject {
     /// 删除全部选中节点（Delete / Backspace）。返回删掉的数量，便于调用方决定要不要提示。
     @discardableResult
     func removeSelected() -> Int {
-        let ids = selectedNodeIds
+        let ids = expandedNodeIDs(selectedNodeIds)
         let count = nodes.filter { ids.contains($0.id) }.count
         removeNodes(ids: ids)
         return count
@@ -484,11 +1133,17 @@ final class CanvasStore: ObservableObject {
 
     func updateNode(id: String, _ mutate: (inout CanvasNode) -> Void) {
         guard let idx = nodes.firstIndex(where: { $0.id == id }) else { return }
+        let owner = piles.firstIndex { $0.memberIDs.contains(id) }
+        let pileFrame = owner.map { CanvasPileGeometry.frame(piles[$0], nodes: nodes) }
         var next = nodes[idx]
         mutate(&next)
         guard next != nodes[idx] else { return }
         next.updatedAt = Date()
         nodes[idx] = next
+        if let owner, let old = pileFrame {
+            let size = CanvasPileGeometry.frame(piles[owner], nodes: nodes).size
+            piles[owner].x = old.midX - size.width / 2; piles[owner].y = old.midY - size.height / 2
+        }
         scheduleSave()
     }
 
@@ -502,7 +1157,12 @@ final class CanvasStore: ObservableObject {
         generationTickets[ticket.token] = ticket
         updateNode(id: node.id) {
             $0.state = .running(startedAt: Date())
-            if !recovering { $0.taskId = nil }
+            if !recovering {
+                $0.taskId = nil
+                $0.generationTask = nil
+                $0.generationRawOutput = nil
+                $0.generationDiagnostic = nil
+            }
         }
         return ticket
     }
@@ -550,7 +1210,7 @@ final class CanvasStore: ObservableObject {
         guard let ticket = generationTickets.values.first(where: { $0.matches(node, projectId: activeProjectId) }) else { return }
         stoppedGenerations.insert(ticket.token)
         // submit 尚未返回时让它交还 taskId；取消这个过程会丢失远端身份。
-        if generationNode(ticket.token)?.taskId != nil {
+        if node.kind == .text || generationNode(ticket.token)?.taskId != nil {
             generationTasks[ticket.token]?.cancel()
             updateGeneration(ticket.token) { $0.state = .idle }
             flushSave()
@@ -571,19 +1231,28 @@ final class CanvasStore: ObservableObject {
     /// 返回值区分"连上了"与"为什么连不上"，而不是返回 `Bool` —— 用户拖了一条线却什么都没发生时，
     /// 唯一有用的信息就是原因（是环？是重复？），调用方拿它做 toast。
     @discardableResult
-    func connect(from: String, to: String, role: CanvasEdgeRole = .auto) -> CanvasEdgeGraph.Rejection? {
-        let ids = Set(nodes.map(\.id))
-        if let rejection = CanvasEdgeGraph.canConnect(from: from, to: to, edges: edges, nodeIds: ids) {
+    func connect(from: String, to: String, role: CanvasEdgeRole = .auto,
+                 purpose: CanvasEdgePurpose? = nil) -> CanvasEdgeGraph.Rejection? {
+        let resolvedPurpose = purpose ?? node(id: to).map(CanvasEdgeGraph.defaultPurpose) ?? .generationInput
+        if let rejection = CanvasEdgeGraph.canConnect(from: from, to: to, nodes: nodes, edges: edges,
+                                                      purpose: resolvedPurpose, role: role) {
             return rejection
         }
         let detail = connectionDetail(from: from, to: to)
-        let edge = CanvasEdge(fromNodeId: from, toNodeId: to, role: role)
+        let edge = CanvasEdge(fromNodeId: from, toNodeId: to, role: role, purpose: resolvedPurpose)
+        var rejection: CanvasEdgeGraph.Rejection? = .editBlocked
         commit(.connect, detail: detail) {
-            edges.append(edge)
-            selectedNodeIds = []
-            selectedEdgeId = edge.id
+            switch CanvasEdgeGraph.connecting(edge, nodes: nodes, edges: edges) {
+            case .failure(let reason): rejection = reason
+            case .success(let edit):
+                nodes = edit.nodes
+                edges = edit.edges
+                selectedNodeIds = []
+                selectedEdgeId = edge.id
+                rejection = nil
+            }
         }
-        return nil
+        return rejection
     }
 
     /// 断开一条线。
@@ -591,25 +1260,58 @@ final class CanvasStore: ObservableObject {
     func disconnect(edgeId: String) -> Bool {
         guard let edge = edges.first(where: { $0.id == edgeId }) else { return false }
         let detail = connectionDetail(from: edge.fromNodeId, to: edge.toNodeId)
+        var changed = false
         commit(.disconnect, detail: detail) {
-            edges.removeAll { $0.id == edgeId }
-            // 清掉旧版血缘，避免解码迁移把用户断开的连接重新生成。
-            if let idx = nodes.firstIndex(where: { $0.id == edge.toNodeId }),
-               nodes[idx].parentNodeId == edge.fromNodeId {
-                nodes[idx].parentNodeId = nil
-            }
+            guard let edit = CanvasEdgeGraph.disconnecting(edgeID: edgeId, nodes: nodes, edges: edges) else { return }
+            nodes = edit.nodes
+            edges = edit.edges
             if selectedEdgeId == edgeId { selectedEdgeId = nil }
+            changed = true
         }
-        return true
+        return changed
     }
 
     /// 改一条线的用途（首帧 / 尾帧 / 参考图 / 提示词 / 自动）。
+    func setEdgeAnimated(edgeId: String, animated: Bool) {
+        guard let index = edges.firstIndex(where: { $0.id == edgeId }), edges[index].animated != animated else { return }
+        commit(.edgeRole, detail: animated ? "开启连线流光" : "关闭连线流光") {
+            edges[index].animated = animated
+        }
+    }
+
     func setEdgeRole(edgeId: String, role: CanvasEdgeRole) {
         guard let idx = edges.firstIndex(where: { $0.id == edgeId }), edges[idx].role != role else { return }
+        let edge = edges[idx]
+        guard CanvasEdgeGraph.canConnect(from: edge.fromNodeId, to: edge.toNodeId, nodes: nodes,
+            edges: edges.filter { $0.id != edgeId }, purpose: edge.purpose, role: role) == nil else { return }
         let detail = "\(connectionDetail(from: edges[idx].fromNodeId, to: edges[idx].toNodeId)) · \(role.displayName)"
         commit(.edgeRole, detail: detail) {
             edges[idx].role = role
         }
+    }
+
+    @discardableResult
+    func setEdgePurpose(edgeId: String, purpose: CanvasEdgePurpose,
+                        role: CanvasEdgeRole? = nil) -> CanvasEdgeGraph.Rejection? {
+        guard var edge = edges.first(where: { $0.id == edgeId }) else { return .missingNode }
+        guard edge.purpose != purpose else { return nil }
+        edge.purpose = purpose
+        edge.role = role ?? (purpose == .draftReference ? .auto : edge.role)
+        var rejection: CanvasEdgeGraph.Rejection? = .editBlocked
+        commit(.edgeRole, detail: connectionDetail(from: edge.fromNodeId, to: edge.toNodeId)) {
+            guard let removed = CanvasEdgeGraph.disconnecting(edgeID: edgeId, nodes: nodes, edges: edges) else {
+                rejection = .missingNode
+                return
+            }
+            switch CanvasEdgeGraph.connecting(edge, nodes: removed.nodes, edges: removed.edges) {
+            case .failure(let reason): rejection = reason
+            case .success(let edit):
+                nodes = edit.nodes
+                edges = edit.edges
+                rejection = nil
+            }
+        }
+        return rejection
     }
 
     func edge(id: String) -> CanvasEdge? {
@@ -677,9 +1379,22 @@ final class CanvasStore: ObservableObject {
     /// 只能另开一个 `clearDuration: Bool` 参数——那是把类型问题挪到参数列表里。
     ///
     /// 约定：外层 nil = 不动；内层 nil = 显式清空。
+    func updateNodeProvider(id: String, provider: GenerationProviderID? = nil,
+                            configuration: ByteArtistCanvasConfiguration? = nil) {
+        guard let index = nodes.firstIndex(where: { $0.id == id }) else { return }
+        guard provider.map({ $0 != nodes[index].generationProvider }) ?? false
+                || configuration.map({ $0 != nodes[index].byteArtist }) ?? false else { return }
+        commit(.paramNode, detail: "生成来源与工作流") {
+            if let provider { nodes[index].generationProvider = provider }
+            if let configuration { nodes[index].byteArtist = configuration }
+            nodes[index].updatedAt = Date()
+        }
+    }
+
     func updateNodeGeneration(id: String,
                               model: String? = nil,
                               ratio: String? = nil,
+                              count: Int? = nil,
                               resolution: String? = nil,
                               duration: Int?? = nil,
                               generateAudio: Bool?? = nil) {
@@ -688,6 +1403,7 @@ final class CanvasStore: ObservableObject {
         let newModel = (model?.trimmingCharacters(in: .whitespacesAndNewlines)).flatMap { $0.isEmpty ? nil : $0 }
             ?? nodes[idx].model
         let newRatio = ratio?.trimmingCharacters(in: .whitespacesAndNewlines) ?? nodes[idx].ratio
+        let newCount = count.map { min(4, max(1, $0)) } ?? nodes[idx].count
         let newResolution = resolution?.trimmingCharacters(in: .whitespacesAndNewlines) ?? nodes[idx].resolution
         let newDuration = duration ?? nodes[idx].duration
         let newAudio = generateAudio ?? nodes[idx].generateAudio
@@ -695,6 +1411,7 @@ final class CanvasStore: ObservableObject {
             ? CanvasNodeSizing.size(ratio: newRatio, shortSide: min(nodes[idx].width, nodes[idx].height)) : nil
         guard newModel != nodes[idx].model
                 || newRatio != nodes[idx].ratio
+                || newCount != nodes[idx].count
                 || newResolution != nodes[idx].resolution
                 || newDuration != nodes[idx].duration
                 || newAudio != nodes[idx].generateAudio
@@ -716,6 +1433,7 @@ final class CanvasStore: ObservableObject {
             }
             nodes[idx].model = newModel
             nodes[idx].ratio = newRatio
+            nodes[idx].count = newCount
             nodes[idx].resolution = newResolution
             nodes[idx].duration = newDuration
             nodes[idx].generateAudio = newAudio
@@ -723,10 +1441,93 @@ final class CanvasStore: ObservableObject {
         }
     }
 
+    /// Configuration/results have separate slots; a single undo removes the
+    /// entire newly submitted batch and its edges.
+    func addGenerationResults(source: CanvasNode, slots: [Int],
+                              inputIDs: [Int: [String]] = [:],
+                              upstreamResults: [String: String] = [:]) -> [CanvasNode] {
+        guard let live = node(id: source.id), live.createdAt == source.createdAt,
+              live.kind.isMediaNode, !slots.isEmpty else { return [] }
+        guard Set(slots).count == slots.count else { return [] }
+        guard flushTextDocuments?() != false else { return [] }
+        var occupied = nodes.map(\.frame)
+        var children: [CanvasNode] = []
+        let incoming = incomingEdges(of: live.id).filter {
+            $0.purpose.isGenerationDependency && $0.fromNodeId != live.generationSourceID
+        }
+        var resultEdges: [CanvasEdge] = []
+        for slot in slots {
+            var child = live
+            child.groupId = privateGroupId
+            child.slot = slot
+            guard !nodes.contains(where: { $0.id == child.id }) else { return [] }
+            let point = CanvasMagnetGeometry.resultOrigin(source: live.frame, size: live.frame.size, occupied: occupied)
+            child.x = point.x
+            child.y = point.y
+            child.mediaRole = .generation
+            child.state = .idle
+            child.taskId = nil
+            child.generationTask = nil
+            child.generationRawOutput = nil
+            child.generationDiagnostic = nil
+            child.draftVideoID = nil
+            child.draftReference = nil
+            child.seed = nil
+            child.count = 1
+            child.outputAttachmentIds = []
+            child.inputAttachmentIds = inputIDs[slot] ?? []
+            child.mediaLayoutAttachmentID = nil
+            child.parentNodeId = live.id
+            child.generationSourceID = live.id
+            child.createdAt = Date()
+            child.updatedAt = child.createdAt
+            children.append(child)
+            occupied.append(child.frame)
+            // Copy the same upstream roles; the source's own prompt arrives last.
+            resultEdges += incoming.map {
+                CanvasEdge(fromNodeId: upstreamResults[$0.fromNodeId] ?? $0.fromNodeId, toNodeId: child.id,
+                           role: $0.role, createdAt: $0.createdAt)
+            }
+            // generationSourceID records batch membership. It is not a reference
+            // edge: all attempts share the original inputs, not attempt one's image.
+        }
+        let selectedGroup = selectedGroupID
+        commit(.addNode, detail: "\(children.count) 个生成结果") {
+            nodes.append(contentsOf: children)
+            edges.append(contentsOf: resultEdges)
+            selectedEdgeId = nil
+            if let selectedGroup { selectGroup(selectedGroup) }
+            else { selectedNodeIds = [live.id] }
+        }
+        return children.filter { child in nodes.contains { $0.id == child.id && $0.createdAt == child.createdAt } }
+    }
+
+    /// Native media can widen a result after download. Push only its later
+    /// generated results to the right, keeping their row and leaving manually
+    /// placed nodes untouched.
+    func reserveSpaceForResult(id: String) {
+        guard let result = node(id: id), result.generationSourceID != nil
+                || adjacentLastResultIDs[id]?.contains(id) == true else { return }
+        let siblings = nodes.filter {
+            $0.id != id && $0.generationSourceID != nil && $0.x > result.x && abs($0.y - result.y) < 0.5
+        }.sorted { $0.x < $1.x }
+        var cursor = result.frame
+        for sibling in siblings {
+            guard let index = nodes.firstIndex(where: { $0.id == sibling.id }) else { continue }
+            if sibling.x < cursor.maxX + 28 {
+                let point = CanvasMagnetGeometry.resultOrigin(source: cursor, size: sibling.frame.size,
+                    occupied: nodes.filter { $0.id != sibling.id && !siblings.contains($0) }.map(\.frame))
+                nodes[index].setFrameOrigin(point)
+            }
+            cursor = nodes[index].frame
+        }
+        scheduleSave()
+    }
+
     /// 当前选中的**唯一**节点。属性面板只在单选时出现 —— 多选时改字体要么只改一个（用户会以为
     /// 没生效），要么全改（等于偷偷批量改），两种都不如不显示面板。
     var soleSelectedNode: CanvasNode? {
-        guard selectedNodeIds.count == 1, let id = selectedNodeIds.first else { return nil }
+        guard selectedGroupID == nil, selectedNodeIds.count == 1, let id = selectedNodeIds.first else { return nil }
         return nodes.first { $0.id == id }
     }
 
@@ -753,7 +1554,9 @@ final class CanvasStore: ObservableObject {
     /// - Returns: 是否真的改绑了。false = 目标槽位已被别的节点占用（或节点不存在），调用方应据此
     ///   放弃第 1 步的内容搬迁，否则会出现"内容搬了、节点没跟过去"的分歧。
     @discardableResult
-    func rebindNode(id: String, toPageId pageId: String, groupId: String, slot: Int) -> Bool {
+    func rebindNode(id: String, toPageId pageId: String, groupId: String, slot: Int,
+                    historyExchange: (undo: () throws -> Void, redo: () throws -> Void)? = nil) -> Bool {
+        guard flushTextDocuments?() != false else { return false }
         guard let idx = nodes.firstIndex(where: { $0.id == id }) else { return false }
         let newId = CanvasNode.makeId(groupId: groupId, slot: slot)
         if newId == id {
@@ -771,6 +1574,7 @@ final class CanvasStore: ObservableObject {
         }
 
         let title = nodeTitle(nodes[idx])
+        let previousEntry = history.entries.last?.id
         commit(.moveNode, detail: title) {
             nodes[idx].pageId = pageId
             nodes[idx].groupId = groupId
@@ -780,14 +1584,26 @@ final class CanvasStore: ObservableObject {
             for i in nodes.indices where nodes[i].parentNodeId == id {
                 nodes[i].parentNodeId = newId
             }
+            for i in nodes.indices where nodes[i].generationSourceID == id {
+                nodes[i].generationSourceID = newId
+            }
             // 连线的两端同理（v2.12.0）。这里是 hotfix 注释里列的第二个坑在连线时代的翻版：
             // 不改就是"把节点归档到另一个槽位后，它的线全断了"，而断链事后无法还原。
             edges = CanvasEdgeGraph.remapping(nodeId: id, to: newId, edges: edges)
+            nodes = CanvasEdgeGraph.reconcilingDraftReferences(nodes: nodes, edges: edges)
+            for index in groups.indices {
+                groups[index].nodeIDs = groups[index].nodeIDs.map { $0 == id ? newId : $0 }
+            }
+            for index in piles.indices {
+                piles[index].memberIDs = piles[index].memberIDs.map { $0 == id ? newId : $0 }
+            }
             if selectedNodeIds.contains(id) {
                 selectedNodeIds.remove(id)
                 selectedNodeIds.insert(newId)
             }
         }
+        guard let entry = history.entries.last, entry.id != previousEntry else { return false }
+        if let historyExchange { agentBodyEdits[entry.id] = historyExchange }
         return true
     }
 
@@ -1010,17 +1826,23 @@ final class CanvasStore: ObservableObject {
         }
     }
     var onRestoreDocument: (() -> Void)?
+    var documentRestorerID: UUID?
 
     /// 撤销一步。返回被撤销的条目（调用方用它做 toast 文案），没得撤时返回 nil。
     @discardableResult
     func undo() -> CanvasHistoryEntry? {
+        guard flushTextDocuments?() != false else { return nil }
         agentHistoryError = nil
+        if let target = history.undoTarget, !canRestoreGenerationHistory(nodes: target.before) { return nil }
+        if let target = history.undoTarget, workflowEdits[target.id] != nil {
+            return exchangeWorkflowHistory(target: target, undo: true)
+        }
         if let target = history.undoTarget, let edit = agentBodyEdits[target.id] {
             do { try edit.undo() }
             catch { agentHistoryError = error.localizedDescription; return nil }
         }
         guard let entry = history.undo() else { return nil }
-        apply(nodes: entry.before, edges: entry.beforeEdges)
+        apply(nodes: entry.before, edges: entry.beforeEdges, groups: entry.beforeGroups, piles: entry.beforePiles)
         onRestoreDocument?()
         if let edit = entry.slotEdit {
             restoreSlotText(groupId: edit.groupId, slot: edit.slot, text: edit.before)
@@ -1036,13 +1858,18 @@ final class CanvasStore: ObservableObject {
 
     @discardableResult
     func redo() -> CanvasHistoryEntry? {
+        guard flushTextDocuments?() != false else { return nil }
         agentHistoryError = nil
+        if let target = history.redoTarget, !canRestoreGenerationHistory(nodes: target.after) { return nil }
+        if let target = history.redoTarget, workflowEdits[target.id] != nil {
+            return exchangeWorkflowHistory(target: target, undo: false)
+        }
         if let target = history.redoTarget, let edit = agentBodyEdits[target.id] {
             do { try edit.redo() }
             catch { agentHistoryError = error.localizedDescription; return nil }
         }
         guard let entry = history.redo() else { return nil }
-        apply(nodes: entry.after, edges: entry.afterEdges)
+        apply(nodes: entry.after, edges: entry.afterEdges, groups: entry.afterGroups, piles: entry.afterPiles)
         onRestoreDocument?()
         if let edit = entry.slotEdit {
             restoreSlotText(groupId: edit.groupId, slot: edit.slot, text: edit.after)
@@ -1056,6 +1883,20 @@ final class CanvasStore: ObservableObject {
         return entry
     }
 
+    private func exchangeWorkflowHistory(target: CanvasHistoryEntry, undo: Bool) -> CanvasHistoryEntry? {
+        guard let (transaction, receipt) = workflowEdits[target.id], receipt.project.id == activeProjectId else { return nil }
+        do {
+            guard flushSave() else { throw AgentCanvasError.writeFailed }
+            let doc = try transaction.exchange(receipt, undo: undo)
+            _ = undo ? history.undo() : history.redo()
+            storage.invalidateCache()
+            workflowPrivateStorage.invalidateContentCaches()
+            nodes = doc.nodes; edges = doc.edges; groups = doc.groups; piles = doc.piles; pan = doc.pan; zoom = doc.zoom
+            selectedNodeIds = []; selectedEdgeId = nil; slotRevision += 1
+            return target
+        } catch { agentHistoryError = error.localizedDescription; return nil }
+    }
+
     /// 历史面板点某一条 → 把画布状态推到「那一条刚做完」的时刻。
     ///
     /// 直接循环调 undo/redo，而不是一步跳到目标快照：`slotEdit` 的回写是**逐条**挂在条目上的，
@@ -1066,17 +1907,42 @@ final class CanvasStore: ObservableObject {
         while history.cursor < clamped { if redo() == nil { break } }
     }
 
-    private func apply(nodes newNodes: [CanvasNode], edges newEdges: [CanvasEdge]) {
+    private func canRestoreGenerationHistory(nodes target: [CanvasNode]) -> Bool {
+        let removesActiveResult = generationTickets.values.contains { ticket in
+            guard ticket.projectId == activeProjectId,
+                  let owner = generationNode(ticket.token), owner.generationSourceID != nil else { return false }
+            return !target.contains { $0.createdAt == owner.createdAt }
+        }
+        if removesActiveResult {
+            agentHistoryError = "生成结果仍在提交或查询，请等待完成，或停止结果节点后再撤销。"
+            return false
+        }
+        return true
+    }
+
+    private func generationHistoryKey(_ node: CanvasNode) -> String {
+        "\(node.id)|\(node.createdAt.timeIntervalSinceReferenceDate)"
+    }
+
+    private func apply(nodes newNodes: [CanvasNode], edges newEdges: [CanvasEdge],
+                       groups newGroups: [CanvasNodeGroup], piles newPiles: [CanvasPile]) {
         let current = nodes
+        for node in current where node.generationSourceID != nil {
+            generationHistoryResults[generationHistoryKey(node)] = node
+        }
         nodes = newNodes.map { restored in
             var next = restored
             // 历史只回滚编辑动作；已经完成的任务结果和正在跑的任务元数据不倒退。
             let sameBirth = current.filter { $0.createdAt == restored.createdAt }
             let live = sameBirth.first { $0.id == restored.id }
                 ?? (sameBirth.count == 1 ? sameBirth.first : nil)
+                ?? generationHistoryResults[generationHistoryKey(restored)]
             if let live {
                 next.state = live.state
                 next.taskId = live.taskId
+                next.generationTask = live.generationTask
+                next.generationRawOutput = live.generationRawOutput
+                next.generationDiagnostic = live.generationDiagnostic
                 next.seed = live.seed
                 next.outputAttachmentIds = live.outputAttachmentIds
             } else {
@@ -1100,10 +1966,15 @@ final class CanvasStore: ObservableObject {
         }
         // 选中集合里可能有已经不存在的 id（撤销"新建"之后），留着会让工具栏的"删除选中"对着空气生效。
         let alive = Set(newNodes.map(\.id))
-        selectedNodeIds = selectedNodeIds.intersection(alive)
+        piles = CanvasPile.normalized(newPiles, nodes: nodes)
+        selectedNodeIds = selectedNodeIds.intersection(visibleEntityIDs)
         // 连线快照里可能有指向已不存在节点的线（老条目不带 edges 时是空数组，那是对的；
         // 带了也可能与节点快照错位）。规整一次，宁可少一条线也不留野线。
         edges = CanvasEdgeGraph.normalized(newEdges, nodeIds: alive)
+        nodes = CanvasEdgeGraph.reconcilingDraftReferences(nodes: nodes, edges: edges)
+        groups = CanvasNodeGroup.normalized(newGroups, nodeIDs: alive)
+        suppressedServerGroupLayouts.formUnion(groups.filter { $0.provenance == .server }.map(\.id))
+        reconcileGroupSelection()
         if let selected = selectedEdgeId, !edges.contains(where: { $0.id == selected }) {
             selectedEdgeId = nil
         }
@@ -1121,11 +1992,24 @@ final class CanvasStore: ObservableObject {
                         slotEdit: CanvasHistoryEntry.SlotTextEdit? = nil,
                         attachmentEdit: CanvasHistoryEntry.SlotAttachmentEdit? = nil,
                         _ mutate: () -> Void) {
+        // A later canvas action must follow the text burst in undo history.
+        // Persist callbacks themselves record a slotEdit and must not recurse.
+        guard slotEdit != nil || flushTextDocuments?() != false else { return }
         let before = nodes
         let beforeEdges = edges
+        let beforeGroups = groups
+        let beforePiles = piles
         mutate()
+        groups = CanvasNodeGroup.normalized(groups, nodeIDs: Set(nodes.map(\.id)))
+        piles = CanvasPile.normalized(piles, nodes: nodes)
+        let groupIDs = Set(groups.map(\.id))
+        for index in piles.indices where piles[index].groupID.map({ !groupIDs.contains($0) }) == true {
+            piles[index].groupID = nil
+        }
+        reconcileGroupSelection()
+        if selectedGroupID == nil { selectedNodeIds = selectedNodeIds.intersection(visibleEntityIDs) }
         guard nodes != before || edges != beforeEdges
-                || slotEdit != nil || attachmentEdit != nil else { return }
+                || groups != beforeGroups || piles != beforePiles || slotEdit != nil || attachmentEdit != nil else { return }
         let tokensBefore = Set(history.entries.compactMap { $0.attachmentEdit?.stashToken })
         history.push(CanvasHistoryEntry(kind: kind,
                                         detail: detail,
@@ -1133,6 +2017,10 @@ final class CanvasStore: ObservableObject {
                                         after: nodes,
                                         beforeEdges: beforeEdges,
                                         afterEdges: edges,
+                                        beforeGroups: beforeGroups,
+                                        afterGroups: groups,
+                                        beforePiles: beforePiles,
+                                        afterPiles: piles,
                                         slotEdit: slotEdit,
                                         attachmentEdit: attachmentEdit))
         // push 会截断已撤销分支 / 在超限时丢最旧条目：那些条目的暂存字节必须同步收走，
@@ -1149,7 +2037,15 @@ final class CanvasStore: ObservableObject {
 
     // MARK: - 选择
 
+    private func reconcileGroupSelection() {
+        guard let id = selectedGroupID else { return }
+        guard groups.contains(where: { $0.id == id }) else { selectedGroupID = nil; return }
+        selectedNodeIds = groupMemberIDs(id)
+        selectedGroupID = id
+    }
+
     func select(id: String, additive: Bool) {
+        selectedGroupID = nil
         selectedEdgeId = nil
         if additive {
             if selectedNodeIds.contains(id) { selectedNodeIds.remove(id) } else { selectedNodeIds.insert(id) }
@@ -1159,6 +2055,7 @@ final class CanvasStore: ObservableObject {
     }
 
     func clearSelection() {
+        selectedGroupID = nil
         if !selectedNodeIds.isEmpty { selectedNodeIds = [] }
         // 连线选中一并清掉：两种选中互斥（Delete 键必须有唯一答案），而"清空"只应该有一个入口。
         if selectedEdgeId != nil { selectedEdgeId = nil }
@@ -1166,8 +2063,10 @@ final class CanvasStore: ObservableObject {
 
     /// 框选：命中判定在画布空间做，避免受缩放影响。
     func selectNodes(inCanvasRect rect: CGRect, additive: Bool) {
+        selectedGroupID = nil
         selectedEdgeId = nil
-        let hit = nodes.filter { $0.frame.intersects(rect) }.map(\.id)
+        let hit = nodes.filter { !piledMemberIDs.contains($0.id) && $0.frame.intersects(rect) }.map(\.id)
+            + piles.filter { CanvasPileGeometry.frame($0, nodes: nodes).intersects(rect) }.map(\.id)
         if additive {
             selectedNodeIds.formUnion(hit)
         } else {
@@ -1203,6 +2102,9 @@ final class CanvasStore: ObservableObject {
         saveTask?.cancel()
         let snapshot = CanvasDocument(nodes: nodes,
                                       edges: edges,
+                                      groups: groups,
+                                      piles: piles,
+                                      appliedAgentMutationIDs: appliedAgentMutationIDs,
                                       panX: pan.width,
                                       panY: pan.height,
                                       zoom: zoom)
@@ -1230,9 +2132,16 @@ final class CanvasStore: ObservableObject {
     /// 立即落盘（离开画布 / App 退出 / 切项目时调用，不等防抖）。
     @discardableResult
     func flushSave() -> Bool {
+        guard flushTextDocuments?() != false else {
+            saveStatus = .failed("文本尚未保存，请在输入框中重试保存")
+            return false
+        }
         saveTask?.cancel()
         let snapshot = CanvasDocument(nodes: nodes,
                                       edges: edges,
+                                      groups: groups,
+                                      piles: piles,
+                                      appliedAgentMutationIDs: appliedAgentMutationIDs,
                                       panX: pan.width,
                                       panY: pan.height,
                                       zoom: zoom)

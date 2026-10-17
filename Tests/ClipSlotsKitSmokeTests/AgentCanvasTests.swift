@@ -28,6 +28,8 @@ func runAgentCanvasTests(_ t: TestRunner) {
         t.check(storage.set(1, content: original, in: group), "CAS fixture written")
         t.check(storage.setLabel(1, label: "素材标签", in: group), "CAS label written")
         let before = AgentSlotBody(storage.get(1, in: group)), after = AgentSlotBody(text: "Agent 新正文")
+        t.equal(AgentSlotBody(SpecialSlotStorage().get(1, in: group)), before,
+                "fresh storage restores HTML and pasteboard format order before CAS")
         let ids = storage.get(1, in: group).attachments.map(\.id)
         let applied = try storage.exchangeAgentBody(1, in: group, expected: before, replacement: after)
         t.equal(applied.plainText, "Agent 新正文", "CAS body applied")
@@ -41,6 +43,8 @@ func runAgentCanvasTests(_ t: TestRunner) {
         }
         let undone = try storage.exchangeAgentBody(1, in: group, expected: after, replacement: before)
         t.equal(AgentSlotBody(undone), before, "CAS undo restores every pasteboard format and HTML")
+        t.equal(AgentSlotBody(SpecialSlotStorage().get(1, in: group)), before,
+                "CAS undo restores rich body on disk after restart, not only cached return")
         _ = try storage.exchangeAgentBody(1, in: group, expected: before, replacement: after)
 
         // A second storage instance models a writer outside the UI cache.
@@ -87,8 +91,6 @@ func runAgentCanvasTests(_ t: TestRunner) {
         let body = AgentService.requestBody(history: [restored], config: AgentConfig(systemPrompt: ""), tools: [])
         t.check(body["messages"]?.arrayValue?.first?["content"]?.stringValue?.contains(reference.text) == true,
                 "DeepSeek receives explicit reference")
-        t.check(CodexAgentService.input(for: restored).first?["text"]?.stringValue?.contains(reference.text) == true,
-                "Codex receives explicit reference")
     } catch { t.check(false, "reference roundtrip \(error)") }
     let rejected = smokeAwait { await AgentPreviewTools().execute(call: .init(id: "write", name: "write_slot", argumentsJSON: "{}")) }
     t.check(rejected.isFailure && AgentPreviewTools().specs().isEmpty, "preview capabilities deny direct writes")

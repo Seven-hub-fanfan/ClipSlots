@@ -1790,6 +1790,69 @@ public final class SpecialSlotStorage {
         slotStorage(for: specialSlotId).getOrUnknown(slot)
     }
 
+    /// Read-only enumeration. Busy storage is an error, never an apparently empty library.
+    public func batchGenerationGroups(slotCount: Int) throws -> [BatchGenerationGroup] {
+        let index = try storageLock.withLock {
+            guard !storageLock.isDegraded else { throw AgentCanvasError.busy }
+            let index = loadIndex()
+            guard !lastLoadDecodeFailed else { throw AgentCanvasError.unavailable }
+            return index
+        }
+        return try index.pages.sorted { ($0.order, $0.id) < ($1.order, $1.id) }.flatMap { page in
+            try index.specialSlots.filter { $0.pageId == page.id && !Self.isReservedGroupId($0.id) }
+                .sorted { ($0.order, $0.id) < ($1.order, $1.id) }.map { group in
+                    let groupStorage = try storageLock.withLock {
+                        guard loadIndex().specialSlots.contains(where: {
+                            $0.id == group.id && $0.createdAt == group.createdAt && $0.pageId == page.id
+                        }) else { throw AgentCanvasError.unavailable }
+                        return slotStorage(for: group.id)
+                    }
+                    let snapshot = try groupStorage.batchGenerationSnapshot(slotCount: slotCount)
+                    let sources = snapshot.keys.sorted().compactMap { slot -> BatchGenerationSource? in
+                        guard let content = snapshot[slot], !content.isEmpty else { return nil }
+                        return .init(pageID: page.id, pageName: page.name, group: group, slot: slot, content: content)
+                    }
+                    return BatchGenerationGroup(page: page, group: group, sources: sources)
+                }
+        }
+    }
+
+    public func batchSourceIsCurrent(_ source: BatchGenerationSource) throws -> Bool {
+        try storageLock.withLock {
+            guard !storageLock.isDegraded else { throw AgentCanvasError.busy }
+            guard loadIndex().specialSlots.contains(where: {
+                $0.id == source.groupID && $0.createdAt == source.groupCreatedAt && $0.pageId == source.pageID
+            }), let content = getOrUnknown(source.slot, in: source.groupID) else { return false }
+            return BatchGenerationSource.revision(of: content) == source.revision && source.filesAreCurrent
+        }
+    }
+
+    /// Compare and append under the GUI/CLI storage lock. Never reconstruct a deleted
+    /// group, overwrite a newer body, or append the same output twice after a crash.
+    public func appendBatchOutput(_ attachment: SlotContent.SlotAttachment,
+                                  source: BatchGenerationSource) throws -> SlotContent {
+        try storageLock.withLock(timeout: 0.15) {
+            guard !storageLock.isDegraded else { throw AgentCanvasError.busy }
+            guard source.slot > 0, loadIndex().specialSlots.contains(where: {
+                $0.id == source.groupID && $0.createdAt == source.groupCreatedAt && $0.pageId == source.pageID
+            }), var current = getOrUnknown(source.slot, in: source.groupID) else {
+                throw AgentCanvasError.unavailable
+            }
+            if let saved = current.attachments.first(where: { $0.id == attachment.id }),
+               let path = saved.storagePath, FileManager.default.fileExists(atPath: path) { return current }
+            guard BatchGenerationSource.revision(of: current) == source.revision,
+                  source.filesAreCurrent else { throw AgentCanvasError.conflict }
+            current.attachments.append(attachment)
+            current.contentId = UUID().uuidString
+            current.updatedAt = Date().timeIntervalSince1970
+            guard set(source.slot, content: current, in: source.groupID),
+                  let saved = getOrUnknown(source.slot, in: source.groupID) else {
+                throw AgentCanvasError.writeFailed
+            }
+            return saved
+        }
+    }
+
     /// Compare and exchange under the same lock used by GUI and CLI writes.
     /// The body snapshot includes rich pasteboard formats; unrelated live metadata survives.
     public func exchangeAgentBody(_ slot: Int, in groupID: String,
@@ -1824,7 +1887,7 @@ public final class SpecialSlotStorage {
     }
 
     @discardableResult
-    public func set(_ slot: Int, content: SlotContent, in specialSlotId: String) -> Bool {
+    public func set(_ slot: Int, content: SlotContent, in specialSlotId: String, replacingLabel: Bool = false) -> Bool {
         var content = content
         content.timestamp = Date()
         // P2-14 (v2.10.6): 内容写入本身此前不持跨进程锁，仅随后的 touchSpecialSlot 持锁，
@@ -1848,7 +1911,7 @@ public final class SpecialSlotStorage {
                     return false
                 }
                 backupSlotBeforeOverwriteIfNeeded(slot: slot, in: specialSlotId)
-                let result = slotStorage(for: specialSlotId).set(slot, content: content)
+                let result = slotStorage(for: specialSlotId).set(slot, content: content, replacingLabel: replacingLabel)
                 if result {
                     var index = loadIndex()
                     if let idx = index.specialSlots.firstIndex(where: { $0.id == specialSlotId }) {

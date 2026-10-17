@@ -3,6 +3,7 @@ import ClipSlotsKit
 
 /// 生成操作保持屏幕字号；提示词编辑和媒体预览可以同时进行。
 struct CanvasNodeComposer<Controls: View>: View {
+    private typealias TapSkin = CanvasSkin
     let node: CanvasNode
     let text: String
     let editing: Bool
@@ -125,10 +126,19 @@ struct CanvasNodeComposer<Controls: View>: View {
                                     .font(.caption).foregroundColor(.secondary)
                                 Button("复制诊断信息") {
                                     NSPasteboard.general.clearContents()
-                                    NSPasteboard.general.setString("ClipSlots \(AppVersion.current)\n模型：\(node.model)\n任务：\(node.taskId ?? "未提交")\n\(reason)", forType: .string)
+                                    let source = node.generationTask?.context.provider == .byteartist
+                                        ? "BA 工作流：" + (node.generationTask?.capabilityID ?? node.byteArtist.workflowID)
+                                        : "Crate 模型：" + node.model
+                                    let diagnostic = node.generationDiagnostic
+                                    NSPasteboard.general.setString("ClipSlots \(AppVersion.current)\n\(source)\n任务：\(node.taskId ?? "未提交")\n阶段：\(diagnostic?.stage ?? "")\n远端状态：\(diagnostic?.rawStatus ?? "")\nrequest_id：\(diagnostic?.requestID ?? "")\nlog_id：\(diagnostic?.logID ?? "")\n\(reason)", forType: .string)
                                 }
                             }.padding(16).frame(width: 360)
                         }
+                }
+                if let diagnostic = node.generationDiagnostic,
+                   case .idle = node.state, node.generationTask?.context.provider == .byteartist {
+                    Text(diagnostic.message ?? diagnostic.stageLabel)
+                        .font(.system(size: 10)).foregroundColor(TapSkin.chromeInkDim).lineLimit(2)
                 }
                 if let onRecover {
                     Button("取回结果", action: onRecover)
@@ -148,6 +158,7 @@ struct CanvasNodeComposer<Controls: View>: View {
                                placeholder: node.kind == .text ? "描述画面想法，优化为生图提示词" : "描述任何你想要生成的内容",
                                onFocus: { if !editing { onBegin() } })
             .frame(height: 82)
+            .tapCursor(.iBeam)
             controls()
         }
         .padding(16)
@@ -185,21 +196,35 @@ extension CanvasWorkspaceView {
     var canvasContentViewport: CGRect {
         CGRect(x: sidebarWidth + 12, y: 58,
                width: max(100, viewSize.width - sidebarWidth - 24),
-               height: max(100, viewSize.height - 124))
+               height: max(100, viewSize.height - (footerControlsStacked ? 176 : 124)))
+    }
+
+    var footerControlsStacked: Bool { viewSize.width - sidebarWidth < 553 }
+    var navigationChromeFrame: CGRect {
+        CGRect(x: sidebarWidth + 14, y: viewSize.height - 56, width: 337, height: 40)
+    }
+    var footerToolbarFrame: CGRect {
+        let left = sidebarWidth
+        let preferred = left + (viewSize.width - left) / 2
+        let center = footerControlsStacked ? viewSize.width - 14 - 88
+            : min(viewSize.width - 14 - 88, max(preferred, navigationChromeFrame.maxX + 12 + 88))
+        return CGRect(x: center - 88, y: viewSize.height - 56 - (footerControlsStacked ? 52 : 0),
+                      width: 176, height: 40)
     }
 
     var visibleNodes: [CanvasNode] {
         canvas.nodes.filter {
-            editingNodeId == $0.id || draggingIds.contains($0.id) ||
+            !canvas.piledMemberIDs.contains($0.id) && (editingNodeId == $0.id || draggingIds.contains($0.id) ||
                 CanvasInteractionGeometry.isVisible(screenFrame(of: $0),
-                                                    viewport: CGRect(origin: .zero, size: viewSize))
+                                                    viewport: CGRect(origin: .zero, size: viewSize)))
         }
     }
 
     var composerFrame: CGRect? {
         guard let node = canvas.soleSelectedNode, node.kind != .slot, !node.isMediaSource,
               addMenu == nil, linkDrag == nil, draggingNodeId == nil, inputFilesNodeId == nil else { return nil }
-        let size = CGSize(width: min(max(640, min(900, screenFrame(of: node).width + 48)), canvasContentViewport.width), height: 204)
+        let height = node.kind == .text ? textComposerHeight : 204
+        let size = CGSize(width: min(max(640, min(900, screenFrame(of: node).width + 48)), canvasContentViewport.width), height: height)
         return CGRect(origin: CanvasInteractionGeometry.panelOrigin(node: screenFrame(of: node),
                        panel: size, viewport: canvasContentViewport), size: size)
     }
@@ -207,7 +232,7 @@ extension CanvasWorkspaceView {
     @ViewBuilder var composerOverlay: some View {
         if let node = canvas.soleSelectedNode, let frame = composerFrame {
             let isComposing = node.kind == .text ? composingNodeId == node.id : editingNodeId == node.id
-            let edges = canvas.incomingEdges(of: node.id)
+            let edges = canvas.incomingEdges(of: node.id).filter { $0.fromNodeId != node.generationSourceID }
             let references = edges.compactMap { canvas.node(id: $0.fromNodeId) }
             CanvasRenderBoundary(key: .init(
                 node: node, selected: true, editing: isComposing,
@@ -224,7 +249,20 @@ extension CanvasWorkspaceView {
                 let slotCounts = Dictionary(references.filter { $0.kind == .slot }.map {
                     ($0.id, Set(slotReferenceImagePaths(for: $0)).count)
                 }, uniquingKeysWith: { first, _ in first })
-                CanvasNodeComposer(node: node, text: node.kind == .text ? node.textGenerationPrompt : liveText(for: node),
+                if node.kind == .text {
+                    CanvasTextComposer(document: store.canvasTextDocument(groupID: node.groupId, slot: node.slot),
+                        node: node, editing: isComposing,
+                        maximumEditorHeight: max(112, min(280, canvasContentViewport.height - 160)),
+                        onBegin: { editingNodeId = nil; composingNodeId = node.id },
+                        onEnd: { composingNodeId = nil },
+                        onPolish: {
+                            inputRouter.anchorView?.window?.makeFirstResponder(nil)
+                            startTextGeneration(node)
+                        },
+                        onStop: { canvas.stopGeneration(node) },
+                        onHeightChange: { textComposerHeight = $0 })
+                } else {
+                CanvasNodeComposer(node: node, text: liveText(for: node),
                                editing: isComposing,
                                inputCount: CanvasEdgeInputs.imageReferences(edgeInputs: resolveEdgeInputs(for: node),
                                                                            slotImages: inputImagePaths(for: node)).count,
@@ -262,6 +300,7 @@ extension CanvasWorkspaceView {
                                onRestart: node.needsGenerationRecovery ? { _ = startGeneration(node, restarting: true) } : nil) {
                     nodeActions(node)
                 }
+                }
             }
             .equatable()
             .id("\(canvas.activeProjectId):\(node.id):\(node.createdAt)")
@@ -269,6 +308,8 @@ extension CanvasWorkspaceView {
             .fixedSize(horizontal: false, vertical: true)
             .canvasControlRegion("composer")
             .offset(x: frame.minX, y: frame.minY)
+            // A generation panel owns its visible rectangle, including areas
+            // overlapping media cards. Pointer/focus routing uses the same rule.
             .zIndex(40)
         }
     }
@@ -279,8 +320,7 @@ extension CanvasWorkspaceView {
                             onRun: {
                                 inputRouter.anchorView?.window?.makeFirstResponder(nil)
                                 if let latest = canvas.node(id: node.id) {
-                                    if latest.kind == .text { startTextGeneration(latest) }
-                                    else { startGeneration(latest) }
+                                    generateAdjacentResults(latest)
                                 }
                             },
                             onSpawnDownstream: { spawnDownstream(from: node) },

@@ -59,6 +59,7 @@ public final class AgentKeychain: AgentSecretStore, @unchecked Sendable {
 
     private let service: String
     private let account: String
+    private let label: String
     private let operations: Operations
 
     // v2.17.6：进程内内存缓存。
@@ -86,14 +87,17 @@ public final class AgentKeychain: AgentSecretStore, @unchecked Sendable {
     private var cacheLoaded: Bool = false
     private var cachedReadError: AgentKeychainError?
 
-    public convenience init(service: String = AgentKeychain.service, account: String = AgentKeychain.account) {
-        self.init(service: service, account: account, operations: .system)
+    public convenience init(service: String = AgentKeychain.service, account: String = AgentKeychain.account,
+                            label: String = "ClipSlots Agent · DeepSeek API Key") {
+        self.init(service: service, account: account, operations: .system, label: label)
     }
 
-    init(service: String, account: String, operations: Operations) {
+    init(service: String, account: String, operations: Operations,
+         label: String = "ClipSlots Agent · DeepSeek API Key") {
         self.service = service
         self.account = account
         self.operations = operations
+        self.label = label
     }
 
     public func readAPIKey() -> String? {
@@ -179,6 +183,9 @@ public final class AgentKeychain: AgentSecretStore, @unchecked Sendable {
         guard let data = trimmed.data(using: .utf8) else { throw AgentKeychainError.encodingFailed }
         cacheLock.lock()
         defer { cacheLock.unlock() }
+        // Repeated Save actions from rebuilt configuration views must not ask
+        // Security to authorize an unchanged value again.
+        if cacheLoaded, cachedReadError == nil, cachedKey == trimmed { return }
 
         // 先尝试更新已有项。顺序刻意是"update 再 add"而不是"delete 再 add"：
         // delete+add 会重建 ACL，等于每次保存都让用户重新授权一遍。
@@ -200,7 +207,7 @@ public final class AgentKeychain: AgentSecretStore, @unchecked Sendable {
         // 仅本机、解锁后可访问；不参与 iCloud 同步（key 是本地凭据，没有同步的理由）。
         insert[kSecAttrAccessible as String] = kSecAttrAccessibleWhenUnlocked
         insert[kSecAttrSynchronizable as String] = false
-        insert[kSecAttrLabel as String] = "ClipSlots Agent · DeepSeek API Key"
+        insert[kSecAttrLabel as String] = label
         let addStatus = operations.add(insert as CFDictionary)
         guard addStatus == errSecSuccess else { throw AgentKeychainError.osStatus(addStatus) }
         cachedKey = trimmed
