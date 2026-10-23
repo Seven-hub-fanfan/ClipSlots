@@ -7,7 +7,7 @@ import ClipSlotsKit
 
 /// Presented pixels are collected off the main thread; no forced layout/display
 /// is used to make a latency assertion pass.
-private final class MenuFrameCapture: NSObject, SCStreamOutput, @unchecked Sendable {
+final class MenuFrameCapture: NSObject, SCStreamOutput, @unchecked Sendable {
     private let queue = DispatchQueue(label: "clipslots.menu.frames")
     private let context = CIContext(options: [.cacheIntermediates: false])
     private var stream: SCStream?
@@ -109,7 +109,9 @@ extension CanvasWorkspaceView {
             if systemMouse {
                 let screen = window.convertPoint(toScreen: location)
                 let quartz = CGPoint(x: screen.x, y: (NSScreen.screens.first?.frame.maxY ?? 0) - screen.y)
-                let cgType: CGEventType = type == .leftMouseDown ? .leftMouseDown
+                let cgType: CGEventType = type == .rightMouseDown ? .rightMouseDown
+                    : type == .rightMouseUp ? .rightMouseUp
+                    : type == .leftMouseDown ? .leftMouseDown
                     : (type == .leftMouseUp ? .leftMouseUp : (type == .mouseMoved ? .mouseMoved : .leftMouseDragged))
                 let payload: [String: Any] = ["pid": Int(ProcessInfo.processInfo.processIdentifier),
                     "window": window.windowNumber, "type": cgType.rawValue, "x": quartz.x, "y": quartz.y,
@@ -136,12 +138,13 @@ extension CanvasWorkspaceView {
             catch { check(false, "presented-frame capture: \(error)") }
         }
         let repeats = Int(env["CLIPSLOTS_MENU_REPEATS"] ?? "") ?? 6
-        let stress = env["CLIPSLOTS_MENU_STRESS"] == "1"
+        let nodeCount = Int(env["CLIPSLOTS_MENU_NODES"] ?? "") ?? (env["CLIPSLOTS_MENU_STRESS"] == "1" ? 100 : 1)
+        let stress = nodeCount > 1
         if stress {
             zoom = 0.25
             // Keep the source's port below the toolbar at this smaller zoom.
             canvas.updateNode(id: source.id) { $0.x = 500; $0.y = 650 }
-            for index in 1...99 {
+            for index in 1..<nodeCount {
                 _ = canvas.placeSlot(pageId: source.pageId, groupId: "menu-stress-fixture", slot: index,
                                      name: "节点 \(index)",
                                      at: CGPoint(x: 160 + (index % 12) * 280, y: 1300 + (index / 12) * 220))
@@ -151,8 +154,10 @@ extension CanvasWorkspaceView {
         try? String(ProcessInfo.processInfo.processIdentifier).write(to: directory.appendingPathComponent("menu-sample-ready"),
                                                                       atomically: true, encoding: .utf8)
         for index in 0..<repeats {
-            for reference in [false, true] {
-                let name = "\(reference ? "drag" : "double")-\(index)"
+            for scenario in (env["CLIPSLOTS_MENU_SCENARIOS"]?.components(separatedBy: ",") ?? ["double", "drag", "right"]) {
+                let reference = scenario == "drag", rightClick = scenario == "right"
+                let name = "\(scenario)-\(index)"
+                CanvasMenuLatencyObservation.events = []
                 addMenu = nil
                 lastBlankClick = nil
                 if reference { canvas.select(id: source.id, additive: false) }
@@ -172,7 +177,7 @@ extension CanvasWorkspaceView {
                     await pause(0.025)
                     mouse(.leftMouseDragged, point)
                     await pause(0.025)
-                } else {
+                } else if !rightClick {
                     mouse(.mouseMoved, point)
                     mouse(.leftMouseDown, point)
                     await pause(0.025)
@@ -183,13 +188,15 @@ extension CanvasWorkspaceView {
                 }
                 let beforeBodies = CanvasRenderDiagnostics.count
                 CanvasMenuLatencyObservation.pickedAt = nil
-                let trigger = mouse(.leftMouseUp, point)
+                let trigger = mouse(rightClick ? .rightMouseDown : .leftMouseUp, point)
                 let requestAt = await waitUntil({ addMenu != nil }, deadline: trigger + 1)
+                if rightClick { mouse(.rightMouseUp, point) }
                 let layoutAt = await waitUntil({
                     guard let rect = controlRegions["add-menu"], let row = controlRegions["add-menu-row-image"] else { return false }
                     return addMenu != nil && abs(rect.width - CanvasAddNodeMenu.width) < 0.1
                         && abs(row.width - CanvasAddNodeMenu.width) < 0.1
-                        && abs(rect.minX - point.x) < 0.5
+                        && abs(rect.minX - min(max(12, point.x - (reference ? CanvasAddNodeMenu.width / 2 : 0)),
+                            max(12, viewSize.width - CanvasAddNodeMenu.width - 12))) < 0.5
                 }, deadline: trigger + 1)
                 let layoutEnd = layoutAt ?? ProcessInfo.processInfo.systemUptime
                 let expectedParents = reference ? [source.id] : []
@@ -197,18 +204,16 @@ extension CanvasWorkspaceView {
                 let bodyDelta = CanvasRenderDiagnostics.count - beforeBodies
                 // Keep the first menu visible for pixel comparison; later cycles
                 // click as soon as real final geometry is observed.
-                if captureThis {
-                    await pause(max(0, 0.45 - (ProcessInfo.processInfo.systemUptime - trigger)))
-                    let count = await capture.save(to: directory, name: name, trigger: trigger)
-                    check(count > 1, "\(name) actual presented frames collected")
-                }
+                if captureThis { await pause(max(0, 0.3 - (ProcessInfo.processInfo.systemUptime - trigger))) }
                 let beforeCount = canvas.nodes.count
                 var pickTime: Double?
+                var pickTrigger: Double?
                 if let row = controlRegions["add-menu-row-image"], layoutAt != nil {
                     let target = CGPoint(x: row.midX, y: row.midY)
                     mouse(.leftMouseDown, target)
                     await pause(systemMouse ? 0.015 : 0.001)
                     let pickedAt = mouse(.leftMouseUp, target)
+                    pickTrigger = pickedAt
                     pickTime = await waitUntil({ canvas.nodes.count == beforeCount + 1 && addMenu == nil },
                                                deadline: pickedAt + 0.5)
                 }
@@ -223,14 +228,22 @@ extension CanvasWorkspaceView {
                 if let created = canvas.soleSelectedNode, created.id != source.id {
                     check(canvas.incomingEdges(of: created.id).map(\.fromNodeId).sorted() == expectedParents,
                           "\(name) selected action preserves references")
-                    _ = canvas.undo()
                 }
-                results.append(["scenario": reference ? "drag" : "double", "iteration": index,
-                                "nodes": stress ? 100 : 1, "request_ms": requestAt.map { ($0 - trigger) * 1000 } ?? -1,
+                results.append(["scenario": scenario, "iteration": index,
+                                "nodes": nodeCount, "request_ms": requestAt.map { ($0 - trigger) * 1000 } ?? -1,
                                 "layout_ms": latency, "click_complete_ms": (end - trigger) * 1000,
                                 "action_accepted_ms": accepted.map { ($0 - trigger) * 1000 } ?? -1,
+                                "pick_event_ms": pickTrigger.map { ($0 - trigger) * 1000 } ?? -1,
+                                "node_created_ms": pickTrigger.map { (end - $0) * 1000 } ?? -1,
                                 "captured": captureThis, "node_body_evaluations": bodyDelta,
+                                "events": CanvasMenuLatencyObservation.events,
                                 "click_succeeded": pickTime != nil])
+                if captureThis {
+                    await pause(0.3)
+                    let count = await capture.save(to: directory, name: name, trigger: trigger)
+                    check(count > 1, "\(name) actual presented frames collected")
+                }
+                if pickTime != nil { _ = canvas.undo() }
                 addMenu = nil
             }
         }

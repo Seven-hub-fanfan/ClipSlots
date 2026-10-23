@@ -85,6 +85,35 @@ private func coldStorage(forGroup gid: String) -> SlotStorage {
 
 let t = TestRunner()
 
+// Library summaries must stay read-only, bounded and coherent with cold storage.
+t.withFreshStore("CANVAS-LIBRARY-SUMMARY") { storage in
+    let gid = firstGroupId(storage)
+    let body = String(repeating: "长正文", count: 1000)
+    storage.set(1, content: makeTextContent(body), in: gid)
+    storage.setLabel(1, label: "摘要标签", in: gid)
+    var binary = SlotContent()
+    binary.items = [[PasteboardItem(type: "public.png", data: Data(repeating: 0x42, count: 8_000_000))]]
+    binary.attachments = [SlotContent.SlotAttachment(name: "input.png", type: .image)]
+    storage.set(2, content: binary, in: gid)
+    let cold = coldStorage(forGroup: gid)
+    let summaries = cold.librarySummaries(slotCount: 10)
+    t.equal(summaries[1]?.preview.count, 512, "侧栏正文摘要长度有界")
+    t.equal(summaries[1]?.label, "摘要标签", "冷摘要保留独立标签")
+    t.equal(summaries[2]?.isEmpty, false, "二进制槽位仍按非空展示")
+    t.equal(summaries[2]?.attachmentCount, 1, "摘要保留入参文件计数")
+    t.equal(summaries[3]?.isEmpty, true, "确认读到的空槽有明确空状态")
+    t.equal(cold.snapshot().count, 0, "摘要不装载二进制到完整内容缓存")
+    let external = coldStorage(forGroup: gid)
+    external.set(1, content: makeTextContent("外部改写"))
+    external.setLabel(1, label: "外部标签")
+    let updated = cold.librarySummaries(slotCount: 10)
+    t.equal(updated[1]?.preview, "外部改写", "外部原子改写后摘要刷新")
+    t.equal(updated[1]?.label, "外部标签", "外部标签改写后摘要刷新")
+    external.clear(1)
+    t.equal(cold.librarySummaries(slotCount: 10)[1]?.isEmpty, true, "外部清空后旧摘要消失")
+    t.check(cold.librarySummaries(slotCount: 0).isEmpty, "零容量摘要不构造无效区间")
+}
+
 runCanvasEdgePurposeTests(t)
 if CommandLine.arguments.contains("--canvas-edge-purpose-only") {
     t.report()
@@ -142,6 +171,7 @@ if CommandLine.arguments.contains("--ba-canvas-only") {
 }
 
 if CommandLine.arguments.contains("--directories-only") {
+    runAgentAttachmentTests(t)
     runAgentDirectoryTests(t)
     t.report()
 }
@@ -2568,6 +2598,32 @@ do {
 }
 
 // MARK: - SEARCH-SCAN-BINARY (v2.11.7 hotfix11) 扫描跳过大二进制但保住过滤器语义
+do {
+    t.withFreshStore("CAPACITY-INDEX-FRESH") { storage in
+        let initial = storage.loadIndex()
+        t.equal(storage.loadIndex().pages, initial.pages, "未变索引缓存保持页面元数据")
+        let indexURL = storage.storageRoot.appendingPathComponent("index.json")
+        var changed = initial
+        changed.pages[0].name = "外部原子更新"
+        let bytes = try JSONEncoder().encode(changed)
+        try bytes.write(to: indexURL, options: .atomic)
+        t.equal(storage.loadIndex().pages[0].name, "外部原子更新", "外部原子替换立即失效索引缓存")
+        changed.pages[0].name = "外部原位更新"
+        try JSONEncoder().encode(changed).write(to: indexURL)
+        t.equal(storage.loadIndex().pages[0].name, "外部原位更新", "外部原位写入立即失效索引缓存")
+        let gid = firstGroupId(storage)
+        storage.set(1, content: makeTextContent("可取消扫描"), in: gid)
+        let cold = coldStorage(forGroup: gid)
+        var checks = 0
+        let cancelled = cold.searchScanSnapshot(slotCount: 10000, isCancelled: {
+            checks += 1
+            return checks > 1
+        })
+        t.check(cancelled.isEmpty && checks == 2, "取消扫描不遍历余下9999槽位或提交部分结果")
+        t.check(cold.searchScanSnapshot(slotCount: 10)[1]?.plainText == "可取消扫描",
+                "取消后下一次完整扫描仍可命中原内容")
+    }
+}
 //
 // 扫描之所以敢扫全库，是因为它 textOnly：图片 / 视频只留 pasteboard type、不读字节。这组用例
 // 钉住这个取舍的两端——① 字节确实没被读进来（否则内存优化落空）；② 类型判据仍然成立，所以
@@ -3871,6 +3927,7 @@ final class SmokeEventLog: @unchecked Sendable {
     func append(_ event: AgentRunEvent) {
         lock.lock(); defer { lock.unlock() }
         switch event {
+        case .credentialAccess(let waiting): storage.append(waiting ? "credentialWaiting" : "credentialReady")
         case .interactionRequested: storage.append("interaction")
         case .sessionStarted: storage.append("session")
         case .runState: storage.append("runState")
@@ -4980,6 +5037,19 @@ do {
     }
     t.check(slow.timedOut, "★超时应被标记")
     t.check(!slow.succeeded, "超时不算成功")
+
+    let cancelled = smokeAwait {
+        let started = Date()
+        let task = Task {
+            await AgentProcessRunner.run(executable: "/bin/sleep", arguments: ["30"], timeout: 20)
+        }
+        try? await Task.sleep(nanoseconds: 100_000_000)
+        task.cancel()
+        let result = await task.value
+        return (!result.succeeded && !result.timedOut, Date().timeIntervalSince(started))
+    }
+    t.check(cancelled.0 && cancelled.1 < 5,
+            "停止 Agent 应终止真实子进程，不等待超时或自然退出")
 
     // stdin 要写进去并正确关闭，否则读 stdin 的脚本会一直挂着。
     let piped = smokeAwait {
@@ -9340,6 +9410,7 @@ runCanvasGroupTests(t)
 runLocalToolchainTests(t)
 runGenerationAdapterTests(t)
 runByteArtistCanvasTests(t)
+runAgentAttachmentTests(t)
 runAgentDirectoryTests(t)
 runTapNowReplicaTests(t)
 runCanvasPileTests(t)
@@ -9350,4 +9421,7 @@ runAgentRunGatewayTests(t)
 runAgentArtifactTests(t)
 runAgentArtifactGatewayPayloadTests(t)
 runGenerationPromptContractTests(t)
+runStorageAvailabilityTests(t)
+runAgentCredentialWaitTests(t)
+runMascotMotionTests(t)
 t.report()

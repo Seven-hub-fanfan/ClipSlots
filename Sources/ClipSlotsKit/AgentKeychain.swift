@@ -30,6 +30,89 @@ public protocol AgentSecretStore: AnyObject {
     func deleteAPIKey() throws
 }
 
+/// Waiters can stop without waiting for Security's synchronous authorization call.
+/// The system operation itself keeps its ACL and completes into the shared cache.
+public enum AgentCredentialAccess {
+    public static let authorizationTimeout: TimeInterval = 30
+
+    public static func readAPIKey(from store: AgentSecretStore,
+                                  timeout: TimeInterval = authorizationTimeout) async throws -> String? {
+        try await wait(timeout: timeout) {
+            if let keychain = store as? AgentKeychain { return try keychain.readAPIKeyResult() }
+            return store.readAPIKey()
+        }
+    }
+
+    fileprivate static func wait<Value>(timeout: TimeInterval,
+                                        operation: @escaping () throws -> Value) async throws -> Value {
+        let waiter = CredentialWaiter<Value>()
+        return try await withTaskCancellationHandler {
+            try Task.checkCancellation()
+            return try await withCheckedThrowingContinuation { continuation in
+                waiter.start(continuation: continuation, timeout: timeout, operation: operation)
+            }
+        } onCancel: {
+            waiter.finish(.failure(CancellationError()))
+        }
+    }
+}
+
+/// One completion owns the continuation, including cancellation before start.
+/// A task group cannot implement this deadline: it waits for its blocked child.
+private final class CredentialWaiter<Value>: @unchecked Sendable {
+    private let lock = NSLock()
+    private var continuation: CheckedContinuation<Value, Error>?
+    private var result: Result<Value, Error>?
+    private var work: DispatchWorkItem?
+    private var deadline: DispatchWorkItem?
+
+    func start(continuation: CheckedContinuation<Value, Error>, timeout: TimeInterval,
+               operation: @escaping () throws -> Value) {
+        lock.lock()
+        if let result {
+            lock.unlock()
+            continuation.resume(with: result)
+            return
+        }
+        self.continuation = continuation
+        let work = DispatchWorkItem { [self] in
+            guard isPending else { return }
+            finish(Result { try operation() })
+        }
+        let deadline = DispatchWorkItem { [self] in
+            finish(.failure(AgentKeychainError.authorizationTimedOut))
+        }
+        self.work = work
+        self.deadline = deadline
+        lock.unlock()
+        let interval = timeout.isFinite ? max(0, timeout) : AgentCredentialAccess.authorizationTimeout
+        DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + interval, execute: deadline)
+        DispatchQueue.global(qos: .userInitiated).async(execute: work)
+    }
+
+    private var isPending: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return result == nil
+    }
+
+    func finish(_ result: Result<Value, Error>) {
+        lock.lock()
+        guard self.result == nil else { lock.unlock(); return }
+        self.result = result
+        let continuation = self.continuation
+        self.continuation = nil
+        let work = self.work
+        let deadline = self.deadline
+        self.work = nil
+        self.deadline = nil
+        lock.unlock()
+        work?.cancel()
+        deadline?.cancel()
+        continuation?.resume(with: result)
+    }
+}
+
 // 全部可变状态和系统操作由 cacheLock 串行保护。
 public final class AgentKeychain: AgentSecretStore, @unchecked Sendable {
     /// 仅供模块内的隔离回归注入；正式实例始终调用系统 Security API。
@@ -104,6 +187,28 @@ public final class AgentKeychain: AgentSecretStore, @unchecked Sendable {
         cacheLock.lock()
         defer { cacheLock.unlock() }
         return readLocked()
+    }
+
+    fileprivate func readAPIKeyResult() throws -> String? {
+        cacheLock.lock()
+        defer { cacheLock.unlock() }
+        let key = readLocked()
+        if let error = cachedReadError { throw error }
+        return key
+    }
+
+    public func keyStateAsync(retryAfterFailure: Bool = false,
+                              timeout: TimeInterval = AgentCredentialAccess.authorizationTimeout) async -> AgentKeychainState {
+        do {
+            return try await AgentCredentialAccess.wait(timeout: timeout) {
+                self.keyState(retryAfterFailure: retryAfterFailure)
+            }
+        } catch is CancellationError {
+            return AgentKeychainState(suffix: nil, error: .readCancelled)
+        } catch {
+            return AgentKeychainState(suffix: nil,
+                                      error: error as? AgentKeychainError ?? .authorizationTimedOut)
+        }
     }
 
     /// UI 只取展示状态。调用可能等待系统授权，必须在后台线程运行。
@@ -271,20 +376,22 @@ public enum AgentKeychainProbe {
                                 retryAfterFailure: Bool = false) async -> AgentKeychainState {
         let store = service == AgentKeychain.service && account == AgentKeychain.account
             ? AgentKeychain.shared : AgentKeychain(service: service, account: account)
-        return await withCheckedContinuation { continuation in
-            DispatchQueue.global(qos: .userInitiated).async {
-                continuation.resume(returning: store.keyState(retryAfterFailure: retryAfterFailure))
-            }
-        }
+        return await store.keyStateAsync(retryAfterFailure: retryAfterFailure)
     }
 }
 
 public enum AgentKeychainError: LocalizedError, Equatable {
     case encodingFailed
     case osStatus(OSStatus)
+    case authorizationTimedOut
+    case readCancelled
 
     public var errorDescription: String? {
         switch self {
+        case .authorizationTimedOut:
+            return "等待钥匙串授权超时，本轮尚未发送请求。请在 macOS 系统授权弹窗中允许 ClipSlots 访问，完成后再重试。"
+        case .readCancelled:
+            return "已停止等待钥匙串授权。"
         case .encodingFailed:
             return "API Key 无法编码为 UTF-8"
         case .osStatus(let status):

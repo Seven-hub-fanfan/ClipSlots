@@ -230,6 +230,7 @@ final class CanvasChromePin {
         let hadFullSizeContentView: Bool
         let titleVisibility: NSWindow.TitleVisibility
         let backgroundColor: NSColor?
+        let acceptsMouseMovedEvents: Bool
     }
 
     /// 改 `styleMask` 会连带改「内容区」的高度：插入 `fullSizeContentView` 时内容区多出标题栏
@@ -247,6 +248,8 @@ final class CanvasChromePin {
     private weak var window: NSWindow?
     private var saved: Saved?
     private var retainCount = 0
+    private var pointerMonitor: Any?
+    private var windowObservers: [NSObjectProtocol] = []
 
     private init() {}
 
@@ -261,7 +264,19 @@ final class CanvasChromePin {
             self.window = window
             saved = Saved(hadFullSizeContentView: window.styleMask.contains(.fullSizeContentView),
                           titleVisibility: window.titleVisibility,
-                          backgroundColor: window.backgroundColor)
+                          backgroundColor: window.backgroundColor,
+                          acceptsMouseMovedEvents: window.acceptsMouseMovedEvents)
+            window.acceptsMouseMovedEvents = true
+            pointerMonitor = NSEvent.addLocalMonitorForEvents(matching: [.mouseMoved, .leftMouseDown]) { [weak self] event in
+                self?.updateWindowButtons(animated: true)
+                return event
+            }
+            for name in [NSWindow.didBecomeKeyNotification, NSWindow.didResignKeyNotification,
+                         NSWindow.didResizeNotification, NSWindow.didMoveNotification,
+                         NSWindow.didExitFullScreenNotification] {
+                windowObservers.append(NotificationCenter.default.addObserver(forName: name, object: window,
+                    queue: .main) { [weak self] _ in self?.updateWindowButtons(animated: false) })
+            }
         }
         retainCount += 1
         apply(to: window)
@@ -293,9 +308,33 @@ final class CanvasChromePin {
         if window.backgroundColor != NSColor(TapSkin.void) {
             window.backgroundColor = NSColor(TapSkin.void)
         }
+        updateWindowButtons(animated: false)
+    }
+
+    /// Native buttons stay accessible; their reveal only changes alpha, not frame or ownership.
+    private func updateWindowButtons(animated: Bool) {
+        guard let window, !window.styleMask.contains(.fullScreen) else { return }
+        let point = window.mouseLocationOutsideOfEventStream
+        let reveal = window.isKeyWindow && CGRect(x: 0, y: window.frame.height - 48,
+                                                  width: 110, height: 48).contains(point)
+        let alpha: CGFloat = reveal ? 1 : 0
+        for kind in [NSWindow.ButtonType.closeButton, .miniaturizeButton, .zoomButton] {
+            guard let button = window.standardWindowButton(kind),
+                  button.alphaValue != alpha else { continue }
+            if animated && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
+                NSAnimationContext.runAnimationGroup { context in
+                    context.duration = 0.15
+                    button.animator().alphaValue = alpha
+                }
+            } else { button.alphaValue = alpha }
+        }
     }
 
     private func restoreIfNeeded() {
+        if let pointerMonitor { NSEvent.removeMonitor(pointerMonitor) }
+        pointerMonitor = nil
+        windowObservers.forEach(NotificationCenter.default.removeObserver)
+        windowObservers = []
         guard let window, let saved else {
             self.window = nil
             self.saved = nil
@@ -306,6 +345,10 @@ final class CanvasChromePin {
         }
         window.titleVisibility = saved.titleVisibility
         window.backgroundColor = saved.backgroundColor ?? .windowBackgroundColor
+        window.acceptsMouseMovedEvents = saved.acceptsMouseMovedEvents
+        for kind in [NSWindow.ButtonType.closeButton, .miniaturizeButton, .zoomButton] {
+            window.standardWindowButton(kind)?.alphaValue = 1
+        }
         self.window = nil
         self.saved = nil
     }

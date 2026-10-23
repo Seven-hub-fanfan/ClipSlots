@@ -25,10 +25,36 @@ struct CanvasWorkspaceView: View {
     @ObservedObject var store: SlotStoreObservable
     @ObservedObject var canvas: CanvasStore
     @ObservedObject var modelCatalog = CrateModelCatalogStore.shared
+    var entryPrepared = false
+    var isWorkspaceTransitioning: () -> Bool = { false }
+    let textSurfacePool: CanvasTextSurfacePool
+    let sectionMounts: CanvasNodeMountQueue?
+    init(store: SlotStoreObservable, canvas: CanvasStore, agentVisible: Binding<Bool>,
+         snapshots: CanvasContentSnapshots? = nil, entryPrepared: Bool = false,
+         isWorkspaceTransitioning: @escaping () -> Bool = { false },
+         textSurfacePool: CanvasTextSurfacePool = CanvasTextSurfacePool(),
+         sectionMounts: CanvasNodeMountQueue? = nil) {
+        self.store = store
+        self.canvas = canvas
+        self._agentVisible = agentVisible
+        self.entryPrepared = entryPrepared
+        self.isWorkspaceTransitioning = isWorkspaceTransitioning
+        self.textSurfacePool = textSurfacePool
+        self.sectionMounts = sectionMounts
+        self._pan = State(initialValue: canvas.pan)
+        self._zoom = State(initialValue: canvas.zoom)
+        self._contentSnapshots = StateObject(wrappedValue: snapshots ?? CanvasContentSnapshots())
+    }
     @State var mediaLayoutTask: Task<Void, Never>?
+    @StateObject private var presenceMirror = CanvasPresenceMirror()
+    @State private var retiringNodes: [CanvasRetiringNode] = []
+    @State var nodeMountQueue = CanvasNodeMountQueue()
+    @State var groupMounts = CanvasGroupMountAdmission()
     /// 画布页 Agent 侧栏的显隐。侧栏本体由 ContentView 的内容区并排渲染，
     /// 这里只持有开关：让"入口按钮"能待在画布右上（生成按钮旁），而布局让位交给外层 HStack。
     @Binding var agentVisible: Bool
+    @State private var externalAgentContext: AgentExternalProjectContext?
+    @State private var showExternalAgent = false
 
     /// 画布根坐标空间名。槽位库的拖拽手势也用它上报落点，两边共用一个空间才能对齐坐标。
     static let spaceName = "clipslots.canvas.root"
@@ -79,6 +105,9 @@ struct CanvasWorkspaceView: View {
     /// （实测本项目的画布子树每秒会被重建一次，监听器若绑在 NSView 挂载周期上会反复装卸并丢事件）。
     @StateObject var inputRouter = CanvasInputRouter()
     @StateObject var inlinePlayback = CanvasInlinePlayback()
+    @StateObject var contentSnapshots = CanvasContentSnapshots()
+    @StateObject var linkCandidateCache = CanvasLinkCandidateCache()
+    @State var menuCreationTask: Task<Void, Never>?
     /// 绑定本视图安装到 `CanvasStore` 的闭包，避免旧视图晚到的 onDisappear 清掉新视图的 handler。
     @State private var slotTextRestorerToken = UUID()
     @State private var attachmentBridgeToken = UUID()
@@ -141,8 +170,21 @@ struct CanvasWorkspaceView: View {
     @State var edgePanTask: Task<Void, Never>?
     @State var edgePanSessionID: UUID?
     @State var edgePanPoint: CGPoint?
+    @StateObject var edgeHover = CanvasEdgeHover()
     @State var selectionLinkPoint: CGPoint? = nil
-    @State var controlRegions: [String: CGRect] = [:]
+    @State private var publishedControlRegions: [String: CGRect] = [:]
+    @State var controlRegionBuffer = CanvasControlRegionBuffer()
+    @State var localControlRegistry = CanvasLocalControlRegistry()
+    @State private var viewportFitAnimation: UUID?
+    @State private var passiveBatchFit = false
+    @State private var activatedTextSlots = Set<String>()
+    var controlRegions: [String: CGRect] {
+        let published = publishedControlRegions
+        var regions = controlRegionBuffer.latest ?? published
+        regions.merge(localControlRegistry.screenRegions(nodes: visibleNodes, pan: effectivePan, zoom: zoom,
+            layoutZoom: layoutZoom, dragged: draggingIds, delta: dragDelta), uniquingKeysWith: { _, new in new })
+        return regions
+    }
     /// 光标位置，供锚点缩放使用。
     private var cursorScreen: CGPoint { inputRouter.cursorPoint }
     /// 当前"按坐标维持 hover"的节点（★ v2.11.8 五轮）。
@@ -193,9 +235,10 @@ struct CanvasWorkspaceView: View {
 
     var body: some View {
         GeometryReader { proxy in
-            ZStack(alignment: .topLeading) {
+            CanvasAbsoluteLayout {
                 CanvasGridBackground(pan: effectivePan, zoom: zoom)
                     .allowsHitTesting(false)
+                    .animation(Anim.transition, value: viewportFitAnimation)
 
                 blankClickCatcher
 
@@ -205,45 +248,64 @@ struct CanvasWorkspaceView: View {
                         .padding(.leading, sidebarWidth)
                 }
 
-                groupBackgroundLayer
-                edgeLayer
+                if !canvas.groups.isEmpty {
+                    WorkspaceContentBoundary { groupBackgroundLayer }
+                        .animation(Anim.transition, value: viewportFitAnimation)
+                }
+                WorkspaceContentBoundary { edgeLayer }
+                    .animation(Anim.transition, value: viewportFitAnimation)
 
-                selectionBoundsOverlay
-                nodeLayer
+                if canvas.selectedNodeIds.count > 1 || selectionLinkPoint != nil {
+                    WorkspaceContentBoundary { selectionBoundsOverlay }
+                }
+                entrySection("0-canvas-nodes", size: proxy.size) { nodeLayer }
                     .zIndex(11)
-                groupHeaderLayer
+                if !canvas.groups.isEmpty {
+                WorkspaceSectionAdmission(admission: groupMounts.admission(for: canvas.selectedGroupID),
+                                          width: proxy.size.width, height: proxy.size.height,
+                                          fillsViewport: true,
+                                          traceLabel: "canvas-group-header") { groupHeaderLayer }
+                    .animation(Anim.transition, value: viewportFitAnimation)
+                }
 
-                linkDragOverlay
-                magnetGuideOverlay
+                if linkDrag != nil { WorkspaceContentBoundary { linkDragOverlay } }
+                if draggingNodeId != nil { WorkspaceContentBoundary { magnetGuideOverlay } }
 
-                outputPortOverlay
+                WorkspaceContentBoundary { outputPortOverlay }
                 // v2.15.0：入口端口。与出口把手同层（节点之上），静态只画一枚、拖线时画全部合法落点。
-                inputPortOverlay
-                selectionActionsOverlay
+                WorkspaceContentBoundary { inputPortOverlay }
+                if canvas.selectedNodeIds.count > 1 {
+                    WorkspaceContentBoundary { selectionActionsOverlay }
+                }
 
-                actionBarOverlay
-                pileToolbarOverlay
-                composerOverlay
-                selectedEdgeToolbar
+                WorkspaceContentBoundary { actionBarOverlay }
+                if canvas.selectedPile != nil || hoveredPileID != nil {
+                    WorkspaceContentBoundary { pileToolbarOverlay }
+                }
+                WorkspaceContentBoundary { composerOverlay }
+                if canvas.selectedEdgeId != nil { WorkspaceContentBoundary { selectedEdgeToolbar } }
+                CanvasEdgeScissors(hover: edgeHover)
+                    .zIndex(60)
 
-                marqueeOverlay
+                if marqueeStart != nil { WorkspaceContentBoundary { marqueeOverlay } }
 
-                floatingLayer(size: proxy.size)
+                WorkspaceContentBoundary { floatingLayer(size: proxy.size) }
                     .zIndex(70)
-                libraryOverlay(size: proxy.size)
+                entrySection("5-canvas-library", size: proxy.size) { libraryOverlay(size: proxy.size) }
                     .zIndex(80)
 
-                ghostOverlay
+                if ghost != nil { WorkspaceContentBoundary { ghostOverlay } }
 
                 // ADD NODE 菜单压在最上层：它是模态性质的浮层，被任何东西盖住都会变成"点了没反应"。
-                addNodeMenuOverlay(size: proxy.size)
+                if addMenu != nil { WorkspaceContentBoundary { addNodeMenuOverlay(size: proxy.size) } }
 
                 // 全屏预览比 ADD NODE 菜单还高一层：它是**全屏模态**，预览期间下面的一切都不该
                 // 能被点到（包括那个菜单）。铺满整个 proxy 而不是只铺画布区 —— 侧边槽位库面板
                 // 也必须被盖住，否则"全屏"这个词就名不副实。
-                fullscreenPreviewOverlay
-                pileGalleryOverlay
-                    .zIndex(850)
+                if previewTarget != nil { WorkspaceContentBoundary { fullscreenPreviewOverlay } }
+                if pileGalleryID != nil {
+                    WorkspaceContentBoundary { pileGalleryOverlay }.zIndex(850)
+                }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             // v2.16.0：画布底改**纯黑**，且不再跟随 AppTheme 的浅色/深色模式。
@@ -262,26 +324,45 @@ struct CanvasWorkspaceView: View {
                 if let endpoint = ProcessInfo.processInfo.environment["CLIPSLOTS_MENU_LATENCY_URL"], let url = URL(string: endpoint), let request = addMenu { let now = ProcessInfo.processInfo.systemUptime; var r = URLRequest(url: url); r.httpMethod = "POST"; r.httpBody = try? JSONSerialization.data(withJSONObject: ["sessionId": "canvas-menu-latency", "runId": ProcessInfo.processInfo.environment["CANVAS_DEBUG_RUN"] ?? "pre-fix", "hypothesisId": "D", "msg": "[DEBUG] menu layout", "data": ["uptime": now, "id": request.id.uuidString, "menu": NSStringFromRect($0["add-menu"] ?? .zero), "image": NSStringFromRect($0["add-menu-row-image"] ?? .zero), "nodeBodies": CanvasRenderDiagnostics.count]]); URLSession.shared.dataTask(with: r).resume() }
                 #endif
                 // #endregion
-                controlRegions = $0
+                controlRegionBuffer.receive($0) { regions in
+                    if publishedControlRegions != regions { publishedControlRegions = regions }
+                }
             }
             .simultaneousGesture(pinchGesture)
             .onAppear {
                 pan = canvas.pan
                 zoom = canvas.zoom
+                canvas.agentGenerationOwner = slotTextRestorerToken
+                canvas.agentGenerationHandler = { ids in
+                    runGeneration(nodeIDs: ids)
+                    return canvas.selectionGenerationTask
+                }
                 // ★ v2.11.13：`layoutZoom` 已是常量基准，这里无须（也无法）再对齐 zoom。
                 // 首帧的 ratio = zoom / base ≠ 1 是**故意**的：卡片按基准排版、由变换缩到位。
                 // 闭包在这里绑一次即可：@State/@ObservedObject 的读写都走稳定的存储盒，
                 // 视图结构体后续被重建也不影响这几个闭包写到正确的地方。
                 inputRouter.onScroll = { dx, dy, precise, isZoom, point in
+                    controlRegionBuffer.end()
+                    edgeHover.cancel()
                     handleScroll(deltaX: dx, deltaY: dy, precise: precise, isZoom: isZoom, at: point)
                 }
-                inputRouter.onMiddleDrag = { delta in handleMiddleDrag(delta) }
+                inputRouter.onMiddleDrag = { delta in
+                    controlRegionBuffer.end()
+                    edgeHover.cancel(); handleMiddleDrag(delta)
+                }
                 inputRouter.onMiddleDragEnded = { canvas.updateViewport(pan: pan, zoom: zoom) }
-                inputRouter.onKeyAction = { action in handleKeyAction(action) }
-                inputRouter.blocksCanvasInput = { previewTarget != nil || pileGalleryID != nil || showBatchGeneration }
+                inputRouter.onKeyAction = { action in
+                    controlRegionBuffer.end()
+                    return handleKeyAction(action)
+                }
+                inputRouter.blocksCanvasInput = {
+                    isWorkspaceTransitioning() || previewTarget != nil || pileGalleryID != nil || showBatchGeneration
+                }
                 inputRouter.usesHandTool = { canvas.activeTool == .hand && addMenu == nil }
                 inputRouter.onPointer = { event, point in routeCanvasPointer(event, at: point) }
                 inputRouter.onHover = { point in
+                    controlRegionBuffer.end()
+                    updateEdgeHover(at: point)
                     if let point {
                         updateHoverHold(at: point)
                         updatePortHover(at: point)
@@ -356,17 +437,33 @@ struct CanvasWorkspaceView: View {
                 // 这里**不弹 toast**：搬进暂存区不是"清理掉了"，Cmd+Z 还能拿回来，而且刚进画布
                 // 就弹一句"已清理 N 项"只会让用户以为自己丢了东西。真正需要告知的是删除那一刻
                 // （见 `performDelete`）。
-                _ = reconcilePrivateContents()
+                if !entryPrepared { _ = reconcilePrivateContents() }
+                refreshCanvasContent()
                 synchronizeMediaLayouts()
                 fitCreatedWorkflow(size: proxy.size)
                 #if DEBUG
                 if ProcessInfo.processInfo.environment["CLIPSLOTS_CANVAS_REGRESSION"] == "1" {
                     CanvasAgentGroupsProbeBridge.current = self
                 }
-                runCanvasRegressionIfRequested()
+                if ProcessInfo.processInfo.environment["CLIPSLOTS_WINDOW_CHROME_PROBE"] != "1" {
+                    runCanvasRegressionIfRequested()
+                }
                 #endif
             }
             .onChange(of: proxy.size) { newSize in viewSize = newSize }
+            .onChange(of: canvas.selectedNodeIds) { selected in
+                if selected.isEmpty { CanvasParameterPopoverSession.popover?.performClose(nil) }
+            }
+            .onChange(of: addMenu?.id) { request in
+                if request != nil { CanvasParameterPopoverSession.popover?.performClose(nil) }
+            }
+            .sheet(isPresented: $showExternalAgent) {
+                if let externalAgentContext {
+                    AgentExternalHandoffView(context: externalAgentContext,
+                                             availableSize: proxy.size,
+                                             onClose: { showExternalAgent = false })
+                }
+            }
             .sheet(isPresented: $showBatchGeneration) {
                 BatchGenerationView(store: store, canvas: canvas, size: proxy.size)
             }
@@ -380,7 +477,18 @@ struct CanvasWorkspaceView: View {
                 WorkflowSkillEditor(draft: request.skill, context: request.context,
                                     original: request.original, onSaved: request.onSaved)
             }
-            .onChange(of: canvas.slotRevision) { _ in synchronizeMediaLayouts() }
+            .onChange(of: canvas.slotRevision) { _ in refreshCanvasContent() }
+            .onChange(of: store.canvasSlotRevision) { _ in refreshCanvasContent() }
+            .onChange(of: store.slots.mapValues(\.contentId)) { _ in refreshCanvasContent() }
+            .onChange(of: store.currentSpecialSlotId) { _ in refreshCanvasContent() }
+            .onChange(of: canvas.nodes.map { "\($0.id):\($0.groupId):\($0.slot)" }) { _ in
+                nodeMountQueue.update(ids: canvas.nodes.map(\.id))
+                refreshCanvasContent()
+            }
+            .onChange(of: canvas.edges) { _ in edgeHover.cancel() }
+            .onChange(of: hoverHoldNodeId) { id in
+                if let id { activatedTextSlots.insert(id) }
+            }
             .onChange(of: canvas.agentFocusRequest) { request in
                 if let request, let node = canvas.nodes.first(where: { $0.id == request.nodeID }) {
                     centerViewport(on: node)
@@ -391,7 +499,11 @@ struct CanvasWorkspaceView: View {
                 if let error { store.transientUI.showToast(error) }
             }
             .onChange(of: canvas.activeProjectId) { _ in
+                controlRegionBuffer.end()
                 cancelCanvasPointer()
+                nodeMountQueue.reset()
+                groupMounts.reset()
+                activatedTextSlots = []
                 pileGalleryID = nil; hoveredPileID = nil
                 pileEntryFrames = [:]; pileLandingFrames = [:]
                 editingGroupID = nil
@@ -401,16 +513,18 @@ struct CanvasWorkspaceView: View {
                     groupRunAlert = nil
                 }
                 inlinePlayback.stop()
-                synchronizeMediaLayouts()
+                refreshCanvasContent()
             }
             .task(id: canvas.activeProjectId) {
                 while !Task.isCancelled {
                     try? await Task.sleep(for: .seconds(2))
                     guard !Task.isCancelled else { return }
-                    synchronizeMediaLayouts()
+                    refreshCanvasContent()
                 }
             }
             .onDisappear {
+                controlRegionBuffer.end()
+                nodeMountQueue.reset()
                 cancelCanvasPointer()
                 inlinePlayback.stop()
                 mediaLayoutTask?.cancel()
@@ -421,6 +535,10 @@ struct CanvasWorkspaceView: View {
                 CanvasCommandBridge.shared.slotCommandHandler = nil
                 canvas.recoverGenerationAction = nil
                 canvas.byteArtistInputPlan = nil
+                if canvas.agentGenerationOwner == slotTextRestorerToken {
+                    canvas.agentGenerationOwner = nil
+                    canvas.agentGenerationHandler = nil
+                }
                 canvas.clearSlotTextRestorer(id: slotTextRestorerToken)
                 canvas.clearAttachmentBridge(id: attachmentBridgeToken)
                 if canvas.documentRestorerID == slotTextRestorerToken {
@@ -433,12 +551,18 @@ struct CanvasWorkspaceView: View {
         }
     }
 
+    private func entrySection<Content: View>(_ id: String, size: CGSize,
+                                            @ViewBuilder content: @escaping () -> Content) -> WorkspaceSectionAdmission {
+        WorkspaceSectionAdmission(admission: sectionMounts?.admission(for: id) ?? .immediate,
+                                  width: size.width, height: size.height, fillsViewport: true, content: content)
+    }
+
     /// 一次进行中的拖线（v2.12.0）。
     struct LinkDrag {
         /// 从哪个节点拖出来的。
         let fromNodeId: String
         /// 出发点（屏幕坐标，= 出口把手位置）。
-        let start: CGPoint
+        var start: CGPoint
         /// 当前光标（屏幕坐标）。
         var cursor: CGPoint
         /// 光标此刻压在哪个节点上（且那个节点可以接这条线）。nil = 落空。
@@ -482,8 +606,9 @@ struct CanvasWorkspaceView: View {
     /// 空白单击 / 双击的分流。
     ///
     /// 第一击照旧取消选中（保持 hotfix21 的手感，不能让它等双击超时），第二击落在同一处且在系统
-    /// 双击间隔内就弹 ADD NODE 菜单。菜单弹出后把游标清空，避免"连点三下"弹第二个菜单。
-    func handleBlankTap() {
+    /// 双击间隔内，顶部留白放大窗口，内容区弹 ADD NODE 菜单。
+    /// 清空点击计时，避免"连点三下"触发第二个动作。
+    func handleBlankTap(eventTime: Double? = nil) {
         // #region debug-point C:blank
         #if DEBUG
         if ProcessInfo.processInfo.environment["CLIPSLOTS_CANVAS_REGRESSION"] == "1" { var r = URLRequest(url: URL(string: "http://127.0.0.1:7777/event")!); r.httpMethod = "POST"; r.httpBody = try? JSONSerialization.data(withJSONObject: ["sessionId": "canvas-pointer-routing", "runId": ProcessInfo.processInfo.environment["CANVAS_DEBUG_RUN"] ?? "pre-fix", "hypothesisId": "C", "msg": "[DEBUG] blank callback"]); URLSession.shared.dataTask(with: r).resume() }
@@ -496,12 +621,17 @@ struct CanvasWorkspaceView: View {
         hoverLeaveTask?.cancel()
         hoverHoldNodeId = nil
         let click = CanvasClickCadence.Click(point: cursorScreen,
-                                             time: Date().timeIntervalSinceReferenceDate)
+                                             time: eventTime ?? NSApp.currentEvent?.timestamp ?? ProcessInfo.processInfo.systemUptime)
         if CanvasClickCadence.isDoubleClick(previous: lastBlankClick,
                                             current: click,
                                             interval: NSEvent.doubleClickInterval) {
             lastBlankClick = nil
-            openAddMenu(atScreen: cursorScreen, parentNodeId: nil)
+            if cursorScreen.y <= 80, let window = NSApp.keyWindow,
+               !window.styleMask.contains(.fullScreen) {
+                MainWindowDragRegion.toggleZoom(window)
+            } else {
+                openAddMenu(atScreen: cursorScreen, parentNodeId: nil)
+            }
             return
         }
         lastBlankClick = click
@@ -618,11 +748,16 @@ struct CanvasWorkspaceView: View {
     @ViewBuilder
     func nodeCard(_ node: CanvasNode, isEditing: Bool) -> some View {
         if node.kind.cardForm == .slotStack {
+            if usesIdleTextSurface(node, isEditing: isEditing) {
+                CanvasIdleTextSlot(node: node, text: renderText(for: node), pathLabel: pathLabel(for: node),
+                    renderScale: layoutZoom, viewZoom: zoom, onOpenInputFiles: { openInputFiles(node) },
+                    registry: localControlRegistry)
+            } else {
             CanvasNodeCardView(node: node,
                                isSelected: canvas.selectedGroupID == nil && canvas.selectedNodeIds.contains(node.id),
-                               text: liveText(for: node),
+                               text: renderText(for: node),
                                pathLabel: pathLabel(for: node),
-                               attachments: liveAttachments(for: node),
+                               attachments: renderAttachments(for: node),
                                // ★★ v2.11.13：常量基准。卡片内部排版只算这一次，
                                // 之后 zoom 怎么变都只走下面那句 `scaleEffect`。
                                renderScale: layoutZoom,
@@ -650,20 +785,24 @@ struct CanvasWorkspaceView: View {
                                onHoverChanged: { noteNodeHover(node, hovering: $0) },
                                onPreviewDragChanged: { updateNodeDrag(node, translation: $0, point: $1) },
                                onPreviewDragEnded: { endNodeDrag(node, translation: $0, point: $1) })
+            }
         } else {
             CanvasTapNodeCard(node: node,
                               isSelected: canvas.selectedGroupID == nil && canvas.selectedNodeIds.contains(node.id),
                               isEditing: isEditing,
-                              text: liveText(for: node),
-                              textDocument: node.kind == .text ? store.canvasTextDocument(groupID: node.groupId, slot: node.slot) : nil,
+                              text: renderText(for: node),
+                              textDocument: node.kind == .text ? store.canvasTextDocument(groupID: node.groupId, slot: node.slot,
+                                  renderContent: contentSnapshots.entry(node)?.content, rendering: true) : nil,
                               pathLabel: pathLabel(for: node),
-                              attachments: liveAttachments(for: node),
+                              attachments: renderAttachments(for: node),
                               renderScale: layoutZoom,
                               textCounter: textCounter,
                               viewZoom: zoom,
                               isHoverHeld: hoverHoldNodeId == node.id,
                               canArchive: canArchiveToLibrary(node),
                               inlinePlayback: inlinePlayback,
+                              connectionAppearance: connectionAppearance(for: node),
+                              generationBackdrop: generationBackdrop(for: node),
                               onHoverChanged: { noteNodeHover(node, hovering: $0) },
                               onBeginEdit: { beginEdit(node) },
                               onCommitEdit: { commitEdit(node, text: $0) },
@@ -673,13 +812,62 @@ struct CanvasWorkspaceView: View {
         }
     }
 
+    func usesIdleTextSurface(_ node: CanvasNode, isEditing: Bool) -> Bool {
+        node.kind.cardForm == .slotStack && !isEditing && hoverHoldNodeId != node.id
+            && !activatedTextSlots.contains(node.id)
+            && draggingNodeId == nil && draggingIds.isEmpty && groupDragID == nil
+            && linkDrag == nil && pileLandingFrames[node.id] == nil
+            && (!canvas.selectedNodeIds.contains(node.id) || canvas.selectedGroupID != nil)
+            && node.state == .idle && renderAttachments(for: node).isEmpty
+            && !renderText(for: node).trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && CanvasFanGeometry.allCardSources(attachmentIndices: [], text: renderText(for: node)).count <= 5
+            // The shared passive host is below interactive siblings. Overlapping
+            // cards retain the normal tree so visual and pointer paint order agree.
+            && !canvas.nodes.contains { $0.id != node.id && $0.frame.intersects(node.frame.insetBy(dx: -20, dy: -20)) }
+    }
+
     // MARK: - 节点层
 
+    @ViewBuilder private func nodeMeasurement(_ node: CanvasNode) -> some View {
+        if canvas.groups.contains(where: { $0.nodeIDs.contains(node.id) }) {
+            CanvasGroupNodeMeasurement(node: node, projectID: canvas.activeProjectId, layoutScale: layoutZoom)
+        }
+    }
+
     private var nodeLayer: some View {
-        ZStack(alignment: .topLeading) {
-            ForEach(visibleNodes) { node in
+        let aimed = linkDrag.flatMap { drag in
+            drag.targetNodeId ?? nodeBody(at: drag.cursor)?.id
+        }
+        return CanvasNodeLayerBoundary(key: .init(project: canvas.activeProjectId,
+            nodes: canvas.nodes, edges: canvas.edges, piles: canvas.piles, groups: canvas.groups,
+            selected: canvas.selectedNodeIds, selectedGroup: canvas.selectedGroupID,
+            edited: editingNodeId, hovered: hoverHoldNodeId, dragID: draggingNodeId,
+            dragged: draggingIds, delta: dragDelta, pan: effectivePan, zoom: zoom, layoutZoom: layoutZoom,
+            size: viewSize, source: linkDrag?.fromNodeId, reverse: linkDrag?.fromInput ?? false, aimed: aimed,
+            contentRevisions: contentSnapshots.entries.mapValues(\.revision),
+            currentGroup: store.currentSpecialSlotId, paths: canvas.nodes.map(pathLabel),
+            landings: pileLandingFrames, groupDrag: groupDragID, groupResize: groupResizePreview,
+            pileDrag: pileDragID, hoveredPile: hoveredPileID, pileGallery: pileGalleryID, pileEntries: pileEntryFrames)) {
+                nodeLayerContents
+            }.equatable()
+    }
+
+    private var nodeLayerContents: some View {
+        let idle = visibleNodes.filter { usesIdleTextSurface($0, isEditing: editingNodeId == $0.id) }
+        let idleIDs = Set(idle.map(\.id))
+        return CanvasAbsoluteLayout {
+            CanvasPooledTextLayer(pool: textSurfacePool,
+                items: idle.map { .init(node: $0, text: renderText(for: $0), path: pathLabel(for: $0)) },
+                pan: effectivePan, zoom: zoom, layoutZoom: layoutZoom, registry: localControlRegistry,
+                onOpenInputFiles: { openInputFiles($0) })
+                .frame(width: viewSize.width, height: viewSize.height)
+            ForEach(visibleNodes.filter { !idleIDs.contains($0.id) }) { node in
                 let isDragging = draggingIds.contains(node.id)
                 let isEditing = editingNodeId == node.id
+                let controlSpace = "canvas-node-controls-\(node.id)"
+                let controlScale = zoom / max(layoutZoom, 0.01)
+                let controlOrigin = screenFrame(of: node).origin
+                CanvasMountingNode(admission: nodeMountQueue.admission(for: node.id)) {
                 CanvasRenderBoundary(key: .init(
                     node: node, selected: canvas.selectedGroupID == nil && canvas.selectedNodeIds.contains(node.id),
                     editing: isEditing, hovered: hoverHoldNodeId == node.id,
@@ -688,16 +876,29 @@ struct CanvasWorkspaceView: View {
                         cardSize: CanvasFanGeometry.fanCardSize(boxHeight: CanvasCardLayout.verticalPlan(
                             nodeHeight: node.height, renderScale: layoutZoom,
                             headerFontSize: 9.5, footerFontSize: 9.5).previewHeight1x), zoom: zoom),
-                    slotRevision: canvas.slotRevision, contentRevision: store.canvasSlotRevision,
+                    slotRevision: 0, contentRevision: contentSnapshots.entry(node)?.revision ?? 0,
                     currentGroup: store.currentSpecialSlotId,
                     currentContentId: node.groupId == store.currentSpecialSlotId ? store.slots[node.slot]?.contentId : nil,
-                    path: pathLabel(for: node)
+                    path: pathLabel(for: node),
+                    connectionAppearance: connectionAppearance(for: node)
                 )) {
                     nodeCard(node, isEditing: isEditing)
+                        .contextMenu { nodeContextMenu(node) }
                 }
                     .equatable()
-                    .background(CanvasGroupNodeMeasurement(node: node, projectID: canvas.activeProjectId,
-                                                           layoutScale: layoutZoom))
+                    .environment(\.canvasControlSpace, controlSpace)
+                    .environment(\.canvasControlTransform, CanvasControlTransform(origin: controlOrigin, scale: controlScale))
+                    .coordinateSpace(name: controlSpace)
+                    .onPreferenceChange(CanvasLocalControlRegions.self) { values in
+                        if !usesIdleTextSurface(node, isEditing: isEditing) {
+                            localControlRegistry.nodes[node.id] = values
+                        }
+                    }
+                    .transformPreference(CanvasLocalControlRegions.self) { $0 = [:] }
+                    .onDisappear { localControlRegistry.nodes[node.id] = nil }
+                    .background(nodeMeasurement(node))
+                    .modifier(CanvasNodePresence(createdAt: usesIdleTextSurface(node, isEditing: isEditing)
+                        ? .distantPast : node.createdAt))
                     // ★ 三轮：缩放过程中的「文字跳舞」修复 —— 排版用 `layoutZoom`，缩放差值用变换补。
                     //
                     // 症状（用户录屏）：缩放时节点里的文字一帧一个换行位置，整块文字在抖。
@@ -723,13 +924,29 @@ struct CanvasWorkspaceView: View {
                             y: (node.y + (isDragging ? dragDelta.height : 0)) * zoom + effectivePan.height)
                     .modifier(CanvasPileLanding(start: pileLandingFrames[node.id],
                         target: screenFrame(of: node), zoom: zoom))
+                    .animation(Anim.transition, value: viewportFitAnimation)
+                }
+                    .frame(width: node.width * layoutZoom, height: node.height * layoutZoom, alignment: .topLeading)
                     // 被按住的那个压在最上层；同批一起走的排第二层，这样多选拖动时整组都浮在其他节点之上。
                     .zIndex(nodeLayerOrder(node))
                     // 外壳/正文由原生路由处理；预览独立传递拖动，编辑器和按钮保留自身事件。
-                    .contextMenu { nodeContextMenu(node) }
+            }
+            ForEach(retiringNodes) { retired in
+                CanvasTapNodeCard(node: retired.node, isSelected: false, isEditing: false,
+                                  text: retired.text, pathLabel: retired.path, attachments: retired.attachments,
+                                  renderScale: layoutZoom, textCounter: textCounter, viewZoom: zoom,
+                                  isHoverHeld: false, canArchive: false, inlinePlayback: inlinePlayback,
+                                  onHoverChanged: { _ in }, onBeginEdit: {}, onCommitEdit: { _ in },
+                                  onCancelEdit: {}, onOpenFullscreen: { _ in }, onArchive: {})
+                    .modifier(CanvasNodePresence(createdAt: retired.node.createdAt, exiting: true))
+                    .scaleEffect(zoom / max(layoutZoom, 0.01), anchor: .topLeading)
+                    .offset(x: retired.node.x * zoom + effectivePan.width,
+                            y: retired.node.y * zoom + effectivePan.height)
+                    .allowsHitTesting(false)
             }
             pileLayer
         }
+        .frame(width: viewSize.width, height: viewSize.height, alignment: .topLeading)
         // 统一施加视口变换。锚点固定 `.topLeading` 是刻意的：`CanvasGeometry` 全部公式都建立在
         // `screen = canvas * zoom + pan` 之上，而这个式子只有在缩放锚点为原点时才成立。
         // 用 `.center` 会凭空引入一个「视图尺寸的一半」的偏移，让所有命中判定整体错位。
@@ -743,7 +960,27 @@ struct CanvasWorkspaceView: View {
         .transaction { t in
             if draggingNodeId != nil || groupDragID != nil { t.animation = nil }
         }
+        .onAppear { presenceMirror.nodes = canvas.nodes }
+        .onChange(of: canvas.activeProjectId) { _ in
+            retiringNodes = []; presenceMirror.nodes = canvas.nodes
+        }
+        .onChange(of: canvas.nodes) { nodes in
+            let ids = Set(nodes.map(\.id))
+            let removed = presenceMirror.nodes.filter {
+                !ids.contains($0.id) && $0.kind.cardForm != .slotStack
+            }
+            presenceMirror.nodes = nodes
+            for node in removed {
+                let retired = CanvasRetiringNode(node: node, text: renderText(for: node),
+                                                 path: pathLabel(for: node), attachments: renderAttachments(for: node))
+                retiringNodes.append(retired)
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.23) {
+                    retiringNodes.removeAll { $0.id == retired.id }
+                }
+            }
+        }
         .onPreferenceChange(CanvasGroupMeasurementPreference.self) { values in
+            guard !canvas.groups.isEmpty else { return }
             let project = canvas.activeProjectId
             let sizes = values.filter { id, value in
                 value.projectID == project && canvas.node(id: id)?.createdAt == value.createdAt
@@ -860,23 +1097,46 @@ struct CanvasWorkspaceView: View {
 
     func updatePortHover(at point: CGPoint) {
         portMotions.prune(nodeIDs: Set(canvas.nodes.map(\.id)))
-        let nodes = linkDrag.map {
+        let coveredByOverlay = canvasOverlayContains(point)
+        let order = nodesInPaintOrder
+        let frames = nodeScreenFrames, scale = zoom, drag = linkDrag, motions = portMotions
+        let ranks = Dictionary(uniqueKeysWithValues: order.enumerated().map { ($0.element.id, $0.offset) })
+        let body = pileBody(at: point) == nil ? order.last { frames[$0.id]?.contains(point) == true } : nil
+        func exposed(_ node: CanvasNode) -> Bool {
+            guard let body, body.id != node.id else { return true }
+            return (ranks[node.id] ?? -1) > (ranks[body.id] ?? -1)
+        }
+        let nodes = drag.map {
             linkCandidates(from: $0.fromNodeId, reverse: $0.fromInput)
         } ?? (pointerSession == nil ? staticPortNodes : [])
+        if let drag {
+            hoverHoldNodeId = nodes.reversed().compactMap { node -> (CanvasNode, CGFloat)? in
+                guard let frame = frames[node.id] else { return nil }
+                let home = CGPoint(x: (drag.fromInput ? frame.maxX : frame.minX)
+                    + (drag.fromInput ? 37 : -37) * scale, y: frame.midY)
+                guard exposed(node) && !coveredByOverlay
+                    && (frame.contains(point)
+                        || CGRect(x: home.x - 40 * scale, y: home.y - 40 * scale,
+                                  width: 80 * scale, height: 80 * scale).contains(point)) else { return nil }
+                return (node, hypot(point.x - home.x, point.y - home.y))
+            }.min { $0.1 < $1.1 }?.0.id
+        }
         var active: Set<String> = []
+        let hovered = hoverHoldNodeId, outputs = drag.map { [$0.fromInput] } ?? [false, true]
         for node in nodes {
-            let outputs = linkDrag.map { [$0.fromInput] } ?? [false, true]
+            guard let frame = frames[node.id] else { continue }
             for output in outputs {
-                let home = output ? outputPortHome(of: node) : inputPortHome(of: node)
+                let home = CGPoint(x: (output ? frame.maxX : frame.minX) + (output ? 37 : -37) * scale, y: frame.midY)
                 // Use the same node stack for following, drawing and pressing.
-                let exposed = portIsAboveBody(at: point, nodeId: node.id)
-                let cursor = exposed && !canvasOverlayContains(point) ? point : nil
-                portMotions.motion(nodeID: node.id, output: output)
-                    .update(cursor: cursor, home: home, output: output, zoom: zoom)
+                let isExposed = exposed(node)
+                    && (drag == nil || hovered == node.id)
+                let cursor = isExposed && !coveredByOverlay ? point : nil
+                motions.motion(nodeID: node.id, output: output)
+                    .update(cursor: cursor, home: home, output: output, zoom: scale)
                 active.insert(node.id + (output ? ":output" : ":input"))
             }
         }
-        portMotions.reset(except: active)
+        motions.reset(except: active)
     }
 
     /// 应用维持结果：**进入立即、离开延迟 `CanvasNodeHover.leaveDelay`**。
@@ -1263,19 +1523,19 @@ struct CanvasWorkspaceView: View {
                               maxHeight: max(100, size.height - 32),
                               onPick: { choice in handleAddNode(choice, request: request) },
                               onDismiss: { addMenu = nil })
+                .modifier(CanvasMenuPresence())
                 .offset(x: clamp(request.screenPoint.x,
-                                 min: 8,
-                                 max: max(8, size.width - CanvasAddNodeMenu.width - 8)),
+                                 min: 12,
+                                 max: max(12, size.width - CanvasAddNodeMenu.width - 12)),
                         // 菜单高度按内容估的（3 项 + 标题 ≈ 168pt）。宁可估大：估小会让菜单在
                         // 窗口底部被切掉最后一项，而估大只是让它离底边远一点。
                         y: clamp(request.screenPoint.y,
-                                 min: 8,
+                                 min: 12,
                                  max: max(8, size.height - min(CanvasAddNodeMenu.height(parentCount: request.allParentIds.count,
-                                        upstream: request.childNodeId != nil), size.height - 32) - 8)))
+                                        upstream: request.childNodeId != nil), size.height - 32) - 12)))
                 // Keep layout and hit regions at their final coordinates from the
                 // first frame. Scaling after offset also scaled the distance from
                 // the canvas origin, moving the menu and republishing every row.
-                .transition(.opacity.animation(.easeOut(duration: 0.08)))
                 .zIndex(91)
         }
     }
@@ -1295,10 +1555,15 @@ struct CanvasWorkspaceView: View {
         #endif
         // #endregion
         endInlineEditing()
+        let referencedIDs = Set(parentNodeIds + [parentNodeId, childNodeId].compactMap { $0 })
+        guard referencedIDs.allSatisfy({ canvas.connectionPolicy.canConnect(nodeID: $0) }) else { return }
         let target = canvasPoint ?? CanvasGeometry.canvasPoint(screen: screenPoint, pan: effectivePan, zoom: zoom)
+        let referenced = parentNodeId != nil || !parentNodeIds.isEmpty || childNodeId != nil
+        let menuPoint = referenced
+            ? CGPoint(x: screenPoint.x - CanvasAddNodeMenu.width / 2, y: screenPoint.y + 16) : screenPoint
         // Only the menu's opacity transitions. The canvas and its geometry
         // preferences must not inherit an animation transaction on menu open.
-        addMenu = AddNodeRequest(screenPoint: screenPoint,
+        addMenu = AddNodeRequest(screenPoint: menuPoint,
                                  canvasPoint: target,
                                  parentNodeId: parentNodeId,
                                  parentNodeIds: parentNodeIds,
@@ -1330,9 +1595,13 @@ struct CanvasWorkspaceView: View {
         guard addMenu?.id == request.id, choice.isAvailable else { return }
         addMenu = nil
         func create(_ kind: CanvasNodeKind) {
-            guard let node = createNode(kind: kind, at: request.canvasPoint, parentNodeId: nil,
-                                        beginEditing: false, parentNodeIds: request.allParentIds) else { return }
-            if let child = request.childNodeId { _ = canvas.connect(from: node.id, to: child) }
+            let previous = menuCreationTask
+            let project = canvas.activeProjectId
+            menuCreationTask = Task { @MainActor in
+                await previous?.value
+                guard canvas.activeProjectId == project else { return }
+                await createNodeFromMenu(kind: kind, request: request)
+            }
         }
         switch choice {
         case .text:
@@ -1682,13 +1951,14 @@ struct CanvasWorkspaceView: View {
         CanvasSlotLibraryPanel.width(expanded: canvas.isLibraryExpanded)
     }
 
+    @ViewBuilder
     func libraryOverlay(size: CGSize) -> some View {
             // 左侧：贴边槽位库侧栏（Figma 风格）。
             //
             // ★ v2.11.7 hotfix18：从「左上角的浮动卡片」改为「贴住窗口左缘、上下通高的侧栏」。
             // 所以这里**不能再有 padding** —— 一点内边距就会露出后面的网格，那道缝隙正是浮动卡片
             // 与贴边侧栏观感上的全部差别。
-            return CanvasSlotLibraryPanel(store: store,
+            CanvasSlotLibraryPanel(store: store,
                                    canvas: canvas,
                                    onDragChanged: handleSlotDragChanged,
                                    onDropSlot: handleSlotDrop,
@@ -1696,65 +1966,54 @@ struct CanvasWorkspaceView: View {
                                    onReorder: { groupId, from, to in
                                        handleSlotReorder(groupId: groupId, from: from, to: to)
                                    })
-                .frame(width: sidebarWidth, height: size.height, alignment: .topLeading)
+                .frame(width: canvas.isLibraryExpanded ? sidebarWidth : 38,
+                       height: canvas.isLibraryExpanded ? size.height : 34, alignment: .topLeading)
                 .clipped()
-                .background(AppTheme.canvasChromeSurface.ignoresSafeArea(.container, edges: .top))
+                .padding(.leading, canvas.isLibraryExpanded ? 0 : 12)
+                .padding(.top, canvas.isLibraryExpanded ? 0 : 12 + TapSkin.titlebarInset)
                 .canvasControlRegion("library-panel")
     }
 
     private func floatingLayer(size: CGSize) -> some View {
-        ZStack(alignment: .topLeading) {
+        CanvasAbsoluteLayout {
 
             // 左上（紧挨侧栏）：项目切换器。
             //
             // 贴在画布内容区左上角而不是 App 顶栏：项目是**画布的文档单位**，和顶栏那一排
             // 「页 / 组」不是同一维度（那两级是槽位容器），并排摆会让人以为有从属关系。
+            entrySection("1-canvas-project", size: size) {
             HStack(spacing: 10) {
                 CanvasProjectSwitcher(canvas: canvas,
                                       onSwitch: handleSwitchProject,
                                       onCreate: handleCreateProject,
                                       onRename: handleRenameProject,
                                       onDelete: handleDeleteProject)
-                switch canvas.saveStatus {
-                case .saved:
-                    Label("已保存", systemImage: "checkmark")
-                        .font(.system(size: 10)).foregroundColor(TapSkin.chromeInkDim)
-                case .saving:
-                    Text("保存中…").font(.system(size: 10)).foregroundColor(TapSkin.chromeInkDim)
-                case .failed(let reason):
-                    Button { canvas.flushSave() } label: {
-                        Label("保存失败 · 重试", systemImage: "exclamationmark.circle")
-                            .font(.system(size: 11))
-                            .padding(.horizontal, 8).frame(height: 28)
-                            .contentShape(Rectangle())
-                    }
-                    .buttonStyle(.plain).foregroundColor(.red)
-                    .help(reason)
-                }
+                CanvasSaveProgressView(progress: canvas.saveProgress, retry: { canvas.flushSave() })
             }
-                .padding(.leading, sidebarWidth + 12)
+                .padding(.leading, canvas.isLibraryExpanded ? sidebarWidth + 12 : 60)
                 // v2.16.1: +titlebarInset —— 画布现在黑到窗口顶边，这条 chrome 要落到
                 // 标题栏拖拽区下面，否则点它等于在拖窗口。
                 .padding(.top, 12 + TapSkin.titlebarInset)
+            }
 
-            // 右上：Agent 入口 + 生成按钮
+            // 右上：连接 Agent、外观、画布 Agent 侧栏与批量生成。
+            entrySection("2-canvas-actions", size: size) {
             VStack {
                 HStack(spacing: 8) {
                     Spacer()
+                    Button(action: connectExternalAgent) {
+                        CanvasAgentPlug()
+                            .stroke(style: StrokeStyle(lineWidth: 1.65, lineCap: .round, lineJoin: .round))
+                            .frame(width: 20, height: 20)
+                            .frame(width: 44, height: 40)
+                    }
+                    .buttonStyle(CanvasHeaderButtonStyle(iconOnly: true, isActive: showExternalAgent))
+                    .help("连接 Agent")
+                    .accessibilityLabel("连接 Agent")
+                    .accessibilityIdentifier("canvas-connect-agent")
+                    .canvasControlRegion("connect-agent")
                     AppAppearanceButton(compact: true, canvasPalette: true)
                         .canvasControlRegion("appearance")
-                    Button {
-                        withAnimation(Anim.transition) { showInspector.toggle() }
-                    } label: {
-                        Image(systemName: "slider.horizontal.3")
-                            .frame(width: 28, height: 28)
-                            .background(AppTheme.canvasChromeSurface)
-                            .clipShape(RoundedRectangle(cornerRadius: 8))
-                    }
-                    .buttonStyle(.plain)
-                    .disabled(canvas.soleSelectedNode == nil)
-                    .help("节点属性")
-                    .accessibilityIdentifier("canvas-inspector-toggle")
                     // ★ v2.11.8：画布页的 Agent 入口紧贴「生成」左侧。
                     // 侧栏本体挂在 ContentView 的内容区（见那边的注释），这里只是开关，
                     // 因此侧栏展开后这一整排会随画布可用宽度自动左移，不需要手动补 padding。
@@ -1762,20 +2021,17 @@ struct CanvasWorkspaceView: View {
                         withAnimation(Anim.transition) { agentVisible.toggle() }
                     } label: {
                         Image(systemName: "sparkles")
-                            .font(.system(size: 12, weight: .semibold))
-                            .foregroundColor(agentVisible ? TapSkin.onAccent : TapSkin.ink)
-                            .frame(width: 28, height: 28)
-                            .background(agentVisible ? TapSkin.accent : AppTheme.canvasChromeSurface)
-                            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-                            .overlay(
-                                RoundedRectangle(cornerRadius: 8, style: .continuous)
-                                    .stroke(AppTheme.subtleBorder, lineWidth: agentVisible ? 0 : 1))
-                            .contentShape(Rectangle())
+                            .font(.system(size: 18, weight: .regular))
+                            .frame(width: 44, height: 40)
                     }
-                    .buttonStyle(.plain)
+                    .buttonStyle(CanvasHeaderButtonStyle(iconOnly: true, isActive: agentVisible))
                     .help(agentVisible ? "收起 Agent 侧栏" : "打开 Agent 侧栏")
+                    .accessibilityLabel(agentVisible ? "收起 Agent 侧栏" : "打开 Agent 侧栏")
+                    .accessibilityIdentifier("canvas-agent-toggle")
+                    .accessibilityAddTraits(agentVisible ? [.isSelected] : [])
+                    .canvasControlRegion("agent-toggle")
 
-                    BatchGenerationEntry {
+                    BatchGenerationEntry(canvasHeader: true, iconOnly: size.width - sidebarWidth < 530) {
                         inputRouter.anchorView?.window?.makeFirstResponder(nil)
                         AttachmentManagerPanelController.shared.close()
                         addMenu = nil
@@ -1783,14 +2039,12 @@ struct CanvasWorkspaceView: View {
                     }
                     .canvasControlRegion("batch-generation")
 
-                    CanvasGenerateButton {
-                        runGenerationForSelection()
-                    }
                 }
                 Spacer()
             }
             .padding(.trailing, 16)
-            .padding(.top, 14 + TapSkin.titlebarInset)
+            .padding(.top, 12 + TapSkin.titlebarInset)
+            }
 
             // 右侧：属性面板（v2.11.7 hotfix19）。
             //
@@ -1814,7 +2068,8 @@ struct CanvasWorkspaceView: View {
 
             // 底部：工具栏。在**侧栏右侧的可见区域**里居中，不是在整个窗口里居中 ——
             // 否则侧栏一展开，工具栏看起来就是偏左的。
-            CanvasFloatingToolbar(canvas: canvas,
+            entrySection("4-canvas-toolbar", size: size) {
+            CanvasFloatingToolbar(canvas: canvas, activeTool: canvas.activeTool,
                                       isHistoryOpen: $showHistory,
                                       onPickSlot: {
                     // hotfix20：节点就是槽位，「放入槽位」不能再凭空造一个空节点（那会是一张
@@ -1822,11 +2077,14 @@ struct CanvasWorkspaceView: View {
                     // 并顺手提示另一条更快的路（Cmd+1~0）。
                     _ = handleKeyAction(.newNode)
                 })
+            .equatable()
             .frame(width: footerToolbarFrame.width, height: footerToolbarFrame.height)
             .canvasControlRegion("canvas-footer-toolbar")
             .position(x: footerToolbarFrame.midX, y: footerToolbarFrame.midY)
+            }
 
             // 左下：缩放控件（紧贴侧栏右侧）
+            entrySection("3-canvas-navigation", size: size) {
             VStack {
                 Spacer()
                 HStack {
@@ -1835,9 +2093,9 @@ struct CanvasWorkspaceView: View {
                         var preview = node
                         preview.x += dragDelta.width; preview.y += dragDelta.height
                         return preview
-                    }, selectedNodeIDs: canvas.selectedNodeIds,
+                    }, projectID: canvas.activeProjectId, selectedNodeIDs: canvas.selectedNodeIds,
                         viewport: canvasContentViewport,
-                        saveStatus: canvas.saveStatus, pan: $pan, zoom: $zoom,
+                        saveStatus: .saved, saveProgress: canvas.saveProgress, pan: $pan, zoom: $zoom,
                         showMap: $showMiniMap, showEdges: $showCanvasEdges, gridSnap: $gridSnapEnabled,
                         onZoom: { target in
                             let anchor = CGPoint(x: canvasContentViewport.midX, y: canvasContentViewport.midY)
@@ -1848,14 +2106,35 @@ struct CanvasWorkspaceView: View {
                         onFit: { fitToContent(size: size) },
                         onViewportEnd: { canvas.updateViewport(pan: pan, zoom: zoom) },
                         onSave: { canvas.flushSave() },
-                        onAgent: { agentVisible = true })
+                        onAgent: { withAnimation(Anim.transition) { agentVisible = true } })
                     Spacer()
                 }
             }
             .padding(.leading, sidebarWidth + 14)
             .padding(.bottom, 16)
+            }
         }
         .frame(width: size.width, height: size.height, alignment: .topLeading)
+    }
+
+    private func connectExternalAgent() {
+        do {
+            let project = canvas.activeProjectId
+            let context = CanvasAgentContext(canvas: canvas, store: store, projectID: project)
+            let turn = try context.captureTurn(supportsTools: true)
+            let directory = try JSONEncoder().encode(turn.directory)
+            let cli = Bundle.main.bundleURL.appendingPathComponent("Contents/MacOS/clipslots-cli")
+            externalAgentContext = AgentExternalProjectContext(
+                scope: try AgentArtifactScope(projectID: project, canvasID: project),
+                projectTitle: canvas.projects.first(where: { $0.id == project })?.name ?? "当前项目",
+                selectedContext: String(decoding: directory, as: UTF8.self), cliPath: cli.path,
+                mcpReadiness: FileManager.default.isExecutableFile(atPath: cli.path)
+                    ? .ready : .unavailable("尚未找到本地命令行工具"),
+                region: "global", language: "zh-CN", snapshotID: turn.snapshotID)
+            showExternalAgent = true
+        } catch {
+            store.transientUI.showToast(error.localizedDescription)
+        }
     }
 
     @ViewBuilder var magnetGuideOverlay: some View {
@@ -1984,11 +2263,12 @@ struct CanvasWorkspaceView: View {
         fit.pan.width += sidebarWidth
         fit.pan.height += includesGroup ? 110 : 45
         settleLayoutZoom(to: fit.zoom)
-        withAnimation(Anim.transition) {
-            pan = fit.pan
-            zoom = fit.zoom
-        }
+        // Persist before opening the view animation transaction. Publishing
+        // during it forces SwiftUI to synchronously flush the new node tree.
         canvas.updateViewport(pan: fit.pan, zoom: fit.zoom)
+        if !passiveBatchFit { viewportFitAnimation = UUID() }
+        pan = fit.pan
+        zoom = fit.zoom
     }
 
     private func handleSlotDragChanged(_ payload: CanvasSlotDragPayload?, at point: CGPoint) {
@@ -2007,20 +2287,72 @@ struct CanvasWorkspaceView: View {
         guard canvasContentViewport.contains(screenPoint) else { return }
         let canvasPoint = CanvasGeometry.canvasPoint(screen: screenPoint, pan: pan, zoom: zoom)
         if payload.isGroup {
-            let slots = payload.slots.filter { !store.canvasSlotIsFree(groupId: payload.groupId, slot: $0) }
-            let map = SlotConnectionStorage.shared.load(pageId: payload.pageId, groupId: payload.groupId)
-            let imported = map.edges.enumerated().map { index, edge in
-                CanvasEdge(id: "slot-\(payload.groupId)-\(edge.id)",
+            let projectID = canvas.activeProjectId
+            let storage = store.canvasStorage(groupId: payload.groupId)
+            // Capture only in-memory state on the main thread. Cold reads may wait
+            // for a CLI writer and must not block pointer events or canvas rendering.
+            func memoryOccupied(_ slot: Int) -> Bool {
+                store.canvasSlotHasUnsavedContent(groupId: payload.groupId, slot: slot)
+            }
+            let occupied = Set(payload.slots.filter(memoryOccupied))
+            Task { @MainActor in
+                let prepared: (Set<Int>, SlotConnectionMap, [Int: SlotContent]) = await withCheckedContinuation { continuation in
+                    DispatchQueue.global(qos: .userInitiated).async {
+                        var texts: [Int: SlotContent] = [:]
+                        let diskOccupied = Set(payload.slots.filter {
+                            let content = storage.getOrUnknown($0, in: payload.groupId)
+                            if let content, content.attachments.isEmpty { texts[$0] = content }
+                            return content?.isEmpty != true
+                        })
+                        let map = SlotConnectionStorage.shared.load(pageId: payload.pageId, groupId: payload.groupId)
+                        continuation.resume(returning: (diskOccupied, map, texts))
+                    }
+                }
+                guard canvas.activeProjectId == projectID, !Task.isCancelled else { return }
+                let slots = payload.slots.filter {
+                    occupied.contains($0) || prepared.0.contains($0) || memoryOccupied($0)
+                }
+                let imported = prepared.1.edges.enumerated().map { index, edge in
+                    CanvasEdge(id: "slot-\(payload.groupId)-\(edge.id)",
                            fromNodeId: CanvasNode.makeId(groupId: payload.groupId, slot: edge.fromSlot),
                            toNodeId: CanvasNode.makeId(groupId: payload.groupId, slot: edge.toSlot),
                            createdAt: Date(timeIntervalSince1970: Double(index)),
                            sourceFromPort: edge.fromPort.rawValue, sourceToPort: edge.toPort.rawValue,
                            sourceColorID: edge.colorId)
-            }
-            if canvas.placeSlotGroup(pageID: payload.pageId, groupID: payload.groupId, slots: slots,
-                                     name: payload.name, edges: imported, at: canvasPoint) != nil {
-                _ = handleKeyAction(.fitSelection)
-                store.transientUI.showToast("已编组 \(slots.count) 个槽位，可点击组内“生成”")
+                }
+                let existing = Set(canvas.nodes.map(\.id))
+                let fresh = slots.map { CanvasNode.makeId(groupId: payload.groupId, slot: $0) }
+                    .filter { !existing.contains($0) }
+                contentSnapshots.seedText(group: payload.groupId, contents: prepared.2)
+                nodeMountQueue.enroll(fresh)
+                nodeMountQueue.admitNative(fresh.filter { id in
+                    guard let slot = slots.first(where: { CanvasNode.makeId(groupId: payload.groupId, slot: $0) == id }),
+                          let content = prepared.2[slot], let text = content.plainText else { return false }
+                    return !text.isEmpty
+                        && CanvasFanGeometry.allCardSources(attachmentIndices: [], text: text).count <= 5
+                })
+                // Native hit routing reads the latest measurements directly.
+                // The entry has fixed final geometry; no completion publication
+                // is needed merely to repeat that geometry in the workspace.
+                controlRegionBuffer.begin(duration: 0.3 + Double(fresh.count) / 60) { _ in }
+                groupMounts.prepare("batch")
+                if let placedGroup = canvas.placeSlotGroup(pageID: payload.pageId, groupID: payload.groupId, slots: slots,
+                                     name: payload.name, edges: imported, at: canvasPoint) {
+                    groupMounts.finish("batch")
+                    passiveBatchFit = !fresh.isEmpty
+                    guard canvas.activeProjectId == projectID, canvas.selectedGroupID == placedGroup.id,
+                          canvas.groups.contains(where: { $0.id == placedGroup.id }) else { return }
+                    _ = handleKeyAction(.fitSelection)
+                    passiveBatchFit = false
+                    await CanvasDisplayClock.shared.nextFrame()
+                    guard canvas.activeProjectId == projectID,
+                          canvas.groups.contains(where: { $0.id == placedGroup.id }) else { return }
+                    store.transientUI.showToast("已编组 \(slots.count) 个槽位，可点击组内“生成”")
+                } else {
+                    groupMounts.cancel("batch")
+                    nodeMountQueue.update(ids: canvas.nodes.map(\.id))
+                    controlRegionBuffer.end()
+                }
             }
             return
         }
@@ -2046,7 +2378,7 @@ struct CanvasWorkspaceView: View {
 
     /// 槽位 Label 的实时值。槽位被改名 / 删名时跟着变。
     private func liveLabel(for node: CanvasNode) -> String? {
-        store.canvasSlotLabel(groupId: node.groupId, slot: node.slot)
+        contentSnapshots.entry(node)?.label
     }
 
     /// 节点卡片顶部居中的路径标识：`页面 - 槽位组 - 槽位`（v2.11.8 二轮）。
@@ -2072,7 +2404,7 @@ struct CanvasWorkspaceView: View {
     }
 
     /// 槽位的**实时**附件列表 = 画布语境下的入参文件。
-    private func liveAttachments(for node: CanvasNode) -> [SlotContent.SlotAttachment] {
+    func liveAttachments(for node: CanvasNode) -> [SlotContent.SlotAttachment] {
         store.canvasSlotAttachments(groupId: node.groupId, slot: node.slot)
     }
 

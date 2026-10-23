@@ -28,11 +28,14 @@ final class LiveResizeMonitor: ObservableObject {
 /// 失效（避免 @State 反模式）。deinit 兜底取消，onDisappear 亦会主动取消（P2-26）。
 final class SearchDebounceHolder: ObservableObject {
     var workItem: DispatchWorkItem?
+    var scanTask: Task<Void, Never>?
     func cancel() {
         workItem?.cancel()
         workItem = nil
+        scanTask?.cancel()
+        scanTask = nil
     }
-    deinit { workItem?.cancel() }
+    deinit { workItem?.cancel(); scanTask?.cancel() }
 }
 
 struct ContentView: View {
@@ -184,6 +187,37 @@ struct ContentView: View {
     /// 不该抢走冷启动后的第一屏。刻意用 `@State` 而不是 `@AppStorage`：MVP 阶段画布还没有真正的
     /// 生图链路，把它记成「上次所在页」会让用户重开 App 直接落在一个半成品页面上。
     @State private var workspaceMode: WorkspaceMode = .edit
+    @StateObject private var workspaceTransition = WorkspaceTransition()
+
+    private func requestWorkspace(_ mode: WorkspaceMode) {
+        guard mode.isSelectable else { return }
+        if mode == workspaceMode {
+            if workspaceTransition.isSwitching && workspaceTransition.pendingMode != mode {
+                workspaceTransition.cancel()
+            }
+            return
+        }
+        AgentDraftEditor.commitFocusedDraft(sourceID: ObjectIdentifier(
+            agentSessions.sidebarSession(canvas: canvasStore, store: store)))
+        workspaceTransition.switchTo(mode, prepare: {
+            if mode == .canvas {
+                let ready = await workspaceTransition.preparation.prepare(canvas: canvasStore, store: store)
+                if !ready {
+                    store.transientUI.showToast("内容仍在更新，请稍后切换画布。")
+                }
+                return ready
+            }
+            return true
+        }, commit: {
+            if mode == .edit {
+                workspaceTransition.editorMounts.reset()
+                workspaceTransition.editorMounts.enroll((1...max(1, store.config.slots)).map(String.init))
+            }
+            var transaction = Transaction()
+            transaction.disablesAnimations = true
+            withTransaction(transaction) { workspaceMode = mode }
+        })
+    }
 
     /// 画布状态容器。用 `@StateObject` 由 ContentView 持有，生命周期与窗口一致：
     /// 切到编辑再切回画布时视口与节点都还在（若放在 `CanvasWorkspaceView` 里，视图一销毁就重置）。
@@ -191,7 +225,8 @@ struct ContentView: View {
     /// 它是**独立** ObservableObject，不挂在 `store` 上 —— 主 store 有几十个 `@Published`，
     /// 任一槽位变化都会重算整棵 body（项目已知技术债）；画布拖拽是每帧写坐标的高频操作，
     /// 一旦并进去，拖一个节点就会连带重绘标题栏与整格槽位卡片。
-    @StateObject private var canvasStore = CanvasStore()
+    @StateObject private var canvasOwner = CanvasWorkspaceOwner()
+    private var canvasStore: CanvasStore { canvasOwner.canvas }
 
     // MARK: - v2.11.8 Agent 侧栏
 
@@ -204,17 +239,16 @@ struct ContentView: View {
     /// token 级刷新被关在 `AgentSidebarView` 自己的 @ObservedObject 里。
     @StateObject private var agentSessions = AgentSessionStore.shared
 
-    /// 侧栏显隐按页面分别记忆。这里用 `@AppStorage` 而不是 `@State`（与 workspaceMode 相反）：
-    /// 侧栏是个"工作习惯"开关，不像画布那样是半成品页面，记住它没有误导风险。
-    @AppStorage(AgentPreferences.editSidebarVisibleKey) private var editAgentVisible = false
-    @AppStorage(AgentPreferences.canvasSidebarVisibleKey) private var canvasAgentVisible = false
+    /// 两个工作区显示同一个项目侧栏，切页保留显隐、展开和会话状态。
+    @AppStorage(AgentPreferences.sharedSidebarVisibleKey) private var sharedAgentVisible = false
+    @State private var canvasAgentExpanded = false
 
     private var agentSidebarVisible: Bool {
-        workspaceMode == .agent ? false : (workspaceMode == .canvas ? canvasAgentVisible : editAgentVisible)
+        workspaceMode != .agent && sharedAgentVisible
     }
 
     private var agentSidebarBinding: Binding<Bool> {
-        workspaceMode == .canvas ? $canvasAgentVisible : $editAgentVisible
+        $sharedAgentVisible
     }
 
     // v2.9.17: theme switch now takes effect instantly with no transition effect.
@@ -283,7 +317,8 @@ struct ContentView: View {
                 // 去"顶穿"上面那几行。那类偏方会让侧栏画到别人的布局里（横幅一出现就当场对不齐），
                 // 而且缺口的真正来源是"侧栏起点被上面的行往下推"，不改层级就永远治不干净。
                 if workspaceMode == .edit {
-                    headerTitleSection
+                    WorkspaceSectionAdmission(admission: workspaceTransition.sections.admission(for: "0-title"),
+                                              height: 104) { headerTitleSection }
                 }
 
                 // ★ v2.10.93（resize 丝滑第二刀）：这里原来是一个包住整个网格的 `GeometryReader`，
@@ -333,7 +368,8 @@ struct ContentView: View {
                     // 侧栏因此从标题栏下沿一路贴到底，头顶不再有缺口。
                     VStack(spacing: 0) {
                         if workspaceMode == .edit {
-                            editHeaderRows
+                            WorkspaceSectionAdmission(admission: workspaceTransition.sections.admission(for: "1-actions"),
+                                                      height: 100) { editHeaderRows }
                         }
 
                         Group {
@@ -341,11 +377,15 @@ struct ContentView: View {
                             case .canvas:
                                 CanvasWorkspaceView(store: store,
                                                     canvas: canvasStore,
-                                                    agentVisible: $canvasAgentVisible)
+                                                    agentVisible: $sharedAgentVisible,
+                                                    snapshots: workspaceTransition.preparation.snapshots,
+                                                    entryPrepared: true,
+                                                    isWorkspaceTransitioning: { workspaceTransition.isSwitching },
+                                                    textSurfacePool: workspaceTransition.preparation.textSurfaces,
+                                                    sectionMounts: workspaceTransition.sections)
                                     // 画布延伸到窗口 chrome：`fullSizeContentView`
                                     // 让内容铺到窗口顶边、标题栏不再切走那 28pt。见 CanvasChromePin
                                     // （含「哪些项 SwiftUI 会抢、只能用它的开关」的实测记录）。
-                                    .background(CanvasWindowAppearancePin().frame(width: 0, height: 0))
                                     // V2.17.4: 画布和面板使用同一套动态外观，不覆盖应用的深浅偏好。
                                     // ★ v2.16.1：标题栏那层浅色材质要用 SwiftUI 的开关关掉，
                                     // 手写 `titlebarAppearsTransparent` 会被 SwiftUI 每帧刷回去
@@ -356,10 +396,14 @@ struct ContentView: View {
                             case .edit:
                                 editWorkspace
                             case .agent:
-                                AgentWorkspaceView(sessions: agentSessions, canvas: canvasStore, store: store)
+                                editWorkspace
                             }
                         }
                         .animation(nil, value: workspaceMode)
+                        if workspaceMode == .edit {
+                            WorkspaceSectionAdmission(admission: workspaceTransition.sections.admission(for: "2-footer"),
+                                                      height: 48) { bottomBar }
+                        }
                     }
                     // ★ v2.11.7 hotfix24: 给工作区一条最小宽度，并把它的布局优先级抬到侧栏之上。
                     //
@@ -374,38 +418,38 @@ struct ContentView: View {
                     //
                     // hotfix25 起这条 minWidth 落在**整个左列**（含操作行）上而不只是工作区，语义正好：
                     // 左列有多宽，操作行和卡片网格就有多宽。
-                    .frame(minWidth: workspaceMode == .canvas
+                    .frame(minWidth: canvasAgentExpanded ? 0 : workspaceMode == .canvas
                            ? WindowLayoutMetrics.canvasViewportMinWidth
                            : WindowLayoutMetrics.editWorkspaceMinWidth)
+                    .frame(width: canvasAgentExpanded ? 0 : nil)
+                    .clipped()
+                    .opacity(canvasAgentExpanded ? 0 : 1)
+                    .allowsHitTesting(!canvasAgentExpanded)
                     .layoutPriority(1)
 
                     if agentSidebarVisible {
-                        AgentSidebarView(model: workspaceMode == .canvas
-                                         ? agentSessions.canvasSession(canvas: canvasStore, store: store)
-                                         : agentSessions.session(for: workspaceMode),
+                        AgentSidebarView(model: agentSessions.sidebarSession(canvas: canvasStore, store: store),
                                          isVisible: agentSidebarBinding, workspaceMode: workspaceMode,
-                                         legacyCanvasModel: workspaceMode == .canvas ? agentSessions.canvas : nil)
-                            .id(workspaceMode == .canvas ? canvasStore.activeProjectId : workspaceMode.rawValue)
+                                         isExpanded: canvasAgentExpanded,
+                                         onToggleExpanded: {
+                                             canvasAgentExpanded.toggle()
+                                         },
+                                         legacyCanvasModel: agentSessions.canvas,
+                                         legacyEditModel: agentSessions.edit,
+                                         entryMounts: workspaceTransition.sidebarMounts)
                             .ignoresSafeArea(.container, edges: workspaceMode == .canvas ? .top : [])
                             .transition(.move(edge: .trailing))
                             // 侧栏自己是定宽的，这里再声明一次「不许被压」：没有它，SwiftUI 仍可能
                             // 在总宽不足时给它一个更小的提案，让 320pt 的内容溢出到工作区上面。
-                            .fixedSize(horizontal: true, vertical: false)
+                            .fixedSize(horizontal: !canvasAgentExpanded, vertical: false)
                             .layoutPriority(0)
                     }
                 }
+                .modifier(WorkspaceViewportBoundary())
                 // ★ v2.11.7 hotfix21→22: 这里曾挂过一份「画布模式专用」的浮动切换器。
                 // 已删除 —— 两份实例就是两套落位，正是「切页时胶囊会跑」的来源。
                 // 现在只有内容区根节点上那唯一一份（见 workspaceModeSwitcherPinned）。
 
-                // ★ v2.11.7 hotfix17: 底栏只在编辑模式保留。
-                //
-                // 上一版为了避免「切模式时内容区高度跳变」把它一直留着，但它整条都是槽位语义
-                // （保存/粘贴/圆盘/切组/上次粘贴），在画布上没有一个是可用动作。高度跳变的代价
-                // 由「切换本身是瞬时无动画」吸收掉了，不值得为它牺牲画布的全屏纯净。
-                if workspaceMode == .edit {
-                    bottomBar
-                }
             }
             .background(
                 // ★ v2.10.91 (perf 第四轮): 整窗氛围层改为「显式传入主题 + EquatableView 短路」。
@@ -450,6 +494,9 @@ struct ContentView: View {
             // 挂在内容区这棵 VStack 的顶边（两个模式共用的同一个几何原点），所以它的落位与
             // 「当前是编辑还是画布」「搜索框在不在」「Agent 侧栏开没开」全都无关 —— 不是"算得准"，
             // 是**没有第二个位置可算**。切页时它连一次 relayout 都不会发生，只有段内选中背景在滑。
+            .overlay {
+                WorkspaceLoadingSurface(transition: workspaceTransition)
+            }
             .overlay(alignment: .top) { workspaceModeSwitcherPinned }
 
             // v2.10.52 (perf 第四批 · 巨型 @Published Store 拆分): Toast / 浮层提示改由独立子视图
@@ -487,15 +534,32 @@ struct ContentView: View {
             .zIndex(200)
 
         }
-        // ★ v2.16.1：窗口标题按模式取值。
-        //
-        // 画布模式要空标题（TapNow 顶边只有红绿灯，`titleVisibility = .hidden` 会被 SwiftUI
-        // 刷回去，得从 title 本身下手）；但**不能只在画布分支里设**——那样切回编辑模式后
-        // SwiftUI 保留最后一次的值，窗口就永远没名字了（实测：进过一次画布之后窗口标题一直是
-        // 空的，窗口菜单与调度中心里都是无名窗口）。所以放在根上，两种模式各给一个值。
-        .navigationTitle(workspaceMode == .canvas ? "" : "ClipSlots")
+        // Extend the content, not just its background, through the native titlebar safe area.
+        // This also gives the loading surface the full window rectangle during workspace switches.
+        .ignoresSafeArea(.container, edges: .top)
+        .navigationTitle("")
+        .toolbarBackground(.hidden, for: .windowToolbar)
+        .background(CanvasWindowAppearancePin().frame(width: 0, height: 0))
+        .overlay(alignment: .top) {
+            MainWindowDragRegion(leadingControlsWidth: workspaceMode == .canvas
+                ? CanvasSlotLibraryPanel.width(expanded: canvasStore.isLibraryExpanded) : 90)
+                .frame(height: 28)
+                .ignoresSafeArea(.container, edges: .top)
+        }
+        .onChange(of: sharedAgentVisible) { visible in
+            if !visible { canvasAgentExpanded = false }
+        }
         .onAppear {
+            AgentPreferences.migrateSidebarVisibility()
             AppearanceDefaults.ensureDefaultLightIfNeeded()
+            #if DEBUG
+            WorkspaceMotionProbe.schedule(store: store, canvas: canvasStore, transition: workspaceTransition,
+                                          mode: { workspaceMode }, request: { requestWorkspace($0) })
+            MainWindowChromeRegression.schedule(store: store, canvas: canvasStore,
+                mode: { workspaceMode }, request: { requestWorkspace($0) },
+                ready: { !workspaceTransition.isSwitching },
+                expanded: { canvasAgentExpanded }, toggleExpanded: { canvasAgentExpanded.toggle() })
+            #endif
         }
         // v2.9.12: Cmd+, / "设置…" menu opens the in-app overlay.
         // v2.10.91: 显隐与「热键安全区」标志的同步统一由 store.setSettingsOverlay 负责。
@@ -506,8 +570,8 @@ struct ContentView: View {
         // 只有 PerfAutoTest 的 narrowshot 场景会发这条通知（见 main.swift 的通知名声明处）。
         .onReceive(NotificationCenter.default.publisher(for: .setWorkspaceMode)) { note in
             guard let raw = note.userInfo?["mode"] as? String,
-                  let mode = WorkspaceMode(rawValue: raw) else { return }
-            workspaceMode = mode
+                  let mode = WorkspaceMode(rawValue: raw), mode.isSelectable else { return }
+            requestWorkspace(mode)
         }
         // v2.6.7: Import options sheet
         .sheet(item: $store.pendingImportSelection) { selection in
@@ -559,6 +623,7 @@ struct ContentView: View {
         .onReceive(NotificationCenter.default.publisher(for: .closeInAppSettings)) { _ in
             store.setSettingsOverlay(false)
         }
+        .onDisappear { workspaceTransition.cancel() }
         // v2.11.7: 皮肤切换 → 换身份 → 整棵树按新皮肤重建（理由见 appSkinRaw 的声明处）。
         // 放在链尾是刻意的：`.id` 之后再挂修饰符会让那些修饰符落在「新身份」之外，
         // 切皮肤时不跟着重建。
@@ -641,7 +706,9 @@ struct ContentView: View {
                     ForEach(Array(stride(from: 1, through: store.config.slots, by: 1)), id: \.self) { slot in
                         // v2.10.73（方案③）：卡片身份改回 `.id(slot)`——切组/切页时复用卡片、不整格
                         // 重建（流畅）；缩略图正确性由 SlotThumbnailView 观察 ThumbnailProvider 保证。
-                        slotCardView(slot: slot)
+                        EditorCardAdmission(admission: workspaceTransition.editorMounts.admission(for: String(slot))) {
+                            slotCardView(slot: slot)
+                        }
                             .id(slot)
                     }
                 }
@@ -655,6 +722,7 @@ struct ContentView: View {
                 // 重新求值。视觉与 v2.10.71 完全一致（0.35 透明度 + 0.16s easeInOut，无全网格模糊）。
                 .modifier(GroupSwitchDimModifier(ui: store.transientUI))
                 }
+                .background(ScrollTrackAutoFade().frame(width: 0, height: 0))
             }
             .background(AppTheme.windowBackground)
             .transaction { $0.animation = nil }
@@ -700,7 +768,7 @@ struct ContentView: View {
     /// 露出一块色差方块；画布模式它压在网格线上，不垫底会透出格线，读起来像控件坏了。
     /// 注意底板是 `.background`，不参与布局 —— 加不加都不影响那颗胶囊的落位。
     private var workspaceModeSwitcherPinned: some View {
-        WorkspaceModeSwitcher(selection: $workspaceMode)
+        WorkspaceModeSwitcher(selection: Binding(get: { workspaceMode }, set: { requestWorkspace($0) }))
             .background {
                 if workspaceMode == .canvas {
                     RoundedRectangle(cornerRadius: 10, style: .continuous)
@@ -871,46 +939,21 @@ struct ContentView: View {
         // 于是「胶囊压住控件」「两簇被裁」都变成构造上不可能。
         CenterReservedRow(centerWidth: WorkspaceModeSwitcher.preferredWidth) {
             // 左簇：logo + 标题/检查更新 + 两个拨杆。
+            WorkspaceSectionAdmission(admission: workspaceTransition.sections.admission(for: "0-title-left"),
+                                      width: 400, height: 68) {
             HStack(spacing: 14) {
             HStack(spacing: 14) {
                 ZStack {
-                // 两种皮肤的 logo **共用同一个 46×46pt 的盒子**（见下方 `.frame`），可见图形
-                // 也都收敛到 ~40pt，所以标题「ClipSlots」的水平起点在两种皮肤下完全一致，
-                // 切皮肤时右侧整块文字不会横向位移。
-                //
-                // v2.11.7 hotfix2: 简洁模式直接展示 App 真实图标（白底 squircle + 黑色三叠石），
-                // 无底板 / 无描边 / 无投影 —— 上一轮给它套的中性灰底板在浅色简洁界面里
-                // 变成了一个「大白按钮」，看着像可点击的控件，而它其实只是个 logo。
-                //
-                // 图标从运行时的 `NSApp.applicationIconImage` 取，而不是 `Image("AppIcon")`：
-                // 本项目的图标是 `assets/AppIcon.icns` 在打包时拷进 bundle Resources 的（没有
-                // Assets.xcassets 目录，SwiftUI 按名字查资源目录会拿不到），而 applicationIconImage
-                // 读的就是当前 bundle 已注册的那份，换图标后自动跟着变，不会漏更新。
-                //
-                // 尺寸账（务必先量再改）：`frame` 给图标的是**画布**边长，不是可见图案边长。
-                // 量过 assets/AppIcon.png（1024 画布）——白色 squircle 底板实际只有 824px，
-                // 即画布的 80.5%（余下是 macOS 图标规范的透明安全边 + 投影空间）。所以想让
-                // 可见底板落在 40pt，画布要给 40 / 0.805 ≈ 50pt。
-                //
-                // hotfix2d：多彩模式的渐变块从 44pt 收到 40pt。它是**实心铺满**的，44pt 时
-                // 可见面积明显大于简洁模式的图标，把标题往右顶得更远，整个 header 显得臃肿。
-                if AppTheme.isMinimalSkin {
-                    Image(nsImage: NSApp.applicationIconImage)
-                        .resizable()
-                        .interpolation(.high)
-                        .frame(width: 50, height: 50)
-                } else {
-                    RoundedRectangle(cornerRadius: 11, style: .continuous)
-                        .fill(AppTheme.chromeAccentTile)
-                        .frame(width: 40, height: 40)
-                        .shadow(color: AppTheme.chromeAccentTileShadow, radius: 9, y: 3)
-
-                    Image(systemName: "rectangle.stack.fill")
-                        .font(.system(size: 18, weight: .semibold))
-                        .foregroundColor(AppTheme.chromeAccentTileInk)
+                // The transparent raster reserves room for hover and dangling
+                // feet. Its visible silhouette matches the supplied header
+                // reference; the shared layout keeps both themes aligned.
+                HeaderMascotView(model: agentSessions.sidebarSession(canvas: canvasStore, store: store),
+                                 canvas: canvasStore) {
+                    sharedAgentVisible.toggle()
                 }
+                .frame(width: HeaderMascotView.canvasSide, height: HeaderMascotView.canvasSide)
             }
-            .frame(width: 46, height: 46)
+            .frame(width: 54, height: 68)
 
             VStack(alignment: .leading, spacing: 4) {
                 Text("ClipSlots")
@@ -949,6 +992,7 @@ struct ContentView: View {
                 .fixedSize(horizontal: true, vertical: false)
                 .layoutPriority(2)
             }
+            }
             // 左簇整体贴左：`CenterReservedRow` 给它的槽位是「整行的左半」，比它实际需要的宽，
             // 多出来的部分必须留在右侧（靠近中线那一侧），否则 logo 会往中间飘。
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -963,6 +1007,8 @@ struct ContentView: View {
             // 现在：搜索栏去掉 `minWidth: 0`（让它如实上报窄变体的最小宽度），图标簇补上 fixedSize
             // 与高优先级。两者的最小宽度之和会被 CenterReservedRow 上报为整行下限。
             HStack(spacing: 8) {
+            WorkspaceSectionAdmission(admission: workspaceTransition.sections.admission(for: "0-title-search"),
+                                      width: 232, height: 68) {
             SlotSearchBar(
                 searchText: $searchText,
                 selectedFilter: $selectedFilter,
@@ -977,7 +1023,10 @@ struct ContentView: View {
             // 写死一个更小的 minWidth（哪怕 80）只会让它再次被压到内容溢出、菜单叠到图标底下。
             .frame(idealWidth: 400, maxWidth: 400)
             .layoutPriority(0)
+            }
 
+            WorkspaceSectionAdmission(admission: workspaceTransition.sections.admission(for: "0-title-tools"),
+                                      width: 192, height: 68) {
             HStack(spacing: 8) {
                 AppAppearanceButton()
 
@@ -985,17 +1034,17 @@ struct ContentView: View {
             // 放在这簇的最左（紧跟外观）而不是最右：右侧末位是「设置」，那是全局配置的固定位置，
             // 十几个版本没变过，插在它后面会让肌肉记忆失效。
             Button {
-                withAnimation(Anim.transition) { editAgentVisible.toggle() }
+                withAnimation(Anim.transition) { sharedAgentVisible.toggle() }
             } label: {
                 Image(systemName: "sparkles")
                     .font(.system(size: 14, weight: .semibold))
                     // 展开时用主题色点亮，收起时和邻居一样是中性墨色——这枚图标是**有状态**的
                     // （侧栏开/关），必须能从图标本身读出来，否则用户只能靠侧栏是否可见去反推。
-                    .foregroundColor(editAgentVisible ? AppTheme.chromeAccentInk : Neu.ink)
+                    .foregroundColor(sharedAgentVisible ? AppTheme.chromeAccentInk : Neu.ink)
                     .neuIconTile()
             }
             .buttonStyle(.plain)
-            .help(editAgentVisible ? "收起 Agent 侧栏" : "打开 Agent 侧栏")
+            .help(sharedAgentVisible ? "收起 Agent 侧栏" : "打开 Agent 侧栏")
 
             // v2.9.8: 插件入口（月亮与键盘图标之间）
             Button {
@@ -1056,6 +1105,7 @@ struct ContentView: View {
             .fixedSize(horizontal: true, vertical: false)
             .layoutPriority(2)
             }
+            }
             // 右簇整体贴右：多出来的空间留在左侧（靠近中线那一侧）。
             .frame(maxWidth: .infinity, alignment: .trailing)
         }
@@ -1115,6 +1165,9 @@ struct ContentView: View {
 
             AutoAdvanceToggleView(autoMode: autoMode)
 
+            if store.isSlotConnectionEnabled {
+                connectionToolButton
+            }
             toolbarActions
         }
         .frame(minHeight: 36, alignment: .center)
@@ -1366,9 +1419,10 @@ struct ContentView: View {
 
     // v2.4: renamed from specialSlotTagBar — shows only current page's slot groups
     private var specialSlotTagBar: some View {
-        ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 6) {
-                ForEach(store.currentPageSlotGroups) { group in
+        let pageGroups = store.currentPageSlotGroups
+        return ScrollView(.horizontal, showsIndicators: false) {
+            LazyHStack(spacing: 6) {
+                ForEach(pageGroups) { group in
                     let isCurrent = group.id == store.currentSpecialSlotId
 
                     // v2.10.77: 组切换 tab 加入按压微缩 / hover 高亮 / 选中态平滑过渡，
@@ -1382,7 +1436,7 @@ struct ContentView: View {
                         } label: {
                             Label("重命名", systemImage: "pencil")
                         }
-                        if store.currentPageSlotGroups.count > 1 {
+                        if pageGroups.count > 1 {
                             Button(role: .destructive) {
                                 store.deleteSpecialSlotWithConfirmation(id: group.id)
                             } label: {
@@ -1404,8 +1458,8 @@ struct ContentView: View {
                         .neuRaised(radius: NeumorphicMetrics.actionRadius)
                 }
                 .buttonStyle(.plain)
-                .disabled(store.currentPageSlotGroups.count >= store.specialSlotSettings.maxSpecialSlots)
-                .help(store.currentPageSlotGroups.count >= store.specialSlotSettings.maxSpecialSlots
+                .disabled(pageGroups.count >= store.specialSlotSettings.maxSpecialSlots)
+                .help(pageGroups.count >= store.specialSlotSettings.maxSpecialSlots
                       ? "当前页面的槽位组数量已达到上限" : "新建槽位组")
 
                 Button {
@@ -1422,6 +1476,7 @@ struct ContentView: View {
                 .help("管理槽位组")
             }
         }
+        .frame(height: NeumorphicMetrics.actionHeight)
         .perfCount("groupTagBar.body")
     }
 
@@ -1617,19 +1672,14 @@ struct ContentView: View {
                 .fixedSize()
                 .help("当前版本 v\(AppVersion.current)\n首次打开 ClipSlots.app 时，macOS 可能提示“无法验证开发者”，请右键点击 App → 选择「打开」→ 点击「打开」确认即可。")
 
-            // Connection stays as a separate tool and is moved to the right side.
-            // v2.9.24: 当「槽位连接」开关关闭时，底部「连接」入口按钮彻底隐藏（不占位）。
-            if store.isSlotConnectionEnabled {
-                connectionToolButton
-            }
-            // v2.9.22: 版本号已迁移到左上角「检查更新」按钮右侧，底部不再重复展示。
         }
         .padding(.horizontal, AppTheme.pagePadding)
-        .padding(.vertical, 11)
-        .background(.regularMaterial)
-        .overlay(alignment: .top) {
-            Divider()
-        }
+        .padding(.vertical, 8)
+        .background(HeaderSurfaceBackground())
+        .accessibilityIdentifier("slot-workspace-footer")
+        #if DEBUG
+        .background(MainWindowChromeRegression.SurfaceBounds(.footer))
+        #endif
         .perfCount("bottomBar.body")
     }
 
@@ -1684,6 +1734,10 @@ struct ContentView: View {
         }
         .buttonStyle(.borderless)
         .fixedSize()
+        .accessibilityIdentifier("slot-connection-entry")
+        #if DEBUG
+        .background(MainWindowChromeRegression.SurfaceBounds(.connection))
+        #endif
     }
 
     private var connectionMenuLabel: some View {
@@ -1926,6 +1980,7 @@ struct ContentView: View {
         // 现在任何一次重算入口都会作废在途搜索。
         store.globalSearchGeneration += 1
         let searchToken = store.globalSearchGeneration
+        searchDebounce.scanTask?.cancel()
 
         guard scope == .global, SlotSearchMatcher.isActive(query: query, filter: filter) else {
             // v2.10.91 (perf): @State 赋值一律触发视图失效，即便赋的是同一个空数组。
@@ -1945,12 +2000,14 @@ struct ContentView: View {
         // 连同 filter + sort 一起移到后台队列。大库全局搜索不再卡主线程。
         let groupRefs = store.searchableGroupsSnapshot()
 
-        DispatchQueue.global(qos: .userInitiated).async {
+        searchDebounce.scanTask = Task.detached(priority: .userInitiated) {
             // Heavy per-slot expansion + cross-page filter + sort all run off the main thread.
             // hotfix11: 匹配已下沉进 expandSearchableSlots（先扫磁盘匹配、命中后才补齐完整内容，
             // 见该方法注释）。这里拿到的已经是命中集，filterAndSortGlobalSearch 的再次 filter
             // 是幂等的，保留它是为了不动既有的排序 / 上下文加权路径。
-            let all = SlotStoreObservable.expandSearchableSlots(groupRefs, query: query, filter: filter)
+            let all = SlotStoreObservable.expandSearchableSlots(groupRefs, query: query, filter: filter,
+                                                               isCancelled: { Task.isCancelled })
+            guard !Task.isCancelled else { return }
             let results = ContentView.filterAndSortGlobalSearch(
                 all: all,
                 query: query,
@@ -1959,7 +2016,8 @@ struct ContentView: View {
                 currentPageId: currentPageId,
                 currentSpecialSlotId: currentSpecialSlotId
             )
-            DispatchQueue.main.async {
+            guard !Task.isCancelled else { return }
+            await MainActor.run {
                 // Stale-query guard: only apply if no newer recompute was scheduled.
                 guard store.globalSearchGeneration == searchToken else { return }   // P1-4
                 // P2-7 (v2.10.6): 智能排序在后台搜索开始时捕获了当时的当前页/组，

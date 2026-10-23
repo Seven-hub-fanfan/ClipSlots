@@ -2,8 +2,7 @@ import SwiftUI
 import AppKit
 import ClipSlotsKit
 
-/// Canvas-only palette. Colorful light retains its colors; both dark skins
-/// resolve to the exact same neutral values without changing editor/Agent colors.
+/// Both skins share canvas surfaces; node accents retain the selected theme.
 enum CanvasSkin {
     static var colorful: Bool { TapSkin.colorful }
     static func tone(_ light: UInt32, _ dark: UInt32) -> Color { TapSkin.tone(light, dark) }
@@ -24,18 +23,19 @@ enum CanvasSkin {
         case .slot, .batchTemplate: return tone(0xa86b18, 0xf0f1f4)
         }
     }
-    static var void: Color { tone(colorful ? 0xf1f3f9 : 0xf3f3f3, 0x080808) }
-    static var gridDot: Color { tone(colorful ? 0xc2c7d6 : 0xc7c7c7, 0x404040) }
+    static var void: Color { tone(0xf3f3f3, 0x080808) }
+    static var gridDot: Color { tone(0xc7c7c7, 0x404040) }
     static var cardEmptyFill: Color { tone(0xffffff, 0x1f1f1f) }
-    static var cardEmptySelectedFill: Color { tone(colorful ? 0xf3f4ff : 0xf9f9f9, 0x292929) }
+    static var cardEmptySelectedFill: Color { tone(0xf9f9f9, 0x292929) }
     static var cardEmptyGlyph: Color { faintInk }
     static var tagInk: Color { secondaryInk }
     static var tagInkActive: Color { ink }
-    static var edgeInk: Color { TapSkin.edgeInk }
+    static var edgeInk: Color { tone(0x999999, 0xffffff).opacity(0.376) }
+    static var edgePreviewInk: Color { tone(0x77777d, 0xb1b1b7) }
     static var edgeInkActive: Color { accent }
-    static var portStroke: Color { secondaryInk }
-    static var portStrokeActive: Color { accent }
-    static var chromeFill: Color { tone(colorful ? 0xfefeff : 0xfefefe, 0x222222) }
+    static var portStroke: Color { tone(0x7a7a7a, 0x7a7a7a) }
+    static var portStrokeActive: Color { tone(0x252525, 0xf5f5f5) }
+    static var chromeFill: Color { tone(0xfefefe, 0x222222) }
     static var chromeInk: Color { ink }
     static var chromeInkDim: Color { secondaryInk }
     static var chromeDivider: Color { border }
@@ -47,7 +47,7 @@ enum CanvasSkin {
     static var menuSectionInk: Color { secondaryInk }
     static let gridStep = CanvasReplicaGeometry.gridStep
     static let gridDotSize = TapSkin.gridDotSize
-    static let cardRadius = TapSkin.cardRadius
+    static let cardRadius: CGFloat = 16
     static let cardEmptyGlyphSize = TapSkin.cardEmptyGlyphSize
     static let tagFontSize = TapSkin.tagFontSize
     static let tagGlyphSize = TapSkin.tagGlyphSize
@@ -56,10 +56,10 @@ enum CanvasSkin {
     static let edgeWidth = TapSkin.edgeWidth
     static let edgeWidthActive = TapSkin.edgeWidthActive
     static let edgeHitSlop = TapSkin.edgeHitSlop
-    static let portDiameter = TapSkin.portDiameter
-    static let portOffset = TapSkin.portOffset
-    static let portStrokeWidth = TapSkin.portStrokeWidth
-    static let portGlyphSize = TapSkin.portGlyphSize
+    static let portDiameter: CGFloat = 24
+    static let portOffset: CGFloat = 37
+    static let portStrokeWidth: CGFloat = 2
+    static let portGlyphSize: CGFloat = 14
     static let toolbarHeight = TapSkin.toolbarHeight
     static let titlebarInset = TapSkin.titlebarInset
     static let toolbarRadius = TapSkin.toolbarRadius

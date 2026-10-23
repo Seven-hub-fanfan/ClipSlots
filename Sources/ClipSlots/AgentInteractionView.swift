@@ -53,7 +53,12 @@ struct AgentInteractionView: View {
                     .disabled(!request.accepts(result))
                     .accessibilityIdentifier("agent-submit-answers")
             } else {
-                if let command = request.params["command"]?.stringValue {
+                if let title = request.params["title"]?.stringValue {
+                    Text(title).font(.system(size: 12, weight: .medium)).textSelection(.enabled)
+                    if let preview = request.params["preview"]?.stringValue, !preview.isEmpty {
+                        Text(preview).font(.system(size: 12)).textSelection(.enabled)
+                    }
+                } else if let command = request.params["command"]?.stringValue {
                     Text(command).font(.system(size: 12, design: .monospaced)).textSelection(.enabled)
                 }
                 if let cwd = request.params["cwd"]?.stringValue {

@@ -90,11 +90,16 @@ struct CanvasGenerateButton: View {
 /// 末尾的历史记录同理是一次性动作（开关一个面板），所以也不进 `CanvasTool` 枚举 ——
 /// 那个枚举的语义是"当前处于哪种指针模式"，塞一个面板开关进去会让 `activeTool` 变成一个
 /// 既表示模式又表示面板的四不像。
-struct CanvasFloatingToolbar: View {
+struct CanvasFloatingToolbar: View, Equatable {
     private typealias AppTheme = CanvasTheme
-    @ObservedObject var canvas: CanvasStore
+    let canvas: CanvasStore
+    let activeTool: CanvasTool
     @Binding var isHistoryOpen: Bool
     let onPickSlot: () -> Void
+    static func == (lhs: Self, rhs: Self) -> Bool {
+        lhs.canvas === rhs.canvas && lhs.activeTool == rhs.activeTool
+            && lhs.isHistoryOpen == rhs.isHistoryOpen
+    }
 
     var body: some View {
         HStack(spacing: 2) {
@@ -103,7 +108,7 @@ struct CanvasFloatingToolbar: View {
                     separator
                     toolButton(tool, isActive: false) { onPickSlot() }
                 } else {
-                    toolButton(tool, isActive: canvas.activeTool == tool) {
+                    toolButton(tool, isActive: activeTool == tool) {
                         canvas.activeTool = tool
                     }
                 }

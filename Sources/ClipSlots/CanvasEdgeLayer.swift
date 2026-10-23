@@ -3,7 +3,7 @@ import AppKit
 import ClipSlotsKit
 
 /// Static edges, command previews and flow all stay below the node layer.
-/// Only connected edge leaves observe handle motion; Core Animation drives flow.
+/// Existing edges use fixed node handles; magnetic plus motion is visual only.
 struct CanvasEdgeLayer: View {
     let edges: [CanvasEdge]
     let frames: [String: CGRect]
@@ -30,12 +30,6 @@ struct CanvasEdgeLayer: View {
                         isSelected: edge.id == selectedEdgeId,
                         endpointSelected: selectedNodeIDs.contains(edge.fromNodeId) || selectedNodeIDs.contains(edge.toNodeId),
                         isFlowing: isFlowing(edge), zoom: zoom,
-                        outputVisible: visibleOutputIDs.contains(edge.fromNodeId),
-                        inputVisible: visibleInputIDs.contains(edge.toNodeId),
-                        sourceFrozen: frozenOutputPoints[edge.fromNodeId],
-                        targetFrozen: frozenInputPoints[edge.toNodeId],
-                        fromMotion: portMotions.motion(nodeID: edge.fromNodeId, output: true),
-                        toMotion: portMotions.motion(nodeID: edge.toNodeId, output: false),
                         roleOptions: roleOptions(edge),
                         onSelect: { onSelect(edge.id) },
                         onSetRole: { onSetRole(edge.id, $0) },
@@ -54,12 +48,6 @@ private struct CanvasEdgeShapeView: View {
     let endpointSelected: Bool
     let isFlowing: Bool
     let zoom: CGFloat
-    let outputVisible: Bool
-    let inputVisible: Bool
-    let sourceFrozen: CGPoint?
-    let targetFrozen: CGPoint?
-    @ObservedObject var fromMotion: CanvasPortMotion
-    @ObservedObject var toMotion: CanvasPortMotion
     let roleOptions: [CanvasEdgeRole]
     let onSelect: () -> Void
     let onSetRole: (CanvasEdgeRole) -> Void
@@ -67,12 +55,8 @@ private struct CanvasEdgeShapeView: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
-        let sourceOffset = fromMotion.presentationOffset(output: true)
-        let targetOffset = toMotion.presentationOffset(output: false)
-        let start = sourceFrozen ?? CGPoint(x: fromRect.maxX + (outputVisible ? CanvasSkin.portOffset + sourceOffset.x : 0),
-                            y: fromRect.midY + (outputVisible ? sourceOffset.y : 0))
-        let end = targetFrozen ?? CGPoint(x: toRect.minX + (inputVisible ? -CanvasSkin.portOffset + targetOffset.x : 0),
-                          y: toRect.midY + (inputVisible ? targetOffset.y : 0))
+        let start = CanvasEdgeGeometry.connectionAnchor(of: fromRect, output: true, zoom: zoom)
+        let end = CanvasEdgeGeometry.connectionAnchor(of: toRect, output: false, zoom: zoom)
         let c = CanvasEdgeGeometry.controlPoints(start: start, end: end, outSide: .right, inSide: .left,
                                                  coordinateScale: zoom)
         let curve = CanvasEdgeCurve(start: start, c1: c.0, c2: c.1, end: end)
@@ -88,8 +72,6 @@ private struct CanvasEdgeShapeView: View {
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                     .allowsHitTesting(false)
             }
-            CanvasEdgeArrow(start: start, c1: c.0, c2: c.1, end: end, size: 8 * zoom)
-                .fill(ink).allowsHitTesting(false)
             if let badge = edge.role.badgeText {
                 Text(badge).font(.system(size: 9.5, weight: .medium))
                     .foregroundColor(CanvasSkin.chromeInk)
@@ -254,8 +236,8 @@ struct CanvasLinkDragPreview: View {
                                                  inSide: fromInput ? .right : .left,
                                                  coordinateScale: zoom)
         CanvasEdgeCurve(start: start, c1: c.0, c2: c.1, end: cursor)
-            .stroke(hasTarget ? CanvasSkin.edgeInkActive : CanvasSkin.edgeInk,
-                    style: StrokeStyle(lineWidth: 2.5 * zoom, lineCap: .round))
+            .stroke(CanvasSkin.edgePreviewInk,
+                    style: StrokeStyle(lineWidth: zoom, lineCap: .butt))
             .allowsHitTesting(false)
     }
 }
@@ -277,20 +259,22 @@ struct CanvasMovingLinkPreview: View {
 struct CanvasPort: View {
     let isActive: Bool
     let isConnected: Bool
+    var zoom: CGFloat = 1
     var body: some View {
+        let ink = isActive ? CanvasSkin.portStrokeActive : CanvasSkin.portStroke
         ZStack {
-            Circle().fill(CanvasSkin.void)
-            Circle().stroke(isActive ? CanvasSkin.portStrokeActive : CanvasSkin.portStroke,
-                            lineWidth: CanvasSkin.portStrokeWidth)
-            if isConnected {
-                Circle().fill(isActive ? CanvasSkin.portStrokeActive : CanvasSkin.portStroke)
-                    .frame(width: CanvasSkin.portDiameter * 0.3, height: CanvasSkin.portDiameter * 0.3)
-            } else {
-                Image(systemName: "plus").font(.system(size: CanvasSkin.portGlyphSize, weight: .medium))
-                    .foregroundColor(isActive ? CanvasSkin.portStrokeActive : CanvasSkin.portStroke)
-            }
+            Circle().strokeBorder(ink, lineWidth: CanvasSkin.portStrokeWidth * zoom)
+            Path { path in
+                let center = CanvasSkin.portDiameter * zoom / 2
+                let arm = 5 * zoom
+                path.move(to: CGPoint(x: center - arm, y: center))
+                path.addLine(to: CGPoint(x: center + arm, y: center))
+                path.move(to: CGPoint(x: center, y: center - arm))
+                path.addLine(to: CGPoint(x: center, y: center + arm))
+            }.stroke(ink, style: StrokeStyle(lineWidth: 2 * zoom, lineCap: .round))
         }
-        .frame(width: CanvasSkin.portDiameter, height: CanvasSkin.portDiameter)
-        .frame(width: 32, height: 32).contentShape(Circle()).help("点击新建，或拖动连到另一个节点")
+        .frame(width: CanvasSkin.portDiameter * zoom, height: CanvasSkin.portDiameter * zoom)
+        .animation(.timingCurve(0.4, 0, 0.2, 1, duration: 0.15), value: isActive)
+        .contentShape(Circle()).help("点击新建，或拖动连到另一个节点")
     }
 }

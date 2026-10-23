@@ -64,16 +64,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// 但任何在求值期读 appearance 的地方都会拿到错的档（这正是 hotfix6 修的
     /// 「新开 App 工具栏漂浮」）。阴影 token 已改成动态色从根上免疫，这里再把时序也修正一次：
     /// 两道保险，且顺带让首帧的 AppKit 界面（菜单栏、弹窗）就是对的。
-    /// 把主窗口的标题栏样式**钉死成 macOS 标准样式**，与皮肤无关。
-    ///
-    /// 用户报「多彩模式有标题栏、切到简洁模式标题栏就没了，界面变成无边框悬浮窗」。
-    /// 代码里没有任何一处按皮肤改 `styleMask`——真正的原因是标题栏的**观感**依赖它背后透出来的东西：
-    /// 多彩模式那层复古海报氛围底有纹理和渐变，标题栏区域于是有明显的材质分界；简洁模式换成一张
-    /// 纯色底，标题栏和内容区同色同质，那条带子就「看不见了」，只剩三颗按钮悬在一片纯色上。
-    ///
-    /// 所以修法不是去解绑某个不存在的绑定，而是**显式声明标题栏必须由 AppKit 自己画**：
-    /// 不透明、标题可见、不做 fullSizeContentView。这样两种皮肤下窗口 chrome 完全一致，
-    /// 也不会再随背景层的实现变化而漂移。切皮肤后重新跑一次，防止 SwiftUI 重建窗口时改回去。
+    /// 两个工作区共用透明窗口边缘；SwiftUI 根视图负责隐藏 toolbar 材质。
+    /// 不再在槽位页移除 fullSizeContentView，否则切页会重现白色标题带。
     private func normalizeMainWindowChrome() {
         // SwiftUI 建窗有时晚于 didFinishLaunching，拿不到就下一轮再试（最多几次，避免死循环）。
         func apply(retry: Int) {
@@ -84,13 +76,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { apply(retry: retry - 1) }
                 return
             }
-            // v2.16.1：画布模式把 chrome 钉成了「透明标题栏 + fullSizeContentView」，
-            // 这里再掰回去就等于把画布顶边那条黑带又切掉一截，见 CanvasChromePin。
-            guard !CanvasChromePin.shared.isActive else { return }
-            window.styleMask.remove(.fullSizeContentView)
-            window.titlebarAppearsTransparent = false
-            window.titleVisibility = .visible
+            if CanvasChromePin.shared.isActive {
+                CanvasChromePin.shared.reapply(window)
+                return
+            }
+            let frame = window.frame
+            window.styleMask.insert(.fullSizeContentView)
+            window.titlebarAppearsTransparent = true
+            window.titleVisibility = .hidden
             window.isMovableByWindowBackground = false
+            if window.frame != frame { window.setFrame(frame, display: false) }
         }
         apply(retry: 10)
     }

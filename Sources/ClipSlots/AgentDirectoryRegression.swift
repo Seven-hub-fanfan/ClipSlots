@@ -81,7 +81,9 @@ func runAgentDirectoryProbe(directory: URL, check: (Bool, String) -> Void) async
                     let frame = button?.accessibilityFrame?()
                     let bounds = window.convertToScreen(host.bounds)
                     let label = "\(mode.rawValue)-\(skin.rawValue)-\(dark ? "dark" : "light")-\(Int(width))"
-                    check(frame.map { $0.width > 35 && $0.minX >= bounds.minX - 2 && $0.maxX <= bounds.maxX + 2 } ?? false,
+                    check(frame.map { $0.width >= 26 && $0.width <= 34 && $0.height >= 26
+                        && $0.minX >= bounds.minX - 2 && $0.maxX <= bounds.maxX + 2
+                        && $0.minY >= bounds.minY - 2 && $0.maxY <= bounds.maxY + 2 } ?? false,
                           "directory control visible inside composer \(label)")
                     if let image = host.bitmapImageRepForCachingDisplay(in: host.bounds) {
                         host.cacheDisplay(in: host.bounds, to: image)
@@ -96,7 +98,29 @@ func runAgentDirectoryProbe(directory: URL, check: (Bool, String) -> Void) async
             let nodes = NSApp.windows.compactMap(\.contentView).flatMap { elements($0) }
             let add = nodes.first { ($0.accessibilityIdentifier?() ?? "") == "agent-directory-add" }
             check(add != nil, "directory management popover exposes add action")
-            _ = add?.accessibilityPerformPress?()
+            for mode in AgentAccessMode.allCases {
+                check(nodes.contains { ($0.accessibilityIdentifier?() ?? "") == "agent-access-\(mode.rawValue)" },
+                      "native permission menu exposes \(mode.title)")
+            }
+            let access = nodes.first { ($0.accessibilityIdentifier?() ?? "") == "agent-access-allDirectoriesReadOnly" }
+            _ = access?.accessibilityPerformPress?()
+            await settle()
+            check(model.accessMode == .allDirectoriesReadOnly, "native permission choice changes actual model policy")
+            let currentNodes = NSApp.windows.compactMap(\.contentView).flatMap { elements($0) }
+            let selected = currentNodes.first { ($0.accessibilityIdentifier?() ?? "") == "agent-access-selectedDirectories" }
+            _ = selected?.accessibilityPerformPress?()
+            await settle()
+            check(model.accessMode == .selectedDirectories, "native permission choice restores selected-directory policy")
+            for window in NSApp.windows where window.contentView != host {
+                if let view = window.contentView, view.bounds.width > 300, view.bounds.width < 400,
+                   let image = view.bitmapImageRepForCachingDisplay(in: view.bounds) {
+                    view.cacheDisplay(in: view.bounds, to: image)
+                    try image.representation(using: .png, properties: [:])?.write(to: directory.appendingPathComponent("access-mode-popover.png"))
+                }
+            }
+            let freshAdd = NSApp.windows.compactMap(\.contentView).flatMap { elements($0) }
+                .first { ($0.accessibilityIdentifier?() ?? "") == "agent-directory-add" }
+            _ = freshAdd?.accessibilityPerformPress?()
             await settle()
             let panel = NSApp.windows.compactMap { $0 as? NSOpenPanel }.first
             check(panel?.canChooseDirectories == true && panel?.canChooseFiles == false,

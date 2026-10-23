@@ -102,7 +102,12 @@ public enum WindowLayoutMetrics {
     ///
     /// 想把这个数压下来，只能减少顶栏内容（例如窄窗下把「ClipSlots + 检查更新」收成纯 logo、
     /// 或把搜索栏折成一颗放大镜按钮）—— 那是功能取舍，不属于本次「修错乱」的范围。
-    public static let minWindowContentWidth: CGFloat = 1060
+    /// Includes the disabled Beat segment. Keep the switcher and window budget
+    /// on the same constant; a wider switcher must never overflow a smaller host.
+    public static let workspaceSwitcherWidth: CGFloat = 238
+    public static let minWindowContentWidth: CGFloat = ceil(
+        centerReservedRowMinWidth(leftMin: 322, rightMin: 432,
+                                  centerWidth: workspaceSwitcherWidth) + 40)
 
     /// 主窗口内容区的最小高度。编辑页需要容下顶栏 + 页面行 + 组标签行 + 一行卡片 + 底栏。
     public static let minWindowContentHeight: CGFloat = 560

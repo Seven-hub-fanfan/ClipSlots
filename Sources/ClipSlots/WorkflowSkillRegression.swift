@@ -6,18 +6,24 @@ import ClipSlotsKit
 @MainActor
 func runWorkflowSkillProbe(store: SlotStoreObservable, canvas: CanvasStore,
                            directory: URL, check: (Bool, String) -> Void) async {
+    NativeAccessibilityProbe.enable()
     func settle() async { try? await Task.sleep(for: .milliseconds(300)) }
     func elements(_ node: AnyObject, depth: Int = 0) -> [AnyObject] {
-        guard depth < 30 else { return [] }
-        let children = node.accessibilityChildren?() ?? []
-        return [node] + (children.isEmpty ? (node as? NSView)?.subviews ?? [] : children)
-            .flatMap { elements($0 as AnyObject, depth: depth + 1) }
+        NativeAccessibilityProbe.elements(node)
     }
     func find(_ view: NSView, _ id: String) -> AnyObject? {
         elements(view).first { ($0.accessibilityIdentifier?() ?? "") == id }
     }
     func press(_ view: NSView, _ id: String) -> Bool {
         find(view, id)?.accessibilityPerformPress?() == true
+    }
+    func openLibrary(_ host: NSView) async -> Bool {
+        guard press(host, "agent-composer-add") else { return false }
+        await settle()
+        guard let menu = NSApp.windows.compactMap(\.contentView).first(where: {
+            find($0, "agent-workflow-skills") != nil
+        }) else { return false }
+        return press(menu, "agent-workflow-skills")
     }
     func fill(_ view: NSView, _ id: String, _ value: String) -> Bool {
         guard let field = find(view, id) else { return false }
@@ -120,7 +126,7 @@ func runWorkflowSkillProbe(store: SlotStoreObservable, canvas: CanvasStore,
               "new version preserves old immutable graph")
         let saved = try libraryStore.load(latest, projectID: context.projectID)
         check(saved.graph.variables.count == 1, "native new version retains explicit field binding")
-        check(press(host, "agent-workflow-skills"), "native composer opens Skill library")
+        check(await openLibrary(host), "native composer add menu opens Skill library")
         await settle()
         guard let library = window.sheets.first?.contentView else {
             check(false, "native library sheet exists"); return
@@ -148,7 +154,7 @@ func runWorkflowSkillProbe(store: SlotStoreObservable, canvas: CanvasStore,
         check(find(host, "agent-completion-" + libraryStore.markdownURL(latest).path) != nil,
               "dollar completion discovers personal workflow")
         model.draft = ""
-        check(press(host, "agent-workflow-skills"), "native library reopens for reuse")
+        check(await openLibrary(host), "native add menu library reopens for reuse")
         await settle()
         guard let reopened = window.sheets.first?.contentView else {
             check(false, "native reuse library exists"); return

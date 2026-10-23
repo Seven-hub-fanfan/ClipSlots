@@ -74,10 +74,20 @@ extension CanvasWorkspaceView {
     /// Match SwiftUI zIndex before using the document's stable array order.
     /// Selection must never make the displayed front card differ from the hit.
     var nodesInPaintOrder: [CanvasNode] {
-        canvas.nodes.filter { !canvas.piledMemberIDs.contains($0.id) }.enumerated().sorted { a, b in
-            let az = nodeLayerOrder(a.element), bz = nodeLayerOrder(b.element)
-            return az == bz ? a.offset < b.offset : az < bz
-        }.map(\.element)
+        let hidden = canvas.piledMemberIDs.union(nodeMountQueue.pendingIDs)
+        let dragged = draggingNodeId, draggedIDs = draggingIds, edited = editingNodeId
+        let selected = canvas.selectedGroupID == nil ? canvas.selectedNodeIds : []
+        var ranked: [(Int, CanvasNode, Int)] = []
+        for (index, node) in canvas.nodes.enumerated() where !hidden.contains(node.id) {
+            var priority = 0
+            if selected.contains(node.id) { priority = 4 }
+            if node.id == edited { priority = 8 }
+            if draggedIDs.contains(node.id) { priority = 9 }
+            if node.id == dragged { priority = 10 }
+            ranked.append((index, node, priority))
+        }
+        ranked.sort { $0.2 == $1.2 ? $0.0 < $1.0 : $0.2 < $1.2 }
+        return ranked.map { $0.1 }
     }
 
     func nodeBody(at point: CGPoint) -> CanvasNode? {
@@ -100,9 +110,17 @@ extension CanvasWorkspaceView {
     /// （`screen = canvas * zoom + pan`）抄错一次的症状是"线的端点与卡片边缘差一点点"。
     var nodeScreenFrames: [String: CGRect] {
         var out: [String: CGRect] = [:]
-        out.reserveCapacity(canvas.nodes.count)
-        for node in canvas.nodes {
-            out[node.id] = canvas.pile(containing: node.id).map(pileScreenFrame) ?? screenFrame(of: node)
+        let nodes = canvas.nodes, piles = canvas.piles, selected = draggingIds, delta = dragDelta
+        let scale = zoom, origin = effectivePan
+        let pileFrames = Dictionary(piles.flatMap { pile in
+            let frame = pileScreenFrame(pile)
+            return pile.memberIDs.map { ($0, frame) }
+        }, uniquingKeysWith: { first, _ in first })
+        out.reserveCapacity(nodes.count)
+        for node in nodes {
+            let offset = selected.contains(node.id) ? delta : .zero
+            out[node.id] = pileFrames[node.id] ?? CGRect(x: (node.x + offset.width) * scale + origin.width,
+                y: (node.y + offset.height) * scale + origin.height, width: node.width * scale, height: node.height * scale)
         }
         return out
     }
@@ -122,10 +140,33 @@ extension CanvasWorkspaceView {
             nodes = output == drag.fromInput ? linkCandidates(from: drag.fromNodeId, reverse: drag.fromInput)
                 : [canvas.node(id: drag.fromNodeId)].compactMap { $0 }
         }
-        return Set(nodes.filter {
-            let home = output ? outputPortHome(of: $0) : inputPortHome(of: $0)
-            return portIsExposed(home, nodeId: $0.id) || portIsExposed(portPoint(of: $0, output: output), nodeId: $0.id)
-        }.map(\.id))
+        return exposedPortIDs(nodes: nodes, output: output)
+    }
+
+    /// Compute stacking and controls once for the entire port layer. A port
+    /// must never rebuild the workspace's geometry for every neighbouring card.
+    func exposedPortIDs(nodes: [CanvasNode], output: Bool) -> Set<String> {
+        let viewport = canvasContentViewport, composer = composerFrame
+        let controls = Array(activeControlRegions.values)
+        let frames = nodeScreenFrames, order = nodesInPaintOrder
+        let ranks = Dictionary(uniqueKeysWithValues: order.enumerated().map { ($0.element.id, $0.offset) })
+        let bodies = order.compactMap { node in frames[node.id].map { (node.id, $0) } }
+        let scale = zoom, motions = portMotions
+        func exposed(_ point: CGPoint, _ id: String) -> Bool {
+            let hit = CGRect(x: point.x - 16, y: point.y - 16, width: 32, height: 32)
+            guard viewport.contains(point), composer?.intersects(hit) != true,
+                  !controls.contains(where: { $0.intersects(hit) }) else { return false }
+            guard let body = bodies.last(where: { $0.1.contains(point) }),
+                  body.0 != id else { return true }
+            return (ranks[id] ?? -1) > (ranks[body.0] ?? -1)
+        }
+        return Set(nodes.compactMap { node in
+            guard let rect = frames[node.id] else { return nil }
+            let home = CGPoint(x: (output ? rect.maxX : rect.minX) + (output ? 37 : -37) * scale, y: rect.midY)
+            let offset = motions.motion(nodeID: node.id, output: output).presentationOffset(output: output)
+            let point = CGPoint(x: home.x + offset.x, y: home.y + offset.y)
+            return exposed(home, node.id) || exposed(point, node.id) ? node.id : nil
+        })
     }
 
     func frozenPortPoints(output: Bool) -> [String: CGPoint] {
@@ -137,10 +178,7 @@ extension CanvasWorkspaceView {
     }
 
     func edgeEndpoint(id: String, rect: CGRect, output: Bool) -> CGPoint {
-        guard visiblePortIDs(output: output).contains(id), let node = canvas.node(id: id) else {
-            return CanvasEdgeGeometry.anchor(of: rect, side: output ? .right : .left)
-        }
-        return portPoint(of: node, output: output)
+        CanvasEdgeGeometry.connectionAnchor(of: rect, output: output, zoom: zoom)
     }
 
     @ViewBuilder
@@ -216,12 +254,12 @@ extension CanvasWorkspaceView {
 
     func outputPortHome(of node: CanvasNode) -> CGPoint {
         let rect = screenFrame(of: node)
-        return CGPoint(x: rect.maxX + TapSkin.portOffset, y: rect.midY)
+        return CGPoint(x: rect.maxX + TapSkin.portOffset * zoom, y: rect.midY)
     }
 
     func inputPortHome(of node: CanvasNode) -> CGPoint {
         let rect = screenFrame(of: node)
-        return CGPoint(x: rect.minX - TapSkin.portOffset, y: rect.midY)
+        return CGPoint(x: rect.minX - TapSkin.portOffset * zoom, y: rect.midY)
     }
 
     func inputPortPoint(of node: CanvasNode) -> CGPoint {
@@ -230,7 +268,8 @@ extension CanvasWorkspaceView {
 
     var outputPortPoint: CGPoint? {
         guard let node = interactionNode, editingNodeId == nil, composingNodeId == nil,
-              addMenu == nil, draggingNodeId == nil, inputFilesNodeId == nil else { return nil }
+              addMenu == nil, draggingNodeId == nil, inputFilesNodeId == nil,
+              canvas.connectionPolicy.canConnect(nodeID: node.id) else { return nil }
         // A down/up sequence owns the handle even as hover, pan, and target
         // cards change. Never rediscover a different source mid-drag.
         if case .link(let id) = pointerSession?.target, id == node.id {
@@ -258,18 +297,24 @@ extension CanvasWorkspaceView {
     /// 用户只可能从一个节点开始拖。
     @ViewBuilder
     var outputPortOverlay: some View {
-        ForEach(linkDrag.flatMap { canvas.node(id: $0.fromNodeId).map { [$0] } } ?? visibleNodes) { node in
-            let point = portPoint(of: node, output: true)
-            let home = outputPortHome(of: node)
+        let drag = linkDrag, scale = zoom, frames = nodeScreenFrames
+        let connected = Set(canvas.edges.map(\.fromNodeId))
+        let nodes = drag.flatMap { canvas.node(id: $0.fromNodeId).map { [$0] } } ?? staticPortNodes
+        let exposed = exposedPortIDs(nodes: nodes, output: true)
+        let shown = Set(staticPortNodes.map(\.id)), hovered = hoverHoldNodeId
+        let multi = canvas.selectedNodeIds.count > 1, dragged = draggingIds
+        ForEach(nodes) { node in
+            let rect = frames[node.id] ?? .zero
+            let home = CGPoint(x: rect.maxX + 37 * scale, y: rect.midY)
             // A hidden inward position may intersect another control. Keep an
             // exposed home mounted so its reveal can actually leave that position.
-            if linkDrag?.fromInput != true && (linkDrag != nil || portIsExposed(home, nodeId: node.id)
-                                               || portIsExposed(point, nodeId: node.id)) {
-                CanvasNodePort(nodeID: node.id, output: true, home: outputPortHome(of: node),
-                               frozenPoint: linkDrag == nil ? nil : point,
-                               active: linkDrag != nil,
-                               connected: !canvas.outgoingEdges(of: node.id).isEmpty, motions: portMotions,
-                               visible: linkDrag != nil || staticPortNodes.contains { $0.id == node.id })
+            if drag?.fromInput != true && (drag != nil || exposed.contains(node.id)) {
+                CanvasNodePort(nodeID: node.id, output: true, home: home,
+                               frozenPoint: drag == nil ? nil : portPoint(of: node, output: true),
+                               active: drag != nil,
+                               connected: connected.contains(node.id), motions: portMotions,
+                               visible: shown.contains(node.id) || hovered == node.id,
+                               zoom: scale, forceHidden: multi || dragged.contains(node.id))
                     .zIndex(20)
             }
         }
@@ -284,33 +329,47 @@ extension CanvasWorkspaceView {
     ///   不是噪声而是答案；非法目标（重复 / 成环 / 自己）不画，于是"没圆点的卡就是连不上的卡"。
     @ViewBuilder
     var inputPortOverlay: some View {
+        let frames = nodeScreenFrames, scale = zoom
+        let shown = Set(staticPortNodes.map(\.id)), hovered = hoverHoldNodeId
+        let incoming = Set(canvas.edges.map(\.toNodeId)), outgoing = Set(canvas.edges.map(\.fromNodeId))
+        let multi = canvas.selectedNodeIds.count > 1, dragged = draggingIds
         if let drag = linkDrag {
             if drag.fromInput, let node = canvas.node(id: drag.fromNodeId) {
                 CanvasNodePort(nodeID: node.id, output: false, home: inputPortHome(of: node),
                                frozenPoint: inputPortPoint(of: node), active: true,
-                               connected: !canvas.incomingEdges(of: node.id).isEmpty, motions: portMotions)
+                               connected: !canvas.incomingEdges(of: node.id).isEmpty, motions: portMotions,
+                               zoom: zoom)
                     .zIndex(20)
             }
-            ForEach(linkCandidates(from: drag.fromNodeId, reverse: drag.fromInput), id: \.id) { node in
-                let point = portPoint(of: node, output: drag.fromInput)
-                let home = drag.fromInput ? outputPortHome(of: node) : inputPortHome(of: node)
-                if portIsExposed(home, nodeId: node.id) || portIsExposed(point, nodeId: node.id) {
+            let shownIDs = shown.union(hovered.map { [$0] } ?? [])
+            let nodes = linkCandidates(from: drag.fromNodeId, reverse: drag.fromInput).filter { shownIDs.contains($0.id) }
+            let exposed = exposedPortIDs(nodes: nodes, output: drag.fromInput)
+            ForEach(nodes, id: \.id) { node in
+                let rect = frames[node.id] ?? .zero
+                let home = CGPoint(x: (drag.fromInput ? rect.maxX : rect.minX)
+                    + (drag.fromInput ? 37 : -37) * scale, y: rect.midY)
+                if exposed.contains(node.id) {
                     CanvasNodePort(nodeID: node.id, output: drag.fromInput,
-                                   home: drag.fromInput ? outputPortHome(of: node) : inputPortHome(of: node),
+                                   home: home,
                                    frozenPoint: nil, active: drag.targetNodeId == node.id,
-                                   connected: !(drag.fromInput ? canvas.outgoingEdges(of: node.id) : canvas.incomingEdges(of: node.id)).isEmpty,
-                                   motions: portMotions)
+                                   connected: (drag.fromInput ? outgoing : incoming).contains(node.id),
+                                   motions: portMotions, visible: hovered == node.id || shown.contains(node.id),
+                                   zoom: scale)
                     .zIndex(20)
                 }
             }
         } else {
-            ForEach(visibleNodes) { node in
-                let point = inputPortPoint(of: node)
-                if portIsExposed(inputPortHome(of: node), nodeId: node.id) || portIsExposed(point, nodeId: node.id) {
-                    CanvasNodePort(nodeID: node.id, output: false, home: inputPortHome(of: node),
+            let nodes = staticPortNodes
+            let exposed = exposedPortIDs(nodes: nodes, output: false)
+            ForEach(nodes) { node in
+                let rect = frames[node.id] ?? .zero
+                if exposed.contains(node.id) {
+                    CanvasNodePort(nodeID: node.id, output: false,
+                                   home: CGPoint(x: rect.minX - 37 * scale, y: rect.midY),
                                    frozenPoint: nil, active: false,
-                                   connected: !canvas.incomingEdges(of: node.id).isEmpty, motions: portMotions,
-                                   visible: staticPortNodes.contains { $0.id == node.id })
+                                   connected: incoming.contains(node.id), motions: portMotions,
+                                   visible: shown.contains(node.id), zoom: scale,
+                                   forceHidden: multi || dragged.contains(node.id))
                         .zIndex(20)
                 }
             }
@@ -322,18 +381,15 @@ extension CanvasWorkspaceView {
     /// 复用 `CanvasEdgeGraph.canConnect` 而不是自己判重 / 判环：落点高亮与真正的连接必须同一个
     /// 判据，否则会出现"圆点亮着、松手却弹「连不上」"。
     func linkConnectionRejection(from sourceID: String, to targetID: String) -> CanvasEdgeGraph.Rejection? {
+        guard canvas.connectionPolicy.canConnect(from: sourceID, to: targetID) else { return .disabled }
         guard let target = canvas.node(id: targetID) else { return .missingNode }
         return CanvasEdgeGraph.canConnect(from: sourceID, to: targetID,
             nodes: canvas.nodes, edges: canvas.edges, purpose: CanvasEdgeGraph.defaultPurpose(for: target))
     }
 
     func linkCandidates(from sourceId: String, reverse: Bool = false) -> [CanvasNode] {
-        return canvas.nodes.filter { node in
-            !canvas.piledMemberIDs.contains(node.id) &&
-            node.id != sourceId
-                && linkConnectionRejection(from: reverse ? node.id : sourceId,
-                                           to: reverse ? sourceId : node.id) == nil
-        }
+        let ids = linkCandidateCache.candidates(canvas: canvas, source: sourceId, reverse: reverse)
+        return canvas.nodes.filter { ids.contains($0.id) }
     }
 
     /// 拖线手势。
@@ -371,23 +427,30 @@ extension CanvasWorkspaceView {
         guard canvasContentViewport.contains(screenPoint),
               !canvasOverlayContains(screenPoint) else { return nil }
         let frames = nodeScreenFrames
-        let body = nodeBody(at: screenPoint)
-        let nearest = nodesInPaintOrder.reversed().compactMap { node -> (CanvasNode, CGFloat)? in
+        let paintOrder = nodesInPaintOrder
+        let scale = zoom, motions = portMotions
+        let coveringBody = paintOrder.last { frames[$0.id]?.contains(screenPoint) == true }
+        let ranks = Dictionary(uniqueKeysWithValues: paintOrder.enumerated().map { ($0.element.id, $0.offset) })
+        let nearest = paintOrder.reversed().compactMap { node -> (CanvasNode, CGFloat)? in
             guard let rect = frames[node.id] else { return nil }
-            let port = portPoint(of: node, output: reverse)
-            guard portIsExposed(port, nodeId: node.id) else { return nil }
+            let port = CanvasEdgeGeometry.connectionAnchor(of: rect, output: reverse, zoom: scale)
+            if let body = coveringBody, body.id != node.id,
+               (ranks[body.id] ?? 0) > (ranks[node.id] ?? 0) { return nil }
             let distance = hypot(screenPoint.x - port.x, screenPoint.y - port.y)
-            let home = reverse ? outputPortHome(of: node) : inputPortHome(of: node)
-            // Rank overlapping hover bounds by their real anchor distance.
-            // Following the pointer does not make every candidate distance zero.
-            if CanvasPortInteractionGeometry.follows(screenPoint, home: home, output: reverse, zoom: zoom) {
-                return (node, hypot(screenPoint.x - home.x, screenPoint.y - home.y))
+            // Handle hit and the moving plus are separate. A visible plus is a
+            // descendant of its fixed Handle and therefore wins a direct hit.
+            let motion = motions.motion(nodeID: node.id, output: reverse)
+            let offset = motion.presentationOffset(output: reverse)
+            let glyph = CGPoint(x: (reverse ? rect.maxX : rect.minX) + (reverse ? 37 : -37) * scale + offset.x,
+                                y: rect.midY + offset.y)
+            if motion.opacity() > 0.01,
+               hypot(screenPoint.x - glyph.x, screenPoint.y - glyph.y) <= TapSkin.portDiameter * scale / 2 {
+                return (node, -1)
             }
-            return distance <= CanvasReplicaGeometry.connectionRadius * zoom ? (node, distance) : nil
+            return distance <= CanvasReplicaGeometry.connectionRadius * scale ? (node, distance) : nil
         }.min { $0.1 < $1.1 }?.0
-        guard let node = body ?? nearest, node.id != sourceId,
-              linkConnectionRejection(from: reverse ? node.id : sourceId,
-                                      to: reverse ? sourceId : node.id) == nil
+        guard let node = nearest, node.id != sourceId,
+              linkCandidateCache.candidates(canvas: canvas, source: sourceId, reverse: reverse).contains(node.id)
         else { return nil }
         return node.id
     }
@@ -398,6 +461,7 @@ extension CanvasWorkspaceView {
     /// 给我一个新节点"。旧版的下游 `+` 也走同一条路（`AddNodeRequest.parentNodeId`），所以这里
     /// 只需要把落点喂给同一个入口。
     func finishLinkDrag(from node: CanvasNode, at screenPoint: CGPoint, target: String?, reverse: Bool = false) {
+        guard canvas.connectionPolicy.canConnect(nodeID: node.id) else { return }
         guard isCanvasSurface(at: screenPoint) else { return }
         if let target {
             if let rejection = canvas.connect(from: reverse ? target : node.id, to: reverse ? node.id : target) {
@@ -407,18 +471,15 @@ extension CanvasWorkspaceView {
             }
             return
         }
-        // 落在别的节点上但连不了（重复 / 成环）→ 给原因，别默默弹建节点菜单。
-        let frames = nodeScreenFrames
-        if let blocked = nodesInPaintOrder.reversed().first(where: {
-            guard let rect = frames[$0.id] else { return false }
-            return reverse ? rect.contains(screenPoint) ||
-                CanvasPortInteractionGeometry.follows(screenPoint, home: outputPortHome(of: $0), output: true, zoom: zoom)
-                : hitsInputPort(screenPoint, rect: rect)
-        }) {
-            let rejection = linkConnectionRejection(from: reverse ? blocked.id : node.id,
-                                                    to: reverse ? node.id : blocked.id)
-            store.transientUI.showToast(rejection?.message ?? "连不上")
-            return
+        // Body fallback happens only on release, after Handle snapping failed.
+        if let body = nodeBody(at: screenPoint), body.id != node.id {
+            let source = reverse ? body.id : node.id
+            let destination = reverse ? node.id : body.id
+            if linkConnectionRejection(from: source, to: destination) == nil {
+                _ = canvas.connect(from: source, to: destination)
+                return
+            }
+            if canvas.node(id: destination)?.draftReference != nil { return }
         }
         openAddMenu(atScreen: screenPoint, parentNodeId: reverse ? nil : node.id,
                     childNodeId: reverse ? node.id : nil)
@@ -428,14 +489,13 @@ extension CanvasWorkspaceView {
     var linkDragOverlay: some View {
         if let drag = linkDrag {
             if let target = drag.targetNodeId.flatMap({ canvas.node(id: $0) }) {
-                CanvasMovingLinkPreview(
-                    motion: portMotions.motion(nodeID: target.id, output: drag.fromInput),
-                    start: pointerSession?.linkPortPoint ?? drag.start,
-                    targetHome: drag.fromInput ? outputPortHome(of: target) : inputPortHome(of: target),
-                    zoom: zoom, fromInput: drag.fromInput)
+                CanvasLinkDragPreview(
+                    start: drag.start,
+                    cursor: CanvasEdgeGeometry.connectionAnchor(of: screenFrame(of: target), output: drag.fromInput, zoom: zoom),
+                    hasTarget: true, zoom: zoom, fromInput: drag.fromInput)
                     .transaction { $0.animation = nil }.zIndex(0)
             } else {
-                CanvasLinkDragPreview(start: pointerSession?.linkPortPoint ?? drag.start,
+                CanvasLinkDragPreview(start: drag.start,
                                       cursor: drag.cursor, hasTarget: false, zoom: zoom, fromInput: drag.fromInput)
                     .transaction { $0.animation = nil }.zIndex(0)
             }
@@ -445,13 +505,14 @@ extension CanvasWorkspaceView {
             let destination = CanvasGeometry.screenPoint(canvas: request.canvasPoint,
                                                          pan: effectivePan, zoom: zoom)
             CanvasPendingLinkPreview(starts: request.allParentIds.compactMap { id in
-                canvas.node(id: id).map { CanvasEdgeGeometry.outputHandle(of: screenFrame(of: $0)) }
-            }, destination: destination)
+                canvas.node(id: id).map { CanvasEdgeGeometry.connectionAnchor(of: screenFrame(of: $0), output: true, zoom: zoom) }
+            }, destination: destination, zoom: zoom)
                 .allowsHitTesting(false)
                 .transaction { $0.animation = nil }
                 .zIndex(0)
             if let child = request.childNodeId, let node = canvas.node(id: child) {
-                CanvasLinkDragPreview(start: destination, cursor: CanvasEdgeGeometry.inputHandle(of: screenFrame(of: node)),
+                CanvasLinkDragPreview(start: destination,
+                                      cursor: CanvasEdgeGeometry.connectionAnchor(of: screenFrame(of: node), output: false, zoom: zoom),
                                       hasTarget: false, zoom: zoom)
                     .allowsHitTesting(false).zIndex(0)
             }
@@ -484,16 +545,17 @@ extension CanvasWorkspaceView {
 
     @ViewBuilder
     var actionBarOverlay: some View {
-        if let node = canvas.soleSelectedNode,
-           addMenu == nil,
-           draggingNodeId == nil,
-           inputFilesNodeId == nil,
-           linkDrag == nil {
-            let rect = screenFrame(of: node)
+        let node = addMenu == nil && draggingNodeId == nil && inputFilesNodeId == nil && linkDrag == nil
+            ? canvas.soleSelectedNode : nil
+        let item = node.map { CanvasFloatingSnapshot(project: canvas.activeProjectId, node: $0, frame: screenFrame(of: $0)) }
+        CanvasFloatingRetainer(item: item, bottom: false) { snapshot in
+            let rect = snapshot.frame
             selectionToolbar(at: CGPoint(x: rect.midX,
-                y: actionBarY(for: rect) - (selectionIsWholeGroup ? 52 : 0) - (actionToolbarHeight - 42) / 2))
-                .zIndex(18)
+                y: actionBarY(for: rect) - (selectionIsWholeGroup ? 52 : 0) - (actionToolbarHeight - 42) / 2),
+                retainedSelection: [snapshot.node])
         }
+        .id(canvas.activeProjectId)
+        .zIndex(18)
     }
 
     /// 文本节点的「复制全文」动作；非文本节点或空文本返回 nil（按钮随之消失）。
@@ -502,9 +564,10 @@ extension CanvasWorkspaceView {
     /// 聊天窗口、代码编辑器），而 Cmd+V 是那条路上唯一不需要解释的动作。
     func copyTextAction(for node: CanvasNode) -> (() -> Void)? {
         guard node.kind == .text else { return nil }
-        let content = liveText(for: node)
-        guard !content.isEmpty else { return nil }
+        guard !renderText(for: node).isEmpty else { return nil }
         return {
+            let content = liveText(for: node)
+            guard !content.isEmpty else { return }
             let pb = NSPasteboard.general
             pb.clearContents()
             pb.setString(content, forType: .string)

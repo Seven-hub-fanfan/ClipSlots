@@ -51,6 +51,8 @@ struct CanvasTapNodeCard: View {
     /// 这个节点能不能"入库"（只有画布私有节点能）。
     let canArchive: Bool
     let inlinePlayback: CanvasInlinePlayback
+    var connectionAppearance: CanvasConnectionAppearance = .idle
+    var generationBackdrop: SlotContent.SlotAttachment? = nil
 
     let onHoverChanged: (Bool) -> Void
     let onBeginEdit: () -> Void
@@ -62,6 +64,8 @@ struct CanvasTapNodeCard: View {
     @State private var isHovering = false
     @State private var draft = ""
     @State private var mediaInfoLine = ""
+    @StateObject private var generation = CanvasGenerationHandoff()
+    @Environment(\.accessibilityReduceMotion) private var reducedMotion
 
     // MARK: - 缩放换算
 
@@ -91,6 +95,13 @@ struct CanvasTapNodeCard: View {
         }
     }
 
+    private var generationInput: CanvasGenerationInput {
+        let failed: Bool
+        if case .failed = node.state { failed = true } else { failed = false }
+        return .init(busy: isBusy, failed: failed, image: media, isImage: node.kind == .image,
+                     reducedMotion: reducedMotion)
+    }
+
     // MARK: - body
 
     var body: some View {
@@ -99,16 +110,27 @@ struct CanvasTapNodeCard: View {
             .background(cardFill)
             .clipShape(RoundedRectangle(cornerRadius: s(TapSkin.cardRadius), style: .continuous))
             .overlay {
-                RoundedRectangle(cornerRadius: s(TapSkin.cardRadius))
-                    .stroke(isEditing ? TapSkin.nodeAccent(node.kind) :
-                                isSelected ? TapSkin.nodeAccent(node.kind).opacity(0.7) : TapSkin.border.opacity(0.6),
-                            lineWidth: s(isEditing ? 1.5 : 1))
-                    .allowsHitTesting(false)
+                if node.kind == .text || !node.kind.isMediaNode {
+                    RoundedRectangle(cornerRadius: s(TapSkin.cardRadius))
+                        .stroke(isEditing ? TapSkin.nodeAccent(node.kind) :
+                                    isSelected ? TapSkin.nodeAccent(node.kind).opacity(0.7) : TapSkin.border.opacity(0.6),
+                                lineWidth: s(isEditing ? 1.5 : 1))
+                        .allowsHitTesting(false)
+                }
             }
             .overlay {
-                // Text polishing is indicated by the composer's shared blue glow.
-                // Keep the live text readable and editable while it runs.
                 if node.kind != .text { statusVeil }
+            }
+            .blur(radius: connectionAppearance == .invalid ? s(3) : 0)
+            .animation(.easeOut(duration: 0.3), value: connectionAppearance == .invalid)
+            .overlay {
+                if connectionAppearance == .invalid {
+                    RoundedRectangle(cornerRadius: s(16)).fill(Color.black.opacity(0.7))
+                        .allowsHitTesting(false)
+                }
+                if case .valid(let reverse) = connectionAppearance {
+                    CanvasCandidateBorder(scale: renderScale, reverse: reverse, hovered: hoverActive)
+                }
             }
             .overlay(alignment: .topTrailing) { hoverChips }
             // 信息角标的位置**随内容而变**，原因见 `infoBadge` 注释末尾那段。
@@ -142,7 +164,11 @@ struct CanvasTapNodeCard: View {
             .onChange(of: isBusy) { busy in
                 if busy { inlinePlayback.stop(nodeID: node.id) }
             }
-            .onDisappear { inlinePlayback.stop(nodeID: node.id) }
+            // One immutable input prevents separate onChange callbacks from
+            // capturing different generations of the card's source/state.
+            .onChange(of: generationInput) { generation.apply($0) }
+            .onAppear { generation.apply(generationInput) }
+            .onDisappear { inlinePlayback.stop(nodeID: node.id); generation.stop() }
             .animation(TapSkin.stateAnim, value: hoverActive)
             .animation(TapSkin.stateAnim, value: isSelected)
     }
@@ -163,7 +189,9 @@ struct CanvasTapNodeCard: View {
 
     @ViewBuilder
     private var content: some View {
-        if node.kind == .text, let document = textDocument {
+        if node.kind == .text && isBusy {
+            CanvasTextGenerationSkeleton(scale: renderScale)
+        } else if node.kind == .text, let document = textDocument {
             CanvasLiveDocumentView(document: document) { value, binding in
                 if isEditing {
                     CanvasPromptEditor(text: binding,
@@ -198,15 +226,37 @@ struct CanvasTapNodeCard: View {
     @ViewBuilder
     private func mediaBody(_ att: SlotContent.SlotAttachment) -> some View {
         ZStack {
+            if generation.prepared, let previousMedia = generation.previousMedia {
+                CanvasAttachmentPreviewImage(attachment: previousMedia, maxPixel: 900, contentMode: .fit)
+                    .scaleEffect(1.1).blur(radius: s(14))
+            }
             CanvasAttachmentPreviewImage(attachment: att, maxPixel: 900, contentMode: .fit)
                 .id(att.canvasSourceIdentity)
                 .frame(width: s(node.width), height: s(node.height))
                 .clipped()
+                .opacity(generation.prepared && !generation.revealing ? 0 : 1)
+                .animation(.timingCurve(0.16, 1, 0.3, 1, duration: reducedMotion ? 0.2 : 0.7),
+                           value: generation.revealing)
+                .blur(radius: generation.prepared && !generation.revealing ? s(36) : isBusy ? s(14) : 0)
+                .scaleEffect(generation.prepared && !generation.revealing ? 1.06 : isBusy ? 1.1 : 1)
+                .animation(.timingCurve(0.16, 1, 0.3, 1, duration: reducedMotion ? 0.2 : 2),
+                           value: generation.revealing)
+                .animation(.timingCurve(0.16, 1, 0.3, 1, duration: reducedMotion ? 0.2 : 1.6),
+                           value: isBusy)
             if att.canvasIsVideoLike, !isBusy {
                 CanvasInlineVideoPreview(playback: inlinePlayback, nodeID: node.id,
                                          sourceIdentity: att.canvasSourceIdentity,
                                          scale: renderScale, hovered: hoverActive)
                     .frame(width: s(node.width), height: s(node.height))
+            }
+            if generation.imageFailed {
+                Button("图片加载失败，重试") { generation.retry(media) }
+                    .buttonStyle(.plain)
+                    .font(.system(size: fs(11)))
+                    .foregroundColor(.white)
+                    .padding(s(8))
+                    .background(RoundedRectangle(cornerRadius: s(8)).fill(.black.opacity(0.8)))
+                    .canvasControlRegion("image-load-retry-\(node.id)")
             }
         }
         .canvasControlRegion(isGeneratedImage ? "canvas-image-pixels-\(node.id)" : "canvas-media-\(node.id)")
@@ -442,26 +492,23 @@ struct CanvasTapNodeCard: View {
     /// 上一版其实还在磁盘上。
     @ViewBuilder
     private var statusVeil: some View {
-        switch node.state {
-        case .queued:
-            veil(Color.black.opacity(0.3)) {
-                Text("排队中")
-                    .font(.system(size: fs(10), weight: .medium))
-                    .foregroundColor(.white.opacity(0.9))
-            }
-        case .running(let startedAt):
-            veil(Color.black.opacity(0.34)) {
-                VStack(spacing: s(6)) {
-                    ProgressView()
-                        .controlSize(.small)
-                        .colorScheme(.dark)
-                    RunningBadge(startedAt: startedAt,
-                                 renderScale: renderScale,
-                                 textCounter: textCounter,
-                                 viewZoom: viewZoom)
+        if generation.visible {
+            ZStack {
+                if let backdrop = generation.baseMedia ?? generationBackdrop {
+                    CanvasGenerationBackdrop(attachment: backdrop)
+                        .frame(width: s(node.width), height: s(node.height))
+                        .scaleEffect(1.9).blur(radius: s(42)).opacity(0.22)
                 }
+                CanvasGenerationMotion(worldSize: node.frame.size, renderScale: renderScale,
+                                       hasMedia: generation.baseMedia != nil || generationBackdrop != nil,
+                                       reducedMotion: reducedMotion)
             }
-        case .failed(let message):
+            .frame(width: s(node.width), height: s(node.height))
+            .clipShape(RoundedRectangle(cornerRadius: s(16)))
+            .opacity(generation.opacity)
+            .allowsHitTesting(false)
+        }
+        if case .failed(let message) = node.state {
             veil(Color.black.opacity(0.52)) {
                 VStack(spacing: s(4)) {
                     Image(systemName: "exclamationmark.triangle.fill")
@@ -476,8 +523,6 @@ struct CanvasTapNodeCard: View {
                 }
                 .canvasScreenFixedText(textCounter, anchor: .center)
             }
-        default:
-            EmptyView()
         }
     }
 

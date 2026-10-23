@@ -13,12 +13,7 @@ extension CanvasWorkspaceView {
         }
         let axControls = ProcessInfo.processInfo.environment["CLIPSLOTS_MEDIA_AX_CONTROLS"] == "1"
         func elements(_ node: AnyObject, depth: Int = 0) -> [AnyObject] {
-            guard depth < 35 else { return [] }
-            let children = node.accessibilityChildren?() ?? []
-            let fallback = (node as? NSView)?.subviews ?? []
-            return [node] + (children.isEmpty ? fallback : children).flatMap {
-                elements($0 as AnyObject, depth: depth + 1)
-            }
+            NativeAccessibilityProbe.elements(node)
         }
         func press(_ title: String, in view: NSView) -> Bool {
             for node in elements(view) where node.accessibilityRole?() == .button {
@@ -30,6 +25,7 @@ extension CanvasWorkspaceView {
             return false
         }
         if axControls {
+            NativeAccessibilityProbe.enable()
             _ = await AgentProcessRunner.run(executable: "/usr/bin/swift", arguments: ["-e", """
                 import ApplicationServices
                 let app = AXUIElementCreateApplication(pid_t(CommandLine.arguments[1])!)

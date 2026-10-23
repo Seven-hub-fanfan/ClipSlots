@@ -26,12 +26,20 @@ final class AgentComposerCompletion: ObservableObject {
     @Published private(set) var token: Token?
     weak var editor: AgentDraftEditor.Editor?
     private var dismissed: Token?
+    private static let tokenExpression = try? NSRegularExpression(pattern: #"(?:^|\s)([/\$])([^\s/\$]*)$"#)
+    private struct Input: Equatable {
+        let text: String
+        let selection: NSRange
+        let marked: Bool
+        let items: [AgentComposerItem]
+    }
+    private var previousInput: Input?
 
     static func token(in text: String, selection: NSRange) -> Token? {
         let ns = text as NSString
         guard selection.length == 0, selection.location <= ns.length else { return nil }
         let prefix = ns.substring(to: selection.location)
-        guard let expression = try? NSRegularExpression(pattern: #"(?:^|\s)([/\$])([^\s/\$]*)$"#),
+        guard let expression = tokenExpression,
               let match = expression.firstMatch(in: prefix, range: NSRange(location: 0, length: (prefix as NSString).length)) else { return nil }
         let start = match.range(at: 1).location
         var end = selection.location
@@ -46,6 +54,9 @@ final class AgentComposerCompletion: ObservableObject {
     }
 
     func update(text: String, selection: NSRange, marked: Bool, items: [AgentComposerItem]) {
+        let input = Input(text: text, selection: selection, marked: marked, items: items)
+        guard input != previousInput else { return }
+        previousInput = input
         let next = marked ? nil : Self.token(in: text, selection: selection)
         if next != token, selected != 0 { selected = 0 }
         if next != dismissed { dismissed = nil }
@@ -65,7 +76,7 @@ final class AgentComposerCompletion: ObservableObject {
     }
 
     var isOpen: Bool { token != nil && token != dismissed }
-    func dismiss() { dismissed = token; rows = [] }
+    func dismiss() { previousInput = nil; dismissed = token; rows = [] }
     func move(_ offset: Int) {
         guard !rows.isEmpty else { return }
         selected = (selected + offset + rows.count) % rows.count
@@ -75,7 +86,7 @@ final class AgentComposerCompletion: ObservableObject {
               let token else { return }
         editor?.accept(item, range: token.range)
     }
-    func openSkills() { dismissed = nil; editor?.openSkills() }
+    func openSkills() { previousInput = nil; dismissed = nil; editor?.openSkills() }
 }
 
 struct AgentComposerMenu: View {

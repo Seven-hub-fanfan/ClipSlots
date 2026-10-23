@@ -9,7 +9,7 @@ extension CanvasWorkspaceView {
         mediaLayoutTask = Task { @MainActor in
             for snapshot in canvas.nodes where snapshot.kind.isMediaNode {
                 guard !Task.isCancelled, canvas.activeProjectId == projectId else { return }
-                let attachments = store.canvasSlotAttachments(groupId: snapshot.groupId, slot: snapshot.slot)
+                let attachments = renderAttachments(for: snapshot)
                 guard let primary = CanvasMediaPick.primary(node: snapshot, attachments: attachments) else { continue }
                 let result = await CanvasMediaProbe.load(for: primary)
                 guard !Task.isCancelled, canvas.activeProjectId == projectId else { return }
@@ -18,7 +18,7 @@ extension CanvasWorkspaceView {
                       let pixels = result.facts.pixelSize, pixels.width > 0, pixels.height > 0 else { continue }
                 if case .running = node.state { continue }
                 if case .queued = node.state { continue }
-                let latestAttachments = store.canvasSlotAttachments(groupId: node.groupId, slot: node.slot)
+                let latestAttachments = renderAttachments(for: node)
                 guard CanvasMediaPick.primary(node: node, attachments: latestAttachments)?.canvasSourceIdentity == primary.canvasSourceIdentity,
                       let size = CanvasNodeSizing.size(ratio: "\(pixels.width):\(pixels.height)",
                                                        shortSide: min(node.width, node.height)) else { continue }

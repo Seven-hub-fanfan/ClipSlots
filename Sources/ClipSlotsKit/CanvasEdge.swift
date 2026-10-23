@@ -267,7 +267,14 @@ public enum CanvasEdgeGraph {
         if from == to { return .selfLoop }
         guard let source = nodes.first(where: { $0.id == from }),
               let target = nodes.first(where: { $0.id == to }) else { return .missingNode }
-        if let rejection = canConnect(from: from, to: to, edges: edges, purpose: purpose) { return rejection }
+        if let rejection = canConnect(from: from, to: to, edges: edges, purpose: purpose) {
+            // Current TapNow directly permits an image -> image reverse edge.
+            // Keep this narrow typed exception; execution scheduling still
+            // checks cycles independently and never recursively follows them.
+            if rejection != .cycle || source.kind != .image || target.kind != .image || role != .auto {
+                return rejection
+            }
+        }
         if purpose == .draftReference {
             guard source.kind == .video, target.kind == .video, role == .auto else { return .incompatibleType }
             guard target.draftReference != nil else { return .unsupportedPurpose }
@@ -391,7 +398,8 @@ public enum CanvasEdgeGraph {
     ///
     /// `nodeIds` 传空集合时跳过野线检查（用于只想去重的场合）。顺序保持输入顺序 —— 重复项
     /// **留第一条**，因为它才是用户先连的那条（角色也可能已经改过）。
-    public static func normalized(_ edges: [CanvasEdge], nodeIds: Set<String>) -> [CanvasEdge] {
+    public static func normalized(_ edges: [CanvasEdge], nodeIds: Set<String>,
+                                  preservingImageCycles nodes: [CanvasNode] = []) -> [CanvasEdge] {
         var seen = Set<EdgeKey>()
         var out: [CanvasEdge] = []
         out.reserveCapacity(edges.count)
@@ -403,7 +411,7 @@ public enum CanvasEdgeGraph {
             guard seen.insert(EdgeKey(from: e.fromNodeId, to: e.toNodeId, purpose: e.purpose)).inserted else { continue }
             out.append(e)
         }
-        return breakingCycles(out)
+        return breakingCycles(out, imageIDs: Set(nodes.filter { $0.kind == .image }.map(\.id)))
     }
 
     /// 把历史脏数据里的执行依赖环打断（保留先建立的边）。引用边不参与。
@@ -412,14 +420,16 @@ public enum CanvasEdgeGraph {
     /// （`CanvasStore.rebindNode`），理论上能撞出环；而带环的图会让取入参的递归下不来。
     /// 这里按 `createdAt` 从旧到新逐条重放，遇到成环就丢 —— 丢的一定是较新的那条，
     /// 符合"先连的先算"的直觉。
-    private static func breakingCycles(_ edges: [CanvasEdge]) -> [CanvasEdge] {
+    private static func breakingCycles(_ edges: [CanvasEdge], imageIDs: Set<String> = []) -> [CanvasEdge] {
         let ordered = edges.sorted { lhs, rhs in
             lhs.createdAt == rhs.createdAt ? lhs.id < rhs.id : lhs.createdAt < rhs.createdAt
         }
         var kept: [CanvasEdge] = []
         var dropped = Set<String>()
         for e in ordered {
-            if e.purpose.isGenerationDependency, wouldCreateCycle(from: e.fromNodeId, to: e.toNodeId, edges: kept) {
+            if e.purpose.isGenerationDependency,
+               !(e.role == .auto && imageIDs.contains(e.fromNodeId) && imageIDs.contains(e.toNodeId)),
+               wouldCreateCycle(from: e.fromNodeId, to: e.toNodeId, edges: kept) {
                 dropped.insert(e.id)
             } else {
                 kept.append(e)
@@ -446,6 +456,9 @@ public enum CanvasEdgeGraph {
         var out = edges
         for node in nodes {
             guard let parent = node.parentNodeId, parent != node.id, ids.contains(parent) else { continue }
+            // Earlier batch results also stored their batch source as a parent.
+            // Membership is not a generation input; preserve only explicit edges.
+            guard parent != node.generationSourceID else { continue }
             let key = EdgeKey(from: parent, to: node.id, purpose: .generationInput)
             guard existing.insert(key).inserted else { continue }
             out.append(CanvasEdge(fromNodeId: parent,
@@ -453,7 +466,7 @@ public enum CanvasEdgeGraph {
                                   role: .auto,
                                   createdAt: node.createdAt))
         }
-        return normalized(out, nodeIds: ids)
+        return normalized(out, nodeIds: ids, preservingImageCycles: nodes)
     }
 
     // MARK: 查询

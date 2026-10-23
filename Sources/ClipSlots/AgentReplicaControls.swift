@@ -4,8 +4,6 @@ import ClipSlotsKit
 struct AgentReplicaControls: View {
     @ObservedObject var model: AgentChatModel
     var onDismiss: () -> Void = {}
-    @State private var showExternal = false
-    @State private var externalContext: AgentExternalProjectContext?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -31,15 +29,6 @@ struct AgentReplicaControls: View {
                     }
                 }
             }
-            if model.canvasContext?.isActive == true {
-                Button {
-                    do {
-                        externalContext = try model.externalHandoffContext()
-                        showExternal = true
-                    } catch { model.errorText = error.localizedDescription }
-                } label: { Label("交给外部 Agent", systemImage: "arrow.up.forward.app") }
-                .accessibilityIdentifier("agent-external-handoff")
-            }
         }
         .font(.system(size: 11))
         .buttonStyle(.bordered)
@@ -49,18 +38,17 @@ struct AgentReplicaControls: View {
             model.artifactPanelDismissed()
             onDismiss()
         }) { record in
+            let conversation = model.selectedConversationID
             AgentArtifactPanel(record: record,
                 actions: record.text != nil && model.canvasContext != nil
                     ? [.init(id: "canvas-text", label: "预览并填入选中节点", toolName: "preview_canvas_text")] : [],
-                onAction: model.handleArtifactAction, onClose: { model.selectedArtifact = nil })
+                onAction: model.handleArtifactAction, onClose: { model.selectedArtifact = nil },
+                onRequest: { operation, name, arguments in
+                    try await model.artifactRequest(key: record.key, revision: record.revision,
+                        conversation: conversation, operation: operation, name: name, arguments: arguments)
+                })
                 .frame(width: 640, height: 580)
                 .foregroundColor(TapSkin.ink).background(TapSkin.tone(0xfafafa, 0x161616))
-        }
-        .sheet(isPresented: $showExternal, onDismiss: onDismiss) {
-            if let externalContext {
-                AgentExternalHandoffView(context: externalContext, onClose: { showExternal = false })
-                    .foregroundColor(TapSkin.ink).background(TapSkin.tone(0xfafafa, 0x161616))
-            }
         }
     }
 }

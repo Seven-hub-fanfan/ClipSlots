@@ -5,15 +5,16 @@ import ClipSlotsKit
 /// without silently injecting them into a newly scoped project conversation.
 struct LegacyCanvasHistoryView: View {
     @ObservedObject var model: AgentChatModel
+    var title = "旧版画布记录"
     @Environment(\.dismiss) private var dismiss
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             HStack {
-                Text("旧版画布记录").font(.headline)
+                Text(title).font(.headline)
                 Spacer()
                 Button("关闭") { dismiss() }
             }
-            Text("历史记录和草稿已保留，可阅读或复制。新会话按画布项目独立保存。")
+            Text("历史记录和草稿已保留，可阅读或复制。编辑页和画布页的新会话按项目共用。")
                 .font(.system(size: 12)).foregroundColor(.secondary)
             ScrollView {
                 VStack(alignment: .leading, spacing: 18) {
@@ -44,27 +45,9 @@ struct CanvasAgentComposer: View {
     @State private var showWorkflowSkills = false
 
     var body: some View {
+        WorkspaceContentBoundary {
         VStack(alignment: .leading, spacing: 7) {
-            HStack {
-                Button { context.addSelection(to: model) } label: {
-                    Label("引用选中素材", systemImage: "plus.circle")
-                }
-                .accessibilityIdentifier("agent-add-canvas-reference")
-                .disabled(model.isRunning)
-                Spacer()
-                Text("\(model.draftReferences.count)/3").foregroundColor(.secondary)
-            }
-            Label(model.supportsCanvasReadTools ? "全图可按需读取 · 发送时固定快照" : "当前后端仅支持引用正文",
-                  systemImage: "point.3.connected.trianglepath.dotted")
-                .accessibilityIdentifier("agent-canvas-scope")
-                .font(.system(size: 10)).foregroundColor(.secondary)
-            HStack(spacing: 14) {
-                Button("总结创作方法") { model.draft = CanvasAgentContext.summarizePrompt }
-                    .disabled(model.isRunning || !model.supportsCanvasReadTools)
-                    .accessibilityIdentifier("agent-summarize-workflow")
-                Button("我的创作 Skill") { showWorkflowSkills = true }
-                    .accessibilityIdentifier("agent-workflow-skills")
-            }.foregroundColor(TapSkin.accent)
+            WorkspaceContentBoundary {
             ForEach(context.pendingGraphPreviews.filter {
                 $0.conversationID == model.selectedConversationID
             }) { preview in
@@ -81,6 +64,16 @@ struct CanvasAgentComposer: View {
                             Text("附件名称：" + ref.attachmentNames.joined(separator: "、"))
                                 .foregroundColor(.secondary)
                         }
+                        if let images = ref.images, !images.isEmpty {
+                            HStack {
+                                ForEach(images) { image in
+                                    if let data = image.imageSnapshot, let preview = NSImage(data: data) {
+                                        Image(nsImage: preview).resizable().scaledToFit().frame(width: 44, height: 44)
+                                    }
+                                }
+                                Text("已读取 \(images.count) 张图片")
+                            }
+                        }
                     } label: { Text(ref.title).lineLimit(1) }
                     Button { context.locate(ref) } label: { Image(systemName: "scope") }
                         .help("定位引用节点")
@@ -92,6 +85,8 @@ struct CanvasAgentComposer: View {
             if let error = context.error {
                 Text(error).foregroundColor(.orange).fixedSize(horizontal: false, vertical: true)
             }
+            }
+        }
         }
         .font(.system(size: 11))
         .buttonStyle(.plain)
@@ -162,12 +157,11 @@ struct CanvasAgentCoverageView: View {
                 }.frame(maxHeight: 150)
             }.padding(.top, 5)
         } label: {
-            Label("画布快照 · \(turn.nodeCount) 节点 · \(turn.edgeCount) 连线", systemImage: "square.stack.3d.up")
+            Label("画布资料", systemImage: "square.stack.3d.up")
         }
         .font(.system(size: 11))
         .foregroundColor(TapSkin.secondaryInk)
-        .padding(10)
-        .background(TapSkin.tone(0xf2f2f2, 0x222222), in: RoundedRectangle(cornerRadius: 10))
+        .padding(.vertical, 4)
         .padding(.top, 8)
         .accessibilityIdentifier("agent-canvas-coverage")
     }

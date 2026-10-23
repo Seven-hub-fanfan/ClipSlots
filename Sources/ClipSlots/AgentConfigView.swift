@@ -102,6 +102,12 @@ struct AgentConfigView: View {
             storedKeySuffix = nil
             errorText = nil
             keyReadFailed = false
+            #if DEBUG
+            if Bundle.main.bundleIdentifier == "com.clipslots.app.canvas-v2174-test",
+               ProcessInfo.processInfo.environment["CLIPSLOTS_CANVAS_REGRESSION"] == "1" {
+                return
+            }
+            #endif
             if currentBackend != .tika { await reloadKeyState() }
         }
         .onChange(of: currentBackend) { kind in
@@ -399,12 +405,8 @@ struct AgentConfigView: View {
         let scope = credentialScopeID
         isKeyBusy = true
         defer { isKeyBusy = false }
-        let state = await withCheckedContinuation { continuation in
-            DispatchQueue.global(qos: .userInitiated).async {
-                continuation.resume(returning: keychain.keyState(retryAfterFailure: retryAfterFailure))
-            }
-        }
-        guard scope == credentialScopeID else { return }
+        let state = await keychain.keyStateAsync(retryAfterFailure: retryAfterFailure)
+        guard !Task.isCancelled, scope == credentialScopeID else { return }
         applyKeyState(state)
     }
 

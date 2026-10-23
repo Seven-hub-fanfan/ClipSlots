@@ -15,14 +15,41 @@ func runAgentModelProbe(directory: URL, check: (Bool, String) -> Void) async {
     let sendStarted = CFAbsoluteTimeGetCurrent()
     pending.send(text: "等待授权", config: AgentConfig(), enabledSkills: [])
     check(CFAbsoluteTimeGetCurrent() - sendStarted < 0.1, "send returns without waiting for credential authorization")
-    await settle(0.1)
-    check(pendingKey.started.wait(timeout: .now()) == .success, "credential read starts in backend")
+    // Background task scheduling is asynchronous. Verify the observable state,
+    // while keeping the independent <100ms assertion for the synchronous send.
+    var credentialStarted = false
+    let credentialDeadline = Date().addingTimeInterval(2)
+    while Date() < credentialDeadline && (!credentialStarted || !pending.isWaitingForCredential) {
+        if !credentialStarted { credentialStarted = pendingKey.started.wait(timeout: .now()) == .success }
+        await settle(0.01)
+    }
+    NSLog("[AgentModel] credential wait observed in %.1fms", (CFAbsoluteTimeGetCurrent() - sendStarted) * 1000)
+    check(credentialStarted, "credential read starts in backend")
     check(!pendingKey.readOnMain, "credential read stays off the main thread")
     check(pending.isRunning, "UI can update while credential authorization is pending")
+    check(pending.isWaitingForCredential, "pending credential has an explicit sidebar state")
     pending.stop()
+    check(!pending.isRunning && !pending.isWaitingForCredential,
+          "stop clears credential state before Security returns")
     pendingKey.release.signal()
     await settle()
     check(!pending.isRunning && !pending.needsConfiguration, "stop ignores late credential failure")
+
+    let timedKey = AgentCredentialGateStore()
+    let timedTransport = AgentScriptedTransport(steps: [])
+    let timed = AgentChatModel(displayName: "授权超时",
+        service: AgentService(transport: timedTransport, secretStore: timedKey, credentialTimeout: 0.1))
+    timed.send(text: "等待授权超时", config: AgentConfig(), enabledSkills: [])
+    await settle(0.2)
+    check(!timed.isRunning && !timed.isWaitingForCredential && timed.runPhase == .failed,
+          "credential deadline settles the model before Security returns")
+    check(timed.errorText?.contains("尚未发送请求") == true && !timed.needsConfiguration,
+          "authorization deadline is distinct from an absent API key")
+    check(timedTransport.capturedRequests.isEmpty, "credential deadline never starts a network request")
+    timedKey.release.signal()
+    await settle()
+    check(timedTransport.capturedRequests.isEmpty && timed.runPhase == .failed,
+          "late authorization cannot revive an expired chat run")
 
     let missingKey = AgentInMemorySecretStore()
     let missing = AgentChatModel(displayName: "缺少凭据",
@@ -182,6 +209,47 @@ func runAgentModelProbe(directory: URL, check: (Bool, String) -> Void) async {
         } else { check(false, "native draft editor supports composition placeholder") }
     } else { check(false, "draft editor mounts with restored text") }
     window.close()
+
+    let credentialModel = AgentChatModel(displayName: "侧栏授权状态",
+        service: AgentService(transport: AgentScriptedTransport(steps: []),
+                              secretStore: AgentInMemorySecretStore(key: "fixture")))
+    credentialModel.draft = "授权等待保留草稿"
+    let noticeHost = NSHostingView(rootView: AnyView(AgentSidebarView(
+        model: credentialModel, isVisible: .constant(true),
+        credentialStateProvider: { (false, .authorizationTimedOut) })))
+    let noticeWindow = NSWindow(contentRect: NSRect(x: 40, y: 40, width: 480, height: 780),
+        styleMask: [.titled, .closable], backing: .buffered, defer: false)
+    noticeWindow.isReleasedWhenClosed = false
+    noticeWindow.contentView = noticeHost
+    noticeWindow.makeKeyAndOrderFront(nil)
+    await settle()
+    check(noticeWindow.attachedSheet == nil, "credential deadline keeps the canvas sidebar free of a settings sheet")
+    check(NativeAccessibilityProbe.elements(noticeHost).contains {
+        $0.accessibilityIdentifier?() == "agent-credential-notice"
+    }, "credential deadline has an accessible inline notice")
+    check(credentialModel.draft == "授权等待保留草稿" && !credentialModel.isRunning,
+          "credential notice preserves draft without submitting a request")
+    noticeHost.rootView = AnyView(Color.clear)
+    await settle()
+    let lateGate = AgentCredentialGateStore()
+    noticeHost.rootView = AnyView(AgentSidebarView(
+        model: credentialModel, isVisible: .constant(true),
+        credentialStateProvider: {
+            let key = try? await AgentCredentialAccess.readAPIKey(from: lateGate, timeout: 0.5)
+            return (key != nil, nil)
+        }))
+    await settle(0.1)
+    noticeHost.rootView = AnyView(Color.clear)
+    await settle(0.1)
+    lateGate.release.signal()
+    await settle()
+    check(noticeWindow.attachedSheet == nil, "disappearing sidebar rejects a late credential probe result")
+    noticeHost.rootView = AnyView(AgentSidebarView(
+        model: credentialModel, isVisible: .constant(true),
+        credentialStateProvider: { (false, nil) }))
+    await settle()
+    check(noticeWindow.attachedSheet != nil, "missing credential still opens initial configuration")
+    noticeWindow.close()
 }
 
 private final class AgentCredentialGateStore: AgentSecretStore {

@@ -4,11 +4,12 @@ import SwiftUI
 struct CanvasPendingLinkPreview: View {
     let starts: [CGPoint]
     let destination: CGPoint
+    var zoom: CGFloat = 1
 
     var body: some View {
         ZStack {
             ForEach(starts.indices, id: \.self) { index in
-                CanvasLinkDragPreview(start: starts[index], cursor: destination, hasTarget: false)
+                CanvasLinkDragPreview(start: starts[index], cursor: destination, hasTarget: false, zoom: zoom)
             }
         }
     }

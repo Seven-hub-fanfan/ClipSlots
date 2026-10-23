@@ -5,12 +5,10 @@ import ClipSlotsKit
 
 @MainActor
 func runAgentInteractionProbe(directory: URL, check: (Bool, String) -> Void) async {
+    NativeAccessibilityProbe.enable()
     func settle() async { try? await Task.sleep(for: .milliseconds(180)) }
     func elements(_ node: AnyObject, depth: Int = 0) -> [AnyObject] {
-        guard depth < 30 else { return [] }
-        let children = node.accessibilityChildren?() ?? []
-        let fallback = (node as? NSView)?.subviews ?? []
-        return [node] + (children.isEmpty ? fallback : children).flatMap { elements($0 as AnyObject, depth: depth + 1) }
+        NativeAccessibilityProbe.elements(node)
     }
     let path = directory.appendingPathComponent("interaction-session.json")
     let model = AgentChatModel(displayName: "应答测试", backend: InteractionFixtureBackend(), persistenceURL: path)

@@ -59,9 +59,10 @@ extension CanvasWorkspaceView {
         let sourceFrame = screenFrame(of: text)
         let port = CGPoint(x: sourceFrame.maxX + TapSkin.portOffset, y: sourceFrame.midY)
         check(outputPortPoint != nil, "source port is exposed")
-        check(mouse(.leftMouseDown, port) && linkDrag != nil, "link preview exists on mouse-down")
-        check(mouse(.leftMouseDragged, CGPoint(x: port.x + 1, y: port.y)) && linkDrag != nil,
-              "one-pixel movement never removes the link preview")
+        check(mouse(.leftMouseDown, port) && pointerSession?.linkPortPoint != nil && linkDrag == nil,
+              "press owns the port while waiting for connection threshold")
+        check(mouse(.leftMouseDragged, CGPoint(x: port.x + 1, y: port.y)) && linkDrag == nil,
+              "one-pixel movement remains a plus click")
         var continuous = true
         for step in 1...60 {
             let point = CGPoint(x: port.x + CGFloat(step) * 9, y: port.y + sin(CGFloat(step)) * 50)
@@ -81,7 +82,9 @@ extension CanvasWorkspaceView {
         _ = mouse(.leftMouseDown, port)
         _ = mouse(.leftMouseDragged, target)
         _ = mouse(.leftMouseUp, target)
-        check(canvas.edges.count == edgeCount && addMenu == nil, "duplicate target does not create a second edge or node")
+        check(canvas.edges.count == edgeCount && addMenu?.parentNodeId == text.id,
+              "duplicate target offers a new node without adding a duplicate edge")
+        addMenu = nil
         showCanvasEdges = false
         check(canvas.edges.count == edgeCount, "hiding wires preserves the graph")
         showCanvasEdges = true

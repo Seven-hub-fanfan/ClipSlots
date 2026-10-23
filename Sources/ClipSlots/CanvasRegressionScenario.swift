@@ -10,6 +10,7 @@ private enum CanvasRegression {
 
 enum CanvasMenuLatencyObservation {
     static var pickedAt: Double?
+    static var events: [[String: Any]] = []
 }
 
 extension CanvasWorkspaceView {
@@ -43,6 +44,14 @@ extension CanvasWorkspaceView {
             }
             inputRouter.anchorView?.window?.setContentSize(CGSize(width: 1440, height: 900))
             let directory = URL(fileURLWithPath: folder, isDirectory: true)
+            if env["CLIPSLOTS_SMOOTHNESS_PROBE"] == "1" {
+                await runSmoothnessProbe(directory: directory)
+                return
+            }
+            if env["CLIPSLOTS_TAPNOW_MOTION_PROBE"] == "1" {
+                await runTapNowMotionProbe(directory: directory)
+                return
+            }
             if env["CLIPSLOTS_STRUCTURE_REPLICA_PROBE"] == "1" {
                 await runStructureReplicaProbe(directory: directory)
                 return
@@ -53,7 +62,7 @@ extension CanvasWorkspaceView {
                     "passed": passed, "failures": failures, "complete": true,
                     "expectedCrateSubmissions": 0,
                     "mediaProbeEnabled": env["CLIPSLOTS_ARTIFACT_MEDIA_FIXTURES"] != nil,
-                    "scope": "native Agent gateway continuation: restart/resume, HTML artifact preview, confirmed graph mutation and undo"
+                    "scope": "native Agent gateway continuation: restart/resume, interactive HTML tool bridge, actual stdio live MCP, scoped proposals, confirmed graph mutation and undo"
                         + (env["CLIPSLOTS_ARTIFACT_MEDIA_FIXTURES"] != nil
                            ? "; local AVPlayer video/audio decode, playback, seek and copy cleanup" : ""),
                     "transport": "in-process fixture AgentGatewayTransport; no live gateway validation"
@@ -125,6 +134,11 @@ extension CanvasWorkspaceView {
             }
             if env["CLIPSLOTS_BATCH_PROBE"] == "1" {
                 await runBatchGenerationProbe(directory: directory)
+                return
+            }
+            if env["CLIPSLOTS_CANVAS_AGENT_GENERATION_PROBE"] == "1" {
+                try? await Self.makeRegressionMedia(in: directory)
+                await runCanvasAgentGenerationProbe(directory: directory)
                 return
             }
             if env["CLIPSLOTS_AGENT_WORKSPACE_PROBE"] == "1" {

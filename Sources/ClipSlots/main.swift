@@ -189,7 +189,7 @@ struct ClipSlotsApp: App {
                     PerfAutoTest.shared.start(store: store)
                 }
         }
-        .windowStyle(.titleBar)
+        .windowStyle(.hiddenTitleBar)
         .windowToolbarStyle(.unified)
         // v2.9.18: 默认窗口 540×420 装不下 10 个卡片（开箱即需滚动）。放大到 1320×820，
         // 配合自适应网格可一屏 5 列 × 2 行完整显示 10 个槽位，无需滚动。
@@ -870,17 +870,26 @@ final class SlotStoreObservable: ObservableObject {
         // body stayed "空槽位 0 B" even though the label (read from disk
         // directly) updated. Drop the content caches so reloadAll re-reads
         // the freshly written bodies from disk.
-        self.specialStorage.invalidateContentCaches()
         // P2 (v2.10.13): 一并失效连接缓存。invalidateContentCaches 只清槽位内容缓存，
         // 不清 SlotConnectionStorage；外部删组/删页后 GUI 侧会残留已删除组的陈旧连线。
         // 连接缓存归 GUI 层的 SlotConnectionStorage 管辖（Kit 层无法引用），故在文件
         // 监听回调里一并清理。
-        SlotConnectionStorage.shared.invalidateCache()
         // P0-1 (v2.10.30): 改走异步 reload，把逐槽磁盘读移出主线程，避免 CLI 批量写盘时 GUI 卡死。
         // 原先紧跟在 reloadAll 之后的 UI 刷新触发（refreshTrigger）挪到异步完成闭包里，确保在 @Published
         // 赋值完成后再刷新。
-        self.reloadAllAsync { [weak self] in
-            self?.refreshTrigger = UUID()
+        // A cache queue may still be decoding a large slot. Never wait for that
+        // queue (or connection reload IO) on the main thread.
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            guard let self else { return }
+            self.specialStorage.invalidateContentCaches()
+            SlotConnectionStorage.shared.invalidateCache()
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                self.reloadAllAsync { [weak self] in
+                    self?.refreshTrigger = UUID()
+                    self?.canvasSlotRevision &+= 1
+                }
+            }
         }
     }
 
@@ -1169,7 +1178,10 @@ final class SlotStoreObservable: ObservableObject {
 
     func loadSpecialSlots() {
         let index = specialStorage.loadIndex()
+        applySpecialSlotIndex(index)
+    }
 
+    private func applySpecialSlotIndex(_ index: SpecialSlotIndex) {
         // v2.10.91 (perf): 全部 @Published 赋值改为「值真的变了才写」。
         //
         // 本方法是所有 reload 路径（reloadAll / reloadAllAsync / watcher 刷新 / 建组删组 / 切页）的第一步，
@@ -1214,7 +1226,7 @@ final class SlotStoreObservable: ObservableObject {
         let newActiveGroup = visibleGroups.first { $0.id == validActiveId }
         if activeHotkeySpecialSlot != newActiveGroup { activeHotkeySpecialSlot = newActiveGroup }
 
-        specialSlotSettings = index.settings
+        if specialSlotSettings != index.settings { specialSlotSettings = index.settings }
     }
 
     // P0-1 (v2.10.50): 同步全量重载——现仅作【内部兜底】保留（不再由任何 UI 路径直接调用）。所有切组 /
@@ -2686,6 +2698,15 @@ final class SlotStoreObservable: ObservableObject {
         SpecialSlotStorage.storage(forGroupId: groupId)
     }
 
+    /// Main-thread snapshot for async drag preparation; never falls back to disk.
+    func canvasSlotHasUnsavedContent(groupId: String, slot: Int) -> Bool {
+        if let draft = canvasTextDocuments["\(groupId)#\(slot)"], draft.isDirty, !draft.text.isEmpty {
+            return true
+        }
+        return groupId == currentSpecialSlotId && loadedSpecialSlotId == groupId
+            && slots[slot]?.isEmpty == false
+    }
+
     /// 读一个**任意组**槽位的主体纯文本，供画布节点卡片实时展示。
     ///
     /// 画布上绑定了槽位的节点，显示的就是槽位数据本身，不是拖进来那一刻的副本 —— 所以每次求值都
@@ -3228,6 +3249,17 @@ final class SlotStoreObservable: ObservableObject {
     /// 最坏情况是"内容暂时躺在未入库里"，用户能看到、能拖回来，没有任何字节消失。
     @discardableResult
     func canvasSwapSlotContent(groupId: String, _ a: Int, _ b: Int) -> Bool {
+        guard a != b else { return true }
+        do {
+            return try StorageLock.shared.withLockIfAvailable {
+                canvasSwapSlotContentWhileLocked(groupId: groupId, a, b)
+            }
+        } catch {
+            return false
+        }
+    }
+
+    private func canvasSwapSlotContentWhileLocked(groupId: String, _ a: Int, _ b: Int) -> Bool {
         guard a != b else { return true }
         let cap = canvasSlotCapacity(groupId: groupId)
         guard a >= 1, a <= cap, b >= 1, b <= cap else { return false }
@@ -7497,8 +7529,8 @@ final class SlotStoreObservable: ObservableObject {
     // MARK: - Global Search (v2.5.2)
 
     /// P0-1 (v2.10.38): a lightweight, main-thread-captured reference to one searchable group.
-    /// Holds only cheap metadata + the group's `SlotStorage` handle so the expensive per-slot
-    /// expansion (`snapshot()` + `getLabel()`) can run OFF the main thread. `pages`/`specialSlots`
+    /// Holds metadata and the storage root; group handles resolve on the worker because their
+    /// initialization checks disk directories. `pages`/`specialSlots`
     /// are mutated only on the main thread, so we read them here (on main) and hand the rest off.
     struct SearchableGroupRef {
         let pageId: String
@@ -7507,19 +7539,19 @@ final class SlotStoreObservable: ObservableObject {
         let groupId: String
         let groupName: String
         let groupOrder: Int
-        let storage: SlotStorage
+        let storageRoot: SpecialSlotStorage
+        var storage: SlotStorage { storageRoot.slotStorage(for: groupId) }
         /// v2.11.7 hotfix11: 每组槽位数。全局搜索改为扫磁盘（见 expandSearchableSlots），
         /// 需要知道要扫 1...slotCount；`config` 只在主线程读，所以在这里一起捕获。
         let slotCount: Int
     }
 
-    /// Capture the searchable-group list on the main thread. Cheap: reads the in-memory
-    /// `pages`/`specialSlots` metadata and resolves each group's cached `SlotStorage` handle
-    /// (`slotStorage(for:)` is internally lock-guarded). No per-slot disk work happens here.
+    /// Capture only in-memory metadata on main; resolve storage handles during expansion.
     func searchableGroupsSnapshot() -> [SearchableGroupRef] {
         var refs: [SearchableGroupRef] = []
+        let groupsByPage = Dictionary(grouping: specialSlots, by: \.pageId)
         for page in pages {
-            let groups = specialSlots.filter { $0.pageId == page.id }.sorted { ($0.order, $0.id) < ($1.order, $1.id) }
+            let groups = (groupsByPage[page.id] ?? []).sorted { ($0.order, $0.id) < ($1.order, $1.id) }
             for group in groups {
                 refs.append(SearchableGroupRef(
                     pageId: page.id,
@@ -7528,7 +7560,7 @@ final class SlotStoreObservable: ObservableObject {
                     groupId: group.id,
                     groupName: group.name,
                     groupOrder: group.order,
-                    storage: specialStorage.slotStorage(for: group.id),
+                    storageRoot: specialStorage,
                     slotCount: config.slots
                 ))
             }
@@ -7551,19 +7583,24 @@ final class SlotStoreObservable: ObservableObject {
     /// 这也是为什么匹配下沉到这里做：先匹配后补齐，才能让内存只随命中数增长。
     static func expandSearchableSlots(_ groups: [SearchableGroupRef],
                                       query: String,
-                                      filter: SlotFilterType) -> [SlotGlobalSearchResult] {
+                                      filter: SlotFilterType,
+                                      isCancelled: () -> Bool = { false }) -> [SlotGlobalSearchResult] {
         var results: [SlotGlobalSearchResult] = []
         for group in groups {
-            let scan = group.storage.searchScanSnapshot(slotCount: group.slotCount)
+            guard !isCancelled() else { return [] }
+            let storage = group.storage
+            let scan = storage.searchScanSnapshot(slotCount: group.slotCount, isCancelled: isCancelled)
             for (slot, scanned) in scan {
-                let label = group.storage.getLabel(slot) ?? ""
+                guard !isCancelled() else { return [] }
+                let label = storage.getLabel(slot) ?? ""
                 guard SlotSearchMatcher.matches(slot: slot,
                                                 content: scanned,
                                                 label: label,
                                                 query: query,
                                                 filter: filter) else { continue }
                 // 命中才补齐完整内容（含图片字节）；补读失败时退回扫描结果，至少还能展示与跳转。
-                let full = group.storage.get(slot)
+                guard !isCancelled() else { return [] }
+                let full = storage.get(slot)
                 results.append(SlotGlobalSearchResult(
                     pageId: group.pageId,
                     pageName: group.pageName,

@@ -62,16 +62,18 @@ func runAgentComposerLayoutProbe(directory: URL, check: (Bool, String) -> Void) 
                         }
                         let label = "\(mode.rawValue)-\(skin.rawValue)-\(appearance)-\(Int(width))-\(count)"
                         let skill = frame("agent-reference-skill"), polish = frame("agent-ai-polish")
+                        let add = frame("agent-composer-add"), voice = frame("agent-voice-input")
+                        let picker = frame("agent-model-picker")
                         let row = frame("agent-composer-toolbar")
                         let editorFrame = editors(host).first.map { editor in
                             window.convertToScreen(editor.convert(editor.bounds, to: nil))
                         }
                         if originalEditorFrame == nil { originalEditorFrame = editorFrame }
-                        let aligned = skill.map { s in
+                        let aligned = add.map { s in
                             polish.map { p in abs(s.midY - p.midY) < 2 && s.maxX < p.minX } ?? false
                         } ?? false
                         let contentFrame = window.convertToScreen(host.frame)
-                        let inside = [skill, polish, row, editorFrame].allSatisfy {
+                        let inside = [add, polish, voice, picker, editorFrame].allSatisfy {
                             guard let f = $0 else { return false }
                             return f.minX >= contentFrame.minX - 2
                                 && f.maxX <= contentFrame.maxX + 2
@@ -83,7 +85,7 @@ func runAgentComposerLayoutProbe(directory: URL, check: (Bool, String) -> Void) 
                         } ?? false
                         let chip = frame("agent-remove-skill-\(references[0].id)")
                         let labelsAligned = count == 0 || (chip.map { c in
-                            polish.map { abs(c.midY - $0.midY) < 2 } ?? false
+                            skill.map { abs(c.midY - $0.midY) < 2 } ?? false
                         } ?? false)
                         allAligned = allAligned && aligned
                         allInside = allInside && inside
@@ -108,10 +110,10 @@ func runAgentComposerLayoutProbe(directory: URL, check: (Bool, String) -> Void) 
             }
         }
     }
-    check(allAligned, "Skills and polish share one row across widths and themes")
+    check(allAligned, "add and polish controls share the bottom row across widths and themes")
     check(allInside, "composer controls stay within each tested window")
     check(allEditorStable, "adding Skill references does not move the editor vertically")
-    check(allLabelsAligned, "selected Skill labels align with the polish control")
+    check(allLabelsAligned, "selected Skill labels align with the Skills control in the reference row")
     let nodes = elements(host)
     if let remove = nodes.first(where: {
         ($0.accessibilityIdentifier?() ?? "") == "agent-remove-skill-\(references[0].id)"

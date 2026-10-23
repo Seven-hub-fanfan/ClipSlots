@@ -40,8 +40,30 @@ struct BatchGenerationButtonStyle: ButtonStyle {
 
 struct BatchGenerationEntry: View {
     @ObservedObject private var controller = BatchGenerationController.shared
+    var canvasHeader = false
+    var iconOnly = false
     let action: () -> Void
     var body: some View {
+        entry
+        .accessibilityIdentifier("batch-generation-entry")
+        .help("选择页面和槽位组，逐槽位生成")
+    }
+
+    @ViewBuilder private var entry: some View {
+        if canvasHeader {
+            Button(action: action) {
+                HStack(spacing: 7) {
+                    Image(systemName: controller.runningID == nil ? "square.stack.3d.up" : "clock.arrow.circlepath")
+                        .font(.system(size: 18, weight: .regular))
+                    if !iconOnly {
+                        Text(controller.runningID == nil ? "批量生成" : "批量进度")
+                    }
+                }
+                .frame(width: iconOnly ? 44 : nil)
+            }
+            .buttonStyle(CanvasHeaderButtonStyle(iconOnly: iconOnly, isActive: controller.runningID != nil))
+            .accessibilityLabel(controller.runningID == nil ? "批量生成" : "批量进度")
+        } else {
         Button(action: action) {
             HStack(spacing: 6) {
                 Image(systemName: controller.runningID == nil ? "square.stack.3d.up.fill" : "clock.arrow.circlepath")
@@ -49,8 +71,7 @@ struct BatchGenerationEntry: View {
             }
         }
         .buttonStyle(BatchGenerationButtonStyle())
-        .accessibilityIdentifier("batch-generation-entry")
-        .help("选择页面和槽位组，逐槽位生成")
+        }
     }
 }
 

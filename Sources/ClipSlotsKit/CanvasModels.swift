@@ -742,7 +742,8 @@ public struct CanvasDocument: Codable, Equatable {
             .compactMap(\.edge)
         edges = CanvasEdgeGraph.migratedFromParentLinks(
             nodes: nodes,
-            edges: CanvasEdgeGraph.normalized(decodedEdges, nodeIds: Set(nodes.map(\.id))))
+            edges: CanvasEdgeGraph.normalized(decodedEdges, nodeIds: Set(nodes.map(\.id)),
+                                              preservingImageCycles: nodes))
         nodes = CanvasEdgeGraph.reconcilingDraftReferences(nodes: nodes, edges: edges)
         groups = CanvasNodeGroup.normalized(
             (try c.decodeIfPresent([LenientGroup].self, forKey: .groups) ?? []).compactMap(\.group),

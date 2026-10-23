@@ -3,6 +3,7 @@
 import argparse
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import plistlib
@@ -63,8 +64,28 @@ with zipfile.ZipFile(source_zip, "w", compression=zipfile.ZIP_DEFLATED, compress
         archive.write(path, "ClipSlots/" + str(path.relative_to(repo)))
 dmg = output / f"ClipSlots_v{version}.dmg"
 assert not dmg.exists()
-subprocess.run(["hdiutil", "create", "-fs", "HFS+", "-srcfolder", str(app),
-                "-volname", f"ClipSlots v{version}", "-format", "UDZO", str(dmg)], check=True)
+with tempfile.TemporaryDirectory(prefix="clipslots-tapnow-dmg-", dir="/tmp") as temporary:
+    work = Path(temporary)
+    writable = work / "writable.dmg"
+    mount = work / "volume"
+    mount.mkdir()
+    app_bytes = sum(p.stat().st_size for p in app.rglob("*") if p.is_file())
+    size_mb = max(64, math.ceil(app_bytes / 1048576) + 24)
+    subprocess.run(["hdiutil", "create", "-size", f"{size_mb}m", "-fs", "HFS+",
+                    "-volname", f"ClipSlots v{version}", str(writable)], check=True)
+    subprocess.run(["hdiutil", "attach", "-nobrowse", "-noautoopen", "-mountpoint",
+                    str(mount), str(writable)], check=True)
+    try:
+        (mount / ".metadata_never_index").touch()
+        subprocess.run(["ditto", str(app), str(mount / "ClipSlots.app")], check=True)
+        subprocess.run(["codesign", "--verify", "--deep", "--strict", str(mount / "ClipSlots.app")], check=True)
+    finally:
+        result = subprocess.run(["hdiutil", "detach", str(mount)])
+        if result.returncode:
+            # Only this task's private image is mounted at this exact path.
+            subprocess.run(["hdiutil", "detach", "-force", str(mount)], check=True)
+    subprocess.run(["hdiutil", "convert", str(writable), "-format", "UDZO",
+                    "-imagekey", "zlib-level=9", "-o", str(dmg)], check=True)
 evidence = output / "evidence"
 evidence.mkdir(exist_ok=True)
 resource_hashes = {str(p.relative_to(contents / "Resources")): sha(p)

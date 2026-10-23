@@ -22,6 +22,25 @@ func runAgentArtifactMediaProbe(directory: URL, check: (Bool, String) -> Void) a
     do {
         for (kind, name) in [(AgentArtifactKind.video, "motion-fixture.mp4"), (.audio, "audio-fixture.wav")] {
             let bytes = try Data(contentsOf: root.appendingPathComponent(name))
+            if kind == .video {
+                let captured = try await Task.detached {
+                    try AgentAttachmentImport.capture(root.appendingPathComponent(name))
+                }.value
+                check(captured.sampledFrames?.count == 3 && captured.textSnapshot?.contains("未读取音轨") == true,
+                      "video input captures three actual frames and declares sampling limits")
+                let message = AgentMessage(role: .user, content: "描述抽帧", attachments: [captured])
+                var config = AgentConfig(); config.supportsImageInput = true
+                try AgentAttachmentImport.validateImageSupport(history: [message], supported: true)
+                let wire = AgentService.requestBody(history: [message], config: config, tools: [])
+                check(wire["messages"]?.arrayValue?.last?["content"]?.arrayValue?.count == 4,
+                      "video input emits text plus three image parts in actual backend body")
+                let saved = try JSONDecoder().decode(AgentAttachment.self, from: JSONEncoder().encode(captured))
+                check(saved.sampledFrames == captured.sampledFrames, "video sampled bytes survive history persistence")
+                do {
+                    try AgentAttachmentImport.validateImageSupport(history: [message], supported: false)
+                    check(false, "video frame input requires declared image capability")
+                } catch { check(true, "video frame input requires declared image capability") }
+            }
             await model.prepare(bytes, kind: kind, path: name)
             await wait { !model.loading }
             guard let player = model.player, let item = player.currentItem else {

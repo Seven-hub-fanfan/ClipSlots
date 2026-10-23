@@ -192,6 +192,15 @@ enum PermissionCenter {
     private static var helperPermission: AppPermission?
     private static var dismissedHelperPermission: AppPermission?
     static var draggingApplication = false
+    private static weak var pressedApplicationCard: PermissionFileDragView?
+
+    static func beginApplicationPress(_ view: PermissionFileDragView) {
+        pressedApplicationCard = view
+    }
+
+    static func endApplicationPress(_ view: PermissionFileDragView) {
+        if pressedApplicationCard === view { pressedApplicationCard = nil }
+    }
 
     static func present(for permission: AppPermission? = nil, afterUpdate: Bool = false) {
         model.refresh()
@@ -275,8 +284,9 @@ enum PermissionCenter {
     private static func updateHelper(using state: PermissionCenterModel, frontPID: pid_t?,
                                      frontBundleID: String?, settingsFrame: CGRect?,
                                      visibleFrames: [CGRect]) {
-        // Do not reposition or order panels during a native file drag.
-        guard !draggingApplication else { return }
+        // Freeze from mouse-down, including the movement below the native
+        // drag threshold. Polling must not move the card out from under a press.
+        guard !draggingApplication, pressedApplicationCard == nil else { return }
         if frontPID == ProcessInfo.processInfo.processIdentifier {
             if panel?.isVisible == false { panel?.orderFront(nil) }
         } else {
@@ -294,6 +304,8 @@ enum PermissionCenter {
             let window = PermissionHelperPanel(contentRect: NSRect(origin: .zero, size: helperSize),
                 styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
             configure(window, identifier: "clipslots-permission-drag-helper", hidesOnDeactivate: false)
+            window.isMovableByWindowBackground = false
+            window.isMovable = false
             window.contentView = NSHostingView(rootView: PermissionDragHelper(
                 model: state, permission: permission,
                 onClose: {
@@ -313,12 +325,8 @@ enum PermissionCenter {
         // Settings always gets the actual drag card. The large status panel
         // must never suppress the only file-drag source on a wide display.
         if helper.frame != frame {
-            if helper.isVisible && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
-                NSAnimationContext.runAnimationGroup {
-                    $0.duration = 0.16
-                    helper.animator().setFrame(frame, display: true)
-                }
-            } else { helper.setFrame(frame, display: true) }
+            // Avoid an in-flight docking animation continuing after mouse-down.
+            helper.setFrame(frame, display: true)
         }
         if !helper.isVisible { helper.orderFrontRegardless() }
     }
@@ -427,7 +435,7 @@ struct PermissionCenterCard: View {
     private var surface: Color { scheme == .dark ? Color(white: 0.12) : .white }
     private var ink: Color { scheme == .dark ? .white : Color(white: 0.12) }
     private var description: String {
-        if afterUpdate { return "应用已更新，请检查以下权限。\n开关已开启但功能不可用时，选择「修复」清除旧记录。" }
+        if afterUpdate { return "应用已更新，请检查以下权限。\n辅助功能旧记录会在需要时自动清除，随后由你在系统中确认。" }
         if purpose == .accessibility { return "获取所选内容与模拟复制粘贴，需要辅助功能权限。\n授权后，请重新执行刚才的操作。" }
         if purpose == .screenCapture { return "截图设为缩略图，需要屏幕录制权限。\n授权后，请重新点击截图；macOS 可能要求重新打开应用。" }
         return "使用复制粘贴与截图功能，需要授予对应的权限。\n你可以按需开启，授权状态会自动更新。"
@@ -585,7 +593,9 @@ struct PermissionDragHelper: View {
             HStack(spacing: 8) {
                 Image(systemName: "cursorarrow.motionlines").font(.system(size: 20, weight: .bold))
                     .foregroundColor(accent)
-                Text("拖入系统列表，开启「\(permission.title)」")
+                Text(model.repairing == permission ? "正在自动清除「\(permission.title)」旧记录" :
+                    model.repairNotice != nil ? "已清除旧记录，请开启「\(permission.title)」" :
+                    "拖入系统列表，开启「\(permission.title)」")
                     .font(.system(size: 12)).lineLimit(1)
                 Spacer(minLength: 0)
                 Button(action: onClose) { Image(systemName: "xmark").font(.system(size: 11)) }
@@ -651,7 +661,7 @@ final class PermissionFileDragView: NSView, NSDraggingSource {
     let url: URL
     var dragEnabled = true {
         didSet {
-            if !dragEnabled { down = nil }
+            if !dragEnabled { endPress() }
             setAccessibilityEnabled(dragEnabled)
             needsDisplay = true
         }
@@ -670,6 +680,16 @@ final class PermissionFileDragView: NSView, NSDraggingSource {
     }
     required init?(coder: NSCoder) { nil }
     override var isFlipped: Bool { true }
+    override var mouseDownCanMoveWindow: Bool { false }
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+    override func viewWillMove(toWindow newWindow: NSWindow?) {
+        if newWindow == nil { endPress() }
+        super.viewWillMove(toWindow: newWindow)
+    }
+    private func endPress() {
+        down = nil
+        PermissionCenter.endApplicationPress(self)
+    }
     override func draw(_ dirtyRect: NSRect) {
         let rounded = NSBezierPath(roundedRect: bounds.insetBy(dx: 0.5, dy: 0.5), xRadius: 7, yRadius: 7)
         NSColor.controlBackgroundColor.withAlphaComponent(0.75).setFill()
@@ -688,14 +708,17 @@ final class PermissionFileDragView: NSView, NSDraggingSource {
     override func mouseDown(with event: NSEvent) {
         guard dragEnabled else { return }
         down = convert(event.locationInWindow, from: nil)
+        PermissionCenter.beginApplicationPress(self)
     }
-    override func mouseUp(with event: NSEvent) { down = nil }
+    override func mouseUp(with event: NSEvent) {
+        endPress()
+        PermissionCenter.model.refresh()
+    }
     override func mouseDragged(with event: NSEvent) {
         guard dragEnabled, let start = down,
               let writer = PermissionApplicationFile.pasteboardWriter(for: url) else { return }
         let point = convert(event.locationInWindow, from: nil)
         guard hypot(point.x - start.x, point.y - start.y) >= 3 else { return }
-        down = nil
         let item = NSDraggingItem(pasteboardWriter: writer)
         let image = NSImage(size: bounds.size)
         if let bitmap = bitmapImageRepForCachingDisplay(in: bounds) {
@@ -704,6 +727,7 @@ final class PermissionFileDragView: NSView, NSDraggingSource {
         }
         item.setDraggingFrame(bounds, contents: image)
         PermissionCenter.draggingApplication = true
+        endPress()
         let session = beginDraggingSession(with: [item], event: event, source: self)
         session.animatesToStartingPositionsOnCancelOrFail = true
     }

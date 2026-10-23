@@ -4,9 +4,11 @@ import ClipSlotsKit
 struct CanvasNavigationControls: View {
     private typealias TapSkin = CanvasSkin
     let nodes: [CanvasNode]
+    var projectID: String = ""
     var selectedNodeIDs: Set<String> = []
     let viewport: CGRect
     let saveStatus: CanvasStore.SaveStatus
+    var saveProgress: CanvasStore.SaveProgress? = nil
     @Binding var pan: CGSize
     @Binding var zoom: CGFloat
     @Binding var showMap: Bool
@@ -27,11 +29,17 @@ struct CanvasNavigationControls: View {
     private let mapSize = CanvasReplicaGeometry.mapSize
 
     var body: some View {
+        WorkspaceContentBoundary {
         VStack(alignment: .leading, spacing: 8) {
             if showMap {
-                miniMap
+                WorkspaceContentBoundary { miniMap }
                     .transition(.opacity.combined(with: .scale(scale: 0.94, anchor: .bottomLeading)))
             }
+            WorkspaceStableBoundary(key: .init(
+                zoom: zoom, map: showMap, edges: showEdges, grid: gridSnap,
+                hovered: hovered, tooltip: tooltipID, helpOpen: helpOpen,
+                saveStatus: saveHint, saveSource: saveProgress.map(ObjectIdentifier.init),
+                project: projectID)) {
             HStack(spacing: 8) {
                 HStack(spacing: 8) {
                     control("map", symbol: "map.fill", hint: showMap ? "关闭小地图" : "打开小地图", active: showMap) {
@@ -51,6 +59,9 @@ struct CanvasNavigationControls: View {
                 .background(TapSkin.chromeFill, in: RoundedRectangle(cornerRadius: 16))
                 .overlay(RoundedRectangle(cornerRadius: 16).stroke(TapSkin.border.opacity(0.45), lineWidth: 0.6)
                     .allowsHitTesting(false))
+                if let saveProgress {
+                    CanvasSaveIndicator(progress: saveProgress, save: onSave)
+                } else {
                 Button(action: onSave) {
                     ZStack(alignment: .topTrailing) {
                         Image(systemName: "arrow.triangle.2.circlepath")
@@ -63,6 +74,7 @@ struct CanvasNavigationControls: View {
                 .help(saveHint)
                 .accessibilityLabel(saveHint)
                 .accessibilityIdentifier("canvas-save-status")
+                }
                 Button { helpOpen.toggle() } label: {
                     Image(systemName: "questionmark.circle")
                         .font(.system(size: 15)).frame(width: 40, height: 40)
@@ -76,15 +88,18 @@ struct CanvasNavigationControls: View {
                 }
             }
             .foregroundColor(TapSkin.ink)
+            }.equatable()
         }
+        }
+        .animation(reduceMotion ? nil : .easeOut(duration: 0.2), value: showMap)
         .onChange(of: nodes.count) { count in
-            if count > 50 && previousNodeCount <= 50 {
-                withAnimation(reduceMotion ? nil : .easeOut(duration: 0.2)) { showMap = true }
+            if count > 50 && previousNodeCount <= 50 && !showMap {
+                showMap = true
             }
             previousNodeCount = count
         }
         .onChange(of: selectedNodeIDs.isEmpty) { empty in
-            if !empty { withAnimation(.easeOut(duration: 0.2)) { showMap = true } }
+            if !empty && !showMap { showMap = true }
         }
         .onAppear {
             previousNodeCount = nodes.count
@@ -185,10 +200,10 @@ struct CanvasNavigationControls: View {
     }
     private var helpMenu: some View {
         VStack(alignment: .leading, spacing: 3) {
-            ForEach(["最近更新", "使用教程", "连接 Agent", "反馈问题", "快捷键"], id: \.self) { title in
+            ForEach(["最近更新", "使用教程", "画布助手", "反馈问题", "快捷键"], id: \.self) { title in
                 Button {
                     helpOpen = false
-                    if title == "连接 Agent" { onAgent() } else { helpPage = title }
+                    if title == "画布助手" { onAgent() } else { helpPage = title }
                 } label: {
                     Label(title, systemImage: helpSymbol(title))
                         .font(.system(size: 12)).padding(10)
@@ -203,7 +218,7 @@ struct CanvasNavigationControls: View {
         switch title {
         case "最近更新": return "bell.fill"
         case "使用教程": return "info.circle"
-        case "连接 Agent": return "powerplug"
+        case "画布助手": return "sparkles"
         case "反馈问题": return "ladybug"
         default: return "keyboard"
         }

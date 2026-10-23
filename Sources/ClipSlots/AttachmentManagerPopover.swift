@@ -857,9 +857,7 @@ private struct AttachmentThumbnail: View {
         .task(id: attachment.canvasSourceIdentity) {
             image = nil
             while !Task.isCancelled {
-                let loaded = await withCheckedContinuation { continuation in
-                    CanvasAttachmentThumbnails.load(attachment, maxPixel: 64) { continuation.resume(returning: $0) }
-                }
+                let loaded = await CanvasAttachmentThumbnails.load(attachment, maxPixel: 64)
                 guard !Task.isCancelled else { return }
                 if image !== loaded { image = loaded }
                 try? await Task.sleep(for: .seconds(2))

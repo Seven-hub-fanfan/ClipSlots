@@ -137,6 +137,8 @@ public final class SlotStorage {
     // 其他进程的外部写入照样能在下一次搜索里出现。
     private var scanCache: [Int: SlotContent] = [:]
     private var scanCacheFingerprint: [Int: DirFingerprint] = [:]
+    private var libraryCache: [Int: LibrarySummary] = [:]
+    private var libraryFingerprints: [Int: DirFingerprint] = [:]
     // P0-1 (v2.10.38): in-memory label cache + per-slot label.txt fingerprint. `getLabel`
     // previously took the cross-process StorageLock and synchronously read `label.txt` on
     // EVERY call. `allSearchableSlots()` (global search) invokes it once per slot on the main
@@ -645,6 +647,56 @@ public final class SlotStorage {
         queue.sync { cache }
     }
 
+    /// Small, read-only values for the canvas library. Missing keys mean UNKNOWN,
+    /// including a busy writer; callers must retain their last known summary.
+    public struct LibrarySummary: Equatable {
+        public let slot: Int
+        public let label: String?
+        public let preview: String
+        public let attachmentCount: Int
+        public let isEmpty: Bool
+    }
+
+    public func librarySummaries(slotCount: Int) -> [Int: LibrarySummary] {
+        guard slotCount > 0 else { return [:] }
+        var result: [Int: LibrarySummary] = [:]
+        for slot in 1...slotCount {
+            let directory = baseURL.appendingPathComponent(String(slot))
+            let fingerprint = dirFingerprint(directory.path)
+            if let summary = queue.sync(execute: {
+                libraryFingerprints[slot] == fingerprint ? libraryCache[slot] : nil
+            }) {
+                result[slot] = summary
+                continue
+            }
+            let cached: SlotContent? = queue.sync {
+                if let value = cache[slot], cacheFingerprint[slot] == fingerprint { return value }
+                if let value = scanCache[slot], scanCacheFingerprint[slot] == fingerprint { return value }
+                return nil
+            }
+            let content: SlotContent?
+            if let cached { content = cached }
+            else {
+                content = try? StorageLock.shared.withLock(timeout: Self.readLockTimeout) {
+                    queue.sync {
+                        readSlotContent(from: directory, textOnly: true)
+                    }
+                }
+            }
+            guard let content else { continue }
+            let text = content.plainText?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            let summary = LibrarySummary(slot: slot, label: content.label ?? getLabel(slot),
+                preview: String(text.prefix(512)), attachmentCount: content.attachments.count,
+                isEmpty: content.isEmpty)
+            result[slot] = summary
+            queue.sync {
+                libraryCache[slot] = summary
+                libraryFingerprints[slot] = fingerprint
+            }
+        }
+        return result
+    }
+
     // MARK: - Global search scan (v2.11.7 hotfix11)
 
     /// Unlike best-effort search, a generation preview must report an incomplete scan.
@@ -683,10 +735,11 @@ public final class SlotStorage {
     /// 随搜索结束即释放。命中的槽位由调用方用 `get(_:)` 完整补齐后再渲染。
     ///
     /// - Parameter slotCount: 每组槽位数（`config.slots`）。
-    public func searchScanSnapshot(slotCount: Int) -> [Int: SlotContent] {
+    public func searchScanSnapshot(slotCount: Int, isCancelled: () -> Bool = { false }) -> [Int: SlotContent] {
         guard slotCount > 0 else { return [:] }
         var out: [Int: SlotContent] = [:]
         for slot in 1...slotCount {
+            guard !isCancelled() else { return [:] }
             let slotDir = baseURL.appendingPathComponent(String(slot))
             // 缓存里已有且指纹未变 → 直接用（完整内容，零额外 IO，也顺带让当前组的搜索保持原有精度）。
             let diskFP = dirFingerprint(slotDir.path)
@@ -750,6 +803,8 @@ public final class SlotStorage {
             // 它本身有指纹护栏，这里一起清只是让「显式失效」语义完整。
             scanCache.removeAll()
             scanCacheFingerprint.removeAll()
+            libraryCache.removeAll()
+            libraryFingerprints.removeAll()
         }
     }
 

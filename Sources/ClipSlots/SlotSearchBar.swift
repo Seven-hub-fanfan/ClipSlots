@@ -61,6 +61,7 @@ struct SlotSearchBar: View {
     @Binding var searchText: String
     @Binding var selectedFilter: SlotFilterType
     @Binding var searchScope: SlotSearchScope
+    @State private var compactScope = true
 
     // v2.11.8: 原 `ScopeControlStyle` 枚举已删除。范围选择器挪到搜索框外侧后，宽窄两版
     // 各自直接写在 body 的两个候选分支里（宽版 = NeuSegmentedControl、窄版 = 图标菜单），
@@ -72,27 +73,37 @@ struct SlotSearchBar: View {
     private static let scopeSegmentedMinWidth: CGFloat = 340
 
     var body: some View {
-        WidthThresholdLayout(threshold: Self.scopeSegmentedMinWidth) {
-            HStack(alignment: .center, spacing: AppTheme.spacingSmall) {
-                searchField
-                    .layoutPriority(2)
-                // v2.11.8: 范围选择器从「搜索框内部」挪到搜索框**右侧**，与新设计稿一致。
-                // 内凹的搜索框里再嵌一个凹轨道会出现「凹中凹」，两层内阴影叠在一起谁也读不出来。
+        HStack(alignment: .center, spacing: compactScope ? AppTheme.spacingTight : AppTheme.spacingSmall) {
+            searchField
+                .layoutPriority(2)
+            if compactScope {
+                scopeCompactMenu
+            } else {
                 NeuSegmentedControl(
                     options: SlotSearchScope.allCases.map { NeuSegment(value: $0, title: $0.title) },
                     selection: $searchScope
                 )
                 .frame(width: 108)
                 .help("搜索范围：\(searchScope.title)")
-                filterMenu
             }
-            HStack(alignment: .center, spacing: AppTheme.spacingTight) {
-                searchField
-                    .layoutPriority(2)
-                scopeCompactMenu
-                filterMenu
+            filterMenu
+        }
+        // Keep one NSTextField and one filter menu alive across width changes.
+        // Placing an unused layout candidate offscreen still mounts its native
+        // controls and expands the root layout graph.
+        .frame(minWidth: 232)
+        .background {
+            GeometryReader { proxy in
+                Color.clear
+                    .onAppear { updateScope(width: proxy.size.width) }
+                    .onChange(of: proxy.size.width) { updateScope(width: $0) }
             }
         }
+    }
+
+    private func updateScope(width: CGFloat) {
+        let compact = width < Self.scopeSegmentedMinWidth
+        if compactScope != compact { compactScope = compact }
     }
 
     /// 内凹搜索框：椭圆形（圆角 = 半高）well，左侧放大镜、右侧清除按钮。

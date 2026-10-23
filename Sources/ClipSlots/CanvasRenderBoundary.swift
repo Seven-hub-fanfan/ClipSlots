@@ -2,7 +2,7 @@ import SwiftUI
 import ClipSlotsKit
 
 /// 闭包只在内容键变化时执行，pan / zoom 不再触发槽位读取与媒体探测。
-struct CanvasRenderBoundary<Content: View>: View, Equatable {
+struct CanvasRenderBoundary: View, Equatable {
     struct Key: Equatable {
         let node: CanvasNode
         let selected: Bool
@@ -15,11 +15,17 @@ struct CanvasRenderBoundary<Content: View>: View, Equatable {
         let currentGroup: String
         let currentContentId: String?
         let path: String
+        var connectionAppearance: CanvasConnectionAppearance = .idle
         var referenceNodes: [CanvasNode] = []
         var referenceEdges: [CanvasEdge] = []
+        var referenceContentRevisions: [Int] = []
     }
     let key: Key
-    @ViewBuilder let content: () -> Content
+    private let content: () -> AnyView
+    init<Content: View>(key: Key, @ViewBuilder content: @escaping () -> Content) {
+        self.key = key
+        self.content = { AnyView(content()) }
+    }
 
     static func == (lhs: Self, rhs: Self) -> Bool { lhs.key == rhs.key }
     var body: some View {

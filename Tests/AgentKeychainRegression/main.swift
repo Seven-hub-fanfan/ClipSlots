@@ -93,7 +93,7 @@ private enum KeychainRegression {
         check(matches == 12, "callers did not share the same result")
     }
 
-    static func main() throws {
+    static func main() async throws {
         let success = SecurityFixture()
         let store = success.store()
         concurrentReads(store, expected: "synthetic-old")
@@ -200,6 +200,57 @@ private enum KeychainRegression {
                 check(racingStore.readAPIKey() == "synthetic-external", "late read undid cache invalidation")
                 check(fixture.reads == 2, "invalidation must cause one fresh read")
             }
+        }
+
+        for reason in ["timeout", "cancel", "state-timeout", "state-cancel"] {
+            let fixture = SecurityFixture()
+            fixture.readStarted = DispatchSemaphore(value: 0)
+            fixture.releaseRead = DispatchSemaphore(value: 0)
+            let waitingStore = fixture.store()
+            let began = Date()
+            let task = Task.detached { () -> AgentKeychainError? in
+                if reason.hasPrefix("state") {
+                    return await waitingStore.keyStateAsync(timeout: reason == "state-timeout" ? 0.1 : 5).error
+                }
+                do {
+                    _ = try await AgentCredentialAccess.readAPIKey(from: waitingStore,
+                        timeout: reason == "timeout" ? 0.1 : 5)
+                    return nil
+                } catch is CancellationError { return .readCancelled }
+                catch { return error as? AgentKeychainError }
+            }
+            check(fixture.readStarted!.wait(timeout: .now() + 2) == .success, "async read never entered Security")
+            if reason.contains("cancel") { task.cancel() }
+            let error = await task.value
+            check(error == (reason.contains("cancel") ? .readCancelled : .authorizationTimedOut),
+                  "blocked credential read lost cancellation/deadline")
+            check(Date().timeIntervalSince(began) < 1, "waiter did not return before Security completed")
+            check(fixture.reads == 1, "bounded wait must not repeat Security requests")
+            fixture.releaseRead!.signal()
+            let key = try await AgentCredentialAccess.readAPIKey(from: waitingStore, timeout: 2)
+            check(key == "synthetic-old" && fixture.reads == 1, "late authorization must populate the existing cache")
+            try waitingStore.writeAPIKey("synthetic-after-wait")
+            check(waitingStore.readAPIKey() == "synthetic-after-wait", "late completion overwrote a newer key")
+        }
+
+        let denied = SecurityFixture()
+        denied.readStatus = errSecAuthFailed
+        do {
+            _ = try await AgentCredentialAccess.readAPIKey(from: denied.store())
+            preconditionFailure("denied async read looked like a missing key")
+        } catch {
+            check(error as? AgentKeychainError == .osStatus(errSecAuthFailed), "async read must retain Security failure")
+        }
+        let preCancelled = SecurityFixture()
+        let neverStarted = Task.detached {
+            withUnsafeCurrentTask { $0?.cancel() }
+            return try await AgentCredentialAccess.readAPIKey(from: preCancelled.store())
+        }
+        do {
+            _ = try await neverStarted.value
+            preconditionFailure("cancelled task started a read")
+        } catch {
+            check(error is CancellationError && preCancelled.reads == 0, "pre-cancellation must not touch Security")
         }
         print("AgentKeychain regression: \(checks) checks passed (synthetic credentials only)")
     }

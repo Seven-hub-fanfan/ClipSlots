@@ -182,7 +182,7 @@ public enum AgentCanvasSync {
         }
         let alive = Set(next.nodes.map(\.id))
         guard next.edges.allSatisfy({ alive.contains($0.fromNodeId) && alive.contains($0.toNodeId) }),
-              CanvasEdgeGraph.normalized(next.edges, nodeIds: alive) == next.edges else {
+              CanvasEdgeGraph.normalized(next.edges, nodeIds: alive, preservingImageCycles: next.nodes) == next.edges else {
             throw AgentOperationError("同步快照缺少连线端点或包含非法连线，未提交半份图。")
         }
         // Deletions are explicit and user-confirmed. Only the affected group

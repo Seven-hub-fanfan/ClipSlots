@@ -20,11 +20,7 @@ extension CanvasWorkspaceView {
     var selectionJunction: CGPoint? {
         guard let bounds = selectionScreenBounds else { return nil }
         if let point = selectionLinkPoint { return point }
-        let viewport = canvasContentViewport
-        let x = min(bounds.maxX + 92, viewport.maxX - 24)
-        let y = bounds.maxX + 110 <= viewport.maxX ? bounds.midY : bounds.minY - 46
-        return CGPoint(x: max(viewport.minX + 24, x),
-                       y: min(max(viewport.minY + 28, y), viewport.maxY - 28))
+        return CGPoint(x: bounds.maxX, y: bounds.midY)
     }
 
     @ViewBuilder var selectionBoundsOverlay: some View {
@@ -36,29 +32,32 @@ extension CanvasWorkspaceView {
                 .position(x: rect.midX, y: rect.midY)
                 .allowsHitTesting(false)
         }
-        if let junction = selectionJunction, draggingNodeId == nil, pileDragID == nil, linkDrag == nil {
+        if let junction = selectionLinkPoint, draggingNodeId == nil, pileDragID == nil, linkDrag == nil {
             ForEach(selectedCanvasNodes) { node in
                 let rect = canvas.pile(containing: node.id).map(pileScreenFrame) ?? screenFrame(of: node)
                 let start = CGPoint(x: rect.maxX, y: rect.midY)
-                let controls = CanvasEdgeGeometry.controlPoints(start: start, end: junction,
-                                                                outSide: .right, inSide: .left)
+                let dx = junction.x - start.x
+                let controls = (CGPoint(x: start.x + dx * 0.5, y: start.y),
+                                CGPoint(x: junction.x - dx * 0.5, y: junction.y))
                 CanvasEdgeCurve(start: start, c1: controls.0, c2: controls.1, end: junction)
-                    .stroke(TapSkin.edgeInkActive.opacity(0.65), lineWidth: 1)
+                    .stroke(Color.white.opacity(0.4), lineWidth: 1.4)
                     .allowsHitTesting(false)
             }
+            Text("+").font(.system(size: 20, weight: .light)).foregroundColor(Color(white: 0.32))
+                .frame(width: 20, height: 20).background(Circle().fill(.white))
+                .position(junction).allowsHitTesting(false)
         }
     }
 
     @ViewBuilder var selectionActionsOverlay: some View {
         if let bounds = selectionScreenBounds, let junction = selectionJunction,
-           draggingNodeId == nil, pileDragID == nil, linkDrag == nil {
+           draggingNodeId == nil, pileDragID == nil, linkDrag == nil, addMenu == nil {
             Button { spawnSelectionDownstream() } label: {
                 Image(systemName: "plus")
-                    .font(.system(size: 13, weight: .semibold))
-                    .foregroundColor(TapSkin.onAccent)
-                    .frame(width: 22, height: 22)
-                    .background(Circle().fill(TapSkin.accent))
-                    .frame(width: 36, height: 36)
+                    .font(.system(size: 16, weight: .medium))
+                    .foregroundColor(.white)
+                    .frame(width: 20, height: 20)
+                    .background(Circle().fill(TapSkin.portStroke))
                     .contentShape(Circle())
             }
             .buttonStyle(.plain)
@@ -74,11 +73,7 @@ extension CanvasWorkspaceView {
 
     func spawnSelectionDownstream(at point: CGPoint? = nil) {
         guard let junction = point ?? selectionJunction else { return }
-        let center = CanvasGeometry.canvasPoint(
-            screen: CGPoint(x: junction.x + 180 * zoom, y: junction.y),
-            pan: effectivePan, zoom: zoom)
-        openAddMenu(atScreen: CGPoint(x: junction.x - 12, y: junction.y + 20),
-                    canvasPoint: center, parentNodeId: nil,
+        openAddMenu(atScreen: junction, parentNodeId: nil,
                     parentNodeIds: selectedCanvasNodes.map(\.id))
     }
 

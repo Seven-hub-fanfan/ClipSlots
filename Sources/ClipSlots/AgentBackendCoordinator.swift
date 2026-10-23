@@ -45,7 +45,11 @@ struct AgentBackendSelection {
     func invocation(history: [AgentMessage],
                     config: AgentConfig,
                     tools: (any AgentToolExecuting)?) -> AgentInvocationContext {
-        AgentInvocationContext(history: history, config: normalized(config), tools: tools)
+        var prepared = normalized(config)
+        if history.last(where: { $0.role == .user })?.canvasTurn != nil {
+            prepared.systemPrompt = config.systemPrompt
+        }
+        return AgentInvocationContext(history: history, config: prepared, tools: tools)
     }
 }
 
@@ -77,7 +81,7 @@ enum AgentBackendCoordinator {
             kind: kind,
             backend: backend,
             requiresAPIKey: kind == .deepseek,
-            supportsCanvasReadTools: kind != .tika,
+            supportsCanvasReadTools: true,
             gatewayConfiguration: gatewayConfig,
             gatewayBaseURL: resolvedURL)
     }
@@ -91,7 +95,7 @@ enum AgentBackendCoordinator {
             kind: kind,
             backend: backend,
             requiresAPIKey: backend is AgentService,
-            supportsCanvasReadTools: !(backend is TikaCLIService))
+            supportsCanvasReadTools: true)
     }
 
     static func kind(for scope: AgentBackendScope,

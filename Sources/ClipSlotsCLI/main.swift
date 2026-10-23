@@ -8,7 +8,13 @@ if CommandLine.arguments.dropFirst().first == "--mcp" {
         let configuration = try AgentExternalReadOnlyMCPConfiguration.parse(arguments: Array(CommandLine.arguments.dropFirst(2)))
         Task.detached {
             do {
-                try await AgentMCPServer.serveReadOnly(configuration: configuration)
+                if let encoded = ProcessInfo.processInfo.environment[AgentLiveMCPLease.environmentKey] {
+                    let lease = try JSONDecoder().decode(AgentLiveMCPLease.self, from: Data(encoded.utf8))
+                    let reader = try AgentExternalReadOnlyMCPTools(configuration: configuration)
+                    await AgentMCPServer.serve(tools: try AgentExternalLiveMCPTools(reader: reader, lease: lease))
+                } else {
+                    try await AgentMCPServer.serveReadOnly(configuration: configuration)
+                }
                 exit(0)
             } catch {
                 FileHandle.standardError.write(Data("ClipSlots 项目只读 MCP 启动失败：\(error.localizedDescription)\n".utf8))
@@ -75,7 +81,7 @@ let CLI_VERSION: String = {
        !v.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
         return v
     }
-    return "2.17.40"
+    return "2.17.69"
 }()
 let DEFAULT_GROUP = "default"
 let DEFAULT_PAGE = "default_page"

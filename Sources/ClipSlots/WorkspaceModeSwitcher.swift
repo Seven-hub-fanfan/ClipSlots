@@ -7,7 +7,7 @@ import ClipSlotsKit
 ///   - `.edit`   槽位卡片主界面（默认）
 ///   - `.canvas` 无限画布（生图工作台）
 ///
-/// Agent 提供独立会话工作区；编辑和画布原有的右侧助手仍各自保留。
+/// agent 保留旧路由标识，仅用于兼容历史；入口现为尚未开放的测评占位。
 enum WorkspaceMode: String, CaseIterable, Identifiable, Equatable {
     case edit
     case canvas
@@ -19,7 +19,7 @@ enum WorkspaceMode: String, CaseIterable, Identifiable, Equatable {
         switch self {
         case .edit: return "编辑"
         case .canvas: return "画布"
-        case .agent: return "Agent"
+        case .agent: return "测评（Beat）"
         }
     }
 
@@ -27,9 +27,11 @@ enum WorkspaceMode: String, CaseIterable, Identifiable, Equatable {
         switch self {
         case .edit: return "rectangle.stack"
         case .canvas: return "square.grid.3x3.topleft.filled"
-        case .agent: return "sparkles"
+        case .agent: return "waveform.path.ecg"
         }
     }
+
+    var isSelectable: Bool { self != .agent }
 }
 
 /// 两段切换控件。
@@ -45,7 +47,7 @@ struct WorkspaceModeSwitcher: View {
     /// v2.11.7 hotfix20：顶栏改成「流内放等宽透明占位 + overlay 里放真控件」来实现几何真居中，
     /// 两处必须**用同一个数**，否则占位与实体不等宽，居中就会差出那点差值。所以这里把宽度从
     /// 「由内容自然撑开」改成一个显式常量：段宽 62 × 3 + 段间距 2 × 2 + 外圈 padding 3 × 2。
-    static let preferredWidth: CGFloat = 196
+    static let preferredWidth: CGFloat = WindowLayoutMetrics.workspaceSwitcherWidth
 
     /// 单段的固定尺寸（v2.11.7 hotfix21）。
     ///
@@ -109,7 +111,7 @@ struct WorkspaceModeSwitcher: View {
     private func segment(_ mode: WorkspaceMode) -> some View {
         let isSelected = selection == mode
         return Button {
-            guard selection != mode else { return }
+            guard mode.isSelectable else { return }
             withAnimation(Anim.transition) { selection = mode }
         } label: {
             HStack(alignment: .center, spacing: 5) {
@@ -124,7 +126,7 @@ struct WorkspaceModeSwitcher: View {
                     .fixedSize()
             }
             .foregroundColor(isSelected ? (canvasPalette ? CanvasTheme.chromeAccentInk : AppTheme.chromeAccentInk) : .secondary.opacity(0.85))
-            .frame(width: Self.segmentWidth, height: Self.segmentHeight, alignment: .center)
+            .frame(width: mode == .agent ? 104 : Self.segmentWidth, height: Self.segmentHeight, alignment: .center)
             .background {
                 if isSelected {
                     // matchedGeometryEffect 让选中背景在两段之间**滑动**而不是闪现。
@@ -137,8 +139,9 @@ struct WorkspaceModeSwitcher: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        .disabled(!mode.isSelectable)
         .accessibilityLabel(mode.title)
-        .accessibilityIdentifier("workspace-\(mode.rawValue)")
-        .help(mode.title)
+        .accessibilityIdentifier(mode == .agent ? "workspace-beat" : "workspace-\(mode.rawValue)")
+        .help(mode == .agent ? "测评（Beat）· 测试不同模型的能力、探索知识，暂未开放。" : mode.title)
     }
 }

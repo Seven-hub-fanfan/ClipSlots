@@ -13,6 +13,39 @@ private func artifactRepositoryTests(_ check: (Bool, String) -> Void) {
     do {
         let scope = try AgentArtifactScope(projectID: "project", canvasID: "canvas")
         let key = try AgentArtifactKey(scope: scope, path: "./reports//result.html")
+        let catalog = try AgentModelCatalog.parse(Data(#"{"data":[{"id":"actual-model","context_window":128000,"capabilities":{"image_input":true}},{"id":"vision-named-but-unknown"}]}"#.utf8))
+        check(catalog.count == 2 && catalog[0].contextWindow == 128000 && catalog[0].supportsImages == true,
+              "model discovery preserves explicitly reported capacity and image support")
+        check(catalog[1].supportsImages == nil && catalog[1].contextWindow == nil,
+              "model discovery never guesses capability from model name")
+        check(try AgentModelCatalog.modelsURL(endpoint: URL(string: "https://example.test/v1/chat/completions")!).absoluteString
+              == "https://example.test/v1/models", "model discovery respects configured API prefix")
+        artifactThrows(check, "model discovery rejects insecure remote origin") {
+            _ = try AgentModelCatalog.modelsURL(endpoint: URL(string: "http://example.test/v1")!)
+        }
+        artifactThrows(check, "model discovery rejects duplicate IDs") {
+            _ = try AgentModelCatalog.parse(Data(#"{"data":[{"id":"same"},{"id":"same"}]}"#.utf8))
+        }
+        let widgets = try AgentWidgetStateStore(directory: root.appendingPathComponent("widgets"))
+        let conversation = UUID()
+        let state: JSONValue = ["counter": 9, "label": "保存🙂"]
+        try widgets.save(state, key: key, conversationID: conversation, revision: 2)
+        let reopenedWidgets = try AgentWidgetStateStore(directory: root.appendingPathComponent("widgets"))
+        check(try reopenedWidgets.load(key: key, conversationID: conversation, revision: 2) == state,
+              "widget state survives reopening with unicode and numeric values")
+        check(try widgets.load(key: key, conversationID: UUID(), revision: 2) == .null,
+              "widget state cannot leak across conversations")
+        check(try widgets.load(key: key, conversationID: conversation, revision: 3) == .null,
+              "widget state cannot leak across content revisions")
+        let foreignWidget = try AgentArtifactKey(projectID: "other", canvasID: "canvas", path: key.path)
+        check(try widgets.load(key: foreignWidget, conversationID: conversation, revision: 2) == .null,
+              "widget state cannot leak across projects")
+        artifactThrows(check, "widget store rejects oversized state") {
+            try widgets.save(.string(String(repeating: "a", count: 65537)), key: key,
+                             conversationID: conversation, revision: 2)
+        }
+        check(try widgets.load(key: key, conversationID: conversation, revision: 2) == state,
+              "rejected widget update preserves prior state")
         check(key.path == "reports/result.html", "path normalizes dot and repeated separators")
         check(try AgentArtifactKey(scope: scope, path: "reports\\result.html") == key, "backslash normalization")
         check(try AgentArtifactKey(scope: scope, path: "cafe\u{301}.txt").path == "caf\u{E9}.txt", "NFC path normalization")
@@ -137,6 +170,9 @@ private func artifactRepositoryTests(_ check: (Bool, String) -> Void) {
         let html = AgentArtifactPreviewPolicy.sandboxedHTML("<script>hidden()</script><img src=\"file:///etc/passwd\">")
         check(html.contains("script-src 'none'") && html.contains("connect-src 'none'") && html.contains("default-src 'none'"), "HTML policy denies scripts and external resources")
         check(html.range(of: "Content-Security-Policy")!.lowerBound < html.range(of: "<script>")!.lowerBound, "CSP precedes untrusted content")
+        let interactive = AgentArtifactPreviewPolicy.sandboxedHTML("<button onclick=\"run()\">run</button>", allowsScripts: true)
+        check(interactive.contains("script-src 'unsafe-inline'") && interactive.contains("connect-src 'none'")
+            && interactive.contains("frame-src 'none'"), "interactive HTML permits inline behavior while retaining network and frame isolation")
         for address in ["file:///tmp/x", "javascript:alert(1)", "http://example.com", "https://u:p@example.com"] {
             check(AgentArtifactPreviewPolicy.externalURL(URL(string: address)!) == nil, "preview blocks unsafe navigation \(address)")
         }
@@ -268,6 +304,44 @@ private func artifactExternalTests(_ check: @escaping (Bool, String) -> Void) as
         try JSONEncoder().encode(catalog.providers).write(to: file)
         check(try AgentExternalProviderCatalog.load(from: file, within: root).providers == catalog.providers, "controlled local config loads through bounded grant")
         check(AgentExternalProviderCatalog.localDefaults.providers.allSatisfy { $0.webTarget?.promptQueryItem == nil }, "default providers never assume prompt/auto-send URL protocols")
+
+        let builtins = AgentExternalProviderCatalog.localDefaults
+        check(builtins.providers.map(\.id) == ["claude", "chatgpt", "deepseek", "workbuddy", "qwenwork"],
+              "DeepSeek Harness appears between ChatGPT and WorkBuddy")
+        let harness = builtins.providers.first { $0.id == "deepseek" }!
+        check(harness.name == "DeepSeek Harness" && harness.desktopBundleID == "com.deepseek.dsh"
+            && harness.desktopTarget?.baseURL.absoluteString == "dsh://open" && harness.webTarget == nil,
+              "Harness uses installed client identity and verified open URI")
+        check(harness.desktopTarget?.promptQueryItem == nil,
+              "Harness open URI never receives prompt or auto-send parameters")
+        check(try AgentExternalProviderCatalog(providers: builtins.providers).providers == builtins.providers,
+              "all built-in providers pass controlled catalog validation")
+        let harnessPlan = try AgentExternalHandoffCoordinator.prepare(provider: harness, context: context)
+        let harnessOpener = ArtifactFakeOpener()
+        let harnessResult = await AgentExternalHandoffCoordinator.execute(harnessPlan, using: harnessOpener)
+        check(harnessResult.status == .openedDesktop && harnessOpener.events == ["copy", "url:dsh"],
+              "explicit Harness launch copies scoped prompt then opens desktop URI")
+        check(harnessPlan.targets.count == 1 && harnessOpener.copied == [harnessPlan.prompt],
+              "Harness launch preserves current project with no unrelated web target")
+        let missingHarness = ArtifactFakeOpener(); missingHarness.available = false
+        let missingResult = await AgentExternalHandoffCoordinator.execute(harnessPlan, using: missingHarness)
+        check(missingResult.status == .copiedOnly && missingHarness.events == ["copy"],
+              "missing Harness copies prompt without opening a different product")
+        let failedHarness = ArtifactFakeOpener(); failedHarness.webOutcome = .failed("dsh fixture failure")
+        let failedHarnessResult = await AgentExternalHandoffCoordinator.execute(harnessPlan, using: failedHarness)
+        check(failedHarnessResult.status == .copiedOnly && failedHarness.events == ["copy", "url:dsh"],
+              "failed Harness URI leaves exactly one copied prompt")
+        check(AgentBrandResources.usesTemplateRendering(for: "deepseek")
+            && AgentBrandResources.usesTemplateRendering(for: "chatgpt")
+            && !AgentBrandResources.usesTemplateRendering(for: "claude"),
+              "Harness follows theme ink while existing colored artwork stays original")
+        let harnessPreferences = AgentExternalHandoffPreferences(defaults: defaults, key: "harness-last-used")
+        let harnessSession = AgentExternalHandoffSession(catalog: builtins, context: context,
+            preferences: harnessPreferences)
+        harnessSession.present(); harnessSession.select("deepseek")
+        harnessSession.close(); harnessSession.present()
+        check(harnessSession.selectedProviderID == "deepseek" && harnessSession.result == nil,
+              "Harness choice survives reopen without persisting transient launch result")
 
         defaults.set("invalid-provider", forKey: "last-used")
         let preferences = AgentExternalHandoffPreferences(defaults: defaults, key: "last-used")

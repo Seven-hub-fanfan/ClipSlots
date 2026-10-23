@@ -33,31 +33,47 @@ struct CenterReservedRow: Layout {
     /// 中间控件与左右两簇之间的最小留白。
     var gap: CGFloat = WindowLayoutMetrics.titleBarCenterGap
 
-    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+    struct Cache {
+        var minima: [CGFloat]?
+        var sizes: [String: CGSize] = [:]
+    }
+    func makeCache(subviews: Subviews) -> Cache { Cache() }
+    func updateCache(_ cache: inout Cache, subviews: Subviews) { cache = Cache() }
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout Cache) -> CGSize {
         guard subviews.count == 2 else {
             return CGSize(width: proposal.width ?? 0, height: proposal.height ?? 0)
         }
+        let key = "\(proposal.width.map(String.init(describing:)) ?? "nil")|\(proposal.height.map(String.init(describing:)) ?? "nil")"
+        if let size = cache.sizes[key] { return size }
         // 两簇各自的**内在最小宽度**：给 width: 0 的提案即可问出来
         // （左簇是 .fixedSize，会如实回答自己的理想宽；右簇里搜索栏会回答窄变体的宽度）。
-        let leftMin = subviews[0].sizeThatFits(ProposedViewSize(width: 0, height: proposal.height)).width
-        let rightMin = subviews[1].sizeThatFits(ProposedViewSize(width: 0, height: proposal.height)).width
+        if cache.minima == nil {
+            cache.minima = subviews.map { $0.sizeThatFits(ProposedViewSize(width: 0, height: nil)).width }
+        }
+        let leftMin = cache.minima?[0] ?? 0
+        let rightMin = cache.minima?[1] ?? 0
         let minWidth = WindowLayoutMetrics.centerReservedRowMinWidth(leftMin: leftMin,
                                                                     rightMin: rightMin,
                                                                     centerWidth: centerWidth,
                                                                     gap: gap)
         // 关键：把 minWidth 作为**下限**返回。父容器问最小尺寸（提案 width: 0）时拿到的就是它，
         // 这个值会一路传到 NSHostingView → NSWindow.contentMinSize，窗口因此拖不到更窄。
-        let width = max(proposal.width ?? minWidth, minWidth)
+        let proposedWidth = proposal.width.flatMap { $0.isFinite ? $0 : nil }
+        let width = max(proposedWidth ?? minWidth, minWidth)
         let half = WindowLayoutMetrics.centerReservedHalfWidth(totalWidth: width,
                                                               centerWidth: centerWidth,
                                                               gap: gap)
         let halfProposal = ProposedViewSize(width: half, height: proposal.height)
         let height = max(subviews[0].sizeThatFits(halfProposal).height,
                          subviews[1].sizeThatFits(halfProposal).height)
-        return CGSize(width: width, height: height)
+        let size = CGSize(width: width, height: height)
+        if cache.sizes.count > 16 { cache.sizes.removeAll(keepingCapacity: true) }
+        cache.sizes[key] = size
+        return size
     }
 
-    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout Cache) {
         guard subviews.count == 2 else { return }
         let half = WindowLayoutMetrics.centerReservedHalfWidth(totalWidth: bounds.width,
                                                               centerWidth: centerWidth,

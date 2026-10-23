@@ -41,7 +41,7 @@ final class CanvasMiniMapView: NSView {
     private var startRect = CGRect.zero
     private var draggedRect: CGRect?
     private var spring: CanvasReplicaGeometry.MapSpring?
-    private var timer: Timer?
+    private var clockToken: UUID?
     private var lastTime: TimeInterval = 0
     private var stopTime: TimeInterval?
 
@@ -116,9 +116,12 @@ final class CanvasMiniMapView: NSView {
         context.drawPath(using: .eoFill)
         context.setFillColor((dark ? NSColor.black : NSColor.white).withAlphaComponent(dark ? 0.1 : 0.25).cgColor)
         context.fill(rect)
-        // CSS border is drawn inside the element's 1.5pt boundary.
-        context.setStrokeColor(viewportInk.cgColor); context.setLineWidth(1.5)
-        context.stroke(rect.insetBy(dx: 0.75, dy: 0.75))
+        let viewportBorder = viewportInk.withAlphaComponent(isDraggingViewport ? 0.65 : (dark ? 0.38 : 0.32))
+        context.setStrokeColor(viewportBorder.cgColor)
+        context.setLineWidth(1)
+        context.addPath(CGPath(roundedRect: rect.insetBy(dx: 0.5, dy: 0.5),
+                               cornerWidth: 3, cornerHeight: 3, transform: nil))
+        context.strokePath()
         context.restoreGState()
         context.setStrokeColor(viewportInk.withAlphaComponent(dark ? 0.15 : 0.14).cgColor)
         context.setLineWidth(1)
@@ -158,7 +161,7 @@ final class CanvasMiniMapView: NSView {
         guard isDraggingViewport else { return }
         isDraggingViewport = false; draggedRect = nil
         if reduceMotion { onEnd(); needsDisplay = true; return }
-        if timer == nil { startMotion(target: pan) }
+        if clockToken == nil { startMotion(target: pan) }
         stopTime = ProcessInfo.processInfo.systemUptime + 0.3
         needsDisplay = true
         window?.invalidateCursorRects(for: self)
@@ -171,11 +174,9 @@ final class CanvasMiniMapView: NSView {
         }
         if spring == nil { spring = .init(position: pan) }
         spring?.target = target
-        guard timer == nil else { return }
+        guard clockToken == nil else { return }
         lastTime = ProcessInfo.processInfo.systemUptime
-        let next = Timer(timeInterval: 1 / 60, repeats: true) { [weak self] _ in self?.tick() }
-        timer = next
-        RunLoop.main.add(next, forMode: .common)
+        clockToken = CanvasDisplayClock.shared.subscribe { [weak self] in self?.tick() }
     }
     private func tick() {
         let now = ProcessInfo.processInfo.systemUptime
@@ -186,12 +187,14 @@ final class CanvasMiniMapView: NSView {
             pan = motion.position; onPan(pan); needsDisplay = true
         }
         if let stopTime, now >= stopTime {
-            timer?.invalidate(); timer = nil; spring = nil; self.stopTime = nil
+            if let clockToken { CanvasDisplayClock.shared.unsubscribe(clockToken) }
+            clockToken = nil; spring = nil; self.stopTime = nil
             onEnd()
         }
     }
     func cancelMotion() {
-        timer?.invalidate(); timer = nil; spring = nil; stopTime = nil
+        if let clockToken { CanvasDisplayClock.shared.unsubscribe(clockToken) }
+        clockToken = nil; spring = nil; stopTime = nil
         isDraggingViewport = false; draggedRect = nil
     }
     override func viewWillMove(toWindow newWindow: NSWindow?) {

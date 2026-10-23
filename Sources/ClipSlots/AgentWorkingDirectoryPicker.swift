@@ -5,6 +5,7 @@ import ClipSlotsKit
 struct AgentWorkingDirectoryPicker: View {
     @ObservedObject var model: AgentChatModel
     @ObservedObject var directories: AgentWorkingDirectoryStore
+    var compact = false
     @State private var showing = false
 
     private var current: AgentWorkingDirectory? { directories.entry(model.workingDirectoryID) }
@@ -13,13 +14,13 @@ struct AgentWorkingDirectoryPicker: View {
     }
     var body: some View {
         Button {
-            if directories.directories.isEmpty { choose() }
+            if !compact && directories.directories.isEmpty { choose() }
             else { showing.toggle() }
         } label: {
             HStack(spacing: 5) {
-                Image(systemName: current == nil ? "folder.badge.plus" : "folder")
-                Text(title).lineLimit(1).truncationMode(.middle)
-                if !directories.directories.isEmpty {
+                Image(systemName: compact ? "shield" : (current == nil ? "folder.badge.plus" : "folder"))
+                if !compact { Text(title).lineLimit(1).truncationMode(.middle) }
+                if !compact && !directories.directories.isEmpty {
                     Image(systemName: "chevron.down").font(.system(size: 8, weight: .semibold))
                 }
             }
@@ -30,13 +31,36 @@ struct AgentWorkingDirectoryPicker: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .frame(maxWidth: 170, alignment: .leading)
+        .frame(width: compact ? 30 : nil, alignment: .leading)
+        .frame(maxWidth: compact ? 30 : 170, alignment: .leading)
         .disabled(model.isRunning || directories.isChoosing)
-        .help(current?.path ?? "选择 Agent 本轮可访问的本地工作目录")
+        .help(model.accessMode.title + " · " + model.accessMode.detail)
         .accessibilityLabel("添加本地目录或切换工作目录")
         .accessibilityIdentifier("agent-working-directory")
         .popover(isPresented: $showing, arrowEdge: .top) {
             VStack(alignment: .leading, spacing: 12) {
+                Text("访问权限").font(.system(size: 14, weight: .semibold))
+                ForEach(AgentAccessMode.allCases, id: \.rawValue) { mode in
+                    Button { model.selectAccessMode(mode) } label: {
+                        HStack(alignment: .top, spacing: 8) {
+                            Image(systemName: model.accessMode == mode ? "checkmark.circle.fill" : "circle")
+                                .foregroundColor(model.accessMode == mode ? TapSkin.accent : TapSkin.secondaryInk)
+                            VStack(alignment: .leading, spacing: 3) {
+                                Text(mode.title).font(.system(size: 12, weight: .medium))
+                                Text(mode.detail).font(.system(size: 10)).foregroundColor(TapSkin.secondaryInk)
+                            }
+                            Spacer(minLength: 0)
+                        }.contentShape(Rectangle())
+                    }.buttonStyle(.plain)
+                        .accessibilityIdentifier("agent-access-\(mode.rawValue)")
+                }
+                if model.canvasProjectID != nil {
+                    Text(model.accessMode == .fullAccess ? "可直接创建、编辑、连线和生成画布节点，支持撤销。"
+                         : model.accessMode == .allDirectoriesReadOnly ? "可以读取画布；修改和生成已关闭。"
+                         : "可以操作当前画布，执行修改前请你确认。")
+                        .font(.system(size: 10)).foregroundColor(TapSkin.secondaryInk)
+                }
+                Divider()
                 HStack {
                     Text("本地工作目录").font(.system(size: 14, weight: .semibold))
                     Spacer()
@@ -44,7 +68,7 @@ struct AgentWorkingDirectoryPicker: View {
                         .buttonStyle(.plain)
                         .accessibilityIdentifier("agent-directory-add")
                 }
-                Text(model.canvasProjectID == nil ? "本轮使用所选目录，写入前由你确认。" : "画布分析仅开放目录读取。")
+                Text(model.accessMode == .fullAccess ? "文件读写自动执行。" : "本轮使用所选目录，写入前由你确认。")
                     .font(.system(size: 11)).foregroundColor(TapSkin.secondaryInk)
                 ScrollView {
                     VStack(spacing: 4) {

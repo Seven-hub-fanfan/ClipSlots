@@ -57,9 +57,12 @@ struct SlotCardView: View {
     @State private var labelText = ""
     @State private var isHovering = false
     @State private var showingPreview = false
-    @State private var showingTextEditor = false
-    @State private var showingHTMLEditor = false
-    @State private var editingText = ""
+    private struct EditorRequest: Identifiable {
+        let id = UUID()
+        let mode: SlotTextEditorSheet.Mode
+        let text: String
+    }
+    @State private var editorRequest: EditorRequest?
     @State private var isDropTargeted = false
     // v2.11.0: 缩略图入口图标的悬停高亮。
     @State private var isHoveringThumbnailEntry = false
@@ -113,11 +116,12 @@ struct SlotCardView: View {
     }
 
     var body: some View {
+        WorkspaceContentBoundary {
         VStack(alignment: .leading, spacing: AppTheme.spacingMedium) {
-            headerRow
+            WorkspaceContentBoundary { headerRow }
 
             // Thumbnail area — split empty vs filled to prevent @State image reuse
-            Group {
+            WorkspaceContentBoundary {
                 if content.hasManualThumbnail {
                     // v2.11.0「槽位缩略图手动上传」：手动封面图优先级最高，压过空槽占位、
                     // 视频内联播放器和自动缩略图三条分支。真正的取图优先级在
@@ -193,6 +197,7 @@ struct SlotCardView: View {
             // v2.7.76: moved the attachment button off the header row (it squeezed the slot
             // title) down here just above the action buttons. It's a plain Button, so it
             // won't trigger the card's paste/edit/hover/drag.
+            WorkspaceContentBoundary {
             HStack(alignment: .lastTextBaseline, spacing: 6) {
                 // v2.11.7 hotfix12: 纯文本槽位的 metadataSummary 现在是空串（不再显示
                 // 「0 B 文本」体积标签），所以这里显式判空——渲染一个空 Text 会留下一道
@@ -228,8 +233,10 @@ struct SlotCardView: View {
             // NodeAttachmentButton pill instead of clipping it / shrinking its hit area.
             .frame(minHeight: 22, alignment: .leading)
             .padding(.horizontal, 2)
+            }
 
-            actionRow
+            WorkspaceContentBoundary { actionRow }
+        }
         }
         // v2.9.22: 卡片最小高度 280 → 216，配合空槽/缩略图/按钮区一起收紧，
         // 让 10 个槽位尽量不滚动就能看全；长文本卡片仍可自适应撑开。
@@ -244,25 +251,22 @@ struct SlotCardView: View {
         // 变化即读新 key、命中秒出/未命中异步填充，卡片编辑态得以在切换/复用中存活。
         .padding(AppTheme.slotCardPadding)
         .background(
-            RoundedRectangle(cornerRadius: AppTheme.slotCardCornerRadius, style: .continuous)
-                .fill(AppTheme.cardBackground(isEmpty: content.isEmpty))
-                // v2.10.88 (perf · hover 切槽位卡顿): 阴影的 radius / y **不再随 hover 变化**。
-                //
-                // 原实现是 radius 5→9、y 2→4，而卡片链尾的 `.animation(Anim.interactive, value: isHovering)`
-                // 会把它一并纳入隐式动画——于是每次 hover 进/出，这个高斯模糊的半径都要在 0.12s 内被
-                // **逐帧重新计算**（模糊半径变化无法靠图层缓存复用，只能整块重新合成）。把鼠标从一张卡片
-                // 移到相邻卡片时，两张卡片会同时各跑一遍这个逐帧重模糊（离开的那张缩+减半径、进入的那张
-                // 放大+加半径），叠加下面 scaleEffect 对整张已合成卡片的重采样，正是「悬停状态下切到另一个
-                // 槽位时 UI 发卡」的主因。
-                //
-                // hover 的视觉反馈完全由「描边加深加粗（cardOutlineColor / cardOutlineWidth，纯矢量描边，
-                // 无模糊）+ 1.012 缩放」承担，这两者都便宜；去掉长在阴影上的那一档抬升，观感差异极小，
-                // 但省掉了 hover 路径上唯一的逐帧模糊重算。
-                .shadow(
-                    color: liveResize.isResizing ? .clear : AppTheme.cardShadow(isEmpty: content.isEmpty),
-                    radius: liveResize.isResizing ? 0 : (content.isEmpty ? 3 : 5),
-                    y: liveResize.isResizing ? 0 : 2
-                )
+            WorkspaceContentBoundary {
+                if WorkspaceCardBackground.useNativeSurface {
+                    WorkspaceCardBackground(
+                        fill: AppTheme.cardBackground(isEmpty: content.isEmpty),
+                        shadow: liveResize.isResizing ? .clear : AppTheme.cardShadow(isEmpty: content.isEmpty),
+                        cornerRadius: AppTheme.slotCardCornerRadius,
+                        shadowRadius: liveResize.isResizing ? 0 : (content.isEmpty ? 3 : 5),
+                        shadowOffset: liveResize.isResizing ? 0 : 2)
+                } else {
+                    RoundedRectangle(cornerRadius: AppTheme.slotCardCornerRadius, style: .continuous)
+                        .fill(AppTheme.cardBackground(isEmpty: content.isEmpty))
+                        .shadow(color: liveResize.isResizing ? .clear : AppTheme.cardShadow(isEmpty: content.isEmpty),
+                                radius: liveResize.isResizing ? 0 : (content.isEmpty ? 3 : 5),
+                                y: liveResize.isResizing ? 0 : 2)
+                }
+            }
                 .allowsHitTesting(false)
         )
         .overlay(
@@ -381,40 +385,22 @@ struct SlotCardView: View {
 
     // v2.10.54: 回退 v2.10.48 的 inline Popover（负优化——点气泡外部无保存 dismiss，编辑内容被静默
     // 丢弃），改回 Sheet（原 520×320 尺寸），并保留 v2.10.48 新增的 ⌘↩ 保存快捷键。
-    // 纯文本编辑 Sheet。
-    //
-    // v2.10.90 (perf · ★逐字延迟根因): 两个编辑 Sheet 的内容改由独立的 `SlotTextEditorSheet` 承载。
-    //
-    // 原先 `TextEditor` 直接绑本视图的 `@State editingText`，于是**每敲一个字符都要重算整张卡片的
-    // body**（缩略图 / 元数据 / actionRow / 6 层 overlay / 阴影 / scaleEffect / 两个 sheet 闭包全都跑一遍），
-    // 延迟量随卡片复杂度增长——就是「每个字都像有延迟输入」的来源。拆出去后逐字输入只重算那个轻量 Sheet。
-    //
-    // `editingText` 保留，但现在只在 `beginEditing()` 里被写一次、作为传给 Sheet 的初值快照，
-    // 打字过程中不再变化，因此不会再让卡片 body 失效。
-    private var textEditorSheet: some View {
+    // The presentation item carries the initial content and its identity
+    // together. Separate Boolean/text states can present the old empty text.
+    // Typing stays local to SlotTextEditorSheet and does not rebuild the card.
+    private func editorSheet(_ request: EditorRequest) -> some View {
         SlotTextEditorSheet(
             slot: slot,
-            mode: .plainText,
-            initialText: editingText,
+            mode: request.mode,
+            initialText: request.text,
             onSave: { text in
-                onEditText?(text)
-                showingTextEditor = false
+                switch request.mode {
+                case .plainText: onEditText?(text)
+                case .html: onEditHTML?(text)
+                }
+                editorRequest = nil
             },
-            onCancel: { showingTextEditor = false }
-        )
-    }
-
-    // HTML 原文编辑 Sheet。
-    private var htmlEditorSheet: some View {
-        SlotTextEditorSheet(
-            slot: slot,
-            mode: .html,
-            initialText: editingText,
-            onSave: { text in
-                onEditHTML?(text)
-                showingHTMLEditor = false
-            },
-            onCancel: { showingHTMLEditor = false }
+            onCancel: { editorRequest = nil }
         )
     }
 
@@ -460,6 +446,7 @@ struct SlotCardView: View {
             .background(Circle().fill(slotAccent.opacity(isMinimalSkin ? 0.14 : 0.20)))
             .overlay(Circle().strokeBorder(slotAccent.opacity(isMinimalSkin ? 0.34 : 0.50), lineWidth: 1))
             .shadow(color: isMinimalSkin ? .clear : slotAccent.opacity(0.22), radius: 3, y: 1)
+            .modifier(StaticSlotDrawing(eligible: true))
             .frame(minWidth: 34, alignment: .leading)
             .accessibilityLabel("槽位 \(slot)")
     }
@@ -683,8 +670,7 @@ struct SlotCardView: View {
             }
         }
         .frame(height: 52)
-        .sheet(isPresented: $showingHTMLEditor) { htmlEditorSheet }
-        .sheet(isPresented: $showingTextEditor) { textEditorSheet }
+        .sheet(item: $editorRequest) { request in editorSheet(request) }
     }
 
     private var canEditContent: Bool {
@@ -703,11 +689,9 @@ struct SlotCardView: View {
 
     private func beginEditing() {
         if content.isHTMLContent, onEditHTML != nil {
-            editingText = content.htmlEditableValue
-            showingHTMLEditor = true
+            editorRequest = EditorRequest(mode: .html, text: content.htmlEditableValue)
         } else if content.isPlainEditableText, onEditText != nil {
-            editingText = content.editableTextValue
-            showingTextEditor = true
+            editorRequest = EditorRequest(mode: .plainText, text: content.editableTextValue)
         }
     }
 

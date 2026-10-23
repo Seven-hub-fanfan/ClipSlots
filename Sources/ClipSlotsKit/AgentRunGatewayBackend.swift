@@ -86,6 +86,7 @@ public actor AgentGatewayBackend: AgentGatewayResuming {
     private func invoke(resuming: Bool, history: [AgentMessage], config: AgentConfig,
                         tools: AgentToolExecuting?,
                         onEvent: @escaping @Sendable (AgentRunEvent) async -> Void) async throws -> [AgentMessage] {
+        try AgentAttachmentImport.validateImageSupport(history: history, supported: config.supportsImageInput == true)
         guard !busy, !controlling else { throw AgentGatewayError.busy }
         try validateConfiguration()
         let lock = try store.acquire()
@@ -128,7 +129,7 @@ public actor AgentGatewayBackend: AgentGatewayResuming {
             // this contract. Authorized textual references use wireContent.
             var fields: [String: JSONValue] = [
                 "id": .string(message.id.uuidString), "role": .string(message.role.rawValue),
-                "content": .string(message.wireContent),
+                "content": message.wirePayload(supportsImages: config.supportsImageInput == true),
                 "toolCallID": message.toolCallId.map(JSONValue.string) ?? .null
             ]
             if !config.isolatedReadOnly {

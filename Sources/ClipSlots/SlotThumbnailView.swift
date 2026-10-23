@@ -31,7 +31,7 @@ struct SlotThumbnailView: View {
         return false
     }
 
-    var body: some View {
+    private var previewSurface: some View {
         ZStack {
             RoundedRectangle(cornerRadius: AppTheme.smallCornerRadius, style: .continuous)
                 .fill(Color.primary.opacity(0.04))
@@ -86,6 +86,20 @@ struct SlotThumbnailView: View {
             // 都会破坏上面两条，切组时会看到旧图淡出/交叠——改动此行前请先复现切组场景。
             .animation(isThumbnailLoaded ? Anim.thumbnailFade : nil, value: isThumbnailLoaded)
         }
+    }
+
+    private var isStaticTextPreview: Bool {
+        guard !content.isEmpty, !content.isFileContent, !content.hasImage,
+              !content.hasManualThumbnail else { return false }
+        switch provider.state(for: currentKey) {
+        case .idle, .failed: return true
+        case .loading, .loaded: return false
+        }
+    }
+
+    var body: some View {
+        previewSurface
+        .modifier(StaticSlotDrawing(eligible: isStaticTextPreview))
         // v2.9.25 hotfix: 框高需容纳约 4 行等宽文本（行高≈17pt，4 行≈68pt + padding 8×2≈16pt
         // + 余量 ≈ 116pt）。minHeight 116 / idealHeight 140 保证内容区净高足够放下 4 行；
         // 长内容仍靠 maxHeight:.infinity 自适应撑开。

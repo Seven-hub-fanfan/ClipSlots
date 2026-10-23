@@ -230,13 +230,13 @@ extension CanvasWorkspaceView {
         return CGRect(x: rect.minX, y: top, width: rect.width, height: max(0, rect.maxY - top))
     }
 
-    func selectionToolbar(at anchor: CGPoint) -> some View {
-        let selected = selectedCanvasNodes
+    func selectionToolbar(at anchor: CGPoint, retainedSelection: [CanvasNode]? = nil) -> some View {
+        let selected = retainedSelection ?? selectedCanvasNodes
         let position = selectionToolbarPosition(anchor)
         return CanvasActionToolbar(
             width: actionToolbarWidth,
             canArchive: selected.contains(where: canArchiveToLibrary)
-                || selected.contains { $0.kind == .image && !$0.isMediaSource && previewableMedia(of: $0) != nil },
+                || selected.contains { $0.kind == .image && !$0.isMediaSource && renderMedia(of: $0) != nil },
             imageDownload: selected.contains { $0.kind == .image && !$0.isMediaSource },
             canRun: selected.contains(where: \.canGenerate),
             running: canvas.selectionGenerationTask != nil,
@@ -398,7 +398,12 @@ extension CanvasWorkspaceView {
                     let running = canvas.runningGroupID == group.id && canvas.selectionGenerationTask != nil
                     CanvasGroupToolbar(group: group, running: running,
                         canRun: canvas.selectionGenerationTask == nil && members.contains(where: \.canGenerate),
-                        canDownload: members.contains { previewableMedia(of: $0)?.canvasLocalURL != nil },
+                        canDownload: members.contains { node in
+                            guard let entry = contentSnapshots.entry(node),
+                                  let media = CanvasMediaPick.primary(node: node, attachments: entry.content.attachments) else { return false }
+                            return [media.storagePath, media.path, media.originalPath].compactMap { $0 }
+                                .contains(where: entry.existingPaths.contains)
+                        },
                         color: { canvas.setGroupColor(group.id, color: $0) },
                         layout: { canvas.arrangeGroup(group.id, layout: $0) },
                         run: {

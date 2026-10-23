@@ -69,8 +69,8 @@ extension CanvasWorkspaceView {
         guard let port = outputPortPoint else { return }
         let original = canvas.node(id: source.id)!.frame
         let end = CGPoint(x: 1170, y: 660)
-        check(mouse(.leftMouseDown, port) && linkDrag?.fromNodeId == source.id,
-              "press immediately owns the source and creates a preview")
+        check(mouse(.leftMouseDown, port) && pointerSession?.linkPortPoint != nil && linkDrag == nil,
+              "press owns the source and waits for connection threshold")
         var continuous = true
         for index in 1...80 {
             let amount = CGFloat(index) / 80
@@ -91,6 +91,8 @@ extension CanvasWorkspaceView {
         screenshot("connection-pending-menu")
         if let request = addMenu {
             handleAddNode(.image, request: request)
+            await menuCreationTask?.value
+            await settle()
             let children = canvas.nodes.filter { ![source.id, target.id, covered.id].contains($0.id) }
             check(children.count == 1 && canvas.edges.count == 1
                   && canvas.edges.first?.fromNodeId == source.id
@@ -111,11 +113,16 @@ extension CanvasWorkspaceView {
             check(canvas.edges.contains { $0.fromNodeId == source.id && $0.toNodeId == target.id },
                   "far release without a final drag still connects the intended node")
             let count = canvas.edges.count
-            _ = mouse(.leftMouseDown, port)
+            canvas.select(id: source.id, additive: false)
+            hoverHoldNodeId = nil
+            inputRouter.cursorPoint = center(screenFrame(of: canvas.node(id: source.id)!))
+            await settle()
+            _ = mouse(.leftMouseDown, outputPortPoint ?? port)
             _ = mouse(.leftMouseDragged, body)
             _ = mouse(.leftMouseUp, body)
-            check(canvas.edges.count == count && addMenu == nil,
-                  "duplicate body target never opens a create menu")
+            check(canvas.edges.count == count && addMenu?.parentNodeId == source.id,
+                  "duplicate body offers a new node without mutating the graph")
+            addMenu = nil
             _ = mouse(.leftMouseDown, port)
             _ = mouse(.leftMouseDragged, end)
             cancelCanvasPointer()
@@ -213,7 +220,12 @@ extension CanvasWorkspaceView {
             await settle()
             let farther = CGPoint(x: targetHome.x + 18, y: targetHome.y + 12)
             _ = mouse(.leftMouseDragged, farther)
-            try? await Task.sleep(for: .milliseconds(280))
+            // Inner reveal lasts 300ms independently of the outer 250ms
+            // magnet. Sample after both have settled.
+            try? await Task.sleep(for: .milliseconds(360))
+            NSLog("[PortResetProbe] actual=%@ expected=%@ hover=%@ target=%@",
+                  NSStringFromPoint(inputPortPoint(of: canvas.node(id: target.id)!)),
+                  NSStringFromPoint(farther), hoverHoldNodeId ?? "nil", linkDrag?.targetNodeId ?? "nil")
             check(inputPortPoint(of: canvas.node(id: target.id)!) == farther,
                   "input presentation follows live drag events after prior hover")
             check(outputPortPoint == pointerSession?.linkPortPoint && linkDrag?.fromNodeId == source.id,
@@ -244,8 +256,8 @@ extension CanvasWorkspaceView {
         check(resolvedHoverHold(at: sourceHome) == source.id,
               "hover over the visible overlapping glyph retains its source")
         _ = mouse(.leftMouseDown, sourceHome)
-        check(linkDrag?.fromNodeId == source.id,
-              "visible front glyph starts a link from its displayed owner")
+        check(pointerSession?.linkPortPoint == sourceHome && linkDrag == nil,
+              "visible front glyph captures its displayed owner before drag")
         cancelCanvasPointer()
         _ = mouse(.leftMouseUp, sourceHome)
         check(linkDrag == nil && addMenu == nil,

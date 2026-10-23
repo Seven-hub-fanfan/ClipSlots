@@ -169,7 +169,7 @@ public struct SpecialSlotIndex: Codable {
 
 // MARK: - Special Slot Settings
 
-public struct SpecialSlotSettings: Codable {
+public struct SpecialSlotSettings: Codable, Equatable {
     public var maxSpecialSlots: Int = 10
     public var maxChildSlotsPerSpecialSlot: Int = 10
     public var suppressFolderOverflowWarning: Bool = false

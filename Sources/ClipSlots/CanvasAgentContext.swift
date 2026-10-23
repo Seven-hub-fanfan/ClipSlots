@@ -38,8 +38,9 @@ final class CanvasAgentContext: ObservableObject {
     @Published var graphPreview: GraphPreview?
     @Published private(set) var error: String?
     @Published private(set) var status: String?
-    private weak var canvas: CanvasStore?
-    private weak var store: SlotStoreObservable?
+    private(set) weak var canvas: CanvasStore?
+    private(set) weak var store: SlotStoreObservable?
+    var operationHistoryIDs: [UUID: Set<String>] = [:]
     let projectID: String
     private var projectObserver: AnyCancellable?
     var onLeaveProject: (() -> Void)?
@@ -140,6 +141,56 @@ final class CanvasAgentContext: ObservableObject {
         } catch { self.error = error.localizedDescription }
     }
 
+    func captureReferenceImages(to model: AgentChatModel) {
+        guard isActive, let store, !model.isImportingAttachments, !model.isRunning else { return }
+        let references = model.draftReferences
+        let conversation = model.selectedConversationID
+        do {
+            let sources = try references.map { reference -> [SlotContent.SlotAttachment] in
+                try validate(reference)
+                guard let content = store.canvasReadFullContent(groupId: reference.groupID, slot: reference.slot),
+                      content.contentId == reference.contentRevision else { throw AgentCanvasError.conflict }
+                return content.attachments.filter {
+                    $0.type == .image || ["png", "jpg", "jpeg", "webp", "gif"]
+                        .contains(URL(fileURLWithPath: $0.name).pathExtension.lowercased())
+                }
+            }
+            model.isImportingAttachments = true
+            Task {
+                defer { model.isImportingAttachments = false }
+                do {
+                    let captured = try await Task.detached(priority: .userInitiated) {
+                        try sources.map { attachments in
+                            try attachments.map { attachment in
+                                if let bytes = attachment.data {
+                                    return try AgentAttachmentImport.captureImage(bytes, name: attachment.name)
+                                }
+                                guard let path = attachment.storagePath ?? attachment.path else {
+                                    throw AgentAttachmentImport.ImportError.unavailable
+                                }
+                                return try AgentAttachmentImport.captureImageFile(URL(fileURLWithPath: path), name: attachment.name)
+                            }
+                        }
+                    }.value
+                    guard isActive, model.selectedConversationID == conversation,
+                          model.draftReferences == references else { throw AgentCanvasError.staleTarget }
+                    for reference in references { try validate(reference) }
+                    try AgentAttachmentImport.validate(model.draftAttachments + captured.flatMap { $0 })
+                    guard captured.contains(where: { !$0.isEmpty }) else {
+                        throw AgentOperationError("引用节点没有可读取的静态图片。音视频目前仅提供附件名称。")
+                    }
+                    model.draftReferences = zip(references, captured).map { reference, images in
+                        AgentCanvasReference(projectID: reference.projectID, nodeID: reference.nodeID,
+                            nodeCreatedAt: reference.nodeCreatedAt, groupID: reference.groupID, slot: reference.slot,
+                            title: reference.title, text: reference.text, attachmentNames: reference.attachmentNames,
+                            contentRevision: reference.contentRevision, images: images.isEmpty ? nil : images)
+                    }
+                    error = nil
+                } catch { self.error = error.localizedDescription }
+            }
+        } catch { self.error = error.localizedDescription }
+    }
+
     private func validate(_ target: AgentCanvasReference) throws {
         guard isActive, target.projectID == projectID, let canvas,
               canvas.nodes.contains(where: {
@@ -217,17 +268,46 @@ final class CanvasAgentContext: ObservableObject {
 
     func prepareMutation(_ payload: JSONValue, conversationID: UUID, runID: String) {
         do {
-            guard isActive, let canvas else { throw AgentCanvasError.staleTarget }
-            let mutation = try JSONDecoder().decode(AgentCanvasMutation.self, from: JSONEncoder().encode(payload))
-            let plan = try AgentCanvasSync.plan(mutation, current: canvas.gatewayDocument(),
-                expectedProject: projectID, expectedConversation: conversationID.uuidString, expectedRun: runID)
-            guard !plan.alreadyApplied else { return }
-            let preview = GraphPreview(mutation: mutation, conversationID: conversationID, runID: runID, plan: plan)
-            if !pendingGraphPreviews.contains(where: {
-                $0.id == preview.id && $0.conversationID == conversationID && $0.runID == runID
-            }) { pendingGraphPreviews.append(preview) }
-            pendingGraphPreviews = Array(pendingGraphPreviews.suffix(100))
+            _ = try submitMutation(payload, conversationID: conversationID, runID: runID)
         } catch { self.error = error.localizedDescription }
+    }
+
+    func submitMutation(_ payload: JSONValue, conversationID: UUID, runID: String) throws -> String {
+        guard isActive, let canvas else { throw AgentCanvasError.staleTarget }
+        let mutation = try JSONDecoder().decode(AgentCanvasMutation.self, from: JSONEncoder().encode(payload))
+        let plan = try AgentCanvasSync.plan(mutation, current: canvas.gatewayDocument(),
+            expectedProject: projectID, expectedConversation: conversationID.uuidString, expectedRun: runID)
+        if plan.alreadyApplied { return "applied" }
+        if let existing = pendingGraphPreviews.first(where: {
+            $0.id == mutation.mutationID && $0.conversationID == conversationID && $0.runID == runID
+        }) {
+            let old = try JSONDecoder().decode(JSONValue.self, from: JSONEncoder().encode(existing.mutation))
+            let new = try JSONDecoder().decode(JSONValue.self, from: JSONEncoder().encode(mutation))
+            guard old == new else { throw AgentOperationError("同一变更标识的内容已改变。") }
+            return "pending"
+        }
+        let preview = GraphPreview(mutation: mutation, conversationID: conversationID, runID: runID, plan: plan)
+        if !pendingGraphPreviews.contains(where: {
+            $0.id == preview.id && $0.conversationID == conversationID && $0.runID == runID
+        }) {
+            guard pendingGraphPreviews.count < 100 else {
+                throw AgentOperationError("待确认的画布预览已满，请先处理现有变更。")
+            }
+            pendingGraphPreviews.append(preview)
+        }
+        return "pending"
+    }
+
+    func mutationStatus(_ payload: JSONValue, conversationID: UUID, runID: String) throws -> String {
+        guard isActive, let canvas else { throw AgentCanvasError.staleTarget }
+        let mutation = try JSONDecoder().decode(AgentCanvasMutation.self, from: JSONEncoder().encode(payload))
+        // The committed receipt survives undo, so replay can never silently reapply it.
+        let key = CanvasWorkflowSnapshot.digest(Data(
+            "\(conversationID.uuidString)\u{0}\(runID)\u{0}\(mutation.mutationID)".utf8))
+        if canvas.gatewayDocument().appliedAgentMutationIDs.contains(key) { return "applied" }
+        return pendingGraphPreviews.contains {
+            $0.id == mutation.mutationID && $0.conversationID == conversationID && $0.runID == runID
+        } ? "pending" : "dismissed"
     }
 
     func presentMutation(_ source: GraphPreview, conversationID: UUID) {
@@ -268,5 +348,10 @@ final class CanvasAgentContext: ObservableObject {
         pendingGraphPreviews = []
         status = nil
         error = nil
+    }
+
+    func pendingExternalConnectionCancelled(runID: String) {
+        pendingGraphPreviews.removeAll { $0.runID == runID }
+        if graphPreview?.runID == runID, graphPreview?.isApplied == false { graphPreview = nil }
     }
 }

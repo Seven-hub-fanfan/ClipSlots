@@ -122,6 +122,7 @@ struct AgentMarkdownText: View, Equatable {
             ForEach(Array(blocks.enumerated()), id: \.offset) { index, block in
                 BlockView(block: block, style: style)
                     .equatable()
+                    .textSelection(.enabled)
                     .padding(.top, spacing(before: block, index: index, blocks: blocks))
             }
         }
@@ -129,7 +130,6 @@ struct AgentMarkdownText: View, Equatable {
         .lineSpacing(style.lineSpacing)
         .multilineTextAlignment(.leading)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .textSelection(.enabled)
     }
 
     private func spacing(before block: AgentMarkdownBlock, index: Int, blocks: [AgentMarkdownBlock]) -> CGFloat {

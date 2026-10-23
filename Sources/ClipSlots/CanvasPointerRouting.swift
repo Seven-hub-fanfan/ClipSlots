@@ -9,12 +9,81 @@ struct CanvasControlRegions: PreferenceKey {
     }
 }
 
+/// Local listeners keep node geometry out of the workspace preference tree.
+struct CanvasLocalControlRegions: PreferenceKey {
+    static var defaultValue: [String: CGRect] = [:]
+    static func reduce(value: inout [String: CGRect], nextValue: () -> [String: CGRect]) {
+        value.merge(nextValue(), uniquingKeysWith: { _, new in new })
+    }
+}
+
+final class CanvasLocalControlRegistry {
+    var nodes: [String: [String: CGRect]] = [:]
+    var nativeNodes: [String: [String: CGRect]] = [:]
+    func screenRegions(nodes visible: [CanvasNode], pan: CGSize, zoom: CGFloat,
+                       layoutZoom: CGFloat, dragged: Set<String>, delta: CGSize) -> [String: CGRect] {
+        var result: [String: CGRect] = [:]
+        for node in visible {
+            let shift = dragged.contains(node.id) ? delta : .zero
+            let transform = CanvasControlTransform(
+                origin: CGPoint(x: (node.x + shift.width) * zoom + pan.width,
+                                y: (node.y + shift.height) * zoom + pan.height),
+                scale: zoom / max(layoutZoom, 0.01))
+            var measurements = nativeNodes[node.id] ?? [:]
+            measurements.merge(nodes[node.id] ?? [:], uniquingKeysWith: { _, new in new })
+            for (id, rect) in measurements { result[id] = transform.screenFrame(rect) }
+        }
+        return result
+    }
+}
+
+private struct CanvasControlSpaceKey: EnvironmentKey {
+    static let defaultValue: String? = nil
+}
+
+struct CanvasControlTransform: Equatable {
+    let origin: CGPoint
+    let scale: CGFloat
+    func screenFrame(_ frame: CGRect) -> CGRect {
+        CGRect(x: origin.x + frame.minX * scale, y: origin.y + frame.minY * scale,
+               width: frame.width * scale, height: frame.height * scale)
+    }
+}
+
+private struct CanvasControlTransformKey: EnvironmentKey {
+    static let defaultValue: CanvasControlTransform? = nil
+}
+
+extension EnvironmentValues {
+    var canvasControlSpace: String? {
+        get { self[CanvasControlSpaceKey.self] }
+        set { self[CanvasControlSpaceKey.self] = newValue }
+    }
+    var canvasControlTransform: CanvasControlTransform? {
+        get { self[CanvasControlTransformKey.self] }
+        set { self[CanvasControlTransformKey.self] = newValue }
+    }
+}
+
+private struct CanvasControlMeasurement: ViewModifier {
+    let id: String
+    @Environment(\.canvasControlSpace) private var localSpace
+    func body(content: Content) -> some View {
+        content.background(GeometryReader { proxy in
+            if let localSpace {
+                Color.clear.preference(key: CanvasLocalControlRegions.self,
+                    value: [id: proxy.frame(in: .named(localSpace))])
+            } else {
+                Color.clear.preference(key: CanvasControlRegions.self,
+                    value: [id: proxy.frame(in: .named(CanvasWorkspaceView.spaceName))])
+            }
+        }.allowsHitTesting(false))
+    }
+}
+
 extension View {
     func canvasControlRegion(_ id: String) -> some View {
-        background(GeometryReader { proxy in
-            Color.clear.preference(key: CanvasControlRegions.self,
-                                   value: [id: proxy.frame(in: .named(CanvasWorkspaceView.spaceName))])
-        }.allowsHitTesting(false))
+        modifier(CanvasControlMeasurement(id: id))
     }
 }
 
@@ -22,7 +91,7 @@ struct CanvasPointerSession {
     enum Target {
         case blank, node(String, wasSelected: Bool), slotPrompt(String), link(String)
         case inputLink(String)
-        case junction, edge, menu(UUID, CanvasAddNodeMenu.Choice?)
+        case junction, edge, scissors(String), menu(UUID, CanvasAddNodeMenu.Choice?)
         case group(String), groupResize(String, CanvasGroupResizeHandle, CGRect)
         case pile(String)
     }
@@ -38,7 +107,15 @@ struct CanvasPointerSession {
 extension CanvasWorkspaceView {
     /// 只采用当前存在的浮层。面板区域同步计算，避免上一帧 preference 造成穿透/幽灵遮挡。
     var activeControlRegions: [String: CGRect] {
-        controlRegions.filter { key, _ in
+        let visibleIDs = Set(visibleNodes.map(\.id))
+        return controlRegions.filter { key, _ in
+            for prefix in ["source-upload-", "node-chips-", "image-load-retry-", "slot-input-", "slot-fan-"] {
+                if key.hasPrefix(prefix) {
+                    let id = String(key.dropFirst(prefix.count))
+                    if prefix == "slot-fan-", usesIdleTextSurfaceForRouting(id) { return false }
+                    return visibleIDs.contains(id)
+                }
+            }
             if key.hasPrefix("pile-toolbar-") {
                 return pileDragID == nil && pileGalleryID == nil && addMenu == nil
                     && canvas.piles.contains { "pile-toolbar-\($0.id)" == key &&
@@ -72,6 +149,11 @@ extension CanvasWorkspaceView {
         }
     }
 
+    private func usesIdleTextSurfaceForRouting(_ id: String) -> Bool {
+        guard let node = canvas.node(id: id) else { return false }
+        return usesIdleTextSurface(node, isEditing: editingNodeId == id)
+    }
+
     func canvasOverlayContains(_ point: CGPoint) -> Bool {
         composerContains(point) || activeControlRegions.contains { $0.value.contains(point) }
     }
@@ -87,6 +169,7 @@ extension CanvasWorkspaceView {
     }
 
     func cancelCanvasPointer() {
+        edgeHover.cancel()
         stopCanvasEdgePan()
         pointerSession = nil
         selectionLinkPoint = nil
@@ -108,6 +191,17 @@ extension CanvasWorkspaceView {
     }
 
     func routeCanvasPointer(_ event: NSEvent, at point: CGPoint) -> Bool {
+        controlRegionBuffer.end()
+        #if DEBUG
+        if ProcessInfo.processInfo.environment["CLIPSLOTS_MENU_LATENCY_PROBE"] == "1",
+           event.type != .leftMouseDragged {
+            CanvasMenuLatencyObservation.events.append(["time": ProcessInfo.processInfo.systemUptime,
+                "type": event.type.rawValue, "point": NSStringFromPoint(point),
+                "surface": isCanvasSurface(at: point), "menu": addMenu != nil,
+                "target": pointerSession.map { String(describing: $0.target) } ?? "",
+                "body": nodeBody(at: point)?.id ?? "", "regions": activeControlRegions.filter { $0.value.contains(point) }.map(\.key)])
+        }
+        #endif
         // #region debug-point C:menu-latency-pointer
         #if DEBUG
         if event.type != .leftMouseDragged, let endpoint = ProcessInfo.processInfo.environment["CLIPSLOTS_MENU_LATENCY_URL"], let url = URL(string: endpoint) { let now = ProcessInfo.processInfo.systemUptime; var r = URLRequest(url: url); r.httpMethod = "POST"; r.httpBody = try? JSONSerialization.data(withJSONObject: ["sessionId": "canvas-menu-latency", "runId": ProcessInfo.processInfo.environment["CANVAS_DEBUG_RUN"] ?? "pre-fix", "hypothesisId": "C", "msg": "[DEBUG] pointer received", "data": ["uptime": now, "event": event.timestamp, "type": event.type.rawValue, "menu": addMenu != nil]]); URLSession.shared.dataTask(with: r).resume() }
@@ -115,7 +209,19 @@ extension CanvasWorkspaceView {
         // #endregion
         let delta = pointerSession.map { CGSize(width: point.x - $0.start.x, height: point.y - $0.start.y) } ?? .zero
         switch event.type {
+        case .rightMouseDown:
+            guard canvasContentViewport.contains(point), inputFilesNodeId == nil,
+                  !composerContains(point) else { return false }
+            if addMenu != nil { addMenu = nil }
+            guard isCanvasSurface(at: point), nodeBody(at: point) == nil,
+                  pileBody(at: point) == nil else { return false }
+            cancelCanvasPointer()
+            lastBlankClick = nil
+            openAddMenu(atScreen: point, parentNodeId: nil)
+            return true
         case .leftMouseDown:
+            let scissorsHit = edgeHover.hit(at: point)
+            edgeHover.cancel()
             // The window monitor also sees the adjacent Agent panel. Only own
             // presses inside the canvas; an active drag still receives its release.
             guard CGRect(origin: .zero, size: viewSize).contains(point) else {
@@ -144,6 +250,10 @@ extension CanvasWorkspaceView {
                 // #endregion
                 if controlRegions["add-menu"]?.contains(point) == true, choice == nil { return false }
                 pointerSession = .init(target: .menu(request.id, choice), start: point, modifiers: event.modifierFlags)
+                return true
+            }
+            if let edgeID = scissorsHit {
+                pointerSession = .init(target: .scissors(edgeID), start: point, modifiers: event.modifierFlags)
                 return true
             }
             guard isCanvasSurface(at: point) else { return false }
@@ -176,10 +286,6 @@ extension CanvasWorkspaceView {
                 inputRouter.claimKeyboardFocus()
                 target = hit.output ? .link(node.id) : .inputLink(node.id)
                 frozenPort = hit.point
-                linkDrag = .init(fromNodeId: node.id,
-                                 start: hit.output ? CanvasEdgeGeometry.outputHandle(of: screenFrame(of: node))
-                                     : CanvasEdgeGeometry.inputHandle(of: screenFrame(of: node)),
-                                 cursor: point, targetNodeId: nil, fromInput: !hit.output)
             } else if let pile = pileBody(at: point) {
                 endInlineEditing()
                 inputRouter.claimKeyboardFocus()
@@ -241,12 +347,14 @@ extension CanvasWorkspaceView {
             return true
         case .leftMouseDragged:
             guard var session = pointerSession else { return false }
-            if !CanvasGeometry.isClickWithoutDrag(translation: delta) { session.moved = true }
+            switch session.target {
+            case .link, .inputLink:
+                if delta.width * delta.width + delta.height * delta.height > 1 { session.moved = true }
+            default:
+                if !CanvasGeometry.isClickWithoutDrag(translation: delta) { session.moved = true }
+            }
             pointerSession = session
-            if linkDrag != nil {
-                // A link exists from mouse-down; even the sub-threshold movement
-                // belongs to it, never to node selection or a button underneath.
-            } else if !session.moved { return true }
+            if !session.moved { return true }
             switch session.target {
             case .blank:
                 marqueeStart = session.start
@@ -258,11 +366,25 @@ extension CanvasWorkspaceView {
                 }
             case .link(let id), .inputLink(let id):
                 if let node = canvas.node(id: id) {
-                    let reverse = linkDrag?.fromInput == true
+                    let reverse: Bool
+                    if case .inputLink = session.target { reverse = true } else { reverse = false }
+                    #if DEBUG
+                    let started = ProcessInfo.processInfo.systemUptime
+                    #endif
                     updatePortHover(at: point)
-                    linkDrag = .init(fromNodeId: id, start: reverse ? CanvasEdgeGeometry.inputHandle(of: screenFrame(of: node))
-                                     : CanvasEdgeGeometry.outputHandle(of: screenFrame(of: node)),
-                                     cursor: point, targetNodeId: linkTarget(at: point, from: id, reverse: reverse),
+                    #if DEBUG
+                    let hovered = ProcessInfo.processInfo.systemUptime
+                    #endif
+                    let target = linkTarget(at: point, from: id, reverse: reverse)
+                    #if DEBUG
+                    let targeted = ProcessInfo.processInfo.systemUptime
+                    if ProcessInfo.processInfo.environment["CLIPSLOTS_SMOOTHNESS_PROBE"] == "1" {
+                        CanvasSmoothnessTiming.values.append([(hovered-started)*1000, (targeted-hovered)*1000])
+                    }
+                    #endif
+                    linkDrag = .init(fromNodeId: id,
+                                     start: CanvasEdgeGeometry.connectionAnchor(of: screenFrame(of: node), output: !reverse, zoom: zoom),
+                                     cursor: point, targetNodeId: target,
                                      fromInput: reverse)
                     updateCanvasEdgePan(at: point)
                 }
@@ -287,7 +409,7 @@ extension CanvasWorkspaceView {
                     draggingIds = canvas.groupDragEntityIDs(id)
                     dragDelta = CGSize(width: preview.minX - frame.minX, height: preview.minY - frame.minY)
                 }
-            case .edge, .menu: break
+            case .edge, .scissors, .menu: break
             }
             return true
         case .leftMouseUp:
@@ -297,7 +419,12 @@ extension CanvasWorkspaceView {
             #endif
             // #endregion
             guard var session = pointerSession else { return false }
-            if !CanvasGeometry.isClickWithoutDrag(translation: delta) { session.moved = true }
+            switch session.target {
+            case .link, .inputLink:
+                if delta.width * delta.width + delta.height * delta.height > 1 { session.moved = true }
+            default:
+                if !CanvasGeometry.isClickWithoutDrag(translation: delta) { session.moved = true }
+            }
             stopCanvasEdgePan()
             pointerSession = nil
             switch session.target {
@@ -308,7 +435,7 @@ extension CanvasWorkspaceView {
                     marqueeCurrent = nil
                 } else {
                     inputRouter.cursorPoint = point
-                    handleBlankTap()
+                    handleBlankTap(eventTime: event.timestamp)
                 }
             case .node(let id, let wasSelected):
                 if let node = canvas.node(id: id), session.moved {
@@ -337,13 +464,17 @@ extension CanvasWorkspaceView {
                     else if !session.modifiers.contains(.shift) { beginEdit(node) }
                 }
             case .link(let id), .inputLink(let id):
-                let reverse = linkDrag?.fromInput == true
+                let reverse: Bool
+                if case .inputLink = session.target { reverse = true } else { reverse = false }
                 updatePortHover(at: point)
                 let target = linkTarget(at: point, from: id, reverse: reverse)
                 if let node = canvas.node(id: id) {
                     if session.moved { finishLinkDrag(from: node, at: point, target: target, reverse: reverse) }
-                    else if reverse { spawnUpstream(of: node, at: point) }
-                    else { spawnDownstream(from: node) }
+                    else {
+                        canvas.clearSelection()
+                        openAddMenu(atScreen: point, parentNodeId: reverse ? nil : id,
+                                    childNodeId: reverse ? id : nil)
+                    }
                 }
                 linkDrag = nil
             case .junction:
@@ -377,6 +508,9 @@ extension CanvasWorkspaceView {
                 groupResizePreview = nil
                 draggingIds = []; dragDelta = .zero
             case .edge: break
+            case .scissors(let id):
+                if !session.moved { disconnectEdge(id) }
+                edgeHover.cancel()
             case .menu(let id, let choice):
                 guard let request = addMenu, request.id == id else { return true }
                 if let choice {
@@ -418,13 +552,11 @@ extension CanvasWorkspaceView {
         let token = UUID()
         edgePanSessionID = token
         edgePanTask = Task { @MainActor in
-            var previous = ProcessInfo.processInfo.systemUptime
             while !Task.isCancelled, edgePanSessionID == token {
-                try? await Task.sleep(for: .milliseconds(16))
+                await CanvasDisplayClock.shared.nextFrame()
                 guard !Task.isCancelled, edgePanSessionID == token else { return }
-                let now = ProcessInfo.processInfo.systemUptime
-                advanceCanvasEdgePan(elapsed: now - previous)
-                previous = now
+                // TapNow's 15-screen-unit maximum is per animation frame.
+                advanceCanvasEdgePan(elapsed: 1 / 60)
             }
         }
     }
@@ -439,6 +571,10 @@ extension CanvasWorkspaceView {
         switch session.target {
         case .link(let id), .inputLink(let id):
             updatePortHover(at: point)
+            if let node = canvas.node(id: id) {
+                linkDrag?.start = CanvasEdgeGeometry.connectionAnchor(of: screenFrame(of: node),
+                    output: linkDrag?.fromInput != true, zoom: zoom)
+            }
             linkDrag?.cursor = point
             linkDrag?.targetNodeId = linkTarget(at: point, from: id, reverse: linkDrag?.fromInput == true)
         case .node(let id, _), .slotPrompt(let id):

@@ -24,12 +24,14 @@ func runRetainedAgentProbe(directory: URL, check: (Bool, String) -> Void) async 
         try! FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: url.path)
         return url
     }
-    check(AgentBackendKind.allCases == [.deepseek, .tika], "only retained backends are selectable")
+    check(AgentBackendKind.allCases == [.deepseek, .tika, .gateway], "local clients and continuation gateway remain selectable")
     let defaults = UserDefaults.standard
     let oldSidebarBackend = defaults.string(forKey: TikaBackendPreferences.backendKindKey)
     let oldWorkspaceBackend = defaults.string(forKey: AgentPreferences.workspaceBackendKey)
     for mode in WorkspaceMode.allCases {
-        for kind in AgentBackendKind.allCases {
+        // Gateway restart, resume and typed proposals use the separate real
+        // gateway transport fixture in AgentGatewayContinuationRegression.
+        for kind in [AgentBackendKind.deepseek, .tika] {
             let label = "\(mode.rawValue)/\(kind.rawValue)"
             let scope = AgentBackendScope(workspaceMode: mode)
             AgentBackendCoordinator.setKind(kind, for: scope)
@@ -104,7 +106,7 @@ func runRetainedAgentProbe(directory: URL, check: (Bool, String) -> Void) async 
     await waitFor { !deepseek.isRunning }
     check(deepseek.errorText == nil && deepseek.messages.last?.content == "DeepSeek重试完成",
           "DeepSeek retry preserves user request and completes")
-    for kind in AgentBackendKind.allCases {
+    for kind in [AgentBackendKind.deepseek, .tika] {
         let polished = "金色夕阳照亮海边，海风轻拂人物衣角。"
         let backend: any AgentBackend = kind == .deepseek
             ? AgentService(transport: AgentScriptedTransport(steps: [.sse(sse(polished))]),

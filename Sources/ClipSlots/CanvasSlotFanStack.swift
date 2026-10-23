@@ -69,6 +69,8 @@ struct CanvasSlotFanStack: View {
     let onDragEnded: (CGSize, CGPoint) -> Void
 
     @Environment(\.colorScheme) private var scheme
+    @Environment(\.canvasControlSpace) private var controlSpace
+    @Environment(\.canvasControlTransform) private var controlTransform
     @State private var draggingPreview = false
     @State private var hoveredCard: Int? = nil
     /// 打开了操作气泡的卡片下标（**全量数组的下标**）。
@@ -261,7 +263,8 @@ struct CanvasSlotFanStack: View {
 
                 // 2) 命中层：整块透明，自己算落在哪张卡上（含「+N」灰卡那一格）。
                 hitLayer(ls, cardSize: cardSize, box: box,
-                         canvasFrame: geo.frame(in: .named(CanvasWorkspaceView.spaceName)))
+                         canvasFrame: controlTransform?.screenFrame(geo.frame(in: .named(controlSpace ?? CanvasWorkspaceView.spaceName)))
+                            ?? geo.frame(in: .named(CanvasWorkspaceView.spaceName)))
 
                 // 3) ★ v2.11.9：收拢态右下角那颗蓝色 `+` 角标**已删除**（用户：“这个蓝色加号
                 //    可以去掉无用”）。它触发的动作与卡片底部那条通樏「入参文件 N」完全一样

@@ -172,10 +172,10 @@ struct CanvasNodeComposer<Controls: View>: View {
 }
 
 extension CanvasWorkspaceView {
-    func videoInputSummary(_ node: CanvasNode) -> (title: String, detail: String)? {
+    func videoInputSummary(_ node: CanvasNode, rendering: Bool = false) -> (title: String, detail: String)? {
         guard node.kind == .video else { return nil }
-        let inputs = resolveEdgeInputs(for: node)
-        let own = inputImagePaths(for: node)
+        let inputs = rendering ? renderPlan(for: node).edgeInputs : resolveEdgeInputs(for: node)
+        let own = rendering ? renderImagePaths(for: node) : inputImagePaths(for: node)
         let model = modelCatalog.videoModels.first { $0.id == node.model }
         let frames = CanvasEdgeInputs.videoFrames(edgeInputs: inputs, slotImages: own, model: model)
         let used = Set([frames.first, frames.last].compactMap { $0 } + frames.references)
@@ -213,8 +213,9 @@ extension CanvasWorkspaceView {
     }
 
     var visibleNodes: [CanvasNode] {
-        canvas.nodes.filter {
-            !canvas.piledMemberIDs.contains($0.id) && (editingNodeId == $0.id || draggingIds.contains($0.id) ||
+        let hidden = canvas.piledMemberIDs
+        return canvas.nodes.filter {
+            !hidden.contains($0.id) && (editingNodeId == $0.id || draggingIds.contains($0.id) ||
                 CanvasInteractionGeometry.isVisible(screenFrame(of: $0),
                                                     viewport: CGRect(origin: .zero, size: viewSize)))
         }
@@ -230,27 +231,33 @@ extension CanvasWorkspaceView {
     }
 
     @ViewBuilder var composerOverlay: some View {
-        if let node = canvas.soleSelectedNode, let frame = composerFrame {
+        let presentation = canvas.soleSelectedNode.flatMap { node in
+            composerFrame.map { CanvasFloatingSnapshot(project: canvas.activeProjectId, node: node, frame: $0) }
+        }
+        CanvasFloatingRetainer(item: presentation, bottom: true) { snapshot in
+            let node = snapshot.node, frame = snapshot.frame
             let isComposing = node.kind == .text ? composingNodeId == node.id : editingNodeId == node.id
             let edges = canvas.incomingEdges(of: node.id).filter { $0.fromNodeId != node.generationSourceID }
             let references = edges.compactMap { canvas.node(id: $0.fromNodeId) }
             CanvasRenderBoundary(key: .init(
                 node: node, selected: true, editing: isComposing,
-                hovered: false, textVisible: true, slotRevision: canvas.slotRevision,
-                contentRevision: store.canvasSlotRevision, currentGroup: store.currentSpecialSlotId,
+                hovered: false, textVisible: true, slotRevision: 0,
+                contentRevision: contentSnapshots.entry(node)?.revision ?? 0, currentGroup: store.currentSpecialSlotId,
                 currentContentId: node.groupId == store.currentSpecialSlotId ? store.slots[node.slot]?.contentId : nil,
-                path: videoInputSummary(node)?.detail ?? "",
-                referenceNodes: references, referenceEdges: edges
+                path: videoInputSummary(node, rendering: true)?.detail ?? "",
+                referenceNodes: references, referenceEdges: edges,
+                referenceContentRevisions: references.map { contentSnapshots.entry($0)?.revision ?? 0 }
             )) {
                 // 沿用主卡片的媒体选择与缩略图缓存；上游身份变化才重读内容。
                 let media = Dictionary(references.compactMap { reference in
-                    reference.kind == .text ? nil : previewableMedia(of: reference).map { (reference.id, $0) }
+                    reference.kind == .text ? nil : renderMedia(of: reference).map { (reference.id, $0) }
                 }, uniquingKeysWith: { first, _ in first })
                 let slotCounts = Dictionary(references.filter { $0.kind == .slot }.map {
-                    ($0.id, Set(slotReferenceImagePaths(for: $0)).count)
+                    ($0.id, Set(renderImagePaths(for: $0, all: true)).count)
                 }, uniquingKeysWith: { first, _ in first })
                 if node.kind == .text {
-                    CanvasTextComposer(document: store.canvasTextDocument(groupID: node.groupId, slot: node.slot),
+                    CanvasTextComposer(document: store.canvasTextDocument(groupID: node.groupId, slot: node.slot,
+                        renderContent: contentSnapshots.entry(node)?.content, rendering: true),
                         node: node, editing: isComposing,
                         maximumEditorHeight: max(112, min(280, canvasContentViewport.height - 160)),
                         onBegin: { editingNodeId = nil; composingNodeId = node.id },
@@ -262,14 +269,14 @@ extension CanvasWorkspaceView {
                         onStop: { canvas.stopGeneration(node) },
                         onHeightChange: { textComposerHeight = $0 })
                 } else {
-                CanvasNodeComposer(node: node, text: liveText(for: node),
+                CanvasNodeComposer(node: node, text: renderText(for: node),
                                editing: isComposing,
-                               inputCount: CanvasEdgeInputs.imageReferences(edgeInputs: resolveEdgeInputs(for: node),
-                                                                           slotImages: inputImagePaths(for: node)).count,
-                               inputSummary: videoInputSummary(node)?.title,
-                               inputDetail: videoInputSummary(node)?.detail ?? "",
+                               inputCount: CanvasEdgeInputs.imageReferences(edgeInputs: renderPlan(for: node).edgeInputs,
+                                                                           slotImages: renderImagePaths(for: node)).count,
+                               inputSummary: videoInputSummary(node, rendering: true)?.title,
+                               inputDetail: videoInputSummary(node, rendering: true)?.detail ?? "",
                                referenceNodes: references, referenceMedia: media,
-                               inputAttachments: inputAttachments(for: node),
+                               inputAttachments: renderInputAttachments(for: node),
                                slotImageCounts: slotCounts,
                                onReference: { reference in
                                    endInlineEditing()
@@ -296,8 +303,11 @@ extension CanvasWorkspaceView {
                                onCancel: { editingNodeId = nil; composingNodeId = nil },
                                onInputs: { addInputFiles(node) },
                                onManageInputs: { openInputFiles(node) },
-                               onRecover: node.taskId == nil || node.needsGenerationRecovery ? nil : { _ = recoverGeneration(node) },
-                               onRestart: node.needsGenerationRecovery ? { _ = startGeneration(node, restarting: true) } : nil) {
+                               onRecover: node.needsGenerationRecovery ? { _ = recoverGeneration(node) } : nil,
+                               onRestart: {
+                                   inputRouter.anchorView?.window?.makeFirstResponder(nil)
+                                   if let latest = canvas.node(id: node.id) { generateAdjacentResults(latest) }
+                               }) {
                     nodeActions(node)
                 }
                 }
@@ -310,8 +320,9 @@ extension CanvasWorkspaceView {
             .offset(x: frame.minX, y: frame.minY)
             // A generation panel owns its visible rectangle, including areas
             // overlapping media cards. Pointer/focus routing uses the same rule.
-            .zIndex(40)
         }
+        .id(canvas.activeProjectId)
+        .zIndex(40)
     }
 
     func nodeActions(_ node: CanvasNode) -> some View {
@@ -327,7 +338,7 @@ extension CanvasWorkspaceView {
                             onRevealAsset: { revealAsset($0) },
                             canArchive: canArchiveToLibrary(node),
                             onArchive: { archiveNodeToLibrary(node) },
-                            onOpenFullscreen: previewableMedia(of: node).map { media in
+                            onOpenFullscreen: renderMedia(of: node).map { media in
                                 { openFullscreen(node, attachment: media) }
                             },
                             onCopyText: copyTextAction(for: node))

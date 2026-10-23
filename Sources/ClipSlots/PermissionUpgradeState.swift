@@ -1,6 +1,7 @@
 import Foundation
 
-/// This stores identity history, never cached grants or automatic reset intent.
+/// Identity history permits one AX repair after a verified identity migration.
+/// Effective grants remain authoritative and are never reset automatically.
 /// Finder replacement, rollback and reinstall are observed on the next launch.
 final class PermissionUpgradeState {
     static let shared = PermissionUpgradeState()
@@ -8,6 +9,8 @@ final class PermissionUpgradeState {
     private let snapshotKey = "PermissionUpgrade.identity.v1"
     private let pendingKey = "PermissionUpgrade.pendingIdentity.v1"
     private let shownKey = "PermissionUpgrade.shownRequirement.v1"
+    private let repairEligibilityKey = "PermissionUpgrade.repairEligibility.v1"
+    private let attemptedRepairKey = "PermissionUpgrade.attemptedAXRepair.v1"
 
     init(defaults: UserDefaults = .standard) { self.defaults = defaults }
 
@@ -20,9 +23,13 @@ final class PermissionUpgradeState {
             from: previous, to: current, satisfiesPrevious: satisfiesPrevious)
         if transition == .migration || transition == .rejected {
             save(current, key: pendingKey)
+            if transition == .migration {
+                defaults.set(current.requirement, forKey: repairEligibilityKey)
+            } else { defaults.removeObject(forKey: repairEligibilityKey) }
         } else if let pending, pending.bundleID != current.bundleID
                     || pending.requirement != current.requirement {
             defaults.removeObject(forKey: pendingKey)
+            defaults.removeObject(forKey: repairEligibilityKey)
         }
         save(current, key: snapshotKey)
         return transition
@@ -31,15 +38,33 @@ final class PermissionUpgradeState {
     func recordInstalled(from old: AppCodeIdentity, to new: AppCodeIdentity,
                          transition: CodeIdentityInspector.Transition) {
         save(old, key: snapshotKey)
-        if transition == .migration { save(new, key: pendingKey) }
-        else { defaults.removeObject(forKey: pendingKey) }
+        if transition == .migration {
+            save(new, key: pendingKey)
+            defaults.set(new.requirement, forKey: repairEligibilityKey)
+        } else {
+            defaults.removeObject(forKey: pendingKey)
+            defaults.removeObject(forKey: repairEligibilityKey)
+        }
     }
 
     func completeIfReady(_ ready: Bool) {
         if ready {
             defaults.removeObject(forKey: pendingKey)
             defaults.removeObject(forKey: shownKey)
+            defaults.removeObject(forKey: repairEligibilityKey)
         }
+    }
+
+    /// Consume before running the subprocess so activation, failures and restarts
+    /// cannot repeatedly clear the user's newly granted or declined permission.
+    func consumeAutomaticAccessibilityRepair(isAuthorized: Bool) -> Bool {
+        guard !isAuthorized, let pending,
+              pending.bundleID == PermissionRepairCoordinator.bundleIdentifier,
+              pending.path == "/Applications/ClipSlots.app",
+              defaults.data(forKey: repairEligibilityKey) == pending.requirement,
+              defaults.data(forKey: attemptedRepairKey) != pending.requirement else { return false }
+        defaults.set(pending.requirement, forKey: attemptedRepairKey)
+        return true
     }
 
     /// Migration guidance is shown once per identity. A declined optional

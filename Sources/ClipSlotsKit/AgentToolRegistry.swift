@@ -35,6 +35,36 @@ public struct AgentProcessResult: Sendable {
     }
 }
 
+final class AgentProcessCancellation: @unchecked Sendable {
+    private let lock = NSLock()
+    private var process: Process?
+    private var cancelled = false
+
+    func attach(_ process: Process) {
+        lock.lock()
+        self.process = process
+        let shouldStop = cancelled
+        lock.unlock()
+        if shouldStop { stop(process) }
+    }
+
+    func cancel() {
+        lock.lock()
+        cancelled = true
+        let active = process
+        lock.unlock()
+        if let active { stop(active) }
+    }
+
+    private func stop(_ process: Process) {
+        guard process.isRunning else { return }
+        process.terminate()
+        DispatchQueue.global().asyncAfter(deadline: .now() + 2) {
+            if process.isRunning { kill(process.processIdentifier, SIGKILL) }
+        }
+    }
+}
+
 public enum AgentProcessRunner {
     /// 同步执行（在调用方线程阻塞），异步入口见下面的 `run`。
     ///
@@ -45,7 +75,8 @@ public enum AgentProcessRunner {
                         currentDirectory: String?,
                         standardInput: String?,
                         timeout: TimeInterval,
-                        maxOutputBytes: Int) -> AgentProcessResult {
+                        maxOutputBytes: Int,
+                        cancellation: AgentProcessCancellation? = nil) -> AgentProcessResult {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: executable)
         process.arguments = arguments
@@ -63,6 +94,7 @@ public enum AgentProcessRunner {
                                       stderr: "无法启动 \(executable)：\(error.localizedDescription)",
                                       timedOut: false)
         }
+        cancellation?.attach(process)
 
         // stdin：写完立刻关，否则读 stdin 的脚本会一直等。
         if let standardInput, let data = standardInput.data(using: .utf8) {
@@ -127,16 +159,22 @@ public enum AgentProcessRunner {
                           standardInput: String? = nil,
                           timeout: TimeInterval = 45,
                           maxOutputBytes: Int = 200_000) async -> AgentProcessResult {
-        await withCheckedContinuation { continuation in
-            DispatchQueue.global(qos: .userInitiated).async {
-                let result = runSync(executable: executable,
-                                     arguments: arguments,
-                                     currentDirectory: currentDirectory,
-                                     standardInput: standardInput,
-                                     timeout: timeout,
-                                     maxOutputBytes: maxOutputBytes)
-                continuation.resume(returning: result)
+        let cancellation = AgentProcessCancellation()
+        return await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                DispatchQueue.global(qos: .userInitiated).async {
+                    let result = runSync(executable: executable,
+                                         arguments: arguments,
+                                         currentDirectory: currentDirectory,
+                                         standardInput: standardInput,
+                                         timeout: timeout,
+                                         maxOutputBytes: maxOutputBytes,
+                                         cancellation: cancellation)
+                    continuation.resume(returning: result)
+                }
             }
+        } onCancel: {
+            cancellation.cancel()
         }
     }
 }

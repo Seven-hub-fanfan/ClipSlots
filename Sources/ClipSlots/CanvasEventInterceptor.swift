@@ -85,7 +85,7 @@ final class CanvasInputRouter: ObservableObject {
         guard monitor == nil else { return }
         monitor = NSEvent.addLocalMonitorForEvents(
             matching: [.scrollWheel, .otherMouseDown, .otherMouseDragged, .otherMouseUp,
-                       .leftMouseDown, .leftMouseDragged, .leftMouseUp, .mouseMoved, .keyDown, .keyUp]
+                       .leftMouseDown, .leftMouseDragged, .leftMouseUp, .rightMouseDown, .mouseMoved, .keyDown, .keyUp]
         ) { [weak self] event in
             guard let self else { return event }
             let consumed = self.routeWithProbeEvidence(event)
@@ -252,6 +252,10 @@ final class CanvasInputRouter: ObservableObject {
         }
 
         switch event.type {
+        case .rightMouseDown:
+            cursorPoint = local
+            guard anchor.bounds.contains(local) else { return false }
+            return onPointer?(event, local) ?? false
         case .leftMouseDown:
             cursorPoint = local
             if allowsEditorFocus?() != false,

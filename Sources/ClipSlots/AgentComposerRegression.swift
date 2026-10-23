@@ -106,6 +106,13 @@ func runAgentComposerProbe(directory: URL, check: (Bool, String) -> Void) async 
 
         replace("/")
         await settle()
+        _ = await AgentProcessRunner.run(executable: "/usr/bin/swift", arguments: ["-e", """
+            import ApplicationServices
+            let app = AXUIElementCreateApplication(pid_t(CommandLine.arguments[1])!)
+            _ = AXUIElementSetAttributeValue(app, "AXEnhancedUserInterface" as CFString, kCFBooleanTrue)
+            var windows: CFTypeRef?
+            _ = AXUIElementCopyAttributeValue(app, kAXWindowsAttribute as CFString, &windows)
+            """, String(ProcessInfo.processInfo.processIdentifier)], timeout: 15)
         check(completion.isOpen && completion.rows.first?.title == "/skills", "\(label) slash opens real command menu")
         key(editor, 125)
         check(completion.rows[completion.selected].title == "/model", "\(label) down selects next command")
@@ -114,15 +121,8 @@ func runAgentComposerProbe(directory: URL, check: (Bool, String) -> Void) async 
         check(model.draft == "$" && completion.isOpen, "\(label) Tab opens skill search without sending")
         key(editor, 53)
         check(!completion.isOpen && model.draft == "$", "\(label) Escape closes menu and keeps draft")
-        let skillButton = elements(host).first { ($0.accessibilityIdentifier?() ?? "") == "agent-reference-skill" }
-        check(skillButton?.accessibilityPerformPress?() == true, "\(label) visible skill button responds to native press")
-        await settle()
-        let skillSearch = NSApp.windows.compactMap(\.contentView).flatMap { elements($0) }
-            .first { ($0.accessibilityIdentifier?() ?? "") == "agent-skill-search" }
-        check(skillSearch != nil && !completion.isOpen && model.draft == "$",
-              "\(label) skill button opens independent search and preserves draft")
-        _ = skillButton?.accessibilityPerformPress?()
-        await settle()
+        check(!elements(host).contains { ($0.accessibilityIdentifier?() ?? "") == "agent-reference-skill" },
+              "\(label) no empty skill row consumes composer space")
         replace("$no-such-fixture-123")
         key(editor, 36)
         check(model.messages.filter { $0.role == .user }.count == 3 && !model.draft.isEmpty,

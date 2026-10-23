@@ -12,6 +12,24 @@ struct AppAppearanceButton: View {
     private var chromeFill: Color { canvasPalette ? CanvasSkin.chromeFill : TapSkin.chromeFill }
 
     var body: some View {
+        trigger
+        .buttonStyle(.plain)
+        .help("外观 · \(mode.title) · \((AppSkin(rawValue: skin) ?? .minimal).title)")
+        .accessibilityLabel("外观与主题")
+        .popover(isPresented: $presented, arrowEdge: .bottom) {
+            appearancePanel
+        }
+    }
+
+    @ViewBuilder private var trigger: some View {
+        if canvasPalette {
+            Button { presented.toggle() } label: {
+                Image(systemName: mode.icon)
+                    .font(.system(size: 18, weight: .regular))
+                    .frame(width: 44, height: 40)
+            }
+            .buttonStyle(CanvasHeaderButtonStyle(iconOnly: true, isActive: presented))
+        } else {
         Button { presented.toggle() } label: {
             Image(systemName: mode.icon)
                 .font(.system(size: compact ? 13 : 14, weight: .medium))
@@ -21,10 +39,10 @@ struct AppAppearanceButton: View {
                 .overlay(RoundedRectangle(cornerRadius: 9).stroke(TapSkin.border.opacity(0.7), lineWidth: 1))
                 .contentShape(Rectangle())
         }
-        .buttonStyle(.plain)
-        .help("外观 · \(mode.title) · \((AppSkin(rawValue: skin) ?? .minimal).title)")
-        .accessibilityLabel("外观与主题")
-        .popover(isPresented: $presented, arrowEdge: .bottom) {
+        }
+    }
+
+    private var appearancePanel: some View {
             VStack(alignment: .leading, spacing: 16) {
                 Text("外观").font(.system(size: 14, weight: .semibold))
                 HStack(spacing: 3) {
@@ -54,7 +72,6 @@ struct AppAppearanceButton: View {
             .padding(18).frame(width: 318)
             .foregroundColor(TapSkin.ink)
             .background(TapSkin.chromeFill)
-        }
     }
 
     private func skinTile(_ value: AppSkin) -> some View {

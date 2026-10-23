@@ -6,6 +6,7 @@ struct AgentDraftEditor: NSViewRepresentable {
     @Binding var text: String
     var focusRequest: Int
     var conversationID: UUID? = nil
+    var sourceID: ObjectIdentifier? = nil
     var replacementID: UUID? = nil
     var isEditable = true
     var placeholder = "随心输入"
@@ -13,6 +14,26 @@ struct AgentDraftEditor: NSViewRepresentable {
     var completionItems: [AgentComposerItem] = []
     var onCompletion: (AgentComposerItem.Action) -> Void = { _ in }
     let onSend: () -> Void
+
+    /// Page changes must commit the native IME buffer to the outgoing model
+    /// before the representable starts observing the destination conversation.
+    static func commitFocusedDraft(sourceID: ObjectIdentifier? = nil) {
+        func belongsToSource(_ editor: Editor) -> Bool {
+            sourceID == nil || (editor.delegate as? Coordinator)?.sourceID == sourceID
+        }
+        if let editor = NSApp.keyWindow?.firstResponder as? Editor, belongsToSource(editor) {
+            editor.commitDraftBuffer()
+            return
+        }
+        // Programmatic page switches also happen while the app is inactive.
+        // Commit only the requesting project's responder, never another writer.
+        guard sourceID != nil else { return }
+        for window in NSApp.windows where window.isVisible && !(window is NSPanel) {
+            guard let editor = window.firstResponder as? Editor, belongsToSource(editor) else { continue }
+            editor.commitDraftBuffer()
+            return
+        }
+    }
 
     func makeNSView(context: Context) -> NSScrollView {
         let scroll = NSScrollView()
@@ -25,9 +46,7 @@ struct AgentDraftEditor: NSViewRepresentable {
         editor.string = text
         editor.font = .systemFont(ofSize: 13)
         editor.placeholder = placeholder
-        editor.placeholderColor = NSColor(TapSkin.faintInk)
-        editor.textColor = NSColor(TapSkin.ink)
-        editor.insertionPointColor = NSColor(TapSkin.ink)
+        editor.synchronizeAppearance()
         editor.drawsBackground = false
         editor.isRichText = false
         editor.isEditable = isEditable
@@ -44,28 +63,31 @@ struct AgentDraftEditor: NSViewRepresentable {
         editor.textContainer?.lineFragmentPadding = 5
         editor.setAccessibilityLabel("Agent 输入")
         editor.onSend = onSend
-        editor.isEditable = isEditable
-        configureCompletion(editor)
+        editor.onCommitDraft = { value in if text != value { text = value } }
+        _ = configureCompletion(editor)
         scroll.documentView = editor
         return scroll
     }
 
     func updateNSView(_ scroll: NSScrollView, context: Context) {
         guard let editor = scroll.documentView as? Editor else { return }
-        context.coordinator.parent = self
         editor.onSend = onSend
-        editor.isEditable = isEditable
-        configureCompletion(editor)
-        editor.placeholder = placeholder
-        editor.placeholderColor = NSColor(TapSkin.faintInk)
-        editor.textColor = NSColor(TapSkin.ink)
-        editor.insertionPointColor = NSColor(TapSkin.ink)
+        if !editor.reconciliationOptimizationsEnabled || editor.isEditable != isEditable {
+            editor.isEditable = isEditable
+        }
+        let changedCompletion = configureCompletion(editor)
+        if editor.placeholder != placeholder { editor.placeholder = placeholder }
+        editor.synchronizeAppearance()
         let changedConversation = context.coordinator.conversationID != conversationID
+            || context.coordinator.sourceID != sourceID
         if changedConversation {
             editor.unmarkText()
             editor.undoManager?.removeAllActions()
         }
+        context.coordinator.parent = self
+        var changedText = false
         if editor.string != text && !editor.hasMarkedText() {
+            changedText = true
             if !changedConversation, context.coordinator.replacementID != replacementID {
                 editor.breakUndoCoalescing()
                 editor.insertText(text, replacementRange: NSRange(location: 0, length: (editor.string as NSString).length))
@@ -79,9 +101,13 @@ struct AgentDraftEditor: NSViewRepresentable {
             editor.needsDisplay = true
         }
         context.coordinator.conversationID = conversationID
+        context.coordinator.sourceID = sourceID
         context.coordinator.replacementID = replacementID
+        editor.onCommitDraft = { value in if text != value { text = value } }
         // Updating SwiftUI state during representable reconciliation is invalid.
-        DispatchQueue.main.async { [weak editor] in editor?.updateCompletion() }
+        if !editor.reconciliationOptimizationsEnabled || changedCompletion || changedText || changedConversation {
+            editor.scheduleCompletionUpdate()
+        }
         if isEditable, context.coordinator.lastFocusRequest != focusRequest {
             context.coordinator.lastFocusRequest = focusRequest
             DispatchQueue.main.async { [weak editor] in
@@ -92,11 +118,16 @@ struct AgentDraftEditor: NSViewRepresentable {
         }
     }
 
-    private func configureCompletion(_ editor: Editor) {
-        editor.completion = completion
-        editor.completionItems = completionItems
+    private func configureCompletion(_ editor: Editor) -> Bool {
+        let changed = editor.completion !== completion || editor.completionItems != completionItems
+        if editor.completion !== completion {
+            if editor.completion?.editor === editor { editor.completion?.editor = nil }
+            editor.completion = completion
+        }
+        if editor.completionItems != completionItems { editor.completionItems = completionItems }
         editor.onCompletion = onCompletion
-        completion?.editor = editor
+        if completion?.editor !== editor { completion?.editor = editor }
+        return changed
     }
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
@@ -104,10 +135,12 @@ struct AgentDraftEditor: NSViewRepresentable {
         var parent: AgentDraftEditor
         var lastFocusRequest: Int?
         var conversationID: UUID?
+        var sourceID: ObjectIdentifier?
         var replacementID: UUID?
         init(_ parent: AgentDraftEditor) {
             self.parent = parent
             conversationID = parent.conversationID
+            sourceID = parent.sourceID
             replacementID = parent.replacementID
         }
         func textDidChange(_ notification: Notification) {
@@ -116,15 +149,65 @@ struct AgentDraftEditor: NSViewRepresentable {
         }
         func textViewDidChangeSelection(_ notification: Notification) {
             guard let editor = notification.object as? Editor else { return }
-            DispatchQueue.main.async { [weak editor] in editor?.updateCompletion() }
+            editor.scheduleCompletionUpdate()
         }
     }
 
     final class Editor: NSTextView {
+        private static let legacyUpdatesRequested: Bool = {
+            #if DEBUG
+            return ProcessInfo.processInfo.environment["CLIPSLOTS_PROBE_LEGACY_EDITOR_UPDATES"] == "1"
+            #else
+            return false
+            #endif
+        }()
+        var reconciliationOptimizationsEnabled: Bool {
+            !Self.legacyUpdatesRequested
+        }
+        private static let ink = NSColor(TapSkin.ink)
+        private static let faintInk = NSColor(TapSkin.faintInk)
+        private var completionUpdatePending = false
         var onSend: (() -> Void)?
         weak var completion: AgentComposerCompletion?
         var completionItems: [AgentComposerItem] = []
         var onCompletion: ((AgentComposerItem.Action) -> Void)?
+        var onCommitDraft: ((String) -> Void)?
+        func synchronizeAppearance() {
+            guard reconciliationOptimizationsEnabled else {
+                placeholderColor = NSColor(TapSkin.faintInk)
+                textColor = NSColor(TapSkin.ink)
+                insertionPointColor = NSColor(TapSkin.ink)
+                return
+            }
+            effectiveAppearance.performAsCurrentDrawingAppearance {
+                let ink = Self.ink.usingColorSpace(.deviceRGB) ?? Self.ink
+                let faintInk = Self.faintInk.usingColorSpace(.deviceRGB) ?? Self.faintInk
+                if placeholderColor != faintInk { placeholderColor = faintInk }
+                if textColor != ink { textColor = ink }
+                if insertionPointColor != ink { insertionPointColor = ink }
+            }
+        }
+        override func viewDidChangeEffectiveAppearance() {
+            super.viewDidChangeEffectiveAppearance()
+            synchronizeAppearance()
+        }
+        func scheduleCompletionUpdate() {
+            if !reconciliationOptimizationsEnabled {
+                DispatchQueue.main.async { [weak self] in self?.updateCompletion() }
+                return
+            }
+            guard !completionUpdatePending else { return }
+            completionUpdatePending = true
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                self.completionUpdatePending = false
+                self.updateCompletion()
+            }
+        }
+        func commitDraftBuffer() {
+            if hasMarkedText() { unmarkText() }
+            onCommitDraft?(string)
+        }
         var placeholder = "" {
             didSet { if oldValue != placeholder { needsDisplay = true } }
         }

@@ -11,6 +11,7 @@ public struct AgentArtifactPanel: View {
     private let onAction: (AgentArtifactPanelAction) -> Void
     private let onClose: () -> Void
     private let onPreviewState: (AgentArtifactResourceState) -> Void
+    private let onRequest: ((String, String, JSONValue) async throws -> JSONValue)?
     @State private var showSource = false
     @State private var notice: String?
     @State private var exportedURL: URL?
@@ -21,10 +22,12 @@ public struct AgentArtifactPanel: View {
     public init(record: AgentArtifactRecord, actions: [AgentArtifactAppToolAction] = [],
                 allowsDelete: Bool = false, onAction: @escaping (AgentArtifactPanelAction) -> Void,
                 onClose: @escaping () -> Void,
-                onPreviewState: @escaping (AgentArtifactResourceState) -> Void = { _ in }) {
+                onPreviewState: @escaping (AgentArtifactResourceState) -> Void = { _ in },
+                onRequest: ((String, String, JSONValue) async throws -> JSONValue)? = nil) {
         self.record = record; self.actions = actions; self.allowsDelete = allowsDelete
         self.onAction = onAction; self.onClose = onClose
         self.onPreviewState = onPreviewState
+        self.onRequest = onRequest
     }
 
     public var body: some View {
@@ -129,7 +132,11 @@ public struct AgentArtifactPanel: View {
                 AgentArtifactHTMLPreview(source: source, onState: {
                     previewState = $0
                     onPreviewState($0)
-                }, onLink: { pendingLink = $0 })
+                }, onLink: { pendingLink = $0 }, actions: record.hasCurrentContent ? actions : [], onTool: { action in
+                    guard record.hasCurrentContent else { return }
+                    onAction(.appTool(.init(key: record.key, revision: record.revision, action: action)))
+                }, onRequest: record.hasCurrentContent ? onRequest : nil)
+                    .id(record.key.path + ":" + String(record.revision))
                     .frame(minHeight: 200, idealHeight: 360)
                     .accessibilityIdentifier("agent-artifact-html-preview")
                 if case .loading = previewState { ProgressView("正在载入预览…").controlSize(.small) }

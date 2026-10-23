@@ -3,6 +3,27 @@ import CoreGraphics
 import ClipSlotsKit
 
 func runTapNowReplicaTests(_ t: TestRunner) {
+    var firstImage = CanvasNode(pageId: "motion", groupId: "motion", slot: 1, x: 0, y: 0)
+    firstImage.kind = .image
+    var secondImage = CanvasNode(pageId: "motion", groupId: "motion", slot: 2, x: 500, y: 0)
+    secondImage.kind = .image
+    let imageForward = CanvasEdge(fromNodeId: firstImage.id, toNodeId: secondImage.id)
+    let imageReverse = CanvasEdge(fromNodeId: secondImage.id, toNodeId: firstImage.id)
+    let images = [firstImage, secondImage]
+    t.check(CanvasEdgeGraph.canConnect(from: secondImage.id, to: firstImage.id,
+                                       nodes: images, edges: [imageForward]) == nil,
+            "TapNow motion: observed image reverse connection is allowed")
+    t.equal(CanvasEdgeGraph.normalized([imageForward, imageReverse], nodeIds: Set(images.map(\.id)),
+                                      preservingImageCycles: images), [imageForward, imageReverse],
+            "TapNow motion: image reverse edge survives undo/reload normalization")
+    t.check(CanvasEdgeInputs.generationOrder(nodes: images, edges: [imageForward, imageReverse]) == nil,
+            "TapNow motion: cyclic media dependencies do not enter an infinite batch scheduler")
+    for zoom in [CGFloat(0.5), 1, 1.5] {
+        let rect = CGRect(x: 100, y: 100, width: 250 * zoom, height: 250 * zoom)
+        t.equal(CanvasEdgeGeometry.connectionAnchor(of: rect, output: true, zoom: zoom),
+                CGPoint(x: rect.maxX + 3 * zoom, y: rect.midY),
+                "TapNow motion: fixed edge anchor scales separately from magnetic plus \(zoom)")
+    }
     let data = Data("\u{FEFF}: heartbeat\r\nid: opaque/z9\r\nevent: content\r\nretry: 5000\r\ndata: 你好🙂\r\ndata: 第二行\r\n\r\nid:\r\n\r\ndata: 尾帧\r\r".utf8)
     let expected = ["你好🙂\n第二行", "尾帧"]
     var allSplits = true

@@ -49,7 +49,8 @@ while Date() < deadline {
                 produced = CGEvent(keyboardEventSource: nil, virtualKey: code, keyDown: type == .keyDown)
             } else if let x = value["x"] as? Double, let y = value["y"] as? Double {
                 produced = CGEvent(mouseEventSource: nil, mouseType: type,
-                                   mouseCursorPosition: CGPoint(x: x, y: y), mouseButton: .left)
+                                   mouseCursorPosition: CGPoint(x: x, y: y),
+                                   mouseButton: type == .rightMouseDown || type == .rightMouseUp ? .right : .left)
             } else { stop(3, "invalid event request") }
             guard let event = produced else { stop(3, "event creation unavailable") }
             if NSWorkspace.shared.frontmostApplication?.processIdentifier != pid_t(pid) {

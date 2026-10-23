@@ -125,7 +125,7 @@ public final class AgentExecutionJournal: @unchecked Sendable {
     }
 }
 
-public final class AgentJournaledTools: AgentToolExecuting, @unchecked Sendable {
+public final class AgentJournaledTools: AgentToolExecuting, AgentCLICommandAuthorizing, @unchecked Sendable {
     private let base: AgentToolExecuting
     private let journal: AgentExecutionJournal
     private let scope: AgentExecutionScope
@@ -133,6 +133,9 @@ public final class AgentJournaledTools: AgentToolExecuting, @unchecked Sendable 
         self.base = base; self.journal = journal; self.scope = scope
     }
     public func specs() -> [AgentToolSpec] { base.specs() }
+    public func permitsCLI(_ command: String) -> Bool {
+        (base as? AgentCLICommandAuthorizing)?.permitsCLI(command) ?? false
+    }
     public func restrictedForPreview() -> AgentJournaledTools {
         .init(base: AgentPreviewTools.restricted(base), journal: journal, scope: scope)
     }

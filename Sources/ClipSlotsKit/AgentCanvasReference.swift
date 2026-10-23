@@ -1,6 +1,6 @@
 import Foundation
 
-/// Explicit, immutable input for a turn. Media bytes and filesystem paths are never included.
+/// Explicit, immutable input for a turn. Captured images are sent separately from reference metadata.
 public struct AgentCanvasReference: Codable, Equatable, Identifiable, Sendable {
     public var id: String { nodeID }
     public let projectID: String
@@ -12,9 +12,11 @@ public struct AgentCanvasReference: Codable, Equatable, Identifiable, Sendable {
     public let text: String
     public let attachmentNames: [String]
     public let contentRevision: String?
+    public let images: [AgentAttachment]?
 
     public init(projectID: String, nodeID: String, nodeCreatedAt: Date, groupID: String,
-                slot: Int, title: String, text: String, attachmentNames: [String], contentRevision: String? = nil) {
+                slot: Int, title: String, text: String, attachmentNames: [String], contentRevision: String? = nil,
+                images: [AgentAttachment]? = nil) {
         self.projectID = projectID
         self.nodeID = nodeID
         self.nodeCreatedAt = nodeCreatedAt
@@ -24,6 +26,7 @@ public struct AgentCanvasReference: Codable, Equatable, Identifiable, Sendable {
         self.text = text
         self.attachmentNames = attachmentNames
         self.contentRevision = contentRevision
+        self.images = images
     }
 }
 

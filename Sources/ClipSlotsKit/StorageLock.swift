@@ -112,6 +112,23 @@ public final class StorageLock {
         return try body()
     }
 
+    /// UI transactions may decline a busy store before any mutation. Unlike a zero
+    /// flock timeout alone, this also avoids waiting for another in-process thread.
+    @discardableResult
+    public func withLockIfAvailable<T>(_ body: () throws -> T) throws -> T {
+        guard recursive.try() else {
+            throw StorageLockError.timeout(detail: "storage is busy in this process; retry shortly")
+        }
+        defer { recursive.unlock() }
+        if depth == 0 { try acquireFlock(timeout: 0) }
+        depth += 1
+        defer {
+            depth -= 1
+            if depth == 0 { releaseFlock() }
+        }
+        return try body()
+    }
+
     // MARK: - Private
 
     /// Emit a one-time stderr warning explaining we are running without the

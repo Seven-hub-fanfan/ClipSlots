@@ -42,13 +42,38 @@ enum CanvasAttachmentThumbnails {
     private static let queue = DispatchQueue(label: "clipslots.canvas.attachment.thumbnail",
                                             qos: .userInitiated)
 
+    private final class RequestCancellation: @unchecked Sendable {
+        private let lock = NSLock()
+        private var cancelled = false
+        func cancel() { lock.lock(); cancelled = true; lock.unlock() }
+        var isCancelled: Bool { lock.lock(); defer { lock.unlock() }; return cancelled }
+    }
+
+    static func load(_ att: SlotContent.SlotAttachment, maxPixel: CGFloat) async -> NSImage? {
+        let cancellation = RequestCancellation()
+        return await withTaskCancellationHandler(operation: {
+            await withCheckedContinuation { continuation in
+                load(att, maxPixel: maxPixel, isCancelled: { cancellation.isCancelled }) {
+                    continuation.resume(returning: $0)
+                }
+            }
+        }, onCancel: { cancellation.cancel() })
+    }
+
     /// 请求加载。已命中缓存 / 已知失败 / 正在加载中都会**立即返回且不重复排队**。
     static func load(_ att: SlotContent.SlotAttachment,
                      maxPixel: CGFloat,
+                     retry: Bool = false,
+                     isCancelled: @escaping () -> Bool = { false },
                      completion: @escaping (NSImage?) -> Void) {
         queue.async {
+            guard !isCancelled() else {
+                DispatchQueue.main.async { completion(nil) }
+                return
+            }
             // stat 与解码都在串行后台队列。每次请求检查文件版本，失败文件恢复后也能重新加载。
             let k = key(att, maxPixel: maxPixel)
+            if retry { misses.remove(k) }
             if let hit = cache.object(forKey: k as NSString) {
                 DispatchQueue.main.async { completion(hit) }
                 return
@@ -158,9 +183,7 @@ struct CanvasAttachmentPreviewImage: View {
             shownId = nil
             // 只对在屏幕上的预览检查版本；没有变化时不发布状态、不重新解码。
             while !Task.isCancelled {
-                let loaded = await withCheckedContinuation { continuation in
-                    CanvasAttachmentThumbnails.load(attachment, maxPixel: maxPixel) { continuation.resume(returning: $0) }
-                }
+                let loaded = await CanvasAttachmentThumbnails.load(attachment, maxPixel: maxPixel)
                 guard !Task.isCancelled else { return }
                 if image !== loaded || shownId != attachment.id {
                     image = loaded

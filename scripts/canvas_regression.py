@@ -131,6 +131,16 @@ finally:
         mouse_driver.terminate()
         mouse_driver.wait(timeout=5)
 report = json.loads((fixtures / "report.json").read_text())
+if env.get("CLIPSLOTS_SMOOTHNESS_PROBE") == "1" or env.get("CLIPSLOTS_TAPNOW_MOTION_PROBE") == "1":
+    output = pathlib.Path(env.get("CLIPSLOTS_SMOOTHNESS_OUTPUT", "/tmp/clipslots-smoothness-native"))
+    output.mkdir(parents=True, exist_ok=True)
+    for source in [*fixtures.glob("*.png"), *fixtures.glob("*-frames.json"), fixtures / "report.json",
+                   fixtures / "subject.json", root / "run.log"]:
+        if source.exists():
+            shutil.copy2(source, output / source.name)
+    print(json.dumps(report, ensure_ascii=False, indent=2))
+    print(f"Evidence: {output}")
+    raise SystemExit(1 if report["failures"] or not report["complete"] else 0)
 if env.get("CLIPSLOTS_AGENT_CONTINUATION_PROBE") == "1":
     output = pathlib.Path(env.get("CLIPSLOTS_AGENT_CONTINUATION_OUTPUT", "/tmp/clipslots-agent-continuation-native"))
     output.mkdir(parents=True, exist_ok=True)

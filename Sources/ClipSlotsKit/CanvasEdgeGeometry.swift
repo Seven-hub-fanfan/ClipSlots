@@ -51,6 +51,13 @@ public enum CanvasEdgeGeometry {
         anchor(of: rect, side: .left)
     }
 
+    /// Current TapNow ReactFlow Handle has a 6-world-unit minimum layout box.
+    /// Its outward edge stays fixed, independently of the magnetic plus child.
+    public static func connectionAnchor(of rect: CGRect, output: Bool, zoom: CGFloat) -> CGPoint {
+        let scale = zoom.isFinite && zoom > 0 ? zoom : 1
+        return CGPoint(x: output ? rect.maxX + 3 * scale : rect.minX - 3 * scale, y: rect.midY)
+    }
+
     /// 两个卡片之间该从哪条边出、进哪条边。
     ///
     /// 输出固定右侧、输入固定左侧；节点移动时只改变曲线，不改变端口语义。

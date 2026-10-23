@@ -232,19 +232,69 @@ enum PermissionRegression {
         let upgrade = PermissionUpgradeState(defaults: defaults)
         check(upgrade.observe(identity(), satisfiesPrevious: false) == .unknown && upgrade.pending == nil,
               "fresh install stores identity without creating repair intent")
+        check(!upgrade.consumeAutomaticAccessibilityRepair(isAuthorized: false),
+              "fresh install never automatically resets permission")
         check(upgrade.observe(identity(hash: "B"), satisfiesPrevious: false) == .migration && upgrade.pending != nil,
               "Finder replacement is detected from persisted previous identity")
+        check(!upgrade.consumeAutomaticAccessibilityRepair(isAuthorized: true),
+              "migration preserves effective accessibility permission")
+        check(upgrade.consumeAutomaticAccessibilityRepair(isAuthorized: false)
+                && !upgrade.consumeAutomaticAccessibilityRepair(isAuthorized: false),
+              "known migration consumes automatic AX repair exactly once")
         check(upgrade.consumeMigrationGuidance() && !upgrade.consumeMigrationGuidance(),
               "known migration shows automatic guidance once, respecting declined optional permission")
         _ = upgrade.observe(identity(hash: "B"), satisfiesPrevious: true)
         check(upgrade.pending != nil, "restart preserves known migration while permissions are still unavailable")
         check(!upgrade.consumeMigrationGuidance(), "same identity restart does not repeat the upgrade popup")
+        check(!PermissionUpgradeState(defaults: defaults).consumeAutomaticAccessibilityRepair(isAuthorized: false),
+              "restart preserves the automatic repair attempt even when permission remains denied")
         upgrade.completeIfReady(false)
         check(upgrade.pending != nil, "one missing permission preserves migration guidance")
         upgrade.completeIfReady(true)
         check(upgrade.pending == nil, "effective grants complete migration guidance")
         upgrade.recordInstalled(from: old, to: new, transition: .compatible)
         check(upgrade.pending == nil && upgrade.previous == old, "normal installer transition does not require reauthorization")
+        check(!upgrade.consumeAutomaticAccessibilityRepair(isAuthorized: false),
+              "compatible update does not create automatic reset eligibility")
+        _ = upgrade.observe(identity(hash: "rejected", signer: "other"), satisfiesPrevious: true)
+        check(!upgrade.consumeAutomaticAccessibilityRepair(isAuthorized: false),
+              "rejected signer transition never clears authorization automatically")
+
+        // Exercise the same launch dispatcher, not just the eligibility flag.
+        upgrade.recordInstalled(from: identity(), to: identity(hash: "C"), transition: .migration)
+        fixture.grants = []
+        model.refresh()
+        let autoResets = fixture.resets.count, autoRequests = fixture.axRequests
+        let autoOpens = fixture.opens.count
+        var guideCount = 0
+        check(!AccessibilityPermissionGuide.startAutomaticRepair(using: model, upgrade: upgrade,
+                isFormalInstall: false, presentGuide: { guideCount += 1 }),
+              "isolated launch never consumes a real-install automatic repair")
+        check(AccessibilityPermissionGuide.startAutomaticRepair(using: model, upgrade: upgrade,
+                isFormalInstall: true, presentGuide: { guideCount += 1 }),
+              "migration launch starts automatic repair without a button click")
+        await settle()
+        check(fixture.resets.count == autoResets + 1 && fixture.resets.last == .accessibility
+                && fixture.axRequests == autoRequests + 1 && fixture.opens.count == autoOpens + 1
+                && fixture.opens.last == .accessibility && guideCount == 1,
+              "automatic launch clears AX only, requests it and opens its settings pane")
+        check(!AccessibilityPermissionGuide.startAutomaticRepair(using: model, upgrade: upgrade,
+                isFormalInstall: true, presentGuide: { guideCount += 1 }),
+              "activation cannot repeat automatic reset after request")
+        model.stopGuiding()
+        upgrade.recordInstalled(from: identity(), to: identity(hash: "D"), transition: .migration)
+        fixture.resetFailure = "automatic reset fixture failure"
+        let failedAutoResets = fixture.resets.count, failedAutoOpens = fixture.opens.count
+        _ = AccessibilityPermissionGuide.startAutomaticRepair(using: model, upgrade: upgrade,
+                isFormalInstall: true, presentGuide: {})
+        await settle()
+        check(model.error == fixture.resetFailure && fixture.resets.count == failedAutoResets + 1
+                && fixture.opens.count == failedAutoOpens,
+              "automatic reset failure is visible and never falsely opens regrant")
+        check(!PermissionUpgradeState(defaults: defaults).consumeAutomaticAccessibilityRepair(isAuthorized: false),
+              "failed automatic reset never loops on next launch")
+        fixture.resetFailure = nil
+        model.stopGuiding()
         defaults.removePersistentDomain(forName: suite)
         check(defaults.dictionaryRepresentation().keys.allSatisfy { !$0.hasPrefix("PermissionUpgrade.") },
               "isolated identity tests clean up their own preferences")
@@ -458,6 +508,69 @@ enum PermissionRegression {
         check(PermissionCenter.helper.map { !$0.frame.intersects(settingsBounds)
                 && wideDisplay.contains($0.frame) } == true,
               "visible helper stays outside the system permission controls")
+        func firstDrag(_ view: NSView) -> PermissionFileDragView? {
+            (view as? PermissionFileDragView) ?? view.subviews.compactMap { firstDrag($0) }.first
+        }
+        check(PermissionCenter.helper.map { !$0.isMovable && !$0.isMovableByWindowBackground } == true,
+              "nonactivating helper cannot be dragged as a window")
+        if let helper = PermissionCenter.helper,
+           let card = helper.contentView.flatMap({ firstDrag($0) }) {
+            check(!card.mouseDownCanMoveWindow && card.acceptsFirstMouse(for: nil),
+                  "file card accepts the first press without starting background window movement")
+            let anchor = card.convert(NSPoint(x: 30, y: 18), to: nil)
+            func event(_ type: NSEvent.EventType, offset: CGFloat = 0) -> NSEvent {
+                NSEvent.mouseEvent(with: type, location: NSPoint(x: anchor.x + offset, y: anchor.y),
+                    modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
+                    windowNumber: helper.windowNumber, context: nil, eventNumber: 1,
+                    clickCount: 1, pressure: type == .leftMouseUp ? 0 : 1)!
+            }
+            func moveSettings() {
+                PermissionCenter.updateHelperForTesting(using: model,
+                    settingsFrame: settingsBounds.offsetBy(dx: -100, dy: 20),
+                    visibleFrames: [wideDisplay], frontBundleID: "com.apple.systempreferences")
+            }
+            let frameBeforePress = helper.frame
+            // Send actual AppKit input to the native card. Staying below 3 px
+            // exercises the gap before beginDraggingSession, without a system
+            // drop, global mouse injection or any change to TCC.
+            card.mouseDown(with: event(.leftMouseDown))
+            card.mouseDragged(with: event(.leftMouseDragged, offset: 1))
+            moveSettings()
+            await settle()
+            check(helper.frame == frameBeforePress && helper.isVisible && !helper.isKeyWindow
+                    && !PermissionCenter.draggingApplication,
+                  "press and subthreshold drag freeze docking before a file session starts")
+            card.mouseUp(with: event(.leftMouseUp))
+            moveSettings()
+            await settle()
+            check(helper.frame != frameBeforePress && !PermissionCenter.draggingApplication,
+                  "release without a file drag restores helper docking")
+            showHelper()
+            await settle()
+            card.mouseDown(with: event(.leftMouseDown))
+            card.dragEnabled = false
+            moveSettings()
+            await settle()
+            check(helper.frame != frameBeforePress,
+                  "disabling an armed application card clears the docking freeze")
+            card.mouseDown(with: event(.leftMouseDown))
+            showHelper()
+            await settle()
+            check(helper.frame == frameBeforePress,
+                  "disabled card cannot arm a new pointer interaction")
+            card.dragEnabled = true
+            let detached = PermissionFileDragView(url: current)
+            detached.frame = NSRect(x: 0, y: 0, width: 300, height: 39)
+            helper.contentView?.addSubview(detached)
+            detached.mouseDown(with: event(.leftMouseDown))
+            detached.removeFromSuperview()
+            moveSettings()
+            await settle()
+            check(helper.frame != frameBeforePress,
+                  "removing an armed card clears the docking freeze")
+            showHelper()
+            await settle()
+        } else { check(false, "actual helper exposes a native file card for mouse regression") }
         let initialFrame = PermissionCenter.helper?.frame
         PermissionCenter.draggingApplication = true
         PermissionCenter.updateHelperForTesting(using: model,
@@ -494,9 +607,6 @@ enum PermissionRegression {
         check(PermissionCenter.helper?.isVisible == true && model.repairing == .accessibility,
               "drag helper stays visible during old-record cleanup")
         let busyHost = PermissionCenter.helper?.contentView
-        func firstDrag(_ view: NSView) -> PermissionFileDragView? {
-            (view as? PermissionFileDragView) ?? view.subviews.compactMap { firstDrag($0) }.first
-        }
         check(busyHost.flatMap { firstDrag($0) }?.dragEnabled == false,
               "application drag waits until record cleanup finishes")
         fixture.pendingReset?.resume()

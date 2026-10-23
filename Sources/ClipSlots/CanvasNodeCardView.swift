@@ -353,8 +353,10 @@ struct CanvasNodeCardView: View {
 
     /// 出图节点：路径行 / 预览区（堆叠卡片）/ 正文区 / 入参文件行。
     private var imageNodeStack: some View {
-        VStack(alignment: .leading, spacing: s(8)) {
+        VStack(alignment: .leading, spacing: 0) {
             headerRow
+                .frame(height: plan.headerHeight)
+            Color.clear.frame(height: s(8))
 
                 // ★ zIndex：堆叠卡片 hover 时会向两侧扇开、向上抬、还要浮出操作气泡和 `+N` 网格，
                 // 这些都溢出预览区。VStack 里**后声明的兄弟画在上面**，所以不置顶的话正文区（以及
@@ -362,17 +364,16 @@ struct CanvasNodeCardView: View {
                 // 用户反馈的"卡片被横线割裂"就是这个。预览区置顶后，卡片永远浮在正文区之上。
                 previewArea
                     .zIndex(10)
+                Color.clear.frame(height: s(previewToPromptGap))
                 promptArea
-                    // 卡片区与文字区之间留 12pt（VStack 已有 8pt，这里补 4pt）。
-                    // 卡片扇开时会略微下探，间距太小就会和正文首行"贴脸"。
-                    .padding(.top, s(previewToPromptGap - 8))  // VStack 自带 8pt
-                // 正文字号被调大后（最大 24pt）会把下面的内容顶出卡片。加一个可压缩的 Spacer，
-                // 让入参文件行始终钉在卡片底边，被挤掉的是正文的末行而不是整条按钮。
-                Spacer(minLength: 0)
+                // Every section consumes its exact shared budget. The footer
+                // therefore remains at the same position in passive and active cards.
+                Color.clear.frame(height: s(8))
 
             // ★ 二轮：入参文件从"参数栏旁边的小胶囊"改成**卡片最底部独立一行**（用户明确要求）。
             // 它是这张卡上唯一的写操作入口，之前挤在一排芯片中间，点击目标只有 60pt 宽。
             inputFilesRow
+                .frame(height: plan.footerHeight)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
     }
@@ -782,6 +783,7 @@ struct CanvasNodeCardView: View {
     private var promptArea: some View {
         if isEditing {
             editor
+                .frame(height: plan.promptMaxHeight, alignment: .topLeading)
         } else {
             Group {
                 if previewText.isEmpty {
@@ -920,6 +922,7 @@ struct CanvasNodeCardView: View {
             .padding(.horizontal, s(9))
             .padding(.vertical, s(5))
             .frame(maxWidth: .infinity)
+            .frame(height: plan.footerHeight)
             .background(
                 RoundedRectangle(cornerRadius: s(8), style: .continuous)
                     .fill(attachments.isEmpty
@@ -934,6 +937,7 @@ struct CanvasNodeCardView: View {
             .contentShape(RoundedRectangle(cornerRadius: s(8), style: .continuous))
         }
         .buttonStyle(.plain)
+        .accessibilityIdentifier("slot-input-\(node.id)")
         .help("管理入参文件：增删、调整顺序（与该槽位的附件是同一份数据）")
         .canvasControlRegion("slot-input-\(node.id)")
     }

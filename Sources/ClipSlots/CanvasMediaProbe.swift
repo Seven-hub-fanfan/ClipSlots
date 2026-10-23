@@ -88,14 +88,27 @@ enum CanvasMediaProbe {
     private static let maxCachedItems = 512
     private static let lock = NSLock()
     private static let queue = DispatchQueue(label: "com.clipslots.media.facts", qos: .utility)
+    private final class RequestCancellation: @unchecked Sendable {
+        private let lock = NSLock()
+        private var cancelled = false
+        func cancel() { lock.lock(); cancelled = true; lock.unlock() }
+        var isCancelled: Bool { lock.lock(); defer { lock.unlock() }; return cancelled }
+    }
 
     static func load(for att: SlotContent.SlotAttachment) async -> (facts: CanvasMediaFacts, version: String) {
-        await withCheckedContinuation { continuation in
-            queue.async {
-                let version = att.canvasSourceVersion
-                continuation.resume(returning: (facts(for: att), version))
+        let cancellation = RequestCancellation()
+        return await withTaskCancellationHandler(operation: {
+            await withCheckedContinuation { continuation in
+                queue.async {
+                    guard !cancellation.isCancelled else {
+                        continuation.resume(returning: (CanvasMediaFacts(), ""))
+                        return
+                    }
+                    let version = att.canvasSourceVersion
+                    continuation.resume(returning: (facts(for: att), version))
+                }
             }
-        }
+        }, onCancel: { cancellation.cancel() })
     }
 
     /// 探测。失败返回 `isEmpty == true` 的空事实而不是 nil：调用方只需判断 `isEmpty`，

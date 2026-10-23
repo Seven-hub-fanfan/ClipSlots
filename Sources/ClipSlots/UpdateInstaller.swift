@@ -304,7 +304,7 @@ final class UpdateInstaller {
                                                                transition: identityTransition)
                 UserDefaults.standard.set(false, forKey: UserPreferenceKeys.pendingAccessibilityReauthAfterUpdate)
                 progress("更新完成，正在重启…")
-                NSLog("[UpdateInstaller] 安装完成；权限以新版系统预检为准，不自动清除授权")
+                NSLog("[UpdateInstaller] 安装完成；有效权限保持，身份迁移后失效的辅助功能记录将自动修复一次")
 
                 // P2-5 (v2.10.8): relaunch 时序加固。旧版用固定 `sleep 1` 猜测退出耗时，
                 // 若本进程退出慢于 1s，open 会命中「App 仍在运行」而无法拉起新实例（甚至

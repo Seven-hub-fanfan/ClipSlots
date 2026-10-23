@@ -6,12 +6,10 @@ import ClipSlotsKit
 /// Local text fixtures only: never issue a remote generation request.
 @MainActor
 func runAgentReadabilityProbe(directory: URL, check: (Bool, String) -> Void) async {
+    NativeAccessibilityProbe.enable()
     func settle() async { try? await Task.sleep(for: .milliseconds(350)) }
     func elements(_ node: AnyObject, depth: Int = 0) -> [AnyObject] {
-        guard depth < 30 else { return [] }
-        let children = node.accessibilityChildren?() ?? []
-        let fallback = (node as? NSView)?.subviews ?? []
-        return [node] + (children.isEmpty ? fallback : children).flatMap { elements($0 as AnyObject, depth: depth + 1) }
+        NativeAccessibilityProbe.elements(node)
     }
     func scrolls(_ view: NSView) -> [NSScrollView] {
         (view as? NSScrollView).map { [$0] } ?? view.subviews.flatMap(scrolls)

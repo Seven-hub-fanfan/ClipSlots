@@ -66,6 +66,9 @@ elif args[:2] == ["model", "describe"]:
     result = {"parameters": []}
 elif args[:2] == ["task", "get"]:
     ident = args[2]
+    if os.environ.get("CLIPSLOTS_CANVAS_AGENT_GENERATION_PROBE") == "1":
+        with (root / "attempt-events.jsonl").open("a") as log:
+            log.write(json.dumps({"event": "query", "task": ident, "at": time.time()}) + "\n")
     suffix = "mp4" if ident.startswith("video") else "png"
     result = {"taskInfo": {"task_status": 2, "task_id": ident, "results": [
         {"content": f"http://127.0.0.1:{os.environ['CLIPSLOTS_FIXTURE_PORT']}/fixture.{suffix}"}
@@ -79,6 +82,20 @@ elif args[:2] == ["task", "get"]:
     if (root / (ident + ".png")).exists():
         result["taskInfo"]["results"][0]["content"] = (
             f"http://127.0.0.1:{os.environ['CLIPSLOTS_FIXTURE_PORT']}/{ident}.png")
+    marker_file = root / (ident + ".attempt.json")
+    if marker_file.exists():
+        marker = json.loads(marker_file.read_text())
+        if "CANVAS_SELECTION_PARALLEL" in marker["prompt"]:
+            simultaneous = [
+                item for path in root.glob("*.attempt.json")
+                if "CANVAS_SELECTION_PARALLEL" in (item := json.loads(path.read_text()))["prompt"]
+            ]
+            if len(simultaneous) < 4 and time.time() - marker["at"] < 1:
+                result = {"taskInfo": {"task_status": 1, "task_id": ident}}
+            else:
+                with (root / "attempt-events.jsonl").open("a") as log:
+                    log.write(json.dumps({"event": "completed", "task": ident,
+                                          "at": time.time(), "submitted": len(simultaneous)}) + "\n")
 elif "generate" in args:
     prompt = args[args.index("--prompt") + 1] if "--prompt" in args else ""
     if os.environ.get("CLIPSLOTS_BATCH_PROBE") == "1" and "BATCH_SLOW" in prompt:
@@ -98,8 +115,26 @@ elif "generate" in args:
         if "BATCH_RATE_ALWAYS" in prompt or attempt < 3:
             print("API error (429): Too many requests", file=sys.stderr)
             sys.exit(1)
-    marker = "batch-fail" if os.environ.get("CLIPSLOTS_BATCH_PROBE") == "1" and "BATCH_FAIL" in prompt else ""
+    fails = os.environ.get("CLIPSLOTS_BATCH_PROBE") == "1" and "BATCH_FAIL" in prompt
+    fails = fails or (os.environ.get("CLIPSLOTS_CANVAS_AGENT_GENERATION_PROBE") == "1"
+                      and "CANVAS_AGENT_FAIL" in prompt)
+    marker = "batch-fail" if fails else ""
     ident = ("video" if "video" in args else "image") + marker + uuid.uuid4().hex[:12]
+    if os.environ.get("CLIPSLOTS_CANVAS_AGENT_GENERATION_PROBE") == "1":
+        attempt = {"event": "submitted", "task": ident, "prompt": prompt, "at": time.time()}
+        (root / (ident + ".attempt.json")).write_text(json.dumps(attempt))
+        with (root / "attempt-events.jsonl").open("a") as log:
+            log.write(json.dumps(attempt) + "\n")
+        if "image" in args and not fails:
+            import hashlib
+            import struct
+            import zlib
+            def chunk(kind, data):
+                return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", zlib.crc32(kind + data))
+            color = hashlib.sha256(prompt.encode()).digest()[:3]
+            image = b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", 128, 72, 8, 2, 0, 0, 0))
+            image += chunk(b"IDAT", zlib.compress((b"\x00" + color * 128) * 72)) + chunk(b"IEND", b"")
+            (root / (ident + ".png")).write_bytes(image)
     if os.environ.get("CLIPSLOTS_BATCH_PROBE") == "1" and "BATCH_PARALLEL" in prompt:
         import hashlib
         import struct

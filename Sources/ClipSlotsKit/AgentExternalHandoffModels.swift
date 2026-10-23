@@ -28,15 +28,18 @@ public struct AgentExternalProjectContext: Equatable, Sendable {
     public let language: String
     public let snapshotID: UUID?
     public let sessionID: UUID?
+    public let liveLease: AgentLiveMCPLease?
 
     public init(scope: AgentArtifactScope, projectTitle: String, selectedContext: String = "",
                 documentationURLs: [URL] = [], cliPath: String = "/usr/local/bin/clipslots",
                 mcpReadiness: AgentExternalMCPReadiness = .unavailable("需保存项目快照并在客户端连接"),
-                region: String = "global", language: String = "en", snapshotID: UUID? = nil, sessionID: UUID? = nil) {
+                region: String = "global", language: String = "en", snapshotID: UUID? = nil, sessionID: UUID? = nil,
+                liveLease: AgentLiveMCPLease? = nil) {
         self.scope = scope; self.projectTitle = projectTitle; self.selectedContext = selectedContext
         self.documentationURLs = documentationURLs; self.cliPath = cliPath
         self.mcpReadiness = mcpReadiness; self.region = region; self.language = language
         self.snapshotID = snapshotID; self.sessionID = sessionID
+        self.liveLease = liveLease
     }
 
     /// A local stdio configuration, not a TapNow endpoint or an internal Agent run.
@@ -48,10 +51,15 @@ public struct AgentExternalProjectContext: Equatable, Sendable {
         var args: [JSONValue] = ["--mcp", "--project-id", .string(scope.projectID), "--canvas-id", .string(scope.canvasID)]
         if let snapshotID { args += ["--snapshot-id", .string(snapshotID.uuidString)] }
         if let sessionID { args += ["--session-id", .string(sessionID.uuidString)] }
+        var environment: [String: JSONValue] = ["CLIPSLOTS_PROJECT_ID": .string(scope.projectID),
+                                               "CLIPSLOTS_CANVAS_ID": .string(scope.canvasID)]
+        if let liveLease {
+            environment[AgentLiveMCPLease.environmentKey] = .string(String(decoding: try JSONEncoder().encode(liveLease), as: UTF8.self))
+        }
         return ["mcpServers": ["clipslots-project": [
             "command": .string(cliPath),
             "args": .array(args),
-            "env": ["CLIPSLOTS_PROJECT_ID": .string(scope.projectID), "CLIPSLOTS_CANVAS_ID": .string(scope.canvasID)]
+            "env": .object(environment)
         ]]]
     }
 
@@ -77,6 +85,9 @@ public struct AgentExternalProjectContext: Equatable, Sendable {
             "projectID": .string(scope.projectID), "canvasID": .string(scope.canvasID),
             "projectTitle": .string(projectTitle)
         ]).encodedText(pretty: true)
+        let permissions = liveLease == nil
+            ? "This MCP route is read-only. Call clipslots_context first to obtain the fixed snapshot ID."
+            : "Call clipslots_context first. preview_canvas_mutation submits a proposal to the active native canvas; only native user confirmation writes it. Poll canvas_mutation_status for the result. This connection expires after 30 minutes or on project/session change or cancellation."
         let text = """
         Continue work in this explicitly selected ClipSlots project/canvas only.
         Project scope:
@@ -92,7 +103,7 @@ public struct AgentExternalProjectContext: Equatable, Sendable {
         Proposed ClipSlots stdio MCP settings (never use a TapNow service):
         \(try mcpConfiguration().encodedText(pretty: true))
 
-        This MCP route is read-only. Call clipslots_context first to obtain the fixed snapshot ID.
+        \(permissions)
         If no snapshot ID is specified, the latest saved snapshot of this project is frozen at startup.
         Do not infer file/shell permissions. Ask for missing access and confirm mutations.
         This handoff does not reuse an internal Agent session or run ID.
@@ -156,6 +167,7 @@ public struct AgentExternalProvider: Codable, Equatable, Sendable, Identifiable 
 
 public struct AgentExternalProviderCatalog: Sendable {
     public let providers: [AgentExternalProvider]
+    public static let desktopSchemes = ["claude", "chatgpt", "dsh", "cursor", "trae", "codex", "workbuddy", "qwenwork-cn"]
 
     public init(providers: [AgentExternalProvider]) throws {
         guard !providers.isEmpty, providers.count <= 32,
@@ -184,7 +196,7 @@ public struct AgentExternalProviderCatalog: Sendable {
                 throw AgentExternalHandoffError.invalidConfiguration
             }
             if let target = provider.desktopTarget {
-                guard ["claude", "chatgpt", "cursor", "trae"].contains(target.baseURL.scheme?.lowercased() ?? ""),
+                guard Self.desktopSchemes.contains(target.baseURL.scheme?.lowercased() ?? ""),
                       target.baseURL.user == nil, target.baseURL.password == nil,
                       target.baseURL.absoluteString.utf8.count <= 8192 else {
                     throw AgentExternalHandoffError.invalidConfiguration
@@ -217,16 +229,24 @@ public struct AgentExternalProviderCatalog: Sendable {
 
     public static var localDefaults: Self {
         // These URLs open clients only. No undocumented prompt or auto-send protocol is assumed.
-        let definitions: [(String, String, String?, String)] = [
-            ("claude", "Claude", "com.anthropic.claudefordesktop", "https://claude.ai/new"),
-            ("chatgpt", "ChatGPT", "com.openai.chat", "https://chatgpt.com/"),
-            ("gemini", "Gemini", nil, "https://gemini.google.com/app"),
-            ("deepseek", "DeepSeek", nil, "https://chat.deepseek.com/")
+        let definitions: [(String, String, String?, String?, String)] = [
+            ("claude", "Claude", "com.anthropic.claudefordesktop", nil, "https://claude.ai/new"),
+            ("chatgpt", "ChatGPT", "com.openai.chat", nil, "https://chatgpt.com/"),
+            ("workbuddy", "WorkBuddy", nil, "workbuddy://task?action=start", "https://www.workbuddy.cn/app"),
+            ("qwenwork", "千问办公", nil, "qwenwork-cn://", "https://qwenwork.cn/app/")
         ]
-        let providers = definitions.compactMap { id, name, bundle, address -> AgentExternalProvider? in
+        var providers = definitions.compactMap { id, name, bundle, desktop, address -> AgentExternalProvider? in
             guard let url = URL(string: address) else { return nil }
-            return .init(id: id, name: name, desktopBundleID: bundle, webTarget: .init(baseURL: url))
+            return .init(id: id, name: name, desktopBundleID: bundle,
+                         desktopTarget: desktop.flatMap(URL.init(string:)).map { .init(baseURL: $0) },
+                         webTarget: .init(baseURL: url),
+                         connectionInstructions: "在客户端的 MCP 设置中添加 ClipSlots 项目配置，再粘贴项目提示词并确认。")
         }
+        providers.insert(.init(id: "deepseek", name: "DeepSeek Harness",
+            desktopBundleID: "com.deepseek.dsh",
+            desktopTarget: .init(baseURL: URL(string: "dsh://open")!),
+            connectionInstructions: "在 DeepSeek Harness 的 MCP 设置中添加 ClipSlots 项目配置，再粘贴项目提示词并确认。"),
+            at: 2)
         // The private initializer is limited to these constant, validated definitions.
         return Self(defaultProviders: providers)
     }

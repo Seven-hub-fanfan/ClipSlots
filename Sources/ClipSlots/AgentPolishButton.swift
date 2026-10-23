@@ -5,34 +5,39 @@ import ClipSlotsKit
 struct AgentPolishButton: View {
     let busy: Bool
     var enabled = true
+    var compact = false
     let action: () -> Void
     @State private var hovered = false
 
     var body: some View {
         Button(action: action) {
-            Label(busy ? "润色中…" : "AI 润色", systemImage: "sparkles")
-                .font(.system(size: 12, weight: .medium))
-                .foregroundColor(TapSkin.tone(0x1962c9, 0x89bbff))
-                .padding(.horizontal, 10).frame(height: 30)
+            Group {
+                if compact { Image(systemName: busy ? "hourglass" : "sparkles") }
+                else { Label(busy ? "润色中…" : "AI 润色", systemImage: busy ? "hourglass" : "sparkles") }
+            }
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundColor(enabled || busy
+                    ? TapSkin.tone(0x1962c9, 0x89bbff) : TapSkin.secondaryInk)
+                .padding(.horizontal, compact ? 7 : 10).frame(height: 30)
                 .background {
                     RoundedRectangle(cornerRadius: 9)
-                        .fill(LinearGradient(colors: [.blue.opacity(0.17), .cyan.opacity(0.07)],
+                        .fill(LinearGradient(colors: [.blue.opacity(enabled || busy ? 0.13 : 0.07),
+                                                     .cyan.opacity(0.04)],
                                              startPoint: .topLeading, endPoint: .bottomTrailing))
                 }
-                .overlay(RoundedRectangle(cornerRadius: 9).stroke(.blue.opacity(0.3), lineWidth: 0.7))
+                .overlay(RoundedRectangle(cornerRadius: 9).stroke(.blue.opacity(enabled || busy ? 0.25 : 0.13), lineWidth: 0.7))
                 .overlay {
                     ComposerEntranceGlow(token: "\(busy):\(hovered)", active: busy || hovered, repeating: busy)
                         .clipShape(RoundedRectangle(cornerRadius: 9))
                         .allowsHitTesting(false).accessibilityHidden(true)
                 }
-                .shadow(color: .blue.opacity(busy || hovered ? 0.18 : 0.06), radius: 6)
-                .opacity(enabled || busy ? 1 : 0.5)
                 .contentShape(RoundedRectangle(cornerRadius: 9))
         }
         .buttonStyle(.plain)
         .disabled(busy || !enabled)
         .onHover { hovered = $0 }
         .accessibilityLabel(busy ? "AI 润色中" : "AI 润色")
+        .help(enabled ? "优化草稿表达，保留原意" : "输入文字后可使用 AI 润色")
     }
 }
 

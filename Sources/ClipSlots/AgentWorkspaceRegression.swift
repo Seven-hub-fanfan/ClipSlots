@@ -18,10 +18,7 @@ extension CanvasWorkspaceView {
             (view as? AgentDraftEditor.Editor).map { [$0] } ?? view.subviews.flatMap(editors)
         }
         func elements(_ node: AnyObject, depth: Int = 0) -> [AnyObject] {
-            guard depth < 30 else { return [] }
-            let children = node.accessibilityChildren?() ?? []
-            let fallback = (node as? NSView)?.subviews ?? []
-            return [node] + (children.isEmpty ? fallback : children).flatMap { elements($0 as AnyObject, depth: depth + 1) }
+            NativeAccessibilityProbe.elements(node)
         }
         func views(_ view: NSView) -> [NSView] {
             [view] + view.subviews.flatMap(views)
@@ -41,11 +38,17 @@ extension CanvasWorkspaceView {
             """, String(ProcessInfo.processInfo.processIdentifier)
         ], timeout: 15)
         NSLog("[AgentWorkspace] AX bootstrap %@", axBootstrap.stdout)
+        NativeAccessibilityProbe.enable()
         await settle()
-        // Window activation is asynchronous and another app can briefly take focus
-        // while the external AX bootstrap starts. Require real focus before input.
-        for _ in 0..<10 {
+        // Window activation and the external AX client may need several turns
+        // after a new candidate is registered. Keep the real focus requirement.
+        for attempt in 0..<100 {
             if mainWindow.isKeyWindow && NSApp.isActive { break }
+            if attempt % 10 == 0 {
+                NSLog("[AgentWorkspace] focus wait attempt=%d active=%d key=%d canKey=%d visible=%d window=%d keyWindow=%d",
+                      attempt, NSApp.isActive, mainWindow.isKeyWindow, mainWindow.canBecomeKey,
+                      mainWindow.isVisible, mainWindow.windowNumber, NSApp.keyWindow?.windowNumber ?? -1)
+            }
             NSApp.activate(ignoringOtherApps: true)
             mainWindow.makeKeyAndOrderFront(nil)
             await settle(0.15)
@@ -186,19 +189,20 @@ extension CanvasWorkspaceView {
         for mode in WorkspaceMode.allCases {
             NotificationCenter.default.post(name: .setWorkspaceMode, object: nil, userInfo: ["mode": mode.rawValue])
             await settle(0.5)
-            let nodes = mainWindow.contentView.map { elements($0) } ?? []
+            let nodes = elements(mainWindow)
             let debugRows = nodes.map { node in
                 ["type": String(describing: type(of: node)), "label": node.accessibilityLabel?() ?? "",
                  "title": node.accessibilityTitle?() ?? "", "id": node.accessibilityIdentifier?() ?? ""]
             }
             try? JSONSerialization.data(withJSONObject: debugRows, options: [.prettyPrinted])
                 .write(to: directory.appendingPathComponent("ax-\(mode.rawValue).json"))
-            check(nodes.contains { ($0.accessibilityLabel?() ?? "") == mode.title
+            let identifier = mode == .agent ? "workspace-beat" : "workspace-\(mode.rawValue)"
+            check(nodes.contains { ($0.accessibilityIdentifier?() ?? "") == identifier
+                || ($0.accessibilityLabel?() ?? "") == mode.title
                 || ($0.accessibilityTitle?() ?? "") == mode.title
                 || ($0.accessibilityHelp?() ?? "") == mode.title }, "\(mode.rawValue) switch remains accessible")
             if mode == .agent {
-                check(mainWindow.contentView.map { !editors($0).isEmpty } ?? false, "full workspace mounts native composer")
-                PerfAutoTest.snapshotWindow(to: directory.appendingPathComponent("canvas-agent-workspace-route.png").path)
+                check(!mode.isSelectable, "Beat placeholder never opens the removed full workspace")
             }
         }
 

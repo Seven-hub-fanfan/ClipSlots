@@ -5,12 +5,10 @@ import ClipSlotsKit
 
 @MainActor
 func runCanvasAgentProbe(store: SlotStoreObservable, directory: URL, check: (Bool, String) -> Void) async {
+    NativeAccessibilityProbe.enable()
     func settle() async { try? await Task.sleep(for: .milliseconds(220)) }
     func elements(_ node: AnyObject, depth: Int = 0) -> [AnyObject] {
-        guard depth < 30 else { return [] }
-        let children = node.accessibilityChildren?() ?? []
-        return [node] + (children.isEmpty ? (node as? NSView)?.subviews ?? [] : children)
-            .flatMap { elements($0 as AnyObject, depth: depth + 1) }
+        NativeAccessibilityProbe.elements(node)
     }
     do {
         let root = directory.appendingPathComponent("agent-canvas-state")
@@ -55,13 +53,17 @@ func runCanvasAgentProbe(store: SlotStoreObservable, directory: URL, check: (Boo
         model.clearHistory()
         model.openConversation(id: draftID)
         check(model.draftReferences.count == 1 && !model.draft.isEmpty, "conversation restores its reference draft")
+        model.selectAccessMode(.allDirectoriesReadOnly)
         model.send(text: model.draft, config: AgentConfig(), enabledSkills: [])
-        await settle()
+        for _ in 0..<150 {
+            if !model.isRunning { break }
+            try? await Task.sleep(for: .milliseconds(20))
+        }
         check(!model.isRunning && model.draftReferences.isEmpty, "send freezes and consumes reference draft")
         check(backend.lastHistory.first?.canvasReferences?.first?.text == before.plainText,
               "backend sees frozen reference snapshot")
-        check(backend.previewOnly && backend.toolCount == 5 && backend.writeDenied,
-              "canvas run exposes only immutable readers and refuses mutation")
+        check(!backend.previewOnly && backend.toolCount >= 5 && backend.writeDenied,
+              "read-only canvas run publishes readers and refuses mutation at dispatch")
         let turn = model.messages.first?.canvasTurn
         check(turn?.nodeCount == 4 && turn?.projectID == canvas.activeProjectId,
               "send freezes full graph metadata beyond explicit references")
@@ -78,8 +80,11 @@ func runCanvasAgentProbe(store: SlotStoreObservable, directory: URL, check: (Boo
         window.makeKeyAndOrderFront(nil)
         defer { window.close(); model.stop() }
         await settle()
-        check(elements(host).contains { ($0.accessibilityIdentifier?() ?? "") == "agent-add-canvas-reference" },
-              "native reference button accessible")
+        check(elements(host).contains { ($0.accessibilityIdentifier?() ?? "") == "agent-composer-add" },
+              "native integrated composer add button accessible")
+        check(!elements(host).contains { ["agent-external-handoff", "canvas-connect-agent"]
+                .contains($0.accessibilityIdentifier?() ?? "") },
+              "native sidebar has no redundant external Agent connection")
         check(elements(host).contains { ($0.accessibilityIdentifier?() ?? "") == "agent-canvas-coverage" },
               "native snapshot coverage visible")
         if let rep = host.bitmapImageRepForCachingDisplay(in: host.bounds) {
@@ -191,6 +196,7 @@ func runCanvasAgentProbe(store: SlotStoreObservable, directory: URL, check: (Boo
               && store.specialStorage.get(10, in: currentGroup).plainText == "排队后的应用",
               "queued older snapshots cannot overwrite current-group apply")
         canvas.flushSave()
+        await runCanvasAgentActionsProbe(store: store, directory: directory, check: check)
     } catch { check(false, "canvas loop exception: \(error.localizedDescription)") }
 }
 

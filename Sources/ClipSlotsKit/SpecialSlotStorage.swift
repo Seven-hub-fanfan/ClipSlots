@@ -110,6 +110,20 @@ public final class SpecialSlotStorage {
     /// 这个实例的磁盘根（v2.14.0）。迁移代码要在两个根之间搬目录，所以必须能读到。
     public var storageRoot: URL { baseDir }
     private let indexURL: URL
+    private struct IndexFingerprint: Equatable {
+        let inode: UInt64
+        let size: Int64
+        let seconds: Int
+        let nanoseconds: Int
+    }
+    private var cachedIndex: (fingerprint: IndexFingerprint, index: SpecialSlotIndex)?
+
+    private func indexFingerprint() -> IndexFingerprint? {
+        var info = stat()
+        guard stat(indexURL.path, &info) == 0 else { return nil }
+        return IndexFingerprint(inode: UInt64(info.st_ino), size: Int64(info.st_size),
+                                seconds: info.st_mtimespec.tv_sec, nanoseconds: info.st_mtimespec.tv_nsec)
+    }
     private let encoder = JSONEncoder()
     private let decoder = JSONDecoder()
     private let queue = DispatchQueue(label: "com.clipslots.specialstorage", qos: .utility)
@@ -578,9 +592,18 @@ public final class SpecialSlotStorage {
     /// 逻辑）能复用同一份读逻辑而不二次进队列。索引读/写现全部收敛到 `queue` 串行执行，
     /// 消除「load 走 queue、save 不走 queue」的队列不一致 data race。
     private func loadIndexOnQueue() -> SpecialSlotIndex {
+        let before = indexFingerprint()
+        if let before, let cachedIndex, cachedIndex.fingerprint == before {
+            lastLoadDecodeFailed = false
+            return cachedIndex.index
+        }
+        cachedIndex = nil
         do {
                 let data = try Data(contentsOf: indexURL)
                 let decoded = try decoder.decode(SpecialSlotIndex.self, from: data)
+                if let before, indexFingerprint() == before {
+                    cachedIndex = (before, decoded)
+                }
                 // P1-4 (v2.10.9): clean successful decode clears the poison flag.
                 lastLoadDecodeFailed = false
                 return decoded
@@ -647,6 +670,8 @@ public final class SpecialSlotStorage {
     /// （否则重入死锁）。把原先在队列外裸执行的「schema 重读 + 原子写盘」整段纳入队列串行区间，
     /// 保证与 `loadIndexOnQueue()` 互斥，读到的现有索引不会是并发写的中间态。
     private func saveIndexOnQueue(_ index: SpecialSlotIndex) throws {
+        // All mutation/repair paths invalidate before writing, including failed writes.
+        cachedIndex = nil
         // P0-1: never let the empty decode-failure fallback (schemaVersion 0, no pages
         // and no slots) overwrite an existing real index.json — that would wipe the
         // whole library. All legitimate save paths persist schemaVersion >= 2.

@@ -6,6 +6,15 @@ private final class DirectoryEmptyTools: AgentToolExecuting {
     func execute(call: AgentToolCall) async -> AgentToolResult { .failure("not registered") }
 }
 
+private final class DirectoryPolicyFixtureTools: AgentToolExecuting {
+    func specs() -> [AgentToolSpec] {
+        ["read_slot", "write_slot", "write_attachment", "paste_slot", "run_skill_script"].map {
+            .init(name: $0, description: "", parameters: ["type": "object"], originLabel: "fixture")
+        }
+    }
+    func execute(call: AgentToolCall) async -> AgentToolResult { .init(content: "executed", summary: "fixture") }
+}
+
 func runAgentDirectoryTests(_ t: TestRunner) {
     let root = FileManager.default.temporaryDirectory.appendingPathComponent("directory '\(UUID())")
     let working = root.appendingPathComponent("项目 with spaces")
@@ -64,6 +73,40 @@ func runAgentDirectoryTests(_ t: TestRunner) {
                 .init(id: UUID().uuidString, name: name, argumentsJSON: try values.encodedText())
             }
             do {
+                let base = DirectoryPolicyFixtureTools()
+                for mode in AgentAccessMode.allCases {
+                    let filtered = AgentAccessTools(base: base, mode: mode)
+                    results.append((filtered.permitsCLI("write-attachment") == (mode == .fullAccess)
+                        && filtered.permitsCLI("write") == (mode != .allDirectoriesReadOnly)
+                        && filtered.permitsCLI("read"), "DIR \(mode.rawValue) applies same policy to Tika XML commands"))
+                    for name in ["read_slot", "write_slot", "write_attachment", "paste_slot", "run_skill_script"] {
+                        let allowed = name == "read_slot" || mode == .fullAccess
+                            || (mode == .selectedDirectories && name == "write_slot")
+                        let result = await filtered.execute(call: .init(id: UUID().uuidString, name: name, argumentsJSON: "{}"))
+                        results.append((filtered.specs().contains(where: { $0.name == name }) == allowed
+                            && result.isFailure != allowed, "DIR \(mode.rawValue) enforces \(name) at publication and dispatch"))
+                    }
+                }
+                let xmlCLI = root.appendingPathComponent("xml-policy-fixture")
+                try Data(#"""
+                #!/bin/sh
+                case "$*" in
+                  *ACCESS_MODE_DENIED*) printf '%s\n' '{"type":"text-delta","text":"policy enforced"}' '{"type":"finish"}' ;;
+                  *) printf '%s\n' '{"type":"text-delta","text":"<clipslots-call cmd=\"clipslots write 1 --text bypass\"/>"}' '{"type":"finish"}' ;;
+                esac
+                """#.utf8).write(to: xmlCLI)
+                try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: xmlCLI.path)
+                let scopedTools = AgentAccessTools(base: base, mode: .allDirectoriesReadOnly)
+                let journaledTools = AgentJournaledTools(base: scopedTools, journal: AgentExecutionJournal(root: root),
+                    scope: .init(sessionID: "fixture", projectID: nil, turnID: "fixture"))
+                let xmlBackend = TikaCLIService(config: .init(cliPath: xmlCLI.path, maxToolTurns: 3),
+                    localRunner: { _, _ in .init(exitCode: 99, stdout: "BYPASS_EXECUTED", stderr: "", timedOut: false) })
+                let xmlMessages = try await xmlBackend.run(history: [.init(role: .user, content: "test policy")],
+                    config: AgentConfig(), tools: journaledTools, onEvent: { _ in })
+                results.append((xmlMessages.last?.content == "policy enforced"
+                    && xmlMessages.contains(where: { $0.role == .tool && $0.content.contains("ACCESS_MODE_DENIED") })
+                    && !xmlMessages.contains(where: { $0.content.contains("BYPASS_EXECUTED") }),
+                    "DIR actual Tika subprocess XML cannot bypass read-only policy through journal wrapper"))
                 let yes = AgentDirectoryTools(base: DirectoryEmptyTools(), access: resolved) { request in
                     _ = try? await request.respond(["decision": "accept"])
                 }
@@ -80,6 +123,29 @@ func runAgentDirectoryTests(_ t: TestRunner) {
                 results.append((denied.isFailure && afterDeny == bytes, "DIR refused edit leaves original bytes"))
                 let readonlyResult = await readOnly.execute(call: update)
                 results.append((readonlyResult.isFailure && !readOnly.specs().contains(where: { $0.name == "local_write_file" }), "DIR canvas read-only tool cannot write"))
+                let allRead = AgentDirectoryTools(base: DirectoryEmptyTools(),
+                    access: try AgentDirectoryAccess(url: URL(fileURLWithPath: "/")),
+                    readOnly: true, absolutePaths: true) { _ in }
+                let globalRead = await allRead.execute(call: try call("local_read_file", ["path": .string(outside.appendingPathComponent("secret.md").resolvingSymlinksInPath().path)]))
+                results.append((!globalRead.isFailure && globalRead.content.contains("external"), "DIR all-directory mode reads absolute path outside selected folder"))
+                let globalWrite = await allRead.execute(call: try call("local_write_file", [
+                    "path": .string(outside.appendingPathComponent("blocked.md").path),
+                    "content": "blocked", "expected_sha256": ""]))
+                results.append((globalWrite.isFailure && !FileManager.default.fileExists(atPath: outside.appendingPathComponent("blocked.md").path), "DIR all-directory read-only rejects direct write dispatch"))
+                let automatic = AgentDirectoryTools(base: DirectoryEmptyTools(),
+                    access: try AgentDirectoryAccess(url: URL(fileURLWithPath: "/")),
+                    absolutePaths: true, automaticWrites: true) { request in
+                        _ = try? await request.respond(["decision": "decline"])
+                    }
+                let autoTarget = outside.appendingPathComponent("automatic.md").resolvingSymlinksInPath()
+                let autoResult = await automatic.execute(call: try call("local_write_file", [
+                    "path": .string(autoTarget.path), "content": "full access", "expected_sha256": ""]))
+                let autoContent = try String(contentsOf: autoTarget)
+                results.append((!autoResult.isFailure && autoContent == "full access", "DIR Full Access performs actual authorized write without approval"))
+                let restrictedAuto = automatic.restrictedForPreview()
+                let restrictedResult = await restrictedAuto.execute(call: try call("local_write_file", [
+                    "path": .string(autoTarget.path), "content": "blocked", "expected_sha256": ""]))
+                results.append((restrictedResult.isFailure, "DIR preview restriction strips Full Access writes"))
                 let approved = await yes.execute(call: update)
                 let afterApprove = try resolved.read("输入.md")
                 results.append((!approved.isFailure && afterApprove == Data("allowed".utf8), "DIR approved edit writes file"))

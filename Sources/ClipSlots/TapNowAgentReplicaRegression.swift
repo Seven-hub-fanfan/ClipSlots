@@ -18,6 +18,9 @@ func runTapNowAgentReplicaProbe(directory: URL, check: (Bool, String) -> Void) a
     firstConfig.thinkingMode = .disabled
     check(model.send(text: "第一条", config: firstConfig, enabledSkills: []), "Agent starts the first submission")
     let originalID = model.selectedConversationID
+    let attachment = AgentAttachment(path: "/fixture/source.txt", name: "source.txt",
+                                     textSnapshot: "QUEUE_ATTACHMENT_MARKER🙂", sha256: "fixture")
+    model.draftAttachments = [attachment]
     model.draftSkillReferences = [.init(name: "固定引用", path: "/fixture/SKILL.md", markdown: "快照原文")]
     check(model.send(text: "第二条", config: AgentConfig(model: "second-model"), enabledSkills: []),
           "busy Agent accepts a queued submission")
@@ -26,6 +29,8 @@ func runTapNowAgentReplicaProbe(directory: URL, check: (Bool, String) -> Void) a
     check(model.queuedSubmissions.count == 2 && model.queuedSubmissions.first?.skillReferences.first?.markdown == "快照原文"
           && model.messages.filter { $0.role == .user }.count == 1,
           "queue snapshots never appear as sent messages before dispatch")
+    check(model.draftAttachments.isEmpty && model.queuedSubmissions.first?.attachments == [attachment],
+          "queued attachments capture contents and leave no duplicate draft")
     if let last = model.queuedSubmissions.last {
         model.moveQueuedSubmission(last.id, by: -1)
         model.editQueuedSubmission(last.id, text: "第三条已编辑")
@@ -35,6 +40,9 @@ func runTapNowAgentReplicaProbe(directory: URL, check: (Bool, String) -> Void) a
           "queue edit and reorder determine actual backend invocation order")
     check(backend.calls.map { $0.model } == ["first-model", "third-model", "second-model"],
           "queued model preferences stay frozen across later changes")
+    check(backend.calls.last?.wire.contains("QUEUE_ATTACHMENT_MARKER🙂") == true
+          && backend.calls.last?.wire.contains("/fixture/source.txt") == false,
+          "actual queued backend call receives attachment text without local source path")
     check(model.queuedSubmissions.isEmpty && model.runPhase == .applied,
           "normal completion drains the queue exactly once")
     check(model.messages.filter { $0.role == .assistant && !$0.isFailure }.count == 3,
@@ -45,6 +53,13 @@ func runTapNowAgentReplicaProbe(directory: URL, check: (Bool, String) -> Void) a
     let saved = try? JSONDecoder().decode(AgentChatModel.SavedSessions.self, from: Data(contentsOf: historyURL))
     check(saved?.current.customTitle == "镜头设计会话" && saved?.current.run?.phase == .applied,
           "saved history includes title and terminal run phase")
+    check(saved?.current.messages.last(where: { $0.role == .user })?.attachments == [attachment],
+          "attachment snapshot persists with the dispatched user message")
+    model.selectAccessMode(.allDirectoriesReadOnly)
+    let accessRestored = AgentChatModel(displayName: "restored access", backend: ReplicaReplyBackend(), persistenceURL: historyURL)
+    check(accessRestored.accessMode == .allDirectoriesReadOnly,
+          "conversation access mode survives actual session persistence")
+    model.selectAccessMode(.selectedDirectories)
     let assistantID = model.messages.first { $0.role == .assistant && !$0.isFailure }?.id
     model.forkConversation(through: assistantID)
     check(model.selectedConversationID != originalID && model.snapshot.forkSourceID == originalID
@@ -135,7 +150,7 @@ func runTapNowAgentReplicaProbe(directory: URL, check: (Bool, String) -> Void) a
 }
 
 private final class ReplicaReplyBackend: AgentBackend, @unchecked Sendable {
-    struct Call { let text: String; let model: String }
+    struct Call { let text: String; let model: String; let wire: String }
     private let lock = NSLock()
     private var records: [Call] = []
     private let interrupted: Bool
@@ -143,7 +158,8 @@ private final class ReplicaReplyBackend: AgentBackend, @unchecked Sendable {
     init(interrupted: Bool = false) { self.interrupted = interrupted }
     private func record(_ history: [AgentMessage], _ config: AgentConfig) {
         lock.lock(); defer { lock.unlock() }
-        records.append(Call(text: history.last { $0.role == .user }?.content ?? "", model: config.model))
+        records.append(Call(text: history.last { $0.role == .user }?.content ?? "", model: config.model,
+                            wire: history.last { $0.role == .user }?.wireContent ?? ""))
     }
     func run(history: [AgentMessage], config: AgentConfig, tools: AgentToolExecuting?,
              onEvent: @escaping @Sendable (AgentRunEvent) async -> Void) async throws -> [AgentMessage] {

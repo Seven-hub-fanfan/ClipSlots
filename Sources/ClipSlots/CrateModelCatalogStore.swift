@@ -75,6 +75,14 @@ final class CrateModelCatalogStore: ObservableObject {
         reload()
     }
 
+    func modelsForAgent() async throws -> [CrateModelCatalog.ModelInfo] {
+        loadIfNeeded()
+        await inFlight?.value
+        if case .loaded(let models) = state { return models }
+        if case .failed(let reason) = state { throw AgentOperationError(reason) }
+        throw AgentOperationError("模型目录尚未加载，请稍后重试。")
+    }
+
     /// 强制重取（面板上的刷新按钮 / 用户刚在终端登录完）。
     func reload() {
         inFlight?.cancel()

@@ -1,8 +1,8 @@
 import Foundation
 import ClipSlotsKit
 
-/// A reset removes a decision; it never grants a permission. This entry point
-/// is called only by the explicit, per-permission repair action.
+/// A reset removes a decision; it never grants a permission. Used by explicit
+/// repair and the one-shot AX repair after a verified identity migration.
 enum PermissionRepairCoordinator {
     static let bundleIdentifier = "com.clipslots.app"
 
@@ -33,6 +33,8 @@ enum PermissionRepairCoordinator {
                 throw Failure(message: "未能清除\(permission.title)记录（退出码 \(output.status)）。"
                     + (detail.isEmpty ? "请在系统设置中检查此项权限。" : String(detail.prefix(220))))
             }
+            NSLog("[PermissionRepair] scoped reset completed service=%@ bundle=%@ status=%d",
+                  arguments[1], bundleIdentifier, output.status)
         } catch ToolProcess.Failure.timeout {
             throw Failure(message: "清除\(permission.title)记录超时。请检查系统设置后手动重试。")
         } catch is CancellationError {

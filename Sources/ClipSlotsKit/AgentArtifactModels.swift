@@ -177,8 +177,8 @@ public enum AgentArtifactPreviewPolicy {
         return url
     }
 
-    public static func sandboxedHTML(_ source: String) -> String {
-        let policy = "default-src 'none'; script-src 'none'; connect-src 'none'; "
+    public static func sandboxedHTML(_ source: String, allowsScripts: Bool = false) -> String {
+        let policy = "default-src 'none'; script-src \(allowsScripts ? "'unsafe-inline'" : "'none'"); connect-src 'none'; "
             + "style-src 'unsafe-inline'; img-src data:; media-src data:; "
             + "font-src 'none'; frame-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'"
         return "<!doctype html><html><head><meta charset=\"utf-8\">"

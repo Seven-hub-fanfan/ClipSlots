@@ -55,11 +55,7 @@ public enum AgentGatewayPreferences {
 
     public static func keyState(url: URL, retryAfterFailure: Bool = false) async -> AgentKeychainState {
         let store = keychain(url: url)
-        return await withCheckedContinuation { continuation in
-            DispatchQueue.global(qos: .userInitiated).async {
-                continuation.resume(returning: store.keyState(retryAfterFailure: retryAfterFailure))
-            }
-        }
+        return await store.keyStateAsync(retryAfterFailure: retryAfterFailure)
     }
 }
 

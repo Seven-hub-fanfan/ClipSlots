@@ -70,7 +70,37 @@ final class CanvasTextDocument: ObservableObject {
         return saveError == nil
     }
 
+    /// Interactive graph actions await the same FIFO without parking AppKit.
+    @MainActor @discardableResult func flushAsync() async -> Bool {
+        scheduled?.cancel()
+        scheduled = nil
+        guard isDirty else { return true }
+        nextWrite &+= 1
+        let value = text, version = nextWrite, writer = writer
+        inFlight.insert(version)
+        return await withCheckedContinuation { continuation in
+            queue.async { [weak self] in
+                let result = Result { try writer.save(value) }
+                DispatchQueue.main.async {
+                    guard let self else { continuation.resume(returning: false); return }
+                    self.inFlight.remove(version)
+                    self.accept(result, write: version, text: value)
+                    continuation.resume(returning: self.saveError == nil)
+                }
+            }
+        }
+    }
+
     func refreshFromStorage(_ content: SlotContent) {
+        if durableBody == nil {
+            let hadInput = !text.isEmpty
+            durableBody = AgentSlotBody(content)
+            durableText = content.plainText ?? ""
+            queue.async { [writer] in writer.expected = AgentSlotBody(content) }
+            if !hadInput { text = durableText }
+            revision &+= 1
+            return
+        }
         guard !isDirty, AgentSlotBody(content) != durableBody else { return }
         revision &+= 1
         nextWrite &+= 1
@@ -121,18 +151,13 @@ final class CanvasTextDocument: ObservableObject {
 }
 
 extension SlotStoreObservable {
-    func canvasTextDocument(groupID: String, slot: Int) -> CanvasTextDocument {
+    func canvasTextDocument(groupID: String, slot: Int,
+                            renderContent: SlotContent? = nil, rendering: Bool = false) -> CanvasTextDocument {
         let key = "\(groupID)#\(slot)"
         if let existing = canvasTextDocuments[key] {
-            // Read again after rendering; publishing during SwiftUI's body is unsafe.
-            DispatchQueue.main.async { [weak self, weak existing] in
-                guard let self, let existing, !existing.isDirty,
-                      let content = self.canvasReadFullContent(groupId: groupID, slot: slot) else { return }
-                existing.refreshFromStorage(content)
-            }
             return existing
         }
-        let document = CanvasTextDocument(content: canvasReadFullContent(groupId: groupID, slot: slot),
+        let document = CanvasTextDocument(content: rendering ? renderContent : canvasReadFullContent(groupId: groupID, slot: slot),
             storage: canvasStorage(groupId: groupID), groupID: groupID, slot: slot, queue: slotWriteQueue)
         document.didPersist = { [weak self] beforeBody, before, after, saved in
             guard let self else { return }
@@ -159,6 +184,16 @@ extension SlotStoreObservable {
         if !results.allSatisfy({ $0 }) {
             transientUI.showToast("文本尚未保存，输入已保留。请在输入框中重试保存。", duration: 4)
             return false
+        }
+        return true
+    }
+
+    @MainActor func flushCanvasTextDocumentsAsync() async -> Bool {
+        for document in Array(canvasTextDocuments.values) {
+            guard await document.flushAsync() else {
+                transientUI.showToast("文本尚未保存，输入已保留。请重试保存。", duration: 4)
+                return false
+            }
         }
         return true
     }

@@ -2,6 +2,31 @@ import Foundation
 import ClipSlotsKit
 
 func runCanvasAgentReadTests(_ t: TestRunner) {
+    runCanvasAgentActionTests(t)
+    do {
+        let prompt = CanvasNode(pageId: "p", groupId: "batch", slot: 1, kind: .text, x: 0, y: 0)
+        let image = CanvasNode(pageId: "p", groupId: "batch", slot: 2, kind: .image, x: 400, y: 0)
+        var sibling = CanvasNode(pageId: "p", groupId: "batch", slot: 3, kind: .image, x: 800, y: 0)
+        sibling.parentNodeId = image.id
+        sibling.generationSourceID = image.id
+        let inputs = [
+            CanvasEdge(fromNodeId: prompt.id, toNodeId: image.id, role: .prompt),
+            CanvasEdge(fromNodeId: prompt.id, toNodeId: sibling.id, role: .prompt)
+        ]
+        let graph = CanvasDocument(nodes: [prompt, image, sibling], edges: inputs)
+        let reloaded = try JSONDecoder().decode(CanvasDocument.self, from: JSONEncoder().encode(graph))
+        t.equal(reloaded.edges, inputs, "batch reload preserves identical original upstream inputs")
+        t.check(!reloaded.edges.contains { $0.fromNodeId == image.id && $0.toNodeId == sibling.id },
+                "batch membership cannot invent first output as sibling reference")
+        let explicit = CanvasEdge(fromNodeId: image.id, toNodeId: sibling.id, role: .auto)
+        let connected = CanvasDocument(nodes: [prompt, image, sibling], edges: inputs + [explicit])
+        t.equal(try JSONDecoder().decode(CanvasDocument.self, from: JSONEncoder().encode(connected)).edges,
+                inputs + [explicit], "batch migration retains deliberately connected reference")
+        sibling.generationSourceID = nil
+        t.check(CanvasEdgeGraph.migratedFromParentLinks(nodes: [prompt, image, sibling], edges: inputs)
+            .contains { $0.fromNodeId == image.id && $0.toNodeId == sibling.id },
+                "legacy real parent link still migrates without batch membership")
+    } catch { t.check(false, "batch reload regression: \(error)") }
     let root = FileManager.default.temporaryDirectory.appendingPathComponent("canvas-reader-\(UUID())")
     defer { try? FileManager.default.removeItem(at: root) }
     let text = String(repeating: "镜头🙂e\u{301}", count: 2100)

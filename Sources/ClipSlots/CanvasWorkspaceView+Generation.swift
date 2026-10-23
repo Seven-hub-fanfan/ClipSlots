@@ -4,10 +4,10 @@ import ClipSlotsKit
 /// Crate 的提交、查询和写回共用一条执行链；内容仍由槽位存储持有。
 extension CanvasWorkspaceView {
     func runGenerationForSelection() {
-        runGeneration(nodeIDs: canvas.selectedNodeIds)
+        runGeneration(nodeIDs: canvas.selectedNodeIds, singleAttemptPerNode: true)
     }
 
-    func runGeneration(nodeIDs: Set<String>, groupID: String? = nil) {
+    func runGeneration(nodeIDs: Set<String>, groupID: String? = nil, singleAttemptPerNode: Bool = false) {
         inputRouter.anchorView?.window?.makeFirstResponder(nil)
         let runnable = canvas.nodes.filter { $0.canGenerate }
         let selected = runnable.filter { nodeIDs.contains($0.id) }
@@ -17,7 +17,7 @@ extension CanvasWorkspaceView {
             return
         }
         guard canvas.selectionGenerationTask == nil else {
-            store.transientUI.showToast("选中节点正在按依赖顺序生成")
+            store.transientUI.showToast("选中节点正在生成")
             return
         }
         guard let ordered = CanvasEdgeInputs.generationOrder(nodes: targets, edges: canvas.interactionEdges) else {
@@ -41,41 +41,86 @@ extension CanvasWorkspaceView {
                 }
             }
             var succeeded = Set<String>()
+            var completed = Set<String>()
             var upstreamResults: [String: String] = [:]
-            for snapshot in ordered {
-                guard !Task.isCancelled, canvas.activeProjectId == projectId,
-                      canvas.selectionGenerationID == runID else { return }
-                let required = edges.filter { $0.toNodeId == snapshot.id }
-                    .map(\.fromNodeId).filter { selectedIds.contains($0) }
-                guard required.allSatisfy({ succeeded.contains($0) }) else {
-                    store.transientUI.showToast("上游未完成，已跳过依赖它的节点", duration: 4)
-                    continue
+            var pending = ordered
+            await withTaskGroup(of: (String, String?).self) { group in
+                while !pending.isEmpty {
+                    guard !Task.isCancelled, canvas.activeProjectId == projectId,
+                          canvas.selectionGenerationID == runID else { return }
+                    var waiting: [CanvasNode] = []
+                    for snapshot in pending {
+                        let required = edges.filter { $0.toNodeId == snapshot.id }
+                            .map(\.fromNodeId).filter { selectedIds.contains($0) }
+                        guard required.allSatisfy({ completed.contains($0) }) else {
+                            waiting.append(snapshot)
+                            continue
+                        }
+                        guard required.allSatisfy({ succeeded.contains($0) }) else {
+                            completed.insert(snapshot.id)
+                            store.transientUI.showToast("上游未完成，已跳过依赖它的节点", duration: 4)
+                            continue
+                        }
+                        let previousTasks = Dictionary(canvas.nodes.map { ($0.id, $0.taskId) },
+                                                       uniquingKeysWith: { first, _ in first })
+                        guard let live = canvas.selectionGenerationNode(snapshot),
+                              let task = generateAdjacentResults(live, upstreamResults: upstreamResults,
+                                                                 singleAttempt: singleAttemptPerNode) else {
+                            completed.insert(snapshot.id)
+                            continue
+                        }
+                        let attempts = (canvas.adjacentLastResultIDs[live.id] ?? [live.id])
+                            .compactMap { canvas.node(id: $0) }
+                        group.addTask {
+                            await task.value
+                            let result = await MainActor.run { () -> String? in
+                                guard canvas.activeProjectId == projectId,
+                                      canvas.selectionGenerationID == runID else { return nil }
+                                return attempts.last(where: { attempt in
+                                    guard let current = canvas.node(id: attempt.id),
+                                          current.createdAt == attempt.createdAt,
+                                          let taskID = current.taskId,
+                                          taskID != (previousTasks[current.id] ?? nil),
+                                          case .succeeded = current.state else { return false }
+                                    return true
+                                })?.id
+                            }
+                            return (snapshot.id, result)
+                        }
+                    }
+                    pending = waiting
+                    if let (id, result) = await group.next() {
+                        completed.insert(id)
+                        if let result {
+                            succeeded.insert(id)
+                            upstreamResults[id] = result
+                        }
+                    } else if !pending.isEmpty {
+                        completed.formUnion(pending.map(\.id))
+                        store.transientUI.showToast("上游未完成，已跳过依赖它的节点", duration: 4)
+                        pending = []
+                    }
                 }
-                guard let live = canvas.selectionGenerationNode(snapshot),
-                      let task = generateAdjacentResults(live, upstreamResults: upstreamResults) else { continue }
-                await task.value
-                if let result = (canvas.adjacentLastResultIDs[live.id] ?? [])
-                    .compactMap({ canvas.node(id: $0) }).last(where: {
-                        if case .succeeded = $0.state { return true }; return false
-                    }) {
-                    succeeded.insert(snapshot.id)
-                    upstreamResults[live.id] = result.id
-                } else if !live.kind.isMediaNode, let current = canvas.selectionGenerationNode(snapshot),
-                          case .succeeded = current.state { succeeded.insert(snapshot.id) }
+                // All independent submissions start before any result is awaited.
+                for await _ in group {}
             }
         }
     }
 
     /// The selected node is attempt one; count N allocates N-1 later results.
-    /// Recovery remains attached to the existing task and never creates a batch.
+    /// Run submits current inputs; only explicit recovery queries an old task.
     @discardableResult
     func generateAdjacentResults(_ snapshot: CanvasNode,
                                  upstreamResults: [String: String] = [:],
-                                 preparedByteArtist: PreparedGenerationRequest? = nil) -> Task<Void, Never>? {
+                                 preparedByteArtist: PreparedGenerationRequest? = nil,
+                                 singleAttempt: Bool = false) -> Task<Void, Never>? {
         guard let source = canvas.node(id: snapshot.id), source.createdAt == snapshot.createdAt,
               source.canGenerate else { return nil }
-        if source.needsGenerationRecovery { return recoverGeneration(source) }
-        guard source.kind.isMediaNode else { return startGeneration(source) }
+        guard !canvas.hasActiveGeneration(source) else {
+            store.transientUI.showToast("本次生成已开始，请在节点查看进度")
+            return nil
+        }
+        guard source.kind.isMediaNode else { return startGeneration(source, restarting: true) }
         guard GenerationRunStore.shared.latest(project: canvas.activeProjectId, node: source)?
             .requiresSubmissionReconciliation != true else {
             store.transientUI.showToast("上次提交结果未知，请先核对任务后再重新生成", duration: 4)
@@ -98,6 +143,11 @@ extension CanvasWorkspaceView {
             do { _ = try validateByteArtist(source, plan: plan) }
             catch { store.transientUI.showToast(error.localizedDescription, duration: 4); return nil }
             if preparedByteArtist == nil {
+                if singleAttempt {
+                    canvas.adjacentLastResultIDs[source.id] = [source.id]
+                    return startGeneration(source, restarting: true, upstreamResults: upstreamResults,
+                                           preparedPlan: plan)
+                }
                 return prepareByteArtistBatch(source, plan: plan, upstreamResults: upstreamResults)
             }
         }
@@ -105,7 +155,7 @@ extension CanvasWorkspaceView {
         guard store.ensureCanvasPrivateGroup(id: group, name: canvas.activeProject.privateGroupName) else { return nil }
         var occupied = canvas.occupiedSlots(inGroup: group)
         var slots: [Int] = []
-        for _ in 0..<(min(4, max(1, source.count)) - 1) {
+        for _ in 0..<(singleAttempt ? 0 : min(4, max(1, source.count)) - 1) {
             guard let slot = store.allocateCanvasPrivateSlot(groupId: group, occupied: occupied) else {
                 store.transientUI.showToast("没有足够空槽创建本次生成结果")
                 return nil
@@ -160,7 +210,7 @@ extension CanvasWorkspaceView {
         // Capture every request before submitting any task. Batch siblings never
         // inherit an output that finishes while another request is being prepared.
         let tasks = resultNodes.compactMap {
-            startGeneration(canvas.node(id: $0.id) ?? $0, upstreamResults: upstreamResults,
+            startGeneration(canvas.node(id: $0.id) ?? $0, restarting: true, upstreamResults: upstreamResults,
                             preparedPlan: plan, preparedByteArtist: preparedByteArtist)
         }
         let aggregate = Task { @MainActor in

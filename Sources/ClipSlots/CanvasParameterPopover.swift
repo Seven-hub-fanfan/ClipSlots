@@ -22,7 +22,7 @@ extension View {
         isPresented: Binding<Bool>, @ViewBuilder content: () -> Content
     ) -> some View {
         background(CanvasParameterPopoverAnchor(isPresented: isPresented,
-                                                content: AnyView(content().fixedSize())))
+            content: isPresented.wrappedValue ? AnyView(content().fixedSize()) : AnyView(EmptyView())))
     }
 }
 
