@@ -4,7 +4,7 @@ import Combine
 import ClipSlotsKit
 
 struct HeaderMascotView: NSViewRepresentable {
-    static let canvasSide: CGFloat = 104
+    static let canvasSide: CGFloat = 124
     let model: AgentChatModel
     let canvas: CanvasStore
     let onToggle: () -> Void
@@ -69,6 +69,7 @@ final class HeaderMascotNativeView: NSView {
         super.init(frame:frameRect)
         motion.legPixels=scene.legPixels
         motion.pointerProjection={ [weak scene] x,y in scene?.pointer(x:x,y:y) ?? (0,0) }
+        motion.computerGaze=scene.computerGaze
         setAccessibilityElement(true)
         setAccessibilityRole(.button)
         setAccessibilityLabel("斗篷小助手")
@@ -78,7 +79,8 @@ final class HeaderMascotNativeView: NSView {
         for name in [NSApplication.didBecomeActiveNotification,NSApplication.didResignActiveNotification,
                      NSWindow.didMiniaturizeNotification,NSWindow.didDeminiaturizeNotification,
                      NSWindow.didChangeOcclusionStateNotification,NSApplication.didHideNotification,
-                     NSApplication.didUnhideNotification] {
+                     NSApplication.didUnhideNotification,NSWindow.didBecomeKeyNotification,
+                     NSWindow.didResignKeyNotification] {
             notifications.append(center.addObserver(forName:name,object:nil,queue:.main) { [weak self] _ in
                 MainActor.assumeIsolated { self?.refreshVisibility() }
             })
@@ -101,15 +103,9 @@ final class HeaderMascotNativeView: NSView {
         notifications.append(center.addObserver(forName:NSTextView.didChangeSelectionNotification,
             object:nil,queue:.main) { [weak self] note in
                 MainActor.assumeIsolated {
-                    guard let self, let editor=note.object as? AgentDraftEditor.Editor,
-                          editor.window === self.window, editor.window?.firstResponder === editor,
-                          !self.motion.hovering, !self.motion.dragging else { return }
-                    var range=editor.selectedRange()
-                    let caret=editor.firstRect(forCharacterRange:range,actualRange:&range)
-                    let origin=self.interactionCenter
-                    self.motion.setPointer(x:Double(caret.midX-origin.x),
-                                           y:Double(origin.y-caret.midY),at:self.now)
-                    self.wake()
+                    guard let self, let editor=note.object as? NSTextView,
+                          editor.window === self.window else { return }
+                    self.refreshPromptFocus()
                 }
             })
     }
@@ -164,6 +160,7 @@ final class HeaderMascotNativeView: NSView {
         updateActivity()
     }
     private func updateActivity(completed:Bool=false) {
+        motion.setAgentWorking(running || waiting || canvasRunning || canvasWaiting,at:now)
         let activity:MascotMotion.Activity
         if listening { activity = .voice }
         else if (running && !waiting) || canvasRunning { activity = .busy }
@@ -194,6 +191,8 @@ final class HeaderMascotNativeView: NSView {
     }
     private func refreshVisibility() {
         if visible {
+            motion.setAgentWorking(running || waiting || canvasRunning || canvasWaiting,at:now)
+            refreshPromptFocus()
             dragPanel?.orderFront(nil)
             if pointerMonitor == nil {
                 pointerMonitor=NSEvent.addLocalMonitorForEvents(matching:[.mouseMoved,.leftMouseDragged]) { [weak self] event in
@@ -250,6 +249,7 @@ final class HeaderMascotNativeView: NSView {
         updatePointer(at:eventScreenPoint(event))
     }
     private func updatePointer(at mouse:NSPoint) {
+        refreshPromptFocus()
         let origin=interactionCenter
         let dx=mouse.x-origin.x,dy=origin.y-mouse.y
         let local=NSPoint(x:bounds.midX+dx,y:bounds.midY+dy)
@@ -268,6 +268,7 @@ final class HeaderMascotNativeView: NSView {
         pollCursor();wake()
     }
     private func pollCursor() {
+        refreshPromptFocus()
         guard visible,pressedAt==nil else { return }
         guard NSApp.isActive else {
             if lastCursor != nil { lastCursor=nil;motion.setPointer(x:nil,y:nil,at:now);wake() }
@@ -277,6 +278,15 @@ final class HeaderMascotNativeView: NSView {
         guard mouse != lastCursor else { return }
         lastCursor=mouse
         updatePointer(at:mouse)
+    }
+    func refreshPromptFocus() {
+        let editor=window?.firstResponder as? NSTextView
+        let prompt=editor is AgentDraftEditor.Editor || CanvasPromptEditor.owns(editor)
+        let focused=visible && NSApp.isActive && window?.isKeyWindow == true &&
+            prompt && editor?.isEditable == true && editor?.isHiddenOrHasHiddenAncestor == false
+        guard focused != motion.editingPrompt else { return }
+        motion.setPromptEditing(focused,at:now)
+        wake()
     }
     override func mouseDown(with event:NSEvent) {
         guard alphaHit(convert(event.locationInWindow,from:nil),rep:bitmap) else { return }
@@ -343,7 +353,8 @@ final class HeaderMascotNativeView: NSView {
         stopTimer(); tick()
         let time=now
         let next=motion.nextWake ?? time+12000
-        let delay=motion.continuous ? 1.0/60 : max(0.02,(next-time)/1000)
+        let delay=motion.continuous ? (motion.highFrameRate ? 1.0/60 : 1.0/30) :
+            max(0.02,(next-time)/1000)
         guard !muted && !motion.reduceMotion else { return }
         let value=Timer(timeInterval:delay,repeats:false) { [weak self] _ in
             MainActor.assumeIsolated { self?.wake() }
@@ -353,11 +364,11 @@ final class HeaderMascotNativeView: NSView {
     private func tick() {
         let time=now
         motion.reduceMotion=muted || NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
-        let fast=motion.dragging || motion.continuous
+        let fast=motion.highFrameRate
         if fast { stableSince=nil }
         else { stableSince=stableSince ?? time }
         let interval=fast || time-(stableSince ?? time)<250 ? 1000.0/60 : 1000.0/30
-        if time-lastTick<interval-0.75 && bitmap != nil { return }
+        if time-lastTick<interval-0.75 && bitmap != nil && !motion.reduceMotion { return }
         lastTick=time; frameCount+=1
         let pose=motion.sample(at:time)
         if listening,ProcessInfo.processInfo.environment["CLIPSLOTS_VOICE_DIAGNOSTICS_DIRECTORY"] != nil,

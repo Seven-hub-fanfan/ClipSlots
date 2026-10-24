@@ -1,5 +1,6 @@
 #if DEBUG
 import AppKit
+import SwiftUI
 import ClipSlotsKit
 
 @MainActor
@@ -15,6 +16,20 @@ func runHeaderMascotProbe(root:NSView,directory:URL,check:(Bool,String)->Void) a
     check(mascot.accessibilityIdentifier()=="header-ip-mascot","Mascot accessible native button")
     let scene=HeaderMascotScene()
     check(scene.ready,"Mascot volumetric model and MacBook load")
+    check(scene.computerGaze.pitch>15 && scene.computerGaze.pitch<=30 &&
+          abs(scene.computerGaze.yaw)<15,"Mascot resting eye ray aims toward the upper MacBook screen")
+    let logos=scene.model.childNodes.filter {
+        $0.name=="macbook-apple-logo" || $0.name=="macbook-apple-leaf"
+    }
+    check(logos.count==2,"Mascot light preserves separate Apple body and leaf meshes")
+    for level in [0.18,0.55,1.0] {
+        var pose=MascotPose();pose.logoIntensity=level
+        _=scene.render(pose,size:208,activity:.idle)
+        check(logos.allSatisfy {
+            abs(Double($0.geometry?.firstMaterial?.emission.intensity ?? -1)-level)<0.00001 &&
+            ($0.geometry?.firstMaterial?.emission.contents as? NSColor)==NSColor.white
+        },"Mascot both Apple logo surfaces emit white at \(level)")
+    }
     check(abs(scene.pixelsPerY-28.538486839707254)<0.00001 &&
           abs(scene.legPixels-10.308069221890811)<0.00001,"Mascot camera and leg projection use packaged source")
     let headset=scene.head.childNodes.filter { ($0.name ?? "").hasPrefix("voice-airpodsmax-") }
@@ -122,6 +137,57 @@ func runHeaderMascotProbe(root:NSView,directory:URL,check:(Bool,String)->Void) a
     mascot.motion.reset(at:ProcessInfo.processInfo.systemUptime*1000)
     mascot.motion.setActivity(.idle,at:ProcessInfo.processInfo.systemUptime*1000)
     check(mascot.hitTest(NSPoint(x:1,y:1)) == nil,"Mascot alpha padding passes through input")
+    if let window=mascot.window {
+        let previous=window.firstResponder
+        let editor=AgentDraftEditor.Editor(frame:NSRect(x:16,y:16,width:240,height:64))
+        editor.isEditable=true;editor.string="帮我生成一段运镜提示词"
+        root.addSubview(editor)
+        NSApp.activate(ignoringOtherApps:true);window.makeKeyAndOrderFront(nil)
+        check(window.makeFirstResponder(editor),"Mascot focus fixture uses the native Agent draft editor")
+        editor.setSelectedRange(NSRange(location:editor.string.utf16.count,length:0))
+        mascot.motion.setActivity(.idle,at:ProcessInfo.processInfo.systemUptime*1000)
+        mascot.refreshPromptFocus()
+        check(mascot.motion.editingPrompt,"Mascot captures actual editable first responder")
+        try? await Task.sleep(for:.milliseconds(900))
+        for step in 0..<20 {
+            let point=NSPoint(x:step%2==0 ? 20 : root.bounds.maxX-20,
+                              y:step%3==0 ? 20 : root.bounds.maxY-20)
+            if let event=NSEvent.mouseEvent(with:.mouseMoved,location:root.convert(point,to:nil),
+                modifierFlags:[],timestamp:ProcessInfo.processInfo.systemUptime,
+                windowNumber:window.windowNumber,context:nil,eventNumber:0,clickCount:0,pressure:0) {
+                mascot.mouseMoved(with:event)
+            }
+            try? await Task.sleep(for:.milliseconds(20))
+        }
+        check(mascot.motion.editingPrompt &&
+            abs(mascot.motion.pose.yaw-scene.computerGaze.yaw)<0.05 &&
+            abs(mascot.motion.pose.pitch-scene.computerGaze.pitch)<0.05,
+            "Mascot native focused prompt remains looking at laptop through pointer events")
+        window.makeFirstResponder(nil);mascot.refreshPromptFocus()
+        check(!mascot.motion.editingPrompt,"Mascot native editor blur releases the screen gaze")
+        editor.removeFromSuperview()
+        let host=NSHostingView(rootView:CanvasPromptEditor(text:.constant("画布提示词"),
+            font:.systemFont(ofSize:14),onCommit:{},onCancel:{},onBlur:{},autoFocus:false))
+        host.frame=NSRect(x:16,y:16,width:240,height:80);root.addSubview(host)
+        host.layoutSubtreeIfNeeded()
+        try? await Task.sleep(for:.milliseconds(40))
+        func promptEditors(_ view:NSView)->[NSTextView] {
+            (CanvasPromptEditor.owns(view) ? [view as! NSTextView] : [])+view.subviews.flatMap(promptEditors)
+        }
+        if let prompt=promptEditors(host).first {
+            check(window.makeFirstResponder(prompt),"Mascot canvas prompt fixture uses its actual native editor")
+            prompt.setMarkedText("ceshi",selectedRange:NSRange(location:5,length:0),
+                                 replacementRange:NSRange(location:NSNotFound,length:0))
+            mascot.refreshPromptFocus()
+            check(mascot.motion.editingPrompt && prompt.hasMarkedText(),
+                  "Mascot canvas prompt focus retains Chinese input method marked text")
+            window.makeFirstResponder(nil);mascot.refreshPromptFocus()
+            check(!mascot.motion.editingPrompt,"Mascot canvas prompt blur releases fixed gaze")
+        } else { check(false,"Mascot native canvas prompt editor is mounted") }
+        host.removeFromSuperview()
+        if let previous { window.makeFirstResponder(previous) }
+        mascot.refreshPromptFocus()
+    } else { check(false,"Mascot prompt-focus fixture has a hosting window") }
     let saved=mascot.onToggle
     var toggles=0; mascot.onToggle={toggles+=1}
     check(mascot.accessibilityPerformPress() && toggles==1,"Mascot native press calls Agent toggle once")
@@ -172,6 +238,13 @@ func runHeaderMascotProbe(root:NSView,directory:URL,check:(Bool,String)->Void) a
         let view=HeaderMascotNativeView(frame:NSRect(x:0,y:0,width:104,height:104))
         view.bind(model:model,canvas:canvas)
         check(view.motion.activity==expected,"Mascot binding immediately adopts existing \(expected.rawValue) state")
+        check(view.motion.agentWorking == (expected == .busy || expected == .waiting),
+              "Mascot \(expected.rawValue) binding drives the working logo independently")
+        if expected == .busy || expected == .waiting {
+            let pose=view.motion.sample(at:ProcessInfo.processInfo.systemUptime*1000+1000)
+            check(pose.logoIntensity==1 && pose.opacity==1,
+                  "Mascot native \(expected.rawValue) binding keeps the emitted logo fully visible")
+        }
         view.dispose()
     }
 }

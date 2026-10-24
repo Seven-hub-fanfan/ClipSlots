@@ -31,6 +31,7 @@ final class HeaderMascotScene {
     private var activityTracks:[String:[String:Any]]=[:]
     private var lastPose:MascotPose?
     private var lastActivity:MascotMotion.Activity?
+    private(set) var computerGaze = (yaw: 0.0, pitch: 26.0)
     private let headRest=simd_quatf(ix:-0.0658900354,iy:-0.0428641721,iz:0.012898743,r:0.9968223455)
     // Rotate at the neck, not at the rear crown. Compensating the rest
     // translation keeps the authored neutral silhouette unchanged.
@@ -172,6 +173,22 @@ final class HeaderMascotScene {
                 surfaceUV=p.map { SIMD2(($0.x+0.75)/1.5,($0.y+0.1)/1.3) }
             } else { surfaceUV=uv }
             let part=Part(node:node,kind:m.part,positions:p,normals:n,uv:surfaceUV,indices:indices)
+            if m.name=="macbook-display", !p.isEmpty {
+                // Look at the upper screen from the eyes in the resting head's
+                // coordinates. Keep the established safe neck rotation limits.
+                let center=p.reduce(SIMD3<Float>.zero,+)/Float(p.count)
+                let top=p.max { $0.y < $1.y }?.y ?? center.y
+                let target=center+SIMD3<Float>(0,(top-center.y)*0.60,(top-center.y)*0.60*tan(20 * .pi/180))
+                let eyes=headPosition+headRest.act(SIMD3(0,0.352,0.43)-headCenter)
+                let direction=headRest.inverse.act(target-eyes)
+                computerGaze=(max(-65,min(65,atan2(Double(direction.x),Double(direction.z))*180 / .pi)),
+                    max(-30,min(30,atan2(Double(-direction.y),hypot(Double(direction.x),Double(direction.z)))*180 / .pi)))
+            }
+            if m.name=="macbook-apple-logo" || m.name=="macbook-apple-leaf" {
+                mat.diffuse.contents=NSColor(calibratedWhite:0.06,alpha:1)
+                mat.metalness.contents=0;mat.roughness.contents=0.6
+                mat.emission.contents=NSColor.white;mat.emission.intensity=0.18
+            }
             node.geometry=geometry(part,positions:p,normals:n);node.geometry?.materials=[mat]
             if ["head","eyeLeft","eyeRight","voiceHead"].contains(m.part) { head.addChildNode(node) }
             else { model.addChildNode(node) }
@@ -493,6 +510,9 @@ final class HeaderMascotScene {
         concernGlow?.light?.intensity=activity == .superBusy ? 1 : 0
         if lastPose?.blink != pose.blink { facialSurfaceValid=true }
         for part in parts {
+            if part.node.name=="macbook-apple-logo" || part.node.name=="macbook-apple-leaf" {
+                part.node.geometry?.firstMaterial?.emission.intensity=CGFloat(pose.logoIntensity)
+            }
             if part.kind=="laptop" {
                 part.node.isHidden=activity == .voice
                 let a=track("laptop")

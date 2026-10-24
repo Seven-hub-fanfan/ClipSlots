@@ -318,7 +318,7 @@ struct ContentView: View {
                 // 而且缺口的真正来源是"侧栏起点被上面的行往下推"，不改层级就永远治不干净。
                 if workspaceMode == .edit {
                     WorkspaceSectionAdmission(admission: workspaceTransition.sections.admission(for: "0-title"),
-                                              height: 104) { headerTitleSection }
+                                              height: 116) { headerTitleSection }
                 }
 
                 // ★ v2.10.93（resize 丝滑第二刀）：这里原来是一个包住整个网格的 `GeometryReader`，
@@ -940,7 +940,7 @@ struct ContentView: View {
         CenterReservedRow(centerWidth: WorkspaceModeSwitcher.preferredWidth) {
             // 左簇：logo + 标题/检查更新 + 两个拨杆。
             WorkspaceSectionAdmission(admission: workspaceTransition.sections.admission(for: "0-title-left"),
-                                      width: 400, height: 68) {
+                                      width: 414, height: 80) {
             HStack(spacing: 14) {
             HStack(spacing: 14) {
                 ZStack {
@@ -953,7 +953,7 @@ struct ContentView: View {
                 }
                 .frame(width: HeaderMascotView.canvasSide, height: HeaderMascotView.canvasSide)
             }
-            .frame(width: 74, height: 68)
+            .frame(width: 88, height: 80)
 
             VStack(alignment: .leading, spacing: 4) {
                 Text("ClipSlots")

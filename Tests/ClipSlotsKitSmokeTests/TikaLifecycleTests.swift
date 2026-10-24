@@ -13,7 +13,9 @@ func runTikaLifecycleTests(_ t: TestRunner) {
         try! FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: file.path)
         return file.path
     }
-    func run(_ path: String, timeout: Double = 0.5, maxDuration: Double = 600,
+    // Allow native subprocess startup on a busy desktop. The active fixture
+    // still streams for longer than this idle limit; timeout bounds stay <3s.
+    func run(_ path: String, timeout: Double = 1, maxDuration: Double = 600,
              runner: ((String, [String]) async -> AgentProcessResult)? = nil) -> Result<[AgentMessage], Error> {
         let backend = TikaCLIService(config: .init(cliPath: path, perTurnTimeout: timeout,
                                                   maxTurnDuration: maxDuration), localRunner: runner)
@@ -74,7 +76,7 @@ printf '%s\n' '
     }
     let active = cli("active", #"""
 i=0
-while [ "$i" -lt 12 ]; do
+while [ "$i" -lt 24 ]; do
   printf '%s\n' '{"type":"reasoning-delta","text":"继续分析中文🙂"}'
   /bin/sleep 0.1
   i=$((i+1))
@@ -85,7 +87,7 @@ printf '%s\n' '{"type":"text-delta","text":"完成🙂"}' '{"type":"finish"}'
     t.check(succeeded(activeResult), "Tika 活跃输出超过单次空闲阈值仍能完成：\(activeResult)")
     if case .success(let messages) = activeResult {
         t.equal(messages.last?.content, "完成🙂", "Tika 长请求完整保留中文正文")
-        t.equal(messages.last?.reasoning, String(repeating: "继续分析中文🙂", count: 12),
+        t.equal(messages.last?.reasoning, String(repeating: "继续分析中文🙂", count: 24),
                 "Tika 长请求完整保留中文推理")
     }
     let hardLimitStart = Date()

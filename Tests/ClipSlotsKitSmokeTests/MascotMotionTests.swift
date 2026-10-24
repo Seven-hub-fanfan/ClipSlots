@@ -85,8 +85,63 @@ func runMascotMotionTests(_ t:TestRunner) {
     _=motion.sample(at:190000)
     t.check(motion.activity == .busy, "Mascot superbusy ends after ten seconds")
     motion.reduceMotion=true
-    t.check(motion.sample(at:190500)==MascotPose() && !motion.continuous,
-            "Mascot reduce motion has no continuous timer")
+    let reduced=motion.sample(at:190500)
+    t.check(reduced.pitch==motion.computerGaze.pitch && reduced.logoIntensity==1 &&
+            !motion.continuous && !motion.highFrameRate,
+            "Mascot reduce motion keeps static working gaze and light without continuous timer")
+    let focused=MascotMotion()
+    focused.setPromptEditing(true,at:0)
+    for i in 0...160 {
+        focused.setPointer(x:i%2==0 ? -900 : 900,y:i%3==0 ? -600 : 600,at:Double(i)*17)
+        _=focused.sample(at:Double(i)*17)
+    }
+    t.check(focused.pose.yaw==focused.computerGaze.yaw && focused.pose.pitch==focused.computerGaze.pitch,
+            "Mascot editing gaze survives continuous opposite pointer sweeps")
+    t.check(focused.pose.logoIntensity<1 && !focused.agentWorking,
+            "Mascot editing alone retains idle breathing instead of work light")
+    focused.setPromptEditing(false,at:2737)
+    let firstRelease=focused.sample(at:2737)
+    t.check(abs(firstRelease.yaw)<20 && firstRelease.pitch>focused.computerGaze.pitch && firstRelease.pitch<30,
+            "Mascot editor blur starts a smooth return to the latest pointer")
+    for i in 1...100 { _=focused.sample(at:2800+Double(i)*17) }
+    t.check(focused.pose.yaw < -60 && focused.pose.pitch==30,
+            "Mascot editor blur restores idle pointer following")
+    focused.setAgentWorking(true,at:4600);focused.setActivity(.waiting,at:4600)
+    for i in 0...100 {
+        focused.setPointer(x:700,y:-400,at:4600+Double(i)*17)
+        _=focused.sample(at:4600+Double(i)*17)
+    }
+    t.check(focused.pose.yaw==focused.computerGaze.yaw && focused.pose.pitch==focused.computerGaze.pitch &&
+            focused.pose.logoIntensity==1,
+            "Mascot pending active work retains screen gaze and steady logo")
+    t.check(focused.pose.opacity==1,"Mascot pending work cannot dim the steady logo through whole-character opacity")
+    focused.setAgentWorking(false,at:6400);focused.setActivity(.idle,at:6400)
+    let lightRelease=focused.sample(at:6400)
+    t.check(lightRelease.logoIntensity==1,"Mascot end of work does not jump directly to breath minimum")
+    _=focused.sample(at:6640)
+    t.check(focused.pose.logoIntensity<0.3,"Mascot end of work rejoins the breathing curve after a short fade")
+    let lamp=MascotMotion();lamp.random={0}
+    for (time,intensity) in [(0.0,0.18),(1600.0,1.0),(3200.0,0.18),(4800.0,1.0)] {
+        t.check(abs(lamp.sample(at:time).logoIntensity-intensity)<0.00001,
+                "Mascot logo 3200ms breath extremum at \(time)")
+    }
+    t.check(lamp.continuous && !lamp.highFrameRate,"Mascot idle breathing uses the lower render cadence")
+    lamp.setActivity(.busy,at:5000)
+    _=lamp.sample(at:5240)
+    for time in [5500.0,6400,8000,9600] {
+        lamp.setPointer(x:900,y:-900,at:time)
+        t.check(lamp.sample(at:time).logoIntensity==1,"Mascot busy logo stays bright at \(time)")
+    }
+    lamp.setDrag(true,at:9700)
+    for i in 0...100 { _=lamp.sample(at:9700+Double(i)*17) }
+    t.check(lamp.pose.yaw==0 && lamp.pose.pitch==0 && lamp.pose.logoIntensity==1,
+            "Mascot drag takes gaze priority while retaining work light")
+    lamp.setDrag(false,at:11500)
+    for i in 0...100 { _=lamp.sample(at:11500+Double(i)*17) }
+    t.check(lamp.pose.pitch==lamp.computerGaze.pitch,"Mascot drop resumes the working screen gaze")
+    lamp.setActivity(.idle,at:13300);lamp.reduceMotion=true
+    t.check(lamp.sample(at:14000).logoIntensity==0.55 && !lamp.continuous,
+            "Mascot reduced motion uses a static soft idle logo")
     for name in MascotResources.identifiers {
         t.check(MascotResources.url(name).map { FileManager.default.fileExists(atPath:$0.path) } == true,
                 "Mascot offline artwork resolves \(name)")

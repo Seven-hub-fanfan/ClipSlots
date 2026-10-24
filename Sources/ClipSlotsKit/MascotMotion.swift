@@ -16,6 +16,7 @@ public struct MascotPose: Equatable {
     public var activityFrame = 0
     public var activityProgress = 0.0
     public var voiceLevel = 0.0
+    public var logoIntensity = 0.18
     public init() {}
 }
 
@@ -31,6 +32,11 @@ public final class MascotMotion {
     public private(set) var activity: Activity = .idle
     public private(set) var hovering = false
     public private(set) var dragging = false
+    public private(set) var editingPrompt = false
+    public private(set) var agentWorking = false
+    public var computerGaze = (yaw: 0.0, pitch: 26.0)
+    public var computerFocused: Bool { editingPrompt || working }
+    private var working: Bool { agentWorking || activity == .busy || activity == .superBusy }
     public var reduceMotion = false
     public var legPixels = 25.0
     public var pointerProjection: ((Double,Double)->(Double,Double))?
@@ -51,6 +57,7 @@ public final class MascotMotion {
     private var busyStart: Double?
     private var completionUntil: Double?
     private var targetVoiceLevel = 0.0
+    private var logoTransition: (at: Double, intensity: Double)?
 
     public init() {}
     public static func smooth(_ amount: Double) -> Double {
@@ -67,7 +74,7 @@ public final class MascotMotion {
     public func setHover(_ value: Bool, at time: Double) {
         guard hovering != value else { return }
         hovering = value
-        if !dragging && activity == .idle {
+        if !dragging && !computerFocused && activity == .idle {
             if value { hoverStart = hoverStart ?? time; hoverEnd = .infinity }
             else if let start = hoverStart, hoverEnd == .infinity {
                 let elapsed=time-start, base=floor(elapsed/1680)*1680, phase=elapsed-base
@@ -94,36 +101,57 @@ public final class MascotMotion {
                 targetPitch=min(30,max(-30,atan2(y,hypot(x,180))*180 / .pi))
             }
         } else { targetYaw=0; targetPitch=0 }
-        if pointerPresent { interruptBlink(at: time) }
+        if pointerPresent && !computerFocused { interruptBlink(at: time) }
+    }
+    public func setPromptEditing(_ value: Bool, at time: Double) {
+        guard editingPrompt != value else { return }
+        editingPrompt=value
+        if computerFocused { hoverStart=nil; hoverEnd = .infinity }
+        else if hovering && activity == .idle { hoverStart=time }
+    }
+    public func setAgentWorking(_ value: Bool, at time: Double) {
+        guard agentWorking != value else { return }
+        let wasWorking=working
+        agentWorking=value
+        if wasWorking != working { logoTransition=(time,pose.logoIntensity) }
+        if computerFocused { hoverStart=nil; hoverEnd = .infinity }
     }
     public func setVoiceLevel(_ value: Double) {
         targetVoiceLevel = value.isFinite ? min(1,max(0,value)) : 0
     }
     public func setActivity(_ value: Activity, at time: Double) {
         guard value != activity else { return }
+        let wasWorking=working
         if value == .completed { completionUntil=time+1800 }
         else { completionUntil=nil }
         if value == .busy && activity != .superBusy { busyStart=time }
         else if value != .superBusy { busyStart=nil }
         activity=value; activityStart=time
+        if wasWorking != working { logoTransition=(time,pose.logoIntensity) }
         if value != .voice { targetVoiceLevel=0 }
         if value != .idle {
             hoverStart=nil; hoverEnd = .infinity
             interruptBlink(at: time)
         } else if hovering { hoverStart=time }
     }
-    public var continuous: Bool {
-        let yaw=dragging ? 0 : targetYaw
-        let pitch=dragging ? 0 : targetPitch
+    private var gaze: (yaw: Double, pitch: Double) {
+        if dragging { return (0,0) }
+        if computerFocused { return computerGaze }
+        return (targetYaw,targetPitch)
+    }
+    public var highFrameRate: Bool {
+        let (yaw,pitch)=gaze
         return !reduceMotion && (hoverStart != nil || dragging || transition != nil ||
             blinkStart != nil || reopening != nil || abs(pose.yaw-yaw)>0.03 ||
             abs(pose.pitch-pitch)>0.03 || ![.idle,.failed].contains(activity))
     }
+    public var continuous: Bool { !reduceMotion }
     public var nextWake: Double? { nextBlink }
     public func reset(at time: Double) {
         hovering=false; dragging=false; hoverStart=nil; transition=nil; blinkStart=nil
         reopening=nil; nextBlink=nil; pointerPresent=false; previousTime=nil
         targetYaw=0; targetPitch=0; targetVoiceLevel=0; pointerMovedAt=nil; pose=MascotPose()
+        editingPrompt=false; agentWorking=false; logoTransition=nil
     }
     private func interruptBlink(at time: Double) {
         nextBlink=nil
@@ -142,16 +170,25 @@ public final class MascotMotion {
             } else if activity == .superBusy { activity = .busy; activityStart=time }
         }
         if reduceMotion {
-            pose=MascotPose(); previousTime=time; nextBlink=nil; return pose
+            pose=MascotPose()
+            if computerFocused { (pose.yaw,pose.pitch)=computerGaze }
+            pose.logoIntensity=working ? 1 : 0.55
+            previousTime=time; nextBlink=nil; logoTransition=nil; return pose
         }
         var result=MascotPose()
         let dt=min(0.1,max(0,(time-(previousTime ?? time-1000/60))/1000))
         previousTime=time
         let easing=1-exp(-dt/0.12)
-        let yaw=dragging ? 0 : targetYaw
-        let pitch=dragging ? 0 : targetPitch
+        let (yaw,pitch)=gaze
         result.yaw=abs(pose.yaw-yaw)<0.03 ? yaw : pose.yaw+(yaw-pose.yaw)*easing
         result.pitch=abs(pose.pitch-pitch)<0.03 ? pitch : pose.pitch+(pitch-pose.pitch)*easing
+        let breath=0.18+0.82*(1-cos(time*2 * .pi/3200))/2
+        result.logoIntensity=working ? 1 : breath
+        if let current=logoTransition {
+            let p=Self.smooth((time-current.at)/240)
+            result.logoIntensity=current.intensity+(result.logoIntensity-current.intensity)*p
+            if p == 1 { logoTransition=nil }
+        }
         let voice=activity == .voice ? targetVoiceLevel : 0
         let voiceEase=1-exp(-dt/(voice>pose.voiceLevel ? 0.07 : 0.18))
         result.voiceLevel=abs(pose.voiceLevel-voice)<0.002 ? voice :
@@ -174,7 +211,7 @@ public final class MascotMotion {
             result.expression=current.pose.expression+(result.expression-current.pose.expression)*s
             if p == 1 { transition=nil }
         }
-        let pointerQuiet = !pointerPresent || time-(pointerMovedAt ?? time)>=800
+        let pointerQuiet = computerFocused || !pointerPresent || time-(pointerMovedAt ?? time)>=800
         let idle = activity == .idle && !hovering && !dragging && pointerQuiet && hoverStart == nil
         if idle && nextBlink == nil && blinkStart == nil && reopening == nil {
             nextBlink=time+2000+random()*2000
@@ -197,7 +234,7 @@ public final class MascotMotion {
         switch activity {
         case .waiting:
             let p=(1-cos(elapsed*2 * .pi/1800))/2
-            result.opacity=1-0.45*p; result.lift=2*p
+            result.opacity=working ? 1 : 1-0.45*p; result.lift=2*p
         case .completed:
             let p=(1-cos(elapsed.truncatingRemainder(dividingBy:600)*2 * .pi/600))/2
             result.lift=9*p; result.rotation = -4*p

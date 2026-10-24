@@ -22,6 +22,7 @@ import AppKit
 /// 异步抢 first responder：卡片位于被 `scaleEffect` 包裹的画布子树里，SwiftUI 的 `@FocusState`
 /// 在这种子树里实测抢不稳（会被下一次视图重建丢掉），而 NSTextView 自己抢是确定性的。
 struct CanvasPromptEditor: NSViewRepresentable {
+    static func owns(_ responder: NSResponder?) -> Bool { responder is FocusGrabbingTextView }
     @Binding var text: String
     let font: NSFont
     /// 回车时调用（文本已经通过 binding 同步）。
