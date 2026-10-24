@@ -435,7 +435,7 @@ struct PermissionCenterCard: View {
     private var surface: Color { scheme == .dark ? Color(white: 0.12) : .white }
     private var ink: Color { scheme == .dark ? .white : Color(white: 0.12) }
     private var description: String {
-        if afterUpdate { return "应用已更新，请检查以下权限。\n辅助功能旧记录会在需要时自动清除，随后由你在系统中确认。" }
+        if afterUpdate { return "应用已更新，请检查以下权限。\n授权需要你在系统中确认；升级不会自动清除权限记录。" }
         if purpose == .accessibility { return "获取所选内容与模拟复制粘贴，需要辅助功能权限。\n授权后，请重新执行刚才的操作。" }
         if purpose == .screenCapture { return "截图设为缩略图，需要屏幕录制权限。\n授权后，请重新点击截图；macOS 可能要求重新打开应用。" }
         return "使用复制粘贴与截图功能，需要授予对应的权限。\n你可以按需开启，授权状态会自动更新。"
@@ -593,7 +593,7 @@ struct PermissionDragHelper: View {
             HStack(spacing: 8) {
                 Image(systemName: "cursorarrow.motionlines").font(.system(size: 20, weight: .bold))
                     .foregroundColor(accent)
-                Text(model.repairing == permission ? "正在自动清除「\(permission.title)」旧记录" :
+                Text(model.repairing == permission ? "正在清除「\(permission.title)」旧记录" :
                     model.repairNotice != nil ? "已清除旧记录，请开启「\(permission.title)」" :
                     "拖入系统列表，开启「\(permission.title)」")
                     .font(.system(size: 12)).lineLimit(1)

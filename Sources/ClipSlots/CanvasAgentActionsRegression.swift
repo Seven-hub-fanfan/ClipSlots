@@ -14,6 +14,7 @@ func runCanvasAgentActionsProbe(store: SlotStoreObservable, directory: URL,
     let backend = CanvasAgentActionsFixtureBackend()
     model.setBackend(backend)
     model.selectAccessMode(.fullAccess)
+    model.selectAutomaticApproval(true)
     model.send(text: "创建镜头文本和16:9图片节点，连接并编组。", config: AgentConfig(), enabledSkills: [])
     for _ in 0..<150 where model.isRunning { try? await Task.sleep(for: .milliseconds(80)) }
     check(!model.isRunning && model.errorText == nil, "full access Agent run settles through real host")
@@ -144,7 +145,7 @@ func runCanvasAgentActionsProbe(store: SlotStoreObservable, directory: URL,
         host.cacheDisplay(in: host.bounds, to: rep)
         try? rep.representation(using: .png, properties: [:])?.write(to: directory.appendingPathComponent("canvas-agent-direct-actions.png"))
     }
-    await runAgentScreenCaptureProbe(model: model, host: host, check: check)
+    await runAgentScreenCaptureProbe(model: model, host: host, directory: directory, check: check)
     window.close(); model.stop()
 }
 

@@ -63,7 +63,8 @@ final class AgentSharedSidebarTools: AgentToolExecuting, AgentCLICommandAuthoriz
             }
             input = .object(object)
             try ByteArtistContract.validateField(try input.encodedText(), schema: spec.parameters)
-            if !Self.readers.contains(call.name), !automaticApproval {
+            if AgentApprovalPolicy.requiresConfirmation(call.name, automatic: automaticApproval,
+                                                         reader: Self.readers.contains(call.name)) {
                 let decision = SidebarToolDecision()
                 let request = AgentInteraction(kind: .commandApproval, params: [
                     "command": .string(call.name), "reason": "修改槽位库",
@@ -77,6 +78,7 @@ final class AgentSharedSidebarTools: AgentToolExecuting, AgentCLICommandAuthoriz
                 while decision.value == nil && Date() < request.expiresAt {
                     try Task.checkCancellation()
                     guard await isCurrent() else { throw AgentCanvasError.staleTarget }
+                    guard request.isPending else { break }
                     try await Task.sleep(for: .milliseconds(80))
                 }
                 guard decision.value == true else {

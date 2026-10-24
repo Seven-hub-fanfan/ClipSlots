@@ -37,6 +37,7 @@ struct AgentSidebarView: View {
     @State private var showLegacyCanvas = false
     @State private var showLegacyEdit = false
     @State private var showContextInfo = false
+    @State private var contextPinned = false
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @AppStorage("agent.panel.requestedWidth") private var requestedWidth = 440.0
     @State private var windowWidth = WindowLayoutMetrics.minWindowContentWidth
@@ -62,6 +63,7 @@ struct AgentSidebarView: View {
     @State private var showConfig = false
     @State private var credentialNotice: String?
     @State private var showSkillPicker = false
+    @State private var dismissedExtensionEntry = false
     @State private var showReferencePicker = false
     @State private var showModelPicker = false
     @State private var showWorkflowLibrary = false
@@ -126,6 +128,14 @@ struct AgentSidebarView: View {
             }
             section("transcript") { transcript }
             section("input", height: 180) {
+                if welcomesUser && !dismissedExtensionEntry {
+                    extensionEntry.padding(.bottom, 2)
+                }
+                if capture.needsPermission {
+                    Button("打开系统设置 · 屏幕录制权限") { capture.openPermissionSettings() }
+                        .font(.system(size: 11)).padding(.horizontal, 12)
+                        .accessibilityIdentifier("agent-capture-permission-settings")
+                }
                 if !isReadOnly && (model.canResumeGateway || !model.artifacts.isEmpty) {
                     AgentReplicaControls(model: model, onDismiss: { inputFocusRequest += 1 })
                 }
@@ -203,6 +213,8 @@ struct AgentSidebarView: View {
             showModelPicker = false
             showComposerAdd = false
             showCaptureMenu = false
+            showContextInfo = false
+            contextPinned = false
             inputFocusRequest += 1
         }
         .onChange(of: backendKind) { _ in credentialNotice = nil }
@@ -325,9 +337,6 @@ struct AgentSidebarView: View {
                     Text(conversationTitle)
                         .font(.system(size: 13, weight: .semibold))
                         .lineLimit(1)
-                    Image(systemName: "chevron.down")
-                        .font(.system(size: 8))
-                        .foregroundColor(TapSkin.faintInk)
                 }
                 .frame(height: 32)
                 .contentShape(Rectangle())
@@ -335,6 +344,17 @@ struct AgentSidebarView: View {
             .menuStyle(.borderlessButton)
             .menuIndicator(.hidden)
             .fixedSize(horizontal: false, vertical: true)
+            .frame(width: conversationMenuWidth)
+            .accessibilityIdentifier("agent-conversation-menu")
+            .overlay(alignment: .trailing) {
+                // AppKit's borderless Menu label drops nested chevron images.
+                Image(systemName: "chevron.down")
+                    .font(.system(size: 8))
+                    .foregroundColor(TapSkin.faintInk)
+                    .allowsHitTesting(false)
+                    .accessibilityLabel("会话菜单展开标记")
+                    .accessibilityIdentifier("agent-conversation-chevron")
+            }
             .help("会话操作")
             Spacer(minLength: 0)
             iconButton("square.and.pencil", help: "新建对话", action: newConversation).disabled(isReadOnly)
@@ -344,7 +364,7 @@ struct AgentSidebarView: View {
                            action: onToggleExpanded)
                     .accessibilityIdentifier("canvas-agent-expand")
             }
-            if !isFullPage {
+            if !isFullPage, onToggleExpanded == nil {
                 iconButton("sidebar.right", help: "收起侧栏") {
                     withAnimation(Anim.transition) { isVisible = false }
                 }
@@ -355,6 +375,11 @@ struct AgentSidebarView: View {
                 Button("重命名对话") {
                     renameTitle = model.currentConversationTitle; showRename = true
                 }
+                if !isFullPage, onToggleExpanded != nil {
+                    Button("收起侧栏") {
+                        withAnimation(Anim.transition) { isVisible = false }
+                    }.accessibilityIdentifier("agent-close-sidebar")
+                }
             } label: {
                 Image(systemName: "ellipsis").frame(width: 28, height: 32)
             }.menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
@@ -364,6 +389,14 @@ struct AgentSidebarView: View {
     }
 
     private var conversationTitle: String { model.currentConversationTitle }
+
+    private var conversationMenuWidth: CGFloat {
+        let titleWidth = (conversationTitle as NSString).size(
+            withAttributes: [.font: NSFont.systemFont(ofSize: 13, weight: .semibold)]).width
+        // Reserve icon, spacing and chevron inside the native button so the
+        // indicator stays beside the title and clicking it opens the menu.
+        return min(max(96, panelWidth - 160), ceil(titleWidth) + 44)
+    }
 
     private func newConversation() {
         guard !isReadOnly else { return }
@@ -545,15 +578,17 @@ struct AgentSidebarView: View {
     }
 
     private func emptyState(width: CGFloat) -> some View {
-        let compact = min(width, isFullPage ? 560 : Self.width) < 428
+        let compact = !isFullPage || min(width, 560) < 428
         let layout = compact ? AnyLayout(VStackLayout(spacing: 20)) : AnyLayout(HStackLayout(spacing: 12))
         return VStack(alignment: .leading, spacing: 16) {
             VStack(alignment: .leading, spacing: 12) {
                 Label("Hi，欢迎回来", systemImage: "sparkles")
                     .font(.system(size: 21, weight: .regular))
                     .foregroundColor(TapSkin.secondaryInk)
+                    .accessibilityIdentifier("agent-welcome-greeting")
                 Text(workspaceMode == .edit ? "今天想怎样编辑槽位？" : "今天一起创作点什么？")
                     .font(.system(size: 26, weight: .medium))
+                    .accessibilityIdentifier("agent-welcome-question")
             }
             .modifier(CreativeWelcomeReveal(token: model.selectedConversationID))
             layout {
@@ -573,10 +608,41 @@ struct AgentSidebarView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
+    private var extensionEntry: some View {
+        HStack(spacing: 8) {
+            Button {
+                completion.dismiss()
+                showComposerAdd = false
+                showReferencePicker = false
+                showSkillPicker.toggle()
+            } label: {
+                HStack(spacing: 7) {
+                    HStack(spacing: -3) {
+                        ForEach(["puzzlepiece.extension", "square.grid.2x2", "folder"], id: \.self) { symbol in
+                            Image(systemName: symbol).font(.system(size: 10))
+                                .frame(width: 17, height: 17)
+                                .background(panelFill, in: RoundedRectangle(cornerRadius: 4))
+                        }
+                    }
+                    Text("使用应用拓展 Agent 能力").font(.system(size: 10, weight: .medium))
+                }.contentShape(Rectangle())
+            }.buttonStyle(.plain)
+                .help("管理本地技能与应用能力")
+                .accessibilityIdentifier("agent-extension-entry")
+            Button { dismissedExtensionEntry = true } label: {
+                Image(systemName: "xmark").font(.system(size: 9)).frame(width: 15, height: 18)
+            }.buttonStyle(.plain)
+                .accessibilityLabel("关闭应用拓展入口")
+                .accessibilityIdentifier("agent-extension-dismiss")
+        }
+        .foregroundColor(TapSkin.secondaryInk)
+        .padding(.horizontal, 10).padding(.vertical, 7)
+        .background(TapSkin.tone(0xededee, 0x252525), in: Capsule())
+        .accessibilityElement(children: .contain)
+    }
+
     private func suggestionCard(_ suggestion: AgentSuggestion, index: Int, compact: Bool) -> some View {
-        CreativeSuggestionCard(category: suggestion.category, symbol: suggestion.symbol,
-                               title: suggestion.title, detail: suggestion.detail,
-                               index: index, compact: compact, fill: inputFill) {
+        Button {
             // #region debug-point C-D:suggestion-action
             #if DEBUG
             if ProcessInfo.processInfo.environment["CLIPSLOTS_CONTROL_PROBE"] == "1" { var r = URLRequest(url: URL(string: "http://127.0.0.1:7784/event")!); r.httpMethod = "POST"; r.httpBody = try? JSONSerialization.data(withJSONObject: ["sessionId": "slot-input-controls", "runId": ProcessInfo.processInfo.environment["CANVAS_DEBUG_RUN"] ?? "pre-fix", "hypothesisId": "C-D", "msg": "[DEBUG] suggestion action", "data": ["session": model.displayName, "title": suggestion.title]]); URLSession.shared.dataTask(with: r).resume() }
@@ -584,7 +650,24 @@ struct AgentSidebarView: View {
             // #endregion
             draft = suggestion.prompt
             inputFocusRequest += 1
-        }
+        } label: {
+            VStack(alignment: .leading, spacing: 9) {
+                HStack(spacing: 8) {
+                    Image(systemName: suggestion.symbol).font(.system(size: 14))
+                    Text(suggestion.title).font(.system(size: 13, weight: .semibold)).lineLimit(2)
+                    Spacer(minLength: 2)
+                    Image(systemName: "arrow.right").font(.system(size: 11)).foregroundColor(TapSkin.faintInk)
+                }
+                Text(suggestion.detail).font(.system(size: 11)).foregroundColor(TapSkin.secondaryInk)
+                    .lineLimit(2).frame(maxWidth: .infinity, alignment: .leading)
+                Spacer(minLength: 0)
+            }.padding(12).frame(maxWidth: .infinity, minHeight: 86, maxHeight: 96, alignment: .topLeading)
+                .background(inputFill, in: RoundedRectangle(cornerRadius: 13))
+                .overlay(RoundedRectangle(cornerRadius: 13).stroke(hairline.opacity(0.6), lineWidth: 0.6))
+                .rotationEffect(.degrees(reduceMotion ? 0 : index == 0 ? -0.8 : 0.8))
+                .contentShape(Rectangle())
+        }.buttonStyle(.plain)
+            .accessibilityIdentifier("agent-suggestion-\(index)")
     }
 
     // MARK: 气泡
@@ -850,38 +933,14 @@ struct AgentSidebarView: View {
                 }
 
                 inputSection("input-tools") {
-                VStack(spacing: 6) {
-                HStack(spacing: 8) {
-                    contextUsageButton
-                    Spacer(minLength: 8)
-                    modelPicker
-                }
                 HStack(spacing: 6) {
                     composerAddMenu
                     AgentWorkingDirectoryPicker(model: model, directories: model.workingDirectories, compact: true)
-                    Menu {
-                        Button { model.selectAutomaticApproval(false) } label: {
-                            Label("请求批准", systemImage: model.automaticApproval ? "circle" : "checkmark.circle")
-                        }
-                        Button { model.selectAutomaticApproval(true) } label: {
-                            Label("替我审批", systemImage: model.automaticApproval ? "checkmark.circle" : "circle")
-                        }
-                    } label: {
-                        Image(systemName: model.automaticApproval ? "arrow.clockwise" : "hand.raised")
-                            .font(.system(size: 13)).frame(width: 26, height: 30)
-                    }
-                    .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
-                    .disabled(model.isRunning || model.canResumeGateway || model.isControllingRun)
-                    .help(model.automaticApproval ? "替我审批" : "请求批准")
-                    .accessibilityIdentifier("agent-approval-policy")
+                    AgentApprovalPicker(model: model)
                     captureControls
                     Spacer(minLength: 0)
-                    AgentPolishButton(busy: model.isPolishing,
-                                      enabled: !model.isRunning && !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-                                      compact: windowWidth < 400) {
-                        completion.dismiss()
-                        model.polishDraft(config: currentConfig)
-                    }.accessibilityIdentifier("agent-ai-polish")
+                    contextUsageButton
+                    modelPicker
                     Button {
                         if voice.isRecording || voice.isStarting { voice.stop() }
                         else {
@@ -920,7 +979,6 @@ struct AgentSidebarView: View {
                     .disabled(!canSend && !model.isRunning)
                     .help(model.isRunning ? "停止生成" : "Enter 发送 · Shift+Enter 换行")
                     .accessibilityLabel(model.isRunning ? "停止生成" : "发送")
-                }
                 }
                 .padding(.horizontal, 10)
                 .padding(.bottom, 10)
@@ -996,7 +1054,8 @@ struct AgentSidebarView: View {
         Button { showComposerAdd.toggle() } label: {
             Image(systemName: "plus").font(.system(size: 13))
                 .frame(width: 26, height: 26)
-                .background(TapSkin.subtleFill, in: Circle())
+                .background(inputFill, in: RoundedRectangle(cornerRadius: 8))
+                .overlay(RoundedRectangle(cornerRadius: 8).stroke(hairline.opacity(0.7), lineWidth: 0.5))
         }
         .buttonStyle(.plain).fixedSize()
         .accessibilityIdentifier("agent-composer-add")
@@ -1004,6 +1063,11 @@ struct AgentSidebarView: View {
             VStack(alignment: .leading, spacing: 3) {
                 addMenuItem("上传文件", symbol: "paperclip") { model.chooseAttachments() }
                     .disabled(model.isImportingAttachments)
+                addMenuItem("优化提示词", symbol: "sparkles") {
+                    completion.dismiss()
+                    model.polishDraft(config: currentConfig)
+                }.accessibilityIdentifier("agent-ai-polish")
+                    .disabled(model.isRunning || model.isPolishing || draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                 if let context = model.canvasContext {
                     addMenuItem("从画布添加", symbol: "cursorarrow.and.square.on.square.dashed") {
                         context.addSelection(to: model); inputFocusRequest += 1
@@ -1040,6 +1104,8 @@ struct AgentSidebarView: View {
         }
         .popover(isPresented: $showSkillPicker, arrowEdge: .top) {
             AgentSkillPickerView(builtinToolCount: AgentBuiltinTools().specs().count)
+                .accessibilityElement(children: .contain)
+                .accessibilityIdentifier("agent-extension-picker")
         }
     }
 
@@ -1110,6 +1176,7 @@ struct AgentSidebarView: View {
         !isReadOnly && (!draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !model.draftAttachments.isEmpty
             || !model.draftReferences.isEmpty || !model.draftSkillReferences.isEmpty)
             && !model.isAddingSkill && !model.isPolishing && !model.isImportingAttachments
+            && model.canvasContext?.isLoadingReferences != true
     }
 
     private var draftHeight: CGFloat {
@@ -1208,36 +1275,107 @@ struct AgentSidebarView: View {
     // MARK: 动作
 
     private var contextCapacityLine: String {
-        guard let tokens = model.reportedPromptTokens,
+        guard let tokens = currentPromptTokens,
               let capacity = modelCatalog.models.first(where: { $0.id == modelLabel })?.contextWindow else { return "" }
         let percentage = Double(tokens) * 100 / Double(capacity)
         return String(format: " · 最近请求上下文 %.1f%%", percentage)
     }
 
+    private var currentContextUsage: AgentContextUsage? {
+        guard let usage = model.contextUsage, usage.model == modelLabel,
+              usage.endpoint == currentConfig.endpoint else { return nil }
+        return usage
+    }
+
+    private var currentPromptTokens: Int? {
+        if model.isEmpty && !model.isRunning { return 0 }
+        return currentContextUsage == nil ? nil : model.reportedPromptTokens
+    }
+
+    private var contextFraction: Double? {
+        if model.isEmpty && !model.isRunning { return 0 }
+        guard let tokens = currentPromptTokens,
+              let capacity = modelCatalog.models.first(where: { $0.id == modelLabel })?.contextWindow else { return nil }
+        return min(1, max(0, Double(tokens) / Double(capacity)))
+    }
+
     private var contextUsageButton: some View {
-        Button { showContextInfo.toggle() } label: {
-            HStack(spacing: 5) {
-                Image(systemName: "chart.pie").font(.system(size: 11))
-                Text("上下文")
-                if let tokens = model.reportedPromptTokens {
-                    Text(tokens.formatted()).monospacedDigit()
-                } else {
-                    Text("—")
+        Button {
+            contextPinned.toggle()
+            showContextInfo = contextPinned
+        } label: {
+            ZStack {
+                Circle().stroke(TapSkin.secondaryInk.opacity(0.28), lineWidth: 2.5)
+                if let fraction = contextFraction {
+                    Circle().trim(from: 0, to: fraction)
+                        .stroke(TapSkin.secondaryInk, style: StrokeStyle(lineWidth: 2.5, lineCap: .round))
+                        .rotationEffect(.degrees(-90))
                 }
-            }
-            .font(.system(size: 10))
-            .foregroundColor(TapSkin.secondaryInk)
-            .frame(height: 24).contentShape(Rectangle())
+            }.frame(width: 14, height: 14).frame(width: 26, height: 30).contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        .help(currentPromptTokens.map { "上下文 \($0.formatted()) tokens\(contextCapacityLine)" } ?? "上下文用量")
         .accessibilityLabel("最近请求上下文用量")
         .accessibilityIdentifier("agent-context-usage")
+        .onHover { if !contextPinned { showContextInfo = $0 } }
+        .onChange(of: showContextInfo) { if !$0 { contextPinned = false } }
         .popover(isPresented: $showContextInfo, arrowEdge: .top) {
-            Text(model.reportedPromptTokens.map {
-                "最近请求输入 \($0) tokens\(contextCapacityLine)"
-            } ?? "当前服务尚未返回上下文用量。发送消息并收到服务用量后显示。")
-            .font(.system(size: 12)).padding(14).frame(width: 240, alignment: .leading)
+            VStack(alignment: .leading, spacing: 10) {
+                Text("上下文占用").font(.system(size: 12, weight: .semibold))
+                HStack {
+                    Text("已用 token")
+                    Spacer()
+                    Text(currentPromptTokens.map { $0.formatted() } ?? "—")
+                }.font(.system(size: 11)).monospacedDigit()
+                    .accessibilityElement(children: .ignore)
+                    .accessibilityLabel("已用 token：" + (currentPromptTokens.map { $0.formatted() } ?? "未知"))
+                    .accessibilityIdentifier("agent-context-used")
+                HStack {
+                    Text("占比")
+                    Spacer()
+                    Text(contextPercentageText)
+                }.font(.system(size: 11)).monospacedDigit()
+                    .accessibilityElement(children: .ignore)
+                    .accessibilityLabel("占比：" + (contextFraction == nil ? "未知" : contextPercentageText))
+                    .accessibilityIdentifier("agent-context-percentage")
+                if let capacity = modelCatalog.models.first(where: { $0.id == modelLabel })?.contextWindow {
+                    Text("容量 \(capacity.formatted()) tokens").font(.system(size: 10)).foregroundColor(TapSkin.secondaryInk)
+                }
+                if let usage = currentContextUsage {
+                    Divider()
+                    contextRow("工作区", tokens: usage.workspace, color: .purple)
+                    contextRow("工具调用与 Agent", tokens: usage.toolsAndAgent, color: .blue)
+                    contextRow("历史消息", tokens: usage.history, color: .orange)
+                    contextRow("系统指令", tokens: usage.system, color: .green)
+                }
+                let pending = AgentContextUsage.estimate(AgentMessage(role: .user, content: draft,
+                    attachments: model.draftAttachments, canvasReferences: model.draftReferences,
+                    skillReferences: model.draftSkillReferences).wireContent)
+                if pending > 0 { contextRow("待发送内容", tokens: pending, color: TapSkin.secondaryInk) }
+                if currentContextUsage != nil || pending > 0 {
+                    Text("分项为文本估算；总量以服务返回为准，包含图像用量。")
+                    .font(.system(size: 10)).foregroundColor(TapSkin.secondaryInk)
+                    .fixedSize(horizontal: false, vertical: true)
+                }
+            }.padding(12).frame(width: currentContextUsage == nil && draft.isEmpty && model.draftReferences.isEmpty
+                && model.draftAttachments.isEmpty && model.draftSkillReferences.isEmpty ? 180 : 260, alignment: .leading)
+                .foregroundColor(TapSkin.ink).background(TapSkin.tone(0xffffff, 0x222222))
+                .accessibilityElement(children: .contain)
+                .accessibilityIdentifier("agent-context-popover")
         }
+    }
+
+    private var contextPercentageText: String {
+        contextFraction.map { $0 == 0 ? "0%" : String(format: "%.1f%%", $0 * 100) } ?? "—"
+    }
+
+    private func contextRow(_ title: String, tokens: Int, color: Color) -> some View {
+        HStack(spacing: 7) {
+            Circle().fill(color).frame(width: 6, height: 6)
+            Text(title)
+            Spacer()
+            Text("≈ " + tokens.formatted()).monospacedDigit()
+        }.font(.system(size: 11))
     }
 
     private var currentConfig: AgentConfig {
@@ -1264,34 +1402,33 @@ struct AgentSidebarView: View {
             showModelPicker.toggle()
             if showModelPicker { refreshModelCatalog() }
         } label: {
-            HStack(spacing: 5) {
-                Image(systemName: "cpu").font(.system(size: 11))
-                Text(modelLabel).lineLimit(1).truncationMode(.middle)
-                Image(systemName: "chevron.down").font(.system(size: 8))
-            }.font(.system(size: 11, weight: .medium))
+            Image(systemName: "sparkles").font(.system(size: 13))
                 .foregroundColor(TapSkin.ink)
-                .padding(.horizontal, 8).frame(height: 26)
-                .frame(maxWidth: isFullPage ? 260 : min(200, panelWidth * 0.48))
-                .background(panelFill, in: RoundedRectangle(cornerRadius: 7))
-                .contentShape(RoundedRectangle(cornerRadius: 7))
+                .frame(width: 26, height: 30)
+                .background(showModelPicker ? TapSkin.subtleFill : .clear, in: Circle())
+                .contentShape(Rectangle())
         }.buttonStyle(.plain)
             .disabled(model.isRunning)
             .help("当前模型：" + modelLabel)
             .accessibilityLabel("当前模型：" + modelLabel)
             .accessibilityIdentifier("agent-model-picker")
             .popover(isPresented: $showModelPicker, arrowEdge: .top) {
-                VStack(spacing: 0) {
-                if backendKind != .tika {
-                    HStack {
-                        if modelCatalog.isLoading { ProgressView().controlSize(.small); Text("正在查询模型…") }
-                        else { Text(modelCatalog.error ?? "服务返回 \(modelCatalog.models.count) 个模型").lineLimit(2) }
-                        Spacer()
-                        Button("刷新") { refreshModelCatalog() }.disabled(modelCatalog.isLoading)
-                    }.font(.caption).foregroundColor(TapSkin.secondaryInk).padding(10)
-                }
-                CreativeModelPicker(options: agentModelOptions,
-                    selected: modelLabel,
-                    onSettings: { showModelPicker = false; showConfig = true }) { choice in
+                AgentSidebarModelPicker(options: agentModelOptions, selected: modelLabel,
+                    loading: modelCatalog.isLoading, notice: modelCatalog.error, compactDetails: windowWidth < 560,
+                    refresh: refreshModelCatalog,
+                    settings: { showModelPicker = false; showConfig = true },
+                    reasoningEffort: reasoningEffort,
+                    effortModelIDs: backendKind == .deepseek
+                        ? Set(agentModelOptions.filter { $0.id.lowercased().hasPrefix("deepseek") }.map(\.id)) : [],
+                    changeEffort: { choice, effort in
+                        guard backendKind == .deepseek, !model.isRunning,
+                              agentModelOptions.contains(where: { $0.id == choice && $0.available }),
+                              ["low", "high", "max"].contains(effort) else { return }
+                        modelName = choice
+                        reasoningEffort = effort
+                        thinkingRaw = AgentThinkingMode.enabled.rawValue
+                    }) { choice in
+                        guard agentModelOptions.contains(where: { $0.id == choice && $0.available }) else { return }
                         showModelPicker = false
                         if backendKind == .deepseek { modelName = choice }
                         if backendKind == .gateway {
@@ -1300,7 +1437,6 @@ struct AgentSidebarView: View {
                         }
                         inputFocusRequest += 1
                     }
-                }
             }
     }
 
@@ -1311,27 +1447,21 @@ struct AgentSidebarView: View {
         if let selectedEndpoint { modelCatalog.refresh(endpoint: selectedEndpoint, gateway: backendKind == .gateway) }
     }
 
-    private var agentModelOptions: [CreativeModelOption] {
+    private var agentModelOptions: [AgentDiscoveredModel] {
         if backendKind != .tika, !modelCatalog.models.isEmpty {
-            return modelCatalog.models.map { option in
-                var details = ["模型由当前服务返回。"]
-                if let capacity = option.contextWindow { details.append("上下文容量：\(capacity) tokens") }
-                if let images = option.supportsImages { details.append(images ? "服务声明支持图像输入。" : "服务声明不支持图像输入。") }
-                return CreativeModelOption(id: option.id, title: option.id, subtitle: "当前服务",
-                                           details: details)
-            }
+            return modelCatalog.models
         }
         switch backendKind {
         case .tika:
-            return [.init(id: "Tika Agent", title: "Tika Agent", subtitle: "当前 Tika 服务",
-                          details: ["模型由 Tika 后端配置。可在服务设置中管理连接。"])]
+            return [.init(id: "Tika Agent", contextWindow: nil, supportsImages: nil,
+                          description: "模型由 Tika 后端配置。可在服务设置中管理连接。")]
         case .gateway:
             let current = UserDefaults.standard.string(forKey: AgentGatewayPreferences.modelKey) ?? AgentGatewayPreferences.defaultModel
-            return [.init(id: current, title: current, subtitle: "已配置模型",
-                          details: ["模型与服务地址在 Agent 设置中配置。"])]
+            return [.init(id: current, contextWindow: nil, supportsImages: nil,
+                          description: "模型与服务地址在 Agent 设置中配置。")]
         case .deepseek:
-            return [.init(id: modelName, title: modelName, subtitle: "已配置模型",
-                          details: ["使用已保存的模型 ID 和服务连接；查询成功后显示服务模型列表。"])]
+            return [.init(id: modelName, contextWindow: nil, supportsImages: nil,
+                          description: "使用已保存的模型 ID 和服务连接；查询成功后显示服务模型列表。")]
         }
     }
 
@@ -1390,12 +1520,12 @@ private struct AgentSuggestion {
 
     static let canvasPages: [[AgentSuggestion]] = [
         [
-            .init(category: "灵感创作", symbol: "sparkles", title: "把一个想法\n打磨成画面",
-                  detail: "从主体、光线到构图，写好生图提示词。",
-                  prompt: "帮我把这个画面想法优化为可直接用于生图的提示词，先问我主体与风格。只产出提示词。"),
-            .init(category: "视频分镜", symbol: "lightbulb", title: "让故事从第一帧\n开始发生",
-                  detail: "梳理镜头和情绪，让画面自然衔接。",
-                  prompt: "帮我规划一段短视频的分镜，先了解故事主题、时长和视觉风格。")
+            .init(category: "创作方法", symbol: "paintpalette", title: "把这个项目的风格做成 Skill",
+                  detail: "沉淀题材、视觉关键词和镜头语言。",
+                  prompt: CanvasAgentContext.summarizePrompt),
+            .init(category: "视频分镜", symbol: "sparkles", title: "用 MiniMax H3 创作有声多镜头短片",
+                  detail: "同步设计镜头、对白、环境声和音乐。",
+                  prompt: "帮我用 MiniMax H3 规划有声多镜头短片。先了解主题、时长与视觉风格，再查询实际可用模型；仅在服务确实提供该模型和音频能力时使用，否则明确说明限制。先预览分镜和提示词，确认后再生成。")
         ],
         [
             .init(category: "槽位整理", symbol: "square.grid.2x2", title: "理清素材\n让灵感各就各位",

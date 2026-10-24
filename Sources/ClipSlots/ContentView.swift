@@ -953,7 +953,7 @@ struct ContentView: View {
                 }
                 .frame(width: HeaderMascotView.canvasSide, height: HeaderMascotView.canvasSide)
             }
-            .frame(width: 54, height: 68)
+            .frame(width: 74, height: 68)
 
             VStack(alignment: .leading, spacing: 4) {
                 Text("ClipSlots")

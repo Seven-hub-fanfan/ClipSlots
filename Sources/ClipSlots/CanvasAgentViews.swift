@@ -55,31 +55,33 @@ struct CanvasAgentComposer: View {
                     context.presentMutation(preview, conversationID: model.selectedConversationID)
                 }.accessibilityIdentifier("agent-canvas-sync-preview")
             }
-            ForEach(model.draftReferences) { ref in
-                HStack(alignment: .top, spacing: 6) {
-                    DisclosureGroup {
-                        Text(ref.text.isEmpty ? "无正文" : ref.text)
-                            .lineLimit(8).textSelection(.enabled)
-                        if !ref.attachmentNames.isEmpty {
-                            Text("附件名称：" + ref.attachmentNames.joined(separator: "、"))
-                                .foregroundColor(.secondary)
-                        }
-                        if let images = ref.images, !images.isEmpty {
-                            HStack {
-                                ForEach(images) { image in
-                                    if let data = image.imageSnapshot, let preview = NSImage(data: data) {
-                                        Image(nsImage: preview).resizable().scaledToFit().frame(width: 44, height: 44)
-                                    }
-                                }
-                                Text("已读取 \(images.count) 张图片")
+            if !model.draftReferences.isEmpty {
+                HStack(spacing: 8) {
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        HStack(spacing: 8) {
+                            ForEach(model.draftReferences) { ref in
+                                AgentCanvasReferenceChip(reference: ref,
+                                    captureError: context.referenceCaptureErrors[ref.id],
+                                    locate: { context.locate(ref) },
+                                    remove: { model.draftReferences.removeAll { $0.id == ref.id } })
                             }
-                        }
-                    } label: { Text(ref.title).lineLimit(1) }
-                    Button { context.locate(ref) } label: { Image(systemName: "scope") }
-                        .help("定位引用节点")
-                    Button { model.draftReferences.removeAll { $0.id == ref.id } } label: {
-                        Image(systemName: "xmark")
-                    }.help("移除本轮引用")
+                            Button { model.draftReferences = []; context.cancelReferenceCapture() } label: {
+                                Image(systemName: "xmark").frame(width: 24, height: 36)
+                            }.help("清空全部引用").accessibilityIdentifier("agent-clear-canvas-references")
+                        }.padding(.top, 6).padding(.trailing, 6)
+                    }.frame(height: 44)
+                    if context.isLoadingReferences {
+                        ProgressView().controlSize(.small).frame(width: 16)
+                    }
+                }
+                .accessibilityElement(children: .contain)
+                .accessibilityIdentifier("agent-canvas-reference-strip")
+                if model.draftReferences.contains(where: { context.referenceCaptureErrors[$0.id] != nil }) {
+                    HStack {
+                        Text("引用素材读取失败").foregroundColor(.orange)
+                        Button("重试") { context.captureReferenceImages(to: model) }
+                            .accessibilityIdentifier("agent-retry-canvas-references")
+                    }
                 }
             }
             if let error = context.error {
@@ -104,6 +106,86 @@ struct CanvasAgentComposer: View {
         }
         .sheet(isPresented: $showWorkflowSkills) {
             WorkflowSkillLibraryView(model: model, context: context)
+        }
+        .padding(.top, model.draftReferences.isEmpty ? 0 : 8)
+    }
+}
+
+private struct AgentCanvasReferenceChip: View {
+    let reference: AgentCanvasReference
+    let captureError: String?
+    let locate: () -> Void
+    let remove: () -> Void
+    @State private var hovering = false
+    @State private var preview = false
+    private var kind: AgentCanvasReference.MediaKind { reference.mediaKind ?? .text }
+    private var symbol: String {
+        switch kind {
+        case .video: return "play.rectangle"
+        case .audio: return "music.note"
+        default: return kind.symbol
+        }
+    }
+
+    var body: some View {
+        ZStack(alignment: .topTrailing) {
+            Button(action: locate) {
+                Image(systemName: symbol).font(.system(size: 16))
+                    .foregroundColor(TapSkin.secondaryInk)
+                    .frame(width: 34, height: 34)
+                    .background(hovering ? TapSkin.subtleFill : .clear, in: RoundedRectangle(cornerRadius: 9))
+                    .overlay(RoundedRectangle(cornerRadius: 9).stroke(TapSkin.secondaryInk.opacity(0.15)))
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel(kind.title + " · " + reference.title)
+            .accessibilityIdentifier("agent-canvas-reference-\(reference.id)")
+            Button(action: remove) {
+                Image(systemName: "xmark").font(.system(size: 9, weight: .semibold))
+                    .foregroundColor(TapSkin.onAccent)
+                    .frame(width: 16, height: 16).background(TapSkin.ink, in: Circle())
+            }.buttonStyle(.plain).offset(x: 5, y: -5)
+                .opacity(hovering ? 1 : 0)
+                .accessibilityLabel("移除引用 · " + reference.title)
+                .accessibilityIdentifier("agent-remove-reference-\(reference.id)")
+        }
+        .frame(width: 34, height: 34)
+        .accessibilityElement(children: .contain)
+        .onHover { value in hovering = value; preview = value }
+        .popover(isPresented: $preview, arrowEdge: .top) {
+            VStack(alignment: .leading, spacing: 8) {
+                ZStack {
+                    RoundedRectangle(cornerRadius: 12).fill(TapSkin.subtleFill)
+                    if let data = reference.previewImage ?? reference.images?.first?.imageSnapshot,
+                       let image = NSImage(data: data) {
+                        Image(nsImage: image).resizable().scaledToFit().padding(8)
+                    } else {
+                        Image(systemName: symbol).font(.system(size: 25))
+                            .foregroundColor(TapSkin.secondaryInk)
+                    }
+                }.frame(width: 144, height: 132)
+                HStack(spacing: 0) {
+                    Text(kind.title).font(.system(size: 12, weight: .medium))
+                }
+                    .accessibilityElement(children: .ignore)
+                    .accessibilityLabel(kind.title)
+                    .accessibilityIdentifier("agent-reference-preview-kind")
+                HStack(spacing: 0) {
+                    Text(reference.title).font(.system(size: 10)).lineLimit(2)
+                }
+                    .accessibilityElement(children: .ignore)
+                    .accessibilityLabel(reference.title)
+                    .accessibilityIdentifier("agent-reference-preview-title")
+                if let captureError {
+                    Text(captureError).font(.system(size: 10)).foregroundColor(.orange).lineLimit(3)
+                } else if kind == .image, reference.images?.isEmpty == false {
+                    Text("已读取图片快照").font(.system(size: 9)).foregroundColor(TapSkin.secondaryInk)
+                } else if kind == .audio || kind == .video {
+                    Text("引用名称与正文").font(.system(size: 9)).foregroundColor(TapSkin.secondaryInk)
+                }
+            }.padding(10).frame(width: 164)
+                .foregroundColor(TapSkin.ink).background(TapSkin.tone(0xffffff, 0x242424))
+                .accessibilityElement(children: .contain)
+                .accessibilityIdentifier("agent-reference-preview")
         }
     }
 }

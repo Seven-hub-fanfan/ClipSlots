@@ -61,7 +61,7 @@ func runAgentComposerLayoutProbe(directory: URL, check: (Bool, String) -> Void) 
                                 .accessibilityFrame?()
                         }
                         let label = "\(mode.rawValue)-\(skin.rawValue)-\(appearance)-\(Int(width))-\(count)"
-                        let skill = frame("agent-reference-skill"), polish = frame("agent-ai-polish")
+                        let skill = frame("agent-reference-skill"), context = frame("agent-context-usage")
                         let add = frame("agent-composer-add"), voice = frame("agent-voice-input")
                         let picker = frame("agent-model-picker")
                         let row = frame("agent-composer-toolbar")
@@ -70,10 +70,10 @@ func runAgentComposerLayoutProbe(directory: URL, check: (Bool, String) -> Void) 
                         }
                         if originalEditorFrame == nil { originalEditorFrame = editorFrame }
                         let aligned = add.map { s in
-                            polish.map { p in abs(s.midY - p.midY) < 2 && s.maxX < p.minX } ?? false
+                            context.map { p in abs(s.midY - p.midY) < 2 && s.maxX < p.minX } ?? false
                         } ?? false
                         let contentFrame = window.convertToScreen(host.frame)
-                        let inside = [add, polish, voice, picker, editorFrame].allSatisfy {
+                        let inside = [add, context, voice, picker, editorFrame].allSatisfy {
                             guard let f = $0 else { return false }
                             return f.minX >= contentFrame.minX - 2
                                 && f.maxX <= contentFrame.maxX + 2
@@ -95,7 +95,7 @@ func runAgentComposerLayoutProbe(directory: URL, check: (Bool, String) -> Void) 
                                          "insideWindow": inside, "editorStable": stable,
                                          "labelsAligned": labelsAligned,
                                          "skill": skill.map(NSStringFromRect) ?? "missing",
-                                         "polish": polish.map(NSStringFromRect) ?? "missing",
+                                         "context": context.map(NSStringFromRect) ?? "missing",
                                          "chip": chip.map(NSStringFromRect) ?? "none",
                                          "editor": editorFrame.map(NSStringFromRect) ?? "missing"])
                         if count == 4 && (width == 480 || (mode == .agent && width == 360)) {
@@ -110,7 +110,7 @@ func runAgentComposerLayoutProbe(directory: URL, check: (Bool, String) -> Void) 
             }
         }
     }
-    check(allAligned, "add and polish controls share the bottom row across widths and themes")
+    check(allAligned, "add and context controls share the bottom row across widths and themes")
     check(allInside, "composer controls stay within each tested window")
     check(allEditorStable, "adding Skill references does not move the editor vertically")
     check(allLabelsAligned, "selected Skill labels align with the Skills control in the reference row")

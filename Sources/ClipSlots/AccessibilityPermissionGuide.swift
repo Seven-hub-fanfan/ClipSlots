@@ -28,30 +28,23 @@ enum AccessibilityPermissionGuide {
             let model = PermissionCenter.model
             model.refresh()
             PermissionUpgradeState.shared.completeIfReady(model.authorized.count == AppPermission.allCases.count)
-            let formalInstall = Bundle.main.bundleIdentifier == PermissionRepairCoordinator.bundleIdentifier
-                && url.resolvingSymlinksInPath().path == "/Applications/ClipSlots.app"
-            if startAutomaticRepair(using: model, upgrade: .shared, isFormalInstall: formalInstall) { return }
-            if afterUpdate {
-                guard let missing = AppPermission.allCases.first(where: { !model.authorized.contains($0) }) else { return }
-                PermissionCenter.present(for: missing, afterUpdate: true)
-            } else if !model.authorized.contains(.accessibility) {
-                PermissionCenter.present(for: .accessibility)
-            }
+            guideAfterLaunch(using: model, afterUpdate: afterUpdate)
         }
     }
 
+    /// Launch and identity changes can offer guidance only. Reset, native
+    /// prompts and opening Settings require a subsequent explicit user action.
     @discardableResult
-    static func startAutomaticRepair(using model: PermissionCenterModel, upgrade: PermissionUpgradeState,
-                                     isFormalInstall: Bool,
-                                     presentGuide: (() -> Void)? = nil) -> Bool {
-        guard isFormalInstall, model.repairing == nil, !model.requestingScreenCapture else { return false }
+    static func guideAfterLaunch(using model: PermissionCenterModel, afterUpdate: Bool,
+                                 presentGuide: ((AppPermission, Bool) -> Void)? = nil) -> Bool {
+        guard model.repairing == nil, !model.requestingScreenCapture else { return false }
         model.refresh()
-        guard upgrade.consumeAutomaticAccessibilityRepair(
-            isAuthorized: model.authorized.contains(.accessibility)) else { return false }
-        if let presentGuide { presentGuide() }
-        else { PermissionCenter.present(for: .accessibility, afterUpdate: true) }
-        // The old flow only displayed the panel; this starts the scoped reset.
-        model.repair(.accessibility)
+        let missing = afterUpdate
+            ? AppPermission.allCases.first(where: { !model.authorized.contains($0) })
+            : (model.authorized.contains(.accessibility) ? nil : AppPermission.accessibility)
+        guard let missing else { return false }
+        if let presentGuide { presentGuide(missing, afterUpdate) }
+        else { PermissionCenter.present(for: missing, afterUpdate: afterUpdate) }
         return true
     }
 

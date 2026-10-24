@@ -57,6 +57,14 @@ extension CanvasWorkspaceView {
         func press(_ root: NSView, _ id: String) -> Bool {
             find(root, id)?.accessibilityPerformPress?() == true
         }
+        func pressPolish(_ root: NSView) async -> Bool {
+            guard press(root, "agent-composer-add") else { return false }
+            await settle()
+            guard let menu = NSApp.windows.compactMap(\.contentView).first(where: {
+                find($0, "agent-ai-polish") != nil
+            }) else { return false }
+            return press(menu, "agent-ai-polish")
+        }
         func editors(_ root: NSView) -> [AgentDraftEditor.Editor] {
             (root as? AgentDraftEditor.Editor).map { [$0] } ?? root.subviews.flatMap(editors)
         }
@@ -97,11 +105,11 @@ extension CanvasWorkspaceView {
                 model.draft = "请整理这段创作说明🙂\n保留 `--ratio 16:9`"
                 await settle(0.4)
                 let before = await backend.calls.count
-                check(find(host, "agent-ai-polish") != nil, "\(mode.rawValue) has accessible top-right polish button")
+                check(find(host, "agent-composer-add") != nil, "\(mode.rawValue) has accessible composer tools menu")
                 check(await backend.calls.count == before, "\(mode.rawValue) mounting and typing do not invoke model")
                 await backend.configure(delay: 0.55)
-                check(press(host, "agent-ai-polish"), "\(mode.rawValue) native polish button activates")
-                _ = press(host, "agent-ai-polish")
+                check(await pressPolish(host), "\(mode.rawValue) native tools menu activates polish")
+                model.polishDraft(config: AgentConfig(model: "fixture-selected-model"))
                 await settle(0.1)
                 let loadingCalls = await backend.calls.count
                 check(model.isPolishing && loadingCalls == before + 1, "\(mode.rawValue) loading prevents duplicate requests")
@@ -132,8 +140,8 @@ extension CanvasWorkspaceView {
                         NSApp.appearance = NSAppearance(named: appearance == "dark" ? .darkAqua : .aqua)
                         await settle()
                         capture(host, "agent-\(mode.rawValue)-\(skin)-\(appearance)")
-                        let frame = find(host, "agent-ai-polish")?.accessibilityFrame?() ?? .zero
-                        check(frame.width > 50 && hostWindow.frame.contains(frame), "\(mode.rawValue)/\(skin)/\(appearance) button within window")
+                        let frame = find(host, "agent-model-picker")?.accessibilityFrame?() ?? .zero
+                        check(frame.width >= 26 && hostWindow.frame.contains(frame), "\(mode.rawValue)/\(skin)/\(appearance) model button within window")
                     }
                 }
             }

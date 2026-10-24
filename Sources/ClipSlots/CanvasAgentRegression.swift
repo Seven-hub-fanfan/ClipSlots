@@ -17,7 +17,14 @@ func runCanvasAgentProbe(store: SlotStoreObservable, directory: URL, check: (Boo
         let group = try store.specialStorage.createSpecialSlot(name: "回填验证")
         var content = SlotContent(text: "海风拂过旧码头")
         content.htmlSource = "<b>海风拂过旧码头</b>"
-        content.attachments = [.init(name: "灯塔参考.png", type: .file, data: Data([7, 2, 5]))]
+        let bitmap = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: 4, pixelsHigh: 4,
+            bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
+            colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0)!
+        for x in 0..<4 { for y in 0..<4 {
+            bitmap.setColor(NSColor(calibratedRed: 0, green: 0, blue: 1, alpha: 1), atX: x, y: y)
+        } }
+        content.attachments = [.init(name: "灯塔参考.png", type: .file,
+                                    data: bitmap.representation(using: .png, properties: [:])!)]
         check(store.specialStorage.set(1, content: content, in: group.id), "canvas source fixture persisted")
         for slot in 1...4 {
             canvas.placeSlot(pageId: group.pageId, groupId: group.id, slot: slot, name: "测试\(slot)",
@@ -45,8 +52,20 @@ func runCanvasAgentProbe(store: SlotStoreObservable, directory: URL, check: (Boo
         model.draftReferences.removeAll { $0.id != node.id }
         canvas.selectedNodeIds = Set(canvas.nodes.map(\.id))
         context.addSelection(to: model)
-        check(model.draftReferences.count == 1 && context.error != nil, "reference limit rejects whole oversized selection")
+        check(model.draftReferences.count == 4 && context.error == nil, "four explicit references supported")
+        let originalReference = model.draftReferences.first!
+        model.draftReferences = (0..<AgentCanvasReference.maxReferences).map { index in
+            AgentCanvasReference(projectID: originalReference.projectID, nodeID: "limit-\(index)",
+                nodeCreatedAt: originalReference.nodeCreatedAt, groupID: originalReference.groupID,
+                slot: originalReference.slot, title: "limit", text: "", attachmentNames: [])
+        }
+        context.addSelection(to: model)
+        check(model.draftReferences.count == AgentCanvasReference.maxReferences && context.error != nil,
+              "reference limit rejects whole oversized selection")
+        model.draftReferences = [originalReference]
         canvas.selectedNodeIds = [node.id]
+        context.addSelection(to: model)
+        await settle()
         model.draft = "请改写为一段镜头描述"
         check(model.flushSession(), "canvas draft reference persisted")
         let draftID = model.selectedConversationID
@@ -54,7 +73,9 @@ func runCanvasAgentProbe(store: SlotStoreObservable, directory: URL, check: (Boo
         model.openConversation(id: draftID)
         check(model.draftReferences.count == 1 && !model.draft.isEmpty, "conversation restores its reference draft")
         model.selectAccessMode(.allDirectoriesReadOnly)
-        model.send(text: model.draft, config: AgentConfig(), enabledSkills: [])
+        var imageConfig = AgentConfig()
+        imageConfig.supportsImageInput = true
+        model.send(text: model.draft, config: imageConfig, enabledSkills: [])
         for _ in 0..<150 {
             if !model.isRunning { break }
             try? await Task.sleep(for: .milliseconds(20))
@@ -118,7 +139,7 @@ func runCanvasAgentProbe(store: SlotStoreObservable, directory: URL, check: (Boo
         context.dismissPreview()
         await settle()
         check(canvas.redo() != nil && store.canvasSlotText(groupId: group.id, slot: 1) == answer, "canvas redo reapplies result")
-        check(store.canvasSlotAttachments(groupId: group.id, slot: 1).first?.resolveData() == Data([7, 2, 5]),
+        check(store.canvasSlotAttachments(groupId: group.id, slot: 1).first?.resolveData() == content.attachments.first?.data,
               "apply undo redo preserves attachment bytes")
         // Body change after preview must refuse application; the target is independent of selection.
         context.prepare(text: "下一份结果", conversationID: model.selectedConversationID)
@@ -197,6 +218,7 @@ func runCanvasAgentProbe(store: SlotStoreObservable, directory: URL, check: (Boo
               "queued older snapshots cannot overwrite current-group apply")
         canvas.flushSave()
         await runCanvasAgentActionsProbe(store: store, directory: directory, check: check)
+        await runAgentSidebarParityProbe(store: store, directory: directory, check: check)
     } catch { check(false, "canvas loop exception: \(error.localizedDescription)") }
 }
 

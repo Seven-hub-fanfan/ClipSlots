@@ -38,11 +38,16 @@ final class CanvasAgentContext: ObservableObject {
     @Published var graphPreview: GraphPreview?
     @Published private(set) var error: String?
     @Published private(set) var status: String?
+    @Published private(set) var isLoadingReferences = false
+    @Published private(set) var referenceCaptureErrors: [String: String] = [:]
     private(set) weak var canvas: CanvasStore?
     private(set) weak var store: SlotStoreObservable?
     var operationHistoryIDs: [UUID: Set<String>] = [:]
     let projectID: String
     private var projectObserver: AnyCancellable?
+    private var selectionObserver: AnyCancellable?
+    private var referenceTask: Task<Void, Never>?
+    private var referenceTicket = UUID()
     var onLeaveProject: (() -> Void)?
 
     init(canvas: CanvasStore, store: SlotStoreObservable, projectID: String) {
@@ -60,6 +65,20 @@ final class CanvasAgentContext: ObservableObject {
     var isActive: Bool { canvas?.activeProjectId == projectID }
 
     func belongs(to canvas: CanvasStore) -> Bool { self.canvas === canvas }
+
+    func observeSelection(to model: AgentChatModel) {
+        selectionObserver?.cancel()
+        guard let canvas else { return }
+        selectionObserver = canvas.selectedNodesDidChange.prepend(canvas.selectedNodeIds).removeDuplicates()
+            .map { [weak model] ids in (ids, model?.selectedConversationID) }
+            .debounce(for: .milliseconds(80), scheduler: DispatchQueue.main)
+            .sink { [weak self, weak model] event in
+                let (ids, conversation) = event
+                guard let self, let model, self.isActive, !ids.isEmpty,
+                      model.selectedConversationID == conversation else { return }
+                self.addSelection(to: model)
+            }
+    }
 
     func captureTurn(supportsTools: Bool) throws -> CanvasAgentTurn {
         guard isActive, let canvas, let store else { throw AgentCanvasError.staleTarget }
@@ -121,74 +140,107 @@ final class CanvasAgentContext: ObservableObject {
             groupID: node.groupId, slot: node.slot,
             title: label.isEmpty ? path : "\(label) · \(path)",
             text: content.plainText ?? "", attachmentNames: content.attachments.map(\.name),
-            contentRevision: content.contentId)
+            contentRevision: content.contentId, mediaKind: Self.mediaKind(node, content: content))
+    }
+
+    private static func mediaKind(_ node: CanvasNode, content: SlotContent) -> AgentCanvasReference.MediaKind {
+        let attachment = content.attachments.first
+        let suffix = attachment.map { URL(fileURLWithPath: $0.name).pathExtension.lowercased() } ?? ""
+        if ["mp3", "wav", "m4a", "aac", "aiff", "ogg", "flac"].contains(suffix) { return .audio }
+        if node.kind == .video || ["mp4", "mov", "m4v", "webm"].contains(suffix) { return .video }
+        if node.kind == .image || attachment?.canvasIsImageLike == true { return .image }
+        return attachment == nil ? .text : .file
     }
 
     func addSelection(to model: AgentChatModel) {
         do {
             guard isActive, let canvas else { throw AgentCanvasError.staleTarget }
             let selected = canvas.nodes.filter { canvas.selectedNodeIds.contains($0.id) }
-            guard !selected.isEmpty else { error = "先在画布选择 1–3 个节点，再添加引用。"; return }
+            guard !selected.isEmpty else { error = "先在画布选择节点。"; return }
+            guard selected.count <= AgentCanvasReference.maxReferences else {
+                error = "每轮最多引用 \(AgentCanvasReference.maxReferences) 个节点，请缩小选择范围。"; return
+            }
             let snapshots = try selected.map { try reference(for: $0) }
-            let ids = Set(snapshots.map(\.id))
-            let next = model.draftReferences.filter { !ids.contains($0.id) } + snapshots
-            guard next.count <= 3 else { error = "每轮最多引用 3 个节点，请先移除部分引用。"; return }
-            guard next.reduce(0, { $0 + $1.text.utf8.count }) <= 96_000 else {
+            let existing = Dictionary(model.draftReferences.map { ($0.id, $0) }, uniquingKeysWith: { _, new in new })
+            let refreshed = snapshots.map { snapshot in
+                if let old = existing[snapshot.id], old.contentRevision == snapshot.contentRevision,
+                   old.mediaKind == snapshot.mediaKind, old.title == snapshot.title { return old }
+                return snapshot
+            }
+            let ids = Set(refreshed.map(\.id))
+            let next = model.draftReferences.filter { !ids.contains($0.id) } + refreshed
+            guard next.count <= AgentCanvasReference.maxReferences else {
+                error = "每轮最多引用 \(AgentCanvasReference.maxReferences) 个节点，请先移除部分引用。"; return
+            }
+            guard next.reduce(0, { $0 + $1.text.utf8.count }) <= AgentCanvasReference.maxTextBytes else {
                 error = "所选正文超过 96 KB，请减少引用或缩短正文。"; return
             }
             model.draftReferences = next
             error = nil
+            captureReferenceImages(to: model)
         } catch { self.error = error.localizedDescription }
     }
 
     func captureReferenceImages(to model: AgentChatModel) {
-        guard isActive, let store, !model.isImportingAttachments, !model.isRunning else { return }
+        guard isActive, let store else { return }
+        referenceTask?.cancel()
+        let ticket = UUID()
+        referenceTicket = ticket
         let references = model.draftReferences
         let conversation = model.selectedConversationID
+        isLoadingReferences = true
+        referenceCaptureErrors = [:]
         do {
-            let sources = try references.map { reference -> [SlotContent.SlotAttachment] in
+            let sources = try references.map { reference -> SlotContent.SlotAttachment? in
                 try validate(reference)
                 guard let content = store.canvasReadFullContent(groupId: reference.groupID, slot: reference.slot),
                       content.contentId == reference.contentRevision else { throw AgentCanvasError.conflict }
-                return content.attachments.filter {
-                    $0.type == .image || ["png", "jpg", "jpeg", "webp", "gif"]
-                        .contains(URL(fileURLWithPath: $0.name).pathExtension.lowercased())
-                }
+                return content.attachments.first
             }
-            model.isImportingAttachments = true
-            Task {
-                defer { model.isImportingAttachments = false }
-                do {
-                    let captured = try await Task.detached(priority: .userInitiated) {
-                        try sources.map { attachments in
-                            try attachments.map { attachment in
-                                if let bytes = attachment.data {
-                                    return try AgentAttachmentImport.captureImage(bytes, name: attachment.name)
-                                }
-                                guard let path = attachment.storagePath ?? attachment.path else {
-                                    throw AgentAttachmentImport.ImportError.unavailable
-                                }
-                                return try AgentAttachmentImport.captureImageFile(URL(fileURLWithPath: path), name: attachment.name)
-                            }
+            referenceTask = Task { [weak self, weak model] in
+                guard let self, let model else { return }
+                defer {
+                    if referenceTicket == ticket { isLoadingReferences = false; referenceTask = nil }
+                }
+                for (reference, source) in zip(references, sources) {
+                    guard !Task.isCancelled, isActive, referenceTicket == ticket,
+                          model.selectedConversationID == conversation else { return }
+                    guard let source else { continue }
+                    do {
+                        let image = await CanvasAttachmentThumbnails.load(source, maxPixel: 1280)
+                        try Task.checkCancellation()
+                        guard referenceTicket == ticket, model.selectedConversationID == conversation else { return }
+                        try validate(reference)
+                        guard store.canvasReadFullContent(groupId: reference.groupID, slot: reference.slot)?.contentId
+                                == reference.contentRevision else { throw AgentCanvasError.conflict }
+                        guard let index = model.draftReferences.firstIndex(where: {
+                            $0.id == reference.id && $0.contentRevision == reference.contentRevision
+                        }) else { continue }
+                        let bitmap = image?.cgImage(forProposedRect: nil, context: nil, hints: nil)
+                            .map(NSBitmapImageRep.init(cgImage:))
+                        let data = bitmap?.representation(using: .jpeg, properties: [.compressionFactor: 0.65])
+                        var images: [AgentAttachment]?
+                        if reference.mediaKind == .image {
+                            guard let data else { throw AgentAttachmentImport.ImportError.unavailable }
+                            images = [try AgentAttachmentImport.captureImage(data, name: source.name)]
                         }
-                    }.value
-                    guard isActive, model.selectedConversationID == conversation,
-                          model.draftReferences == references else { throw AgentCanvasError.staleTarget }
-                    for reference in references { try validate(reference) }
-                    try AgentAttachmentImport.validate(model.draftAttachments + captured.flatMap { $0 })
-                    guard captured.contains(where: { !$0.isEmpty }) else {
-                        throw AgentOperationError("引用节点没有可读取的静态图片。音视频目前仅提供附件名称。")
-                    }
-                    model.draftReferences = zip(references, captured).map { reference, images in
-                        AgentCanvasReference(projectID: reference.projectID, nodeID: reference.nodeID,
+                        let replacement = AgentCanvasReference(projectID: reference.projectID, nodeID: reference.nodeID,
                             nodeCreatedAt: reference.nodeCreatedAt, groupID: reference.groupID, slot: reference.slot,
                             title: reference.title, text: reference.text, attachmentNames: reference.attachmentNames,
-                            contentRevision: reference.contentRevision, images: images.isEmpty ? nil : images)
+                            contentRevision: reference.contentRevision, images: images, mediaKind: reference.mediaKind,
+                            previewImage: data)
+                        var proposed = model.draftReferences
+                        proposed[index] = replacement
+                        try AgentAttachmentImport.validate(model.draftAttachments + proposed.flatMap { $0.images ?? [] })
+                        model.draftReferences = proposed
+                    } catch is CancellationError { return }
+                    catch {
+                        guard referenceTicket == ticket, model.selectedConversationID == conversation else { return }
+                        referenceCaptureErrors[reference.id] = error.localizedDescription
                     }
-                    error = nil
-                } catch { self.error = error.localizedDescription }
+                }
             }
-        } catch { self.error = error.localizedDescription }
+        } catch { self.error = error.localizedDescription; isLoadingReferences = false }
     }
 
     private func validate(_ target: AgentCanvasReference) throws {
@@ -197,6 +249,10 @@ final class CanvasAgentContext: ObservableObject {
                   $0.id == target.nodeID && $0.createdAt == target.nodeCreatedAt
                   && $0.groupId == target.groupID && $0.slot == target.slot
               }) else { throw AgentCanvasError.staleTarget }
+    }
+
+    func validateReferences(_ references: [AgentCanvasReference]) throws {
+        for reference in references { try validate(reference) }
     }
 
     func locate(_ target: AgentCanvasReference) {
@@ -348,6 +404,13 @@ final class CanvasAgentContext: ObservableObject {
         pendingGraphPreviews = []
         status = nil
         error = nil
+    }
+
+    func cancelReferenceCapture() {
+        referenceTask?.cancel()
+        referenceTicket = UUID()
+        isLoadingReferences = false
+        referenceCaptureErrors = [:]
     }
 
     func pendingExternalConnectionCancelled(runID: String) {

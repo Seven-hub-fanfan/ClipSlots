@@ -79,7 +79,7 @@ public final class CanvasAgentActionTools: AgentToolExecuting, AgentCLICommandAu
             spec("canvas_group_nodes", permission + "将指定节点编组，保留节点内容和连线，支持撤销。",
                  ["node_ids": ids, "name": ["type": "string", "minLength": 1, "maxLength": 120],
                   "expected_graph_revision": string], ["node_ids", "name", "expected_graph_revision"]),
-            spec("canvas_delete_nodes", permission + "删除明确指定的节点和相关连线，可从画布历史撤销；不删除槽位库源文件。",
+            spec("canvas_delete_nodes", "始终由用户确认后删除明确指定的节点和相关连线，可从画布历史撤销；不删除槽位库源文件。",
                  ["node_ids": ids, "expected_graph_revision": string], ["node_ids", "expected_graph_revision"]),
             spec("canvas_undo", permission + "撤销指定的最近一次Agent画布操作；有后续操作时拒绝跳过。",
                  ["history_id": string], ["history_id"]),
@@ -105,7 +105,8 @@ public final class CanvasAgentActionTools: AgentToolExecuting, AgentCLICommandAu
                Set(ids).count != ids.count {
                 throw AgentOperationError("节点列表包含重复项，未排布。")
             }
-            if Self.writers.contains(call.name), !automaticApproval {
+            if AgentApprovalPolicy.requiresConfirmation(call.name, automatic: automaticApproval,
+                                                         reader: Self.readers.contains(call.name)) {
                 let decision = CanvasActionDecision()
                 let request = AgentInteraction(kind: .commandApproval, params: [
                     "command": .string(call.name), "reason": "修改当前画布",
@@ -118,6 +119,7 @@ public final class CanvasAgentActionTools: AgentToolExecuting, AgentCLICommandAu
                 defer { request.invalidate() }
                 while decision.value == nil && Date() < request.expiresAt {
                     try Task.checkCancellation()
+                    guard request.isPending else { break }
                     try await Task.sleep(for: .milliseconds(80))
                 }
                 guard decision.value == true else {

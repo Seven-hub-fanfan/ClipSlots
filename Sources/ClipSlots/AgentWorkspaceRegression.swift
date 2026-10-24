@@ -53,6 +53,17 @@ extension CanvasWorkspaceView {
             mainWindow.makeKeyAndOrderFront(nil)
             await settle(0.15)
         }
+        if ProcessInfo.processInfo.environment["CLIPSLOTS_AGENT_SIDEBAR_PAGES_PROBE"] == "1" {
+            let focused = mainWindow.isKeyWindow && NSApp.isActive
+            check(focused, "sidebar pages probe starts in the focused native candidate")
+            await runAgentSidebarPagesFixtureProbe(canvas: canvas, store: store, directory: directory, check: check)
+            let report: [String: Any] = ["passed": passed, "failures": failures, "desktopFocused": focused,
+                "scope": "Four themes, narrow and wide sidebar menus, actual native clicks and parsed model metadata"]
+            try? JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys])
+                .write(to: directory.appendingPathComponent("report.json"))
+            NSApp.terminate(nil)
+            return
+        }
         if ProcessInfo.processInfo.environment["CLIPSLOTS_BA_CANVAS_PROBE"] == "1" {
             await runByteArtistCanvasProbe(directory: directory, check: check)
             let report: [String: Any] = ["passed": passed, "failures": failures,

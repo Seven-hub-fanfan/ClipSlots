@@ -8,16 +8,16 @@ public enum AgentAccessMode: String, Codable, CaseIterable, Sendable {
     case selectedDirectories, allDirectoriesReadOnly, fullAccess
     public var title: String {
         switch self {
-        case .selectedDirectories: return "仅所选目录"
-        case .allDirectoriesReadOnly: return "全部目录 · 只读"
+        case .selectedDirectories: return "已选目录"
+        case .allDirectoriesReadOnly: return "全部目录（只读）"
         case .fullAccess: return "Full Access"
         }
     }
     public var detail: String {
         switch self {
-        case .selectedDirectories: return "只访问所选工作目录，写入前确认。"
-        case .allDirectoriesReadOnly: return "可读取 macOS 已允许访问的目录，禁止本地写入和业务修改工具。"
-        case .fullAccess: return "可读写 macOS 已允许访问的目录，文件写入自动执行。"
+        case .selectedDirectories: return "仅访问你明确选择的目录。"
+        case .allDirectoriesReadOnly: return "可读取全部系统允许的目录，新增全盘授权只允许读取。"
+        case .fullAccess: return "读写系统允许的目录；操作是否执行由审批模式决定。"
         }
     }
 }

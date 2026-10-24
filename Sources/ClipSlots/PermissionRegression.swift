@@ -229,70 +229,85 @@ enum PermissionRegression {
               "missing history is unknown, never evidence of stale permission")
         let suite = "com.clipslots.permission-test.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suite)!
+        defaults.set(Data("legacy".utf8), forKey: "PermissionUpgrade.repairEligibility.v1")
+        defaults.set(Data("legacy".utf8), forKey: "PermissionUpgrade.attemptedAXRepair.v1")
         let upgrade = PermissionUpgradeState(defaults: defaults)
+        func hasLegacyRepairIntent() -> Bool {
+            defaults.object(forKey: "PermissionUpgrade.repairEligibility.v1") != nil
+                || defaults.object(forKey: "PermissionUpgrade.attemptedAXRepair.v1") != nil
+        }
+        check(!hasLegacyRepairIntent(), "initialization removes legacy automatic repair intent")
         check(upgrade.observe(identity(), satisfiesPrevious: false) == .unknown && upgrade.pending == nil,
               "fresh install stores identity without creating repair intent")
-        check(!upgrade.consumeAutomaticAccessibilityRepair(isAuthorized: false),
-              "fresh install never automatically resets permission")
+        check(!hasLegacyRepairIntent(), "fresh install never creates automatic reset eligibility")
         check(upgrade.observe(identity(hash: "B"), satisfiesPrevious: false) == .migration && upgrade.pending != nil,
               "Finder replacement is detected from persisted previous identity")
-        check(!upgrade.consumeAutomaticAccessibilityRepair(isAuthorized: true),
-              "migration preserves effective accessibility permission")
-        check(upgrade.consumeAutomaticAccessibilityRepair(isAuthorized: false)
-                && !upgrade.consumeAutomaticAccessibilityRepair(isAuthorized: false),
-              "known migration consumes automatic AX repair exactly once")
+        check(!hasLegacyRepairIntent(), "known migration only records guidance, never reset intent")
         check(upgrade.consumeMigrationGuidance() && !upgrade.consumeMigrationGuidance(),
               "known migration shows automatic guidance once, respecting declined optional permission")
         _ = upgrade.observe(identity(hash: "B"), satisfiesPrevious: true)
         check(upgrade.pending != nil, "restart preserves known migration while permissions are still unavailable")
         check(!upgrade.consumeMigrationGuidance(), "same identity restart does not repeat the upgrade popup")
-        check(!PermissionUpgradeState(defaults: defaults).consumeAutomaticAccessibilityRepair(isAuthorized: false),
-              "restart preserves the automatic repair attempt even when permission remains denied")
+        _ = PermissionUpgradeState(defaults: defaults)
+        check(!hasLegacyRepairIntent(), "restart cannot revive automatic repair while permission remains denied")
         upgrade.completeIfReady(false)
         check(upgrade.pending != nil, "one missing permission preserves migration guidance")
         upgrade.completeIfReady(true)
         check(upgrade.pending == nil, "effective grants complete migration guidance")
         upgrade.recordInstalled(from: old, to: new, transition: .compatible)
         check(upgrade.pending == nil && upgrade.previous == old, "normal installer transition does not require reauthorization")
-        check(!upgrade.consumeAutomaticAccessibilityRepair(isAuthorized: false),
+        check(!hasLegacyRepairIntent(),
               "compatible update does not create automatic reset eligibility")
         _ = upgrade.observe(identity(hash: "rejected", signer: "other"), satisfiesPrevious: true)
-        check(!upgrade.consumeAutomaticAccessibilityRepair(isAuthorized: false),
+        check(!hasLegacyRepairIntent(),
               "rejected signer transition never clears authorization automatically")
 
-        // Exercise the same launch dispatcher, not just the eligibility flag.
+        // Exercise the actual launch dispatcher with a backend that records
+        // every destructive reset, prompt and Settings action.
         upgrade.recordInstalled(from: identity(), to: identity(hash: "C"), transition: .migration)
         fixture.grants = []
         model.refresh()
         let autoResets = fixture.resets.count, autoRequests = fixture.axRequests
-        let autoOpens = fixture.opens.count
-        var guideCount = 0
-        check(!AccessibilityPermissionGuide.startAutomaticRepair(using: model, upgrade: upgrade,
-                isFormalInstall: false, presentGuide: { guideCount += 1 }),
-              "isolated launch never consumes a real-install automatic repair")
-        check(AccessibilityPermissionGuide.startAutomaticRepair(using: model, upgrade: upgrade,
-                isFormalInstall: true, presentGuide: { guideCount += 1 }),
-              "migration launch starts automatic repair without a button click")
+        let autoOpens = fixture.opens.count, screenRequests = fixture.requests
+        var guides: [(AppPermission, Bool)] = []
+        check(AccessibilityPermissionGuide.guideAfterLaunch(using: model, afterUpdate: true,
+                presentGuide: { guides.append(($0, $1)) }),
+              "migration launch offers guidance for the missing permission")
         await settle()
-        check(fixture.resets.count == autoResets + 1 && fixture.resets.last == .accessibility
-                && fixture.axRequests == autoRequests + 1 && fixture.opens.count == autoOpens + 1
-                && fixture.opens.last == .accessibility && guideCount == 1,
-              "automatic launch clears AX only, requests it and opens its settings pane")
-        check(!AccessibilityPermissionGuide.startAutomaticRepair(using: model, upgrade: upgrade,
-                isFormalInstall: true, presentGuide: { guideCount += 1 }),
-              "activation cannot repeat automatic reset after request")
-        model.stopGuiding()
+        check(guides.count == 1 && guides[0].0 == .accessibility && guides[0].1,
+              "migration guidance identifies accessibility and update context")
+        check(fixture.resets.count == autoResets && fixture.axRequests == autoRequests
+                && fixture.requests == screenRequests && fixture.opens.count == autoOpens
+                && model.repairing == nil && model.repairNotice == nil,
+              "migration launch performs no reset, native prompt or Settings action")
+        let grantCases: [Set<AppPermission>] = [[], [.accessibility], [.screenCapture],
+                                               [.accessibility, .screenCapture]]
+        for grants in grantCases {
+            fixture.grants = grants
+            for afterUpdate in [false, true] {
+                let beforeGuides = guides.count
+                let offered = AccessibilityPermissionGuide.guideAfterLaunch(using: model, afterUpdate: afterUpdate,
+                    presentGuide: { guides.append(($0, $1)) })
+                let expected = afterUpdate
+                    ? AppPermission.allCases.first(where: { !grants.contains($0) })
+                    : (grants.contains(.accessibility) ? nil : .accessibility)
+                check(offered == (expected != nil) && guides.count == beforeGuides + (offered ? 1 : 0)
+                        && (!offered || guides.last?.0 == expected),
+                      "launch guidance follows actual grants \(grants) update=\(afterUpdate)")
+            }
+        }
         upgrade.recordInstalled(from: identity(), to: identity(hash: "D"), transition: .migration)
-        fixture.resetFailure = "automatic reset fixture failure"
-        let failedAutoResets = fixture.resets.count, failedAutoOpens = fixture.opens.count
-        _ = AccessibilityPermissionGuide.startAutomaticRepair(using: model, upgrade: upgrade,
-                isFormalInstall: true, presentGuide: {})
+        defaults.set(Data("D".utf8), forKey: "PermissionUpgrade.repairEligibility.v1")
+        let restarted = PermissionUpgradeState(defaults: defaults)
+        check(!hasLegacyRepairIntent() && restarted.pending != nil,
+              "legacy eligibility is removed on restart without losing migration guidance")
+        fixture.grants = []
+        fixture.resetFailure = "a reset must never be reached"
+        _ = AccessibilityPermissionGuide.guideAfterLaunch(using: model, afterUpdate: true, presentGuide: { _, _ in })
         await settle()
-        check(model.error == fixture.resetFailure && fixture.resets.count == failedAutoResets + 1
-                && fixture.opens.count == failedAutoOpens,
-              "automatic reset failure is visible and never falsely opens regrant")
-        check(!PermissionUpgradeState(defaults: defaults).consumeAutomaticAccessibilityRepair(isAuthorized: false),
-              "failed automatic reset never loops on next launch")
+        check(fixture.resets.count == autoResets && fixture.axRequests == autoRequests
+                && fixture.requests == screenRequests && fixture.opens.count == autoOpens && model.error == nil,
+              "repeated launch, denied grants and legacy flags never reach reset or authorization")
         fixture.resetFailure = nil
         model.stopGuiding()
         defaults.removePersistentDomain(forName: suite)

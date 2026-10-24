@@ -100,13 +100,17 @@ final class CanvasStore: ObservableObject {
     private var suppressedServerGroupLayouts = Set<String>()
     @Published private(set) var serverGroupLayoutStates: [String: CanvasServerGroupLayout.State] = [:]
     var selectedGroupID: String? { didSet { if selectedGroupID != oldValue { notifyGraphChange() } } }
+    let selectedNodesDidChange = PassthroughSubject<Set<String>, Never>()
     var selectedNodeIds: Set<String> = [] {
         didSet {
             if let id = selectedGroupID,
                groupMemberIDs(id) != selectedNodeIds {
                 selectedGroupID = nil
             }
-            if selectedNodeIds != oldValue { notifyGraphChange() }
+            if selectedNodeIds != oldValue {
+                selectedNodesDidChange.send(selectedNodeIds)
+                notifyGraphChange()
+            }
         }
     }
     /// 当前选中的连线（一次只选一条）。

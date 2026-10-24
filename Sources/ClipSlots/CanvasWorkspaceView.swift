@@ -2948,7 +2948,18 @@ extension CanvasWorkspaceView {
             // #endregion
         }
         func settle() async { try? await Task.sleep(for: .milliseconds(500)) }
-        guard let window = inputRouter.anchorView?.window else { return }
+        func complete() async {
+            try? JSONSerialization.data(withJSONObject: ["passed": passed, "failures": failures],
+                                        options: [.prettyPrinted, .sortedKeys])
+                .write(to: directory.appendingPathComponent("report.json"))
+            await settle()
+            NSApp.terminate(nil)
+        }
+        guard let window = inputRouter.anchorView?.window else {
+            check(false, "native input upload window is attached")
+            await complete()
+            return
+        }
         NSApp.activate(ignoringOtherApps: true)
         window.makeKeyAndOrderFront(nil)
         canvas.isLibraryExpanded = false
@@ -2956,6 +2967,13 @@ extension CanvasWorkspaceView {
         pan = CGSize(width: 80, height: 65)
         zoom = 0.8
         if ProcessInfo.processInfo.environment["CLIPSLOTS_MEDIA_ROLE_PROBE"] == "1" {
+            guard let fixture = ProcessInfo.processInfo.environment["CLIPSLOTS_CRATE_FIXTURE"],
+                  fixture.hasPrefix(directory.deletingLastPathComponent().path + "/"),
+                  FileManager.default.isExecutableFile(atPath: fixture) else {
+                check(false, "media role probe requires its own isolated mock Crate executable")
+                await complete()
+                return
+            }
             func click(_ rect: CGRect) async {
                 guard let anchor = inputRouter.anchorView else { return }
                 let point = anchor.convert(CGPoint(x: rect.midX, y: rect.midY), to: nil)
@@ -2976,7 +2994,12 @@ extension CanvasWorkspaceView {
             let request = AddNodeRequest(screenPoint: .zero, canvasPoint: CGPoint(x: 400, y: 250), parentNodeId: nil)
             addMenu = request
             handleAddNode(.image, request: request)
-            guard let source = canvas.soleSelectedNode else { return }
+            await menuCreationTask?.value
+            guard let source = canvas.soleSelectedNode else {
+                check(false, "asynchronous source image menu creation commits and selects its node")
+                await complete()
+                return
+            }
             await settle()
             check(source.isMediaSource && !source.canGenerate, "blank-menu image is persistent source")
             if let region = controlRegions["source-upload-\(source.id)"] {
@@ -3016,7 +3039,12 @@ extension CanvasWorkspaceView {
                                       parentNodeId: nil, parentNodeIds: [source.id])
             addMenu = next
             handleAddNode(.image, request: next)
-            guard let generated = canvas.soleSelectedNode else { return }
+            await menuCreationTask?.value
+            guard let generated = canvas.soleSelectedNode else {
+                check(false, "asynchronous connected image menu creation commits and selects its node")
+                await complete()
+                return
+            }
             check(generated.mediaRole == .generation && generated.canGenerate, "parent-array menu creates generation node")
             check(resolveEdgeInputs(for: generated).assetPaths.count == 1, "downstream receives uploaded source")
             check(importInputFiles([photo], to: generated, projectId: canvas.activeProjectId), "generation upload succeeds")
@@ -3059,7 +3087,12 @@ extension CanvasWorkspaceView {
             let videoRequest = AddNodeRequest(screenPoint: .zero, canvasPoint: CGPoint(x: 550, y: 600), parentNodeId: nil)
             addMenu = videoRequest
             handleAddNode(.video, request: videoRequest)
-            guard let sourceVideo = canvas.soleSelectedNode else { return }
+            await menuCreationTask?.value
+            guard let sourceVideo = canvas.soleSelectedNode else {
+                check(false, "asynchronous source video menu creation commits and selects its node")
+                await complete()
+                return
+            }
             check(sourceVideo.isMediaSource, "blank-menu video creates source")
             await settle()
             addInputFiles(sourceVideo)
@@ -3102,7 +3135,12 @@ extension CanvasWorkspaceView {
                                                  parentNodeId: nil, parentNodeIds: [parent])
                 addMenu = childRequest
                 handleAddNode(.video, request: childRequest)
-                let child = canvas.soleSelectedNode!
+                await menuCreationTask?.value
+                guard let child = canvas.soleSelectedNode else {
+                    check(false, "asynchronous linked video menu creation commits and selects its node")
+                    await complete()
+                    return
+                }
                 check(child.mediaRole == .generation, "media-linked menu creates video generation")
                 check(importInputFiles([photo, portrait], to: child, projectId: canvas.activeProjectId), "video generation accepts multiple input images")
                 check(previewableMedia(of: canvas.node(id: child.id)!) == nil, "video generation inputs stay outside preview")
@@ -3142,6 +3180,38 @@ extension CanvasWorkspaceView {
             _ = handlePaste()
             check(canvas.soleSelectedNode.map { liveAttachments(for: $0).count == 1 } == true,
                   "image URL paste retains its single stored reference")
+            if let source = NSImage(contentsOf: photo)?.cgImage(forProposedRect: nil, context: nil, hints: nil) {
+                let capture = AgentCaptureDocument(image: source, size: CGSize(width: source.width, height: source.height))
+                capture.selection = CGRect(x: 0, y: 0, width: source.width, height: source.height)
+                capture.marks = [capture.mark(.rectangle, points: [
+                    CGPoint(x: 10, y: 10), CGPoint(x: source.width - 10, y: source.height - 10)
+                ])]
+                let agent = AgentSessionStore().canvasSession(canvas: canvas, store: store)
+                agent.draftReferences = []
+                let beforePaste = Set(canvas.nodes.map(\.id))
+                pasteboard.clearContents()
+                pasteboard.setData(capture.renderPNG(), forType: .png)
+                check(handlePaste(), "annotated screenshot clipboard enters the actual canvas paste handler")
+                for _ in 0..<120 {
+                    if agent.draftReferences.count == 1 && agent.canvasContext?.isLoadingReferences == false { break }
+                    try? await Task.sleep(for: .milliseconds(25))
+                }
+                let added = canvas.nodes.filter { !beforePaste.contains($0.id) }
+                check(added.count == 1 && added[0].kind == .image && added[0].isMediaSource,
+                      "screenshot paste creates exactly one image source with the selected media ratio")
+                if let node = added.first, let bytes = liveAttachments(for: node).first?.resolveData(),
+                   let bitmap = NSBitmapImageRep(data: bytes) {
+                    let red = bitmap.colorAt(x: 20, y: 10)?.usingColorSpace(.deviceRGB)
+                    check(bitmap.pixelsWide == source.width && bitmap.pixelsHigh == source.height
+                          && (red?.redComponent ?? 0) > 0.8 && (red?.greenComponent ?? 1) < 0.35,
+                          "native bitmap paste stores flattened annotation pixels and original dimensions")
+                    check(agent.draftReferences.count == 1 && agent.draftReferences[0].nodeID == node.id
+                          && agent.draftReferences[0].mediaKind == .image
+                          && agent.draftReferences[0].images?.first?.imageSnapshot != nil,
+                          "pasted screenshot selected by canvas automatically appears as actual Agent image input")
+                } else { check(false, "pasted screenshot has decodable persisted image bytes") }
+                agent.stop()
+            } else { check(false, "screenshot paste fixture image is available") }
             pasteboard.clearContents()
             pasteboard.writeObjects(savedPasteboard)
             try? JSONSerialization.data(withJSONObject: ["passed": passed, "failures": failures], options: [.prettyPrinted, .sortedKeys])

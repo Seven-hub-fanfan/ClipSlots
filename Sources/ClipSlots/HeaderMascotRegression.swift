@@ -14,9 +14,21 @@ func runHeaderMascotProbe(root:NSView,directory:URL,check:(Bool,String)->Void) a
           "Mascot header uses enlarged transparent canvas")
     check(mascot.accessibilityIdentifier()=="header-ip-mascot","Mascot accessible native button")
     let scene=HeaderMascotScene()
-    check(scene.ready,"Mascot volumetric model and original laptop load")
+    check(scene.ready,"Mascot volumetric model and MacBook load")
     check(abs(scene.pixelsPerY-28.538486839707254)<0.00001 &&
           abs(scene.legPixels-10.308069221890811)<0.00001,"Mascot camera and leg projection use packaged source")
+    let headset=scene.head.childNodes.filter { ($0.name ?? "").hasPrefix("voice-airpodsmax-") }
+    check(headset.contains { $0.name=="voice-airpodsmax-earcup-left" } &&
+          headset.contains { $0.name=="voice-airpodsmax-earcup-right" },
+          "Mascot AirPods Max has two rounded aluminium earcups")
+    check(headset.contains { $0.name=="voice-airpodsmax-digital-crown" } &&
+          headset.contains { ($0.name ?? "").hasPrefix("voice-airpodsmax-knit-cross-") },
+          "Mascot AirPods Max has crown control and a knitted canopy")
+    _=scene.render(MascotPose(),size:208,activity:.voice)
+    check(headset.allSatisfy { !$0.isHidden && $0.parent===scene.head },
+          "Mascot headset shares the complete animated head transform")
+    _=scene.render(MascotPose(),size:208,activity:.idle)
+    check(headset.allSatisfy(\.isHidden),"Mascot headset keeps voice activity visibility")
     var poses:[(String,MascotPose,MascotMotion.Activity)]=[]
     let engine=MascotMotion();engine.legPixels=scene.legPixels
     poses.append(("idle",engine.sample(at:0),.idle))
@@ -60,7 +72,24 @@ func runHeaderMascotProbe(root:NSView,directory:URL,check:(Bool,String)->Void) a
                 let rep=scene.render(pose,size:208,activity:.idle)
                 check(rep != nil && scene.geometryInsideFrustum && scene.facialSurfaceValid,
                     "Mascot extreme yaw\(yaw) pitch\(pitch) blink\(blink) retains a valid face")
+                check(scene.neckAttachmentValid && scene.headBodyClearanceValid && scene.neckSurfaceValid,
+                    "Mascot extreme yaw\(yaw) pitch\(pitch) has a continuous neck and shoulder clearance")
             }
+        }
+    }
+    // Reproduce low/high pointer sweeps through full authored activity cycles.
+    // Assert the rendered deformation, not merely the input pose limits.
+    for activity in [MascotMotion.Activity.idle,.busy,.superBusy,.voice] {
+        for frame in 0..<12 {
+            var pose=MascotPose()
+            pose.yaw=65*sin(Double(frame) * .pi/6)
+            pose.pitch=30*cos(Double(frame) * .pi/6)
+            pose.activityFrame=frame*6;pose.activityProgress=0.5
+            pose.voiceLevel=frame%2==0 ? 0 : 1
+            let rep=scene.render(pose,size:104,activity:activity)
+            check(rep != nil && scene.neckAttachmentValid && scene.headBodyClearanceValid && scene.neckSurfaceValid &&
+                scene.geometryInsideFrustum && scene.facialSurfaceValid,
+                "Mascot \(activity.rawValue) low-head continuous sample \(frame) remains attached")
         }
     }
     var permissionReply: CheckedContinuation<Bool,Never>?

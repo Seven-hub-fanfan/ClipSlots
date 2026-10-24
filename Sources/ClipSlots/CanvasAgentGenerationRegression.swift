@@ -23,6 +23,7 @@ extension CanvasWorkspaceView {
         let backend = CanvasAgentGenerationFixtureBackend()
         model.setBackend(backend)
         model.selectAccessMode(.fullAccess)
+        model.selectAutomaticApproval(true)
         model.send(text: "新建灯塔图片和视频节点，连接后生成两张图片与一段视频。",
                    config: AgentConfig(), enabledSkills: [])
         for _ in 0..<600 where model.isRunning { try? await Task.sleep(for: .milliseconds(50)) }
@@ -62,6 +63,7 @@ extension CanvasWorkspaceView {
 
         model.clearHistory()
         model.selectAccessMode(.fullAccess)
+        model.selectAutomaticApproval(true)
         let failing = CanvasAgentGenerationFixtureBackend(failing: true)
         model.setBackend(failing)
         model.send(text: "生成一张用于验证服务失败状态的图片。", config: AgentConfig(), enabledSkills: [])

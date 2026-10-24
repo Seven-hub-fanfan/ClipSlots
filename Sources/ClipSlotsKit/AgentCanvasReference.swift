@@ -2,6 +2,29 @@ import Foundation
 
 /// Explicit, immutable input for a turn. Captured images are sent separately from reference metadata.
 public struct AgentCanvasReference: Codable, Equatable, Identifiable, Sendable {
+    public static let maxReferences = 20
+    public static let maxTextBytes = 96_000
+    public enum MediaKind: String, Codable, Sendable {
+        case text, image, video, audio, file
+        public var title: String {
+            switch self {
+            case .text: return "Text"
+            case .image: return "Image"
+            case .video: return "Video"
+            case .audio: return "Audio"
+            case .file: return "File"
+            }
+        }
+        public var symbol: String {
+            switch self {
+            case .text: return "text.alignleft"
+            case .image: return "photo"
+            case .video: return "video"
+            case .audio: return "waveform"
+            case .file: return "doc"
+            }
+        }
+    }
     public var id: String { nodeID }
     public let projectID: String
     public let nodeID: String
@@ -13,10 +36,13 @@ public struct AgentCanvasReference: Codable, Equatable, Identifiable, Sendable {
     public let attachmentNames: [String]
     public let contentRevision: String?
     public let images: [AgentAttachment]?
+    public let mediaKind: MediaKind?
+    /// Presentation only; never included in model context or counted as inspected media.
+    public let previewImage: Data?
 
     public init(projectID: String, nodeID: String, nodeCreatedAt: Date, groupID: String,
                 slot: Int, title: String, text: String, attachmentNames: [String], contentRevision: String? = nil,
-                images: [AgentAttachment]? = nil) {
+                images: [AgentAttachment]? = nil, mediaKind: MediaKind? = nil, previewImage: Data? = nil) {
         self.projectID = projectID
         self.nodeID = nodeID
         self.nodeCreatedAt = nodeCreatedAt
@@ -27,6 +53,8 @@ public struct AgentCanvasReference: Codable, Equatable, Identifiable, Sendable {
         self.attachmentNames = attachmentNames
         self.contentRevision = contentRevision
         self.images = images
+        self.mediaKind = mediaKind
+        self.previewImage = previewImage
     }
 }
 
