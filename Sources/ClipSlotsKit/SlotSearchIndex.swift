@@ -66,17 +66,13 @@ public enum SlotSearchIndex {
         let key = "content::\(content.contentId)::\(content.updatedAt)::\(content.searchCacheIdentity)::\(label)" as NSString
         if let cached = SlotSearchIndexCache.shared.object(forKey: key) { return cached as String }
         let built = buildContentHaystack(content: content, label: label)
-        SlotSearchIndexCache.shared.setObject(built as NSString, forKey: key)
+        SlotSearchIndexCache.shared.setObject(built as NSString, forKey: key, cost: built.utf8.count * 2)
         return built
     }
 
     /// GUI 用可搜索文本：内容侧文本 + 槽位号 + 「槽位 N」。
     public static func slotHaystack(slot: Int, content: SlotContent, label: String) -> String {
-        let key = "slot::\(slot)::\(content.contentId)::\(content.updatedAt)::\(content.searchCacheIdentity)::\(label)" as NSString
-        if let cached = SlotSearchIndexCache.shared.object(forKey: key) { return cached as String }
-        let built = "\(slot)\n槽位 \(slot)\n" + contentHaystack(content: content, label: label)
-        SlotSearchIndexCache.shared.setObject(built as NSString, forKey: key)
-        return built
+        "\(slot)\n槽位 \(slot)\n" + contentHaystack(content: content, label: label)
     }
 
     // MARK: - Private
@@ -120,9 +116,5 @@ public enum SlotSearchIndex {
 private enum SlotSearchIndexCache {
     /// 上限与 SlotContent 的 preview / plainText 缓存一致。key 带 updatedAt，改一次内容旧条目
     /// 自然被挤掉。
-    static let shared: NSCache<NSString, NSString> = {
-        let cache = NSCache<NSString, NSString>()
-        cache.countLimit = 800
-        return cache
-    }()
+    static let shared = ResourceCache<NSString>(category: .searchIndex, countLimit: 800)
 }

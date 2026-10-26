@@ -11,8 +11,27 @@ public struct AppConfig: Codable {
     /// UNDO-3 (v2.10.97): 每个槽位组保留的撤销/重做步数（设置面板「高级 → 操作历史」）。
     /// 合法范围 1~100，默认 10；写入时统一经 `SlotUndoStack.clampLimit` 夹取。
     public var undoSteps: Int = SlotUndoStack.defaultLimitPerGroup
+    public var cacheBudgetMiB: Int = 0
+    public var attachmentWarningCount: Int = 50
 
     public init() {}
+
+    enum CodingKeys: String, CodingKey {
+        case slots, verbose, saveKey, pasteKey, radialKey, hotkeyTemplate, undoSteps
+        case cacheBudgetMiB, attachmentWarningCount
+    }
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        slots = try c.decodeIfPresent(Int.self, forKey: .slots) ?? 10
+        verbose = try c.decodeIfPresent(Bool.self, forKey: .verbose) ?? true
+        saveKey = try c.decodeIfPresent(String.self, forKey: .saveKey) ?? "option+{n}"
+        pasteKey = try c.decodeIfPresent(String.self, forKey: .pasteKey) ?? "cmd+{n}"
+        radialKey = try c.decodeIfPresent(String.self, forKey: .radialKey) ?? "ctrl+space"
+        hotkeyTemplate = try c.decodeIfPresent(HotkeyTemplate.self, forKey: .hotkeyTemplate) ?? HotkeyTemplate(kind: .numeric)
+        undoSteps = try c.decodeIfPresent(Int.self, forKey: .undoSteps) ?? SlotUndoStack.defaultLimitPerGroup
+        cacheBudgetMiB = ResourceBudget.clampMiB(try c.decodeIfPresent(Int.self, forKey: .cacheBudgetMiB) ?? 0)
+        attachmentWarningCount = max(0, try c.decodeIfPresent(Int.self, forKey: .attachmentWarningCount) ?? 50)
+    }
 
     private static var configURL: URL {
         if let path = ProcessInfo.processInfo.environment["CLIPSLOTS_CONFIG_PATH"],
@@ -23,10 +42,9 @@ public struct AppConfig: Codable {
     }
 
     public static func load() -> AppConfig {
-        guard let content = try? String(contentsOf: Self.configURL, encoding: .utf8) else {
-            return AppConfig()
-        }
-        return parseTOML(content)
+        let config = (try? String(contentsOf: Self.configURL, encoding: .utf8)).map(parseTOML) ?? AppConfig()
+        ResourceBudget.shared.configure(cacheMiB: config.cacheBudgetMiB)
+        return config
     }
 
     public func save() {
@@ -47,6 +65,11 @@ public struct AppConfig: Codable {
             "# Undo/redo steps kept per slot group (1-100)",
             "undo_steps = \(undoSteps)",
             "",
+            "# Rebuildable memory cache budget in MiB (0 = automatic)",
+            "cache_budget_mib = \(ResourceBudget.clampMiB(cacheBudgetMiB))",
+            "# Manual attachment count reminder (0 = disabled; never a hard limit)",
+            "attachment_warning_count = \(max(0, attachmentWarningCount))",
+            "",
             "# Keybind configuration",
             "# Use {n} as placeholder for the slot number",
             "#",
@@ -65,6 +88,7 @@ public struct AppConfig: Codable {
         ]
         let content = lines.joined(separator: "\n") + "\n"
         try? content.write(to: Self.configURL, atomically: true, encoding: .utf8)
+        ResourceBudget.shared.configure(cacheMiB: cacheBudgetMiB)
     }
 
     private static func parseTOML(_ content: String) -> AppConfig {
@@ -109,6 +133,8 @@ public struct AppConfig: Codable {
                 if key == "slots", let v = Int(value) { config.slots = max(1, min(10, v)) }
                 else if key == "verbose" { config.verbose = value.lowercased() == "true" }
                 else if key == "undo_steps", let v = Int(value) { config.undoSteps = SlotUndoStack.clampLimit(v) }
+                else if key == "cache_budget_mib", let v = Int(value) { config.cacheBudgetMiB = ResourceBudget.clampMiB(v) }
+                else if key == "attachment_warning_count", let v = Int(value) { config.attachmentWarningCount = max(0, v) }
             }
         }
         return config

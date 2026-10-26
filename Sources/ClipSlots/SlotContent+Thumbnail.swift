@@ -160,19 +160,7 @@ extension SlotContent {
     /// re-render. Decoding once per content version and caching the result removes
     /// that repeated main-thread work. Keyed by the stable content identity so an
     /// overwrite (new contentId/updatedAt) still misses the cache.
-    private static let inlineImageCache: NSCache<NSString, NSImage> = {
-        let cache = NSCache<NSString, NSImage>()
-        // C-3 (v2.10.31): countLimit=64 alone let 64 decoded 8K images (~100MB+
-        // each once decompressed) accumulate to multiple GB and OOM on
-        // memory-constrained machines. Add a totalCostLimit sized in *decompressed*
-        // bytes and pass a per-image cost at every setObject. 512MB is a sane cap:
-        // it holds ~5 full-screen 8K images (8192×4320×4B ≈ 135MB) or many smaller
-        // thumbnails while bounding worst-case resident memory. countLimit stays as
-        // a secondary safety net for tiny-image floods.
-        cache.countLimit = 64
-        cache.totalCostLimit = 512 * 1024 * 1024 // 512 MB of decompressed pixels
-        return cache
-    }()
+    private static let inlineImageCache = ResourceCache<NSImage>(category: .inlineFull, countLimit: 64)
 
     // ATT-1 (v2.10.32): approximate decompressed byte cost of an NSImage, used as the
     // NSCache cost so totalCostLimit reflects real memory pressure.
@@ -246,12 +234,7 @@ extension SlotContent {
     // Full-res images stay in `inlineImageCache` (used only by the enlarge-preview
     // path); grid thumbnails live here. Each entry is tiny; bound by count + a small
     // cost limit as a safety net.
-    private static let inlineThumbnailCache: NSCache<NSString, NSImage> = {
-        let cache = NSCache<NSString, NSImage>()
-        cache.countLimit = 128
-        cache.totalCostLimit = 64 * 1024 * 1024 // 64 MB of small thumbnails
-        return cache
-    }()
+    private static let inlineThumbnailCache = ResourceCache<NSImage>(category: .inlineThumb, countLimit: 128)
 
     // ATT-1/ATT-2 (v2.10.32): decode a DOWNSAMPLED inline image (longest edge ≤
     // maxPixel) via ImageIO instead of the full-resolution `NSImage(data:)`. Used by
@@ -373,11 +356,7 @@ extension SlotContent {
     // count on *every* body evaluation, dropping frames while scrolling / switching
     // slots. Caching the finished string makes repeat reads O(1); an overwrite mints a
     // new identity and misses the cache, so the summary still refreshes correctly.
-    private static let metadataSummaryCache: NSCache<NSString, NSString> = {
-        let cache = NSCache<NSString, NSString>()
-        cache.countLimit = 128
-        return cache
-    }()
+    private static let metadataSummaryCache = ResourceCache<NSString>(category: .mediaMetadata, countLimit: 128)
 
     // MARK: - Cache Invalidation (v2.10.33, bug #1)
 

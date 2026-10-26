@@ -261,8 +261,17 @@ public struct SlotContent: Codable {
             return cached as String
         }
         let result = computedPreview
-        SlotContentPreviewCache.preview.setObject(result as NSString, forKey: key)
+        SlotContentPreviewCache.preview.setObject(result as NSString, forKey: key, cost: result.utf8.count * 2)
         return result
+    }
+
+    public func displayTextPreview(characters: Int) -> String? {
+        for list in items {
+            for item in list where item.type == "public.utf8-plain-text" || item.type == "NSStringPboardType" {
+                return TextPreview.prefix(item.data, characters: characters)
+            }
+        }
+        return nil
     }
 
     private var computedPreview: String {
@@ -271,10 +280,7 @@ public struct SlotContent: Codable {
                 if item.type == "public.utf8-plain-text" || item.type == "NSStringPboardType" {
                     // v2.8.7 (B): legacy NSStringPboardType is often UTF-16, so fall
                     // back to utf16 when utf8 decode fails, otherwise preview is empty.
-                    if let str = String(data: item.data, encoding: .utf8) ?? String(data: item.data, encoding: .utf16) {
-                        let t = str.trimmingCharacters(in: .whitespacesAndNewlines)
-                        return t.count > 30 ? String(t.prefix(30)) + "…" : t
-                    }
+                    if let summary = TextPreview.prefix(item.data) { return summary }
                 }
                 if item.type == "public.rtf" { return "[RTF]" }
                 if item.type == "public.html" {
@@ -282,19 +288,7 @@ public struct SlotContent: Codable {
                     // HTML slot looks exactly like a plain-text slot, instead of the
                     // bare "[HTML]" placeholder. A plain-text item, when present, is
                     // matched earlier in this loop and takes priority.
-                    if let str = String(data: item.data, encoding: .utf8) ?? String(data: item.data, encoding: .utf16) {
-                        let stripped = str
-                            .replacingOccurrences(of: "<[^>]+>", with: " ", options: .regularExpression)
-                            .replacingOccurrences(of: "&nbsp;", with: " ")
-                            .replacingOccurrences(of: "&lt;", with: "<")
-                            .replacingOccurrences(of: "&gt;", with: ">")
-                            .replacingOccurrences(of: "&amp;", with: "&")
-                            .replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
-                            .trimmingCharacters(in: .whitespacesAndNewlines)
-                        if !stripped.isEmpty {
-                            return stripped.count > 30 ? String(stripped.prefix(30)) + "…" : stripped
-                        }
-                    }
+                    if let summary = TextPreview.prefix(item.data, html: true), !summary.isEmpty { return summary }
                     return "[HTML]"
                 }
                 if item.type == "public.file-url" {
@@ -329,7 +323,8 @@ public struct SlotContent: Codable {
             return cached === SlotContentPreviewCache.missing ? nil : cached as String
         }
         let result = computedPlainText
-        SlotContentPreviewCache.plainText.setObject((result as NSString?) ?? SlotContentPreviewCache.missing, forKey: key)
+        SlotContentPreviewCache.plainText.setObject((result as NSString?) ?? SlotContentPreviewCache.missing,
+            forKey: key, cost: (result?.utf8.count ?? 0) * 2)
         return result
     }
 
@@ -338,7 +333,7 @@ public struct SlotContent: Codable {
             for item in itemList {
                 if item.type == "public.utf8-plain-text" || item.type == "NSStringPboardType" {
                     // v2.8.7 (B): legacy NSStringPboardType is often UTF-16.
-                    return String(data: item.data, encoding: .utf8) ?? String(data: item.data, encoding: .utf16)
+                    return TextPreview.decode(item.data)
                 }
             }
         }
@@ -347,16 +342,8 @@ public struct SlotContent: Codable {
 }
 
 private enum SlotContentPreviewCache {
-    static let preview: NSCache<NSString, NSString> = {
-        let cache = NSCache<NSString, NSString>()
-        cache.countLimit = 500
-        return cache
-    }()
-    static let plainText: NSCache<NSString, NSString> = {
-        let cache = NSCache<NSString, NSString>()
-        cache.countLimit = 500
-        return cache
-    }()
+    static let preview = ResourceCache<NSString>(category: .previewText, countLimit: 4096)
+    static let plainText = ResourceCache<NSString>(category: .plainText, countLimit: 500)
     static let missing = NSString(string: "\u{0}")
 }
 
@@ -682,19 +669,13 @@ extension SlotContent.SlotAttachment {
 /// 用 `NSCache` 承载（自动内存压力回收 + 容量上限），线程安全。
 final class AttachmentTextCache {
     static let shared = AttachmentTextCache()
-    private let cache = NSCache<NSString, NSString>()
-
-    private init() {
-        // 文本附件通常很小；限制条数与总字符数，避免异常大文本堆积。
-        cache.countLimit = 512
-        cache.totalCostLimit = 16 * 1024 * 1024 // 约 16MB 字符
-    }
+    private let cache = ResourceCache<NSString>(category: .attachmentText, countLimit: 512)
 
     func string(forKey key: String) -> String? {
         cache.object(forKey: key as NSString) as String?
     }
 
     func set(_ value: String, forKey key: String) {
-        cache.setObject(value as NSString, forKey: key as NSString, cost: value.utf8.count)
+        cache.setObject(value as NSString, forKey: key as NSString, cost: value.utf8.count * 2)
     }
 }

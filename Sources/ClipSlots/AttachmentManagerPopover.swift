@@ -191,7 +191,7 @@ struct AttachmentManagerPopover: View {
                 emptyState
             } else {
                 ScrollView {
-                    VStack(spacing: 8) {
+                    LazyVStack(spacing: 8) {
                         let items = attachments
                         ForEach(items, id: \.id) { att in
                             attachmentRow(for: att)
@@ -431,12 +431,35 @@ struct AttachmentManagerPopover: View {
                                              type: .reference, path: String(index))
         }
         inlineError = nil
+        guard appendManually([att]) else { return }
         withAnimation(Anim.transition) {
-            var current = attachments
-            current.append(att)
-            writeAttachments(current)
             inlineEditor = nil
         }
+    }
+
+    /// A modal can allow another editor/CLI to write. Merge additions with the
+    /// newest state AFTER the reminder returns, never a pre-alert list snapshot.
+    @discardableResult
+    private func appendManually(_ additions: [SlotContent.SlotAttachment]) -> Bool {
+        guard !additions.isEmpty else { return false }
+        let destinationGroup = groupId ?? store.currentSpecialSlotId
+        let threshold = store.config.attachmentWarningCount
+        let count = storedAttachments.count + additions.count
+        if threshold > 0, count > threshold {
+            let alert = NSAlert()
+            alert.messageText = "\(noun)将达到 \(count) 项"
+            alert.informativeText = "较多附件可能增加打开和预览时的负担。仍可继续添加；也可以分到其他槽位。"
+            alert.addButton(withTitle: "继续添加")
+            alert.addButton(withTitle: "取消")
+            guard alert.runModal() == .alertFirstButtonReturn else { return false }
+        }
+        guard destinationGroup == (groupId ?? store.currentSpecialSlotId),
+              store.canvasStorage(groupId: destinationGroup).getOrUnknown(slot, in: destinationGroup) != nil else {
+            store.transientUI.showToast("槽位正在更新，请稍后重新添加")
+            return false
+        }
+        writeAttachments(storedAttachments + additions)
+        return true
     }
 
     private func pickFile(imagesOnly: Bool) {
@@ -448,17 +471,15 @@ struct AttachmentManagerPopover: View {
             panel.allowedContentTypes = [.image]
         }
         guard panel.runModal() == .OK else { return }
-        var current = attachments
-        for url in panel.urls {
+        let additions = panel.urls.map { url in
             let type: SlotContent.AttachmentType = imagesOnly ? .image : .file
-            let att = SlotContent.SlotAttachment(
+            return SlotContent.SlotAttachment(
                 name: url.lastPathComponent,
                 type: type,
                 path: url.path
             )
-            current.append(att)
         }
-        writeAttachments(current)
+        appendManually(additions)
     }
 
     // v2.9.17: multi-select picker used by the dropzone (empty state + compact).
@@ -481,18 +502,11 @@ struct AttachmentManagerPopover: View {
     private func addFileURLs(_ urls: [URL]) {
         let fileURLs = urls.filter { $0.isFileURL }
         guard !fileURLs.isEmpty else { return }
-        withAnimation(Anim.transition) {
-            var current = attachments
-            for url in fileURLs {
-                let att = SlotContent.SlotAttachment(
-                    name: url.lastPathComponent,
-                    type: attachmentType(for: url),
-                    path: url.path
-                )
-                current.append(att)
-            }
-            writeAttachments(current)
+        let additions = fileURLs.map { url in
+            SlotContent.SlotAttachment(name: url.lastPathComponent,
+                type: attachmentType(for: url), path: url.path)
         }
+        appendManually(additions)
     }
 
     private func attachmentType(for url: URL) -> SlotContent.AttachmentType {
@@ -667,6 +681,7 @@ struct AttachmentRow: View {
     // v2.10.37: 断链本地文件引用的判定含磁盘 fileExists，若在 SwiftUI body 里同步调用，遇到
     // 断连的网络卷会阻塞主线程。改为后台异步计算一次，结果驱动角标 / 缩略图淡出。
     @State private var isBrokenRef = false
+    @State private var textSummary = ""
 
     var body: some View {
         HStack(spacing: 10) {
@@ -786,6 +801,13 @@ struct AttachmentRow: View {
         .offset(y: dragOffset)
         .contentShape(Rectangle())
         .background(WindowAnchorView(holder: anchor))
+        .task(id: attachment.canvasSourceIdentity) {
+            guard attachment.type == .text else { return }
+            let att = attachment
+            let summary = await Task.detached(priority: .utility) { att.textSummary() }.value
+            guard !Task.isCancelled else { return }
+            textSummary = summary
+        }
         .onHover { hovering in
             isHovered = hovering
             if hovering && !dragActive {
@@ -820,8 +842,7 @@ struct AttachmentRow: View {
         case .url:
             return attachment.url ?? ""
         case .text:
-            let text = attachment.resolveTextString() ?? ""
-            return String(text.prefix(30))
+            return textSummary
         case .reference:
             return attachment.path.map { "→ 槽位 \($0)" } ?? "引用"
         }
@@ -856,11 +877,17 @@ private struct AttachmentThumbnail: View {
         .frame(width: 32, height: 32)
         .task(id: attachment.canvasSourceIdentity) {
             image = nil
+            var previousVersion: String?
             while !Task.isCancelled {
-                let loaded = await CanvasAttachmentThumbnails.load(attachment, maxPixel: 64)
+                let version = await Task.detached(priority: .utility) { attachment.canvasSourceVersion }.value
                 guard !Task.isCancelled else { return }
-                if image !== loaded { image = loaded }
-                try? await Task.sleep(for: .seconds(2))
+                if version != previousVersion {
+                    let loaded = await CanvasAttachmentThumbnails.load(attachment, maxPixel: 64)
+                    guard !Task.isCancelled else { return }
+                    image = loaded
+                    previousVersion = version
+                }
+                try? await Task.sleep(for: .seconds(ResourceBudget.shared.refreshInterval))
             }
         }
     }
@@ -937,7 +964,8 @@ enum AttachmentThumbnailProvider {
         let candidates = [att.storageFileURL, att.path.flatMap { $0.isEmpty ? nil : URL(fileURLWithPath: $0) }].compactMap { $0 }
         for url in candidates where FileManager.default.fileExists(atPath: url.path) {
             if att.canvasIsVideoLike {
-                if let frame = VideoThumbnailProvider.thumbnail(forFile: url.path, fileName: att.name) { return frame }
+                if let frame = VideoThumbnailProvider.thumbnail(forFile: url.path, fileName: att.name,
+                                                                maxPixel: maxPixel) { return frame }
             } else if let image = downsampledThumbnail(path: url.path, maxPixel: maxPixel) {
                 return image
             }
@@ -1131,9 +1159,11 @@ private struct AsyncPreviewImage<Fallback: View>: View {
             // main thread instead of the full-resolution bitmap. This bounds per-hover
             // memory and keeps fast scrubbing from stacking multiple full-size buffers.
             if Task.isCancelled { return }
-            let img = await Task.detached(priority: .userInitiated) {
-                AttachmentThumbnailProvider.previewImage(for: att, maxPixel: 640)
-            }.value
+            let img = await ThumbnailDecodeLimiter.shared.run {
+                await Task.detached(priority: .userInitiated) {
+                    AttachmentThumbnailProvider.previewImage(for: att, maxPixel: 640)
+                }.value
+            }
             if !Task.isCancelled {
                 image = img
                 loaded = true

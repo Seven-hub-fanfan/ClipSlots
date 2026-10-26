@@ -85,6 +85,8 @@ private func coldStorage(forGroup gid: String) -> SlotStorage {
 
 let t = TestRunner()
 
+runResourceBudgetTests(t)
+if CommandLine.arguments.contains("--resource-budget-only") { t.report() }
 runSearchSnapshotTests(t)
 if CommandLine.arguments.contains("--search-snapshot-only") { t.report() }
 

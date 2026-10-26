@@ -14,6 +14,7 @@ struct SlotThumbnailView: View {
     // v2.10.73 (方案③): 观察共享的、以 key 为维度的缩略图缓存（单一数据源）。
     // 本视图的渲染是 `currentKey` 的纯函数：读到什么就画什么，不再持有各自的解码态。
     @ObservedObject private var provider = ThumbnailProvider.shared
+    @State private var retainedKey: String?
 
     /// The composite key that uniquely identifies this slot version.
     /// When any dimension changes (special slot, slot number, content, or overwrite),
@@ -107,15 +108,19 @@ struct SlotThumbnailView: View {
         .clipped()
         // v2.10.73 (方案③): 去掉 `.id(currentKey)`——不再靠内部整格重建强刷缩略图；
         // 刷新改由「currentKey 变化 → 读取新 key → provider 状态驱动重渲染」保证。
-        .onAppear { loadIfNeeded() }
-        .onChange(of: currentKey) { _ in loadIfNeeded() }
+        .onAppear { retainCurrentPreview(); loadIfNeeded() }
+        .onChange(of: currentKey) { _ in retainCurrentPreview(); loadIfNeeded() }
+        .onDisappear {
+            if let retainedKey { provider.releaseVisible(retainedKey) }
+            retainedKey = nil
+        }
         // v2.10.86: 触发解码的第三道保险。卡片身份是 `.id(slot)`（v2.10.73 起为了切组流畅而复用
         // 卡片），所以切组时 `onAppear` 不会再触发，全靠 `onChange(of: currentKey)` 这一个钩子；
         // 一旦它在某个更新时序里没被触发（或触发时状态已被别的路径改写），槽位就会永久停在占位图，
         // 只能靠切走再切回自愈——正是本次回归的表现。`.task(id:)` 与 onChange 相互独立：它在视图
         // 出现以及 id 变化时都会重新执行，且执行点在当轮更新之外。
         // load() 内部对「已缓存 / 正在解码 / 已知失败」都会直接返回，因此重复调用零成本、不会重复解码。
-        .task(id: currentKey) { loadIfNeeded() }
+        .task(id: currentKey) { retainCurrentPreview(); loadIfNeeded() }
     }
 
     // MARK: - Subviews
@@ -176,9 +181,7 @@ struct SlotThumbnailView: View {
     // v2.9.25 hotfix3: 卡片文本预览专用的多行文本源。content.preview 会被上游截断为 30 字符，
     // 只能显示约 2 行；这里用 plainText 全文（截到 240 字符足够铺满 4 行），非纯文本槽回退到 preview。
     private var multilinePreview: String {
-        if let text = content.plainText?.trimmingCharacters(in: .whitespacesAndNewlines), !text.isEmpty {
-            return text.count > 240 ? String(text.prefix(240)) + "…" : text
-        }
+        if let text = content.displayTextPreview(characters: 240), !text.isEmpty { return text }
         return content.preview
     }
 
@@ -208,6 +211,12 @@ struct SlotThumbnailView: View {
     private func loadIfNeeded() {
         guard provider.image(for: currentKey) == nil else { return }
         provider.load(key: currentKey, content: content, specialSlotId: specialSlotId, slot: slot)
+    }
+    private func retainCurrentPreview() {
+        guard retainedKey != currentKey else { return }
+        if let retainedKey { provider.releaseVisible(retainedKey) }
+        retainedKey = currentKey
+        provider.retainVisible(currentKey)
     }
 }
 

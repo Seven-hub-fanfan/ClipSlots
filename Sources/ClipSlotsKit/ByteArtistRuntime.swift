@@ -1,7 +1,8 @@
 import Foundation
 
 public enum GenerationProcessBudget {
-    public static let shared = AsyncWorkLimiter(limit: 4)
+    public static let shared = AsyncWorkLimiter(limit: 4,
+        currentLimit: { ResourceBudget.shared.decodeConcurrency * 2 })
 }
 
 public struct ByteArtistRuntime: Sendable {

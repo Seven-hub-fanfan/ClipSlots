@@ -277,16 +277,11 @@ enum ScreenshotWindowHider {
 final class ManualThumbnailCache: ObservableObject {
     static let shared = ManualThumbnailCache()
 
-    private let cache = NSCache<NSString, NSImage>()
+    private let cache = ResourceCache<NSImage>(category: .manualThumb, countLimit: 64)
     /// 正在解码中的 id，避免同一张图被多个视图重复排队解码。
     private var inFlight: Set<String> = []
 
-    private init() {
-        // 手动缩略图最长边 1024 → 解压后约 4MB/张；上限 64MB 够放十几张，
-        // 超出后 NSCache 自行按 LRU 驱逐（内存告警时也会自动清空）。
-        cache.totalCostLimit = 64 * 1024 * 1024
-        cache.countLimit = 64
-    }
+    private init() {}
 
     func cachedImage(id: String) -> NSImage? {
         cache.object(forKey: id as NSString)
@@ -298,10 +293,14 @@ final class ManualThumbnailCache: ObservableObject {
         guard !inFlight.contains(id) else { return nil }
         inFlight.insert(id)
 
-        Task.detached(priority: .userInitiated) {
+        Task {
             // 轮盘扇区最大 56pt（Retina 下 112px），解到 256 已远超所需，
             // 顺带覆盖 hover 放大等场景，仍比原图小一个数量级。
-            let image = ClipSlotsImageIO.downsampledImage(url: url, maxPixel: 256)
+            let image = await ThumbnailDecodeLimiter.shared.run {
+                await Task.detached(priority: .userInitiated) {
+                    ClipSlotsImageIO.downsampledImage(url: url, maxPixel: 256)
+                }.value
+            }
             await MainActor.run {
                 self.inFlight.remove(id)
                 guard let image else { return }

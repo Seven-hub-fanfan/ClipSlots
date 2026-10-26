@@ -6,6 +6,16 @@ import ClipSlotsKit
 extension CanvasWorkspaceView {
     @MainActor
     func runBatchGenerationProbe(directory: URL) async {
+        guard let fixture = ProcessInfo.processInfo.environment["CLIPSLOTS_CRATE_FIXTURE"],
+              FileManager.default.isExecutableFile(atPath: fixture),
+              (try? CrateGenerationService.shared.resolveBinary()) == fixture else {
+            let report: [String: Any] = ["passed": 0,
+                "failures": ["Batch probe requires an explicit executable local CLI fixture; stopped before submission."]]
+            try? JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted])
+                .write(to: directory.appendingPathComponent("report.json"))
+            NSApp.terminate(nil)
+            return
+        }
         var passed = 0, failures: [String] = []
         func check(_ value: Bool, _ name: String) {
             if value { passed += 1 } else { failures.append(name) }
@@ -75,13 +85,7 @@ extension CanvasWorkspaceView {
             catalog.loadIfNeeded()
             await controller.loadLibrary(store: store)
             check(await wait { !catalog.imageModels.isEmpty }, "catalog from fixture")
-            _ = await AgentProcessRunner.run(executable: "/usr/bin/swift", arguments: ["-e", """
-                import ApplicationServices
-                let app = AXUIElementCreateApplication(pid_t(CommandLine.arguments[1])!)
-                print(AXUIElementSetAttributeValue(app, "AXEnhancedUserInterface" as CFString, kCFBooleanTrue).rawValue)
-                var windows: CFTypeRef?
-                print(AXUIElementCopyAttributeValue(app, kAXWindowsAttribute as CFString, &windows).rawValue)
-                """, String(ProcessInfo.processInfo.processIdentifier)], timeout: 15)
+            NativeAccessibilityProbe.enable()
             await settle()
             guard let window = inputRouter.anchorView?.window, let root = window.contentView else {
                 throw CocoaError(.coderInvalidValue)

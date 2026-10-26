@@ -28,12 +28,29 @@ final class ThumbnailProvider: ObservableObject {
     static let shared = ThumbnailProvider()
 
     private let lock = NSLock()
-    private var cache: [String: NSImage] = [:]
-    // P2-15 (v2.10.6): cache 此前无上限，文件类槽位很多时内存持续增长。改为 LRU：
-    // accessOrder 记录访问顺序（末尾 = 最近使用），超过 maxCacheCount 时淘汰最旧项。
-    // 所有 cache/accessOrder 变更均在既有 lock（NSLock）保护下进行，保持顺序一致。
-    private var accessOrder: [String] = []
-    private let maxCacheCount = 200
+    private let cache = ResourceCache<NSImage>(category: .mainThumb, countLimit: 200)
+    // Visible views own their current images separately from the rebuildable cache.
+    // Cache pressure must never turn an already visible preview into a placeholder.
+    private var visibleCounts: [String: Int] = [:]
+    private var visibleImages: [String: NSImage] = [:]
+    private var decodeTasks: [String: Task<Void, Never>] = [:]
+    private var decodeTokens: [String: UUID] = [:]
+    func retainVisible(_ key: String) {
+        lock.lock(); defer { lock.unlock() }
+        visibleCounts[key, default: 0] += 1
+        if let image = cache.object(forKey: key) { visibleImages[key] = image }
+    }
+    func releaseVisible(_ key: String) {
+        lock.lock(); defer { lock.unlock() }
+        let count = max(0, visibleCounts[key, default: 0] - 1)
+        if count == 0 {
+            visibleCounts.removeValue(forKey: key); visibleImages.removeValue(forKey: key)
+            decodeTasks.removeValue(forKey: key)?.cancel()
+            decodeTokens.removeValue(forKey: key)
+            inFlight.remove(key)
+        }
+        else { visibleCounts[key] = count }
+    }
 
     // v2.10.73 (方案③): 以 key 为维度的「进行中 / 失败」态。
     // - loaded：`cache[key] != nil`（命中即已解码）。
@@ -91,6 +108,7 @@ final class ThumbnailProvider: ObservableObject {
     private var scaleResolved = false
 
     private init() {
+        _ = ResourceRuntime.shared
         let apply: () -> Void = { [weak self] in
             guard let self = self else { return }
             let scale = NSScreen.main?.backingScaleFactor ?? 2.0
@@ -143,8 +161,7 @@ final class ThumbnailProvider: ObservableObject {
     ) {
         // Fast path: cache hit
         lock.lock()
-        if let cached = cache[cacheKey] {
-            markAccessedLocked(cacheKey)  // P2-15 (v2.10.6): 命中后更新 LRU 访问顺序
+        if let cached = cache.object(forKey: cacheKey) {
             lock.unlock()
             DispatchQueue.main.async { completion(cached, cacheKey) }
             return
@@ -211,9 +228,7 @@ final class ThumbnailProvider: ObservableObject {
 
             self.lock.lock()
             if let image = image {
-                self.cache[cacheKey] = image
-                self.markAccessedLocked(cacheKey)  // P2-15 (v2.10.6): 记录访问顺序
-                self.evictIfNeededLocked()          // P2-15 (v2.10.6): 超上限淘汰最旧项
+                self.cache.setObject(image, forKey: cacheKey, cost: ClipSlotsImageIO.pixelCost(of: image))
             }
             let completions = self.pendingCompletions.removeValue(forKey: cacheKey) ?? []
             self.pendingGeneration.removeValue(forKey: cacheKey)  // P2-7 (v2.10.16): 正常完成，清理本次代次记录
@@ -233,8 +248,7 @@ final class ThumbnailProvider: ObservableObject {
     /// 同步查询：命中缓存返回已解码图片，否则 nil。供视图 body 直接读取（主线程）。
     func image(for key: String) -> NSImage? {
         lock.lock(); defer { lock.unlock() }
-        if let img = cache[key] {
-            markAccessedLocked(key)  // 命中即视为最近使用，更新 LRU
+        if let img = visibleImages[key] ?? cache.object(forKey: key) {
             return img
         }
         return nil
@@ -243,8 +257,7 @@ final class ThumbnailProvider: ObservableObject {
     /// 同步查询该 key 的渲染状态：loaded(命中缓存) / loading(解码中) / failed(失败) / idle(未触发)。
     func state(for key: String) -> ThumbnailState {
         lock.lock(); defer { lock.unlock() }
-        if let img = cache[key] {
-            markAccessedLocked(key)
+        if let img = visibleImages[key] ?? cache.object(forKey: key) {
             return .loaded(img)
         }
         if inFlight.contains(key) { return .loading }
@@ -259,7 +272,7 @@ final class ThumbnailProvider: ObservableObject {
     ///   自己的 key，不会污染当前视图，故无需 per-view token 守卫。
     func load(key: String, content: SlotContent, specialSlotId: String, slot: Int) {
         lock.lock()
-        if cache[key] != nil || inFlight.contains(key) || failedKeys.contains(key) {
+        if visibleImages[key] != nil || cache.object(forKey: key) != nil || inFlight.contains(key) || failedKeys.contains(key) {
             lock.unlock()
             return
         }
@@ -280,7 +293,9 @@ final class ThumbnailProvider: ObservableObject {
         if let manualId = content.manualThumbnailId, !manualId.isEmpty,
            let manualURL = SpecialSlotStorage.storage(forGroupId: specialSlotId)
                .manualThumbnailURL(slot, in: specialSlotId) {
-            Task {
+            startDecode(key: key, onMissing: {
+                self.loadAutomatic(key: key, content: content, specialSlotId: specialSlotId, slot: slot)
+            }) { () -> NSImage? in
                 let decoded = await ThumbnailDecodeLimiter.shared.run {
                     await Task.detached(priority: .userInitiated) { () -> NSImage? in
                         // 与内联图片同样的 512px 降采样档位：卡片主预览区最大也就这个量级，
@@ -288,15 +303,14 @@ final class ThumbnailProvider: ObservableObject {
                         ClipSlotsImageIO.downsampledImage(url: manualURL, maxPixel: 512)
                     }.value
                 }
+                guard !Task.isCancelled else { return nil }
                 if decoded == nil {
                     // 极少数情况：文件存在但解不出（写入中断 / 被外部替换成损坏字节）。
                     // 不静默留白，落回自动缩略图逻辑，用户至少还能看到内容本身的预览。
                     NSLog("[ClipSlots] ThumbnailProvider: manual thumbnail \(manualId) failed to decode for "
                         + "\(specialSlotId)#\(slot); falling back to the automatic thumbnail")
-                    self.loadAutomatic(key: key, content: content, specialSlotId: specialSlotId, slot: slot)
-                } else {
-                    self.finish(key: key, image: decoded)
                 }
+                return decoded
             }
             return
         }
@@ -318,13 +332,13 @@ final class ThumbnailProvider: ObservableObject {
         // 避免一屏图片卡同时触发数百次全分辨率 ImageIO 解码而卡主线程（沿用原 SlotThumbnailView 逻辑）。
         if content.hasRenderableInlineImage {
             let snapshot = content
-            Task {
+            startDecode(key: key) {
                 let decoded = await ThumbnailDecodeLimiter.shared.run {
                     await Task.detached(priority: .userInitiated) { () -> NSImage? in
-                        snapshot.decodedInlineThumbnail(maxPixel: 512) ?? snapshot.decodedInlineImage()
+                        snapshot.decodedInlineThumbnail(maxPixel: 512)
                     }.value
                 }
-                self.finish(key: key, image: decoded)
+                return decoded
             }
             return
         }
@@ -346,6 +360,29 @@ final class ThumbnailProvider: ObservableObject {
         }
     }
 
+    private func startDecode(key: String, onMissing: (() -> Void)? = nil,
+                             operation: @escaping @Sendable () async -> NSImage?) {
+        let token = UUID()
+        lock.lock()
+        decodeTokens[key] = token
+        let task = Task {
+            let image = await operation()
+            self.lock.lock()
+            let isCurrent = self.decodeTokens[key] == token
+            if isCurrent {
+                self.decodeTasks.removeValue(forKey: key)
+                self.decodeTokens.removeValue(forKey: key)
+            }
+            self.lock.unlock()
+            guard isCurrent, !Task.isCancelled else { return }
+            if image == nil, let onMissing { onMissing(); return }
+            self.finish(key: key, image: image)
+        }
+        decodeTasks[key]?.cancel()
+        decodeTasks[key] = task
+        lock.unlock()
+    }
+
     /// 解码收尾：清 in-flight，写入缓存（成功）或记录失败态，然后发出合并后的变更通知。
     ///
     /// PERF-2 (v2.10.84): 此前本方法整体（含缓存写入）被 hop 到主线程执行，并在每次完成时无条件
@@ -362,9 +399,8 @@ final class ThumbnailProvider: ObservableObject {
         lock.lock()
         inFlight.remove(key)
         if let image = image {
-            cache[key] = image
-            markAccessedLocked(key)  // P2-15: 记录访问顺序
-            evictIfNeededLocked()     // P2-15: 超上限淘汰最旧项
+            cache.setObject(image, forKey: key, cost: ClipSlotsImageIO.pixelCost(of: image))
+            if visibleCounts[key, default: 0] > 0 { visibleImages[key] = image }
             failedKeys.remove(key)
         } else {
             failedKeys.insert(key)   // 记录失败，避免无限重试
@@ -472,8 +508,11 @@ final class ThumbnailProvider: ObservableObject {
     func invalidateSlot(specialSlotId: String, slot: Int) {
         let prefix = "\(specialSlotId)::\(slot)::"
         lock.lock()
-        cache = cache.filter { !$0.key.hasPrefix(prefix) }
-        accessOrder.removeAll { $0.hasPrefix(prefix) }  // P2-15 (v2.10.6): 同步剔除访问顺序
+        cache.remove { ($0.base as? String)?.hasPrefix(prefix) == true }
+        visibleImages = visibleImages.filter { !$0.key.hasPrefix(prefix) }
+        for key in Array(decodeTasks.keys) where key.hasPrefix(prefix) {
+            decodeTasks.removeValue(forKey: key)?.cancel(); decodeTokens.removeValue(forKey: key)
+        }
         // v2.10.3 (P1 fix): fire (not drop) queued completions for invalidated keys,
         // otherwise callers awaiting a thumbnail hang forever (leaking spinners/tasks).
         let dropped = pendingCompletions.filter { $0.key.hasPrefix(prefix) }
@@ -491,8 +530,11 @@ final class ThumbnailProvider: ObservableObject {
     func invalidateSpecialSlot(specialSlotId: String) {
         let prefix = "\(specialSlotId)::"
         lock.lock()
-        cache = cache.filter { !$0.key.hasPrefix(prefix) }
-        accessOrder.removeAll { $0.hasPrefix(prefix) }  // P2-15 (v2.10.6): 同步剔除访问顺序
+        cache.remove { ($0.base as? String)?.hasPrefix(prefix) == true }
+        visibleImages = visibleImages.filter { !$0.key.hasPrefix(prefix) }
+        for key in Array(decodeTasks.keys) where key.hasPrefix(prefix) {
+            decodeTasks.removeValue(forKey: key)?.cancel(); decodeTokens.removeValue(forKey: key)
+        }
         let dropped = pendingCompletions.filter { $0.key.hasPrefix(prefix) }
         pendingCompletions = pendingCompletions.filter { !$0.key.hasPrefix(prefix) }
         pendingGeneration = pendingGeneration.filter { !$0.key.hasPrefix(prefix) }  // P2-7 (v2.10.16): 同步剔除代次记录
@@ -507,31 +549,19 @@ final class ThumbnailProvider: ObservableObject {
     func clearCache() {
         lock.lock()
         cache.removeAll()
-        accessOrder.removeAll()  // P2-15 (v2.10.6): 一并清空 LRU 访问顺序
-        let dropped = pendingCompletions
-        pendingCompletions.removeAll()
-        pendingGeneration.removeAll()  // P2-7 (v2.10.16): 一并清空代次记录
-        inFlight.removeAll()     // v2.10.73 (方案③): 一并清空进行中标记
+        // OS pressure also invokes this legacy hook. Keep images still owned by
+        // visible views; they're released as soon as those views disappear.
+        for key in Array(decodeTasks.keys) where visibleCounts[key, default: 0] == 0 {
+            decodeTasks.removeValue(forKey: key)?.cancel(); decodeTokens.removeValue(forKey: key)
+        }
+        let dropped = pendingCompletions.filter { visibleCounts[$0.key, default: 0] == 0 }
+        pendingCompletions = pendingCompletions.filter { visibleCounts[$0.key, default: 0] > 0 }
+        pendingGeneration = pendingGeneration.filter { visibleCounts[$0.key, default: 0] > 0 }
+        inFlight = inFlight.filter { visibleCounts[$0, default: 0] > 0 }
         failedKeys.removeAll()   // v2.10.73 (方案③): 一并清空失败态
         lock.unlock()
         notifyCancelled(dropped)
         notifyChangeOnMain()  // v2.10.73 (方案③): 通知观察者重渲染
-    }
-
-    // P2-15 (v2.10.6): 更新访问顺序——把 key 移到末尾（最近使用）。调用方必须已持 lock。
-    private func markAccessedLocked(_ key: String) {
-        if let idx = accessOrder.firstIndex(of: key) {
-            accessOrder.remove(at: idx)
-        }
-        accessOrder.append(key)
-    }
-
-    // P2-15 (v2.10.6): 超过上限时从最旧端淘汰，保持 cache 与 accessOrder 一致。调用方必须已持 lock。
-    private func evictIfNeededLocked() {
-        while cache.count > maxCacheCount, let oldest = accessOrder.first {
-            accessOrder.removeFirst()
-            cache.removeValue(forKey: oldest)
-        }
     }
 
     /// Fire dropped/queued completions with a nil image so no caller is left hanging

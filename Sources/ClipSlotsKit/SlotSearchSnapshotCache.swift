@@ -113,18 +113,8 @@ final class SlotSearchSnapshotCache {
     }
     // Separate cost limits: compact file stamps and recently decoded hits. A
     // library scan never permanently retains every group's storage/content.
-    private let metadataCache: NSCache<NSString, CachedMetadata> = {
-        let cache = NSCache<NSString, CachedMetadata>()
-        cache.countLimit = 8192
-        cache.totalCostLimit = 64 * 1024 * 1024
-        return cache
-    }()
-    private let contentCache: NSCache<NSData, CachedContent> = {
-        let cache = NSCache<NSData, CachedContent>()
-        cache.countLimit = 75000
-        cache.totalCostLimit = 96 * 1024 * 1024
-        return cache
-    }()
+    private let metadataCache = ResourceCache<CachedMetadata>(category: .searchMetadata)
+    private let contentCache = ResourceCache<CachedContent>(category: .searchContent, countLimit: 75000)
 
     deinit { for database in databases.values { sqlite3_close(database) } }
 
@@ -217,7 +207,7 @@ final class SlotSearchSnapshotCache {
         let key = Data(SHA256.hash(data: data)) as NSData
         if let cached = contentCache.object(forKey: key) { return cached.value }
         guard let value = try? decoder.decode(SlotContent.self, from: data) else { return nil }
-        contentCache.setObject(CachedContent(value), forKey: key, cost: data.count * 2 + 256)
+        contentCache.setObject(CachedContent(value), forKey: key, cost: value.memoryCacheCost)
         return value
     }
 
@@ -322,7 +312,7 @@ final class SlotSearchSnapshotCache {
             }
             guard sqlite3_step(insertion) == SQLITE_DONE else { return }
             contentCache.setObject(CachedContent(content), forKey: Data(SHA256.hash(data: payload)) as NSData,
-                                   cost: payload.count * 2 + 256)
+                                   cost: content.memoryCacheCost)
         }
         committed = sqlite3_exec(database, "COMMIT", nil, nil, nil) == SQLITE_OK
         if committed {

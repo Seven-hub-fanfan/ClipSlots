@@ -27,37 +27,48 @@ enum CanvasAttachmentThumbnails {
         "\(att.canvasSourceVersion)::\(Int(maxPixel.rounded()))"
     }
 
-    private static let cache: NSCache<NSString, NSImage> = {
-        let c = NSCache<NSString, NSImage>()
-        // 一屏十几张卡片 × 每张数个附件 × 两种尺寸，128 足够覆盖工作集又不至于长期占着内存。
-        c.countLimit = 128
-        return c
-    }()
+    private static let cache = ResourceCache<NSImage>(category: .canvasThumb, countLimit: 128)
 
     /// 「这张生不出缩略图」的记忆。见类型注释。
     private static var misses = Set<String>()
 
     /// 解码队列刻意是**串行**的：并发解码多张大图会瞬时占用数倍内存（ATT-3 那次 OOM 的同源风险），
     /// 而缩略图本来就只需要「在一两帧之内陆续出现」，不需要并行。
-    private static let queue = DispatchQueue(label: "clipslots.canvas.attachment.thumbnail",
-                                            qos: .userInitiated)
-
-    private final class RequestCancellation: @unchecked Sendable {
-        private let lock = NSLock()
-        private var cancelled = false
-        func cancel() { lock.lock(); cancelled = true; lock.unlock() }
-        var isCancelled: Bool { lock.lock(); defer { lock.unlock() }; return cancelled }
+    private static let lock = NSLock()
+    private static func wasMissing(_ key: String, retry: Bool) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        if retry { misses.remove(key) }
+        return misses.contains(key)
+    }
+    private static func recordMissing(_ key: String) {
+        lock.lock(); defer { lock.unlock() }
+        if misses.count >= 256, let oldest = misses.first { misses.remove(oldest) }
+        misses.insert(key)
     }
 
     static func load(_ att: SlotContent.SlotAttachment, maxPixel: CGFloat) async -> NSImage? {
-        let cancellation = RequestCancellation()
-        return await withTaskCancellationHandler(operation: {
-            await withCheckedContinuation { continuation in
-                load(att, maxPixel: maxPixel, isCancelled: { cancellation.isCancelled }) {
-                    continuation.resume(returning: $0)
-                }
-            }
-        }, onCancel: { cancellation.cancel() })
+        await loadImage(att, maxPixel: maxPixel, retry: false, isCancelled: { false })
+    }
+
+    private static func loadImage(_ att: SlotContent.SlotAttachment, maxPixel: CGFloat,
+                                  retry: Bool, isCancelled: @escaping () -> Bool) async -> NSImage? {
+        guard !Task.isCancelled, !isCancelled() else { return nil }
+        let k = await Task.detached(priority: .utility) { key(att, maxPixel: maxPixel) }.value
+        guard !Task.isCancelled, !isCancelled() else { return nil }
+        if let hit = cache.object(forKey: k as NSString) { return hit }
+        if wasMissing(k, retry: retry) { return nil }
+        return await ThumbnailDecodeLimiter.shared.run(priority: maxPixel > 128 ? 10 : 0) {
+            // A different visible row may have filled this key while we waited.
+            guard !isCancelled() else { return nil }
+            if let hit = cache.object(forKey: k as NSString) { return hit }
+            let image = await Task.detached(priority: .userInitiated) {
+                AttachmentThumbnailProvider.thumbnail(for: att, maxPixel: maxPixel)
+            }.value
+            guard !Task.isCancelled, !isCancelled() else { return nil }
+            if let image { cache.setObject(image, forKey: k as NSString, cost: ClipSlotsImageIO.pixelCost(of: image)) }
+            else { recordMissing(k) }
+            return image
+        }
     }
 
     /// 请求加载。已命中缓存 / 已知失败 / 正在加载中都会**立即返回且不重复排队**。
@@ -66,28 +77,8 @@ enum CanvasAttachmentThumbnails {
                      retry: Bool = false,
                      isCancelled: @escaping () -> Bool = { false },
                      completion: @escaping (NSImage?) -> Void) {
-        queue.async {
-            guard !isCancelled() else {
-                DispatchQueue.main.async { completion(nil) }
-                return
-            }
-            // stat 与解码都在串行后台队列。每次请求检查文件版本，失败文件恢复后也能重新加载。
-            let k = key(att, maxPixel: maxPixel)
-            if retry { misses.remove(k) }
-            if let hit = cache.object(forKey: k as NSString) {
-                DispatchQueue.main.async { completion(hit) }
-                return
-            }
-            if misses.contains(k) {
-                DispatchQueue.main.async { completion(nil) }
-                return
-            }
-            let image = AttachmentThumbnailProvider.thumbnail(for: att, maxPixel: maxPixel)
-            if let image { cache.setObject(image, forKey: k as NSString) }
-            else {
-                if misses.count >= 256 { misses.remove(misses.first!) }
-                misses.insert(k)
-            }
+        Task {
+            let image = await loadImage(att, maxPixel: maxPixel, retry: retry, isCancelled: isCancelled)
             DispatchQueue.main.async { completion(image) }
         }
     }
@@ -181,15 +172,17 @@ struct CanvasAttachmentPreviewImage: View {
         .task(id: "\(attachment.canvasSourceIdentity)|\(maxPixel)") {
             image = nil
             shownId = nil
+            var previousVersion: String?
             // 只对在屏幕上的预览检查版本；没有变化时不发布状态、不重新解码。
             while !Task.isCancelled {
-                let loaded = await CanvasAttachmentThumbnails.load(attachment, maxPixel: maxPixel)
+                let version = await Task.detached(priority: .utility) { attachment.canvasSourceVersion }.value
                 guard !Task.isCancelled else { return }
-                if image !== loaded || shownId != attachment.id {
-                    image = loaded
-                    shownId = attachment.id
+                if version != previousVersion {
+                    let loaded = await CanvasAttachmentThumbnails.load(attachment, maxPixel: maxPixel)
+                    guard !Task.isCancelled else { return }
+                    image = loaded; shownId = attachment.id; previousVersion = version
                 }
-                try? await Task.sleep(for: .seconds(2))
+                try? await Task.sleep(for: .seconds(ResourceBudget.shared.refreshInterval))
             }
         }
     }

@@ -43,32 +43,30 @@ enum VideoThumbnailProvider {
         let path: String
         let modified: TimeInterval
         let size: Int64
+        let maxPixel: Int
     }
 
-    private static var cache: [CacheKey: NSImage] = [:]
+    private static let cache = ResourceCache<NSImage>(category: .videoThumb, countLimit: 32)
     /// 抽帧失败过的键。记下来是为了**不要每次重绘都重试**：一个损坏/半下载的 mp4 会让每帧都
     /// 白跑一次 AVFoundation，那是画布卡顿最隐蔽的一种来源。
     private static var failed: Set<CacheKey> = []
 
     /// 取首帧。不是视频、文件不存在、抽帧失败都返回 nil（调用方按"没有预览"处理）。
-    static func thumbnail(forFile path: String, fileName: String? = nil) -> NSImage? {
+    static func thumbnail(forFile path: String, fileName: String? = nil, maxPixel: CGFloat = 640) -> NSImage? {
         guard CanvasAttachmentKind.from(fileName: fileName ?? path) == .video else { return nil }
-        guard let key = makeKey(path) else { return nil }
+        guard let key = makeKey(path, maxPixel: maxPixel) else { return nil }
         cacheLock.lock()
         defer { cacheLock.unlock() }
-        if let hit = cache[key] { return hit }
+        if let hit = cache.object(forKey: key) { return hit }
         if failed.contains(key) { return nil }
 
         let url = CanvasVideoAsset.shared.url(for: URL(fileURLWithPath: path), fileName: fileName ?? path)
-        guard let image = extractFirstFrame(url.path) else {
+        guard let image = extractFirstFrame(url.path, maxPixel: maxPixel) else {
+            if failed.count >= 256, let first = failed.first { failed.remove(first) }
             failed.insert(key)
             return nil
         }
-        if cache.count >= maxCachedItems {
-            cache.removeAll(keepingCapacity: true)
-            failed.removeAll(keepingCapacity: true)
-        }
-        cache[key] = image
+        cache.setObject(image, forKey: key, cost: ClipSlotsImageIO.pixelCost(of: image))
         return image
     }
 
@@ -95,21 +93,21 @@ enum VideoThumbnailProvider {
     // MARK: - 内部
     private static let cacheLock = NSLock()
 
-    private static func makeKey(_ path: String) -> CacheKey? {
+    private static func makeKey(_ path: String, maxPixel: CGFloat) -> CacheKey? {
         guard let attrs = try? FileManager.default.attributesOfItem(atPath: path) else { return nil }
         let modified = (attrs[.modificationDate] as? Date)?.timeIntervalSince1970 ?? 0
         let size = (attrs[.size] as? NSNumber)?.int64Value ?? 0
-        return CacheKey(path: path, modified: modified, size: size)
+        return CacheKey(path: path, modified: modified, size: size, maxPixel: Int(maxPixel))
     }
 
-    private static func extractFirstFrame(_ path: String) -> NSImage? {
+    private static func extractFirstFrame(_ path: String, maxPixel: CGFloat) -> NSImage? {
         let asset = AVURLAsset(url: URL(fileURLWithPath: path))
         let generator = AVAssetImageGenerator(asset: asset)
         // 必须开这个：不开时抽出来的帧不带轨道的旋转矩阵，竖屏视频（9:16）的首帧会被画成横的。
         generator.appliesPreferredTrackTransform = true
         // 长边压到 640：卡片预览区最大也就几百 pt，抽一张 4k 原尺寸图只是白占内存
         // （一张 3840×2160 的 NSImage 约 33MB，32 项缓存就能吃掉 1GB）。
-        generator.maximumSize = CGSize(width: 640, height: 640)
+        generator.maximumSize = CGSize(width: maxPixel, height: maxPixel)
 
         let seconds = CMTimeGetSeconds(asset.duration)
         let target = seconds.isFinite && seconds > 0 ? min(0.6, seconds * 0.1) : 0

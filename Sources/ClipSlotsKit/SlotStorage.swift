@@ -124,7 +124,7 @@ public final class SlotStorage {
     public static var didWriteLiveSlotDir: (() -> Void)?
 
     private let baseURL: URL
-    private var cache: [Int: SlotContent] = [:]
+    private let cache = SlotBodyMemoryCache()
     // P1-6 (v2.10.9): last-seen on-disk fingerprint per cached slot. `get` compares
     // it against a freshly-stat'd fingerprint so a value written by another process
     // (CLI) is picked up on the very next read, even on coarse-mtime volumes where
@@ -135,9 +135,8 @@ public final class SlotStorage {
     // 搜索用。GUI 每敲一个字符就重算一次全库搜索（0.2s 去抖），没有这层缓存的话 13 组 × 10 槽会
     // 每次都重读一遍磁盘；有了它，后续按键只剩一次 stat 指纹比对。指纹变了立即重读，所以 CLI 或
     // 其他进程的外部写入照样能在下一次搜索里出现。
-    private var scanCache: [Int: SlotContent] = [:]
+    private let scanCache = SlotBodyMemoryCache()
     private var scanCacheFingerprint: [Int: DirFingerprint] = [:]
-    private var searchSnapshot: SlotSearchSnapshot?
     private var libraryCache: [Int: LibrarySummary] = [:]
     private var libraryFingerprints: [Int: DirFingerprint] = [:]
     // P0-1 (v2.10.38): in-memory label cache + per-slot label.txt fingerprint. `getLabel`
@@ -540,7 +539,7 @@ public final class SlotStorage {
                     cacheFingerprint[slot] = dirFingerprint(slotDir.path)
                     // hotfix11: 丢弃这个槽的搜索扫描缓存。虽然它有指纹护栏，但不能把「改完能不能
                     // 搜到新内容」这种正确性押在 mtime 粒度上——下次搜索走 `cache` 的新鲜命中即可。
-                    scanCache.removeValue(forKey: slot)
+                    scanCache[slot] = nil
                     scanCacheFingerprint.removeValue(forKey: slot)
                     NSLog("[ClipSlots] SlotStorage.set OK slot=\(slot) preview=\(content.preview)")
                     return true
@@ -570,7 +569,7 @@ public final class SlotStorage {
                 if invalidated { return }
                 cache[slot] = SlotContent()
                 // hotfix11: 清空后立刻丢弃搜索扫描缓存，否则已删除的内容还能被搜出来。
-                scanCache.removeValue(forKey: slot)
+                scanCache[slot] = nil
                 scanCacheFingerprint.removeValue(forKey: slot)
                 // P0-1 (v2.10.38): the slot dir (incl. label.txt) is removed below; drop its
                 // label cache entry so getLabel doesn't serve a stale label for a cleared slot.
@@ -677,7 +676,7 @@ public final class SlotStorage {
     }
 
     public func snapshot() -> [Int: SlotContent] {
-        queue.sync { cache }
+        queue.sync { cache.snapshot() }
     }
 
     /// Small, read-only values for the canvas library. Missing keys mean UNKNOWN,
@@ -773,12 +772,11 @@ public final class SlotStorage {
         #if DEBUG
         let loadStart = SlotSearchDiagnostics.now
         #endif
-        let cached = queue.sync { searchSnapshot } ?? SlotSearchSnapshotCache.shared.load(group: baseURL)
+        let cached = SlotSearchSnapshotCache.shared.load(group: baseURL)
         #if DEBUG
         SlotSearchDiagnostics.record("cacheLoadMS", since: loadStart)
         #endif
         if let cached, cached.isCurrent(slotCount: slotCount, isCancelled: isCancelled) {
-            queue.sync { searchSnapshot = cached }
             return cached.slots
         }
         // Read at most one group per lock acquisition. Cached reads avoid the
@@ -823,7 +821,6 @@ public final class SlotStorage {
                 #if DEBUG
                 SlotSearchDiagnostics.record("postReadValidationMS", since: validationStart)
                 #endif
-                searchSnapshot = snapshot
                 return snapshot
             }
         }
@@ -870,7 +867,6 @@ public final class SlotStorage {
             // 它本身有指纹护栏，这里一起清只是让「显式失效」语义完整。
             scanCache.removeAll()
             scanCacheFingerprint.removeAll()
-            searchSnapshot = nil
             libraryCache.removeAll()
             libraryFingerprints.removeAll()
         }

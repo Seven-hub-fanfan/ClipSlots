@@ -3,17 +3,24 @@ import Foundation
 /// Limits expensive local processes without limiting remote asynchronous jobs.
 public actor AsyncWorkLimiter {
     private let limit: Int
+    private let currentLimit: (@Sendable () -> Int)?
     private var occupied = 0
-    private var waiters: [(UUID, CheckedContinuation<Void, Error>)] = []
-    public init(limit: Int) { self.limit = max(1, limit) }
+    private var waiters: [(UUID, CheckedContinuation<Void, Error>, Int)] = []
+    public init(limit: Int, currentLimit: (@Sendable () -> Int)? = nil) {
+        self.limit = max(1, limit); self.currentLimit = currentLimit
+    }
+    private var effectiveLimit: Int { max(1, min(limit, currentLimit?() ?? limit)) }
 
-    private func acquire() async throws {
+    private func acquire(priority: Int) async throws {
         try Task.checkCancellation()
         let id = UUID()
         try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { continuation in
-                if occupied < limit { occupied += 1; continuation.resume() }
-                else { waiters.append((id, continuation)) }
+                if occupied < effectiveLimit { occupied += 1; continuation.resume() }
+                else {
+                    let index = waiters.firstIndex { $0.2 < priority } ?? waiters.count
+                    waiters.insert((id, continuation, priority), at: index)
+                }
             }
         } onCancel: { Task { await self.cancel(id) } }
     }
@@ -22,11 +29,14 @@ public actor AsyncWorkLimiter {
         waiters.remove(at: index).1.resume(throwing: CancellationError())
     }
     private func release() {
-        if waiters.isEmpty { occupied -= 1 }
-        else { waiters.removeFirst().1.resume() }
+        occupied -= 1
+        while occupied < effectiveLimit, !waiters.isEmpty {
+            occupied += 1
+            waiters.removeFirst().1.resume()
+        }
     }
-    public func withPermit<T>(_ body: () async throws -> T) async throws -> T {
-        try await acquire()
+    public func withPermit<T>(priority: Int = 0, _ body: () async throws -> T) async throws -> T {
+        try await acquire(priority: priority)
         do {
             try Task.checkCancellation()
             let value = try await body()

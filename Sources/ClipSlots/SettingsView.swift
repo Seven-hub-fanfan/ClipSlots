@@ -65,6 +65,8 @@ struct SettingsView: View {
     @State private var verbose: Bool
     // UNDO-3 (v2.10.97): 撤销步数（每个槽位组保留的撤销/重做步数，1~100）。
     @State private var undoSteps: Int
+    @State private var cacheBudgetMiB: Int
+    @State private var attachmentWarningCount: Int
     /// 撤销栈当前磁盘占用（字节）。进入设置面板 / 改动步数后刷新。
     @State private var undoDiskBytes: Int64 = 0
     @State private var hotkeyTemplateKind: HotkeyTemplateKind
@@ -128,6 +130,8 @@ struct SettingsView: View {
         _pasteKey = State(initialValue: config.pasteKey)
         _radialKey = State(initialValue: config.radialKey)
         _verbose = State(initialValue: config.verbose)
+        _cacheBudgetMiB = State(initialValue: config.cacheBudgetMiB)
+        _attachmentWarningCount = State(initialValue: config.attachmentWarningCount)
         _undoSteps = State(initialValue: SlotUndoStack.clampLimit(config.undoSteps))
         _hotkeyTemplateKind = State(initialValue: config.hotkeyTemplate.kind)
         _skipOverwriteConfirmation = State(initialValue: UserDefaults.standard.skipOverwriteConfirmation)
@@ -449,6 +453,35 @@ struct SettingsView: View {
                 }
                 Slider(value: $slots, in: 1...10, step: 1)
                 Text("建议设置为 5～9 个槽位。槽位越多，圆盘菜单可读性越低。")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                Divider().padding(.vertical, 4)
+                subsectionHeader("附件与性能")
+                Picker("预览缓存", selection: $cacheBudgetMiB) {
+                    Text("自动（推荐）").tag(0)
+                    Text("节省内存 · 64 MiB").tag(64)
+                    Text("均衡 · 128 MiB").tag(128)
+                    Text("更多缓存 · 256 MiB").tag(256)
+                    if ![0, 64, 128, 256].contains(cacheBudgetMiB) {
+                        Text("自定义 · \(cacheBudgetMiB) MiB").tag(cacheBudgetMiB)
+                    }
+                }
+                .accessibilityLabel("预览缓存")
+                .accessibilityIdentifier("slot-preview-cache-budget")
+                Text("自动根据电脑内存调整；内存吃紧时回收预览缓存。原始文件和已提交的生成任务照常保存。")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                Picker("附件数量提醒", selection: $attachmentWarningCount) {
+                    Text("50 项（推荐）").tag(50)
+                    Text("100 项").tag(100)
+                    Text("关闭").tag(0)
+                    if ![0, 50, 100].contains(attachmentWarningCount) {
+                        Text("\(attachmentWarningCount) 项").tag(attachmentWarningCount)
+                    }
+                }
+                .accessibilityLabel("附件数量提醒")
+                .accessibilityIdentifier("slot-attachment-warning-count")
+                Text("仅在手动添加超过此数量时提醒，仍可继续添加。")
                     .font(.caption)
                     .foregroundColor(.secondary)
             }
@@ -989,6 +1022,8 @@ struct SettingsView: View {
         radialKey = "ctrl+space"
         verbose = true
         undoSteps = SlotUndoStack.defaultLimitPerGroup
+        cacheBudgetMiB = 0
+        attachmentWarningCount = 50
     }
 
     private func save() {
@@ -999,6 +1034,8 @@ struct SettingsView: View {
         newConfig.radialKey = HotkeyTemplateNormalizer.normalizedShortcut(radialKey, allowsSlotPlaceholder: false)
         newConfig.verbose = verbose
         newConfig.undoSteps = SlotUndoStack.clampLimit(undoSteps)
+        newConfig.cacheBudgetMiB = cacheBudgetMiB
+        newConfig.attachmentWarningCount = attachmentWarningCount
         newConfig.hotkeyTemplate.kind = hotkeyTemplateKind
         newConfig.save()
 
