@@ -53,8 +53,10 @@ struct WorkspaceModeSwitcher: View {
                 .frame(width: 22, height: 25)
                 .frame(width: Self.ornamentWidth, height: Self.preferredHeight)
                 .overlay(alignment: .trailing) {
-                    Rectangle().fill(TapSkin.tone(0xdddddf, 0x414144))
-                        .frame(width: 0.5, height: 19).padding(.trailing, 3)
+                    Rectangle().fill(LinearGradient(
+                        colors: [.clear, TapSkin.tone(0xd6d7dc, 0x44464c), .clear],
+                        startPoint: .top, endPoint: .bottom))
+                        .frame(width: 0.5, height: 18).padding(.trailing, 3)
                 }
                 .allowsHitTesting(false).accessibilityHidden(true)
             ForEach(WorkspaceMode.allCases) { mode in segment(mode) }
@@ -63,12 +65,12 @@ struct WorkspaceModeSwitcher: View {
         .frame(width: Self.preferredWidth, height: Self.preferredHeight)
         .background {
             Capsule(style: .continuous)
-                .fill(TapSkin.tone(0xd6d6d8, 0x070707))
-                .offset(y: 1.5)
-            Capsule(style: .continuous)
-                .fill(LinearGradient(colors: [TapSkin.tone(0xffffff, 0x252525), TapSkin.tone(0xfafafa, 0x1b1b1b)],
-                                     startPoint: .topLeading, endPoint: .bottomTrailing))
-                .overlay(Capsule().strokeBorder(TapSkin.tone(0xe4e4e6, 0x343437), lineWidth: 0.5))
+                .fill(TapSkin.tone(0xfafafb, 0x1c1d1f))
+                .overlay(Capsule(style: .continuous).strokeBorder(
+                    contrast == .increased
+                        ? TapSkin.tone(0xb8bbc2, 0x767a84)
+                        : TapSkin.tone(0xdedfe3, 0x383a40),
+                    lineWidth: contrast == .increased ? 1 : 0.5))
         }
         .overlay(alignment: .leading) {
             WorkspaceContourSurface(center: Self.center(for: selection),
@@ -77,7 +79,6 @@ struct WorkspaceModeSwitcher: View {
                 highContrast: contrast == .increased, motion: contourMotion)
                 .allowsHitTesting(false).accessibilityHidden(true)
         }
-        .shadow(color: .black.opacity(0.12), radius: 4, y: 3)
     }
 
     private func segment(_ mode: WorkspaceMode) -> some View {
@@ -164,12 +165,12 @@ struct WorkspaceSelectionContour: Shape {
         path.move(to: CGPoint(x: rect.minX, y: bottom))
         path.addLine(to: CGPoint(x: center - shoulder, y: bottom))
         path.addCurve(to: CGPoint(x: center - crown, y: top),
-            control1: CGPoint(x: center - shoulder * 0.37, y: bottom),
-            control2: CGPoint(x: center - shoulder * 0.75, y: top))
+            control1: CGPoint(x: center - shoulder * 0.52, y: bottom),
+            control2: CGPoint(x: center - shoulder * 0.78, y: top))
         path.addLine(to: CGPoint(x: center + crown, y: top))
         path.addCurve(to: CGPoint(x: center + shoulder, y: bottom),
-            control1: CGPoint(x: center + shoulder * 0.75, y: top),
-            control2: CGPoint(x: center + shoulder * 0.37, y: bottom))
+            control1: CGPoint(x: center + shoulder * 0.78, y: top),
+            control2: CGPoint(x: center + shoulder * 0.52, y: bottom))
         path.addLine(to: CGPoint(x: rect.maxX, y: bottom))
         return path
     }

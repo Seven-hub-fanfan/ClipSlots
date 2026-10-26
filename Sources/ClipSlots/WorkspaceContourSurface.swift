@@ -33,6 +33,7 @@ struct WorkspaceContourSurface: NSViewRepresentable {
     final class Host: NSView {
         private let gradient = CAGradientLayer()
         private let contour = CAShapeLayer()
+        private let contourOpacity = CAGradientLayer()
         private let dot = CAShapeLayer()
         private var halfWidth: CGFloat = 0
         private var targetCenter: CGFloat?
@@ -47,11 +48,18 @@ struct WorkspaceContourSurface: NSViewRepresentable {
             layer?.masksToBounds = true
             gradient.startPoint = CGPoint(x: 0, y: 0.5)
             gradient.endPoint = CGPoint(x: 1, y: 0.5)
-            gradient.locations = [0, 0.20, 0.80, 1]
+            gradient.locations = [0, 0.12, 0.28, 0.72, 0.88, 1]
             gradient.mask = contour
             contour.fillColor = nil
             contour.strokeColor = NSColor.white.cgColor
             contour.lineCap = .round
+            contour.lineJoin = .round
+            // Keep the arch readable while the horizontal rails settle into
+            // the surface instead of competing with the capsule's hairline.
+            contourOpacity.startPoint = CGPoint(x: 0.5, y: 0)
+            contourOpacity.endPoint = CGPoint(x: 0.5, y: 1)
+            contourOpacity.locations = [0, 0.55, 1]
+            contour.mask = contourOpacity
             dot.path = CGPath(ellipseIn: CGRect(x: -1.5, y: -1.5, width: 3, height: 3),
                               transform: nil)
             layer?.addSublayer(gradient)
@@ -73,15 +81,41 @@ struct WorkspaceContourSurface: NSViewRepresentable {
             colors()
         }
 
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            updateBackingScale()
+        }
+
+        override func viewDidChangeBackingProperties() {
+            super.viewDidChangeBackingProperties()
+            updateBackingScale()
+        }
+
+        private func updateBackingScale() {
+            let scale = window?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 1
+            CATransaction.begin()
+            CATransaction.setDisableActions(true)
+            for renderedLayer in [gradient, contour, contourOpacity, dot] {
+                renderedLayer.contentsScale = scale
+            }
+            CATransaction.commit()
+        }
+
         private func colors() {
             effectiveAppearance.performAsCurrentDrawingAppearance {
                 let ink = effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
                     ? NSColor.white : NSColor(srgbRed: 48 / 255, green: 48 / 255, blue: 52 / 255, alpha: 1)
                 CATransaction.begin()
                 CATransaction.setDisableActions(true)
-                gradient.colors = [0.02, 0.80, 0.80, 0.02].map { ink.withAlphaComponent($0).cgColor }
-                contour.lineWidth = highContrast ? 1.5 : 1.05
-                dot.fillColor = ink.cgColor
+                let strength: CGFloat = highContrast ? 1 : 0.66
+                gradient.colors = [0, 0.42, 1, 1, 0.42, 0].map {
+                    ink.withAlphaComponent(CGFloat($0) * strength).cgColor
+                }
+                contourOpacity.colors = (highContrast ? [1, 1, 0.72] : [1, 0.90, 0.22]).map {
+                    NSColor.white.withAlphaComponent(CGFloat($0)).cgColor
+                }
+                contour.lineWidth = highContrast ? 1.5 : 0.85
+                dot.fillColor = ink.withAlphaComponent(highContrast ? 1 : 0.90).cgColor
                 CATransaction.commit()
             }
         }
@@ -95,6 +129,7 @@ struct WorkspaceContourSurface: NSViewRepresentable {
             layer?.cornerRadius = bounds.height / 2
             gradient.frame = bounds
             contour.frame = bounds
+            contourOpacity.frame = contour.bounds
             if let targetCenter { setModel(center: targetCenter) }
             contour.removeAnimation(forKey: "workspace-slide")
             dot.removeAnimation(forKey: "workspace-slide")
