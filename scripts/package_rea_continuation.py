@@ -38,13 +38,13 @@ def sha(path):
     return h.hexdigest()
 
 
-for source, name in [("ClipSlots", "ClipSlots"), ("ClipSlotsCLI", "clipslots-cli")]:
+for source, name in [("ClipSlots", "ClipSlots"), ("ClipSlotsCLI", "clipslots-cli"), ("ClipSlotsMCP", "clipslots-mcp")]:
     shutil.copy2(products / source, contents / "MacOS" / name)
 shutil.copy2(repo / "Info.plist", contents / "Info.plist")
 shutil.copy2(repo / "assets/AppIcon.icns", contents / "Resources/AppIcon.icns")
 shutil.copytree(repo / "skills/clipslots-manager", contents / "Resources/skills/clipslots-manager")
 shutil.copytree(products / "ClipSlots_ClipSlotsKit.bundle", contents / "Resources/ClipSlots_ClipSlotsKit.bundle")
-for name in ["ClipSlots", "clipslots-cli"]:
+for name in ["ClipSlots", "clipslots-cli", "clipslots-mcp"]:
     subprocess.run(["codesign", "--force", "--timestamp=none", "--sign", "-", str(contents / "MacOS" / name)], check=True)
 subprocess.run(["codesign", "--force", "--timestamp=none", "--sign", "-", str(app)], check=True)
 subprocess.run(["codesign", "--verify", "--deep", "--strict", str(app)], check=True)
@@ -56,8 +56,9 @@ assert cli["ok"] and cli["version"] == version
 assert not (contents / "Resources/codex-runtime").exists()
 source_zip = output / f"ClipSlots_{version}_source.zip"
 assert not source_zip.exists()
-source_paths = [repo / name for name in ["Info.plist", "Package.swift", "CLAUDE.md", "MEMORY.md", ".gitignore"]]
-source_paths += [p for folder in ["Sources", "Tests", "scripts", "skills", "assets", "gateway"]
+source_paths = [repo / name for name in ["Info.plist", "Package.swift", "CLAUDE.md", "MEMORY.md", ".gitignore"]
+                if (repo / name).is_file()]
+source_paths += [p for folder in ["Sources", "Tests", "scripts", "skills", "assets", "gateway", "docs"]
                  for p in (repo / folder).rglob("*") if p.is_file() and "__pycache__" not in p.parts]
 with zipfile.ZipFile(source_zip, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=9) as archive:
     for path in sorted(source_paths):
@@ -91,7 +92,8 @@ evidence.mkdir(exist_ok=True)
 resource_hashes = {str(p.relative_to(contents / "Resources")): sha(p)
                    for p in (contents / "Resources").rglob("*") if p.is_file()}
 manifest = {"version": version, "build": build, "app": str(app), "gui_sha256": sha(contents / "MacOS/ClipSlots"),
-            "cli_sha256": sha(contents / "MacOS/clipslots-cli"), "cli": cli,
+            "cli_sha256": sha(contents / "MacOS/clipslots-cli"),
+            "mcp_sha256": sha(contents / "MacOS/clipslots-mcp"), "cli": cli,
             "resources": resource_hashes, "source_files": len(source_paths),
             "app_bytes": sum(p.stat().st_size for p in app.rglob("*") if p.is_file()),
             "dmg_sha256": sha(dmg), "dmg_bytes": dmg.stat().st_size,

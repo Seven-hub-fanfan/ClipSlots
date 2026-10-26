@@ -11,13 +11,21 @@ public struct PasteboardItem: Codable {
 }
 
 public struct SlotContent: Codable {
-    public var items: [[PasteboardItem]] = []
+    // Transient identity distinguishes re-read or edited bodies even when an
+    // external editor leaves the persisted contentId/updatedAt unchanged.
+    private var previewCacheIdentity = UUID()
+    var searchCacheIdentity: UUID { previewCacheIdentity }
+    public var items: [[PasteboardItem]] = [] {
+        didSet { previewCacheIdentity = UUID() }
+    }
     public var timestamp: Date = Date()
     public var label: String? = nil
     public var htmlSource: String? = nil
     // v2.7.61: Slot attachments - only visible and editable in node canvas
     // Empty array = disabled, no change to existing behavior
-    public var attachments: [SlotAttachment] = []
+    public var attachments: [SlotAttachment] = [] {
+        didSet { previewCacheIdentity = UUID() }
+    }
 
     // MARK: - Manual thumbnail (v2.11.0)
 
@@ -248,7 +256,7 @@ public struct SlotContent: Codable {
     }
 
     public var preview: String {
-        let key = "\(contentId)::\(updatedAt)::preview" as NSString
+        let key = "\(contentId)::\(updatedAt)::\(previewCacheIdentity)::preview" as NSString
         if let cached = SlotContentPreviewCache.preview.object(forKey: key) {
             return cached as String
         }
@@ -316,7 +324,7 @@ public struct SlotContent: Codable {
     }
 
     public var plainText: String? {
-        let key = "\(contentId)::\(updatedAt)::plainText" as NSString
+        let key = "\(contentId)::\(updatedAt)::\(previewCacheIdentity)::plainText" as NSString
         if let cached = SlotContentPreviewCache.plainText.object(forKey: key) {
             return cached === SlotContentPreviewCache.missing ? nil : cached as String
         }

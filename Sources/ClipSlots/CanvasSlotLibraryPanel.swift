@@ -19,7 +19,18 @@ final class CanvasLibrarySummaries: ObservableObject {
     @Published private(set) var expanded = true
     @Published private(set) var privateGroup = SpecialSlotStorage.unfiledGroupId
     @Published private(set) var privateSlots: Set<Int> = []
-    @Published private(set) var summaries: [String: [Int: SlotStorage.LibrarySummary]] = [:]
+    final class GroupSummary: ObservableObject {
+        @Published fileprivate(set) var values: [Int: SlotStorage.LibrarySummary] = [:]
+    }
+    // Only the subtree displaying this group observes its content. Publishing a
+    // dictionary here invalidated every visible row for each completed read.
+    private var groups: [String: GroupSummary] = [:]
+    func summary(_ group: String) -> GroupSummary {
+        if let value = groups[group] { return value }
+        let value = GroupSummary()
+        groups[group] = value
+        return value
+    }
     private var subscriptions: Set<AnyCancellable> = []
     private var visible: Set<String> = []
     private var running: Set<String> = []
@@ -86,8 +97,7 @@ final class CanvasLibrarySummaries: ObservableObject {
     private func prune() {
         let retained = valid.union([privateGroup])
         visible.formIntersection(retained)
-        let next = summaries.filter { retained.contains($0.key) }
-        if next != summaries { summaries = next }
+        groups = groups.filter { retained.contains($0.key) }
     }
     private func refreshVisible() {
         for group in visible { refresh(group) }
@@ -104,14 +114,29 @@ final class CanvasLibrarySummaries: ObservableObject {
                 guard let self else { return }
                 self.running.remove(group)
                 if self.valid.contains(group) || group == self.privateGroup {
-                    var next = self.summaries[group] ?? [:]
+                    let summary = self.summary(group)
+                    var next = summary.values
                     next.merge(values) { _, latest in latest }
                     next = next.filter { $0.key <= count }
-                    if self.summaries[group] != next { self.summaries[group] = next }
+                    if summary.values != next { summary.values = next }
                 }
                 if self.pending.remove(group) != nil { self.refresh(group) }
             }
         }
+    }
+}
+
+private struct ObservedLibraryGroup<Content: View>: View {
+    @ObservedObject var summary: CanvasLibrarySummaries.GroupSummary
+    @ViewBuilder var content: () -> Content
+    var body: some View { content() }
+}
+
+private struct LibraryRowHover<Content: View>: View {
+    @State private var hovered = false
+    @ViewBuilder var content: (Bool) -> Content
+    var body: some View {
+        content(hovered).onHover { hovered = $0 }
     }
 }
 
@@ -194,7 +219,6 @@ struct CanvasSlotLibraryPanel: View {
     /// （AppKit 的 mouseEntered/Exited 在拖拽会话里被抑制），而排序的全部动作都发生在按住的时候。
     @State private var rowFrames: [String: CGRect] = [:]
     @State private var groupDragPayload: CanvasSlotDragPayload?
-    @State private var hoveredRow: String?
 
     /// 某页面下**用户可见**的槽位组。
     ///
@@ -239,6 +263,9 @@ struct CanvasSlotLibraryPanel: View {
                         // ★ v2.11.15：页面在上、「未入库」在最下面（用户要求）。
                         // 它是个待整理的暂存区而不是入口，放顶部会天天挡在真正要点的页面前面。
                         ForEach(library.rows) { row in
+                            // One child per identity lets LazyVStack skip offscreen
+                            // groups without evaluating every conditional slot list.
+                            VStack(alignment: .leading, spacing: 3) {
                             switch row {
                             case .page(let page):
                                 Text(page.name)
@@ -246,19 +273,24 @@ struct CanvasSlotLibraryPanel: View {
                                     .foregroundColor(AppTheme.canvasChromeSecondaryInk)
                                     .padding(.horizontal, 10).padding(.top, 16).padding(.bottom, 6)
                             case .group(let page, let group):
+                              ObservedLibraryGroup(summary: library.summary(group.id)) {
                                 groupRow(page: page, group: group)
                                     .onAppear { library.show(group.id) }
                                     .onDisappear { library.hide(group.id) }
                                 if expandedGroupIds.contains(group.id) {
                                     slotList(page: page, group: group)
                                 }
+                              }
+                            }
                             }
                         }
                         Rectangle().fill(AppTheme.subtleBorder).frame(height: 1)
                             .padding(.horizontal, 8).padding(.top, 14).padding(.bottom, 10)
-                        unfiledSection
-                            .onAppear { library.show(library.privateGroup) }
-                            .onDisappear { library.hide(library.privateGroup) }
+                        ObservedLibraryGroup(summary: library.summary(library.privateGroup)) {
+                            unfiledSection
+                                .onAppear { library.show(library.privateGroup) }
+                                .onDisappear { library.hide(library.privateGroup) }
+                        }
                     }
                     .padding(.bottom, 16)
                     .padding(.horizontal, 10)
@@ -362,6 +394,7 @@ struct CanvasSlotLibraryPanel: View {
         let gid = library.privateGroup
         let isOpen = expandedGroupIds.contains(gid)
         VStack(alignment: .leading, spacing: 2) {
+          LibraryRowHover { hovered in
             Button {
                 withAnimation(Anim.reveal) {
                     if isOpen { expandedGroupIds.remove(gid) } else { expandedGroupIds.insert(gid) }
@@ -393,13 +426,13 @@ struct CanvasSlotLibraryPanel: View {
                         .background(AppTheme.chipBackground, in: Capsule())
                 }
                 .padding(.horizontal, 8).frame(height: 34)
-                .background(hoveredRow == gid ? AppTheme.chipBackground : .clear,
+                .background(hovered ? AppTheme.chipBackground : .clear,
                             in: RoundedRectangle(cornerRadius: 8, style: .continuous))
                 .contentShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
             }
             .buttonStyle(.plain)
-            .onHover { hoveredRow = $0 ? gid : nil }
             .help("本项目里还没归到正式槽位的节点，只存在于画布，不占用任何槽位页面或槽位组。把节点拖到下面的槽位库即可正式归档；在画布上删除节点，这里的内容会立刻一起消失（Cmd+Z 可连内容一起撤回）。")
+          }
 
             if isOpen {
                 if entries.isEmpty {
@@ -439,7 +472,7 @@ struct CanvasSlotLibraryPanel: View {
         for slot in library.privateSlots where !known.contains(slot) {
             known.insert(slot)
             out.append(SlotEntry(slot: slot,
-                                 label: library.summaries[gid]?[slot]?.label,
+                                 label: library.summary(gid).values[slot]?.label,
                                  prompt: "",
                                  attachmentCount: 0))
         }
@@ -449,6 +482,7 @@ struct CanvasSlotLibraryPanel: View {
     // MARK: - 页面 / 组 / 槽位
 
     private func groupRow(page: SlotPage, group: SpecialSlot) -> some View {
+      LibraryRowHover { hovered in
         HStack(spacing: 2) {
           Button {
             withAnimation(Anim.reveal) {
@@ -481,7 +515,7 @@ struct CanvasSlotLibraryPanel: View {
           .accessibilityIdentifier("slot-group-toggle-\(group.id)")
           Image(systemName: "square.stack")
               .font(.system(size: 12, weight: .regular))
-              .foregroundColor(hoveredRow == group.id || groupDragPayload?.groupId == group.id
+              .foregroundColor(hovered || groupDragPayload?.groupId == group.id
                                ? AppTheme.canvasChromeSecondaryInk : .clear)
               .frame(width: 28, height: 28).contentShape(Rectangle())
               .help("拖出整组非空槽位，自动编组并保留连线")
@@ -505,9 +539,9 @@ struct CanvasSlotLibraryPanel: View {
                       onDropSlot(payload, value.location)
                   })
         }
-        .background(hoveredRow == group.id ? AppTheme.chipBackground : .clear,
+        .background(hovered ? AppTheme.chipBackground : .clear,
                     in: RoundedRectangle(cornerRadius: 8, style: .continuous))
-        .onHover { hoveredRow = $0 ? group.id : nil }
+      }
     }
 
     /// 槽位行。只列**非空**槽位 —— 空槽没有 prompt，拖到画布也是个空节点，先不干扰列表。
@@ -515,7 +549,7 @@ struct CanvasSlotLibraryPanel: View {
     private func slotList(page: SlotPage, group: SpecialSlot) -> some View {
         let entries = slotEntries(groupId: group.id, capacity: max(1, store.config.slots))
         if entries.isEmpty {
-            Text((library.summaries[group.id]?.count ?? 0) < max(1, store.config.slots)
+            Text(library.summary(group.id).values.count < max(1, store.config.slots)
                 ? "正在读取…" : "无可用内容")
                 .font(.system(size: 11))
                 .foregroundColor(AppTheme.canvasChromeTertiaryInk)
@@ -555,7 +589,7 @@ struct CanvasSlotLibraryPanel: View {
     ///
     /// 另外刻意**不切组去读** `store.slots`：切组是用户可见的副作用（会改变主界面所在位置）。
     private func slotEntries(groupId: String, capacity: Int) -> [SlotEntry] {
-        (library.summaries[groupId] ?? [:]).values
+        library.summary(groupId).values.values
             .filter { $0.slot <= capacity && !$0.isEmpty }
             .sorted { $0.slot < $1.slot }
             .map { SlotEntry(slot: $0.slot, label: $0.label,
@@ -585,7 +619,8 @@ struct CanvasSlotLibraryPanel: View {
                                            name: displayTitle(entry))
         let key = Self.rowKey(groupId: groupId, slot: entry.slot)
         let isReorderTarget = (reorderTargetKey == key)
-        return HStack(spacing: 7) {
+        return LibraryRowHover { hovered in
+          HStack(spacing: 7) {
             Text("\(entry.slot)")
                 .font(.system(size: 10, weight: .medium, design: .rounded))
                 .foregroundColor(AppTheme.canvasChromeTertiaryInk)
@@ -610,13 +645,13 @@ struct CanvasSlotLibraryPanel: View {
             Image(systemName: "line.3.horizontal")
                 .font(.system(size: 10))
                 .foregroundColor(AppTheme.canvasChromeTertiaryInk.opacity(0.7))
-                .opacity(hoveredRow == key || draggingKey == key ? 1 : 0)
+                .opacity(hovered || draggingKey == key ? 1 : 0)
         }
         .padding(.leading, 28).padding(.trailing, 8).frame(height: 32)
         .contentShape(Rectangle())
         .background(
             RoundedRectangle(cornerRadius: 8, style: .continuous)
-                .fill(rowFill(key: key, isReorderTarget: isReorderTarget))
+                .fill(rowFill(key: key, isReorderTarget: isReorderTarget, hovered: hovered))
         )
         // 交换目标再加一道描边：仅靠底色变化在拖拽中不够显眼（用户此刻在看拖影，不在看行）。
         .overlay(
@@ -665,13 +700,13 @@ struct CanvasSlotLibraryPanel: View {
         .help(reorderable
               ? (entry.prompt.isEmpty ? "拖到画布创建节点，或拖到同组另一行交换位置" : entry.prompt)
               : (entry.prompt.isEmpty ? "拖到画布创建节点" : entry.prompt))
-        .onHover { hoveredRow = $0 ? key : nil }
+        }
     }
 
-    private func rowFill(key: String, isReorderTarget: Bool) -> Color {
+    private func rowFill(key: String, isReorderTarget: Bool, hovered: Bool) -> Color {
         if isReorderTarget { return AppTheme.chromeAccentSoftFill }
         if draggingKey == key { return AppTheme.chromeAccentSoftFill.opacity(0.6) }
-        if hoveredRow == key { return AppTheme.chipBackground }
+        if hovered { return AppTheme.chipBackground }
         return .clear
     }
 

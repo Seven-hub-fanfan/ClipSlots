@@ -102,9 +102,9 @@ public enum WindowLayoutMetrics {
     ///
     /// 想把这个数压下来，只能减少顶栏内容（例如窄窗下把「ClipSlots + 检查更新」收成纯 logo、
     /// 或把搜索栏折成一颗放大镜按钮）—— 那是功能取舍，不属于本次「修错乱」的范围。
-    /// Includes the disabled Beat segment. Keep the switcher and window budget
+    /// Includes the models entry. Keep the switcher and window budget
     /// on the same constant; a wider switcher must never overflow a smaller host.
-    public static let workspaceSwitcherWidth: CGFloat = 238
+    public static let workspaceSwitcherWidth: CGFloat = 244
     public static let minWindowContentWidth: CGFloat = ceil(
         centerReservedRowMinWidth(leftMin: 322, rightMin: 432,
                                   centerWidth: workspaceSwitcherWidth) + 40)

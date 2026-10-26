@@ -11,12 +11,15 @@ public struct AgentLiveMCPLease: Codable, Equatable, Sendable {
     public let canvasID: String
     public let sessionID: UUID
     public let snapshotID: UUID
+    public let accessMode: AgentAccessMode
 
     public init(directory: URL, token: String, runID: String, expiresAt: Date,
-                scope: AgentArtifactScope, sessionID: UUID, snapshotID: UUID) {
+                scope: AgentArtifactScope, sessionID: UUID, snapshotID: UUID,
+                accessMode: AgentAccessMode = .selectedDirectories) {
         self.directory = directory; self.token = token; self.runID = runID; self.expiresAt = expiresAt
         projectID = scope.projectID; canvasID = scope.canvasID
         self.sessionID = sessionID; self.snapshotID = snapshotID
+        self.accessMode = accessMode
     }
 
     public static let environmentKey = "CLIPSLOTS_LIVE_MCP_LEASE"
@@ -77,7 +80,16 @@ public final class AgentExternalLiveMCPTools: AgentToolExecuting, @unchecked Sen
         self.reader = reader; self.lease = lease
     }
 
-    public func specs() -> [AgentToolSpec] { reader.specs() + AgentLiveMCPMailbox.specs }
+    public func specs() -> [AgentToolSpec] {
+        let actions = CanvasAgentActionTools(base: AgentPreviewTools(), mode: lease.accessMode,
+            automaticApproval: false, onInteraction: { _ in }, perform: { _, _ in [:] })
+        let slots = AgentAccessTools(base: AgentNativeSlotTools(), mode: lease.accessMode)
+        let proposals = lease.accessMode == .allDirectoriesReadOnly ? [] : AgentLiveMCPMailbox.specs
+        return reader.specs().map { spec in
+            .init(name: spec.name, description: spec.description + " 本连接由原生主机读取当前状态。",
+                  parameters: spec.parameters, originLabel: "当前画布")
+        } + actions.specs() + slots.specs() + proposals
+    }
 
     public func execute(call: AgentToolCall) async -> AgentToolResult {
         guard !Task.isCancelled, Date() < lease.expiresAt else {
@@ -87,17 +99,11 @@ public final class AgentExternalLiveMCPTools: AgentToolExecuting, @unchecked Sen
             from: lease.directory.appendingPathComponent("lease.json"), within: lease.directory), marker == lease else {
             return .failure("当前画布连接已取消，请重新连接。", code: "LIVE_CONNECTION_UNAVAILABLE")
         }
-        if reader.specs().contains(where: { $0.name == call.name }) {
-            let response = await reader.execute(call: call)
-            guard call.name == "clipslots_context", !response.isFailure,
-                  var object = (try? JSONValue.decode(jsonText: response.content))?.objectValue else { return response }
-            object["read_only"] = false
-            object["writes_require_native_confirmation"] = true
-            object["live_run_id"] = .string(lease.runID)
-            object["expires_at"] = .string(ISO8601DateFormatter().string(from: lease.expiresAt))
-            return .init(content: (try? JSONValue.object(object).encodedText()) ?? response.content, summary: "当前画布连接")
+        // Artifact reads remain project-scoped; canvas reads always go to the live host.
+        if call.name.hasPrefix("artifact_") {
+            return await reader.execute(call: call)
         }
-        guard AgentLiveMCPMailbox.specs.contains(where: { $0.name == call.name }) else {
+        guard specs().contains(where: { $0.name == call.name }) else {
             return .failure("该工具未启用。", code: "TOOL_NOT_ENABLED")
         }
         var requestURL: URL?
@@ -107,7 +113,7 @@ public final class AgentExternalLiveMCPTools: AgentToolExecuting, @unchecked Sen
             if let responseURL { try? FileManager.default.removeItem(at: responseURL) }
         }
         do {
-            let request = AgentLiveMCPRequest(token: lease.token, deadline: min(lease.expiresAt, Date().addingTimeInterval(10)),
+            let request = AgentLiveMCPRequest(token: lease.token, deadline: min(lease.expiresAt, Date().addingTimeInterval(300)),
                                              name: call.name, arguments: try call.arguments())
             requestURL = lease.directory.appendingPathComponent(request.id.uuidString + ".request")
             responseURL = lease.directory.appendingPathComponent(request.id.uuidString + ".response")

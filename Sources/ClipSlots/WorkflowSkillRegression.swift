@@ -71,8 +71,20 @@ func runWorkflowSkillProbe(store: SlotStoreObservable, canvas: CanvasStore,
         let model = sessions.canvasSession(canvas: canvas, store: store)
         model.setBackend(WorkflowSkillFixtureBackend())
         guard let context = model.canvasContext else { check(false, "workflow context exists"); return }
-        model.send(text: CanvasAgentContext.summarizePrompt, config: AgentConfig(), enabledSkills: [])
-        await settle()
+        for _ in 0..<100 {
+            if !context.isLoadingReferences { break }
+            try? await Task.sleep(for: .milliseconds(20))
+        }
+        check(!context.isLoadingReferences, "workflow selected references finish native capture before submission")
+        guard model.send(text: CanvasAgentContext.summarizePrompt, config: AgentConfig(), enabledSkills: []) else {
+            check(false, "workflow summary submission succeeds: \(model.errorText ?? "unknown")"); return
+        }
+        for _ in 0..<100 {
+            if !model.isRunning { break }
+            try? await Task.sleep(for: .milliseconds(20))
+        }
+        check(!model.isRunning && model.messages.last?.role == .assistant,
+              "workflow summary has a completed native reply before opening its editor")
         let host = NSHostingView(rootView: AnyView(AgentSidebarView(model: model, isVisible: .constant(true))))
         let window = NSWindow(contentRect: NSRect(x: 120, y: 80, width: 400, height: 860),
                               styleMask: [.titled, .closable], backing: .buffered, defer: false)

@@ -33,6 +33,9 @@ enum TapSkin {
         case .image: return tone(0x147d76, 0x75c8bf)
         case .video: return tone(0x3869c8, 0x91b4fc)
         case .slot, .batchTemplate: return tone(0xa86b18, 0xe7be7a)
+        case .audio: return tone(0xa5498c, 0xe8a0d1)
+        case .threeD, .stage: return tone(0x3869c8, 0x91b4fc)
+        case .timeline: return tone(0x147d76, 0x75c8bf)
         }
     }
 

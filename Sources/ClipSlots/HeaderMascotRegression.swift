@@ -5,6 +5,42 @@ import ClipSlotsKit
 
 @MainActor
 func runHeaderMascotProbe(root:NSView,directory:URL,check:(Bool,String)->Void) async {
+    // Hold completions as a deliberately stalled GPU. Hundreds of UI samples
+    // must stay bounded and only the latest pose may start after it recovers.
+    var launched:[Int]=[],presented:[Int]=[]
+    var completions:[MascotFrameScheduler.Completion]=[]
+    let frame=MascotRenderedFrame(bitmap:nil,geometryInsideFrustum:true,facialSurfaceValid:true)
+    var scheduler:MascotFrameScheduler?=MascotFrameScheduler(render: { request, completion in
+        launched.append(request.size);completions.append(completion)
+    },present: { request,_ in presented.append(request.size) })
+    for size in 128...400 {
+        scheduler?.submit(MascotFrameRequest(pose:MascotPose(),size:size,activity:.idle))
+    }
+    check(launched==[128] && scheduler?.inFlight==true && scheduler?.coalesced==271,
+          "Mascot stalled renderer keeps one in flight and coalesces 272 pending samples")
+    completions.removeFirst()(frame)
+    check(launched==[128,400] && presented==[128],
+          "Mascot resumed renderer skips obsolete intermediate poses")
+    scheduler?.invalidate()
+    scheduler?.submit(MascotFrameRequest(pose:MascotPose(),size:560,activity:.busy))
+    completions.removeFirst()(frame)
+    check(launched==[128,400,560] && presented==[128] && scheduler?.discarded==1,
+          "Mascot resize or activity generation rejects the older completed raster")
+    scheduler?.invalidate()
+    scheduler?.submit(MascotFrameRequest(pose:MascotPose(),size:561,activity:.voice))
+    scheduler?.invalidate()
+    completions.removeFirst()(frame)
+    check(launched==[128,400,560] && presented==[128] && scheduler?.inFlight==false,
+          "Mascot hiding cancels the pending pose and discards the in-flight completion")
+    scheduler?.submit(MascotFrameRequest(pose:MascotPose(),size:562,activity:.idle))
+    completions.removeFirst()(frame)
+    check(presented==[128,562],"Mascot unhide accepts a fresh generation")
+    scheduler?.submit(MascotFrameRequest(pose:MascotPose(),size:563,activity:.idle))
+    weak var released=scheduler
+    scheduler=nil
+    completions.removeFirst()(frame)
+    check(released==nil && presented==[128,562],
+          "Mascot in-flight completion cannot retain or revive a disposed scheduler")
     func views(_ view:NSView) -> [HeaderMascotNativeView] {
         (view as? HeaderMascotNativeView).map { [$0] } ?? view.subviews.flatMap(views)
     }

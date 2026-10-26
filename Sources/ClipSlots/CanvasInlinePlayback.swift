@@ -7,6 +7,10 @@ import ClipSlotsKit
 /// 不发布逐帧进度，也不随节点选择、画布重绘重新创建 AVPlayer。
 @MainActor
 final class CanvasInlinePlayback: ObservableObject {
+    #if DEBUG
+    static weak var regressionInstance: CanvasInlinePlayback?
+    init() { Self.regressionInstance = self }
+    #endif
     enum Phase { case idle, loading, playing, paused, failed }
     @Published private(set) var nodeID: String?
     @Published private(set) var phase: Phase = .idle

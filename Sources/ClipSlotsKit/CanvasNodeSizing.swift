@@ -22,6 +22,7 @@ public enum CanvasNodeSizing {
     }
 
     public static func initialSize(for kind: CanvasNodeKind) -> CGSize {
+        if kind.cardForm == .tool { return CanvasNode.defaultSize(for: kind) }
         if kind == .slot { return CanvasNode.defaultSize }
         if kind == .text { return CGSize(width: defaultShortSide, height: defaultShortSide) }
         return size(ratio: CanvasNode.defaultRatio(for: kind)) ?? CGSize(width: defaultShortSide, height: defaultShortSide)

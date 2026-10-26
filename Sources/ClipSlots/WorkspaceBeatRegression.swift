@@ -7,10 +7,18 @@ import ClipSlotsKit
 func runWorkspaceBeatProbe(directory: URL, check: (Bool, String) -> Void) async {
     final class Selection: ObservableObject {
         @Published var mode = WorkspaceMode.canvas
+        @Published var reduceMotion = false
     }
     struct Fixture: View {
         @ObservedObject var state: Selection
-        var body: some View { WorkspaceModeSwitcher(selection: $state.mode).padding(20) }
+        var body: some View {
+            WorkspaceModeSwitcher(selection: Binding(get: { state.mode }, set: { mode in
+                var transaction = Transaction()
+                transaction.disablesAnimations = true
+                withTransaction(transaction) { state.mode = mode }
+            }), animationsEnabled: !state.reduceMotion)
+            .padding(20).background(Color(white: 0.90))
+        }
     }
     func elements(_ node: AnyObject, depth: Int = 0) -> [AnyObject] {
         guard depth < 20 else { return [] }
@@ -22,7 +30,7 @@ func runWorkspaceBeatProbe(directory: URL, check: (Bool, String) -> Void) async 
     }
     let state = Selection()
     let host = NSHostingView(rootView: Fixture(state: state))
-    let window = NSWindow(contentRect: NSRect(x: 80, y: 80, width: 310, height: 90),
+    let window = NSWindow(contentRect: NSRect(x: 80, y: 80, width: 284, height: 80),
                           styleMask: [.titled], backing: .buffered, defer: false)
     window.isReleasedWhenClosed = false
     window.contentView = host
@@ -47,21 +55,85 @@ func runWorkspaceBeatProbe(directory: URL, check: (Bool, String) -> Void) async 
         "label": $0.accessibilityLabel?() ?? "", "enabled": $0.isAccessibilityEnabled?() ?? false
     ] as [String: Any] }
     try? JSONSerialization.data(withJSONObject: description, options: [.prettyPrinted, .sortedKeys])
-        .write(to: directory.appendingPathComponent("workspace-beat-ax.json"))
-    let beat = nodes.first { ($0.accessibilityIdentifier?() ?? "") == "workspace-beat"
-        || ($0.accessibilityRole?() == .button && $0.accessibilityLabel?() == "测评（Beat）") }
-    check(beat != nil && beat?.accessibilityLabel?() == "测评（Beat）", "native top bar names the placeholder 测评（Beat）")
-    check(beat?.isAccessibilityEnabled?() == false, "Beat is disabled in the native accessibility tree")
-    _ = beat?.accessibilityPerformPress?()
+        .write(to: directory.appendingPathComponent("workspace-models-ax.json"))
+    let models = nodes.first { ($0.accessibilityIdentifier?() ?? "") == "workspace-models" }
+    check(models != nil && models?.accessibilityLabel?() == "模型", "native top bar shows 模型")
+    check(!nodes.contains { ($0.accessibilityLabel?() ?? "").contains("Beat") }, "native top bar removes Beat label")
+    check(models?.isAccessibilityEnabled?() == false, "models placeholder retains its unavailable state")
+    _ = models?.accessibilityPerformPress?()
     try? await Task.sleep(for: .milliseconds(80))
-    check(state.mode == .canvas, "native Beat press cannot leave the canvas")
+    check(state.mode == .canvas, "native models placeholder cannot leave the canvas")
     check(!WorkspaceMode.agent.isSelectable, "legacy agent route is not a selectable workspace")
+    check(WorkspaceBrandResources.markURL.flatMap { NSImage(contentsOf: $0) } != nil,
+          "original app-center artwork loads from bundled transparent resource")
     let edit = elements(window).first { ($0.accessibilityIdentifier?() ?? "") == "workspace-edit"
         || ($0.accessibilityRole?() == .button && $0.accessibilityLabel?() == "编辑") }
-    _ = edit?.accessibilityPerformPress?()
+    let canvas = elements(window).first { ($0.accessibilityIdentifier?() ?? "") == "workspace-canvas" }
+    if let a = edit?.accessibilityFrame?(), let b = canvas?.accessibilityFrame?(), let c = models?.accessibilityFrame?() {
+        check(abs(a.width-b.width)<0.5 && abs(b.width-c.width)<0.5
+            && abs(a.midY-b.midY)<0.5 && abs(b.midY-c.midY)<0.5, "all three native segments have equal width and baseline")
+    } else { check(false, "native segment frames available") }
+    @discardableResult func capture(_ name: String) -> Double {
+        if let bitmap = host.bitmapImageRepForCachingDisplay(in: host.bounds) {
+            host.cacheDisplay(in: host.bounds, to: bitmap)
+            try? bitmap.representation(using: .png, properties: [:])?
+                .write(to: directory.appendingPathComponent(name + ".png"))
+            let x = Int((host.bounds.midX + WorkspaceModeSwitcher.preferredWidth / 2 - 10)
+                * CGFloat(bitmap.pixelsWide) / host.bounds.width)
+            if let color = bitmap.colorAt(x: x, y: bitmap.pixelsHigh / 2)?.usingColorSpace(.sRGB) {
+                return (color.redComponent + color.greenComponent + color.blueComponent) / 3
+            }
+        }
+        return -1
+    }
+    let originalSkin = AppSkinCenter.current
+    var paletteSamples = [[String: Any]]()
+    for colorful in [false, true] {
+        AppSkinCenter.apply(colorful ? .colorful : .minimal)
+        for dark in [false, true, false] {
+            window.appearance = NSAppearance(named: dark ? .darkAqua : .aqua)
+            try? await Task.sleep(for: .milliseconds(180))
+            let name = "workspace-\(colorful ? "colorful" : "minimal")-\(dark ? "dark" : "light")"
+            let brightness = capture(name)
+            check(dark ? brightness >= 0 && brightness < 0.25 : brightness > 0.92,
+                "\(name) live appearance renders \(dark ? "black" : "white") base")
+            paletteSamples.append(["theme": name, "baseBrightness": brightness])
+        }
+    }
+    AppSkinCenter.apply(originalSkin)
+    try? JSONSerialization.data(withJSONObject: paletteSamples, options: [.prettyPrinted])
+        .write(to: directory.appendingPathComponent("workspace-palette.json"))
+    let buttons = nodes.filter { $0.accessibilityRole?() == .button }
+    check(Set(buttons.compactMap { $0.accessibilityIdentifier?() }).count == 3,
+          "decorative brand mark adds no accessible button or selection")
+    let decorationPoint = CGPoint(x: host.bounds.midX - WorkspaceModeSwitcher.preferredWidth / 2 + 29,
+                                  y: host.bounds.midY)
+    for type in [NSEvent.EventType.leftMouseDown, .leftMouseUp] {
+        if let event = NSEvent.mouseEvent(with: type, location: host.convert(decorationPoint, to: nil),
+            modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
+            windowNumber: window.windowNumber, context: nil, eventNumber: 0, clickCount: 1, pressure: 1) {
+            window.sendEvent(event)
+        }
+    }
     try? await Task.sleep(for: .milliseconds(100))
+    check(state.mode == .canvas, "native click on decorative brand mark leaves selection unchanged")
+    var motion: OwnWindowCompositorProbe?
+    if #available(macOS 14.4, *) {
+        do {
+            motion = try await OwnWindowCompositorProbe.start(window: window)
+            motion?.begin(region: CGRect(origin: .zero, size: window.frame.size), retainImages: true)
+            try? await Task.sleep(for: .milliseconds(180))
+        } catch { check(false, "own-window animation capture starts: \(error.localizedDescription)") }
+    }
+    capture("workspace-contour-before")
+    let started = motion?.now ?? 0
+    _ = edit?.accessibilityPerformPress?()
+    for index in 0..<18 {
+        try? await Task.sleep(for: .milliseconds(25))
+        capture(String(format: "workspace-motion-%02d", index))
+    }
     if edit == nil {
-        let point = CGPoint(x: host.bounds.midX - 78, y: host.bounds.midY)
+        let point = CGPoint(x: host.bounds.midX - 41, y: host.bounds.midY)
         let location = host.convert(point, to: nil)
         for type in [NSEvent.EventType.leftMouseDown, .leftMouseUp] {
             if let event = NSEvent.mouseEvent(with: type, location: location, modifierFlags: [],
@@ -71,10 +143,30 @@ func runWorkspaceBeatProbe(directory: URL, check: (Bool, String) -> Void) async 
         try? await Task.sleep(for: .milliseconds(150))
     }
     check(state.mode == .edit, "edit workspace still opens through its native control")
+    if let motion {
+        let ended = motion.now
+        let report = await motion.report(since: started, until: ended, expectedText: nil,
+                                        directory: directory, name: "workspace-contour")
+        check((report["changedPixelSamples"] as? Int ?? 0) >= 4,
+              "adaptive contour animates through distinct compositor frames with parent animations disabled")
+        try? JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted])
+            .write(to: directory.appendingPathComponent("workspace-motion.json"))
+        _ = await motion.exportAnimation(since: started, until: ended,
+            directory: directory.appendingPathComponent("workspace-compositor-animation"))
+        motion.begin(region: CGRect(origin: .zero, size: window.frame.size), retainImages: true)
+        state.reduceMotion = true
+        try? await Task.sleep(for: .milliseconds(160))
+        _ = canvas?.accessibilityPerformPress?()
+        try? await Task.sleep(for: .milliseconds(400))
+        check(state.mode == .canvas, "reduced-motion native switch still changes workspace")
+        capture("workspace-reduced-motion")
+        await motion.stop()
+    }
     if let bitmap = host.bitmapImageRepForCachingDisplay(in: host.bounds) {
         host.cacheDisplay(in: host.bounds, to: bitmap)
         try? bitmap.representation(using: .png, properties: [:])?
-            .write(to: directory.appendingPathComponent("workspace-beat.png"))
+            .write(to: directory.appendingPathComponent("workspace-models.png"))
     }
+    await WelcomeCardInteractionRegression.run(directory: directory, check: check)
 }
 #endif

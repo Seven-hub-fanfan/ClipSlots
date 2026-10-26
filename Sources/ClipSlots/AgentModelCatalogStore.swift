@@ -3,6 +3,9 @@ import ClipSlotsKit
 
 @MainActor
 final class AgentModelCatalogStore: ObservableObject {
+    #if DEBUG
+    static var debugCredentials: (@Sendable (URL, Bool) async throws -> String?)?
+    #endif
     @Published private(set) var models: [AgentDiscoveredModel] = []
     @Published private(set) var isLoading = false
     @Published private(set) var error: String?
@@ -27,12 +30,19 @@ final class AgentModelCatalogStore: ObservableObject {
     func refresh(endpoint: URL, gateway: Bool) {
         task?.cancel()
         let ticket = UUID(); generation = ticket
+        let sameSource = sourceEndpoint == endpoint && sourceGateway == gateway
         sourceEndpoint = endpoint; sourceGateway = gateway
-        models = []; error = nil; isLoading = true
+        if !sameSource { models = [] }
+        error = nil; isLoading = true
         task = Task {
             do {
                 let url = try AgentModelCatalog.modelsURL(endpoint: endpoint)
-                let key = try await credentials(endpoint, gateway)
+                #if DEBUG
+                let credentialReader = Self.debugCredentials ?? credentials
+                #else
+                let credentialReader = credentials
+                #endif
+                let key = try await credentialReader(endpoint, gateway)
                 try Task.checkCancellation()
                 var request = URLRequest(url: url)
                 request.timeoutInterval = 15
@@ -59,6 +69,9 @@ final class AgentModelCatalogStore: ObservableObject {
                 if found.isEmpty { error = "服务未提供可用模型。" }
             } catch {
                 guard generation == ticket, !Task.isCancelled else { return }
+                // Keep the current list while refreshing, but do not retain
+                // unverified capabilities after a failed or malformed reply.
+                models = []
                 self.error = error.localizedDescription; isLoading = false
             }
         }

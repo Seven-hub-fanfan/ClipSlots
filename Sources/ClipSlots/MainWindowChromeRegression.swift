@@ -41,6 +41,18 @@ enum MainWindowChromeRegression {
                          ready: @escaping () -> Bool,
                          expanded: @escaping () -> Bool,
                          toggleExpanded: @escaping () -> Void) {
+        if ProcessInfo.processInfo.environment["CLIPSLOTS_LARGE_LIBRARY_PROBE"] == "1",
+           !started, Bundle.main.bundleIdentifier == "com.clipslots.app.canvas-v2174-test",
+           let path = ProcessInfo.processInfo.environment["CLIPSLOTS_FIXTURE_DIR"],
+           ProcessInfo.processInfo.environment["CLIPSLOTS_DATA_DIR"]?.hasPrefix("/tmp/clipslots-v2174-") == true {
+            started = true
+            Task {
+                try? await Task.sleep(for: .seconds(2))
+                await LargeLibraryRegression.run(directory: URL(fileURLWithPath: path),
+                    store: store, canvas: canvas, request: request, ready: ready)
+            }
+            return
+        }
         if ProcessInfo.processInfo.environment["CLIPSLOTS_LIBRARY_DESIGN_PROBE"] == "1",
            !started,
            let path = ProcessInfo.processInfo.environment["CLIPSLOTS_FIXTURE_DIR"],
@@ -70,6 +82,12 @@ enum MainWindowChromeRegression {
                             ready: @escaping () -> Bool,
                             expanded: @escaping () -> Bool,
                             toggleExpanded: @escaping () -> Void) async {
+        let environment = ProcessInfo.processInfo.environment
+        let requestedSkin = AppSkin(rawValue: environment["CLIPSLOTS_TEST_SKIN"] ?? "minimal") ?? .minimal
+        let requestedAppearance = ThemeMode(rawValue: environment["CLIPSLOTS_TEST_APPEARANCE"] ?? "light") ?? .light
+        AppSkinCenter.apply(requestedSkin)
+        UserDefaults.standard.set(requestedAppearance.rawValue, forKey: AppearanceDefaults.key)
+        NSApp.appearance = requestedAppearance.nsAppearance
         var passed = 0, failures: [String] = [], observations: [[String: Any]] = []
         func check(_ value: Bool, _ title: String) {
             if value { passed += 1 } else { failures.append(title) }
@@ -88,6 +106,10 @@ enum MainWindowChromeRegression {
         }
         guard let window = NSApp.windows.first(where: { $0.canBecomeMain }),
               let root = window.contentView else { return }
+        await pause()
+        check(AppSkinCenter.current == requestedSkin, "requested skin applied")
+        check((window.effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua)
+              == (requestedAppearance == .dark), "requested native appearance applied")
         func libraryHeader() -> NSView? {
             views(root, LibraryHeaderView.self).first { $0.window === window && !$0.isHiddenOrHasHiddenAncestor }
         }
@@ -109,6 +131,9 @@ enum MainWindowChromeRegression {
                   "\(stage) canvas header icons share 44pt targets")
             check(buttons.allSatisfy { abs(top($0) - top(buttons[0])) < 0.5 },
                   "\(stage) canvas header controls align on the same baseline")
+            check(buttons.allSatisfy {
+                top($0) >= WorkspaceModeSwitcher.pinnedTopInset + WorkspaceModeSwitcher.preferredHeight + 8
+            }, "\(stage) canvas header buttons remain below the contour switcher")
             check(zip(buttons, buttons.dropFirst()).allSatisfy { abs($1.minX - $0.maxX - 8) < 0.5 },
                   "\(stage) canvas header has consistent 8pt gaps")
             let sidebarRect = sidebar.map { $0.convert($0.bounds, to: root) }

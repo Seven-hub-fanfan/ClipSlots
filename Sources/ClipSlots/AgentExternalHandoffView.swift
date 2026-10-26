@@ -19,7 +19,7 @@ struct AgentHandoffLayout {
     }
 }
 
-private struct AgentBrandIcon: View {
+struct AgentBrandIcon: View {
     let identifier: String
     let size: CGFloat
     var body: some View {

@@ -40,6 +40,7 @@ func runAgentComposerLayoutProbe(directory: URL, check: (Bool, String) -> Void) 
     var allInside = true
     var allEditorStable = true
     var allLabelsAligned = true
+    var polishAndModelSeparated = true
     for mode in WorkspaceMode.allCases {
         let widths: [CGFloat] = mode == .agent ? [360, 480, 800, 1200] : [AgentSidebarView.width]
         for skin in [AppSkin.minimal, .colorful] {
@@ -64,6 +65,10 @@ func runAgentComposerLayoutProbe(directory: URL, check: (Bool, String) -> Void) 
                         let skill = frame("agent-reference-skill"), context = frame("agent-context-usage")
                         let add = frame("agent-composer-add"), voice = frame("agent-voice-input")
                         let picker = frame("agent-model-picker")
+                        let polish = frame("agent-ai-polish")
+                        polishAndModelSeparated = polishAndModelSeparated && (polish.map { p in
+                            picker.map { abs(p.midY - $0.midY) < 2 && p.maxX <= $0.minX + 1 } ?? false
+                        } ?? false)
                         let row = frame("agent-composer-toolbar")
                         let editorFrame = editors(host).first.map { editor in
                             window.convertToScreen(editor.convert(editor.bounds, to: nil))
@@ -73,7 +78,7 @@ func runAgentComposerLayoutProbe(directory: URL, check: (Bool, String) -> Void) 
                             context.map { p in abs(s.midY - p.midY) < 2 && s.maxX < p.minX } ?? false
                         } ?? false
                         let contentFrame = window.convertToScreen(host.frame)
-                        let inside = [add, context, voice, picker, editorFrame].allSatisfy {
+                        let inside = [add, context, voice, picker, polish, editorFrame].allSatisfy {
                             guard let f = $0 else { return false }
                             return f.minX >= contentFrame.minX - 2
                                 && f.maxX <= contentFrame.maxX + 2
@@ -114,6 +119,7 @@ func runAgentComposerLayoutProbe(directory: URL, check: (Bool, String) -> Void) 
     check(allInside, "composer controls stay within each tested window")
     check(allEditorStable, "adding Skill references does not move the editor vertically")
     check(allLabelsAligned, "selected Skill labels align with the Skills control in the reference row")
+    check(polishAndModelSeparated, "AI polish and model picker remain separate aligned controls in all widths and four themes")
     let nodes = elements(host)
     if let remove = nodes.first(where: {
         ($0.accessibilityIdentifier?() ?? "") == "agent-remove-skill-\(references[0].id)"
@@ -158,6 +164,27 @@ func runAgentComposerLayoutProbe(directory: URL, check: (Bool, String) -> Void) 
     }
     try? JSONSerialization.data(withJSONObject: geometry, options: [.prettyPrinted, .sortedKeys])
         .write(to: directory.appendingPathComponent("skill-layout-geometry.json"))
+    model.draft = ""
+    await settle()
+    let emptyPolish = elements(host).first { ($0.accessibilityIdentifier?() ?? "") == "agent-ai-polish" }
+    check(emptyPolish?.isAccessibilityEnabled?() == false, "empty draft disables the direct AI polish action")
+    model.draft = "润色前🙂"
+    let transport = AgentScriptedTransport(steps: [.sse(
+        "data: {\"choices\":[{\"delta\":{\"content\":\"润色后🙂\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n")])
+    model.setBackend(AgentService(transport: transport, secretStore: AgentInMemorySecretStore(key: "fixture")), kind: .deepseek)
+    await settle()
+    if let polish = elements(host).first(where: { ($0.accessibilityIdentifier?() ?? "") == "agent-ai-polish" }) {
+        _ = polish.accessibilityPerformPress?()
+        for _ in 0..<50 {
+            await settle()
+            if !model.isPolishing { break }
+        }
+        check(model.draft == "润色后🙂" && !model.isRunning,
+              "native sparkle button polishes the draft without submitting an Agent task")
+        let request = await transport.lastRequestJSON()
+        check(request?["tools"] == nil && request?["model"] != nil,
+              "direct AI polish uses the selected text model without tools")
+    } else { check(false, "direct AI polish is accessible") }
     window.close()
 }
 #endif

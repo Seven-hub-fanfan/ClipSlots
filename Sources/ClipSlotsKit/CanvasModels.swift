@@ -26,6 +26,7 @@ public enum CanvasNodeCardForm: Equatable {
     case text
     /// 媒体卡（v2.15.0）：媒体铺满卡片 + 悬浮信息角标 + 底部单行提示词条。
     case media
+    case tool
 }
 
 public enum CanvasNodeKind: String, Codable, Equatable {
@@ -50,6 +51,7 @@ public enum CanvasNodeKind: String, Codable, Equatable {
     /// 为 true、模型清单走图像档 —— 它继承的正是 v2.14.x 时 `.image` 的全部能力，
     /// 老文档迁到这里不会少任何一个功能（见 `CanvasDocument.migrateKinds`）。
     case slot
+    case audio, threeD, timeline, stage
 
     public var displayName: String {
         switch self {
@@ -58,6 +60,10 @@ public enum CanvasNodeKind: String, Codable, Equatable {
         case .video: return "视频生成"
         case .batchTemplate: return "批量模版"
         case .slot: return "槽位"
+        case .audio: return "音频"
+        case .threeD: return "3D"
+        case .timeline: return "剪辑时间线"
+        case .stage: return "3D 片场"
         }
     }
 
@@ -69,6 +75,10 @@ public enum CanvasNodeKind: String, Codable, Equatable {
         case .video: return "film"
         case .batchTemplate: return "square.stack.3d.up"
         case .slot: return "square.grid.2x2"
+        case .audio: return "waveform"
+        case .threeD: return "cube"
+        case .timeline: return "film.stack"
+        case .stage: return "globe"
         }
     }
 
@@ -77,6 +87,7 @@ public enum CanvasNodeKind: String, Codable, Equatable {
         switch self {
         case .text: return false
         case .image, .video, .batchTemplate, .slot: return true
+        case .audio, .threeD, .timeline, .stage: return true
         }
     }
 
@@ -89,6 +100,7 @@ public enum CanvasNodeKind: String, Codable, Equatable {
         case .text: return .text
         case .image, .video: return .media
         case .slot, .batchTemplate: return .slotStack
+        case .audio, .threeD, .timeline, .stage: return .tool
         }
     }
 
@@ -217,7 +229,7 @@ public struct CanvasNode: Codable, Identifiable, Equatable {
     /// nil 仅用于读取没有角色字段的旧文档，由文档层结合连线完成迁移。
     public var mediaRole: CanvasMediaRole?
     public var isMediaSource: Bool { kind.isMediaNode && mediaRole == .source }
-    public var canGenerate: Bool { kind.producesAsset && !isMediaSource }
+    public var canGenerate: Bool { kind.producesAsset && kind.cardForm != .tool && !isMediaSource }
     public var displayName: String {
         isMediaSource ? (kind == .video ? "视频" : "图片") : kind.displayName
     }
@@ -341,6 +353,7 @@ public struct CanvasNode: Codable, Identifiable, Equatable {
     /// 独立导入画布的媒体不在此集合；旧文档缺省空集合，保留已有素材预览。
     public var inputAttachmentIds: [String]
 
+    public var tools: CanvasToolConfiguration?
     public var createdAt: Date
     public var updatedAt: Date
 
@@ -353,7 +366,10 @@ public struct CanvasNode: Codable, Identifiable, Equatable {
     /// 竖图会被压成一根签子 —— 这正是 `CanvasMediaCardLayout` 让位顺序要处理的那个窘境，
     /// 与其生下来就触发让位，不如一开始给足。
     public static func defaultSize(for kind: CanvasNodeKind) -> CGSize {
-        kind.isMediaNode ? CanvasMediaCardLayout.defaultSize : defaultSize
+        if kind == .timeline { return CGSize(width: 960, height: 104) }
+        if kind == .audio { return CGSize(width: 480, height: 270) }
+        if kind == .threeD || kind == .stage { return CGSize(width: 480, height: 320) }
+        return kind.isMediaNode ? CanvasMediaCardLayout.defaultSize : defaultSize
     }
 
     /// 正文默认字号。卡片是 260pt 宽的定尺容器，10pt 是「两行能塞进 ~60 字」的经验值。
@@ -442,6 +458,7 @@ public struct CanvasNode: Codable, Identifiable, Equatable {
         self.parentNodeId = parentNodeId
         self.outputAttachmentIds = outputAttachmentIds
         self.inputAttachmentIds = inputAttachmentIds
+        self.tools = kind.cardForm == .tool ? CanvasToolConfiguration() : nil
         self.animationStyle = animationStyle
         self.createdAt = createdAt
         self.updatedAt = updatedAt
@@ -455,6 +472,8 @@ public struct CanvasNode: Codable, Identifiable, Equatable {
     public static func defaultModel(for kind: CanvasNodeKind) -> String {
         switch kind {
         case .video: return CrateGeneration.defaultVideoModel
+        case .audio: return "macos-speech"
+        case .threeD, .timeline, .stage: return ""
         default: return CrateGeneration.defaultModel
         }
     }
@@ -465,7 +484,8 @@ public struct CanvasNode: Codable, Identifiable, Equatable {
     /// 全部 7 个视频模型都声明了的档位（方图 `1:1` 反而不是每个都有）。
     public static func defaultRatio(for kind: CanvasNodeKind) -> String {
         switch kind {
-        case .video: return "16:9"
+        case .video, .audio, .timeline: return "16:9"
+        case .threeD, .stage: return "3:2"
         default: return "1:1"
         }
     }
@@ -483,6 +503,7 @@ public struct CanvasNode: Codable, Identifiable, Equatable {
         case state, taskId, seed
         case parentNodeId, generationSourceID
         case outputAttachmentIds, inputAttachmentIds
+        case tools
         case animationStyle
         case createdAt, updatedAt
         // 旧字段：hotfix19 及更早的节点自带内容与溯源信息。只在解码时读，从不写回。
@@ -553,6 +574,8 @@ public struct CanvasNode: Codable, Identifiable, Equatable {
         // v2.11.17 新增：老文档没有产物标记，缺省空集合（= 全部附件都算入参，与老行为一致）。
         outputAttachmentIds = try c.decodeIfPresent([String].self, forKey: .outputAttachmentIds) ?? []
         inputAttachmentIds = try c.decodeIfPresent([String].self, forKey: .inputAttachmentIds) ?? []
+        tools = try c.decodeIfPresent(CanvasToolConfiguration.self, forKey: .tools)
+            ?? (kind.cardForm == .tool ? CanvasToolConfiguration() : nil)
         // ★ 九轮：只剩扇形一种风格；老文档里的 `carousel` / `stackedScatter` 由
         // `ExpandStyle.init(from:)` 迁移成 `.fanOut`（不抛错，见那边注释）。
         animationStyle = try c.decodeIfPresent(CanvasFanGeometry.ExpandStyle.self,
@@ -570,6 +593,7 @@ public struct CanvasNode: Codable, Identifiable, Equatable {
         try c.encode(slot, forKey: .slot)
         try c.encode(kind, forKey: .kind)
         try c.encodeIfPresent(mediaRole, forKey: .mediaRole)
+        try c.encodeIfPresent(tools, forKey: .tools)
         try c.encode(x, forKey: .x)
         try c.encode(y, forKey: .y)
         try c.encode(width, forKey: .width)

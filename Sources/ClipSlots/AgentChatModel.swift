@@ -268,6 +268,7 @@ final class AgentChatModel: ObservableObject {
             canvasContext?.observeSelection(to: self)
             externalMCPHost?.cancel()
             externalMCPHost = nil
+            clearExternalInteractions()
             let backend = backendSelection.backend
             Task { await hydrateGateway(backend, inactive: !isRunning) }
         }
@@ -291,6 +292,7 @@ final class AgentChatModel: ObservableObject {
     @Published private(set) var liveActivities: [AgentToolActivity] = []
     @Published private(set) var isRunning = false { didSet { notifyConversationChanged() } }
     @Published private(set) var pendingInteractions: [AgentInteraction] = []
+    private var externalInteractionIDs: Set<UUID> = []
     /// 草稿跟随会话存活；收起侧栏、切换皮肤重建视图时保留。
     @Published var draft = "" {
         didSet {
@@ -1070,6 +1072,7 @@ final class AgentChatModel: ObservableObject {
     func stop() {
         externalMCPHost?.cancel()
         externalMCPHost = nil
+        clearExternalInteractions()
         cancelPolish()
         guard isRunning else { return }
         if !queuedSubmissions.isEmpty { queuePauseReason = "运行已停止，队列已保留。" }
@@ -1102,6 +1105,14 @@ final class AgentChatModel: ObservableObject {
     }
 
     func respond(to request: AgentInteraction, result: JSONValue) async {
+        if externalInteractionIDs.contains(request.id) {
+            do {
+                guard canvasContext?.isActive == true, try await request.respond(result) else { return }
+                pendingInteractions.removeAll { $0.id == request.id }
+                externalInteractionIDs.remove(request.id)
+            } catch { errorText = "MCP 操作确认失败：\(error.localizedDescription)" }
+            return
+        }
         guard let runID = currentRunID, isRunning,
               pendingInteractions.contains(where: { $0.id == request.id }) else { return }
         do {
@@ -1127,6 +1138,7 @@ final class AgentChatModel: ObservableObject {
     private func invalidateInteractions() {
         pendingInteractions.forEach { $0.invalidate() }
         pendingInteractions = []
+        externalInteractionIDs = []
     }
 
     func clearHistory() {
@@ -1776,17 +1788,42 @@ final class AgentChatModel: ObservableObject {
         let turn = try context.captureTurn(supportsTools: true)
         let text = try JSONEncoder().encode(turn.directory)
         guard text.count <= 60 * 1024 else { throw AgentExternalHandoffError.promptTooLarge }
-        let cli = Bundle.main.bundleURL.appendingPathComponent("Contents/MacOS/clipslots-cli")
+        let mcp = Bundle.main.bundleURL.appendingPathComponent("Contents/MacOS/clipslots-mcp")
         externalMCPHost?.cancel()
+        pendingInteractions.removeAll { externalInteractionIDs.contains($0.id) }
+        externalInteractionIDs = []
         let host = try AgentLiveMCPHost(context: context, scope: scope, conversationID: conversationId, snapshotID: turn.snapshotID,
-                                       root: runtimeRoot.appendingPathComponent("live-mcp"))
+            root: runtimeRoot.appendingPathComponent("live-mcp"), accessMode: accessMode,
+            onInteraction: { [weak self] request in await self?.receiveExternalInteraction(request) })
         externalMCPHost = host
         return AgentExternalProjectContext(scope: scope, projectTitle: displayName,
-            selectedContext: String(decoding: text, as: UTF8.self), cliPath: cli.path,
-            mcpReadiness: FileManager.default.isExecutableFile(atPath: cli.path)
-                ? .ready : .unavailable("尚未找到本地命令行工具"),
+            selectedContext: String(decoding: text, as: UTF8.self), cliPath: mcp.path,
+            mcpReadiness: FileManager.default.isExecutableFile(atPath: mcp.path)
+                ? .ready : .unavailable("尚未找到本地 MCP 服务"),
             region: "global", language: "zh-CN", snapshotID: turn.snapshotID, sessionID: conversationId,
             liveLease: host.lease)
+    }
+
+    private func receiveExternalInteraction(_ request: AgentInteraction) {
+        guard canvasContext?.isActive == true, externalMCPHost != nil else { request.invalidate(); return }
+        pendingInteractions.removeAll { externalInteractionIDs.contains($0.id) && !$0.isPending }
+        externalInteractionIDs = externalInteractionIDs.intersection(Set(pendingInteractions.map(\.id)))
+        externalInteractionIDs.insert(request.id)
+        pendingInteractions.append(request)
+        let id = request.id
+        Task { [weak self, weak request] in
+            while request?.isPending == true {
+                try? await Task.sleep(for: .milliseconds(120))
+            }
+            self?.pendingInteractions.removeAll { $0.id == id }
+            self?.externalInteractionIDs.remove(id)
+        }
+    }
+
+    private func clearExternalInteractions() {
+        pendingInteractions.filter { externalInteractionIDs.contains($0.id) }.forEach { $0.invalidate() }
+        pendingInteractions.removeAll { externalInteractionIDs.contains($0.id) }
+        externalInteractionIDs = []
     }
 
     // MARK: - 后端切换

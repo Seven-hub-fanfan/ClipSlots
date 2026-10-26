@@ -23,7 +23,12 @@ struct AgentSidebarModelPicker: View {
     private var manual: [AgentDiscoveredModel] { options.filter { !$0.automatic } }
     private var recommended: [AgentDiscoveredModel] {
         let preferred = manual.filter(\.recommended)
-        return preferred.isEmpty ? Array(manual.prefix(4)) : preferred
+        var rows = Array((preferred.isEmpty ? manual : preferred).prefix(4))
+        if let current = manual.first(where: { $0.id == selected }),
+           !rows.contains(where: { $0.id == selected }) {
+            rows.insert(current, at: 0)
+        }
+        return rows
     }
     private var filtered: [AgentDiscoveredModel] {
         manual.filter {
@@ -34,10 +39,25 @@ struct AgentSidebarModelPicker: View {
     private var detail: AgentDiscoveredModel? {
         options.first { $0.id == focused }
     }
+    private var menuHeight: CGFloat {
+        // In the single-column fallback, keep the whole detail card visible
+        // when changing to a model with the additional reasoning controls.
+        if compactDetails, detail != nil { return 424 }
+        return min(424, 190 + CGFloat(recommended.count) * 29
+            + (loading || notice != nil ? 32 : 0) + (expanded ? 275 : 0))
+    }
 
     var body: some View {
         HStack(alignment: .bottom, spacing: 8) {
-            if !compactDetails, let detail { modelDetails(detail) }
+            if !compactDetails {
+                Group {
+                    if let detail { modelDetails(detail) }
+                    else {
+                        Color.clear.frame(height: 1)
+                    }
+                }.frame(width: 218, alignment: .bottom)
+            }
+            ScrollView {
             VStack(alignment: .leading, spacing: 5) {
                 if compactDetails, let detail { modelDetails(detail) }
                 Button { if let automatic, automatic.available { choose(automatic.id) } } label: {
@@ -70,7 +90,7 @@ struct AgentSidebarModelPicker: View {
                         .font(.system(size: 11)).padding(.horizontal, 6)
                         .accessibilityIdentifier("agent-model-search")
                     ScrollView {
-                        VStack(spacing: 3) {
+                        LazyVStack(spacing: 3) {
                             ForEach(filtered, id: \.id) { option in modelRow(option) }
                             if filtered.isEmpty { Text("没有匹配的模型").font(.system(size: 11)).padding(9) }
                         }
@@ -88,10 +108,13 @@ struct AgentSidebarModelPicker: View {
                     Spacer()
                     Button("模型设置", action: settings)
                 }.buttonStyle(.plain).font(.system(size: 10)).foregroundColor(TapSkin.secondaryInk).padding(9)
-            }.padding(5).frame(width: 228)
+            }.padding(5).frame(width: 242)
                 .background(TapSkin.tone(0xffffff, 0x222222), in: RoundedRectangle(cornerRadius: 10))
-        }.padding(5).foregroundColor(TapSkin.ink)
-            .background(TapSkin.tone(0xffffff, 0x222222))
+            }.frame(width: 242, height: menuHeight)
+                .background(TapSkin.tone(0xffffff, 0x222222), in: RoundedRectangle(cornerRadius: 10))
+                .overlay(RoundedRectangle(cornerRadius: 10).stroke(TapSkin.secondaryInk.opacity(0.12), lineWidth: 1))
+        }.padding(8).foregroundColor(TapSkin.ink)
+            .frame(width: compactDetails ? 258 : 484, height: 440, alignment: .bottomLeading)
             .accessibilityElement(children: .contain)
             .accessibilityIdentifier("agent-model-menu")
     }
@@ -132,7 +155,7 @@ struct AgentSidebarModelPicker: View {
                 Text(images ? "支持图像输入" : "文本输入").font(.system(size: 10))
             }
             Text("信息由当前服务提供").font(.system(size: 9)).foregroundColor(TapSkin.secondaryInk)
-        }.padding(12).frame(width: compactDetails ? 218 : 210)
+        }.padding(12).frame(width: 218, alignment: .leading)
             .background(TapSkin.tone(0xf7f7f7, 0x292929), in: RoundedRectangle(cornerRadius: 10))
             .accessibilityElement(children: .contain)
             .accessibilityIdentifier("agent-model-detail")
@@ -242,7 +265,12 @@ private struct AgentSidebarModelRow: View {
         HStack(spacing: 7) {
             Button(action: choose) {
                 HStack(spacing: 7) {
-                    Image(systemName: "sparkles").font(.system(size: 10))
+                    if option.id.lowercased().contains("deepseek") {
+                        AgentBrandIcon(identifier: "deepseek", size: 15)
+                    } else {
+                        Image(systemName: option.automatic ? "wand.and.stars" : "cpu")
+                            .font(.system(size: 11))
+                    }
                     Text(option.displayName ?? option.id).lineLimit(1)
                     if !option.available {
                         Text(option.subscriptionRequired ? "订阅解锁" : "未开放")

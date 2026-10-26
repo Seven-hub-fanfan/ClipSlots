@@ -365,7 +365,10 @@ final class SlotStoreObservable: ObservableObject {
     }
 
     // Special slot state
-    @Published var specialSlots: [SpecialSlot] = []
+    @Published var specialSlots: [SpecialSlot] = [] {
+        didSet { orderedGroupsByPage = nil }
+    }
+    private var orderedGroupsByPage: [String: [SpecialSlot]]?
     @Published var currentSpecialSlotId: String = "default"  // UI preview layer
     @Published var currentSpecialSlot: SpecialSlot?
     @Published var activeHotkeySpecialSlotId: String = "default"  // Cmd+number hotkey layer
@@ -576,7 +579,11 @@ final class SlotStoreObservable: ObservableObject {
 
     /// Slot groups belonging to the current page, sorted by order.
     var currentPageSlotGroups: [SpecialSlot] {
-        specialSlots.filter { $0.pageId == currentPageId }.sorted { ($0.order, $0.id) < ($1.order, $1.id) }
+        if orderedGroupsByPage == nil {
+            orderedGroupsByPage = Dictionary(grouping: specialSlots, by: \.pageId)
+                .mapValues { $0.sorted { ($0.order, $0.id) < ($1.order, $1.id) } }
+        }
+        return orderedGroupsByPage?[currentPageId] ?? []
     }
 
     var lastNonClipSlotsApp: NSRunningApplication?
@@ -606,6 +613,7 @@ final class SlotStoreObservable: ObservableObject {
 
     /// The special slot id that current in-memory `slots` / `labels` belong to.
     private var loadedSpecialSlotId: String?
+    var displayedSpecialSlotId: String { loadedSpecialSlotId ?? currentSpecialSlotId }
 
     /// APP-1 (v2.10.32): monotonic generation stamp for `reloadAllAsync`. B-1 only dropped a
     /// stale snapshot when the user switched to ANOTHER group (activeId mismatch). But two
@@ -771,6 +779,8 @@ final class SlotStoreObservable: ObservableObject {
         }, onAnyEvent: { [weak self] in
             // 流心跳（过滤前）：区分「流活着但这批不值得刷新」与「流聋了」。
             self?.noteWatcherStreamAlive()
+        }, ignoreVerifiedChange: { [weak self] paths in
+            self?.navigationIndexWrites.matches(paths: paths) == true
         })
         watcher.start()
         storageWatcher = watcher
@@ -885,7 +895,7 @@ final class SlotStoreObservable: ObservableObject {
             SlotConnectionStorage.shared.invalidateCache()
             DispatchQueue.main.async { [weak self] in
                 guard let self else { return }
-                self.reloadAllAsync { [weak self] in
+                self.reloadAllAsync(forceSlotRefresh: true) { [weak self] in
                     self?.refreshTrigger = UUID()
                     self?.canvasSlotRevision &+= 1
                 }
@@ -1249,7 +1259,15 @@ final class SlotStoreObservable: ObservableObject {
     // 说明：loadSpecialSlots 只读索引（轻），保留在主线程先跑以拿到最新 currentSpecialSlotId；
     // loadConnectionMapForCurrentGroup / reloadLastPasteFromDefaults / recomputeAutoPreviews 均只做
     // 内存缓存读或轻量 FS-shape 探测且会写 @Published，统一放主线程完成闭包里执行。
-    private func reloadAllAsync(completion: (() -> Void)? = nil) {
+    private func reloadAllAsync(forceSlotRefresh: Bool = false, completion: (() -> Void)? = nil) {
+        // A watcher must not restore the previous on-disk selection while a
+        // new UI selection is waiting for its ordered transaction.
+        if transientUI.isNavigationPending {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in
+                self?.reloadAllAsync(forceSlotRefresh: forceSlotRefresh, completion: completion)
+            }
+            return
+        }
         loadSpecialSlots()
         let activeId = currentSpecialSlotId
         // APP-1 (v2.10.32): stamp this reload; only the newest generation may commit its snapshot.
@@ -1283,7 +1301,15 @@ final class SlotStoreObservable: ObservableObject {
                     return
                 }
                 // v2.10.52 (perf 第四批): 增量 diff 提交——快照与内存等价则跳过赋值，不触发重绘。
-                self.applySlotsSnapshot(snapshot.slots, labels: snapshot.labels)
+                if forceSlotRefresh {
+                    // External editors may replace bodies without updating content.json.
+                    // A verified external event must not be discarded by metadata equality.
+                    self.slots = snapshot.slots
+                    self.labels = snapshot.labels
+                    ThumbnailProvider.shared.invalidateSpecialSlot(specialSlotId: activeId)
+                } else {
+                    self.applySlotsSnapshot(snapshot.slots, labels: snapshot.labels)
+                }
                 self.loadedSpecialSlotId = activeId
                 // v2.10.47: 若一次 watcher 触发的 reload 抢先在切组读盘之前提交（generation 更高），
                 // 切组遮罩需在此一并关闭，避免遮罩因 loadSlotsAsync 被判超时丢弃而卡住。
@@ -1321,17 +1347,141 @@ final class SlotStoreObservable: ObservableObject {
         if lastPasteSlotIndex != newSlot { lastPasteSlotIndex = newSlot }
     }
 
-    func switchSpecialSlot(id: String) {
+    func switchSpecialSlot(id: String, fromNavigation: Bool = false) {
+        if fromNavigation { navigateToGroup(id: id); return }
         selectAndActivateSpecialSlot(id: id)
+    }
+
+    private final class NavigationTicket {
+        private let lock = NSLock()
+        private var value = UUID()
+        func replace() -> UUID {
+            lock.lock(); defer { lock.unlock() }
+            value = UUID()
+            return value
+        }
+        func contains(_ ticket: UUID) -> Bool {
+            lock.lock(); defer { lock.unlock() }
+            return value == ticket
+        }
+    }
+    private let navigationTicket = NavigationTicket()
+    private final class NavigationIndexWrites {
+        private let lock = NSLock()
+        private var fingerprints: [String] = []
+        private func fingerprint() -> String? {
+            var info = stat()
+            guard stat(ClipSlotsPaths.specialSlots.appendingPathComponent("index.json").path, &info) == 0 else { return nil }
+            return "\(info.st_ino):\(info.st_size):\(info.st_mtimespec.tv_sec):\(info.st_mtimespec.tv_nsec)"
+        }
+        func record() {
+            guard let value = fingerprint() else { return }
+            lock.lock(); defer { lock.unlock() }
+            fingerprints.append(value)
+            if fingerprints.count > 16 { fingerprints.removeFirst(fingerprints.count - 16) }
+        }
+        func matches(paths: [String]) -> Bool {
+            let expected = ClipSlotsPaths.specialSlots.appendingPathComponent("index.json")
+                .resolvingSymlinksInPath().path
+            guard !paths.isEmpty, paths.allSatisfy({
+                URL(fileURLWithPath: $0).resolvingSymlinksInPath().path == expected
+            }), let value = fingerprint() else { return false }
+            lock.lock(); defer { lock.unlock() }
+            return fingerprints.contains(value)
+        }
+    }
+    private let navigationIndexWrites = NavigationIndexWrites()
+    private var navigationRequestedGroupId: String?
+
+    /// The button supplies immediate press feedback. Commit its selected state
+    /// together with the new content to avoid two full workspace layouts.
+    /// Disk transactions stay on the same ordered queue as edits.
+    private func navigateToGroup(id: String) {
+        guard id != currentSpecialSlotId || id != activeHotkeySpecialSlotId || transientUI.isNavigationPending,
+              let group = specialSlots.first(where: { $0.id == id }),
+              let page = pages.first(where: { $0.id == group.pageId }) else { return }
+        if transientUI.isNavigationPending, navigationRequestedGroupId == id { return }
+        cancelPendingPasteOperations(restoreClipboard: true)
+        let ticket = navigationTicket.replace()
+        reloadGeneration &+= 1
+        let generation = reloadGeneration
+        beginGroupSwitchTransition()
+        navigationRequestedGroupId = id
+        transientUI.isNavigationPending = true
+        #if DEBUG
+        let traceStart = ProcessInfo.processInfo.systemUptime
+        #endif
+        slotWriteQueue.async { [weak self] in
+            guard let self, self.navigationTicket.contains(ticket) else { return }
+            do {
+                guard let index = try self.specialStorage.persistNavigation(groupId: id,
+                    shouldCommit: { self.navigationTicket.contains(ticket) },
+                    didCommit: {
+                        self.navigationIndexWrites.record()
+                        let sentinel = self.storageSentinel()
+                        self.fingerprintQueue.async {
+                            self.pendingSelfWriteSentinels.append(sentinel)
+                            if self.pendingSelfWriteSentinels.count > 16 {
+                                self.pendingSelfWriteSentinels.removeFirst(self.pendingSelfWriteSentinels.count - 16)
+                            }
+                        }
+                    }) else { return }
+                #if DEBUG
+                let tracePersist = ProcessInfo.processInfo.systemUptime
+                #endif
+                let snapshot = self.readSlotsSnapshot(for: id)
+                let connections = SlotConnectionStorage.shared.load(pageId: page.id, groupId: id)
+                #if DEBUG
+                let traceRead = ProcessInfo.processInfo.systemUptime
+                #endif
+                DispatchQueue.main.async {
+                    guard self.navigationTicket.contains(ticket) else { return }
+                    guard generation == self.reloadGeneration else {
+                        self.transientUI.isNavigationPending = false
+                        self.reloadAllAsync()
+                        return
+                    }
+                    self.applySpecialSlotIndex(index)
+                    self.applySlotsSnapshot(snapshot.slots, labels: snapshot.labels)
+                    self.loadedSpecialSlotId = id
+                    self.pastedChainMembersByGroup.removeAll()
+                    self.navigationRequestedGroupId = nil
+                    self.transientUI.isNavigationPending = false
+                    if self.currentConnectionMap != connections { self.currentConnectionMap = connections }
+                    self.endGroupSwitchTransition()
+                    ThumbnailProvider.shared.refreshAfterGroupSwitch(specialSlotId: id)
+                    self.recomputeAutoPreviews()
+                    #if DEBUG
+                    if ProcessInfo.processInfo.environment["CLIPSLOTS_LARGE_LIBRARY_PROBE"] == "1" {
+                        NSLog("[NavigationTiming] %@ persist=%.2f read=%.2f commit=%.2f", id,
+                              (tracePersist - traceStart) * 1000, (traceRead - tracePersist) * 1000,
+                              (ProcessInfo.processInfo.systemUptime - traceRead) * 1000)
+                    }
+                    #endif
+                }
+            } catch {
+                let index = self.specialStorage.loadIndex()
+                DispatchQueue.main.async {
+                    guard self.navigationTicket.contains(ticket) else { return }
+                    self.navigationRequestedGroupId = nil
+                    self.transientUI.isNavigationPending = false
+                    self.applySpecialSlotIndex(index)
+                    self.loadSlotsAsync()
+                    self.showToast("切换未保存：\(error.localizedDescription)")
+                }
+            }
+        }
     }
 
     // MARK: - Preview / Activate (Layer model)
 
     /// Click a tag: preview only, does NOT change Cmd+number binding.
     func selectSpecialSlotForPreview(id: String) {
-        guard id != currentSpecialSlotId else { return }
+        guard id != currentSpecialSlotId || transientUI.isNavigationPending else { return }
 
         guard specialSlots.contains(where: { $0.id == id }) else { return }
+        _ = navigationTicket.replace()
+        transientUI.isNavigationPending = false
 
         let oldId = currentSpecialSlotId
         NSLog("[ClipSlots] selectSpecialSlotForPreview from=\(oldId) to=\(id) activeHotkey=\(activeHotkeySpecialSlotId)")
@@ -1403,7 +1553,10 @@ final class SlotStoreObservable: ObservableObject {
     /// Preview AND activate: both UI and Cmd+number switch to this slot.
     /// v2.4: also switches to the page that owns this slot group.
     func selectAndActivateSpecialSlot(id: String) {
-        guard id != currentSpecialSlotId || id != activeHotkeySpecialSlotId else { return }
+        let wasPending = transientUI.isNavigationPending
+        _ = navigationTicket.replace()
+        transientUI.isNavigationPending = false
+        guard id != currentSpecialSlotId || id != activeHotkeySpecialSlotId || wasPending else { return }
         guard specialSlots.contains(where: { $0.id == id }) else { return }
 
         let oldPreview = currentSpecialSlotId
@@ -1589,7 +1742,15 @@ final class SlotStoreObservable: ObservableObject {
         }
     }
 
-    func switchToPage(id: String) {
+    func switchToPage(id: String, fromNavigation: Bool = false) {
+        if fromNavigation {
+            guard let group = specialSlots.filter({ $0.pageId == id })
+                .min(by: { $0.order != $1.order ? $0.order < $1.order : $0.id < $1.id }) else { return }
+            navigateToGroup(id: group.id)
+            return
+        }
+        _ = navigationTicket.replace()
+        transientUI.isNavigationPending = false
         suppressWatcher() // v2.9.4 (#2): self-write
         beginGroupSwitchTransition()
         do {
@@ -1605,33 +1766,22 @@ final class SlotStoreObservable: ObservableObject {
 
     // v2.4.1: Cmd+Left / Cmd+Right — cycle through slot groups in current page
     func switchToPreviousSlotGroup() {
-        suppressWatcher() // v2.9.4 (#2): self-write
-        beginGroupSwitchTransition()
-        do {
-            try specialStorage.switchToAdjacentSpecialSlot(direction: .previous)
-            reloadAllAsync() // P1-3 (v2.10.35): Cmd+Left 相邻切组读盘异步化，避免主线程逐槽 flock 卡顿
-            refreshTrigger = UUID()
-            if let name = currentSpecialSlot?.name {
-                showToast("已切换至「\(name)」")
-            }
-        } catch {
-            NSLog("[ClipSlots] switchToPreviousSlotGroup error: \(error)")
-        }
+        navigateToAdjacentGroup(offset: -1)
     }
 
     func switchToNextSlotGroup() {
-        suppressWatcher() // v2.9.4 (#2): self-write
-        beginGroupSwitchTransition()
-        do {
-            try specialStorage.switchToAdjacentSpecialSlot(direction: .next)
-            reloadAllAsync() // P1-3 (v2.10.35): Cmd+Right 相邻切组读盘异步化，避免主线程逐槽 flock 卡顿
-            refreshTrigger = UUID()
-            if let name = currentSpecialSlot?.name {
-                showToast("已切换至「\(name)」")
-            }
-        } catch {
-            NSLog("[ClipSlots] switchToNextSlotGroup error: \(error)")
-        }
+        navigateToAdjacentGroup(offset: 1)
+    }
+
+    private func navigateToAdjacentGroup(offset: Int) {
+        let selectedId = transientUI.isNavigationPending ? (navigationRequestedGroupId ?? currentSpecialSlotId) : currentSpecialSlotId
+        let pageId = specialSlots.first { $0.id == selectedId }?.pageId ?? currentPageId
+        let groups = pageId == currentPageId ? currentPageSlotGroups
+            : specialSlots.filter { $0.pageId == pageId }.sorted { ($0.order, $0.id) < ($1.order, $1.id) }
+        guard !groups.isEmpty else { return }
+        let current = groups.firstIndex { $0.id == selectedId } ?? 0
+        let next = (current + offset + groups.count) % groups.count
+        navigateToGroup(id: groups[next].id)
     }
 
     // MARK: - v2.9.31 Auto-Advance After Paste
@@ -2901,6 +3051,13 @@ final class SlotStoreObservable: ObservableObject {
 
     // MARK: - 未入库保留组 / 归槽 / 排序（v2.11.8 二轮）
 
+    @MainActor
+    func prepareCanvasToolWrite() async {
+        await withCheckedContinuation { continuation in
+            slotWriteQueue.async { continuation.resume() }
+        }
+    }
+
     /// 生成下载的临时文件必须等存储摄取完成才能删除；普通附件入口是乐观异步写，不能用于此处。
     func appendCanvasGeneratedAttachment(_ attachment: SlotContent.SlotAttachment,
                                          groupId: String, slot: Int) -> SlotContent.SlotAttachment? {
@@ -3542,6 +3699,12 @@ final class SlotStoreObservable: ObservableObject {
     // A→B→A switch — or a concurrent watcher reload — can never let an older read clobber the
     // newer group's state.
     private func loadSlotsAsync(onCommit: (() -> Void)? = nil) {
+        if transientUI.isNavigationPending {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in
+                self?.loadSlotsAsync(onCommit: onCommit)
+            }
+            return
+        }
         let activeId = currentSpecialSlotId
         reloadGeneration &+= 1
         let gen = reloadGeneration
@@ -7578,9 +7741,8 @@ final class SlotStoreObservable: ObservableObject {
     /// `searchScanSnapshot(slotCount:)`，从磁盘扫全库。
     ///
     /// 内存：扫描是 textOnly 的（图片 / 视频只留 type，不读字节，也不进常驻缓存），所以扫全库
-    /// 不会把 11 GB 数据目录拉进内存；**命中的槽位**才用 `get(_:)` 完整读取，用于结果行渲染
-    /// （缩略图、内联图片、精确的 `[图片 N KB]` preview 都依赖真实字节）。
-    /// 这也是为什么匹配下沉到这里做：先匹配后补齐，才能让内存只随命中数增长。
+    /// 不会把 11 GB 数据目录拉进内存。结果行保留文字和类型元数据；
+    /// 仅当前选中的预览由 SearchResultHydratedPreview 异步完整读取媒体。
     static func expandSearchableSlots(_ groups: [SearchableGroupRef],
                                       query: String,
                                       filter: SlotFilterType,
@@ -7588,31 +7750,37 @@ final class SlotStoreObservable: ObservableObject {
         var results: [SlotGlobalSearchResult] = []
         for group in groups {
             guard !isCancelled() else { return [] }
-            let storage = group.storage
-            let scan = storage.searchScanSnapshot(slotCount: group.slotCount, isCancelled: isCancelled)
+            let scan = group.storageRoot.searchCandidates(in: group.groupId, slotCount: group.slotCount,
+                                                         query: query, isCancelled: isCancelled)
+            #if DEBUG
+            let matchStart = SlotSearchDiagnostics.now
+            #endif
             for (slot, scanned) in scan {
                 guard !isCancelled() else { return [] }
-                let label = storage.getLabel(slot) ?? ""
+                let label = scanned.label ?? ""
                 guard SlotSearchMatcher.matches(slot: slot,
                                                 content: scanned,
                                                 label: label,
                                                 query: query,
                                                 filter: filter) else { continue }
-                // 命中才补齐完整内容（含图片字节）；补读失败时退回扫描结果，至少还能展示与跳转。
                 guard !isCancelled() else { return [] }
-                let full = storage.get(slot)
                 results.append(SlotGlobalSearchResult(
                     pageId: group.pageId,
                     pageName: group.pageName,
                     groupId: group.groupId,
                     groupName: group.groupName,
                     slot: slot,
-                    content: full.isEmpty ? scanned : full,
+                    // Result rows only need text and metadata. The selected preview
+                    // loads full media on demand, rather than decoding every hit.
+                    content: scanned,
                     label: label,
                     pageOrder: group.pageOrder,
                     groupOrder: group.groupOrder
                 ))
             }
+            #if DEBUG
+            SlotSearchDiagnostics.record("matchingMS", since: matchStart)
+            #endif
         }
         return results
     }

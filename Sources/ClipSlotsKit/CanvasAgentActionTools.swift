@@ -35,7 +35,7 @@ public final class CanvasAgentActionTools: AgentToolExecuting, AgentCLICommandAu
             .init(name: name, description: description, parameters: [
                 "type": "object", "additionalProperties": false,
                 "properties": .object(fields), "required": .array(required.map(JSONValue.string))
-            ], originLabel: "当前画布")
+            ], originLabel: ["canvas_generate", "canvas_list_models"].contains(name) ? "生成服务" : "当前画布")
         }
         let live = [
             spec("canvas_current", "读取当前项目的实时节点、编组、连线与 graph_revision；offset 分页，正文限4000字符。新建或修改后用此工具读取真实结果。",

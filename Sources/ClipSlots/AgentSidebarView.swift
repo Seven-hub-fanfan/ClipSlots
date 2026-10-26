@@ -110,7 +110,7 @@ struct AgentSidebarView: View {
     private var panelFill: Color { isFullPage ? TapSkin.tone(0xffffff, 0x121212) : TapSkin.tone(0xfafafa, 0x111111) }
     private var inputFill: Color { TapSkin.tone(0xf7f7f7, 0x191919) }
     private var hairline: Color { TapSkin.tone(0xe0e1e5, 0x2b2b2b) }
-    private var welcomesUser: Bool { model.isEmpty && !model.isRunning && (isFullPage || (draft.isEmpty && model.draftAttachments.isEmpty)) }
+    private var welcomesUser: Bool { model.isEmpty && !model.isRunning && model.pendingInteractions.isEmpty && (isFullPage || (draft.isEmpty && model.draftAttachments.isEmpty)) }
     private var suggestionPages: [[AgentSuggestion]] {
         workspaceMode == .edit ? AgentSuggestion.editPages : AgentSuggestion.canvasPages
     }
@@ -642,7 +642,9 @@ struct AgentSidebarView: View {
     }
 
     private func suggestionCard(_ suggestion: AgentSuggestion, index: Int, compact: Bool) -> some View {
-        Button {
+        CreativeSuggestionCard(category: suggestion.category, symbol: suggestion.symbol,
+                               title: suggestion.title, detail: suggestion.detail,
+                               index: index, compact: compact, fill: inputFill) {
             // #region debug-point C-D:suggestion-action
             #if DEBUG
             if ProcessInfo.processInfo.environment["CLIPSLOTS_CONTROL_PROBE"] == "1" { var r = URLRequest(url: URL(string: "http://127.0.0.1:7784/event")!); r.httpMethod = "POST"; r.httpBody = try? JSONSerialization.data(withJSONObject: ["sessionId": "slot-input-controls", "runId": ProcessInfo.processInfo.environment["CANVAS_DEBUG_RUN"] ?? "pre-fix", "hypothesisId": "C-D", "msg": "[DEBUG] suggestion action", "data": ["session": model.displayName, "title": suggestion.title]]); URLSession.shared.dataTask(with: r).resume() }
@@ -650,24 +652,8 @@ struct AgentSidebarView: View {
             // #endregion
             draft = suggestion.prompt
             inputFocusRequest += 1
-        } label: {
-            VStack(alignment: .leading, spacing: 9) {
-                HStack(spacing: 8) {
-                    Image(systemName: suggestion.symbol).font(.system(size: 14))
-                    Text(suggestion.title).font(.system(size: 13, weight: .semibold)).lineLimit(2)
-                    Spacer(minLength: 2)
-                    Image(systemName: "arrow.right").font(.system(size: 11)).foregroundColor(TapSkin.faintInk)
-                }
-                Text(suggestion.detail).font(.system(size: 11)).foregroundColor(TapSkin.secondaryInk)
-                    .lineLimit(2).frame(maxWidth: .infinity, alignment: .leading)
-                Spacer(minLength: 0)
-            }.padding(12).frame(maxWidth: .infinity, minHeight: 86, maxHeight: 96, alignment: .topLeading)
-                .background(inputFill, in: RoundedRectangle(cornerRadius: 13))
-                .overlay(RoundedRectangle(cornerRadius: 13).stroke(hairline.opacity(0.6), lineWidth: 0.6))
-                .rotationEffect(.degrees(reduceMotion ? 0 : index == 0 ? -0.8 : 0.8))
-                .contentShape(Rectangle())
-        }.buttonStyle(.plain)
-            .accessibilityIdentifier("agent-suggestion-\(index)")
+        }
+        .accessibilityIdentifier("agent-suggestion-\(index)")
     }
 
     // MARK: 气泡
@@ -940,6 +926,15 @@ struct AgentSidebarView: View {
                     captureControls
                     Spacer(minLength: 0)
                     contextUsageButton
+                    AgentPolishButton(busy: model.isPolishing,
+                        enabled: !isReadOnly && !model.isRunning && !voice.isRecording && !voice.isStarting
+                            && !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                        compact: true) {
+                            showModelPicker = false
+                            completion.dismiss()
+                            model.polishDraft(config: currentConfig)
+                        }
+                        .accessibilityIdentifier("agent-ai-polish")
                     modelPicker
                     Button {
                         if voice.isRecording || voice.isStarting { voice.stop() }
@@ -1402,19 +1397,26 @@ struct AgentSidebarView: View {
             showModelPicker.toggle()
             if showModelPicker { refreshModelCatalog() }
         } label: {
-            Image(systemName: "sparkles").font(.system(size: 13))
+            Group {
+                if backendKind == .deepseek || modelLabel.lowercased().contains("deepseek") {
+                    AgentBrandIcon(identifier: "deepseek", size: 19)
+                } else {
+                    Image(systemName: backendKind == .gateway ? "cpu" : "circle.hexagongrid")
+                        .font(.system(size: 14))
+                }
+            }
                 .foregroundColor(TapSkin.ink)
                 .frame(width: 26, height: 30)
                 .background(showModelPicker ? TapSkin.subtleFill : .clear, in: Circle())
                 .contentShape(Rectangle())
         }.buttonStyle(.plain)
-            .disabled(model.isRunning)
+            .disabled(model.isRunning || model.isPolishing)
             .help("当前模型：" + modelLabel)
             .accessibilityLabel("当前模型：" + modelLabel)
             .accessibilityIdentifier("agent-model-picker")
-            .popover(isPresented: $showModelPicker, arrowEdge: .top) {
+            .agentModelPopover(isPresented: $showModelPicker) {
                 AgentSidebarModelPicker(options: agentModelOptions, selected: modelLabel,
-                    loading: modelCatalog.isLoading, notice: modelCatalog.error, compactDetails: windowWidth < 560,
+                    loading: modelCatalog.isLoading, notice: modelCatalog.error, compactDetails: false,
                     refresh: refreshModelCatalog,
                     settings: { showModelPicker = false; showConfig = true },
                     reasoningEffort: reasoningEffort,
@@ -1449,7 +1451,10 @@ struct AgentSidebarView: View {
 
     private var agentModelOptions: [AgentDiscoveredModel] {
         if backendKind != .tika, !modelCatalog.models.isEmpty {
-            return modelCatalog.models
+            if modelCatalog.models.contains(where: { $0.id == modelLabel }) { return modelCatalog.models }
+            return [.init(id: modelLabel, contextWindow: nil, supportsImages: nil,
+                          description: "已保存的模型 ID，当前服务列表未列出。可在模型设置中修改。")]
+                + modelCatalog.models
         }
         switch backendKind {
         case .tika:

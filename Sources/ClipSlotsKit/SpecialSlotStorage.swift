@@ -716,9 +716,11 @@ public final class SpecialSlotStorage {
         // 这与 v2.10.84 给 resetAutoPasteCursor 加的短路、以及 StorageLock.writeHolderPID 的
         // 「PID 已一致就不写」是同一套写前比对思路，只是收敛到了所有索引写入者的唯一收口。
         if let existing = try? Data(contentsOf: indexURL), existing == data {
+            if let fingerprint = indexFingerprint() { cachedIndex = (fingerprint, index) }
             return
         }
         try data.write(to: indexURL, options: .atomic)
+        if let fingerprint = indexFingerprint() { cachedIndex = (fingerprint, index) }
     }
 
     /// A-6 (v2.10.31): escape the read-only "poison" dead state WITHOUT a process restart.
@@ -980,6 +982,30 @@ public final class SpecialSlotStorage {
             index.selectedSpecialSlotId = id
             index.activeHotkeySpecialSlotId = id
             try saveIndex(index)
+        }
+    }
+
+    /// UI navigation commits selection and cursor reset in one transaction.
+    /// The caller runs this on its serial write queue, never on the UI thread.
+    public func persistNavigation(groupId: String, shouldCommit: () -> Bool = { true },
+                                  didCommit: () -> Void = {}) throws -> SpecialSlotIndex? {
+        try storageLock.withLock {
+            guard shouldCommit() else { return nil }
+            var index = loadIndex()
+            guard let group = index.specialSlots.first(where: { $0.id == groupId }),
+                  index.pages.contains(where: { $0.id == group.pageId }),
+                  !Self.isReservedGroupId(groupId) else {
+                throw SpecialSlotError.specialSlotNotFound
+            }
+            index.currentPageId = group.pageId
+            index.currentSpecialSlotId = groupId
+            index.selectedSpecialSlotId = groupId
+            index.activeHotkeySpecialSlotId = groupId
+            index.autoPasteCursor = nil
+            index.autoPasteCursorPrev = nil
+            try saveIndex(index)
+            didCommit()
+            return index
         }
     }
 
@@ -1757,6 +1783,14 @@ public final class SpecialSlotStorage {
     /// reads/writes could randomly crash or corrupt the cache. This is distinct from
     /// the cross-process `storageLock` (flock) — here we need an intra-process thread lock.
     private let storageCacheLock = NSLock()
+
+    /// Global search uses a bounded persistent text cache without populating the
+    /// live per-group storage cache. UI edits still use slotStorage(for:).
+    public func searchCandidates(in specialSlotId: String, slotCount: Int, query: String,
+                                 isCancelled: () -> Bool = { false }) -> [Int: SlotContent] {
+        SlotStorage.searchCandidates(slotsDir: specialSlotDirectory(for: specialSlotId),
+                                     slotCount: slotCount, query: query, isCancelled: isCancelled)
+    }
 
     public func slotStorage(for specialSlotId: String) -> SlotStorage {
         storageCacheLock.lock()

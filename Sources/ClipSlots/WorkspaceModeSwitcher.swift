@@ -1,147 +1,203 @@
 import SwiftUI
 import ClipSlotsKit
+import CoreImage
 
-/// 工作区切换（v2.11.7 hotfix17）。
-///
-/// 两个工作区是**并列的一级视图**，不是弹窗也不是抽屉：
-///   - `.edit`   槽位卡片主界面（默认）
-///   - `.canvas` 无限画布（生图工作台）
-///
-/// agent 保留旧路由标识，仅用于兼容历史；入口现为尚未开放的测评占位。
+/// The legacy agent route is retained for compatibility; models is not yet open.
 enum WorkspaceMode: String, CaseIterable, Identifiable, Equatable {
     case edit
     case canvas
     case agent
 
     var id: String { rawValue }
-
     var title: String {
         switch self {
         case .edit: return "编辑"
         case .canvas: return "画布"
-        case .agent: return "测评（Beat）"
+        case .agent: return "模型"
         }
     }
-
     var symbolName: String {
         switch self {
         case .edit: return "rectangle.stack"
-        case .canvas: return "square.grid.3x3.topleft.filled"
-        case .agent: return "waveform.path.ecg"
+        case .canvas: return "viewfinder"
+        case .agent: return "cube"
         }
     }
-
     var isSelectable: Bool { self != .agent }
 }
 
-/// 两段切换控件。
-///
-/// 刻意**没有**复用 `NeuSegmentedControl`：那个控件跟槽位业务（自动切换/范围）绑得比较死，
-/// 而这里只需要一个纯粹的视图路由器；两边各自演化互不牵连。
+/// One pinned instance for both workspaces. Only the contour, dot and button
+/// contents animate; the window and page layout do not participate.
 struct WorkspaceModeSwitcher: View {
     @Binding var selection: WorkspaceMode
-    private var canvasPalette: Bool { selection == .canvas }
+    var animationsEnabled = true
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.colorSchemeContrast) private var contrast
+    @State private var hovered: WorkspaceMode?
 
-    /// 控件的固定宽度。
-    ///
-    /// v2.11.7 hotfix20：顶栏改成「流内放等宽透明占位 + overlay 里放真控件」来实现几何真居中，
-    /// 两处必须**用同一个数**，否则占位与实体不等宽，居中就会差出那点差值。所以这里把宽度从
-    /// 「由内容自然撑开」改成一个显式常量：段宽 62 × 3 + 段间距 2 × 2 + 外圈 padding 3 × 2。
     static let preferredWidth: CGFloat = WindowLayoutMetrics.workspaceSwitcherWidth
-
-    /// 单段的固定尺寸（v2.11.7 hotfix21）。
-    ///
-    /// ★ 为什么必须写死、不能让内容自然撑开：两段用的 SF Symbol 字形盒子不一样高
-    /// （`rectangle.stack` 偏扁，`square.grid.3x3.topleft.filled` 是个满格方块），
-    /// 而 `Image(systemName:)` 的固有高度是跟着字形盒子走的。段高一旦随字形变化，两段里
-    /// 「图标 + 文字」这组内容的垂直居中基准就各算各的，观感就是**「画布」整段往下沉一两个点**
-    /// ——正是用户反馈的那个对不齐。把段高、图标绘制盒都钉成常量后，两段的几何完全一致，
-    /// 换 symbol 也不会再把对齐带歪。
-    private static let segmentHeight: CGFloat = 26
-    private static let segmentWidth: CGFloat = 62
-    private static let iconBox: CGFloat = 13
-
-    /// 控件总高（段高 + 外圈 padding × 2）。外层要按它算落位，所以必须公开且是常量。
-    static let preferredHeight: CGFloat = segmentHeight + 3 * 2
-
-    /// 切换器在**内容区顶边**下方的固定落位（pt，到胶囊顶边）。
-    ///
-    /// ★ v2.11.7 hotfix22：这颗胶囊全 App 只存在**一份**，挂在内容区根节点的
-    /// `.overlay(alignment: .top)` 上，编辑 / 画布共用同一个实例、同一个 inset —— 位置在数学上
-    /// 不可能随模式变化。此前是「编辑模式挂在 titleBar 的 .center、画布模式挂在内容区的 .top」
-    /// 两份实例：水平方向恰好都落在窗口中线（实测两模式 x 完全一致），但垂直方向差了 27.5pt，
-    /// 于是切页时胶囊上下窜一下 —— 用户看到的「按钮会跑，不像切换按钮」就是这个。
-    ///
-    /// ★ v2.11.7 hotfix23：基准从「编辑模式 titleBar 第一行的垂直中心（37.5pt）」改为
-    /// **画布模式那套浮动落位（10pt，紧贴标题栏下沿）**，按用户要求两个模式都用它。
-    ///
-    /// 为什么这个值不再跟 titleBar 行高挂钩：一旦挂钩，它就会随页眉里任何控件的高度变化而升降，
-    /// 而页眉只在编辑模式存在 —— 那等于把「切换器的落位」交给一个画布模式根本没有的东西去决定，
-    /// 于是「同一颗按钮换挡」的观感永远修不干净。现在它只相对**内容区顶边**定位，两个模式共有的
-    /// 唯一几何基准，页眉里加减控件都动不到它。
-    ///
-    /// 编辑模式下它因此**高于**页眉行的垂直中心，落在中央那块透明占位的上沿附近 —— 这是刻意的，
-    /// 与「浮在最顶」的定位一致；中央那一列没有任何实控件（见 titleBar 里的等宽透明占位），
-    /// 所以不会压到 logo / 拨杆 / 搜索框。
-    static let pinnedTopInset: CGFloat = 10
-
-
-    @Namespace private var indicator
+    static let preferredHeight: CGFloat = 40
+    static let pinnedTopInset: CGFloat = 20
+    private static let inset: CGFloat = 8
+    private static let ornamentWidth: CGFloat = 42
+    private static var segmentWidth: CGFloat { (preferredWidth - inset * 2 - ornamentWidth) / 3 }
+    private var selectedIndex: CGFloat { selection == .canvas ? 1 : 0 }
+    private var center: CGFloat { Self.inset + Self.ornamentWidth + Self.segmentWidth * (selectedIndex + 0.5) }
+    private var ink: Color { TapSkin.tone(0x303034, 0xffffff) }
+    private var movement: Animation? {
+        reduceMotion || !animationsEnabled ? nil : .spring(response: 0.32, dampingFraction: 0.82)
+    }
 
     var body: some View {
-        HStack(alignment: .center, spacing: 2) {
-            ForEach(WorkspaceMode.allCases) { mode in
-                segment(mode)
-            }
+        HStack(spacing: 0) {
+            WorkspaceBrandMark()
+                .frame(width: 22, height: 25)
+                .frame(width: Self.ornamentWidth, height: Self.preferredHeight)
+                .overlay(alignment: .trailing) {
+                    Rectangle().fill(TapSkin.tone(0xdddddf, 0x414144))
+                        .frame(width: 0.5, height: 19).padding(.trailing, 3)
+                }
+                .allowsHitTesting(false).accessibilityHidden(true)
+            ForEach(WorkspaceMode.allCases) { mode in segment(mode) }
         }
-        .padding(3)
-        // 控件自身高度也固定：外层（titleBar / 画布浮动层）拿它去做垂直居中时，
-        // 高度若随内容浮动，居中结果就会跟着一起浮动。
-        .frame(width: Self.preferredWidth, height: Self.segmentHeight + 3 * 2)
-        .background(
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .fill(canvasPalette ? CanvasTheme.chipBackground : AppTheme.chipBackground)
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .stroke(canvasPalette ? CanvasTheme.subtleBorder : AppTheme.subtleBorder, lineWidth: 1)
-        )
+        .padding(.horizontal, Self.inset)
+        .frame(width: Self.preferredWidth, height: Self.preferredHeight)
+        .background {
+            Capsule(style: .continuous)
+                .fill(TapSkin.tone(0xd6d6d8, 0x070707))
+                .offset(y: 1.5)
+            Capsule(style: .continuous)
+                .fill(LinearGradient(colors: [TapSkin.tone(0xffffff, 0x252525), TapSkin.tone(0xfafafa, 0x1b1b1b)],
+                                     startPoint: .topLeading, endPoint: .bottomTrailing))
+                .overlay(Capsule().strokeBorder(TapSkin.tone(0xe4e4e6, 0x343437), lineWidth: 0.5))
+        }
+        .overlay(alignment: .leading) {
+            WorkspaceSelectionContour(center: center, halfWidth: Self.segmentWidth * 0.64)
+                .stroke(LinearGradient(stops: [
+                    .init(color: ink.opacity(0.02), location: 0),
+                    .init(color: ink.opacity(0.80), location: 0.20),
+                    .init(color: ink.opacity(0.80), location: 0.80),
+                    .init(color: ink.opacity(0.02), location: 1)
+                ], startPoint: .leading, endPoint: .trailing),
+                        style: StrokeStyle(lineWidth: contrast == .increased ? 1.5 : 1.05, lineCap: .round))
+                .clipShape(Capsule())
+                .animation(movement, value: selectedIndex)
+                .transaction { $0.disablesAnimations = false }
+                .allowsHitTesting(false).accessibilityHidden(true)
+        }
+        .overlay(alignment: .bottomLeading) {
+            Circle().fill(ink).frame(width: 3, height: 3)
+                .offset(x: center - 1.5, y: -3)
+                .animation(movement, value: selectedIndex)
+                .transaction { $0.disablesAnimations = false }
+                .allowsHitTesting(false).accessibilityHidden(true)
+        }
+        .shadow(color: .black.opacity(0.12), radius: 4, y: 3)
     }
 
     private func segment(_ mode: WorkspaceMode) -> some View {
-        let isSelected = selection == mode
+        let selected = selection == mode
         return Button {
             guard mode.isSelectable else { return }
-            withAnimation(Anim.transition) { selection = mode }
+            selection = mode
         } label: {
-            HStack(alignment: .center, spacing: 5) {
+            VStack(spacing: 2) {
                 Image(systemName: mode.symbolName)
-                    .font(.system(size: 10, weight: .semibold))
-                    // 钉死绘制盒子 + 盒内居中：图标的视觉中心从此与文字的视觉中心同高，
-                    // 与具体 symbol 的字形高度无关。
-                    .frame(width: Self.iconBox, height: Self.iconBox, alignment: .center)
+                    .font(.system(size: 13, weight: .medium))
+                    .frame(width: 17, height: 15)
                 Text(mode.title)
-                    .font(.system(size: 11, weight: .semibold))
-                    // 不允许被压缩/换行：一旦文字进入多行或省略号路径，它的基线会整体偏移。
+                    .font(.system(size: 10, weight: selected ? .semibold : .medium))
                     .fixedSize()
             }
-            .foregroundColor(isSelected ? (canvasPalette ? CanvasTheme.chromeAccentInk : AppTheme.chromeAccentInk) : .secondary.opacity(0.85))
-            .frame(width: mode == .agent ? 104 : Self.segmentWidth, height: Self.segmentHeight, alignment: .center)
-            .background {
-                if isSelected {
-                    // matchedGeometryEffect 让选中背景在两段之间**滑动**而不是闪现。
-                    RoundedRectangle(cornerRadius: 8, style: .continuous)
-                        .fill(canvasPalette ? CanvasTheme.elevatedBackground : AppTheme.elevatedBackground)
-                        .shadow(color: AppTheme.cardShadow(isEmpty: true), radius: 3, x: 0, y: 1)
-                        .matchedGeometryEffect(id: "workspaceModeIndicator", in: indicator)
-                }
-            }
+            .foregroundColor(ink.opacity(selected ? 1 : hovered == mode ? 0.78 : 0.50))
+            .offset(y: -1.5)
+            .frame(width: Self.segmentWidth, height: Self.preferredHeight)
             .contentShape(Rectangle())
         }
-        .buttonStyle(.plain)
+        .buttonStyle(WorkspacePressStyle(animationsEnabled: animationsEnabled))
+        .onHover { hovered = $0 && mode.isSelectable ? mode : nil }
         .disabled(!mode.isSelectable)
         .accessibilityLabel(mode.title)
-        .accessibilityIdentifier(mode == .agent ? "workspace-beat" : "workspace-\(mode.rawValue)")
-        .help(mode == .agent ? "测评（Beat）· 测试不同模型的能力、探索知识，暂未开放。" : mode.title)
+        .accessibilityAddTraits(selected ? .isSelected : [])
+        .accessibilityIdentifier(mode == .agent ? "workspace-models" : "workspace-\(mode.rawValue)")
+        .help(mode == .agent ? "模型 · 暂未开放" : mode.title)
+    }
+}
+
+/// The app icon's original central artwork, without its white plate.
+/// Decorative only: no focus, action, selection or tracking area.
+private struct WorkspaceBrandMark: NSViewRepresentable {
+    func makeNSView(context: Context) -> Host { Host() }
+    func updateNSView(_ view: Host, context: Context) { view.needsDisplay = true }
+
+    final class Host: NSView {
+        private static let artwork = WorkspaceBrandResources.markURL.flatMap { NSImage(contentsOf: $0) }
+        private static let darkArtwork: NSImage? = {
+            guard let image = artwork?.cgImage(forProposedRect: nil, context: nil, hints: nil) else { return nil }
+            let inverse = CIImage(cgImage: image).applyingFilter("CIColorInvert")
+            guard let rendered = CIContext().createCGImage(inverse, from: inverse.extent) else { return nil }
+            return NSImage(cgImage: rendered, size: NSSize(width: image.width, height: image.height))
+        }()
+        override init(frame: NSRect) {
+            super.init(frame: frame)
+            setAccessibilityElement(false)
+        }
+        required init?(coder: NSCoder) { nil }
+        override func hitTest(_ point: NSPoint) -> NSView? { nil }
+        override func viewDidChangeEffectiveAppearance() {
+            super.viewDidChangeEffectiveAppearance()
+            needsDisplay = true
+        }
+        override func draw(_ dirtyRect: NSRect) {
+            let image = effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
+                ? Self.darkArtwork : Self.artwork
+            if let image {
+                let scale = min(bounds.width / image.size.width, bounds.height / image.size.height)
+                let size = NSSize(width: image.size.width * scale, height: image.size.height * scale)
+                image.draw(in: NSRect(x: bounds.midX - size.width / 2,
+                                     y: bounds.midY - size.height / 2, width: size.width, height: size.height),
+                           from: .zero, operation: .sourceOver, fraction: 1)
+            }
+        }
+    }
+}
+
+/// A continuous shoulder joins the active arch to the base line.
+struct WorkspaceSelectionContour: Shape {
+    var center: CGFloat
+    var halfWidth: CGFloat
+    var animatableData: CGFloat {
+        get { center }
+        set { center = newValue }
+    }
+    func path(in rect: CGRect) -> Path {
+        let bottom = rect.maxY - 1.5, top = rect.minY + 4
+        let shoulder = halfWidth, crown = halfWidth * 0.29
+        var path = Path()
+        path.move(to: CGPoint(x: rect.minX, y: bottom))
+        path.addLine(to: CGPoint(x: center - shoulder, y: bottom))
+        path.addCurve(to: CGPoint(x: center - crown, y: top),
+            control1: CGPoint(x: center - shoulder * 0.37, y: bottom),
+            control2: CGPoint(x: center - shoulder * 0.75, y: top))
+        path.addLine(to: CGPoint(x: center + crown, y: top))
+        path.addCurve(to: CGPoint(x: center + shoulder, y: bottom),
+            control1: CGPoint(x: center + shoulder * 0.75, y: top),
+            control2: CGPoint(x: center + shoulder * 0.37, y: bottom))
+        path.addLine(to: CGPoint(x: rect.maxX, y: bottom))
+        return path
+    }
+}
+
+private struct WorkspacePressStyle: ButtonStyle {
+    var animationsEnabled = true
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .scaleEffect(configuration.isPressed ? 0.90 : 1)
+            .offset(y: configuration.isPressed ? 1.5 : 0)
+            .opacity(configuration.isPressed ? 0.75 : 1)
+            .animation(reduceMotion || !animationsEnabled ? nil : .spring(response: 0.20, dampingFraction: 0.66),
+                       value: configuration.isPressed)
+            .transaction { $0.disablesAnimations = false }
     }
 }

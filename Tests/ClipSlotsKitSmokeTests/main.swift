@@ -85,6 +85,26 @@ private func coldStorage(forGroup gid: String) -> SlotStorage {
 
 let t = TestRunner()
 
+runSearchSnapshotTests(t)
+if CommandLine.arguments.contains("--search-snapshot-only") { t.report() }
+
+do {
+    var first = makeTextContent("旧正文")
+    t.equal(first.plainText, "旧正文", "正文预览缓存建立")
+    t.equal(first.preview, "旧正文", "列表预览缓存建立")
+    var second = first
+    second.items = [[PasteboardItem(type: "public.utf8-plain-text", data: Data("新正文".utf8))]]
+    t.equal(second.plainText, "新正文", "相同持久化身份的新正文不复用旧预览")
+    t.equal(second.preview, "新正文", "相同持久化身份的新列表预览刷新")
+    t.equal(first.plainText, "旧正文", "结构体副本仍保留原始正文")
+    first.items = second.items
+    t.equal(first.plainText, "新正文", "原地改写刷新派生缓存")
+    let encoded = try JSONEncoder().encode(second)
+    let decoded = try JSONDecoder().decode(SlotContent.self, from: encoded)
+    t.equal(decoded.plainText, "新正文", "派生身份不影响持久化往返")
+    t.check(!String(decoding: encoded, as: UTF8.self).contains("previewCacheIdentity"), "缓存身份不写入业务文件")
+} catch { t.check(false, "派生缓存验证异常：\(error)") }
+
 // Library summaries must stay read-only, bounded and coherent with cold storage.
 t.withFreshStore("CANVAS-LIBRARY-SUMMARY") { storage in
     let gid = firstGroupId(storage)

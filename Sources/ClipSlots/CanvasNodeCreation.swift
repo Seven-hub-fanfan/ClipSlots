@@ -49,6 +49,33 @@ extension CanvasWorkspaceView {
                 _ = canvas.connect(from: result.node.id, to: child)
             }
             refreshCanvasContent()
+            if kind.cardForm == .tool {
+                let session = CanvasToolSession(canvas: canvas, store: store, node: result.node, attachments: [])
+                if kind == .timeline || kind == .stage || kind == .audio {
+                    for parentID in request.allParentIds {
+                        guard canvas.activeProjectId == project, let parent = canvas.node(id: parentID) else { return }
+                        for attachment in renderAttachments(for: parent) {
+                            let ext = (attachment.name as NSString).pathExtension.lowercased()
+                            let allowed = kind == .timeline ? ["mp4","mov","m4v","wav","mp3","m4a","aiff","caf"] :
+                                kind == .stage ? ["glb","obj","dae","scn","usdz"] : ["wav","mp3","m4a","aiff","caf"]
+                            guard allowed.contains(ext), let path = [attachment.storagePath, attachment.path, attachment.originalPath]
+                                .compactMap({ $0 }).first(where: { FileManager.default.fileExists(atPath: $0) }) else { continue }
+                            do {
+                                // Persisted bins have no extension; preserve the source
+                                // attachment name through a temporary clone.
+                                let temporary = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+                                try FileManager.default.createDirectory(at: temporary, withIntermediateDirectories: true)
+                                defer { try? FileManager.default.removeItem(at: temporary) }
+                                let url = temporary.appendingPathComponent(attachment.name)
+                                try FileManager.default.copyItem(at: URL(fileURLWithPath: path), to: url)
+                                try await session.ingest(url)
+                            } catch { store.transientUI.showToast("引用素材未导入：\(error.localizedDescription)") }
+                        }
+                    }
+                }
+                guard canvas.activeProjectId == project, let current = canvas.node(id: result.node.id) else { return }
+                CanvasToolWindows.shared.open(node: current, canvas: canvas, store: store, attachments: session.attachments)
+            }
             return
         }
         store.transientUI.showToast("新建请求繁忙，请重试")

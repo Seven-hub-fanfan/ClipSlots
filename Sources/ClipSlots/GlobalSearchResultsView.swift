@@ -9,6 +9,7 @@ struct GlobalSearchResultsView: View {
     let currentGroupId: String
     var onJump: (SlotGlobalSearchResult) -> Void
     @Binding var sortRule: SlotSearchSortRule
+    var loadPreview: (SlotGlobalSearchResult) async -> SlotContent = { $0.content }
 
     @State private var selectedResultId: String?
     // v2.10.48: 悬停防抖 work item——扫视 / 滚动搜索结果列表时，抑制右侧预览随每一行掠过而
@@ -85,6 +86,9 @@ struct GlobalSearchResultsView: View {
                  : "全局找到 \(results.count) 个匹配槽位")
                 .font(.caption.weight(.medium))
                 .foregroundColor(.secondary)
+                #if DEBUG
+                .accessibilityIdentifier("global-search-count-\(results.count)")
+                #endif
 
             Spacer()
 
@@ -247,7 +251,7 @@ struct GlobalSearchResultsView: View {
         // any on-disk image asynchronously instead of decoding it on the main thread
         // inside the view body).
         if hasImagePreview(for: result) {
-            SearchResultPreviewImage(content: result.content)
+            SearchResultHydratedPreview(result: result, load: loadPreview)
                 // v2.9.18: 预览图最大高度由 120 放大到 160，提升缩略图可读性。
                 .frame(maxWidth: .infinity, maxHeight: 160)
                 .background(Color.black.opacity(0.06))
@@ -390,6 +394,24 @@ struct GlobalSearchResultsView: View {
 }
 
 // MARK: - Async Preview Image (v2.8.0 perf H4)
+
+private struct SearchResultHydratedPreview: View {
+    let result: SlotGlobalSearchResult
+    let load: (SlotGlobalSearchResult) async -> SlotContent
+    @State private var loaded: SlotContent?
+    private var key: String { "\(result.id)::\(result.content.contentId)::\(result.content.updatedAt)" }
+    var body: some View {
+        Group {
+            if let loaded { SearchResultPreviewImage(content: loaded) }
+            else { ProgressView().controlSize(.small) }
+        }.task(id: key) {
+            loaded = nil
+            let content = await load(result)
+            guard !Task.isCancelled else { return }
+            loaded = content
+        }
+    }
+}
 
 /// Renders the selected search result's image preview. Inline (pasteboard) images
 /// come from the cached `inlineImage` (v2.8.0 H1) and appear immediately; on-disk

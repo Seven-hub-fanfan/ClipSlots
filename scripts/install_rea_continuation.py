@@ -101,6 +101,7 @@ def verify(app):
 verify(candidate)
 assert sha(candidate / "Contents/MacOS/ClipSlots") == manifest["gui_sha256"]
 assert sha(candidate / "Contents/MacOS/clipslots-cli") == manifest["cli_sha256"]
+assert sha(candidate / "Contents/MacOS/clipslots-mcp") == manifest["mcp_sha256"]
 old = plistlib.loads((installed / "Contents/Info.plist").read_bytes())
 previous_version = old["CFBundleShortVersionString"]
 assert previous_version == options.expected_installed_version
@@ -134,6 +135,7 @@ try:
     time.sleep(5)
     cli = json.loads(subprocess.check_output([str(installed / "Contents/MacOS/clipslots-cli"), "version"], text=True))
     assert cli["ok"] and cli["version"] == version
+    assert sha(installed / "Contents/MacOS/clipslots-mcp") == manifest["mcp_sha256"]
     after = {"data": files(data, True), "config": files(config, True), "links": links()}
     if before != after:
         differences = {key: [name for name in set(before[key]) | set(after[key])
@@ -162,6 +164,7 @@ report = {"version": version, "previous_version": previous_version,
                                   "empty appliedAgentMutationIDs default only"],
           "external_links_unchanged": before["links"] == after["links"],
           "tcc_reset_executed": False, "published": False,
-          "gui_sha256": manifest["gui_sha256"], "cli_sha256": manifest["cli_sha256"]}
+          "gui_sha256": manifest["gui_sha256"], "cli_sha256": manifest["cli_sha256"],
+          "mcp_sha256": manifest["mcp_sha256"]}
 (delivery / "evidence/install-verification.json").write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n")
 print(json.dumps(report, ensure_ascii=False, indent=2), flush=True)

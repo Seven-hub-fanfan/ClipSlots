@@ -6,6 +6,7 @@ struct SlotCardView: View {
     let slot: Int
     let content: SlotContent
     let specialSlotId: String
+    var externalContentRevision: Int = 0
     var label: String = ""
     var saveShortcut: String = ""
     var pasteShortcut: String = ""
@@ -128,6 +129,7 @@ struct SlotCardView: View {
                     // ThumbnailProvider.load 里实现——这里只是把渲染入口统一收敛到
                     // SlotThumbnailView，避免视图层再分叉出第二套缩略图状态机。
                     SlotThumbnailView(content: content, specialSlotId: specialSlotId, slot: slot)
+                        .id(externalContentRevision)
                         .clipShape(RoundedRectangle(cornerRadius: AppTheme.slotPreviewCornerRadius, style: .continuous))
                         .onTapGesture {
                             if content.canPreview {
@@ -154,6 +156,7 @@ struct SlotCardView: View {
                         .help("点击查看视频大图预览")
                 } else {
                     SlotThumbnailView(content: content, specialSlotId: specialSlotId, slot: slot)
+                        .id(externalContentRevision)
                         .clipShape(RoundedRectangle(cornerRadius: AppTheme.slotPreviewCornerRadius, style: .continuous))
                         .onTapGesture {
                             if content.canPreview {
@@ -933,6 +936,7 @@ extension SlotCardView: Equatable {
     static func == (lhs: SlotCardView, rhs: SlotCardView) -> Bool {
         lhs.slot == rhs.slot
             && lhs.specialSlotId == rhs.specialSlotId
+            && lhs.externalContentRevision == rhs.externalContentRevision
             && lhs.content.thumbnailKey(specialSlotId: lhs.specialSlotId, slot: lhs.slot)
                 == rhs.content.thumbnailKey(specialSlotId: rhs.specialSlotId, slot: rhs.slot)
             && lhs.label == rhs.label

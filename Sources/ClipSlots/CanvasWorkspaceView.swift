@@ -747,7 +747,11 @@ struct CanvasWorkspaceView: View {
     /// 关掉 —— 这些都不是一张卡片能负责的。若把分派藏进卡片，那个回调就得穿透一层只为了转交。
     @ViewBuilder
     func nodeCard(_ node: CanvasNode, isEditing: Bool) -> some View {
-        if node.kind.cardForm == .slotStack {
+        if node.kind.cardForm == .tool {
+            CanvasToolNodeCard(node: node, attachments: renderAttachments(for: node),
+                selected: canvas.selectedNodeIds.contains(node.id), renderScale: layoutZoom,
+                onOpen: { openTool(node) }, onHover: { noteNodeHover(node, hovering: $0) })
+        } else if node.kind.cardForm == .slotStack {
             if usesIdleTextSurface(node, isEditing: isEditing) {
                 CanvasIdleTextSlot(node: node, text: renderText(for: node), pathLabel: pathLabel(for: node),
                     renderScale: layoutZoom, viewZoom: zoom, onOpenInputFiles: { openInputFiles(node) },
@@ -1009,7 +1013,11 @@ struct CanvasWorkspaceView: View {
             copyCanvasStructure(duplicate: true)
         }
         Divider()
-        Button(node.isMediaSource ? "上传 / 替换素材" : "编辑提示词") { beginEdit(node) }
+        if node.kind.cardForm == .tool {
+            Button("打开\(node.kind.displayName)") { openTool(node) }
+        } else {
+            Button(node.isMediaSource ? "上传 / 替换素材" : "编辑提示词") { beginEdit(node) }
+        }
         Button("节点属性") {
             canvas.select(id: node.id, additive: false)
             showInspector = true
@@ -1630,9 +1638,16 @@ struct CanvasWorkspaceView: View {
                 importCanvasResource(url, at: request.canvasPoint, parentNodeIds: request.allParentIds,
                                      childNodeId: request.childNodeId)
             }
-        case .audio, .threeD, .timeline, .stage:
-            break
+        case .audio: create(.audio)
+        case .threeD: create(.threeD)
+        case .timeline: create(.timeline)
+        case .stage: create(.stage)
         }
+    }
+
+    func openTool(_ node: CanvasNode) {
+        guard node.kind.cardForm == .tool else { return }
+        CanvasToolWindows.shared.open(node: node, canvas: canvas, store: store, attachments: renderAttachments(for: node))
     }
 
     func importCanvasResource(_ url: URL, at point: CGPoint, parentNodeIds: [String] = [],
@@ -2043,7 +2058,8 @@ struct CanvasWorkspaceView: View {
                 Spacer()
             }
             .padding(.trailing, 16)
-            .padding(.top, 12 + TapSkin.titlebarInset)
+            .padding(.top, max(12 + TapSkin.titlebarInset,
+                WorkspaceModeSwitcher.pinnedTopInset + WorkspaceModeSwitcher.preferredHeight + 10))
             }
 
             // 右侧：属性面板（v2.11.7 hotfix19）。
@@ -2062,7 +2078,8 @@ struct CanvasWorkspaceView: View {
                     Spacer()
                 }
                 .padding(.trailing, 16)
-                .padding(.top, 62 + TapSkin.titlebarInset)
+                .padding(.top, max(62 + TapSkin.titlebarInset,
+                    WorkspaceModeSwitcher.pinnedTopInset + WorkspaceModeSwitcher.preferredHeight + 60))
                 .transition(.opacity.combined(with: .move(edge: .trailing)))
             }
 
@@ -2409,6 +2426,11 @@ struct CanvasWorkspaceView: View {
     }
 
     func beginEdit(_ node: CanvasNode) {
+        if node.kind.cardForm == .tool {
+            canvas.select(id: node.id, additive: false)
+            openTool(node)
+            return
+        }
         if node.isMediaSource {
             canvas.select(id: node.id, additive: false)
             addInputFiles(node)

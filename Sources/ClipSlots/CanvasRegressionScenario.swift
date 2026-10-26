@@ -44,6 +44,10 @@ extension CanvasWorkspaceView {
             }
             inputRouter.anchorView?.window?.setContentSize(CGSize(width: 1440, height: 900))
             let directory = URL(fileURLWithPath: folder, isDirectory: true)
+            if env["CLIPSLOTS_TAPNOW_TOOL_PROBE"] == "1" {
+                await runTapNowToolProbe(directory: directory)
+                return
+            }
             if env["CLIPSLOTS_SMOOTHNESS_PROBE"] == "1" {
                 await runSmoothnessProbe(directory: directory)
                 return

@@ -1,6 +1,16 @@
 import SwiftUI
 import ClipSlotsKit
 
+/// Only the click shield observes this flag, not every transient badge.
+final class SlotNavigationGate: ObservableObject {
+    @Published var isPending = false
+}
+
+/// Grid opacity must not subscribe to cursor, toast or import notifications.
+final class SlotGroupTransition: ObservableObject {
+    @Published var isSwitching = false
+}
+
 /// v2.10.52 (perf 第四批 · 巨型 @Published Store 拆分)
 ///
 /// 把高频触发的「瞬态覆盖层」UI 状态（Toast / 浮层提示）从主 `SlotStoreObservable` 里剥离到本
@@ -41,7 +51,18 @@ final class TransientUIStore: ObservableObject {
 
     /// v2.10.47/74: 切组/切页过渡态。为 true 时表示「已切到新组、新数据尚在后台异步读盘」。
     /// 仅驱动切组遮罩与旧内容淡化，token/兜底逻辑仍在主 store 的 begin/endGroupSwitchTransition。
-    @Published var isSwitchingGroup: Bool = false
+    let groupTransition = SlotGroupTransition()
+    var isSwitchingGroup: Bool {
+        get { groupTransition.isSwitching }
+        set { if groupTransition.isSwitching != newValue { groupTransition.isSwitching = newValue } }
+    }
+    /// A separate publisher prevents a pending disk read from invalidating
+    /// every cursor badge and rebuilding the grid before content is ready.
+    let navigationGate = SlotNavigationGate()
+    var isNavigationPending: Bool {
+        get { navigationGate.isPending }
+        set { if navigationGate.isPending != newValue { navigationGate.isPending = newValue } }
+    }
 
     /// v2.10.1: 下一次 Opt+1 自动存储会写入的空槽（绿色写游标角标）。
     @Published var autoStorePreview: SlotAddress? = nil

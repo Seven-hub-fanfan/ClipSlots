@@ -56,6 +56,7 @@ func runAgentGatewayContinuationProbe(store: SlotStoreObservable, directory: URL
               "artifact stream populates durable native preview records")
         check(context.pendingGraphPreviews.count == 1 && canvas.node(id: node.id)?.width == node.width,
               "canvas events only prepare a preview before user confirmation")
+        await wait { !context.isLoadingReferences }
         check(model.send(text: "稍后继续", config: AgentConfig(), enabledSkills: []),
               "a waiting run accepts a separate queued direction")
         check(model.flushSession(), "waiting run, original submission and queue survive a disk save")
@@ -65,7 +66,12 @@ func runAgentGatewayContinuationProbe(store: SlotStoreObservable, directory: URL
             persistenceURL: sessionURL, canvasProjectID: canvas.activeProjectId, backendKind: .gateway)
         let restoredContext = CanvasAgentContext(canvas: canvas, store: store, projectID: canvas.activeProjectId)
         restored.canvasContext = restoredContext
-        await wait { restored.canResumeGateway && restoredContext.pendingGraphPreviews.count == 1 }
+        // Artifact bytes are read on a detached task. A prepared graph proposal
+        // alone does not mean that the independent artifact reload has finished.
+        await wait {
+            restored.canResumeGateway && restoredContext.pendingGraphPreviews.count == 1
+                && restored.artifacts.count == 1
+        }
         check(restored.selectedConversationID == model.selectedConversationID && restored.queuedSubmissions.count == 1,
               "reopening restores the original conversation and paused queue")
         check(restored.artifacts.count == 1 && restoredContext.pendingGraphPreviews.count == 1,
@@ -306,8 +312,10 @@ func runAgentGatewayContinuationProbe(store: SlotStoreObservable, directory: URL
         canvas.selectedNodeIds = [node.id]
         restoredContext.addSelection(to: restored)
         restoredContext.captureReferenceImages(to: restored)
-        await wait { !restored.isImportingAttachments }
-        check(restored.draftReferences.first?.images?.first?.imageSnapshot == imageBytes,
+        await wait { !restoredContext.isLoadingReferences }
+        let capturedReference = restored.draftReferences.first?.images?.first
+        check(capturedReference?.imageSnapshot.flatMap(NSImage.init(data:)) != nil
+            && store.specialStorage.get(1, in: group.id).attachments.first?.resolveData() == imageBytes,
               "native explicit image capture reads actual stored canvas bytes")
         let referenceTransport = AgentScriptedTransport(steps: [.sse(
             "data: {\"choices\":[{\"delta\":{\"content\":\"引用已传入\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n")])
@@ -317,12 +325,16 @@ func runAgentGatewayContinuationProbe(store: SlotStoreObservable, directory: URL
               "native canvas image submission succeeds")
         await wait { !restored.isRunning }
         let referenceRequest = await referenceTransport.lastRequestJSON()
-        check(referenceRequest?["messages"]?.arrayValue?.last?["content"]?.arrayValue?.last?["image_url"]?["url"]?.stringValue
-            == "data:image/png;base64," + imageBytes.base64EncodedString(),
+        let capturedURL = capturedReference.flatMap { file in
+            file.imageSnapshot.map { "data:\(file.imageMIMEType ?? "image/jpeg");base64," + $0.base64EncodedString() }
+        }
+        check(capturedURL != nil && referenceRequest?["messages"]?.arrayValue?.last?["content"]?.arrayValue?.last?["image_url"]?["url"]?.stringValue
+            == capturedURL,
               "native canvas reference reaches the actual backend as image bytes")
         await runAgentModelNetworkProbe(directory: directory, check: check)
         await runAgentArtifactScriptProbe(directory: directory, check: check)
         await runAgentArtifactMediaProbe(directory: directory, check: check)
+        await runAgentNativeMCPProbe(store: store, directory: directory, check: check)
     } catch { check(false, "native gateway integration: \(error.localizedDescription)") }
 }
 

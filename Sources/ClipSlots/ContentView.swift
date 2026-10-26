@@ -769,13 +769,6 @@ struct ContentView: View {
     /// 注意底板是 `.background`，不参与布局 —— 加不加都不影响那颗胶囊的落位。
     private var workspaceModeSwitcherPinned: some View {
         WorkspaceModeSwitcher(selection: Binding(get: { workspaceMode }, set: { requestWorkspace($0) }))
-            .background {
-                if workspaceMode == .canvas {
-                    RoundedRectangle(cornerRadius: 10, style: .continuous)
-                        .fill(AppTheme.canvasChromeSurface)
-                        .shadow(color: Color.black.opacity(0.12), radius: 5, x: 0, y: 2)
-                }
-            }
             .padding(.top, WorkspaceModeSwitcher.pinnedTopInset)
     }
 
@@ -1204,7 +1197,7 @@ struct ContentView: View {
             .padding(.bottom, 4)
 
             ScrollView {
-                VStack(spacing: 3) {
+                LazyVStack(spacing: 3) {
                     ForEach(store.pages) { page in
                         let isCurrentPage = page.id == store.currentPageId
                         let isExpanded = expandedPageId == page.id || (expandedPageId == nil && isCurrentPage)
@@ -1223,7 +1216,7 @@ struct ContentView: View {
                                     expandedPageId = ""
                                 }
                             } else {
-                                store.switchToPage(id: page.id)
+                                store.switchToPage(id: page.id, fromNavigation: true)
                                 withAnimation(Anim.status) {
                                     expandedPageId = page.id
                                 }
@@ -1265,11 +1258,11 @@ struct ContentView: View {
                         .buttonStyle(PageNavigationButtonStyle())
 
                         if isExpanded && !isPageMultiSelecting {
-                            VStack(spacing: 2) {
+                            LazyVStack(spacing: 2) {
                                 ForEach(pageGroups) { group in
                                     let isCurrentGroup = group.id == store.currentSpecialSlotId
                                     Button {
-                                        store.switchSpecialSlot(id: group.id)
+                                        store.switchSpecialSlot(id: group.id, fromNavigation: true)
                                         showingPageSelector = false
                                     } label: {
                                         HStack(spacing: 8) {
@@ -1428,7 +1421,7 @@ struct ContentView: View {
                     // v2.10.77: 组切换 tab 加入按压微缩 / hover 高亮 / 选中态平滑过渡，
                     // 交互反馈由 GroupTabButton 内部承载，点击切组语义（switchSpecialSlot）保持不变。
                     GroupTabButton(name: group.name, isCurrent: isCurrent) {
-                        store.switchSpecialSlot(id: group.id)
+                        store.switchSpecialSlot(id: group.id, fromNavigation: true)
                     }
                     .contextMenu {
                         Button {
@@ -1811,11 +1804,13 @@ struct ContentView: View {
         let content = store.slots[slot] ?? SlotContent()
         let label = store.labels[slot] ?? ""
         let isMatched = slotMatched(slot)
+        let displayedGroup = store.displayedSpecialSlotId
 
         SlotCardView(
             slot: slot,
             content: content,
-            specialSlotId: store.currentSpecialSlotId,
+            specialSlotId: displayedGroup,
+            externalContentRevision: store.canvasSlotRevision,
             label: label,
             saveShortcut: shortcutPreview(store.config.saveKey, slot: slot),
             pasteShortcut: shortcutPreview(store.config.pasteKey, slot: slot),
@@ -1832,8 +1827,8 @@ struct ContentView: View {
             onCaptureThumbnail: { store.captureManualThumbnail(slot) },
             onUploadThumbnail: { store.uploadManualThumbnail(slot) },
             onClearManualThumbnail: { store.clearManualThumbnail(slot) },
-            isLastPasted: store.isLastPasted(slot: slot, groupId: store.currentSpecialSlotId),
-            isFlashHighlighted: store.flashHighlightSlot == FlashHighlightTarget(groupId: store.currentSpecialSlotId, slot: slot),
+            isLastPasted: store.isLastPasted(slot: slot, groupId: displayedGroup),
+            isFlashHighlighted: store.flashHighlightSlot == FlashHighlightTarget(groupId: displayedGroup, slot: slot),
             store: store,
             connectionDotColor: store.portColor(for: slot),
             isConnectionMode: false,
@@ -1895,7 +1890,13 @@ struct ContentView: View {
                     currentPageId: store.currentPageId,
                     currentGroupId: store.currentSpecialSlotId,
                     onJump: jumpToSearchResult,
-                    sortRule: $globalSearchSortRule
+                    sortRule: $globalSearchSortRule,
+                    loadPreview: { result in
+                        let storage = store.specialStorage
+                        return await Task.detached(priority: .userInitiated) {
+                            storage.slotStorage(for: result.groupId).get(result.slot)
+                        }.value
+                    }
                 )
                 .padding(.top, 2)
             }
@@ -2001,17 +2002,13 @@ struct ContentView: View {
         let groupRefs = store.searchableGroupsSnapshot()
 
         searchDebounce.scanTask = Task.detached(priority: .userInitiated) {
-            // Heavy per-slot expansion + cross-page filter + sort all run off the main thread.
-            // hotfix11: 匹配已下沉进 expandSearchableSlots（先扫磁盘匹配、命中后才补齐完整内容，
-            // 见该方法注释）。这里拿到的已经是命中集，filterAndSortGlobalSearch 的再次 filter
-            // 是幂等的，保留它是为了不动既有的排序 / 上下文加权路径。
+            // Expansion already applies the authoritative text/media matcher.
+            // Sort those hits directly instead of repeating full-text matching.
             let all = SlotStoreObservable.expandSearchableSlots(groupRefs, query: query, filter: filter,
                                                                isCancelled: { Task.isCancelled })
             guard !Task.isCancelled else { return }
-            let results = ContentView.filterAndSortGlobalSearch(
-                all: all,
-                query: query,
-                filter: filter,
+            let results = ContentView.sortGlobalSearch(
+                all,
                 sortRule: sortRule,
                 currentPageId: currentPageId,
                 currentSpecialSlotId: currentSpecialSlotId
@@ -2079,37 +2076,9 @@ struct ContentView: View {
 
     /// Pure filter + sort over an already-collected slot list. Static so it can run on a
     /// background thread without touching `@State`/view state (v2.8.7 F).
-    private static func filterAndSortGlobalSearch(
-        all: [SlotGlobalSearchResult],
-        query: String,
-        filter: SlotFilterType,
-        sortRule: SlotSearchSortRule,
-        currentPageId: String,
-        currentSpecialSlotId: String
-    ) -> [SlotGlobalSearchResult] {
-        let filtered = all
-            .filter { result in
-                SlotSearchMatcher.matches(
-                    slot: result.slot,
-                    content: result.content,
-                    label: result.label,
-                    query: query,
-                    filter: filter
-                )
-            }
-        // P2 (#9, v2.10.7): 过滤后交给 sortGlobalSearch 排序；主线程完成回调可直接复用
-        // sortGlobalSearch 重排而无需重复过滤，避免大结果集在主线程二次过滤造成卡顿。
-        return ContentView.sortGlobalSearch(
-            filtered,
-            sortRule: sortRule,
-            currentPageId: currentPageId,
-            currentSpecialSlotId: currentSpecialSlotId
-        )
-    }
-
     /// P2 (#9, v2.10.7): 仅排序（不重复过滤）。后台队列已完成过滤，主线程完成回调只需
     /// 按最新的当前页/组上下文重排即可，避免对大结果集在主线程重复执行 filter。
-    private static func sortGlobalSearch(
+    nonisolated private static func sortGlobalSearch(
         _ filtered: [SlotGlobalSearchResult],
         sortRule: SlotSearchSortRule,
         currentPageId: String,
@@ -2161,8 +2130,7 @@ struct ContentView: View {
     }
 
     private func jumpToSearchResult(_ result: SlotGlobalSearchResult) {
-        store.switchToPage(id: result.pageId)
-        store.switchSpecialSlot(id: result.groupId)
+        store.switchSpecialSlot(id: result.groupId, fromNavigation: true)
         searchScope = .currentGroup
     }
 }

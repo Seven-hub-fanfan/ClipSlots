@@ -21,6 +21,11 @@ let package = Package(
             dependencies: ["ClipSlotsKit"],
             path: "Sources/ClipSlotsCLI"
         ),
+        .executableTarget(
+            name: "ClipSlotsMCP",
+            dependencies: ["ClipSlotsKit"],
+            path: "Sources/ClipSlotsMCP"
+        ),
         .testTarget(
             name: "ClipSlotsKitTests",
             dependencies: ["ClipSlotsKit"],

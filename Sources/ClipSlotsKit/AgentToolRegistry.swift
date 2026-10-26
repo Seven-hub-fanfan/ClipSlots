@@ -1102,10 +1102,10 @@ public final class AgentSkillTools {
 // MARK: - 汇总注册表
 
 public final class AgentToolRegistry: AgentToolExecuting {
-    private let builtin: AgentBuiltinTools
+    private let builtin: AgentToolExecuting
     private let skills: AgentSkillTools
 
-    public init(builtin: AgentBuiltinTools = AgentBuiltinTools(),
+    public init(builtin: AgentToolExecuting = AgentNativeSlotTools(),
                 skills: AgentSkillTools = AgentSkillTools()) {
         self.builtin = builtin
         self.skills = skills
@@ -1120,7 +1120,7 @@ public final class AgentToolRegistry: AgentToolExecuting {
     }
 
     public func execute(call: AgentToolCall) async -> AgentToolResult {
-        if builtin.toolNames.contains(call.name) {
+        if builtin.specs().contains(where: { $0.name == call.name }) {
             return await builtin.execute(call: call)
         }
         return await skills.execute(call: call)

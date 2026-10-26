@@ -207,13 +207,13 @@ extension CanvasWorkspaceView {
             }
             try? JSONSerialization.data(withJSONObject: debugRows, options: [.prettyPrinted])
                 .write(to: directory.appendingPathComponent("ax-\(mode.rawValue).json"))
-            let identifier = mode == .agent ? "workspace-beat" : "workspace-\(mode.rawValue)"
+            let identifier = mode == .agent ? "workspace-models" : "workspace-\(mode.rawValue)"
             check(nodes.contains { ($0.accessibilityIdentifier?() ?? "") == identifier
                 || ($0.accessibilityLabel?() ?? "") == mode.title
                 || ($0.accessibilityTitle?() ?? "") == mode.title
                 || ($0.accessibilityHelp?() ?? "") == mode.title }, "\(mode.rawValue) switch remains accessible")
             if mode == .agent {
-                check(!mode.isSelectable, "Beat placeholder never opens the removed full workspace")
+                check(!mode.isSelectable, "models placeholder never opens the removed full workspace")
             }
         }
 

@@ -11,7 +11,9 @@ if CommandLine.arguments.dropFirst().first == "--mcp" {
                 if let encoded = ProcessInfo.processInfo.environment[AgentLiveMCPLease.environmentKey] {
                     let lease = try JSONDecoder().decode(AgentLiveMCPLease.self, from: Data(encoded.utf8))
                     let reader = try AgentExternalReadOnlyMCPTools(configuration: configuration)
-                    await AgentMCPServer.serve(tools: try AgentExternalLiveMCPTools(reader: reader, lease: lease))
+                    let live = try AgentExternalLiveMCPTools(reader: reader, lease: lease)
+                    await AgentMCPServer.serve(tools: CommandLine.arguments.contains("--read-only")
+                        ? AgentMCPReadOnlyTools(base: live) : live)
                 } else {
                     try await AgentMCPServer.serveReadOnly(configuration: configuration)
                 }
@@ -81,7 +83,7 @@ let CLI_VERSION: String = {
        !v.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
         return v
     }
-    return "2.17.81"
+    return "2.17.91"
 }()
 let DEFAULT_GROUP = "default"
 let DEFAULT_PAGE = "default_page"

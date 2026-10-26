@@ -13,7 +13,7 @@ public enum AgentExternalHandoffError: Error, LocalizedError {
 
 public enum AgentExternalMCPReadiness: Equatable, Sendable {
     case unavailable(String)
-    /// Set only after the CLI route AND project-scoped tool enforcement are available.
+    /// Set only after the dedicated MCP executable and scoped native host are available.
     case ready
 }
 
@@ -87,7 +87,7 @@ public struct AgentExternalProjectContext: Equatable, Sendable {
         ]).encodedText(pretty: true)
         let permissions = liveLease == nil
             ? "This MCP route is read-only. Call clipslots_context first to obtain the fixed snapshot ID."
-            : "Call clipslots_context first. preview_canvas_mutation submits a proposal to the active native canvas; only native user confirmation writes it. Poll canvas_mutation_status for the result. This connection expires after 30 minutes or on project/session change or cancellation."
+            : "Call clipslots_context first. canvas_current/canvas_get_node read the live native canvas. canvas_* actions edit, connect, move, group, lay out, undo or redo through native transactions; writes require approval in ClipSlots. Slot tools use the native data layer without the ClipSlots CLI and obey the connection access mode. Read current revisions before writes, then read back results. canvas_generate uses the separately configured Crate/ByteArtist service and may consume credits. preview_canvas_mutation remains available for structural proposals. This connection expires after 30 minutes or on project/session change or cancellation."
         let text = """
         Continue work in this explicitly selected ClipSlots project/canvas only.
         Project scope:
@@ -104,7 +104,7 @@ public struct AgentExternalProjectContext: Equatable, Sendable {
         \(try mcpConfiguration().encodedText(pretty: true))
 
         \(permissions)
-        If no snapshot ID is specified, the latest saved snapshot of this project is frozen at startup.
+        \(liveLease == nil ? "If no snapshot ID is specified, the latest saved snapshot of this project is frozen at startup." : "Canvas reads are refreshed by the native host on each invocation; use canvas_current for current revisions.")
         Do not infer file/shell permissions. Ask for missing access and confirm mutations.
         This handoff does not reuse an internal Agent session or run ID.
         """

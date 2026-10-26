@@ -1,15 +1,26 @@
 import Foundation
 
-/// Stdio MCP adapter for resumed desktop threads, which cannot add dynamic tools.
-/// Reuses the same registry and CLI locking as the app; does not modify client configuration.
+/// Stdio protocol adapter shared by the dedicated MCP binary and compatibility CLI.
 public enum AgentMCPServer {
+    public static var version: String {
+        let executable = Bundle.main.executableURL?.resolvingSymlinksInPath()
+        let plist = executable?.deletingLastPathComponent().deletingLastPathComponent().appendingPathComponent("Info.plist")
+        if let plist, let data = try? Data(contentsOf: plist),
+           let info = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any],
+           let value = info["CFBundleShortVersionString"] as? String { return value }
+        return "2.17.91"
+    }
+
     public static func response(to request: JSONValue, tools: AgentToolExecuting) async -> JSONValue? {
         guard let id = request["id"] else { return nil }
         let result: JSONValue
         switch request["method"]?.stringValue {
         case "initialize":
-            result = ["protocolVersion": "2024-11-05", "capabilities": ["tools": [:]],
-                      "serverInfo": ["name": "clipslots", "version": "2.17.37"]]
+            let requested = request["params"]?["protocolVersion"]?.stringValue ?? ""
+            let supported = ["2024-11-05", "2025-03-26", "2025-06-18", "2025-11-25"]
+            result = ["protocolVersion": .string(supported.contains(requested) ? requested : "2025-11-25"),
+                      "capabilities": ["tools": [:]],
+                      "serverInfo": ["name": "clipslots", "version": .string(version)]]
         case "ping": result = [:]
         case "tools/list":
             result = ["tools": .array(tools.specs().map {
@@ -33,8 +44,7 @@ public enum AgentMCPServer {
 
     public static func serve(cliPath: String, bundlePath: String, skillSlugs: Set<String>) async {
         let skills = AgentSkillCatalog.discover(bundlePath: bundlePath).filter { skillSlugs.contains($0.slug) }
-        let registry = AgentToolRegistry(builtin: AgentBuiltinTools(cliPath: cliPath),
-                                         skills: AgentSkillTools(enabledSkills: skills))
+        let registry = AgentToolRegistry(builtin: AgentNativeSlotTools(), skills: AgentSkillTools(enabledSkills: skills))
         await serve(tools: registry)
     }
 
@@ -61,5 +71,31 @@ public enum AgentMCPServer {
                 do { try FileHandle.standardOutput.write(contentsOf: encoded) } catch { return }
             }
         }
+    }
+}
+
+/// Restricts a connected live host without granting access to its write tools.
+public final class AgentMCPReadOnlyTools: AgentToolExecuting {
+    private let base: AgentToolExecuting
+    private let names: Set<String>
+    public init(base: AgentToolExecuting) {
+        self.base = base
+        names = AgentNativeSlotTools.readers.union(CanvasAgentActionTools.readers).union([
+            "clipslots_context", "artifact_list", "artifact_metadata", "artifact_read",
+            "canvas_overview", "canvas_nodes", "canvas_edges", "canvas_groups", "canvas_piles",
+            "canvas_read_group", "canvas_read_node", "canvas_read_run", "canvas_mutation_status"
+        ])
+    }
+    public func specs() -> [AgentToolSpec] { base.specs().filter { names.contains($0.name) } }
+    public func execute(call: AgentToolCall) async -> AgentToolResult {
+        guard names.contains(call.name) else { return .failure("此 MCP 连接为只读。", code: "READ_ONLY_SCOPE") }
+        let result = await base.execute(call: call)
+        if call.name == "clipslots_context", !result.isFailure,
+           var value = (try? JSONValue.decode(jsonText: result.content))?.objectValue {
+            value["read_only"] = true
+            value["writes_enabled"] = false
+            return .init(content: (try? JSONValue.object(value).encodedText()) ?? result.content, summary: result.summary)
+        }
+        return result
     }
 }

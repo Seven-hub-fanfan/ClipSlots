@@ -21,6 +21,9 @@ enum CanvasSkin {
         case .image: return tone(0x147d76, 0xf0f1f4)
         case .video: return tone(0x3869c8, 0xf0f1f4)
         case .slot, .batchTemplate: return tone(0xa86b18, 0xf0f1f4)
+        case .audio: return tone(0xa5498c, 0xf0f1f4)
+        case .threeD, .stage: return tone(0x3869c8, 0xf0f1f4)
+        case .timeline: return tone(0x147d76, 0xf0f1f4)
         }
     }
     static var void: Color { tone(0xf3f3f3, 0x080808) }

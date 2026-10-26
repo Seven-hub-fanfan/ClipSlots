@@ -30,6 +30,7 @@ final class StorageDirectoryWatcher {
     private let stateLock = NSLock()
     private let path: String
     private let onChange: () -> Void
+    private let ignoreVerifiedChange: (([String]) -> Bool)?
     /// ★ v2.10.91 (第六轮): 「本流收到过任何事件」的心跳回调，在**过滤之前**调用。
     /// GUI 侧用它区分「流活着但这批事件不值得刷新」与「流已经聋了」——后者才需要重建流。
     private let onAnyEvent: (() -> Void)?
@@ -43,9 +44,11 @@ final class StorageDirectoryWatcher {
     /// POSIX `realpath(3)` 拿物理路径，三种写法都参与前缀匹配。
     private let baseCandidates: [String]
 
-    init(path: String, onChange: @escaping () -> Void, onAnyEvent: (() -> Void)? = nil) {
+    init(path: String, onChange: @escaping () -> Void, onAnyEvent: (() -> Void)? = nil,
+         ignoreVerifiedChange: (([String]) -> Bool)? = nil) {
         self.path = path
         self.onAnyEvent = onAnyEvent
+        self.ignoreVerifiedChange = ignoreVerifiedChange
         var candidates = [path, URL(fileURLWithPath: path).resolvingSymlinksInPath().path]
         var buf = [CChar](repeating: 0, count: Int(PATH_MAX))
         if realpath(path, &buf) != nil {
@@ -79,6 +82,11 @@ final class StorageDirectoryWatcher {
             guard eventPath.hasPrefix(withSlash) else { continue }
             let rel = eventPath.dropFirst(withSlash.count)
             guard !rel.isEmpty else { return false }
+            // Foundation's atomic index writes use visible "index.json.sb-…"
+            // siblings on this macOS version. They are staging files, never
+            // library data; the final index.json event still undergoes verification.
+            if rel.range(of: #"^index\.json\.sb-[0-9a-fA-F]{8}-[A-Za-z0-9]{6}$"#,
+                         options: .regularExpression) != nil { return true }
             return rel.split(separator: "/").contains { $0.hasPrefix(".") }
         }
         // 兜底：无法确定相对路径 → 只看叶子名是否隐藏。
@@ -110,7 +118,7 @@ final class StorageDirectoryWatcher {
             copyDescription: nil
         )
 
-        let callback: FSEventStreamCallback = { (_, info, _, eventPaths, _, _) in
+        let callback: FSEventStreamCallback = { (_, info, count, eventPaths, eventFlags, _) in
             guard let info = info else { return }
             let box = Unmanaged<WeakBox>.fromOpaque(info).takeUnretainedValue()
             // weak back-reference: nil once the watcher has been deallocated → skip.
@@ -126,9 +134,20 @@ final class StorageDirectoryWatcher {
             // 一定产生非隐藏路径事件（实测 CLI write/clear 的事件批都含 `<group>/<slot>` 与 `index.json`），
             // 并且还有 sentinel 轮询兜底。
             if let paths = unsafeBitCast(eventPaths, to: NSArray.self) as? [String],
-               !paths.isEmpty,
-               paths.allSatisfy({ watcher.isInternalBookkeepingPath($0) }) {
-                return
+               !paths.isEmpty {
+                let relevant = paths.filter { !watcher.isInternalBookkeepingPath($0) }
+                if relevant.isEmpty { return }
+                #if DEBUG
+                if ProcessInfo.processInfo.environment["CLIPSLOTS_LARGE_LIBRARY_PROBE"] == "1" {
+                    NSLog("[LargeWatcher] %@ flags=%@", relevant.description,
+                          (0..<count).map { String(eventFlags[$0]) }.joined(separator: ","))
+                }
+                #endif
+                let recoveryFlags = UInt32(kFSEventStreamEventFlagMustScanSubDirs
+                    | kFSEventStreamEventFlagUserDropped | kFSEventStreamEventFlagKernelDropped
+                    | kFSEventStreamEventFlagRootChanged)
+                if !(0..<count).contains(where: { eventFlags[$0] & recoveryFlags != 0 }),
+                   watcher.ignoreVerifiedChange?(relevant) == true { return }
             }
             watcher.onChange()
         }

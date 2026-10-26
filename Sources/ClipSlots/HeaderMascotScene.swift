@@ -5,7 +5,8 @@ import ClipSlotsKit
 
 /// Authored volumetric replacement at the original model pivots and camera.
 /// The controller deforms the leg mesh in depth; it never scales a flat image.
-@MainActor
+// A live scene belongs exclusively to HeaderMascotRenderer's serial queue.
+// Standalone regression scenes are used synchronously by their caller.
 final class HeaderMascotScene {
     private struct Mesh: Decodable {
         struct Range: Decodable { let offset:Int; let count:Int }
@@ -38,7 +39,10 @@ final class HeaderMascotScene {
     private let headCenter=SIMD3<Float>(0,0.035,-0.025)
     private var headPosition:SIMD3<Float> { SIMD3(0.026227125,0.0008692615,-0.03371167)+headRest.act(headCenter) }
     private var headInverse=matrix_identity_float4x4
+    private var pointerCameraTransform=matrix_identity_float4x4
     private var lastHeadTransform:simd_float4x4?
+    private var lastContactTransform:simd_float4x4?
+    private var lastContactLift:Float=0
     private(set) var neckAttachmentValid=true
     private(set) var neckSurfaceValid=true
     private(set) var headBodyClearanceValid=true
@@ -316,6 +320,7 @@ final class HeaderMascotScene {
         for node in head.childNodes { node.simdPosition-=headCenter }
         pixelsPerY=28.538486839707254
         legPixels=10.308069221890811
+        pointerCameraTransform=camera.simdWorldTransform
         ready=true
     }
     private func geometry(_ part:Part,positions:[SIMD3<Float>],normals:[SIMD3<Float>])->SCNGeometry {
@@ -381,16 +386,26 @@ final class HeaderMascotScene {
         return (a+(b-a)*tx)*(1-tz)+(c+(d-c)*tx)*tz
     }
     private func resolveShoulderContact() {
+        let transform=head.simdTransform
+        if lastContactTransform == transform {
+            head.simdPosition.y+=lastContactLift
+            return
+        }
+        // SceneKit getters cross Objective-C and derive quaternions. Capture
+        // them once for the entire mesh, preserving the exact vertex formula.
+        let position=head.simdPosition,orientation=head.simdOrientation
         var lift:Float=0
         for p in headContactPoints {
-            let point=head.simdPosition+head.simdOrientation.act(p-headCenter)
+            let point=position+orientation.act(p-headCenter)
             lift=max(lift,shoulderY(point)+0.022-point.y)
         }
+        lastContactTransform=transform;lastContactLift=lift
         head.simdPosition.y+=lift
         headBodyClearanceValid=true
         if verifyGeometry {
+            let lifted=head.simdPosition
             headBodyClearanceValid=headContactPoints.allSatisfy {
-                let p=head.simdPosition+head.simdOrientation.act($0-headCenter)
+                let p=lifted+orientation.act($0-headCenter)
                 return p.y>=shoulderY(p)+0.021
             }
         }
@@ -399,11 +414,12 @@ final class HeaderMascotScene {
         let current=head.simdTransform
         guard lastHeadTransform != current else { return }
         lastHeadTransform=current;neckAttachmentValid=true;neckSurfaceValid=true
+        let position=head.simdPosition,headOrientation=head.simdOrientation
         func rest(_ p:SIMD3<Float>)->SIMD3<Float> { headPosition+headRest.act(p-headCenter) }
-        func moved(_ p:SIMD3<Float>)->SIMD3<Float> { head.simdPosition+head.simdOrientation.act(p-headCenter) }
+        func moved(_ p:SIMD3<Float>)->SIMD3<Float> { position+headOrientation.act(p-headCenter) }
         // Transport each cloth ring along the centreline with a quaternion.
         // A blend of rotation matrices pinched the wide collar during yaw.
-        let restRotation=simd_float3x3(headRest),rotation=simd_float3x3(head.simdOrientation)
+        let restRotation=simd_float3x3(headRest),rotation=simd_float3x3(headOrientation)
         func blend(_ y:Float)->Float {
             let t=max(0,min(1,(y-neckLower)/(neckUpper-neckLower)))
             return t*t*(3-2*t)
@@ -418,10 +434,10 @@ final class HeaderMascotScene {
             let derivative=6*t*(1-t)/(neckUpper-neckLower)
             let center=SIMD3<Float>(0,y,-0.025)
             let a=rest(center),b=moved(center)
-            let orientation=simd_float3x3(simd_slerp(headRest,head.simdOrientation,weight))
+            let orientation=simd_float3x3(simd_slerp(headRest,headOrientation,weight))
             let epsilon:Float=0.0005
-            let next=simd_float3x3(simd_slerp(headRest,head.simdOrientation,blend(y+epsilon)))
-            let prior=simd_float3x3(simd_slerp(headRest,head.simdOrientation,blend(y-epsilon)))
+            let next=simd_float3x3(simd_slerp(headRest,headOrientation,blend(y+epsilon)))
+            let prior=simd_float3x3(simd_slerp(headRest,headOrientation,blend(y-epsilon)))
             let value=(a+(b-a)*weight,
                 restRotation.columns.1*(1-weight)+rotation.columns.1*weight+(b-a)*derivative,
                 orientation,(next-prior)*(1/(2*epsilon)))
@@ -465,7 +481,9 @@ final class HeaderMascotScene {
     }
     func pointer(x:Double,y:Double)->(Double,Double) {
         var direction=SIMD4<Float>(Float(x),Float(-y),180,0)
-        direction=camera.simdWorldTransform*direction
+        // Both projection matrices are immutable after construction. Pointer
+        // sampling must never read the live SceneKit graph from the UI thread.
+        direction=pointerCameraTransform*direction
         direction=headInverse*direction
         let v=simd_normalize(SIMD3(direction.x,direction.y,direction.z))
         return (max(-65,min(65,atan2(Double(v.x),Double(v.z))*180 / .pi)),
@@ -525,7 +543,7 @@ final class HeaderMascotScene {
             if part.kind=="voicePen" {
                 let a=track("pen");part.node.position=SCNVector3(a[0]*sourceUnits,-a[1]*sourceUnits,0)
             }
-            if part.kind=="voiceArmLeft" || part.kind=="voiceArmRight" {
+            if activity == .voice && (part.kind=="voiceArmLeft" || part.kind=="voiceArmRight") {
                 let a=track(part.kind=="voiceArmRight" ? "pen" : "leftArm")
                 if lastActivity != activity || lastPose?.activityFrame != pose.activityFrame ||
                     lastPose?.activityProgress != pose.activityProgress {
@@ -543,8 +561,8 @@ final class HeaderMascotScene {
                 let a=track(part.kind=="armLeft" ? "leftArm" : "rightArm")
                 part.node.isHidden=activity == .voice
                 let delta=SIMD3<Float>(Float(a[0]*sourceUnits),Float(-a[1]*sourceUnits),0)
-                if lastActivity != activity || lastPose?.activityFrame != pose.activityFrame ||
-                    lastPose?.activityProgress != pose.activityProgress {
+                if activity != .voice && (lastActivity != activity || lastPose?.activityFrame != pose.activityFrame ||
+                    lastPose?.activityProgress != pose.activityProgress) {
                 // Pin sleeves at the shoulder while the fingertip follows the
                 // source typing trajectory; moving the complete limb detaches it.
                 let p=part.positions.map { position -> SIMD3<Float> in

@@ -63,7 +63,7 @@ public enum SlotSearchIndex {
     /// `[图片 742KB]` 只存在于 preview，plainText 对它们是 nil，所以两者都要收）、附件名、
     /// 主文件的文件名 / 完整路径 / 扩展名、检测到的网址与 host。
     public static func contentHaystack(content: SlotContent, label: String) -> String {
-        let key = "content::\(content.contentId)::\(content.updatedAt)::\(label)" as NSString
+        let key = "content::\(content.contentId)::\(content.updatedAt)::\(content.searchCacheIdentity)::\(label)" as NSString
         if let cached = SlotSearchIndexCache.shared.object(forKey: key) { return cached as String }
         let built = buildContentHaystack(content: content, label: label)
         SlotSearchIndexCache.shared.setObject(built as NSString, forKey: key)
@@ -72,7 +72,7 @@ public enum SlotSearchIndex {
 
     /// GUI 用可搜索文本：内容侧文本 + 槽位号 + 「槽位 N」。
     public static func slotHaystack(slot: Int, content: SlotContent, label: String) -> String {
-        let key = "slot::\(slot)::\(content.contentId)::\(content.updatedAt)::\(label)" as NSString
+        let key = "slot::\(slot)::\(content.contentId)::\(content.updatedAt)::\(content.searchCacheIdentity)::\(label)" as NSString
         if let cached = SlotSearchIndexCache.shared.object(forKey: key) { return cached as String }
         let built = "\(slot)\n槽位 \(slot)\n" + contentHaystack(content: content, label: label)
         SlotSearchIndexCache.shared.setObject(built as NSString, forKey: key)

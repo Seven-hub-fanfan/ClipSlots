@@ -46,10 +46,7 @@ extension CanvasWorkspaceView {
             return condition()
         }
         func elements(_ node: AnyObject, depth: Int = 0) -> [AnyObject] {
-            guard depth < 40 else { return [] }
-            let children = node.accessibilityChildren?() ?? []
-            let fallback = (node as? NSView)?.subviews ?? []
-            return [node] + (children.isEmpty ? fallback : children).flatMap { elements($0 as AnyObject, depth: depth + 1) }
+            NativeAccessibilityProbe.elements(node)
         }
         func find(_ root: NSView, _ id: String) -> AnyObject? {
             elements(root).first { ($0.accessibilityIdentifier?() ?? "") == id }
@@ -58,12 +55,7 @@ extension CanvasWorkspaceView {
             find(root, id)?.accessibilityPerformPress?() == true
         }
         func pressPolish(_ root: NSView) async -> Bool {
-            guard press(root, "agent-composer-add") else { return false }
-            await settle()
-            guard let menu = NSApp.windows.compactMap(\.contentView).first(where: {
-                find($0, "agent-ai-polish") != nil
-            }) else { return false }
-            return press(menu, "agent-ai-polish")
+            press(root, "agent-ai-polish")
         }
         func editors(_ root: NSView) -> [AgentDraftEditor.Editor] {
             (root as? AgentDraftEditor.Editor).map { [$0] } ?? root.subviews.flatMap(editors)
@@ -79,6 +71,7 @@ extension CanvasWorkspaceView {
                 .filter { $0.first == "generate" }
         }
         guard let anchor = inputRouter.anchorView, let window = anchor.window, let root = window.contentView else { return }
+        NativeAccessibilityProbe.enable()
         _ = await AgentProcessRunner.run(executable: "/usr/bin/swift", arguments: ["-e", """
             import ApplicationServices
             let app = AXUIElementCreateApplication(pid_t(CommandLine.arguments[1])!)
@@ -105,10 +98,11 @@ extension CanvasWorkspaceView {
                 model.draft = "请整理这段创作说明🙂\n保留 `--ratio 16:9`"
                 await settle(0.4)
                 let before = await backend.calls.count
-                check(find(host, "agent-composer-add") != nil, "\(mode.rawValue) has accessible composer tools menu")
+                check(find(host, "agent-ai-polish") != nil && find(host, "agent-model-picker") != nil,
+                      "\(mode.rawValue) exposes separate polish and model controls")
                 check(await backend.calls.count == before, "\(mode.rawValue) mounting and typing do not invoke model")
                 await backend.configure(delay: 0.55)
-                check(await pressPolish(host), "\(mode.rawValue) native tools menu activates polish")
+                check(await pressPolish(host), "\(mode.rawValue) native sparkle button activates polish")
                 model.polishDraft(config: AgentConfig(model: "fixture-selected-model"))
                 await settle(0.1)
                 let loadingCalls = await backend.calls.count

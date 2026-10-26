@@ -24,7 +24,20 @@ final class HeaderMascotNativeView: NSView {
     override var isFlipped: Bool { true }
     override var mouseDownCanMoveWindow: Bool { false }
     let motion=MascotMotion()
-    private let scene=HeaderMascotScene()
+    private let renderer=HeaderMascotRenderer()
+    private lazy var frames=MascotFrameScheduler(render: { [renderer] request, completion in
+        renderer.render(request,completion:completion)
+    },present: { [weak self] request, frame in
+        guard let self, self.visible, request.activity == self.motion.activity,
+              request.size == self.rasterSide, let image=frame.bitmap else { return }
+        self.bitmap=image
+        self.geometryInsideFrustum=frame.geometryInsideFrustum
+        self.facialSurfaceValid=frame.facialSurfaceValid
+        self.renderCount+=1;self.needsDisplay=true
+        self.detachedView?.needsDisplay=true
+    })
+    private var scheduledActivity:MascotMotion.Activity?
+    private var scheduledSize:Int?
     var onToggle: () -> Void = {}
     private var subscribers=Set<AnyCancellable>()
     private var boundModel: ObjectIdentifier?
@@ -61,15 +74,18 @@ final class HeaderMascotNativeView: NSView {
     private(set) var frameCount=0
     private(set) var renderCount=0
     private(set) var activeTimer=false
-    var geometryInsideFrustum: Bool { scene.geometryInsideFrustum }
-    var facialSurfaceValid: Bool { scene.facialSurfaceValid }
+    private(set) var geometryInsideFrustum=true
+    private(set) var facialSurfaceValid=true
     private var now: Double { ProcessInfo.processInfo.systemUptime*1000 }
+    private var rasterSide:Int {
+        max(128,Int(ceil(bounds.width*(window?.backingScaleFactor ?? 2))))
+    }
 
     override init(frame frameRect:NSRect) {
         super.init(frame:frameRect)
-        motion.legPixels=scene.legPixels
-        motion.pointerProjection={ [weak scene] x,y in scene?.pointer(x:x,y:y) ?? (0,0) }
-        motion.computerGaze=scene.computerGaze
+        motion.legPixels=renderer.legPixels
+        motion.pointerProjection={ [weak renderer] x,y in renderer?.pointer(x:x,y:y) ?? (0,0) }
+        motion.computerGaze=renderer.computerGaze
         setAccessibilityElement(true)
         setAccessibilityRole(.button)
         setAccessibilityLabel("斗篷小助手")
@@ -214,6 +230,7 @@ final class HeaderMascotNativeView: NSView {
             }
         } else {
             stopTimer()
+            frames.invalidate()
             cursorTimer?.invalidate();cursorTimer=nil;lastCursor=nil
             if let pointerMonitor { NSEvent.removeMonitor(pointerMonitor); self.pointerMonitor=nil }
             dragPanel?.orderOut(nil);pressedAt=nil
@@ -222,6 +239,7 @@ final class HeaderMascotNativeView: NSView {
     }
     func dispose() {
         disposed=true; stopTimer(); subscribers.removeAll()
+        frames.invalidate()
         cursorTimer?.invalidate();cursorTimer=nil
         notifications.forEach {
             NotificationCenter.default.removeObserver($0)
@@ -379,11 +397,14 @@ final class HeaderMascotNativeView: NSView {
                 "yaw":pose.yaw,"pitch":pose.pitch,"frame":pose.activityFrame,
                 "frame_progress":pose.activityProgress])
         }
+        let side=rasterSide, activity=motion.activity
+        if scheduledActivity != activity || scheduledSize != side {
+            frames.invalidate()
+            scheduledActivity=activity;scheduledSize=side;lastPose=nil
+        }
         if pose != lastPose || bitmap == nil {
-            let scale=window?.backingScaleFactor ?? 2
-            let rasterSide=max(128,Int(ceil(bounds.width*scale)))
-            bitmap=render(pose,size:rasterSide); lastPose=pose; renderCount+=1; needsDisplay=true
-            detachedView?.needsDisplay=true
+            frames.submit(MascotFrameRequest(pose:pose,size:side,activity:activity))
+            lastPose=pose
         }
     }
     private func saveVoiceTrace() {
@@ -400,9 +421,13 @@ final class HeaderMascotNativeView: NSView {
         NSImage(cgImage:image,size:bounds.size).draw(in:bounds,from:.zero,
             operation:.sourceOver,fraction:1,respectFlipped:true,hints:[.interpolation:NSImageInterpolation.high])
     }
-    /// One transparent CPU raster at Retina size. No web runtime or per-token page redraw.
+    /// Synchronous deterministic probe; the live timer always uses async frames.
+    /// It shares the same serial renderer, so probes cannot race the live graph.
     func render(_ pose:MascotPose,size:Int) -> NSBitmapImageRep? {
-        return scene.render(pose,size:size,activity:motion.activity)
+        let frame=renderer.renderSynchronously(MascotFrameRequest(pose:pose,size:size,activity:motion.activity))
+        geometryInsideFrustum=frame.geometryInsideFrustum
+        facialSurfaceValid=frame.facialSurfaceValid
+        return frame.bitmap
     }
     fileprivate func drawFloating() {
         guard let image=bitmap?.cgImage else { return }
@@ -410,6 +435,80 @@ final class HeaderMascotNativeView: NSView {
             fraction:1,respectFlipped:true,hints:[.interpolation:NSImageInterpolation.high])
     }
     fileprivate func floatingHit(_ point:NSPoint)->Bool { alphaHit(point,rep:bitmap) }
+}
+
+struct MascotFrameRequest {
+    let pose:MascotPose
+    let size:Int
+    let activity:MascotMotion.Activity
+}
+
+struct MascotRenderedFrame {
+    let bitmap:NSBitmapImageRep?
+    let geometryInsideFrustum:Bool
+    let facialSurfaceValid:Bool
+}
+
+/// Only the queue touches the live scene after initialization. Completed bitmaps
+/// are transferred to main and never mutated again; no NSView leaves main.
+private final class HeaderMascotRenderer: @unchecked Sendable {
+    private let queue=DispatchQueue(label:"com.clipslots.mascot.render",qos:.userInitiated)
+    private let scene=HeaderMascotScene()
+    var legPixels:Double { scene.legPixels }
+    var computerGaze:(yaw:Double,pitch:Double) { scene.computerGaze }
+    func pointer(x:Double,y:Double)->(Double,Double) { scene.pointer(x:x,y:y) }
+    private func raster(_ request:MascotFrameRequest)->MascotRenderedFrame {
+        autoreleasepool {
+            let bitmap=scene.render(request.pose,size:request.size,activity:request.activity)
+            return MascotRenderedFrame(bitmap:bitmap,geometryInsideFrustum:scene.geometryInsideFrustum,
+                                       facialSurfaceValid:scene.facialSurfaceValid)
+        }
+    }
+    func render(_ request:MascotFrameRequest,completion:@escaping @MainActor (MascotRenderedFrame)->Void) {
+        queue.async { [self] in
+            let frame=raster(request)
+            DispatchQueue.main.async { completion(frame) }
+        }
+    }
+    func renderSynchronously(_ request:MascotFrameRequest)->MascotRenderedFrame {
+        queue.sync { raster(request) }
+    }
+}
+
+/// At most one frame in flight and one latest pending pose. Invalidation drops
+/// pre-hide, old-activity and old-size results without blocking the UI or GPU.
+@MainActor
+final class MascotFrameScheduler {
+    typealias Completion = @MainActor (MascotRenderedFrame)->Void
+    private let render:(MascotFrameRequest,@escaping Completion)->Void
+    private let present:(MascotFrameRequest,MascotRenderedFrame)->Void
+    private var generation:UInt64=0
+    private var pending:MascotFrameRequest?
+    private(set) var inFlight=false
+    private(set) var coalesced=0
+    private(set) var discarded=0
+    init(render:@escaping (MascotFrameRequest,@escaping Completion)->Void,
+         present:@escaping (MascotFrameRequest,MascotRenderedFrame)->Void) {
+        self.render=render;self.present=present
+    }
+    func invalidate() { generation &+= 1;pending=nil }
+    func submit(_ request:MascotFrameRequest) {
+        if inFlight {
+            if pending != nil { coalesced+=1 }
+            pending=request
+        } else { launch(request) }
+    }
+    private func launch(_ request:MascotFrameRequest) {
+        inFlight=true
+        let epoch=generation
+        render(request) { [weak self] frame in
+            guard let self else { return }
+            if epoch == self.generation { self.present(request,frame) }
+            else { self.discarded+=1 }
+            self.inFlight=false
+            if let next=self.pending { self.pending=nil;self.launch(next) }
+        }
+    }
 }
 
 @MainActor

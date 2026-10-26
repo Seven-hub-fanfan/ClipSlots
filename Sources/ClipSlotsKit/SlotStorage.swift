@@ -137,6 +137,7 @@ public final class SlotStorage {
     // 其他进程的外部写入照样能在下一次搜索里出现。
     private var scanCache: [Int: SlotContent] = [:]
     private var scanCacheFingerprint: [Int: DirFingerprint] = [:]
+    private var searchSnapshot: SlotSearchSnapshot?
     private var libraryCache: [Int: LibrarySummary] = [:]
     private var libraryFingerprints: [Int: DirFingerprint] = [:]
     // P0-1 (v2.10.38): in-memory label cache + per-slot label.txt fingerprint. `getLabel`
@@ -171,7 +172,7 @@ public final class SlotStorage {
     // instance invalidated when it evicts the group; every write path checks this flag and
     // refuses. Guarded by `queue` like the rest of the mutable state.
     private var invalidated = false
-    private let queue = DispatchQueue(label: "com.clipslots.storage", qos: .utility)
+    private let queue: DispatchQueue
     // ST-5 (v2.10.15): the diagnostic manifest rebuild (updateManifest) walks every
     // slot directory off disk. It previously ran on the shared serial `queue`, so a
     // large rebuild blocked the get/set hot path (both use queue.sync). manifest.json
@@ -187,6 +188,7 @@ public final class SlotStorage {
     // 改为在每个编解码点创建局部实例（无自定义配置，创建成本极低），彻底消除跨队列共享。
 
     public init(slotsDir: URL? = nil) {
+        queue = DispatchQueue(label: "com.clipslots.storage", qos: .utility)
         if let slotsDir {
             baseURL = slotsDir
         } else {
@@ -200,6 +202,36 @@ public final class SlotStorage {
         // P1-5 (v2.10.9): sweep any `.tmp_slot_*` staging dirs orphaned by a crash
         // (before replaceItemAt/moveItem completed) so they don't accumulate forever.
         cleanupStagingDirs()
+    }
+
+    /// A global read must not create directories, sweep staging files or retain
+    /// one storage/queue pair for every group in the library.
+    private init(searchDirectory: URL) {
+        baseURL = searchDirectory
+        // This reader exists only for an explicit foreground search. Background
+        // summaries and maintenance retain their utility scheduling.
+        queue = DispatchQueue(label: "com.clipslots.search-reader", qos: .userInitiated)
+    }
+
+    public static func searchCandidates(slotsDir: URL, slotCount: Int, query: String,
+                                        isCancelled: () -> Bool = { false }) -> [Int: SlotContent] {
+        guard slotCount > 0, !isCancelled() else { return [:] }
+        if let hits = SlotSearchSnapshotCache.shared.query(group: slotsDir, slotCount: slotCount,
+                                                          query: query, isCancelled: isCancelled) {
+            return hits
+        }
+        guard !isCancelled() else { return [:] }
+        let reader = SlotStorage(searchDirectory: slotsDir)
+        var snapshot = reader.searchScanSnapshot(slotCount: slotCount, isCancelled: isCancelled)
+        // An uncooperative external writer can change a stamped file mid-read.
+        // Retry once after the rejected snapshot; never persist a partial read.
+        if snapshot.isEmpty && !isCancelled() {
+            snapshot = reader.searchScanSnapshot(slotCount: slotCount, isCancelled: isCancelled)
+        }
+        return snapshot.filter { slot, content in
+            !isCancelled() && SlotSearchIndex.matches(slot: slot, content: content,
+                                                      label: content.label ?? "", query: query)
+        }
     }
 
     /// P1-6 (v2.10.9): compute a slot directory's stat(2) fingerprint. Returns nil
@@ -231,9 +263,9 @@ public final class SlotStorage {
         // The per-slot sweep (slot != nil) stays unconditional: it runs in THIS process right
         // before we (re)write that same slot, so there is no concurrent writer to protect.
         let isStartupSweep = (slot == nil)
-        let keys: [URLResourceKey] = isStartupSweep ? [.contentModificationDateKey] : []
-        guard let entries = try? FileManager.default.contentsOfDirectory(
-            at: baseURL, includingPropertiesForKeys: keys) else { return }
+        // Stat only staging candidates; normal slot directories need no resource
+        // prefetch when a group handle is created during a library scan.
+        guard let names = try? FileManager.default.contentsOfDirectory(atPath: baseURL.path) else { return }
         // STG-3 (v2.10.32): the startup sweep judged staleness by the staging DIRECTORY's mtime.
         // But a directory's mtime only updates when entries are added/removed, NOT while a large
         // file is being written into item_0/*.bin. A single-file write that takes > threshold
@@ -245,7 +277,8 @@ public final class SlotStorage {
         // are never reaped.
         let staleThreshold: TimeInterval = 600
         let now = Date()
-        for entry in entries where entry.lastPathComponent.hasPrefix(prefix) {
+        for name in names where name.hasPrefix(prefix) {
+            let entry = baseURL.appendingPathComponent(name, isDirectory: true)
             if isStartupSweep {
                 let latest = latestModificationDate(in: entry)
                 if let latest, now.timeIntervalSince(latest) < staleThreshold { continue }
@@ -736,39 +769,73 @@ public final class SlotStorage {
     ///
     /// - Parameter slotCount: 每组槽位数（`config.slots`）。
     public func searchScanSnapshot(slotCount: Int, isCancelled: () -> Bool = { false }) -> [Int: SlotContent] {
-        guard slotCount > 0 else { return [:] }
-        var out: [Int: SlotContent] = [:]
-        for slot in 1...slotCount {
-            guard !isCancelled() else { return [:] }
-            let slotDir = baseURL.appendingPathComponent(String(slot))
-            // 缓存里已有且指纹未变 → 直接用（完整内容，零额外 IO，也顺带让当前组的搜索保持原有精度）。
-            let diskFP = dirFingerprint(slotDir.path)
-            if let cached = queue.sync(execute: {
-                cache[slot].flatMap { cacheFingerprint[slot] == diskFP ? $0 : nil }
-            }) {
-                if !cached.isEmpty { out[slot] = cached }
-                continue
-            }
-            // 扫描缓存命中（指纹未变）→ 直接复用，逐字符搜索时这条路径承担绝大多数请求。
-            if let cachedScan = queue.sync(execute: {
-                scanCache[slot].flatMap { scanCacheFingerprint[slot] == diskFP ? $0 : nil }
-            }) {
-                if !cachedScan.isEmpty { out[slot] = cachedScan }
-                continue
-            }
-            // 冷槽位：在跨进程锁内做文本扫描，避免撞上并发的原子目录替换读到半个槽。
-            // 拿不到锁时跳过该槽（搜索是只读的尽力而为操作，绝不因为锁竞争阻塞或伪造空槽）。
-            guard let content = try? StorageLock.shared.withLock(
-                timeout: SlotStorage.readLockTimeout,
-                { readSlotContent(from: slotDir, textOnly: true) }
-            ) else { continue }
-            queue.sync {
-                scanCache[slot] = content
-                scanCacheFingerprint[slot] = diskFP
-            }
-            if !content.isEmpty { out[slot] = content }
+        guard slotCount > 0, !isCancelled() else { return [:] }
+        #if DEBUG
+        let loadStart = SlotSearchDiagnostics.now
+        #endif
+        let cached = queue.sync { searchSnapshot } ?? SlotSearchSnapshotCache.shared.load(group: baseURL)
+        #if DEBUG
+        SlotSearchDiagnostics.record("cacheLoadMS", since: loadStart)
+        #endif
+        if let cached, cached.isCurrent(slotCount: slotCount, isCancelled: isCancelled) {
+            queue.sync { searchSnapshot = cached }
+            return cached.slots
         }
-        return out
+        // Read at most one group per lock acquisition. Cached reads avoid the
+        // storage lock entirely; cancellation between slots yields to navigation.
+        let rebuilt: SlotSearchSnapshot? = try? StorageLock.shared.withLock(timeout: Self.readLockTimeout) {
+            guard !isCancelled(), !StorageLock.shared.isDegraded else { return nil }
+            return queue.sync {
+                #if DEBUG
+                let inputStart = SlotSearchDiagnostics.now
+                #endif
+                let before = SlotSearchSnapshot.inputs(base: baseURL, slotCount: slotCount)
+                var entries: [String: [String]] = [:]
+                for stamp in before {
+                    guard stamp.identity.count > 1,
+                          let separator = stamp.path.lastIndex(of: "/") else { continue }
+                    entries[String(stamp.path[..<separator]), default: []]
+                        .append(String(stamp.path[stamp.path.index(after: separator)...]))
+                }
+                #if DEBUG
+                SlotSearchDiagnostics.record("inputEnumerationMS", since: inputStart)
+                let readStart = SlotSearchDiagnostics.now
+                #endif
+                var slots: [Int: SlotContent] = [:]
+                for slot in 1...slotCount {
+                    guard !isCancelled() else { return nil }
+                    let directory = baseURL.appendingPathComponent(String(slot), isDirectory: true)
+                    var content = readSlotContent(from: directory, textOnly: true, searchEntries: entries)
+                    content.label = SlotSearchFileIO.read(directory.path + "/label.txt")
+                        .flatMap { String(data: $0, encoding: .utf8) }?
+                        .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                    // Old attachment metadata may still contain large inline
+                    // payloads. Search retains names/types, never those bytes.
+                    for index in content.attachments.indices { content.attachments[index].data = nil }
+                    if !content.isEmpty { slots[slot] = content }
+                }
+                #if DEBUG
+                SlotSearchDiagnostics.record("contentReadMS", since: readStart)
+                let validationStart = SlotSearchDiagnostics.now
+                #endif
+                let snapshot = SlotSearchSnapshot(slotCount: slotCount, stamps: before, slots: slots)
+                guard snapshot.isCurrent(slotCount: slotCount, isCancelled: isCancelled) else { return nil }
+                #if DEBUG
+                SlotSearchDiagnostics.record("postReadValidationMS", since: validationStart)
+                #endif
+                searchSnapshot = snapshot
+                return snapshot
+            }
+        }
+        guard let rebuilt, !isCancelled() else { return [:] }
+        #if DEBUG
+        let saveStart = SlotSearchDiagnostics.now
+        #endif
+        SlotSearchSnapshotCache.shared.save(rebuilt, group: baseURL)
+        #if DEBUG
+        SlotSearchDiagnostics.record("cacheSaveMS", since: saveStart)
+        #endif
+        return rebuilt.slots
     }
 
     /// 搜索扫描时哪些 pasteboard type 的字节值得读。
@@ -803,6 +870,7 @@ public final class SlotStorage {
             // 它本身有指纹护栏，这里一起清只是让「显式失效」语义完整。
             scanCache.removeAll()
             scanCacheFingerprint.removeAll()
+            searchSnapshot = nil
             libraryCache.removeAll()
             libraryFingerprints.removeAll()
         }
@@ -982,29 +1050,32 @@ public final class SlotStorage {
     ///   专供全局搜索的整库扫描使用：搜索只需要文本 + 类型（类型决定过滤器语义，且 file-url /
     ///   url 本身就是文本），不需要把几百 MB 图片字节读进内存。命中的槽位由调用方再用 `get(_:)`
     ///   走完整读取路径补齐，用于渲染。
-    private func readSlotContent(from slotDir: URL, textOnly: Bool = false) -> SlotContent {
+    private func readSlotContent(from slotDir: URL, textOnly: Bool = false,
+                                 searchEntries: [String: [String]]? = nil) -> SlotContent {
         var content = SlotContent()
+        func readData(_ url: URL) -> Data? {
+            textOnly ? SlotSearchFileIO.read(url.path) : try? Data(contentsOf: url)
+        }
+        func names(_ url: URL) -> [String]? {
+            if let searchEntries { return searchEntries[url.path] ?? [] }
+            return textOnly ? SlotSearchFileIO.names(url.path)
+                : try? FileManager.default.contentsOfDirectory(atPath: url.path)
+        }
 
-        var isSlotDir: ObjCBool = false
-        guard FileManager.default.fileExists(atPath: slotDir.path, isDirectory: &isSlotDir), isSlotDir.boolValue else {
+        var directoryInfo = stat()
+        guard stat(slotDir.path, &directoryInfo) == 0,
+              directoryInfo.st_mode & S_IFMT == S_IFDIR else {
             return content
         }
 
-        if let attrs = try? FileManager.default.attributesOfItem(atPath: slotDir.path),
-           let modDate = attrs[.modificationDate] as? Date {
-            content.timestamp = modDate
-        }
+        content.timestamp = Date(timeIntervalSince1970: Double(directoryInfo.st_mtimespec.tv_sec)
+            + Double(directoryInfo.st_mtimespec.tv_nsec) / 1_000_000_000)
 
         // Enumerate all item_N directories, sorted
-        let itemDirs: [URL]
-        do {
-            itemDirs = try FileManager.default.contentsOfDirectory(at: slotDir, includingPropertiesForKeys: nil)
-                .filter { $0.lastPathComponent.hasPrefix("item_") }
-                .sorted { $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending }
-        } catch {
-            NSLog("[ClipSlots] readSlotContent list FAIL slotDir=\(slotDir.path): \(error)")
-            return content
-        }
+        guard let slotNames = names(slotDir) else { return content }
+        let itemDirs = slotNames.filter { $0.hasPrefix("item_") }
+            .sorted { $0.localizedStandardCompare($1) == .orderedAscending }
+            .map { slotDir.appendingPathComponent($0, isDirectory: true) }
 
         var groups: [[PasteboardItem]] = []
 
@@ -1014,13 +1085,8 @@ public final class SlotStorage {
                 continue
             }
 
-            let files: [URL]
-            do {
-                files = try FileManager.default.contentsOfDirectory(at: itemDir, includingPropertiesForKeys: nil)
-            } catch {
-                NSLog("[ClipSlots] readSlotContent read itemDir FAIL \(itemDir.path): \(error)")
-                continue
-            }
+            guard let fileNames = names(itemDir) else { continue }
+            let files = fileNames.map { itemDir.appendingPathComponent($0, isDirectory: false) }
 
             var items: [PasteboardItem] = []
             for file in files where file.pathExtension == "bin" {
@@ -1033,11 +1099,10 @@ public final class SlotStorage {
                     items.append(PasteboardItem(type: typeName, data: Data()))
                     continue
                 }
-                do {
-                    let data = try Data(contentsOf: file)
+                if let data = readData(file) {
                     items.append(PasteboardItem(type: typeName, data: data))
-                } catch {
-                    NSLog("[ClipSlots] readSlotContent read file FAIL type=\(typeName): \(error)")
+                } else {
+                    NSLog("[ClipSlots] readSlotContent read file FAIL type=\(typeName)")
                 }
             }
 
@@ -1052,7 +1117,7 @@ public final class SlotStorage {
         // Slots saved before v2.3.6 won't have this file — we generate new IDs
         // so the first thumbnail load after upgrade is a one-time cache miss.
         let metaURL = slotDir.appendingPathComponent("content.json")
-        if let metaData = try? Data(contentsOf: metaURL),
+        if let metaData = readData(metaURL),
            let meta = try? JSONDecoder().decode(SlotContentMeta.self, from: metaData) {
             content.contentId = meta.contentId
             content.updatedAt = meta.updatedAt
@@ -1100,7 +1165,7 @@ public final class SlotStorage {
         // integer-named slot dir); nil means an unexpected path — treat as no tracking.
         let slotNum = Int(slotDir.lastPathComponent)
         if FileManager.default.fileExists(atPath: attachmentsURL.path) {
-            if let attData = try? Data(contentsOf: attachmentsURL),
+            if let attData = readData(attachmentsURL),
                let atts = try? JSONDecoder().decode([SlotContent.SlotAttachment].self, from: attData) {
                 // Step 2 (v2.10.42) 老数据懒迁移：若解码出的附件仍内联着 base64 `data`
                 // （老格式，storagePath 缺失/文件不存在），首次读到时把字节外置成独立文件并
@@ -1116,6 +1181,10 @@ public final class SlotStorage {
                 // Clean decode clears any prior corruption poison for this slot.
                 if let s = slotNum { attachmentDecodeFailedSlots.remove(s) }
             } else {
+                // Search is strictly read-only, including corrupt legacy
+                // metadata. Normal get() retains the existing poison/backup
+                // protection before any following edit.
+                if textOnly { return content }
                 // P2 (v2.10.13): 文件「存在但解码失败」= 真实损坏（区别于「文件缺失」的正常
                 // 首次/legacy 情形）。此前一律走 try? 静默回退为空，随后一次 writeSlotContent
                 // 会因 attachments 为空而不再写 attachments.json，把「空」固化 → 附件永久丢失。

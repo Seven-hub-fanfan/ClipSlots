@@ -72,23 +72,70 @@ struct GroupSwitchVeil: View {
 
 /// 应用到 LazyVGrid 上的「切组淡化」修饰器：只观察 TransientUIStore.isSwitchingGroup。
 struct GroupSwitchDimModifier: ViewModifier {
-    @ObservedObject var ui: TransientUIStore
+    @ObservedObject private var transition: SlotGroupTransition
+    private let navigationGate: SlotNavigationGate
+
+    init(ui: TransientUIStore) {
+        transition = ui.groupTransition
+        navigationGate = ui.navigationGate
+    }
 
     func body(content: Content) -> some View {
         content
-            .opacity(ui.isSwitchingGroup ? 0.35 : 1)
-            .allowsHitTesting(!ui.isSwitchingGroup)
+            .opacity(transition.isSwitching ? 0.35 : 1)
+            .allowsHitTesting(!transition.isSwitching)
+            .overlay { GroupNavigationShield(gate: navigationGate) }
             // v2.10.87: 曲线与时长与此前完全一致，仅把裸 0.16s 换成具名 token（见 AnimationTokens.swift）。
-            .animation(Anim.groupSwitch, value: ui.isSwitchingGroup)
+            .animation(Anim.groupSwitch, value: transition.isSwitching)
+    }
+}
+
+/// Keep the native hit-test surface mounted. Reading the gate at event time
+/// avoids a SwiftUI insertion/removal and full layout before data is committed.
+/// The surface draws nothing and passes every idle event through.
+private struct GroupNavigationShield: NSViewRepresentable {
+    let gate: SlotNavigationGate
+
+    func makeNSView(context: Context) -> Shield {
+        let view = Shield()
+        view.gate = gate
+        view.identifier = NSUserInterfaceItemIdentifier("slot-navigation-shield")
+        view.setAccessibilityElement(false)
+        return view
+    }
+
+    func updateNSView(_ view: Shield, context: Context) {
+        view.gate = gate
+    }
+
+    final class Shield: NSView {
+        weak var gate: SlotNavigationGate?
+
+        override func hitTest(_ point: NSPoint) -> NSView? {
+            guard gate?.isPending == true else { return nil }
+            return super.hitTest(point)
+        }
+
+        override func mouseDown(with event: NSEvent) {}
+        override func mouseUp(with event: NSEvent) {}
+        override func rightMouseDown(with event: NSEvent) {}
+        override func rightMouseUp(with event: NSEvent) {}
+        override func otherMouseDown(with event: NSEvent) {}
+        override func otherMouseUp(with event: NSEvent) {}
+        override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
     }
 }
 
 /// 叠在网格上的切组 shimmer 微光遮罩：只观察 TransientUIStore.isSwitchingGroup。
 struct GroupSwitchVeilOverlay: View {
-    @ObservedObject var ui: TransientUIStore
+    @ObservedObject private var transition: SlotGroupTransition
+
+    init(ui: TransientUIStore) {
+        transition = ui.groupTransition
+    }
 
     var body: some View {
-        if ui.isSwitchingGroup {
+        if transition.isSwitching {
             GroupSwitchVeil()
                 .transition(.opacity)
         }

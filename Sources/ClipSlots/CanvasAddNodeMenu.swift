@@ -51,11 +51,15 @@ struct CanvasAddNodeMenu: View {
             referencing && [.text, .image, .video].contains(self) ? title + "生成" : title
         }
 
-        var isAvailable: Bool { [.text, .image, .video, .slot, .upload].contains(self) }
+        var isAvailable: Bool { true }
 
         var subtitle: String {
             switch self {
             case .text: return "将画面想法优化为生图 Prompt"
+            case .audio: return "音乐、配音与音效"
+            case .threeD: return "3D 对象与高斯世界"
+            case .timeline: return "串联片段，剪辑与合并导出"
+            case .stage: return "布置场景，规划相机镜头"
             default: return ""
             }
         }
@@ -92,6 +96,7 @@ struct CanvasAddNodeMenu: View {
             VStack(alignment: .leading, spacing: 2) {
                 sectionTitle(upstream ? "添加上下文" : parentCount > 1 ? "引用所有选中的节点生成" : (parentCount == 1 ? "引用该节点生成" : "添加节点"))
                 ForEach(upstream ? [Choice.text, .image] : [Choice.text, .image, .video, .audio, .threeD]) { row($0) }
+                if parentCount > 1 && !upstream { row(.timeline) }
                 if parentCount == 0 && !upstream {
                     sectionTitle("辅助工具")
                     row(.timeline)

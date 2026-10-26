@@ -1414,6 +1414,40 @@ final class CanvasStore: ObservableObject {
         scheduleSave()
     }
 
+    func editTool(id: String, configuration: CanvasToolConfiguration, detail: String) {
+        guard !connectionPolicy.readOnly, let node = node(id: id), node.kind.cardForm == .tool,
+              configuration.validationError(for: node.kind) == nil, node.tools != configuration else { return }
+        commit(.editNode, detail: detail) {
+            updateNode(id: id) { $0.tools = configuration }
+        }
+    }
+
+    func prepareToolMutation() -> Bool {
+        !connectionPolicy.readOnly && flushTextDocuments?() != false
+    }
+
+    func recordToolImport(id: String, configuration: CanvasToolConfiguration,
+                          edit: CanvasHistoryEntry.SlotAttachmentEdit) {
+        guard node(id: id) != nil else { return }
+        commit(.editAttachments, detail: "导入工具素材", attachmentEdit: edit) {
+            updateNode(id: id) { $0.tools = configuration }
+        }
+    }
+
+    /// Export bytes and the downstream node/edge share one undo entry.
+    @discardableResult
+    func recordToolOutput(sourceID: String, output: CanvasNode,
+                          edit: CanvasHistoryEntry.SlotAttachmentEdit) -> Bool {
+        guard prepareToolMutation(), let source = node(id: sourceID), source.kind.cardForm == .tool,
+              node(id: output.id) == nil else { return false }
+        commit(.addNode, detail: "工具导出回画布", attachmentEdit: edit) {
+            nodes.append(output)
+            edges.append(CanvasEdge(fromNodeId: sourceID, toNodeId: output.id))
+            selectedEdgeId = nil; selectedNodeIds = [output.id]
+        }
+        return node(id: output.id) != nil
+    }
+
     func hasActiveGeneration(_ node: CanvasNode) -> Bool {
         generationTickets.values.contains { $0.matches(node, projectId: activeProjectId) }
     }
