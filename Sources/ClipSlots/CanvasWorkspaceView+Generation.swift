@@ -135,11 +135,11 @@ extension CanvasWorkspaceView {
         single.count = 1
         let plan = CanvasWorkflowCapture.plan(node: single, canvas: canvas, store: store,
                                              upstreamResults: upstreamResults)
-        if let reason = plan.blockingReasons.first {
+        if source.modelProfileID == nil, let reason = plan.blockingReasons.first {
             store.transientUI.showToast(reason, duration: 4)
             return nil
         }
-        if source.generationProvider == .byteartist {
+        if source.modelProfileID == nil && source.generationProvider == .byteartist {
             do { _ = try validateByteArtist(source, plan: plan) }
             catch { store.transientUI.showToast(error.localizedDescription, duration: 4); return nil }
             if preparedByteArtist == nil {
@@ -238,6 +238,9 @@ extension CanvasWorkspaceView {
         guard let node = canvas.node(id: snapshot.id), node.createdAt == snapshot.createdAt,
               node.canGenerate else { return nil }
         guard store.flushCanvasTextDocuments() else { return nil }
+        if node.modelProfileID != nil {
+            return startModelAPIGeneration(node, recovering: !restarting && node.modelEvaluationCellID != nil)
+        }
         if node.needsGenerationRecovery && !restarting && !reusingSeed {
             return recoverGeneration(node)
         }
@@ -280,6 +283,7 @@ extension CanvasWorkspaceView {
     /// 只查询旧任务，不走 submit，超时和下载失败后不必再扣一次生成额度。
     @discardableResult
     func recoverGeneration(_ snapshot: CanvasNode) -> Task<Void, Never>? {
+        if snapshot.modelEvaluationCellID != nil { return startModelAPIGeneration(snapshot, recovering: true) }
         guard let node = canvas.node(id: snapshot.id), node.createdAt == snapshot.createdAt,
               node.canGenerate,
               let taskId = node.taskId, !taskId.isEmpty else { return nil }
@@ -306,6 +310,7 @@ extension CanvasWorkspaceView {
                 let submitted = try await submit()
                 canvas.updateGeneration(ticket.token) {
                     $0.taskId = submitted.taskId
+                    $0.modelEvaluationCellID = nil
                     $0.generationTask = try? GenerationTaskHandle(context: .crate, taskID: submitted.taskId,
                         capabilityID: node.model, kind: node.kind == .video ? .video : .image, seed: submitted.seed)
                     if let seed = submitted.seed { $0.seed = seed }

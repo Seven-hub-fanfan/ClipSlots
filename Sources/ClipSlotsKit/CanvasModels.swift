@@ -247,6 +247,9 @@ public struct CanvasNode: Codable, Identifiable, Equatable {
     /// 模型稳定 ID，例如 `seedream45`。
     public var model: String
     public var generationProvider: GenerationProviderID = .crate
+    /// API selection is independent of legacy CLI provider identity.
+    public var modelProfileID: String?
+    public var modelEvaluationCellID: String?
     public var byteArtist = ByteArtistCanvasConfiguration()
     /// 比例，例如 `1:1`。
     public var ratio: String
@@ -498,6 +501,7 @@ public struct CanvasNode: Codable, Identifiable, Equatable {
         case model, ratio, count, textGenerationPrompt, mediaLayoutAttachmentID
         case draftVideoID, draftReference
         case generationProvider, byteArtist, generationTask, generationRawOutput, generationDiagnostic
+        case modelProfileID, modelEvaluationCellID
         case resolution, duration, generateAudio
         case fontName, fontSize
         case state, taskId, seed
@@ -548,6 +552,8 @@ public struct CanvasNode: Codable, Identifiable, Equatable {
         // 只影响"字段压根不存在"的情况，不会覆盖用户显式选过的值。
         model = try c.decodeIfPresent(String.self, forKey: .model) ?? CanvasNode.defaultModel(for: kind)
         generationProvider = try c.decodeIfPresent(GenerationProviderID.self, forKey: .generationProvider) ?? .crate
+        modelProfileID = try c.decodeIfPresent(String.self, forKey: .modelProfileID)
+        modelEvaluationCellID = try c.decodeIfPresent(String.self, forKey: .modelEvaluationCellID)
         byteArtist = try c.decodeIfPresent(ByteArtistCanvasConfiguration.self, forKey: .byteArtist) ?? .init()
         generationTask = try c.decodeIfPresent(GenerationTaskHandle.self, forKey: .generationTask)
         generationRawOutput = try c.decodeIfPresent(JSONValue.self, forKey: .generationRawOutput)
@@ -600,6 +606,8 @@ public struct CanvasNode: Codable, Identifiable, Equatable {
         try c.encode(height, forKey: .height)
         try c.encode(model, forKey: .model)
         if generationProvider != .crate { try c.encode(generationProvider, forKey: .generationProvider) }
+        try c.encodeIfPresent(modelProfileID, forKey: .modelProfileID)
+        try c.encodeIfPresent(modelEvaluationCellID, forKey: .modelEvaluationCellID)
         if !byteArtist.workflowID.isEmpty { try c.encode(byteArtist, forKey: .byteArtist) }
         try c.encodeIfPresent(generationTask, forKey: .generationTask)
         try c.encodeIfPresent(generationRawOutput, forKey: .generationRawOutput)

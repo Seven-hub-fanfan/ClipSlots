@@ -1688,10 +1688,10 @@ final class CanvasStore: ObservableObject {
     func updateNodeProvider(id: String, provider: GenerationProviderID? = nil,
                             configuration: ByteArtistCanvasConfiguration? = nil) {
         guard let index = nodes.firstIndex(where: { $0.id == id }) else { return }
-        guard provider.map({ $0 != nodes[index].generationProvider }) ?? false
+        guard nodes[index].modelProfileID != nil || provider.map({ $0 != nodes[index].generationProvider }) ?? false
                 || configuration.map({ $0 != nodes[index].byteArtist }) ?? false else { return }
         commit(.paramNode, detail: "生成来源与工作流") {
-            if let provider { nodes[index].generationProvider = provider }
+            if let provider { nodes[index].generationProvider = provider; nodes[index].modelProfileID = nil }
             if let configuration { nodes[index].byteArtist = configuration }
             nodes[index].updatedAt = Date()
         }
@@ -1774,6 +1774,7 @@ final class CanvasStore: ObservableObject {
             child.state = .idle
             child.taskId = nil
             child.generationTask = nil
+            child.modelEvaluationCellID = nil
             child.generationRawOutput = nil
             child.generationDiagnostic = nil
             child.draftVideoID = nil

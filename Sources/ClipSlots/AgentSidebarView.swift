@@ -100,7 +100,7 @@ struct AgentSidebarView: View {
     private var modelLabel: String {
         switch backendKind {
         case .tika: return "Tika Agent"
-        case .deepseek: return modelName
+        case .deepseek: return ModelConfigurationBridge.profile(.agent)?.model ?? modelName
         case .gateway:
             return UserDefaults.standard.string(forKey: AgentGatewayPreferences.modelKey)
                 ?? AgentGatewayPreferences.defaultModel
@@ -218,7 +218,8 @@ struct AgentSidebarView: View {
             inputFocusRequest += 1
         }
         .onChange(of: backendKind) { _ in credentialNotice = nil }
-        .task(id: backendKind) {
+        .task(id: backendKind.rawValue + ":" + (ModelConfigurationBridge.profile(.agent)?.id ?? "")) {
+            credentialNotice = nil
             guard !isReadOnly, model.requiresAPIKey else { return }
             #if DEBUG
             if credentialStateProvider == nil,
@@ -230,12 +231,17 @@ struct AgentSidebarView: View {
             let state: (hasKey: Bool, error: AgentKeychainError?)
             if let credentialStateProvider { state = await credentialStateProvider() }
             else {
-                let result = await AgentKeychainProbe.keyState()
+                let profile = backendKind == .deepseek ? ModelConfigurationBridge.profile(.agent) : nil
+                let result = await AgentKeychainProbe.keyState(service: profile?.keyService ?? AgentKeychain.service,
+                    account: profile?.keyAccount ?? AgentKeychain.account)
                 state = (result.hasKey, result.error)
             }
             guard !Task.isCancelled, model.requiresAPIKey else { return }
             credentialNotice = state.error?.localizedDescription
-            if !state.hasKey, state.error == nil { showConfig = true }
+            if !state.hasKey, state.error == nil {
+                if ModelConfigurationBridge.profile(.agent) != nil { credentialNotice = "请在模型 → 配置中心保存此模型的密钥。" }
+                else { showConfig = true }
+            }
         }
         .onDisappear { voice.cancel(); capture.cancel(); commitPanelWidth(); scrollTask?.cancel(); scrollTask = nil }
         .onAppear {
@@ -1398,7 +1404,7 @@ struct AgentSidebarView: View {
             if showModelPicker { refreshModelCatalog() }
         } label: {
             Group {
-                if backendKind == .deepseek || modelLabel.lowercased().contains("deepseek") {
+                if modelLabel.lowercased().contains("deepseek") {
                     AgentBrandIcon(identifier: "deepseek", size: 19)
                 } else {
                     Image(systemName: backendKind == .gateway ? "cpu" : "circle.hexagongrid")
@@ -1415,7 +1421,8 @@ struct AgentSidebarView: View {
             .accessibilityLabel("当前模型：" + modelLabel)
             .accessibilityIdentifier("agent-model-picker")
             .agentModelPopover(isPresented: $showModelPicker) {
-                AgentSidebarModelPicker(options: agentModelOptions, selected: modelLabel,
+                AgentSidebarModelPicker(options: agentModelOptions, selected: backendKind == .deepseek
+                    ? ModelConfigurationBridge.profile(.agent).map { "profile:" + $0.id } ?? modelLabel : modelLabel,
                     loading: modelCatalog.isLoading, notice: modelCatalog.error, compactDetails: false,
                     refresh: refreshModelCatalog,
                     settings: { showModelPicker = false; showConfig = true },
@@ -1432,6 +1439,16 @@ struct AgentSidebarView: View {
                     }) { choice in
                         guard agentModelOptions.contains(where: { $0.id == choice && $0.available }) else { return }
                         showModelPicker = false
+                        if choice.hasPrefix("profile:") {
+                            let id = String(choice.dropFirst(8))
+                            Task {
+                                await ModelWorkspaceStore.shared.setDefault(.agent, id: id)
+                                AgentBackendCoordinator.setKind(.deepseek, for: model.usesWorkspaceBackend ? .workspace : .sidebar)
+                                model.reloadBackendSelection()
+                            }
+                            inputFocusRequest += 1
+                            return
+                        }
                         if backendKind == .deepseek { modelName = choice }
                         if backendKind == .gateway {
                             UserDefaults.standard.set(choice, forKey: AgentGatewayPreferences.modelKey)
@@ -1444,12 +1461,18 @@ struct AgentSidebarView: View {
 
     private func refreshModelCatalog() {
         if backendKind == .tika { return }
+        if backendKind == .deepseek, ModelConfigurationBridge.profile(.agent) != nil { return }
         let selectedEndpoint = backendKind == .gateway
             ? AgentGatewayPreferences.endpoint() : URL(string: endpoint)
         if let selectedEndpoint { modelCatalog.refresh(endpoint: selectedEndpoint, gateway: backendKind == .gateway) }
     }
 
     private var agentModelOptions: [AgentDiscoveredModel] {
+        let configured = ModelConfigurationBridge.agentProfiles().map { profile in
+            AgentDiscoveredModel(id: "profile:" + profile.id, contextWindow: nil, supportsImages: profile.supportsImages,
+                displayName: profile.name, description: "\(profile.model) · \(profile.endpoint)")
+        }
+        if !configured.isEmpty { return configured }
         if backendKind != .tika, !modelCatalog.models.isEmpty {
             if modelCatalog.models.contains(where: { $0.id == modelLabel }) { return modelCatalog.models }
             return [.init(id: modelLabel, contextWindow: nil, supportsImages: nil,

@@ -185,6 +185,58 @@ import ClipSlotsKit
             }
         }
     }
+    func generateConfiguredAudio(prompt: String) {
+        let models = ModelWorkspaceStore.shared
+        guard let source = node, let profile = models.canvasProfile(for: source) else {
+            message = "请在模型配置中心设置音频 API"; return
+        }
+        let expected = configuration
+        run {
+            let id: String
+            if let old = source.modelEvaluationCellID, let cell = models.evaluationCell(old),
+               (cell.state != .succeeded || source.taskId != "api-" + old),
+               cell.state != .failed && cell.state != .cancelled {
+                id = old
+            } else {
+                var question = ModelQuestion(); question.kind = .audio
+                question.prompt = prompt; question.title = "画布音频"
+                guard let created = await models.beginCanvas(question: question, profile: profile) else {
+                    throw ModelWorkspaceError.invalid(models.message ?? "任务未保存")
+                }
+                id = created
+                self.canvas.updateNode(id: self.nodeID) { $0.modelEvaluationCellID = id }
+                self.canvas.flushSave()
+            }
+            await models.resumeCanvas(id)
+            while self.node != nil {
+                try Task.checkCancellation()
+                guard let cell = models.evaluationCell(id) else { throw ModelWorkspaceError.unreadable }
+                if cell.state == .succeeded {
+                    guard self.configuration == expected else { throw CanvasToolError.invalid("节点已修改，结果保留在模型结果集中") }
+                    let url: URL
+                    if let path = cell.localMediaPaths.first { url = URL(fileURLWithPath: path) }
+                    else {
+                        guard let raw = cell.mediaURLs.first, let remote = URL(string: raw) else { throw ModelWorkspaceError.response }
+                        let (file, response) = try await URLSession.shared.download(from: remote)
+                        guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode) else { throw ModelWorkspaceError.response }
+                        let root = ClipSlotsPaths.dataRoot.appendingPathComponent("models/media")
+                        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+                        url = root.appendingPathComponent("api-\(id)." + (remote.pathExtension.isEmpty ? "mp3" : remote.pathExtension))
+                        if !FileManager.default.fileExists(atPath: url.path) { try FileManager.default.moveItem(at: file, to: url) }
+                    }
+                    try await self.ingest(url)
+                    self.canvas.updateNode(id: self.nodeID) { $0.taskId = "api-" + id }
+                    self.canvas.flushSave()
+                    self.message = "音频生成完成"; return
+                }
+                if [.unknown, .failed, .cancelled].contains(cell.state) || !cell.detail.isEmpty {
+                    throw ModelWorkspaceError.invalid(cell.detail.isEmpty ? cell.state.title : cell.detail)
+                }
+                self.message = cell.state.title
+                try await Task.sleep(for: .milliseconds(300))
+            }
+        }
+    }
     func acceptCloud(_ result:CanvasCloudClient.Result,expected:CanvasToolConfiguration) async throws {
         guard node?.tools==expected else { throw CanvasToolError.invalid("节点已变更，云端结果未覆盖新配置") }
         let url=FileManager.default.temporaryDirectory.appendingPathComponent("云生成-\(UUID().uuidString).\(result.fileExtension)")

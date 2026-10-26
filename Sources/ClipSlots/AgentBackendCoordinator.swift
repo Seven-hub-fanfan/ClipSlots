@@ -25,9 +25,15 @@ struct AgentBackendSelection {
     let supportsCanvasReadTools: Bool
     var gatewayConfiguration: AgentConfig? = nil
     var gatewayBaseURL: URL? = nil
+    var modelProfile: ModelProfile? = nil
 
     func normalized(_ base: AgentConfig) -> AgentConfig {
         var config = base
+        if let profile = modelProfile, let url = URL(string: profile.endpoint) {
+            config.endpoint = url; config.model = profile.model
+            config.supportsImageInput = profile.supportsImages
+            config.reasoningEffort = nil; config.thinkingMode = .serverDefault
+        }
         if kind == .tika {
             config.model = ""
             config.reasoningEffort = nil
@@ -80,10 +86,12 @@ enum AgentBackendCoordinator {
             scope: scope,
             kind: kind,
             backend: backend,
-            requiresAPIKey: kind == .deepseek,
+            requiresAPIKey: kind == .deepseek && (ModelConfigurationBridge.profile(.agent)?.requiresKey
+                ?? !ModelConfigurationBridge.hasDefault(.agent)),
             supportsCanvasReadTools: true,
             gatewayConfiguration: gatewayConfig,
-            gatewayBaseURL: resolvedURL)
+            gatewayBaseURL: resolvedURL,
+            modelProfile: kind == .deepseek ? ModelConfigurationBridge.profile(.agent) : nil)
     }
 
     static func injected(_ backend: any AgentBackend,
@@ -118,6 +126,14 @@ enum AgentBackendCoordinator {
                                     gatewayURL: URL?) -> any AgentBackend {
         switch kind {
         case .deepseek:
+            if let profile = ModelConfigurationBridge.profile(.agent), !profile.isCLI,
+               profile.contract == .chatCompletions, (try? profile.validate()) != nil {
+                let secret: AgentSecretStore = profile.requiresKey
+                    ? AgentKeychain(service: profile.keyService, account: profile.keyAccount)
+                    : AgentInMemorySecretStore(key: "unauthenticated")
+                return AgentService(transport: ModelAgentTransport(profile: profile), secretStore: secret)
+            }
+            if ModelConfigurationBridge.hasDefault(.agent) { return UnavailableModelAgentBackend() }
             return AgentService()
         case .tika:
             let cliPath = defaults.string(forKey: TikaBackendPreferences.tikaCLIPathKey)
@@ -168,5 +184,32 @@ enum AgentBackendCoordinator {
 
     static func currentBackend(workspace: Bool = false) -> any AgentBackend {
         selection(for: workspace ? .workspace : .sidebar).backend
+    }
+}
+
+private final class UnavailableModelAgentBackend: AgentBackend, Sendable {
+    func run(history: [AgentMessage], config: AgentConfig, tools: AgentToolExecuting?,
+             onEvent: @escaping @Sendable (AgentRunEvent) async -> Void) async throws -> [AgentMessage] {
+        throw ModelWorkspaceError.invalid("默认 Agent LLM 不可用，请在模型配置中心重新选择。")
+    }
+}
+
+private struct ModelAgentTransport: AgentTransport {
+    let profile: ModelProfile
+    func stream(request: URLRequest) async throws -> AgentHTTPStream {
+        var modified = request
+        let bearer = request.value(forHTTPHeaderField: "Authorization") ?? ""
+        modified.setValue(nil, forHTTPHeaderField: "Authorization")
+        if profile.requiresKey {
+            let key = bearer.hasPrefix("Bearer ") ? String(bearer.dropFirst(7)) : bearer
+            modified.setValue(profile.authPrefix + key, forHTTPHeaderField: profile.authHeader)
+        }
+        if let body = modified.httpBody, case .object(var fields) = try JSONDecoder().decode(JSONValue.self, from: body) {
+            for (name, value) in profile.parameters where !["messages", "model", "stream", "tools", "tool_choice"].contains(name) {
+                fields[name] = value
+            }
+            modified.httpBody = try JSONEncoder().encode(JSONValue.object(fields))
+        }
+        return try await URLSessionAgentTransport(timeout: profile.timeout).stream(request: modified)
     }
 }

@@ -2,7 +2,7 @@ import SwiftUI
 import ClipSlotsKit
 import CoreImage
 
-/// The legacy agent route is retained for compatibility; models is not yet open.
+/// The legacy raw route is retained for saved-data compatibility.
 enum WorkspaceMode: String, CaseIterable, Identifiable, Equatable {
     case edit
     case canvas
@@ -23,7 +23,7 @@ enum WorkspaceMode: String, CaseIterable, Identifiable, Equatable {
         case .agent: return "cube"
         }
     }
-    var isSelectable: Bool { self != .agent }
+    var isSelectable: Bool { true }
 }
 
 /// One pinned instance for both workspaces. Only the contour, dot and button
@@ -43,7 +43,8 @@ struct WorkspaceModeSwitcher: View {
     private static let ornamentWidth: CGFloat = 42
     private static var segmentWidth: CGFloat { (preferredWidth - inset * 2 - ornamentWidth) / 3 }
     private static func center(for mode: WorkspaceMode) -> CGFloat {
-        inset + ornamentWidth + segmentWidth * (mode == .canvas ? 1.5 : 0.5)
+        let index: CGFloat = mode == .edit ? 0 : mode == .canvas ? 1 : 2
+        return inset + ornamentWidth + segmentWidth * (index + 0.5)
     }
     private var ink: Color { TapSkin.tone(0x303034, 0xffffff) }
 
@@ -113,7 +114,7 @@ struct WorkspaceModeSwitcher: View {
         .accessibilityLabel(mode.title)
         .accessibilityAddTraits(selected ? .isSelected : [])
         .accessibilityIdentifier(mode == .agent ? "workspace-models" : "workspace-\(mode.rawValue)")
-        .help(mode == .agent ? "模型 · 暂未开放" : mode.title)
+        .help(mode.title)
     }
 }
 

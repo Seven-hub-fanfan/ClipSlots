@@ -3,6 +3,7 @@ import ClipSlotsKit
 
 struct CanvasCloudControls: View {
     @ObservedObject var session: CanvasToolSession
+    @ObservedObject private var models = ModelWorkspaceStore.shared
     @Binding var draft: CanvasToolConfiguration
     let isAudio: Bool
     var generateSpeech: (() -> Void)? = nil
@@ -31,6 +32,15 @@ struct CanvasCloudControls: View {
     }
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
+            if isAudio {
+                Picker("模型目录", selection: Binding(get: { session.node?.modelProfileID ?? "" }, set: { id in
+                    session.canvas.updateNode(id: session.nodeID) { $0.modelProfileID = id.isEmpty ? nil : id }
+                })) {
+                    Text("原服务 / 本机配音").tag("")
+                    Text("默认音频 API").tag("__default__")
+                    ForEach(models.profiles.filter { !$0.isCLI && $0.kind == .audio }) { Text($0.name).tag($0.id) }
+                }
+            }
             prompt
             toolbar
             taskStatus
@@ -98,7 +108,11 @@ struct CanvasCloudControls: View {
                 }
                 Spacer(minLength: 0)
                 Button {
-                    if localSpeech { generateSpeech?() }
+                    if isAudio && session.node?.modelProfileID != nil {
+                        if session.save(draft, detail: "音频 API 参数") {
+                            session.generateConfiguredAudio(prompt: localSpeech ? draft.audio.text : cloud.wrappedValue.prompt)
+                        }
+                    } else if localSpeech { generateSpeech?() }
                     else if cloud.wrappedValue.task == nil { generate(resume: false) }
                     else { generate(resume: true) }
                 } label: {
@@ -115,6 +129,10 @@ struct CanvasCloudControls: View {
     }
     private var generationDisabled: Bool {
         if session.busy { return true }
+        if isAudio, let node = session.node, node.modelProfileID != nil {
+            return models.canvasProfile(for: node) == nil
+                || (localSpeech ? draft.audio.text : cloud.wrappedValue.prompt).trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        }
         if localSpeech { return draft.audio.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
         return key.isEmpty || (cloud.wrappedValue.task?.id == nil && cloud.wrappedValue.task != nil)
     }

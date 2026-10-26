@@ -5,6 +5,7 @@ struct CanvasGenerationSourceControls: View {
     let node: CanvasNode
     @ObservedObject var canvas: CanvasStore
     @ObservedObject private var catalog = ByteArtistCatalogStore.shared
+    @ObservedObject private var models = ModelWorkspaceStore.shared
     @State private var showingWorkflow = false
     @State private var showingLibrary = false
     @State private var showingEnvironment = false
@@ -27,11 +28,20 @@ struct CanvasGenerationSourceControls: View {
                     canvas.updateNodeProvider(id: node.id, provider: .byteartist)
                     showingLibrary = true
                 }
+                Divider()
+                Button("API · 使用默认模型") {
+                    canvas.updateNode(id: node.id) { $0.modelProfileID = "__default__" }
+                }
+                ForEach(models.profiles.filter { !$0.isCLI && $0.kind.rawValue == node.kind.rawValue }) { profile in
+                    Button("API · \(profile.name)") {
+                        canvas.updateNode(id: node.id) { $0.modelProfileID = profile.id }
+                    }
+                }
                 if node.generationTask?.context.provider == .byteartist {
                     Button("查看 BA 任务与产物") { showingWorkflow = true }
                 }
             } label: {
-                Text(node.generationProvider == .byteartist ? "BA" : "Crate")
+                Text(node.modelProfileID != nil ? "API" : node.generationProvider == .byteartist ? "BA" : "Crate")
                     .font(.system(size: 11, weight: .semibold))
                     .foregroundColor(CanvasSkin.chromeInk)
             }
@@ -39,7 +49,10 @@ struct CanvasGenerationSourceControls: View {
             .accessibilityIdentifier("canvas-generation-source")
             .help("生成来源；切换仅影响下次生成，已提交任务保留原来源")
             .canvasControlRegion("composer-provider")
-            if node.generationProvider == .byteartist {
+            if node.modelProfileID != nil {
+                Text(models.canvasProfile(for: node)?.name ?? "请设置默认 API")
+                    .font(.system(size: 11)).lineLimit(1).frame(maxWidth: 160)
+            } else if node.generationProvider == .byteartist {
                 Button { showingLibrary = true } label: {
                     HStack(spacing: 4) {
                         Text(capability?.title ?? (node.byteArtist.workflowID.isEmpty ? "选择工作流" : node.byteArtist.workflowID))

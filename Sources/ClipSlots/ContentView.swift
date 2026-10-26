@@ -396,7 +396,7 @@ struct ContentView: View {
                             case .edit:
                                 editWorkspace
                             case .agent:
-                                editWorkspace
+                                ModelWorkspaceView(store: store)
                             }
                         }
                         .animation(nil, value: workspaceMode)
@@ -553,6 +553,7 @@ struct ContentView: View {
             AgentPreferences.migrateSidebarVisibility()
             AppearanceDefaults.ensureDefaultLightIfNeeded()
             #if DEBUG
+            ModelWorkspaceRegression.schedule(store: store)
             WorkspaceMotionProbe.schedule(store: store, canvas: canvasStore, transition: workspaceTransition,
                                           mode: { workspaceMode }, request: { requestWorkspace($0) })
             MainWindowChromeRegression.schedule(store: store, canvas: canvasStore,
@@ -561,6 +562,7 @@ struct ContentView: View {
                 expanded: { canvasAgentExpanded }, toggleExpanded: { canvasAgentExpanded.toggle() })
             #endif
         }
+        .task { await ModelWorkspaceStore.shared.load() }
         // v2.9.12: Cmd+, / "设置…" menu opens the in-app overlay.
         // v2.10.91: 显隐与「热键安全区」标志的同步统一由 store.setSettingsOverlay 负责。
         .onReceive(NotificationCenter.default.publisher(for: .openInAppSettings)) { _ in

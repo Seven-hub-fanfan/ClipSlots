@@ -1,0 +1,111 @@
+<!doctype html>
+<html lang="zh-CN">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>ClipSlots 模型工作区需求</title>
+<style>
+:root{color-scheme:light dark;--bg:#f4f4f7;--card:#fff;--ink:#24262b;--muted:#737781;--line:#dedfe5;--accent:#5265d7}*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.75 -apple-system,BlinkMacSystemFont,"PingFang SC",sans-serif}main{max-width:1160px;margin:auto;padding:48px 28px 80px}h1{font-size:34px;letter-spacing:-1px;margin:8px 0}h2{font-size:24px;margin-top:38px}h3{font-size:18px;margin:28px 0 10px}p{max-width:950px}.muted,.tag{color:var(--muted)}.tag{font-size:12px}.card{background:var(--card);border:1px solid var(--line);border-radius:18px;padding:24px;margin:20px 0}table{width:100%;border-collapse:collapse;font-size:14px}th,td{text-align:left;vertical-align:top;padding:12px;border-bottom:1px solid var(--line)}button,input,select{font:inherit;border:1px solid var(--line);border-radius:9px;padding:8px 12px;background:var(--card);color:var(--ink)}button{cursor:pointer}button.active{border-color:var(--accent);color:var(--accent)}.tabs{display:flex;gap:8px;flex-wrap:wrap}.panel{display:none}.panel.active{display:block}.models{display:flex;flex-wrap:wrap;gap:8px;margin:15px 0}.models label{border:1px solid var(--line);border-radius:8px;padding:6px 10px}.message{min-height:30px;color:var(--accent)}.flow{display:flex;flex-wrap:wrap;align-items:center;gap:12px}.flow span{border:1px solid var(--line);border-radius:10px;padding:10px 14px}.assumption{border-left:3px solid #c99336;padding-left:16px}.grid{display:grid;grid-template-columns:1fr 1fr;gap:20px}svg{max-width:100%;height:auto}a{color:var(--accent)}@media(max-width:760px){.grid{grid-template-columns:1fr}main{padding:26px 16px}table{font-size:12px}th,td{padding:8px}}@media(prefers-color-scheme:dark){:root{--bg:#17181b;--card:#202126;--ink:#eeeef1;--muted:#a2a5ae;--line:#393b43;--accent:#a4afff}}
+</style>
+<main>
+<div class="tag">ClipSlots · 模型工作区 · 需求与交互演示 · 2026-10-27</div>
+<h1>把出题、测评、模型配置和 AI 日报放到同一个工作区</h1>
+<p>用户从顶部“模型”进入，选择与槽位同步的题库及最多 14 个模型，运行并查看结果集，再按适用维度评分、比较和查看排行榜。画布与 Agent 使用同一模型目录；内部产品 CLI 单独归入独立合集。</p>
+<p class="muted">来源：用户本次三项需求；现有应用 v2.17.97 的槽位、画布生成来源和 Agent 配置。下方交互为需求演示，示例模型及评分不代表真实测评结果。</p>
+
+<h2>工作区结构与核心流程</h2>
+<div class="flow"><span>模型配置</span>→<span>出题 / 槽位同步</span>→<span>选题库与模型</span>→<span>运行结果集</span>→<span>评分与对比</span>→<span>排行榜</span></div>
+<p>AI 日报作为独立浏览模块。切换工作区保留尚未完成的测评；打开页面本身不启动模型请求。</p>
+<div class="card">
+<div class="tabs"><button class="active" data-tab="evaluation">测评</button><button data-tab="ranking">排行榜</button><button data-tab="configuration">配置中心</button><button data-tab="news">AI 日报</button></div>
+<section id="evaluation" class="panel active">
+<h3>FR-01～FR-04：选题与多模型对比</h3>
+<label>题库 <select id="bank"><option>示例题库 · 从槽位同步 · 3 题</option><option>空题库 · 0 题</option></select></label>
+<div class="models" id="models"></div>
+<div class="tabs"><button id="all">选择 14 个模型</button><button id="extra">尝试选择第 15 个</button><button id="preview">预览测评任务</button><button id="question">生成示例题草稿</button></div>
+<p id="eval-message" class="message">尚未运行。演示不会发送模型请求或修改槽位。</p>
+</section>
+<section id="ranking" class="panel">
+<h3>FR-05：六维可视化</h3>
+<div class="grid"><div><label>模型类型 <select id="kind"><option>视频</option><option>图像</option><option>LLM</option></select></label><p class="muted">示例仅说明适用维度，不提供虚构分数。真实排行榜显示题库版本、评分来源、样本数和完成状态。</p><p id="dimension-status"></p><button id="unscored">查看未评分状态</button><p id="ranking-message" class="message">未评分的模型不参与综合名次。</p></div><svg viewBox="0 0 360 300" role="img" aria-label="六维能力坐标"><g fill="none" stroke="#9aa0ad"><path d="M180 42 274 96 274 204 180 258 86 204 86 96Z"/><path d="M180 96 227 123 227 177 180 204 133 177 133 123Z"/><path d="M180 42V258M86 96 274 204M86 204 274 96"/></g><g fill="currentColor" text-anchor="middle" font-size="13"><text x="180" y="24">响应效果</text><text x="304" y="90">画面美感</text><text x="304" y="224">参考效果</text><text x="180" y="284">保持效果</text><text x="54" y="224">运动效果</text><text x="54" y="90">音频效果</text><text x="180" y="156">待评分</text></g></svg></div>
+</section>
+<section id="configuration" class="panel">
+<h3>FR-06：API 配置与内部 CLI 分开管理</h3>
+<div class="tabs"><button id="api-tab" class="active">API 模型</button><button id="cli-tab">内部产品 CLI</button></div>
+<div id="api-form"><p>名称 <input value="示例服务"><br>API 地址 <input id="endpoint" placeholder="https://服务地址"><br>模型标识 <input placeholder="模型 ID"><br>密钥 <input type="password" placeholder="输入后安全保存"></p><button id="save">保存演示配置</button></div>
+<div id="cli-list" hidden><p>独立合集：Crate、ByteArtist、Tika。每项显示安装状态、登录状态、区域 / 账号及已发现能力，提供其自身配置入口。</p></div>
+<p id="config-message" class="message">配置可指定用途：测评、画布图像 / 视频 / 音频、Agent LLM、出题。</p>
+</section>
+<section id="news" class="panel">
+<h3>FR-07：每日最新 AI 新闻资讯</h3>
+<p>按发布时间排列；每条显示来源、原文链接和发布时间。区分原文发布时间、应用抓取时间及离线缓存状态。</p><button id="refresh">刷新演示</button><button id="offline">查看离线状态</button><p id="news-message" class="message">尚未加载新闻。此需求演示不编造今日新闻。</p>
+</section>
+</div>
+
+<h2>功能要求</h2>
+<h3>FR-01 · 题库与槽位同步</h3>
+<p>用户可绑定已有页面 / 槽位组为题库，或为新题库创建独立页面。题目关联到具体槽位，包含题干、参考素材、期望效果、模型类型、评分维度和标签。槽位的文本及附件变化反映到题库；题库编辑确认保存后写回对应槽位。</p>
+<p>空槽位不作为有效题目。附件引用失效时标明缺失，相关题目不能提交；不删除源文件。同步发现双方修改时展示差异，让用户选择保留版本，不静默覆盖。解绑题库保留槽位内容；删除题库索引不等于清空槽位。</p>
+
+<h3>FR-02 · 出题能力</h3>
+<p>用户选择出题模型、目标模型类型、能力维度、难度 / 标签及题目数量，生成结构化题目草稿。草稿包含测试输入、必要参考素材说明及可观察的评分标准，用户逐题编辑、排除重复和确认后保存到题库并同步槽位。</p>
+<p>未配置出题 LLM 时引导至配置中心。生成失败保留已生成草稿；重试显示是否会再次请求模型。不能将模型生成的答案直接视为标准答案或有效评分。DeepSeek 在画布生成链路中继续只承担提示词优化，不用于直接生成媒体。</p>
+
+<h3>FR-03 · 测评任务与结果集</h3>
+<p>用户选择题库、题目子集、模型和适用参数，先查看题目数、模型数及计划请求数，再主动启动。任务使用当次固定的题库版本、输入素材与模型配置；运行中修改配置或槽位只影响后续任务。</p>
+<p>题目和模型形成结果矩阵。每个单元显示等待、运行、成功、失败、取消或提交状态未知；展示真实文本或媒体、耗时、有效参数、错误信息及模型返回的任务标识。结果按本次测评分组保存，重启后可查看与恢复已确认的异步任务。</p>
+<p>失败单元可单独重试，不重复成功单元。已提交但响应丢失的任务标为未知，不自动重提；取消阻止新的请求，已提交任务按服务方支持情况处理并明确展示。结果写回槽位必须由用户选择目标并处理占用冲突。</p>
+
+<h3>FR-04 · 最多 14 个模型同时对比</h3>
+<p>一次对比最多选择 14 个模型，以同一题目行展示多模型结果，支持横向滚动、聚焦、筛选、并排媒体查看和导出。第 15 个选择被阻止，并保留前 14 个选择。不同输出类型分组比较，参数不一致处可见。</p>
+<p>14 个模型可加入同一次测评批次；实际请求调度遵守服务方限流和应用资源预算。界面显示排队原因与进度，不把尚未发送的请求显示为运行中。预览按需加载，原始媒体比例保留。</p>
+
+<h3>FR-05 · 排行榜与六维能力</h3>
+<p>提供 LLM、图像、视频能力榜；音频结果可在对应类型下查看。榜单来自可追溯的测评与评分，按模型类型、题库版本和评分口径筛选。每项显示有效样本数、缺失维度、评分方式及更新日期；未评分或缺少有效结果时不生成综合名次。</p>
+<table><thead><tr><th>维度</th><th>可观察内容</th><th>适用边界</th></tr></thead><tbody>
+<tr><td>响应效果</td><td>对题目要求的理解、执行与输出质量；耗时另列</td><td>所有模型类型</td></tr>
+<tr><td>画面美感</td><td>构图、色彩、细节、视觉完成度</td><td>图像、视频</td></tr>
+<tr><td>参考效果</td><td>对给定参考文本、图像或音频的利用程度</td><td>题目包含参考输入时</td></tr>
+<tr><td>保持效果</td><td>主体、角色、风格或指定约束的一致性</td><td>题目明确指定保持目标时</td></tr>
+<tr><td>运动效果</td><td>动作连贯性、物理合理性和镜头运动</td><td>视频</td></tr>
+<tr><td>音频效果</td><td>音质、语音 / 音乐表现及音画配合</td><td>音频、含音频的视频</td></tr>
+</tbody></table>
+<p>六维图对不适用维度显示“不适用”，对未评分维度显示“待评分”，不将两者记成零分。不同适用维度集合不混排一个综合榜。人工评分与自动评判分开标注；自动评判须明确评判模型及其可读取的输入类型。</p>
+<p class="assumption">[Assumption, TBD] 首版采用可编辑的 0–100 分口径，默认等权，允许题库定义维度权重；默认展示本地测评榜。外部榜单来源、自动评判模型与最终评分口径尚未由用户指定，须在配置和榜单中显式说明。</p>
+
+<h3>FR-06 · 统一配置中心</h3>
+<p>管理服务名称、API 地址、认证方式、密钥、模型标识、模型类型、输入 / 输出能力、用途、默认参数、超时及并发限制。一个服务可配置多个模型；用户分别指定画布图像、视频、音频、Agent LLM、出题和测评的默认模型。</p>
+<p>保存、连通性检查、能力发现和生成请求分开操作。检查不能伪装为免费的真实生成；不支持的接口契约明确标示。删除仍被默认用途或未完成任务引用的配置时，先提示依赖并让用户调整。已有配置迁入统一目录时保留原有选择与凭据。</p>
+<p>内部产品 CLI 在独立合集展示，使用其本地安装、登录、区域、账号与能力配置。CLI 与 API 具有不同配置形式，但可共同出现在按输出类型筛选的模型选择器中。每个任务保留最初选择的来源，失败后不偷偷换来源。</p>
+
+<h3>FR-07 · AI 日报</h3>
+<p>提供每日新闻列表、来源筛选、关键词搜索、原文打开和手动刷新。页面进入时检查更新，显示最近成功抓取时间；有缓存时先显示缓存，失败时保留缓存并提示来源错误。新闻重复链接合并，日期缺失的内容不标为今日最新。</p>
+<p>来源支持配置，按原文发布时间排序；摘要区分来源摘要与模型整理。摘要模型请求由用户主动启用。过期、断网、单来源失败和全部来源失败各有可见状态。</p>
+<p class="assumption">[Assumption, TBD] 默认以当前 Mac 的日期归档，以公开、可配置的 RSS / Atom 来源获取新闻。用户尚未指定来源清单、是否需要中文自动摘要及摘要模型。</p>
+
+<h2>共享规则</h2>
+<table><thead><tr><th>对象</th><th>主要状态与规则</th></tr></thead><tbody>
+<tr><td>题库</td><td>未绑定 → 已同步 → 有修改 / 冲突 → 已同步；测评使用固定版本</td></tr>
+<tr><td>题目草稿</td><td>生成中 → 待审核 → 已保存；未确认草稿不写入槽位</td></tr>
+<tr><td>测评单元</td><td>等待 → 运行 → 成功 / 失败 / 未知；取消停止尚未提交的单元</td></tr>
+<tr><td>评分</td><td>待评分 → 已评分；保存评分来源、适用维度和口径</td></tr>
+<tr><td>模型配置</td><td>未配置 / 待验证 / 可用 / 验证失败 / 停用；任务固定原配置版本</td></tr>
+<tr><td>新闻来源</td><td>未加载 / 更新中 / 已更新 / 部分失败 / 离线缓存</td></tr>
+</tbody></table>
+<p>凭据不进入题库、结果导出、错误信息和新闻缓存。关闭模型页面不会丢弃已保存的测评结果；运行请求和媒体预览分别管理。请求计费、远端取消和重试可否保证不重复均以具体服务能力为准，在启动预览或恢复任务时可见。</p>
+</main>
+<script>
+document.querySelectorAll('[data-tab]').forEach(b=>b.onclick=()=>{document.querySelectorAll('[data-tab]').forEach(x=>x.classList.toggle('active',x===b));document.querySelectorAll('.panel').forEach(p=>p.classList.toggle('active',p.id===b.dataset.tab));});
+const box=document.getElementById('models');for(let i=1;i<=14;i++){const l=document.createElement('label');l.innerHTML='<input type="checkbox"> 示例模型 '+i;box.append(l)}
+const msg=s=>document.getElementById('eval-message').textContent=s;
+document.getElementById('all').onclick=()=>{box.querySelectorAll('input').forEach(x=>x.checked=true);msg('已选择 14 个示例模型。')};
+document.getElementById('extra').onclick=()=>msg('一次最多对比 14 个模型；原有选择保留。');
+document.getElementById('preview').onclick=()=>{const n=box.querySelectorAll('input:checked').length;msg(document.getElementById('bank').selectedIndex===1?'题库没有有效题目，请先同步或出题。':n?`任务预览：3 题 × ${n} 个模型 = ${3*n} 个结果单元。此处仅演示，不发请求。`:'请至少选择一个模型。')};
+document.getElementById('question').onclick=()=>msg('示例草稿：保持同一角色服装与面部特征，生成两个不同动作。审核后再保存到题库。');
+const dims=()=>{document.getElementById('dimension-status').textContent=document.getElementById('kind').value==='LLM'?'响应效果；参考效果、保持效果依题目适用。其余维度不适用。':document.getElementById('kind').value==='图像'?'响应效果、画面美感；参考效果、保持效果依题目适用。运动、音频不适用。':'视频可展示六维；没有音频或参考输入时标为不适用。'};document.getElementById('kind').onchange=dims;dims();
+document.getElementById('unscored').onclick=()=>document.getElementById('ranking-message').textContent='没有已评分的有效结果，暂不显示排行榜名次。';
+const configMode=cli=>{document.getElementById('api-form').hidden=cli;document.getElementById('cli-list').hidden=!cli;document.getElementById('api-tab').classList.toggle('active',!cli);document.getElementById('cli-tab').classList.toggle('active',cli)};document.getElementById('api-tab').onclick=()=>configMode(false);document.getElementById('cli-tab').onclick=()=>configMode(true);
+document.getElementById('save').onclick=()=>{let ok=false;try{const u=new URL(document.getElementById('endpoint').value);ok=['http:','https:'].includes(u.protocol)&&!!u.hostname&&!u.username&&!u.password}catch{}document.getElementById('config-message').textContent=ok?'演示配置已验证；此页面不修改应用配置或保存密钥。':'请输入合法的 HTTP / HTTPS API 地址。'};
+document.getElementById('refresh').onclick=()=>document.getElementById('news-message').textContent='演示状态：尚未配置新闻来源，可添加来源后刷新。';
+document.getElementById('offline').onclick=()=>document.getElementById('news-message').textContent='演示状态：离线，显示上次缓存及抓取时间；没有缓存时显示空状态。';
+</script>
+</html>

@@ -65,11 +65,12 @@ func runWorkspaceBeatProbe(directory: URL, check: (Bool, String) -> Void) async 
     let models = nodes.first { ($0.accessibilityIdentifier?() ?? "") == "workspace-models" }
     check(models != nil && models?.accessibilityLabel?() == "模型", "native top bar shows 模型")
     check(!nodes.contains { ($0.accessibilityLabel?() ?? "").contains("Beat") }, "native top bar removes Beat label")
-    check(models?.isAccessibilityEnabled?() == false, "models placeholder retains its unavailable state")
+    check(models?.isAccessibilityEnabled?() == true, "models workspace is available")
     _ = models?.accessibilityPerformPress?()
     try? await Task.sleep(for: .milliseconds(80))
-    check(state.mode == .canvas, "native models placeholder cannot leave the canvas")
-    check(!WorkspaceMode.agent.isSelectable, "legacy agent route is not a selectable workspace")
+    check(state.mode == .agent, "native models button opens the model workspace")
+    check(WorkspaceMode.agent.isSelectable, "model route is selectable")
+    state.mode = .canvas
     check(WorkspaceBrandResources.markURL.flatMap { NSImage(contentsOf: $0) } != nil,
           "original app-center artwork loads from bundled transparent resource")
     let edit = elements(window).first { ($0.accessibilityIdentifier?() ?? "") == "workspace-edit"

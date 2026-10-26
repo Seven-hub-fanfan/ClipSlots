@@ -1914,6 +1914,20 @@ public final class SpecialSlotStorage {
 
     /// Compare and exchange under the same lock used by GUI and CLI writes.
     /// The body snapshot includes rich pasteboard formats; unrelated live metadata survives.
+    public func exchangeModelQuestion(_ slot: Int, in groupID: String,
+                                      expectedRevision: String, text: String) throws -> SlotContent {
+        try storageLock.withLock(timeout: 0.15) {
+            guard !storageLock.isDegraded, let current = getOrUnknown(slot, in: groupID) else {
+                throw AgentCanvasError.busy
+            }
+            guard BatchGenerationSource.revision(of: current) == expectedRevision else {
+                throw AgentCanvasError.conflict
+            }
+            return try exchangeAgentBody(slot, in: groupID, expected: AgentSlotBody(current),
+                                         replacement: AgentSlotBody(text: text))
+        }
+    }
+
     public func exchangeAgentBody(_ slot: Int, in groupID: String,
                                   expected: AgentSlotBody, replacement: AgentSlotBody) throws -> SlotContent {
         try storageLock.withLock(timeout: 0.15) {

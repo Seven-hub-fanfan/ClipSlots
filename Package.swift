@@ -40,5 +40,10 @@ let package = Package(
             dependencies: ["ClipSlotsKit"],
             path: "Tests/ClipSlotsKitSmokeTests"
         ),
+        .executableTarget(
+            name: "ModelWorkspaceSmokeTests",
+            dependencies: ["ClipSlotsKit"],
+            path: "Tests/ModelWorkspaceSmokeTests"
+        ),
     ]
 )

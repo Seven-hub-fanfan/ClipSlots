@@ -109,6 +109,7 @@ extension CanvasWorkspaceView {
                 // Save accepted ownership even if stop/project-switch happened during submit.
                 canvas.updateGeneration(ticket.token) {
                     $0.taskId = handle.taskID
+                    $0.modelEvaluationCellID = nil
                     $0.generationTask = handle
                 }
                 canvas.flushSave()

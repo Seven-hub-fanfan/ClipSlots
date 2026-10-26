@@ -2954,6 +2954,22 @@ final class SlotStoreObservable: ObservableObject {
         }
     }
 
+    /// Model banks use a captured authoritative revision, including attachments.
+    func writeModelQuestion(groupID: String, slot: Int, expectedRevision: String, text: String) throws -> SlotContent {
+        guard !canvasSlotHasUnsavedContent(groupId: groupID, slot: slot)
+                || canvasTextDocuments["\(groupID)#\(slot)"]?.isDirty != true else {
+            throw AgentCanvasError.conflict
+        }
+        let saved = try slotWriteQueue.sync {
+            try canvasStorage(groupId: groupID).exchangeModelQuestion(slot, in: groupID,
+                expectedRevision: expectedRevision, text: text)
+        }
+        if loadedSpecialSlotId == groupID { slots[slot] = saved }
+        canvasTextDocuments["\(groupID)#\(slot)"]?.refreshFromStorage(saved)
+        bumpCanvasSlotRevision()
+        return saved
+    }
+
     /// 把画布「入参文件」面板改好的附件列表写回**任意组**的槽位（v2.11.7 hotfix20）。
     ///
     /// 画布上的入参文件与槽位附件是**同一份数据**，所以这里没有第二套存储 —— 只是把
