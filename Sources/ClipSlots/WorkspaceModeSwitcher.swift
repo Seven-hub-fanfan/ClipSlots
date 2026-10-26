@@ -63,15 +63,7 @@ struct WorkspaceModeSwitcher: View {
         }
         .padding(.horizontal, Self.inset)
         .frame(width: Self.preferredWidth, height: Self.preferredHeight)
-        .background {
-            Capsule(style: .continuous)
-                .fill(TapSkin.tone(0xfafafb, 0x1c1d1f))
-                .overlay(Capsule(style: .continuous).strokeBorder(
-                    contrast == .increased
-                        ? TapSkin.tone(0xb8bbc2, 0x767a84)
-                        : TapSkin.tone(0xdedfe3, 0x383a40),
-                    lineWidth: contrast == .increased ? 1 : 0.5))
-        }
+        .background { navigationSurface }
         .overlay(alignment: .leading) {
             WorkspaceContourSurface(center: Self.center(for: selection),
                 halfWidth: Self.segmentWidth * 0.64,
@@ -79,6 +71,35 @@ struct WorkspaceModeSwitcher: View {
                 highContrast: contrast == .increased, motion: contourMotion)
                 .allowsHitTesting(false).accessibilityHidden(true)
         }
+    }
+
+    /// A shallow bevel stays inside the capsule: the top catches light and
+    /// the lower edge carries its thickness without an external shadow.
+    private var navigationSurface: some View {
+        Capsule(style: .continuous)
+            .fill(LinearGradient(
+                colors: [TapSkin.tone(0xfdfdfe, 0x24262a), TapSkin.tone(0xf5f6f8, 0x1c1d20)],
+                startPoint: .top, endPoint: .bottom))
+            .overlay {
+                Capsule(style: .continuous).strokeBorder(LinearGradient(
+                    colors: contrast == .increased
+                        ? [TapSkin.tone(0xaeb2bc, 0x828894), TapSkin.tone(0xaeb2bc, 0x828894)]
+                        : [TapSkin.tone(0xffffff, 0x4c5057),
+                           TapSkin.tone(0xd4d7dd, 0x1b1d22),
+                           TapSkin.tone(0xbec2cc, 0x0b0c0f)],
+                    startPoint: .topLeading, endPoint: .bottomTrailing),
+                    lineWidth: contrast == .increased ? 1.5 : 1.25)
+            }
+            .overlay {
+                Capsule(style: .continuous).inset(by: 0.8)
+                    .strokeBorder(LinearGradient(stops: [
+                        .init(color: TapSkin.tone(0xffffff, 0xb7bcc7).opacity(0.72), location: 0),
+                        .init(color: Color.white.opacity(0.18), location: 0.36),
+                        .init(color: .clear, location: 0.70),
+                        .init(color: TapSkin.tone(0x505969, 0x000000).opacity(0.12), location: 1)
+                    ], startPoint: .topLeading, endPoint: .bottomTrailing), lineWidth: 0.75)
+                    .opacity(contrast == .increased ? 0 : 1)
+            }
     }
 
     private func segment(_ mode: WorkspaceMode) -> some View {
