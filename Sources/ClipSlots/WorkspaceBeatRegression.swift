@@ -8,15 +8,21 @@ func runWorkspaceBeatProbe(directory: URL, check: (Bool, String) -> Void) async 
     final class Selection: ObservableObject {
         @Published var mode = WorkspaceMode.canvas
         @Published var reduceMotion = false
+        var deferCommit = false
+        let navigation = WorkspaceNavigationState()
     }
     struct Fixture: View {
         @ObservedObject var state: Selection
         var body: some View {
-            WorkspaceModeSwitcher(selection: Binding(get: { state.mode }, set: { mode in
+            WorkspaceNavigationBar(selection: Binding(get: { state.mode }, set: { mode in
+                if state.deferCommit {
+                    state.navigation.requestedMode = mode
+                    return
+                }
                 var transaction = Transaction()
                 transaction.disablesAnimations = true
                 withTransaction(transaction) { state.mode = mode }
-            }), animationsEnabled: !state.reduceMotion)
+            }), navigation: state.navigation, animationsEnabled: !state.reduceMotion)
             .padding(20).background(Color(white: 0.90))
         }
     }
@@ -153,12 +159,79 @@ func runWorkspaceBeatProbe(directory: URL, check: (Bool, String) -> Void) async 
             .write(to: directory.appendingPathComponent("workspace-motion.json"))
         _ = await motion.exportAnimation(since: started, until: ended,
             directory: directory.appendingPathComponent("workspace-compositor-animation"))
+        let surface = elements(host).compactMap { $0 as? WorkspaceContourSurface.Host }.first
+        check(surface != nil, "native compositor surface is present behind SwiftUI buttons")
+        motion.begin(region: CGRect(origin: .zero, size: window.frame.size), retainImages: true)
+        state.deferCommit = true
+        let deferredStarted = motion.now
+        _ = canvas?.accessibilityPerformPress?()
+        check(state.mode == .edit && state.navigation.requestedMode == .canvas,
+              "requested navigation responds before deferred workspace commit")
+        check(surface?.debugHasAnimation == true,
+              "native contour starts synchronously inside the click action")
+        try? await Task.sleep(for: .milliseconds(50))
+        let stalledAt = motion.now
+        // Reproduce the main-thread work encountered during page mounting.
+        func simulateMountWork() { Thread.sleep(forTimeInterval: 0.12) }
+        simulateMountWork()
+        let resumedAt = motion.now
+        try? await Task.sleep(for: .milliseconds(250))
+        let deferredEnded = motion.now
+        _ = await motion.exportAnimation(since: deferredStarted, until: deferredEnded,
+            directory: directory.appendingPathComponent("workspace-deferred-animation"))
+        try? JSONSerialization.data(withJSONObject: [
+            "clickedAt": deferredStarted, "mainBlockedAt": stalledAt,
+            "mainResumedAt": resumedAt, "endedAt": deferredEnded
+        ], options: [.prettyPrinted]).write(to: directory.appendingPathComponent("workspace-deferred-timing.json"))
+        capture("workspace-pending-canvas")
+        state.navigation.requestedMode = nil
+        try? await Task.sleep(for: .milliseconds(450))
+        check(state.mode == .edit && abs((surface?.debugVisibleCenter ?? 0) - 81) < 0.5,
+              "abandoned deferred request restores the committed edit selection")
+        capture("workspace-restored-edit")
+        state.deferCommit = false
+        motion.begin(region: CGRect(origin: .zero, size: window.frame.size), retainImages: true)
+        let reversalStarted = motion.now
+        _ = canvas?.accessibilityPerformPress?()
+        try? await Task.sleep(for: .milliseconds(70))
+        let beforeReverse = surface?.debugVisibleCenter ?? 0
+        _ = edit?.accessibilityPerformPress?()
+        let afterReverse = surface?.debugVisibleCenter ?? 0
+        check(abs(beforeReverse - afterReverse) < 1,
+              "rapid reversal continues from the presented position without a jump")
+        try? await Task.sleep(for: .milliseconds(450))
+        check(abs((surface?.debugVisibleCenter ?? 0) - 81) < 0.5,
+              "rapid reversal settles at the latest requested workspace")
+        _ = await motion.exportAnimation(since: reversalStarted, until: motion.now,
+            directory: directory.appendingPathComponent("workspace-reversal-animation"))
+        let transition = WorkspaceTransition()
+        var erroneouslyCommitted = false
+        transition.switchTo(.canvas, prepare: {
+            try? await Task.sleep(for: .milliseconds(60))
+            return false
+        }, commit: { erroneouslyCommitted = true })
+        check(transition.navigation.requestedMode == .canvas,
+              "real workspace preparation publishes its requested selection immediately")
+        for _ in 0..<40 where transition.isSwitching {
+            try? await Task.sleep(for: .milliseconds(25))
+        }
+        check(!transition.isSwitching && transition.navigation.requestedMode == nil && !erroneouslyCommitted,
+              "real failed workspace preparation rolls navigation back")
+        transition.switchTo(.canvas, prepare: {
+            try? await Task.sleep(for: .seconds(1))
+            return true
+        }, commit: { erroneouslyCommitted = true })
+        transition.cancel()
+        check(transition.navigation.requestedMode == nil && !transition.isSwitching,
+              "real cancelled workspace request restores navigation immediately")
         motion.begin(region: CGRect(origin: .zero, size: window.frame.size), retainImages: true)
         state.reduceMotion = true
         try? await Task.sleep(for: .milliseconds(160))
         _ = canvas?.accessibilityPerformPress?()
         try? await Task.sleep(for: .milliseconds(400))
         check(state.mode == .canvas, "reduced-motion native switch still changes workspace")
+        check(surface?.debugHasAnimation == false,
+              "reduced-motion switch updates both native layers without animation")
         capture("workspace-reduced-motion")
         await motion.stop()
     }

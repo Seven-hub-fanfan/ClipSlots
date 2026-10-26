@@ -34,6 +34,7 @@ struct WorkspaceModeSwitcher: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.colorSchemeContrast) private var contrast
     @State private var hovered: WorkspaceMode?
+    @State private var contourMotion = WorkspaceContourMotion()
 
     static let preferredWidth: CGFloat = WindowLayoutMetrics.workspaceSwitcherWidth
     static let preferredHeight: CGFloat = 40
@@ -41,12 +42,10 @@ struct WorkspaceModeSwitcher: View {
     private static let inset: CGFloat = 8
     private static let ornamentWidth: CGFloat = 42
     private static var segmentWidth: CGFloat { (preferredWidth - inset * 2 - ornamentWidth) / 3 }
-    private var selectedIndex: CGFloat { selection == .canvas ? 1 : 0 }
-    private var center: CGFloat { Self.inset + Self.ornamentWidth + Self.segmentWidth * (selectedIndex + 0.5) }
-    private var ink: Color { TapSkin.tone(0x303034, 0xffffff) }
-    private var movement: Animation? {
-        reduceMotion || !animationsEnabled ? nil : .spring(response: 0.32, dampingFraction: 0.82)
+    private static func center(for mode: WorkspaceMode) -> CGFloat {
+        inset + ornamentWidth + segmentWidth * (mode == .canvas ? 1.5 : 0.5)
     }
+    private var ink: Color { TapSkin.tone(0x303034, 0xffffff) }
 
     var body: some View {
         HStack(spacing: 0) {
@@ -72,24 +71,10 @@ struct WorkspaceModeSwitcher: View {
                 .overlay(Capsule().strokeBorder(TapSkin.tone(0xe4e4e6, 0x343437), lineWidth: 0.5))
         }
         .overlay(alignment: .leading) {
-            WorkspaceSelectionContour(center: center, halfWidth: Self.segmentWidth * 0.64)
-                .stroke(LinearGradient(stops: [
-                    .init(color: ink.opacity(0.02), location: 0),
-                    .init(color: ink.opacity(0.80), location: 0.20),
-                    .init(color: ink.opacity(0.80), location: 0.80),
-                    .init(color: ink.opacity(0.02), location: 1)
-                ], startPoint: .leading, endPoint: .trailing),
-                        style: StrokeStyle(lineWidth: contrast == .increased ? 1.5 : 1.05, lineCap: .round))
-                .clipShape(Capsule())
-                .animation(movement, value: selectedIndex)
-                .transaction { $0.disablesAnimations = false }
-                .allowsHitTesting(false).accessibilityHidden(true)
-        }
-        .overlay(alignment: .bottomLeading) {
-            Circle().fill(ink).frame(width: 3, height: 3)
-                .offset(x: center - 1.5, y: -3)
-                .animation(movement, value: selectedIndex)
-                .transaction { $0.disablesAnimations = false }
+            WorkspaceContourSurface(center: Self.center(for: selection),
+                halfWidth: Self.segmentWidth * 0.64,
+                animated: animationsEnabled && !reduceMotion,
+                highContrast: contrast == .increased, motion: contourMotion)
                 .allowsHitTesting(false).accessibilityHidden(true)
         }
         .shadow(color: .black.opacity(0.12), radius: 4, y: 3)
@@ -99,18 +84,20 @@ struct WorkspaceModeSwitcher: View {
         let selected = selection == mode
         return Button {
             guard mode.isSelectable else { return }
+            // Submit the layer animation before preparing or mounting the page.
+            contourMotion.select(center: Self.center(for: mode),
+                                 animated: animationsEnabled && !reduceMotion)
             selection = mode
         } label: {
             VStack(spacing: 2) {
                 Image(systemName: mode.symbolName)
-                    .font(.system(size: 13, weight: .medium))
-                    .frame(width: 17, height: 15)
+                    .font(.system(size: 12, weight: .medium))
+                    .frame(width: 16, height: 14)
                 Text(mode.title)
                     .font(.system(size: 10, weight: selected ? .semibold : .medium))
                     .fixedSize()
             }
             .foregroundColor(ink.opacity(selected ? 1 : hovered == mode ? 0.78 : 0.50))
-            .offset(y: -1.5)
             .frame(width: Self.segmentWidth, height: Self.preferredHeight)
             .contentShape(Rectangle())
         }
@@ -171,8 +158,8 @@ struct WorkspaceSelectionContour: Shape {
         set { center = newValue }
     }
     func path(in rect: CGRect) -> Path {
-        let bottom = rect.maxY - 1.5, top = rect.minY + 4
-        let shoulder = halfWidth, crown = halfWidth * 0.29
+        let bottom = rect.maxY - 1.5, top = rect.minY + 1.5
+        let shoulder = halfWidth, crown = halfWidth * 0.34
         var path = Path()
         path.move(to: CGPoint(x: rect.minX, y: bottom))
         path.addLine(to: CGPoint(x: center - shoulder, y: bottom))

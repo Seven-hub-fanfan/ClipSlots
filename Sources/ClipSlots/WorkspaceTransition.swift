@@ -14,6 +14,7 @@ final class WorkspaceTransition: ObservableObject {
     let editorMounts = CanvasNodeMountQueue()
     let sections = CanvasNodeMountQueue()
     let sidebarMounts = CanvasNodeMountQueue()
+    let navigation = WorkspaceNavigationState()
     private(set) var pendingMode: WorkspaceMode?
 
     func switchTo(_ mode: WorkspaceMode, prepare: @escaping () async -> Bool,
@@ -27,6 +28,7 @@ final class WorkspaceTransition: ObservableObject {
         generation = ticket
         isSwitching = true
         pendingMode = mode
+        navigation.requestedMode = mode
         surface?.show(title: mode == .canvas ? "正在准备画布" : "正在打开编辑区")
         task = Task { [weak self] in
             // Give the compositor the loading layer before any heavy mounting.
@@ -80,6 +82,7 @@ final class WorkspaceTransition: ObservableObject {
             WorkspaceMountTrace.mark("ready:\(mode.rawValue)")
             self.isSwitching = false
             self.pendingMode = nil
+            self.navigation.requestedMode = nil
             self.task = nil
         }
     }
@@ -93,6 +96,7 @@ final class WorkspaceTransition: ObservableObject {
         sidebarMounts.admitNative(Array(sidebarMounts.pendingIDs))
         isSwitching = false
         pendingMode = nil
+        navigation.requestedMode = nil
         surface?.hide()
     }
 }

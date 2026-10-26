@@ -768,7 +768,8 @@ struct ContentView: View {
     /// 露出一块色差方块；画布模式它压在网格线上，不垫底会透出格线，读起来像控件坏了。
     /// 注意底板是 `.background`，不参与布局 —— 加不加都不影响那颗胶囊的落位。
     private var workspaceModeSwitcherPinned: some View {
-        WorkspaceModeSwitcher(selection: Binding(get: { workspaceMode }, set: { requestWorkspace($0) }))
+        WorkspaceNavigationBar(selection: Binding(get: { workspaceMode }, set: { requestWorkspace($0) }),
+                               navigation: workspaceTransition.navigation)
             .padding(.top, WorkspaceModeSwitcher.pinnedTopInset)
     }
 
