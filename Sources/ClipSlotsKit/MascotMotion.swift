@@ -20,6 +20,13 @@ public struct MascotPose: Equatable {
     public init() {}
 }
 
+public struct MascotScheduleHint {
+    public enum Work { case staticFeedback, pose, activity, lampOnly }
+    public let work: Work
+    public let nextDeadlineMS: Double?
+    public let nextSemanticDeadlineMS: Double?
+}
+
 public final class MascotMotion {
     public enum Activity: String { case idle, busy, superBusy, voice, waiting, completed, failed, celebration }
     public static let hoverFrames: [[Double]] = [
@@ -147,6 +154,37 @@ public final class MascotMotion {
     }
     public var continuous: Bool { !reduceMotion }
     public var nextWake: Double? { nextBlink }
+    public func rebaseIntegratorAfterSleep(at time: Double) { previousTime=time }
+    public func synchronizePresentedLampIntensity(_ value: Double) {
+        guard value.isFinite else { return }
+        pose.logoIntensity=min(1,max(0,value))
+    }
+    /// Call after sampling, so expired transitions have already been consumed.
+    public func schedulingHint(at time: Double) -> MascotScheduleHint {
+        var semantic:[Double]=[]
+        if let until=completionUntil { semantic.append(until) }
+        if activity == .celebration { semantic.append(activityStart+8750) }
+        if let start=busyStart {
+            let cycle=floor(max(0,time-start)/180000)
+            semantic.append(start+cycle*180000+10000)
+            semantic.append(start+(cycle+1)*180000)
+        }
+        func earliest(_ values:[Double]) -> Double? {
+            values.filter { $0.isFinite && $0>time }.min()
+        }
+        var deadlines=semantic
+        if !reduceMotion {
+            if let nextBlink { deadlines.append(nextBlink) }
+            if activity == .idle, !hovering, !dragging, !computerFocused,
+               let moved=pointerMovedAt, nextBlink == nil { deadlines.append(moved+800) }
+        }
+        let moving=highFrameRate || logoTransition != nil ||
+            (activity != .voice && pose.voiceLevel>0.002)
+        let work:MascotScheduleHint.Work = reduceMotion ? .staticFeedback :
+            moving ? ([.idle,.failed].contains(activity) ? .pose : .activity) : .lampOnly
+        return .init(work:work,nextDeadlineMS:earliest(deadlines),
+                     nextSemanticDeadlineMS:earliest(semantic))
+    }
     public func reset(at time: Double) {
         hovering=false; dragging=false; hoverStart=nil; transition=nil; blinkStart=nil
         reopening=nil; nextBlink=nil; pointerPresent=false; previousTime=nil
@@ -159,16 +197,20 @@ public final class MascotMotion {
             blinkStart=nil; reopening=(time,pose.blink)
         }
     }
-    @discardableResult public func sample(at time: Double) -> MascotPose {
+    public func advanceSemanticState(at time: Double) {
         if let until=completionUntil, time >= until {
             completionUntil=nil; setActivity(.idle,at:time)
         }
+        if activity == .celebration, time-activityStart >= 8750 { setActivity(.idle,at:time) }
         if let start=busyStart {
             let elapsed=time-start
             if elapsed >= 180000 && elapsed.truncatingRemainder(dividingBy:180000) < 10000 {
                 if activity != .superBusy { activity = .superBusy; activityStart=time }
             } else if activity == .superBusy { activity = .busy; activityStart=time }
         }
+    }
+    @discardableResult public func sample(at time: Double) -> MascotPose {
+        advanceSemanticState(at:time)
         if reduceMotion {
             pose=MascotPose()
             if computerFocused { (pose.yaw,pose.pitch)=computerGaze }

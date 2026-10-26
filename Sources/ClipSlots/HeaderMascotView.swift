@@ -20,22 +20,37 @@ struct HeaderMascotView: NSViewRepresentable {
 }
 
 @MainActor
-final class HeaderMascotNativeView: NSView {
+final class HeaderMascotNativeView: NSView, HeaderMascotRenderOwner {
     override var isFlipped: Bool { true }
     override var mouseDownCanMoveWindow: Bool { false }
     let motion=MascotMotion()
-    private let renderer=HeaderMascotRenderer()
-    private lazy var frames=MascotFrameScheduler(render: { [renderer] request, completion in
-        renderer.render(request,completion:completion)
-    },present: { [weak self] request, frame in
-        guard let self, self.visible, request.activity == self.motion.activity,
-              request.size == self.rasterSide, let image=frame.bitmap else { return }
-        self.bitmap=image
-        self.geometryInsideFrustum=frame.geometryInsideFrustum
-        self.facialSurfaceValid=frame.facialSurfaceValid
-        self.renderCount+=1;self.needsDisplay=true
-        self.detachedView?.needsDisplay=true
-    })
+    private var service:HeaderMascotRenderService?
+    private var renderer:HeaderMascotRenderer {
+        if service == nil { service=HeaderMascotRenderService();service?.attach(self) }
+        return service!.renderer
+    }
+    private var frames:MascotFrameScheduler { _=renderer;return service!.frames }
+    private let atlas=HeaderMascotLampAtlas()
+    private let lamp=HeaderMascotLampPlayer()
+    private let floatingLamp=HeaderMascotLampPlayer()
+    private var buildSubmitted=false
+    private var lastBuildMS=0.0
+    private var presentedPose:MascotPose?
+    #if DEBUG
+    private var displayIssuedAtMS=0.0
+    #endif
+    private var displayWasLamp=false
+    private var dormant=true
+    private var failedFrames=0
+    private var wakeDeadline=MascotEarliestWake()
+    private var budgetObserver:UUID?
+    private var sessionSubscriber:AnyCancellable?
+    private var constrained=false
+    private var constrainedRecovery:Double?
+    private var lastHealthMS=0.0
+    private var fallbackPolling=false
+    private var lastPointerEventMS=0.0
+    private var globalPointerMonitor:Any?
     private var scheduledActivity:MascotMotion.Activity?
     private var scheduledSize:Int?
     var onToggle: () -> Void = {}
@@ -64,10 +79,8 @@ final class HeaderMascotNativeView: NSView {
     private var canvasWaiting=false
     private var phase=AgentChatModel.RunPhase.idle
     private var previousNodeStates: [String:CanvasNodeState]=[:]
-    private var muted=false
+    private var muted:Bool { HeaderMascotSessionState.shared.paused }
     private var lastTick=0.0
-    private var stableSince: Double?
-    private var cursorTimer:Timer?
     private var lastCursor:NSPoint?
     private var voiceTrace:[[String:Any]]=[]
     private var lastVoiceTraceTime=0.0
@@ -83,9 +96,14 @@ final class HeaderMascotNativeView: NSView {
 
     override init(frame frameRect:NSRect) {
         super.init(frame:frameRect)
-        motion.legPixels=renderer.legPixels
-        motion.pointerProjection={ [weak renderer] x,y in renderer?.pointer(x:x,y:y) ?? (0,0) }
-        motion.computerGaze=renderer.computerGaze
+        wantsLayer=true
+        layer?.addSublayer(lamp.layer)
+        sessionSubscriber=HeaderMascotSessionState.shared.$paused.dropFirst().sink { [weak self] _ in
+            Task { @MainActor in self?.invalidateDisplay();self?.refreshVisibility() }
+        }
+        budgetObserver=ResourceBudget.shared.observe { [weak self] in
+            Task { @MainActor in self?.wake() }
+        }
         setAccessibilityElement(true)
         setAccessibilityRole(.button)
         setAccessibilityLabel("斗篷小助手")
@@ -96,7 +114,8 @@ final class HeaderMascotNativeView: NSView {
                      NSWindow.didMiniaturizeNotification,NSWindow.didDeminiaturizeNotification,
                      NSWindow.didChangeOcclusionStateNotification,NSApplication.didHideNotification,
                      NSApplication.didUnhideNotification,NSWindow.didBecomeKeyNotification,
-                     NSWindow.didResignKeyNotification] {
+                     NSWindow.didResignKeyNotification,NSWindow.didChangeBackingPropertiesNotification,
+                     ProcessInfo.thermalStateDidChangeNotification] {
             notifications.append(center.addObserver(forName:name,object:nil,queue:.main) { [weak self] _ in
                 MainActor.assumeIsolated { self?.refreshVisibility() }
             })
@@ -121,6 +140,13 @@ final class HeaderMascotNativeView: NSView {
                 MainActor.assumeIsolated {
                     guard let self, let editor=note.object as? NSTextView,
                           editor.window === self.window else { return }
+                    self.refreshPromptFocus()
+                }
+            })
+        notifications.append(center.addObserver(forName:NSWindow.didUpdateNotification,
+            object:nil,queue:.main) { [weak self] note in
+                MainActor.assumeIsolated {
+                    guard let self,note.object as? NSWindow === self.window else { return }
                     self.refreshPromptFocus()
                 }
             })
@@ -176,6 +202,7 @@ final class HeaderMascotNativeView: NSView {
         updateActivity()
     }
     private func updateActivity(completed:Bool=false) {
+        prepareInput()
         motion.setAgentWorking(running || waiting || canvasRunning || canvasWaiting,at:now)
         let activity:MascotMotion.Activity
         if listening { activity = .voice }
@@ -190,13 +217,30 @@ final class HeaderMascotNativeView: NSView {
         setAccessibilityValue(activity.rawValue)
         wake()
     }
-    override func viewDidMoveToWindow() { super.viewDidMoveToWindow(); refreshVisibility() }
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        if let window {
+            let next=HeaderMascotRenderService.forWindow(window)
+            if service !== next {
+                service?.detach(self);service=next;next.attach(self)
+                atlas.clear();buildSubmitted=false;presentedPose=nil;lastPose=nil
+            }
+            motion.legPixels=renderer.legPixels
+            motion.computerGaze=renderer.computerGaze
+            motion.pointerProjection={ [weak self] x,y in self?.renderer.pointer(x:x,y:y) ?? (0,0) }
+        } else { service?.detach(self) }
+        refreshVisibility()
+        #if DEBUG
+        HeaderMascotOptimizationProbe.start(self)
+        #endif
+    }
     override func viewDidHide() { super.viewDidHide(); refreshVisibility() }
     override func viewDidUnhide() { super.viewDidUnhide(); refreshVisibility() }
     private var visible:Bool {
         !disposed && !isHiddenOrHasHiddenAncestor && !NSApp.isHidden &&
-        window != nil && window!.isVisible && !window!.isMiniaturized &&
-        window!.occlusionState.contains(.visible)
+        window != nil && ((window!.isVisible && !window!.isMiniaturized &&
+        window!.occlusionState.contains(.visible)) ||
+        (dragPanel?.isVisible == true && dragPanel?.occlusionState.contains(.visible) == true))
     }
     private var screenCenter:NSPoint {
         guard let window else { return .zero }
@@ -209,43 +253,69 @@ final class HeaderMascotNativeView: NSView {
         if visible {
             motion.setAgentWorking(running || waiting || canvasRunning || canvasWaiting,at:now)
             refreshPromptFocus()
-            dragPanel?.orderFront(nil)
-            if pointerMonitor == nil {
+            if pointerMonitor == nil,NSApp.isActive,!muted {
                 pointerMonitor=NSEvent.addLocalMonitorForEvents(matching:[.mouseMoved,.leftMouseDragged]) { [weak self] event in
                     MainActor.assumeIsolated {
-                        if let self, event.window === self.window, self.visible, self.pressedAt == nil {
+                        if let self,(event.window === self.window || event.window === self.dragPanel),
+                           self.visible,self.pressedAt == nil {
+                            self.lastPointerEventMS=self.now
                             self.follow(event)
                         }
                     }
                     return event
                 }
                 window?.acceptsMouseMovedEvents=true
+                globalPointerMonitor=NSEvent.addGlobalMonitorForEvents(matching:.mouseMoved) { [weak self] _ in
+                    Task { @MainActor in
+                        guard let self,self.visible,NSApp.isActive,!self.muted,self.pressedAt==nil else { return }
+                        self.lastPointerEventMS=self.now
+                        self.updatePointer(at:NSEvent.mouseLocation)
+                    }
+                }
+                fallbackPolling=pointerMonitor==nil || globalPointerMonitor==nil
+            }
+            if !NSApp.isActive || muted {
+                removePointerMonitors()
+                prepareInput();motion.setHover(false,at:now);entryBitmap=nil
+                if lastCursor != nil {
+                    prepareInput();lastCursor=nil;motion.setPointer(x:nil,y:nil,at:now)
+                }
+            } else if lastCursor == nil {
+                pollCursor()
             }
             wake()
-            if cursorTimer == nil {
-                let timer=Timer(timeInterval:0.05,repeats:true) { [weak self] _ in
-                    MainActor.assumeIsolated { self?.pollCursor() }
-                }
-                cursorTimer=timer;RunLoop.main.add(timer,forMode:.common)
-            }
         } else {
             stopTimer()
-            frames.invalidate()
-            cursorTimer?.invalidate();cursorTimer=nil;lastCursor=nil
-            if let pointerMonitor { NSEvent.removeMonitor(pointerMonitor); self.pointerMonitor=nil }
-            dragPanel?.orderOut(nil);pressedAt=nil
-            motion.reset(at:now); lastPose=nil; entryBitmap=nil
+            invalidateDisplay();removePointerMonitors();lastCursor=nil
+            dragPanel?.orderOut(nil);pressedAt=nil;dormant=true
+            motion.setPointer(x:nil,y:nil,at:now)
+            motion.setHover(false,at:now);motion.setDrag(false,at:now)
+            lastPose=nil;entryBitmap=nil
         }
+    }
+    private func removePointerMonitors() {
+        if let pointerMonitor { NSEvent.removeMonitor(pointerMonitor);self.pointerMonitor=nil }
+        if let globalPointerMonitor { NSEvent.removeMonitor(globalPointerMonitor);self.globalPointerMonitor=nil }
+        fallbackPolling=false
+    }
+    private func invalidateDisplay() {
+        if displayWasLamp,let frozen=atlas.presentationBitmap(timeMS:now) {
+            bitmap=frozen;needsDisplay=true;detachedView?.needsDisplay=true
+        }
+        service?.frames.invalidate();lamp.stop();floatingLamp.stop()
+        displayWasLamp=false;lastPose=nil;presentedPose=nil;buildSubmitted=false;failedFrames=0
     }
     func dispose() {
         disposed=true; stopTimer(); subscribers.removeAll()
-        frames.invalidate()
-        cursorTimer?.invalidate();cursorTimer=nil
+        invalidateDisplay();service?.detach(self);service=nil
+        atlas.clear();sessionSubscriber=nil
+        if let budgetObserver { ResourceBudget.shared.removeObserver(budgetObserver) }
+        budgetObserver=nil
         notifications.forEach {
             NotificationCenter.default.removeObserver($0)
             NSWorkspace.shared.notificationCenter.removeObserver($0)
         }; notifications=[]
-        if let pointerMonitor { NSEvent.removeMonitor(pointerMonitor); self.pointerMonitor=nil }
+        removePointerMonitors()
         dragPanel?.orderOut(nil); dragPanel=nil
     }
     override func updateTrackingAreas() {
@@ -267,6 +337,8 @@ final class HeaderMascotNativeView: NSView {
         updatePointer(at:eventScreenPoint(event))
     }
     private func updatePointer(at mouse:NSPoint) {
+        guard visible,!muted,NSApp.isActive,mouse != lastCursor else { return }
+        prepareInput();lastCursor=mouse
         refreshPromptFocus()
         let origin=interactionCenter
         let dx=mouse.x-origin.x,dy=origin.y-mouse.y
@@ -282,19 +354,19 @@ final class HeaderMascotNativeView: NSView {
     override func mouseEntered(with event:NSEvent) { follow(event) }
     override func mouseMoved(with event:NSEvent) { follow(event) }
     override func mouseExited(with event:NSEvent) {
+        prepareInput()
         motion.setHover(false,at:now); entryBitmap=nil
         pollCursor();wake()
     }
     private func pollCursor() {
         refreshPromptFocus()
-        guard visible,pressedAt==nil else { return }
+        guard visible,pressedAt==nil,!muted else { return }
         guard NSApp.isActive else {
             if lastCursor != nil { lastCursor=nil;motion.setPointer(x:nil,y:nil,at:now);wake() }
             return
         }
         let mouse=NSEvent.mouseLocation
         guard mouse != lastCursor else { return }
-        lastCursor=mouse
         updatePointer(at:mouse)
     }
     func refreshPromptFocus() {
@@ -303,6 +375,7 @@ final class HeaderMascotNativeView: NSView {
         let focused=visible && NSApp.isActive && window?.isKeyWindow == true &&
             prompt && editor?.isEditable == true && editor?.isHiddenOrHasHiddenAncestor == false
         guard focused != motion.editingPrompt else { return }
+        prepareInput()
         motion.setPromptEditing(focused,at:now)
         wake()
     }
@@ -324,14 +397,17 @@ final class HeaderMascotNativeView: NSView {
         let mouse=eventScreenPoint(event)
         if !moved && abs(mouse.x-start.x)<3 && abs(mouse.y-start.y)<3 { return }
         if !moved {
+            prepareInput()
             moved=true; motion.setDrag(true,at:now)
             if dragPanel == nil {
             let panel=NSPanel(contentRect:NSRect(origin:.zero,size:bounds.size),
                 styleMask:[.borderless,.nonactivatingPanel],backing:.buffered,defer:false)
             panel.isOpaque=false; panel.backgroundColor = .clear; panel.hasShadow=false
+            panel.acceptsMouseMovedEvents=true
             panel.level = .floating; panel.isReleasedWhenClosed=false
             let floating=HeaderMascotFloatingView(frame:NSRect(origin:.zero,size:bounds.size))
             floating.owner=self;panel.contentView=floating;detachedView=floating
+            floating.wantsLayer=true;floating.layer?.addSublayer(floatingLamp.layer)
             dragPanel=panel;window?.addChildWindow(panel,ordered:.above)
             }
         }
@@ -341,6 +417,7 @@ final class HeaderMascotNativeView: NSView {
     override func mouseUp(with event:NSEvent) {
         guard pressedAt != nil else { return }
         if moved {
+            prepareInput()
             motion.setHover(false,at:now); motion.setDrag(false,at:now)
             lastCursor=nil
             wake()
@@ -359,36 +436,118 @@ final class HeaderMascotNativeView: NSView {
         NSMenu.popUpContextMenu(menu,with:event,for:self)
     }
     @objc private func toggleAgent() { onToggle() }
-    @objc private func toggleAnimation() { muted.toggle(); wake() }
+    @objc private func toggleAnimation() { HeaderMascotSessionState.shared.togglePause() }
     @objc private func returnHome() {
+        invalidateDisplay();atlas.clear()
         motion.reset(at:now);dragPanel?.orderOut(nil)
         if let dragPanel { window?.removeChildWindow(dragPanel) }
         dragPanel=nil;detachedView=nil;needsDisplay=true;wake()
     }
-    private func stopTimer() { timer?.invalidate(); timer=nil; activeTimer=false }
-    private func wake() {
-        guard visible else { return }
-        stopTimer(); tick()
-        let time=now
-        let next=motion.nextWake ?? time+12000
-        let delay=motion.continuous ? (motion.highFrameRate ? 1.0/60 : 1.0/30) :
-            max(0.02,(next-time)/1000)
-        guard !muted && !motion.reduceMotion else { return }
-        let value=Timer(timeInterval:delay,repeats:false) { [weak self] _ in
-            MainActor.assumeIsolated { self?.wake() }
+    private func stopTimer() {
+        timer?.invalidate();timer=nil;activeTimer=false;wakeDeadline.consume()
+    }
+    private func schedule(at time:Double) {
+        guard wakeDeadline.request(time) else { return }
+        timer?.invalidate()
+        let value=Timer(timeInterval:max(0.001,(time-now)/1000),repeats:false) { [weak self] _ in
+            MainActor.assumeIsolated {
+                self?.timer=nil;self?.activeTimer=false;self?.wakeDeadline.consume();self?.wake()
+            }
         }
-        timer=value; activeTimer=true; RunLoop.main.add(value,forMode:.common)
+        timer=value;activeTimer=true;RunLoop.main.add(value,forMode:.common)
+    }
+    private func prepareInput() {
+        let time=now
+        if failedFrames>=3 { failedFrames=0;lastPose=nil }
+        if dormant { motion.rebaseIntegratorAfterSleep(at:time) }
+        _=motion.sample(at:time)
+        if lamp.isPlaying || floatingLamp.isPlaying {
+            motion.synchronizePresentedLampIntensity(lamp.brightness(at:time))
+        }
+    }
+    private func wake() {
+        guard visible,!disposed else { return }
+        let time=now
+        let budget=ResourceBudget.shared.schedulingSnapshot
+        let thermal=ProcessInfo.processInfo.thermalState
+        let critical=budget.pressure == .critical || thermal == .critical
+        let limited=budget.pressure != .normal || budget.lowPower || thermal == .serious || critical
+        if limited { constrained=true;constrainedRecovery=nil }
+        else if constrained {
+            constrainedRecovery=constrainedRecovery ?? time+5000
+            if time >= constrainedRecovery! { constrained=false;constrainedRecovery=nil }
+        }
+        let reduced=muted || NSWorkspace.shared.accessibilityDisplayShouldReduceMotion || critical
+        if motion.reduceMotion != reduced { invalidateDisplay();dormant=true }
+        motion.reduceMotion=reduced
+        if critical { atlas.clear();lamp.stop();floatingLamp.stop() }
+        if NSApp.isActive,!reduced,time-lastHealthMS >= (fallbackPolling ? 50 : 250) {
+            lastHealthMS=time
+            let mouse=NSEvent.mouseLocation
+            if let lastCursor,mouse != lastCursor,time-lastPointerEventMS>100 { fallbackPolling=true }
+            else if time-lastPointerEventMS<250 { fallbackPolling=false }
+            pollCursor()
+        }
+        tick()
+        let hint=motion.schedulingHint(at:time)
+        var deadlines:[Double]=[]
+        if let deadline=reduced ? hint.nextSemanticDeadlineMS : hint.nextDeadlineMS { deadlines.append(deadline) }
+        if let recovery=constrainedRecovery { deadlines.append(recovery) }
+        if !reduced {
+            if !displayWasLamp,failedFrames<3 {
+                let fps=hint.work == .lampOnly ? (constrained ? 15.0 : 30.0) : (constrained ? 30.0 : 60.0)
+                deadlines.append(max(time+1,lastTick+1000/fps))
+            }
+            if atlas.key != nil,!atlas.ready,atlas.rejection==nil {
+                deadlines.append(max(time+20,lastBuildMS+200))
+            }
+            if NSApp.isActive { deadlines.append(lastHealthMS+(fallbackPolling ? 50 : 250)) }
+        } else if failedFrames>0,failedFrames<3 { deadlines.append(time+250) }
+        if let deadline=deadlines.min() { schedule(at:deadline) }
+        else { stopTimer() }
     }
     private func tick() {
         let time=now
-        motion.reduceMotion=muted || NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
-        let fast=motion.highFrameRate
-        if fast { stableSince=nil }
-        else { stableSince=stableSince ?? time }
-        let interval=fast || time-(stableSince ?? time)<250 ? 1000.0/60 : 1000.0/30
-        if time-lastTick<interval-0.75 && bitmap != nil && !motion.reduceMotion { return }
-        lastTick=time; frameCount+=1
+        if dormant { motion.rebaseIntegratorAfterSleep(at:time) }
         let pose=motion.sample(at:time)
+        let hint=motion.schedulingHint(at:time)
+        guard failedFrames<3 else { return }
+        let lampOnly=hint.work == .lampOnly && !motion.agentWorking
+        let key=MascotLampKey(side:rasterSide,pose:pose,activity:motion.activity,
+            appearance:effectiveAppearance.name.rawValue,
+            display:window?.screen?.colorSpace?.iccProfileData ?? Data())
+        // Blinks may temporarily suspend a build, but the full trajectory is
+        // verified before a normalized blink key can ever be played.
+        if lampOnly { atlas.reset(key) }
+        else if atlas.key != key { atlas.reset(nil);buildSubmitted=false }
+        let scale=(dragPanel ?? window)?.backingScaleFactor ?? 2
+        // Preserve the original 128px minimum raster on non-Retina windows.
+        // A resampled base cannot safely share an independently resampled ROI.
+        let pixelAligned=rasterSide==Int(ceil(bounds.width*scale))
+        let useLamp=lampOnly && pixelAligned && atlas.ready && atlas.key==key &&
+            ProcessInfo.processInfo.environment["CLIPSLOTS_MASCOT_DISABLE_ATLAS"] != "1"
+        if useLamp {
+            if !displayWasLamp {
+                frames.invalidate();bitmap=atlas.base;presentedPose=pose
+                needsDisplay=true;detachedView?.needsDisplay=true
+            }
+            if dragPanel == nil {
+                floatingLamp.stop();lamp.play(atlas,in:bounds,scale:window?.backingScaleFactor ?? 2,timeMS:time)
+            } else {
+                lamp.stop();floatingLamp.play(atlas,in:bounds,
+                    scale:dragPanel?.backingScaleFactor ?? 2,timeMS:time)
+            }
+            displayWasLamp=true;dormant=true;return
+        }
+        if displayWasLamp { invalidateDisplay() }
+        lamp.stop();floatingLamp.stop()
+        dormant=motion.reduceMotion
+        let fps=hint.work == .lampOnly ? (constrained ? 15.0 : 30.0) : (constrained ? 30.0 : 60.0)
+        let interval=1000/fps
+        if time-lastTick<interval-0.75 && bitmap != nil && !motion.reduceMotion {
+            submitAtlasPartIfIdle(at:time,lampOnly:lampOnly);return
+        }
+        lastTick=time;frameCount+=1
         if listening,ProcessInfo.processInfo.environment["CLIPSLOTS_VOICE_DIAGNOSTICS_DIRECTORY"] != nil,
            time-lastVoiceTraceTime>=45,voiceTrace.count<1600 {
             lastVoiceTraceTime=time
@@ -400,12 +559,58 @@ final class HeaderMascotNativeView: NSView {
         let side=rasterSide, activity=motion.activity
         if scheduledActivity != activity || scheduledSize != side {
             frames.invalidate()
-            scheduledActivity=activity;scheduledSize=side;lastPose=nil
+            scheduledActivity=activity;scheduledSize=side;lastPose=nil;buildSubmitted=false
         }
         if pose != lastPose || bitmap == nil {
             frames.submit(MascotFrameRequest(pose:pose,size:side,activity:activity))
             lastPose=pose
         }
+        submitAtlasPartIfIdle(at:time,lampOnly:lampOnly)
+    }
+    private func submitAtlasPartIfIdle(at time:Double,lampOnly:Bool,afterDisplay:Bool=false) {
+        if lampOnly,!motion.reduceMotion,!atlas.ready,atlas.rejection==nil,
+           !buildSubmitted,(!frames.inFlight || afterDisplay),time-lastBuildMS>=200,
+           ProcessInfo.processInfo.environment["CLIPSLOTS_MASCOT_DISABLE_ATLAS"] != "1",
+           let part=atlas.pose(for:atlas.nextIndex) {
+            buildSubmitted=true;lastBuildMS=time
+            frames.submit(.init(pose:part,size:rasterSide,activity:motion.activity,
+                target:.atlas(epoch:atlas.epoch,index:atlas.nextIndex)))
+        }
+    }
+    func receiveMascotFrame(_ request:MascotFrameRequest,_ frame:MascotRenderedFrame) {
+        guard visible,!disposed else { return }
+        switch request.target {
+        case let .atlas(epoch,index):
+            guard epoch==atlas.epoch,request.size==rasterSide else { buildSubmitted=false;return }
+            buildSubmitted=false
+            atlas.accept(index:index,frame:frame,
+                limit:min(512*1024,ResourceBudget.shared.bytes(for:.auxiliary)/4))
+            schedule(at:now+1)
+        case .display:
+            guard !displayWasLamp,request.activity==motion.activity,request.size==rasterSide else { return }
+            guard let image=frame.bitmap else {
+                lastPose=nil;failedFrames+=1
+                if failedFrames>=3 { atlas.clear();buildSubmitted=false }
+                if failedFrames<3 { schedule(at:now+250) };return
+            }
+            bitmap=image;presentedPose=request.pose;failedFrames=0
+            #if DEBUG
+            displayIssuedAtMS=request.issuedAtMS
+            #endif
+            geometryInsideFrustum=frame.geometryInsideFrustum;facialSurfaceValid=frame.facialSurfaceValid
+            renderCount+=1;needsDisplay=true;detachedView?.needsDisplay=true
+            let hint=motion.schedulingHint(at:now)
+            if hint.work == .lampOnly,atlas.key != nil {
+                submitAtlasPartIfIdle(at:now,lampOnly:true,afterDisplay:true)
+            }
+            // Give cache work a chance immediately after a display completes.
+            if atlas.key != nil,!atlas.ready,atlas.rejection==nil {
+                schedule(at:now+1)
+            }
+        }
+    }
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance();invalidateDisplay();atlas.clear();wake()
     }
     private func saveVoiceTrace() {
         guard let path=ProcessInfo.processInfo.environment["CLIPSLOTS_VOICE_DIAGNOSTICS_DIRECTORY"],
@@ -435,12 +640,34 @@ final class HeaderMascotNativeView: NSView {
             fraction:1,respectFlipped:true,hints:[.interpolation:NSImageInterpolation.high])
     }
     fileprivate func floatingHit(_ point:NSPoint)->Bool { alphaHit(point,rep:bitmap) }
+    #if DEBUG
+    var optimizationDiagnostics:[String:Any] {
+        ["renders":renderCount,"samples":frameCount,"atlasReady":atlas.ready,
+         "atlasIndex":atlas.nextIndex,"atlasRejection":atlas.rejection ?? "",
+         "lampPlaying":displayWasLamp,"atlasBytes":atlas.byteCost,
+         "roi":NSStringFromRect(atlas.rect),"side":rasterSide,"paused":muted,
+         "yaw":motion.pose.yaw,"pitch":motion.pose.pitch,
+         "hovering":motion.hovering,"activity":motion.activity.rawValue,
+         "work":String(describing:motion.schedulingHint(at:now).work),
+         "visible":visible,"inFlight":service?.frames.inFlight ?? false,
+         "displayIssuedAtMS":displayIssuedAtMS]
+    }
+    func optimizationRefresh() { lastCursor=nil;wake() }
+    #endif
 }
 
 struct MascotFrameRequest {
+    #if DEBUG
+    let issuedAtMS=ProcessInfo.processInfo.systemUptime*1000
+    #endif
     let pose:MascotPose
     let size:Int
     let activity:MascotMotion.Activity
+    enum Target { case display, atlas(epoch:UInt64,index:Int) }
+    let target:Target
+    init(pose:MascotPose,size:Int,activity:MascotMotion.Activity,target:Target = .display) {
+        self.pose=pose;self.size=size;self.activity=activity;self.target=target
+    }
 }
 
 struct MascotRenderedFrame {
@@ -451,7 +678,7 @@ struct MascotRenderedFrame {
 
 /// Only the queue touches the live scene after initialization. Completed bitmaps
 /// are transferred to main and never mutated again; no NSView leaves main.
-private final class HeaderMascotRenderer: @unchecked Sendable {
+final class HeaderMascotRenderer: @unchecked Sendable {
     private let queue=DispatchQueue(label:"com.clipslots.mascot.render",qos:.userInitiated)
     private let scene=HeaderMascotScene()
     var legPixels:Double { scene.legPixels }
@@ -487,6 +714,7 @@ final class MascotFrameScheduler {
     private(set) var inFlight=false
     private(set) var coalesced=0
     private(set) var discarded=0
+    var onIdle:(()->Void)?
     init(render:@escaping (MascotFrameRequest,@escaping Completion)->Void,
          present:@escaping (MascotFrameRequest,MascotRenderedFrame)->Void) {
         self.render=render;self.present=present
@@ -507,6 +735,7 @@ final class MascotFrameScheduler {
             else { self.discarded+=1 }
             self.inFlight=false
             if let next=self.pending { self.pending=nil;self.launch(next) }
+            else { self.onIdle?() }
         }
     }
 }

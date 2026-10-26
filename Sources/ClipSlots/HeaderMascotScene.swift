@@ -606,6 +606,9 @@ final class HeaderMascotScene {
             }
         }
         SCNTransaction.commit()
+        // The serial renderer has no run loop. Publish the completed scene
+        // transaction before snapshotting, including interleaved blink meshes.
+        SCNTransaction.flush()
         let image=renderer.snapshot(atTime:0,with:NSSize(width:size,height:size),antialiasingMode:.multisampling4X)
         // Check actual deformed mesh vertices. Rotating a local bounding box
         // creates empty corners outside the viewport even when the mesh fits.

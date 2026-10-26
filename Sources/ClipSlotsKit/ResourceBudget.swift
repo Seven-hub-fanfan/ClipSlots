@@ -12,6 +12,15 @@ public final class ResourceBudget: @unchecked Sendable {
         }
     }
     public enum Pressure { case normal, warning, critical }
+    public struct SchedulingSnapshot {
+        public let pressure: Pressure
+        public let background: Bool
+        public let lowPower: Bool
+    }
+    public var schedulingSnapshot: SchedulingSnapshot {
+        lock.lock(); defer { lock.unlock() }
+        return .init(pressure:pressure,background:background,lowPower:lowPower)
+    }
     private let lock = NSLock()
     private var overrideMiB = 0
     private var pressure: Pressure = .normal

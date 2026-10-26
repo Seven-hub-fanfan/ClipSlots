@@ -178,11 +178,30 @@ func runHeaderMascotProbe(root:NSView,directory:URL,check:(Bool,String)->Void) a
         let editor=AgentDraftEditor.Editor(frame:NSRect(x:16,y:16,width:240,height:64))
         editor.isEditable=true;editor.string="帮我生成一段运镜提示词"
         root.addSubview(editor)
-        NSApp.activate(ignoringOtherApps:true);window.makeKeyAndOrderFront(nil)
+        // LaunchServices performs a real OS activation. On macOS 14+ an
+        // in-process activate request may be denied after briefly setting
+        // app-local state; that is not a valid focused-editor fixture.
+        let activation=NSWorkspace.OpenConfiguration()
+        activation.activates=true
+        _=try? await NSWorkspace.shared.openApplication(at:Bundle.main.bundleURL,configuration:activation)
+        window.makeKeyAndOrderFront(nil)
+        var focusedSince:Double?
+        for _ in 0..<40 {
+            if NSApp.isActive && window.isKeyWindow &&
+               NSWorkspace.shared.frontmostApplication?.processIdentifier == ProcessInfo.processInfo.processIdentifier {
+                focusedSince=focusedSince ?? ProcessInfo.processInfo.systemUptime
+                if ProcessInfo.processInfo.systemUptime-(focusedSince ?? 0)>=0.3 { break }
+            } else { focusedSince=nil }
+            try? await Task.sleep(for:.milliseconds(25))
+        }
+        check(focusedSince != nil && NSApp.isActive && window.isKeyWindow &&
+            NSWorkspace.shared.frontmostApplication?.processIdentifier == ProcessInfo.processInfo.processIdentifier,
+            "Mascot editor fixture has stable actual OS foreground focus")
         check(window.makeFirstResponder(editor),"Mascot focus fixture uses the native Agent draft editor")
         editor.setSelectedRange(NSRange(location:editor.string.utf16.count,length:0))
         mascot.motion.setActivity(.idle,at:ProcessInfo.processInfo.systemUptime*1000)
         mascot.refreshPromptFocus()
+        NSLog("[MascotFocusFixture] active=\(NSApp.isActive) key=\(window.isKeyWindow) responder=\(String(describing:window.firstResponder)) editable=\(editor.isEditable) hidden=\(editor.isHiddenOrHasHiddenAncestor) mascotWindow=\(mascot.window === window) visible=\(mascot.optimizationDiagnostics["visible"] ?? false)")
         check(mascot.motion.editingPrompt,"Mascot captures actual editable first responder")
         try? await Task.sleep(for:.milliseconds(900))
         for step in 0..<20 {
@@ -195,6 +214,7 @@ func runHeaderMascotProbe(root:NSView,directory:URL,check:(Bool,String)->Void) a
             }
             try? await Task.sleep(for:.milliseconds(20))
         }
+        NSLog("[MascotFocusFixture] after pointer active=\(NSApp.isActive) key=\(window.isKeyWindow) foreground=\(NSWorkspace.shared.frontmostApplication?.bundleIdentifier ?? "") responderSame=\(window.firstResponder === editor) editing=\(mascot.motion.editingPrompt) yaw=\(mascot.motion.pose.yaw) pitch=\(mascot.motion.pose.pitch) expected=\(scene.computerGaze)")
         check(mascot.motion.editingPrompt &&
             abs(mascot.motion.pose.yaw-scene.computerGaze.yaw)<0.05 &&
             abs(mascot.motion.pose.pitch-scene.computerGaze.pitch)<0.05,
@@ -215,6 +235,7 @@ func runHeaderMascotProbe(root:NSView,directory:URL,check:(Bool,String)->Void) a
             prompt.setMarkedText("ceshi",selectedRange:NSRange(location:5,length:0),
                                  replacementRange:NSRange(location:NSNotFound,length:0))
             mascot.refreshPromptFocus()
+            NSLog("[MascotFocusFixture] canvas active=\(NSApp.isActive) key=\(window.isKeyWindow) responderSame=\(window.firstResponder === prompt) editing=\(mascot.motion.editingPrompt) marked=\(prompt.hasMarkedText()) editable=\(prompt.isEditable) hidden=\(prompt.isHiddenOrHasHiddenAncestor)")
             check(mascot.motion.editingPrompt && prompt.hasMarkedText(),
                   "Mascot canvas prompt focus retains Chinese input method marked text")
             window.makeFirstResponder(nil);mascot.refreshPromptFocus()
@@ -223,6 +244,31 @@ func runHeaderMascotProbe(root:NSView,directory:URL,check:(Bool,String)->Void) a
         host.removeFromSuperview()
         if let previous { window.makeFirstResponder(previous) }
         mascot.refreshPromptFocus()
+        var latencyMS:[Double]=[]
+        for index in 0..<20 {
+            let point=NSPoint(x:index%2==0 ? 20 : root.bounds.maxX-20,y:root.bounds.midY)
+            let started=ProcessInfo.processInfo.systemUptime*1000
+            if let event=NSEvent.mouseEvent(with:.mouseMoved,location:root.convert(point,to:nil),
+                modifierFlags:[],timestamp:started/1000,windowNumber:window.windowNumber,
+                context:nil,eventNumber:0,clickCount:0,pressure:0) {
+                mascot.mouseMoved(with:event)
+                for _ in 0..<200 {
+                    if (mascot.optimizationDiagnostics["displayIssuedAtMS"] as? Double ?? 0)>=started {
+                        latencyMS.append(ProcessInfo.processInfo.systemUptime*1000-started);break
+                    }
+                    try? await Task.sleep(for:.milliseconds(5))
+                }
+            }
+        }
+        let ordered=latencyMS.sorted()
+        let p95=ordered.count==20 ? ordered[18] : Double.infinity
+        let latency:[String:Any]=["samples_ms":latencyMS,"p95_ms":p95.isFinite ? p95 : -1,
+            "scope":"posted native pointer event to a presented frame submitted after that event",
+            "physical_input_or_display_scanout_measured":false]
+        try? JSONSerialization.data(withJSONObject:latency,options:[.prettyPrinted,.sortedKeys])
+            .write(to:directory.appendingPathComponent("event-latency.json"))
+        check(latencyMS.count==20,"Mascot every posted pointer event receives a new rendered frame")
+        check(p95<=50,"Mascot posted pointer event to new rendered frame P95 at most 50ms")
     } else { check(false,"Mascot prompt-focus fixture has a hosting window") }
     let saved=mascot.onToggle
     var toggles=0; mascot.onToggle={toggles+=1}
@@ -260,7 +306,10 @@ func runHeaderMascotProbe(root:NSView,directory:URL,check:(Bool,String)->Void) a
     try? await Task.sleep(for:.milliseconds(100))
     check(mascot.renderCount==count && !mascot.activeTimer,"Mascot hidden leaf parks renderer and timer")
     mascot.isHidden=false
-    try? await Task.sleep(for:.milliseconds(100))
+    for _ in 0..<40 {
+        if mascot.renderCount>count { break }
+        try? await Task.sleep(for:.milliseconds(25))
+    }
     check(mascot.renderCount>count,"Mascot unhide resumes with fresh raster")
     let activityRoot=directory.appendingPathComponent("mascot-activity-state")
     let canvas=CanvasStore(storage:CanvasStorage(rootOverride:activityRoot),

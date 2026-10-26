@@ -167,4 +167,41 @@ func runMascotMotionTests(_ t:TestRunner) {
                 "Mascot voice retains source writing-pen trajectory")
     } else { t.check(false,"Mascot activity source track readable") }
     t.check(MascotResources.url("../idle")==nil, "Mascot resource traversal rejected")
+    let scheduled=MascotMotion();scheduled.random={0}
+    _=scheduled.sample(at:0)
+    t.check(scheduled.schedulingHint(at:0).work == .lampOnly &&
+            scheduled.schedulingHint(at:0).nextDeadlineMS==2000,
+            "Mascot lamp-only scheduling keeps the exact next blink")
+    scheduled.setPointer(x:500,y:0,at:100)
+    _=scheduled.sample(at:100)
+    t.check(scheduled.schedulingHint(at:100).work == .pose &&
+            scheduled.schedulingHint(at:100).nextDeadlineMS==900,
+            "Mascot pointer convergence retains the 800ms quiet deadline")
+    scheduled.reduceMotion=true;scheduled.setActivity(.completed,at:1000)
+    _=scheduled.sample(at:1000)
+    t.check(scheduled.schedulingHint(at:1000).nextSemanticDeadlineMS==2800,
+            "Mascot paused completion still has a semantic wake")
+    _=scheduled.sample(at:2800)
+    t.check(scheduled.activity == .idle,"Mascot paused completion expires without visual frames")
+    scheduled.setActivity(.celebration,at:3000);_=scheduled.sample(at:11750)
+    t.check(scheduled.activity == .idle,"Mascot reduced celebration cannot stick past its end")
+    scheduled.setActivity(.busy,at:12000);_=scheduled.sample(at:192000)
+    t.check(scheduled.activity == .superBusy &&
+            scheduled.schedulingHint(at:192000).nextSemanticDeadlineMS==202000,
+            "Mascot paused busy retains the ten-second superbusy deadline")
+    _=scheduled.sample(at:202000)
+    t.check(scheduled.activity == .busy,"Mascot paused superbusy returns to normal")
+    let sleeping=MascotMotion();_=sleeping.sample(at:0)
+    sleeping.rebaseIntegratorAfterSleep(at:600000)
+    sleeping.setPointer(x:900,y:0,at:600000)
+    t.check(sleeping.sample(at:600000).yaw==0,
+            "Mascot dormant first input does not introduce a 100ms gaze jump")
+    t.check(sleeping.sample(at:600017).yaw>0 && sleeping.pose.yaw<10,
+            "Mascot dormant gaze resumes with the original damping")
+    sleeping.synchronizePresentedLampIntensity(0.42)
+    sleeping.setActivity(.busy,at:600017)
+    t.check(abs(sleeping.sample(at:600017).logoIntensity-0.42)<0.00001,
+            "Mascot lamp-to-work transition starts at the presented brightness")
+    sleeping.synchronizePresentedLampIntensity(.nan)
+    t.check(sleeping.pose.logoIntensity.isFinite,"Mascot invalid presentation brightness is ignored")
 }
