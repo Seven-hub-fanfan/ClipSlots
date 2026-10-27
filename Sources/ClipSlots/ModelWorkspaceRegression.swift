@@ -20,6 +20,11 @@ private actor ModelWorkspaceFixtureHTTP: ModelHTTPTransport {
 @MainActor enum ModelWorkspaceRegression {
     private static var started = false
     static func schedule(store: SlotStoreObservable) {
+        if let path = ProcessInfo.processInfo.environment["CLIPSLOTS_MARKET_REGRESSION"], !started {
+            started = true
+            Task { await runAgentAppMarketRegression(store: store, root: URL(fileURLWithPath: path)) }
+            return
+        }
         guard !started, let path = ProcessInfo.processInfo.environment["CLIPSLOTS_MODEL_REGRESSION"] else { return }
         started = true
         Task { await run(store: store, root: URL(fileURLWithPath: path)) }

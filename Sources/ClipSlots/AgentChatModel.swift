@@ -1781,7 +1781,7 @@ final class AgentChatModel: ObservableObject {
         canvasContext?.prepare(text: pending.text, conversationID: conversationId)
     }
 
-    func externalHandoffContext() throws -> AgentExternalProjectContext {
+    func externalHandoffContext(readOnly: Bool = false) throws -> AgentExternalProjectContext {
         guard let context = canvasContext, context.isActive, let scope = artifactScope else {
             throw AgentCanvasError.staleTarget
         }
@@ -1793,7 +1793,8 @@ final class AgentChatModel: ObservableObject {
         pendingInteractions.removeAll { externalInteractionIDs.contains($0.id) }
         externalInteractionIDs = []
         let host = try AgentLiveMCPHost(context: context, scope: scope, conversationID: conversationId, snapshotID: turn.snapshotID,
-            root: runtimeRoot.appendingPathComponent("live-mcp"), accessMode: accessMode,
+            root: runtimeRoot.appendingPathComponent("live-mcp"),
+            accessMode: readOnly ? .allDirectoriesReadOnly : accessMode,
             onInteraction: { [weak self] request in await self?.receiveExternalInteraction(request) })
         externalMCPHost = host
         return AgentExternalProjectContext(scope: scope, projectTitle: displayName,

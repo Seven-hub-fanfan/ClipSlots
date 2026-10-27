@@ -1,0 +1,22 @@
+[
+  {
+    "path": "/Applications/TapNow.app/Contents/Resources/web/assets/app-store-page-BwS8H2TJ.js",
+    "bytes": 327135,
+    "sha256": "9615ad5bc3374affacb7e2272b0e1eb1dc0ec5c0b8fdf15d0596829b159d87ab"
+  },
+  {
+    "path": "/Applications/TapNow.app/Contents/Resources/web/assets/app-mxQ73M3U.js",
+    "bytes": 155823,
+    "sha256": "48b443d354c1f7bdb7a65f0157c802ebb3a10e74ef11d5afad6b635f6a661cb5"
+  },
+  {
+    "path": "/Applications/TapNow.app/Contents/Resources/web/assets/vendor-pkg-agent-DqI4Ylok.js",
+    "bytes": 71253,
+    "sha256": "1920c4a10f45f3070b9f391b10e0d4abedbfe1f4c81a49c0dd3016bc61e37c68"
+  },
+  {
+    "path": "/Applications/TapNow.app/Contents/Resources/web/assets/vendor-pkg-canvas-Db37ClNT.js",
+    "bytes": 3358786,
+    "sha256": "581d45f361cc13f28926b81ecf09c140820ad251f324ecdf3385c961e66fa137"
+  }
+]

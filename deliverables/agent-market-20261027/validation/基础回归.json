@@ -1,0 +1,9 @@
+{
+  "ok": true,
+  "passed": 37992,
+  "failed": 0,
+  "baseline_count_equal": true,
+  "model_assertions_equivalent_to_baseline": true,
+  "model_test_source_unchanged": true,
+  "model_report_display_labels_normalized": 2
+}

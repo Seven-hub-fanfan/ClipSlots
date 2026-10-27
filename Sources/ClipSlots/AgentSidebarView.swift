@@ -63,6 +63,7 @@ struct AgentSidebarView: View {
     @State private var showConfig = false
     @State private var credentialNotice: String?
     @State private var showSkillPicker = false
+    @State private var showAppMarket = false
     @State private var dismissedExtensionEntry = false
     @State private var showReferencePicker = false
     @State private var showModelPicker = false
@@ -122,6 +123,7 @@ struct AgentSidebarView: View {
         #endif
         // #endregion
         WorkspaceDockLayout(width: isFullPage ? nil : panelWidth) {
+        ZStack {
         VStack(spacing: 0) {
             section("header", height: 64) {
                 if !isFullPage || !model.isEmpty || onToggleExpanded != nil { header }
@@ -143,6 +145,15 @@ struct AgentSidebarView: View {
                     .frame(maxWidth: .infinity)
                     .disabled(isReadOnly)
             }
+        }
+        .opacity(showAppMarket ? 0 : 1)
+        .allowsHitTesting(!showAppMarket)
+        .accessibilityHidden(showAppMarket)
+        if showAppMarket {
+            AgentAppMarketView(model: model, isReadOnly: isReadOnly,
+                onClose: { showAppMarket = false },
+                onUse: { showAppMarket = false; inputFocusRequest += 1 })
+        }
         }
         .frame(width: isFullPage ? nil : panelWidth)
         .frame(maxWidth: isFullPage ? .infinity : nil)
@@ -620,7 +631,7 @@ struct AgentSidebarView: View {
                 completion.dismiss()
                 showComposerAdd = false
                 showReferencePicker = false
-                showSkillPicker.toggle()
+                showAppMarket = true
             } label: {
                 HStack(spacing: 7) {
                     HStack(spacing: -3) {
@@ -633,7 +644,7 @@ struct AgentSidebarView: View {
                     Text("使用应用拓展 Agent 能力").font(.system(size: 10, weight: .medium))
                 }.contentShape(Rectangle())
             }.buttonStyle(.plain)
-                .help("管理本地技能与应用能力")
+                .help("浏览应用市场与技能")
                 .accessibilityIdentifier("agent-extension-entry")
             Button { dismissedExtensionEntry = true } label: {
                 Image(systemName: "xmark").font(.system(size: 9)).frame(width: 15, height: 18)
@@ -1085,6 +1096,8 @@ struct AgentSidebarView: View {
                     model.workingDirectories.choose { model.selectWorkingDirectory($0) }
                 }
                 addMenuItem("引用技能", symbol: "puzzlepiece.extension") { showReferencePicker = true }
+                addMenuItem("应用市场", symbol: "square.grid.2x2") { showAppMarket = true }
+                    .accessibilityIdentifier("agent-open-app-market")
                 addMenuItem("管理技能", symbol: "square.grid.2x2") { showSkillPicker = true }
                 Divider().padding(.vertical, 4)
                 addMenuItem("清空草稿", symbol: "xmark") { model.draft = ""; inputFocusRequest += 1 }

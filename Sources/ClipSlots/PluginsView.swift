@@ -136,6 +136,7 @@ struct PluginsView: View {
             }
             .buttonStyle(.plain)
             .help("关闭")
+            .accessibilityIdentifier("plugins-close")
         }
         .padding(.horizontal, 18)
         .padding(.vertical, 14)
@@ -603,6 +604,7 @@ struct PluginsView: View {
                 }
                 .buttonStyle(.plain)
                 .help("关闭")
+                .accessibilityIdentifier("plugins-close")
             }
             .padding(.horizontal, 18)
             .padding(.vertical, 12)
@@ -618,6 +620,8 @@ struct PluginsView: View {
                             HStack(spacing: 8) {
                                 Text(item.name)
                                     .font(.system(size: 18, weight: .bold))
+                                    .accessibilityLabel(item.name)
+                                    .accessibilityIdentifier("plugins-detail-title-\(item.id)")
                                 if let label = versionLabel(for: item) {
                                     Text(label)
                                         .font(.caption2)
@@ -1175,6 +1179,7 @@ struct PluginsView: View {
                 }
                 .buttonStyle(.plain)
                 .help("关闭")
+                .accessibilityIdentifier("plugins-close")
             }
             .padding(.horizontal, 18)
             .padding(.vertical, 12)

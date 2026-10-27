@@ -86,8 +86,8 @@ func runAgentSidebarPagesProbe(model: AgentChatModel, directory: URL,
                 window.contentView = host
                 window.setContentSize(CGSize(width: 1100, height: 740))
                 window.makeKeyAndOrderFront(nil)
-                // The production welcome starts after 750 ms and animates for 300 ms.
-                try? await Task.sleep(for: .milliseconds(1150))
+                // Include WindowServer presentation time after the 750 + 300 ms reveal.
+                try? await Task.sleep(for: .milliseconds(1400))
                 let name = suffix + "-\(Int(width))"
                 if let rect = sidebarRect(host) {
                     check(abs(rect.width - width) <= 1 && abs(rect.maxX - host.bounds.maxX) <= 1,
@@ -96,7 +96,7 @@ func runAgentSidebarPagesProbe(model: AgentChatModel, directory: URL,
                     try? JSONSerialization.data(withJSONObject: [
                         "hostWidth": host.bounds.width, "sidebarWidth": rect.width,
                         "sidebarX": rect.minX, "sidebarRight": rect.maxX,
-                        "requestedWidth": width, "animationWaitMilliseconds": 1150
+                        "requestedWidth": width, "animationWaitMilliseconds": 1400
                     ], options: [.prettyPrinted, .sortedKeys])
                         .write(to: directory.appendingPathComponent("agent-page-layout-" + name + ".json"))
                 } else { check(false, name + " native sidebar bounds exist") }
@@ -113,17 +113,19 @@ func runAgentSidebarPagesProbe(model: AgentChatModel, directory: URL,
                 check(visible(host, "agent-extension-entry") && visible(host, "agent-extension-dismiss"),
                       name + " extension entry and dismiss control fit inside sidebar")
                 let priorDraft = model.draft
-                check(press(host, "agent-extension-entry"), name + " extension entry opens local skill management")
+                check(press(host, "agent-extension-entry"), name + " extension entry opens embedded application market")
                 await settle()
-                if let picker = panel("agent-extension-picker") {
+                if let picker = panel("agent-app-market") {
                     capture(picker, "agent-page-extensions-" + name)
                     check(model.draft == priorDraft, name + " extension navigation preserves draft")
-                } else { check(false, name + " actual extension management popup exists") }
-                _ = press(host, "agent-extension-entry")
+                } else { check(false, name + " embedded application market exists") }
+                _ = press(host, "agent-market-close")
                 await settle()
-                check(panel("agent-extension-picker") == nil, name + " extension management closes on toggle")
+                capture(host, "agent-market-return-" + name, rect: sidebarRect(host))
+                check(panel("agent-app-market") == nil, name + " market returns to conversation")
                 check(press(host, "agent-extension-dismiss"), name + " extension entry can be dismissed")
                 await settle()
+                capture(host, "agent-market-dismiss-" + name, rect: sidebarRect(host))
                 check(find(host, "agent-extension-entry") == nil && model.draft == priorDraft
                         && visible(host, "agent-welcome-question") && visible(host, "agent-composer-add"),
                       name + " dismissing promotion preserves welcome composer and draft")
