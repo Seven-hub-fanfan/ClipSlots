@@ -203,7 +203,7 @@ struct ModelWorkspaceView: View {
                                     HStack {
                                         Image(systemName: selectedModels.contains(profile.id) ? "checkmark.circle.fill" : "circle")
                                         VStack(alignment: .leading, spacing: 4) {
-                                            Text(profile.name).font(.system(size: 12, weight: .medium)).lineLimit(1)
+                                            Text(ModelCatalogPresentation.text(profile.name)).font(.system(size: 12, weight: .medium)).lineLimit(1)
                                             Text("\(profile.kind.title) · \(profile.cliContext?.provider.rawValue ?? "API")")
                                                 .font(.system(size: 10)).foregroundStyle(.secondary)
                                         }
@@ -324,7 +324,7 @@ struct ModelWorkspaceView: View {
                                     HStack(spacing: 24) {
                                         Text(String(index + 1)).font(.system(size: 22, weight: .semibold)).foregroundStyle(.secondary).frame(width: 28)
                                         VStack(alignment: .leading, spacing: 8) {
-                                            Text(entry.model.name).font(.system(size: 16, weight: .semibold))
+                                            Text(ModelCatalogPresentation.text(entry.model.name)).font(.system(size: 16, weight: .semibold))
                                             Text(String(format: "%.1f 分 · %d 个有效样本", entry.total, entry.samples)).font(.system(size: 12))
                                             Text(entry.updatedAt.formatted()).font(.system(size: 11)).foregroundStyle(.secondary)
                                             Text("模型版本 \(entry.model.revision.prefix(8)) · 题库版本 \(run.bank.revision.prefix(8))").font(.system(size: 10)).foregroundStyle(.secondary)
@@ -385,7 +385,7 @@ struct ModelWorkspaceView: View {
                     card {
                         HStack {
                             VStack(alignment: .leading, spacing: 6) {
-                                Text(profile.name).font(.system(size: 15, weight: .semibold))
+                                Text(ModelCatalogPresentation.text(profile.name)).font(.system(size: 15, weight: .semibold))
                                 Text("\(profile.kind.title) · \(profile.model)").font(.system(size: 12)).foregroundStyle(.secondary)
                                 Text(profile.isCLI ? "\(profile.cliContext?.provider.rawValue ?? "") · \(profile.cliContext?.controlPlane ?? "") · \(profile.cliContext?.accountAlias ?? "")" : profile.endpoint)
                                     .font(.system(size: 11)).foregroundStyle(.secondary).textSelection(.enabled)

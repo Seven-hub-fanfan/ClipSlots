@@ -1,39 +1,12 @@
 {
   "schemaVersion": 1,
-  "sourceProduct": "TapNow",
-  "sourceVersion": "0.4.155",
   "observedAt": "2026-10-27",
-  "extraction": "Static AST; no bundle bootstrap, network submission or credentials read",
-  "sourceOffsetUnit": "UTF-16 source code units",
   "counts": {
     "llm": 17,
     "image": 31,
     "video": 57,
     "audio": 14
   },
-  "sourceArtifacts": [
-    {
-      "path": "/Applications/TapNow.app/Contents/Resources/web/assets/vendor-pkg-tap-models-CWO_NP4e.js",
-      "sha256": "19c977f1a6afe6f2365010d23fe31ab90ce4c1d96d0988384af9039d36edf9ef",
-      "bytes": 307153
-    },
-    {
-      "path": "/Applications/TapNow.app/Contents/Resources/web/assets/vendor-shared-C-U24Utf.js",
-      "sha256": "2923588fd0f86d82c604fbac09b58c32efb580eb235061c22f4398d768729c1b",
-      "bytes": 256324
-    },
-    {
-      "path": "/Applications/TapNow.app/Contents/Resources/web/assets/vendor-pkg-endpoints-BZ5e7w2O.js",
-      "sha256": "b4e7f94168bd041615ff659f7a296ba605e0c80763678c2e8845b6af9d3d03f6",
-      "bytes": 139866
-    },
-    {
-      "path": "/Applications/TapNow.app/Contents/Resources/web/assets/vendor-pkg-core-E7gSgLFq.js",
-      "sha256": "f590c3b597ce6dccb0d4888d123c56e536c0e85b1caf648d6d35623095190574",
-      "bytes": 10040
-    }
-  ],
-  "reaEvidenceID": "ev_46cbe389039418c1b9ce4f6ec6a9abeb69685549f44fd040f3bdbed4aca2cc17",
   "coverage": {
     "imageRegistryAndEnumMatch": true,
     "videoRegistryAndEnumMatch": true,
@@ -46,27 +19,11 @@
     "liveProviderModelAvailabilityVerified": false,
     "paidGenerationRequests": 0
   },
-  "tapnowGatewayPaths": {
-    "TEXT_GEN": "api/conversation/v1/generations/text",
-    "IMAGE_GEN": "api/conversation/v1/generations/image",
-    "VIDEO_GEN": "api/conversation/v1/generations/video",
-    "UNIFIED_GEN": "api/conversation/v2/generations",
-    "AUDIO_GEN": "api/conversation/v1/generations/audio",
-    "AUDIO_LYRICS_GEN": "api/conversation/v1/generations/lyrics/sync",
-    "AUDIO_VOICES": "api/conversation/v1/generations/audio/voices",
-    "WORLD_GEN": "api/conversation/v2/generations",
-    "TASK_STATUS": "api/conversation/v1/generations/tasks"
-  },
   "entries": [
     {
-      "id": "tapnow:llm:gemini-3.5-flash",
+      "id": "builtin:llm:gemini-3.5-flash",
       "kind": "llm",
       "model": "gemini-3.5-flash",
-      "sourceSymbol": "uo",
-      "sourceRange": {
-        "start": 299745,
-        "end": 299966
-      },
       "config": {
         "provider": "google",
         "name": "textModels.name.gemini35Flash",
@@ -95,14 +52,9 @@
       "catalogModelIDIsUpstreamID": false
     },
     {
-      "id": "tapnow:llm:gemini-3.6-flash",
+      "id": "builtin:llm:gemini-3.6-flash",
       "kind": "llm",
       "model": "gemini-3.6-flash",
-      "sourceSymbol": "uo",
-      "sourceRange": {
-        "start": 299986,
-        "end": 300207
-      },
       "config": {
         "provider": "google",
         "name": "textModels.name.gemini36Flash",
@@ -131,14 +83,9 @@
       "catalogModelIDIsUpstreamID": false
     },
     {
-      "id": "tapnow:llm:gemini-3.1-pro",
+      "id": "builtin:llm:gemini-3.1-pro",
       "kind": "llm",
       "model": "gemini-3.1-pro",
-      "sourceSymbol": "uo",
-      "sourceRange": {
-        "start": 300225,
-        "end": 300442
-      },
       "config": {
         "provider": "google",
         "name": "textModels.name.gemini31Pro",
@@ -166,14 +113,9 @@
       "catalogModelIDIsUpstreamID": false
     },
     {
-      "id": "tapnow:llm:gemini-3.1-flash-lite",
+      "id": "builtin:llm:gemini-3.1-flash-lite",
       "kind": "llm",
       "model": "gemini-3.1-flash-lite",
-      "sourceSymbol": "uo",
-      "sourceRange": {
-        "start": 300467,
-        "end": 300699
-      },
       "config": {
         "provider": "google",
         "name": "textModels.name.gemini31FlashLite",
@@ -202,14 +144,9 @@
       "catalogModelIDIsUpstreamID": false
     },
     {
-      "id": "tapnow:llm:gemini-3-pro",
+      "id": "builtin:llm:gemini-3-pro",
       "kind": "llm",
       "model": "gemini-3-pro",
-      "sourceSymbol": "uo",
-      "sourceRange": {
-        "start": 300715,
-        "end": 300869
-      },
       "config": {
         "provider": "google",
         "name": "textModels.name.gemini3Pro",
@@ -234,14 +171,9 @@
       "catalogModelIDIsUpstreamID": false
     },
     {
-      "id": "tapnow:llm:gemini-3-flash",
+      "id": "builtin:llm:gemini-3-flash",
       "kind": "llm",
       "model": "gemini-3-flash",
-      "sourceSymbol": "uo",
-      "sourceRange": {
-        "start": 300887,
-        "end": 301098
-      },
       "config": {
         "provider": "google",
         "name": "textModels.name.gemini3Flash",
@@ -269,14 +201,9 @@
       "catalogModelIDIsUpstreamID": false
     },
     {
-      "id": "tapnow:llm:gemini-2.5-flash",
+      "id": "builtin:llm:gemini-2.5-flash",
       "kind": "llm",
       "model": "gemini-2.5-flash",
-      "sourceSymbol": "uo",
-      "sourceRange": {
-        "start": 301118,
-        "end": 301263
-      },
       "config": {
         "provider": "google",
         "name": "textModels.name.gemini",
@@ -301,14 +228,9 @@
       "catalogModelIDIsUpstreamID": false
     },
     {
-      "id": "tapnow:llm:gemini-2.5-pro",
+      "id": "builtin:llm:gemini-2.5-pro",
       "kind": "llm",
       "model": "gemini-2.5-pro",
-      "sourceSymbol": "uo",
-      "sourceRange": {
-        "start": 301281,
-        "end": 301429
-      },
       "config": {
         "provider": "google",
         "name": "textModels.name.geminiPro",
@@ -333,14 +255,9 @@
       "catalogModelIDIsUpstreamID": false
     },
     {
-      "id": "tapnow:llm:deepseek-v4-pro",
+      "id": "builtin:llm:deepseek-v4-pro",
       "kind": "llm",
       "model": "deepseek-v4-pro",
-      "sourceSymbol": "uo",
-      "sourceRange": {
-        "start": 301448,
-        "end": 301963
-      },
       "config": {
         "provider": "alibaba",
         "name": "textModels.name.deepseekV4Pro",
@@ -385,14 +302,9 @@
       "catalogModelIDIsUpstreamID": false
     },
     {
-      "id": "tapnow:llm:grok-4.6",
+      "id": "builtin:llm:grok-4.6",
       "kind": "llm",
       "model": "grok-4.6",
-      "sourceSymbol": "uo",
-      "sourceRange": {
-        "start": 301975,
-        "end": 302214
-      },
       "config": {
         "provider": "xai",
         "name": "textModels.name.grok46",
@@ -426,14 +338,9 @@
       "catalogModelIDIsUpstreamID": false
     },
     {
-      "id": "tapnow:llm:gpt-5.6-sol",
+      "id": "builtin:llm:gpt-5.6-sol",
       "kind": "llm",
       "model": "gpt-5.6-sol",
-      "sourceSymbol": "uo",
-      "sourceRange": {
-        "start": 302229,
-        "end": 302573
-      },
       "config": {
         "provider": "azure",
         "name": "textModels.name.gpt56Sol",
@@ -472,14 +379,9 @@
       "catalogModelIDIsUpstreamID": false
     },
     {
-      "id": "tapnow:llm:gpt-5.6-terra",
+      "id": "builtin:llm:gpt-5.6-terra",
       "kind": "llm",
       "model": "gpt-5.6-terra",
-      "sourceSymbol": "uo",
-      "sourceRange": {
-        "start": 302590,
-        "end": 302938
-      },
       "config": {
         "provider": "azure",
         "name": "textModels.name.gpt56Terra",
@@ -518,14 +420,9 @@
       "catalogModelIDIsUpstreamID": false
     },
     {
-      "id": "tapnow:llm:gpt-5.6-luna",
+      "id": "builtin:llm:gpt-5.6-luna",
       "kind": "llm",
       "model": "gpt-5.6-luna",
-      "sourceSymbol": "uo",
-      "sourceRange": {
-        "start": 302954,
-        "end": 303297
-      },
       "config": {
         "provider": "azure",
         "name": "textModels.name.gpt56Luna",
@@ -564,14 +461,9 @@
       "catalogModelIDIsUpstreamID": false
     },
     {
-      "id": "tapnow:llm:gpt-6-astra",
+      "id": "builtin:llm:gpt-6-astra",
       "kind": "llm",
       "model": "gpt-6-astra",
-      "sourceSymbol": "uo",
-      "sourceRange": {
-        "start": 303312,
-        "end": 303683
-      },
       "config": {
         "provider": "azure",
         "name": "textModels.name.gpt6Astra",
@@ -612,14 +504,9 @@
       "catalogModelIDIsUpstreamID": false
     },
     {
-      "id": "tapnow:llm:anthropic.claude-opus-5",
+      "id": "builtin:llm:anthropic.claude-opus-5",
       "kind": "llm",
       "model": "anthropic.claude-opus-5",
-      "sourceSymbol": "uo",
-      "sourceRange": {
-        "start": 303710,
-        "end": 303950
-      },
       "config": {
         "provider": "aws",
         "name": "textModels.name.claudeOpus5",
@@ -648,14 +535,9 @@
       "catalogModelIDIsUpstreamID": false
     },
     {
-      "id": "tapnow:llm:anthropic.claude-fable-5",
+      "id": "builtin:llm:anthropic.claude-fable-5",
       "kind": "llm",
       "model": "anthropic.claude-fable-5",
-      "sourceSymbol": "uo",
-      "sourceRange": {
-        "start": 303978,
-        "end": 304220
-      },
       "config": {
         "provider": "aws",
         "name": "textModels.name.claudeFable5",
@@ -684,14 +566,9 @@
       "catalogModelIDIsUpstreamID": false
     },
     {
-      "id": "tapnow:llm:anthropic.claude-fable-5-1",
+      "id": "builtin:llm:anthropic.claude-fable-5-1",
       "kind": "llm",
       "model": "anthropic.claude-fable-5-1",
-      "sourceSymbol": "uo",
-      "sourceRange": {
-        "start": 304250,
-        "end": 304494
-      },
       "config": {
         "provider": "aws",
         "name": "textModels.name.claudeFable51",
@@ -720,14 +597,9 @@
       "catalogModelIDIsUpstreamID": false
     },
     {
-      "id": "tapnow:image:gpt-image-2.5-flare",
+      "id": "builtin:image:gpt-image-2.5-flare",
       "kind": "image",
       "model": "gpt-image-2.5-flare",
-      "sourceSymbol": "Wa",
-      "sourceRange": {
-        "start": 229249,
-        "end": 229822
-      },
       "config": {
         "model": "gpt-image-2.5-flare",
         "provider": "openai",
@@ -808,14 +680,9 @@
       "catalogModelIDIsUpstreamID": false
     },
     {
-      "id": "tapnow:image:gpt-image-2.5-sunburst",
+      "id": "builtin:image:gpt-image-2.5-sunburst",
       "kind": "image",
       "model": "gpt-image-2.5-sunburst",
-      "sourceSymbol": "J2",
-      "sourceRange": {
-        "start": 229826,
-        "end": 230106
-      },
       "config": {
         "model": "gpt-image-2.5-sunburst",
         "provider": "openai",
@@ -896,14 +763,9 @@
       "catalogModelIDIsUpstreamID": false
     },
     {
-      "id": "tapnow:image:gpt-image-2",
+      "id": "builtin:image:gpt-image-2",
       "kind": "image",
       "model": "gpt-image-2",
-      "sourceSymbol": "Ha",
-      "sourceRange": {
-        "start": 228614,
-        "end": 229245
-      },
       "config": {
         "model": "gpt-image-2",
         "provider": "openai",
@@ -983,14 +845,9 @@
       "catalogModelIDIsUpstreamID": false
     },
     {
-      "id": "tapnow:image:nano-banana-2.1",
+      "id": "builtin:image:nano-banana-2.1",
       "kind": "image",
       "model": "nano-banana-2.1",
-      "sourceSymbol": "X2",
-      "sourceRange": {
-        "start": 224052,
-        "end": 224696
-      },
       "config": {
         "model": "nano-banana-2.1",
         "provider": "google",
@@ -1070,14 +927,9 @@
       "catalogModelIDIsUpstreamID": false
     },
     {
-      "id": "tapnow:image:nano-banana-flash",
+      "id": "builtin:image:nano-banana-flash",
       "kind": "image",
       "model": "nano-banana-flash",
-      "sourceSymbol": "B2",
-      "sourceRange": {
-        "start": 224700,
-        "end": 225316
-      },
       "config": {
         "model": "nano-banana-flash",
         "provider": "google",
@@ -1153,14 +1005,9 @@
       "catalogModelIDIsUpstreamID": false
     },
     {
-      "id": "tapnow:image:nano-banana-flash-lite",
+      "id": "builtin:image:nano-banana-flash-lite",
       "kind": "image",
       "model": "nano-banana-flash-lite",
-      "sourceSymbol": "H2",
-      "sourceRange": {
-        "start": 225320,
-        "end": 225916
-      },
       "config": {
         "model": "nano-banana-flash-lite",
         "provider": "google",
@@ -1231,14 +1078,9 @@
       "catalogModelIDIsUpstreamID": false
     },
     {
-      "id": "tapnow:image:tamar-google-gemini-pro",
+      "id": "builtin:image:tamar-google-gemini-pro",
       "kind": "image",
       "model": "tamar-google-gemini-pro",
-      "sourceSymbol": "xi",
-      "sourceRange": {
-        "start": 225920,
-        "end": 226446
-      },
       "config": {
         "model": "tamar-google-gemini-pro",
         "provider": "google",
@@ -1305,14 +1147,9 @@
       "catalogModelIDIsUpstreamID": false
     },
     {
-      "id": "tapnow:image:nano-banana",
+      "id": "builtin:image:nano-banana",
       "kind": "image",
       "model": "nano-banana",
-      "sourceSymbol": "U2",
-      "sourceRange": {
-        "start": 223596,
-        "end": 224048
-      },
       "config": {
         "model": "nano-banana",
         "provider": "google",
@@ -1370,14 +1207,9 @@
       "catalogModelIDIsUpstreamID": false
     },
     {
-      "id": "tapnow:image:hunyuan-image-3.5-preview",
+      "id": "builtin:image:hunyuan-image-3.5-preview",
       "kind": "image",
       "model": "hunyuan-image-3.5-preview",
-      "sourceSymbol": "nu",
-      "sourceRange": {
-        "start": 231609,
-        "end": 232113
-      },
       "config": {
         "model": "hunyuan-image-3.5-preview",
         "provider": "tencent",
@@ -1440,14 +1272,9 @@
       "catalogModelIDIsUpstreamID": false
     },
     {
-      "id": "tapnow:image:reve-2.1",
+      "id": "builtin:image:reve-2.1",
       "kind": "image",
       "model": "reve-2.1",
-      "sourceSymbol": "eu",
-      "sourceRange": {
-        "start": 230414,
-        "end": 230792
-      },
       "config": {
         "model": "reve-2.1",
         "provider": "fal",
@@ -1505,14 +1332,9 @@
       "catalogModelIDIsUpstreamID": false
     },
     {
-      "id": "tapnow:image:fal-recraft-v4",
+      "id": "builtin:image:fal-recraft-v4",
       "kind": "image",
       "model": "fal-recraft-v4",
-      "sourceSymbol": "j2",
-      "sourceRange": {
-        "start": 222755,
-        "end": 223162
-      },
       "config": {
         "model": "fal-recraft-v4",
         "provider": "fal",
@@ -1567,14 +1389,9 @@
       "catalogModelIDIsUpstreamID": false
     },
     {
-      "id": "tapnow:image:fal-recraft-v4-vector",
+      "id": "builtin:image:fal-recraft-v4-vector",
       "kind": "image",
       "model": "fal-recraft-v4-vector",
-      "sourceSymbol": "K2",
-      "sourceRange": {
-        "start": 223166,
-        "end": 223592
-      },
       "config": {
         "model": "fal-recraft-v4-vector",
         "provider": "fal",
@@ -1629,14 +1446,9 @@
       "catalogModelIDIsUpstreamID": false
     },
     {
-      "id": "tapnow:image:doubao-seedream-5.0-lite",
+      "id": "builtin:image:doubao-seedream-5.0-lite",
       "kind": "image",
       "model": "doubao-seedream-5.0-lite",
-      "sourceSymbol": "L2",
-      "sourceRange": {
-        "start": 221777,
-        "end": 222259
-      },
       "config": {
         "model": "doubao-seedream-5.0-lite",
         "provider": "bytedance",
@@ -1698,14 +1510,9 @@
       "catalogModelIDIsUpstreamID": false
     },
     {
-      "id": "tapnow:image:doubao-seedream-5.0-pro",
+      "id": "builtin:image:doubao-seedream-5.0-pro",
       "kind": "image",
       "model": "doubao-seedream-5.0-pro",
-      "sourceSymbol": "F2",
-      "sourceRange": {
-        "start": 222263,
-        "end": 222751
-      },
       "config": {
         "model": "doubao-seedream-5.0-pro",
         "provider": "bytedance",
@@ -1768,19 +1575,14 @@
       "catalogModelIDIsUpstreamID": false
     },
     {
-      "id": "tapnow:image:tapnow-image-turbo",
+      "id": "builtin:image:builtin-image-turbo",
       "kind": "image",
-      "model": "tapnow-image-turbo",
-      "sourceSymbol": "ou",
-      "sourceRange": {
-        "start": 231140,
-        "end": 231605
-      },
+      "model": "builtin-image-turbo",
       "config": {
-        "model": "tapnow-image-turbo",
-        "provider": "tapnow",
-        "name": "imageModels.name.tapnowImageTurbo",
-        "description": "imageModels.descriptions.tapnowImageTurbo",
+        "model": "builtin-image-turbo",
+        "provider": "内置服务",
+        "name": "imageModels.name.builtinImageTurbo",
+        "description": "imageModels.descriptions.内置ImageTurbo",
         "duration": "15s",
         "isFree": false,
         "isComingSoon": false,
@@ -1815,9 +1617,9 @@
           "imageSize": "2K"
         }
       },
-      "displayName": "TapNow Flash",
+      "displayName": "图像极速模型",
       "description": "轻量极速模型，几乎零等待、超低算力成本，让生成随手即得。",
-      "provider": "tapnow",
+      "provider": "内置服务",
       "visibility": "hidden",
       "visibilitySource": "client declared fallback; server overrides may change it",
       "audioType": null,
@@ -1834,14 +1636,9 @@
       "catalogModelIDIsUpstreamID": false
     },
     {
-      "id": "tapnow:image:grok-2-image",
+      "id": "builtin:image:grok-2-image",
       "kind": "image",
       "model": "grok-2-image",
-      "sourceSymbol": "iu",
-      "sourceRange": {
-        "start": 232117,
-        "end": 232462
-      },
       "config": {
         "model": "grok-2-image",
         "provider": "xai",
@@ -1891,14 +1688,9 @@
       "catalogModelIDIsUpstreamID": false
     },
     {
-      "id": "tapnow:image:grok-imagine-image",
+      "id": "builtin:image:grok-imagine-image",
       "kind": "image",
       "model": "grok-imagine-image",
-      "sourceSymbol": "au",
-      "sourceRange": {
-        "start": 232566,
-        "end": 233003
-      },
       "config": {
         "model": "grok-imagine-image",
         "provider": "xai",
@@ -1971,14 +1763,9 @@
       "catalogModelIDIsUpstreamID": false
     },
     {
-      "id": "tapnow:image:grok-imagine-image-quality",
+      "id": "builtin:image:grok-imagine-image-quality",
       "kind": "image",
       "model": "grok-imagine-image-quality",
-      "sourceSymbol": "su",
-      "sourceRange": {
-        "start": 233007,
-        "end": 233466
-      },
       "config": {
         "model": "grok-imagine-image-quality",
         "provider": "xai",
@@ -2051,14 +1838,9 @@
       "catalogModelIDIsUpstreamID": false
     },
     {
-      "id": "tapnow:image:doubao-seedream-4.0",
+      "id": "builtin:image:doubao-seedream-4.0",
       "kind": "image",
       "model": "doubao-seedream-4.0",
-      "sourceSymbol": "k2",
-      "sourceRange": {
-        "start": 220799,
-        "end": 221271
-      },
       "config": {
         "model": "doubao-seedream-4.0",
         "provider": "bytedance",
@@ -2117,14 +1899,9 @@
       "catalogModelIDIsUpstreamID": false
     },
     {
-      "id": "tapnow:image:doubao-seedream-4.5",
+      "id": "builtin:image:doubao-seedream-4.5",
       "kind": "image",
       "model": "doubao-seedream-4.5",
-      "sourceSymbol": "V2",
-      "sourceRange": {
-        "start": 221275,
-        "end": 221773
-      },
       "config": {
         "model": "doubao-seedream-4.5",
         "provider": "bytedance",
@@ -2187,14 +1964,9 @@
       "catalogModelIDIsUpstreamID": false
     },
     {
-      "id": "tapnow:image:midjourney-v7",
+      "id": "builtin:image:midjourney-v7",
       "kind": "image",
       "model": "midjourney-v7",
-      "sourceSymbol": "z2",
-      "sourceRange": {
-        "start": 226732,
-        "end": 227178
-      },
       "config": {
         "model": "midjourney-v7",
         "provider": "midjourney",
@@ -2252,14 +2024,9 @@
       "catalogModelIDIsUpstreamID": false
     },
     {
-      "id": "tapnow:image:midjourney-v8.2",
+      "id": "builtin:image:midjourney-v8.2",
       "kind": "image",
       "model": "midjourney-v8.2",
-      "sourceSymbol": "q2",
-      "sourceRange": {
-        "start": 227640,
-        "end": 228103
-      },
       "config": {
         "model": "midjourney-v8.2",
         "provider": "midjourney",
@@ -2318,14 +2085,9 @@
       "catalogModelIDIsUpstreamID": false
     },
     {
-      "id": "tapnow:image:midjourney-v8.1",
+      "id": "builtin:image:midjourney-v8.1",
       "kind": "image",
       "model": "midjourney-v8.1",
-      "sourceSymbol": "$2",
-      "sourceRange": {
-        "start": 227182,
-        "end": 227636
-      },
       "config": {
         "model": "midjourney-v8.1",
         "provider": "midjourney",
@@ -2383,14 +2145,9 @@
       "catalogModelIDIsUpstreamID": false
     },
     {
-      "id": "tapnow:image:midjourney-niji7",
+      "id": "builtin:image:midjourney-niji7",
       "kind": "image",
       "model": "midjourney-niji7",
-      "sourceSymbol": "Y2",
-      "sourceRange": {
-        "start": 228107,
-        "end": 228569
-      },
       "config": {
         "model": "midjourney-niji7",
         "provider": "midjourney",
@@ -2448,14 +2205,9 @@
       "catalogModelIDIsUpstreamID": false
     },
     {
-      "id": "tapnow:image:gpt-image-1",
+      "id": "builtin:image:gpt-image-1",
       "kind": "image",
       "model": "gpt-image-1",
-      "sourceSymbol": "Q2",
-      "sourceRange": {
-        "start": 230110,
-        "end": 230410
-      },
       "config": {
         "model": "gpt-image-1",
         "provider": "openai",
@@ -2498,14 +2250,9 @@
       "catalogModelIDIsUpstreamID": false
     },
     {
-      "id": "tapnow:image:imagen-4.0",
+      "id": "builtin:image:imagen-4.0",
       "kind": "image",
       "model": "imagen-4.0",
-      "sourceSymbol": "W2",
-      "sourceRange": {
-        "start": 226450,
-        "end": 226728
-      },
       "config": {
         "model": "imagen-4.0",
         "provider": "google",
@@ -2547,14 +2294,9 @@
       "catalogModelIDIsUpstreamID": false
     },
     {
-      "id": "tapnow:image:flux-2-pro",
+      "id": "builtin:image:flux-2-pro",
       "kind": "image",
       "model": "flux-2-pro",
-      "sourceSymbol": "D2",
-      "sourceRange": {
-        "start": 219574,
-        "end": 220021
-      },
       "config": {
         "model": "flux-2-pro",
         "provider": "bfl",
@@ -2615,14 +2357,9 @@
       "catalogModelIDIsUpstreamID": false
     },
     {
-      "id": "tapnow:image:flux-kontext-max",
+      "id": "builtin:image:flux-kontext-max",
       "kind": "image",
       "model": "flux-kontext-max",
-      "sourceSymbol": "P2",
-      "sourceRange": {
-        "start": 220025,
-        "end": 220411
-      },
       "config": {
         "model": "flux-kontext-max",
         "provider": "bfl",
@@ -2674,14 +2411,9 @@
       "catalogModelIDIsUpstreamID": false
     },
     {
-      "id": "tapnow:image:flux-kontext-pro",
+      "id": "builtin:image:flux-kontext-pro",
       "kind": "image",
       "model": "flux-kontext-pro",
-      "sourceSymbol": "G2",
-      "sourceRange": {
-        "start": 220415,
-        "end": 220795
-      },
       "config": {
         "model": "flux-kontext-pro",
         "provider": "bfl",
@@ -2733,14 +2465,9 @@
       "catalogModelIDIsUpstreamID": false
     },
     {
-      "id": "tapnow:image:world-edit",
+      "id": "builtin:image:world-edit",
       "kind": "image",
       "model": "world-edit",
-      "sourceSymbol": "tu",
-      "sourceRange": {
-        "start": 230796,
-        "end": 231136
-      },
       "config": {
         "model": "world-edit",
         "provider": "tamar",
@@ -2786,14 +2513,9 @@
       "catalogModelIDIsUpstreamID": false
     },
     {
-      "id": "tapnow:image:nano-banana-2",
+      "id": "builtin:image:nano-banana-2",
       "kind": "image",
       "model": "nano-banana-2",
-      "sourceSymbol": "le",
-      "sourceRange": {
-        "start": 234198,
-        "end": 234217
-      },
       "config": {
         "model": "tamar-google-gemini-pro",
         "provider": "google",
@@ -2861,21 +2583,16 @@
       "catalogModelIDIsUpstreamID": false
     },
     {
-      "id": "tapnow:video:seedance-2.0",
+      "id": "builtin:video:seedance-2.0",
       "kind": "video",
       "model": "seedance-2.0",
-      "sourceSymbol": "Rr",
-      "sourceRange": {
-        "start": 61982,
-        "end": 63559
-      },
       "config": {
         "model": "seedance-2.0",
         "externalModelIds": [
           "agent-video-generation-01",
           "seedance-2"
         ],
-        "provider": "tapnow",
+        "provider": "内置服务",
         "name": "videoModels.name.seedance20",
         "description": "videoModels.descriptions.seedance20",
         "duration": "5~10 min",
@@ -3085,7 +2802,7 @@
       },
       "displayName": "Seedance 2.0",
       "description": "多分镜专业影视模型，支持多模态参考生成。",
-      "provider": "tapnow",
+      "provider": "内置服务",
       "visibility": "visible",
       "visibilitySource": "client declared fallback; server overrides may change it",
       "audioType": null,
@@ -3110,21 +2827,16 @@
       "catalogModelIDIsUpstreamID": false
     },
     {
-      "id": "tapnow:video:seedance-2.0-mini",
+      "id": "builtin:video:seedance-2.0-mini",
       "kind": "video",
       "model": "seedance-2.0-mini",
-      "sourceSymbol": "Mr",
-      "sourceRange": {
-        "start": 65165,
-        "end": 66933
-      },
       "config": {
         "model": "seedance-2.0-mini",
         "externalModelIds": [
           "agent-video-generation-01-mini",
           "seedance-2-mini"
         ],
-        "provider": "tapnow",
+        "provider": "内置服务",
         "name": "videoModels.name.seedance20Mini",
         "description": "videoModels.descriptions.seedance20Mini",
         "duration": "2~5 min",
@@ -3375,7 +3087,7 @@
       },
       "displayName": "Seedance 2.0 Mini",
       "description": "Seedance 2.0 Mini - 轻量视频生成模型，适合快速创意探索。",
-      "provider": "tapnow",
+      "provider": "内置服务",
       "visibility": "visible",
       "visibilitySource": "client declared fallback; server overrides may change it",
       "audioType": null,
@@ -3400,21 +3112,16 @@
       "catalogModelIDIsUpstreamID": false
     },
     {
-      "id": "tapnow:video:seedance-2.0-fast",
+      "id": "builtin:video:seedance-2.0-fast",
       "kind": "video",
       "model": "seedance-2.0-fast",
-      "sourceSymbol": "yr",
-      "sourceRange": {
-        "start": 63563,
-        "end": 65161
-      },
       "config": {
         "model": "seedance-2.0-fast",
         "externalModelIds": [
           "agent-video-generation-01-fast",
           "seedance-2-fast"
         ],
-        "provider": "tapnow",
+        "provider": "内置服务",
         "name": "videoModels.name.seedance20Fast",
         "description": "videoModels.descriptions.seedance20Fast",
         "duration": "2~5 min",
@@ -3616,7 +3323,7 @@
       },
       "displayName": "Seedance 2.0 Fast",
       "description": "Seedance 2.0 Fast 版本，速度和成本优先。",
-      "provider": "tapnow",
+      "provider": "内置服务",
       "visibility": "visible",
       "visibilitySource": "client declared fallback; server overrides may change it",
       "audioType": null,
@@ -3641,21 +3348,16 @@
       "catalogModelIDIsUpstreamID": false
     },
     {
-      "id": "tapnow:video:seedance-2.5",
+      "id": "builtin:video:seedance-2.5",
       "kind": "video",
       "model": "seedance-2.5",
-      "sourceSymbol": "xt",
-      "sourceRange": {
-        "start": 67080,
-        "end": 69138
-      },
       "config": {
         "model": "seedance-2.5",
         "externalModelIds": [
           "agent-video-generation-02",
           "seedance_2_5"
         ],
-        "provider": "tapnow",
+        "provider": "内置服务",
         "name": "videoModels.name.seedance25",
         "description": "videoModels.descriptions.seedance25",
         "duration": "5~10 min",
@@ -3971,7 +3673,7 @@
       },
       "displayName": "Seedance 2.5",
       "description": "单次生成最长 30 秒音画一体视频，支持最多 50 个多模态参考素材，并支持视频编辑与延长。",
-      "provider": "tapnow",
+      "provider": "内置服务",
       "visibility": "visible",
       "visibilitySource": "client declared fallback; server overrides may change it",
       "audioType": null,
@@ -3997,17 +3699,12 @@
       "catalogModelIDIsUpstreamID": false
     },
     {
-      "id": "tapnow:video:seedance-2.5-4k",
+      "id": "builtin:video:seedance-2.5-4k",
       "kind": "video",
       "model": "seedance-2.5-4k",
-      "sourceSymbol": "Cr",
-      "sourceRange": {
-        "start": 69635,
-        "end": 70173
-      },
       "config": {
         "model": "seedance-2.5-4k",
-        "provider": "tapnow",
+        "provider": "内置服务",
         "name": "videoModels.name.seedance25FourK",
         "description": "videoModels.descriptions.seedance25FourK",
         "duration": "5~10 min",
@@ -4315,7 +4012,7 @@
       },
       "displayName": "Seedance 2.5 4K",
       "description": "全球首发 4K 电影级视频生成，与 Seedance 2.5 同源能力。需团队审核开通后使用。",
-      "provider": "tapnow",
+      "provider": "内置服务",
       "visibility": "visible",
       "visibilitySource": "client declared fallback; server overrides may change it",
       "audioType": null,
@@ -4338,17 +4035,12 @@
       "catalogModelIDIsUpstreamID": false
     },
     {
-      "id": "tapnow:video:seedance-2.5-draft",
+      "id": "builtin:video:seedance-2.5-draft",
       "kind": "video",
       "model": "seedance-2.5-draft",
-      "sourceSymbol": "br",
-      "sourceRange": {
-        "start": 69142,
-        "end": 69631
-      },
       "config": {
         "model": "seedance-2.5-draft",
-        "provider": "tapnow",
+        "provider": "内置服务",
         "name": "videoModels.name.seedance25Draft",
         "description": "videoModels.descriptions.seedance25Draft",
         "duration": "5~10 min",
@@ -4654,7 +4346,7 @@
       },
       "displayName": "Seedance 2.5 样片",
       "description": "480p 样片，用来快速验证创意。满意后可一键生成 1080p 正式片。",
-      "provider": "tapnow",
+      "provider": "内置服务",
       "visibility": "visible",
       "visibilitySource": "client declared fallback; server overrides may change it",
       "audioType": null,
@@ -4677,14 +4369,9 @@
       "catalogModelIDIsUpstreamID": false
     },
     {
-      "id": "tapnow:video:MiniMax-H3",
+      "id": "builtin:video:MiniMax-H3",
       "kind": "video",
       "model": "MiniMax-H3",
-      "sourceSymbol": "Bt",
-      "sourceRange": {
-        "start": 94018,
-        "end": 95296
-      },
       "config": {
         "model": "MiniMax-H3",
         "externalModelIds": [
@@ -4892,14 +4579,9 @@
       "catalogModelIDIsUpstreamID": false
     },
     {
-      "id": "tapnow:video:MiniMax-H3-Max",
+      "id": "builtin:video:MiniMax-H3-Max",
       "kind": "video",
       "model": "MiniMax-H3-Max",
-      "sourceSymbol": "ul",
-      "sourceRange": {
-        "start": 95300,
-        "end": 95979
-      },
       "config": {
         "model": "MiniMax-H3-Max",
         "externalModelIds": [
@@ -5017,14 +4699,9 @@
       "catalogModelIDIsUpstreamID": false
     },
     {
-      "id": "tapnow:video:wan3.0-video",
+      "id": "builtin:video:wan3.0-video",
       "kind": "video",
       "model": "wan3.0-video",
-      "sourceSymbol": "Tl",
-      "sourceRange": {
-        "start": 104030,
-        "end": 105598
-      },
       "config": {
         "model": "wan3.0-video",
         "provider": "wanxiang",
@@ -5335,14 +5012,9 @@
       "catalogModelIDIsUpstreamID": false
     },
     {
-      "id": "tapnow:video:kling-video-o3",
+      "id": "builtin:video:kling-video-o3",
       "kind": "video",
       "model": "kling-video-o3",
-      "sourceSymbol": "Zr",
-      "sourceRange": {
-        "start": 85820,
-        "end": 87834
-      },
       "config": {
         "model": "kling-video-o3",
         "externalModelIds": [
@@ -5598,14 +5270,9 @@
       "catalogModelIDIsUpstreamID": false
     },
     {
-      "id": "tapnow:video:kling-4.0-preview",
+      "id": "builtin:video:kling-4.0-preview",
       "kind": "video",
       "model": "kling-4.0-preview",
-      "sourceSymbol": "nl",
-      "sourceRange": {
-        "start": 90309,
-        "end": 91736
-      },
       "config": {
         "model": "kling-4.0-preview",
         "provider": "kling",
@@ -5956,14 +5623,9 @@
       "catalogModelIDIsUpstreamID": false
     },
     {
-      "id": "tapnow:video:flux-3",
+      "id": "builtin:video:flux-3",
       "kind": "video",
       "model": "flux-3",
-      "sourceSymbol": "Tr",
-      "sourceRange": {
-        "start": 58741,
-        "end": 59393
-      },
       "config": {
         "model": "flux-3",
         "provider": "bfl",
@@ -6088,14 +5750,9 @@
       "catalogModelIDIsUpstreamID": false
     },
     {
-      "id": "tapnow:video:depth-anything-video",
+      "id": "builtin:video:depth-anything-video",
       "kind": "video",
       "model": "depth-anything-video",
-      "sourceSymbol": "wr",
-      "sourceRange": {
-        "start": 71160,
-        "end": 71534
-      },
       "config": {
         "model": "depth-anything-video",
         "provider": "fal",
@@ -6135,14 +5792,9 @@
       "catalogModelIDIsUpstreamID": false
     },
     {
-      "id": "tapnow:video:gemini-omni-flash",
+      "id": "builtin:video:gemini-omni-flash",
       "kind": "video",
       "model": "gemini-omni-flash",
-      "sourceSymbol": "Vr",
-      "sourceRange": {
-        "start": 75657,
-        "end": 76780
-      },
       "config": {
         "model": "gemini-omni-flash",
         "provider": "google",
@@ -6288,14 +5940,9 @@
       "catalogModelIDIsUpstreamID": false
     },
     {
-      "id": "tapnow:video:gemini-omni-1.1-flash",
+      "id": "builtin:video:gemini-omni-1.1-flash",
       "kind": "video",
       "model": "gemini-omni-1.1-flash",
-      "sourceSymbol": "Lr",
-      "sourceRange": {
-        "start": 76784,
-        "end": 77915
-      },
       "config": {
         "model": "gemini-omni-1.1-flash",
         "provider": "google",
@@ -6441,14 +6088,9 @@
       "catalogModelIDIsUpstreamID": false
     },
     {
-      "id": "tapnow:video:kling-v3-pro",
+      "id": "builtin:video:kling-v3-pro",
       "kind": "video",
       "model": "kling-v3-pro",
-      "sourceSymbol": "Jr",
-      "sourceRange": {
-        "start": 87838,
-        "end": 88965
-      },
       "config": {
         "model": "kling-v3-pro",
         "provider": "kling",
@@ -6607,14 +6249,9 @@
       "catalogModelIDIsUpstreamID": false
     },
     {
-      "id": "tapnow:video:happyhorse-1.0",
+      "id": "builtin:video:happyhorse-1.0",
       "kind": "video",
       "model": "happyhorse-1.0",
-      "sourceSymbol": "Ur",
-      "sourceRange": {
-        "start": 79868,
-        "end": 80819
-      },
       "config": {
         "model": "happyhorse-1.0",
         "provider": "alibaba",
@@ -6774,14 +6411,9 @@
       "catalogModelIDIsUpstreamID": false
     },
     {
-      "id": "tapnow:video:happyhorse-1.1",
+      "id": "builtin:video:happyhorse-1.1",
       "kind": "video",
       "model": "happyhorse-1.1",
-      "sourceSymbol": "Xr",
-      "sourceRange": {
-        "start": 80823,
-        "end": 81783
-      },
       "config": {
         "model": "happyhorse-1.1",
         "provider": "alibaba",
@@ -6942,14 +6574,9 @@
       "catalogModelIDIsUpstreamID": false
     },
     {
-      "id": "tapnow:video:happyhorse-1.0-edit",
+      "id": "builtin:video:happyhorse-1.0-edit",
       "kind": "video",
       "model": "happyhorse-1.0-edit",
-      "sourceSymbol": "Br",
-      "sourceRange": {
-        "start": 81787,
-        "end": 82310
-      },
       "config": {
         "model": "happyhorse-1.0-edit",
         "provider": "alibaba",
@@ -7008,14 +6635,9 @@
       "catalogModelIDIsUpstreamID": false
     },
     {
-      "id": "tapnow:video:kling-o3-video-edit",
+      "id": "builtin:video:kling-o3-video-edit",
       "kind": "video",
       "model": "kling-o3-video-edit",
-      "sourceSymbol": "tl",
-      "sourceRange": {
-        "start": 89771,
-        "end": 90127
-      },
       "config": {
         "model": "kling-o3-video-edit",
         "provider": "kling",
@@ -7066,14 +6688,9 @@
       "catalogModelIDIsUpstreamID": false
     },
     {
-      "id": "tapnow:video:kling-video-o3-edit",
+      "id": "builtin:video:kling-video-o3-edit",
       "kind": "video",
       "model": "kling-video-o3-edit",
-      "sourceSymbol": "Qr",
-      "sourceRange": {
-        "start": 88969,
-        "end": 89411
-      },
       "config": {
         "model": "kling-video-o3-edit",
         "provider": "kling",
@@ -7128,14 +6745,9 @@
       "catalogModelIDIsUpstreamID": false
     },
     {
-      "id": "tapnow:video:kling-video-o1-edit",
+      "id": "builtin:video:kling-video-o1-edit",
       "kind": "video",
       "model": "kling-video-o1-edit",
-      "sourceSymbol": "el",
-      "sourceRange": {
-        "start": 89415,
-        "end": 89767
-      },
       "config": {
         "model": "kling-video-o1-edit",
         "provider": "kling",
@@ -7183,14 +6795,9 @@
       "catalogModelIDIsUpstreamID": false
     },
     {
-      "id": "tapnow:video:kling-video-o1",
+      "id": "builtin:video:kling-video-o1",
       "kind": "video",
       "model": "kling-video-o1",
-      "sourceSymbol": "zr",
-      "sourceRange": {
-        "start": 83495,
-        "end": 84680
-      },
       "config": {
         "model": "kling-video-o1",
         "provider": "kling",
@@ -7336,14 +6943,9 @@
       "catalogModelIDIsUpstreamID": false
     },
     {
-      "id": "tapnow:video:veo3.1-lite",
+      "id": "builtin:video:veo3.1-lite",
       "kind": "video",
       "model": "veo3.1-lite",
-      "sourceSymbol": "Dr",
-      "sourceRange": {
-        "start": 71608,
-        "end": 72607
-      },
       "config": {
         "model": "veo3.1-lite",
         "provider": "google",
@@ -7469,14 +7071,9 @@
       "catalogModelIDIsUpstreamID": false
     },
     {
-      "id": "tapnow:video:veo3.1-lite-extend",
+      "id": "builtin:video:veo3.1-lite-extend",
       "kind": "video",
       "model": "veo3.1-lite-extend",
-      "sourceSymbol": "Pr",
-      "sourceRange": {
-        "start": 72611,
-        "end": 73068
-      },
       "config": {
         "model": "veo3.1-lite-extend",
         "provider": "google",
@@ -7539,14 +7136,9 @@
       "catalogModelIDIsUpstreamID": false
     },
     {
-      "id": "tapnow:video:veo3.1-fast",
+      "id": "builtin:video:veo3.1-fast",
       "kind": "video",
       "model": "veo3.1-fast",
-      "sourceSymbol": "kr",
-      "sourceRange": {
-        "start": 74336,
-        "end": 75631
-      },
       "config": {
         "model": "veo3.1-fast",
         "provider": "google",
@@ -7710,14 +7302,9 @@
       "catalogModelIDIsUpstreamID": false
     },
     {
-      "id": "tapnow:video:veo3.1",
+      "id": "builtin:video:veo3.1",
       "kind": "video",
       "model": "veo3.1",
-      "sourceSymbol": "Gr",
-      "sourceRange": {
-        "start": 73072,
-        "end": 74332
-      },
       "config": {
         "model": "veo3.1",
         "provider": "google",
@@ -7878,14 +7465,9 @@
       "catalogModelIDIsUpstreamID": false
     },
     {
-      "id": "tapnow:video:seedance-1.5-pro",
+      "id": "builtin:video:seedance-1.5-pro",
       "kind": "video",
       "model": "seedance-1.5-pro",
-      "sourceSymbol": "Sr",
-      "sourceRange": {
-        "start": 70177,
-        "end": 71156
-      },
       "config": {
         "model": "seedance-1.5-pro",
         "provider": "byteplus",
@@ -8020,14 +7602,9 @@
       "catalogModelIDIsUpstreamID": false
     },
     {
-      "id": "tapnow:video:wanxiang-v2-6",
+      "id": "builtin:video:wanxiang-v2-6",
       "kind": "video",
       "model": "wanxiang-v2-6",
-      "sourceSymbol": "yl",
-      "sourceRange": {
-        "start": 107703,
-        "end": 109354
-      },
       "config": {
         "model": "wanxiang-v2-6",
         "provider": "wanxiang",
@@ -8265,14 +7842,9 @@
       "catalogModelIDIsUpstreamID": false
     },
     {
-      "id": "tapnow:video:kling-v2-6",
+      "id": "builtin:video:kling-v2-6",
       "kind": "video",
       "model": "kling-v2-6",
-      "sourceSymbol": "$r",
-      "sourceRange": {
-        "start": 84684,
-        "end": 85336
-      },
       "config": {
         "model": "kling-v2-6",
         "provider": "kling",
@@ -8363,14 +7935,9 @@
       "catalogModelIDIsUpstreamID": false
     },
     {
-      "id": "tapnow:video:MiniMax-Hailuo-2.3",
+      "id": "builtin:video:MiniMax-Hailuo-2.3",
       "kind": "video",
       "model": "MiniMax-Hailuo-2.3",
-      "sourceSymbol": "rl",
-      "sourceRange": {
-        "start": 93292,
-        "end": 93866
-      },
       "config": {
         "model": "MiniMax-Hailuo-2.3",
         "provider": "minimax",
@@ -8454,14 +8021,9 @@
       "catalogModelIDIsUpstreamID": false
     },
     {
-      "id": "tapnow:video:doubao-seedance-pro",
+      "id": "builtin:video:doubao-seedance-pro",
       "kind": "video",
       "model": "doubao-seedance-pro",
-      "sourceSymbol": "Or",
-      "sourceRange": {
-        "start": 59397,
-        "end": 60407
-      },
       "config": {
         "model": "doubao-seedance-pro",
         "provider": "bytedance",
@@ -8594,14 +8156,9 @@
       "catalogModelIDIsUpstreamID": false
     },
     {
-      "id": "tapnow:video:doubao-seedance-lite",
+      "id": "builtin:video:doubao-seedance-lite",
       "kind": "video",
       "model": "doubao-seedance-lite",
-      "sourceSymbol": "Nr",
-      "sourceRange": {
-        "start": 60411,
-        "end": 61674
-      },
       "config": {
         "model": "doubao-seedance-lite",
         "provider": "bytedance",
@@ -8766,14 +8323,9 @@
       "catalogModelIDIsUpstreamID": false
     },
     {
-      "id": "tapnow:video:midjourney-video",
+      "id": "builtin:video:midjourney-video",
       "kind": "video",
       "model": "midjourney-video",
-      "sourceSymbol": "il",
-      "sourceRange": {
-        "start": 91740,
-        "end": 92268
-      },
       "config": {
         "model": "midjourney-video",
         "provider": "midjourney",
@@ -8840,14 +8392,9 @@
       "catalogModelIDIsUpstreamID": false
     },
     {
-      "id": "tapnow:video:minimax",
+      "id": "builtin:video:minimax",
       "kind": "video",
       "model": "minimax",
-      "sourceSymbol": "sl",
-      "sourceRange": {
-        "start": 92479,
-        "end": 93240
-      },
       "config": {
         "model": "minimax",
         "provider": "minimax",
@@ -8971,14 +8518,9 @@
       "catalogModelIDIsUpstreamID": false
     },
     {
-      "id": "tapnow:video:MiniMax-Hailuo-2.3-Fast",
+      "id": "builtin:video:MiniMax-Hailuo-2.3-Fast",
       "kind": "video",
       "model": "MiniMax-Hailuo-2.3-Fast",
-      "sourceSymbol": "cl",
-      "sourceRange": {
-        "start": 95983,
-        "end": 96448
-      },
       "config": {
         "model": "MiniMax-Hailuo-2.3-Fast",
         "provider": "minimax",
@@ -9041,14 +8583,9 @@
       "catalogModelIDIsUpstreamID": false
     },
     {
-      "id": "tapnow:video:viduq1",
+      "id": "builtin:video:viduq1",
       "kind": "video",
       "model": "viduq1",
-      "sourceSymbol": "El",
-      "sourceRange": {
-        "start": 100331,
-        "end": 100787
-      },
       "config": {
         "model": "viduq1",
         "provider": "vidu",
@@ -9107,14 +8644,9 @@
       "catalogModelIDIsUpstreamID": false
     },
     {
-      "id": "tapnow:video:viduq2",
+      "id": "builtin:video:viduq2",
       "kind": "video",
       "model": "viduq2",
-      "sourceSymbol": "Il",
-      "sourceRange": {
-        "start": 100791,
-        "end": 101664
-      },
       "config": {
         "model": "viduq2",
         "provider": "vidu",
@@ -9255,14 +8787,9 @@
       "catalogModelIDIsUpstreamID": false
     },
     {
-      "id": "tapnow:video:viduq2-pro",
+      "id": "builtin:video:viduq2-pro",
       "kind": "video",
       "model": "viduq2-pro",
-      "sourceSymbol": "vl",
-      "sourceRange": {
-        "start": 101668,
-        "end": 102290
-      },
       "config": {
         "model": "viduq2-pro",
         "provider": "vidu",
@@ -9354,14 +8881,9 @@
       "catalogModelIDIsUpstreamID": false
     },
     {
-      "id": "tapnow:video:viduq2-turbo",
+      "id": "builtin:video:viduq2-turbo",
       "kind": "video",
       "model": "viduq2-turbo",
-      "sourceSymbol": "Al",
-      "sourceRange": {
-        "start": 102294,
-        "end": 102922
-      },
       "config": {
         "model": "viduq2-turbo",
         "provider": "vidu",
@@ -9453,14 +8975,9 @@
       "catalogModelIDIsUpstreamID": false
     },
     {
-      "id": "tapnow:video:viduq3-pro",
+      "id": "builtin:video:viduq3-pro",
       "kind": "video",
       "model": "viduq3-pro",
-      "sourceSymbol": "xl",
-      "sourceRange": {
-        "start": 103030,
-        "end": 103864
-      },
       "config": {
         "model": "viduq3-pro",
         "provider": "vidu",
@@ -9591,14 +9108,9 @@
       "catalogModelIDIsUpstreamID": false
     },
     {
-      "id": "tapnow:video:kling",
+      "id": "builtin:video:kling",
       "kind": "video",
       "model": "kling",
-      "sourceSymbol": "Hr",
-      "sourceRange": {
-        "start": 82314,
-        "end": 82946
-      },
       "config": {
         "model": "kling",
         "provider": "kling",
@@ -9688,14 +9200,9 @@
       "catalogModelIDIsUpstreamID": false
     },
     {
-      "id": "tapnow:video:kling-v2-5-turbo-pro",
+      "id": "builtin:video:kling-v2-5-turbo-pro",
       "kind": "video",
       "model": "kling-v2-5-turbo-pro",
-      "sourceSymbol": "Wr",
-      "sourceRange": {
-        "start": 82950,
-        "end": 83491
-      },
       "config": {
         "model": "kling-v2-5-turbo-pro",
         "provider": "kling",
@@ -9771,14 +9278,9 @@
       "catalogModelIDIsUpstreamID": false
     },
     {
-      "id": "tapnow:video:kling-motion-control",
+      "id": "builtin:video:kling-motion-control",
       "kind": "video",
       "model": "kling-motion-control",
-      "sourceSymbol": "Yr",
-      "sourceRange": {
-        "start": 85398,
-        "end": 85816
-      },
       "config": {
         "model": "kling-motion-control",
         "provider": "kling",
@@ -9835,14 +9337,9 @@
       "catalogModelIDIsUpstreamID": false
     },
     {
-      "id": "tapnow:video:wanxiang-plus",
+      "id": "builtin:video:wanxiang-plus",
       "kind": "video",
       "model": "wanxiang-plus",
-      "sourceSymbol": "Ol",
-      "sourceRange": {
-        "start": 105602,
-        "end": 106241
-      },
       "config": {
         "model": "wanxiang-plus",
         "provider": "wanxiang",
@@ -9926,14 +9423,9 @@
       "catalogModelIDIsUpstreamID": false
     },
     {
-      "id": "tapnow:video:wanxiang-i2v-flash",
+      "id": "builtin:video:wanxiang-i2v-flash",
       "kind": "video",
       "model": "wanxiang-i2v-flash",
-      "sourceSymbol": "Nl",
-      "sourceRange": {
-        "start": 106245,
-        "end": 106718
-      },
       "config": {
         "model": "wanxiang-i2v-flash",
         "provider": "wanxiang",
@@ -9994,14 +9486,9 @@
       "catalogModelIDIsUpstreamID": false
     },
     {
-      "id": "tapnow:video:wanxiang-preview",
+      "id": "builtin:video:wanxiang-preview",
       "kind": "video",
       "model": "wanxiang-preview",
-      "sourceSymbol": "Rl",
-      "sourceRange": {
-        "start": 106722,
-        "end": 107569
-      },
       "config": {
         "model": "wanxiang-preview",
         "provider": "wanxiang",
@@ -10106,14 +9593,9 @@
       "catalogModelIDIsUpstreamID": false
     },
     {
-      "id": "tapnow:video:pixverse-v5.5",
+      "id": "builtin:video:pixverse-v5.5",
       "kind": "video",
       "model": "pixverse-v5.5",
-      "sourceSymbol": "fl",
-      "sourceRange": {
-        "start": 97898,
-        "end": 98850
-      },
       "config": {
         "model": "pixverse-v5.5",
         "provider": "pixverse",
@@ -10242,14 +9724,9 @@
       "catalogModelIDIsUpstreamID": false
     },
     {
-      "id": "tapnow:video:pixverse-v5",
+      "id": "builtin:video:pixverse-v5",
       "kind": "video",
       "model": "pixverse-v5",
-      "sourceSymbol": "pl",
-      "sourceRange": {
-        "start": 96998,
-        "end": 97894
-      },
       "config": {
         "model": "pixverse-v5",
         "provider": "pixverse",
@@ -10367,14 +9844,9 @@
       "catalogModelIDIsUpstreamID": false
     },
     {
-      "id": "tapnow:video:veo3",
+      "id": "builtin:video:veo3",
       "kind": "video",
       "model": "veo3",
-      "sourceSymbol": "Fr",
-      "sourceRange": {
-        "start": 77919,
-        "end": 78692
-      },
       "config": {
         "model": "veo3",
         "provider": "google",
@@ -10477,14 +9949,9 @@
       "catalogModelIDIsUpstreamID": false
     },
     {
-      "id": "tapnow:video:veo3-fast",
+      "id": "builtin:video:veo3-fast",
       "kind": "video",
       "model": "veo3-fast",
-      "sourceSymbol": "jr",
-      "sourceRange": {
-        "start": 78696,
-        "end": 79482
-      },
       "config": {
         "model": "veo3-fast",
         "provider": "google",
@@ -10587,14 +10054,9 @@
       "catalogModelIDIsUpstreamID": false
     },
     {
-      "id": "tapnow:video:veo2",
+      "id": "builtin:video:veo2",
       "kind": "video",
       "model": "veo2",
-      "sourceSymbol": "Kr",
-      "sourceRange": {
-        "start": 79486,
-        "end": 79770
-      },
       "config": {
         "model": "veo2",
         "provider": "google",
@@ -10636,14 +10098,9 @@
       "catalogModelIDIsUpstreamID": false
     },
     {
-      "id": "tapnow:video:sora-2-standard",
+      "id": "builtin:video:sora-2-standard",
       "kind": "video",
       "model": "sora-2-standard",
-      "sourceSymbol": "_l",
-      "sourceRange": {
-        "start": 98854,
-        "end": 99541
-      },
       "config": {
         "model": "sora-2-standard",
         "provider": "fal",
@@ -10734,14 +10191,9 @@
       "catalogModelIDIsUpstreamID": false
     },
     {
-      "id": "tapnow:video:sora-2-pro",
+      "id": "builtin:video:sora-2-pro",
       "kind": "video",
       "model": "sora-2-pro",
-      "sourceSymbol": "gl",
-      "sourceRange": {
-        "start": 99545,
-        "end": 100236
-      },
       "config": {
         "model": "sora-2-pro",
         "provider": "fal",
@@ -10834,14 +10286,9 @@
       "catalogModelIDIsUpstreamID": false
     },
     {
-      "id": "tapnow:video:grok-imagine-video-1.5",
+      "id": "builtin:video:grok-imagine-video-1.5",
       "kind": "video",
       "model": "grok-imagine-video-1.5",
-      "sourceSymbol": "bl",
-      "sourceRange": {
-        "start": 109474,
-        "end": 109981
-      },
       "config": {
         "model": "grok-imagine-video-1.5",
         "provider": "xai",
@@ -10922,14 +10369,9 @@
       "catalogModelIDIsUpstreamID": false
     },
     {
-      "id": "tapnow:video:grok-imagine-video",
+      "id": "builtin:video:grok-imagine-video",
       "kind": "video",
       "model": "grok-imagine-video",
-      "sourceSymbol": "Cl",
-      "sourceRange": {
-        "start": 109985,
-        "end": 110976
-      },
       "config": {
         "model": "grok-imagine-video",
         "provider": "xai",
@@ -11108,14 +10550,9 @@
       "catalogModelIDIsUpstreamID": false
     },
     {
-      "id": "tapnow:video:omnihuman-1.5",
+      "id": "builtin:video:omnihuman-1.5",
       "kind": "video",
       "model": "omnihuman-1.5",
-      "sourceSymbol": "ml",
-      "sourceRange": {
-        "start": 96452,
-        "end": 96918
-      },
       "config": {
         "model": "omnihuman-1.5",
         "provider": "byteplus",
@@ -11167,14 +10604,9 @@
       "catalogModelIDIsUpstreamID": false
     },
     {
-      "id": "tapnow:audio:music_v1",
+      "id": "builtin:audio:music_v1",
       "kind": "audio",
       "model": "music_v1",
-      "sourceSymbol": "xa",
-      "sourceRange": {
-        "start": 155497,
-        "end": 155649
-      },
       "config": {
         "provider": "elevenlabs",
         "model": "music_v1",
@@ -11206,14 +10638,9 @@
       "catalogModelIDIsUpstreamID": false
     },
     {
-      "id": "tapnow:audio:eleven_sound_effect",
+      "id": "builtin:audio:eleven_sound_effect",
       "kind": "audio",
       "model": "eleven_sound_effect",
-      "sourceSymbol": "Na",
-      "sourceRange": {
-        "start": 160203,
-        "end": 160342
-      },
       "config": {
         "provider": "elevenlabs",
         "model": "eleven_sound_effect",
@@ -11242,14 +10669,9 @@
       "catalogModelIDIsUpstreamID": false
     },
     {
-      "id": "tapnow:audio:eleven_multilingual_v2",
+      "id": "builtin:audio:eleven_multilingual_v2",
       "kind": "audio",
       "model": "eleven_multilingual_v2",
-      "sourceSymbol": "pn",
-      "sourceRange": {
-        "start": 165167,
-        "end": 165332
-      },
       "config": {
         "provider": "elevenlabs",
         "model": "eleven_multilingual_v2",
@@ -11284,14 +10706,9 @@
       "catalogModelIDIsUpstreamID": false
     },
     {
-      "id": "tapnow:audio:eleven_v3",
+      "id": "builtin:audio:eleven_v3",
       "kind": "audio",
       "model": "eleven_v3",
-      "sourceSymbol": "fn",
-      "sourceRange": {
-        "start": 171077,
-        "end": 171181
-      },
       "config": {
         "provider": "elevenlabs",
         "model": "eleven_v3",
@@ -11319,14 +10736,9 @@
       "catalogModelIDIsUpstreamID": false
     },
     {
-      "id": "tapnow:audio:drama-3",
+      "id": "builtin:audio:drama-3",
       "kind": "audio",
       "model": "drama-3",
-      "sourceSymbol": "so",
-      "sourceRange": {
-        "start": 185156,
-        "end": 185319
-      },
       "config": {
         "provider": "fish-audio",
         "model": "drama-3",
@@ -11357,14 +10769,9 @@
       "catalogModelIDIsUpstreamID": false
     },
     {
-      "id": "tapnow:audio:lyria-3-clip-preview",
+      "id": "builtin:audio:lyria-3-clip-preview",
       "kind": "audio",
       "model": "lyria-3-clip-preview",
-      "sourceSymbol": "Da",
-      "sourceRange": {
-        "start": 186405,
-        "end": 186521
-      },
       "config": {
         "provider": "google",
         "characterLimit": 5000,
@@ -11396,14 +10803,9 @@
       "catalogModelIDIsUpstreamID": false
     },
     {
-      "id": "tapnow:audio:lyria-3-pro-preview",
+      "id": "builtin:audio:lyria-3-pro-preview",
       "kind": "audio",
       "model": "lyria-3-pro-preview",
-      "sourceSymbol": "Pa",
-      "sourceRange": {
-        "start": 186525,
-        "end": 186640
-      },
       "config": {
         "provider": "google",
         "characterLimit": 5000,
@@ -11435,14 +10837,9 @@
       "catalogModelIDIsUpstreamID": false
     },
     {
-      "id": "tapnow:audio:music-2.6",
+      "id": "builtin:audio:music-2.6",
       "kind": "audio",
       "model": "music-2.6",
-      "sourceSymbol": "Ga",
-      "sourceRange": {
-        "start": 190831,
-        "end": 191095
-      },
       "config": {
         "provider": "minimax",
         "model": "music-2.6",
@@ -11477,14 +10874,9 @@
       "catalogModelIDIsUpstreamID": false
     },
     {
-      "id": "tapnow:audio:mureka-7.6",
+      "id": "builtin:audio:mureka-7.6",
       "kind": "audio",
       "model": "mureka-7.6",
-      "sourceSymbol": "ka",
-      "sourceRange": {
-        "start": 193118,
-        "end": 193239
-      },
       "config": {
         "provider": "mureka",
         "model": "mureka-7.6",
@@ -11514,14 +10906,9 @@
       "catalogModelIDIsUpstreamID": false
     },
     {
-      "id": "tapnow:audio:mureka-o2",
+      "id": "builtin:audio:mureka-o2",
       "kind": "audio",
       "model": "mureka-o2",
-      "sourceSymbol": "Va",
-      "sourceRange": {
-        "start": 193243,
-        "end": 193363
-      },
       "config": {
         "provider": "mureka",
         "model": "mureka-o2",
@@ -11551,14 +10938,9 @@
       "catalogModelIDIsUpstreamID": false
     },
     {
-      "id": "tapnow:audio:mureka-8",
+      "id": "builtin:audio:mureka-8",
       "kind": "audio",
       "model": "mureka-8",
-      "sourceSymbol": "La",
-      "sourceRange": {
-        "start": 193367,
-        "end": 193486
-      },
       "config": {
         "provider": "mureka",
         "model": "mureka-8",
@@ -11588,14 +10970,9 @@
       "catalogModelIDIsUpstreamID": false
     },
     {
-      "id": "tapnow:audio:doubao-seed-audio-1-0",
+      "id": "builtin:audio:doubao-seed-audio-1-0",
       "kind": "audio",
       "model": "doubao-seed-audio-1-0",
-      "sourceSymbol": "Fa",
-      "sourceRange": {
-        "start": 195275,
-        "end": 195546
-      },
       "config": {
         "provider": "doubao",
         "model": "doubao-seed-audio-1-0",
@@ -11639,14 +11016,9 @@
       "catalogModelIDIsUpstreamID": false
     },
     {
-      "id": "tapnow:audio:sonilo-music",
+      "id": "builtin:audio:sonilo-music",
       "kind": "audio",
       "model": "sonilo-music",
-      "sourceSymbol": "ja",
-      "sourceRange": {
-        "start": 200560,
-        "end": 200796
-      },
       "config": {
         "provider": "sonilo",
         "model": "sonilo-music",
@@ -11678,14 +11050,9 @@
       "catalogModelIDIsUpstreamID": false
     },
     {
-      "id": "tapnow:audio:sonilo-sfx",
+      "id": "builtin:audio:sonilo-sfx",
       "kind": "audio",
       "model": "sonilo-sfx",
-      "sourceSymbol": "Ka",
-      "sourceRange": {
-        "start": 203930,
-        "end": 204150
-      },
       "config": {
         "provider": "sonilo",
         "model": "sonilo-sfx",
@@ -11715,5 +11082,10 @@
       "displayNameSource": "packaged localization",
       "catalogModelIDIsUpstreamID": false
     }
-  ]
+  ],
+  "presentation": {
+    "label": "内置模型目录",
+    "identifiers": "展示别名；实际调用请填写服务接受的上游模型标识。",
+    "provenance": "原始目录及来源记录保留在内部核验资料中。"
+  }
 }

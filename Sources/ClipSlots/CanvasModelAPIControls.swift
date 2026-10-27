@@ -10,10 +10,10 @@ struct CanvasModelAPIControls: View {
             Text("API 节点参数").font(.system(size: 15, weight: .semibold))
             Picker("模型", selection: Binding(get: { node.modelProfileID ?? "__default__" }, set: { id in edit { $0.modelProfileID = id } })) {
                 Text("用途默认模型").tag("__default__")
-                ForEach(models.profiles.filter { !$0.isCLI && $0.kind == ModelWorkspaceStore.purpose(for: node).kind }) { Text($0.name).tag($0.id) }
+                ForEach(models.profiles.filter { !$0.isCLI && $0.kind == ModelWorkspaceStore.purpose(for: node).kind }) { Text(ModelCatalogPresentation.text($0.name)).tag($0.id) }
             }
             if let profile = models.canvasProfile(for: node) {
-                Text("\(profile.name) · \(profile.contract.title)").font(.system(size: 11)).foregroundStyle(.secondary)
+                Text("\(ModelCatalogPresentation.text(profile.name)) · \(profile.contract.title)").font(.system(size: 11)).foregroundStyle(.secondary)
                 if node.kind == .image || node.kind == .video {
                     TextField("比例，例如 16:9", text: Binding(get: { node.ratio }, set: { value in edit { $0.ratio = value } }))
                     TextField("分辨率", text: Binding(get: { node.resolution }, set: { value in edit { $0.resolution = value } }))
@@ -28,7 +28,7 @@ struct CanvasModelAPIControls: View {
                     .font(.system(size: 10)).foregroundStyle(.secondary)
                 if let item = models.catalog?.entries.first(where: { $0.id == profile.catalogID }) {
                     DisclosureGroup("目录参数与范围") {
-                        ScrollView { Text((try? item.config.encodedText()) ?? "").font(.system(size: 10, design: .monospaced)).textSelection(.enabled) }.frame(maxHeight: 240)
+                        ScrollView { Text((try? item.presentationConfig.encodedText()) ?? "").font(.system(size: 10, design: .monospaced)).textSelection(.enabled) }.frame(maxHeight: 240)
                     }
                 }
             } else { Text("请在配置中心设置此用途模型。").font(.system(size: 11)).foregroundStyle(.secondary) }

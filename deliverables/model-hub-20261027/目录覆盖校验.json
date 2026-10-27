@@ -1,0 +1,26 @@
+{
+  "label": "内置模型目录覆盖校验",
+  "counts": {
+    "llm": 17,
+    "image": 31,
+    "video": 57,
+    "audio": 14
+  },
+  "coverage": {
+    "imageRegistryAndEnumMatch": true,
+    "videoRegistryAndEnumMatch": true,
+    "audioRegistryAndEnumsMatch": true,
+    "llmDeclaredEntries": 17,
+    "mediaVariantCount": 155,
+    "declaredHidden": 18,
+    "regionalVisibility": 6,
+    "serverVisibilityOverridesObservedStatically": true,
+    "liveProviderModelAvailabilityVerified": false,
+    "paidGenerationRequests": 0
+  },
+  "presentationAliasesOnly": true,
+  "runtimeCatalogUnchanged": true,
+  "runtimeCatalogSHA256": "321b012617a1732bca44a7fc0e014bb7499b485bf11a9b32173762716c7d57e6",
+  "modelCount": 119,
+  "mediaVariantCount": 155
+}

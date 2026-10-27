@@ -153,6 +153,20 @@ actor BudgetFixture {
             check(catalog.entries.reduce(0) { $0 + ($1.config["variants"]?.arrayValue?.count ?? 0) } == 155, "all 155 media variants retained")
             check(catalog.entries.filter { $0.visibility == "hidden" }.count == 18, "hidden models retained in catalog")
             check(catalog.entries.allSatisfy { $0.draft().model.isEmpty }, "TapNow gateway IDs never prefilled as upstream IDs")
+            let catalogEncoder = JSONEncoder(); catalogEncoder.outputFormatting = .sortedKeys
+            let catalogBeforeDisplay = try catalogEncoder.encode(catalog)
+            check(catalog.entries.allSatisfy { entry in
+                let visible = [entry.presentationName, entry.presentationModel, entry.presentationProvider,
+                    entry.presentationDescription, (try? entry.presentationConfig.encodedText()) ?? "", entry.draft().name].joined(separator: "\n")
+                return !visible.localizedCaseInsensitiveContains("tapnow")
+            }, "all 119 catalog display fields and draft names are neutral")
+            check(try catalogEncoder.encode(catalog) == catalogBeforeDisplay,
+                "display redaction preserves original catalog identities parameters and references")
+            if let branded = catalog.entries.first(where: { $0.model == "tapnow-image-turbo" }) {
+                check(branded.presentationName == "图像极速模型" && branded.presentationModel == "builtin-image-turbo"
+                    && branded.presentationProvider == "内置服务" && branded.draft().catalogID == branded.id,
+                    "neutral aliases retain the original catalog binding")
+            }
             var connection = ModelServiceConnection(); connection.name = "shared"; connection.baseURL = "http://127.0.0.1:1/v1"
             connection.requiresKey = false; connection.discoveryURL = "models"; connection.concurrency = 1
             var bound = profile; bound.serviceID = connection.id; bound.endpoint = "chat/completions"

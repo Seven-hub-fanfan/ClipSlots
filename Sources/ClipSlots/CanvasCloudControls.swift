@@ -39,7 +39,7 @@ struct CanvasCloudControls: View {
                 })) {
                     Text("原服务 / 本机配音").tag("")
                     Text("默认音频 API").tag("__default__")
-                    ForEach(models.profiles.filter { !$0.isCLI && $0.kind == .audio }) { Text($0.name).tag($0.id) }
+                    ForEach(models.profiles.filter { !$0.isCLI && $0.kind == .audio }) { Text(ModelCatalogPresentation.text($0.name)).tag($0.id) }
                 }
             }
             prompt
@@ -91,7 +91,7 @@ struct CanvasCloudControls: View {
                         choices: CanvasAudioConfiguration.Scene.allCases.map { ($0, $0.title) })
                 }
                 if configuredAPI {
-                    Text(session.node.flatMap { models.canvasProfile(for: $0)?.name } ?? "未设置 API").font(.system(size: 11)).lineLimit(1)
+                    Text(ModelCatalogPresentation.text(session.node.flatMap { models.canvasProfile(for: $0)?.name } ?? "未设置 API")).font(.system(size: 11)).lineLimit(1)
                     Button { showSettings.toggle() } label: { Image(systemName: "slider.horizontal.3") }
                         .popover(isPresented: $showSettings, arrowEdge: .bottom) { apiSettings }
                 } else if !localSpeech {

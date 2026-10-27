@@ -18,7 +18,7 @@ struct ModelHubConfigurationView: View {
     private var entries: [TapNowModelCatalog.Entry] {
         (models.catalog?.entries ?? []).filter {
             (kind.isEmpty || $0.kind.rawValue == kind) && (provider.isEmpty || $0.provider == provider)
-                && (search.isEmpty || ($0.displayName + $0.model + ($0.provider ?? "") + $0.description).localizedCaseInsensitiveContains(search))
+                && (search.isEmpty || ($0.presentationName + $0.presentationModel + $0.presentationProvider + $0.presentationDescription).localizedCaseInsensitiveContains(search))
         }
     }
     var body: some View {
@@ -41,15 +41,15 @@ struct ModelHubConfigurationView: View {
         }
         .sheet(item: $detail) { item in
             VStack(alignment: .leading, spacing: 16) {
-                Text(item.displayName).font(.system(size: 22, weight: .semibold))
-                Text("\(item.kind.title) · \(item.model) · \(item.provider ?? "未声明") · \(item.statusTitle)")
+                Text(item.presentationName).font(.system(size: 22, weight: .semibold))
+                Text("\(item.kind.title) · \(item.presentationModel) · \(item.presentationProvider) · \(item.statusTitle)")
                     .font(.system(size: 12)).foregroundStyle(.secondary)
-                Text(item.description).font(.system(size: 12))
+                Text(item.presentationDescription).font(.system(size: 12))
                 ScrollView {
-                    Text((try? item.config.encodedText()) ?? "").font(.system(size: 11, design: .monospaced))
+                    Text((try? item.presentationConfig.encodedText()) ?? "").font(.system(size: 11, design: .monospaced))
                         .textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading)
                 }.padding(12).background(TapSkin.tone(0xf3f4f7, 0x24262b), in: RoundedRectangle(cornerRadius: 10))
-                Text("TapNow \(models.catalog?.sourceVersion ?? "") · \(item.sourceSymbol) · UTF-16 \(item.sourceRange)\n函数和服务端条件保留在原配置中。目录标识需映射为实际服务的模型标识。")
+                Text("目录使用中性展示名称与别名。接入时请填写实际服务接受的上游模型标识，参数以所配置服务为准。")
                     .font(.system(size: 10)).foregroundStyle(.secondary)
                 HStack {
                     Spacer()
@@ -77,7 +77,7 @@ struct ModelHubConfigurationView: View {
                     }
                 }
             }
-            Text("TapNow \(models.catalog?.sourceVersion ?? "") · 完整客户端目录 · 155 个媒体变体 · 隐藏与地区条件条目均保留")
+            Text("内置模型目录 · 155 个媒体变体 · 隐藏与地区条件条目均保留")
                 .font(.system(size: 11)).foregroundStyle(.secondary)
             HStack {
                 TextField("搜索模型名称、标识或用途", text: $search).textFieldStyle(.roundedBorder)
@@ -88,10 +88,12 @@ struct ModelHubConfigurationView: View {
                 }.frame(width: 125)
                 Picker("路由", selection: $provider) {
                     Text("全部路由").tag("")
-                    ForEach(Array(Set((models.catalog?.entries ?? []).compactMap(\.provider))).sorted(), id: \.self) { Text($0).tag($0) }
+                    ForEach(Array(Set((models.catalog?.entries ?? []).compactMap(\.provider))).sorted(), id: \.self) {
+                        Text(ModelCatalogPresentation.provider($0)).tag($0)
+                    }
                 }.frame(width: 145)
             }
-            Text("目录路由属于 TapNow；接入时填写真实上游标识。实时可用性由所配置服务决定。")
+            Text("目录标识为展示别名；接入时填写真实上游标识。实时可用性由所配置服务决定。")
                 .font(.system(size: 11)).foregroundStyle(.secondary)
             GeometryReader { size in
                 VStack(spacing: 0) {
@@ -99,7 +101,7 @@ struct ModelHubConfigurationView: View {
                         Text("模型 / 标识").frame(maxWidth: .infinity, alignment: .leading)
                         Text("类型").frame(width: 44)
                         if size.size.width > 850 {
-                            Text("TapNow 路由").frame(width: 100, alignment: .leading)
+                            Text("服务路由").frame(width: 100, alignment: .leading)
                             Text("支持模式").frame(width: 200, alignment: .leading)
                         }
                         Text("状态").frame(width: 80)
@@ -110,12 +112,12 @@ struct ModelHubConfigurationView: View {
                         ForEach(entries) { item in
                             HStack(spacing: 10) {
                                 VStack(alignment: .leading, spacing: 4) {
-                                    Text(item.displayName).font(.system(size: 12, weight: .medium)).lineLimit(1)
-                                    Text(item.model).font(.system(size: 10, design: .monospaced)).foregroundStyle(.secondary).lineLimit(1)
+                                    Text(item.presentationName).font(.system(size: 12, weight: .medium)).lineLimit(1)
+                                    Text(item.presentationModel).font(.system(size: 10, design: .monospaced)).foregroundStyle(.secondary).lineLimit(1)
                                 }.frame(maxWidth: .infinity, alignment: .leading)
                                 Text(item.kind.title).font(.system(size: 11)).frame(width: 44)
                                 if size.size.width > 850 {
-                                    Text(item.provider ?? "—").font(.system(size: 11)).frame(width: 100, alignment: .leading)
+                                    Text(item.presentationProvider).font(.system(size: 11)).frame(width: 100, alignment: .leading)
                                     Text(item.modes.joined(separator: " · ")).font(.system(size: 10)).foregroundStyle(.secondary).lineLimit(2)
                                         .frame(width: 200, alignment: .leading)
                                 }
@@ -143,7 +145,7 @@ struct ModelHubConfigurationView: View {
                 card {
                     HStack {
                         VStack(alignment: .leading, spacing: 6) {
-                            Text(profile.name).font(.system(size: 15, weight: .semibold))
+                            Text(ModelCatalogPresentation.text(profile.name)).font(.system(size: 15, weight: .semibold))
                             Text("\(profile.kind.title) · \(profile.model) · \(profile.contract.title)").font(.system(size: 11)).foregroundStyle(.secondary)
                             Text(profile.serviceID.flatMap { id in models.document.services?.first { $0.id == id }?.name } ?? profile.endpoint)
                                 .font(.system(size: 11)).foregroundStyle(.secondary)
@@ -213,7 +215,7 @@ struct ModelHubConfigurationView: View {
                         set: { id in Task { await models.setDefault(purpose, id: id) } })) {
                         Text("未设置 / 沿用原配置").tag("")
                         ForEach(models.profiles.filter { models.supports($0, purpose: purpose) }) {
-                            Text($0.name).tag($0.id)
+                            Text(ModelCatalogPresentation.text($0.name)).tag($0.id)
                         }
                     }.frame(maxWidth: 560)
                 }

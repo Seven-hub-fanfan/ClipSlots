@@ -68,6 +68,29 @@ public enum ModelHubResolver {
     }
 }
 
+/// Presentation aliases do not change catalog identities or upstream request values.
+public enum ModelCatalogPresentation {
+    public static func text(_ value: String) -> String {
+        value.replacingOccurrences(of: "TapNow Flash", with: "图像极速模型", options: .caseInsensitive)
+            .replacingOccurrences(of: "tapnow", with: "内置", options: .caseInsensitive)
+    }
+    public static func identifier(_ value: String) -> String {
+        value.replacingOccurrences(of: "tapnow", with: "builtin", options: .caseInsensitive)
+    }
+    public static func provider(_ value: String?) -> String {
+        guard let value else { return "未声明" }
+        return value.caseInsensitiveCompare("tapnow") == .orderedSame ? "内置服务" : text(value)
+    }
+    public static func configuration(_ value: JSONValue) -> JSONValue {
+        switch value {
+        case .string(let value): return .string(text(value))
+        case .array(let values): return .array(values.map(configuration))
+        case .object(let values): return .object(values.mapValues(configuration))
+        default: return value
+        }
+    }
+}
+
 public struct TapNowModelCatalog: Codable, Sendable {
     public var sourceProduct: String
     public var sourceVersion: String
@@ -88,11 +111,16 @@ public struct TapNowModelCatalog: Codable, Sendable {
         public var defaultParameters: JSONValue
         public var sourceSymbol: String
         public var sourceRange: JSONValue
+        public var presentationName: String { ModelCatalogPresentation.text(displayName) }
+        public var presentationModel: String { ModelCatalogPresentation.identifier(model) }
+        public var presentationProvider: String { ModelCatalogPresentation.provider(provider) }
+        public var presentationDescription: String { ModelCatalogPresentation.text(description) }
+        public var presentationConfig: JSONValue { ModelCatalogPresentation.configuration(config) }
         public var statusTitle: String {
             switch visibility { case "hidden": return "客户端隐藏"; case "regional": return "地区条件"; default: return "客户端目录" }
         }
         public func draft() -> ModelProfile {
-            var p = ModelProfile(); p.name = displayName; p.catalogID = id; p.kind = kind
+            var p = ModelProfile(); p.name = presentationName; p.catalogID = id; p.kind = kind
             p.model = ""; p.endpoint = ""; p.supportsImages = modes.contains("image_input")
             p.contract = kind == .llm ? .chatCompletions : kind == .image ? .imageGenerations : .asyncMedia
             return p

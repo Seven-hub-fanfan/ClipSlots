@@ -51,7 +51,7 @@ struct CanvasGenerationSourceControls: View {
             .help("生成来源；切换仅影响下次生成，已提交任务保留原来源")
             .canvasControlRegion("composer-provider")
             if node.modelProfileID != nil {
-                Text(models.canvasProfile(for: node)?.name ?? "请设置默认 API")
+                Text(ModelCatalogPresentation.text(models.canvasProfile(for: node)?.name ?? "请设置默认 API"))
                     .font(.system(size: 11)).lineLimit(1).frame(maxWidth: 160)
                 Button { showingAPI = true } label: { Image(systemName: "slider.horizontal.3") }
                     .buttonStyle(.plain).help("API 参数").popover(isPresented: $showingAPI) {

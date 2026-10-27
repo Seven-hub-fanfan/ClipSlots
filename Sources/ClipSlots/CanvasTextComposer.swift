@@ -45,7 +45,7 @@ struct CanvasTextComposer: View {
         return AgentBackendCoordinator.kind(for: .sidebar)
     }
     private var modelLabel: String {
-        if let profile = node.modelProfileID != nil ? models.canvasProfile(for: node) : models.defaultProfile(.canvasText) { return profile.name }
+        if let profile = node.modelProfileID != nil ? models.canvasProfile(for: node) : models.defaultProfile(.canvasText) { return ModelCatalogPresentation.text(profile.name) }
         switch backend {
         case .deepseek: return model
         case .tika: return "Tika Agent"
@@ -87,7 +87,7 @@ struct CanvasTextComposer: View {
                     if let onModelSelection {
                         Button("用途默认 LLM") { onModelSelection("__default__") }
                         ForEach(models.profiles.filter { $0.kind == .llm && !$0.isCLI }) { profile in
-                            Button(profile.name) { onModelSelection(profile.id) }
+                            Button(ModelCatalogPresentation.text(profile.name)) { onModelSelection(profile.id) }
                         }
                         Button("自动选择默认模型") { onModelSelection(nil) }
                         Divider()

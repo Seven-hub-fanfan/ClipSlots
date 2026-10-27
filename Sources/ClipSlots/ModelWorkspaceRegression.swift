@@ -50,6 +50,12 @@ private actor ModelWorkspaceFixtureHTTP: ModelHTTPTransport {
             check(models.document.runs.last?.cells.count == 14 && models.document.runs.last?.cells.allSatisfy({ $0.state == .succeeded }) == true,
                 "14 models complete a real scheduled result matrix")
             check(models.catalog?.entries.count == 119, "full bundled catalog loaded into native workspace")
+            // Put the sensitive catalog entry on screen in every theme and width.
+            models.catalog?.entries.sort {
+                let left = $0.displayName.localizedCaseInsensitiveContains("tapnow")
+                let right = $1.displayName.localizedCaseInsensitiveContains("tapnow")
+                return left && !right
+            }
             let peak = await fixture.peak
             check(peak <= 4 && peak > 1, "global concurrency bounded at four with parallel dispatch")
             let requests = await fixture.count
@@ -167,8 +173,14 @@ private actor ModelWorkspaceFixtureHTTP: ModelHTTPTransport {
                                 let request = VNRecognizeTextRequest(); request.recognitionLevel = .accurate; request.recognitionLanguages = ["zh-Hans","en-US"]
                                 try VNImageRequestHandler(cgImage: cg).perform([request])
                                 let text = (request.results?.compactMap { $0.topCandidates(1).first?.string } ?? []).joined().filter { !$0.isWhitespace }
-                                let expected = ["模型目录": "完整客户端目录", "已接入": "测试模型", "服务连接": "本地共享服务", "用途路由": "画布文本润色"][section] ?? ""
+                                let expected = ["模型目录": "内置模型目录", "已接入": "测试模型", "服务连接": "本地共享服务", "用途路由": "画布文本润色"][section] ?? ""
                                 check(text.contains(expected), "\(width)/\(colorful)/\(dark) hub section \(section) native content rendered")
+                                check(!text.localizedCaseInsensitiveContains("tapnow"),
+                                    "\(width)/\(colorful)/\(dark) hub section \(section) has no source brand in visible text")
+                                if section == "模型目录" {
+                                    check(text.contains("图像极速模型") && (width < 1280 || text.contains("内置服务")),
+                                        "\(width)/\(colorful)/\(dark) branded catalog row uses neutral display aliases")
+                                }
                                 try bitmap.representation(using: .png, properties: [:])?.write(to: root.appendingPathComponent(
                                     "\(width)-\(colorful ? "colorful" : "minimal")-\(dark ? "dark" : "light")-hub-\(section).png"))
                             } else { check(false, "hub bitmap unavailable") }
