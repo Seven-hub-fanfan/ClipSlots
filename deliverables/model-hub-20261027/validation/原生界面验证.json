@@ -246,7 +246,11 @@
     "1280/true/true hub section 服务连接 native content rendered",
     "1280/true/true hub section 服务连接 has no source brand in visible text",
     "1280/true/true hub section 用途路由 native content rendered",
-    "1280/true/true hub section 用途路由 has no source brand in visible text"
+    "1280/true/true hub section 用途路由 has no source brand in visible text",
+    "editor/false bound catalog model and association visibly rendered",
+    "editor/false has no source brand in visible binding label",
+    "editor/true bound catalog model and association visibly rendered",
+    "editor/true has no source brand in visible binding label"
   ],
   "realPaidRequests": 0
 }

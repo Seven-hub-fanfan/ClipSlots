@@ -21,7 +21,7 @@ struct ModelProfileEditor: View {
                     TextField("名称", text: $profile.name)
                     TextField("模型标识", text: $profile.model)
                     if let id = profile.catalogID {
-                        Text("目录关联：\(id)。此处填写服务实际接受的标识。").font(.system(size: 11)).foregroundStyle(.secondary)
+                        Text("目录关联：\(ModelCatalogPresentation.identifier(id))。此处填写服务实际接受的标识。").font(.system(size: 11)).foregroundStyle(.secondary)
                     }
                     Picker("输出类型", selection: $profile.kind) { ForEach(ModelKind.allCases) { Text($0.title).tag($0) } }
                     if !profile.isCLI {

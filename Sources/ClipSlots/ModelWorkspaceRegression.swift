@@ -189,6 +189,37 @@ private actor ModelWorkspaceFixtureHTTP: ModelHTTPTransport {
                     }
                 }
             }
+            if let entry = models.catalog?.entries.first(where: { $0.model == "tapnow-image-turbo" }) {
+                for dark in [false, true] {
+                    // Sheet content is transparent; supply its native window background
+                    // when capturing the hosting view without the surrounding panel.
+                    let host = NSHostingView(rootView: ModelProfileEditor(profile: entry.draft(), models: models)
+                        .environment(\.colorScheme, dark ? .dark : .light)
+                        .background(dark ? Color(red: 0.14, green: 0.15, blue: 0.17) : Color.white))
+                    let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 680, height: 740),
+                        styleMask: [.titled, .closable], backing: .buffered, defer: false)
+                    window.isReleasedWhenClosed = false; window.contentView = host
+                    window.appearance = NSAppearance(named: dark ? .darkAqua : .aqua)
+                    window.makeKeyAndOrderFront(nil)
+                    try await Task.sleep(for: .milliseconds(240))
+                    host.layoutSubtreeIfNeeded()
+                    if let bitmap = host.bitmapImageRepForCachingDisplay(in: host.bounds) {
+                        host.cacheDisplay(in: host.bounds, to: bitmap)
+                        guard let cg = bitmap.cgImage else { throw ModelWorkspaceError.response }
+                        let request = VNRecognizeTextRequest()
+                        request.recognitionLevel = .accurate; request.recognitionLanguages = ["zh-Hans", "en-US"]
+                        try VNImageRequestHandler(cgImage: cg).perform([request])
+                        let text = (request.results?.compactMap { $0.topCandidates(1).first?.string } ?? []).joined()
+                        check(text.contains("目录关联") && text.contains("图像极速模型"),
+                            "editor/\(dark) bound catalog model and association visibly rendered")
+                        check(!text.localizedCaseInsensitiveContains("tapnow"),
+                            "editor/\(dark) has no source brand in visible binding label")
+                        try bitmap.representation(using: .png, properties: [:])?.write(to: root.appendingPathComponent(
+                            "editor-\(dark ? "dark" : "light").png"))
+                    } else { check(false, "editor bitmap unavailable") }
+                    window.close()
+                }
+            } else { check(false, "editor catalog fixture unavailable") }
         } catch { failed.append(error.localizedDescription) }
         let report: [String: Any] = ["ok": failed.isEmpty, "passed": passed, "failed": failed, "realPaidRequests": 0]
         try? JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys])

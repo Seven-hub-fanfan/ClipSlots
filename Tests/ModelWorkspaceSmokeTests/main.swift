@@ -157,7 +157,8 @@ actor BudgetFixture {
             let catalogBeforeDisplay = try catalogEncoder.encode(catalog)
             check(catalog.entries.allSatisfy { entry in
                 let visible = [entry.presentationName, entry.presentationModel, entry.presentationProvider,
-                    entry.presentationDescription, (try? entry.presentationConfig.encodedText()) ?? "", entry.draft().name].joined(separator: "\n")
+                    entry.presentationDescription, (try? entry.presentationConfig.encodedText()) ?? "", entry.draft().name,
+                    ModelCatalogPresentation.identifier(entry.draft().catalogID ?? "")].joined(separator: "\n")
                 return !visible.localizedCaseInsensitiveContains("tapnow")
             }, "all 119 catalog display fields and draft names are neutral")
             check(try catalogEncoder.encode(catalog) == catalogBeforeDisplay,
