@@ -1,0 +1,60 @@
+{
+  "schemaVersion": 1,
+  "sourceProduct": "TapNow",
+  "sourceVersion": "0.4.155",
+  "observedAt": "2026-10-27",
+  "extraction": "Static AST; no bundle bootstrap, network submission or credentials read",
+  "sourceOffsetUnit": "UTF-16 source code units",
+  "counts": {
+    "llm": 17,
+    "image": 31,
+    "video": 57,
+    "audio": 14
+  },
+  "sourceArtifacts": [
+    {
+      "path": "/Applications/TapNow.app/Contents/Resources/web/assets/vendor-pkg-tap-models-CWO_NP4e.js",
+      "sha256": "19c977f1a6afe6f2365010d23fe31ab90ce4c1d96d0988384af9039d36edf9ef",
+      "bytes": 307153
+    },
+    {
+      "path": "/Applications/TapNow.app/Contents/Resources/web/assets/vendor-shared-C-U24Utf.js",
+      "sha256": "2923588fd0f86d82c604fbac09b58c32efb580eb235061c22f4398d768729c1b",
+      "bytes": 256324
+    },
+    {
+      "path": "/Applications/TapNow.app/Contents/Resources/web/assets/vendor-pkg-endpoints-BZ5e7w2O.js",
+      "sha256": "b4e7f94168bd041615ff659f7a296ba605e0c80763678c2e8845b6af9d3d03f6",
+      "bytes": 139866
+    },
+    {
+      "path": "/Applications/TapNow.app/Contents/Resources/web/assets/vendor-pkg-core-E7gSgLFq.js",
+      "sha256": "f590c3b597ce6dccb0d4888d123c56e536c0e85b1caf648d6d35623095190574",
+      "bytes": 10040
+    }
+  ],
+  "reaEvidenceID": "ev_46cbe389039418c1b9ce4f6ec6a9abeb69685549f44fd040f3bdbed4aca2cc17",
+  "coverage": {
+    "imageRegistryAndEnumMatch": true,
+    "videoRegistryAndEnumMatch": true,
+    "audioRegistryAndEnumsMatch": true,
+    "llmDeclaredEntries": 17,
+    "mediaVariantCount": 155,
+    "declaredHidden": 18,
+    "regionalVisibility": 6,
+    "serverVisibilityOverridesObservedStatically": true,
+    "liveProviderModelAvailabilityVerified": false,
+    "paidGenerationRequests": 0
+  },
+  "tapnowGatewayPaths": {
+    "TEXT_GEN": "api/conversation/v1/generations/text",
+    "IMAGE_GEN": "api/conversation/v1/generations/image",
+    "VIDEO_GEN": "api/conversation/v1/generations/video",
+    "UNIFIED_GEN": "api/conversation/v2/generations",
+    "AUDIO_GEN": "api/conversation/v1/generations/audio",
+    "AUDIO_LYRICS_GEN": "api/conversation/v1/generations/lyrics/sync",
+    "AUDIO_VOICES": "api/conversation/v1/generations/audio/voices",
+    "WORLD_GEN": "api/conversation/v2/generations",
+    "TASK_STATUS": "api/conversation/v1/generations/tasks"
+  }
+}
