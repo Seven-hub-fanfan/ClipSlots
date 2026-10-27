@@ -42,6 +42,17 @@ struct WorkspaceContourSurface: NSViewRepresentable {
         override var isFlipped: Bool { true }
         override func hitTest(_ point: NSPoint) -> NSView? { nil }
 
+        private func gradientColors(center: CGFloat?) -> [CGColor] {
+            let ink = effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
+                ? NSColor.white : NSColor(srgbRed: 48 / 255, green: 48 / 255, blue: 52 / 255, alpha: 1)
+            // The final arch reaches the fixed right-edge fade. Keep its crown
+            // and shoulder at the same ink strength as the first two arches.
+            let trailingArch = center.map { $0 - halfWidth * 0.34 > bounds.width * 0.72 } ?? false
+            let stops: [CGFloat] = trailingArch ? [0, 0.42, 1, 1, 1, 1] : [0, 0.42, 1, 1, 0.42, 0]
+            let strength: CGFloat = highContrast ? 1 : 0.66
+            return stops.map { ink.withAlphaComponent($0 * strength).cgColor }
+        }
+
         override init(frame: NSRect) {
             super.init(frame: frame)
             wantsLayer = true
@@ -107,10 +118,7 @@ struct WorkspaceContourSurface: NSViewRepresentable {
                     ? NSColor.white : NSColor(srgbRed: 48 / 255, green: 48 / 255, blue: 52 / 255, alpha: 1)
                 CATransaction.begin()
                 CATransaction.setDisableActions(true)
-                let strength: CGFloat = highContrast ? 1 : 0.66
-                gradient.colors = [0, 0.42, 1, 1, 0.42, 0].map {
-                    ink.withAlphaComponent(CGFloat($0) * strength).cgColor
-                }
+                gradient.colors = gradientColors(center: targetCenter)
                 contourOpacity.colors = (highContrast ? [1, 1, 0.72] : [1, 0.90, 0.22]).map {
                     NSColor.white.withAlphaComponent(CGFloat($0)).cgColor
                 }
@@ -137,6 +145,7 @@ struct WorkspaceContourSurface: NSViewRepresentable {
         }
 
         private func setModel(center: CGFloat) {
+            gradient.colors = gradientColors(center: center)
             contour.path = WorkspaceSelectionContour(center: center, halfWidth: halfWidth).path(in: bounds).cgPath
             dot.position = CGPoint(x: center, y: bounds.height - 4.5)
         }
@@ -147,11 +156,13 @@ struct WorkspaceContourSurface: NSViewRepresentable {
             guard previous != center || !animated else { return }
             let oldPath = contour.presentation()?.path ?? contour.path
             let oldPosition = dot.presentation()?.position ?? dot.position
+            let oldColors = gradient.presentation()?.colors ?? gradient.colors
             CATransaction.begin()
             CATransaction.setDisableActions(true)
             setModel(center: center)
             contour.removeAnimation(forKey: "workspace-slide")
             dot.removeAnimation(forKey: "workspace-slide")
+            gradient.removeAnimation(forKey: "workspace-ink")
             if animated, previous != nil, bounds.width > 0, let oldPath {
                 let start = CACurrentMediaTime()
                 let shape = spring(keyPath: "path", begin: start)
@@ -162,6 +173,13 @@ struct WorkspaceContourSurface: NSViewRepresentable {
                 point.toValue = NSValue(point: dot.position)
                 contour.add(shape, forKey: "workspace-slide")
                 dot.add(point, forKey: "workspace-slide")
+                let ink = CABasicAnimation(keyPath: "colors")
+                ink.fromValue = oldColors
+                ink.toValue = gradient.colors
+                ink.duration = shape.duration
+                ink.beginTime = start
+                ink.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+                gradient.add(ink, forKey: "workspace-ink")
             }
             CATransaction.commit()
             // Do not defer the first visible response until page preparation ends.

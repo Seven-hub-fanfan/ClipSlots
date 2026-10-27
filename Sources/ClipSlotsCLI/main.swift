@@ -83,7 +83,7 @@ let CLI_VERSION: String = {
        !v.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
         return v
     }
-    return "2.17.98"
+    return "2.17.99"
 }()
 let DEFAULT_GROUP = "default"
 let DEFAULT_PAGE = "default_page"
