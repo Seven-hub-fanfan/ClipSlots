@@ -35,10 +35,12 @@ struct ModelWorkspaceView: View {
     @State private var newsSearch = ""
     @State private var newsSourceID = ""
     @State private var showingSources = false
+    private var initialConfigurationSection = "模型目录"
     private var bank: ModelQuestionBank? { models.document.banks.first { $0.id == bankID } }
     private var run: ModelEvaluationRun? { models.document.runs.first { $0.id == models.selectedRunID } }
-    init(store: SlotStoreObservable, models: ModelWorkspaceStore = .shared, initialTab: String = "测评") {
+    init(store: SlotStoreObservable, models: ModelWorkspaceStore = .shared, initialTab: String = "测评", initialConfigurationSection: String = "模型目录") {
         self.store = store; self.models = models
+        self.initialConfigurationSection = initialConfigurationSection
         _tab = State(initialValue: ModelWorkspaceTab(rawValue: initialTab) ?? .evaluation)
     }
 
@@ -376,8 +378,10 @@ struct ModelWorkspaceView: View {
                             }
                         }
                     }
+                } else {
+                    ModelHubConfigurationView(models: models, initialSection: initialConfigurationSection) { profileDraft = $0 }
                 }
-                ForEach(models.document.profiles.filter { $0.isCLI == configurationCLI }) { profile in
+                ForEach(models.document.profiles.filter { configurationCLI && $0.isCLI }) { profile in
                     card {
                         HStack {
                             VStack(alignment: .leading, spacing: 6) {
@@ -389,18 +393,6 @@ struct ModelWorkspaceView: View {
                             Spacer()
                             Button("编辑") { profileDraft = profile }
                             Button("移除") { Task { await models.removeProfile(profile.id) } }
-                        }
-                    }
-                }
-                card {
-                    VStack(alignment: .leading, spacing: 12) {
-                        Text("默认用途").font(.system(size: 16, weight: .semibold))
-                        ForEach(ModelPurpose.allCases) { purpose in
-                            Picker(purpose.title, selection: Binding(get: { models.document.defaults[purpose.rawValue] ?? "" }, set: { id in Task { await models.setDefault(purpose, id: id) } })) {
-                                Text("沿用原配置 / 未设置").tag("")
-                                ForEach(models.profiles.filter { !$0.isCLI && $0.kind == purpose.kind && !([ModelPurpose.agent, .questions].contains(purpose)
-                                    && $0.contract != .chatCompletions) }) { Text($0.name).tag($0.id) }
-                            }.frame(maxWidth: 500)
                         }
                     }
                 }

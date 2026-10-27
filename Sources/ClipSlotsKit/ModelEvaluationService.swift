@@ -24,6 +24,11 @@ private final class ModelNoRedirect: NSObject, URLSessionTaskDelegate {
                     completionHandler: @escaping (URLRequest?) -> Void) { completionHandler(nil) }
 }
 
+private actor ModelSubmissionWitness {
+    var started = false
+    func markStarted() { started = true }
+}
+
 public enum ModelJSONPath {
     public static func value(_ root: JSONValue, path: String) -> JSONValue? {
         var current: JSONValue? = root
@@ -57,10 +62,14 @@ public struct ModelEvaluationService: Sendable {
     private func request(profile: ModelProfile, key: String?, url: String, method: String,
                          body: JSONValue? = nil) throws -> URLRequest {
         try ModelProfile.validateURL(url)
-        guard let target = URL(string: url) else { throw ModelWorkspaceError.invalid("接口地址无效。") }
+        let encodedModel = profile.model.addingPercentEncoding(withAllowedCharacters: .alphanumerics) ?? ""
+        guard let target = URL(string: url.replacingOccurrences(of: "{model}", with: encodedModel)) else { throw ModelWorkspaceError.invalid("接口地址无效。") }
         var request = URLRequest(url: target, timeoutInterval: profile.timeout)
         request.httpMethod = method
         request.setValue("application/json", forHTTPHeaderField: "Accept")
+        if profile.contract == .audioSpeech { request.setValue("audio/*", forHTTPHeaderField: "Accept") }
+        for (name, value) in profile.headers ?? [:] { request.setValue(value, forHTTPHeaderField: name) }
+        if profile.contract == .anthropicMessages { request.setValue("2023-06-01", forHTTPHeaderField: "anthropic-version") }
         if profile.requiresKey {
             guard let key, !key.isEmpty, !key.contains("\n"), !key.contains("\r") else { throw ModelWorkspaceError.credential }
             request.setValue(profile.authPrefix + key, forHTTPHeaderField: profile.authHeader)
@@ -84,7 +93,7 @@ public struct ModelEvaluationService: Sendable {
             throw ModelWorkspaceError.invalid("密钥只能保存在认证字段，不能放入默认参数。")
         }
         fields["model"] = .string(profile.model)
-        if profile.contract == .chatCompletions {
+        if profile.contract.isText {
             var content: JSONValue = .string(question.prompt)
             if !question.references.isEmpty {
                 guard profile.supportsImages else { throw ModelWorkspaceError.invalid("该 LLM 未声明图像输入能力。") }
@@ -102,26 +111,46 @@ public struct ModelEvaluationService: Sendable {
             }
             fields["messages"] = [["role": "user", "content": content]]
             fields["stream"] = false
+            return ModelTextWire.body(fields, contract: profile.contract)
         } else {
-            fields["prompt"] = .string(question.prompt)
+            fields[profile.mapping?.promptField ?? (profile.contract == .audioSpeech ? "input" : "prompt")] = .string(question.prompt)
+            for (semantic, wire) in profile.mapping?.parameterFields ?? [:] {
+                if let value = question.nodeParameters?[semantic] { fields[wire] = value }
+            }
             // Never silently ignore references for an unsupported generation contract.
             if !question.references.isEmpty {
-                guard profile.contract == .asyncMedia, let field = profile.referenceInputField else {
-                    throw ModelWorkspaceError.invalid("此 API 契约未配置参考输入字段。请在模型配置中声明接口的参考输入方式。")
-                }
-                fields[field] = .array(try question.references.map { ref in
-                    let url = URL(fileURLWithPath: ref.path)
-                    let ext = URL(fileURLWithPath: ref.name ?? ref.path).pathExtension.lowercased()
-                    let mime = ["png": "image/png", "jpg": "image/jpeg", "jpeg": "image/jpeg", "webp": "image/webp"][ext]
-                    guard let mime, let size = try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize,
-                          size <= 12 * 1024 * 1024 else {
-                        throw ModelWorkspaceError.invalid("异步参考输入需要 12MB 内的 PNG/JPEG/WebP。")
+                var references: [String: [JSONValue]] = [:]
+                for ref in question.references {
+                    let mime = Self.mime(for: ref)
+                    let kind = ref.mediaKind ?? (mime.hasPrefix("image/") ? .image : mime.hasPrefix("video/") ? .video : .audio)
+                    let field = profile.mapping?.referenceFields[ref.role ?? ""]
+                        ?? profile.mapping?.referenceFields[kind.rawValue]
+                        ?? (kind == .image ? profile.referenceInputField : nil)
+                    guard let field, !mime.isEmpty, let size = try? URL(fileURLWithPath: ref.path).resourceValues(forKeys: [.fileSizeKey]).fileSize,
+                          size > 0, size <= 20 * 1024 * 1024 else {
+                        throw ModelWorkspaceError.invalid("请为 \(ref.role ?? kind.title) 配置参考输入映射；单个内联素材需小于 20 MB。")
                     }
-                    return .string("data:\(mime);base64," + (try Data(contentsOf: url)).base64EncodedString())
-                })
+                    let encoded = try Data(contentsOf: URL(fileURLWithPath: ref.path)).base64EncodedString()
+                    let value: JSONValue = profile.mapping?.referenceEncoding == "base64Object"
+                        ? ["type": .string(kind.rawValue), "role": .string(ref.role ?? "reference"), "mime_type": .string(mime), "data": .string(encoded)]
+                        : .string("data:\(mime);base64," + encoded)
+                    references[field, default: []].append(value)
+                }
+                for (field, values) in references {
+                    if profile.mapping?.referenceShape == "single" {
+                        guard values.count == 1 else { throw ModelWorkspaceError.invalid("单值参考字段收到多个素材，请改用数组或区分首尾帧映射。") }
+                        fields[field] = values[0]
+                    } else { fields[field] = .array(values) }
+                }
             }
         }
         return .object(fields)
+    }
+    public static func mime(for ref: ModelReference) -> String {
+        let ext = URL(fileURLWithPath: ref.name ?? ref.path).pathExtension.lowercased()
+        return ["png": "image/png", "jpg": "image/jpeg", "jpeg": "image/jpeg", "webp": "image/webp",
+                "mp4": "video/mp4", "mov": "video/quicktime", "webm": "video/webm",
+                "mp3": "audio/mpeg", "wav": "audio/wav", "m4a": "audio/mp4", "ogg": "audio/ogg", "flac": "audio/flac"][ext] ?? ""
     }
 
     public func submit(question: ModelQuestion, profile: ModelProfile, key: String?,
@@ -130,14 +159,31 @@ public struct ModelEvaluationService: Sendable {
         let request = try request(profile: profile, key: key, url: profile.endpoint, method: "POST", body: body)
         try Task.checkCancellation()
         let data: Data; let status: Int
-        do { (data, status) = try await transport.send(request) }
-        catch { throw ModelWorkspaceError.submissionUnknown }
+        let witness = ModelSubmissionWitness()
+        do { (data, status) = try await ModelRequestBudget.shared.withPermit(profile: profile) {
+            try Task.checkCancellation()
+            await witness.markStarted()
+            return try await transport.send(request)
+        } }
+        catch {
+            if await !witness.started { throw error }
+            throw ModelWorkspaceError.submissionUnknown
+        }
         if (400...499).contains(status) { throw ModelWorkspaceError.http(status) }
         guard (200...299).contains(status) else { throw ModelWorkspaceError.submissionUnknown }
+        if profile.contract == .audioSpeech {
+            let ext = profile.outputExtension ?? profile.parameters["response_format"]?.stringValue ?? "mp3"
+            guard Self.validAudio(data, extension: ext) else { throw ModelWorkspaceError.submissionUnknown }
+            let root = ClipSlotsPaths.dataRoot.appendingPathComponent("models/media")
+            try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+            let file = root.appendingPathComponent(UUID().uuidString + "." + ext)
+            try data.write(to: file, options: .atomic)
+            return .init(paths: [file.path])
+        }
         guard let root = try? JSONDecoder().decode(JSONValue.self, from: data) else { throw ModelWorkspaceError.submissionUnknown }
         switch profile.contract {
-        case .chatCompletions:
-            guard let text = root["choices"]?.arrayValue?.first?["message"]?["content"]?.stringValue, !text.isEmpty else {
+        case .chatCompletions, .responses, .anthropicMessages, .geminiContent:
+            guard let text = try? ModelTextWire.assistant(root, contract: profile.contract)["content"]?.stringValue, !text.isEmpty else {
                 throw ModelWorkspaceError.submissionUnknown
             }
             return .init(text: text)
@@ -157,6 +203,11 @@ public struct ModelEvaluationService: Sendable {
             }
             guard !urls.isEmpty || !paths.isEmpty else { throw ModelWorkspaceError.submissionUnknown }
             return .init(urls: urls, paths: paths)
+        case .syncMedia:
+            let urls = ModelJSONPath.media(ModelJSONPath.value(root, path: profile.outputPath ?? ""))
+            guard !urls.isEmpty else { throw ModelWorkspaceError.submissionUnknown }
+            return .init(urls: urls)
+        case .audioSpeech: throw ModelWorkspaceError.response
         case .asyncMedia:
             guard let id = ModelJSONPath.value(root, path: profile.asynchronous.taskIDPath)?.stringValue,
                   !id.isEmpty, id.utf8.count < 512 else { throw ModelWorkspaceError.submissionUnknown }
@@ -164,12 +215,43 @@ public struct ModelEvaluationService: Sendable {
             return nil
         }
     }
+    public static func validAudio(_ data: Data, extension ext: String) -> Bool {
+        guard data.count > 12, data.count <= 32 * 1024 * 1024 else { return false }
+        let header = String(decoding: data.prefix(4), as: UTF8.self)
+        switch ext {
+        case "mp3": return header.hasPrefix("ID3") || (data[0] == 0xff && data[1] & 0xe0 == 0xe0)
+        case "aac": return data[0] == 0xff && data[1] & 0xf0 == 0xf0
+        case "wav": return header == "RIFF" && String(decoding: data[8..<12], as: UTF8.self) == "WAVE"
+        case "opus": return header == "OggS"
+        case "flac": return header == "fLaC"
+        case "pcm": return data.count % 2 == 0
+        default: return false
+        }
+    }
+
+    public func discover(service: ModelServiceConnection, key: String?) async throws -> [DiscoveredModel] {
+        try service.validate()
+        guard !service.discoveryURL.isEmpty else { throw ModelWorkspaceError.invalid("请填写只读模型发现地址。") }
+        var p = ModelProfile(); p.requiresKey = service.requiresKey; p.authHeader = service.authHeader
+        p.authPrefix = service.authPrefix; p.timeout = service.timeout
+        let req = try request(profile: p, key: key, url: service.url(service.discoveryURL), method: "GET")
+        p.serviceID = service.id; p.serviceConcurrency = service.concurrency
+        let snapshot = p
+        let (data, status) = try await ModelRequestBudget.shared.withPermit(profile: snapshot) { try await transport.send(req) }
+        guard (200...299).contains(status) else { throw ModelWorkspaceError.http(status) }
+        let root = try JSONDecoder().decode(JSONValue.self, from: data)
+        guard let items = ModelJSONPath.value(root, path: service.discoveryPath)?.arrayValue else { throw ModelWorkspaceError.response }
+        return items.compactMap {
+            guard let id = $0["id"]?.stringValue ?? $0["name"]?.stringValue, !id.isEmpty else { return nil }
+            return DiscoveredModel(id: id, title: $0["displayName"]?.stringValue ?? id)
+        }
+    }
 
     public func query(profile: ModelProfile, key: String?, taskID: String) async throws -> ModelEvaluationOutput? {
         let encoded = taskID.addingPercentEncoding(withAllowedCharacters: .alphanumerics) ?? ""
         let url = profile.asynchronous.queryURL.replacingOccurrences(of: "{id}", with: encoded)
         let req = try request(profile: profile, key: key, url: url, method: "GET")
-        let (data, status) = try await transport.send(req)
+        let (data, status) = try await ModelRequestBudget.shared.withPermit(profile: profile) { try await transport.send(req) }
         guard (200...299).contains(status) else { throw ModelWorkspaceError.http(status) }
         let root = try JSONDecoder().decode(JSONValue.self, from: data)
         guard let state = ModelJSONPath.value(root, path: profile.asynchronous.statusPath)?.stringValue else {

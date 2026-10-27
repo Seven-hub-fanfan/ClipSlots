@@ -22,6 +22,8 @@ struct CanvasTextComposer: View {
     let onPolish: () -> Void
     let onStop: () -> Void
     let onHeightChange: (CGFloat) -> Void
+    var onModelSelection: ((String?) -> Void)? = nil
+    @ObservedObject private var models = ModelWorkspaceStore.shared
     @State private var editorHeight: CGFloat = 112
     @State private var showingError = false
     @State private var backendRevision: UInt = 0
@@ -43,6 +45,7 @@ struct CanvasTextComposer: View {
         return AgentBackendCoordinator.kind(for: .sidebar)
     }
     private var modelLabel: String {
+        if let profile = node.modelProfileID != nil ? models.canvasProfile(for: node) : models.defaultProfile(.canvasText) { return profile.name }
         switch backend {
         case .deepseek: return model
         case .tika: return "Tika Agent"
@@ -81,6 +84,14 @@ struct CanvasTextComposer: View {
                 .tapCursor(.iBeam)
             HStack(spacing: 8) {
                 Menu {
+                    if let onModelSelection {
+                        Button("用途默认 LLM") { onModelSelection("__default__") }
+                        ForEach(models.profiles.filter { $0.kind == .llm && !$0.isCLI }) { profile in
+                            Button(profile.name) { onModelSelection(profile.id) }
+                        }
+                        Button("自动选择默认模型") { onModelSelection(nil) }
+                        Divider()
+                    }
                     if backend == .deepseek {
                         ForEach(AgentConfig.modelPresets) { preset in
                             Button(preset.id) { model = preset.id }
@@ -134,7 +145,7 @@ struct CanvasTextComposer: View {
         }
         .onChange(of: editorHeight) { onHeightChange(min($0, maximumEditorHeight) + 108) }
         .onChange(of: maximumEditorHeight) { onHeightChange(min(editorHeight, $0) + 108) }
-        .onAppear { onHeightChange(min(editorHeight, maximumEditorHeight) + 108) }
+        .onAppear { onHeightChange(min(editorHeight, maximumEditorHeight) + 108); Task { await models.load() } }
         .onDisappear { document.saveSoon() }
         .onReceive(NotificationCenter.default.publisher(
             for: AgentBackendCoordinator.backendChangedNotification)) { notification in

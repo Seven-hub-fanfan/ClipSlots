@@ -267,7 +267,8 @@ extension CanvasWorkspaceView {
                             startTextGeneration(node)
                         },
                         onStop: { canvas.stopGeneration(node) },
-                        onHeightChange: { textComposerHeight = $0 })
+                        onHeightChange: { textComposerHeight = $0 },
+                        onModelSelection: { id in canvas.updateNode(id: node.id) { $0.modelProfileID = id }; canvas.flushSave() })
                 } else {
                 CanvasNodeComposer(node: node, text: renderText(for: node),
                                editing: isComposing,

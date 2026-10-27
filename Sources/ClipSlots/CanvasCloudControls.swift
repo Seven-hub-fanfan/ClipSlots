@@ -10,6 +10,7 @@ struct CanvasCloudControls: View {
     @State private var key = ""
     @State private var showSettings = false
     private var localSpeech: Bool { isAudio && draft.audio.scene == .speech }
+    private var configuredAPI: Bool { isAudio && session.node?.modelProfileID != nil }
     private var providers: [CanvasCloudConfiguration.Provider] {
         isAudio ? (draft.audio.scene == .sound ? [.elevenLabs] : [.elevenLabs, .miniMax]) : [.tripo, .worldLabs]
     }
@@ -89,7 +90,11 @@ struct CanvasCloudControls: View {
                     CanvasToolChoice(title: "音频场景", selection: $draft.audio.scene,
                         choices: CanvasAudioConfiguration.Scene.allCases.map { ($0, $0.title) })
                 }
-                if !localSpeech {
+                if configuredAPI {
+                    Text(session.node.flatMap { models.canvasProfile(for: $0)?.name } ?? "未设置 API").font(.system(size: 11)).lineLimit(1)
+                    Button { showSettings.toggle() } label: { Image(systemName: "slider.horizontal.3") }
+                        .popover(isPresented: $showSettings, arrowEdge: .bottom) { apiSettings }
+                } else if !localSpeech {
                     CanvasToolChoice(title: "服务", selection: cloud.provider, choices: providers.map { ($0, $0.title) })
                     if !isAudio && cloud.wrappedValue.provider == .tripo {
                         CanvasToolChoice(title: "生成方式", selection: cloud.mode, choices: modeChoices)
@@ -137,7 +142,9 @@ struct CanvasCloudControls: View {
         return key.isEmpty || (cloud.wrappedValue.task?.id == nil && cloud.wrappedValue.task != nil)
     }
     @ViewBuilder private var taskStatus: some View {
-            if !localSpeech {
+            if configuredAPI {
+                Text("使用配置中心共享连接与认证").font(.system(size: 10)).foregroundColor(CanvasSkin.faintInk)
+            } else if !localSpeech {
                 if let task = cloud.wrappedValue.task {
                     HStack {
                         Text("任务：\(task.id ?? "提交结果未知") · \(task.state.rawValue)").textSelection(.enabled).lineLimit(1)
@@ -152,6 +159,18 @@ struct CanvasCloudControls: View {
                     Text("在参数中填写服务密钥后生成").font(.system(size: 10)).foregroundColor(CanvasSkin.faintInk)
                 }
             }
+    }
+    private var apiSettings: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("音频 API 参数").font(.system(size: 14, weight: .semibold))
+            TextField("上游声音 ID", text: $draft.audio.voiceID)
+            TextField("语速", value: $draft.audio.rate, format: .number)
+            TextField("时长 / 秒", value: cloud.duration, format: .number)
+            Toggle("纯音乐", isOn: cloud.instrumental)
+            CanvasToolPrompt(text: cloud.lyrics, placeholder: "歌词（可选）")
+            Text("参数按配置中心显式映射发送；本机声音 ID 与云端声音 ID 需分别配置。")
+                .font(.system(size: 10)).foregroundStyle(.secondary)
+        }.padding(16).frame(width: 310).textFieldStyle(.roundedBorder)
     }
     private var sourceTasks: [(String?, String)] {
         [(nil, "选择模型任务")] + (draft.cloudResources ?? [:]).keys.sorted().compactMap { id in

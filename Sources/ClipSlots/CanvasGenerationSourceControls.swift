@@ -11,6 +11,7 @@ struct CanvasGenerationSourceControls: View {
     @State private var showingEnvironment = false
     @State private var workflowID = ""
     @State private var allOutputs = true
+    @State private var showingAPI = false
     private var capability: GenerationCapability? { catalog.capability(id: node.byteArtist.workflowID) }
     private var inputPlan: CanvasWorkflowResolver.Plan? {
         canvas.byteArtistInputPlan?(node)
@@ -52,6 +53,10 @@ struct CanvasGenerationSourceControls: View {
             if node.modelProfileID != nil {
                 Text(models.canvasProfile(for: node)?.name ?? "请设置默认 API")
                     .font(.system(size: 11)).lineLimit(1).frame(maxWidth: 160)
+                Button { showingAPI = true } label: { Image(systemName: "slider.horizontal.3") }
+                    .buttonStyle(.plain).help("API 参数").popover(isPresented: $showingAPI) {
+                        CanvasModelAPIControls(node: canvas.node(id: node.id) ?? node, canvas: canvas)
+                    }
             } else if node.generationProvider == .byteartist {
                 Button { showingLibrary = true } label: {
                     HStack(spacing: 4) {
@@ -74,7 +79,7 @@ struct CanvasGenerationSourceControls: View {
         .popover(isPresented: $showingWorkflow, arrowEdge: .bottom) { workflowPanel }
         .popover(isPresented: $showingLibrary, arrowEdge: .bottom) { library }
         .sheet(isPresented: $showingEnvironment) { EnvironmentSetupView() }
-        .onAppear { if node.generationProvider == .byteartist { catalog.loadIfNeeded() } }
+        .onAppear { if node.generationProvider == .byteartist { catalog.loadIfNeeded() }; Task { await models.load() } }
     }
 
     private var library: some View {

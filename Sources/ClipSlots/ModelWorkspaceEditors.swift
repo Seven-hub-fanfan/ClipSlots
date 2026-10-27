@@ -9,6 +9,8 @@ struct ModelProfileEditor: View {
     @Environment(\.dismiss) private var dismiss
     @State private var key = ""
     @State private var parameters = "{}"
+    @State private var mapping = "{}"
+    @State private var headers = "{}"
     @State private var busy = false
     @State private var error: String?
     var body: some View {
@@ -18,19 +20,47 @@ struct ModelProfileEditor: View {
                 Form {
                     TextField("名称", text: $profile.name)
                     TextField("模型标识", text: $profile.model)
+                    if let id = profile.catalogID {
+                        Text("目录关联：\(id)。此处填写服务实际接受的标识。").font(.system(size: 11)).foregroundStyle(.secondary)
+                    }
                     Picker("输出类型", selection: $profile.kind) { ForEach(ModelKind.allCases) { Text($0.title).tag($0) } }
                     if !profile.isCLI {
-                        TextField("完整请求地址", text: $profile.endpoint)
-                        Text("请填写实际接口 URL，例如 …/v1/chat/completions。").font(.system(size: 11)).foregroundStyle(.secondary)
+                        Picker("共享服务连接", selection: Binding(get: { profile.serviceID ?? "" }, set: { profile.serviceID = $0.isEmpty ? nil : $0 })) {
+                            Text("独立完整地址").tag("")
+                            ForEach(models.document.services ?? []) { Text($0.name).tag($0.id) }
+                        }
+                        TextField(profile.serviceID == nil ? "完整请求地址" : "请求路径 / 完整地址", text: $profile.endpoint)
+                        Text("按服务文档填写。Gemini 可使用 models/{model}:generateContent。").font(.system(size: 11)).foregroundStyle(.secondary)
                         Picker("接口契约", selection: $profile.contract) { ForEach(ModelAPIContract.allCases) { Text($0.title).tag($0) } }
-                        Toggle("需要密钥", isOn: $profile.requiresKey)
-                        if profile.requiresKey {
+                        if let entry = models.catalog?.entries.first(where: { $0.id == profile.catalogID }),
+                           let variants = entry.config["variants"]?.arrayValue, !variants.isEmpty {
+                            Picker("目录变体", selection: Binding(get: { profile.catalogVariantKey ?? "" }, set: { profile.catalogVariantKey = $0.isEmpty ? nil : $0 })) {
+                                Text("按节点输入选择").tag("")
+                                ForEach(variants.indices, id: \.self) { i in Text(variants[i]["modelType"]?.stringValue ?? "").tag(variants[i]["key"]?.stringValue ?? "") }
+                            }
+                        }
+                        if profile.serviceID == nil { Toggle("需要密钥", isOn: $profile.requiresKey) }
+                        if profile.requiresKey && profile.serviceID == nil {
                             SecureField("新密钥（留空保留已有）", text: $key)
                             TextField("认证请求头", text: $profile.authHeader)
                             TextField("认证前缀", text: $profile.authPrefix)
                             Text("密钥保存到 macOS 钥匙串，不进入题库和结果导出。").font(.system(size: 11)).foregroundStyle(.secondary)
                         }
                         Toggle("支持 LLM 图像参考输入", isOn: $profile.supportsImages)
+                        if profile.contract == .syncMedia {
+                            TextField("同步媒体 URL 路径", text: Binding(get: { profile.outputPath ?? "" }, set: { profile.outputPath = $0 }))
+                        }
+                        if profile.contract == .audioSpeech {
+                            TextField("音频扩展名", text: Binding(get: { profile.outputExtension ?? "mp3" }, set: { profile.outputExtension = $0 }))
+                        }
+                        if !profile.contract.isText {
+                            Text("节点输入映射 JSON").font(.system(size: 12, weight: .medium))
+                            Text("参数语义：aspectRatio、resolution、duration、generateAudio、voice、speed、lyrics、instrumental。参考键：image、video、audio、firstFrame、lastFrame。")
+                                .font(.system(size: 10)).foregroundStyle(.secondary)
+                            TextEditor(text: $mapping).font(.system(size: 11, design: .monospaced)).frame(height: 140)
+                        }
+                        Text("附加请求头 JSON（版本等公开字段）").font(.system(size: 11))
+                        TextEditor(text: $headers).font(.system(size: 11, design: .monospaced)).frame(height: 65)
                         if profile.contract == .asyncMedia {
                             TextField("参考输入字段（可选）", text: Binding(get: { profile.referenceInputField ?? "" },
                                 set: { profile.referenceInputField = $0.isEmpty ? nil : $0 }))
@@ -65,13 +95,26 @@ struct ModelProfileEditor: View {
                             error = "默认参数需要 JSON 对象。"; return
                         }
                         profile.parameters = raw
+                        do {
+                            if !profile.contract.isText {
+                                profile.mapping = try JSONDecoder().decode(ModelInputMapping.self, from: Data(mapping.utf8))
+                            }
+                            profile.headers = try JSONDecoder().decode([String: String].self, from: Data(headers.utf8))
+                        } catch { self.error = "输入映射或请求头 JSON 格式无效。"; return }
                         if await models.saveProfile(profile, key: key) { dismiss() }
                         else { error = models.message }
                     }
                 }.disabled(busy)
             }
         }.padding(24).frame(width: 580, height: 680)
-            .onAppear { parameters = (try? JSONValue.object(profile.parameters).encodedText()) ?? "{}" }
+            .onAppear {
+                parameters = (try? JSONValue.object(profile.parameters).encodedText()) ?? "{}"
+                let encoder = JSONEncoder(); encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+                var initial = profile.mapping ?? ModelInputMapping()
+                if profile.mapping == nil && profile.contract == .audioSpeech { initial.promptField = "input"; initial.parameterFields = ["voice": "voice", "speed": "speed"] }
+                mapping = (try? encoder.encode(initial)).map { String(decoding: $0, as: UTF8.self) } ?? "{}"
+                headers = (try? encoder.encode(profile.headers ?? [:])).map { String(decoding: $0, as: UTF8.self) } ?? "{}"
+            }
     }
 }
 

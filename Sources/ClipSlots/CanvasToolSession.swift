@@ -198,8 +198,10 @@ import ClipSlotsKit
                cell.state != .failed && cell.state != .cancelled {
                 id = old
             } else {
-                var question = ModelQuestion(); question.kind = .audio
-                question.prompt = prompt; question.title = "画布音频"
+                let ids = Set(self.canvas.incomingEdges(of: source.id).map(\.fromNodeId) + [source.id])
+                let question = try ModelCanvasInput.question(node: source,
+                    facts: CanvasWorkflowCapture.facts(nodes: self.canvas.nodes.filter { ids.contains($0.id) }, store: self.store),
+                    edges: self.canvas.edges, promptOverride: prompt)
                 guard let created = await models.beginCanvas(question: question, profile: profile) else {
                     throw ModelWorkspaceError.invalid(models.message ?? "任务未保存")
                 }
@@ -225,7 +227,10 @@ import ClipSlotsKit
                         if !FileManager.default.fileExists(atPath: url.path) { try FileManager.default.moveItem(at: file, to: url) }
                     }
                     try await self.ingest(url)
-                    self.canvas.updateNode(id: self.nodeID) { $0.taskId = "api-" + id }
+                    self.canvas.updateNode(id: self.nodeID) {
+                        $0.taskId = "api-" + id
+                        if let output = $0.tools?.resourceAttachmentID, !$0.outputAttachmentIds.contains(output) { $0.outputAttachmentIds.append(output) }
+                    }
                     self.canvas.flushSave()
                     self.message = "音频生成完成"; return
                 }

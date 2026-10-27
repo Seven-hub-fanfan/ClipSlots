@@ -127,7 +127,7 @@ enum AgentBackendCoordinator {
         switch kind {
         case .deepseek:
             if let profile = ModelConfigurationBridge.profile(.agent), !profile.isCLI,
-               profile.contract == .chatCompletions, (try? profile.validate()) != nil {
+               profile.contract.isText, (try? profile.validate()) != nil {
                 let secret: AgentSecretStore = profile.requiresKey
                     ? AgentKeychain(service: profile.keyService, account: profile.keyAccount)
                     : AgentInMemorySecretStore(key: "unauthenticated")
@@ -198,6 +198,8 @@ private struct ModelAgentTransport: AgentTransport {
     let profile: ModelProfile
     func stream(request: URLRequest) async throws -> AgentHTTPStream {
         var modified = request
+        let modelID = profile.model.addingPercentEncoding(withAllowedCharacters: .alphanumerics) ?? ""
+        modified.url = URL(string: profile.endpoint.replacingOccurrences(of: "{model}", with: modelID))
         let bearer = request.value(forHTTPHeaderField: "Authorization") ?? ""
         modified.setValue(nil, forHTTPHeaderField: "Authorization")
         if profile.requiresKey {
@@ -208,8 +210,55 @@ private struct ModelAgentTransport: AgentTransport {
             for (name, value) in profile.parameters where !["messages", "model", "stream", "tools", "tool_choice"].contains(name) {
                 fields[name] = value
             }
-            modified.httpBody = try JSONEncoder().encode(JSONValue.object(fields))
+            // Native Gemini tool result messages require the original function name.
+            if profile.contract == .geminiContent, let messages = fields["messages"]?.arrayValue {
+                var names: [String: JSONValue] = [:]
+                fields["messages"] = .array(messages.map { message in
+                    for call in message["tool_calls"]?.arrayValue ?? [] {
+                        if let id = call["id"]?.stringValue { names[id] = call["function"]?["name"] }
+                    }
+                    if let id = message["tool_call_id"]?.stringValue, let name = names[id], var value = message.objectValue {
+                        value["name"] = name; return .object(value)
+                    }
+                    return message
+                })
+            }
+            modified.httpBody = try JSONEncoder().encode(ModelTextWire.body(fields, contract: profile.contract))
         }
-        return try await URLSessionAgentTransport(timeout: profile.timeout).stream(request: modified)
+        for (name, value) in profile.headers ?? [:] { modified.setValue(value, forHTTPHeaderField: name) }
+        if profile.contract == .anthropicMessages { modified.setValue("2023-06-01", forHTTPHeaderField: "anthropic-version") }
+        if profile.contract != .chatCompletions {
+            modified.setValue("application/json", forHTTPHeaderField: "Accept")
+            let frozenRequest = modified
+            let (data, status) = try await ModelRequestBudget.shared.withPermit(profile: profile) { try await ModelURLSessionTransport().send(frozenRequest) }
+            guard (200...299).contains(status) else { return .init(statusCode: status, chunks: .init { $0.finish() }) }
+            let root = try JSONDecoder().decode(JSONValue.self, from: data)
+            let assistant = try ModelTextWire.assistant(root, contract: profile.contract)
+            var delta = assistant.objectValue ?? [:]
+            if let calls = delta["tool_calls"]?.arrayValue {
+                delta["tool_calls"] = .array(calls.enumerated().map { index, call in
+                    var value = call.objectValue ?? [:]; value["index"] = .number(Double(index)); return .object(value)
+                })
+            }
+            let chunk: JSONValue = ["choices": [["index": 0, "delta": .object(delta), "finish_reason": assistant["tool_calls"] == nil ? "stop" : "tool_calls"]]]
+            let text = "data: " + (try chunk.encodedText()) + "\n\ndata: [DONE]\n\n"
+            return .init(statusCode: status, chunks: .init { $0.yield(Data(text.utf8)); $0.finish() })
+        }
+        // Keep the permit until the stream completes, including Agent tool rounds.
+        let frozenRequest = modified
+        let chunks = AsyncThrowingStream<Data, Error> { continuation in
+            let task = Task {
+                do {
+                    try await ModelRequestBudget.shared.withPermit(profile: profile) {
+                        let response = try await URLSessionAgentTransport(timeout: profile.timeout).stream(request: frozenRequest)
+                        guard (200...299).contains(response.statusCode) else { throw ModelWorkspaceError.http(response.statusCode) }
+                        for try await data in response.chunks { continuation.yield(data) }
+                    }
+                    continuation.finish()
+                } catch { continuation.finish(throwing: error) }
+            }
+            continuation.onTermination = { _ in task.cancel() }
+        }
+        return .init(statusCode: 200, chunks: chunks)
     }
 }

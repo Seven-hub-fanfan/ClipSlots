@@ -21,15 +21,18 @@ public enum ModelDimension: String, Codable, CaseIterable, Identifiable, Sendabl
 }
 
 public enum ModelPurpose: String, Codable, CaseIterable, Identifiable, Sendable {
-    case agent, questions, canvasImage, canvasVideo, canvasAudio
+    case agent, questions, canvasText, canvasImage, canvasVideo, canvasSpeech, canvasMusic, canvasSound, canvasAudio
     public var id: String { rawValue }
     public var title: String {
         switch self { case .agent: return "Agent LLM"; case .questions: return "出题 LLM"
-        case .canvasImage: return "画布图像"; case .canvasVideo: return "画布视频"; case .canvasAudio: return "画布音频" }
+        case .canvasText: return "画布文本润色"
+        case .canvasImage: return "画布图像"; case .canvasVideo: return "画布视频"
+        case .canvasSpeech: return "画布语音"; case .canvasMusic: return "画布音乐"
+        case .canvasSound: return "画布音效"; case .canvasAudio: return "旧版音频回退" }
     }
     public var kind: ModelKind {
-        switch self { case .agent, .questions: return .llm; case .canvasImage: return .image
-        case .canvasVideo: return .video; case .canvasAudio: return .audio }
+        switch self { case .agent, .questions, .canvasText: return .llm; case .canvasImage: return .image
+        case .canvasVideo: return .video; case .canvasAudio, .canvasSpeech, .canvasMusic, .canvasSound: return .audio }
     }
 }
 
@@ -45,12 +48,15 @@ public struct ModelAsyncContract: Codable, Equatable, Sendable {
 }
 
 public enum ModelAPIContract: String, Codable, CaseIterable, Identifiable, Sendable {
-    case chatCompletions, imageGenerations, asyncMedia
+    case chatCompletions, responses, anthropicMessages, geminiContent, imageGenerations, syncMedia, audioSpeech, asyncMedia
     public var id: String { rawValue }
     public var title: String {
         switch self { case .chatCompletions: return "Chat Completions"; case .imageGenerations: return "Images Generations"
-        case .asyncMedia: return "异步媒体任务" }
+        case .responses: return "OpenAI Responses"; case .anthropicMessages: return "Anthropic Messages"
+        case .geminiContent: return "Gemini generateContent"; case .syncMedia: return "同步媒体 JSON"
+        case .audioSpeech: return "语音二进制"; case .asyncMedia: return "异步媒体任务" }
     }
+    public var isText: Bool { [.chatCompletions, .responses, .anthropicMessages, .geminiContent].contains(self) }
 }
 
 public struct ModelProfile: Codable, Equatable, Identifiable, Sendable {
@@ -75,6 +81,16 @@ public struct ModelProfile: Codable, Equatable, Identifiable, Sendable {
     public var asynchronous = ModelAsyncContract()
     /// Explicit JSON field for base64 reference inputs in custom async contracts.
     public var referenceInputField: String?
+    public var serviceID: String?
+    public var catalogID: String?
+    public var catalogVariantKey: String?
+    public var credentialAccount: String?
+    public var credentialService: String?
+    public var mapping: ModelInputMapping?
+    public var outputPath: String?
+    public var outputExtension: String?
+    public var headers: [String: String]?
+    public var serviceConcurrency: Int?
     /// CLI profiles keep a frozen context and capability identity.
     public var cliContext: GenerationProviderContext?
     public var cliCapabilityID: String?
@@ -82,9 +98,9 @@ public struct ModelProfile: Codable, Equatable, Identifiable, Sendable {
     public var cliOutputBindings: [GenerationOutputBinding] = []
     public var cliPromptKey = "prompt"
     public init() {}
-    public var keyAccount: String { legacyKeyAccount ?? id }
+    public var keyAccount: String { credentialAccount ?? legacyKeyAccount ?? id }
     public var isCLI: Bool { cliContext != nil }
-    public var keyService: String { legacyKeyAccount == nil ? "com.clipslots.models" : AgentKeychain.service }
+    public var keyService: String { credentialService ?? (legacyKeyAccount == nil ? "com.clipslots.models" : AgentKeychain.service) }
     public func validate() throws {
         guard !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
               !model.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
@@ -107,11 +123,15 @@ public struct ModelProfile: Codable, Equatable, Identifiable, Sendable {
             guard cliCapabilityID != nil, cliInputSchema != nil else { throw ModelWorkspaceError.invalid("请先发现 CLI 能力。") }
             return
         }
-        try Self.validateURL(endpoint)
+        if serviceID == nil || endpoint.hasPrefix("http") { try Self.validateURL(endpoint.replacingOccurrences(of: "{model}", with: "model")) }
+        else { guard !endpoint.isEmpty, !endpoint.contains(".."), !endpoint.contains("#") else {
+            throw ModelWorkspaceError.invalid("共享连接的请求路径无效。")
+        } }
         guard !authHeader.isEmpty, !authHeader.contains("\r"), !authHeader.contains("\n"),
               !authPrefix.contains("\r"), !authPrefix.contains("\n") else { throw ModelWorkspaceError.invalid("认证字段不合法。") }
-        guard contract == .asyncMedia || (contract == .chatCompletions && kind == .llm)
-                || (contract == .imageGenerations && kind == .image) else {
+        guard (contract.isText && kind == .llm) || (contract == .imageGenerations && kind == .image)
+                || ([.syncMedia, .asyncMedia].contains(contract) && kind != .llm)
+                || (contract == .audioSpeech && kind == .audio) else {
             throw ModelWorkspaceError.invalid("接口契约与输出类型不匹配。")
         }
         if contract == .asyncMedia {
@@ -120,18 +140,31 @@ public struct ModelProfile: Codable, Equatable, Identifiable, Sendable {
                   !asynchronous.successValues.isEmpty, !asynchronous.failureValues.isEmpty else {
                 throw ModelWorkspaceError.invalid("请配置异步查询地址及返回字段路径。")
             }
-            try Self.validateURL(asynchronous.queryURL.replacingOccurrences(of: "{id}", with: "test"))
+            if serviceID == nil || asynchronous.queryURL.hasPrefix("http") {
+                try Self.validateURL(asynchronous.queryURL.replacingOccurrences(of: "{id}", with: "test"))
+            }
         }
         if let field = referenceInputField {
-            guard contract == .asyncMedia, !field.isEmpty,
+            guard [.asyncMedia, .syncMedia].contains(contract), !field.isEmpty,
                   !["model", "prompt", "api_key", "authorization", "token", "secret"].contains(field.lowercased()) else {
                 throw ModelWorkspaceError.invalid("参考输入字段仅适用于异步契约，且不能覆盖模型、题干或认证字段。")
+            }
+        }
+        try mapping?.validate()
+        if contract == .syncMedia, outputPath?.isEmpty != false { throw ModelWorkspaceError.invalid("请填写同步媒体输出 URL 路径。") }
+        for (field, value) in headers ?? [:] {
+            guard !field.isEmpty, !field.contains("\n"), !value.contains("\n"), !value.contains("\r"),
+                  !["authorization", "x-api-key", "x-goog-api-key", "cookie"].contains(field.lowercased()) else {
+                throw ModelWorkspaceError.invalid("认证请求头只能由钥匙串配置，附加请求头不可包含密钥。")
             }
         }
     }
     public static func validateURL(_ text: String) throws {
         guard let url = URL(string: text), ["https", "http"].contains(url.scheme?.lowercased() ?? ""),
-              url.host != nil, url.user == nil, url.password == nil, url.fragment == nil, url.query == nil else {
+              url.host != nil, url.user == nil, url.password == nil, url.fragment == nil,
+              (URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems ?? []).allSatisfy({
+                  ["api-version", "alt"].contains($0.name) && $0.value?.isEmpty == false
+              }) else {
             throw ModelWorkspaceError.invalid("需要完整的 HTTP(S) 接口地址；认证请使用密钥字段。")
         }
     }
@@ -141,6 +174,8 @@ public struct ModelReference: Codable, Equatable, Sendable {
     public var path: String
     public var version: String
     public var name: String?
+    public var role: String?
+    public var mediaKind: ModelKind?
     public init(path: String, name: String? = nil) { self.path = path; self.name = name; version = GenerationRunContext.fileVersion(path) }
     public var isCurrent: Bool { version != "missing" && version == GenerationRunContext.fileVersion(path) }
 }
@@ -159,6 +194,8 @@ public struct ModelQuestion: Codable, Equatable, Identifiable, Sendable {
     public var syncedPrompt: String?
     public var slotRevision: String?
     public var conflict = false
+    public var nodeParameters: [String: JSONValue]?
+    public var generationMode: String?
     public init() {}
     public var applicableDimensions: [ModelDimension] {
         dimensions.filter {
@@ -264,6 +301,7 @@ public struct ModelWorkspaceDocument: Codable, Equatable, Sendable {
     public var schemaVersion = 1
     public var revision = UUID().uuidString
     public var profiles: [ModelProfile] = []
+    public var services: [ModelServiceConnection]?
     public var defaults: [String: String] = [:]
     public var banks: [ModelQuestionBank] = []
     public var runs: [ModelEvaluationRun] = []

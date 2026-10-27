@@ -15,6 +15,9 @@ final class ModelWorkspaceStore: ObservableObject {
     @Published var selectedRunID: String?
     @Published var cliCapabilities: [GenerationCapability] = []
     @Published var discoveringCLI = false
+    @Published var catalog: TapNowModelCatalog?
+    @Published var discoveredModels: [String: [DiscoveredModel]] = [:]
+    @Published var discoveringServiceID: String?
     private let repository: ModelWorkspaceRepository
     private let service: ModelEvaluationService
     private var expectedRevision: String?
@@ -27,19 +30,43 @@ final class ModelWorkspaceStore: ObservableObject {
          service: ModelEvaluationService = ModelEvaluationService()) {
         self.repository = repository; self.service = service
     }
-    var profiles: [ModelProfile] { document.profiles.filter(\.enabled) }
+    var profiles: [ModelProfile] {
+        document.profiles.filter(\.enabled).compactMap { try? ModelHubResolver.resolve($0, services: document.services ?? []) }
+    }
     var canWrite: Bool { writable && loaded }
+    func supports(_ profile: ModelProfile, purpose: ModelPurpose) -> Bool {
+        guard profile.kind == purpose.kind, !profile.isCLI else { return false }
+        if purpose.kind == .llm { return profile.contract.isText }
+        let audioType = catalog?.entries.first(where: { $0.id == profile.catalogID })?.audioType
+        switch purpose {
+        case .canvasSpeech: return audioType == nil || audioType == "speech"
+        case .canvasMusic: return profile.contract != .audioSpeech && (audioType == nil || audioType == "music")
+        case .canvasSound: return profile.contract != .audioSpeech && (audioType == nil || audioType == "sound")
+        default: return true
+        }
+    }
     func canvasProfile(for node: CanvasNode) -> ModelProfile? {
         guard let id = node.modelProfileID else { return nil }
-        let purpose: ModelPurpose = node.kind == .video ? .canvasVideo : node.kind == .audio ? .canvasAudio : .canvasImage
+        let purpose = Self.purpose(for: node)
         let profile = id == "__default__" ? defaultProfile(purpose) : profiles.first { $0.id == id }
-        return profile.flatMap { !$0.isCLI && $0.kind == purpose.kind ? $0 : nil }
+        return profile.flatMap { supports($0, purpose: purpose) ? $0 : nil }
+    }
+    static func purpose(for node: CanvasNode) -> ModelPurpose {
+        switch node.kind {
+        case .text: return .canvasText
+        case .video: return .canvasVideo
+        case .audio:
+            switch node.tools?.audio.scene ?? .music { case .speech: return .canvasSpeech; case .music: return .canvasMusic; case .sound: return .canvasSound }
+        default: return .canvasImage
+        }
     }
     func evaluationCell(_ id: String) -> ModelEvaluationCell? {
         guard let (r, c) = locate(id) else { return nil }
         return document.runs[r].cells[c]
     }
     func beginCanvas(question: ModelQuestion, profile: ModelProfile) async -> String? {
+        do { try catalog?.entries.first(where: { $0.id == profile.catalogID })?.validate(question: question, profile: profile) }
+        catch { message = error.localizedDescription; return nil }
         var bank = ModelQuestionBank(); bank.name = "画布 · \(profile.name)"; bank.questions = [question]
         guard let runID = await enqueue(bank: bank, profiles: [profile], scheduling: false),
               let cell = document.runs.first(where: { $0.id == runID })?.cells.first else { return nil }
@@ -54,8 +81,9 @@ final class ModelWorkspaceStore: ObservableObject {
         }
     }
     func defaultProfile(_ purpose: ModelPurpose) -> ModelProfile? {
-        guard let id = document.defaults[purpose.rawValue] else { return nil }
-        return profiles.first { $0.id == id && $0.kind == purpose.kind }
+        let id = document.defaults[purpose.rawValue] ?? (purpose.kind == .audio ? document.defaults[ModelPurpose.canvasAudio.rawValue] : nil)
+        guard let id else { return nil }
+        return profiles.first { $0.id == id && supports($0, purpose: purpose) }
     }
     func load() async {
         guard !loaded, !loading else { return }
@@ -73,6 +101,7 @@ final class ModelWorkspaceStore: ObservableObject {
                 }
             }
             loaded = true
+            do { catalog = try TapNowModelCatalog.load() } catch { message = error.localizedDescription }
             if !document.legacyImported {
                 var profile = ModelProfile()
                 profile.id = "legacy-agent-deepseek"; profile.name = "已有 Agent API"
@@ -110,15 +139,16 @@ final class ModelWorkspaceStore: ObservableObject {
         do {
             try profile.validate()
             let purposes = ModelPurpose.allCases.filter { document.defaults[$0.rawValue] == profile.id }
-            guard purposes.allSatisfy({ profile.enabled && !profile.isCLI && profile.kind == $0.kind
-                && (![ModelPurpose.agent, .questions].contains($0) || profile.contract == .chatCompletions) }) else {
+            guard purposes.allSatisfy({ profile.enabled && supports(profile, purpose: $0) }) else {
                 throw ModelWorkspaceError.invalid("此模型仍关联默认用途，请先调整默认用途再停用或改变类型。")
             }
-            if !key.isEmpty {
-                let store = AgentKeychain(service: profile.keyService, account: profile.keyAccount)
+            _ = try ModelHubResolver.resolve(profile, services: document.services ?? [])
+            var value = profile; value.revision = UUID().uuidString
+            if !key.isEmpty && profile.serviceID == nil {
+                value.credentialService = "com.clipslots.models"; value.credentialAccount = UUID().uuidString
+                let store = AgentKeychain(service: value.keyService, account: value.keyAccount)
                 try await Task.detached { try store.writeAPIKey(key) }.value
             }
-            var value = profile; value.revision = UUID().uuidString
             if let index = document.profiles.firstIndex(where: { $0.id == profile.id }) { document.profiles[index] = value }
             else { document.profiles.append(value) }
             await persist()
@@ -127,15 +157,14 @@ final class ModelWorkspaceStore: ObservableObject {
         } catch { message = error.localizedDescription; return false }
     }
     func setDefault(_ purpose: ModelPurpose, id: String) async {
-        guard canWrite, id.isEmpty || profiles.contains(where: { $0.id == id && $0.kind == purpose.kind
-            && !$0.isCLI && !([ModelPurpose.agent, .questions].contains(purpose) && $0.contract != .chatCompletions) }) else { return }
+        guard canWrite, id.isEmpty || profiles.contains(where: { $0.id == id && supports($0, purpose: purpose) }) else { return }
         document.defaults[purpose.rawValue] = id.isEmpty ? nil : id
         await persist(); ModelConfigurationBridge.update(document)
     }
     func removeProfile(_ id: String) async {
         guard canWrite else { return }
         guard !document.defaults.values.contains(id),
-              !document.runs.contains(where: { run in run.models.contains(where: { $0.id == id }) && run.cells.contains(where: { $0.state.active }) }) else {
+              !document.runs.contains(where: { run in run.models.contains(where: { $0.id == id }) && run.cells.contains(where: { $0.state.active || $0.state == .unknown }) }) else {
             message = "此模型仍被默认用途或未完成任务引用，请先调整。"; return
         }
         document.profiles.removeAll { $0.id == id }; await persist()
@@ -144,6 +173,46 @@ final class ModelWorkspaceStore: ObservableObject {
     func key(for profile: ModelProfile) async throws -> String? {
         guard profile.requiresKey, !profile.isCLI else { return nil }
         return try await AgentCredentialAccess.readAPIKey(from: AgentKeychain(service: profile.keyService, account: profile.keyAccount))
+    }
+    func saveService(_ service: ModelServiceConnection, key: String) async -> Bool {
+        guard canWrite else { return false }
+        do {
+            try service.validate()
+            let ids = Set(document.profiles.filter { $0.serviceID == service.id }.map(\.id))
+            if !service.enabled, document.defaults.values.contains(where: { ids.contains($0) }) {
+                throw ModelWorkspaceError.invalid("该连接关联默认用途，请先切换用途再停用。")
+            }
+            var value = service
+            // Each replacement secret has its own identity; old tasks retain old credentials.
+            if !key.isEmpty {
+                value.keyAccount = UUID().uuidString
+                let secret = AgentKeychain(service: ModelServiceConnection.keyService, account: value.keyAccount)
+                try await Task.detached { try secret.writeAPIKey(key) }.value
+            }
+            var services = document.services ?? []
+            if let index = services.firstIndex(where: { $0.id == value.id }) { services[index] = value }
+            else { services.append(value) }
+            document.services = services; await persist(); ModelConfigurationBridge.update(document)
+            return writable
+        } catch { message = error.localizedDescription; return false }
+    }
+    func removeService(_ id: String) async {
+        guard canWrite else { return }
+        guard !document.profiles.contains(where: { $0.serviceID == id }),
+              !document.runs.contains(where: { $0.models.contains(where: { $0.serviceID == id }) && $0.cells.contains(where: { $0.state.active || $0.state == .unknown }) }) else {
+            message = "此连接仍被模型或未完成任务引用，请先调整。"; return
+        }
+        document.services?.removeAll { $0.id == id }; await persist(); ModelConfigurationBridge.update(document)
+    }
+    func discoverService(_ service: ModelServiceConnection) async {
+        guard discoveringServiceID == nil else { return }
+        discoveringServiceID = service.id; defer { discoveringServiceID = nil }
+        do {
+            let secret = service.requiresKey ? try await AgentCredentialAccess.readAPIKey(
+                from: AgentKeychain(service: ModelServiceConnection.keyService, account: service.keyAccount)) : nil
+            discoveredModels[service.id] = try await self.service.discover(service: service, key: secret)
+            message = "只读发现成功，返回 \(discoveredModels[service.id]?.count ?? 0) 个模型。"
+        } catch { message = "模型发现失败，可继续手动填写上游标识。\(error.localizedDescription)" }
     }
     func bindBank(name: String, groupIDs: [String], kind: ModelKind) async {
         guard canWrite else { return }
@@ -275,7 +344,8 @@ final class ModelWorkspaceStore: ObservableObject {
     private func enqueue(bank: ModelQuestionBank, profiles: [ModelProfile], scheduling: Bool) async -> String? {
         guard canWrite else { return nil }
         do {
-            var run = try ModelEvaluationRun(bank: bank, models: profiles)
+            let snapshots = try profiles.map { try ModelHubResolver.resolve($0, services: document.services ?? []) }
+            var run = try ModelEvaluationRun(bank: bank, models: snapshots)
             let runID = run.id
             run.bank = try await Task.detached {
                 var snapshot = bank
@@ -289,7 +359,9 @@ final class ModelWorkspaceStore: ObservableObject {
                         let dest = root.appendingPathComponent(UUID().uuidString + (ext.isEmpty ? "" : "." + ext))
                         try FileManager.default.copyItem(at: URL(fileURLWithPath: original.path), to: dest)
                         guard original.isCurrent else { throw GenerationAdapterError.inputChanged }
-                        snapshot.questions[q].references[ref] = .init(path: dest.path, name: original.name)
+                        var copied = ModelReference(path: dest.path, name: original.name)
+                        copied.role = original.role; copied.mediaKind = original.mediaKind
+                        snapshot.questions[q].references[ref] = copied
                     }
                 }
                 return snapshot
@@ -315,6 +387,13 @@ final class ModelWorkspaceStore: ObservableObject {
                 guard tasks.count < 4, let profile = run.models.first(where: { $0.id == cell.modelID }),
                       activeModels[profile.id, default: 0] < profile.concurrency,
                       let question = run.bank.questions.first(where: { $0.id == cell.questionID }) else { continue }
+                if let serviceID = profile.serviceID {
+                    let active = document.runs.flatMap { activeRun in
+                        activeRun.cells.filter { tasks[$0.id] != nil }.compactMap { cell in activeRun.models.first { $0.id == cell.modelID } }
+                    }.filter { $0.serviceID == serviceID }
+                    let limit = min(profile.serviceConcurrency ?? 2, active.compactMap(\.serviceConcurrency).min() ?? 14)
+                    guard active.count < limit else { continue }
+                }
                 activeModels[profile.id, default: 0] += 1
                 changeCell(cell.id) { $0.state = .running; $0.startedAt = Date(); $0.attempt += 1 }
                 tasks[cell.id] = Task { [weak self] in
@@ -510,7 +589,7 @@ enum ModelConfigurationBridge {
     private static var profiles: [ModelProfile] = []
     private static var defaults: [String: String] = [:]
     static func update(_ document: ModelWorkspaceDocument) {
-        lock.lock(); profiles = document.profiles; defaults = document.defaults; lock.unlock()
+        lock.lock(); profiles = document.profiles.compactMap { try? ModelHubResolver.resolve($0, services: document.services ?? []) }; defaults = document.defaults; lock.unlock()
         AgentBackendCoordinator.broadcastChange()
     }
     static func profile(_ purpose: ModelPurpose) -> ModelProfile? {
@@ -519,7 +598,7 @@ enum ModelConfigurationBridge {
     }
     static func agentProfiles() -> [ModelProfile] {
         lock.lock(); defer { lock.unlock() }
-        return profiles.filter { $0.enabled && !$0.isCLI && $0.kind == .llm && $0.contract == .chatCompletions }
+        return profiles.filter { $0.enabled && !$0.isCLI && $0.kind == .llm && $0.contract.isText }
     }
     static func hasDefault(_ purpose: ModelPurpose) -> Bool {
         lock.lock(); defer { lock.unlock() }

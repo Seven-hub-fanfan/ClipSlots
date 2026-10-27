@@ -25,13 +25,10 @@ extension CanvasWorkspaceView {
                         throw ModelWorkspaceError.invalid("请在模型配置中心设置同类型 API，或在节点选择一个 API 模型。")
                     }
                     guard store.flushCanvasTextDocuments() else { throw ModelWorkspaceError.unreadable }
-                    // Edge resolution supplies authoritative text and reference roles.
-                    let inputs = resolveEdgeInputs(for: node)
-                    if let reason = inputs.blockingReason { throw ModelWorkspaceError.invalid(reason) }
-                    var question = ModelQuestion()
-                    question.title = node.displayName; question.kind = profile.kind
-                    question.prompt = ([liveText(for: node)] + inputs.promptFragments).filter { !$0.isEmpty }.joined(separator: "\n\n")
-                    question.references = Array(Set(inputImagePaths(for: node) + inputs.assetPaths)).sorted().map { ModelReference(path: $0) }
+                    let ids = Set(canvas.incomingEdges(of: node.id).map(\.fromNodeId) + [node.id])
+                    let question = try ModelCanvasInput.question(node: node,
+                        facts: CanvasWorkflowCapture.facts(nodes: canvas.nodes.filter { ids.contains($0.id) }, store: store),
+                        edges: canvas.edges)
                     guard let id = await models.beginCanvas(question: question, profile: profile) else {
                         throw ModelWorkspaceError.invalid(models.message ?? "API 任务保存失败")
                     }

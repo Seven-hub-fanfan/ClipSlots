@@ -26,6 +26,17 @@ actor ConfirmedID {
     func set(_ value: String) { self.value = value }
 }
 
+actor BudgetFixture {
+    var active = 0
+    var peak = 0
+    func request() async throws -> Int {
+        active += 1; peak = max(peak, active)
+        defer { active -= 1 }
+        try await Task.sleep(for: .milliseconds(30))
+        return 1
+    }
+}
+
 @main struct ModelWorkspaceSmokeTests {
     static func main() async {
         var passed: [String] = [], failed: [String] = []
@@ -136,6 +147,119 @@ actor ConfirmedID {
             var conflict = bank; conflict.questions[0].conflict = true
             do { _ = try ModelEvaluationRun(bank: conflict, models: [profile]); check(false, "conflicted question blocks evaluation") }
             catch { check(true, "conflicted question blocks evaluation") }
+            let catalog = try TapNowModelCatalog.load()
+            check(catalog.entries.count == 119 && catalog.counts == ["llm":17, "image":31, "video":57, "audio":14], "bundled complete TapNow catalog has exact type counts")
+            check(Set(catalog.entries.map(\.id)).count == 119, "catalog identities unique")
+            check(catalog.entries.reduce(0) { $0 + ($1.config["variants"]?.arrayValue?.count ?? 0) } == 155, "all 155 media variants retained")
+            check(catalog.entries.filter { $0.visibility == "hidden" }.count == 18, "hidden models retained in catalog")
+            check(catalog.entries.allSatisfy { $0.draft().model.isEmpty }, "TapNow gateway IDs never prefilled as upstream IDs")
+            var connection = ModelServiceConnection(); connection.name = "shared"; connection.baseURL = "http://127.0.0.1:1/v1"
+            connection.requiresKey = false; connection.discoveryURL = "models"; connection.concurrency = 1
+            var bound = profile; bound.serviceID = connection.id; bound.endpoint = "chat/completions"
+            let snapshot = try ModelHubResolver.resolve(bound, services: [connection])
+            connection.baseURL = "http://127.0.0.1:2/v1"; connection.keyAccount = "new-identity"
+            let next = try ModelHubResolver.resolve(bound, services: [connection])
+            check(snapshot.endpoint == "http://127.0.0.1:1/v1/chat/completions" && next.endpoint == "http://127.0.0.1:2/v1/chat/completions", "connection switch updates next request and leaves old snapshot pinned")
+            check(snapshot.keyAccount != next.keyAccount && snapshot.serviceConcurrency == 1, "snapshot keeps credential identity and shared concurrency")
+            connection.enabled = false
+            check((try? ModelHubResolver.resolve(bound, services: [connection])) == nil, "disabled shared service blocks requests")
+            connection.enabled = true
+            let discoveryHTTP = FixtureHTTP([(#"{"data":[{"id":"upstream-model"}]}"#,200)])
+            let discovered = try await ModelEvaluationService(transport: discoveryHTTP).discover(service: connection, key: nil)
+            let discoveryMethod = await discoveryHTTP.requests.first?.httpMethod
+            check(discovered.first?.id == "upstream-model" && discoveryMethod == "GET", "model discovery only sends GET")
+            for (contract, reply, bodyField) in [
+                (ModelAPIContract.responses, #"{"output":[{"type":"message","content":[{"type":"output_text","text":"native"}]}]}"#, "input"),
+                (.anthropicMessages, #"{"content":[{"type":"text","text":"native"}]}"#, "messages"),
+                (.geminiContent, #"{"candidates":[{"content":{"parts":[{"text":"native"}]}}]}"#, "contents")
+            ] {
+                var p = profile; p.contract = contract
+                let http = FixtureHTTP([(reply, 200)])
+                let result = try await ModelEvaluationService(transport: http).submit(question: question, profile: p, key: nil, didConfirmTask: { _ in })
+                let nativeBody = await http.lastBody()
+                check(result?.text == "native" && nativeBody?[bodyField] != nil, "\(contract.rawValue) request and response follow native contract")
+            }
+            let function = try ModelTextWire.assistant(try JSONValue.decode(jsonText: #"{"content":[{"type":"tool_use","id":"call1","name":"read","input":{"path":"x"}}]}"#), contract: .anthropicMessages)
+            check(function["tool_calls"]?.arrayValue?.first?["function"]?["name"] == "read", "native tool calls convert into existing Agent policy path")
+            let imageFile = root.appendingPathComponent("input.png"), videoFile = root.appendingPathComponent("input.mp4"), audioFile = root.appendingPathComponent("input.wav")
+            for file in [imageFile,videoFile,audioFile] { try Data("fixture-media".utf8).write(to: file) }
+            var mapped = video; mapped.mapping = ModelInputMapping()
+            mapped.mapping?.referenceFields = ["firstFrame":"first_frame", "video":"videos", "audio":"audios"]
+            mapped.mapping?.parameterFields = ["duration":"duration_s", "aspectRatio":"aspect_ratio", "generateAudio":"generate_audio"]
+            var multimodal = videoQuestion
+            var imageRef = ModelReference(path: imageFile.path); imageRef.role = "firstFrame"
+            multimodal.references = [imageRef, .init(path: videoFile.path), .init(path: audioFile.path)]
+            multimodal.nodeParameters = ["duration":5, "aspectRatio":"16:9", "generateAudio":false]
+            let multimodalBody = try ModelEvaluationService().input(question: multimodal, profile: mapped)
+            check(multimodalBody["first_frame"]?.arrayValue?.count == 1 && multimodalBody["videos"]?.arrayValue?.count == 1 && multimodalBody["audios"]?.arrayValue?.count == 1, "typed image video audio references map to separate wire fields")
+            check(multimodalBody["duration_s"] == 5 && multimodalBody["generate_audio"] == false && multimodalBody["aspectRatio"] == nil, "node duration ratio and audio use explicit wire keys")
+            mapped.mapping?.referenceFields["audio"] = nil
+            check((try? ModelEvaluationService().input(question: multimodal, profile: mapped)) == nil, "unmapped audio input is blocked before POST")
+            var sound = profile; sound.kind = .audio; sound.contract = .audioSpeech
+            sound.mapping = ModelInputMapping(); sound.mapping?.promptField = "input"; sound.mapping?.parameterFields = ["voice":"voice","speed":"speed"]
+            var speechQuestion = question; speechQuestion.kind = .audio; speechQuestion.nodeParameters = ["voice":"alloy","speed":1.2]
+            let speechBody = try ModelEvaluationService().input(question: speechQuestion, profile: sound)
+            check(speechBody["input"] == .string(question.prompt) && speechBody["voice"] == "alloy" && speechBody["speed"] == 1.2, "speech input voice speed reach native wire fields")
+            var legacyDocJSON = try JSONDecoder().decode(JSONValue.self, from: JSONEncoder().encode(doc)).objectValue ?? [:]
+            legacyDocJSON.removeValue(forKey: "services")
+            let legacyDoc = try JSONDecoder().decode(ModelWorkspaceDocument.self, from: JSONEncoder().encode(JSONValue.object(legacyDocJSON)))
+            check(legacyDoc.services == nil && legacyDoc.runs == doc.runs, "existing workspace decodes without new fields")
+            let seedance = catalog.entries.first { $0.model == "seedance-2.0" }
+            multimodal.generationMode = "reference"
+            mapped.mapping?.referenceFields["audio"] = "audios"
+            check((try? seedance?.validate(question: multimodal, profile: mapped)) != nil, "catalog validates supported multi-reference variant")
+            multimodal.nodeParameters?["duration"] = 99
+            check((try? seedance?.validate(question: multimodal, profile: mapped)) == nil, "catalog rejects invalid declared duration before submit")
+            let budgetFixture = BudgetFixture()
+            try await withThrowingTaskGroup(of: Int.self) { group in
+                for index in 0..<4 {
+                    var p = profile; p.id = "budget-\(index)"; p.serviceID = "budget-shared"; p.serviceConcurrency = 1
+                    let snapshot = p
+                    group.addTask { try await ModelRequestBudget.shared.withPermit(profile: snapshot) { try await budgetFixture.request() } }
+                }
+                for try await _ in group {}
+            }
+            check(await budgetFixture.peak == 1, "transport budget enforces shared concurrency across distinct profiles")
+            let syncHTTP = FixtureHTTP([(#"{"result":{"urls":["https://example.com/output.mp4"]}}"#,200)])
+            var sync = video; sync.contract = .syncMedia; sync.outputPath = "result.urls"
+            let syncOutput = try await ModelEvaluationService(transport: syncHTTP).submit(question: videoQuestion, profile: sync, key: nil, didConfirmTask: { _ in })
+            check(syncOutput?.urls == ["https://example.com/output.mp4"], "sync video media uses configured JSON output path")
+            check(ModelEvaluationService.validAudio(Data("ID3".utf8) + Data(repeating: 0, count: 24), extension: "mp3"), "binary speech accepts matching audio header")
+            check(!ModelEvaluationService.validAudio(Data("<html>error body</html>".utf8), extension: "mp3"), "binary speech rejects HTML error masquerading as audio")
+            check((try? ModelProfile.validateURL("https://example.com/deployments/a/chat/completions?api-version=2024-10-21")) != nil, "Azure public API version query supported")
+            check((try? ModelProfile.validateURL("https://example.com/models?api_key=secret")) == nil, "credential query never accepted")
+            let chatBody: [String: JSONValue] = ["model":"upstream", "messages":[["role":"user","content":"test"]], "stream":true, "stream_options":["include_usage":true]]
+            check([ModelAPIContract.responses, .anthropicMessages, .geminiContent].allSatisfy {
+                let value = ModelTextWire.body(chatBody, contract: $0); return value["stream"] == nil && value["stream_options"] == nil
+            }, "native Agent protocols omit Chat streaming options")
+            var target = CanvasNode(pageId:"p", groupId:"target", slot:1, kind:.video, x:0, y:0)
+            target.ratio = "16:9"; target.duration = 5; target.generateAudio = true
+            let videoSource = CanvasNode(pageId:"p", groupId:"video-source", slot:1, kind:.video, x:0, y:0)
+            let audioSource = CanvasNode(pageId:"p", groupId:"audio-source", slot:1, kind:.audio, x:0, y:0)
+            let facts: [CanvasWorkflowFacts] = [
+                .init(node:target, title:"target", body:"生成视频", bodyRevision:"1"),
+                .init(node:videoSource, title:"video", body:"video prompt", bodyRevision:"1", primaryAssetPath:videoFile.path),
+                .init(node:audioSource, title:"audio", body:"audio prompt", bodyRevision:"1", primaryAssetPath:audioFile.path)
+            ]
+            let edges = [CanvasEdge(fromNodeId:videoSource.id,toNodeId:target.id),
+                         CanvasEdge(fromNodeId:audioSource.id,toNodeId:target.id)]
+            let captured = try ModelCanvasInput.question(node: target, facts: facts, edges: edges)
+            check(captured.references.map(\.mediaKind).contains(.video) && captured.references.map(\.mediaKind).contains(.audio),
+                "canvas API edges capture actual video and audio instead of CLI image rules")
+            check(captured.nodeParameters?["duration"] == 5 && captured.generationMode == "reference", "canvas parameter and reference mode captured together")
+            var unavailable = facts; unavailable[1].bodyAvailable = false
+            check((try? ModelCanvasInput.question(node: target, facts: unavailable, edges: edges)) == nil, "unknown upstream slot state blocks API capture")
+            var generated = facts[0]; generated.node.outputAttachmentIds = ["out"]
+            generated.media = [.init(id:"media-out",attachmentID:"out",name:"output.mp4",kind:"video",role:"output",revision:"1",availability:"local")]
+            generated.resourcePaths = ["media-out": videoFile.path]
+            let clean = try ModelCanvasInput.question(node: generated.node, facts:[generated], edges:[])
+            check(clean.references.isEmpty, "previous generated node output is not silently used as a new reference")
+            let toolBody: [String: JSONValue] = ["model":"native", "messages":[
+                ["role":"assistant", "content":"", "tool_calls":[["id":"t","function":["name":"read","arguments":"{}"]]]]
+            ]]
+            let nativeToolBody = ModelTextWire.body(toolBody, contract:.anthropicMessages)
+            check(nativeToolBody["messages"]?.arrayValue?.first?["content"]?.arrayValue?.count == 1,
+                "native tool-only turn omits invalid empty text blocks")
         } catch { failed.append("unexpected: \(error.localizedDescription)") }
         let result: [String: Any] = ["ok": failed.isEmpty, "passed": passed, "failed": failed]
         if let data = try? JSONSerialization.data(withJSONObject: result, options: [.prettyPrinted, .sortedKeys]) {

@@ -120,8 +120,21 @@ extension CanvasWorkspaceView {
             do {
                 let activeSelection = AgentBackendCoordinator.injected(
                     backend, scope: .sidebar, kind: selection.kind)
-                let result = try await CanvasTextGeneration.optimizedPrompt(
-                    prompt, config: config, selection: activeSelection)
+                let result: String
+                await ModelWorkspaceStore.shared.load()
+                let models = ModelWorkspaceStore.shared
+                let profile = node.modelProfileID != nil ? models.canvasProfile(for: node) : models.defaultProfile(.canvasText)
+                let configured = node.modelProfileID != nil || models.document.defaults[ModelPurpose.canvasText.rawValue] != nil
+                if service == nil && configured {
+                    guard let profile else { throw ModelWorkspaceError.invalid("文本润色模型不可用，请在配置中心选择 LLM。") }
+                    var q = ModelQuestion(); q.kind = .llm
+                    q.prompt = CanvasImagePrompt.systemPrompt + "\n\n" + prompt
+                    let output = try await ModelEvaluationService().submit(question: q, profile: profile, key: models.key(for: profile), didConfirmTask: { _ in })
+                    result = try CanvasImagePrompt.normalized(output?.text ?? "")
+                } else {
+                    result = try await CanvasTextGeneration.optimizedPrompt(
+                        prompt, config: config, selection: activeSelection)
+                }
                 try Task.checkCancellation()
                 guard canvas.shouldTrackGeneration(ticket.token),
                       let current = canvas.generationNode(ticket.token) else { return }
