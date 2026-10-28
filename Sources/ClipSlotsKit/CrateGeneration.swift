@@ -110,6 +110,8 @@ public struct CrateVideoRequest: Equatable {
     public var lastFramePath: String?
     /// 参考图本地路径（已按模型上限截断）。
     public var referenceImagePaths: [String]
+    /// Legacy image-to-video models publish inputs.image without frame roles.
+    public var imagePaths: [String]
     /// 复现用 seed。nil = 让服务端随机。
     public var seed: Int?
 
@@ -122,6 +124,7 @@ public struct CrateVideoRequest: Equatable {
                 firstFramePath: String? = nil,
                 lastFramePath: String? = nil,
                 referenceImagePaths: [String] = [],
+                imagePaths: [String] = [],
                 seed: Int? = nil) {
         self.model = model
         self.prompt = prompt
@@ -132,6 +135,7 @@ public struct CrateVideoRequest: Equatable {
         self.firstFramePath = firstFramePath
         self.lastFramePath = lastFramePath
         self.referenceImagePaths = referenceImagePaths
+        self.imagePaths = imagePaths
         self.seed = seed
     }
 }
@@ -144,6 +148,7 @@ public enum CrateRequestError: Error, Equatable {
     case unsupportedCount(Int)
     case invalidImageDimensions
     case incompatibleImageInput
+    case invalidModelParameter(String)
     /// 模型要求必须带输入图，但槽位里没有可用图片（实测只有 `veo-3.1-generate-preview`）。
     case missingRequiredImage(model: String)
 
@@ -154,6 +159,7 @@ public enum CrateRequestError: Error, Equatable {
         case .unsupportedCount(let n): return "当前版本一次只出 1 张（现在是 \(n) 张）"
         case .invalidImageDimensions: return "图像宽高必须成对设置为 16–16384 像素"
         case .incompatibleImageInput: return "图片入参包含视频文件，请先提取图片再生成"
+        case .invalidModelParameter(let detail): return detail
         case .missingRequiredImage(let model):
             return "\(model) 必须带一张输入图，先往这个槽位挂张图片"
         }
@@ -260,6 +266,8 @@ public enum CrateGeneration {
         }
         if let width = req.width, let height = req.height {
             args += ["--param", "width=\(width)", "--param", "height=\(height)"]
+        } else if let resolution = req.resolution, !resolution.isEmpty {
+            args += ["--param", "resolution=\(resolution)"]
         }
         for path in req.imagePaths where !path.isEmpty {
             args += ["--image", path]
@@ -299,12 +307,13 @@ public enum CrateGeneration {
         guard !prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { throw CrateRequestError.emptyPrompt }
         let model = req.model.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !model.isEmpty else { throw CrateRequestError.emptyModel }
-        let images = [req.firstFramePath, req.lastFramePath].compactMap { $0 } + req.referenceImagePaths
+        let images = [req.firstFramePath, req.lastFramePath].compactMap { $0 } + req.referenceImagePaths + req.imagePaths
         guard !images.contains(where: { CanvasAttachmentKind.from(fileName: $0) == .video }) else {
             throw CrateRequestError.incompatibleImageInput
         }
 
         var args = ["generate", "video", "--model", model, "--prompt", prompt]
+        for path in req.imagePaths where !path.isEmpty { args += ["--image", path] }
         let ratio = req.ratio.trimmingCharacters(in: .whitespacesAndNewlines)
         if !ratio.isEmpty {
             args += ["--param", "ratio=\(ratio)"]
@@ -314,7 +323,7 @@ public enum CrateGeneration {
             args += ["--resolution", resolution]
         }
         if let duration = req.duration {
-            args += ["--duration", "\(duration)"]
+            args += duration < 0 ? ["--param", "duration=\(duration)"] : ["--duration", "\(duration)"]
         }
         if let audio = req.generateAudio {
             args += ["--generate-audio", audio ? "true" : "false"]
@@ -359,7 +368,7 @@ public enum CrateGeneration {
     public static let seedParameterName = "seed"
 
     public static func modelDescribeArguments(model: String) -> [String] {
-        ["model", "describe", model, "--json"]
+        ["model", "describe", model, "--refresh", "--json"]
     }
 
     /// 从 `model describe --json` 里取参数名集合。

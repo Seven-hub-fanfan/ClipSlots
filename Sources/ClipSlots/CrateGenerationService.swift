@@ -134,23 +134,6 @@ final class CrateGenerationService {
 
     // MARK: - 环境（PATH / node）
 
-    /// 模型参数表缓存（`model describe` 的结果）。模型的参数表在一次会话里不会变，而每次重跑都问
-    /// 一遍要多等一个 Node 冷启动。
-    private var modelParameterCache: [String: Set<String>] = [:]
-    private let parameterLock = NSLock()
-
-    private func cachedParameters(_ model: String) -> Set<String>? {
-        parameterLock.lock()
-        defer { parameterLock.unlock() }
-        return modelParameterCache[model]
-    }
-
-    private func cacheParameters(_ names: Set<String>, for model: String) {
-        parameterLock.lock()
-        defer { parameterLock.unlock() }
-        modelParameterCache[model] = names
-    }
-
     private let envLock = NSLock()
     private var cachedSearchPath: String?
 
@@ -284,13 +267,7 @@ final class CrateGenerationService {
                                   timeout: CrateModelCatalog.listTimeout,
                                   stage: "查询模型目录")
         do {
-            let models = try CrateModelCatalog.parse(output)
-            // 顺手把参数表喂进 seed 门禁的缓存：目录里已经带了完整 parameters，再为同一个模型
-            // 单独 describe 一次纯属浪费（也是"点生成要等两次进程"的一个来源）。
-            for m in models where !m.parameterNames.isEmpty {
-                cacheParameters(m.parameterNames, for: m.id)
-            }
-            return models
+            return try CrateModelCatalog.parse(output)
         } catch let err as CrateResponseError {
             throw ServiceError.response(err)
         }
@@ -302,11 +279,14 @@ final class CrateGenerationService {
     /// 照常传，提交真被拒了再去掉 seed 重试一次。单靠任何一道都不够 —— 只查表的话，CLI 改字段
     /// 或离线就会把重跑变成硬失败；只靠重试的话，每次重跑都要先白跑一次失败的提交。
     func submit(_ request: CrateImageRequest, recording: GenerationRunContext? = nil) async throws -> Submission {
-        var effective = request
+        let model = try await fetchModel(id: request.model)
+        var effective: CrateImageRequest
+        do { effective = try CrateModelParameters.image(request, model: model, resolveDimensions: true) }
+        catch let error as CrateRequestError { throw ServiceError.request(error) }
         let requested = GenerationRequestRecord(request, resourceIDs: recording?.resourceIDs ?? [:])
         var dropped = false
-        if request.seed != nil, await modelRejectsSeed(model: request.model) == true {
-            effective = CrateGeneration.droppingSeed(request)
+        if request.seed != nil, !model.supportsSeed {
+            effective = CrateGeneration.droppingSeed(effective)
             dropped = true
         }
 
@@ -352,11 +332,14 @@ final class CrateGenerationService {
     /// 每一级退路都只摘掉**被 CLI 明确点名**的那一个参数，绝不"报错就全摘干净"——那样用户选的
     /// 4k 会在一次无关的报错后静默变成默认档。
     func submit(_ request: CrateVideoRequest, recording: GenerationRunContext? = nil) async throws -> VideoSubmission {
-        var effective = request
+        let model = try await fetchModel(id: request.model)
+        var effective: CrateVideoRequest
+        do { effective = try CrateModelParameters.video(request, model: model) }
+        catch let error as CrateRequestError { throw ServiceError.request(error) }
         let requested = GenerationRequestRecord(request, resourceIDs: recording?.resourceIDs ?? [:])
         var droppedSeed = false
-        if request.seed != nil, await modelRejectsSeed(model: request.model) == true {
-            effective = CrateGeneration.droppingSeed(request)
+        if request.seed != nil, !model.supportsSeed {
+            effective = CrateGeneration.droppingSeed(effective)
             droppedSeed = true
         }
 
@@ -368,7 +351,7 @@ final class CrateGenerationService {
             guard case .processFailed(_, let detail) = err else { throw err }
 
             var retry = effective
-            var dropped: [String] = []
+            let dropped: [String] = []
             var retriedSeed = false
             if retry.seed != nil, CrateGeneration.isUnsupportedParameterError(detail) {
                 retry = CrateGeneration.droppingSeed(retry)
@@ -376,18 +359,7 @@ final class CrateGenerationService {
                 retriedSeed = true
             }
             // Keep the requested video aspect through any compatibility retry.
-            if !retry.resolution.isEmpty,
-               CrateGeneration.isUnsupportedParameterError(detail,
-                                                          parameter: CrateModelCatalog.resolutionParameterName) {
-                retry = CrateGeneration.droppingResolution(retry)
-                dropped.append("分辨率")
-            }
-            if retry.generateAudio != nil,
-               CrateGeneration.isUnsupportedParameterError(detail,
-                                                          parameter: CrateModelCatalog.audioParameterName) {
-                retry = CrateGeneration.droppingAudio(retry)
-                dropped.append("配音")
-            }
+            // Output parameters remain mandatory through a compatibility retry.
             guard retriedSeed || !dropped.isEmpty else { throw err }
 
             NSLog("[ClipSlots][crate] video model \(effective.model) rejected "
@@ -469,24 +441,14 @@ final class CrateGenerationService {
         return text.contains("http 429") || text.contains("api error (429)") || text.contains("too many requests")
     }
 
-    /// 这个模型是不是不收 seed？`nil` = 问不出来（不确定时不做任何取舍，交给重试兜底）。
-    private func modelRejectsSeed(model: String) async -> Bool? {
-        if let cached = cachedParameters(model) {
-            return !cached.contains(CrateGeneration.seedParameterName)
+    func fetchModel(id: String) async throws -> CrateModelCatalog.ModelInfo {
+        let output = try await run(CrateGeneration.modelDescribeArguments(model: id),
+                                   timeout: CrateGeneration.describeTimeout, stage: "核对模型最新参数")
+        guard let model = try CrateModelCatalog.parse("[" + output + "]").first, model.id == id else {
+            throw ServiceError.request(.invalidModelParameter("Crate 未返回所选模型的完整参数"))
         }
-        do {
-            let output = try await run(CrateGeneration.modelDescribeArguments(model: model),
-                                       timeout: CrateGeneration.describeTimeout,
-                                       stage: "查询模型参数")
-            let names = try CrateGeneration.parseModelParameterNames(output)
-            // 空表按"问不出来"处理：宁可让提交去试，也不要因为解析口径变了就默默阉掉 seed。
-            guard !names.isEmpty else { return nil }
-            cacheParameters(names, for: model)
-            return !names.contains(CrateGeneration.seedParameterName)
-        } catch {
-            NSLog("[ClipSlots][crate] model describe \(model) failed: \(error)")
-            return nil
-        }
+        await MainActor.run { CrateModelCatalogStore.shared.update(model) }
+        return model
     }
 
     /// 轮询到终态，返回产物 URL 列表。

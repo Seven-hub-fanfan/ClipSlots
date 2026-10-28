@@ -174,11 +174,11 @@ struct CanvasInspectorPanel: View {
                     .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
-            .disabled(ratioOptions.isEmpty)
+            .disabled(!splitImageSize && ratioOptions.isEmpty)
             .accessibilityIdentifier("canvas-inspector-size")
             .canvasParameterPopover(isPresented: $showingRatios) {
                 if splitImageSize {
-                    CanvasImageSizePicker(selection: imageSelection) { ratio, quality in
+                    CanvasImageSizePicker(selection: imageSelection, model: currentModel) { ratio, quality in
                         CanvasGenerationParamEdits.applyImageSize(ratio: ratio, quality: quality, node: node, canvas: canvas)
                     }
                 } else {
@@ -195,7 +195,7 @@ struct CanvasInspectorPanel: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
 
-            if isVideoNode {
+            if isVideoNode || (!splitImageSize && currentModel?.supportsResolution == true) {
                 videoSection
             }
         }
@@ -230,7 +230,7 @@ struct CanvasInspectorPanel: View {
                 .disabled(model.resolutionOptions.isEmpty)
             }
 
-            if let model = currentModel, model.supportsDuration, let spec = model.durationSpec {
+            if isVideoNode, let model = currentModel, model.supportsDuration, let spec = model.durationSpec {
                 sectionTitle("时长")
                 Picker("", selection: durationBinding) {
                     // `-1`（交给服务端定）与"不传"是两件事，但对用户是同一个意思："我不指定"。
@@ -252,7 +252,7 @@ struct CanvasInspectorPanel: View {
                 }
             }
 
-            if let model = currentModel, model.supportsAudio {
+            if isVideoNode, let model = currentModel, model.supportsAudio {
                 Toggle(isOn: audioBinding) {
                     Text("生成配音 / 音效")
                         .font(.system(size: 10))
@@ -264,12 +264,12 @@ struct CanvasInspectorPanel: View {
 
             // 输入图的语义必须写出来：同一个槽位里的图，第 1 张是首帧、第 2 张是尾帧，
             // 这个顺序约定在界面上看不出来（槽位里只是"几张图"）。
-            if let model = currentModel, model.acceptsVideoImageInput {
+            if isVideoNode, let model = currentModel, model.acceptsVideoImageInput {
                 Text(frameHint(model))
                     .font(.system(size: 9))
                     .foregroundColor(AppTheme.canvasChromeTertiaryInk)
                     .fixedSize(horizontal: false, vertical: true)
-            } else if currentModel != nil {
+            } else if isVideoNode && currentModel != nil {
                 Text("该模型只做文生视频，槽位里的图会被忽略")
                     .font(.system(size: 9))
                     .foregroundColor(AppTheme.canvasChromeTertiaryInk)

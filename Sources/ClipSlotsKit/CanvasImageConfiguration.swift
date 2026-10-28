@@ -18,9 +18,32 @@ public enum CanvasImageConfiguration {
     }
     public static func supportsSplit(_ model: CrateModelCatalog.ModelInfo?) -> Bool {
         guard let model else { return false }
-        return splitModels.contains(model.id) && model.isImageGenerator
+        return model.isImageGenerator
             && model.parameterNames.contains("width") && model.parameterNames.contains("height")
-            && Set(ratios).isSubset(of: Set(model.ratioOptions.map(\.value)))
+            // Composite native presets (e.g. GPT Image 2) retain their published picker.
+            && !model.ratioOptions.contains { $0.value.contains(":") && $0.value.contains(" ") }
+    }
+    public static func ratios(for model: CrateModelCatalog.ModelInfo?) -> [String] {
+        guard let model else { return ratios }
+        return ratios.filter { ratio in
+            (!model.supportsRatio || model.ratioOptions.contains { $0.value == ratio })
+                && dimensions(ratio: ratio, quality: qualities(for: model).first ?? "2K", model: model) != nil
+        }
+    }
+    public static func qualities(for model: CrateModelCatalog.ModelInfo?) -> [String] {
+        guard let model else { return qualities }
+        let limits = model.imageDimensionLimits
+        if let max = limits.maximumPixels, max < 2560 * 2560 { return ["2K"] }
+        if min(limits.maximumWidth, limits.maximumHeight) <= 1024 { return ["1K"] }
+        return ["2K", "3K", "4K"]
+    }
+    public static func dimensions(ratio: String, quality: String,
+                                  model: CrateModelCatalog.ModelInfo) -> Dimensions? {
+        guard qualities(for: model).contains(quality) else { return nil }
+        let limits = model.imageDimensionLimits
+        let longSide = quality == "2K" && (limits.maximumPixels ?? Int.max) < 2560 * 2560 ? 2048 : nil
+        return dimensions(ratio: ratio, quality: quality, minimumPixels: limits.minimumPixels,
+                          limits: limits, longSide: longSide)
     }
     public static func selection(ratio: String, resolution: String) -> Selection {
         let parts = ratio.split(separator: " ").map(String.init)
@@ -30,9 +53,12 @@ public enum CanvasImageConfiguration {
         return Selection(ratio: aspect, quality: quality)
     }
     public static func dimensions(ratio: String, quality: String,
-                                  minimumPixels: Int? = nil) -> Dimensions? {
+                                  minimumPixels: Int? = nil,
+                                  limits: CrateModelCatalog.ImageDimensionLimits = .init(),
+                                  longSide: Int? = nil) -> Dimensions? {
         let sides: [String: Int] = ["1K": 1024, "2K": 2560, "3K": 3072, "4K": 3840]
-        guard ratios.contains(ratio), let long = sides[quality] else { return nil }
+        guard ratios.contains(ratio), let preset = sides[quality] else { return nil }
+        let long = longSide ?? preset
         let parts = ratio.split(separator: ":").compactMap { Double($0) }
         guard parts.count == 2 else { return nil }
         var width = parts[0] >= parts[1] ? long : Int((Double(long) * parts[0] / parts[1]).rounded())
@@ -44,7 +70,17 @@ public enum CanvasImageConfiguration {
             width = Int(ceil(Double(width) * scale))
             height = Int(ceil(Double(height) * scale))
         }
-        guard (16...16384).contains(width), (16...16384).contains(height) else { return nil }
+        let maxAreaScale = limits.maximumPixels.map { sqrt(Double($0) / Double(width * height)) } ?? 1
+        let scale = min(1, maxAreaScale, Double(limits.maximumWidth) / Double(width),
+                        Double(limits.maximumHeight) / Double(height))
+        let multiple = max(1, limits.multipleOf)
+        width = Int(floor(Double(width) * scale / Double(multiple))) * multiple
+        height = Int(floor(Double(height) * scale / Double(multiple))) * multiple
+        // Quantization must not put a minimum-area image just below its bound.
+        if let minimumPixels, width * height < minimumPixels {
+            if width <= height { width += multiple } else { height += multiple }
+        }
+        guard limits.allows(width: width, height: height) else { return nil }
         return Dimensions(width: width, height: height)
     }
 }

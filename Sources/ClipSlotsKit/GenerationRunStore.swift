@@ -49,7 +49,8 @@ public struct GenerationRequestRecord: Codable, Equatable {
         duration = request.duration; generateAudio = request.generateAudio
         firstFrame = request.firstFramePath.flatMap { $0.isEmpty ? nil : (resourceIDs[$0] ?? "unavailable") }
         lastFrame = request.lastFramePath.flatMap { $0.isEmpty ? nil : (resourceIDs[$0] ?? "unavailable") }
-        references = request.referenceImagePaths.filter { !$0.isEmpty }.map { resourceIDs[$0] ?? "unavailable" }
+        references = (request.referenceImagePaths + request.imagePaths).filter { !$0.isEmpty }
+            .map { resourceIDs[$0] ?? "unavailable" }
     }
 
     public func droppedParameters(comparedTo requested: Self) -> [String] {

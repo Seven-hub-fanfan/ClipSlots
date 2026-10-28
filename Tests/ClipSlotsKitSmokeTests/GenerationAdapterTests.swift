@@ -319,7 +319,7 @@ func runGenerationAdapterTests(_ t: TestRunner, live: Bool = false) {
             _ = try await crate.submit(video)
             let videoCall = await crateFixture.calls.last!
             c.check(videoCall.arguments.contains("--first-frame") && videoCall.arguments.contains("4k")
-                    && videoCall.arguments.contains("-1") && videoCall.arguments.contains("false")
+                    && videoCall.arguments.contains("duration=-1") && videoCall.arguments.contains("false")
                     && videoCall.arguments.contains("seed=88"), "Crate video roles, case and duration special value retained")
             for values: [String: JSONValue] in [
                 ["prompt": "x", "last_frame": .string(file.path)],

@@ -68,6 +68,7 @@ public enum CanvasWorkflowResolver {
                 append(videoRequest.firstFramePath, role: .firstFrame)
                 append(videoRequest.lastFramePath, role: .lastFrame)
                 videoRequest.referenceImagePaths.forEach { append($0, role: .reference) }
+                videoRequest.imagePaths.forEach { append($0, role: .reference) }
             } else if let imageRequest {
                 imageRequest.imagePaths.forEach { append($0, role: .reference) }
             } else {
@@ -147,21 +148,37 @@ public enum CanvasWorkflowResolver {
                 generateAudio: (model?.supportsAudio ?? false) ? node.generateAudio : nil,
                 firstFramePath: frames.first, lastFramePath: frames.last, referenceImagePaths: frames.references,
                 seed: reusingSeed ? node.seed : nil)
+            if let model, !model.supportsFirstFrame {
+                video?.imagePaths = Array(CanvasEdgeInputs.imageReferences(edgeInputs: resolved,
+                    slotImages: fact.inputImagePaths).prefix(model.imageInputMaxCount ?? Int.max))
+            }
+            if let request = video, let model {
+                do { video = try CrateModelParameters.video(request, model: model) }
+                catch let error as CrateRequestError { reasons.append(error.userMessage) }
+                catch { reasons.append(error.localizedDescription) }
+            }
         } else {
             let split = CanvasImageConfiguration.supportsSplit(model)
                 || (model == nil && CanvasImageConfiguration.splitModels.contains(node.model))
             let selection = CanvasImageConfiguration.selection(ratio: node.ratio, resolution: node.resolution)
             let minimumPixels = model?.imageMinimumPixels
                 ?? (split ? CanvasImageConfiguration.seedreamMinimumPixels : nil)
-            let dimensions = split ? CanvasImageConfiguration.dimensions(
+            let dimensions = split ? model.map {
+                CanvasImageConfiguration.dimensions(ratio: selection.ratio, quality: selection.quality, model: $0)
+            } ?? CanvasImageConfiguration.dimensions(
                 ratio: selection.ratio, quality: selection.quality, minimumPixels: minimumPixels) : nil
             if split && dimensions == nil { reasons.append(CrateRequestError.invalidImageDimensions.userMessage) }
             image = .init(model: node.model, prompt: prompt, ratio: node.ratio, count: 1,
                 imagePaths: CanvasEdgeInputs.imageReferences(edgeInputs: resolved, slotImages: fact.inputImagePaths),
                 seed: reusingSeed ? node.seed : nil,
                 width: dimensions?.width, height: dimensions?.height,
-                resolution: split ? selection.quality : nil)
-            if split { image?.ratio = selection.ratio }
+                resolution: split ? selection.quality : ((model?.supportsResolution ?? true) ? node.resolution : nil))
+            if split { image?.ratio = model?.supportsRatio == false ? "" : selection.ratio }
+            if let request = image, let model {
+                do { image = try CrateModelParameters.image(request, model: model) }
+                catch let error as CrateRequestError { reasons.append(error.userMessage) }
+                catch { reasons.append(error.localizedDescription) }
+            }
         }
         return Plan(edgeInputs: resolved, prompt: prompt, fragments: fragments,
                     imageRequest: image, videoRequest: video, blockingReasons: reasons)

@@ -39,7 +39,7 @@ final class CrateModelCatalogStore: ObservableObject {
 
     /// 软过期时间。模型上下线是以天计的事，10 分钟足够让"刚上线的模型"在下次打开面板时出现，
     /// 又不会让连续操作反复起进程。
-    private let cacheTTL: TimeInterval = 600
+    private let cacheTTL: TimeInterval = 60
     private var loadedAt: Date?
     private var inFlight: Task<Void, Never>?
 
@@ -76,11 +76,18 @@ final class CrateModelCatalogStore: ObservableObject {
     }
 
     func modelsForAgent() async throws -> [CrateModelCatalog.ModelInfo] {
-        loadIfNeeded()
+        if inFlight == nil { reload() }
         await inFlight?.value
         if case .loaded(let models) = state { return models }
         if case .failed(let reason) = state { throw AgentOperationError(reason) }
         throw AgentOperationError("模型目录尚未加载，请稍后重试。")
+    }
+
+    func update(_ model: CrateModelCatalog.ModelInfo) {
+        guard case .loaded(var models) = state else { return }
+        if let index = models.firstIndex(where: { $0.id == model.id }) { models[index] = model }
+        else { models.append(model) }
+        state = .loaded(models)
     }
 
     /// 强制重取（面板上的刷新按钮 / 用户刚在终端登录完）。

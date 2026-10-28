@@ -20,9 +20,11 @@ with (root / "commands.jsonl").open("a") as log:
     log.write(json.dumps(args) + "\n")
 if args[:2] == ["auth", "status"]:
     result = {"username": "canvas-test"}
-elif args[:2] == ["model", "list"]:
+elif args[:2] in (["model", "list"], ["model", "describe"]):
     if os.environ.get("CLIPSLOTS_GENERATION_CHAIN_PROBE") == "1":
         result = json.loads(pathlib.Path(os.environ["CLIPSLOTS_CHAIN_MODEL_CATALOG"]).read_text())
+        if args[1] == "describe":
+            result = next(item for item in result if item["id"] == args[2])
         print(json.dumps(result))
         sys.exit(0)
     result = [
@@ -62,8 +64,8 @@ elif args[:2] == ["model", "list"]:
             {"role": "last_frame", "maxCount": 1},
             {"role": "reference_image", "maxCount": 4},
         ]}
-elif args[:2] == ["model", "describe"]:
-    result = {"parameters": []}
+    if args[1] == "describe":
+        result = next(item for item in result if item["id"] == args[2])
 elif args[:2] == ["task", "get"]:
     ident = args[2]
     if os.environ.get("CLIPSLOTS_CANVAS_AGENT_GENERATION_PROBE") == "1":

@@ -33,7 +33,10 @@ enum CanvasGenerationParamEdits {
         let ratio = split ? selection.ratio : CrateModelCatalog.resolvedRatio(current: node.ratio, for: info)
         // 分辨率与时长：新模型不吃就清空/归零（0 = 交给模型默认），吃但当前值不在档位里也清掉。
         let resolution: String = {
-            if split { return CanvasImageConfiguration.qualities.contains(selection.quality) ? selection.quality : "2K" }
+            if split {
+                let qualities = CanvasImageConfiguration.qualities(for: info)
+                return qualities.contains(selection.quality) ? selection.quality : qualities[0]
+            }
             guard info.supportsResolution else { return "" }
             if node.resolution.isEmpty { return "" }
             guard info.resolutionOptions.isEmpty
@@ -114,9 +117,9 @@ struct CanvasNodeActionBar: View {
                 CanvasGenerationSourceControls(node: node, canvas: canvas)
                 if node.generationProvider == .crate {
                     modelChip
-                    if currentModel?.supportsRatio ?? true { ratioChip }
+                    if splitImageSize || (currentModel?.supportsRatio ?? true) { ratioChip }
+                    if !splitImageSize, currentModel?.supportsResolution == true { resolutionChip }
                     if isVideo {
-                        if currentModel?.supportsResolution ?? false { resolutionChip }
                         if currentModel?.supportsDuration ?? false { durationChip }
                         if currentModel?.supportsAudio ?? false { audioChip }
                     }
@@ -294,7 +297,7 @@ struct CanvasNodeActionBar: View {
         .canvasControlRegion("composer-aspect")
         .canvasParameterPopover(isPresented: $showingAspectPicker) {
             if splitImageSize {
-                CanvasImageSizePicker(selection: imageSelection) { ratio, quality in
+                CanvasImageSizePicker(selection: imageSelection, model: currentModel) { ratio, quality in
                     CanvasGenerationParamEdits.applyImageSize(ratio: ratio, quality: quality, node: node, canvas: canvas)
                 }
             } else {

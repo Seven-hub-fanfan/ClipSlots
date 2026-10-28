@@ -30,7 +30,7 @@ public struct CrateGenerationAdapter: GenerationProvider {
         }
     }
     public func discover() async throws -> [GenerationCapability] {
-        let value = try GenerationWire.decode(GenerationAdapterRuntime.output(await invoke(["model", "list", "--json"])))
+        let value = try GenerationWire.decode(GenerationAdapterRuntime.output(await invoke(CrateModelCatalog.listArguments())))
         guard let list = value.arrayValue else { throw GenerationAdapterError.invalidResponse }
         return try list.flatMap { item -> [GenerationCapability] in
             guard item["enabled"] != .bool(false) else { return [] }
@@ -57,10 +57,11 @@ public struct CrateGenerationAdapter: GenerationProvider {
         var fields: [String: JSONValue] = ["prompt": ["type": "string", "minLength": 1]]
         let names = Set(parameters.compactMap { $0["name"]?.stringValue })
         for parameter in parameters {
-            guard let name = parameter["name"]?.stringValue,
-                  ["ratio", "width", "height", "resolution", "duration", "seed", "generate_audio"].contains(name) else { continue }
-            let integer = ["width", "height", "duration", "seed"].contains(name)
-            var rule: [String: JSONValue] = ["type": .string(name == "generate_audio" ? "boolean" : integer ? "integer" : "string")]
+            guard let name = parameter["name"]?.stringValue else { continue }
+            let integer = ["width", "height", "seed"].contains(name) || (name == "duration" && parameter["precision"] == .number(0))
+            let type = parameter["type"]?.stringValue
+                ?? (name == "generate_audio" ? "boolean" : ["width", "height", "duration", "seed"].contains(name) ? "number" : "string")
+            var rule: [String: JSONValue] = ["type": .string(integer ? "integer" : type)]
             if let options = parameter["options"]?.arrayValue, !options.isEmpty {
                 let values = options.compactMap { option -> JSONValue? in
                     guard let value = option["value"] else { return nil }
@@ -85,7 +86,8 @@ public struct CrateGenerationAdapter: GenerationProvider {
             fields["images"] = pathArray
             fields.removeValue(forKey: "duration"); fields.removeValue(forKey: "generate_audio")
         } else {
-            fields["reference_images"] = pathArray
+            if refs.contains("reference_image") { fields["reference_images"] = pathArray }
+            if refs.isEmpty, types.contains("image-to-video") { fields["images"] = pathArray }
             if refs.contains("first_frame") { fields["first_frame"] = ["type": "string", "minLength": 1] }
             if refs.contains("last_frame") { fields["last_frame"] = ["type": "string", "minLength": 1] }
             fields.removeValue(forKey: "width"); fields.removeValue(forKey: "height")
@@ -138,15 +140,20 @@ public struct CrateGenerationAdapter: GenerationProvider {
             }
             let request = CrateImageRequest(model: capability.id, prompt: prompt,
                 ratio: v["ratio"]?.stringValue ?? "", imagePaths: paths, seed: v["seed"]?.intValue,
-                width: width, height: height)
-            args = try CrateGeneration.submitArguments(request)
-            if let resolution = v["resolution"]?.stringValue {
+                width: width, height: height, resolution: v["resolution"]?.stringValue)
+            guard let parsed = try CrateModelCatalog.parse("[" + fresh.encodedText() + "]").first else {
+                throw GenerationAdapterError.invalidResponse
+            }
+            do { args = try CrateGeneration.submitArguments(CrateModelParameters.image(request, model: parsed)) }
+            catch let error as CrateRequestError { throw GenerationAdapterError.invalidInput(error.userMessage) }
+            if width != nil, let resolution = v["resolution"]?.stringValue {
                 args += ["--param", "resolution=\(resolution)"]
             }
         } else if capability.kind == .video {
             let first = v["first_frame"]?.stringValue, last = v["last_frame"]?.stringValue
             let reference = v["reference_images"]?.arrayValue?.compactMap(\.stringValue) ?? []
-            paths = [first, last].compactMap { $0 } + reference
+            let images = v["images"]?.arrayValue?.compactMap(\.stringValue) ?? []
+            paths = [first, last].compactMap { $0 } + reference + images
             let roles = fresh["references"]?["roles"]?.arrayValue ?? []
             let cap = roles.first { $0["role"] == .string("reference_image") }?["maxCount"]?.intValue ?? 0
             guard reference.count <= cap else { throw GenerationAdapterError.invalidInput("参考图片数量超出模型声明上限。") }
@@ -168,11 +175,26 @@ public struct CrateGenerationAdapter: GenerationProvider {
                     }
                 }
             }
-            args = try CrateGeneration.submitArguments(CrateVideoRequest(model: capability.id, prompt: prompt,
+            guard let parsed else { throw GenerationAdapterError.invalidResponse }
+            do {
+                args = try CrateGeneration.submitArguments(CrateModelParameters.video(CrateVideoRequest(model: capability.id, prompt: prompt,
                 ratio: v["ratio"]?.stringValue ?? "", resolution: v["resolution"]?.stringValue ?? "",
                 duration: v["duration"]?.intValue, generateAudio: v["generate_audio"]?.boolValue,
-                firstFramePath: first, lastFramePath: last, referenceImagePaths: reference, seed: v["seed"]?.intValue))
+                firstFramePath: first, lastFramePath: last, referenceImagePaths: reference, imagePaths: images,
+                    seed: v["seed"]?.intValue), model: parsed))
+            } catch let error as CrateRequestError { throw GenerationAdapterError.invalidInput(error.userMessage) }
         } else { throw GenerationAdapterError.invalidInput("Crate 首期仅适配图片与视频模型。") }
+        let handled: Set<String> = ["prompt", "ratio", "width", "height", "resolution", "duration", "seed", "generate_audio"]
+        let published = Set(fresh["parameters"]?.arrayValue?.compactMap { $0["name"]?.stringValue } ?? [])
+        for name in published.sorted() where !handled.contains(name) {
+            if let value = v[name] {
+                let text = try value.stringValue ?? value.encodedText()
+                args += ["--param", "\(name)=\(text)"]
+            }
+        }
+        if let duration = v["duration"], duration.intValue == nil {
+            args += ["--param", "duration=\(try duration.encodedText())"]
+        }
         let files = try paths.map(GenerationAdapterRuntime.file)
         return .init(capability: capability, input: input, inputFiles: files, arguments: args)
     }

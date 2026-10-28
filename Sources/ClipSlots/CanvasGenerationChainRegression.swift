@@ -33,8 +33,11 @@ extension CanvasWorkspaceView {
             return
         }
         if mode == "ratios" {
-            for model in ["seedream45", "seedream5"] {
-                for quality in ["2K", "3K"] {
+            for model in ["seedream45", "seedream5", "seedream5-pro"] {
+                guard let info = modelCatalog.model(id: model) else {
+                    check(false, "missing \(model) live catalog fixture"); continue
+                }
+                for quality in CanvasImageConfiguration.qualities(for: info).filter({ $0 != "4K" }) {
                     for ratio in CanvasImageConfiguration.ratios {
                         guard let source = createNode(kind: .image, at: CGPoint(x: 300, y: 240),
                             parentNodeId: nil, beginEditing: false, quiet: true) else {
@@ -46,8 +49,7 @@ extension CanvasWorkspaceView {
                                                     count: 1, resolution: quality)
                         let configured = canvas.node(id: source.id)!
                         let plan = CanvasWorkflowCapture.plan(node: configured, canvas: canvas, store: store)
-                        let expected = CanvasImageConfiguration.dimensions(ratio: ratio, quality: quality,
-                            minimumPixels: CanvasImageConfiguration.seedreamMinimumPixels)!
+                        let expected = CanvasImageConfiguration.dimensions(ratio: ratio, quality: quality, model: info)!
                         let prefix = "\(model) \(quality) \(ratio)"
                         check(plan.imageRequest?.width == expected.width &&
                               plan.imageRequest?.height == expected.height, "\(prefix) resolves explicit dimensions")

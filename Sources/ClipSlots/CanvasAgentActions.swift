@@ -88,11 +88,18 @@ extension CanvasAgentContext {
         if call.name == "canvas_list_models" {
             let models = try await CrateModelCatalogStore.shared.modelsForAgent()
             try validateScope()
-            return ["ok": true, "models": .array(models.map { model in
+            return ["ok": true, "models": .array(models.filter(\.enabled).map { model in
                 ["id": .string(model.id), "name": .string(model.displayName),
                  "generation_types": .array(model.generationTypes.map(JSONValue.string)),
                  "ratios": .array(model.ratioOptions.map { .string($0.value) }),
-                 "resolutions": .array(model.resolutionOptions.map { .string($0.value) })]
+                 "resolutions": .array(model.resolutionOptions.map { .string($0.value) }),
+                 "parameters": model.manifest["parameters"] ?? .array([]),
+                 "defaults": model.manifest["defaults"] ?? .object([:]),
+                 "dimensions": model.manifest["dimensions"] ?? .object([:]),
+                 "dimension_options": model.manifest["dimensionOptions"] ?? .array([]),
+                 "inputs": model.manifest["inputs"] ?? .object([:]),
+                 "references": model.manifest["references"] ?? .object([:]),
+                 "rules": model.manifest["rules"] ?? .object([:])]
             }), "summary": "已读取实际可用模型，请使用精确ID"]
         }
         try writable([])

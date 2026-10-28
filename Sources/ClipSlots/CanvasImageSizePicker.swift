@@ -4,6 +4,7 @@ import ClipSlotsKit
 struct CanvasImageSizePicker: View {
     private typealias TapSkin = CanvasSkin
     let selection: CanvasImageConfiguration.Selection
+    var model: CrateModelCatalog.ModelInfo? = nil
     let onPick: (String, String) -> Void
     @State private var hovered: String?
     @Namespace private var highlight
@@ -13,7 +14,7 @@ struct CanvasImageSizePicker: View {
         VStack(alignment: .leading, spacing: 8) {
             Text("画质").font(.system(size: 12, weight: .medium)).foregroundColor(mutedInk)
             HStack(spacing: 4) {
-                ForEach(CanvasImageConfiguration.qualities, id: \.self) { quality in
+                ForEach(CanvasImageConfiguration.qualities(for: model), id: \.self) { quality in
                     Button { onPick(selection.ratio, quality) } label: {
                         Text(quality).font(.system(size: 12, weight: .medium))
                             .frame(maxWidth: .infinity).frame(height: 32)
@@ -74,6 +75,7 @@ struct CanvasImageSizePicker: View {
             }
             .contentShape(Rectangle())
         }.buttonStyle(.plain)
+            .disabled(!CanvasImageConfiguration.ratios(for: model).contains(ratio))
             .onHover { if $0 { hovered = ratio } else if hovered == ratio { hovered = nil } }
             .accessibilityLabel("画面比例 " + ratio)
             .accessibilityIdentifier("canvas-ratio-" + ratio)

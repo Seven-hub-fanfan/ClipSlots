@@ -269,6 +269,7 @@ public enum CanvasEdgeInputs {
         // 目录没加载出来时按"接受图输入"处理：拒掉用户挂的图比多传一张更糟（多传最坏是服务端报错，
         // 少传是静默不生效）。
         if let model, !model.acceptsVideoImageInput { return (nil, nil, []) }
+        if let model, !model.supportsFirstFrame { return (nil, nil, []) }
 
         var used = Set<String>()
         func take(_ path: String?) -> String? {

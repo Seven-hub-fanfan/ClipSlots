@@ -7433,7 +7433,7 @@ do {
 // 表现为"生成能用、重跑坏了"。两道保险都要有测试盯着。
 do {
     t.equal(CrateGeneration.modelDescribeArguments(model: "seedream45"),
-            ["model", "describe", "seedream45", "--json"],
+            ["model", "describe", "seedream45", "--refresh", "--json"],
             "CRATE-SEED-1 模型参数表查询命令")
 
     let describe = """
@@ -7526,7 +7526,7 @@ do {
 //   - 有一类出图模型压根没有 ratio 参数（走 width/height），对它们必须不传 --ratio。
 // 下面的 fixture 字段口径全部照抄本机 `crate model list --json` 的实测输出。
 do {
-    t.equal(CrateModelCatalog.listArguments(), ["model", "list", "--json"],
+    t.equal(CrateModelCatalog.listArguments(), ["model", "list", "--all", "--refresh", "--json"],
             "CRATE-CAT-1 目录查询命令")
 
     let json = """
@@ -7674,7 +7674,7 @@ do {
             "★CRATE-VID-11 duration/audio 为 nil 时不传：Pro 1 压根没有 generate_audio，传了整次请求报废")
     let autoDuration = try! CrateGeneration.submitArguments(
         CrateVideoRequest(model: "seedance25", prompt: "x", duration: -1))
-    t.check(autoDuration.contains("--duration") && autoDuration.contains("-1"),
+    t.check(autoDuration.contains("--param") && autoDuration.contains("duration=-1"),
             "★CRATE-VID-12 -1 是 seedance 声明的合法特殊值（服务端自己定时长），不能被当成非法数据滤掉")
     let audioOff = try! CrateGeneration.submitArguments(
         CrateVideoRequest(model: "seedance25", prompt: "x", generateAudio: false))
@@ -9431,6 +9431,7 @@ runBatchGenerationTests(t)
 runCanvasGroupTests(t)
 runLocalToolchainTests(t)
 runGenerationAdapterTests(t)
+runCrateModelAlignmentTests(t)
 runByteArtistCanvasTests(t)
 runAgentAttachmentTests(t)
 runAgentDirectoryTests(t)

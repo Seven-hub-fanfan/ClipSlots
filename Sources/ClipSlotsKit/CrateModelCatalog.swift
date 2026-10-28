@@ -28,6 +28,34 @@ import Foundation
 /// 一次展示去串行 describe 十几个模型。
 public enum CrateModelCatalog {
 
+    public struct ImageDimensionLimits: Equatable {
+        public var minimumPixels: Int?
+        public var maximumPixels: Int?
+        public var minimumAspectRatio: Double?
+        public var maximumAspectRatio: Double?
+        public var minimumWidth = 16
+        public var minimumHeight = 16
+        public var maximumWidth = 16384
+        public var maximumHeight = 16384
+        public var multipleOf = 1
+
+        public init(minimumPixels: Int? = nil, maximumPixels: Int? = nil) {
+            self.minimumPixels = minimumPixels
+            self.maximumPixels = maximumPixels
+        }
+
+        public func allows(width: Int, height: Int) -> Bool {
+            guard width >= minimumWidth, width <= maximumWidth,
+                  height >= minimumHeight, height <= maximumHeight,
+                  width % max(1, multipleOf) == 0, height % max(1, multipleOf) == 0 else { return false }
+            let pixels = Double(width) * Double(height), aspect = Double(width) / Double(height)
+            return (minimumPixels.map { pixels >= Double($0) } ?? true)
+                && (maximumPixels.map { pixels <= Double($0) } ?? true)
+                && (minimumAspectRatio.map { aspect >= $0 } ?? true)
+                && (maximumAspectRatio.map { aspect <= $0 } ?? true)
+        }
+    }
+
     // MARK: - 数据
 
     /// 一个比例选项。`value` 直接交给 `--ratio`，`label` 是 CLI 给的人类可读名。
@@ -142,6 +170,13 @@ public enum CrateModelCatalog {
         public let framesExcludeReferences: Bool
         /// Minimum image area declared by the CLI model; nil when unspecified.
         public let imageMinimumPixels: Int?
+        public let imageDimensionLimits: ImageDimensionLimits
+        /// Full published definitions/defaults/rules remain available to Agent readers.
+        public let manifest: JSONValue
+        public let supportsFirstFrame: Bool
+        public let imageInputMaxCount: Int?
+        public let textOnlyResolutions: [String]
+        public let resolutionDurations: [String: Int]
         public let enabled: Bool
 
         public init(id: String,
@@ -158,6 +193,12 @@ public enum CrateModelCatalog {
                     referenceImageMaxCount: Int = 0,
                     framesExcludeReferences: Bool = false,
                     imageMinimumPixels: Int? = nil,
+                    imageDimensionLimits: ImageDimensionLimits? = nil,
+                    manifest: JSONValue = .null,
+                    supportsFirstFrame: Bool = true,
+                    imageInputMaxCount: Int? = nil,
+                    textOnlyResolutions: [String] = [],
+                    resolutionDurations: [String: Int] = [:],
                     enabled: Bool) {
             self.id = id
             self.displayName = displayName
@@ -173,6 +214,12 @@ public enum CrateModelCatalog {
             self.referenceImageMaxCount = referenceImageMaxCount
             self.framesExcludeReferences = framesExcludeReferences
             self.imageMinimumPixels = imageMinimumPixels
+            self.imageDimensionLimits = imageDimensionLimits ?? .init(minimumPixels: imageMinimumPixels)
+            self.manifest = manifest
+            self.supportsFirstFrame = supportsFirstFrame
+            self.imageInputMaxCount = imageInputMaxCount
+            self.textOnlyResolutions = textOnlyResolutions
+            self.resolutionDurations = resolutionDurations
             self.enabled = enabled
         }
 
@@ -236,7 +283,7 @@ public enum CrateModelCatalog {
     // MARK: - 命令行
 
     public static func listArguments() -> [String] {
-        ["model", "list", "--json"]
+        ["model", "list", "--all", "--refresh", "--json"]
     }
 
     // MARK: - 解析
@@ -287,6 +334,22 @@ public enum CrateModelCatalog {
             let refImageMax = roles.first { ($0["role"] as? String) == "reference_image" }
                 .flatMap { intValue($0["maxCount"]) } ?? 0
             let exclusive = parseFramesExcludeReferences((refs["constraints"] as? [[String: Any]]) ?? [])
+            let dimensions = (dict["dimensions"] as? [String: Any]) ?? [:]
+            var limits = ImageDimensionLimits(minimumPixels: intValue(dimensions["minimumPixels"]),
+                                              maximumPixels: intValue(dimensions["maximumPixels"]))
+            limits.minimumAspectRatio = dimensions["minimumAspectRatio"] as? Double
+            limits.maximumAspectRatio = dimensions["maximumAspectRatio"] as? Double
+            limits.multipleOf = max(1, intValue(dimensions["multipleOf"]) ?? 1)
+            let width = params.first { ($0["name"] as? String) == "width" }
+            let height = params.first { ($0["name"] as? String) == "height" }
+            let min = dimensions["min"] as? [String: Any], max = dimensions["max"] as? [String: Any]
+            limits.minimumWidth = intValue(min?["width"]) ?? intValue(width?["min"]) ?? 16
+            limits.minimumHeight = intValue(min?["height"]) ?? intValue(height?["min"]) ?? 16
+            limits.maximumWidth = intValue(max?["width"]) ?? intValue(width?["max"]) ?? 16384
+            limits.maximumHeight = intValue(max?["height"]) ?? intValue(height?["max"]) ?? 16384
+            let manifestData = try? JSONSerialization.data(withJSONObject: dict, options: [.sortedKeys])
+            let manifest = manifestData.flatMap { try? JSONDecoder().decode(JSONValue.self, from: $0) } ?? .null
+            let rules = dict["rules"] as? [String: Any]
 
             let name = (dict["name"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? id
             return ModelInfo(id: id,
@@ -304,6 +367,13 @@ public enum CrateModelCatalog {
                              framesExcludeReferences: exclusive,
                              imageMinimumPixels: (dict["dimensions"] as? [String: Any])
                                 .flatMap { intValue($0["minimumPixels"]) },
+                             imageDimensionLimits: limits,
+                             manifest: manifest,
+                             supportsFirstFrame: roles.contains { ($0["role"] as? String) == "first_frame" },
+                             imageInputMaxCount: intValue(((dict["inputs"] as? [String: Any])?["image"] as? [String: Any])?["maxCount"]),
+                             textOnlyResolutions: rules?["textOnlyResolutions"] as? [String] ?? [],
+                             resolutionDurations: (rules?["resolutionDurations"] as? [String: Any] ?? [:])
+                                .compactMapValues { intValue($0) },
                              // 缺字段按可用处理：漏掉一个能用的模型，比凭空多显示一个更难被发现。
                              enabled: (dict["enabled"] as? Bool) ?? true)
         }
@@ -346,8 +416,10 @@ public enum CrateModelCatalog {
     /// 字符串），所以两种都收——只认 Int 的代价是某个模型的时长规格静默变成 nil，UI 上表现为
     /// "时长选择器凭空消失"。
     static func intValue(_ raw: Any?) -> Int? {
-        if let i = raw as? Int { return i }
-        if let d = raw as? Double { return Int(d) }
+        if let d = raw as? Double {
+            guard d.isFinite, d == d.rounded(), abs(d) < Double(Int.max) else { return nil }
+            return Int(d)
+        }
         if let s = raw as? String { return Int(s.trimmingCharacters(in: .whitespacesAndNewlines)) }
         return nil
     }
@@ -404,6 +476,7 @@ public enum CrateModelCatalog {
     public static func assignVideoFrames(imagePaths: [String],
                                         model: ModelInfo) -> (first: String?, last: String?, references: [String]) {
         guard model.acceptsVideoImageInput, !imagePaths.isEmpty else { return (nil, nil, []) }
+        guard model.supportsFirstFrame else { return (nil, nil, []) }
         var rest = imagePaths
         let first = rest.removeFirst()
         var last: String?

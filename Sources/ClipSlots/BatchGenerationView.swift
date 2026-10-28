@@ -298,7 +298,7 @@ struct BatchGenerationView: View {
                                 showingModels = false
                             }
                         }
-                    if model?.supportsRatio == true {
+                    if model?.supportsRatio == true || CanvasImageConfiguration.supportsSplit(model) {
                         Button { showingModels = false; showingRatio.toggle() } label: {
                             HStack(spacing: 5) {
                                 CanvasAspectGlyph(ratio: configuration.ratio)
@@ -308,12 +308,25 @@ struct BatchGenerationView: View {
                         .fixedSize()
                         .accessibilityIdentifier("batch-aspect-picker")
                         .popover(isPresented: $showingRatio) {
-                            CanvasAspectPicker(options: model?.ratioOptions ?? [], selected: configuration.ratio) {
-                                configuration.ratio = $0; showingRatio = false
+                            if configuration.kind == .image, CanvasImageConfiguration.supportsSplit(model) {
+                                CanvasImageSizePicker(selection: CanvasImageConfiguration.selection(
+                                    ratio: configuration.ratio, resolution: configuration.resolution), model: model) { ratio, quality in
+                                    configuration.ratio = ratio; configuration.resolution = quality
+                                }
+                            } else {
+                                CanvasAspectPicker(options: model?.ratioOptions ?? [], selected: configuration.ratio) {
+                                    configuration.ratio = $0; showingRatio = false
+                                }
                             }
                         }
                     }
                 }
+            }
+            if configuration.kind == .image, let model, model.supportsResolution {
+                Picker("分辨率", selection: $configuration.resolution) {
+                    Text("模型默认").tag("")
+                    ForEach(model.resolutionOptions, id: \.value) { Text($0.label).tag($0.value) }
+                }.font(.system(size: 11))
             }
             if configuration.kind == .video, let model {
                 let layout = compact ? AnyLayout(VStackLayout(alignment: .leading, spacing: 10))
@@ -460,8 +473,16 @@ struct BatchGenerationView: View {
     }
     private func pickModel(_ info: CrateModelCatalog.ModelInfo) {
         configuration.model = info.id
-        configuration.ratio = CrateModelCatalog.resolvedRatio(current: configuration.ratio, for: info)
-        if !info.supportsResolution || !info.resolutionOptions.contains(where: { $0.value == configuration.resolution }) {
+        if configuration.kind == .image, CanvasImageConfiguration.supportsSplit(info) {
+            let selection = CanvasImageConfiguration.selection(ratio: configuration.ratio, resolution: configuration.resolution)
+            configuration.ratio = selection.ratio
+            let qualities = CanvasImageConfiguration.qualities(for: info)
+            configuration.resolution = qualities.contains(selection.quality) ? selection.quality : qualities[0]
+        } else {
+            configuration.ratio = CrateModelCatalog.resolvedRatio(current: configuration.ratio, for: info)
+        }
+        if !CanvasImageConfiguration.supportsSplit(info),
+           !info.supportsResolution || (!configuration.resolution.isEmpty && !info.resolutionOptions.contains(where: { $0.value == configuration.resolution })) {
             configuration.resolution = ""
         }
         if let duration = configuration.duration, info.durationSpec?.allows(duration) != true { configuration.duration = nil }
