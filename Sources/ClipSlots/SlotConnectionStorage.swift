@@ -265,11 +265,9 @@ final class SlotConnectionStorage {
             .appendingPathComponent("connections.json.corrupt")
         do {
             try Data(contentsOf: url).write(to: backupURL, options: .atomic)
-            NSLog("[ClipSlots] ERROR: connections.json at \(url.path) failed to decode; "
-                + "backed up corrupt bytes to \(backupURL.path) before falling back to empty.")
+            NSLog("[ClipSlots] ERROR: connections.json failed to decode; corrupt bytes backed up.")
         } catch {
-            NSLog("[ClipSlots] ERROR: connections.json at \(url.path) failed to decode AND "
-                + "the corrupt backup failed: \(error).")
+            NSLog("[ClipSlots] ERROR: connections.json failed to decode AND backup failed: \(ApplicationDiagnostics.error(error))")
         }
     }
 

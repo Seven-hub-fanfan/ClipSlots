@@ -26,7 +26,7 @@ enum NeuPreviewRenderer {
         guard let prefix = ProcessInfo.processInfo.environment["CLIPSLOTS_RENDER_PREVIEW"],
               !prefix.isEmpty else { return false }
 
-        for skin in [AppSkin.minimal, AppSkin.colorful] {
+        for skin in AppSkin.allCases {
             for dark in [false, true] {
                 AppSkinCenter.apply(skin)
                 let path = "\(prefix)_\(skin.rawValue)_\(dark ? "dark" : "light").png"

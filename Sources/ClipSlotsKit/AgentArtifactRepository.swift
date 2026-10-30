@@ -70,6 +70,42 @@ public final class AgentArtifactRepository: @unchecked Sendable {
             if let current, update.revision < current.revision { return current }
             if let current, current.isDeleted, update.revision == current.revision { return current }
             if let bytes = update.content, bytes.count > limits.maximumContentBytes { throw AgentArtifactError.tooLarge }
+            if let origin = update.appReplyOrigin {
+                try origin.validate()
+                let authority = origin.authority
+                guard update.replacesAppReplyAuthority, authority.artifactRevision == update.revision,
+                      AgentGatewayDecisionIdentity.bytes(authority.path, update.key.path),
+                      AgentGatewayDecisionIdentity.bytes(authority.binding.projectID ?? "", update.key.scope.projectID),
+                      AgentGatewayDecisionIdentity.bytes(authority.binding.canvasID ?? "", update.key.scope.canvasID) else {
+                    throw AgentArtifactError.invalidScope
+                }
+            }
+            if let context = update.appReplyToolContext {
+                try context.validate()
+                guard context.authority == update.appReplyOrigin?.authority else { throw AgentArtifactError.invalidScope }
+            }
+            try update.pageProjection?.validate()
+            if let uri = update.pageResourceURI {
+                guard AgentArtifactResourceIdentity(uri: uri) != nil, update.pageProjection != nil else {
+                    throw AgentArtifactError.invalidMetadata
+                }
+                if let old = current, old.revision == update.revision, let previous = old.pageResourceURI,
+                   previous != uri { throw AgentArtifactError.revisionConflict }
+            }
+            if update.pageProjection != nil {
+                guard update.pageProjectionConversationID != nil,
+                      update.pageProjectionRunID.map(AgentGatewayDecisionIdentity.opaque) ?? true else {
+                    throw AgentArtifactError.invalidScope
+                }
+                if let authority = update.appReplyOrigin?.authority {
+                    guard update.pageProjectionConversationID?.uuidString == authority.binding.sessionID,
+                          update.pageProjectionRunID == authority.originRunID else { throw AgentArtifactError.invalidScope }
+                }
+                if let old = current, old.revision == update.revision, old.pageProjection != nil {
+                    guard old.pageProjectionConversationID == update.pageProjectionConversationID,
+                          old.pageProjectionRunID == update.pageProjectionRunID else { throw AgentArtifactError.revisionConflict }
+                }
+            }
             if let title = update.title, title.utf8.count > 2048 { throw AgentArtifactError.invalidMetadata }
             if let mime = update.mimeType,
                mime.utf8.count > 256 || mime.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) }) {
@@ -80,6 +116,10 @@ public final class AgentArtifactRepository: @unchecked Sendable {
                 throw AgentArtifactError.revisionConflict
             }
             let advanced = current == nil || update.revision > (current?.revision ?? 0)
+            if !advanced, let old = current?.appReplyOrigin, update.replacesAppReplyAuthority,
+               old != update.appReplyOrigin { throw AgentArtifactError.revisionConflict }
+            if !advanced, let old = current?.appReplyToolContext, update.replacesAppReplyAuthority,
+               old != update.appReplyToolContext { throw AgentArtifactError.revisionConflict }
             if current == nil {
                 current = AgentArtifactRecord(key: update.key, revision: update.revision, contentRevision: nil,
                     content: nil, title: (update.key.path as NSString).lastPathComponent,
@@ -90,6 +130,23 @@ public final class AgentArtifactRepository: @unchecked Sendable {
             let previous = record
             record.revision = update.revision
             record.isDeleted = false
+            if advanced || update.replacesAppReplyAuthority {
+                record.appReplyOrigin = update.appReplyOrigin
+                record.appReplyToolContext = update.appReplyToolContext
+            }
+            if advanced {
+                record.pageProjection = update.pageProjection
+                record.pageProjectionConversationID = update.pageProjectionConversationID
+                record.pageProjectionRunID = update.pageProjectionRunID
+                record.pageResourceURI = update.pageResourceURI
+            }
+            else if let projection = update.pageProjection,
+                    record.pageProjection.map({ projection.revision > $0.revision }) ?? true {
+                record.pageProjection = projection
+                record.pageProjectionConversationID = update.pageProjectionConversationID
+                record.pageProjectionRunID = update.pageProjectionRunID
+                record.pageResourceURI = update.pageResourceURI ?? record.pageResourceURI
+            }
             if let title = update.title { record.title = title }
             if let mime = update.mimeType { record.mimeType = mime }
             if let bytes = update.content {
@@ -121,6 +178,12 @@ public final class AgentArtifactRepository: @unchecked Sendable {
             record.revision = revision
             record.content = nil
             record.contentRevision = nil
+            record.appReplyOrigin = nil
+            record.appReplyToolContext = nil
+            record.pageProjection = nil
+            record.pageProjectionConversationID = nil
+            record.pageProjectionRunID = nil
+            record.pageResourceURI = nil
             record.resourceState = .missing
             record.isDeleted = true
             record.updatedAt = Date()
@@ -231,6 +294,36 @@ public final class AgentArtifactRepository: @unchecked Sendable {
               (record.content == nil) == (record.contentRevision == nil),
               record.resourceState != .ready || record.hasCurrentContent,
               !record.isDeleted || record.content == nil else { throw AgentArtifactError.invalidMetadata }
+        if let origin = record.appReplyOrigin {
+            try origin.validate()
+            guard !record.isDeleted, origin.authority.artifactRevision == record.revision,
+                  AgentGatewayDecisionIdentity.bytes(origin.authority.path, record.key.path),
+                  AgentGatewayDecisionIdentity.bytes(origin.authority.binding.projectID ?? "", record.key.scope.projectID),
+                  AgentGatewayDecisionIdentity.bytes(origin.authority.binding.canvasID ?? "", record.key.scope.canvasID) else {
+                throw AgentArtifactError.invalidMetadata
+            }
+        }
+        if let context = record.appReplyToolContext {
+            try context.validate()
+            guard context.authority == record.appReplyOrigin?.authority else { throw AgentArtifactError.invalidMetadata }
+        }
+        try record.pageProjection?.validate()
+        if let uri = record.pageResourceURI {
+            guard AgentArtifactResourceIdentity(uri: uri) != nil, record.pageProjection != nil else {
+                throw AgentArtifactError.invalidMetadata
+            }
+        }
+        guard !record.isDeleted || record.pageProjection == nil else { throw AgentArtifactError.invalidMetadata }
+        if record.pageProjection != nil {
+            guard record.pageProjectionConversationID != nil,
+                  record.pageProjectionRunID.map(AgentGatewayDecisionIdentity.opaque) ?? true else {
+                throw AgentArtifactError.invalidMetadata
+            }
+            if let authority = record.appReplyOrigin?.authority {
+                guard record.pageProjectionConversationID?.uuidString == authority.binding.sessionID,
+                      record.pageProjectionRunID == authority.originRunID else { throw AgentArtifactError.invalidMetadata }
+            }
+        }
         return record
     }
 

@@ -33,6 +33,7 @@ final class CanvasAgentContext: ObservableObject {
         let runID: String
         var plan: AgentCanvasSync.Plan
         var isApplied = false
+        var readbackRequest: AgentCanvasReadbackRequest?
     }
     @Published private(set) var pendingGraphPreviews: [GraphPreview] = []
     @Published var graphPreview: GraphPreview?
@@ -44,18 +45,75 @@ final class CanvasAgentContext: ObservableObject {
     private(set) weak var store: SlotStoreObservable?
     var operationHistoryIDs: [UUID: Set<String>] = [:]
     let projectID: String
+    private(set) var activationEpoch = UUID()
     private var projectObserver: AnyCancellable?
     private var selectionObserver: AnyCancellable?
     private var referenceTask: Task<Void, Never>?
     private var referenceTicket = UUID()
+    private var readbackSource: (any AgentCanvasSnapshotReading)?
+    private var readbackBatcher: AgentCanvasReadbackBatcher?
+    private var readbackEpoch = UUID()
+    private var readbackTasks: [String: (request: AgentCanvasReadbackRequest, task: Task<Void, Never>)] = [:]
+    private struct ReadbackObservation {
+        let before: CanvasDocument
+        let watchesAll: Bool
+        let nodeIDs: Set<String>
+        let edgeIDs: Set<String>
+        let nodes: [String: CanvasNode]
+        let edges: [String: CanvasEdge]
+        var changedNodes = Set<String>()
+        var changedEdges = Set<String>()
+        var deletedNodes = Set<String>()
+    }
+    private var readbackObservations: [UUID: ReadbackObservation] = [:]
+    private var readbackNodeObserver: AnyCancellable?
+    private var readbackEdgeObserver: AnyCancellable?
+    private var lastReadbackNodeIDs = Set<String>()
     var onLeaveProject: (() -> Void)?
 
-    init(canvas: CanvasStore, store: SlotStoreObservable, projectID: String) {
+    init(canvas: CanvasStore, store: SlotStoreObservable?, projectID: String,
+         readbackSource: (any AgentCanvasSnapshotReading)? = nil) {
         self.canvas = canvas
         self.store = store
         self.projectID = projectID
+        self.readbackSource = readbackSource
+        readbackNodeObserver = canvas.nodeEditEvents.sink { [weak self] nodes in
+            guard let self, !self.readbackObservations.isEmpty else { return }
+            let ids = Set(nodes.map(\.id))
+            let watched = self.readbackObservations.values.reduce(into: Set<String>()) { $0.formUnion($1.nodeIDs) }
+            let watchesAll = self.readbackObservations.values.contains(where: \.watchesAll)
+            let live = Dictionary(nodes.filter { watchesAll || watched.contains($0.id) }.map { ($0.id, $0) },
+                                  uniquingKeysWith: { _, new in new })
+            let deleted = self.lastReadbackNodeIDs.subtracting(ids)
+            self.lastReadbackNodeIDs = ids
+            for id in Array(self.readbackObservations.keys) {
+                guard var observation = self.readbackObservations[id] else { continue }
+                let observedIDs = observation.watchesAll ? ids.union(observation.nodeIDs) : observation.nodeIDs
+                for nodeID in observedIDs where live[nodeID] != observation.nodes[nodeID] {
+                    observation.changedNodes.insert(nodeID)
+                }
+                observation.deletedNodes.formUnion(deleted)
+                self.readbackObservations[id] = observation
+            }
+        }
+        readbackEdgeObserver = canvas.edgeEditEvents.sink { [weak self] edges in
+            guard let self, !self.readbackObservations.isEmpty else { return }
+            let watched = self.readbackObservations.values.reduce(into: Set<String>()) { $0.formUnion($1.edgeIDs) }
+            let watchesAll = self.readbackObservations.values.contains(where: \.watchesAll)
+            let live = Dictionary(edges.filter { watchesAll || watched.contains($0.id) }.map { ($0.id, $0) },
+                                  uniquingKeysWith: { _, new in new })
+            for id in Array(self.readbackObservations.keys) {
+                guard var observation = self.readbackObservations[id] else { continue }
+                let observedIDs = observation.watchesAll ? Set(live.keys).union(observation.edgeIDs) : observation.edgeIDs
+                for edgeID in observedIDs where live[edgeID] != observation.edges[edgeID] {
+                    observation.changedEdges.insert(edgeID)
+                }
+                self.readbackObservations[id] = observation
+            }
+        }
         projectObserver = canvas.$activeProjectId.sink { [weak self] next in
             guard let self, next != self.projectID else { return }
+            self.activationEpoch = UUID()
             self.dismissPreview()
             self.skillDraft = nil
             self.onLeaveProject?()
@@ -280,6 +338,20 @@ final class CanvasAgentContext: ObservableObject {
         } catch { self.error = error.localizedDescription }
     }
 
+    private func beginReadbackObservation(_ request: AgentCanvasReadbackRequest, id: UUID) throws {
+        guard isActive, let canvas, readbackObservations.count < 128 else { throw AgentGatewayError.busy }
+        let before = canvas.gatewayDocument()
+        let nodeIDs = Set(request.isFullSnapshot ? before.nodes.map(\.id) : request.nodeIDs)
+        let edgeIDs = Set(request.isFullSnapshot ? before.edges.map(\.id) : request.edgeIDs)
+        if readbackObservations.isEmpty { lastReadbackNodeIDs = Set(before.nodes.map(\.id)) }
+        readbackObservations[id] = .init(before: before, watchesAll: request.isFullSnapshot,
+            nodeIDs: nodeIDs, edgeIDs: edgeIDs,
+            nodes: Dictionary(before.nodes.filter { nodeIDs.contains($0.id) }.map { ($0.id, $0) },
+                              uniquingKeysWith: { _, new in new }),
+            edges: Dictionary(before.edges.filter { edgeIDs.contains($0.id) }.map { ($0.id, $0) },
+                              uniquingKeysWith: { _, new in new }))
+    }
+
     @discardableResult
     func apply(conversationID: UUID) -> Bool {
         do {
@@ -328,7 +400,118 @@ final class CanvasAgentContext: ObservableObject {
         } catch { self.error = error.localizedDescription }
     }
 
-    func submitMutation(_ payload: JSONValue, conversationID: UUID, runID: String) throws -> String {
+    /// A host must supply the authority explicitly. Missing configuration
+    /// preserves the durable request; it never guesses a URL or an empty graph.
+    func configureReadbackSource(_ source: (any AgentCanvasSnapshotReading)?) {
+        cancelReadbacks()
+        readbackSource = source
+    }
+
+    func cancelReadbacks() {
+        readbackEpoch = UUID()
+        readbackTasks.values.forEach { $0.task.cancel() }; readbackTasks.removeAll()
+        readbackObservations.removeAll()
+        let previous = readbackBatcher
+        readbackBatcher = nil
+        Task { await previous?.cancelAll() }
+    }
+
+    func prepareReadback(_ request: AgentCanvasReadbackRequest,
+                         isCurrent: @escaping @MainActor () -> Bool) {
+        let key = request.coordinationKey
+        if let existing = readbackTasks[key] {
+            if existing.request != request { error = "同一读回标识的内容已改变。" }
+            return
+        }
+        guard readbackTasks.count < 128 else {
+            error = "画布读回队列已满，原请求已保留，请稍后重试。"; return
+        }
+        let epoch = readbackEpoch
+        let task = Task { [weak self] in
+            guard let self else { return }
+            defer { if readbackEpoch == epoch { readbackTasks.removeValue(forKey: key) } }
+            do { _ = try await submitReadback(request, isCurrent: isCurrent) }
+            catch {
+                guard readbackEpoch == epoch, isCurrent(), !(error is CancellationError) else { return }
+                self.error = (error as? AgentGatewayError)?.localizedDescription
+                    ?? "权威画布快照尚不可用，原变更已保留，可在配置读回源后重试。"
+            }
+        }
+        readbackTasks[key] = (request, task)
+    }
+
+    @discardableResult
+    func submitReadback(_ request: AgentCanvasReadbackRequest,
+                        isCurrent: @escaping @MainActor () -> Bool) async throws -> String {
+        try request.validate()
+        guard isActive, isCurrent(), request.projectID == projectID,
+              let conversation = UUID(uuidString: request.conversationID), let canvas else {
+            throw AgentGatewayError.originMismatch
+        }
+        let receipt = CanvasWorkflowSnapshot.digest(Data(
+            "\(request.conversationID)\u{0}\(request.runID)\u{0}\(request.mutationID)".utf8))
+        if canvas.gatewayDocument().appliedAgentMutationIDs.contains(receipt) { return "applied" }
+        if let existing = pendingGraphPreviews.first(where: {
+            $0.id == request.mutationID && $0.conversationID == conversation && $0.runID == request.runID
+        }) {
+            guard existing.readbackRequest == request else { throw AgentGatewayError.malformedPayload }
+            return "pending"
+        }
+        guard let readbackSource else { throw AgentCanvasError.unavailable }
+        if readbackBatcher == nil {
+            readbackBatcher = AgentCanvasReadbackBatcher(reader: readbackSource, serialGate: .shared)
+        }
+        guard let batcher = readbackBatcher else { throw AgentCanvasError.unavailable }
+        let epoch = readbackEpoch, observationID = UUID()
+        if request.isFullSnapshot {
+            // Include nested tool callbacks already scheduled by the host.
+            // Their failures do not prevent a subsequent authoritative query.
+            let toolReads = readbackTasks.values.filter { !$0.request.isFullSnapshot }.map(\.task)
+            for task in toolReads { await task.value }
+            try Task.checkCancellation()
+            guard epoch == readbackEpoch, isActive, isCurrent() else { throw CancellationError() }
+        } else {
+            try beginReadbackObservation(request, id: observationID)
+        }
+        defer { readbackObservations.removeValue(forKey: observationID) }
+        let snapshot = try await batcher.read(request) { [weak self] in
+            guard request.isFullSnapshot else { return }
+            try await MainActor.run {
+                guard let self, self.readbackEpoch == epoch, self.isActive, isCurrent() else {
+                    throw CancellationError()
+                }
+                try self.beginReadbackObservation(request, id: observationID)
+            }
+        }
+        try Task.checkCancellation()
+        guard epoch == readbackEpoch, isActive, isCurrent() else { throw CancellationError() }
+        guard let observation = readbackObservations[observationID] else { throw CancellationError() }
+        let current = canvas.gatewayDocument()
+        let result = try AgentCanvasReadbackSync.plan(request: request, snapshot: snapshot,
+            before: observation.before, current: current, activeProject: projectID,
+            conversation: request.conversationID, run: request.runID,
+            locallyChangedNodeIDs: observation.changedNodes, locallyChangedEdgeIDs: observation.changedEdges,
+            locallyDeletedNodeIDs: observation.deletedNodes)
+        guard !result.changedNodeIDs.isEmpty || !result.changedEdgeIDs.isEmpty else {
+            return result.deletedNodeIDs.isEmpty ? "no_change" : "deleted_during_readback"
+        }
+        let changedNodes = Set(result.changedNodeIDs), changedEdges = Set(result.changedEdgeIDs)
+        guard changedNodes.count <= 1000, changedEdges.count <= 2000 else {
+            throw AgentGatewayError.requestTooLarge
+        }
+        let mutation = AgentCanvasMutation(projectID: projectID, conversationID: request.conversationID,
+            runID: request.runID, mutationID: request.mutationID,
+            changes: result.document.nodes.filter { changedNodes.contains($0.id) }.map { node in
+                .init(before: current.nodes.first { $0.id == node.id }, after: node)
+            },
+            addedEdges: result.document.edges.filter { changedEdges.contains($0.id) },
+            removedEdges: current.edges.filter { changedEdges.contains($0.id) })
+        let value = try JSONDecoder().decode(JSONValue.self, from: JSONEncoder().encode(mutation))
+        return try submitMutation(value, conversationID: conversation, runID: request.runID, readbackRequest: request)
+    }
+
+    func submitMutation(_ payload: JSONValue, conversationID: UUID, runID: String,
+                        readbackRequest: AgentCanvasReadbackRequest? = nil) throws -> String {
         guard isActive, let canvas else { throw AgentCanvasError.staleTarget }
         let mutation = try JSONDecoder().decode(AgentCanvasMutation.self, from: JSONEncoder().encode(payload))
         let plan = try AgentCanvasSync.plan(mutation, current: canvas.gatewayDocument(),
@@ -342,7 +525,8 @@ final class CanvasAgentContext: ObservableObject {
             guard old == new else { throw AgentOperationError("同一变更标识的内容已改变。") }
             return "pending"
         }
-        let preview = GraphPreview(mutation: mutation, conversationID: conversationID, runID: runID, plan: plan)
+        let preview = GraphPreview(mutation: mutation, conversationID: conversationID, runID: runID,
+                                   plan: plan, readbackRequest: readbackRequest)
         if !pendingGraphPreviews.contains(where: {
             $0.id == preview.id && $0.conversationID == conversationID && $0.runID == runID
         }) {
@@ -399,6 +583,7 @@ final class CanvasAgentContext: ObservableObject {
     }
 
     func dismissPreview() {
+        cancelReadbacks()
         preview = nil
         graphPreview = nil
         pendingGraphPreviews = []

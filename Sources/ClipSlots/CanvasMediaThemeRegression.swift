@@ -185,6 +185,8 @@ extension CanvasWorkspaceView {
         // draft retention on a real downstream generation node instead.
         let draftNodeID = createNode(kind: .video, at: CGPoint(x: 420, y: 180),
                                      parentNodeId: movieID, beginEditing: false, quiet: true)?.id
+        weak var draftEditor: NSTextView?
+        var draftSelection = NSRange(location: 0, length: 0)
         if let draftNodeID {
             canvas.select(id: draftNodeID, additive: false)
             try? await Task.sleep(nanoseconds: 350_000_000)
@@ -192,6 +194,8 @@ extension CanvasWorkspaceView {
                 await click(CGPoint(x: frame.minX + 90, y: frame.minY + 85), in: anchor)
                 if let editor = anchor.window?.firstResponder as? NSTextView {
                     editor.insertText(draft, replacementRange: NSRange(location: 0, length: (editor.string as NSString).length))
+                    draftEditor = editor
+                    draftSelection = editor.selectedRange()
                     check(editor.string == draft && editingNodeId == draftNodeID,
                           "native generation composer receives unsubmitted draft")
                     // #region debug-point E:draft-inserted
@@ -224,13 +228,21 @@ extension CanvasWorkspaceView {
                 check(nowDark == (otherMode == "dark"), "native mode control updates canvas appearance")
                 if axControls { _ = press(mode == "dark" ? "深色" : "浅色", in: view) }
                 else { await click(popupPoint(mode == "dark" ? 254 : 158, 68), in: view, canvasCoordinates: false) }
-                let otherSkin: AppSkin = originalSkin == .minimal ? .colorful : .minimal
-                if axControls { _ = press(otherSkin.title, in: view) }
-                else { await click(popupPoint(otherSkin == .colorful ? 232 : 86, 172), in: view, canvasCoordinates: false) }
                 try? await Task.sleep(nanoseconds: 450_000_000)
-                check(AppSkinCenter.current == otherSkin, "native theme tile changes app skin")
+                check(AppSkinCenter.current == .minimal, "native appearance controls retain minimal style")
                 if let draftNodeID, let movie = canvas.node(id: draftNodeID) {
-                    check(liveText(for: movie) == draft, "theme switching preserves unsubmitted composer text")
+                    // Appearance changes keep the editor mounted; its draft need
+                    // not have reached storage until the ordinary blur/commit.
+                    if let editor = draftEditor, editor.window === anchor.window {
+                        check(editor.string == draft, "appearance switching preserves unsubmitted composer text")
+                        check(editor.selectedRange() == draftSelection, "appearance switching preserves composer selection")
+                        PerfAutoTest.snapshotWindow(to: directory.appendingPathComponent("canvas-draft-\(schemeName).png").path)
+                        anchor.window?.makeFirstResponder(nil)
+                        try? await Task.sleep(nanoseconds: 200_000_000)
+                        check(liveText(for: movie) == draft, "retained composer draft saves through normal blur")
+                    } else {
+                        check(liveText(for: movie) == draft, "appearance switching preserves committed composer text")
+                    }
                 }
                 if popup.isVisible { popup.close() }
                 AppSkinCenter.apply(originalSkin)

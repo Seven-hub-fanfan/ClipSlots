@@ -42,7 +42,8 @@ struct WorkspaceModeSwitcher: View {
     private static let inset: CGFloat = 8
     private static let ornamentWidth: CGFloat = 42
     private static var segmentWidth: CGFloat { (preferredWidth - inset * 2 - ornamentWidth) / 3 }
-    private static func center(for mode: WorkspaceMode) -> CGFloat {
+    static var contourHalfWidth: CGFloat { segmentWidth * 0.64 }
+    static func center(for mode: WorkspaceMode) -> CGFloat {
         let index: CGFloat = mode == .edit ? 0 : mode == .canvas ? 1 : 2
         return inset + ornamentWidth + segmentWidth * (index + 0.5)
     }
@@ -67,7 +68,7 @@ struct WorkspaceModeSwitcher: View {
         .background { navigationSurface }
         .overlay(alignment: .leading) {
             WorkspaceContourSurface(center: Self.center(for: selection),
-                halfWidth: Self.segmentWidth * 0.64,
+                halfWidth: Self.contourHalfWidth,
                 animated: animationsEnabled && !reduceMotion,
                 highContrast: contrast == .increased, motion: contourMotion)
                 .allowsHitTesting(false).accessibilityHidden(true)

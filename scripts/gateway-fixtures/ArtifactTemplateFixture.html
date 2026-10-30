@@ -1,0 +1,68 @@
+<!doctype html><!-- <head> deceptive comment; isolated protocol fixture -->
+<html><head><title><head> inert title</title></head><body>
+<textarea id="raw"><head> inert textarea</textarea>
+<input id="draft" value="草稿🙂"><p id="remote-template">Published template fixture</p>
+<script>
+(() => {
+  const state={notifications:[],responses:{},draft:'草稿🙂',isolation:{}};
+  const pending=new Map();
+  let presentationReceived=null;
+  const report=tag=>parent.postMessage({jsonrpc:'2.0',method:'fixture/report',
+    params:{tag,...state,draft:document.getElementById('draft').value,
+      firstHead:document.head.firstElementChild.outerHTML}},'*');
+  function rpc(method,params={},id='rpc-'+Math.random()){
+    return new Promise(resolve=>{
+      pending.set(id,resolve);parent.postMessage({jsonrpc:'2.0',id,method,params},'*');
+    });
+  }
+  for(const [name,read] of Object.entries({
+    parentDOM:()=>parent.document,
+    parentNonce:()=>parent.__clipslotsNativeInstance,
+    localStorage:()=>localStorage.getItem('fixture'),
+    sessionStorage:()=>sessionStorage.getItem('fixture')
+  })){
+    try{read();state.isolation[name]='accessible';}catch{state.isolation[name]='blocked';}
+  }
+  try{
+    state.cookieBefore=document.cookie;
+    try{document.cookie='opaque_fixture=must_not_persist; path=/';}catch{state.cookieWrite='blocked';}
+    state.cookieAfter=document.cookie;
+  }catch{state.cookieRead='blocked';}
+  addEventListener('message',async e=>{
+    if(e.source!==parent || !e.data || e.data.jsonrpc!=='2.0')return;
+    const msg=e.data;
+    if(msg.id!==undefined&&pending.has(msg.id)){
+      const resolve=pending.get(msg.id);pending.delete(msg.id);resolve(msg);return;
+    }
+    if(msg.method==='fixture/probe'){report(msg.params.tag);return;}
+    if(msg.method==='fixture/draft'){
+      document.getElementById('draft').value=msg.params.text;report(msg.params.tag);return;
+    }
+    if(msg.method==='fixture/rpc'){
+      state.responses[msg.params.tag]=await rpc(msg.params.method,msg.params.arguments,msg.params.id);
+      report(msg.params.tag);return;
+    }
+    if(msg.method==='fixture/native'){
+      try{
+        await window.webkit.messageHandlers.clipslots.postMessage({
+          jsonrpc:'2.0',id:'native-frame',method:'ping',params:{},
+          nonce:'unavailable',revision:'1'});
+        state.directNative='accepted';
+      }catch{state.directNative='denied';}
+      report(msg.params.tag);return;
+    }
+    if(msg.method)state.notifications.push(msg);
+    if(msg.method==='tapnow/presentationState'&&presentationReceived) presentationReceived();
+  });
+  document.addEventListener('DOMContentLoaded',async()=>{
+    state.initialized=await rpc('ui/initialize',{protocolVersion:'2026-01-26'},'standard-init');
+    parent.postMessage({jsonrpc:'2.0',method:'ui/notifications/initialized',params:{}},'*');
+    await rpc('ping',{},'initial-ping');
+    // Native replies and postMessage notifications are independent queues in WebKit.
+    // Observe the required presentation frame before freezing this initialization snapshot.
+    if(!state.notifications.some(x=>x.method==='tapnow/presentationState'))
+      await new Promise(resolve=>presentationReceived=resolve);
+    report('initialized');
+  });
+})();
+</script></body></html>

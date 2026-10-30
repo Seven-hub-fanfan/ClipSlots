@@ -73,7 +73,7 @@ struct CanvasIdleTextSlot: NSViewRepresentable {
             let visible = CanvasScreenText.textVisible(nodeSize: node.frame.size, zoom: zoom) && plan.fitsText
             let cardSize = CanvasFanGeometry.fanCardSize(boxHeight: plan.previewHeight1x)
             let fanVisible = CanvasScreenText.cardTextVisible(cardSize: cardSize, zoom: zoom)
-            let key = "\(node.width)|\(node.height)|\(node.fontName)|\(node.resolvedBodyFontSize)|\(text)|\(path)|\(dark)|\(CanvasSkin.colorful)|\(visible)|\(fanVisible)|\(rs)"
+            let key = "\(node.width)|\(node.height)|\(node.fontName)|\(node.resolvedBodyFontSize)|\(text)|\(path)|\(dark)|\(visible)|\(fanVisible)|\(rs)"
             guard signature != key, layer != nil else { return }
             let root = contentLayer
             let first = signature.isEmpty
@@ -172,7 +172,7 @@ struct CanvasIdleTextSlot: NSViewRepresentable {
                 fade.colors = [NSColor.black.cgColor, NSColor.black.cgColor, NSColor.clear.cgColor]
                 fade.locations = [0, NSNumber(value: Double(max(0, 1 - min(0.28, 10 / boxHeight)))), 1]
                 bodyLayer.mask = fade
-                let tagInk = CanvasSkin.colorful ? color(0xa86b18, 0xf0f1f4) : color(0x666970, 0xb0b3bc)
+                let tagInk = color(0x666970, 0xb0b3bc)
                 symbol(node.kind.symbolName, frame: CGRect(x: 0, y: -20 * rs, width: 10.5 * rs, height: 14 * rs),
                        pointSize: 10.5 * rs, ink: tagInk)
                 label(path, frame: CGRect(x: 14.5 * rs, y: -20 * rs, width: size.width - 14.5 * rs, height: 16 * rs),

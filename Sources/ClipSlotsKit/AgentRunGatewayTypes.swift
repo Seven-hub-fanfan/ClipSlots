@@ -43,6 +43,10 @@ public protocol AgentGatewayToolRecovering: AgentToolExecuting {
     func recoveredResult(call: AgentToolCall) async throws -> AgentToolResult?
 }
 
+public protocol AgentGatewayScopedToolRecovering: AgentGatewayToolRecovering, AgentToolExecutionScoped {
+    func recoveredResult(call: AgentToolCall, scope: AgentExecutionScope) async throws -> AgentToolResult?
+}
+
 public struct AgentGatewayTiming: Sendable {
     public let sleep: @Sendable (TimeInterval) async throws -> Void
     public let now: @Sendable () -> Date
@@ -68,12 +72,17 @@ public enum AgentGatewayError: Error, LocalizedError, Equatable {
     case noResumableRun
     case http(Int)
     case malformedPayload
+    case requestTooLarge
     case originMismatch
     case journalUnavailable
     case interrupted
     case toolOutcomeUnknown
+    case toolRequestExpired
     case remoteFailed
     case steerNotReady
+    case decisionOutcomeUnknown
+    case decisionNotSaved
+    case decisionStorageUnknown
 
     public var errorDescription: String? {
         switch self {
@@ -83,12 +92,17 @@ public enum AgentGatewayError: Error, LocalizedError, Equatable {
         case .noResumableRun: return "There is no resumable gateway run."
         case .http(let status): return "Gateway HTTP \(status)."
         case .malformedPayload: return "Gateway payload does not satisfy the v1 contract."
+        case .requestTooLarge: return "本轮完整消息超过网关 8 MiB 限制，请减少附件或开启新会话；内容已保留。"
         case .originMismatch: return "Gateway event belongs to a different origin or run."
         case .journalUnavailable: return "Gateway journal cannot be read or committed."
         case .interrupted: return "Gateway outcome is unknown; the run remains resumable."
         case .toolOutcomeUnknown: return "Interrupted tool execution needs reconciliation; it was not repeated."
+        case .toolRequestExpired: return "Tool result was saved locally after its delivery deadline; it was not submitted."
         case .remoteFailed: return "The gateway explicitly reported run failure."
         case .steerNotReady: return "Remote termination was not confirmed; keep the queued submission."
+        case .decisionOutcomeUnknown: return "回答已保留，服务端接受结果待核对；没有自动重发。"
+        case .decisionNotSaved: return "回答未能保存，尚未发送；请重试保存原回答。"
+        case .decisionStorageUnknown: return "无法核实回答的保存状态，尚未发起发送；请恢复本地存储后核对原请求。"
         }
     }
 }
@@ -103,7 +117,23 @@ public struct AgentGatewayRunSnapshot: Sendable {
     public let currentAssistantID: UUID?
     public let completedAssistantIDs: Set<UUID>
     public let artifactUpdates: [JSONValue]
+    public var artifactToolContexts: [String: AgentAppReplyToolContext] = [:]
     public let canvasMutations: [JSONValue]
+    public let canvasReadbacks: [AgentCanvasReadbackRequest]
+    public let subagentCanvasScopes: [String: String]
+    public let contextUsage: AgentContextUsageState
+    public let compactions: AgentContextCompactionLifecycle
+    public var taskSubagents: AgentTaskSubagentProjection = .init()
+    public var steerCapability: AgentGatewaySteerCapability?
+    public var steers: [AgentGatewaySteerSnapshot] = []
+    public var interactions: [AgentInteraction] = []
+
+    public func appReplyToolContext(for payload: JSONValue) -> AgentAppReplyToolContext? {
+        guard let value = payload["appReplyAuthority"],
+              let bytes = try? JSONEncoder().encode(value),
+              let authority = try? JSONDecoder().decode(AgentAppReplyAuthority.self, from: bytes) else { return nil }
+        return artifactToolContexts[AgentAppReplyToolContext.key(for: authority)]
+    }
 }
 
 /// Redirects are denied on both paths, so credentials cannot escape the
@@ -182,6 +212,10 @@ struct AgentGatewayDescriptor: Codable {
     let runID: String
     let phase: String
     let requestKey: String?
+    let steerCapability: AgentGatewaySteerCapability?
+    let decisionCapability: AgentGatewayDecisionCapability?
+    let decisionReceipt: AgentGatewayDecisionReceipt?
+    var clientInstanceID: String? = nil
 }
 
 struct AgentGatewayEnvelope: Codable {
@@ -217,6 +251,20 @@ struct AgentGatewayToolRecord: Codable {
     var content: String?
     var isFailure: Bool?
     var summary: String?
+    var submissionKey: String?
+    var expiryRejection: Bool?
+    var messageOrigin: AgentToolMessageOrigin?
+    var resultMessageID: UUID?
+}
+
+/// Exact local declaration and ownership at submission. A fresh executor may
+/// reconcile a durable result, but never inherits an old instance's authority
+/// to begin side effects after resume or process restart.
+struct AgentGatewayToolSnapshot: Codable {
+    typealias Declaration = AgentAppReplyToolContext.Declaration
+    let instanceID: UUID
+    let scope: AgentExecutionScope?
+    let declarations: [Declaration]
 }
 
 struct AgentGatewayJournal: Codable {
@@ -237,14 +285,39 @@ struct AgentGatewayJournal: Codable {
     var allowsTools = false
     var toolNames: Set<String> = []
     var toolLimit = 0
+    var toolSubmissionKey: String?
+    var toolSnapshots: [String: AgentGatewayToolSnapshot]?
     var pendingInteraction: JSONValue?
     var diagnosticCount = 0
     // Optional storage fields keep existing v1 journals decodable. Snapshots
     // normalize missing values to empty arrays; callbacks are not acknowledgments.
     var artifactUpdates: [JSONValue]?
     var canvasMutations: [JSONValue]?
+    var canvasReadbacks: [AgentCanvasReadbackRequest]?
+    var subagentCanvasProjection: AgentSubagentCanvasProjection?
+    var contextUsage: AgentContextUsageState?
+    var compactions: AgentContextCompactionLifecycle?
+    var taskSubagents: AgentTaskSubagentProjection?
+    var steerCapability: AgentGatewaySteerCapability?
+    var steerSupportsImages: Bool?
+    var wireMessageOffset: Int?
+    var steerSubmissions: [String: AgentGatewaySteerSubmission]?
+    var steerStates: [String: AgentGatewaySteerLocalState]?
+    var decisionRecords: [String: AgentGatewayDecisionRecord]?
+    var legacyDecisionRecords: [String: AgentGatewayLegacyDecisionRecord]?
+    var appReply: AgentAppReplySnapshot?
+    var artifactToolContexts: [String: AgentAppReplyToolContext]?
+    var appReplyToolContext: AgentAppReplyToolContext?
+    var nativeToolContextRows: Set<String>?
+    var nativeToolMessagePresence: String?
 
     var resumable: Bool {
         command != nil || (runID != nil && !["completed", "failed", "cancelled"].contains(phase))
+            || (decisionRecords ?? [:]).values.contains { $0.state == .syncing || $0.state == .saved }
+            || (legacyDecisionRecords ?? [:]).values.contains { $0.submissionKey != nil && $0.acceptedKey == nil }
+            || (steerStates ?? [:]).values.contains {
+                $0.receipt == nil || $0.receipt?.state == .accepted
+                    || ($0.receipt?.state == .placed && !$0.eventApplied)
+            }
     }
 }

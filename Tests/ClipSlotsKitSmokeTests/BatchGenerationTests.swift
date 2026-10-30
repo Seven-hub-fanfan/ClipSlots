@@ -61,6 +61,28 @@ func runBatchGenerationTests(_ t: TestRunner) {
         unknown.reconcile(runs: [])
         t.equal(unknown.items[0].status, .stopped, "batch known ID restores query-only state")
         t.check(unknown.items[0].canRecover, "batch known ID remains recoverable")
+        var retry = batch.items[0]
+        retry.status = .failed
+        retry.taskID = "remote-failed"
+        t.check(!retry.canRetry && retry.canRecover, "batch query failure is recovery-only")
+        retry.remoteFailureConfirmed = true
+        t.check(retry.canRetry && !retry.canRecover, "batch confirmed remote failure exposes retry only")
+        let priorRun = retry.runID, priorOutput = retry.outputID
+        let originalNode = retry.node
+        t.check(retry.prepareRetry(), "batch selected failure prepares explicit retry")
+        t.equal(retry.source, batch.items[0].source, "batch retry keeps frozen source and references")
+        t.equal(retry.node, originalNode, "batch retry keeps original generation parameters")
+        t.check(retry.runID != priorRun && retry.outputID != priorOutput && retry.previousRunIDs == [priorRun],
+                "batch retry owns new identity and retains old journal reference")
+        t.check(retry.status == .pending && retry.taskID == nil && retry.remoteFailureConfirmed == nil,
+                "batch retry clears terminal task state")
+        t.check(!retry.prepareRetry(), "batch repeated retry click cannot duplicate pending submission")
+        retry.status = .unknown
+        t.check(!retry.canRetry && !retry.prepareRetry(), "batch unknown submission never permits retry")
+        retry.status = .succeeded
+        t.check(!retry.canRetry, "batch successful item cannot be resubmitted")
+        retry.status = .failed; retry.localFile = "/existing-output"
+        t.check(!retry.canRetry, "batch archived output cannot be replaced by retry")
 
         let source = batch.items[0].source
         t.check(try storage.batchSourceIsCurrent(source), "batch frozen source initially current")
@@ -122,6 +144,12 @@ func runBatchGenerationTests(_ t: TestRunner) {
         interrupted.reconcile(runs: runStore.runs(project: batch.projectID))
         t.equal(interrupted.items[0].taskID, "known-after-crash", "batch recovers ID saved at service boundary")
         t.check(interrupted.items[0].canRecover, "batch service-boundary ID query only")
+        try runStore.updateTask(project: batch.projectID, taskID: "known-after-crash", outcome: "failed: remote failure")
+        var legacyFailed = batch
+        legacyFailed.items[0].status = .failed
+        legacyFailed.reconcile(runs: runStore.runs(project: batch.projectID))
+        t.check(legacyFailed.items[0].canRetry && !legacyFailed.items[0].canRecover,
+                "batch old remote-failed journals gain single-item retry from recorded evidence")
     }
 }
 

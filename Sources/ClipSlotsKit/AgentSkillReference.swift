@@ -6,11 +6,13 @@ public struct AgentSkillReference: Codable, Equatable, Identifiable, Sendable {
     public let name: String
     public let path: String
     public let markdown: String
+    /// A catalog application carries configuration, not an invented SKILL.md.
+    public let applicationID: String?
     public static let maximumCount = 4
     public static let maximumBytes = 65_536
 
-    public init(name: String, path: String, markdown: String) {
-        self.name = name; self.path = path; self.markdown = markdown
+    public init(name: String, path: String, markdown: String, applicationID: String? = nil) {
+        self.name = name; self.path = path; self.markdown = markdown; self.applicationID = applicationID
     }
 
     public static func load(name: String, path: String) throws -> Self {

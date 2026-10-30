@@ -1,0 +1,33 @@
+<!doctype html><html><head><title>Remote native panel fixture</title></head><body>
+<input id="draft" value="远端草稿🙂"><p>Remote panel fixture</p>
+<script>
+(() => {
+  const state={notifications:[],responses:{}}, pending=new Map();
+  const report=tag=>parent.postMessage({jsonrpc:'2.0',method:'fixture/report',
+    params:{tag,...state,draft:document.getElementById('draft').value}},'*');
+  const rpc=(method,params={},id='rpc-'+Math.random())=>new Promise(resolve=>{
+    pending.set(id,resolve);parent.postMessage({jsonrpc:'2.0',id,method,params},'*');
+  });
+  addEventListener('message',async e=>{
+    if(e.source!==parent||!e.data||e.data.jsonrpc!=='2.0')return;
+    const msg=e.data;
+    if(msg.id!==undefined&&pending.has(msg.id)){
+      const resolve=pending.get(msg.id);pending.delete(msg.id);resolve(msg);return;
+    }
+    if(msg.method==='fixture/probe'){report(msg.params.tag);return;}
+    if(msg.method==='fixture/draft'){
+      document.getElementById('draft').value=msg.params.text;report(msg.params.tag);return;
+    }
+    if(msg.method==='fixture/rpc'){
+      state.responses[msg.params.tag]=await rpc(msg.params.method,msg.params.arguments,msg.params.id);
+      report(msg.params.tag);return;
+    }
+    if(msg.method)state.notifications.push(msg);
+  });
+  addEventListener('DOMContentLoaded',async()=>{
+    state.initialized=await rpc('ui/initialize',{protocolVersion:'2026-01-26'},'init');
+    parent.postMessage({jsonrpc:'2.0',method:'ui/notifications/initialized',params:{}},'*');
+    await rpc('ping',{},'initial-ping');report('initialized');
+  });
+})();
+</script></body></html>

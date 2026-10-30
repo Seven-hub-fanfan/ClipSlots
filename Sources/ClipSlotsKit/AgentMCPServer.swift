@@ -8,7 +8,7 @@ public enum AgentMCPServer {
         if let plist, let data = try? Data(contentsOf: plist),
            let info = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any],
            let value = info["CFBundleShortVersionString"] as? String { return value }
-        return "2.17.103"
+        return "2.17.104"
     }
 
     public static func response(to request: JSONValue, tools: AgentToolExecuting) async -> JSONValue? {

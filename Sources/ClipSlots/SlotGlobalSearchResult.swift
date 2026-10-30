@@ -81,3 +81,47 @@ struct SlotGlobalSearchResult: Identifiable {
         return 0  // text
     }
 }
+
+/// One strict ordering for full results and pages. Names/types are projected
+/// once off-main; a stable identity tie-breaker removes dictionary-order ties.
+enum SlotGlobalSearchOrdering {
+    static func sort(_ values: [SlotGlobalSearchResult], rule: SlotSearchSortRule,
+                     currentPageId: String, currentGroupId: String) -> [SlotGlobalSearchResult] {
+        let projected = values.map { value in
+            (value, rule == .nameAscending || rule == .nameDescending ? value.displayTitle : "",
+             rule == .typeOrder ? value.contentTypeOrder : 0)
+        }
+        return projected.sorted { left, right in
+            let lhs = left.0, rhs = right.0
+            switch rule {
+            case .smart:
+                if (lhs.pageId == currentPageId) != (rhs.pageId == currentPageId) {
+                    return lhs.pageId == currentPageId
+                }
+                if (lhs.groupId == currentGroupId) != (rhs.groupId == currentGroupId) {
+                    return lhs.groupId == currentGroupId
+                }
+            case .slotOrder:
+                if lhs.slot != rhs.slot { return lhs.slot < rhs.slot }
+            case .nameAscending, .nameDescending:
+                let comparison = left.1.localizedStandardCompare(right.1)
+                if comparison != .orderedSame {
+                    return rule == .nameAscending ? comparison == .orderedAscending : comparison == .orderedDescending
+                }
+            case .typeOrder:
+                if left.2 != right.2 { return left.2 < right.2 }
+            case .pageGroupSlot:
+                break
+            }
+            if lhs.pageOrder != rhs.pageOrder { return lhs.pageOrder < rhs.pageOrder }
+            if lhs.groupOrder != rhs.groupOrder { return lhs.groupOrder < rhs.groupOrder }
+            if rule == .smart || rule == .pageGroupSlot {
+                if lhs.pageId != rhs.pageId { return lhs.pageId < rhs.pageId }
+                if lhs.groupId != rhs.groupId { return lhs.groupId < rhs.groupId }
+            }
+            if lhs.slot != rhs.slot { return lhs.slot < rhs.slot }
+            if lhs.pageId != rhs.pageId { return lhs.pageId < rhs.pageId }
+            return lhs.groupId < rhs.groupId
+        }.map(\.0)
+    }
+}

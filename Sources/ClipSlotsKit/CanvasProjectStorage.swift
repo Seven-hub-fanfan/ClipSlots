@@ -95,7 +95,7 @@ public final class CanvasProjectStorage {
             try FileManager.default.copyItem(at: legacyDocURL, to: dest)
             NSLog("[ClipSlots][canvas] 已把 v2.12 的单画布迁移成默认项目（原文件保留为备份）")
         } catch {
-            NSLog("[ClipSlots][canvas] 迁移旧画布失败（按空画布继续）：\(error)")
+            NSLog("[ClipSlots][canvas] 迁移旧画布失败（按空画布继续）：\(ApplicationDiagnostics.error(error))")
         }
         return index
     }
@@ -181,7 +181,7 @@ public final class CanvasProjectStorage {
             try fm.moveItem(at: dir, to: dest)
             return true
         } catch {
-            NSLog("[ClipSlots][canvas] 删项目时移动画布文档失败：\(error)")
+            NSLog("[ClipSlots][canvas] 删项目时移动画布文档失败：\(ApplicationDiagnostics.error(error))")
             return false
         }
     }

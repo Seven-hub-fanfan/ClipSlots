@@ -128,6 +128,9 @@ func runCanvasWorkflowTests(_ t: TestRunner) {
         let first = try store.beginAttempt(context: context, requested: requested, effective: effective)
         t.check(store.load(project: "project-A", id: context.runID)?.requiresSubmissionReconciliation == true,
                 "persisted submitting record protects crash/unknown boundary")
+        t.expectThrows("inflight run blocks duplicate attempt at persistence boundary") {
+            _ = try store.beginAttempt(context: context, requested: requested, effective: effective)
+        }
         try store.finishAttempt(context: context, attemptID: first, status: .rejected, detail: "unsupported ratio")
         effective.ratio = ""
         let second = try store.beginAttempt(context: context, requested: requested, effective: effective)
@@ -139,11 +142,24 @@ func runCanvasWorkflowTests(_ t: TestRunner) {
         t.equal(run?.requestedRequest.seed, 42, "original requested seed preserved")
         t.equal(run?.attempts.last?.returnedSeed, 777, "returned server seed distinguished from requested seed")
         t.equal(run?.attempts.last?.taskID, "task-1", "accepted task persisted immediately")
+        t.expectThrows("accepted run blocks resubmit after restart") {
+            _ = try reopened.beginAttempt(context: context, requested: requested, effective: effective)
+        }
+        t.expectThrows("late failure cannot erase accepted receipt") {
+            try reopened.finishAttempt(context: context, attemptID: second, status: .unknown)
+        }
+        t.expectThrows("conflicting receipt cannot replace accepted task identity") {
+            try reopened.finishAttempt(context: context, attemptID: second, status: .accepted, taskID: "wrong", seed: 777)
+        }
+        try reopened.finishAttempt(context: context, attemptID: second, status: .accepted, taskID: "task-1", seed: 777)
+        t.equal(reopened.load(project: "project-A", id: context.runID)?.attempts.count, 2, "duplicate accepted receipt is idempotent")
         t.check(run?.requiresSubmissionReconciliation == false, "explicit rejection followed by accepted task is reconciled")
         t.check(reopened.load(project: "project-B", id: context.runID) == nil, "run records remain project scoped")
         try reopened.updateTask(project: "project-A", taskID: "task-1", outcome: "succeeded", outputIDs: ["output-1"])
         t.equal(reopened.load(project: "project-A", id: context.runID)?.outputAttachmentIDs, ["output-1"],
                 "task recovery updates original run output")
+        try reopened.updateTask(project: "project-A", taskID: "task-1", outcome: "running")
+        t.equal(reopened.load(project: "project-A", id: context.runID)?.outcome, "succeeded", "late query does not reopen completed outcome")
         try reopened.updateTask(project: "project-A", taskID: "legacy-task", outcome: "succeeded")
         t.equal(reopened.runs(project: "project-A").count, 1, "legacy recovery does not invent a submitted request")
         let unknownContext = GenerationRunContext(snapshot: snapshot, node: video, resourceIDs: [:])
@@ -151,6 +167,23 @@ func runCanvasWorkflowTests(_ t: TestRunner) {
         try reopened.finishAttempt(context: unknownContext, attemptID: unknownAttempt, status: .unknown)
         t.check(reopened.latest(project: "project-A", node: video)?.requiresSubmissionReconciliation == true,
                 "unknown submission cannot be treated as safe to resubmit")
+        t.expectThrows("unknown run blocks repeat submission after restart") {
+            _ = try GenerationRunStore(root: root).beginAttempt(context: unknownContext, requested: requested, effective: requested)
+        }
+        var wrongContext = unknownContext
+        wrongContext.nodeCreatedAt = Date()
+        t.expectThrows("reused node id does not mutate original attempt") {
+            try reopened.finishAttempt(context: wrongContext, attemptID: unknownAttempt, status: .unknown)
+        }
+        let malformed = root.appendingPathComponent("generation-runs")
+            .appendingPathComponent(CanvasWorkflowSnapshot.digest(Data(context.projectID.utf8)))
+            .appendingPathComponent(unknownContext.runID.uuidString + ".json")
+        let corruptBytes = Data("broken record".utf8)
+        try corruptBytes.write(to: malformed)
+        t.expectThrows("corrupt run record is not overwritten by new submission") {
+            _ = try reopened.beginAttempt(context: unknownContext, requested: requested, effective: requested)
+        }
+        t.equal(try Data(contentsOf: malformed), corruptBytes, "corrupt history bytes retained")
         let input = root.appendingPathComponent("input.png")
         try Data([1, 2, 3]).write(to: input)
         let fileContext = GenerationRunContext(snapshot: snapshot, node: video, resourceIDs: [input.path: media.id])

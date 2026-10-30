@@ -47,10 +47,7 @@ struct ModelWorkspaceView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
             HStack {
-                VStack(alignment: .leading, spacing: 5) {
-                    Text("模型").font(.system(size: 27, weight: .semibold))
-                    Text("出题、测评、配置与每日 AI 资讯").font(.system(size: 12)).foregroundStyle(.secondary)
-                }
+                Text("模型").font(.system(size: 27, weight: .semibold))
                 Spacer()
                 if !models.loaded { ProgressView().controlSize(.small) }
                 HStack(spacing: 4) {
@@ -151,13 +148,20 @@ struct ModelWorkspaceView: View {
                             Spacer()
                             Button("绑定槽位") { showingBank = true }.accessibilityIdentifier("models-bind-bank")
                             Button("同步") { Task { await models.synchronizeBank(bankID) } }.disabled(bank == nil)
+                            if let bank {
+                                InterfaceHelpButton(title: "题库同步信息",
+                                    text: "版本 \(bank.revision.prefix(8)) · 与 \(bank.groupIDs.count) 个槽位组同步。",
+                                    identifier: "models-bank-help")
+                            }
                             Button("题库配置") { editingBank = true }.disabled(bank == nil)
                             Button("出题") { showingQuestionGenerator = true }.disabled(bank == nil)
                         }
                         if let bank {
-                            Toggle("运行全部题目", isOn: $useAllQuestions).font(.system(size: 11))
-                            Text("版本 \(bank.revision.prefix(8)) · 与 \(bank.groupIDs.count) 个槽位组同步")
-                                .font(.system(size: 11)).foregroundStyle(.secondary)
+                            HStack {
+                                Toggle("运行全部题目", isOn: $useAllQuestions).font(.system(size: 11))
+                                Spacer()
+                                Text("\(bank.groupIDs.count) 个同步槽位组").font(.system(size: 11)).foregroundStyle(.secondary)
+                            }
                             ForEach(bank.questions) { q in
                                 HStack(alignment: .top, spacing: 12) {
                                     if !useAllQuestions {
@@ -173,7 +177,9 @@ struct ModelWorkspaceView: View {
                                         if q.conflict { Text("槽位内容变化且题目有修改，请打开编辑核对。").font(.system(size: 11)).foregroundStyle(.orange) }
                                     }
                                     Spacer()
-                                    Text(q.slot.map { "槽位 \($0)" } ?? "未绑定").font(.system(size: 11)).foregroundStyle(.secondary)
+                                    if q.title != q.slot.map({ "槽位 \($0)" }) {
+                                        Text(q.slot.map { "槽位 \($0)" } ?? "未绑定").font(.system(size: 11)).foregroundStyle(.secondary)
+                                    }
                                     Button("编辑") { questionDraft = q }
                                 }.padding(.vertical, 5)
                             }
@@ -302,6 +308,8 @@ struct ModelWorkspaceView: View {
             VStack(alignment: .leading, spacing: 16) {
                 HStack {
                     Text("本地测评能力榜").font(.system(size: 18, weight: .semibold))
+                    InterfaceHelpButton(title: "评分口径", text: "0–100 分 · 人工评分 · 题库权重。按同一适用维度与评分来源分榜，未评分与不适用维度不计为零。",
+                                        identifier: "models-ranking-help")
                     Spacer()
                     Picker("类型", selection: $rankKind) { ForEach(ModelKind.allCases) { Text($0.title).tag($0) } }.frame(width: 130)
                     Picker("结果集", selection: Binding(get: { models.selectedRunID ?? "" }, set: { models.selectedRunID = $0 })) {
@@ -309,8 +317,6 @@ struct ModelWorkspaceView: View {
                         ForEach(models.document.runs.reversed()) { Text($0.title + " · " + String($0.bank.revision.prefix(8))).tag($0.id) }
                     }.frame(maxWidth: 330)
                 }
-                Text("0–100 分 · 人工评分 · 题库权重 · 按同一适用维度与评分来源分榜。未评分与不适用维度不计为零。")
-                    .font(.system(size: 12)).foregroundStyle(.secondary)
                 if let run {
                     let entries = ModelRanking.entries(run: run, kind: rankKind)
                     if entries.isEmpty { empty("暂无有效排名", subtitle: "完成测评后为全部适用维度评分，即可生成可追溯的能力榜。", symbol: "chart.bar.xaxis") }
@@ -345,6 +351,7 @@ struct ModelWorkspaceView: View {
             VStack(alignment: .leading, spacing: 16) {
                 HStack {
                     Picker("合集", selection: $configurationCLI) { Text("API 模型").tag(false); Text("内部产品 CLI").tag(true) }
+                        .labelsHidden().accessibilityLabel("模型合集")
                         .pickerStyle(.segmented).frame(width: 300)
                     Spacer()
                     Button(configurationCLI ? "环境检测" : "新增 API 模型") {
@@ -412,7 +419,7 @@ struct ModelWorkspaceView: View {
                 Button("来源配置") { showingSources = true }
                 Button("刷新") { Task { await models.refreshNews(force: true) } }.disabled(models.refreshingNews)
             }
-            Text(models.document.newsRefreshedAt.map { "最近成功抓取：\($0.formatted()) · 按原文发布时间排序" } ?? "尚未成功抓取新闻")
+            Text(models.document.newsRefreshedAt.map { "更新于 \($0.formatted())" } ?? "尚未成功抓取新闻")
                 .font(.system(size: 11)).foregroundStyle(.secondary)
             if !models.document.newsErrors.isEmpty {
                 Text("部分来源暂不可用，保留离线缓存。\(models.document.newsErrors.values.joined(separator: " "))")
@@ -430,12 +437,13 @@ struct ModelWorkspaceView: View {
                                     Text(item.sourceName).font(.system(size: 11, weight: .medium))
                                     Text(item.publishedAt.map { Calendar.current.isDateInToday($0) ? "今日 · \($0.formatted(date: .omitted, time: .shortened))" : $0.formatted(date: .abbreviated, time: .shortened) } ?? "发布时间未知")
                                         .font(.system(size: 11)).foregroundStyle(.secondary)
+                                    InterfaceHelpButton(title: "新闻来源信息", text: "摘要来自原文来源，抓取于 \(item.fetchedAt.formatted())。列表按原文发布时间排序。",
+                                                        identifier: "models-news-help-\(item.id)")
                                     Spacer()
                                     if let url = URL(string: item.url) { Link("原文 ↗", destination: url).font(.system(size: 11)) }
                                 }
                                 Text(item.title).font(.system(size: 16, weight: .semibold))
                                 if !item.summary.isEmpty { Text(item.summary).font(.system(size: 12)).foregroundStyle(.secondary).lineLimit(4) }
-                                Text("来源摘要 · 抓取于 \(item.fetchedAt.formatted())").font(.system(size: 10)).foregroundStyle(.secondary)
                             }
                         }
                     }

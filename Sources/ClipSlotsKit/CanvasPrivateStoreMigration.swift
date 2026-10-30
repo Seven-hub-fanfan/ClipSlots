@@ -156,7 +156,7 @@ public enum CanvasPrivateStoreMigration {
                         moved += 1
                     } catch {
                         // 搬不动就整体放弃这一组：**不**把它从主索引里删掉，否则内容就成了孤儿。
-                        NSLog("[ClipSlots] v2.14 迁移失败（\(group.id)）：\(error.localizedDescription)，本组保留在槽位库")
+                        NSLog("[ClipSlots] v2.14 迁移失败（\(group.id)）：\(ApplicationDiagnostics.error(error))，本组保留在槽位库")
                         continue
                     }
                 }
@@ -167,7 +167,7 @@ public enum CanvasPrivateStoreMigration {
                 try canvasPrivate.ensureReservedGroup(id: group.id,
                                                       name: SpecialSlotStorage.unfiledGroupName)
             } catch {
-                NSLog("[ClipSlots] v2.14 迁移：登记 \(group.id) 到画布私有库失败：\(error.localizedDescription)")
+                NSLog("[ClipSlots] v2.14 迁移：登记 \(group.id) 到画布私有库失败：\(ApplicationDiagnostics.error(error))")
             }
         }
 
@@ -185,7 +185,7 @@ public enum CanvasPrivateStoreMigration {
             try main.saveIndex(after)
             NSLog("[ClipSlots] v2.14 迁移完成：搬移 \(moved) 组，主索引剔除 \(plan.groupsToMove.count - stillOwned.count) 组")
         } catch {
-            NSLog("[ClipSlots] v2.14 迁移：主索引落盘失败：\(error.localizedDescription)")
+            NSLog("[ClipSlots] v2.14 迁移：主索引落盘失败：\(ApplicationDiagnostics.error(error))")
         }
         return moved
     }

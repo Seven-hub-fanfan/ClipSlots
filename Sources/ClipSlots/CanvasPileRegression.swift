@@ -308,7 +308,7 @@ extension CanvasWorkspaceView {
         canvas.ungroupNodes(Set(group.nodeIDs))
         check(canvas.groups.isEmpty && canvas.piles.count == 1 && canvas.piles.first?.groupID == nil,
               "ungroup retains Pile and only removes its parent")
-        for skin in ["minimal", "colorful"] {
+        for skin in AppSkin.allCases.map(\.rawValue) {
             for appearance in ["light", "dark"] {
                 AppSkinCenter.apply(AppSkin(rawValue: skin)!)
                 NSApp.appearance = NSAppearance(named: appearance == "dark" ? .darkAqua : .aqua)

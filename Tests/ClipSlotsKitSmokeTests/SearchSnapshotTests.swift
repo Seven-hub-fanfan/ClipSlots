@@ -2,6 +2,7 @@ import Foundation
 import ClipSlotsKit
 import CryptoKit
 import SQLite3
+import Darwin
 
 func runSearchSnapshotTests(_ t: TestRunner) {
     func text(_ value: String) -> SlotContent {
@@ -9,13 +10,8 @@ func runSearchSnapshotTests(_ t: TestRunner) {
     }
     func bytes(_ root: URL) -> [String: String] {
         var result: [String: String] = [:]
-        let canonicalRoot = root.resolvingSymlinksInPath().path
         let files = FileManager.default.enumerator(at: root, includingPropertiesForKeys: [.isRegularFileKey])
         while let file = files?.nextObject() as? URL {
-            // A preceding write asynchronously rebuilds this diagnostic manifest.
-            // It is not a slot payload; all slot files remain covered below.
-            if file.lastPathComponent == "manifest.json",
-               file.deletingLastPathComponent().resolvingSymlinksInPath().path == canonicalRoot { continue }
             if (try? file.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile) == true,
                let data = try? Data(contentsOf: file) {
                 result[file.path] = SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
@@ -30,6 +26,8 @@ func runSearchSnapshotTests(_ t: TestRunner) {
         storage.set(1, content: text("OLD_BODY_骑马"), in: group.id)
         storage.setLabel(1, label: "旧标签", in: group.id)
         storage.set(2, content: text("第二个正文"), in: group.id)
+        // Complete fixture writes before asserting that subsequent reads write nothing.
+        storage.slotStorage(for: group.id).finishPendingWritesBeforeMovingDirectory()
         let directory = storage.storageRoot.appendingPathComponent(group.id)
         let first = SlotStorage(slotsDir: directory)
         let before = bytes(directory)
@@ -95,6 +93,7 @@ func runSearchSnapshotTests(_ t: TestRunner) {
         ]
         for (index, value) in values.enumerated() { storage.set(index + 1, content: text(value), in: group.id) }
         storage.setLabel(2, label: "独有标签", in: group.id)
+        storage.slotStorage(for: group.id).finishPendingWritesBeforeMovingDirectory()
         let directory = storage.storageRoot.appendingPathComponent(group.id)
         let live = SlotStorage(slotsDir: directory).searchScanSnapshot(slotCount: 10)
         let before = bytes(directory)
@@ -139,6 +138,22 @@ func runSearchSnapshotTests(_ t: TestRunner) {
                     "即时外部更新", "corrupt candidate payload falls back to live source")
             t.equal(storage.searchCandidates(in: group.id, slotCount: 10, query: "即时")[1]?.plainText,
                     "即时外部更新", "corrupt candidate payload repaired for next query")
+            var altered: OpaquePointer?
+            if sqlite3_open(parent.appendingPathComponent(hash + ".sqlite").path, &altered) == SQLITE_OK,
+               let altered {
+                t.equal(sqlite3_exec(altered, "UPDATE search_slots SET haystack='wrong' WHERE slot=1",
+                                    nil, nil, nil), SQLITE_OK, "corrupt candidate haystack fixture written")
+                t.equal(storage.searchCandidates(in: group.id, slotCount: 10, query: "即时")[1]?.plainText,
+                        "即时外部更新", "corrupt haystack cannot hide authoritative source body")
+                t.equal(sqlite3_exec(altered, "DELETE FROM search_slots WHERE slot=1", nil, nil, nil),
+                        SQLITE_OK, "missing candidate row fixture written")
+                t.equal(storage.searchCandidates(in: group.id, slotCount: 10, query: "即时")[1]?.plainText,
+                        "即时外部更新", "missing cache row rebuilds rather than returning false empty")
+                sqlite3_close(altered)
+            } else {
+                if let altered { sqlite3_close(altered) }
+                t.check(false, "cache opens for haystack corruption")
+            }
         } else {
             if let db { sqlite3_close(db) }
             t.check(false, "candidate cache exists for corruption fixture")
@@ -152,5 +167,70 @@ func runSearchSnapshotTests(_ t: TestRunner) {
         _ = SlotStorage.searchCandidates(slotsDir: missing, slotCount: 10, query: "")
         t.check(!FileManager.default.fileExists(atPath: missing.path),
                 "global search never creates missing business directories")
+    }
+    t.withFreshStore("SEARCH-INCREMENTAL-READ-STATUS") { storage in
+        guard let group = storage.loadIndex().specialSlots.first else { return }
+        for slot in 1...3 { storage.set(slot, content: text("稳定正文 \(slot)"), in: group.id) }
+        storage.slotStorage(for: group.id).finishPendingWritesBeforeMovingDirectory()
+        let directory = storage.storageRoot.appendingPathComponent(group.id)
+        let initial = SlotStorage.searchCandidatesResult(slotsDir: directory, slotCount: 10, query: "")
+        t.check(initial.isComplete && initial.slots.count == 3, "initial search explicitly complete")
+        let library = directory.deletingLastPathComponent().resolvingSymlinksInPath().path
+        let hash = SHA256.hash(data: Data(library.utf8)).map { String(format: "%02x", $0) }.joined()
+        let parent = ProcessInfo.processInfo.environment["CLIPSLOTS_SEARCH_CACHE_DIR"].map {
+            URL(fileURLWithPath: $0)
+        } ?? FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first!
+            .appendingPathComponent("com.clipslots/search-v1")
+        var database: OpaquePointer?
+        guard sqlite3_open(parent.appendingPathComponent(hash + ".sqlite").path, &database) == SQLITE_OK,
+              let database else { t.check(false, "incremental fixture cache opens"); return }
+        defer { sqlite3_close(database) }
+        let trigger = """
+            CREATE TABLE search_test_changes(slot INTEGER, operation TEXT);
+            CREATE TRIGGER search_test_delete AFTER DELETE ON search_slots
+              BEGIN INSERT INTO search_test_changes VALUES(old.slot,'delete'); END;
+            CREATE TRIGGER search_test_insert AFTER INSERT ON search_slots
+              BEGIN INSERT INTO search_test_changes VALUES(new.slot,'insert'); END;
+            """
+        t.equal(sqlite3_exec(database, trigger, nil, nil, nil), SQLITE_OK, "observe actual incremental row writes")
+        let body = directory.appendingPathComponent("1/item_0/public.utf8-plain-text.bin")
+        try Data("增量更新正文".utf8).write(to: body)
+        let changed = SlotStorage.searchCandidatesResult(slotsDir: directory, slotCount: 10, query: "增量")
+        t.check(changed.isComplete, "raw external write reconciles complete result")
+        t.equal(changed.slots[1]?.plainText, "增量更新正文", "changed slot returns full new bytes")
+        var statement: OpaquePointer?
+        if sqlite3_prepare_v2(database, "SELECT slot,operation FROM search_test_changes ORDER BY rowid",
+                             -1, &statement, nil) == SQLITE_OK, let statement {
+            var operations: [String] = []
+            while sqlite3_step(statement) == SQLITE_ROW {
+                operations.append("\(sqlite3_column_int(statement, 0)):"
+                    + String(cString: sqlite3_column_text(statement, 1)))
+            }
+            sqlite3_finalize(statement)
+            t.equal(operations, ["1:delete", "1:insert"], "unchanged SQLite slot rows are never rewritten")
+        } else { t.check(false, "incremental operation evidence readable") }
+        let cancelled = SlotStorage.searchCandidatesResult(slotsDir: directory, slotCount: 10,
+                                                            query: "", isCancelled: { true })
+        t.check(!cancelled.isComplete && cancelled.slots.isEmpty, "cancel is incomplete rather than proven empty")
+        let descriptor = open(body.path, O_WRONLY | O_TRUNC)
+        guard descriptor >= 0 else { t.check(false, "sparse fixture body opens"); return }
+        t.equal(ftruncate(descriptor, off_t(ResourceBudget.shared.totalBytes + 1)), 0,
+                "create sparse over-budget file without allocating payload")
+        close(descriptor)
+        let oversized = SlotStorage.searchCandidatesResult(slotsDir: directory, slotCount: 10, query: "")
+        t.check(!oversized.isComplete && oversized.slots.isEmpty, "over-budget body does not become cached empty")
+        try Data("预算后完整恢复".utf8).write(to: body)
+        let recovered = SlotStorage.searchCandidatesResult(slotsDir: directory, slotCount: 10, query: "恢复")
+        t.check(recovered.isComplete && recovered.slots[1]?.plainText == "预算后完整恢复",
+                "failed read leaves cache recoverable from restored source")
+        try FileManager.default.removeItem(at: body)
+        t.equal(mkfifo(body.path, 0o600), 0, "nonregular body fixture created")
+        let nonregular = SlotStorage.searchCandidatesResult(slotsDir: directory, slotCount: 10, query: "")
+        t.check(!nonregular.isComplete, "FIFO is rejected promptly and never accepted as empty body")
+        try FileManager.default.removeItem(at: body)
+        try Data("FIFO后完整恢复".utf8).write(to: body)
+        let final = SlotStorage.searchCandidatesResult(slotsDir: directory, slotCount: 10, query: "恢复")
+        t.check(final.isComplete && final.slots[1]?.plainText == "FIFO后完整恢复",
+                "ordinary body remains recoverable after nonregular input")
     }
 }

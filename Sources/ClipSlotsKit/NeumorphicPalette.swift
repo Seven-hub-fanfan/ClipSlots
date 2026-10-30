@@ -120,55 +120,14 @@ public enum NeumorphicPalette {
         dangerInk: RGB(1.0, 0.514, 0.494)          // #FF837E
     )
 
-    // MARK: - 多彩模式（同几何、带品牌倾向）
-
-    /// 多彩模式 · 浅色。凹凸结构与简洁模式逐值同构，只是每个面都掺了一点蓝紫。
-    /// 掺色幅度刻意压得很小（0.5%～3%）：再多一点，凸起就会从「白里透紫」变成「紫色块」，
-    /// 而卡片区仍是白的，两者会打起来。
-    public static let colorfulLight = Surfaces(
-        // 与 AppTheme 的多彩窗口底同值（AppTheme 直接引用这里，见 windowBackground）。
-        ground: RGB(0.965, 0.970, 0.980),          // #F6F7FA 画布 = 工具栏承载面
-        raised: RGB(0.965, 0.970, 0.980),          // #F6F7FA 与画布同色
-        well: RGB(0.906, 0.914, 0.960),            // #E7E9F5 内凹（更明显的蓝紫）
-        wellShade: RGB(0.757, 0.773, 0.871),       // #C1C5DE
-        sliderFill: RGB(0.357, 0.373, 0.898),      // #5B5FE5 品牌蓝紫（渐变起点）
-        sliderInk: RGB(1.0, 1.0, 1.0),
-        ink: RGB(0.114, 0.118, 0.180),             // #1D1E2E
-        subtleInk: RGB(0.435, 0.447, 0.545),
-        dangerFill: RGB(0.996, 0.914, 0.925),
-        dangerInk: RGB(0.760, 0.130, 0.260)
-    )
-
-    /// 多彩模式 · 深色。
-    public static let colorfulDark = Surfaces(
-        ground: RGB(0.075, 0.078, 0.088),          // #131416 画布 = AppTheme 多彩深色窗口底
-        raised: RGB(0.075, 0.078, 0.088),          // #131416 与画布同色
-        // hotfix5：凸起改成与画布同色后，「凸起 vs 内凹」的明度差全靠内凹自己撑（原来还有
-        // 纯白凸起帮忙）。多彩深色这档原值只剩 1.044 对比度，搜索框在黑底上彻底消失，压深一档。
-        well: RGB(0.035, 0.039, 0.063),            // #090A10
-        wellShade: RGB(0.020, 0.024, 0.043),
-        sliderFill: RGB(0.404, 0.384, 0.918),      // #6762EA（比浅色档亮一档，但仍压得住白字：白字对比 4.66:1）
-        sliderInk: RGB(1.0, 1.0, 1.0),
-        ink: RGB(0.945, 0.949, 0.980),
-        subtleInk: RGB(0.612, 0.624, 0.706),
-        dangerFill: RGB(0.239, 0.106, 0.145),
-        dangerInk: RGB(1.0, 0.529, 0.596)
-    )
-
-    /// 按皮肤 + 明暗取一套表面色。
+    /// 按明暗取一套简洁表面色。保留 skin 参数兼容既有调用。
     public static func surfaces(skin: AppSkin, dark: Bool) -> Surfaces {
-        switch (skin, dark) {
-        case (.minimal, false): return minimalLight
-        case (.minimal, true): return minimalDark
-        case (.colorful, false): return colorfulLight
-        case (.colorful, true): return colorfulDark
-        }
+        dark ? minimalDark : minimalLight
     }
 
-    /// 全部四套（皮肤 × 明暗），供断言遍历。
+    /// 全部两套明暗外观，供断言遍历。
     public static var allSurfaces: [(name: String, surfaces: Surfaces)] {
-        [("简洁·浅色", minimalLight), ("简洁·深色", minimalDark),
-         ("多彩·浅色", colorfulLight), ("多彩·深色", colorfulDark)]
+        [("简洁·浅色", minimalLight), ("简洁·深色", minimalDark)]
     }
 }
 

@@ -75,23 +75,8 @@ struct FloatingNotice: Identifiable, Equatable {
 struct NoticeSurface: View {
     var radius: CGFloat = NoticeMetrics.cornerRadius
 
-    @Environment(\.colorScheme) private var colorScheme
-
     var body: some View {
-        if AppTheme.isMinimalSkin {
-            NeuRaisedBackground(radius: radius)
-        } else {
-            let style = NoticePalette.colorfulSurface(dark: colorScheme == .dark)
-            let shape = RoundedRectangle(cornerRadius: radius, style: .continuous)
-            shape
-                .fill(NoticeInk.material(style))
-                .overlay(shape.fill(NoticeInk.color(style.tint)))
-                .overlay(shape.strokeBorder(NoticeInk.color(style.border), lineWidth: style.borderWidth))
-                .shadow(color: Color.black.opacity(style.shadow.opacity),
-                        radius: style.shadow.radius,
-                        x: 0,
-                        y: style.shadow.offsetY)
-        }
+        NeuRaisedBackground(radius: radius)
     }
 }
 
@@ -99,28 +84,12 @@ struct NoticeSurface: View {
 /// 多彩模式按 `colorScheme` 从 `NoticePalette` 取对应那一档。
 enum NoticeInk {
 
-    static func color(_ rgba: NoticeSurfaceStyle.RGBA) -> Color {
-        Color(.sRGB, red: rgba.red, green: rgba.green, blue: rgba.blue, opacity: rgba.opacity)
-    }
-
-    /// 材质档位 → SwiftUI `Material`。两档是不同的具体类型，只能用 `AnyShapeStyle` 抹平。
-    static func material(_ style: NoticeSurfaceStyle) -> AnyShapeStyle {
-        switch style.material {
-        case .ultraThin: return AnyShapeStyle(.ultraThinMaterial)
-        case .thin:      return AnyShapeStyle(.thinMaterial)
-        }
-    }
-
     static func title(_ scheme: ColorScheme) -> Color {
-        AppTheme.isMinimalSkin
-            ? Neu.ink
-            : color(NoticePalette.colorfulSurface(dark: scheme == .dark).titleInk)
+        Neu.ink
     }
 
     static func subtitle(_ scheme: ColorScheme) -> Color {
-        AppTheme.isMinimalSkin
-            ? Neu.subtleInk
-            : color(NoticePalette.colorfulSurface(dark: scheme == .dark).subtitleInk)
+        Neu.subtleInk
     }
 
     /// 状态图标色。它是整张卡片上唯一的语义信号（成功 / 警告 / 失败），两种皮肤都保留
@@ -128,16 +97,7 @@ enum NoticeInk {
     /// 多彩 + 深色卡片上要提亮一档，AppTheme 那组饱和色直接放上去会发暗；多彩 + 浅色卡片
     /// 反过来必须用原本的饱和色，提亮版（浅绿 / 浅黄）在白底上几乎看不见。
     static func icon(_ kind: FloatingNoticeKind, _ scheme: ColorScheme) -> Color {
-        if AppTheme.isMinimalSkin { return kind.iconColor }
-        guard NoticePalette.colorfulSurface(dark: scheme == .dark).isDarkSurface else {
-            return kind.iconColor
-        }
-        switch kind {
-        case .success: return Color(red: 0.36, green: 0.86, blue: 0.50)
-        case .warning: return Color(red: 1.00, green: 0.76, blue: 0.28)
-        case .error:   return Color(red: 1.00, green: 0.45, blue: 0.41)
-        case .info:    return Color(red: 0.48, green: 0.74, blue: 1.00)
-        }
+        kind.iconColor
     }
 }
 

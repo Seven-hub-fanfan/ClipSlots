@@ -280,7 +280,7 @@ public final class SpecialSlotStorage {
                 .appendingPathComponent("special_slots_backup_v2_corrupt", isDirectory: true)
             try? FileManager.default.removeItem(at: backupDir)
             try? FileManager.default.copyItem(at: baseDir, to: backupDir)
-            NSLog("[ClipSlots] v2.4 migration: corrupt index backed up to \(backupDir.path)")
+            NSLog("[ClipSlots] v2.4 migration: corrupt index backed up")
             try? createDefaultIndex()
             return
         }
@@ -296,9 +296,9 @@ public final class SpecialSlotStorage {
                 try? FileManager.default.removeItem(at: backupDir)
             }
             try FileManager.default.copyItem(at: baseDir, to: backupDir)
-            NSLog("[ClipSlots] v2.4 migration: backup created at \(backupDir.path)")
+            NSLog("[ClipSlots] v2.4 migration: backup created")
         } catch {
-            NSLog("[ClipSlots] v2.4 migration: backup failed \(error), aborting")
+            NSLog("[ClipSlots] v2.4 migration: backup failed \(ApplicationDiagnostics.error(error)), aborting")
             return
         }
 
@@ -331,7 +331,7 @@ public final class SpecialSlotStorage {
             try saveIndex(upgraded)
             NSLog("[ClipSlots] v2.4 migration complete: \(updatedSlots.count) slot groups → 默认页面")
         } catch {
-            NSLog("[ClipSlots] v2.4 migration save failed: \(error)")
+            NSLog("[ClipSlots] v2.4 migration save failed: \(ApplicationDiagnostics.error(error))")
         }
         } // end storageLock.withLock (P2-12)
     }
@@ -450,7 +450,7 @@ public final class SpecialSlotStorage {
             do {
                 try migrateLegacySlots(from: legacyDir)
             } catch {
-                NSLog("[ClipSlots] Migration failed: \(error). Creating default index.")
+                NSLog("[ClipSlots] Migration failed: \(ApplicationDiagnostics.error(error)). Creating default index.")
                 try? createDefaultIndex()
             }
         } else {
@@ -632,12 +632,10 @@ public final class SpecialSlotStorage {
                             try FileManager.default.removeItem(at: backupURL)
                         }
                         try FileManager.default.copyItem(at: indexURL, to: backupURL)
-                        NSLog("[ClipSlots] ERROR: index.json failed to decode (\(error)). "
-                            + "The corrupt file was backed up to \(backupURL.path) before "
-                            + "falling back to an empty index. Recover your data from that backup.")
+                        NSLog("[ClipSlots] ERROR: index.json failed to decode (\(ApplicationDiagnostics.error(error))). The corrupt file was backed up.")
                     } catch {
                         NSLog("[ClipSlots] ERROR: index.json failed to decode AND the backup "
-                            + "to index.json.corrupt.bak failed: \(error). Falling back to empty index.")
+                            + "to index.json.corrupt.bak failed: \(ApplicationDiagnostics.error(error)). Falling back to empty index.")
                     }
                 } else {
                     // File missing = normal first run. Just fall back quietly, no scary log.
@@ -1043,7 +1041,7 @@ public final class SpecialSlotStorage {
             index.selectedSpecialSlotId = target.id
             index.activeHotkeySpecialSlotId = target.id
             try saveIndex(index)
-            NSLog("[ClipSlots] switchToAdjacentSpecialSlot direction=\(direction) to=\(target.id) name=\(target.name)")
+            NSLog("[ClipSlots] switchToAdjacentSpecialSlot direction=\(direction) to=\(target.id)")
         }
     }
 
@@ -1062,7 +1060,7 @@ public final class SpecialSlotStorage {
                 try saveIndex(index)
             }
         } catch {
-            NSLog("[ClipSlots] updateSelectedSpecialSlot(id=\(id)) failed to persist: \(error). "
+            NSLog("[ClipSlots] updateSelectedSpecialSlot(id=\(id)) failed to persist: \(ApplicationDiagnostics.error(error)). "
                 + "Selected slot may not survive restart.")
         }
     }
@@ -1337,7 +1335,7 @@ public final class SpecialSlotStorage {
                 return true
             }
         } catch {
-            NSLog("[ClipSlots] canvas undo stash 失败 \(groupId)#\(slot)：\(error.localizedDescription)")
+            NSLog("[ClipSlots] canvas undo stash 失败 \(groupId)#\(slot)：\(ApplicationDiagnostics.error(error))")
             return false
         }
     }
@@ -1372,7 +1370,7 @@ public final class SpecialSlotStorage {
                 return true
             }
         } catch {
-            NSLog("[ClipSlots] canvas undo restore 失败 \(groupId)#\(slot)：\(error.localizedDescription)")
+            NSLog("[ClipSlots] canvas undo restore 失败 \(groupId)#\(slot)：\(ApplicationDiagnostics.error(error))")
             return false
         }
     }
@@ -1407,7 +1405,7 @@ public final class SpecialSlotStorage {
                 try fm.moveItem(at: root, to: target)
                 NSLog("[ClipSlots] canvas undo stash: 上次会话的 \(groups.count) 组暂存内容已移入 .trash")
             } catch {
-                NSLog("[ClipSlots] canvas undo stash 清理失败：\(error.localizedDescription)")
+                NSLog("[ClipSlots] canvas undo stash 清理失败：\(ApplicationDiagnostics.error(error))")
             }
         }
     }
@@ -1620,7 +1618,7 @@ public final class SpecialSlotStorage {
             }
 
             try saveIndex(index)
-            NSLog("[ClipSlots] Page created: \(page.name)\(defaultGroup != nil ? " (+ default group)" : "")")
+            NSLog("[ClipSlots] Page created: defaultGroup=\(defaultGroup != nil)")
             return CreatePageResult(page: page, defaultGroup: defaultGroup)
         }
     }
@@ -1646,7 +1644,7 @@ public final class SpecialSlotStorage {
             index.pages[idx].name = clipped
             index.pages[idx].updatedAt = Date()
             try saveIndex(index)
-            NSLog("[ClipSlots] Page renamed to: \(clipped)")
+            NSLog("[ClipSlots] Page renamed")
         }
     }
 
@@ -1790,6 +1788,12 @@ public final class SpecialSlotStorage {
                                  isCancelled: () -> Bool = { false }) -> [Int: SlotContent] {
         SlotStorage.searchCandidates(slotsDir: specialSlotDirectory(for: specialSlotId),
                                      slotCount: slotCount, query: query, isCancelled: isCancelled)
+    }
+
+    public func searchCandidatesResult(in specialSlotId: String, slotCount: Int, query: String,
+                                       isCancelled: () -> Bool = { false }) -> SlotSearchReadResult {
+        SlotStorage.searchCandidatesResult(slotsDir: specialSlotDirectory(for: specialSlotId),
+                                            slotCount: slotCount, query: query, isCancelled: isCancelled)
     }
 
     public func slotStorage(for specialSlotId: String) -> SlotStorage {
@@ -1995,7 +1999,7 @@ public final class SpecialSlotStorage {
                 return result
             }
         } catch {
-            NSLog("[ClipSlots] set(slot:\(slot) in:\(specialSlotId)) 获取存储锁失败，写入未执行：\(error.localizedDescription)")
+            NSLog("[ClipSlots] set(slot:\(slot) in:\(specialSlotId)) 获取存储锁失败，写入未执行：\(ApplicationDiagnostics.error(error))")
             return false
         }
     }
@@ -2092,7 +2096,7 @@ public final class SpecialSlotStorage {
                 return true
             }
         } catch {
-            NSLog("[ClipSlots] clear(slot:\(slot) in:\(specialSlotId)) 获取存储锁失败，清空未执行：\(error.localizedDescription)")
+            NSLog("[ClipSlots] clear(slot:\(slot) in:\(specialSlotId)) 获取存储锁失败，清空未执行：\(ApplicationDiagnostics.error(error))")
             return false
         }
     }
@@ -2197,7 +2201,7 @@ public final class SpecialSlotStorage {
             }
             return true
         } catch {
-            NSLog("[ClipSlots] setLabel(slot:\(slot) in:\(specialSlotId)) 获取存储锁失败，标签未更新：\(error.localizedDescription)")
+            NSLog("[ClipSlots] setLabel(slot:\(slot) in:\(specialSlotId)) 获取存储锁失败，标签未更新：\(ApplicationDiagnostics.error(error))")
             return false
         }
     }

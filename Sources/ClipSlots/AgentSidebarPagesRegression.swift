@@ -69,7 +69,7 @@ func runAgentSidebarPagesProbe(model: AgentChatModel, directory: URL,
     window.isReleasedWhenClosed = false
     defer { window.close() }
     model.clearHistory()
-    for skin in [AppSkin.minimal, .colorful] {
+    for skin in AppSkin.allCases {
         AppSkinCenter.apply(skin)
         for dark in [false, true] {
             NSApp.appearance = NSAppearance(named: dark ? .darkAqua : .aqua)
@@ -113,16 +113,16 @@ func runAgentSidebarPagesProbe(model: AgentChatModel, directory: URL,
                 check(visible(host, "agent-extension-entry") && visible(host, "agent-extension-dismiss"),
                       name + " extension entry and dismiss control fit inside sidebar")
                 let priorDraft = model.draft
-                check(press(host, "agent-extension-entry"), name + " extension entry opens embedded application market")
+                check(press(host, "agent-extension-entry"), name + " extension entry opens centered application manager")
                 await settle()
-                if let picker = panel("agent-app-market") {
+                if let picker = panel("agent-application-manager") {
                     capture(picker, "agent-page-extensions-" + name)
                     check(model.draft == priorDraft, name + " extension navigation preserves draft")
-                } else { check(false, name + " embedded application market exists") }
-                _ = press(host, "agent-market-close")
+                    _ = press(picker, "market-manager-close")
+                } else { check(false, name + " centered application manager exists") }
                 await settle()
                 capture(host, "agent-market-return-" + name, rect: sidebarRect(host))
-                check(panel("agent-app-market") == nil, name + " market returns to conversation")
+                check(panel("agent-application-manager") == nil, name + " market returns to conversation")
                 check(press(host, "agent-extension-dismiss"), name + " extension entry can be dismissed")
                 await settle()
                 capture(host, "agent-market-dismiss-" + name, rect: sidebarRect(host))
@@ -265,7 +265,7 @@ func runAgentSidebarPagesProbe(model: AgentChatModel, directory: URL,
         ]}
         """#.utf8))
     } catch { check(false, "model page fixture parses through real service metadata parser"); return }
-    for skin in [AppSkin.minimal, .colorful] {
+    for skin in AppSkin.allCases {
         AppSkinCenter.apply(skin)
         for dark in [false, true] {
             NSApp.appearance = NSAppearance(named: dark ? .darkAqua : .aqua)

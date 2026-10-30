@@ -13,11 +13,11 @@ import ClipSlotsKit
         }
         let originalSkin = AppSkinCenter.current
         defer { AppSkinCenter.apply(originalSkin) }
-        for colorful in [false, true] {
-            AppSkinCenter.apply(colorful ? .colorful : .minimal)
+        for skin in AppSkin.allCases {
+            AppSkinCenter.apply(skin)
             for dark in [false, true] {
                 for expanded in [false, true] {
-                    let name = "\(colorful ? "colorful" : "minimal")-\(dark ? "dark" : "light")-\(expanded ? "wide" : "sidebar")"
+                    let name = "\(skin.rawValue)-\(dark ? "dark" : "light")-\(expanded ? "wide" : "sidebar")"
                     let model = AgentChatModel(displayName: "欢迎卡片验收", service: AgentService(
                         transport: AgentScriptedTransport(steps: []),
                         secretStore: AgentInMemorySecretStore(key: "fixture")),
@@ -86,7 +86,7 @@ import ClipSlotsKit
                         card.reduceMotion = false
                         card.onHoverChanged = exitPublish
                         tracking.forEach { card.addTrackingArea($0) }
-                        if colorful && dark && expanded
+                        if dark && expanded
                             && ProcessInfo.processInfo.environment["CLIPSLOTS_WELCOME_SYSTEM_MOUSE"] == "1" {
                             NSApp.activate(ignoringOtherApps: true)
                             window.makeKeyAndOrderFront(nil)
@@ -136,7 +136,7 @@ import ClipSlotsKit
                     check(!model.draft.isEmpty && model.messages.isEmpty && !model.isRunning,
                           "\(name) suggestion click fills draft without submitting")
                     model.draft = ""
-                    if colorful && dark && expanded
+                    if dark && expanded
                         && ProcessInfo.processInfo.environment["CLIPSLOTS_WELCOME_KEEP_OPEN"] == "1" {
                         retainedWindow = window
                     } else {

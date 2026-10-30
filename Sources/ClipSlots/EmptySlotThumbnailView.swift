@@ -14,18 +14,13 @@ struct EmptySlotThumbnailView: View {
                 )
                 .allowsHitTesting(false)
 
-            VStack(spacing: 7) {
-                Image(systemName: "tray")
-                    .font(.system(size: 17, weight: .medium))
-                    .foregroundColor(.secondary.opacity(0.42))
-                Text("空槽位 · 复制后按保存键存入")
-                    .font(AppTheme.Fonts.footnote)
-                    .foregroundColor(.secondary.opacity(0.64))
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.8)
-            }
-            .padding(.horizontal, 12)
+            Image(systemName: "tray")
+                .font(.system(size: 20, weight: .regular))
+                .foregroundColor(.secondary.opacity(0.42))
         }
         .frame(minHeight: 76, idealHeight: 88, maxHeight: .infinity)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("空槽位")
+        .help("复制内容后，点击保存或使用保存快捷键存入")
     }
 }

@@ -7,8 +7,22 @@ import sys
 import time
 import uuid
 import atexit
+import hashlib
+import fcntl
 
 root = pathlib.Path(os.environ["CLIPSLOTS_FIXTURE_DIR"])
+def count_attempt(key):
+    path = root / ("counter-" + hashlib.sha256(key.encode()).hexdigest())
+    with path.open("a+") as counter:
+        fcntl.flock(counter, fcntl.LOCK_EX)
+        counter.seek(0)
+        attempt = int(counter.read() or "0") + 1
+        counter.seek(0)
+        counter.truncate()
+        counter.write(str(attempt))
+        counter.flush()
+    return attempt
+
 args = sys.argv[1:]
 if os.environ.get("CLIPSLOTS_BATCH_PROBE") == "1":
     def record_process(event):
@@ -64,10 +78,15 @@ elif args[:2] in (["model", "list"], ["model", "describe"]):
             {"role": "last_frame", "maxCount": 1},
             {"role": "reference_image", "maxCount": 4},
         ]}
+    if os.environ.get("CLIPSLOTS_BATCH_PROBE") == "1":
+        result[0]["generationTypes"].append("image-2-image")
     if args[1] == "describe":
         result = next(item for item in result if item["id"] == args[2])
 elif args[:2] == ["task", "get"]:
     ident = args[2]
+    if "batch-query" in ident and count_attempt("query-" + ident) == 1:
+        print("fixture: temporary query failure", file=sys.stderr)
+        sys.exit(1)
     if os.environ.get("CLIPSLOTS_CANVAS_AGENT_GENERATION_PROBE") == "1":
         with (root / "attempt-events.jsonl").open("a") as log:
             log.write(json.dumps({"event": "query", "task": ident, "at": time.time()}) + "\n")
@@ -118,9 +137,13 @@ elif "generate" in args:
             print("API error (429): Too many requests", file=sys.stderr)
             sys.exit(1)
     fails = os.environ.get("CLIPSLOTS_BATCH_PROBE") == "1" and "BATCH_FAIL" in prompt
+    if os.environ.get("CLIPSLOTS_BATCH_PROBE") == "1" and "BATCH_FAIL_ONCE" in prompt:
+        fails = count_attempt("submit-" + prompt) == 1
     fails = fails or (os.environ.get("CLIPSLOTS_CANVAS_AGENT_GENERATION_PROBE") == "1"
                       and "CANVAS_AGENT_FAIL" in prompt)
     marker = "batch-fail" if fails else ""
+    if os.environ.get("CLIPSLOTS_BATCH_PROBE") == "1" and "BATCH_QUERY_FAIL_ONCE" in prompt:
+        marker = "batch-query"
     ident = ("video" if "video" in args else "image") + marker + uuid.uuid4().hex[:12]
     if os.environ.get("CLIPSLOTS_CANVAS_AGENT_GENERATION_PROBE") == "1":
         attempt = {"event": "submitted", "task": ident, "prompt": prompt, "at": time.time()}
@@ -186,6 +209,18 @@ elif "generate" in args:
         with (root / "effective-parameters.jsonl").open("a") as log:
             log.write(json.dumps(task) + "\n")
     result = {"success": True, "taskId": ident}
+    if os.environ.get("CLIPSLOTS_BATCH_PROBE") == "1" and "BATCH_ACCEPTED_EXIT" in prompt:
+        print(json.dumps(result), flush=True)
+        print("PRIVATE_PROCESS_STDERR_TOKEN_BODY", file=sys.stderr, flush=True)
+        sys.exit(1)
+    if os.environ.get("CLIPSLOTS_BATCH_PROBE") == "1" and "BATCH_ACCEPTED_TAIL" in prompt:
+        print(json.dumps(result), flush=True)
+        print("{broken tail", flush=True)
+        sys.exit(0)
+    if os.environ.get("CLIPSLOTS_BATCH_PROBE") == "1" and "BATCH_CONFLICTING_RECEIPTS" in prompt:
+        print(json.dumps(result), flush=True)
+        print(json.dumps({"taskId": "other-" + ident}), flush=True)
+        sys.exit(0)
 else:
     print(json.dumps({"error": "Unexpected fixture command", "args": args}))
     sys.exit(1)

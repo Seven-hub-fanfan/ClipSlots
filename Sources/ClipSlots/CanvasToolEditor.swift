@@ -24,10 +24,9 @@ struct CanvasToolEditor: View {
             HStack(spacing: 8) {
                 Image(systemName: kind.symbolName).font(.system(size: 15))
                     .frame(width: 32, height: 32).background(RoundedRectangle(cornerRadius: 10).fill(CanvasSkin.subtleFill))
-                VStack(alignment: .leading, spacing: 3) {
-                    Text(kind.displayName).font(.system(size: 13, weight: .semibold))
-                    Text(dirty ? "未应用修改" : "画布工具").font(.system(size: 10)).foregroundColor(CanvasSkin.secondaryInk)
-                }
+                Text(kind.displayName).font(.system(size: 13, weight: .semibold))
+                InterfaceHelpButton(title: "\(kind.displayName)使用说明", text: helpText,
+                                    identifier: "tool-editor-help")
                 Spacer()
                 Button { canvas.undo() } label: { Image(systemName: "arrow.uturn.backward") }
                     .disabled(!canvas.canUndo || session.busy).help("撤销").accessibilityLabel("撤销")
@@ -83,12 +82,14 @@ struct CanvasToolEditor: View {
                     }.frame(minWidth: 250, idealWidth: 280, maxWidth: 320).background(CanvasSkin.void)
                 }.disabled(session.busy)
             }
-            Divider()
-            HStack {
-                Text(session.message.isEmpty ? helpText : session.message).font(.system(size: 11))
-                    .foregroundColor(CanvasSkin.secondaryInk).lineLimit(2)
-                Spacer()
-            }.padding(.horizontal, 16).padding(.vertical, 8)
+            if !session.message.isEmpty {
+                Divider()
+                HStack {
+                    Text(session.message).font(.system(size: 11))
+                        .foregroundColor(CanvasSkin.secondaryInk).lineLimit(2)
+                    Spacer()
+                }.padding(.horizontal, 16).padding(.vertical, 8)
+            }
         }
         .foregroundColor(CanvasSkin.ink).background(CanvasSkin.void)
         .font(.system(size: 11))
@@ -264,10 +265,6 @@ struct CanvasToolEditor: View {
                 Button("导入\(draft.audio.scene.title)") { session.chooseImport() }
                 Toggle("循环播放", isOn: $draft.audio.loop)
             }
-            CanvasToolSection(title: "声音创作", symbol: "sparkles") {
-                Text(draft.audio.scene == .speech ? "在下方输入文字，用本机声音生成配音。" : "在预览下方描述声音，选择服务并设置生成参数。")
-                    .foregroundColor(CanvasSkin.secondaryInk).fixedSize(horizontal: false, vertical: true)
-            }
         }
     }
     private var resourceControls: some View {
@@ -283,8 +280,6 @@ struct CanvasToolEditor: View {
             if let id = draft.resourceAttachmentID, let url = session.urls[id] {
                 Button("显示原始模型") { NSWorkspace.shared.activateFileViewerSelecting([url]) }
             }
-            Text("生成方式和服务参数位于预览下方。")
-                .foregroundColor(CanvasSkin.secondaryInk).fixedSize(horizontal: false, vertical: true)
         }
     }
     private var timeline: some View {

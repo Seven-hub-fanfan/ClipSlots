@@ -2,6 +2,7 @@ import Foundation
 import SwiftUI
 import AppKit
 import UniformTypeIdentifiers
+import ClipSlotsKit
 
 // v2.9.53: 「社区 Skill」——用户自定义上传 Skill 并像官方 Skill 一样软链安装到各 Agent。
 //
@@ -17,6 +18,8 @@ import UniformTypeIdentifiers
 //   - 家目录不可写时回退 macOS 系统鉴权弹窗。
 @MainActor
 final class CommunitySkillManager: ObservableObject {
+    private let installsExternalAgents: Bool
+    init(installsExternalAgents: Bool = true) { self.installsExternalAgents = installsExternalAgents }
 
     // MARK: - 数据模型
 
@@ -245,6 +248,10 @@ final class CommunitySkillManager: ObservableObject {
             return
         }
         lastMessage = nil
+        if (try? url.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true {
+            importZip(at: url)
+            return
+        }
         let ext = url.pathExtension.lowercased()
         switch ext {
         case "zip":
@@ -303,12 +310,17 @@ final class CommunitySkillManager: ObservableObject {
         }
         defer { try? fm.removeItem(at: tmp) }
 
-        guard unzip(url.path, to: tmp.path) else {
-            return .failure("解压失败，请确认这是一个有效的 .zip 文件。")
+        let sourceRoot: String
+        if (try? url.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true { sourceRoot = url.path }
+        else {
+            guard unzip(url.path, to: tmp.path) else {
+                return .failure("解压失败，请确认这是一个有效的 .zip 文件。")
+            }
+            sourceRoot = tmp.path
         }
 
         // 2. 定位含 SKILL.md 的目录（根目录或一级子目录）。
-        guard let skillDir = findSkillRoot(in: tmp.path) else {
+        guard let skillDir = findSkillRoot(in: sourceRoot) else {
             return .failure("压缩包内未找到 SKILL.md（应位于根目录或一级子目录下）。")
         }
 
@@ -453,6 +465,24 @@ final class CommunitySkillManager: ObservableObject {
 
     /// 导入成功后的收尾：刷新列表 + 自动安装到已检测 Agent + 反馈。
     private func finishImport(name: String, slug: String) {
+        if !installsExternalAgents {
+            let directory = (communitySkillsRoot as NSString).appendingPathComponent(slug)
+            Task {
+                let imported = await Task.detached {
+                    AgentSkillCatalog.discover().first { $0.directory == directory }
+                }.value
+                if let imported {
+                    var enabled = AgentPreferences.decodeEnabledSlugs(
+                        UserDefaults.standard.string(forKey: AgentPreferences.enabledSkillsKey) ?? "")
+                    enabled.insert(imported.slug)
+                    UserDefaults.standard.set(AgentPreferences.encodeEnabledSlugs(enabled), forKey: AgentPreferences.enabledSkillsKey)
+                    AgentSkillLibrary.shared.refresh()
+                    report("已添加 Skill「\(name)」", isError: false)
+                } else { report("Skill 已保存，但未能载入，请检查 SKILL.md。", isError: true) }
+                refresh()
+            }
+            return
+        }
         // INST-2 (v2.10.32): B-8 made refresh() async (self.skills is only assigned after a
         // background scan), but finishImport still read `skills.first(where: id==slug)` in the
         // SAME main-thread turn right after calling refresh() — i.e. against the STALE pre-refresh
@@ -709,7 +739,7 @@ final class CommunitySkillManager: ObservableObject {
             proc.waitUntilExit()
             return proc.terminationStatus == 0
         } catch {
-            NSLog("[ClipSlots][CommunitySkill] unzip failed: \(error)")
+            NSLog("[ClipSlots][CommunitySkill] unzip failed: \(ApplicationDiagnostics.error(error))")
             return false
         }
     }

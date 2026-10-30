@@ -6,7 +6,6 @@ struct AppAppearanceButton: View {
     var compact = false
     var canvasPalette = false
     @AppStorage(AppearanceDefaults.key) private var appearance = ThemeMode.light.rawValue
-    @AppStorage(AppSkin.defaultsKey) private var skin = AppSkin.fallback.rawValue
     @State private var presented = false
     private var mode: ThemeMode { ThemeMode(rawValue: appearance) ?? .system }
     private var chromeFill: Color { canvasPalette ? CanvasSkin.chromeFill : TapSkin.chromeFill }
@@ -14,8 +13,8 @@ struct AppAppearanceButton: View {
     var body: some View {
         trigger
         .buttonStyle(.plain)
-        .help("外观 · \(mode.title) · \((AppSkin(rawValue: skin) ?? .minimal).title)")
-        .accessibilityLabel("外观与主题")
+        .help("外观 · \(mode.title)")
+        .accessibilityLabel("外观")
         .popover(isPresented: $presented, arrowEdge: .bottom) {
             appearancePanel
         }
@@ -43,7 +42,7 @@ struct AppAppearanceButton: View {
     }
 
     private var appearancePanel: some View {
-            VStack(alignment: .leading, spacing: 16) {
+            VStack(alignment: .leading, spacing: 12) {
                 Text("外观").font(.system(size: 14, weight: .semibold))
                 HStack(spacing: 3) {
                     ForEach(ThemeMode.allCases, id: \.rawValue) { value in
@@ -61,45 +60,10 @@ struct AppAppearanceButton: View {
                     }
                 }
                 .padding(3).background(RoundedRectangle(cornerRadius: 9).fill(TapSkin.subtleFill))
-                Text("主题").font(.system(size: 12, weight: .medium)).foregroundColor(TapSkin.secondaryInk)
-                HStack(spacing: 10) {
-                    skinTile(.minimal)
-                    skinTile(.colorful)
-                }
-                Text("编辑区、画布和面板使用同一套外观")
-                    .font(.system(size: 11)).foregroundColor(TapSkin.secondaryInk)
             }
-            .padding(18).frame(width: 318)
+            .padding(16).frame(width: 290)
             .foregroundColor(TapSkin.ink)
             .background(TapSkin.chromeFill)
     }
 
-    private func skinTile(_ value: AppSkin) -> some View {
-        Button {
-            AppSkinCenter.apply(value)
-        } label: {
-            VStack(alignment: .leading, spacing: 9) {
-                HStack(spacing: 5) {
-                    ForEach(0..<3) { index in
-                        RoundedRectangle(cornerRadius: 5)
-                            .fill(value == .minimal ? TapSkin.subtleFill : [Color.purple, Color.teal, Color.blue][index].opacity(0.14))
-                            .overlay(alignment: .top) {
-                                Capsule().fill(value == .minimal ? TapSkin.secondaryInk : [Color.purple, Color.teal, Color.blue][index])
-                                    .frame(height: 2).padding(.horizontal, 6).padding(.top, 6)
-                            }
-                            .frame(height: 40)
-                    }
-                }
-                HStack {
-                    Text(value.title).font(.system(size: 12, weight: .medium))
-                    Spacer(minLength: 0)
-                    if skin == value.rawValue { Image(systemName: "checkmark.circle.fill").foregroundColor(TapSkin.accent) }
-                }
-            }
-            .padding(10)
-            .background(RoundedRectangle(cornerRadius: 10).fill(TapSkin.cardEmptyFill))
-            .overlay(RoundedRectangle(cornerRadius: 10).stroke(skin == value.rawValue ? TapSkin.accent : TapSkin.border, lineWidth: 1))
-            .contentShape(Rectangle())
-        }.buttonStyle(.plain)
-    }
 }

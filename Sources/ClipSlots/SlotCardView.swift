@@ -80,13 +80,11 @@ struct SlotCardView: View {
     ///   • 悬停 / 拖入 / 闪烁描边 → 统一换成紫色选中描边（仍然要有「选中」反馈，只是不再五色轮播）
     ///   • 闪烁时的彩色外发光 → 去掉（描边已经够，外发光是这套界面里最"多彩"的一笔）
     ///   • 槽位编号 → **保留**槽位色，并收进一个圆形角标里。这是简洁模式唯一的彩色出口。
-    private var isMinimalSkin: Bool { AppTheme.isMinimalSkin }
-
     /// 简洁模式下描边的高亮色：不跟槽位色，统一紫色（浅色淡紫 / 深色霓虹紫）。
     /// 注意这条只管**闪烁定位 / 拖入目标**这两种真状态；鼠标悬停走下面中性的
     /// `hoverOutlineColor`（v2.11.7 hotfix15）。
     private var outlineHighlight: Color {
-        isMinimalSkin ? AppTheme.minimalSelectionBorder : slotAccent
+        AppTheme.minimalSelectionBorder
     }
 
     /// 悬停描边色（v2.11.7 hotfix15）。
@@ -96,7 +94,7 @@ struct SlotCardView: View {
     /// 浅色档黑 35%、深色档白 35%（`MinimalSkinPalette.CardHover`）。
     /// 多彩模式不变，继续用槽位色——那本来就是它的品牌高亮语言。
     private var hoverOutlineColor: Color {
-        isMinimalSkin ? AppTheme.minimalCardHoverBorder : outlineHighlight.opacity(0.72)
+        AppTheme.minimalCardHoverBorder
     }
 
     private var cardOutlineColor: Color {
@@ -113,7 +111,7 @@ struct SlotCardView: View {
         // 一样是 1.5pt——hotfix15 首版收成 1pt + 35% 实机太淡，静息态描边本身就有黑 15% 的重量，
         // 悬停几乎看不出变化。加粗与提浓一起做，才是「一眼看得出」。
         guard isHovering else { return 1 }
-        return isMinimalSkin ? MinimalSkinPalette.CardHover.light.width : 1.5
+        return MinimalSkinPalette.CardHover.light.width
     }
 
     var body: some View {
@@ -319,12 +317,6 @@ struct SlotCardView: View {
                     .allowsHitTesting(false)
             }
         }
-        // Flash keeps the original colored glow, but its hard edge is rendered by the
-        // single card outline above so hover/drop/flash never produce parallel strokes.
-        .shadow(
-            color: (isFlashHighlighted && !isMinimalSkin) ? slotAccent.opacity(0.5) : Color.clear,
-            radius: (isFlashHighlighted && !isMinimalSkin) ? 9 : 0
-        )
         .animation(Anim.status, value: isFlashHighlighted)
         // v2.9.36: persistent "上次粘贴" corner badge, lightweight so it doesn't
         // cover the card's main content.
@@ -417,16 +409,12 @@ struct SlotCardView: View {
         }
         // 简洁模式：这枚角标只有 9pt，中性灰底会直接消失在卡片里，所以反相成「近黑底白字 /
         // 白底黑字」——靠明度而不是色相把它从卡片上拎出来，仍然不引入第二种颜色。
-        .foregroundColor(isMinimalSkin ? AppTheme.minimalCTAInk : .white)
+        .foregroundColor(AppTheme.minimalCTAInk)
         .padding(.horizontal, 6)
         .padding(.vertical, 3)
         .background(
-            Capsule().fill(isMinimalSkin ? AppTheme.minimalCTAFill : slotAccent.opacity(0.92))
+            Capsule().fill(AppTheme.minimalCTAFill)
         )
-        .overlay(
-            Capsule().stroke(Color.white.opacity(isMinimalSkin ? 0 : 0.25), lineWidth: 0.5)
-        )
-        .shadow(color: isMinimalSkin ? .clear : slotAccent.opacity(0.3), radius: 2, x: 0, y: 1)
         .help("这是最近一次粘贴的槽位")
     }
 
@@ -446,9 +434,8 @@ struct SlotCardView: View {
             .foregroundColor(slotAccent)
             .monospacedDigit()
             .frame(width: 30, height: 30)
-            .background(Circle().fill(slotAccent.opacity(isMinimalSkin ? 0.14 : 0.20)))
-            .overlay(Circle().strokeBorder(slotAccent.opacity(isMinimalSkin ? 0.34 : 0.50), lineWidth: 1))
-            .shadow(color: isMinimalSkin ? .clear : slotAccent.opacity(0.22), radius: 3, y: 1)
+            .background(Circle().fill(slotAccent.opacity(0.14)))
+            .overlay(Circle().strokeBorder(slotAccent.opacity(0.34), lineWidth: 1))
             .modifier(StaticSlotDrawing(eligible: true))
             .frame(minWidth: 34, alignment: .leading)
             .accessibilityLabel("槽位 \(slot)")
@@ -499,12 +486,6 @@ struct SlotCardView: View {
                     .help("点击编辑标签")
                 }
 
-                // v2.9.18: 类型文字与缩略图/元数据信息冗余；有内容时隐藏，只在空槽提示。
-                if content.isEmpty {
-                    Text("空槽位")
-                        .font(.caption2)
-                        .foregroundColor(.secondary)
-                }
             }
 
             Spacer()
@@ -649,7 +630,7 @@ struct SlotCardView: View {
                     .help("清空槽位内容（需要确认）")
                     .frame(maxWidth: .infinity)
                 }
-            } else if AppTheme.isMinimalSkin {
+            } else {
                 // 简洁模式的空卡片上，这枚按钮是**唯一**的交互元素。多彩模式靠彩色按钮 + 顶部
                 // 装饰条 + 彩色编号三处一起说「这张卡片属于槽位 N，你可以往里存东西」；简洁模式
                 // 把前两处都收掉了，引导的担子全压在这里，所以让它反相并撑满整个底部区域。
@@ -659,17 +640,7 @@ struct SlotCardView: View {
                 }
                 .buttonStyle(SlotActionButtonStyle(kind: .cta, layout: .hero))
                 .help(saveShortcut.isEmpty ? "保存当前剪贴板内容到槽位 \(slot)" : saveShortcut)
-            } else {
-                // 多彩模式：配色换成槽位强调色，**尺寸与简洁模式完全相同**（同一个 `.hero`）。
-                // 原来这里用 `.compact` 尺寸 + 一块 `Color.clear` 撑满剩余高度，于是按钮只有
-                // 36pt、下方还空出一条 —— 与简洁模式肉眼可见地不一样高（hotfix19 修复）。
-                Button { onSave() } label: {
-                    Label("保存到槽位 \(slot)", systemImage: "square.and.arrow.down")
-                        .frame(maxWidth: .infinity)
-                }
-                .buttonStyle(SlotActionButtonStyle(kind: .accent(AppTheme.slotActionAccent(slot)),
-                                                  layout: .hero))
-                .help(saveShortcut.isEmpty ? "保存当前剪贴板内容到槽位 \(slot)" : saveShortcut)
+
             }
         }
         .frame(height: 52)
@@ -1049,16 +1020,12 @@ private struct SlotActionButtonBody: View {
     /// 拟物高光：中性灰底上的白描边会变成一道脏边，CTA 的白底上更是直接看不见却拉低了纯度。
     /// 于是简洁模式改用一道与卡片同源的细边框（CTA 自身对比度已经够强，不需要边框）。
     private var strokeColor: Color {
-        guard AppTheme.isMinimalSkin else {
-            return Color.white.opacity(isEnabled ? 0.16 : 0.06)
-        }
         return isCTA ? .clear : AppTheme.subtleBorder
     }
 
     /// 按钮自身的彩色投影。简洁模式一律取消——那是「按钮在发光」，与中性克制的目标相反。
     private var dropShadowColor: Color {
-        guard !AppTheme.isMinimalSkin else { return .clear }
-        return backgroundColor.opacity(isEnabled ? 0.22 : 0)
+        .clear
     }
 
     /// 浅色模式下 hover 时把强调色按钮压暗一点。

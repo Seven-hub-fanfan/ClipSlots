@@ -20,6 +20,41 @@ private actor ModelWorkspaceFixtureHTTP: ModelHTTPTransport {
 @MainActor enum ModelWorkspaceRegression {
     private static var started = false
     static func schedule(store: SlotStoreObservable) {
+        if let path = ProcessInfo.processInfo.environment["CLIPSLOTS_INTERACTIVE_DECISION"], !started {
+            started = true
+            Task { await DecisionForegroundFixture.open(root: URL(fileURLWithPath: path)) }
+            return
+        }
+        if let path = ProcessInfo.processInfo.environment["CLIPSLOTS_INTERACTIVE_STEER"], !started {
+            started = true
+            Task { await SteerForegroundFixture.open(root: URL(fileURLWithPath: path)) }
+            return
+        }
+        if let path = ProcessInfo.processInfo.environment["CLIPSLOTS_INTERACTIVE_CANDIDATE"], !started {
+            started = true
+            Task { await InteractiveCandidateFixture.open(store: store, root: URL(fileURLWithPath: path)) }
+            return
+        }
+        if let path = ProcessInfo.processInfo.environment["CLIPSLOTS_NATIVE_MCP_REGRESSION"], !started {
+            started = true
+            Task { await runAgentNativeMCPRegression(store: store, directory: URL(fileURLWithPath: path)) }
+            return
+        }
+        if let path = ProcessInfo.processInfo.environment["CLIPSLOTS_MARKET_UX_REGRESSION"], !started {
+            started = true
+            Task { await AgentMarketUXRegression.run(root: URL(fileURLWithPath: path)) }
+            return
+        }
+        if let path = ProcessInfo.processInfo.environment["CLIPSLOTS_MARKET_SYNC_REGRESSION"], !started {
+            started = true
+            Task { await AgentMarketSyncRegression.run(store: store, root: URL(fileURLWithPath: path)) }
+            return
+        }
+        if let path = ProcessInfo.processInfo.environment["CLIPSLOTS_LAYOUT_REGRESSION"], !started {
+            started = true
+            Task { await LayoutClarityRegression.run(store: store, root: URL(fileURLWithPath: path)) }
+            return
+        }
         if let path = ProcessInfo.processInfo.environment["CLIPSLOTS_MARKET_REGRESSION"], !started {
             started = true
             Task { await runAgentAppMarketRegression(store: store, root: URL(fileURLWithPath: path)) }
@@ -34,6 +69,17 @@ private actor ModelWorkspaceFixtureHTTP: ModelHTTPTransport {
         func check(_ value: Bool, _ name: String) { if value { passed.append(name) } else { failed.append(name) } }
         do {
             try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+            runIsolatedCrateBoundaryProbe(check: check)
+            if ProcessInfo.processInfo.environment["CLIPSLOTS_WORKSPACE_ARCH_ONLY"] == "1" {
+                await runWorkspaceArchRasterProbe(directory: root, check: check)
+                let report: [String: Any] = ["ok": failed.isEmpty, "passed": passed, "failed": failed,
+                    "realPaidRequests": 0, "systemInputValidated": false,
+                    "scope": "production Core Animation offscreen raster and Crate isolation boundary"]
+                try JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys])
+                    .write(to: root.appendingPathComponent("report.json"))
+                NSApp.terminate(nil)
+                return
+            }
             let fixture = ModelWorkspaceFixtureHTTP()
             let models = ModelWorkspaceStore(repository: .init(root: root.appendingPathComponent("repository")),
                 service: .init(transport: fixture))
@@ -134,8 +180,8 @@ private actor ModelWorkspaceFixtureHTTP: ModelHTTPTransport {
             await runWorkspaceBeatProbe(directory: root, check: check)
             let original = AppSkinCenter.current
             defer { AppSkinCenter.apply(original) }
-            for colorful in [false, true] {
-                AppSkinCenter.apply(colorful ? .colorful : .minimal)
+            for skin in AppSkin.allCases {
+                AppSkinCenter.apply(skin)
                 for dark in [false, true] {
                     for width in [920, 1280] {
                         let host = NSHostingView(rootView: ModelWorkspaceView(store: store, models: models).id("initial"))
@@ -161,11 +207,11 @@ private actor ModelWorkspaceFixtureHTTP: ModelHTTPTransport {
                                 let text = (request.results?.compactMap { $0.topCandidates(1).first?.string } ?? [])
                                     .joined().filter { !$0.isWhitespace }
                                 check(["测评", "排行榜", "配置中心", "AI日报"].allSatisfy { text.contains($0) },
-                                    "\(width)/\(colorful)/\(dark) all native tabs visibly rendered")
+                                    "\(width)/\(skin.rawValue)/\(dark) all native tabs visibly rendered")
                                 let expected = ["测评": "配置模型", "排行榜": "本地测评能力榜", "配置中心": "API模型", "AI 日报": "暂无新闻"][tab] ?? ""
-                                check(!expected.isEmpty && text.contains(expected), "\(width)/\(colorful)/\(dark) actual section \(tab) rendered")
+                                check(!expected.isEmpty && text.contains(expected), "\(width)/\(skin.rawValue)/\(dark) actual section \(tab) rendered")
                                 try bitmap.representation(using: .png, properties: [:])?.write(to: root.appendingPathComponent(
-                                    "\(width)-\(colorful ? "colorful" : "minimal")-\(dark ? "dark" : "light")-\(tab).png"))
+                                    "\(width)-\(skin.rawValue)-\(dark ? "dark" : "light")-\(tab).png"))
                             } else { check(false, "native bitmap unavailable") }
                         }
                         for section in ["模型目录", "已接入", "服务连接", "用途路由"] {
@@ -178,16 +224,16 @@ private actor ModelWorkspaceFixtureHTTP: ModelHTTPTransport {
                                 let request = VNRecognizeTextRequest(); request.recognitionLevel = .accurate; request.recognitionLanguages = ["zh-Hans","en-US"]
                                 try VNImageRequestHandler(cgImage: cg).perform([request])
                                 let text = (request.results?.compactMap { $0.topCandidates(1).first?.string } ?? []).joined().filter { !$0.isWhitespace }
-                                let expected = ["模型目录": "内置模型目录", "已接入": "测试模型", "服务连接": "本地共享服务", "用途路由": "画布文本润色"][section] ?? ""
-                                check(text.contains(expected), "\(width)/\(colorful)/\(dark) hub section \(section) native content rendered")
+                                let expected = ["模型目录": "全部119", "已接入": "测试模型", "服务连接": "本地共享服务", "用途路由": "画布文本润色"][section] ?? ""
+                                check(text.contains(expected), "\(width)/\(skin.rawValue)/\(dark) hub section \(section) native content rendered")
                                 check(!text.localizedCaseInsensitiveContains("tapnow"),
-                                    "\(width)/\(colorful)/\(dark) hub section \(section) has no source brand in visible text")
+                                    "\(width)/\(skin.rawValue)/\(dark) hub section \(section) has no source brand in visible text")
                                 if section == "模型目录" {
                                     check(text.contains("图像极速模型") && (width < 1280 || text.contains("内置服务")),
-                                        "\(width)/\(colorful)/\(dark) branded catalog row uses neutral display aliases")
+                                        "\(width)/\(skin.rawValue)/\(dark) branded catalog row uses neutral display aliases")
                                 }
                                 try bitmap.representation(using: .png, properties: [:])?.write(to: root.appendingPathComponent(
-                                    "\(width)-\(colorful ? "colorful" : "minimal")-\(dark ? "dark" : "light")-hub-\(section).png"))
+                                    "\(width)-\(skin.rawValue)-\(dark ? "dark" : "light")-hub-\(section).png"))
                             } else { check(false, "hub bitmap unavailable") }
                         }
                         window.close()

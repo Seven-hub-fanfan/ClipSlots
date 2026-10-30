@@ -82,6 +82,8 @@ final class AgentSkillLibrary: ObservableObject {
     @Published private(set) var lastScanAt: Date?
     @Published private(set) var workflowEntries: [String: [WorkflowSkillStore.Entry]] = [:]
     private var workflowScans: [String: UUID] = [:]
+    private var scanToken = UUID()
+    private var rescanPending = false
 
     private init() {}
 
@@ -99,16 +101,27 @@ final class AgentSkillLibrary: ObservableObject {
 
     /// 扫盘放到后台：Agent 目录里可能有几十个 Skill，加上要读每个 SKILL.md，
     /// 在主线程做会让侧栏打开的那一帧掉帧。
+    func resetMarketScope() {
+        scanToken = UUID(); isScanning = false
+        skills.removeAll { $0.source == .market }
+    }
+
     func refresh() {
-        guard !isScanning else { return }
+        guard !isScanning else { rescanPending = true; return }
         isScanning = true
+        let token = UUID(); scanToken = token
         let bundlePath = Bundle.main.bundlePath
         Task.detached(priority: .userInitiated) {
             let found = AgentSkillCatalog.discover(bundlePath: bundlePath)
             await MainActor.run {
+                guard self.scanToken == token else { return }
                 self.skills = found
                 self.isScanning = false
                 self.lastScanAt = Date()
+                if self.rescanPending {
+                    self.rescanPending = false
+                    self.refresh()
+                }
             }
         }
     }
@@ -133,6 +146,7 @@ struct AgentToolActivity: Identifiable, Equatable {
 
 @MainActor
 final class AgentChatModel: ObservableObject {
+    var applicationStore: AgentMarketSyncStore = .shared
     enum RunPhase: String, Codable, Sendable {
         case idle, starting, streaming, waiting, applied, failed, cancelled, unknown
     }
@@ -145,6 +159,18 @@ final class AgentChatModel: ObservableObject {
         var gatewayCursor: String?
         var config: AgentConfig?
         var gatewayEndpoint: URL?
+        var libraryPageID: String?
+        var libraryGroupID: String?
+        var steerContext: SteerRunContext?
+        var appReplyID: String? = nil
+    }
+    struct SteerRunContext: Codable, Sendable {
+        var config: AgentConfig
+        var skills: [AgentSkill]
+        var directoryID: UUID?
+        var mode: AgentAccessMode
+        var automaticApproval: Bool
+        var widgetContext: JSONValue?
         var libraryPageID: String?
         var libraryGroupID: String?
     }
@@ -166,6 +192,9 @@ final class AgentChatModel: ObservableObject {
         var automaticApproval: Bool?
         var libraryPageID: String?
         var libraryGroupID: String?
+        var hotRunID: String?
+        var hotReceipt: AgentGatewaySteerReceipt?
+        var hotEventApplied: Bool?
         var createdAt = Date()
     }
     @Published private(set) var runPhase: RunPhase = .idle
@@ -175,11 +204,17 @@ final class AgentChatModel: ObservableObject {
     private var lastStreamCheckpoint = Date.distantPast
     private var lastRunID: UUID?
     @Published private(set) var gatewayRunID: String?
+    private var gatewaySubagentCanvasScopes: [String: String] = [:]
     @Published private(set) var gatewayCursor: String?
     @Published private(set) var canResumeGateway = false
     @Published private(set) var isControllingRun = false
+    @Published private(set) var gatewaySteerCapability: AgentGatewaySteerCapability?
+    private var steerRunContext: SteerRunContext?
+    private var runSkills: [AgentSkill] = []
     @Published private(set) var artifacts: [AgentArtifactRecord] = []
-    @Published var selectedArtifact: AgentArtifactRecord?
+    @Published var selectedArtifact: AgentArtifactRecord? {
+        didSet { if selectedArtifact != oldValue { artifactCallbackEpoch = UUID() } }
+    }
     private var lastRunConfig: AgentConfig?
     private var lastGatewayEndpoint: URL?
     private var lastLibraryPageID: String?
@@ -188,7 +223,16 @@ final class AgentChatModel: ObservableObject {
     private var backendIsInjected = false
     private var artifactRepository: AgentArtifactRepository?
     private var artifactRefreshID = UUID()
-    private var pendingArtifactText: (conversation: UUID, text: String)?
+    private var artifactCallbackEpoch = UUID()
+    @Published private(set) var appReplySnapshots: [AgentAppReplySnapshot] = []
+    private var appReplyClients: [String: AgentAppReplyClient] = [:]
+    private var appReplyID: String?
+    private var appReplyOperation: UUID?
+    private var appReplyLifecycles: [String: AgentArtifactReplyLifecycle] = [:]
+    private var appReplyPromises: [String: AgentArtifactReplySubmissionPromise] = [:]
+
+    var artifactConversationRunActive: Bool { isRunning && runTask != nil }
+    private var pendingArtifactText: (identity: AgentArtifactPageIdentity, text: String)?
     // #region debug-point A-C:agent-work-counts
     #if DEBUG
     var debugReceivedEvents = 0
@@ -225,6 +269,9 @@ final class AgentChatModel: ObservableObject {
         var accessMode: AgentAccessMode?
         var widgetContext: JSONValue?
         var automaticApproval: Bool?
+        var contextObservation: AgentContextUsageState?
+        var compactions: AgentContextCompactionLifecycle?
+        var taskSubagents: AgentTaskSubagentProjection?
         var title: String { customTitle ?? codexContext?.title ?? String((messages.first { $0.role == .user }?.content ?? draft).prefix(30)) }
     }
     struct SavedSessions: Codable, Sendable {
@@ -264,6 +311,8 @@ final class AgentChatModel: ObservableObject {
     var canvasContext: CanvasAgentContext? {
         didSet {
             guard canvasContext !== oldValue else { return }
+            artifactCallbackEpoch = UUID()
+            pendingArtifactText = nil
             oldValue?.cancelReferenceCapture()
             canvasContext?.observeSelection(to: self)
             externalMCPHost?.cancel()
@@ -314,6 +363,27 @@ final class AgentChatModel: ObservableObject {
     @Published private(set) var usageLine: String?
     @Published private(set) var reportedPromptTokens: Int?
     @Published private(set) var contextUsage: AgentContextUsage?
+    @Published private(set) var contextObservation = AgentContextUsageState()
+    @Published private(set) var contextCompactions = AgentContextCompactionLifecycle() {
+        didSet {
+            compactionVersion &+= 1
+            cachedTranscript = buildTranscript()
+            schedulePersistence()
+        }
+    }
+    private var compactionVersion: UInt64 = 0
+    @Published private(set) var taskSubagents = AgentTaskSubagentProjection() {
+        didSet {
+            taskProjectionVersion &+= 1
+            cachedTranscript = buildTranscript()
+            schedulePersistence()
+        }
+    }
+    private var taskProjectionVersion: UInt64 = 0
+    private var displayEventOrder = 0
+    private var streamingAssistantID: UUID?
+    private var contextSelectionModel: String?
+    private var contextSelectionEndpoint: URL?
     private var contextToolSchemas = ""
     private var widgetContext: JSONValue?
     /// 触发配置页：没有 API Key 时第一次发送会把它置 true。
@@ -401,9 +471,11 @@ final class AgentChatModel: ObservableObject {
                                            partialReasoning: streamingReasoning + pendingReasoning,
                                            gatewayRunID: gatewayRunID, gatewayCursor: gatewayCursor,
                                            config: lastRunConfig, gatewayEndpoint: lastGatewayEndpoint,
-                                           libraryPageID: lastLibraryPageID, libraryGroupID: lastLibraryGroupID) },
+                                           libraryPageID: lastLibraryPageID, libraryGroupID: lastLibraryGroupID,
+                                           steerContext: steerRunContext, appReplyID: appReplyID) },
               runBindingID: runBindingID, accessMode: accessMode, widgetContext: widgetContext,
-              automaticApproval: automaticApproval)
+              automaticApproval: automaticApproval, contextObservation: contextObservation,
+              compactions: contextCompactions, taskSubagents: taskSubagents)
     }
 
     private func schedulePersistence() {
@@ -531,15 +603,34 @@ final class AgentChatModel: ObservableObject {
         gatewayCursor = saved.run?.gatewayCursor
         lastRunConfig = saved.run?.config
         lastGatewayEndpoint = saved.run?.gatewayEndpoint
+        appReplyID = saved.run?.appReplyID
         lastLibraryPageID = saved.run?.libraryPageID
         lastLibraryGroupID = saved.run?.libraryGroupID
+        steerRunContext = saved.run?.steerContext
+        gatewaySteerCapability = nil
         runPhase = saved.run?.phase ?? .idle
+        contextObservation = saved.contextObservation ?? .init()
+        contextCompactions = saved.compactions ?? .init()
+        taskSubagents = saved.taskSubagents ?? .init()
+        displayEventOrder = max(contextCompactions.entries.compactMap { $0.anchor?.displayOrder }.max() ?? 0,
+                                taskSubagents.entries.compactMap { $0.anchor?.displayOrder }.max() ?? 0) + 1
+        if contextObservation.snapshot?.conversationID != nil,
+           contextObservation.snapshot?.conversationID != saved.id.uuidString {
+            contextObservation.resetConversation()
+            contextCompactions = .init()
+        }
         if [.starting, .streaming, .waiting].contains(runPhase) {
+            contextObservation.interrupt()
+            contextCompactions.interrupt()
+            taskSubagents.finish(runID: compactionRunID)
             runPhase = .unknown
             if saved.run?.gatewayRunID == nil, let run = saved.run,
                !run.partialContent.isEmpty || !run.partialReasoning.isEmpty {
-                messages.append(.init(role: .assistant, content: run.partialContent,
-                    reasoning: run.partialReasoning.isEmpty ? nil : run.partialReasoning, isFailure: true))
+                let message = AgentMessage(role: .assistant, content: run.partialContent,
+                    reasoning: run.partialReasoning.isEmpty ? nil : run.partialReasoning, isFailure: true)
+                contextCompactions.attachPending(to: message.id, runID: run.id.uuidString)
+                taskSubagents.attachPending(to: message.id, runID: run.id.uuidString)
+                messages.append(message)
             }
             errorText = "上次运行因应用退出中断，结果尚未确认。已恢复收到的文字。"
         }
@@ -579,12 +670,18 @@ final class AgentChatModel: ObservableObject {
         let sourceID = conversationId
         let end = messageID.flatMap { id in messages.firstIndex { $0.id == id } } ?? (messages.count - 1)
         let prefix = end >= 0 ? Array(messages.prefix(end + 1)) : []
+        var compactions = contextCompactions
+        compactions.retain(through: Set(prefix.map(\.id)))
+        var taskProjection = taskSubagents
+        taskProjection.retain(through: Set(prefix.map(\.id)))
         let title = currentConversationTitle
         archiveCurrent()
         resetConversationState()
         restoring = true
         conversationId = UUID(); forkSourceID = sourceID
         customTitle = title + " · 分支"
+        contextCompactions = compactions
+        taskSubagents = taskProjection
         messages = prefix; codexThreadID = nil; codexContext = nil
         settleUnfinishedTools()
         queuedSubmissions = []; queuePauseReason = nil; runPhase = .idle; lastRunID = nil
@@ -648,6 +745,13 @@ final class AgentChatModel: ObservableObject {
         guard !isRunning, !canResumeGateway, !isControllingRun else {
             workingDirectories.error = "请完成或停止当前运行后再切换访问模式。"
             return
+        }
+        if mode != accessMode {
+            artifactCallbackEpoch = UUID()
+            pendingArtifactText = nil
+            externalMCPHost?.cancel()
+            externalMCPHost = nil
+            clearExternalInteractions()
         }
         accessMode = mode
         flushSession()
@@ -805,6 +909,7 @@ final class AgentChatModel: ObservableObject {
         draftReferences = []
         draftSkillReferences = []
         registry.update(enabledSkills: submission.skills)
+        runSkills = submission.skills
         beginRun(config: submission.config, capturedDirectory: submission.directoryID,
                  useCapturedDirectory: true, capturedAccessMode: mode, supplement: submission.widgetContext,
                  libraryPageID: submission.libraryPageID, libraryGroupID: submission.libraryGroupID)
@@ -812,6 +917,7 @@ final class AgentChatModel: ObservableObject {
     }
 
     func removeQueuedSubmission(_ id: UUID) {
+        guard queuedSubmissions.first(where: { $0.id == id })?.hotRunID == nil else { return }
         queuedSubmissions.removeAll { $0.id == id }
         if queuedSubmissions.isEmpty { queuePauseReason = nil }
         schedulePersistence()
@@ -819,14 +925,17 @@ final class AgentChatModel: ObservableObject {
 
     func moveQueuedSubmission(_ id: UUID, by offset: Int) {
         guard let index = queuedSubmissions.firstIndex(where: { $0.id == id }),
-              queuedSubmissions.indices.contains(index + offset) else { return }
+              queuedSubmissions.indices.contains(index + offset),
+              queuedSubmissions[index].hotRunID == nil,
+              queuedSubmissions[index + offset].hotRunID == nil else { return }
         queuedSubmissions.swapAt(index, index + offset)
         schedulePersistence()
     }
 
     func editQueuedSubmission(_ id: UUID, text: String) {
         guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-              let index = queuedSubmissions.firstIndex(where: { $0.id == id }) else { return }
+              let index = queuedSubmissions.firstIndex(where: { $0.id == id }),
+              queuedSubmissions[index].hotRunID == nil else { return }
         queuedSubmissions[index].text = text
         schedulePersistence()
     }
@@ -839,6 +948,10 @@ final class AgentChatModel: ObservableObject {
 
     private func dispatchQueue() {
         guard !isRunning, queuePauseReason == nil, let next = queuedSubmissions.first else { return }
+        guard next.hotRunID == nil else {
+            queuePauseReason = "追加输入仍需核对或恢复草稿，不会自动发送。"
+            return
+        }
         if submit(next) {
             queuedSubmissions.removeAll { $0.id == next.id }
             schedulePersistence()
@@ -858,35 +971,59 @@ final class AgentChatModel: ObservableObject {
         }
         errorText = nil
         registry.update(enabledSkills: enabledSkills)
+        runSkills = enabledSkills
         beginRun(config: config)
     }
 
     private func beginRun(config: AgentConfig, capturedDirectory: UUID? = nil,
                           useCapturedDirectory: Bool = false, capturedAccessMode: AgentAccessMode? = nil,
                           resuming: Bool = false, supplement: JSONValue? = nil,
-                          libraryPageID: String? = nil, libraryGroupID: String? = nil) {
+                          libraryPageID: String? = nil, libraryGroupID: String? = nil,
+                          appReplyContinuation: Bool = false, appReplyActivation: Bool = false) {
         guard canvasProjectID == nil || canvasContext?.isActive == true else {
             errorText = "请返回所属画布项目后继续。"; return
         }
         cancelPolish()
+        if !resuming, appReplyID != nil {
+            appReplyID = nil; gatewayRunID = nil; gatewayCursor = nil
+            if backendIsInjected, let gateway = backendSelection.backend as? AgentGatewayBackend {
+                applyBackendSelection(AgentBackendCoordinator.injected(
+                    gateway.appReplyBackend(journalRoot: runtimeRoot), scope: backendScope, kind: .gateway))
+            } else {
+                applyBackendSelection(AgentBackendCoordinator.selection(for: backendScope,
+                    binding: gatewayBinding, journalRoot: runtimeRoot))
+            }
+        }
         let selection = backendSelection
         let mode = capturedAccessMode ?? accessMode
         let directoryAccess: AgentDirectoryAccess?
         do {
             if mode == .selectedDirectories {
                 directoryAccess = try (useCapturedDirectory ? capturedDirectory : workingDirectoryID)
-                    .map { try workingDirectories.access($0) }
-            } else { directoryAccess = try AgentDirectoryAccess(url: URL(fileURLWithPath: "/")) }
+                    .map { try workingDirectories.access($0, sessionID: conversationId.uuidString, projectID: canvasProjectID) }
+            } else {
+                directoryAccess = try AgentDirectoryAccess(url: URL(fileURLWithPath: "/"), journal: .init(
+                    root: runtimeRoot.appendingPathComponent("agent-directory-journal", isDirectory: true),
+                    authorizationID: "full-access", sessionID: conversationId.uuidString, projectID: canvasProjectID))
+            }
         }
         catch {
             errorText = error.localizedDescription
             return
         }
         var config = config
+        config.workingDirectory = nil
         let runID = UUID()
         let conversation = conversationId, epoch = sessionEpoch
         let targetPageID = libraryPageID ?? (resuming ? lastLibraryPageID : nil) ?? canvasContext?.store?.currentPageId
         let targetGroupID = libraryGroupID ?? (resuming ? lastLibraryGroupID : nil) ?? canvasContext?.store?.currentSpecialSlotId
+        if !resuming {
+            steerRunContext = .init(config: config, skills: runSkills,
+                directoryID: useCapturedDirectory ? capturedDirectory : workingDirectoryID,
+                mode: mode, automaticApproval: automaticApproval, widgetContext: supplement,
+                libraryPageID: targetPageID, libraryGroupID: targetGroupID)
+            gatewaySteerCapability = nil
+        }
         var runTools: AgentToolExecuting = AgentAccessTools(base: registry, mode: mode)
         if canvasProjectID != nil {
             config.canvasPreviewOnly = false
@@ -970,14 +1107,39 @@ final class AgentChatModel: ObservableObject {
                 readOnly: config.canvasPreviewOnly || mode == .allDirectoriesReadOnly,
                 absolutePaths: mode != .selectedDirectories,
                 automaticWrites: automaticApproval && mode != .allDirectoriesReadOnly && !config.canvasPreviewOnly,
-                confirmReads: !automaticApproval && !config.canvasPreviewOnly) { [weak self] interaction in
+                confirmReads: !automaticApproval && !config.canvasPreviewOnly,
+                allowShell: mode == .fullAccess && !config.canvasPreviewOnly,
+                isCurrent: { [weak self] in
+                    await MainActor.run {
+                        guard let self else { return false }
+                        return self.currentRunID == runID && self.isRunning
+                            && self.conversationId == conversation && self.sessionEpoch == epoch
+                            && (self.canvasProjectID == nil || self.canvasContext?.isActive == true)
+                    }
+                }) { [weak self] interaction in
                     await self?.apply(.interactionRequested(interaction), runID: runID)
                 }
         }
-        if let userID = messages.last(where: { $0.role == .user })?.id {
+        let applicationTools = applicationStore.applicationTools(
+            readOnly: config.canvasPreviewOnly || mode == .allDirectoriesReadOnly, automaticApproval: automaticApproval,
+            isCurrent: { [weak self] in
+                guard let self else { return false }
+                return self.currentRunID == runID && self.isRunning
+                    && self.conversationId == conversation && self.sessionEpoch == epoch
+                    && (self.canvasProjectID == nil || self.canvasContext?.isActive == true)
+            }, onInteraction: { [weak self] interaction in
+                await self?.apply(.interactionRequested(interaction), runID: runID)
+            })
+        runTools = AgentCombinedTools([runTools] + applicationTools)
+        if appReplyID != nil || messages.last(where: { $0.role == .user }) != nil {
             let journal = AgentExecutionJournal(root: runtimeRoot)
-            let scope = AgentExecutionScope(sessionID: conversationId.uuidString,
-                projectID: canvasProjectID, turnID: userID.uuidString)
+            let scope: AgentExecutionScope
+            if let appReplyID {
+                scope = AgentAppReplyToolContext.executionScope(binding: gatewayBinding, replyID: appReplyID)
+            } else {
+                guard let userID = messages.last(where: { $0.role == .user })?.id else { return }
+                scope = .init(sessionID: conversationId.uuidString, projectID: canvasProjectID, turnID: userID.uuidString)
+            }
             runTools = selection.backend is any AgentGatewayResuming
                 ? AgentGatewayRecoverableTools(base: runTools, journal: journal, scope: scope)
                 : AgentJournaledTools(base: runTools, journal: journal, scope: scope)
@@ -989,6 +1151,7 @@ final class AgentChatModel: ObservableObject {
         isWaitingForCredential = false
         streamingContent = ""
         streamingReasoning = ""
+        streamingAssistantID = nil
         liveActivities = []
 
         let prepared = resuming
@@ -1001,6 +1164,8 @@ final class AgentChatModel: ObservableObject {
         let invocation = AgentInvocationContext(history: prepared.history, config: invocationConfig, tools: prepared.tools)
         contextToolSchemas = (try? JSONValue.array((invocation.tools?.specs() ?? []).map(\.wireValue)).encodedText()) ?? ""
         reportedPromptTokens = nil
+        contextObservation.invalidate()
+        contextCompactions.interrupt()
         contextUsage = AgentContextUsage(model: invocation.config.model, endpoint: invocation.config.endpoint,
             history: invocation.history, systemPrompt: invocation.config.systemPrompt, toolSchemas: contextToolSchemas)
         let runningBackend = selection.backend
@@ -1019,10 +1184,20 @@ final class AgentChatModel: ObservableObject {
             return
         }
         runTask = Task { [weak self] in
+            defer { directoryAccess?.revoke() }
             guard let self else { return }
+            let replyLifecycle = appReplyID.flatMap { appReplyLifecycles[$0] }
+            replyLifecycle?.activate()
+            defer { replyLifecycle?.finish() }
             do {
                 // 事件回调是 @Sendable，且会在任意线程被调用，所以统一 hop 回主线程。
                 if resuming, let gateway = runningBackend as? any AgentGatewayResuming {
+                    if appReplyActivation, let backend = runningBackend as? AgentGatewayBackend {
+                        _ = try await backend.activateAppReplyTools(invocation.tools, config: invocation.config)
+                    }
+                    if appReplyContinuation, let backend = runningBackend as? AgentGatewayBackend {
+                        try await backend.prepareAppReplyContinuation()
+                    }
                     await self.hydrateGateway(runningBackend, localRunID: runID)
                     try await gateway.resume(history: invocation.history, config: invocation.config,
                         tools: invocation.tools) { event in await self.apply(event, runID: runID) }
@@ -1032,9 +1207,10 @@ final class AgentChatModel: ObservableObject {
                     }
                 }
                 await self.hydrateGateway(runningBackend, localRunID: runID)
+                let resumable = await (runningBackend as? any AgentGatewayResuming)?.hasResumableRun ?? false
                 await MainActor.run {
                     guard self.currentRunID == runID else { return }
-                    if self.runPhase == .waiting && runningBackend is any AgentGatewayResuming {
+                    if resumable {
                         self.runTask = nil
                         self.canResumeGateway = true
                         self.schedulePersistence()
@@ -1055,9 +1231,11 @@ final class AgentChatModel: ObservableObject {
                 }
             } catch let error as AgentGatewayError {
                 await self.hydrateGateway(runningBackend, localRunID: runID, inactive: true)
+                let resumable = await (runningBackend as? any AgentGatewayResuming)?.hasResumableRun ?? false
                 guard self.currentRunID == runID else { return }
                 self.failRun(error == .remoteFailed ? .network(error.localizedDescription)
                     : .interrupted(error.localizedDescription))
+                if error == .remoteFailed { self.canResumeGateway = resumable }
                 self.errorText = error.localizedDescription
             } catch {
                 await self.hydrateGateway(runningBackend, localRunID: runID, inactive: true)
@@ -1113,10 +1291,18 @@ final class AgentChatModel: ObservableObject {
             } catch { errorText = "MCP 操作确认失败：\(error.localizedDescription)" }
             return
         }
-        guard let runID = currentRunID, isRunning,
+        guard (isRunning || request.isGateway && canResumeGateway), !isControllingRun,
               pendingInteractions.contains(where: { $0.id == request.id }) else { return }
+        let runID = currentRunID
+        let epoch = sessionEpoch, conversation = conversationId
         do {
-            guard try await request.respond(result), currentRunID == runID else { return }
+            guard try await request.respond(result), currentRunID == runID,
+                  sessionEpoch == epoch, conversationId == conversation else { return }
+            if request.isGateway {
+                objectWillChange.send()
+                finishGatewayDecision(request)
+                return
+            }
             pendingInteractions.removeAll { $0.id == request.id }
             if pendingInteractions.isEmpty { runPhase = .streaming }
             // Secret answers stay only in the protocol reply, not in persisted chat.
@@ -1129,15 +1315,72 @@ final class AgentChatModel: ObservableObject {
                 beginRun(config: config, resuming: true)
             }
         } catch {
-            guard currentRunID == runID else { return }
-            stop()
-            errorText = "应答未送达，本轮已停止：\(error.localizedDescription)"
+            guard currentRunID == runID, sessionEpoch == epoch, conversationId == conversation else { return }
+            objectWillChange.send()
+            runPhase = request.state == .pending ? .waiting : .unknown
+            errorText = request.state == .pending ? AgentGatewayError.decisionNotSaved.localizedDescription
+                : request.state.summary
+            schedulePersistence()
         }
     }
 
-    private func invalidateInteractions() {
-        pendingInteractions.forEach { $0.invalidate() }
-        pendingInteractions = []
+    func sendSaved(_ request: AgentInteraction) async {
+        guard request.isGateway, request.canSendSaved, !isControllingRun,
+              pendingInteractions.contains(where: { $0.id == request.id }) else { return }
+        let epoch = sessionEpoch, conversation = conversationId
+        do {
+            _ = try await request.sendSavedResponse()
+            guard sessionEpoch == epoch, conversationId == conversation,
+                  pendingInteractions.contains(where: { $0.id == request.id }) else { return }
+            objectWillChange.send()
+            finishGatewayDecision(request)
+        } catch {
+            guard sessionEpoch == epoch, conversationId == conversation else { return }
+            objectWillChange.send()
+            runPhase = .unknown
+            errorText = request.state.summary
+            schedulePersistence()
+        }
+    }
+
+    func reconcile(_ request: AgentInteraction) async {
+        guard request.isGateway, pendingInteractions.contains(where: { $0.id == request.id }) else { return }
+        let epoch = sessionEpoch, conversation = conversationId
+        do {
+            _ = try await request.reconcile()
+            guard sessionEpoch == epoch, conversationId == conversation,
+                  pendingInteractions.contains(where: { $0.id == request.id }) else { return }
+            objectWillChange.send()
+            finishGatewayDecision(request)
+        } catch {
+            guard sessionEpoch == epoch, conversationId == conversation else { return }
+            errorText = "暂时无法核对原回复，请稍后重试。"
+        }
+    }
+
+    private func finishGatewayDecision(_ request: AgentInteraction) {
+        errorText = request.state == .syncing ? AgentGatewayError.decisionOutcomeUnknown.localizedDescription : nil
+        if request.state.accepted {
+            // Acceptance is independent of downstream execution. Resume from
+            // the event cursor; never submit this answer through chat history.
+            if runTask == nil, let config = lastRunConfig, canResumeGateway {
+                isRunning = false; currentRunID = nil
+                beginRun(config: config, resuming: true)
+            }
+        } else if request.gatewayIdentity == nil && request.state == .syncing,
+                  runTask == nil, let config = lastRunConfig {
+            // Legacy transport dispatches a durably queued first attempt on
+            // resume. An attempted unknown command is read back only.
+            isRunning = false; currentRunID = nil
+            beginRun(config: config, resuming: true)
+        } else if request.state == .pending || request.state == .saved { runPhase = .waiting }
+        else if request.state == .syncing || request.state == .storageUnknown { runPhase = .unknown }
+        schedulePersistence()
+    }
+
+    private func invalidateInteractions(keepingGateway: Bool = false) {
+        pendingInteractions.filter { !keepingGateway || !$0.isGateway }.forEach { $0.invalidate() }
+        pendingInteractions = keepingGateway ? pendingInteractions.filter(\.isGateway) : []
         externalInteractionIDs = []
     }
 
@@ -1154,8 +1397,13 @@ final class AgentChatModel: ObservableObject {
     }
 
     private func resetConversationState() {
+        appReplyPromises.values.forEach { $0.resolve(.failure(AgentAppReplyError.preflight)) }
+        appReplyPromises.removeAll()
+        appReplyLifecycles.values.forEach { $0.dispose() }
+        appReplyLifecycles.removeAll()
         stop()
         sessionEpoch = UUID()
+        artifactCallbackEpoch = UUID()
         runBindingID = UUID()
         currentRunID = nil
         runTask?.cancel(); runTask = nil
@@ -1177,7 +1425,10 @@ final class AgentChatModel: ObservableObject {
         runPhase = .idle
         lastRunID = nil
         gatewayRunID = nil; gatewayCursor = nil; canResumeGateway = false; isControllingRun = false
+        gatewaySteerCapability = nil; steerRunContext = nil; runSkills = []
+        gatewaySubagentCanvasScopes = [:]
         lastRunConfig = nil; lastGatewayEndpoint = nil
+        appReplyID = nil; appReplyOperation = nil; appReplyClients = [:]; appReplySnapshots = []
         lastLibraryPageID = nil; lastLibraryGroupID = nil
         needsConfiguration = false
         codexThreadID = nil
@@ -1190,11 +1441,18 @@ final class AgentChatModel: ObservableObject {
         messages = []
         streamingContent = ""
         streamingReasoning = ""
+        streamingAssistantID = nil
         liveActivities = []
         errorText = nil
         usageLine = nil
         reportedPromptTokens = nil
         contextUsage = nil
+        contextObservation.resetConversation()
+        contextCompactions = .init()
+        taskSubagents = .init()
+        displayEventOrder = 0
+        contextSelectionModel = nil
+        contextSelectionEndpoint = nil
         contextToolSchemas = ""
         draft = ""
         isRunning = false
@@ -1206,20 +1464,31 @@ final class AgentChatModel: ObservableObject {
     private func apply(_ event: AgentRunEvent, runID: UUID) async {
         await MainActor.run {
             guard self.currentRunID == runID else { return }
+            displayEventOrder += 1
             // #region debug-point A:event-count
             #if DEBUG
             if ProcessInfo.processInfo.environment["CLIPSLOTS_AGENT_PERF"] == "1" { debugReceivedEvents += 1 }
             #endif
             // #endregion
             switch event {
+            case .steerCapability(let capability):
+                gatewaySteerCapability = capability
+            case .steerState(let state):
+                receiveSteerState(state)
             case .credentialAccess(let waiting):
                 isWaitingForCredential = waiting
             case .interactionRequested(let request):
-                if !pendingInteractions.contains(where: { $0.id == request.id }) { pendingInteractions.append(request) }
-                runPhase = .waiting
+                if let index = pendingInteractions.firstIndex(where: { $0.id == request.id }) {
+                    pendingInteractions[index] = request
+                } else { pendingInteractions.append(request) }
+                if request.state == .pending || request.state == .saved { runPhase = .waiting }
+                else if request.state == .syncing || request.state == .storageUnknown { runPhase = .unknown }
             case .sessionStarted:
                 break // Transport session identifiers are not legacy conversation identifiers.
+            case .runStreamActivity(let remoteID):
+                if let appReplyID { appReplyLifecycles[appReplyID]?.receiveActivity(runID: remoteID) }
             case .runState(let phase, let remoteID, let cursor):
+                if let appReplyID { appReplyLifecycles[appReplyID]?.receivePhase(phase, runID: remoteID) }
                 gatewayRunID = remoteID
                 gatewayCursor = cursor
                 canResumeGateway = !["completed", "failed", "cancelled"].contains(phase)
@@ -1232,12 +1501,55 @@ final class AgentChatModel: ObservableObject {
                 case "waiting_question", "waiting_confirmation", "waiting_suspended": runPhase = .waiting
                 default: runPhase = .unknown
                 }
+                if ["recovering", "unknown", "blocked", "failed", "cancelled"].contains(phase) {
+                    contextObservation.interrupt()
+                    contextCompactions.interrupt()
+                } else if phase == "completed" {
+                    contextObservation.finishLoading()
+                    contextCompactions.interrupt()
+                }
+                if ["completed", "failed", "cancelled", "unknown", "blocked"].contains(phase) {
+                    taskSubagents.finish(runID: compactionRunID)
+                }
                 schedulePersistence()
-            case .artifactUpdated(let payload):
-                receiveArtifact(payload)
+            case .artifactUpdated(let payload, let toolContext):
+                receiveArtifact(payload, toolContext: toolContext)
             case .canvasChanged(let payload):
                 guard let remoteID = gatewayRunID else { return }
                 canvasContext?.prepareMutation(payload, conversationID: conversationId, runID: remoteID)
+            case .canvasReadbackRequested(let request):
+                let epoch = sessionEpoch
+                canvasContext?.prepareReadback(request) { [weak self] in
+                    guard let self else { return false }
+                    return self.sessionEpoch == epoch && self.lastRunID == runID
+                        && self.conversationId.uuidString == request.conversationID
+                        && self.gatewayRunID == request.runID
+                        && self.isReadbackScopeCurrent(request)
+                }
+            case .subagentCanvasScopes(let scopes):
+                gatewaySubagentCanvasScopes = scopes
+            case .taskSnapshot(let snapshot, let eventID, let remoteAnchor):
+                publishPendingStream()
+                let anchor = remoteAnchor ?? AgentContextCompactionAnchor(messageID: streamingAssistantID,
+                    afterMessageID: messages.last?.id, content: streamingContent, reasoning: streamingReasoning,
+                    displayOrder: displayEventOrder)
+                do {
+                    if try taskSubagents.receiveTasks(snapshot, eventID: eventID, runID: compactionRunID, anchor: anchor),
+                       let id = remoteAnchor?.messageID { streamingAssistantID = id }
+                } catch {
+                    errorText = "任务计划记录未更新，原记录已保留。"
+                }
+            case .subagentEvent(let payload, let eventID, let remoteAnchor):
+                publishPendingStream()
+                let anchor = remoteAnchor ?? AgentContextCompactionAnchor(messageID: streamingAssistantID,
+                    afterMessageID: messages.last?.id, content: streamingContent, reasoning: streamingReasoning,
+                    displayOrder: displayEventOrder)
+                do {
+                    if try taskSubagents.receiveSubagent(payload, eventID: eventID, runID: compactionRunID, anchor: anchor),
+                       let id = remoteAnchor?.messageID { streamingAssistantID = id }
+                } catch {
+                    errorText = "子任务记录未更新，原记录已保留。"
+                }
             case .reasoningDelta(let text):
                 if runPhase != .streaming { runPhase = .streaming }
                 pendingReasoning.append(text)
@@ -1246,23 +1558,32 @@ final class AgentChatModel: ObservableObject {
                 if runPhase != .streaming { runPhase = .streaming }
                 pendingContent.append(text)
                 scheduleStreamPublish(runID: runID)
-            case .assistantCompleted(let message):
+            case .assistantCompleted(var message), .assistantUpdated(var message):
+                if message.runID == nil { message.runID = compactionRunID }
+                contextCompactions.attachPending(to: message.id, runID: compactionRunID)
+                taskSubagents.attachPending(to: message.id, runID: compactionRunID)
                 clearPendingStream()
                 // 历史完全由事件构建（service 的返回值被丢弃），保证只有一个真相来源。
                 if let index = messages.firstIndex(where: { $0.id == message.id }) { messages[index] = message }
                 else { messages.append(message) }
                 streamingContent = ""
                 streamingReasoning = ""
-            case .toolStarted(let call):
-                if !liveActivities.contains(where: { $0.id == call.id }) {
-                    liveActivities.append(AgentToolActivity(id: call.id,
+                streamingAssistantID = nil
+            case .toolStarted(let call, let proposed):
+                let origin = toolMessageOrigin(proposed, callID: call.id, name: call.name)
+                let activityID = origin.map { $0.assistantID.uuidString + ":" + call.id } ?? call.id
+                if !liveActivities.contains(where: { $0.id == activityID }) {
+                    liveActivities.append(AgentToolActivity(id: activityID,
                                                         name: call.name,
                                                         argumentsPreview: Self.preview(call.argumentsJSON),
                                                         state: .running,
                                                         summary: nil))
                 }
-            case .toolCompleted(let callId, let name, let result):
-                if let index = liveActivities.firstIndex(where: { $0.id == callId }) {
+            case .toolCompleted(let callId, let name, let result, let proposed):
+                contextObservation.invalidate()
+                let origin = toolMessageOrigin(proposed, callID: callId, name: name)
+                let activityID = origin.map { $0.assistantID.uuidString + ":" + callId } ?? callId
+                if let index = liveActivities.firstIndex(where: { $0.id == activityID }) {
                     liveActivities[index].state = result.isFailure ? .failure : .success
                     liveActivities[index].summary = result.summary
                 }
@@ -1270,11 +1591,11 @@ final class AgentChatModel: ObservableObject {
                                              content: result.content,
                                              toolCallId: callId,
                                              toolName: name,
-                                             isFailure: result.isFailure)
-                if let index = messages.firstIndex(where: { $0.role == .tool && $0.toolCallId == callId }) {
-                    var replacement = message
-                    replacement.id = messages[index].id
-                    messages[index] = replacement
+                                             isFailure: result.isFailure,
+                                             runID: origin?.runID, executionScope: origin?.scope,
+                                             toolOrigin: origin)
+                if let index = AgentToolMessageHistory.matchingIndex(message, in: messages) {
+                    messages[index] = AgentToolMessageHistory.merging(message, preserving: messages[index])
                 } else { messages.append(message) }
             case .usage(let usage):
                 reportedPromptTokens = usage.promptTokens
@@ -1284,6 +1605,22 @@ final class AgentChatModel: ObservableObject {
                 }
                 usageLine = "输入 \(usage.promptTokens) · 输出 \(usage.completionTokens) tokens"
                     + (usage.cachedTokens.map { " · 命中缓存 \($0)" } ?? "")
+            case .contextUsage(let incoming):
+                if contextObservation.receive(incoming, conversationID: conversationId.uuidString, runID: gatewayRunID) {
+                    schedulePersistence()
+                }
+            case .contextCompaction(let phase, let eventID, let remoteAnchor):
+                // Compact is a server notification, never a local compression command.
+                guard phase != .idle else { return }
+                publishPendingStream()
+                let anchor = remoteAnchor ?? AgentContextCompactionAnchor(messageID: streamingAssistantID,
+                    afterMessageID: messages.last?.id, content: streamingContent, reasoning: streamingReasoning,
+                    displayOrder: displayEventOrder)
+                if contextCompactions.receive(phase, eventID: eventID, runID: compactionRunID, anchor: anchor) {
+                    if let messageID = remoteAnchor?.messageID { streamingAssistantID = messageID }
+                    contextObservation.setCompaction(phase)
+                }
+                schedulePersistence()
             case .note(let text):
                 messages.append(AgentMessage(role: .assistant, content: text, isFailure: true))
             }
@@ -1291,7 +1628,10 @@ final class AgentChatModel: ObservableObject {
     }
 
     private func completeRun() {
-        invalidateInteractions()
+        contextObservation.finishLoading()
+        contextCompactions.interrupt()
+        taskSubagents.finish(runID: compactionRunID)
+        invalidateInteractions(keepingGateway: true)
         currentRunID = nil
         publishPendingStream()
         settleUnfinishedTools()
@@ -1308,7 +1648,10 @@ final class AgentChatModel: ObservableObject {
     }
 
     private func failRun(_ error: AgentError) {
-        invalidateInteractions()
+        contextObservation.interrupt()
+        contextCompactions.interrupt()
+        taskSubagents.finish(runID: compactionRunID)
+        invalidateInteractions(keepingGateway: true)
         currentRunID = nil
         publishPendingStream()
         settleUnfinishedTools()
@@ -1326,12 +1669,15 @@ final class AgentChatModel: ObservableObject {
         if activeBackend is any AgentGatewayResuming {
             canResumeGateway = error != .cancelled || canResumeGateway
         } else if !streamingContent.isEmpty || !streamingReasoning.isEmpty {
-            messages.append(AgentMessage(role: .assistant,
-                                         content: streamingContent,
-                                         reasoning: streamingReasoning.isEmpty ? nil : streamingReasoning, isFailure: true))
+            let message = AgentMessage(role: .assistant, content: streamingContent,
+                reasoning: streamingReasoning.isEmpty ? nil : streamingReasoning, isFailure: true)
+            contextCompactions.attachPending(to: message.id, runID: compactionRunID)
+            taskSubagents.attachPending(to: message.id, runID: compactionRunID)
+            messages.append(message)
         }
         streamingContent = ""
         streamingReasoning = ""
+        streamingAssistantID = nil
         if error == .cancelled {
             messages.append(AgentMessage(role: .assistant, content: "已停止本次回答。", isFailure: true))
         } else {
@@ -1369,14 +1715,35 @@ final class AgentChatModel: ObservableObject {
         pendingReasoning = ""
     }
 
+    private func toolMessageOrigin(_ proposed: AgentToolMessageOrigin?, callID: String,
+                                   name: String) -> AgentToolMessageOrigin? {
+        if let proposed {
+            guard let assistant = messages.first(where: { $0.id == proposed.assistantID }),
+                  assistant.toolCalls.contains(where: { $0.id == callID && $0.name == name }),
+                  proposed.runID == nil || proposed.runID == assistant.runID,
+                  proposed.scope == assistant.executionScope else { return nil }
+            return .init(assistantID: proposed.assistantID, runID: assistant.runID,
+                         scope: proposed.scope, executionID: proposed.executionID)
+        }
+        let candidates = messages.filter {
+            $0.role == .assistant && $0.runID == compactionRunID
+                && $0.toolCalls.contains(where: { $0.id == callID && $0.name == name })
+        }
+        guard let assistant = candidates.last else { return nil }
+        return .init(assistantID: assistant.id, runID: assistant.runID, scope: assistant.executionScope)
+    }
+
     /// 中断只说明没有收到结果，不能声称有副作用的工具已撤销或未执行。
     private func settleUnfinishedTools() {
-        let completed = Set(messages.filter { $0.role == .tool }.compactMap(\.toolCallId))
-        let missing = messages.flatMap(\.toolCalls).filter { !completed.contains($0.id) }
-        for call in missing {
-            messages.append(AgentMessage(role: .tool,
-                content: #"{"error_code":"interrupted","message":"本地跟踪已停止，执行结果未知；继续操作前请检查槽位实际内容，勿直接重复修改。"}"#,
-                toolCallId: call.id, toolName: call.name, isFailure: true))
+        let completed = AgentToolMessageHistory.resultIndices(messages)
+        for assistant in messages where assistant.role == .assistant {
+            for call in assistant.toolCalls where completed[assistant.id]?[call.id] == nil {
+                messages.append(AgentMessage(role: .tool,
+                    content: #"{"error_code":"interrupted","message":"本地跟踪已停止，执行结果未知；继续操作前请检查槽位实际内容，勿直接重复修改。"}"#,
+                    toolCallId: call.id, toolName: call.name, isFailure: true,
+                    runID: assistant.runID, executionScope: assistant.executionScope,
+                    toolOrigin: .init(assistantID: assistant.id, runID: assistant.runID, scope: assistant.executionScope)))
+            }
         }
         for index in liveActivities.indices where liveActivities[index].state == .running {
             liveActivities[index].state = .stopped
@@ -1400,15 +1767,57 @@ final class AgentChatModel: ObservableObject {
             case user(String)
             case assistant(text: String, reasoning: String?, isFailure: Bool)
             case tools([AgentToolActivity])
+            case compaction(AgentContextCompactionLifecycle.Entry)
+            case taskSubagent(AgentTaskSubagentProjection.Entry)
         }
         let id: String
         let kind: Kind
         let canvasChanged: Bool
+        var isStreamingTail = false
+        var copyText: String?
 
         init(id: String, kind: Kind, canvasChanged: Bool = false) {
             self.id = id
             self.kind = kind
             self.canvasChanged = canvasChanged
+        }
+    }
+
+    private var compactionRunID: String { gatewayRunID ?? lastRunID?.uuidString ?? "" }
+
+    var showsThinking: Bool { isRunning && contextObservation.compaction != .started }
+
+    var streamingTranscript: [TranscriptItem] {
+        let cards = contextCompactions.entries.filter {
+            $0.runID == compactionRunID && $0.anchor != nil && $0.anchor?.messageID == streamingAssistantID
+                && (streamingAssistantID != nil || $0.anchor?.awaitingAssistant == true)
+        }
+        let tasks = taskSubagents.entries.filter {
+            $0.runID == compactionRunID && $0.anchor != nil && $0.anchor?.messageID == streamingAssistantID
+                && (streamingAssistantID != nil || $0.anchor?.awaitingAssistant == true)
+        }
+        return transcriptParts(content: streamingContent, reasoning: streamingReasoning,
+            cards: cards, tasks: tasks, identity: "streaming:" + compactionRunID, isFailure: false, streaming: true)
+    }
+
+    private func transcriptParts(content: String, reasoning: String,
+                                 cards: [AgentContextCompactionLifecycle.Entry],
+                                 tasks: [AgentTaskSubagentProjection.Entry] = [], identity: String,
+                                 isFailure: Bool, streaming: Bool = false, canvasChanged: Bool = false) -> [TranscriptItem] {
+        AgentContextCompactionLifecycle.project(content: content, reasoning: reasoning, cards: cards,
+                                                identity: identity, taskSubagents: tasks).compactMap { part in
+            switch part.kind {
+            case .assistant(let text, let reasoning):
+                guard part.isTail && (streaming || !content.isEmpty) || !text.isEmpty || !reasoning.isEmpty else { return nil }
+                var item = TranscriptItem(id: part.id,
+                    kind: .assistant(text: text, reasoning: reasoning.isEmpty ? nil : reasoning, isFailure: isFailure),
+                    canvasChanged: canvasChanged)
+                item.isStreamingTail = streaming && part.isTail
+                if part.isTail && !streaming && !content.isEmpty { item.copyText = content }
+                return item
+            case .compact(let card): return TranscriptItem(id: part.id, kind: .compaction(card))
+            case .taskSubagent(let entry): return TranscriptItem(id: part.id, kind: .taskSubagent(entry))
+            }
         }
     }
 
@@ -1447,11 +1856,7 @@ final class AgentChatModel: ObservableObject {
 
     private func buildTranscript() -> [TranscriptItem] {
         var items: [TranscriptItem] = []
-        // 先把 tool 结果按 call id 索引，供 assistant 轮次配对。
-        var results: [String: AgentMessage] = [:]
-        for message in messages where message.role == .tool {
-            if let id = message.toolCallId { results[id] = message }
-        }
+        let results = AgentToolMessageHistory.resultIndices(messages)
 
         var canvasChanged = false
         for message in messages {
@@ -1460,28 +1865,26 @@ final class AgentChatModel: ObservableObject {
                 canvasChanged = false
                 let attachmentNames = (message.attachments ?? []).map { "📎 " + $0.name }.joined(separator: "\n")
                 let references = (message.canvasReferences ?? []).map { "引用 · \($0.title)" }.joined(separator: "\n")
-                let skills = (message.skillReferences ?? []).map { "技能 · \($0.name)" }.joined(separator: "\n")
+                let skills = (message.skillReferences ?? []).map {
+                    ($0.applicationID == nil ? "技能 · " : "应用 · ") + $0.name
+                }.joined(separator: "\n")
                 items.append(TranscriptItem(id: message.id.uuidString,
                     kind: .user(message.content + (attachmentNames.isEmpty ? "" : "\n\n" + attachmentNames)
                         + (references.isEmpty ? "" : "\n\n" + references)
                         + (skills.isEmpty ? "" : "\n\n" + skills))))
             case .assistant:
-                if !message.content.isEmpty || (message.reasoning?.isEmpty == false) {
-                    items.append(TranscriptItem(
-                        id: message.id.uuidString,
-                        kind: .assistant(text: message.content,
-                                         reasoning: message.reasoning,
-                                         isFailure: message.isFailure),
-                        canvasChanged: canvasChanged))
-                }
+                items += transcriptParts(content: message.content, reasoning: message.reasoning ?? "",
+                    cards: contextCompactions.entries.filter { $0.anchor?.messageID == message.id },
+                    tasks: taskSubagents.entries.filter { $0.anchor?.messageID == message.id },
+                    identity: message.id.uuidString, isFailure: message.isFailure, canvasChanged: canvasChanged)
                 if !message.toolCalls.isEmpty {
                     let rows = message.toolCalls.map { call -> AgentToolActivity in
-                        let result = results[call.id]
+                        let result = results[message.id]?[call.id].map { messages[$0] }
                         return AgentToolActivity(
                             id: call.id,
                             name: call.name,
                             argumentsPreview: Self.preview(call.argumentsJSON),
-                            state: result == nil ? .running : (Self.wasInterrupted(result!) ? .stopped : (result!.isFailure ? .failure : .success)),
+                            state: result.map { Self.wasInterrupted($0) ? .stopped : ($0.isFailure ? .failure : .success) } ?? .running,
                             summary: result.map { Self.summarize($0) })
                     }
                     items.append(TranscriptItem(id: message.id.uuidString + "_tools", kind: .tools(rows)))
@@ -1494,6 +1897,18 @@ final class AgentChatModel: ObservableObject {
             case .system:
                 continue
             }
+            // Compact outside an active assistant is anchored after the last
+            // received message. Never guess a location for legacy unanchored cards.
+            items += contextCompactions.entries.filter {
+                $0.anchor?.messageID == nil && $0.anchor?.afterMessageID == message.id
+                    && (!isRunning || $0.runID != compactionRunID || $0.anchor?.awaitingAssistant == false)
+            }.map { TranscriptItem(id: "after:" + message.id.uuidString + ":compact:" + $0.displayID,
+                                   kind: .compaction($0)) }
+            items += taskSubagents.entries.filter {
+                $0.anchor?.messageID == nil && $0.anchor?.afterMessageID == message.id
+                    && (!isRunning || $0.runID != compactionRunID || $0.anchor?.awaitingAssistant == false)
+            }.map { TranscriptItem(id: "after:" + message.id.uuidString + ":task:" + $0.id,
+                                   kind: .taskSubagent($0)) }
         }
         return items
     }
@@ -1537,6 +1952,11 @@ final class AgentChatModel: ObservableObject {
         .init(sessionID: conversationId.uuidString, projectID: canvasProjectID, canvasID: canvasProjectID)
     }
 
+    private var gatewayJournalRoot: URL {
+        appReplyID.map { runtimeRoot.appendingPathComponent("app-reply-runs").appendingPathComponent($0) }
+            ?? runtimeRoot
+    }
+
     var artifactScope: AgentArtifactScope? {
         try? .init(projectID: canvasProjectID ?? "agent-\(conversationId.uuidString)",
                    canvasID: canvasProjectID ?? conversationId.uuidString)
@@ -1544,10 +1964,10 @@ final class AgentChatModel: ObservableObject {
 
     private func refreshConversationServices() {
         if !backendIsInjected {
-            let originalURL = [.starting, .streaming, .waiting, .unknown].contains(runPhase)
+            let originalURL = appReplyID != nil || [.starting, .streaming, .waiting, .unknown].contains(runPhase)
                 ? lastGatewayEndpoint : nil
             applyBackendSelection(AgentBackendCoordinator.selection(for: backendScope,
-                binding: gatewayBinding, journalRoot: runtimeRoot, gatewayURL: originalURL))
+                binding: gatewayBinding, journalRoot: gatewayJournalRoot, gatewayURL: originalURL))
         }
         selectedArtifact = nil
         artifacts = []
@@ -1570,39 +1990,119 @@ final class AgentChatModel: ObservableObject {
         guard let gateway = backend as? any AgentGatewayResuming else { return }
         let conversation = conversationId
         let epoch = sessionEpoch
+        let requestedRunID = lastRunID
+        let requestedRemoteRunID = gatewayRunID
+        let usageVersion = contextObservation.localVersion
+        let compactVersion = compactionVersion
+        let taskVersion = taskProjectionVersion
+        var hydratedUsage = false
         let state = await gateway.snapshot
         guard conversation == conversationId, epoch == sessionEpoch, state.binding == gatewayBinding,
+              requestedRunID == lastRunID, requestedRemoteRunID == gatewayRunID,
+              requestedRemoteRunID == nil || state.runID == requestedRemoteRunID,
               localRunID == nil || currentRunID == localRunID else { return }
         guard lastRunID != nil || runBindingID == nil || state.runID == nil else { return }
         gatewayRunID = state.runID
+        if let appReplyID, let remoteID = state.runID {
+            appReplyLifecycles[appReplyID]?.receivePhase(state.phase, runID: remoteID)
+        }
+        gatewaySteerCapability = state.steerCapability
         gatewayCursor = state.cursor
+        gatewaySubagentCanvasScopes = state.subagentCanvasScopes
+        let external = pendingInteractions.filter { externalInteractionIDs.contains($0.id) }
+        pendingInteractions = state.interactions + external
+        if contextObservation.localVersion == usageVersion {
+            hydratedUsage = contextObservation.hydrate(state.contextUsage, conversationID: conversation.uuidString,
+                requestedAtVersion: usageVersion)
+            // Only a newer observation requested after the last invalidation
+            // may restore validity. Terminal loading may close an active card.
+            if hydratedUsage && ["completed", "failed", "cancelled", "unknown", "blocked", "recovering"].contains(state.phase) {
+                if state.phase == "completed" { contextObservation.finishLoading() }
+                else { contextObservation.interrupt() }
+            }
+        }
+        if compactVersion == compactionVersion, let remoteID = state.runID {
+            contextCompactions.merge(state.compactions, runID: remoteID)
+            if !isRunning && inactive || hydratedUsage
+                && ["completed", "failed", "cancelled", "unknown", "blocked", "recovering"].contains(state.phase) {
+                contextCompactions.interrupt()
+            }
+        }
+        if taskVersion == taskProjectionVersion, let remoteID = state.runID {
+            taskSubagents.merge(state.taskSubagents, runID: remoteID)
+            if !isRunning && inactive {
+                taskSubagents.finish(runID: remoteID)
+            }
+        }
+        // Control queries may know placement before SSE reaches the safe point.
+        // Only journal-materialized user messages participate in transcript merge.
         for source in state.messages {
             var message = source
-            if source.id == state.currentAssistantID {
+            if source.id == state.currentAssistantID && source.toolCalls.isEmpty {
                 messages.removeAll { $0.id == source.id }
                 if inactive {
                     message.isFailure = true
                     if !message.content.isEmpty || !(message.reasoning ?? "").isEmpty { messages.append(message) }
                 } else {
                     clearPendingStream()
+                    streamingAssistantID = source.id
                     streamingContent = source.content
                     streamingReasoning = source.reasoning ?? ""
                 }
-            } else if let index = messages.firstIndex(where: {
-                $0.id == source.id || (source.role == .tool && $0.role == .tool
-                    && source.toolCallId != nil && $0.toolCallId == source.toolCallId)
-            }) {
-                if source.role == .tool { message.id = messages[index].id }
-                messages[index] = message
+            } else if let index = AgentToolMessageHistory.matchingIndex(source, in: messages) {
+                messages[index] = AgentToolMessageHistory.merging(message, preserving: messages[index])
             } else { messages.append(message) }
         }
-        for payload in state.artifactUpdates { receiveArtifact(payload) }
+        for entry in state.steers { receiveSteerState(entry) }
+        for payload in state.artifactUpdates {
+            let toolContext = state.appReplyToolContext(for: payload)
+            receiveArtifact(payload, sourceEndpoint: (backend as? AgentGatewayBackend)?.artifactEndpoint,
+                            sourceRunID: state.runID, toolContext: toolContext)
+        }
         if let remoteID = state.runID {
+            let hydrationRunID = lastRunID
             for payload in state.canvasMutations {
                 canvasContext?.prepareMutation(payload, conversationID: conversationId, runID: remoteID)
             }
+            for request in state.canvasReadbacks {
+                canvasContext?.prepareReadback(request) { [weak self] in
+                    guard let self else { return false }
+                    return self.sessionEpoch == epoch && self.conversationId == conversation
+                        && self.gatewayRunID == remoteID && self.lastRunID == hydrationRunID
+                        && request.conversationID == conversation.uuidString && request.runID == remoteID
+                        && self.isReadbackScopeCurrent(request)
+                }
+            }
         }
         schedulePersistence()
+    }
+
+    func contextConfigurationChanged(model: String, endpoint: URL) {
+        defer { contextSelectionModel = model; contextSelectionEndpoint = endpoint }
+        guard contextSelectionModel != model || contextSelectionEndpoint != endpoint else { return }
+        contextObservation.invalidate()
+        schedulePersistence()
+    }
+
+    func contextDisplay(model: String, endpoint: URL) -> AgentContextUsageDisplay? {
+        guard let observation = contextObservation.snapshot,
+              observation.conversationID == conversationId.uuidString,
+              lastRunConfig?.endpoint == endpoint, lastRunConfig?.model == model,
+              contextObservation.displaySnapshot?.model.map({ $0 == model }) ?? true else { return nil }
+        return .init(state: contextObservation)
+    }
+
+    #if DEBUG
+    func debugHydrateContextUsage(from backend: any AgentBackend) async {
+        await hydrateGateway(backend)
+    }
+    func debugWaitForRunCompletion() async { await runTask?.value }
+    #endif
+
+    private func isReadbackScopeCurrent(_ request: AgentCanvasReadbackRequest) -> Bool {
+        guard let child = request.source?.subagentID, let identity = request.subagentInstanceKey else { return true }
+        if request.isFullSnapshot { return gatewaySubagentCanvasScopes[child] == identity }
+        return gatewaySubagentCanvasScopes[child].map { $0 == identity } ?? true
     }
 
     func resumeGateway() {
@@ -1610,10 +2110,14 @@ final class AgentChatModel: ObservableObject {
               let config = lastRunConfig else { return }
         isRunning = false
         errorText = nil
-        beginRun(config: config, resuming: true)
+        beginRun(config: config, resuming: true, appReplyContinuation: appReplyID != nil)
     }
 
     func steerQueuedSubmission(_ id: UUID) {
+        if canHotSteer || queuedSubmissions.first(where: { $0.id == id })?.hotRunID != nil {
+            hotSteerQueuedSubmission(id)
+            return
+        }
         guard !isControllingRun, queuedSubmissions.contains(where: { $0.id == id }),
               let gateway = (activeBackend ?? backendSelection.backend) as? any AgentGatewayResuming else { return }
         let conversation = conversationId, epoch = sessionEpoch
@@ -1649,6 +2153,139 @@ final class AgentChatModel: ObservableObject {
         }
     }
 
+    var canHotSteer: Bool {
+        isRunning && runPhase == .streaming && runTask != nil && gatewaySteerCapability?.accepting == true
+            && steerRunContext != nil && activeBackend is any AgentGatewaySteering
+    }
+
+    private func hotCompatible(_ submission: Submission) -> Bool {
+        guard let frozen = steerRunContext else { return false }
+        let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys]
+        let candidate = SteerRunContext(config: submission.config, skills: submission.skills,
+            directoryID: submission.directoryID, mode: submission.accessMode ?? .selectedDirectories,
+            automaticApproval: submission.automaticApproval ?? false, widgetContext: submission.widgetContext,
+            libraryPageID: submission.libraryPageID, libraryGroupID: submission.libraryGroupID)
+        guard let before = try? encoder.encode(frozen), let after = try? encoder.encode(candidate) else { return false }
+        return before == after
+            && submission.conversationID == conversationId && submission.projectID == canvasProjectID
+            && submission.backend == backendKind && (canvasProjectID == nil || canvasContext?.isActive == true)
+            && candidate.mode == accessMode && candidate.automaticApproval == automaticApproval
+            && candidate.directoryID == workingDirectoryID
+    }
+
+    private func hotSteerQueuedSubmission(_ id: UUID) {
+        guard !isControllingRun, let index = queuedSubmissions.firstIndex(where: { $0.id == id }),
+              let run = queuedSubmissions[index].hotRunID ?? gatewayRunID,
+              let gateway = (activeBackend ?? backendSelection.backend) as? any AgentGatewaySteering else { return }
+        let submission = queuedSubmissions[index]
+        if submission.hotRunID == nil, !hotCompatible(submission) {
+            queuePauseReason = "模型、技能、目录或权限与当前运行不同，请在运行结束后发送。"
+            return
+        }
+        let conversation = conversationId, epoch = sessionEpoch, localRun = lastRunID
+        queuedSubmissions[index].hotRunID = run
+        isControllingRun = true
+        schedulePersistence()
+        guard flushSession() else {
+            queuedSubmissions[index].hotRunID = submission.hotRunID
+            isControllingRun = false
+            queuePauseReason = submission.hotRunID == nil
+                ? "追加未提交，会话尚未保存；输入已保留。"
+                : "会话尚未保存，输入已保留；保存后再核对原提交。"
+            return
+        }
+        Task {
+            do {
+                let result: AgentGatewaySteerSnapshot
+                if submission.hotRunID != nil {
+                    result = try await gateway.reconcileSteer(submissionID: id, runID: run)
+                } else {
+                    let message = AgentMessage(id: id, role: .user, content: submission.text,
+                        createdAt: submission.createdAt, attachments: submission.attachments,
+                        canvasReferences: submission.references.isEmpty ? nil : submission.references,
+                        skillReferences: submission.skillReferences.isEmpty ? nil : submission.skillReferences,
+                        canvasTurn: submission.canvasTurn)
+                    result = try await gateway.submitSteer(message: message, runID: run)
+                }
+                guard conversationId == conversation, sessionEpoch == epoch,
+                      lastRunID == localRun, gatewayRunID == run else { return }
+                receiveSteerState(result)
+                isControllingRun = false
+            } catch {
+                guard conversationId == conversation, sessionEpoch == epoch,
+                      lastRunID == localRun, gatewayRunID == run else { return }
+                let state = await gateway.snapshot
+                guard conversationId == conversation, sessionEpoch == epoch,
+                      lastRunID == localRun, gatewayRunID == run, state.runID == run else { return }
+                for entry in state.steers { receiveSteerState(entry) }
+                let durable = try? await gateway.hasSteerSubmission(submissionID: id, runID: run)
+                guard conversationId == conversation, sessionEpoch == epoch,
+                      lastRunID == localRun, gatewayRunID == run else { return }
+                if submission.hotRunID == nil, durable == false,
+                   let position = queuedSubmissions.firstIndex(where: { $0.id == id }) {
+                    // No durable submission exists: failure was preflight.
+                    queuedSubmissions[position].hotRunID = nil
+                    queuePauseReason = "追加未提交，输入已保留；请修改后再试。"
+                } else {
+                    queuePauseReason = "追加结果尚未确认，输入已保留；核对时使用原提交身份。"
+                }
+                isControllingRun = false
+                errorText = error.localizedDescription
+            }
+            schedulePersistence()
+            flushSession()
+        }
+    }
+
+    private func receiveSteerState(_ state: AgentGatewaySteerSnapshot) {
+        guard let index = queuedSubmissions.firstIndex(where: { $0.id == state.message.id }),
+              let receipt = state.receipt, receipt.binding == gatewayBinding,
+              receipt.runID == gatewayRunID,
+              queuedSubmissions[index].hotRunID == receipt.runID else { return }
+        do {
+            queuedSubmissions[index].hotReceipt = try AgentGatewaySteerReceipt.reduce(
+                queuedSubmissions[index].hotReceipt, incoming: receipt)
+        } catch {
+            queuePauseReason = "追加回执发生冲突，原输入已保留。"
+            return
+        }
+        if state.eventApplied { queuedSubmissions[index].hotEventApplied = true }
+        if receipt.state == .placed, state.eventApplied {
+            publishPendingStream()
+            if !messages.contains(where: { $0.id == state.message.id }) { messages.append(state.message) }
+            queuedSubmissions.remove(at: index)
+            if queuedSubmissions.isEmpty { queuePauseReason = nil }
+        } else if receipt.state == .returned {
+            queuePauseReason = "追加输入已退回，附件和引用已保留，可恢复为草稿。"
+        }
+    }
+
+    func restoreReturnedSteerDraft(_ id: UUID) {
+        guard let index = queuedSubmissions.firstIndex(where: { $0.id == id }),
+              queuedSubmissions[index].hotReceipt?.state == .returned else { return }
+        guard draft.isEmpty, draftAttachments.isEmpty, draftReferences.isEmpty, draftSkillReferences.isEmpty else {
+            queuePauseReason = "请先保存或发送当前草稿，再恢复退回的输入。"
+            return
+        }
+        let input = queuedSubmissions.remove(at: index)
+        draft = input.text
+        draftAttachments = input.attachments ?? []
+        draftReferences = input.references
+        draftSkillReferences = input.skillReferences
+        queuePauseReason = queuedSubmissions.isEmpty ? nil : "队列已保留，请检查后继续。"
+        schedulePersistence(); flushSession()
+    }
+
+    func queuedSteerStatus(_ input: Submission) -> String? {
+        guard input.hotRunID != nil else { return nil }
+        switch input.hotReceipt?.state {
+        case .accepted: return "已接收 · 等待安全点"
+        case .placed: return "已写入上下文 · 等待事件同步"
+        case .returned: return "已退回"
+        case nil: return "追加结果待核对"
+        }
+    }
+
     func refreshArtifacts() {
         guard let repository = artifactRepository, let scope = artifactScope else { return }
         let ticket = UUID()
@@ -1660,15 +2297,21 @@ final class AgentChatModel: ObservableObject {
             case .success(let records):
                 artifacts = records
                 if let selected = selectedArtifact { selectedArtifact = records.first { $0.key == selected.key } }
+                await refreshAppReplies()
             case .failure(let error): errorText = error.localizedDescription
             }
         }
     }
 
-    private func receiveArtifact(_ payload: JSONValue) {
+    private func receiveArtifact(_ payload: JSONValue, sourceEndpoint: URL? = nil, sourceRunID: String? = nil,
+                                 toolContext: AgentAppReplyToolContext? = nil) {
         guard let repository = artifactRepository, let scope = artifactScope else { return }
         do {
-            let update = try AgentArtifactGatewayPayload.update(payload, scope: scope)
+            let endpoint = sourceEndpoint ?? (backendSelection.backend as? AgentGatewayBackend)?.artifactEndpoint
+            let update = try AgentArtifactGatewayPayload.update(payload, scope: scope,
+                binding: endpoint == nil ? nil : gatewayBinding,
+                originRunID: sourceRunID ?? gatewayRunID, gatewayURL: endpoint, toolContext: toolContext,
+                conversationID: conversationId)
             Task {
                 let result = await Task.detached { Result { try repository.merge(update) } }.value
                 guard artifactScope == scope else { return }
@@ -1678,37 +2321,65 @@ final class AgentChatModel: ObservableObject {
         } catch { errorText = error.localizedDescription }
     }
 
-    func handleArtifactAction(_ action: AgentArtifactPanelAction) {
+    func artifactPageIdentity(key: AgentArtifactKey, revision: UInt64) -> AgentArtifactPageIdentity {
+        .init(key: key, conversationID: conversationId, revision: revision,
+              runtimeEpoch: artifactCallbackEpoch, canvasEpoch: canvasContext?.activationEpoch)
+    }
+
+    private func artifactRecord(for identity: AgentArtifactPageIdentity) -> AgentArtifactRecord? {
+        guard identity.runtimeEpoch == artifactCallbackEpoch,
+              identity.canvasEpoch == canvasContext?.activationEpoch,
+              identity.conversationID == conversationId, identity.key.scope == artifactScope,
+              canvasContext?.isActive == true else { return nil }
+        return artifacts.first { $0.key == identity.key && $0.revision == identity.revision }
+    }
+
+    func dismissArtifact(identity: AgentArtifactPageIdentity) {
+        guard artifactRecord(for: identity) != nil else { return }
+        selectedArtifact = nil
+    }
+
+    func handleArtifactAction(_ action: AgentArtifactPanelAction, identity: AgentArtifactPageIdentity) {
+        guard let record = artifactRecord(for: identity) else { return }
         switch action {
         case .openExternalURL(let url):
             if let allowed = AgentArtifactPreviewPolicy.externalURL(url) { NSWorkspace.shared.open(allowed) }
-        case .retry:
+        case .retry(let key):
+            guard key == identity.key else { return }
             if canResumeGateway { resumeGateway() }
             else { errorText = "此版本内容尚未交付，请让 Agent 重新提供该产物。" }
         case .delete(let key, let revision):
-            guard let repository = artifactRepository, key.scope == artifactScope, revision < UInt64.max else { return }
+            guard let repository = artifactRepository, key == identity.key, revision == identity.revision,
+                  !record.isDeleted, accessMode != .allDirectoriesReadOnly, revision < UInt64.max else { return }
             Task {
+                guard artifactRecord(for: identity) != nil else { return }
                 let result = await Task.detached { Result { try repository.delete(key, revision: revision + 1) } }.value
+                guard artifactRecord(for: identity) != nil else { return }
                 if case .failure(let error) = result { errorText = error.localizedDescription }
                 refreshArtifacts()
             }
         case .appTool(let request):
-            guard request.key.scope == artifactScope,
-                  let record = artifacts.first(where: { $0.key == request.key }),
-                  record.revision == request.revision, record.hasCurrentContent,
+            guard request.key == identity.key, request.revision == identity.revision,
+                  accessMode != .allDirectoriesReadOnly, !isRunning, !canResumeGateway, !isControllingRun,
+                  record.hasCurrentContent,
                   request.action.toolName == "preview_canvas_text", let text = record.text else { return }
             selectedArtifact = nil
-            pendingArtifactText = (conversationId, text)
+            pendingArtifactText = (artifactPageIdentity(key: record.key, revision: record.revision), text)
         }
     }
 
-    func artifactRequest(key: AgentArtifactKey, revision: UInt64, conversation: UUID,
+    func artifactRequest(identity: AgentArtifactPageIdentity,
                          operation: String, name: String, arguments: JSONValue) async throws -> JSONValue {
+        if operation.hasPrefix("app_reply") {
+            return try await artifactAppReplyRequest(identity: identity, operation: operation, arguments: arguments)
+        }
+        let epoch = sessionEpoch
+        let key = identity.key, revision = identity.revision, conversation = identity.conversationID
         func validate() throws {
             try Task.checkCancellation()
-            guard conversationId == conversation, key.scope == artifactScope,
-                  artifacts.contains(where: { $0.key == key && $0.revision == revision && $0.hasCurrentContent }),
-                  canvasContext?.isActive == true else { throw AgentCanvasError.staleTarget }
+            guard sessionEpoch == epoch, artifactRecord(for: identity)?.hasCurrentContent == true else {
+                throw AgentCanvasError.staleTarget
+            }
         }
         try validate()
         guard try JSONEncoder().encode(arguments).count <= 64 * 1024 else { throw AgentArtifactError.tooLarge }
@@ -1729,9 +2400,13 @@ final class AgentChatModel: ObservableObject {
             guard !isRunning, !canResumeGateway, !isControllingRun else {
                 throw AgentOperationError("请等待本轮结束后更新补充资料。")
             }
+            let prior = widgetContext
             widgetContext = arguments
             schedulePersistence()
-            guard flushSession() else { throw AgentArtifactError.storageUnavailable }
+            guard flushSession() else {
+                widgetContext = prior
+                throw AgentArtifactError.storageUnavailable
+            }
             return ["status": "saved", "applies_to": "next_submission"]
         }
         guard let context = canvasContext else { throw AgentCanvasError.staleTarget }
@@ -1774,10 +2449,253 @@ final class AgentChatModel: ObservableObject {
                 "result": try JSONValue.decode(jsonText: result.content)]
     }
 
+    private var appReplyDirectory: URL {
+        agentDataRoot.appendingPathComponent("agent-runtime/app-replies", isDirectory: true)
+    }
+
+    private func replyClient(origin: AgentAppReplyOrigin) throws -> AgentAppReplyClient {
+        let address = origin.endpoint.absoluteString
+        if let client = appReplyClients[address] { return client }
+        let client: AgentAppReplyClient
+        if let backend = (activeBackend ?? backendSelection.backend) as? AgentGatewayBackend,
+           backend.artifactEndpoint == origin.endpoint {
+            client = try backend.appReplyClient(directory: appReplyDirectory)
+        } else {
+            client = try .init(directory: appReplyDirectory, credential: { url in
+                AgentGatewayPreferences.keychain(url: url).readAPIKey()
+            })
+        }
+        appReplyClients[address] = client
+        return client
+    }
+
+    private func refreshAppReplies() async {
+        let epoch = sessionEpoch, binding = gatewayBinding
+        do {
+            let client = try AgentAppReplyClient(directory: appReplyDirectory)
+            let records = try await client.snapshots(binding: binding)
+            guard epoch == sessionEpoch, binding == gatewayBinding else { return }
+            appReplySnapshots = records
+        } catch {
+            guard epoch == sessionEpoch else { return }
+            errorText = "页面回复记录读取失败，原记录已保留。"
+        }
+    }
+
+    func appReplies(for record: AgentArtifactRecord) -> [AgentAppReplySnapshot] {
+        appReplySnapshots.filter {
+            $0.submission.origin.authority.path == record.key.path
+                && $0.submission.origin.authority.binding == gatewayBinding
+        }
+    }
+
+    private func authorizeAppReply(identity: AgentArtifactPageIdentity, epoch: UUID,
+                                   origin: AgentAppReplyOrigin, submitting: Bool) throws {
+        try Task.checkCancellation()
+        guard epoch == sessionEpoch, let record = artifactRecord(for: identity),
+              record.hasCurrentContent, record.appReplyOrigin == origin,
+              origin.authority.binding == gatewayBinding,
+              !submitting || (accessMode != .allDirectoriesReadOnly && !isRunning
+                  && !canResumeGateway && !isControllingRun) else { throw AgentAppReplyError.preflight }
+    }
+
+    private func authorizeAppReplyRequest(identity: AgentArtifactPageIdentity, epoch: UUID,
+                                          origin: AgentAppReplyOrigin, submitting: Bool, originalRun: UUID?) throws {
+        guard lastRunID == originalRun else { throw AgentAppReplyError.preflight }
+        try authorizeAppReply(identity: identity, epoch: epoch, origin: origin, submitting: submitting)
+    }
+
+    private func artifactAppReplyRequest(identity: AgentArtifactPageIdentity, operation: String,
+                                         arguments: JSONValue) async throws -> JSONValue {
+        guard operation == "app_reply" else {
+            return try await executeArtifactAppReplyRequest(identity: identity, operation: operation, arguments: arguments)
+        }
+        let epoch = sessionEpoch
+        guard let origin = artifactRecord(for: identity)?.appReplyOrigin else { throw AgentAppReplyError.preflight }
+        try authorizeAppReply(identity: identity, epoch: epoch, origin: origin, submitting: false)
+        let submission = try AgentAppReplySubmission(origin: origin, replyJSON: arguments.encodedText())
+        if let promise = appReplyPromises[submission.replyID] {
+            guard promise.epoch == epoch, promise.submission == submission else { throw AgentAppReplyError.preflight }
+            return try await promise.value()
+        }
+        let promise = AgentArtifactReplySubmissionPromise(submission: submission, epoch: epoch)
+        appReplyPromises[submission.replyID] = promise
+        do {
+            let result = try await executeArtifactAppReplyRequest(identity: identity, operation: operation, arguments: arguments)
+            promise.resolve(.success(result))
+            return result
+        } catch {
+            promise.resolve(.failure(error))
+            if appReplyPromises[submission.replyID] === promise { appReplyPromises.removeValue(forKey: submission.replyID) }
+            throw error
+        }
+    }
+
+    private func executeArtifactAppReplyRequest(identity: AgentArtifactPageIdentity, operation: String,
+                                                arguments: JSONValue) async throws -> JSONValue {
+        let epoch = sessionEpoch, originalRun = lastRunID
+        guard let origin = artifactRecord(for: identity)?.appReplyOrigin else {
+            throw AgentAppReplyError.preflight
+        }
+        let submitting = operation != "app_reply_status"
+        let authorize: @Sendable () async throws -> Void = { [weak self] in
+            guard let self else { throw AgentAppReplyError.preflight }
+            try await self.authorizeAppReplyRequest(identity: identity, epoch: epoch, origin: origin,
+                submitting: submitting, originalRun: originalRun)
+        }
+        try await authorize()
+        let client = try replyClient(origin: origin)
+        if operation == "app_reply_validate" {
+            _ = try AgentAppReplySubmission(origin: origin, replyJSON: arguments.encodedText())
+            _ = try await client.validateManifest(origin: origin, authorize: authorize)
+            return ["manifest_revision": .string(origin.authority.manifestRevision)]
+        }
+        if operation == "app_reply_status" {
+            let records = try await client.snapshots(binding: gatewayBinding)
+            guard let record = records.first(where: {
+                $0.submission.origin == origin && $0.receipt?.runID == arguments["run_id"]?.stringValue
+            }) else { throw AgentAppReplyError.preflight }
+            let updated = try await client.reconcile(replyID: record.submission.replyID, authorize: authorize)
+            try await authorize()
+            await refreshAppReplies()
+            return ["status": .string(sourceReplyRunStatus(updated))]
+        }
+        guard operation == "app_reply", appReplyOperation == nil else { throw AgentAppReplyError.preflight }
+        let operationID = UUID()
+        appReplyOperation = operationID
+        defer {
+            if appReplyOperation == operationID { appReplyOperation = nil }
+            Task { @MainActor [weak self] in await self?.refreshAppReplies() }
+        }
+        let submission = try AgentAppReplySubmission(origin: origin, replyJSON: arguments.encodedText())
+        let record = try await client.submit(submission, authorize: authorize)
+        try await authorize()
+        guard let receipt = record.receipt else { throw AgentAppReplyError.unknown }
+        let lifecycle = appReplyLifecycles[receipt.replyID] ?? AgentArtifactReplyLifecycle(
+            origin: origin, runID: receipt.runID, epoch: epoch)
+        appReplyLifecycles[receipt.replyID] = lifecycle
+        // Acceptance is durable even if journal/session adoption fails.
+        let attached = (try? await attachAppReply(record, identity: identity, epoch: epoch)) ?? false
+        if !attached || !artifactConversationRunActive { lifecycle.finish() }
+        return ["reply_id": .string(receipt.replyID), "run_id": .string(receipt.runID),
+                "deduped": .bool(receipt.deduped)]
+    }
+
+    func artifactReplyObservation(identity: AgentArtifactPageIdentity, replyID: String,
+                                  runID: String) throws -> AgentArtifactReplyObservation {
+        guard let lifecycle = appReplyLifecycles[replyID], lifecycle.runID == runID else {
+            throw AgentAppReplyError.preflight
+        }
+        try authorizeAppReply(identity: identity, epoch: lifecycle.epoch, origin: lifecycle.origin, submitting: false)
+        return lifecycle.observe { [weak self, weak lifecycle] in
+            guard let self, let lifecycle, self.appReplyLifecycles[replyID] === lifecycle else { return false }
+            return (try? self.authorizeAppReply(identity: identity, epoch: lifecycle.epoch,
+                origin: lifecycle.origin, submitting: false)) != nil
+        }
+    }
+
+    private func sourceReplyRunStatus(_ record: AgentAppReplySnapshot) -> String {
+        guard record.state == .accepted, let receipt = record.receipt else { return "unknown" }
+        switch receipt.phase {
+        case "completed", "failed", "cancelled": return "inactive"
+        case "waiting_question", "waiting_confirmation": return "waiting"
+        case "streaming", "recovering": return "running"
+        default: return "unknown"
+        }
+    }
+
+    private func replyStatus(_ record: AgentAppReplySnapshot) -> JSONValue {
+        var status: [String: JSONValue] = ["reply_id": .string(record.submission.replyID),
+            "acceptance": .string(record.state.rawValue)]
+        if let receipt = record.receipt {
+            status["run_id"] = .string(receipt.runID)
+            status["state"] = receipt.state.map(JSONValue.string) ?? "unknown"
+            status["phase"] = receipt.phase.map(JSONValue.string) ?? "unknown"
+        }
+        return .object(status)
+    }
+
+    func recoverArtifactAppReply(identity: AgentArtifactPageIdentity, replyID: String,
+                                  action: AgentAppReplyRecoveryAction) async throws -> JSONValue {
+        let epoch = sessionEpoch, originalRun = lastRunID
+        guard let origin = artifactRecord(for: identity)?.appReplyOrigin else {
+            throw AgentAppReplyError.preflight
+        }
+        let submitting: Bool
+        if case .reconcile = action { submitting = false } else { submitting = true }
+        let authorize: @Sendable () async throws -> Void = { [weak self] in
+            guard let self else { throw AgentAppReplyError.preflight }
+            try await self.authorizeAppReplyRequest(identity: identity, epoch: epoch, origin: origin,
+                submitting: submitting, originalRun: originalRun)
+        }
+        try await authorize()
+        let client = try replyClient(origin: origin)
+        guard let original = try await client.snapshot(replyID: replyID),
+              original.submission.origin == origin else { throw AgentAppReplyError.preflight }
+        defer { Task { @MainActor [weak self] in await self?.refreshAppReplies() } }
+        let record: AgentAppReplySnapshot
+        switch action {
+        case .reconcile: record = try await client.reconcile(replyID: replyID, authorize: authorize)
+        case .retry(let attempt):
+            record = try await client.retry(replyID: replyID, expectedAttempt: attempt, authorize: authorize)
+        case .attach:
+            record = try await client.reconcile(replyID: replyID, authorize: authorize)
+            try await authorize()
+            _ = try await attachAppReply(record, identity: identity, epoch: epoch)
+        }
+        return replyStatus(record)
+    }
+
+    private func attachAppReply(_ record: AgentAppReplySnapshot, identity: AgentArtifactPageIdentity,
+                                epoch: UUID) async throws -> Bool {
+        let origin = record.submission.origin
+        try authorizeAppReply(identity: identity, epoch: epoch, origin: origin, submitting: true)
+        guard let receipt = record.receipt else { throw AgentAppReplyError.unknown }
+        let originalRun = lastRunID, originalRemote = gatewayRunID
+        let backend: AgentGatewayBackend
+        let root = runtimeRoot.appendingPathComponent("app-reply-runs").appendingPathComponent(record.submission.replyID)
+        if let current = backendSelection.backend as? AgentGatewayBackend, current.artifactEndpoint == origin.endpoint {
+            backend = current.appReplyBackend(journalRoot: root)
+        } else {
+            guard let pinned = AgentBackendCoordinator.selection(for: backendScope, binding: gatewayBinding,
+                journalRoot: root, gatewayURL: origin.endpoint).backend as? AgentGatewayBackend else {
+                throw AgentAppReplyError.preflight
+            }
+            backend = pinned
+        }
+        try await backend.attachAppReply(record, toolContext: artifactRecord(for: identity)?.appReplyToolContext)
+        try authorizeAppReply(identity: identity, epoch: epoch, origin: origin, submitting: true)
+        guard lastRunID == originalRun, gatewayRunID == originalRemote else { throw AgentAppReplyError.preflight }
+        let prior = snapshot, selection = backendSelection
+        appReplyID = receipt.replyID
+        gatewayRunID = receipt.runID; gatewayCursor = nil
+        steerRunContext = nil; gatewaySteerCapability = nil
+        lastGatewayEndpoint = origin.endpoint
+        lastRunID = UUID()
+        let config = lastRunConfig ?? AgentConfig()
+        lastRunConfig = config
+        runPhase = .unknown
+        applyBackendSelection(.init(scope: backendScope, kind: .gateway, backend: backend,
+            requiresAPIKey: false, supportsCanvasReadTools: true, gatewayBaseURL: origin.endpoint))
+        schedulePersistence()
+        guard flushSession() else {
+            restoreReplicaState(prior); applyBackendSelection(selection)
+            throw AgentAppReplyError.unknown
+        }
+        let adoptedRun = lastRunID
+        let resumable = await backend.hasResumableRun
+        try authorizeAppReply(identity: identity, epoch: epoch, origin: origin, submitting: false)
+        guard lastRunID == adoptedRun, gatewayRunID == receipt.runID else { throw AgentAppReplyError.preflight }
+        if resumable { beginRun(config: config, resuming: true, appReplyActivation: true) }
+        else { await hydrateGateway(backend, inactive: true) }
+        return true
+    }
+
     func artifactPanelDismissed() {
         guard let pending = pendingArtifactText else { return }
         pendingArtifactText = nil
-        guard pending.conversation == conversationId else { return }
+        guard artifactRecord(for: pending.identity)?.hasCurrentContent == true,
+              accessMode != .allDirectoriesReadOnly, !isRunning, !canResumeGateway, !isControllingRun else { return }
         canvasContext?.prepare(text: pending.text, conversationID: conversationId)
     }
 
@@ -1795,9 +2713,11 @@ final class AgentChatModel: ObservableObject {
         let host = try AgentLiveMCPHost(context: context, scope: scope, conversationID: conversationId, snapshotID: turn.snapshotID,
             root: runtimeRoot.appendingPathComponent("live-mcp"),
             accessMode: readOnly ? .allDirectoriesReadOnly : accessMode,
+            automaticApproval: { [weak self] in self?.automaticApproval == true },
             onInteraction: { [weak self] request in await self?.receiveExternalInteraction(request) })
         externalMCPHost = host
-        return AgentExternalProjectContext(scope: scope, projectTitle: displayName,
+        return AgentExternalProjectContext(scope: scope,
+            projectTitle: context.canvas?.projects.first(where: { $0.id == scope.projectID })?.name ?? displayName,
             selectedContext: String(decoding: text, as: UTF8.self), cliPath: mcp.path,
             mcpReadiness: FileManager.default.isExecutableFile(atPath: mcp.path)
                 ? .ready : .unavailable("尚未找到本地 MCP 服务"),
@@ -1844,36 +2764,62 @@ final class AgentChatModel: ObservableObject {
 
     private func applyBackendSelection(_ selection: AgentBackendSelection) {
         cancelPolish()
+        contextObservation.invalidate()
         backendSelection = selection
         backendKind = selection.kind
     }
 
-    func addSkillReference(name: String, path: String, workflow: WorkflowSkillStore.Entry? = nil) {
-        guard !isAddingSkill else { return }
-        guard draftSkillReferences.count < AgentSkillReference.maximumCount else {
-            errorText = "每条消息最多引用 4 个技能。"; return
+    private var referenceOperation: UUID?
+
+    /// Prepare off the composer; commit only a complete reference to the same live conversation.
+    @discardableResult
+    func prepareReference(prompt: String = "", loader: () async throws -> AgentSkillReference) async throws -> Bool {
+        guard !isAddingSkill else { return false }
+        let conversation = conversationId, epoch = sessionEpoch, operation = UUID()
+        referenceOperation = operation; isAddingSkill = true
+        defer {
+            if referenceOperation == operation { referenceOperation = nil; isAddingSkill = false }
         }
-        let conversation = conversationId, epoch = sessionEpoch
+        let reference: AgentSkillReference
+        do { reference = try await loader() }
+        catch {
+            guard conversationId == conversation, sessionEpoch == epoch else { return false }
+            throw error
+        }
+        guard conversationId == conversation, sessionEpoch == epoch else { return false }
+        try Task.checkCancellation()
+        let duplicate = draftSkillReferences.contains { $0.id == reference.id }
+        guard duplicate || draftSkillReferences.count < AgentSkillReference.maximumCount else {
+            throw AgentMarketSyncError.invalidForm("每条消息最多引用 4 个应用或技能，请先移除一项")
+        }
+        guard reference.markdown.utf8.count <= AgentSkillReference.maximumBytes,
+              !reference.markdown.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw CocoaError(.fileReadTooLarge)
+        }
+        if !duplicate { draftSkillReferences.append(reference) }
+        if !prompt.isEmpty { draft += (draft.isEmpty ? "" : "\n\n") + prompt }
+        errorText = nil
+        return true
+    }
+
+    @discardableResult
+    func referenceSkill(name: String, path: String, workflow: WorkflowSkillStore.Entry? = nil) async throws -> Bool {
         let projectID = canvasProjectID
-        isAddingSkill = true
-        Task { @MainActor in
-            let result = await Task.detached(priority: .userInitiated) {
-                Result {
-                    if let workflow {
-                        let skill = try WorkflowSkillStore().load(workflow, projectID: projectID)
-                        return AgentSkillReference(name: skill.name, path: path, markdown: try skill.markdown())
-                    }
-                    return try AgentSkillReference.load(name: name, path: path)
+        return try await prepareReference {
+            try await Task.detached(priority: .userInitiated) {
+                if let workflow {
+                    let skill = try WorkflowSkillStore().load(workflow, projectID: projectID)
+                    return AgentSkillReference(name: skill.name, path: path, markdown: try skill.markdown())
                 }
+                return try AgentSkillReference.load(name: name, path: path)
             }.value
-            guard conversationId == conversation, sessionEpoch == epoch else { return }
-            isAddingSkill = false
-            switch result {
-            case .success(let reference):
-                if !draftSkillReferences.contains(where: { $0.id == reference.id }) {
-                    draftSkillReferences.append(reference)
-                }
-            case .failure(let error):
+        }
+    }
+
+    func addSkillReference(name: String, path: String, workflow: WorkflowSkillStore.Entry? = nil) {
+        Task {
+            do { try await referenceSkill(name: name, path: path, workflow: workflow) }
+            catch {
                 errorText = "技能引用失败（须为不超过 64 KB 的 UTF-8 文档）：\(error.localizedDescription)"
             }
         }

@@ -45,8 +45,8 @@ struct WorkspaceContourSurface: NSViewRepresentable {
         private func gradientColors(center: CGFloat?) -> [CGColor] {
             let ink = effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
                 ? NSColor.white : NSColor(srgbRed: 48 / 255, green: 48 / 255, blue: 52 / 255, alpha: 1)
-            // The final arch reaches the fixed right-edge fade. Keep its crown
-            // and shoulder at the same ink strength as the first two arches.
+            // Keep the last arch out of the fixed right fade, preserving the
+            // existing rail fade for the first two selections.
             let trailingArch = center.map { $0 - halfWidth * 0.34 > bounds.width * 0.72 } ?? false
             let stops: [CGFloat] = trailingArch ? [0, 0.42, 1, 1, 1, 1] : [0, 0.42, 1, 1, 0.42, 0]
             let strength: CGFloat = highContrast ? 1 : 0.66
@@ -141,6 +141,7 @@ struct WorkspaceContourSurface: NSViewRepresentable {
             if let targetCenter { setModel(center: targetCenter) }
             contour.removeAnimation(forKey: "workspace-slide")
             dot.removeAnimation(forKey: "workspace-slide")
+            gradient.removeAnimation(forKey: "workspace-ink")
             CATransaction.commit()
         }
 

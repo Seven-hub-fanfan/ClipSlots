@@ -54,6 +54,7 @@ public struct AgentSkill: Identifiable, Equatable, Codable, Sendable {
         case agentDirectory
         case personal
         case project
+        case market
 
         public var displayName: String {
             switch self {
@@ -62,6 +63,7 @@ public struct AgentSkill: Identifiable, Equatable, Codable, Sendable {
             case .agentDirectory: return "Agent 目录"
             case .personal: return "个人 Skill"
             case .project: return "当前项目"
+            case .market: return "同步技能"
             }
         }
     }
@@ -133,6 +135,11 @@ public struct AgentSkillCatalog {
                 seenRealPaths.insert(real)
                 result.append(skill)
             }
+        }
+        let marketRoot = homeDirectory == NSHomeDirectory() ? AgentMarketSyncService.defaultRoot
+            : URL(fileURLWithPath: homeDirectory).appendingPathComponent("Library/Application Support/ClipSlots/market-sync")
+        for skill in AgentMarketSyncService.discover(root: marketRoot) where !seenSlugs.contains(skill.slug) {
+            seenSlugs.insert(skill.slug); result.append(skill)
         }
         return result.sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
     }

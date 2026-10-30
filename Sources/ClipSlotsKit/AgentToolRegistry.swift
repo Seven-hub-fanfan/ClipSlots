@@ -1,16 +1,16 @@
 import Foundation
+import Darwin
 
 // MARK: - 工具注册表与执行
 //
 // 分三块：
-//   1. `AgentProcessRunner`：跑外部进程的唯一入口（超时、输出截断、无 shell）。
+//   1. `AgentProcessRunner`：外部进程入口（进程组、超时、双向IO、合计输出预算）。
 //   2. `AgentBuiltinTools`：内置 ClipSlots CLI 工具，直连 /usr/local/bin/clipslots。
 //   3. `AgentSkillTools` + `AgentToolRegistry`：把用户勾选的 Skill 变成工具并汇总。
 //
 // ## 为什么不经过 shell
-// 所有执行都用 `Process` 传 argv 数组，绝不拼字符串交给 `/bin/sh -c`。
-// 模型产出的参数是不可信输入，一旦进 shell，`; rm -rf ~` 就是一次工具调用的距离。
-// argv 直传时参数永远只是参数，没有注入面。
+// CLI与Skill仍直传argv，不把参数拼接到shell。完全访问模式的目录工具
+// 独立提供一次性shell proposal，消费不可变原脚本并要求显式确认。
 //
 // ## 失败也要有结构
 // 工具失败不抛异常、不中断对话，而是回一段 `{"ok":false,"error_code":...}` 给模型。
@@ -23,134 +23,191 @@ public struct AgentProcessResult: Sendable {
     public let stdout: String
     public let stderr: String
     public let timedOut: Bool
-    public var succeeded: Bool { exitCode == 0 && !timedOut }
+    public let cancelled: Bool
+    public let outputTruncated: Bool
+    public var succeeded: Bool { exitCode == 0 && !timedOut && !cancelled }
 
     /// 显式 public init：smoke 测试要注入假 runner 来断言 argv，
     /// 而结构体的隐式 memberwise init 是 internal，跨模块用不了。
-    public init(exitCode: Int32, stdout: String, stderr: String, timedOut: Bool) {
+    public init(exitCode: Int32, stdout: String, stderr: String, timedOut: Bool,
+                cancelled: Bool = false, outputTruncated: Bool = false) {
         self.exitCode = exitCode
         self.stdout = stdout
         self.stderr = stderr
         self.timedOut = timedOut
+        self.cancelled = cancelled
+        self.outputTruncated = outputTruncated
     }
 }
 
 final class AgentProcessCancellation: @unchecked Sendable {
     private let lock = NSLock()
-    private var process: Process?
     private var cancelled = false
-
-    func attach(_ process: Process) {
-        lock.lock()
-        self.process = process
-        let shouldStop = cancelled
-        lock.unlock()
-        if shouldStop { stop(process) }
-    }
-
-    func cancel() {
-        lock.lock()
-        cancelled = true
-        let active = process
-        lock.unlock()
-        if let active { stop(active) }
-    }
-
-    private func stop(_ process: Process) {
-        guard process.isRunning else { return }
-        process.terminate()
-        DispatchQueue.global().asyncAfter(deadline: .now() + 2) {
-            if process.isRunning { kill(process.processIdentifier, SIGKILL) }
-        }
-    }
+    var isCancelled: Bool { lock.withLock { cancelled } }
+    func cancel() { lock.withLock { cancelled = true } }
 }
 
 public enum AgentProcessRunner {
-    /// 同步执行（在调用方线程阻塞），异步入口见下面的 `run`。
-    ///
-    /// 输出读取用后台线程边跑边收，不是"等进程退出再 readToEnd"——
-    /// 后者在输出超过管道缓冲（约 64KB）时会双向死锁：子进程等我们读，我们等它退出。
+    /// One worker owns spawn, nonblocking IO, waitpid and group termination.
+    /// stdin and both output pipes advance together, including after leader exit.
+    /// A process group is lifecycle control, not a filesystem/network sandbox.
     static func runSync(executable: String,
                         arguments: [String],
                         currentDirectory: String?,
                         standardInput: String?,
                         timeout: TimeInterval,
                         maxOutputBytes: Int,
-                        cancellation: AgentProcessCancellation? = nil) -> AgentProcessResult {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: executable)
-        process.arguments = arguments
-        if let currentDirectory {
-            process.currentDirectoryURL = URL(fileURLWithPath: currentDirectory)
+                        cancellation: AgentProcessCancellation? = nil,
+                        currentDirectoryDescriptor: Int32? = nil) -> AgentProcessResult {
+        func failure(_ code: Int32) -> AgentProcessResult {
+            .init(exitCode: -1, stdout: "", stderr: "进程无法启动（POSIX \(code)）。", timedOut: false)
         }
-
-        let outPipe = Pipe(), errPipe = Pipe(), inPipe = Pipe()
-        process.standardOutput = outPipe
-        process.standardError = errPipe
-        process.standardInput = inPipe
-
-        do { try process.run() } catch {
-            return AgentProcessResult(exitCode: -1, stdout: "",
-                                      stderr: "无法启动 \(executable)：\(error.localizedDescription)",
-                                      timedOut: false)
+        guard executable.hasPrefix("/"), !executable.contains("\0"),
+              arguments.allSatisfy({ !$0.contains("\0") }),
+              currentDirectory.map({ !$0.contains("\0") }) ?? true,
+              timeout.isFinite, timeout > 0, maxOutputBytes >= 0,
+              maxOutputBytes <= 16_777_216,
+              (standardInput?.utf8.count ?? 0) <= 16_777_216 else { return failure(EINVAL) }
+        if cancellation?.isCancelled == true {
+            return .init(exitCode: -1, stdout: "", stderr: "", timedOut: false, cancelled: true)
         }
-        cancellation?.attach(process)
-
-        // stdin：写完立刻关，否则读 stdin 的脚本会一直等。
-        if let standardInput, let data = standardInput.data(using: .utf8) {
-            inPipe.fileHandleForWriting.write(data)
+        var inputPipe: [Int32] = [-1, -1], outputPipe = inputPipe, errorPipe = inputPipe
+        guard pipe(&inputPipe) == 0 else { return failure(errno) }
+        defer { for fd in inputPipe where fd >= 0 { close(fd) } }
+        guard pipe(&outputPipe) == 0 else { return failure(errno) }
+        defer { for fd in outputPipe where fd >= 0 { close(fd) } }
+        guard pipe(&errorPipe) == 0 else { return failure(errno) }
+        defer { for fd in errorPipe where fd >= 0 { close(fd) } }
+        for fd in inputPipe + outputPipe + errorPipe {
+            guard fcntl(fd, F_SETFD, FD_CLOEXEC) == 0 else { return failure(errno) }
         }
-        try? inPipe.fileHandleForWriting.close()
-
-        let lock = NSLock()
-        var outData = Data(), errData = Data()
-        let group = DispatchGroup()
-
-        func drain(_ handle: FileHandle, into sink: @escaping (Data) -> Void) {
-            group.enter()
-            DispatchQueue.global(qos: .userInitiated).async {
-                while true {
-                    let chunk = handle.availableData
-                    if chunk.isEmpty { break }
-                    sink(chunk)
+        var actions: posix_spawn_file_actions_t?
+        var attributes: posix_spawnattr_t?
+        guard posix_spawn_file_actions_init(&actions) == 0 else { return failure(ENOMEM) }
+        defer { posix_spawn_file_actions_destroy(&actions) }
+        guard posix_spawnattr_init(&attributes) == 0 else { return failure(ENOMEM) }
+        defer { posix_spawnattr_destroy(&attributes) }
+        var setup = posix_spawnattr_setflags(&attributes, Int16(POSIX_SPAWN_SETPGROUP | POSIX_SPAWN_CLOEXEC_DEFAULT))
+        if setup == 0 { setup = posix_spawnattr_setpgroup(&attributes, 0) }
+        for (from, to) in [(inputPipe[0], STDIN_FILENO), (outputPipe[1], STDOUT_FILENO), (errorPipe[1], STDERR_FILENO)] {
+            if setup == 0 { setup = posix_spawn_file_actions_adddup2(&actions, from, to) }
+        }
+        if setup == 0, let fd = currentDirectoryDescriptor {
+            setup = posix_spawn_file_actions_addfchdir_np(&actions, fd)
+        } else if setup == 0, let directory = currentDirectory {
+            setup = posix_spawn_file_actions_addchdir_np(&actions, directory)
+        }
+        guard setup == 0 else { return failure(setup) }
+        let argv = ([executable] + arguments).map { strdup($0) } + [nil]
+        defer { for pointer in argv { free(pointer) } }
+        let environment = ProcessInfo.processInfo.environment.map { strdup("\($0.key)=\($0.value)") } + [nil]
+        defer { for pointer in environment { free(pointer) } }
+        var pid: pid_t = 0
+        let spawned = argv.withUnsafeBufferPointer { pointers in
+            environment.withUnsafeBufferPointer { values in
+                posix_spawn(&pid, executable, &actions, &attributes,
+                            UnsafeMutablePointer(mutating: pointers.baseAddress!),
+                            UnsafeMutablePointer(mutating: values.baseAddress!))
+            }
+        }
+        guard spawned == 0 else { return failure(spawned) }
+        close(inputPipe[0]); inputPipe[0] = -1
+        close(outputPipe[1]); outputPipe[1] = -1
+        close(errorPipe[1]); errorPipe[1] = -1
+        for fd in [inputPipe[1], outputPipe[0], errorPipe[0]] {
+            _ = fcntl(fd, F_SETFL, fcntl(fd, F_GETFL) | O_NONBLOCK)
+        }
+        // F_SETNOSIGPIPE is per descriptor and does not alter the host's signal policy.
+        _ = fcntl(inputPipe[1], F_SETNOSIGPIPE, 1)
+        let input = Data((standardInput ?? "").utf8)
+        var inputOffset = 0, out = Data(), err = Data()
+        var status: Int32 = 0, reaped = false, timedOut = false, cancelled = false, truncated = false
+        let start = ProcessInfo.processInfo.systemUptime
+        var terminatingAt: TimeInterval?
+        var killed = false
+        func closeInput() { if inputPipe[1] >= 0 { close(inputPipe[1]); inputPipe[1] = -1 } }
+        if input.isEmpty { closeInput() }
+        func drain(_ fd: inout Int32, into data: inout Data, remaining: Int) {
+            guard fd >= 0 else { return }
+            var buffer = [UInt8](repeating: 0, count: 16_384)
+            var available = remaining
+            // A continuously noisy child must not starve cancellation/deadline checks.
+            for _ in 0..<16 {
+                let count = Darwin.read(fd, &buffer, buffer.count)
+                if count > 0 {
+                    let retained = min(count, max(0, available))
+                    data.append(contentsOf: buffer.prefix(retained))
+                    available -= retained
+                    if retained < count { truncated = true }
+                } else if count == 0 {
+                    close(fd); fd = -1; break
+                } else if errno != EINTR {
+                    if errno != EAGAIN && errno != EWOULDBLOCK { close(fd); fd = -1 }
+                    break
                 }
-                group.leave()
             }
         }
-        drain(outPipe.fileHandleForReading) { chunk in
-            lock.lock()
-            if outData.count < maxOutputBytes { outData.append(chunk) }
-            lock.unlock()
-        }
-        drain(errPipe.fileHandleForReading) { chunk in
-            lock.lock()
-            if errData.count < maxOutputBytes { errData.append(chunk) }
-            lock.unlock()
-        }
-
-        // 超时看门狗：先 SIGTERM 给个体面退出的机会，2s 后 SIGKILL。
-        var timedOut = false
-        let watchdog = DispatchWorkItem {
-            guard process.isRunning else { return }
-            timedOut = true
-            process.terminate()
-            DispatchQueue.global().asyncAfter(deadline: .now() + 2) {
-                if process.isRunning { kill(process.processIdentifier, SIGKILL) }
+        while true {
+            let now = ProcessInfo.processInfo.systemUptime
+            if !reaped {
+                let waited = waitpid(pid, &status, WNOHANG)
+                reaped = waited == pid || (waited < 0 && errno == ECHILD)
+            }
+            let groupAlive = kill(-pid, 0) == 0 || errno == EPERM
+            if terminatingAt == nil {
+                if cancellation?.isCancelled == true { cancelled = true; terminatingAt = now }
+                else if now - start >= timeout { timedOut = true; terminatingAt = now }
+                if terminatingAt != nil { closeInput(); _ = kill(-pid, SIGTERM) }
+            }
+            if let stopping = terminatingAt, now - stopping >= 2, !killed {
+                _ = kill(-pid, SIGKILL); killed = true
+            }
+            drain(&outputPipe[0], into: &out, remaining: maxOutputBytes - out.count - err.count)
+            drain(&errorPipe[0], into: &err, remaining: maxOutputBytes - out.count - err.count)
+            if reaped && !groupAlive && outputPipe[0] < 0 && errorPipe[0] < 0 { break }
+            // Escaped sessions can retain pipes; do not wait indefinitely on their EOF.
+            // They are not claimed as contained by this process-group runner.
+            if let stopping = terminatingAt, now - stopping >= 2.5 {
+                for index in [0] {
+                    if outputPipe[index] >= 0 { close(outputPipe[index]); outputPipe[index] = -1 }
+                    if errorPipe[index] >= 0 { close(errorPipe[index]); errorPipe[index] = -1 }
+                }
+                if !reaped {
+                    _ = kill(pid, SIGKILL)
+                    while waitpid(pid, &status, 0) < 0 && errno == EINTR {}
+                    reaped = true
+                }
+                break
+            }
+            var polling: [pollfd] = []
+            if outputPipe[0] >= 0 { polling.append(.init(fd: outputPipe[0], events: Int16(POLLIN), revents: 0)) }
+            if errorPipe[0] >= 0 { polling.append(.init(fd: errorPipe[0], events: Int16(POLLIN), revents: 0)) }
+            if inputPipe[1] >= 0 { polling.append(.init(fd: inputPipe[1], events: Int16(POLLOUT), revents: 0)) }
+            _ = poll(&polling, nfds_t(polling.count), 20)
+            if inputPipe[1] >= 0, polling.contains(where: { $0.fd == inputPipe[1] && $0.revents != 0 }) {
+                let written = input.withUnsafeBytes { raw in
+                    Darwin.write(inputPipe[1], raw.baseAddress!.advanced(by: inputOffset), min(16_384, input.count - inputOffset))
+                }
+                if written > 0 { inputOffset += written }
+                else if written < 0 && errno != EINTR && errno != EAGAIN { closeInput() }
+                if inputOffset == input.count { closeInput() }
             }
         }
-        DispatchQueue.global().asyncAfter(deadline: .now() + timeout, execute: watchdog)
-
-        process.waitUntilExit()
-        watchdog.cancel()
-        group.wait()
-
-        lock.lock()
-        let out = String(decoding: outData.prefix(maxOutputBytes), as: UTF8.self)
-        let err = String(decoding: errData.prefix(maxOutputBytes), as: UTF8.self)
-        lock.unlock()
-
-        return AgentProcessResult(exitCode: process.terminationStatus,
-                                  stdout: out, stderr: err, timedOut: timedOut)
+        func text(_ data: Data) -> String {
+            let decoded = String(decoding: data, as: UTF8.self)
+            // Replacement characters can grow malformed UTF8; retain a byte-bounded string.
+            var end = decoded.startIndex, bytes = 0
+            while end < decoded.endIndex {
+                let next = decoded.index(after: end)
+                let count = decoded[end..<next].utf8.count
+                if bytes + count > data.count { break }
+                bytes += count; end = next
+            }
+            return String(decoded[..<end])
+        }
+        let exitCode = status & 0x7f == 0 ? (status >> 8) & 0xff : status & 0x7f
+        return .init(exitCode: exitCode, stdout: text(out), stderr: text(err),
+                     timedOut: timedOut, cancelled: cancelled, outputTruncated: truncated)
     }
 
     public static func run(executable: String,
@@ -158,7 +215,8 @@ public enum AgentProcessRunner {
                           currentDirectory: String? = nil,
                           standardInput: String? = nil,
                           timeout: TimeInterval = 45,
-                          maxOutputBytes: Int = 200_000) async -> AgentProcessResult {
+                          maxOutputBytes: Int = 200_000,
+                          currentDirectoryDescriptor: Int32? = nil) async -> AgentProcessResult {
         let cancellation = AgentProcessCancellation()
         return await withTaskCancellationHandler {
             await withCheckedContinuation { continuation in
@@ -169,7 +227,8 @@ public enum AgentProcessRunner {
                                          standardInput: standardInput,
                                          timeout: timeout,
                                          maxOutputBytes: maxOutputBytes,
-                                         cancellation: cancellation)
+                                         cancellation: cancellation,
+                                         currentDirectoryDescriptor: currentDirectoryDescriptor)
                     continuation.resume(returning: result)
                 }
             }

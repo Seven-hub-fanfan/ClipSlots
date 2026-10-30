@@ -418,7 +418,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
         }
 
-        NSLog("[ClipSlots] RADIAL show menu, previousApp=\(previousApp?.localizedName ?? "nil"), frontmost=\(frontmost?.localizedName ?? "nil")")
+        NSLog("[ClipSlots] RADIAL show menu, previousPresent=\(previousApp != nil), frontmostPresent=\(frontmost != nil)")
 
         radialMenuController.show(
             at: mouseLocation,

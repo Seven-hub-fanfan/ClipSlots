@@ -13,11 +13,16 @@ BIN="$(swift build --scratch-path "$SCRATCH" --show-bin-path)"
 OBJECTS=("$BIN"/ClipSlotsKit.build/*.swift.o)
 swiftc -parse-as-library -I "$BIN/Modules" \
     Tests/ClipSlotsKitSmokeTests/AgentRunGatewayTests.swift \
+    Tests/ClipSlotsKitSmokeTests/AgentAuthoritativeContextUsageTests.swift \
+    Tests/ClipSlotsKitSmokeTests/AgentContextCompactionTranscriptTests.swift \
+    Tests/ClipSlotsKitSmokeTests/AgentTaskSubagentProjectionTests.swift \
+    Tests/ClipSlotsKitSmokeTests/AgentTaskSubagentGatewayTests.swift \
     scripts/gateway-fixtures/GatewayTestMain.swift \
     "${OBJECTS[@]}" -o "$SCRATCH/gateway-fixture-tests"
 "$SCRATCH/gateway-fixture-tests"
 swiftc -parse-as-library -I "$BIN/Modules" \
     Sources/ClipSlots/AgentBackendCoordinator.swift \
+    Sources/ClipSlots/ModelConfigurationBridge.swift \
     Sources/ClipSlots/AgentConfigView.swift \
     Sources/ClipSlots/AgentPolishButton.swift \
     scripts/gateway-fixtures/GatewayAppIntegrationMain.swift \

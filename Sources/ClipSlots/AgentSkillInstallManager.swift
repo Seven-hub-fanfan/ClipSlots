@@ -1,6 +1,7 @@
 import Foundation
 import SwiftUI
 import AppKit
+import ClipSlotsKit
 
 // v2.9.14: 一键把 ClipSlots Skill 安装到本机已安装的 Agent 环境。
 //
@@ -580,7 +581,7 @@ final class AgentSkillInstallManager: ObservableObject {
             try fm.createSymbolicLink(atPath: target, withDestinationPath: source)
             return true
         } catch {
-            NSLog("[ClipSlots][Skill] relink failed for \(agent.displayName) at \(target): \(error)")
+            NSLog("[ClipSlots][Skill] relink failed: \(ApplicationDiagnostics.error(error))")
             return false
         }
     }
@@ -697,15 +698,15 @@ final class AgentSkillInstallManager: ObservableObject {
                         // 失效软链（指向旧 bundle / 别处）→ 安全重建（removeItem 只删软链本身）。
                         if self.trySymlinkWithoutPrivilege(source: source, target: target, skillsDir: agent.skillsDir) {
                             relinked.append(agent.displayName)
-                            NSLog("[ClipSlots][SkillSync] re-linked stale symlink for \(agent.displayName): \(target) -> \(source)")
+                            NSLog("[ClipSlots][SkillSync] re-linked stale symlink")
                         } else {
-                            NSLog("[ClipSlots][SkillSync] failed to re-link \(agent.displayName) at \(target) (need privilege), skip silently")
+                            NSLog("[ClipSlots][SkillSync] failed to re-link (need privilege)")
                         }
                     } else {
                         // 真实目录/文件：仅当是本 App 旧版拷贝安装（含 SKILL.md）且内容过期时，就地刷新文件。
                         if self.refreshLegacyCopyIfOutdated(source: source, targetDir: target) {
                             refreshedCopy.append(agent.displayName)
-                            NSLog("[ClipSlots][SkillSync] refreshed outdated SKILL.md copy for \(agent.displayName): \(target)")
+                            NSLog("[ClipSlots][SkillSync] refreshed outdated SKILL.md copy")
                         }
                     }
                 }
@@ -752,7 +753,7 @@ final class AgentSkillInstallManager: ObservableObject {
             try sourceData.write(to: URL(fileURLWithPath: targetSkill), options: .atomic)
             return true
         } catch {
-            NSLog("[ClipSlots][SkillSync] failed to overwrite legacy SKILL.md at \(targetSkill): \(error)")
+            NSLog("[ClipSlots][SkillSync] failed to overwrite legacy SKILL.md: \(ApplicationDiagnostics.error(error))")
             return false
         }
     }

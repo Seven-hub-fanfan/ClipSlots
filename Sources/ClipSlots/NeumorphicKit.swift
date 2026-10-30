@@ -127,15 +127,9 @@ enum Neu {
         dynAlpha(light: Color.black.opacity(0.10), dark: Color.white.opacity(0.12))
     }
 
-    /// 选中滑块的填充。简洁模式是单色近黑（深色档反相），多彩模式换成品牌渐变。
+    /// 选中滑块的填充：单色近黑，深色档反相。
     static var selectedFill: AnyShapeStyle {
-        if AppTheme.isMinimalSkin {
-            return AnyShapeStyle(sliderFill)
-        }
-        return AnyShapeStyle(LinearGradient(
-            colors: [sliderFill, sliderFill.opacity(0.82)],
-            startPoint: .topLeading, endPoint: .bottomTrailing
-        ))
+        AnyShapeStyle(sliderFill)
     }
 
     /// 凸起表面的填充。hotfix5 起是**纯色**且与画布同色。
@@ -417,8 +411,7 @@ struct NeuMiniButton: View {
             }
             // 简洁模式下按钮文字一律走中性墨色：状态色只保留在顶部状态点上（功能性），
             // 「回退 / 重置」的字色属于装饰性上色，简洁模式必须收掉。
-            .foregroundColor(enabled ? ((AppTheme.isMinimalSkin ? nil : tint) ?? Neu.ink)
-                                     : Neu.subtleInk.opacity(0.6))
+            .foregroundColor(enabled ? Neu.ink : Neu.subtleInk.opacity(0.6))
             .padding(.horizontal, 7)
             .frame(height: 20)
             .contentShape(RoundedRectangle(cornerRadius: 7, style: .continuous))

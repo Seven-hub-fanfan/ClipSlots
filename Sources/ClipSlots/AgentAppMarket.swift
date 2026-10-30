@@ -59,7 +59,7 @@ struct AgentMarketRecipe: Identifiable {
     }
 }
 
-struct AgentAppMarketView: View {
+struct AgentLocalAppMarketView: View {
     @ObservedObject var model: AgentChatModel
     var isReadOnly = false
     var fixtureSkills: [AgentSkill]? = nil
@@ -86,7 +86,7 @@ struct AgentAppMarketView: View {
     private var cardFill: Color { TapSkin.tone(0xffffff, 0x1e1e1e) }
     private var border: Color { TapSkin.tone(0xe4e4e8, 0x333333) }
     private var filteredRecipes: [AgentMarketRecipe] {
-        AgentMarketRecipe.all.filter { (category == .all || $0.category == category) && matches($0.name + $0.summary + $0.output) }
+        (fixtureSkills == nil ? [] : AgentMarketRecipe.all).filter { (category == .all || $0.category == category) && matches($0.name + $0.summary + $0.output) }
     }
     private var filteredSkills: [AgentSkill] {
         skills.filter { matches($0.name + $0.description + $0.source.displayName) }
@@ -138,11 +138,7 @@ struct AgentAppMarketView: View {
             }.buttonStyle(.plain)
                 .accessibilityLabel(browsing ? "返回对话" : "返回应用市场")
                 .accessibilityIdentifier(browsing ? "agent-market-close" : "agent-market-back")
-            VStack(alignment: .leading, spacing: 3) {
-                Text(browsing ? "应用市场" : "应用详情").font(.system(size: 16, weight: .semibold))
-                Text(browsing ? "让创作能力加入你的对话" : "了解能力，带入当前创作")
-                    .font(.system(size: 10)).foregroundStyle(TapSkin.secondaryInk)
-            }
+            Text(browsing ? "应用市场" : "应用详情").font(.system(size: 16, weight: .semibold))
             Spacer(minLength: 0)
             Menu {
                 Button("管理本地技能") { showSkills = true }.disabled(isReadOnly)
@@ -153,7 +149,7 @@ struct AgentAppMarketView: View {
             } label: { Image(systemName: "ellipsis").frame(width: 24, height: 28) }
                 .menuStyle(.borderlessButton).fixedSize()
                 .accessibilityIdentifier("agent-market-manage")
-        }.padding(.horizontal, 12).frame(height: 64)
+        }.padding(.horizontal, 12).frame(height: 48)
     }
 
     private var browse: some View {
@@ -196,8 +192,8 @@ struct AgentAppMarketView: View {
             }
             ScrollView {
                 VStack(alignment: .leading, spacing: 20) {
-                    if tab == .all && category == .all && search.isEmpty {
-                        heading("最新上线", subtitle: "从一个想法开始")
+                    if fixtureSkills != nil && tab == .all && category == .all && search.isEmpty {
+                        heading("最新上线")
                         ScrollView(.horizontal, showsIndicators: false) {
                             HStack(spacing: 10) {
                                 ForEach(AgentMarketRecipe.all.prefix(3)) { recipe in
@@ -211,14 +207,14 @@ struct AgentAppMarketView: View {
                                 }
                             }
                         }
-                        heading("官方技能", subtitle: "内置能力，随当前项目使用")
+                        heading("官方技能")
                         Button { open("canvas-mcp") } label: {
                             itemRow("画布 MCP", summary: "连接当前画布，让其他 Agent 参与创作",
                                     symbol: "point.3.connected.trianglepath.dotted", badge: model.canvasContext?.isActive == true ? "项目可连接" : "需打开画布")
                         }.buttonStyle(.plain).accessibilityIdentifier("agent-market-item-canvas-mcp")
                         ForEach(skills.filter { $0.source == .bundled }) { skill in skillRow(skill) }
                     }
-                    if !(tab == .all && category == .all && search.isEmpty),
+                    if !(fixtureSkills != nil && tab == .all && category == .all && search.isEmpty),
                        (category == .all || category == .tools), matches("画布 MCP 连接当前项目") {
                         Button { open("canvas-mcp") } label: {
                             itemRow("画布 MCP", summary: "连接当前项目，让其他 Agent 参与创作",
@@ -226,16 +222,17 @@ struct AgentAppMarketView: View {
                         }.buttonStyle(.plain).accessibilityIdentifier("agent-market-item-canvas-mcp")
                     }
                     if tab != .skills && category != .tools && !filteredRecipes.isEmpty {
-                        heading(tab == .all ? "创作用例" : "创作应用", subtitle: "填入需求，开始一轮对话")
+                        heading(tab == .all ? "创作用例" : "创作应用")
                         ForEach(filteredRecipes) { recipe in
                             Button { open(recipe.id) } label: {
-                                itemRow(recipe.name, summary: recipe.summary, symbol: recipe.symbol, badge: recipe.category.rawValue)
+                                itemRow(recipe.name, summary: recipe.summary, symbol: recipe.symbol,
+                                        badge: category == .all ? recipe.category.rawValue : "")
                             }.buttonStyle(.plain).accessibilityIdentifier("agent-market-item-\(recipe.id)")
                         }
                     }
                     if tab != .apps && (category == .all || category == .tools) {
                         if !filteredSkills.isEmpty {
-                            heading("本地技能", subtitle: "\(filteredSkills.count) 项 · 已启用 \(enabled.intersection(Set(skills.map(\.slug))).count) 项")
+                            heading("本地技能", metadata: "\(filteredSkills.count) 项 · 已启用 \(enabled.intersection(Set(skills.map(\.slug))).count) 项")
                             ForEach(filteredSkills) { skill in skillRow(skill) }
                         } else if tab == .skills && search.isEmpty {
                             Text(library.isScanning ? "正在读取本地技能…" : "暂无本地技能，可从管理菜单上传或安装。")
@@ -243,10 +240,10 @@ struct AgentAppMarketView: View {
                         }
                     }
                     if tab != .skills && (category == .all || category == .tools) && !filteredPlugins.isEmpty {
-                        heading("效率工具", subtitle: "独立应用 · 查看真实安装与接入方式")
+                        heading("效率工具")
                         ForEach(filteredPlugins) { item in
                             Button { open("plugin:" + item.id) } label: {
-                                itemRow(item.name, summary: item.summary, symbol: item.iconSystemName, badge: "查看接入")
+                                itemRow(item.name, summary: item.summary, symbol: item.iconSystemName, badge: "")
                             }.buttonStyle(.plain).accessibilityIdentifier("agent-market-item-plugin-\(item.id)")
                         }
                     }
@@ -317,10 +314,17 @@ struct AgentAppMarketView: View {
                             Button { model.chooseAttachments() } label: { Label("添加资料", systemImage: "paperclip") }
                                 .disabled(isReadOnly || model.isImportingAttachments)
                         }.font(.system(size: 11))
-                        Text("将保留草稿、\(model.draftAttachments.count) 个附件与 \(model.draftReferences.count) 个画布引用。")
-                            .font(.system(size: 10)).foregroundStyle(TapSkin.secondaryInk)
+                        if !model.draftAttachments.isEmpty || !model.draftReferences.isEmpty {
+                            HStack(spacing: 12) {
+                                if !model.draftAttachments.isEmpty {
+                                    Label("\(model.draftAttachments.count) 个附件", systemImage: "paperclip")
+                                }
+                                if !model.draftReferences.isEmpty {
+                                    Label("\(model.draftReferences.count) 个画布引用", systemImage: "square.on.square")
+                                }
+                            }.font(.system(size: 11)).foregroundStyle(TapSkin.secondaryInk)
+                        }
                     }
-                    detailSection("工作方式", text: "先整理需求与方案，再使用当前可用的画布和技能工具推进。你可编辑填入的内容后发送。")
                     if let purpose = recipe.media {
                         let configured = ModelConfigurationBridge.profile(purpose) != nil
                         detailSection("生成服务", text: configured ? "已配置\(purpose == .canvasVideo ? "视频" : "图像")用途路由；实际生成仍需可用凭据与确认。" : "尚未配置\(purpose == .canvasVideo ? "视频" : "图像")用途路由。可先完成方案，在「模型 → 配置中心」接入服务后生成。")
@@ -328,7 +332,8 @@ struct AgentAppMarketView: View {
                     if let notice { Text(notice).font(.system(size: 11)).foregroundStyle(.orange) }
                 }.padding(16)
             }
-            actionBar("在对话中试用", disabled: isReadOnly || topic.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty) {
+            actionBar("在对话中试用", disabled: isReadOnly || topic.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                      help: "先整理需求与方案，再使用当前可用的画布和技能工具推进。内容会追加至当前草稿，保留附件与画布引用，你可编辑后发送。") {
                 guard let prompt = recipe.prompt(topic: topic, requirements: requirements, ratio: ratio) else { return }
                 model.draft += (model.draft.isEmpty ? "" : "\n\n") + prompt
                 onUse()
@@ -350,18 +355,21 @@ struct AgentAppMarketView: View {
                         if slugs.contains(skill.slug) { slugs.remove(skill.slug) } else { slugs.insert(skill.slug) }
                         enabledRaw = AgentPreferences.encodeEnabledSlugs(slugs)
                     } label: {
-                        Label(enabled.contains(skill.slug) ? "已添加到 Agent · 点击停用" : "添加到 Agent",
+                        Label(enabled.contains(skill.slug) ? "停用技能" : "启用技能",
                               systemImage: enabled.contains(skill.slug) ? "checkmark.circle.fill" : "plus.circle")
                     }.buttonStyle(.plain).font(.system(size: 12, weight: .medium)).padding(12)
                         .background(cardFill, in: RoundedRectangle(cornerRadius: 10))
                         .disabled(isReadOnly).accessibilityIdentifier("agent-market-enable-skill")
                     detailSection("使用范围", text: "启用该技能会允许 Agent 读取说明并使用其目录内脚本；访问范围和确认策略继续生效。")
+                    if let notice { Text(notice).font(.system(size: 11)).foregroundStyle(.orange) }
                 }.padding(16)
             }
             actionBar(model.isAddingSkill ? "正在读取技能…" : "引用到本轮对话",
-                      disabled: isReadOnly || model.isAddingSkill || model.draftSkillReferences.count >= AgentSkillReference.maximumCount) {
-                model.addSkillReference(name: skill.name, path: skill.markdownPath)
-                onUse()
+                      disabled: isReadOnly || model.isAddingSkill) {
+                Task {
+                    do { if try await model.referenceSkill(name: skill.name, path: skill.markdownPath) { onUse() } }
+                    catch { notice = error.localizedDescription }
+                }
             }
         }
     }
@@ -392,11 +400,13 @@ struct AgentAppMarketView: View {
         return query.isEmpty || text.localizedCaseInsensitiveContains(query)
     }
     private func open(_ id: String) { selection = id; notice = nil; topic = ""; requirements = "" }
-    private func heading(_ title: String, subtitle: String) -> some View {
-        HStack(alignment: .firstTextBaseline) {
+    private func heading(_ title: String, metadata: String = "") -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 8) {
             Text(title).font(.system(size: 14, weight: .semibold))
+            if !metadata.isEmpty {
+                Text(metadata).font(.system(size: 10)).foregroundStyle(TapSkin.secondaryInk).lineLimit(1)
+            }
             Spacer(minLength: 8)
-            Text(subtitle).font(.system(size: 9)).foregroundStyle(TapSkin.secondaryInk).lineLimit(1)
         }
     }
     private func skillRow(_ skill: AgentSkill) -> some View {
@@ -413,7 +423,11 @@ struct AgentAppMarketView: View {
                 HStack {
                     Text(title).font(.system(size: 12, weight: .semibold)).lineLimit(1)
                     Spacer(minLength: 0)
-                    Text(badge).font(.system(size: 9)).foregroundStyle(TapSkin.secondaryInk)
+                    if !badge.isEmpty {
+                        Text(badge).font(.system(size: 10)).foregroundStyle(TapSkin.secondaryInk)
+                    } else {
+                        Image(systemName: "chevron.right").font(.system(size: 10)).foregroundStyle(TapSkin.secondaryInk)
+                    }
                 }
                 Text(summary).font(.system(size: 10)).foregroundStyle(TapSkin.secondaryInk).lineLimit(2)
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -446,16 +460,21 @@ struct AgentAppMarketView: View {
                 .fixedSize(horizontal: false, vertical: true).textSelection(.enabled)
         }.frame(maxWidth: .infinity, alignment: .leading)
     }
-    private func actionBar(_ title: String, disabled: Bool = false, action: @escaping () -> Void) -> some View {
+    private func actionBar(_ title: String, disabled: Bool = false, help: String? = nil, action: @escaping () -> Void) -> some View {
         VStack(spacing: 0) {
             Rectangle().fill(border).frame(height: 1)
-            Button(action: action) {
+            HStack(spacing: 6) {
+              Button(action: action) {
                 Text(title).font(.system(size: 12, weight: .semibold)).frame(maxWidth: .infinity).frame(height: 38)
                     .foregroundStyle(TapSkin.tone(0xffffff, 0x181818))
                     .background(TapSkin.tone(0x262626, 0xededed), in: RoundedRectangle(cornerRadius: 10))
                     .opacity(disabled ? 0.45 : 1)
-            }.buttonStyle(.plain).disabled(disabled).padding(14)
+              }.buttonStyle(.plain).disabled(disabled)
                 .accessibilityIdentifier("agent-market-primary")
+              if let help {
+                  InterfaceHelpButton(title: "试用方式", text: help, identifier: "agent-market-recipe-help")
+              }
+            }.padding(14)
         }.background(TapSkin.tone(0xfafafa, 0x111111))
     }
 }

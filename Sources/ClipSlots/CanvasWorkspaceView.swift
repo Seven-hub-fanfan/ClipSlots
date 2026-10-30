@@ -499,6 +499,8 @@ struct CanvasWorkspaceView: View {
                 if let error { store.transientUI.showToast(error) }
             }
             .onChange(of: canvas.activeProjectId) { _ in
+                showExternalAgent = false
+                externalAgentContext = nil
                 controlRegionBuffer.end()
                 cancelCanvasPointer()
                 nodeMountQueue.reset()
@@ -993,12 +995,12 @@ struct CanvasWorkspaceView: View {
                 allowLayout: pointerSession == nil && draggingNodeId == nil && groupDragID == nil && groupResizePreview == nil)
         }
         .onChange(of: canvas.groups) { _ in
-            if pointerSession == nil && draggingNodeId == nil && groupDragID == nil && groupResizePreview == nil {
-                canvas.reconcileMeasuredServerGroups()
-            }
+            canvas.reconcileMeasuredServerGroups(projectID: canvas.activeProjectId,
+                allowLayout: pointerSession == nil && draggingNodeId == nil
+                    && groupDragID == nil && groupResizePreview == nil)
         }
-        .onChange(of: groupDragID) { id in
-            if id == nil && pointerSession == nil { canvas.reconcileMeasuredServerGroups() }
+        .onChange(of: pointerSession == nil && draggingNodeId == nil && groupDragID == nil && groupResizePreview == nil) { allowed in
+            canvas.reconcileMeasuredServerGroups(projectID: canvas.activeProjectId, allowLayout: allowed)
         }
     }
 
@@ -2134,20 +2136,17 @@ struct CanvasWorkspaceView: View {
         .frame(width: size.width, height: size.height, alignment: .topLeading)
     }
 
+    @MainActor
+    func externalAgentHandoffContext(sessions: AgentSessionStore? = nil) throws -> AgentExternalProjectContext {
+        let model = (sessions ?? .shared).sidebarSession(canvas: canvas, store: store)
+        return try model.externalHandoffContext()
+    }
+
+    @MainActor
     private func connectExternalAgent() {
         do {
-            let project = canvas.activeProjectId
-            let context = CanvasAgentContext(canvas: canvas, store: store, projectID: project)
-            let turn = try context.captureTurn(supportsTools: true)
-            let directory = try JSONEncoder().encode(turn.directory)
-            let cli = Bundle.main.bundleURL.appendingPathComponent("Contents/MacOS/clipslots-cli")
-            externalAgentContext = AgentExternalProjectContext(
-                scope: try AgentArtifactScope(projectID: project, canvasID: project),
-                projectTitle: canvas.projects.first(where: { $0.id == project })?.name ?? "当前项目",
-                selectedContext: String(decoding: directory, as: UTF8.self), cliPath: cli.path,
-                mcpReadiness: FileManager.default.isExecutableFile(atPath: cli.path)
-                    ? .ready : .unavailable("尚未找到本地命令行工具"),
-                region: "global", language: "zh-CN", snapshotID: turn.snapshotID)
+            externalAgentContext = try externalAgentHandoffContext()
+            agentVisible = true
             showExternalAgent = true
         } catch {
             store.transientUI.showToast(error.localizedDescription)

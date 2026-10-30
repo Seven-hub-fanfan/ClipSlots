@@ -97,7 +97,7 @@ extension CanvasWorkspaceView {
         }
         if ProcessInfo.processInfo.environment["CLIPSLOTS_SKILL_LAYOUT_PROBE"] == "1" {
             let desktopFocused = mainWindow.isKeyWindow && NSApp.isActive
-            await runAgentComposerLayoutProbe(directory: directory, check: check)
+            let geometryCases = await runAgentComposerLayoutProbe(directory: directory, check: check)
             let sessions = AgentSessionStore()
             check(sessions.session(for: .edit) === sessions.edit
                   && sessions.session(for: .agent) === sessions.agent
@@ -119,7 +119,7 @@ extension CanvasWorkspaceView {
             let report: [String: Any] = [
                 "passed": passed, "failures": failures, "sessionLocked": locked,
                 "desktopFocused": desktopFocused, "systemInputValidated": false,
-                "geometryCases": 72,
+                "geometryCases": geometryCases,
                 "scope": "Offscreen native view geometry and process-local accessibility actions"]
             try? JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys])
                 .write(to: directory.appendingPathComponent("report.json"))
@@ -130,7 +130,9 @@ extension CanvasWorkspaceView {
         if ProcessInfo.processInfo.environment["CLIPSLOTS_WORKFLOW_SKILL_PROBE"] == "1" {
             await runWorkflowSkillProbe(store: store, canvas: canvas, directory: directory, check: check)
             let locked = (CGSessionCopyCurrentDictionary() as? [String: Any])?["CGSSessionScreenIsLocked"] as? Bool ?? false
-            let report: [String: Any] = ["passed": passed, "failures": failures, "sessionLocked": locked]
+            let report: [String: Any] = ["passed": passed, "failures": failures, "sessionLocked": locked,
+                "complete": true, "desktopFocused": mainWindow.isKeyWindow && NSApp.isActive,
+                "systemInputValidated": false, "scope": "production Skill menu and native AX / AppKit editing"]
             try? JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys])
                 .write(to: directory.appendingPathComponent("report.json"))
             NSApp.terminate(nil)
@@ -345,7 +347,7 @@ extension CanvasWorkspaceView {
               "home restores history search")
         check(!elements(host).contains { ($0.accessibilityIdentifier?() ?? "").hasPrefix("codex-") },
               "workspace contains no Codex controls")
-        for skin in [AppSkin.minimal, .colorful] {
+        for skin in AppSkin.allCases {
             AppSkinCenter.apply(skin)
             for appearance in ["light", "dark"] {
                 UserDefaults.standard.set(appearance, forKey: AppearanceDefaults.key)

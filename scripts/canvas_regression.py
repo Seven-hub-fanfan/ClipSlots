@@ -17,6 +17,7 @@ import time
 parser = argparse.ArgumentParser()
 parser.add_argument("--skip-build", action="store_true")
 parser.add_argument("--binary", type=pathlib.Path, help="Use a preserved baseline binary for before/after comparison")
+parser.add_argument("--model-workspace", action="store_true", help="Run model and navigation probes instead of canvas probes")
 options = parser.parse_args()
 repo = pathlib.Path(__file__).resolve().parent.parent
 if os.environ.get("CANVAS_SYSTEM_MOUSE") == "1" or (
@@ -68,9 +69,15 @@ subject = {
         else "in-process AppKit router / AX fixture",
 }
 (fixtures / "subject.json").write_text(json.dumps(subject, indent=2))
-fixture_cli = repo / "scripts/crate_canvas_fixture.py"
-if not os.access(fixture_cli, os.X_OK):
-    fixture_cli.chmod(0o755)
+fixture_source = repo / "scripts/crate_canvas_fixture.py"
+assert fixture_source.is_file() and not fixture_source.is_symlink(), "Local fixture source required"
+fixture_cli = root / "crate_canvas_fixture.py"
+shutil.copy2(fixture_source, fixture_cli)
+fixture_cli.chmod(0o755)
+fixture_hash = sha(fixture_cli)
+assert fixture_hash == sha(fixture_source), "Copied fixture differs from source"
+subject["crate_fixture_sha256"] = fixture_hash
+(fixtures / "subject.json").write_text(json.dumps(subject, indent=2))
 handler = functools.partial(http.server.SimpleHTTPRequestHandler, directory=str(fixtures))
 server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler)
 threading.Thread(target=server.serve_forever, daemon=True).start()
@@ -78,8 +85,11 @@ env = dict(os.environ, CLIPSLOTS_CANVAS_REGRESSION="1", CLIPSLOTS_PERF_AUTOTEST=
            CLIPSLOTS_PERF_LOG="1", CLIPSLOTS_DATA_DIR=str(data),
            CLIPSLOTS_CONFIG_PATH=str(root / "config.toml"),
            CLIPSLOTS_FIXTURE_DIR=str(fixtures), CLIPSLOTS_FIXTURE_PORT=str(server.server_port),
-           CLIPSLOTS_CRATE_FIXTURE=str(fixture_cli))
+           CLIPSLOTS_CRATE_FIXTURE=str(fixture_cli), CLIPSLOTS_CRATE_FIXTURE_SHA256=fixture_hash)
 env["CLIPSLOTS_TEST_DOWNLOAD_DIR"] = str(fixtures / "downloads")
+if options.model_workspace:
+    env.pop("CLIPSLOTS_CANVAS_REGRESSION", None)
+    env["CLIPSLOTS_MODEL_REGRESSION"] = str(fixtures)
 print(f"Isolated run: {root}", flush=True)
 mouse_driver = None
 if env.get("CANVAS_SYSTEM_MOUSE") == "1":
@@ -131,6 +141,22 @@ finally:
         mouse_driver.terminate()
         mouse_driver.wait(timeout=5)
 report = json.loads((fixtures / "report.json").read_text())
+if env.get("CLIPSLOTS_SKILL_LAYOUT_PROBE") == "1":
+    geometry = json.loads((fixtures / "skill-layout-geometry.json").read_text())
+    assert report["geometryCases"] == len(geometry) and len(geometry) > 0
+    assert report["systemInputValidated"] is False
+    print(json.dumps(report, ensure_ascii=False, indent=2))
+    print(f"Evidence: {fixtures}")
+    raise SystemExit(1 if report["failures"] else 0)
+if options.model_workspace:
+    output = repo / "build/validation/model-and-navigation"
+    output.mkdir(parents=True, exist_ok=True)
+    shutil.copytree(fixtures, output, dirs_exist_ok=True)
+    shutil.copy2(root / "run.log", output / "run.log")
+    print(json.dumps({"ok": report["ok"], "passed": len(report["passed"]), "failed": report["failed"],
+                      "realPaidRequests": report["realPaidRequests"]}, ensure_ascii=False, indent=2))
+    print(f"Evidence: {output}")
+    raise SystemExit(0 if report["ok"] and not report["failed"] else 1)
 if env.get("CLIPSLOTS_SMOOTHNESS_PROBE") == "1" or env.get("CLIPSLOTS_TAPNOW_MOTION_PROBE") == "1":
     output = pathlib.Path(env.get("CLIPSLOTS_SMOOTHNESS_OUTPUT", "/tmp/clipslots-smoothness-native"))
     output.mkdir(parents=True, exist_ok=True)
@@ -255,7 +281,7 @@ if env.get("CLIPSLOTS_CREATIVE_PROBE") == "1":
     print(f"Evidence: {output}")
     raise SystemExit(1 if report["failures"] else 0)
 if env.get("CLIPSLOTS_BATCH_PROBE") == "1":
-    output = repo / "build/validation/batch-generation"
+    output = pathlib.Path(env.get("CLIPSLOTS_BATCH_OUTPUT", str(repo / "build/validation/batch-generation")))
     output.mkdir(parents=True, exist_ok=True)
     for source in fixtures.glob("batch-*.png"):
         shutil.copy(source, output / source.name)
@@ -276,7 +302,7 @@ if env.get("CLIPSLOTS_AGENT_WORKSPACE_PROBE") == "1":
     shutil.copy(fixtures / "report.json", output / "report.json")
     print(json.dumps(report, ensure_ascii=False, indent=2))
     print(f"Evidence: {output}")
-    raise SystemExit(1 if report["failures"] else 0)
+    raise SystemExit(1 if report["failures"] or not report["complete"] else 0)
 if env.get("CLIPSLOTS_INPUT_UPLOAD_PROBE") == "1":
     output = repo / "build/validation"
     output.mkdir(parents=True, exist_ok=True)

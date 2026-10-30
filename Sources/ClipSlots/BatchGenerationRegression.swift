@@ -85,6 +85,11 @@ extension CanvasWorkspaceView {
             catalog.loadIfNeeded()
             await controller.loadLibrary(store: store)
             check(await wait { !catalog.imageModels.isEmpty }, "catalog from fixture")
+            let displayedModels = catalog.imageModels
+            catalog.reload()
+            check(catalog.isLoading && catalog.imageModels == displayedModels,
+                  "soft model refresh retains current picker choices")
+            check(await wait { !catalog.isLoading }, "soft model refresh completes")
             NativeAccessibilityProbe.enable()
             await settle()
             guard let window = inputRouter.anchorView?.window, let root = window.contentView else {
@@ -151,7 +156,7 @@ extension CanvasWorkspaceView {
             check(!controller.start(batch, store: store, model: catalog.imageModels.first),
                   "duplicate start rejected while batch running")
             check(await wait { controller.runningID == nil }, "batch queue finishes")
-            check(controller.batch(batch.id)?.completedCount == 2, "batch writes each selected group's output")
+            check(controller.batch(batch.id)?.completedCount == 2, "batch archives each selected group's output")
             let outputs = controller.batch(batch.id)?.items.compactMap(\.localFile).map { URL(fileURLWithPath: $0) } ?? []
             check(outputs.count == 2 && Set(outputs.map { $0.deletingLastPathComponent() }).count == 1,
                   "native queue archives the batch in one folder")
@@ -160,6 +165,11 @@ extension CanvasWorkspaceView {
             check(submissionCount() - before == 2, "exactly two paid submission boundaries simulated")
             check(store.specialStorage.get(1, in: a.id).plainText == "柔光产品图"
                 && store.specialStorage.get(3, in: b.id).plainText == "自然光海报", "batch retains original prompts")
+            check(store.specialStorage.get(1, in: a.id).attachments.isEmpty
+                && store.specialStorage.get(3, in: b.id).attachments.isEmpty, "batch generates zero source attachments")
+            check(batch.items.allSatisfy {
+                GenerationRunStore.shared.load(project: originalProject, id: $0.runID)?.outputAttachmentIDs.isEmpty == true
+            }, "batch journals claim no slot attachment output IDs")
             check(canvas.nodes == originalCanvas && canvas.activeProjectId == originalProject,
                   "batch needs no canvas nodes and does not switch projects")
             capture(sheet, "batch-progress-complete.png")
@@ -193,8 +203,8 @@ extension CanvasWorkspaceView {
                   "restart recovery queries only old task")
             restored.recover(cancellable.id, store: store)
             await settle()
-            check(submissionCount() == recoverBefore && store.specialStorage.get(1, in: a.id).attachments.count == 1,
-                  "repeat recovery adds no duplicate output")
+            check(submissionCount() == recoverBefore && store.specialStorage.get(1, in: a.id).attachments.isEmpty,
+                  "repeat recovery adds no source attachment or submission")
 
             // Mutating one in-flight source and one queued source exercises both fences.
             _ = store.specialStorage.set(1, content: .init(text: "BATCH_SLOW conflict"), in: a.id)
@@ -208,8 +218,8 @@ extension CanvasWorkspaceView {
             _ = store.specialStorage.set(1, content: .init(text: "生成期间手改"), in: a.id)
             _ = store.specialStorage.set(3, content: .init(text: "排队期间手改"), in: b.id)
             check(await wait { controller.runningID == nil }, "conflict batch finishes")
-            check(controller.batch(conflict.id)?.items.first?.status == .retained
-                && controller.batch(conflict.id)?.items.last?.status == .skipped, "conflict retains output and skips stale queued source")
+            check(controller.batch(conflict.id)?.items.first?.status == .succeeded
+                && controller.batch(conflict.id)?.items.last?.status == .skipped, "archive completes independently of edited source and skips stale queued source")
             check(store.specialStorage.get(1, in: a.id).plainText == "生成期间手改"
                 && store.specialStorage.get(1, in: a.id).attachments.isEmpty, "conflict never overwrites manual content")
             check(submissionCount() == conflictBefore + 1, "stale queued source never submitted")
@@ -226,6 +236,33 @@ extension CanvasWorkspaceView {
             controller.recover(unknown.id, store: store)
             await settle()
             check(submissionCount() == unknownBefore + 1, "ambiguous submission never auto-retried")
+            check(!controller.retry(unknown.id, itemID: unknown.items[0].id, store: store, model: catalog.imageModels.first),
+                  "unknown item explicitly rejects manual retry")
+
+            for marker in ["BATCH_ACCEPTED_EXIT", "BATCH_ACCEPTED_TAIL", "BATCH_CONFLICTING_RECEIPTS"] {
+                _ = store.specialStorage.set(1, content: .init(text: marker), in: a.id)
+                await controller.loadLibrary(store: store)
+                let receipt = controller.plan(projectID: originalProject, selected: [a.id],
+                                              configuration: config, model: catalog.imageModels.first)
+                let before = submissionCount()
+                _ = controller.start(receipt, store: store, model: catalog.imageModels.first)
+                check(await wait { controller.runningID == nil }, "\(marker) settles")
+                let item = controller.batch(receipt.id)?.items.first
+                let run = item.flatMap { GenerationRunStore.shared.load(project: originalProject, id: $0.runID) }
+                if marker == "BATCH_CONFLICTING_RECEIPTS" {
+                    check(item?.status == .unknown && run?.requiresSubmissionReconciliation == true,
+                          "conflicting native process receipts stay unknown")
+                } else {
+                    check(item?.status == .succeeded && item?.taskID != nil,
+                          "\(marker) retains accepted identity and retrieves result")
+                    check(run?.attempts.last?.taskHandle?.context == .crate,
+                          "\(marker) records original provider context")
+                }
+                check(submissionCount() == before + 1, "\(marker) executes only one submit")
+                controller.recover(receipt.id, store: store)
+                await settle()
+                check(submissionCount() == before + 1, "\(marker) recovery never resubmits")
+            }
 
             _ = store.specialStorage.set(1, content: .init(text: "BATCH_FAIL"), in: a.id)
             await controller.loadLibrary(store: store)
@@ -235,6 +272,140 @@ extension CanvasWorkspaceView {
             check(await wait { controller.runningID == nil }, "remote failure settles")
             check(controller.batch(failed.id)?.items.first?.status == .failed && submissionCount() == failBefore + 1,
                   "remote failure does not resubmit")
+            check(controller.batch(failed.id)?.items.first?.canRetry == true,
+                  "remote terminal failure enables per-item regeneration")
+
+            _ = store.specialStorage.set(1, content: .init(text: "BATCH_FAIL_ONCE native-button"), in: a.id)
+            await controller.loadLibrary(store: store)
+            let retryBatch = controller.plan(projectID: originalProject, selected: [a.id, b.id],
+                                             configuration: config, model: catalog.imageModels.first)
+            let retryBefore = submissionCount()
+            _ = controller.start(retryBatch, store: store, model: catalog.imageModels.first)
+            check(await wait { controller.runningID == nil }, "mixed success and failure batch settles")
+            guard let mixed = controller.batch(retryBatch.id), let failedItem = mixed.items.first(where: \.canRetry),
+                  let successfulItem = mixed.items.first(where: { $0.status == .succeeded }) else {
+                throw CocoaError(.coderInvalidValue)
+            }
+            let successBytes = try Data(contentsOf: URL(fileURLWithPath: successfulItem.localFile!))
+            check(press(root, "batch-generation-entry"), "open history for single-item retry")
+            await settle()
+            guard let retrySheet = window.sheets.first?.contentView else { throw CocoaError(.coderInvalidValue) }
+            check(press(retrySheet, "batch-history"), "open mixed batch history")
+            await settle()
+            let history = NSApp.windows.filter(\.isVisible).compactMap(\.contentView)
+                .first { find($0, "batch-history-" + retryBatch.id.uuidString) != nil }
+            check(history.map { press($0, "batch-history-" + retryBatch.id.uuidString) } == true,
+                  "select mixed batch from real history")
+            await settle()
+            check(find(retrySheet, "batch-retry-" + failedItem.id.uuidString) != nil,
+                  "failed item exposes native regenerate button")
+            check(find(retrySheet, "batch-retry-" + successfulItem.id.uuidString) == nil,
+                  "successful item exposes no regenerate action")
+            capture(retrySheet, "batch-single-failure-retry.png")
+            check(press(retrySheet, "batch-retry-" + failedItem.id.uuidString), "native single-item regenerate button submits")
+            check(!controller.retry(retryBatch.id, itemID: failedItem.id, store: store, model: catalog.imageModels.first),
+                  "double click is rejected before duplicate submission")
+            check(await wait { controller.runningID == nil }, "single-item retry completes")
+            let retried = controller.batch(retryBatch.id)!
+            check(retried.completedCount == 2 && submissionCount() == retryBefore + 3,
+                  "single failed item adds exactly one submission")
+            let newItem = retried.items.first { $0.id == failedItem.id }!
+            let retainedSuccessBytes = try Data(contentsOf: URL(fileURLWithPath: successfulItem.localFile!))
+            check(newItem.runID != failedItem.runID && newItem.previousRunIDs == [failedItem.runID],
+                  "retry retains original failure journal and records new run")
+            check(retried.items.first { $0.id == successfulItem.id } == successfulItem
+                  && retainedSuccessBytes == successBytes,
+                  "retry leaves same-batch successful item and output bytes unchanged")
+            check(store.specialStorage.get(1, in: a.id).attachments.isEmpty
+                  && store.specialStorage.get(3, in: b.id).attachments.isEmpty,
+                  "retry and success both write zero source attachments")
+            check(Set(retried.items.compactMap(\.localFile).map { URL(fileURLWithPath: $0).deletingLastPathComponent() }).count == 1,
+                  "retry output stays in original batch folder")
+            capture(retrySheet, "batch-single-retry-complete.png")
+            _ = press(retrySheet, "batch-close")
+            await settle()
+
+            _ = store.specialStorage.set(1, content: .init(text: "BATCH_FAIL_ONCE live-queue"), in: a.id)
+            _ = store.specialStorage.set(3, content: .init(text: "BATCH_SLOW live-queue"), in: b.id)
+            await controller.loadLibrary(store: store)
+            var live = controller.plan(projectID: originalProject, selected: [a.id, b.id], configuration: config,
+                                       model: catalog.imageModels.first)
+            live.concurrency = 2
+            let liveBefore = submissionCount()
+            _ = controller.start(live, store: store, model: catalog.imageModels.first)
+            check(await wait { controller.batch(live.id)?.items.contains(where: \.canRetry) == true },
+                  "early failed item is retryable while sibling is running")
+            let liveFailed = controller.batch(live.id)!.items.first(where: \.canRetry)!
+            check(controller.runningID == live.id, "live retry meets active same batch")
+            check(!controller.retry(failed.id, itemID: failed.items[0].id, store: store, model: catalog.imageModels.first),
+                  "different batch cannot retry during active generation")
+            check(controller.retry(live.id, itemID: liveFailed.id, store: store, model: catalog.imageModels.first),
+                  "active same batch accepts selected failure retry")
+            check(await wait { controller.runningID == nil }, "rolling window drains appended retry")
+            check(controller.batch(live.id)?.completedCount == 2 && submissionCount() == liveBefore + 3
+                  && controller.peakActiveCount <= 2, "live retry runs once within configured concurrency")
+
+            _ = store.specialStorage.set(1, content: .init(text: "BATCH_QUERY_FAIL_ONCE"), in: a.id)
+            await controller.loadLibrary(store: store)
+            let query = controller.plan(projectID: originalProject, selected: [a.id], configuration: config,
+                                        model: catalog.imageModels.first)
+            let queryBefore = submissionCount()
+            _ = controller.start(query, store: store, model: catalog.imageModels.first)
+            check(await wait { controller.runningID == nil }, "temporary task query failure settles")
+            let queryItem = controller.batch(query.id)!.items[0]
+            check(queryItem.canRecover && !queryItem.canRetry
+                  && !controller.retry(query.id, itemID: queryItem.id, store: store, model: catalog.imageModels.first),
+                  "query error permits retrieval and rejects paid resubmission")
+            controller.recover(query.id, itemID: queryItem.id, store: store)
+            check(await wait { controller.runningID == nil }, "single-item query recovery succeeds")
+            check(controller.batch(query.id)?.completedCount == 1 && submissionCount() == queryBefore + 1,
+                  "single-item recovery does not submit a second task")
+
+            var referencedContent = SlotContent(text: "reference image preserved")
+            var inputImage = SlotContent.SlotAttachment(name: "input.png", type: .image)
+            inputImage.storagePath = directory.appendingPathComponent("fixture.png").path
+            referencedContent.attachments = [inputImage]
+            _ = store.specialStorage.set(1, content: referencedContent, in: a.id)
+            let protectedSource = store.specialStorage.get(1, in: a.id)
+            let protectedSourceJSON = try CanvasWorkflowSnapshot.jsonData(protectedSource)
+            let protectedReferenceBytes = protectedSource.attachments.first!.resolveData()
+            await controller.loadLibrary(store: store)
+            let referenced = controller.plan(projectID: originalProject, selected: [a.id], configuration: config,
+                                              model: catalog.imageModels.first)
+            _ = controller.start(referenced, store: store, model: catalog.imageModels.first)
+            check(await wait { controller.runningID == nil }, "reference image batch completes")
+            check(controller.batch(referenced.id)?.completedCount == 1
+                  && (try? CanvasWorkflowSnapshot.jsonData(store.specialStorage.get(1, in: a.id))) == protectedSourceJSON
+                  && store.specialStorage.get(1, in: a.id).attachments.first?.resolveData() == protectedReferenceBytes,
+                  "batch preserves source content and existing reference attachment bytes")
+            let wire = (try? String(contentsOf: directory.appendingPathComponent("commands.jsonl"))) ?? ""
+            check(wire.split(separator: "\n").contains { $0.contains("reference image preserved") && $0.contains("\"--image\"") },
+                  "reference image remains part of generation request")
+            try Data("local video fixture".utf8).write(to: directory.appendingPathComponent("fixture.mp4"))
+            _ = store.specialStorage.set(1, content: .init(text: "video archive only"), in: a.id)
+            await controller.loadLibrary(store: store)
+            var videoConfig = config
+            videoConfig.kind = .video; videoConfig.model = "seedance2-mini"
+            let videoBatch = controller.plan(projectID: originalProject, selected: [a.id], configuration: videoConfig,
+                                             model: catalog.videoModels.first)
+            _ = controller.start(videoBatch, store: store, model: catalog.videoModels.first)
+            check(await wait { controller.runningID == nil }, "video batch archive completes")
+            check(controller.batch(videoBatch.id)?.completedCount == 1
+                  && controller.batch(videoBatch.id)?.items[0].localFile?.hasSuffix(".mp4") == true
+                  && store.specialStorage.get(1, in: a.id).attachments.isEmpty,
+                  "video output is archived without source attachment insertion")
+
+            var invalidConfig = config
+            invalidConfig.model = "seedance2-mini"
+            let invalid = controller.plan(projectID: originalProject, selected: [a.id],
+                                          configuration: invalidConfig, model: nil)
+            let invalidBefore = submissionCount()
+            _ = controller.start(invalid, store: store, model: nil)
+            check(await wait { controller.runningID == nil }, "latest model validation rejection settles")
+            check(controller.batch(invalid.id)?.items[0].canRetry == true
+                  && controller.batch(invalid.id)?.items[0].status == .failed
+                  && submissionCount() == invalidBefore,
+                  "request rejected before submission stays retryable without unknown task state")
 
             // Real controller + subprocess + HTTP download + on-disk output under a
             // deterministic LOCAL fixture. This is a scheduler test, not a cloud speed claim.
@@ -331,7 +502,16 @@ extension CanvasWorkspaceView {
             check(submissionCount() == limitedBefore + 3 && controller.batch(limited.id)?.items.last?.status == .stopped,
                   "persistent 429 stops new submissions after two retries")
 
-            for skin in [AppSkin.minimal, .colorful] {
+            // Keep the layout subject visible at the top of the lazy history list.
+            _ = store.specialStorage.set(1, content: .init(text: "布局产物甲"), in: a.id)
+            _ = store.specialStorage.set(3, content: .init(text: "布局产物乙"), in: b.id)
+            await controller.loadLibrary(store: store)
+            let layoutBatch = controller.plan(projectID: originalProject, selected: [a.id, b.id],
+                                              configuration: config, model: catalog.imageModels.first)
+            _ = controller.start(layoutBatch, store: store, model: catalog.imageModels.first)
+            check(await wait { controller.runningID == nil }, "layout subject batch completes")
+            check(controller.batch(layoutBatch.id)?.completedCount == 2, "layout subject has two archived outputs")
+            for skin in AppSkin.allCases {
                 AppSkinCenter.apply(skin)
                 for dark in [false, true] {
                     for width in [CGFloat(480), 820] {
@@ -360,14 +540,14 @@ extension CanvasWorkspaceView {
                         check(press(preview, "batch-history"), "native history button opens \(suffix)")
                         await settle()
                         let historyPanel = NSApp.windows.filter(\.isVisible).compactMap(\.contentView)
-                            .first { find($0, "batch-history-" + batch.id.uuidString) != nil }
+                            .first { find($0, "batch-history-" + layoutBatch.id.uuidString) != nil }
                         if let historyPanel {
                             capture(historyPanel, "batch-history-\(suffix).png")
-                            check(press(historyPanel, "batch-history-" + batch.id.uuidString),
+                            check(press(historyPanel, "batch-history-" + layoutBatch.id.uuidString),
                                   "history switches to chosen completed batch \(suffix)")
                         } else { check(false, "history exposes saved batch \(suffix)") }
                         await settle()
-                        let outputIDs = batch.items.map { "batch-output-" + $0.id.uuidString }
+                        let outputIDs = layoutBatch.items.map { "batch-output-" + $0.id.uuidString }
                         let outputFrames = outputIDs.map { frame(preview, $0) }
                         check(outputFrames.allSatisfy { $0.width > 0 && abs($0.height - 32) <= 1 }
                               && abs(outputFrames[0].minX - outputFrames[1].minX) <= 1,

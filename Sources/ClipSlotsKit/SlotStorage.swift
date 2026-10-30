@@ -13,7 +13,7 @@ func cloneOrCopyItem(at src: URL, to dst: URL) -> Bool {
         try FileManager.default.copyItem(at: src, to: dst)
         return true
     } catch {
-        NSLog("[ClipSlots] cloneOrCopyItem FAIL \(src.lastPathComponent): \(error.localizedDescription)")
+        NSLog("[ClipSlots] cloneOrCopyItem FAIL: \(ApplicationDiagnostics.error(error))")
         return false
     }
 }
@@ -40,7 +40,7 @@ func cloneLinkOrCopyFile(at src: URL, to dst: URL) -> Bool {
         try FileManager.default.copyItem(at: src, to: dst)
         return true
     } catch {
-        NSLog("[ClipSlots] cloneLinkOrCopyFile FAIL \(src.lastPathComponent): \(error.localizedDescription)")
+        NSLog("[ClipSlots] cloneLinkOrCopyFile FAIL: \(ApplicationDiagnostics.error(error))")
         return false
     }
 }
@@ -61,7 +61,7 @@ func ingestExternalFile(at src: URL, to dst: URL) -> Bool {
         try FileManager.default.copyItem(at: src, to: dst)
         return true
     } catch {
-        NSLog("[ClipSlots] ingestExternalFile FAIL \(src.lastPathComponent): \(error.localizedDescription)")
+        NSLog("[ClipSlots] ingestExternalFile FAIL: \(ApplicationDiagnostics.error(error))")
         return false
     }
 }
@@ -196,7 +196,7 @@ public final class SlotStorage {
         do {
             try FileManager.default.createDirectory(at: baseURL, withIntermediateDirectories: true)
         } catch {
-            NSLog("[ClipSlots] SlotStorage init: failed to create base dir \(baseURL.path): \(error)")
+            NSLog("[ClipSlots] SlotStorage init: failed to create base dir: \(ApplicationDiagnostics.error(error))")
         }
         // P1-5 (v2.10.9): sweep any `.tmp_slot_*` staging dirs orphaned by a crash
         // (before replaceItemAt/moveItem completed) so they don't accumulate forever.
@@ -214,23 +214,37 @@ public final class SlotStorage {
 
     public static func searchCandidates(slotsDir: URL, slotCount: Int, query: String,
                                         isCancelled: () -> Bool = { false }) -> [Int: SlotContent] {
-        guard slotCount > 0, !isCancelled() else { return [:] }
+        searchCandidatesResult(slotsDir: slotsDir, slotCount: slotCount, query: query,
+                               isCancelled: isCancelled).slots
+    }
+
+    public static func searchCandidatesResult(slotsDir: URL, slotCount: Int, query: String,
+                                              isCancelled: () -> Bool = { false }) -> SlotSearchReadResult {
+        guard !isCancelled() else { return .incomplete }
+        guard slotCount > 0 else { return .init(slots: [:], isComplete: true) }
+        // Persisted-cache hits still install the bounded event watcher for this
+        // explicitly searched library; a startup cache hit must not skip it.
+        let eventHints = SlotSearchChangeMonitor.shared.hints(group: slotsDir)
         if let hits = SlotSearchSnapshotCache.shared.query(group: slotsDir, slotCount: slotCount,
                                                           query: query, isCancelled: isCancelled) {
-            return hits
+            return .init(slots: hits, isComplete: true)
         }
-        guard !isCancelled() else { return [:] }
+        guard !isCancelled() else { return .incomplete }
         let reader = SlotStorage(searchDirectory: slotsDir)
-        var snapshot = reader.searchScanSnapshot(slotCount: slotCount, isCancelled: isCancelled)
+        var snapshot = reader.searchScanResult(slotCount: slotCount, isCancelled: isCancelled,
+                                               eventHints: eventHints)
         // An uncooperative external writer can change a stamped file mid-read.
         // Retry once after the rejected snapshot; never persist a partial read.
-        if snapshot.isEmpty && !isCancelled() {
-            snapshot = reader.searchScanSnapshot(slotCount: slotCount, isCancelled: isCancelled)
+        if !snapshot.isComplete && !isCancelled() {
+            snapshot = reader.searchScanResult(slotCount: slotCount, isCancelled: isCancelled,
+                                                eventHints: eventHints)
         }
-        return snapshot.filter { slot, content in
+        guard snapshot.isComplete, !isCancelled() else { return .incomplete }
+        let hits = snapshot.slots.filter { slot, content in
             !isCancelled() && SlotSearchIndex.matches(slot: slot, content: content,
                                                       label: content.label ?? "", query: query)
         }
+        return isCancelled() ? .incomplete : .init(slots: hits, isComplete: true)
     }
 
     /// P1-6 (v2.10.9): compute a slot directory's stat(2) fingerprint. Returns nil
@@ -541,10 +555,10 @@ public final class SlotStorage {
                     // 搜到新内容」这种正确性押在 mtime 粒度上——下次搜索走 `cache` 的新鲜命中即可。
                     scanCache[slot] = nil
                     scanCacheFingerprint.removeValue(forKey: slot)
-                    NSLog("[ClipSlots] SlotStorage.set OK slot=\(slot) preview=\(content.preview)")
+                    SlotSearchChangeMonitor.shared.didWrite(group: baseURL, slot: slot)
                     return true
                 } catch {
-                    NSLog("[ClipSlots] SlotStorage.set FAIL slot=\(slot) error=\(error)")
+                    NSLog("[ClipSlots] SlotStorage.set FAIL slot=\(slot) error=\(ApplicationDiagnostics.error(error))")
                     return false
                 }
             }
@@ -578,10 +592,11 @@ public final class SlotStorage {
                 let slotDir = baseURL.appendingPathComponent(String(slot))
                 do {
                     try FileManager.default.removeItem(at: slotDir)
+                    SlotSearchChangeMonitor.shared.didWrite(group: baseURL, slot: slot)
                 } catch {
                     let nsErr = error as NSError
                     if nsErr.domain == NSCocoaErrorDomain && nsErr.code == 4 { /* file not found */ }
-                    else { NSLog("[ClipSlots] SlotStorage.clear FAIL slot=\(slot): \(error)") }
+            else { NSLog("[ClipSlots] SlotStorage.clear FAIL slot=\(slot): \(ApplicationDiagnostics.error(error))") }
                 }
             }
             scheduleManifestUpdate()
@@ -612,9 +627,10 @@ public final class SlotStorage {
                 do {
                     try FileManager.default.removeItem(at: baseURL)
                     try FileManager.default.createDirectory(at: baseURL, withIntermediateDirectories: true)
+                    SlotSearchChangeMonitor.shared.didWrite(group: baseURL, slot: 0)
                     NSLog("[ClipSlots] SlotStorage.clearAll OK")
                 } catch {
-                    NSLog("[ClipSlots] SlotStorage.clearAll FAIL: \(error)")
+                NSLog("[ClipSlots] SlotStorage.clearAll FAIL: \(ApplicationDiagnostics.error(error))")
                 }
             }
             scheduleManifestUpdate()
@@ -665,7 +681,7 @@ public final class SlotStorage {
                     SlotStorage.didWriteLiveSlotDir?()
                 }
             } catch {
-                NSLog("[ClipSlots] SlotStorage manifest update FAIL: \(error)")
+                NSLog("[ClipSlots] SlotStorage manifest update FAIL: \(ApplicationDiagnostics.error(error))")
             }
         }
     }
@@ -768,17 +784,30 @@ public final class SlotStorage {
     ///
     /// - Parameter slotCount: 每组槽位数（`config.slots`）。
     public func searchScanSnapshot(slotCount: Int, isCancelled: () -> Bool = { false }) -> [Int: SlotContent] {
-        guard slotCount > 0, !isCancelled() else { return [:] }
+        searchScanResult(slotCount: slotCount, isCancelled: isCancelled).slots
+    }
+
+    public func searchScanResult(slotCount: Int, isCancelled: () -> Bool = { false },
+                                 eventHints: Set<Int> = []) -> SlotSearchReadResult {
+        guard !isCancelled() else { return .incomplete }
+        guard slotCount > 0 else { return .init(slots: [:], isComplete: true) }
         #if DEBUG
         let loadStart = SlotSearchDiagnostics.now
         #endif
-        let cached = SlotSearchSnapshotCache.shared.load(group: baseURL)
+        let hints = SlotSearchChangeMonitor.shared.hints(group: baseURL).union(eventHints)
+        let revision = SlotSearchChangeMonitor.shared.revision(group: baseURL)
+        guard !isCancelled() else { return .incomplete }
+        let cached = SlotSearchSnapshotCache.shared.load(group: baseURL, isCancelled: isCancelled)
         #if DEBUG
         SlotSearchDiagnostics.record("cacheLoadMS", since: loadStart)
         #endif
-        if let cached, cached.isCurrent(slotCount: slotCount, isCancelled: isCancelled) {
-            return cached.slots
+        let changes = cached?.slotCount == slotCount
+            ? cached?.changedSlots(base: baseURL, slotCount: slotCount, prioritySlots: hints,
+                                    isCancelled: isCancelled) : nil
+        if let cached, let changes, changes.isEmpty {
+            return .init(slots: cached.slots, isComplete: true)
         }
+        guard !isCancelled() else { return .incomplete }
         // Read at most one group per lock acquisition. Cached reads avoid the
         // storage lock entirely; cancellation between slots yields to navigation.
         let rebuilt: SlotSearchSnapshot? = try? StorageLock.shared.withLock(timeout: Self.readLockTimeout) {
@@ -787,7 +816,17 @@ public final class SlotStorage {
                 #if DEBUG
                 let inputStart = SlotSearchDiagnostics.now
                 #endif
-                let before = SlotSearchSnapshot.inputs(base: baseURL, slotCount: slotCount)
+                guard var before = SlotSearchSnapshot.inputs(base: baseURL, slotCount: slotCount,
+                    slots: changes, isCancelled: isCancelled) else { return nil }
+                if let changes, let cached {
+                    let prefix = baseURL.path + "/"
+                    before += cached.stamps.filter { stamp in
+                        guard stamp.path.hasPrefix(prefix),
+                              let first = stamp.path.dropFirst(prefix.count).split(separator: "/").first,
+                              let slot = Int(first) else { return false }
+                        return !changes.contains(slot)
+                    }
+                }
                 var entries: [String: [String]] = [:]
                 for stamp in before {
                     guard stamp.identity.count > 1,
@@ -799,40 +838,47 @@ public final class SlotStorage {
                 SlotSearchDiagnostics.record("inputEnumerationMS", since: inputStart)
                 let readStart = SlotSearchDiagnostics.now
                 #endif
-                var slots: [Int: SlotContent] = [:]
-                for slot in 1...slotCount {
+                var slots = changes != nil ? cached?.slots ?? [:] : [:]
+                var readFailed = false
+                for slot in 1...slotCount where changes == nil || changes?.contains(slot) == true {
                     guard !isCancelled() else { return nil }
                     let directory = baseURL.appendingPathComponent(String(slot), isDirectory: true)
-                    var content = readSlotContent(from: directory, textOnly: true, searchEntries: entries)
-                    content.label = SlotSearchFileIO.read(directory.path + "/label.txt")
+                    var content = readSlotContent(from: directory, textOnly: true, searchEntries: entries,
+                        isSearchCancelled: isCancelled, searchReadFailure: { readFailed = true })
+                    content.label = SlotSearchFileIO.read(directory.path + "/label.txt",
+                        isCancelled: isCancelled, onFailure: { readFailed = true })
                         .flatMap { String(data: $0, encoding: .utf8) }?
                         .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
                     // Old attachment metadata may still contain large inline
                     // payloads. Search retains names/types, never those bytes.
                     for index in content.attachments.indices { content.attachments[index].data = nil }
                     if !content.isEmpty { slots[slot] = content }
+                    else { slots.removeValue(forKey: slot) }
                 }
+                guard !readFailed, !isCancelled() else { return nil }
                 #if DEBUG
                 SlotSearchDiagnostics.record("contentReadMS", since: readStart)
                 let validationStart = SlotSearchDiagnostics.now
                 #endif
-                let snapshot = SlotSearchSnapshot(slotCount: slotCount, stamps: before, slots: slots)
-                guard snapshot.isCurrent(slotCount: slotCount, isCancelled: isCancelled) else { return nil }
+                let snapshot = SlotSearchSnapshot(slotCount: slotCount, stamps: before, slots: slots,
+                                                  generation: cached?.generation)
+                guard snapshot.isCurrent(slotCount: slotCount, isCancelled: isCancelled),
+                      SlotSearchChangeMonitor.shared.revision(group: baseURL) == revision else { return nil }
                 #if DEBUG
                 SlotSearchDiagnostics.record("postReadValidationMS", since: validationStart)
                 #endif
                 return snapshot
             }
         }
-        guard let rebuilt, !isCancelled() else { return [:] }
+        guard let rebuilt, !isCancelled() else { return .incomplete }
         #if DEBUG
         let saveStart = SlotSearchDiagnostics.now
         #endif
-        SlotSearchSnapshotCache.shared.save(rebuilt, group: baseURL)
+        SlotSearchSnapshotCache.shared.save(rebuilt, group: baseURL, changedSlots: changes, isCancelled: isCancelled)
         #if DEBUG
         SlotSearchDiagnostics.record("cacheSaveMS", since: saveStart)
         #endif
-        return rebuilt.slots
+        return isCancelled() ? .incomplete : .init(slots: rebuilt.slots, isComplete: true)
     }
 
     /// 搜索扫描时哪些 pasteboard type 的字节值得读。
@@ -970,7 +1016,7 @@ public final class SlotStorage {
                 do {
                     try FileManager.default.createDirectory(at: slotDir, withIntermediateDirectories: true)
                 } catch {
-                    NSLog("[ClipSlots] setLabel: create dir FAIL slot=\(slot): \(error)")
+            NSLog("[ClipSlots] setLabel: create dir FAIL slot=\(slot): \(ApplicationDiagnostics.error(error))")
                     return
                 }
                 let labelFile = slotDir.appendingPathComponent("label.txt")
@@ -988,13 +1034,13 @@ public final class SlotStorage {
                     do {
                         try label.write(to: labelFile, atomically: true, encoding: .utf8)
                     } catch {
-                        NSLog("[ClipSlots] setLabel: write FAIL slot=\(slot): \(error)")
+                NSLog("[ClipSlots] setLabel: write FAIL slot=\(slot): \(ApplicationDiagnostics.error(error))")
                     }
                 } else {
                     do { try FileManager.default.removeItem(at: labelFile) } catch {
                         let nsErr = error as NSError
                         if !(nsErr.domain == NSCocoaErrorDomain && nsErr.code == 4) {
-                            NSLog("[ClipSlots] setLabel: remove FAIL: \(error)")
+                NSLog("[ClipSlots] setLabel: remove FAIL: \(ApplicationDiagnostics.error(error))")
                         }
                     }
                 }
@@ -1002,6 +1048,7 @@ public final class SlotStorage {
                 // the just-written value exactly once and repopulates the cache coherently.
                 labelCache.removeValue(forKey: slot)
                 labelCacheFingerprint.removeValue(forKey: slot)
+                SlotSearchChangeMonitor.shared.didWrite(group: baseURL, slot: slot)
             }
         }
     }
@@ -1047,10 +1094,13 @@ public final class SlotStorage {
     ///   url 本身就是文本），不需要把几百 MB 图片字节读进内存。命中的槽位由调用方再用 `get(_:)`
     ///   走完整读取路径补齐，用于渲染。
     private func readSlotContent(from slotDir: URL, textOnly: Bool = false,
-                                 searchEntries: [String: [String]]? = nil) -> SlotContent {
+                                 searchEntries: [String: [String]]? = nil,
+                                 isSearchCancelled: () -> Bool = { false },
+                                 searchReadFailure: () -> Void = {}) -> SlotContent {
         var content = SlotContent()
         func readData(_ url: URL) -> Data? {
-            textOnly ? SlotSearchFileIO.read(url.path) : try? Data(contentsOf: url)
+            textOnly ? SlotSearchFileIO.read(url.path, isCancelled: isSearchCancelled,
+                                             onFailure: searchReadFailure) : try? Data(contentsOf: url)
         }
         func names(_ url: URL) -> [String]? {
             if let searchEntries { return searchEntries[url.path] ?? [] }
@@ -1098,7 +1148,8 @@ public final class SlotStorage {
                 if let data = readData(file) {
                     items.append(PasteboardItem(type: typeName, data: data))
                 } else {
-                    NSLog("[ClipSlots] readSlotContent read file FAIL type=\(typeName)")
+                    if textOnly { searchReadFailure() }
+                NSLog("[ClipSlots] readSlotContent read file FAIL")
                 }
             }
 
@@ -1200,12 +1251,10 @@ public final class SlotStorage {
                     "slot_\(slotName)_attachments.json.corrupt")
                 do {
                     try Data(contentsOf: attachmentsURL).write(to: backupURL, options: .atomic)
-                    NSLog("[ClipSlots] ERROR: slot \(slotName) attachments.json failed to decode; "
-                        + "backed up corrupt bytes to \(backupURL.path) before falling back to empty. "
-                        + "Recover attachments from that backup.")
+                    NSLog("[ClipSlots] ERROR: slot \(slotName) attachments.json failed to decode; corrupt bytes backed up.")
                 } catch {
                     NSLog("[ClipSlots] ERROR: slot \(slotName) attachments.json failed to decode AND "
-                        + "the corrupt backup failed: \(error). Falling back to empty attachments.")
+                        + "the corrupt backup failed: \(ApplicationDiagnostics.error(error)). Falling back to empty attachments.")
                 }
             }
         } else {
@@ -1495,7 +1544,7 @@ public final class SlotStorage {
                         out.data = nil
                         out.storagePath = finalPath
                     } else {
-                        NSLog("[ClipSlots] externalizeAttachments slot=\(slot) att=\(att.id) clone FAIL from canonical \(canonicalURL.path) — aborting write to preserve existing bytes")
+                        NSLog("[ClipSlots] externalizeAttachments slot=\(slot) att=\(att.id) clone FAIL; preserving existing bytes")
                         throw SlotStorageError.attachmentExternalizeFailed(slot: slot, attachment: att.id, source: canonicalURL.path)
                     }
                 } else if let srcPath = att.localFileReferencePath,
@@ -1531,12 +1580,12 @@ public final class SlotStorage {
                         if out.originalPath == nil || out.originalPath?.isEmpty == true {
                             out.originalPath = srcPath
                         }
-                        NSLog("[ClipSlots] externalizeAttachments slot=\(slot) att=\(att.id) ingested external file from \(srcPath)")
+                        NSLog("[ClipSlots] externalizeAttachments slot=\(slot) att=\(att.id) ingested external file")
                     } else {
                         // 摄取失败（磁盘满 / 权限 / 源文件读不了）→ 与情形 2 同样抛错回滚整槽写入。
                         // 绝不「静默写入一条注定断链的纯路径记录」：那正是本次 bug 的形态，用户会以为
                         // 附件已安全存档，实际只存了个迟早失效的路径。宁可让本次写入显式失败并报错。
-                        NSLog("[ClipSlots] externalizeAttachments slot=\(slot) att=\(att.id) ingest FAIL from \(srcPath) — aborting write rather than persisting a doomed path-only reference")
+                        NSLog("[ClipSlots] externalizeAttachments slot=\(slot) att=\(att.id) ingest FAIL; preserving existing bytes")
                         throw SlotStorageError.attachmentIngestFailed(slot: slot, attachment: att.id, source: srcPath)
                     }
                 } else if let sp = att.storagePath, !sp.isEmpty {
@@ -1597,7 +1646,7 @@ public final class SlotStorage {
                 anyChanged = true
             } catch {
                 // 单条迁移失败：保留内联 data（绝不丢原始字节），下次读再重试（幂等）。
-                NSLog("[ClipSlots] migrate attachment slot=\(slotDir.lastPathComponent) att=\(att.id) FAIL: \(error)")
+                NSLog("[ClipSlots] migrate attachment slot=\(slotDir.lastPathComponent) att=\(att.id) FAIL: \(ApplicationDiagnostics.error(error))")
             }
         }
 
@@ -1610,7 +1659,7 @@ public final class SlotStorage {
                 // JSON 改写失败：.bin 已在盘上但 JSON 仍是旧的（含 data）——数据不丢；下次读因旧 JSON
                 // 无 storagePath 仍判定需迁移，会覆盖同名 .bin 并重试写 JSON（幂等）。本次返回 migrated
                 // （storagePath 已指向存在文件），读取正常。
-                NSLog("[ClipSlots] migrate rewrite attachments.json FAIL slot=\(slotDir.lastPathComponent): \(error)")
+            NSLog("[ClipSlots] migrate rewrite attachments.json FAIL slot=\(slotDir.lastPathComponent): \(ApplicationDiagnostics.error(error))")
             }
             // P2-B (v2.10.44): 懒迁移直接写 live slotDir（.bin + attachments.json）。这是由「读」
             // 触发的写，不经过任何 GUI 写入入口，GUI 的 FSEvents watcher 会把它当外部写触发多余

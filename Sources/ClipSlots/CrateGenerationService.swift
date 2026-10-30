@@ -45,6 +45,7 @@ final class CrateGenerationService {
         case pollTimeout(taskId: String, seconds: TimeInterval)
         case downloadFailed(detail: String)
         case inputChanged
+        case invalidTestFixture
 
         /// 给用户看的一句话。每一种失败对应的下一步动作都不同，所以不合并成一句通用文案。
         var userMessage: String {
@@ -71,34 +72,26 @@ final class CrateGenerationService {
                 return "产物下载失败：\(detail)"
             case .inputChanged:
                 return "提交前参考素材已变化或不可用，请检查素材后重新生成"
+            case .invalidTestFixture:
+                return "隔离测试夹具缺失或校验失败，已阻止 Crate 调用。"
             }
         }
 
-        /// 排查用的完整原文（写进日志，不进 Toast）。
+        /// Fixed classifications for logs. Raw process output is only used by the UI.
         var logDetail: String {
             switch self {
-            case .cliMissing(let candidates):
-                return "crate not found in: \(candidates.joined(separator: ", "))"
-            case .nodeMissing(let searchPath):
-                return "node not found in PATH: \(searchPath)"
-            case .notAuthenticated(let detail):
-                return detail
-            case .processFailed(let stage, let detail):
-                return "\(stage): \(detail)"
-            case .processTimeout(let stage, let seconds):
-                return "\(stage) timeout \(seconds)s"
-            case .request(let err):
-                return "\(err)"
-            case .response(let err):
-                return "\(err)"
-            case .taskFailed(let reason):
-                return reason
-            case .pollTimeout(let taskId, let seconds):
-                return "poll timeout after \(Int(seconds))s, taskId=\(taskId)"
-            case .downloadFailed(let detail):
-                return detail
-            case .inputChanged:
-                return "Input resource changed before submission"
+            case .cliMissing: return "cli_missing"
+            case .nodeMissing: return "node_missing"
+            case .notAuthenticated: return "authentication_required"
+            case .processFailed: return "process_failed"
+            case .processTimeout: return "process_timeout"
+            case .request: return "invalid_request"
+            case .response: return "invalid_response"
+            case .taskFailed: return "task_failed"
+            case .pollTimeout: return "tracking_timeout"
+            case .downloadFailed: return "download_failed"
+            case .inputChanged: return "input_changed"
+            case .invalidTestFixture: return "fixture_invalid"
             }
         }
     }
@@ -111,9 +104,24 @@ final class CrateGenerationService {
     /// 找到 crate 可执行文件。结果缓存，找不到时不缓存（用户装完不必重启 App）。
     func resolveBinary() throws -> String {
         #if DEBUG
-        if ProcessInfo.processInfo.environment["CLIPSLOTS_CANVAS_REGRESSION"] == "1",
-           let fixture = ProcessInfo.processInfo.environment["CLIPSLOTS_CRATE_FIXTURE"],
-           FileManager.default.isExecutableFile(atPath: fixture) {
+        if ProcessInfo.processInfo.environment["CLIPSLOTS_CANVAS_REGRESSION"] == "1"
+            || Bundle.main.object(forInfoDictionaryKey: "ClipSlotsIsolatedCandidate") as? Bool == true {
+            let env = ProcessInfo.processInfo.environment
+            guard Bundle.main.object(forInfoDictionaryKey: "ClipSlotsIsolatedCandidate") as? Bool == true,
+                  Bundle.main.bundleIdentifier != "com.clipslots.app",
+                  let fixture = env["CLIPSLOTS_CRATE_FIXTURE"],
+                  let root = env["CLIPSLOTS_FIXTURE_DIR"],
+                  root.hasPrefix("/tmp/clipslots-"),
+                  fixture.hasPrefix(URL(fileURLWithPath: root).deletingLastPathComponent().path + "/"),
+                  let expected = env["CLIPSLOTS_CRATE_FIXTURE_SHA256"], expected.count == 64,
+                  FileManager.default.isExecutableFile(atPath: fixture),
+                  let attributes = try? FileManager.default.attributesOfItem(atPath: fixture),
+                  attributes[.type] as? FileAttributeType == .typeRegular,
+                  ((attributes[.size] as? NSNumber)?.intValue ?? Int.max) <= 1_048_576,
+                  let bytes = try? Data(contentsOf: URL(fileURLWithPath: fixture)),
+                  CanvasWorkflowSnapshot.digest(bytes) == expected else {
+                throw ServiceError.invalidTestFixture
+            }
             return fixture
         }
         #endif
@@ -220,12 +228,12 @@ final class CrateGenerationService {
 
     /// 前置体检：CLI 在不在、登录还有效没有。点「生成」时先跑一次，把「未登录」拦在节点进
     /// running 之前——否则用户看到的是一个转了半天然后失败的节点，而真正的动作是去终端登录。
-    func preflight() async throws {
+    func preflight(provider: GenerationProviderContext = .crate) async throws {
         _ = try resolveBinary()
         try assertNodeAvailable()
         let output = try await run(CrateGeneration.authStatusArguments(),
                                   timeout: CrateGeneration.authCheckTimeout,
-                                  stage: "登录检查")
+                                  stage: "登录检查", provider: provider)
         // `auth status --json` 成功时返回 {username, email, employee_id}；未登录时退出码非零
         // （已被 run 转成 processFailed），这里再兜一层「退出码 0 但没有 username」。
         guard let root = try? CrateGeneration.jsonObject(output),
@@ -387,6 +395,8 @@ final class CrateGenerationService {
                                 effective: GenerationRequestRecord, retryCount: Int = 0) async throws -> CrateGeneration.SubmitResult {
         try Task.checkCancellation()
         if let recording, !recording.inputsAreCurrent(effective) { throw ServiceError.inputChanged }
+        var effective = effective
+        effective.provider = .crate
         let attempt = try recording.map {
             try GenerationRunStore.shared.beginAttempt(context: $0, requested: requested, effective: effective)
         }
@@ -399,8 +409,11 @@ final class CrateGenerationService {
                 // Never lose a known task ID to a post-submission disk failure. The caller also saves it on the node.
                 do {
                     try GenerationRunStore.shared.finishAttempt(context: recording, attemptID: attempt,
-                        status: .accepted, taskID: result.taskId, seed: result.seed)
-                } catch { NSLog("[ClipSlots][crate] accepted task history could not be saved: \(error)") }
+                        status: .accepted, taskID: result.taskId, seed: result.seed,
+                        taskHandle: try GenerationTaskHandle(context: .crate, taskID: result.taskId,
+                            capabilityID: effective.model, kind: effective.kind == "video" ? .video : .image,
+                            seed: result.seed))
+                } catch { NSLog("[ClipSlots][crate] accepted task history could not be saved: \(ApplicationDiagnostics.error(error))") }
             }
             return result
         } catch {
@@ -461,6 +474,7 @@ final class CrateGenerationService {
     func waitForCompletion(taskId: String,
                            timeout: TimeInterval = CrateGeneration.pollTimeout,
                            recordingProject: String? = nil,
+                           provider: GenerationProviderContext = .crate,
                            onProgress: @escaping (CrateTaskProgress) -> Void) async throws -> [String] {
         let deadline = Date().addingTimeInterval(timeout)
         var firstPoll = true
@@ -473,10 +487,10 @@ final class CrateGenerationService {
 
             let output = try await run(CrateGeneration.taskGetArguments(taskId: taskId),
                                        timeout: CrateGeneration.pollProcessTimeout,
-                                       stage: "查询任务")
+                                       stage: "查询任务", provider: provider)
             let progress: CrateTaskProgress
             do {
-                progress = try CrateGeneration.parseTaskStatus(output)
+                progress = try CrateGeneration.parseTaskStatus(output, expectedTaskID: taskId)
             } catch let err as CrateResponseError {
                 throw ServiceError.response(err)
             }
@@ -488,13 +502,13 @@ final class CrateGenerationService {
             case .succeeded(let urls):
                 if let recordingProject {
                     try? GenerationRunStore.shared.updateTask(project: recordingProject, taskID: taskId,
-                                                              outcome: "succeeded-awaiting-download")
+                                                              outcome: "succeeded-awaiting-download", provider: provider)
                 }
                 return urls
             case .failed(let reason):
                 if let recordingProject {
                     try? GenerationRunStore.shared.updateTask(project: recordingProject, taskID: taskId,
-                                                              outcome: "failed: \(reason)")
+                                                              outcome: "failed", provider: provider)
                 }
                 throw ServiceError.taskFailed(reason: reason)
             }
@@ -555,110 +569,61 @@ final class CrateGenerationService {
     ///   1. **绝对路径**启动。App 从 Finder 启动时 PATH 是 launchd 的精简版，没有 `~/.local/bin`。
     ///   2. 子进程 PATH 要**显式重建**。crate 的入口是 `#!/usr/bin/env node`，光有 crate 的绝对
     ///      路径不够，它自己还得找到 node。
-    ///   3. stdout / stderr **并发抽干**。crate 的 `model list --json` 能有几十 KB，顺序读会在
-    ///      pipe 缓冲区满时死锁（这个坑 `UpdateInstaller` 已经踩过，此处沿用同一套 DispatchGroup）。
+    ///   3. stdout / stderr 有界并行捕获，取消和超时后仍先核对提交回执。
     private let processLimiter = GenerationProcessBudget.shared
-    private func run(_ arguments: [String], timeout: TimeInterval, stage: String) async throws -> String {
+    private func run(_ arguments: [String], timeout: TimeInterval, stage: String,
+                     provider: GenerationProviderContext = .crate) async throws -> String {
+        guard provider.provider == .crate, provider.controlPlane == "i18n-tt",
+              provider.accountAlias == "default" else { throw GenerationAdapterError.providerMismatch }
         let binary = try resolveBinary()
         let path = searchPath()
-        return try await processLimiter.withPermit {
-          try await withCheckedThrowingContinuation { continuation in
-            DispatchQueue.global(qos: .userInitiated).async {
-                do {
-                    let output = try Self.runSync(binary: binary,
-                                                  arguments: arguments,
-                                                  searchPath: path,
-                                                  timeout: timeout,
-                                                  stage: stage)
-                    continuation.resume(returning: output)
-                } catch {
-                    continuation.resume(throwing: error)
-                }
-            }
-          }
-        }
-    }
-
-    private static func runSync(binary: String,
-                                arguments: [String],
-                                searchPath: String,
-                                timeout: TimeInterval,
-                                stage: String) throws -> String {
-        let task = Process()
-        task.executableURL = URL(fileURLWithPath: binary)
-        task.arguments = arguments
-
         var env = ProcessInfo.processInfo.environment
-        let home = FileManager.default.homeDirectoryForCurrentUser.path
-        env["PATH"] = searchPath
-        env["HOME"] = home              // crate 要读 ~/.crate/{config,session}.json
-        env["NO_COLOR"] = "1"           // 别把 ANSI 转义塞进要解析的 stdout
-        task.environment = env
-
-        let outPipe = Pipe()
-        let errPipe = Pipe()
-        task.standardOutput = outPipe
-        task.standardError = errPipe
-
-        let dataLock = NSLock()
-        var outData = Data()
-        var errData = Data()
-        let drainGroup = DispatchGroup()
-
+        env["PATH"] = path
+        env["NO_COLOR"] = "1"
+        // Freeze submission/query routing; never inherit a later CRATE_BASE_URL.
+        env["CRATE_BASE_URL"] = provider.endpoint.absoluteString
+        let submitting = arguments.contains("--no-wait")
+        let output: ToolProcess.Output
         do {
-            try task.run()
-        } catch {
+            output = try await processLimiter.withPermit {
+                try Task.checkCancellation()
+                if submitting {
+                    // Stop cancels local tracking and queued permits. A launched
+                    // submit drains until its bounded timeout to retain the ID;
+                    // cancelling it would not prove the remote task was cancelled.
+                    return try await Task.detached(priority: .userInitiated) {
+                        try await ToolProcess.run(binary, arguments, environment: env, timeout: timeout,
+                                                  outputLimit: 4_194_304, captureStoppedOutput: true)
+                    }.value
+                }
+                return try await ToolProcess.run(binary, arguments, environment: env, timeout: timeout,
+                                                 outputLimit: 4_194_304, captureStoppedOutput: false)
+            }
+        } catch is CancellationError { throw CancellationError() }
+        catch ToolProcess.Failure.timeout { throw ServiceError.processTimeout(stage: stage, seconds: Int(timeout)) }
+        catch {
             throw ServiceError.processFailed(stage: stage, detail: error.localizedDescription)
         }
-
-        drainGroup.enter()
-        DispatchQueue.global().async {
-            let d = outPipe.fileHandleForReading.readDataToEndOfFile()
-            dataLock.lock(); outData = d; dataLock.unlock()
-            drainGroup.leave()
+        if submitting {
+            do {
+                if let accepted = try CrateGeneration.confirmedSubmission(output.stdout) {
+                    var response: [String: Any] = ["success": true, "taskId": accepted.taskId]
+                    if let seed = accepted.seed { response["input"] = ["seed": seed] }
+                    return String(decoding: try JSONSerialization.data(withJSONObject: response), as: UTF8.self)
+                }
+            } catch let error as CrateResponseError { throw ServiceError.response(error) }
         }
-        drainGroup.enter()
-        DispatchQueue.global().async {
-            let d = errPipe.fileHandleForReading.readDataToEndOfFile()
-            dataLock.lock(); errData = d; dataLock.unlock()
-            drainGroup.leave()
-        }
-
-        let sema = DispatchSemaphore(value: 0)
-        let timedOutLock = NSLock()
-        var timedOut = false
-        DispatchQueue.global().async {
-            if sema.wait(timeout: .now() + timeout) == .timedOut {
-                timedOutLock.lock(); timedOut = true; timedOutLock.unlock()
-                if task.isRunning { task.terminate() }
-            }
-        }
-        task.waitUntilExit()
-        sema.signal()
-        drainGroup.wait()
-
-        timedOutLock.lock(); let didTimeOut = timedOut; timedOutLock.unlock()
-        if didTimeOut {
-            throw ServiceError.processTimeout(stage: stage, seconds: Int(timeout))
-        }
-
-        dataLock.lock()
-        let out = String(data: outData, encoding: .utf8) ?? ""
-        let err = String(data: errData, encoding: .utf8) ?? ""
-        dataLock.unlock()
-
-        guard task.terminationStatus == 0 else {
-            // stderr 优先：`--json` 下进度提示与错误都走 stderr，出错时那里才是有用的一行。
-            let detail = CrateGeneration.clip(err.isEmpty ? out : err)
-            NSLog("[ClipSlots][crate] \(stage) exit=\(task.terminationStatus) stderr=\(err)")
-            // 登录态失效的表征在退出码里分辨不出来，只能看文案。命中关键词就升级成
-            // notAuthenticated，因为这一类的下一步动作（去终端登录）和别的失败完全不同。
-            if Self.looksLikeAuthFailure(err + " " + out) {
+        if output.stopped { throw ServiceError.processTimeout(stage: stage, seconds: Int(timeout)) }
+        if output.truncated { throw ServiceError.response(.notJSON("CLI 输出超过本地捕获上限")) }
+        guard output.status == 0 else {
+            let detail = CrateGeneration.clip(output.stderr.isEmpty ? output.stdout : output.stderr)
+            NSLog("[ClipSlots][crate] \(stage) exit=\(output.status) stdoutBytes=\(output.stdout.utf8.count) stderrBytes=\(output.stderr.utf8.count)")
+            if Self.looksLikeAuthFailure(output.stderr + " " + output.stdout) {
                 throw ServiceError.notAuthenticated(detail: detail)
             }
-            throw ServiceError.processFailed(stage: stage, detail: detail.isEmpty ? "退出码 \(task.terminationStatus)" : detail)
+            throw ServiceError.processFailed(stage: stage, detail: detail.isEmpty ? "退出码 \(output.status)" : detail)
         }
-        return out
+        return output.stdout
     }
 
     /// 登录失效的关键词。📌 待确认：本机没抓到过期样本（JWT 还有效），所以这里覆盖的是

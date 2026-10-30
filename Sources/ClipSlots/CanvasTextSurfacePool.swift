@@ -56,7 +56,6 @@ struct CanvasPooledTextLayer: NSViewRepresentable {
             let path: String
             let scale: CGFloat
             let dark: Bool
-            let colorful: Bool
             let textVisible: Bool
             let fanVisible: Bool
         }
@@ -106,7 +105,7 @@ struct CanvasPooledTextLayer: NSViewRepresentable {
                                                      headerFontSize: 9.5, footerFontSize: 9.5)
             let cardSize = CanvasFanGeometry.fanCardSize(boxHeight: plan.previewHeight1x)
             let key = ContentKey(node: node, text: item.text, path: item.path, scale: scale,
-                                 dark: dark, colorful: CanvasSkin.colorful,
+                                 dark: dark,
                                  textVisible: CanvasScreenText.textVisible(nodeSize: node.frame.size, zoom: zoom),
                                  fanVisible: CanvasScreenText.cardTextVisible(cardSize: cardSize, zoom: zoom))
             if contentKeys[node.id] != key {

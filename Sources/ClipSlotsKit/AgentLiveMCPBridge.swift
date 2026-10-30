@@ -88,7 +88,12 @@ public final class AgentExternalLiveMCPTools: AgentToolExecuting, @unchecked Sen
         return reader.specs().map { spec in
             .init(name: spec.name, description: spec.description + " 本连接由原生主机读取当前状态。",
                   parameters: spec.parameters, originLabel: "当前画布")
-        } + actions.specs() + slots.specs() + proposals
+        } + actions.specs().map { spec in
+            .init(name: spec.name,
+                  description: spec.description.replacingOccurrences(of: "由用户确认后执行，",
+                      with: "遵循原生会话当前审批模式，") + " 当前审批模式可通过 clipslots_context 查询。",
+                  parameters: spec.parameters, originLabel: spec.originLabel)
+        } + slots.specs() + proposals
     }
 
     public func execute(call: AgentToolCall) async -> AgentToolResult {

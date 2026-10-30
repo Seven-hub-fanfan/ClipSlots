@@ -8,8 +8,8 @@ import ClipSlotsKit
                     directory: URL, check: (Bool, String) -> Void) async throws {
         NativeAccessibilityProbe.enable()
         await runWorkspaceBeatProbe(directory: directory, check: check)
-        for colorful in [false, true] {
-            AppSkinCenter.apply(colorful ? .colorful : .minimal)
+        for skin in AppSkin.allCases {
+            AppSkinCenter.apply(skin)
             for dark in [false, true] {
                 for size in [NSSize(width: 800, height: 558), NSSize(width: 1080, height: 740)] {
                     for kind in [CanvasNodeKind.audio, .threeD, .timeline, .stage] {
@@ -22,7 +22,7 @@ import ClipSlotsKit
                         window.contentView = host; window.makeKeyAndOrderFront(nil)
                         try await Task.sleep(for: .milliseconds(300))
                         host.layoutSubtreeIfNeeded()
-                        let name = "\(kind.rawValue)-\(colorful ? "colorful" : "minimal")-\(dark ? "dark" : "light")-\(Int(size.width))"
+                        let name = "\(kind.rawValue)-\(skin.rawValue)-\(dark ? "dark" : "light")-\(Int(size.width))"
                         func element(_ id: String) -> AnyObject? {
                             NativeAccessibilityProbe.elements(window).first { $0.accessibilityIdentifier?() == id }
                         }
@@ -44,7 +44,7 @@ import ClipSlotsKit
                             try bitmap.representation(using: .png, properties: [:])?
                                 .write(to: directory.appendingPathComponent("ui-\(name).png"))
                         }
-                        if kind == .threeD && size.width == 800 && !dark && !colorful {
+                        if kind == .threeD && size.width == 800 && !dark {
                             let before = session.configuration
                             _ = element("tool-cloud-settings")?.accessibilityPerformPress?()
                             try await Task.sleep(for: .milliseconds(250))
@@ -57,7 +57,7 @@ import ClipSlotsKit
                             check(session.configuration == before && !session.busy,
                                 "opening and closing generation parameters does not submit a cloud task")
                         }
-                        if kind == .stage && size.width == 800 && !dark && !colorful,
+                        if kind == .stage && size.width == 800 && !dark,
                            let entity = session.configuration.stage.entities.first,
                            let shot = session.configuration.stage.shots.first {
                             _ = element("tool-entity-\(entity.id)")?.accessibilityPerformPress?()

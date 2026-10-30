@@ -351,8 +351,7 @@ struct PackExporter {
                         } catch {
                             // 缩略图是纯展示元数据，拷不动不该让整包导出失败——降级为「本槽无缩略图」
                             // 并记一行日志即可（不进 failedAttachments，那是给用户数据用的）。
-                            NSLog("[ClipSlots] PackExporter: failed to include manual thumbnail for "
-                                + "\(group.name)/slot \(slot): \(error.localizedDescription)")
+                            NSLog("[ClipSlots] PackExporter: failed to include manual thumbnail slot=\(slot): \(ApplicationDiagnostics.error(error))")
                         }
                     }
 

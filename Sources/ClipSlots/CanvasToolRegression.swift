@@ -184,8 +184,8 @@ extension CanvasWorkspaceView {
             await CanvasCloudRegression.run(fixtures:fixtures,directory:directory,check:check)
             if let model=sessions[.threeD] { await CanvasCloudRegression.session(model,fixtures:fixtures,check:check) }
             // Render the real production editor and card tree in all four themes.
-            for colorful in [false,true] {
-                AppSkinCenter.apply(colorful ? .colorful : .minimal)
+            for skin in AppSkin.allCases {
+                AppSkinCenter.apply(skin)
                 for dark in [false,true] {
                     for kind in [CanvasNodeKind.audio,.threeD,.timeline,.stage] {
                         guard let session=sessions[kind] else {continue}
@@ -194,7 +194,7 @@ extension CanvasWorkspaceView {
                         editor.appearance=NSAppearance(named:dark ? .darkAqua : .aqua);editor.contentView=host;editor.makeKeyAndOrderFront(nil)
                         editor.displayIfNeeded();host.layoutSubtreeIfNeeded()
                         try await Task.sleep(nanoseconds:250_000_000)
-                        let suffix="\(colorful ? "colorful":"minimal")-\(dark ? "dark":"light")"
+                        let suffix="\(skin.rawValue)-\(dark ? "dark":"light")"
                         if let bitmap=host.bitmapImageRepForCachingDisplay(in:host.bounds) {
                             host.cacheDisplay(in:host.bounds,to:bitmap)
                             if let data=bitmap.representation(using:.png,properties:[:]) {

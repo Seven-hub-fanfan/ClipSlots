@@ -247,8 +247,7 @@ struct PackImporter {
                         do {
                             try fm.removeItem(at: backup.groupDir)
                         } catch {
-                            NSLog("[ClipSlots] PackImporter D-4 回滚清理半写入组目录失败："
-                                + "\(backup.groupDir.path)：\(error)")
+                            NSLog("[ClipSlots] PackImporter D-4 回滚清理半写入组目录失败：\(ApplicationDiagnostics.error(error))")
                         }
                     }
                     continue
@@ -278,8 +277,7 @@ struct PackImporter {
                 } catch {
                     // rename 回滚是空间无关操作，正常不会失败；万一失败也记录（不再静默吞掉），备份目录
                     // 仍原样保留在 special_slots 下（.import_backup_<groupId>_<uuid>）供人工恢复。
-                    NSLog("[ClipSlots] PackImporter D-3 回滚失败：无法将备份 \(backupDir.path) 还原到 "
-                        + "\(backup.groupDir.path)：\(error)。原数据仍完整保存在该备份目录中。")
+                    NSLog("[ClipSlots] PackImporter D-3 回滚失败：\(ApplicationDiagnostics.error(error))。原数据仍保存在备份目录中。")
                 }
             }
             // rename 改变了组目录 inode，使各 SlotStorage 的内存缓存指纹失效；主动清缓存确保回滚后
@@ -373,8 +371,7 @@ struct PackImporter {
                         // 判断是否符号链接，遇到即整体跳过并记录可读报错，绝不读取其目标。
                         let isSymlink = (try? safeURL.resourceValues(forKeys: [.isSymbolicLinkKey]).isSymbolicLink) ?? false
                         if isSymlink {
-                            NSLog("[ClipSlots] PackImporter PACK-1 拒绝符号链接附件（防越界读取包外文件）："
-                                + "\(att.name)（条目 \(file)）")
+                            NSLog("[ClipSlots] PackImporter PACK-1 拒绝符号链接附件")
                         } else if !resolvedURLStaysWithin(safeURL, root: attachmentsDir) {
                             // P0-1 (v2.10.34): PACK-1 的 `.isSymbolicLinkKey` 只判断路径「末段(leaf)」是否
                             // 软链，safeChildURL 又只用 standardizedFileURL 解析 `..`/`.`——两者都不检查
@@ -384,8 +381,7 @@ struct PackImporter {
                             // 目录外的 /etc/passwd 当作附件字节吸入用户数据（分享即外泄）。这里在真正读取
                             // 前用 resolvingSymlinksInPath() 把【每一级组件】的软链全解析出真实路径，再重做
                             // 一次「仍在 attachmentsDir 之内」的前缀校验；越界即整条附件跳过、绝不读其目标。
-                            NSLog("[ClipSlots] PackImporter P0-1 拒绝越界附件（软链穿越解压目录外，防任意文件读取）："
-                                + "\(att.name)（条目 \(file)）")
+                            NSLog("[ClipSlots] PackImporter P0-1 拒绝越界附件")
                         } else {
                         // P0-2 (v2.10.50): 附件字节【全部】流式化。D-1（v2.10.31）只给 >20MB 的大文件走
                         // copyItem 流式落盘，<20MB 仍用 `Data(contentsOf:)` 整块读入内存再内联进
@@ -406,8 +402,7 @@ struct PackImporter {
                             importedAttachmentPaths.append(dest)
                         } else {
                             // 拷贝失败：记录可读报错，保留附件元信息（无字节），绝不静默把整块读进内存。
-                            NSLog("[ClipSlots] PackImporter P0-2 附件流式落盘失败，已跳过其字节："
-                                + "\(att.name)（源 \(safeURL.path)）")
+                            NSLog("[ClipSlots] PackImporter P0-2 附件流式落盘失败，已跳过其字节")
                         }
                         }
                     }
@@ -500,7 +495,7 @@ struct PackImporter {
         do {
             try fm.createDirectory(at: dir, withIntermediateDirectories: true)
         } catch {
-            NSLog("[ClipSlots] PackImporter D-1 无法创建持久附件目录 \(dir.path)：\(error)")
+            NSLog("[ClipSlots] PackImporter D-1 无法创建持久附件目录：\(ApplicationDiagnostics.error(error))")
             return nil
         }
         let dest = dir.appendingPathComponent("\(attachmentId.uuidString)_\(src.lastPathComponent)")
@@ -512,7 +507,7 @@ struct PackImporter {
             try fm.copyItem(at: src, to: dest)
             return dest
         } catch {
-            NSLog("[ClipSlots] PackImporter D-1 流式拷贝大附件失败 \(src.path) → \(dest.path)：\(error)")
+            NSLog("[ClipSlots] PackImporter D-1 流式拷贝大附件失败：\(ApplicationDiagnostics.error(error))")
             return nil
         }
     }
@@ -556,7 +551,7 @@ struct PackImporter {
                 return Date().timeIntervalSince(mtime)
             }()
             if backupAge < 3600 {
-                NSLog("[ClipSlots] PackImporter 启动清扫：跳过较新的备份 \(name)（\(Int(backupAge))s，疑似进行中的并发导入）")
+                NSLog("[ClipSlots] PackImporter 启动清扫：跳过较新的备份 ageSeconds=\(Int(backupAge))")
                 continue
             }
             // 解析 groupId：形如 .import_backup_<groupId>_<uuid>。groupId（UUID 或 "default"）与末段 uuid 均
@@ -575,7 +570,7 @@ struct PackImporter {
                     storage.invalidateContentCaches()
                     NSLog("[ClipSlots] PackImporter 启动清扫：从孤儿备份恢复组 \(groupId)（上次导入未完成）")
                 } catch {
-                    NSLog("[ClipSlots] PackImporter 启动清扫：恢复孤儿备份失败 \(url.path)：\(error)（备份原样保留）")
+                    NSLog("[ClipSlots] PackImporter 启动清扫：恢复孤儿备份失败：\(ApplicationDiagnostics.error(error))（备份原样保留）")
                 }
             } else {
                 // 实况组已有内容 → 备份冗余 → 删除释放空间。

@@ -399,7 +399,7 @@ enum PermissionRegression {
             if FileManager.default.fileExists(atPath: directory.appendingPathComponent("accessibility-ready").path) { break }
             await settle()
         }
-        for skin in [AppSkin.minimal, .colorful] {
+        for skin in AppSkin.allCases {
             AppSkinCenter.apply(skin)
             for dark in [false, true] {
                 NSApp.appearance = NSAppearance(named: dark ? .darkAqua : .aqua)
@@ -595,7 +595,7 @@ enum PermissionRegression {
         PermissionCenter.draggingApplication = false
         model.onRefresh = { showHelper() }
         fixture.holdReset = true
-        for skin in [AppSkin.minimal, .colorful] {
+        for skin in AppSkin.allCases {
             AppSkinCenter.apply(skin)
             for dark in [false, true] {
                 NSApp.appearance = NSAppearance(named: dark ? .darkAqua : .aqua)

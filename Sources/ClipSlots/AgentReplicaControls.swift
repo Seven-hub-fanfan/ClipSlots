@@ -38,15 +38,22 @@ struct AgentReplicaControls: View {
             model.artifactPanelDismissed()
             onDismiss()
         }) { record in
-            let conversation = model.selectedConversationID
+            let identity = model.artifactPageIdentity(key: record.key, revision: record.revision)
             AgentArtifactPanel(record: record,
-                actions: record.text != nil && model.canvasContext != nil
+                actions: record.text != nil && model.canvasContext != nil && model.accessMode != .allDirectoriesReadOnly
                     ? [.init(id: "canvas-text", label: "预览并填入选中节点", toolName: "preview_canvas_text")] : [],
-                onAction: model.handleArtifactAction, onClose: { model.selectedArtifact = nil },
+                pageIdentity: identity,
+                onAction: { model.handleArtifactAction($0, identity: identity) },
+                onClose: { model.dismissArtifact(identity: identity) },
                 onRequest: { operation, name, arguments in
-                    try await model.artifactRequest(key: record.key, revision: record.revision,
-                        conversation: conversation, operation: operation, name: name, arguments: arguments)
+                    try await model.artifactRequest(identity: identity, operation: operation, name: name, arguments: arguments)
+                }, replies: model.appReplies(for: record), onRecoverReply: { replyID, action in
+                    _ = try await model.recoverArtifactAppReply(identity: identity, replyID: replyID, action: action)
                 })
+                .observingReplies({ replyID, runID in
+                    try model.artifactReplyObservation(identity: identity, replyID: replyID, runID: runID)
+                }, conversationActive: model.artifactConversationRunActive)
+                .id(identity)
                 .frame(width: 640, height: 580)
                 .foregroundColor(TapSkin.ink).background(TapSkin.tone(0xfafafa, 0x161616))
         }

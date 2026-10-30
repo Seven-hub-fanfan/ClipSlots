@@ -171,6 +171,7 @@ public enum CrateResponseError: Error, Equatable {
     case notJSON(String)
     case submissionRejected(String)
     case missingTaskId
+    case taskIdentityMismatch
     case unknownTaskStatus(Int)
 
     public var userMessage: String {
@@ -181,6 +182,8 @@ public enum CrateResponseError: Error, Equatable {
             return "提交被拒绝：\(CrateGeneration.clip(detail))"
         case .missingTaskId:
             return "CLI 没有返回 taskId"
+        case .taskIdentityMismatch:
+            return "CLI 返回的任务身份不一致，需核对原平台任务。"
         case .unknownTaskStatus(let code):
             return "未知任务状态码 \(code)"
         }
@@ -529,14 +532,50 @@ public enum CrateGeneration {
               !taskId.isEmpty else {
             throw CrateResponseError.missingTaskId
         }
+        do { try GenerationWire.validateIdentifier(taskId) }
+        catch { throw CrateResponseError.taskIdentityMismatch }
         return SubmitResult(taskId: taskId, seed: extractSeed(from: root))
     }
 
+    /// A confirmed ID survives a stopped process or malformed trailing NDJSON.
+    /// Conflicting/invalid IDs remain unknown rather than choosing the first one.
+    public static func confirmedSubmission(_ output: String) throws -> SubmitResult? {
+        let objects = (try? GenerationWire.objects(output)) ?? output.split(separator: "\n").compactMap {
+            try? GenerationWire.decode(String($0))
+        }
+        let accepted = objects.filter { $0["taskId"] != nil || $0["task_id"] != nil }
+        guard !accepted.isEmpty else { return nil }
+        var ids: [String] = []
+        for object in accepted {
+            for key in ["taskId", "task_id"] where object[key] != nil {
+                guard let id = try? GenerationWire.identifier(object[key]) else {
+                    throw CrateResponseError.taskIdentityMismatch
+                }
+                ids.append(id)
+            }
+        }
+        guard Set(ids).count == 1, let id = ids.first else { throw CrateResponseError.taskIdentityMismatch }
+        let seed = accepted.compactMap { object -> Int? in
+            guard let text = try? object.encodedText(), let raw = try? jsonObject(text) else { return nil }
+            return extractSeed(from: raw)
+        }.first
+        return SubmitResult(taskId: id, seed: seed)
+    }
+
     /// 解析 `task get` 的单任务响应。
-    public static func parseTaskStatus(_ output: String) throws -> CrateTaskProgress {
+    public static func parseTaskStatus(_ output: String, expectedTaskID: String? = nil) throws -> CrateTaskProgress {
         let root = try jsonObject(output)
         guard let info = root["taskInfo"] as? [String: Any] else {
             throw CrateResponseError.notJSON(output)
+        }
+        if let expectedTaskID {
+            for key in ["task_id", "taskId"] where info[key] != nil {
+                guard let data = try? JSONSerialization.data(withJSONObject: info),
+                      let value = try? JSONDecoder().decode(JSONValue.self, from: data),
+                      (try? GenerationWire.identifier(value[key])) == expectedTaskID else {
+                    throw CrateResponseError.taskIdentityMismatch
+                }
+            }
         }
         return progress(fromTaskInfo: info)
     }

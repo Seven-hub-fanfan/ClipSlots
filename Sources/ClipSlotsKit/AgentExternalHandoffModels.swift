@@ -54,7 +54,9 @@ public struct AgentExternalProjectContext: Equatable, Sendable {
         var environment: [String: JSONValue] = ["CLIPSLOTS_PROJECT_ID": .string(scope.projectID),
                                                "CLIPSLOTS_CANVAS_ID": .string(scope.canvasID)]
         if let liveLease {
-            environment[AgentLiveMCPLease.environmentKey] = .string(String(decoding: try JSONEncoder().encode(liveLease), as: UTF8.self))
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = [.sortedKeys]
+            environment[AgentLiveMCPLease.environmentKey] = .string(String(decoding: try encoder.encode(liveLease), as: UTF8.self))
         }
         return ["mcpServers": ["clipslots-project": [
             "command": .string(cliPath),
@@ -87,7 +89,7 @@ public struct AgentExternalProjectContext: Equatable, Sendable {
         ]).encodedText(pretty: true)
         let permissions = liveLease == nil
             ? "This MCP route is read-only. Call clipslots_context first to obtain the fixed snapshot ID."
-            : "Call clipslots_context first. canvas_current/canvas_get_node read the live native canvas. canvas_* actions edit, connect, move, group, lay out, undo or redo through native transactions; writes require approval in ClipSlots. Slot tools use the native data layer without the ClipSlots CLI and obey the connection access mode. Read current revisions before writes, then read back results. canvas_generate uses the separately configured Crate/ByteArtist service and may consume credits. preview_canvas_mutation remains available for structural proposals. This connection expires after 30 minutes or on project/session change or cancellation."
+            : "Call clipslots_context first. canvas_current/canvas_get_node read the live native canvas. Canvas and slot writes follow the current ClipSlots approval mode: manual mode requests native approval; automatic mode executes permitted safe operations. Deletions always require native confirmation. canvas_* actions edit, connect, move, group, lay out, undo or redo through native transactions. Slot tools use the native data layer without the ClipSlots CLI and obey the connection access mode. Read current revisions before writes, then read back results. canvas_generate uses the separately configured Crate/ByteArtist service and may consume credits. preview_canvas_mutation remains available for structural proposals that require native confirmation. This connection expires after 30 minutes or on project/session/access-mode change or cancellation."
         let text = """
         Continue work in this explicitly selected ClipSlots project/canvas only.
         Project scope:

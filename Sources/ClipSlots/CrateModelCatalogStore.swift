@@ -40,23 +40,29 @@ final class CrateModelCatalogStore: ObservableObject {
     /// 软过期时间。模型上下线是以天计的事，10 分钟足够让"刚上线的模型"在下次打开面板时出现，
     /// 又不会让连续操作反复起进程。
     private let cacheTTL: TimeInterval = 60
+    /// Display cache during a soft refresh. Actual submissions still fetch and
+    /// validate current model parameters at the CLI boundary.
+    private var lastKnownModels: [CrateModelCatalog.ModelInfo] = []
     private var loadedAt: Date?
     private var inFlight: Task<Void, Never>?
 
     private init() {}
 
-    /// 当前可选的出图模型。未加载 / 失败时为空数组（UI 据此退回只显示当前值）。
+    private var displayModels: [CrateModelCatalog.ModelInfo] {
+        if case .loaded(let all) = state { return all }
+        return lastKnownModels
+    }
+
+    /// Keep existing controls mounted while refreshing the catalog.
     var imageModels: [CrateModelCatalog.ModelInfo] {
-        guard case .loaded(let all) = state else { return [] }
-        return CrateModelCatalog.imageModels(all)
+        CrateModelCatalog.imageModels(displayModels)
     }
 
     /// 当前可选的出视频模型（v2.11.19）。与 `imageModels` 是两份互不相交的清单：
     /// 实测没有任何模型同时声明 `text-2-image` 与 `text-2-video`，所以不必担心一个模型
     /// 在两个 picker 里都出现。
     var videoModels: [CrateModelCatalog.ModelInfo] {
-        guard case .loaded(let all) = state else { return [] }
-        return CrateModelCatalog.videoModels(all)
+        CrateModelCatalog.videoModels(displayModels)
     }
 
     var isLoading: Bool { state == .loading }
@@ -87,18 +93,21 @@ final class CrateModelCatalogStore: ObservableObject {
         guard case .loaded(var models) = state else { return }
         if let index = models.firstIndex(where: { $0.id == model.id }) { models[index] = model }
         else { models.append(model) }
+        lastKnownModels = models
         state = .loaded(models)
     }
 
     /// 强制重取（面板上的刷新按钮 / 用户刚在终端登录完）。
     func reload() {
         inFlight?.cancel()
+        if case .loaded(let models) = state { lastKnownModels = models }
         state = .loading
         inFlight = Task { [weak self] in
             let result = await Self.fetch()
             guard let self, !Task.isCancelled else { return }
             switch result {
             case .success(let models):
+                self.lastKnownModels = models
                 self.state = .loaded(models)
                 self.loadedAt = Date()
             case .failure(let message):

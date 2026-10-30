@@ -1,5 +1,6 @@
 #if DEBUG
 import Foundation
+import AppKit
 import CoreGraphics
 import ClipSlotsKit
 
@@ -18,6 +19,59 @@ enum CanvasNestedGroupRegression {
         let directory = URL(fileURLWithPath: folder).standardizedFileURL
         let resolved = directory.resolvingSymlinksInPath().path
         guard resolved == directory.path || resolved == "/private" + directory.path else { exit(2) }
+        if env["CLIPSLOTS_ARTIFACT_PAGE_REGRESSION"] == "1" || env["CLIPSLOTS_APP_REPLY_PAGE_REGRESSION"] == "1"
+            || env["CLIPSLOTS_ARTIFACT_PRESENTATION_REGRESSION"] == "1"
+            || env["CLIPSLOTS_ARTIFACT_REMOTE_PANEL_REGRESSION"] == "1"
+            || env["CLIPSLOTS_ARTIFACT_HTTPS_REGRESSION"] == "1"
+            || env["CLIPSLOTS_ARTIFACT_TEMPLATE_REGRESSION"] == "1" {
+            NSApplication.shared.setActivationPolicy(.prohibited)
+            Task { @MainActor in
+                let report: [String: Any]
+                if env["CLIPSLOTS_ARTIFACT_REMOTE_PANEL_REGRESSION"] == "1" {
+                    report = await runArtifactRemotePanelRegression(directory: directory)
+                } else if env["CLIPSLOTS_ARTIFACT_HTTPS_REGRESSION"] == "1" {
+                    report = await runArtifactHTTPSRegression(directory: directory)
+                } else if env["CLIPSLOTS_ARTIFACT_TEMPLATE_REGRESSION"] == "1" {
+                    report = await runArtifactTemplateRegression(directory: directory)
+                } else if env["CLIPSLOTS_ARTIFACT_PRESENTATION_REGRESSION"] == "1" {
+                    report = await runArtifactPresentationRegression(directory: directory)
+                } else if env["CLIPSLOTS_APP_REPLY_PAGE_REGRESSION"] == "1" {
+                    report = await runAppReplyPageRegression(directory: directory)
+                } else { report = await runArtifactPageRegression(directory: directory) }
+                do {
+                    try JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys])
+                        .write(to: directory.appendingPathComponent("report.json"), options: .atomic)
+                } catch { exit(2) }
+                exit((report["failures"] as? [String])?.isEmpty == true ? 0 : 1)
+            }
+            NSApplication.shared.run()
+            exit(2)
+        }
+        if env["CLIPSLOTS_READBACK_REGRESSION"] == "1" || env["CLIPSLOTS_CLOUD_SESSION_REGRESSION"] == "1"
+            || env["CLIPSLOTS_CONTEXT_USAGE_REGRESSION"] == "1" || env["CLIPSLOTS_SUBAGENT_REGRESSION"] == "1"
+            || env["CLIPSLOTS_STEER_REGRESSION"] == "1" || env["CLIPSLOTS_DECISION_REGRESSION"] == "1" {
+            Task { @MainActor in
+                let report: [String: Any]
+                if env["CLIPSLOTS_DECISION_REGRESSION"] == "1" {
+                    report = await runGatewayDecisionRegression(directory: directory)
+                } else if env["CLIPSLOTS_STEER_REGRESSION"] == "1" {
+                    report = await runGatewaySteerRegression(directory: directory)
+                } else if env["CLIPSLOTS_SUBAGENT_REGRESSION"] == "1" {
+                    report = await runTaskSubagentRegression(directory: directory)
+                } else if env["CLIPSLOTS_CONTEXT_USAGE_REGRESSION"] == "1" {
+                    report = await runContextUsageRegression(directory: directory)
+                } else if env["CLIPSLOTS_CLOUD_SESSION_REGRESSION"] == "1" {
+                    report = await runCloudSessionRegression(directory: directory)
+                } else { report = await runCanvasReadbackRegression(directory: directory) }
+                do {
+                    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+                    try JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys])
+                        .write(to: directory.appendingPathComponent("report.json"), options: .atomic)
+                } catch { exit(2) }
+                exit((report["failures"] as? [String])?.isEmpty == true ? 0 : 1)
+            }
+            dispatchMain()
+        }
         let report = run()
         do {
             try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
@@ -99,15 +153,19 @@ enum CanvasNestedGroupRegression {
             let beforeLayout = store.history.cursor
             store.updateGroupMeasurements(measurements, projectID: store.activeProjectId, allowLayout: false)
             check(store.history.cursor == beforeLayout, "真实 Store 拖拽门控不布局")
-            store.reconcileMeasuredServerGroups()
+            store.reconcileMeasuredServerGroups(projectID: store.activeProjectId, allowLayout: false)
+            check(store.history.cursor == beforeLayout, "真实 Store reconcile 入口也拒绝 live gesture 写入")
+            store.reconcileMeasuredServerGroups(projectID: "old-project", allowLayout: true)
+            check(store.history.cursor == beforeLayout, "真实 Store reconcile 入口拒绝旧项目写入")
+            store.reconcileMeasuredServerGroups(projectID: store.activeProjectId, allowLayout: true)
             check(store.history.cursor == beforeLayout + 1 && store.serverGroupLayoutStates[parent.id] == .applied,
                   "真实 Store 实际尺寸 ready 记录布局事务")
             check(store.serverGroupLayoutStates[child.id] == .nestedServer, "真实 Store nested server guard")
             let laidOut = store.groups
-            store.reconcileMeasuredServerGroups()
+            store.reconcileMeasuredServerGroups(projectID: store.activeProjectId, allowLayout: true)
             check(store.history.cursor == beforeLayout + 1 && store.groups == laidOut, "真实 Store 签名去重")
             _ = store.undo()
-            store.reconcileMeasuredServerGroups()
+            store.reconcileMeasuredServerGroups(projectID: store.activeProjectId, allowLayout: true)
             check(store.history.cursor == beforeLayout && store.groups.last?.measuredLayoutSignature == nil,
                   "真实 Store 自动布局 undo 不被回调立即重做")
             check(store.flushSave(), "真实 Store 群组和 receipt 落盘")

@@ -85,6 +85,12 @@ private func coldStorage(forGroup gid: String) -> SlotStorage {
 
 let t = TestRunner()
 
+runAgentArtifactResourceTests(t)
+if CommandLine.arguments.contains("--artifact-resource-only") { t.report() }
+runAgentToolMessageHistoryTests(t)
+if CommandLine.arguments.contains("--tool-message-history-only") { t.report() }
+runApplicationDiagnosticsTests(t)
+if CommandLine.arguments.contains("--diagnostics-only") { t.report() }
 runResourceBudgetTests(t)
 if CommandLine.arguments.contains("--resource-budget-only") { t.report() }
 runSearchSnapshotTests(t)
@@ -147,6 +153,9 @@ if CommandLine.arguments.contains("--prompt-contract-only") {
 }
 
 if CommandLine.arguments.contains("--gateway-only") {
+    runAuthoritativeContextUsageTests(t)
+    runContextCompactionTranscriptTests(t)
+    runTaskSubagentProjectionTests(t)
     runAgentRunGatewayTests(t)
     t.report()
 }
@@ -154,6 +163,9 @@ if CommandLine.arguments.contains("--gateway-only") {
 if CommandLine.arguments.contains("--artifacts-only") {
     runAgentArtifactTests(t)
     runAgentArtifactGatewayPayloadTests(t)
+    runAgentArtifactPageProtocolTests(t)
+    runAgentArtifactPageDataTests(t)
+    runAgentAppReplyTests(t)
     t.report()
 }
 
@@ -169,6 +181,7 @@ if CommandLine.arguments.contains("--nested-groups-only") {
 
 if CommandLine.arguments.contains("--canvas-sync-only") {
     runAgentCanvasSyncTests(t)
+    runAgentCanvasReadbackTests(t)
     t.report()
 }
 
@@ -2180,8 +2193,7 @@ do {
     t.check(AppSkin.defaultsKey != "appearanceMode",
             "★★皮肤键名绝不能撞上 ThemeMode 的 appearanceMode（深浅与风格是两个正交维度）")
     t.equal(AppSkin.fallback, .minimal, "★新安装默认值必须是简洁模式")
-    t.equal(AppSkin.allCases.count, 2, "皮肤只有多彩 / 简洁两种")
-    t.equal(AppSkin.colorful.rawValue, "colorful", "rawValue 是持久化格式，不能改")
+    t.equal(AppSkin.allCases, [.minimal], "界面只有简洁模式")
     t.equal(AppSkin.minimal.rawValue, "minimal", "rawValue 是持久化格式，不能改")
 
     let suiteName = "clipslots.smoke.skin.\(UUID().uuidString)"
@@ -2198,8 +2210,29 @@ do {
         defaults.set("rainbow", forKey: AppSkin.defaultsKey)
         t.equal(AppSkin.load(from: defaults), .minimal, "★脏值必须回退到默认皮肤，而不是崩或空白界面")
 
-        AppSkin.colorful.store(in: defaults)
-        t.equal(AppSkin.load(from: defaults), .colorful, "切回多彩模式应正常")
+        for mode in ["light", "dark", "system"] {
+            defaults.set(mode, forKey: "appearanceMode")
+            defaults.set("colorful", forKey: AppSkin.defaultsKey)
+            defaults.set("unchanged", forKey: "unrelated")
+            t.equal(AppSkin.load(from: defaults), .minimal, "旧多彩设置自动迁移")
+            t.equal(defaults.string(forKey: AppSkin.defaultsKey), "minimal", "迁移写入规范值")
+            t.equal(defaults.string(forKey: "appearanceMode"), mode, "迁移保留明暗选择")
+            t.equal(defaults.string(forKey: "unrelated"), "unchanged", "迁移保留其他设置")
+            let before = defaults.dictionaryRepresentation() as NSDictionary
+            _ = AppSkin.load(from: defaults)
+            t.check(before.isEqual(to: defaults.dictionaryRepresentation()), "重复加载不改偏好")
+        }
+        do {
+            let decoder = JSONDecoder()
+            let legacy = try decoder.decode(AppSkin.self, from: Data("\"colorful\"".utf8))
+            t.equal(legacy, .minimal, "历史 Codable 风格兼容读取")
+            t.equal(String(data: try JSONEncoder().encode(legacy), encoding: .utf8),
+                    "\"minimal\"", "历史风格重新编码为简洁")
+            t.equal(try decoder.decode(AppSkin.self, from: Data("\"minimal\"".utf8)),
+                    .minimal, "简洁风格编码兼容")
+            t.check((try? decoder.decode(AppSkin.self, from: Data("\"unknown\"".utf8))) == nil,
+                    "无效编码仍报错")
+        } catch { t.check(false, "风格编码迁移失败：\(error)") }
     } else {
         t.check(false, "无法创建测试用 UserDefaults suite")
     }
@@ -2364,14 +2397,6 @@ do {
             t.check(n <= 0.02 + 1e-9, "★★\(name)：新拟物表面色必须是灰阶（RGB 极差 \(String(format: "%.4f", n))）")
         }
     }
-
-    // ── ⑥ 多彩模式必须**真的带色**，否则两种皮肤就没区别了
-    let colorfulSlider = MinimalSkinPalette.neutrality(NeumorphicPalette.colorfulLight.sliderFill)
-    t.check(colorfulSlider > 0.15,
-            "★★多彩模式的选中滑块必须是品牌彩色（RGB 极差 \(String(format: "%.3f", colorfulSlider))），否则和简洁模式无异")
-    t.check(MinimalSkinPalette.neutrality(NeumorphicPalette.colorfulLight.well) >
-            MinimalSkinPalette.neutrality(NeumorphicPalette.minimalLight.well),
-            "★多彩模式的内凹底要比简洁模式带色（这是两种皮肤在同一几何下的主要区分手段）")
 
     // ── ⑦ 几何：两种皮肤共用，且几个尺寸间的关系不能被随手改坏
     // v2.11.7 hotfix10: 竖开关（switchTrack*/switchKnob*）还原，这 4 条几何断言随之恢复。
@@ -2904,72 +2929,6 @@ do {
     let huge = CGSize(width: 4000, height: 3000)
     let o = NoticeMetrics.hudOrigin(windowFrame: window, contentSize: huge, screenVisibleFrame: screen)
     t.check(o.x.isFinite && o.y.isFinite, "超大卡片下 HUD 落点必须是有限值")
-}
-
-// MARK: - NOTICE-PALETTE (v2.11.7 hotfix14) 多彩皮肤 Toast 必须分明暗两档
-//
-// hotfix13 只给多彩皮肤做了深色一档（#1C1C1E @ 90%），浅色系统外观下那张近黑卡片贴在
-// 浅灰白画布上就是一块与界面无关的黑条。这里把「两档必须不同、且各自方向正确」钉住。
-do {
-    let dark = NoticePalette.colorfulSurface(dark: true)
-    let light = NoticePalette.colorfulSurface(dark: false)
-
-    t.check(dark != light, "★★多彩皮肤的明暗两档 Toast 外观必须不同（hotfix14 的核心）")
-    t.equal(dark, NoticePalette.colorfulDark, "dark=true 应取深色档")
-    t.equal(light, NoticePalette.colorfulLight, "dark=false 应取浅色档")
-
-    // 深色档 = hotfix13 的原设计，逐项钉死，防止后续改浅色档时顺手动了它。
-    t.check(dark.isDarkSurface, "深色档卡片底应标记为深色")
-    t.equal(dark.material, .ultraThin, "深色档应用 ultraThinMaterial")
-    t.equal(dark.tint.opacity, 0.90, "深色档染层不透明度应为 90%")
-    t.check(abs(dark.tint.red - 0.110) < 0.0005
-                && abs(dark.tint.green - 0.110) < 0.0005
-                && abs(dark.tint.blue - 0.118) < 0.0005,
-            "深色档染层应为 #1C1C1E")
-    t.equal(dark.border.red, 1, "深色档细边应为白色")
-    t.equal(dark.border.opacity, 0.15, "深色档细边应为白 15%")
-    t.equal(dark.shadow.opacity, 0.30, "深色档投影应为黑 30%")
-    t.equal(dark.shadow.radius, 12, "深色档投影 blur 应为 12")
-    t.equal(dark.titleInk.opacity, 1.0, "深色档标题应为纯白")
-    t.check(dark.titleInk.luminance > 0.9, "★★深色档标题必须是亮色文字")
-    t.check(dark.subtitleInk.luminance > 0.9 && dark.subtitleInk.opacity < 1.0,
-            "深色档副标题应为半透明白")
-
-    // 浅色档（hotfix14 新增）：白 95% + thinMaterial + 黑 8% 细边 + 黑 15% blur 8 + 深色文字。
-    t.check(!light.isDarkSurface, "★★浅色档卡片底不得再标记为深色")
-    t.equal(light.material, .thin, "浅色档应用 thinMaterial")
-    t.equal(light.tint.opacity, 0.95, "浅色档染层不透明度应为 95%")
-    t.check(light.tint.luminance > 0.99, "★★浅色档染层必须是白色")
-    t.equal(light.border.red, 0, "浅色档细边应为黑色系")
-    t.equal(light.border.opacity, 0.08, "浅色档细边应为黑 8%")
-    t.equal(light.shadow.opacity, 0.15, "浅色档投影应为黑 15%")
-    t.equal(light.shadow.radius, 8, "浅色档投影 blur 应为 8")
-    t.check(light.titleInk.luminance < 0.2, "★★浅色档标题必须是深色文字（这正是用户报的 bug）")
-    t.check(light.subtitleInk.luminance < 0.2 && light.subtitleInk.opacity < 1.0,
-            "浅色档副标题应为半透明深墨")
-
-    // 两档之间的方向性关系。
-    t.check(light.tint.luminance > dark.tint.luminance + 0.5,
-            "★★浅色档卡片底必须显著亮于深色档")
-    t.check(light.titleInk.luminance < dark.titleInk.luminance - 0.5,
-            "★★浅色档文字必须显著暗于深色档（否则白字白底）")
-    t.check(light.shadow.opacity < dark.shadow.opacity && light.shadow.radius < dark.shadow.radius,
-            "浅底上的投影必须比深色档更轻更紧")
-    t.equal(light.borderWidth, dark.borderWidth, "两档细边宽度应一致（几何不随皮肤/明暗变化）")
-
-    // 文字与卡片底的对比方向：任一档都不许出现「白字白底 / 黑字黑底」。
-    for (name, style) in [("dark", dark), ("light", light)] {
-        let gap = abs(style.titleInk.luminance - style.tint.luminance)
-        t.check(gap > 0.5, "★★\(name) 档标题与卡片底的亮度差必须足够（\(gap)）")
-        t.check(style.isDarkSurface == (style.titleInk.luminance > style.tint.luminance),
-                "\(name) 档 isDarkSurface 应与「亮字压深底」一致")
-    }
-
-    // 幂等：同一入参多次取值必须完全一致（纯数据，不读全局状态）。
-    for _ in 0..<3 {
-        t.equal(NoticePalette.colorfulSurface(dark: true), dark, "深色档取值应幂等")
-        t.equal(NoticePalette.colorfulSurface(dark: false), light, "浅色档取值应幂等")
-    }
 }
 
 // MARK: - MINIMAL-HOVER (v2.11.7 hotfix15) 简洁模式卡片悬停描边必须是中性的
@@ -3953,11 +3912,21 @@ final class SmokeEventLog: @unchecked Sendable {
         case .interactionRequested: storage.append("interaction")
         case .sessionStarted: storage.append("session")
         case .runState: storage.append("runState")
+        case .runStreamActivity: storage.append("runStreamActivity")
+        case .steerCapability: storage.append("steerCapability")
+        case .steerState: storage.append("steerState")
         case .artifactUpdated: storage.append("artifactUpdated")
         case .canvasChanged: storage.append("canvasChanged")
+        case .canvasReadbackRequested: storage.append("canvasReadbackRequested")
+        case .subagentCanvasScopes: storage.append("subagentCanvasScopes")
+        case .taskSnapshot: storage.append("taskSnapshot")
+        case .subagentEvent: storage.append("subagentEvent")
+        case .contextUsage: storage.append("contextUsage")
+        case .contextCompaction: storage.append("contextCompaction")
         case .reasoningDelta: storage.append("reasoning")
         case .contentDelta: storage.append("content")
         case .assistantCompleted: storage.append("assistant")
+        case .assistantUpdated: storage.append("assistantUpdated")
         case .toolStarted: storage.append("toolStarted")
         case .toolCompleted: storage.append("toolCompleted")
         case .usage: storage.append("usage")
@@ -9439,10 +9408,17 @@ runTapNowReplicaTests(t)
 runCanvasPileTests(t)
 runAgentExecutionJournalTests(t)
 runAgentCanvasSyncTests(t)
+runAgentCanvasReadbackTests(t)
 runCanvasNestedGroupTests(t)
 runAgentRunGatewayTests(t)
+runAuthoritativeContextUsageTests(t)
+runContextCompactionTranscriptTests(t)
+runTaskSubagentProjectionTests(t)
 runAgentArtifactTests(t)
 runAgentArtifactGatewayPayloadTests(t)
+runAgentArtifactPageProtocolTests(t)
+runAgentArtifactPageDataTests(t)
+runAgentAppReplyTests(t)
 runGenerationPromptContractTests(t)
 runStorageAvailabilityTests(t)
 runAgentCredentialWaitTests(t)

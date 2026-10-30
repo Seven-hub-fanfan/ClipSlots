@@ -2,12 +2,12 @@ import SwiftUI
 import AppKit
 import ClipSlotsKit
 
-/// 画布统一外观。V2.17.4 支持浅/深 × 简洁/多彩，颜色在绘制时解析。
+/// 画布统一简洁外观，深浅颜色在绘制时解析。
 /// 几何沿用 TapNow 参考：16pt 点阵、12pt 卡片圆角、44pt 工具条、
 /// 18pt 端口与 28pt 偏移；连线使用细实线曲线，拖动不吸附网格。
-/// 简洁主题使用中性色，多彩主题以节点类型色和蓝紫操作色区分层次。
+/// 使用中性色区分层次。
 enum TapSkin {
-    /// Appearance is resolved at paint time. Skin changes rebuild the existing host once.
+    /// Appearance is resolved at paint time.
     static func tone(_ light: UInt32, _ dark: UInt32) -> Color {
         func rgb(_ hex: UInt32) -> NSColor {
             NSColor(srgbRed: CGFloat((hex >> 16) & 255) / 255,
@@ -18,34 +18,24 @@ enum TapSkin {
             appearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua ? b : a
         })
     }
-    static var colorful: Bool { AppSkinCenter.current == .colorful }
     static var ink: Color { tone(0x25262b, 0xf0f1f4) }
     static var secondaryInk: Color { tone(0x666970, 0xb0b3bc) }
     static var faintInk: Color { tone(0x7a7d85, 0x90949e) }
     static var border: Color { tone(0xd4d6dd, 0x3b3e47) }
     static var subtleFill: Color { tone(0xedeef2, 0x292c33) }
-    static var accent: Color { colorful ? tone(0x4e5de4, 0x9aa5ff) : ink }
-    static var onAccent: Color { colorful ? tone(0xffffff, 0x101425) : tone(0xffffff, 0x17181b) }
+    static var accent: Color { ink }
+    static var onAccent: Color { tone(0xffffff, 0x17181b) }
     static func nodeAccent(_ kind: CanvasNodeKind) -> Color {
-        guard colorful else { return ink }
-        switch kind {
-        case .text: return tone(0x8454c7, 0xbb9bea)
-        case .image: return tone(0x147d76, 0x75c8bf)
-        case .video: return tone(0x3869c8, 0x91b4fc)
-        case .slot, .batchTemplate: return tone(0xa86b18, 0xe7be7a)
-        case .audio: return tone(0xa5498c, 0xe8a0d1)
-        case .threeD, .stage: return tone(0x3869c8, 0x91b4fc)
-        case .timeline: return tone(0x147d76, 0x75c8bf)
-        }
+        ink
     }
 
     // MARK: - 画布
 
     /// 不透明底色，避免编辑区的装饰背景透进画布。
-    static var void: Color { colorful ? tone(0xf1f3f9, 0x10131b) : tone(0xf3f3f3, 0x080808) }
+    static var void: Color { tone(0xf3f3f3, 0x080808) }
 
     /// 点阵网格颜色。`#4A4A4A` 看着很亮，但点只有 1.2pt，视觉密度极低。
-    static var gridDot: Color { colorful ? tone(0xc2c7d6, 0x3b4256) : tone(0xc7c7c7, 0x404040) }
+    static var gridDot: Color { tone(0xc7c7c7, 0x404040) }
     /// 网格间距（画布坐标，会随 zoom 缩放）。
     static let gridStep: CGFloat = 16
     /// 点直径。低于 1pt 在非 Retina 上会被抹掉，高于 1.5pt 就开始"有颗粒感"。
@@ -55,10 +45,10 @@ enum TapSkin {
 
     static let cardRadius: CGFloat = 12
     /// 空卡填充（没有媒体时那块灰）。
-    static var cardEmptyFill: Color { colorful ? tone(0xffffff, 0x20242f) : tone(0xffffff, 0x1f1f1f) }
+    static var cardEmptyFill: Color { tone(0xffffff, 0x1f1f1f) }
     /// 选中时空卡提亮一档。实测 `#343434`——这是**唯一**一处选中态改了卡片本身的地方，
     /// 而且只在空卡上看得出来（有媒体时媒体自己盖住了填充）。
-    static var cardEmptySelectedFill: Color { colorful ? tone(0xf3f4ff, 0x2c3040) : tone(0xf9f9f9, 0x292929) }
+    static var cardEmptySelectedFill: Color { tone(0xf9f9f9, 0x292929) }
     /// 空态中心 glyph。
     static var cardEmptyGlyph: Color { faintInk }
     static let cardEmptyGlyphSize: CGFloat = 24
@@ -95,7 +85,7 @@ enum TapSkin {
 
     // MARK: - 工具条 / 浮层
 
-    static var chromeFill: Color { colorful ? tone(0xfefeff, 0x222632) : tone(0xfefefe, 0x222222) }
+    static var chromeFill: Color { tone(0xfefefe, 0x222222) }
     static var chromeInk: Color { ink }
     static var chromeInkDim: Color { secondaryInk }
     static var chromeDivider: Color { border }

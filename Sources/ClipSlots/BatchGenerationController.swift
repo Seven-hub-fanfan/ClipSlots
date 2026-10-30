@@ -10,6 +10,7 @@ final class BatchGenerationController: ObservableObject {
     @Published private(set) var batches: [BatchGeneration] = []
     @Published private(set) var isLoading = false
     @Published private(set) var runningID: UUID?
+    @Published private(set) var isRecovering = false
     @Published private(set) var activeCount = 0
     @Published private(set) var peakActiveCount = 0
     @Published var error: String?
@@ -84,11 +85,36 @@ final class BatchGenerationController: ObservableObject {
         } catch { self.error = "停止状态未能保存：\(error.localizedDescription)" }
     }
 
-    func recover(_ id: UUID, store: SlotStoreObservable) {
-        guard runningID == nil, let batch = batch(id), batch.items.contains(where: \.canRecover) else { return }
+    func canRetry(_ id: UUID, itemID: UUID) -> Bool {
+        guard !isLoading, !isRecovering, runningID == nil || runningID == id,
+              runningID == nil || batch(id)?.stopRequested != true,
+              let batch = batch(id), let item = batch.items.first(where: { $0.id == itemID }),
+              item.canRetry else { return false }
+        return GenerationRunStore.shared.load(project: batch.projectID, id: item.runID)?
+            .requiresSubmissionReconciliation != true
+    }
+
+    @discardableResult
+    func retry(_ id: UUID, itemID: UUID, store: SlotStoreObservable,
+               model: CrateModelCatalog.ModelInfo?) -> Bool {
+        guard canRetry(id, itemID: itemID) else { return false }
+        do {
+            try edit(id) { batch in
+                guard let index = batch.items.firstIndex(where: { $0.id == itemID }) else { return }
+                batch.items[index].prepareRetry()
+                batch.stopRequested = false
+            }
+        } catch { self.error = "无法重新生成：\(error.localizedDescription)"; return false }
+        if runningID == nil { launch(id, store: store, model: model, recoveryOnly: false) }
+        return true
+    }
+
+    func recover(_ id: UUID, itemID: UUID? = nil, store: SlotStoreObservable) {
+        guard runningID == nil, !isLoading, let batch = batch(id),
+              batch.items.contains(where: { $0.canRecover && (itemID == nil || $0.id == itemID) }) else { return }
         do { try edit(id) { $0.stopRequested = false } }
         catch { self.error = "无法恢复：\(error.localizedDescription)"; return }
-        launch(id, store: store, model: nil, recoveryOnly: true)
+        launch(id, store: store, model: nil, recoveryOnly: true, recoveryItemID: itemID)
     }
 
     func batch(_ id: UUID) -> BatchGeneration? { batches.first { $0.id == id } }
@@ -108,17 +134,17 @@ final class BatchGenerationController: ObservableObject {
     }
 
     private func launch(_ id: UUID, store: SlotStoreObservable,
-                        model: CrateModelCatalog.ModelInfo?, recoveryOnly: Bool) {
-        runningID = id; error = nil; activeCount = 0; peakActiveCount = 0
+                        model: CrateModelCatalog.ModelInfo?, recoveryOnly: Bool, recoveryItemID: UUID? = nil) {
+        runningID = id; isRecovering = recoveryOnly; error = nil; activeCount = 0; peakActiveCount = 0
         task = Task { @MainActor in
-            defer { runningID = nil; task = nil; activeCount = 0 }
+            defer { runningID = nil; isRecovering = false; task = nil; activeCount = 0 }
             guard let initial = batch(id) else { return }
             do {
                 try await CrateGenerationService.shared.preflight()
-                let eligible = initial.items.filter { recoveryOnly ? $0.canRecover : $0.status == .pending }
                 try await withThrowingTaskGroup(of: Void.self) { group in
-                    var next = 0
+                    var scheduled = Set<UUID>(), inFlight = 0
                     func enqueue(_ item: BatchGeneration.Item) {
+                        scheduled.insert(item.runID); inFlight += 1
                         group.addTask { @MainActor in
                             guard !Task.isCancelled, self.batch(id)?.stopRequested != true else { return }
                             self.activeCount += 1
@@ -128,12 +154,20 @@ final class BatchGenerationController: ObservableObject {
                                                    store: store, model: model, recoveryOnly: recoveryOnly)
                         }
                     }
-                    while next < min(initial.effectiveConcurrency, eligible.count) {
-                        enqueue(eligible[next]); next += 1
+                    @MainActor func fillWindow() {
+                        guard !Task.isCancelled, let latest = batch(id), !latest.stopRequested else { return }
+                        let eligible = latest.items.filter {
+                            !scheduled.contains($0.runID) && (recoveryOnly
+                                ? $0.canRecover && (recoveryItemID == nil || $0.id == recoveryItemID)
+                                : $0.status == .pending)
+                        }
+                        for item in eligible.prefix(max(0, latest.effectiveConcurrency - inFlight)) { enqueue(item) }
                     }
+                    fillWindow()
                     while try await group.next() != nil {
+                        inFlight -= 1
                         if Task.isCancelled || batch(id)?.stopRequested == true { group.cancelAll(); continue }
-                        if next < eligible.count { enqueue(eligible[next]); next += 1 }
+                        fillWindow()
                     }
                 }
             } catch {
@@ -203,7 +237,7 @@ final class BatchGenerationController: ObservableObject {
                 let urls = try await service.waitForCompletion(taskId: taskID,
                     timeout: item.node.kind == .video ? CrateGeneration.videoPollTimeout : CrateGeneration.pollTimeout,
                     recordingProject: projectID) { [weak self] progress in
-                        Task { @MainActor in self?.progress(progress, batchID: batchID, itemID: initial.id) }
+                        Task { @MainActor in self?.progress(progress, batchID: batchID, itemID: initial.id, runID: initial.runID) }
                     }
                 try Task.checkCancellation()
                 guard let first = urls.first else {
@@ -219,28 +253,27 @@ final class BatchGenerationController: ObservableObject {
                 try editItem(batchID, item.id) { $0.localFile = file.path; $0.status = .retained }
             }
             try Task.checkCancellation()
-            var attachment = SlotContent.SlotAttachment(name: file.lastPathComponent,
-                type: item.node.kind == .video ? .file : .image)
-            attachment.id = item.outputID; attachment.storagePath = file.path
-            do {
-                try await store.appendBatchGeneratedAttachment(attachment, source: item.source)
-                try editItem(batchID, item.id) { $0.status = .succeeded; $0.detail = item.detail }
-                try GenerationRunStore.shared.updateTask(project: projectID, taskID: taskID, outcome: "succeeded",
-                                                        outputIDs: [item.outputID.uuidString])
-            } catch {
-                try editItem(batchID, item.id) {
-                    $0.status = .retained; $0.detail = "产物已保留，未写回原槽位：\(message(error))"
-                }
-            }
+            try editItem(batchID, item.id) { $0.status = .succeeded; $0.detail = item.detail }
+            try GenerationRunStore.shared.updateTask(project: projectID, taskID: taskID, outcome: "succeeded")
         } catch {
             let run = GenerationRunStore.shared.load(project: projectID, id: item.runID)
             let known = item.taskID ?? run?.attempts.reversed().compactMap(\.taskID).first
+            let rejectedBeforeSubmission: Bool
+            switch error {
+            case CrateGenerationService.ServiceError.request, CrateGenerationService.ServiceError.inputChanged:
+                rejectedBeforeSubmission = true
+            default: rejectedBeforeSubmission = false
+            }
             try editItem(batchID, item.id) {
                 $0.taskID = known
+                if case CrateGenerationService.ServiceError.taskFailed = error {
+                    $0.remoteFailureConfirmed = true
+                }
                 if $0.localFile != nil { $0.status = .retained }
                 else if known != nil { $0.status = error is CancellationError ? .stopped : .failed }
                 else if error is CancellationError, run?.requiresSubmissionReconciliation != true { $0.status = .stopped }
                 else if run?.attempts.last?.status == .rejected { $0.status = .failed }
+                else if rejectedBeforeSubmission, run?.requiresSubmissionReconciliation != true { $0.status = .failed }
                 else if run?.requiresSubmissionReconciliation == true || $0.status == .submitting {
                     $0.status = .unknown
                 } else { $0.status = error is CancellationError ? .stopped : .failed }
@@ -258,9 +291,9 @@ final class BatchGenerationController: ObservableObject {
         }
     }
 
-    private func progress(_ value: CrateTaskProgress, batchID: UUID, itemID: UUID) {
+    private func progress(_ value: CrateTaskProgress, batchID: UUID, itemID: UUID, runID: UUID) {
         guard runningID == batchID, let item = batch(batchID)?.items.first(where: { $0.id == itemID }),
-              item.status == .tracking else { return }
+              item.runID == runID, item.status == .tracking else { return }
         let detail: String
         switch value {
         case .queued(let ahead): detail = ahead > 0 ? "排队中，前方 \(ahead) 个任务" : "排队中"

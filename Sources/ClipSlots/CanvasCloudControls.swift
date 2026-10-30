@@ -139,7 +139,8 @@ struct CanvasCloudControls: View {
                 || (localSpeech ? draft.audio.text : cloud.wrappedValue.prompt).trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         }
         if localSpeech { return draft.audio.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
-        return key.isEmpty || (cloud.wrappedValue.task?.id == nil && cloud.wrappedValue.task != nil)
+        return key.isEmpty || (cloud.wrappedValue.task?.id == nil && cloud.wrappedValue.task != nil &&
+                              cloud.wrappedValue.task?.canResumeRigCheck != true)
     }
     @ViewBuilder private var taskStatus: some View {
             if configuredAPI {
@@ -147,16 +148,34 @@ struct CanvasCloudControls: View {
             } else if !localSpeech {
                 if let task = cloud.wrappedValue.task {
                     HStack {
-                        Text("任务：\(task.id ?? "提交结果未知") · \(task.state.rawValue)").textSelection(.enabled).lineLimit(1)
+                        Text("任务：\(task.id ?? task.rigCheck?.id ?? "提交结果未知") · \(task.canResumeRigCheck ? "骨骼检查可继续" : task.state.rawValue)").textSelection(.enabled).lineLimit(1)
                         Spacer(minLength: 0)
-                        Button("新建任务") { cloud.wrappedValue.task = nil }
+                        Button("新建任务") {
+                            cloud.wrappedValue.replacesReceiptID = session.cloudRecovery?.id ?? task.receiptID
+                            cloud.wrappedValue.task = nil
+                        }
                     }.font(.system(size: 10)).foregroundColor(CanvasSkin.secondaryInk)
                     if task.state == .unknown {
                         Text("先在服务控制台确认提交结果，再新建任务，避免重复扣费。")
                             .font(.system(size: 10)).foregroundColor(CanvasSkin.secondaryInk)
                     }
+                } else if let recovery = session.cloudRecovery, [.submitting, .unknown, .pending].contains(recovery.task.state) {
+                    HStack {
+                        Text("原任务：\(recovery.task.id ?? "提交结果待核对")").textSelection(.enabled)
+                        Spacer(minLength: 0)
+                        Button("核对后新建") { cloud.wrappedValue.replacesReceiptID = recovery.id }
+                    }.font(.system(size: 10)).foregroundColor(CanvasSkin.secondaryInk)
                 } else if key.isEmpty {
                     Text("在参数中填写服务密钥后生成").font(.system(size: 10)).foregroundColor(CanvasSkin.faintInk)
+                }
+                if session.hasCloudResult {
+                    Button("取回已生成结果") { session.recoverCachedCloud() }
+                        .disabled(session.busy)
+                        .accessibilityIdentifier("tool-cloud-recover-result")
+                } else if session.cloudRecovery?.task.id != nil || session.cloudRecovery?.task.canResumeRigCheck == true {
+                    Button("查询原任务结果") { session.recoverCloudTask(key: key) }
+                        .disabled(session.busy || key.isEmpty)
+                        .accessibilityIdentifier("tool-cloud-recover-task")
                 }
             }
     }

@@ -2,25 +2,36 @@ import Foundation
 
 /// Decorates existing tools with a fixed, user-selected root for one Agent turn.
 public final class AgentDirectoryTools: AgentToolExecuting, AgentCLICommandAuthorizing {
-    public static let names: Set<String> = ["local_list_directory", "local_read_file", "local_write_file"]
+    public static let names: Set<String> = [
+        "local_list_directory", "local_read_file", "local_write_file", "local_directory_tree",
+        "local_batch_write", "local_organize_files", "local_undo_directory",
+        "local_directory_history",
+        "local_propose_shell", "local_execute_proposal"
+    ]
+    static let writers: Set<String> = ["local_write_file", "local_batch_write", "local_organize_files", "local_undo_directory"]
     private let base: AgentToolExecuting
-    private let access: AgentDirectoryAccess
-    private let readOnly: Bool
-    private let absolutePaths: Bool
-    private let automaticWrites: Bool
-    private let confirmReads: Bool
-    private let onInteraction: @Sendable (AgentInteraction) async -> Void
+    let access: AgentDirectoryAccess
+    let readOnly: Bool
+    let absolutePaths: Bool
+    let automaticWrites: Bool
+    let confirmReads: Bool
+    let onInteraction: @Sendable (AgentInteraction) async -> Void
+    let isCurrent: @Sendable () async -> Bool
+    let allowShell: Bool
+    let shellProposals = AgentDirectoryShellProposals()
 
     public init(base: AgentToolExecuting, access: AgentDirectoryAccess, readOnly: Bool = false,
                 absolutePaths: Bool = false, automaticWrites: Bool = false, confirmReads: Bool = false,
+                allowShell: Bool = false, isCurrent: @escaping @Sendable () async -> Bool = { true },
                 onInteraction: @escaping @Sendable (AgentInteraction) async -> Void) {
         self.base = base; self.access = access; self.readOnly = readOnly; self.onInteraction = onInteraction
         self.absolutePaths = absolutePaths; self.automaticWrites = automaticWrites
         self.confirmReads = confirmReads
+        self.allowShell = allowShell; self.isCurrent = isCurrent
     }
     public func restrictedForPreview() -> AgentDirectoryTools {
         AgentDirectoryTools(base: AgentPreviewTools.restricted(base), access: access,
-                            readOnly: true, absolutePaths: absolutePaths, onInteraction: onInteraction)
+                            readOnly: true, absolutePaths: absolutePaths, isCurrent: isCurrent, onInteraction: onInteraction)
     }
     public func permitsCLI(_ command: String) -> Bool {
         if readOnly && !["list", "read", "search", "groups", "pages", "version", "help"].contains(command) {
@@ -45,21 +56,29 @@ public final class AgentDirectoryTools: AgentToolExecuting, AgentCLICommandAutho
                  ["path": path, "offset": ["type": "integer", "minimum": 0]], ["path"])]
         if !readOnly && (absolutePaths || access.isWritable) {
             extra.append(spec("local_write_file", (automaticWrites ? "按本轮目录范围与自动生成授权创建或更新 UTF-8 文件。" : "请求用户确认后创建或更新 UTF-8 文件。")
-                + "更新时必须提供最近读取的 expected_sha256；新建传空字符串。父目录必须存在。",
+                + "更新时必须提供最近读取的 expected_sha256；新建传空字符串。父目录必须存在。返回undo_id以供撤销。",
                 ["path": path, "content": ["type": "string"], "expected_sha256": ["type": "string"]],
                 ["path", "content", "expected_sha256"]))
         }
-        return base.specs() + extra
+        if access.isActive {
+            extra += extendedSpecs(path: path)
+            return base.specs() + extra
+        }
+        return base.specs()
     }
 
     public func execute(call: AgentToolCall) async -> AgentToolResult {
         guard call.name.hasPrefix("local_") else { return await base.execute(call: call) }
         do {
             try Task.checkCancellation()
+            try await checkCurrent()
             guard let spec = specs().first(where: { $0.name == call.name }),
                   Self.names.contains(call.name) else { throw AgentDirectoryError.permissionDenied }
             let input = try JSONValue.decode(jsonText: call.argumentsJSON)
             try GenerationSchema.validate(input, schema: spec.parameters)
+            if !["local_list_directory", "local_read_file", "local_write_file"].contains(call.name) {
+                return try await executeExtended(call: call, input: input)
+            }
             guard let suppliedPath = input["path"]?.stringValue else { throw AgentDirectoryError.invalidPath }
             if confirmReads, call.name != "local_write_file" {
                 let decision = DirectoryDecision()
@@ -74,6 +93,7 @@ public final class AgentDirectoryTools: AgentToolExecuting, AgentCLICommandAutho
                 defer { request.invalidate() }
                 while decision.value == nil && Date() < request.expiresAt {
                     try Task.checkCancellation()
+                    try await checkCurrent()
                     guard request.isPending else { break }
                     try await Task.sleep(for: .milliseconds(80))
                 }
@@ -81,23 +101,15 @@ public final class AgentDirectoryTools: AgentToolExecuting, AgentCLICommandAutho
                     return .failure("未允许本次读取。", code: "DECLINED")
                 }
             }
-            var path = absolutePaths && suppliedPath.hasPrefix("/") ? String(suppliedPath.dropFirst()) : suppliedPath
-            // macOS exposes these OS directory aliases at /. Resolve only the
-            // known system alias; arbitrary file/parent links remain rejected.
-            if absolutePaths {
-                for alias in ["var", "tmp", "etc"] where path == alias || path.hasPrefix(alias + "/") {
-                    if let target = try? FileManager.default.destinationOfSymbolicLink(atPath: "/" + alias),
-                       target == "private/" + alias || target == "/private/" + alias {
-                        path = "private/" + path
-                    }
-                }
-            }
+            let path = normalizedPath(suppliedPath)
             let result: JSONValue
             if call.name == "local_list_directory" {
                 let offset = input["offset"]?.intValue ?? 0
-                result = try await Task.detached { [access] in try access.list(path, offset: offset) }.value
+                result = try await directoryOperation { [access] cancelled in
+                    try access.list(path, offset: offset, cancelled: cancelled)
+                }
             } else if call.name == "local_read_file" {
-                let data = try await Task.detached { [access] in try access.read(path) }.value
+                let data = try await directoryOperation { [access] cancelled in try access.read(path, cancelled: cancelled) }
                 guard let text = String(data: data, encoding: .utf8) else { throw AgentDirectoryError.unsupportedFile }
                 let offset = min(text.count, max(0, input["offset"]?.intValue ?? 0))
                 let page = String(text.dropFirst(offset).prefix(8000))
@@ -110,7 +122,7 @@ public final class AgentDirectoryTools: AgentToolExecuting, AgentCLICommandAutho
                 guard bytes.count <= AgentDirectoryAccess.maxFileBytes else { throw AgentDirectoryError.tooLarge }
                 // Verify the proposed target before presenting a request.
                 let existing: Data?
-                do { existing = try await Task.detached { [access] in try access.read(path) }.value }
+                do { existing = try await directoryOperation { [access] cancelled in try access.read(path, cancelled: cancelled) } }
                 catch AgentDirectoryError.unavailable { existing = nil }
                 let expected = hash.isEmpty ? nil : hash
                 guard existing.map(AgentDirectoryAccess.digest) == expected else { throw AgentDirectoryError.changed }
@@ -125,23 +137,31 @@ public final class AgentDirectoryTools: AgentToolExecuting, AgentCLICommandAutho
                 defer { request.invalidate() }
                 while decision.value == nil && Date() < request.expiresAt {
                     try Task.checkCancellation()
+                    try await checkCurrent()
                     guard request.isPending else { break }
                     try await Task.sleep(for: .milliseconds(80))
                 }
                 try Task.checkCancellation()
+                try await checkCurrent()
                 guard decision.value == true else {
                     return .failure("用户拒绝或确认已过期，文件未修改。", code: "DECLINED")
                 }
-                try await Task.detached { [access] in
-                    try access.write(path, data: bytes, expectedDigest: expected)
-                }.value
+                let written = try await directoryOperation { [access] cancelled in
+                    try access.batchWrite([.init(path: path, data: bytes, expectedDigest: expected)],
+                                          accepted: [true], cancelled: cancelled)
+                }
+                guard written["complete"] == true else {
+                    return .failure(try written.encodedText(), code: written["items"]?.arrayValue?.first?["error_code"]?.stringValue
+                        ?? "LOCAL_DIRECTORY_ERROR")
+                }
                 result = ["path": .string(path), "written_bytes": .number(Double(bytes.count)),
-                          "sha256": .string(AgentDirectoryAccess.digest(bytes))]
+                          "sha256": .string(AgentDirectoryAccess.digest(bytes)), "undo_id": written["undo_id"] ?? .null,
+                          "persistent": written["persistent"] ?? false]
             }
             return .init(content: try result.encodedText(), summary: call.name == "local_write_file" ? "文件已保存" : "已读取工作目录")
         } catch {
             return .failure(error is CancellationError ? "本轮已停止。" : error.localizedDescription,
-                            code: error is CancellationError ? "CANCELLED" : "LOCAL_DIRECTORY_ERROR")
+                            code: AgentDirectoryAccess.errorCode(error).stringValue ?? "LOCAL_DIRECTORY_ERROR")
         }
     }
 }

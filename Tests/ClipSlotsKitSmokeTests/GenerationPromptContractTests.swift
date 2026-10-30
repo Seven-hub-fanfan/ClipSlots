@@ -8,6 +8,24 @@ func runGenerationPromptContractTests(_ t: TestRunner) {
     let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
     defer { try? FileManager.default.removeItem(at: root) }
     do {
+        for tail in ["", "\n{broken", "\n" + #"{"success":false,"error":"late error"}"#] {
+            let result = try CrateGeneration.confirmedSubmission(
+                #"{"taskId":"9007199254740993999","input":{"seed":12}}"# + tail)
+            t.equal(result?.taskId, "9007199254740993999", "accepted receipt survives trailing output")
+            t.equal(result?.seed, 12, "accepted receipt preserves returned seed")
+        }
+        for output in [#"{"taskId":"one","task_id":"two"}"#,
+                       #"{"taskId":"one"}"# + "\n" + #"{"taskId":"two"}"#,
+                       #"{"taskId":9007199254740993999}"#, #"{"taskId":"bad id"}"#] {
+            t.expectThrows("conflicting or unsafe task ID stays unknown") {
+                _ = try CrateGeneration.confirmedSubmission(output)
+            }
+        }
+        t.check(try CrateGeneration.confirmedSubmission("{broken") == nil, "missing receipt stays unknown")
+        t.expectThrows("wrong query task never updates current task") {
+            _ = try CrateGeneration.parseTaskStatus(#"{"taskInfo":{"task_id":"other","task_status":2}}"#,
+                                                    expectedTaskID: "original")
+        }
         for (kind, args, record) in [
             ("image", try CrateGeneration.submitArguments(image), GenerationRequestRecord(image, resourceIDs: [:])),
             ("video", try CrateGeneration.submitArguments(video), GenerationRequestRecord(video, resourceIDs: [:]))

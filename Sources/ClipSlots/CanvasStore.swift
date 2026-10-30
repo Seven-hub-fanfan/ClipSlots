@@ -63,6 +63,13 @@ final class CanvasStore: ObservableObject {
 
     private let nodesSubject = CurrentValueSubject<[CanvasNode], Never>([])
     var nodeChanges: AnyPublisher<[CanvasNode], Never> { nodesSubject.eraseToAnyPublisher() }
+    /// Conflict observers need every edit, including an edit immediately
+    /// undone before the coalesced UI notification. These events do not
+    /// invalidate views or retain a second full graph snapshot.
+    private let nodeEditSubject = PassthroughSubject<[CanvasNode], Never>()
+    private let edgeEditSubject = PassthroughSubject<[CanvasEdge], Never>()
+    var nodeEditEvents: AnyPublisher<[CanvasNode], Never> { nodeEditSubject.eraseToAnyPublisher() }
+    var edgeEditEvents: AnyPublisher<[CanvasEdge], Never> { edgeEditSubject.eraseToAnyPublisher() }
     private var graphNotificationQueued = false
     private func notifyGraphChange() {
         guard !graphNotificationQueued else { return }
@@ -80,7 +87,7 @@ final class CanvasStore: ObservableObject {
         didSet { graphRevision &+= 1 }
     }
     private(set) var nodes: [CanvasNode] = [] {
-        didSet { graphRevision &+= 1; notifyGraphChange() }
+        didSet { graphRevision &+= 1; nodeEditSubject.send(nodes); notifyGraphChange() }
     }
     /// 节点之间的连线（v2.12.0）。
     ///
@@ -88,7 +95,7 @@ final class CanvasStore: ObservableObject {
     /// —— 但那条通路走的是 View 侧 `dragOffset`（与节点自身相同的办法），不经过这个数组。
     /// 这里只在"真的增删改了一条线"时才变。
     private(set) var edges: [CanvasEdge] = [] {
-        didSet { graphRevision &+= 1; notifyGraphChange() }
+        didSet { graphRevision &+= 1; edgeEditSubject.send(edges); notifyGraphChange() }
     }
     private(set) var groups: [CanvasNodeGroup] = [] { didSet { notifyGraphChange() } }
     private(set) var piles: [CanvasPile] = [] {
@@ -473,8 +480,9 @@ final class CanvasStore: ObservableObject {
     func switchProject(to id: String) -> Bool {
         guard id != activeProjectId, projects.contains(where: { $0.id == id }) else { return false }
         guard flushSave() else { return false }
-        touchProject(id: id)
         adoptProject(id: id)
+        // Persist the newly active ID. Saving before adoption records the project being left.
+        touchProject(id: id)
         return true
     }
 
@@ -1014,11 +1022,12 @@ final class CanvasStore: ObservableObject {
         guard projectID == activeProjectId else { return }
         groupMeasurementProjectID = projectID
         groupMeasurements = measurements
-        if allowLayout { reconcileMeasuredServerGroups() }
+        reconcileMeasuredServerGroups(projectID: projectID, allowLayout: allowLayout)
     }
 
-    func reconcileMeasuredServerGroups() {
-        guard groupMeasurementProjectID == activeProjectId, !documentLoadFailed,
+    func reconcileMeasuredServerGroups(projectID: String, allowLayout: Bool) {
+        guard allowLayout, projectID == activeProjectId,
+              groupMeasurementProjectID == activeProjectId, !documentLoadFailed,
               groups.contains(where: { $0.provenance == .server && $0.autoLayoutEnabled != false }) else { return }
         do {
             let result = try CanvasServerGroupLayout.reconcile(gatewayDocument(), measurements: groupMeasurements,

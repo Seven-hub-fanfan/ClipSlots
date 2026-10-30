@@ -150,7 +150,8 @@ public final class TikaCLIService: NSObject, AgentBackend, @unchecked Sendable {
             let assistantMsg = AgentMessage(role: .assistant,
                                             content: assistantText,
                                             reasoning: outcome.accumulator.reasoning.isEmpty ? nil : outcome.accumulator.reasoning,
-                                            toolCalls: toolCalls + directoryCalls)
+                                            toolCalls: toolCalls + directoryCalls,
+                                            executionScope: (tools as? any AgentToolExecutionScoped)?.executionScope)
             await onEvent(.assistantCompleted(assistantMsg))
             produced.append(assistantMsg)
 
@@ -163,10 +164,11 @@ public final class TikaCLIService: NSObject, AgentBackend, @unchecked Sendable {
             // 3c. 同一轮可包含多条独立命令；顺序执行、逐条回报并检查取消。
             var resultFragments: [String] = []
             for (item, toolCall) in zip(extraction.items, toolCalls) {
+                let origin = AgentToolMessageOrigin(assistantID: assistantMsg.id, scope: assistantMsg.executionScope)
                 try Task.checkCancellation()
                 switch item.payload {
                 case .ok(let call):
-                    await onEvent(.toolStarted(toolCall))
+                    await onEvent(.toolStarted(toolCall, origin: origin))
                     try Task.checkCancellation()
                     let allowedByMode = (tools as? AgentCLICommandAuthorizing)?.permitsCLI(call.subcommand) ?? true
                     if sessionConfig.canvasPreviewOnly || !allowedByMode {
@@ -174,9 +176,10 @@ public final class TikaCLIService: NSObject, AgentBackend, @unchecked Sendable {
                             ? "请只返回待预览的正文，用户确认后才会应用到画布。"
                             : "当前访问模式没有开放此命令，请调整权限后重试。",
                             code: sessionConfig.canvasPreviewOnly ? "PREVIEW_REQUIRED" : "ACCESS_MODE_DENIED")
-                        await onEvent(.toolCompleted(callId: toolCall.id, name: toolCall.name, result: rejection))
+                        await onEvent(.toolCompleted(callId: toolCall.id, name: toolCall.name, result: rejection, origin: origin))
                         produced.append(AgentMessage(role: .tool, content: rejection.content,
-                            toolCallId: toolCall.id, toolName: toolCall.name, isFailure: true))
+                            toolCallId: toolCall.id, toolName: toolCall.name, isFailure: true,
+                            executionScope: assistantMsg.executionScope, toolOrigin: origin))
                         resultFragments.append(rejection.content)
                         continue
                     }
@@ -197,14 +200,15 @@ public final class TikaCLIService: NSObject, AgentBackend, @unchecked Sendable {
                         content: exec.stdout.isEmpty ? exec.stderr : exec.stdout,
                         isFailure: !ok,
                         summary: ok ? "OK" : "FAIL(\(cliResult.code))")
-                    await onEvent(.toolCompleted(callId: toolCall.id, name: toolCall.name, result: uiResult))
+                    await onEvent(.toolCompleted(callId: toolCall.id, name: toolCall.name, result: uiResult, origin: origin))
 
                     // 把 tool 消息也放进 produced（AgentChatModel 会把它显示成"工具行"）
                     produced.append(AgentMessage(role: .tool,
                                                  content: exec.stdout,
                                                  toolCallId: toolCall.id,
                                                  toolName: toolCall.name,
-                                                 isFailure: !ok))
+                                                 isFailure: !ok,
+                                                 executionScope: assistantMsg.executionScope, toolOrigin: origin))
 
                 case .error(let err):
                     let rejection = ClipSlotsToolExecutionResult.rejection(err)
@@ -212,20 +216,22 @@ public final class TikaCLIService: NSObject, AgentBackend, @unchecked Sendable {
                     resultFragments.append(envelope)
 
                     // 也上报为一次失败的 tool call，方便用户看到"Agent 编了个 rm，被拒了"
-                    await onEvent(.toolStarted(toolCall))
+                    await onEvent(.toolStarted(toolCall, origin: origin))
                     let failedResult = AgentToolResult.failure(err.message, code: err.code)
-                    await onEvent(.toolCompleted(callId: toolCall.id, name: toolCall.name, result: failedResult))
+                    await onEvent(.toolCompleted(callId: toolCall.id, name: toolCall.name, result: failedResult, origin: origin))
                     produced.append(AgentMessage(role: .tool,
                                                  content: err.message,
                                                  toolCallId: toolCall.id,
                                                  toolName: toolCall.name,
-                                                 isFailure: true))
+                                                 isFailure: true,
+                                                 executionScope: assistantMsg.executionScope, toolOrigin: origin))
                 }
             }
 
             for call in directoryCalls {
                 try Task.checkCancellation()
-                await onEvent(.toolStarted(call))
+                let origin = AgentToolMessageOrigin(assistantID: assistantMsg.id, scope: assistantMsg.executionScope)
+                await onEvent(.toolStarted(call, origin: origin))
                 let result: AgentToolResult
                 if (call.name.hasPrefix("canvas_") || sessionConfig.workingDirectory != nil), let tools,
                    tools.specs().contains(where: { $0.name == call.name }) {
@@ -233,9 +239,10 @@ public final class TikaCLIService: NSObject, AgentBackend, @unchecked Sendable {
                 } else {
                     result = .failure("本轮没有授权此工作目录工具。", code: "LOCAL_DIRECTORY_NOT_AUTHORIZED")
                 }
-                await onEvent(.toolCompleted(callId: call.id, name: call.name, result: result))
+                await onEvent(.toolCompleted(callId: call.id, name: call.name, result: result, origin: origin))
                 produced.append(AgentMessage(role: .tool, content: result.content,
-                    toolCallId: call.id, toolName: call.name, isFailure: result.isFailure))
+                    toolCallId: call.id, toolName: call.name, isFailure: result.isFailure,
+                    executionScope: assistantMsg.executionScope, toolOrigin: origin))
                 resultFragments.append(result.content)
             }
 

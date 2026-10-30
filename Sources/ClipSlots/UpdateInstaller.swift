@@ -89,7 +89,7 @@ final class UpdateInstaller {
         // 通过护栏：先落盘「已尝试安装该版本」，再真正动 bundle。顺序很关键——即使后续
         // 安装崩溃或重启后又被误判为需要更新，去重依据也已经存在。
         UpdateInstallGuardStore.recordAttempt(targetTag: version)
-        NSLog("[ClipSlots][Update] 开始安装：目标=\(version) 运行中=\(running) dmg=\(dmgPath)")
+        NSLog("[ClipSlots][Update] 开始安装")
 
         let appName = "ClipSlots.app"
         let targetApp = "/Applications/\(appName)"
@@ -109,7 +109,7 @@ final class UpdateInstaller {
             // ★ UPD-LOOP-FIX (v2.10.92): 安装没走到「替换成功 + 重启」就失败 → 清掉去重记录，
             // 否则一次偶发失败会把该版本永久拉黑，用户之后再也装不上这个版本（见 clearAttempt 注释）。
             UpdateInstallGuardStore.clearAttempt(reason: message)
-            NSLog("[ClipSlots][Update] 安装失败：目标=\(version) 原因=\(message)")
+            NSLog("[ClipSlots][Update] 安装失败")
             DispatchQueue.main.async { failure(message) }
         }
 
@@ -124,7 +124,7 @@ final class UpdateInstaller {
             do {
                 try Self.runProcess("/usr/bin/hdiutil", ["verify", dmgPath, "-quiet"], timeout: 120)
             } catch {
-                NSLog("[ClipSlots] UpdateInstaller: hdiutil verify 未通过（非致命，继续安装）：\(error.localizedDescription)")
+                NSLog("[ClipSlots] UpdateInstaller: hdiutil verify 未通过：\(ApplicationDiagnostics.error(error))")
             }
 
             // 2. 挂载 DMG。
@@ -436,7 +436,7 @@ final class UpdateInstaller {
         do {
             try runProcess("/usr/bin/hdiutil", ["detach", mountPoint, "-quiet", "-force"], timeout: 60)
         } catch {
-            NSLog("[ClipSlots] UpdateInstaller: detach 失败，重试一次：\(error.localizedDescription)")
+            NSLog("[ClipSlots] UpdateInstaller: detach 失败，重试一次：\(ApplicationDiagnostics.error(error))")
             do {
                 try runProcess("/usr/bin/hdiutil", ["detach", mountPoint, "-quiet", "-force"], timeout: 60)
             } catch {
@@ -444,7 +444,7 @@ final class UpdateInstaller {
                 // 既不清理也不记录，反复更新失败会在 /private/tmp 残留大量 clipslots-update-mnt-* 挂载卷
                 // 与目录。改为把挂载点记入待清理列表，下次更新流程启动时由 reapStalePendingMounts() 兜底
                 // 卸载并删除，避免无界泄漏。
-                NSLog("[ClipSlots] UpdateInstaller: detach 重试仍失败，记录待清理：\(error.localizedDescription)")
+                NSLog("[ClipSlots] UpdateInstaller: detach 重试仍失败，记录待清理：\(ApplicationDiagnostics.error(error))")
                 recordPendingMountCleanup(mountPoint)
                 return
             }

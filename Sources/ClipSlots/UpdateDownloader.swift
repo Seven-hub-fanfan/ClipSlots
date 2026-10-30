@@ -77,8 +77,7 @@ final class UpdateDownloader: NSObject {
                 + "不下载、不安装（防同版本重装循环）")
             return
         }
-        NSLog("[ClipSlots][Update] 开始下载：目标=\(version) 运行中=\(running) url=\(url.absoluteString) "
-            + "期望大小=\(expectedSize) 期望SHA256=\(expectedSHA256 ?? "无")")
+        NSLog("[ClipSlots][Update] 开始下载：期望大小=\(expectedSize) 有哈希=\(expectedSHA256 != nil)")
 
         // 若已有下载在进行，先取消旧的。
         cancel()
@@ -253,7 +252,7 @@ final class UpdateDownloader: NSObject {
             let expectedLower = expected.lowercased()
             guard let actual = Self.sha256HexOfFile(atPath: dest.path) else {
                 try? fm.removeItem(at: dest)
-                NSLog("[ClipSlots][Update] SHA-256 校验失败：无法读取下载文件计算哈希，path=\(dest.path)")
+                NSLog("[ClipSlots][Update] SHA-256 校验失败：无法读取下载文件计算哈希")
                 handleFailure("下载文件完整性校验失败：无法读取文件计算哈希。下载可能已损坏，请重试。")
                 return
             }
@@ -281,7 +280,7 @@ final class UpdateDownloader: NSObject {
         // v2.10.7: 下载完成后不再要求手动拖拽 DMG。切换面板为「安装就绪」，
         // 用户点击「安装并重启」即自动完成挂载 + ditto 替换 + 重启。
         pendingInstallDMGPath = dest.path
-        NSLog("[ClipSlots][Update] 下载完成并通过校验：目标=\(version) path=\(dest.path)，等待用户点击「安装并重启」")
+        NSLog("[ClipSlots][Update] 下载完成并通过校验，等待用户点击「安装并重启」")
         presentInstallReady()
     }
 

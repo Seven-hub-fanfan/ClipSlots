@@ -97,12 +97,6 @@ enum AppTheme {
 
     // MARK: - Skin（v2.11.7 简洁模式）
 
-    /// 当前皮肤。视图侧判断「要不要画彩色装饰」时读它。
-    static var skin: AppSkin { AppSkinCenter.current }
-
-    /// 简洁模式下为真。比 `skin == .minimal` 读起来顺一点，调用点很多。
-    static var isMinimalSkin: Bool { AppSkinCenter.current == .minimal }
-
     /// 把 Kit 里的中性调色板包成动态色。
     ///
     /// 注意这里**不能**偷懒写成 `dyn(light: .white, dark: .black).opacity(x)`：简洁模式的灰阶是
@@ -166,31 +160,27 @@ enum AppTheme {
     // 也让两者在视觉语言上自洽：**简洁模式里出现彩色，就意味着「这里有状态」**。
 
     /// 装饰性图标 / 文字的着色。
-    static var chromeAccentInk: Color { isMinimalSkin ? minimalControlInk : TapSkin.accent }
+    static var chromeAccentInk: Color { minimalControlInk }
 
     /// 装饰性图标背后的浅色底板（原先各处裸写 `Color.accentColor.opacity(0.12~0.16)`）。
-    private static var colorfulChromeAccentSoftFill: Color { TapSkin.accent.opacity(0.14) }
-    static var chromeAccentSoftFill: Color { isMinimalSkin ? minimalControlFill : colorfulChromeAccentSoftFill }
+    static var chromeAccentSoftFill: Color { minimalControlFill }
 
     /// 更淡一档的装饰底（快捷键提示条那种「几乎看不见」的色块）。
-    private static var colorfulChromeAccentFaintFill: Color { TapSkin.accent.opacity(0.06) }
     private static let minimalChromeAccentFaintFill = minimalAlpha(light: 0.035, dark: 0.16)
     static var chromeAccentFaintFill: Color {
-        isMinimalSkin ? minimalChromeAccentFaintFill : colorfulChromeAccentFaintFill
+        minimalChromeAccentFaintFill
     }
 
     /// 实心品牌色块（App logo 底板、有附件的计数胶囊）及其上的文字色 / 投影。
     static var chromeAccentTile: AnyShapeStyle {
-        isMinimalSkin ? AnyShapeStyle(minimalControlFill) : AnyShapeStyle(brandGradient)
+        AnyShapeStyle(minimalControlFill)
     }
-    static var chromeAccentTileInk: Color { isMinimalSkin ? minimalControlInk : onAccentText }
-    private static let colorfulChromeAccentTileShadow = Color.accentColor.opacity(0.25)
-    static var chromeAccentTileShadow: Color { isMinimalSkin ? .clear : colorfulChromeAccentTileShadow }
+    static var chromeAccentTileInk: Color { minimalControlInk }
+    static var chromeAccentTileShadow: Color { .clear }
 
     /// 实心品牌色块的描边。多彩模式靠白色高光提亮渐变；简洁模式改用与卡片同源的细边框
     /// （中性灰块没有渐变可提亮，白高光只会变成脏边）。
-    private static let colorfulChromeAccentTileStroke = Color.white.opacity(0.22)
-    static var chromeAccentTileStroke: Color { isMinimalSkin ? minimalBorder : colorfulChromeAccentTileStroke }
+    static var chromeAccentTileStroke: Color { minimalBorder }
 
     // MARK: - Brand
 
@@ -239,9 +229,7 @@ enum AppTheme {
     // 工具栏去掉浮动面板后，它的承载面就是窗口底本身，两处必须**同源**——否则工具栏区
     // 会重新变成一块颜色略不同的方块压在内容上（简洁模式那侧同源于 MinimalSkinPalette.window，
     // 由 smoke 断言钉住两边相等）。取值与 hotfix4 之前逐位相同，视觉零变化。
-    private static let colorfulWindowBackground = dyn(light: color(NeumorphicPalette.colorfulLight.ground),
-                                                      dark: color(NeumorphicPalette.colorfulDark.ground))
-    static var windowBackground: Color { isMinimalSkin ? minimalWindow : colorfulWindowBackground }
+    static var windowBackground: Color { minimalWindow }
     static func windowBackground(_ scheme: ColorScheme) -> Color { windowBackground }
 
     // MARK: 画布与 Agent 的共享外观（V2.17.4）
@@ -323,25 +311,16 @@ enum AppTheme {
     /// 纯文本节点的占位文案色（★ v2.11.16）。
     static var canvasTextNodePlaceholderInk: Color { TapSkin.faintInk }
 
-    private static let colorfulElevatedBackground = dyn(light: Color.white.opacity(0.82),
-                                                        dark: Color.white.opacity(0.055))
-    static var elevatedBackground: Color { isMinimalSkin ? minimalCardFilled : colorfulElevatedBackground }
+    static var elevatedBackground: Color { minimalCardFilled }
     static func elevatedBackground(_ scheme: ColorScheme) -> Color { elevatedBackground }
 
-    private static let colorfulHeaderBackground = dyn(light: Color.white.opacity(0.72),
-                                                      dark: Color.white.opacity(0.04))
-    static var headerBackground: Color { isMinimalSkin ? minimalCardEmpty : colorfulHeaderBackground }
+    static var headerBackground: Color { minimalCardEmpty }
     static func headerBackground(_ scheme: ColorScheme) -> Color { headerBackground }
 
     // MARK: - Card
 
-    private static let cardBackgroundFilled = dyn(light: Color(red: 0.995, green: 0.99, blue: 0.98),
-                                                  dark: Color(red: 0.105, green: 0.108, blue: 0.115).opacity(0.98))
-    private static let cardBackgroundEmpty = dyn(light: Color(red: 0.965, green: 0.955, blue: 0.935),
-                                                 dark: Color(red: 0.105, green: 0.108, blue: 0.115).opacity(0.92))
     static func cardBackground(isEmpty: Bool = false) -> Color {
-        if isMinimalSkin { return isEmpty ? minimalCardEmpty : minimalCardFilled }
-        return isEmpty ? cardBackgroundEmpty : cardBackgroundFilled
+        isEmpty ? minimalCardEmpty : minimalCardFilled
     }
     static func cardBackground(_ scheme: ColorScheme, isEmpty: Bool = false) -> Color {
         cardBackground(isEmpty: isEmpty)
@@ -407,52 +386,34 @@ enum AppTheme {
         })
     }
 
-    /// High-chroma light fills for card actions. These stay bright without relying on
-    /// opacity, which would mix the hue with the card background and create a muted gray cast.
-    private static let slotActionAccents: [Color] = [
-        dyn(light: Color(red: 0.56, green: 0.93, blue: 0.65), dark: Color(red: 0.42, green: 0.82, blue: 0.55)),
-        dyn(light: Color(red: 1.00, green: 0.82, blue: 0.28), dark: Color(red: 0.94, green: 0.76, blue: 0.32)),
-        dyn(light: Color(red: 1.00, green: 0.62, blue: 0.30), dark: Color(red: 0.95, green: 0.55, blue: 0.31)),
-        dyn(light: Color(red: 0.98, green: 0.52, blue: 0.70), dark: Color(red: 0.91, green: 0.48, blue: 0.64)),
-        dyn(light: Color(red: 0.45, green: 0.75, blue: 1.00), dark: Color(red: 0.48, green: 0.72, blue: 0.92))
-    ]
-
     static func slotActionAccent(_ slot: Int) -> Color {
-        // 简洁模式：操作按钮全部收成中性灰。槽位身份只由编号角标承载。
-        if isMinimalSkin { return minimalControlFill }
-        return slotActionAccents[max(0, slot - 1) % slotActionAccents.count]
+        minimalControlFill
     }
     static func slotActionAccent(_ slot: Int, scheme: ColorScheme) -> Color { slotActionAccent(slot) }
 
-    private static let colorfulPreviewBackground = dyn(light: Color.black.opacity(0.035), dark: Color.black.opacity(0.22))
     static var previewBackground: Color {
-        isMinimalSkin ? minimalPreviewBackground : colorfulPreviewBackground
+        minimalPreviewBackground
     }
     static func previewBackground(_ scheme: ColorScheme) -> Color { previewBackground }
 
-    private static let colorfulSubtleBorder = dyn(light: Color.black.opacity(0.075), dark: Color.white.opacity(0.10))
-    static var subtleBorder: Color { isMinimalSkin ? minimalBorder : colorfulSubtleBorder }
+    static var subtleBorder: Color { minimalBorder }
     static func subtleBorder(_ scheme: ColorScheme) -> Color { subtleBorder }
 
     static let activeBorder = dynAccent(lightOpacity: 0.32, darkOpacity: 0.45)
     static func activeBorder(_ scheme: ColorScheme) -> Color { activeBorder }
 
-    private static let cardShadowFilled = dyn(light: Color.black.opacity(0.09), dark: Color.black.opacity(0.30))
-    private static let cardShadowEmpty = dyn(light: Color.black.opacity(0.035), dark: Color.black.opacity(0.16))
     static func cardShadow(isEmpty: Bool) -> Color {
-        if isMinimalSkin { return isEmpty ? minimalShadowEmpty : minimalShadowFilled }
-        return isEmpty ? cardShadowEmpty : cardShadowFilled
+        isEmpty ? minimalShadowEmpty : minimalShadowFilled
     }
     static func cardShadow(_ scheme: ColorScheme, isEmpty: Bool) -> Color { cardShadow(isEmpty: isEmpty) }
 
     /// 简洁模式的卡片投影半径：比多彩模式再收一档（6 → 4），配合极低的 alpha。
-    static var cardShadowRadius: CGFloat { isMinimalSkin ? 4 : 6 }
+    static var cardShadowRadius: CGFloat { 4 }
 
     private static let slotBadgeEmptyBackground = dyn(light: Color.black.opacity(0.06),
                                                      dark: Color.white.opacity(0.08))
     static func slotBadgeBackground(isEmpty: Bool) -> AnyShapeStyle {
-        if isMinimalSkin { return AnyShapeStyle(isEmpty ? slotBadgeEmptyBackground : minimalControlFill) }
-        return isEmpty ? AnyShapeStyle(slotBadgeEmptyBackground) : AnyShapeStyle(brandGradient)
+        AnyShapeStyle(isEmpty ? slotBadgeEmptyBackground : minimalControlFill)
     }
     static func slotBadgeBackground(_ scheme: ColorScheme, isEmpty: Bool) -> AnyShapeStyle {
         slotBadgeBackground(isEmpty: isEmpty)
@@ -460,12 +421,10 @@ enum AppTheme {
 
     // MARK: - Chip
 
-    private static let colorfulChipBackground = dyn(light: Color.black.opacity(0.045), dark: Color.white.opacity(0.075))
-    static var chipBackground: Color { isMinimalSkin ? minimalControlFill : colorfulChipBackground }
+    static var chipBackground: Color { minimalControlFill }
     static func chipBackground(_ scheme: ColorScheme) -> Color { chipBackground }
 
-    private static let colorfulSoftButtonBackground = dyn(light: Color.black.opacity(0.055), dark: Color.white.opacity(0.08))
-    static var softButtonBackground: Color { isMinimalSkin ? minimalControlFill : colorfulSoftButtonBackground }
+    static var softButtonBackground: Color { minimalControlFill }
     static func softButtonBackground(_ scheme: ColorScheme) -> Color { softButtonBackground }
 
     // MARK: - Radial Menu
@@ -689,18 +648,15 @@ enum AppTheme {
 
     // MARK: - Search Field (v2.5)
 
-    private static let colorfulSearchFieldBackground = dyn(light: Color.black.opacity(0.04), dark: Color.white.opacity(0.06))
-    static var searchFieldBackground: Color { isMinimalSkin ? minimalControlFill : colorfulSearchFieldBackground }
+    static var searchFieldBackground: Color { minimalControlFill }
     static func searchFieldBackground(_ scheme: ColorScheme) -> Color { searchFieldBackground }
 
-    private static let colorfulSearchFieldStroke = dyn(light: Color.black.opacity(0.08), dark: Color.white.opacity(0.10))
-    static var searchFieldStroke: Color { isMinimalSkin ? minimalBorder : colorfulSearchFieldStroke }
+    static var searchFieldStroke: Color { minimalBorder }
     static func searchFieldStroke(_ scheme: ColorScheme) -> Color { searchFieldStroke }
 
     // MARK: - Filter Chips (v2.5)
 
-    private static let colorfulFilterChipBackground = dyn(light: Color.black.opacity(0.04), dark: Color.white.opacity(0.05))
-    static var filterChipBackground: Color { isMinimalSkin ? minimalControlFill : colorfulFilterChipBackground }
+    static var filterChipBackground: Color { minimalControlFill }
     static func filterChipBackground(_ scheme: ColorScheme) -> Color { filterChipBackground }
 
     static let filterChipSelectedBackground = dynAccent(lightOpacity: 0.16, darkOpacity: 0.28)
@@ -723,22 +679,17 @@ enum AppTheme {
     static let actionButtonDangerActiveBackground = dyn(light: AppTheme.danger.opacity(0.14),
                                                         dark: AppTheme.danger)
     /// 卡片操作按钮：危险操作静息态底色。
-    private static let colorfulActionButtonDangerIdleBackground = dyn(light: Color.black.opacity(0.075),
-                                                                      dark: Color(red: 0.20, green: 0.21, blue: 0.23))
     static var actionButtonDangerIdleBackground: Color {
-        isMinimalSkin ? minimalControlFill : colorfulActionButtonDangerIdleBackground
+        minimalControlFill
     }
     /// 卡片操作按钮：强调色按钮上的文字（多彩模式两套主题都用深墨色压在鲜亮槽位色上以保对比度）。
-    private static let colorfulActionButtonAccentText = dyn(light: Color.black.opacity(0.72),
-                                                            dark: Color.black.opacity(0.82))
     static var actionButtonAccentText: Color {
         // 简洁模式的按钮底已经是中性灰，再压深墨色就会在深色下变成黑底黑字。
-        isMinimalSkin ? minimalControlInk : colorfulActionButtonAccentText
+        minimalControlInk
     }
     /// 卡片操作按钮：危险操作静息态文字。
-    private static let colorfulActionButtonDangerIdleText = dyn(light: Color.black.opacity(0.68), dark: .white)
     static var actionButtonDangerIdleText: Color {
-        isMinimalSkin ? minimalControlInk : colorfulActionButtonDangerIdleText
+        minimalControlInk
     }
 
     /// 顶部工具条上的软性胶囊底/描边（原 ContentView 内联取色）。

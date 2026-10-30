@@ -194,7 +194,7 @@ extension CanvasWorkspaceView {
             } else { check(false, "populated slot control geometry exists") }
         }
         canvas.clearSelection()
-        for skin in [AppSkin.minimal, .colorful] {
+        for skin in AppSkin.allCases {
             AppSkinCenter.apply(skin)
             for appearance in ["light", "dark"] {
                 UserDefaults.standard.set(appearance, forKey: AppearanceDefaults.key)

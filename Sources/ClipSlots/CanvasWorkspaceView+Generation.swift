@@ -304,16 +304,20 @@ extension CanvasWorkspaceView {
         let task = Task { @MainActor in
             defer { canvas.endGeneration(ticket.token) }
             let service = CrateGenerationService.shared
+            let provider = recovering ? (node.generationTask?.context ?? .crate) : .crate
             do {
-                try await service.preflight()
+                try await service.preflight(provider: provider)
                 guard canvas.shouldTrackGeneration(ticket.token) else { return }
                 let submitted = try await submit()
                 canvas.updateGeneration(ticket.token) {
                     $0.taskId = submitted.taskId
                     $0.modelEvaluationCellID = nil
-                    $0.generationTask = try? GenerationTaskHandle(context: .crate, taskID: submitted.taskId,
-                        capabilityID: node.model, kind: node.kind == .video ? .video : .image, seed: submitted.seed)
-                    if let seed = submitted.seed { $0.seed = seed }
+                    $0.generationTask = recovering ? (node.generationTask ?? (try? GenerationTaskHandle(
+                        context: provider, taskID: submitted.taskId, capabilityID: node.model,
+                        kind: node.kind == .video ? .video : .image, seed: submitted.seed))) :
+                        (try? GenerationTaskHandle(context: provider, taskID: submitted.taskId,
+                            capabilityID: node.model, kind: node.kind == .video ? .video : .image, seed: submitted.seed))
+                    if !recovering, let seed = submitted.seed { $0.seed = seed }
                 }
                 // 提交身份必须立即落盘：重启后“取回结果”可以继续查询，避免再次提交。
                 canvas.flushSave()
@@ -324,7 +328,7 @@ extension CanvasWorkspaceView {
                 let urls = try await service.waitForCompletion(
                     taskId: submitted.taskId,
                     timeout: node.kind == .video ? CrateGeneration.videoPollTimeout : CrateGeneration.pollTimeout,
-                    recordingProject: ticket.projectId
+                    recordingProject: ticket.projectId, provider: provider
                 ) { progress in
                     Task { @MainActor in
                         self.applyProgress(progress, token: ticket.token)
@@ -338,12 +342,13 @@ extension CanvasWorkspaceView {
                                                       index: 0, fallbackExtension: node.kind == .video ? "mp4" : "jpg")
                 defer { try? FileManager.default.removeItem(at: file.deletingLastPathComponent()) }
                 guard canvas.shouldTrackGeneration(ticket.token) else { return }
-                try await finishGeneration(token: ticket.token, file: file, taskId: submitted.taskId, projectID: ticket.projectId)
+                try await finishGeneration(token: ticket.token, file: file, taskId: submitted.taskId,
+                                           projectID: ticket.projectId, provider: provider)
             } catch {
                 guard canvas.shouldTrackGeneration(ticket.token) else { return }
                 let serviceError = error as? CrateGenerationService.ServiceError
                 let reason = serviceError?.userMessage ?? error.localizedDescription
-                NSLog("[ClipSlots][crate] node=\(node.id) \(serviceError?.logDetail ?? reason)")
+                NSLog("[ClipSlots][crate] node=\(node.id) failed=\(serviceError?.logDetail ?? ApplicationDiagnostics.error(error))")
                 canvas.updateGeneration(ticket.token) { $0.state = .failed(reason: reason) }
                 store.transientUI.showToast(reason, duration: 3)
             }

@@ -103,7 +103,7 @@ func runAgentReadabilityProbe(directory: URL, check: (Bool, String) -> Void) asy
     }
     let initialAppearance = UserDefaults.standard.string(forKey: AppearanceDefaults.key)
     let initialSkin = AppSkinCenter.current
-    for skin in [AppSkin.minimal, .colorful] {
+    for skin in AppSkin.allCases {
         AppSkinCenter.apply(skin)
         for appearance in ["light", "dark"] {
             UserDefaults.standard.set(appearance, forKey: AppearanceDefaults.key)

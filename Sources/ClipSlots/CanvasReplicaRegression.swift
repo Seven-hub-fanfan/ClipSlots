@@ -284,9 +284,6 @@ extension CanvasWorkspaceView {
         let current = CanvasAgentGroupsProbeBridge.current ?? self
         current.canvas.clearSelection()
         screenshot("replica-canvas-minimal-dark")
-        AppSkinCenter.apply(.colorful)
-        await settle()
-        screenshot("replica-canvas-colorful-dark")
         func rgb(_ color: Color, dark: Bool) -> [CGFloat] {
             var values: [CGFloat] = []
             NSAppearance(named: dark ? .darkAqua : .aqua)!.performAsCurrentDrawingAppearance {
@@ -296,12 +293,15 @@ extension CanvasWorkspaceView {
             }
             return values
         }
-        let colorfulDark = [CanvasSkin.void, CanvasSkin.cardEmptyFill, CanvasSkin.chromeFill,
-                            CanvasSkin.accent, CanvasSkin.nodeAccent(.image)].map { rgb($0, dark: true) }
-        AppSkinCenter.apply(.minimal)
-        let minimalDark = [CanvasSkin.void, CanvasSkin.cardEmptyFill, CanvasSkin.chromeFill,
-                           CanvasSkin.accent, CanvasSkin.nodeAccent(.image)].map { rgb($0, dark: true) }
-        check(colorfulDark == minimalDark, "canvas dark color tokens match across both skins")
+        for dark in [false, true] {
+            let background = rgb(CanvasSkin.void, dark: dark)
+            check(background.count == 4 && background[3] == 1,
+                  "canvas surface stays opaque in both appearances")
+            check(background.count == 4 && (dark ? background[0] < 0.1 : background[0] > 0.9),
+                  "canvas surface resolves the current appearance")
+            check(rgb(CanvasSkin.nodeAccent(.image), dark: dark) == rgb(CanvasSkin.ink, dark: dark),
+                  "node accents use minimal ink in both appearances")
+        }
         await settle()
         let mounted = CanvasAgentGroupsProbeBridge.current ?? self
         func elements(_ node: AnyObject, depth: Int = 0) -> [AnyObject] {

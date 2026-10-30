@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
 """Self-owned Gateway v1. Local HTTP transport; no bundled model credentials."""
 import argparse
+import base64
+import binascii
 import contextlib
 import fcntl
 import hashlib
 import hmac
 import json
+import math
 import os
 import re
 import sqlite3
@@ -17,10 +20,21 @@ import urllib.request
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+import app_reply
 
 MAX_BODY = 8 * 1024 * 1024
+MAX_IMAGE_BYTES = 1_048_576
+MAX_MESSAGE_IMAGE_BYTES = 2_097_152
+MAX_MESSAGE_IMAGES = 6
 TERMINAL = {"completed", "failed", "cancelled"}
 WAITING = {"waiting_question", "waiting_confirmation", "waiting_suspended"}
+STEER_VERSION = 1
+STEER_SAFE_POINTS = {"model_boundary", "tools_resolved"}
+MAX_PENDING_STEERS = 32
+MAX_RUN_STEERS = 64
+MAX_STEER_TEXT_BYTES = 262_144
+DECISION_VERSION = 1
+MAX_RUN_INTERACTIONS = 128
 
 
 class GatewayError(Exception):
@@ -53,9 +67,84 @@ def decode(data):
 
 
 def text(value, limit=1024, empty=False):
-    if not isinstance(value, str) or (not empty and not value) or len(value.encode()) > limit:
+    if not isinstance(value, str) or (not empty and not value):
         raise GatewayError(400, "INVALID_STRING")
+    try:
+        if len(value.encode("utf-8")) > limit:
+            raise GatewayError(400, "INVALID_STRING")
+    except UnicodeEncodeError:
+        raise GatewayError(400, "INVALID_STRING") from None
     return value
+
+
+def image_size(value):
+    """Validate a bounded captured image envelope; never fetch a remote URL.
+
+    ImageIO validates complete image data before the native client captures it.
+    The gateway validates MIME magic and transport shape, not full decoding.
+    """
+    if not isinstance(value, dict) or set(value) - {"url", "detail"}:
+        raise GatewayError(400, "INVALID_IMAGE")
+    if "detail" in value and value["detail"] not in ("auto", "low", "high"):
+        raise GatewayError(400, "INVALID_IMAGE")
+    url = value.get("url")
+    if not isinstance(url, str):
+        raise GatewayError(400, "INVALID_IMAGE")
+    match = re.fullmatch(r"data:(image/(?:png|jpeg|webp|gif));base64,([A-Za-z0-9+/]*={0,2})", url)
+    if not match:
+        raise GatewayError(400, "INVALID_IMAGE")
+    mime, encoded = match.groups()
+    if len(encoded) > 4 * ((MAX_IMAGE_BYTES + 2) // 3):
+        raise GatewayError(400, "IMAGE_LIMIT")
+    try:
+        data = base64.b64decode(encoded, validate=True)
+    except (ValueError, binascii.Error):
+        raise GatewayError(400, "INVALID_IMAGE") from None
+    if not data or base64.b64encode(data).decode("ascii") != encoded:
+        raise GatewayError(400, "INVALID_IMAGE")
+    if len(data) > MAX_IMAGE_BYTES:
+        raise GatewayError(400, "IMAGE_LIMIT")
+    signatures = {
+        "image/png": data.startswith(b"\x89PNG\r\n\x1a\n"),
+        "image/jpeg": data.startswith(b"\xff\xd8\xff"),
+        "image/gif": data.startswith((b"GIF87a", b"GIF89a")),
+        "image/webp": len(data) >= 12 and data[:4] == b"RIFF" and data[8:12] == b"WEBP",
+    }
+    if not signatures[mime]:
+        raise GatewayError(400, "INVALID_IMAGE")
+    return len(data)
+
+
+def validate_content(value, role, message_version, supports_images):
+    if isinstance(value, str):
+        text(value, MAX_BODY, empty=True)
+        return
+    if message_version != 1:
+        raise GatewayError(400, "MESSAGE_SCHEMA_VERSION")
+    if role != "user" or not isinstance(value, list) or not value:
+        raise GatewayError(400, "INVALID_MESSAGE_CONTENT")
+    # One textual snapshot plus at most six captured images, as in the native
+    # client. Bound text-only lists too; do not allow arbitrary model parts.
+    if len(value) > MAX_MESSAGE_IMAGES + 1:
+        raise GatewayError(400, "IMAGE_LIMIT")
+    count, total, texts = 0, 0, 0
+    for part in value:
+        if not isinstance(part, dict):
+            raise GatewayError(400, "INVALID_MESSAGE_CONTENT")
+        if part.get("type") == "text" and set(part) == {"type", "text"}:
+            texts += 1
+            if texts > 1:
+                raise GatewayError(400, "INVALID_MESSAGE_CONTENT")
+            text(part["text"], MAX_BODY, empty=True)
+        elif part.get("type") == "image_url" and set(part) == {"type", "image_url"}:
+            if not supports_images:
+                raise GatewayError(400, "IMAGE_INPUT_UNSUPPORTED")
+            count += 1
+            total += image_size(part["image_url"])
+            if count > MAX_MESSAGE_IMAGES or total > MAX_MESSAGE_IMAGE_BYTES:
+                raise GatewayError(400, "IMAGE_LIMIT")
+        else:
+            raise GatewayError(400, "INVALID_MESSAGE_CONTENT")
 
 
 def opaque(value):
@@ -81,17 +170,154 @@ def binding(value):
     return normalized
 
 
+def interaction_answer(body):
+    """v1 retains the exact answer bytes for a cross-language fingerprint."""
+    if "decisionSchemaVersion" not in body:
+        if "answer" not in body:
+            raise GatewayError(400, "MISSING_ANSWER")
+        return body["answer"], hashlib.sha256(encode(body["answer"]).encode()).hexdigest()
+    if type(body["decisionSchemaVersion"]) is not int or body["decisionSchemaVersion"] != DECISION_VERSION:
+        raise GatewayError(400, "DECISION_SCHEMA_VERSION")
+    if "answer" in body:
+        raise GatewayError(400, "AMBIGUOUS_ANSWER")
+    integer(body.get("requestRevision"))
+    fingerprint = text(body.get("requestFingerprint"), 64)
+    if re.fullmatch(r"[0-9a-f]{64}", fingerprint) is None:
+        raise GatewayError(400, "INVALID_REQUEST_FINGERPRINT")
+    raw = text(body.get("answerJSON"), MAX_BODY)
+    answer = decode(raw)
+    if not isinstance(answer, dict):
+        raise GatewayError(400, "INVALID_ANSWER")
+    return answer, hashlib.sha256(raw.encode()).hexdigest()
+
+
+def available_decisions(params):
+    decisions = params.get("availableDecisions", ["accept", "decline"])
+    if not isinstance(decisions, list) or not decisions \
+            or any(type(d) is not str or d not in {"accept", "decline"} for d in decisions) \
+            or len(set(decisions)) != len(decisions):
+        raise GatewayError(400, "INVALID_AVAILABLE_DECISIONS")
+    return decisions
+
+
+def validate_decision_request(kind, params):
+    if kind == "waiting_question":
+        questions = params.get("questions")
+        if not isinstance(questions, list) or not 1 <= len(questions) <= 32:
+            raise GatewayError(400, "INVALID_QUESTIONS")
+        identities = set()
+        for question in questions:
+            if not isinstance(question, dict):
+                raise GatewayError(400, "INVALID_QUESTIONS")
+            identity = opaque(question.get("id"))
+            if identity in identities:
+                raise GatewayError(400, "INVALID_QUESTIONS")
+            identities.add(identity)
+            text(question.get("question"), MAX_BODY)
+            options = question.get("options", [])
+            if not isinstance(options, list) or len(options) > 64:
+                raise GatewayError(400, "INVALID_QUESTIONS")
+            labels = []
+            for option in options:
+                if not isinstance(option, dict):
+                    raise GatewayError(400, "INVALID_QUESTIONS")
+                labels.append(text(option.get("label"), MAX_BODY))
+            if len(set(labels)) != len(labels):
+                raise GatewayError(400, "INVALID_QUESTIONS")
+            for flag in ("isSecret", "isOther"):
+                if flag in question and type(question[flag]) is not bool:
+                    raise GatewayError(400, "INVALID_QUESTIONS")
+    else:
+        available_decisions(params)
+        if "items" in params:
+            items = params["items"]
+            if not isinstance(items, list) or not 1 <= len(items) <= 64:
+                raise GatewayError(400, "INVALID_BATCH_DECISION")
+            indices = set()
+            for item in items:
+                if not isinstance(item, dict):
+                    raise GatewayError(400, "INVALID_BATCH_DECISION")
+                index = integer(item.get("index"))
+                if index in indices:
+                    raise GatewayError(400, "INVALID_BATCH_DECISION")
+                indices.add(index)
+                opaque(item.get("action"))
+                available_decisions(item)
+                allowed = item.get("allowedModifications", [])
+                if not isinstance(allowed, list) or len(allowed) > 64 \
+                        or any(not isinstance(key, str) or not key for key in allowed) \
+                        or len(set(allowed)) != len(allowed):
+                    raise GatewayError(400, "INVALID_BATCH_DECISION")
+    if "cost" in params:
+        cost = params["cost"]
+        if not isinstance(cost, dict):
+            raise GatewayError(400, "INVALID_COST_DECISION")
+        available_decisions(cost)
+
+
+def validate_decision_answer(kind, params, answer):
+    if not isinstance(answer, dict):
+        raise GatewayError(400, "INVALID_ANSWER")
+    expected = {"costDecision"} if "cost" in params else set()
+    if "cost" in params and answer.get("costDecision") not in available_decisions(params["cost"]):
+        raise GatewayError(400, "INVALID_COST_DECISION")
+    if kind == "waiting_question":
+        expected.add("answers")
+        answers = answer.get("answers")
+        questions = params["questions"]
+        if not isinstance(answers, dict) or set(answers) != {q["id"] for q in questions}:
+            raise GatewayError(400, "INVALID_ANSWER")
+        for question in questions:
+            values = answers[question["id"]]
+            if not isinstance(values, dict) or set(values) != {"answers"}:
+                raise GatewayError(400, "INVALID_ANSWER")
+            values = values["answers"]
+            if not isinstance(values, list) or len(values) != 1 or type(values[0]) is not str \
+                    or not values[0].strip():
+                raise GatewayError(400, "INVALID_ANSWER")
+            options = [o["label"] for o in question.get("options", [])]
+            if options and not question.get("isOther", False) and values[0] not in options:
+                raise GatewayError(400, "INVALID_ANSWER")
+    elif "items" in params:
+        expected.add("items")
+        items = answer.get("items")
+        if not isinstance(items, list) or len(items) != len(params["items"]):
+            raise GatewayError(400, "INVALID_BATCH_DECISION")
+        # Order is part of the request. Never zip after sorting or silently
+        # replace the original action/index with a generated position.
+        for original, item in zip(params["items"], items):
+            if not isinstance(item, dict) or set(item) != {"index", "action", "decision", "modifications"} \
+                    or type(item["index"]) is not int or item["index"] != original["index"] \
+                    or item["action"] != original["action"] \
+                    or item["decision"] not in available_decisions(original):
+                raise GatewayError(400, "INVALID_BATCH_DECISION")
+            modifications = item["modifications"]
+            if not isinstance(modifications, dict) or set(modifications) - set(original.get("allowedModifications", [])) \
+                    or (item["decision"] == "decline" and modifications):
+                raise GatewayError(400, "INVALID_BATCH_MODIFICATIONS")
+    else:
+        expected.add("decision")
+        if answer.get("decision") not in available_decisions(params):
+            raise GatewayError(400, "INVALID_ANSWER")
+    if set(answer) != expected:
+        raise GatewayError(400, "INVALID_ANSWER")
+
+
 def validate_command(body, interaction=False):
     if not isinstance(body, dict) or type(body.get("schemaVersion")) is not int or body["schemaVersion"] != 1:
         raise GatewayError(400, "SCHEMA_VERSION")
+    if "appReply" in body:
+        raise GatewayError(400, "APP_REPLY_REQUIRES_DEDICATED_ROUTE")
     opaque(body.get("requestKey"))
     scope = binding(body.get("binding"))
     if interaction:
         opaque(body.get("clientInstanceID"))
         opaque(body.get("interactionID"))
-        if "answer" not in body:
-            raise GatewayError(400, "MISSING_ANSWER")
+        interaction_answer(body)
         return scope
+    message_version = body.get("messageSchemaVersion", 0)
+    if type(message_version) is not int or message_version not in (0, 1):
+        raise GatewayError(400, "MESSAGE_SCHEMA_VERSION")
     opaque(body.get("clientInstanceID"))
     config = body.get("config")
     if not isinstance(config, dict):
@@ -102,6 +328,9 @@ def validate_command(body, interaction=False):
         raise GatewayError(400, "INVALID_THINKING_MODE")
     if config.get("taskPolicy") not in {"chat", "textPolish"}:
         raise GatewayError(400, "INVALID_TASK_POLICY")
+    supports_images = config.get("supportsImageInput", False)
+    if type(supports_images) is not bool:
+        raise GatewayError(400, "INVALID_IMAGE_CAPABILITY")
     integer(config.get("maxToolRounds"), 20)
     tools = body.get("tools")
     history = body.get("history")
@@ -124,7 +353,11 @@ def validate_command(body, interaction=False):
             uuid.UUID(text(message.get("id")))
         except ValueError:
             raise GatewayError(400, "INVALID_MESSAGE_ID") from None
-        text(message.get("content"), MAX_BODY, empty=True)
+        validate_content(message.get("content"), message["role"], message_version, supports_images)
+        if message.get("reasoning") is not None:
+            if message["role"] != "assistant":
+                raise GatewayError(400, "INVALID_REASONING_ROLE")
+            text(message["reasoning"], MAX_BODY, empty=True)
         calls = message.get("toolCalls", [])
         if not isinstance(calls, list) or len(calls) > 20:
             raise GatewayError(400, "INVALID_TOOL_CALLS")
@@ -155,6 +388,8 @@ def wire_history(command):
     result = [{"role": "system", "content": command["config"]["systemPrompt"]}]
     for item in command["history"]:
         message = {"role": item["role"], "content": item["content"]}
+        if item["role"] == "assistant" and item.get("reasoning") is not None:
+            message["reasoning_content"] = item["reasoning"]
         if item.get("toolCallID"):
             message["tool_call_id"] = item["toolCallID"]
         if item.get("toolCalls"):
@@ -165,6 +400,42 @@ def wire_history(command):
             ]
         result.append(message)
     return result
+
+
+def validate_steer(body, row):
+    """Only a captured user message. It cannot expand a run's frozen tools."""
+    allowed = {"schemaVersion", "steerSchemaVersion", "requestKey", "binding",
+               "runID", "clientInstanceID", "submissionID", "message"}
+    if set(body) != allowed or type(body.get("steerSchemaVersion")) is not int \
+            or body["steerSchemaVersion"] != STEER_VERSION:
+        raise GatewayError(400, "STEER_SCHEMA_VERSION")
+    submission = opaque(body.get("submissionID"))
+    try:
+        uuid.UUID(submission)
+    except ValueError:
+        raise GatewayError(400, "INVALID_SUBMISSION_ID") from None
+    if body["requestKey"] != "steer-" + submission:
+        raise GatewayError(400, "STEER_KEY_MISMATCH")
+    if body.get("clientInstanceID") != row["client"]:
+        raise GatewayError(409, "CLIENT_CONFLICT")
+    command = decode(row["command"])
+    if any(message["id"] == submission for message in command["history"]):
+        raise GatewayError(409, "MESSAGE_ID_CONFLICT")
+    if command["config"]["taskPolicy"] != "chat":
+        raise GatewayError(409, "STEER_UNSUPPORTED")
+    message = body.get("message")
+    if not isinstance(message, dict) or set(message) != {"id", "role", "content"} \
+            or message["id"] != submission or message["role"] != "user":
+        raise GatewayError(400, "INVALID_STEER_MESSAGE")
+    content = message["content"]
+    validate_content(content, "user", 1, command["config"].get("supportsImageInput", False))
+    if isinstance(content, str):
+        text(content, MAX_STEER_TEXT_BYTES)
+    else:
+        for part in content:
+            if part["type"] == "text":
+                text(part["text"], MAX_STEER_TEXT_BYTES, empty=True)
+    return {"role": "user", "content": content}
 
 
 class Store:
@@ -184,7 +455,7 @@ class Store:
         os.chmod(path, 0o600)
         self.db.execute("PRAGMA journal_mode=WAL")
         self.db.execute("PRAGMA synchronous=FULL")
-        if self.db.execute("PRAGMA user_version").fetchone()[0] not in (0, 1):
+        if self.db.execute("PRAGMA user_version").fetchone()[0] not in (0, 1, 2, 3, 4):
             raise GatewayError(409, "UNSUPPORTED_DATABASE_VERSION")
         self.db.executescript("""
             CREATE TABLE IF NOT EXISTS runs (
@@ -203,9 +474,34 @@ class Store:
                 execution TEXT PRIMARY KEY, run TEXT NOT NULL, call TEXT NOT NULL,
                 generation INTEGER NOT NULL, request TEXT NOT NULL, result TEXT,
                 UNIQUE(run, call));
-            PRAGMA user_version=1;
+            CREATE TABLE IF NOT EXISTS steers (
+                key TEXT PRIMARY KEY, run TEXT NOT NULL, submission TEXT NOT NULL,
+                body TEXT NOT NULL, state TEXT NOT NULL,
+                sequence INTEGER NOT NULL, accepted_at REAL NOT NULL,
+                placement TEXT, return_reason TEXT,
+                UNIQUE(run, submission), UNIQUE(run, sequence));
+            CREATE TABLE IF NOT EXISTS interactions (
+                run TEXT NOT NULL, id TEXT NOT NULL, kind TEXT NOT NULL,
+                request TEXT NOT NULL, fingerprint TEXT NOT NULL,
+                revision INTEGER NOT NULL, created_at REAL NOT NULL,
+                expires_at REAL NOT NULL, decision TEXT,
+                PRIMARY KEY(run, id));
+            PRAGMA user_version=3;
         """)
+        app_reply.schema(self.db)
+        self.db.execute("PRAGMA user_version=4")
         with self.changed, self.db:
+            # Old events and receipts stay byte-identical. Only an existing
+            # pending request can be migrated without inventing old decisions.
+            for row in self.db.execute("SELECT * FROM runs WHERE interaction IS NOT NULL "
+                    "AND phase IN ('waiting_question','waiting_confirmation')").fetchall():
+                payload = decode(row["interaction"])
+                if self.db.execute("SELECT 1 FROM interactions WHERE run=? AND id=?",
+                                   (row["id"], payload["interactionID"])).fetchone() is None:
+                    self.register_interaction(row, row["phase"], payload, legacy=True)
+            for row in self.db.execute("SELECT * FROM runs WHERE id IN "
+                    "(SELECT run FROM steers WHERE state='accepted')").fetchall():
+                self.return_steers(row, "PROCESS_RESTART")
             for row in self.db.execute("SELECT * FROM runs WHERE phase IN ('starting','streaming','cancelling')").fetchall():
                 self.db.execute("UPDATE runs SET phase='waiting_suspended', generation=generation+1 WHERE id=?", (row["id"],))
                 self.append(row, "waiting_suspended", {"code": "PROCESS_RESTART_REQUIRES_CONTINUE"})
@@ -218,10 +514,124 @@ class Store:
 
     def descriptor(self, row, key=None):
         result = {"schemaVersion": 1, "binding": decode(row["binding"]),
-                  "runID": row["id"], "phase": row["phase"]}
+                  "runID": row["id"], "phase": row["phase"], "clientInstanceID": row["client"]}
+        result["decisionCapability"] = {"schemaVersion": DECISION_VERSION, "readback": True}
         if key is not None:
             result["requestKey"] = key
+        if decode(row["command"])["config"]["taskPolicy"] == "chat":
+            result["steerCapability"] = {
+                "schemaVersion": STEER_VERSION, "safePoints": sorted(STEER_SAFE_POINTS),
+                "accepting": row["phase"] == "streaming",
+                "maxPending": MAX_PENDING_STEERS, "maxPerRun": MAX_RUN_STEERS}
         return result
+
+    def register_interaction(self, row, kind, payload, legacy=False):
+        identity = opaque(payload.get("interactionID"))
+        expiry = payload.get("expiresAt")
+        params = payload.get("params")
+        if kind not in {"waiting_question", "waiting_confirmation"} \
+                or not isinstance(params, dict) or type(expiry) not in (int, float) or not math.isfinite(expiry):
+            raise GatewayError(400, "INVALID_INTERACTION")
+        if not legacy:
+            validate_decision_request(kind, params)
+        original = {"interactionID": identity, "kind": kind, "expiresAt": expiry, "params": params}
+        fingerprint = hashlib.sha256(encode(original).encode()).hexdigest()
+        old = self.db.execute("SELECT * FROM interactions WHERE run=? AND id=?", (row["id"], identity)).fetchone()
+        if old is not None:
+            if old["fingerprint"] != fingerprint or old["decision"] is not None:
+                raise GatewayError(409, "INTERACTION_ID_REUSED")
+            created = old["created_at"]
+        else:
+            count = self.db.execute("SELECT COUNT(*) FROM interactions WHERE run=?", (row["id"],)).fetchone()[0]
+            if count >= MAX_RUN_INTERACTIONS:
+                raise GatewayError(429, "INTERACTION_LIMIT")
+            created = time.time()
+            self.db.execute("INSERT INTO interactions VALUES (?,?,?,?,?,1,?,?,NULL)",
+                            (row["id"], identity, kind, encode(original), fingerprint, created, expiry))
+        # Only the server can assign request revision/fingerprint and time.
+        return dict(payload, decisionSchemaVersion=DECISION_VERSION, requestRevision=1,
+                    requestFingerprint=fingerprint, serverTime=time.time(), createdAt=created)
+
+    def interaction(self, run, identity):
+        row = self.run(run)
+        request = self.db.execute("SELECT * FROM interactions WHERE run=? AND id=?", (run, identity)).fetchone()
+        if request is None:
+            raise GatewayError(404, "INTERACTION_NOT_FOUND")
+        now = time.time()
+        if request["decision"] is not None:
+            state = "resolved"
+        elif row["interaction"] is None or decode(row["interaction"]).get("interactionID") != identity \
+                or row["phase"] not in {"waiting_question", "waiting_confirmation"}:
+            state = "superseded"
+        elif now >= request["expires_at"]:
+            state = "expired"
+        else:
+            state = "pending"
+        result = {"schemaVersion": 1, "decisionSchemaVersion": DECISION_VERSION,
+                  "binding": decode(row["binding"]), "runID": run,
+                  "clientInstanceID": row["client"], "interactionID": identity,
+                  "requestRevision": request["revision"], "requestFingerprint": request["fingerprint"],
+                  "kind": request["kind"], "createdAt": request["created_at"],
+                  "expiresAt": request["expires_at"], "serverTime": now, "state": state}
+        if request["decision"] is not None:
+            result["decision"] = decode(request["decision"])
+        return result
+
+    def steer_receipt(self, row, steer):
+        receipt = {"schemaVersion": 1, "steerSchemaVersion": STEER_VERSION,
+                   "binding": decode(row["binding"]), "runID": row["id"],
+                   "clientInstanceID": row["client"], "requestKey": steer["key"],
+                   "submissionID": steer["submission"], "messageID": steer["submission"],
+                   "state": steer["state"], "revision": 1 if steer["state"] == "accepted" else 2,
+                   "sequence": steer["sequence"], "acceptedAt": steer["accepted_at"]}
+        if steer["placement"]:
+            receipt["placement"] = decode(steer["placement"])
+        if steer["return_reason"]:
+            receipt["returnReason"] = steer["return_reason"]
+        return receipt
+
+    def steer(self, run, submission):
+        row = self.run(run)
+        steer = self.db.execute("SELECT * FROM steers WHERE run=? AND submission=?",
+                                (run, submission)).fetchone()
+        if steer is None:
+            raise GatewayError(404, "STEER_NOT_FOUND")
+        return self.steer_receipt(row, steer)
+
+    def pending_steers(self, run):
+        return self.db.execute("SELECT * FROM steers WHERE run=? AND state='accepted' "
+                               "ORDER BY sequence", (run,)).fetchall()
+
+    def return_steers(self, row, reason):
+        for steer in self.pending_steers(row["id"]):
+            self.db.execute("UPDATE steers SET state='returned', return_reason=? WHERE key=?",
+                            (reason, steer["key"]))
+            self.append(row, "steer_state", self.steer(row["id"], steer["submission"]))
+
+    def place_steers(self, row, messages, point, generation):
+        """Call only inside the same transaction that closes the safe point."""
+        if point not in STEER_SAFE_POINTS:
+            raise GatewayError(500, "INVALID_STEER_SAFE_POINT")
+        if self.db.execute("SELECT COUNT(*) FROM tools WHERE run=? AND result IS NULL",
+                           (row["id"],)).fetchone()[0]:
+            raise GatewayError(409, "TOOLS_UNRESOLVED")
+        placed = 0
+        for steer in self.pending_steers(row["id"]):
+            message = decode(steer["body"])["message"]
+            wire = {"role": "user", "content": message["content"]}
+            if len(messages) >= 1000 or len(encode(messages + [wire]).encode()) > MAX_BODY:
+                self.db.execute("UPDATE steers SET state='returned', return_reason='CONTEXT_LIMIT' WHERE key=?",
+                                (steer["key"],))
+            else:
+                placement = {"point": point, "generation": generation,
+                             "messageIndex": len(messages), "placedAt": time.time()}
+                messages.append(wire)
+                self.db.execute("UPDATE steers SET state='placed', placement=? WHERE key=?",
+                                (encode(placement), steer["key"]))
+                placed += 1
+            self.append(row, "steer_state", self.steer(row["id"], steer["submission"]))
+        self.db.execute("UPDATE runs SET messages=? WHERE id=?", (encode(messages), row["id"]))
+        return placed
 
     def receipt(self, key, route=None, body=None):
         row = self.db.execute("SELECT * FROM receipts WHERE key=?", (key,)).fetchone()
@@ -241,6 +651,7 @@ class Store:
         if event == "artifact_updated":
             text(payload.get("artifactID"), 256)
             integer(payload.get("revision"))
+            payload = app_reply.register_artifact(self.db, row, payload)
         if event == "usage":
             for field in ("promptTokens", "completionTokens", "totalTokens"):
                 integer(payload.get(field))
@@ -288,6 +699,7 @@ class OpenAIProvider:
             {"Content-Type": "application/json", "Accept": "text/event-stream",
              "Authorization": "Bearer " + self.key}, method="POST")
         calls, content, reason, finish, done, data, usage = {}, "", "", None, False, [], None
+        reason_seen = False
         with self.opener.open(request, timeout=self.timeout) as response:
             if response.headers.get_content_type() != "text/event-stream":
                 raise GatewayError(502, "PROVIDER_NOT_SSE")
@@ -328,6 +740,7 @@ class OpenAIProvider:
                         emit("content", {"delta": part})
                     if delta.get("reasoning_content") is not None:
                         part = text(delta["reasoning_content"], MAX_BODY, empty=True)
+                        reason_seen = True
                         reason += part
                         emit("thinking", {"delta": part})
                     for call in delta.get("tool_calls", []):
@@ -351,7 +764,10 @@ class OpenAIProvider:
             raise GatewayError(502, "PROVIDER_TOOL_PROTOCOL")
         if usage:
             emit("usage", usage)
-        return {"content": content, "calls": [calls[i] for i in sorted(calls)]}
+        result = {"content": content, "calls": [calls[i] for i in sorted(calls)]}
+        if reason_seen:
+            result["reasoning"] = reason
+        return result
 
 
 class Service:
@@ -373,12 +789,11 @@ class Service:
             if event in {"content", "thinking"}:
                 text(payload.get("delta"), MAX_BODY, empty=True)
                 payload = dict(payload, messageID=row["message_id"])
-            self.store.append(row, event, payload)
             if event in {"waiting_question", "waiting_confirmation"}:
-                opaque(payload.get("interactionID"))
-                if not isinstance(payload.get("params"), dict) or type(payload.get("expiresAt")) not in (int, float):
-                    raise GatewayError(400, "INVALID_INTERACTION")
+                payload = self.store.register_interaction(row, event, payload)
+                self.store.return_steers(row, "RUN_WAITING")
                 self.store.db.execute("UPDATE runs SET phase=?, interaction=? WHERE id=?", (event, encode(payload), run))
+            self.store.append(row, event, payload)
             self.store.changed.notify_all()
 
     def spawn(self, run, generation):
@@ -388,6 +803,7 @@ class Service:
         worker.start()
 
     def work(self, run, generation):
+        launch = None
         try:
             with self.store.changed, self.store.db:
                 row = self.store.run(run)
@@ -404,7 +820,15 @@ class Service:
             # Provider-side typed proposals must bind to the real persisted run.
             # This context is not part of the user command or upstream wire body.
             provider_command = dict(command, gatewayRunID=run)
-            result = self.provider.generate(provider_command, messages, emit, lambda: self.alive(run, generation))
+            if "appReply" in command:
+                method = "generate_app_reply" if generation == 0 else "continue_app_reply"
+                handler = getattr(self.provider, method, None)
+                if not callable(handler):
+                    raise GatewayError(422, "APP_REPLY_PROVIDER_UNSUPPORTED")
+                result = handler(provider_command, messages, command["appReply"],
+                                 emit, lambda: self.alive(run, generation))
+            else:
+                result = self.provider.generate(provider_command, messages, emit, lambda: self.alive(run, generation))
             if result is None:
                 return
             with self.store.changed, self.store.db:
@@ -419,6 +843,8 @@ class Service:
                 if used + len(calls) > command["config"]["maxToolRounds"]:
                     raise GatewayError(502, "TOOL_LIMIT")
                 assistant = {"role": "assistant", "content": result["content"]}
+                if result.get("reasoning") is not None:
+                    assistant["reasoning_content"] = text(result["reasoning"], MAX_BODY, empty=True)
                 for call in calls:
                     validate_call(call)
                     if call["name"] not in allowed:
@@ -440,22 +866,39 @@ class Service:
                         self.store.append(row, "client_tool_request", request)
                 else:
                     self.store.append(row, "assistant_completed", {"messageID": row["message_id"]})
-                    self.store.append(row, "run_completed", {"messageID": row["message_id"]})
-                    self.store.db.execute("UPDATE runs SET phase='completed', message_id=NULL WHERE id=?", (run,))
+                    if self.store.place_steers(row, messages, "model_boundary", generation + 1):
+                        self.store.db.execute("UPDATE runs SET message_id=NULL, generation=generation+1 WHERE id=?", (run,))
+                        launch = (run, generation + 1)
+                    else:
+                        self.store.append(row, "run_completed", {"messageID": row["message_id"]})
+                        self.store.db.execute("UPDATE runs SET phase='completed', message_id=NULL WHERE id=?", (run,))
                 self.store.changed.notify_all()
-        except Exception:
+        except Exception as error:
             # Provider exceptions and HTTP bodies may contain secrets.
+            # Fixed local request failures can be actionable without exposing
+            # exception text or an upstream-provided error field.
+            local_codes = {"INTERACTION_LIMIT", "INTERACTION_ID_REUSED", "INVALID_INTERACTION",
+                           "INVALID_AVAILABLE_DECISIONS", "INVALID_QUESTIONS",
+                           "INVALID_BATCH_DECISION", "INVALID_COST_DECISION"}
+            code = error.code if isinstance(error, GatewayError) and error.code in local_codes else "PROVIDER_FAILURE"
             with self.store.changed, self.store.db:
                 if self.alive(run, generation):
                     row = self.store.run(run)
-                    self.store.append(row, "run_failed", {"code": "PROVIDER_FAILURE"})
+                    self.store.return_steers(row, "TERMINAL_FAILED")
+                    self.store.append(row, "run_failed", {"code": code})
                     self.store.db.execute("UPDATE runs SET phase='failed' WHERE id=?", (run,))
                     self.store.changed.notify_all()
         finally:
             with self.store.changed:
                 self.workers.discard(threading.current_thread())
+        if launch:
+            self.spawn(*launch)
 
     def command(self, route, run, action, body):
+        if action == "app-replies":
+            return app_reply.submit(self, route, run, body)
+        if action == "app-reply-continue":
+            return app_reply.continue_run(self, route, run, body)
         key = opaque(body.get("requestKey"))
         launch = None
         with self.store.changed, self.store.db:
@@ -480,10 +923,33 @@ class Service:
                     raise GatewayError(409, "RUN_CONFLICT")
                 if action == "cancel":
                     if row["phase"] not in TERMINAL:
+                        self.store.return_steers(row, "TERMINAL_CANCELLED")
                         self.store.append(row, "run_cancelled", {})
                         self.store.db.execute("UPDATE runs SET phase='cancelled', generation=generation+1 WHERE id=?", (run,))
+                elif action == "steer":
+                    message = validate_steer(body, row)
+                    if row["phase"] != "streaming":
+                        raise GatewayError(409, "RUN_NOT_STEERABLE")
+                    pending = self.store.pending_steers(run)
+                    count = self.store.db.execute("SELECT COUNT(*) FROM steers WHERE run=?", (run,)).fetchone()[0]
+                    if len(pending) >= MAX_PENDING_STEERS or count >= MAX_RUN_STEERS:
+                        raise GatewayError(429, "STEER_QUEUE_LIMIT")
+                    messages = decode(row["messages"]) + [
+                        {"role": "user", "content": decode(s["body"])["message"]["content"]}
+                        for s in pending] + [message]
+                    if len(messages) > 1000 or len(encode(messages).encode()) > MAX_BODY:
+                        raise GatewayError(413, "STEER_CONTEXT_LIMIT")
+                    self.store.db.execute("INSERT INTO steers VALUES (?,?,?,?,'accepted',?,?,NULL,NULL)",
+                        (key, run, body["submissionID"], encode(body), count + 1, time.time()))
+                    receipt = self.store.steer(run, body["submissionID"])
+                    self.store.append(row, "steer_state", receipt)
+                    self.store.save_receipt(key, route, body, receipt)
+                    self.store.changed.notify_all()
+                    return receipt
                 elif action == "continue":
                     interaction = "interactionID" in body
+                    if not interaction and "appReply" in decode(row["command"]):
+                        raise GatewayError(409, "APP_REPLY_REQUIRES_DEDICATED_CONTINUATION")
                     validate_command(body, interaction)
                     if body["clientInstanceID"] != row["client"]:
                         raise GatewayError(409, "CLIENT_CONFLICT")
@@ -498,11 +964,45 @@ class Service:
                         waiting = decode(row["interaction"]) if row["interaction"] else {}
                         if body["interactionID"] != waiting.get("interactionID"):
                             raise GatewayError(409, "INTERACTION_CONFLICT")
-                        if time.time() >= waiting.get("expiresAt", 0):
+                        accepted_at = time.time()
+                        if accepted_at >= waiting.get("expiresAt", 0):
                             raise GatewayError(410, "INTERACTION_EXPIRED")
+                        answer, answer_digest = interaction_answer(body)
+                        if "decisionSchemaVersion" in body:
+                            current = self.store.interaction(run, body["interactionID"])
+                            if current["state"] != "pending" or body["requestRevision"] != current["requestRevision"] \
+                                    or body["requestFingerprint"] != current["requestFingerprint"]:
+                                raise GatewayError(409, "INTERACTION_REVISION_CONFLICT")
+                            validate_decision_request(row["phase"], waiting["params"])
+                            validate_decision_answer(row["phase"], waiting["params"], answer)
                         command, messages = decode(row["command"]), decode(row["messages"])
-                        messages.append({"role": "user", "content": encode(body["answer"])})
+                        decision = {"requestKey": key, "answerSHA256": answer_digest,
+                                    "acceptedAt": accepted_at, "generation": row["generation"] + 1,
+                                    "messageIndex": len(messages)}
+                        messages.append({"role": "user", "content": encode(answer)})
+                        if len(messages) > 1000 or len(encode(messages).encode()) > MAX_BODY:
+                            raise GatewayError(413, "DECISION_CONTEXT_LIMIT")
+                        changed = self.store.db.execute("UPDATE interactions SET decision=? "
+                            "WHERE run=? AND id=? AND decision IS NULL",
+                            (encode(decision), run, body["interactionID"]))
+                        if changed.rowcount != 1:
+                            raise GatewayError(409, "INTERACTION_DECISION_CONFLICT")
                     else:
+                        placed = self.store.db.execute("SELECT body FROM steers WHERE run=? AND state='placed' "
+                                                       "ORDER BY sequence", (run,)).fetchall()
+                        identities = {m["id"]: (i, m) for i, m in enumerate(body["history"])}
+                        if placed and len(identities) != len(body["history"]):
+                            raise GatewayError(409, "PLACED_MESSAGE_ORDER")
+                        positions = []
+                        for item in placed:
+                            original = decode(item["body"])["message"]
+                            supplied = identities.get(original["id"])
+                            if supplied is None or supplied[1]["role"] != "user" \
+                                    or encode(supplied[1]["content"]) != encode(original["content"]):
+                                raise GatewayError(409, "PLACED_MESSAGE_MISSING")
+                            positions.append(supplied[0])
+                        if positions != sorted(set(positions)):
+                            raise GatewayError(409, "PLACED_MESSAGE_ORDER")
                         command, messages = body, wire_history(body)
                     if row["message_id"]:
                         self.store.append(row, "assistant_completed", {"messageID": row["message_id"]})
@@ -532,11 +1032,15 @@ class Service:
                     if not remaining and row["phase"] == "streaming":
                         self.store.append(row, "assistant_completed", {"messageID": row["message_id"]})
                         generation = row["generation"] + 1
+                        self.store.place_steers(row, messages, "tools_resolved", generation)
                         self.store.db.execute("UPDATE runs SET message_id=NULL, generation=? WHERE id=?", (generation, run))
                         launch = (run, generation)
                 else:
                     raise GatewayError(404, "ROUTE_NOT_FOUND")
             receipt = self.store.descriptor(self.store.run(run), key)
+            if action == "continue" and "interactionID" in body:
+                receipt["decisionReceipt"] = self.store.interaction(run, body["interactionID"])
+                self.store.append(self.store.run(run), "decision_resolved", receipt["decisionReceipt"])
             self.store.save_receipt(key, route, body, receipt)
             self.store.changed.notify_all()
         if launch:
@@ -609,7 +1113,8 @@ class Handler(BaseHTTPRequestHandler):
                     raise GatewayError(400, "IDEMPOTENCY_KEY_MISMATCH")
                 if path == ["runs"]:
                     run, action = None, "create"
-                elif len(path) == 3 and path[0] == "runs" and path[2] in {"continue", "cancel", "tool-results"}:
+                elif len(path) == 3 and path[0] == "runs" and path[2] in {
+                        "continue", "cancel", "tool-results", "steer", "app-replies", "app-reply-continue"}:
                     run, action = path[1], path[2]
                 else:
                     raise GatewayError(404, "ROUTE_NOT_FOUND")
@@ -627,9 +1132,22 @@ class Handler(BaseHTTPRequestHandler):
                                 "providerConfigured": provider is not None,
                                 "synthetic": provider is not None and provider.label.startswith("TEST-ONLY"),
                                 "authRequired": bool(self.server.token),
-                                "capabilities": ["runs", "sseReplay", "idempotency", "clientTools"]}
+                                "capabilities": ["runs", "sseReplay", "idempotency", "clientTools",
+                                                 "messageContentV1", "reasoningHistory", "decisionReadbackV1",
+                                                 "appReplyReadbackV1"],
+                                "appReplyExecution": callable(getattr(provider, "generate_app_reply", None)),
+                                "messageSchemaVersion": 1}
                     elif len(path) == 2 and path[0] == "runs":
                         body = store.descriptor(store.run(path[1]))
+                    elif len(path) == 4 and path[0] == "runs" and path[2] == "steers":
+                        body = store.steer(path[1], path[3])
+                    elif len(path) == 4 and path[0] == "runs" and path[2] == "interactions":
+                        body = store.interaction(path[1], path[3])
+                    elif len(path) == 5 and path[0] == "runs" and path[2] == "artifacts" \
+                            and path[4] == "app-reply-manifest":
+                        body = app_reply.authority(store.db, store.run(path[1]), path[3])
+                    elif len(path) == 4 and path[0] == "runs" and path[2] == "app-replies":
+                        body = app_reply.readback(store, path[1], path[3])
                     elif len(path) == 2 and path[0] == "requests":
                         body = store.receipt(path[1])
                         if body is None:
@@ -637,7 +1155,7 @@ class Handler(BaseHTTPRequestHandler):
                     else:
                         raise GatewayError(404, "ROUTE_NOT_FOUND")
                 self.reply(200, body)
-        except GatewayError as error:
+        except (GatewayError, app_reply.AppReplyError) as error:
             self.reply(error.status, {"schemaVersion": 1, "error": {"code": error.code}})
         except (BrokenPipeError, ConnectionResetError, TimeoutError):
             self.close_connection = True

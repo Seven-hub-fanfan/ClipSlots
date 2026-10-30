@@ -168,7 +168,7 @@ final class StorageDirectoryWatcher {
             0.2, // latency (s) — coarse coalescing at the FSEvents layer
             flags
         ) else {
-            NSLog("[ClipSlots] StorageDirectoryWatcher: FSEventStreamCreate failed for \(path)")
+            NSLog("[ClipSlots] StorageDirectoryWatcher: FSEventStreamCreate failed")
             boxRef.release() // balance passRetained on the failure path
             return
         }
@@ -177,12 +177,12 @@ final class StorageDirectoryWatcher {
         if FSEventStreamStart(created) {
             stream = created
             self.boxRef = boxRef // keep the box alive for the stream's lifetime
-            NSLog("[ClipSlots] StorageDirectoryWatcher started on \(path)")
+            NSLog("[ClipSlots] StorageDirectoryWatcher started")
             // ★ v2.10.91 (第六轮): 新流刚建好就先记一次心跳，避免「刚启动、还没有任何事件」被
             // sentinel 轮询误判成聋掉而立刻重建流。
             onAnyEvent?()
         } else {
-            NSLog("[ClipSlots] StorageDirectoryWatcher: FSEventStreamStart failed for \(path)")
+            NSLog("[ClipSlots] StorageDirectoryWatcher: FSEventStreamStart failed")
             FSEventStreamInvalidate(created)
             FSEventStreamRelease(created)
             boxRef.release() // balance passRetained on the failure path

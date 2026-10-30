@@ -9,16 +9,32 @@ final class AgentWorkingDirectoryStore: ObservableObject {
     @Published private(set) var isChoosing = false
     @Published var error: String?
     private let catalog: AgentDirectoryCatalog
+    private let journalRoot: URL
+    private final class LiveGrant {
+        weak var access: AgentDirectoryAccess?
+        let id: UUID
+        init(_ access: AgentDirectoryAccess, id: UUID) { self.access = access; self.id = id }
+    }
+    private var liveGrants: [LiveGrant] = []
+    private func revoke(_ id: UUID) {
+        for grant in liveGrants where grant.id == id { grant.access?.revoke() }
+        liveGrants.removeAll { $0.id == id || $0.access == nil }
+    }
 
     init(root: URL) {
         catalog = AgentDirectoryCatalog(root: root)
+        journalRoot = root.appendingPathComponent("agent-directory-journal", isDirectory: true)
         do { directories = try catalog.load() }
         catch { self.error = error.localizedDescription }
     }
     func entry(_ id: UUID?) -> AgentWorkingDirectory? { directories.first { $0.id == id } }
-    func access(_ id: UUID) throws -> AgentDirectoryAccess {
+    func access(_ id: UUID, sessionID: String? = nil, projectID: String? = nil) throws -> AgentDirectoryAccess {
         guard let entry = entry(id) else { throw AgentDirectoryError.unavailable }
-        let grant = try entry.resolve()
+        let context = sessionID.map {
+            AgentDirectoryJournalContext(root: journalRoot, authorizationID: (entry.authorizationID ?? entry.id).uuidString,
+                                         sessionID: $0, projectID: projectID)
+        }
+        let grant = try entry.resolve(journal: context)
         if grant.bookmarkNeedsRefresh || grant.url.path != entry.path {
             let renewed = try AgentWorkingDirectory.authorize(grant.url, id: id)
             var next = directories
@@ -30,6 +46,8 @@ final class AgentWorkingDirectoryStore: ObservableObject {
                 directories = next
             }
         }
+        liveGrants.removeAll { $0.access == nil }
+        liveGrants.append(LiveGrant(grant, id: id))
         return grant
     }
     @discardableResult
@@ -43,10 +61,12 @@ final class AgentWorkingDirectoryStore: ObservableObject {
         if let existing {
             var updated = next[existing]
             updated.name = entry.name; updated.path = entry.path; updated.bookmark = entry.bookmark
+            updated.authorizationID = entry.authorizationID
             chosenID = updated.id
             next[existing] = updated
         } else { next.append(entry); chosenID = entry.id }
         try catalog.save(next)
+        if let existing { revoke(directories[existing].id) }
         directories = next
         error = nil
         return chosenID
@@ -54,6 +74,7 @@ final class AgentWorkingDirectoryStore: ObservableObject {
     func remove(_ id: UUID) throws {
         let next = directories.filter { $0.id != id }
         try catalog.save(next)
+        revoke(id)
         directories = next
         error = nil
     }

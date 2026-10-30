@@ -131,6 +131,18 @@ public struct GenerationRun: Codable, Equatable, Identifiable {
     }
 }
 
+public enum GenerationRunStoreError: LocalizedError {
+    case unresolvedSubmission, alreadySubmitted, identityConflict, invalidTransition
+    public var errorDescription: String? {
+        switch self {
+        case .unresolvedSubmission: return "提交结果尚未核对，已阻止重复提交。"
+        case .alreadySubmitted: return "本次执行已有任务，请取回原任务结果。"
+        case .identityConflict: return "任务记录身份不一致，已保留原记录。"
+        case .invalidTransition: return "任务回执与当前状态不一致，已保留原记录。"
+        }
+    }
+}
+
 /// Separate immutable identities per run/attempt. Atomic replacement keeps every observed transition.
 /// Missing history stays missing; task recovery only updates a record that already owns that task.
 public final class GenerationRunStore: @unchecked Sendable {
@@ -174,6 +186,22 @@ public final class GenerationRunStore: @unchecked Sendable {
     public func beginAttempt(context: GenerationRunContext, requested: GenerationRequestRecord,
                              effective: GenerationRequestRecord) throws -> UUID {
         lock.lock(); defer { lock.unlock() }
+        let existing = load(project: context.projectID, id: context.runID)
+        if existing == nil, FileManager.default.fileExists(atPath: url(project: context.projectID, id: context.runID).path) {
+            throw CocoaError(.fileReadCorruptFile)
+        }
+        if let existing {
+            guard matches(existing, context: context) else { throw GenerationRunStoreError.identityConflict }
+            guard !existing.requiresSubmissionReconciliation else { throw GenerationRunStoreError.unresolvedSubmission }
+            guard !existing.attempts.contains(where: { $0.status == .accepted || $0.taskID != nil }) else {
+                throw GenerationRunStoreError.alreadySubmitted
+            }
+            guard existing.requestedRequest.model == requested.model,
+                  existing.requestedRequest.kind == requested.kind,
+                  existing.requestedRequest.provider == requested.provider else {
+                throw GenerationRunStoreError.identityConflict
+            }
+        }
         // Include catalog filtering that happened before the CLI boundary.
         var original = requested
         if requested.provider == nil, requested.kind == "video", let node = context.configuredNode {
@@ -181,7 +209,7 @@ public final class GenerationRunStore: @unchecked Sendable {
             original.duration = node.duration
             original.generateAudio = node.generateAudio
         }
-        var run = load(project: context.projectID, id: context.runID) ?? GenerationRun(
+        var run = existing ?? GenerationRun(
             id: context.runID, snapshotID: context.snapshotID, projectID: context.projectID,
             nodeID: context.nodeID, nodeCreatedAt: context.nodeCreatedAt, graphRevision: context.graphRevision,
             startedAt: Date(), requestedRequest: original, configuredNode: context.configuredNode, resources: context.resources,
@@ -201,20 +229,54 @@ public final class GenerationRunStore: @unchecked Sendable {
               let index = run.attempts.firstIndex(where: { $0.id == attemptID }) else {
             throw CocoaError(.fileReadCorruptFile)
         }
+        guard matches(run, context: context) else { throw GenerationRunStoreError.identityConflict }
+        let attempt = run.attempts[index]
+        if status == .accepted {
+            guard let taskID else { throw GenerationRunStoreError.invalidTransition }
+            try GenerationWire.validateIdentifier(taskID)
+            if let taskHandle {
+                guard taskHandle.taskID == taskID,
+                      taskHandle.context == (attempt.effectiveRequest.provider ?? .crate),
+                      taskHandle.capabilityID == attempt.effectiveRequest.model,
+                      taskHandle.kind.rawValue == attempt.effectiveRequest.kind else {
+                    throw GenerationRunStoreError.identityConflict
+                }
+            }
+        } else if taskID != nil || taskHandle != nil {
+            throw GenerationRunStoreError.invalidTransition
+        }
+        // Duplicate receipts are idempotent. A late failure cannot erase an ID
+        // already accepted, nor can an explicit rejection be reopened.
+        if attempt.status != .submitting {
+            guard attempt.status == status, attempt.taskID == taskID,
+                  attempt.returnedSeed == seed, attempt.taskHandle == taskHandle else {
+                throw GenerationRunStoreError.invalidTransition
+            }
+            return
+        }
         run.attempts[index].status = status; run.attempts[index].taskID = taskID
         run.attempts[index].returnedSeed = seed; run.attempts[index].detail = detail
         run.attempts[index].taskHandle = taskHandle
         run.outcome = status.rawValue
         try save(run)
     }
+    private func matches(_ run: GenerationRun, context: GenerationRunContext) -> Bool {
+        run.id == context.runID && run.projectID == context.projectID &&
+            run.snapshotID == context.snapshotID && run.graphRevision == context.graphRevision &&
+            run.nodeID == context.nodeID && run.nodeCreatedAt == context.nodeCreatedAt
+    }
     public func updateTask(project: String, taskID: String, outcome: String, outputIDs: [String] = [],
                            provider: GenerationProviderContext = .crate,
                            diagnostic: GenerationTaskDiagnostic? = nil) throws {
         lock.lock(); defer { lock.unlock() }
-        guard var run = runs(project: project).first(where: { run in
+        let owners = runs(project: project).filter { run in
             run.attempts.contains { $0.taskID == taskID &&
                 ($0.taskHandle?.context ?? $0.effectiveRequest.provider ?? .crate) == provider }
-        }) else { return }
+        }
+        guard owners.count <= 1 else { throw GenerationRunStoreError.identityConflict }
+        guard var run = owners.first else { return }
+        // Transport/query failure does not override a completed local outcome.
+        if run.outcome == "succeeded", outcome != "succeeded" { return }
         run.outcome = outcome
         if let diagnostic { run.diagnostic = diagnostic }
         if !outputIDs.isEmpty { run.outputAttachmentIDs = outputIDs }

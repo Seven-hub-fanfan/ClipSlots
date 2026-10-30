@@ -67,37 +67,31 @@ struct ModelHubConfigurationView: View {
     }
     private var catalog: some View {
         VStack(alignment: .leading, spacing: 14) {
-            card {
-                HStack(spacing: 24) {
-                    ForEach(ModelKind.allCases) { category in
-                        VStack(alignment: .leading, spacing: 5) {
-                            Text("\(models.catalog?.counts[category.rawValue] ?? 0)").font(.system(size: 24, weight: .semibold))
-                            Text(category.title).font(.system(size: 11)).foregroundStyle(.secondary)
-                        }.frame(maxWidth: .infinity, alignment: .leading)
-                    }
+            HStack(spacing: 6) {
+                catalogKind("", title: "全部", count: models.catalog?.entries.count ?? 0)
+                ForEach(ModelKind.allCases) { category in
+                    catalogKind(category.rawValue, title: category.title,
+                                count: models.catalog?.counts[category.rawValue] ?? 0)
                 }
+                Spacer(minLength: 0)
+                Text("\(entries.count) 个模型").font(.system(size: 11)).foregroundStyle(.secondary)
+                InterfaceHelpButton(title: "模型目录说明",
+                    text: "目录包含 155 个媒体变体，保留隐藏与地区条件条目。模型标识为展示别名；接入时请填写实际服务接受的上游标识。实时可用性与参数范围由所配置服务决定。",
+                    identifier: "model-hub-catalog-help")
             }
-            Text("内置模型目录 · 155 个媒体变体 · 隐藏与地区条件条目均保留")
-                .font(.system(size: 11)).foregroundStyle(.secondary)
             HStack {
                 TextField("搜索模型名称、标识或用途", text: $search).textFieldStyle(.roundedBorder)
                     .accessibilityIdentifier("model-hub-search")
-                Picker("类型", selection: $kind) {
-                    Text("全部类型").tag("")
-                    ForEach(ModelKind.allCases) { Text($0.title).tag($0.rawValue) }
-                }.frame(width: 125)
                 Picker("路由", selection: $provider) {
                     Text("全部路由").tag("")
                     ForEach(Array(Set((models.catalog?.entries ?? []).compactMap(\.provider))).sorted(), id: \.self) {
                         Text(ModelCatalogPresentation.provider($0)).tag($0)
                     }
-                }.frame(width: 145)
+                }.labelsHidden().accessibilityLabel("服务路由").frame(width: 145)
             }
-            Text("目录标识为展示别名；接入时填写真实上游标识。实时可用性由所配置服务决定。")
-                .font(.system(size: 11)).foregroundStyle(.secondary)
             GeometryReader { size in
                 VStack(spacing: 0) {
-                    HStack {
+                    HStack(spacing: 10) {
                         Text("模型 / 标识").frame(maxWidth: .infinity, alignment: .leading)
                         Text("类型").frame(width: 44)
                         if size.size.width > 850 {
@@ -133,8 +127,20 @@ struct ModelHubConfigurationView: View {
                     }
                 }.background(TapSkin.tone(0xffffff, 0x24262b), in: RoundedRectangle(cornerRadius: 12))
             }.frame(height: CGFloat(entries.count) * 65 + 42)
-            Text("显示 \(entries.count) / \(models.catalog?.entries.count ?? 0) 个模型").font(.system(size: 11)).foregroundStyle(.secondary)
         }
+    }
+    private func catalogKind(_ value: String, title: String, count: Int) -> some View {
+        Button { kind = value } label: {
+            HStack(spacing: 6) {
+                Text(title).font(.system(size: 12, weight: .medium))
+                Text(String(count)).font(.system(size: 11)).monospacedDigit()
+                    .foregroundStyle(.secondary)
+            }.padding(.horizontal, 12).padding(.vertical, 8)
+                .background(kind == value ? TapSkin.tone(0xe9ebf0, 0x353840) : TapSkin.tone(0xffffff, 0x24262b), in: Capsule())
+        }.buttonStyle(.plain)
+            .accessibilityLabel("\(title)，\(count) 个模型")
+            .accessibilityAddTraits(kind == value ? [.isSelected] : [])
+            .accessibilityIdentifier("model-hub-kind-\(value.isEmpty ? "all" : value)")
     }
     private var connected: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -168,9 +174,10 @@ struct ModelHubConfigurationView: View {
     private var services: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack {
-                Text("一个服务连接可供多个模型共享地址与认证。").font(.system(size: 12)).foregroundStyle(.secondary)
-                Spacer()
                 Button("新增连接") { serviceDraft = ModelServiceConnection() }.accessibilityIdentifier("model-hub-new-service")
+                InterfaceHelpButton(title: "共享服务连接说明", text: "一个服务连接可供多个模型共享地址、认证与并发限制。",
+                                    identifier: "model-hub-service-help")
+                Spacer()
             }
             ForEach(models.document.services ?? []) { service in
                 card {
@@ -207,9 +214,12 @@ struct ModelHubConfigurationView: View {
     private var routes: some View {
         card {
             VStack(alignment: .leading, spacing: 16) {
-                Text("用途路由").font(.system(size: 17, weight: .semibold))
-                Text("选择默认模型。节点可覆盖；切换只影响下一次请求，已提交任务使用原配置。")
-                    .font(.system(size: 12)).foregroundStyle(.secondary)
+                HStack {
+                    Text("默认模型").font(.system(size: 17, weight: .semibold))
+                    InterfaceHelpButton(title: "默认模型与节点选择", text: "节点可覆盖用途默认模型。切换只影响下一次请求，已提交任务继续使用原配置。",
+                                        identifier: "model-hub-route-help")
+                    Spacer()
+                }
                 ForEach(ModelPurpose.allCases) { purpose in
                     Picker(purpose.title, selection: Binding(get: { models.document.defaults[purpose.rawValue] ?? "" },
                         set: { id in Task { await models.setDefault(purpose, id: id) } })) {

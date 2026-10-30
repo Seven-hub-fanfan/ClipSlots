@@ -231,7 +231,7 @@ extension CanvasWorkspaceView {
         _ = document.flush()
         canvas.updateNode(id: node.id) { $0.state = .idle }
         window.makeFirstResponder(nil)
-        for skin in ["minimal", "colorful"] {
+        for skin in AppSkin.allCases.map(\.rawValue) {
             for appearance in ["light", "dark"] {
                 AppSkinCenter.apply(AppSkin(rawValue: skin) ?? .minimal)
                 UserDefaults.standard.set(appearance, forKey: "appearanceMode")

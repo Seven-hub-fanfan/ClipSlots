@@ -1578,7 +1578,7 @@ final class SlotStoreObservable: ObservableObject {
             do {
                 try specialStorage.switchToSpecialSlot(id: id)
             } catch {
-                NSLog("[ClipSlots] selectAndActivateSpecialSlot save failed: \(error)")
+                NSLog("[ClipSlots] selectAndActivateSpecialSlot save failed: \(ApplicationDiagnostics.error(error))")
             }
         }
 
@@ -1640,7 +1640,7 @@ final class SlotStoreObservable: ObservableObject {
         } catch SpecialSlotError.duplicateName {
             // v2.9.4 (Feature #4): same-page duplicate names are rejected. Show a
             // non-fatal HUD instead of crashing / force-unwrapping.
-            NSLog("[ClipSlots] createSpecialSlot rejected: duplicate name '\(name)'")
+            NSLog("[ClipSlots] createSpecialSlot rejected: duplicate name")
             showFloatingNotice(FloatingNotice(
                 title: "名称重复",
                 subtitle: "当前页面已存在「\(name.trimmingCharacters(in: .whitespacesAndNewlines))」，请换个名字",
@@ -1648,7 +1648,7 @@ final class SlotStoreObservable: ObservableObject {
                 kind: .warning
             ))
         } catch {
-            NSLog("[ClipSlots] createSpecialSlot error: \(error)")
+            NSLog("[ClipSlots] createSpecialSlot error: \(ApplicationDiagnostics.error(error))")
             showFloatingNotice(FloatingNotice(
                 title: "创建槽位组失败",
                 subtitle: error.localizedDescription,
@@ -1683,7 +1683,7 @@ final class SlotStoreObservable: ObservableObject {
             reloadAllAsync()
             refreshTrigger = UUID()
         } catch {
-            NSLog("[ClipSlots] deleteSpecialSlot error: \(error)")
+            NSLog("[ClipSlots] deleteSpecialSlot error: \(ApplicationDiagnostics.error(error))")
         }
     }
 
@@ -1693,7 +1693,7 @@ final class SlotStoreObservable: ObservableObject {
             try specialStorage.renameSpecialSlot(id: id, name: name)
             loadSpecialSlots()
         } catch {
-            NSLog("[ClipSlots] renameSpecialSlot error: \(error)")
+            NSLog("[ClipSlots] renameSpecialSlot error: \(ApplicationDiagnostics.error(error))")
         }
     }
 
@@ -1710,7 +1710,7 @@ final class SlotStoreObservable: ObservableObject {
             reloadAllAsync()
             showToast("已创建页面「\(page.name)」")
         } catch {
-            NSLog("[ClipSlots] createPage error: \(error)")
+            NSLog("[ClipSlots] createPage error: \(ApplicationDiagnostics.error(error))")
             showAlert(message: "创建页面失败: \(error.localizedDescription)")
         }
     }
@@ -1722,7 +1722,7 @@ final class SlotStoreObservable: ObservableObject {
             loadSpecialSlots()
             showToast("页面已重命名")
         } catch {
-            NSLog("[ClipSlots] renamePage error: \(error)")
+            NSLog("[ClipSlots] renamePage error: \(ApplicationDiagnostics.error(error))")
             showAlert(message: "重命名失败: \(error.localizedDescription)")
         }
     }
@@ -1737,7 +1737,7 @@ final class SlotStoreObservable: ObservableObject {
             reloadAllAsync()
             showToast("页面已删除")
         } catch {
-            NSLog("[ClipSlots] deletePage error: \(error)")
+            NSLog("[ClipSlots] deletePage error: \(ApplicationDiagnostics.error(error))")
             showAlert(message: "删除页面失败: \(error.localizedDescription)")
         }
     }
@@ -1760,7 +1760,7 @@ final class SlotStoreObservable: ObservableObject {
                 showToast("已切换至「\(page.name)」")
             }
         } catch {
-            NSLog("[ClipSlots] switchToPage error: \(error)")
+            NSLog("[ClipSlots] switchToPage error: \(ApplicationDiagnostics.error(error))")
         }
     }
 
@@ -2480,7 +2480,7 @@ final class SlotStoreObservable: ObservableObject {
                     try specialStorage.updateSettings { $0.confirmBeforeDeleteSpecialSlot = false }
                     specialSlotSettings.confirmBeforeDeleteSpecialSlot = false
                 } catch {
-                    NSLog("[ClipSlots] update confirmBeforeDeleteSpecialSlot failed: \(error)")
+                    NSLog("[ClipSlots] update confirmBeforeDeleteSpecialSlot failed: \(ApplicationDiagnostics.error(error))")
                 }
             }
         }
@@ -2541,7 +2541,7 @@ final class SlotStoreObservable: ObservableObject {
                 let data = try JSONEncoder().encode(stack)
                 try data.write(to: url, options: .atomic)
             } catch {
-                NSLog("[ClipSlots] persist stack failed (\(url.lastPathComponent)): \(error)")
+                NSLog("[ClipSlots] persist stack failed: \(ApplicationDiagnostics.error(error))")
             }
         }
     }
@@ -2625,7 +2625,7 @@ final class SlotStoreObservable: ObservableObject {
                           let sp = content.attachments[i].storagePath, !sp.isEmpty else { continue }
                     guard let bytes = content.attachments[i].resolveData() else { continue }
                     guard bytes.count <= budget else {
-                        NSLog("[ClipSlots] undo snapshot: attachment '\(content.attachments[i].name)' (\(bytes.count) bytes) exceeds materialize budget; keeping storagePath only (recoverable from .trash)")
+                        NSLog("[ClipSlots] undo snapshot: attachment bytes=\(bytes.count) exceeds materialize budget; keeping recoverable reference")
                         continue
                     }
                     budget -= bytes.count
@@ -3054,7 +3054,7 @@ final class SlotStoreObservable: ObservableObject {
                                            slot: slot,
                                            token: stashToken)
         } catch {
-            NSLog("[ClipSlots] applyCanvasAttachmentEdit 字节归位失败：\(error.localizedDescription)")
+            NSLog("[ClipSlots] applyCanvasAttachmentEdit 字节归位失败：\(ApplicationDiagnostics.error(error))")
             return false
         }
         return writeCanvasSlotAttachments(groupId: groupId, slot: slot, attachments: attachments)
@@ -3173,7 +3173,7 @@ final class SlotStoreObservable: ObservableObject {
             _ = try SpecialSlotStorage.canvasPrivate.ensureReservedGroup(id: id, name: name)
             return true
         } catch {
-            NSLog("[ClipSlots] ensureCanvasPrivateGroup(\(id)) failed: \(error)")
+            NSLog("[ClipSlots] ensureCanvasPrivateGroup(\(id)) failed: \(ApplicationDiagnostics.error(error))")
             return false
         }
     }
@@ -3224,7 +3224,7 @@ final class SlotStoreObservable: ObservableObject {
             bumpCanvasSlotRevision()
             return true
         } catch {
-            NSLog("[ClipSlots] deleteCanvasPrivateGroup(\(id)) failed: \(error)")
+            NSLog("[ClipSlots] deleteCanvasPrivateGroup(\(id)) failed: \(ApplicationDiagnostics.error(error))")
             return false
         }
     }
@@ -3513,7 +3513,7 @@ final class SlotStoreObservable: ObservableObject {
                     try self.specialStorage.updateSettings { $0.confirmBeforeClearAllSlots = false }
                     self.specialSlotSettings.confirmBeforeClearAllSlots = false
                 } catch {
-                    NSLog("[ClipSlots] update confirmBeforeClearAllSlots failed: \(error)")
+                    NSLog("[ClipSlots] update confirmBeforeClearAllSlots failed: \(ApplicationDiagnostics.error(error))")
                 }
             }
             self.clearAllSlotsInCurrentSpecialSlot()
@@ -3560,7 +3560,7 @@ final class SlotStoreObservable: ObservableObject {
 
             NSLog("[ClipSlots] CLEAR ALL specialSlot=\(activeId)")
         } catch {
-            NSLog("[ClipSlots] CLEAR ALL failed specialSlot=\(activeId) error=\(error)")
+            NSLog("[ClipSlots] CLEAR ALL failed specialSlot=\(activeId) error=\(ApplicationDiagnostics.error(error))")
             showAlert(message: "清空失败：\(error.localizedDescription)")
         }
     }
@@ -3631,7 +3631,7 @@ final class SlotStoreObservable: ObservableObject {
                         try self.specialStorage.updateSettings { $0.confirmBeforePasteAllSlots = false }
                         self.specialSlotSettings.confirmBeforePasteAllSlots = false
                     } catch {
-                        NSLog("[ClipSlots] update confirmBeforePasteAllSlots failed: \(error)")
+                        NSLog("[ClipSlots] update confirmBeforePasteAllSlots failed: \(ApplicationDiagnostics.error(error))")
                     }
                 }
                 self.pasteAllSlotsFromUI()
@@ -3868,12 +3868,10 @@ final class SlotStoreObservable: ObservableObject {
 
         // Only trust memory cache if it belongs to the currently active special slot.
         if loadedSpecialSlotId == activeId, let inMemory = slots[slot], !inMemory.isEmpty {
-            NSLog("[ClipSlots] contentForSlot memory specialSlot=\(activeId) slot=\(slot) preview=\(inMemory.preview)")
             return inMemory
         }
 
         let stored = specialStorage.get(slot, in: activeId)
-        NSLog("[ClipSlots] contentForSlot storage specialSlot=\(activeId) slot=\(slot) preview=\(stored.preview) loadedSpecialSlotId=\(loadedSpecialSlotId ?? "nil")")
         return stored
     }
 
@@ -4268,7 +4266,7 @@ final class SlotStoreObservable: ObservableObject {
         }
 
         _ = clipboard.restore(content)
-        NSLog("[ClipSlots] COPY slot=\(slot) preview=\(content.preview)")
+        NSLog("[ClipSlots] COPY slot=\(slot) items=\(content.items.count)")
 
         if UserDefaults.standard.showCopyToast {
             let summary = content.noticeSummary
@@ -4450,7 +4448,7 @@ final class SlotStoreObservable: ObservableObject {
         self.pendingPasteWorkItem = pasteWorkItem
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.08, execute: pasteWorkItem)
 
-        NSLog("[ClipSlots] pasteSlot scheduled specialSlot=\(activeId) slot=\(slot) preview=\(content.preview)")
+        NSLog("[ClipSlots] pasteSlot scheduled specialSlot=\(activeId) slot=\(slot) items=\(content.items.count)")
     }
 
     // MARK: - Radial Paste (targetApp activation + waitUntilFrontmost)
@@ -4512,7 +4510,7 @@ final class SlotStoreObservable: ObservableObject {
             cleanTarget = targetApp ?? lastNonClipSlotsApp
         }
 
-        NSLog("[ClipSlots] PASTE radial specialSlot=\(activeId) slot=\(slot) preview=\(content.preview) targetApp=\(cleanTarget?.localizedName ?? "nil")")
+        NSLog("[ClipSlots] PASTE radial specialSlot=\(activeId) slot=\(slot) items=\(content.items.count) targetPresent=\(cleanTarget != nil)")
 
         let previous = clipboard.capture()
 
@@ -5634,7 +5632,7 @@ final class SlotStoreObservable: ObservableObject {
             tempFiles.append(url)
             return url
         } catch {
-            NSLog("[ClipSlots] failed to spill image attachment to temp file: \(error)")
+            NSLog("[ClipSlots] failed to spill image attachment to temp file: \(ApplicationDiagnostics.error(error))")
             return nil
         }
     }
@@ -5919,7 +5917,7 @@ final class SlotStoreObservable: ObservableObject {
         } catch {
             // v2.7.66: surface the underlying decode error instead of silently
             // collapsing every failure to a generic "模板格式无效".
-            NSLog("[ClipSlots] importConnectionTemplate decode failed: \(error)")
+            NSLog("[ClipSlots] importConnectionTemplate decode failed: \(ApplicationDiagnostics.error(error))")
             showFloatingNotice(FloatingNotice(
                 title: "导入失败",
                 subtitle: "模板格式无效：\(error.localizedDescription)",
@@ -6472,7 +6470,7 @@ final class SlotStoreObservable: ObservableObject {
                 try specialStorage.updateSettings { $0.confirmBeforeClearSingleSlot = false }
                 specialSlotSettings.confirmBeforeClearSingleSlot = false
             } catch {
-                NSLog("[ClipSlots] update confirmBeforeClearSingleSlot failed: \(error)")
+                NSLog("[ClipSlots] update confirmBeforeClearSingleSlot failed: \(ApplicationDiagnostics.error(error))")
             }
         }
 
@@ -7027,7 +7025,7 @@ final class SlotStoreObservable: ObservableObject {
                         ))
                     }
                 } catch {
-                    NSLog("[ClipSlots] Folder import (bg) error: \(error)")
+                    NSLog("[ClipSlots] Folder import (bg) error: \(ApplicationDiagnostics.error(error))")
                     DispatchQueue.main.async { [weak self] in
                         self?.publishImportProgress(nil) // v2.10.39: 收起进度条浮层
                         self?.showAlert(message: "导入失败: \(error.localizedDescription)")
@@ -7036,7 +7034,7 @@ final class SlotStoreObservable: ObservableObject {
             }
 
         } catch {
-            NSLog("[ClipSlots] Folder import error: \(error)")
+            NSLog("[ClipSlots] Folder import error: \(ApplicationDiagnostics.error(error))")
             showAlert(message: "导入失败: \(error.localizedDescription)")
         }
     }
@@ -7203,7 +7201,7 @@ final class SlotStoreObservable: ObservableObject {
                     }
                 }
 
-                NSLog("[ClipSlots] SAVE OK specialSlot=\(activeId) slot=\(targetSlot) contentId=\(contentToWrite.contentId) preview=\(contentToWrite.preview)")
+                NSLog("[ClipSlots] SAVE OK specialSlot=\(activeId) slot=\(targetSlot) items=\(contentToWrite.items.count) attachments=\(contentToWrite.attachments.count)")
 
                 // v2.6.2: Floating notice with content summary
                 if UserDefaults.standard.showSaveToast {
@@ -7359,7 +7357,7 @@ final class SlotStoreObservable: ObservableObject {
                     }
                     createdGroupCount += 1
                 } catch {
-                    NSLog("[ClipSlots] Batch save: failed to create group '\(groupName)': \(error)")
+                    NSLog("[ClipSlots] Batch save: failed to create group: \(ApplicationDiagnostics.error(error))")
                     break
                 }
             }
@@ -7391,13 +7389,13 @@ final class SlotStoreObservable: ObservableObject {
                             }
                             createdGroupCount += 1
                         } catch {
-                            NSLog("[ClipSlots] Batch save: failed to create group in page '\(pageName)': \(error)")
+                            NSLog("[ClipSlots] Batch save: failed to create group in page: \(ApplicationDiagnostics.error(error))")
                             break
                         }
                     }
                     } // end if groupsNeededInPage > 0
                 } catch {
-                    NSLog("[ClipSlots] Batch save: failed to create page: \(error)")
+                    NSLog("[ClipSlots] Batch save: failed to create page: \(ApplicationDiagnostics.error(error))")
                     break
                 }
             }
@@ -7700,7 +7698,7 @@ final class SlotStoreObservable: ObservableObject {
                 self?.importFolderIntoCurrentSpecialSlot(folderURL)
             }
         } catch {
-            NSLog("[ClipSlots] createSpecialSlotAndImportFolder error: \(error)")
+            NSLog("[ClipSlots] createSpecialSlotAndImportFolder error: \(ApplicationDiagnostics.error(error))")
             showAlert(message: "创建槽位组失败: \(error.localizedDescription)")
         }
     }
@@ -7711,19 +7709,7 @@ final class SlotStoreObservable: ObservableObject {
     /// Holds metadata and the storage root; group handles resolve on the worker because their
     /// initialization checks disk directories. `pages`/`specialSlots`
     /// are mutated only on the main thread, so we read them here (on main) and hand the rest off.
-    struct SearchableGroupRef {
-        let pageId: String
-        let pageName: String
-        let pageOrder: Int
-        let groupId: String
-        let groupName: String
-        let groupOrder: Int
-        let storageRoot: SpecialSlotStorage
-        var storage: SlotStorage { storageRoot.slotStorage(for: groupId) }
-        /// v2.11.7 hotfix11: 每组槽位数。全局搜索改为扫磁盘（见 expandSearchableSlots），
-        /// 需要知道要扫 1...slotCount；`config` 只在主线程读，所以在这里一起捕获。
-        let slotCount: Int
-    }
+    typealias SearchableGroupRef = SlotGlobalSearchGroup
 
     /// Capture only in-memory metadata on main; resolve storage handles during expansion.
     func searchableGroupsSnapshot() -> [SearchableGroupRef] {
@@ -7763,42 +7749,19 @@ final class SlotStoreObservable: ObservableObject {
                                       query: String,
                                       filter: SlotFilterType,
                                       isCancelled: () -> Bool = { false }) -> [SlotGlobalSearchResult] {
-        var results: [SlotGlobalSearchResult] = []
-        for group in groups {
-            guard !isCancelled() else { return [] }
-            let scan = group.storageRoot.searchCandidates(in: group.groupId, slotCount: group.slotCount,
-                                                         query: query, isCancelled: isCancelled)
-            #if DEBUG
-            let matchStart = SlotSearchDiagnostics.now
-            #endif
-            for (slot, scanned) in scan {
-                guard !isCancelled() else { return [] }
-                let label = scanned.label ?? ""
-                guard SlotSearchMatcher.matches(slot: slot,
-                                                content: scanned,
-                                                label: label,
-                                                query: query,
-                                                filter: filter) else { continue }
-                guard !isCancelled() else { return [] }
-                results.append(SlotGlobalSearchResult(
-                    pageId: group.pageId,
-                    pageName: group.pageName,
-                    groupId: group.groupId,
-                    groupName: group.groupName,
-                    slot: slot,
-                    // Result rows only need text and metadata. The selected preview
-                    // loads full media on demand, rather than decoding every hit.
-                    content: scanned,
-                    label: label,
-                    pageOrder: group.pageOrder,
-                    groupOrder: group.groupOrder
-                ))
-            }
-            #if DEBUG
-            SlotSearchDiagnostics.record("matchingMS", since: matchStart)
-            #endif
-        }
-        return results
+        expandSearchableSlotsResult(groups, query: query, filter: filter,
+                                    isCancelled: isCancelled).results
+    }
+
+    typealias SearchExpansion = SlotGlobalSearchWorker.Expansion
+
+    static func expandSearchableSlotsResult(_ groups: [SearchableGroupRef],
+                                            query: String,
+                                            filter: SlotFilterType,
+                                            isCancelled: () -> Bool = { false },
+                                            onProgress: (([SlotGlobalSearchResult], Int) -> Void)? = nil) -> SearchExpansion {
+        SlotGlobalSearchWorker.expand(groups, query: query, filter: filter,
+                                      isCancelled: isCancelled, onProgress: onProgress)
     }
 
     /// Return all searchable slots across all pages and groups (read-only). Convenience

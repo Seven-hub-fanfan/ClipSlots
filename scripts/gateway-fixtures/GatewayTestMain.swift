@@ -9,6 +9,10 @@ final class TestRunner {
         else { failed += 1; print("FAIL: \(message)") }
     }
 
+    func equal<T: Equatable>(_ actual: T, _ expected: T, _ message: String) {
+        check(actual == expected, message)
+    }
+
     func report() -> Never {
         print("Gateway fixtures: \(passed) passed, \(failed) failed")
         exit(failed == 0 ? 0 : 1)
@@ -32,6 +36,9 @@ func smokeAwait<T>(_ body: @escaping @Sendable () async -> T) -> T {
 enum GatewayTestMain {
     static func main() {
         let runner = TestRunner()
+        runAuthoritativeContextUsageTests(runner)
+        runContextCompactionTranscriptTests(runner)
+        runTaskSubagentProjectionTests(runner)
         runAgentRunGatewayTests(runner)
         runner.report()
     }

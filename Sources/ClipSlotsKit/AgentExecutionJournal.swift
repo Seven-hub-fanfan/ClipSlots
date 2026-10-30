@@ -11,6 +11,10 @@ public struct AgentExecutionScope: Codable, Equatable, Sendable {
     }
 }
 
+public protocol AgentToolExecutionScoped: AgentToolExecuting {
+    var executionScope: AgentExecutionScope { get }
+}
+
 /// A reservation is durable before side effects start. Replays return recorded
 /// results; an interrupted execution remains unknown until separately checked.
 /// The journal makes no claim about exactly-once delivery to a remote service.
@@ -125,12 +129,15 @@ public final class AgentExecutionJournal: @unchecked Sendable {
     }
 }
 
-public final class AgentJournaledTools: AgentToolExecuting, AgentCLICommandAuthorizing, @unchecked Sendable {
+public final class AgentJournaledTools: AgentToolExecutionScoped, AgentCLICommandAuthorizing, @unchecked Sendable {
     private let base: AgentToolExecuting
     private let journal: AgentExecutionJournal
     private let scope: AgentExecutionScope
+    private let declarations: [AgentToolSpec]
+    public var executionScope: AgentExecutionScope { scope }
     public init(base: AgentToolExecuting, journal: AgentExecutionJournal, scope: AgentExecutionScope) {
         self.base = base; self.journal = journal; self.scope = scope
+        declarations = base.specs()
     }
     public func specs() -> [AgentToolSpec] { base.specs() }
     public func permitsCLI(_ command: String) -> Bool {
@@ -144,6 +151,9 @@ public final class AgentJournaledTools: AgentToolExecuting, AgentCLICommandAutho
             try Task.checkCancellation()
             guard let spec = base.specs().first(where: { $0.name == call.name }) else {
                 return .failure("工具未在本轮开放。", code: "TOOL_NOT_ENABLED")
+            }
+            guard declarations.first(where: { $0.name == call.name }) == spec else {
+                return .failure("工具声明已改变，请开启新一轮后再执行。", code: "TOOL_DECLARATION_CHANGED")
             }
             try GenerationSchema.validate(try call.arguments(), schema: spec.parameters)
             let reservation = try await Task.detached { [journal, scope] in

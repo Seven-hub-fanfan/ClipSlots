@@ -20,6 +20,10 @@ func runWorkflowSkillProbe(store: SlotStoreObservable, canvas: CanvasStore,
     func openLibrary(_ host: NSView) async -> Bool {
         guard press(host, "agent-composer-add") else { return false }
         await settle()
+        guard let rootMenu = NSApp.windows.compactMap(\.contentView).first(where: {
+            find($0, "agent-add-skills") != nil
+        }), press(rootMenu, "agent-add-skills") else { return false }
+        await settle()
         guard let menu = NSApp.windows.compactMap(\.contentView).first(where: {
             find($0, "agent-workflow-skills") != nil
         }) else { return false }
@@ -51,6 +55,7 @@ func runWorkflowSkillProbe(store: SlotStoreObservable, canvas: CanvasStore,
         window.sheets.first.map(deepestSheet) ?? window
     }
     do {
+        runIsolatedCrateBoundaryProbe(check: check)
         let sourceProject = canvas.createProject(name: "Skill 原生验收")
         let group = try store.specialStorage.createSpecialSlot(name: "Skill 源素材")
         for (index, text) in ["柠檬汽水，柔光产品特写", "保留瓶身比例与商标，浅色背景", "缓慢推进，三秒停留"].enumerated() {

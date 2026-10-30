@@ -1,18 +1,8 @@
 import Foundation
 
-/// 界面皮肤（v2.11.7）。
-///
-/// `colorful`（多彩模式）是 v2.11.6 及之前的既有观感：卡片带槽位色装饰条、彩色操作按钮、
-/// 槽位色描边与外发光。`minimal`（简洁模式）把这些彩色元素全部收回，只保留**槽位编号**的
-/// 颜色作为点缀，其余一律中性灰阶。
-///
-/// 两者是纯视觉层的分叉——数据、存储、快捷键、CLI 行为完全共用，切换皮肤不动任何一个字节的用户数据。
-///
-/// 注意与 `ThemeMode`（深色 / 浅色 / 跟随系统）的区别：那是**明暗**，这是**风格**。两者正交，
-/// 简洁模式同样有浅色与深色两套取值，跟随系统 appearance 自动解析。
-/// UserDefaults 的键名也刻意分开：`appearanceMode` 早已被 `ThemeMode` 占用，皮肤用 `appearanceSkin`。
+/// 唯一的界面风格。保留类型和旧键用于读取历史设置；
+/// 明暗仍由 `ThemeMode` / `appearanceMode` 独立管理。
 public enum AppSkin: String, CaseIterable, Codable, Sendable {
-    case colorful
     case minimal
 
     /// UserDefaults 键名。
@@ -21,31 +11,33 @@ public enum AppSkin: String, CaseIterable, Codable, Sendable {
     /// 新安装与每次更新的默认外观为简洁模式。
     public static let fallback: AppSkin = .minimal
 
-    public var title: String {
-        switch self {
-        case .colorful: return "多彩模式"
-        case .minimal: return "简洁模式"
-        }
-    }
+    public var title: String { "简洁模式" }
 
-    public var subtitle: String {
-        switch self {
-        case .colorful: return "卡片带槽位配色、彩色按钮与高亮"
-        case .minimal: return "中性灰阶界面，仅保留槽位编号的颜色"
-        }
-    }
+    public var subtitle: String { "中性灰阶界面，仅保留槽位编号的颜色" }
 
-    public var iconName: String {
-        switch self {
-        case .colorful: return "paintpalette.fill"
-        case .minimal: return "circle.lefthalf.filled"
-        }
-    }
+    public var iconName: String { "circle.lefthalf.filled" }
 
-    /// 从 UserDefaults 读取。未设置或值非法时回落到简洁模式。
+    /// 旧风格或非法值规范化为简洁模式；不改明暗选择与其他偏好。
     public static func load(from defaults: UserDefaults) -> AppSkin {
-        guard let raw = defaults.string(forKey: defaultsKey) else { return fallback }
-        return AppSkin(rawValue: raw) ?? fallback
+        if defaults.object(forKey: defaultsKey) != nil,
+           defaults.string(forKey: defaultsKey) != fallback.rawValue {
+            fallback.store(in: defaults)
+        }
+        return fallback
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.singleValueContainer()
+        let raw = try container.decode(String.self)
+        guard raw == Self.minimal.rawValue || raw == "colorful" else {
+            throw DecodingError.dataCorruptedError(in: container, debugDescription: "Unknown appearance style")
+        }
+        self = .minimal
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.singleValueContainer()
+        try container.encode(rawValue)
     }
 
     public func store(in defaults: UserDefaults) {

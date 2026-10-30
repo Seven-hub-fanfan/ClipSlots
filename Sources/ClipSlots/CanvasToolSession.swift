@@ -19,6 +19,11 @@ import ClipSlotsKit
     @Published var cloud: CanvasGaussianCloud?
     @Published var composite:CanvasStageComposite?
     @Published var previewTime: Double = 0
+    @Published private(set) var cloudRecovery: CanvasCloudRunRecord?
+    private var cloudUnpersistedResult: CanvasCloudClient.Result?
+    var hasCloudResult: Bool { cloudRecovery?.result != nil || cloudUnpersistedResult != nil }
+    private let cloudClient: CanvasCloudClient
+    private let cloudRuns: CanvasCloudRunStore
     private var operation: Task<Void, Never>?
     private var operationID: UUID?
     private var previewComposition: CanvasToolMedia.Composition?
@@ -28,9 +33,22 @@ import ClipSlotsKit
     weak var window: NSWindow?
     var capturePreview: (() throws -> NSImage)?
     init(canvas: CanvasStore, store: SlotStoreObservable, node: CanvasNode,
-         attachments: [SlotContent.SlotAttachment]) {
+         attachments: [SlotContent.SlotAttachment],
+         cloudClient: CanvasCloudClient = .init(),
+         cloudRuns: CanvasCloudRunStore = .init(root: ClipSlotsPaths.dataRoot)) {
         self.canvas = canvas; self.store = store; project = canvas.activeProjectId
         nodeID = node.id; createdAt = node.createdAt; self.attachments = attachments
+        self.cloudClient = cloudClient; self.cloudRuns = cloudRuns
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            do {
+                let project = self.project, nodeID = self.nodeID, createdAt = self.createdAt
+                let record = try await self.cloudRecordWork { runs in
+                    try runs.latest(project: project, node: nodeID, createdAt: createdAt)
+                }
+                if self.cloudRecovery == nil { self.cloudRecovery = record }
+            } catch { if self.message.isEmpty { self.message = error.localizedDescription } }
+        }
     }
     var node: CanvasNode? {
         guard canvas.activeProjectId == project, let node = canvas.node(id: nodeID),
@@ -131,59 +149,216 @@ import ClipSlotsKit
         canvas.editTool(id:nodeID,configuration:next,detail:"保存云端任务状态")
         guard configuration==next else { throw CanvasToolError.invalid("云端任务状态保存失败") };return next
     }
+    private func cloudRecordWork<T>(_ body: @escaping (CanvasCloudRunStore) throws -> T) async throws -> T {
+        let runs = cloudRuns
+        // Receipt completion must survive cancellation of local waiting.
+        return try await Task.detached { try body(runs) }.value
+    }
     func generateCloud(key:String,resume:Bool=false) {
-        guard var config=configuration.cloudGeneration else { return }
-        if let error=config.validationError { message=error;return }
+        guard let config=configuration.cloudGeneration else { return }
+        if !resume, let error=config.validationError { message=error;return }
         if !resume && config.task != nil { message="已有任务，请先查询或明确新建任务";return }
-        run {
-            let client=CanvasCloudClient()
-            var expected=self.configuration
-            var submitted=resume
-            do {
+        run { try await self.performCloud(key: key, resume: resume) }
+    }
+    func performCloud(key: String, resume: Bool) async throws {
+        guard let config = configuration.cloudGeneration else { throw CanvasCloudError.invalid("没有云生成配置") }
+        var expected = configuration
+        var receipt: CanvasCloudRunRecord?
+        var networkStarted = false
+        var imageToken: String?
+        let project = project, nodeID = nodeID, createdAt = createdAt
+        do {
+            try Task.checkCancellation()
+            if resume {
+                guard let task = config.task else { throw CanvasCloudError.invalid("没有可恢复的云端任务") }
+                if let id = task.receiptID {
+                    receipt = try await cloudRecordWork { try $0.record(project: project, node: nodeID, createdAt: createdAt, id: id) }
+                    guard receipt?.task.id == task.id, receipt?.task.provider == task.provider,
+                          receipt?.task.mode == task.mode, receipt?.task.model == task.model,
+                          receipt?.task.service == task.service,
+                          receipt?.task.rigCheck == task.rigCheck,
+                          receipt?.task.submissionStarted == task.submissionStarted else { throw CanvasCloudError.invalid("节点任务与保存的回执不一致") }
+                } else {
+                    receipt = try await cloudRecordWork {
+                        try $0.adopt(project: project, node: nodeID, createdAt: createdAt, configuration: config, task: task)
+                    }
+                }
+            } else {
+                if let error = config.validationError { throw CanvasCloudError.invalid(error) }
+                guard config.task == nil else { throw CanvasCloudError.invalid("已有任务，请先取回结果") }
+                if config.mode == .image3D {
+                    guard let id = config.inputAttachmentID, let resource = resources[id] else { throw CanvasToolError.missingMedia }
+                    let lease = try CanvasMediaFileLease(source: resource.url, name: resource.name)
+                    imageToken = try await cloudClient.uploadImage(lease.url, key: key)
+                }
+                try Task.checkCancellation()
+                guard node?.tools == expected else { throw CanvasToolError.invalid("节点已变更，未提交云生成") }
+                receipt = try await cloudRecordWork {
+                    try $0.begin(project: project, node: nodeID, createdAt: createdAt, configuration: config)
+                }
+                cloudRecovery = receipt
+                guard let reservation = receipt else { throw CanvasCloudError.remote }
+                expected = try persistCloud(expected, task: reservation.task)
+            }
+            if !resume || receipt?.task.canResumeRigCheck == true {
+                guard let reservation = receipt else { throw CanvasCloudError.remote }
+                try Task.checkCancellation()
+                networkStarted = true
                 if config.provider == .elevenLabs || config.provider == .miniMax {
-                    guard !resume else { throw CanvasCloudError.invalid("此音频服务不支持恢复提交，请先检查服务控制台") }
-                    expected=try self.persistCloud(expected,task:.init(provider:config.provider,mode:config.mode,state:.submitting))
-                    submitted=true
-                    let result=try await client.audio(config,key:key)
+                    let result = try await cloudClient.audio(config, key: key)
+                    cloudUnpersistedResult = result
+                    var received = reservation; received.task.id = result.metadata.taskID; received.task.state = .complete
+                    receipt = received; cloudRecovery = received
+                    receipt = try await cloudRecordWork { try $0.cache(reservation, result: result) }
+                    cloudUnpersistedResult = nil
+                } else {
+                    let task = try await cloudClient.submit(reservation.configuration, key: key, imageToken: imageToken,
+                        rigCheck: reservation.task.rigCheck,
+                        originalTask: config.mode == .rig ? reservation.task : nil,
+                        checkpoint: { check in
+                            let saved = try await self.cloudRecordWork { try $0.checkpointRig(reservation, check: check) }
+                            receipt = saved; self.cloudRecovery = saved
+                            if self.node?.tools == expected { expected = try self.persistCloud(expected, task: saved.task) }
+                        }, beforeSubmission: {
+                            guard !Task.isCancelled, self.node?.tools == expected else { throw CanvasCloudError.notSubmitted }
+                            if config.mode == .rig {
+                                let saved = try await self.cloudRecordWork { try $0.startSubmission(reservation) }
+                                receipt = saved; self.cloudRecovery = saved
+                                expected = try self.persistCloud(expected, task: saved.task)
+                            }
+                        })
+                    var received = receipt ?? reservation
+                    received.task.id = task.id; received.task.state = .pending
+                    receipt = received; cloudRecovery = received
+                    receipt = try await cloudRecordWork { try $0.accept(reservation, task: task) }
+                }
+            }
+            guard let accepted = receipt else { throw CanvasCloudError.remote }
+            cloudRecovery = accepted
+            // Durable receipt precedes this fallible graph projection.
+            expected = try persistCloud(expected, task: accepted.task)
+            if let result = try await cloudRecordWork({ try $0.cachedResult(accepted) }) {
+                try Task.checkCancellation()
+                try await acceptCloud(result, expected: expected)
+                cloudRecovery = try await cloudRecordWork { try $0.markProjected(accepted) }
+                return
+            }
+            guard accepted.task.id != nil, accepted.task.provider == .tripo || accepted.task.provider == .worldLabs else {
+                throw CanvasCloudError.unknownSubmission
+            }
+            message = "云端任务已保存，正在查询…"
+            for _ in 0..<300 {
+                try Task.checkCancellation()
+                let status = try await cloudClient.status(accepted.task, quality: accepted.configuration.worldQuality, key: key)
+                if status.done {
+                    let result = try await cloudClient.download(status)
+                    cloudUnpersistedResult = result
+                    receipt = try await cloudRecordWork { try $0.cache(accepted, result: result) }
+                    cloudUnpersistedResult = nil
+                    cloudRecovery = receipt
                     try Task.checkCancellation()
-                    try await self.acceptCloud(result,expected:expected)
+                    guard let cached = try await cloudRecordWork({ try $0.cachedResult(accepted) }) else { throw CanvasCloudError.remote }
+                    try await acceptCloud(cached, expected: expected)
+                    if let receipt { cloudRecovery = try await cloudRecordWork { try $0.markProjected(receipt) } }
                     return
                 }
-                if !resume {
-                    var imageToken:String?
-                    if config.mode == .image3D {
-                        guard let id=config.inputAttachmentID,let resource=self.resources[id] else { throw CanvasToolError.missingMedia }
-                        let lease=try CanvasMediaFileLease(source:resource.url,name:resource.name)
-                        imageToken=try await client.uploadImage(lease.url,key:key)
-                    }
-                    expected=try self.persistCloud(expected,task:.init(provider:config.provider,mode:config.mode,state:.submitting))
-                    submitted=true
-                    let task=try await client.submit(config,key:key,imageToken:imageToken)
-                    // Retain the returned ID even if local cancellation occurred
-                    // after the service accepted the request.
-                    expected=try self.persistCloud(expected,task:task);config.task=task
+                try await Task.sleep(nanoseconds: 2_000_000_000)
+            }
+            throw CanvasCloudError.expired
+        } catch {
+            if let current = receipt {
+                let rejected: Bool
+                switch error {
+                case CanvasCloudError.unauthorized, CanvasCloudError.balance, CanvasCloudError.rejected,
+                     CanvasCloudError.notSubmitted: rejected = true
+                default: rejected = (!networkStarted && !resume) ||
+                    (current.task.submissionStarted == false && current.task.rigCheck?.state == .complete &&
+                     !current.task.canResumeRigCheck)
                 }
-                guard let task=config.task else { throw CanvasCloudError.remote }
-                self.message="云端任务已保存，正在查询…"
-                for _ in 0..<300 {
-                    try Task.checkCancellation()
-                    let status=try await client.status(task,quality:config.worldQuality,key:key)
-                    if status.done {
-                        let result=try await client.download(status)
-                        try Task.checkCancellation();try await self.acceptCloud(result,expected:expected);return
-                    }
-                    try await Task.sleep(nanoseconds:2_000_000_000)
-                }
-                throw CanvasCloudError.expired
+                let saved = try await cloudRecordWork { try $0.finishWaiting(current, rejected: rejected) }
+                cloudRecovery = saved.task.id == nil && (current.task.id != nil || cloudUnpersistedResult != nil) ? current : saved
+                if node?.tools == expected { _ = try? persistCloud(expected, task: saved.task) }
+                if saved.task.state == .unknown { throw CanvasCloudError.unknownSubmission }
+                if error is CancellationError, saved.task.id != nil || saved.result != nil { throw CanvasCloudError.cancelled }
+            }
+            throw error
+        }
+    }
+    func recoverCachedCloud() {
+        guard hasCloudResult else { return }
+        run { try await self.performRecoveredCloud(key: "") }
+    }
+    func recoverCloudTask(key: String) {
+        guard cloudRecovery?.task.id != nil || cloudRecovery?.task.canResumeRigCheck == true else { return }
+        run { try await self.performRecoveredCloud(key: key) }
+    }
+    /// Explicit recovery uses the saved run's provider and configuration while
+    /// protecting the current editor snapshot. An accepted or unknown final
+    /// submission is never repeated; a pending rig check can continue its workflow.
+    func performRecoveredCloud(key: String) async throws {
+        guard let observed = cloudRecovery else { throw CanvasCloudError.invalid("没有可恢复的云端回执") }
+        let expected = configuration
+        var record = try await cloudRecordWork {
+            try $0.record(project: observed.projectID, node: observed.nodeID, createdAt: observed.nodeCreatedAt, id: observed.id)
+        }
+        if let result = cloudUnpersistedResult {
+            record = try await cloudRecordWork { try $0.cache(record, result: result) }
+            cloudUnpersistedResult = nil
+        } else if record.task.id == nil, observed.task.id != nil {
+            record = try await cloudRecordWork { try $0.accept(record, task: observed.task) }
+        }
+        cloudRecovery = record
+        if record.task.canResumeRigCheck {
+            let reservation = record
+            do {
+                let accepted = try await cloudClient.submit(record.configuration, key: key, rigCheck: record.task.rigCheck,
+                    originalTask: reservation.task,
+                    checkpoint: { check in
+                        record = try await self.cloudRecordWork { try $0.checkpointRig(reservation, check: check) }
+                        self.cloudRecovery = record
+                    }, beforeSubmission: {
+                        guard !Task.isCancelled, self.node?.tools == expected else { throw CanvasCloudError.notSubmitted }
+                        record = try await self.cloudRecordWork { try $0.startSubmission(reservation) }
+                        self.cloudRecovery = record
+                    })
+                record.task.id = accepted.id; record.task.state = .pending
+                cloudRecovery = record
+                record = try await cloudRecordWork { try $0.accept(reservation, task: accepted) }
+                cloudRecovery = record
             } catch {
-                if submitted,let current=self.node?.tools,current==expected,let pending=current.cloudGeneration?.task,pending.id==nil {
-                    var unknown=pending;unknown.state = .unknown;_ = try? self.persistCloud(expected,task:unknown)
-                    throw CanvasCloudError.unknownSubmission
-                }
-                if error is CancellationError,config.task?.id != nil { throw CanvasCloudError.cancelled }
+                let observed = record
+                record = try await cloudRecordWork { try $0.finishWaiting(reservation) }
+                cloudRecovery = record.task.id == nil && observed.task.id != nil ? observed : record
                 throw error
             }
         }
+        if let result = try await cloudRecordWork({ try $0.cachedResult(record) }) {
+            try Task.checkCancellation()
+            try await acceptCloud(result, expected: expected)
+            cloudRecovery = try await cloudRecordWork { try $0.markProjected(record) }
+            return
+        }
+        guard record.task.id != nil, record.task.provider == .tripo || record.task.provider == .worldLabs else {
+            throw CanvasCloudError.unknownSubmission
+        }
+        for _ in 0..<300 {
+            try Task.checkCancellation()
+            let status = try await cloudClient.status(record.task, quality: record.configuration.worldQuality, key: key)
+            if status.done {
+                let downloaded = try await cloudClient.download(status)
+                cloudUnpersistedResult = downloaded
+                record = try await cloudRecordWork { try $0.cache(record, result: downloaded) }
+                cloudUnpersistedResult = nil
+                cloudRecovery = record
+                guard let result = try await cloudRecordWork({ try $0.cachedResult(record) }) else { throw CanvasCloudError.remote }
+                try Task.checkCancellation()
+                try await acceptCloud(result, expected: expected)
+                cloudRecovery = try await cloudRecordWork { try $0.markProjected(record) }
+                return
+            }
+            try await Task.sleep(nanoseconds: 2_000_000_000)
+        }
+        throw CanvasCloudError.expired
     }
     func generateConfiguredAudio(prompt: String) {
         let models = ModelWorkspaceStore.shared
@@ -244,6 +419,19 @@ import ClipSlotsKit
     }
     func acceptCloud(_ result:CanvasCloudClient.Result,expected:CanvasToolConfiguration) async throws {
         guard node?.tools==expected else { throw CanvasToolError.invalid("节点已变更，云端结果未覆盖新配置") }
+        if result.metadata.receiptID != nil, let current = node, let id = current.tools?.resourceAttachmentID,
+           current.tools?.cloudResources?[id] == result.metadata,
+           let attachment = store.canvasSlotAttachments(groupId: current.groupId, slot: current.slot)
+                .first(where: { $0.id.uuidString == id }),
+           let path = attachment.storagePath {
+            let matches = try await CanvasToolMedia.worker {
+                let url = URL(fileURLWithPath: path)
+                guard try url.resourceValues(forKeys: [.fileSizeKey]).fileSize == result.data.count else { return false }
+                return try Data(contentsOf: url) == result.data
+            }
+            guard node?.tools == expected else { throw CanvasToolError.invalid("节点已变更，云端结果未覆盖新配置") }
+            if matches { message = "结果已导入，可从节点素材中查看"; return }
+        }
         let url=FileManager.default.temporaryDirectory.appendingPathComponent("云生成-\(UUID().uuidString).\(result.fileExtension)")
         defer { try? FileManager.default.removeItem(at:url) }
         try result.data.write(to:url,options:.atomic)
@@ -294,7 +482,8 @@ import ClipSlotsKit
         if let cloudMetadata {
             if config.cloudResources==nil { config.cloudResources=[:] }
             config.cloudResources?[persisted.id.uuidString]=cloudMetadata
-            config.cloudGeneration?.task?.state = .complete
+            if let task = config.cloudGeneration?.task, task.provider == cloudMetadata.provider,
+               task.id == cloudMetadata.taskID { config.cloudGeneration?.task?.state = .complete }
         }
         if referenceImage { config.cloudGeneration?.inputAttachmentID=persisted.id.uuidString }
         else if environment { config.stage.animation.environment.attachmentID=persisted.id.uuidString }

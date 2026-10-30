@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Real loopback HTTP/SSE tests. Providers in this suite are synthetic."""
 import argparse
+import base64
 import concurrent.futures
 import copy
 import http.client
@@ -145,7 +146,7 @@ class ProcessServer:
                 "executionID": request["executionID"], "callID": request["callID"],
                 "content": content, "isFailure": False}
 
-    def read_until(self, run, event_type):
+    def read_until(self, run, event_type, predicate=None):
         conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=5)
         headers = {"Authorization": "Bearer " + self.token} if self.token else {}
         conn.request("GET", "/v1/runs/" + segment(run) + "/events", headers=headers)
@@ -156,7 +157,7 @@ class ProcessServer:
             if not line and frame:
                 frame["data"] = json.loads(frame["data"])
                 frames.append(frame)
-                if frame["event"] == event_type:
+                if frame["event"] == event_type and (predicate is None or predicate(frame["data"]["payload"])):
                     conn.close()
                     return frames
                 frame = {}
@@ -185,7 +186,15 @@ class Upstream:
                     self.send_header("Location", "/redirect-target")
                     self.end_headers()
                     return
-                if owner.mode == "tool" and value["messages"][-1]["role"] != "tool":
+                tool_round = sum(m["role"] == "tool" for m in value["messages"])
+                if owner.mode == "reasoning-two-tools" and tool_round < 2:
+                    deltas = [
+                        {"reasoning_content": f"工具轮{tool_round}：\n"},
+                        {"reasoning_content": "保留空白 🙂 "},
+                        {"tool_calls": [{"index": 0, "id": f"reason-call-{tool_round}",
+                                         "function": {"name": "live_test_tool", "arguments": "{}"}}]}]
+                    finish = "tool_calls"
+                elif owner.mode == "tool" and value["messages"][-1]["role"] != "tool":
                     deltas = [
                         {"tool_calls": [{"index": 0, "id": "upstream-call", "function": {"name": "live_test_tool", "arguments": '{"text":'}}]},
                         {"tool_calls": [{"index": 0, "function": {"arguments": '"synthetic"}'}}]}]
@@ -276,6 +285,50 @@ class FaultServer:
                     data += frame("artifact_updated", "metadata", {"artifactID": "a", "revision": -1})
                 elif scenario == "bad-usage":
                     data += frame("usage", "usage", {"promptTokens": 0.5, "completionTokens": 1, "totalTokens": 1})
+                elif scenario == "task-subagents":
+                    def child(phase, parent="one", **extra):
+                        return dict(schema_version="subagent_event.v1", subagent_id="child",
+                                    parent_tool_call_id=parent, phase=phase,
+                                    agent_type="分析子任务", task_description="synthetic", **extra)
+                    data += frame("content", "before|1", {"messageID": message_id, "delta": "中e"})
+                    data += frame("task_snapshot", "plan|2", {"schema_version": "agent_task_snapshot.v1",
+                        "plan_ready": True, "tasks": [{"task_id": "one", "subject": "分析", "status": "in_progress"}]})
+                    data += frame("subagent_event", "child|3", child("started"))
+                    text = frame("subagent_event", "child|4", child("content", text="正文🙂"))
+                    data += text + text
+                    data += frame("subagent_event", "same|4", child("content", text="重复"))
+                    data += frame("subagent_event", "old|2", child("content", text="旧"))
+                    tool = dict(schema_version="tool_event.v1", type="tool_event", tool_call_id="tool",
+                                tool="Read", status="started", request={"path": "synthetic"}, response=None)
+                    data += frame("subagent_event", "tool|5", child("tool_started", tool_event=tool))
+                    tool = dict(tool, status="completed", request={}, response="已读取")
+                    data += frame("subagent_event", "tool|6", child("tool_completed", tool_event=tool))
+                    data += frame("subagent_event", "stop|7", child("stopped"))
+                    data += frame("subagent_event", "progress|8", child("progress"))
+                    data += frame("subagent_event", "successor|9", child("started", parent="two"))
+                    data += frame("subagent_event", "retired|10", child("started"))
+                    data += frame("subagent_event", "retired-content|11", child("content", text="旧实例"))
+                    data += frame("content", "after|12", {"messageID": message_id, "delta": "\u0301后"})
+                elif scenario == "context-usage":
+                    def usage(revision, **updates):
+                        value = {"conversation_id": body["binding"]["sessionID"], "run_id": "fault-run",
+                                 "runtime_session_id": None, "revision": revision, "used_tokens": 200,
+                                 "max_tokens": 100, "percentage": 200, "model": "test", "source": "sdk",
+                                 "status": "ready", "observed_at": "2026-10-29T02:00:00.123Z"}
+                        value.update(updates)
+                        return value
+                    data += frame("context_usage", "context-one", usage(1))
+                    data += frame("content", "compact-before", {"messageID": message_id, "delta": "中e"})
+                    data += frame("thinking", "compact-thinking", {"messageID": message_id, "delta": "思考🙂"})
+                    data += frame("compact", "compact-start", {"phase": "started"})
+                    data += frame("compact", "compact-start-duplicate", {"phase": "started"})
+                    data += frame("context_usage", "context-stale", usage(2, status="stale"))
+                    data += frame("compact", "compact-finish", {"phase": "finished"})
+                    data += frame("content", "compact-after", {"messageID": message_id, "delta": "\u0301后"})
+                    data += frame("context_usage", "context-old", usage(1))
+                    data += frame("context_usage", "context-other", usage(99, conversation_id="other"))
+                    data += frame("context_usage", "context-invalid", usage(99, max_tokens=0))
+                    data += frame("context_usage", "context-three", {"context_usage": usage(3)})
                 elif scenario == "unknown":
                     data += frame("execute_arbitrary_action", "unknown", {"secret": "TEST_SECRET_MUST_NOT_SURFACE"})
                 else:
@@ -573,6 +626,177 @@ class LiveTests(unittest.TestCase):
         self.assertEqual(server.events(run)[1][-1]["event"], "run_completed")
         self.assertEqual(len(upstream.requests), 2)
         self.assertEqual(upstream.requests[1]["messages"][-1]["tool_call_id"], "upstream-call")
+
+    def test_image_content_roundtrip_and_restart(self):
+        upstream = Upstream()
+        self.addCleanup(upstream.stop)
+        server = ProcessServer(synthetic=False, provider=upstream.url)
+        self.addCleanup(server.stop)
+        image = "data:image/png;base64," + (
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Wl6pAoAAAAASUVORK5CYII=")
+        content = [{"type": "text", "text": "仅检查结构：中文🙂"},
+                   {"type": "image_url", "image_url": {"url": image}}]
+        body = command(content)
+        body["messageSchemaVersion"] = 1
+        body["config"]["supportsImageInput"] = True
+        run, receipt = server.create(body)
+        events = server.events(run)[1]
+        self.assertEqual(events[-1]["event"], "run_completed")
+        self.assertEqual(upstream.requests[0]["messages"][-1]["content"], content)
+        with sqlite3.connect(server.db) as db:
+            saved = json.loads(db.execute("SELECT messages FROM runs WHERE id=?", (run,)).fetchone()[0])
+        self.assertEqual(saved[1]["content"], content)
+        server.restart(crash=True)
+        self.assertEqual(server.http("POST", "runs", body), (200, receipt))
+        self.assertEqual(server.events(run)[1], events)
+        self.assertEqual(len(upstream.requests), 1)
+
+    def test_structured_content_rejects_invalid_or_unclaimed_images_before_provider(self):
+        upstream = Upstream()
+        self.addCleanup(upstream.stop)
+        server = ProcessServer(synthetic=False, provider=upstream.url)
+        self.addCleanup(server.stop)
+        png = base64.b64encode(b"\x89PNG\r\n\x1a\n" + b"x" * 32).decode()
+        valid = {"type": "image_url", "image_url": {"url": "data:image/png;base64," + png}}
+        cases = [
+            ([], "INVALID_MESSAGE_CONTENT"),
+            ([{"type": "text", "text": "x", "hidden": "x"}], "INVALID_MESSAGE_CONTENT"),
+            ([{"type": "tool", "text": "x"}], "INVALID_MESSAGE_CONTENT"),
+            ([{"type": "text", "text": 1}], "INVALID_STRING"),
+            ([{"type": "image_url", "image_url": {"url": "https://fixture.invalid/private"}}], "INVALID_IMAGE"),
+            ([{"type": "image_url", "image_url": {"url": "data:image/png;base64,!!!"}}], "INVALID_IMAGE"),
+            ([{"type": "image_url", "image_url": {"url": "data:image/jpeg;base64," + png}}], "INVALID_IMAGE"),
+            ([dict(valid, extra="x")], "INVALID_MESSAGE_CONTENT"),
+            ([{"type": "image_url", "image_url": {"url": valid["image_url"]["url"], "detail": "invalid"}}], "INVALID_IMAGE"),
+            ([valid] * 7, "IMAGE_LIMIT"),
+        ]
+        for content, expected in cases:
+            with self.subTest(expected=expected, content_type=str(content)[:70]):
+                body = command(content)
+                body["messageSchemaVersion"] = 1
+                body["config"]["supportsImageInput"] = True
+                status, response = server.http("POST", "runs", body)
+                self.assertEqual(status, 400)
+                self.assertEqual(response["error"]["code"], expected)
+        for mutation, expected in [
+            (lambda b: b.pop("messageSchemaVersion"), "MESSAGE_SCHEMA_VERSION"),
+            (lambda b: b.update(messageSchemaVersion=True), "MESSAGE_SCHEMA_VERSION"),
+            (lambda b: b["config"].pop("supportsImageInput"), "IMAGE_INPUT_UNSUPPORTED"),
+            (lambda b: b["config"].update(supportsImageInput=False), "IMAGE_INPUT_UNSUPPORTED"),
+            (lambda b: b["config"].update(supportsImageInput="true"), "INVALID_IMAGE_CAPABILITY"),
+            (lambda b: b["history"][0].update(role="assistant"), "INVALID_MESSAGE_CONTENT"),
+        ]:
+            body = command([valid])
+            body["messageSchemaVersion"] = 1
+            body["config"]["supportsImageInput"] = True
+            mutation(body)
+            status, response = server.http("POST", "runs", body)
+            self.assertEqual((status, response["error"]["code"]), (400, expected))
+        self.assertEqual(upstream.requests, [])
+        with sqlite3.connect(server.db) as db:
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM runs").fetchone()[0], 0)
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM receipts").fetchone()[0], 0)
+
+    def test_reasoning_history_and_two_tool_turns_survive_restart(self):
+        upstream = Upstream("reasoning-two-tools")
+        self.addCleanup(upstream.stop)
+        server = ProcessServer(synthetic=False, provider=upstream.url)
+        self.addCleanup(server.stop)
+        body = command(tools=True)
+        historical = "已有思考\n\t🙂 "
+        body["history"].insert(0, {"id": str(uuid.uuid4()), "role": "assistant",
+                                  "content": "earlier", "reasoning": historical, "toolCalls": []})
+        body["messageSchemaVersion"] = 1
+        run, _ = server.create(body)
+        request = server.read_until(run, "client_tool_request")[-1]["data"]["payload"]
+        for round_index in range(2):
+            with sqlite3.connect(server.db) as db:
+                saved = json.loads(db.execute("SELECT messages FROM runs WHERE id=?", (run,)).fetchone()[0])
+            self.assertEqual(saved[-1]["reasoning_content"], f"工具轮{round_index}：\n保留空白 🙂 ")
+            result = server.tool_result(body, run, request)
+            self.assertEqual(server.http("POST", f"runs/{segment(run)}/tool-results", result)[0], 200)
+            if round_index == 0:
+                previous_call = request["callID"]
+                request = server.read_until(run, "client_tool_request",
+                    lambda payload: payload["callID"] != previous_call)[-1]["data"]["payload"]
+        final = server.events(run)[1]
+        self.assertEqual(final[-1]["event"], "run_completed")
+        self.assertEqual(len(upstream.requests), 3)
+        for sent in upstream.requests:
+            self.assertEqual(sent["messages"][1]["reasoning_content"], historical)
+        self.assertEqual([m["reasoning_content"] for m in upstream.requests[-1]["messages"] if m["role"] == "assistant"],
+                         [historical, "工具轮0：\n保留空白 🙂 ", "工具轮1：\n保留空白 🙂 "])
+        server.restart(crash=True)
+        self.assertEqual(server.events(run)[1], final)
+        with sqlite3.connect(server.db) as db:
+            restored = json.loads(db.execute("SELECT messages FROM runs WHERE id=?", (run,)).fetchone()[0])
+        self.assertEqual([m["reasoning_content"] for m in restored if m["role"] == "assistant"],
+                         [historical, "工具轮0：\n保留空白 🙂 ", "工具轮1：\n保留空白 🙂 ", "test"])
+        self.assertNotIn(historical, server.log_path.read_text())
+
+    def test_message_byte_limits_and_reasoning_roles(self):
+        from server import GatewayError, validate_command, wire_history
+        def content(size):
+            payload = b"\x89PNG\r\n\x1a\n" + b"x" * (size - 8)
+            return {"type": "image_url", "image_url": {
+                "url": "data:image/png;base64," + base64.b64encode(payload).decode()}}
+        body = command([content(1_048_576), content(1_048_576)])
+        body["messageSchemaVersion"] = 1
+        body["config"]["supportsImageInput"] = True
+        self.assertEqual(validate_command(body), body["binding"])
+        for images in [[content(1_048_577)], [content(1_048_576), content(1_048_576), content(8)]]:
+            bad = copy.deepcopy(body)
+            bad["history"][0]["content"] = images
+            with self.assertRaises(GatewayError) as error:
+                validate_command(bad)
+            self.assertEqual(error.exception.code, "IMAGE_LIMIT")
+        for role, reason, expected in [("user", "not allowed", "INVALID_REASONING_ROLE"),
+                                      ("assistant", [], "INVALID_STRING"),
+                                      ("assistant", "\ud800", "INVALID_STRING")]:
+            bad = command()
+            bad["history"][0].update(role=role, reasoning=reason)
+            with self.assertRaises(GatewayError) as error:
+                validate_command(bad)
+            self.assertEqual(error.exception.code, expected)
+        empty = command()
+        empty["history"][0].update(role="assistant", reasoning="")
+        validate_command(empty)
+        self.assertEqual(wire_history(empty)[-1]["reasoning_content"], "")
+        legacy = command()
+        validate_command(legacy)
+        self.assertNotIn("reasoning_content", wire_history(legacy)[-1])
+
+    def test_reasoning_pending_tool_crash_then_explicit_continue(self):
+        upstream = Upstream("reasoning-two-tools")
+        self.addCleanup(upstream.stop)
+        server = ProcessServer(synthetic=False, provider=upstream.url)
+        self.addCleanup(server.stop)
+        body = command(tools=True)
+        body["messageSchemaVersion"] = 1
+        run, _ = server.create(body)
+        request = server.read_until(run, "client_tool_request")[-1]["data"]["payload"]
+        server.restart(crash=True)
+        self.assertEqual(server.await_phase(run, {"waiting_suspended"})["phase"], "waiting_suspended")
+        self.assertEqual(len(upstream.requests), 1)
+        result = server.tool_result(body, run, request)
+        self.assertEqual(server.http("POST", f"runs/{segment(run)}/tool-results", result)[0], 200)
+        self.assertEqual(len(upstream.requests), 1)  # recovery never silently retries the provider
+        continuation = copy.deepcopy(body)
+        continuation["requestKey"] = str(uuid.uuid4())
+        continuation["history"] += [
+            {"id": str(uuid.uuid4()), "role": "assistant", "content": "",
+             "reasoning": "工具轮0：\n保留空白 🙂 ",
+             "toolCalls": [{"id": request["callID"], "name": request["name"], "argumentsJSON": request["argumentsJSON"]}]},
+            {"id": str(uuid.uuid4()), "role": "tool", "content": result["content"], "toolCallID": request["callID"]}
+        ]
+        self.assertEqual(server.http("POST", f"runs/{segment(run)}/continue", continuation)[0], 200)
+        next_request = server.read_until(run, "client_tool_request",
+            lambda p: p["callID"] != request["callID"])[-1]["data"]["payload"]
+        self.assertEqual(upstream.requests[1]["messages"][-2]["reasoning_content"], "工具轮0：\n保留空白 🙂 ")
+        self.assertEqual(server.http("POST", f"runs/{segment(run)}/tool-results",
+                                    server.tool_result(body, run, next_request))[0], 200)
+        self.assertEqual(server.events(run)[1][-1]["event"], "run_completed")
+        self.assertEqual(len(upstream.requests), 3)
 
     def test_provider_eof_is_not_success(self):
         upstream = Upstream("eof")

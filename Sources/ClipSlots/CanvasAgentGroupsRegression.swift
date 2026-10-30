@@ -128,7 +128,7 @@ extension CanvasWorkspaceView {
                     check(model.draft == "你好", "\(mode.rawValue) IME commits to draft")
                 } else { check(false, "\(mode.rawValue) native editor exists") }
                 model.draft = "把海边日落的创意整理成三个分镜，保留自然光线和安静的构图。"
-                for skin in ["minimal", "colorful"] {
+                for skin in AppSkin.allCases.map(\.rawValue) {
                     for appearance in ["light", "dark"] {
                         AppSkinCenter.apply(AppSkin(rawValue: skin) ?? .minimal)
                         NSApp.appearance = NSAppearance(named: appearance == "dark" ? .darkAqua : .aqua)
@@ -220,7 +220,7 @@ extension CanvasWorkspaceView {
             await settle()
             check(canvas.groups.first == group && canvas.edges == initialEdges, "Project reload persists group and connection")
             canvas.selectGroup(group.id)
-            for skin in ["minimal", "colorful"] {
+            for skin in AppSkin.allCases.map(\.rawValue) {
                 for appearance in ["light", "dark"] {
                     AppSkinCenter.apply(AppSkin(rawValue: skin) ?? .minimal)
                     NSApp.appearance = NSAppearance(named: appearance == "dark" ? .darkAqua : .aqua)

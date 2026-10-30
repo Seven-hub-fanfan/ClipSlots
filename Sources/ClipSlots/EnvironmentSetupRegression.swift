@@ -64,7 +64,7 @@ extension CanvasWorkspaceView {
                   "REA is shipped in community plugin catalog")
             check(REAIntegration.iconURL.flatMap { NSImage(contentsOf: $0) }?.size == NSSize(width: 32, height: 32),
                   "REA original SVG loads as a native image")
-            for skin in [AppSkin.minimal, .colorful] {
+            for skin in AppSkin.allCases {
                 AppSkinCenter.apply(skin)
                 for dark in [false, true] {
                     let host = NSHostingView(rootView: EnvironmentSetupView(includeREA: true)

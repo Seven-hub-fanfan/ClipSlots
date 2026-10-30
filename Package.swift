@@ -45,5 +45,11 @@ let package = Package(
             dependencies: ["ClipSlotsKit"],
             path: "Tests/ModelWorkspaceSmokeTests"
         ),
+        .executableTarget(
+            name: "AgentMarketSyncSmokeTests",
+            dependencies: ["ClipSlotsKit"],
+            path: "Tests/AgentMarketSyncSmokeTests",
+            swiftSettings: [.unsafeFlags(["-parse-as-library"])]
+        ),
     ]
 )

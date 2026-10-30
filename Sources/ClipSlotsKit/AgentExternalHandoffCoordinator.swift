@@ -122,10 +122,12 @@ public final class AgentExternalHandoffSession: ObservableObject {
     @Published public private(set) var isPresented = false
     @Published public private(set) var isExecuting = false
     @Published public private(set) var providers: [AgentExternalProvider]
+    @Published public private(set) var mcpConfigurationText: String?
     private let catalog: AgentExternalProviderCatalog
     private let preferences: AgentExternalHandoffPreferences
     private var generation = UUID()
     private var context: AgentExternalProjectContext
+    private var mcpConfigurationError: Error?
 
     public init(catalog: AgentExternalProviderCatalog, context: AgentExternalProjectContext,
                 preferences: AgentExternalHandoffPreferences) {
@@ -133,9 +135,21 @@ public final class AgentExternalHandoffSession: ObservableObject {
         self.context = context
         self.providers = catalog.visibleProviders(region: context.region, language: context.language)
         self.preferences = preferences
+        refreshMCPConfiguration()
     }
 
     public var selectedProvider: AgentExternalProvider? { providers.first { $0.id == selectedProviderID } }
+
+    /// Keep display and clipboard bytes identical until the project or lease changes.
+    private func refreshMCPConfiguration() {
+        do {
+            mcpConfigurationText = try context.mcpConfiguration().encodedText(pretty: true)
+            mcpConfigurationError = nil
+        } catch {
+            mcpConfigurationText = nil
+            mcpConfigurationError = error
+        }
+    }
 
     public func present() {
         generation = UUID(); isPresented = true; isExecuting = false; result = nil
@@ -143,8 +157,10 @@ public final class AgentExternalHandoffSession: ObservableObject {
     }
 
     public func update(context: AgentExternalProjectContext) {
+        let changed = context != self.context
         close()
         self.context = context
+        if changed { refreshMCPConfiguration() }
         providers = catalog.visibleProviders(region: context.region, language: context.language)
         present()
     }
@@ -170,6 +186,15 @@ public final class AgentExternalHandoffSession: ObservableObject {
         guard isPresented, generation == ticket else { return nil }
         isExecuting = false; result = response
         return response
+    }
+
+    public func copyMCPConfiguration(context: AgentExternalProjectContext,
+                                     using opener: AgentExternalHandoffOpening) throws -> Bool {
+        guard isPresented, !isExecuting, context == self.context else { return false }
+        guard let text = mcpConfigurationText else {
+            throw mcpConfigurationError ?? AgentExternalHandoffError.invalidConfiguration
+        }
+        return opener.copyPrompt(text)
     }
 
     public func copy(context: AgentExternalProjectContext, using opener: AgentExternalHandoffOpening) throws -> AgentExternalHandoffResult? {

@@ -581,7 +581,7 @@ struct CanvasNodeNameTag: View {
                 .lineLimit(1)
                 .truncationMode(.middle)
         }
-        .foregroundColor(TapSkin.colorful ? TapSkin.nodeAccent(symbol == "film" ? .video : symbol == "photo" ? .image : symbol == "text.alignleft" ? .text : .slot) : (isActive ? TapSkin.tagInkActive : TapSkin.tagInk))
+        .foregroundColor(isActive ? TapSkin.tagInkActive : TapSkin.tagInk)
         .frame(maxWidth: s(cardWidth), alignment: .leading)
         .canvasStableLabel()
         .canvasScreenFixedText(textCounter, anchor: .bottomLeading)

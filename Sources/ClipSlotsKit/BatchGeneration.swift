@@ -103,7 +103,7 @@ public struct BatchGeneration: Codable, Equatable, Identifiable {
             case .pending: return "等待提交"
             case .submitting: return "正在提交"
             case .tracking: return "生成中"
-            case .succeeded: return "已写回"
+            case .succeeded: return "已完成"
             case .failed: return "失败"
             case .skipped: return "已跳过"
             case .stopped: return "已停止"
@@ -117,14 +117,32 @@ public struct BatchGeneration: Codable, Equatable, Identifiable {
         public var source: BatchGenerationSource
         public var node: CanvasNode
         public var runID = UUID()
-        /// Chosen before any write: append remains idempotent across a crash.
+        /// Retained for older journals and explicit manual imports.
         public var outputID = UUID()
         public var status: Status = .pending
         public var taskID: String?
         public var detail: String?
         public var localFile: String?
+        /// Only a terminal remote failure authorizes replacing a known task.
+        public var remoteFailureConfirmed: Bool?
+        public var previousRunIDs: [UUID]?
+        public var canRetry: Bool {
+            status == .failed && localFile == nil && (taskID == nil || remoteFailureConfirmed == true)
+        }
         public var canRecover: Bool {
-            taskID != nil && [.stopped, .tracking, .failed, .unknown, .retained].contains(status)
+            taskID != nil && remoteFailureConfirmed != true
+                && [.stopped, .tracking, .failed, .unknown, .retained].contains(status)
+        }
+
+        @discardableResult
+        public mutating func prepareRetry() -> Bool {
+            guard canRetry else { return false }
+            previousRunIDs = (previousRunIDs ?? []) + [runID]
+            runID = UUID(); outputID = UUID()
+            status = .pending; taskID = nil; detail = nil; localFile = nil
+            remoteFailureConfirmed = nil
+            node.taskId = nil; node.state = .idle; node.outputAttachmentIds = []
+            return true
         }
     }
     public var schemaVersion = 3
@@ -165,6 +183,9 @@ public struct BatchGeneration: Codable, Equatable, Identifiable {
             let run = runs.first { $0.id == items[i].runID }
             if items[i].taskID == nil {
                 items[i].taskID = run?.attempts.reversed().compactMap(\.taskID).first
+            }
+            if items[i].status == .failed, run?.outcome.hasPrefix("failed:") == true {
+                items[i].remoteFailureConfirmed = true
             }
             switch items[i].status {
             case .submitting, .unknown:

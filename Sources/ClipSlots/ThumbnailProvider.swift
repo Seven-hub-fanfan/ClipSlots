@@ -221,7 +221,7 @@ final class ThumbnailProvider: ObservableObject {
             guard let self = self else { return }
 
             if let error = error {
-                NSLog("[ClipSlots] ThumbnailProvider failed for \(url.lastPathComponent): \(error.localizedDescription)")
+                NSLog("[ClipSlots] ThumbnailProvider failed: \(ApplicationDiagnostics.error(error))")
             }
 
             let image = thumbnail?.nsImage

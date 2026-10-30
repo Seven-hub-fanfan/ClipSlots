@@ -5,6 +5,10 @@ import ClipSlotsKit
 
 struct GlobalSearchResultsView: View {
     let results: [SlotGlobalSearchResult]
+    var isRunning = false
+    var isComplete = true
+    var matchedCount = 0
+    var resultsRevision = 0
     let currentPageId: String
     let currentGroupId: String
     var onJump: (SlotGlobalSearchResult) -> Void
@@ -15,6 +19,7 @@ struct GlobalSearchResultsView: View {
     // v2.10.48: 悬停防抖 work item——扫视 / 滚动搜索结果列表时，抑制右侧预览随每一行掠过而
     // 疯狂重新解码切换，消除「预览图狂闪」。停留 ~80ms 后才真正切换选中项。
     @State private var hoverDebounce: DispatchWorkItem?
+    @State private var mountedCount = 128
 
     private var previewResult: SlotGlobalSearchResult? {
         if let id = selectedResultId,
@@ -36,10 +41,7 @@ struct GlobalSearchResultsView: View {
     // 过渡），但零堆分配、无引用计数。Hasher 每进程随机种子，同一进程内多次 body 求值间的比较依然
     // 有效（SwiftUI 只在同进程内比较新旧值）。
     private var resultsSignature: Int {
-        var hasher = Hasher()
-        hasher.combine(results.count)
-        for result in results { hasher.combine(result.id) }
-        return hasher.finalize()
+        resultsRevision
     }
 
     var body: some View {
@@ -62,6 +64,14 @@ struct GlobalSearchResultsView: View {
         }
         // v2.10.48: 搜索结果集变化（换搜索词 / 排序）时做柔性过渡，避免列表与预览硬切跳变。
         .animation(Anim.status, value: resultsSignature)
+        .onChange(of: resultsRevision) { _ in
+            mountedCount = 128
+            hoverDebounce?.cancel()
+            if let selectedResultId, !results.contains(where: { $0.id == selectedResultId }) {
+                self.selectedResultId = nil
+            }
+        }
+        .onDisappear { hoverDebounce?.cancel() }
         .padding(10)
         .background(
             RoundedRectangle(cornerRadius: 10, style: .continuous)
@@ -81,8 +91,9 @@ struct GlobalSearchResultsView: View {
                 .font(.caption)
                 .foregroundColor(.accentColor)
 
-            Text(results.isEmpty
-                 ? "全局未找到匹配槽位"
+            Text(isRunning ? (matchedCount > 0 ? "已找到 \(matchedCount) 个，继续搜索…" : "正在搜索…")
+                 : !isComplete ? "搜索尚未完成，请重试"
+                 : results.isEmpty ? "全局未找到匹配槽位"
                  : "全局找到 \(results.count) 个匹配槽位")
                 .font(.caption.weight(.medium))
                 .foregroundColor(.secondary)
@@ -109,9 +120,10 @@ struct GlobalSearchResultsView: View {
 
     private var emptyView: some View {
         HStack(spacing: 8) {
-            Image(systemName: "magnifyingglass")
-                .foregroundColor(.secondary)
-            Text("没有匹配的全局结果")
+            if isRunning { ProgressView().controlSize(.small) }
+            else { Image(systemName: "magnifyingglass").foregroundColor(.secondary) }
+            Text(isRunning ? "正在查找匹配槽位"
+                 : isComplete ? "没有匹配的全局结果" : "搜索未完成，未确认全部结果")
                 .font(.caption)
                 .foregroundColor(.secondary)
             Spacer()
@@ -124,8 +136,12 @@ struct GlobalSearchResultsView: View {
     private var resultList: some View {
         ScrollView(.vertical, showsIndicators: true) {
             LazyVStack(spacing: 6) {
-                ForEach(results) { result in
+                ForEach(results.prefix(mountedCount)) { result in
                     resultRow(result)
+                }
+                if mountedCount < results.count {
+                    ProgressView().controlSize(.small)
+                        .onAppear { mountedCount = min(results.count, mountedCount + 128) }
                 }
             }
             .padding(.trailing, 4)

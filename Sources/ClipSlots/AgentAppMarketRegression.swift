@@ -69,7 +69,7 @@ func runAgentAppMarketRegression(store: SlotStoreObservable, root: URL) async {
                               styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
         window.isReleasedWhenClosed = false
         defer { window.close(); model.stop() }
-        for skin in [AppSkin.minimal, .colorful] {
+        for skin in AppSkin.allCases {
             AppSkinCenter.apply(skin)
             for dark in [false, true] {
                 NSApp.appearance = NSAppearance(named: dark ? .darkAqua : .aqua)
@@ -119,13 +119,15 @@ func runAgentAppMarketRegression(store: SlotStoreObservable, root: URL) async {
                           suffix + " enabled preferences map to real skill tools")
                     capture(host, "market-skill-" + suffix)
                     let before = model.draft
+                    let previousUses = used
                     check(press(host, "agent-market-primary"), suffix + " actual skill reference action")
                     for _ in 0..<40 {
-                        if !model.isAddingSkill { break }
+                        if used == previousUses + 1 && !model.isAddingSkill { break }
                         try? await Task.sleep(for: .milliseconds(30))
                     }
                     check(model.draftSkillReferences.count == 1 && model.draftSkillReferences.first?.markdown == markdown
-                            && model.draft == before, suffix + " reference reads exact local markdown and preserves body")
+                            && model.draft == before && used == previousUses + 1,
+                          suffix + " reference reads exact local markdown before returning to composer")
                     check(press(host, "agent-market-enable-skill"), suffix + " actual skill disable action")
                     await settle()
                     check(AgentPreferences.decodeEnabledSlugs(UserDefaults.standard.string(forKey: AgentPreferences.enabledSkillsKey) ?? "").isEmpty,
@@ -222,7 +224,7 @@ func runAgentAppMarketRegression(store: SlotStoreObservable, root: URL) async {
               "five distinct neutral creative applications")
     } catch { check(false, "market fixture: \(error.localizedDescription)") }
     let report: [String: Any] = ["passed": passed, "failures": failures,
-        "paid_generation_requests": 0, "themes": 4, "widths": [360, 440, 960],
+        "paid_generation_requests": 0, "themes": 2, "widths": [360, 440, 960],
         "scope": "Native market actions, required inputs, local skill authorization/reference, draft preservation, sidebar menus and live stdio canvas MCP"]
     try? JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys])
         .write(to: root.appendingPathComponent("report.json"))

@@ -17,7 +17,7 @@ enum LargeLibraryRegression {
         }
         defer { AgentModelCatalogStore.debugCredentials = nil }
         let environment = ProcessInfo.processInfo.environment
-        let requestedSkin = AppSkin(rawValue: environment["CLIPSLOTS_TEST_SKIN"] ?? "colorful") ?? .colorful
+        let requestedSkin = AppSkin.minimal
         let requestedAppearance = ThemeMode(rawValue: environment["CLIPSLOTS_TEST_APPEARANCE"] ?? "light") ?? .light
         AppSkinCenter.apply(requestedSkin)
         UserDefaults.standard.set(requestedAppearance.rawValue, forKey: AppearanceDefaults.key)

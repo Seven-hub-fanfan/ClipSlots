@@ -80,7 +80,7 @@ public enum CanvasAttachmentStash {
                 try fm.copyItem(at: source, to: dest)
                 copied.append(id)
             } catch {
-                NSLog("[ClipSlots] attach stash 复制失败 \(id)：\(error.localizedDescription)")
+                NSLog("[ClipSlots] attach stash 复制失败 \(id)：\(ApplicationDiagnostics.error(error))")
             }
         }
         return copied

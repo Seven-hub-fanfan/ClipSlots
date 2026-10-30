@@ -20,6 +20,10 @@ swiftc -parse-as-library -I "$BIN/Modules" \
     > /tmp/clipslots-gateway-live-swift-compile.log 2>&1
 swiftc -parse-as-library -I "$BIN/Modules" \
     Tests/ClipSlotsKitSmokeTests/AgentRunGatewayTests.swift \
+    Tests/ClipSlotsKitSmokeTests/AgentAuthoritativeContextUsageTests.swift \
+    Tests/ClipSlotsKitSmokeTests/AgentContextCompactionTranscriptTests.swift \
+    Tests/ClipSlotsKitSmokeTests/AgentTaskSubagentProjectionTests.swift \
+    Tests/ClipSlotsKitSmokeTests/AgentTaskSubagentGatewayTests.swift \
     scripts/gateway-fixtures/GatewayTestMain.swift \
     "${OBJECTS[@]}" -o "$SCRATCH/gateway-regression-tests" \
     > /tmp/clipslots-gateway-live-regression-compile.log 2>&1

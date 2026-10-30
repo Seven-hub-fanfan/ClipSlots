@@ -20,6 +20,7 @@ enum AppTheme {
 }
 enum TapSkin {
     static func tone(_ light: Int, _ dark: Int) -> Color { .blue }
+    static let secondaryInk = Color.secondary
 }
 struct ComposerEntranceGlow: View {
     let token: String
@@ -112,13 +113,13 @@ enum GatewayAppIntegrationMain {
         seed.messages = [.init(role: .assistant, content: "existing partial")]
         seed.currentAssistantID = seed.messages[0].id
         try store.save(seed)
-        let before = try Data(contentsOf: store.file)
+        let before = try Data(contentsOf: store.storageFile)
         let transport = PolishTransport()
         let backend = AgentGatewayBackend(baseURL: originalURL, binding: binding, journalRoot: root, transport: transport)
         let selection = AgentBackendCoordinator.injected(backend, scope: .sidebar)
         let result = try await AgentDraftPolish.run("draft", config: .init(), selection: selection)
         check(result == "polished draft", "actual AgentDraftPolish gateway path completes")
-        check(try Data(contentsOf: store.file) == before, "actual draft polish does not modify resumable conversation")
+        check(try Data(contentsOf: store.storageFile) == before, "actual draft polish does not modify resumable conversation")
         let body = await transport.createBody
         check(body["binding"]?["sessionID"] != .string(binding.sessionID), "draft run receives new session")
         check(body["tools"] == .array([]) && body["config"]?["taskPolicy"] == "textPolish",

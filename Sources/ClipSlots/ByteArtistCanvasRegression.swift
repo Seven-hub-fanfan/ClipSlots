@@ -138,7 +138,7 @@ extension CanvasWorkspaceView {
             defer { window.close() }
             let originalSkin = AppSkinCenter.current
             defer { AppSkinCenter.apply(originalSkin) }
-            for skin in [AppSkin.minimal, .colorful] {
+            for skin in AppSkin.allCases {
                 AppSkinCenter.apply(skin)
                 for dark in [false, true] {
                     window.appearance = NSAppearance(named: dark ? .darkAqua : .aqua)
@@ -167,7 +167,7 @@ extension CanvasWorkspaceView {
                           }, "BA choice commits and closes picker \(skin.rawValue) \(dark)")
                 }
             }
-            for skin in [AppSkin.minimal, .colorful] {
+            for skin in AppSkin.allCases {
                 AppSkinCenter.apply(skin)
                 for dark in [false, true] {
                     window.appearance = NSAppearance(named: dark ? .darkAqua : .aqua)

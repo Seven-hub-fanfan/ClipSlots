@@ -14,6 +14,9 @@ import time
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument("--binary", type=Path, required=True)
 parser.add_argument("--output", type=Path, required=True)
+parser.add_argument("--readback", action="store_true", help="Run production async readback context without GUI.")
+parser.add_argument("--context-usage", action="store_true", help="Run actual AgentChatModel context state without GUI.")
+parser.add_argument("--subagents", action="store_true", help="Run actual task projection and a separate process restart.")
 options = parser.parse_args()
 repo = Path(__file__).resolve().parent.parent
 binary = options.binary.resolve(strict=True)
@@ -34,26 +37,80 @@ resource = binary.parent / "ClipSlots_ClipSlotsKit.bundle"
 if resource.exists():
     shutil.copytree(resource, contents / "Resources/ClipSlots_ClipSlotsKit.bundle")
 subprocess.run(["codesign", "--force", "--deep", "--sign", "-", str(contents.parent)], check=True)
+subprocess.run(["codesign", "--verify", "--deep", "--strict", str(contents.parent)], check=True)
 sha = lambda path: hashlib.sha256(path.read_bytes()).hexdigest()
+sources = {str(p.relative_to(repo)): sha(p) for p in sorted((repo / "Sources").rglob("*.swift"))}
+protected = [Path("/Applications/ClipSlots.app/Contents/MacOS") / name
+             for name in ["ClipSlots", "clipslots-cli", "clipslots-mcp"]]
+protected_before = {str(p): sha(p) for p in protected}
 subject = {
     "version": info["CFBundleShortVersionString"], "build": info["CFBundleVersion"],
     "source_binary_sha256": sha(binary), "isolated_binary_sha256": sha(contents / "MacOS/ClipSlots"),
     "started_unix_seconds": time.time(),
-    "scope": "actual CanvasStore, temporary storage, no GUI or remote model",
+    "scope": ("actual AgentChatModel task projection and process restart" if options.subagents else
+              "actual AgentChatModel context and persistence" if options.context_usage else
+              "actual CanvasAgentContext and CanvasStore readback" if options.readback else "actual CanvasStore")
+        + ", temporary storage, no GUI or remote model",
     "runner_sha256": sha(Path(__file__).resolve()),
+    "sources": sources,
+    "isolated_bundle": str(contents.parent),
+    "productionRestarted": False,
 }
 (output / "subject.json").write_text(json.dumps(subject, indent=2))
 env = {key: value for key, value in os.environ.items()
        if not key.startswith("CLIPSLOTS_") and not key.startswith("CANVAS_")}
 env.update(CLIPSLOTS_STORE_REGRESSION="1", CLIPSLOTS_DATA_DIR=str(output),
            CLIPSLOTS_CONFIG_PATH=str(output / "config.toml"))
+if options.readback:
+    env["CLIPSLOTS_READBACK_REGRESSION"] = "1"
+if options.context_usage:
+    assert not options.readback
+    env["CLIPSLOTS_CONTEXT_USAGE_REGRESSION"] = "1"
+if options.subagents:
+    assert not options.readback and not options.context_usage
+    env["CLIPSLOTS_SUBAGENT_REGRESSION"] = "1"
 with (output / "run.log").open("w") as log:
-    process = subprocess.run([str(contents / "MacOS/ClipSlots")], env=env, stdout=log,
-                             stderr=subprocess.STDOUT, timeout=30)
+    try:
+        process = subprocess.run([str(contents / "MacOS/ClipSlots")], env=env, stdout=log,
+                                 stderr=subprocess.STDOUT, timeout=30)
+    except subprocess.TimeoutExpired:
+        subject.update(exitCode=None, timedOut=True, timeoutSeconds=30,
+                       sourcesUnchanged=all(sha(repo / p) == h for p, h in sources.items()),
+                       productionProductHashesUnchanged=protected_before == {str(p): sha(p) for p in protected},
+                       protectedProductHashes=protected_before)
+        (output / "subject.json").write_text(json.dumps(subject, indent=2))
+        raise
 report_path = output / "report.json"
 if not report_path.exists():
     raise RuntimeError(f"Store regression produced no report; exit {process.returncode}; see {output / 'run.log'}")
 report = json.loads(report_path.read_text())
-assert report["gui"] is False and report["remote"] is False
+restart_exit = None
+if options.subagents and process.returncode == 0 and not report["failures"]:
+    env["CLIPSLOTS_SUBAGENT_VERIFY_RESTART"] = "1"
+    shutil.copy2(report_path, output / "first-process-report.json")
+    with (output / "restart.log").open("w") as log:
+        restarted = subprocess.run([str(contents / "MacOS/ClipSlots")], env=env, stdout=log,
+                                   stderr=subprocess.STDOUT, timeout=30)
+    restart = json.loads(report_path.read_text())
+    shutil.copy2(report_path, output / "restart-report.json")
+    report["passed"] += restart["passed"]
+    report["checks"] += restart["checks"]
+    report["failures"] += restart["failures"]
+    report["separateProcessRestart"] = True
+    restart_exit = restarted.returncode
+    report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n")
+subject.update(exitCode=process.returncode,
+               restartExitCode=restart_exit,
+               sourcesUnchanged=all(sha(repo / p) == h for p, h in sources.items()),
+               productionProductHashesUnchanged=protected_before == {str(p): sha(p) for p in protected},
+               protectedProductHashes=protected_before)
+(output / "subject.json").write_text(json.dumps(subject, indent=2))
+assert subject["sourcesUnchanged"] and subject["productionProductHashesUnchanged"]
+if restart_exit is not None:
+    assert restart_exit == 0
+if options.readback:
+    assert report["foregroundRequired"] is False and report["providerRequests"] == 0
+else:
+    assert report["gui"] is False and report["remote"] is False
 print(json.dumps(report, ensure_ascii=False, indent=2))
 raise SystemExit(process.returncode if process.returncode else (1 if report["failures"] else 0))

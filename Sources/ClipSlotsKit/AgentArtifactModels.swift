@@ -113,6 +113,12 @@ public struct AgentArtifactRecord: Codable, Equatable, Sendable, Identifiable {
     public internal(set) var isDeleted: Bool
     public internal(set) var updatedAt: Date
     internal var mutationID: UUID
+    public internal(set) var appReplyOrigin: AgentAppReplyOrigin?
+    public internal(set) var appReplyToolContext: AgentAppReplyToolContext?
+    public internal(set) var pageProjection: AgentArtifactPageData?
+    public internal(set) var pageProjectionConversationID: UUID?
+    public internal(set) var pageProjectionRunID: String?
+    public internal(set) var pageResourceURI: String?
 
     public var kind: AgentArtifactKind { .detect(mimeType: mimeType, path: key.path) }
     public var text: String? { content.flatMap { String(data: $0, encoding: .utf8) } }
@@ -125,14 +131,32 @@ public struct AgentArtifactUpdate: Sendable {
     public let content: Data?
     public let title: String?
     public let mimeType: String?
+    public let appReplyOrigin: AgentAppReplyOrigin?
+    public let appReplyToolContext: AgentAppReplyToolContext?
+    public let replacesAppReplyAuthority: Bool
+    public let pageProjection: AgentArtifactPageData?
+    public let pageProjectionConversationID: UUID?
+    public let pageProjectionRunID: String?
+    public let pageResourceURI: String?
 
     public init(key: AgentArtifactKey, revision: UInt64, content: Data? = nil,
-                title: String? = nil, mimeType: String? = nil) {
+                title: String? = nil, mimeType: String? = nil,
+                appReplyOrigin: AgentAppReplyOrigin? = nil, replacesAppReplyAuthority: Bool = false,
+                appReplyToolContext: AgentAppReplyToolContext? = nil, pageProjection: AgentArtifactPageData? = nil,
+                pageProjectionConversationID: UUID? = nil, pageProjectionRunID: String? = nil,
+                pageResourceURI: String? = nil) {
         self.key = key
         self.revision = revision
         self.content = content
         self.title = title
         self.mimeType = mimeType
+        self.appReplyOrigin = appReplyOrigin
+        self.appReplyToolContext = appReplyToolContext
+        self.replacesAppReplyAuthority = replacesAppReplyAuthority
+        self.pageProjection = pageProjection
+        self.pageProjectionConversationID = pageProjectionConversationID
+        self.pageProjectionRunID = pageProjectionRunID
+        self.pageResourceURI = pageResourceURI
     }
 }
 

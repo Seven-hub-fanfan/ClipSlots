@@ -20,19 +20,6 @@ enum SettingsCategory: String, CaseIterable, Identifiable {
         }
     }
 
-    var subtitle: String {
-        switch self {
-        case .appearance: return "主题与界面显示方式"
-        case .slot: return "槽位数量与基础行为"
-        case .shortcut: return "全局操作与键盘录入"
-        case .permission: return "授权状态与功能访问"
-        case .notification: return "确认流程与操作反馈"
-        case .connection: return "槽位之间的串联能力"
-        case .advanced: return "日志调试与操作历史"
-        case .cli: return "CLI、Agent Skill 与卸载"
-        }
-    }
-
     var icon: String {
         switch self {
         case .appearance: return "paintbrush.fill"
@@ -103,19 +90,6 @@ struct SettingsView: View {
         Binding(
             get: { ThemeMode(rawValue: appearanceModeRaw) ?? .system },
             set: { appearanceModeRaw = $0.rawValue }
-        )
-    }
-
-    // v2.11.7 皮肤（多彩 / 简洁）。与上面的 `appearanceMode`（深 / 浅 / 跟随系统）正交，
-    // 键名也刻意分开：`appearanceMode` 管明暗，`appearanceSkin` 管风格。
-    @AppStorage(AppSkin.defaultsKey) private var appSkinRaw = AppSkin.fallback.rawValue
-
-    private var appSkinBinding: Binding<AppSkin> {
-        Binding(
-            get: { AppSkin(rawValue: appSkinRaw) ?? .fallback },
-            // 先过 AppSkinCenter 再落 @AppStorage：前者同步更新 AppTheme 读取的内存缓存，
-            // 后者负责触发 SwiftUI 重建。顺序反了会先用旧皮肤画一帧。
-            set: { AppSkinCenter.apply($0); appSkinRaw = $0.rawValue }
         )
     }
 
@@ -282,6 +256,7 @@ struct SettingsView: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        .accessibilityIdentifier("settings-category-\(category.rawValue)")
         .padding(.horizontal, 8)
     }
 
@@ -326,13 +301,8 @@ struct SettingsView: View {
                     .font(.system(size: 14, weight: .semibold))
                     .foregroundColor(.accentColor)
             }
-            VStack(alignment: .leading, spacing: 2) {
-                Text(selectedCategory.title)
-                    .font(.system(size: 16, weight: .semibold))
-                Text(selectedCategory.subtitle)
-                    .font(.system(size: 11))
-                    .foregroundColor(.secondary)
-            }
+            Text(selectedCategory.title)
+                .font(.system(size: 16, weight: .semibold))
             Spacer()
             Button { closeAction() } label: {
                 Image(systemName: "xmark")
@@ -413,27 +383,10 @@ struct SettingsView: View {
                         }
                     }
                     .pickerStyle(.segmented)
-                    Text("首次安装默认使用深色模式；也可以改为浅色或跟随系统。")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                }
-
-                Divider()
-
-                VStack(alignment: .leading, spacing: 10) {
-                    Text("皮肤")
-                        .font(.subheadline)
-                    Picker("皮肤", selection: appSkinBinding) {
-                        ForEach(AppSkin.allCases, id: \.self) { skin in
-                            Label(skin.title, systemImage: skin.iconName).tag(skin)
-                        }
-                    }
-                    .pickerStyle(.segmented)
                     .labelsHidden()
-                    Text(appSkinBinding.wrappedValue.subtitle + "。切换立即生效，不影响任何已保存的数据。")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
+                    .accessibilityLabel("外观")
                 }
+
             }
         }
     }
@@ -607,9 +560,9 @@ struct SettingsView: View {
                     )
                 )
 
-                settingsToggleRow(title: "保存成功后显示提示", subtitle: "保存 / 覆盖槽位后显示轻提示。", isOn: $showSaveToast)
+                settingsToggleRow(title: "保存成功后显示提示", subtitle: "", isOn: $showSaveToast)
 
-                settingsToggleRow(title: "复制成功后显示提示", subtitle: "复制槽位内容后显示轻提示。", isOn: $showCopyToast)
+                settingsToggleRow(title: "复制成功后显示提示", subtitle: "", isOn: $showCopyToast)
 
                 Button("重置提示偏好") {
                     resetNotificationPreferences()
@@ -919,9 +872,11 @@ struct SettingsView: View {
             Spacer()
             Button("取消") { closeAction() }
                 .keyboardShortcut(.escape)
+                .accessibilityIdentifier("settings-cancel")
             Button("保存") { save() }
                 .buttonStyle(.borderedProminent)
                 .keyboardShortcut(.return)
+                .accessibilityIdentifier("settings-save")
         }
         .padding(.horizontal, 24)
         .padding(.vertical, 16)
@@ -932,7 +887,8 @@ struct SettingsView: View {
 
     private func settingsSection<Content: View>(title: String, icon: String, @ViewBuilder content: () -> Content) -> some View {
         VStack(alignment: .leading, spacing: 14) {
-            HStack(spacing: 9) {
+            if title != selectedCategory.title && !(selectedCategory == .cli && title == "命令行工具 (CLI)") {
+              HStack(spacing: 9) {
                 ZStack {
                     RoundedRectangle(cornerRadius: 7, style: .continuous)
                         .fill(Color.accentColor.opacity(colorScheme == .dark ? 0.20 : 0.11))
@@ -943,6 +899,7 @@ struct SettingsView: View {
                 }
                 Text(title)
                     .font(.system(size: 15, weight: .semibold))
+              }
             }
             content()
         }
@@ -1000,16 +957,19 @@ struct SettingsView: View {
                 Text(title)
                     .font(.subheadline)
                     .frame(maxWidth: .infinity, alignment: .leading)
-                Text(subtitle)
+                if !subtitle.isEmpty {
+                  Text(subtitle)
                     .font(.caption)
                     .foregroundColor(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
                     .frame(maxWidth: .infinity, alignment: .leading)
+                }
             }
             Spacer(minLength: 24)
             Toggle("", isOn: isOn)
                 .toggleStyle(.switch)
                 .labelsHidden()
+                .accessibilityLabel(title)
                 .frame(width: 64, alignment: .trailing)
         }
         .frame(maxWidth: .infinity, alignment: .leading)

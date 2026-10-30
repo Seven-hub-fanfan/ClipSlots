@@ -100,15 +100,6 @@ struct ContentView: View {
     // v2.9.8: plugins page popover.
     @State private var showingPlugins = false
 
-    // v2.11.7 皮肤（多彩 / 简洁）。
-    //
-    // 这是 ContentView 上**唯一**被刻意保留的「全树级」依赖，和上面竭力避免的 `appearanceMode`
-    // 恰好相反，原因是两者的机制不同：深浅切换由 dynamic NSColor 在绘制时解析，视图树不用重算；
-    // 皮肤是 App 自己的全局状态，AppKit 不认识它，不重建就不会有任何视图知道该换色（详见
-    // AppSkinCenter 的注释）。所以这里主动 `.id(appSkinRaw)` 让整棵树重建一次。
-    // 代价是切皮肤那一下会有一次整树重算（≈ 切主题在 v2.10.93 之前的成本），但切皮肤是极低频的
-    // 显式操作——用户一年可能点两次，和「每次切深浅都卡 130ms」完全不是一个量级的问题。
-    @AppStorage(AppSkin.defaultsKey) private var appSkinRaw = AppSkin.fallback.rawValue
     @State private var showingPageSelector = false
     @State private var expandedPageId: String?
     @State private var isPageMultiSelecting = false
@@ -168,6 +159,10 @@ struct ContentView: View {
     // unrelated view re-renders (e.g. thumbnails finishing load) no longer re-run the
     // whole scan+sort on the main thread.
     @State private var globalSearchResultsCache: [SlotGlobalSearchResult] = []
+    @State private var globalSearchIsRunning = false
+    @State private var globalSearchIsComplete = true
+    @State private var globalSearchMatchedCount = 0
+    @State private var globalSearchResultsRevision = 0
     // v2.10.49 (perf 第一批 P1「组内搜索 matchedSlotCount 防抖缓存」): 此前 matchedSlotCount 是
     // 每次 body 求值都遍历本组槽位重算的计算属性（无结果提示与匹配计数文案各触发一次遍历）。
     // 改为把结果缓存到此 @State，仅在搜索输入（searchText/selectedFilter/searchScope）或底层槽位
@@ -481,11 +476,7 @@ struct ContentView: View {
                     // 画布模式把 chrome 全摘了之后，它直接糊在网格上，还会在切到画布的瞬间闪一下
                     // （用户视频 0:04 的「蓝色点击反馈圆圈」就是这个闪现，不是按钮的点击动画）。
                     // 画布要的是一张能给网格线做对比基准的中性底，不是海报。
-                    if AppTheme.isMinimalSkin || workspaceMode != .edit {
-                        AppTheme.canvasSurface
-                    } else {
-                        AmbientBackgroundHost(simplified: liveResize.isResizing)
-                    }
+                    AppTheme.canvasSurface
                 }
                 .ignoresSafeArea()
             )
@@ -626,10 +617,6 @@ struct ContentView: View {
             store.setSettingsOverlay(false)
         }
         .onDisappear { workspaceTransition.cancel() }
-        // v2.11.7: 皮肤切换 → 换身份 → 整棵树按新皮肤重建（理由见 appSkinRaw 的声明处）。
-        // 放在链尾是刻意的：`.id` 之后再挂修饰符会让那些修饰符落在「新身份」之外，
-        // 切皮肤时不跟着重建。
-        .id(appSkinRaw)
     }
 
     private var hotkeyErrorBanner: some View {
@@ -842,6 +829,8 @@ struct ContentView: View {
         // P2-26 (v2.10.9): 视图消失时取消尚未触发的搜索防抖 work item，避免其在视图销毁后再触发。
         .onDisappear {
             searchDebounce.cancel()
+            store.globalSearchGeneration += 1
+            globalSearchIsRunning = false
         }
         .perfCount("headerTitleSection.body")
     }
@@ -1890,6 +1879,10 @@ struct ContentView: View {
             } else {
                 GlobalSearchResultsView(
                     results: globalSearchResultsCache,
+                    isRunning: globalSearchIsRunning,
+                    isComplete: globalSearchIsComplete,
+                    matchedCount: globalSearchMatchedCount,
+                    resultsRevision: globalSearchResultsRevision,
                     currentPageId: store.currentPageId,
                     currentGroupId: store.currentSpecialSlotId,
                     onJump: jumpToSearchResult,
@@ -1991,8 +1984,13 @@ struct ContentView: View {
             // 本函数在每次 `store.slotsContentSignature` 变化（含每次切组）时都会被调用，而非搜索态下
             // 它只是把缓存清空——原来那次无条件赋空等于每次切组白搭一整棵 ContentView 重绘 + 重布局。
             if !globalSearchResultsCache.isEmpty { globalSearchResultsCache = [] }
+            globalSearchIsRunning = false
+            globalSearchIsComplete = true
             return
         }
+        globalSearchIsRunning = true
+        globalSearchIsComplete = false
+        globalSearchMatchedCount = 0
 
         let currentPageId = store.currentPageId
         let currentSpecialSlotId = store.currentSpecialSlotId
@@ -2002,13 +2000,40 @@ struct ContentView: View {
         // P0-1 (v2.10.38): 只在主线程捕获「轻量的分组引用」（页/组元数据 + 各组 SlotStorage 句柄），
         // 把真正繁重的逐槽展开（snapshot + getLabel，此前会逐槽抢 flock 同步读 label.txt 钉死主线程）
         // 连同 filter + sort 一起移到后台队列。大库全局搜索不再卡主线程。
-        let groupRefs = store.searchableGroupsSnapshot()
+        let canPublishOrderedPrefix = sortRule == .smart || sortRule == .pageGroupSlot
+        let groupRefs = store.searchableGroupsSnapshot().sorted { lhs, rhs in
+            if sortRule == .smart {
+                if (lhs.pageId == currentPageId) != (rhs.pageId == currentPageId) {
+                    return lhs.pageId == currentPageId
+                }
+                if (lhs.groupId == currentSpecialSlotId) != (rhs.groupId == currentSpecialSlotId) {
+                    return lhs.groupId == currentSpecialSlotId
+                }
+            }
+            if lhs.pageOrder != rhs.pageOrder { return lhs.pageOrder < rhs.pageOrder }
+            if lhs.groupOrder != rhs.groupOrder { return lhs.groupOrder < rhs.groupOrder }
+            if lhs.pageId != rhs.pageId { return lhs.pageId < rhs.pageId }
+            return lhs.groupId < rhs.groupId
+        }
 
         searchDebounce.scanTask = Task.detached(priority: .userInitiated) {
             // Expansion already applies the authoritative text/media matcher.
             // Sort those hits directly instead of repeating full-text matching.
-            let all = SlotStoreObservable.expandSearchableSlots(groupRefs, query: query, filter: filter,
-                                                               isCancelled: { Task.isCancelled })
+            let expansion = SlotStoreObservable.expandSearchableSlotsResult(groupRefs, query: query, filter: filter,
+                isCancelled: { Task.isCancelled }, onProgress: { prefix, count in
+                    guard !Task.isCancelled else { return }
+                    DispatchQueue.main.async {
+                        guard store.globalSearchGeneration == searchToken, self.globalSearchIsRunning,
+                              store.currentPageId == currentPageId,
+                              store.currentSpecialSlotId == currentSpecialSlotId else { return }
+                        self.globalSearchMatchedCount = count
+                        if canPublishOrderedPrefix, self.globalSearchResultsCache.isEmpty, !prefix.isEmpty {
+                            self.globalSearchResultsCache = prefix
+                            self.globalSearchResultsRevision += 1
+                        }
+                    }
+                })
+            let all = expansion.results
             guard !Task.isCancelled else { return }
             let results = ContentView.sortGlobalSearch(
                 all,
@@ -2036,15 +2061,15 @@ struct ContentView: View {
                     || freshSpecialSlotId != currentSpecialSlotId
                 // P2 (#9, v2.10.7): 只重排、不重复过滤（results 已在后台过滤完毕），
                 // 避免大结果集在主线程再跑一遍 filter 造成卡顿。
-                let reordered = contextChanged
-                    ? ContentView.sortGlobalSearch(
-                        results,
-                        sortRule: sortRule,
-                        currentPageId: freshPageId,
-                        currentSpecialSlotId: freshSpecialSlotId
-                    )
-                    : results
-                self.globalSearchResultsCache = reordered
+                if contextChanged {
+                    self.recomputeGlobalSearchResults()
+                    return
+                }
+                self.globalSearchResultsCache = results
+                self.globalSearchResultsRevision += 1
+                self.globalSearchMatchedCount = results.count
+                self.globalSearchIsRunning = false
+                self.globalSearchIsComplete = expansion.isComplete
             }
         }
     }
@@ -2054,12 +2079,19 @@ struct ContentView: View {
     /// (filter/scope/sort) recompute immediately.
     private func scheduleGlobalSearchRecompute(debounced: Bool) {
         searchDebounce.cancel()
+        store.globalSearchGeneration += 1
 
         guard searchScope == .global, isSearchActive else {
             store.globalSearchGeneration += 1   // P1-4 (v2.10.7): 作废在途后台搜索，防止清空后旧结果回魂
             if !globalSearchResultsCache.isEmpty { globalSearchResultsCache = [] }  // v2.10.91 (perf)
+            globalSearchIsRunning = false
+            globalSearchIsComplete = true
             return
         }
+        globalSearchIsRunning = true
+        globalSearchIsComplete = false
+        globalSearchMatchedCount = 0
+        if !globalSearchResultsCache.isEmpty { globalSearchResultsCache = [] }
 
         if debounced {
             // P2 (v2.10.13): 去抖闭包不再在「调度时刻」冻结 searchText/selectedFilter 快照。
@@ -2087,49 +2119,8 @@ struct ContentView: View {
         currentPageId: String,
         currentSpecialSlotId: String
     ) -> [SlotGlobalSearchResult] {
-        switch sortRule {
-        case .smart:
-            return filtered.sorted { lhs, rhs in
-                let lhsCurrentPage = lhs.pageId == currentPageId
-                let rhsCurrentPage = rhs.pageId == currentPageId
-                if lhsCurrentPage != rhsCurrentPage { return lhsCurrentPage }
-                let lhsCurrentGroup = lhs.groupId == currentSpecialSlotId
-                let rhsCurrentGroup = rhs.groupId == currentSpecialSlotId
-                if lhsCurrentGroup != rhsCurrentGroup { return lhsCurrentGroup }
-                if lhs.pageOrder != rhs.pageOrder { return lhs.pageOrder < rhs.pageOrder }
-                if lhs.groupOrder != rhs.groupOrder { return lhs.groupOrder < rhs.groupOrder }
-                return lhs.slot < rhs.slot
-            }
-        case .slotOrder:
-            return filtered.sorted { lhs, rhs in
-                if lhs.slot != rhs.slot { return lhs.slot < rhs.slot }
-                if lhs.pageOrder != rhs.pageOrder { return lhs.pageOrder < rhs.pageOrder }
-                return lhs.groupOrder < rhs.groupOrder
-            }
-        case .nameAscending:
-            return filtered.sorted {
-                $0.displayTitle.localizedStandardCompare($1.displayTitle) == .orderedAscending
-            }
-        case .nameDescending:
-            return filtered.sorted {
-                $0.displayTitle.localizedStandardCompare($1.displayTitle) == .orderedDescending
-            }
-        case .typeOrder:
-            return filtered.sorted { lhs, rhs in
-                if lhs.contentTypeOrder != rhs.contentTypeOrder {
-                    return lhs.contentTypeOrder < rhs.contentTypeOrder
-                }
-                if lhs.pageOrder != rhs.pageOrder { return lhs.pageOrder < rhs.pageOrder }
-                if lhs.groupOrder != rhs.groupOrder { return lhs.groupOrder < rhs.groupOrder }
-                return lhs.slot < rhs.slot
-            }
-        case .pageGroupSlot:
-            return filtered.sorted { lhs, rhs in
-                if lhs.pageOrder != rhs.pageOrder { return lhs.pageOrder < rhs.pageOrder }
-                if lhs.groupOrder != rhs.groupOrder { return lhs.groupOrder < rhs.groupOrder }
-                return lhs.slot < rhs.slot
-            }
-        }
+        SlotGlobalSearchOrdering.sort(filtered, rule: sortRule,
+                                      currentPageId: currentPageId, currentGroupId: currentSpecialSlotId)
     }
 
     private func jumpToSearchResult(_ result: SlotGlobalSearchResult) {
@@ -2456,168 +2447,6 @@ private struct CrossGroupCursorHintView: View {
             )
             .shadow(color: .black.opacity(0.12), radius: 4, y: 1)
         }
-    }
-}
-
-// MARK: - v2.7.43 Always-on Poster Ambient Background
-
-private struct RetroPosterAmbientBackground: View, Equatable {
-    // v2.10.91: 主题由父视图显式传入（原先是本视图内部的 @AppStorage + @Environment 推导）。
-    // 这样本视图成为纯值类型，可配合 `.equatable()` 在「与主题/resize 无关的重绘」里被完全短路；
-    // 同时主题变化必然改变本值 → 必然重算 body + 换 .id，彻底避免 v2.10.80/81 的「卡旧色」。
-    let scheme: ColorScheme
-    // v2.10.70: 拖拽 live-resize 期间为 true——只画纯色底，跳过 4 层超大高斯模糊 + grain + drawingGroup，
-    // 避免整窗离屏缓冲每帧按新尺寸重新栅格化造成掉帧；拖拽结束恢复完整海报背景。
-    var simplified: Bool = false
-
-    static func == (lhs: RetroPosterAmbientBackground, rhs: RetroPosterAmbientBackground) -> Bool {
-        lhs.scheme == rhs.scheme && lhs.simplified == rhs.simplified
-    }
-
-    // v2.10.81: 彻底移除 v2.10.76 的 ImageRenderer 静态栅格快照（raster/@State + cacheKey/quantize +
-    // rebuildRasterIfNeeded 全部删除）。根因：ImageRenderer 离屏位图 + drawingGroup 的 Metal 纹理会
-    // 卡在旧 appearance，视图 identity 不变就不刷新——切主题时缓存键虽已含新 scheme，但快照/纹理不重建，
-    // 背景卡旧色直到 resize 被动纠正。改回「非 resize 常态实时渲染 fullBackground + drawingGroup 维持
-    // 低开销」，并对该层加 .id(effectiveScheme) 破除身份缓存，切主题即时重建拿到新配色。
-    // resize 期间仍保留 v2.10.75/70 的 simplified 纯色降级（不画多层模糊、不触发离屏）。
-
-    // 实验/诊断开关：CLIPSLOTS_PERF_EXP_NOAMBIENT=1 时退化为纯色底。用于 A/B 量化「整窗氛围层」
-    // 在一次重绘里占多少主线程时间（v2.10.91 用它测出约 120ms/次切组）。默认关闭，正式运行零影响。
-    private static let expNoAmbient = ProcessInfo.processInfo.environment["CLIPSLOTS_PERF_EXP_NOAMBIENT"] == "1"
-
-    var body: some View {
-        if simplified || Self.expNoAmbient {
-            // v2.10.75/70: live-resize 期间只画纯色底，跳过 4 层超大高斯模糊 + grain + drawingGroup，
-            // 避免整窗离屏缓冲每帧按新尺寸重合成造成掉帧。
-            AppTheme.windowBackground(scheme)
-        } else {
-            // v2.10.81: 实时海报渲染（drawingGroup 仍在，维持非 resize 常态低开销）。.id(effectiveScheme)
-            // 使切主题时该子树获得新身份、强制重建 drawingGroup 的 GPU 纹理，即时呈现新主题配色。
-            fullBackground(scheme: scheme)
-                .id(scheme)
-                .perfCount("ambientBackground.body")
-        }
-    }
-
-    /// 海报层叠内容（不含 drawingGroup）。按显式 scheme 参数取色，避免依赖可能滞后的 self.colorScheme。
-    private func posterLayers(scheme: ColorScheme) -> some View {
-        ZStack {
-            AppTheme.windowBackground(scheme)
-
-            Circle()
-                .fill(scheme == .dark ? Color(red: 0.22, green: 0.27, blue: 0.48).opacity(0.24) : Color(red: 0.70, green: 0.75, blue: 0.88).opacity(0.46))
-                .frame(width: 820, height: 820)
-                .offset(x: 130, y: -40)
-                .blur(radius: 1.5)
-
-            RadialGradient(colors: [Color.red.opacity(scheme == .dark ? 0.28 : 0.22), Color.red.opacity(scheme == .dark ? 0.12 : 0.08), .clear], center: .center, startRadius: 0, endRadius: 460)
-                .frame(width: 720, height: 580)
-                .offset(x: -470, y: -230)
-                .blur(radius: 50)
-                .blendMode(.screen)
-
-            RadialGradient(colors: [Color.white.opacity(scheme == .dark ? 0.18 : 0.48), Color.orange.opacity(scheme == .dark ? 0.18 : 0.16), .clear], center: .center, startRadius: 0, endRadius: 520)
-                .frame(width: 760, height: 580)
-                .offset(x: 560, y: -250)
-                .blur(radius: 58)
-                .blendMode(.screen)
-
-            Rectangle()
-                .fill(LinearGradient(colors: [.clear, Color.white.opacity(scheme == .dark ? 0.055 : 0.26), .clear], startPoint: .leading, endPoint: .trailing))
-                .frame(height: 130)
-                .rotationEffect(.degrees(-2.5))
-                .offset(y: -210)
-                .blur(radius: 32)
-                .blendMode(.screen)
-
-            Rectangle()
-                .fill(LinearGradient(colors: [.clear, Color.red.opacity(scheme == .dark ? 0.08 : 0.06), .clear], startPoint: .leading, endPoint: .trailing))
-                .frame(height: 220)
-                .rotationEffect(.degrees(5))
-                .offset(y: 110)
-                .blur(radius: 58)
-                .blendMode(.screen)
-
-            RetroPosterGrain(opacity: scheme == .dark ? 0.060 : 0.050)
-        }
-    }
-
-    private func fullBackground(scheme: ColorScheme) -> some View {
-        // v2.8.4 (perf): flatten the whole poster background (base fill + 4 large
-        // blur/`.screen` gradient layers + grain) into ONE offscreen GPU texture.
-        // Previously CoreAnimation had to composite ~7 blurred/blended layers every
-        // frame while the window resized/zoomed, which contributed to the dropped-frame
-        // feel. drawingGroup keeps the identical look (screen blends still composite
-        // against the base fill inside the group) but collapses the overdraw into a
-        // single Metal pass, off the main thread.
-        posterLayers(scheme: scheme)
-            .drawingGroup()
-    }
-}
-
-private struct RetroPosterGrain: View {
-    let opacity: Double
-
-    // v2.8.4 (perf): the grain used to be a full-window `Canvas` that ran a nested
-    // per-pixel loop (step=3) over the ENTIRE window on EVERY redraw. During live
-    // window resize / title-bar double-click zoom this fired dozens of times per
-    // second on the main thread (a maximized window = 200k+ fill() calls per frame),
-    // stalling the run loop so the frame lagged behind the mouse and dropped frames.
-    // The grain is a purely decorative, static noise texture, so we now rasterize a
-    // single tile ONCE (cached) and tile it across the window — resize/zoom becomes a
-    // near-free bitmap stretch/tile instead of a main-thread pixel loop.
-    var body: some View {
-        Image(nsImage: RetroPosterGrain.tileImage)
-            .resizable(resizingMode: .tile)
-            .opacity(opacity)
-            .blendMode(.overlay)
-            .allowsHitTesting(false)
-    }
-
-    /// Deterministic noise tile, generated exactly once on first access and reused
-    /// for the lifetime of the process. Alpha per pixel matches the old formula
-    /// (0.35 + value*0.65); the per-theme `opacity` is applied on the Image so one
-    /// tile serves both light and dark modes.
-    private static let tileImage: NSImage = makeTile(side: 240, step: 3)
-
-    private static func makeTile(side: CGFloat, step: CGFloat) -> NSImage {
-        let image = NSImage(size: NSSize(width: side, height: side))
-        image.lockFocus()
-        var x: CGFloat = 0
-        while x <= side {
-            var y: CGFloat = 0
-            while y <= side {
-                let value = abs(sin(Double(x * 12.9898 + y * 78.233)))
-                let alpha = 0.35 + value * 0.65
-                NSColor(white: 1, alpha: alpha).setFill()
-                NSBezierPath(rect: NSRect(x: x, y: y, width: 1, height: 1)).fill()
-                y += step
-            }
-            x += step
-        }
-        image.unlockFocus()
-        return image
-    }
-}
-
-/// v2.10.93: 氛围海报层的宿主。
-///
-/// 主题依赖只留在这一层：它自己读 `@AppStorage("appearanceMode")` 与环境 colorScheme 推导有效主题，
-/// 再把结果作为参数传给 Equatable 的 `RetroPosterAmbientBackground`。
-/// 这样既保住 v2.10.80/81 的不变量（主题一变，参数必变 → body 必重算 → `.id(scheme)` 重建
-/// drawingGroup 纹理，绝不卡旧色），又不再把「整棵 ContentView」拖进主题切换的重算范围。
-private struct AmbientBackgroundHost: View {
-    let simplified: Bool
-    @AppStorage("appearanceMode") private var appearanceModeRaw = ThemeMode.light.rawValue
-    @Environment(\.colorScheme) private var colorScheme
-
-    private var effectiveScheme: ColorScheme {
-        (ThemeMode(rawValue: appearanceModeRaw) ?? .system).preferredColorScheme ?? colorScheme
-    }
-
-    var body: some View {
-        RetroPosterAmbientBackground(scheme: effectiveScheme, simplified: simplified)
-            .equatable()
     }
 }
 

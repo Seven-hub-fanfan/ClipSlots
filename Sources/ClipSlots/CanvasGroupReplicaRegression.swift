@@ -270,7 +270,7 @@ extension CanvasWorkspaceView {
         let saved = canvas.groups
         _ = canvas.createProject(name: "编组持久化回归"); _ = canvas.switchProject(to: project)
         check(canvas.groups == saved, "project reload preserves title frame color layout and membership")
-        for skin in ["minimal", "colorful"] {
+        for skin in AppSkin.allCases.map(\.rawValue) {
             for appearance in ["light", "dark"] {
                 AppSkinCenter.apply(AppSkin(rawValue: skin)!)
                 NSApp.appearance = NSAppearance(named: appearance == "dark" ? .darkAqua : .aqua)

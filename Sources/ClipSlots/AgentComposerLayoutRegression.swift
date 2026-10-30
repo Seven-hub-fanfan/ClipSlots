@@ -4,7 +4,7 @@ import SwiftUI
 import ClipSlotsKit
 
 @MainActor
-func runAgentComposerLayoutProbe(directory: URL, check: (Bool, String) -> Void) async {
+func runAgentComposerLayoutProbe(directory: URL, check: (Bool, String) -> Void) async -> Int {
     func settle() async { try? await Task.sleep(for: .milliseconds(180)) }
     func elements(_ node: AnyObject, depth: Int = 0) -> [AnyObject] {
         guard depth < 30 else { return [] }
@@ -43,7 +43,7 @@ func runAgentComposerLayoutProbe(directory: URL, check: (Bool, String) -> Void) 
     var polishAndModelSeparated = true
     for mode in WorkspaceMode.allCases {
         let widths: [CGFloat] = mode == .agent ? [360, 480, 800, 1200] : [AgentSidebarView.width]
-        for skin in [AppSkin.minimal, .colorful] {
+        for skin in AppSkin.allCases {
             AppSkinCenter.apply(skin)
             for appearance in ["light", "dark"] {
                 window.appearance = NSAppearance(named: appearance == "light" ? .aqua : .darkAqua)
@@ -66,6 +66,7 @@ func runAgentComposerLayoutProbe(directory: URL, check: (Bool, String) -> Void) 
                         let add = frame("agent-composer-add"), voice = frame("agent-voice-input")
                         let picker = frame("agent-model-picker")
                         let polish = frame("agent-ai-polish")
+                        let sendStop = frame("agent-send-stop")
                         polishAndModelSeparated = polishAndModelSeparated && (polish.map { p in
                             picker.map { abs(p.midY - $0.midY) < 2 && p.maxX <= $0.minX + 1 } ?? false
                         } ?? false)
@@ -78,7 +79,7 @@ func runAgentComposerLayoutProbe(directory: URL, check: (Bool, String) -> Void) 
                             context.map { p in abs(s.midY - p.midY) < 2 && s.maxX < p.minX } ?? false
                         } ?? false
                         let contentFrame = window.convertToScreen(host.frame)
-                        let inside = [add, context, voice, picker, polish, editorFrame].allSatisfy {
+                        let inside = [add, context, voice, picker, polish, sendStop, editorFrame].allSatisfy {
                             guard let f = $0 else { return false }
                             return f.minX >= contentFrame.minX - 2
                                 && f.maxX <= contentFrame.maxX + 2
@@ -136,14 +137,23 @@ func runAgentComposerLayoutProbe(directory: URL, check: (Bool, String) -> Void) 
         await settle()
     }
     if let skill = elements(host).first(where: {
-        ($0.accessibilityIdentifier?() ?? "") == "agent-reference-skill"
+        ($0.accessibilityIdentifier?() ?? "") == "agent-composer-add"
     }) {
         _ = skill.accessibilityPerformPress?()
         await settle()
-        let popoverElements = NSApp.windows.compactMap(\.contentView).flatMap { elements($0) }
+        var popoverElements = NSApp.windows.compactMap(\.contentView).flatMap { elements($0) }
         check(popoverElements.contains {
-            ($0.accessibilityIdentifier?() ?? "") == "agent-skill-search"
-        }, "toolbar Skills action opens its selection popover")
+            ($0.accessibilityIdentifier?() ?? "") == "agent-composer-add-menu"
+        }, "toolbar action opens compact add menu")
+        _ = popoverElements.first { $0.accessibilityIdentifier?() == "agent-add-skills" }?.accessibilityPerformPress?()
+        for _ in 0..<50 {
+            await settle()
+            popoverElements = NSApp.windows.compactMap(\.contentView).flatMap { elements($0) }
+            if popoverElements.contains(where: {
+                ($0.accessibilityIdentifier?() ?? "").hasPrefix("agent-skill-pick-")
+                    && ($0.accessibilityIdentifier?() ?? "").contains("composer-fixture")
+            }) { break }
+        }
         if let pick = popoverElements.first(where: {
             ($0.accessibilityIdentifier?() ?? "").hasPrefix("agent-skill-pick-")
                 && ($0.accessibilityIdentifier?() ?? "").contains("composer-fixture")
@@ -157,6 +167,14 @@ func runAgentComposerLayoutProbe(directory: URL, check: (Bool, String) -> Void) 
                   && model.draft == "布局验证草稿🙂",
                   "native Skills selection preserves draft and adds its frozen reference")
         } else {
+            let fixtureDiscovered = AgentSkillCatalog.discover().contains { $0.name == "composer-fixture" }
+            let fixtureCached = AgentSkillLibrary.shared.skills.contains { $0.name == "composer-fixture" }
+            let observed = popoverElements.compactMap { $0.accessibilityIdentifier?() }
+                .map { $0.contains("composer-fixture") || !$0.hasPrefix("agent-skill-pick-") ? $0 : "agent-skill-pick-<other>" }
+            try? JSONSerialization.data(withJSONObject: ["fixtureDiscovered": fixtureDiscovered,
+                "fixtureCached": fixtureCached, "isScanning": AgentSkillLibrary.shared.isScanning,
+                "menuIdentifiers": observed], options: [.prettyPrinted, .sortedKeys])
+                .write(to: directory.appendingPathComponent("skill-selection-failure.json"))
             check(false, "selection popover exposes the local fixture Skill")
         }
     } else {
@@ -185,6 +203,47 @@ func runAgentComposerLayoutProbe(directory: URL, check: (Bool, String) -> Void) 
         check(request?["tools"] == nil && request?["model"] != nil,
               "direct AI polish uses the selected text model without tools")
     } else { check(false, "direct AI polish is accessible") }
+    model.draft = "initial"
+    window.contentView = NSHostingView(rootView: ComposerLiveCatalogProbe(model: model))
+    await settle()
+    var liveNodes = NSApp.windows.compactMap(\.contentView).flatMap { elements($0) }
+    if let expand = liveNodes.first(where: { $0.accessibilityIdentifier?() == "composer-live-expand" }) {
+        _ = expand.accessibilityPerformPress?()
+        await settle()
+        liveNodes = NSApp.windows.compactMap(\.contentView).flatMap { elements($0) }
+        check(liveNodes.contains { $0.accessibilityIdentifier?() == "composer-live-initial" },
+              "native menu opens the initial catalog with expanded state")
+        model.draft = "updated"
+        await settle()
+        liveNodes = NSApp.windows.compactMap(\.contentView).flatMap { elements($0) }
+        check(liveNodes.contains { $0.accessibilityIdentifier?() == "composer-live-updated" }
+              && !liveNodes.contains { $0.accessibilityIdentifier?() == "composer-live-initial" },
+              "open native menu updates catalog without losing expanded state")
+    } else { check(false, "native live catalog probe opens its real menu") }
     window.close()
+    return geometry.count
+}
+
+private struct ComposerLiveCatalogProbe: View {
+    @ObservedObject var model: AgentChatModel
+    @State private var presented = true
+    var body: some View {
+        Button("目录") { presented = true }
+            .background(AgentComposerMenuPresenter(presented: $presented,
+                content: ComposerLiveCatalogContent(value: model.draft)))
+    }
+}
+
+private struct ComposerLiveCatalogContent: View {
+    let value: String
+    @State private var expanded = false
+    var body: some View {
+        VStack {
+            Button("展开目录") { expanded = true }.accessibilityIdentifier("composer-live-expand")
+            if expanded {
+                Text(value).accessibilityIdentifier("composer-live-" + value)
+            }
+        }.padding(12)
+    }
 }
 #endif

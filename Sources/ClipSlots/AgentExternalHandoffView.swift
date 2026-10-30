@@ -145,15 +145,16 @@ public struct AgentExternalHandoffView: View {
                             Text("连接 ClipSlots MCP").font(.system(size: 18, weight: .semibold))
                             Text("将配置添加到客户端的 mcpServers，再重启客户端。连接后可读取「\(context.projectTitle)」的画布与产物。")
                                 .foregroundStyle(TapSkin.secondaryInk).lineSpacing(6)
-                            Text((try? context.mcpConfiguration().encodedText(pretty: true)) ?? "配置无效")
+                            Text(session.mcpConfigurationText ?? "配置无效")
                                 .font(.system(size: 11, design: .monospaced))
+                                .accessibilityIdentifier("agent-external-mcp-configuration")
                                 .textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading)
                                 .padding(16)
                                 .background(TapSkin.tone(0xf2f2f2, 0x111111),
                                             in: RoundedRectangle(cornerRadius: 12, style: .continuous))
                             Text(context.liveLease == nil
                                  ? "当前连接提供固定画布快照和本地最新产物的只读访问。"
-                                 : "可读取项目快照与产物，并向当前画布提交变更预览。在画布中确认后应用，支持撤销。连接有效期 30 分钟。")
+                                 : "画布和槽位操作遵循当前审批模式；自动生成模式下安全操作自动执行，删除与结构变更预览仍需确认。支持撤销，连接有效期 30 分钟。")
                                 .font(.system(size: 12)).foregroundStyle(TapSkin.secondaryInk).lineSpacing(5)
                         }.frame(maxWidth: .infinity, alignment: .leading)
                             .padding(32).padding(.top, 16)
@@ -219,7 +220,12 @@ public struct AgentExternalHandoffView: View {
         .background(AgentHandoffSheetSurface())
         .onAppear { session.present(); previousSelection = session.selectedProviderID }
         .onDisappear { launchTask?.cancel(); session.close() }
-        .onChange(of: context) { _ in launchTask?.cancel(); session.update(context: context); error = nil }
+        .onChange(of: context) { _ in
+            launchTask?.cancel()
+            session.update(context: context)
+            configurationCopied = false
+            error = nil
+        }
     }
 
     private func select(_ identifier: String) {
@@ -240,7 +246,7 @@ public struct AgentExternalHandoffView: View {
             if showConfiguration {
                 Button {
                     do {
-                        configurationCopied = opener.copyPrompt(try context.mcpConfiguration().encodedText(pretty: true))
+                        configurationCopied = try session.copyMCPConfiguration(context: context, using: opener)
                         error = configurationCopied ? nil : "无法复制，请手动选择配置。"
                     } catch { self.error = error.localizedDescription }
                 } label: {

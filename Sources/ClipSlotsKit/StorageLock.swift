@@ -159,7 +159,7 @@ public final class StorageLock {
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         fd = open(lockURL.path, O_RDWR | O_CREAT, 0o644)
         if fd < 0 {
-            NSLog("[ClipSlots] StorageLock: failed to open lock file \(lockURL.path) errno=\(errno)")
+            NSLog("[ClipSlots] StorageLock: failed to open lock file errno=\(errno)")
         }
         return fd
     }

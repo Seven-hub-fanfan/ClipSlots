@@ -2,29 +2,19 @@ import SwiftUI
 import AppKit
 import ClipSlotsKit
 
-/// Both skins share canvas surfaces; node accents retain the selected theme.
+/// Canvas surfaces use the shared minimal appearance.
 enum CanvasSkin {
-    static var colorful: Bool { TapSkin.colorful }
     static func tone(_ light: UInt32, _ dark: UInt32) -> Color { TapSkin.tone(light, dark) }
     static var ink: Color { TapSkin.ink }
     static var secondaryInk: Color { TapSkin.secondaryInk }
     static var faintInk: Color { TapSkin.faintInk }
     static var border: Color { TapSkin.border }
     static var subtleFill: Color { TapSkin.subtleFill }
-    static var accent: Color { colorful ? tone(0x4e5de4, 0xf0f1f4) : ink }
+    static var accent: Color { ink }
     static var onAccent: Color { tone(0xffffff, 0x17181b) }
     static var textPolishAccent: Color { TapSkin.tone(0x4e5de4, 0x9aa5ff) }
     static func nodeAccent(_ kind: CanvasNodeKind) -> Color {
-        guard colorful else { return ink }
-        switch kind {
-        case .text: return tone(0x8454c7, 0xf0f1f4)
-        case .image: return tone(0x147d76, 0xf0f1f4)
-        case .video: return tone(0x3869c8, 0xf0f1f4)
-        case .slot, .batchTemplate: return tone(0xa86b18, 0xf0f1f4)
-        case .audio: return tone(0xa5498c, 0xf0f1f4)
-        case .threeD, .stage: return tone(0x3869c8, 0xf0f1f4)
-        case .timeline: return tone(0x147d76, 0xf0f1f4)
-        }
+        ink
     }
     static var void: Color { tone(0xf3f3f3, 0x080808) }
     static var gridDot: Color { tone(0xc7c7c7, 0x404040) }

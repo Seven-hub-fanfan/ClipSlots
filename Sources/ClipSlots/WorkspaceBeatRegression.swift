@@ -95,12 +95,12 @@ func runWorkspaceBeatProbe(directory: URL, check: (Bool, String) -> Void) async 
     }
     let originalSkin = AppSkinCenter.current
     var paletteSamples = [[String: Any]]()
-    for colorful in [false, true] {
-        AppSkinCenter.apply(colorful ? .colorful : .minimal)
+    for skin in AppSkin.allCases {
+        AppSkinCenter.apply(skin)
         for dark in [false, true, false] {
             window.appearance = NSAppearance(named: dark ? .darkAqua : .aqua)
             try? await Task.sleep(for: .milliseconds(180))
-            let name = "workspace-\(colorful ? "colorful" : "minimal")-\(dark ? "dark" : "light")"
+            let name = "workspace-\(skin.rawValue)-\(dark ? "dark" : "light")"
             let brightness = capture(name)
             check(dark ? brightness >= 0 && brightness < 0.25 : brightness > 0.92,
                 "\(name) live appearance renders \(dark ? "black" : "white") base")
@@ -241,6 +241,54 @@ func runWorkspaceBeatProbe(directory: URL, check: (Bool, String) -> Void) async 
         try? bitmap.representation(using: .png, properties: [:])?
             .write(to: directory.appendingPathComponent("workspace-models.png"))
     }
+    await runWorkspaceArchRasterProbe(directory: directory, check: check)
     await WelcomeCardInteractionRegression.run(directory: directory, check: check)
+}
+
+/// This verifies production Core Animation pixels offscreen. It deliberately
+/// makes no claim about desktop focus, compositor timing or physical input.
+@MainActor
+func runWorkspaceArchRasterProbe(directory: URL, check: (Bool, String) -> Void) async {
+    var crownSamples = [[String: Any]]()
+    for dark in [false, true] {
+        for highContrast in [false, true] {
+          for mode in WorkspaceMode.allCases {
+            let surface = WorkspaceContourSurface.Host(frame: NSRect(x: 0, y: 0,
+                width: WorkspaceModeSwitcher.preferredWidth, height: WorkspaceModeSwitcher.preferredHeight))
+            surface.appearance = NSAppearance(named: dark ? .darkAqua : .aqua)
+            let center = WorkspaceModeSwitcher.center(for: mode)
+            surface.configure(center: center, halfWidth: WorkspaceModeSwitcher.contourHalfWidth,
+                              animated: false, highContrast: highContrast)
+            surface.layoutSubtreeIfNeeded()
+            guard let layer = surface.layer,
+                  let context = CGContext(data: nil, width: Int(surface.bounds.width * 2),
+                    height: Int(surface.bounds.height * 2), bitsPerComponent: 8,
+                    bytesPerRow: 0, space: CGColorSpaceCreateDeviceRGB(),
+                    bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else {
+                check(false, "native arch raster is available"); continue
+            }
+            context.scaleBy(x: 2, y: 2)
+            layer.render(in: context)
+            guard let image = context.makeImage() else {
+                check(false, "native arch raster has pixels"); continue
+            }
+            let bitmap = NSBitmapImageRep(cgImage: image)
+            let name = "workspace-arch-\(mode.rawValue)-\(dark ? "dark" : "light")-\(highContrast ? "contrast" : "normal")"
+            try? bitmap.representation(using: .png, properties: [:])?
+                .write(to: directory.appendingPathComponent(name + ".png"))
+            func crownAlpha(_ offset: CGFloat) -> CGFloat {
+                let x = Int((center + offset) * 2)
+                let rows = Array(0..<12) + Array((bitmap.pixelsHigh - 12)..<bitmap.pixelsHigh)
+                return rows.compactMap { bitmap.colorAt(x: x, y: $0)?.alphaComponent }.max() ?? 0
+            }
+            let left = crownAlpha(-6), right = crownAlpha(6)
+            check(min(left, right) > 0.45 && abs(left - right) < 0.04,
+                  "\(name) crown remains readable and balanced on both sides")
+            crownSamples.append(["theme": name, "leftAlpha": left, "rightAlpha": right])
+          }
+        }
+    }
+    try? JSONSerialization.data(withJSONObject: crownSamples, options: [.prettyPrinted, .sortedKeys])
+        .write(to: directory.appendingPathComponent("workspace-arch-pixels.json"))
 }
 #endif

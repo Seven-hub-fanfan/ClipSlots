@@ -1,5 +1,6 @@
 import Foundation
 import Security
+import AppKit
 @testable import ClipSlotsKit
 
 private let gatewayRoot = URL(string: "https://gateway.fixture.invalid/v1")!
@@ -46,10 +47,11 @@ private func gatewayDone(_ id: String = "done") throws -> Data {
     try gatewayFrame("run_completed", id, ["messageID": .string(gatewayMessageID)])
 }
 private func gatewayTool(_ target: String, expiry: Double = 4_000_000_000,
-                         name: String = "fixture_tool", id: String = "tool-event") throws -> Data {
+                         name: String = "fixture_tool", id: String = "tool-event",
+                         arguments: String = #"{"text":"test"}"#) throws -> Data {
     try gatewayFrame("client_tool_request", id, [
         "executionID": "execution-one", "callID": "call-one", "name": .string(name),
-        "argumentsJSON": #"{"text":"test"}"#, "targetClientInstanceID": .string(target),
+        "argumentsJSON": .string(arguments), "targetClientInstanceID": .string(target),
         "expiresAt": .number(expiry)
     ])
 }
@@ -113,6 +115,7 @@ private final class GatewayClock: @unchecked Sendable {
     let cancelSleep: Bool
     init(cancelSleep: Bool = false) { self.cancelSleep = cancelSleep }
     var now: Date { lock.withLock { date } }
+    func advance(_ seconds: Double) { lock.withLock { date.addTimeInterval(seconds) } }
     var sleeps: [Double] { lock.withLock { delays } }
     var timing: AgentGatewayTiming {
         .init(sleep: { [self] delay in
@@ -130,8 +133,11 @@ private actor GatewayEvents {
     private(set) var tools = 0
     private(set) var artifacts = 0
     private(set) var canvas = 0
+    private(set) var readbacks = 0
+    private(set) var readbackScopes: [Bool] = []
     private(set) var notes: [String] = []
     private(set) var phases: [String] = []
+    private(set) var streamActivities = 0
     private(set) var interaction: AgentInteraction?
     func receive(_ event: AgentRunEvent) {
         switch event {
@@ -141,8 +147,10 @@ private actor GatewayEvents {
         case .toolStarted: tools += 1
         case .artifactUpdated: artifacts += 1
         case .canvasChanged: canvas += 1
+        case .canvasReadbackRequested(let request): readbacks += 1; readbackScopes.append(request.isFullSnapshot)
         case .note(let note): notes.append(note)
         case .runState(let phase, _, _): phases.append(phase)
+        case .runStreamActivity: streamActivities += 1
         case .interactionRequested(let value): interaction = value
         default: break
         }
@@ -160,6 +168,60 @@ private final class GatewayTools: AgentToolExecuting, @unchecked Sendable {
     func execute(call: AgentToolCall) async -> AgentToolResult {
         lock.withLock { executions += 1 }
         return .init(content: #"{"ok":true}"#, summary: "fixture completed")
+    }
+}
+
+private final class GatewayMutableTools: AgentToolExecutionScoped, @unchecked Sendable {
+    private let lock = NSLock()
+    private var executions = 0
+    private var scope = AgentExecutionScope(sessionID: "session", projectID: "project", turnID: "turn")
+    private var declarations = [AgentToolSpec(name: "fixture_tool", description: "test",
+        parameters: ["type": "object", "properties": ["text": ["type": "string"]],
+                     "required": ["text"], "additionalProperties": false], originLabel: "test")]
+    var afterExecution: (@Sendable () -> Void)?
+    var count: Int { lock.withLock { executions } }
+    var executionScope: AgentExecutionScope { lock.withLock { scope } }
+    func changeScope() {
+        lock.withLock { scope = .init(sessionID: "another", projectID: "project", turnID: "turn") }
+    }
+    func changeSchema() {
+        lock.withLock {
+            declarations = [.init(name: "fixture_tool", description: "changed",
+                parameters: ["type": "object", "properties": [:]], originLabel: "another owner")]
+        }
+    }
+    func disable() { lock.withLock { declarations = [] } }
+    func specs() -> [AgentToolSpec] { lock.withLock { declarations } }
+    func execute(call: AgentToolCall) async -> AgentToolResult {
+        lock.withLock { executions += 1 }
+        afterExecution?()
+        return .init(content: "side effect completed", summary: "completed")
+    }
+}
+
+private actor GatewayExecutionGate {
+    private var started = false
+    private var waiter: CheckedContinuation<Void, Never>?
+    func start() { started = true; waiter?.resume(); waiter = nil }
+    func wait() async {
+        if started { return }
+        await withCheckedContinuation { waiter = $0 }
+    }
+}
+
+private final class GatewayCancellableTools: AgentToolExecuting, @unchecked Sendable {
+    let gate = GatewayExecutionGate()
+    let output: URL
+    init(output: URL) { self.output = output }
+    func specs() -> [AgentToolSpec] { GatewayTools().specs() }
+    func execute(call: AgentToolCall) async -> AgentToolResult {
+        await gate.start()
+        do {
+            try await Task.sleep(for: .seconds(60))
+            try Task.checkCancellation()
+            try Data("must not be written".utf8).write(to: output)
+            return .init(content: "written", summary: "written")
+        } catch { return .failure("handler cancelled", code: "CANCELLED") }
     }
 }
 
@@ -193,17 +255,248 @@ private func gatewayBackend(_ root: URL, _ transport: GatewayScript,
 }
 
 func runAgentRunGatewayTests(_ t: TestRunner) {
+    runTaskSubagentGatewayTests(t)
+    gatewayCase(t, "context journal binding") { c, root in
+        let store = AgentGatewayJournalStore(baseURL: gatewayRoot, binding: gatewayBinding, root: root)
+        var journal = try store.load()
+        var usage = AgentContextUsageState()
+        usage.receive(try .init(validating: usageTestValue(conversation: "other")),
+                      conversationID: "other", runID: gatewayRunID)
+        journal.contextUsage = usage
+        await c.error(.journalUnavailable, { try store.save(journal) },
+                      "foreign context cannot be persisted under another binding")
+    }
+    gatewayCase(t, "authoritative usage compact durable") { c, root in
+        var frames = try gatewayInitial()
+        frames += try gatewayFrame("thinking", "before-thought", ["messageID": .string(gatewayMessageID), "delta": "思考🙂"])
+        frames += try gatewayFrame("content", "before-body", ["messageID": .string(gatewayMessageID), "delta": "中e"])
+        frames += try gatewayFrame("context_usage", "u1", usageTestValue())
+        frames += try gatewayFrame("compact", "c1", ["phase": "started"])
+        frames += try gatewayFrame("compact", "c2", ["phase": "started"])
+        frames += try gatewayFrame("context_usage", "u2", usageTestValue(revision: 2))
+        frames += try gatewayFrame("compact", "c3", ["phase": "finished"])
+        frames += try gatewayFrame("content", "after-body", ["messageID": .string(gatewayMessageID), "delta": "\u{301}后"])
+        frames += try gatewayFrame("context_usage", "old", usageTestValue(revision: 1))
+        frames += try gatewayFrame("context_usage", "bad", ["revision": -1])
+        frames += try gatewayFrame("context_usage", "other", usageTestValue(revision: 100, conversation: "other"))
+        frames += try gatewayFrame("context_usage", "oldrun", usageTestValue(revision: 100, run: "old"))
+        frames += try gatewayFrame("compact", "unknown-phase", ["phase": "summarized"])
+        frames += try gatewayFrame("context_usage", "u3", ["context_usage": usageTestValue(revision: 3)])
+        frames += try gatewayDone()
+        let transport = GatewayScript([gatewayHTTP("POST", "/runs"), gatewayQuery()], [.init(chunks: [frames])])
+        let backend = gatewayBackend(root, transport)
+        let events = GatewayEvents()
+        _ = try await backend.run(history: [], config: AgentConfig(), tools: nil) { await events.receive($0) }
+        let snapshot = await backend.snapshot
+        c.check(snapshot.contextUsage.snapshot?.revision == 3 && snapshot.contextUsage.displaySnapshot?.percentage == 200,
+                "stream ignores stale invalid and wrong origins while preserving 200 percent")
+        c.check(!snapshot.contextUsage.stale && snapshot.contextUsage.compaction == .idle,
+                "ready observation after compact finish restores validity")
+        c.check(snapshot.compactions.entries.count == 1 && snapshot.compactions.entries[0].phase == .finished,
+                "duplicate starts update one durable lifecycle")
+        c.check(snapshot.compactions.entries.first?.anchor?.messageID == UUID(uuidString: gatewayMessageID)
+                && snapshot.compactions.entries.first?.anchor?.contentBytes == "中e".utf8.count
+                && snapshot.compactions.entries.first?.anchor?.reasoningBytes == "思考🙂".utf8.count,
+                "compact card freezes assistant identity and byte offsets in same cursor transaction")
+        c.check(snapshot.messages.last?.content == "中e\u{301}后" && snapshot.messages.last?.reasoning == "思考🙂",
+                "compact card metadata never rewrites upstream body or reasoning")
+        let recovered = await gatewayBackend(root, transport).snapshot
+        c.check(recovered.contextUsage == snapshot.contextUsage && recovered.compactions == snapshot.compactions,
+                "actual SQLite process-style reopen retains full projection")
+    }
+    gatewayCase(t, "compact stop no false finish") { c, root in
+        var frames = try gatewayInitial()
+        frames += try gatewayFrame("context_usage", "ready", usageTestValue())
+        frames += try gatewayFrame("compact", "started", ["phase": "started"])
+        frames += try gatewayDone()
+        let backend = gatewayBackend(root, GatewayScript([gatewayHTTP("POST", "/runs"), gatewayQuery()],
+            [.init(chunks: [frames])]))
+        _ = try await backend.run(history: [], config: AgentConfig(), tools: nil) { _ in }
+        let snapshot = await backend.snapshot
+        c.check(snapshot.contextUsage.stale && snapshot.contextUsage.compaction == .idle && snapshot.compactions.entries.isEmpty,
+                "terminal removes unfinished lifecycle without inventing compressed observation")
+    }
+    gatewayCase(t, "durable subagent full readback") { c, root in
+        let nested: JSONValue = ["tool": "gen_image", "status": "completed", "tool_call_id": "nested",
+            "response": ["canvas_id": "project", "node_id": "created-node"]]
+        func child(_ phase: String, parent: String = "parent", schema: String = "subagent_event.v1",
+                   tool: JSONValue? = nil) -> JSONValue {
+            var value: [String: JSONValue] = ["schema_version": .string(schema), "subagent_id": "child",
+                "parent_tool_call_id": .string(parent), "phase": .string(phase)]
+            if let tool { value["tool_event"] = tool }
+            return .object(value)
+        }
+        var frames = try gatewayInitial()
+        frames += try gatewayFrame("subagent_event", "child-start", child("started"))
+        frames += try gatewayFrame("subagent_event", "unsupported", child("tool_completed", schema: "future.v2", tool: nested))
+        frames += try gatewayFrame("subagent_event", "child-tool", child("tool_completed", tool: nested))
+        frames += try gatewayFrame("subagent_event", "child-stop", child("stopped"))
+        frames += try gatewayFrame("subagent_event", "late-terminal", child("completed"))
+        frames += try gatewayFrame("subagent_event", "next-parent", child("started", parent: "next-parent"))
+        frames += try gatewayFrame("subagent_event", "late-old-parent", child("failed"))
+        frames += try gatewayDone()
+        let backend = gatewayBackend(root, GatewayScript([gatewayHTTP("POST", "/runs"), gatewayQuery()],
+                                                        [.init(chunks: [frames])]))
+        let events = GatewayEvents()
+        _ = try await backend.run(history: [], config: .init(), tools: nil, onEvent: { await events.receive($0) })
+        let snapshot = await backend.snapshot, scopes = await events.readbackScopes
+        c.check(scopes == [false, true, true], "nested tool index precedes terminal full query and run finish flush")
+        c.check(snapshot.canvasReadbacks.count == 3 && snapshot.canvasMutations.isEmpty,
+                "child events produce durable indices and full intents without graph mutation authority")
+        c.check(snapshot.canvasReadbacks.first?.source?.subagentID == "child"
+                && snapshot.canvasReadbacks.first?.source?.parentToolCallID == "parent",
+                "adapter attaches explicitly declared parent and child to nested tool response")
+        c.check(snapshot.canvasReadbacks.last?.source?.parentToolCallID == "next-parent"
+                && snapshot.canvasReadbacks.last?.key == "next-parent",
+                "run finish flushes dirty successor without accepting late earlier-parent terminal")
+        let restored = await gatewayBackend(root, GatewayScript([])).snapshot
+        c.check(restored.canvasReadbacks == snapshot.canvasReadbacks
+                && restored.subagentCanvasScopes == snapshot.subagentCanvasScopes,
+                "journal recovery preserves full intents and current parent instance scope")
+    }
+    gatewayCase(t, "durable source tool readback") { c, root in
+        let payload: JSONValue = ["tool": "Bash", "status": "failed", "tool_call_id": "readback-call",
+            "response": ["canvas_changed": ["canvas_id": "project", "node_id": "local-node"]]]
+        let frames = try gatewayInitial() + gatewayFrame("canvas_tool_event", "readback-event", payload) + gatewayDone()
+        let script = GatewayScript([gatewayHTTP("POST", "/runs"), gatewayQuery()], [.init(chunks: [frames])])
+        let backend = gatewayBackend(root, script), events = GatewayEvents()
+        _ = try await backend.run(history: [], config: .init(), tools: nil, onEvent: { await events.receive($0) })
+        let snapshot = await backend.snapshot
+        let count = await events.readbacks
+        c.check(count == 1 && snapshot.canvasReadbacks.count == 1, "source indices are persisted and emitted")
+        c.check(snapshot.canvasReadbacks[0].nodeIDs == ["local-node"]
+            && snapshot.canvasReadbacks[0].allowsFallback, "CLI partial effects retain scoped readback semantics")
+        c.check(snapshot.canvasMutations.isEmpty, "source indices are never treated as graph mutation authority")
+        let restarted = gatewayBackend(root, GatewayScript([]))
+        c.check(await restarted.snapshot.canvasReadbacks == snapshot.canvasReadbacks,
+                "restart preserves unresolved readback without inventing a source")
+    }
+    gatewayCase(t, "durable child readback origins") { c, root in
+        func payload(_ parent: String) -> JSONValue {
+            ["tool": "gen_image", "status": "completed", "tool_call_id": "shared-call",
+             "subagent_id": "child", "parent_tool_call_id": .string(parent),
+             "response": ["canvas_changed": ["canvas_id": "project", "node_id": "local-node"]]]
+        }
+        let frames = try gatewayInitial()
+            + gatewayFrame("canvas_tool_event", "child-one", payload("parent-one"))
+            + gatewayFrame("canvas_tool_event", "child-two", payload("parent-two")) + gatewayDone()
+        let backend = gatewayBackend(root, GatewayScript([gatewayHTTP("POST", "/runs"), gatewayQuery()],
+                                                        [.init(chunks: [frames])]))
+        _ = try await backend.run(history: [], config: .init(), tools: nil, onEvent: { _ in })
+        let snapshot = await backend.snapshot
+        c.check(snapshot.canvasReadbacks.count == 2
+            && Set(snapshot.canvasReadbacks.map(\.coordinationKey)).count == 2,
+                "shared tool call under distinct parents retains both requests")
+        c.check(Set(snapshot.canvasReadbacks.compactMap { $0.source?.parentToolCallID }) == ["parent-one", "parent-two"],
+                "explicit parent identities are persisted")
+        let restarted = gatewayBackend(root, GatewayScript([]))
+        c.check(await restarted.snapshot.canvasReadbacks == snapshot.canvasReadbacks,
+                "journal restart preserves full child provenance")
+        c.check(snapshot.canvasMutations.isEmpty, "child origin never grants graph mutation authority")
+    }
+
+    gatewayCase(t, "bounded redacted diagnostics") { c, root in
+        let secret = "private-user-body-and-api-key"
+        let start = try gatewayInitial()
+        let frames = (0..<160).map { index in
+            try! gatewayFrame("note", "secret-event-\(secret)-\(index)", ["message": .string(secret)])
+        }.reduce(start, +) + (try gatewayDone())
+        let script = GatewayScript([gatewayHTTP("POST", "/runs"), gatewayQuery()], [.init(chunks: [frames])])
+        let backend = AgentGatewayBackend(baseURL: gatewayRoot, binding: gatewayBinding, journalRoot: root,
+            apiKeyProvider: { secret }, transport: script, timing: GatewayClock().timing)
+        _ = try await backend.run(history: [.init(role: .user, content: secret, reasoning: secret)],
+            config: .init(), tools: nil, onEvent: { _ in })
+        let diagnostics = await backend.diagnosticSnapshot
+        let bytes = try await backend.exportDiagnostics()
+        let text = String(decoding: bytes, as: UTF8.self)
+        c.check(diagnostics.records.count == AgentRunDiagnostics.maximumRecords && diagnostics.dropped > 0,
+                "record ring remains bounded after long stream")
+        c.check(bytes.count <= AgentRunDiagnostics.maximumExportBytes, "export has a byte ceiling")
+        c.check(!text.contains(secret) && !text.contains(gatewayRoot.absoluteString)
+            && !text.contains(gatewayRunID), "no credentials, endpoint, user body or opaque raw run ID")
+        c.check(diagnostics.records.last?.stage == .terminal && diagnostics.records.last?.outcome == .completed,
+                "completed operation reports its durable terminal state")
+        c.check(diagnostics.records.allSatisfy {
+            $0.durationMilliseconds.map { $0.isFinite && $0 >= 0 } ?? true
+        }, "durations use finite nonnegative milliseconds")
+        let committed = diagnostics.records.filter { $0.stage == .event && $0.outcome == .committed }
+        c.check(committed.allSatisfy { $0.event?.count == 64 && $0.run?.count == 64 },
+                "event and run correlation use digests")
+        c.check(diagnostics.records.map(\.sequence) == diagnostics.records.map(\.sequence).sorted(),
+                "eviction retains sequence order")
+        var direct = AgentRunDiagnostics(binding: gatewayBinding)
+        direct.append(stage: .tool, outcome: .committed, call: secret,
+            elapsed: .infinity, bytes: -4, status: 100_000, retry: -2)
+        c.check(direct.records[0].durationMilliseconds == nil && direct.records[0].byteCount == 0
+            && direct.records[0].httpStatus == nil && direct.records[0].retry == 0,
+            "invalid metrics cannot escape sanitization")
+        c.check(try !String(decoding: direct.export(), as: UTF8.self).contains(secret),
+                "tool correlation never includes raw call identity")
+    }
+
+    gatewayCase(t, "versioned image and reasoning history") { c, root in
+        let bitmap = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: 2, pixelsHigh: 2,
+            bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
+            colorSpaceName: .deviceRGB, bytesPerRow: 8, bitsPerPixel: 32)!
+        bitmap.bitmapData?.initialize(repeating: 128, count: 16)
+        let png = bitmap.representation(using: .png, properties: [:])!
+        let image = try AgentAttachmentImport.captureImage(png, name: "fixture.png")
+        let history: [AgentMessage] = [
+            .init(role: .assistant, content: "earlier", reasoning: "思考\n\t🙂 "),
+            .init(role: .assistant, content: "", reasoning: "", toolCalls: [
+                .init(id: "history-call", name: "fixture_tool", argumentsJSON: "{}")]),
+            .init(role: .tool, content: "saved result", toolCallId: "history-call"),
+            .init(role: .user, content: "captured image", attachments: [image])
+        ]
+        let script = GatewayScript([gatewayHTTP("POST", "/runs"), gatewayQuery()],
+                                   [.init(chunks: [try gatewayInitial() + gatewayDone()])])
+        var config = AgentConfig()
+        config.supportsImageInput = true
+        _ = try await gatewayBackend(root, script).run(history: history, config: config, tools: nil, onEvent: { _ in })
+        let requests = await script.requests
+        let body = try JSONDecoder().decode(JSONValue.self, from: requests[0].httpBody!)
+        c.check(body["messageSchemaVersion"] == 1 && body["schemaVersion"] == 1, "message v1 is additive to gateway v1")
+        c.check(body["config"]?["supportsImageInput"] == true, "model image capability explicitly captured")
+        let wire = body["history"]!.arrayValue!
+        c.check(wire[0]["reasoning"] == "思考\n\t🙂 " && wire[1]["reasoning"] == "", "all assistant reasoning preserved without trimming")
+        c.check(wire[3]["content"]?.arrayValue?.last?["image_url"]?["url"] ==
+                .string("data:image/png;base64," + png.base64EncodedString()), "image bytes survive request encoding")
+        let unsupported = gatewayBackend(root.appendingPathComponent("unsupported"), GatewayScript([]))
+        do {
+            _ = try await unsupported.run(history: history, config: .init(), tools: nil, onEvent: { _ in })
+            c.check(false, "unclaimed image capability rejects")
+        } catch {
+            c.check(error is AgentAttachmentImport.ImportError, "unclaimed image rejected before HTTP")
+        }
+    }
+
+    gatewayCase(t, "complete history HTTP budget") { c, root in
+        let script = GatewayScript([])
+        let backend = gatewayBackend(root, script)
+        await c.error(.requestTooLarge, {
+            _ = try await backend.run(history: [.init(role: .user, content: String(repeating: "x", count: 8 * 1024 * 1024))],
+                                      config: .init(), tools: nil, onEvent: { _ in })
+        }, "rejects JSON envelope overhead before reserving run")
+        c.check(await script.requests.isEmpty, "oversized history sends no HTTP request")
+        c.check(await !backend.hasResumableRun, "oversized history does not create unknown run")
+        let journal = AgentGatewayJournalStore(baseURL: gatewayRoot, binding: gatewayBinding, root: root)
+        c.check(!FileManager.default.fileExists(atPath: journal.file.path), "oversized command not persisted")
+    }
+
     gatewayCase(t, "UTF8 and metadata") { c, root in
         let mutation: JSONValue = [
             "project_id": "project", "conversation_id": "session", "run_id": .string(gatewayRunID),
             "mutation_id": "mutation", "changes": [], "added_edges": [], "removed_edges": []
         ]
-        let bytes = try gatewayInitial() + gatewayContent("中文🙂") +
-            gatewayFrame("thinking", "thought", ["messageID": .string(gatewayMessageID), "delta": "推理🧪"]) +
-            gatewayFrame("artifact_updated", "artifact", ["artifactID": "artifact", "revision": 1]) +
-            gatewayFrame("canvas_changed", "canvas", mutation) +
-            gatewayFrame("note", "note", ["message": "fixture-secret"]) +
-            gatewayFrame("future_type", "future", ["text": "fixture-secret"]) + gatewayDone()
+        let frames: [Data] = try [
+            gatewayInitial(), gatewayContent("中文🙂"),
+            gatewayFrame("thinking", "thought", ["messageID": .string(gatewayMessageID), "delta": "推理🧪"]),
+            gatewayFrame("artifact_updated", "artifact", ["artifactID": "artifact", "revision": 1]),
+            gatewayFrame("canvas_changed", "canvas", mutation),
+            gatewayFrame("note", "note", ["message": "fixture-secret"]),
+            gatewayFrame("future_type", "future", ["text": "fixture-secret"]), gatewayDone()
+        ]
+        let bytes = frames.reduce(into: Data()) { $0.append($1) }
         let script = GatewayScript([gatewayHTTP("POST", "/runs"), gatewayQuery()],
                                    [.init(chunks: bytes.map { Data([$0]) })])
         let backend = AgentGatewayBackend(baseURL: gatewayRoot, binding: gatewayBinding, journalRoot: root,
@@ -229,10 +522,13 @@ func runAgentRunGatewayTests(_ t: TestRunner) {
         let body = String(data: requests[0].httpBody ?? Data(), encoding: .utf8) ?? ""
         c.check(!body.contains("config-secret") && !body.contains("never-use"), "config endpoint and API key excluded")
         let store = AgentGatewayJournalStore(baseURL: gatewayRoot, binding: gatewayBinding, root: root)
-        let disk = try String(contentsOf: store.file, encoding: .utf8)
+        let files = try FileManager.default.contentsOfDirectory(at: root, includingPropertiesForKeys: nil)
+        let disk = try files.filter { !$0.path.hasSuffix(".lock") }.map {
+            String(decoding: try Data(contentsOf: $0), as: UTF8.self)
+        }.joined()
         c.check(!disk.contains("fixture-secret") && !disk.contains("config-secret"), "journal stores no transport secrets")
         c.check(try store.load().cursor == "done", "committed cursor is terminal event ID")
-        let mode = try FileManager.default.attributesOfItem(atPath: store.file.path)[.posixPermissions] as? NSNumber
+        let mode = try FileManager.default.attributesOfItem(atPath: store.storageFile.path)[.posixPermissions] as? NSNumber
         c.check(mode?.intValue == 0o600, "journal has private file mode")
         let reopened = gatewayBackend(root, script)
         let snapshot = await reopened.snapshot
@@ -447,6 +743,99 @@ func runAgentRunGatewayTests(_ t: TestRunner) {
         }
     }
 
+    gatewayCase(t, "frozen declaration scope and arguments") { c, root in
+        for mode in ["schema", "owner", "arguments", "after_notification"] {
+            let local = root.appendingPathComponent(mode)
+            let store = AgentGatewayJournalStore(baseURL: gatewayRoot, binding: gatewayBinding, root: local)
+            let seed = try store.load(); try store.save(seed)
+            let tools = GatewayMutableTools()
+            let script = GatewayScript([gatewayHTTP("POST", "/runs"), gatewayQuery(),
+                gatewayStatus("POST", gatewayRunPath + "/tool-results", 204)],
+                [.init(chunks: [try gatewayInitial() + gatewayTool(seed.clientInstanceID,
+                    arguments: mode == "arguments" ? #"{"text":12}"# : #"{"text":"test"}"#) + gatewayDone()])])
+            let messages = try await gatewayBackend(local, script).run(
+                history: [], config: .init(), tools: tools, onEvent: { event in
+                    if case .sessionStarted = event {
+                        if mode == "schema" { tools.changeSchema() }
+                        if mode == "owner" { tools.changeScope() }
+                    }
+                    if case .toolStarted = event, mode == "after_notification" { tools.changeSchema() }
+                })
+            c.check(tools.count == 0, "\(mode) cannot start side effects under an old declaration")
+            c.check(messages.first(where: { $0.role == .tool })?.isFailure == true,
+                    "\(mode) produces a durable typed rejection")
+            let saved = try store.load()
+            c.check(saved.toolSnapshots?[saved.toolSubmissionKey ?? ""]?.declarations.first?.wireValue["function"]?["description"] == "test",
+                    "\(mode) preserves the exact submitted declaration")
+            c.check(await script.remaining == 0, "\(mode) finishes the expected protocol")
+        }
+    }
+
+    gatewayCase(t, "same live owner versus restart") { c, root in
+        for replacement in [false, true] {
+            let local = root.appendingPathComponent(replacement ? "replacement" : "same")
+            let store = AgentGatewayJournalStore(baseURL: gatewayRoot, binding: gatewayBinding, root: local)
+            let seed = try store.load(); try store.save(seed)
+            let tools = GatewayMutableTools()
+            let script = GatewayScript([gatewayHTTP("POST", "/runs"), gatewayQuery()],
+                [.init(chunks: [try gatewayInitial()])])
+            let backend = gatewayBackend(local, script, clock: GatewayClock(cancelSleep: true))
+            do {
+                _ = try await backend.run(history: [], config: .init(), tools: tools, onEvent: { _ in })
+            } catch { c.check(error is CancellationError, "reader interruption leaves resumable submission") }
+            await script.enqueue([gatewayQuery(), gatewayStatus("POST", gatewayRunPath + "/tool-results", 204)],
+                [.init(chunks: [try gatewayTool(seed.clientInstanceID) + gatewayDone()])])
+            let controller = replacement ? gatewayBackend(local, script) : backend
+            let executor = replacement ? GatewayMutableTools() : tools
+            let messages = try await controller.resume(history: [], config: .init(), tools: executor, onEvent: { _ in })
+            c.check(executor.count == (replacement ? 0 : 1),
+                    replacement ? "new process instance cannot inherit old execution authority" : "same live instance resumes authorized tools")
+            c.check(messages.first(where: { $0.role == .tool })?.isFailure == replacement,
+                    "result accurately reflects ownership")
+        }
+    }
+
+    gatewayCase(t, "result expires while executing") { c, root in
+        let store = AgentGatewayJournalStore(baseURL: gatewayRoot, binding: gatewayBinding, root: root)
+        let seed = try store.load(); try store.save(seed)
+        let clock = GatewayClock()
+        let tools = GatewayMutableTools()
+        tools.afterExecution = { clock.advance(20) }
+        let script = GatewayScript([gatewayHTTP("POST", "/runs"), gatewayQuery()],
+            [.init(chunks: [try gatewayInitial() + gatewayTool(seed.clientInstanceID,
+                expiry: clock.now.timeIntervalSince1970 + 10)])])
+        let backend = gatewayBackend(root, script, clock: clock)
+        await c.error(.toolRequestExpired, {
+            _ = try await backend.run(history: [], config: .init(), tools: tools, onEvent: { _ in })
+        }, "expired completed result is not submitted")
+        let saved = try store.load()
+        c.check(tools.count == 1 && saved.tools["execution-one"]?.phase == "completed"
+            && saved.tools["execution-one"]?.content == "side effect completed", "completion stays durable without re-execution")
+        c.check(await script.requests.filter { $0.httpMethod == "POST" }.count == 1,
+                "no stale result POST is sent")
+    }
+
+    gatewayCase(t, "cancel reaches running handler") { c, root in
+        let store = AgentGatewayJournalStore(baseURL: gatewayRoot, binding: gatewayBinding, root: root)
+        let seed = try store.load(); try store.save(seed)
+        let tools = GatewayCancellableTools(output: root.appendingPathComponent("side-effect.txt"))
+        let script = GatewayScript([gatewayHTTP("POST", "/runs"), gatewayQuery()],
+            [.init(chunks: [try gatewayInitial() + gatewayTool(seed.clientInstanceID)])])
+        let backend = gatewayBackend(root, script)
+        let task = Task { try await backend.run(history: [], config: .init(), tools: tools, onEvent: { _ in }) }
+        await tools.gate.wait()
+        let started = Date()
+        task.cancel()
+        do { _ = try await task.value; c.check(false, "cancel must interrupt run") }
+        catch { c.check(error is CancellationError, "run reports cancellation") }
+        c.check(Date().timeIntervalSince(started) < 1 && !FileManager.default.fileExists(atPath: tools.output.path),
+                "cooperative handler stops before its file side effect")
+        c.check(try store.load().tools["execution-one"]?.phase == "completed",
+                "handler cancellation result is cached locally")
+        c.check(await script.requests.filter { $0.httpMethod == "POST" }.count == 1,
+                "cancelled run sends no tool result")
+    }
+
     gatewayCase(t, "tool crash window recovery") { c, root in
         for confirmed in [false, true] {
             let localRoot = root.appendingPathComponent(confirmed ? "confirmed" : "unknown")
@@ -464,7 +853,8 @@ func runAgentRunGatewayTests(_ t: TestRunner) {
                 name: call.name, argumentsJSON: call.argumentsJSON, targetClientInstanceID: seed.clientInstanceID,
                 expiresAt: 4_000_000_000), phase: "executing")
             try store.save(seed)
-            let base = GatewayTools()
+            let base = GatewayMutableTools()
+            if confirmed { base.disable() }
             let wrapper = AgentGatewayRecoverableTools(base: base, journal: hostJournal, scope: scope)
             let script = GatewayScript(confirmed ? [gatewayQuery(), gatewayStatus("POST", gatewayRunPath + "/tool-results", 204)] : [gatewayQuery()],
                 confirmed ? [.init(chunks: [try gatewayInitial() + gatewayDone()])] : [])
@@ -481,6 +871,42 @@ func runAgentRunGatewayTests(_ t: TestRunner) {
             }
             c.check(base.count == 0, "recovery never invokes base executor")
         }
+    }
+
+    gatewayCase(t, "recovery uses original submission scope") { c, root in
+        let store = AgentGatewayJournalStore(baseURL: gatewayRoot, binding: gatewayBinding, root: root)
+        var seed = try store.load()
+        let call = AgentToolCall(id: "call-one", name: "fixture_tool", argumentsJSON: #"{"text":"test"}"#)
+        let original = AgentExecutionScope(sessionID: "session", projectID: "project", turnID: "original")
+        let later = AgentExecutionScope(sessionID: "session", projectID: "project", turnID: "later")
+        let host = AgentExecutionJournal(root: root)
+        for (scope, content) in [(original, "original result"), (later, "different result")] {
+            guard case .execute(let reservation) = try host.reserve(scope: scope, call: call) else {
+                throw GatewayFixtureError.unexpectedRequest
+            }
+            try host.complete(reservation, result: .init(content: content, summary: "saved"))
+        }
+        seed.runID = gatewayRunID; seed.phase = "unknown"
+        seed.toolSnapshots = ["original": .init(instanceID: UUID(), scope: original, declarations: [])]
+        seed.tools["execution-one"] = .init(request: .init(executionID: "execution-one", callID: call.id,
+            name: call.name, argumentsJSON: call.argumentsJSON, targetClientInstanceID: seed.clientInstanceID,
+            expiresAt: 4_000_000_000), phase: "executing", submissionKey: "original")
+        try store.save(seed)
+        let base = GatewayMutableTools(); base.disable()
+        let recovery = AgentGatewayRecoverableTools(base: base, journal: host, scope: later)
+        let script = GatewayScript([gatewayQuery(), gatewayStatus("POST", gatewayRunPath + "/tool-results", 204)],
+            [.init(chunks: [try gatewayInitial() + gatewayDone()])])
+        let messages = try await gatewayBackend(root, script).resume(
+            history: [], config: .init(), tools: recovery, onEvent: { _ in })
+        c.check(messages.first(where: { $0.role == .tool })?.content == "original result",
+                "recreated host never substitutes a later turn's matching call ID")
+        c.check(base.count == 0 && recovery.specs().isEmpty,
+                "removed executor still reconciles durable result without executing")
+        do {
+            _ = try await recovery.recoveredResult(call: call,
+                scope: .init(sessionID: "wrong", projectID: "project", turnID: "original"))
+            c.check(false, "cross-session receipt must reject")
+        } catch { c.check(error as? AgentGatewayError == .originMismatch, "cross-session receipt is rejected") }
     }
 
     gatewayCase(t, "cancel confirmation and steer readiness") { c, root in
@@ -571,11 +997,28 @@ func runAgentRunGatewayTests(_ t: TestRunner) {
             let clock = GatewayClock()
             let script = GatewayScript([gatewayHTTP("POST", "/runs"), gatewayQuery()], [.init(chunks: [bytes])])
             let backend = gatewayBackend(root.appendingPathComponent(name), script, clock: clock)
+            let events = GatewayEvents()
             await c.error(expected, {
-                _ = try await backend.run(history: [], config: .init(), tools: nil, onEvent: { _ in })
+                _ = try await backend.run(history: [], config: .init(), tools: nil, onEvent: { await events.receive($0) })
             }, "\(name) rejected")
             let resumable = await backend.hasResumableRun
             c.check(clock.sleeps.isEmpty && resumable, "\(name) stops without losing run")
+            let activities = await events.streamActivities
+            c.check(activities == (name == "mutated-id" ? 2 : ["delta", "canvas-origin"].contains(name) ? 1 : 0),
+                    "\(name) only committed valid prefix frames count as stream activity")
+            let diagnostics = await backend.diagnosticSnapshot
+            c.check(diagnostics.records.contains {
+                $0.failure == (expected == .originMismatch ? .scopeMismatch : .malformed)
+            }, "\(name) has a typed diagnostic cause")
+            if ["binding", "run", "canvas-origin"].contains(name) {
+                let canvasEvents = await events.canvas, artifactEvents = await events.artifacts
+                let content = await events.content
+                c.check(canvasEvents == 0 && artifactEvents == 0 && content.isEmpty,
+                        "\(name) emits no foreign content or canvas write")
+                let state = await backend.snapshot
+                c.check(state.canvasMutations.isEmpty && state.artifactUpdates.isEmpty,
+                        "\(name) stores no foreign graph or artifact")
+            }
         }
     }
 
@@ -603,13 +1046,13 @@ func runAgentRunGatewayTests(_ t: TestRunner) {
             _ = try await backend.run(history: [], config: .init(), tools: nil, onEvent: { _ in })
         }, "independent controller lock blocks stale creation")
         store.release(lock)
-        try Data("corrupt".utf8).write(to: store.file)
+        try Data("corrupt".utf8).write(to: store.storageFile)
         let restarted = gatewayBackend(root, script)
         c.check(await restarted.hasResumableRun, "corrupt journal conservatively blocks replacement")
         await c.error(.journalUnavailable, {
             _ = try await restarted.run(history: [], config: .init(), tools: nil, onEvent: { _ in })
         }, "corrupt journal is never reset silently")
-        c.check(try String(contentsOf: store.file, encoding: .utf8) == "corrupt", "corrupt evidence preserved")
+        c.check(try String(contentsOf: store.storageFile, encoding: .utf8) == "corrupt", "corrupt evidence preserved")
         let other = AgentGatewayJournalStore(baseURL: URL(string: "https://other.fixture.invalid/v1")!,
             binding: gatewayBinding, root: root)
         c.check(other.file != store.file, "service origin participates in journal identity")
@@ -725,7 +1168,7 @@ func runAgentRunGatewayTests(_ t: TestRunner) {
         seed.messages = [.init(id: UUID(uuidString: gatewayMessageID)!, role: .assistant, content: "existing partial")]
         seed.currentAssistantID = seed.messages[0].id
         try store.save(seed)
-        let before = try Data(contentsOf: store.file)
+        let before = try Data(contentsOf: store.storageFile)
         let script = GatewayScript([])
         let conversation = gatewayBackend(conversationRoot, script)
         let fresh = await conversation.isolatedBackend(journalRoot: root.appendingPathComponent("polish"))
@@ -751,6 +1194,6 @@ func runAgentRunGatewayTests(_ t: TestRunner) {
         let body = try JSONDecoder().decode(JSONValue.self, from: request.httpBody ?? Data())
         c.check(body["tools"] == .array([]) && body["config"]?["taskPolicy"] == "textPolish",
                 "isolated polish advertises no tools and explicit read-only task policy")
-        c.check(try Data(contentsOf: store.file) == before, "isolated backend creation never edits original journal")
+        c.check(try Data(contentsOf: store.storageFile) == before, "isolated backend creation never edits original journal")
     }
 }

@@ -6,10 +6,11 @@ private final class JournalFileTools: AgentToolExecuting, @unchecked Sendable {
     private let lock = NSLock()
     private var executions = 0
     var enabled = true
+    var alteredSchema = false
     var count: Int { lock.lock(); defer { lock.unlock() }; return executions }
     init(file: URL) { self.file = file }
     func specs() -> [AgentToolSpec] {
-        enabled ? [.init(name: "write_fixture", description: "fixture",
+        enabled ? [.init(name: "write_fixture", description: alteredSchema ? "changed" : "fixture",
             parameters: ["type": "object", "properties": ["text": ["type": "string"]],
                          "required": ["text"], "additionalProperties": false], originLabel: "test")] : []
     }
@@ -60,6 +61,12 @@ func runAgentExecutionJournalTests(_ t: TestRunner) {
                 let unknown = await restarted.execute(call: pending)
                 checks.append((unknown.isFailure && unknown.content.contains("EXECUTION_UNKNOWN") && base.count == 2,
                     "JOURNAL interrupted side effect is unknown and never blindly repeated"))
+                base.alteredSchema = true
+                let changedSchema = await wrapper.execute(call: .init(id: "new-call", name: call.name,
+                    argumentsJSON: call.argumentsJSON))
+                checks.append((changedSchema.isFailure && changedSchema.content.contains("TOOL_DECLARATION_CHANGED") && base.count == 2,
+                    "JOURNAL live schema changes cannot inherit original tool declaration"))
+                base.alteredSchema = false
                 base.enabled = false
                 let revoked = await restarted.execute(call: call)
                 checks.append((revoked.isFailure && base.count == 2,

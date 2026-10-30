@@ -132,8 +132,9 @@ func runAgentGatewayContinuationProbe(store: SlotStoreObservable, directory: URL
             let identity = await tools.execute(call: .init(id: "identity", name: "clipslots_context", argumentsJSON: "{}"))
             let identityJSON = try JSONValue.decode(jsonText: identity.content)
             check(identityJSON["live_run_id"]?.stringValue == lease.runID
-                && identityJSON["writes_require_native_confirmation"]?.boolValue == true,
-                "live MCP exposes the actual scoped run and native confirmation contract")
+                && identityJSON["writes_require_native_confirmation"]?.boolValue
+                    == !(restored.automaticApproval && lease.accessMode != .allDirectoriesReadOnly),
+                "live MCP exposes the actual scoped run and current native approval policy")
             let current = canvas.node(id: node.id)!
             var changed = current; changed.height += 31
             let liveMutation = AgentCanvasMutation(projectID: handoff.scope.projectID,
@@ -204,14 +205,15 @@ func runAgentGatewayContinuationProbe(store: SlotStoreObservable, directory: URL
         if let record = restored.artifacts.first {
             let conversation = restored.selectedConversationID
             let savedState: JSONValue = ["counter": 7, "text": "状态🙂"]
-            let saved = try await restored.artifactRequest(key: record.key, revision: record.revision,
-                conversation: conversation, operation: "set_state", name: "", arguments: savedState)
-            let loaded = try await restored.artifactRequest(key: record.key, revision: record.revision,
-                conversation: conversation, operation: "get_state", name: "", arguments: [:])
+            let identity = restored.artifactPageIdentity(key: record.key, revision: record.revision)
+            let saved = try await restored.artifactRequest(identity: identity,
+                operation: "set_state", name: "", arguments: savedState)
+            let loaded = try await restored.artifactRequest(identity: identity,
+                operation: "get_state", name: "", arguments: [:])
             check(saved["status"]?.stringValue == "saved" && loaded == savedState,
                   "native artifact request saves and reloads real widget state")
-            let read = try await restored.artifactRequest(key: record.key, revision: record.revision,
-                conversation: conversation, operation: "tools_call", name: "canvas_overview", arguments: [:])
+            let read = try await restored.artifactRequest(identity: identity,
+                operation: "tools_call", name: "canvas_overview", arguments: [:])
             check(read["status"]?.stringValue == "completed" && read["result"]?.objectValue != nil,
                   "native widget tool request returns actual canvas tool result")
             let currentNode = canvas.node(id: node.id)!
@@ -220,8 +222,8 @@ func runAgentGatewayContinuationProbe(store: SlotStoreObservable, directory: URL
                 conversationID: conversation.uuidString, runID: "page-untrusted", mutationID: "widget-mutation",
                 changes: [.init(before: currentNode, after: widgetNode)])
             let widgetPayload = try JSONDecoder().decode(JSONValue.self, from: JSONEncoder().encode(widgetMutation))
-            let proposal = try await restored.artifactRequest(key: record.key, revision: record.revision,
-                conversation: conversation, operation: "tools_call", name: "preview_canvas_mutation",
+            let proposal = try await restored.artifactRequest(identity: identity,
+                operation: "tools_call", name: "preview_canvas_mutation",
                 arguments: ["mutation": widgetPayload])
             check(proposal["status"]?.stringValue == "pending" && canvas.node(id: node.id)?.width == currentNode.width,
                   "widget mutation returns pending without writing before native confirmation")
@@ -231,25 +233,28 @@ func runAgentGatewayContinuationProbe(store: SlotStoreObservable, directory: URL
             }
             check(canvas.node(id: node.id)?.width == widgetNode.width && canvas.undo() != nil,
                   "widget proposal uses durable native confirmation and undo")
-            _ = try await restored.artifactRequest(key: record.key, revision: record.revision,
-                conversation: conversation, operation: "model_context", name: "", arguments: ["note": "模型补充🙂"])
+            _ = try await restored.artifactRequest(identity: identity,
+                operation: "model_context", name: "", arguments: ["note": "模型补充🙂"])
             check(restored.snapshot.widgetContext?["note"]?.stringValue == "模型补充🙂",
                   "widget model-context supplement is saved in actual conversation snapshot")
             do {
-                _ = try await restored.artifactRequest(key: record.key, revision: record.revision,
-                    conversation: UUID(), operation: "get_state", name: "", arguments: [:])
+                _ = try await restored.artifactRequest(identity: .init(key: record.key, conversationID: UUID(),
+                    revision: record.revision, runtimeEpoch: identity.runtimeEpoch, canvasEpoch: identity.canvasEpoch),
+                    operation: "get_state", name: "", arguments: [:])
                 check(false, "widget request rejects stale conversation")
             } catch { check(true, "widget request rejects stale conversation") }
             restored.selectedArtifact = record
+            let panelIdentity = restored.artifactPageIdentity(key: record.key, revision: record.revision)
             var previewReady = false
             var previewError: String?
             let host = NSHostingView(rootView: AgentArtifactPanel(record: record,
-                onAction: restored.handleArtifactAction, onClose: {}, onPreviewState: { state in
+                pageIdentity: panelIdentity, onAction: { restored.handleArtifactAction($0, identity: panelIdentity) },
+                onClose: {}, onPreviewState: { state in
                     if state == .ready { previewReady = true }
                     if case .error(let message) = state { previewError = message }
                 }, onRequest: { operation, name, arguments in
-                    try await restored.artifactRequest(key: record.key, revision: record.revision,
-                        conversation: conversation, operation: operation, name: name, arguments: arguments)
+                    try await restored.artifactRequest(identity: panelIdentity,
+                        operation: operation, name: name, arguments: arguments)
                 }))
             let window = NSWindow(contentRect: NSRect(x: 80, y: 80, width: 640, height: 560),
                 styleMask: [.titled], backing: .buffered, defer: false)

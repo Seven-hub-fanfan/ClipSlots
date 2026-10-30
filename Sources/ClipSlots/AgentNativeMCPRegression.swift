@@ -1,6 +1,12 @@
 #if DEBUG
 import AppKit
+import SwiftUI
 import ClipSlotsKit
+
+@MainActor
+private final class NativeMCPApprovalDecision {
+    var accept = true
+}
 
 @MainActor
 func runAgentNativeMCPProbe(store: SlotStoreObservable, directory: URL,
@@ -8,33 +14,42 @@ func runAgentNativeMCPProbe(store: SlotStoreObservable, directory: URL,
     let executable = Bundle.main.bundleURL.appendingPathComponent("Contents/MacOS/clipslots-mcp")
     let cli = Bundle.main.bundleURL.appendingPathComponent("Contents/MacOS/clipslots-cli")
     let disabledCLI = cli.appendingPathExtension("disabled")
-    var host: AgentLiveMCPHost?
+    var exportedModel: AgentChatModel?
     do {
         try FileManager.default.moveItem(at: cli, to: disabledCLI)
-        defer { try? FileManager.default.moveItem(at: disabledCLI, to: cli); host?.cancel() }
+        defer { try? FileManager.default.moveItem(at: disabledCLI, to: cli); exportedModel?.stop() }
         check(!FileManager.default.isExecutableFile(atPath: cli.path), "MCP probe removes the bundled business CLI")
         let root = directory.appendingPathComponent("native-mcp-canvas")
         let canvas = CanvasStore(storage: CanvasStorage(rootOverride: root),
                                  projectStorage: CanvasProjectStorage(rootOverride: root))
-        let context = CanvasAgentContext(canvas: canvas, store: store, projectID: canvas.activeProjectId)
-        let conversation = UUID()
-        let turn = try context.captureTurn(supportsTools: true)
-        let scope = try AgentArtifactScope(projectID: canvas.activeProjectId, canvasID: canvas.activeProjectId)
+        let sessions = AgentSessionStore(dataRoot: directory.appendingPathComponent("native-mcp-sessions"))
+        let model = sessions.sidebarSession(canvas: canvas, store: store)
+        exportedModel = model
+        model.selectAccessMode(.fullAccess)
+        model.selectAutomaticApproval(false)
+        let view = CanvasWorkspaceView(store: store, canvas: canvas, agentVisible: .constant(false))
+        let handoff = try view.externalAgentHandoffContext(sessions: sessions)
+        guard let lease = handoff.liveLease else { throw AgentOperationError("Canvas button exported no live MCP lease") }
+        let configuration = try handoff.mcpConfiguration()["mcpServers"]?["clipslots-project"] ?? [:]
+        let env = configuration["env"]?[AgentLiveMCPLease.environmentKey]?.stringValue ?? ""
+        let connection = configuration["args"]?.arrayValue?.compactMap(\.stringValue) ?? []
+        let conversation = model.selectedConversationID
+        check(configuration["command"] == .string(executable.path) && !env.isEmpty
+            && connection.contains("--session-id") && handoff.sessionID == conversation
+            && lease.accessMode == .fullAccess,
+              "canvas button exports the dedicated MCP with the shared session and writable native lease")
         var approvals: [String] = []
-        var accept = true
-        host = try AgentLiveMCPHost(context: context, scope: scope, conversationID: conversation,
-            snapshotID: turn.snapshotID, root: root.appendingPathComponent("mailbox"), accessMode: .fullAccess,
-            onInteraction: { request in
-                await MainActor.run {
+        let decision = NativeMCPApprovalDecision()
+        let approvalTask = Task { @MainActor in
+            while !Task.isCancelled {
+                for request in model.pendingInteractions where request.isPending {
                     approvals.append(request.params["command"]?.stringValue ?? "")
+                    _ = try? await request.respond(["decision": decision.accept ? "accept" : "decline"])
                 }
-                let decision = await MainActor.run { accept }
-                _ = try? await request.respond(["decision": decision ? "accept" : "decline"])
-            })
-        let lease = host!.lease
-        let env = String(decoding: try JSONEncoder().encode(lease), as: UTF8.self)
-        let connection = ["--mcp", "--project-id", scope.projectID, "--canvas-id", scope.canvasID,
-                          "--snapshot-id", turn.snapshotID.uuidString, "--session-id", conversation.uuidString]
+                try? await Task.sleep(for: .milliseconds(40))
+            }
+        }
+        defer { approvalTask.cancel() }
         var rpcEvidence: [JSONValue] = []
         func rpc(_ method: String, _ params: JSONValue = [:], live: Bool = true, readOnly: Bool = false) async throws -> JSONValue {
             let request: JSONValue = ["jsonrpc": "2.0", "id": .string("native-\(rpcEvidence.count)"), "method": .string(method),
@@ -68,6 +83,8 @@ func runAgentNativeMCPProbe(store: SlotStoreObservable, directory: URL,
         let identity = try await call("clipslots_context")
         check(identity["cli_required"] == false && identity["project_id"] == .string(canvas.activeProjectId),
               "MCP connects to the active scoped native host without CLI")
+        check(identity["automatic_approval"] == false && identity["writes_require_native_confirmation"] == true,
+              "manual MCP session reports its current native approval policy")
 
         let pages = try await call("list_pages", live: false)
         check(pages["ok"] == true && pages["backend"] == "native_data_layer", "standalone slots MCP reads real persisted pages with empty PATH")
@@ -162,14 +179,77 @@ func runAgentNativeMCPProbe(store: SlotStoreObservable, directory: URL,
             let redo = try await call("canvas_redo", ["history_id": .string(history)])
             check(undo["ok"] == true && redo["ok"] == true, "MCP native undo and redo preserve the history transaction")
         } else { check(false, "MCP layout produced a history receipt") }
-        accept = false
+        decision.accept = false
         let beforeDecline = try await call("canvas_get_node", ["node_id": .string(id)])
         let declined = try await call("canvas_edit_node", ["node_id": .string(id), "text": "不应写入",
             "expected_revision": beforeDecline["node_revision"] ?? .null])
         check(declined["error_code"] == "DECLINED" && approvals.contains("canvas_edit_node"),
               "declined native MCP approval leaves the canvas unchanged")
-        accept = true
-        let fresh = try await call("canvas_overview", ["snapshot_id": .string(turn.snapshotID.uuidString)])
+        let approvalCount = approvals.count
+        model.selectAutomaticApproval(true)
+        let automaticIdentity = try await call("clipslots_context")
+        check(automaticIdentity["automatic_approval"] == true
+            && automaticIdentity["writes_require_native_confirmation"] == false
+            && automaticIdentity["deletions_require_native_confirmation"] == true
+            && automaticIdentity["preview_mutations_require_native_confirmation"] == true,
+              "existing MCP connection follows automatic mode while retaining delete and preview confirmations")
+        let automaticCreated = try await call("canvas_create_node", ["kind": "text",
+            "text": "自动创建🙂", "x": 1000, "y": 200])
+        check(automaticCreated["ok"] == true && approvals.count == approvalCount,
+              "automatic MCP creates native nodes without requesting approval")
+        let beforeAutomaticEdit = try await call("canvas_get_node", ["node_id": .string(id)])
+        let automaticEdited = try await call("canvas_edit_node", ["node_id": .string(id),
+            "expected_revision": beforeAutomaticEdit["node_revision"] ?? .null, "text": "自动更新🙂"])
+        check(automaticEdited["ok"] == true && approvals.count == approvalCount,
+              "automatic MCP saves canvas text without requesting approval")
+        let beforeAutomaticConfigure = try await call("canvas_get_node", ["node_id": .string(secondID)])
+        let automaticConfigured = try await call("canvas_configure_node", ["node_id": .string(secondID),
+            "expected_revision": beforeAutomaticConfigure["node_revision"] ?? .null,
+            "ratio": "4:3", "count": 1])
+        check(automaticConfigured["ok"] == true && approvals.count == approvalCount,
+              "automatic MCP configures generation parameters without requesting approval")
+        var generationTargets: Set<String> = []
+        let priorGenerationHandler = canvas.agentGenerationHandler
+        canvas.agentGenerationHandler = { ids in generationTargets = ids; return nil }
+        let beforeAutomaticGenerate = try await call("canvas_current")
+        let automaticGeneration = try await call("canvas_generate", ["node_ids": [.string(secondID)],
+            "expected_graph_revision": beforeAutomaticGenerate["graph_revision"] ?? .null])
+        canvas.agentGenerationHandler = priorGenerationHandler
+        check(generationTargets == [secondID] && approvals.count == approvalCount
+            && automaticGeneration["error_code"] == "CANVAS_ACTION_FAILED",
+              "automatic MCP reaches the native generation handler without approval and reports a refused submission truthfully")
+        let automaticGroup = try await call("create_group", ["page": "default_page", "name": "MCP自动槽位"])
+        let automaticGroupID = automaticGroup["id"]?.stringValue ?? ""
+        let automaticSlot = try await call("write_slot", ["group": .string(automaticGroupID),
+            "slot": 1, "text": "自动槽位正文🙂"])
+        let automaticRead = try await call("read_slot", ["group": .string(automaticGroupID), "slot": 1])
+        check(automaticGroup["ok"] == true && automaticSlot["ok"] == true
+            && automaticRead["text"] == "自动槽位正文🙂" && approvals.count == approvalCount,
+              "automatic MCP group and slot writes execute without approval and persist exact bytes")
+        let beforeDelete = try await call("canvas_current")
+        let protectedDelete = try await call("canvas_delete_nodes", ["node_ids": [.string(secondID)],
+            "expected_graph_revision": beforeDelete["graph_revision"] ?? .null])
+        check(protectedDelete["error_code"] == "DECLINED" && canvas.node(id: secondID) != nil
+            && approvals.last == "canvas_delete_nodes" && approvals.count == approvalCount + 1,
+              "automatic MCP still requires native confirmation before deleting canvas nodes")
+        let protectedClear = try await call("clear_slot", ["group": .string(automaticGroupID), "slot": 1])
+        check(protectedClear["error_code"] == "DECLINED"
+            && SpecialSlotStorage.shared.get(1, in: automaticGroupID).plainText == "自动槽位正文🙂"
+            && approvals.last == "clear_slot" && approvals.count == approvalCount + 2,
+              "automatic MCP still requires native confirmation before clearing slot bytes")
+        model.selectAutomaticApproval(false)
+        let manualIdentity = try await call("clipslots_context")
+        let beforeManualEdit = try await call("canvas_get_node", ["node_id": .string(id)])
+        let manualEdit = try await call("canvas_edit_node", ["node_id": .string(id),
+            "expected_revision": beforeManualEdit["node_revision"] ?? .null, "text": "不应写入"])
+        let afterManualEdit = try await call("canvas_get_node", ["node_id": .string(id)])
+        check(manualIdentity["automatic_approval"] == false
+            && manualIdentity["writes_require_native_confirmation"] == true
+            && manualEdit["error_code"] == "DECLINED" && afterManualEdit["body_text"] == "自动更新🙂",
+              "switching the same MCP connection back to manual restores approval and preserves declined bytes")
+        model.selectAutomaticApproval(true)
+        decision.accept = true
+        let fresh = try await call("canvas_overview", ["snapshot_id": .string(lease.snapshotID.uuidString)])
         check(fresh["node_count"] == .number(Double(canvas.nodes.count)),
               "legacy overview tools refresh live state instead of retaining the startup snapshot")
         let stableA = try await call("clipslots_context")
@@ -191,8 +271,45 @@ func runAgentNativeMCPProbe(store: SlotStoreObservable, directory: URL,
               "read-only stdio connection cannot escalate a writable live lease")
         try JSONEncoder().encode(rpcEvidence).write(to: directory.appendingPathComponent("native-mcp-wire.json"))
         let marker = lease.directory.appendingPathComponent("lease.json")
-        host?.cancel()
+        model.stop()
         check(!FileManager.default.fileExists(atPath: marker.path), "closing a live MCP host revokes its lease")
-    } catch { check(false, "native MCP probe: \(error.localizedDescription)"); host?.cancel() }
+        model.selectAccessMode(.allDirectoriesReadOnly)
+        let readOnlyHandoff = try view.externalAgentHandoffContext(sessions: sessions)
+        guard let readOnlyLease = readOnlyHandoff.liveLease else {
+            throw AgentOperationError("Read-only export lost its live connection")
+        }
+        let reader = try AgentExternalReadOnlyMCPTools(configuration: .init(scope: readOnlyHandoff.scope,
+            snapshotID: readOnlyLease.snapshotID, sessionID: readOnlyHandoff.sessionID))
+        let readOnlyTools = try AgentExternalLiveMCPTools(reader: reader, lease: readOnlyLease)
+        let restrictedNames = Set(readOnlyTools.specs().map(\.name))
+        check(readOnlyLease.accessMode == .allDirectoriesReadOnly
+            && !restrictedNames.contains("canvas_edit_node") && !restrictedNames.contains("write_slot"),
+              "canvas button preserves an explicitly read-only session without granting writes")
+        let readOnlyIdentity = try JSONValue.decode(jsonText: await readOnlyTools.execute(
+            call: .init(id: "read-only-policy", name: "clipslots_context", argumentsJSON: "{}")).content)
+        check(readOnlyIdentity["read_only"] == true && readOnlyIdentity["automatic_approval"] == false,
+              "automatic preference never grants writes or automatic execution to a read-only MCP lease")
+        model.selectAccessMode(.fullAccess)
+        check(!FileManager.default.fileExists(atPath: readOnlyLease.directory.appendingPathComponent("lease.json").path),
+              "changing directory access revokes the old MCP lease before granting a new scope")
+    } catch { check(false, "native MCP probe: \(error.localizedDescription)"); exportedModel?.stop() }
+}
+
+@MainActor
+func runAgentNativeMCPRegression(store: SlotStoreObservable, directory: URL) async {
+    var passed: [String] = [], failures: [String] = []
+    func check(_ value: Bool, _ name: String) {
+        if value { passed.append(name) } else { failures.append(name) }
+        NSLog("[NativeMCP] %@ %@", value ? "PASS" : "FAIL", name)
+    }
+    do {
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        await runAgentNativeMCPProbe(store: store, directory: directory, check: check)
+        let report: JSONValue = ["passed": .array(passed.map(JSONValue.string)),
+            "failures": .array(failures.map(JSONValue.string)), "ok": .bool(failures.isEmpty)]
+        try report.encodedText(pretty: true).write(to: directory.appendingPathComponent("native-mcp-report.json"),
+                                                   atomically: true, encoding: .utf8)
+    } catch { NSLog("[NativeMCP] FAIL %@", error.localizedDescription) }
+    NSApp.terminate(nil)
 }
 #endif

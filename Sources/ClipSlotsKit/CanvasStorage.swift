@@ -87,6 +87,45 @@ public final class CanvasStorage {
 
     // MARK: - 读
 
+    /// Strict readback never converts a missing/corrupt source into an empty
+    /// graph, migrates files, or consults the rendering/storage cache.
+    public func readbackSnapshot(projectId: String) throws -> AgentCanvasReadbackSnapshot {
+        guard !projectId.isEmpty, projectId.utf8.count <= 512, ![".", ".."].contains(projectId),
+              !projectId.contains("/"), !projectId.contains("\\"),
+              !projectId.unicodeScalars.contains(where: CharacterSet.controlCharacters.contains) else {
+            throw AgentGatewayError.originMismatch
+        }
+        struct StrictGraph: Decodable {
+            let nodes: [CanvasNode]
+            let edges: [CanvasEdge]
+            enum CodingKeys: String, CodingKey { case schemaVersion, nodes, edges }
+            init(from decoder: Decoder) throws {
+                let c = try decoder.container(keyedBy: CodingKeys.self)
+                guard try c.decode(Int.self, forKey: .schemaVersion) == CanvasDocument.currentSchemaVersion else {
+                    throw AgentGatewayError.malformedPayload
+                }
+                nodes = try c.decode([CanvasNode].self, forKey: .nodes)
+                // The native v2 encoder deliberately omits empty edges.
+                // Missing nodes/file and malformed arrays still fail strictly.
+                edges = try c.decodeIfPresent([CanvasEdge].self, forKey: .edges) ?? []
+            }
+        }
+        return try StorageLock.shared.withLock {
+            let url = fileURL(projectId: projectId)
+            let attributes = try FileManager.default.attributesOfItem(atPath: url.path)
+            guard attributes[.type] as? FileAttributeType == .typeRegular,
+                  ((attributes[.size] as? NSNumber)?.intValue ?? Int.max) <= 64 * 1024 * 1024 else {
+                throw AgentGatewayError.malformedPayload
+            }
+            let graph = try JSONDecoder().decode(StrictGraph.self, from: Data(contentsOf: url))
+            guard Set(graph.nodes.map(\.id)).count == graph.nodes.count,
+                  Set(graph.edges.map(\.id)).count == graph.edges.count else {
+                throw AgentGatewayError.malformedPayload
+            }
+            return .init(projectID: projectId, nodes: graph.nodes, edges: graph.edges)
+        }
+    }
+
     /// 读取画布文档。缓存命中直接返回；未命中读盘（**不持 cacheLock 做 IO**，避免同步磁盘
     /// 读阻塞其他线程 —— 这是 P2-2 在连线存储上踩过的坑）。
     public func load(projectId: String) -> CanvasDocument {
@@ -108,7 +147,7 @@ public final class CanvasStorage {
             cacheLock.lock()
             loadFailed[projectId] = true
             cacheLock.unlock()
-            NSLog("[ClipSlots][canvas] 工作流事务恢复失败，保留原数据：\(error)")
+            NSLog("[ClipSlots][canvas] 工作流事务恢复失败，保留原数据：\(ApplicationDiagnostics.error(error))")
             return .empty
         }
         if FileManager.default.fileExists(atPath: url.path) {

@@ -125,6 +125,60 @@ private struct Environment {
 }
 
 private func suite(_ env: Environment, _ checks: LiveChecks) async {
+    await checks.test("real URLSession task snapshot child timeline parent succession and SQLite restoration") {
+        let endpoint = env.fault.appendingPathComponent("task-subagents")
+        let backend = env.backend("swift-task-subagents", endpoint: endpoint)
+        _ = try await backend.run(history: [], config: env.config, tools: nil) { _ in }
+        let state = await backend.snapshot
+        let children = state.taskSubagents.entries.compactMap { entry -> AgentSubagentState? in
+            if case .subagent(let child) = entry.content { return child }; return nil
+        }
+        try checks.check(state.taskSubagents.entries.count == 3, "HTTP plan plus predecessor and successor")
+        try checks.check(children.map(\.status) == [.stopped, .endedUnknown], "HTTP terminal and parent outcome remain distinct")
+        try checks.check(children.first?.text == "正文🙂" && children.last?.text == "", "HTTP duplicate old and terminal text ignored")
+        try checks.check(children.first?.timeline == [.text("正文🙂"), .tool("tool")], "HTTP child timeline order exact")
+        try checks.check(children.first?.tools[0]["request"] == ["path": "synthetic"]
+                         && children.first?.tools[0]["response"] == "已读取", "HTTP result keeps original tool request")
+        try checks.check(children.last?.parentToolCallID == "two", "HTTP retired start cannot replace successor")
+        try checks.check(state.taskSubagents.entries.allSatisfy { $0.anchor?.messageID == state.messages.last?.id },
+                         "HTTP task anchors use actual assistant identity")
+        let parts = AgentContextCompactionLifecycle.project(content: state.messages.last?.content ?? "", reasoning: "",
+            cards: [], identity: "http", taskSubagents: state.taskSubagents.entries)
+        let bodies = parts.compactMap { part -> String? in
+            if case .assistant(let text, _) = part.kind { return text }; return nil
+        }
+        try checks.check(bodies == ["中e", "\u{301}后"] && Data(bodies.joined().utf8) == Data("中e\u{301}后".utf8),
+                         "HTTP task display never modifies body bytes")
+        let restored = await env.backend("swift-task-subagents", endpoint: endpoint).snapshot
+        try checks.check(restored.taskSubagents == state.taskSubagents, "HTTP task projection survives SQLite reopen")
+        try checks.check(restored.canvasReadbacks.count == 2 && restored.subagentCanvasScopes["child"] != nil,
+                         "HTTP child canvas readback stays independent and preserves successor scope")
+    }
+    await checks.test("real URLSession context observation compact and SQLite restoration") {
+        let endpoint = env.fault.appendingPathComponent("context-usage")
+        let backend = env.backend("swift-context", endpoint: endpoint)
+        _ = try await backend.run(history: [], config: env.config, tools: nil) { _ in }
+        let state = await backend.snapshot
+        try checks.check(state.contextUsage.snapshot?.revision == 3, "HTTP rejects old invalid and wrong conversation observations")
+        try checks.check(state.contextUsage.displaySnapshot?.percentage == 200, "HTTP keeps percentage above 100")
+        try checks.check(!state.contextUsage.stale && state.contextUsage.compaction == .idle, "new ready clears compact finish")
+        try checks.check(state.compactions.entries.count == 1 && state.compactions.entries[0].phase == .finished,
+                         "HTTP duplicate compact updates one lifecycle")
+        try checks.check(state.compactions.entries[0].anchor?.messageID == state.messages.last?.id
+                         && state.compactions.entries[0].anchor?.contentBytes == "中e".utf8.count
+                         && state.compactions.entries[0].anchor?.reasoningBytes == "思考🙂".utf8.count,
+                         "HTTP same-cursor compact captures assistant and UTF8 boundaries")
+        let parts = AgentContextCompactionLifecycle.project(content: state.messages.last?.content ?? "",
+            reasoning: state.messages.last?.reasoning ?? "", cards: state.compactions.entries, identity: "http")
+        let bodies = parts.compactMap { part -> String? in
+            if case .assistant(let text, _) = part.kind { return text }; return nil
+        }
+        try checks.check(bodies == ["中e", "\u{301}后"] && Data(bodies.joined().utf8) == Data("中e\u{301}后".utf8),
+                         "HTTP compact display restores before and after body without rewriting bytes")
+        let restored = await env.backend("swift-context", endpoint: endpoint).snapshot
+        try checks.check(restored.contextUsage == state.contextUsage && restored.compactions == state.compactions,
+                         "HTTP projection restored from actual SQLite")
+    }
     await checks.test("real URLSession content, reasoning, metadata and durable snapshot") {
         let backend = env.backend("swift-metadata")
         let events = LiveEvents()

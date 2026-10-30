@@ -131,8 +131,16 @@ struct BatchGenerationView: View {
             Divider().overlay(TapSkin.chromeDivider)
             if let id = displayedBatch, let batch = controller.batch(id) {
                 BatchGenerationProgressView(batch: batch, isRunning: controller.runningID == id, compact: compact,
+                    recoveryAvailable: controller.runningID == nil && !controller.isLoading,
+                    retryAvailable: { controller.canRetry(id, itemID: $0) },
                     onStop: { controller.stop(id) },
-                    onRecover: { controller.recover(id, store: store) })
+                    onRecover: { controller.recover(id, store: store) },
+                    onRecoverItem: { controller.recover(id, itemID: $0, store: store) },
+                    onRetry: { itemID in
+                        let node = batch.items.first { $0.id == itemID }?.node
+                        let info = (catalog.imageModels + catalog.videoModels).first { $0.id == node?.model }
+                        controller.retry(id, itemID: itemID, store: store, model: info)
+                    })
             } else {
                 selectionBody
             }
@@ -203,7 +211,7 @@ struct BatchGenerationView: View {
                                     Text(batch.outputNaming?.label ??
                                          batch.createdAt.formatted(date: .numeric, time: .shortened))
                                         .font(.system(size: 12, weight: .semibold))
-                                    Text("\(batch.createdAt.formatted(date: .omitted, time: .shortened)) · 已写回 \(batch.completedCount) / \(batch.items.count) 项")
+                                    Text("\(batch.createdAt.formatted(date: .omitted, time: .shortened)) · 已完成 \(batch.completedCount) / \(batch.items.count) 项")
                                         .font(.system(size: 11))
                                 }.frame(maxWidth: .infinity, alignment: .leading)
                                 Image(systemName: displayedBatch == batch.id ? "checkmark.circle.fill" : "chevron.right")
@@ -359,7 +367,7 @@ struct BatchGenerationView: View {
                     Button("重试") { catalog.reload() }
                 }.font(.system(size: 11))
             }
-            Text("使用各槽位的正文与参考图，结果追加到原槽位。空槽位不参与。")
+            Text("使用各槽位的正文与参考图，产物保存在批次文件夹。空槽位不参与。")
                 .font(.system(size: 11)).foregroundColor(TapSkin.chromeInkDim)
             HStack {
                 Picker("同时处理", selection: $concurrency) {
@@ -494,8 +502,12 @@ private struct BatchGenerationProgressView: View {
     let batch: BatchGeneration
     let isRunning: Bool
     let compact: Bool
+    let recoveryAvailable: Bool
+    let retryAvailable: (UUID) -> Bool
     let onStop: () -> Void
     let onRecover: () -> Void
+    let onRecoverItem: (UUID) -> Void
+    let onRetry: (UUID) -> Void
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             HStack {
@@ -503,7 +515,7 @@ private struct BatchGenerationProgressView: View {
                 VStack(alignment: .leading, spacing: 5) {
                     Text(isRunning ? (batch.stopRequested ? "正在停止…" : "正在批量生成") : "批次记录")
                         .font(.system(size: 17, weight: .semibold))
-                    Text("已写回 \(batch.completedCount) / \(batch.items.count) 项")
+                    Text("已完成 \(batch.completedCount) / \(batch.items.count) 项")
                         .font(.system(size: 12)).foregroundColor(TapSkin.chromeInkDim)
                 }
                 Spacer()
@@ -511,6 +523,7 @@ private struct BatchGenerationProgressView: View {
                     Button("停止后续任务", action: onStop).disabled(batch.stopRequested)
                 } else if batch.items.contains(where: \.canRecover) {
                     Button("取回已提交结果", action: onRecover)
+                        .disabled(!recoveryAvailable)
                 }
             }
             if let naming = batch.outputNaming {
@@ -569,6 +582,16 @@ private struct BatchGenerationProgressView: View {
             if let file = item.localFile {
                 Button("查看产物") { NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: file)]) }
                     .accessibilityIdentifier("batch-output-" + item.id.uuidString)
+            } else if item.canRetry {
+                Button("重新生成") { onRetry(item.id) }
+                    .disabled(!retryAvailable(item.id))
+                    .help("沿用本项提示词与参数，重新提交一项生成任务")
+                    .accessibilityIdentifier("batch-retry-" + item.id.uuidString)
+            } else if item.canRecover {
+                Button("取回结果") { onRecoverItem(item.id) }
+                    .disabled(!recoveryAvailable)
+                    .help("继续查询已有任务")
+                    .accessibilityIdentifier("batch-recover-" + item.id.uuidString)
             } else if !compact {
                 Color.clear.frame(width: 72, height: 32)
             }

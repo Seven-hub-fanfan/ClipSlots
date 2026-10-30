@@ -378,8 +378,7 @@ public final class ClipboardManager {
             if !items.isEmpty { allItems.append(items) }
         }
         content.items = allItems
-        let types = allItems.flatMap { $0.map { $0.type } }
-        NSLog("[ClipSlots] CLIPBOARD capture: changeCount=\(pasteboard.changeCount) items=\(pbItems.count), types: \(types), preview=\(content.preview)")
+        NSLog("[ClipSlots] CLIPBOARD capture: changeCount=\(pasteboard.changeCount) items=\(pbItems.count)")
         return content
     }
 
@@ -408,15 +407,14 @@ public final class ClipboardManager {
                 let type = NSPasteboard.PasteboardType(item.type)
                 let ok = pbItem.setData(item.data, forType: type)
                 if !ok {
-                    NSLog("[ClipSlots] WARNING: setData failed for type \(item.type) (\(item.data.count) bytes)")
+                    NSLog("[ClipSlots] WARNING: clipboard setData failed bytes=\(item.data.count)")
                 }
             }
             pbItems.append(pbItem)
         }
         guard !pbItems.isEmpty else { return false }
         let result = pasteboard.writeObjects(pbItems)
-        let types = content.items.flatMap { $0.map { $0.type } }
-        NSLog("[ClipSlots] CLIPBOARD restore: \(content.items.count) groups, types: \(types), result: \(result)")
+        NSLog("[ClipSlots] CLIPBOARD restore: groups=\(content.items.count) result=\(result)")
         return result
     }
 
@@ -648,7 +646,7 @@ extension SlotContent.SlotAttachment {
         do {
             try fm.createDirectory(at: dir, withIntermediateDirectories: true)
         } catch {
-            NSLog("[ClipSlots] materializedFileURL mkdir FAIL att=\(id): \(error.localizedDescription)")
+            NSLog("[ClipSlots] materializedFileURL mkdir FAIL att=\(id): \(ApplicationDiagnostics.error(error))")
             return nil
         }
         let crc = binURL.path.withCString { s in dest.path.withCString { d in clonefile(s, d, 0) } }
@@ -657,7 +655,7 @@ extension SlotContent.SlotAttachment {
             try fm.copyItem(at: binURL, to: dest)
             return dest
         } catch {
-            NSLog("[ClipSlots] materializedFileURL copy FAIL att=\(id): \(error.localizedDescription)")
+            NSLog("[ClipSlots] materializedFileURL copy FAIL att=\(id): \(ApplicationDiagnostics.error(error))")
             return nil
         }
     }

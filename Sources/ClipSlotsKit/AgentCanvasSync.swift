@@ -120,7 +120,9 @@ public enum AgentCanvasSync {
                       !node.id.isEmpty, node.id.utf8.count <= 512,
                       !node.groupId.isEmpty, node.groupId.utf8.count <= 256,
                       !node.pageId.isEmpty, node.pageId.utf8.count <= 256,
-                      (1...10).contains(node.slot), node.createdAt.timeIntervalSinceReferenceDate.isFinite else {
+                      node.slot >= 1,
+                      node.slot <= (SpecialSlotStorage.isReservedGroupId(node.groupId) ? SpecialSlotStorage.unfiledCapacity : 10),
+                      node.createdAt.timeIntervalSinceReferenceDate.isFinite else {
                     throw AgentOperationError("节点快照包含非法坐标或内容绑定。")
                 }
             }

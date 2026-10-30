@@ -68,7 +68,7 @@ func runAgentDirectoryProbe(directory: URL, check: (Bool, String) -> Void) async
         window.contentView = host
         window.makeKeyAndOrderFront(nil)
         defer { window.close() }
-        for skin in [AppSkin.minimal, .colorful] {
+        for skin in AppSkin.allCases {
             AppSkinCenter.apply(skin)
             for dark in [false, true] {
                 window.appearance = NSAppearance(named: dark ? .darkAqua : .aqua)

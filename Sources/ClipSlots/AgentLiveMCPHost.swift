@@ -14,14 +14,20 @@ final class AgentLiveMCPHost {
     private var tasks: [UUID: Task<Void, Never>] = [:]
     private var interactions: [AgentInteraction] = []
     private let onInteraction: @Sendable (AgentInteraction) async -> Void
+    private let approvalPolicy: @MainActor @Sendable () -> Bool
+    private var automaticApproval: Bool {
+        lease.accessMode != .allDirectoriesReadOnly && approvalPolicy()
+    }
 
     init(context: CanvasAgentContext, scope: AgentArtifactScope, conversationID: UUID, snapshotID: UUID, root: URL,
          accessMode: AgentAccessMode = .selectedDirectories,
+         automaticApproval: @escaping @MainActor @Sendable () -> Bool = { false },
          onInteraction: @escaping @Sendable (AgentInteraction) async -> Void = { _ in }) throws {
         self.context = context; self.conversationID = conversationID
         initialTurn = CanvasAgentTurn(snapshot: try CanvasAgentSnapshotStore().load(project: scope.projectID, id: snapshotID).graph,
                                       supportsTools: true)
         self.onInteraction = onInteraction
+        self.approvalPolicy = automaticApproval
         let directory = root.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true,
                                                  attributes: [.posixPermissions: 0o700])
@@ -73,10 +79,14 @@ final class AgentLiveMCPHost {
             let response: JSONValue
             do {
                 guard let context, let args = request.arguments.objectValue else { throw AgentCanvasError.staleTarget }
+                let automatic = automaticApproval
                 if request.name == "clipslots_context" {
                     let turn = try freshTurn()
                     return ["ok": true, "read_only": .bool(lease.accessMode == .allDirectoriesReadOnly),
-                        "writes_require_native_confirmation": true, "cli_required": false,
+                        "automatic_approval": .bool(automatic),
+                        "writes_require_native_confirmation": .bool(!automatic),
+                        "deletions_require_native_confirmation": true,
+                        "preview_mutations_require_native_confirmation": true, "cli_required": false,
                         "project_id": .string(lease.projectID), "canvas_id": .string(lease.canvasID),
                         "session_id": .string(conversationID.uuidString), "live_run_id": .string(lease.runID),
                         "snapshot_id": .string(turn.snapshotID.uuidString), "graph_revision": .string(turn.graphRevision),
@@ -98,12 +108,12 @@ final class AgentLiveMCPHost {
                         await self.addInteraction(interaction)
                     }
                     let actions = try context.actionTools(for: turn, mode: lease.accessMode,
-                        automaticApproval: false, conversationID: conversationID,
+                        automaticApproval: automatic, conversationID: conversationID,
                         isCurrent: current, onInteraction: approval)
                     let tools = AgentSharedSidebarTools(canvas: actions,
                         library: AgentAccessTools(base: AgentNativeSlotTools(), mode: lease.accessMode),
                         pageID: context.store?.currentPageId, groupID: context.store?.currentSpecialSlotId,
-                        automaticApproval: false, isCurrent: current, onInteraction: approval)
+                        automaticApproval: automatic, isCurrent: current, onInteraction: approval)
                     var input = args
                     if let spec = tools.specs().first(where: { $0.name == request.name }),
                        spec.parameters["properties"]?["snapshot_id"] != nil {
