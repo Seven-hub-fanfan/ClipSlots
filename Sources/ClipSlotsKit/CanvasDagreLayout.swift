@@ -19,11 +19,9 @@ public enum CanvasDagreLayout {
             Bundle.main.bundleURL.appendingPathComponent(relative)
         ].compactMap { $0 }
         var resource = locations.first { FileManager.default.fileExists(atPath: $0.path) }
-        #if DEBUG
         if resource == nil {
-            resource = Bundle.module.url(forResource: "dagre-1.1.5.min", withExtension: "js", subdirectory: "Resources")
+            resource = ClipSlotsResourceBundle.bundle?.url(forResource: "dagre-1.1.5.min", withExtension: "js", subdirectory: "Resources")
         }
-        #endif
         guard let resource, let source = try? String(contentsOf: resource),
               let context = JSContext() else { return nil }
         context.evaluateScript(source)

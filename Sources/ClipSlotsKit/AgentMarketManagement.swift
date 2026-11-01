@@ -23,17 +23,22 @@ public extension AgentMarketItem {
 public struct AgentConnectorSession: Equatable, Sendable {
     public var raw: JSONValue
     public init(_ raw: JSONValue) { self.raw = raw }
-    public var id: String { raw["session_id"]?.stringValue ?? "" }
+    /// The challenge contract arrives in snake_case or camelCase; snake wins when both exist.
+    private func field(_ snake: String, _ camel: String) -> JSONValue? { raw[snake] ?? raw[camel] }
+    public var id: String { field("session_id", "sessionId")?.stringValue ?? "" }
     public var status: String { raw["status"]?.stringValue ?? "pending" }
     public var stage: String { raw["stage"]?.stringValue ?? "" }
-    public var kind: String { raw["challenge_kind"]?.stringValue ?? "" }
-    public var fields: [JSONValue] { raw["form_fields"]?.arrayValue ?? [] }
+    public var kind: String { field("challenge_kind", "challengeKind")?.stringValue ?? "" }
+    public var fields: [JSONValue] { field("form_fields", "formFields")?.arrayValue ?? [] }
+    public var userCode: String? { field("user_code", "userCode")?.stringValue }
     public var terminal: Bool { ["authenticated", "error", "expired", "cancelled"].contains(status) }
+    /// Never poll faster than the server asks; the upper bound only rejects absurd values.
     public var interval: Double {
-        min(30, max(0.2, Double(raw["poll_interval_ms"]?.intValue ?? 2000) / 1000))
+        min(600, max(0.2, Double(field("poll_interval_ms", "pollIntervalMs")?.intValue ?? 2000) / 1000))
     }
     public var externalURL: URL? {
-        guard let text = raw["redirect_url"]?.stringValue ?? raw["verification_url"]?.stringValue,
+        guard let text = field("redirect_url", "redirectUrl")?.stringValue
+                ?? field("verification_url", "verificationUrl")?.stringValue,
               let url = URL(string: text), url.scheme == "https", url.user == nil, url.password == nil else { return nil }
         return url
     }
@@ -193,18 +198,19 @@ extension AgentMarketSyncService {
             session: session, method: "DELETE")
     }
     public func setLocalEnabled(_ item: AgentMarketItem, scope: String, enabled: Bool) throws {
-        var records = try installations(scope: scope)
-        if records[item.id] == nil { return }
-        records[item.id]?.enabled = enabled
-        try JSONEncoder().encode(records).write(to: installationsURL(scope), options: .atomic)
+        try AgentMarketDiskTransaction.access(root: root) { disk in
+            var records = try installations(scope: scope, disk: disk)
+            if records[item.id] == nil { return }
+            records[item.id]?.enabled = enabled
+            try disk.apply([(installationsURL(scope), try JSONEncoder().encode(records))])
+        }
     }
     public func removeLocal(_ item: AgentMarketItem, scope: String) throws {
-        var records = try installations(scope: scope)
-        records[item.id] = nil
-        let file = installationsURL(scope)
-        try FileManager.default.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
-        try JSONEncoder().encode(records).write(to: file, options: .atomic)
-        let directory = skillURL(item, scope: scope)
-        if FileManager.default.fileExists(atPath: directory.path) { try FileManager.default.removeItem(at: directory) }
+        try AgentMarketDiskTransaction.access(root: root) { disk in
+            var records = try installations(scope: scope, disk: disk)
+            records[item.id] = nil
+            try disk.apply([(installationsURL(scope), try JSONEncoder().encode(records)),
+                (skillURL(item, scope: scope).appendingPathComponent("SKILL.md"), nil)])
+        }
     }
 }

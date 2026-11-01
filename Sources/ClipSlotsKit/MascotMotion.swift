@@ -310,6 +310,6 @@ public enum MascotResources {
                     Bundle.main.bundleURL.appendingPathComponent(relative)].compactMap({$0}) {
             if FileManager.default.fileExists(atPath:url.path) { return url }
         }
-        return Bundle.module.url(forResource:name,withExtension:ext,subdirectory:"Resources/Mascot")
+        return ClipSlotsResourceBundle.bundle?.url(forResource:name,withExtension:ext,subdirectory:"Resources/Mascot")
     }
 }

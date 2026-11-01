@@ -7,7 +7,14 @@ enum SlotSearchFileIO {
     static func read(_ path: String, isCancelled: () -> Bool = { false },
                      onFailure: () -> Void = {}) -> Data? {
         guard !isCancelled() else { onFailure(); return nil }
+        #if DEBUG
+        let openStart = SlotSearchDiagnostics.now
+        #endif
         let descriptor = open(path, O_RDONLY | O_CLOEXEC | O_NONBLOCK)
+        #if DEBUG
+        SlotSearchDiagnostics.record("fileOpenMS", since: openStart)
+        SlotSearchDiagnostics.increment("fileOpenCalls")
+        #endif
         guard descriptor >= 0 else {
             if errno != ENOENT { onFailure() }
             return nil
@@ -20,6 +27,9 @@ enum SlotSearchFileIO {
         }
         var data = Data()
         var buffer = [UInt8](repeating: 0, count: min(256 * 1024, max(1, Int(info.st_size))))
+        #if DEBUG
+        let readStart = SlotSearchDiagnostics.now
+        #endif
         while data.count < info.st_size {
             guard !isCancelled() else { onFailure(); return nil }
             let remaining = Int(info.st_size) - data.count
@@ -30,6 +40,12 @@ enum SlotSearchFileIO {
             guard count > 0 else { onFailure(); return nil }
             data.append(contentsOf: buffer.prefix(count))
         }
+        #if DEBUG
+        SlotSearchDiagnostics.record("fileReadMS", since: readStart)
+        SlotSearchDiagnostics.increment("fileReadBytes", by: Double(data.count))
+        let validationStart = SlotSearchDiagnostics.now
+        defer { SlotSearchDiagnostics.record("fileReadIdentityMS", since: validationStart) }
+        #endif
         var after = stat()
         var current = stat()
         func identity(_ value: stat) -> [Int64] {
@@ -46,7 +62,14 @@ enum SlotSearchFileIO {
 
     static func names(_ path: String, isCancelled: () -> Bool = { false }) -> [String]? {
         guard !isCancelled() else { return nil }
+        #if DEBUG
+        let openStart = SlotSearchDiagnostics.now
+        #endif
         guard let directory = opendir(path) else { return nil }
+        #if DEBUG
+        SlotSearchDiagnostics.record("directoryOpenMS", since: openStart)
+        SlotSearchDiagnostics.increment("directoryOpenCalls")
+        #endif
         defer { closedir(directory) }
         var names: [String] = []
         while true {

@@ -52,7 +52,7 @@ struct AgentSourceConnectorWizard: View {
                         risk("与此应用共享的数据", "添加此应用即表示你授权它访问你访问网站时通常共享的基本信息，例如你的 IP 地址和大致位置。")
                     }
                     VStack(alignment: .leading, spacing: 14) {
-                    if let code = auth?.raw["user_code"]?.stringValue {
+                    if let code = auth?.userCode {
                         HStack { Text(code).font(.system(size: 20, weight: .semibold, design: .monospaced)); Spacer()
                             Button("复制") { NSPasteboard.general.clearContents(); NSPasteboard.general.setString(code, forType: .string) } }
                     }
@@ -135,7 +135,9 @@ struct AgentSourceConnectorWizard: View {
                     }
                     if session.terminal { break }
                     do {
-                        try await Task.sleep(for: .seconds(session.kind == "external_approval" ? delay : session.interval))
+                        // Administrator approval backs off, but never polls faster than the server asks.
+                        let wait = session.kind == "external_approval" ? max(delay, session.interval) : session.interval
+                        try await Task.sleep(for: .seconds(wait))
                         try await sync.pollSourceConnection()
                         delay = min(30, delay * 1.5)
                     } catch is CancellationError { break }

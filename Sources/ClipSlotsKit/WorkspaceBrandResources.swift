@@ -8,7 +8,7 @@ public enum WorkspaceBrandResources {
             Bundle.main.bundleURL.appendingPathComponent(relative)
         ].compactMap { $0 }
         return candidates.first(where: { FileManager.default.fileExists(atPath: $0.path) })
-            ?? Bundle.module.url(forResource: "WorkspaceBrandMark", withExtension: "png",
+            ?? ClipSlotsResourceBundle.bundle?.url(forResource: "WorkspaceBrandMark", withExtension: "png",
                                  subdirectory: "Resources")
     }
 }

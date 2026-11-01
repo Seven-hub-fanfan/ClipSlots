@@ -18,7 +18,7 @@ public enum AgentBrandResources {
         if let url = candidates.first(where: { FileManager.default.fileExists(atPath: $0.path) }) {
             return url
         }
-        return Bundle.module.url(forResource: identifier, withExtension: "png",
+        return ClipSlotsResourceBundle.bundle?.url(forResource: identifier, withExtension: "png",
                                  subdirectory: "Resources/AgentBrands")
     }
 }

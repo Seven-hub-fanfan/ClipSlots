@@ -15,6 +15,24 @@ extension AgentMarketSyncStore {
     func connectorStatus(_ id: String) -> String? {
         snapshot?.connectors?.first { $0["id"]?.stringValue == id }?["status"]?.stringValue
     }
+    func applicationAuthorizationReady(_ item: AgentMarketItem) -> Bool {
+        guard item.kind == "app" else { return true }
+        let current = snapshot?.managerCatalog?.first(where: { AgentMarketItem($0).id == item.id })
+            .map(AgentMarketItem.init) ?? snapshot?.item(item.id) ?? item
+        return current.connectorIDs.allSatisfy { connectorStatus($0) == "authenticated" }
+    }
+    func connectorStatusText(_ id: String) -> String {
+        switch connectorStatus(id) {
+        case "authenticated": return "已连接"
+        case "pending_approval": return "待批准"
+        case "pending", "authorizing": return "授权中"
+        case "error": return "连接失败"
+        case "expired": return "授权已过期"
+        case "cancelled": return "已取消"
+        case "disconnected": return "未连接"
+        default: return "状态未知"
+        }
+    }
     func refreshManagement() async {
         guard !isRefreshing else { return }
         if readsDesktop || session == nil { await loadCached() }
@@ -24,24 +42,33 @@ extension AgentMarketSyncStore {
         }
         isRefreshing = true; defer { isRefreshing = false }
         let scope = snapshot?.scope, token = revision
+        let operation = beginCatalogOperation()
+        defer { finishCatalogOperation(operation) }
         do {
             let next = try await service.refreshManager(session: session, previous: snapshot)
-            guard scope == snapshot?.scope, token == revision else { return }
-            try await service.commit(next)
+            guard catalogIsCurrent(operation, scope: scope, token: token) else { return }
+            try await service.commit(next, operation: operation)
+            guard catalogIsCurrent(operation, scope: scope, token: token) else { return }
             snapshot = next
-        } catch { self.error = error.localizedDescription }
+        } catch {
+            if catalogIsCurrent(operation, scope: scope, token: token) { self.error = error.localizedDescription }
+        }
     }
     func managementDetail(_ item: AgentMarketItem) async throws {
         guard let session else { return }
         let token = revision, scope = snapshot?.scope
+        let operation = beginCatalogOperation()
+        defer { finishCatalogOperation(operation) }
         let detail = try await service.managementDetail(item, session: session)
-        guard token == revision, scope == snapshot?.scope, var next = snapshot else { throw CancellationError() }
+        guard catalogIsCurrent(operation, scope: scope, token: token), var next = snapshot else { throw CancellationError() }
         next.details[item.id] = detail
         if item.kind == "skill" { next.skills[item.name] = detail }
         else if let index = next.managerCatalog?.firstIndex(where: { AgentMarketItem($0).id == item.id }) {
             next.managerCatalog?[index] = detail
         }
-        try await service.commit(next); snapshot = next
+        try await service.commit(next, operation: operation)
+        guard catalogIsCurrent(operation, scope: scope, token: token) else { throw CancellationError() }
+        snapshot = next
     }
     func requireSession() async throws -> AgentMarketDesktopSession {
         guard let session, session.scope == snapshot?.scope else { throw AgentMarketSyncError.requiresLogin }
@@ -117,10 +144,12 @@ extension AgentMarketSyncStore {
         if session != nil { await refreshManagement() }
     }
     func saveManagedSkill(original: AgentMarketItem?, name: String, description: String, instructions: String) async throws -> AgentMarketItem {
+        let operation = beginCatalogOperation()
+        defer { finishCatalogOperation(operation) }
         let session = try await requireSession(), token = revision
         let value = try await service.saveSkill(original: original?.name, name: name, description: description,
                                                 instructions: instructions, session: session)
-        guard token == revision, snapshot?.scope == session.scope else { throw CancellationError() }
+        guard catalogIsCurrent(operation, scope: session.scope, token: token) else { throw CancellationError() }
         var fields = value.objectValue ?? [:]
         fields["kind"] = "skill"; fields["name"] = .string(name)
         fields["display_name"] = .string(name); fields["activation_skill"] = .string(name)
@@ -130,17 +159,24 @@ extension AgentMarketSyncStore {
         if var next = snapshot {
             if let original { next.skills[original.name] = nil; next.details[original.id] = nil }
             next.skills[name] = item.raw
-            try await service.commit(next); snapshot = next
+            try await service.commit(next, operation: operation)
+            guard catalogIsCurrent(operation, scope: session.scope, token: token) else { throw CancellationError() }
+            snapshot = next
         }
         return item
     }
     func startSourceConnection(_ item: AgentMarketItem, fresh: Bool = false) async throws {
         let key = "auth:" + item.id
-        guard !pending.contains(key) else { return }
-        pending.insert(key); defer { pending.remove(key) }
+        // A fresh retry supersedes a still-held earlier request instead of waiting on it.
+        guard fresh || !pending.contains(key) else { return }
+        if !fresh, sourceConnection?.id == item.id, sourceAuth?.terminal == false { return }
+        let attempt = UUID(); authAttempt = attempt; authAttemptKey = key
+        pending.insert(key)
+        // Keep the marker only while a newer attempt for the same connector is in flight.
+        defer { if authAttempt == attempt || authAttemptKey != key { pending.remove(key) } }
         let session = try await requireSession(), token = revision
         guard let id = item.connectorIDs.first else { throw AgentMCPError.unavailable }
-        if !fresh, sourceConnection?.id == item.id, sourceAuth?.terminal == false { return }
+        guard authAttempt == attempt else { throw CancellationError() }
         let connector = snapshot?.connectors?.first { $0["id"]?.stringValue == id }
         if !fresh, let pendingID = connector?["pending_session_id"]?.stringValue {
             sourceConnection = item
@@ -151,28 +187,36 @@ extension AgentMarketSyncStore {
         let capabilities = (connector?["capabilities"]?.arrayValue ?? [])
             .filter { $0["enabled"]?.boolValue == true }.compactMap { $0["id"]?.stringValue }
         let auth = try await service.startConnector(id, capabilityIDs: capabilities, session: session)
-        guard token == revision, snapshot?.scope == session.scope else { throw CancellationError() }
+        try Task.checkCancellation()
+        guard token == revision, authAttempt == attempt, snapshot?.scope == session.scope else { throw CancellationError() }
         sourceConnection = item; sourceAuth = auth
     }
     func pollSourceConnection() async throws {
-        let session = try await requireSession(), token = revision
+        let session = try await requireSession(), token = revision, attempt = authAttempt
         guard let item = sourceConnection, let auth = sourceAuth, !auth.terminal, let id = item.connectorIDs.first else { return }
         let next = try await service.pollConnector(id, auth: auth, session: session)
-        guard token == revision, sourceConnection?.id == item.id, sourceAuth?.id == auth.id, snapshot?.scope == session.scope else { return }
+        guard token == revision, authAttempt == attempt, sourceConnection?.id == item.id, sourceAuth?.id == auth.id,
+              sourceAuth?.terminal == false, snapshot?.scope == session.scope else { return }
         sourceAuth = next
     }
     func submitSourceConnection(_ values: [String: String]) async throws {
-        let session = try await requireSession(), token = revision
+        let session = try await requireSession(), token = revision, attempt = authAttempt
         guard let item = sourceConnection, let auth = sourceAuth, let id = item.connectorIDs.first else { throw AgentMCPError.unavailable }
         let next = try await service.submitConnector(id, auth: auth, values: values, session: session)
-        guard token == revision, sourceAuth?.id == auth.id, snapshot?.scope == session.scope else { throw CancellationError() }
+        guard token == revision, authAttempt == attempt, sourceAuth?.id == auth.id,
+              snapshot?.scope == session.scope else { throw CancellationError() }
+        // A terminal state observed by polling meanwhile wins over a late pending reply.
+        if sourceAuth?.terminal == true && !next.terminal { return }
         sourceAuth = next
     }
     func cancelSourceConnection(reset: Bool) async throws {
-        if reset, let item = sourceConnection, let id = item.connectorIDs.first {
+        let item = sourceConnection
+        // Invalidate first: no in-flight start/poll/submit may publish after cancel.
+        authAttempt = UUID(); authAttemptKey = nil; sourceAuth = nil; sourceConnection = nil
+        pending = pending.filter { !$0.hasPrefix("auth:") }
+        if reset, let item, let id = item.connectorIDs.first {
             let session = try await requireSession()
             try await service.disconnectConnector(id, reset: true, session: session)
         }
-        sourceAuth = nil; sourceConnection = nil
     }
 }

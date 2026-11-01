@@ -32,6 +32,7 @@ verify_app_bundle() {
   test -d "$app" || die "$app missing"
   test -x "$app/Contents/MacOS/$APP_NAME" || die "$APP_NAME executable missing or not executable"
   test -x "$app/Contents/MacOS/clipslots-cli" || die "bundled clipslots-cli missing or not executable in $app"
+  test -x "$app/Contents/MacOS/clipslots-mcp" || die "bundled clipslots-mcp missing or not executable in $app"
   test -f "$app/Contents/Resources/skills/clipslots-manager/SKILL.md" || die "bundled skill missing in $app"
   plutil -lint "$app/Contents/Info.plist" >/dev/null
   test -f "$app/Contents/Resources/AppIcon.icns" || die "AppIcon.icns missing in app bundle"
@@ -83,6 +84,9 @@ out.write_bytes(png)
 PY
 }
 
+echo "==> Check disk budget"
+python3 "$ROOT_DIR/scripts/disk_guard.py" check --reserve-gib 4 --operation "Package DMG"
+
 echo "==> Sync bundled skill"
 bash "$ROOT_DIR/scripts/sync-skill.sh"
 bash "$ROOT_DIR/scripts/sync-skill.sh" --check
@@ -104,7 +108,13 @@ echo "==> Clean stale DMGs in build dir (keep only current build output)"
 rm -f "$BUILD_DIR"/ClipSlots*.dmg
 
 echo "==> Build release"
-swift build -c release --package-path "$ROOT_DIR"
+# 全目标 Release 构建会编入使用 @testable import 的 smoke runner，未启用 testing 时失败；
+# 正式产品按 docs/candidate-packaging.md 只构建 GUI / CLI / MCP 三个 product。
+for PRODUCT in ClipSlots ClipSlotsCLI ClipSlotsMCP; do
+  python3 "$ROOT_DIR/scripts/disk_guard.py" run \
+    --output "$ROOT_DIR/.build" --budget-gib 4 -- \
+    swift build -c release --jobs 2 --product "$PRODUCT" --package-path "$ROOT_DIR"
+done
 
 echo "==> Create app bundle"
 mkdir -p "$APP_DIR/Contents/MacOS"
@@ -142,6 +152,14 @@ cp "$CLI_SRC" "$CLI_DST"
 chmod +x "$CLI_DST"
 test -x "$CLI_DST" || die "bundled clipslots-cli missing or not executable at $CLI_DST"
 echo "  OK: bundled clipslots-cli -> $CLI_DST"
+
+# MCP 服务端：AgentChatModel 从 <bundle>/Contents/MacOS/clipslots-mcp 查找（与 v2.17.104 三产品布局一致）。
+MCP_SRC="$ROOT_DIR/.build/release/ClipSlotsMCP"
+MCP_DST="$APP_DIR/Contents/MacOS/clipslots-mcp"
+test -f "$MCP_SRC" || die "MCP binary not found at $MCP_SRC (SPM target ClipSlotsMCP)"
+cp "$MCP_SRC" "$MCP_DST"
+chmod +x "$MCP_DST"
+echo "  OK: bundled clipslots-mcp -> $MCP_DST"
 
 # ---------------------------------------------------------------------------
 # v2.9.28: 把内置 Skill 目录打进 App bundle。

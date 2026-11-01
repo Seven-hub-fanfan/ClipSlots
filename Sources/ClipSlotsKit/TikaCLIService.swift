@@ -557,15 +557,24 @@ private final class TikaProcessWaiter: @unchecked Sendable {
         let now = ProcessInfo.processInfo.systemUptime
         let idleRemaining = timeout - (now - lastOutputAt)
         let totalRemaining = maxDuration - (now - startedAt)
-        lock.unlock()
+        let result: Result<Void, Error>
         if totalRemaining <= 0 {
-            if finish(.failure(TikaBackendError.turnDurationExceeded), requiringOpenStream: true) { stopProcess() }
+            result = .failure(TikaBackendError.turnDurationExceeded)
         } else if idleRemaining <= 0 {
-            if finish(.failure(TikaBackendError.timedOut), requiringOpenStream: true) { stopProcess() }
+            result = .failure(TikaBackendError.timedOut)
         } else {
+            lock.unlock()
             // 输出只更新时间戳，不为每个token创建新timer。
             scheduleDeadlineCheck(after: min(idleRemaining, totalRemaining))
+            return
         }
+        // 判定与一次性 completion 必须同锁，不能让已收到的新输出被旧判定覆盖。
+        completion = result
+        let continuation = self.continuation
+        self.continuation = nil
+        lock.unlock()
+        continuation?.resume(with: result)
+        stopProcess()
     }
 
     func cancel() {
@@ -573,9 +582,9 @@ private final class TikaProcessWaiter: @unchecked Sendable {
     }
 
     @discardableResult
-    private func finish(_ result: Result<Void, Error>, requiringOpenStream: Bool = false) -> Bool {
+    private func finish(_ result: Result<Void, Error>) -> Bool {
         lock.lock()
-        guard completion == nil, !requiringOpenStream || !streamEnded else { lock.unlock(); return false }
+        guard completion == nil else { lock.unlock(); return false }
         completion = result
         let continuation = self.continuation
         self.continuation = nil

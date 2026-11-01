@@ -1,6 +1,54 @@
 import Foundation
 import CryptoKit
 import SQLite3
+import Compression
+
+/// Versioned, bounded envelope for rebuildable stamp bytes. It never changes
+/// freshness rules; a rejected envelope simply forces an authoritative rebuild.
+private enum SearchStampCompression {
+    static let limit = 16 * 1024 * 1024
+    private static let magic = Data([0x53, 0x53, 0x56, 0x01])
+    static func encode(_ raw: Data) -> Data? {
+        guard !raw.isEmpty, raw.count <= limit else { return nil }
+        var output = Data(count: raw.count)
+        let count = output.withUnsafeMutableBytes { destination in
+            raw.withUnsafeBytes { source in
+                compression_encode_buffer(destination.bindMemory(to: UInt8.self).baseAddress!,
+                    destination.count, source.bindMemory(to: UInt8.self).baseAddress!, source.count,
+                    nil, COMPRESSION_LZFSE)
+            }
+        }
+        guard count > 0, count + 40 < raw.count else { return nil }
+        output.count = count
+        var result = magic
+        var length = UInt32(raw.count).littleEndian
+        withUnsafeBytes(of: &length) { result.append(contentsOf: $0) }
+        result.append(contentsOf: SHA256.hash(data: raw))
+        result.append(output)
+        return result
+    }
+    static func decode(_ envelope: Data) -> Data? {
+        guard envelope.count > 40, envelope.prefix(4) == magic else { return nil }
+        let length = envelope.withUnsafeBytes {
+            Int(UInt32(littleEndian: $0.loadUnaligned(fromByteOffset: 4, as: UInt32.self)))
+        }
+        guard length > 0, length <= min(limit, ResourceBudget.shared.totalBytes),
+              envelope.count <= limit else { return nil }
+        // One extra byte detects advertised lengths shorter than the stream.
+        var raw = Data(count: length + 1)
+        let count = raw.withUnsafeMutableBytes { destination in
+            envelope.withUnsafeBytes { source in
+                compression_decode_buffer(destination.bindMemory(to: UInt8.self).baseAddress!,
+                    destination.count, source.bindMemory(to: UInt8.self).baseAddress!.advanced(by: 40),
+                    source.count - 40, nil, COMPRESSION_LZFSE)
+            }
+        }
+        guard count == length else { return nil }
+        raw.count = length
+        guard Data(SHA256.hash(data: raw)) == envelope.subdata(in: 8..<40) else { return nil }
+        return raw
+    }
+}
 
 /// Rebuildable search data only. Business files remain the source of truth.
 /// Paths include nested text files: editing a body without touching content.json
@@ -10,26 +58,44 @@ struct SlotSearchSnapshot: Codable {
         let slotCount: Int
         private let legacyStamps: [Stamp]
         private let packedStamps: Data?
+        private let compressedStamps: Data?
         let generation: String
         let relativePaths: Bool?
+        let includesEmptySlots: Bool?
 
-        enum CodingKeys: String, CodingKey { case slotCount, stamps, packedStamps, generation, relativePaths }
+        enum CodingKeys: String, CodingKey {
+            case slotCount, stamps, packedStamps, compressedStamps, generation, relativePaths, includesEmptySlots
+        }
 
-        init(slotCount: Int, stamps: [Stamp], generation: String, relativePaths: Bool?) {
+        init(slotCount: Int, stamps: [Stamp], generation: String, relativePaths: Bool?,
+             includesEmptySlots: Bool? = nil) {
             self.slotCount = slotCount
             self.legacyStamps = []
-            self.packedStamps = Self.pack(stamps)
+            let raw = Self.pack(stamps)
+            let compressed = SearchStampCompression.encode(raw)
+            self.packedStamps = compressed == nil ? raw : nil
+            self.compressedStamps = compressed
             self.generation = generation
             self.relativePaths = relativePaths
+            self.includesEmptySlots = includesEmptySlots
         }
         init(from decoder: Decoder) throws {
             let values = try decoder.container(keyedBy: CodingKeys.self)
             slotCount = try values.decode(Int.self, forKey: .slotCount)
             generation = try values.decode(String.self, forKey: .generation)
             relativePaths = try values.decodeIfPresent(Bool.self, forKey: .relativePaths)
+            includesEmptySlots = try values.decodeIfPresent(Bool.self, forKey: .includesEmptySlots)
             packedStamps = try values.decodeIfPresent(Data.self, forKey: .packedStamps)
-            legacyStamps = packedStamps == nil ? try values.decode([Stamp].self, forKey: .stamps) : []
-            if let packedStamps, !Self.visit(packedStamps, { _, _ in true }) {
+            compressedStamps = try values.decodeIfPresent(Data.self, forKey: .compressedStamps)
+            legacyStamps = packedStamps == nil && compressedStamps == nil
+                ? try values.decode([Stamp].self, forKey: .stamps) : []
+            if let compressedStamps {
+                guard packedStamps == nil, let raw = SearchStampCompression.decode(compressedStamps),
+                      Self.visit(raw, { _, _ in true }) else {
+                    throw DecodingError.dataCorruptedError(forKey: .compressedStamps, in: values,
+                                                          debugDescription: "invalid compressed search stamp cache")
+                }
+            } else if let packedStamps, !Self.visit(packedStamps, { _, _ in true }) {
                 throw DecodingError.dataCorruptedError(forKey: .packedStamps, in: values,
                                                         debugDescription: "invalid search stamp cache")
             }
@@ -39,20 +105,26 @@ struct SlotSearchSnapshot: Codable {
             try values.encode(slotCount, forKey: .slotCount)
             try values.encode(generation, forKey: .generation)
             try values.encodeIfPresent(relativePaths, forKey: .relativePaths)
-            if let packedStamps { try values.encode(packedStamps, forKey: .packedStamps) }
+            try values.encodeIfPresent(includesEmptySlots, forKey: .includesEmptySlots)
+            if let compressedStamps { try values.encode(compressedStamps, forKey: .compressedStamps) }
+            else if let packedStamps { try values.encode(packedStamps, forKey: .packedStamps) }
             else { try values.encode(legacyStamps, forKey: .stamps) }
         }
         var stamps: [Stamp] {
-            guard let packedStamps else { return legacyStamps }
+            guard let raw = stampBytes else { return legacyStamps }
             var result: [Stamp] = []
-            _ = Self.visit(packedStamps) { path, identity in
+            _ = Self.visit(raw) { path, identity in
                 result.append(.init(path: path, identity: identity)); return true
             }
             return result
         }
         var cacheCost: Int {
+            if let compressedStamps { return 256 + compressedStamps.count }
             if let packedStamps { return 256 + packedStamps.count }
             return legacyStamps.reduce(256) { $0 + $1.path.utf8.count + $1.identity.count * 8 + 96 }
+        }
+        private var stampBytes: Data? {
+            compressedStamps.flatMap(SearchStampCompression.decode) ?? packedStamps
         }
         private static func pack(_ stamps: [Stamp]) -> Data {
             var result = Data()
@@ -106,8 +178,10 @@ struct SlotSearchSnapshot: Codable {
                                                      fallbackPath: path).identity == identity
             }
             let valid: Bool
-            if let packedStamps {
-                valid = Self.visit(packedStamps, matches)
+            if let raw = stampBytes {
+                valid = Self.visit(raw, matches)
+            } else if compressedStamps != nil {
+                return false
             } else {
                 valid = legacyStamps.allSatisfy { matches($0.path, $0.identity) }
             }
@@ -122,14 +196,14 @@ struct SlotSearchSnapshot: Codable {
 
         func compacted(groupPath: String) -> Metadata {
             if relativePaths == true {
-                return packedStamps != nil ? self : Metadata(slotCount: slotCount, stamps: legacyStamps,
-                    generation: generation, relativePaths: true)
+                return packedStamps != nil || compressedStamps != nil ? self : Metadata(slotCount: slotCount, stamps: legacyStamps,
+                    generation: generation, relativePaths: true, includesEmptySlots: includesEmptySlots)
             }
             let prefix = groupPath + "/"
             guard stamps.allSatisfy({ $0.path.hasPrefix(prefix) }) else { return self }
             return Metadata(slotCount: slotCount,
                 stamps: stamps.map { Stamp(path: String($0.path.dropFirst(prefix.count)), identity: $0.identity) },
-                generation: generation, relativePaths: true)
+                generation: generation, relativePaths: true, includesEmptySlots: includesEmptySlots)
         }
 
         func absoluteStamps(groupPath: String) -> [Stamp] {
@@ -171,12 +245,15 @@ struct SlotSearchSnapshot: Codable {
     let stamps: [Stamp]
     let slots: [Int: SlotContent]
     let generation: String?
+    let includesEmptySlots: Bool
 
-    init(slotCount: Int, stamps: [Stamp], slots: [Int: SlotContent], generation: String? = nil) {
+    init(slotCount: Int, stamps: [Stamp], slots: [Int: SlotContent], generation: String? = nil,
+         includesEmptySlots: Bool = false) {
         self.slotCount = slotCount
         self.stamps = stamps
         self.slots = slots
         self.generation = generation
+        self.includesEmptySlots = includesEmptySlots
     }
 
     /// File events can prioritize work but cannot prove freshness. Reconcile all
@@ -229,7 +306,8 @@ struct SlotSearchSnapshot: Codable {
                        isCancelled: () -> Bool = { false }) -> [Stamp]? {
         var paths: [String] = []
         if slotCount > 0 {
-            for slot in 1...slotCount where slots == nil || slots?.contains(slot) == true {
+            let selected = slots?.filter { $0 > 0 && $0 <= slotCount }.sorted() ?? Array(1...slotCount)
+            for slot in selected {
                 guard !isCancelled() else { return nil }
                 let directory = base.appendingPathComponent(String(slot)).path
                 paths.append(contentsOf: [directory, directory + "/content.json",
@@ -250,7 +328,12 @@ struct SlotSearchSnapshot: Codable {
             }
         }
         guard !isCancelled() else { return nil }
-        return paths.sorted().map(Stamp.read)
+        let stamps = paths.sorted().map(Stamp.read)
+        // Only ENOENT proves absence. A stable permissions/lookup failure is
+        // unknown, even when a second stat reports the same error.
+        guard stamps.allSatisfy({ $0.identity.count != 1 || $0.identity[0] == -Int64(ENOENT) })
+            else { return nil }
+        return stamps
     }
 }
 
@@ -263,11 +346,6 @@ final class SlotSearchSnapshotCache {
     private var databases: [String: OpaquePointer] = [:]
     private var databaseOrder: [String] = []
     private var libraryAliases: [String: (identity: [Int64], resolved: String)] = [:]
-    private let encoder: PropertyListEncoder = {
-        let value = PropertyListEncoder()
-        value.outputFormat = .binary
-        return value
-    }()
     private let decoder = PropertyListDecoder()
     private let transient = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
     private final class CachedMetadata: NSObject {
@@ -370,18 +448,30 @@ final class SlotSearchSnapshotCache {
               let generationText = sqlite3_column_text(statement, 0) else { return nil }
         let generation = String(cString: generationText)
         if let cached = metadataCache.object(forKey: path as NSString),
-           cached.value.generation == generation { return cached.value }
+           cached.value.generation == generation {
+            #if DEBUG
+            SlotSearchDiagnostics.increment("metadataCacheHits")
+            #endif
+            return cached.value
+        }
         #if DEBUG
+        SlotSearchDiagnostics.increment("metadataCacheMisses")
         let decodeStart = SlotSearchDiagnostics.now
         defer { SlotSearchDiagnostics.record("metadataDecodeMS", since: decodeStart) }
         #endif
         guard let pointer = sqlite3_column_blob(statement, 1) else { return nil }
-        let data = Data(bytes: pointer, count: Int(sqlite3_column_bytes(statement, 1)))
+        let bytes = Int(sqlite3_column_bytes(statement, 1))
+        guard bytes > 0, bytes <= min(SearchStampCompression.limit, ResourceBudget.shared.totalBytes) else { return nil }
+        let data = Data(bytes: pointer, count: bytes)
         guard let decoded = try? decoder.decode(SlotSearchSnapshot.Metadata.self, from: data),
               decoded.generation == generation else { return nil }
         let value = decoded.compacted(groupPath: path)
         metadataCache.setObject(CachedMetadata(value), forKey: path as NSString,
                                 cost: metadataCost(value))
+        #if DEBUG
+        SlotSearchDiagnostics.gauge("metadataCacheCount", Double(metadataCache.count))
+        SlotSearchDiagnostics.gauge("metadataCacheBytes", Double(metadataCache.totalCost))
+        #endif
         return value
     }
 
@@ -389,7 +479,7 @@ final class SlotSearchSnapshotCache {
         value.cacheCost
     }
 
-    private func decodeContent(_ data: Data) -> SlotContent? {
+    private func decodeContent(_ data: Data, decoder: PropertyListDecoder) -> SlotContent? {
         // Hash the actual row bytes, not merely a persisted identity/generation:
         // raw cache corruption or a same-ID external rewrite cannot reuse a hit.
         let key = Data(SHA256.hash(data: data)) as NSData
@@ -399,56 +489,108 @@ final class SlotSearchSnapshotCache {
         return value
     }
 
-    private func rows(database: OpaquePointer, path: String, query: String,
-                      isCancelled: () -> Bool) -> [Int: SlotContent]? {
-        // instr is a conservative candidate filter. NFC preserves Swift's
-        // canonical-equivalence matching. The authoritative Swift matcher still
-        // runs afterwards, including grapheme boundaries and media filters.
-        let needle = query.trimmingCharacters(in: .whitespacesAndNewlines)
+    private struct RawRow {
+        let slot: Int
+        let payload: Data
+        let haystack: String?
+    }
+
+    private func needle(for query: String) -> String {
+        query.trimmingCharacters(in: .whitespacesAndNewlines)
             .lowercased().precomposedStringWithCanonicalMapping
+    }
+
+    /// Copy a single group's rows while its header and rows share a transaction.
+    /// No SQLite pointer escapes; expensive decoding runs after releasing the
+    /// connection lock so other groups can validate/read in parallel.
+    private func rows(database: OpaquePointer, path: String, needle: String,
+                      isCancelled: () -> Bool) -> [RawRow]? {
+        #if DEBUG
+        let rowStart = SlotSearchDiagnostics.now
+        defer { SlotSearchDiagnostics.record("rowQueryMS", since: rowStart) }
+        #endif
         var statement: OpaquePointer?
         let sql = needle.isEmpty
-            ? "SELECT slot,value FROM search_slots WHERE path=?"
-            : "SELECT slot,value FROM search_slots WHERE path=? AND instr(haystack,?)>0"
+            ? "SELECT slot,value,haystack FROM search_slots WHERE path=?"
+            : "SELECT slot,value,haystack FROM search_slots WHERE path=? AND instr(haystack,?)>0"
         guard sqlite3_prepare_v2(database, sql, -1, &statement, nil) == SQLITE_OK,
               let statement else { return nil }
         defer { sqlite3_finalize(statement) }
         sqlite3_bind_text(statement, 1, path, -1, transient)
         if !needle.isEmpty { sqlite3_bind_text(statement, 2, needle, Int32(needle.utf8.count), transient) }
-        var slots: [Int: SlotContent] = [:]
+        var rows: [RawRow] = []
         while !isCancelled() {
             let status = sqlite3_step(statement)
-            if status == SQLITE_DONE { return slots }
+            if status == SQLITE_DONE { return rows }
             guard status == SQLITE_ROW, let pointer = sqlite3_column_blob(statement, 1) else { return nil }
+            let haystack: String?
+            if !needle.isEmpty {
+                guard let text = sqlite3_column_text(statement, 2),
+                      let value = String(bytes: UnsafeBufferPointer(start: text,
+                          count: Int(sqlite3_column_bytes(statement, 2))), encoding: .utf8) else { return nil }
+                haystack = value
+            } else { haystack = nil }
             let data = Data(bytes: pointer, count: Int(sqlite3_column_bytes(statement, 1)))
-            guard let content = decodeContent(data) else { return nil }
-            slots[Int(sqlite3_column_int(statement, 0))] = content
+            rows.append(RawRow(slot: Int(sqlite3_column_int(statement, 0)), payload: data, haystack: haystack))
         }
         return nil
     }
 
-    func load(group: URL, isCancelled: () -> Bool = { false }) -> SlotSearchSnapshot? {
-        lock.lock(); defer { lock.unlock() }
-        guard !isCancelled(), let database = database(for: group),
-              sqlite3_exec(database, "BEGIN", nil, nil, nil) == SQLITE_OK else { return nil }
-        defer { sqlite3_exec(database, "ROLLBACK", nil, nil, nil) }
-        guard let value = metadata(database: database, path: group.path),
-              let slots = rows(database: database, path: group.path, query: "", isCancelled: isCancelled)
-            else { return nil }
-        return SlotSearchSnapshot(slotCount: value.slotCount,
-                                  stamps: value.absoluteStamps(groupPath: group.path), slots: slots,
-                                  generation: value.generation)
+    private func decodeRows(_ rows: [RawRow], needle: String,
+                            isCancelled: () -> Bool) -> [Int: SlotContent]? {
+        #if DEBUG
+        let decodeStart = SlotSearchDiagnostics.now
+        defer { SlotSearchDiagnostics.record("rowDecodeMS", since: decodeStart) }
+        #endif
+        // PropertyListDecoder is local to this invocation; the shared metadata
+        // decoder remains confined to the SQLite lock.
+        let decoder = PropertyListDecoder()
+        var slots: [Int: SlotContent] = [:]
+        for row in rows {
+            guard !isCancelled() else { return nil }
+            // instr is conservative. Keep Swift's exact NFC substring semantics.
+            if !needle.isEmpty, row.haystack?.contains(needle) != true { continue }
+            guard let content = decodeContent(row.payload, decoder: decoder) else { return nil }
+            #if DEBUG
+            SlotSearchDiagnostics.increment("candidateRowsDecoded")
+            #endif
+            slots[row.slot] = content
+        }
+        return isCancelled() ? nil : slots
     }
 
-    func query(group: URL, slotCount: Int, query: String,
+    func load(group: URL, isCancelled: () -> Bool = { false }) -> SlotSearchSnapshot? {
+        let captured: (SlotSearchSnapshot.Metadata, [RawRow])? = {
+            lock.lock(); defer { lock.unlock() }
+            guard !isCancelled(), let database = database(for: group),
+                  sqlite3_exec(database, "BEGIN", nil, nil, nil) == SQLITE_OK else { return nil }
+            defer { sqlite3_exec(database, "ROLLBACK", nil, nil, nil) }
+            guard let value = metadata(database: database, path: group.path),
+                  let rows = rows(database: database, path: group.path, needle: "", isCancelled: isCancelled)
+                else { return nil }
+            return (value, rows)
+        }()
+        guard let (value, rows) = captured,
+              let slots = decodeRows(rows, needle: "", isCancelled: isCancelled) else { return nil }
+        return SlotSearchSnapshot(slotCount: value.slotCount,
+                                  stamps: value.absoluteStamps(groupPath: group.path), slots: slots,
+                                  generation: value.generation,
+                                  includesEmptySlots: value.includesEmptySlots == true)
+    }
+
+    func query(group: URL, slotCount: Int, query: String, includeEmpty: Bool = false,
                isCancelled: () -> Bool) -> [Int: SlotContent]? {
-        // One SQLite read transaction keeps stamps and payloads from different
-        // processes consistent; never acquires StorageLock while holding this.
-        lock.lock(); defer { lock.unlock() }
-        guard !isCancelled(), let database = database(for: group),
-              sqlite3_exec(database, "BEGIN", nil, nil, nil) == SQLITE_OK else { return nil }
-        defer { sqlite3_exec(database, "ROLLBACK", nil, nil, nil) }
-        guard let value = metadata(database: database, path: group.path) else { return nil }
+        // Borrow immutable metadata, then release the DB mutex during file IO so
+        // different groups can reconcile in parallel. A second read transaction
+        // requires the same generation before reading any rows; a concurrent
+        // rebuild/corruption cannot pair old stamps with newer payloads.
+        let value: SlotSearchSnapshot.Metadata? = {
+            lock.lock(); defer { lock.unlock() }
+            guard !isCancelled(), let database = database(for: group) else { return nil }
+            return metadata(database: database, path: group.path)
+        }()
+        guard let value else { return nil }
+        guard !includeEmpty || value.includesEmptySlots == true else { return nil }
         #if DEBUG
         let validationStart = SlotSearchDiagnostics.now
         #endif
@@ -456,18 +598,44 @@ final class SlotSearchSnapshotCache {
         #if DEBUG
         SlotSearchDiagnostics.record("stampValidationMS", since: validationStart)
         #endif
-        return rows(database: database, path: group.path, query: query, isCancelled: isCancelled)
+        let needle = needle(for: query)
+        let captured: [RawRow]? = {
+            lock.lock(); defer { lock.unlock() }
+            guard !isCancelled(), let database = database(for: group),
+                  sqlite3_exec(database, "BEGIN", nil, nil, nil) == SQLITE_OK else { return nil }
+            defer { sqlite3_exec(database, "ROLLBACK", nil, nil, nil) }
+            guard metadata(database: database, path: group.path)?.generation == value.generation else { return nil }
+            return rows(database: database, path: group.path, needle: needle, isCancelled: isCancelled)
+        }()
+        guard let captured else { return nil }
+        return decodeRows(captured, needle: needle, isCancelled: isCancelled)
     }
 
     @discardableResult
     func save(_ snapshot: SlotSearchSnapshot, group: URL, changedSlots: Set<Int>? = nil,
               isCancelled: () -> Bool = { false }) -> Bool {
-        lock.lock(); defer { lock.unlock() }
         guard !isCancelled() else { return false }
+        let prefix = group.path + "/"
+        guard snapshot.stamps.allSatisfy({ $0.path.hasPrefix(prefix) }) else { return false }
+        let relative = snapshot.stamps.map {
+            SlotSearchSnapshot.Stamp(path: String($0.path.dropFirst(prefix.count)), identity: $0.identity)
+        }
         let value = SlotSearchSnapshot.Metadata(slotCount: snapshot.slotCount,
-                                                stamps: snapshot.stamps, generation: UUID().uuidString,
-                                                relativePaths: false).compacted(groupPath: group.path)
-        guard let data = try? encoder.encode(value), let database = database(for: group),
+                                                stamps: relative, generation: UUID().uuidString,
+                                                relativePaths: true,
+                                                includesEmptySlots: snapshot.includesEmptySlots)
+        let encoder = PropertyListEncoder()
+        encoder.outputFormat = .binary
+        guard let data = try? encoder.encode(value) else { return false }
+        var prepared: [(slot: Int, content: SlotContent, payload: Data, haystack: String)] = []
+        for (slot, content) in snapshot.slots where changedSlots == nil || changedSlots?.contains(slot) == true {
+            guard !isCancelled(), let payload = try? encoder.encode(content) else { return false }
+            let haystack = SlotSearchIndex.slotHaystack(slot: slot, content: content, label: content.label ?? "")
+                .precomposedStringWithCanonicalMapping
+            prepared.append((slot, content, payload, haystack))
+        }
+        lock.lock(); defer { lock.unlock() }
+        guard !isCancelled(), let database = database(for: group),
               sqlite3_exec(database, "BEGIN IMMEDIATE", nil, nil, nil) == SQLITE_OK else { return false }
         var committed = false
         defer { if !committed { sqlite3_exec(database, "ROLLBACK", nil, nil, nil) } }
@@ -503,11 +671,8 @@ final class SlotSearchSnapshotCache {
         guard sqlite3_prepare_v2(database, "INSERT INTO search_slots(path,slot,haystack,value) VALUES(?,?,?,?)",
                                 -1, &insertion, nil) == SQLITE_OK, let insertion else { return false }
         defer { sqlite3_finalize(insertion) }
-        for (slot, content) in snapshot.slots where changedSlots == nil || changedSlots?.contains(slot) == true {
+        for (slot, content, payload, haystack) in prepared {
             guard !isCancelled() else { return false }
-            guard let payload = try? encoder.encode(content) else { return false }
-            let haystack = SlotSearchIndex.slotHaystack(slot: slot, content: content, label: content.label ?? "")
-                .precomposedStringWithCanonicalMapping
             sqlite3_reset(insertion)
             sqlite3_bind_text(insertion, 1, group.path, -1, transient)
             sqlite3_bind_int(insertion, 2, Int32(slot))
@@ -526,6 +691,10 @@ final class SlotSearchSnapshotCache {
         committed = sqlite3_exec(database, "COMMIT", nil, nil, nil) == SQLITE_OK
         if committed {
             metadataCache.setObject(CachedMetadata(value), forKey: group.path as NSString, cost: metadataCost(value))
+            #if DEBUG
+            SlotSearchDiagnostics.gauge("metadataCacheCount", Double(metadataCache.count))
+            SlotSearchDiagnostics.gauge("metadataCacheBytes", Double(metadataCache.totalCost))
+            #endif
         }
         return committed
     }

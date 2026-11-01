@@ -219,25 +219,29 @@ public final class SlotStorage {
     }
 
     public static func searchCandidatesResult(slotsDir: URL, slotCount: Int, query: String,
+                                              includeEmpty: Bool = false,
                                               isCancelled: () -> Bool = { false }) -> SlotSearchReadResult {
         guard !isCancelled() else { return .incomplete }
         guard slotCount > 0 else { return .init(slots: [:], isComplete: true) }
+        // Both cache and rebuild paths return exact Swift keyword matches; callers
+        // can apply media filters without rebuilding the keyword haystack.
         // Persisted-cache hits still install the bounded event watcher for this
         // explicitly searched library; a startup cache hit must not skip it.
         let eventHints = SlotSearchChangeMonitor.shared.hints(group: slotsDir)
         if let hits = SlotSearchSnapshotCache.shared.query(group: slotsDir, slotCount: slotCount,
-                                                          query: query, isCancelled: isCancelled) {
-            return .init(slots: hits, isComplete: true)
+                                                          query: query, includeEmpty: includeEmpty,
+                                                          isCancelled: isCancelled) {
+            return .init(slots: includeEmpty ? hits : hits.filter { !$0.value.isEmpty }, isComplete: true)
         }
         guard !isCancelled() else { return .incomplete }
         let reader = SlotStorage(searchDirectory: slotsDir)
         var snapshot = reader.searchScanResult(slotCount: slotCount, isCancelled: isCancelled,
-                                               eventHints: eventHints)
+                                               eventHints: eventHints, includeEmpty: includeEmpty)
         // An uncooperative external writer can change a stamped file mid-read.
         // Retry once after the rejected snapshot; never persist a partial read.
         if !snapshot.isComplete && !isCancelled() {
             snapshot = reader.searchScanResult(slotCount: slotCount, isCancelled: isCancelled,
-                                                eventHints: eventHints)
+                                                eventHints: eventHints, includeEmpty: includeEmpty)
         }
         guard snapshot.isComplete, !isCancelled() else { return .incomplete }
         let hits = snapshot.slots.filter { slot, content in
@@ -788,7 +792,7 @@ public final class SlotStorage {
     }
 
     public func searchScanResult(slotCount: Int, isCancelled: () -> Bool = { false },
-                                 eventHints: Set<Int> = []) -> SlotSearchReadResult {
+                                 eventHints: Set<Int> = [], includeEmpty: Bool = false) -> SlotSearchReadResult {
         guard !isCancelled() else { return .incomplete }
         guard slotCount > 0 else { return .init(slots: [:], isComplete: true) }
         #if DEBUG
@@ -801,23 +805,30 @@ public final class SlotStorage {
         #if DEBUG
         SlotSearchDiagnostics.record("cacheLoadMS", since: loadStart)
         #endif
-        let changes = cached?.slotCount == slotCount
+        let changes = cached?.slotCount == slotCount && cached?.includesEmptySlots == true
             ? cached?.changedSlots(base: baseURL, slotCount: slotCount, prioritySlots: hints,
                                     isCancelled: isCancelled) : nil
         if let cached, let changes, changes.isEmpty {
-            return .init(slots: cached.slots, isComplete: true)
+            return .init(slots: includeEmpty ? cached.slots : cached.slots.filter { !$0.value.isEmpty },
+                         isComplete: true)
         }
         guard !isCancelled() else { return .incomplete }
         // Read at most one group per lock acquisition. Cached reads avoid the
         // storage lock entirely; cancellation between slots yields to navigation.
-        let rebuilt: SlotSearchSnapshot? = try? StorageLock.shared.withLock(timeout: Self.readLockTimeout) {
+        let rebuilt: SlotSearchSnapshot? = try? StorageLock.shared.withCancellableLock(
+            timeout: Self.readLockTimeout, isCancelled: isCancelled) {
             guard !isCancelled(), !StorageLock.shared.isDegraded else { return nil }
             return queue.sync {
                 #if DEBUG
                 let inputStart = SlotSearchDiagnostics.now
                 #endif
-                guard var before = SlotSearchSnapshot.inputs(base: baseURL, slotCount: slotCount,
-                    slots: changes, isCancelled: isCancelled) else { return nil }
+                let selected = changes?.sorted() ?? Array(1...slotCount)
+                guard let inputParts = SlotSearchParallel.map(count: selected.count, isCancelled: isCancelled,
+                    body: { index, cancelled in
+                        SlotSearchSnapshot.inputs(base: self.baseURL, slotCount: slotCount,
+                            slots: [selected[index]], isCancelled: cancelled)
+                    }), inputParts.allSatisfy({ $0 != nil }) else { return nil }
+                var before = inputParts.compactMap { $0 }.flatMap { $0 }.sorted { $0.path < $1.path }
                 if let changes, let cached {
                     let prefix = baseURL.path + "/"
                     before += cached.stamps.filter { stamp in
@@ -839,29 +850,40 @@ public final class SlotStorage {
                 let readStart = SlotSearchDiagnostics.now
                 #endif
                 var slots = changes != nil ? cached?.slots ?? [:] : [:]
-                var readFailed = false
-                for slot in 1...slotCount where changes == nil || changes?.contains(slot) == true {
-                    guard !isCancelled() else { return nil }
+                // The owning thread retains StorageLock throughout this work.
+                // These read-only workers never acquire that lock or mutate the
+                // queue-owned caches/attachment poison state.
+                let capturedEntries = entries
+                guard let contents = SlotSearchParallel.map(count: selected.count, isCancelled: isCancelled,
+                    body: { index, cancelled -> SlotContent? in
+                    let slot = selected[index]
+                    var readFailed = false
                     let directory = baseURL.appendingPathComponent(String(slot), isDirectory: true)
-                    var content = readSlotContent(from: directory, textOnly: true, searchEntries: entries,
-                        isSearchCancelled: isCancelled, searchReadFailure: { readFailed = true })
-                    content.label = SlotSearchFileIO.read(directory.path + "/label.txt",
-                        isCancelled: isCancelled, onFailure: { readFailed = true })
-                        .flatMap { String(data: $0, encoding: .utf8) }?
+                    var content = readSlotContent(from: directory, textOnly: true, searchEntries: capturedEntries,
+                        isSearchCancelled: cancelled, searchReadFailure: { readFailed = true })
+                    let labelData = SlotSearchFileIO.read(directory.path + "/label.txt",
+                        isCancelled: cancelled, onFailure: { readFailed = true })
+                    let label = labelData.flatMap { String(data: $0, encoding: .utf8) }
+                    if labelData != nil && label == nil { readFailed = true }
+                    content.label = label?
                         .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
                     // Old attachment metadata may still contain large inline
                     // payloads. Search retains names/types, never those bytes.
                     for index in content.attachments.indices { content.attachments[index].data = nil }
-                    if !content.isEmpty { slots[slot] = content }
-                    else { slots.removeValue(forKey: slot) }
+                    // Keep proven empty and label-only rows in the disposable
+                    // snapshot. Public nonempty searches retain their old scope.
+                    return readFailed || cancelled() ? nil : content
+                }), !isCancelled() else { return nil }
+                for (slot, content) in zip(selected, contents) {
+                    guard let content else { return nil }
+                    slots[slot] = content
                 }
-                guard !readFailed, !isCancelled() else { return nil }
                 #if DEBUG
                 SlotSearchDiagnostics.record("contentReadMS", since: readStart)
                 let validationStart = SlotSearchDiagnostics.now
                 #endif
                 let snapshot = SlotSearchSnapshot(slotCount: slotCount, stamps: before, slots: slots,
-                                                  generation: cached?.generation)
+                                                  generation: cached?.generation, includesEmptySlots: true)
                 guard snapshot.isCurrent(slotCount: slotCount, isCancelled: isCancelled),
                       SlotSearchChangeMonitor.shared.revision(group: baseURL) == revision else { return nil }
                 #if DEBUG
@@ -878,7 +900,9 @@ public final class SlotStorage {
         #if DEBUG
         SlotSearchDiagnostics.record("cacheSaveMS", since: saveStart)
         #endif
-        return isCancelled() ? .incomplete : .init(slots: rebuilt.slots, isComplete: true)
+        return isCancelled() ? .incomplete
+            : .init(slots: includeEmpty ? rebuilt.slots : rebuilt.slots.filter { !$0.value.isEmpty },
+                    isComplete: true)
     }
 
     /// 搜索扫描时哪些 pasteboard type 的字节值得读。
@@ -1164,8 +1188,10 @@ public final class SlotStorage {
         // Slots saved before v2.3.6 won't have this file — we generate new IDs
         // so the first thumbnail load after upgrade is a one-time cache miss.
         let metaURL = slotDir.appendingPathComponent("content.json")
-        if let metaData = readData(metaURL),
-           let meta = try? JSONDecoder().decode(SlotContentMeta.self, from: metaData) {
+        let metaData = readData(metaURL)
+        let meta = metaData.flatMap { try? JSONDecoder().decode(SlotContentMeta.self, from: $0) }
+        let invalidSearchMetadata = textOnly && metaData != nil && meta == nil
+        if let meta {
             content.contentId = meta.contentId
             content.updatedAt = meta.updatedAt
             content.htmlSource = meta.htmlSource
@@ -1226,12 +1252,15 @@ public final class SlotStorage {
                 let normalizedAtts = textOnly ? atts : migrateInlineAttachmentsIfNeeded(atts, slotDir: slotDir)
                 content.attachments = normalizeStoragePaths(normalizedAtts, slotDir: slotDir)
                 // Clean decode clears any prior corruption poison for this slot.
-                if let s = slotNum { attachmentDecodeFailedSlots.remove(s) }
+                if !textOnly, let s = slotNum { attachmentDecodeFailedSlots.remove(s) }
             } else {
                 // Search is strictly read-only, including corrupt legacy
                 // metadata. Normal get() retains the existing poison/backup
                 // protection before any following edit.
-                if textOnly { return content }
+                if textOnly {
+                    if content.isEmpty { searchReadFailure() }
+                    return content
+                }
                 // P2 (v2.10.13): 文件「存在但解码失败」= 真实损坏（区别于「文件缺失」的正常
                 // 首次/legacy 情形）。此前一律走 try? 静默回退为空，随后一次 writeSlotContent
                 // 会因 attachments 为空而不再写 attachments.json，把「空」固化 → 附件永久丢失。
@@ -1260,9 +1289,10 @@ public final class SlotStorage {
         } else {
             // ST-2 (v2.10.15): no file on disk = genuinely empty (or legacy). Clear any
             // stale poison so it never blocks a legitimate empty-attachment write.
-            if let s = slotNum { attachmentDecodeFailedSlots.remove(s) }
+            if !textOnly, let s = slotNum { attachmentDecodeFailedSlots.remove(s) }
         }
 
+        if invalidSearchMetadata && content.isEmpty { searchReadFailure() }
         return content
     }
 

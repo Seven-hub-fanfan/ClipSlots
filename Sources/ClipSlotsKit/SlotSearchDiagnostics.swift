@@ -19,5 +19,13 @@ public enum SlotSearchDiagnostics {
         totals.removeAll()
         return result
     }
+    static func increment(_ name: String, by amount: Double = 1) {
+        guard enabled else { return }
+        lock.lock(); totals[name, default: 0] += amount; lock.unlock()
+    }
+    static func gauge(_ name: String, _ value: Double) {
+        guard enabled else { return }
+        lock.lock(); totals[name] = value; lock.unlock()
+    }
 }
 #endif

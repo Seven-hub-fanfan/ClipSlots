@@ -112,6 +112,37 @@ public final class StorageLock {
         return try body()
     }
 
+    /// Foreground reads can stop waiting for either an in-process writer or an
+    /// external flock holder. The timeout covers both waits; writes keep their
+    /// existing entry point. Cancellation never enters the protected body.
+    @discardableResult
+    public func withCancellableLock<T>(timeout: TimeInterval = 5.0,
+                                        isCancelled: () -> Bool,
+                                        _ body: () throws -> T) throws -> T {
+        let deadline = ProcessInfo.processInfo.systemUptime + max(0, timeout)
+        while true {
+            if isCancelled() { throw CancellationError() }
+            if recursive.try() { break }
+            if ProcessInfo.processInfo.systemUptime >= deadline {
+                throw StorageLockError.timeout(detail: "storage is busy in this process; retry shortly")
+            }
+            usleep(5_000)
+        }
+        defer { recursive.unlock() }
+        if isCancelled() { throw CancellationError() }
+        if depth == 0 {
+            try acquireFlock(timeout: max(0, deadline - ProcessInfo.processInfo.systemUptime),
+                             isCancelled: isCancelled)
+        }
+        depth += 1
+        defer {
+            depth -= 1
+            if depth == 0 { releaseFlock() }
+        }
+        if isCancelled() { throw CancellationError() }
+        return try body()
+    }
+
     /// UI transactions may decline a busy store before any mutation. Unlike a zero
     /// flock timeout alone, this also avoids waiting for another in-process thread.
     @discardableResult
@@ -248,7 +279,8 @@ public final class StorageLock {
         return errno == EPERM // exists but owned by another user
     }
 
-    private func acquireFlock(timeout: TimeInterval) throws {
+    private func acquireFlock(timeout: TimeInterval, isCancelled: () -> Bool = { false }) throws {
+        if isCancelled() { throw CancellationError() }
         // v2.9.16 (#6): `--force` bypasses the OS lock entirely.
         if StorageLock.forceUnlocked {
             warnLocklessOnce("--force")
@@ -268,6 +300,7 @@ public final class StorageLock {
         }
         let deadline = Date().addingTimeInterval(timeout)
         while true {
+            if isCancelled() { throw CancellationError() }
             if flock(handle, LOCK_EX | LOCK_NB) == 0 {
                 holdsFlock = true
                 _isDegraded = false // ST-7 (v2.10.15): real lock acquired — not degraded.

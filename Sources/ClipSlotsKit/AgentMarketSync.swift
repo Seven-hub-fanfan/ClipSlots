@@ -194,44 +194,59 @@ public actor AgentMarketSyncService {
         snapshotURL(scope).deletingLastPathComponent().appendingPathComponent("installed.json")
     }
     public func installations(scope: String) throws -> [String: AgentMarketInstallation] {
-        let file = installationsURL(scope)
-        guard FileManager.default.fileExists(atPath: file.path) else { return [:] }
-        return try JSONDecoder().decode([String: AgentMarketInstallation].self, from: Data(contentsOf: file))
+        try AgentMarketDiskTransaction.access(root: root) { disk in
+            try installations(scope: scope, disk: disk)
+        }
+    }
+    func installations(scope: String, disk: AgentMarketDiskTransaction) throws -> [String: AgentMarketInstallation] {
+        guard let data = try disk.read(installationsURL(scope)) else { return [:] }
+        return try JSONDecoder().decode([String: AgentMarketInstallation].self, from: data)
     }
     /// Only an actual skill document or verified, explicitly bound tools count
     /// as an installation. Old catalog-only records remain readable but pending.
     public func install(_ item: AgentMarketItem, snapshot: AgentMarketSnapshot) throws -> AgentMarketInstallation {
-        var records = try installations(scope: snapshot.scope)
-        let resolved = snapshot.item(item.id) ?? item
-        let skill: AgentSkill?
-        if snapshot.markdown(for: resolved) != nil { skill = try materialize(resolved, snapshot: snapshot) }
-        else if resolved.kind == "app", let existing = records[item.id]?.connection,
-                existing.isValid, existing.scope == snapshot.scope, existing.applicationID == item.id { skill = nil }
-        else if resolved.kind == "app" { throw AgentMCPError.authorization }
-        else { throw AgentMarketSyncError.unavailableSkill }
-        let record = AgentMarketInstallation(item: resolved.raw, skillSlug: skill?.slug,
-            installedAt: records[item.id]?.installedAt ?? Date(), connection: records[item.id]?.connection)
-        records[item.id] = record
-        let file = installationsURL(snapshot.scope)
-        try FileManager.default.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
-        try JSONEncoder().encode(records).write(to: file, options: .atomic)
-        return record
+        try AgentMarketDiskTransaction.access(root: root) { disk in
+            var records = try installations(scope: snapshot.scope, disk: disk)
+            let resolved = snapshot.item(item.id) ?? item
+            let skill: AgentSkill?
+            var changes: [(URL, Data?)] = []
+            if snapshot.markdown(for: resolved) != nil {
+                let document = try materializedDocument(resolved, snapshot: snapshot)
+                skill = document.0
+                changes.append((URL(fileURLWithPath: document.0.markdownPath), document.1))
+            } else if resolved.kind == "app", let existing = records[item.id]?.connection,
+                      existing.isValid, existing.scope == snapshot.scope, existing.applicationID == item.id { skill = nil }
+            else if resolved.kind == "app" { throw AgentMCPError.authorization }
+            else { throw AgentMarketSyncError.unavailableSkill }
+            let record = AgentMarketInstallation(item: resolved.raw, skillSlug: skill?.slug,
+                installedAt: records[item.id]?.installedAt ?? Date(), connection: records[item.id]?.connection)
+            records[item.id] = record
+            changes.append((installationsURL(snapshot.scope), try JSONEncoder().encode(records)))
+            try disk.apply(changes)
+            return record
+        }
     }
     public func bind(_ item: AgentMarketItem, snapshot: AgentMarketSnapshot,
-                     client: AgentMCPClient, selectedNames: Set<String>) async throws -> AgentMarketInstallation {
+                     client: AgentMCPClient, selectedNames: Set<String>,
+                     operation: AgentMarketOperation? = nil) async throws -> AgentMarketInstallation {
         guard !selectedNames.isEmpty, item.kind == "app" else { throw AgentMCPError.unavailable }
         let tools = try await client.listTools().filter { selectedNames.contains($0.name) }
         guard tools.count == selectedNames.count else { throw AgentMCPError.invalidBinding }
         let binding = AgentMCPBinding(scope: snapshot.scope, applicationID: item.id, endpoint: client.endpoint, tools: tools)
         guard binding.isValid else { throw AgentMCPError.invalidBinding }
-        var records = try installations(scope: snapshot.scope)
-        let record = AgentMarketInstallation(item: item.raw, skillSlug: records[item.id]?.skillSlug,
-            installedAt: records[item.id]?.installedAt ?? Date(), connection: binding)
-        records[item.id] = record
-        let file = installationsURL(snapshot.scope)
-        try FileManager.default.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
-        try JSONEncoder().encode(records).write(to: file, options: .atomic)
-        return record
+        func persist() throws -> AgentMarketInstallation {
+            try Task.checkCancellation()
+            return try AgentMarketDiskTransaction.access(root: root) { disk in
+                var records = try installations(scope: snapshot.scope, disk: disk)
+                let record = AgentMarketInstallation(item: item.raw, skillSlug: records[item.id]?.skillSlug,
+                    installedAt: records[item.id]?.installedAt ?? Date(), connection: binding)
+                records[item.id] = record
+                try disk.apply([(installationsURL(snapshot.scope), try JSONEncoder().encode(records))])
+                return record
+            }
+        }
+        if let operation { return try operation.withCurrent(persist) }
+        return try persist()
     }
     public func reference(_ item: AgentMarketItem, snapshot: AgentMarketSnapshot) throws -> AgentSkillReference {
         if snapshot.markdown(for: item) != nil {
@@ -252,15 +267,18 @@ public actor AgentMarketSyncService {
             markdown: content, applicationID: item.id)
     }
     public func activate(scope: String) {
-        try? FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-        try? JSONEncoder().encode(["scope": scope]).write(to: root.appendingPathComponent("active.json"), options: .atomic)
+        try? AgentMarketDiskTransaction.access(root: root) { disk in
+            try disk.apply([(root.appendingPathComponent("active.json"), try JSONEncoder().encode(["scope": scope]))])
+        }
     }
     public func load(scope: String = "public") -> AgentMarketSnapshot? {
-        guard let data = try? Data(contentsOf: snapshotURL(scope)) else { return scope == "public" ? seed() : nil }
-        return try? JSONDecoder().decode(AgentMarketSnapshot.self, from: data)
+        try? AgentMarketDiskTransaction.access(root: root) { disk in
+            guard let data = try disk.read(snapshotURL(scope)) else { return scope == "public" ? seed() : nil }
+            return try JSONDecoder().decode(AgentMarketSnapshot.self, from: data)
+        }
     }
     private func seed() -> AgentMarketSnapshot? {
-        let resources = Bundle.module.url(forResource: "Resources", withExtension: nil)?.appendingPathComponent("Market")
+        let resources = ClipSlotsResourceBundle.bundle?.url(forResource: "Resources", withExtension: nil)?.appendingPathComponent("Market")
         guard let resources, let data = try? Data(contentsOf: resources.appendingPathComponent("catalog.json")),
               let catalog = try? JSONDecoder().decode(JSONValue.self, from: data),
               let detailData = try? Data(contentsOf: resources.appendingPathComponent("details.json")),
@@ -335,15 +353,21 @@ public actor AgentMarketSyncService {
             throw AgentMCPError.unavailable
         }
     }
-    public func refresh(session: AgentMarketDesktopSession? = nil, force: Bool = false) async throws -> AgentMarketSnapshot {
+    public func refresh(session: AgentMarketDesktopSession? = nil, force: Bool = false,
+                        operation: AgentMarketOperation? = nil) async throws -> AgentMarketSnapshot {
+        try Task.checkCancellation()
         let scope = session?.scope ?? "public"
         let cached = load(scope: scope)
-        if !force, let cached, Date().timeIntervalSince(cached.fetchedAt) < 60 { return cached }
+        if !force, let cached, Date().timeIntervalSince(cached.fetchedAt) < 60 {
+            if let operation { return try operation.withCurrent { cached } }
+            return cached
+        }
         let catalog: JSONValue
         do { catalog = try await request("/api/bff/app-store/catalog", session: session) }
         catch AgentMarketSyncError.requiresLogin where session != nil {
-            activate(scope: "public")
-            return try await refresh(session: nil, force: true)
+            if let operation { try operation.withCurrent { activate(scope: "public") } }
+            else { try Task.checkCancellation(); activate(scope: "public") }
+            return try await refresh(session: nil, force: true, operation: operation)
         }
         guard let rawItems = catalog["items"]?.arrayValue, !rawItems.isEmpty,
               catalog["content_version"]?.stringValue?.isEmpty == false,
@@ -385,7 +409,7 @@ public actor AgentMarketSyncService {
             }
         } else { next.accountStatus = "公开目录 · 登录后同步个人技能" }
         next.fetchedAt = Date()
-        try commit(next)
+        try commit(next, operation: operation)
         return next
     }
     public func fetchDetail(_ item: AgentMarketItem, session: AgentMarketDesktopSession? = nil) async throws -> JSONValue {
@@ -397,53 +421,79 @@ public actor AgentMarketSyncService {
         }
         return detail
     }
-    public func commit(_ snapshot: AgentMarketSnapshot) throws {
-        let file = snapshotURL(snapshot.scope)
-        try FileManager.default.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
-        try JSONEncoder().encode(snapshot).write(to: file, options: .atomic)
-        let active = root.appendingPathComponent("active.json")
-        try JSONEncoder().encode(["scope": snapshot.scope]).write(to: active, options: .atomic)
-        // Refresh only previously materialized skill documents. No automatic script authorization.
-        for item in snapshot.items where FileManager.default.fileExists(atPath: skillURL(item, scope: snapshot.scope).path) {
-            if snapshot.markdown(for: item) != nil { _ = try materialize(item, snapshot: snapshot) }
+    public func commit(_ snapshot: AgentMarketSnapshot, operation: AgentMarketOperation? = nil) throws {
+        // Snapshot, active scope and materialized documents form one operation.
+        // Invalidation shares this final synchronous write lock, so an actor
+        // call queued before a scope/new-request change cannot persist later.
+        func persist() throws {
+            try Task.checkCancellation()
+            try AgentMarketDiskTransaction.access(root: root) { disk in
+                var changes: [(URL, Data?)] = [
+                    (snapshotURL(snapshot.scope), try JSONEncoder().encode(snapshot)),
+                    (root.appendingPathComponent("active.json"), try JSONEncoder().encode(["scope": snapshot.scope]))
+                ]
+                // Only existing documents are refreshed. Empty uninstall
+                // directories and user-owned companion files do not authorize materialization.
+                for item in snapshot.items {
+                    let file = skillURL(item, scope: snapshot.scope).appendingPathComponent("SKILL.md")
+                    if try disk.read(file) != nil, snapshot.markdown(for: item) != nil {
+                        changes.append((file, try materializedDocument(item, snapshot: snapshot).1))
+                    }
+                }
+                try disk.apply(changes)
+            }
         }
+        if let operation { try operation.withCurrent(persist) }
+        else { try persist() }
     }
     public func materialize(_ item: AgentMarketItem, snapshot: AgentMarketSnapshot) throws -> AgentSkill {
+        try AgentMarketDiskTransaction.access(root: root) { disk in
+            let (skill, bytes) = try materializedDocument(item, snapshot: snapshot)
+            try disk.apply([(URL(fileURLWithPath: skill.markdownPath), bytes)])
+            return skill
+        }
+    }
+    private func materializedDocument(_ item: AgentMarketItem, snapshot: AgentMarketSnapshot) throws -> (AgentSkill, Data) {
         guard let markdown = snapshot.markdown(for: item), markdown.utf8.count <= 1_048_576 else { throw AgentMarketSyncError.unavailableSkill }
         let directory = skillURL(item, scope: snapshot.scope), file = directory.appendingPathComponent("SKILL.md")
-        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        try Data(markdown.utf8).write(to: file, options: .atomic)
         let parsed = AgentSkillCatalog.parse(markdown: markdown, fallbackName: item.title)
-        return AgentSkill(slug: "market_" + String(Self.hash(snapshot.scope + "|" + item.activationSkill).prefix(24)),
+        return (AgentSkill(slug: "market_" + String(Self.hash(snapshot.scope + "|" + item.activationSkill).prefix(24)),
             name: item.title, description: item.summary, version: snapshot.version, directory: directory.path,
-            markdownPath: file.path, source: .market, declaredTools: parsed.tools, scripts: [])
+            markdownPath: file.path, source: .market, declaredTools: parsed.tools, scripts: []), Data(markdown.utf8))
     }
     func skillURL(_ item: AgentMarketItem, scope: String) -> URL {
         root.appendingPathComponent("scopes/" + Self.hash(scope) + "/skills/" + Self.hash(item.activationSkill))
     }
     public static func discover(root: URL = defaultRoot) -> [AgentSkill] {
-        guard let active = try? Data(contentsOf: root.appendingPathComponent("active.json")),
-              let scope = (try? JSONDecoder().decode([String:String].self,from:active))?["scope"] else { return [] }
-        return discover(root:root,session:scope == "public" ? nil : AgentMarketDesktopSession.read())
+        (try? AgentMarketDiskTransaction.access(root: root) { disk in
+            try discover(root: root, disk: disk) { AgentMarketDesktopSession.read() }
+        }) ?? []
     }
     public static func discover(root: URL, session: AgentMarketDesktopSession?) -> [AgentSkill] {
-        guard let active = try? Data(contentsOf: root.appendingPathComponent("active.json")),
+        (try? AgentMarketDiskTransaction.access(root: root) { disk in
+            try discover(root: root, disk: disk) { session }
+        }) ?? []
+    }
+    private static func discover(root: URL, disk: AgentMarketDiskTransaction,
+                                 session: () -> AgentMarketDesktopSession?) throws -> [AgentSkill] {
+        guard let active = try disk.read(root.appendingPathComponent("active.json")),
               let scope = (try? JSONDecoder().decode([String: String].self, from: active))?["scope"],
-              scope == "public" || session?.scope == scope,
-              let data = try? Data(contentsOf: root.appendingPathComponent("scopes/" + hash(scope) + "/snapshot.json")),
+              scope == "public" || session()?.scope == scope,
+              let data = try disk.read(root.appendingPathComponent("scopes/" + hash(scope) + "/snapshot.json")),
               let snapshot = try? JSONDecoder().decode(AgentMarketSnapshot.self, from: data) else { return [] }
         var seen = Set<String>()
-        let installedData = try? Data(contentsOf: root.appendingPathComponent("scopes/" + hash(scope) + "/installed.json"))
-        let installed = installedData.flatMap { try? JSONDecoder().decode([String: AgentMarketInstallation].self, from: $0) } ?? [:]
-        return snapshot.items.compactMap { item in
+        let installedData = try disk.read(root.appendingPathComponent("scopes/" + hash(scope) + "/installed.json"))
+        let installed = try installedData.map { try JSONDecoder().decode([String: AgentMarketInstallation].self, from: $0) } ?? [:]
+        return try snapshot.items.compactMap { item in
             guard seen.insert(item.activationSkill).inserted, installed[item.id]?.isEnabled != false else { return nil }
             let directory = root.appendingPathComponent("scopes/" + hash(scope) + "/skills/" + hash(item.activationSkill))
             let file = directory.appendingPathComponent("SKILL.md")
-            guard FileManager.default.fileExists(atPath: file.path), snapshot.markdown(for: item) != nil else { return nil }
+            guard let bytes = try disk.read(file), let markdown = String(data: bytes, encoding: .utf8),
+                  snapshot.markdown(for: item) != nil else { return nil }
             return AgentSkill(slug: "market_" + String(hash(scope + "|" + item.activationSkill).prefix(24)),
                 name: item.title, description: item.summary, version: snapshot.version,
                 directory: directory.path, markdownPath: file.path, source: .market,
-                declaredTools: AgentSkillCatalog.parse(markdown: (try? String(contentsOf: file)) ?? "").tools, scripts: [])
+                declaredTools: AgentSkillCatalog.parse(markdown: markdown).tools, scripts: [])
         }
     }
     public func image(_ address: String) async throws -> Data {

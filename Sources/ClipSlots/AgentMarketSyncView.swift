@@ -7,10 +7,19 @@ import ClipSlotsKit
     let service: AgentMarketSyncService
     @Published var snapshot: AgentMarketSnapshot? {
         didSet {
+            if oldValue != snapshot { catalogOperation?.invalidate() }
             items = snapshot?.items ?? []
             if oldValue?.scope != snapshot?.scope {
+                scopeGeneration = UUID()
+                bindingAttempts.values.forEach { $0.invalidate() }
+                bindingAttempts.removeAll()
                 revision = UUID(); installed = [:]; pending = []; itemErrors = [:]
                 connectingItem = nil; connectionPrompt = nil; sourceConnection = nil; sourceAuth = nil
+                authAttempt = UUID(); authAttemptKey = nil
+            } else if oldValue?.connectors != snapshot?.connectors {
+                // Losing and regaining authorization cannot revive an executor
+                // captured before the connector state changed.
+                connectorGeneration = UUID()
             }
         }
     }
@@ -29,11 +38,43 @@ import ClipSlotsKit
         }
     }
     private var installTasks: [String: Task<Void, Error>] = [:]
+    private var bindingAttempts: [String: AgentMarketOperation] = [:]
+    private var scopeGeneration = UUID()
+    private var connectorGeneration = UUID()
     @Published var isRefreshing = false
     @Published var error: String?
     @Published var presentation: [String: MarketPresentation] = [:]
-    var session: AgentMarketDesktopSession?
-    var revision = UUID()
+    var session: AgentMarketDesktopSession? {
+        didSet {
+            if oldValue?.scope != session?.scope { catalogOperation?.invalidate() }
+        }
+    }
+    var revision = UUID() {
+        didSet {
+            if oldValue != revision { catalogOperation?.invalidate() }
+        }
+    }
+    private var catalogOperation: AgentMarketOperation?
+    /// Catalog writes capture entire snapshots. A newer request supersedes the
+    /// previous capture, including requests for another item in the same scope.
+    func beginCatalogOperation() -> AgentMarketOperation {
+        catalogOperation?.invalidate()
+        let operation = AgentMarketOperation()
+        catalogOperation = operation
+        return operation
+    }
+    func finishCatalogOperation(_ operation: AgentMarketOperation) {
+        if catalogOperation === operation { catalogOperation = nil }
+        operation.invalidate()
+    }
+    func catalogIsCurrent(_ operation: AgentMarketOperation, scope: String?, token: UUID) -> Bool {
+        !Task.isCancelled && operation.isCurrent && catalogOperation === operation
+            && scope == snapshot?.scope && token == revision
+    }
+    /// Connector authorization generation. Start, cancel and scope changes replace it,
+    /// so a response from an earlier attempt can never publish into the current one.
+    var authAttempt = UUID()
+    var authAttemptKey: String?
     let readsDesktop: Bool
     init(service: AgentMarketSyncService = .init(), fixture: AgentMarketSnapshot? = nil, readsDesktop: Bool = true) {
         self.service = service; snapshot = fixture; self.readsDesktop = readsDesktop
@@ -64,7 +105,7 @@ import ClipSlotsKit
         guard !isRefreshing else { return }
         isRefreshing = true; error = nil
         defer { isRefreshing = false }
-        let token = UUID(); revision = token
+        revision = UUID()
         let currentSession = readsDesktop ? await Task.detached { AgentMarketDesktopSession.read() }.value : nil
         session = currentSession
         let scope = readsDesktop ? currentSession?.scope ?? "public" : snapshot?.scope ?? "public"
@@ -87,9 +128,12 @@ import ClipSlotsKit
         if let data = try? Data(contentsOf: root.appendingPathComponent("presentation.json")),
            let value = try? JSONDecoder().decode([String: MarketPresentation].self, from: data) { presentation = value }
         guard readsDesktop else { return }
+        let token = UUID(); revision = token
+        let operation = beginCatalogOperation()
+        defer { finishCatalogOperation(operation) }
         do {
-            let result = try await service.refresh(session: currentSession, force: force)
-            guard revision == token else { return }
+            let result = try await service.refresh(session: currentSession, force: force, operation: operation)
+            guard catalogIsCurrent(operation, scope: scope, token: token) else { return }
             if result.scope != scope {
                 session = nil
                 AgentSkillLibrary.shared.resetMarketScope()
@@ -97,16 +141,25 @@ import ClipSlotsKit
             snapshot = result
             installed = try await service.installations(scope: result.scope)
             AgentSkillLibrary.shared.refresh()
-        } catch { self.error = error.localizedDescription }
+        } catch {
+            if catalogIsCurrent(operation, scope: scope, token: token) { self.error = error.localizedDescription }
+        }
     }
     func detail(_ item: AgentMarketItem) async {
         guard readsDesktop else { return }
         let scope = snapshot?.scope, token = revision
+        let operation = beginCatalogOperation()
+        defer { finishCatalogOperation(operation) }
         do {
             let detail = try await service.fetchDetail(item, session: session)
-            guard scope == snapshot?.scope, token == revision, var current = snapshot else { return }
-            current.details[item.id] = detail; try await service.commit(current); snapshot = current
-        } catch { self.error = error.localizedDescription }
+            guard catalogIsCurrent(operation, scope: scope, token: token), var current = snapshot else { return }
+            current.details[item.id] = detail
+            try await service.commit(current, operation: operation)
+            guard catalogIsCurrent(operation, scope: scope, token: token) else { return }
+            snapshot = current
+        } catch {
+            if catalogIsCurrent(operation, scope: scope, token: token) { self.error = error.localizedDescription }
+        }
     }
     func materialize(_ item: AgentMarketItem) async throws -> AgentSkill {
         guard let current = snapshot else { throw AgentMarketSyncError.unavailableSkill }
@@ -123,6 +176,7 @@ import ClipSlotsKit
         return result
     }
     func isInstalled(_ item: AgentMarketItem) -> Bool {
+        guard applicationAuthorizationReady(item) else { return false }
         guard let record = installed[item.id] else { return false }
         if record.skillSlug != nil { return true }
         return record.connection?.isValid == true && record.connection?.scope == snapshot?.scope
@@ -145,10 +199,23 @@ import ClipSlotsKit
     }
     func bind(_ item: AgentMarketItem, client: AgentMCPClient, selectedNames: Set<String>) async throws {
         guard let current = snapshot else { throw AgentMarketSyncError.invalidResponse }
+        let generation = scopeGeneration
+        let attempt = AgentMarketOperation()
+        bindingAttempts[item.id]?.invalidate()
+        bindingAttempts[item.id] = attempt
         pending.insert(item.id)
-        defer { pending.remove(item.id) }
-        let record = try await service.bind(item, snapshot: current, client: client, selectedNames: selectedNames)
-        guard current.scope == snapshot?.scope else { throw AgentMCPError.invalidBinding }
+        defer {
+            if bindingAttempts[item.id] === attempt {
+                bindingAttempts[item.id] = nil
+                pending.remove(item.id)
+            }
+            attempt.invalidate()
+        }
+        let record = try await service.bind(item, snapshot: current, client: client,
+                                            selectedNames: selectedNames, operation: attempt)
+        guard generation == scopeGeneration, current.scope == snapshot?.scope, attempt.isCurrent else {
+            throw AgentMCPError.invalidBinding
+        }
         installed[item.id] = record
         itemErrors[item.id] = nil
         connectingItem = nil
@@ -157,21 +224,28 @@ import ClipSlotsKit
                           isCurrent: @escaping @MainActor @Sendable () -> Bool,
                           onInteraction: @escaping @Sendable (AgentInteraction) async -> Void) -> [AgentToolExecuting] {
         guard let scope = snapshot?.scope else { return [] }
-        let service = self.service, readsDesktop = self.readsDesktop
+        let service = self.service, readsDesktop = self.readsDesktop, generation = scopeGeneration
+        let authorizationGeneration = connectorGeneration
         return installed.values.compactMap { record in
             guard record.isEnabled, managedApplicationEnabled(AgentMarketItem(record.item).id),
+                  applicationAuthorizationReady(AgentMarketItem(record.item)),
                   let binding = record.connection, binding.isValid, binding.scope == scope else { return nil }
             let title = AgentMarketItem(record.item).title
             return AgentMCPApplicationTools(binding: binding, title: title,
                 client: clientFactory(binding.endpoint, scope), readOnly: readOnly,
                 isCurrent: { [weak self] in
-                    guard await isCurrent(), await self?.snapshot?.scope == scope,
+                    guard await isCurrent(), await self?.scopeGeneration == generation,
+                          await self?.connectorGeneration == authorizationGeneration,
+                          await self?.snapshot?.scope == scope,
+                          await self?.applicationAuthorizationReady(AgentMarketItem(record.item)) == true,
                           await self?.managedApplicationEnabled(binding.applicationID) == true else { return false }
                     if readsDesktop, scope != "public" {
                         guard await Task.detached(operation: { AgentMarketDesktopSession.read()?.scope }).value == scope else { return false }
                     }
                     let record = try? await service.installations(scope: scope)[binding.applicationID]
-                    return record?.isEnabled == true && record?.connection == binding
+                    let sameGeneration = await self?.scopeGeneration == generation
+                    let sameAuthorization = await self?.connectorGeneration == authorizationGeneration
+                    return record?.isEnabled == true && record?.connection == binding && sameGeneration && sameAuthorization
                 }, approve: { tool, call in
                     // External effects always ask; read-only annotations allow
                     // execution only when the user selected automatic approval.
@@ -219,9 +293,18 @@ import ClipSlotsKit
     }
     func reference(_ item: AgentMarketItem) async throws -> AgentSkillReference {
         guard let current = snapshot else { throw AgentMarketSyncError.invalidResponse }
+        guard applicationAuthorizationReady(item) else {
+            throw AgentMarketSyncError.invalidForm("连接器尚未完成授权")
+        }
+        let generation = scopeGeneration, authorizationGeneration = connectorGeneration
         try await install(item)
+        guard scopeGeneration == generation, connectorGeneration == authorizationGeneration,
+              applicationAuthorizationReady(item) else { throw CancellationError() }
         let reference = try await service.reference(current.item(item.id) ?? item, snapshot: current)
-        guard snapshot?.scope == current.scope else { throw AgentMarketSyncError.requiresLogin }
+        guard snapshot?.scope == current.scope, scopeGeneration == generation,
+              connectorGeneration == authorizationGeneration, applicationAuthorizationReady(item) else {
+            throw AgentMarketSyncError.requiresLogin
+        }
         return reference
     }
     func save(_ value: MarketPresentation, for id: String) async throws {

@@ -160,7 +160,7 @@ public struct TapNowModelCatalog: Codable, Sendable {
         }
     }
     public static func load() throws -> Self {
-        guard let url = Bundle.module.url(forResource: "TapNowModelCatalog", withExtension: "json", subdirectory: "Resources") else {
+        guard let url = ClipSlotsResourceBundle.bundle?.url(forResource: "TapNowModelCatalog", withExtension: "json", subdirectory: "Resources") else {
             throw ModelWorkspaceError.invalid("模型目录资源缺失。")
         }
         return try JSONDecoder().decode(Self.self, from: Data(contentsOf: url))

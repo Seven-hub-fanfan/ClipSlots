@@ -333,7 +333,11 @@ struct AgentApplicationManager: View {
                             HStack {
                                 Label(id, systemImage: "link")
                                 Spacer()
-                                Button(sync.connectorStatus(id) == "authenticated" ? "断开连接" : "连接") {
+                                Text(sync.connectorStatusText(id))
+                                    .foregroundStyle(TapSkin.secondaryInk)
+                                    .accessibilityIdentifier("market-manager-connector-status-" + id)
+                                Button(sync.connectorStatus(id) == "authenticated" ? "断开连接"
+                                       : sync.connectorStatus(id) == "pending_approval" ? "查看进度" : "连接") {
                                     if sync.connectorStatus(id) == "authenticated" {
                                         work {
                                             try await sync.service.disconnectConnector(id, session: sync.requireSession())
@@ -410,7 +414,7 @@ struct AgentApplicationManager: View {
                         }
                         Spacer()
                         Button("在对话中使用") { use(item) }.buttonStyle(ConnectorButtonStyle(primary: true))
-                            .disabled(item.connectorIDs.contains { sync.connectorStatus($0) == nil })
+                            .disabled(!sync.applicationAuthorizationReady(item))
                             .accessibilityIdentifier("market-manager-use")
                     } else {
                         Spacer()

@@ -10,11 +10,7 @@ public enum REAIntegration {
             Bundle.main.bundleURL.appendingPathComponent(relative)
         ].compactMap { $0 }
         if let url = candidates.first(where: { FileManager.default.fileExists(atPath: $0.path) }) { return url }
-        #if DEBUG
-        return Bundle.module.url(forResource: "rea-original", withExtension: "svg", subdirectory: "Resources")
-        #else
-        return nil
-        #endif
+        return ClipSlotsResourceBundle.bundle?.url(forResource: "rea-original", withExtension: "svg", subdirectory: "Resources")
     }
 
     public enum Analysis: String, CaseIterable, Sendable {

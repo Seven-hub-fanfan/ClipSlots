@@ -1791,9 +1791,11 @@ public final class SpecialSlotStorage {
     }
 
     public func searchCandidatesResult(in specialSlotId: String, slotCount: Int, query: String,
+                                       includeEmpty: Bool = false,
                                        isCancelled: () -> Bool = { false }) -> SlotSearchReadResult {
         SlotStorage.searchCandidatesResult(slotsDir: specialSlotDirectory(for: specialSlotId),
-                                            slotCount: slotCount, query: query, isCancelled: isCancelled)
+                                            slotCount: slotCount, query: query, includeEmpty: includeEmpty,
+                                            isCancelled: isCancelled)
     }
 
     public func slotStorage(for specialSlotId: String) -> SlotStorage {

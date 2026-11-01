@@ -106,6 +106,8 @@ func runSearchSnapshotTests(_ t: TestRunner) {
                 SlotSearchIndex.matches(slot: $0.key, content: $0.value, label: $0.value.label ?? "", query: query)
             }.keys)
             let candidates = storage.searchCandidates(in: group.id, slotCount: 10, query: query)
+            t.equal(Set(candidates.keys), expected,
+                    "candidate query itself uses exact Swift substring semantics: \(query.debugDescription)")
             let actual = Set(candidates.filter {
                 SlotSearchIndex.matches(slot: $0.key, content: $0.value, label: $0.value.label ?? "", query: query)
             }.keys)
@@ -232,5 +234,51 @@ func runSearchSnapshotTests(_ t: TestRunner) {
         let final = SlotStorage.searchCandidatesResult(slotsDir: directory, slotCount: 10, query: "恢复")
         t.check(final.isComplete && final.slots[1]?.plainText == "FIFO后完整恢复",
                 "ordinary body remains recoverable after nonregular input")
+    }
+    t.withFreshStore("SEARCH-PROVEN-EMPTY") { storage in
+        guard let group = storage.loadIndex().specialSlots.first else { return }
+        storage.set(1, content: text("非空正文"), in: group.id)
+        storage.setLabel(2, label: "仅标签", in: group.id)
+        storage.slotStorage(for: group.id).finishPendingWritesBeforeMovingDirectory()
+        let directory = storage.storageRoot.appendingPathComponent(group.id)
+        try FileManager.default.createDirectory(at: directory.appendingPathComponent("3"),
+                                                withIntermediateDirectories: true)
+        let before = bytes(directory)
+        let normal = SlotStorage.searchCandidatesResult(slotsDir: directory, slotCount: 10, query: "")
+        t.equal(Set(normal.slots.keys), [1], "ordinary search still excludes empty/label-only slots")
+        let all = SlotStorage.searchCandidatesResult(slotsDir: directory, slotCount: 10, query: "",
+                                                     includeEmpty: true)
+        t.check(all.isComplete && all.slots.count == 10, "opt-in search covers all proven slot states")
+        t.check(all.slots[2]?.isEmpty == true && all.slots[3]?.isEmpty == true
+                && all.slots[10]?.isEmpty == true, "label-only, existing empty and absent slots are proven empty")
+        t.equal(all.slots[2]?.label, "仅标签", "empty slot retains searchable label")
+        let labeled = SlotStorage.searchCandidatesResult(slotsDir: directory, slotCount: 10, query: "仅标签",
+                                                         includeEmpty: true)
+        t.equal(Set(labeled.slots.keys), [2], "label query can find proven empty slot")
+        let numbered = SlotStorage.searchCandidatesResult(slotsDir: directory, slotCount: 10, query: "槽位 3",
+                                                          includeEmpty: true)
+        t.equal(Set(numbered.slots.keys), [3], "GUI number query includes proven empty slot")
+        t.equal(before, bytes(directory), "empty search writes no business files")
+        let corrupt = directory.appendingPathComponent("4/attachments.json")
+        try FileManager.default.createDirectory(at: corrupt.deletingLastPathComponent(),
+                                                withIntermediateDirectories: true)
+        try Data("{broken".utf8).write(to: corrupt)
+        let unknown = SlotStorage.searchCandidatesResult(slotsDir: directory, slotCount: 10, query: "",
+                                                         includeEmpty: true)
+        t.check(!unknown.isComplete && unknown.slots.isEmpty, "corrupt empty attachment metadata remains unknown")
+        try Data("[]".utf8).write(to: corrupt)
+        let recovered = SlotStorage.searchCandidatesResult(slotsDir: directory, slotCount: 10, query: "",
+                                                           includeEmpty: true)
+        t.check(recovered.isComplete && recovered.slots[4]?.isEmpty == true, "restored empty metadata recovers")
+        let invalid = directory.appendingPathComponent("3/content.json")
+        try Data("{broken".utf8).write(to: invalid)
+        t.check(!SlotStorage.searchCandidatesResult(slotsDir: directory, slotCount: 10, query: "",
+                                                    includeEmpty: true).isComplete,
+                "corrupt metadata cannot certify an empty slot")
+        try FileManager.default.removeItem(at: invalid)
+        try Data([0xff, 0xfe, 0xfd]).write(to: directory.appendingPathComponent("2/label.txt"))
+        t.check(!SlotStorage.searchCandidatesResult(slotsDir: directory, slotCount: 10, query: "",
+                                                    includeEmpty: true).isComplete,
+                "undecodable label does not become known empty text")
     }
 }
