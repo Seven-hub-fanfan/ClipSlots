@@ -14,9 +14,22 @@ struct EmptySlotThumbnailView: View {
                 )
                 .allowsHitTesting(false)
 
-            Image(systemName: "tray")
-                .font(.system(size: 20, weight: .regular))
-                .foregroundColor(.secondary.opacity(0.42))
+            // 空槽保存与提示文案恢复计划 P1：托盘图标下方补回简短动作提示，帮助发现「复制→保存」。
+            // 纯展示，不进入正文/剪贴板/搜索/导出；次级色小字号，窄卡片自动缩小，最多两行。
+            VStack(spacing: 6) {
+                Image(systemName: "tray")
+                    .font(.system(size: 20, weight: .regular))
+                    .foregroundColor(.secondary.opacity(0.42))
+                Text("复制内容后点“保存”")
+                    .font(.system(size: 11))
+                    .foregroundColor(.secondary)
+                    .multilineTextAlignment(.center)
+                    .lineLimit(2)
+                    .minimumScaleFactor(0.85)
+                    .padding(.horizontal, 8)
+                    .accessibilityIdentifier("empty-slot-hint")
+            }
+            .allowsHitTesting(false)
         }
         .frame(minHeight: 76, idealHeight: 88, maxHeight: .infinity)
         .accessibilityElement(children: .ignore)

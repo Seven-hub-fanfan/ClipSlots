@@ -4198,7 +4198,15 @@ final class SlotStoreObservable: ObservableObject {
 
         let content = clipboard.capture()
         guard !content.isEmpty else {
+            // 空槽保存与提示文案恢复计划 P1：空剪贴板不再静默失败，给出可见反馈。
+            // 只提示、不写入：不创建空白文本、不覆盖现有内容、不改 isEmpty 语义，CLI/Skill 不受影响。
             NSLog("[ClipSlots] SAVE ignored: clipboard empty slot=\(slot)")
+            showFloatingNotice(FloatingNotice(
+                title: "剪贴板为空",
+                subtitle: "未改动内容",
+                iconName: "doc.on.clipboard",
+                kind: .warning
+            ))
             return
         }
 

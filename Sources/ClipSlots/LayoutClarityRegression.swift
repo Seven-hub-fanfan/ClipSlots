@@ -122,7 +122,9 @@ import ClipSlotsKit
                 window.makeKeyAndOrderFront(nil); await settle()
                 check(NativeAccessibilityProbe.elements(host).contains { $0.accessibilityLabel?() == "空槽位" },
                       "\(width) empty preview has accessible state")
-                _ = try capture(host, "empty-\(width)")
+                // 空槽保存与提示文案恢复计划 P1：提示文案须原生渲染可见（OCR 读得到「复制」「保存」）。
+                let text = try capture(host, "empty-\(width)")
+                check(text.contains("复制") && text.contains("保存"), "\(width) empty preview shows save hint")
             }
         } catch { failures.append(error.localizedDescription) }
         let report: [String: Any] = ["complete": true, "passed": passed, "failures": failures,
