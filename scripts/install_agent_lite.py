@@ -9,6 +9,7 @@ import plistlib
 import shutil
 import subprocess
 import time
+import disk_guard
 
 repo = Path(__file__).resolve().parent.parent
 candidate = repo / "build/agent-lite-candidate"
@@ -100,8 +101,9 @@ baseline_failures = [line for line in baseline.splitlines() if line.startswith("
 assert len(failures) == 4 and failures == baseline_failures
 assert "通过 33014，失败 4" in smoke and "通过 33015，失败 4" in baseline
 signed(source)
+backup_lease = disk_guard.reserve_backup("Install Agent candidate", [data, config, installed])
 stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
-backup = repo / f"build/install-backups/{stamp}-2171101-to-2171201"
+backup = backup_lease.root / f"{stamp}-2171101-to-2171201"
 assert not backup.exists()
 backup.mkdir(parents=True)
 stage = Path("/Applications/.ClipSlots-agent-lite-stage.app")

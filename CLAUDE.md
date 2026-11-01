@@ -2,11 +2,22 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Disk limits
+
+Follow the disk rules in `agent.md` for every build, test, package and installation.
+Keep at least 40 GiB free after planned output; build/test jobs have a 4 GiB individual
+and 12 GiB registered total budget. Use `scripts/disk_guard.py run`, reuse output
+roots and never copy complete test/build trees into deliverables. Central installation
+backups are limited to two copies and 30 GiB; exceeding a limit stops creation,
+not automatic deletion. Apply the guard to copied worktrees and standalone scripts too.
+Do not invoke the production CLI to check version during disk maintenance; it may
+initialize storage and automatically prune the trash.
+
 ## Build & Run
 
 ```bash
 # Build (SPM, macOS 13+, `-parse-as-library`)
-swift build
+python3 scripts/disk_guard.py run --output .build --budget-gib 4 -- swift build
 
 # Sign + install + restart
 codesign --force --deep --sign - .build/debug/ClipSlots
@@ -143,7 +154,7 @@ https://bytedance.sg.larkoffice.com/docx/...  执行
 After implementing all changes, execute this exact sequence. Each step is required:
 
 0. **Sync Skill**: `./scripts/sync-skill.sh` — 校验 `skills/clipslots-manager/SKILL.md`（当前唯一内容源、App bundle 打包源）；若旧工作树仍有 `docs/clipslots-cli-skill-draft.md`，先同步草稿。**发版前必须运行**，可用 `./scripts/sync-skill.sh --check` 校验一致性。
-1. **Build**: `swift build` — fix real errors, ignore SourceKit "Cannot find type 'X'" spurious errors
+1. **Build**: `python3 scripts/disk_guard.py run --output .build --budget-gib 4 -- swift build` — fix real errors, ignore SourceKit "Cannot find type 'X'" spurious errors
 2. **Sign**: `codesign --force --deep --sign - .build/debug/ClipSlots`
 3. **Install**: `cp -f .build/debug/ClipSlots /Applications/ClipSlots.app/Contents/MacOS/ClipSlots`
 4. **Launch**: `killall ClipSlots 2>/dev/null; open /Applications/ClipSlots.app`

@@ -11,11 +11,13 @@ import shutil
 import subprocess
 import tempfile
 import zipfile
+import disk_guard
 
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument("--build-root", type=Path, required=True)
 parser.add_argument("--output", type=Path, required=True)
 options = parser.parse_args()
+disk_guard.check_space("Package release", reserve_gib=2)
 repo = Path(__file__).resolve().parent.parent
 output = options.output.resolve()
 output.mkdir(parents=True, exist_ok=True)

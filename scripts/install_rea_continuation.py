@@ -9,6 +9,7 @@ from pathlib import Path
 import plistlib
 import subprocess
 import time
+import disk_guard
 
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument("--delivery", type=Path, required=True)
@@ -27,7 +28,7 @@ candidate_info = plistlib.loads((candidate / "Contents/Info.plist").read_bytes()
 assert candidate_info["CFBundleShortVersionString"] == version
 assert candidate_info["CFBundleVersion"] == manifest["build"]
 stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
-backup = delivery / "backups" / stamp
+backup = Path.home() / ".local/share/clipslots-install-backups" / stamp
 stage = Path(f"/Applications/.ClipSlots-rea-{stamp}.app")
 
 
@@ -106,6 +107,7 @@ old = plistlib.loads((installed / "Contents/Info.plist").read_bytes())
 previous_version = old["CFBundleShortVersionString"]
 assert previous_version == options.expected_installed_version
 assert not backup.exists() and not stage.exists()
+backup_lease = disk_guard.reserve_backup("Install verified release", [data, config, installed])
 backup.mkdir(parents=True)
 clone(candidate, stage)
 quit_app()

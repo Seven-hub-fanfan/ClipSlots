@@ -10,8 +10,10 @@ import pathlib
 import plistlib
 import shutil
 import subprocess
+import disk_guard
 
 repo = pathlib.Path(__file__).resolve().parent.parent
+disk_guard.check_space("Package isolated candidate", reserve_gib=2)
 parser = argparse.ArgumentParser()
 parser.add_argument("--variant", choices=["agent-loop", "batch-visual", "creative-optimized", "creative-active", "creative-refined", "light-agent-halo", "light-agent-color", "canvas-menu", "batch-folders", "text-input", "advanced-text", "agent-groups"], default="agent-loop")
 parser.add_argument("--configuration", choices=["debug", "release"], default="debug")

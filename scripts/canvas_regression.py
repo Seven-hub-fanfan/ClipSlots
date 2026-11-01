@@ -10,9 +10,11 @@ import pathlib
 import plistlib
 import shutil
 import subprocess
+import sys
 import tempfile
 import threading
 import time
+import disk_guard
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--skip-build", action="store_true")
@@ -20,6 +22,7 @@ parser.add_argument("--binary", type=pathlib.Path, help="Use a preserved baselin
 parser.add_argument("--model-workspace", action="store_true", help="Run model and navigation probes instead of canvas probes")
 options = parser.parse_args()
 repo = pathlib.Path(__file__).resolve().parent.parent
+disk_guard.check_space("Canvas regression", reserve_gib=4)
 if os.environ.get("CANVAS_SYSTEM_MOUSE") == "1" or (
     os.environ.get("CLIPSLOTS_TEXT_INPUT_PROBE") == "1"
     and os.environ.get("CLIPSLOTS_TEXT_INPUT_LIFECYCLE") != "1"
@@ -30,7 +33,9 @@ if os.environ.get("CANVAS_SYSTEM_MOUSE") == "1" or (
     if console.get("IOConsoleLocked"):
         raise SystemExit("System input test blocked: macOS session is screen-locked.")
 if not options.skip_build and options.binary is None:
-    subprocess.run(["swift", "build"], cwd=repo, check=True)
+    status = disk_guard.guarded_run(["swift", "build", "--package-path", str(repo)], [repo / ".build"], 4)
+    if status:
+        raise SystemExit(status)
 root = pathlib.Path(tempfile.mkdtemp(prefix="clipslots-v2174-", dir="/tmp"))
 fixtures = root / "fixtures"
 fixtures.mkdir()
@@ -118,7 +123,9 @@ if env.get("CLIPSLOTS_CREATIVE_SAMPLE") == "1":
     threading.Thread(target=sample_creative_refresh, daemon=True).start()
 try:
     with (root / "run.log").open("w") as log:
-        process = subprocess.Popen([str(contents / "MacOS/ClipSlots")], env=env, stdout=log,
+        process = subprocess.Popen([sys.executable, str(repo / "scripts/disk_guard.py"), "run",
+                                    "--output", str(root), "--budget-gib", "4", "--",
+                                    str(contents / "MacOS/ClipSlots")], env=env, stdout=log,
                                    stderr=subprocess.STDOUT)
         try:
             deadline = time.monotonic() + 15

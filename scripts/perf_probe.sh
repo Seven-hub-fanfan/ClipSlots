@@ -26,12 +26,13 @@ OUT_DIR="$ROOT_DIR/build/perf"
 APP="$OUT_DIR/ClipSlots-perf.app"
 LOG="$OUT_DIR/$LABEL.log"
 
+python3 "$ROOT_DIR/scripts/disk_guard.py" check --reserve-gib 4 --operation "Performance regression"
 mkdir -p "$OUT_DIR"
 [ -d "$DATA_DIR" ] || { echo "ERROR: 数据目录不存在：$DATA_DIR（先从真实库复制一份）" >&2; exit 1; }
 
 echo "==> build release"
-cd "$ROOT_DIR"
-swift build -c release >/dev/null
+python3 "$ROOT_DIR/scripts/disk_guard.py" run --output "$ROOT_DIR/.build" --budget-gib 4 -- \
+  swift build -c release --package-path "$ROOT_DIR" >/dev/null
 
 echo "==> assemble $APP (bundle id com.clipslots.app.perf)"
 rm -rf "$APP"
@@ -52,7 +53,8 @@ CLIPSLOTS_PERF_AUTOTEST=1 \
 CLIPSLOTS_PERF_AUTOTEST_SCENARIO="$SCENARIO" \
 CLIPSLOTS_PERF_AUTOTEST_ROUNDS="$ROUNDS" \
 CLIPSLOTS_DATA_DIR="$DATA_DIR" \
-"$APP/Contents/MacOS/ClipSlots" >"$LOG" 2>&1
+python3 "$ROOT_DIR/scripts/disk_guard.py" run --output "$OUT_DIR" --output "$DATA_DIR" \
+  --budget-gib 4 -- "$APP/Contents/MacOS/ClipSlots" >"$LOG" 2>&1
 set -e
 
 echo "==> SUMMARY"
