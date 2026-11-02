@@ -461,6 +461,20 @@ extension SlotContent {
         self.items = [[item]]
         self.timestamp = Date()
     }
+
+    /// v2.17.107（空槽保存计划 P2）：用户显式创建的「空白文本」——一个零字节纯文本正文条目。
+    /// 它有正文条目，因此 `isEmpty == false`：GUI、CLI `--if-empty`、MCP、Skill、自动存储
+    /// 空槽查找均视为**已占用**，不会被当作可覆盖空槽。只有用户「清空」才回到未占用状态。
+    /// 刻意不改 `isEmpty` 定义（items.isEmpty && attachments.isEmpty）——它本来就把空白文本算作占用。
+    public static func blankText() -> SlotContent { SlotContent(text: "") }
+
+    /// 是否为「空白文本」占用态：恰好一个正文组、全部为纯文本类型且字节为 0、没有附件。
+    public var isBlankText: Bool {
+        guard attachments.isEmpty, items.count == 1, let group = items.first, !group.isEmpty else { return false }
+        return group.allSatisfy {
+            ($0.type == "public.utf8-plain-text" || $0.type == "NSStringPboardType") && $0.data.isEmpty
+        }
+    }
 }
 
 // MARK: - v2.7.32 HTML Detection

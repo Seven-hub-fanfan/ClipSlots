@@ -4198,15 +4198,7 @@ final class SlotStoreObservable: ObservableObject {
 
         let content = clipboard.capture()
         guard !content.isEmpty else {
-            // 空槽保存与提示文案恢复计划 P1：空剪贴板不再静默失败，给出可见反馈。
-            // 只提示、不写入：不创建空白文本、不覆盖现有内容、不改 isEmpty 语义，CLI/Skill 不受影响。
-            NSLog("[ClipSlots] SAVE ignored: clipboard empty slot=\(slot)")
-            showFloatingNotice(FloatingNotice(
-                title: "剪贴板为空",
-                subtitle: "未改动内容",
-                iconName: "doc.on.clipboard",
-                kind: .warning
-            ))
+            saveBlankTextForEmptyClipboard(slot, captured: content)
             return
         }
 
@@ -4252,6 +4244,40 @@ final class SlotStoreObservable: ObservableObject {
         }
 
         handleCapturedContentForSave(content, targetSlot: slot)
+    }
+
+    /// 空槽保存与提示文案恢复计划 P2（v2.17.107）：手动保存遇到空剪贴板时，
+    /// 仅在「剪贴板确认为空 + 目标槽位确认为空」时创建零字节「空白文本」占用槽位，
+    /// 让用户随后可点「编辑」直接输入。其余情况一律不写入：
+    /// - 剪贴板读取失败/无法确认（capturedEmpty == false）→ 提示重试；
+    /// - 槽位状态 UNKNOWN（锁繁忙且无缓存）→ 提示稍后重试；
+    /// - 目标已有正文、附件或已创建的空白文本 → 不覆盖（重复点击也不会重复创建/刷新时间/加撤销）。
+    /// 自动存储 / 自动捕获 / 批量导入不经过本路径，空剪贴板时行为不变。
+    func saveBlankTextForEmptyClipboard(_ slot: Int, captured: SlotContent) {
+        guard captured.capturedEmpty else {
+            NSLog("[ClipSlots] SAVE ignored: clipboard unreadable slot=\(slot)")
+            showFloatingNotice(FloatingNotice(title: "无法读取剪贴板", subtitle: "请重试",
+                                              iconName: "exclamationmark.triangle.fill", kind: .warning))
+            return
+        }
+        guard let existing = contentForSlotOrUnknown(slot) else {
+            NSLog("[ClipSlots] SAVE blank aborted: slot \(slot) state UNKNOWN")
+            showFloatingNotice(FloatingNotice(title: "存储繁忙", subtitle: "槽位 \(slot) 暂不可写，请稍后重试",
+                                              iconName: "exclamationmark.triangle.fill", kind: .warning))
+            return
+        }
+        guard existing.isEmpty else {
+            NSLog("[ClipSlots] SAVE ignored: clipboard empty, slot \(slot) occupied (blank=\(existing.isBlankText))")
+            showFloatingNotice(FloatingNotice(title: "剪贴板为空", subtitle: "未覆盖现有内容",
+                                              iconName: "doc.on.clipboard", kind: .warning))
+            return
+        }
+        var blank = SlotContent.blankText()
+        // 保留空槽上已有的标题与手动封面（标签由存储层从磁盘保活）。
+        blank.label = existing.label
+        blank.manualThumbnailId = existing.manualThumbnailId
+        NSLog("[ClipSlots] SAVE blank text slot=\(slot)")
+        handleCapturedContentForSave(blank, targetSlot: slot)
     }
 
     // MARK: - Copy (lightweight)

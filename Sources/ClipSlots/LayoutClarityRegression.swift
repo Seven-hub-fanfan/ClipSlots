@@ -126,6 +126,20 @@ import ClipSlotsKit
                 let text = try capture(host, "empty-\(width)")
                 check(text.contains("复制") && text.contains("保存"), "\(width) empty preview shows save hint")
             }
+            // 空槽保存计划 P2：空白文本是「已占用」状态，且预览展示编辑引导而非空槽提示。
+            let blank = SlotContent.blankText()
+            check(!blank.isEmpty && blank.isBlankText, "blank text slot counts as occupied")
+            check(SlotContent().isEmpty && !SlotContent().isBlankText, "untouched slot stays empty")
+            check(!SlotContent(text: "hi").isBlankText, "non-empty text is not blank")
+            for width in [140, 240] {
+                let host = NSHostingView(rootView: BlankTextSlotThumbnailView())
+                window.contentView = host; window.setContentSize(NSSize(width: width, height: 100))
+                window.makeKeyAndOrderFront(nil); await settle()
+                check(NativeAccessibilityProbe.elements(host).contains { $0.accessibilityLabel?() == "空白文本槽位，可编辑" },
+                      "\(width) blank preview has accessible state")
+                let text = try capture(host, "blank-\(width)")
+                check(text.contains("编辑"), "\(width) blank preview shows edit hint")
+            }
         } catch { failures.append(error.localizedDescription) }
         let report: [String: Any] = ["complete": true, "passed": passed, "failures": failures,
                                     "paid_generation_requests": 0]

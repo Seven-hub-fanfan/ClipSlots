@@ -20,7 +20,7 @@ struct EmptySlotThumbnailView: View {
                 Image(systemName: "tray")
                     .font(.system(size: 20, weight: .regular))
                     .foregroundColor(.secondary.opacity(0.42))
-                Text("复制内容后点“保存”")
+                Text("复制后，点击保存\n剪贴板为空也能先保存再编辑")
                     .font(.system(size: 11))
                     .foregroundColor(.secondary)
                     .multilineTextAlignment(.center)
@@ -34,6 +34,30 @@ struct EmptySlotThumbnailView: View {
         .frame(minHeight: 76, idealHeight: 88, maxHeight: .infinity)
         .accessibilityElement(children: .ignore)
         .accessibilityLabel("空槽位")
-        .help("复制内容后，点击保存或使用保存快捷键存入")
+        .help("保存剪贴板内容；剪贴板为空时创建可编辑的空白文本")
+    }
+}
+
+/// 空槽保存计划 P2（v2.17.107）：「空白文本」占用态的预览——区别于未占用空槽，
+/// 提示用户点击编辑开始填写。纯展示，不进入正文/剪贴板/搜索/导出。
+struct BlankTextSlotThumbnailView: View {
+    var body: some View {
+        VStack(spacing: 6) {
+            Image(systemName: "square.and.pencil")
+                .font(.system(size: 20, weight: .regular))
+                .foregroundColor(.secondary.opacity(0.5))
+            Text("还没有文字\n点击编辑，开始填写")
+                .font(.system(size: 11))
+                .foregroundColor(.secondary)
+                .multilineTextAlignment(.center)
+                .lineLimit(2)
+                .minimumScaleFactor(0.85)
+                .padding(.horizontal, 8)
+                .accessibilityIdentifier("blank-text-slot-hint")
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .allowsHitTesting(false)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("空白文本槽位，可编辑")
     }
 }

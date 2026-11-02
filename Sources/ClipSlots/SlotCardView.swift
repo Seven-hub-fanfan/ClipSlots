@@ -1121,7 +1121,8 @@ private extension SlotContent {
         // `inlineImage` here would re-introduce a main-thread full decode.
         primaryFileURL == nil && !hasImage && !isHTMLContent && !preview.hasPrefix("[图片") && !preview.hasPrefix("[文件") && !preview.hasPrefix("[富文本]")
     }
-    var editableTextValue: String { plainText ?? preview }
+    // 空槽保存计划 P2：空白文本编辑初值必须是 ""，不能把 "(空)" 占位填进正文。
+    var editableTextValue: String { isBlankText ? "" : (plainText ?? preview) }
 }
 
 // MARK: - v2.7.23 Inline Video Preview

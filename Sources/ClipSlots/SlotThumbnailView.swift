@@ -145,6 +145,9 @@ struct SlotThumbnailView: View {
                         .font(.caption2)
                         .foregroundColor(.secondary)
                 }
+            } else if content.isBlankText {
+                // 空槽保存计划 P2：零字节空白文本——已占用，可编辑。
+                BlankTextSlotThumbnailView()
             } else if content.isFileContent {
                 VStack(spacing: 8) {
                     Image(systemName: fileIconName)
