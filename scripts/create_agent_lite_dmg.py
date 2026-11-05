@@ -43,6 +43,17 @@ def main():
     writable = root / "writable.dmg"
     mount = root / "volume"
     mount.mkdir()
+    def detach_owned_volume():
+        # Budget sampling or indexing can momentarily hold this temporary volume
+        # open. Only the freshly created installer volume may use this fallback.
+        result = subprocess.run(["hdiutil", "detach", str(mount)])
+        if result.returncode == 16:
+            if mount.parent != root or not (mount / ".metadata_never_index").is_file():
+                raise ValueError("Busy volume is not this invocation's installer volume.")
+            subprocess.run(["/bin/sync"], check=True)
+            subprocess.run(["hdiutil", "detach", "-force", str(mount)], check=True)
+        elif result.returncode:
+            raise subprocess.CalledProcessError(result.returncode, result.args)
     size_mb = max(64, math.ceil(logical_bytes(before) / 1048576) + 32)
     subprocess.run(["hdiutil", "create", "-size", str(size_mb) + "m", "-fs", "HFS+",
                     "-volname", "ClipSlots v" + version, str(writable)], check=True)
@@ -73,7 +84,7 @@ def main():
         subprocess.run(["codesign", "--verify", "--deep", "--strict",
                         str(mount / "ClipSlots.app")], check=True)
     finally:
-        subprocess.run(["hdiutil", "detach", str(mount)], check=True)
+        detach_owned_volume()
     subprocess.run(["hdiutil", "convert", str(writable), "-format", "UDZO",
                     "-imagekey", "zlib-level=9", "-o", str(args.output.resolve())], check=True)
     subprocess.run(["hdiutil", "verify", str(args.output.resolve())], check=True)
@@ -90,7 +101,7 @@ def main():
         subprocess.run(["codesign", "--verify", "--deep", "--strict",
                         str(mount / "ClipSlots.app")], check=True)
     finally:
-        subprocess.run(["hdiutil", "detach", str(mount)], check=True)
+        detach_owned_volume()
     if inventory(app) != before:
         raise ValueError("Source candidate changed during image creation.")
     report = {"schema": "clipslots.dmg.v1", "version": version, "build": build,
