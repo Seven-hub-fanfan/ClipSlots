@@ -57,10 +57,10 @@ struct ModelProfileEditor: View {
                             Text("节点输入映射 JSON").font(.system(size: 12, weight: .medium))
                             Text("参数语义：aspectRatio、resolution、duration、generateAudio、voice、speed、lyrics、instrumental。参考键：image、video、audio、firstFrame、lastFrame。")
                                 .font(.system(size: 10)).foregroundStyle(.secondary)
-                            TextEditor(text: $mapping).font(.system(size: 11, design: .monospaced)).frame(height: 140)
+                            TextEditor(text: $mapping).font(.system(size: 11)).frame(height: 140)
                         }
                         Text("附加请求头 JSON（版本等公开字段）").font(.system(size: 11))
-                        TextEditor(text: $headers).font(.system(size: 11, design: .monospaced)).frame(height: 65)
+                        TextEditor(text: $headers).font(.system(size: 11)).frame(height: 65)
                         if profile.contract == .asyncMedia {
                             TextField("参考输入字段（可选）", text: Binding(get: { profile.referenceInputField ?? "" },
                                 set: { profile.referenceInputField = $0.isEmpty ? nil : $0 }))
@@ -79,7 +79,7 @@ struct ModelProfileEditor: View {
                     TextField("请求超时（秒）", value: $profile.timeout, format: .number)
                     Toggle("启用", isOn: $profile.enabled)
                     Text("默认参数 JSON").font(.system(size: 12, weight: .medium))
-                    TextEditor(text: $parameters).font(.system(size: 11, design: .monospaced)).frame(height: 120)
+                    TextEditor(text: $parameters).font(.system(size: 11)).frame(height: 120)
                 }.textFieldStyle(.roundedBorder)
             }
             if let error { Text(error).font(.system(size: 12)).foregroundStyle(.orange) }
@@ -378,7 +378,7 @@ struct ModelResultPreview: View {
                             }.font(.system(size: 12))
                         }
                     }
-                    if let id = cell.taskID { Text("任务 ID：\(id)").font(.system(size: 11, design: .monospaced)).textSelection(.enabled) }
+                    if let id = cell.taskID { Text("任务 ID：\(id)").font(.system(size: 11)).textSelection(.enabled) }
                 }
             }
         }.padding(24).frame(width: 720, height: 580).onDisappear { player?.pause(); player = nil }

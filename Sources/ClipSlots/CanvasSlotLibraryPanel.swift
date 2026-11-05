@@ -420,7 +420,7 @@ struct CanvasSlotLibraryPanel: View {
                         .lineLimit(1)
                     Spacer(minLength: 0)
                     Text("\(entries.count)")
-                        .font(.system(size: 10, weight: .medium, design: .rounded))
+                        .font(.system(size: 10, weight: .medium))
                         .foregroundColor(AppTheme.canvasChromeTertiaryInk)
                         .padding(.horizontal, 6).padding(.vertical, 3)
                         .background(AppTheme.chipBackground, in: Capsule())
@@ -622,7 +622,7 @@ struct CanvasSlotLibraryPanel: View {
         return LibraryRowHover { hovered in
           HStack(spacing: 7) {
             Text("\(entry.slot)")
-                .font(.system(size: 10, weight: .medium, design: .rounded))
+                .font(.system(size: 10, weight: .medium))
                 .foregroundColor(AppTheme.canvasChromeTertiaryInk)
                 .frame(width: 18, height: 20)
             Text(displayTitle(entry))
@@ -638,7 +638,7 @@ struct CanvasSlotLibraryPanel: View {
                     Image(systemName: "paperclip")
                         .font(.system(size: 9))
                     Text("\(entry.attachmentCount)")
-                        .font(.system(size: 9, weight: .medium, design: .rounded))
+                        .font(.system(size: 9, weight: .medium))
                 }
                 .foregroundColor(AppTheme.canvasChromeTertiaryInk)
             }

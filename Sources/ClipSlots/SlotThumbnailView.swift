@@ -168,7 +168,7 @@ struct SlotThumbnailView: View {
                 // 仅此情形把占位文字在正文内容区水平+垂直居中；有正文文本时仍沿用
                 // 左对齐 + 顶部多行铺排，图片/视频缩略图与完全空槽位占位均不经过此分支。
                 Text(multilinePreview)
-                    .font(.system(size: 12, design: .monospaced))
+                    .font(.system(size: 12))
                     .foregroundColor(.primary.opacity(0.8))
                     .multilineTextAlignment(isEmptyBodyPlaceholder ? .center : .leading)
                     .lineLimit(4)

@@ -82,6 +82,9 @@ final class HeaderMascotNativeView: NSView, HeaderMascotRenderOwner {
     private var muted:Bool { HeaderMascotSessionState.shared.paused }
     private var lastTick=0.0
     private var lastCursor:NSPoint?
+    private var pendingCursor:NSPoint?
+    private var lastPointerSampleMS = -Double.infinity
+    private let pointerSampleIntervalMS = 1000.0/30
     private var voiceTrace:[[String:Any]]=[]
     private var lastVoiceTraceTime=0.0
     private(set) var frameCount=0
@@ -275,6 +278,7 @@ final class HeaderMascotNativeView: NSView, HeaderMascotRenderOwner {
                 fallbackPolling=pointerMonitor==nil || globalPointerMonitor==nil
             }
             if !NSApp.isActive || muted {
+                pendingCursor=nil;pointerNearby=false
                 removePointerMonitors()
                 prepareInput();motion.setHover(false,at:now);entryBitmap=nil
                 if lastCursor != nil {
@@ -287,6 +291,7 @@ final class HeaderMascotNativeView: NSView, HeaderMascotRenderOwner {
         } else {
             stopTimer()
             invalidateDisplay();removePointerMonitors();lastCursor=nil
+            pendingCursor=nil;pointerNearby=false
             dragPanel?.orderOut(nil);pressedAt=nil;dormant=true
             motion.setPointer(x:nil,y:nil,at:now)
             motion.setHover(false,at:now);motion.setDrag(false,at:now)
@@ -337,20 +342,31 @@ final class HeaderMascotNativeView: NSView, HeaderMascotRenderOwner {
         updatePointer(at:eventScreenPoint(event))
     }
     private func updatePointer(at mouse:NSPoint) {
-        guard visible,!muted,NSApp.isActive,mouse != lastCursor else { return }
-        prepareInput();lastCursor=mouse
-        refreshPromptFocus()
+        guard visible,!muted,!motion.reduceMotion,NSApp.isActive,mouse != lastCursor else { return }
+        lastCursor=mouse;pendingCursor=mouse
+        schedule(at:max(now,lastPointerSampleMS+pointerSampleIntervalMS))
+    }
+    private func consumePointer(at time:Double) {
+        guard let mouse=pendingCursor,time-lastPointerSampleMS>=pointerSampleIntervalMS-0.5 else { return }
+        pendingCursor=nil;lastPointerSampleMS=time
         let origin=interactionCenter
         let dx=mouse.x-origin.x,dy=origin.y-mouse.y
+        // Nearby motion draws attention; moving around the rest of the workspace
+        // should leave the character at rest. Hysteresis avoids boundary chatter.
+        let radius=max(520,bounds.width*5)+(pointerNearby ? 64 : 0)
+        let nearby=hypot(dx,dy)<=radius
         let local=NSPoint(x:bounds.midX+dx,y:bounds.midY+dy)
-        let hover=alphaHit(local,rep:bitmap) || (motion.hovering && alphaHit(local,rep:entryBitmap))
+        let hover=nearby && (alphaHit(local,rep:bitmap) || (motion.hovering && alphaHit(local,rep:entryBitmap)))
+        guard nearby || pointerNearby || hover != motion.hovering else { return }
+        prepareInput()
+        pointerNearby=nearby
         if hover != motion.hovering {
             entryBitmap=hover ? bitmap : nil
-            motion.setHover(hover,at:now)
+            motion.setHover(hover,at:time)
         }
-        motion.setPointer(x:Double(dx),y:Double(dy),at:now)
-        wake()
+        motion.setPointer(x:nearby ? Double(dx) : nil,y:nearby ? Double(dy) : nil,at:time)
     }
+    private var pointerNearby=false
     override func mouseEntered(with event:NSEvent) { follow(event) }
     override func mouseMoved(with event:NSEvent) { follow(event) }
     override func mouseExited(with event:NSEvent) {
@@ -478,9 +494,10 @@ final class HeaderMascotNativeView: NSView, HeaderMascotRenderOwner {
             if time >= constrainedRecovery! { constrained=false;constrainedRecovery=nil }
         }
         let reduced=muted || NSWorkspace.shared.accessibilityDisplayShouldReduceMotion || critical
-        if motion.reduceMotion != reduced { invalidateDisplay();dormant=true }
+        if motion.reduceMotion != reduced { invalidateDisplay();dormant=true;lastCursor=nil }
         motion.reduceMotion=reduced
         if critical { atlas.clear();lamp.stop();floatingLamp.stop() }
+        if reduced || !NSApp.isActive { pendingCursor=nil;pointerNearby=false }
         if NSApp.isActive,!reduced,time-lastHealthMS >= (fallbackPolling ? 50 : 250) {
             lastHealthMS=time
             let mouse=NSEvent.mouseLocation
@@ -488,12 +505,14 @@ final class HeaderMascotNativeView: NSView, HeaderMascotRenderOwner {
             else if time-lastPointerEventMS<250 { fallbackPolling=false }
             pollCursor()
         }
+        if !reduced { consumePointer(at:time) }
         tick()
         let hint=motion.schedulingHint(at:time)
         var deadlines:[Double]=[]
         if let deadline=reduced ? hint.nextSemanticDeadlineMS : hint.nextDeadlineMS { deadlines.append(deadline) }
         if let recovery=constrainedRecovery { deadlines.append(recovery) }
         if !reduced {
+            if pendingCursor != nil { deadlines.append(max(time+1,lastPointerSampleMS+pointerSampleIntervalMS)) }
             if !displayWasLamp,failedFrames<3 {
                 let fps=hint.work == .lampOnly ? (constrained ? 15.0 : 30.0) : (constrained ? 30.0 : 60.0)
                 deadlines.append(max(time+1,lastTick+1000/fps))
@@ -680,7 +699,15 @@ struct MascotRenderedFrame {
 /// are transferred to main and never mutated again; no NSView leaves main.
 final class HeaderMascotRenderer: @unchecked Sendable {
     private let queue=DispatchQueue(label:"com.clipslots.mascot.render",qos:.userInitiated)
-    private let scene=HeaderMascotScene()
+    private let scene:HeaderMascotScene
+    init(verifyGeometry:Bool=false) {
+        scene=HeaderMascotScene(verifyGeometry:verifyGeometry)
+    }
+    #if DEBUG
+    var performancePhases:[String:Double] { queue.sync { scene.performancePhases } }
+    var contactLift:Float { queue.sync { scene.contactLift } }
+    var geometryFingerprint:String { queue.sync { scene.geometryFingerprint } }
+    #endif
     var legPixels:Double { scene.legPixels }
     var computerGaze:(yaw:Double,pitch:Double) { scene.computerGaze }
     func pointer(x:Double,y:Double)->(Double,Double) { scene.pointer(x:x,y:y) }

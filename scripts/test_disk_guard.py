@@ -32,6 +32,22 @@ class DiskGuardTests(unittest.TestCase):
             with self.assertRaises(guard.DiskLimitError):
                 guard.check_space("build", reserve_gib=4, volume=self.root)
 
+    def test_removed_staging_directory_during_sample_is_tolerated(self):
+        (self.root / "kept.bin").write_bytes(b"kept")
+        def walker(root, followlinks, onerror):
+            onerror(FileNotFoundError("staging directory was atomically removed"))
+            yield str(root), [], ["kept.bin"]
+        with patch.object(guard.os, "walk", side_effect=walker):
+            self.assertEqual(guard.bytes_used(self.root), 4)
+
+    def test_unreadable_directory_still_blocks_sampling(self):
+        def walker(root, followlinks, onerror):
+            onerror(PermissionError("directory cannot be inspected"))
+            yield str(root), [], []
+        with patch.object(guard.os, "walk", side_effect=walker):
+            with self.assertRaises(PermissionError):
+                guard.bytes_used(self.root)
+
     def test_free_floor_passes_at_boundary(self):
         with patch.object(guard, "shutil_free", return_value=44 * guard.GIB):
             self.assertEqual(guard.check_space("build", reserve_gib=4, volume=self.root), 44)
@@ -53,6 +69,52 @@ class DiskGuardTests(unittest.TestCase):
         with self.assertRaises(guard.DiskLimitError):
             guard.BackupLease(self.root / "backups", "install", 31)
         self.assertEqual(list((self.root / "backups").glob("data*")), [])
+
+    def test_existing_backup_can_receive_budgeted_delta_without_third_copy(self):
+        backups = self.root / "backups"
+        (backups / "one").mkdir(parents=True)
+        (backups / "two").mkdir()
+        lease = guard.BackupLease(backups, "install", 1, reuse_backup=backups / "two")
+        try:
+            lease.reserve_additional(1024)
+            with self.assertRaises(guard.DiskLimitError):
+                lease.reserve_additional(30 * guard.GIB)
+            self.assertEqual(sorted(p.name for p in backups.iterdir() if p.is_dir()), ["one", "two"])
+        finally:
+            lease.release()
+
+    def test_explicit_install_allowance_keeps_default_and_delta_checks(self):
+        backups = self.root / "backups"
+        (backups / "one").mkdir(parents=True)
+        with patch.object(guard, "bytes_used", return_value=29 * guard.GIB):
+            with self.assertRaises(guard.DiskLimitError):
+                guard.BackupLease(backups, "default", 1.1, reuse_backup=backups / "one")
+            lease = guard.BackupLease(backups, "authorized", 1.1,
+                                     reuse_backup=backups / "one", max_backup_gib=31)
+            try:
+                lease.reserve_additional(int(0.2 * guard.GIB))
+                with self.assertRaises(guard.DiskLimitError):
+                    lease.reserve_additional(guard.GIB)
+            finally:
+                lease.release()
+        self.assertEqual(guard.MAX_BACKUP_GIB, 30)
+        self.assertTrue((backups / "one").exists())
+
+    def test_install_allowance_cannot_disable_floor_or_count(self):
+        for value in [float("inf"), float("nan"), 32, 0]:
+            with self.assertRaises(guard.DiskLimitError):
+                guard.BackupLease(self.root / "backups", "install", 1, max_backup_gib=value)
+        with patch.object(guard, "shutil_free", return_value=40 * guard.GIB):
+            with self.assertRaises(guard.DiskLimitError):
+                guard.BackupLease(self.root / "backups", "install", 1, max_backup_gib=31)
+
+    def test_reuse_rejects_symlink_or_outside_directory(self):
+        backups = self.root / "backups"
+        (backups / "one").mkdir(parents=True)
+        (backups / "link").symlink_to(backups / "one", target_is_directory=True)
+        for path in [backups / "link", self.root, backups / "missing"]:
+            with self.assertRaises(guard.DiskLimitError):
+                guard.BackupLease(backups, "install", 1, reuse_backup=path)
 
     def test_backup_lease_serializes_installers(self):
         backups = self.root / "backups"

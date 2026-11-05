@@ -555,7 +555,7 @@ struct AgentSyncedAppMarketView: View {
                     Text(clean(item.summary)).font(.system(size: 12)).foregroundStyle(TapSkin.secondaryInk)
                     if let markdown = sync.snapshot?.markdown(for: item) {
                         DisclosureGroup("Skill 正文") {
-                            ScrollView { Text(markdown).font(.system(size: 11, design: .monospaced)).textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading) }
+                            ScrollView { Text(markdown).font(.system(size: 11)).textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading) }
                                 .frame(maxHeight: 220)
                         }.font(.system(size: 12)).accessibilityIdentifier("market-sync-markdown")
                     } else {
@@ -620,7 +620,7 @@ struct AgentSyncedAppMarketView: View {
                             ForEach(["capabilities", "connectors", "library", "collection", "preset_gallery", "influencer_studio"], id: \.self) { key in
                                 if let value = item.raw[key], value != .array([]) {
                                     DisclosureGroup(configLabel(key)) {
-                                        Text(clean((try? value.encodedText(pretty: true)) ?? "")).font(.system(size: 10, design: .monospaced)).textSelection(.enabled)
+                                        Text(clean((try? value.encodedText(pretty: true)) ?? "")).font(.system(size: 10)).textSelection(.enabled)
                                     }
                                 }
                             }

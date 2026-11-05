@@ -47,12 +47,12 @@ struct MascotLampPixels {
                 CGBitmapInfo.byteOrder32Big.rawValue),provider:provider,decode:nil,
             shouldInterpolate:false,intent:.defaultIntent)
     }
-    func differenceRect(_ other:Self) -> CGRect? {
+    func differenceRect(_ other:Self,tolerance:Int=0) -> CGRect? {
         guard side==other.side else { return nil }
         var minX=side,minY=side,maxX = -1,maxY = -1
         for pixel in 0..<side*side {
             let offset=pixel*4
-            if (0..<4).contains(where:{ bytes[offset+$0] != other.bytes[offset+$0] }) {
+            if (0..<4).contains(where:{ abs(Int(bytes[offset+$0])-Int(other.bytes[offset+$0]))>tolerance }) {
                 minX=min(minX,pixel%side);maxX=max(maxX,pixel%side)
                 minY=min(minY,pixel/side);maxY=max(maxY,pixel/side)
             }
@@ -63,12 +63,23 @@ struct MascotLampPixels {
     func matchesOutsideAndOpaque(_ reference:Self,rect:CGRect) -> Bool {
         guard side==reference.side else { return false }
         let x0=Int(rect.minX),x1=Int(rect.maxX),y0=Int(rect.minY),y1=Int(rect.maxY)
+        var roundedPixels=0
+        let roundingLimit=max(4,side*side/4096)
         for y in 0..<side { for x in 0..<side {
             let i=(y*side+x)*4
             if x>=x0,x<x1,y>=y0,y<y1 {
                 if bytes[i+3] != 255 || reference.bytes[i+3] != 255 { return false }
             } else {
-                for c in 0..<4 where bytes[i+c] != reference.bytes[i+c] { return false }
+                var changed=false
+                for c in 0..<4 {
+                    let delta=abs(Int(bytes[i+c])-Int(reference.bytes[i+c]))
+                    if delta>1 { return false }
+                    changed = changed || delta != 0
+                }
+                if changed {
+                    roundedPixels+=1
+                    if roundedPixels>roundingLimit { return false }
+                }
             }
         }}
         return true
@@ -164,7 +175,10 @@ final class HeaderMascotLampAtlas {
         }
         if index==0 { low=pixels;referenceImage=image }
         else if index==1 {
-            guard let low,let roi=low.differenceRect(pixels),
+            // A few unrelated GPU edge pixels may round by one sRGB byte.
+            // They cannot enlarge the patch; the check below limits both the
+            // per-channel error and its area, retaining opaque patch coverage.
+            guard let low,let roi=low.differenceRect(pixels,tolerance:1),
                   roi.width*roi.height*4*49<=Double(limit),
                   pixels.matchesOutsideAndOpaque(low,rect:roi) else {
                 reject("non-opaque or over-budget lamp region");return
@@ -178,13 +192,19 @@ final class HeaderMascotLampAtlas {
         } else {
             guard let low,pixels.matchesOutsideAndOpaque(low,rect:rect),
                   let patch=pixels.patch(rect) else {
+                #if DEBUG
+                if ProcessInfo.processInfo.environment["CLIPSLOTS_MASCOT_OPTIMIZATION_PROBE"] != nil {
+                    NSLog("[MascotAtlas] rejected index=%d roi=%@ difference=%@", index,
+                          NSStringFromRect(rect), NSStringFromRect(low?.differenceRect(pixels) ?? .zero))
+                }
+                #endif
                 reject("nonlocal or transparent brightness change");return
             }
             if index<73 { frames.append(patch) }
             else if index==73 {
-                guard pixels.bytes==low.bytes else { reject("unstable low endpoint");return }
+                guard pixels.matchesROI(low,rect:rect) else { reject("unstable low endpoint");return }
             } else if index==74 {
-                guard let high,pixels.bytes==high.bytes else { reject("unstable high endpoint");return }
+                guard let high,pixels.matchesROI(high,rect:rect) else { reject("unstable high endpoint");return }
             } else {
                 let reference=frames[index-75]
                 guard let stored=reference.dataProvider?.data,

@@ -2,6 +2,9 @@ import AppKit
 import SceneKit
 import simd
 import ClipSlotsKit
+#if DEBUG
+import CryptoKit
+#endif
 
 /// Authored volumetric replacement at the original model pivots and camera.
 /// The controller deforms the leg mesh in depth; it never scales a flat image.
@@ -43,6 +46,9 @@ final class HeaderMascotScene {
     private var lastHeadTransform:simd_float4x4?
     private var lastContactTransform:simd_float4x4?
     private var lastContactLift:Float=0
+    #if DEBUG
+    var contactLift:Float { lastContactLift }
+    #endif
     private(set) var neckAttachmentValid=true
     private(set) var neckSurfaceValid=true
     private(set) var headBodyClearanceValid=true
@@ -52,6 +58,13 @@ final class HeaderMascotScene {
     private let collisionGrid=96
     private var shoulderHeight:[Float]=[]
     private var headContactPoints:[SIMD3<Float>]=[]
+    private struct ContactCluster {
+        let center:SIMD3<Float>
+        let extent:SIMD3<Float>
+        let points:[SIMD3<Float>]
+    }
+    private var contactClusters:[ContactCluster]=[]
+    private var maximumShoulderY:Float = -2
     private let hip:Float = -0.56455332
     private let attachment:Float = -0.59701014
     private(set) var ready=false
@@ -60,6 +73,36 @@ final class HeaderMascotScene {
     private(set) var geometryInsideFrustum=true
     private(set) var facialSurfaceValid=true
     private var verifyGeometry=false
+    #if DEBUG
+    private(set) var performancePhases:[String:Double]=[:]
+    /// SIMD3 has a fourth padding lane. SceneKit reads only the declared
+    /// components; hashing the stride bytes compares uninitialized padding.
+    static func geometrySourceBytes(_ source:SCNGeometrySource)->Data {
+        let data=source.data
+        let width=source.componentsPerVector*source.bytesPerComponent
+        var packed=Data(capacity:source.vectorCount*width)
+        for i in 0..<source.vectorCount {
+            let start=source.dataOffset+i*source.dataStride
+            packed.append(data[start..<(start+width)])
+        }
+        return packed
+    }
+    var geometryFingerprint:String {
+        var digest=SHA256()
+        for part in parts {
+            var transform=part.node.simdWorldTransform
+            withUnsafeBytes(of:&transform) { digest.update(data:Data($0)) }
+            digest.update(data:Data([part.node.isHidden ? 1 : 0]))
+            for source in part.node.geometry?.sources ?? [] {
+                digest.update(data:Self.geometrySourceBytes(source))
+            }
+            for element in part.node.geometry?.elements ?? [] {
+                digest.update(data:element.data)
+            }
+        }
+        return digest.finalize().map { String(format:"%02x",$0) }.joined()
+    }
+    #endif
 
     private func faceSurface(x:Float,y:Float,offset:Float=0.007)->(SIMD3<Float>,SIMD3<Float>) {
         let z:Float=0.005+0.47*sqrt(max(0.001,1-pow(x/0.67,2)-pow((y-0.505)/0.50,2)))
@@ -88,11 +131,15 @@ final class HeaderMascotScene {
         return node
     }
 
-    init(directory:URL?=nil) {
+    init(directory:URL?=nil, verifyGeometry requestedValidation:Bool?=nil) {
         verifyGeometry=directory != nil
         #if DEBUG
         verifyGeometry=true
         #endif
+        // Standalone geometry regressions retain exhaustive validation. Live
+        // rendering opts out explicitly; walking every vertex is diagnostic
+        // work and does not contribute to the pixels presented to the user.
+        if let requestedValidation { verifyGeometry=requestedValidation }
         guard let url=directory?.appendingPathComponent("scene.json") ?? MascotResources.url("scene"),
               let descriptors=try? JSONDecoder().decode([Mesh].self,from:Data(contentsOf:url)),
               let data=try? Data(contentsOf:url.deletingLastPathComponent().appendingPathComponent("scene.mesh")) else { return }
@@ -376,6 +423,17 @@ final class HeaderMascotScene {
             }.max() ?? -2
         }}
         headContactPoints=parts.filter { $0.kind=="head" }.flatMap(\.positions).filter { $0.y<0.65 }
+        maximumShoulderY=shoulderHeight.max() ?? -2
+        // Conservative broad phase, built once. All potentially touching
+        // vertices still use the original exact contact calculation.
+        let cells=Dictionary(grouping:headContactPoints) { p in
+            SIMD3<Int32>(Int32(floor(p.x/0.08)),Int32(floor(p.y/0.08)),Int32(floor(p.z/0.08)))
+        }
+        contactClusters=cells.values.map { points in
+            var low=points[0],high=points[0]
+            for p in points { low=simd_min(low,p);high=simd_max(high,p) }
+            return ContactCluster(center:(low+high)*0.5,extent:(high-low)*0.5,points:points)
+        }
     }
     private func shoulderY(_ point:SIMD3<Float>)->Float {
         let x=(point.x+1.5)*Float(collisionGrid-1)/3,z=(point.z+1.5)*Float(collisionGrid-1)/3
@@ -395,9 +453,26 @@ final class HeaderMascotScene {
         // them once for the entire mesh, preserving the exact vertex formula.
         let position=head.simdPosition,orientation=head.simdOrientation
         var lift:Float=0
-        for p in headContactPoints {
-            let point=position+orientation.act(p-headCenter)
-            lift=max(lift,shoulderY(point)+0.022-point.y)
+        if verifyGeometry {
+            for p in headContactPoints {
+                let point=position+orientation.act(p-headCenter)
+                lift=max(lift,shoulderY(point)+0.022-point.y)
+            }
+        } else {
+            let matrix=simd_float3x3(orientation)
+            let yAxis=SIMD3(matrix.columns.0.y,matrix.columns.1.y,matrix.columns.2.y)
+            // Sort the small set of cells, never the full vertex mesh.
+            let candidates=contactClusters.map { cell in
+                (position.y+orientation.act(cell.center-headCenter).y
+                    - simd_dot(simd_abs(yAxis),cell.extent),cell)
+            }.sorted { $0.0 < $1.0 }
+            for (minimumY,cell) in candidates {
+                if minimumY+lift > maximumShoulderY+0.022+0.00001 { break }
+                for p in cell.points {
+                    let point=position+orientation.act(p-headCenter)
+                    lift=max(lift,shoulderY(point)+0.022-point.y)
+                }
+            }
         }
         lastContactTransform=transform;lastContactLift=lift
         head.simdPosition.y+=lift
@@ -491,6 +566,9 @@ final class HeaderMascotScene {
     }
     func render(_ pose:MascotPose,size:Int,activity:MascotMotion.Activity)->NSBitmapImageRep? {
         guard ready else { return nil }
+        #if DEBUG
+        let phaseStart=ProcessInfo.processInfo.systemUptime
+        #endif
         SCNTransaction.begin();SCNTransaction.animationDuration=0
         world.position.y=[MascotMotion.Activity.waiting,.completed].contains(activity) ? 0 : CGFloat(pose.lift/max(1,pixelsPerY))
         let yaw=simd_quatf(angle:Float(pose.yaw * .pi/180),axis:SIMD3(0,1,0))
@@ -609,7 +687,13 @@ final class HeaderMascotScene {
         // The serial renderer has no run loop. Publish the completed scene
         // transaction before snapshotting, including interleaved blink meshes.
         SCNTransaction.flush()
+        #if DEBUG
+        let preparedAt=ProcessInfo.processInfo.systemUptime
+        #endif
         let image=renderer.snapshot(atTime:0,with:NSSize(width:size,height:size),antialiasingMode:.multisampling4X)
+        #if DEBUG
+        let snapshotAt=ProcessInfo.processInfo.systemUptime
+        #endif
         // Check actual deformed mesh vertices. Rotating a local bounding box
         // creates empty corners outside the viewport even when the mesh fits.
         if verifyGeometry {
@@ -629,6 +713,9 @@ final class HeaderMascotScene {
             }
         }
         }
+        #if DEBUG
+        let auditedAt=ProcessInfo.processInfo.systemUptime
+        #endif
         guard let cg=image.cgImage(forProposedRect:nil,context:nil,hints:nil) else { return nil }
         lastPose=pose;lastActivity=activity
         guard let rep=NSBitmapImageRep(bitmapDataPlanes:nil,pixelsWide:size,pixelsHigh:size,bitsPerSample:8,
@@ -644,7 +731,13 @@ final class HeaderMascotScene {
         // The centred sweep retains a small transparent interaction margin.
         c.scaleBy(x:0.96,y:0.96)
         c.draw(cg,in:CGRect(x:-CGFloat(size)/2,y:-CGFloat(size)/2,width:CGFloat(size),height:CGFloat(size)))
-        NSGraphicsContext.restoreGraphicsState();return rep
+        NSGraphicsContext.restoreGraphicsState()
+        #if DEBUG
+        performancePhases=["prepare_ms":(preparedAt-phaseStart)*1000,
+            "snapshot_ms":(snapshotAt-preparedAt)*1000,"audit_ms":(auditedAt-snapshotAt)*1000,
+            "composite_ms":(ProcessInfo.processInfo.systemUptime-auditedAt)*1000]
+        #endif
+        return rep
     }
 }
 

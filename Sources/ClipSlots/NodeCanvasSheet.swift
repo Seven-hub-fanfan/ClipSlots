@@ -130,7 +130,7 @@ struct NodeCanvasSheet: View {
                     ForEach(1...10, id: \.self) { slot in
                         if let rect = nodeFrames[slot] {
                             HStack(spacing: 0) {
-                                NodeAttachmentButton(slot: slot, store: store)
+                                NodeAttachmentButton(slot: slot, store: store, groupId: store.currentSpecialSlotId)
                                 Spacer(minLength: 0)
                             }
                             .padding(.horizontal, 10)

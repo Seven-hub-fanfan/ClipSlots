@@ -113,6 +113,7 @@ final class AttachmentManagerPanelController: NSObject, NSPopoverDelegate {
         self.popover = pop
         pop.show(relativeTo: NSRect(origin: point, size: NSSize(width: 1, height: 1)),
                  of: anchor, preferredEdge: .maxY)
+        hosting.view.window?.makeFirstResponder(hosting.view)
     }
 
     /// 指定槽位的面板是否正在显示（点同一个附件按钮时用于切换关闭）。
@@ -132,6 +133,7 @@ final class AttachmentManagerPanelController: NSObject, NSPopoverDelegate {
         anchor: AttachmentButtonScreenAnchor,
         slot: Int,
         store: SlotStoreObservable,
+        groupId: String? = nil,
         onClose: @escaping () -> Void
     ) {
         guard anchor.view?.window != nil else { return }
@@ -139,6 +141,7 @@ final class AttachmentManagerPanelController: NSObject, NSPopoverDelegate {
         // C-6 (v2.10.31): 每次 show 领取一个新 token，作废所有在途的 pending show 请求。
         pendingShowToken &+= 1
         let token = pendingShowToken
+        let targetGroup = groupId ?? store.currentSpecialSlotId
 
         // UX (v2.10.46): 若上一次切换的旧面板还在淡出，立即硬关，避免两个 popover 叠加。
         hardCloseFadingOut()
@@ -168,11 +171,11 @@ final class AttachmentManagerPanelController: NSObject, NSPopoverDelegate {
                 // 淡出完成回调发生在当前 runloop 之后，附件按钮 backing NSView 的重排也已
                 // settle（原 AT-3 的一个 runloop micro-defer 由 0.12s 淡出自然覆盖）。
                 guard token == self.pendingShowToken else { return }
-                self.reallyShow(anchor: anchor, slot: slot, store: store, onClose: onClose, animates: false, fadeIn: true)
+                self.reallyShow(anchor: anchor, slot: slot, store: store, groupId: targetGroup, onClose: onClose, animates: false, fadeIn: true)
             }
         } else {
             // 首次打开：保留原有系统淡入动画。
-            reallyShow(anchor: anchor, slot: slot, store: store, onClose: onClose, animates: true, fadeIn: false)
+            reallyShow(anchor: anchor, slot: slot, store: store, groupId: targetGroup, onClose: onClose, animates: true, fadeIn: false)
         }
     }
 
@@ -203,6 +206,7 @@ final class AttachmentManagerPanelController: NSObject, NSPopoverDelegate {
         anchor: AttachmentButtonScreenAnchor,
         slot: Int,
         store: SlotStoreObservable,
+        groupId: String,
         onClose: @escaping () -> Void,
         animates: Bool,
         fadeIn: Bool
@@ -216,7 +220,7 @@ final class AttachmentManagerPanelController: NSObject, NSPopoverDelegate {
         // building a new one so switching content can't leak SwiftUI render trees.
         tearDownHosting()
 
-        let content = AttachmentManagerPopover(slot: slot, store: store)
+        let content = AttachmentManagerPopover(slot: slot, store: store, groupId: groupId)
         let hosting = NSHostingController(rootView: content)
         hosting.view = AttachmentManagerHostingView(rootView: content)
         let pop = NSPopover()
@@ -234,6 +238,7 @@ final class AttachmentManagerPanelController: NSObject, NSPopoverDelegate {
         pop.show(relativeTo: anchorView.bounds, of: anchorView, preferredEdge: .maxY)
         self.popover = pop
         self.hosting = hosting
+        hosting.view.window?.makeFirstResponder(hosting.view)
 
         if fadeIn {
             NSAnimationContext.runAnimationGroup { ctx in
@@ -254,9 +259,18 @@ final class AttachmentManagerPanelController: NSObject, NSPopoverDelegate {
         hosting = nil
     }
 
-    func close() {
+    func close(immediately: Bool = false) {
+        // A group switch can arrive during the short slot-to-slot fade.
+        // Cancel that deferred show too, so an old-group panel cannot reopen.
+        pendingShowToken &+= 1
         pendingShow = nil
-        popover?.performClose(nil)
+        hardCloseFadingOut()
+        if immediately {
+            popover?.animates = false
+            popover?.close()
+        } else {
+            popover?.performClose(nil)
+        }
     }
 
     // MARK: NSPopoverDelegate
@@ -280,7 +294,27 @@ final class AttachmentManagerPanelController: NSObject, NSPopoverDelegate {
 }
 
 /// SwiftUI 滚动容器会吞掉行内 NSViewRepresentable 的命中；只把明确的原生控件交还其自身。
-private final class AttachmentManagerHostingView: NSHostingView<AttachmentManagerPopover> {
+final class AttachmentManagerHostingView: NSHostingView<AttachmentManagerPopover> {
+    var attachmentPasteboard: NSPasteboard = .general
+    override var acceptsFirstResponder: Bool { true }
+
+    @objc func paste(_ sender: Any?) {
+        rootView.pasteAttachments(from: attachmentPasteboard)
+    }
+
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        if event.modifierFlags.intersection(.deviceIndependentFlagsMask) == .command,
+           event.charactersIgnoringModifiers?.lowercased() == "v" {
+            // Inline text/name fields keep normal text paste.
+            if let text = window?.firstResponder as? NSTextView, text.isEditable {
+                return super.performKeyEquivalent(with: event)
+            }
+            paste(nil)
+            return true
+        }
+        return super.performKeyEquivalent(with: event)
+    }
+
     override func hitTest(_ point: NSPoint) -> NSView? {
         let local = convert(point, from: superview)
         guard bounds.contains(local) else { return nil }

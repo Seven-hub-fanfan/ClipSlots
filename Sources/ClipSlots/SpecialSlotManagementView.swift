@@ -29,7 +29,7 @@ struct SpecialSlotManagementView: View {
                 }
                 VStack(alignment: .leading, spacing: 2) {
                     Text("槽位组管理")
-                        .font(.system(size: 18, weight: .bold, design: .rounded))
+                        .font(.system(size: 18, weight: .bold))
                     Text("创建、编辑和切换槽位组")
                         .font(.caption)
                         .foregroundColor(.secondary)

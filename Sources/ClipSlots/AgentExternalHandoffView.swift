@@ -146,7 +146,7 @@ public struct AgentExternalHandoffView: View {
                             Text("将配置添加到客户端的 mcpServers，再重启客户端。连接后可读取「\(context.projectTitle)」的画布与产物。")
                                 .foregroundStyle(TapSkin.secondaryInk).lineSpacing(6)
                             Text(session.mcpConfigurationText ?? "配置无效")
-                                .font(.system(size: 11, design: .monospaced))
+                                .font(.system(size: 11))
                                 .accessibilityIdentifier("agent-external-mcp-configuration")
                                 .textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading)
                                 .padding(16)

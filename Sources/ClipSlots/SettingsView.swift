@@ -192,7 +192,7 @@ struct SettingsView: View {
                 }
                 VStack(alignment: .leading, spacing: 1) {
                     Text("ClipSlots")
-                        .font(.system(size: 15, weight: .bold, design: .rounded))
+                        .font(.system(size: 15, weight: .bold))
                     Text("偏好设置")
                         .font(.system(size: 11))
                         .foregroundColor(.secondary)
@@ -360,7 +360,7 @@ struct SettingsView: View {
             }
             VStack(alignment: .leading, spacing: 2) {
                 Text("ClipSlots 设置")
-                    .font(.system(size: 18, weight: .bold, design: .rounded))
+                    .font(.system(size: 18, weight: .bold))
                 Text("配置外观、槽位和全局快捷键")
                     .font(.caption)
                     .foregroundColor(.secondary)
@@ -399,7 +399,7 @@ struct SettingsView: View {
                         .font(.subheadline)
                     Spacer()
                     Text("\(Int(slots))")
-                        .font(.system(size: 13, weight: .semibold, design: .rounded))
+                        .font(.system(size: 13, weight: .semibold))
                         .padding(.horizontal, 9)
                         .padding(.vertical, 4)
                         .background(Capsule().fill(AppTheme.chipBackground(colorScheme)))
@@ -501,7 +501,7 @@ struct SettingsView: View {
                 Spacer()
                 // 数值胶囊（与「槽位数量」的数值样式保持一致）
                 Text("\(undoSteps)")
-                    .font(.system(size: 13, weight: .semibold, design: .rounded))
+                    .font(.system(size: 13, weight: .semibold))
                     .monospacedDigit()
                     .padding(.horizontal, 9)
                     .padding(.vertical, 4)
@@ -926,7 +926,7 @@ struct SettingsView: View {
                 Spacer()
                 Text(preview.isEmpty ? "未设置" : preview)
                     // v2.9.18: 快捷键预览由 11pt 提升到 12pt（保留 monospaced 以对齐键位显示），改善可读。
-                    .font(.system(size: 12, weight: .medium, design: .monospaced))
+                    .font(.system(size: 12, weight: .medium))
                     .foregroundColor(.secondary)
                     .padding(.horizontal, 8)
                     .padding(.vertical, 4)
@@ -934,7 +934,7 @@ struct SettingsView: View {
             }
             TextField(placeholder, text: text)
                 .textFieldStyle(.roundedBorder)
-                .font(.system(.body, design: .monospaced))
+                .font(.system(.body))
         }
     }
 
@@ -1055,7 +1055,7 @@ private func shortcutRecorder(title: String, subtitle: String, text: Binding<Str
             Spacer()
             Text(preview.isEmpty ? "未设置" : preview)
                 // v2.9.18: 快捷键预览由 11pt 提升到 12pt（保留 monospaced 以对齐键位显示），改善可读。
-                .font(.system(size: 12, weight: .medium, design: .monospaced))
+                .font(.system(size: 12, weight: .medium))
                 .foregroundColor(.secondary)
                 .padding(.horizontal, 8)
                 .padding(.vertical, 4)
@@ -1086,7 +1086,7 @@ private struct ShortcutCaptureField: NSViewRepresentable {
         field.isBordered = false
         field.backgroundColor = .controlBackgroundColor
         field.focusRingType = .none
-        field.font = .monospacedSystemFont(ofSize: 14, weight: .medium)
+        field.font = .systemFont(ofSize: 14, weight: .medium)
         field.alignment = .left
         field.onShortcut = { value in
             // Only mutate local SettingsView draft binding. This does NOT affect live config.

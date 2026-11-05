@@ -1,4 +1,5 @@
 import Foundation
+import UniformTypeIdentifiers
 
 // MARK: - Slot Group Direction (v2.4.1)
 
@@ -176,6 +177,7 @@ public final class SpecialSlotStorage {
         indexURL = baseDir.appendingPathComponent("index.json")
 
         try? FileManager.default.createDirectory(at: baseDir, withIntermediateDirectories: true)
+        try? storageLock.withLock { try SlotMoveDiskTransaction.recover() }
         ensureInitialized()
         // F7 (契约5): detect + auto-repair a missing default page / default group on
         // every process init (before trash cleanup so a repaired install is fully
@@ -1852,7 +1854,13 @@ public final class SpecialSlotStorage {
     /// callers that carry over attachments MUST use this and abort the write on nil rather than
     /// overwrite the disk with an empty placeholder (which drops externalized `.bin` bytes).
     public func getOrUnknown(_ slot: Int, in specialSlotId: String) -> SlotContent? {
-        slotStorage(for: specialSlotId).getOrUnknown(slot)
+        if SlotMoveDiskTransaction.hasPending {
+            do {
+                try storageLock.withLock { try SlotMoveDiskTransaction.recover() }
+                invalidateContentCaches()
+            } catch { return nil }
+        }
+        return slotStorage(for: specialSlotId).getOrUnknown(slot)
     }
 
     /// Read-only enumeration. Busy storage is an error, never an apparently empty library.
@@ -1918,6 +1926,250 @@ public final class SpecialSlotStorage {
         }
     }
 
+    /// Merge against the latest body and attachments under the cross-process lock.
+    /// The group is fixed by the drop/paste receiver, never by current navigation.
+    public func appendTransferredAttachments(_ additions: [SlotContent.SlotAttachment],
+                                             slot: Int, groupID: String) throws -> SlotContent {
+        try storageLock.withLock(timeout: 0.15) {
+            guard !storageLock.isDegraded else { throw AgentCanvasError.busy }
+            guard !additions.isEmpty, slot >= 1,
+                  slot <= (Self.isReservedGroupId(groupID) ? Self.unfiledCapacity : 10),
+                  loadIndex().specialSlots.contains(where: { $0.id == groupID }),
+                  var current = getOrUnknown(slot, in: groupID) else { throw AgentCanvasError.unavailable }
+            for attachment in additions where attachment.type == .image || attachment.type == .file {
+                guard !(attachment.data?.isEmpty ?? true)
+                        || attachment.localFileReferencePath.map({
+                            (try? URL(fileURLWithPath: $0).resourceValues(forKeys: [.isRegularFileKey]))?.isRegularFile == true
+                        }) == true else { throw AgentCanvasError.unavailable }
+            }
+            current.attachments.append(contentsOf: additions)
+            current.contentId = UUID().uuidString
+            current.updatedAt = Date().timeIntervalSince1970
+            guard set(slot, content: current, in: groupID),
+                  let saved = getOrUnknown(slot, in: groupID) else { throw AgentCanvasError.writeFailed }
+            return saved
+        }
+    }
+
+    public func moveFile(_ source: SlotFileMove, from sourceStorage: SpecialSlotStorage,
+                         to slot: Int, groupID: String, destination: SlotFileMoveDestination,
+                         checkpoint: ((Int) throws -> Void)? = nil) throws -> SlotContent {
+        try storageLock.withCancellableLock(timeout: 0.15, isCancelled: { false }) {
+            guard !storageLock.isDegraded else { throw AgentCanvasError.busy }
+            try SlotMoveDiskTransaction.recover()
+            guard sourceStorage.loadIndex().specialSlots.contains(where: {
+                $0.id == source.groupID && $0.pageId == source.pageID && $0.createdAt == source.groupCreatedAt
+            }), loadIndex().specialSlots.contains(where: { $0.id == groupID }),
+                  source.slot >= 1, source.slot <= (Self.isReservedGroupId(source.groupID) ? Self.unfiledCapacity : 10),
+                  slot >= 1, slot <= (Self.isReservedGroupId(groupID) ? Self.unfiledCapacity : 10),
+                  var original = sourceStorage.getOrUnknown(source.slot, in: source.groupID),
+                  var target = getOrUnknown(slot, in: groupID) else { throw AgentCanvasError.unavailable }
+            let same = storageRoot == sourceStorage.storageRoot && source.groupID == groupID && source.slot == slot
+            let additions: [SlotContent.SlotAttachment]
+            var textBody: SlotContent?
+            if let bundle = source.attachmentBundle {
+                guard destination == .attachments else {
+                    throw AgentOperationError("整组附件只能拖到附件按钮或附件区域。")
+                }
+                guard source.body == nil, source.attachment == nil, !bundle.isEmpty,
+                      Set(bundle.map(\.id)).count == bundle.count,
+                      bundle.allSatisfy({ original.attachments.contains($0) }) else {
+                    throw AgentCanvasError.conflict
+                }
+                if same { return target }
+                additions = bundle
+                let movedIDs = Set(bundle.map(\.id))
+                original.attachments.removeAll { movedIDs.contains($0.id) }
+            } else if let attachment = source.attachment {
+                guard original.attachments.contains(attachment) else { throw AgentCanvasError.conflict }
+                if same && destination == .attachments { return target }
+                additions = [attachment]
+                original.attachments.removeAll { $0.id == attachment.id }
+            } else if let expected = source.body {
+                guard AgentSlotBody(original) == AgentSlotBody(expected) else { throw AgentCanvasError.conflict }
+                if same && destination == .body { return target }
+                if SlotFileMove.isTextBody(original) {
+                    additions = SlotFileMove.bodyAttachments(in: original)
+                    textBody = expected
+                    original.items = []
+                    original.htmlSource = nil
+                } else {
+                    additions = SlotFileMove.files(in: original)
+                    let removed = Set(original.items.indices.filter {
+                        !SlotFileMove.files(in: SlotContent(items: [original.items[$0]])).isEmpty
+                    })
+                    original.items = original.items.enumerated().filter { !removed.contains($0.offset) }.map(\.element)
+                }
+                original.managedBodyFiles = nil
+            } else { throw AgentCanvasError.unavailable }
+            guard !additions.isEmpty, source.fileVersions.allSatisfy({
+                SlotFileMove.isCurrent(path: $0.key, expected: $0.value)
+            }) else { throw AgentCanvasError.conflict }
+            for file in additions where file.type == .file || file.type == .image {
+                guard !(file.data?.isEmpty ?? true) || (file.storagePath ?? file.localFileReferencePath).map({
+                    (try? URL(fileURLWithPath: $0).resourceValues(forKeys: [.isRegularFileKey]))?.isRegularFile == true
+                }) == true else { throw AgentCanvasError.unavailable }
+            }
+            if same { target = original }
+            if destination == .attachments {
+                guard !additions.contains(where: { file in target.attachments.contains { $0.id == file.id } })
+                else { throw AgentCanvasError.conflict }
+                target.attachments.append(contentsOf: additions)
+            } else {
+                // Never silently replace a populated body when dropping a file.
+                guard target.items.isEmpty, target.htmlSource?.isEmpty != false else {
+                    throw AgentOperationError("目标槽位已有内容，请拖到附件按钮或选择空槽位。")
+                }
+                var managed: [String: SlotContent.SlotAttachment] = [:]
+                target.items = try additions.map { file in
+                    switch file.type {
+                    case .image, .file:
+                        let path = file.storagePath ?? file.localFileReferencePath
+                            ?? storageRoot.appendingPathComponent("pending-\(file.id)-\(file.name)").path
+                        let url = URL(fileURLWithPath: path)
+                        managed[url.absoluteString] = file
+                        return [PasteboardItem(type: UTType.fileURL.identifier, data: Data(url.absoluteString.utf8))]
+                    case .text:
+                        guard let data = file.resolveData() else { throw AgentCanvasError.unavailable }
+                        return [PasteboardItem(type: UTType.utf8PlainText.identifier, data: data)]
+                    case .url:
+                        guard let url = file.url else { throw AgentCanvasError.unavailable }
+                        return [PasteboardItem(type: UTType.url.identifier, data: Data(url.utf8))]
+                    case .reference: throw AgentCanvasError.unavailable
+                    }
+                }
+                target.managedBodyFiles = managed.isEmpty ? nil : managed
+                if let textBody {
+                    target.items = textBody.items
+                    target.htmlSource = textBody.htmlSource
+                }
+            }
+            target.contentId = UUID().uuidString
+            target.updatedAt = Date().timeIntervalSince1970
+            original.contentId = UUID().uuidString
+            original.updatedAt = target.updatedAt
+            let liveTarget = storageRoot.appendingPathComponent(groupID).appendingPathComponent(String(slot))
+            let liveSource = sourceStorage.storageRoot.appendingPathComponent(source.groupID)
+                .appendingPathComponent(String(source.slot))
+            let changes = same ? [(live: liveTarget, content: target)]
+                : [(live: liveTarget, content: target), (live: liveSource, content: original)]
+            defer {
+                slotStorage(for: groupID).invalidateCache()
+                sourceStorage.slotStorage(for: source.groupID).invalidateCache()
+            }
+            try SlotMoveDiskTransaction.commit(changes, checkpoint: checkpoint)
+            slotStorage(for: groupID).invalidateCache()
+            sourceStorage.slotStorage(for: source.groupID).invalidateCache()
+            guard let saved = getOrUnknown(slot, in: groupID) else { throw AgentCanvasError.writeFailed }
+            return saved
+        }
+    }
+
+    public func editorSnapshot(_ slot: Int, in groupID: String) throws -> SlotEditorSnapshot {
+        try storageLock.withLock(timeout: 0.15) {
+            guard !storageLock.isDegraded else { throw AgentCanvasError.busy }
+            let index = loadIndex()
+            guard let group = index.specialSlots.first(where: { $0.id == groupID }),
+                  slot >= 1, slot <= (Self.isReservedGroupId(groupID) ? Self.unfiledCapacity : 10),
+                  var content = getOrUnknown(slot, in: groupID) else { throw AgentCanvasError.unavailable }
+            content.label = getLabel(slot, in: groupID)
+            return SlotEditorSnapshot(slot: slot, group: group,
+                pageName: index.pages.first(where: { $0.id == group.pageId })?.name ?? "画布",
+                content: content)
+        }
+    }
+
+    /// Commit both editor drafts in one checked write. Live labels and thumbnails
+    /// survive; concurrent body/attachment changes and deleted/recreated groups fail.
+    public func exchangeEditorContent(_ snapshot: SlotEditorSnapshot,
+                                      body: AgentSlotBody,
+                                      attachments: [SlotContent.SlotAttachment],
+                                      markdownEdit: SlotMarkdownEdit? = nil) throws -> SlotContent {
+        try storageLock.withLock(timeout: 0.15) {
+            guard !storageLock.isDegraded else { throw AgentCanvasError.busy }
+            guard snapshot.slot >= 1,
+                  snapshot.slot <= (Self.isReservedGroupId(snapshot.group.id) ? Self.unfiledCapacity : 10),
+                  loadIndex().specialSlots.contains(where: {
+                $0.id == snapshot.group.id && $0.pageId == snapshot.group.pageId
+                    && $0.createdAt == snapshot.group.createdAt
+            }), var current = getOrUnknown(snapshot.slot, in: snapshot.group.id) else {
+                throw AgentCanvasError.unavailable
+            }
+            guard AgentSlotBody(current) == AgentSlotBody(snapshot.content),
+                  current.attachments == snapshot.content.attachments else { throw AgentCanvasError.conflict }
+            if let markdownEdit {
+                try markdownEdit.document.validateSource(in: current)
+                current = try markdownEdit.document.replacingBody(in: current, text: markdownEdit.text)
+            } else {
+                current.items = body.items
+                current.htmlSource = body.htmlSource
+            }
+            current.attachments = attachments
+            current.contentId = UUID().uuidString
+            current.updatedAt = Date().timeIntervalSince1970
+            guard set(snapshot.slot, content: current, in: snapshot.group.id),
+                  let saved = getOrUnknown(snapshot.slot, in: snapshot.group.id) else {
+                throw AgentCanvasError.writeFailed
+            }
+            return saved
+        }
+    }
+
+    /// A picker only fills the captured empty body. Latest attachments, label and
+    /// cover survive; a changed body or deleted/recreated group is never replaced.
+    public func importFileIntoEmptyBody(_ url: URL, snapshot: SlotEditorSnapshot,
+                                       cancellation: FileImportCancellation = FileImportCancellation(),
+                                       preferClone: Bool = true,
+                                       progress: ((Int64, Int64) throws -> Void)? = nil)
+        throws -> (before: SlotContent, after: SlotContent) {
+        guard snapshot.content.hasEmptyBody, url.isFileURL else { throw AgentCanvasError.conflict }
+        let data = Data(url.absoluteString.utf8)
+        var body = SlotContent(items: [[PasteboardItem(type: "public.file-url", data: data),
+                                       PasteboardItem(type: "public.url", data: data)]])
+        body.manageBodyFile(url)
+        let prepared = try PreparedSlotBody(content: body, storageRoot: storageRoot,
+                                            cancellation: cancellation, preferClone: preferClone,
+                                            progress: progress)
+        return try commitImportedBody(body, snapshot: snapshot, prepared: prepared)
+    }
+
+    /// All expensive source I/O has finished. Re-read the target under the lock,
+    /// retain its latest attachments/metadata, and reject stale or deleted targets.
+    public func commitImportedBody(_ body: SlotContent, snapshot: SlotEditorSnapshot,
+                                   prepared: PreparedSlotBody, label: String? = nil)
+        throws -> (before: SlotContent, after: SlotContent) {
+        try storageLock.withLock(timeout: 0.15) {
+            try prepared.cancellation.check()
+            guard !storageLock.isDegraded else { throw AgentCanvasError.busy }
+            guard snapshot.slot >= 1,
+                  snapshot.slot <= (Self.isReservedGroupId(snapshot.group.id) ? Self.unfiledCapacity : 10),
+                  loadIndex().specialSlots.contains(where: {
+                      $0.id == snapshot.group.id && $0.pageId == snapshot.group.pageId
+                          && $0.createdAt == snapshot.group.createdAt
+                  }), var current = getOrUnknown(snapshot.slot, in: snapshot.group.id) else {
+                throw AgentCanvasError.unavailable
+            }
+            guard AgentSlotBody(current) == AgentSlotBody(snapshot.content),
+                  current.managedBodyFiles == snapshot.content.managedBodyFiles else {
+                throw AgentOperationError("准备文件期间槽位内容已改变，请重试。")
+            }
+            current.label = getLabel(snapshot.slot, in: snapshot.group.id)
+            let before = current
+            current.items = body.items
+            current.htmlSource = body.htmlSource
+            current.managedBodyFiles = body.managedBodyFiles
+            if let label { current.label = label }
+            current.contentId = UUID().uuidString
+            current.updatedAt = Date().timeIntervalSince1970
+            guard set(snapshot.slot, content: current, in: snapshot.group.id,
+                      replacingLabel: label != nil, preparedBody: prepared),
+                  let saved = getOrUnknown(snapshot.slot, in: snapshot.group.id) else {
+                throw AgentCanvasError.writeFailed
+            }
+            return (before, saved)
+        }
+    }
+
     /// Compare and exchange under the same lock used by GUI and CLI writes.
     /// The body snapshot includes rich pasteboard formats; unrelated live metadata survives.
     public func exchangeModelQuestion(_ slot: Int, in groupID: String,
@@ -1966,7 +2218,8 @@ public final class SpecialSlotStorage {
     }
 
     @discardableResult
-    public func set(_ slot: Int, content: SlotContent, in specialSlotId: String, replacingLabel: Bool = false) -> Bool {
+    public func set(_ slot: Int, content: SlotContent, in specialSlotId: String, replacingLabel: Bool = false,
+                    preparedBody: PreparedSlotBody? = nil) -> Bool {
         var content = content
         content.timestamp = Date()
         // P2-14 (v2.10.6): 内容写入本身此前不持跨进程锁，仅随后的 touchSpecialSlot 持锁，
@@ -1979,6 +2232,7 @@ public final class SpecialSlotStorage {
         // 曾为了规避 I/O 阻塞，但导致了并发下的快照撕裂风险。改为锁内执行以确保原子性。
         do {
             return try storageLock.withLock {
+                try SlotMoveDiskTransaction.recover()
                 // STG-2 (v2.10.32): validate the target group is still in the index INSIDE the lock
                 // before writing. A caller holding only a groupId string (e.g. CLI resolveGroup that
                 // resolved the id before entering the lock — TOCTOU) could otherwise write to a group
@@ -1990,7 +2244,8 @@ public final class SpecialSlotStorage {
                     return false
                 }
                 backupSlotBeforeOverwriteIfNeeded(slot: slot, in: specialSlotId)
-                let result = slotStorage(for: specialSlotId).set(slot, content: content, replacingLabel: replacingLabel)
+                let result = slotStorage(for: specialSlotId).set(slot, content: content,
+                    replacingLabel: replacingLabel, preparedBody: preparedBody)
                 if result {
                     var index = loadIndex()
                     if let idx = index.specialSlots.firstIndex(where: { $0.id == specialSlotId }) {
@@ -2230,10 +2485,11 @@ public final class SpecialSlotStorage {
 
     // MARK: - Source Update
 
-    public func updateCurrentSpecialSlotSource(sourceType: SpecialSlotSourceType, sourcePath: String?) throws {
+    public func updateCurrentSpecialSlotSource(sourceType: SpecialSlotSourceType, sourcePath: String?,
+                                              groupID: String? = nil) throws {
         try storageLock.withLock {
             var index = loadIndex()
-            guard let idx = index.specialSlots.firstIndex(where: { $0.id == index.currentSpecialSlotId }) else {
+            guard let idx = index.specialSlots.firstIndex(where: { $0.id == (groupID ?? index.currentSpecialSlotId) }) else {
                 throw SpecialSlotError.specialSlotNotFound
             }
             index.specialSlots[idx].sourceType = sourceType

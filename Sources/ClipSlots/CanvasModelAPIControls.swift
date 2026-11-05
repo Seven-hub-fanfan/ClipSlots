@@ -35,7 +35,7 @@ struct CanvasModelAPIControls: View {
                     DisclosureGroup("目录参数与范围") {
                         Text("只有配置中心声明的参数映射会发送给服务；参考素材按显式映射提交。")
                             .font(.system(size: 11)).foregroundStyle(.secondary)
-                        ScrollView { Text((try? item.presentationConfig.encodedText()) ?? "").font(.system(size: 10, design: .monospaced)).textSelection(.enabled) }.frame(maxHeight: 240)
+                        ScrollView { Text((try? item.presentationConfig.encodedText()) ?? "").font(.system(size: 10)).textSelection(.enabled) }.frame(maxHeight: 240)
                     }
                 }
             } else { Text("请在配置中心设置此用途模型。").font(.system(size: 11)).foregroundStyle(.secondary) }

@@ -50,7 +50,7 @@ struct REAPluginView: View {
             if !result.isEmpty {
                 ScrollView([.vertical, .horizontal]) {
                     Text(String(result.prefix(16000)))
-                        .font(.system(size: 10, design: .monospaced))
+                        .font(.system(size: 10))
                         .textSelection(.enabled).padding(10)
                 }
                 .frame(height: 180)

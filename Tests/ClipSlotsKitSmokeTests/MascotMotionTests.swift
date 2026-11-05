@@ -101,8 +101,9 @@ func runMascotMotionTests(_ t:TestRunner) {
             "Mascot editing alone retains idle breathing instead of work light")
     focused.setPromptEditing(false,at:2737)
     let firstRelease=focused.sample(at:2737)
-    t.check(abs(firstRelease.yaw)<20 && firstRelease.pitch>focused.computerGaze.pitch && firstRelease.pitch<30,
-            "Mascot editor blur starts a smooth return to the latest pointer")
+    t.check(hypot(firstRelease.yaw-focused.computerGaze.yaw,
+                  firstRelease.pitch-focused.computerGaze.pitch)<4,
+            "Mascot editor blur smoothly leaves screen gaze without a jump")
     for i in 1...100 { _=focused.sample(at:2800+Double(i)*17) }
     t.check(focused.pose.yaw < -60 && focused.pose.pitch==30,
             "Mascot editor blur restores idle pointer following")
@@ -174,9 +175,9 @@ func runMascotMotionTests(_ t:TestRunner) {
             "Mascot lamp-only scheduling keeps the exact next blink")
     scheduled.setPointer(x:500,y:0,at:100)
     _=scheduled.sample(at:100)
-    t.check(scheduled.schedulingHint(at:100).work == .pose &&
-            scheduled.schedulingHint(at:100).nextDeadlineMS==900,
-            "Mascot pointer convergence retains the 800ms quiet deadline")
+    t.check(scheduled.schedulingHint(at:100).work == .lampOnly &&
+            scheduled.schedulingHint(at:100).nextDeadlineMS==160,
+            "Mascot observes the pointer on a deadline without rendering attention-delay frames")
     scheduled.reduceMotion=true;scheduled.setActivity(.completed,at:1000)
     _=scheduled.sample(at:1000)
     t.check(scheduled.schedulingHint(at:1000).nextSemanticDeadlineMS==2800,
@@ -196,12 +197,66 @@ func runMascotMotionTests(_ t:TestRunner) {
     sleeping.setPointer(x:900,y:0,at:600000)
     t.check(sleeping.sample(at:600000).yaw==0,
             "Mascot dormant first input does not introduce a 100ms gaze jump")
-    t.check(sleeping.sample(at:600017).yaw>0 && sleeping.pose.yaw<10,
-            "Mascot dormant gaze resumes with the original damping")
+    t.check(sleeping.sample(at:600017).yaw==0 && sleeping.sample(at:600100).yaw>0,
+            "Mascot dormant gaze acknowledges the pointer within 100ms without an instant snap")
     sleeping.synchronizePresentedLampIntensity(0.42)
     sleeping.setActivity(.busy,at:600017)
     t.check(abs(sleeping.sample(at:600017).logoIntensity-0.42)<0.00001,
             "Mascot lamp-to-work transition starts at the presented brightness")
     sleeping.synchronizePresentedLampIntensity(.nan)
     t.check(sleeping.pose.logoIntensity.isFinite,"Mascot invalid presentation brightness is ignored")
+    // Physical outcomes at multiple render cadences, independent of the filter formula.
+    var settled:[Double]=[]
+    for hz in [15.0,30,60,120] {
+        let gaze=MascotMotion();gaze.random={1}
+        _=gaze.sample(at:0);gaze.setPointer(x:10000,y:10000,at:0)
+        var last=0.0, settledAt=Double.infinity
+        for i in 1...Int(hz*2) {
+            let time=Double(i)*1000/hz, p=gaze.sample(at:time)
+            t.check(p.yaw>=last && p.yaw<=65 && p.pitch>=0 && p.pitch<=30,
+                    "Mascot \(Int(hz))Hz step stays monotonic and inside authored angles #\(i)")
+            t.check((p.yaw-last)*hz<=151,
+                    "Mascot \(Int(hz))Hz head respects its own turn speed #\(i)")
+            last=p.yaw
+            if settledAt == .infinity && gaze.pose.yaw==65 && !gaze.highFrameRate { settledAt=time }
+        }
+        settled.append(settledAt)
+        t.check(settledAt<=1100 && gaze.pose.yaw==65 && gaze.pose.pitch==30,
+                "Mascot \(Int(hz))Hz gaze settles within 1100ms and releases active cadence")
+    }
+    t.check((settled.max() ?? 0)-(settled.min() ?? 0)<160,
+            "Mascot low-power and normal cadence converge consistently")
+    let reversal=MascotMotion();_=reversal.sample(at:0)
+    reversal.setPointer(x:10000,y:0,at:0)
+    for i in 1...17 { _=reversal.sample(at:Double(i)*17) }
+    let a=reversal.sample(at:299).yaw, b=reversal.sample(at:300).yaw
+    reversal.setPointer(x:-10000,y:0,at:300)
+    let c=reversal.sample(at:301).yaw
+    t.check(b>a && c>b && abs((c-b)-(b-a))<0.06,
+            "Mascot rapid reversal preserves velocity instead of instantly changing direction")
+    for i in 1...30 { _=reversal.sample(at:301+Double(i)*17) }
+    t.check(reversal.pose.yaw<c,"Mascot reversed pointer takes effect after observing and braking")
+    for i in 1...100 { _=reversal.sample(at:811+Double(i)*17) }
+    t.check(reversal.pose.yaw == -65 && !reversal.highFrameRate,
+            "Mascot reverse sweep settles completely without extra idle frames")
+    reversal.setPointer(x:10000,y:0,at:2600);_=reversal.sample(at:2617)
+    reversal.reduceMotion=true;_=reversal.sample(at:2618)
+    reversal.reduceMotion=false;reversal.setPointer(x:nil,y:nil,at:2618)
+    _=reversal.sample(at:2900)
+    t.check(reversal.pose.yaw==0 && !reversal.highFrameRate,
+            "Mascot pause clears stored velocity and cannot resume a stale turn")
+    let jitter=MascotMotion();jitter.random={1};_=jitter.sample(at:0)
+    jitter.setPointer(x:120,y:30,at:0)
+    for i in 1...120 { _=jitter.sample(at:Double(i)*17) }
+    let still=jitter.pose.yaw
+    for i in 121...180 {
+        jitter.setPointer(x:120+Double(i%3-1),y:30,at:Double(i)*17)
+        _=jitter.sample(at:Double(i)*17)
+    }
+    t.check(jitter.pose.yaw==still && !jitter.highFrameRate,
+            "Mascot tiny pointer tremor cannot keep head renders alive")
+    jitter.setPointer(x:nil,y:nil,at:3100)
+    t.check(jitter.sample(at:3200).yaw==still,"Mascot briefly retains attention after pointer leaves")
+    for i in 1...120 { _=jitter.sample(at:3200+Double(i)*17) }
+    t.check(jitter.pose.yaw==0 && !jitter.highFrameRate,"Mascot returns to rest after nearby attention ends")
 }

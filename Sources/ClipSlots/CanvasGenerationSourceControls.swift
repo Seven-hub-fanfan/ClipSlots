@@ -192,7 +192,7 @@ struct CanvasGenerationSourceControls: View {
                         Text("已提交任务 · BA / \(task.capabilityID)").font(.system(size: 11, weight: .semibold))
                         Text(node.generationDiagnostic?.stageLabel ?? "等待查询原任务")
                             .font(.system(size: 11)).foregroundColor(.secondary)
-                        Text(task.taskID).font(.system(size: 10, design: .monospaced)).textSelection(.enabled)
+                        Text(task.taskID).font(.system(size: 10)).textSelection(.enabled)
                         if let raw = node.generationRawOutput {
                             let candidates = ByteArtistOutputSelection.candidates(raw)
                             if !candidates.isEmpty {
@@ -217,7 +217,7 @@ struct CanvasGenerationSourceControls: View {
                                     .font(.system(size: 11)).foregroundColor(.orange)
                             }
                             DisclosureGroup("原始结果") {
-                                Text((try? raw.encodedText()) ?? "").font(.system(size: 10, design: .monospaced))
+                                Text((try? raw.encodedText()) ?? "").font(.system(size: 10))
                                     .textSelection(.enabled)
                             }.font(.system(size: 11))
                         }

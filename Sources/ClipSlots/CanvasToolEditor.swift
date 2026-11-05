@@ -192,7 +192,7 @@ struct CanvasToolEditor: View {
                     time = $0; session.previewTime = $0
                     session.player.seek(to: CMTime(seconds: $0, preferredTimescale: 600), toleranceBefore: .zero, toleranceAfter: .zero)
                 }), in: 0...max(0.001,duration))
-                Text(String(format: "%.1f / %.1f s", time, duration)).font(.system(size: 11, design: .monospaced)).frame(width: 110)
+                Text(String(format: "%.1f / %.1f s", time, duration)).font(.system(size: 11)).frame(width: 110)
             }
         } else {
             HStack {

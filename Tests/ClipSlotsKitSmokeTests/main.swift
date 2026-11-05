@@ -85,6 +85,16 @@ private func coldStorage(forGroup gid: String) -> SlotStorage {
 
 let t = TestRunner()
 
+if CommandLine.arguments.contains("--mascot-only") {
+    runMascotMotionTests(t)
+    t.report()
+}
+
+if CommandLine.arguments.contains("--slot-editor-only") {
+    runSlotEditorTests(t)
+    t.report()
+}
+
 runAgentArtifactResourceTests(t)
 if CommandLine.arguments.contains("--artifact-resource-only") { t.report() }
 runAgentToolMessageHistoryTests(t)

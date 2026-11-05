@@ -25,17 +25,21 @@ public struct SlotUndoSnapshot: Codable {
     public var groupId: String
     /// 抓取时间（Unix 秒），仅用于日志/排序观测。
     public var capturedAt: TimeInterval
+    /// nil keeps the historical whole-group behavior. Editor saves own one slot.
+    public var affectedSlots: [Int]?
 
     public init(slots: [Int: SlotContent],
                 labels: [Int: String],
                 title: String,
                 groupId: String,
-                capturedAt: TimeInterval = Date().timeIntervalSince1970) {
+                capturedAt: TimeInterval = Date().timeIntervalSince1970,
+                affectedSlots: [Int]? = nil) {
         self.slots = slots
         self.labels = labels
         self.title = title
         self.groupId = groupId
         self.capturedAt = capturedAt
+        self.affectedSlots = affectedSlots
     }
 
     /// 内容身份签名（按 contentId + updatedAt，与 slotsSnapshotEqual 同源判据）。
@@ -46,7 +50,7 @@ public struct SlotUndoSnapshot: Codable {
             return "\(key):\(c.contentId):\(c.updatedAt)"
         }.joined(separator: "|")
         let labelPart = labels.keys.sorted().map { "\($0)=\(labels[$0] ?? "")" }.joined(separator: ",")
-        return "\(groupId)#\(slotPart)#\(labelPart)"
+        return "\(groupId)#\(slotPart)#\(labelPart)#\(affectedSlots?.sorted().description ?? "all")"
     }
 }
 

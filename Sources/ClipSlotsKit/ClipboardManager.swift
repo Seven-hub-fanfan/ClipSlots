@@ -49,6 +49,25 @@ public struct SlotContent: Codable {
     /// 为 nil 且 `manualThumbnailId` 非空时，存储层会把 live 目录里的旧 `.bin` clone 进 staging 保活。
     public var pendingManualThumbnailData: Data? = nil
 
+    /// File bodies promoted from attachments travel with the slot directory.
+    /// Keys are file-URL strings in `items`; values retain the original filename
+    /// and byte source until SlotStorage stages them under body-files/.
+    public var managedBodyFiles: [String: SlotAttachment]? = nil
+
+    /// Register a file body for the same atomic, owned-copy ingestion used by
+    /// uploads. This only prepares metadata; file validation and byte copying
+    /// happen on the storage writer. Callers handle directory references first.
+    public mutating func manageBodyFile(_ url: URL) {
+        guard url.isFileURL else { return }
+        let key = url.absoluteString
+        guard managedBodyFiles?[key] == nil else { return }
+        var files = managedBodyFiles ?? [:]
+        files[key] = .init(name: url.lastPathComponent,
+                          type: Self.imageFileExtensions.contains(url.pathExtension.lowercased()) ? .image : .file,
+                          path: url.path)
+        managedBodyFiles = files
+    }
+
     /// 该槽位是否设置了手动缩略图。
     public var hasManualThumbnail: Bool {
         !(manualThumbnailId?.isEmpty ?? true)
@@ -59,7 +78,7 @@ public struct SlotContent: Codable {
         case items, timestamp, label, htmlSource, attachments, contentId, updatedAt
         // v2.11.0: 手动缩略图标识。`pendingManualThumbnailData` 刻意不在此列——它是仅在
         // 「调用方 → 存储层」这一次写入中传递字节的瞬态载荷，绝不可编码进任何 JSON。
-        case manualThumbnailId
+        case manualThumbnailId, managedBodyFiles
     }
     
     public init(from decoder: Decoder) throws {
@@ -80,6 +99,7 @@ public struct SlotContent: Codable {
         // 空串按「未设置」处理，避免拼出 `attachments/.bin` 这种非法路径。
         let rawManualThumbnailId = try container.decodeIfPresent(String.self, forKey: .manualThumbnailId)
         manualThumbnailId = (rawManualThumbnailId?.isEmpty ?? true) ? nil : rawManualThumbnailId
+        managedBodyFiles = try container.decodeIfPresent([String: SlotAttachment].self, forKey: .managedBodyFiles)
     }
 
     public init() {}

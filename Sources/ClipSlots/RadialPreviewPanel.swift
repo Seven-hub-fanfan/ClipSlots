@@ -444,7 +444,7 @@ private struct RadialAttachmentStrip: View {
 
                     if plan.hiddenImageCount > 0 {
                         Text("+\(plan.hiddenImageCount)")
-                            .font(.system(size: 12, weight: .bold, design: .rounded))
+                            .font(.system(size: 12, weight: .bold))
                             .foregroundColor(.primary)
                             .frame(width: Self.thumbnailSide, height: Self.thumbnailSide)
                             .background(
@@ -722,7 +722,7 @@ private struct RadialTextPreview: View {
         // The card size fits the text content, not the full window.
         ScrollView {
             Text(text.isEmpty ? "空文本" : text)
-                .font(.system(size: 13, weight: .regular, design: .monospaced))
+                .font(.system(size: 13, weight: .regular))
                 .foregroundColor(.primary)
                 .lineSpacing(3)
                 .fixedSize(horizontal: false, vertical: true)

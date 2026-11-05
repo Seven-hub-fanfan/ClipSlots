@@ -928,7 +928,7 @@ struct RadialMenuView: View {
             // v2.7.0: Slot number + connection dot
             HStack(spacing: 4) {
                 Text("\(slot)")
-                    .font(.system(size: 20, weight: .bold, design: .rounded))
+                    .font(.system(size: 20, weight: .bold))
                     .foregroundColor(AppTheme.radialPrimaryText(colorScheme, isHovered: isHovered, isEmpty: content.isEmpty))
 
                 if let colorId = liveConnectionMap.colorId(for: slot) {

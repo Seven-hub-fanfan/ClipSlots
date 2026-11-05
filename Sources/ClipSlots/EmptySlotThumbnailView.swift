@@ -3,6 +3,7 @@ import ClipSlotsKit
 
 /// A fixed-height empty slot placeholder that never has any @State image to leak.
 struct EmptySlotThumbnailView: View {
+    var allowsUpload = false
 
     var body: some View {
         ZStack {
@@ -17,10 +18,10 @@ struct EmptySlotThumbnailView: View {
             // 空槽保存与提示文案恢复计划 P1：托盘图标下方补回简短动作提示，帮助发现「复制→保存」。
             // 纯展示，不进入正文/剪贴板/搜索/导出；次级色小字号，窄卡片自动缩小，最多两行。
             VStack(spacing: 6) {
-                Image(systemName: "tray")
+                Image(systemName: allowsUpload ? "square.and.arrow.up" : "tray")
                     .font(.system(size: 20, weight: .regular))
                     .foregroundColor(.secondary.opacity(0.42))
-                Text("复制后，点击保存\n剪贴板为空也能先保存再编辑")
+                Text(allowsUpload ? "点击上传文件" : "复制后，点击保存\n剪贴板为空也能先保存再编辑")
                     .font(.system(size: 11))
                     .foregroundColor(.secondary)
                     .multilineTextAlignment(.center)
@@ -34,7 +35,7 @@ struct EmptySlotThumbnailView: View {
         .frame(minHeight: 76, idealHeight: 88, maxHeight: .infinity)
         .accessibilityElement(children: .ignore)
         .accessibilityLabel("空槽位")
-        .help("保存剪贴板内容；剪贴板为空时创建可编辑的空白文本")
+        .help(allowsUpload ? "点击选择单个文件" : "保存剪贴板内容；剪贴板为空时创建可编辑的空白文本")
     }
 }
 

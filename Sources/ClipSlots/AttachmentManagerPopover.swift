@@ -153,6 +153,8 @@ struct AttachmentManagerPopover: View {
         }
         .frame(width: 360, height: 480)
         .background(AppTheme.elevatedBackground(scheme))
+        .onDrop(of: AttachmentTransfer.dropTypes, delegate: FileTransferDropDelegate(
+            isTargeted: $isDropTargeted, receive: handleDrop))
     }
 
     // MARK: Header
@@ -230,6 +232,8 @@ struct AttachmentManagerPopover: View {
             dragOffset: isDragging ? liveDragOffset : 0,
             onDelete: { remove(att) },
             onOpen: { openInDefaultApp(att) },
+            moveSource: { store.fileMoveSource(groupID: groupId ?? store.currentSpecialSlotId,
+                                              slot: slot, attachment: att) },
             onDragChanged: { translation in handleDragChanged(att.id, translation) },
             onDragEnded: { handleDragEnded() }
         )
@@ -248,7 +252,7 @@ struct AttachmentManagerPopover: View {
                 Text(isDropTargeted ? "松开以添加\(noun)" : "拖拽文件到这里")
                     .font(.callout.weight(.medium))
                     .foregroundColor(isDropTargeted ? .accentColor : .secondary)
-                Text("或点击此区域选择文件（可多选）")
+                Text("⌘V 粘贴，或点击选择文件（可多选）")
                     .font(.caption)
                     .foregroundColor(.secondary.opacity(0.75))
             }
@@ -269,9 +273,6 @@ struct AttachmentManagerPopover: View {
         )
         .padding(16)
         .onTapGesture { pickFilesForDropzone() }
-        .onDrop(of: [.fileURL], isTargeted: $isDropTargeted) { providers in
-            handleDrop(providers)
-        }
         .animation(Anim.interactive, value: isDropTargeted)
     }
 
@@ -283,7 +284,7 @@ struct AttachmentManagerPopover: View {
             Image(systemName: isDropTargeted ? "square.and.arrow.down.fill" : "square.and.arrow.down")
                 .font(.system(size: 13, weight: .medium))
                 .foregroundColor(isDropTargeted ? .accentColor : .secondary)
-            Text(isDropTargeted ? "松开以添加\(noun)" : "拖拽文件到此，或点击选择（可多选）")
+            Text(isDropTargeted ? "松开以添加\(noun)" : "⌘V 粘贴，拖入文件，或点击选择")
                 .font(.caption)
                 .foregroundColor(isDropTargeted ? .accentColor : .secondary)
             Spacer(minLength: 0)
@@ -306,9 +307,6 @@ struct AttachmentManagerPopover: View {
         .padding(.horizontal, 12)
         .padding(.top, 10)
         .onTapGesture { pickFilesForDropzone() }
-        .onDrop(of: [.fileURL], isTargeted: $isDropTargeted) { providers in
-            handleDrop(providers)
-        }
         .animation(Anim.interactive, value: isDropTargeted)
     }
 
@@ -518,36 +516,31 @@ struct AttachmentManagerPopover: View {
         return .file
     }
 
-    // v2.9.17: resolve dropped file-URL providers to on-disk URLs, then add them.
-    private func handleDrop(_ providers: [NSItemProvider]) -> Bool {
-        let fileURLType = UTType.fileURL.identifier
-        let relevant = providers.filter { $0.hasItemConformingToTypeIdentifier(fileURLType) }
-        guard !relevant.isEmpty else { return false }
+    func pasteAttachments(from pasteboard: NSPasteboard = .general) {
+        appendTransfer(AttachmentTransfer.clipboard(pasteboard), destinationGroup: groupId ?? store.currentSpecialSlotId)
+    }
 
-        let group = DispatchGroup()
-        let lock = NSLock()
-        var collected: [URL] = []
-
-        for provider in relevant {
-            group.enter()
-            provider.loadItem(forTypeIdentifier: fileURLType, options: nil) { item, _ in
-                defer { group.leave() }
-                var url: URL?
-                if let data = item as? Data {
-                    url = URL(dataRepresentation: data, relativeTo: nil)
-                } else if let u = item as? URL {
-                    url = u
-                }
-                if let url, url.isFileURL {
-                    lock.lock(); collected.append(url); lock.unlock()
-                }
+    private func appendTransfer(_ additions: [SlotContent.SlotAttachment], destinationGroup: String) {
+        if onWrite != nil {
+            // Canvas owns its undo bookkeeping through onWrite.
+            guard destinationGroup == (groupId ?? store.currentSpecialSlotId) else { return }
+            _ = appendManually(additions)
+        } else {
+            Task { @MainActor in
+                _ = await store.appendTransferredAttachmentsAsync(additions, groupID: destinationGroup, slot: slot)
             }
         }
+    }
 
-        group.notify(queue: .main) {
-            addFileURLs(collected)
+    private func handleDrop(_ providers: [NSItemProvider]) -> Bool {
+        let targetGroup = groupId ?? store.currentSpecialSlotId
+        return AttachmentTransfer.receive(providers) { loaded in
+            if case .additions(let additions) = loaded {
+                appendTransfer(additions, destinationGroup: targetGroup)
+            } else {
+                store.acceptTransferInBackground(loaded, groupID: targetGroup, slot: slot)
+            }
         }
-        return true
     }
 
     /// 用系统默认程序打开这个附件（★ v2.11.8 三轮，用户要求「点击具体文件用
@@ -662,6 +655,7 @@ struct AttachmentRow: View {
     /// `NSWorkspace.shared.open(url)`）。删除按钮和拖拽手柄在右侧，各自有自己的命中区，
     /// 所以这个点击区**刻意只覆盖到 `Spacer` 之前**，不会跟它们抢事件。
     let onOpen: () -> Void
+    var moveSource: (() -> SlotFileMove?)? = nil
     let onDragChanged: (CGFloat) -> Void
     let onDragEnded: () -> Void
 
@@ -682,6 +676,18 @@ struct AttachmentRow: View {
     // 断连的网络卷会阻塞主线程。改为后台异步计算一次，结果驱动角标 / 缩略图淡出。
     @State private var isBrokenRef = false
     @State private var textSummary = ""
+    @State private var transferThumbnail: NSImage?
+    @State private var isTransferring = false
+
+    private var openOrDrag: FirstMouseClickHandle {
+        FirstMouseClickHandle(action: onOpen, moveSource: moveSource,
+            dragImage: { CompactFileDrag.image(thumbnail: transferThumbnail) },
+            onDragStarted: {
+                hoverToken += 1
+                isTransferring = true
+                AttachmentPreviewWindowController.shared.hide()
+            }, onDragEnded: { isTransferring = false })
+    }
 
     var body: some View {
         HStack(spacing: 10) {
@@ -693,7 +699,7 @@ struct AttachmentRow: View {
                 // key window 时 SwiftUI 会把第一次 mouseDown 吞掉只为了激活窗口 —— 用户的体感就是
                 // 「第一下点了没反应」，与 v2.8.9 修删除按钮时踩的是同一个坑（见下面那段注释）。
                 // 所以复用同一个 acceptsFirstMouse 的 AppKit 命中层。
-                .overlay(FirstMouseClickHandle(action: onOpen))
+                .overlay(openOrDrag)
                 // v2.10.37: 断链本地文件引用（源文件已移动/删除）——缩略图淡出，配合下方角标提示。
                 .opacity(isBrokenRef ? 0.4 : 1)
                 .task(id: attachment.id) {
@@ -737,12 +743,12 @@ struct AttachmentRow: View {
                 }
             }
             .contentShape(Rectangle())
-            .overlay(FirstMouseClickHandle(action: onOpen))
+            .overlay(openOrDrag)
 
             Spacer(minLength: 4)
                 // ★ 三轮：把 Spacer 也纳入「打开」的命中区，行的空白处点了也能开 ——
                 // 否则文件名短的时候一行里有一大片死区，用户点了没反应。
-                .overlay(FirstMouseClickHandle(action: onOpen))
+                .overlay(openOrDrag)
 
             // v2.8.9: the delete affordance is a plain visual whose click is
             // driven by a first-mouse AppKit overlay. Inside an NSPopover that
@@ -802,6 +808,9 @@ struct AttachmentRow: View {
         .contentShape(Rectangle())
         .background(WindowAnchorView(holder: anchor))
         .task(id: attachment.canvasSourceIdentity) {
+            transferThumbnail = await CanvasAttachmentThumbnails.load(attachment, maxPixel: 144)
+        }
+        .task(id: attachment.canvasSourceIdentity) {
             guard attachment.type == .text else { return }
             let att = attachment
             let summary = await Task.detached(priority: .utility) { att.textSummary() }.value
@@ -810,14 +819,14 @@ struct AttachmentRow: View {
         }
         .onHover { hovering in
             isHovered = hovering
-            if hovering && !dragActive {
+            if hovering && !dragActive && !isTransferring {
                 hoverToken += 1
                 let token = hoverToken
                 // UX (v2.10.46): 悬停预览延迟 0.4s → 0.18s，扫视附件更跟手。
                 // 预览窗已开时后续切换即时响应（延迟 0），避免边扫边等的「钝」感。
                 let delay = AttachmentPreviewWindowController.shared.isVisible ? 0 : 0.18
                 DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
-                    guard isHovered, token == hoverToken, !dragActive,
+                    guard isHovered, token == hoverToken, !dragActive, !isTransferring,
                           let rect = anchor.screenRect() else { return }
                     AttachmentPreviewWindowController.shared.show(
                         attachment: attachment, scheme: scheme, anchor: rect
@@ -1073,7 +1082,7 @@ private struct AttachmentPreviewContent: View {
     private func textCard(_ text: String) -> some View {
         ScrollView {
             Text(text.isEmpty ? "空内容" : text)
-                .font(.system(size: 13, design: .monospaced))
+                .font(.system(size: 13))
                 .foregroundColor(Color(NSColor.labelColor))
                 .lineSpacing(3)
                 .fixedSize(horizontal: false, vertical: true)
@@ -1178,22 +1187,71 @@ private struct AsyncPreviewImage<Fallback: View>: View {
 // key (otherwise SwiftUI's Button eats the first click just to make the window
 // key). Fires `action` on mouseUp when released inside bounds, and shows the
 // pointing-hand cursor. Scoped to the control it overlays only.
-private struct FirstMouseClickHandle: NSViewRepresentable {
+struct FirstMouseClickHandle: NSViewRepresentable {
     let action: () -> Void
+    var moveSource: (() -> SlotFileMove?)? = nil
+    var dragImage: (() -> NSImage)? = nil
+    var onDragStarted: (() -> Void)? = nil
+    var onDragEnded: (() -> Void)? = nil
 
     func makeNSView(context: Context) -> ClickHandleNSView {
         let view = ClickHandleNSView()
         view.action = action
+        configure(view)
         return view
     }
 
     func updateNSView(_ nsView: ClickHandleNSView, context: Context) {
         nsView.action = action
+        configure(nsView)
+    }
+    private func configure(_ view: ClickHandleNSView) {
+        view.moveSource = moveSource
+        view.dragImage = dragImage
+        view.onDragStarted = onDragStarted
+        view.onDragEnded = onDragEnded
     }
 }
 
-final class ClickHandleNSView: NSView {
+final class ClickHandleNSView: NSView, NSDraggingSource {
     var action: (() -> Void)?
+    var moveSource: (() -> SlotFileMove?)?
+    var dragImage: (() -> NSImage)?
+    var onDragStarted: (() -> Void)?
+    var onDragEnded: (() -> Void)?
+    private var startPoint: NSPoint?
+    private var didDrag = false
+
+    override func mouseDown(with event: NSEvent) {
+        startPoint = convert(event.locationInWindow, from: nil)
+        didDrag = false
+    }
+
+    override func mouseDragged(with event: NSEvent) {
+        guard !didDrag, let startPoint,
+              hypot(event.locationInWindow.x - convert(startPoint, to: nil).x,
+                    event.locationInWindow.y - convert(startPoint, to: nil).y) >= 4,
+              let source = moveSource?(), let bytes = try? JSONEncoder().encode(source) else { return }
+        didDrag = true
+        onDragStarted?()
+        let item = NSPasteboardItem()
+        item.setData(bytes, forType: NSPasteboard.PasteboardType(AttachmentTransfer.type(for: source).identifier))
+        let dragging = NSDraggingItem(pasteboardWriter: item)
+        let point = convert(event.locationInWindow, from: nil)
+        dragging.setDraggingFrame(NSRect(x: point.x + 8, y: point.y - CompactFileDrag.size.height - 8,
+            width: CompactFileDrag.size.width, height: CompactFileDrag.size.height),
+            contents: dragImage?() ?? CompactFileDrag.image(thumbnail: nil))
+        beginDraggingSession(with: [dragging], event: event, source: self)
+    }
+
+    func draggingSession(_ session: NSDraggingSession, sourceOperationMaskFor context: NSDraggingContext) -> NSDragOperation {
+        context == .withinApplication ? .move : []
+    }
+    func ignoreModifierKeys(for session: NSDraggingSession) -> Bool { true }
+    func draggingSession(_ session: NSDraggingSession, endedAt screenPoint: NSPoint, operation: NSDragOperation) {
+        startPoint = nil
+        onDragEnded?()
+    }
 
     // #region debug-point C:native-hit
     #if DEBUG
@@ -1212,9 +1270,10 @@ final class ClickHandleNSView: NSView {
 
     override func mouseUp(with event: NSEvent) {
         let point = convert(event.locationInWindow, from: nil)
-        if bounds.contains(point) {
+        if !didDrag, bounds.contains(point) {
             action?()
         }
+        startPoint = nil
     }
 }
 

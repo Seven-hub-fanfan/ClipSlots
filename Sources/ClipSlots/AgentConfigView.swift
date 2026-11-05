@@ -175,7 +175,7 @@ struct AgentConfigView: View {
             HStack(spacing: 8) {
                 TextField(AgentGatewayPreferences.defaultEndpoint.absoluteString, text: $gatewayEndpoint)
                     .textFieldStyle(.roundedBorder)
-                    .font(.system(size: 11, design: .monospaced))
+                    .font(.system(size: 11))
                 Button("默认") { gatewayEndpoint = AgentGatewayPreferences.defaultEndpoint.absoluteString }
                     .controlSize(.small)
             }
@@ -197,7 +197,7 @@ struct AgentConfigView: View {
             HStack(spacing: 8) {
                 TextField("Agent ID（例：1509440157188）", text: $tikaAgentId)
                     .textFieldStyle(.roundedBorder)
-                    .font(.system(size: 11, design: .monospaced))
+                    .font(.system(size: 11))
             }
             HStack(spacing: 8) {
                 Text("tikacli 路径")
@@ -205,7 +205,7 @@ struct AgentConfigView: View {
                     .foregroundColor(AppTheme.canvasCardMetaInk)
                 TextField("tikacli", text: $tikaCLIPath)
                     .textFieldStyle(.roundedBorder)
-                    .font(.system(size: 11, design: .monospaced))
+                    .font(.system(size: 11))
                 Button("默认") { tikaCLIPath = "tikacli" }
                     .controlSize(.small)
             }
@@ -356,7 +356,7 @@ struct AgentConfigView: View {
             HStack(spacing: 8) {
                 TextField(AgentConfig.defaultEndpoint.absoluteString, text: $endpoint)
                     .textFieldStyle(.roundedBorder)
-                    .font(.system(size: 11, design: .monospaced))
+                    .font(.system(size: 11))
                 Button("默认") { endpoint = AgentConfig.defaultEndpoint.absoluteString }
                     .controlSize(.small)
             }

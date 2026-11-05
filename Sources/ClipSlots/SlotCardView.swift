@@ -18,6 +18,7 @@ struct SlotCardView: View {
     var onEditText: ((String) -> Void)? = nil
     var onEditHTML: ((String) -> Void)? = nil
     var onDropFiles: (([URL]) -> Void)? = nil
+    var onUploadFile: (() -> Void)? = nil
     // v2.10.19: 单独删除主体文本内容（保留附件）。
     var onClearBody: (() -> Void)? = nil
 
@@ -58,12 +59,6 @@ struct SlotCardView: View {
     @State private var labelText = ""
     @State private var isHovering = false
     @State private var showingPreview = false
-    private struct EditorRequest: Identifiable {
-        let id = UUID()
-        let mode: SlotTextEditorSheet.Mode
-        let text: String
-    }
-    @State private var editorRequest: EditorRequest?
     @State private var isDropTargeted = false
     // v2.11.0: 缩略图入口图标的悬停高亮。
     @State private var isHoveringThumbnailEntry = false
@@ -121,7 +116,21 @@ struct SlotCardView: View {
 
             // Thumbnail area — split empty vs filled to prevent @State image reuse
             WorkspaceContentBoundary {
-                if content.hasManualThumbnail {
+                if content.hasEmptyBody, let onUploadFile {
+                    ZStack {
+                        if content.hasManualThumbnail {
+                            SlotThumbnailView(content: content, specialSlotId: specialSlotId, slot: slot)
+                                .id(externalContentRevision)
+                        } else { EmptySlotThumbnailView(allowsUpload: true) }
+                    }
+                    .clipShape(RoundedRectangle(cornerRadius: AppTheme.slotPreviewCornerRadius, style: .continuous))
+                    .overlay(FirstMouseClickHandle(action: onUploadFile))
+                    .accessibilityElement(children: .ignore)
+                    .accessibilityLabel("上传文件到槽位 \(slot)")
+                    .accessibilityAddTraits(.isButton)
+                    .accessibilityAction { onUploadFile() }
+                    .help("点击上传单个文件到槽位 \(slot)")
+                } else if content.hasManualThumbnail {
                     // v2.11.0「槽位缩略图手动上传」：手动封面图优先级最高，压过空槽占位、
                     // 视频内联播放器和自动缩略图三条分支。真正的取图优先级在
                     // ThumbnailProvider.load 里实现——这里只是把渲染入口统一收敛到
@@ -164,6 +173,8 @@ struct SlotCardView: View {
                         .help(content.canPreview ? "点击查看大图" : "")
                 }
             }
+            .modifier(SlotBodyDragModifier(content: content, groupID: specialSlotId, slot: slot, store: store,
+                onOpen: { if content.canPreview { showingPreview = true } }))
             // v2.10.20: 「删除主体文本」叉号位于内容预览框左上角，
             // 避开右上角卡片级「上次粘贴」角标；仅当槽位有主体内容时显示。
             .overlay(alignment: .topLeading) {
@@ -226,7 +237,8 @@ struct SlotCardView: View {
                     NodeAttachmentButton(
                         slot: slot,
                         store: store,
-                        attachmentCountOverride: content.attachments.count
+                        attachmentCountOverride: content.attachments.count,
+                        groupId: specialSlotId
                     )
                 }
             }
@@ -307,9 +319,16 @@ struct SlotCardView: View {
         .onHover { hovering in
             isHovering = hovering
         }
-        .onDrop(of: [UTType.fileURL.identifier], isTargeted: $isDropTargeted) { providers in
-            handleFileDrop(providers)
-        }
+        .onDrop(of: [AttachmentTransfer.bodyType, .fileURL], delegate: FileTransferDropDelegate(
+            isTargeted: $isDropTargeted, types: [AttachmentTransfer.bodyType, .fileURL], receive: { providers in
+            if providers.contains(where: { $0.hasItemConformingToTypeIdentifier(AttachmentTransfer.bodyType.identifier) }),
+               let store {
+                return AttachmentTransfer.receive(providers) {
+                    store.acceptTransferInBackground($0, groupID: specialSlotId, slot: slot, destination: .body)
+                }
+            }
+            return handleFileDrop(providers)
+        }))
         .overlay(alignment: .center) {
             if isDropTargeted {
                 DropImportOverlay(slot: slot)
@@ -378,27 +397,6 @@ struct SlotCardView: View {
         .perfCount("SlotCardView.body")
     }
 
-    // v2.10.54: 回退 v2.10.48 的 inline Popover（负优化——点气泡外部无保存 dismiss，编辑内容被静默
-    // 丢弃），改回 Sheet（原 520×320 尺寸），并保留 v2.10.48 新增的 ⌘↩ 保存快捷键。
-    // The presentation item carries the initial content and its identity
-    // together. Separate Boolean/text states can present the old empty text.
-    // Typing stays local to SlotTextEditorSheet and does not rebuild the card.
-    private func editorSheet(_ request: EditorRequest) -> some View {
-        SlotTextEditorSheet(
-            slot: slot,
-            mode: request.mode,
-            initialText: request.text,
-            onSave: { text in
-                switch request.mode {
-                case .plainText: onEditText?(text)
-                case .html: onEditHTML?(text)
-                }
-                editorRequest = nil
-            },
-            onCancel: { editorRequest = nil }
-        )
-    }
-
     // v2.9.36: lightweight "上次粘贴" badge shown in the card's top-right corner.
     private var lastPasteBadge: some View {
         HStack(spacing: 3) {
@@ -430,7 +428,7 @@ struct SlotCardView: View {
     @ViewBuilder
     private var slotNumberBadge: some View {
         Text("\(slot)")
-            .font(.system(size: 14, weight: .bold, design: .rounded))
+            .font(.system(size: 14, weight: .bold))
             .foregroundColor(slotAccent)
             .monospacedDigit()
             .frame(width: 30, height: 30)
@@ -597,7 +595,7 @@ struct SlotCardView: View {
                         .frame(width: 20)
 
                     Text(content.preview)
-                        .font(.system(size: 12, design: .monospaced))
+                        .font(.system(size: 12))
                         .foregroundColor(.primary)
                         // v2.9.23: 统一所有槽位卡片文本预览行数为 28，避免部分卡片过早省略。
                         .lineLimit(28)
@@ -644,11 +642,11 @@ struct SlotCardView: View {
             }
         }
         .frame(height: 52)
-        .sheet(item: $editorRequest) { request in editorSheet(request) }
     }
 
     private var canEditContent: Bool {
-        (content.isHTMLContent && onEditHTML != nil) || (content.isPlainEditableText && onEditText != nil)
+        (content.isMarkdownFile && store != nil) || (content.isHTMLContent && onEditHTML != nil)
+            || (content.isPlainEditableText && onEditText != nil)
     }
 
     private var editActionTitle: String {
@@ -656,17 +654,15 @@ struct SlotCardView: View {
     }
 
     private var editActionHelp: String {
+        if content.isMarkdownFile, store != nil { return "编辑 Markdown 文件，保存后仍为 .md 文件" }
         if content.isHTMLContent && onEditHTML != nil { return "编辑 HTML 原文" }
         if content.isPlainEditableText && onEditText != nil { return "直接编辑此文本槽位" }
         return "此内容类型不支持直接编辑"
     }
 
     private func beginEditing() {
-        if content.isHTMLContent, onEditHTML != nil {
-            editorRequest = EditorRequest(mode: .html, text: content.htmlEditableValue)
-        } else if content.isPlainEditableText, onEditText != nil {
-            editorRequest = EditorRequest(mode: .plainText, text: content.editableTextValue)
-        }
+        guard let store else { return }
+        SlotEditorWindowController.present(slot: slot, groupID: specialSlotId, store: store)
     }
 
     private var moreActionsMenu: some View {
@@ -685,6 +681,9 @@ struct SlotCardView: View {
 
                 Divider()
 
+                if content.isMarkdownFile, store != nil {
+                    Button(action: beginEditing) { Label("编辑 Markdown", systemImage: "pencil") }
+                }
                 if content.isPlainEditableText, onEditText != nil {
                     Button(action: beginEditing) { Label("编辑文本", systemImage: "pencil") }
                 }
@@ -913,6 +912,7 @@ extension SlotCardView: Equatable {
             && lhs.label == rhs.label
             && lhs.saveShortcut == rhs.saveShortcut
             && lhs.pasteShortcut == rhs.pasteShortcut
+            && (lhs.onUploadFile != nil) == (rhs.onUploadFile != nil)
             && lhs.isLastPasted == rhs.isLastPasted
             && lhs.isFlashHighlighted == rhs.isFlashHighlighted
             && lhs.connectionDotColor == rhs.connectionDotColor
@@ -1046,7 +1046,7 @@ private struct SlotActionButtonBody: View {
         configuration.label
             // 字号 / 内边距 / 高度**只看 layout**，与皮肤和配色无关 —— 这是 hotfix19 的全部要点：
             // 同一枚「保存到槽位 N」在多彩与简洁下必须一样大，差别只在颜色。
-            .font(.system(size: isHero ? 13 : 12, weight: .bold, design: .rounded))
+            .font(.system(size: isHero ? 13 : 12, weight: .bold))
             .labelStyle(.titleAndIcon)
             .foregroundStyle(foregroundColor)
             .padding(.horizontal, 12)

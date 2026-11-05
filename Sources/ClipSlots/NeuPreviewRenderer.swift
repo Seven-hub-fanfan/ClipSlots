@@ -119,8 +119,8 @@ private struct PreviewStrip: View {
 
             // ③ 组标签行（hotfix9 并入新拟物）
             HStack(spacing: 6) {
-                GroupTabButton(name: "prompt", isCurrent: true) {}
-                GroupTabButton(name: "1", isCurrent: false) {}
+                GroupTabButton(name: "prompt", isCurrent: true, action: {})
+                GroupTabButton(name: "1", isCurrent: false, action: {})
                 Image(systemName: "plus")
                     .font(.system(size: 12, weight: .semibold))
                     .foregroundColor(Neu.ink)

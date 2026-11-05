@@ -55,6 +55,8 @@ func cloneLinkOrCopyFile(at src: URL, to dst: URL) -> Bool {
 ///   2) 物理 `copyItem` —— 非 APFS / 跨卷时不可避免地真拷字节。
 @discardableResult
 func ingestExternalFile(at src: URL, to dst: URL) -> Bool {
+    guard src.isFileURL,
+          (try? src.resourceValues(forKeys: [.isRegularFileKey]))?.isRegularFile == true else { return false }
     let crc = src.path.withCString { s in dst.path.withCString { d in clonefile(s, d, 0) } }
     if crc == 0 { return true }
     do {
@@ -180,6 +182,7 @@ public final class SlotStorage {
     // dedicated serial queue moves the rebuild entirely off the hot path without
     // changing behavior or introducing data races.
     private let manifestQueue = DispatchQueue(label: "com.clipslots.storage.manifest", qos: .utility)
+    private let schedulesManifestUpdates: Bool
     // P1-1 (v2.10.53): 移除共享的 encoder / decoder 实例。JSONEncoder / JSONDecoder 非线程安全，而
     // updateManifest 自 ST-5(v2.10.15) 起跑在独立的 manifestQueue，主存储写路径（编码 meta / 附件外置后的
     // attachments.json / 迁移数据）跑在 `queue`；两条队列并发调用同一 encoder 属真实 data race——轻则 manifest
@@ -187,6 +190,7 @@ public final class SlotStorage {
     // 改为在每个编解码点创建局部实例（无自定义配置，创建成本极低），彻底消除跨队列共享。
 
     public init(slotsDir: URL? = nil) {
+        schedulesManifestUpdates = true
         queue = DispatchQueue(label: "com.clipslots.storage", qos: .utility)
         if let slotsDir {
             baseURL = slotsDir
@@ -206,10 +210,20 @@ public final class SlotStorage {
     /// A global read must not create directories, sweep staging files or retain
     /// one storage/queue pair for every group in the library.
     private init(searchDirectory: URL) {
+        schedulesManifestUpdates = false
         baseURL = searchDirectory
         // This reader exists only for an explicit foreground search. Background
         // summaries and maintenance retain their utility scheduling.
         queue = DispatchQueue(label: "com.clipslots.search-reader", qos: .userInitiated)
+    }
+
+    /// Move staging is private to a transaction holding StorageLock. Real slot
+    /// writes are synchronous; a diagnostic worker would need that same lock to
+    /// read labels, so draining it before the directory swap would deadlock.
+    init(moveStagingDirectory: URL) {
+        baseURL = moveStagingDirectory
+        schedulesManifestUpdates = false
+        queue = DispatchQueue(label: "com.clipslots.move-staging", qos: .userInitiated)
     }
 
     public static func searchCandidates(slotsDir: URL, slotCount: Int, query: String,
@@ -512,7 +526,8 @@ public final class SlotStorage {
     }
 
     @discardableResult
-    public func set(_ slot: Int, content: SlotContent, replacingLabel: Bool = false) -> Bool {
+    public func set(_ slot: Int, content: SlotContent, replacingLabel: Bool = false,
+                    preparedBody: PreparedSlotBody? = nil) -> Bool {
         // DS-3 / CR-3 (v2.10.30): a deleted group's storage must never write again.
         if isInvalidated {
             NSLog("[ClipSlots] SlotStorage.set slot=\(slot): refused — storage invalidated (group deleted)")
@@ -535,7 +550,8 @@ public final class SlotStorage {
                     return false
                 }
                 do {
-                    let persisted = try writeSlotContent(content, to: slot, replacingLabel: replacingLabel)
+                    let persisted = try writeSlotContent(content, to: slot, replacingLabel: replacingLabel,
+                                                         preparedBody: preparedBody)
                     // P2-C (v2.10.44): cache the PERSISTED attachments (data=nil, storagePath →
                     // on-disk `.bin`) rather than the caller's `content`, which still carries the
                     // inline attachment bytes. Caching `content` kept those bytes resident until
@@ -543,6 +559,8 @@ public final class SlotStorage {
                     // was meant to deliver. Converging the cache to the on-disk shape here releases
                     // the inline attachment bytes immediately.
                     var cachedContent = content
+                    cachedContent.items = persisted.items
+                    cachedContent.managedBodyFiles = persisted.managedBodyFiles
                     cachedContent.attachments = persisted.attachments
                     // v2.11.0: 缓存必须收敛到「磁盘真实形态」——用存储层归一化后的 id，而不是调用方
                     // 传进来的原值（字节缺失时会被降级为 nil）。同时清掉瞬态字节载荷，否则这份缓存会
@@ -669,6 +687,7 @@ public final class SlotStorage {
     /// v2.8.0 (perf H2): regenerate the diagnostic manifest asynchronously on the
     /// serial storage queue so it never blocks the save/clear critical path.
     private func scheduleManifestUpdate() {
+        guard schedulesManifestUpdates else { return }
         // ST-5 (v2.10.15): rebuild on the dedicated manifestQueue (not the shared
         // storage `queue`) so the full slot-directory walk never blocks the get/set
         // hot path. Both callers invoke this AFTER their queue.sync write completes,
@@ -690,7 +709,8 @@ public final class SlotStorage {
         }
     }
 
-    /// A staged owner must drain diagnostic IO before renaming its entire directory.
+    /// Drain a live owner's diagnostic IO only while outside StorageLock.
+    /// Transaction staging never schedules this IO.
     public func finishPendingWritesBeforeMovingDirectory() {
         manifestQueue.sync {}
     }
@@ -1091,6 +1111,7 @@ public final class SlotStorage {
         // and pasteboard format priority. Older metadata decodes these as nil.
         var htmlSource: String? = nil
         var itemTypeOrder: [[String]]? = nil
+        var managedBodyFiles: [String: SlotContent.SlotAttachment]? = nil
     }
 
     /// v2.11.0：手动缩略图在槽位目录内的字节文件路径（不校验存在性）。
@@ -1195,6 +1216,21 @@ public final class SlotStorage {
             content.contentId = meta.contentId
             content.updatedAt = meta.updatedAt
             content.htmlSource = meta.htmlSource
+            if let managed = meta.managedBodyFiles {
+                // Directory moves / restores must not retain the old absolute URLs.
+                var normalized: [String: SlotContent.SlotAttachment] = [:]
+                var replacements: [String: String] = [:]
+                for (oldURL, var file) in managed {
+                    let name = Self.bodyFileName(file)
+                    let url = slotDir.appendingPathComponent("body-files").appendingPathComponent(name)
+                    file.storagePath = url.path
+                    file.path = url.path
+                    normalized[url.absoluteString] = file
+                    replacements[oldURL] = url.absoluteString
+                }
+                content.items = Self.replacingFileURLs(content.items, replacements: replacements)
+                content.managedBodyFiles = normalized.isEmpty ? nil : normalized
+            }
             if let order = meta.itemTypeOrder, order.count == content.items.count {
                 for index in content.items.indices {
                     let positions = Dictionary(order[index].enumerated().map { ($0.element, $0.offset) },
@@ -1301,6 +1337,8 @@ public final class SlotStorage {
     /// （字节缺失时降级为 nil）。若 `set` 仍按调用方原值填缓存，就会出现「内存说有图、磁盘没字节」
     /// 的不一致，下一次冷读又自愈成 nil，表现为缩略图诡异地时有时无。
     struct PersistedSlotShape {
+        var items: [[PasteboardItem]]
+        var managedBodyFiles: [String: SlotContent.SlotAttachment]?
         var attachments: [SlotContent.SlotAttachment]
         var manualThumbnailId: String?
     }
@@ -1311,7 +1349,9 @@ public final class SlotStorage {
     /// caches this shape so the freshly-written slot doesn't keep inline bytes resident (P2-C).
     /// A slot with no attachments returns the (empty) `content.attachments` unchanged.
     @discardableResult
-    private func writeSlotContent(_ content: SlotContent, to slot: Int, replacingLabel: Bool = false) throws -> PersistedSlotShape {
+    private func writeSlotContent(_ content: SlotContent, to slot: Int, replacingLabel: Bool = false,
+                                  preparedBody: PreparedSlotBody? = nil) throws -> PersistedSlotShape {
+        var content = content
         let slotDir = baseURL.appendingPathComponent(String(slot))
         // P2-C (v2.10.44): the attachment shape actually written to disk. Defaults to the
         // caller's attachments (covers the no-attachment / non-externalized paths); the
@@ -1347,6 +1387,39 @@ public final class SlotStorage {
         try FileManager.default.createDirectory(at: stagingDir, withIntermediateDirectories: true)
 
         do {
+            if let managed = content.managedBodyFiles {
+                let referenced = Set(content.items.flatMap { $0 }.filter { $0.type == "public.file-url" }
+                    .compactMap { String(data: $0.data, encoding: .utf8) })
+                var saved: [String: SlotContent.SlotAttachment] = [:]
+                var replacements: [String: String] = [:]
+                for (oldURL, var file) in managed where referenced.contains(oldURL) {
+                    let name = Self.bodyFileName(file)
+                    let directory = stagingDir.appendingPathComponent("body-files")
+                    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+                    let staged = directory.appendingPathComponent(name)
+                    try FileManager.default.createDirectory(at: staged.deletingLastPathComponent(),
+                                                            withIntermediateDirectories: true)
+                    if let preparedBody {
+                        try preparedBody.stage(file.id, to: staged)
+                    } else if let data = file.data {
+                        try data.write(to: staged, options: .atomic)
+                    } else if let source = managedBodySource(file, slot: slot),
+                              ingestExternalFile(at: source, to: staged) {
+                        // Copied into the same atomic slot staging tree.
+                    } else { throw AgentCanvasError.unavailable }
+                    guard (try? staged.resourceValues(forKeys: [.isRegularFileKey]))?.isRegularFile == true else {
+                        throw AgentCanvasError.unavailable
+                    }
+                    let final = slotDir.appendingPathComponent("body-files").appendingPathComponent(name)
+                    file.data = nil
+                    file.storagePath = final.path
+                    file.path = final.path
+                    saved[final.absoluteString] = file
+                    replacements[oldURL] = final.absoluteString
+                }
+                content.items = Self.replacingFileURLs(content.items, replacements: replacements)
+                content.managedBodyFiles = saved.isEmpty ? nil : saved
+            }
             // Restore label into the staging dir.
             if let label = existingLabel, !label.isEmpty {
                 try label.write(to: stagingDir.appendingPathComponent("label.txt"),
@@ -1381,7 +1454,8 @@ public final class SlotStorage {
                                            updatedAt: content.updatedAt,
                                            manualThumbnailId: effectiveManualThumbnailId,
                                            htmlSource: content.htmlSource,
-                                           itemTypeOrder: content.items.map { $0.map(\.type) })
+                                           itemTypeOrder: content.items.map { $0.map(\.type) },
+                                           managedBodyFiles: content.managedBodyFiles)
                 let metaData = try JSONEncoder().encode(meta)
                 try metaData.write(to: stagingDir.appendingPathComponent("content.json"), options: .atomic)
 
@@ -1441,8 +1515,96 @@ public final class SlotStorage {
 
         // P2-C (v2.10.44): the atomic swap succeeded — hand back the on-disk attachment shape
         // so the caller can cache it (inline bytes released).
-        return PersistedSlotShape(attachments: persistedAttachments,
+        return PersistedSlotShape(items: content.items, managedBodyFiles: content.managedBodyFiles,
+                                  attachments: persistedAttachments,
                                   manualThumbnailId: effectiveManualThumbnailId)
+    }
+
+    private static func bodyFileName(_ attachment: SlotContent.SlotAttachment) -> String {
+        let name = URL(fileURLWithPath: attachment.name).lastPathComponent
+        return attachment.id.uuidString + "/" + (name.isEmpty ? "file" : name)
+    }
+
+    /// An undo snapshot may still name an owned body removed by an atomic
+    /// overwrite/clear. Recover that UUID from this group's retained snapshots;
+    /// external clipboard sources never use this fallback.
+    private func managedBodySource(_ file: SlotContent.SlotAttachment, slot: Int) -> URL? {
+        guard let path = file.storagePath ?? file.localFileReferencePath else { return nil }
+        let source = URL(fileURLWithPath: path)
+        if FileManager.default.fileExists(atPath: source.path) { return source }
+        let relative = "body-files/" + Self.bodyFileName(file)
+        let expected = baseURL.appendingPathComponent(String(slot)).appendingPathComponent(relative)
+        guard file.storagePath != nil, source.standardizedFileURL == expected.standardizedFileURL else { return nil }
+        let trash = baseURL.deletingLastPathComponent().appendingPathComponent(".trash")
+        let group = baseURL.lastPathComponent
+        guard let entries = try? FileManager.default.contentsOfDirectory(at: trash,
+            includingPropertiesForKeys: nil, options: [.skipsHiddenFiles]) else { return nil }
+        for entry in entries {
+            let name = entry.lastPathComponent
+            let candidate: URL
+            if name.hasPrefix("slot_overwritten_\(group)_\(slot)_")
+                || name.hasPrefix("slot_cleared_\(group)_\(slot)_") {
+                candidate = entry.appendingPathComponent(relative)
+            } else if name.hasPrefix("group_cleared_\(group)_") {
+                candidate = entry.appendingPathComponent(String(slot)).appendingPathComponent(relative)
+            } else { continue }
+            if FileManager.default.fileExists(atPath: candidate.path) { return candidate }
+        }
+        return nil
+    }
+
+    private static func replacingFileURLs(_ items: [[PasteboardItem]],
+                                          replacements: [String: String]) -> [[PasteboardItem]] {
+        items.map { group in group.map { item in
+            guard item.type == "public.file-url" || item.type == "public.url",
+                  let old = String(data: item.data, encoding: .utf8),
+                  let new = replacements[old] else { return item }
+            return PasteboardItem(type: item.type, data: Data(new.utf8))
+        } }
+    }
+
+    /// A multi-slot transaction stages outside the live group. Rebase only
+    /// transaction-owned paths before exchanging directories, so persisted
+    /// manifests and raw file-URL bytes already name their final locations.
+    static func rebasePreparedSlot(_ staged: URL, to live: URL) throws {
+        func path(_ old: String) -> String {
+            guard old.hasPrefix(staged.path + "/") else { return old }
+            return live.path + old.dropFirst(staged.path.count)
+        }
+        func file(_ input: SlotContent.SlotAttachment) -> SlotContent.SlotAttachment {
+            var value = input
+            value.storagePath = value.storagePath.map(path)
+            value.path = value.path.map(path)
+            return value
+        }
+        let metadataURL = staged.appendingPathComponent("content.json")
+        if FileManager.default.fileExists(atPath: metadataURL.path) {
+            var metadata = try JSONDecoder().decode(SlotContentMeta.self, from: Data(contentsOf: metadataURL))
+            if let managed = metadata.managedBodyFiles {
+                metadata.managedBodyFiles = Dictionary(managed.map { key, value in
+                    let oldURL = URL(string: key)
+                    let newKey = oldURL.map { URL(fileURLWithPath: path($0.path)).absoluteString } ?? key
+                    return (newKey, file(value))
+                }, uniquingKeysWith: { a, _ in a })
+            }
+            try JSONEncoder().encode(metadata).write(to: metadataURL, options: .atomic)
+        }
+        let attachmentsURL = staged.appendingPathComponent("attachments.json")
+        if FileManager.default.fileExists(atPath: attachmentsURL.path) {
+            let attachments = try JSONDecoder().decode([SlotContent.SlotAttachment].self,
+                                                       from: Data(contentsOf: attachmentsURL))
+            try JSONEncoder().encode(attachments.map(file)).write(to: attachmentsURL, options: .atomic)
+        }
+        for directory in try FileManager.default.contentsOfDirectory(at: staged, includingPropertiesForKeys: nil)
+            where directory.lastPathComponent.hasPrefix("item_") {
+          for type in ["public.file-url", "public.url"] {
+            let itemURL = directory.appendingPathComponent(type + ".bin")
+            guard FileManager.default.fileExists(atPath: itemURL.path),
+                  let old = String(data: try Data(contentsOf: itemURL), encoding: .utf8),
+                  let url = URL(string: old), url.isFileURL, url.path.hasPrefix(staged.path + "/") else { continue }
+            try Data(URL(fileURLWithPath: path(url.path)).absoluteString.utf8).write(to: itemURL, options: .atomic)
+          }
+        }
     }
 
     /// v2.11.0「槽位缩略图手动上传」：把手动缩略图字节搬进 staging 目录，返回实际生效的 id。

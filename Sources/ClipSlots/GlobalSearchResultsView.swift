@@ -156,7 +156,7 @@ struct GlobalSearchResultsView: View {
         return HStack(spacing: 10) {
             // Slot badge
             Text("\(result.slot)")
-                .font(.system(size: 11, weight: .bold, design: .rounded))
+                .font(.system(size: 11, weight: .bold))
                 .foregroundColor(.white)
                 .frame(width: 24, height: 24)
                 .background(Circle().fill(Color.accentColor))

@@ -46,7 +46,7 @@ struct ModelHubConfigurationView: View {
                     .font(.system(size: 12)).foregroundStyle(.secondary)
                 Text(item.presentationDescription).font(.system(size: 12))
                 ScrollView {
-                    Text((try? item.presentationConfig.encodedText()) ?? "").font(.system(size: 11, design: .monospaced))
+                    Text((try? item.presentationConfig.encodedText()) ?? "").font(.system(size: 11))
                         .textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading)
                 }.padding(12).background(TapSkin.tone(0xf3f4f7, 0x24262b), in: RoundedRectangle(cornerRadius: 10))
                 Text("目录使用中性展示名称与别名。接入时请填写实际服务接受的上游模型标识，参数以所配置服务为准。")
@@ -107,7 +107,7 @@ struct ModelHubConfigurationView: View {
                             HStack(spacing: 10) {
                                 VStack(alignment: .leading, spacing: 4) {
                                     Text(item.presentationName).font(.system(size: 12, weight: .medium)).lineLimit(1)
-                                    Text(item.presentationModel).font(.system(size: 10, design: .monospaced)).foregroundStyle(.secondary).lineLimit(1)
+                                    Text(item.presentationModel).font(.system(size: 10)).foregroundStyle(.secondary).lineLimit(1)
                                 }.frame(maxWidth: .infinity, alignment: .leading)
                                 Text(item.kind.title).font(.system(size: 11)).frame(width: 44)
                                 if size.size.width > 850 {

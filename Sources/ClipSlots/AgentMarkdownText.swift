@@ -191,7 +191,7 @@ struct AgentMarkdownText: View, Equatable {
             options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace))) ?? AttributedString(text)
         for run in value.runs {
             if run.inlinePresentationIntent?.contains(.code) == true {
-                value[run.range].font = .system(size: size - 1, design: .monospaced)
+                value[run.range].font = .system(size: size - 1)
                 value[run.range].backgroundColor = TapSkin.tone(0xf0f0f2, 0x29292c)
             }
         }
@@ -226,7 +226,7 @@ private struct AgentCodeBlock: View {
             Divider().opacity(0.5)
             ScrollView(.horizontal) {
                 Text(verbatim: text)
-                    .font(.system(size: size, design: .monospaced))
+                    .font(.system(size: size))
                     .foregroundColor(TapSkin.ink)
                     .lineSpacing(4)
                     .fixedSize(horizontal: true, vertical: true)

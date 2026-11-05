@@ -88,6 +88,7 @@ final class TransientUIStore: ObservableObject {
     // 注意：主 store 侧保留同名转发计算属性（见 main.swift），`publishImportProgress` 的
     // v2.10.56 generation 代次守卫逻辑与调用方全部不变，仅最终存储落到本 store 的 @Published。
     @Published var importProgress: ImportProgress?
+    @Published var importCancellation: FileImportCancellation?
 
     // ★ v2.10.91 (perf 第四轮 · 设置界面转场): 应用内设置覆盖层的显隐状态。
     //

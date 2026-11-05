@@ -132,7 +132,7 @@ struct CreativeModelPicker: View {
                             }
                         }
                         Text(detail.id.isEmpty ? "跟随当前服务默认" : detail.id)
-                            .font(.system(size: 9, design: .monospaced)).foregroundColor(TapSkin.faintInk)
+                            .font(.system(size: 9)).foregroundColor(TapSkin.faintInk)
                             .lineLimit(2).textSelection(.enabled)
                     }
                 }.padding(16).frame(width: 224, height: 278, alignment: .topLeading)

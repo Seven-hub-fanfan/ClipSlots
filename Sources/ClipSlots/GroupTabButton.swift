@@ -20,8 +20,10 @@ struct GroupTabButton: View {
     let name: String
     let isCurrent: Bool
     let action: () -> Void
+    var onDropFiles: (([NSItemProvider]) -> Bool)? = nil
 
     @State private var isHovering = false
+    @StateObject private var dragDwell = GroupDragDwell()
     @GestureState private var isPressing = false
 
     var body: some View {
@@ -42,13 +44,17 @@ struct GroupTabButton: View {
         .buttonStyle(.plain)
         .neuRaised(radius: NeumorphicMetrics.actionRadius,
                    pressed: isPressing,
-                   hovering: isHovering,
+                   hovering: isHovering || dragDwell.isTargeted,
                    fill: isCurrent ? Neu.selectedFill : nil)
         .scaleEffect(isPressing ? 0.96 : 1)
         .animation(Anim.status, value: isCurrent)
         .animation(Anim.interactive, value: isHovering)
         .animation(Anim.interactive, value: isPressing)
         .onHover { isHovering = $0 }
+        .onDrop(of: AttachmentTransfer.dropTypes,
+                delegate: GroupDragSwitchDelegate(dwell: dragDwell, isCurrent: isCurrent, action: action,
+                                                  receive: onDropFiles))
+        .onDisappear { dragDwell.cancel() }
         .simultaneousGesture(
             // 仅捕捉按下/松手以驱动按压微缩；minimumDistance 0 且不消费点击，
             // 不影响 Button(action:) 的切组行为。

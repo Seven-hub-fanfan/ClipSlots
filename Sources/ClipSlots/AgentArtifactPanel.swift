@@ -327,7 +327,7 @@ public struct AgentArtifactPanel: View {
                 .frame(minHeight: 160, idealHeight: 300)
         } else if let text = record.text {
             ScrollView {
-                Text(text).font(.system(size: 12, design: .monospaced))
+                Text(text).font(.system(size: 12))
                     .frame(maxWidth: .infinity, alignment: .leading).textSelection(.enabled)
             }.frame(minHeight: 160, idealHeight: 300)
                 .accessibilityIdentifier("agent-artifact-text-preview")

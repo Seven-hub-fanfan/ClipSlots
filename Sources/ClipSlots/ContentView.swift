@@ -942,7 +942,7 @@ struct ContentView: View {
 
             VStack(alignment: .leading, spacing: 4) {
                 Text("ClipSlots")
-                    .font(.system(size: 22, weight: .bold, design: .rounded))
+                    .font(.system(size: 22, weight: .bold))
 
                 Button {
                     updateChecker.checkForUpdates()
@@ -1123,7 +1123,7 @@ struct ContentView: View {
                         .font(.system(size: 12, weight: .semibold))
                         .lineLimit(1)
                     Text("\(store.currentPageSlotGroups.count)")
-                        .font(.system(size: 9, weight: .bold, design: .rounded))
+                        .font(.system(size: 9, weight: .bold))
                         .foregroundColor(Neu.subtleInk)
                         .padding(.horizontal, 6)
                         .padding(.vertical, 2)
@@ -1223,7 +1223,7 @@ struct ContentView: View {
                                     .lineLimit(1)
                                 Spacer()
                                 Text("\(pageGroups.count)")
-                                    .font(.system(size: 9, weight: .semibold, design: .rounded))
+                                    .font(.system(size: 9, weight: .semibold))
                                     .foregroundColor(.secondary)
                                     .padding(.horizontal, 6)
                                     .padding(.vertical, 2)
@@ -1412,9 +1412,9 @@ struct ContentView: View {
 
                     // v2.10.77: 组切换 tab 加入按压微缩 / hover 高亮 / 选中态平滑过渡，
                     // 交互反馈由 GroupTabButton 内部承载，点击切组语义（switchSpecialSlot）保持不变。
-                    GroupTabButton(name: group.name, isCurrent: isCurrent) {
-                        store.switchSpecialSlot(id: group.id, fromNavigation: true)
-                    }
+                    GroupTabButton(name: group.name, isCurrent: isCurrent,
+                        action: { store.switchSpecialSlot(id: group.id, fromNavigation: true) },
+                        onDropFiles: { store.dropFilesIntoGroup($0, groupID: group.id) })
                     .contextMenu {
                         Button {
                             renameSlotGroup(id: group.id, currentName: group.name)
@@ -1652,7 +1652,7 @@ struct ContentView: View {
             Spacer()
 
             Text("v\(AppVersion.current)")
-                .font(.system(size: 9, weight: .medium, design: .rounded))
+                .font(.system(size: 9, weight: .medium))
                 .foregroundColor(Color.secondary.opacity(0.55))
                 .fixedSize()
                 .help("当前版本 v\(AppVersion.current)\n首次打开 ClipSlots.app 时，macOS 可能提示“无法验证开发者”，请右键点击 App → 选择「打开」→ 点击「打开」确认即可。")
@@ -1814,6 +1814,7 @@ struct ContentView: View {
             onEditText: { newText in store.updateTextSlot(slot, text: newText) },
             onEditHTML: { html in store.updateHTMLSlot(slot, html: html) },
             onDropFiles: { urls in store.importDroppedFiles(urls, toSlot: slot) },
+            onUploadFile: { store.chooseFileForEmptySlot(slot: slot, groupID: displayedGroup) },
             onClearBody: { store.clearSlotBody(slot) },
             // v2.11.0「槽位缩略图手动上传」：图标菜单与右键菜单双入口共用这三个回调。
             onCaptureThumbnail: { store.captureManualThumbnail(slot) },
@@ -2145,7 +2146,7 @@ private struct ShortcutBadge: View {
                 .font(.system(size: 10, weight: .medium))
                 .foregroundColor(.secondary)
             Text(shortcut)
-                .font(.system(size: 10, weight: .semibold, design: .rounded))
+                .font(.system(size: 10, weight: .semibold))
                 .foregroundColor(.primary)
                 .padding(.horizontal, 5)
                 .padding(.vertical, 2)
@@ -2292,7 +2293,7 @@ struct HotkeyTemplatePopover: View {
                             .font(.caption2)
                             .foregroundColor(.secondary)
                         Text(key.uppercased())
-                            .font(.system(size: 14, weight: .semibold, design: .monospaced))
+                            .font(.system(size: 14, weight: .semibold))
                     }
                     .padding(8)
                     .background(RoundedRectangle(cornerRadius: 8).fill(Color.primary.opacity(0.06)))
@@ -2528,7 +2529,7 @@ private struct ConnectionFullscreenView: View {
 
                     VStack(alignment: .leading, spacing: 4) {
                         Text("连接模式")
-                            .font(.system(size: 28, weight: .bold, design: .rounded))
+                            .font(.system(size: 28, weight: .bold))
                         Text("为当前槽位组规划串联路径、模板与批量粘贴顺序")
                             .font(.system(size: 13, weight: .medium))
                             .foregroundColor(.secondary)
@@ -2571,7 +2572,7 @@ private struct ConnectionMetricCard: View {
             Image(systemName: icon).foregroundColor(.accentColor)
             VStack(alignment: .leading, spacing: 2) {
                 Text(title).font(.caption).foregroundColor(.secondary)
-                Text(value).font(.system(size: 16, weight: .bold, design: .rounded)).lineLimit(1)
+                Text(value).font(.system(size: 16, weight: .bold)).lineLimit(1)
             }
             Spacer()
         }

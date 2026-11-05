@@ -264,7 +264,7 @@ struct CanvasHistoryPanel: View {
                 Spacer(minLength: 0)
 
                 Text(entry.stamp())
-                    .font(.system(size: 9, design: .monospaced))
+                    .font(.system(size: 9))
                     .foregroundColor(applied ? AppTheme.canvasChromeTertiaryInk
                                              : AppTheme.canvasChromeTertiaryInk.opacity(0.55))
             }
@@ -298,7 +298,7 @@ struct CanvasZoomControl: View {
 
             Button(action: onReset) {
                 Text(percentText)
-                    .font(.system(size: 10, weight: .medium, design: .rounded))
+                    .font(.system(size: 10, weight: .medium))
                     // ★ hotfix19：原来是 `.secondary`（深色下白 ~55%），压在浮层上偏灰到看不清。
                     .foregroundColor(AppTheme.canvasChromeInk)
                     // 固定宽度：否则从 100% 跳到 25% 会让左右两个按钮横向抖动。

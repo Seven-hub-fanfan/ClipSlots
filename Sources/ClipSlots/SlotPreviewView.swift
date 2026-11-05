@@ -170,7 +170,7 @@ struct SlotPreviewView: View {
     private var fallbackPreview: some View {
         ScrollView {
             Text(content.preview)
-                .font(.system(.body, design: .monospaced))
+                .font(.system(.body))
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(20)
                 .textSelection(.enabled)

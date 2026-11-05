@@ -441,7 +441,7 @@ struct CanvasInspectorPanel: View {
                 sectionTitle("字号")
                 Spacer(minLength: 0)
                 Text("\(Int(node.resolvedBodyFontSize))")
-                    .font(.system(size: 10, weight: .semibold, design: .rounded))
+                    .font(.system(size: 10, weight: .semibold))
                     .foregroundColor(AppTheme.canvasChromeInk)
                     .frame(width: 20, alignment: .trailing)
                 Stepper("") {

@@ -528,7 +528,7 @@ private struct BatchGenerationProgressView: View {
             }
             if let naming = batch.outputNaming {
                 HStack {
-                    Text(naming.label).font(.system(size: 12, weight: .medium, design: .monospaced))
+                    Text(naming.label).font(.system(size: 12, weight: .medium))
                         .foregroundColor(TapSkin.chromeInkDim).textSelection(.enabled)
                     Spacer()
                     if let file = batch.items.compactMap(\.localFile).first {
@@ -563,7 +563,7 @@ private struct BatchGenerationProgressView: View {
                                     Text(detail).font(.system(size: 11)).foregroundColor(TapSkin.chromeInkDim).textSelection(.enabled)
                                 }
                                 if let taskID = item.taskID {
-                                    Text("Task \(taskID)").font(.system(size: 10, design: .monospaced))
+                                    Text("Task \(taskID)").font(.system(size: 10))
                                         .foregroundColor(TapSkin.chromeInkDim).textSelection(.enabled)
                                 }
                             }.padding(.leading, 28)

@@ -90,6 +90,8 @@ extension Notification.Name {
 struct ClipSlotsApp: App {
     init() {
         #if DEBUG
+        AttachmentTransferRegression.runIfRequested()
+        SlotEditorRegression.runIfRequested()
         CanvasNestedGroupRegression.runIfRequested()
         #endif
         LaunchDefaults.applyForUpdate()
@@ -599,6 +601,7 @@ final class SlotStoreObservable: ObservableObject {
 
     /// Pending paste keystroke work item. Cancelled when switching special slots.
     private var pendingPasteWorkItem: DispatchWorkItem?
+    private var emptySlotFilePanel: NSOpenPanel?
 
     /// v2.8.1 (P0-1): monotonically increasing token identifying the current
     /// sequential-paste run. Each scheduled recursion step captures the token it
@@ -706,6 +709,71 @@ final class SlotStoreObservable: ObservableObject {
     // 所有 App 自身的槽位写盘（persist 快照 / 自动存储 / 文件夹导入 / 单槽保存 / 批量保存）都排入这一条
     // 串行队列：入队顺序即主线程发起编辑的顺序，串行执行保证 last-write-wins 与编辑顺序一致，彻底消除错序。
     let slotWriteQueue = DispatchQueue(label: "com.clipslots.slotwrite", qos: .userInitiated)
+    // Only one file copy at a time. Never wait for physical I/O on slotWriteQueue.
+    private let fileImportQueue = DispatchQueue(label: "com.clipslots.file-import", qos: .userInitiated)
+    private var lastFileProgressUpdate: TimeInterval = 0
+    #if DEBUG
+    var fileImportPreferClone = true
+    var fileImportCopyProbe: ((Int64, Int64) throws -> Void)?
+    #endif
+
+    private func beginFileImport(title: String) throws -> FileImportCancellation {
+        guard transientUI.importCancellation == nil, !isBatchSaving, importProgress == nil else {
+            throw AgentOperationError("正在导入文件，请完成或取消后重试。")
+        }
+        let cancellation = FileImportCancellation()
+        lastFileProgressUpdate = 0
+        transientUI.importCancellation = cancellation
+        publishImportProgress(ImportProgress(title: title, detail: "准备中…"))
+        return cancellation
+    }
+
+    private func finishFileImport(_ cancellation: FileImportCancellation) {
+        guard transientUI.importCancellation === cancellation else { return }
+        transientUI.importCancellation = nil
+        publishImportProgress(nil)
+    }
+
+    private func reportFileCopy(_ cancellation: FileImportCancellation, name: String,
+                                copied: Int64, total: Int64) {
+        publishFileImportProgress(cancellation, ImportProgress(title: "正在保存文件",
+            detail: "\(name) · \(ByteCountFormatter.string(fromByteCount: copied, countStyle: .file)) / \(ByteCountFormatter.string(fromByteCount: total, countStyle: .file))",
+            completed: total > 0 ? Int(Double(copied) / Double(total) * 100) : 0,
+            total: total > 0 ? 100 : 0))
+    }
+
+    private func publishFileImportProgress(_ cancellation: FileImportCancellation, _ progress: ImportProgress) {
+        DispatchQueue.main.async { [weak self] in
+            guard let self, self.transientUI.importCancellation === cancellation else { return }
+            let now = ProcessInfo.processInfo.systemUptime
+            guard now - self.lastFileProgressUpdate >= 0.1 else { return }
+            self.lastFileProgressUpdate = now
+            self.publishImportProgress(progress)
+        }
+    }
+
+    /// Called on fileImportQueue; the shared write queue sees only the checked commit.
+    private func prepareAndCommitFile(_ content: SlotContent, snapshot: SlotEditorSnapshot,
+                                      storage: SpecialSlotStorage, cancellation: FileImportCancellation,
+                                      label: String? = nil) throws -> (before: SlotContent, after: SlotContent) {
+        #if DEBUG
+        let preferClone = fileImportPreferClone
+        let probe = fileImportCopyProbe
+        #else
+        let preferClone = true
+        #endif
+        let prepared = try PreparedSlotBody(content: content, storageRoot: storage.storageRoot,
+            cancellation: cancellation, preferClone: preferClone) { [weak self] copied, total in
+                #if DEBUG
+                try probe?(copied, total)
+                #endif
+                self?.reportFileCopy(cancellation, name: content.primaryFileURL?.lastPathComponent ?? "文件",
+                                     copied: copied, total: total)
+            }
+        return try slotWriteQueue.sync {
+            try storage.commitImportedBody(content, snapshot: snapshot, prepared: prepared, label: label)
+        }
+    }
     var canvasTextDocuments: [String: CanvasTextDocument] = [:]
     var canvasTextDidPersist: ((String, Int, String, String) -> Void)?
     // UNDO-1 (v2.10.95): 撤销栈落盘专用串行队列。快照可能较大（含内联附件字节），编码 + 写盘
@@ -2618,8 +2686,18 @@ final class SlotStoreObservable: ObservableObject {
         if !materializeSlots.isEmpty {
             var budget = Self.undoMaterializeBudgetBytes
             for slot in materializeSlots {
-                guard var content = snapshotSlots[slot], !content.attachments.isEmpty else { continue }
+                guard var content = snapshotSlots[slot] else { continue }
                 var changed = false
+                if var managed = content.managedBodyFiles {
+                    for (url, var file) in managed where file.data == nil {
+                        guard let bytes = file.resolveData(), bytes.count <= budget else { continue }
+                        file.data = bytes
+                        managed[url] = file
+                        budget -= bytes.count
+                        changed = true
+                    }
+                    content.managedBodyFiles = managed
+                }
                 for i in content.attachments.indices {
                     guard content.attachments[i].data == nil,
                           let sp = content.attachments[i].storagePath, !sp.isEmpty else { continue }
@@ -2649,6 +2727,22 @@ final class SlotStoreObservable: ObservableObject {
     private func applyStateSnapshot(_ snapshot: SlotUndoSnapshot, activeId: String) {
         suppressWatcher()             // v2.9.4 (#2): 自写，不要触发 watcher 反向 reload
         cancelPendingClipboardRestore()
+
+        if let affected = snapshot.affectedSlots {
+            let restored = snapshot.slots.filter { affected.contains($0.key) }
+            slotWriteQueue.sync {
+                for (slot, content) in restored {
+                    specialStorage.set(slot, content: content, in: activeId)
+                }
+            }
+            for (slot, _) in restored {
+                if let saved = specialStorage.getOrUnknown(slot, in: activeId) { slots[slot] = saved }
+            }
+            ThumbnailProvider.shared.invalidateSpecialSlot(specialSlotId: activeId)
+            refreshTrigger = UUID()
+            bumpCanvasSlotRevision()
+            return
+        }
 
         // 整组回写：按 config.slots 归一化，快照里缺失的槽位显式还原为空槽，
         // 避免「回退后残留操作产生的新内容」。
@@ -2682,7 +2776,7 @@ final class SlotStoreObservable: ObservableObject {
         // UNDO-2 (v2.10.96): 先把「撤销前的状态」压进重做栈，Cmd+Shift+Z 才能再往前恢复。
         // 这里 materialize 全部槽位：撤销的整组回写会覆盖当前槽位目录（原子换目录），当前状态里
         // 那些外置的附件字节可能随之消失，不内联进重做快照就会断链。
-        pushRedoSnapshot(title: snapshot.title, activeId: activeId)
+        pushRedoSnapshot(title: snapshot.title, activeId: activeId, affectedSlots: snapshot.affectedSlots)
 
         applyStateSnapshot(snapshot, activeId: activeId)
         persistUndoStack()
@@ -2709,8 +2803,13 @@ final class SlotStoreObservable: ObservableObject {
         guard let snapshot = redoStack.popLatest(forGroup: activeId) else { return }
 
         // 把重做前的状态放回撤销栈（不走 captureUndoSnapshot——那条路径会清空重做栈）。
-        let backToUndo = makeStateSnapshot(title: snapshot.title,
+        var backToUndo = makeStateSnapshot(title: snapshot.title,
                                           materializeSlots: Array(stride(from: 1, through: config.slots, by: 1)))
+        backToUndo.affectedSlots = snapshot.affectedSlots
+        if let affected = snapshot.affectedSlots {
+            backToUndo.slots = backToUndo.slots.filter { affected.contains($0.key) }
+            backToUndo.labels = backToUndo.labels.filter { affected.contains($0.key) }
+        }
         undoStack.push(backToUndo)
         persistUndoStack()
 
@@ -2727,14 +2826,19 @@ final class SlotStoreObservable: ObservableObject {
     }
 
     /// 把当前状态压入重做栈（撤销时调用）。
-    private func pushRedoSnapshot(title: String, activeId: String) {
-        let current = makeStateSnapshot(title: title,
+    private func pushRedoSnapshot(title: String, activeId: String, affectedSlots: [Int]? = nil) {
+        var current = makeStateSnapshot(title: title,
                                        materializeSlots: Array(stride(from: 1, through: config.slots, by: 1)))
+        current.affectedSlots = affectedSlots
+        if let affectedSlots {
+            current.slots = current.slots.filter { affectedSlots.contains($0.key) }
+            current.labels = current.labels.filter { affectedSlots.contains($0.key) }
+        }
         redoStack.push(current)
         persistRedoStack()
     }
 
-    private func persistCurrentSpecialSlotData() {
+    private func persistCurrentSpecialSlotData(only targetSlot: Int? = nil) {
         guard flushCanvasTextDocuments() else { return }
         suppressWatcher() // v2.9.4 (#2): our own write — don't let it trigger a reload
         let activeId = currentSpecialSlotId
@@ -2742,8 +2846,10 @@ final class SlotStoreObservable: ObservableObject {
         // 跑在主线程，拖拽导入 / 文本编辑等会卡住 UI。改为：在主线程先固定 slots/labels 的不可变快照，再把
         // 实际磁盘写入整体挪到后台队列。in-memory 的 slots/labels 变更已由各调用方在主线程完成（UI 立即
         // 更新），此处仅做持久化；写入成功与否不驱动任何后续 UI（与原同步实现一致，均忽略返回值）。
-        let slotsSnapshot = slots
-        let labelsSnapshot = labels
+        // A single-slot edit must not replay stale neighbors over a file import
+        // that committed while its main-thread completion was still pending.
+        let slotsSnapshot = slots.filter { targetSlot == nil || $0.key == targetSlot }
+        let labelsSnapshot = labels.filter { targetSlot == nil || $0.key == targetSlot }
         slotWriteQueue.async { [weak self] in  // P1-1 (v2.10.35): 串行写队列，防并发错序覆盖
             guard let self = self else { return }
             for (slot, content) in slotsSnapshot {
@@ -2777,7 +2883,7 @@ final class SlotStoreObservable: ObservableObject {
         content.attachments = existing.attachments
         captureUndoSnapshot(title: "保存 HTML 到槽位 \(slot)")   // UNDO-1 (v2.10.95)
         slots[slot] = content
-        persistCurrentSpecialSlotData()
+        persistCurrentSpecialSlotData(only: slot)
         refreshTrigger = UUID()
         showFloatingNotice(FloatingNotice(title: "已保存 HTML", subtitle: "槽位 \(slot)", iconName: "doc.richtext", kind: .success))
     }
@@ -2804,7 +2910,7 @@ final class SlotStoreObservable: ObservableObject {
         content.updatedAt = Date().timeIntervalSince1970
         captureUndoSnapshot(title: "编辑槽位 \(slot) HTML")   // UNDO-1 (v2.10.95)
         slots[slot] = content
-        persistCurrentSpecialSlotData()
+        persistCurrentSpecialSlotData(only: slot)
         refreshTrigger = UUID()
     }
 
@@ -2829,7 +2935,7 @@ final class SlotStoreObservable: ObservableObject {
         content.attachments = existing.attachments
         captureUndoSnapshot(title: "编辑槽位 \(slot) 文本")   // UNDO-1 (v2.10.95)
         slots[slot] = content
-        persistCurrentSpecialSlotData()
+        persistCurrentSpecialSlotData(only: slot)
         showFloatingNotice(FloatingNotice(title: "已更新文本", subtitle: "槽位 \(slot)", iconName: "pencil.circle.fill", kind: .success))
     }
 
@@ -2952,6 +3058,156 @@ final class SlotStoreObservable: ObservableObject {
         } catch {
             return false
         }
+    }
+
+    func captureSlotEditor(slot: Int, groupID: String) throws -> SlotEditorSnapshot {
+        guard canvasTextDocuments["\(groupID)#\(slot)"]?.flush() != false else {
+            throw AgentCanvasError.conflict
+        }
+        return try slotWriteQueue.sync {
+            try canvasStorage(groupId: groupID).editorSnapshot(slot, in: groupID)
+        }
+    }
+
+    func saveSlotEditor(_ snapshot: SlotEditorSnapshot, body: AgentSlotBody,
+                        attachments: [SlotContent.SlotAttachment], markdownEdit: SlotMarkdownEdit? = nil) throws {
+        let groupID = snapshot.group.id
+        guard canvasTextDocuments["\(groupID)#\(snapshot.slot)"]?.isDirty != true else {
+            throw AgentCanvasError.conflict
+        }
+        let storage = canvasStorage(groupId: groupID)
+        let result = try slotWriteQueue.sync {
+            try Self.exchangeSlotEditor(storage: storage, snapshot: snapshot, body: body,
+                attachments: attachments, markdownEdit: markdownEdit)
+        }
+        finishSlotEditorSave(snapshot, undoContent: result.before, saved: result.after)
+    }
+
+    /// Only the transaction and undo-byte capture run off main. UI and history
+    /// are published after the transaction succeeds, just as in the sync path.
+    @MainActor func saveSlotEditorAsync(_ snapshot: SlotEditorSnapshot, body: AgentSlotBody,
+                             attachments: [SlotContent.SlotAttachment],
+                             markdownEdit: SlotMarkdownEdit? = nil) async throws {
+        let groupID = snapshot.group.id
+        guard canvasTextDocuments["\(groupID)#\(snapshot.slot)"]?.isDirty != true else {
+            throw AgentCanvasError.conflict
+        }
+        let storage = canvasStorage(groupId: groupID)
+        let result: (before: SlotContent, after: SlotContent) = try await withCheckedThrowingContinuation { continuation in
+            slotWriteQueue.async {
+                do {
+                    continuation.resume(returning: try Self.exchangeSlotEditor(storage: storage,
+                        snapshot: snapshot, body: body, attachments: attachments, markdownEdit: markdownEdit))
+                } catch { continuation.resume(throwing: error) }
+            }
+        }
+        finishSlotEditorSave(snapshot, undoContent: result.before, saved: result.after)
+    }
+
+    private static func exchangeSlotEditor(storage: SpecialSlotStorage, snapshot: SlotEditorSnapshot,
+                                          body: AgentSlotBody, attachments: [SlotContent.SlotAttachment],
+                                          markdownEdit: SlotMarkdownEdit?) throws -> (before: SlotContent, after: SlotContent) {
+        var undoContent = markdownEdit?.document.contentForUndo(snapshot.content) ?? snapshot.content
+        // Capture only removed bytes before the atomic directory replacement.
+        var budget = Self.undoMaterializeBudgetBytes - (markdownEdit?.document.sourceBytes.count ?? 0)
+        for i in undoContent.attachments.indices where !attachments.contains(where: {
+            $0.id == undoContent.attachments[i].id
+        }) {
+            if let bytes = undoContent.attachments[i].resolveData(), bytes.count <= budget {
+                undoContent.attachments[i].data = bytes
+                budget -= bytes.count
+            }
+        }
+        let saved = try storage.exchangeEditorContent(snapshot, body: body, attachments: attachments,
+                                                      markdownEdit: markdownEdit)
+        return (undoContent, saved)
+    }
+
+    private func finishSlotEditorSave(_ snapshot: SlotEditorSnapshot, undoContent: SlotContent, saved: SlotContent) {
+        let groupID = snapshot.group.id
+        // Record only this slot, so undo cannot restore unrelated external writes.
+        let undo = SlotUndoSnapshot(slots: [snapshot.slot: undoContent],
+            labels: [snapshot.slot: snapshot.content.label ?? ""],
+            title: "编辑槽位 \(snapshot.slot)", groupId: groupID, affectedSlots: [snapshot.slot])
+        if undoStack.push(undo) { persistUndoStack() }
+        if redoStack.canUndo(forGroup: groupID) {
+            redoStack.removeAll(forGroup: groupID)
+            persistRedoStack()
+        }
+        if loadedSpecialSlotId == groupID { slots[snapshot.slot] = saved }
+        if let document = canvasTextDocuments["\(groupID)#\(snapshot.slot)"], !document.isDirty {
+            document.refreshFromStorage(saved)
+        }
+        bumpCanvasSlotRevision()
+        refreshTrigger = UUID()
+    }
+
+    static func singleSlotFilePanel() -> NSOpenPanel {
+        let panel = NSOpenPanel()
+        panel.title = "上传文件到槽位"
+        panel.prompt = "上传"
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = false
+        return panel
+    }
+
+    func chooseFileForEmptySlot(slot: Int, groupID: String) {
+        guard emptySlotFilePanel == nil else { return }
+        do {
+            let snapshot = try captureSlotEditor(slot: slot, groupID: groupID)
+            guard snapshot.content.hasEmptyBody else { throw AgentCanvasError.conflict }
+            let panel = Self.singleSlotFilePanel()
+            emptySlotFilePanel = panel
+            let completed: (NSApplication.ModalResponse) -> Void = { [weak self, weak panel] response in
+                guard let self else { return }
+                let urls = panel?.urls ?? []
+                self.emptySlotFilePanel = nil
+                guard response == .OK, urls.count == 1 else { return }
+                Task { @MainActor in
+                    do { try await self.importSelectedFile(urls[0], snapshot: snapshot) }
+                    catch { self.transientUI.showToast(error.localizedDescription, duration: 4) }
+                }
+            }
+            if let window = NSApp.keyWindow { panel.beginSheetModal(for: window, completionHandler: completed) }
+            else { panel.begin(completionHandler: completed) }
+        } catch { transientUI.showToast(error.localizedDescription, duration: 4) }
+    }
+
+    func importSelectedFile(_ url: URL, snapshot: SlotEditorSnapshot) async throws {
+        guard snapshot.content.hasEmptyBody, url.isFileURL,
+              (try url.resourceValues(forKeys: [.isRegularFileKey])).isRegularFile == true else {
+            throw AgentCanvasError.unavailable
+        }
+        let groupID = snapshot.group.id
+        guard canvasTextDocuments["\(groupID)#\(snapshot.slot)"]?.isDirty != true else {
+            throw AgentCanvasError.conflict
+        }
+        let storage = canvasStorage(groupId: groupID)
+        let cancellation = try beginFileImport(title: "正在上传文件")
+        defer { finishFileImport(cancellation) }
+        let body = folderImportService.makeSlotContent(for: url)
+        let result: (before: SlotContent, after: SlotContent) = try await withCheckedThrowingContinuation { continuation in
+            fileImportQueue.async {
+                do { continuation.resume(returning: try self.prepareAndCommitFile(body, snapshot: snapshot,
+                    storage: storage, cancellation: cancellation)) }
+                catch { continuation.resume(throwing: error) }
+            }
+        }
+        let undo = SlotUndoSnapshot(slots: [snapshot.slot: result.before],
+            labels: [snapshot.slot: result.before.label ?? ""], title: "上传文件到槽位 \(snapshot.slot)",
+            groupId: groupID, affectedSlots: [snapshot.slot])
+        if undoStack.push(undo) { persistUndoStack() }
+        redoStack.removeAll(forGroup: groupID)
+        persistRedoStack()
+        if loadedSpecialSlotId == groupID,
+           slots[snapshot.slot].map({ AgentSlotBody($0) == AgentSlotBody(snapshot.content) }) != false {
+            slots[snapshot.slot] = result.after
+        }
+        canvasTextDocuments["\(groupID)#\(snapshot.slot)"]?.refreshFromStorage(result.after)
+        bumpCanvasSlotRevision()
+        refreshTrigger = UUID()
+        transientUI.showToast("已上传 \(url.lastPathComponent)")
     }
 
     /// Model banks use a captured authoritative revision, including attachments.
@@ -3324,7 +3580,7 @@ final class SlotStoreObservable: ObservableObject {
         c.updatedAt = Date().timeIntervalSince1970
         if groupId == currentSpecialSlotId {
             slots[slot] = c
-            persistCurrentSpecialSlotData()
+            persistCurrentSpecialSlotData(only: slot)
             refreshTrigger = UUID()
             return true
         }
@@ -3468,21 +3724,54 @@ final class SlotStoreObservable: ObservableObject {
     }
 
     func importDroppedFiles(_ urls: [URL], toSlot slot: Int) {
-        guard let first = urls.first else { return }
+        guard !urls.isEmpty, slot >= 1, slot <= config.slots, flushCanvasTextDocuments() else { return }
+        let cancellation: FileImportCancellation
+        do { cancellation = try beginFileImport(title: "正在导入文件") }
+        catch { transientUI.showToast(error.localizedDescription); return }
+        let groupID = currentSpecialSlotId
+        let storage = canvasStorage(groupId: groupID)
+        let imports = urls.prefix(config.slots - slot + 1).enumerated().map { offset, url in
+            (slot: slot + offset, url: url, content: folderImportService.makeSlotContent(for: url),
+             expected: slots[slot + offset] ?? SlotContent())
+        }
         // UNDO-1 (v2.10.95): 拖入文件会覆盖若干槽位主体，整批算一步撤销。
         captureUndoSnapshot(title: urls.count == 1 ? "导入文件到槽位 \(slot)" : "导入 \(urls.count) 个文件（槽位 \(slot) 起）")
-        for (offset, url) in urls.enumerated() {
-            let target = slot + offset
-            guard target <= config.slots else { break }
-            var newContent = folderImportService.makeSlotContent(for: url)
-            // v2.7.74: preserve existing attachments when replacing slot content.
-            newContent.attachments = slots[target]?.attachments ?? []
-            slots[target] = newContent
+        suppressWatcher()
+        fileImportQueue.async { [weak self] in
+            guard let self else { return }
+            var saved: [Int: SlotContent] = [:]
+            for item in imports {
+                if cancellation.isCancelled { break }
+                do {
+                    let snapshot = try self.slotWriteQueue.sync { try storage.editorSnapshot(item.slot, in: groupID) }
+                    guard AgentSlotBody(snapshot.content) == AgentSlotBody(item.expected) else { continue }
+                    saved[item.slot] = try self.prepareAndCommitFile(item.content, snapshot: snapshot,
+                        storage: storage, cancellation: cancellation).after
+                } catch { NSLog("[ClipSlots] Dropped file import: \(ApplicationDiagnostics.error(error))") }
+            }
+            let results = saved
+            DispatchQueue.main.async {
+                self.finishFileImport(cancellation)
+                if self.loadedSpecialSlotId == groupID {
+                    for item in imports where self.slots[item.slot]?.contentId == item.expected.contentId
+                        || self.slots[item.slot] == nil {
+                        if let result = results[item.slot] {
+                            self.slots[item.slot] = result
+                            self.canvasTextDocuments["\(groupID)#\(item.slot)"]?.refreshFromStorage(result)
+                        }
+                    }
+                }
+                self.bumpCanvasSlotRevision()
+                self.refreshTrigger = UUID()
+                let complete = results.count == imports.count
+                self.showFloatingNotice(FloatingNotice(
+                    title: complete ? "已保存文件副本" : "部分文件未能导入",
+                    subtitle: complete ? (imports.count == 1 ? imports[0].url.lastPathComponent : "\(imports.count) 个文件")
+                        : "已保存 \(results.count) 个；未完成的文件请重新拖入",
+                    iconName: complete ? "folder.badge.plus" : "exclamationmark.triangle.fill",
+                    kind: complete ? .success : .warning))
+            }
         }
-        // MT-1 (v2.10.30): persistCurrentSpecialSlotData 已改为「主线程快照 + 后台写盘」，此处拖拽导入
-        // 不再在主线程上逐槽同步写锁写盘。
-        persistCurrentSpecialSlotData()
-        showFloatingNotice(FloatingNotice(title: "已导入文件", subtitle: urls.count == 1 ? first.lastPathComponent : "\(urls.count) 个文件", iconName: "folder.badge.plus", kind: .success))
     }
 
     func clearAllSlotsInCurrentSpecialSlotWithConfirmation() {
@@ -6914,33 +7203,22 @@ final class SlotStoreObservable: ObservableObject {
     /// Called when user confirms import options from the sheet. (v2.6.7)
     func executeImportSelection(_ selection: PendingImportSelection, choice: ImportChoiceMode) {
         let mode = resolveExpansionMode(choice: choice, summary: selection.summary)
-        let expansion = folderImportService.expandSelection(
-            urls: selection.urls,
-            mode: mode,
-            sortRule: specialSlotSettings.folderImportSortRule
-        )
-
-        guard !expansion.items.isEmpty else {
-            showFloatingNotice(FloatingNotice(
-                title: "没有可导入的文件",
-                subtitle: expansion.folderCount > 0 ? "文件夹为空或无可读取文件" : "",
-                iconName: "tray",
-                kind: .warning
-            ))
-            return
-        }
-
-        handleBatchSave(
-            items: expansion.items,
-            startSlot: selection.startSlot,
-            expansion: expansion
-        )
+        expandImportInBackground(urls: selection.urls, mode: mode,
+            sortRule: specialSlotSettings.folderImportSortRule, startSlot: selection.startSlot)
     }
 
     /// Expand URLs using the given mode and delegate to handleBatchSave.
     func executeToolbarImport(urls: [URL], mode: ImportLimitMode, sortRule: FolderImportSortRule) {
-        let expansion = folderImportService.expandSelection(urls: urls, mode: mode, sortRule: sortRule)
+        expandImportInBackground(urls: urls, mode: mode, sortRule: sortRule, startSlot: 1)
+    }
 
+    private func expandImportInBackground(urls: [URL], mode: ImportLimitMode,
+                                          sortRule: FolderImportSortRule, startSlot: Int) {
+        let target = (pageID: currentPageId, groupID: currentSpecialSlotId)
+        Task { @MainActor in
+        let expansion = await Task.detached(priority: .userInitiated) {
+            FolderImportService().expandSelection(urls: urls, mode: mode, sortRule: sortRule)
+        }.value
         guard !expansion.items.isEmpty else {
             showFloatingNotice(FloatingNotice(
                 title: "没有可导入的文件",
@@ -6953,9 +7231,11 @@ final class SlotStoreObservable: ObservableObject {
 
         handleBatchSave(
             items: expansion.items,
-            startSlot: 1,
-            expansion: expansion
+            startSlot: startSlot,
+            expansion: expansion,
+            target: target
         )
+        }
     }
 
     func importFolderIntoCurrentSpecialSlot(_ folderURL: URL) {
@@ -6968,8 +7248,11 @@ final class SlotStoreObservable: ObservableObject {
             sortRule: specialSlotSettings.folderImportSortRule
         )
 
+        Task { @MainActor in
         do {
-            let preview = try folderImportService.preview(folderURL: folderURL, options: options)
+            let preview = try await Task.detached(priority: .userInitiated) {
+                try FolderImportService().preview(folderURL: folderURL, options: options)
+            }.value
 
             guard preview.totalImportableCount > 0 else {
                 showAlert(message: "该文件夹中没有可导入文件")
@@ -6995,7 +7278,8 @@ final class SlotStoreObservable: ObservableObject {
                 guard confirmOverwriteCurrentSpecialSlot() else { return }
             }
 
-            // Clear and import
+            // Prepare each file before touching its target. A failed or cancelled
+            // import must not clear the old body or the remaining slots.
             ThumbnailProvider.shared.invalidateSpecialSlot(specialSlotId: activeId)
 
             suppressWatcher() // v2.9.4 (#2): re-bump after any modal so the write burst below stays suppressed
@@ -7005,30 +7289,36 @@ final class SlotStoreObservable: ObservableObject {
             // synchronously on the main thread — a folder of hundreds of files froze the GUI. Move
             // the whole burst to a background serial queue and commit the reload/toast back on main.
             let willImportFiles = preview.willImportFiles
+            let cancellation = try beginFileImport(title: "正在导入文件夹")
             // v2.10.39: 显示导入进度浮层，分母为将导入的文件数。
             publishImportProgress(ImportProgress(
                 title: "正在导入文件夹", detail: "准备中…", completed: 0, total: willImportFiles.count))
-            slotWriteQueue.async { [weak self] in  // P1-1 (v2.10.35): 串行写队列，防并发错序覆盖
+            fileImportQueue.async { [weak self] in
                 guard let self = self else { return }
                 do {
-                    try self.specialStorage.clearAllSlots(in: activeId)
-
                     var successCount = 0
                     var failCount = 0
                     for (idx, fileURL) in willImportFiles.enumerated() {
+                        if cancellation.isCancelled { break }
                         self.suppressWatcher() // keep the self-write window fresh during a long import
                         let slotNumber = idx + 1
                         var content = self.folderImportService.makeSlotContent(for: fileURL)
                         // Regenerate identity so thumbnails and SwiftUI views refresh.
                         content.contentId = UUID().uuidString
                         content.updatedAt = Date().timeIntervalSince1970
-                        if self.specialStorage.set(slotNumber, content: content, in: activeId) {
+                        do {
+                            let snapshot = try self.slotWriteQueue.sync {
+                                try self.specialStorage.editorSnapshot(slotNumber, in: activeId)
+                            }
+                            _ = try self.prepareAndCommitFile(content, snapshot: snapshot,
+                                storage: self.specialStorage, cancellation: cancellation,
+                                label: fileURL.lastPathComponent)
                             successCount += 1
-                        } else {
+                        } catch {
                             failCount += 1
                         }
                         // v2.10.39: 刷新导入进度。
-                        self.publishImportProgress(ImportProgress(
+                        self.publishFileImportProgress(cancellation, ImportProgress(
                             title: "正在导入文件夹",
                             detail: fileURL.lastPathComponent,
                             completed: idx + 1,
@@ -7037,7 +7327,8 @@ final class SlotStoreObservable: ObservableObject {
 
                     try? self.specialStorage.updateCurrentSpecialSlotSource(
                         sourceType: .folderImport,
-                        sourcePath: folderURL.path
+                        sourcePath: folderURL.path,
+                        groupID: activeId
                     )
 
                     DispatchQueue.main.async { [weak self] in
@@ -7049,7 +7340,7 @@ final class SlotStoreObservable: ObservableObject {
                         self.reloadAllAsync()
                         self.refreshTrigger = UUID()
                         self.suppressWatcher(2.0)
-                        self.publishImportProgress(nil) // v2.10.39: 收起进度条浮层
+                        self.finishFileImport(cancellation)
                         // v2.6.2: Floating notice instead of blocking alert
                         self.showFloatingNotice(FloatingNotice(
                             title: "已导入 \(successCount) 个文件",
@@ -7061,7 +7352,7 @@ final class SlotStoreObservable: ObservableObject {
                 } catch {
                     NSLog("[ClipSlots] Folder import (bg) error: \(ApplicationDiagnostics.error(error))")
                     DispatchQueue.main.async { [weak self] in
-                        self?.publishImportProgress(nil) // v2.10.39: 收起进度条浮层
+                        self?.finishFileImport(cancellation)
                         self?.showAlert(message: "导入失败: \(error.localizedDescription)")
                     }
                 }
@@ -7070,6 +7361,7 @@ final class SlotStoreObservable: ObservableObject {
         } catch {
             NSLog("[ClipSlots] Folder import error: \(ApplicationDiagnostics.error(error))")
             showAlert(message: "导入失败: \(error.localizedDescription)")
+        }
         }
     }
 
@@ -7139,6 +7431,11 @@ final class SlotStoreObservable: ObservableObject {
             return
         }
 
+        if let fileURL = content.primaryFileURL {
+            saveCapturedFile(content, url: fileURL, slot: targetSlot, groupID: activeId)
+            return
+        }
+
         // Check if overwriting (before save)
         // P1 (v2.10.50): 保存前不再同步 specialStorage.get() 抢跨进程 flock（锁竞争时主线程最长阻塞 ~5s）。
         // 改读内存快照 contentForSlotOrUnknown：命中当前组内存即用（无 flock，成本极低），仅在磁盘状态确实
@@ -7154,6 +7451,7 @@ final class SlotStoreObservable: ObservableObject {
 
         // Normal save — regenerate identity so thumbnails and SwiftUI views refresh.
         var savedContent = content
+        // Files have already been routed through lock-external preparation.
         savedContent.contentId = UUID().uuidString
         savedContent.updatedAt = Date().timeIntervalSince1970
         // v2.7.74: overwriting a slot's main content should keep its attachments,
@@ -7187,6 +7485,10 @@ final class SlotStoreObservable: ObservableObject {
         slotWriteQueue.async { [weak self] in  // P1-1 (v2.10.35): 串行写队列，防并发错序覆盖
             guard let self = self else { return }
             let success = self.specialStorage.set(targetSlot, content: contentToWrite, in: activeId)
+            // The storage writer rewrites file URLs to body-files/. Publish the
+            // committed shape so immediate paste/open no longer uses the source.
+            let committedContent = success
+                ? self.specialStorage.getOrUnknown(targetSlot, in: activeId) : nil
             DispatchQueue.main.async { [weak self] in
                 guard let self = self else { return }
                 guard success else {
@@ -7215,9 +7517,10 @@ final class SlotStoreObservable: ObservableObject {
                 // 标签写错组。故仅当仍停留在 activeId 时才刷新内存并走 setLabel；已切组时跳过内存刷新，
                 // 且仅把文件名标签按 activeId 直接持久化到正确组的磁盘（不碰任何内存），避免标签丢失。
                 let stillOnActiveGroup = (self.currentSpecialSlotId == activeId)
-                if stillOnActiveGroup {
+                if stillOnActiveGroup,
+                   self.slots[targetSlot]?.contentId == contentToWrite.contentId {
                     var newSlots = self.slots
-                    newSlots[targetSlot] = contentToWrite
+                    newSlots[targetSlot] = committedContent ?? contentToWrite
                     self.slots = newSlots
                     self.loadedSpecialSlotId = activeId
                     self.refreshTrigger = UUID()
@@ -7226,7 +7529,7 @@ final class SlotStoreObservable: ObservableObject {
                     if let fileURL = contentToWrite.primaryFileURL {
                         self.setLabel(targetSlot, label: fileURL.lastPathComponent)
                     }
-                } else {
+                } else if !stillOnActiveGroup {
                     NSLog("[ClipSlots] SAVE 回调发现已切组（active=\(activeId) current=\(self.currentSpecialSlotId)），"
                         + "跳过内存刷新，仅按 activeId 持久化标签，避免污染错组内存 / 标签写错组")
                     if let fileURL = contentToWrite.primaryFileURL {
@@ -7254,13 +7557,74 @@ final class SlotStoreObservable: ObservableObject {
 
     // MARK: - Batch Save (v2.6.1)
 
+    private func saveCapturedFile(_ content: SlotContent, url: URL, slot: Int, groupID: String) {
+        guard let expected = contentForSlotOrUnknown(slot) else {
+            transientUI.showToast("存储繁忙，请稍后重试。")
+            return
+        }
+        Task { @MainActor in
+            do {
+                let cancellation = try beginFileImport(title: "正在保存文件到槽位 \(slot)")
+                defer { finishFileImport(cancellation) }
+                var body = content
+                body.manageBodyFile(url)
+                let capturedBody = body
+                let result: (before: SlotContent, after: SlotContent) = try await withCheckedThrowingContinuation { continuation in
+                    fileImportQueue.async {
+                        do {
+                            let snapshot = try self.slotWriteQueue.sync {
+                                try self.specialStorage.editorSnapshot(slot, in: groupID)
+                            }
+                            guard AgentSlotBody(snapshot.content) == AgentSlotBody(expected),
+                                  snapshot.content.managedBodyFiles == expected.managedBodyFiles else {
+                                throw AgentCanvasError.conflict
+                            }
+                            let saved = try self.prepareAndCommitFile(capturedBody, snapshot: snapshot,
+                                storage: self.specialStorage, cancellation: cancellation, label: url.lastPathComponent)
+                            continuation.resume(returning: saved)
+                        } catch { continuation.resume(throwing: error) }
+                    }
+                }
+                let undo = SlotUndoSnapshot(slots: [slot: result.before],
+                    labels: [slot: result.before.label ?? ""], title: "保存文件到槽位 \(slot)",
+                    groupId: groupID, affectedSlots: [slot])
+                if undoStack.push(undo) { persistUndoStack() }
+                redoStack.removeAll(forGroup: groupID)
+                persistRedoStack()
+                if loadedSpecialSlotId == groupID,
+                   slots[slot].map({ AgentSlotBody($0) == AgentSlotBody(result.before) }) != false {
+                    slots[slot] = result.after
+                }
+                ThumbnailProvider.shared.invalidateSlot(specialSlotId: groupID, slot: slot)
+                reloadAllAsync()
+                bumpCanvasSlotRevision()
+                showFloatingNotice(FloatingNotice(title: "已保存到槽位 \(slot)",
+                    subtitle: url.lastPathComponent, iconName: "checkmark.circle.fill", kind: .success))
+            } catch is CancellationError {
+                transientUI.showToast("已取消保存")
+            } catch {
+                transientUI.showToast("保存失败：\(error.localizedDescription)", duration: 4)
+            }
+        }
+    }
+
     private let maxAutoCreatePages: Int = 20
+    private var isBatchPlanning = false
 
     private func handleBatchSave(
         items: [BatchImportItem],
         startSlot: Int,
-        expansion: BatchImportExpansionResult? = nil
+        expansion: BatchImportExpansionResult? = nil,
+        target: (pageID: String, groupID: String)? = nil
     ) {
+        guard !isBatchPlanning else {
+            showFloatingNotice(FloatingNotice(title: "正在准备批量保存，请稍候", iconName: "hourglass", kind: .info))
+            return
+        }
+        let capturedTarget = target ?? (pageID: currentPageId, groupID: currentSpecialSlotId)
+        isBatchPlanning = true
+        Task { @MainActor in
+        defer { isBatchPlanning = false }
         suppressWatcher() // v2.9.4 (#2): self-write (batch); re-bumped in the loop below
         // v2.6.2: Safety guards
         guard !isBatchSaving else {
@@ -7281,16 +7645,22 @@ final class SlotStoreObservable: ObservableObject {
             return
         }
 
-        guard currentPage != nil, currentSpecialSlot != nil else {
+        let activeId = capturedTarget.groupID
+        let originalPageId = capturedTarget.pageID
+        let targetGroup = specialSlots.first { $0.id == activeId && $0.pageId == originalPageId }
+            ?? (currentSpecialSlot?.id == activeId ? currentSpecialSlot : nil)
+        guard pages.contains(where: { $0.id == originalPageId }), targetGroup != nil else {
             showFloatingNotice(FloatingNotice(
                 title: "页面或槽位组不存在", iconName: "exclamationmark.triangle.fill", kind: .error))
             return
         }
 
-        let activeId = currentSpecialSlotId
-        let originalPageId = currentPageId
-        let pageGroups = currentPageSlotGroups
+        let pageGroups = specialSlots.filter { $0.pageId == originalPageId }
+            .sorted { ($0.order, $0.id) < ($1.order, $1.id) }
         let allPages = pages
+        let cfgSlots = config.slots
+        let maxSpecial = specialSlotSettings.maxSpecialSlots
+        let targetPageName = pages.first { $0.id == originalPageId }?.name ?? "页面"
 
         // Build target slot list: [(specialSlotId, slot)]
         var targets: [(specialSlotId: String, slot: Int)] = []
@@ -7325,11 +7695,17 @@ final class SlotStoreObservable: ObservableObject {
 
         let totalCapacity = capacityInPage + pagesNeeded * specialSlotSettings.maxSpecialSlots * config.slots
 
+        let overwriteTargets = Array(targets.prefix(items.count))
+        let overwriteCount: Int = await withCheckedContinuation { continuation in
+            slotWriteQueue.async {
+                continuation.resume(returning: self.countOverwrites(targets: overwriteTargets[...]))
+            }
+        }
         let plan = BatchSavePlan(
             items: items,
             startSlot: startSlot,
-            willOverwriteCount: countOverwrites(targets: targets.prefix(items.count)),
-            needsNewGroups: newGroupsNeededInPage + pagesNeeded * specialSlotSettings.maxSpecialSlots,
+            willOverwriteCount: overwriteCount,
+            needsNewGroups: newGroupsNeededInPage + pagesNeeded * maxSpecial,
             skippedFolderCount: 0,
             skippedUnsupportedCount: 0,
             availableCapacity: totalCapacity
@@ -7338,8 +7714,8 @@ final class SlotStoreObservable: ObservableObject {
         // Show confirmation (updated to include page info)
         if !UserDefaults.standard.skipBatchSaveConfirmation || plan.willOverwriteCount > 0 {
             guard confirmBatchSaveV2(plan,
-                currentGroupName: currentSpecialSlot?.name ?? "槽位组",
-                pagesNeeded: pagesNeeded) else {
+                currentGroupName: targetGroup?.name ?? "槽位组",
+                pagesNeeded: pagesNeeded, pageName: targetPageName) else {
                 return
             }
         }
@@ -7351,6 +7727,9 @@ final class SlotStoreObservable: ObservableObject {
             }
         }
 
+        let cancellation: FileImportCancellation
+        do { cancellation = try beginFileImport(title: "正在导入文件") }
+        catch { transientUI.showToast(error.localizedDescription); return }
         isBatchSaving = true
         // v2.10.39: 显示导入进度浮层，分母为将要保存的文件数。
         publishImportProgress(ImportProgress(
@@ -7368,9 +7747,7 @@ final class SlotStoreObservable: ObservableObject {
         // background serial queue over an immutable item snapshot, then hop back to the main thread
         // to update @Published state, reloadAllAsync, and show the toast, clearing isBatchSaving
         // only after that completes.
-        let cfgSlots = config.slots
-        let maxSpecial = specialSlotSettings.maxSpecialSlots
-        slotWriteQueue.async { [weak self] in  // P1-1 (v2.10.35): 串行写队列，防并发错序覆盖
+        fileImportQueue.async { [weak self] in
             guard let self = self else { return }
             var savedCount = 0
             var failedCount = 0
@@ -7437,7 +7814,7 @@ final class SlotStoreObservable: ObservableObject {
 
             // Save items to targets
             for (index, item) in items.enumerated() {
-                guard index < itemsToSave, index < targets.count else { break }
+                guard !cancellation.isCancelled, index < itemsToSave, index < targets.count else { break }
                 self.suppressWatcher() // v2.9.4 (#2): keep the self-write window fresh during a long batch
                 let target = targets[index]
                 var content = self.batchImportService.makeSlotContent(for: item.fileURL)
@@ -7445,20 +7822,19 @@ final class SlotStoreObservable: ObservableObject {
                 content.updatedAt = Date().timeIntervalSince1970
 
                 // Check if overwriting
-                let existing = self.specialStorage.get(target.slot, in: target.specialSlotId)
-                let isOverwrite = !existing.isEmpty
-
-                let ok = self.specialStorage.set(target.slot, content: content, in: target.specialSlotId)
-                if ok {
-                    if isOverwrite { overwrittenCount += 1 }
-                    // Set label to file name
-                    self.specialStorage.setLabel(target.slot, label: item.fileName, in: target.specialSlotId)
+                do {
+                    let snapshot = try self.slotWriteQueue.sync {
+                        try self.specialStorage.editorSnapshot(target.slot, in: target.specialSlotId)
+                    }
+                    _ = try self.prepareAndCommitFile(content, snapshot: snapshot,
+                        storage: self.specialStorage, cancellation: cancellation, label: item.fileName)
+                    if !snapshot.content.isEmpty { overwrittenCount += 1 }
                     savedCount += 1
-                } else {
+                } catch {
                     failedCount += 1
                 }
                 // v2.10.39: 刷新导入进度（已处理 = 已尝试的条目数）。
-                self.publishImportProgress(ImportProgress(
+                self.publishFileImportProgress(cancellation, ImportProgress(
                     title: "正在导入文件",
                     detail: item.fileName,
                     completed: index + 1,
@@ -7470,10 +7846,10 @@ final class SlotStoreObservable: ObservableObject {
                 try? self.specialStorage.switchToPage(id: originalPageId)
             }
 
+            let refreshedIndex = self.specialStorage.loadIndex()
             DispatchQueue.main.async { [weak self] in
                 guard let self = self else { return }
                 // Refresh state (must touch @Published on the main thread)
-                let refreshedIndex = self.specialStorage.loadIndex()
                 // v2.14.0：同 selectAndActivateSpecialSlot —— 保留组永不进 `specialSlots`。
                 self.specialSlots = refreshedIndex.specialSlots.filter {
                     !SpecialSlotStorage.isReservedGroupId($0.id)
@@ -7494,6 +7870,7 @@ final class SlotStoreObservable: ObservableObject {
 
                 var parts: [String] = []
                 parts.append("已保存 \(savedCount) 个文件")
+                if cancellation.isCancelled { parts.append("已取消剩余导入") }
                 if overwrittenCount > 0 { parts.append("覆盖 \(overwrittenCount) 个槽位") }
                 if createdPageCount > 0 { parts.append("新建 \(createdPageCount) 个页面") }
                 if createdGroupCount > 0 { parts.append("新建 \(createdGroupCount) 个槽位组") }
@@ -7524,9 +7901,10 @@ final class SlotStoreObservable: ObservableObject {
                 }
                 self.suppressWatcher(2.0) // 收敛抑制窗口，覆盖批量写入的尾随 FSEvents
                 self.isBatchSaving = false
-                self.publishImportProgress(nil) // v2.10.39: 收起进度条浮层
+                self.finishFileImport(cancellation)
                 NSLog("[ClipSlots] Batch save complete: \(toast)")
             }
+        }
         }
     }
 
@@ -7554,7 +7932,8 @@ final class SlotStoreObservable: ObservableObject {
         }
     }
 
-    private func confirmBatchSaveV2(_ plan: BatchSavePlan, currentGroupName: String, pagesNeeded: Int) -> Bool {
+    private func confirmBatchSaveV2(_ plan: BatchSavePlan, currentGroupName: String, pagesNeeded: Int,
+                                    pageName: String? = nil) -> Bool {
         let alert = NSAlert()
         alert.messageText = "批量保存文件？"
         alert.alertStyle = .informational
@@ -7562,8 +7941,8 @@ final class SlotStoreObservable: ObservableObject {
         var lines: [String] = []
         lines.append("即将保存 \(plan.items.count) 个文件。")
         lines.append("")
-        let pageName = currentPage?.name ?? "页面"
-        lines.append("起点：页面「\(pageName)」/ \(currentGroupName) / 槽位 \(plan.startSlot)")
+        let displayedPageName = pageName ?? currentPage?.name ?? "页面"
+        lines.append("起点：页面「\(displayedPageName)」/ \(currentGroupName) / 槽位 \(plan.startSlot)")
         if pagesNeeded > 0 {
             lines.append("将新建：\(pagesNeeded) 个页面")
         }

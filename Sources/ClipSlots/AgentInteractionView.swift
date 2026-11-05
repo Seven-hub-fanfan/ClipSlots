@@ -117,7 +117,7 @@ struct AgentInteractionView: View {
             if let title = item["title"]?.stringValue { Text(title).font(.system(size: 12)) }
             if let preview = item["preview"]?.stringValue { Text(preview).font(.system(size: 12)).textSelection(.enabled) }
             if let command = item["command"]?.stringValue {
-                Text(command).font(.system(size: 12, design: .monospaced)).textSelection(.enabled)
+                Text(command).font(.system(size: 12)).textSelection(.enabled)
             }
             if let path = item["path"]?.stringValue { Text("路径：\(path)").font(.system(size: 12)).textSelection(.enabled) }
             Picker("决定", selection: Binding(get: { itemDecisions[offset] ?? "" },
@@ -247,7 +247,7 @@ struct AgentInteractionView: View {
                         Text(preview).font(.system(size: 12)).textSelection(.enabled)
                     }
                 } else if let command = request.params["command"]?.stringValue {
-                    Text(command).font(.system(size: 12, design: .monospaced)).textSelection(.enabled)
+                    Text(command).font(.system(size: 12)).textSelection(.enabled)
                 }
                 if let cwd = request.params["cwd"]?.stringValue {
                     Text("目录：\(cwd)").font(.system(size: 11)).textSelection(.enabled)
@@ -260,13 +260,13 @@ struct AgentInteractionView: View {
                     ForEach(Array(changes.enumerated()), id: \.offset) { _, change in
                         DisclosureGroup(change["path"]?.stringValue ?? "文件变更") {
                             Text(change["diff"]?.stringValue ?? "未提供差异正文")
-                                .font(.system(size: 11, design: .monospaced)).textSelection(.enabled)
+                                .font(.system(size: 11)).textSelection(.enabled)
                         }
                     }
                 }
                 DisclosureGroup("查看完整请求") {
                     Text((try? request.params.encodedText(pretty: true)) ?? "")
-                        .font(.system(size: 11, design: .monospaced)).textSelection(.enabled)
+                        .font(.system(size: 11)).textSelection(.enabled)
                 }.font(.system(size: 11))
                 costForm
                 HStack {

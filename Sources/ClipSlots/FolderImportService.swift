@@ -50,7 +50,8 @@ final class FolderImportService {
         )
 
         let importable = children.filter { isImportableFile($0, includeHidden: options.includeHiddenFiles) }
-        let skipped = children.filter { !importable.contains($0) }
+        let importableSet = Set(importable)
+        let skipped = children.filter { !importableSet.contains($0) }
         let sorted = sortFiles(importable, rule: options.sortRule)
         let willImport = Array(sorted.prefix(options.maxFiles))
 
@@ -79,11 +80,17 @@ final class FolderImportService {
             data: data
         )
 
-        return SlotContent(
+        var content = SlotContent(
             items: [[item, urlItem]],
             timestamp: Date(),
             label: fileURL.lastPathComponent
         )
+        // Directories remain navigable references. Every other URL requires a
+        // successful regular-file ingestion; a missing source must fail save.
+        if (try? fileURL.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory != true {
+            content.manageBodyFile(fileURL)
+        }
+        return content
     }
 
     // MARK: - Multi-folder expansion (v2.6.4)

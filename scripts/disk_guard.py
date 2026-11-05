@@ -35,8 +35,11 @@ def bytes_used(root):
         raise DiskLimitError("Output root cannot be a symlink: " + str(root))
     total = 0
     seen = set()
-    for current, dirs, files in os.walk(root, followlinks=False,
-                                        onerror=lambda e: (_ for _ in ()).throw(e)):
+    def walk_error(error):
+        if isinstance(error, FileNotFoundError):
+            return  # Atomic staging-directory cleanup can race a size sample.
+        raise error
+    for current, dirs, files in os.walk(root, followlinks=False, onerror=walk_error):
         dirs[:] = [n for n in dirs if not Path(current, n).is_symlink()]
         for name in files:
             path = Path(current, name)
@@ -101,24 +104,44 @@ def _locked_directory(root):
 
 class BackupLease:
     """Serialize installers and stop before a third full backup is created."""
-    def __init__(self, root, operation, planned_gib):
+    def __init__(self, root, operation, planned_gib, reuse_backup=None, max_backup_gib=MAX_BACKUP_GIB):
+        if not math.isfinite(max_backup_gib) or not MAX_BACKUP_GIB <= max_backup_gib <= 31:
+            raise DiskLimitError("Explicit backup allowance must be between 30 and 31 GiB.")
+        self.max_backup_gib = max_backup_gib
         self.root = Path(root)
+        self.operation = operation
+        self.planned_gib = planned_gib
         self.handle = _locked_directory(self.root)
         try:
             fcntl.flock(self.handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
             backups = [p for p in self.root.iterdir() if p.is_dir() and not p.name.startswith(".")]
-            if len(backups) >= MAX_BACKUPS:
+            if reuse_backup is not None:
+                reuse = Path(reuse_backup)
+                if (reuse.is_symlink() or reuse.parent.resolve() != self.root.resolve()
+                        or reuse.name.startswith(".") or not reuse.is_dir()):
+                    raise DiskLimitError("Reuse must name an existing direct backup directory.")
+            if len(backups) > MAX_BACKUPS or (reuse_backup is None and len(backups) >= MAX_BACKUPS):
                 raise DiskLimitError(
                     "Backup limit reached (2). Keep verified rollback copies and consolidate "
                     "older backups before retrying: " + str(self.root))
             used_gib = bytes_used(self.root) / GIB
-            if used_gib + planned_gib > MAX_BACKUP_GIB:
-                raise DiskLimitError("Backup budget would exceed 30 GiB; no backup created.")
+            if used_gib + planned_gib > self.max_backup_gib:
+                raise DiskLimitError(f"Backup budget would exceed {self.max_backup_gib:g} GiB; no backup created.")
             check_space(operation, reserve_gib=planned_gib, volume=self.root)
         except Exception:
             self.release()
             raise
         atexit.register(self.release)
+
+    def reserve_additional(self, additional_bytes):
+        """Budget an immutable checkpoint delta under the existing installer lock."""
+        if self.handle is None or additional_bytes < 0:
+            raise DiskLimitError("Additional backup reservation requires a live lease.")
+        planned = self.planned_gib + additional_bytes / GIB
+        if bytes_used(self.root) / GIB + planned > self.max_backup_gib:
+            raise DiskLimitError(f"Backup checkpoint would exceed {self.max_backup_gib:g} GiB.")
+        check_space(self.operation, reserve_gib=planned, volume=self.root)
+        self.planned_gib = planned
 
     def release(self):
         if self.handle is not None:
@@ -126,10 +149,10 @@ class BackupLease:
             self.handle = None
 
 
-def reserve_backup(operation, source_roots):
+def reserve_backup(operation, source_roots, reuse_backup=None, max_backup_gib=MAX_BACKUP_GIB):
     root = Path.home() / ".local/share/clipslots-install-backups"
     estimate = sum(bytes_used(p) for p in source_roots) / GIB + 0.5
-    return BackupLease(root, operation, estimate)
+    return BackupLease(root, operation, estimate, reuse_backup=reuse_backup, max_backup_gib=max_backup_gib)
 
 
 class JobLease:

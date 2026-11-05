@@ -80,7 +80,7 @@ struct ConnectionManagementSheet: View {
                             .fill(SlotConnectionColor.color(for: store.currentConnectionMap.colorId(for: chain.first ?? 1)))
                             .frame(width: 8, height: 8)
                         Text(compactChainDescription(chain))
-                            .font(.system(size: 13, weight: .medium, design: .rounded))
+                            .font(.system(size: 13, weight: .medium))
                         Spacer()
                         Text("串联 \(chain.count) 个")
                             .font(.caption)

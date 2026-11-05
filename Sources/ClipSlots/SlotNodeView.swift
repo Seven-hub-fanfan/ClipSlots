@@ -91,6 +91,7 @@ struct NodeAttachmentButton: View {
     @State private var showingAttachments = false
     @State private var showingClearConfirm = false
     @State private var isHoveringAttachmentControl = false
+    @State private var isAttachmentDropTargeted = false
     // v2.7.75: local mirror of the "不再提醒" toggle inside the confirm popover.
     @State private var suppressConfirmToggle = false
 
@@ -133,6 +134,7 @@ struct NodeAttachmentButton: View {
     //      热路径**零存储读**；
     //   2) 未传时仍回退存储读，但 body 内**只求值一次**（见 body 里的 `let count`），9 次降为 1 次。
     var attachmentCountOverride: Int? = nil
+    var groupId: String? = nil
 
     /// 解析出本次渲染要用的附件数。**只应在 body 顶部求值一次**，然后把结果传下去。
     private var resolvedAttachmentCount: Int {
@@ -158,9 +160,40 @@ struct NodeAttachmentButton: View {
                 pill(count: count)
             }
             .buttonStyle(.plain)
-            .help(count > 0 ? "附件：\(count) 个，点击管理" : "添加附件")
+            .overlay {
+                if count > 0 {
+                    FirstMouseClickHandle(action: toggleAttachmentPanel,
+                        moveSource: {
+                            store.fileMoveSource(groupID: groupId ?? store.currentSpecialSlotId,
+                                slot: slot, moveAllAttachments: true)
+                        },
+                        dragImage: { CompactFileDrag.image(thumbnail:
+                            NSImage(systemSymbolName: "paperclip", accessibilityDescription: nil), count: count) },
+                        onDragStarted: {
+                            AttachmentPreviewWindowController.shared.hide()
+                            panelController.close(immediately: true)
+                        })
+                }
+            }
+            .help(count > 0 ? "附件：\(count) 个，点击管理，拖动可移动全部附件" : "添加附件")
             // v2.10.20: 用透明背景视图持续上报按钮的屏幕矩形，供浮动面板定位与关闭判断。
             .background(AttachmentButtonAnchorReporter(holder: buttonAnchor))
+            .onDrop(of: AttachmentTransfer.dropTypes, delegate: FileTransferDropDelegate(
+                isTargeted: $isAttachmentDropTargeted, receive: { providers in
+                let targetGroup = groupId ?? store.currentSpecialSlotId
+                return AttachmentTransfer.receive(providers) { loaded in
+                    store.acceptTransferInBackground(loaded, groupID: targetGroup, slot: slot) { success in
+                        if success, store.currentSpecialSlotId == targetGroup {
+                            presentAttachmentPanel(retry: true)
+                        }
+                    }
+                }
+            }))
+            .overlay {
+                RoundedRectangle(cornerRadius: 10)
+                    .strokeBorder(isAttachmentDropTargeted ? Color.accentColor : .clear, lineWidth: 2)
+                    .allowsHitTesting(false)
+            }
 
             if count > 0 {
                 Button {
@@ -192,6 +225,9 @@ struct NodeAttachmentButton: View {
             }
         }
         .onHover { isHoveringAttachmentControl = $0 }
+        .onChange(of: store.currentSpecialSlotId) { _ in
+            if showingAttachments { panelController.close() }
+        }
     }
 
     // v2.10.22: 再次点击切换开合；打开时用附件按钮 backing NSView 锚定 NSPopover。
@@ -220,6 +256,7 @@ struct NodeAttachmentButton: View {
             anchor: buttonAnchor,
             slot: slot,
             store: store,
+            groupId: groupId,
             onClose: { showingAttachments = false }
         )
         showingAttachments = true

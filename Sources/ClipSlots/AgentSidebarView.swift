@@ -810,7 +810,7 @@ struct AgentSidebarView: View {
                             Text(result.content)
                         }
                     }
-                    .font(.system(size: 12, design: .monospaced))
+                    .font(.system(size: 12))
                     .lineSpacing(4)
                     .textSelection(.enabled)
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -834,7 +834,7 @@ struct AgentSidebarView: View {
                         .font(.system(size: 12, weight: .medium))
                     if !row.name.hasPrefix("canvas_") {
                         Text(row.argumentsPreview)
-                            .font(.system(size: 12, design: .monospaced))
+                            .font(.system(size: 12))
                             .foregroundColor(AppTheme.canvasCardMetaInk)
                             .lineLimit(1)
                     }

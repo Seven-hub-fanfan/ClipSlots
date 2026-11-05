@@ -53,7 +53,7 @@ struct AgentSourceConnectorWizard: View {
                     }
                     VStack(alignment: .leading, spacing: 14) {
                     if let code = auth?.userCode {
-                        HStack { Text(code).font(.system(size: 20, weight: .semibold, design: .monospaced)); Spacer()
+                        HStack { Text(code).font(.system(size: 20, weight: .semibold)); Spacer()
                             Button("复制") { NSPasteboard.general.clearContents(); NSPasteboard.general.setString(code, forType: .string) } }
                     }
                     ForEach(Array((auth?.fields ?? []).enumerated()), id: \.offset) { _, field in

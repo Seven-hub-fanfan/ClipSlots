@@ -11,7 +11,7 @@ import SwiftUI
 /// 拆分后 `ContentView` 不再读取 `store.importProgress`，进度推进只重绘这一条 340pt 宽的浮层。
 ///
 /// 视觉与 v2.10.46 完全一致：
-/// - 非模态：底部悬浮轻量进度条，无全屏阻塞遮罩，整体 `allowsHitTesting(false)`，导入期间可继续
+/// - 非模态：底部悬浮轻量进度条，无全屏阻塞遮罩，仅取消按钮所在卡片接收点击，导入期间可继续
 ///   操作其他槽位（边导入边整理），不打断心流；
 /// - `total <= 0` 时显示不确定进度（解压 / 解析阶段），否则显示确定百分比与「x/y」计数；
 /// - 进出场沿用 `.move(edge: .bottom) + .opacity` 配 `Anim.status`。
@@ -44,6 +44,16 @@ struct ImportProgressOverlayView: View {
                         Text("\(progress.completed)/\(progress.total)")
                             .font(.system(size: 11, weight: .medium).monospacedDigit())
                             .foregroundColor(.secondary)
+                    }
+                    if let cancellation = ui.importCancellation {
+                        Button {
+                            cancellation.cancel()
+                        } label: {
+                            Image(systemName: "xmark.circle.fill")
+                                .foregroundColor(.secondary)
+                        }
+                        .buttonStyle(.plain)
+                        .help("取消尚未完成的导入，已保存的文件会保留")
                     }
                 }
 
@@ -84,9 +94,9 @@ struct ImportProgressOverlayView: View {
                     .shadow(color: Color.black.opacity(0.22), radius: 14, y: 6)
             )
             .padding(.bottom, 16)
+            .allowsHitTesting(ui.importCancellation != nil)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        // 非模态关键点：整体不拦截点击，导入期间主网格照常可交互。
-        .allowsHitTesting(false)
+        // Spacer has no hit surface; only the visible cancellable card handles clicks.
     }
 }

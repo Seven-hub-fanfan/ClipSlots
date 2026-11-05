@@ -117,7 +117,7 @@ struct PluginsView: View {
             }
             VStack(alignment: .leading, spacing: 1) {
                 Text("插件市场")
-                    .font(.system(size: 15, weight: .bold, design: .rounded))
+                    .font(.system(size: 15, weight: .bold))
                 Text("发现并安装 Skill 与插件扩展")
                     .font(.caption)
                     .foregroundColor(.secondary)
@@ -703,7 +703,7 @@ struct PluginsView: View {
                             .buttonStyle(.plain)
                             .help(urlString)
                             Text(urlString)
-                                .font(.system(size: 10.5, design: .monospaced))
+                                .font(.system(size: 10.5))
                                 .foregroundColor(.secondary)
                                 .lineLimit(1)
                                 .truncationMode(.middle)
@@ -802,7 +802,7 @@ struct PluginsView: View {
                     .font(.system(size: 13, weight: .medium))
                 if case .installed = state {
                     Text(agent.skillTargetPath)
-                        .font(.system(size: 10, design: .monospaced))
+                        .font(.system(size: 10))
                         .foregroundColor(.secondary)
                         .lineLimit(1)
                         .truncationMode(.middle)
@@ -1349,7 +1349,7 @@ struct PluginsView: View {
                                 .font(.system(size: 12.5, weight: .medium))
                             if installed {
                                 Text((agent.skillsDir as NSString).appendingPathComponent(skill.id))
-                                    .font(.system(size: 10, design: .monospaced))
+                                    .font(.system(size: 10))
                                     .foregroundColor(.secondary)
                                     .lineLimit(1)
                                     .truncationMode(.middle)

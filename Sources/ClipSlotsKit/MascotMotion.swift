@@ -1,8 +1,8 @@
 import Foundation
 
-/// Native translation of the locally inspected TRAE pet controller.
-/// Timings and hover keyframes are source observations; the native scene
-/// supplies reference camera projection and the IP's replacement geometry.
+/// Native adaptation of the locally inspected TRAE pet controller, with
+/// deliberate observation and bounded turn speed. Hover keyframes retain the
+/// source timing; camera projection and geometry belong to the native scene.
 public struct MascotPose: Equatable {
     public var lift = 0.0
     public var legScale = 1.0
@@ -57,6 +57,9 @@ public final class MascotMotion {
     private var nextBlink: Double?
     private var targetYaw = 0.0
     private var targetPitch = 0.0
+    private var pendingGaze: (yaw: Double, pitch: Double, at: Double)?
+    private var yawVelocity = 0.0
+    private var pitchVelocity = 0.0
     private var pointerPresent = false
     private var pointerMovedAt: Double?
     private var previousTime: Double?
@@ -98,17 +101,31 @@ public final class MascotMotion {
         hoverEnd = .infinity
     }
     public func setPointer(x: Double?, y: Double?, at time: Double) {
-        pointerPresent = x != nil && y != nil
-        pointerMovedAt = pointerPresent ? time : nil
-        if let x, let y, hypot(x,y) >= 8 {
+        let wasPresent=pointerPresent
+        pointerPresent = x?.isFinite == true && y?.isFinite == true
+        var yaw=0.0, pitch=0.0
+        if pointerPresent, let x, let y, hypot(x,y) >= 8 {
             if let pointerProjection {
-                (targetYaw,targetPitch)=pointerProjection(x,y)
+                (yaw,pitch)=pointerProjection(x,y)
             } else {
-                targetYaw=min(65,max(-65,atan2(x,180)*180 / .pi))
-                targetPitch=min(30,max(-30,atan2(y,hypot(x,180))*180 / .pi))
+                yaw=min(65,max(-65,atan2(x,180)*180 / .pi))
+                pitch=min(30,max(-30,atan2(y,hypot(x,180))*180 / .pi))
             }
-        } else { targetYaw=0; targetPitch=0 }
-        if pointerPresent && !computerFocused { interruptBlink(at: time) }
+        }
+        if !pointerPresent || !yaw.isFinite || !pitch.isFinite { yaw=0;pitch=0 }
+        yaw=min(65,max(-65,yaw));pitch=min(30,max(-30,pitch))
+        // Observe before turning. Keep the first deadline while replacing the
+        // pending destination, so continuous motion cannot postpone attention.
+        if pointerPresent == wasPresent,
+           abs(yaw-(pendingGaze?.yaw ?? targetYaw))<0.75,
+           abs(pitch-(pendingGaze?.pitch ?? targetPitch))<0.75 { return }
+        pointerMovedAt=pointerPresent ? time : nil
+        // A short initial acknowledgement; once engaged, keep the latest
+        // sampled target without adding another observation delay each time.
+        let delay = !pointerPresent ? 180.0 : !wasPresent ? 60.0 : 0.0
+        pendingGaze=(yaw,pitch,pointerPresent == wasPresent ? pendingGaze?.at ?? time+delay : time+delay)
+        // Small pointer updates must not repeatedly cancel a natural blink.
+        if pointerPresent && !wasPresent && !computerFocused { interruptBlink(at:time) }
     }
     public func setPromptEditing(_ value: Bool, at time: Double) {
         guard editingPrompt != value else { return }
@@ -150,11 +167,14 @@ public final class MascotMotion {
         let (yaw,pitch)=gaze
         return !reduceMotion && (hoverStart != nil || dragging || transition != nil ||
             blinkStart != nil || reopening != nil || abs(pose.yaw-yaw)>0.03 ||
-            abs(pose.pitch-pitch)>0.03 || ![.idle,.failed].contains(activity))
+            abs(pose.pitch-pitch)>0.03 || abs(yawVelocity)>0.5 ||
+            abs(pitchVelocity)>0.5 || ![.idle,.failed].contains(activity))
     }
     public var continuous: Bool { !reduceMotion }
     public var nextWake: Double? { nextBlink }
-    public func rebaseIntegratorAfterSleep(at time: Double) { previousTime=time }
+    public func rebaseIntegratorAfterSleep(at time: Double) {
+        previousTime=time; yawVelocity=0; pitchVelocity=0
+    }
     public func synchronizePresentedLampIntensity(_ value: Double) {
         guard value.isFinite else { return }
         pose.logoIntensity=min(1,max(0,value))
@@ -174,6 +194,7 @@ public final class MascotMotion {
         }
         var deadlines=semantic
         if !reduceMotion {
+            if let pendingGaze { deadlines.append(pendingGaze.at) }
             if let nextBlink { deadlines.append(nextBlink) }
             if activity == .idle, !hovering, !dragging, !computerFocused,
                let moved=pointerMovedAt, nextBlink == nil { deadlines.append(moved+800) }
@@ -189,6 +210,8 @@ public final class MascotMotion {
         hovering=false; dragging=false; hoverStart=nil; transition=nil; blinkStart=nil
         reopening=nil; nextBlink=nil; pointerPresent=false; previousTime=nil
         targetYaw=0; targetPitch=0; targetVoiceLevel=0; pointerMovedAt=nil; pose=MascotPose()
+        pendingGaze=nil
+        yawVelocity=0; pitchVelocity=0
         editingPrompt=false; agentWorking=false; logoTransition=nil
     }
     private func interruptBlink(at time: Double) {
@@ -211,8 +234,12 @@ public final class MascotMotion {
     }
     @discardableResult public func sample(at time: Double) -> MascotPose {
         advanceSemanticState(at:time)
+        if let pending=pendingGaze, time>=pending.at {
+            targetYaw=pending.yaw;targetPitch=pending.pitch;pendingGaze=nil
+        }
         if reduceMotion {
             pose=MascotPose()
+            yawVelocity=0; pitchVelocity=0
             if computerFocused { (pose.yaw,pose.pitch)=computerGaze }
             pose.logoIntensity=working ? 1 : 0.55
             previousTime=time; nextBlink=nil; logoTransition=nil; return pose
@@ -220,10 +247,32 @@ public final class MascotMotion {
         var result=MascotPose()
         let dt=min(0.1,max(0,(time-(previousTime ?? time-1000/60))/1000))
         previousTime=time
-        let easing=1-exp(-dt/0.12)
+        // Speed-limited critical damping: a large cursor jump cannot fling the
+        // head around. Preserve velocity on reversals and stop the subpixel tail.
+        // Short shared substeps keep speed limiting consistent at 15/30/60Hz,
+        // including low-power cadence and occasional late frames.
+        let steps=max(1,Int(ceil(dt*120))), step=dt/Double(steps)
+        let omega=16.0, decay=exp(-16*step)
+        func follow(_ value:Double,_ target:Double,_ velocity:inout Double,
+                    _ limit:Double,_ speed:Double)->Double {
+            let reach=speed*2/omega
+            var result=value
+            for _ in 0..<steps {
+                if abs(result-target)<0.12 && abs(velocity)<1.5 {
+                    velocity=0;return target
+                }
+                let displacement=min(reach,max(-reach,result-target))
+                let destination=result-displacement, coefficient=velocity+omega*displacement
+                let next=destination+(displacement+coefficient*step)*decay
+                velocity=(velocity-omega*coefficient*step)*decay
+                if next < -limit || next > limit { velocity=0 }
+                result=min(limit,max(-limit,next))
+            }
+            return result
+        }
         let (yaw,pitch)=gaze
-        result.yaw=abs(pose.yaw-yaw)<0.03 ? yaw : pose.yaw+(yaw-pose.yaw)*easing
-        result.pitch=abs(pose.pitch-pitch)<0.03 ? pitch : pose.pitch+(pitch-pose.pitch)*easing
+        result.yaw=follow(pose.yaw,yaw,&yawVelocity,65,150)
+        result.pitch=follow(pose.pitch,pitch,&pitchVelocity,30,95)
         let breath=0.18+0.82*(1-cos(time*2 * .pi/3200))/2
         result.logoIntensity=working ? 1 : breath
         if let current=logoTransition {

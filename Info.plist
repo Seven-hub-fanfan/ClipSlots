@@ -19,9 +19,9 @@
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
-	<string>2.17.107</string>
+	<string>2.17.108</string>
 	<key>CFBundleVersion</key>
-	<string>21710701</string>
+	<string>21710801</string>
 	<key>LSMinimumSystemVersion</key>
 	<string>13.0</string>
 	<key>NSAppleEventsUsageDescription</key>
@@ -32,6 +32,25 @@
 	<string>在你点击语音输入时，将麦克风语音转为 Agent 草稿文字。</string>
 	<key>NSPrincipalClass</key>
 	<string>NSApplication</string>
+	<key>UTExportedTypeDeclarations</key>
+	<array>
+		<dict>
+			<key>UTTypeIdentifier</key>
+			<string>com.clipslots.slot-attachments</string>
+			<key>UTTypeConformsTo</key>
+			<array><string>public.data</string></array>
+			<key>UTTypeDescription</key>
+			<string>ClipSlots 整组附件</string>
+		</dict>
+		<dict>
+			<key>UTTypeIdentifier</key>
+			<string>com.clipslots.slot-body</string>
+			<key>UTTypeConformsTo</key>
+			<array><string>public.data</string></array>
+			<key>UTTypeDescription</key>
+			<string>ClipSlots 槽位文件</string>
+		</dict>
+	</array>
 	<key>NSSpeechRecognitionUsageDescription</key>
 	<string>使用设备上的语音识别，将你说的话转为可编辑草稿。</string>
 </dict>
