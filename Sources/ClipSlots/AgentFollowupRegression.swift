@@ -3,6 +3,7 @@ import AppKit
 import SwiftUI
 import WebKit
 import CryptoKit
+import CoreImage
 import ClipSlotsKit
 
 private actor FollowupConnectorHTTP: AgentMarketHTTP {
@@ -194,6 +195,57 @@ private actor FollowupConnectorHTTP: AgentMarketHTTP {
         loading.hide()
         try await Task.sleep(for: .milliseconds(250))
         window.close()
+        try await readyBlurLifecycle(check: check)
+    }
+
+    private static func readyBlurLifecycle(check: (Bool, String) -> Void) async throws {
+        guard !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion else { return }
+        for appearance in [NSAppearance.Name.aqua, .darkAqua] {
+            let window = NSWindow(contentRect: NSRect(x: 100, y: 100, width: 480, height: 360),
+                                  styleMask: [.borderless], backing: .buffered, defer: false)
+            window.isReleasedWhenClosed = false
+            window.appearance = NSAppearance(named: appearance)
+            let base = NSView(frame: NSRect(x: 0, y: 0, width: 480, height: 360))
+            let loading = WorkspaceLoadingView(frame: base.bounds)
+            base.wantsLayer = true
+            base.layerUsesCoreImageFilters = false
+            let foreign = CIFilter(name: "CIColorControls")!
+            base.layer?.filters = [foreign]
+            base.addSubview(loading); window.contentView = base
+            window.makeKeyAndOrderFront(nil)
+            loading.show(title: "Loading")
+            check(base.layer?.animation(forKey: "workspace-ready-blur") == nil
+                  && !base.layerUsesCoreImageFilters,
+                  "\(appearance.rawValue): loading never blurs an incomplete destination")
+            loading.hide()
+            let blur = base.layer?.animation(forKey: "workspace-ready-blur") as? CAKeyframeAnimation
+            check(blur?.duration == 0.28 && blur?.values as? [Int] == [0, 6, 0]
+                  && base.layerUsesCoreImageFilters && base.layer?.filters?.count == 2,
+                  "\(appearance.rawValue): ready reveal adds a short native blur beside existing filters")
+            try await Task.sleep(for: .milliseconds(45))
+            loading.show(title: "Restart")
+            check(base.layer?.animation(forKey: "workspace-ready-blur") == nil
+                  && base.layer?.filters?.count == 1
+                  && (base.layer?.filters?.first as AnyObject?) === foreign
+                  && !base.layerUsesCoreImageFilters && loading.layer?.opacity == 1,
+                  "\(appearance.rawValue): restarting restores the root and opaque loading cover immediately")
+            try await Task.sleep(for: .milliseconds(300))
+            check(loading.symbol.contents != nil && loading.layer?.opacity == 1,
+                  "\(appearance.rawValue): previous blur cleanup cannot remove a restarted animation")
+            loading.hide()
+            try await Task.sleep(for: .milliseconds(350))
+            check(base.layer?.animation(forKey: "workspace-ready-blur") == nil
+                  && base.layer?.filters?.count == 1
+                  && (base.layer?.filters?.first as AnyObject?) === foreign
+                  && !base.layerUsesCoreImageFilters && base.wantsLayer,
+                  "\(appearance.rawValue): ready completion restores the original native filter state")
+            loading.show(title: "Detach"); loading.hide()
+            loading.removeFromSuperview()
+            check(base.layer?.animation(forKey: "workspace-ready-blur") == nil
+                  && base.layer?.filters?.count == 1 && !base.layerUsesCoreImageFilters,
+                  "\(appearance.rawValue): detaching the loader removes its transient blur")
+            window.close()
+        }
     }
 
     private static func transitionPoster(loading: WorkspaceLoadingView, root: URL, name: String,

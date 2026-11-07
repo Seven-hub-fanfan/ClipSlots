@@ -2,6 +2,7 @@ import AppKit
 import SwiftUI
 import QuartzCore
 import ImageIO
+import CoreImage
 import ClipSlotsKit
 
 /// Only this small native layer animates while SwiftUI mounts the destination.
@@ -180,6 +181,12 @@ final class WorkspaceLoadingView: NSView {
     private var playbackStart: CFTimeInterval = 0
     private var playbackReduced = false
     private var generation = UUID()
+    private weak var readyBlurView: NSView?
+    private weak var readyBlurLayer: CALayer?
+    private var readyBlurFilter: CIFilter?
+    private var previousWantsLayer = false
+    private var previousUsesFilters = false
+    private var previousFilters: [Any]?
     override var isFlipped: Bool { true }
     override func hitTest(_ point: NSPoint) -> NSView? { active ? self : nil }
     override init(frame: NSRect) {
@@ -202,6 +209,7 @@ final class WorkspaceLoadingView: NSView {
     }
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
+        if readyBlurView !== window?.contentView { clearReadyBlur() }
         updateAppearance()
     }
     private var isLight: Bool {
@@ -240,6 +248,7 @@ final class WorkspaceLoadingView: NSView {
         layer?.opacity = 1
         envelope.opacity = 1
         envelope.removeAllAnimations()
+        clearReadyBlur()
         CATransaction.commit()
         let reduced = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
         play(reduced: reduced)
@@ -295,12 +304,69 @@ final class WorkspaceLoadingView: NSView {
         if NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
             releaseAnimation()
         } else {
+            revealReadyWorkspace()
             fade(layer, from: opacity, to: 0, duration: 0.18)
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in
                 guard let self, self.generation == ticket, !self.active else { return }
                 self.releaseAnimation()
             }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
+                guard let self, self.generation == ticket, !self.active else { return }
+                self.clearReadyBlur()
+            }
         }
+    }
+    private func revealReadyWorkspace() {
+        clearReadyBlur()
+        guard let root = window?.contentView, root !== self,
+              let filter = CIFilter(name: "CIGaussianBlur") else { return }
+        // The destination is already fully mounted. Animate its native composite,
+        // including the fading glyph, without rebuilding the SwiftUI subtree.
+        previousWantsLayer = root.wantsLayer
+        previousUsesFilters = root.layerUsesCoreImageFilters
+        root.wantsLayer = true
+        root.layerUsesCoreImageFilters = true
+        guard let target = root.layer else {
+            root.layerUsesCoreImageFilters = previousUsesFilters
+            root.wantsLayer = previousWantsLayer
+            return
+        }
+        readyBlurView = root
+        readyBlurLayer = target
+        readyBlurFilter = filter
+        previousFilters = target.filters
+        filter.name = "workspaceReadyBlur"
+        filter.setValue(0, forKey: kCIInputRadiusKey)
+        CATransaction.begin(); CATransaction.setDisableActions(true)
+        target.filters = (previousFilters ?? []) + [filter]
+        CATransaction.commit()
+        let blur = CAKeyframeAnimation(keyPath: "filters.workspaceReadyBlur.inputRadius")
+        blur.values = [0, 6, 0]; blur.keyTimes = [0, 0.18, 1]
+        blur.duration = 0.28
+        blur.beginTime = target.convertTime(CACurrentMediaTime(), from: nil)
+        blur.timingFunctions = [
+            CAMediaTimingFunction(controlPoints: 0.25, 0.1, 0.25, 1),
+            CAMediaTimingFunction(controlPoints: 0.22, 0.1, 0.25, 1)
+        ]
+        target.add(blur, forKey: "workspace-ready-blur")
+    }
+    private func clearReadyBlur() {
+        guard let filter = readyBlurFilter else { return }
+        CATransaction.begin(); CATransaction.setDisableActions(true)
+        if let target = readyBlurLayer {
+            target.removeAnimation(forKey: "workspace-ready-blur")
+            let remaining = (target.filters ?? []).filter { ($0 as AnyObject) !== filter }
+            target.filters = remaining.isEmpty && previousFilters == nil ? nil : remaining
+            if let root = readyBlurView, root.layer === target {
+                root.layerUsesCoreImageFilters = previousUsesFilters
+                root.wantsLayer = previousWantsLayer
+            }
+        }
+        readyBlurFilter = nil
+        readyBlurLayer = nil
+        readyBlurView = nil
+        previousFilters = nil
+        CATransaction.commit()
     }
     private func releaseAnimation() {
         CATransaction.begin(); CATransaction.setDisableActions(true)
