@@ -2,6 +2,7 @@ import AppKit
 import SwiftUI
 import QuartzCore
 import ImageIO
+import CoreImage
 import ClipSlotsKit
 
 /// Only this small native layer animates while SwiftUI mounts the destination.
@@ -119,6 +120,7 @@ struct WorkspaceLoadingSurface: NSViewRepresentable {
 final class WorkspaceLoadingView: NSView {
     struct Frames: @unchecked Sendable {
         let images: [CGImage]
+        let lightImages: [CGImage]
         let times: [NSNumber]
         let duration: Double
     }
@@ -128,6 +130,8 @@ final class WorkspaceLoadingView: NSView {
     private var preparation: Task<Frames?, Never>?
     private var preparationID = UUID()
     private var active = false
+    private var playbackStart: CFTimeInterval = 0
+    private var playbackReduced = false
     private var generation = UUID()
     override var isFlipped: Bool { true }
     override func hitTest(_ point: NSPoint) -> NSView? { active ? self : nil }
@@ -135,16 +139,33 @@ final class WorkspaceLoadingView: NSView {
         super.init(frame: frame)
         wantsLayer = true
         layer?.opacity = 0
-        layer?.backgroundColor = NSColor.black.cgColor
         layer?.masksToBounds = true
         layer?.addSublayer(envelope)
         envelope.addSublayer(symbol)
         symbol.contentsGravity = .resizeAspect
+        updateAppearance()
         setAccessibilityIdentifier("workspace-loading")
         setAccessibilityRole(.progressIndicator)
         startPreparing()
     }
     required init?(coder: NSCoder) { nil }
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        updateAppearance()
+    }
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        updateAppearance()
+    }
+    private var isLight: Bool {
+        effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) != .darkAqua
+    }
+    private func updateAppearance() {
+        CATransaction.begin(); CATransaction.setDisableActions(true)
+        layer?.backgroundColor = (isLight ? NSColor.white : NSColor.black).cgColor
+        if active || symbol.contents != nil { updateMorph() }
+        CATransaction.commit()
+    }
     private func startPreparing() {
         guard frames == nil, preparation == nil else { return }
         preparationID = UUID()
@@ -152,7 +173,8 @@ final class WorkspaceLoadingView: NSView {
             .appendingPathComponent("TapNowMotion/workspace-loading.webp")
         preparation = Task.detached(priority: .userInitiated) {
             guard let url, let source = CGImageSourceCreateWithURL(url as CFURL, nil) else { return nil }
-            var images: [CGImage] = [], durations: [Double] = []
+            let context = CIContext(options: [.cacheIntermediates: false, .workingColorSpace: NSNull()])
+            var images: [CGImage] = [], lightImages: [CGImage] = [], durations: [Double] = []
             for index in 0..<CGImageSourceGetCount(source) {
                 guard !Task.isCancelled,
                       let image = CGImageSourceCreateImageAtIndex(source, index,
@@ -160,7 +182,14 @@ final class WorkspaceLoadingView: NSView {
                       let properties = CGImageSourceCopyPropertiesAtIndex(source, index, nil) as? [String: Any],
                       let webp = properties["{WebP}"] as? [String: Any],
                       let delay = (webp["UnclampedDelayTime"] ?? webp["DelayTime"]) as? NSNumber else { return nil }
-                images.append(image); durations.append(max(0.01, delay.doubleValue))
+                // The original frames contain an opaque black backdrop. Invert
+                // the complete frame so light mode has no black square, while
+                // retaining every luminance gradient, alpha value and timing.
+                let inverted = CIImage(cgImage: image).applyingFilter("CIColorInvert")
+                guard let light = context.createCGImage(inverted, from: inverted.extent,
+                    format: .RGBA8, colorSpace: CGColorSpace(name: CGColorSpace.sRGB)) else { return nil }
+                images.append(image); lightImages.append(light)
+                durations.append(max(0.01, delay.doubleValue))
             }
             guard !images.isEmpty else { return nil }
             let total = durations.reduce(0, +)
@@ -169,7 +198,7 @@ final class WorkspaceLoadingView: NSView {
                 defer { elapsed += duration }
                 return NSNumber(value: elapsed / total)
             }
-            return Frames(images: images, times: times, duration: total)
+            return Frames(images: images, lightImages: lightImages, times: times, duration: total)
         }
     }
     func prepareAnimation() async {
@@ -225,23 +254,35 @@ final class WorkspaceLoadingView: NSView {
         }
     }
     private func play(reduced: Bool) {
-        guard let frames, let first = frames.images.first else { return }
+        guard frames != nil else { return }
+        playbackReduced = reduced
+        playbackStart = symbol.convertTime(CACurrentMediaTime(), from: nil)
         CATransaction.begin(); CATransaction.setDisableActions(true)
         symbol.removeAllAnimations()
-        symbol.contents = first
+        updateAppearance()
         CATransaction.commit()
         guard !reduced else { return }
-        let morph = CAKeyframeAnimation(keyPath: "contents")
-        morph.values = frames.images + [first]
-        morph.keyTimes = frames.times + [1]
-        morph.calculationMode = .discrete
-        morph.duration = frames.duration; morph.repeatCount = .infinity
-        symbol.add(morph, forKey: "morph")
         let pulse = CAKeyframeAnimation(keyPath: "transform.scale")
         pulse.values = [0.95, 1.05, 0.95]; pulse.keyTimes = [0, 0.5, 1]
         pulse.duration = 2; pulse.repeatCount = .infinity
         pulse.timingFunctions = Array(repeating: CAMediaTimingFunction(controlPoints: 0.42, 0, 0.58, 1), count: 2)
         symbol.add(pulse, forKey: "pulse")
+    }
+    private func updateMorph() {
+        guard let frames else { return }
+        let images = isLight ? frames.lightImages : frames.images
+        guard let first = images.first else { return }
+        symbol.contents = first
+        symbol.removeAnimation(forKey: "morph")
+        guard !playbackReduced else { return }
+        let morph = CAKeyframeAnimation(keyPath: "contents")
+        morph.values = images + [first]
+        morph.keyTimes = frames.times + [1]
+        morph.calculationMode = .discrete
+        morph.duration = frames.duration; morph.repeatCount = .infinity
+        // Theme changes replace colors without restarting the morph cycle.
+        morph.beginTime = playbackStart
+        symbol.add(morph, forKey: "morph")
     }
     private func fade(_ target: CALayer?, from: Float, to: Float, duration: Double, delay: Double = 0) {
         let animation = CABasicAnimation(keyPath: "opacity")

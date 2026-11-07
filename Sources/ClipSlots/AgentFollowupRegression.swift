@@ -138,11 +138,12 @@ private actor FollowupConnectorHTTP: AgentMarketHTTP {
               && loading.envelope.position == CGPoint(x: 240, y: 180), "canvas loader centered at exact TapNow size")
         check(loading.frames?.images.count == 86 && abs((loading.frames?.duration ?? 0) - 3.44) < 0.001,
               "all 86 original WebP frames retain 40ms timing")
+        try transitionThemeFrames(loading: loading, check: check)
         if let url = AgentBackgroundResources.pageURL?.deletingLastPathComponent().deletingLastPathComponent()
             .appendingPathComponent("TapNowMotion/workspace-loading.webp") {
             let digest = SHA256.hash(data: try Data(contentsOf: url)).map { String(format: "%02x", $0) }.joined()
             check(digest == "e90e059cd2c39b8c739a2e00f25fbed5f3e322a69dfe26be4b17d5ea93c798e0",
-                  "canvas loader uses byte-identical TapNow artwork including alpha gradients")
+                  "dark canvas loader uses byte-identical TapNow artwork including luminance gradients")
         } else { check(false, "original loading asset exists") }
         if !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
             check((loading.symbol.animation(forKey: "morph") as? CAKeyframeAnimation)?.values?.count == 87
@@ -196,17 +197,61 @@ private actor FollowupConnectorHTTP: AgentMarketHTTP {
             check((scales.min() ?? 0) >= 0.949 && (scales.max() ?? 2) <= 1.051
                   && (scales.max() ?? 0) - (scales.min() ?? 0) > 0.09,
                   "runtime scale pulse spans the original 0.95–1.05 range")
-            check((samples.last?["opacity"] ?? 0) > 0.999, "one-second black backdrop fade reaches full opacity")
+            check((samples.last?["opacity"] ?? 0) > 0.999, "one-second themed backdrop fade reaches full opacity")
         }
-        for appearance in [NSAppearance.Name.aqua, .darkAqua] {
+        let morphStart = loading.symbol.animation(forKey: "morph")?.beginTime
+        let pulseStart = loading.symbol.animation(forKey: "pulse")?.beginTime
+        var raster: [NSAppearance.Name: [UInt8]] = [:]
+        for appearance in [NSAppearance.Name.darkAqua, .aqua, .darkAqua, .aqua] {
             window.appearance = NSAppearance(named: appearance)
             try await Task.sleep(for: .milliseconds(100))
+            let light = appearance == .aqua
+            check(loading.layer?.backgroundColor == (light ? NSColor.white : NSColor.black).cgColor,
+                  "\(appearance.rawValue): existing loader backdrop follows window theme")
+            let expected = light ? loading.frames?.lightImages.first : loading.frames?.images.first
+            check((loading.symbol.contents as AnyObject?) === expected,
+                  "\(appearance.rawValue): existing loader selects the matching morph colors")
+            check(loading.symbol.animation(forKey: "morph")?.beginTime == morphStart
+                  && loading.symbol.animation(forKey: "pulse")?.beginTime == pulseStart,
+                  "\(appearance.rawValue): theme switch preserves morph and pulse clocks")
+            if let layer = loading.layer,
+               let context = CGContext(data: nil, width: 480, height: 360, bitsPerComponent: 8,
+                   bytesPerRow: 480 * 4, space: CGColorSpace(name: CGColorSpace.sRGB)!,
+                   bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) {
+                layer.render(in: context)
+                if let data = context.data {
+                    raster[appearance] = Array(UnsafeBufferPointer(start: data.assumingMemoryBound(to: UInt8.self),
+                                                                  count: 480 * 360 * 4))
+                }
+                if let image = context.makeImage() {
+                    try NSBitmapImageRep(cgImage: image).representation(using: .png, properties: [:])?
+                        .write(to: root.appendingPathComponent("transition-raster-\(appearance.rawValue).png"))
+                }
+            }
             if let image = CGWindowListCreateImage(.null, .optionIncludingWindow, CGWindowID(window.windowNumber),
                                                    [.boundsIgnoreFraming, .bestResolution]) {
                 try NSBitmapImageRep(cgImage: image).representation(using: .png, properties: [:])?
                     .write(to: root.appendingPathComponent("transition-\(appearance.rawValue).png"))
             }
         }
+        if let light = raster[.aqua], let dark = raster[.darkAqua] {
+            check(light[0] == 255 && dark[0] == 0, "rendered light backdrop is white and dark backdrop is black")
+            let outsideSymbol = (180 * 480 + 209) * 4
+            check(light[outsideSymbol] == 255 && dark[outsideSymbol] == 0,
+                  "rendered frame backdrop matches the surrounding theme without a rectangular seam")
+            var complementError = 0
+            var lightMin = 255, darkMax = 0
+            for y in 148..<212 {
+                for x in 208..<272 {
+                    let index = (y * 480 + x) * 4
+                    lightMin = min(lightMin, Int(light[index]))
+                    darkMax = max(darkMax, Int(dark[index]))
+                    complementError = max(complementError, abs(Int(light[index]) + Int(dark[index]) - 255))
+                }
+            }
+            check(lightMin < 8 && darkMax > 247, "rendered morph is dark on light and white on dark")
+            check(complementError <= 2, "rendered light and dark morph gradients remain complementary")
+        } else { check(false, "both theme rasters are available") }
         window.setContentSize(NSSize(width: 620, height: 400))
         loading.layoutSubtreeIfNeeded()
         check(loading.envelope.position == CGPoint(x: 310, y: 200)
@@ -217,6 +262,40 @@ private actor FollowupConnectorHTTP: AgentMarketHTTP {
             "scope": "Native presentation-layer timing; not a recording of TapNow's live transition"],
             options: [.prettyPrinted, .sortedKeys])
             .write(to: root.appendingPathComponent("transition-runtime.json"))
+    }
+
+    private static func transitionThemeFrames(loading: WorkspaceLoadingView, check: (Bool, String) -> Void) throws {
+        guard let frames = loading.frames, frames.lightImages.count == frames.images.count else {
+            check(false, "both themes contain every original animation frame"); return
+        }
+        func pixels(_ image: CGImage) -> [UInt8]? {
+            guard let context = CGContext(data: nil, width: image.width, height: image.height,
+                bitsPerComponent: 8, bytesPerRow: image.width * 4,
+                space: CGColorSpace(name: CGColorSpace.sRGB)!,
+                bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return nil }
+            context.draw(image, in: CGRect(x: 0, y: 0, width: image.width, height: image.height))
+            guard let data = context.data else { return nil }
+            return Array(UnsafeBufferPointer(start: data.assumingMemoryBound(to: UInt8.self),
+                                             count: image.width * image.height * 4))
+        }
+        var maximumError = 0, alphaChanged = false, gradientPixels = 0
+        for (dark, light) in zip(frames.images, frames.lightImages) {
+            guard let original = pixels(dark), let adapted = pixels(light), original.count == adapted.count else {
+                check(false, "theme frames decode to matching pixel dimensions"); return
+            }
+            for index in stride(from: 0, to: original.count, by: 4) {
+                let alpha = Int(original[index + 3])
+                alphaChanged = alphaChanged || original[index + 3] != adapted[index + 3]
+                for channel in 0..<3 {
+                    maximumError = max(maximumError,
+                        abs(Int(original[index + channel]) + Int(adapted[index + channel]) - alpha))
+                }
+                if original[index] > 2 && Int(original[index]) < alpha - 2 { gradientPixels += 1 }
+            }
+        }
+        check(!alphaChanged, "all 86 light frames preserve the original alpha values")
+        check(maximumError <= 2 && gradientPixels > 1000,
+              "all 86 light frames invert the full luminance gradients without flattening them")
     }
 
     private static func editorPresentation(check: (Bool, String) -> Void) async throws {
