@@ -162,7 +162,9 @@ final class WorkspaceLoadingView: NSView {
     }
     private func updateAppearance() {
         CATransaction.begin(); CATransaction.setDisableActions(true)
-        layer?.backgroundColor = (isLight ? NSColor.white : NSColor.black).cgColor
+        layer?.backgroundColor = (isLight
+            ? NSColor(srgbRed: 236.0 / 255, green: 236.0 / 255, blue: 236.0 / 255, alpha: 1)
+            : NSColor.black).cgColor
         if active || symbol.contents != nil { updateMorph() }
         CATransaction.commit()
     }
@@ -182,11 +184,18 @@ final class WorkspaceLoadingView: NSView {
                       let properties = CGImageSourceCopyPropertiesAtIndex(source, index, nil) as? [String: Any],
                       let webp = properties["{WebP}"] as? [String: Any],
                       let delay = (webp["UnclampedDelayTime"] ?? webp["DelayTime"]) as? NSNumber else { return nil }
-                // The original frames contain an opaque black backdrop. Invert
-                // the complete frame so light mode has no black square, while
-                // retaining every luminance gradient, alpha value and timing.
-                let inverted = CIImage(cgImage: image).applyingFilter("CIColorInvert")
-                guard let light = context.createCGImage(inverted, from: inverted.extent,
+                // Match the reference light palette: #ececec backdrop and
+                // #444444 glyph. Map the complete grayscale range so the frame
+                // backdrop matches the overlay and soft gradients remain intact.
+                let scale = -168.0 / 255
+                let adapted = CIImage(cgImage: image).applyingFilter("CIColorMatrix", parameters: [
+                    "inputRVector": CIVector(x: scale, y: 0, z: 0, w: 0),
+                    "inputGVector": CIVector(x: 0, y: scale, z: 0, w: 0),
+                    "inputBVector": CIVector(x: 0, y: 0, z: scale, w: 0),
+                    "inputAVector": CIVector(x: 0, y: 0, z: 0, w: 1),
+                    "inputBiasVector": CIVector(x: 236.0 / 255, y: 236.0 / 255, z: 236.0 / 255, w: 0)
+                ])
+                guard let light = context.createCGImage(adapted, from: adapted.extent,
                     format: .RGBA8, colorSpace: CGColorSpace(name: CGColorSpace.sRGB)) else { return nil }
                 images.append(image); lightImages.append(light)
                 durations.append(max(0.01, delay.doubleValue))

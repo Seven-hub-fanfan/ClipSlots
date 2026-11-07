@@ -206,7 +206,10 @@ private actor FollowupConnectorHTTP: AgentMarketHTTP {
             window.appearance = NSAppearance(named: appearance)
             try await Task.sleep(for: .milliseconds(100))
             let light = appearance == .aqua
-            check(loading.layer?.backgroundColor == (light ? NSColor.white : NSColor.black).cgColor,
+            let backdrop = light
+                ? NSColor(srgbRed: 236.0 / 255, green: 236.0 / 255, blue: 236.0 / 255, alpha: 1)
+                : NSColor.black
+            check(loading.layer?.backgroundColor == backdrop.cgColor,
                   "\(appearance.rawValue): existing loader backdrop follows window theme")
             let expected = light ? loading.frames?.lightImages.first : loading.frames?.images.first
             check((loading.symbol.contents as AnyObject?) === expected,
@@ -218,6 +221,9 @@ private actor FollowupConnectorHTTP: AgentMarketHTTP {
                let context = CGContext(data: nil, width: 480, height: 360, bitsPerComponent: 8,
                    bytesPerRow: 480 * 4, space: CGColorSpace(name: CGColorSpace.sRGB)!,
                    bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) {
+                // Match CALayer's linear sampling. The default CGContext
+                // downsampling introduces ringing outside the palette range.
+                context.interpolationQuality = .low
                 layer.render(in: context)
                 if let data = context.data {
                     raster[appearance] = Array(UnsafeBufferPointer(start: data.assumingMemoryBound(to: UInt8.self),
@@ -235,22 +241,25 @@ private actor FollowupConnectorHTTP: AgentMarketHTTP {
             }
         }
         if let light = raster[.aqua], let dark = raster[.darkAqua] {
-            check(light[0] == 255 && dark[0] == 0, "rendered light backdrop is white and dark backdrop is black")
+            check(light[0] == 236 && dark[0] == 0,
+                  "rendered light backdrop matches reference #ececec and dark backdrop is black")
             let outsideSymbol = (180 * 480 + 209) * 4
-            check(light[outsideSymbol] == 255 && dark[outsideSymbol] == 0,
+            check(light[outsideSymbol] == 236 && dark[outsideSymbol] == 0,
                   "rendered frame backdrop matches the surrounding theme without a rectangular seam")
-            var complementError = 0
+            var gradientError = 0
             var lightMin = 255, darkMax = 0
             for y in 148..<212 {
                 for x in 208..<272 {
                     let index = (y * 480 + x) * 4
                     lightMin = min(lightMin, Int(light[index]))
                     darkMax = max(darkMax, Int(dark[index]))
-                    complementError = max(complementError, abs(Int(light[index]) + Int(dark[index]) - 255))
+                    let expected = 236.0 - 168.0 * Double(dark[index]) / 255
+                    gradientError = max(gradientError, abs(Int(light[index]) - Int(expected.rounded())))
                 }
             }
-            check(lightMin < 8 && darkMax > 247, "rendered morph is dark on light and white on dark")
-            check(complementError <= 2, "rendered light and dark morph gradients remain complementary")
+            check(abs(lightMin - 68) <= 2 && darkMax > 247,
+                  "rendered light glyph matches reference #444444 and dark glyph remains white")
+            check(gradientError <= 2, "rendered light morph retains the original gradients in the reference palette")
         } else { check(false, "both theme rasters are available") }
         window.setContentSize(NSSize(width: 620, height: 400))
         loading.layoutSubtreeIfNeeded()
@@ -279,6 +288,7 @@ private actor FollowupConnectorHTTP: AgentMarketHTTP {
                                              count: image.width * image.height * 4))
         }
         var maximumError = 0, alphaChanged = false, gradientPixels = 0
+        var referenceBackdropPixels = 0, referenceGlyphPixels = 0
         for (dark, light) in zip(frames.images, frames.lightImages) {
             guard let original = pixels(dark), let adapted = pixels(light), original.count == adapted.count else {
                 check(false, "theme frames decode to matching pixel dimensions"); return
@@ -287,15 +297,19 @@ private actor FollowupConnectorHTTP: AgentMarketHTTP {
                 let alpha = Int(original[index + 3])
                 alphaChanged = alphaChanged || original[index + 3] != adapted[index + 3]
                 for channel in 0..<3 {
-                    maximumError = max(maximumError,
-                        abs(Int(original[index + channel]) + Int(adapted[index + channel]) - alpha))
+                    let expected = (236.0 * Double(alpha) - 168.0 * Double(original[index + channel])) / 255
+                    maximumError = max(maximumError, abs(Int(adapted[index + channel]) - Int(expected.rounded())))
                 }
                 if original[index] > 2 && Int(original[index]) < alpha - 2 { gradientPixels += 1 }
+                if alpha == 255 && original[index] == 0 && adapted[index] == 236 { referenceBackdropPixels += 1 }
+                if alpha == 255 && original[index] == 255 && adapted[index] == 68 { referenceGlyphPixels += 1 }
             }
         }
         check(!alphaChanged, "all 86 light frames preserve the original alpha values")
         check(maximumError <= 2 && gradientPixels > 1000,
-              "all 86 light frames invert the full luminance gradients without flattening them")
+              "all 86 light frames retain full luminance gradients in the reference gray palette")
+        check(referenceBackdropPixels > 1000 && referenceGlyphPixels > 1000,
+              "all 86 adapted frames reach the screenshot's #ececec backdrop and #444444 glyph")
     }
 
     private static func editorPresentation(check: (Bool, String) -> Void) async throws {
