@@ -234,24 +234,15 @@ final class WorkspaceLoadingView: NSView {
         let ticket = generation
         active = true
         setAccessibilityLabel(title)
-        let opacity = layer?.presentation()?.opacity ?? layer?.opacity ?? 0
-        layer?.removeAllAnimations()
         CATransaction.begin(); CATransaction.setDisableActions(true)
+        // Cover the destination before preparation or mounting can begin.
+        // Only the ready workspace is revealed by hide().
+        layer?.removeAllAnimations()
         layer?.opacity = 1
         envelope.opacity = 1
         envelope.removeAllAnimations()
         CATransaction.commit()
         let reduced = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
-        if !reduced {
-            fade(layer, from: opacity, to: 1, duration: 1)
-            fade(envelope, from: 0, to: 1, duration: 0.3, delay: 0.1)
-            let reveal = CABasicAnimation(keyPath: "transform.scale")
-            reveal.fromValue = 0.95; reveal.toValue = 1
-            reveal.duration = 0.3; reveal.beginTime = CACurrentMediaTime() + 0.1
-            reveal.fillMode = .backwards
-            reveal.timingFunction = CAMediaTimingFunction(controlPoints: 0, 0, 0.58, 1)
-            envelope.add(reveal, forKey: "reveal")
-        }
         if frames != nil { play(reduced: reduced) }
         else {
             Task { [weak self] in
@@ -293,10 +284,10 @@ final class WorkspaceLoadingView: NSView {
         morph.beginTime = playbackStart
         symbol.add(morph, forKey: "morph")
     }
-    private func fade(_ target: CALayer?, from: Float, to: Float, duration: Double, delay: Double = 0) {
+    private func fade(_ target: CALayer?, from: Float, to: Float, duration: Double) {
         let animation = CABasicAnimation(keyPath: "opacity")
         animation.fromValue = from; animation.toValue = to
-        animation.duration = duration; animation.beginTime = CACurrentMediaTime() + delay
+        animation.duration = duration; animation.beginTime = CACurrentMediaTime()
         animation.fillMode = .backwards
         animation.timingFunction = CAMediaTimingFunction(controlPoints: 0, 0, 0.58, 1)
         target?.add(animation, forKey: "visibility")
@@ -309,14 +300,12 @@ final class WorkspaceLoadingView: NSView {
         let opacity = layer?.presentation()?.opacity ?? 1
         CATransaction.begin(); CATransaction.setDisableActions(true)
         layer?.opacity = 0
-        envelope.opacity = 0
         CATransaction.commit()
         if NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
             releaseAnimation()
         } else {
-            fade(layer, from: opacity, to: 0, duration: 1)
-            fade(envelope, from: envelope.presentation()?.opacity ?? 1, to: 0, duration: 0.8)
-            DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in
+            fade(layer, from: opacity, to: 0, duration: 0.18)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in
                 guard let self, self.generation == ticket, !self.active else { return }
                 self.releaseAnimation()
             }

@@ -499,10 +499,10 @@ struct ContentView: View {
             // 挂在内容区这棵 VStack 的顶边（两个模式共用的同一个几何原点），所以它的落位与
             // 「当前是编辑还是画布」「搜索框在不在」「Agent 侧栏开没开」全都无关 —— 不是"算得准"，
             // 是**没有第二个位置可算**。切页时它连一次 relayout 都不会发生，只有段内选中背景在滑。
+            .overlay(alignment: .top) { workspaceModeSwitcherPinned }
             .overlay {
                 WorkspaceLoadingSurface(transition: workspaceTransition)
             }
-            .overlay(alignment: .top) { workspaceModeSwitcherPinned }
 
             // v2.10.52 (perf 第四批 · 巨型 @Published Store 拆分): Toast / 浮层提示改由独立子视图
             // TransientOverlayView 观察 store.transientUI 渲染。ContentView.body 不再读取

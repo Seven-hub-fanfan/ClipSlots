@@ -149,22 +149,113 @@ private actor FollowupConnectorHTTP: AgentMarketHTTP {
             check((loading.symbol.animation(forKey: "morph") as? CAKeyframeAnimation)?.values?.count == 87
                   && (loading.symbol.animation(forKey: "pulse") as? CAKeyframeAnimation)?.duration == 2,
                   "morph frames loop with the original two-second scale pulse")
-            check((loading.layer?.animation(forKey: "visibility") as? CABasicAnimation)?.duration == 1
-                  && (loading.envelope.animation(forKey: "reveal") as? CABasicAnimation)?.duration == 0.3,
-                  "outer fade and inner reveal match the actual canvas component")
+            check(loading.layer?.opacity == 1 && loading.layer?.animation(forKey: "visibility") == nil
+                  && loading.envelope.animationKeys()?.isEmpty != false,
+                  "loading cover is immediately opaque without an entering fade or reveal")
         }
         if ProcessInfo.processInfo.environment["CLIPSLOTS_FOLLOWUP_STATIC_ONLY"] != "1" {
             try await transitionRuntime(window: window, loading: loading, root: root, check: check)
+            try await transitionReadiness(window: window, loading: loading, root: root, check: check)
         }
         loading.hide(); loading.show(title: "再次切换")
-        try await Task.sleep(for: .milliseconds(1100))
+        try await Task.sleep(for: .milliseconds(250))
         check(loading.layer?.opacity == 1, "late hide does not remove restarted transition")
         loading.hide()
         check(loading.hitTest(.zero) == nil, "fade-out immediately releases input interception")
-        try await Task.sleep(for: .milliseconds(1100))
+        try await Task.sleep(for: .milliseconds(250))
         check(loading.symbol.animationKeys()?.isEmpty != false && loading.frames == nil,
               "hidden transition releases animation and input interception")
         window.close()
+    }
+
+    private static func transitionReadiness(window: NSWindow, loading: WorkspaceLoadingView, root: URL,
+                                           check: (Bool, String) -> Void) async throws {
+        let base = NSView(frame: window.contentView!.bounds)
+        base.wantsLayer = true
+        base.layer?.backgroundColor = NSColor.systemRed.cgColor
+        loading.removeFromSuperview()
+        loading.frame = base.bounds
+        loading.autoresizingMask = [.width, .height]
+        base.addSubview(loading)
+        window.contentView = base
+        let transition = WorkspaceTransition()
+        transition.surface = loading
+        var observations: [[String: Any]] = []
+        for mode in [WorkspaceMode.canvas, .edit] {
+            await loading.prepareAnimation()
+            var preparing = false, prepared = false, committed = false
+            transition.switchTo(mode, prepare: {
+                preparing = true
+                // Keep preparation pending while the covered destination changes.
+                for index in 0..<10 {
+                    base.layer?.backgroundColor = (index.isMultiple(of: 2) ? NSColor.systemRed : .systemBlue).cgColor
+                    try? await Task.sleep(for: .milliseconds(35))
+                }
+                prepared = true
+                return true
+            }, commit: {
+                committed = true
+                base.layer?.backgroundColor = NSColor.systemGreen.cgColor
+                transition.sidebarMounts.enroll((0..<12).map { "sidebar-\($0)" })
+                if mode == .edit { transition.editorMounts.enroll((0..<12).map { "editor-\($0)" }) }
+            })
+            check(loading.layer?.opacity == 1 && loading.hitTest(.zero) === loading,
+                  "\(mode.rawValue): opaque input cover precedes destination preparation")
+            let start = CACurrentMediaTime()
+            var coverSamples = 0, opaque = true, pixelsCovered = true
+            var preparationSamples = 0, mountSamples = 0
+            while transition.isSwitching && CACurrentMediaTime() - start < 4 {
+                try await Task.sleep(for: .milliseconds(35))
+                guard transition.isSwitching else { break }
+                coverSamples += 1
+                if preparing && !prepared { preparationSamples += 1 }
+                if committed { mountSamples += 1 }
+                let opacity = loading.layer?.presentation()?.opacity ?? 0
+                opaque = opaque && opacity > 0.999 && loading.layer?.animation(forKey: "visibility") == nil
+                if let image = CGWindowListCreateImage(.null, .optionIncludingWindow,
+                    CGWindowID(window.windowNumber), [.boundsIgnoreFraming, .bestResolution]) {
+                    let bitmap = NSBitmapImageRep(cgImage: image)
+                    let scale = Double(bitmap.pixelsWide) / Double(base.bounds.width)
+                    let titleHeight = Double(bitmap.pixelsHigh) / scale - Double(base.bounds.height)
+                    let points = [(16.0, titleHeight + 16.0),
+                                  (16.0, titleHeight + Double(base.bounds.height) - 16)]
+                    var colors: [[Int]] = []
+                    for (x, y) in points {
+                        // Compare the stored screenshot channels. colorAt reports
+                        // calibrated RGB; converting it again alters raw #ececec.
+                        if let color = bitmap.colorAt(x: Int(x * scale), y: Int(y * scale)) {
+                            let channels = [color.redComponent, color.greenComponent, color.blueComponent]
+                                .map { Int(($0 * 255).rounded()) }
+                            colors.append(channels)
+                            pixelsCovered = pixelsCovered && channels.allSatisfy { abs($0 - 236) <= 1 }
+                        } else { pixelsCovered = false }
+                    }
+                    observations.append(["mode": mode.rawValue, "preparing": !prepared, "mounted": committed,
+                                         "opacity": opacity, "colors": colors])
+                    if coverSamples == 4 || (committed && mountSamples == 1) {
+                        try bitmap.representation(using: .png, properties: [:])?.write(
+                            to: root.appendingPathComponent("ready-cover-\(mode.rawValue)-\(committed ? "mount" : "prepare").png"))
+                    }
+                } else { pixelsCovered = false }
+            }
+            check(preparationSamples >= 4 && mountSamples >= 2 && opaque && pixelsCovered,
+                  "\(mode.rawValue): actual window hides changing destination throughout preparation and mounting")
+            check(prepared && committed && !transition.isSwitching
+                  && transition.sections.pendingIDs.isEmpty && transition.sidebarMounts.pendingIDs.isEmpty
+                  && transition.editorMounts.pendingIDs.isEmpty,
+                  "\(mode.rawValue): destination commits and all admission queues drain before reveal")
+            if !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
+                check((loading.layer?.animation(forKey: "visibility") as? CABasicAnimation)?.duration == 0.18
+                      && loading.envelope.opacity == 1,
+                      "\(mode.rawValue): only the ready workspace triggers a single short exit fade")
+            }
+            try await Task.sleep(for: .milliseconds(250))
+            check(loading.layer?.opacity == 0 && loading.frames == nil,
+                  "\(mode.rawValue): ready exit releases the cover and decoded frames")
+        }
+        try JSONSerialization.data(withJSONObject: observations, options: [.prettyPrinted, .sortedKeys])
+            .write(to: root.appendingPathComponent("ready-cover-runtime.json"))
+        loading.show(title: "再次切换")
     }
 
     private static func transitionRuntime(window: NSWindow, loading: WorkspaceLoadingView, root: URL,
@@ -197,7 +288,8 @@ private actor FollowupConnectorHTTP: AgentMarketHTTP {
             check((scales.min() ?? 0) >= 0.949 && (scales.max() ?? 2) <= 1.051
                   && (scales.max() ?? 0) - (scales.min() ?? 0) > 0.09,
                   "runtime scale pulse spans the original 0.95–1.05 range")
-            check((samples.last?["opacity"] ?? 0) > 0.999, "one-second themed backdrop fade reaches full opacity")
+            check(samples.allSatisfy { ($0["opacity"] ?? 0) > 0.999 },
+                  "loading backdrop stays fully opaque throughout compositor sampling")
         }
         let morphStart = loading.symbol.animation(forKey: "morph")?.beginTime
         let pulseStart = loading.symbol.animation(forKey: "pulse")?.beginTime
