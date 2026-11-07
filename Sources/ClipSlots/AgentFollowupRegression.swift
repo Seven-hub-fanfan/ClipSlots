@@ -133,17 +133,23 @@ private actor FollowupConnectorHTTP: AgentMarketHTTP {
         let loading = WorkspaceLoadingView(frame: NSRect(x: 0, y: 0, width: 480, height: 360))
         window.contentView = loading; window.makeKeyAndOrderFront(nil)
         loading.show(title: "冷启动图案")
-        check(loading.frames == nil && loading.symbol.contents != nil,
-              "cold loading cover contains the reference glyph before full animation decoding")
+        check(loading.frames?.images.count == 86 && loading.symbol.contents != nil,
+              "cold loading cover has the complete animation immediately")
+        let coldFrames = loading.frames
+        check(coldFrames?.images.allSatisfy { $0.width <= 128 && $0.height <= 128 } == true,
+              "shared animation frames are limited to the 64pt Retina display size")
+        if !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
+            check((loading.symbol.animation(forKey: "morph") as? CAKeyframeAnimation)?.values?.count == 87,
+                  "cold show starts the real morph before any asynchronous wait")
+        }
         try transitionPoster(loading: loading, root: root, name: "cold", check: check)
         let firstPulseStart = loading.symbol.animation(forKey: "pulse")?.beginTime
         await loading.prepareAnimation()
-        // Let show()'s suspended preparation continuation attach the full morph.
         await CanvasDisplayClock.shared.nextFrame()
         if !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
             check(loading.symbol.animation(forKey: "pulse")?.beginTime == firstPulseStart
                   && loading.symbol.animation(forKey: "morph")?.beginTime == firstPulseStart,
-                  "full decoding joins the initial pulse clock without restarting the visible glyph")
+                  "morph and pulse start together without a later decoding handoff")
         }
         loading.layoutSubtreeIfNeeded(); loading.show(title: "正在准备画布")
         check(loading.symbol.bounds.size == CGSize(width: 64, height: 64)
@@ -178,8 +184,12 @@ private actor FollowupConnectorHTTP: AgentMarketHTTP {
         check(loading.symbol.animationKeys()?.isEmpty != false && loading.frames == nil,
               "hidden transition releases animation and input interception")
         loading.show(title: "释放帧后再次加载")
-        check(loading.frames == nil && loading.symbol.contents != nil,
-              "released animation frames do not leave the next loading cover without its glyph")
+        check(loading.frames?.images.first === coldFrames?.images.first && loading.symbol.contents != nil,
+              "repeated loading reuses already decoded original animation frames")
+        if !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
+            check((loading.symbol.animation(forKey: "morph") as? CAKeyframeAnimation)?.values?.count == 87,
+                  "repeated show starts the complete morph immediately")
+        }
         try transitionPoster(loading: loading, root: root, name: "repeat", check: check)
         loading.hide()
         try await Task.sleep(for: .milliseconds(250))
@@ -424,10 +434,12 @@ private actor FollowupConnectorHTTP: AgentMarketHTTP {
         }
         var maximumError = 0, alphaChanged = false, gradientPixels = 0
         var referenceBackdropPixels = 0, referenceGlyphPixels = 0
+        var uniqueDarkFrames = Set<Data>()
         for (dark, light) in zip(frames.images, frames.lightImages) {
             guard let original = pixels(dark), let adapted = pixels(light), original.count == adapted.count else {
                 check(false, "theme frames decode to matching pixel dimensions"); return
             }
+            uniqueDarkFrames.insert(Data(SHA256.hash(data: Data(original))))
             for index in stride(from: 0, to: original.count, by: 4) {
                 let alpha = Int(original[index + 3])
                 alphaChanged = alphaChanged || original[index + 3] != adapted[index + 3]
@@ -441,6 +453,11 @@ private actor FollowupConnectorHTTP: AgentMarketHTTP {
             }
         }
         check(!alphaChanged, "all 86 light frames preserve the original alpha values")
+        check(uniqueDarkFrames.count >= 70, "complete cached animation contains distinct original morph shapes")
+        let cachedBytes = (frames.images + frames.lightImages).reduce(0) {
+            $0 + $1.bytesPerRow * $1.height
+        }
+        check(cachedBytes <= 12 * 1024 * 1024, "both themes share a bounded display-size animation cache")
         check(maximumError <= 2 && gradientPixels > 1000,
               "all 86 light frames retain full luminance gradients in the reference gray palette")
         check(referenceBackdropPixels > 1000 && referenceGlyphPixels > 1000,

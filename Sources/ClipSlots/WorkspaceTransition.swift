@@ -2,7 +2,6 @@ import AppKit
 import SwiftUI
 import QuartzCore
 import ImageIO
-import CoreImage
 import ClipSlotsKit
 
 /// Only this small native layer animates while SwiftUI mounts the destination.
@@ -124,43 +123,59 @@ final class WorkspaceLoadingView: NSView {
         let times: [NSNumber]
         let duration: Double
     }
-    private struct Poster {
-        let dark: CGImage
-        let light: CGImage
-    }
     private static var animationURL: URL? {
         AgentBackgroundResources.pageURL?.deletingLastPathComponent().deletingLastPathComponent()
             .appendingPathComponent("TapNowMotion/workspace-loading.webp")
     }
-    // Retain only one frame per theme between switches. The complete animation
-    // can still be released without leaving the next loading cover blank.
-    private static let poster: Poster? = {
+    // Prepare the complete loop once, before this surface is shown. Sharing
+    // display-sized frames makes every switch start the actual morph immediately.
+    private static let animationFrames: Frames? = {
         guard let url = animationURL,
-              let source = CGImageSourceCreateWithURL(url as CFURL, nil),
-              let image = CGImageSourceCreateImageAtIndex(source, 0,
-                [kCGImageSourceShouldCacheImmediately: true] as CFDictionary) else { return nil }
-        let context = CIContext(options: [.cacheIntermediates: false, .workingColorSpace: NSNull()])
-        guard let light = adaptedLightFrame(image, context: context) else { return nil }
-        return Poster(dark: image, light: light)
+              let source = CGImageSourceCreateWithURL(url as CFURL, nil) else { return nil }
+        var images: [CGImage] = [], lightImages: [CGImage] = [], durations: [Double] = []
+        for index in 0..<CGImageSourceGetCount(source) {
+            guard let image = CGImageSourceCreateThumbnailAtIndex(source, index, [
+                kCGImageSourceCreateThumbnailFromImageAlways: true,
+                kCGImageSourceThumbnailMaxPixelSize: 128,
+                kCGImageSourceShouldCacheImmediately: true
+            ] as CFDictionary),
+                  let properties = CGImageSourceCopyPropertiesAtIndex(source, index, nil) as? [String: Any],
+                  let webp = properties["{WebP}"] as? [String: Any],
+                  let delay = (webp["UnclampedDelayTime"] ?? webp["DelayTime"]) as? NSNumber,
+                  let light = adaptedLightFrame(image) else { return nil }
+            images.append(image); lightImages.append(light)
+            durations.append(max(0.01, delay.doubleValue))
+        }
+        guard !images.isEmpty else { return nil }
+        let total = durations.reduce(0, +)
+        var elapsed = 0.0
+        let times = durations.map { duration -> NSNumber in
+            defer { elapsed += duration }
+            return NSNumber(value: elapsed / total)
+        }
+        return Frames(images: images, lightImages: lightImages, times: times, duration: total)
     }()
-    nonisolated private static func adaptedLightFrame(_ image: CGImage, context: CIContext) -> CGImage? {
+    private static func adaptedLightFrame(_ image: CGImage) -> CGImage? {
         // #ececec backdrop, #444444 glyph, preserving every intermediate shade.
-        let scale = -168.0 / 255
-        let adapted = CIImage(cgImage: image).applyingFilter("CIColorMatrix", parameters: [
-            "inputRVector": CIVector(x: scale, y: 0, z: 0, w: 0),
-            "inputGVector": CIVector(x: 0, y: scale, z: 0, w: 0),
-            "inputBVector": CIVector(x: 0, y: 0, z: scale, w: 0),
-            "inputAVector": CIVector(x: 0, y: 0, z: 0, w: 1),
-            "inputBiasVector": CIVector(x: 236.0 / 255, y: 236.0 / 255, z: 236.0 / 255, w: 0)
-        ])
-        return context.createCGImage(adapted, from: adapted.extent,
-            format: .RGBA8, colorSpace: CGColorSpace(name: CGColorSpace.sRGB))
+        guard let context = CGContext(data: nil, width: image.width, height: image.height,
+            bitsPerComponent: 8, bytesPerRow: image.width * 4,
+            space: CGColorSpace(name: CGColorSpace.sRGB)!,
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue),
+              let data = context.data else { return nil }
+        context.draw(image, in: CGRect(x: 0, y: 0, width: image.width, height: image.height))
+        let pixels = data.assumingMemoryBound(to: UInt8.self)
+        for index in stride(from: 0, to: image.width * image.height * 4, by: 4) {
+            let alpha = Int(pixels[index + 3])
+            for channel in 0..<3 {
+                let value = (236 * alpha - 168 * Int(pixels[index + channel]) + 127) / 255
+                pixels[index + channel] = UInt8(clamping: value)
+            }
+        }
+        return context.makeImage()
     }
     let symbol = CALayer()
     let envelope = CALayer()
     private(set) var frames: Frames?
-    private var preparation: Task<Frames?, Never>?
-    private var preparationID = UUID()
     private var active = false
     private var playbackStart: CFTimeInterval = 0
     private var playbackReduced = false
@@ -175,11 +190,10 @@ final class WorkspaceLoadingView: NSView {
         layer?.addSublayer(envelope)
         envelope.addSublayer(symbol)
         symbol.contentsGravity = .resizeAspect
-        symbol.contents = Self.poster?.dark
+        frames = Self.animationFrames
         updateAppearance()
         setAccessibilityIdentifier("workspace-loading")
         setAccessibilityRole(.progressIndicator)
-        startPreparing()
     }
     required init?(coder: NSCoder) { nil }
     override func viewDidChangeEffectiveAppearance() {
@@ -201,43 +215,8 @@ final class WorkspaceLoadingView: NSView {
         if active || symbol.contents != nil { updateMorph() }
         CATransaction.commit()
     }
-    private func startPreparing() {
-        guard frames == nil, preparation == nil else { return }
-        preparationID = UUID()
-        let url = Self.animationURL
-        preparation = Task.detached(priority: .userInitiated) {
-            guard let url, let source = CGImageSourceCreateWithURL(url as CFURL, nil) else { return nil }
-            let context = CIContext(options: [.cacheIntermediates: false, .workingColorSpace: NSNull()])
-            var images: [CGImage] = [], lightImages: [CGImage] = [], durations: [Double] = []
-            for index in 0..<CGImageSourceGetCount(source) {
-                guard !Task.isCancelled,
-                      let image = CGImageSourceCreateImageAtIndex(source, index,
-                        [kCGImageSourceShouldCacheImmediately: true] as CFDictionary),
-                      let properties = CGImageSourceCopyPropertiesAtIndex(source, index, nil) as? [String: Any],
-                      let webp = properties["{WebP}"] as? [String: Any],
-                      let delay = (webp["UnclampedDelayTime"] ?? webp["DelayTime"]) as? NSNumber else { return nil }
-                guard let light = Self.adaptedLightFrame(image, context: context) else { return nil }
-                images.append(image); lightImages.append(light)
-                durations.append(max(0.01, delay.doubleValue))
-            }
-            guard !images.isEmpty else { return nil }
-            let total = durations.reduce(0, +)
-            var elapsed = 0.0
-            let times = durations.map { duration -> NSNumber in
-                defer { elapsed += duration }
-                return NSNumber(value: elapsed / total)
-            }
-            return Frames(images: images, lightImages: lightImages, times: times, duration: total)
-        }
-    }
     func prepareAnimation() async {
-        startPreparing()
-        guard let preparation else { return }
-        let ticket = preparationID
-        let result = await preparation.value
-        guard preparationID == ticket, !preparation.isCancelled else { return }
-        frames = result
-        self.preparation = nil
+        frames = Self.animationFrames
     }
     override func layout() {
         super.layout()
@@ -251,8 +230,8 @@ final class WorkspaceLoadingView: NSView {
     func show(title: String) {
         window?.contentView?.layoutSubtreeIfNeeded()
         generation = UUID()
-        let ticket = generation
         active = true
+        frames = Self.animationFrames
         setAccessibilityLabel(title)
         CATransaction.begin(); CATransaction.setDisableActions(true)
         // Cover the destination before preparation or mounting can begin.
@@ -264,16 +243,6 @@ final class WorkspaceLoadingView: NSView {
         CATransaction.commit()
         let reduced = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
         play(reduced: reduced)
-        if frames == nil {
-            Task { [weak self] in
-                guard let self else { return }
-                await self.prepareAnimation()
-                guard self.active, self.generation == ticket else { return }
-                CATransaction.begin(); CATransaction.setDisableActions(true)
-                self.updateMorph()
-                CATransaction.commit()
-            }
-        }
     }
     private func play(reduced: Bool) {
         playbackReduced = reduced
@@ -291,11 +260,7 @@ final class WorkspaceLoadingView: NSView {
         symbol.add(pulse, forKey: "pulse")
     }
     private func updateMorph() {
-        guard let frames else {
-            symbol.contents = isLight ? Self.poster?.light : Self.poster?.dark
-            symbol.removeAnimation(forKey: "morph")
-            return
-        }
+        guard let frames else { return }
         let images = isLight ? frames.lightImages : frames.images
         guard let first = images.first else { return }
         symbol.contents = first
@@ -342,7 +307,5 @@ final class WorkspaceLoadingView: NSView {
         layer?.removeAllAnimations(); envelope.removeAllAnimations(); symbol.removeAllAnimations()
         symbol.contents = nil; frames = nil
         CATransaction.commit()
-        preparationID = UUID()
-        preparation?.cancel(); preparation = nil
     }
 }
