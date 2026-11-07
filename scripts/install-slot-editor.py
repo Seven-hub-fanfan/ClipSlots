@@ -154,7 +154,10 @@ if args.reuse_backup:
         backup, args.reuse_checkpoint.absolute(), before_raw)
         if args.reuse_checkpoint else {})
     new_object_bytes = backup_checkpoint.new_object_bytes(original, before_raw, reusable)
-    lease.reserve_additional(new_object_bytes)
+    checkpoint_metadata_bytes = len(json.dumps({
+        "base_manifest_sha256": "0" * 64, "snapshot": before_raw
+    }, indent=2).encode("utf-8")) + 4096
+    lease.reserve_additional(new_object_bytes + checkpoint_metadata_bytes)
     checkpoint = backup / ("checkpoint-" + stamp)
     backup_checkpoint.create(backup, before_raw, {"data": data, "config": config},
                              checkpoint, reusable=reusable)
@@ -177,14 +180,17 @@ assert not pids() and files(installed) == before_bundle
 old_app = backup / ("ClipSlots-" + stamp + ".app") if args.reuse_backup else backup / "ClipSlots.app"
 assert not old_app.exists()
 if checkpoint:
-    (checkpoint / "application.json").write_text(json.dumps({
+    application_metadata = json.dumps({
         "previous_application": str(old_app),
         "previous_gui_sha256": args.expected_installed_sha256,
         "protected_links": before["links"],
         "base_backup": str(backup),
         "restore": "backup_checkpoint.materialize(base_backup, checkpoint, NEW_destination); "
                    "verify before replacing any live directory"
-    }, indent=2))
+    }, indent=2)
+    if len(application_metadata.encode("utf-8")) > 4096:
+        lease.reserve_additional(len(application_metadata.encode("utf-8")) - 4096)
+    (checkpoint / "application.json").write_text(application_metadata)
 installed.rename(old_app)
 try:
     stage.rename(installed)
@@ -237,6 +243,7 @@ report = {
     "latest_checkpoint": str(checkpoint) if checkpoint else None,
     "checkpoint_delta_bytes": delta_bytes,
     "checkpoint_new_object_bytes": new_object_bytes,
+    "checkpoint_metadata_reserved_bytes": checkpoint_metadata_bytes if checkpoint else 0,
     "checkpoint_reused_objects": len(reusable),
     "checkpoint_reused_object_bytes": sum(p.stat().st_size for p in reusable.values()),
     "backup_limit_gib": args.backup_limit_gib,

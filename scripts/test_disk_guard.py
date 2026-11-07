@@ -83,6 +83,37 @@ class DiskGuardTests(unittest.TestCase):
         finally:
             lease.release()
 
+    def test_reused_backup_reserves_exact_payload_then_checkpoint_metadata(self):
+        backups = self.root / ".local/share/clipslots-install-backups"
+        for name in ["one", "two"]:
+            (backups / name).mkdir(parents=True)
+        protected = backups / "two" / "protected"
+        protected.write_bytes(b"unchanged backup")
+        application = self.root / "application"
+        def used(path):
+            return int((30.42 if Path(path) == backups else 0.12) * guard.GIB)
+        with patch.object(guard.Path, "home", return_value=self.root), \
+             patch.object(guard, "bytes_used", side_effect=used):
+            lease = guard.reserve_backup("follow-up install", [application],
+                                         reuse_backup=backups / "two", max_backup_gib=31)
+            try:
+                self.assertAlmostEqual(lease.planned_gib, 0.12, places=6)
+                lease.reserve_additional(int(0.01 * guard.GIB))
+                with self.assertRaises(guard.DiskLimitError):
+                    lease.reserve_additional(int(0.5 * guard.GIB))
+            finally:
+                lease.release()
+        self.assertEqual(protected.read_bytes(), b"unchanged backup")
+        self.assertEqual(sorted(p.name for p in backups.iterdir() if p.is_dir()), ["one", "two"])
+
+    def test_full_backup_retains_metadata_allowance(self):
+        with patch.object(guard.Path, "home", return_value=self.root), \
+             patch.object(guard, "BackupLease") as lease, \
+             patch.object(guard, "bytes_used", return_value=int(0.12 * guard.GIB)):
+            guard.reserve_backup("full install", [self.root / "application"])
+            self.assertAlmostEqual(lease.call_args.args[2], 0.62, places=6)
+            self.assertEqual(lease.call_args.kwargs["max_backup_gib"], 30)
+
     def test_explicit_install_allowance_keeps_default_and_delta_checks(self):
         backups = self.root / "backups"
         (backups / "one").mkdir(parents=True)

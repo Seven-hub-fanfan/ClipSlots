@@ -151,7 +151,12 @@ class BackupLease:
 
 def reserve_backup(operation, source_roots, reuse_backup=None, max_backup_gib=MAX_BACKUP_GIB):
     root = Path.home() / ".local/share/clipslots-install-backups"
-    estimate = sum(bytes_used(p) for p in source_roots) / GIB + 0.5
+    estimate = sum(bytes_used(p) for p in source_roots) / GIB
+    # A reused backup reserves its changed objects and serialized checkpoint
+    # metadata separately, once the protected snapshot is known. Full copies
+    # retain the general metadata allowance.
+    if reuse_backup is None:
+        estimate += 0.5
     return BackupLease(root, operation, estimate, reuse_backup=reuse_backup, max_backup_gib=max_backup_gib)
 
 
