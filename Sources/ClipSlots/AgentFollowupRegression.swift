@@ -132,7 +132,19 @@ private actor FollowupConnectorHTTP: AgentMarketHTTP {
         window.isReleasedWhenClosed = false
         let loading = WorkspaceLoadingView(frame: NSRect(x: 0, y: 0, width: 480, height: 360))
         window.contentView = loading; window.makeKeyAndOrderFront(nil)
+        loading.show(title: "冷启动图案")
+        check(loading.frames == nil && loading.symbol.contents != nil,
+              "cold loading cover contains the reference glyph before full animation decoding")
+        try transitionPoster(loading: loading, root: root, name: "cold", check: check)
+        let firstPulseStart = loading.symbol.animation(forKey: "pulse")?.beginTime
         await loading.prepareAnimation()
+        // Let show()'s suspended preparation continuation attach the full morph.
+        await CanvasDisplayClock.shared.nextFrame()
+        if !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
+            check(loading.symbol.animation(forKey: "pulse")?.beginTime == firstPulseStart
+                  && loading.symbol.animation(forKey: "morph")?.beginTime == firstPulseStart,
+                  "full decoding joins the initial pulse clock without restarting the visible glyph")
+        }
         loading.layoutSubtreeIfNeeded(); loading.show(title: "正在准备画布")
         check(loading.symbol.bounds.size == CGSize(width: 64, height: 64)
               && loading.envelope.position == CGPoint(x: 240, y: 180), "canvas loader centered at exact TapNow size")
@@ -165,7 +177,38 @@ private actor FollowupConnectorHTTP: AgentMarketHTTP {
         try await Task.sleep(for: .milliseconds(250))
         check(loading.symbol.animationKeys()?.isEmpty != false && loading.frames == nil,
               "hidden transition releases animation and input interception")
+        loading.show(title: "释放帧后再次加载")
+        check(loading.frames == nil && loading.symbol.contents != nil,
+              "released animation frames do not leave the next loading cover without its glyph")
+        try transitionPoster(loading: loading, root: root, name: "repeat", check: check)
+        loading.hide()
+        try await Task.sleep(for: .milliseconds(250))
         window.close()
+    }
+
+    private static func transitionPoster(loading: WorkspaceLoadingView, root: URL, name: String,
+                                         check: (Bool, String) -> Void) throws {
+        let width = Int(loading.bounds.width), height = Int(loading.bounds.height)
+        guard let context = CGContext(data: nil, width: width, height: height,
+            bitsPerComponent: 8, bytesPerRow: width * 4, space: CGColorSpace(name: CGColorSpace.sRGB)!,
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue), let layer = loading.layer else {
+            check(false, "\(name): initial glyph raster exists"); return
+        }
+        context.interpolationQuality = .low
+        layer.render(in: context)
+        let bytes = context.data!.assumingMemoryBound(to: UInt8.self)
+        let background = Int(bytes[0])
+        var glyphPixels = 0
+        for y in (height / 2 - 32)..<(height / 2 + 32) {
+            for x in (width / 2 - 32)..<(width / 2 + 32) {
+                if abs(Int(bytes[(y * width + x) * 4]) - background) > 20 { glyphPixels += 1 }
+            }
+        }
+        check(glyphPixels > 100, "\(name): visible central reference glyph exists before any async frame wait")
+        if let image = context.makeImage() {
+            try NSBitmapImageRep(cgImage: image).representation(using: .png, properties: [:])?
+                .write(to: root.appendingPathComponent("initial-glyph-\(name).png"))
+        }
     }
 
     private static func transitionReadiness(window: NSWindow, loading: WorkspaceLoadingView, root: URL,

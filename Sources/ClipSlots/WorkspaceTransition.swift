@@ -124,6 +124,38 @@ final class WorkspaceLoadingView: NSView {
         let times: [NSNumber]
         let duration: Double
     }
+    private struct Poster {
+        let dark: CGImage
+        let light: CGImage
+    }
+    private static var animationURL: URL? {
+        AgentBackgroundResources.pageURL?.deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("TapNowMotion/workspace-loading.webp")
+    }
+    // Retain only one frame per theme between switches. The complete animation
+    // can still be released without leaving the next loading cover blank.
+    private static let poster: Poster? = {
+        guard let url = animationURL,
+              let source = CGImageSourceCreateWithURL(url as CFURL, nil),
+              let image = CGImageSourceCreateImageAtIndex(source, 0,
+                [kCGImageSourceShouldCacheImmediately: true] as CFDictionary) else { return nil }
+        let context = CIContext(options: [.cacheIntermediates: false, .workingColorSpace: NSNull()])
+        guard let light = adaptedLightFrame(image, context: context) else { return nil }
+        return Poster(dark: image, light: light)
+    }()
+    nonisolated private static func adaptedLightFrame(_ image: CGImage, context: CIContext) -> CGImage? {
+        // #ececec backdrop, #444444 glyph, preserving every intermediate shade.
+        let scale = -168.0 / 255
+        let adapted = CIImage(cgImage: image).applyingFilter("CIColorMatrix", parameters: [
+            "inputRVector": CIVector(x: scale, y: 0, z: 0, w: 0),
+            "inputGVector": CIVector(x: 0, y: scale, z: 0, w: 0),
+            "inputBVector": CIVector(x: 0, y: 0, z: scale, w: 0),
+            "inputAVector": CIVector(x: 0, y: 0, z: 0, w: 1),
+            "inputBiasVector": CIVector(x: 236.0 / 255, y: 236.0 / 255, z: 236.0 / 255, w: 0)
+        ])
+        return context.createCGImage(adapted, from: adapted.extent,
+            format: .RGBA8, colorSpace: CGColorSpace(name: CGColorSpace.sRGB))
+    }
     let symbol = CALayer()
     let envelope = CALayer()
     private(set) var frames: Frames?
@@ -143,6 +175,7 @@ final class WorkspaceLoadingView: NSView {
         layer?.addSublayer(envelope)
         envelope.addSublayer(symbol)
         symbol.contentsGravity = .resizeAspect
+        symbol.contents = Self.poster?.dark
         updateAppearance()
         setAccessibilityIdentifier("workspace-loading")
         setAccessibilityRole(.progressIndicator)
@@ -171,8 +204,7 @@ final class WorkspaceLoadingView: NSView {
     private func startPreparing() {
         guard frames == nil, preparation == nil else { return }
         preparationID = UUID()
-        let url = AgentBackgroundResources.pageURL?.deletingLastPathComponent().deletingLastPathComponent()
-            .appendingPathComponent("TapNowMotion/workspace-loading.webp")
+        let url = Self.animationURL
         preparation = Task.detached(priority: .userInitiated) {
             guard let url, let source = CGImageSourceCreateWithURL(url as CFURL, nil) else { return nil }
             let context = CIContext(options: [.cacheIntermediates: false, .workingColorSpace: NSNull()])
@@ -184,19 +216,7 @@ final class WorkspaceLoadingView: NSView {
                       let properties = CGImageSourceCopyPropertiesAtIndex(source, index, nil) as? [String: Any],
                       let webp = properties["{WebP}"] as? [String: Any],
                       let delay = (webp["UnclampedDelayTime"] ?? webp["DelayTime"]) as? NSNumber else { return nil }
-                // Match the reference light palette: #ececec backdrop and
-                // #444444 glyph. Map the complete grayscale range so the frame
-                // backdrop matches the overlay and soft gradients remain intact.
-                let scale = -168.0 / 255
-                let adapted = CIImage(cgImage: image).applyingFilter("CIColorMatrix", parameters: [
-                    "inputRVector": CIVector(x: scale, y: 0, z: 0, w: 0),
-                    "inputGVector": CIVector(x: 0, y: scale, z: 0, w: 0),
-                    "inputBVector": CIVector(x: 0, y: 0, z: scale, w: 0),
-                    "inputAVector": CIVector(x: 0, y: 0, z: 0, w: 1),
-                    "inputBiasVector": CIVector(x: 236.0 / 255, y: 236.0 / 255, z: 236.0 / 255, w: 0)
-                ])
-                guard let light = context.createCGImage(adapted, from: adapted.extent,
-                    format: .RGBA8, colorSpace: CGColorSpace(name: CGColorSpace.sRGB)) else { return nil }
+                guard let light = Self.adaptedLightFrame(image, context: context) else { return nil }
                 images.append(image); lightImages.append(light)
                 durations.append(max(0.01, delay.doubleValue))
             }
@@ -243,18 +263,19 @@ final class WorkspaceLoadingView: NSView {
         envelope.removeAllAnimations()
         CATransaction.commit()
         let reduced = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
-        if frames != nil { play(reduced: reduced) }
-        else {
+        play(reduced: reduced)
+        if frames == nil {
             Task { [weak self] in
                 guard let self else { return }
                 await self.prepareAnimation()
                 guard self.active, self.generation == ticket else { return }
-                self.play(reduced: reduced)
+                CATransaction.begin(); CATransaction.setDisableActions(true)
+                self.updateMorph()
+                CATransaction.commit()
             }
         }
     }
     private func play(reduced: Bool) {
-        guard frames != nil else { return }
         playbackReduced = reduced
         playbackStart = symbol.convertTime(CACurrentMediaTime(), from: nil)
         CATransaction.begin(); CATransaction.setDisableActions(true)
@@ -265,11 +286,16 @@ final class WorkspaceLoadingView: NSView {
         let pulse = CAKeyframeAnimation(keyPath: "transform.scale")
         pulse.values = [0.95, 1.05, 0.95]; pulse.keyTimes = [0, 0.5, 1]
         pulse.duration = 2; pulse.repeatCount = .infinity
+        pulse.beginTime = playbackStart
         pulse.timingFunctions = Array(repeating: CAMediaTimingFunction(controlPoints: 0.42, 0, 0.58, 1), count: 2)
         symbol.add(pulse, forKey: "pulse")
     }
     private func updateMorph() {
-        guard let frames else { return }
+        guard let frames else {
+            symbol.contents = isLight ? Self.poster?.light : Self.poster?.dark
+            symbol.removeAnimation(forKey: "morph")
+            return
+        }
         let images = isLight ? frames.lightImages : frames.images
         guard let first = images.first else { return }
         symbol.contents = first
