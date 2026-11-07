@@ -6,10 +6,13 @@ import AVFoundation
 import AppKit
 
 public enum AgentAttachmentImport {
-    public static let maxBytes = 262_144
-    public static let maxFiles = 6
-    public static let maxImageBytes = 1_048_576
-    public static let maxTotalImageBytes = 2_097_152
+    // Import memory bounds, not claims about every provider's capabilities.
+    // The encoded request is checked separately, including conversation history.
+    public static let maxBytes = 1_048_576
+    public static let maxFiles = 600
+    public static let maxImageBytes = 32 * 1024 * 1024
+    public static let maxTotalImageBytes = 64 * 1024 * 1024
+    private static let maxPDFBytes = 32 * 1024 * 1024
     private static let imageTypes = [
         "public.png": "image/png", "public.jpeg": "image/jpeg",
         "org.webmproject.webp": "image/webp", "com.compuserve.gif": "image/gif"
@@ -35,7 +38,8 @@ public enum AgentAttachmentImport {
         guard fstat(fd, &info) == 0, info.st_mode & S_IFMT == S_IFREG else { throw ImportError.unsupported }
         let isImage = imageName != nil || ["png", "jpg", "jpeg", "webp", "gif"].contains(url.pathExtension.lowercased())
         let isVideo = ["mp4", "mov", "m4v"].contains(url.pathExtension.lowercased())
-        let limit = isImage ? maxImageBytes : (isVideo ? 24 * 1024 * 1024 : maxBytes)
+        let limit = isImage ? maxImageBytes : (isVideo ? 24 * 1024 * 1024
+            : (url.pathExtension.lowercased() == "pdf" ? maxPDFBytes : maxBytes))
         guard info.st_size <= limit else { throw ImportError.tooLarge }
         var data = Data(), buffer = [UInt8](repeating: 0, count: 8192)
         while true {
@@ -52,7 +56,7 @@ public enum AgentAttachmentImport {
         let text: String
         if url.pathExtension.lowercased() == "pdf" {
             guard let document = PDFDocument(data: data), !document.isLocked,
-                  document.pageCount <= 100 else { throw ImportError.unsupported }
+                  document.pageCount <= 500 else { throw ImportError.unsupported }
             var extracted = ""
             for index in 0..<document.pageCount {
                 extracted += "\n[页 \(index + 1)]\n" + (document.page(at: index)?.string ?? "")
@@ -114,7 +118,7 @@ public enum AgentAttachmentImport {
     public static func validate(_ files: [AgentAttachment]) throws {
         let frames = files.flatMap { $0.sampledFrames ?? [] }
         guard frames.allSatisfy({ $0.sampledFrames == nil && $0.imageSnapshot != nil }),
-              frames.count <= 18 else { throw ImportError.unsupported }
+              frames.count <= maxFiles else { throw ImportError.unsupported }
         guard files.count <= maxFiles,
               files.reduce(0, { $0 + ($1.textSnapshot?.utf8.count ?? 0) }) <= maxBytes,
               (files + frames).reduce(0, { $0 + ($1.imageSnapshot?.count ?? 0) }) <= maxTotalImageBytes else {
@@ -130,9 +134,16 @@ public enum AgentAttachmentImport {
         }
     }
 
-    public static func validateImageSupport(history: [AgentMessage], supported: Bool) throws {
+    public static func validateImageSupport(history: [AgentMessage], supported: Bool?, tika: Bool = false) throws {
         let files = history.filter(\.isWireVisible).flatMap(\.inputAttachments)
-        if files.contains(where: { $0.imageSnapshot != nil }) && !supported { throw ImportError.imageUnsupported }
+        if files.contains(where: { $0.imageSnapshot != nil }) && supported == false {
+            throw tika ? ImportError.tikaImageUnsupported : ImportError.imageUnsupported
+        }
+        let images = files.filter { $0.imageSnapshot != nil }
+        guard images.count <= maxFiles,
+              images.reduce(0, { $0 + ($1.imageSnapshot?.count ?? 0) }) <= maxTotalImageBytes else {
+            throw ImportError.tooLarge
+        }
         for message in history where message.isWireVisible {
             try validate(message.inputAttachments.filter { $0.imageSnapshot != nil })
         }
@@ -146,20 +157,23 @@ public enum AgentAttachmentImport {
               let width = props[kCGImagePropertyPixelWidth as String] as? Int,
               let height = props[kCGImagePropertyPixelHeight as String] as? Int,
               width > 0, height > 0, width <= 8192, height <= 8192,
-              width * height <= 25_000_000,
-              CGImageSourceCreateImageAtIndex(source, 0, nil) != nil else { return nil }
+              CGImageSourceCreateThumbnailAtIndex(source, 0, [
+                kCGImageSourceCreateThumbnailFromImageAlways: true,
+                kCGImageSourceThumbnailMaxPixelSize: 32
+              ] as CFDictionary) != nil else { return nil }
         return mime
     }
 
     public enum ImportError: LocalizedError {
-        case unavailable, unsupported, tooLarge, noText, imageUnsupported
+        case unavailable, unsupported, tooLarge, noText, imageUnsupported, tikaImageUnsupported
         public var errorDescription: String? {
             switch self {
             case .unavailable: return "附件内容不可读取，请重新添加文件。"
             case .unsupported: return "支持 UTF-8 文本、含文字 PDF、静态 PNG/JPEG/WebP/GIF，以及 120 秒内可解码的 MP4/MOV/M4V（三张抽帧，无音轨）。"
-            case .tooLarge: return "每轮最多 6 个附件、256 KB 文字；图片每张 1 MB、合计 2 MB；视频源文件最多 24 MB。"
+            case .tooLarge: return "附件超过 App 读取上限：600 个附件、1 MiB 文字；图片单张 32 MiB、合计 64 MiB；视频源文件 24 MiB。服务端另有请求与上下文限制。"
             case .noText: return "此 PDF 没有可提取文字，请先转换为文本。"
-            case .imageUnsupported: return "当前服务未明确声明此模型支持图片，请查询模型列表并选择支持图像的模型；Tika 暂不支持图片输入。"
+            case .imageUnsupported: return "当前接口或模型明确不支持图片输入，请选择支持图片的模型。"
+            case .tikaImageUnsupported: return "Tika 文字桥接暂不支持图片输入，请切换到支持图片的 API。"
             }
         }
     }

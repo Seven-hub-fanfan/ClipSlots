@@ -1,0 +1,352 @@
+#if DEBUG
+import AppKit
+import SwiftUI
+import WebKit
+import CryptoKit
+import ClipSlotsKit
+
+private actor FollowupConnectorHTTP: AgentMarketHTTP {
+    var requests: [(String, String)] = []
+    var delayStart = false
+    var sequence = 0
+    func delay() { delayStart = true }
+    func send(_ request: URLRequest) async throws -> (Data, Int) {
+        let path = request.url!.path, method = request.httpMethod ?? "GET"
+        requests.append((method, path))
+        let result: JSONValue
+        if path.hasSuffix("/auth-sessions") {
+            sequence += 1
+            if delayStart { try await Task.sleep(for: .milliseconds(150)) }
+            result = ["session_id": .string("fixture-\(sequence)"), "status": "pending",
+                      "authorization_url": "https://example.com/authorize"]
+        } else if path.contains("/auth-sessions/") {
+            result = ["status": "authenticated"]
+        } else if path.contains("/plugins/") {
+            result = ["plugin_name": .string(String(path.split(separator: "/").last!)),
+                      "connectors": [["connector_id": "notion"]]]
+        } else {
+            result = ["id": .string(String(path.split(separator: "/").last!)), "status": "disconnected"]
+        }
+        return (try JSONEncoder().encode(JSONValue.object(["code": 200, "data": result])), 200)
+    }
+}
+
+@MainActor enum AgentFollowupRegression {
+    static func run(root: URL, check: (Bool, String) -> Void) async throws {
+        // Minimal LevelDB fixture; no live account or provider credentials.
+        func varint(_ input: UInt64) -> [UInt8] {
+            var value = input, out: [UInt8] = []
+            repeat { let b = UInt8(value & 127); value >>= 7; out.append(b | (value == 0 ? 0 : 128)) } while value > 0
+            return out
+        }
+        func little(_ value: UInt64, _ count: Int) -> [UInt8] { (0..<count).map { UInt8((value >> ($0 * 8)) & 255) } }
+        func log(_ bytes: [UInt8]) -> Data { Data([0,0,0,0] + little(UInt64(bytes.count), 2) + [1] + bytes) }
+        let home = root.appendingPathComponent("connector-fixture-home")
+        let database = home.appendingPathComponent("Library/Application Support/@tap/desktop/Local Storage/leveldb")
+        try FileManager.default.createDirectory(at: database, withIntermediateDirectories: true)
+        try Data("MANIFEST-000001\n".utf8).write(to: database.appendingPathComponent("CURRENT"))
+        try log([2] + varint(64)).write(to: database.appendingPathComponent("MANIFEST-000001"))
+        let claims: JSONValue = ["sub": "followup-fixture", "exp": .number(Double(Int(Date().timeIntervalSince1970) + 3600))]
+        let payload = try JSONEncoder().encode(claims).base64EncodedString().replacingOccurrences(of: "=", with: "")
+        let key = Array("_tapnow://app".utf8) + [UInt8(0),1] + Array("access_token".utf8)
+        let value = [UInt8(1)] + Array(("header." + payload + ".signature").utf8)
+        var batch = little(2,8) + little(1,4)
+        batch += [1] + varint(UInt64(key.count)) + key
+        batch += varint(UInt64(value.count)) + value
+        try log(batch).write(to: database.appendingPathComponent("000064.log"))
+        guard let session = AgentMarketDesktopSession.read(home: home.path) else { throw AgentMarketSyncError.requiresLogin }
+        let http = FollowupConnectorHTTP()
+        let service = AgentMarketSyncService(root: root.appendingPathComponent("connector-cache"), http: http)
+        let names = ["unsplash", "frameio", "vimeo", "feishu", "lark", "notion", "slack",
+                     "linear", "asana", "descript", "atlassian", "baidupan", "airtable", "hubspot"]
+        let apps = names.map { name in
+            AgentMarketItem(["kind": "app", "name": .string(name), "connectors": [["connector_id": .string(name)]]])
+        }
+        var fixture = AgentMarketSnapshot(scope: session.scope, catalog: ["items": .array(apps.map(\.raw))])
+        fixture.managerCatalog = apps.map(\.raw)
+        fixture.connectors = names.filter { $0 != "vimeo" }.map { ["id": .string($0), "status": "disconnected"] }
+        let store = AgentMarketSyncStore(service: service, fixture: fixture, readsDesktop: false)
+        store.session = session
+        for app in apps {
+            try await store.startSourceConnection(app, fresh: true)
+            check(store.sourceConnectorID == app.name && store.sourceAuth?.externalURL != nil,
+                  "\(app.name): real connector_id shape reaches authorization")
+            try await store.pollSourceConnection()
+            check(store.sourceAuth?.status == "authenticated", "\(app.name): session polling completes")
+            check(try await store.finishSourceConnection(), "\(app.name): completed consent admits local grant")
+            try await store.cancelSourceConnection(reset: false)
+        }
+        check(await http.requests.contains { $0 == ("GET", "/api/agent-gateway/v1/connectors/vimeo") },
+              "connector missing from inventory is resolved from provider endpoint")
+        let before = await http.requests.count
+        try await store.startSourceConnection(apps[0])
+        check(await http.requests.count == before && store.connectingItem?.id == apps[0].id,
+              "already authorized application does not restart consent")
+        try await store.cancelSourceConnection(reset: false)
+        let invalid = AgentMarketItem(["kind":"app", "name":"invalid", "connectors":[["display_name":"Unknown"]]])
+        check(!store.applicationAuthorizationReady(invalid), "invalid connector never becomes authorized through empty allSatisfy")
+        do { try await store.startSourceConnection(invalid); check(false, "invalid declaration rejected") }
+        catch { check(await http.requests.count == before, "invalid declaration fails before network") }
+        let native = AgentMarketItem(["kind":"app", "name":"creative", "connectors":[]])
+        try await store.startSourceConnection(native)
+        check(store.sourceAuth == nil && store.connectingItem?.id == native.id,
+              "app without external connector goes directly to local tools")
+        try await store.cancelSourceConnection(reset: false)
+        store.snapshot?.connectors = []
+        let multiple = AgentMarketItem(["kind":"app", "name":"multiple",
+            "connectors":[["connector_id":"slack"],["connector_id":"notion"]]])
+        try await store.startSourceConnection(multiple)
+        try await store.pollSourceConnection()
+        check(try await !store.finishSourceConnection() && store.sourceConnectorID == "notion",
+              "second connector starts after first consent")
+        try await store.pollSourceConnection()
+        check(try await store.finishSourceConnection() && store.applicationAuthorizationReady(multiple),
+              "multi-connector app waits for every consent")
+        try await store.cancelSourceConnection(reset: false)
+        let stale = AgentMarketItem(["kind":"app", "name":"slack", "connectors":[]])
+        try await store.startSourceConnection(stale)
+        check(store.sourceConnection?.connectorIDs == ["slack"], "manager catalog replaces stale detail connector list")
+        try await store.cancelSourceConnection(reset: false)
+        let unresolved = AgentMarketItem(["kind":"app", "name":"unresolved"])
+        try await store.startSourceConnection(unresolved)
+        check(store.sourceConnection?.connectorIDs == ["notion"], "missing connector declaration resolves fresh plugin detail")
+        try await store.cancelSourceConnection(reset: false)
+        store.snapshot?.connectors = []
+        await http.delay()
+        let pending = Task { try await store.startSourceConnection(apps[0], fresh: true) }
+        try await Task.sleep(for: .milliseconds(40))
+        check(store.sourceAuth == nil, "new authorization cannot reuse completed challenge from previous connector")
+        try await store.cancelSourceConnection(reset: false)
+        _ = try? await pending.value
+        check(store.sourceAuth == nil && store.sourceConnection == nil, "cancel discards late authorization response")
+        for (model, backend, icon) in [("deepseek-reasoner", AgentBackendKind.deepseek, "deepseek"),
+                                      ("DEEPSEEK-v4", .gateway, "deepseek"),
+                                      ("gpt-5", .deepseek, "circle.hexagongrid"),
+                                      ("gpt-5", .gateway, "cpu"), ("Tika Agent", .tika, "circle.hexagongrid")] {
+            check(AgentModelPresentation(name: model, backend: backend).icon == icon,
+                  "\(model): editor and sidebar share model artwork rule")
+        }
+        try await editorPresentation(check: check)
+        let window = NSWindow(contentRect: NSRect(x: 100, y: 100, width: 480, height: 360),
+                              styleMask: [.titled], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        let loading = WorkspaceLoadingView(frame: NSRect(x: 0, y: 0, width: 480, height: 360))
+        window.contentView = loading; window.makeKeyAndOrderFront(nil)
+        await loading.prepareAnimation()
+        loading.layoutSubtreeIfNeeded(); loading.show(title: "正在准备画布")
+        check(loading.symbol.bounds.size == CGSize(width: 64, height: 64)
+              && loading.envelope.position == CGPoint(x: 240, y: 180), "canvas loader centered at exact TapNow size")
+        check(loading.frames?.images.count == 86 && abs((loading.frames?.duration ?? 0) - 3.44) < 0.001,
+              "all 86 original WebP frames retain 40ms timing")
+        if let url = AgentBackgroundResources.pageURL?.deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("TapNowMotion/workspace-loading.webp") {
+            let digest = SHA256.hash(data: try Data(contentsOf: url)).map { String(format: "%02x", $0) }.joined()
+            check(digest == "e90e059cd2c39b8c739a2e00f25fbed5f3e322a69dfe26be4b17d5ea93c798e0",
+                  "canvas loader uses byte-identical TapNow artwork including alpha gradients")
+        } else { check(false, "original loading asset exists") }
+        if !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
+            check((loading.symbol.animation(forKey: "morph") as? CAKeyframeAnimation)?.values?.count == 87
+                  && (loading.symbol.animation(forKey: "pulse") as? CAKeyframeAnimation)?.duration == 2,
+                  "morph frames loop with the original two-second scale pulse")
+            check((loading.layer?.animation(forKey: "visibility") as? CABasicAnimation)?.duration == 1
+                  && (loading.envelope.animation(forKey: "reveal") as? CABasicAnimation)?.duration == 0.3,
+                  "outer fade and inner reveal match the actual canvas component")
+        }
+        if ProcessInfo.processInfo.environment["CLIPSLOTS_FOLLOWUP_STATIC_ONLY"] != "1" {
+            try await transitionRuntime(window: window, loading: loading, root: root, check: check)
+        }
+        loading.hide(); loading.show(title: "再次切换")
+        try await Task.sleep(for: .milliseconds(1100))
+        check(loading.layer?.opacity == 1, "late hide does not remove restarted transition")
+        loading.hide()
+        check(loading.hitTest(.zero) == nil, "fade-out immediately releases input interception")
+        try await Task.sleep(for: .milliseconds(1100))
+        check(loading.symbol.animationKeys()?.isEmpty != false && loading.frames == nil,
+              "hidden transition releases animation and input interception")
+        window.close()
+    }
+
+    private static func transitionRuntime(window: NSWindow, loading: WorkspaceLoadingView, root: URL,
+                                          check: (Bool, String) -> Void) async throws {
+        window.level = .floating
+        window.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+        for _ in 0..<75 {
+            if window.occlusionState.contains(.visible) { break }
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        check(window.occlusionState.contains(.visible), "transition runtime window is visible")
+        var samples: [[String: Double]] = []
+        if !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
+            let start = CACurrentMediaTime()
+            var uniqueFrames = Set<Int>()
+            while CACurrentMediaTime() - start < 2.1 {
+                await CanvasDisplayClock.shared.nextFrame()
+                guard let presentation = loading.symbol.presentation() else { continue }
+                if let image = presentation.contents {
+                    uniqueFrames.insert(ObjectIdentifier(image as AnyObject).hashValue)
+                }
+                samples.append(["time": CACurrentMediaTime() - start, "scale": presentation.transform.m11,
+                                "opacity": Double(loading.layer?.presentation()?.opacity ?? 0)])
+            }
+            let duration = (samples.last?["time"] ?? 0) - (samples.first?["time"] ?? 0)
+            let scales = samples.compactMap { $0["scale"] }
+            check(samples.count >= 60 && duration > 2, "visible compositor yields sustained transition samples")
+            check(uniqueFrames.count >= 35, "visible native compositor advances through original morph frames")
+            check((scales.min() ?? 0) >= 0.949 && (scales.max() ?? 2) <= 1.051
+                  && (scales.max() ?? 0) - (scales.min() ?? 0) > 0.09,
+                  "runtime scale pulse spans the original 0.95–1.05 range")
+            check((samples.last?["opacity"] ?? 0) > 0.999, "one-second black backdrop fade reaches full opacity")
+        }
+        for appearance in [NSAppearance.Name.aqua, .darkAqua] {
+            window.appearance = NSAppearance(named: appearance)
+            try await Task.sleep(for: .milliseconds(100))
+            if let image = CGWindowListCreateImage(.null, .optionIncludingWindow, CGWindowID(window.windowNumber),
+                                                   [.boundsIgnoreFraming, .bestResolution]) {
+                try NSBitmapImageRep(cgImage: image).representation(using: .png, properties: [:])?
+                    .write(to: root.appendingPathComponent("transition-\(appearance.rawValue).png"))
+            }
+        }
+        window.setContentSize(NSSize(width: 620, height: 400))
+        loading.layoutSubtreeIfNeeded()
+        check(loading.envelope.position == CGPoint(x: 310, y: 200)
+              && loading.symbol.bounds.size == CGSize(width: 64, height: 64),
+              "resizing keeps the 64px morph animation centered")
+        try JSONSerialization.data(withJSONObject: ["samples": samples,
+            "reference": "TapNow loading-overlay-CfKK9qM2.js / loading-BWU_g4Wm.webp",
+            "scope": "Native presentation-layer timing; not a recording of TapNow's live transition"],
+            options: [.prettyPrinted, .sortedKeys])
+            .write(to: root.appendingPathComponent("transition-runtime.json"))
+    }
+
+    private static func editorPresentation(check: (Bool, String) -> Void) async throws {
+        let defaults = UserDefaults.standard
+        let keys = [AgentBackendScope.sidebar.preferenceKey, AgentGatewayPreferences.modelKey]
+        let saved = keys.map { defaults.object(forKey: $0) }
+        defer {
+            for (key, value) in zip(keys, saved) {
+                if let value { defaults.set(value, forKey: key) } else { defaults.removeObject(forKey: key) }
+            }
+        }
+        let group = SpecialSlot(id: "icon-fixture", name: "Fixture", sourceType: .manual,
+                                createdAt: Date(), updatedAt: Date())
+        let model = try SlotEditorModel(snapshot: .init(slot: 1, group: group, pageName: "Fixture",
+            content: SlotContent(items: [[PasteboardItem(type: "public.utf8-plain-text", data: Data("Fixture".utf8))]])))
+        let window = NSWindow(contentRect: NSRect(x: 20, y: 20, width: 1000, height: 700),
+                              styleMask: [.titled], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        let host = NSHostingView(rootView: SlotTextEditorSheet(model: model,
+            onFullScreen: {}, onSave: {}, onCancel: {}))
+        window.contentView = host; window.makeKeyAndOrderFront(nil)
+        try await Task.sleep(for: .milliseconds(150))
+        for (name, icon) in [("deepseek-v4-pro", "deepseek"), ("gpt-5", "cpu")] {
+            defaults.set(name, forKey: AgentGatewayPreferences.modelKey)
+            AgentBackendCoordinator.setKind(.gateway, for: .sidebar)
+            NotificationCenter.default.post(name: UserDefaults.didChangeNotification, object: defaults)
+            try await Task.sleep(for: .milliseconds(150))
+            check(model.modelName == name && model.modelPresentation.icon == icon,
+                  "open editor reacts to \(name) preference notifications without reopening")
+            let indicator = NativeAccessibilityProbe.elements(host).first { $0.accessibilityIdentifier?() == "slot-editor-model" }
+            check(indicator?.accessibilityLabel?() == "当前模型：" + name,
+                  "\(name): mounted editor indicator and accessible model name update together")
+        }
+        window.close()
+    }
+
+    static func settings(window: NSWindow, web: AgentLineHostWebView, root: URL,
+                         check: (Bool, String) -> Void) async {
+        window.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+        var delivered = 0
+        let monitor = NSEvent.addLocalMonitorForEvents(matching: .scrollWheel) { event in
+            if event.window === window { delivered += 1 }
+            return event
+        }
+        defer { if let monitor { NSEvent.removeMonitor(monitor) } }
+        for name in ["claude", "gemini", "gpt", "deepseek", "grok", "kimi"] {
+          var nativeGestureTravel: CGFloat = 0
+          // Quartz-injected momentum is ignored inconsistently by NSScrollView
+          // itself. Exercise AppKit's actual deceleration from ended gestures.
+          for kind in ["native-gesture", "wheel", "gesture"] {
+            let raw = try? await web.evaluateJavaScript("(()=>{const r=document.querySelector('#picker .\(name)').getBoundingClientRect();return {x:r.x+r.width/2,y:r.y+r.height/2}})()")
+            guard let point = raw as? [String: Double], let x = point["x"], let y = point["y"] else {
+                check(false, name + ": card DOM located"); continue
+            }
+            var ancestor = web.superview
+            while ancestor != nil && !(ancestor is NSScrollView) { ancestor = ancestor?.superview }
+            guard let scroll = ancestor as? NSScrollView else {
+                check(false, name + ": outer settings scroll exists"); continue
+            }
+            // Leave a margin above the fixed footer. scrollToVisible on the
+            // nested WebView alone can put a bottom card behind that footer.
+            scroll.contentView.scroll(to: .zero)
+            scroll.reflectScrolledClipView(scroll.contentView)
+            let pointInClip = scroll.contentView.convert(NSPoint(x: x, y: y), from: web)
+            let maxY = max(0, (scroll.documentView?.bounds.height ?? 0) - scroll.contentView.bounds.height)
+            let revealY = min(maxY, max(0, pointInClip.y - scroll.contentView.bounds.height + 100))
+            scroll.contentView.scroll(to: NSPoint(x: 0, y: revealY))
+            scroll.reflectScrolledClipView(scroll.contentView)
+            try? await Task.sleep(for: .milliseconds(120))
+            let control = kind.hasPrefix("native-")
+            let location = control
+                ? scroll.contentView.convert(NSPoint(x: scroll.contentView.bounds.minX + 4,
+                                                     y: scroll.contentView.bounds.midY), to: nil)
+                : web.convert(NSPoint(x: x, y: y), to: nil)
+            let hit = window.contentView?.hitTest(window.contentView!.convert(location, from: nil))
+            let hitsWeb = hit === web || hit?.isDescendant(of: web) == true
+            check(control ? (!hitsWeb && hit?.isDescendant(of: scroll) == true) : hitsWeb,
+                  name + "/" + kind + ": input location hits the intended visible surface")
+            let screen = window.convertPoint(toScreen: location)
+            let before = scroll.contentView.bounds.origin.y
+            let receipt = "scroll-receipt-\(UUID().uuidString).json"
+            let request: [String: Any] = ["pid": getpid(), "window": window.windowNumber,
+                "x": screen.x, "y": (NSScreen.screens.first?.frame.maxY ?? 0) - screen.y,
+                "receipt": receipt, "delta": -48, "kind": kind]
+            try? JSONSerialization.data(withJSONObject: request)
+                .write(to: root.appendingPathComponent("scroll-request.json"), options: .atomic)
+            var acknowledged = false
+            for _ in 0..<100 {
+                if let data = try? Data(contentsOf: root.appendingPathComponent(receipt)),
+                   let result = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                    acknowledged = result["success"] as? Bool == true
+                    break
+                }
+                try? await Task.sleep(for: .milliseconds(50))
+            }
+            // AppKit synthesizes deceleration after a phase-ended event. Let
+            // it finish before resetting the next fixture's clip origin.
+            var stable = 0, previous = scroll.contentView.bounds.origin.y
+            for _ in 0..<60 {
+                try? await Task.sleep(for: .milliseconds(50))
+                let current = scroll.contentView.bounds.origin.y
+                stable = abs(current - previous) < 0.01 ? stable + 1 : 0
+                previous = current
+                if stable >= 4 { break }
+            }
+            let delta = scroll.contentView.bounds.origin.y - before
+            check(acknowledged, name + "/" + kind + ": external input targets the correct native window")
+            check(stable >= 4, name + "/" + kind + ": native deceleration settles before next input")
+            if kind == "native-gesture" { nativeGestureTravel = delta }
+            let correctTravel: Bool
+            switch kind {
+            case "wheel": correctTravel = abs(delta - 48) < 1
+            case "gesture":
+                // More travel than the 48px input proves actual deceleration.
+                // Compare to native padding, allowing scheduler-dependent speed.
+                correctTravel = delta > 72 && nativeGestureTravel > 72
+                    && abs(delta - nativeGestureTravel) / nativeGestureTravel < 0.35
+            default: correctTravel = delta > 0
+            }
+            check(correctTravel, name + "/" + kind + ": travel matches native control and input semantics")
+            print("SCROLL \(name)/\(kind) before=\(before) after=\(scroll.contentView.bounds.origin.y) delivered=\(delivered) location=\(location)")
+            scroll.contentView.scroll(to: .zero); scroll.reflectScrolledClipView(scroll.contentView)
+          }
+        }
+        if let image = CGWindowListCreateImage(.null, .optionIncludingWindow, CGWindowID(window.windowNumber),
+                                               [.boundsIgnoreFraming, .bestResolution]) {
+            try? NSBitmapImageRep(cgImage: image).representation(using: .png, properties: [:])?
+                .write(to: root.appendingPathComponent("agent-settings-followup.png"))
+        }
+    }
+}
+#endif

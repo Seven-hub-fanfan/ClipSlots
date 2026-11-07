@@ -118,24 +118,19 @@ struct CanvasFloatingToolbar: View, Equatable {
 
             Button { isHistoryOpen.toggle() } label: {
                 Image(systemName: "clock.arrow.circlepath")
-                    .font(.system(size: 12, weight: .medium))
-                    .foregroundColor(isHistoryOpen ? AppTheme.chromeAccentInk : AppTheme.canvasChromeSecondaryInk)
-                    .frame(width: 28, height: 24)
-                    .background(
-                        RoundedRectangle(cornerRadius: 7, style: .continuous)
-                            .fill(isHistoryOpen ? AppTheme.chromeAccentSoftFill : Color.clear)
-                    )
-                    .contentShape(Rectangle())
+                    .font(.system(size: 14, weight: .medium))
+                    .frame(width: 34)
             }
-            .buttonStyle(.plain)
+            .buttonStyle(CompactActionStyle(selected: isHistoryOpen, iconOnly: true))
+            .accessibilityLabel("操作历史")
+            .accessibilityIdentifier("canvas-tool-history")
             .help("操作历史（⌘Z 撤销 / ⇧⌘Z 重做）")
             .popover(isPresented: $isHistoryOpen, arrowEdge: .top) {
                 CanvasHistoryPanel(canvas: canvas)
             }
         }
-        .padding(.horizontal, 6)
-        .padding(.vertical, 5)
-        .floatingSurface(cornerRadius: 13)
+        .padding(6)
+        .floatingSurface(cornerRadius: 16)
     }
 
     private var separator: some View {
@@ -147,16 +142,13 @@ struct CanvasFloatingToolbar: View, Equatable {
     private func toolButton(_ tool: CanvasTool, isActive: Bool, action: @escaping () -> Void) -> some View {
         Button(action: action) {
             Image(systemName: tool.symbolName)
-                .font(.system(size: 12, weight: .medium))
-                .foregroundColor(isActive ? AppTheme.chromeAccentInk : AppTheme.canvasChromeSecondaryInk)
-                .frame(width: 28, height: 24)
-                .background(
-                    RoundedRectangle(cornerRadius: 7, style: .continuous)
-                        .fill(isActive ? AppTheme.chromeAccentSoftFill : Color.clear)
-                )
-                .contentShape(Rectangle())
+                .font(.system(size: 14, weight: .medium))
+                .frame(width: 34)
         }
-        .buttonStyle(.plain)
+        .buttonStyle(CompactActionStyle(selected: isActive, iconOnly: true))
+        .accessibilityLabel(tool.title)
+        .accessibilityIdentifier("canvas-tool-\(tool.rawValue)")
+        .accessibilityAddTraits(isActive ? [.isSelected] : [])
         .help(tool.hint.map { "\(tool.title)（\(tool.shortcut)）· \($0)" } ?? "\(tool.title)（\(tool.shortcut)）")
     }
 }

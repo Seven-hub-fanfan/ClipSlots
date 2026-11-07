@@ -272,7 +272,7 @@ public actor AgentGatewayBackend: AgentGatewaySteering {
     private func invoke(resuming: Bool, history: [AgentMessage], config: AgentConfig,
                         tools: AgentToolExecuting?,
                         onEvent: @escaping @Sendable (AgentRunEvent) async -> Void) async throws -> [AgentMessage] {
-        try AgentAttachmentImport.validateImageSupport(history: history, supported: config.supportsImageInput == true)
+        try AgentAttachmentImport.validateImageSupport(history: history, supported: config.resolvedImageSupport)
         guard !busy, !controlling, !hotControl else { throw AgentGatewayError.busy }
         try validateConfiguration()
         try retainJournalLock()
@@ -357,7 +357,7 @@ public actor AgentGatewayBackend: AgentGatewaySteering {
                 // Re-encoding reference JSON can change its embedded text
                 // bytes. Continue must carry the exact content already placed.
                 content = saved
-            } else { content = message.wirePayload(supportsImages: config.supportsImageInput == true) }
+            } else { content = message.wirePayload(supportsImages: config.permitsImageInput) }
             // Local attachment paths and endpoint credentials do not belong in
             // this contract. Authorized textual references use wireContent.
             var fields: [String: JSONValue] = [
@@ -383,7 +383,7 @@ public actor AgentGatewayBackend: AgentGatewaySteering {
         }
         let key = UUID().uuidString
         journal.wireMessageOffset = messages.count + 1 - journal.messages.count
-        journal.steerSupportsImages = config.supportsImageInput == true
+        journal.steerSupportsImages = config.permitsImageInput
         let bindingValue = try value(binding)
         let body: JSONValue = .object([
             "schemaVersion": 1, "messageSchemaVersion": 1,
@@ -392,7 +392,7 @@ public actor AgentGatewayBackend: AgentGatewaySteering {
             "history": .array(messages),
             "config": .object(["model": .string(config.model), "systemPrompt": .string(config.systemPrompt),
                                "thinkingMode": .string(config.thinkingMode.rawValue),
-                               "supportsImageInput": .bool(config.supportsImageInput == true),
+                               "supportsImageInput": .bool(config.permitsImageInput),
                                "taskPolicy": .string(config.taskPolicy.rawValue),
                                "maxToolRounds": .number(Double(config.maxToolRounds))]),
             "tools": .array(specs.map(\.wireValue))

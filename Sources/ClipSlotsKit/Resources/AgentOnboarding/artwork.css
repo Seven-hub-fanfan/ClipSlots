@@ -1,0 +1,20 @@
+:root{color-scheme:light;--box:#42bdfa;--box-text:#06344a;font-family:-apple-system,BlinkMacSystemFont,"PingFang SC",sans-serif}
+:root[data-theme=dark]{color-scheme:dark}
+*{box-sizing:border-box}html,body{margin:0;background:transparent;overflow:hidden;width:100%;height:100%}
+[hidden]{display:none!important}button{font:inherit;border:0;cursor:pointer}
+.provider-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
+.brand-card{position:relative;height:172px;overflow:hidden;min-width:0;border-radius:12px;background:var(--card-bg);color:var(--card-ink);isolation:isolate;padding:0;touch-action:pan-y;border:1px solid rgb(0 0 0 / 4%)}
+.brand-card:focus-visible{outline:2px solid #4b8de8;outline-offset:-3px}
+.claude{--card-bg:#efe8df;--card-ink:#38291f;--line:#bf684c;--thin-opacity:.31}
+.gemini{--card-bg:#175bed;--card-ink:#f1f6ff;--line:#d2eaff;--thin-opacity:.30}
+.gpt{--card-bg:#ffffff;--card-ink:#151515;--line:#151515;--thin-opacity:.34}
+.deepseek{--card-bg:#e9eefb;--card-ink:#163374;--line:#4166ea;--thin-opacity:.31}
+.grok{--card-bg:#0d0e10;--card-ink:#f4f4f2;--line:#fafaf8;--thin-opacity:.27}
+.kimi{--card-bg:#edf0f4;--card-ink:#20252e;--line:#20252e;--thin-opacity:.24}
+.brand-card canvas{position:absolute;inset:0;width:100%;height:100%;display:block;opacity:1}
+.brand-heading{position:absolute;left:13px;top:12px;display:flex;align-items:center;gap:6px;font-size:12px;font-weight:550;pointer-events:none;z-index:1}
+.claude .brand-heading{color:var(--line)}
+.brand-icon{width:13px;height:13px}.brand-icon svg{display:block;fill:currentColor;width:100%;height:100%}
+.brand-footer{position:absolute;bottom:12px;left:13px;right:13px;display:flex;align-items:center;justify-content:space-between;font-size:10px;z-index:1;pointer-events:none;opacity:.75}
+.demo-pointer{display:none;position:absolute;pointer-events:none}
+#heroes,.hero-field{width:100%;height:100%}.hero-field{border:0;border-radius:10px}

@@ -333,7 +333,7 @@ enum LargeLibraryRegression {
         searchPanel.isReleasedWhenClosed = false
         let searchHost = NSHostingView(rootView: GlobalSearchResultsView(results: hits,
             currentPageId: store.currentPageId, currentGroupId: store.currentSpecialSlotId,
-            onJump: { _ in }, sortRule: .constant(.smart), loadPreview: { result in
+            onJump: { _ in }, sortRule: .constant(.smart), selectionModel: SearchResultSelection(), loadPreview: { result in
                 await Task.detached {
                     SpecialSlotStorage.shared.get(result.slot, in: result.groupId)
                 }.value

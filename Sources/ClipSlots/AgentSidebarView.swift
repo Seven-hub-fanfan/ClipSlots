@@ -34,6 +34,7 @@ struct AgentSidebarView: View {
     var isReadOnly = false
     var entryMounts: CanvasNodeMountQueue?
     var credentialStateProvider: (() async -> (hasKey: Bool, error: AgentKeychainError?))?
+    var connectionController: AgentConnectionController?
     var marketSync: AgentMarketSyncStore = .shared
     @State private var showLegacyCanvas = false
     @State private var showLegacyEdit = false
@@ -63,6 +64,15 @@ struct AgentSidebarView: View {
     }
     @State private var showConfig = false
     @State private var credentialNotice: String?
+    private enum CredentialState { case checking, missing, blocked, ready }
+    @State private var credentialState = CredentialState.checking
+    @State private var credentialRevision = 0
+    @State private var retryCredentialAccess = false
+    private var showsConnectionPanel: Bool {
+        !isReadOnly && backendKind == .deepseek && model.requiresAPIKey && credentialState != .ready
+    }
+    private var backendScope: AgentBackendScope { model.usesWorkspaceBackend ? .workspace : .sidebar }
+    private var directProfile: ModelProfile? { AgentBackendCoordinator.directProfile(for: backendScope) }
     @State private var showSkillPicker = false
     @State private var showAppMarket = false
     @State private var showSourceConnector = false
@@ -106,7 +116,7 @@ struct AgentSidebarView: View {
     private var modelLabel: String {
         switch backendKind {
         case .tika: return "Tika Agent"
-        case .deepseek: return ModelConfigurationBridge.profile(.agent)?.model ?? modelName
+        case .deepseek: return directProfile?.model ?? modelName
         case .gateway:
             return UserDefaults.standard.string(forKey: AgentGatewayPreferences.modelKey)
                 ?? AgentGatewayPreferences.defaultModel
@@ -133,7 +143,54 @@ struct AgentSidebarView: View {
             section("header", height: 64) {
                 if !isFullPage || !model.isEmpty || onToggleExpanded != nil { header }
             }
-            section("transcript") { transcript }
+            section("transcript") {
+                if showsConnectionPanel {
+                    ScrollView {
+                        VStack(spacing: 0) {
+                            if let credentialNotice {
+                                HStack(spacing: 8) {
+                                    Image(systemName: "key.horizontal")
+                                        .font(.system(size: 12))
+                                        .foregroundColor(TapSkin.secondaryInk)
+                                        .accessibilityHidden(true)
+                                    Text("需授权访问密钥")
+                                        .font(.system(size: 11))
+                                        .foregroundColor(TapSkin.secondaryInk)
+                                        .lineLimit(1)
+                                        .help(credentialNotice)
+                                        .accessibilityIdentifier("agent-sidebar-credential-notice")
+                                    Spacer(minLength: 0)
+                                    Button("重新授权") {
+                                        retryCredentialAccess = true
+                                        credentialRevision += 1
+                                    }
+                                        .font(.system(size: 11, weight: .medium))
+                                        .foregroundColor(TapSkin.ink)
+                                        .padding(.horizontal, 9).frame(height: 24)
+                                        .background(TapSkin.tone(0xffffff, 0x292929))
+                                        .clipShape(RoundedRectangle(cornerRadius: 6))
+                                        .overlay(RoundedRectangle(cornerRadius: 6)
+                                            .stroke(AppTheme.subtleBorder, lineWidth: 0.5))
+                                        .buttonStyle(.plain)
+                                        .accessibilityIdentifier("agent-sidebar-reauthorize")
+                                }
+                                .padding(.horizontal, 10).padding(.vertical, 4)
+                                .background(TapSkin.tone(0xf0f0ef, 0x1b1b1b))
+                                .clipShape(RoundedRectangle(cornerRadius: 9))
+                                .padding(.horizontal, 24).padding(.top, 12)
+                            }
+                            AgentConnectionPanelHost(scope: backendScope, controller: connectionController,
+                                onConnected: {
+                                    credentialState = .ready
+                                    credentialNotice = nil
+                                    model.reloadBackendSelection()
+                                    inputFocusRequest += 1
+                                })
+                        }
+                    }.frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+                } else { transcript }
+            }
+            if !showsConnectionPanel {
             section("input", height: 180) {
                 AgentConnectorPrompt(sync: marketSync) {
                     guard let item = marketSync.connectionPrompt else { return }
@@ -154,6 +211,7 @@ struct AgentSidebarView: View {
                 inputArea.frame(maxWidth: isFullPage ? 800 : .infinity)
                     .frame(maxWidth: .infinity)
                     .disabled(isReadOnly)
+            }
             }
         }
         }
@@ -200,7 +258,9 @@ struct AgentSidebarView: View {
                     .accessibilityIdentifier("agent-panel-resize")
             }
         }
-        .sheet(isPresented: $showConfig) { AgentConfigView(isWorkspace: model.usesWorkspaceBackend) }
+        .sheet(isPresented: $showConfig, onDismiss: { credentialRevision += 1 }) {
+            AgentConfigView(isWorkspace: model.usesWorkspaceBackend, openAdvanced: showsConnectionPanel)
+        }
         .sheet(isPresented: $showWorkflowLibrary, onDismiss: { inputFocusRequest += 1 }) {
             if let context = model.canvasContext { WorkflowSkillLibraryView(model: model, context: context) }
         }
@@ -240,9 +300,16 @@ struct AgentSidebarView: View {
             inputFocusRequest += 1
         }
         .onChange(of: backendKind) { _ in credentialNotice = nil }
-        .task(id: backendKind.rawValue + ":" + (ModelConfigurationBridge.profile(.agent)?.id ?? "")) {
+        .onReceive(NotificationCenter.default.publisher(for: AgentBackendCoordinator.backendChangedNotification)) { note in
+            guard AgentBackendCoordinator.scope(from: note).map({ $0 == backendScope }) ?? true else { return }
+            credentialRevision += 1
+        }
+        .task(id: backendKind.rawValue + ":" + (directProfile?.keyAccount ?? "") + ":\(credentialRevision)") {
             credentialNotice = nil
-            guard !isReadOnly, model.requiresAPIKey else { return }
+            guard !isReadOnly, model.requiresAPIKey else { credentialState = .ready; return }
+            credentialState = .checking
+            let retryAfterFailure = retryCredentialAccess
+            retryCredentialAccess = false
             #if DEBUG
             if credentialStateProvider == nil,
                Bundle.main.bundleIdentifier == "com.clipslots.app.canvas-v2174-test",
@@ -253,17 +320,17 @@ struct AgentSidebarView: View {
             let state: (hasKey: Bool, error: AgentKeychainError?)
             if let credentialStateProvider { state = await credentialStateProvider() }
             else {
-                let profile = backendKind == .deepseek ? ModelConfigurationBridge.profile(.agent) : nil
+                let profile = backendKind == .deepseek ? directProfile : nil
                 let result = await AgentKeychainProbe.keyState(service: profile?.keyService ?? AgentKeychain.service,
-                    account: profile?.keyAccount ?? AgentKeychain.account)
+                    account: profile?.keyAccount ?? AgentKeychain.account,
+                    retryAfterFailure: retryAfterFailure)
                 state = (result.hasKey, result.error)
             }
             guard !Task.isCancelled, model.requiresAPIKey else { return }
             credentialNotice = state.error?.localizedDescription
-            if !state.hasKey, state.error == nil {
-                if ModelConfigurationBridge.profile(.agent) != nil { credentialNotice = "请在模型 → 配置中心保存此模型的密钥。" }
-                else { showConfig = true }
-            }
+            // Failed reads remain unknown; only confirmed usable credentials
+            // admit the normal conversation UI.
+            credentialState = state.error != nil ? .blocked : state.hasKey ? .ready : .missing
         }
         .onDisappear { voice.cancel(); capture.cancel(); commitPanelWidth(); scrollTask?.cancel(); scrollTask = nil }
         .onAppear {
@@ -275,7 +342,8 @@ struct AgentSidebarView: View {
         .task { await marketSync.loadCached() }
         .onChange(of: model.needsConfiguration) { needs in
             guard needs, !isReadOnly else { return }
-            showConfig = true
+            if backendKind == .deepseek { credentialState = .missing }
+            else { showConfig = true }
             model.needsConfiguration = false
         }
         }
@@ -1515,9 +1583,13 @@ struct AgentSidebarView: View {
             config.model = modelLabel
             if let gatewayEndpoint = AgentGatewayPreferences.endpoint() { config.endpoint = gatewayEndpoint }
         }
-        config.supportsImageInput = backendKind != .tika && modelCatalog.supportsImages(
+        if backendKind == .deepseek, let profile = directProfile, let url = URL(string: profile.endpoint) {
+            config.endpoint = url
+            config.model = profile.model
+        }
+        config.supportsImageInput = backendKind == .tika ? false : modelCatalog.supportsImages(
             model: modelLabel,
-            endpoint: backendKind == .gateway ? AgentGatewayPreferences.endpoint() : URL(string: endpoint),
+            endpoint: config.endpoint,
             gateway: backendKind == .gateway)
         return config
     }
@@ -1529,15 +1601,7 @@ struct AgentSidebarView: View {
             showModelPicker.toggle()
             if showModelPicker { refreshModelCatalog() }
         } label: {
-            Group {
-                if modelLabel.lowercased().contains("deepseek") {
-                    AgentBrandIcon(identifier: "deepseek", size: 19)
-                } else {
-                    Image(systemName: backendKind == .gateway ? "cpu" : "circle.hexagongrid")
-                        .font(.system(size: 14))
-                }
-            }
-                .foregroundColor(TapSkin.ink)
+            AgentModelIndicator(presentation: .init(name: modelLabel, backend: backendKind))
                 .frame(width: 26, height: 30)
                 .background(showModelPicker ? TapSkin.subtleFill : .clear, in: Circle())
                 .contentShape(Rectangle())
@@ -1548,7 +1612,7 @@ struct AgentSidebarView: View {
             .accessibilityIdentifier("agent-model-picker")
             .agentModelPopover(isPresented: $showModelPicker) {
                 AgentSidebarModelPicker(options: agentModelOptions, selected: backendKind == .deepseek
-                    ? ModelConfigurationBridge.profile(.agent).map { "profile:" + $0.id } ?? modelLabel : modelLabel,
+                    ? directProfile.map { "profile:" + $0.id } ?? modelLabel : modelLabel,
                     loading: modelCatalog.isLoading, notice: modelCatalog.error, compactDetails: false,
                     refresh: refreshModelCatalog,
                     settings: { showModelPicker = false; showConfig = true },
@@ -1569,13 +1633,20 @@ struct AgentSidebarView: View {
                             let id = String(choice.dropFirst(8))
                             Task {
                                 await ModelWorkspaceStore.shared.setDefault(.agent, id: id)
+                                UserDefaults.standard.removeObject(forKey: AgentConnectionPreferences.key(scope: backendScope.rawValue))
                                 AgentBackendCoordinator.setKind(.deepseek, for: model.usesWorkspaceBackend ? .workspace : .sidebar)
                                 model.reloadBackendSelection()
                             }
                             inputFocusRequest += 1
                             return
                         }
-                        if backendKind == .deepseek { modelName = choice }
+                        if backendKind == .deepseek {
+                            if var profile = AgentConnectionPreferences.profile(scope: backendScope.rawValue) {
+                                profile.model = choice
+                                try? AgentConnectionPreferences.save(profile, scope: backendScope.rawValue)
+                                model.reloadBackendSelection()
+                            } else { modelName = choice }
+                        }
                         if backendKind == .gateway {
                             UserDefaults.standard.set(choice, forKey: AgentGatewayPreferences.modelKey)
                             model.reloadBackendSelection()
@@ -1587,13 +1658,18 @@ struct AgentSidebarView: View {
 
     private func refreshModelCatalog() {
         if backendKind == .tika { return }
-        if backendKind == .deepseek, ModelConfigurationBridge.profile(.agent) != nil { return }
+        if backendKind == .deepseek, directProfile != nil { return }
         let selectedEndpoint = backendKind == .gateway
             ? AgentGatewayPreferences.endpoint() : URL(string: endpoint)
         if let selectedEndpoint { modelCatalog.refresh(endpoint: selectedEndpoint, gateway: backendKind == .gateway) }
     }
 
     private var agentModelOptions: [AgentDiscoveredModel] {
+        if let profile = AgentConnectionPreferences.profile(scope: backendScope.rawValue), backendKind == .deepseek {
+            return [.init(id: profile.model, contextWindow: nil, supportsImages: profile.supportsImages,
+                          displayName: profile.name + " · " + profile.model,
+                          description: "在 Agent 设置中修改 API 与模型。")]
+        }
         let configured = ModelConfigurationBridge.agentProfiles().map { profile in
             AgentDiscoveredModel(id: "profile:" + profile.id, contextWindow: nil, supportsImages: profile.supportsImages,
                 displayName: profile.name, description: "\(profile.model) · \(profile.endpoint)")

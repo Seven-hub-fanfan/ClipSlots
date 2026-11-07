@@ -90,6 +90,7 @@ extension Notification.Name {
 struct ClipSlotsApp: App {
     init() {
         #if DEBUG
+        AgentOnboardingRegression.runIfRequested()
         AttachmentTransferRegression.runIfRequested()
         SlotEditorRegression.runIfRequested()
         CanvasNestedGroupRegression.runIfRequested()
@@ -179,6 +180,9 @@ struct ClipSlotsApp: App {
                 .onAppear {
                     AppearanceDefaults.ensureDefaultLightIfNeeded()
                     appDelegate.store = store
+                    #if DEBUG
+                    BatchStoragePerformanceRegression.primaryStore = store
+                    #endif
                     appDelegate.setupHotKeysAfterStoreReady()
                     store.installLocalHotkeyGuardIfNeeded()
                     // v2.9.8: 方案 Y — 每次启动检测辅助功能权限并引导。
@@ -714,6 +718,7 @@ final class SlotStoreObservable: ObservableObject {
     private var lastFileProgressUpdate: TimeInterval = 0
     #if DEBUG
     var fileImportPreferClone = true
+    var fileImportReferenceOnly = false
     var fileImportCopyProbe: ((Int64, Int64) throws -> Void)?
     #endif
 
@@ -759,10 +764,13 @@ final class SlotStoreObservable: ObservableObject {
         #if DEBUG
         let preferClone = fileImportPreferClone
         let probe = fileImportCopyProbe
+        var importedContent = content
+        if fileImportReferenceOnly { importedContent.managedBodyFiles = nil }
         #else
         let preferClone = true
+        let importedContent = content
         #endif
-        let prepared = try PreparedSlotBody(content: content, storageRoot: storage.storageRoot,
+        let prepared = try PreparedSlotBody(content: importedContent, storageRoot: storage.storageRoot,
             cancellation: cancellation, preferClone: preferClone) { [weak self] copied, total in
                 #if DEBUG
                 try probe?(copied, total)
@@ -771,7 +779,7 @@ final class SlotStoreObservable: ObservableObject {
                                      copied: copied, total: total)
             }
         return try slotWriteQueue.sync {
-            try storage.commitImportedBody(content, snapshot: snapshot, prepared: prepared, label: label)
+            try storage.commitImportedBody(importedContent, snapshot: snapshot, prepared: prepared, label: label)
         }
     }
     var canvasTextDocuments: [String: CanvasTextDocument] = [:]
@@ -1372,10 +1380,11 @@ final class SlotStoreObservable: ObservableObject {
                 if forceSlotRefresh {
                     // External editors may replace bodies without updating content.json.
                     // A verified external event must not be discarded by metadata equality.
+                    self.acceptPreviewFingerprints(snapshot.previews, groupID: activeId)
                     self.slots = snapshot.slots
                     self.labels = snapshot.labels
-                    ThumbnailProvider.shared.invalidateSpecialSlot(specialSlotId: activeId)
                 } else {
+                    self.acceptPreviewFingerprints(snapshot.previews, groupID: activeId)
                     self.applySlotsSnapshot(snapshot.slots, labels: snapshot.labels)
                 }
                 self.loadedSpecialSlotId = activeId
@@ -1510,6 +1519,7 @@ final class SlotStoreObservable: ObservableObject {
                         return
                     }
                     self.applySpecialSlotIndex(index)
+                    self.acceptPreviewFingerprints(snapshot.previews, groupID: id)
                     self.applySlotsSnapshot(snapshot.slots, labels: snapshot.labels)
                     self.loadedSpecialSlotId = id
                     self.pastedChainMembersByGroup.removeAll()
@@ -3982,6 +3992,63 @@ final class SlotStoreObservable: ObservableObject {
 
     // MARK: - Slot Loading
 
+    private struct PreviewFingerprint: Equatable {
+        let contentKey: String
+        let bytesAndSource: Int
+    }
+    // Retain the last observed source metadata across group switches so a
+    // same-path external edit also invalidates a cached preview on returning.
+    private var previewFingerprints: [String: [Int: PreviewFingerprint]] = [:]
+    private var previewRevisions: [String: [Int: Int]] = [:]
+
+    /// Rendering-only generation. Never used to authorize storage writes.
+    func slotPreviewRevision(_ slot: Int, groupID: String) -> Int {
+        previewRevisions[groupID]?[slot] ?? 0
+    }
+
+    private func acceptPreviewFingerprints(_ next: [Int: PreviewFingerprint], groupID: String) {
+        let previousGroup = previewFingerprints[groupID] ?? [:]
+        for (slot, fingerprint) in next {
+            // Normal writes already change thumbnailKey. Only an in-place
+            // external edit with unchanged metadata needs explicit invalidation.
+            if let previous = previousGroup[slot],
+               previous.contentKey == fingerprint.contentKey,
+               previous.bytesAndSource != fingerprint.bytesAndSource {
+                ThumbnailProvider.shared.invalidateSlot(specialSlotId: groupID, slot: slot)
+                previewRevisions[groupID, default: [:]][slot, default: 0] &+= 1
+            }
+        }
+        previewFingerprints[groupID] = next
+    }
+
+    /// Runs on the snapshot reader, before publishing. File metadata checks do
+    /// not read media bytes; rich-text/inline payloads are already in SlotContent.
+    private func previewFingerprint(_ content: SlotContent, slot: Int, groupID: String) -> PreviewFingerprint {
+        var hasher = Hasher()
+        for group in content.items {
+            hasher.combine(group.count)
+            for item in group { hasher.combine(item.type); hasher.combine(item.data) }
+        }
+        hasher.combine(content.htmlSource)
+        hasher.combine(content.manualThumbnailId)
+        var urls = content.detectedFileURLs
+        if content.hasManualThumbnail,
+           let url = canvasStorage(groupId: groupID).manualThumbnailURL(slot, in: groupID) { urls.append(url) }
+        for url in urls {
+            hasher.combine(url.path)
+            var info = stat()
+            let result = stat(url.path, &info)
+            hasher.combine(result)
+            if result == 0 {
+                hasher.combine(info.st_dev); hasher.combine(info.st_ino); hasher.combine(info.st_size)
+                hasher.combine(info.st_mtimespec.tv_sec); hasher.combine(info.st_mtimespec.tv_nsec)
+                hasher.combine(info.st_ctimespec.tv_sec); hasher.combine(info.st_ctimespec.tv_nsec)
+            }
+        }
+        return PreviewFingerprint(contentKey: content.thumbnailKey(specialSlotId: groupID, slot: slot),
+                                  bytesAndSource: hasher.finalize())
+    }
+
     func loadSlots() {
         let activeId = currentSpecialSlotId
         NSLog("[ClipSlots] loadSlots activeSpecialSlotId=\(activeId)")
@@ -3989,6 +4056,7 @@ final class SlotStoreObservable: ObservableObject {
         // 同步路径（init / 显式切组）保持原样：读完立即在主线程赋值 @Published。
         let snapshot = readSlotsSnapshot(for: activeId)
         // v2.10.52 (perf 第四批): 增量 diff 提交——快照与内存等价则跳过赋值，不触发重绘。
+        acceptPreviewFingerprints(snapshot.previews, groupID: activeId)
         applySlotsSnapshot(snapshot.slots, labels: snapshot.labels)
         loadedSpecialSlotId = activeId
     }
@@ -4026,6 +4094,7 @@ final class SlotStoreObservable: ObservableObject {
                 // v2.10.47: 丝滑切组——旧组内容一直显示到此刻（切组时未清空），新数据就绪后连同关闭
                 // 切组遮罩一起淡入替换（0.16s），消除「先闪空槽位」的中间态。onCommit 承接旧组缩略图缓存
                 // 失效等收尾（此时已切走旧内容，安全）。
+                self.acceptPreviewFingerprints(snapshot.previews, groupID: activeId)
                 self.applySlotsSnapshot(snapshot.slots, labels: snapshot.labels)
                 // v2.10.74: 新数据已提交——作废在途的 80ms 延迟置位（缓存命中不出现遮罩），
                 // 若遮罩已显示（真异步等待路径）则正常关闭。
@@ -4048,17 +4117,21 @@ final class SlotStoreObservable: ObservableObject {
     // P0-1 (v2.10.30): 逐槽磁盘读取（每次 get/getLabel 需拿跨进程 flock，最长阻塞 ~5s）。抽为纯函数
     // 返回局部字典，不做任何 @Published 赋值，便于在后台队列调用（见 reloadAllAsync），避免 watcher
     // 触发的 reload 在主线程上被 flock 阻塞导致 GUI 卡死（转圈）。
-    private func readSlotsSnapshot(for activeId: String) -> (slots: [Int: SlotContent], labels: [Int: String]) {
+    private func readSlotsSnapshot(for activeId: String) -> (slots: [Int: SlotContent], labels: [Int: String],
+                                                           previews: [Int: PreviewFingerprint]) {
         var result: [Int: SlotContent] = [:]
         var labelMap: [Int: String] = [:]
+        var previews: [Int: PreviewFingerprint] = [:]
         // P2-7 (v2.10.7): 配置损坏导致 config.slots==0 时，1...0 闭区间会 fatalError；改用 stride 空迭代。
         for slot in stride(from: 1, through: config.slots, by: 1) {
-            result[slot] = specialStorage.get(slot, in: activeId)
+            let content = specialStorage.get(slot, in: activeId)
+            result[slot] = content
+            previews[slot] = previewFingerprint(content, slot: slot, groupID: activeId)
             if let label = specialStorage.getLabel(slot, in: activeId), !label.isEmpty {
                 labelMap[slot] = label
             }
         }
-        return (result, labelMap)
+        return (result, labelMap, previews)
     }
 
     // MARK: - Slots snapshot commit (v2.10.52 · perf 第四批 · slots 增量 diff)

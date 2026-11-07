@@ -112,7 +112,6 @@ struct LeverClusterView: View {
 /// 局部观察 autoMode.autoAdvanceEnabled，翻动仅重绘本按钮。
 struct AutoAdvanceToggleView: View {
     @ObservedObject var autoMode: AutoModeState
-    @State private var isHovering = false
 
     var body: some View {
         let isOn = autoMode.autoAdvanceEnabled
@@ -125,17 +124,11 @@ struct AutoAdvanceToggleView: View {
                 Text("自动切换")
                     .font(.system(size: 12, weight: .semibold))
             }
-            .foregroundColor(isOn ? Neu.sliderInk : Neu.ink)
-            .padding(.horizontal, 10)
-            .frame(height: NeumorphicMetrics.actionHeight)
-            .contentShape(RoundedRectangle(cornerRadius: NeumorphicMetrics.actionRadius, style: .continuous))
         }
-        .buttonStyle(.plain)
-        .neuRaised(radius: NeumorphicMetrics.actionRadius,
-                   hovering: isHovering,
-                   fill: isOn ? Neu.selectedFill : nil)
+        .buttonStyle(CompactActionStyle(selected: isOn))
+        .accessibilityIdentifier("editor-auto-advance")
+        .accessibilityValue(isOn ? "开启" : "关闭")
         .animation(Anim.status, value: isOn)
-        .onHover { isHovering = $0 }
         .fixedSize()
         .help("开启后：自动存储/粘贴可跨组、跨页推进；关闭则只在当前组内循环")
     }

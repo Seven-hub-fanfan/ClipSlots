@@ -14,7 +14,7 @@ import ClipSlotsKit
                 bindingAttempts.values.forEach { $0.invalidate() }
                 bindingAttempts.removeAll()
                 revision = UUID(); installed = [:]; pending = []; itemErrors = [:]
-                connectingItem = nil; connectionPrompt = nil; sourceConnection = nil; sourceAuth = nil
+                connectingItem = nil; connectionPrompt = nil; sourceConnection = nil; sourceAuth = nil; sourceConnectorID = nil
                 authAttempt = UUID(); authAttemptKey = nil
             } else if oldValue?.connectors != snapshot?.connectors {
                 // Losing and regaining authorization cannot revive an executor
@@ -31,6 +31,7 @@ import ClipSlotsKit
     @Published var connectionPrompt: AgentMarketItem?
     @Published var sourceConnection: AgentMarketItem?
     @Published var sourceAuth: AgentConnectorSession?
+    @Published var sourceConnectorID: String?
     var clientFactory: @Sendable (URL, String) -> AgentMCPClient = { endpoint, scope in
         AgentMCPClient(endpoint: endpoint) {
             guard endpoint == AgentMCPClient.officialEndpoint else { throw AgentMCPError.invalidBinding }

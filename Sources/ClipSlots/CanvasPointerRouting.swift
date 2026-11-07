@@ -331,11 +331,6 @@ extension CanvasWorkspaceView {
                 canvas.clearSelection()
                 canvas.selectedEdgeId = edge.id
                 target = .edge
-            } else if let group = canvas.groups.reversed().first(where: { groupScreenBounds($0)?.contains(point) == true }) {
-                endInlineEditing()
-                inputRouter.claimKeyboardFocus()
-                canvas.selectGroup(group.id)
-                target = .group(group.id)
             } else {
                 endInlineEditing()
                 inputRouter.claimKeyboardFocus()

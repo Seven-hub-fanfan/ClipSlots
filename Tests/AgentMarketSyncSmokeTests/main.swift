@@ -221,6 +221,44 @@ actor RemoteInstallHTTP: AgentMarketHTTP {
         if let output = ProcessInfo.processInfo.environment["MARKET_SYNC_REPORT"] {
             try JSONSerialization.data(withJSONObject: summary, options: [.prettyPrinted, .sortedKeys]).write(to: URL(fileURLWithPath: output))
         }
+        if let output = ProcessInfo.processInfo.environment["MARKET_CONNECTOR_LIVE_REPORT"] {
+            guard let desktop = AgentMarketDesktopSession.read() else { throw AgentMarketSyncError.requiresLogin }
+            let auditHTTP = ConnectorAuditHTTP()
+            let live = AgentMarketSyncService(root: root.appendingPathComponent("connector-live"), http: auditHTTP)
+            let current = try await live.refreshManager(session: desktop, previous: nil)
+            var probe: [String: String] = [:]
+            if let id = ProcessInfo.processInfo.environment["MARKET_CONNECTOR_AUTH_PROBE"],
+               current.managerItems.contains(where: { $0.connectorIDs.contains(id) }) {
+                do {
+                    let auth = try await live.startConnector(id, capabilityIDs: [], session: desktop)
+                    probe = ["id": id, "status": auth.status, "kind": auth.kind,
+                             "has_authorization_url": String(auth.externalURL != nil)]
+                } catch { probe = ["id": id, "error": error.localizedDescription] }
+            }
+            var apps: [[String: Any]] = []
+            for item in current.managerItems where item.kind == "app" {
+                var connectors: [[String: Any]] = []
+                for id in item.connectorIDs {
+                    let cached = current.connectors?.first { AgentMarketItem.connectorID($0) == id }
+                    do {
+                        let state: JSONValue
+                        if let cached { state = cached } else { state = try await live.connector(id, session: desktop) }
+                        connectors.append(["id": id, "available": true, "status": state["status"]?.stringValue ?? "unknown",
+                                           "resolved_directly": cached == nil])
+                    } catch {
+                        connectors.append(["id": id, "available": false, "error": error.localizedDescription,
+                                           "resolved_directly": true])
+                    }
+                }
+                apps.append(["name": item.name, "connector_ids_valid": !item.hasInvalidConnectorDeclaration,
+                             "connectors": connectors])
+            }
+            let report: [String: Any] = ["apps": apps, "response_shapes": await auditHTTP.shapes,
+                "auth_entry_probe": probe, "read_only": probe.isEmpty, "remote_mutations": probe.isEmpty ? 0 : 1,
+                "credentials_persisted": false, "account_authorizations_performed": 0]
+            try JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys])
+                .write(to: URL(fileURLWithPath: output))
+        }
         if let directory = ProcessInfo.processInfo.environment["MARKET_SYNC_LIVE_ROOT"] {
             let liveRoot = URL(fileURLWithPath: directory)
             let live = AgentMarketSyncService(root: liveRoot)
@@ -243,5 +281,20 @@ actor RemoteInstallHTTP: AgentMarketHTTP {
         }
         print("\(passed.count) passed; \(failures.count) failed")
         if !failures.isEmpty { exit(1) }
+    }
+}
+
+private actor ConnectorAuditHTTP: AgentMarketHTTP {
+    var shapes: [[String: String]] = []
+    func send(_ request: URLRequest) async throws -> (Data, Int) {
+        let (data, status) = try await AgentMarketURLSessionHTTP().send(request)
+        if request.url?.path.contains("/connectors/") == true {
+            let body = try? JSONDecoder().decode(JSONValue.self, from: data)
+            shapes.append(["path": request.url!.path, "http_status": String(status),
+                "json": String(body != nil), "root_keys": (body?.objectValue?.keys.sorted() ?? []).joined(separator: ","),
+                "data_keys": (body?["data"]?.objectValue?.keys.sorted() ?? []).joined(separator: ","),
+                "data_connector_keys": (body?["data"]?["connector"]?.objectValue?.keys.sorted() ?? []).joined(separator: ",")])
+        }
+        return (data, status)
     }
 }

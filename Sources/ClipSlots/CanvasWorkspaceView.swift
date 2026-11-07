@@ -442,6 +442,9 @@ struct CanvasWorkspaceView: View {
                 synchronizeMediaLayouts()
                 fitCreatedWorkflow(size: proxy.size)
                 #if DEBUG
+                if ProcessInfo.processInfo.environment["CLIPSLOTS_SELECTION_MEDIA_REGRESSION"] != nil {
+                    SelectionMediaRegression.current = self
+                }
                 if ProcessInfo.processInfo.environment["CLIPSLOTS_CANVAS_REGRESSION"] == "1" {
                     CanvasAgentGroupsProbeBridge.current = self
                 }
@@ -616,12 +619,12 @@ struct CanvasWorkspaceView: View {
         if ProcessInfo.processInfo.environment["CLIPSLOTS_CANVAS_REGRESSION"] == "1" { var r = URLRequest(url: URL(string: "http://127.0.0.1:7777/event")!); r.httpMethod = "POST"; r.httpBody = try? JSONSerialization.data(withJSONObject: ["sessionId": "canvas-pointer-routing", "runId": ProcessInfo.processInfo.environment["CANVAS_DEBUG_RUN"] ?? "pre-fix", "hypothesisId": "C", "msg": "[DEBUG] blank callback"]); URLSession.shared.dataTask(with: r).resume() }
         #endif
         // #endregion
-        // 正在 inline 编辑时，点空白处的语义是「写完了」——先按失焦保存收掉编辑态（否则编辑框会
-        // 一直挂在节点上，见 endInlineEditing 的注释），这一击不再兼作取消选中/双击判定。
+        // 同一击完成失焦保存并取消选中；双击仍由系统间隔判定。
         endInlineEditing()
         composingNodeId = nil
         hoverLeaveTask?.cancel()
         hoverHoldNodeId = nil
+        canvas.clearSelection()
         let click = CanvasClickCadence.Click(point: cursorScreen,
                                              time: eventTime ?? NSApp.currentEvent?.timestamp ?? ProcessInfo.processInfo.systemUptime)
         if CanvasClickCadence.isDoubleClick(previous: lastBlankClick,
@@ -637,7 +640,6 @@ struct CanvasWorkspaceView: View {
             return
         }
         lastBlankClick = click
-        canvas.clearSelection()
     }
 
     // MARK: - 全屏预览（v2.15.0）
@@ -2031,23 +2033,6 @@ struct CanvasWorkspaceView: View {
                     .canvasControlRegion("connect-agent")
                     AppAppearanceButton(compact: true, canvasPalette: true)
                         .canvasControlRegion("appearance")
-                    // ★ v2.11.8：画布页的 Agent 入口紧贴「生成」左侧。
-                    // 侧栏本体挂在 ContentView 的内容区（见那边的注释），这里只是开关，
-                    // 因此侧栏展开后这一整排会随画布可用宽度自动左移，不需要手动补 padding。
-                    Button {
-                        withAnimation(Anim.transition) { agentVisible.toggle() }
-                    } label: {
-                        Image(systemName: "sparkles")
-                            .font(.system(size: 18, weight: .regular))
-                            .frame(width: 44, height: 40)
-                    }
-                    .buttonStyle(CanvasHeaderButtonStyle(iconOnly: true, isActive: agentVisible))
-                    .help(agentVisible ? "收起 Agent 侧栏" : "打开 Agent 侧栏")
-                    .accessibilityLabel(agentVisible ? "收起 Agent 侧栏" : "打开 Agent 侧栏")
-                    .accessibilityIdentifier("canvas-agent-toggle")
-                    .accessibilityAddTraits(agentVisible ? [.isSelected] : [])
-                    .canvasControlRegion("agent-toggle")
-
                     BatchGenerationEntry(canvasHeader: true, iconOnly: size.width - sidebarWidth < 530) {
                         inputRouter.anchorView?.window?.makeFirstResponder(nil)
                         AttachmentManagerPanelController.shared.close()
@@ -2114,7 +2099,7 @@ struct CanvasWorkspaceView: View {
                         return preview
                     }, projectID: canvas.activeProjectId, selectedNodeIDs: canvas.selectedNodeIds,
                         viewport: canvasContentViewport,
-                        saveStatus: .saved, saveProgress: canvas.saveProgress, pan: $pan, zoom: $zoom,
+                        pan: $pan, zoom: $zoom,
                         showMap: $showMiniMap, showEdges: $showCanvasEdges, gridSnap: $gridSnapEnabled,
                         onZoom: { target in
                             let anchor = CGPoint(x: canvasContentViewport.midX, y: canvasContentViewport.midY)
@@ -2123,9 +2108,7 @@ struct CanvasWorkspaceView: View {
                             zoom = target
                         },
                         onFit: { fitToContent(size: size) },
-                        onViewportEnd: { canvas.updateViewport(pan: pan, zoom: zoom) },
-                        onSave: { canvas.flushSave() },
-                        onAgent: { withAnimation(Anim.transition) { agentVisible = true } })
+                        onViewportEnd: { canvas.updateViewport(pan: pan, zoom: zoom) })
                     Spacer()
                 }
             }

@@ -67,7 +67,7 @@ private final class ManagementServer: @unchecked Sendable {
             if method == "DELETE" && !fail { installed = false }
             let plugin: JSONValue = ["plugin_name":"documents", "display_name":"Documents", "status":"published",
                 "installation":["installed":.bool(installed),"status":.string(enabled ? "enabled" : "disabled")],
-                "install_mode":"user","connectors":[["name":"lark"]],"skills":[["name":"embedded"]]]
+                "install_mode":"user","connectors":[["connector_id":"lark"]],"skills":[["name":"embedded"]]]
             if path.hasSuffix("/plugins") || path.contains("installed_only") {
                 result = ["plugins": .array(path.contains("installed_only") && !installed ? [] : [plugin])]
             } else { result = plugin }
@@ -94,7 +94,8 @@ private final class ManagementServer: @unchecked Sendable {
             result = path.hasSuffix("/skills") && method == "GET" ? ["skills":.array(skills)] : body
         }
         let data = (try? JSONEncoder().encode(JSONValue.object(["code":200,"data":result]))) ?? Data()
-        let response = "HTTP/1.1 \(fail ? 500 : 200) OK\r\nContent-Type: application/json\r\nContent-Length: \(data.count)\r\nConnection: close\r\n\r\n"
+        let status = path.contains("/connectors/unavailable") ? 404 : fail ? 500 : 200
+        let response = "HTTP/1.1 \(status) OK\r\nContent-Type: application/json\r\nContent-Length: \(data.count)\r\nConnection: close\r\n\r\n"
         connection.send(content: Data(response.utf8) + data, completion: .contentProcessed { _ in connection.cancel() })
     }
 }
@@ -114,8 +115,39 @@ enum MarketManagementWireRegression {
         let server = try ManagementServer(), endpoint = try await server.start()
         defer { server.stop() }
         let service = AgentMarketSyncService(root: root, http: LoopbackManagementHTTP(endpoint: endpoint))
+        for start in [false, true] {
+            do {
+                if start { _ = try await service.startConnector("unavailable", capabilityIDs: [], session: session) }
+                else { _ = try await service.connector("unavailable", session: session) }
+                check(false, "missing connector is rejected")
+            } catch AgentMarketSyncError.connectorUnavailable(let id) {
+                check(id == "unavailable", "connector \(start ? "authorization" : "inventory") 404 reports upstream unavailability")
+            }
+        }
         let first = try await service.refreshManager(session: session, previous: nil)
         let app = first.managerItems.first { $0.kind == "app" }!
+        check(app.connectorIDs == ["lark"], "production connector_id schema survives catalog normalization")
+        for alias in ["connector_id", "connector_name", "name", "connector_provider", "id"] {
+            let item = AgentMarketItem(["connectors": .array([.object([alias: "lark"])])])
+            check(item.connectorIDs == ["lark"], alias + " connector reference accepted")
+        }
+        let aliases = AgentMarketItem(["connectors":[["connector_id":" ", "connector_name":" lark ", "name":"Wrong"], ["id":"lark"]]])
+        check(aliases.connectorIDs == ["lark"], "connector aliases skip blank values and deduplicate")
+        for alias in ["redirect_url", "redirectUrl", "authorization_url", "authorize_url", "verification_url", "verificationUrl"] {
+            let auth = AgentConnectorSession(.object([alias: "https://example.com/authorize"]))
+            check(auth.externalURL != nil && auth.kind == "redirect", alias + " infers redirect challenge")
+        }
+        check(AgentConnectorSession(["authorization_url":"javascript:alert(1)"]).externalURL == nil,
+              "authorization URL rejects executable scheme")
+        let pending = AgentConnectorSession(["session_id":"approval","status":"error","error_code":"pending_approval"])
+        check(!pending.terminal && pending.kind == "external_approval", "admin approval is waiting rather than fatal error")
+        let editable = AgentConnectorSession(["session_id":"form","status":"error","form_fields":[["name":"secret"]]])
+        check(editable.canSubmit && editable.kind == "form", "failed form retains editable submit")
+        let changedAlias = AgentConnectorSession(["poll_interval_ms":2000,"redirect_url":"https://old.example",
+            "form_fields":[["name":"old"]]]).merging(["pollIntervalMs":4000,"redirectUrl":"https://new.example",
+            "formFields":[["name":"new"]]])
+        check(changedAlias.interval == 4 && changedAlias.externalURL?.host == "new.example"
+              && changedAlias.fields.first?["name"] == "new", "partial camelCase replies replace stale snake_case challenge")
         check(app.name == "documents" && app.sourceAdded && !app.sourceEnabled,
               "real HTTP normalizes nested installation separately from published runtime")
         check(first.managerItems.count == 2 && first.connectors?.count == 1,

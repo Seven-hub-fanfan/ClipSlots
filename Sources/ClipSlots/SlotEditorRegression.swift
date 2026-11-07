@@ -37,6 +37,18 @@ enum SlotEditorRegression {
                 if condition { passes += 1 } else { failures.append(label) }
             }
             do {
+                if env["BATCH_STORAGE_PERF_ONLY"] == "1" {
+                    try await BatchStoragePerformanceRegression.run(root: root)
+                    exit(0)
+                }
+                if env["STORAGE_PERF_ONLY"] == "1" {
+                    try await SlotStoragePerformanceRegression.run(root: root)
+                    exit(0)
+                }
+                if env["FLICKER_ONLY"] == "1" {
+                    try await SlotFlickerRegression.run(root: root)
+                    exit(0)
+                }
                 try HeaderMascotAttentionRegression.run(root: root, check: check)
                 try await HeaderMascotAttentionRegression.runScheduled(root: root, check: check)
                 let backend = SlotEditorFixtureBackend()

@@ -59,6 +59,14 @@ struct SlotTextEditorSheet: View {
         .background(fill)
         .disabled(model.saving)
         .onChange(of: model.draft) { _ in model.updateOutline() }
+        .onAppear { model.refreshModelPresentation() }
+        .onReceive(NotificationCenter.default.publisher(for: AgentBackendCoordinator.backendChangedNotification)) { note in
+            guard AgentBackendCoordinator.scope(from: note).map({ $0 == .sidebar }) ?? true else { return }
+            model.refreshModelPresentation()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: UserDefaults.didChangeNotification)) { _ in
+            model.refreshModelPresentation()
+        }
         .onDisappear { voice.cancel() }
     }
 
@@ -326,8 +334,12 @@ struct SlotTextEditorSheet: View {
                 AgentPolishButton(busy: model.polishing,
                     enabled: !model.busy && !model.instruction.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
                     compact: true, action: model.polishInstruction)
-                Button { modelInfo.toggle() } label: { Image(systemName: "cpu").frame(width: 24, height: 26) }
-                    .buttonStyle(.plain).help("当前模型")
+                Button { modelInfo.toggle() } label: {
+                    AgentModelIndicator(presentation: model.modelPresentation).frame(width: 26, height: 30)
+                }
+                    .buttonStyle(.plain).help("当前模型：" + model.modelName)
+                    .accessibilityLabel("当前模型：" + model.modelName)
+                    .accessibilityIdentifier("slot-editor-model")
                     .popover(isPresented: $modelInfo) {
                         VStack(alignment: .leading, spacing: 8) {
                             Text("当前文本模型").font(.headline)

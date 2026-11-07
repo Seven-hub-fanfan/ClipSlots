@@ -7,8 +7,6 @@ struct CanvasNavigationControls: View {
     var projectID: String = ""
     var selectedNodeIDs: Set<String> = []
     let viewport: CGRect
-    let saveStatus: CanvasStore.SaveStatus
-    var saveProgress: CanvasStore.SaveProgress? = nil
     @Binding var pan: CGSize
     @Binding var zoom: CGFloat
     @Binding var showMap: Bool
@@ -17,10 +15,6 @@ struct CanvasNavigationControls: View {
     let onZoom: (CGFloat) -> Void
     let onFit: () -> Void
     let onViewportEnd: () -> Void
-    let onSave: () -> Void
-    let onAgent: () -> Void
-    @State private var helpOpen = false
-    @State private var helpPage: String?
     @State private var hovered: String?
     @State private var tooltipID: String?
     @State private var previousNodeCount = 0
@@ -37,8 +31,7 @@ struct CanvasNavigationControls: View {
             }
             WorkspaceStableBoundary(key: .init(
                 zoom: zoom, map: showMap, edges: showEdges, grid: gridSnap,
-                hovered: hovered, tooltip: tooltipID, helpOpen: helpOpen,
-                saveStatus: saveHint, saveSource: saveProgress.map(ObjectIdentifier.init),
+                hovered: hovered, tooltip: tooltipID,
                 project: projectID)) {
             HStack(spacing: 8) {
                 HStack(spacing: 8) {
@@ -59,33 +52,6 @@ struct CanvasNavigationControls: View {
                 .background(TapSkin.chromeFill, in: RoundedRectangle(cornerRadius: 16))
                 .overlay(RoundedRectangle(cornerRadius: 16).stroke(TapSkin.border.opacity(0.45), lineWidth: 0.6)
                     .allowsHitTesting(false))
-                if let saveProgress {
-                    CanvasSaveIndicator(progress: saveProgress, save: onSave)
-                } else {
-                Button(action: onSave) {
-                    ZStack(alignment: .topTrailing) {
-                        Image(systemName: "arrow.triangle.2.circlepath")
-                            .font(.system(size: 14)).frame(width: 40, height: 40)
-                        Circle().fill(saveIndicator).frame(width: 5, height: 5).offset(x: -1, y: 1)
-                    }
-                    .background(TapSkin.chromeFill, in: Circle())
-                }
-                .buttonStyle(.plain)
-                .help(saveHint)
-                .accessibilityLabel(saveHint)
-                .accessibilityIdentifier("canvas-save-status")
-                }
-                Button { helpOpen.toggle() } label: {
-                    Image(systemName: "questionmark.circle")
-                        .font(.system(size: 15)).frame(width: 40, height: 40)
-                        .background(TapSkin.chromeFill, in: Circle())
-                }
-                .buttonStyle(.plain)
-                .help("帮助")
-                .accessibilityIdentifier("canvas-help")
-                .popover(isPresented: $helpOpen, arrowEdge: .top) {
-                    helpMenu
-                }
             }
             .foregroundColor(TapSkin.ink)
             }.equatable()
@@ -106,16 +72,6 @@ struct CanvasNavigationControls: View {
             if !selectedNodeIDs.isEmpty || nodes.count > 50 { showMap = true }
         }
         .canvasControlRegion("canvas-navigation")
-        .sheet(item: Binding(
-            get: { helpPage.map { HelpPage(title: $0) } },
-            set: { helpPage = $0?.title })) { page in
-            VStack(alignment: .leading, spacing: 16) {
-                Text(page.title).font(.title3.bold())
-                Text(helpText(page.title)).font(.system(size: 13)).textSelection(.enabled)
-                Button("完成") { helpPage = nil }.frame(maxWidth: .infinity, alignment: .trailing)
-            }
-            .padding(24).frame(width: 460)
-        }
     }
 
     private var zoomSlider: some View {
@@ -152,6 +108,8 @@ struct CanvasNavigationControls: View {
         .clipShape(RoundedRectangle(cornerRadius: 8))
         .overlay(RoundedRectangle(cornerRadius: 8).stroke(TapSkin.border.opacity(0.45), lineWidth: 0.6)
             .allowsHitTesting(false))
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("canvas-minimap")
     }
 
     private func control(_ id: String, symbol: String, hint: String, active: Bool,
@@ -188,51 +146,4 @@ struct CanvasNavigationControls: View {
         }
     }
 
-    private var saveIndicator: Color {
-        switch saveStatus { case .failed: return .orange; case .saving: return .yellow; case .saved: return .cyan }
-    }
-    private var saveHint: String {
-        switch saveStatus {
-        case .saved: return "画布已保存"
-        case .saving: return "正在保存画布"
-        case .failed: return "保存失败，点击重试"
-        }
-    }
-    private var helpMenu: some View {
-        VStack(alignment: .leading, spacing: 3) {
-            ForEach(["最近更新", "使用教程", "画布助手", "反馈问题", "快捷键"], id: \.self) { title in
-                Button {
-                    helpOpen = false
-                    if title == "画布助手" { onAgent() } else { helpPage = title }
-                } label: {
-                    Label(title, systemImage: helpSymbol(title))
-                        .font(.system(size: 12)).padding(10)
-                        .frame(width: 142, alignment: .leading)
-                        .contentShape(Rectangle())
-                }.buttonStyle(.plain)
-            }
-        }.padding(6).foregroundColor(TapSkin.ink).background(TapSkin.chromeFill)
-    }
-    private struct HelpPage: Identifiable { let title: String; var id: String { title } }
-    private func helpSymbol(_ title: String) -> String {
-        switch title {
-        case "最近更新": return "bell.fill"
-        case "使用教程": return "info.circle"
-        case "画布助手": return "sparkles"
-        case "反馈问题": return "ladybug"
-        default: return "keyboard"
-        }
-    }
-    private func helpText(_ title: String) -> String {
-        switch title {
-        case "最近更新":
-            return "本次更新：稳定拖拽连线、节点对齐吸附、1–4 次生成、同行结果节点、小地图与画布导航。"
-        case "使用教程":
-            return "双击空白添加节点；拖动节点右侧 + 连接已有节点或创建下游节点。点击空白取消选择，Shift 多选。小地图可拖动视口，缩放滑杆改变观察范围。生成结果保留在新的节点中。"
-        case "反馈问题":
-            return "请记录复现步骤、应用版本 \(AppVersion.current) 和录屏。生成失败时可从节点的“错误详情”复制诊断信息。"
-        default:
-            return "空格 + 拖动：抓手平移\n⌘ + 滚轮：缩放\nShift + 点击：多选\n⌘Z：撤销\n⇧⌘Z：重做\nDelete：删除所选节点或连线\nEsc：取消当前操作\n双击空白：添加节点"
-        }
-    }
 }

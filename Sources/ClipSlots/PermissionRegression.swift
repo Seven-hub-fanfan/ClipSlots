@@ -415,8 +415,8 @@ enum PermissionRegression {
                       "\(skin.rawValue) \(dark ? "dark" : "light") denied row accessible")
                 check(nodes.contains { ($0.accessibilityIdentifier?() ?? "") == "permission-close" },
                       "\(skin.rawValue) \(dark ? "dark" : "light") close button accessible")
-                check(nodes.contains { ($0.accessibilityIdentifier?() ?? "") == "permission-repair-accessibility" },
-                      "\(skin.rawValue) \(dark ? "dark" : "light") explicit repair is accessible")
+                check(!nodes.contains { ($0.accessibilityIdentifier?() ?? "") == "permission-repair-accessibility" },
+                      "\(skin.rawValue) \(dark ? "dark" : "light") repair link removed from compact card")
                 check(nodes.contains { ($0.accessibilityIdentifier?() ?? "") == "permission-app-drag" },
                       "\(skin.rawValue) \(dark ? "dark" : "light") main permission card exposes application drag")
                 func dragView(_ view: NSView) -> PermissionFileDragView? {

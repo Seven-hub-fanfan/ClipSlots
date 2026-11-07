@@ -15,7 +15,18 @@ public extension AgentMarketItem {
             && raw["provider"]?.stringValue != "system"
     }
     var connectorIDs: [String] {
-        (raw["connectors"]?.arrayValue ?? []).compactMap { $0["name"]?.stringValue ?? $0["id"]?.stringValue }
+        var seen = Set<String>()
+        return (raw["connectors"]?.arrayValue ?? []).compactMap(Self.connectorID).filter { seen.insert($0).inserted }
+    }
+    static func connectorID(_ value: JSONValue) -> String? {
+        (["connector_id", "connector_name", "name", "connector_provider", "id"]
+            .compactMap { value[$0]?.stringValue } + [value.stringValue].compactMap { $0 })
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.first { !$0.isEmpty }
+    }
+    var hasInvalidConnectorDeclaration: Bool {
+        guard let value = raw["connectors"], value != .null else { return false }
+        guard let values = value.arrayValue else { return true }
+        return values.contains { Self.connectorID($0) == nil }
     }
 }
 
@@ -26,25 +37,54 @@ public struct AgentConnectorSession: Equatable, Sendable {
     /// The challenge contract arrives in snake_case or camelCase; snake wins when both exist.
     private func field(_ snake: String, _ camel: String) -> JSONValue? { raw[snake] ?? raw[camel] }
     public var id: String { field("session_id", "sessionId")?.stringValue ?? "" }
-    public var status: String { raw["status"]?.stringValue ?? "pending" }
+    public var status: String {
+        let status = raw["status"]?.stringValue ?? "pending"
+        let codes = [raw["error_code"]?.stringValue, raw["error"]?["code"]?.stringValue,
+                     raw["error"]?.stringValue, raw["error"]?["message"]?.stringValue, raw["message"]?.stringValue]
+        return status == "error" && codes.compactMap({ $0 }).contains(where: {
+            $0.range(of: #"\bpending_approval\b"#, options: [.regularExpression, .caseInsensitive]) != nil
+        }) ? "pending_approval" : status
+    }
     public var stage: String { raw["stage"]?.stringValue ?? "" }
-    public var kind: String { field("challenge_kind", "challengeKind")?.stringValue ?? "" }
+    public var kind: String {
+        if status == "pending_approval" { return "external_approval" }
+        if let explicit = field("challenge_kind", "challengeKind")?.stringValue,
+           !explicit.isEmpty, explicit != "none" { return explicit }
+        if !fields.isEmpty { return "form" }
+        if userCode != nil { return "device_code" }
+        return externalURL == nil ? "none" : "redirect"
+    }
     public var fields: [JSONValue] { field("form_fields", "formFields")?.arrayValue ?? [] }
     public var userCode: String? { field("user_code", "userCode")?.stringValue }
     public var terminal: Bool { ["authenticated", "error", "expired", "cancelled"].contains(status) }
+    public var canSubmit: Bool { !fields.isEmpty && !["authenticated", "expired", "cancelled", "pending_approval"].contains(status) }
     /// Never poll faster than the server asks; the upper bound only rejects absurd values.
     public var interval: Double {
         min(600, max(0.2, Double(field("poll_interval_ms", "pollIntervalMs")?.intValue ?? 2000) / 1000))
     }
     public var externalURL: URL? {
         guard let text = field("redirect_url", "redirectUrl")?.stringValue
+                ?? raw["authorization_url"]?.stringValue ?? raw["authorize_url"]?.stringValue
                 ?? field("verification_url", "verificationUrl")?.stringValue,
               let url = URL(string: text), url.scheme == "https", url.user == nil, url.password == nil else { return nil }
         return url
     }
     public func merging(_ update: JSONValue) -> Self {
         var fields = raw.objectValue ?? [:]
+        // Canonicalize aliases before merging so a new camelCase challenge can
+        // replace an older snake_case value rather than being shadowed by it.
+        let aliases = [("session_id", "sessionId"), ("challenge_kind", "challengeKind"),
+                       ("form_fields", "formFields"), ("user_code", "userCode"),
+                       ("poll_interval_ms", "pollIntervalMs"), ("redirect_url", "redirectUrl"),
+                       ("verification_url", "verificationUrl")]
+        for (snake, camel) in aliases where update[snake] != nil || update[camel] != nil {
+            fields[snake] = update[snake] ?? update[camel]; fields[camel] = nil
+        }
         for (key, value) in update.objectValue ?? [:] { fields[key] = value }
+        if let redirect = ["redirect_url", "redirectUrl", "authorization_url", "authorize_url"].compactMap({ update[$0] }).first {
+            fields["redirect_url"] = redirect
+            for alias in ["redirectUrl", "authorization_url", "authorize_url"] { fields[alias] = nil }
+        }
         return .init(.object(fields))
     }
 }
@@ -177,6 +217,11 @@ extension AgentMarketSyncService {
         let result = AgentConnectorSession(raw)
         guard !result.id.isEmpty else { throw AgentMarketSyncError.invalidResponse }
         return result
+    }
+    public func connector(_ id: String, session: AgentMarketDesktopSession) async throws -> JSONValue {
+        let value = try await request("/api/agent-gateway/v1/connectors/" + Self.segment(id), session: session)
+        guard AgentMarketItem.connectorID(value) == id else { throw AgentMarketSyncError.invalidResponse }
+        return value
     }
     public func pollConnector(_ id: String, auth: AgentConnectorSession, session: AgentMarketDesktopSession) async throws -> AgentConnectorSession {
         auth.merging(try await request("/api/agent-gateway/v1/connectors/" + Self.segment(id) + "/auth-sessions/" + Self.segment(auth.id), session: session))

@@ -90,7 +90,7 @@ public final class TikaCLIService: NSObject, AgentBackend, @unchecked Sendable {
                     config sessionConfig: AgentConfig,
                     tools: AgentToolExecuting?,
                     onEvent: @escaping @Sendable (AgentRunEvent) async -> Void) async throws -> [AgentMessage] {
-        try AgentAttachmentImport.validateImageSupport(history: history, supported: false)
+        try AgentAttachmentImport.validateImageSupport(history: history, supported: false, tika: true)
         // 1. 先校验 tikacli 可执行
         guard FileManager.default.isExecutableFile(atPath: resolvedCLIPath) else {
             throw TikaBackendError.cliNotFound(resolvedCLIPath)

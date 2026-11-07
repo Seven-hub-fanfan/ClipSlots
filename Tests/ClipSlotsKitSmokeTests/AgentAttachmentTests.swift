@@ -62,9 +62,27 @@ func runAgentAttachmentTests(_ t: TestRunner) {
         t.expectThrows("ATT unsupported model refuses captured canvas image") {
             try AgentAttachmentImport.validateImageSupport(history: [referenced], supported: false)
         }
-        t.expectThrows("ATT undeclared backend cannot silently drop images") {
+        t.expectThrows("ATT explicitly text-only backend rejects images") {
             try AgentAttachmentImport.validateImageSupport(history: [visual], supported: false)
         }
+        try AgentAttachmentImport.validateImageSupport(history: [visual], supported: nil)
+        let unknownBody = AgentService.requestBody(history: [visual], config: AgentConfig(), tools: [])
+        t.equal(unknownBody["messages"]?.arrayValue?.last?["content"]?.arrayValue?.last?["image_url"]?["url"]?.stringValue,
+                "data:image/png;base64," + png.base64EncodedString(), "ATT unknown model receives actual image bytes")
+        let seven = Array(repeating: imageRestored, count: 7)
+        try AgentAttachmentImport.validate(seven)
+        let sevenBody = AgentService.requestBody(history: [.init(role: .user, content: "compare", attachments: seven)],
+            config: AgentConfig(model: "deepseek-flash"), tools: [])
+        t.equal(sevenBody["messages"]?.arrayValue?.last?["content"]?.arrayValue?.count, 8,
+                "ATT seven images exceed old local cap and all reach Flash payload")
+        t.equal(AgentConfig(model: "deepseek-flash").resolvedImageSupport, true, "ATT verified official Flash vision contract")
+        t.equal(AgentConfig(model: "deepseek-v4-pro").resolvedImageSupport, false, "ATT official Pro remains text-only")
+        t.equal(AgentMediaCapabilities.imageSupport(endpoint: URL(string: "https://proxy.example/v1/chat/completions")!,
+            model: "deepseek-v4-pro"), nil, "ATT official contracts never guessed on proxy endpoints")
+        t.equal(AgentMediaCapabilities.imageSupport(endpoint: AgentConfig.defaultEndpoint, model: "deepseek-reasoner"), nil,
+                "ATT unverified legacy alias remains unknown")
+        let discovery = try AgentModelCatalog.parse(Data(#"{"data":[{"id":"modern","architecture":{"input_modalities":["text","image"]}},{"id":"text","capabilities":{"image_input":false}},{"id":"unknown"}]}"#.utf8))
+        t.check(discovery.map(\.supportsImages) == [true, false, nil], "ATT model discovery preserves all three capability states")
         var altered = imageRestored
         altered.sha256 = "changed"
         t.expectThrows("ATT altered stored image rejected") { try AgentAttachmentImport.validate([altered]) }
@@ -73,8 +91,11 @@ func runAgentAttachmentTests(_ t: TestRunner) {
         t.check(oldConfig.supportsImageInput == nil, "ATT legacy config has no implicit image capability")
         try Data(repeating: 65, count: AgentAttachmentImport.maxBytes + 1).write(to: file)
         t.expectThrows("ATT oversized file rejected before reading") { _ = try AgentAttachmentImport.capture(file) }
-        t.expectThrows("ATT total file count bounded") { try AgentAttachmentImport.validate(Array(repeating: attachment, count: 7)) }
-        let large = AgentAttachment(path: "", name: "large", textSnapshot: String(repeating: "a", count: 150_000), sha256: "digest")
+        t.expectThrows("ATT total file count bounded") {
+            try AgentAttachmentImport.validate(Array(repeating: attachment, count: AgentAttachmentImport.maxFiles + 1))
+        }
+        let large = AgentAttachment(path: "", name: "large",
+            textSnapshot: String(repeating: "a", count: AgentAttachmentImport.maxBytes / 2 + 1), sha256: "digest")
         t.expectThrows("ATT aggregate context bytes bounded") { try AgentAttachmentImport.validate([large, large]) }
         let pdfURL = root.appendingPathComponent("empty.pdf")
         let document = PDFDocument()

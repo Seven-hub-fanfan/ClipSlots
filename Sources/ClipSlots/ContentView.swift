@@ -163,6 +163,11 @@ struct ContentView: View {
     @State private var globalSearchIsComplete = true
     @State private var globalSearchMatchedCount = 0
     @State private var globalSearchResultsRevision = 0
+    @State private var globalSearchSelection = SearchResultSelection()
+    private var globalSearchSelectedId: String? {
+        get { globalSearchSelection.id }
+        nonmutating set { globalSearchSelection.id = newValue }
+    }
     // v2.10.49 (perf 第一批 P1「组内搜索 matchedSlotCount 防抖缓存」): 此前 matchedSlotCount 是
     // 每次 body 求值都遍历本组槽位重算的计算属性（无结果提示与匹配计数文案各触发一次遍历）。
     // 改为把结果缓存到此 @State，仅在搜索输入（searchText/selectedFilter/searchScope）或底层槽位
@@ -397,7 +402,7 @@ struct ContentView: View {
                         .animation(nil, value: workspaceMode)
                         if workspaceMode == .edit {
                             WorkspaceSectionAdmission(admission: workspaceTransition.sections.admission(for: "2-footer"),
-                                                      height: 48) { bottomBar }
+                                                      height: 56) { bottomBar }
                         }
                     }
                     // ★ v2.11.7 hotfix24: 给工作区一条最小宽度，并把它的布局优先级抬到侧栏之上。
@@ -421,6 +426,15 @@ struct ContentView: View {
                     .opacity(canvasAgentExpanded ? 0 : 1)
                     .allowsHitTesting(!canvasAgentExpanded)
                     .layoutPriority(1)
+                    .overlay(alignment: .bottomTrailing) {
+                        if workspaceMode == .canvas && !canvasAgentExpanded {
+                            AgentOrbButton(isOpen: sharedAgentVisible) {
+                                withAnimation(Anim.transition) { sharedAgentVisible.toggle() }
+                            }
+                            .padding(.trailing, 14)
+                            .padding(.bottom, 16)
+                        }
+                    }
 
                     if agentSidebarVisible {
                         AgentSidebarView(model: agentSessions.sidebarSession(canvas: canvasStore, store: store),
@@ -551,6 +565,11 @@ struct ContentView: View {
                 mode: { workspaceMode }, request: { requestWorkspace($0) },
                 ready: { !workspaceTransition.isSwitching },
                 expanded: { canvasAgentExpanded }, toggleExpanded: { canvasAgentExpanded.toggle() })
+            UIRedesignRegression.schedule(store: store, canvas: canvasStore,
+                request: { requestWorkspace($0) }, ready: { !workspaceTransition.isSwitching },
+                setAgent: { sharedAgentVisible = $0 },
+                agent: { UserDefaults.standard.bool(forKey: AgentPreferences.sharedSidebarVisibleKey) },
+                selection: { globalSearchSelectedId }, results: { globalSearchResultsCache })
             #endif
         }
         .task { await ModelWorkspaceStore.shared.load() }
@@ -997,7 +1016,20 @@ struct ContentView: View {
             SlotSearchBar(
                 searchText: $searchText,
                 selectedFilter: $selectedFilter,
-                searchScope: $searchScope
+                searchScope: $searchScope,
+                onNavigate: { delta in
+                    guard searchScope == .global, !globalSearchResultsCache.isEmpty else { return }
+                    let index = globalSearchResultsCache.firstIndex { $0.id == globalSearchSelectedId }
+                        ?? (delta > 0 ? -1 : 0)
+                    globalSearchSelectedId = globalSearchResultsCache[
+                        min(globalSearchResultsCache.count - 1, max(0, index + delta))].id
+                },
+                onOpen: {
+                    guard searchScope == .global,
+                          let result = globalSearchResultsCache.first(where: { $0.id == globalSearchSelectedId })
+                            ?? globalSearchResultsCache.first else { return }
+                    jumpToSearchResult(result)
+                }
             )
             // v2.10.77: 搜索框此前 maxWidth: .infinity 会横向铺满整行，观感过长。改为
             // 固定上限宽度 400pt。用固定上限而非随窗口宽度变化的比例值，配合 v2.10.75
@@ -1011,25 +1043,9 @@ struct ContentView: View {
             }
 
             WorkspaceSectionAdmission(admission: workspaceTransition.sections.admission(for: "0-title-tools"),
-                                      width: 192, height: 68) {
+                                      width: 152, height: 68) {
             HStack(spacing: 8) {
                 AppAppearanceButton()
-
-            // ★ v2.11.8（Agent）：编辑页的 Agent 入口，和外观/插件/键盘/设置同一簇图标。
-            // 放在这簇的最左（紧跟外观）而不是最右：右侧末位是「设置」，那是全局配置的固定位置，
-            // 十几个版本没变过，插在它后面会让肌肉记忆失效。
-            Button {
-                withAnimation(Anim.transition) { sharedAgentVisible.toggle() }
-            } label: {
-                Image(systemName: "sparkles")
-                    .font(.system(size: 14, weight: .semibold))
-                    // 展开时用主题色点亮，收起时和邻居一样是中性墨色——这枚图标是**有状态**的
-                    // （侧栏开/关），必须能从图标本身读出来，否则用户只能靠侧栏是否可见去反推。
-                    .foregroundColor(sharedAgentVisible ? AppTheme.chromeAccentInk : Neu.ink)
-                    .neuIconTile()
-            }
-            .buttonStyle(.plain)
-            .help(sharedAgentVisible ? "收起 Agent 侧栏" : "打开 Agent 侧栏")
 
             // v2.9.8: 插件入口（月亮与键盘图标之间）
             Button {
@@ -1651,16 +1667,15 @@ struct ContentView: View {
 
             Spacer()
 
-            Text("v\(AppVersion.current)")
-                .font(.system(size: 9, weight: .medium))
-                .foregroundColor(Color.secondary.opacity(0.55))
-                .fixedSize()
-                .help("当前版本 v\(AppVersion.current)\n首次打开 ClipSlots.app 时，macOS 可能提示“无法验证开发者”，请右键点击 App → 选择「打开」→ 点击「打开」确认即可。")
+            AgentOrbButton(isOpen: sharedAgentVisible) {
+                withAnimation(Anim.transition) { sharedAgentVisible.toggle() }
+            }
 
         }
         .padding(.horizontal, AppTheme.pagePadding)
-        .padding(.vertical, 8)
+        .padding(.vertical, 6)
         .background(HeaderSurfaceBackground())
+        .accessibilityElement(children: .contain)
         .accessibilityIdentifier("slot-workspace-footer")
         #if DEBUG
         .background(MainWindowChromeRegression.SurfaceBounds(.footer))
@@ -1717,7 +1732,7 @@ struct ContentView: View {
         } label: {
             connectionMenuLabel
         }
-        .buttonStyle(.borderless)
+        .buttonStyle(CompactActionStyle(selected: !store.currentConnectionMap.edges.isEmpty))
         .fixedSize()
         .accessibilityIdentifier("slot-connection-entry")
         #if DEBUG
@@ -1728,12 +1743,6 @@ struct ContentView: View {
     private var connectionMenuLabel: some View {
         let edgeCount = store.currentConnectionMap.edges.count
         let hasConnections = edgeCount > 0
-        // v2.9.22: 「连接」按钮升级——更贴切的节点连线图标 + 渐变胶囊 + 描边/投影，
-        // 提升质感并与整体设计语言统一；有连接时用强调色渐变，无连接时用中性玻璃底。
-        //
-        // v2.11.7 hotfix: 只把**无连接**那一档收成中性——它是「什么都没发生」的静息态，用强调色纯属装饰。
-        // 有连接时保留强调色渐变：那是在报「当前组已有 N 条连接」的状态，收成灰就把信息丢了
-        // （简洁模式的规矩是「出现彩色 = 这里有状态」，这一档正是有状态）。
         return HStack(spacing: 6) {
             Image(systemName: "point.3.connected.trianglepath.dotted")
                 .font(.system(size: 12, weight: .bold))
@@ -1741,31 +1750,6 @@ struct ContentView: View {
             Text(hasConnections ? "连接 · \(edgeCount)" : "连接")
                 .font(.caption.weight(.semibold))
         }
-        .foregroundColor(hasConnections ? .white : AppTheme.chromeAccentInk)
-        .padding(.horizontal, 13)
-        .padding(.vertical, 6)
-        .background(
-            Capsule()
-                .fill(
-                    hasConnections
-                        ? AnyShapeStyle(LinearGradient(
-                            colors: [Color.accentColor, Color.accentColor.opacity(0.78)],
-                            startPoint: .topLeading,
-                            endPoint: .bottomTrailing))
-                        : AnyShapeStyle(AppTheme.chromeAccentSoftFill)
-                )
-        )
-        .overlay(
-            Capsule().stroke(
-                hasConnections ? Color.white.opacity(0.35) : AppTheme.chromeAccentTileStroke,
-                lineWidth: 1)
-        )
-        // v2.11.7 hotfix8: 这颗按钮原来带一层外投影（无连接时黑 6%、有连接时强调色光晕）。
-        // 工具栏这一行已经全面去掉外部 Drop Shadow（见 NeumorphicKit 文件头第 2 条），
-        // 它是行内唯一还在投影的控件，留着就成了「一颗浮起来的胶囊」。状态信号不受影响：
-        // 有连接靠强调色渐变 + 计数文字，无连接靠中性底。
-        .scaleEffect(hasConnections ? 1.02 : 1.0)
-        .animation(Anim.transition, value: edgeCount)
         .help(hasConnections ? "当前槽位组已有 \(edgeCount) 条连接" : "打开节点连接工具")
     }
 
@@ -1802,7 +1786,7 @@ struct ContentView: View {
             slot: slot,
             content: content,
             specialSlotId: displayedGroup,
-            externalContentRevision: store.canvasSlotRevision,
+            externalContentRevision: store.slotPreviewRevision(slot, groupID: store.displayedSpecialSlotId),
             label: label,
             saveShortcut: shortcutPreview(store.config.saveKey, slot: slot),
             pasteShortcut: shortcutPreview(store.config.pasteKey, slot: slot),
@@ -1888,6 +1872,7 @@ struct ContentView: View {
                     currentGroupId: store.currentSpecialSlotId,
                     onJump: jumpToSearchResult,
                     sortRule: $globalSearchSortRule,
+                    selectionModel: globalSearchSelection,
                     loadPreview: { result in
                         let storage = store.specialStorage
                         return await Task.detached(priority: .userInitiated) {
@@ -2125,8 +2110,9 @@ struct ContentView: View {
     }
 
     private func jumpToSearchResult(_ result: SlotGlobalSearchResult) {
-        store.switchSpecialSlot(id: result.groupId, fromNavigation: true)
-        searchScope = .currentGroup
+        searchText = ""
+        selectedFilter = .all
+        store.jumpToCursorAddress(SlotAddress(groupId: result.groupId, slot: result.slot))
     }
 }
 
@@ -2171,10 +2157,7 @@ private struct ToolbarActionButton: View {
     let title: String
     let icon: String
     let role: Role
-    // v2.11.8: 原 `prominent` 参数（是否加投影）已删除——新拟物里投影是**表面语言**的一部分，
-    // 由 NeuRaisedBackground 统一负责，不再由调用点逐个决定「这颗要不要投影」。
     let action: () -> Void
-    @State private var isHovering = false
 
     var body: some View {
         Button(action: action) {
@@ -2184,48 +2167,11 @@ private struct ToolbarActionButton: View {
                 Text(title)
                     .font(.system(size: 12, weight: .semibold))
             }
-            .frame(minWidth: minWidth, minHeight: NeumorphicMetrics.actionHeight)
-            .padding(.horizontal, 9)
-            .contentShape(RoundedRectangle(cornerRadius: NeumorphicMetrics.actionRadius, style: .continuous))
         }
-        .buttonStyle(.plain)
-        .foregroundColor(foregroundColor)
-        // v2.11.8: 三种 role 都落到同一套新拟物凸起表面上，只换填充：
-        //   normal      → 默认凸起（白/浅灰渐变）
-        //   accent      → 选中滑块色（简洁模式近黑、多彩模式品牌渐变）+ 反相文字
-        //   destructive → 淡红底 + 红字（设计稿里「清空」就是这个处理，而不是整块实心红）
-        // 原实现里 destructive 是**实心红底白字**，在白面板上是全场最重的一块，
-        // 视觉上盖过了主操作；设计稿刻意把它降成「淡底彩字」——危险但不喧哗。
-        .neuRaised(radius: NeumorphicMetrics.actionRadius,
-                   hovering: isHovering,
-                   fill: surfaceFill)
-        .onHover { isHovering = $0 }
+        .buttonStyle(CompactActionStyle(selected: role == .accent, destructive: role == .destructive))
+        .accessibilityIdentifier("editor-action-\(title)")
     }
 
-    private var minWidth: CGFloat {
-        switch role {
-        case .normal: return 66
-        case .accent: return 88
-        case .destructive: return 62
-        }
-    }
-
-    private var foregroundColor: Color {
-        switch role {
-        case .normal: return Neu.ink
-        case .accent: return Neu.sliderInk
-        case .destructive: return Neu.dangerInk
-        }
-    }
-
-    /// nil = 用 NeuRaisedBackground 的默认凸起填充。
-    private var surfaceFill: AnyShapeStyle? {
-        switch role {
-        case .normal: return nil
-        case .accent: return Neu.selectedFill
-        case .destructive: return AnyShapeStyle(Neu.dangerFill)
-        }
-    }
 }
 
 // MARK: - Hotkey Template Popover

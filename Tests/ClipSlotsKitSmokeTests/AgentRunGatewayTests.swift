@@ -462,12 +462,22 @@ func runAgentRunGatewayTests(_ t: TestRunner) {
         c.check(wire[3]["content"]?.arrayValue?.last?["image_url"]?["url"] ==
                 .string("data:image/png;base64," + png.base64EncodedString()), "image bytes survive request encoding")
         let unsupported = gatewayBackend(root.appendingPathComponent("unsupported"), GatewayScript([]))
+        var textOnly = AgentConfig()
+        textOnly.supportsImageInput = false
         do {
-            _ = try await unsupported.run(history: history, config: .init(), tools: nil, onEvent: { _ in })
-            c.check(false, "unclaimed image capability rejects")
+            _ = try await unsupported.run(history: history, config: textOnly, tools: nil, onEvent: { _ in })
+            c.check(false, "explicit text-only capability rejects")
         } catch {
-            c.check(error is AgentAttachmentImport.ImportError, "unclaimed image rejected before HTTP")
+            c.check(error is AgentAttachmentImport.ImportError, "explicit text-only image rejected before HTTP")
         }
+        let unknownScript = GatewayScript([gatewayHTTP("POST", "/runs"), gatewayQuery()],
+            [.init(chunks: [try gatewayInitial() + gatewayDone()])])
+        _ = try await gatewayBackend(root.appendingPathComponent("unknown"), unknownScript)
+            .run(history: history, config: .init(), tools: nil, onEvent: { _ in })
+        let unknownRequests = await unknownScript.requests
+        let unknownBody = try JSONDecoder().decode(JSONValue.self, from: unknownRequests[0].httpBody!)
+        c.check(unknownBody["history"]?.arrayValue?.last?["content"]?.arrayValue?.last?["image_url"]?["url"]
+            == .string("data:image/png;base64," + png.base64EncodedString()), "unknown gateway preserves image for actual API decision")
     }
 
     gatewayCase(t, "complete history HTTP budget") { c, root in

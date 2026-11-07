@@ -1,6 +1,8 @@
 import AppKit
 import SwiftUI
 import QuartzCore
+import ImageIO
+import ClipSlotsKit
 
 /// Only this small native layer animates while SwiftUI mounts the destination.
 /// The outgoing workspace is removed normally, including its event monitors.
@@ -115,81 +117,167 @@ struct WorkspaceLoadingSurface: NSViewRepresentable {
 }
 
 final class WorkspaceLoadingView: NSView {
-    private let symbol = CAShapeLayer()
-    private let label = CATextLayer()
+    struct Frames: @unchecked Sendable {
+        let images: [CGImage]
+        let times: [NSNumber]
+        let duration: Double
+    }
+    let symbol = CALayer()
+    let envelope = CALayer()
+    private(set) var frames: Frames?
+    private var preparation: Task<Frames?, Never>?
+    private var preparationID = UUID()
     private var active = false
-    private var hideTicket = UUID()
+    private var generation = UUID()
     override var isFlipped: Bool { true }
     override func hitTest(_ point: NSPoint) -> NSView? { active ? self : nil }
     override init(frame: NSRect) {
         super.init(frame: frame)
         wantsLayer = true
         layer?.opacity = 0
-        layer?.addSublayer(symbol)
-        layer?.addSublayer(label)
-        label.alignmentMode = .center
-        label.font = NSFont.systemFont(ofSize: 12, weight: .medium)
-        label.fontSize = 12
-        label.contentsScale = NSScreen.main?.backingScaleFactor ?? 2
-        symbol.lineWidth = 3
-        symbol.lineCap = .round
-        symbol.fillColor = nil
+        layer?.backgroundColor = NSColor.black.cgColor
+        layer?.masksToBounds = true
+        layer?.addSublayer(envelope)
+        envelope.addSublayer(symbol)
+        symbol.contentsGravity = .resizeAspect
         setAccessibilityIdentifier("workspace-loading")
         setAccessibilityRole(.progressIndicator)
-        colors()
+        startPreparing()
     }
     required init?(coder: NSCoder) { nil }
-    override func viewDidChangeEffectiveAppearance() { super.viewDidChangeEffectiveAppearance(); colors() }
-    private func colors() {
-        effectiveAppearance.performAsCurrentDrawingAppearance {
-            layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
-            symbol.strokeColor = NSColor.labelColor.cgColor
-            label.foregroundColor = NSColor.secondaryLabelColor.cgColor
+    private func startPreparing() {
+        guard frames == nil, preparation == nil else { return }
+        preparationID = UUID()
+        let url = AgentBackgroundResources.pageURL?.deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("TapNowMotion/workspace-loading.webp")
+        preparation = Task.detached(priority: .userInitiated) {
+            guard let url, let source = CGImageSourceCreateWithURL(url as CFURL, nil) else { return nil }
+            var images: [CGImage] = [], durations: [Double] = []
+            for index in 0..<CGImageSourceGetCount(source) {
+                guard !Task.isCancelled,
+                      let image = CGImageSourceCreateImageAtIndex(source, index,
+                        [kCGImageSourceShouldCacheImmediately: true] as CFDictionary),
+                      let properties = CGImageSourceCopyPropertiesAtIndex(source, index, nil) as? [String: Any],
+                      let webp = properties["{WebP}"] as? [String: Any],
+                      let delay = (webp["UnclampedDelayTime"] ?? webp["DelayTime"]) as? NSNumber else { return nil }
+                images.append(image); durations.append(max(0.01, delay.doubleValue))
+            }
+            guard !images.isEmpty else { return nil }
+            let total = durations.reduce(0, +)
+            var elapsed = 0.0
+            let times = durations.map { duration -> NSNumber in
+                defer { elapsed += duration }
+                return NSNumber(value: elapsed / total)
+            }
+            return Frames(images: images, times: times, duration: total)
         }
+    }
+    func prepareAnimation() async {
+        startPreparing()
+        guard let preparation else { return }
+        let ticket = preparationID
+        let result = await preparation.value
+        guard preparationID == ticket, !preparation.isCancelled else { return }
+        frames = result
+        self.preparation = nil
     }
     override func layout() {
         super.layout()
         CATransaction.begin(); CATransaction.setDisableActions(true)
-        symbol.bounds = CGRect(x: 0, y: 0, width: 44, height: 44)
-        symbol.position = CGPoint(x: bounds.midX, y: bounds.midY - 12)
-        symbol.path = CGPath(ellipseIn: CGRect(x: 5, y: 5, width: 34, height: 34), transform: nil)
-        symbol.strokeStart = 0.08; symbol.strokeEnd = 0.82
-        label.frame = CGRect(x: max(0, bounds.midX - 130), y: bounds.midY + 25, width: 260, height: 24)
+        envelope.bounds = CGRect(x: 0, y: 0, width: 64, height: 64)
+        envelope.position = CGPoint(x: bounds.midX, y: bounds.midY)
+        symbol.frame = envelope.bounds
+        symbol.contentsScale = window?.backingScaleFactor ?? 2
         CATransaction.commit()
     }
     func show(title: String) {
-        // A workspace switch can arrive before the resize layout pass. Resolve the
-        // full window bounds before exposing this opaque layer, including its top edge.
         window?.contentView?.layoutSubtreeIfNeeded()
-        hideTicket = UUID()
+        generation = UUID()
+        let ticket = generation
         active = true
-        label.string = title
         setAccessibilityLabel(title)
-        layer?.removeAnimation(forKey: "visibility")
+        let opacity = layer?.presentation()?.opacity ?? layer?.opacity ?? 0
+        layer?.removeAllAnimations()
+        CATransaction.begin(); CATransaction.setDisableActions(true)
         layer?.opacity = 1
-        if !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
-            let spin = CABasicAnimation(keyPath: "transform.rotation")
-            spin.fromValue = 0; spin.toValue = 2 * Double.pi
-            spin.duration = 1.4; spin.repeatCount = .infinity
-            symbol.add(spin, forKey: "spin")
-            let pulse = CABasicAnimation(keyPath: "opacity")
-            pulse.fromValue = 0.5; pulse.toValue = 1
-            pulse.duration = 0.9; pulse.autoreverses = true; pulse.repeatCount = .infinity
-            symbol.add(pulse, forKey: "pulse")
+        envelope.opacity = 1
+        envelope.removeAllAnimations()
+        CATransaction.commit()
+        let reduced = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+        if !reduced {
+            fade(layer, from: opacity, to: 1, duration: 1)
+            fade(envelope, from: 0, to: 1, duration: 0.3, delay: 0.1)
+            let reveal = CABasicAnimation(keyPath: "transform.scale")
+            reveal.fromValue = 0.95; reveal.toValue = 1
+            reveal.duration = 0.3; reveal.beginTime = CACurrentMediaTime() + 0.1
+            reveal.fillMode = .backwards
+            reveal.timingFunction = CAMediaTimingFunction(controlPoints: 0, 0, 0.58, 1)
+            envelope.add(reveal, forKey: "reveal")
         }
+        if frames != nil { play(reduced: reduced) }
+        else {
+            Task { [weak self] in
+                guard let self else { return }
+                await self.prepareAnimation()
+                guard self.active, self.generation == ticket else { return }
+                self.play(reduced: reduced)
+            }
+        }
+    }
+    private func play(reduced: Bool) {
+        guard let frames, let first = frames.images.first else { return }
+        CATransaction.begin(); CATransaction.setDisableActions(true)
+        symbol.removeAllAnimations()
+        symbol.contents = first
+        CATransaction.commit()
+        guard !reduced else { return }
+        let morph = CAKeyframeAnimation(keyPath: "contents")
+        morph.values = frames.images + [first]
+        morph.keyTimes = frames.times + [1]
+        morph.calculationMode = .discrete
+        morph.duration = frames.duration; morph.repeatCount = .infinity
+        symbol.add(morph, forKey: "morph")
+        let pulse = CAKeyframeAnimation(keyPath: "transform.scale")
+        pulse.values = [0.95, 1.05, 0.95]; pulse.keyTimes = [0, 0.5, 1]
+        pulse.duration = 2; pulse.repeatCount = .infinity
+        pulse.timingFunctions = Array(repeating: CAMediaTimingFunction(controlPoints: 0.42, 0, 0.58, 1), count: 2)
+        symbol.add(pulse, forKey: "pulse")
+    }
+    private func fade(_ target: CALayer?, from: Float, to: Float, duration: Double, delay: Double = 0) {
+        let animation = CABasicAnimation(keyPath: "opacity")
+        animation.fromValue = from; animation.toValue = to
+        animation.duration = duration; animation.beginTime = CACurrentMediaTime() + delay
+        animation.fillMode = .backwards
+        animation.timingFunction = CAMediaTimingFunction(controlPoints: 0, 0, 0.58, 1)
+        target?.add(animation, forKey: "visibility")
     }
     func hide() {
         guard active else { return }
         active = false
-        let ticket = UUID(); hideTicket = ticket
-        let fade = CABasicAnimation(keyPath: "opacity")
-        fade.fromValue = layer?.presentation()?.opacity ?? 1; fade.toValue = 0
-        fade.duration = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion ? 0 : 0.18
+        generation = UUID()
+        let ticket = generation
+        let opacity = layer?.presentation()?.opacity ?? 1
+        CATransaction.begin(); CATransaction.setDisableActions(true)
         layer?.opacity = 0
-        layer?.add(fade, forKey: "visibility")
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in
-            guard let self, self.hideTicket == ticket else { return }
-            self.symbol.removeAllAnimations()
+        envelope.opacity = 0
+        CATransaction.commit()
+        if NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
+            releaseAnimation()
+        } else {
+            fade(layer, from: opacity, to: 0, duration: 1)
+            fade(envelope, from: envelope.presentation()?.opacity ?? 1, to: 0, duration: 0.8)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in
+                guard let self, self.generation == ticket, !self.active else { return }
+                self.releaseAnimation()
+            }
         }
+    }
+    private func releaseAnimation() {
+        CATransaction.begin(); CATransaction.setDisableActions(true)
+        layer?.removeAllAnimations(); envelope.removeAllAnimations(); symbol.removeAllAnimations()
+        symbol.contents = nil; frames = nil
+        CATransaction.commit()
+        preparationID = UUID()
+        preparation?.cancel(); preparation = nil
     }
 }

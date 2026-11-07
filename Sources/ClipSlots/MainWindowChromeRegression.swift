@@ -123,11 +123,11 @@ enum MainWindowChromeRegression {
             let buttons = views(root, CanvasHeaderButtonProbeView.self)
                 .filter { $0.window === window && !$0.isHiddenOrHasHiddenAncestor }
                 .map { $0.convert($0.bounds, to: root) }.sorted { $0.minX < $1.minX }
-            check(buttons.count == 4, "\(stage) mounts connection appearance Agent and batch header controls")
-            guard buttons.count == 4 else { return }
+            check(buttons.count == 3, "\(stage) mounts connection appearance and batch header controls")
+            guard buttons.count == 3 else { return }
             check(buttons.allSatisfy { abs($0.height - 40) < 0.5 },
                   "\(stage) canvas header controls share 40pt height")
-            check(buttons.prefix(3).allSatisfy { abs($0.width - 44) < 0.5 },
+            check(buttons.prefix(2).allSatisfy { abs($0.width - 44) < 0.5 },
                   "\(stage) canvas header icons share 44pt targets")
             check(buttons.allSatisfy { abs(top($0) - top(buttons[0])) < 0.5 },
                   "\(stage) canvas header controls align on the same baseline")

@@ -48,6 +48,10 @@ final class CanvasAgentContext: ObservableObject {
     private(set) var activationEpoch = UUID()
     private var projectObserver: AnyCancellable?
     private var selectionObserver: AnyCancellable?
+    private var conversationObserver: AnyCancellable?
+    private var selectionTask: Task<Void, Never>?
+    private var observedSelection: Set<String>?
+    private var observedConversation: UUID?
     private var referenceTask: Task<Void, Never>?
     private var referenceTicket = UUID()
     private var readbackSource: (any AgentCanvasSnapshotReading)?
@@ -127,15 +131,50 @@ final class CanvasAgentContext: ObservableObject {
     func observeSelection(to model: AgentChatModel) {
         selectionObserver?.cancel()
         guard let canvas else { return }
-        selectionObserver = canvas.selectedNodesDidChange.prepend(canvas.selectedNodeIds).removeDuplicates()
-            .map { [weak model] ids in (ids, model?.selectedConversationID) }
-            .debounce(for: .milliseconds(80), scheduler: DispatchQueue.main)
-            .sink { [weak self, weak model] event in
-                let (ids, conversation) = event
-                guard let self, let model, self.isActive, !ids.isEmpty,
-                      model.selectedConversationID == conversation else { return }
-                self.addSelection(to: model)
+        selectionObserver = canvas.selectedNodesDidChange.removeDuplicates()
+            .sink { [weak self, weak model] _ in
+                guard let self, let model else { return }
+                self.synchronizeSelection(to: model)
             }
+        // Restoring a conversation is read-only. Reconcile its draft when the
+        // user changes selection or sends, rather than mutating it on launch.
+        if canvas.selectedNodeIds.isEmpty {
+            observedSelection = []
+            observedConversation = model.selectedConversationID
+        } else {
+            synchronizeSelection(to: model)
+        }
+        conversationObserver = NotificationCenter.default.publisher(for: AgentChatModel.conversationChangedNotification)
+            .sink { [weak self, weak model] notification in
+                guard let self, let model, notification.object as AnyObject? === model else { return }
+                self.synchronizeSelection(to: model)
+            }
+    }
+
+    func synchronizeSelection(to model: AgentChatModel) {
+        guard isActive, let canvas else { return }
+        let ids = canvas.selectedNodeIds
+        let kept = model.draftReferences.filter { $0.selectionDerived == false || ids.contains($0.id) }
+        if kept != model.draftReferences {
+            cancelReferenceCapture()
+            model.draftReferences = kept
+        }
+        guard observedSelection != ids || observedConversation != model.selectedConversationID else { return }
+        observedSelection = ids
+        observedConversation = model.selectedConversationID
+        selectionTask?.cancel()
+        cancelReferenceCapture()
+        error = nil
+        guard !ids.isEmpty else { return }
+        let conversation = model.selectedConversationID
+        isLoadingReferences = true
+        selectionTask = Task { [weak self, weak model] in
+            do { try await Task.sleep(for: .milliseconds(80)) } catch { return }
+            guard let self, let model, self.isActive, self.canvas?.selectedNodeIds == ids,
+                  model.selectedConversationID == conversation, !Task.isCancelled else { return }
+            self.selectionTask = nil
+            self.addSelection(to: model, automatic: true)
+        }
     }
 
     func captureTurn(supportsTools: Bool) throws -> CanvasAgentTurn {
@@ -210,7 +249,10 @@ final class CanvasAgentContext: ObservableObject {
         return attachment == nil ? .text : .file
     }
 
-    func addSelection(to model: AgentChatModel) {
+    func addSelection(to model: AgentChatModel, automatic: Bool = false) {
+        if !automatic { selectionTask?.cancel(); selectionTask = nil }
+        var captured = false
+        defer { if !captured { isLoadingReferences = false } }
         do {
             guard isActive, let canvas else { throw AgentCanvasError.staleTarget }
             let selected = canvas.nodes.filter { canvas.selectedNodeIds.contains($0.id) }
@@ -221,9 +263,11 @@ final class CanvasAgentContext: ObservableObject {
             let snapshots = try selected.map { try reference(for: $0) }
             let existing = Dictionary(model.draftReferences.map { ($0.id, $0) }, uniquingKeysWith: { _, new in new })
             let refreshed = snapshots.map { snapshot in
+                var refreshed = snapshot
                 if let old = existing[snapshot.id], old.contentRevision == snapshot.contentRevision,
-                   old.mediaKind == snapshot.mediaKind, old.title == snapshot.title { return old }
-                return snapshot
+                   old.mediaKind == snapshot.mediaKind, old.title == snapshot.title { refreshed = old }
+                refreshed.selectionDerived = automatic && refreshed.selectionDerived != false
+                return refreshed
             }
             let ids = Set(refreshed.map(\.id))
             let next = model.draftReferences.filter { !ids.contains($0.id) } + refreshed
@@ -236,7 +280,8 @@ final class CanvasAgentContext: ObservableObject {
             model.draftReferences = next
             error = nil
             captureReferenceImages(to: model)
-        } catch { self.error = error.localizedDescription }
+            captured = true
+        } catch { self.error = error.localizedDescription; isLoadingReferences = false }
     }
 
     func captureReferenceImages(to model: AgentChatModel) {
@@ -249,11 +294,11 @@ final class CanvasAgentContext: ObservableObject {
         isLoadingReferences = true
         referenceCaptureErrors = [:]
         do {
-            let sources = try references.map { reference -> SlotContent.SlotAttachment? in
+            let sources = try references.map { reference -> [SlotContent.SlotAttachment] in
                 try validate(reference)
                 guard let content = store.canvasReadFullContent(groupId: reference.groupID, slot: reference.slot),
                       content.contentId == reference.contentRevision else { throw AgentCanvasError.conflict }
-                return content.attachments.first
+                return content.attachments
             }
             referenceTask = Task { [weak self, weak model] in
                 guard let self, let model else { return }
@@ -263,9 +308,19 @@ final class CanvasAgentContext: ObservableObject {
                 for (reference, source) in zip(references, sources) {
                     guard !Task.isCancelled, isActive, referenceTicket == ticket,
                           model.selectedConversationID == conversation else { return }
-                    guard let source else { continue }
+                    guard let first = source.first else { continue }
                     do {
-                        let image = await CanvasAttachmentThumbnails.load(source, maxPixel: 1280)
+                        let image = await CanvasAttachmentThumbnails.load(first, maxPixel: 240)
+                        try Task.checkCancellation()
+                        guard referenceTicket == ticket, model.selectedConversationID == conversation else { return }
+                        try validate(reference)
+                        guard store.canvasReadFullContent(groupId: reference.groupID, slot: reference.slot)?.contentId
+                                == reference.contentRevision else { throw AgentCanvasError.conflict }
+                        let bitmap = image?.cgImage(forProposedRect: nil, context: nil, hints: nil)
+                            .map(NSBitmapImageRep.init(cgImage:))
+                        let data = bitmap?.representation(using: .jpeg, properties: [.compressionFactor: 0.65])
+                        let imageSources = source.filter(\.canvasIsImageLike)
+                        let images = imageSources.isEmpty ? nil : try await SlotEditorAI.captureAttachments(imageSources)
                         try Task.checkCancellation()
                         guard referenceTicket == ticket, model.selectedConversationID == conversation else { return }
                         try validate(reference)
@@ -274,19 +329,11 @@ final class CanvasAgentContext: ObservableObject {
                         guard let index = model.draftReferences.firstIndex(where: {
                             $0.id == reference.id && $0.contentRevision == reference.contentRevision
                         }) else { continue }
-                        let bitmap = image?.cgImage(forProposedRect: nil, context: nil, hints: nil)
-                            .map(NSBitmapImageRep.init(cgImage:))
-                        let data = bitmap?.representation(using: .jpeg, properties: [.compressionFactor: 0.65])
-                        var images: [AgentAttachment]?
-                        if reference.mediaKind == .image {
-                            guard let data else { throw AgentAttachmentImport.ImportError.unavailable }
-                            images = [try AgentAttachmentImport.captureImage(data, name: source.name)]
-                        }
                         let replacement = AgentCanvasReference(projectID: reference.projectID, nodeID: reference.nodeID,
                             nodeCreatedAt: reference.nodeCreatedAt, groupID: reference.groupID, slot: reference.slot,
                             title: reference.title, text: reference.text, attachmentNames: reference.attachmentNames,
                             contentRevision: reference.contentRevision, images: images, mediaKind: reference.mediaKind,
-                            previewImage: data)
+                            previewImage: data, selectionDerived: reference.selectionDerived)
                         var proposed = model.draftReferences
                         proposed[index] = replacement
                         try AgentAttachmentImport.validate(model.draftAttachments + proposed.flatMap { $0.images ?? [] })
@@ -592,7 +639,10 @@ final class CanvasAgentContext: ObservableObject {
     }
 
     func cancelReferenceCapture() {
+        selectionTask?.cancel()
+        selectionTask = nil
         referenceTask?.cancel()
+        referenceTask = nil
         referenceTicket = UUID()
         isLoadingReferences = false
         referenceCaptureErrors = [:]

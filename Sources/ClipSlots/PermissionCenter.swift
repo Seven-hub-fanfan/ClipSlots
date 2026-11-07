@@ -185,7 +185,7 @@ final class PermissionCenterModel: ObservableObject {
 @MainActor
 enum PermissionCenter {
     static let model = PermissionCenterModel.shared
-    static let cardSize = CGSize(width: 480, height: 526)
+    static let cardSize = CGSize(width: 480, height: 500)
     static let helperSize = CGSize(width: 430, height: 156)
     private(set) static var panel: NSPanel?
     private(set) static var helper: NSPanel?
@@ -444,6 +444,10 @@ struct PermissionCenterCard: View {
         VStack(spacing: 0) {
             HStack {
                 Spacer()
+                Button { model.refresh() } label: {
+                    Image(systemName: "arrow.clockwise").font(.system(size: 12)).frame(width: 28, height: 28)
+                }.buttonStyle(.plain).help("重新检查权限").accessibilityLabel("重新检查权限")
+                    .accessibilityIdentifier("permission-refresh")
                 Button(action: onClose) {
                     Image(systemName: "xmark").font(.system(size: 13)).frame(width: 28, height: 28)
                 }.buttonStyle(.plain).help("关闭").accessibilityLabel("关闭权限面板")
@@ -464,23 +468,13 @@ struct PermissionCenterCard: View {
                 .frame(maxWidth: .infinity).padding(.vertical, 16)
                 .background(ink.opacity(0.035), in: RoundedRectangle(cornerRadius: 10))
                 .padding(.top, 18)
-            PermissionRows(model: model, onAuthorize: onAuthorize, onRepair: onRepair)
+            PermissionRows(model: model, onAuthorize: onAuthorize)
                 .padding(.top, 16)
             PermissionApplicationDragSection(model: model).padding(.top, 12)
-            HStack(spacing: 6) {
-                if let error = model.error {
-                    Text(error).foregroundColor(.red)
-                } else if let notice = model.repairNotice {
-                    Text(notice).foregroundColor(.secondary)
-                } else {
-                    Text(model.authorized.count == 2 ? "权限已就绪，可继续使用。" : "授权后自动更新 · 可在设置中随时查看")
-                        .foregroundColor(.secondary)
-                }
-                Spacer(minLength: 0)
-                Button { model.refresh() } label: { Image(systemName: "arrow.clockwise") }
-                    .buttonStyle(.plain).help("重新检查权限").accessibilityLabel("重新检查权限")
-                    .accessibilityIdentifier("permission-refresh")
-            }.font(.system(size: 10.5)).padding(.top, 12)
+            if let message = model.error ?? model.repairNotice {
+                Text(message).foregroundColor(model.error == nil ? .secondary : .red)
+                    .font(.system(size: 11)).padding(.top, 12)
+            }
             Spacer(minLength: 14)
         }
         .padding(.horizontal, 24).frame(width: PermissionCenter.cardSize.width,
@@ -521,28 +515,16 @@ struct PermissionRows: View {
                             .accessibilityLabel("\(permission.title)，已授权")
                             .accessibilityIdentifier("permission-status-\(permission.rawValue)")
                     } else {
-                        VStack(spacing: 5) {
                             Button { onAuthorize(permission) } label: {
                                 HStack(spacing: 5) {
                                     Text(model.repairing == permission ? "修复中…" :
                                         model.requestingScreenCapture && permission == .screenCapture ? "等待授权" : "去授权")
                                     Image(systemName: "arrow.up.right.square")
                                 }.font(.system(size: 11, weight: .medium))
-                                    .foregroundColor(scheme == .dark ? .black : .white)
-                                    .padding(.horizontal, 10).frame(height: 27)
-                                    .background(scheme == .dark ? Color(white: 0.92) : Color(white: 0.17),
-                                                in: RoundedRectangle(cornerRadius: 7))
-                            }.buttonStyle(.plain)
+                            }.buttonStyle(CompactActionStyle(selected: true))
                                 .disabled(model.repairing != nil || permission == .screenCapture && model.requestingScreenCapture)
                                 .accessibilityLabel("\(permission.title)，未授权，打开系统设置")
                                 .accessibilityIdentifier("permission-authorize-\(permission.rawValue)")
-                            Button("修复此项授权") { onRepair(permission) }
-                                .buttonStyle(.plain).font(.system(size: 10)).foregroundColor(.secondary)
-                                .disabled(model.repairing != nil || model.requestingScreenCapture)
-                                .help("清除 ClipSlots 此项授权记录并重新申请；需要系统确认。")
-                                .accessibilityLabel("修复\(permission.title)：清除 ClipSlots 此项记录并重新申请，需要系统确认")
-                                .accessibilityIdentifier("permission-repair-\(permission.rawValue)")
-                        }
                     }
                 }.padding(.horizontal, 16).frame(minHeight: 72)
             }
@@ -555,11 +537,17 @@ struct PermissionSettingsSection: View {
     @ObservedObject private var model = PermissionCenterModel.shared
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
-            Text("系统权限").font(.system(size: 18, weight: .semibold))
             Text("复制粘贴与截图按需使用以下权限，状态以 macOS 当前进程的授权为准。")
                 .font(.system(size: 12)).foregroundColor(.secondary)
             PermissionRows(model: model)
             PermissionApplicationDragSection(model: model)
+            Menu("修复授权…") {
+                ForEach(AppPermission.allCases) { permission in
+                    Button("修复\(permission.title)…") { PermissionCenter.repair(permission) }
+                }
+            }
+            .disabled(model.repairing != nil || model.requestingScreenCapture)
+            .fixedSize()
             Text("开关已开启但功能不可用时，可修复此项授权。修复会清除 ClipSlots 此项现有记录并重新申请，需要系统确认。")
                 .font(.system(size: 11)).foregroundColor(.secondary)
             if let message = model.error ?? model.repairNotice {

@@ -67,7 +67,12 @@ final class SlotEditorModel: ObservableObject {
     @Published var polishing = false
     @Published var saving = false
     @Published var inputFocus = 0
-    @Published var modelName: String
+    @Published private(set) var modelPresentation = AgentModelPresentation.current(scope: .sidebar)
+    var modelName: String { modelPresentation.name }
+    func refreshModelPresentation() {
+        let current = AgentModelPresentation.current(scope: .sidebar)
+        if current != modelPresentation { modelPresentation = current }
+    }
     var showsOutline: Bool { fullScreen && !focused && !outline.isEmpty }
     var showsPreviewPicker: Bool { proposal != nil }
     let textBridge = SlotEditorTextBridge()
@@ -85,7 +90,7 @@ final class SlotEditorModel: ObservableObject {
         initialText = raw
         draft = raw
         attachments = snapshot.content.attachments
-        modelName = CanvasTextGeneration.config.model
+        refreshModelPresentation()
         updateOutline()
     }
 
@@ -263,14 +268,39 @@ enum SlotEditorAI {
             + (markdown ? "\n当前正文是 Markdown 源码，请保持标题、列表、链接及代码围栏等 Markdown 语法。" : "")
         config.taskPolicy = .textPolish
         config.canvasPreviewOnly = true
-        let files = try await Task.detached(priority: .userInitiated) {
+        let files = try await captureAttachments(attachments)
+        try AgentAttachmentImport.validateImageSupport(history: [.init(role: .user, content: "", attachments: files)],
+            supported: selection.kind == .tika ? false : config.resolvedImageSupport, tika: selection.kind == .tika)
+        return try await rewriteCaptured(text: text, instruction: instruction, files: files, selection: selection, config: config)
+    }
+
+    static func captureAttachments(_ attachments: [SlotContent.SlotAttachment]) async throws -> [AgentAttachment] {
+        guard attachments.count <= AgentAttachmentImport.maxFiles else { throw AgentAttachmentImport.ImportError.tooLarge }
+        return try await Task.detached(priority: .userInitiated) {
             try attachments.map { attachment -> AgentAttachment in
                 try Task.checkCancellation()
+                if attachment.canvasIsImageLike {
+                    if let data = attachment.data {
+                        return try AgentAttachmentImport.captureImage(data, name: attachment.name)
+                    }
+                    // Stored bytes are the attachment; path is only its source
+                    // provenance and can disappear after import or a body move.
+                    var visited = Set<String>()
+                    for path in [attachment.storagePath, attachment.localFileReferencePath].compactMap({ $0 })
+                        where !path.isEmpty && visited.insert(path).inserted {
+                        do {
+                            return try AgentAttachmentImport.captureImageFile(
+                                URL(fileURLWithPath: path), name: attachment.name)
+                        } catch AgentAttachmentImport.ImportError.unavailable {
+                            // A missing authorized source can fall back to the
+                            // other recorded location. Format/size errors still fail.
+                            continue
+                        }
+                    }
+                    throw AgentAttachmentImport.ImportError.unavailable
+                }
                 if let path = attachment.localFileReferencePath ?? attachment.storagePath {
                     let url = URL(fileURLWithPath: path)
-                    if attachment.type == .image {
-                        return try AgentAttachmentImport.captureImageFile(url, name: attachment.name)
-                    }
                     if attachment.type != .text {
                         return try AgentAttachmentImport.capture(url)
                     }
@@ -288,6 +318,10 @@ enum SlotEditorAI {
                 throw AgentAttachmentImport.ImportError.unavailable
             }
         }.value
+    }
+
+    private static func rewriteCaptured(text: String, instruction: String, files: [AgentAttachment],
+                                       selection: AgentBackendSelection, config: AgentConfig) async throws -> String {
         try AgentAttachmentImport.validate(files)
         let history: [AgentMessage] = [.init(role: .user,
             content: "修改要求：\n\(instruction)\n\n待修改正文：\n\(text)", attachments: files)]

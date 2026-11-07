@@ -128,8 +128,7 @@ struct SettingsView: View {
                         sectionContent(for: selectedCategory)
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.horizontal, 22)
-                    .padding(.vertical, 20)
+                    .padding(24)
                 }
                 .background(AppTheme.windowBackground(colorScheme))
                 Divider()
@@ -137,10 +136,12 @@ struct SettingsView: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .buttonStyle(CompactActionStyle())
+        .tint(colorScheme == .dark ? Color(white: 0.78) : Color(white: 0.28))
         .background(AppTheme.windowBackground(colorScheme))
-        .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
         .overlay(
-            RoundedRectangle(cornerRadius: 14, style: .continuous)
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
                 .stroke(AppTheme.subtleBorder(colorScheme), lineWidth: 1)
         )
         .onAppear {
@@ -178,29 +179,15 @@ struct SettingsView: View {
 
     // v2.9.12: left category navigation sidebar (Obsidian-style).
     private var sidebar: some View {
-        VStack(alignment: .leading, spacing: 2) {
+        VStack(alignment: .leading, spacing: 4) {
             HStack(spacing: 10) {
-                ZStack {
-                    RoundedRectangle(cornerRadius: 10, style: .continuous)
-                        // v2.11.7 hotfix: 品牌渐变底板是装饰 → 简洁模式收成中性灰块。
-                        .fill(AppTheme.chromeAccentTile)
-                        .frame(width: 36, height: 36)
-                        .shadow(color: AppTheme.chromeAccentTileShadow, radius: 7, y: 3)
-                    Image(systemName: "gearshape.fill")
-                        .font(.system(size: 16, weight: .semibold))
-                        .foregroundColor(AppTheme.chromeAccentTileInk)
-                }
                 VStack(alignment: .leading, spacing: 1) {
-                    Text("ClipSlots")
-                        .font(.system(size: 15, weight: .bold))
-                    Text("偏好设置")
-                        .font(.system(size: 11))
-                        .foregroundColor(.secondary)
+                    Text("设置").font(.system(size: 20, weight: .semibold))
                 }
             }
-            .padding(.horizontal, 16)
-            .padding(.top, 18)
-            .padding(.bottom, 16)
+            .padding(.horizontal, 22)
+            .padding(.top, 26)
+            .padding(.bottom, 22)
 
             ForEach(SettingsCategory.allCases) { category in
                 sidebarRow(category)
@@ -215,8 +202,11 @@ struct SettingsView: View {
             pluginMarketRow
 
             Spacer()
+            Text("ClipSlots  ·  v\(AppVersion.current)")
+                .font(.system(size: 10)).foregroundColor(.secondary)
+                .padding(22)
         }
-        .frame(width: 196)
+        .frame(width: 182)
         .frame(maxHeight: .infinity)
         .background(AppTheme.elevatedBackground(colorScheme))
     }
@@ -227,29 +217,19 @@ struct SettingsView: View {
             selectedCategory = category
         } label: {
             HStack(spacing: 10) {
-                ZStack {
-                    RoundedRectangle(cornerRadius: 7, style: .continuous)
-                        .fill(isSelected ? Color.accentColor : Color.clear)
-                        .frame(width: 28, height: 28)
                     Image(systemName: category.icon)
-                        .font(.system(size: 12, weight: .semibold))
-                        .foregroundColor(isSelected ? .white : .secondary)
-                }
+                        .font(.system(size: 13, weight: .medium))
+                        .frame(width: 22, height: 28)
                 Text(category.title)
                     .font(.system(size: 13, weight: isSelected ? .semibold : .medium))
                 Spacer(minLength: 0)
-                if isSelected {
-                    Circle()
-                        .fill(Color.accentColor)
-                        .frame(width: 5, height: 5)
-                }
             }
             .padding(.horizontal, 9)
             .padding(.vertical, 5)
             .foregroundColor(isSelected ? .primary : .secondary)
             .background(
                 RoundedRectangle(cornerRadius: 9, style: .continuous)
-                    .fill(isSelected ? Color.accentColor.opacity(colorScheme == .dark ? 0.18 : 0.10) : Color.clear)
+                    .fill(isSelected ? Color.primary.opacity(0.075) : Color.clear)
             )
             // v2.9.13: make the entire row (incl. blank area right of the text)
             // clickable, not just the text/icon glyphs.
@@ -257,7 +237,7 @@ struct SettingsView: View {
         }
         .buttonStyle(.plain)
         .accessibilityIdentifier("settings-category-\(category.rawValue)")
-        .padding(.horizontal, 8)
+        .padding(.horizontal, 12)
     }
 
     // v2.9.17: special sidebar entry that launches the plugin marketplace popover.
@@ -293,16 +273,8 @@ struct SettingsView: View {
     // v2.9.12: content header with the × close button (no window titlebar).
     private var overlayHeader: some View {
         HStack(spacing: 12) {
-            ZStack {
-                RoundedRectangle(cornerRadius: 9, style: .continuous)
-                    .fill(Color.accentColor.opacity(colorScheme == .dark ? 0.20 : 0.12))
-                    .frame(width: 34, height: 34)
-                Image(systemName: selectedCategory.icon)
-                    .font(.system(size: 14, weight: .semibold))
-                    .foregroundColor(.accentColor)
-            }
             Text(selectedCategory.title)
-                .font(.system(size: 16, weight: .semibold))
+                .font(.system(size: 18, weight: .semibold))
             Spacer()
             Button { closeAction() } label: {
                 Image(systemName: "xmark")
@@ -315,9 +287,10 @@ struct SettingsView: View {
             }
             .buttonStyle(.plain)
             .help("关闭")
+            .accessibilityIdentifier("settings-close")
         }
-        .padding(.horizontal, 20)
-        .padding(.vertical, 14)
+        .padding(.horizontal, 24)
+        .frame(height: 72)
     }
 
     @ViewBuilder
@@ -375,20 +348,50 @@ struct SettingsView: View {
 
     private var appearanceSection: some View {
         settingsSection(title: "外观", icon: "paintbrush.fill") {
-            VStack(alignment: .leading, spacing: 16) {
-                VStack(alignment: .leading, spacing: 10) {
-                    Picker("外观", selection: appearanceModeBinding) {
-                        ForEach(ThemeMode.allCases) { mode in
-                            Label(mode.title, systemImage: mode.icon).tag(mode)
-                        }
-                    }
-                    .pickerStyle(.segmented)
-                    .labelsHidden()
-                    .accessibilityLabel("外观")
+            HStack(spacing: 12) {
+                ForEach(ThemeMode.allCases) { mode in
+                    appearanceChoice(mode)
                 }
-
             }
         }
+    }
+
+    private func appearanceChoice(_ mode: ThemeMode) -> some View {
+        let selected = appearanceModeBinding.wrappedValue == mode
+        let dark = mode == .dark
+        return Button { appearanceModeBinding.wrappedValue = mode } label: {
+            VStack(spacing: 12) {
+                HStack(spacing: 0) {
+                    Rectangle().fill(Color(white: dark ? 0.16 : 0.9)).frame(width: 28)
+                    VStack(alignment: .leading, spacing: 7) {
+                        RoundedRectangle(cornerRadius: 3).fill(Color(white: dark ? 0.4 : 0.76))
+                            .frame(width: 38, height: 5)
+                        HStack(spacing: 5) {
+                            RoundedRectangle(cornerRadius: 5).fill(Color(white: dark ? 0.25 : 0.89))
+                            RoundedRectangle(cornerRadius: 5).fill(Color(white: dark ? 0.25 : 0.89))
+                        }
+                    }.padding(10)
+                }
+                .frame(height: 78)
+                .background(mode == .system ? AnyShapeStyle(LinearGradient(colors: [.white, Color(white: 0.2)],
+                    startPoint: .leading, endPoint: .trailing)) : AnyShapeStyle(Color(white: dark ? 0.11 : 0.98)))
+                .clipShape(RoundedRectangle(cornerRadius: 8))
+                .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(Color.primary.opacity(0.08), lineWidth: 1))
+                HStack(spacing: 5) {
+                    Image(systemName: mode.icon)
+                    Text(mode.title)
+                    if selected { Image(systemName: "checkmark").font(.system(size: 10, weight: .semibold)) }
+                }.font(.system(size: 12, weight: .medium))
+            }
+            .padding(10).frame(maxWidth: .infinity)
+            .background(Color.primary.opacity(selected ? 0.065 : 0), in: RoundedRectangle(cornerRadius: 12))
+            .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(Color.primary.opacity(selected ? 0.3 : 0.08),
+                                                                   lineWidth: 1))
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityIdentifier("settings-appearance-\(mode.rawValue)")
+        .accessibilityAddTraits(selected ? [.isSelected] : [])
     }
 
     private var slotSection: some View {
@@ -404,12 +407,22 @@ struct SettingsView: View {
                         .padding(.vertical, 4)
                         .background(Capsule().fill(AppTheme.chipBackground(colorScheme)))
                 }
-                Slider(value: $slots, in: 1...10, step: 1)
-                Text("建议设置为 5～9 个槽位。槽位越多，圆盘菜单可读性越低。")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
+                HStack(spacing: 4) {
+                    ForEach(1...10, id: \.self) { count in
+                        Button { slots = Double(count) } label: {
+                            Text("\(count)").monospacedDigit().frame(maxWidth: .infinity)
+                        }
+                        .buttonStyle(CompactActionStyle(selected: Int(slots) == count, iconOnly: true))
+                        .accessibilityLabel("\(count) 个槽位")
+                        .accessibilityIdentifier("settings-slot-count-\(count)")
+                    }
+                }
+                .help("建议设置 5～9 个槽位，兼顾容量和圆盘菜单的可读性")
                 Divider().padding(.vertical, 4)
                 subsectionHeader("附件与性能")
+                HStack {
+                Text("预览缓存").font(.system(size: 13))
+                Spacer()
                 Picker("预览缓存", selection: $cacheBudgetMiB) {
                     Text("自动（推荐）").tag(0)
                     Text("节省内存 · 64 MiB").tag(64)
@@ -419,11 +432,17 @@ struct SettingsView: View {
                         Text("自定义 · \(cacheBudgetMiB) MiB").tag(cacheBudgetMiB)
                     }
                 }
+                .labelsHidden().frame(width: 188)
                 .accessibilityLabel("预览缓存")
                 .accessibilityIdentifier("slot-preview-cache-budget")
-                Text("自动根据电脑内存调整；内存吃紧时回收预览缓存。原始文件和已提交的生成任务照常保存。")
+                }
+                Text("自动随可用内存调整，不影响原始文件。")
                     .font(.caption)
                     .foregroundColor(.secondary)
+                Divider().padding(.vertical, 2)
+                HStack {
+                Text("附件数量提醒").font(.system(size: 13))
+                Spacer()
                 Picker("附件数量提醒", selection: $attachmentWarningCount) {
                     Text("50 项（推荐）").tag(50)
                     Text("100 项").tag(100)
@@ -432,8 +451,10 @@ struct SettingsView: View {
                         Text("\(attachmentWarningCount) 项").tag(attachmentWarningCount)
                     }
                 }
+                .labelsHidden().frame(width: 188)
                 .accessibilityLabel("附件数量提醒")
                 .accessibilityIdentifier("slot-attachment-warning-count")
+                }
                 Text("仅在手动添加超过此数量时提醒，仍可继续添加。")
                     .font(.caption)
                     .foregroundColor(.secondary)
@@ -874,29 +895,23 @@ struct SettingsView: View {
                 .keyboardShortcut(.escape)
                 .accessibilityIdentifier("settings-cancel")
             Button("保存") { save() }
-                .buttonStyle(.borderedProminent)
+                .buttonStyle(CompactActionStyle(selected: true))
                 .keyboardShortcut(.return)
                 .accessibilityIdentifier("settings-save")
         }
         .padding(.horizontal, 24)
         .padding(.vertical, 16)
-        .frame(height: 72)
-        .background(.regularMaterial)
-        .overlay(alignment: .top) { Divider() }
+        .frame(height: 68)
+        .background(AppTheme.elevatedBackground(colorScheme))
     }
 
     private func settingsSection<Content: View>(title: String, icon: String, @ViewBuilder content: () -> Content) -> some View {
         VStack(alignment: .leading, spacing: 14) {
             if title != selectedCategory.title && !(selectedCategory == .cli && title == "命令行工具 (CLI)") {
               HStack(spacing: 9) {
-                ZStack {
-                    RoundedRectangle(cornerRadius: 7, style: .continuous)
-                        .fill(Color.accentColor.opacity(colorScheme == .dark ? 0.20 : 0.11))
-                        .frame(width: 28, height: 28)
                     Image(systemName: icon)
                         .font(.system(size: 12, weight: .semibold))
-                        .foregroundColor(.accentColor)
-                }
+                        .foregroundColor(.secondary)
                 Text(title)
                     .font(.system(size: 15, weight: .semibold))
               }
@@ -913,7 +928,6 @@ struct SettingsView: View {
             RoundedRectangle(cornerRadius: 15, style: .continuous)
                 .stroke(AppTheme.subtleBorder(colorScheme), lineWidth: 1)
         )
-        .shadow(color: Color.black.opacity(colorScheme == .dark ? 0.14 : 0.05), radius: 8, y: 3)
     }
 
     private func shortcutInput(title: String, subtitle: String, placeholder: String, text: Binding<String>, preview: String) -> some View {

@@ -30,16 +30,23 @@ struct AgentBackendSelection {
     func normalized(_ base: AgentConfig) -> AgentConfig {
         var config = base
         if let profile = modelProfile, let url = URL(string: profile.endpoint) {
+            let reported = base.endpoint == url && base.model == profile.model ? base.supportsImageInput : nil
             config.endpoint = url; config.model = profile.model
-            config.supportsImageInput = profile.supportsImages
+            config.supportsImageInput = AgentMediaCapabilities.imageSupport(endpoint: url, model: profile.model,
+                reported: reported ?? profile.imageInputCapability ?? (profile.supportsImages ? true : nil))
             config.reasoningEffort = nil; config.thinkingMode = .serverDefault
         }
         if kind == .tika {
             config.model = ""
+            config.supportsImageInput = false
             config.reasoningEffort = nil
             config.thinkingMode = .serverDefault
         }
         if kind == .gateway, let gateway = gatewayConfiguration {
+            if let url = gatewayBaseURL {
+                if base.endpoint != url || base.model != gateway.model { config.supportsImageInput = nil }
+                config.endpoint = url
+            }
             config.model = gateway.model
             config.thinkingMode = gateway.thinkingMode
             config.reasoningEffort = nil
@@ -76,7 +83,7 @@ enum AgentBackendCoordinator {
         let kind: AgentBackendKind = gatewayURL == nil ? kind(for: scope, defaults: defaults) : .gateway
         let resolvedURL = kind == .gateway ? gatewayURL ?? AgentGatewayPreferences.endpoint(defaults: defaults) : nil
         let backend = makeBackend(kind: kind, defaults: defaults, binding: binding,
-                                  journalRoot: journalRoot, gatewayURL: resolvedURL)
+                                  journalRoot: journalRoot, gatewayURL: resolvedURL, scope: scope)
         let gatewayConfig = kind == .gateway ? AgentConfig(
             model: defaults.string(forKey: AgentGatewayPreferences.modelKey) ?? AgentGatewayPreferences.defaultModel,
             systemPrompt: defaults.string(forKey: AgentGatewayPreferences.systemPromptKey) ?? AgentConfig.defaultSystemPrompt,
@@ -86,12 +93,17 @@ enum AgentBackendCoordinator {
             scope: scope,
             kind: kind,
             backend: backend,
-            requiresAPIKey: kind == .deepseek && (ModelConfigurationBridge.profile(.agent)?.requiresKey
+            requiresAPIKey: kind == .deepseek && (directProfile(for: scope, defaults: defaults)?.requiresKey
                 ?? !ModelConfigurationBridge.hasDefault(.agent)),
             supportsCanvasReadTools: true,
             gatewayConfiguration: gatewayConfig,
             gatewayBaseURL: resolvedURL,
-            modelProfile: kind == .deepseek ? ModelConfigurationBridge.profile(.agent) : nil)
+            modelProfile: kind == .deepseek ? directProfile(for: scope, defaults: defaults) : nil)
+    }
+
+    static func directProfile(for scope: AgentBackendScope, defaults: UserDefaults = .standard) -> ModelProfile? {
+        AgentConnectionPreferences.profile(scope: scope.rawValue, defaults: defaults)
+            ?? ModelConfigurationBridge.profile(.agent)
     }
 
     static func injected(_ backend: any AgentBackend,
@@ -123,15 +135,15 @@ enum AgentBackendCoordinator {
                                     defaults: UserDefaults,
                                     binding: AgentRunBinding?,
                                     journalRoot: URL?,
-                                    gatewayURL: URL?) -> any AgentBackend {
+                                    gatewayURL: URL?, scope: AgentBackendScope) -> any AgentBackend {
         switch kind {
         case .deepseek:
-            if let profile = ModelConfigurationBridge.profile(.agent), !profile.isCLI,
+            if let profile = directProfile(for: scope, defaults: defaults), !profile.isCLI,
                profile.contract.isText, (try? profile.validate()) != nil {
                 let secret: AgentSecretStore = profile.requiresKey
                     ? AgentKeychain(service: profile.keyService, account: profile.keyAccount)
                     : AgentInMemorySecretStore(key: "unauthenticated")
-                return AgentService(transport: ModelAgentTransport(profile: profile), secretStore: secret)
+                return AgentService(transport: AgentProviderTransport(profile: profile), secretStore: secret)
             }
             if ModelConfigurationBridge.hasDefault(.agent) { return UnavailableModelAgentBackend() }
             return AgentService()
@@ -191,74 +203,5 @@ private final class UnavailableModelAgentBackend: AgentBackend, Sendable {
     func run(history: [AgentMessage], config: AgentConfig, tools: AgentToolExecuting?,
              onEvent: @escaping @Sendable (AgentRunEvent) async -> Void) async throws -> [AgentMessage] {
         throw ModelWorkspaceError.invalid("默认 Agent LLM 不可用，请在模型配置中心重新选择。")
-    }
-}
-
-private struct ModelAgentTransport: AgentTransport {
-    let profile: ModelProfile
-    func stream(request: URLRequest) async throws -> AgentHTTPStream {
-        var modified = request
-        let modelID = profile.model.addingPercentEncoding(withAllowedCharacters: .alphanumerics) ?? ""
-        modified.url = URL(string: profile.endpoint.replacingOccurrences(of: "{model}", with: modelID))
-        let bearer = request.value(forHTTPHeaderField: "Authorization") ?? ""
-        modified.setValue(nil, forHTTPHeaderField: "Authorization")
-        if profile.requiresKey {
-            let key = bearer.hasPrefix("Bearer ") ? String(bearer.dropFirst(7)) : bearer
-            modified.setValue(profile.authPrefix + key, forHTTPHeaderField: profile.authHeader)
-        }
-        if let body = modified.httpBody, case .object(var fields) = try JSONDecoder().decode(JSONValue.self, from: body) {
-            for (name, value) in profile.parameters where !["messages", "model", "stream", "tools", "tool_choice"].contains(name) {
-                fields[name] = value
-            }
-            // Native Gemini tool result messages require the original function name.
-            if profile.contract == .geminiContent, let messages = fields["messages"]?.arrayValue {
-                var names: [String: JSONValue] = [:]
-                fields["messages"] = .array(messages.map { message in
-                    for call in message["tool_calls"]?.arrayValue ?? [] {
-                        if let id = call["id"]?.stringValue { names[id] = call["function"]?["name"] }
-                    }
-                    if let id = message["tool_call_id"]?.stringValue, let name = names[id], var value = message.objectValue {
-                        value["name"] = name; return .object(value)
-                    }
-                    return message
-                })
-            }
-            modified.httpBody = try JSONEncoder().encode(ModelTextWire.body(fields, contract: profile.contract))
-        }
-        for (name, value) in profile.headers ?? [:] { modified.setValue(value, forHTTPHeaderField: name) }
-        if profile.contract == .anthropicMessages { modified.setValue("2023-06-01", forHTTPHeaderField: "anthropic-version") }
-        if profile.contract != .chatCompletions {
-            modified.setValue("application/json", forHTTPHeaderField: "Accept")
-            let frozenRequest = modified
-            let (data, status) = try await ModelRequestBudget.shared.withPermit(profile: profile) { try await ModelURLSessionTransport().send(frozenRequest) }
-            guard (200...299).contains(status) else { return .init(statusCode: status, chunks: .init { $0.finish() }) }
-            let root = try JSONDecoder().decode(JSONValue.self, from: data)
-            let assistant = try ModelTextWire.assistant(root, contract: profile.contract)
-            var delta = assistant.objectValue ?? [:]
-            if let calls = delta["tool_calls"]?.arrayValue {
-                delta["tool_calls"] = .array(calls.enumerated().map { index, call in
-                    var value = call.objectValue ?? [:]; value["index"] = .number(Double(index)); return .object(value)
-                })
-            }
-            let chunk: JSONValue = ["choices": [["index": 0, "delta": .object(delta), "finish_reason": assistant["tool_calls"] == nil ? "stop" : "tool_calls"]]]
-            let text = "data: " + (try chunk.encodedText()) + "\n\ndata: [DONE]\n\n"
-            return .init(statusCode: status, chunks: .init { $0.yield(Data(text.utf8)); $0.finish() })
-        }
-        // Keep the permit until the stream completes, including Agent tool rounds.
-        let frozenRequest = modified
-        let chunks = AsyncThrowingStream<Data, Error> { continuation in
-            let task = Task {
-                do {
-                    try await ModelRequestBudget.shared.withPermit(profile: profile) {
-                        let response = try await URLSessionAgentTransport(timeout: profile.timeout).stream(request: frozenRequest)
-                        guard (200...299).contains(response.statusCode) else { throw ModelWorkspaceError.http(response.statusCode) }
-                        for try await data in response.chunks { continuation.yield(data) }
-                    }
-                    continuation.finish()
-                } catch { continuation.finish(throwing: error) }
-            }
-            continuation.onTermination = { _ in task.cancel() }
-        }
-        return .init(statusCode: 200, chunks: chunks)
     }
 }

@@ -119,6 +119,7 @@ public struct AgentMessage: Identifiable, Equatable, Codable, Sendable {
                var item = value
                item.removeValue(forKey: "images")
                item.removeValue(forKey: "previewImage")
+               item.removeValue(forKey: "selectionDerived")
                return item
            }, options: [.sortedKeys]),
            let json = String(data: metadata, encoding: .utf8) {
@@ -306,8 +307,12 @@ public struct AgentConfig: Equatable, Codable, Sendable {
     public var systemPrompt: String
     /// User-authorized root captured once by the host, never inferred from model output.
     public var workingDirectory: String?
-    /// Optional for decode compatibility with saved runs; only explicit discovery enables images.
+    /// nil = unknown: preserve images and let the actual provider decide.
     public var supportsImageInput: Bool?
+    public var resolvedImageSupport: Bool? {
+        AgentMediaCapabilities.imageSupport(endpoint: endpoint, model: model, reported: supportsImageInput)
+    }
+    public var permitsImageInput: Bool { resolvedImageSupport != false }
     public var canvasPreviewOnly = false
     /// Explicit task contract shared by every backend. Chat keeps its existing
     /// partial-output/tool behavior; polishing must finish without side effects.
@@ -446,7 +451,7 @@ public enum AgentError: LocalizedError, Equatable {
     public var errorDescription: String? {
         switch self {
         case .missingAPIKey:
-            return "还没有配置 DeepSeek API Key，点右上角齿轮填入后即可开始对话。"
+            return "还没有配置 API Key，请在 Agent 接入面板填写后开始对话。"
         case .credential(let error):
             return error.localizedDescription
         case .emptyPrompt:
@@ -459,7 +464,7 @@ public enum AgentError: LocalizedError, Equatable {
             case 401:
                 return "鉴权失败（401）：API Key 无效或已撤销，请在设置里重新填写。"
             case 402:
-                return "余额不足（402）：请到 DeepSeek 平台充值后重试。"
+                return "余额不足（402）：请到服务提供方的平台充值后重试。"
             case 404:
                 return "接口或模型不存在（404）：\(detail ?? "请检查模型名与 Endpoint")。"
             case 422:
@@ -534,7 +539,7 @@ public final class AgentService: @unchecked Sendable {
                 continue
             case .user:
                 messages.append(.object(["role": .string("user"),
-                    "content": message.wirePayload(supportsImages: config.supportsImageInput == true)]))
+                    "content": message.wirePayload(supportsImages: config.permitsImageInput)]))
             case .assistant:
                 var obj: [String: JSONValue] = [
                     "role": .string("assistant"),
@@ -601,7 +606,7 @@ public final class AgentService: @unchecked Sendable {
                     tools: AgentToolExecuting?,
                     onEvent: @escaping @Sendable (AgentRunEvent) async -> Void) async throws -> [AgentMessage] {
         try Task.checkCancellation()
-        try AgentAttachmentImport.validateImageSupport(history: history, supported: config.supportsImageInput == true)
+        try AgentAttachmentImport.validateImageSupport(history: history, supported: config.resolvedImageSupport)
         await onEvent(.credentialAccess(waiting: true))
         let credential: String?
         do {
@@ -703,10 +708,13 @@ public final class AgentService: @unchecked Sendable {
         } catch {
             throw AgentError.invalidResponse("请求体序列化失败：\(error.localizedDescription)")
         }
+        try AgentMediaCapabilities.validateRequestBytes(request.httpBody!, endpoint: config.endpoint)
 
         let response: AgentHTTPStream
         do {
             response = try await transport.stream(request: request)
+        } catch let error as AgentError {
+            throw error
         } catch let urlError as URLError {
             if urlError.code == .cancelled { throw AgentError.cancelled }
             throw AgentError.network(urlError.localizedDescription)
@@ -717,8 +725,11 @@ public final class AgentService: @unchecked Sendable {
         guard (200...299).contains(response.statusCode) else {
             // 错误响应是普通 JSON（不是 SSE），把 body 收全再翻译。
             var raw = Data()
-            for try await chunk in response.chunks { raw.append(chunk) }
-            let (message, code) = Self.parseErrorBody(raw)
+            for try await chunk in response.chunks {
+                raw.append(chunk.prefix(max(0, 65_536 - raw.count)))
+                if raw.count >= 65_536 { break }
+            }
+            let (message, code) = Self.parseErrorBody(raw, redacting: apiKey)
             throw AgentError.http(status: response.statusCode, message: message, code: code)
         }
 
@@ -745,6 +756,8 @@ public final class AgentService: @unchecked Sendable {
             await dispatch(decoder.finish())
         } catch is CancellationError {
             throw AgentError.cancelled
+        } catch let error as AgentError {
+            throw error
         } catch let urlError as URLError {
             if urlError.code == .cancelled { throw AgentError.cancelled }
             throw AgentError.interrupted(urlError.localizedDescription)
@@ -765,13 +778,25 @@ public final class AgentService: @unchecked Sendable {
         return accumulator
     }
 
-    static func parseErrorBody(_ data: Data) -> (String?, String?) {
+    static func parseErrorBody(_ data: Data, redacting credential: String? = nil) -> (String?, String?) {
+        func sanitized(_ value: String?) -> String? {
+            guard var value else { return nil }
+            if let credential, !credential.isEmpty {
+                value = value.replacingOccurrences(of: credential, with: "[已隐藏凭据]")
+            }
+            value = value.replacingOccurrences(of: #"sk-[A-Za-z0-9_-]{8,}"#,
+                with: "[已隐藏凭据]", options: .regularExpression)
+            value = String(value.unicodeScalars.filter {
+                !CharacterSet.controlCharacters.contains($0) || $0 == "\n" || $0 == "\t"
+            }).trimmingCharacters(in: .whitespacesAndNewlines)
+            return value.isEmpty ? nil : String(value.prefix(1200))
+        }
         if let env = try? AgentSSEDecoder.decoder.decode(WireErrorEnvelope.self, from: data),
            let err = env.error {
-            return (err.message, err.code ?? err.type)
+            return (sanitized(err.message), sanitized(err.code ?? err.type))
         }
         let text = String(decoding: data, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
-        return (text.isEmpty ? nil : String(text.prefix(400)), nil)
+        return (sanitized(text), nil)
     }
 }
 

@@ -39,10 +39,14 @@ public struct AgentCanvasReference: Codable, Equatable, Identifiable, Sendable {
     public let mediaKind: MediaKind?
     /// Presentation only; never included in model context or counted as inspected media.
     public let previewImage: Data?
+    /// Unsent selection references track the live selection; explicit pins do not.
+    /// Older drafts were populated by the selection observer and decode as nil.
+    public var selectionDerived: Bool?
 
     public init(projectID: String, nodeID: String, nodeCreatedAt: Date, groupID: String,
                 slot: Int, title: String, text: String, attachmentNames: [String], contentRevision: String? = nil,
-                images: [AgentAttachment]? = nil, mediaKind: MediaKind? = nil, previewImage: Data? = nil) {
+                images: [AgentAttachment]? = nil, mediaKind: MediaKind? = nil, previewImage: Data? = nil,
+                selectionDerived: Bool? = nil) {
         self.projectID = projectID
         self.nodeID = nodeID
         self.nodeCreatedAt = nodeCreatedAt
@@ -55,6 +59,7 @@ public struct AgentCanvasReference: Codable, Equatable, Identifiable, Sendable {
         self.images = images
         self.mediaKind = mediaKind
         self.previewImage = previewImage
+        self.selectionDerived = selectionDerived
     }
 }
 

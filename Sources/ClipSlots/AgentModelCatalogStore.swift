@@ -22,9 +22,11 @@ final class AgentModelCatalogStore: ObservableObject {
         self.credentials = credentials
     }
 
-    func supportsImages(model: String, endpoint: URL?, gateway: Bool) -> Bool {
-        endpoint == sourceEndpoint && gateway == sourceGateway
-            && models.first(where: { $0.id == model })?.supportsImages == true
+    func supportsImages(model: String, endpoint: URL?, gateway: Bool) -> Bool? {
+        guard let endpoint else { return nil }
+        let reported = endpoint == sourceEndpoint && gateway == sourceGateway
+            ? models.first(where: { $0.id == model })?.supportsImages : nil
+        return AgentMediaCapabilities.imageSupport(endpoint: endpoint, model: model, reported: reported)
     }
 
     func refresh(endpoint: URL, gateway: Bool) {

@@ -323,14 +323,13 @@ extension CanvasWorkspaceView {
             return node
         }
         let navigation = CanvasNavigationControls(nodes: navigationNodes,
-            viewport: CGRect(x: 0, y: 0, width: 1000, height: 700), saveStatus: .saved,
+            viewport: CGRect(x: 0, y: 0, width: 1000, height: 700),
             pan: Binding(get: { navigationState.pan }, set: { navigationState.pan = $0 }),
             zoom: Binding(get: { navigationState.zoom }, set: { navigationState.zoom = $0 }),
             showMap: Binding(get: { navigationState.showMap }, set: { navigationState.showMap = $0 }),
             showEdges: Binding(get: { navigationState.showEdges }, set: { navigationState.showEdges = $0 }),
             gridSnap: Binding(get: { navigationState.grid }, set: { navigationState.grid = $0 }),
-            onZoom: { navigationState.zoom = $0 }, onFit: {}, onViewportEnd: {},
-            onSave: {}, onAgent: {})
+            onZoom: { navigationState.zoom = $0 }, onFit: {}, onViewportEnd: {})
         let navigationHost = NSHostingView(rootView: navigation)
         let navigationWindow = NSWindow(contentRect: CGRect(x: 200, y: 200, width: 390, height: 240),
                                         styleMask: [.titled], backing: .buffered, defer: false)

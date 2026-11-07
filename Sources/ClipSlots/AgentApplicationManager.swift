@@ -491,8 +491,13 @@ struct AgentApplicationManager: View {
         }
     }
     private func connectSource(_ item: AgentMarketItem) {
-        if sync.sourceConnection?.id != item.id { sync.sourceAuth = nil }
-        sync.sourceConnection = item; showConnection = true
+        let current = sync.currentApplication(item)
+        if current.raw["connectors"] != nil, current.connectorIDs.isEmpty, !current.hasInvalidConnectorDeclaration {
+            sync.connectingItem = current
+            return
+        }
+        if sync.sourceConnection?.id != current.id { sync.sourceAuth = nil; sync.sourceConnectorID = nil }
+        sync.sourceConnection = current; showConnection = true
     }
     private func work(_ operation: @escaping @MainActor () async throws -> Void) {
         guard !busy else { return }

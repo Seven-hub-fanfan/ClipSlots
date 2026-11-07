@@ -10,9 +10,6 @@ struct WorkspaceStableBoundary: View, Equatable {
         let grid: Bool
         let hovered: String?
         let tooltip: String?
-        let helpOpen: Bool
-        let saveStatus: String
-        let saveSource: ObjectIdentifier?
         let project: String
     }
     let key: Key

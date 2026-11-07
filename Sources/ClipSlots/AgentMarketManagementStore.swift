@@ -13,13 +13,17 @@ extension AgentMarketSyncStore {
         item.sourceEnabled && installed[item.id]?.isEnabled != false
     }
     func connectorStatus(_ id: String) -> String? {
-        snapshot?.connectors?.first { $0["id"]?.stringValue == id }?["status"]?.stringValue
+        snapshot?.connectors?.first { AgentMarketItem.connectorID($0) == id }?["status"]?.stringValue
+    }
+    func currentApplication(_ item: AgentMarketItem) -> AgentMarketItem {
+        snapshot?.managerCatalog?.first(where: { AgentMarketItem($0).id == item.id })
+            .map(AgentMarketItem.init) ?? snapshot?.item(item.id) ?? item
     }
     func applicationAuthorizationReady(_ item: AgentMarketItem) -> Bool {
         guard item.kind == "app" else { return true }
-        let current = snapshot?.managerCatalog?.first(where: { AgentMarketItem($0).id == item.id })
-            .map(AgentMarketItem.init) ?? snapshot?.item(item.id) ?? item
-        return current.connectorIDs.allSatisfy { connectorStatus($0) == "authenticated" }
+        let current = currentApplication(item)
+        return !current.hasInvalidConnectorDeclaration
+            && current.connectorIDs.allSatisfy { connectorStatus($0) == "authenticated" }
     }
     func connectorStatusText(_ id: String) -> String {
         switch connectorStatus(id) {
@@ -171,15 +175,36 @@ extension AgentMarketSyncStore {
         guard fresh || !pending.contains(key) else { return }
         if !fresh, sourceConnection?.id == item.id, sourceAuth?.terminal == false { return }
         let attempt = UUID(); authAttempt = attempt; authAttemptKey = key
+        // A previous connector's completed challenge must never authorize the
+        // next connector while its network request is still in flight.
+        sourceAuth = nil; sourceConnectorID = nil
+        if connectingItem?.id == item.id { connectingItem = nil }
         pending.insert(key)
         // Keep the marker only while a newer attempt for the same connector is in flight.
         defer { if authAttempt == attempt || authAttemptKey != key { pending.remove(key) } }
         let session = try await requireSession(), token = revision
-        guard let id = item.connectorIDs.first else { throw AgentMCPError.unavailable }
-        guard authAttempt == attempt else { throw CancellationError() }
-        let connector = snapshot?.connectors?.first { $0["id"]?.stringValue == id }
+        var current = currentApplication(item)
+        if current.raw["connectors"] == nil || current.raw["connectors"] == .null {
+            current = AgentMarketItem(try await service.managementDetail(current, session: session))
+        }
+        guard token == revision, authAttempt == attempt, snapshot?.scope == session.scope else { throw CancellationError() }
+        guard !current.hasInvalidConnectorDeclaration else { throw AgentMarketSyncError.invalidForm("应用的连接配置不完整，请刷新后重试") }
+        snapshot?.details[current.id] = current.raw
+        if let index = snapshot?.managerCatalog?.firstIndex(where: { AgentMarketItem($0).id == current.id }) {
+            snapshot?.managerCatalog?[index] = current.raw
+        }
+        sourceConnection = current
+        guard let id = current.connectorIDs.first(where: { connectorStatus($0) != "authenticated" }) else {
+            sourceAuth = nil; sourceConnectorID = nil; connectingItem = current
+            return
+        }
+        sourceConnectorID = id
+        var connector = snapshot?.connectors?.first { AgentMarketItem.connectorID($0) == id }
+        if connector == nil {
+            connector = try await service.connector(id, session: session)
+            guard token == revision, authAttempt == attempt, snapshot?.scope == session.scope else { throw CancellationError() }
+        }
         if !fresh, let pendingID = connector?["pending_session_id"]?.stringValue {
-            sourceConnection = item
             sourceAuth = AgentConnectorSession(["session_id": .string(pendingID), "status":"pending",
                 "challenge_kind": connector?["status"] == "pending_approval" ? "external_approval" : "none"])
             return
@@ -189,11 +214,12 @@ extension AgentMarketSyncStore {
         let auth = try await service.startConnector(id, capabilityIDs: capabilities, session: session)
         try Task.checkCancellation()
         guard token == revision, authAttempt == attempt, snapshot?.scope == session.scope else { throw CancellationError() }
-        sourceConnection = item; sourceAuth = auth
+        sourceConnection = current; sourceAuth = auth
     }
     func pollSourceConnection() async throws {
         let session = try await requireSession(), token = revision, attempt = authAttempt
-        guard let item = sourceConnection, let auth = sourceAuth, !auth.terminal, let id = item.connectorIDs.first else { return }
+        guard let item = sourceConnection, let auth = sourceAuth, !auth.terminal,
+              let id = sourceConnectorID ?? item.connectorIDs.first else { return }
         let next = try await service.pollConnector(id, auth: auth, session: session)
         guard token == revision, authAttempt == attempt, sourceConnection?.id == item.id, sourceAuth?.id == auth.id,
               sourceAuth?.terminal == false, snapshot?.scope == session.scope else { return }
@@ -201,7 +227,8 @@ extension AgentMarketSyncStore {
     }
     func submitSourceConnection(_ values: [String: String]) async throws {
         let session = try await requireSession(), token = revision, attempt = authAttempt
-        guard let item = sourceConnection, let auth = sourceAuth, let id = item.connectorIDs.first else { throw AgentMCPError.unavailable }
+        guard let item = sourceConnection, let auth = sourceAuth,
+              let id = sourceConnectorID ?? item.connectorIDs.first else { throw AgentMCPError.unavailable }
         let next = try await service.submitConnector(id, auth: auth, values: values, session: session)
         guard token == revision, authAttempt == attempt, sourceAuth?.id == auth.id,
               snapshot?.scope == session.scope else { throw CancellationError() }
@@ -209,12 +236,34 @@ extension AgentMarketSyncStore {
         if sourceAuth?.terminal == true && !next.terminal { return }
         sourceAuth = next
     }
+    /// Advance only the connector that actually completed, retaining unknown
+    /// states for other accounts. Each connector gets its own consent session.
+    func finishSourceConnection() async throws -> Bool {
+        guard let item = sourceConnection, sourceAuth?.status == "authenticated",
+              let id = sourceConnectorID ?? item.connectorIDs.first else { return true }
+        if var next = snapshot {
+            var connectors = next.connectors ?? []
+            var fields = connectors.first { AgentMarketItem.connectorID($0) == id }?.objectValue ?? ["id": .string(id)]
+            fields["status"] = "authenticated"; fields["pending_session_id"] = nil
+            if let index = connectors.firstIndex(where: { AgentMarketItem.connectorID($0) == id }) {
+                connectors[index] = .object(fields)
+            } else { connectors.append(.object(fields)) }
+            next.connectors = connectors; snapshot = next
+        }
+        if !applicationAuthorizationReady(item) {
+            try await startSourceConnection(item, fresh: true)
+            return false
+        }
+        connectingItem = item
+        return true
+    }
     func cancelSourceConnection(reset: Bool) async throws {
         let item = sourceConnection
+        let connectorID = sourceConnectorID ?? item?.connectorIDs.first
         // Invalidate first: no in-flight start/poll/submit may publish after cancel.
-        authAttempt = UUID(); authAttemptKey = nil; sourceAuth = nil; sourceConnection = nil
+        authAttempt = UUID(); authAttemptKey = nil; sourceAuth = nil; sourceConnection = nil; sourceConnectorID = nil
         pending = pending.filter { !$0.hasPrefix("auth:") }
-        if reset, let item, let id = item.connectorIDs.first {
+        if reset, let id = connectorID {
             let session = try await requireSession()
             try await service.disconnectConnector(id, reset: true, session: session)
         }

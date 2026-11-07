@@ -21,12 +21,34 @@ struct AgentSourceConnectorWizard: View {
     @State private var error: String?
     @State private var notified: String?
     private var auth: AgentConnectorSession? { sync.sourceAuth }
+    private var pollingIdentity: String { [auth?.id, auth?.status, auth?.kind].compactMap { $0 }.joined(separator: ":") }
     private var connectorName: String {
-        item.raw["connectors"]?.arrayValue?.first?["display_name"]?.stringValue ?? item.title
+        let current = sync.sourceConnection ?? item
+        let connector = current.raw["connectors"]?.arrayValue?.first {
+            AgentMarketItem.connectorID($0) == (sync.sourceConnectorID ?? current.connectorIDs.first)
+        }
+        return connector?["display_name"]?.stringValue ?? sync.sourceConnectorID ?? current.title
     }
     var body: some View {
         VStack(spacing: 20) {
-            VStack(spacing: 12) {
+            header
+            challenge
+            actions
+        }.padding(24).frame(width: availableWidth).fixedSize(horizontal: false, vertical: true)
+            .foregroundStyle(TapSkin.ink).background(TapSkin.tone(0xfafafa, 0x171717))
+            .background(GeometryReader { geometry in
+                Color.clear.onAppear { onSizeChange?(geometry.size) }
+                    .onChange(of: geometry.size) { onSizeChange?($0) }
+            })
+            .accessibilityElement(children: .contain)
+            .accessibilityIdentifier("market-connector-wizard")
+            .onExitCommand { close() }
+            .onChange(of: auth?.id) { _ in values = [:]; notified = nil }
+            .task(id: pollingIdentity) { await runAuthorization() }
+            .onDisappear { closing = true; values = [:] }
+    }
+    private var header: some View {
+        VStack(spacing: 12) {
                 HStack(spacing: 12) {
                     Image(nsImage: NSImage(named: NSImage.applicationIconName) ?? NSImage())
                         .resizable().frame(width: 40, height: 40)
@@ -44,7 +66,9 @@ struct AgentSourceConnectorWizard: View {
                 Button { close() } label: { Image(systemName: "xmark").frame(width: 32, height: 32) }
                     .buttonStyle(.plain).accessibilityIdentifier("market-connector-close")
             }
-            ScrollView {
+    }
+    private var challenge: some View {
+        ScrollView {
                 VStack(alignment: .leading, spacing: 0) {
                     if auth?.stage == "create_app" || auth?.kind == "redirect" {
                         risk("应用可能带来更高风险", "创作平台 内置数据保护，但攻击者仍可能通过 创作平台 访问该应用中的数据，或通过该应用获取 创作平台 中的数据。")
@@ -60,7 +84,7 @@ struct AgentSourceConnectorWizard: View {
                         let key = field["name"]?.stringValue ?? ""
                         Text((field["label"]?.stringValue ?? key) + (field["required"]?.boolValue == true ? " *" : ""))
                         let binding = Binding(get: { values[key] ?? "" }, set: { values[key] = $0 })
-                        if field["secret"]?.boolValue == true {
+                        if field["secret"]?.boolValue == true || field["input_type"]?.stringValue == "password" {
                             SecureField(field["placeholder"]?.stringValue ?? "", text: binding).textFieldStyle(.roundedBorder)
                                 .accessibilityIdentifier("market-connector-field-" + key)
                         } else { TextField(field["placeholder"]?.stringValue ?? "", text: binding).textFieldStyle(.roundedBorder)
@@ -88,18 +112,20 @@ struct AgentSourceConnectorWizard: View {
                     })
             }.frame(height: min(bodyHeight, min(360, availableHeight * 0.45)))
                 .onPreferenceChange(ConnectorBodyHeight.self) { bodyHeight = $0 }
-            HStack(spacing: 12) {
+    }
+    private var actions: some View {
+        HStack(spacing: 12) {
                 Button("取消") {
                     closing = true
                     act { try await sync.cancelSourceConnection(reset: auth?.stage == "create_app"); values = [:]; onClose() }
                 }.buttonStyle(ConnectorButtonStyle(primary: false)).accessibilityIdentifier("market-connector-cancel")
-                if auth?.status == "error" || auth?.status == "expired" {
+                if auth?.canSubmit == true {
+                    Button("连接") { act { try await sync.submitSourceConnection(values); if auth?.status != "error" { values = [:] } } }
+                        .buttonStyle(ConnectorButtonStyle(primary: true)).accessibilityIdentifier("market-connector-submit")
+                } else if auth?.status == "error" || auth?.status == "expired" || auth?.status == "cancelled" {
                     Button("重试") { act { values = [:]; try await sync.startSourceConnection(item, fresh: true) } }
                         .buttonStyle(ConnectorButtonStyle(primary: true))
                         .accessibilityIdentifier("market-connector-retry")
-                } else if auth?.fields.isEmpty == false {
-                    Button("连接") { act { try await sync.submitSourceConnection(values); values = [:] } }
-                        .buttonStyle(ConnectorButtonStyle(primary: true)).accessibilityIdentifier("market-connector-submit")
                 } else if let url = auth?.externalURL {
                     Button("在 \(connectorName) 中继续") { NSWorkspace.shared.open(url) }
                         .buttonStyle(ConnectorButtonStyle(primary: true)).accessibilityIdentifier("market-connector-continue")
@@ -108,28 +134,24 @@ struct AgentSourceConnectorWizard: View {
                         .buttonStyle(ConnectorButtonStyle(primary: true))
                 }
             }.disabled(busy)
-        }.padding(24).frame(width: availableWidth).fixedSize(horizontal: false, vertical: true)
-            .foregroundStyle(TapSkin.ink).background(TapSkin.tone(0xfafafa, 0x171717))
-            .background(GeometryReader { geometry in
-                Color.clear.onAppear { onSizeChange?(geometry.size) }
-                    .onChange(of: geometry.size) { onSizeChange?($0) }
-            })
-            .accessibilityElement(children: .contain)
-            .accessibilityIdentifier("market-connector-wizard")
-            .onExitCommand { close() }
-            .onChange(of: auth?.id) { _ in values = [:]; notified = nil }
-            .task(id: auth?.id) {
+    }
+    @MainActor private func runAuthorization() async {
                 guard !closing else { return }
                 if auth == nil {
                     do { try await sync.startSourceConnection(item) } catch { self.error = error.localizedDescription }
+                    if sync.connectingItem?.id == item.id, auth == nil { close(); return }
                 }
                 var delay: Double = 2
                 while !Task.isCancelled, !closing, let session = auth {
                     if session.status == "authenticated" {
                         if notified != session.id {
-                            notified = session.id; values = [:]; await sync.refreshManagement()
-                            // Cloud consent and the local MCP grant have separate origins.
-                            sync.connectingItem = item; close()
+                            notified = session.id; values = [:]
+                            do {
+                                if try await sync.finishSourceConnection() {
+                                    close()
+                                    await sync.refreshManagement()
+                                }
+                            } catch { notified = nil; self.error = error.localizedDescription }
                         }
                         break
                     }
@@ -143,8 +165,6 @@ struct AgentSourceConnectorWizard: View {
                     } catch is CancellationError { break }
                     catch { self.error = error.localizedDescription; break }
                 }
-            }
-            .onDisappear { closing = true; values = [:] }
     }
     private func risk(_ title: String, _ text: String) -> some View {
         VStack(alignment: .leading, spacing: 6) {

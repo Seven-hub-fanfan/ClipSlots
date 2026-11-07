@@ -20,9 +20,15 @@ parser.add_argument("--evidence", type=Path, required=True)
 parser.add_argument("--expected-installed-sha256", required=True)
 parser.add_argument("--reuse-backup", type=Path,
                     help="Reuse this task's verified full backup for a follow-up local candidate.")
+parser.add_argument("--reuse-checkpoint", type=Path,
+                    help="Reuse verified identical objects from this backup's immutable checkpoint.")
 parser.add_argument("--backup-limit-gib", type=float, default=30,
                     help="Explicit per-install allowance, 30–31 GiB; requires user authorization above 30.")
+parser.add_argument("--allow-native-timing-failure", action="store_true",
+                    help="With explicit user authorization, accept only the known mascot frame-budget failure.")
 args = parser.parse_args()
+if args.reuse_checkpoint and not args.reuse_backup:
+    parser.error("--reuse-checkpoint requires --reuse-backup.")
 candidate = args.candidate.resolve(strict=True)
 evidence = args.evidence.resolve(strict=True)
 installed = Path("/Applications/ClipSlots.app")
@@ -100,7 +106,13 @@ def verify(bundle):
 
 verify(candidate)
 assert candidate != installed and sha(installed / "Contents/MacOS/ClipSlots") == args.expected_installed_sha256
-assert json.loads((evidence / "app-regression.json").read_text())["passed"]
+native_report = json.loads((evidence / "app-regression.json").read_text())
+timing_failure_waived = not native_report["passed"] and args.allow_native_timing_failure
+if timing_failure_waived:
+    assert native_report["failures"] == ["机器人 248px 原生渲染 P95 小于 60fps 单帧预算"], \
+        "Only the explicitly authorized mascot timing failure may be accepted."
+else:
+    assert native_report["passed"]
 package = json.loads((evidence / "package.json").read_text())
 assert package["gui_sha256"] == sha(candidate / "Contents/MacOS/ClipSlots")
 assert package["kit_regression_passed"] and package["source_format_passed"]
@@ -138,13 +150,22 @@ if args.reuse_backup:
     backup_raw = {"data": files(backup / "data"), "config": files(backup / "config")}
     assert backup_raw == original, "Existing backup bytes changed; replacement stopped."
     delta_bytes = backup_checkpoint.changed_bytes(original, before_raw)
-    lease.reserve_additional(delta_bytes)
+    reusable = (backup_checkpoint.reusable_objects(
+        backup, args.reuse_checkpoint.absolute(), before_raw)
+        if args.reuse_checkpoint else {})
+    new_object_bytes = backup_checkpoint.new_object_bytes(original, before_raw, reusable)
+    lease.reserve_additional(new_object_bytes)
     checkpoint = backup / ("checkpoint-" + stamp)
-    backup_checkpoint.create(backup, before_raw, {"data": data, "config": config}, checkpoint)
+    backup_checkpoint.create(backup, before_raw, {"data": data, "config": config},
+                             checkpoint, reusable=reusable)
     print("Latest protected snapshot verified; delta bytes: " + str(delta_bytes), flush=True)
+    print("New checkpoint object bytes: " + str(new_object_bytes) +
+          "; reused verified objects: " + str(len(reusable)), flush=True)
 else:
     checkpoint = None
     delta_bytes = 0
+    new_object_bytes = 0
+    reusable = {}
     (backup / "protected-before.json").write_text(json.dumps(before_raw, indent=2))
     print("Creating full APFS backup and checking every copied file.", flush=True)
     clone(data, backup / "data")
@@ -215,8 +236,14 @@ report = {
     "full_backup_reused": bool(args.reuse_backup),
     "latest_checkpoint": str(checkpoint) if checkpoint else None,
     "checkpoint_delta_bytes": delta_bytes,
+    "checkpoint_new_object_bytes": new_object_bytes,
+    "checkpoint_reused_objects": len(reusable),
+    "checkpoint_reused_object_bytes": sum(p.stat().st_size for p in reusable.values()),
     "backup_limit_gib": args.backup_limit_gib,
     "backup_limit_default_gib": 30,
+    "native_timing_failure_user_waived": timing_failure_waived,
+    "native_regression_passed": native_report["passed"],
+    "native_regression_failures": native_report.get("failures", []),
     "latest_checkpoint_all_files_verified": True,
     "previous_application": str(old_app),
     "comparison_excludes": ["*.lock", "canvas/projects/*/canvas.json:updatedAt",

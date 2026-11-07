@@ -19,8 +19,51 @@ def changed_bytes(original, current):
                for name, entry in entries.items() if entry != original[kind].get(name))
 
 
-def create(base, current, roots, destination):
+def changed_objects(original, current):
+    result = {}
+    for kind, entries in current.items():
+        for name, entry in entries.items():
+            if entry != original[kind].get(name) and "sha256" in entry:
+                digest = entry["sha256"]
+                assert len(digest) == 64 and all(c in "0123456789abcdef" for c in digest)
+                assert digest not in result or result[digest] == entry["bytes"]
+                result[digest] = entry["bytes"]
+    return result
+
+
+def reusable_objects(base, checkpoint, current):
+    """Reuse only verified immutable objects from a checkpoint in this backup."""
+    base, checkpoint = Path(base), Path(checkpoint)
+    assert not checkpoint.is_symlink() and checkpoint.parent == base
+    assert checkpoint.name.startswith("checkpoint-") and checkpoint.is_dir()
+    objects = checkpoint / "objects"
+    assert not objects.is_symlink() and objects.is_dir()
+    manifest = json.loads((checkpoint / "manifest.json").read_text())
+    assert manifest["base_manifest_sha256"] == sha(base / "protected-before.json")
+    original = json.loads((base / "protected-before.json").read_text())
+    referenced = {entry["sha256"] for entries in manifest["snapshot"].values()
+                  for entry in entries.values() if "sha256" in entry}
+    result = {}
+    for digest, size in changed_objects(original, current).items():
+        source = objects / digest
+        if digest not in referenced or not source.exists():
+            continue
+        assert not source.is_symlink() and source.is_file()
+        assert source.stat().st_dev == base.stat().st_dev
+        assert source.stat().st_size == size and sha(source) == digest
+        result[digest] = source
+    return result
+
+
+def new_object_bytes(original, current, reusable=None):
+    reusable = reusable or {}
+    return sum(size for digest, size in changed_objects(original, current).items()
+               if digest not in reusable)
+
+
+def create(base, current, roots, destination, reusable=None):
     """Store changed bytes only; the complete manifest also records removals."""
+    reusable = reusable or {}
     original = json.loads((base / "protected-before.json").read_text())
     destination.mkdir()
     objects = destination / "objects"
@@ -30,7 +73,13 @@ def create(base, current, roots, destination):
             if entry != original[kind].get(name) and "sha256" in entry:
                 target = objects / entry["sha256"]
                 if not target.exists():
-                    shutil.copyfile(roots[kind] / name, target)
+                    if source := reusable.get(entry["sha256"]):
+                        assert source.parent.name == "objects"
+                        assert source.parent.parent.parent == base
+                        assert not source.is_symlink() and sha(source) == entry["sha256"]
+                        os.link(source, target, follow_symlinks=False)
+                    else:
+                        shutil.copyfile(roots[kind] / name, target)
                 assert sha(target) == entry["sha256"]
                 assert target.stat().st_size == entry["bytes"]
     manifest = {"base_manifest_sha256": sha(base / "protected-before.json"),

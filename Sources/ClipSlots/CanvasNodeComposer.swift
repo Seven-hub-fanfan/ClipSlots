@@ -199,17 +199,20 @@ extension CanvasWorkspaceView {
                height: max(100, viewSize.height - (footerControlsStacked ? 176 : 124)))
     }
 
-    var footerControlsStacked: Bool { viewSize.width - sidebarWidth < 553 }
+    var footerControlsStacked: Bool { viewSize.width - sidebarWidth < 540 }
     var navigationChromeFrame: CGRect {
-        CGRect(x: sidebarWidth + 14, y: viewSize.height - 56, width: 337, height: 40)
+        CGRect(x: sidebarWidth + 14, y: viewSize.height - 56, width: 241, height: 40)
     }
     var footerToolbarFrame: CGRect {
         let left = sidebarWidth
         let preferred = left + (viewSize.width - left) / 2
-        let center = footerControlsStacked ? viewSize.width - 14 - 88
-            : min(viewSize.width - 14 - 88, max(preferred, navigationChromeFrame.maxX + 12 + 88))
-        return CGRect(x: center - 88, y: viewSize.height - 56 - (footerControlsStacked ? 52 : 0),
-                      width: 176, height: 40)
+        let center = footerControlsStacked ? viewSize.width - 14 - 90
+            : min(viewSize.width - 80 - 90, max(preferred, navigationChromeFrame.maxX + 12 + 90))
+        let lift: CGFloat = footerControlsStacked
+            ? (showMiniMap && viewSize.width - sidebarWidth < 434 ? CanvasReplicaGeometry.mapSize.height + 24 : 52)
+            : 0
+        return CGRect(x: center - 90, y: viewSize.height - 60 - lift,
+                      width: 180, height: 44)
     }
 
     var visibleNodes: [CanvasNode] {

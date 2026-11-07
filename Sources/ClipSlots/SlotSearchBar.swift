@@ -1,5 +1,6 @@
 import SwiftUI
 import ClipSlotsKit
+import AppKit
 
 // MARK: - v2.10.93 · 按可用宽度二选一的布局（替代嵌套 ViewThatFits）
 //
@@ -61,6 +62,8 @@ struct SlotSearchBar: View {
     @Binding var searchText: String
     @Binding var selectedFilter: SlotFilterType
     @Binding var searchScope: SlotSearchScope
+    var onNavigate: (Int) -> Void = { _ in }
+    var onOpen: () -> Void = {}
     @State private var compactScope = true
 
     // v2.11.8: 原 `ScopeControlStyle` 枚举已删除。范围选择器挪到搜索框外侧后，宽窄两版
@@ -113,8 +116,8 @@ struct SlotSearchBar: View {
                 .foregroundColor(Neu.subtleInk)
                 .font(.system(size: 12, weight: .medium))
 
-            TextField("搜索槽位…", text: $searchText)
-                .textFieldStyle(.plain)
+            SearchInputField(text: $searchText, onNavigate: onNavigate, onOpen: onOpen,
+                             onEscape: { searchText = ""; selectedFilter = .all })
                 .font(.system(size: 13))
                 .foregroundColor(Neu.ink)
                 .frame(minWidth: 90)
@@ -129,11 +132,14 @@ struct SlotSearchBar: View {
                 }
                 .buttonStyle(.plain)
                 .contentShape(Rectangle())
+                .help("清除搜索")
+                .accessibilityLabel("清除搜索")
             }
         }
         .padding(.horizontal, 12)
         .frame(height: NeumorphicMetrics.searchHeight)
-        .neuWell()
+        .background(Color.primary.opacity(0.035), in: RoundedRectangle(cornerRadius: 10))
+        .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(Color.primary.opacity(0.08), lineWidth: 1))
     }
 
     private var scopeCompactMenu: some View {
@@ -183,5 +189,51 @@ struct SlotSearchBar: View {
         .menuStyle(.borderlessButton)
         .fixedSize()
         .help("筛选槽位类型")
+    }
+}
+
+/// Delegate commands reach the result list while the insertion point stays in
+/// the single search field. Marked text keeps all IME candidate navigation.
+struct SearchInputField: NSViewRepresentable {
+    @Binding var text: String
+    var onNavigate: (Int) -> Void
+    var onOpen: () -> Void
+    var onEscape: () -> Void
+    func makeCoordinator() -> Coordinator { Coordinator(self) }
+    func makeNSView(context: Context) -> NSTextField {
+        let field = NSTextField()
+        field.isBordered = false
+        field.drawsBackground = false
+        field.focusRingType = .none
+        field.font = .systemFont(ofSize: 13)
+        field.placeholderString = "搜索槽位…"
+        field.delegate = context.coordinator
+        field.setAccessibilityIdentifier("slot-search-field")
+        field.setAccessibilityLabel("搜索槽位")
+        field.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        return field
+    }
+    func updateNSView(_ field: NSTextField, context: Context) {
+        context.coordinator.parent = self
+        if field.stringValue != text { field.stringValue = text }
+        field.textColor = .labelColor
+    }
+    final class Coordinator: NSObject, NSTextFieldDelegate {
+        var parent: SearchInputField
+        init(_ parent: SearchInputField) { self.parent = parent }
+        func controlTextDidChange(_ notification: Notification) {
+            if let field = notification.object as? NSTextField { parent.text = field.stringValue }
+        }
+        func control(_ control: NSControl, textView: NSTextView, doCommandBy selector: Selector) -> Bool {
+            guard !textView.hasMarkedText() else { return false }
+            switch selector {
+            case #selector(NSResponder.moveDown(_:)): parent.onNavigate(1)
+            case #selector(NSResponder.moveUp(_:)): parent.onNavigate(-1)
+            case #selector(NSResponder.insertNewline(_:)): parent.onOpen()
+            case #selector(NSResponder.cancelOperation(_:)): parent.onEscape()
+            default: return false
+            }
+            return true
+        }
     }
 }

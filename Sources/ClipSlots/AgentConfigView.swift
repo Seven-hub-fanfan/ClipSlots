@@ -11,13 +11,15 @@ import ClipSlotsKit
 //   - **模型 / System Prompt / 思考模式 / Endpoint → @AppStorage**（可自定义，用户明确要求）。
 //   - Skill 勾选状态在 AgentSkillPickerView 里，同样走 @AppStorage。
 //
-// 首次打开侧栏若无 key，由侧栏把 `isPresented` 置 true 弹出本页（用户要求的行为）。
+// 首次接入直接显示在侧栏；此页用于编辑连接与高级设置。
 //
 // 后端选择只通过 AgentBackendCoordinator 读写，设置页和实际调用共享同一作用域。
 
 struct AgentConfigView: View {
     @Environment(\.dismiss) private var dismiss
     var isWorkspace = false
+    var openAdvanced = false
+    @State private var advancedExpanded = false
 
     // DeepSeek 相关
     @AppStorage(AgentPreferences.modelKey) private var model = AgentConfig.defaultModel
@@ -47,7 +49,13 @@ struct AgentConfigView: View {
 
     private var gatewayURL: URL? { AgentGatewayPreferences.endpoint() }
     private var keychain: AgentKeychain? {
-        if currentBackend == .deepseek { return AgentKeychain.shared }
+        if currentBackend == .deepseek {
+            if let profile = AgentBackendCoordinator.directProfile(for: backendScope) {
+                return profile.requiresKey
+                    ? AgentKeychain(service: profile.keyService, account: profile.keyAccount) : nil
+            }
+            return AgentKeychain.shared
+        }
         if currentBackend == .gateway, let url = gatewayURL { return AgentGatewayPreferences.keychain(url: url) }
         return nil
     }
@@ -64,19 +72,44 @@ struct AgentConfigView: View {
 
             ScrollView {
                 VStack(alignment: .leading, spacing: 18) {
-                    backendSection
-                    Divider().opacity(0.3)
-
                     if currentBackend == .deepseek {
-                        apiKeySection
-                        modelSection
-                        thinkingSection
-                        systemPromptSection
-                        endpointSection
+                        AgentConnectionPanelHost(scope: backendScope, editSaved: true,
+                            onConnected: { dismiss() })
+                        DisclosureGroup("高级设置", isExpanded: $advancedExpanded) {
+                            backendSection
+                            Divider().opacity(0.3)
+                            HStack(spacing: 8) {
+                                Button("重新授权") {
+                                    Task {
+                                        await reloadKeyState(retryAfterFailure: true)
+                                        if !keyReadFailed {
+                                            AgentBackendCoordinator.broadcastChange(for: backendScope)
+                                        }
+                                    }
+                                }
+                                .controlSize(.small)
+                                .disabled(isKeyBusy || keychain == nil)
+                                .accessibilityIdentifier("agent-api-reauthorize")
+                                if isKeyBusy {
+                                    ProgressView().controlSize(.small)
+                                    Text("正在访问钥匙串…").font(.system(size: 11))
+                                } else if let errorText {
+                                    Text(errorText).font(.system(size: 11)).foregroundColor(.orange)
+                                } else if storedKeySuffix != nil {
+                                    Text("已获得钥匙串授权").font(.system(size: 11)).foregroundColor(.green)
+                                }
+                            }
+                            thinkingSection
+                            systemPromptSection
+                        }
                     } else if currentBackend == .tika {
+                        backendSection
+                        Divider().opacity(0.3)
                         tikaSection
                         tikaSystemPromptSection
                     } else {
+                        backendSection
+                        Divider().opacity(0.3)
                         gatewaySection
                         apiKeySection
                         modelSection
@@ -92,6 +125,7 @@ struct AgentConfigView: View {
         }
         .frame(width: 460, height: 640)
         .background(AppTheme.windowBackground)
+        .onAppear { if openAdvanced { advancedExpanded = true } }
         .sheet(isPresented: $showingEnvironment) { EnvironmentSetupView() }
         .task(id: isWorkspace) {
             currentBackend = AgentBackendCoordinator.kind(for: backendScope)
@@ -108,7 +142,7 @@ struct AgentConfigView: View {
                 return
             }
             #endif
-            if currentBackend != .tika { await reloadKeyState() }
+            if currentBackend == .gateway { await reloadKeyState() }
         }
         .onChange(of: currentBackend) { kind in
             guard AgentBackendCoordinator.kind(for: backendScope) != kind else { return }
@@ -148,9 +182,10 @@ struct AgentConfigView: View {
                 .font(.system(size: 13, weight: .semibold))
             Spacer()
             Button("完成") { dismiss() }
-                .buttonStyle(.borderedProminent)
-                .controlSize(.small)
-                .keyboardShortcut(.defaultAction)
+                .buttonStyle(CompactActionStyle(selected: true))
+                .keyboardShortcut(.return, modifiers: .command)
+                .help("完成设置 · ⌘Return")
+                .accessibilityIdentifier("agent-settings-done")
         }
         .padding(.horizontal, 18)
         .padding(.vertical, 12)
@@ -161,12 +196,13 @@ struct AgentConfigView: View {
         section("AI 后端", note: isWorkspace ? "独立 Agent 页的设置，切换后下一条消息生效。" : "编辑和画布助手的设置，切换后下一条消息生效。") {
             Picker("", selection: $currentBackend) {
                 ForEach(AgentBackendKind.allCases, id: \.rawValue) { kind in
-                    Text(kind.displayName).tag(kind)
+                    Text(kind == .deepseek ? "API" : kind.displayName).tag(kind)
                 }
             }
             .pickerStyle(.segmented)
             .labelsHidden()
             .disabled(isKeyBusy)
+            .accessibilityIdentifier("agent-backend-selector")
         }
     }
 
@@ -368,10 +404,10 @@ struct AgentConfigView: View {
             Image(systemName: "lock.shield")
                 .font(.system(size: 10))
             Text(currentBackend == .tika
-                 ? "Tika 走本机 tikacli，认证与云端调度由 tikacli 自己处理；本 App 不持有任何 Tika 凭据。"
+                 ? "Tika 连接由本机客户端管理。"
                  : currentBackend == .gateway
-                 ? "网关凭据按服务来源独立保存在钥匙串。停止仅在远端明确确认后视为已取消；结果未知时保留续接状态。"
-                 : "API Key 仅保存在本机钥匙串；ad-hoc 签名下版本更新后首次读取会弹系统授权，点「始终允许」即可。")
+                 ? "网关凭据按服务地址分别保存在本机钥匙串。"
+                 : "API Key 保存在本机钥匙串，仅用于连接所选模型。")
                 .font(.system(size: 10))
                 .foregroundColor(AppTheme.canvasCardMetaInk)
                 .fixedSize(horizontal: false, vertical: true)

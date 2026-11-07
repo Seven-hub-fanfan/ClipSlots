@@ -1,6 +1,11 @@
 import SwiftUI
 import ClipSlotsKit
 
+/// Hover and keyboard selection redraw only the result panel, not the slot grid.
+final class SearchResultSelection: ObservableObject {
+    @Published var id: String?
+}
+
 // MARK: - Global Search Results View (v2.5.3)
 
 struct GlobalSearchResultsView: View {
@@ -13,13 +18,19 @@ struct GlobalSearchResultsView: View {
     let currentGroupId: String
     var onJump: (SlotGlobalSearchResult) -> Void
     @Binding var sortRule: SlotSearchSortRule
+    @ObservedObject var selectionModel: SearchResultSelection
+    private var selectedResultId: String? {
+        get { selectionModel.id }
+        nonmutating set { selectionModel.id = newValue }
+    }
     var loadPreview: (SlotGlobalSearchResult) async -> SlotContent = { $0.content }
 
-    @State private var selectedResultId: String?
+    @State private var compact = false
     // v2.10.48: 悬停防抖 work item——扫视 / 滚动搜索结果列表时，抑制右侧预览随每一行掠过而
     // 疯狂重新解码切换，消除「预览图狂闪」。停留 ~80ms 后才真正切换选中项。
     @State private var hoverDebounce: DispatchWorkItem?
     @State private var mountedCount = 128
+    private var resultHeight: CGFloat { min(288, max(compact ? 108 : 224, CGFloat(results.count) * 54)) }
 
     private var previewResult: SlotGlobalSearchResult? {
         if let id = selectedResultId,
@@ -52,12 +63,14 @@ struct GlobalSearchResultsView: View {
                 emptyView
                     .transition(.opacity)
             } else {
-                HStack(alignment: .top, spacing: 12) {
+                HStack(alignment: .top, spacing: 16) {
                     resultList
                         .frame(maxWidth: .infinity, alignment: .leading)
 
-                    previewPanel
-                        .frame(width: 260)
+                    if !compact {
+                        previewPanel
+                            .frame(width: 244)
+                    }
                 }
                 .transition(.opacity)
             }
@@ -72,14 +85,20 @@ struct GlobalSearchResultsView: View {
             }
         }
         .onDisappear { hoverDebounce?.cancel() }
-        .padding(10)
+        .background {
+            GeometryReader { proxy in
+                Color.clear.onAppear { compact = proxy.size.width < 570 }
+                    .onChange(of: proxy.size.width) { compact = $0 < 570 }
+            }
+        }
+        .padding(14)
         .background(
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .fill(Color.primary.opacity(0.035))
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .fill(AppTheme.elevatedBackground)
         )
         .overlay(
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .stroke(Color.secondary.opacity(0.12), lineWidth: 1)
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .stroke(Color.primary.opacity(0.08), lineWidth: 1)
         )
     }
 
@@ -87,14 +106,14 @@ struct GlobalSearchResultsView: View {
 
     private var header: some View {
         HStack(spacing: 6) {
-            Image(systemName: "globe")
+            Image(systemName: "magnifyingglass")
                 .font(.caption)
-                .foregroundColor(.accentColor)
+                .foregroundColor(.secondary)
 
             Text(isRunning ? (matchedCount > 0 ? "已找到 \(matchedCount) 个，继续搜索…" : "正在搜索…")
                  : !isComplete ? "搜索尚未完成，请重试"
                  : results.isEmpty ? "全局未找到匹配槽位"
-                 : "全局找到 \(results.count) 个匹配槽位")
+                : "\(results.count) 个结果")
                 .font(.caption.weight(.medium))
                 .foregroundColor(.secondary)
                 #if DEBUG
@@ -104,13 +123,20 @@ struct GlobalSearchResultsView: View {
             Spacer()
 
             if !results.isEmpty {
-                Picker("排序", selection: $sortRule) {
+                Menu {
                     ForEach(SlotSearchSortRule.allCases) { rule in
-                        Text(rule.title).tag(rule)
+                        Button { sortRule = rule } label: {
+                            Label(rule.title, systemImage: sortRule == rule ? "checkmark" : "arrow.up.arrow.down")
+                        }
                     }
+                } label: {
+                    Label(sortRule.title, systemImage: "arrow.up.arrow.down")
+                        .font(.system(size: 11, weight: .medium))
+                        .padding(.horizontal, 9).frame(height: 28)
+                        .background(Color.primary.opacity(0.04), in: RoundedRectangle(cornerRadius: 8))
                 }
-                .pickerStyle(.menu)
-                .controlSize(.small)
+                .menuStyle(.borderlessButton).fixedSize()
+                .accessibilityIdentifier("global-search-sort")
                 .help("结果排序方式")
             }
         }
@@ -134,10 +160,11 @@ struct GlobalSearchResultsView: View {
     // MARK: - Result List (Left)
 
     private var resultList: some View {
+        ScrollViewReader { proxy in
         ScrollView(.vertical, showsIndicators: true) {
             LazyVStack(spacing: 6) {
                 ForEach(results.prefix(mountedCount)) { result in
-                    resultRow(result)
+                    resultRow(result).id(result.id)
                 }
                 if mountedCount < results.count {
                     ProgressView().controlSize(.small)
@@ -146,20 +173,31 @@ struct GlobalSearchResultsView: View {
             }
             .padding(.trailing, 4)
         }
-        .frame(minHeight: 120, maxHeight: 260)
+        .frame(height: resultHeight)
+        .onChange(of: selectedResultId) { id in
+            guard let id, let index = results.firstIndex(where: { $0.id == id }) else { return }
+            if index >= mountedCount { mountedCount = min(results.count, index + 128) }
+            DispatchQueue.main.async { proxy.scrollTo(id) }
+        }
+        }
     }
 
     private func resultRow(_ result: SlotGlobalSearchResult) -> some View {
         let isCurrent = result.pageId == currentPageId && result.groupId == currentGroupId
-        let isSelected = selectedResultId == result.id
+        let isSelected = (selectedResultId ?? results.first?.id) == result.id
 
-        return HStack(spacing: 10) {
+        return Button {
+            hoverDebounce?.cancel()
+            selectedResultId = result.id
+            onJump(result)
+        } label: {
+        HStack(spacing: 10) {
             // Slot badge
             Text("\(result.slot)")
                 .font(.system(size: 11, weight: .bold))
-                .foregroundColor(.white)
-                .frame(width: 24, height: 24)
-                .background(Circle().fill(Color.accentColor))
+                .foregroundColor(.secondary)
+                .frame(width: 30, height: 30)
+                .background(RoundedRectangle(cornerRadius: 9).fill(Color.primary.opacity(0.06)))
 
             // Info
             VStack(alignment: .leading, spacing: 3) {
@@ -169,8 +207,8 @@ struct GlobalSearchResultsView: View {
                             .font(.system(size: 9, weight: .semibold))
                             .padding(.horizontal, 6)
                             .padding(.vertical, 2)
-                            .background(Capsule().fill(Color.accentColor.opacity(0.18)))
-                            .foregroundColor(.accentColor)
+                            .background(Capsule().fill(Color.primary.opacity(0.06)))
+                            .foregroundColor(.secondary)
                     }
 
                     Text(result.displayTitle)
@@ -185,23 +223,30 @@ struct GlobalSearchResultsView: View {
             }
 
             Spacer()
+            Image(systemName: "arrow.up.right")
+                .font(.system(size: 10, weight: .medium))
+                .foregroundColor(.secondary.opacity(isSelected ? 1 : 0.35))
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 7)
         .background(
             RoundedRectangle(cornerRadius: 8, style: .continuous)
-                .fill(isSelected ? Color.accentColor.opacity(0.10) : Color.primary.opacity(0.035))
+                .fill(isSelected ? Color.primary.opacity(0.065) : Color.clear)
         )
         .overlay(
             RoundedRectangle(cornerRadius: 8, style: .continuous)
                 .stroke(
                     isSelected
-                    ? Color.accentColor.opacity(0.50)
-                    : Color.secondary.opacity(0.10),
+                    ? Color.primary.opacity(0.12)
+                    : Color.clear,
                     lineWidth: 1
                 )
         )
         .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityIdentifier("global-search-result-\(result.id)")
+        .accessibilityAddTraits(isSelected ? [.isSelected] : [])
         .onHover { hovering in
             // v2.10.48: 悬停防抖。滚动 / 扫视时鼠标会连续掠过多行，若每次进入都立刻改
             // selectedResultId，右侧预览会随之疯狂重解码闪烁。改为进入后延迟 ~80ms 再切换，
@@ -214,12 +259,6 @@ struct GlobalSearchResultsView: View {
             }
             hoverDebounce = work
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.08, execute: work)
-        }
-        .onTapGesture {
-            // 点击是明确意图，取消防抖、立即选中并跳转。
-            hoverDebounce?.cancel()
-            selectedResultId = result.id
-            onJump(result)
         }
         .help("点击跳转到该槽位")
         .transition(.opacity)
@@ -251,8 +290,8 @@ struct GlobalSearchResultsView: View {
                 Spacer(minLength: 0)
             }
         }
-        .padding(10)
-        .frame(minHeight: 120, maxHeight: 260, alignment: .topLeading)
+        .padding(12)
+        .frame(height: resultHeight, alignment: .topLeading)
         .background(
             RoundedRectangle(cornerRadius: 8, style: .continuous)
                 .fill(Color.primary.opacity(0.035))
@@ -331,17 +370,16 @@ struct GlobalSearchResultsView: View {
 
     @ViewBuilder
     private func actionButtons(for result: SlotGlobalSearchResult) -> some View {
-        VStack(spacing: 4) {
+        HStack(spacing: 8) {
             // Jump
             Button {
                 onJump(result)
             } label: {
-                Label("跳转", systemImage: "arrow.right.circle")
-                    .font(.caption)
-                    .frame(maxWidth: .infinity, alignment: .leading)
+                Label("定位槽位", systemImage: "arrow.up.right")
             }
-            .buttonStyle(.plain)
+            .buttonStyle(CompactActionStyle())
 
+            Menu {
             // File actions
             if let fileURL = result.content.primaryFileURL {
                 let exists = FileManager.default.fileExists(atPath: fileURL.path)
@@ -405,6 +443,13 @@ struct GlobalSearchResultsView: View {
                 }
                 .buttonStyle(.plain)
             }
+            } label: {
+                Image(systemName: "ellipsis").frame(width: 28, height: 32)
+            }
+            .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
+            .help("更多操作")
+            .disabled(result.content.primaryFileURL == nil && result.content.detectedWebURL == nil)
+            Spacer(minLength: 0)
         }
     }
 }

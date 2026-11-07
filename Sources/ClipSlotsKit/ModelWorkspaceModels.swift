@@ -73,6 +73,9 @@ public struct ModelProfile: Codable, Equatable, Identifiable, Sendable {
     public var requiresKey = true
     public var legacyKeyAccount: String?
     public var supportsImages = false
+    /// Agent connections preserve an explicit negative separately from older
+    /// model-hub profiles whose default false did not come from API discovery.
+    public var imageInputCapability: Bool?
     public var supportsAudio = false
     public var enabled = true
     public var timeout: Double = 120

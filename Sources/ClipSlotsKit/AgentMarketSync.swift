@@ -136,9 +136,11 @@ public struct AgentMarketSnapshot: Codable, Equatable, Sendable {
 
 public enum AgentMarketSyncError: LocalizedError {
     case invalidResponse, requiresLogin, invalidURL, invalidForm(String), unavailableSkill
+    case connectorUnavailable(String)
     public var errorDescription: String? {
         switch self {
         case .invalidResponse: return "目录响应不完整，已保留上次完整配置"
+        case .connectorUnavailable(let id): return "创作平台暂未提供 \(id) 的连接服务（404），请稍后刷新重试"
         case .requiresLogin: return "登录会话不可用，请在参考应用登录后刷新"
         case .invalidURL: return "资源地址无效"
         case .invalidForm(let message): return message
@@ -327,6 +329,10 @@ public actor AgentMarketSyncService {
         let (data, status) = try await http.send(request)
         try Task.checkCancellation()
         if status == 401 || status == 403 { throw AgentMarketSyncError.requiresLogin }
+        if status == 404, resource == "connectors",
+           segments.count == 5 || (segments.count == 6 && segments.last == "auth-sessions") {
+            throw AgentMarketSyncError.connectorUnavailable(segments[4])
+        }
         if status == 204 && method != "GET" { return [:] }
         guard (200...299).contains(status), let value = try? JSONDecoder().decode(JSONValue.self, from: data),
               value["code"]?.intValue == 200 || value["code"]?.intValue == 0 || value["code"] == nil,

@@ -361,8 +361,8 @@ private func runAgentModelNetworkProbe(directory: URL, check: (Bool, String) -> 
         }
         check(catalog.models.first?.id == "fixture-vision" && catalog.error == nil,
               "actual URLSession localhost model discovery receives and parses HTTP response")
-        check(catalog.supportsImages(model: "fixture-vision", endpoint: endpoint, gateway: false)
-            && !catalog.supportsImages(model: "fixture-vision", endpoint: endpoint, gateway: true),
+        check(catalog.supportsImages(model: "fixture-vision", endpoint: endpoint, gateway: false) == true
+            && catalog.supportsImages(model: "fixture-vision", endpoint: endpoint, gateway: true) == nil,
               "image capability binds to the discovered endpoint and provider")
         try Data("invalid JSON".utf8).write(to: path)
         catalog.refresh(endpoint: endpoint, gateway: false)

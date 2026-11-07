@@ -51,9 +51,7 @@ public enum AgentModelCatalog {
                   seen.insert(id).inserted else { throw AgentOperationError("模型列表包含无效或重复 ID。") }
             let reported = row["context_window"]?.intValue
             let context = reported.flatMap { (1...100_000_000).contains($0) ? $0 : nil }
-            let image: Bool?
-            if case .bool(let support) = row["capabilities"]?["image_input"] { image = support }
-            else { image = nil }
+            let image = reportedImageSupport(row)
             func text(_ key: String, limit: Int) -> String? {
                 guard let value = row[key]?.stringValue, !value.isEmpty,
                       value.utf8.count <= limit,
@@ -72,6 +70,21 @@ public enum AgentModelCatalog {
                 subscriptionRequired: subscription, automatic: row["automatic"]?.boolValue == true || id == "auto",
                 ratings: ratings)
         }
+    }
+
+    private static func reportedImageSupport(_ row: JSONValue) -> Bool? {
+        for value in [row["capabilities"]?["image_input"], row["capabilities"]?["supports_images"],
+                      row["capabilities"]?["vision"], row["supports_images"], row["supports_vision"]] {
+            if case .bool(let supported) = value { return supported }
+        }
+        for value in [row["input_modalities"], row["architecture"]?["input_modalities"],
+                      row["modalities"]?["input"]] {
+            if let modalities = value?.arrayValue, !modalities.isEmpty,
+               modalities.allSatisfy({ $0.stringValue != nil }) {
+                return modalities.contains { $0.stringValue?.lowercased() == "image" }
+            }
+        }
+        return nil
     }
 }
 

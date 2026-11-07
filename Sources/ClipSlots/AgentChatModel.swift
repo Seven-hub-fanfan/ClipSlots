@@ -767,7 +767,7 @@ final class AgentChatModel: ObservableObject {
         guard !isImportingAttachments else { return }
         let panel = NSOpenPanel()
         panel.title = "上传文件"
-        panel.message = "支持文本、含文字 PDF、静态图片与 120 秒/24 MB 内视频。视频只提供三张抽帧，无音轨；图像合计 2 MB。"
+        panel.message = "图片按当前 API 发送；文本和 PDF 提取文字。视频支持 120 秒/24 MiB 内的三张抽帧，不读取音轨。具体请求限制以服务端反馈为准。"
         panel.canChooseFiles = true
         panel.canChooseDirectories = false
         panel.allowsMultipleSelection = true
@@ -819,6 +819,7 @@ final class AgentChatModel: ObservableObject {
 
     @discardableResult
     func send(text: String, config: AgentConfig, enabledSkills: [AgentSkill]) -> Bool {
+        canvasContext?.synchronizeSelection(to: self)
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard (!trimmed.isEmpty || !draftAttachments.isEmpty || !draftReferences.isEmpty || !draftSkillReferences.isEmpty),
               !isAddingSkill, !isImportingAttachments else { return false }
@@ -847,7 +848,8 @@ final class AgentChatModel: ObservableObject {
             try AgentAttachmentImport.validateImageSupport(
                 history: messages + [AgentMessage(role: .user, content: trimmed, attachments: draftAttachments,
                                                  canvasReferences: draftReferences)],
-                supported: backendKind != .tika && config.supportsImageInput == true)
+                supported: backendKind == .tika ? false : config.resolvedImageSupport,
+                tika: backendKind == .tika)
         } catch { errorText = error.localizedDescription; return false }
         // 后端的异步 run() 负责凭据检查；主线程不能等待系统授权或另一个正在读钥匙串的线程。
         // 缺 key 仍由 failRun(.missingAPIKey) 打开配置，用户消息保留以便配置后重试。
