@@ -72,6 +72,7 @@ private actor ModelWorkspaceFixtureHTTP: ModelHTTPTransport {
             runIsolatedCrateBoundaryProbe(check: check)
             if ProcessInfo.processInfo.environment["CLIPSLOTS_WORKSPACE_LIGHT_ONLY"] == "1" {
                 await runWorkspaceBeatProbe(directory: root, includeWelcomeCards: false, check: check)
+                await runWorkspaceNavigationLoadingProbe(directory: root, check: check)
                 let report: [String: Any] = ["ok": failed.isEmpty, "passed": passed, "failed": failed,
                     "realPaidRequests": 0, "systemInputValidated": false,
                     "scope": "native navigation compositor, selection, lifecycle and appearance"]

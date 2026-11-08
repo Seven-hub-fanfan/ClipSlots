@@ -106,14 +106,30 @@ final class WorkspaceTransition: ObservableObject {
 
 struct WorkspaceLoadingSurface: NSViewRepresentable {
     let transition: WorkspaceTransition
+    var keepsNavigationVisible = false
     func makeNSView(context: Context) -> WorkspaceLoadingView {
         let view = WorkspaceLoadingView()
+        view.keepsNavigationVisible = keepsNavigationVisible
         transition.surface = view
         return view
     }
-    func updateNSView(_ view: WorkspaceLoadingView, context: Context) {}
+    func updateNSView(_ view: WorkspaceLoadingView, context: Context) {
+        view.keepsNavigationVisible = keepsNavigationVisible
+    }
     static func dismantleNSView(_ view: WorkspaceLoadingView, coordinator: ()) {
         view.hide()
+    }
+}
+
+/// Keep the single navigation instance above both the loading cover and its
+/// exit fade. The native cover also leaves these SwiftUI buttons reachable.
+struct WorkspaceLoadingOverlay<Navigation: View>: ViewModifier {
+    let transition: WorkspaceTransition
+    let navigation: Navigation
+    func body(content: Content) -> some View {
+        content
+            .overlay { WorkspaceLoadingSurface(transition: transition, keepsNavigationVisible: true) }
+            .overlay(alignment: .top) { navigation }
     }
 }
 
@@ -187,8 +203,18 @@ final class WorkspaceLoadingView: NSView {
     private var previousWantsLayer = false
     private var previousUsesFilters = false
     private var previousFilters: [Any]?
+    var keepsNavigationVisible = false
     override var isFlipped: Bool { true }
-    override func hitTest(_ point: NSPoint) -> NSView? { active ? self : nil }
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        guard active else { return nil }
+        if keepsNavigationVisible {
+            let navigation = CGRect(x: bounds.midX - WorkspaceModeSwitcher.preferredWidth / 2,
+                y: bounds.minY + WorkspaceModeSwitcher.pinnedTopInset,
+                width: WorkspaceModeSwitcher.preferredWidth, height: WorkspaceModeSwitcher.preferredHeight)
+            if navigation.contains(point) { return nil }
+        }
+        return self
+    }
     override init(frame: NSRect) {
         super.init(frame: frame)
         wantsLayer = true

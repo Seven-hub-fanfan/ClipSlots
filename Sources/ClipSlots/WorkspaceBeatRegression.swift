@@ -351,4 +351,134 @@ func runWorkspaceArchRasterProbe(directory: URL, check: (Bool, String) -> Void) 
     try? JSONSerialization.data(withJSONObject: crownSamples, options: [.prettyPrinted, .sortedKeys])
         .write(to: directory.appendingPathComponent("workspace-arch-pixels.json"))
 }
+/// Exercise the same loading/navigation modifier used by ContentView, with a
+/// delayed preparation and admission queue so the covered phases are observable.
+@MainActor
+func runWorkspaceNavigationLoadingProbe(directory: URL, check: (Bool, String) -> Void) async {
+    @MainActor final class Selection: ObservableObject {
+        @Published var mode = WorkspaceMode.edit
+        let transition = WorkspaceTransition()
+        var preparationAllowed = false
+        func select(_ mode: WorkspaceMode) {
+            if mode == self.mode { transition.cancel(); return }
+            transition.switchTo(mode, prepare: { [self] in
+                while !preparationAllowed && !Task.isCancelled {
+                    try? await Task.sleep(for: .milliseconds(15))
+                }
+                return !Task.isCancelled
+            }, commit: { [self] in
+                self.mode = mode
+                transition.sections.enroll((0..<12).map { "cover-fixture-\($0)" })
+            })
+        }
+    }
+    struct Fixture: View {
+        @ObservedObject var state: Selection
+        var body: some View {
+            Color.red
+                .modifier(WorkspaceLoadingOverlay(transition: state.transition,
+                    navigation: WorkspaceNavigationBar(
+                        selection: Binding(get: { state.mode }, set: { state.select($0) }),
+                        navigation: state.transition.navigation)
+                        .padding(.top, WorkspaceModeSwitcher.pinnedTopInset)))
+        }
+    }
+    let state = Selection()
+    let host = NSHostingView(rootView: Fixture(state: state))
+    let window = NSWindow(contentRect: CGRect(x: 120, y: 120, width: 480, height: 360),
+                          styleMask: [.titled], backing: .buffered, defer: false)
+    window.isReleasedWhenClosed = false
+    window.contentView = host
+    window.makeKeyAndOrderFront(nil)
+    defer { state.transition.cancel(); window.close() }
+    try? await Task.sleep(for: .milliseconds(250))
+    host.layoutSubtreeIfNeeded()
+    let surface = NativeAccessibilityProbe.elements(host).compactMap { $0 as? WorkspaceContourSurface.Host }.first
+    guard let surface, let loading = state.transition.surface else {
+        check(false, "loading fixture mounts the production navigation and cover"); return
+    }
+    var samples = [[String: Any]]()
+    func sample(_ label: String, dark: Bool, bodyCovered: Bool) -> Bool {
+        guard let image = CGWindowListCreateImage(.null, .optionIncludingWindow,
+            CGWindowID(window.windowNumber), [.boundsIgnoreFraming, .bestResolution]) else { return false }
+        let bitmap = NSBitmapImageRep(cgImage: image)
+        let scale = CGFloat(bitmap.pixelsWide) / window.frame.width
+        let rect = surface.convert(surface.bounds, to: nil)
+        let raster = CGRect(x: rect.minX * scale, y: (window.frame.height - rect.maxY) * scale,
+                            width: rect.width * scale, height: rect.height * scale).integral
+        var colored = 0
+        for y in Int(raster.minY)..<Int(raster.maxY) {
+            for x in Int(raster.minX)..<Int(raster.maxX) {
+                guard let color = bitmap.colorAt(x: x, y: y) else { continue }
+                let channels = [color.redComponent, color.greenComponent, color.blueComponent]
+                if (channels.max() ?? 0) - (channels.min() ?? 0) > 0.12 { colored += 1 }
+            }
+        }
+        let point = loading.convert(CGPoint(x: 12, y: 140), to: nil)
+        let color = bitmap.colorAt(x: Int(point.x * scale),
+                                  y: Int((window.frame.height - point.y) * scale))
+        let background = dark ? 0 : 236
+        let covered = color.map { color in
+            [color.redComponent, color.greenComponent, color.blueComponent]
+                .allSatisfy { abs(Int(($0 * 255).rounded()) - background) <= 1 }
+        } ?? false
+        samples.append(["phase": label, "coloredNavigationPixels": colored, "bodyCovered": covered])
+        try? bitmap.representation(using: .png, properties: [:])?
+            .write(to: directory.appendingPathComponent("navigation-cover-\(label).png"))
+        return colored > 12 && (!bodyCovered || covered)
+    }
+    for dark in [false, true] {
+        window.appearance = NSAppearance(named: dark ? .darkAqua : .aqua)
+        try? await Task.sleep(for: .milliseconds(160))
+        let theme = dark ? "dark" : "light"
+        for mode in [WorkspaceMode.canvas, .agent, .edit] {
+            state.preparationAllowed = false
+            state.select(mode)
+            try? await Task.sleep(for: .milliseconds(80))
+            check(state.transition.isSwitching
+                  && sample("\(theme)-\(mode.rawValue)-prepare", dark: dark, bodyCovered: true),
+                  "\(theme) \(mode.rawValue): navigation and prism remain visible over the opaque preparation cover")
+            check(loading.layer?.opacity == 1 && loading.frames?.images.count == 86
+                  && loading.symbol.contents != nil,
+                  "\(theme) \(mode.rawValue): the original loading animation still covers the unready workspace")
+            let navigationPoint = CGPoint(x: loading.bounds.midX,
+                y: WorkspaceModeSwitcher.pinnedTopInset + WorkspaceModeSwitcher.preferredHeight / 2)
+            check(loading.hitTest(navigationPoint) == nil
+                  && loading.hitTest(CGPoint(x: 12, y: 140)) === loading,
+                  "\(theme) \(mode.rawValue): loading intercepts content input and passes navigation input")
+            state.preparationAllowed = true
+            var observedMount = false, visibleDuringMount = true
+            for _ in 0..<100 where state.transition.isSwitching {
+                try? await Task.sleep(for: .milliseconds(15))
+                if state.mode == mode && state.transition.isSwitching {
+                    observedMount = true
+                    visibleDuringMount = visibleDuringMount && sample(
+                        "\(theme)-\(mode.rawValue)-mount", dark: dark, bodyCovered: true)
+                }
+            }
+            check(observedMount && visibleDuringMount && state.mode == mode && !state.transition.isSwitching,
+                  "\(theme) \(mode.rawValue): navigation stays visible while the destination mounts and becomes ready")
+            check(sample("\(theme)-\(mode.rawValue)-reveal", dark: dark, bodyCovered: false),
+                  "\(theme) \(mode.rawValue): navigation remains visible during the ready fade and blur")
+            try? await Task.sleep(for: .milliseconds(320))
+            check(NativeAccessibilityProbe.elements(host).compactMap { $0 as? WorkspaceContourSurface.Host }.first === surface,
+                  "\(theme) \(mode.rawValue): switching preserves the single native navigation instance")
+        }
+    }
+    state.preparationAllowed = false
+    state.select(.canvas)
+    try? await Task.sleep(for: .milliseconds(100))
+    let rect = surface.convert(surface.bounds, to: nil)
+    let location = CGPoint(x: rect.minX + WorkspaceModeSwitcher.center(for: .edit), y: rect.midY)
+    for type: NSEvent.EventType in [.leftMouseDown, .leftMouseUp] {
+        if let event = NSEvent.mouseEvent(with: type, location: location, modifierFlags: [],
+            timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber,
+            context: nil, eventNumber: 0, clickCount: 1, pressure: 1) { window.sendEvent(event) }
+    }
+    try? await Task.sleep(for: .milliseconds(80))
+    check(state.mode == .edit && !state.transition.isSwitching && state.transition.navigation.requestedMode == nil,
+          "clicking the current navigation button cancels a pending switch through the active loading cover")
+    try? JSONSerialization.data(withJSONObject: samples, options: [.prettyPrinted, .sortedKeys])
+        .write(to: directory.appendingPathComponent("navigation-cover-pixels.json"))
+}
 #endif
