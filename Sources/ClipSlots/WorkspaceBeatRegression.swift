@@ -4,7 +4,7 @@ import SwiftUI
 import ClipSlotsKit
 
 @MainActor
-func runWorkspaceBeatProbe(directory: URL, check: (Bool, String) -> Void) async {
+func runWorkspaceBeatProbe(directory: URL, includeWelcomeCards: Bool = true, check: (Bool, String) -> Void) async {
     final class Selection: ObservableObject {
         @Published var mode = WorkspaceMode.canvas
         @Published var reduceMotion = false
@@ -162,6 +162,22 @@ func runWorkspaceBeatProbe(directory: URL, check: (Bool, String) -> Void) async 
             directory: directory.appendingPathComponent("workspace-compositor-animation"))
         let surface = elements(host).compactMap { $0 as? WorkspaceContourSurface.Host }.first
         check(surface != nil, "native compositor surface is present behind SwiftUI buttons")
+        for dark in [false, true] {
+            window.appearance = NSAppearance(named: dark ? .darkAqua : .aqua)
+            try? await Task.sleep(for: .milliseconds(180))
+            check(surface?.debugLightHasOrbit == true,
+                  "\(dark ? "dark" : "light") selected navigation runs its native light orbit")
+            motion.begin(region: CGRect(origin: .zero, size: window.frame.size), retainImages: true)
+            let orbitStarted = motion.now
+            try? await Task.sleep(for: .seconds(2.6))
+            let name = "workspace-light-\(dark ? "dark" : "light")"
+            let orbitReport = await motion.report(since: orbitStarted, until: motion.now,
+                expectedText: nil, directory: directory, name: name)
+            check((orbitReport["changedPixelSamples"] as? Int ?? 0) >= 6,
+                  "\(name) has moving compositor pixels while selection is stationary")
+            _ = await motion.exportAnimation(since: orbitStarted, until: motion.now,
+                directory: directory.appendingPathComponent(name))
+        }
         motion.begin(region: CGRect(origin: .zero, size: window.frame.size), retainImages: true)
         state.deferCommit = true
         let deferredStarted = motion.now
@@ -196,10 +212,15 @@ func runWorkspaceBeatProbe(directory: URL, check: (Bool, String) -> Void) async 
         _ = canvas?.accessibilityPerformPress?()
         try? await Task.sleep(for: .milliseconds(70))
         let beforeReverse = surface?.debugVisibleCenter ?? 0
+        let lightBeforeReverse = surface?.debugLightVisibleCenter ?? 0
         _ = edit?.accessibilityPerformPress?()
         let afterReverse = surface?.debugVisibleCenter ?? 0
+        let lightAfterReverse = surface?.debugLightVisibleCenter ?? 0
         check(abs(beforeReverse - afterReverse) < 1,
               "rapid reversal continues from the presented position without a jump")
+        check(abs(lightBeforeReverse - lightAfterReverse) < 1
+              && abs(afterReverse - lightAfterReverse) < 1,
+              "moving prism remains attached to the selected arch during rapid reversal")
         try? await Task.sleep(for: .milliseconds(450))
         check(abs((surface?.debugVisibleCenter ?? 0) - 81) < 0.5,
               "rapid reversal settles at the latest requested workspace")
@@ -233,7 +254,27 @@ func runWorkspaceBeatProbe(directory: URL, check: (Bool, String) -> Void) async 
         check(state.mode == .canvas, "reduced-motion native switch still changes workspace")
         check(surface?.debugHasAnimation == false,
               "reduced-motion switch updates both native layers without animation")
+        check(surface?.debugLightHasOrbit == false,
+              "reduced-motion preference stops continuous light motion")
         capture("workspace-reduced-motion")
+        state.reduceMotion = false
+        try? await Task.sleep(for: .milliseconds(160))
+        check(surface?.debugLightHasOrbit == true, "restoring motion resumes the selected light")
+        surface?.isHidden = true
+        check(surface?.debugLightHasOrbit == false, "hidden navigation stops the light orbit")
+        surface?.isHidden = false
+        window.orderOut(nil)
+        try? await Task.sleep(for: .milliseconds(160))
+        check(surface?.debugLightHasOrbit == false, "offscreen window stops the light orbit")
+        window.makeKeyAndOrderFront(nil)
+        try? await Task.sleep(for: .milliseconds(160))
+        check(surface?.debugLightHasOrbit == true, "visible window resumes the light orbit")
+        if let surface {
+            surface.configure(center: WorkspaceModeSwitcher.center(for: .canvas),
+                halfWidth: WorkspaceModeSwitcher.contourHalfWidth, animated: true, highContrast: true)
+            check(!surface.debugLightHasOrbit && surface.debugLightIsHidden,
+                  "increased contrast preserves a clear monochrome contour without moving bloom")
+        }
         await motion.stop()
     }
     if let bitmap = host.bitmapImageRepForCachingDisplay(in: host.bounds) {
@@ -242,7 +283,9 @@ func runWorkspaceBeatProbe(directory: URL, check: (Bool, String) -> Void) async 
             .write(to: directory.appendingPathComponent("workspace-models.png"))
     }
     await runWorkspaceArchRasterProbe(directory: directory, check: check)
-    await WelcomeCardInteractionRegression.run(directory: directory, check: check)
+    if includeWelcomeCards {
+        await WelcomeCardInteractionRegression.run(directory: directory, check: check)
+    }
 }
 
 /// This verifies production Core Animation pixels offscreen. It deliberately
@@ -282,8 +325,25 @@ func runWorkspaceArchRasterProbe(directory: URL, check: (Bool, String) -> Void) 
                 return rows.compactMap { bitmap.colorAt(x: x, y: $0)?.alphaComponent }.max() ?? 0
             }
             let left = crownAlpha(-6), right = crownAlpha(6)
-            check(min(left, right) > 0.45 && abs(left - right) < 0.04,
-                  "\(name) crown remains readable and balanced on both sides")
+            check(min(left, right) > 0.45 && (!highContrast || abs(left - right) < 0.04),
+                  "\(name) crown remains readable on both sides")
+            var coloredPixels = 0, colorOutsideSelection = 0
+            for y in 0..<bitmap.pixelsHigh {
+                for x in 0..<bitmap.pixelsWide {
+                    guard let color = bitmap.colorAt(x: x, y: y)?.usingColorSpace(.sRGB),
+                          color.alphaComponent > 0.1 else { continue }
+                    let channels = [color.redComponent, color.greenComponent, color.blueComponent]
+                    if (channels.max() ?? 0) - (channels.min() ?? 0) > 0.16 {
+                        coloredPixels += 1
+                        if abs(CGFloat(x) / 2 - center) > WorkspaceModeSwitcher.contourHalfWidth + 6 {
+                            colorOutsideSelection += 1
+                        }
+                    }
+                }
+            }
+            check(highContrast ? coloredPixels == 0 : coloredPixels > 12,
+                  "\(name) renders the expected prism or increased-contrast fallback")
+            check(colorOutsideSelection == 0, "\(name) light stays inside the selected region")
             crownSamples.append(["theme": name, "leftAlpha": left, "rightAlpha": right])
           }
         }

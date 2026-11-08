@@ -70,6 +70,16 @@ private actor ModelWorkspaceFixtureHTTP: ModelHTTPTransport {
         do {
             try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
             runIsolatedCrateBoundaryProbe(check: check)
+            if ProcessInfo.processInfo.environment["CLIPSLOTS_WORKSPACE_LIGHT_ONLY"] == "1" {
+                await runWorkspaceBeatProbe(directory: root, includeWelcomeCards: false, check: check)
+                let report: [String: Any] = ["ok": failed.isEmpty, "passed": passed, "failed": failed,
+                    "realPaidRequests": 0, "systemInputValidated": false,
+                    "scope": "native navigation compositor, selection, lifecycle and appearance"]
+                try JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys])
+                    .write(to: root.appendingPathComponent("report.json"))
+                NSApp.terminate(nil)
+                return
+            }
             if ProcessInfo.processInfo.environment["CLIPSLOTS_WORKSPACE_ARCH_ONLY"] == "1" {
                 await runWorkspaceArchRasterProbe(directory: root, check: check)
                 let report: [String: Any] = ["ok": failed.isEmpty, "passed": passed, "failed": failed,
