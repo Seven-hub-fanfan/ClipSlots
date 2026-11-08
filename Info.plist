@@ -21,7 +21,16 @@
 	<key>CFBundleShortVersionString</key>
 	<string>2.17.108</string>
 	<key>CFBundleVersion</key>
-	<string>21710820</string>
+	<string>21710821</string>
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleURLName</key>
+			<string>com.clipslots.app.oauth</string>
+			<key>CFBundleURLSchemes</key>
+			<array><string>com.clipslots.app</string></array>
+		</dict>
+	</array>
 	<key>LSMinimumSystemVersion</key>
 	<string>13.0</string>
 	<key>NSAppleEventsUsageDescription</key>

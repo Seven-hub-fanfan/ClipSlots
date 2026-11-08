@@ -237,7 +237,7 @@ struct AgentApplicationManager: View {
             } message: { Text(selected?.title ?? "") }
             .background(AgentApplicationManagerPresenter(isPresented: $showConnection, model: model,
                 sync: sync, isReadOnly: isReadOnly, initialTab: "连接", onClose: {}))
-            .sheet(item: $sync.connectingItem) { item in AgentApplicationConnection(item: item, sync: sync) }
+            .background(AgentApplicationConnectionPresenter(sync: sync))
             .background(AgentMarketPreviewPresenter(media: $preview))
             .sheet(item: $editingIcon) { item in
                 AgentMarketPresentationEditor(item: item, sync: sync, onClose: { editingIcon = nil })
@@ -528,6 +528,8 @@ struct AgentApplicationManager: View {
 struct AgentApplicationConnection: View {
     let item: AgentMarketItem
     @ObservedObject var sync: AgentMarketSyncStore
+    let generation: UUID
+    let onClose: () -> Void
     @State private var tools: [AgentMCPTool] = []
     @State private var selected = Set<String>()
     @State private var client: AgentMCPClient?
@@ -535,15 +537,14 @@ struct AgentApplicationConnection: View {
     @State private var error: String?
     @State private var task: Task<Void, Never>?
     @State private var authorization = AgentMarketAuthorization()
-    @Environment(\.dismiss) private var dismiss
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
             HStack {
                 MarketArtwork(item: item, sync: sync).frame(width: 36, height: 36)
                 Text("连接" + item.title).font(.headline)
                 Spacer()
-                Button { task?.cancel(); authorization.cancel(); dismiss() } label: { Image(systemName: "xmark") }
-                    .buttonStyle(.plain)
+                Button { close() } label: { Image(systemName: "xmark").frame(width: 28, height: 28) }
+                    .buttonStyle(.plain).accessibilityIdentifier("market-connect-close")
             }
             if tools.isEmpty {
                 Text("此应用需要工具服务授权。连接后，选择供当前 Agent 使用的工具。")
@@ -570,30 +571,44 @@ struct AgentApplicationConnection: View {
                     guard let client else { return }
                     busy = true; error = nil
                     task = Task {
-                        defer { busy = false }
-                        do { try await sync.bind(item, client: client, selectedNames: selected); dismiss() }
-                        catch { self.error = error.localizedDescription }
+                        defer { if current { busy = false } }
+                        do {
+                            try await sync.bind(item, client: client, selectedNames: selected)
+                            try Task.checkCancellation()
+                            onClose()
+                        } catch { if current && !(error is CancellationError) { self.error = error.localizedDescription } }
                     }
                 }.buttonStyle(.borderedProminent).disabled(busy || selected.isEmpty)
                     .accessibilityIdentifier("market-connect-bind")
             }
             if busy { ProgressView().controlSize(.small) }
             if let error { Text(error).font(.system(size: 12)).foregroundStyle(.orange) }
-        }.padding(24).frame(width: 480)
+        }.padding(24).frame(maxWidth: .infinity)
+            .foregroundStyle(TapSkin.ink).background(TapSkin.tone(0xfafafa, 0x171717))
+            .accessibilityElement(children: .contain).accessibilityIdentifier("market-connect-panel")
             .task { connect(authorize: false) }
             .onDisappear { task?.cancel(); authorization.cancel() }
+            .onExitCommand { close() }
+    }
+    private var current: Bool { sync.connectionGeneration == generation && sync.connectingItem?.id == item.id }
+    private func close() {
+        task?.cancel(); task = nil; authorization.cancel()
+        sync.closeConnection(generation: generation)
+        onClose()
     }
     private func connect(authorize: Bool) {
-        guard !busy, let scope = sync.snapshot?.scope else { return }
+        guard current, !busy, let scope = sync.snapshot?.scope else { return }
         busy = true; error = nil
         task = Task {
-            defer { busy = false }
+            defer { if current { busy = false } }
             do {
                 if authorize { try await authorization.connect(scope: scope) }
+                try Task.checkCancellation()
+                guard current else { throw CancellationError() }
                 let client = sync.clientFactory(AgentMCPClient.officialEndpoint, scope)
                 let list = try await client.listTools()
                 try Task.checkCancellation()
-                guard sync.snapshot?.scope == scope else { throw AgentMCPError.invalidBinding }
+                guard current, sync.snapshot?.scope == scope else { throw CancellationError() }
                 guard !list.isEmpty else { throw AgentMCPError.unavailable }
                 self.client = client; tools = list
                 // A generic server's inventory does not prove application
@@ -601,7 +616,7 @@ struct AgentApplicationConnection: View {
                 selected = []
             } catch AgentMCPError.authorization where !authorize {
                 // An unconnected app presents the authorization action.
-            } catch { self.error = error.localizedDescription }
+            } catch { if current && !(error is CancellationError) { self.error = error.localizedDescription } }
         }
     }
 }

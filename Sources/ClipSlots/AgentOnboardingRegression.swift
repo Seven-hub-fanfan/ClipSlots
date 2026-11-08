@@ -33,6 +33,7 @@ enum AgentOnboardingRegression {
         }
         do {
             NativeAccessibilityProbe.enable()
+            try await AgentMarketOAuthRegression.run(root: root, check: check)
             try await AgentFollowupRegression.run(root: root, check: check)
             if ProcessInfo.processInfo.environment["CLIPSLOTS_FOLLOWUP_STATIC_ONLY"] == "1" {
                 let result: [String: Any] = ["passed": failures.isEmpty, "passes": passes, "failures": failures,

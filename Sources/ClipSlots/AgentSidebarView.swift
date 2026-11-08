@@ -221,9 +221,7 @@ struct AgentSidebarView: View {
         .background(AgentApplicationManagerPresenter(isPresented: $showSourceConnector,
             model: model, sync: marketSync, isReadOnly: isReadOnly, initialTab: "连接",
             onClose: { inputFocusRequest += 1 }))
-        .sheet(item: Binding(get: { marketSync.connectingItem }, set: { marketSync.connectingItem = $0 })) { item in
-            AgentApplicationConnection(item: item, sync: marketSync)
-        }
+        .background(AgentApplicationConnectionPresenter(sync: marketSync))
         .frame(width: isFullPage ? nil : panelWidth)
         .frame(maxWidth: isFullPage ? .infinity : nil)
         .frame(maxHeight: .infinity, alignment: .top)

@@ -112,7 +112,8 @@ public struct AgentMCPURLSessionHTTP: AgentMCPHTTP {
 /// Streamable HTTP JSON-RPC client. Each write is sent once; a timeout or
 /// dropped response is never retried automatically.
 public actor AgentMCPClient {
-    public static let officialEndpoint = URL(string: "https://mcp.tapnow.ai/api/agent-gateway/mcp/general/mcp")!
+    public static let officialEndpoint = URL(string: "https://mcp.tapnow.media/api/agent-gateway/mcp/general/mcp")!
+    public static let globalEndpoint = URL(string: "https://mcp.tapnow.ai/api/agent-gateway/mcp/general/mcp")!
     public static func validEndpoint(_ url: URL) -> Bool {
         url.user == nil && url.password == nil && url.fragment == nil && url.query == nil
             && (url.scheme == "https" || (url.scheme == "http" && ["127.0.0.1", "[::1]", "::1"].contains(url.host ?? "")))

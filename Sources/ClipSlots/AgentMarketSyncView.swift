@@ -27,15 +27,33 @@ import ClipSlotsKit
     @Published var installed: [String: AgentMarketInstallation] = [:]
     @Published var pending: Set<String> = []
     @Published var itemErrors: [String: String] = [:]
-    @Published var connectingItem: AgentMarketItem?
+    @Published var connectingItem: AgentMarketItem? {
+        didSet {
+            connectionGeneration = UUID()
+            if let oldValue { bindingAttempts[oldValue.id]?.invalidate() }
+        }
+    }
+    private(set) var connectionGeneration = UUID()
+    private var connectionPresenter: UUID?
+    func claimConnectionPresenter(_ id: UUID) -> Bool {
+        guard connectingItem != nil, connectionPresenter == nil || connectionPresenter == id else { return false }
+        connectionPresenter = id
+        return true
+    }
+    func releaseConnectionPresenter(_ id: UUID) {
+        if connectionPresenter == id { connectionPresenter = nil }
+    }
+    func closeConnection(generation: UUID) {
+        guard connectionGeneration == generation else { return }
+        connectingItem = nil
+    }
     @Published var connectionPrompt: AgentMarketItem?
     @Published var sourceConnection: AgentMarketItem?
     @Published var sourceAuth: AgentConnectorSession?
     @Published var sourceConnectorID: String?
     var clientFactory: @Sendable (URL, String) -> AgentMCPClient = { endpoint, scope in
         AgentMCPClient(endpoint: endpoint) {
-            guard endpoint == AgentMCPClient.officialEndpoint else { throw AgentMCPError.invalidBinding }
-            return try await AgentMarketCredentials.shared.token(scope: scope)
+            return try await AgentMarketCredentials.shared.token(scope: scope, endpoint: endpoint)
         }
     }
     private var installTasks: [String: Task<Void, Error>] = [:]
@@ -421,7 +439,7 @@ struct AgentSyncedAppMarketView: View {
                 AgentMarketPresentationEditor(item: selected, sync: sync, onClose: { configure = false })
             }
         }
-        .sheet(item: $sync.connectingItem) { item in AgentApplicationConnection(item: item, sync: sync) }
+        .background(AgentApplicationConnectionPresenter(sync: sync))
     }
     private var header: some View {
         HStack(spacing: 8) {
