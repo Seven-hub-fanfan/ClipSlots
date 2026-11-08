@@ -414,6 +414,18 @@ func runWorkspaceNavigationLoadingProbe(directory: URL, check: (Bool, String) ->
                 if (channels.max() ?? 0) - (channels.min() ?? 0) > 0.12 { colored += 1 }
             }
         }
+        let center = WorkspaceModeSwitcher.center(for: state.transition.navigation.requestedMode ?? state.mode)
+        let text = CGRect(x: raster.minX + (center - 13) * scale,
+                          y: raster.minY + 22 * scale, width: 26 * scale, height: 13 * scale).integral
+        var luminance = [CGFloat]()
+        for y in Int(text.minY)..<Int(text.maxY) {
+            for x in Int(text.minX)..<Int(text.maxX) {
+                if let color = bitmap.colorAt(x: x, y: y) {
+                    luminance.append((color.redComponent + color.greenComponent + color.blueComponent) / 3)
+                }
+            }
+        }
+        let textContrast = (luminance.max() ?? 0) - (luminance.min() ?? 0)
         let point = loading.convert(CGPoint(x: 12, y: 140), to: nil)
         let color = bitmap.colorAt(x: Int(point.x * scale),
                                   y: Int((window.frame.height - point.y) * scale))
@@ -422,10 +434,12 @@ func runWorkspaceNavigationLoadingProbe(directory: URL, check: (Bool, String) ->
             [color.redComponent, color.greenComponent, color.blueComponent]
                 .allSatisfy { abs(Int(($0 * 255).rounded()) - background) <= 1 }
         } ?? false
-        samples.append(["phase": label, "coloredNavigationPixels": colored, "bodyCovered": covered])
+        samples.append(["phase": label, "coloredNavigationPixels": colored, "bodyCovered": covered,
+                        "selectedLabelContrast": textContrast, "rootContentsScale": host.layer?.contentsScale ?? 0,
+                        "rootGeometryFlipped": host.layer?.isGeometryFlipped ?? false])
         try? bitmap.representation(using: .png, properties: [:])?
             .write(to: directory.appendingPathComponent("navigation-cover-\(label).png"))
-        return colored > 12 && (!bodyCovered || covered)
+        return colored > 12 && textContrast > 0.56 && (!bodyCovered || covered)
     }
     for dark in [false, true] {
         window.appearance = NSAppearance(named: dark ? .darkAqua : .aqua)
@@ -459,7 +473,7 @@ func runWorkspaceNavigationLoadingProbe(directory: URL, check: (Bool, String) ->
             check(observedMount && visibleDuringMount && state.mode == mode && !state.transition.isSwitching,
                   "\(theme) \(mode.rawValue): navigation stays visible while the destination mounts and becomes ready")
             check(sample("\(theme)-\(mode.rawValue)-reveal", dark: dark, bodyCovered: false),
-                  "\(theme) \(mode.rawValue): navigation remains visible during the ready fade and blur")
+                  "\(theme) \(mode.rawValue): navigation stays clear and readable during the ready fade and blur")
             try? await Task.sleep(for: .milliseconds(320))
             check(NativeAccessibilityProbe.elements(host).compactMap { $0 as? WorkspaceContourSurface.Host }.first === surface,
                   "\(theme) \(mode.rawValue): switching preserves the single native navigation instance")

@@ -71,7 +71,9 @@ private actor ModelWorkspaceFixtureHTTP: ModelHTTPTransport {
             try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
             runIsolatedCrateBoundaryProbe(check: check)
             if ProcessInfo.processInfo.environment["CLIPSLOTS_WORKSPACE_LIGHT_ONLY"] == "1" {
-                await runWorkspaceBeatProbe(directory: root, includeWelcomeCards: false, check: check)
+                if ProcessInfo.processInfo.environment["CLIPSLOTS_WORKSPACE_COVER_ONLY"] != "1" {
+                    await runWorkspaceBeatProbe(directory: root, includeWelcomeCards: false, check: check)
+                }
                 await runWorkspaceNavigationLoadingProbe(directory: root, check: check)
                 let report: [String: Any] = ["ok": failed.isEmpty, "passed": passed, "failed": failed,
                     "realPaidRequests": 0, "systemInputValidated": false,

@@ -345,7 +345,7 @@ final class WorkspaceLoadingView: NSView {
     private func revealReadyWorkspace() {
         clearReadyBlur()
         guard let root = window?.contentView, root !== self,
-              let filter = CIFilter(name: "CIGaussianBlur") else { return }
+              let filter = CIFilter(name: keepsNavigationVisible ? "CIMaskedVariableBlur" : "CIGaussianBlur") else { return }
         // The destination is already fully mounted. Animate its native composite,
         // including the fading glyph, without rebuilding the SwiftUI subtree.
         previousWantsLayer = root.wantsLayer
@@ -361,6 +361,22 @@ final class WorkspaceLoadingView: NSView {
         readyBlurLayer = target
         readyBlurFilter = filter
         previousFilters = target.filters
+        if keepsNavigationVisible {
+            // Core Animation maps this mask from layer points to backing pixels.
+            // Applying contentsScale here would scale the exclusion twice.
+            let extent = CGRect(origin: .zero, size: root.bounds.size)
+            let width = WorkspaceModeSwitcher.preferredWidth + 16
+            let height = WorkspaceModeSwitcher.preferredHeight + 16
+            let navigationY = target.isGeometryFlipped
+                ? WorkspaceModeSwitcher.pinnedTopInset - 8
+                : root.bounds.height - WorkspaceModeSwitcher.pinnedTopInset
+                    - WorkspaceModeSwitcher.preferredHeight - 8
+            let navigation = CGRect(x: (root.bounds.width - width) / 2,
+                y: navigationY, width: width, height: height)
+            let white = CIImage(color: CIColor(red: 1, green: 1, blue: 1)).cropped(to: extent)
+            let black = CIImage(color: CIColor(red: 0, green: 0, blue: 0)).cropped(to: navigation)
+            filter.setValue(black.composited(over: white), forKey: "inputMask")
+        }
         filter.name = "workspaceReadyBlur"
         filter.setValue(0, forKey: kCIInputRadiusKey)
         CATransaction.begin(); CATransaction.setDisableActions(true)
