@@ -136,7 +136,9 @@ struct AttachmentManagerPopover: View {
     }
 
     /// 语境相关的名词：画布上叫「入参文件」，编辑页叫「附件」。
-    private var noun: String { isCanvasContext ? "入参文件" : "附件" }
+    @AppStorage(AppInterfaceLanguage.preferenceKey) private var languageRaw = AppInterfaceLanguage.chinese.rawValue
+    private var language: AppInterfaceLanguage { AppInterfaceLanguage.resolve(languageRaw) }
+    private var noun: String { AppInterfaceStrings.text(isCanvasContext ? "入参文件" : "附件", language: language) }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -168,14 +170,14 @@ struct AttachmentManagerPopover: View {
                     Text(noun)
                         .font(.system(size: 15, weight: .semibold))
                 }
-                Text(isCanvasContext
-                     ? "生图时按此顺序作为入参；与槽位 \(slot) 的附件是同一份数据"
-                     : "粘贴槽位 \(slot) 时会依次带出这些附件")
+                AppLocalizedText(isCanvasContext
+                     ? "生图时按此顺序作为入参；与槽位 %ld 的附件是同一份数据"
+                     : "粘贴槽位 %ld 时会依次带出这些附件", slot)
                     .font(.caption)
                     .foregroundColor(.secondary)
             }
             Spacer()
-            Text("\(attachments.count) 项")
+            AppLocalizedText("%ld 项", attachments.count)
                 // v2.9.18: 计数徽章由 11pt 提升到 12pt（保留 medium 字重），改善可读。
                 .font(.system(size: 12, weight: .medium))
                 .padding(.horizontal, 8)
@@ -249,10 +251,10 @@ struct AttachmentManagerPopover: View {
                 .font(.system(size: 34, weight: .regular))
                 .foregroundColor(isDropTargeted ? .accentColor : .secondary.opacity(0.55))
             VStack(spacing: 4) {
-                Text(isDropTargeted ? "松开以添加\(noun)" : "拖拽文件到这里")
+                AppLocalizedText(isDropTargeted ? "松开以添加%@" : "拖拽文件到这里", noun)
                     .font(.callout.weight(.medium))
                     .foregroundColor(isDropTargeted ? .accentColor : .secondary)
-                Text("⌘V 粘贴，或点击选择文件（可多选）")
+                AppLocalizedText("⌘V 粘贴，或点击选择文件（可多选）")
                     .font(.caption)
                     .foregroundColor(.secondary.opacity(0.75))
             }
@@ -284,7 +286,7 @@ struct AttachmentManagerPopover: View {
             Image(systemName: isDropTargeted ? "square.and.arrow.down.fill" : "square.and.arrow.down")
                 .font(.system(size: 13, weight: .medium))
                 .foregroundColor(isDropTargeted ? .accentColor : .secondary)
-            Text(isDropTargeted ? "松开以添加\(noun)" : "⌘V 粘贴，拖入文件，或点击选择")
+            AppLocalizedText(isDropTargeted ? "松开以添加%@" : "⌘V 粘贴，拖入文件，或点击选择", noun)
                 .font(.caption)
                 .foregroundColor(isDropTargeted ? .accentColor : .secondary)
             Spacer(minLength: 0)
@@ -321,11 +323,11 @@ struct AttachmentManagerPopover: View {
             }
         }()
         return VStack(alignment: .leading, spacing: 8) {
-            TextField("名称（可选）", text: $draftName)
+            TextField(AppInterfaceStrings.text("名称（可选）", language: language), text: $draftName)
                 .textFieldStyle(.plain)
                 .padding(8)
                 .background(RoundedRectangle(cornerRadius: 8).fill(AppTheme.searchFieldBackground(scheme)))
-            TextField(placeholder(for: kind), text: $draftValue)
+            TextField(AppInterfaceStrings.text(placeholder(for: kind), language: language), text: $draftValue)
                 .textFieldStyle(.plain)
                 .padding(8)
                 .background(RoundedRectangle(cornerRadius: 8).fill(AppTheme.searchFieldBackground(scheme)))
@@ -336,9 +338,9 @@ struct AttachmentManagerPopover: View {
             }
             HStack {
                 Spacer()
-                Button("取消") { cancelInline() }
+                Button(localized: "取消") { cancelInline() }
                     .buttonStyle(.borderless)
-                Button("添加") { commitInline(kind) }
+                Button(localized: "添加") { commitInline(kind) }
                     .buttonStyle(.borderedProminent)
                     .tint(accent)
                     .disabled(draftValue.trimmingCharacters(in: .whitespaces).isEmpty)
@@ -375,7 +377,7 @@ struct AttachmentManagerPopover: View {
             VStack(spacing: 4) {
                 Image(systemName: type.iconName)
                     .font(.system(size: 15, weight: .medium))
-                Text(type.displayName)
+                AppLocalizedText(type.displayName)
                     .font(.system(size: 10))
             }
             .frame(maxWidth: .infinity)
@@ -385,7 +387,7 @@ struct AttachmentManagerPopover: View {
         }
         .buttonStyle(.plain)
         .foregroundColor(.primary)
-        .help("添加\(type.displayName)\(noun)")
+        .localizedHelp("添加%@%@", AppInterfaceStrings.text(type.displayName, language: language), noun)
     }
 
     // MARK: Actions
@@ -445,10 +447,10 @@ struct AttachmentManagerPopover: View {
         let count = storedAttachments.count + additions.count
         if threshold > 0, count > threshold {
             let alert = NSAlert()
-            alert.messageText = "\(noun)将达到 \(count) 项"
-            alert.informativeText = "较多附件可能增加打开和预览时的负担。仍可继续添加；也可以分到其他槽位。"
-            alert.addButton(withTitle: "继续添加")
-            alert.addButton(withTitle: "取消")
+            alert.messageText = AppInterfaceStrings.format("%@将达到 %ld 项", language: language, arguments: [noun, count])
+            alert.informativeText = AppInterfaceStrings.text("较多附件可能增加打开和预览时的负担。仍可继续添加；也可以分到其他槽位。", language: language)
+            alert.addButton(withTitle: AppInterfaceStrings.text("继续添加", language: language))
+            alert.addButton(withTitle: AppInterfaceStrings.text("取消", language: language))
             guard alert.runModal() == .alertFirstButtonReturn else { return false }
         }
         guard destinationGroup == (groupId ?? store.currentSpecialSlotId),
@@ -729,12 +731,12 @@ struct AttachmentRow: View {
                     HStack(spacing: 3) {
                         Image(systemName: "exclamationmark.triangle.fill")
                             .font(.system(size: 10))
-                        Text("文件不存在")
+                        AppLocalizedText("文件不存在")
                             .font(.system(size: 11))
                     }
                     .foregroundColor(.secondary)
                     .lineLimit(1)
-                    .help("原始文件已移动或不存在，无法粘贴")
+                    .localizedHelp("原始文件已移动或不存在，无法粘贴")
                 } else {
                     Text(subtitle)
                         .font(.system(size: 11))
@@ -762,7 +764,8 @@ struct AttachmentRow: View {
                 .frame(width: 22, height: 22)
                 .contentShape(Rectangle())
                 .onHover { deleteHovered = $0 }
-                .help("删除附件")
+                .localizedHelp("删除附件")
+                .localizedAccessibilityLabel("删除附件")
                 .overlay(FirstMouseClickHandle(action: onDelete))
 
             // v2.8.8: AppKit-backed drag handle. The manager lives inside an
@@ -782,7 +785,8 @@ struct AttachmentRow: View {
                 .foregroundColor(.secondary)
                 .frame(width: 24, height: 36)
                 .contentShape(Rectangle())
-                .help("拖动排序")
+                .localizedHelp("拖动排序")
+                .localizedAccessibilityLabel("拖动排序")
                 .overlay(
                     FirstMouseDragHandle(
                         onChanged: { dy in
@@ -1081,7 +1085,7 @@ private struct AttachmentPreviewContent: View {
 
     private func textCard(_ text: String) -> some View {
         ScrollView {
-            Text(text.isEmpty ? "空内容" : text)
+            Text(verbatim: text.isEmpty ? AppInterfaceStrings.text("空内容") : text)
                 .font(.system(size: 13))
                 .foregroundColor(Color(NSColor.labelColor))
                 .lineSpacing(3)
@@ -1099,11 +1103,17 @@ private struct AttachmentPreviewContent: View {
             Image(systemName: "arrow.triangle.branch")
                 .font(.system(size: 40, weight: .semibold))
                 .foregroundColor(SlotContent.AttachmentType.reference.accentColor)
-            Text("引用槽位")
+            AppLocalizedText("引用槽位")
                 .font(.system(size: 13, weight: .semibold))
-            Text(attachment.path.map { "→ 槽位 \($0)" } ?? attachment.name)
-                .font(.callout)
-                .foregroundColor(.secondary)
+            Group {
+                if let path = attachment.path {
+                    AppLocalizedText("→ 槽位 %@", path)
+                } else {
+                    Text(attachment.name)
+                }
+            }
+            .font(.callout)
+            .foregroundColor(.secondary)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Color(NSColor.textBackgroundColor))
@@ -1115,7 +1125,7 @@ private struct AttachmentPreviewContent: View {
             Image(systemName: icon)
                 .font(.system(size: 40, weight: .semibold))
                 .foregroundColor(.accentColor)
-            Text(title)
+            AppLocalizedText(title)
                 .font(.system(size: 13, weight: .semibold))
             Text(attachment.path.map { URL(fileURLWithPath: $0).lastPathComponent } ?? attachment.name)
                 .font(.caption)

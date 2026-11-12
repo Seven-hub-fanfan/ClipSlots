@@ -2,6 +2,9 @@ import Foundation
 
 /// Approved line artwork, bundled offline.
 public enum AgentBackgroundResources {
+    public static func posterURL(for provider: AgentAPIProvider) -> URL? {
+        pageURL?.deletingLastPathComponent().appendingPathComponent("poster-\(provider.rawValue).png")
+    }
     public static var pageURL: URL? {
         let relative = "ClipSlots_ClipSlotsKit.bundle/Resources/AgentOnboarding/index.html"
         let candidates = [

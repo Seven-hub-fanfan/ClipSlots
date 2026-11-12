@@ -1,0 +1,22 @@
+{
+  "passed": false,
+  "observations": [
+    {
+      "implementation": "AppDelegate openFiles only",
+      "result": "Two windows; neither selected package imported."
+    },
+    {
+      "implementation": "SwiftUI onOpenURL plus openFiles",
+      "result": "First package imported; second missing."
+    }
+  ],
+  "minimal_cold_and_warm_trace": [
+    "swiftui 改名 [一].bin",
+    "delegate [\"改名 二\"]",
+    "didFinish",
+    "swiftui 改名 [一].bin",
+    "delegate [\"改名 二\"]"
+  ],
+  "final_fix": "SwiftUI onOpenURL plus AppDelegate application(_:open:) feed the same serial import queue.",
+  "final_result": "file-open-regression.json"
+}

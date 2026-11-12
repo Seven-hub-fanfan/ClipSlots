@@ -1,0 +1,28 @@
+{
+  "passed": true,
+  "gui_sha256": "c92350550342b34b3c47b3f8387017022d2b8b96ccb6679c8b7808ccc8c766b4",
+  "probe_gui_sha256": "a0e174040c9a04d8e5991529953b65bd24b18ad44901da35b95199a4b49d11e8",
+  "executable_payload_sha256": "3e3bab42580364300cf2e3fe7077487caa38fed2fb3c96170ebd554bb75ece15",
+  "executable_payload_bytes": 26801200,
+  "all_executable_bytes_equal": true,
+  "interface_rendering_resources_equal": true,
+  "probe_non_interface_omissions": {
+    "AppIcon.icns": {
+      "kind": "file",
+      "bytes": 1034545,
+      "sha256": "4f117e95fa7fb432c9ea4d20b548d11162a11eef5f2d9d449f515f8b54d1107a"
+    },
+    "skills/clipslots-manager/SKILL.md": {
+      "kind": "file",
+      "bytes": 51529,
+      "sha256": "201875e26be0c9fb4a5a1e53104f2af11e011ca01d7ae45bf6be6fc7391bd8b8"
+    }
+  },
+  "both_signatures_verified": true,
+  "comparison_excludes": [
+    "Code signature superblob",
+    "LC_CODE_SIGNATURE.datasize",
+    "__LINKEDIT.filesize (signature allocation size)",
+    "Probe omits Dock icon and external-install Skill; their names and hashes are recorded separately"
+  ]
+}

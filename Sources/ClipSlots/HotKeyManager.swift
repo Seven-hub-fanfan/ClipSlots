@@ -22,6 +22,8 @@ fileprivate func carbonEventHandler(_ handler: EventHandlerCallRef?, _ event: Ev
     let slot = Int(hotKeyID.id)
     // v2.4.1: switch on signature to prevent new signatures from falling through to save
     DispatchQueue.main.async {
+        if hotKeyID.signature == 4 || hotKeyID.signature == 5,
+           HotKeyManager.routeNavigationToTextEditor(previous: hotKeyID.signature == 4) { return }
         switch hotKeyID.signature {
         case 1: gOnPaste?(slot)
         case 2: gOnSave?(slot)
@@ -35,6 +37,21 @@ fileprivate func carbonEventHandler(_ handler: EventHandlerCallRef?, _ event: Ev
 }
 
 final class HotKeyManager {
+    /// Carbon owns these system shortcuts, so explicitly return their native text meaning.
+    static func routeNavigationToTextEditor(previous: Bool) -> Bool {
+        guard NSApp.isActive else { return false }
+        if let editor = NSApp.keyWindow?.firstResponder as? NSTextView, editor.isEditable {
+            if !editor.hasMarkedText() {
+                editor.doCommand(by: previous ? #selector(NSResponder.moveToBeginningOfLine(_:))
+                                              : #selector(NSResponder.moveToEndOfLine(_:)))
+            }
+            return true
+        }
+        if let field = NSApp.keyWindow?.firstResponder as? NSTextField, field.isEditable {
+            return true
+        }
+        return false
+    }
     static let shared = HotKeyManager()
     private var hotKeyRefs: [EventHotKeyRef] = []
     private var eventHandlerRef: EventHandlerRef?

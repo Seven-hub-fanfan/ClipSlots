@@ -1,0 +1,14 @@
+{
+  "passed": true,
+  "passes": 298,
+  "failures": [],
+  "components": {
+    "pack_transfer": 108,
+    "settings": 166,
+    "packaged_cli_mcp": 14,
+    "candidate_gui": 10
+  },
+  "kit_smoke_passed": true,
+  "strict_60fps_measured": false,
+  "scope": "Build 21710839 final release verification"
+}

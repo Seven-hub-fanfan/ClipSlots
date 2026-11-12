@@ -421,6 +421,7 @@ struct CanvasWorkspaceView: View {
                 }
                 // 登记「槽位命令」处理器：画布在台上时，Cmd+1~0 与圆盘选槽都改为填进选中节点。
                 CanvasCommandBridge.shared.slotCommandHandler = { slot in handleSlotCommand(slot) }
+                CanvasCommandBridge.shared.commandWindowProvider = { [weak inputRouter] in inputRouter?.anchorView?.window }
                 canvas.recoverGenerationAction = { node in _ = recoverGeneration(node) }
                 canvas.byteArtistInputPlan = { node in CanvasWorkflowCapture.plan(node: node, canvas: canvas, store: store) }
 
@@ -538,6 +539,7 @@ struct CanvasWorkspaceView: View {
                 // 必须撤销登记：留着它，切回编辑模式后 Cmd+1 会被一个已经下台的画布吃掉，
                 // 表现是"热键静默失效"（既没粘贴，也没有任何提示）。
                 CanvasCommandBridge.shared.slotCommandHandler = nil
+                CanvasCommandBridge.shared.commandWindowProvider = nil
                 canvas.recoverGenerationAction = nil
                 canvas.byteArtistInputPlan = nil
                 if canvas.agentGenerationOwner == slotTextRestorerToken {
@@ -846,35 +848,52 @@ struct CanvasWorkspaceView: View {
         let aimed = linkDrag.flatMap { drag in
             drag.targetNodeId ?? nodeBody(at: drag.cursor)?.id
         }
+        let visible = visibleNodes
+        // Camera translation does not change a media/text card's layout.
+        // Keep the retained node plane in world coordinates, and translate it
+        // once outside the equality boundary. Visibility remains part of the
+        // key so newly exposed nodes are still mounted while panning.
+        // Slot fans and pile transitions currently carry screen-space drag
+        // snapshots; retain their existing coordinate path until they settle.
+        let sharedPan = canvas.piles.isEmpty && pileLandingFrames.isEmpty && retiringNodes.isEmpty
+            && !canvas.nodes.contains { $0.kind.cardForm == .slotStack }
+        let planePan = sharedPan ? CGSize.zero : effectivePan
+        let translation = sharedPan ? effectivePan : CGSize.zero
         return CanvasNodeLayerBoundary(key: .init(project: canvas.activeProjectId,
             nodes: canvas.nodes, edges: canvas.edges, piles: canvas.piles, groups: canvas.groups,
             selected: canvas.selectedNodeIds, selectedGroup: canvas.selectedGroupID,
             edited: editingNodeId, hovered: hoverHoldNodeId, dragID: draggingNodeId,
-            dragged: draggingIds, delta: dragDelta, pan: effectivePan, zoom: zoom, layoutZoom: layoutZoom,
+            dragged: draggingIds, delta: dragDelta, pan: planePan, zoom: zoom, layoutZoom: layoutZoom,
             size: viewSize, source: linkDrag?.fromNodeId, reverse: linkDrag?.fromInput ?? false, aimed: aimed,
             contentRevisions: contentSnapshots.entries.mapValues(\.revision),
             currentGroup: store.currentSpecialSlotId, paths: canvas.nodes.map(pathLabel),
             landings: pileLandingFrames, groupDrag: groupDragID, groupResize: groupResizePreview,
-            pileDrag: pileDragID, hoveredPile: hoveredPileID, pileGallery: pileGalleryID, pileEntries: pileEntryFrames)) {
-                nodeLayerContents
+            pileDrag: pileDragID, hoveredPile: hoveredPileID, pileGallery: pileGalleryID, pileEntries: pileEntryFrames,
+            visibleNodeIDs: visible.map(\.id))) {
+                nodeLayerContents(visible: visible, planePan: planePan)
             }.equatable()
+            .offset(x: translation.width, y: translation.height)
     }
 
-    private var nodeLayerContents: some View {
-        let idle = visibleNodes.filter { usesIdleTextSurface($0, isEditing: editingNodeId == $0.id) }
+    private func nodeLayerContents(visible: [CanvasNode], planePan: CGSize) -> some View {
+        let idle = visible.filter { usesIdleTextSurface($0, isEditing: editingNodeId == $0.id) }
         let idleIDs = Set(idle.map(\.id))
         return CanvasAbsoluteLayout {
             CanvasPooledTextLayer(pool: textSurfacePool,
                 items: idle.map { .init(node: $0, text: renderText(for: $0), path: pathLabel(for: $0)) },
-                pan: effectivePan, zoom: zoom, layoutZoom: layoutZoom, registry: localControlRegistry,
+                pan: planePan, zoom: zoom, layoutZoom: layoutZoom, registry: localControlRegistry,
                 onOpenInputFiles: { openInputFiles($0) })
                 .frame(width: viewSize.width, height: viewSize.height)
-            ForEach(visibleNodes.filter { !idleIDs.contains($0.id) }) { node in
+            ForEach(visible.filter { !idleIDs.contains($0.id) }) { node in
                 let isDragging = draggingIds.contains(node.id)
                 let isEditing = editingNodeId == node.id
                 let controlSpace = "canvas-node-controls-\(node.id)"
                 let controlScale = zoom / max(layoutZoom, 0.01)
-                let controlOrigin = screenFrame(of: node).origin
+                let shift = isDragging ? dragDelta : .zero
+                let planeFrame = CGRect(x: (node.x + shift.width) * zoom + planePan.width,
+                    y: (node.y + shift.height) * zoom + planePan.height,
+                    width: node.width * zoom, height: node.height * zoom)
+                let controlOrigin = planeFrame.origin
                 CanvasMountingNode(admission: nodeMountQueue.admission(for: node.id)) {
                 CanvasRenderBoundary(key: .init(
                     node: node, selected: canvas.selectedGroupID == nil && canvas.selectedNodeIds.contains(node.id),
@@ -928,10 +947,9 @@ struct CanvasWorkspaceView: View {
                     .scaleEffect(zoom / max(layoutZoom, 0.01), anchor: .topLeading)
                     // 屏幕坐标 = 画布坐标 * zoom + pan。**必须与 `CanvasGeometry.screenPoint` 同式**，
                     // 否则命中判定（框选、拖拽落点、弹层锚点）会与眼睛看到的位置整体错开。
-                    .offset(x: (node.x + (isDragging ? dragDelta.width : 0)) * zoom + effectivePan.width,
-                            y: (node.y + (isDragging ? dragDelta.height : 0)) * zoom + effectivePan.height)
+                    .offset(x: planeFrame.minX, y: planeFrame.minY)
                     .modifier(CanvasPileLanding(start: pileLandingFrames[node.id],
-                        target: screenFrame(of: node), zoom: zoom))
+                        target: planeFrame, zoom: zoom))
                     .animation(Anim.transition, value: viewportFitAnimation)
                 }
                     .frame(width: node.width * layoutZoom, height: node.height * layoutZoom, alignment: .topLeading)
@@ -948,8 +966,8 @@ struct CanvasWorkspaceView: View {
                                   onCancelEdit: {}, onOpenFullscreen: { _ in }, onArchive: {})
                     .modifier(CanvasNodePresence(createdAt: retired.node.createdAt, exiting: true))
                     .scaleEffect(zoom / max(layoutZoom, 0.01), anchor: .topLeading)
-                    .offset(x: retired.node.x * zoom + effectivePan.width,
-                            y: retired.node.y * zoom + effectivePan.height)
+                    .offset(x: retired.node.x * zoom + planePan.width,
+                            y: retired.node.y * zoom + planePan.height)
                     .allowsHitTesting(false)
             }
             pileLayer
@@ -1008,43 +1026,45 @@ struct CanvasWorkspaceView: View {
 
     @ViewBuilder
     private func nodeContextMenu(_ node: CanvasNode) -> some View {
-        Button("复制节点") {
+        Button(localized: "复制节点") {
             if !canvas.selectedNodeIds.contains(node.id) { canvas.select(id: node.id, additive: false) }
             copyCanvasStructure()
         }
-        Button("创建副本") {
+        Button(localized: "创建副本") {
             if !canvas.selectedNodeIds.contains(node.id) { canvas.select(id: node.id, additive: false) }
             copyCanvasStructure(duplicate: true)
         }
         Divider()
         if node.kind.cardForm == .tool {
-            Button("打开\(node.kind.displayName)") { openTool(node) }
+            Button { openTool(node) } label: {
+                AppLocalizedText("打开%@", AppInterfaceStrings.text(node.kind.displayName))
+            }
         } else {
-            Button(node.isMediaSource ? "上传 / 替换素材" : "编辑提示词") { beginEdit(node) }
+            Button(localized: node.isMediaSource ? "上传 / 替换素材" : "编辑提示词") { beginEdit(node) }
         }
-        Button("节点属性") {
+        Button(localized: "节点属性") {
             canvas.select(id: node.id, additive: false)
             showInspector = true
         }
         if !node.isMediaSource {
-            Button("管理入参文件") { openInputFiles(node) }
+            Button(localized: "管理入参文件") { openInputFiles(node) }
         }
         Divider()
         if node.canGenerate {
             if node.needsGenerationRecovery {
-                Button("继续查询已提交任务") { recoverGeneration(node) }
+                Button(localized: "继续查询已提交任务") { recoverGeneration(node) }
             }
-            Button(node.state == .idle && node.taskId == nil ? "生成" : "重新生成") {
+            Button(localized: node.state == .idle && node.taskId == nil ? "生成" : "重新生成") {
                 startGeneration(node, reusingSeed: true, restarting: true)
             }
             if case .running = node.state {
-                Button("停止本地跟踪") { canvas.stopGeneration(node) }
+                Button(localized: "停止本地跟踪") { canvas.stopGeneration(node) }
             } else if case .queued = node.state {
-                Button("停止本地跟踪") { canvas.stopGeneration(node) }
+                Button(localized: "停止本地跟踪") { canvas.stopGeneration(node) }
             }
         }
         if let taskId = node.taskId {
-            Button("复制 taskId") {
+            Button(localized: "复制 taskId") {
                 NSPasteboard.general.clearContents()
                 NSPasteboard.general.setString(taskId, forType: .string)
             }
@@ -1053,11 +1073,11 @@ struct CanvasWorkspaceView: View {
         // 右键点在选中集合里的某个节点上时，删除的是**整个选中集合** —— 与 Delete 键一致。
         // 两条路径语义不同（一个删一个、一个删一片）是最容易被用户当成 bug 的那类不一致。
         if canvas.selectedNodeIds.contains(node.id), canvas.selectedNodeIds.count > 1 {
-            Button("删除选中的 \(canvas.selectedNodeIds.count) 个节点") {
+            Button {
                 requestDelete(ids: canvas.selectedNodeIds)
-            }
+            } label: { AppLocalizedText("删除选中的 %ld 个节点", canvas.selectedNodeIds.count) }
         } else {
-            Button("删除节点") { requestDelete(ids: [node.id]) }
+            Button(localized: "删除节点") { requestDelete(ids: [node.id]) }
         }
     }
 
@@ -2027,8 +2047,8 @@ struct CanvasWorkspaceView: View {
                             .frame(width: 44, height: 40)
                     }
                     .buttonStyle(CanvasHeaderButtonStyle(iconOnly: true, isActive: showExternalAgent))
-                    .help("连接 Agent")
-                    .accessibilityLabel("连接 Agent")
+                    .localizedHelp("连接 Agent")
+                    .localizedAccessibilityLabel("连接 Agent")
                     .accessibilityIdentifier("canvas-connect-agent")
                     .canvasControlRegion("connect-agent")
                     AppAppearanceButton(compact: true, canvasPalette: true)

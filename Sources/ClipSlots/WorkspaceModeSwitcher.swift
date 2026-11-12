@@ -66,6 +66,11 @@ struct WorkspaceModeSwitcher: View {
         .padding(.horizontal, Self.inset)
         .frame(width: Self.preferredWidth, height: Self.preferredHeight)
         .background { navigationSurface }
+        .overlay {
+            WorkspaceOuterRim(animated: animationsEnabled && !reduceMotion,
+                              highContrast: contrast == .increased)
+                .allowsHitTesting(false).accessibilityHidden(true)
+        }
         .overlay(alignment: .leading) {
             WorkspaceContourSurface(center: Self.center(for: selection),
                 halfWidth: Self.contourHalfWidth,
@@ -75,10 +80,14 @@ struct WorkspaceModeSwitcher: View {
         }
     }
 
-    /// A uniform, subdued rim keeps the whole capsule visually balanced.
+    /// A subdued base keeps the capsule readable beneath the traveling light.
     private var navigationSurface: some View {
         Capsule(style: .continuous)
-            .fill(TapSkin.tone(0xfafafb, 0x1e1f22))
+            .fill(LinearGradient(
+                colors: [TapSkin.tone(0xfdfdfe, 0x1e1f22),
+                         TapSkin.tone(0xf8f9fb, 0x1e1f22),
+                         TapSkin.tone(0xeff1f5, 0x1e1f22)],
+                startPoint: .top, endPoint: .bottom))
             .overlay {
                 Capsule(style: .continuous).strokeBorder(
                     contrast == .increased
@@ -98,10 +107,18 @@ struct WorkspaceModeSwitcher: View {
             selection = mode
         } label: {
             VStack(spacing: 2) {
-                Image(systemName: mode.symbolName)
-                    .font(.system(size: 12, weight: .medium))
-                    .frame(width: 16, height: 14)
-                Text(mode.title)
+                if selected {
+                    WorkspaceMetalArtwork(kind: mode == .edit ? .edit : mode == .canvas ? .canvas : .model,
+                        animated: animationsEnabled && !reduceMotion,
+                        highContrast: contrast == .increased, hovered: hovered == mode)
+                        .frame(width: 16, height: 14)
+                        .accessibilityHidden(true)
+                } else {
+                    Image(systemName: mode.symbolName)
+                        .font(.system(size: 12, weight: .medium))
+                        .frame(width: 16, height: 14)
+                }
+                AppLocalizedText(mode.title)
                     .font(.system(size: 10, weight: selected ? .semibold : .medium))
                     .fixedSize()
             }
@@ -112,16 +129,16 @@ struct WorkspaceModeSwitcher: View {
         .buttonStyle(WorkspacePressStyle(animationsEnabled: animationsEnabled))
         .onHover { hovered = $0 && mode.isSelectable ? mode : nil }
         .disabled(!mode.isSelectable)
-        .accessibilityLabel(mode.title)
+        .localizedAccessibilityLabel(mode.title)
         .accessibilityAddTraits(selected ? .isSelected : [])
         .accessibilityIdentifier(mode == .agent ? "workspace-models" : "workspace-\(mode.rawValue)")
-        .help(mode.title)
+        .localizedHelp(mode.title)
     }
 }
 
-/// The app icon's original central artwork, without its white plate.
-/// Decorative only: no focus, action, selection or tracking area.
-private struct WorkspaceBrandMark: NSViewRepresentable {
+/// The original transparent app artwork, with its original light/dark treatment.
+/// Decorative only; it has no material playback or interaction layers.
+struct WorkspaceBrandMark: NSViewRepresentable {
     func makeNSView(context: Context) -> Host { Host() }
     func updateNSView(_ view: Host, context: Context) { view.needsDisplay = true }
 

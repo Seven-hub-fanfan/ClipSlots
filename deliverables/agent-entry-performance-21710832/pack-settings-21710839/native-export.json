@@ -1,0 +1,8 @@
+{
+  "passed": true,
+  "native_exported_pages": 2,
+  "expected_pages_and_counts": true,
+  "empty_attachment_bytes_verified": true,
+  "zip_crc_verified": true,
+  "archive_bytes": 9702
+}

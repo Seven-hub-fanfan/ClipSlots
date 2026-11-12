@@ -1,0 +1,10 @@
+{
+  "passed": true,
+  "products": [
+    "ClipSlots",
+    "ClipSlotsCLI",
+    "ClipSlotsMCP",
+    "ClipSlotsKitSmokeTests"
+  ],
+  "kit_smoke_passed": true
+}

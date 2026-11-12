@@ -7,6 +7,9 @@
   const STEP_X = 6, STEP_Y = 5, WIDTHS = [.32, 1.05, 2.55, 4.35];
   const clamp = (v, min, max) => Math.max(min, Math.min(max, v));
   const motionQuery = matchMedia("(prefers-reduced-motion: reduce)");
+  // Immutable silhouettes are shared by picker and detail cards. Pointer
+  // displacement and velocity remain private to each mounted field.
+  const masks = new Map();
   const noise = (x, y) => .50 + .24 * Math.sin(y * .076 + Math.sin(x * .091) * 2.1)
     + .16 * Math.sin(y * .171 + x * .093) + .10 * Math.sin(y * .043 - x * .23);
 
@@ -25,10 +28,7 @@
       this.observer.observe(card);
       card.addEventListener("pointermove", event => {
         if (onInteraction() === false) return;
-        const rect = this.canvas.getBoundingClientRect();
-        this.pointer = { x: (event.clientX - rect.left) / this.scale,
-          y: (event.clientY - rect.top) / this.scale, active: true, source: "user" };
-        wake();
+        this.setPointer(event.clientX, event.clientY, "user");
       });
       card.addEventListener("pointerleave", () => this.releasePointer());
       card.addEventListener("pointercancel", () => this.releasePointer());
@@ -55,6 +55,8 @@
       svg.appendChild(path); host.appendChild(svg);
     }
     makeMask() {
+      const cached = masks.get(this.brand);
+      if (cached) { this.alpha = cached.alpha; this.boxes = cached.boxes; return; }
       const mask = document.createElement("canvas"); mask.width = WORLD_W; mask.height = WORLD_H;
       const ctx = mask.getContext("2d", { willReadFrequently: true });
       ctx.translate((WORLD_W - LOGO_SIZE) / 2, 109); ctx.scale(LOGO_SIZE / 24, LOGO_SIZE / 24);
@@ -76,6 +78,7 @@
         }
       }
       this.boxes.sort((a, b) => a.y - b.y);
+      masks.set(this.brand, { alpha: this.alpha, boxes: this.boxes });
     }
     sample(x, y) {
       const ix = Math.round(x), iy = Math.round(y);
@@ -129,6 +132,12 @@
       this.pointer.active = false; this.pointer.source = "none";
       this.cursor.style.display = "none"; this.wake();
     }
+    setPointer(x, y, source) {
+      const rect = this.canvas.getBoundingClientRect();
+      this.pointer = { x: (x - rect.left) / this.scale,
+        y: (y - rect.top) / this.scale, active: true, source };
+      this.wake();
+    }
     demoPointer(x, y, active) {
       this.pointer = { x: this.width / 2 + x, y: this.height / 2 + y,
         active, source: active ? "demo" : "none" };
@@ -137,17 +146,21 @@
       this.cursor.style.top = `${this.pointer.y * this.scale}px`;
     }
     update(dt) {
+      if (!this.pointer.active && this.maxDisplacement === 0) return;
       const p = this.pointer, radius = 85, timeStep = clamp(dt * 60, .1, 2);
+      const damping = Math.pow(.79, timeStep), radiusSquared = radius * radius;
       let max = 0;
       for (let col = 0; col < this.columns; col++) {
         const x = col * STEP_X + this.offsetX % STEP_X;
         for (let row = 0; row < this.rows; row++) {
           const index = col * this.rows + row, dx = x - p.x, dy = row * STEP_Y - p.y;
-          const dist = Math.hypot(dx, dy); let target = 0;
-          if (p.active && dist < radius)
-            target = (dx / Math.max(dist, 12)) * Math.pow(1 - dist / radius, 2) * 69;
+          const distanceSquared = dx * dx + dy * dy; let target = 0;
+          if (p.active && distanceSquared < radiusSquared) {
+            const dist = Math.sqrt(distanceSquared), falloff = 1 - dist / radius;
+            target = (dx / Math.max(dist, 12)) * falloff * falloff * 69;
+          }
           this.velocity[index] += (target - this.displacement[index]) * .078 * timeStep;
-          this.velocity[index] *= Math.pow(.79, timeStep);
+          this.velocity[index] *= damping;
           this.displacement[index] += this.velocity[index] * timeStep;
           if (Math.abs(this.displacement[index]) < .004 && Math.abs(this.velocity[index]) < .004)
             this.displacement[index] = this.velocity[index] = 0;

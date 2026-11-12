@@ -1,12 +1,9 @@
 import SwiftUI
 import ClipSlotsKit
 
-// v2.9.12: in-app settings categories for the Obsidian-style two-pane layout.
 enum SettingsCategory: String, CaseIterable, Identifiable {
     case appearance, slot, shortcut, permission, notification, connection, advanced, cli
-
     var id: String { rawValue }
-
     var title: String {
         switch self {
         case .appearance: return "外观"
@@ -19,101 +16,101 @@ enum SettingsCategory: String, CaseIterable, Identifiable {
         case .cli: return "命令行工具"
         }
     }
-
     var icon: String {
         switch self {
-        case .appearance: return "paintbrush.fill"
-        case .slot: return "rectangle.stack.fill"
-        case .shortcut: return "keyboard.fill"
+        case .appearance: return "paintpalette"
+        case .slot: return "square.stack"
+        case .shortcut: return "keyboard"
         case .permission: return "lock.shield"
-        case .notification: return "bell.fill"
+        case .notification: return "bell"
         case .connection: return "point.3.connected.trianglepath.dotted"
         case .advanced: return "slider.horizontal.3"
-        case .cli: return "terminal.fill"
+        case .cli: return "terminal"
         }
     }
 }
 
+/// All editable preferences are a draft. Appearance and language preview live,
+/// then roll back on every dismissal path unless the user saves.
 struct SettingsView: View {
     @State var config: AppConfig
     var onSave: (AppConfig) -> Void
-    // v2.9.12: optional close handler used by the in-app overlay presentation.
-    // Falls back to the SwiftUI dismiss action when nil (legacy window path).
-    var onClose: (() -> Void)? = nil
-    // v2.9.17: open the independent plugin marketplace popover from the sidebar.
-    // The marketplace stays a separate floating layer (not embedded here).
-    var onOpenPlugins: (() -> Void)? = nil
-    @State private var selectedCategory: SettingsCategory = .appearance
-
-    @State private var slots: Double
+    var onClose: (() -> Void)?
+    var onOpenPlugins: (() -> Void)?
+    @State private var selectedCategory: SettingsCategory
+    @State private var slots: Int
     @State private var saveKey: String
     @State private var pasteKey: String
     @State private var radialKey: String
     @State private var verbose: Bool
-    // UNDO-3 (v2.10.97): 撤销步数（每个槽位组保留的撤销/重做步数，1~100）。
     @State private var undoSteps: Int
     @State private var cacheBudgetMiB: Int
     @State private var attachmentWarningCount: Int
-    /// 撤销栈当前磁盘占用（字节）。进入设置面板 / 改动步数后刷新。
-    @State private var undoDiskBytes: Int64 = 0
+    @State private var undoDiskBytes: Int64?
     @State private var hotkeyTemplateKind: HotkeyTemplateKind
-    @State private var showingResetConfirm = false
-
-    // v2.6.0: Notification preferences
     @State private var skipOverwriteConfirmation: Bool
     @State private var skipBatchSaveConfirmation: Bool
     @State private var showSaveToast: Bool
     @State private var showCopyToast: Bool
-
-    // v2.7.0: Slot connection preference
     @State private var enableSlotConnection: Bool
-
-    // v2.9.6: CLI install management
+    @State private var saved = false
+    @State private var originalAppearance: String
+    @State private var originalLanguage: String
     @StateObject private var cliManager = CLIInstallManager()
-
-    // v2.9.46: Agent Skill 安装管理 + 卸载 App
     @StateObject private var skillManager = AgentSkillInstallManager()
     @StateObject private var appUninstaller = AppUninstaller()
     @State private var showUninstallSheet = false
-    @State private var uninstallDeleteData = true
+    @State private var uninstallDeleteData = false
     @State private var uninstallRemoveCLI = true
     @State private var uninstallRemoveSkills = true
-
     @Environment(\.dismiss) private var dismiss
-    @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.colorScheme) private var scheme
+    @AppStorage("appearanceMode") private var appearanceRaw = ThemeMode.light.rawValue
+    @AppStorage(AppInterfaceLanguage.preferenceKey) private var languageRaw = AppInterfaceLanguage.chinese.rawValue
 
-    // v2.7.47: align Settings with first-launch default dark mode.
-    // Existing persisted appearanceMode remains unchanged.
-    @AppStorage("appearanceMode") private var appearanceModeRaw = ThemeMode.light.rawValue
-
-    private var appearanceModeBinding: Binding<ThemeMode> {
-        Binding(
-            get: { ThemeMode(rawValue: appearanceModeRaw) ?? .system },
-            set: { appearanceModeRaw = $0.rawValue }
-        )
-    }
-
-    init(config: AppConfig, onSave: @escaping (AppConfig) -> Void, onClose: (() -> Void)? = nil, onOpenPlugins: (() -> Void)? = nil) {
+    init(config: AppConfig, onSave: @escaping (AppConfig) -> Void,
+         onClose: (() -> Void)? = nil, onOpenPlugins: (() -> Void)? = nil,
+         initialCategory: SettingsCategory = .appearance) {
         AppearanceDefaults.ensureDefaultLightIfNeeded()
         self.config = config
         self.onSave = onSave
         self.onClose = onClose
         self.onOpenPlugins = onOpenPlugins
-        _slots = State(initialValue: Double(config.slots))
+        _selectedCategory = State(initialValue: initialCategory)
+        _slots = State(initialValue: config.slots)
         _saveKey = State(initialValue: config.saveKey)
         _pasteKey = State(initialValue: config.pasteKey)
         _radialKey = State(initialValue: config.radialKey)
         _verbose = State(initialValue: config.verbose)
+        _undoSteps = State(initialValue: SlotUndoStack.clampLimit(config.undoSteps))
         _cacheBudgetMiB = State(initialValue: config.cacheBudgetMiB)
         _attachmentWarningCount = State(initialValue: config.attachmentWarningCount)
-        _undoSteps = State(initialValue: SlotUndoStack.clampLimit(config.undoSteps))
         _hotkeyTemplateKind = State(initialValue: config.hotkeyTemplate.kind)
-        _skipOverwriteConfirmation = State(initialValue: UserDefaults.standard.skipOverwriteConfirmation)
-        _skipBatchSaveConfirmation = State(initialValue: UserDefaults.standard.skipBatchSaveConfirmation)
-        _showSaveToast = State(initialValue: UserDefaults.standard.showSaveToast)
-        _showCopyToast = State(initialValue: UserDefaults.standard.showCopyToast)
-        _enableSlotConnection = State(initialValue: UserDefaults.standard.object(forKey: UserPreferenceKeys.enableSlotConnection) == nil
-            ? true : UserDefaults.standard.bool(forKey: UserPreferenceKeys.enableSlotConnection))
+        let defaults = UserDefaults.standard
+        _skipOverwriteConfirmation = State(initialValue: defaults.skipOverwriteConfirmation)
+        _skipBatchSaveConfirmation = State(initialValue: defaults.skipBatchSaveConfirmation)
+        _showSaveToast = State(initialValue: defaults.showSaveToast)
+        _showCopyToast = State(initialValue: defaults.showCopyToast)
+        _enableSlotConnection = State(initialValue: defaults.object(forKey: UserPreferenceKeys.enableSlotConnection) == nil
+            || defaults.bool(forKey: UserPreferenceKeys.enableSlotConnection))
+        _originalAppearance = State(initialValue: defaults.string(forKey: "appearanceMode") ?? ThemeMode.light.rawValue)
+        _originalLanguage = State(initialValue: defaults.string(forKey: AppInterfaceLanguage.preferenceKey)
+            ?? AppInterfaceLanguage.chinese.rawValue)
+    }
+
+    private var hasChanges: Bool {
+        slots != config.slots || saveKey != config.saveKey || pasteKey != config.pasteKey
+            || radialKey != config.radialKey || verbose != config.verbose
+            || undoSteps != config.undoSteps || cacheBudgetMiB != config.cacheBudgetMiB
+            || attachmentWarningCount != config.attachmentWarningCount
+            || hotkeyTemplateKind != config.hotkeyTemplate.kind
+            || appearanceRaw != originalAppearance || languageRaw != originalLanguage
+            || skipOverwriteConfirmation != UserDefaults.standard.skipOverwriteConfirmation
+            || skipBatchSaveConfirmation != UserDefaults.standard.skipBatchSaveConfirmation
+            || showSaveToast != UserDefaults.standard.showSaveToast
+            || showCopyToast != UserDefaults.standard.showCopyToast
+            || enableSlotConnection != (UserDefaults.standard.object(forKey: UserPreferenceKeys.enableSlotConnection) == nil
+                || UserDefaults.standard.bool(forKey: UserPreferenceKeys.enableSlotConnection))
     }
 
     var body: some View {
@@ -121,1129 +118,592 @@ struct SettingsView: View {
             sidebar
             Divider()
             VStack(spacing: 0) {
-                overlayHeader
-                Divider()
-                ScrollView {
-                    VStack(alignment: .leading, spacing: 16) {
-                        sectionContent(for: selectedCategory)
+                HStack {
+                    AppLocalizedText(selectedCategory.title).font(.system(size: 20, weight: .semibold))
+                    Spacer()
+                    Button(action: closeAction) {
+                        Image(systemName: "xmark").font(.system(size: 12, weight: .medium))
+                            .frame(width: 28, height: 28).contentShape(Circle())
                     }
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(24)
+                    .buttonStyle(.plain)
+                    .foregroundColor(.secondary)
+                    .localizedAccessibilityLabel("关闭")
+                    .accessibilityIdentifier("settings-close")
                 }
-                .background(AppTheme.windowBackground(colorScheme))
+                .padding(.horizontal, 28).frame(height: 76)
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 24) { sectionContent }
+                        .frame(maxWidth: 680, alignment: .leading)
+                        .frame(maxWidth: .infinity, alignment: .center)
+                        .padding(.horizontal, 28).padding(.bottom, 28).padding(.top, 2)
+                }
+                .id(selectedCategory)
                 Divider()
                 footer
             }
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .font(.system(size: 13))
         .buttonStyle(CompactActionStyle())
-        .tint(colorScheme == .dark ? Color(white: 0.78) : Color(white: 0.28))
-        .background(AppTheme.windowBackground(colorScheme))
-        .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: 18, style: .continuous)
-                .stroke(AppTheme.subtleBorder(colorScheme), lineWidth: 1)
-        )
-        .onAppear {
-            // v2.10.90 (perf · 打开设置卡一下): 这两个刷新都是**主线程同步文件系统扫描**——
-            // `skillManager.refresh()`（AgentSkillInstallManager.swift:146）会遍历全部 Agent 目录做
-            // `fileExists`，再对每个命中的 Agent 走 `computeState`（含 `destinationOfSymbolicLink`
-            // 等符号链接解析）；`cliManager.refreshState()` 同样要探测安装路径属性。
-            //
-            // 原先它们直接跑在 onAppear 里，也就是**设置面板进场动画的第一帧**上，磁盘 stat/symlink
-            // 解析把主线程占住，转场必然掉帧——就是「打开设置卡一下」。
-            //
-            // 改为让出一个 runloop 再扫：进场动画先跑起来，扫描落在动画之后。安装状态本来就是
-            // 「显示用」信息，晚一帧到达无任何语义影响（CLI / Skill 分区在拿到结果后自然刷新）。
-            // v2.10.91 (perf 第四轮): 进一步把 Skill 扫描整体挪到**后台队列**（refreshInBackground），
-            // 不再只是「推迟一个 runloop 仍在主线程跑」——v2.10.90 的推迟并没有让它离开主线程，扫描照旧
-            // 落在 0.2s 淡入动画的头几帧上。cliManager.refreshState() 的重活（探测 CLI 版本要 spawn 子进程）
-            // 本来就在后台，主线程只剩两次 lstat/fileExists，可忽略。
-            // 再叠加一点延迟（0.25s ≈ 淡入动画走完），保证转场帧完全独占主线程。
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
-                cliManager.refreshState()
-                skillManager.refreshInBackground()
-            }
-        }
-        .sheet(isPresented: $showUninstallSheet) {
-            uninstallConfirmSheet
-        }
-        .confirmationDialog("恢复默认设置？", isPresented: $showingResetConfirm, titleVisibility: .visible) {
-            Button("恢复默认", role: .destructive) { resetDefaults() }
-            Button("取消", role: .cancel) {}
-        } message: {
-            Text("槽位数量、快捷键和日志设置将恢复为默认值。")
-        }
+        .controlSize(.regular)
+        .tint(scheme == .dark ? Color(white: 0.78) : Color(white: 0.28))
+        .background(AppTheme.windowBackground(scheme))
+        .clipShape(RoundedRectangle(cornerRadius: 18))
+        .overlay(RoundedRectangle(cornerRadius: 18).strokeBorder(AppTheme.subtleBorder(scheme), lineWidth: 1))
+        .onDisappear { restorePreview() }
+        .sheet(isPresented: $showUninstallSheet) { uninstallConfirmSheet }
         .perfCount("SettingsView.body")
     }
 
-    // v2.9.12: left category navigation sidebar (Obsidian-style).
     private var sidebar: some View {
         VStack(alignment: .leading, spacing: 4) {
-            HStack(spacing: 10) {
-                VStack(alignment: .leading, spacing: 1) {
-                    Text("设置").font(.system(size: 20, weight: .semibold))
-                }
-            }
-            .padding(.horizontal, 22)
-            .padding(.top, 26)
-            .padding(.bottom, 22)
-
+            AppLocalizedText("设置").font(.system(size: 20, weight: .semibold))
+                .padding(.horizontal, 22).padding(.top, 26).padding(.bottom, 22)
             ForEach(SettingsCategory.allCases) { category in
-                sidebarRow(category)
+                Button {
+                    NSApp.keyWindow?.makeFirstResponder(nil)
+                    selectedCategory = category
+                } label: {
+                    HStack(spacing: 10) {
+                        Image(systemName: category.icon).font(.system(size: 14, weight: .medium)).frame(width: 20)
+                        AppLocalizedText(category == .permission ? "权限" : category.title)
+                            .font(.system(size: 13, weight: selectedCategory == category ? .semibold : .regular))
+                        Spacer(minLength: 0)
+                    }
+                    .padding(.horizontal, 12).frame(height: 38)
+                    .background(Color.primary.opacity(selectedCategory == category ? 0.07 : 0),
+                                in: RoundedRectangle(cornerRadius: 8))
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain).padding(.horizontal, 10)
+                .accessibilityIdentifier("settings-category-\(category.rawValue)")
+                .accessibilityAddTraits(selectedCategory == category ? [.isSelected] : [])
             }
-
-            // v2.9.17: plugin marketplace entry — placed after 高级/命令行工具.
-            // Clicking it opens the independent marketplace popover; it does NOT
-            // embed into the settings window.
-            Divider()
-                .padding(.horizontal, 20)
-                .padding(.vertical, 6)
-            pluginMarketRow
-
+            Divider().padding(.horizontal, 22).padding(.vertical, 12)
+            Button { onOpenPlugins?() } label: {
+                HStack(spacing: 10) {
+                    Image(systemName: "square.grid.2x2").frame(width: 20)
+                    AppLocalizedText("插件")
+                    Spacer(minLength: 0)
+                    Image(systemName: "arrow.up.right").font(.system(size: 10))
+                }
+                .padding(.horizontal, 22).frame(height: 34).contentShape(Rectangle())
+            }.buttonStyle(.plain).foregroundColor(.secondary)
             Spacer()
-            Text("ClipSlots  ·  v\(AppVersion.current)")
-                .font(.system(size: 10)).foregroundColor(.secondary)
-                .padding(22)
+            Text("ClipSlots  \(AppVersion.current)").font(.system(size: 12)).foregroundColor(.secondary).padding(22)
         }
-        .frame(width: 182)
-        .frame(maxHeight: .infinity)
-        .background(AppTheme.elevatedBackground(colorScheme))
+        .frame(width: 188).frame(maxHeight: .infinity)
+        .background(AppTheme.elevatedBackground(scheme))
     }
 
-    private func sidebarRow(_ category: SettingsCategory) -> some View {
-        let isSelected = selectedCategory == category
-        return Button {
-            selectedCategory = category
-        } label: {
-            HStack(spacing: 10) {
-                    Image(systemName: category.icon)
-                        .font(.system(size: 13, weight: .medium))
-                        .frame(width: 22, height: 28)
-                Text(category.title)
-                    .font(.system(size: 13, weight: isSelected ? .semibold : .medium))
-                Spacer(minLength: 0)
-            }
-            .padding(.horizontal, 9)
-            .padding(.vertical, 5)
-            .foregroundColor(isSelected ? .primary : .secondary)
-            .background(
-                RoundedRectangle(cornerRadius: 9, style: .continuous)
-                    .fill(isSelected ? Color.primary.opacity(0.075) : Color.clear)
-            )
-            // v2.9.13: make the entire row (incl. blank area right of the text)
-            // clickable, not just the text/icon glyphs.
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .accessibilityIdentifier("settings-category-\(category.rawValue)")
-        .padding(.horizontal, 12)
-    }
-
-    // v2.9.17: special sidebar entry that launches the plugin marketplace popover.
-    private var pluginMarketRow: some View {
-        Button {
-            onOpenPlugins?()
-        } label: {
-            HStack(spacing: 10) {
-                Image(systemName: "square.grid.2x2")
-                    .font(.system(size: 13))
-                    .frame(width: 20)
-                Text("插件市场")
-                    .font(.system(size: 13, weight: .medium))
-                Spacer(minLength: 0)
-                Image(systemName: "arrow.up.forward")
-                    .font(.system(size: 10, weight: .semibold))
-                    .foregroundColor(.secondary)
-            }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 8)
-            .foregroundColor(.primary)
-            .background(
-                RoundedRectangle(cornerRadius: 8, style: .continuous)
-                    .fill(Color.clear)
-            )
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .padding(.horizontal, 8)
-        .help("打开插件市场（独立弹窗）")
-    }
-
-    // v2.9.12: content header with the × close button (no window titlebar).
-    private var overlayHeader: some View {
-        HStack(spacing: 12) {
-            Text(selectedCategory.title)
-                .font(.system(size: 18, weight: .semibold))
-            Spacer()
-            Button { closeAction() } label: {
-                Image(systemName: "xmark")
-                    .font(.system(size: 12, weight: .bold))
-                    .frame(width: 26, height: 26)
-                    .background(
-                        Circle().fill(AppTheme.chipBackground(colorScheme))
-                    )
-                    .contentShape(Circle())
-            }
-            .buttonStyle(.plain)
-            .help("关闭")
-            .accessibilityIdentifier("settings-close")
-        }
-        .padding(.horizontal, 24)
-        .frame(height: 72)
-    }
-
-    @ViewBuilder
-    private func sectionContent(for category: SettingsCategory) -> some View {
-        switch category {
+    @ViewBuilder private var sectionContent: some View {
+        switch selectedCategory {
         case .appearance: appearanceSection
         case .slot: slotSection
-        case .shortcut:
-            shortcutSection
-            helpSection
+        case .shortcut: shortcutSection
         case .permission: PermissionSettingsSection()
-        case .notification: notificationPreferencesSection
+        case .notification: notificationSection
         case .connection: connectionSection
         case .advanced: advancedSection
-        case .cli:
-            cliSection
-            agentSkillSection
-            uninstallAppSection
+        case .cli: cliSection
         }
-    }
-
-    // v2.9.12: unified close that prefers the in-app overlay handler.
-    private func closeAction() {
-        if let onClose {
-            onClose()
-        } else {
-            dismiss()
-        }
-    }
-
-    private var header: some View {
-        HStack(spacing: 12) {
-            ZStack {
-                RoundedRectangle(cornerRadius: 10, style: .continuous)
-                    .fill(AppTheme.chromeAccentTile)
-                    .frame(width: 38, height: 38)
-                Image(systemName: "gearshape.fill")
-                    .font(.system(size: 17, weight: .semibold))
-                    .foregroundColor(AppTheme.chromeAccentTileInk)
-            }
-            VStack(alignment: .leading, spacing: 2) {
-                Text("ClipSlots 设置")
-                    .font(.system(size: 18, weight: .bold))
-                Text("配置外观、槽位和全局快捷键")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-            }
-            Spacer()
-        }
-        .padding(.horizontal, 24)
-        .padding(.vertical, 18)
-        .background(.regularMaterial)
-        .overlay(alignment: .bottom) { Divider() }
     }
 
     private var appearanceSection: some View {
-        settingsSection(title: "外观", icon: "paintbrush.fill") {
-            HStack(spacing: 12) {
-                ForEach(ThemeMode.allCases) { mode in
-                    appearanceChoice(mode)
+        VStack(alignment: .leading, spacing: 24) {
+            SettingsGroup(title: "主题") {
+                HStack(spacing: 12) {
+                    ForEach(ThemeMode.allCases) { mode in appearanceChoice(mode) }
+                }.padding(16)
+            }
+            SettingsGroup(title: "语言") {
+                SettingsRow("界面语言") {
+                    Picker(localized: "界面语言", selection: $languageRaw) {
+                        ForEach(AppInterfaceLanguage.allCases) { language in
+                            Text(verbatim: language.nativeTitle).tag(language.rawValue)
+                        }
+                    }.pickerStyle(.segmented).labelsHidden().frame(width: 208)
+                        .accessibilityIdentifier("settings-interface-language")
                 }
             }
         }
     }
 
     private func appearanceChoice(_ mode: ThemeMode) -> some View {
-        let selected = appearanceModeBinding.wrappedValue == mode
+        let selected = appearanceRaw == mode.rawValue
         let dark = mode == .dark
-        return Button { appearanceModeBinding.wrappedValue = mode } label: {
+        return Button { appearanceRaw = mode.rawValue } label: {
             VStack(spacing: 12) {
                 HStack(spacing: 0) {
-                    Rectangle().fill(Color(white: dark ? 0.16 : 0.9)).frame(width: 28)
-                    VStack(alignment: .leading, spacing: 7) {
-                        RoundedRectangle(cornerRadius: 3).fill(Color(white: dark ? 0.4 : 0.76))
-                            .frame(width: 38, height: 5)
-                        HStack(spacing: 5) {
-                            RoundedRectangle(cornerRadius: 5).fill(Color(white: dark ? 0.25 : 0.89))
-                            RoundedRectangle(cornerRadius: 5).fill(Color(white: dark ? 0.25 : 0.89))
+                    VStack(spacing: 7) {
+                        ForEach(0..<3) { _ in
+                            Capsule().fill(Color(white: dark ? 0.34 : 0.77)).frame(height: 4)
                         }
+                        Spacer(minLength: 0)
+                    }
+                    .padding(8).frame(width: 32).background(Color(white: dark ? 0.19 : 0.92))
+                    VStack(alignment: .leading, spacing: 8) {
+                        Capsule().fill(Color(white: dark ? 0.5 : 0.7)).frame(width: 32, height: 5)
+                        RoundedRectangle(cornerRadius: 4).fill(Color(white: dark ? 0.23 : 0.9))
+                        RoundedRectangle(cornerRadius: 4).fill(Color(white: dark ? 0.23 : 0.9))
                     }.padding(10)
                 }
-                .frame(height: 78)
-                .background(mode == .system ? AnyShapeStyle(LinearGradient(colors: [.white, Color(white: 0.2)],
-                    startPoint: .leading, endPoint: .trailing)) : AnyShapeStyle(Color(white: dark ? 0.11 : 0.98)))
-                .clipShape(RoundedRectangle(cornerRadius: 8))
-                .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(Color.primary.opacity(0.08), lineWidth: 1))
-                HStack(spacing: 5) {
-                    Image(systemName: mode.icon)
-                    Text(mode.title)
-                    if selected { Image(systemName: "checkmark").font(.system(size: 10, weight: .semibold)) }
-                }.font(.system(size: 12, weight: .medium))
+                .frame(height: 82)
+                .background(mode == .system ? AnyShapeStyle(LinearGradient(colors: [.white, Color(white: 0.15)],
+                    startPoint: .leading, endPoint: .trailing)) : AnyShapeStyle(Color(white: dark ? 0.12 : 0.99)))
+                .clipShape(RoundedRectangle(cornerRadius: 7))
+                .overlay(RoundedRectangle(cornerRadius: 7).strokeBorder(Color.primary.opacity(0.08), lineWidth: 1))
+                HStack(spacing: 6) {
+                    Image(systemName: selected ? "checkmark.circle.fill" : "circle")
+                        .foregroundColor(selected ? .primary : .secondary)
+                    AppLocalizedText(mode.title)
+                }.font(.system(size: 13, weight: selected ? .medium : .regular))
             }
             .padding(10).frame(maxWidth: .infinity)
-            .background(Color.primary.opacity(selected ? 0.065 : 0), in: RoundedRectangle(cornerRadius: 12))
-            .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(Color.primary.opacity(selected ? 0.3 : 0.08),
-                                                                   lineWidth: 1))
+            .background(Color.primary.opacity(selected ? 0.035 : 0), in: RoundedRectangle(cornerRadius: 11))
+            .overlay(RoundedRectangle(cornerRadius: 11).strokeBorder(Color.primary.opacity(selected ? 0.45 : 0.08), lineWidth: 1))
             .contentShape(Rectangle())
         }
-        .buttonStyle(.plain)
-        .accessibilityIdentifier("settings-appearance-\(mode.rawValue)")
+        .buttonStyle(.plain).accessibilityIdentifier("settings-appearance-\(mode.rawValue)")
         .accessibilityAddTraits(selected ? [.isSelected] : [])
     }
 
     private var slotSection: some View {
-        settingsSection(title: "槽位", icon: "rectangle.stack.fill") {
-            VStack(alignment: .leading, spacing: 12) {
-                HStack {
-                    Text("槽位数量")
-                        .font(.subheadline)
-                    Spacer()
-                    Text("\(Int(slots))")
-                        .font(.system(size: 13, weight: .semibold))
-                        .padding(.horizontal, 9)
-                        .padding(.vertical, 4)
-                        .background(Capsule().fill(AppTheme.chipBackground(colorScheme)))
-                }
-                HStack(spacing: 4) {
-                    ForEach(1...10, id: \.self) { count in
-                        Button { slots = Double(count) } label: {
-                            Text("\(count)").monospacedDigit().frame(maxWidth: .infinity)
+        VStack(alignment: .leading, spacing: 24) {
+            SettingsGroup(title: "容量") {
+                VStack(alignment: .leading, spacing: 16) {
+                    HStack {
+                        AppLocalizedText("槽位数量")
+                        Spacer()
+                        AppLocalizedText("%ld 个槽位", slots).foregroundColor(.secondary).monospacedDigit()
+                    }
+                    HStack(spacing: 5) {
+                        ForEach(1...10, id: \.self) { count in
+                            Button { slots = count } label: {
+                                Text(String(format: "%02d", count)).monospacedDigit().frame(maxWidth: .infinity)
+                            }
+                            .buttonStyle(CompactActionStyle(selected: slots == count, iconOnly: true))
+                            .accessibilityIdentifier("settings-slot-count-\(count)")
+                            .accessibilityLabel(AppInterfaceStrings.format("%ld 个槽位", arguments: [count]))
                         }
-                        .buttonStyle(CompactActionStyle(selected: Int(slots) == count, iconOnly: true))
-                        .accessibilityLabel("\(count) 个槽位")
-                        .accessibilityIdentifier("settings-slot-count-\(count)")
                     }
+                }.padding(18)
+            }
+            SettingsGroup(title: "附件与性能") {
+                SettingsRow("预览缓存") {
+                    Picker(localized: "预览缓存", selection: $cacheBudgetMiB) {
+                        AppLocalizedText("自动（推荐）").tag(0)
+                        Text("64 MiB").tag(64)
+                        Text("128 MiB").tag(128)
+                        Text("256 MiB").tag(256)
+                        if ![0, 64, 128, 256].contains(cacheBudgetMiB) {
+                            AppLocalizedText("自定义 · %ld MiB", cacheBudgetMiB).tag(cacheBudgetMiB)
+                        }
+                    }.labelsHidden().frame(width: 208)
+                        .localizedHelp("自动随可用内存调整，不影响原始文件。")
+                        .accessibilityIdentifier("slot-preview-cache-budget")
                 }
-                .help("建议设置 5～9 个槽位，兼顾容量和圆盘菜单的可读性")
-                Divider().padding(.vertical, 4)
-                subsectionHeader("附件与性能")
-                HStack {
-                Text("预览缓存").font(.system(size: 13))
-                Spacer()
-                Picker("预览缓存", selection: $cacheBudgetMiB) {
-                    Text("自动（推荐）").tag(0)
-                    Text("节省内存 · 64 MiB").tag(64)
-                    Text("均衡 · 128 MiB").tag(128)
-                    Text("更多缓存 · 256 MiB").tag(256)
-                    if ![0, 64, 128, 256].contains(cacheBudgetMiB) {
-                        Text("自定义 · \(cacheBudgetMiB) MiB").tag(cacheBudgetMiB)
-                    }
+                SettingsDivider()
+                SettingsRow("附件数量提醒") {
+                    Picker(localized: "附件数量提醒", selection: $attachmentWarningCount) {
+                        AppLocalizedText("50 项（推荐）").tag(50)
+                        AppLocalizedText("100 项").tag(100)
+                        AppLocalizedText("禁用").tag(0)
+                        if ![0, 50, 100].contains(attachmentWarningCount) {
+                            AppLocalizedText("%ld 项", attachmentWarningCount).tag(attachmentWarningCount)
+                        }
+                    }.labelsHidden().frame(width: 208)
+                        .localizedHelp("仅在手动添加超过此数量时提醒，仍可继续添加。")
+                        .accessibilityIdentifier("slot-attachment-warning-count")
                 }
-                .labelsHidden().frame(width: 188)
-                .accessibilityLabel("预览缓存")
-                .accessibilityIdentifier("slot-preview-cache-budget")
-                }
-                Text("自动随可用内存调整，不影响原始文件。")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-                Divider().padding(.vertical, 2)
-                HStack {
-                Text("附件数量提醒").font(.system(size: 13))
-                Spacer()
-                Picker("附件数量提醒", selection: $attachmentWarningCount) {
-                    Text("50 项（推荐）").tag(50)
-                    Text("100 项").tag(100)
-                    Text("关闭").tag(0)
-                    if ![0, 50, 100].contains(attachmentWarningCount) {
-                        Text("\(attachmentWarningCount) 项").tag(attachmentWarningCount)
-                    }
-                }
-                .labelsHidden().frame(width: 188)
-                .accessibilityLabel("附件数量提醒")
-                .accessibilityIdentifier("slot-attachment-warning-count")
-                }
-                Text("仅在手动添加超过此数量时提醒，仍可继续添加。")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
             }
         }
     }
 
     private var shortcutSection: some View {
-        settingsSection(title: "快捷键", icon: "keyboard.fill") {
-            VStack(spacing: 14) {
-                // Template picker
-                VStack(alignment: .leading, spacing: 6) {
-                    Text("快捷键模板").font(.subheadline)
-                    Picker("模板", selection: $hotkeyTemplateKind) {
-                        ForEach(HotkeyTemplateKind.allCases) { kind in
-                            Text(kind.title).tag(kind)
-                        }
-                    }
-                    .pickerStyle(.segmented)
+        VStack(alignment: .leading, spacing: 24) {
+            SettingsGroup(title: "全局快捷键") {
+                SettingsRow("槽位编号") {
+                    Picker(localized: "模板", selection: $hotkeyTemplateKind) {
+                        ForEach(HotkeyTemplateKind.allCases) { kind in AppLocalizedText(kind.title).tag(kind) }
+                    }.labelsHidden().frame(width: 208)
                 }
+                SettingsDivider()
+                shortcutRow("保存快捷键", key: $saveKey, slots: true, id: "save")
+                SettingsDivider()
+                shortcutRow("粘贴快捷键", key: $pasteKey, slots: true, id: "paste")
+                SettingsDivider()
+                shortcutRow("圆盘菜单快捷键", key: $radialKey, slots: false, id: "radial")
+            }
+            SettingsDisclosure(title: "快捷键使用帮助") {
+                AppLocalizedText("点击快捷键后按下新组合；保存与粘贴中的数字键代表全部槽位。Esc 取消录入，Tab 切换。")
+                HStack {
+                    AppLocalizedText("槽位组切换")
+                    Spacer()
+                    Text("⌘ ← / →").font(.system(size: 13, weight: .medium))
+                }
+            }
+        }
+    }
 
-                shortcutRecorder(title: "保存快捷键", subtitle: "按下组合键，支持槽位编号占位 {n}", text: $saveKey, preview: saveKey.replacingOccurrences(of: "{n}", with: "1"), allowsSlotPlaceholder: true)
-                shortcutRecorder(title: "粘贴快捷键", subtitle: "按下组合键，支持槽位编号占位 {n}", text: $pasteKey, preview: pasteKey.replacingOccurrences(of: "{n}", with: "1"), allowsSlotPlaceholder: true)
-                shortcutRecorder(title: "圆盘菜单快捷键", subtitle: "默认 Ctrl+Space；按组合键即可修改", text: $radialKey, preview: radialKey, allowsSlotPlaceholder: false)
+    private func shortcutRow(_ title: String, key: Binding<String>, slots: Bool, id: String) -> some View {
+        SettingsRow(title) {
+            ShortcutCaptureField(shortcut: key, allowsSlotPlaceholder: slots,
+                                 slotLabel: hotkeyTemplateKind == .numeric ? "1…0" :
+                                    hotkeyTemplateKind == .hybrid ? "1…5 / Q…T" : AppInterfaceStrings.text("槽位"))
+                .frame(width: 208, height: 34)
+                .accessibilityIdentifier("settings-shortcut-\(id)")
+                .localizedAccessibilityLabel(title)
+        }
+    }
+
+    private var notificationSection: some View {
+        VStack(alignment: .leading, spacing: 24) {
+            SettingsGroup(title: "操作确认") {
+                SettingsToggleRow("覆盖槽位前询问", isOn: Binding(get: { !skipOverwriteConfirmation },
+                    set: { skipOverwriteConfirmation = !$0 }))
+                SettingsDivider()
+                SettingsToggleRow("批量保存前询问", isOn: Binding(get: { !skipBatchSaveConfirmation },
+                    set: { skipBatchSaveConfirmation = !$0 }))
+            }
+            SettingsGroup(title: "完成提示") {
+                SettingsToggleRow("保存成功后显示提示", isOn: $showSaveToast)
+                SettingsDivider()
+                SettingsToggleRow("复制成功后显示提示", isOn: $showCopyToast)
+            }
+        }
+    }
+
+    private var connectionSection: some View {
+        VStack(alignment: .leading, spacing: 24) {
+            SettingsGroup(title: "串联粘贴") {
+                HStack(spacing: 0) {
+                    ForEach(0..<3) { index in
+                        if index > 0 {
+                            Rectangle().fill(Color.primary.opacity(0.18)).frame(height: 1)
+                            Image(systemName: "chevron.right").font(.system(size: 9, weight: .semibold))
+                                .foregroundColor(.secondary).padding(.trailing, 8)
+                        }
+                        Image(systemName: ["doc.text", "photo", "doc.on.clipboard"][index])
+                            .font(.system(size: 19, weight: .regular))
+                            .foregroundColor(enableSlotConnection ? .primary : .secondary)
+                            .frame(width: 58, height: 54)
+                            .background(Color.primary.opacity(0.035), in: RoundedRectangle(cornerRadius: 11))
+                            .overlay(RoundedRectangle(cornerRadius: 11).strokeBorder(Color.primary.opacity(0.07), lineWidth: 1))
+                    }
+                }.padding(.horizontal, 36).padding(.vertical, 28).accessibilityHidden(true)
+                SettingsDivider()
+                SettingsToggleRow("启用槽位连接", isOn: $enableSlotConnection)
+            }
+            SettingsDisclosure(title: "连接如何工作") {
+                AppLocalizedText("按连接顺序一次粘贴多个槽位。关闭后保留已有连接。")
             }
         }
     }
 
     private var advancedSection: some View {
-        settingsSection(title: "高级", icon: "slider.horizontal.3") {
-            // UNDO-3 (v2.10.97): 「高级」拆成两个小节——日志及调试 / 操作历史。
-            VStack(alignment: .leading, spacing: 18) {
-                VStack(alignment: .leading, spacing: 10) {
-                    subsectionHeader("日志及调试")
-                    settingsToggleRow(
-                        title: "输出详细日志",
-                        subtitle: "用于调试保存、粘贴、快捷键注册等问题。",
-                        isOn: $verbose
-                    )
+        VStack(alignment: .leading, spacing: 24) {
+            SettingsGroup(title: "操作历史") {
+                SettingsRow("撤销步数") {
+                    HStack(spacing: 12) {
+                        Text("\(undoSteps)").monospacedDigit().frame(minWidth: 28)
+                        Stepper(value: $undoSteps, in: SlotUndoStack.minLimitPerGroup...SlotUndoStack.maxLimitPerGroup) {
+                            EmptyView()
+                        }.labelsHidden().fixedSize().localizedAccessibilityLabel("撤销步数")
+                    }
+                    .localizedHelp("每个槽位组保留的撤销 / 重做步数（Cmd+Z / Cmd+Shift+Z），范围 1～100。")
                 }
-
-                VStack(alignment: .leading, spacing: 10) {
-                    subsectionHeader("操作历史")
-                    undoStepsRow
+                SettingsDivider()
+                SettingsRow("历史占用") {
+                    Text(undoDiskBytes.map { ByteCountFormatter.string(fromByteCount: $0, countStyle: .file) } ?? "—")
+                        .foregroundColor(.secondary).monospacedDigit()
                 }
             }
-        }
-        .onAppear { refreshUndoDiskUsage() }
-    }
-
-    /// UNDO-3 (v2.10.97): 撤销步数（Stepper，1~100），下方显示撤销栈磁盘占用。
-    ///
-    /// ⚠️ v2.10.98 修复：数值胶囊**必须放在 Stepper 外面**。之前把它写成 Stepper 的 label 又叠了
-    /// `.labelsHidden()`，等于亲手把唯一显示当前步数的控件隐藏掉 —— 界面上只剩 ∧/∨ 两个箭头，
-    /// 用户完全看不出现在是几步。这里改为「标题（含数值）+ 独立胶囊 + 纯箭头 Stepper」的组合。
-    private var undoStepsRow: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack(alignment: .firstTextBaseline) {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("撤销步数：\(undoSteps)").font(.subheadline)
-                    Text("每个槽位组保留的撤销 / 重做步数（Cmd+Z / Cmd+Shift+Z），范围 1～100。")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                }
-                Spacer()
-                // 数值胶囊（与「槽位数量」的数值样式保持一致）
-                Text("\(undoSteps)")
-                    .font(.system(size: 13, weight: .semibold))
-                    .monospacedDigit()
-                    .padding(.horizontal, 9)
-                    .padding(.vertical, 4)
-                    .background(Capsule().fill(AppTheme.chipBackground(colorScheme)))
-                Stepper(value: $undoSteps,
-                        in: SlotUndoStack.minLimitPerGroup...SlotUndoStack.maxLimitPerGroup) {
-                    EmptyView()
-                }
-                .labelsHidden()
-                .fixedSize()
-                .accessibilityLabel("撤销步数")
-                .accessibilityValue("\(undoSteps)")
+            SettingsGroup(title: "诊断") {
+                SettingsToggleRow("输出详细日志", isOn: $verbose)
+                    .localizedHelp("用于调试保存、粘贴、快捷键注册等问题。")
             }
-            Text("撤销栈磁盘占用：\(formattedUndoDiskUsage)（调小步数并保存后会立即截断超出的历史）")
-                .font(.caption)
-                .foregroundColor(.secondary)
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-    }
-
-    private var formattedUndoDiskUsage: String {
-        ByteCountFormatter.string(fromByteCount: undoDiskBytes, countStyle: .file)
-    }
-
-    private func refreshUndoDiskUsage() {
-        let bytes = ClipSlotsPaths.undoStackDiskBytes()
-        DispatchQueue.main.async { undoDiskBytes = bytes }
-    }
-
-    /// 分区内的小节标题。
-    private func subsectionHeader(_ title: String) -> some View {
-        Text(title)
-            .font(.system(size: 12, weight: .semibold))
-            .foregroundColor(.secondary)
-            .textCase(.uppercase)
-    }
-
-    private var notificationPreferencesSection: some View {
-        settingsSection(title: "提示与确认", icon: "bell.fill") {
-            VStack(spacing: 12) {
-                settingsToggleRow(
-                    title: "覆盖槽位前询问",
-                    subtitle: "保存时若目标槽位已有内容，弹窗确认是否覆盖。",
-                    isOn: Binding(
-                        get: { !skipOverwriteConfirmation },
-                        set: { skipOverwriteConfirmation = !$0 }
-                    )
-                )
-
-                settingsToggleRow(
-                    title: "批量保存前询问",
-                    subtitle: "批量保存文件时，弹窗确认保存计划。",
-                    isOn: Binding(
-                        get: { !skipBatchSaveConfirmation },
-                        set: { skipBatchSaveConfirmation = !$0 }
-                    )
-                )
-
-                settingsToggleRow(title: "保存成功后显示提示", subtitle: "", isOn: $showSaveToast)
-
-                settingsToggleRow(title: "复制成功后显示提示", subtitle: "", isOn: $showCopyToast)
-
-                Button("重置提示偏好") {
-                    resetNotificationPreferences()
-                }
-                .controlSize(.small)
+            SettingsDisclosure(title: "历史保留规则") {
+                AppLocalizedText("降低步数并保存后，超出的旧历史会被移除。当前槽位内容保持不变。")
             }
+        }.task {
+            undoDiskBytes = await Task.detached(priority: .utility) { ClipSlotsPaths.undoStackDiskBytes() }.value
         }
     }
 
-    // v2.7.0: Slot connection toggle
-    private var connectionSection: some View {
-        settingsSection(title: "槽位连接", icon: "point.3.connected.trianglepath.dotted") {
-            settingsToggleRow(title: "启用槽位连接", subtitle: "关闭后隐藏连接编辑与串联粘贴；连接数据保留。", isOn: $enableSlotConnection)
-        }
-    }
-
-    // v2.9.6: CLI install management
     private var cliSection: some View {
-        settingsSection(title: "命令行工具 (CLI)", icon: "terminal.fill") {
-            VStack(alignment: .leading, spacing: 12) {
-                // Status row
-                HStack(spacing: 10) {
-                    Circle()
-                        .fill(cliStatusColor)
-                        .frame(width: 9, height: 9)
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(cliStatusTitle)
-                            .font(.subheadline)
-                            .fontWeight(.medium)
-                        Text(cliStatusSubtitle)
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-                            .textSelection(.enabled)
-                    }
-                    Spacer()
-                }
-
-                Text("安装后可在终端或智能体中直接调用 `clipslots` 命令，路径为 \(CLIInstallManager.targetPath)。")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-
-                // Action buttons
-                HStack(spacing: 10) {
-                    Button(action: { cliManager.install() }) {
-                        Label(cliPrimaryButtonTitle, systemImage: cliPrimaryButtonIcon)
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .disabled(cliManager.isBusy)
-
-                    if cliIsInstalled {
-                        Button(role: .destructive, action: { cliManager.uninstall() }) {
-                            Label("卸载 CLI", systemImage: "trash")
-                        }
+        VStack(alignment: .leading, spacing: 24) {
+            SettingsGroup(title: "CLI") {
+                SettingsRow("clipslots") {
+                    SettingsStatus(title: cliStatusTitle, color: cliStatusColor)
+                    Button(localized: cliPrimaryButtonTitle) { cliManager.install() }
                         .disabled(cliManager.isBusy)
-                    }
-
-                    if cliManager.isBusy {
-                        ProgressView()
-                            .controlSize(.small)
-                    }
-                    Spacer()
                 }
-
-                if let message = cliManager.lastMessage {
-                    Text(message)
-                        .font(.caption)
-                        .foregroundColor(cliManager.lastMessageIsError ? .red : .green)
-                        .fixedSize(horizontal: false, vertical: true)
+                if let message = cliManager.lastMessage { operationMessage(message, error: cliManager.lastMessageIsError) }
+                SettingsDivider()
+                SettingsDisclosure(title: "安装详情", inset: true) {
+                    Text(CLIInstallManager.targetPath).textSelection(.enabled)
+                    if case .broken = cliManager.state {
+                        AppLocalizedText("命令行软链已失效（目标不存在），请点击重新安装以修复。")
+                    }
+                    HStack {
+                        Button(localized: "刷新") { cliManager.refreshState() }.disabled(cliManager.isBusy)
+                        if cliIsInstalled {
+                            Button(localized: "卸载 CLI", role: .destructive) { cliManager.uninstall() }
+                                .disabled(cliManager.isBusy)
+                        }
+                    }
+                }
+            }
+            SettingsGroup(title: "Agent Skill") {
+                SettingsRow("ClipSlots Skill") {
+                    SettingsStatus(title: skillManager.agentsWithSkillInstalled.isEmpty ? "未安装" :
+                        AppInterfaceStrings.format("已安装 · %ld 个 Agent", arguments: [skillManager.agentsWithSkillInstalled.count]),
+                        color: skillManager.agentsWithSkillInstalled.isEmpty ? .secondary : .green)
+                    Button(localized: skillManager.agentsWithSkillInstalled.isEmpty ? "安装" : "重新安装") {
+                        skillManager.reinstallSkillByOverwrite()
+                    }.disabled(skillManager.busyAgentID != nil)
+                }
+                if let message = skillManager.lastMessage { operationMessage(message, error: skillManager.lastMessageIsError) }
+                SettingsDivider()
+                SettingsDisclosure(title: "已连接的 Agent", inset: true) {
+                    if skillManager.agentsWithSkillInstalled.isEmpty {
+                        AppLocalizedText("安装后，Agent 可读取 ClipSlots 的使用说明。")
+                    }
+                    ForEach(skillManager.agentsWithSkillInstalled) { agent in
+                        HStack {
+                            Text(agent.displayName)
+                            Spacer()
+                            SkillStatusPill(broken: skillManager.linkHealth(for: agent) == .broken)
+                        }.help(agent.skillTargetPath)
+                    }
+                    if let version = skillManager.bundledSkillVersionInfo {
+                        AppLocalizedText("当前 Skill 版本：%@", version)
+                    }
+                    if !skillManager.agentsWithSkillInstalled.isEmpty {
+                        Button(localized: "卸载 Skill", role: .destructive) { skillManager.uninstallSkillFromAllAgents() }
+                            .disabled(skillManager.busyAgentID != nil)
+                    }
+                }
+            }
+            SettingsGroup(title: "应用管理") {
+                SettingsRow("卸载 ClipSlots") {
+                    Button(localized: "卸载…", role: .destructive) { showUninstallSheet = true }
+                        .buttonStyle(CompactActionStyle(destructive: true)).disabled(appUninstaller.isBusy)
                 }
             }
         }
-    }
-
-    private var cliIsInstalled: Bool {
-        switch cliManager.state {
-        case .notInstalled: return false
-        case .installed, .outdated: return true
-        // P2-12 (v2.10.9): 软链损坏视为「已存在但需修复」，允许走重装按钮把链接指回当前 bundle。
-        case .broken: return true
+        .task {
+            cliManager.refreshState()
+            skillManager.refreshInBackground()
         }
     }
 
+    private func operationMessage(_ text: String, error: Bool) -> some View {
+        Text(text).font(.system(size: 12)).foregroundColor(error ? .red : .secondary)
+            .fixedSize(horizontal: false, vertical: true).padding(.horizontal, 18).padding(.bottom, 14)
+    }
+    private var cliIsInstalled: Bool {
+        if case .notInstalled = cliManager.state { return false }
+        return true
+    }
     private var cliStatusColor: Color {
         switch cliManager.state {
         case .notInstalled: return .secondary
         case .installed: return .green
         case .outdated: return .orange
-        case .broken: return .red  // P2-12 (v2.10.9)
+        case .broken: return .red
         }
     }
-
     private var cliStatusTitle: String {
         switch cliManager.state {
         case .notInstalled: return "未安装"
-        case .installed(let version): return "已安装 · v\(version)"
-        case .outdated(let installed, _): return "已安装（旧版本 v\(installed)）"
-        case .broken: return "软链损坏"  // P2-12 (v2.10.9)
+        case .installed(let version): return "v\(version)"
+        case .outdated: return "可更新"
+        case .broken: return "需要修复"
         }
     }
-
-    private var cliStatusSubtitle: String {
-        switch cliManager.state {
-        case .notInstalled:
-            return "尚未安装命令行工具。"
-        case .installed:
-            return CLIInstallManager.targetPath
-        case .outdated(_, let bundled):
-            return "可更新至 v\(bundled)"
-        case .broken:
-            // P2-12 (v2.10.9): 软链存在但目标失效，提示重新安装以修复。
-            return "命令行软链已失效（目标不存在），请点击重新安装以修复。"
-        }
-    }
-
     private var cliPrimaryButtonTitle: String {
         switch cliManager.state {
-        case .notInstalled: return "安装 CLI"
-        case .installed: return "重新安装 CLI"
-        case .outdated: return "更新 CLI"
-        case .broken: return "修复 CLI"  // P2-12 (v2.10.9)
+        case .notInstalled: return "安装"
+        case .installed: return "重新安装"
+        case .outdated: return "更新"
+        case .broken: return "修复"
         }
     }
 
-    private var cliPrimaryButtonIcon: String {
-        switch cliManager.state {
-        case .notInstalled: return "arrow.down.circle"
-        case .installed: return "arrow.clockwise"
-        case .outdated: return "arrow.up.circle"
-        case .broken: return "exclamationmark.arrow.circlepath"  // P2-12 (v2.10.9)
-        }
-    }
-
-    // MARK: - v2.9.46 Agent Skill 卡片
-
-    private var agentSkillSection: some View {
-        settingsSection(title: "Agent Skill", icon: "brain.head.profile") {
-            VStack(alignment: .leading, spacing: 12) {
-                let installed = skillManager.agentsWithSkillInstalled
-
-                // 状态行（精致徽章 + 安装数量 + 版本）
-                HStack(spacing: 10) {
-                    VStack(alignment: .leading, spacing: 3) {
-                        HStack(spacing: 4) {
-                            Image(systemName: installed.isEmpty ? "circle.dashed" : "checkmark.circle.fill")
-                                .foregroundColor(installed.isEmpty ? .secondary : .green)
-                                .font(.caption)
-                            Text(installed.isEmpty ? "未安装" : "已安装 · \(installed.count) 个 Agent")
-                                .font(.subheadline)
-                                .fontWeight(.semibold)
-                        }
-                        Text(skillManager.bundledSkillVersionInfo.map { "当前 Skill 版本：\($0)" } ?? "未能读取内置 Skill 版本")
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-                            .textSelection(.enabled)
-                    }
-                    Spacer()
-                }
-
-                // 已安装 Agent 列表（健康状态 pill + 路径）
-                if !installed.isEmpty {
-                    VStack(alignment: .leading, spacing: 10) {
-                        ForEach(installed) { agent in
-                            let health = skillManager.linkHealth(for: agent)
-                            VStack(alignment: .leading, spacing: 4) {
-                                HStack(alignment: .firstTextBaseline) {
-                                    VStack(alignment: .leading, spacing: 2) {
-                                        Text(agent.displayName)
-                                            .font(.callout)
-                                            .fontWeight(.medium)
-                                        Text(agent.skillTargetPath)
-                                            .font(.caption2)
-                                            .foregroundColor(.secondary)
-                                            .textSelection(.enabled)
-                                    }
-                                    Spacer(minLength: 12)
-                                    SkillStatusPill(broken: health == .broken)
-                                }
-                                if health == .broken {
-                                    Text("软链目标已失效（App 可能被删除或移动），请点击「重新安装 Skill」修复。")
-                                        .font(.caption2)
-                                        .foregroundColor(.orange)
-                                        .fixedSize(horizontal: false, vertical: true)
-                                }
-                            }
-                        }
-                    }
-                    .padding(.leading, 2)
-                }
-
-                Text("把 ClipSlots 使用说明（SKILL.md）安装到本机 Agent，供智能体理解 `clipslots` CLI 的用法。重新安装会删除各 Agent 旧的 skill 目标并重建软链，指向 App 内最新内容。")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-
-                // 操作按钮
-                HStack(spacing: 10) {
-                    Button(action: { skillManager.reinstallSkillByOverwrite() }) {
-                        Label("重新安装 Skill", systemImage: "arrow.clockwise")
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .disabled(skillManager.busyAgentID != nil)
-
-                    if !installed.isEmpty {
-                        Button(role: .destructive, action: { skillManager.uninstallSkillFromAllAgents() }) {
-                            Label("卸载 Skill", systemImage: "trash")
-                        }
-                        .disabled(skillManager.busyAgentID != nil)
-                    }
-                    Spacer()
-                }
-
-                if let message = skillManager.lastMessage {
-                    Text(message)
-                        .font(.caption)
-                        .foregroundColor(skillManager.lastMessageIsError ? .red : .green)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-            }
-        }
-    }
-
-    // MARK: - v2.9.46 卸载 App（危险区域）
-
-    private var uninstallAppSection: some View {
-        settingsSection(title: "卸载 ClipSlots", icon: "exclamationmark.triangle.fill") {
-            VStack(alignment: .leading, spacing: 12) {
-                Text("卸载会把 ClipSlots 移入废纸篓，并可选清理槽位数据、CLI 与 Agent Skill。此操作不可恢复。")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-
-                HStack {
-                    Button(role: .destructive) {
-                        showUninstallSheet = true
-                    } label: {
-                        Label("卸载 ClipSlots", systemImage: "trash.fill")
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .tint(.red)
-                    .disabled(appUninstaller.isBusy)
-
-                    if appUninstaller.isBusy {
-                        ProgressView().controlSize(.small)
-                    }
-                    Spacer()
-                }
-            }
-        }
-    }
-
-    // v2.9.46: 卸载确认弹窗
     private var uninstallConfirmSheet: some View {
-        VStack(alignment: .leading, spacing: 18) {
-            VStack(alignment: .leading, spacing: 6) {
-                Text("确认卸载 ClipSlots？")
-                    .font(.system(size: 17, weight: .bold))
-                Text("此操作不可恢复，请谨慎选择。")
-                    .font(.subheadline)
-                    .foregroundColor(.secondary)
-            }
-
-            VStack(alignment: .leading, spacing: 10) {
-                Toggle("同时删除所有槽位数据（删除 App 数据目录）", isOn: $uninstallDeleteData)
-                Toggle("同时卸载 CLI（删除 \(CLIInstallManager.targetPath)）", isOn: $uninstallRemoveCLI)
-                Toggle("同时卸载所有 Agent Skill（删除各 Agent skill 目录）", isOn: $uninstallRemoveSkills)
-            }
-            .toggleStyle(.checkbox)
-
+        VStack(alignment: .leading, spacing: 22) {
+            AppLocalizedText("确认卸载 ClipSlots？").font(.system(size: 20, weight: .semibold))
+            AppLocalizedText("应用将移入废纸篓。选中删除的数据无法恢复。")
+                .font(.system(size: 13)).foregroundColor(.secondary)
+            VStack(alignment: .leading, spacing: 14) {
+                Toggle(localized: "删除所有槽位数据", isOn: $uninstallDeleteData)
+                Toggle(localized: "卸载 CLI", isOn: $uninstallRemoveCLI)
+                Toggle(localized: "卸载 Skill", isOn: $uninstallRemoveSkills)
+            }.toggleStyle(.checkbox).font(.system(size: 13))
             HStack {
                 Spacer()
-                Button("取消") { showUninstallSheet = false }
-                    .keyboardShortcut(.escape)
-                Button(role: .destructive) {
+                Button(localized: "取消") { showUninstallSheet = false }.keyboardShortcut(.escape)
+                Button(localized: "确认卸载", role: .destructive) {
                     showUninstallSheet = false
-                    appUninstaller.performUninstall(
-                        deleteData: uninstallDeleteData,
-                        uninstallCLI: uninstallRemoveCLI,
-                        uninstallSkills: uninstallRemoveSkills,
-                        skillManager: skillManager
-                    )
-                } label: {
-                    Text("确认卸载")
-                }
-                .buttonStyle(.borderedProminent)
-                .tint(.red)
+                    appUninstaller.performUninstall(deleteData: uninstallDeleteData, uninstallCLI: uninstallRemoveCLI,
+                        uninstallSkills: uninstallRemoveSkills, skillManager: skillManager)
+                }.buttonStyle(CompactActionStyle(destructive: true))
             }
-        }
-        .padding(24)
-        .frame(width: 440)
-    }
-
-    private var helpSection: some View {
-        settingsSection(title: "快捷键格式", icon: "info.circle.fill") {
-            VStack(alignment: .leading, spacing: 6) {
-                helpRow("修饰键", "cmd, option, ctrl, shift")
-                helpRow("普通键", "0-9, a-z, f1-f12, space, tab, 方向键")
-                helpRow("槽位占位符", "{n} 代表槽位编号，例如 cmd+{n}。录入保存/粘贴快捷键时按数字键会自动转成 {n}。")
-                helpRow("槽位组切换", "Cmd+← → 在当前页面内的槽位组间循环切换")
-            }
-        }
+        }.padding(28).frame(width: 460).buttonStyle(CompactActionStyle())
     }
 
     private var footer: some View {
-        HStack(spacing: 12) {
-            Button("恢复默认") { showingResetConfirm = true }
+        HStack(spacing: 10) {
+            if selectedCategory != .permission && selectedCategory != .cli {
+                Button(localized: "恢复默认", action: resetCurrentPage)
+                    .accessibilityIdentifier("settings-reset")
+            }
             Spacer()
-            Button("取消") { closeAction() }
-                .keyboardShortcut(.escape)
-                .accessibilityIdentifier("settings-cancel")
-            Button("保存") { save() }
-                .buttonStyle(CompactActionStyle(selected: true))
-                .keyboardShortcut(.return)
-                .accessibilityIdentifier("settings-save")
-        }
-        .padding(.horizontal, 24)
-        .padding(.vertical, 16)
-        .frame(height: 68)
-        .background(AppTheme.elevatedBackground(colorScheme))
-    }
-
-    private func settingsSection<Content: View>(title: String, icon: String, @ViewBuilder content: () -> Content) -> some View {
-        VStack(alignment: .leading, spacing: 14) {
-            if title != selectedCategory.title && !(selectedCategory == .cli && title == "命令行工具 (CLI)") {
-              HStack(spacing: 9) {
-                    Image(systemName: icon)
-                        .font(.system(size: 12, weight: .semibold))
-                        .foregroundColor(.secondary)
-                Text(title)
-                    .font(.system(size: 15, weight: .semibold))
-              }
+            if hasChanges {
+                Circle().fill(Color.primary.opacity(0.35)).frame(width: 5, height: 5)
+                    .localizedAccessibilityLabel("未保存")
             }
-            content()
+            Button(localized: hasChanges ? "取消" : "完成", action: closeAction)
+                .keyboardShortcut(.escape).accessibilityIdentifier("settings-cancel")
+            Button(localized: "保存", action: save)
+                .buttonStyle(CompactActionStyle(selected: true)).disabled(!hasChanges)
+                .keyboardShortcut(.return).accessibilityIdentifier("settings-save")
         }
-        .padding(18)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(
-            RoundedRectangle(cornerRadius: 15, style: .continuous)
-                .fill(AppTheme.elevatedBackground(colorScheme))
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 15, style: .continuous)
-                .stroke(AppTheme.subtleBorder(colorScheme), lineWidth: 1)
-        )
+        .padding(.horizontal, 28).frame(height: 68)
+        .background(AppTheme.elevatedBackground(scheme))
     }
 
-    private func shortcutInput(title: String, subtitle: String, placeholder: String, text: Binding<String>, preview: String) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(title).font(.subheadline)
-                    Text(subtitle).font(.caption).foregroundColor(.secondary)
-                }
-                Spacer()
-                Text(preview.isEmpty ? "未设置" : preview)
-                    // v2.9.18: 快捷键预览由 11pt 提升到 12pt（保留 monospaced 以对齐键位显示），改善可读。
-                    .font(.system(size: 12, weight: .medium))
-                    .foregroundColor(.secondary)
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 4)
-                    .background(Capsule().fill(AppTheme.chipBackground(colorScheme)))
-            }
-            TextField(placeholder, text: text)
-                .textFieldStyle(.roundedBorder)
-                .font(.system(.body))
+    private func resetCurrentPage() {
+        switch selectedCategory {
+        case .appearance:
+            appearanceRaw = ThemeMode.light.rawValue
+            languageRaw = AppInterfaceLanguage.chinese.rawValue
+        case .slot: slots = 10; cacheBudgetMiB = 0; attachmentWarningCount = 50
+        case .shortcut:
+            saveKey = "option+{n}"; pasteKey = "cmd+{n}"; radialKey = "ctrl+space"; hotkeyTemplateKind = .numeric
+        case .notification:
+            skipOverwriteConfirmation = false; skipBatchSaveConfirmation = false
+            showSaveToast = true; showCopyToast = true
+        case .connection: enableSlotConnection = true
+        case .advanced: verbose = true; undoSteps = SlotUndoStack.defaultLimitPerGroup
+        case .permission, .cli: break
         }
     }
-
-    private func helpRow(_ title: String, _ value: String) -> some View {
-        HStack(alignment: .top, spacing: 12) {
-            Text(title)
-                .font(.caption)
-                .foregroundColor(.secondary)
-                .frame(width: 76, alignment: .leading)
-            Text(value)
-                .font(.caption)
-                .foregroundColor(.secondary)
-                .textSelection(.enabled)
-        }
+    private func restorePreview() {
+        guard !saved else { return }
+        appearanceRaw = originalAppearance
+        languageRaw = originalLanguage
     }
-
-    private func settingsToggleRow(title: String, subtitle: String, isOn: Binding<Bool>) -> some View {
-        HStack(alignment: .center, spacing: 18) {
-            VStack(alignment: .leading, spacing: 3) {
-                Text(title)
-                    .font(.subheadline)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                if !subtitle.isEmpty {
-                  Text(subtitle)
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                }
-            }
-            Spacer(minLength: 24)
-            Toggle("", isOn: isOn)
-                .toggleStyle(.switch)
-                .labelsHidden()
-                .accessibilityLabel(title)
-                .frame(width: 64, alignment: .trailing)
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
+    private func closeAction() {
+        restorePreview()
+        if let onClose { onClose() } else { dismiss() }
     }
-
-    private func resetDefaults() {
-        slots = 10
-        saveKey = "option+{n}"
-        pasteKey = "cmd+{n}"
-        radialKey = "ctrl+space"
-        verbose = true
-        undoSteps = SlotUndoStack.defaultLimitPerGroup
-        cacheBudgetMiB = 0
-        attachmentWarningCount = 50
-    }
-
     private func save() {
-        var newConfig = config
-        newConfig.slots = Int(slots)
-        newConfig.saveKey = HotkeyTemplateNormalizer.normalizedShortcut(saveKey, allowsSlotPlaceholder: true)
-        newConfig.pasteKey = HotkeyTemplateNormalizer.normalizedShortcut(pasteKey, allowsSlotPlaceholder: true)
-        newConfig.radialKey = HotkeyTemplateNormalizer.normalizedShortcut(radialKey, allowsSlotPlaceholder: false)
-        newConfig.verbose = verbose
-        newConfig.undoSteps = SlotUndoStack.clampLimit(undoSteps)
-        newConfig.cacheBudgetMiB = cacheBudgetMiB
-        newConfig.attachmentWarningCount = attachmentWarningCount
-        newConfig.hotkeyTemplate.kind = hotkeyTemplateKind
-        newConfig.save()
-
-        // v2.6.0: persist notification preferences
-        UserDefaults.standard.set(skipOverwriteConfirmation, forKey: UserPreferenceKeys.skipOverwriteConfirmation)
-        UserDefaults.standard.set(skipBatchSaveConfirmation, forKey: UserPreferenceKeys.skipBatchSaveConfirmation)
-        UserDefaults.standard.set(showSaveToast, forKey: UserPreferenceKeys.showSaveToast)
-        UserDefaults.standard.set(showCopyToast, forKey: UserPreferenceKeys.showCopyToast)
-        UserDefaults.standard.set(enableSlotConnection, forKey: UserPreferenceKeys.enableSlotConnection)
-
-        onSave(newConfig)
+        var next = config
+        next.slots = slots
+        next.saveKey = HotkeyTemplateNormalizer.normalizedShortcut(saveKey, allowsSlotPlaceholder: true)
+        next.pasteKey = HotkeyTemplateNormalizer.normalizedShortcut(pasteKey, allowsSlotPlaceholder: true)
+        next.radialKey = HotkeyTemplateNormalizer.normalizedShortcut(radialKey, allowsSlotPlaceholder: false)
+        next.verbose = verbose
+        next.undoSteps = SlotUndoStack.clampLimit(undoSteps)
+        next.cacheBudgetMiB = cacheBudgetMiB
+        next.attachmentWarningCount = attachmentWarningCount
+        next.hotkeyTemplate.kind = hotkeyTemplateKind
+        next.save()
+        let defaults = UserDefaults.standard
+        defaults.set(skipOverwriteConfirmation, forKey: UserPreferenceKeys.skipOverwriteConfirmation)
+        defaults.set(skipBatchSaveConfirmation, forKey: UserPreferenceKeys.skipBatchSaveConfirmation)
+        defaults.set(showSaveToast, forKey: UserPreferenceKeys.showSaveToast)
+        defaults.set(showCopyToast, forKey: UserPreferenceKeys.showCopyToast)
+        defaults.set(enableSlotConnection, forKey: UserPreferenceKeys.enableSlotConnection)
+        saved = true
+        onSave(next)
         closeAction()
-    }
-
-    private func resetNotificationPreferences() {
-        UserDefaults.standard.removeObject(forKey: UserPreferenceKeys.skipOverwriteConfirmation)
-        UserDefaults.standard.removeObject(forKey: UserPreferenceKeys.skipBatchSaveConfirmation)
-        UserDefaults.standard.removeObject(forKey: UserPreferenceKeys.showSaveToast)
-        UserDefaults.standard.removeObject(forKey: UserPreferenceKeys.showCopyToast)
-        skipOverwriteConfirmation = false
-        skipBatchSaveConfirmation = false
-        showSaveToast = true
-        showCopyToast = true
     }
 }
 
-// MARK: - v2.7.9 Settings Section Card
+// The same tokens and row geometry are used on every settings page, including permissions.
+struct SettingsGroup<Content: View>: View {
+    var title: String
+    @ViewBuilder var content: Content
+    @Environment(\.colorScheme) private var scheme
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            AppLocalizedText(title).font(.system(size: 12, weight: .medium)).foregroundColor(.secondary).padding(.leading, 2)
+            VStack(alignment: .leading, spacing: 0) { content }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(AppTheme.elevatedBackground(scheme), in: RoundedRectangle(cornerRadius: 12))
+                .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(Color.primary.opacity(0.075), lineWidth: 1))
+        }
+    }
+}
+
+struct SettingsRow<Content: View>: View {
+    var title: String
+    var content: Content
+    init(_ title: String, @ViewBuilder content: () -> Content) { self.title = title; self.content = content() }
+    var body: some View {
+        HStack(spacing: 16) {
+            AppLocalizedText(title).font(.system(size: 13)).fixedSize(horizontal: false, vertical: true)
+            Spacer(minLength: 8)
+            content
+        }.padding(.horizontal, 18).padding(.vertical, 12).frame(minHeight: 58)
+    }
+}
+
+struct SettingsDivider: View {
+    var body: some View { Divider().padding(.horizontal, 18) }
+}
+
+struct SettingsToggleRow: View {
+    var title: String
+    @Binding var isOn: Bool
+    init(_ title: String, isOn: Binding<Bool>) { self.title = title; _isOn = isOn }
+    var body: some View {
+        SettingsRow(title) {
+            Toggle("", isOn: $isOn).toggleStyle(.switch).labelsHidden().localizedAccessibilityLabel(title)
+        }
+    }
+}
+
+struct SettingsDisclosure<Content: View>: View {
+    var title: String
+    var inset = false
+    @ViewBuilder var content: Content
+    @State private var expanded = false
+    var body: some View {
+        DisclosureGroup(isExpanded: $expanded) {
+            VStack(alignment: .leading, spacing: 14) { content }
+                .font(.system(size: 12)).foregroundColor(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: .infinity, alignment: .leading).padding(.top, 12).padding(.bottom, 4)
+        } label: {
+            AppLocalizedText(title).font(.system(size: 13)).foregroundColor(.secondary)
+        }
+        .padding(inset ? 18 : 2)
+    }
+}
+
+struct SettingsStatus: View {
+    var title: String
+    var color: Color
+    var body: some View {
+        HStack(spacing: 6) {
+            Circle().fill(color).frame(width: 5, height: 5)
+            AppLocalizedText(title).font(.system(size: 12)).foregroundColor(.secondary)
+        }.fixedSize()
+    }
+}
 
 struct SettingsSectionCard<Content: View>: View {
     let title: String
     let systemImage: String
     @ViewBuilder var content: Content
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            Label(title, systemImage: systemImage)
-                .font(.system(size: 16, weight: .semibold))
-                .foregroundStyle(.primary)
-            content
-        }
-        .padding(18)
-        .frame(maxWidth: 560, alignment: .leading)
-        .background(RoundedRectangle(cornerRadius: 18).fill(Color(NSColor.controlBackgroundColor)))
-        .overlay(RoundedRectangle(cornerRadius: 18).stroke(Color.white.opacity(0.08), lineWidth: 1))
-    }
+    var body: some View { SettingsGroup(title: title) { content.padding(18) } }
 }
-
-// MARK: - v2.7.25 Shortcut Recorder
-
-private func shortcutRecorder(title: String, subtitle: String, text: Binding<String>, preview: String, allowsSlotPlaceholder: Bool) -> some View {
-    VStack(alignment: .leading, spacing: 8) {
-        HStack(alignment: .center, spacing: 12) {
-            VStack(alignment: .leading, spacing: 2) {
-                Text(title).font(.subheadline)
-                Text(subtitle).font(.caption).foregroundColor(.secondary)
-            }
-            Spacer()
-            Text(preview.isEmpty ? "未设置" : preview)
-                // v2.9.18: 快捷键预览由 11pt 提升到 12pt（保留 monospaced 以对齐键位显示），改善可读。
-                .font(.system(size: 12, weight: .medium))
-                .foregroundColor(.secondary)
-                .padding(.horizontal, 8)
-                .padding(.vertical, 4)
-                .background(Capsule().fill(Color(NSColor.controlBackgroundColor)))
-        }
-
-        ShortcutCaptureField(shortcut: text, allowsSlotPlaceholder: allowsSlotPlaceholder)
-            .frame(height: 38)
-            .overlay(alignment: .trailing) {
-                Text("录入后需点击右下角「保存」才生效")
-                    // v2.9.18: 9pt 提示字上调到 AppTheme.Fonts.footnote（12pt），提升到可读范围。
-                    .font(AppTheme.Fonts.footnote)
-                    .foregroundColor(.secondary)
-                    .padding(.trailing, 8)
-                    .allowsHitTesting(false)
-            }
-    }
-}
-
-private struct ShortcutCaptureField: NSViewRepresentable {
-    @Binding var shortcut: String
-    let allowsSlotPlaceholder: Bool
-
-    func makeNSView(context: Context) -> ShortcutCaptureTextField {
-        let field = ShortcutCaptureTextField()
-        field.isEditable = false
-        field.isSelectable = false
-        field.isBordered = false
-        field.backgroundColor = .controlBackgroundColor
-        field.focusRingType = .none
-        field.font = .systemFont(ofSize: 14, weight: .medium)
-        field.alignment = .left
-        field.onShortcut = { value in
-            // Only mutate local SettingsView draft binding. This does NOT affect live config.
-            shortcut = value
-        }
-        field.allowsSlotPlaceholder = allowsSlotPlaceholder
-        field.stringValue = shortcut
-        field.placeholderString = "点击后直接按组合键"
-        field.bezelStyle = .roundedBezel
-        field.isBezeled = true
-        field.drawsBackground = true
-        return field
-    }
-
-    func updateNSView(_ nsView: ShortcutCaptureTextField, context: Context) {
-        nsView.allowsSlotPlaceholder = allowsSlotPlaceholder
-        // v2.7.33: Do not overwrite the recorder display while it is focused.
-        // SwiftUI updateNSView was resetting "ctrl+option+{n}" back to the old
-        // binding during modifier/key transitions, making it look unsaved.
-        guard !nsView.isRecording else { return }
-        if nsView.stringValue != shortcut { nsView.stringValue = shortcut }
-    }
-}
-
-private final class ShortcutCaptureTextField: NSTextField {
-    var onShortcut: ((String) -> Void)?
-    var allowsSlotPlaceholder = false
-    var isRecording = false
-    private var pendingShortcut: String?
-
-    override var acceptsFirstResponder: Bool { true }
-    override func becomeFirstResponder() -> Bool {
-        isRecording = true
-        layer?.borderColor = NSColor.controlAccentColor.cgColor
-        layer?.borderWidth = 1.5
-        layer?.cornerRadius = 7
-        return super.becomeFirstResponder()
-    }
-    override func resignFirstResponder() -> Bool {
-        isRecording = false
-        layer?.borderWidth = 0
-        return super.resignFirstResponder()
-    }
-    override func mouseDown(with event: NSEvent) {
-        window?.makeFirstResponder(self)
-        stringValue = "按下组合键…"
-    }
-    override func keyDown(with event: NSEvent) {
-        let value = Self.shortcutString(from: event, allowsSlotPlaceholder: allowsSlotPlaceholder)
-        guard !value.isEmpty else { return }
-        stringValue = value
-        pendingShortcut = nil
-        onShortcut?(value)
-    }
-
-    override func keyUp(with event: NSEvent) {
-        // v2.7.31: no-op. Some key combinations never deliver keyUp to NSTextField
-        // reliably while modifiers are involved, which made shortcut saving impossible.
-    }
-
-    override func flagsChanged(with event: NSEvent) {
-        // Give immediate feedback when user only presses modifiers first.
-        let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
-        var parts: [String] = []
-        if flags.contains(.command) { parts.append("cmd") }
-        if flags.contains(.control) { parts.append("ctrl") }
-        if flags.contains(.option) { parts.append("option") }
-        if flags.contains(.shift) { parts.append("shift") }
-        if !parts.isEmpty { stringValue = parts.joined(separator: "+") + "+…" }
-    }
-
-    private static func shortcutString(from event: NSEvent, allowsSlotPlaceholder: Bool) -> String {
-        var parts: [String] = []
-        let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
-        if flags.contains(.command) { parts.append("cmd") }
-        if flags.contains(.control) { parts.append("ctrl") }
-        if flags.contains(.option) { parts.append("option") }
-        if flags.contains(.shift) { parts.append("shift") }
-
-        let key = normalizedKey(event)
-        guard !key.isEmpty else { return "" }
-        // v2.7.26: for save/paste shortcuts, any letter or number means slot placeholder.
-        // Users press cmd+1 or cmd+a to express the slot token; registering a literal
-        // number/letter would create one shortcut only and fail for other slots.
-        if allowsSlotPlaceholder, key.rangeOfCharacter(from: CharacterSet.alphanumerics) != nil {
-            parts.append("{n}")
-        } else {
-            parts.append(key)
-        }
-        return parts.joined(separator: "+")
-    }
-
-    private static func normalizedKey(_ event: NSEvent) -> String {
-        switch Int(event.keyCode) {
-        case 49: return "space"
-        case 48: return "tab"
-        case 123: return "left"
-        case 124: return "right"
-        case 125: return "down"
-        case 126: return "up"
-        default:
-            return (event.charactersIgnoringModifiers ?? "").lowercased()
-        }
-    }
-}
-
-// MARK: - v2.7.30 Hotkey Normalizer
-
-enum HotkeyTemplateNormalizer {
-    static func normalizedShortcut(_ raw: String, allowsSlotPlaceholder: Bool) -> String {
-        let parts = raw.split(separator: "+").map { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }.filter { !$0.isEmpty }
-        var modifiers: [String] = []
-        var key: String?
-        for p in parts {
-            switch p {
-            case "cmd", "command", "⌘": if !modifiers.contains("cmd") { modifiers.append("cmd") }
-            case "ctrl", "control", "⌃": if !modifiers.contains("ctrl") { modifiers.append("ctrl") }
-            case "option", "opt", "alt", "⌥": if !modifiers.contains("option") { modifiers.append("option") }
-            case "shift", "⇧": if !modifiers.contains("shift") { modifiers.append("shift") }
-            case "{n}", "n", "数字": key = allowsSlotPlaceholder ? "{n}" : "n"
-            default:
-                if allowsSlotPlaceholder, p.rangeOfCharacter(from: CharacterSet.alphanumerics) != nil { key = "{n}" } else { key = p }
-            }
-        }
-        let ordered = ["cmd", "ctrl", "option", "shift"].filter { modifiers.contains($0) }
-        return (ordered + [key ?? ""]).filter { !$0.isEmpty }.joined(separator: "+")
-    }
-}
-
-
-// MARK: - v2.9.51 Agent Skill 状态 pill 胶囊标签
 
 struct SkillStatusPill: View {
     let broken: Bool
-
-    var body: some View {
-        Text(broken ? "软链已断开" : "已安装")
-            .font(.caption2)
-            .fontWeight(.medium)
-            .foregroundColor(.white)
-            .padding(.horizontal, 6)
-            .padding(.vertical, 2)
-            .background((broken ? Color.orange : Color.green).opacity(0.85))
-            .clipShape(Capsule())
-    }
+    var body: some View { SettingsStatus(title: broken ? "软链已断开" : "已安装", color: broken ? .orange : .green) }
 }

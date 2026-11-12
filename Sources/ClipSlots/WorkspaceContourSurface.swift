@@ -36,9 +36,9 @@ struct WorkspaceContourSurface: NSViewRepresentable {
         private let contourOpacity = CAGradientLayer()
         private let dot = CAShapeLayer()
         private let light = CALayer()
-        private let lightBands = (0..<3).map { _ in CALayer() }
-        private let lightMasks = (0..<3).map { _ in CAShapeLayer() }
-        private let prisms = (0..<3).map { _ in CAGradientLayer() }
+        private let metal = WorkspaceMetalPlayback()
+        private let silver = WorkspaceLightArch()
+        private var darkAppearance = false
         private var halfWidth: CGFloat = 0
         private var targetCenter: CGFloat?
         private var previousSize: CGSize = .zero
@@ -56,7 +56,8 @@ struct WorkspaceContourSurface: NSViewRepresentable {
             // existing rail fade for the first two selections.
             let trailingArch = center.map { $0 - halfWidth * 0.34 > bounds.width * 0.72 } ?? false
             let stops: [CGFloat] = trailingArch ? [0, 0.42, 1, 1, 1, 1] : [0, 0.42, 1, 1, 0.42, 0]
-            let strength: CGFloat = highContrast ? 1 : 0.66
+            let dark = effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
+            let strength: CGFloat = highContrast ? 1 : dark ? 0.66 : 0.30
             return stops.map { ink.withAlphaComponent($0 * strength).cgColor }
         }
 
@@ -83,21 +84,8 @@ struct WorkspaceContourSurface: NSViewRepresentable {
             dot.path = CGPath(ellipseIn: CGRect(x: -1.5, y: -1.5, width: 3, height: 3),
                               transform: nil)
             layer?.addSublayer(gradient)
-            for index in prisms.indices {
-                let prism = prisms[index], mask = lightMasks[index], band = lightBands[index]
-                prism.type = .conic
-                prism.startPoint = CGPoint(x: 0.5, y: 0.5)
-                prism.endPoint = CGPoint(x: 0.5, y: 0)
-                prism.locations = [0, 0.06, 0.10, 0.135, 0.16, 0.19, 0.22, 0.26, 0.32, 0.40,
-                                   0.50, 0.56, 0.60, 0.635, 0.66, 0.69, 0.72, 0.76, 0.82, 0.90, 1]
-                mask.fillColor = nil
-                mask.strokeColor = NSColor.white.cgColor
-                mask.lineCap = .round
-                mask.lineJoin = .round
-                band.addSublayer(prism)
-                band.mask = mask
-                light.addSublayer(band)
-            }
+            light.addSublayer(metal.layer)
+            light.addSublayer(silver.layer)
             layer?.addSublayer(light)
             layer?.addSublayer(dot)
             setAccessibilityElement(false)
@@ -162,10 +150,10 @@ struct WorkspaceContourSurface: NSViewRepresentable {
             let scale = window?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 1
             CATransaction.begin()
             CATransaction.setDisableActions(true)
-            for renderedLayer in [gradient, contour, contourOpacity, dot, light]
-                + lightBands + lightMasks + prisms {
+            for renderedLayer in [gradient, contour, contourOpacity, dot, light] {
                 renderedLayer.contentsScale = scale
             }
+            silver.scale(scale)
             CATransaction.commit()
         }
 
@@ -179,31 +167,14 @@ struct WorkspaceContourSurface: NSViewRepresentable {
                 contourOpacity.colors = (highContrast ? [1, 1, 0.72] : [1, 0.90, 0.22]).map {
                     NSColor.white.withAlphaComponent(CGFloat($0)).cgColor
                 }
-                contour.lineWidth = highContrast ? 1.5 : 0.85
-                dot.fillColor = ink.withAlphaComponent(highContrast ? 1 : 0.90).cgColor
                 let dark = effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
-                // Two compact white highlights with cyan, amber and violet
-                // fringes. The low-alpha stretches keep this from reading as
-                // a uniformly illuminated rainbow outline.
-                let spectrum: [(UInt32, CGFloat)] = [
-                    (0x303a82, 0.12), (0x4156cf, 0.32), (0x23cfff, 0.90),
-                    (0xc3f5ff, 1), (0xffffff, 1), (0xfff4ca, 1),
-                    (0xffb948, 0.95), (0xee72c9, 0.72), (0x6650d7, 0.36),
-                    (0x29377c, 0.12)
-                ]
-                let cycle = spectrum + spectrum + [spectrum[0]]
-                let colors = cycle.map { hex, alpha in
-                    NSColor(srgbRed: CGFloat((hex >> 16) & 255) / 255,
-                            green: CGFloat((hex >> 8) & 255) / 255,
-                            blue: CGFloat(hex & 255) / 255,
-                            alpha: alpha * (dark ? 1 : 0.92)).cgColor
-                }
-                for index in prisms.indices {
-                    prisms[index].colors = colors
-                    lightMasks[index].lineWidth = [7, 3.5, 1.6][index]
-                    lightBands[index].opacity = highContrast ? 0
-                        : (dark ? [0.12, 0.28, 1] : [0.055, 0.16, 1])[index]
-                }
+                contour.lineWidth = highContrast ? 1.5 : dark ? 0.85 : 0.65
+                dot.fillColor = ink.withAlphaComponent(highContrast ? 1 : 0.90).cgColor
+                darkAppearance = dark
+                metal.configure(kind: .arch, dark: true)
+                metal.layer.isHidden = !dark
+                silver.layer.isHidden = dark
+                light.isHidden = highContrast
                 CATransaction.commit()
             }
             updateLightMotion()
@@ -221,14 +192,8 @@ struct WorkspaceContourSurface: NSViewRepresentable {
             contourOpacity.frame = contour.bounds
             let lightSize = CGSize(width: halfWidth * 2 + 16, height: bounds.height + 16)
             light.bounds = CGRect(origin: .zero, size: lightSize)
-            let square = max(lightSize.width, lightSize.height) + 8
-            for index in prisms.indices {
-                lightBands[index].frame = light.bounds
-                lightMasks[index].frame = light.bounds
-                prisms[index].bounds = CGRect(x: 0, y: 0, width: square, height: square)
-                prisms[index].position = CGPoint(x: lightSize.width / 2, y: lightSize.height / 2)
-                lightMasks[index].path = activeLightPath(in: light.bounds.insetBy(dx: 8, dy: 8))
-            }
+            metal.layer.frame = light.bounds
+            silver.layout(in: light.bounds, halfWidth: halfWidth)
             if let targetCenter { setModel(center: targetCenter) }
             contour.removeAnimation(forKey: "workspace-slide")
             dot.removeAnimation(forKey: "workspace-slide")
@@ -238,44 +203,14 @@ struct WorkspaceContourSurface: NSViewRepresentable {
             updateLightMotion()
         }
 
-        private func activeLightPath(in rect: CGRect) -> CGPath {
-            let center = rect.midX, bottom = rect.maxY - 1.5, top = rect.minY + 1.5
-            let crown = halfWidth * 0.34
-            let path = CGMutablePath()
-            path.move(to: CGPoint(x: center - halfWidth, y: bottom))
-            path.addCurve(to: CGPoint(x: center - crown, y: top),
-                          control1: CGPoint(x: center - halfWidth * 0.52, y: bottom),
-                          control2: CGPoint(x: center - halfWidth * 0.78, y: top))
-            path.addLine(to: CGPoint(x: center + crown, y: top))
-            path.addCurve(to: CGPoint(x: center + halfWidth, y: bottom),
-                          control1: CGPoint(x: center + halfWidth * 0.78, y: top),
-                          control2: CGPoint(x: center + halfWidth * 0.52, y: bottom))
-            path.closeSubpath()
-            return path
-        }
-
         private func updateLightMotion() {
             let running = motionEnabled && !highContrast && !isHiddenOrHasHiddenAncestor
                 && window?.isVisible == true && window?.isMiniaturized == false
                 && window?.occlusionState.contains(.visible) == true
-            let start = CACurrentMediaTime()
-            for prism in prisms {
-                if running {
-                    guard prism.animation(forKey: "workspace-light-orbit") == nil else { continue }
-                    let orbit = CABasicAnimation(keyPath: "transform.rotation.z")
-                    orbit.fromValue = 0
-                    orbit.toValue = CGFloat.pi * 2
-                    orbit.duration = 5
-                    orbit.repeatCount = .infinity
-                    orbit.timingFunction = CAMediaTimingFunction(name: .linear)
-                    // All three bands share a clock, including when restored
-                    // after occlusion. Selection never restarts the orbit.
-                    orbit.beginTime = start
-                    prism.add(orbit, forKey: "workspace-light-orbit")
-                } else {
-                    prism.removeAnimation(forKey: "workspace-light-orbit")
-                }
-            }
+            // Hidden optics stay on the same compositor clock. Theme changes
+            // only swap visibility rather than re-submitting color keyframes.
+            metal.setRunning(running)
+            silver.setRunning(running)
         }
 
         private func setModel(center: CGFloat) {
@@ -342,10 +277,103 @@ struct WorkspaceContourSurface: NSViewRepresentable {
         var debugTargetCenter: CGFloat? { targetCenter }
         var debugVisibleCenter: CGFloat { dot.presentation()?.position.x ?? dot.position.x }
         var debugHasAnimation: Bool { contour.animation(forKey: "workspace-slide") != nil }
-        var debugLightHasOrbit: Bool { prisms.allSatisfy { $0.animation(forKey: "workspace-light-orbit") != nil } }
+        var debugLightHasOrbit: Bool { darkAppearance ? metal.debugRunning : silver.running }
         var debugLightVisibleCenter: CGFloat { light.presentation()?.position.x ?? light.position.x }
-        var debugLightIsHidden: Bool { lightBands.allSatisfy { $0.opacity == 0 } }
+        var debugLightIsHidden: Bool { light.isHidden }
         #endif
+    }
+}
+
+/// Light mode has its own open, vector arch. The colored flank supports a
+/// narrow white crest; neither a closed bottom edge nor a raster halo is added.
+private final class WorkspaceLightArch {
+    let layer = CALayer()
+    private let flank = CAGradientLayer()
+    private let bloom = CAGradientLayer()
+    private let white = CAGradientLayer()
+    private let flankMask = CAShapeLayer()
+    private let bloomMask = CAShapeLayer()
+    private let whiteMask = CAShapeLayer()
+    private(set) var running = false
+    private static let key = "workspace-silver-orbit"
+    private static let palette: [[CGColor]] = (0..<150).map { frame in
+        let phase = Double(frame) / 150 * .pi * 2
+        return (0..<8).map { index in
+            let x = CGFloat(index) / 7
+            let hue = CGFloat(0.64 + 0.075 * sin(phase + Double(x) * 3))
+            let alpha: CGFloat = [0, 0.38, 0.90, 1, 1, 0.90, 0.38, 0][index]
+            return NSColor(calibratedHue: hue, saturation: 0.48,
+                           brightness: 0.94, alpha: alpha).cgColor
+        }
+    }
+    init() {
+        layer.masksToBounds = false
+        for (gradient, mask) in [(bloom, bloomMask), (flank, flankMask), (white, whiteMask)] {
+            gradient.startPoint = CGPoint(x: 0, y: 0.5)
+            gradient.endPoint = CGPoint(x: 1, y: 0.5)
+            gradient.locations = [0, 0.22, 0.38, 0.48, 0.52, 0.62, 0.78, 1]
+            gradient.mask = mask
+            mask.fillColor = nil
+            mask.strokeColor = NSColor.white.cgColor
+            mask.lineCap = .round
+            mask.lineJoin = .round
+            layer.addSublayer(gradient)
+        }
+        flank.colors = Self.palette[66]
+        bloom.colors = Self.palette[66]
+        flankMask.lineWidth = 1.8
+        bloomMask.lineWidth = 2.8
+        bloomMask.shadowColor = NSColor.white.cgColor
+        bloomMask.shadowOpacity = 1
+        bloomMask.shadowRadius = 1.2
+        bloomMask.shadowOffset = .zero
+        bloom.opacity = 0.17
+        whiteMask.lineWidth = 0.8
+        white.colors = [0, 0, 0.24, 1, 1, 0.24, 0, 0].map {
+            NSColor.white.withAlphaComponent(CGFloat($0)).cgColor
+        }
+    }
+    func scale(_ scale: CGFloat) {
+        for rendered in [layer, flank, bloom, white, flankMask, bloomMask, whiteMask] {
+            rendered.contentsScale = scale
+        }
+    }
+    func layout(in bounds: CGRect, halfWidth: CGFloat) {
+        layer.frame = bounds
+        let center = bounds.midX, bottom = bounds.maxY - 9.5, top = bounds.minY + 9.5
+        let crown = halfWidth * 0.34
+        let path = CGMutablePath()
+        path.move(to: CGPoint(x: center - halfWidth, y: bottom))
+        path.addCurve(to: CGPoint(x: center - crown, y: top),
+                      control1: CGPoint(x: center - halfWidth * 0.52, y: bottom),
+                      control2: CGPoint(x: center - halfWidth * 0.78, y: top))
+        path.addLine(to: CGPoint(x: center + crown, y: top))
+        path.addCurve(to: CGPoint(x: center + halfWidth, y: bottom),
+                      control1: CGPoint(x: center + halfWidth * 0.78, y: top),
+                      control2: CGPoint(x: center + halfWidth * 0.52, y: bottom))
+        for (gradient, mask) in [(bloom, bloomMask), (flank, flankMask), (white, whiteMask)] {
+            gradient.frame = layer.bounds
+            mask.frame = gradient.bounds
+            mask.path = path
+        }
+    }
+    func setRunning(_ running: Bool) {
+        self.running = running
+        for gradient in [flank, bloom] {
+            if !running {
+                if let colors = gradient.presentation()?.colors { gradient.colors = colors }
+                gradient.removeAnimation(forKey: Self.key)
+            } else if gradient.animation(forKey: Self.key) == nil {
+                let animation = CAKeyframeAnimation(keyPath: "colors")
+                animation.values = Self.palette + [Self.palette[0]]
+                animation.keyTimes = (0...150).map { NSNumber(value: Double($0) / 150) }
+                animation.duration = WorkspaceMetalMaterial.cycle
+                animation.repeatCount = .infinity
+                animation.calculationMode = .linear
+                animation.beginTime = gradient.convertTime(WorkspaceMetalMaterial.epoch, from: nil)
+                gradient.add(animation, forKey: Self.key)
+            }
+        }
     }
 }
 

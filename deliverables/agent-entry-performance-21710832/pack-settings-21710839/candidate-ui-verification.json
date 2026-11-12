@@ -1,0 +1,20 @@
+{
+  "passed": true,
+  "gui_sha256": "c92350550342b34b3c47b3f8387017022d2b8b96ccb6679c8b7808ccc8c766b4",
+  "isolated": true,
+  "checks": {
+    "native_file_panel_multiselect_three_packages": true,
+    "standard_and_two_renamed_packages_kept": true,
+    "native_conflict_append_preserves_originals": true,
+    "native_export_two_selected_groups": true,
+    "native_export_empty_attachment_and_crc": true,
+    "cold_open_two_renamed_packages_exactly_once": true,
+    "warm_open_two_renamed_packages_exactly_once": true,
+    "final_settings_light_dark_visually_checked": true,
+    "final_english_preview_observed": true,
+    "final_cancel_restores_chinese_and_light": true
+  },
+  "manual_observations": "Native controls operated through Computer Use; dark and English previews observed, Cancel restored Chinese/light. File panel selected one standard package and two renamed packages; both conflicts appended. Export selected exactly two groups.",
+  "probe_gui_sha256": "a0e174040c9a04d8e5991529953b65bd24b18ad44901da35b95199a4b49d11e8",
+  "executable_equivalence_report": "candidate-probe-equivalence.json"
+}

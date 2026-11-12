@@ -21,7 +21,7 @@ struct EmptySlotThumbnailView: View {
                 Image(systemName: allowsUpload ? "square.and.arrow.up" : "tray")
                     .font(.system(size: 20, weight: .regular))
                     .foregroundColor(.secondary.opacity(0.42))
-                Text(allowsUpload ? "点击上传文件" : "复制后，点击保存\n剪贴板为空也能先保存再编辑")
+                AppLocalizedText(allowsUpload ? "点击上传文件" : "复制后，点击保存\n剪贴板为空也能先保存再编辑")
                     .font(.system(size: 11))
                     .foregroundColor(.secondary)
                     .multilineTextAlignment(.center)
@@ -34,8 +34,8 @@ struct EmptySlotThumbnailView: View {
         }
         .frame(minHeight: 76, idealHeight: 88, maxHeight: .infinity)
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel("空槽位")
-        .help(allowsUpload ? "点击选择单个文件" : "保存剪贴板内容；剪贴板为空时创建可编辑的空白文本")
+        .localizedAccessibilityLabel("空槽位")
+        .localizedHelp(allowsUpload ? "点击选择单个文件" : "保存剪贴板内容；剪贴板为空时创建可编辑的空白文本")
     }
 }
 
@@ -47,7 +47,7 @@ struct BlankTextSlotThumbnailView: View {
             Image(systemName: "square.and.pencil")
                 .font(.system(size: 20, weight: .regular))
                 .foregroundColor(.secondary.opacity(0.5))
-            Text("还没有文字\n点击编辑，开始填写")
+            AppLocalizedText("还没有文字\n点击编辑，开始填写")
                 .font(.system(size: 11))
                 .foregroundColor(.secondary)
                 .multilineTextAlignment(.center)
@@ -59,6 +59,6 @@ struct BlankTextSlotThumbnailView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .allowsHitTesting(false)
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel("空白文本槽位，可编辑")
+        .localizedAccessibilityLabel("空白文本槽位，可编辑")
     }
 }

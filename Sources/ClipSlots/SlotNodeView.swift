@@ -175,7 +175,7 @@ struct NodeAttachmentButton: View {
                         })
                 }
             }
-            .help(count > 0 ? "附件：\(count) 个，点击管理，拖动可移动全部附件" : "添加附件")
+            .localizedHelp(count > 0 ? "附件：%ld 个，点击管理，拖动可移动全部附件" : "添加附件", count)
             // v2.10.20: 用透明背景视图持续上报按钮的屏幕矩形，供浮动面板定位与关闭判断。
             .background(AttachmentButtonAnchorReporter(holder: buttonAnchor))
             .onDrop(of: AttachmentTransfer.dropTypes, delegate: FileTransferDropDelegate(
@@ -214,7 +214,7 @@ struct NodeAttachmentButton: View {
                         .contentShape(Circle())
                 }
                 .buttonStyle(.plain)
-                .help("清空该槽位全部附件")
+                .localizedHelp("清空该槽位全部附件")
                 .offset(x: 5, y: -6)
                 .opacity(isClearButtonVisible ? 1 : 0)
                 .allowsHitTesting(isClearButtonVisible)
@@ -270,21 +270,21 @@ struct NodeAttachmentButton: View {
                     .font(.system(size: 18))
                     // v2.9.18: 裸写 .red 收敛到 AppTheme.danger。
                     .foregroundColor(AppTheme.danger)
-                Text("清空该槽位的全部附件？")
+                AppLocalizedText("清空该槽位的全部附件？")
                     .font(.system(size: 13, weight: .semibold))
             }
-            Text("将删除该槽位当前的 \(count) 个附件，此操作无法撤销。")
+            AppLocalizedText("将删除该槽位当前的 %ld 个附件，此操作无法撤销。", count)
                 .font(.caption)
                 .foregroundColor(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
 
-            Toggle("不再提醒", isOn: $suppressConfirmToggle)
+            Toggle(localized: "不再提醒", isOn: $suppressConfirmToggle)
                 .toggleStyle(.checkbox)
                 .font(.caption)
 
             HStack(spacing: 8) {
                 Spacer()
-                Button("取消") { showingClearConfirm = false }
+                Button(localized: "取消") { showingClearConfirm = false }
                     .keyboardShortcut(.cancelAction)
                 Button(role: .destructive) {
                     if suppressConfirmToggle {
@@ -293,7 +293,7 @@ struct NodeAttachmentButton: View {
                     store.setAttachments([], for: slot)
                     showingClearConfirm = false
                 } label: {
-                    Text("清空 \(count) 个附件")
+                    AppLocalizedText("清空 %ld 个附件", count)
                 }
                 .keyboardShortcut(.defaultAction)
             }
@@ -306,7 +306,7 @@ struct NodeAttachmentButton: View {
         HStack(spacing: 4) {
             Image(systemName: count > 0 ? "paperclip.circle.fill" : "paperclip")
                 .font(.system(size: 12, weight: .semibold))
-            Text(count > 0 ? "附件 \(count)" : "附件")
+            AppLocalizedText(count > 0 ? "附件 %ld" : "附件", count)
                 .font(.system(size: 11, weight: .semibold))
                 .lineLimit(1)
         }

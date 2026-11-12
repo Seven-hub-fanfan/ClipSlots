@@ -52,6 +52,7 @@ struct CanvasNodeLayerKey: Equatable {
     let hoveredPile: String?
     let pileGallery: String?
     let pileEntries: [String: CGRect]
+    let visibleNodeIDs: [String]
 }
 
 /// Menu state and pointer movement do not traverse the whole node layer when
@@ -64,7 +65,9 @@ struct CanvasNodeLayerBoundary: View, Equatable {
         self.content = { AnyView(content()) }
     }
     static func == (lhs: Self, rhs: Self) -> Bool { lhs.key == rhs.key }
-    var body: some View { content() }
+    var body: some View {
+        content()
+    }
 }
 
 /// Each fixed slot observes its own admission. Opening a slot does not rebuild

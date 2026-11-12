@@ -98,9 +98,30 @@ final class CLIInstallManager: ObservableObject {
     /// under `flock` contention, which previously froze the Settings UI).
     nonisolated private static func binaryVersion(at path: String) -> String? {
         guard FileManager.default.fileExists(atPath: path) else { return nil }
+        // Bundled versions are metadata. Merely opening Settings must never
+        // initialize the live CLI store (which may prune expired trash).
+        let resolved = URL(fileURLWithPath: path).resolvingSymlinksInPath()
+        let bundle = resolved.deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        if resolved.lastPathComponent == "clipslots-cli",
+           let data = try? Data(contentsOf: bundle.appendingPathComponent("Contents/Info.plist")),
+           let info = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any],
+           let identifier = info["CFBundleIdentifier"] as? String, identifier.hasPrefix("com.clipslots."),
+           let version = info["CFBundleShortVersionString"] as? String {
+            return version
+        }
+        // Legacy standalone binaries still need a probe, always with an empty,
+        // temporary data/config directory rather than the user's working store.
+        let scratch = FileManager.default.temporaryDirectory.appendingPathComponent("clipslots-cli-version-\(UUID())")
+        do { try FileManager.default.createDirectory(at: scratch, withIntermediateDirectories: true) }
+        catch { return nil }
+        defer { try? FileManager.default.removeItem(at: scratch) }
         let process = Process()
         process.executableURL = URL(fileURLWithPath: path)
         process.arguments = ["version"]
+        var environment = ProcessInfo.processInfo.environment
+        environment["CLIPSLOTS_DATA_DIR"] = scratch.appendingPathComponent("data").path
+        environment["CLIPSLOTS_CONFIG_PATH"] = scratch.appendingPathComponent("config.toml").path
+        process.environment = environment
         let outPipe = Pipe()
         let errPipe = Pipe()
         process.standardOutput = outPipe

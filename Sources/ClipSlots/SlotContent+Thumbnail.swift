@@ -400,6 +400,18 @@ extension SlotContent {
         return summary
     }
 
+    /// Metadata summaries are generated interface text; file extensions and
+    /// dimensions stay verbatim. The original cache remains language independent.
+    func interfaceMetadataSummary(language: AppInterfaceLanguage) -> String {
+        let summary = metadataSummary
+        guard language == .english else { return summary }
+        if summary == "文件" { return AppInterfaceStrings.text("文件", language: language) }
+        for kind in ["文件", "视频"] where summary.hasSuffix(" " + kind) {
+            return String(summary.dropLast(kind.count)) + AppInterfaceStrings.text(kind, language: language).lowercased()
+        }
+        return summary
+    }
+
     // AT-2 (v2.10.30): the original (uncached) summary computation, now invoked at
     // most once per content version.
     private func computeMetadataSummary() -> String {

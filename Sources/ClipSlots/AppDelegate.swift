@@ -2,7 +2,36 @@ import Cocoa
 import ClipSlotsKit
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
-    weak var store: SlotStoreObservable?
+    weak var store: SlotStoreObservable? {
+        didSet {
+            if let store, !pendingOpenFiles.isEmpty {
+                let urls = pendingOpenFiles
+                pendingOpenFiles.removeAll()
+                DispatchQueue.main.async { store.importSelectedURLs(urls) }
+            }
+        }
+    }
+    private var pendingOpenFiles: [URL] = []
+
+    // WindowGroup delivers the first URL through onOpenURL and forwards the
+    // rest through this URL-based delegate method (including on cold launch).
+    // Implementing only openFiles silently loses the remaining selection.
+    func application(_ application: NSApplication, open urls: [URL]) {
+        receiveOpenFiles(urls.filter(\.isFileURL))
+    }
+
+    func application(_ sender: NSApplication, openFiles filenames: [String]) {
+        receiveOpenFiles(filenames.map { URL(fileURLWithPath: $0) })
+        sender.reply(toOpenOrPrint: .success)
+    }
+
+    private func receiveOpenFiles(_ urls: [URL]) {
+        guard !urls.isEmpty else { return }
+        if let store { store.importSelectedURLs(urls) }
+        else { pendingOpenFiles.append(contentsOf: urls) }
+        NSApp.activate(ignoringOtherApps: true)
+        NSApp.windows.first { $0.styleMask.contains(.titled) && !($0 is NSPanel) }?.makeKeyAndOrderFront(nil)
+    }
     private let hotkeyManager = HotKeyManager.shared
     private let radialMenuController = RadialMenuWindowController()
     private var hotKeysReady = false
@@ -406,6 +435,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         let mouseLocation = NSEvent.mouseLocation
         let frontmost = NSWorkspace.shared.frontmostApplication
+        let targetsCanvas = CanvasCommandBridge.shared.acceptsSlotCommands
 
         // Filter out ClipSlots itself
         let previousApp: NSRunningApplication?
@@ -431,7 +461,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 // v2.11.7 hotfix18/19: 画布在台上 → 内容进画布（有选中填进去，无选中则新建节点）。
                 // **刻意不切回上一个 App**：目标就在 ClipSlots 自己的画布里，把前台让出去等于让用户
                 // 看不到刚才那一步的结果，还得手动切回来。
-                if CanvasCommandBridge.shared.handleSlotCommand(slot) { return }
+                // Opening our radial panel must not change an external app's paste target.
+                if targetsCanvas, CanvasCommandBridge.shared.handleSlotCommand(slot) { return }
 
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
                     if let previousApp = previousApp ?? self.store?.lastNonClipSlotsApp {

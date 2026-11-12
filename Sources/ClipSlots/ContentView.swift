@@ -100,9 +100,6 @@ struct ContentView: View {
     // v2.9.8: plugins page popover.
     @State private var showingPlugins = false
 
-    @State private var showingPageSelector = false
-    @State private var expandedPageId: String?
-    @State private var isPageMultiSelecting = false
     // v2.10.69: 量化后的网格容器宽度 + 缓存的列数组。拖拽 resize 时仅当宽度跨过 8pt 台阶才更新，
     // 其余帧沿用同一 [GridItem] 实例（身份稳定），避免逐像素重排。
     /// v2.10.93: 「装宽度的盒子」。写它的属性**不会**让任何视图失效（普通引用类型，不是 @Published），
@@ -124,7 +121,6 @@ struct ContentView: View {
     /// 变成了「跨列时才走一次」；列宽则交给 `.flexible()` 在布局阶段均分铺满，逐帧免费。
     @State private var gridColumnCount: Int = 0
 
-    @State private var selectedPageIds: Set<String> = []
     // v2.9.8: update checker.
     @ObservedObject private var updateChecker = UpdateChecker.shared
     @State private var showingConnectionFullscreen = false
@@ -151,7 +147,7 @@ struct ContentView: View {
     @State private var searchText: String = ""
     @State private var selectedFilter: SlotFilterType = .all
     // v2.7.23: global search is the default. Users can still switch back to group scope.
-@State private var searchScope: SlotSearchScope = .global
+    @State private var searchScope: SlotSearchScope = .global
     @State private var globalSearchSortRule: SlotSearchSortRule = .smart
     // v2.8.0 (perf M1/M2): debounced + cached global search. `searchText` changes on
     // every keystroke, but the expensive cross-page/group scan should only run after
@@ -241,6 +237,7 @@ struct ContentView: View {
 
     /// 两个工作区显示同一个项目侧栏，切页保留显隐、展开和会话状态。
     @AppStorage(AgentPreferences.sharedSidebarVisibleKey) private var sharedAgentVisible = false
+    @Environment(\.accessibilityReduceMotion) private var reduceSidebarMotion
     @State private var canvasAgentExpanded = false
 
     private var agentSidebarVisible: Bool {
@@ -248,7 +245,10 @@ struct ContentView: View {
     }
 
     private var agentSidebarBinding: Binding<Bool> {
-        $sharedAgentVisible
+        Binding(get: { sharedAgentVisible }, set: { setAgentSidebarVisible($0) })
+    }
+    private func setAgentSidebarVisible(_ visible: Bool) {
+        withAnimation(reduceSidebarMotion ? nil : Anim.navigationReveal) { sharedAgentVisible = visible }
     }
 
     // v2.9.17: theme switch now takes effect instantly with no transition effect.
@@ -418,6 +418,7 @@ struct ContentView: View {
                     //
                     // hotfix25 起这条 minWidth 落在**整个左列**（含操作行）上而不只是工作区，语义正好：
                     // 左列有多宽，操作行和卡片网格就有多宽。
+                    .animation(nil, value: sharedAgentVisible)
                     .frame(minWidth: canvasAgentExpanded ? 0 : workspaceMode == .canvas
                            ? WindowLayoutMetrics.canvasViewportMinWidth
                            : WindowLayoutMetrics.editWorkspaceMinWidth)
@@ -429,7 +430,7 @@ struct ContentView: View {
                     .overlay(alignment: .bottomTrailing) {
                         if workspaceMode == .canvas && !canvasAgentExpanded {
                             AgentOrbButton(isOpen: sharedAgentVisible) {
-                                withAnimation(Anim.transition) { sharedAgentVisible.toggle() }
+                                setAgentSidebarVisible(!sharedAgentVisible)
                             }
                             .padding(.trailing, 14)
                             .padding(.bottom, 16)
@@ -447,7 +448,7 @@ struct ContentView: View {
                                          legacyEditModel: agentSessions.edit,
                                          entryMounts: workspaceTransition.sidebarMounts)
                             .ignoresSafeArea(.container, edges: workspaceMode == .canvas ? .top : [])
-                            .transition(.move(edge: .trailing))
+                            .transition(reduceSidebarMotion ? .identity : .opacity)
                             // 侧栏自己是定宽的，这里再声明一次「不许被压」：没有它，SwiftUI 仍可能
                             // 在总宽不足时给它一个更小的提案，让 320pt 的内容溢出到工作区上面。
                             .fixedSize(horizontal: !canvasAgentExpanded, vertical: false)
@@ -650,7 +651,7 @@ struct ContentView: View {
                 }
             }
             HStack(spacing: 4) {
-                Text("💡 建议在设置中尝试 Cmd+Option+数字 以避免冲突")
+                AppLocalizedText("💡 建议在设置中尝试 Cmd+Option+数字 以避免冲突")
                     .font(.system(size: 9))
                     .foregroundColor(.secondary)
                 Spacer()
@@ -902,9 +903,6 @@ struct ContentView: View {
     private var headerView: some View {
         VStack(spacing: 0) {
             actionBar
-                // v2.10.24: 跨组游标提示胶囊叠在操作行上，水平居中，不占额外垂直空间
-                // （仅在游标位于其他组时才有内容）。
-                .overlay(crossGroupCursorHint)
                 .padding(.horizontal, AppTheme.pagePadding)
                 .padding(.vertical, 8)
 
@@ -951,7 +949,7 @@ struct ContentView: View {
                 // reference; the shared layout keeps both themes aligned.
                 HeaderMascotView(model: agentSessions.sidebarSession(canvas: canvasStore, store: store),
                                  canvas: canvasStore) {
-                    sharedAgentVisible.toggle()
+                    setAgentSidebarVisible(!sharedAgentVisible)
                 }
                 .frame(width: HeaderMascotView.canvasSide, height: HeaderMascotView.canvasSide)
             }
@@ -973,7 +971,7 @@ struct ContentView: View {
                                 Image(systemName: "arrow.triangle.2.circlepath")
                                     .font(.system(size: 11, weight: .semibold))
                             }
-                            Text(updateChecker.isChecking ? "检查中…" : "检查更新")
+                            AppLocalizedText(updateChecker.isChecking ? "检查中…" : "检查更新")
                                 .font(.system(size: 11, weight: .medium))
                         }
                         .padding(.horizontal, 8)
@@ -984,7 +982,7 @@ struct ContentView: View {
                     }
                     .buttonStyle(.borderless)
                     .disabled(updateChecker.isChecking)
-                    .help("检查是否有新版本")
+                    .localizedHelp("检查是否有新版本")
             }
             }
             .fixedSize(horizontal: true, vertical: false)
@@ -1029,14 +1027,13 @@ struct ContentView: View {
                     jumpToSearchResult(result)
                 }
             )
-            // v2.10.77: 搜索框此前 maxWidth: .infinity 会横向铺满整行，观感过长。改为
-            // 固定上限宽度 400pt。用固定上限而非随窗口宽度变化的比例值，配合 v2.10.75
-            // resize 冻结，resize 时宽度稳定。
+            // Compact the complete search well, including scope and filter,
+            // to the user's 330pt target. Keep a fixed cap during resizing.
             //
             // v2.11.7 hotfix24: 刻意**不写 minWidth** —— 让 SlotSearchBar 自己的
             // `WidthThresholdLayout` 回答最小宽度（提案 width: 0 时它选窄变体，答 ~232pt）。
             // 写死一个更小的 minWidth（哪怕 80）只会让它再次被压到内容溢出、菜单叠到图标底下。
-            .frame(idealWidth: 400, maxWidth: 400)
+            .frame(idealWidth: 330, maxWidth: 330)
             .layoutPriority(0)
             }
 
@@ -1060,7 +1057,7 @@ struct ContentView: View {
                     .neuIconTile()
             }
             .buttonStyle(.plain)
-            .help("插件")
+            .localizedHelp("插件")
             .popover(isPresented: $showingPlugins) {
                 PluginsView {
                     showingPlugins = false
@@ -1076,7 +1073,7 @@ struct ContentView: View {
                     .neuIconTile()
             }
             .buttonStyle(.plain)
-            .help("快捷键模板：\(store.config.hotkeyTemplate.kind.title)")
+            .localizedHelp("快捷键模板：%@", AppInterfaceStrings.text(store.config.hotkeyTemplate.kind.title))
             .popover(isPresented: $showingHotkeyTemplatePopover) {
                 HotkeyTemplatePopover(
                     config: store.config,
@@ -1099,7 +1096,7 @@ struct ContentView: View {
                     .neuIconTile()
             }
             .buttonStyle(.plain)
-            .help("设置")
+            .localizedHelp("设置")
             }
             .fixedSize(horizontal: true, vertical: false)
             .layoutPriority(2)
@@ -1121,259 +1118,26 @@ struct ContentView: View {
     // Layer 2: Page Selector + Actions
     private var actionBar: some View {
         HStack(alignment: .center, spacing: 10) {
-            Button {
-                showingPageSelector.toggle()
-            } label: {
-                // v2.11.7 hotfix9: 这颗按钮外壳早就是新拟物了，里面却还塞着两个旧世界的零件——
-                // 一块 25pt 的浅色小方块托着页面图标、一颗半透明灰胶囊裹着组数。凸起按钮里再嵌两个
-                // 更小的「片」，材质就套了三层，是这一行看起来最杂的地方。现在图标去掉底板（图标本身
-                // 就够表意，底板纯装饰），组数换成**内凹**小胶囊——凹进按钮表面 = 「这是刻在按钮上的
-                // 附加信息」，和搜索框共用同一种凹陷语言，不再引入第三种材质。
-                HStack(spacing: 7) {
-                    Image(systemName: "square.grid.2x2.fill")
-                        .font(.system(size: 12, weight: .semibold))
-                        .foregroundColor(Neu.subtleInk)
-                    Text(store.currentPage?.name ?? "默认页面")
-                        .font(.system(size: 12, weight: .semibold))
-                        .lineLimit(1)
-                    Text("\(store.currentPageSlotGroups.count)")
-                        .font(.system(size: 9, weight: .bold))
-                        .foregroundColor(Neu.subtleInk)
-                        .padding(.horizontal, 6)
-                        .padding(.vertical, 2)
-                        .neuWell(radius: 7)
-                    Image(systemName: "chevron.down")
-                        .font(.system(size: 8, weight: .bold))
-                        .foregroundColor(Neu.subtleInk)
-                }
-                .foregroundColor(Neu.ink)
-                .padding(.leading, 9)
-                .padding(.trailing, 9)
-                .frame(height: NeumorphicMetrics.actionHeight)
-                // v2.11.8: 页面选择器与右侧操作按钮同为「凸起」层级，用同一套 neu 表面，
-                // 免得一行里出现两种材质（原来是半透明胶囊 + 描边）。
-                .neuRaised(radius: NeumorphicMetrics.actionRadius)
-            }
-            .buttonStyle(.plain)
-            .fixedSize()
-            .popover(isPresented: $showingPageSelector, arrowEdge: .bottom) {
-                pageSelectorPopover
-            }
+            PageNavigationControl(store: store,
+                onCreate: { promptCreatePage() },
+                onRename: { promptRenamePage(id: $0, currentName: $1) },
+                onDelete: { confirmDeletePage(id: $0, name: $1) })
 
             Spacer(minLength: 8)
 
+            crossGroupCursorHint
+                .frame(maxWidth: 360, alignment: .trailing)
+
             AutoAdvanceToggleView(autoMode: autoMode)
+                .fixedSize()
 
             if store.isSlotConnectionEnabled {
                 connectionToolButton
             }
             toolbarActions
+                .fixedSize()
         }
         .frame(minHeight: 36, alignment: .center)
-    }
-
-    private var pageSelectorPopover: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack(spacing: 9) {
-                ZStack {
-                    RoundedRectangle(cornerRadius: 8, style: .continuous)
-                        .fill(Color.primary.opacity(0.88))
-                        .frame(width: 30, height: 30)
-                    Image(systemName: "square.grid.2x2.fill")
-                        .font(.system(size: 11, weight: .semibold))
-                        .foregroundColor(AppTheme.invertedOnAccentText)
-                }
-                Text("页面导航")
-                    .font(.system(size: 13, weight: .semibold))
-                Spacer()
-                Button {
-                    showingPageSelector = false
-                    promptCreatePage()
-                } label: {
-                    Image(systemName: "plus")
-                        .font(.system(size: 10, weight: .bold))
-                        .frame(width: 24, height: 24)
-                        .background(Circle().fill(Color.primary.opacity(0.07)))
-                }
-                .buttonStyle(.plain)
-                .help("新建页面")
-            }
-            .padding(.horizontal, 10)
-            .padding(.top, 10)
-            .padding(.bottom, 4)
-
-            ScrollView {
-                LazyVStack(spacing: 3) {
-                    ForEach(store.pages) { page in
-                        let isCurrentPage = page.id == store.currentPageId
-                        let isExpanded = expandedPageId == page.id || (expandedPageId == nil && isCurrentPage)
-                        let isSelected = selectedPageIds.contains(page.id)
-                        let pageGroups = store.specialSlots.filter { $0.pageId == page.id }
-
-                        Button {
-                            if isPageMultiSelecting {
-                                if isSelected {
-                                    selectedPageIds.remove(page.id)
-                                } else {
-                                    selectedPageIds.insert(page.id)
-                                }
-                            } else if isExpanded {
-                                withAnimation(Anim.status) {
-                                    expandedPageId = ""
-                                }
-                            } else {
-                                store.switchToPage(id: page.id, fromNavigation: true)
-                                withAnimation(Anim.status) {
-                                    expandedPageId = page.id
-                                }
-                            }
-                        } label: {
-                            HStack(spacing: 9) {
-                                Image(systemName: isCurrentPage ? "folder.fill" : "folder")
-                                    .font(.system(size: 12, weight: .medium))
-                                    .frame(width: 18)
-                                Text(page.name)
-                                    .font(.system(size: 12, weight: isCurrentPage ? .semibold : .medium))
-                                    .lineLimit(1)
-                                Spacer()
-                                Text("\(pageGroups.count)")
-                                    .font(.system(size: 9, weight: .semibold))
-                                    .foregroundColor(.secondary)
-                                    .padding(.horizontal, 6)
-                                    .padding(.vertical, 2)
-                                    .background(Capsule().fill(Color.primary.opacity(0.07)))
-                                if isPageMultiSelecting {
-                                    Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
-                                        .font(.system(size: 12, weight: .semibold))
-                                        .foregroundColor(isSelected ? .accentColor : .secondary)
-                                } else {
-                                    Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
-                                        .font(.system(size: 8, weight: .bold))
-                                        .foregroundColor(.secondary)
-                                }
-                            }
-                            .foregroundColor(.primary)
-                            .padding(.horizontal, 10)
-                            .frame(height: 36)
-                            .background(
-                                RoundedRectangle(cornerRadius: 9, style: .continuous)
-                                    .fill(isCurrentPage ? Color.primary.opacity(0.075) : Color.clear)
-                            )
-                            .contentShape(Rectangle())
-                        }
-                        .buttonStyle(PageNavigationButtonStyle())
-
-                        if isExpanded && !isPageMultiSelecting {
-                            LazyVStack(spacing: 2) {
-                                ForEach(pageGroups) { group in
-                                    let isCurrentGroup = group.id == store.currentSpecialSlotId
-                                    Button {
-                                        store.switchSpecialSlot(id: group.id, fromNavigation: true)
-                                        showingPageSelector = false
-                                    } label: {
-                                        HStack(spacing: 8) {
-                                            Rectangle()
-                                                .fill(isCurrentGroup ? Color.accentColor : Color.primary.opacity(0.10))
-                                                .frame(width: 1, height: 24)
-                                            Text(group.name)
-                                                .font(.system(size: 11, weight: isCurrentGroup ? .semibold : .regular))
-                                                .lineLimit(1)
-                                            Spacer()
-                                            if isCurrentGroup {
-                                                Image(systemName: "chevron.right")
-                                                    .font(.system(size: 8, weight: .bold))
-                                            }
-                                        }
-                                        .foregroundColor(isCurrentGroup ? .primary : .secondary)
-                                        .padding(.leading, 23)
-                                        .padding(.trailing, 11)
-                                        .frame(height: 31)
-                                        .background(
-                                            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                                                .fill(isCurrentGroup ? Color.primary.opacity(0.07) : Color.clear)
-                                        )
-                                        .contentShape(Rectangle())
-                                    }
-                                    .buttonStyle(.plain)
-                                }
-                            }
-                            .transition(.opacity.combined(with: .move(edge: .top)))
-                        }
-                    }
-                }
-                .padding(.horizontal, 6)
-            }
-            .frame(maxHeight: 300)
-
-            Divider()
-
-            HStack(spacing: 10) {
-                if isPageMultiSelecting {
-                    Button(role: .destructive) {
-                        let pageIds = selectedPageIds
-                        for pageId in pageIds {
-                            store.deletePage(id: pageId)
-                        }
-                        selectedPageIds.removeAll()
-                        withAnimation(Anim.interactive) {
-                            isPageMultiSelecting = false
-                        }
-                    } label: {
-                        Label("删除 \(selectedPageIds.count)", systemImage: "trash")
-                    }
-                    .disabled(selectedPageIds.isEmpty)
-
-                    Button {
-                        selectedPageIds.removeAll()
-                        withAnimation(Anim.interactive) {
-                            isPageMultiSelecting = false
-                        }
-                    } label: {
-                        Text("取消")
-                    }
-                } else {
-                    if store.pages.count > 1, let page = store.currentPage {
-                        Button {
-                            showingPageSelector = false
-                            promptRenamePage(id: page.id, currentName: page.name)
-                        } label: {
-                            Label("重命名", systemImage: "pencil")
-                        }
-                        Button(role: .destructive) {
-                            showingPageSelector = false
-                            confirmDeletePage(id: page.id, name: page.name)
-                        } label: {
-                            Label("删除", systemImage: "trash")
-                        }
-                    }
-
-                    Button {
-                        selectedPageIds.removeAll()
-                        withAnimation(Anim.interactive) {
-                            isPageMultiSelecting = true
-                        }
-                    } label: {
-                        Label("多选", systemImage: "checkmark.circle")
-                    }
-                }
-
-                Spacer()
-
-                Button {
-                    showingPageSelector = false
-                    isPageMultiSelecting = false
-                    selectedPageIds.removeAll()
-                } label: {
-                    Text("完成")
-                        .fontWeight(.semibold)
-                }
-            }
-            .font(.system(size: 10.5))
-            .buttonStyle(.borderless)
-            .padding(.horizontal, 11)
-            .padding(.bottom, 9)
-        }
-        .frame(width: 252)
     }
 
     // v2.10.79 (改动A 观察下沉): 原 `autoAdvanceToggle` / `leverCluster` 及其私有辅助
@@ -1392,7 +1156,7 @@ struct ContentView: View {
                 role: .normal,
                 action: { store.startPackExport() }
             )
-            .help("把选中的页面/槽位组打包导出为 .clipslotspack")
+            .localizedHelp("把选中的页面/槽位组打包导出为 .clipslotspack")
 
             ToolbarActionButton(
                 title: "导入",
@@ -1400,7 +1164,7 @@ struct ContentView: View {
                 role: .normal,
                 action: { store.startToolbarImport() }
             )
-            .help("导入图片/文件夹，或导入槽位包（.clipslotspack）")
+            .localizedHelp("导入图片/文件夹，或导入槽位包（.clipslotspack）")
 
             ToolbarActionButton(
                 title: "清空",
@@ -1408,7 +1172,7 @@ struct ContentView: View {
                 role: .destructive,
                 action: { store.clearAllSlotsInCurrentSpecialSlotWithConfirmation() }
             )
-            .help("清空当前槽位组中的全部槽位")
+            .localizedHelp("清空当前槽位组中的全部槽位")
         }
         .frame(height: 36, alignment: .center)
         .padding(.horizontal, 2)
@@ -1422,24 +1186,21 @@ struct ContentView: View {
         return ScrollView(.horizontal, showsIndicators: false) {
             LazyHStack(spacing: 6) {
                 ForEach(pageGroups) { group in
-                    let isCurrent = group.id == store.currentSpecialSlotId
-
-                    // v2.10.77: 组切换 tab 加入按压微缩 / hover 高亮 / 选中态平滑过渡，
-                    // 交互反馈由 GroupTabButton 内部承载，点击切组语义（switchSpecialSlot）保持不变。
-                    GroupTabButton(name: group.name, isCurrent: isCurrent,
+                    GroupNavigationTab(gate: store.transientUI.navigationGate,
+                        groupID: group.id, name: group.name, currentGroupID: store.currentSpecialSlotId,
                         action: { store.switchSpecialSlot(id: group.id, fromNavigation: true) },
                         onDropFiles: { store.dropFilesIntoGroup($0, groupID: group.id) })
                     .contextMenu {
                         Button {
                             renameSlotGroup(id: group.id, currentName: group.name)
                         } label: {
-                            Label("重命名", systemImage: "pencil")
+                            Label(localized: "重命名", systemImage: "pencil")
                         }
                         if pageGroups.count > 1 {
                             Button(role: .destructive) {
                                 store.deleteSpecialSlotWithConfirmation(id: group.id)
                             } label: {
-                                Label("删除", systemImage: "trash")
+                                Label(localized: "删除", systemImage: "trash")
                             }
                         }
                     }
@@ -1458,7 +1219,7 @@ struct ContentView: View {
                 }
                 .buttonStyle(.plain)
                 .disabled(pageGroups.count >= store.specialSlotSettings.maxSpecialSlots)
-                .help(pageGroups.count >= store.specialSlotSettings.maxSpecialSlots
+                .localizedHelp(pageGroups.count >= store.specialSlotSettings.maxSpecialSlots
                       ? "当前页面的槽位组数量已达到上限" : "新建槽位组")
 
                 Button {
@@ -1472,7 +1233,7 @@ struct ContentView: View {
                         .neuRaised(radius: NeumorphicMetrics.actionRadius)
                 }
                 .buttonStyle(.plain)
-                .help("管理槽位组")
+                .localizedHelp("管理槽位组")
             }
         }
         .frame(height: NeumorphicMetrics.actionHeight)
@@ -1540,13 +1301,13 @@ struct ContentView: View {
     // v2.4: renamed from renameSpecialSlot
     private func renameSlotGroup(id: String, currentName: String) {
         let alert = NSAlert()
-        alert.messageText = "重命名槽位组"
-        alert.addButton(withTitle: "确定")
-        alert.addButton(withTitle: "取消")
+        alert.messageText = AppInterfaceStrings.text("重命名槽位组")
+        alert.addButton(withTitle: AppInterfaceStrings.text("确定"))
+        alert.addButton(withTitle: AppInterfaceStrings.text("取消"))
 
         let textField = NSTextField(frame: NSRect(x: 0, y: 0, width: 240, height: 24))
         textField.stringValue = currentName
-        textField.placeholderString = "输入新名称"
+        textField.placeholderString = AppInterfaceStrings.text("输入新名称")
         alert.accessoryView = textField
 
         // P2-4: non-blocking sheet instead of runModal.
@@ -1564,12 +1325,12 @@ struct ContentView: View {
 
     private func promptCreatePage() {
         let alert = NSAlert()
-        alert.messageText = "新建页面"
-        alert.addButton(withTitle: "确定")
-        alert.addButton(withTitle: "取消")
+        alert.messageText = AppInterfaceStrings.text("新建页面")
+        alert.addButton(withTitle: AppInterfaceStrings.text("确定"))
+        alert.addButton(withTitle: AppInterfaceStrings.text("取消"))
 
         let textField = NSTextField(frame: NSRect(x: 0, y: 0, width: 240, height: 24))
-        textField.placeholderString = "输入页面名称"
+        textField.placeholderString = AppInterfaceStrings.text("输入页面名称")
         alert.accessoryView = textField
 
         // P2-4: non-blocking sheet instead of runModal.
@@ -1585,13 +1346,13 @@ struct ContentView: View {
 
     private func promptRenamePage(id: String, currentName: String) {
         let alert = NSAlert()
-        alert.messageText = "重命名页面"
-        alert.addButton(withTitle: "确定")
-        alert.addButton(withTitle: "取消")
+        alert.messageText = AppInterfaceStrings.text("重命名页面")
+        alert.addButton(withTitle: AppInterfaceStrings.text("确定"))
+        alert.addButton(withTitle: AppInterfaceStrings.text("取消"))
 
         let textField = NSTextField(frame: NSRect(x: 0, y: 0, width: 240, height: 24))
         textField.stringValue = currentName
-        textField.placeholderString = "输入新名称"
+        textField.placeholderString = AppInterfaceStrings.text("输入新名称")
         alert.accessoryView = textField
 
         // P2-4: non-blocking sheet instead of runModal.
@@ -1608,11 +1369,11 @@ struct ContentView: View {
     private func confirmDeletePage(id: String, name: String) {
         // v2.10.47: 回退 v2.10.46 的 inline 确认卡（负优化）——恢复系统 NSAlert（非阻塞 sheet）。
         let alert = NSAlert()
-        alert.messageText = "删除页面？"
-        alert.informativeText = "将删除页面「\(name)」及其下所有槽位组和槽位内容。此操作不可撤销。"
+        alert.messageText = AppInterfaceStrings.text("删除页面？")
+        alert.informativeText = AppInterfaceStrings.format("将删除页面「%@」及其下所有槽位组和槽位内容。此操作不可撤销。", arguments: [name])
         alert.alertStyle = .warning
-        alert.addButton(withTitle: "删除")
-        alert.addButton(withTitle: "取消")
+        alert.addButton(withTitle: AppInterfaceStrings.text("删除"))
+        alert.addButton(withTitle: AppInterfaceStrings.text("取消"))
 
         // P2-4: non-blocking sheet instead of runModal.
         runAlertNonBlocking(alert) { response in
@@ -1666,7 +1427,7 @@ struct ContentView: View {
             Spacer()
 
             AgentOrbButton(isOpen: sharedAgentVisible) {
-                withAnimation(Anim.transition) { sharedAgentVisible.toggle() }
+                setAgentSidebarVisible(!sharedAgentVisible)
             }
 
         }
@@ -1693,11 +1454,11 @@ struct ContentView: View {
                 Image(systemName: "arrow.uturn.forward.circle")
                     .font(.system(size: 11, weight: .semibold))
                 if let desc = store.lastPasteDescription {
-                    Text("上次粘贴 ")
-                    + Text(desc)
+                    AppLocalizedText("上次粘贴")
+                    Text(verbatim: desc)
                         .foregroundColor(lastPasteHovering ? .primary : .secondary)
                 } else {
-                    Text("上次粘贴 —")
+                    AppLocalizedText("上次粘贴 —")
                 }
             }
             .font(.caption2)
@@ -1719,7 +1480,8 @@ struct ContentView: View {
             lastPasteHovering = hovering && store.lastPasteDescription != nil
         }
         .animation(Anim.interactive, value: lastPasteHovering)
-        .help(store.lastPasteDescription.map { "点击跳转到上次粘贴位置：\($0)" } ?? "尚未粘贴过任何槽位")
+        .localizedHelp(store.lastPasteDescription == nil ? "尚未粘贴过任何槽位" : "点击跳转到上次粘贴位置：%@",
+                       store.lastPasteDescription ?? "")
     }
 
     // v2.7.9: prominent connection button with current-group state.
@@ -1741,14 +1503,10 @@ struct ContentView: View {
     private var connectionMenuLabel: some View {
         let edgeCount = store.currentConnectionMap.edges.count
         let hasConnections = edgeCount > 0
-        return HStack(spacing: 6) {
-            Image(systemName: "point.3.connected.trianglepath.dotted")
-                .font(.system(size: 12, weight: .bold))
-                .symbolRenderingMode(.hierarchical)
-            Text(hasConnections ? "连接 · \(edgeCount)" : "连接")
-                .font(.caption.weight(.semibold))
-        }
-        .help(hasConnections ? "当前槽位组已有 \(edgeCount) 条连接" : "打开节点连接工具")
+        return CompactActionLabel(title: hasConnections ? "连接 · %ld" : "连接",
+                                  icon: "point.3.connected.trianglepath.dotted",
+                                  arguments: hasConnections ? [edgeCount] : [])
+        .localizedHelp(hasConnections ? "当前槽位组已有 %ld 条连接" : "打开节点连接工具", edgeCount)
     }
 
     private func keyChip(_ text: String, icon: String) -> some View {
@@ -1792,7 +1550,8 @@ struct ContentView: View {
             onCopy: { store.copySlot(slot) },
             onSave: { store.saveToSlot(slot) },
             onClear: { store.clearSlotWithConfirmation(slot) },
-            onSetLabel: { newLabel in store.setLabel(slot, label: newLabel.isEmpty ? nil : newLabel) },
+            onSetLabel: { newLabel in store.setLabel(slot, label: newLabel.isEmpty ? nil : newLabel, in: displayedGroup) },
+            onCommitLabel: { newLabel in store.setLabel(slot, label: newLabel.isEmpty ? nil : newLabel, in: displayedGroup) },
             onEditText: { newText in store.updateTextSlot(slot, text: newText) },
             onEditHTML: { html in store.updateHTMLSlot(slot, html: html) },
             onDropFiles: { urls in store.importDroppedFiles(urls, toSlot: slot) },
@@ -1853,9 +1612,9 @@ struct ContentView: View {
     private var searchResultsSection: some View {
         VStack(spacing: 4) {
             if searchScope == .currentGroup {
-                Text(matchedSlotCount == 0
+                AppLocalizedText(matchedSlotCount == 0
                      ? "组内未找到匹配槽位"
-                     : "组内找到 \(matchedSlotCount) 个匹配槽位")
+                     : "组内找到 %ld 个匹配槽位", matchedSlotCount)
                     .font(.caption)
                     .foregroundColor(.secondary)
                     .padding(.top, 2)
@@ -1888,10 +1647,10 @@ struct ContentView: View {
             Image(systemName: "magnifyingglass")
                 .font(.system(size: 28))
                 .foregroundColor(.secondary.opacity(0.5))
-            Text("未找到匹配槽位")
+            AppLocalizedText("未找到匹配槽位")
                 .font(.subheadline)
                 .foregroundColor(.secondary)
-            Button("清除搜索") {
+            Button(localized: "清除搜索") {
                 // P2-29 (v2.10.9): 这是显式的「清除搜索」整体动作，语义上清空全部搜索条件，
                 // 因此仍同时清文本 + 重置筛选。搜索栏的 × 按钮（SlotSearchBar）才需保留筛选。
                 searchText = ""
@@ -2120,16 +1879,18 @@ private struct ShortcutBadge: View {
     let title: String
     let shortcut: String
     let icon: String
+    @AppStorage(AppInterfaceLanguage.preferenceKey) private var languageRaw = AppInterfaceLanguage.chinese.rawValue
 
     var body: some View {
         HStack(spacing: 5) {
             Image(systemName: icon)
                 .font(.system(size: 9, weight: .semibold))
                 .foregroundColor(.secondary)
-            Text(title)
+            AppLocalizedText(title)
                 .font(.system(size: 10, weight: .medium))
                 .foregroundColor(.secondary)
-            Text(shortcut)
+            Text(verbatim: shortcut.replacingOccurrences(of: "数字",
+                with: AppInterfaceStrings.text("数字", language: AppInterfaceLanguage.resolve(languageRaw))))
                 .font(.system(size: 10, weight: .semibold))
                 .foregroundColor(.primary)
                 .padding(.horizontal, 5)
@@ -2159,12 +1920,7 @@ private struct ToolbarActionButton: View {
 
     var body: some View {
         Button(action: action) {
-            HStack(spacing: 6) {
-                Image(systemName: icon)
-                    .font(.system(size: 12, weight: .semibold))
-                Text(title)
-                    .font(.system(size: 12, weight: .semibold))
-            }
+            CompactActionLabel(title: title, icon: icon)
         }
         .buttonStyle(CompactActionStyle(selected: role == .accent, destructive: role == .destructive))
         .accessibilityIdentifier("editor-action-\(title)")
@@ -2190,12 +1946,12 @@ struct HotkeyTemplatePopover: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
-            Text("快捷键模板")
+            AppLocalizedText("快捷键模板")
                 .font(.headline)
 
-            Picker("模板", selection: $kind) {
+            Picker(localized: "模板", selection: $kind) {
                 ForEach(HotkeyTemplateKind.allCases) { k in
-                    Text(k.title).tag(k)
+                    AppLocalizedText(k.title).tag(k)
                 }
             }
             .pickerStyle(.segmented)
@@ -2210,7 +1966,7 @@ struct HotkeyTemplatePopover: View {
 
             HStack {
                 Spacer()
-                Button("应用") {
+                Button(localized: "应用") {
                     var newConfig = config
                     newConfig.hotkeyTemplate.kind = kind
                     newConfig.hotkeyTemplate.customKeys = customKeys
@@ -2225,7 +1981,7 @@ struct HotkeyTemplatePopover: View {
 
     private var templatePreview: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text("槽位映射")
+            AppLocalizedText("槽位映射")
                 .font(.subheadline)
                 .foregroundColor(.secondary)
 
@@ -2233,7 +1989,7 @@ struct HotkeyTemplatePopover: View {
                 ForEach(1...10, id: \.self) { slot in
                     let key = currentTemplate.keyToken(for: slot) ?? "-"
                     VStack(spacing: 2) {
-                        Text("槽 \(slot)")
+                        AppLocalizedText("槽 %ld", slot)
                             .font(.caption2)
                             .foregroundColor(.secondary)
                         Text(key.uppercased())
@@ -2254,7 +2010,7 @@ struct HotkeyTemplatePopover: View {
         LazyVGrid(columns: Array(repeating: GridItem(.flexible()), count: 2), spacing: 8) {
             ForEach(0..<10, id: \.self) { index in
                 HStack {
-                    Text("槽 \(index + 1)")
+                    AppLocalizedText("槽 %ld", index + 1)
                         .font(.caption)
                     TextField("", text: Binding(
                         get: { customKeys.indices.contains(index) ? customKeys[index] : "" },
@@ -2304,11 +2060,11 @@ private struct CursorBadgesView: View {
             HStack(spacing: 3) {
                 if showWrite {
                     cursorDot(color: .green)
-                        .help("下一次 Opt+1 自动存储会写这里")
+                        .localizedHelp("下一次 Opt+1 自动存储会写这里")
                 }
                 if showRead {
                     cursorDot(color: .blue)
-                        .help("下一次 Cmd+1 自动粘贴会读这里")
+                        .localizedHelp("下一次 Cmd+1 自动粘贴会读这里")
                 }
             }
             .padding(7)
@@ -2324,11 +2080,13 @@ private struct CursorBadgesView: View {
     }
 }
 
-/// 标题栏第二行的「写/读游标在其他组」跨组提示胶囊。
+/// Cross-group cursor destinations occupy their own space in the action row.
 private struct CrossGroupCursorHintView: View {
     @ObservedObject var store: SlotStoreObservable
     @ObservedObject var ui: TransientUIStore
     @ObservedObject var autoMode: AutoModeState
+    @AppStorage(AppInterfaceLanguage.preferenceKey) private var languageRaw = AppInterfaceLanguage.chinese.rawValue
+    private var language: AppInterfaceLanguage { AppInterfaceLanguage.resolve(languageRaw) }
 
     /// 若地址指向的组不是当前查看组，返回「页 / 组 · 槽位 N」描述；否则返回 nil（当前组已有角标）。
     private func crossGroupCursorLabel(_ addr: SlotAddress?) -> String? {
@@ -2339,7 +2097,7 @@ private struct CrossGroupCursorHintView: View {
         }
         let pageName = store.pages.first(where: { $0.id == group.pageId })?.name
         let pagePart = pageName.map { "\($0) / " } ?? ""
-        return "\(pagePart)\(group.name) · 槽位 \(addr.slot)"
+        return "\(pagePart)\(group.name) · " + AppInterfaceStrings.format("槽位 %ld", language: language, arguments: [addr.slot])
     }
 
     @ViewBuilder
@@ -2347,51 +2105,44 @@ private struct CrossGroupCursorHintView: View {
         let writeHint = autoMode.autoStoreEnabled ? crossGroupCursorLabel(ui.autoStorePreview) : nil
         let readHint = autoMode.autoPasteEnabled ? crossGroupCursorLabel(ui.autoPastePreview) : nil
         if writeHint != nil || readHint != nil {
-            HStack(spacing: 12) {
+            HStack(spacing: 6) {
                 if let writeHint, let addr = ui.autoStorePreview {
                     Button {
                         store.jumpToCursorAddress(addr)
                     } label: {
-                        HStack(spacing: 5) {
-                            Circle().fill(Color.green).frame(width: 7, height: 7)
-                            Text("写游标在其他组：\(writeHint)")
-                            Image(systemName: "arrow.right.circle.fill")
-                                .font(.system(size: 9))
-                                .foregroundColor(.secondary.opacity(0.7))
-                        }
+                        cursorLabel("存储至", icon: "tray.and.arrow.down", destination: writeHint, slot: addr.slot)
                     }
-                    .buttonStyle(.plain)
-                    .help("点击跳转到写游标所在槽位")
+                    .buttonStyle(CompactActionStyle())
+                    .localizedHelp("下一次自动存储：%@ · 点击定位", writeHint)
+                    .localizedAccessibilityLabel("自动存储至 %@", writeHint)
                 }
                 if let readHint, let addr = ui.autoPastePreview {
                     Button {
                         store.jumpToCursorAddress(addr)
                     } label: {
-                        HStack(spacing: 5) {
-                            Circle().fill(Color.blue).frame(width: 7, height: 7)
-                            Text("读游标在其他组：\(readHint)")
-                            Image(systemName: "arrow.right.circle.fill")
-                                .font(.system(size: 9))
-                                .foregroundColor(.secondary.opacity(0.7))
-                        }
+                        cursorLabel("粘贴自", icon: "tray.and.arrow.up", destination: readHint, slot: addr.slot)
                     }
-                    .buttonStyle(.plain)
-                    .help("点击跳转到读游标所在槽位")
+                    .buttonStyle(CompactActionStyle())
+                    .localizedHelp("下一次自动粘贴：%@ · 点击定位", readHint)
+                    .localizedAccessibilityLabel("自动粘贴自 %@", readHint)
                 }
             }
-            .font(.caption)
-            .foregroundColor(.secondary)
-            .padding(.horizontal, 10)
-            .padding(.vertical, 5)
-            // v2.10.22: 胶囊改用中高强度磨砂玻璃（.thickMaterial），背景半透明但内容不可辨认、
-            // 只透出色彩基调，观感对齐系统 Popover / 「快捷键模板」弹窗的毛玻璃质感。
-            .background(
-                Capsule()
-                    .fill(.thickMaterial)
-                    .overlay(Capsule().stroke(Color.secondary.opacity(0.18), lineWidth: 0.5))
-            )
-            .shadow(color: .black.opacity(0.12), radius: 4, y: 1)
         }
+    }
+
+    private func cursorLabel(_ action: String, icon: String, destination: String, slot: Int) -> some View {
+        HStack(spacing: 6) {
+            Image(systemName: icon).font(.system(size: 11, weight: .semibold))
+            ViewThatFits(in: .horizontal) {
+                Text(verbatim: "\(AppInterfaceStrings.text(action, language: language)) \(destination)")
+                    .font(.system(size: 11, weight: .medium))
+                    .fixedSize()
+                Text(verbatim: "\(AppInterfaceStrings.text(action, language: language)) \(String(format: "%02d", slot))")
+                    .font(.system(size: 11, weight: .medium))
+                    .fixedSize()
+            }
+        }
+        .lineLimit(1)
     }
 }
 
@@ -2401,6 +2152,7 @@ private struct CrossGroupCursorHintView: View {
 private struct ThemeCycleButton: View {
     let onCycle: () -> Void
     @AppStorage("appearanceMode") private var appearanceModeRaw = ThemeMode.light.rawValue
+    @AppStorage(AppInterfaceLanguage.preferenceKey) private var languageRaw = AppInterfaceLanguage.chinese.rawValue
 
     private var mode: ThemeMode { ThemeMode(rawValue: appearanceModeRaw) ?? .system }
 
@@ -2412,33 +2164,19 @@ private struct ThemeCycleButton: View {
                 .neuIconTile()
         }
         .buttonStyle(.plain)
-        .help("外观：\(mode.title)，点击切换")
+        .localizedHelp("外观：%@，点击切换", AppInterfaceStrings.text(mode.title, language: AppInterfaceLanguage.resolve(languageRaw)))
+        .localizedAccessibilityLabel("外观")
     }
 }
 
 /// v2.10.93: 顶部磨砂玻璃材质层。
 ///
-/// 之所以单独成一个视图：`.regularMaterial` 背后是 AppKit 的 NSVisualEffectView，
-/// v2.10.81 曾给它加 `.id(colorScheme)` 来强制切主题时重建（修「顶部材质卡旧色」）。
-/// 但 `.id` 变化意味着**销毁 + 重建**一个 NSVisualEffectView，这本身就是一次卡顿；
-/// 而且它写在 header 的 `.background` 里，导致整个 headerView 都要跟着 colorScheme 重算。
-/// 现在把这层单独隔离：colorScheme 的依赖只留在这一个叶子视图里，
-/// header 其余内容（搜索框、拨杆、组标签…）不再被主题切换牵连重算。
+/// A dynamic solid color replaced the old material. It no longer needs to
+/// destroy and recreate its view identity when appearance changes.
 private struct HeaderSurfaceBackground: View {
-    @Environment(\.colorScheme) private var colorScheme
-
     var body: some View {
-        // v2.11.7 hotfix4: 从 .regularMaterial 换成 AppTheme.windowBackground。
-        //
-        // 这个色值与卡片区滚动视图的底、以及新拟物调色板的 `ground` 三者同源
-        // （AppTheme 多彩窗口底直接引用 NeumorphicPalette.ground，简洁模式两边都取
-        // MinimalSkinPalette.window），所以工具栏和内容区是**同一张面**，接缝不可见。
-        //
-        // `.id(colorScheme)` 保留（v2.10.81 的不变量）：原本是为了强制重建磨砂层、杜绝
-        // 「顶部卡旧色」；现在虽是纯色，留着也无成本，且明暗切换时一定重算。
         Rectangle()
             .fill(AppTheme.windowBackground)
-            .id(colorScheme)
     }
 }
 
@@ -2472,16 +2210,16 @@ private struct ConnectionFullscreenView: View {
                         .overlay(RoundedRectangle(cornerRadius: 18).stroke(Color.white.opacity(0.18), lineWidth: 1))
 
                     VStack(alignment: .leading, spacing: 4) {
-                        Text("连接模式")
+                        AppLocalizedText("连接模式")
                             .font(.system(size: 28, weight: .bold))
-                        Text("为当前槽位组规划串联路径、模板与批量粘贴顺序")
+                        AppLocalizedText("为当前槽位组规划串联路径、模板与批量粘贴顺序")
                             .font(.system(size: 13, weight: .medium))
                             .foregroundColor(.secondary)
                     }
 
                     Spacer()
 
-                    Button("完成") { onClose() }
+                    Button(localized: "完成") { onClose() }
                         .keyboardShortcut(.escape, modifiers: [])
                         .buttonStyle(.borderedProminent)
                 }
@@ -2554,16 +2292,6 @@ private struct ConnectionFullscreenAction: View {
         .animation(Anim.interactive, value: hovering)
     }
 }
-
-private struct PageNavigationButtonStyle: ButtonStyle {
-    func makeBody(configuration: Configuration) -> some View {
-        configuration.label
-            .scaleEffect(configuration.isPressed ? 0.985 : 1)
-            .opacity(configuration.isPressed ? 0.78 : 1)
-            .animation(Anim.interactive, value: configuration.isPressed)
-    }
-}
-
 
 // MARK: - v2.10.91 (perf 第四轮 · 交互状态下沉) 设置覆盖层宿主
 //

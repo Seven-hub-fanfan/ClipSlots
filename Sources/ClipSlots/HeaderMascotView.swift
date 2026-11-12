@@ -8,13 +8,17 @@ struct HeaderMascotView: NSViewRepresentable {
     let model: AgentChatModel
     let canvas: CanvasStore
     let onToggle: () -> Void
+    @AppStorage(AppInterfaceLanguage.preferenceKey) private var languageRaw = AppInterfaceLanguage.chinese.rawValue
     func makeNSView(context: Context) -> HeaderMascotNativeView {
         let view=HeaderMascotNativeView(frame:NSRect(x:0,y:0,width:Self.canvasSide,height:Self.canvasSide))
-        view.bind(model:model,canvas:canvas); view.onToggle=onToggle
+        updateNSView(view, context: context)
         return view
     }
     func updateNSView(_ view: HeaderMascotNativeView, context: Context) {
         view.bind(model:model,canvas:canvas); view.onToggle=onToggle
+        let language = AppInterfaceLanguage.resolve(languageRaw)
+        view.setAccessibilityLabel(AppInterfaceStrings.text("斗篷小助手", language: language))
+        view.setAccessibilityHelp(AppInterfaceStrings.text("点击开关项目 Agent；悬停、拖动与右键可互动", language: language))
     }
     static func dismantleNSView(_ view: HeaderMascotNativeView, coordinator: ()) { view.dispose() }
 }

@@ -158,7 +158,10 @@ enum SlotMoveDiskTransaction {
         }
     }
     static func commit(_ changes: [(live: URL, content: SlotContent)],
-                       checkpoint: ((Int) throws -> Void)? = nil) throws {
+                       checkpoint: ((Int) throws -> Void)? = nil,
+                       replacingLabels: Bool = false,
+                       metadataFiles: [(live: URL, data: Data)] = [],
+                       validatePrepared: ((URL, SlotContent) throws -> Void)? = nil) throws {
         try recover()
         let directory = root.appendingPathComponent(UUID().uuidString)
         try fm.createDirectory(at: directory, withIntermediateDirectories: true)
@@ -174,11 +177,21 @@ enum SlotMoveDiskTransaction {
                     throw AgentCanvasError.writeFailed
                 }
                 let staging = SlotStorage(moveStagingDirectory: stageRoot)
-                guard staging.set(1, content: change.content) else { throw AgentCanvasError.writeFailed }
+                guard staging.set(1, content: change.content, replacingLabel: replacingLabels) else {
+                    throw AgentCanvasError.writeFailed
+                }
+                try validatePrepared?(staged, change.content)
                 try SlotStorage.rebasePreparedSlot(staged, to: change.live)
                 guard let prepared = inode(staged) else { throw AgentCanvasError.writeFailed }
                 journal.entries.append(Entry(live: change.live, staged: staged,
                     originalInode: original, preparedInode: prepared))
+            }
+            for (index, file) in metadataFiles.enumerated() {
+                let staged = directory.appendingPathComponent("metadata-\(index)")
+                try file.data.write(to: staged, options: .atomic)
+                guard let prepared = inode(staged) else { throw AgentCanvasError.writeFailed }
+                journal.entries.append(Entry(live: file.live, staged: staged,
+                    originalInode: inode(file.live), preparedInode: prepared))
             }
             try JSONEncoder().encode(journal).write(to: journalURL, options: .atomic)
             for (index, entry) in journal.entries.enumerated() {

@@ -12,12 +12,10 @@ import AppKit
 /// 所以反过来：**画布视图在上台时把「怎么处理一次槽位命令」这段能力登记进来，下台时撤掉。**
 /// `AppDelegate` 只需要问一句「这次槽位命令有人接吗」，接了就收手。
 ///
-/// ## 为什么用「有没有 handler」代替「是不是画布模式」
+/// ## 可见性与命令目标
 ///
-/// 若另开一个 `isCanvasActive` 布尔量，就出现了两个必须同步的真相源，任何一次 onAppear /
-/// onDisappear 配对失衡都会留下「布尔说在画布、handler 已经没了」的僵尸状态 —— 表现是
-/// Cmd+1 静默失效（既没粘贴到剪贴板，也没填进节点）。handler 的存在**本身**就是状态，
-/// 少一个可以说谎的字段。
+/// handler 只表示画布已挂载；缩到程序坞、隐藏或切到其他 App 时它仍然存在。
+/// 每次派发都读取真实窗口状态，只有前台画布主窗口可以消费命令。
 ///
 /// ## 线程契约
 ///
@@ -35,13 +33,20 @@ final class CanvasCommandBridge {
 
     /// 画布视图登记的槽位命令处理器。返回 true = 本次命令已由画布消费，调用方不要再走剪贴板粘贴。
     var slotCommandHandler: ((Int) -> Bool)?
+    /// Resolve the live canvas window at dispatch time; onAppear can precede attachment.
+    var commandWindowProvider: (() -> NSWindow?)?
 
-    /// 画布是否正在台上（= 有人登记了处理器）。
-    var isCanvasActive: Bool { slotCommandHandler != nil }
+    var acceptsSlotCommands: Bool {
+        guard slotCommandHandler != nil, NSApp.isActive,
+              let window = commandWindowProvider?() else { return false }
+        return window.isVisible && !window.isMiniaturized && window.isOnActiveSpace
+            && NSApp.keyWindow === window
+    }
 
     /// 尝试把一次「取第 N 槽位」的命令交给画布。
     func handleSlotCommand(_ slot: Int) -> Bool {
-        guard let handler = slotCommandHandler else { return false }
+        guard acceptsSlotCommands,
+              let handler = slotCommandHandler else { return false }
         return handler(slot)
     }
 }

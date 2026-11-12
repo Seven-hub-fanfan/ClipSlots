@@ -1006,8 +1006,9 @@ public final class SlotStorage {
                    let cachedLabel = labelCache[slot] {
                     return cachedLabel
                 }
-                let value = (try? String(contentsOf: labelFile, encoding: .utf8))?
+                let text = (try? String(contentsOf: labelFile, encoding: .utf8))?
                     .trimmingCharacters(in: .whitespacesAndNewlines)
+                let value = text?.isEmpty == false ? text : nil
                 labelCache[slot] = value
                 labelCacheFingerprint[slot] = fp
                 return value
@@ -1043,25 +1044,28 @@ public final class SlotStorage {
         }
         // Miss / stale: read label.txt directly (we're already on `queue`, and the
         // caller holds the cross-process lock, so no extra locking is needed).
-        let value = (try? String(contentsOf: labelFile, encoding: .utf8))?
+        let text = (try? String(contentsOf: labelFile, encoding: .utf8))?
             .trimmingCharacters(in: .whitespacesAndNewlines)
+        let value = text?.isEmpty == false ? text : nil
         labelCache[slot] = value
         labelCacheFingerprint[slot] = fp
         return value
     }
 
-    public func setLabel(_ slot: Int, label: String?) {
+    @discardableResult public func setLabel(_ slot: Int, label: String?) -> Bool {
         // DS-3 / CR-3 (v2.10.30): refuse writes on an invalidated (deleted-group) instance.
-        if isInvalidated { return }
+        if isInvalidated { return false }
         // v2.9.4 (#4): cross-process lock around the label write.
-        try? StorageLock.shared.withLock {
-            queue.sync {
+        do {
+            try StorageLock.shared.withLock {
+                guard !StorageLock.shared.isDegraded else { throw AgentCanvasError.busy }
+                try queue.sync {
                 let slotDir = baseURL.appendingPathComponent(String(slot))
                 do {
                     try FileManager.default.createDirectory(at: slotDir, withIntermediateDirectories: true)
                 } catch {
             NSLog("[ClipSlots] setLabel: create dir FAIL slot=\(slot): \(ApplicationDiagnostics.error(error))")
-                    return
+                    throw error
                 }
                 let labelFile = slotDir.appendingPathComponent("label.txt")
                 if let label = label, !label.isEmpty {
@@ -1078,13 +1082,13 @@ public final class SlotStorage {
                     do {
                         try label.write(to: labelFile, atomically: true, encoding: .utf8)
                     } catch {
-                NSLog("[ClipSlots] setLabel: write FAIL slot=\(slot): \(ApplicationDiagnostics.error(error))")
+                        throw error
                     }
                 } else {
                     do { try FileManager.default.removeItem(at: labelFile) } catch {
                         let nsErr = error as NSError
                         if !(nsErr.domain == NSCocoaErrorDomain && nsErr.code == 4) {
-                NSLog("[ClipSlots] setLabel: remove FAIL: \(ApplicationDiagnostics.error(error))")
+                            throw error
                         }
                     }
                 }
@@ -1093,7 +1097,12 @@ public final class SlotStorage {
                 labelCache.removeValue(forKey: slot)
                 labelCacheFingerprint.removeValue(forKey: slot)
                 SlotSearchChangeMonitor.shared.didWrite(group: baseURL, slot: slot)
+                }
             }
+            return true
+        } catch {
+            NSLog("[ClipSlots] setLabel failed slot=\(slot): \(ApplicationDiagnostics.error(error))")
+            return false
         }
     }
 
@@ -1882,11 +1891,11 @@ public final class SlotStorage {
         var out = attachments
         for i in out.indices {
             // 仅处理「字节应由存储层外置管理」的附件：有 storagePath 记录且内存无 inline data。
-            guard out[i].data == nil, let sp = out[i].storagePath, !sp.isEmpty else { continue }
+            guard out[i].data == nil else { continue }
             let expected = attachmentsDir.appendingPathComponent(out[i].id.uuidString + ".bin")
             guard fm.fileExists(atPath: expected.path) else { continue }
             // 外置文件就在当前 slotDir 下——以当前真实路径为准，覆盖可能已失效的存量绝对路径。
-            if sp != expected.path {
+            if out[i].storagePath != expected.path {
                 out[i].storagePath = expected.path
             }
         }

@@ -11,7 +11,6 @@ struct WorkspaceCardBackground: NSViewRepresentable {
         return true
         #endif
     }
-    @Environment(\.colorScheme) private var colorScheme
     let fill: Color
     let shadow: Color
     let cornerRadius: CGFloat

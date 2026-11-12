@@ -169,6 +169,7 @@ public final class AgentKeychain: AgentSecretStore, @unchecked Sendable {
     private var cachedKey: String? = nil
     private var cacheLoaded: Bool = false
     private var cachedReadError: AgentKeychainError?
+    private var cachedPassiveFailure = false
 
     public convenience init(service: String = AgentKeychain.service, account: String = AgentKeychain.account,
                             label: String = "ClipSlots Agent · DeepSeek API Key") {
@@ -211,7 +212,7 @@ public final class AgentKeychain: AgentSecretStore, @unchecked Sendable {
         }
     }
 
-    /// UI 只取展示状态。调用可能等待系统授权，必须在后台线程运行。
+    /// Passive display probes never open system authorization; explicit retry may.
     public func keyState(retryAfterFailure: Bool = false) -> AgentKeychainState {
         cacheLock.lock()
         defer { cacheLock.unlock() }
@@ -219,7 +220,7 @@ public final class AgentKeychain: AgentSecretStore, @unchecked Sendable {
             cacheLoaded = false
             cachedReadError = nil
         }
-        let key = readLocked()
+        let key = readLocked(allowsInteraction: retryAfterFailure)
         return AgentKeychainState(
             suffix: key.map { $0.count >= 4 ? String($0.suffix(4)) : "••••" },
             error: cachedReadError
@@ -227,7 +228,12 @@ public final class AgentKeychain: AgentSecretStore, @unchecked Sendable {
     }
 
     /// 调用方持锁直至结果写入缓存；UI 使用后台探测接口，不能在主线程等待此锁。
-    private func readLocked() -> String? {
+    private func readLocked(allowsInteraction: Bool = true) -> String? {
+        if allowsInteraction, cachedPassiveFailure {
+            cacheLoaded = false
+            cachedReadError = nil
+            cachedPassiveFailure = false
+        }
         if cacheLoaded {
             let v = cachedKey
             // #region debug-point A:credential-cache-hit
@@ -241,6 +247,7 @@ public final class AgentKeychain: AgentSecretStore, @unchecked Sendable {
         var query = baseQuery()
         query[kSecReturnData as String] = true
         query[kSecMatchLimit as String] = kSecMatchLimitOne
+        if !allowsInteraction { query[kSecUseAuthenticationUI as String] = kSecUseAuthenticationUIFail }
 
         // #region debug-point A-B:credential-read-start
         #if DEBUG
@@ -264,11 +271,13 @@ public final class AgentKeychain: AgentSecretStore, @unchecked Sendable {
             NSLog("[ClipSlots][Agent] keychain read failed: \(status)")
             cachedKey = nil
             cachedReadError = status == errSecSuccess ? .encodingFailed : .osStatus(status)
+            cachedPassiveFailure = !allowsInteraction
             cacheLoaded = true
             return nil
         }
         cachedKey = result
         cachedReadError = nil
+        cachedPassiveFailure = false
         cacheLoaded = true
         return result
     }

@@ -99,6 +99,7 @@ struct ClipSlotsApp: App {
     }
     @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
     @StateObject private var store = SlotStoreObservable()
+    @AppStorage(AppInterfaceLanguage.preferenceKey) private var languageRaw = AppInterfaceLanguage.chinese.rawValue
 
     /// UNDO-1 (v2.10.95): Cmd+Z 的分流。Cmd+Z 是系统「撤销」的标准键位，直接抢下来会让
     /// 槽位文本编辑器 / 搜索框里的原生文本撤销失效。所以先看第一响应者是不是文本控件：
@@ -136,6 +137,14 @@ struct ClipSlotsApp: App {
     var body: some Scene {
         WindowGroup {
             ContentView(store: store)
+                .environment(\.locale, AppInterfaceLanguage.resolve(languageRaw).locale)
+                // SwiftUI owns file-open events for WindowGroup. AppDelegate's
+                // fallback alone creates empty windows instead of importing.
+                .onOpenURL { url in
+                    guard url.isFileURL else { return }
+                    store.importSelectedURLs([url])
+                }
+                .handlesExternalEvents(preferring: ["*"], allowing: ["*"])
                 // v2.9.23: 增大窗口最小尺寸，防止标题栏/应用图标在缩到最小时被挤压变形。
                 //
                 // v2.10.91 (perf 第四轮 · 被数据否证的假设，勿再尝试): `sample` 采样显示主线程活跃时间
@@ -195,6 +204,7 @@ struct ClipSlotsApp: App {
                     PerfAutoTest.shared.start(store: store)
                 }
         }
+        .handlesExternalEvents(matching: ["*"])
         .windowStyle(.hiddenTitleBar)
         .windowToolbarStyle(.unified)
         // v2.9.18: 默认窗口 540×420 装不下 10 个卡片（开箱即需滚动）。放大到 1320×820，
@@ -203,12 +213,12 @@ struct ClipSlotsApp: App {
         .commands {
             CommandGroup(replacing: .newItem) {}
             CommandGroup(replacing: .appInfo) {
-                Button("关于 ClipSlots") { NSApp.orderFrontStandardAboutPanel(nil) }
+                Button(localized: "关于 ClipSlots") { NSApp.orderFrontStandardAboutPanel(nil) }
             }
             // v2.9.12: settings are now an in-app overlay (not a separate window).
             // Keep Cmd+, working by broadcasting a request the main window observes.
             CommandGroup(replacing: .appSettings) {
-                Button("设置…") {
+                Button(localized: "设置…") {
                     NotificationCenter.default.post(name: .openInAppSettings, object: nil)
                 }
                 .keyboardShortcut(",", modifiers: .command)
@@ -220,12 +230,12 @@ struct ClipSlotsApp: App {
             // App 里恒为禁用态 → Cmd+Z 什么都不会发生。替换掉整个 undoRedo 组，Cmd+Z 才真正归我们；
             // 文本框内的原生撤销由 performSlotUndo 的第一响应者分流保证不丢。
             CommandGroup(replacing: .undoRedo) {
-                Button("撤销槽位操作") {
+                Button(localized: "撤销槽位操作") {
                     Self.performSlotUndo(store)
                 }
                 .keyboardShortcut("z", modifiers: [.command])
                 // UNDO-2 (v2.10.96): Cmd+Shift+Z 反向撤回（重做），撤销过头可以再往前恢复。
-                Button("重做槽位操作") {
+                Button(localized: "重做槽位操作") {
                     Self.performSlotRedo(store)
                 }
                 .keyboardShortcut("z", modifiers: [.command, .shift])
@@ -235,10 +245,10 @@ struct ClipSlotsApp: App {
             // inside the app window even after global hotkeys are changed.
             // That is the real reason ctrl+option+number kept saving/HUD while the
             // configured shortcut was cmd+option+number.
-            CommandMenu("槽位") {
+            CommandMenu(AppInterfaceStrings.text("槽位", language: AppInterfaceLanguage.resolve(languageRaw))) {
                 ForEach(Array(stride(from: 1, through: store.config.slots, by: 1)), id: \.self) { slot in
-                    Button("粘贴槽位 \(slot)") { store.pasteSlot(slot) }
-                    Button("保存到槽位 \(slot)") { store.saveToSlot(slot) }
+                    Button { store.pasteSlot(slot) } label: { AppLocalizedText("粘贴槽位 %ld", slot) }
+                    Button { store.saveToSlot(slot) } label: { AppLocalizedText("保存到槽位 %ld", slot) }
                 }
             }
         }
@@ -760,7 +770,8 @@ final class SlotStoreObservable: ObservableObject {
     /// Called on fileImportQueue; the shared write queue sees only the checked commit.
     private func prepareAndCommitFile(_ content: SlotContent, snapshot: SlotEditorSnapshot,
                                       storage: SpecialSlotStorage, cancellation: FileImportCancellation,
-                                      label: String? = nil) throws -> (before: SlotContent, after: SlotContent) {
+                                      label: String? = nil, captureHistory: Bool = false)
+        throws -> (before: SlotContent, after: SlotContent, undo: SlotUndoSnapshot) {
         #if DEBUG
         let preferClone = fileImportPreferClone
         let probe = fileImportCopyProbe
@@ -779,7 +790,23 @@ final class SlotStoreObservable: ObservableObject {
                                      copied: copied, total: total)
             }
         return try slotWriteQueue.sync {
-            try storage.commitImportedBody(importedContent, snapshot: snapshot, prepared: prepared, label: label)
+            try StorageLock.shared.withLock(timeout: 0.15) {
+                let fresh = try storage.editorSnapshot(snapshot.slot, in: snapshot.group.id)
+                let before = SlotUndoSnapshot(
+                    slots: [snapshot.slot: fresh.content], labels: [snapshot.slot: fresh.content.label ?? ""],
+                    title: "保存文件到槽位 \(snapshot.slot)", groupId: snapshot.group.id,
+                    affectedSlots: [snapshot.slot])
+                let undo = captureHistory
+                    ? try SlotUndoMediaArchive.shared.seal(before, storageRoot: storage.storageRoot) : before
+                do {
+                    let result = try storage.commitImportedBody(importedContent, snapshot: snapshot,
+                        prepared: prepared, label: label)
+                    return (result.before, result.after, undo)
+                } catch {
+                    SlotUndoMediaArchive.shared.releasePending(undo.mediaArchiveID)
+                    throw error
+                }
+            }
         }
     }
     var canvasTextDocuments: [String: CanvasTextDocument] = [:]
@@ -1470,9 +1497,8 @@ final class SlotStoreObservable: ObservableObject {
     private let navigationIndexWrites = NavigationIndexWrites()
     private var navigationRequestedGroupId: String?
 
-    /// The button supplies immediate press feedback. Commit its selected state
-    /// together with the new content to avoid two full workspace layouts.
-    /// Disk transactions stay on the same ordered queue as edits.
+    /// Pending selection belongs to the small tabs; the editor keeps its last
+    /// complete snapshot until the ordered disk transaction is ready.
     private func navigateToGroup(id: String) {
         guard id != currentSpecialSlotId || id != activeHotkeySpecialSlotId || transientUI.isNavigationPending,
               let group = specialSlots.first(where: { $0.id == id }),
@@ -1484,6 +1510,7 @@ final class SlotStoreObservable: ObservableObject {
         let generation = reloadGeneration
         beginGroupSwitchTransition()
         navigationRequestedGroupId = id
+        transientUI.navigationGate.requestedGroupID = id
         transientUI.isNavigationPending = true
         #if DEBUG
         let traceStart = ProcessInfo.processInfo.systemUptime
@@ -2171,7 +2198,10 @@ final class SlotStoreObservable: ObservableObject {
         // UNDO-1 (v2.10.95): 自动存储的落点写入也算一步撤销。仅当落点就在【当前激活组】时抓快照——
         // 快照是「当前内存中的这一组」，落点在别的组时抓了也无法用于还原那个组（且会误占额度）。
         if target.groupId == currentSpecialSlotId {
-            captureUndoSnapshot(title: "自动存储到槽位 \(target.slot)")
+            guard captureUndoSnapshot(title: "自动存储到槽位 \(target.slot)") else {
+                isAutoStoreInFlight = false
+                return
+            }
         }
         suppressWatcher() // self-write
         // MT-2 / CS-4 (v2.10.30): specialStorage.set 需拿跨进程写锁，锁竞争时最长阻塞 ~5s。把它挪到后台
@@ -2593,40 +2623,48 @@ final class SlotStoreObservable: ObservableObject {
         ClipSlotsPaths.specialSlots.appendingPathComponent(".undo/clear_snapshot.json")
     }
 
-    /// 抓快照时「就地取回附件字节」的总预算。撤销要能把内容【全部】还原，而单槽 clear /
-    /// 清空整组会把槽位目录（含外置附件字节 attachments/*.bin）物理删除——此时快照里
-    /// `data == nil` + `storagePath` 的附件会变成断链，撤销只回来元数据。所以对「即将被销毁
-    /// 字节」的槽位，在快照里把字节内联进内存（回写时存储层会重新外置落盘）。
-    /// 超出预算的超大附件保持 storagePath 原样（仍可从 .trash 的 30 天克隆里人工恢复），
-    /// 避免一次撤销快照吃掉数百 MB 内存。
-    private static let undoMaterializeBudgetBytes = 64 * 1024 * 1024
+    private struct PersistedHistory: Codable {
+        var undo: SlotUndoStack
+        var redo: SlotUndoStack
+    }
+    private var historyURL: URL { ClipSlotsPaths.undoDir.appendingPathComponent("history.json") }
 
-    /// 撤销栈落盘（后台串行队列，避免大快照编码卡主线程）。失败仅记日志，绝不影响撤销本身。
-    private func persistUndoStack() { persistStack(undoStack, to: undoStackURL) }
+    private func persistUndoStack() { _ = persistHistory() }
+    private func persistRedoStack() { _ = persistHistory() }
 
-    /// 重做栈落盘（同上）。
-    private func persistRedoStack() { persistStack(redoStack, to: redoStackURL) }
-
-    private func persistStack(_ stack: SlotUndoStack, to url: URL) {
-        undoPersistQueue.async {
+    /// Media is already externalized. A single small atomic JSON commits both
+    /// stacks so a restart cannot observe half of an undo/redo transition.
+    @discardableResult private func persistHistory(commitCanonical: Bool = true) -> Bool {
+        let history = PersistedHistory(undo: undoStack, redo: redoStack)
+        let url = historyURL
+        return undoPersistQueue.sync {
             let fm = FileManager.default
-            guard !stack.isEmpty else {
-                try? fm.removeItem(at: url)
-                return
-            }
             do {
                 try fm.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
-                let data = try JSONEncoder().encode(stack)
-                try data.write(to: url, options: .atomic)
+                if commitCanonical { try JSONEncoder().encode(history).write(to: url, options: .atomic) }
+                // Keep compatibility files for older tools. The pair above is
+                // authoritative; GC only runs after all writes succeed.
+                try JSONEncoder().encode(history.undo).write(to: undoStackURL, options: .atomic)
+                try JSONEncoder().encode(history.redo).write(to: redoStackURL, options: .atomic)
+                let ids = Set((history.undo.entries + history.redo.entries).compactMap(\.mediaArchiveID))
+                try SlotUndoMediaArchive.shared.prune(referencedIDs: ids)
+                return true
             } catch {
-                NSLog("[ClipSlots] persist stack failed: \(ApplicationDiagnostics.error(error))")
+                NSLog("[ClipSlots] persist history failed: \(ApplicationDiagnostics.error(error))")
+                return false
             }
         }
     }
 
     /// 启动时恢复撤销栈，使「最近若干步」跨重启仍可撤销（沿用 v2.9.5 Feature #3 的契约）。
     private func loadPersistedUndoSnapshot() {
-        if let data = try? Data(contentsOf: undoStackURL),
+        let history = (try? Data(contentsOf: historyURL)).flatMap {
+            try? JSONDecoder().decode(PersistedHistory.self, from: $0)
+        }
+        if let history {
+            undoStack = history.undo
+            redoStack = history.redo
+        } else if let data = try? Data(contentsOf: undoStackURL),
            let stack = try? JSONDecoder().decode(SlotUndoStack.self, from: data) {
             undoStack = stack
             NSLog("[ClipSlots] restored undo stack: \(stack.entries.count) entr(ies)")
@@ -2641,7 +2679,7 @@ final class SlotStoreObservable: ObservableObject {
             persistUndoStack()
             NSLog("[ClipSlots] migrated legacy undo snapshot: \(legacy.title)")
         }
-        if let data = try? Data(contentsOf: redoStackURL),
+        if history == nil, let data = try? Data(contentsOf: redoStackURL),
            let stack = try? JSONDecoder().decode(SlotUndoStack.self, from: data) {
             redoStack = stack
             NSLog("[ClipSlots] restored redo stack: \(stack.entries.count) entr(ies)")
@@ -2672,61 +2710,52 @@ final class SlotStoreObservable: ObservableObject {
         let specialSlotId: String
     }
 
-    /// 在一次会改动槽位内容的操作【之前】抓一步撤销快照。
-    /// - Parameters:
-    ///   - title: 浮层提示用的操作描述。
-    ///   - materializeSlots: 本次操作会物理删除其字节的槽位（单槽 clear → [slot]；清空整组 →
-    ///     全部槽位）。这些槽位的外置附件字节会被就地读入快照（受 64MB 预算约束）。
-    ///     普通覆盖写不需要（存储层会保留/重新克隆附件字节），传空即可。
-    private func captureUndoSnapshot(title: String, materializeSlots: [Int] = []) {
-        let snapshot = makeStateSnapshot(title: title, materializeSlots: materializeSlots)
-        guard undoStack.push(snapshot) else { return }  // 与上一步状态完全一致 → 不占额度
-        persistUndoStack()
-        // UNDO-2 (v2.10.96): 新的改动让当前组的重做分支失效。
-        if redoStack.canUndo(forGroup: snapshot.groupId) {
+    /// Capture all media before a mutation. Failure aborts the mutation.
+    private func captureUndoSnapshot(title: String) -> Bool {
+        do {
+            let snapshot = try makeStateSnapshot(title: title)
+            let previousUndo = undoStack, previousRedo = redoStack
+            undoStack.push(snapshot)
             redoStack.removeAll(forGroup: snapshot.groupId)
-            persistRedoStack()
+            SlotUndoMediaArchive.shared.releasePending(snapshot.mediaArchiveID)
+            guard persistHistory() else {
+                undoStack = previousUndo
+                redoStack = previousRedo
+                _ = persistHistory()
+                throw AgentOperationError("撤销记录保存失败，本次操作未执行。")
+            }
+            return true
+        } catch {
+            transientUI.showToast("未执行改动：\(error.localizedDescription)", duration: 4)
+            return false
         }
     }
 
-    /// 把「当前内存中的这一组」打成一份快照。`materializeSlots` 里的槽位会把外置附件字节
-    /// 就地读进快照（用于字节即将被物理删除的场景，见 captureUndoSnapshot 注释）。
-    private func makeStateSnapshot(title: String, materializeSlots: [Int]) -> SlotUndoSnapshot {
-        var snapshotSlots = slots
-        if !materializeSlots.isEmpty {
-            var budget = Self.undoMaterializeBudgetBytes
-            for slot in materializeSlots {
-                guard var content = snapshotSlots[slot] else { continue }
-                var changed = false
-                if var managed = content.managedBodyFiles {
-                    for (url, var file) in managed where file.data == nil {
-                        guard let bytes = file.resolveData(), bytes.count <= budget else { continue }
-                        file.data = bytes
-                        managed[url] = file
-                        budget -= bytes.count
-                        changed = true
+    private func makeStateSnapshot(title: String, affectedSlots: [Int]? = nil) throws -> SlotUndoSnapshot {
+        let group = currentSpecialSlotId
+        var captured = slots
+        var capturedLabels = labels
+        if let affectedSlots {
+            captured = captured.filter { affectedSlots.contains($0.key) }
+            capturedLabels = capturedLabels.filter { affectedSlots.contains($0.key) }
+        }
+        let storage = canvasStorage(groupId: group)
+        return try slotWriteQueue.sync {
+            try StorageLock.shared.withLock(timeout: 0.15) {
+                guard !StorageLock.shared.isDegraded else { throw AgentCanvasError.busy }
+                if affectedSlots == nil {
+                    for slot in 1...config.slots where captured[slot] == nil {
+                        guard let authoritative = storage.getOrUnknown(slot, in: group) else {
+                            throw AgentCanvasError.busy
+                        }
+                        captured[slot] = authoritative
                     }
-                    content.managedBodyFiles = managed
                 }
-                for i in content.attachments.indices {
-                    guard content.attachments[i].data == nil,
-                          let sp = content.attachments[i].storagePath, !sp.isEmpty else { continue }
-                    guard let bytes = content.attachments[i].resolveData() else { continue }
-                    guard bytes.count <= budget else {
-                        NSLog("[ClipSlots] undo snapshot: attachment bytes=\(bytes.count) exceeds materialize budget; keeping recoverable reference")
-                        continue
-                    }
-                    budget -= bytes.count
-                    content.attachments[i].data = bytes
-                    changed = true
-                }
-                if changed { snapshotSlots[slot] = content }
+                let snapshot = SlotUndoSnapshot(slots: captured, labels: capturedLabels,
+                    title: title, groupId: group, affectedSlots: affectedSlots)
+                return try SlotUndoMediaArchive.shared.seal(snapshot, storageRoot: storage.storageRoot)
             }
         }
-        return SlotUndoSnapshot(slots: snapshotSlots,
-                                labels: labels,
-                                title: title,
-                                groupId: currentSpecialSlotId)
     }
 
     /// 当前组还可撤销 / 重做几步（供 UI / 日志使用）。
@@ -2734,41 +2763,31 @@ final class SlotStoreObservable: ObservableObject {
     var redoStepsAvailableForCurrentGroup: Int { redoStack.count(forGroup: currentSpecialSlotId) }
 
     /// 把一份快照整组回写到磁盘 + 内存（撤销与重做共用）。
-    private func applyStateSnapshot(_ snapshot: SlotUndoSnapshot, activeId: String) {
+    private func applyStateSnapshot(_ snapshot: SlotUndoSnapshot, activeId: String, historyData: Data? = nil) throws {
+        guard snapshot.groupId == activeId, flushCanvasTextDocuments() else { throw AgentCanvasError.conflict }
         suppressWatcher()             // v2.9.4 (#2): 自写，不要触发 watcher 反向 reload
         cancelPendingClipboardRestore()
-
-        if let affected = snapshot.affectedSlots {
-            let restored = snapshot.slots.filter { affected.contains($0.key) }
-            slotWriteQueue.sync {
-                for (slot, content) in restored {
-                    specialStorage.set(slot, content: content, in: activeId)
-                }
+        var normalized = snapshot
+        if snapshot.affectedSlots == nil && snapshot.mediaArchiveID == nil {
+            for slot in 1...config.slots where normalized.slots[slot] == nil {
+                normalized.slots[slot] = SlotContent()
             }
-            for (slot, _) in restored {
-                if let saved = specialStorage.getOrUnknown(slot, in: activeId) { slots[slot] = saved }
+        }
+        let restored = try slotWriteQueue.sync {
+            try canvasStorage(groupId: activeId).restoreUndoSnapshot(normalized, historyData: historyData)
+        }
+        for (slot, content) in restored {
+            slots[slot] = content
+            if let label = snapshot.labels[slot], !label.isEmpty { labels[slot] = label }
+            else { labels.removeValue(forKey: slot) }
+            if let document = canvasTextDocuments["\(activeId)#\(slot)"], !document.isDirty {
+                document.refreshFromStorage(content)
             }
-            ThumbnailProvider.shared.invalidateSpecialSlot(specialSlotId: activeId)
-            refreshTrigger = UUID()
-            bumpCanvasSlotRevision()
-            return
         }
-
-        // 整组回写：按 config.slots 归一化，快照里缺失的槽位显式还原为空槽，
-        // 避免「回退后残留操作产生的新内容」。
-        var restored: [Int: SlotContent] = [:]
-        for slot in stride(from: 1, through: config.slots, by: 1) {
-            restored[slot] = snapshot.slots[slot] ?? SlotContent()
-        }
-        // 缩略图身份不变量（v2.10.64/65）：缩略图 key = contentId + updatedAt。回写的是历史身份，
-        // 与当前身份不同 → diff 能识别变化；同时整组失效一次缓存，杜绝切组串图/不刷。
         ThumbnailProvider.shared.invalidateSpecialSlot(specialSlotId: activeId)
-
-        slots = restored
-        labels = snapshot.labels
         loadedSpecialSlotId = activeId
-        persistCurrentSpecialSlotData()
         refreshTrigger = UUID()
+        bumpCanvasSlotRevision()
         recomputeAutoPreviews()       // 游标角标随内容还原重算
     }
 
@@ -2781,15 +2800,8 @@ final class SlotStoreObservable: ObservableObject {
         }
         // v2.8.7 (D) 的不变量保留：快照只回写到它被抓取的那个组（popLatest 按组取），
         // 绝不把 A 组的历史写进当前激活的 B 组。
-        guard let snapshot = undoStack.popLatest(forGroup: activeId) else { return }
-
-        // UNDO-2 (v2.10.96): 先把「撤销前的状态」压进重做栈，Cmd+Shift+Z 才能再往前恢复。
-        // 这里 materialize 全部槽位：撤销的整组回写会覆盖当前槽位目录（原子换目录），当前状态里
-        // 那些外置的附件字节可能随之消失，不内联进重做快照就会断链。
-        pushRedoSnapshot(title: snapshot.title, activeId: activeId, affectedSlots: snapshot.affectedSlots)
-
-        applyStateSnapshot(snapshot, activeId: activeId)
-        persistUndoStack()
+        guard let snapshot = undoStack.latest(forGroup: activeId) else { return }
+        guard exchangeHistory(snapshot, undo: true) else { return }
 
         let remaining = undoStack.count(forGroup: activeId)
         NSLog("[ClipSlots] UNDO specialSlot=\(activeId) title=\(snapshot.title) remaining=\(remaining)")
@@ -2810,21 +2822,8 @@ final class SlotStoreObservable: ObservableObject {
             showFloatingNotice(FloatingNotice(title: "没有可重做操作", subtitle: subtitle, iconName: "arrow.uturn.forward", kind: .warning))
             return
         }
-        guard let snapshot = redoStack.popLatest(forGroup: activeId) else { return }
-
-        // 把重做前的状态放回撤销栈（不走 captureUndoSnapshot——那条路径会清空重做栈）。
-        var backToUndo = makeStateSnapshot(title: snapshot.title,
-                                          materializeSlots: Array(stride(from: 1, through: config.slots, by: 1)))
-        backToUndo.affectedSlots = snapshot.affectedSlots
-        if let affected = snapshot.affectedSlots {
-            backToUndo.slots = backToUndo.slots.filter { affected.contains($0.key) }
-            backToUndo.labels = backToUndo.labels.filter { affected.contains($0.key) }
-        }
-        undoStack.push(backToUndo)
-        persistUndoStack()
-
-        applyStateSnapshot(snapshot, activeId: activeId)
-        persistRedoStack()
+        guard let snapshot = redoStack.latest(forGroup: activeId) else { return }
+        guard exchangeHistory(snapshot, undo: false) else { return }
 
         let remaining = redoStack.count(forGroup: activeId)
         NSLog("[ClipSlots] REDO specialSlot=\(activeId) title=\(snapshot.title) remaining=\(remaining)")
@@ -2835,17 +2834,44 @@ final class SlotStoreObservable: ObservableObject {
             kind: .success))
     }
 
-    /// 把当前状态压入重做栈（撤销时调用）。
-    private func pushRedoSnapshot(title: String, activeId: String, affectedSlots: [Int]? = nil) {
-        var current = makeStateSnapshot(title: title,
-                                       materializeSlots: Array(stride(from: 1, through: config.slots, by: 1)))
-        current.affectedSlots = affectedSlots
-        if let affectedSlots {
-            current.slots = current.slots.filter { affectedSlots.contains($0.key) }
-            current.labels = current.labels.filter { affectedSlots.contains($0.key) }
+    /// Peek first; failed verification/write never consumes the user's history.
+    private func exchangeHistory(_ snapshot: SlotUndoSnapshot, undo: Bool) -> Bool {
+        var current: SlotUndoSnapshot?
+        do {
+            guard flushCanvasTextDocuments() else { throw AgentCanvasError.conflict }
+            if snapshot.labelsOnly == true {
+                guard let affected = snapshot.affectedSlots, affected.count == 1, let slot = affected.first else {
+                    throw AgentCanvasError.conflict
+                }
+                current = makeTitleSnapshot(slot: slot, groupID: snapshot.groupId, title: snapshot.title)
+            } else {
+                current = try makeStateSnapshot(title: snapshot.title, affectedSlots: snapshot.affectedSlots)
+            }
+            var nextUndo = undoStack, nextRedo = redoStack
+            if undo {
+                _ = nextUndo.popLatest(forGroup: snapshot.groupId)
+                nextRedo.push(current!)
+            } else {
+                _ = nextRedo.popLatest(forGroup: snapshot.groupId)
+                nextUndo.push(current!)
+            }
+            let historyData = try JSONEncoder().encode(PersistedHistory(undo: nextUndo, redo: nextRedo))
+            try applyStateSnapshot(snapshot, activeId: currentSpecialSlotId, historyData: historyData)
+            undoStack = nextUndo
+            redoStack = nextRedo
+            SlotUndoMediaArchive.shared.releasePending(current?.mediaArchiveID)
+            if !persistHistory(commitCanonical: false) {
+                transientUI.showToast("内容与撤销记录已恢复，旧格式历史副本暂未同步。", duration: 5)
+            }
+            return true
+        } catch {
+            SlotUndoMediaArchive.shared.releasePending(current?.mediaArchiveID)
+            _ = persistHistory()
+            showFloatingNotice(FloatingNotice(title: undo ? "撤销未执行" : "重做未执行",
+                subtitle: "当前内容与历史记录已保留。\(error.localizedDescription)",
+                iconName: "exclamationmark.triangle.fill", kind: .warning))
+            return false
         }
-        redoStack.push(current)
-        persistRedoStack()
     }
 
     private func persistCurrentSpecialSlotData(only targetSlot: Int? = nil) {
@@ -2891,7 +2917,7 @@ final class SlotStoreObservable: ObservableObject {
             return
         }
         content.attachments = existing.attachments
-        captureUndoSnapshot(title: "保存 HTML 到槽位 \(slot)")   // UNDO-1 (v2.10.95)
+        guard captureUndoSnapshot(title: "保存 HTML 到槽位 \(slot)") else { return }
         slots[slot] = content
         persistCurrentSpecialSlotData(only: slot)
         refreshTrigger = UUID()
@@ -2918,7 +2944,7 @@ final class SlotStoreObservable: ObservableObject {
         // 修法：改内容后统一刷新身份字段，恢复不变量（同步跨进程 + 搜索计数）。
         content.contentId = UUID().uuidString
         content.updatedAt = Date().timeIntervalSince1970
-        captureUndoSnapshot(title: "编辑槽位 \(slot) HTML")   // UNDO-1 (v2.10.95)
+        guard captureUndoSnapshot(title: "编辑槽位 \(slot) HTML") else { return }
         slots[slot] = content
         persistCurrentSpecialSlotData(only: slot)
         refreshTrigger = UUID()
@@ -2943,7 +2969,7 @@ final class SlotStoreObservable: ObservableObject {
             return
         }
         content.attachments = existing.attachments
-        captureUndoSnapshot(title: "编辑槽位 \(slot) 文本")   // UNDO-1 (v2.10.95)
+        guard captureUndoSnapshot(title: "编辑槽位 \(slot) 文本") else { return }
         slots[slot] = content
         persistCurrentSpecialSlotData(only: slot)
         showFloatingNotice(FloatingNotice(title: "已更新文本", subtitle: "槽位 \(slot)", iconName: "pencil.circle.fill", kind: .success))
@@ -3090,7 +3116,7 @@ final class SlotStoreObservable: ObservableObject {
             try Self.exchangeSlotEditor(storage: storage, snapshot: snapshot, body: body,
                 attachments: attachments, markdownEdit: markdownEdit)
         }
-        finishSlotEditorSave(snapshot, undoContent: result.before, saved: result.after)
+        finishSlotEditorSave(snapshot, undo: result.undo, saved: result.after)
     }
 
     /// Only the transaction and undo-byte capture run off main. UI and history
@@ -3103,7 +3129,7 @@ final class SlotStoreObservable: ObservableObject {
             throw AgentCanvasError.conflict
         }
         let storage = canvasStorage(groupId: groupID)
-        let result: (before: SlotContent, after: SlotContent) = try await withCheckedThrowingContinuation { continuation in
+        let result: (undo: SlotUndoSnapshot, after: SlotContent) = try await withCheckedThrowingContinuation { continuation in
             slotWriteQueue.async {
                 do {
                     continuation.resume(returning: try Self.exchangeSlotEditor(storage: storage,
@@ -3111,39 +3137,44 @@ final class SlotStoreObservable: ObservableObject {
                 } catch { continuation.resume(throwing: error) }
             }
         }
-        finishSlotEditorSave(snapshot, undoContent: result.before, saved: result.after)
+        finishSlotEditorSave(snapshot, undo: result.undo, saved: result.after)
     }
 
     private static func exchangeSlotEditor(storage: SpecialSlotStorage, snapshot: SlotEditorSnapshot,
                                           body: AgentSlotBody, attachments: [SlotContent.SlotAttachment],
-                                          markdownEdit: SlotMarkdownEdit?) throws -> (before: SlotContent, after: SlotContent) {
-        var undoContent = markdownEdit?.document.contentForUndo(snapshot.content) ?? snapshot.content
-        // Capture only removed bytes before the atomic directory replacement.
-        var budget = Self.undoMaterializeBudgetBytes - (markdownEdit?.document.sourceBytes.count ?? 0)
-        for i in undoContent.attachments.indices where !attachments.contains(where: {
-            $0.id == undoContent.attachments[i].id
-        }) {
-            if let bytes = undoContent.attachments[i].resolveData(), bytes.count <= budget {
-                undoContent.attachments[i].data = bytes
-                budget -= bytes.count
+                                          markdownEdit: SlotMarkdownEdit?) throws -> (undo: SlotUndoSnapshot, after: SlotContent) {
+        try StorageLock.shared.withLock(timeout: 0.15) {
+            let fresh = try storage.editorSnapshot(snapshot.slot, in: snapshot.group.id)
+            var undoContent = markdownEdit?.document.contentForUndo(fresh.content) ?? fresh.content
+            undoContent.label = fresh.content.label
+            let undo = try SlotUndoMediaArchive.shared.seal(SlotUndoSnapshot(
+                slots: [snapshot.slot: undoContent], labels: [snapshot.slot: undoContent.label ?? ""],
+                title: "编辑槽位 \(snapshot.slot)", groupId: snapshot.group.id,
+                affectedSlots: [snapshot.slot]), storageRoot: storage.storageRoot)
+            do {
+                let saved = try storage.exchangeEditorContent(snapshot, body: body, attachments: attachments,
+                                                              markdownEdit: markdownEdit)
+                return (undo, saved)
+            } catch {
+                SlotUndoMediaArchive.shared.releasePending(undo.mediaArchiveID)
+                throw error
             }
         }
-        let saved = try storage.exchangeEditorContent(snapshot, body: body, attachments: attachments,
-                                                      markdownEdit: markdownEdit)
-        return (undoContent, saved)
     }
 
-    private func finishSlotEditorSave(_ snapshot: SlotEditorSnapshot, undoContent: SlotContent, saved: SlotContent) {
+    private func recordCommittedUndo(_ undo: SlotUndoSnapshot) {
+        undoStack.push(undo)
+        redoStack.removeAll(forGroup: undo.groupId)
+        SlotUndoMediaArchive.shared.releasePending(undo.mediaArchiveID)
+        if !persistHistory() {
+            transientUI.showToast("内容已保存，但撤销历史保存失败，请保持 App 打开后重试。", duration: 5)
+        }
+    }
+
+    private func finishSlotEditorSave(_ snapshot: SlotEditorSnapshot, undo: SlotUndoSnapshot, saved: SlotContent) {
         let groupID = snapshot.group.id
         // Record only this slot, so undo cannot restore unrelated external writes.
-        let undo = SlotUndoSnapshot(slots: [snapshot.slot: undoContent],
-            labels: [snapshot.slot: snapshot.content.label ?? ""],
-            title: "编辑槽位 \(snapshot.slot)", groupId: groupID, affectedSlots: [snapshot.slot])
-        if undoStack.push(undo) { persistUndoStack() }
-        if redoStack.canUndo(forGroup: groupID) {
-            redoStack.removeAll(forGroup: groupID)
-            persistRedoStack()
-        }
+        recordCommittedUndo(undo)
         if loadedSpecialSlotId == groupID { slots[snapshot.slot] = saved }
         if let document = canvasTextDocuments["\(groupID)#\(snapshot.slot)"], !document.isDirty {
             document.refreshFromStorage(saved)
@@ -3197,19 +3228,14 @@ final class SlotStoreObservable: ObservableObject {
         let cancellation = try beginFileImport(title: "正在上传文件")
         defer { finishFileImport(cancellation) }
         let body = folderImportService.makeSlotContent(for: url)
-        let result: (before: SlotContent, after: SlotContent) = try await withCheckedThrowingContinuation { continuation in
+        let result: (before: SlotContent, after: SlotContent, undo: SlotUndoSnapshot) = try await withCheckedThrowingContinuation { continuation in
             fileImportQueue.async {
                 do { continuation.resume(returning: try self.prepareAndCommitFile(body, snapshot: snapshot,
-                    storage: storage, cancellation: cancellation)) }
+                    storage: storage, cancellation: cancellation, captureHistory: true)) }
                 catch { continuation.resume(throwing: error) }
             }
         }
-        let undo = SlotUndoSnapshot(slots: [snapshot.slot: result.before],
-            labels: [snapshot.slot: result.before.label ?? ""], title: "上传文件到槽位 \(snapshot.slot)",
-            groupId: groupID, affectedSlots: [snapshot.slot])
-        if undoStack.push(undo) { persistUndoStack() }
-        redoStack.removeAll(forGroup: groupID)
-        persistRedoStack()
+        recordCommittedUndo(result.undo)
         if loadedSpecialSlotId == groupID,
            slots[snapshot.slot].map({ AgentSlotBody($0) == AgentSlotBody(snapshot.content) }) != false {
             slots[snapshot.slot] = result.after
@@ -3745,7 +3771,10 @@ final class SlotStoreObservable: ObservableObject {
              expected: slots[slot + offset] ?? SlotContent())
         }
         // UNDO-1 (v2.10.95): 拖入文件会覆盖若干槽位主体，整批算一步撤销。
-        captureUndoSnapshot(title: urls.count == 1 ? "导入文件到槽位 \(slot)" : "导入 \(urls.count) 个文件（槽位 \(slot) 起）")
+        guard captureUndoSnapshot(title: urls.count == 1 ? "导入文件到槽位 \(slot)" : "导入 \(urls.count) 个文件（槽位 \(slot) 起）") else {
+            finishFileImport(cancellation)
+            return
+        }
         suppressWatcher()
         fileImportQueue.async { [weak self] in
             guard let self else { return }
@@ -3834,8 +3863,7 @@ final class SlotStoreObservable: ObservableObject {
         let activeId = currentSpecialSlotId
         // UNDO-1 (v2.10.95): 清空整组算「一步」，且撤销后 10 个槽位的内容要全部返回 → 快照抓整组，
         // 并把全部槽位的外置附件字节内联进快照（clearAll 会物理删除整个组目录）。
-        captureUndoSnapshot(title: "清空槽位组「\(currentSpecialSlot?.name ?? activeId)」",
-                            materializeSlots: Array(stride(from: 1, through: config.slots, by: 1)))
+        guard captureUndoSnapshot(title: "清空槽位组「\(currentSpecialSlot?.name ?? activeId)」") else { return }
         suppressWatcher() // v2.9.4 (#2): self-write
         cancelPendingClipboardRestore()
 
@@ -4279,7 +4307,7 @@ final class SlotStoreObservable: ObservableObject {
         let previousContent = content // P2-1 (v2.10.54): 乐观更新前的旧内容快照，写盘失败时回滚用。
         // UNDO-1 (v2.10.95): 改附件（节点画布增删附件）算一步撤销。旧附件字节仍在磁盘（set 会重新克隆），
         // 故无需 materialize。
-        captureUndoSnapshot(title: "修改槽位 \(slot) 附件")
+        guard captureUndoSnapshot(title: "修改槽位 \(slot) 附件") else { return }
         content.attachments = attachments
         // P1-2 (v2.10.53): 同 updateHTMLSlot——复用旧 content 仅改 attachments 却不刷新身份字段，会破坏
         // v2.10.52 增量 diff（slotsSnapshotEqual 以 contentId+updatedAt 判等）的「内容变则 id/时间戳变」不变量，
@@ -6608,7 +6636,7 @@ final class SlotStoreObservable: ObservableObject {
         let activeId = currentSpecialSlotId
         // UNDO-1 (v2.10.95): 单槽清空算一步。clear() 会物理删除该槽目录（含外置附件字节），
         // 所以把该槽的附件字节内联进快照，撤销时主体 + 附件 + 标签能整体返回。
-        captureUndoSnapshot(title: "清空槽位 \(slot)", materializeSlots: [slot])
+        guard captureUndoSnapshot(title: "清空槽位 \(slot)") else { return }
 
         suppressWatcher() // v2.9.4 (#2): self-write
         cancelPendingClipboardRestore()
@@ -6639,7 +6667,7 @@ final class SlotStoreObservable: ObservableObject {
         // 已经没有主体内容则无需处理（避免误清附件 / 无谓写盘）。
         guard !content.items.isEmpty || content.htmlSource != nil else { return }
 
-        captureUndoSnapshot(title: "删除槽位 \(slot) 内容")
+        guard captureUndoSnapshot(title: "删除槽位 \(slot) 内容") else { return }
 
         suppressWatcher() // v2.9.4 (#2): self-write
         cancelPendingClipboardRestore()
@@ -6747,7 +6775,7 @@ final class SlotStoreObservable: ObservableObject {
         var content = contentForSlot(slot)
         guard content.hasManualThumbnail else { return }
 
-        captureUndoSnapshot(title: "移除槽位 \(slot) 缩略图")
+        guard captureUndoSnapshot(title: "移除槽位 \(slot) 缩略图") else { return }
         suppressWatcher()
 
         content.manualThumbnailId = nil
@@ -6795,7 +6823,7 @@ final class SlotStoreObservable: ObservableObject {
             return
         }
 
-        captureUndoSnapshot(title: "设置槽位 \(slot) 缩略图")
+        guard captureUndoSnapshot(title: "设置槽位 \(slot) 缩略图") else { return }
         suppressWatcher()
 
         var content = contentForSlot(slot)
@@ -6875,24 +6903,45 @@ final class SlotStoreObservable: ObservableObject {
 
     // MARK: - Label
 
-    func setLabel(_ slot: Int, label: String?) {
-        let activeId = currentSpecialSlotId
-        // UNDO-1 (v2.10.95): 改标签也算一步撤销（快照含 labels 全量）。
-        captureUndoSnapshot(title: "修改槽位 \(slot) 标签")
-
-        suppressWatcher() // v2.9.4 (#2): self-write
-        specialStorage.setLabel(slot, label: label, in: activeId)
-
-        var newLabels = labels
-        if let label = label, !label.isEmpty {
-            newLabels[slot] = label
-        } else {
-            newLabels.removeValue(forKey: slot)
+    @discardableResult func setLabel(_ slot: Int, label: String?, in groupID: String? = nil) -> Bool {
+        let activeId = groupID ?? displayedSpecialSlotId
+        let normalized = label?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        do {
+            var nextUndo = undoStack, nextRedo = redoStack
+            try slotWriteQueue.sync {
+                try StorageLock.shared.withLock(timeout: 0.15) {
+                    guard !StorageLock.shared.isDegraded else { throw AgentCanvasError.busy }
+                    guard specialStorage.loadIndex().specialSlots.contains(where: { $0.id == activeId }) else {
+                        throw AgentCanvasError.unavailable
+                    }
+                    if (specialStorage.getLabel(slot, in: activeId) ?? "") == normalized { return }
+                    nextUndo.push(makeTitleSnapshot(slot: slot, groupID: activeId,
+                                                   title: "修改槽位 \(slot) 标题"))
+                    nextRedo.removeAll(forGroup: activeId)
+                    let history = try JSONEncoder().encode(PersistedHistory(undo: nextUndo, redo: nextRedo))
+                    suppressWatcher()
+                    try specialStorage.writeTitle(slot, label: normalized, in: activeId, historyData: history)
+                }
+            }
+            undoStack = nextUndo
+            redoStack = nextRedo
+            if displayedSpecialSlotId == activeId {
+                if normalized.isEmpty { labels.removeValue(forKey: slot) }
+                else { labels[slot] = normalized }
+            }
+            _ = persistHistory(commitCanonical: false)
+            return true
+        } catch {
+            transientUI.showToast("标题未保存，原内容已保留。\(error.localizedDescription)", duration: 4)
+            return false
         }
-        labels = newLabels
-        loadedSpecialSlotId = activeId
+    }
 
-        NSLog("[ClipSlots] setLabel specialSlot=\(activeId) slot=\(slot) label=\(label ?? "")")
+    private func makeTitleSnapshot(slot: Int, groupID: String, title: String) -> SlotUndoSnapshot {
+        let original = specialStorage.getLabel(slot, in: groupID)
+        return SlotUndoSnapshot(slots: [slot: SlotContent(contentId: "title-history")],
+            labels: original.map { [slot: $0] } ?? [:], title: title, groupId: groupID,
+            affectedSlots: [slot], labelsOnly: true)
     }
 
     // MARK: - v2.7.26 Hotkey Generation Guard
@@ -6917,6 +6966,8 @@ final class SlotStoreObservable: ObservableObject {
 
     private let folderImportService = FolderImportService()
     private let batchImportService = BatchImportService()
+    private var queuedImportURLs: [URL] = []
+    private var processingImportSelection = false
 
     // MARK: - Toolbar Import (v2.6.4)
 
@@ -6933,41 +6984,57 @@ final class SlotStoreObservable: ObservableObject {
 
         guard panel.runModal() == .OK, !panel.urls.isEmpty else { return }
 
-        // 优先识别槽位包（v2.10.58：内容优先，不再只看扩展名）。
-        // 用户可能把导出的 .clipslotspack 改名（扩展名变化），此时仅靠扩展名会误走普通文件
-        // 导入路径，把整个 ZIP 当普通文件塞进槽位。这里先按扩展名快速命中；未命中时再对
-        // 「单个非目录文件」尝试解析 manifest.json 做内容探测，探测成功即走包导入。
-        if let packURL = panel.urls.first(where: { $0.pathExtension.lowercased() == "clipslotspack" }) {
-            importPack(from: packURL)
-            return
-        }
-        if panel.urls.count == 1, let candidate = panel.urls.first,
-           !isDirectory(candidate) {
-            // P2 (v2.10.60): isValidPack 会同步 spawn /usr/bin/unzip 解出 manifest.json 做内容探测，
-            // 选中大文件 / 慢速卷时可能在主线程短暂卡顿。改为后台探测，完成后回主线程分流，
-            // 全程主线程不阻塞（探测期间 UI 保持响应）。
-            let urls = panel.urls
-            let maxChild = specialSlotSettings.maxChildSlotsPerSpecialSlot
-            DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-                let isPack = PackImporter(maxChildSlots: maxChild).isValidPack(at: candidate)
-                DispatchQueue.main.async { [weak self] in
-                    guard let self = self else { return }
-                    if isPack {
-                        self.importPack(from: candidate)
-                    } else {
-                        self.presentImportOptions(for: urls)
-                    }
-                }
-            }
-            return
-        }
-        presentImportOptions(for: panel.urls)
+        importSelectedURLs(panel.urls)
     }
 
-    /// v2.10.58: 判断 URL 是否指向一个目录（用于内容探测前排除文件夹选择）。
-    private func isDirectory(_ url: URL) -> Bool {
-        var isDir: ObjCBool = false
-        return FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir) && isDir.boolValue
+    /// Classify all selections by content, then import packages serially. Keep
+    /// ordinary files and report invalid packs instead of silently dropping them.
+    func importSelectedURLs(_ urls: [URL]) {
+        queuedImportURLs.append(contentsOf: urls)
+        guard !processingImportSelection else { return }
+        drainImportSelection()
+    }
+
+    private func drainImportSelection() {
+        guard !queuedImportURLs.isEmpty else { processingImportSelection = false; return }
+        processingImportSelection = true
+        let urls = queuedImportURLs
+        queuedImportURLs.removeAll()
+        let maxChild = specialSlotSettings.maxChildSlotsPerSpecialSlot
+        publishImportProgress(ImportProgress(title: "正在解析槽位包", detail: "读取包信息…"))
+        DispatchQueue.global(qos: .userInitiated).async {
+            let items = PackImportSelection.classify(urls, maxChildSlots: maxChild)
+            DispatchQueue.main.async {
+                self.publishImportProgress(nil)
+                var packs: [URL] = []
+                var files: [URL] = []
+                var failures: [String] = []
+                for item in items {
+                    switch item {
+                    case .pack(let url): packs.append(url)
+                    case .file(let url): files.append(url)
+                    case .invalid(let url, let error): failures.append("\(url.lastPathComponent)：\(error)")
+                    }
+                }
+                func next(_ index: Int) {
+                    if index < packs.count {
+                        self.importPack(from: packs[index]) { next(index + 1) }
+                        return
+                    }
+                    if !failures.isEmpty {
+                        let alert = NSAlert()
+                        alert.messageText = AppInterfaceStrings.text("无法导入")
+                        alert.informativeText = failures.joined(separator: "\n\n")
+                        alert.addButton(withTitle: AppInterfaceStrings.text("确定"))
+                        alert.runModal()
+                    }
+                    if !files.isEmpty { self.presentImportOptions(for: files) }
+                    self.processingImportSelection = false
+                    if !self.queuedImportURLs.isEmpty { self.drainImportSelection() }
+                }
+                next(0)
+            }
+        }
     }
 
     // MARK: - Pack Export / Import (v2.10.14)
@@ -7101,10 +7168,11 @@ final class SlotStoreObservable: ObservableObject {
     /// 主线程，大包会阻塞 runloop 导致转圈/无响应（导出早已后台化，导入却没有）。改为把整个
     /// 导入放到后台队列执行；仅「冲突弹窗」（必须主线程）与最终 UI 更新回到主线程。冲突弹窗通过
     /// DispatchQueue.main.sync 同步取用户选择后继续在后台推进。
-    func importPack(from packURL: URL) {
+    func importPack(from packURL: URL, completion: (() -> Void)? = nil) {
         let importer = PackImporter(maxChildSlots: specialSlotSettings.maxChildSlotsPerSpecialSlot)
 
         DispatchQueue.global(qos: .userInitiated).async {
+            defer { DispatchQueue.main.async { completion?() } }
             // v2.10.39: 进入解压/解析阶段先显示不确定进度浮层（total 未知）。
             self.publishImportProgress(ImportProgress(title: "正在解析槽位包", detail: "读取包信息…"))
             // 先校验是否为有效槽位包（readManifest 只解出 manifest.json，放后台即可）。
@@ -7533,7 +7601,7 @@ final class SlotStoreObservable: ObservableObject {
 
         // UNDO-1 (v2.10.95): 保存/覆盖单槽（Cmd+Option+数字保存、自动存储落点、划词保存等的统一收口）
         // 算一步撤销。覆盖写不会销毁附件字节（存储层保留 + .trash 备份），故无需 materialize。
-        captureUndoSnapshot(title: "保存到槽位 \(targetSlot)")
+        guard captureUndoSnapshot(title: "保存到槽位 \(targetSlot)") else { return }
 
         ThumbnailProvider.shared.invalidateSlot(specialSlotId: activeId, slot: targetSlot)
 
@@ -7642,7 +7710,7 @@ final class SlotStoreObservable: ObservableObject {
                 var body = content
                 body.manageBodyFile(url)
                 let capturedBody = body
-                let result: (before: SlotContent, after: SlotContent) = try await withCheckedThrowingContinuation { continuation in
+                let result: (before: SlotContent, after: SlotContent, undo: SlotUndoSnapshot) = try await withCheckedThrowingContinuation { continuation in
                     fileImportQueue.async {
                         do {
                             let snapshot = try self.slotWriteQueue.sync {
@@ -7653,17 +7721,13 @@ final class SlotStoreObservable: ObservableObject {
                                 throw AgentCanvasError.conflict
                             }
                             let saved = try self.prepareAndCommitFile(capturedBody, snapshot: snapshot,
-                                storage: self.specialStorage, cancellation: cancellation, label: url.lastPathComponent)
+                                storage: self.specialStorage, cancellation: cancellation, label: url.lastPathComponent,
+                                captureHistory: true)
                             continuation.resume(returning: saved)
                         } catch { continuation.resume(throwing: error) }
                     }
                 }
-                let undo = SlotUndoSnapshot(slots: [slot: result.before],
-                    labels: [slot: result.before.label ?? ""], title: "保存文件到槽位 \(slot)",
-                    groupId: groupID, affectedSlots: [slot])
-                if undoStack.push(undo) { persistUndoStack() }
-                redoStack.removeAll(forGroup: groupID)
-                persistRedoStack()
+                recordCommittedUndo(result.undo)
                 if loadedSpecialSlotId == groupID,
                    slots[slot].map({ AgentSlotBody($0) == AgentSlotBody(result.before) }) != false {
                     slots[slot] = result.after

@@ -131,7 +131,7 @@ struct CanvasAddNodeMenu: View {
     }
 
     private func sectionTitle(_ title: String) -> some View {
-        Text(title)
+        AppLocalizedText(title)
             .font(.system(size: 12, weight: .regular))
             .foregroundColor(TapSkin.secondaryInk)
             .padding(.horizontal, 12)
@@ -154,10 +154,10 @@ struct CanvasAddNodeMenu: View {
                     )
 
                 VStack(alignment: .leading, spacing: 1) {
-                    Text(upstream ? (choice == .text ? "文本生成" : "图片处理") : choice.title(referencing: parentCount > 0))
+                    AppLocalizedText(upstream ? (choice == .text ? "文本生成" : "图片处理") : choice.title(referencing: parentCount > 0))
                         .font(.system(size: 14, weight: .semibold))
                         .foregroundColor(TapSkin.ink)
-                    if upstream || !choice.subtitle.isEmpty { Text(upstream ? (choice == .text ? "生成或编辑文本" : "生成或上传图片") : choice.subtitle)
+                    if upstream || !choice.subtitle.isEmpty { AppLocalizedText(upstream ? (choice == .text ? "生成或编辑文本" : "生成或上传图片") : choice.subtitle)
                         .font(.system(size: 11))
                         .foregroundColor(TapSkin.secondaryInk)
                         .lineLimit(2)
@@ -166,7 +166,7 @@ struct CanvasAddNodeMenu: View {
 
                 Spacer(minLength: 0)
                 if !choice.isAvailable {
-                    Text("暂未接入")
+                    AppLocalizedText("暂未接入")
                         .font(.system(size: 10))
                         .foregroundColor(TapSkin.secondaryInk)
                 }
@@ -183,7 +183,7 @@ struct CanvasAddNodeMenu: View {
         .buttonStyle(.plain)
         .disabled(!choice.isAvailable)
         .opacity(choice.isAvailable ? 1 : 0.4)
-        .help(choice.isAvailable ? choice.title(referencing: parentCount > 0) : "\(choice.title)暂未接入")
+        .localizedHelp(choice.isAvailable ? choice.title(referencing: parentCount > 0) : "\(choice.title)暂未接入")
         .canvasControlRegion("add-menu-row-\(choice.rawValue)")
         .onHover { hovered = $0 ? choice : (hovered == choice ? nil : hovered) }
     }

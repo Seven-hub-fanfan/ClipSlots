@@ -26,6 +26,8 @@ struct CanvasNodeComposer<Controls: View>: View {
     @ViewBuilder let controls: () -> Controls
     @State private var draft = ""
     @State private var showingError = false
+    @AppStorage(AppInterfaceLanguage.preferenceKey) private var languageRaw = AppInterfaceLanguage.chinese.rawValue
+    private var language: AppInterfaceLanguage { AppInterfaceLanguage.resolve(languageRaw) }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -38,8 +40,8 @@ struct CanvasNodeComposer<Controls: View>: View {
                         .overlay(RoundedRectangle(cornerRadius: 7).stroke(TapSkin.border))
                 }
                 .buttonStyle(.plain)
-                .help("添加参考文件")
-                .accessibilityLabel("添加参考文件")
+                .localizedHelp("添加参考文件")
+                .localizedAccessibilityLabel("添加参考文件")
                 .canvasControlRegion("composer-add-input")
                 if !referenceNodes.isEmpty || !inputAttachments.isEmpty {
                     ScrollView(.horizontal, showsIndicators: false) {
@@ -69,7 +71,7 @@ struct CanvasNodeComposer<Controls: View>: View {
                                         }
                                         if reference.kind == .slot {
                                             let count = slotImageCounts[reference.id] ?? 0
-                                            Text(count > 0 ? "槽位 · \(count) 图" : "槽位")
+                                            AppLocalizedText(count > 0 ? "槽位 · %ld 图" : "槽位", count)
                                                 .padding(.trailing, 8)
                                         }
                                     }
@@ -79,8 +81,8 @@ struct CanvasNodeComposer<Controls: View>: View {
                                     .contentShape(Rectangle())
                                 }
                                 .buttonStyle(.plain)
-                                .help("查看引用\(reference.kind == .slot ? "槽位" : (reference.kind == .text ? "文本" : (reference.kind == .image ? "图片" : "视频")))")
-                                .accessibilityLabel("连接的\(reference.kind.displayName)")
+                                .localizedHelp("查看引用%@", AppInterfaceStrings.text(reference.kind == .slot ? "槽位" : (reference.kind == .text ? "文本" : (reference.kind == .image ? "图片" : "视频")), language: language))
+                                .localizedAccessibilityLabel("连接的%@", AppInterfaceStrings.text(reference.kind.displayName, language: language))
                                 .canvasControlRegion("composer-reference-\(reference.id)")
                             }
                             ForEach(inputAttachments) { attachment in
@@ -92,15 +94,15 @@ struct CanvasNodeComposer<Controls: View>: View {
                                         .overlay(RoundedRectangle(cornerRadius: 7).stroke(TapSkin.border))
                                 }
                                 .buttonStyle(.plain)
-                                .help("入参：\(attachment.name)")
-                                .accessibilityLabel("参考文件 \(attachment.name)")
+                                .localizedHelp("入参：%@", attachment.name)
+                                .localizedAccessibilityLabel("参考文件 %@", attachment.name)
                                 .canvasControlRegion("composer-input-\(attachment.id.uuidString)")
                             }
                         }
                     }.frame(height: 32)
                 }
                 if inputCount > 0 || inputSummary != nil {
-                    Text(inputSummary ?? "\(inputCount) 张参考图")
+                    Text(verbatim: inputSummary ?? AppInterfaceStrings.format("%ld 张参考图", language: language, arguments: [inputCount]))
                         .font(.system(size: 11)).foregroundColor(TapSkin.chromeInkDim)
                         .lineLimit(1)
                         .help(inputDetail)
@@ -111,20 +113,20 @@ struct CanvasNodeComposer<Controls: View>: View {
                         .frame(width: 28, height: 32)
                 }
                 .buttonStyle(.plain)
-                .help("管理入参文件")
-                .accessibilityLabel("管理入参文件")
+                .localizedHelp("管理入参文件")
+                .localizedAccessibilityLabel("管理入参文件")
                 Spacer()
                 if case .failed(let reason) = node.state {
-                    Button("错误详情") { showingError = true }
+                    Button(localized: "错误详情") { showingError = true }
                         .buttonStyle(.plain).font(.system(size: 11)).foregroundColor(.orange)
                         .popover(isPresented: $showingError) {
                             VStack(alignment: .leading, spacing: 12) {
-                                Text("生成失败").font(.headline)
+                                AppLocalizedText("生成失败").font(.headline)
                                 ScrollView { Text(reason).textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading) }
                                     .frame(maxHeight: 200)
-                                Text(node.taskId == nil ? "检查提示词、参考文件及模型设置后重试。" : "任务已提交，可先继续查询结果；重新生成会提交新任务。")
+                                AppLocalizedText(node.taskId == nil ? "检查提示词、参考文件及模型设置后重试。" : "任务已提交，可先继续查询结果；重新生成会提交新任务。")
                                     .font(.caption).foregroundColor(.secondary)
-                                Button("复制诊断信息") {
+                                Button(localized: "复制诊断信息") {
                                     NSPasteboard.general.clearContents()
                                     let source = node.generationTask?.context.provider == .byteartist
                                         ? "BA 工作流：" + (node.generationTask?.capabilityID ?? node.byteArtist.workflowID)
@@ -141,13 +143,13 @@ struct CanvasNodeComposer<Controls: View>: View {
                         .font(.system(size: 10)).foregroundColor(TapSkin.chromeInkDim).lineLimit(2)
                 }
                 if let onRecover {
-                    Button("取回结果", action: onRecover)
+                    Button(localized: "取回结果", action: onRecover)
                         .buttonStyle(.plain).font(.system(size: 11))
                 }
                 if let onRestart {
-                    Button("重新生成", action: onRestart)
+                    Button(localized: "重新生成", action: onRestart)
                         .buttonStyle(.plain).font(.system(size: 11))
-                        .help("使用当前参数提交新任务")
+                        .localizedHelp("使用当前参数提交新任务")
                 }
             }
             CanvasPromptEditor(text: $draft, font: .systemFont(ofSize: 13),
@@ -155,7 +157,7 @@ struct CanvasNodeComposer<Controls: View>: View {
                                onCancel: { draft = text; onCancel() },
                                onBlur: { onCommit(draft) },
                                autoFocus: editing,
-                               placeholder: node.kind == .text ? "描述画面想法，优化为生图提示词" : "描述任何你想要生成的内容",
+                               placeholder: AppInterfaceStrings.text(node.kind == .text ? "描述画面想法，优化为生图提示词" : "描述任何你想要生成的内容", language: language),
                                onFocus: { if !editing { onBegin() } })
             .frame(height: 82)
             .tapCursor(.iBeam)
@@ -182,15 +184,16 @@ extension CanvasWorkspaceView {
         let all = CanvasEdgeInputs.imageReferences(edgeInputs: inputs, slotImages: own)
         let excluded = all.filter { !used.contains($0) }.count
         let roles = [
-            frames.first == nil ? nil : "首帧 1",
-            frames.last == nil ? nil : "尾帧 1",
-            frames.references.isEmpty ? nil : "参考 \(frames.references.count)"
+            frames.first == nil ? nil : AppInterfaceStrings.text("首帧 1"),
+            frames.last == nil ? nil : AppInterfaceStrings.text("尾帧 1"),
+            frames.references.isEmpty ? nil : AppInterfaceStrings.format("参考 %ld", arguments: [frames.references.count])
         ].compactMap { $0 }.joined(separator: " · ")
-        let title = (roles.isEmpty ? "无图片入参" : roles) + (excluded > 0 ? " · \(excluded) 图未使用" : "")
-        let detail = (roles.isEmpty ? "无图片入参" : roles)
-            + (excluded > 0 ? "。当前模型的互斥规则或数量限制排除了 \(excluded) 张图片。" : "。")
-            + "点击连线可调整首帧、尾帧或参考图角色。"
-            + (model == nil ? "模型目录尚未加载，暂保留全部图位。" : "")
+        let title = (roles.isEmpty ? AppInterfaceStrings.text("无图片入参") : roles)
+            + (excluded > 0 ? AppInterfaceStrings.format(" · %ld 图未使用", arguments: [excluded]) : "")
+        let detail = (roles.isEmpty ? AppInterfaceStrings.text("无图片入参") : roles)
+            + (excluded > 0 ? AppInterfaceStrings.format("。当前模型的互斥规则或数量限制排除了 %ld 张图片。", arguments: [excluded]) : AppInterfaceStrings.text("。"))
+            + AppInterfaceStrings.text("点击连线可调整首帧、尾帧或参考图角色。")
+            + (model == nil ? AppInterfaceStrings.text("模型目录尚未加载，暂保留全部图位。") : "")
         return (title, detail)
     }
     var canvasContentViewport: CGRect {

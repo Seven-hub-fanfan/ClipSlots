@@ -1,0 +1,25 @@
+{
+  "passed": true,
+  "checks": {
+    "导入验收 1: appearance": true,
+    "导入验收 1: labels": true,
+    "导入验收 1: body bytes": true,
+    "导入验收 1: attachment bytes and empty file": true,
+    "导入验收 2: appearance": true,
+    "导入验收 2: labels": true,
+    "导入验收 2: body bytes": true,
+    "导入验收 2: attachment bytes and empty file": true,
+    "导入验收 1-导入: appearance": true,
+    "导入验收 1-导入: labels": true,
+    "导入验收 1-导入: body bytes": true,
+    "导入验收 1-导入: attachment bytes and empty file": true,
+    "导入验收 2-导入: appearance": true,
+    "导入验收 2-导入: labels": true,
+    "导入验收 2-导入: body bytes": true,
+    "导入验收 2-导入: attachment bytes and empty file": true
+  },
+  "isolated": true,
+  "route": "native_toolbar_multiselect",
+  "fixture_sha256": "5d93b230f7cf4ff0ad3a5effb4dab0702ccb13deb8cef38da8e03fd6a568780f",
+  "pages_checked": 4
+}

@@ -20,6 +20,12 @@ enum Anim {
     /// 指针级即时反馈：hover / 按压 / 开关 / 即时高亮。跟手、干脆。
     static let interactive: Animation = .easeOut(duration: 0.12)
 
+    /// Navigation presses update immediately; only release/selection settles.
+    static let navigationFeedback: Animation = .easeOut(duration: 0.09)
+
+    /// Local page disclosure, without a moving insertion across the editor.
+    static let navigationReveal: Animation = .easeOut(duration: 0.12)
+
     /// 状态 / 信息淡入淡出：Toast / 浮层 / 角标 / 提示。中性、不抢眼。
     static let status: Animation = .easeInOut(duration: 0.2)
 

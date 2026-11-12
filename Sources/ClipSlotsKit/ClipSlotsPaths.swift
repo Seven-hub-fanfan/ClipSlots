@@ -53,11 +53,11 @@ public enum ClipSlotsPaths {
     /// 只统计 `.undo` 目录下的常规文件，目录不存在时返回 0。
     public static func undoStackDiskBytes() -> Int64 {
         let fm = FileManager.default
-        guard let items = try? fm.contentsOfDirectory(at: undoDir,
-                                                     includingPropertiesForKeys: [.fileSizeKey, .isRegularFileKey],
-                                                     options: [.skipsHiddenFiles]) else { return 0 }
+        guard let items = fm.enumerator(at: undoDir,
+                                       includingPropertiesForKeys: [.fileSizeKey, .isRegularFileKey],
+                                       options: [.skipsHiddenFiles]) else { return 0 }
         var total: Int64 = 0
-        for url in items {
+        for case let url as URL in items {
             let values = try? url.resourceValues(forKeys: [.fileSizeKey, .isRegularFileKey])
             guard values?.isRegularFile == true, let size = values?.fileSize else { continue }
             total += Int64(size)

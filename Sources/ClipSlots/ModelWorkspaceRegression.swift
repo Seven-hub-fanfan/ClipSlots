@@ -20,6 +20,11 @@ private actor ModelWorkspaceFixtureHTTP: ModelHTTPTransport {
 @MainActor enum ModelWorkspaceRegression {
     private static var started = false
     static func schedule(store: SlotStoreObservable) {
+        if let path = ProcessInfo.processInfo.environment["CLIPSLOTS_AGENT_ORB_REGRESSION"], !started {
+            started = true
+            Task { await AgentOrbRegression.run(root: URL(fileURLWithPath: path)) }
+            return
+        }
         if let path = ProcessInfo.processInfo.environment["CLIPSLOTS_INTERACTIVE_DECISION"], !started {
             started = true
             Task { await DecisionForegroundFixture.open(root: URL(fileURLWithPath: path)) }

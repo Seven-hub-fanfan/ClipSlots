@@ -26,6 +26,8 @@ struct GlobalSearchResultsView: View {
     var loadPreview: (SlotGlobalSearchResult) async -> SlotContent = { $0.content }
 
     @State private var compact = false
+    @AppStorage(AppInterfaceLanguage.preferenceKey) private var languageRaw = AppInterfaceLanguage.chinese.rawValue
+    private var interfaceLanguage: AppInterfaceLanguage { AppInterfaceLanguage.resolve(languageRaw) }
     // v2.10.48: 悬停防抖 work item——扫视 / 滚动搜索结果列表时，抑制右侧预览随每一行掠过而
     // 疯狂重新解码切换，消除「预览图狂闪」。停留 ~80ms 后才真正切换选中项。
     @State private var hoverDebounce: DispatchWorkItem?
@@ -110,10 +112,10 @@ struct GlobalSearchResultsView: View {
                 .font(.caption)
                 .foregroundColor(.secondary)
 
-            Text(isRunning ? (matchedCount > 0 ? "已找到 \(matchedCount) 个，继续搜索…" : "正在搜索…")
+            AppLocalizedText(isRunning ? (matchedCount > 0 ? "已找到 %ld 个，继续搜索…" : "正在搜索…")
                  : !isComplete ? "搜索尚未完成，请重试"
                  : results.isEmpty ? "全局未找到匹配槽位"
-                : "\(results.count) 个结果")
+                : "%ld 个结果", isRunning ? matchedCount : results.count)
                 .font(.caption.weight(.medium))
                 .foregroundColor(.secondary)
                 #if DEBUG
@@ -126,18 +128,18 @@ struct GlobalSearchResultsView: View {
                 Menu {
                     ForEach(SlotSearchSortRule.allCases) { rule in
                         Button { sortRule = rule } label: {
-                            Label(rule.title, systemImage: sortRule == rule ? "checkmark" : "arrow.up.arrow.down")
+                            Label(localized: rule.title, systemImage: sortRule == rule ? "checkmark" : "arrow.up.arrow.down")
                         }
                     }
                 } label: {
-                    Label(sortRule.title, systemImage: "arrow.up.arrow.down")
+                    Label(localized: sortRule.title, systemImage: "arrow.up.arrow.down")
                         .font(.system(size: 11, weight: .medium))
                         .padding(.horizontal, 9).frame(height: 28)
                         .background(Color.primary.opacity(0.04), in: RoundedRectangle(cornerRadius: 8))
                 }
                 .menuStyle(.borderlessButton).fixedSize()
                 .accessibilityIdentifier("global-search-sort")
-                .help("结果排序方式")
+                .localizedHelp("结果排序方式")
             }
         }
     }
@@ -148,7 +150,7 @@ struct GlobalSearchResultsView: View {
         HStack(spacing: 8) {
             if isRunning { ProgressView().controlSize(.small) }
             else { Image(systemName: "magnifyingglass").foregroundColor(.secondary) }
-            Text(isRunning ? "正在查找匹配槽位"
+            AppLocalizedText(isRunning ? "正在查找匹配槽位"
                  : isComplete ? "没有匹配的全局结果" : "搜索未完成，未确认全部结果")
                 .font(.caption)
                 .foregroundColor(.secondary)
@@ -203,7 +205,7 @@ struct GlobalSearchResultsView: View {
             VStack(alignment: .leading, spacing: 3) {
                 HStack(spacing: 6) {
                     if isCurrent {
-                        Text("当前")
+                        AppLocalizedText("当前")
                             .font(.system(size: 9, weight: .semibold))
                             .padding(.horizontal, 6)
                             .padding(.vertical, 2)
@@ -211,12 +213,12 @@ struct GlobalSearchResultsView: View {
                             .foregroundColor(.secondary)
                     }
 
-                    Text(result.displayTitle)
+                    Text(result.interfaceDisplayTitle(language: interfaceLanguage))
                         .font(.caption.weight(.semibold))
                         .lineLimit(1)
                 }
 
-                Text(result.displaySubtitle)
+                Text(result.interfaceDisplaySubtitle(language: interfaceLanguage))
                     .font(.caption2)
                     .foregroundColor(.secondary)
                     .lineLimit(1)
@@ -260,7 +262,7 @@ struct GlobalSearchResultsView: View {
             hoverDebounce = work
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.08, execute: work)
         }
-        .help("点击跳转到该槽位")
+        .localizedHelp("点击跳转到该槽位")
         .transition(.opacity)
     }
 
@@ -269,11 +271,11 @@ struct GlobalSearchResultsView: View {
     private var previewPanel: some View {
         VStack(alignment: .leading, spacing: 8) {
             if let result = previewResult {
-                Text(result.displayTitle)
+                Text(result.interfaceDisplayTitle(language: interfaceLanguage))
                     .font(.caption.weight(.semibold))
                     .lineLimit(2)
 
-                Text(result.displaySubtitle)
+                Text(result.interfaceDisplaySubtitle(language: interfaceLanguage))
                     .font(.caption2)
                     .foregroundColor(.secondary)
                     .lineLimit(2)
@@ -283,7 +285,7 @@ struct GlobalSearchResultsView: View {
                 actionButtons(for: result)
             } else {
                 Spacer(minLength: 0)
-                Text("暂无预览")
+                AppLocalizedText("暂无预览")
                     .font(.caption)
                     .foregroundColor(.secondary)
                     .frame(maxWidth: .infinity, alignment: .center)
@@ -375,7 +377,7 @@ struct GlobalSearchResultsView: View {
             Button {
                 onJump(result)
             } label: {
-                Label("定位槽位", systemImage: "arrow.up.right")
+                Label(localized: "定位槽位", systemImage: "arrow.up.right")
             }
             .buttonStyle(CompactActionStyle())
 
@@ -387,7 +389,7 @@ struct GlobalSearchResultsView: View {
                 Button {
                     SlotTypeActions.openFile(fileURL)
                 } label: {
-                    Label("打开文件", systemImage: "doc")
+                    Label(localized: "打开文件", systemImage: "doc")
                         .font(.caption)
                         .frame(maxWidth: .infinity, alignment: .leading)
                 }
@@ -397,7 +399,7 @@ struct GlobalSearchResultsView: View {
                 Button {
                     SlotTypeActions.revealInFinder(fileURL)
                 } label: {
-                    Label("打开所在目录", systemImage: "folder")
+                    Label(localized: "打开所在目录", systemImage: "folder")
                         .font(.caption)
                         .frame(maxWidth: .infinity, alignment: .leading)
                 }
@@ -407,7 +409,7 @@ struct GlobalSearchResultsView: View {
                 Button {
                     SlotTypeActions.copyFilePath(fileURL)
                 } label: {
-                    Label("复制路径", systemImage: "doc.on.doc")
+                    Label(localized: "复制路径", systemImage: "doc.on.doc")
                         .font(.caption)
                         .frame(maxWidth: .infinity, alignment: .leading)
                 }
@@ -419,7 +421,7 @@ struct GlobalSearchResultsView: View {
                 Button {
                     SlotTypeActions.openWebURL(webURL)
                 } label: {
-                    Label("打开链接", systemImage: "safari")
+                    Label(localized: "打开链接", systemImage: "safari")
                         .font(.caption)
                         .frame(maxWidth: .infinity, alignment: .leading)
                 }
@@ -428,7 +430,7 @@ struct GlobalSearchResultsView: View {
                 Button {
                     SlotTypeActions.copyString(webURL.absoluteString)
                 } label: {
-                    Label("复制链接", systemImage: "link")
+                    Label(localized: "复制链接", systemImage: "link")
                         .font(.caption)
                         .frame(maxWidth: .infinity, alignment: .leading)
                 }
@@ -437,7 +439,7 @@ struct GlobalSearchResultsView: View {
                 Button {
                     SlotTypeActions.copyMarkdownLink(webURL)
                 } label: {
-                    Label("复制 Markdown", systemImage: "text.badge.plus")
+                    Label(localized: "复制 Markdown", systemImage: "text.badge.plus")
                         .font(.caption)
                         .frame(maxWidth: .infinity, alignment: .leading)
                 }
@@ -447,7 +449,7 @@ struct GlobalSearchResultsView: View {
                 Image(systemName: "ellipsis").frame(width: 28, height: 32)
             }
             .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
-            .help("更多操作")
+            .localizedHelp("更多操作")
             .disabled(result.content.primaryFileURL == nil && result.content.detectedWebURL == nil)
             Spacer(minLength: 0)
         }

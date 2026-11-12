@@ -164,6 +164,7 @@ struct NeuRaisedBackground: View {
     var radius: CGFloat = NeumorphicMetrics.actionRadius
     var pressed: Bool = false
     var hovering: Bool = false
+    var pressAnimation: Animation? = Anim.interactive
     /// 传入非 nil 时用它替换默认的凸起填充（例如危险操作的淡红底）。
     var fill: AnyShapeStyle? = nil
 
@@ -202,7 +203,7 @@ struct NeuRaisedBackground: View {
                                                     startPoint: .topLeading,
                                                     endPoint: .center)))
             )
-            .animation(Anim.interactive, value: pressed)
+            .animation(pressAnimation, value: pressed)
     }
 }
 
@@ -260,8 +261,10 @@ extension View {
     func neuRaised(radius: CGFloat = NeumorphicMetrics.actionRadius,
                    pressed: Bool = false,
                    hovering: Bool = false,
-                   fill: AnyShapeStyle? = nil) -> some View {
-        background(NeuRaisedBackground(radius: radius, pressed: pressed, hovering: hovering, fill: fill))
+                   fill: AnyShapeStyle? = nil,
+                   pressAnimation: Animation? = Anim.interactive) -> some View {
+        background(NeuRaisedBackground(radius: radius, pressed: pressed, hovering: hovering,
+                                       pressAnimation: pressAnimation, fill: fill))
     }
 
     /// 挂成内凹容器。
@@ -345,7 +348,7 @@ struct NeuVerticalSwitch: View {
                 Circle()
                     .fill(isOn ? statusColor : Neu.subtleInk.opacity(0.45))
                     .frame(width: 5, height: 5)
-                Text(label)
+                AppLocalizedText(label)
                     .font(.system(size: 9, weight: .semibold))
                     .foregroundColor(isOn ? Neu.ink : Neu.subtleInk)
                     .fixedSize()
@@ -379,10 +382,10 @@ struct NeuVerticalSwitch: View {
         .onHover { isHovering = $0 }
         .onTapGesture { isOn.toggle() }
         .accessibilityElement()
-        .accessibilityLabel(label)
-        .accessibilityValue(isOn ? "开" : "关")
+        .localizedAccessibilityLabel(label)
+        .localizedAccessibilityValue(isOn ? "开" : "关")
         .accessibilityAddTraits(.isButton)
-        .help(help ?? label)
+        .localizedHelp(help ?? label)
     }
 }
 
@@ -403,7 +406,7 @@ struct NeuMiniButton: View {
             HStack(spacing: 3) {
                 Image(systemName: icon)
                     .font(.system(size: 8, weight: .bold))
-                Text(title)
+                AppLocalizedText(title)
                     .font(.system(size: 9, weight: .semibold))
                     // 截图里「回退」被压成了「…」：这两颗按钮的可用宽度由上方开关那一列决定
                     // （滑道只有 26pt 宽），不锁住理想宽度就会被 SwiftUI 判定为可截断的文本。

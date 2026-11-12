@@ -12,6 +12,7 @@ import SwiftUI
 /// 不预加载、不额外占内存，仅在 `isSwitchingGroup == true` 的极短窗口内存在。
 struct GroupSwitchVeil: View {
     @State private var animating = false
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     // v2.10.87（动画打磨）: 扫光的两个观感参数。
     //
@@ -50,8 +51,10 @@ struct GroupSwitchVeil: View {
             .frame(maxWidth: .infinity, alignment: .leading)
             .onAppear {
                 animating = false
-                withAnimation(.linear(duration: Self.sweepDuration).repeatForever(autoreverses: false)) {
-                    animating = true
+                if !reduceMotion {
+                    withAnimation(.linear(duration: Self.sweepDuration).repeatForever(autoreverses: false)) {
+                        animating = true
+                    }
                 }
             }
         }
@@ -74,6 +77,7 @@ struct GroupSwitchVeil: View {
 struct GroupSwitchDimModifier: ViewModifier {
     @ObservedObject private var transition: SlotGroupTransition
     private let navigationGate: SlotNavigationGate
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     init(ui: TransientUIStore) {
         transition = ui.groupTransition
@@ -82,11 +86,11 @@ struct GroupSwitchDimModifier: ViewModifier {
 
     func body(content: Content) -> some View {
         content
-            .opacity(transition.isSwitching ? 0.35 : 1)
+            .opacity(transition.isSwitching ? 0.88 : 1)
             .allowsHitTesting(!transition.isSwitching)
             .overlay { GroupNavigationShield(gate: navigationGate) }
             // v2.10.87: 曲线与时长与此前完全一致，仅把裸 0.16s 换成具名 token（见 AnimationTokens.swift）。
-            .animation(Anim.groupSwitch, value: transition.isSwitching)
+            .animation(reduceMotion ? nil : Anim.navigationFeedback, value: transition.isSwitching)
     }
 }
 

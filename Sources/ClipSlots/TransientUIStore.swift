@@ -4,6 +4,7 @@ import ClipSlotsKit
 /// Only the click shield observes this flag, not every transient badge.
 final class SlotNavigationGate: ObservableObject {
     @Published var isPending = false
+    @Published var requestedGroupID: String?
 }
 
 /// Grid opacity must not subscribe to cursor, toast or import notifications.
@@ -61,7 +62,10 @@ final class TransientUIStore: ObservableObject {
     let navigationGate = SlotNavigationGate()
     var isNavigationPending: Bool {
         get { navigationGate.isPending }
-        set { if navigationGate.isPending != newValue { navigationGate.isPending = newValue } }
+        set {
+            if !newValue, navigationGate.requestedGroupID != nil { navigationGate.requestedGroupID = nil }
+            if navigationGate.isPending != newValue { navigationGate.isPending = newValue }
+        }
     }
 
     /// v2.10.1: 下一次 Opt+1 自动存储会写入的空槽（绿色写游标角标）。

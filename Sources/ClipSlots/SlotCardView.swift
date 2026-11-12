@@ -15,6 +15,7 @@ struct SlotCardView: View {
     var onSave: () -> Void
     var onClear: () -> Void
     var onSetLabel: (String) -> Void
+    var onCommitLabel: ((String) -> Bool)? = nil
     var onEditText: ((String) -> Void)? = nil
     var onEditHTML: ((String) -> Void)? = nil
     var onDropFiles: (([URL]) -> Void)? = nil
@@ -55,13 +56,12 @@ struct SlotCardView: View {
     var onUpdateDrag: ((CGPoint) -> Void)?
     var onEndDrag: (() -> Void)?
 
-    @State private var editingLabel = false
-    @State private var labelText = ""
     @State private var isHovering = false
     @State private var showingPreview = false
     @State private var isDropTargeted = false
     // v2.11.0: 缩略图入口图标的悬停高亮。
     @State private var isHoveringThumbnailEntry = false
+    @AppStorage(AppInterfaceLanguage.preferenceKey) private var languageRaw = AppInterfaceLanguage.chinese.rawValue
 
     // v2.10.70: 拖拽 live-resize 期间去掉卡片软阴影——resize 时 N 张可见卡片的软阴影每帧重合成开销很大。
     @ObservedObject private var liveResize = LiveResizeMonitor.shared
@@ -126,10 +126,10 @@ struct SlotCardView: View {
                     .clipShape(RoundedRectangle(cornerRadius: AppTheme.slotPreviewCornerRadius, style: .continuous))
                     .overlay(FirstMouseClickHandle(action: onUploadFile))
                     .accessibilityElement(children: .ignore)
-                    .accessibilityLabel("上传文件到槽位 \(slot)")
+                    .localizedAccessibilityLabel("上传文件到槽位 %ld", slot)
                     .accessibilityAddTraits(.isButton)
                     .accessibilityAction { onUploadFile() }
-                    .help("点击上传单个文件到槽位 \(slot)")
+                    .localizedHelp("点击上传单个文件到槽位 %ld", slot)
                 } else if content.hasManualThumbnail {
                     // v2.11.0「槽位缩略图手动上传」：手动封面图优先级最高，压过空槽占位、
                     // 视频内联播放器和自动缩略图三条分支。真正的取图优先级在
@@ -143,7 +143,7 @@ struct SlotCardView: View {
                                 showingPreview = true
                             }
                         }
-                        .help(content.canPreview ? "点击查看大图（当前显示的是手动设置的缩略图）" : "当前显示的是手动设置的缩略图")
+                        .localizedHelp(content.canPreview ? "点击查看大图（当前显示的是手动设置的缩略图）" : "当前显示的是手动设置的缩略图")
                 } else if content.isEmpty {
                     EmptySlotThumbnailView()
                 } else if content.isVideoFile, let url = content.primaryFileURL {
@@ -160,7 +160,7 @@ struct SlotCardView: View {
                                     showingPreview = true
                                 }
                         )
-                        .help("点击查看视频大图预览")
+                        .localizedHelp("点击查看视频大图预览")
                 } else {
                     SlotThumbnailView(content: content, specialSlotId: specialSlotId, slot: slot)
                         .id(externalContentRevision)
@@ -170,7 +170,7 @@ struct SlotCardView: View {
                                 showingPreview = true
                             }
                         }
-                        .help(content.canPreview ? "点击查看大图" : "")
+                        .localizedHelp(content.canPreview ? "点击查看大图" : "")
                 }
             }
             .modifier(SlotBodyDragModifier(content: content, groupID: specialSlotId, slot: slot, store: store,
@@ -190,7 +190,7 @@ struct SlotCardView: View {
                             )
                     }
                     .buttonStyle(.plain)
-                    .help("删除此槽位的文本内容（保留附件）")
+                    .localizedHelp("删除此槽位的文本内容（保留附件）")
                     .padding(6)
                 }
             }
@@ -215,7 +215,7 @@ struct SlotCardView: View {
                 // 「0 B 文本」体积标签），所以这里显式判空——渲染一个空 Text 会留下一道
                 // 空基线占位，把右侧附件按钮的行高撑成一条空白行。图片/文件槽位仍照旧显示
                 // 「PNG · 512×512」/「PDF 文件」。
-                let summary = content.metadataSummary
+                let summary = content.interfaceMetadataSummary(language: AppInterfaceLanguage.resolve(languageRaw))
                 if !summary.isEmpty {
                     Text(summary)
                         .font(.caption2)
@@ -389,7 +389,7 @@ struct SlotCardView: View {
                 Menu {
                     thumbnailMenuItems
                 } label: {
-                    Label(content.hasManualThumbnail ? "更改缩略图…" : "设置缩略图…",
+                    Label(localized: content.hasManualThumbnail ? "更改缩略图…" : "设置缩略图…",
                           systemImage: content.hasManualThumbnail ? "photo.fill.on.rectangle.fill" : "photo.badge.plus")
                 }
             }
@@ -402,7 +402,7 @@ struct SlotCardView: View {
         HStack(spacing: 3) {
             Image(systemName: "checkmark.circle.fill")
                 .font(.system(size: 9, weight: .bold))
-            Text("上次粘贴")
+            AppLocalizedText("上次粘贴")
                 .font(.system(size: 9, weight: .semibold))
         }
         // 简洁模式：这枚角标只有 9pt，中性灰底会直接消失在卡片里，所以反相成「近黑底白字 /
@@ -413,7 +413,7 @@ struct SlotCardView: View {
         .background(
             Capsule().fill(AppTheme.minimalCTAFill)
         )
-        .help("这是最近一次粘贴的槽位")
+        .localizedHelp("这是最近一次粘贴的槽位")
     }
 
     /// 槽位编号。两种皮肤**共用同一套几何**：30pt 圆形角标 + 34pt 的左对齐占位宽。
@@ -427,16 +427,15 @@ struct SlotCardView: View {
     /// 保住原来那种「彩色卡片」的分量；简洁模式是淡淡的一小块色，不带投影。
     @ViewBuilder
     private var slotNumberBadge: some View {
-        Text("\(slot)")
-            .font(.system(size: 14, weight: .bold))
+        Text(String(format: "%02d", slot))
+            .font(Font(SlotTypography.numberFont))
             .foregroundColor(slotAccent)
-            .monospacedDigit()
             .frame(width: 30, height: 30)
             .background(Circle().fill(slotAccent.opacity(0.14)))
             .overlay(Circle().strokeBorder(slotAccent.opacity(0.34), lineWidth: 1))
             .modifier(StaticSlotDrawing(eligible: true))
             .frame(minWidth: 34, alignment: .leading)
-            .accessibilityLabel("槽位 \(slot)")
+            .localizedAccessibilityLabel("槽位 %ld", slot)
     }
 
     private var headerRow: some View {
@@ -455,45 +454,14 @@ struct SlotCardView: View {
                 .padding(.vertical, 3)
                 .background(Capsule().fill(dotColor.opacity(0.14)))
                 .overlay(Capsule().stroke(dotColor.opacity(0.35), lineWidth: 0.8))
-                .help("此槽位属于串联链路")
+                .localizedHelp("此槽位属于串联链路")
             }
 
-            VStack(alignment: .leading, spacing: AppTheme.spacingTight) {
-                if editingLabel {
-                    TextField("标签", text: $labelText, onCommit: commitLabel)
-                        .textFieldStyle(.roundedBorder)
-                        .font(.subheadline)
-                        .onExitCommand {
-                            editingLabel = false
-                        }
-                } else {
-                    HStack(spacing: 5) {
-                        Text(displayTitle)
-                            .font(.system(size: 14, weight: .semibold))
-                            .lineLimit(1)
-
-                        Image(systemName: "pencil")
-                            .font(.system(size: 10, weight: .semibold))
-                            .foregroundColor(.secondary.opacity(isHovering ? 0.85 : 0.0))
-                    }
-                    .contentShape(Rectangle())
-                    .onTapGesture {
-                        labelText = label
-                        editingLabel = true
-                    }
-                    .help("点击编辑标签")
-                }
-
-            }
-
-            Spacer()
-
-            if !content.isEmpty {
-                // v2.9.18: 密集 header 里去掉时间戳胶囊背景，改纯灰文字更克制。
-                Text(timeAgo)
-                    .font(.caption2)
-                    .foregroundColor(.secondary)
-            }
+            SlotTitleEditor(label: label, groupID: specialSlotId, slot: slot,
+                onCommit: onCommitLabel ?? { onSetLabel($0); return true })
+            .id("\(specialSlotId)/\(slot)")
+            .frame(height: 28)
+            .frame(maxWidth: .infinity, alignment: .leading)
 
             moreActionsMenu
         }
@@ -532,7 +500,7 @@ struct SlotCardView: View {
         .menuIndicator(.hidden)
         .frame(width: 24, height: 24)
         .onHover { isHoveringThumbnailEntry = $0 }
-        .help(content.hasManualThumbnail
+        .localizedHelp(content.hasManualThumbnail
               ? "已设置手动缩略图 · 点击可更换或移除"
               : "设置槽位缩略图（截图 / 上传图片）")
     }
@@ -549,18 +517,18 @@ struct SlotCardView: View {
     private var thumbnailMenuItems: some View {
         if let onCaptureThumbnail {
             Button(action: onCaptureThumbnail) {
-                Label("截图", systemImage: "camera.viewfinder")
+                Label(localized: "截图", systemImage: "camera.viewfinder")
             }
         }
         if let onUploadThumbnail {
             Button(action: onUploadThumbnail) {
-                Label("上传图片…", systemImage: "photo.on.rectangle")
+                Label(localized: "上传图片…", systemImage: "photo.on.rectangle")
             }
         }
         if content.hasManualThumbnail, let onClearManualThumbnail {
             Divider()
             Button(role: .destructive, action: onClearManualThumbnail) {
-                Label("移除手动缩略图", systemImage: "arrow.uturn.backward")
+                Label(localized: "移除手动缩略图", systemImage: "arrow.uturn.backward")
             }
         }
     }
@@ -573,13 +541,13 @@ struct SlotCardView: View {
                         Image(systemName: "tray")
                             .font(.callout)
                             .foregroundColor(.secondary.opacity(0.55))
-                        Text("暂无内容")
+                        AppLocalizedText("暂无内容")
                             .font(.system(size: 13, weight: .medium))
                             .foregroundColor(.secondary)
                     }
 
                     if !saveShortcut.isEmpty {
-                        Text("使用 \(saveShortcut) 保存到此槽位")
+                        AppLocalizedText("使用 %@ 保存到此槽位", saveShortcut)
                             .font(.caption2)
                             .foregroundColor(.secondary.opacity(0.72))
                             .lineLimit(1)
@@ -612,20 +580,20 @@ struct SlotCardView: View {
             if !content.isEmpty {
                 HStack(spacing: 8) {
                     Button(action: beginEditing) {
-                        Label(editActionTitle, systemImage: "pencil")
+                        Label(localized: editActionTitle, systemImage: "pencil")
                             .frame(maxWidth: .infinity)
                     }
                     .buttonStyle(SlotActionButtonStyle(kind: .accent(AppTheme.slotActionAccent(slot))))
                     .disabled(!canEditContent)
-                    .help(editActionHelp)
+                    .localizedHelp(editActionHelp)
                     .frame(maxWidth: .infinity)
 
                     Button(role: .destructive) { onClear() } label: {
-                        Label("清空", systemImage: "trash")
+                        Label(localized: "清空", systemImage: "trash")
                             .frame(maxWidth: .infinity)
                     }
                     .buttonStyle(SlotActionButtonStyle(kind: .destructive))
-                    .help("清空槽位内容（需要确认）")
+                    .localizedHelp("清空槽位内容（需要确认）")
                     .frame(maxWidth: .infinity)
                 }
             } else {
@@ -633,11 +601,14 @@ struct SlotCardView: View {
                 // 装饰条 + 彩色编号三处一起说「这张卡片属于槽位 N，你可以往里存东西」；简洁模式
                 // 把前两处都收掉了，引导的担子全压在这里，所以让它反相并撑满整个底部区域。
                 Button { onSave() } label: {
-                    Label("保存到槽位 \(slot)", systemImage: "square.and.arrow.down")
+                    Label { AppLocalizedText("保存到槽位 %ld", slot) } icon: {
+                        Image(systemName: "square.and.arrow.down")
+                    }
                         .frame(maxWidth: .infinity)
                 }
                 .buttonStyle(SlotActionButtonStyle(kind: .cta, layout: .hero))
-                .help(saveShortcut.isEmpty ? "保存当前剪贴板内容到槽位 \(slot)" : saveShortcut)
+                .help(saveShortcut.isEmpty ? AppInterfaceStrings.format("保存当前剪贴板内容到槽位 %ld",
+                    language: AppInterfaceLanguage.resolve(languageRaw), arguments: [slot]) : saveShortcut)
 
             }
         }
@@ -669,34 +640,37 @@ struct SlotCardView: View {
         Menu {
             if content.isEmpty {
                 Button { onSave() } label: {
-                    Label(saveShortcut.isEmpty ? "保存到槽位" : "保存到槽位（\(saveShortcut)）", systemImage: "square.and.arrow.down")
+                    Label(localized: saveShortcut.isEmpty ? "保存到槽位" : "保存到槽位（%@）",
+                          arguments: saveShortcut.isEmpty ? [] : [saveShortcut], systemImage: "square.and.arrow.down")
                 }
             } else {
                 Button { onPaste() } label: {
-                    Label(pasteShortcut.isEmpty ? "粘贴" : "粘贴（\(pasteShortcut)）", systemImage: "arrow.up.doc.fill")
+                    Label(localized: pasteShortcut.isEmpty ? "粘贴" : "粘贴（%@）",
+                          arguments: pasteShortcut.isEmpty ? [] : [pasteShortcut], systemImage: "arrow.up.doc.fill")
                 }
                 Button { onCopy() } label: {
-                    Label("复制", systemImage: "doc.on.doc")
+                    Label(localized: "复制", systemImage: "doc.on.doc")
                 }
 
                 Divider()
 
                 if content.isMarkdownFile, store != nil {
-                    Button(action: beginEditing) { Label("编辑 Markdown", systemImage: "pencil") }
+                    Button(action: beginEditing) { Label(localized: "编辑 Markdown", systemImage: "pencil") }
                 }
                 if content.isPlainEditableText, onEditText != nil {
-                    Button(action: beginEditing) { Label("编辑文本", systemImage: "pencil") }
+                    Button(action: beginEditing) { Label(localized: "编辑文本", systemImage: "pencil") }
                 }
                 if content.isHTMLContent, onEditHTML != nil {
-                    Button(action: beginEditing) { Label("编辑 HTML", systemImage: "chevron.left.forwardslash.chevron.right") }
+                    Button(action: beginEditing) { Label(localized: "编辑 HTML", systemImage: "chevron.left.forwardslash.chevron.right") }
                 }
                 Button { onSave() } label: {
-                    Label(saveShortcut.isEmpty ? "覆盖" : "覆盖（\(saveShortcut)）", systemImage: "arrow.triangle.2.circlepath")
+                    Label(localized: saveShortcut.isEmpty ? "覆盖" : "覆盖（%@）",
+                          arguments: saveShortcut.isEmpty ? [] : [saveShortcut], systemImage: "arrow.triangle.2.circlepath")
                 }
 
                 if let onClearBody, !content.items.isEmpty || content.htmlSource != nil {
                     Button(role: .destructive, action: onClearBody) {
-                        Label("删除主体内容（保留附件）", systemImage: "doc.badge.minus")
+                        Label(localized: "删除主体内容（保留附件）", systemImage: "doc.badge.minus")
                     }
                 }
 
@@ -704,7 +678,7 @@ struct SlotCardView: View {
 
                 Divider()
                 Button(role: .destructive) { onClear() } label: {
-                    Label("清空槽位…", systemImage: "trash")
+                    Label(localized: "清空槽位…", systemImage: "trash")
                 }
             }
         } label: {
@@ -716,17 +690,15 @@ struct SlotCardView: View {
         .menuStyle(.borderlessButton)
         .menuIndicator(.hidden)
         .fixedSize()
-        .help("更多操作")
-        .accessibilityLabel("槽位 \(slot) 更多操作")
-    }
-
-    private func commitLabel() {
-        editingLabel = false
-        onSetLabel(labelText.trimmingCharacters(in: .whitespacesAndNewlines))
+        .localizedHelp("更多操作")
+        .localizedAccessibilityLabel("槽位 %ld 更多操作", slot)
     }
 
     private var displayTitle: String {
-        if label.isEmpty { return "槽位 \(slot)" }
+        if label.isEmpty {
+            return AppInterfaceStrings.format("槽位 %ld",
+                language: AppInterfaceLanguage.resolve(languageRaw), arguments: [slot])
+        }
         return label
     }
 
@@ -760,21 +732,21 @@ struct SlotCardView: View {
 
             let exists = SlotTypeActions.fileExists(fileURL)
 
-            Button("打开文件") {
+            Button(localized: "打开文件") {
                 SlotTypeActions.openFile(fileURL)
             }
             .disabled(!exists)
 
-            Button("在 Finder 中显示") {
+            Button(localized: "在 Finder 中显示") {
                 SlotTypeActions.revealInFinder(fileURL)
             }
             .disabled(!exists)
 
-            Button("复制文件路径") {
+            Button(localized: "复制文件路径") {
                 SlotTypeActions.copyFilePath(fileURL)
             }
 
-            Button("复制文件名") {
+            Button(localized: "复制文件名") {
                 SlotTypeActions.copyFileName(fileURL)
             }
         }
@@ -782,43 +754,18 @@ struct SlotCardView: View {
         if let webURL = content.detectedWebURL {
             Divider()
 
-            Button("打开链接") {
+            Button(localized: "打开链接") {
                 SlotTypeActions.openWebURL(webURL)
             }
 
-            Button("复制链接") {
+            Button(localized: "复制链接") {
                 SlotTypeActions.copyString(webURL.absoluteString)
             }
 
-            Button("复制 Markdown 链接") {
+            Button(localized: "复制 Markdown 链接") {
                 SlotTypeActions.copyMarkdownLink(webURL)
             }
         }
-    }
-
-    private var timeAgo: String {
-        SlotCardView.relativeTimeString(since: content.timestamp)
-    }
-
-    // v2.10.76 (Phase 2.5 · body 重算缓存): 相对时间字符串按「分钟粒度」记忆化。
-    // timeAgo 依赖“当前时间”，无法随内容永久缓存；但同一分钟内、对同一 timestamp 的重复求值结果不变，
-    // 故用 (timestamp 秒, 当前分钟桶) 作 key 缓存，避免卡片 body 重算时反复做区间判断 + 字符串插值分配。
-    // 语义与旧实现逐字节一致（含未来时间戳→“刚刚”）。metadataSummary 已于 v2.10.30 用 contentId::updatedAt
-    // 缓存（见 SlotContent+Thumbnail.swift），无需再处理。
-    private static let timeAgoCache = NSCache<NSString, NSString>()
-    static func relativeTimeString(since date: Date) -> String {
-        let now = Date()
-        let interval = now.timeIntervalSince(date)
-        let minuteBucket = Int(now.timeIntervalSince1970 / 60)
-        let key = "\(Int(date.timeIntervalSince1970))-\(minuteBucket)" as NSString
-        if let cached = timeAgoCache.object(forKey: key) { return cached as String }
-        let result: String
-        if interval < 60 { result = "刚刚" }
-        else if interval < 3600 { result = "\(Int(interval / 60)) 分钟前" }
-        else if interval < 86400 { result = "\(Int(interval / 3600)) 小时前" }
-        else { result = "\(Int(interval / 86400)) 天前" }
-        timeAgoCache.setObject(result as NSString, forKey: key)
-        return result
     }
 
     // MARK: - v2.7.0 Port Overlay
@@ -900,8 +847,7 @@ struct SlotCardView: View {
 //   • connectionDotColor / 连线相关（连线口显隐与配色）；
 //   • store 引用身份（附件按钮观察的是同一 store 实例，内容变化经 thumbnailKey 反映）。
 // 注意：卡片内部的 hover（isHovering）、编辑态等是 @State，Equatable 命中复用时会被 SwiftUI 原样保留，
-// 不受影响；hover 缩放/描边由卡片自身 onHover 驱动，无需进入 ==。timeAgo 依赖“当前时间”，命中复用时
-// 不会自行走秒——这与迁移前一致（原本也只在 body 重算时刷新），非回归。
+// 不受影响；hover 缩放/描边由卡片自身 onHover 驱动，无需进入 ==。
 extension SlotCardView: Equatable {
     static func == (lhs: SlotCardView, rhs: SlotCardView) -> Bool {
         lhs.slot == rhs.slot
@@ -1150,7 +1096,7 @@ private struct InlineSlotVideoPreview: View {
                     Image(systemName: "film")
                         .font(.system(size: 28, weight: .semibold))
                         .foregroundColor(.secondary.opacity(0.85))
-                    Text("视频")
+                    AppLocalizedText("视频")
                         .font(.caption)
                         .foregroundColor(.secondary)
                 }
@@ -1161,7 +1107,7 @@ private struct InlineSlotVideoPreview: View {
                 HStack {
                     Image(systemName: "play.fill")
                         .font(.system(size: 11, weight: .bold))
-                    Text("点击预览")
+                    AppLocalizedText("点击预览")
                         .font(.system(size: 11, weight: .semibold))
                 }
                 .foregroundColor(AppTheme.onAccentText)
@@ -1258,10 +1204,10 @@ private struct DropImportOverlay: View {
                 }
 
                 VStack(spacing: 3) {
-                    Text("松开导入到槽位 \(slot)")
+                    AppLocalizedText("松开导入到槽位 %ld", slot)
                         .font(.system(size: 13, weight: .semibold))
                         .foregroundColor(.primary)
-                    Text("图片、视频、PDF、文件夹")
+                    AppLocalizedText("图片、视频、PDF、文件夹")
                         .font(.caption2)
                         .foregroundColor(.secondary)
                         .multilineTextAlignment(.center)

@@ -89,9 +89,9 @@ struct CanvasNavigationControls: View {
             let position = min(1, max(0, (value.location.x - 8) / trackWidth))
             onZoom(((CanvasGeometry.zoomMin + position * range) * 100).rounded() / 100)
         }.onEnded { _ in onViewportEnd() })
-        .help("放大/缩小画布（⌘ + 滚轮）")
+        .localizedHelp("放大/缩小画布（⌘ + 滚轮）")
         .accessibilityElement()
-        .accessibilityLabel("画布缩放")
+        .localizedAccessibilityLabel("画布缩放")
         .accessibilityValue("\(Int(zoom * 100))%")
         .accessibilityIdentifier("canvas-zoom-slider")
         .accessibilityAdjustableAction { direction in
@@ -124,13 +124,13 @@ struct CanvasNavigationControls: View {
                 }
                 .contentShape(Rectangle())
         }
-        .buttonStyle(.plain).accessibilityLabel(hint)
+        .buttonStyle(.plain).localizedAccessibilityLabel(hint)
         .accessibilityIdentifier("canvas-navigation-" + id)
         .onHover { hovered = $0 ? id : nil }
         .animation(reduceMotion ? nil : .easeOut(duration: 0.2), value: hovered == id)
         .overlay(alignment: .top) {
             if tooltipID == id {
-                Text(hint).font(.system(size: 11))
+                AppLocalizedText(hint).font(.system(size: 11))
                     .padding(.horizontal, 10).padding(.vertical, 6)
                     .foregroundColor(TapSkin.ink)
                     .background(TapSkin.chromeFill, in: RoundedRectangle(cornerRadius: 8))

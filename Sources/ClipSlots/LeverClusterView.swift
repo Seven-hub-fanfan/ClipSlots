@@ -97,11 +97,11 @@ struct LeverClusterView: View {
                 NeuMiniButton(title: "回退", icon: "arrow.uturn.backward",
                               tint: isOn.wrappedValue ? statusColor : nil,
                               enabled: isOn.wrappedValue, action: onBack)
-                    .help(backHelp)
+                    .localizedHelp(backHelp)
                 NeuMiniButton(title: "重置", icon: "backward.end",
                               tint: isOn.wrappedValue ? statusColor : nil,
                               enabled: isOn.wrappedValue, action: onReset)
-                    .help(resetHelp)
+                    .localizedHelp(resetHelp)
             }
         }
     }
@@ -118,18 +118,14 @@ struct AutoAdvanceToggleView: View {
         Button {
             autoMode.autoAdvanceEnabled.toggle()
         } label: {
-            HStack(spacing: 5) {
-                Image(systemName: isOn ? "arrow.forward.circle.fill" : "arrow.forward.circle")
-                    .font(.system(size: 11, weight: .semibold))
-                Text("自动切换")
-                    .font(.system(size: 12, weight: .semibold))
-            }
+            CompactActionLabel(title: "自动切换",
+                               icon: isOn ? "arrow.forward.circle.fill" : "arrow.forward.circle")
         }
         .buttonStyle(CompactActionStyle(selected: isOn))
         .accessibilityIdentifier("editor-auto-advance")
-        .accessibilityValue(isOn ? "开启" : "关闭")
+        .localizedAccessibilityValue(isOn ? "开启" : "关闭状态")
         .animation(Anim.status, value: isOn)
         .fixedSize()
-        .help("开启后：自动存储/粘贴可跨组、跨页推进；关闭则只在当前组内循环")
+        .localizedHelp("开启后：自动存储/粘贴可跨组、跨页推进；关闭则只在当前组内循环")
     }
 }

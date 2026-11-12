@@ -24,16 +24,17 @@ struct GroupTabButton: View {
 
     @State private var isHovering = false
     @StateObject private var dragDwell = GroupDragDwell()
-    @GestureState private var isPressing = false
 
     var body: some View {
         Button(action: action) {
             HStack(spacing: 5) {
                 Image(systemName: isCurrent ? "folder.fill" : "folder")
                     .font(.system(size: 11, weight: .semibold))
+                    .frame(width: 14)
                 Text(name)
             }
-            .font(.system(size: 12, weight: isCurrent ? .semibold : .medium))
+            // Keep intrinsic width stable while the selected material changes.
+            .font(.system(size: 12, weight: .semibold))
             // 选中 = 近黑胶囊上的反相字（多彩模式是品牌渐变上的白字），静息 = 画布同色上的正文墨色。
             .foregroundColor(isCurrent ? Neu.sliderInk : Neu.ink)
             .padding(.horizontal, 10)
@@ -41,25 +42,48 @@ struct GroupTabButton: View {
             .contentShape(RoundedRectangle(cornerRadius: NeumorphicMetrics.actionRadius,
                                            style: .continuous))
         }
-        .buttonStyle(.plain)
-        .neuRaised(radius: NeumorphicMetrics.actionRadius,
-                   pressed: isPressing,
-                   hovering: isHovering || dragDwell.isTargeted,
-                   fill: isCurrent ? Neu.selectedFill : nil)
-        .scaleEffect(isPressing ? 0.96 : 1)
-        .animation(Anim.status, value: isCurrent)
-        .animation(Anim.interactive, value: isHovering)
-        .animation(Anim.interactive, value: isPressing)
+        .buttonStyle(GroupTabStyle(selected: isCurrent, hovering: isHovering || dragDwell.isTargeted))
         .onHover { isHovering = $0 }
         .onDrop(of: AttachmentTransfer.dropTypes,
                 delegate: GroupDragSwitchDelegate(dwell: dragDwell, isCurrent: isCurrent, action: action,
                                                   receive: onDropFiles))
         .onDisappear { dragDwell.cancel() }
-        .simultaneousGesture(
-            // 仅捕捉按下/松手以驱动按压微缩；minimumDistance 0 且不消费点击，
-            // 不影响 Button(action:) 的切组行为。
-            DragGesture(minimumDistance: 0)
-                .updating($isPressing) { _, state, _ in state = true }
-        )
+    }
+}
+
+/// Pending selection only invalidates the small tab, never the editor grid.
+struct GroupNavigationTab: View {
+    @ObservedObject var gate: SlotNavigationGate
+    let groupID: String
+    let name: String
+    let currentGroupID: String
+    let action: () -> Void
+    var onDropFiles: (([NSItemProvider]) -> Bool)? = nil
+
+    var body: some View {
+        let selected = (gate.requestedGroupID ?? currentGroupID) == groupID
+        GroupTabButton(name: name, isCurrent: selected, action: action, onDropFiles: onDropFiles)
+            .accessibilityIdentifier("group-tab-\(groupID)")
+            .localizedAccessibilityValue(selected ? "已选择" : "未选择")
+    }
+}
+
+private struct GroupTabStyle: ButtonStyle {
+    let selected: Bool
+    let hovering: Bool
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .neuRaised(radius: NeumorphicMetrics.actionRadius,
+                       pressed: configuration.isPressed, hovering: hovering,
+                       fill: selected ? Neu.selectedFill : nil,
+                       pressAnimation: configuration.isPressed || reduceMotion ? nil : Anim.navigationFeedback)
+            .scaleEffect(configuration.isPressed && !reduceMotion ? 0.985 : 1)
+            .animation(reduceMotion ? nil : Anim.navigationFeedback, value: selected)
+            .animation(reduceMotion ? nil : Anim.navigationFeedback, value: hovering)
+            // Down is immediate. A short ease-out only settles the release.
+            .animation(configuration.isPressed || reduceMotion ? nil : Anim.navigationFeedback,
+                       value: configuration.isPressed)
     }
 }

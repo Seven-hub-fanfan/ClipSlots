@@ -1,0 +1,66 @@
+{
+  "build": "21710839",
+  "version": "2.17.108",
+  "installed": true,
+  "gui_sha256": "c92350550342b34b3c47b3f8387017022d2b8b96ccb6679c8b7808ccc8c766b4",
+  "archive_bytes": 32257036,
+  "archive_mib": 30.762706756591797,
+  "archive_sha256": "ba03253923f430bf51a892f5872d2efdbf3f610b27ec5fa0ca61311109bd681e",
+  "archive_contents_verified": true,
+  "signature_verified": true,
+  "signing": "local ad-hoc",
+  "backup_total_gib": 30.11547544039786,
+  "backup_limit_gib": 31.0,
+  "full_backup_hash_verified": true,
+  "application_restoration_verified": true,
+  "business_data_and_config_preserved": true,
+  "verified_files": {
+    "data": 8537,
+    "config": 1
+  },
+  "canvas_node_positions_compared_without_normalization": true,
+  "external_links_unchanged": true,
+  "regression": {
+    "passed": true,
+    "passes": 298,
+    "failures": [],
+    "components": {
+      "pack_transfer": 108,
+      "settings": 166,
+      "packaged_cli_mcp": 14,
+      "candidate_gui": 10
+    },
+    "kit_smoke_passed": true,
+    "strict_60fps_measured": false,
+    "scope": "Build 21710839 final release verification"
+  },
+  "installed_interaction": {
+    "passed": false,
+    "status": "awaiting_local_macos_authentication",
+    "completed_checks": {
+      "six_brand_entry_cards_rendered": true,
+      "provider_detail_open_and_return": true,
+      "sidebar_close_reopen_and_close": true,
+      "global_search_empty_result": true,
+      "global_search_matching_result": true,
+      "clear_search_restores_slot_view": true
+    },
+    "pending_checks": [
+      "Restore Accessibility and Screen Recording permissions",
+      "Six-brand mouse hover and rebound",
+      "Pointer-driven scrolling",
+      "Canvas minimized to Dock then external slot paste"
+    ],
+    "observed_blocker": "macOS Privacy & Security displays: use Touch ID or enter password to allow changes. ClipSlots reports both required permissions as unauthorized after signature change.",
+    "hover_attempt": {
+      "brand": "Claude",
+      "mean_pixel_difference": 0.0,
+      "result": "Unverified: the attempted pointer hover did not produce an observable change while system authentication was pending. No functional pass or root cause is inferred."
+    },
+    "credentials_submitted_by_agent": false,
+    "clipboard_test_started": false,
+    "strict_60fps_measured": false
+  },
+  "strict_60fps_measured": false,
+  "all_installed_interaction_checks_completed": false
+}

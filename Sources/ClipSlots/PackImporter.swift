@@ -95,14 +95,12 @@ struct PackImporter {
         let tmp = fm.temporaryDirectory.appendingPathComponent("clipslotspack_in_\(UUID().uuidString)", isDirectory: true)
         defer { try? fm.removeItem(at: tmp) }
 
-        // P2-3 (v2.10.53): 先清扫上次导入遗留的孤儿临时目录（崩溃/回滚失败留下的 .import_backup_ /
-        // .rollback_discard_），既释放累积占用，又能从「备份是唯一副本」的中断态恢复数据；须在本次创建
-        // 任何新备份之前执行。
-        sweepStaleImportTempDirs()
-
         try unzip(packURL, to: tmp)
         let manifest = try loadManifest(in: tmp)
         let pagesRoot = tmp.appendingPathComponent("pages", isDirectory: true)
+        try validateContents(manifest, pagesRoot: pagesRoot)
+        // Invalid packages must not trigger library mutations or recovery.
+        try sweepStaleImportTempDirs()
 
         // v2.10.39: 预统计总槽位数，供进度条显示分母。轻量遍历各页组的 slots 声明；
         // 声明为空时回退扫描 slots 目录，与 writeSlots 的口径保持一致。失败不影响导入，
@@ -129,6 +127,7 @@ struct PackImporter {
         // P1-2 (v2.10.35): 登记本次导入流式落盘到 imported_attachments/ 的大附件路径，供 catch 回滚清理，
         // 避免导入失败后这些独立于组目录的大文件成为无主孤儿永久残留。
         var importedAttachmentPaths: [URL] = []
+        var appearances: [(id: String, icon: String, colorHex: String?)] = []
 
         do {
         for manifestPage in manifest.pages {
@@ -143,7 +142,7 @@ struct PackImporter {
 
             // 读取该页所有组（按 order 排序）。
             let groupsRoot = pageDir.appendingPathComponent("groups", isDirectory: true)
-            let packGroups = loadGroups(in: groupsRoot)
+            let packGroups = try loadGroups(in: groupsRoot)
             guard !packGroups.isEmpty else { continue }
 
             // 决定目标页面。
@@ -214,6 +213,7 @@ struct PackImporter {
                 }
 
                 let slotCount = try writeSlots(from: slotsRoot, declaredSlots: packGroup.slots, into: targetGroupId, importedAttachmentPaths: &importedAttachmentPaths)
+                appearances.append((targetGroupId, packGroup.icon, packGroup.colorHex))
                 result.importedGroups += 1
                 result.importedSlots += slotCount
                 // v2.10.39: 每写完一个组上报一次进度（组级粒度，足够驱动进度条）。
@@ -221,6 +221,7 @@ struct PackImporter {
                 onProgress?(doneSlots, totalSlots, packGroup.name)
             }
         }
+        if !appearances.isEmpty { try storage.updateGroupAppearances(appearances) }
         } catch {
             // P1-2 (v2.10.35): 先清理本次导入已流式落盘的大附件（imported_attachments/ 下），它们独立于组
             // 目录，rename/删组回滚都不会触及，不清理即成无主孤儿永久残留。放在回滚最前面，确保无论后续
@@ -321,7 +322,7 @@ struct PackImporter {
         for manifestPage in manifest.pages {
             guard let pageDir = safeChildURL(in: pagesRoot, component: manifestPage.id, isDirectory: true) else { continue }
             let groupsRoot = pageDir.appendingPathComponent("groups", isDirectory: true)
-            for (groupDir, packGroup) in loadGroups(in: groupsRoot) {
+            for (groupDir, packGroup) in (try? loadGroups(in: groupsRoot)) ?? [] {
                 var slotNumbers = packGroup.slots
                 if slotNumbers.isEmpty {
                     let slotsRoot = groupDir.appendingPathComponent("slots", isDirectory: true)
@@ -347,9 +348,11 @@ struct PackImporter {
 
         var written = 0
         for slot in slotNumbers {
-            guard slot >= 1, slot <= maxChildSlots else { continue }
+            guard slot >= 1, slot <= maxChildSlots else {
+                throw PackImportError.manifestCorrupt("槽位 \(slot) 超出当前配置上限 \(maxChildSlots)")
+            }
             let slotDir = slotsRoot.appendingPathComponent("\(slot)", isDirectory: true)
-            guard let packSlot = try? loadJSON(PackSlot.self, from: slotDir.appendingPathComponent("slot.json")) else { continue }
+            let packSlot = try loadJSON(PackSlot.self, from: slotDir.appendingPathComponent("slot.json"))
 
             let attachmentsDir = slotDir.appendingPathComponent("attachments", isDirectory: true)
             var restored: [SlotContent.SlotAttachment] = []
@@ -371,7 +374,7 @@ struct PackImporter {
                         // 判断是否符号链接，遇到即整体跳过并记录可读报错，绝不读取其目标。
                         let isSymlink = (try? safeURL.resourceValues(forKeys: [.isSymbolicLinkKey]).isSymbolicLink) ?? false
                         if isSymlink {
-                            NSLog("[ClipSlots] PackImporter PACK-1 拒绝符号链接附件")
+                            throw PackImportError.manifestCorrupt("附件为符号链接：\(att.name)")
                         } else if !resolvedURLStaysWithin(safeURL, root: attachmentsDir) {
                             // P0-1 (v2.10.34): PACK-1 的 `.isSymbolicLinkKey` 只判断路径「末段(leaf)」是否
                             // 软链，safeChildURL 又只用 standardizedFileURL 解析 `..`/`.`——两者都不检查
@@ -381,7 +384,7 @@ struct PackImporter {
                             // 目录外的 /etc/passwd 当作附件字节吸入用户数据（分享即外泄）。这里在真正读取
                             // 前用 resolvingSymlinksInPath() 把【每一级组件】的软链全解析出真实路径，再重做
                             // 一次「仍在 attachmentsDir 之内」的前缀校验；越界即整条附件跳过、绝不读其目标。
-                            NSLog("[ClipSlots] PackImporter P0-1 拒绝越界附件")
+                            throw PackImportError.manifestCorrupt("附件路径越界：\(att.name)")
                         } else {
                         // P0-2 (v2.10.50): 附件字节【全部】流式化。D-1（v2.10.31）只给 >20MB 的大文件走
                         // copyItem 流式落盘，<20MB 仍用 `Data(contentsOf:)` 整块读入内存再内联进
@@ -402,9 +405,11 @@ struct PackImporter {
                             importedAttachmentPaths.append(dest)
                         } else {
                             // 拷贝失败：记录可读报错，保留附件元信息（无字节），绝不静默把整块读进内存。
-                            NSLog("[ClipSlots] PackImporter P0-2 附件流式落盘失败，已跳过其字节")
+                            throw PackImportError.writeFailed("附件写入失败：\(att.name)")
                         }
                         }
+                    } else {
+                        throw PackImportError.manifestCorrupt("附件路径无效：\(att.name)")
                     }
                 }
                 // 附件 UUID 始终新生成；小文件字节内联，大文件以持久路径引用，路径不跨机还原。
@@ -454,8 +459,7 @@ struct PackImporter {
                     content.manualThumbnailId = UUID().uuidString  // 始终新生成，绝不复用包内 id
                     content.pendingManualThumbnailData = data
                 } else {
-                    NSLog("[ClipSlots] PackImporter: slot \(slot) declares manual thumbnail "
-                        + "\(thumbName) but the bytes are missing/unreadable; importing without it")
+                    throw PackImportError.manifestCorrupt("槽位 \(slot) 的缩略图缺失或不可读")
                 }
             }
 
@@ -525,20 +529,16 @@ struct PackImporter {
     /// 目录，避免其无限累积占用磁盘。两类前缀分别处理，且绝不删除数据的唯一副本：
     ///   - `.rollback_discard_*`：回滚时把「半写入新内容」挪走待丢弃的目录，纯废弃物 → 直接删除。
     ///   - `.import_backup_<groupId>_<uuid>`：覆盖导入前对被覆盖组做的磁盘级 rename 备份。
-    ///       · 实况组目录存在且非空 → 组已完好（导入成功或已回滚），备份冗余 → 删除释放空间；
+    ///       · 实况组目录存在且非空 → 可能只写入部分内容，保留两份并报告需恢复；
     ///       · 实况组目录缺失 / 为空 → 崩溃发生在「备份已挪走、新内容尚未写就」窗口，备份是原数据唯一副本
     ///         → rename 回原位恢复数据，绝不删除。
-    private func sweepStaleImportTempDirs() {
+    private func sweepStaleImportTempDirs() throws {
         let fm = FileManager.default
         let root = ClipSlotsPaths.specialSlots
         guard let entries = try? fm.contentsOfDirectory(at: root, includingPropertiesForKeys: nil) else { return }
         for url in entries {
             let name = url.lastPathComponent
-            if name.hasPrefix(".rollback_discard_") {
-                try? fm.removeItem(at: url)
-                continue
-            }
-            guard name.hasPrefix(".import_backup_") else { continue }
+            guard name.hasPrefix(".import_backup_") || name.hasPrefix(".rollback_discard_") else { continue }
             // P2-2 (v2.10.54): 并发导入安全阈值。本清扫在启动时运行，若此刻【另一进程/实例】正有一场
             // 导入进行中——backupGroupDirForOverwrite 已把旧组 rename 成 .import_backup_ 并重建了空的原组
             // 目录，但 writeSlots 尚未把新内容写进去——原组目录会短暂为空，误触发下面「实况组为空 → 恢复
@@ -552,6 +552,10 @@ struct PackImporter {
             }()
             if backupAge < 3600 {
                 NSLog("[ClipSlots] PackImporter 启动清扫：跳过较新的备份 ageSeconds=\(Int(backupAge))")
+                continue
+            }
+            if name.hasPrefix(".rollback_discard_") {
+                try? fm.removeItem(at: url)
                 continue
             }
             // 解析 groupId：形如 .import_backup_<groupId>_<uuid>。groupId（UUID 或 "default"）与末段 uuid 均
@@ -570,11 +574,12 @@ struct PackImporter {
                     storage.invalidateContentCaches()
                     NSLog("[ClipSlots] PackImporter 启动清扫：从孤儿备份恢复组 \(groupId)（上次导入未完成）")
                 } catch {
-                    NSLog("[ClipSlots] PackImporter 启动清扫：恢复孤儿备份失败：\(ApplicationDiagnostics.error(error))（备份原样保留）")
+                    throw PackImportError.writeFailed("恢复上次导入失败，备份已保留：\(url.path)")
                 }
             } else {
-                // 实况组已有内容 → 备份冗余 → 删除释放空间。
-                try? fm.removeItem(at: url)
+                // Non-empty does not imply complete: a crash may have happened
+                // after the first slot was written. Never delete this backup.
+                throw PackImportError.writeFailed("发现未完成的历史导入，请先恢复备份：\(url.path)")
             }
         }
     }
@@ -758,53 +763,7 @@ struct PackImporter {
     }
 
     private func unzip(_ packURL: URL, to dest: URL, members: [String] = []) throws {
-        let fm = FileManager.default
-        do {
-            try fm.createDirectory(at: dest, withIntermediateDirectories: true)
-        } catch {
-            throw PackImportError.unzipFailed(error.localizedDescription)
-        }
-
-        // D-6 (v2.10.31): 解压前先做 Zip Slip 预检；发现越界条目直接抛错，绝不落盘。
-        try assertNoZipSlip(packURL, extractingInto: dest)
-        // P0-1 (v2.10.34): 再拒绝任何符号链接条目（纵深防御，配合读侧 resolvedURLStaysWithin）。
-        try assertNoSymlinkEntries(packURL)
-
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/unzip")
-        // -q 静默，-o 覆盖；members 非空时仅解出指定成员。
-        var args = ["-q", "-o", packURL.path]
-        args.append(contentsOf: members)
-        args.append(contentsOf: ["-d", dest.path])
-        process.arguments = args
-        let errPipe = Pipe()
-        process.standardError = errPipe
-        // P2-2 (v2.10.53): 在 waitUntilExit 之前就开始抽干 stderr。unzip 遇坏包/大量警告可能向 stderr 写出
-        // 超过管道缓冲（~64KB）的内容；若不提前读取，写端会阻塞在 write()，进程永不退出，waitUntilExit 随之
-        // 永久挂起（导入卡死）。用后台线程 readDataToEndOfFile 持续抽干（进程退出关闭写端后读到 EOF 返回），
-        // 主线程先等进程退出、再等抽干完成——drainGroup.wait() 建立 happens-before，errData 读取安全。
-        var errData = Data()
-        let drainGroup = DispatchGroup()
-        drainGroup.enter()
-        DispatchQueue.global(qos: .utility).async {
-            errData = errPipe.fileHandleForReading.readDataToEndOfFile()
-            drainGroup.leave()
-        }
-        do {
-            try process.run()
-            process.waitUntilExit()
-        } catch {
-            // run() 抛错时进程从未启动，Foundation 不会关闭父进程侧的写端，后台 readDataToEndOfFile 会一直
-            // 阻塞——手动关掉写端制造 EOF，让抽干线程退出后再 wait，避免死锁。
-            try? errPipe.fileHandleForWriting.close()
-            drainGroup.wait()
-            throw PackImportError.unzipFailed(error.localizedDescription)
-        }
-        drainGroup.wait()
-        guard process.terminationStatus == 0 else {
-            let msg = String(data: errData, encoding: .utf8) ?? "unzip exit \(process.terminationStatus)"
-            throw PackImportError.unzipFailed(msg)
-        }
+        try PackArchive.read(packURL, into: dest, members: members.isEmpty ? nil : Set(members))
     }
 
     private func loadManifest(in root: URL) throws -> PackManifest {
@@ -813,24 +772,102 @@ struct PackImporter {
             throw PackImportError.manifestMissing
         }
         do {
-            return try loadJSON(PackManifest.self, from: url)
+            let manifest = try loadJSON(PackManifest.self, from: url)
+            guard manifest.version == PackExporter.packFormatVersion else {
+                throw PackImportError.manifestCorrupt("不支持的包版本 \(manifest.version)")
+            }
+            var ids = Set<String>()
+            for page in manifest.pages {
+                guard validComponent(page.id), ids.insert(page.id).inserted,
+                      !page.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                      page.groupCount >= 0, page.slotCount >= 0 else {
+                    throw PackImportError.manifestCorrupt("页面标识、名称或统计无效")
+                }
+            }
+            return manifest
         } catch {
             throw PackImportError.manifestCorrupt(error.localizedDescription)
         }
     }
 
     /// 列出某页 groups/ 下的所有组，按 group.json 的 order 升序返回 (目录, 元信息)。
-    private func loadGroups(in groupsRoot: URL) -> [(URL, PackGroup)] {
+    private func loadGroups(in groupsRoot: URL) throws -> [(URL, PackGroup)] {
         let fm = FileManager.default
-        guard let dirs = try? fm.contentsOfDirectory(at: groupsRoot, includingPropertiesForKeys: nil) else { return [] }
+        let dirs = try fm.contentsOfDirectory(at: groupsRoot, includingPropertiesForKeys: nil)
         var out: [(URL, PackGroup)] = []
         for dir in dirs {
             var isDir: ObjCBool = false
             guard fm.fileExists(atPath: dir.path, isDirectory: &isDir), isDir.boolValue else { continue }
-            guard let group = try? loadJSON(PackGroup.self, from: dir.appendingPathComponent("group.json")) else { continue }
+            let group = try loadJSON(PackGroup.self, from: dir.appendingPathComponent("group.json"))
+            guard validComponent(group.id), group.id == dir.lastPathComponent,
+                  !group.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                throw PackImportError.manifestCorrupt("槽位组标识或名称无效")
+            }
             out.append((dir, group))
         }
         return out.sorted { $0.1.order < $1.1.order }
+    }
+
+    private func validComponent(_ value: String) -> Bool {
+        !value.isEmpty && value != "." && value != ".." &&
+        !value.contains("/") && !value.contains("\\") &&
+        !value.unicodeScalars.contains { CharacterSet.controlCharacters.contains($0) }
+    }
+
+    /// Reject incomplete packs before touching the library, including overwrite
+    /// imports. Empty slot declarations remain compatible with older 1.0 packs.
+    private func validateContents(_ manifest: PackManifest, pagesRoot: URL) throws {
+        let fm = FileManager.default
+        for page in manifest.pages {
+            let pageRoot = pagesRoot.appendingPathComponent(page.id)
+            let metadata = pageRoot.appendingPathComponent("page.json")
+            if fm.fileExists(atPath: metadata.path) {
+                let value = try loadJSON(PackPage.self, from: metadata)
+                guard value.id == page.id, value.name == page.name else {
+                    throw PackImportError.manifestCorrupt("页面信息与清单不一致")
+                }
+            }
+            let groups = try loadGroups(in: pageRoot.appendingPathComponent("groups"))
+            var total = 0
+            for (directory, group) in groups {
+                let slotsRoot = directory.appendingPathComponent("slots")
+                let actual = try fm.contentsOfDirectory(at: slotsRoot, includingPropertiesForKeys: nil)
+                    .compactMap { Int($0.lastPathComponent) }
+                let slots = group.slots.isEmpty ? actual : group.slots
+                guard Set(slots).count == slots.count, Set(slots) == Set(actual) else {
+                    throw PackImportError.manifestCorrupt("槽位清单重复或与文件不一致")
+                }
+                total += slots.count
+                for slot in slots {
+                    guard slot >= 1, slot <= maxChildSlots else {
+                        throw PackImportError.manifestCorrupt("槽位 \(slot) 超出当前配置上限 \(maxChildSlots)")
+                    }
+                    let slotRoot = slotsRoot.appendingPathComponent("\(slot)")
+                    let value = try loadJSON(PackSlot.self, from: slotRoot.appendingPathComponent("slot.json"))
+                    guard value.slot == slot else { throw PackImportError.manifestCorrupt("槽位编号不一致") }
+                    for attachment in value.attachments {
+                        if let file = attachment.file {
+                            guard let url = safeChildURL(in: slotRoot.appendingPathComponent("attachments"),
+                                                         component: file, isDirectory: false),
+                                  try url.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile == true else {
+                                throw PackImportError.manifestCorrupt("附件缺失或路径无效：\(attachment.name)")
+                            }
+                        }
+                    }
+                    if let thumbnail = value.manualThumbnail {
+                        guard validComponent(thumbnail),
+                              let size = try slotRoot.appendingPathComponent(thumbnail)
+                                .resourceValues(forKeys: [.fileSizeKey]).fileSize,
+                              size > 0, size <= Self.maxJSONBytes else {
+                            throw PackImportError.manifestCorrupt("缩略图缺失或无效")
+                        }
+                    }
+                }
+            }
+            guard groups.count == page.groupCount, total == page.slotCount else {
+                throw PackImportError.manifestCorrupt("页面统计与内容不一致")
+            }
+        }
     }
 
     private func loadJSON<T: Decodable>(_ type: T.Type, from url: URL) throws -> T {

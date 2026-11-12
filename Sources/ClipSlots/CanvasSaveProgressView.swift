@@ -5,11 +5,8 @@ struct CanvasSaveProgressView: View {
     let retry: () -> Void
     var body: some View {
         switch progress.status {
-        case .saved:
-            Label("已保存", systemImage: "checkmark")
-                .font(.system(size: 10)).foregroundColor(CanvasSkin.chromeInkDim)
-        case .saving:
-            Text("保存中…").font(.system(size: 10)).foregroundColor(CanvasSkin.chromeInkDim)
+        case .saved, .saving:
+            EmptyView()
         case .failed(let reason):
             Button(action: retry) {
                 Label("保存失败 · 重试", systemImage: "exclamationmark.circle")

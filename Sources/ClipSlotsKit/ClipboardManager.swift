@@ -635,8 +635,10 @@ extension SlotContent.SlotAttachment {
         // 附件本身依然完好可粘贴。若仍只按 `path` 存在性判定，就会把这些健康附件全部误报成「文件不存在」——
         // 相当于把修复后的正常状态显示成故障。故这里先看自有字节，有则直接放行。
         if storageFileURL != nil { return false }
-        // 没有任何本地路径引用（例如纯 url / 内联型），不属于本地文件断链范畴。
-        guard let p = localFileReferencePath else { return false }
+        if let raw = url, let remote = URL(string: raw),
+           ["http", "https"].contains(remote.scheme?.lowercased() ?? "") { return false }
+        // A pathless image/file with no bytes is unavailable too.
+        guard let p = localFileReferencePath else { return true }
         return !FileManager.default.fileExists(atPath: p)
     }
 

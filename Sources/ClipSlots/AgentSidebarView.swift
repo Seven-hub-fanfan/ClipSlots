@@ -147,20 +147,29 @@ struct AgentSidebarView: View {
                 if showsConnectionPanel {
                     ScrollView {
                         VStack(spacing: 0) {
+                            AgentConnectionPanelHost(scope: backendScope, controller: connectionController,
+                                onConnected: {
+                                    credentialState = .ready
+                                    credentialNotice = nil
+                                    model.reloadBackendSelection()
+                                    inputFocusRequest += 1
+                                })
+                            // A delayed keychain result must not move the cards
+                            // underneath the pointer during opening or scrolling.
                             if let credentialNotice {
                                 HStack(spacing: 8) {
                                     Image(systemName: "key.horizontal")
                                         .font(.system(size: 12))
                                         .foregroundColor(TapSkin.secondaryInk)
                                         .accessibilityHidden(true)
-                                    Text("需授权访问密钥")
+                                    AppLocalizedText("需授权访问密钥")
                                         .font(.system(size: 11))
                                         .foregroundColor(TapSkin.secondaryInk)
                                         .lineLimit(1)
                                         .help(credentialNotice)
                                         .accessibilityIdentifier("agent-sidebar-credential-notice")
                                     Spacer(minLength: 0)
-                                    Button("重新授权") {
+                                    Button(localized: "重新授权") {
                                         retryCredentialAccess = true
                                         credentialRevision += 1
                                     }
@@ -177,15 +186,8 @@ struct AgentSidebarView: View {
                                 .padding(.horizontal, 10).padding(.vertical, 4)
                                 .background(TapSkin.tone(0xf0f0ef, 0x1b1b1b))
                                 .clipShape(RoundedRectangle(cornerRadius: 9))
-                                .padding(.horizontal, 24).padding(.top, 12)
+                                .padding(.horizontal, 24).padding(.bottom, 12)
                             }
-                            AgentConnectionPanelHost(scope: backendScope, controller: connectionController,
-                                onConnected: {
-                                    credentialState = .ready
-                                    credentialNotice = nil
-                                    model.reloadBackendSelection()
-                                    inputFocusRequest += 1
-                                })
                         }
                     }.frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
                 } else { transcript }
@@ -252,7 +254,7 @@ struct AgentSidebarView: View {
                     .onHover { hovering in
                         if hovering { NSCursor.resizeLeftRight.set() } else { NSCursor.arrow.set() }
                     }
-                    .accessibilityLabel("调整 Agent 面板宽度")
+                    .localizedAccessibilityLabel("调整 Agent 面板宽度")
                     .accessibilityIdentifier("agent-panel-resize")
             }
         }
@@ -264,13 +266,13 @@ struct AgentSidebarView: View {
         }
         .alert("重命名对话", isPresented: $showRename) {
             TextField("对话标题", text: $renameTitle)
-            Button("保存") { model.renameConversation(model.selectedConversationID, title: renameTitle) }
-            Button("取消", role: .cancel) {}
+            Button(localized: "保存") { model.renameConversation(model.selectedConversationID, title: renameTitle) }
+            Button(localized: "取消", role: .cancel) {}
         }
         .alert("编辑待发送消息", isPresented: $showQueueEdit) {
             TextField("消息内容", text: $queueEditText)
-            Button("保存") { if let id = editingQueueID { model.editQueuedSubmission(id, text: queueEditText) } }
-            Button("取消", role: .cancel) {}
+            Button(localized: "保存") { if let id = editingQueueID { model.editQueuedSubmission(id, text: queueEditText) } }
+            Button(localized: "取消", role: .cancel) {}
         }
         .sheet(isPresented: $showLegacyCanvas) {
             if let legacyCanvasModel {
@@ -391,7 +393,7 @@ struct AgentSidebarView: View {
     private var header: some View {
         HStack(spacing: 8) {
             Menu {
-                Button("新建对话", action: newConversation).disabled(isReadOnly)
+                Button(localized: "新建对话", action: newConversation).disabled(isReadOnly)
                 Button("重命名对话") {
                     renameTitle = model.currentConversationTitle; showRename = true
                 }.disabled(isReadOnly)
@@ -455,10 +457,10 @@ struct AgentSidebarView: View {
                     .font(.system(size: 8))
                     .foregroundColor(TapSkin.faintInk)
                     .allowsHitTesting(false)
-                    .accessibilityLabel("会话菜单展开标记")
+                    .localizedAccessibilityLabel("会话菜单展开标记")
                     .accessibilityIdentifier("agent-conversation-chevron")
             }
-            .help("会话操作")
+            .localizedHelp("会话操作")
             Spacer(minLength: 0)
             iconButton("square.and.pencil", help: "新建对话", action: newConversation).disabled(isReadOnly)
             if let onToggleExpanded {
@@ -654,7 +656,7 @@ struct AgentSidebarView: View {
                             followsLatest = true
                             scrollToBottom(proxy)
                         } label: {
-                            Label("回到最新", systemImage: "arrow.down")
+                            Label(localized: "回到最新", systemImage: "arrow.down")
                                 .font(.system(size: 11))
                                 .padding(.horizontal, 12).padding(.vertical, 7)
                                 .background(inputFill, in: Capsule())
@@ -704,11 +706,11 @@ struct AgentSidebarView: View {
         let layout = compact ? AnyLayout(VStackLayout(spacing: 20)) : AnyLayout(HStackLayout(spacing: 12))
         return VStack(alignment: .leading, spacing: 16) {
             VStack(alignment: .leading, spacing: 12) {
-                Label("Hi，欢迎回来", systemImage: "sparkles")
+                Label(localized: "Hi，欢迎回来", systemImage: "sparkles")
                     .font(.system(size: 21, weight: .regular))
                     .foregroundColor(TapSkin.secondaryInk)
                     .accessibilityIdentifier("agent-welcome-greeting")
-                Text(workspaceMode == .edit ? "今天想怎样编辑槽位？" : "今天一起创作点什么？")
+                AppLocalizedText(workspaceMode == .edit ? "今天想怎样编辑槽位？" : "今天一起创作点什么？")
                     .font(.system(size: 26, weight: .medium))
                     .accessibilityIdentifier("agent-welcome-question")
             }
@@ -746,15 +748,15 @@ struct AgentSidebarView: View {
                                 .background(panelFill, in: RoundedRectangle(cornerRadius: 4))
                         }
                     }
-                    Text("应用市场").font(.system(size: 11, weight: .medium))
+                    AppLocalizedText("应用市场").font(.system(size: 11, weight: .medium))
                 }.contentShape(Rectangle())
             }.buttonStyle(.plain)
-                .help("浏览应用市场与技能")
+                .localizedHelp("浏览应用市场与技能")
                 .accessibilityIdentifier("agent-extension-entry")
             Button { dismissedExtensionEntry = true } label: {
                 Image(systemName: "xmark").font(.system(size: 9)).frame(width: 15, height: 18)
             }.buttonStyle(.plain)
-                .accessibilityLabel("关闭应用拓展入口")
+                .localizedAccessibilityLabel("关闭应用拓展入口")
                 .accessibilityIdentifier("agent-extension-dismiss")
         }
         .foregroundColor(TapSkin.secondaryInk)
@@ -834,7 +836,7 @@ struct AgentSidebarView: View {
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .help("复制这段回答")
+        .localizedHelp("复制这段回答")
     }
 
     private func streamingBubble(text: String, reasoning: String, showsThinking: Bool) -> some View {
@@ -852,11 +854,11 @@ struct AgentSidebarView: View {
                 } else if reasoning.isEmpty && showsThinking {
                     HStack(spacing: 8) {
                         CreativeLoadingMark().frame(width: 24, height: 24)
-                        Text(model.isWaitingForCredential ? "正在读取凭据…" : "正在处理…")
+                        AppLocalizedText(model.isWaitingForCredential ? "正在读取凭据…" : "正在处理…")
                             .font(.system(size: 13)).foregroundColor(TapSkin.secondaryInk)
                     }
                     if model.isWaitingForCredential {
-                        Text("若 macOS 弹出钥匙串授权，请完成授权。此时尚未发送请求，可以随时停止。")
+                        AppLocalizedText("若 macOS 弹出钥匙串授权，请完成授权。此时尚未发送请求，可以随时停止。")
                             .font(.system(size: 11)).foregroundColor(TapSkin.secondaryInk)
                             .fixedSize(horizontal: false, vertical: true)
                     }
@@ -944,10 +946,10 @@ struct AgentSidebarView: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
             HStack(spacing: 10) {
-                Button("重试") { model.retryLast(config: currentConfig, enabledSkills: currentSkills) }
+                Button(localized: "重试") { model.retryLast(config: currentConfig, enabledSkills: currentSkills) }
                     .controlSize(.small)
                     .disabled(isReadOnly)
-                Button("打开设置") { showConfig = true }
+                Button(localized: "打开设置") { showConfig = true }
                     .buttonStyle(.link)
                     .controlSize(.small)
                 Spacer()
@@ -972,7 +974,7 @@ struct AgentSidebarView: View {
                 HStack(alignment: .top, spacing: 8) {
                     Text(credentialNotice).font(.system(size: 11)).foregroundColor(.orange)
                         .fixedSize(horizontal: false, vertical: true)
-                    Button("设置") { showConfig = true }
+                    Button(localized: "设置") { showConfig = true }
                         .buttonStyle(.plain).font(.system(size: 11))
                 }
                 .padding(.horizontal, 4)
@@ -1012,11 +1014,11 @@ struct AgentSidebarView: View {
                                             .accessibilityLabel(file.name + " 图片预览")
                                     } else { Image(systemName: "doc") }
                                     Text(file.name).lineLimit(1)
-                                    if file.sampledFrames != nil { Text("3 帧 · 无音轨").foregroundColor(.secondary) }
+                                    if file.sampledFrames != nil { AppLocalizedText("3 帧 · 无音轨").foregroundColor(.secondary) }
                                     Button {
                                         model.draftAttachments.removeAll { $0.id == file.id }
                                     } label: { Image(systemName: "xmark") }
-                                    .buttonStyle(.plain).help("移除附件")
+                                    .buttonStyle(.plain).localizedHelp("移除附件")
                                 }
                                 .font(.system(size: 11))
                                 .padding(8).background(panelFill, in: RoundedRectangle(cornerRadius: 8))
@@ -1037,7 +1039,7 @@ struct AgentSidebarView: View {
                     .frame(height: draftHeight)
                     .padding(.horizontal, 9)
                     .padding(.top, 2)
-                    .accessibilityLabel("Agent 输入")
+                    .localizedAccessibilityLabel("Agent 输入")
                 }
 
                 inputSection("input-tools") {
@@ -1120,13 +1122,13 @@ struct AgentSidebarView: View {
                 .foregroundColor(voice.isRecording || voice.isStarting ? TapSkin.accent : TapSkin.secondaryInk)
                 .frame(width: 26, height: 30)
         }.buttonStyle(.plain)
-            .help(voice.isRecording || voice.isStarting ? "停止语音输入" : "本地语音输入")
-            .accessibilityLabel(voice.isStarting ? "取消语音输入" : voice.isRecording ? "停止语音输入" : "语音输入")
+            .localizedHelp(voice.isRecording || voice.isStarting ? "停止语音输入" : "本地语音输入")
+            .localizedAccessibilityLabel(voice.isStarting ? "取消语音输入" : voice.isRecording ? "停止语音输入" : "语音输入")
             .accessibilityIdentifier("agent-voice-input")
         if model.isRunning {
             Button(action: send) {
                 Image(systemName: "text.badge.plus").frame(width: 30, height: 30)
-            }.buttonStyle(.plain).disabled(!canSend).help("加入待发送队列 · Enter")
+            }.buttonStyle(.plain).disabled(!canSend).localizedHelp("加入待发送队列 · Enter")
                 .accessibilityIdentifier("agent-enqueue")
         }
         Button {
@@ -1141,8 +1143,8 @@ struct AgentSidebarView: View {
         }
         .buttonStyle(.plain)
         .disabled(!canSend && !model.isRunning)
-        .help(model.isRunning ? "停止生成" : "Enter 发送 · Shift+Enter 换行")
-        .accessibilityLabel(model.isRunning ? "停止生成" : "发送")
+        .localizedHelp(model.isRunning ? "停止生成" : "Enter 发送 · Shift+Enter 换行")
+        .localizedAccessibilityLabel(model.isRunning ? "停止生成" : "发送")
         .accessibilityIdentifier("agent-send-stop")
     }
 
@@ -1155,14 +1157,14 @@ struct AgentSidebarView: View {
                 Image(systemName: capture.isCapturing ? "xmark" : "scissors")
                     .font(.system(size: 13)).frame(width: 25, height: 30)
             }.buttonStyle(.plain)
-                .help(capture.isCapturing ? "取消截取" : "截图")
-                .accessibilityLabel(capture.isCapturing ? "取消截取" : "截图")
+                .localizedHelp(capture.isCapturing ? "取消截取" : "截图")
+                .localizedAccessibilityLabel(capture.isCapturing ? "取消截取" : "截图")
                 .accessibilityIdentifier("agent-screen-capture")
             Button { showCaptureMenu.toggle() } label: {
                 Image(systemName: "chevron.up").font(.system(size: 7)).frame(width: 10, height: 30)
             }.buttonStyle(.plain)
-                .help("截图与录屏")
-                .accessibilityLabel("截图与录屏")
+                .localizedHelp("截图与录屏")
+                .localizedAccessibilityLabel("截图与录屏")
                 .accessibilityIdentifier("agent-capture-menu")
                 .disabled(capture.isCapturing)
                 .popover(isPresented: $showCaptureMenu, arrowEdge: .top) {
@@ -1325,7 +1327,7 @@ struct AgentSidebarView: View {
                 .accessibilityIdentifier("agent-skill-references")
             }
             if model.isPolishing {
-                Button("取消") { model.cancelPolish() }
+                Button(localized: "取消") { model.cancelPolish() }
                     .buttonStyle(.plain).font(.system(size: 11))
                     .fixedSize()
             }
@@ -1359,7 +1361,7 @@ struct AgentSidebarView: View {
             HStack(spacing: 4) {
                 Image(systemName: "sparkles")
                     .font(.system(size: 12, weight: .regular))
-                Text("应用")
+                AppLocalizedText("应用")
                     .font(.system(size: 11, weight: .medium))
                 if !model.draftSkillReferences.isEmpty {
                     Text("\(model.draftSkillReferences.count)")
@@ -1378,7 +1380,7 @@ struct AgentSidebarView: View {
             .contentShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
         }
         .buttonStyle(.plain)
-        .help("添加或引用应用与技能 · 也可输入 $ 搜索技能")
+        .localizedHelp("添加或引用应用与技能 · 也可输入 $ 搜索技能")
         .accessibilityIdentifier("agent-reference-skill")
         .disabled(model.isAddingSkill)
         .contextMenu {
@@ -1504,7 +1506,7 @@ struct AgentSidebarView: View {
         }
         .popover(isPresented: $showContextInfo, arrowEdge: .top) {
             VStack(alignment: .leading, spacing: 10) {
-                Text("上下文占用").font(.system(size: 12, weight: .semibold))
+                AppLocalizedText("上下文占用").font(.system(size: 12, weight: .semibold))
                 HStack {
                     Text("已用 token")
                     Spacer()
@@ -1718,7 +1720,7 @@ struct AgentSidebarView: View {
                     }.frame(maxWidth: .infinity, alignment: .leading)
                     Button {
                         editingQueueID = submission.id; queueEditText = submission.text; showQueueEdit = true
-                    } label: { Image(systemName: "pencil") }.help("编辑")
+                    } label: { Image(systemName: "pencil") }.localizedHelp("编辑")
                         .disabled(submission.hotRunID != nil)
                     if submission.hotReceipt?.state == .returned {
                         Button("恢复草稿") { model.restoreReturnedSteerDraft(submission.id) }

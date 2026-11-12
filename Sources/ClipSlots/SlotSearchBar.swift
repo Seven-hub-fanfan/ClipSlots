@@ -64,104 +64,71 @@ struct SlotSearchBar: View {
     @Binding var searchScope: SlotSearchScope
     var onNavigate: (Int) -> Void = { _ in }
     var onOpen: () -> Void = {}
-    @State private var compactScope = true
-
-    // v2.11.8: 原 `ScopeControlStyle` 枚举已删除。范围选择器挪到搜索框外侧后，宽窄两版
-    // 各自直接写在 body 的两个候选分支里（宽版 = NeuSegmentedControl、窄版 = 图标菜单），
-    // 不再需要把形态当参数透进 searchField。
-
-    /// 切换阈值。取值依据：本栏外层 `.frame(maxWidth: 400)`，默认窗口下拿到 400pt（渲染分段控件）；
-    /// 窗口收到 760pt 时本栏被压到约 260pt（渲染图标菜单）。340 落在两者之间且留足余量，
-    /// 保证与原 ViewThatFits 的切换点观感一致。
-    private static let scopeSegmentedMinWidth: CGFloat = 340
-
+    @AppStorage(AppInterfaceLanguage.preferenceKey) private var languageRaw = AppInterfaceLanguage.chinese.rawValue
     var body: some View {
-        HStack(alignment: .center, spacing: compactScope ? AppTheme.spacingTight : AppTheme.spacingSmall) {
-            searchField
-                .layoutPriority(2)
-            if compactScope {
-                scopeCompactMenu
-            } else {
-                NeuSegmentedControl(
-                    options: SlotSearchScope.allCases.map { NeuSegment(value: $0, title: $0.title) },
-                    selection: $searchScope
-                )
-                .frame(width: 108)
-                .help("搜索范围：\(searchScope.title)")
-            }
-            filterMenu
-        }
-        // Keep one NSTextField and one filter menu alive across width changes.
-        // Placing an unused layout candidate offscreen still mounts its native
-        // controls and expands the root layout graph.
-        .frame(minWidth: 232)
-        .background {
-            GeometryReader { proxy in
-                Color.clear
-                    .onAppear { updateScope(width: proxy.size.width) }
-                    .onChange(of: proxy.size.width) { updateScope(width: $0) }
-            }
-        }
-    }
-
-    private func updateScope(width: CGFloat) {
-        let compact = width < Self.scopeSegmentedMinWidth
-        if compactScope != compact { compactScope = compact }
-    }
-
-    /// 内凹搜索框：椭圆形（圆角 = 半高）well，左侧放大镜、右侧清除按钮。
-    private var searchField: some View {
-        HStack(alignment: .center, spacing: AppTheme.spacingSmall) {
+        HStack(alignment: .center, spacing: 4) {
             Image(systemName: "magnifyingglass")
                 .foregroundColor(Neu.subtleInk)
                 .font(.system(size: 12, weight: .medium))
-
             SearchInputField(text: $searchText, onNavigate: onNavigate, onOpen: onOpen,
                              onEscape: { searchText = ""; selectedFilter = .all })
-                .font(.system(size: 13))
-                .foregroundColor(Neu.ink)
-                .frame(minWidth: 90)
-
-            if !searchText.isEmpty || selectedFilter != .all {
-                Button {
-                    if !searchText.isEmpty { searchText = "" } else { selectedFilter = .all }
-                } label: {
+                .frame(minWidth: 50)
+                .layoutPriority(1)
+            if !searchText.isEmpty {
+                Button { searchText = "" } label: {
                     Image(systemName: "xmark.circle.fill")
+                        .font(.system(size: 11))
                         .foregroundColor(Neu.subtleInk)
-                        .font(.system(size: 12))
                 }
                 .buttonStyle(.plain)
-                .contentShape(Rectangle())
-                .help("清除搜索")
-                .accessibilityLabel("清除搜索")
+                .localizedHelp("清除搜索")
+                .localizedAccessibilityLabel("清除搜索")
             }
+            Rectangle().fill(Color.primary.opacity(0.10)).frame(width: 0.5, height: 16)
+            filterMenu
+            scopeControl
         }
-        .padding(.horizontal, 12)
-        .frame(height: NeumorphicMetrics.searchHeight)
-        .background(Color.primary.opacity(0.035), in: RoundedRectangle(cornerRadius: 10))
-        .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(Color.primary.opacity(0.08), lineWidth: 1))
+        .padding(.leading, 11)
+        .padding(.trailing, 5)
+        .frame(height: 34)
+        .frame(minWidth: 232)
+        .background(TapSkin.tone(0xf6f7f9, 0x242529),
+                    in: RoundedRectangle(cornerRadius: 11, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 11, style: .continuous)
+            .strokeBorder(TapSkin.tone(0xd9dce2, 0x3b3e45), lineWidth: 0.7))
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("slot-search-well")
     }
 
-    private var scopeCompactMenu: some View {
-        Menu {
+    private var scopeControl: some View {
+        HStack(spacing: 0) {
             ForEach(SlotSearchScope.allCases) { scope in
-                Button {
-                    searchScope = scope
-                } label: {
-                    Label(scope.title, systemImage: searchScope == scope ? "checkmark" : scope.systemImage)
+                Button { searchScope = scope } label: {
+                    AppLocalizedText(scope.title)
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundColor(searchScope == scope ? Neu.sliderInk : Neu.subtleInk)
+                        .frame(width: 45, height: NeumorphicMetrics.segmentHeight)
+                        .background {
+                            if searchScope == scope {
+                                Capsule(style: .continuous)
+                                    .fill(Neu.selectedFill)
+                                    .padding(.vertical, NeumorphicMetrics.segmentInset)
+                            }
+                        }
+                        .contentShape(Rectangle())
                 }
+                .buttonStyle(.plain)
+                .localizedAccessibilityLabel(scope.title)
+                .accessibilityIdentifier("slot-search-scope-\(scope.rawValue)")
+                .accessibilityValue(AppInterfaceStrings.text(searchScope == scope ? "已选择" : "未选择", language: AppInterfaceLanguage.resolve(languageRaw)))
+                .accessibilityAddTraits(searchScope == scope ? .isSelected : [])
+                .help(AppInterfaceStrings.format("搜索范围：%@", language: AppInterfaceLanguage.resolve(languageRaw), arguments: [AppInterfaceStrings.text(scope.title, language: AppInterfaceLanguage.resolve(languageRaw))]))
             }
-        } label: {
-            Image(systemName: searchScope.systemImage)
-                .font(.system(size: 11, weight: .semibold))
-                .foregroundColor(Neu.ink)
-                .frame(width: 26, height: NeumorphicMetrics.segmentHeight)
-                .neuRaised(radius: NeumorphicMetrics.segmentHeight / 2)
         }
-        .menuStyle(.borderlessButton)
-        .menuIndicator(.hidden)
+        .padding(.horizontal, NeumorphicMetrics.segmentInset)
+        .frame(height: NeumorphicMetrics.segmentHeight)
+        .neuWell(radius: NeumorphicMetrics.segmentHeight / 2)
         .fixedSize()
-        .help("搜索范围：\(searchScope.title)")
     }
 
     // 注：v2.10.93 删除了 `filterStrip`（横向筛选 chip 条）及其 `filterChip`。
@@ -175,20 +142,24 @@ struct SlotSearchBar: View {
                 Button {
                     selectedFilter = filter
                 } label: {
-                    Label(filter.title, systemImage: selectedFilter == filter ? "checkmark" : filter.systemImage)
+                    Label(localized: filter.title, systemImage: selectedFilter == filter ? "checkmark" : filter.systemImage)
                 }
             }
         } label: {
-            Label(selectedFilter.title, systemImage: "line.3.horizontal.decrease.circle")
-                .font(.system(size: 11, weight: .semibold))
-                .foregroundColor(Neu.ink)
-                .padding(.horizontal, 9)
-                .frame(height: NeumorphicMetrics.segmentHeight)
-                .neuRaised(radius: NeumorphicMetrics.segmentHeight / 2)
+            Image(systemName: "line.3.horizontal.decrease")
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundColor(selectedFilter == .all ? Neu.subtleInk : Neu.ink)
+                .frame(width: 26, height: 24)
+                .background(selectedFilter == .all ? Color.clear : TapSkin.tone(0xe7eaf0, 0x41434b),
+                            in: RoundedRectangle(cornerRadius: 7, style: .continuous))
         }
         .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
         .fixedSize()
-        .help("筛选槽位类型")
+        .accessibilityIdentifier("slot-search-filter")
+        .localizedAccessibilityLabel("筛选槽位类型")
+        .accessibilityValue(AppInterfaceStrings.text(selectedFilter.title, language: AppInterfaceLanguage.resolve(languageRaw)))
+        .help(AppInterfaceStrings.format("筛选槽位类型：%@", language: AppInterfaceLanguage.resolve(languageRaw), arguments: [AppInterfaceStrings.text(selectedFilter.title, language: AppInterfaceLanguage.resolve(languageRaw))]))
     }
 }
 
@@ -199,6 +170,7 @@ struct SearchInputField: NSViewRepresentable {
     var onNavigate: (Int) -> Void
     var onOpen: () -> Void
     var onEscape: () -> Void
+    @AppStorage(AppInterfaceLanguage.preferenceKey) private var languageRaw = AppInterfaceLanguage.chinese.rawValue
     func makeCoordinator() -> Coordinator { Coordinator(self) }
     func makeNSView(context: Context) -> NSTextField {
         let field = NSTextField()
@@ -206,16 +178,20 @@ struct SearchInputField: NSViewRepresentable {
         field.drawsBackground = false
         field.focusRingType = .none
         field.font = .systemFont(ofSize: 13)
-        field.placeholderString = "搜索槽位…"
+        field.placeholderString = AppInterfaceStrings.text("搜索槽位…", language: AppInterfaceLanguage.resolve(languageRaw))
         field.delegate = context.coordinator
         field.setAccessibilityIdentifier("slot-search-field")
-        field.setAccessibilityLabel("搜索槽位")
+        field.setAccessibilityLabel(AppInterfaceStrings.text("搜索槽位", language: AppInterfaceLanguage.resolve(languageRaw)))
         field.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         return field
     }
     func updateNSView(_ field: NSTextField, context: Context) {
         context.coordinator.parent = self
-        if field.stringValue != text { field.stringValue = text }
+        field.placeholderString = AppInterfaceStrings.text("搜索槽位…", language: AppInterfaceLanguage.resolve(languageRaw))
+        field.setAccessibilityLabel(AppInterfaceStrings.text("搜索槽位", language: AppInterfaceLanguage.resolve(languageRaw)))
+        if (field.currentEditor() as? NSTextView)?.hasMarkedText() != true, field.stringValue != text {
+            field.stringValue = text
+        }
         field.textColor = .labelColor
     }
     final class Coordinator: NSObject, NSTextFieldDelegate {

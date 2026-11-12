@@ -162,11 +162,23 @@ func runWorkspaceBeatProbe(directory: URL, includeWelcomeCards: Bool = true, che
             directory: directory.appendingPathComponent("workspace-compositor-animation"))
         let surface = elements(host).compactMap { $0 as? WorkspaceContourSurface.Host }.first
         check(surface != nil, "native compositor surface is present behind SwiftUI buttons")
+        let rim = elements(host).compactMap { $0 as? WorkspaceOuterRim.Host }.first
+        check(rim != nil && rim?.bounds.size == CGSize(width: 244, height: 40)
+              && rim?.hitTest(CGPoint(x: 100, y: 20)) == nil,
+              "outer capsule light covers the complete navigation without intercepting input")
+        let metalArt = elements(host).compactMap { $0 as? WorkspaceMetalArtwork.Host }
+        check(Set(metalArt.map(\.debugKind)) == [.edit],
+              "only the selected navigation symbol uses a B metal playback layer")
+        let brand = elements(host).compactMap { $0 as? WorkspaceBrandMark.Host }.first
+        check(brand != nil && brand?.bounds.size == CGSize(width: 22, height: 25),
+              "brand restores the original artwork view and 22 by 25 point size")
         for dark in [false, true] {
             window.appearance = NSAppearance(named: dark ? .darkAqua : .aqua)
             try? await Task.sleep(for: .milliseconds(180))
             check(surface?.debugLightHasOrbit == true,
                   "\(dark ? "dark" : "light") selected navigation runs its native light orbit")
+            check(rim?.debugRunning == true && rim?.debugFrameCount == 150,
+                  "\(dark ? "dark" : "light") outer capsule plays the complete reference palette")
             motion.begin(region: CGRect(origin: .zero, size: window.frame.size), retainImages: true)
             let orbitStarted = motion.now
             try? await Task.sleep(for: .seconds(2.6))
@@ -177,6 +189,29 @@ func runWorkspaceBeatProbe(directory: URL, includeWelcomeCards: Bool = true, che
                   "\(name) has moving compositor pixels while selection is stationary")
             _ = await motion.exportAnimation(since: orbitStarted, until: motion.now,
                 directory: directory.appendingPathComponent(name))
+            let art = elements(host).compactMap { $0 as? WorkspaceMetalArtwork.Host }
+            check(art.count == 1 && art.allSatisfy { $0.debugFrameCount == 150 && $0.debugRunning },
+                  "\(name) selected symbol plays the complete sampled reflection cycle")
+            if let brand, let bitmap = brand.bitmapImageRepForCachingDisplay(in: brand.bounds) {
+                brand.cacheDisplay(in: brand.bounds, to: bitmap)
+                var colored = 0, opaque = 0
+                var totalBrightness: CGFloat = 0
+                for y in 0..<bitmap.pixelsHigh {
+                    for x in 0..<bitmap.pixelsWide {
+                        guard let color = bitmap.colorAt(x: x, y: y)?.usingColorSpace(.sRGB),
+                              color.alphaComponent > 0.5 else { continue }
+                        let channels = [color.redComponent, color.greenComponent, color.blueComponent]
+                        opaque += 1
+                        totalBrightness += channels.reduce(0, +) / 3
+                        if (channels.max() ?? 0) - (channels.min() ?? 0) > 0.08 { colored += 1 }
+                    }
+                }
+                let brightness = totalBrightness / CGFloat(max(1, opaque))
+                check(opaque > 12 && colored == 0 && (dark ? brightness > 0.55 : brightness < 0.45),
+                      "\(name) original brand has monochrome artwork and the correct theme inversion")
+                try? bitmap.representation(using: .png, properties: [:])?
+                    .write(to: directory.appendingPathComponent("original-brand-\(dark ? "dark" : "light").png"))
+            } else { check(false, "\(name) original brand raster is available") }
         }
         motion.begin(region: CGRect(origin: .zero, size: window.frame.size), retainImages: true)
         state.deferCommit = true
@@ -256,19 +291,35 @@ func runWorkspaceBeatProbe(directory: URL, includeWelcomeCards: Bool = true, che
               "reduced-motion switch updates both native layers without animation")
         check(surface?.debugLightHasOrbit == false,
               "reduced-motion preference stops continuous light motion")
+        check(rim?.debugRunning == false, "reduced motion stops the outer capsule light")
+        check(elements(host).compactMap { $0 as? WorkspaceMetalArtwork.Host }.allSatisfy { !$0.debugRunning },
+              "reduced motion also stops selected-symbol reflections")
         capture("workspace-reduced-motion")
         state.reduceMotion = false
         try? await Task.sleep(for: .milliseconds(160))
         check(surface?.debugLightHasOrbit == true, "restoring motion resumes the selected light")
+        check(rim?.debugRunning == true, "restoring motion resumes the outer capsule light")
+        rim?.isHidden = true
+        check(rim?.debugRunning == false, "hidden outer capsule suspends its light")
+        rim?.isHidden = false
         surface?.isHidden = true
         check(surface?.debugLightHasOrbit == false, "hidden navigation stops the light orbit")
         surface?.isHidden = false
         window.orderOut(nil)
         try? await Task.sleep(for: .milliseconds(160))
         check(surface?.debugLightHasOrbit == false, "offscreen window stops the light orbit")
+        check(rim?.debugRunning == false, "offscreen window suspends the outer capsule light")
+        check(elements(host).compactMap { $0 as? WorkspaceMetalArtwork.Host }.allSatisfy { !$0.debugRunning },
+              "offscreen window suspends every B reflection layer")
         window.makeKeyAndOrderFront(nil)
         try? await Task.sleep(for: .milliseconds(160))
         check(surface?.debugLightHasOrbit == true, "visible window resumes the light orbit")
+        check(rim?.debugRunning == true, "visible window resumes the outer capsule light")
+        if let rim {
+            rim.configure(animated: true, highContrast: true)
+            check(!rim.debugRunning && rim.debugHiddenForContrast,
+                  "increased contrast removes colored outer light and preserves the base outline")
+        }
         if let surface {
             surface.configure(center: WorkspaceModeSwitcher.center(for: .canvas),
                 halfWidth: WorkspaceModeSwitcher.contourHalfWidth, animated: true, highContrast: true)
@@ -283,9 +334,138 @@ func runWorkspaceBeatProbe(directory: URL, includeWelcomeCards: Bool = true, che
             .write(to: directory.appendingPathComponent("workspace-models.png"))
     }
     await runWorkspaceArchRasterProbe(directory: directory, check: check)
+    await runWorkspaceOuterRimProbe(directory: directory, check: check)
+    runWorkspaceMetalOpticalProbe(directory: directory, check: check)
     if includeWelcomeCards {
         await WelcomeCardInteractionRegression.run(directory: directory, check: check)
     }
+}
+
+/// Capture the outer capsule alone, so selected icons and the inner arch cannot
+/// make a stationary or missing outer light appear to pass.
+@MainActor
+private func runWorkspaceOuterRimProbe(directory: URL, check: (Bool, String) -> Void) async {
+    for dark in [false, true] {
+        let container = NSView(frame: NSRect(x: 0, y: 0, width: 284, height: 80))
+        container.wantsLayer = true
+        container.layer?.backgroundColor = (dark ? NSColor(white: 0.12, alpha: 1)
+                                           : NSColor(white: 0.98, alpha: 1)).cgColor
+        let surface = WorkspaceOuterRim.Host(frame: NSRect(x: 20, y: 20, width: 244, height: 40))
+        container.addSubview(surface)
+        let window = NSWindow(contentRect: NSRect(x: 80, y: 80, width: 284, height: 80),
+                              styleMask: [.titled], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.appearance = NSAppearance(named: dark ? .darkAqua : .aqua)
+        window.contentView = container
+        surface.configure(animated: false, highContrast: false)
+        window.makeKeyAndOrderFront(nil)
+        surface.layoutSubtreeIfNeeded()
+        let name = "outer-rim-\(dark ? "dark" : "light")"
+        if let layer = surface.layer,
+           let context = CGContext(data: nil, width: 488, height: 80, bitsPerComponent: 8,
+            bytesPerRow: 0, space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) {
+            context.scaleBy(x: 2, y: 2)
+            layer.render(in: context)
+            if let image = context.makeImage() {
+                let bitmap = NSBitmapImageRep(cgImage: image)
+                try? bitmap.representation(using: .png, properties: [:])?
+                    .write(to: directory.appendingPathComponent(name + "-poster.png"))
+                let patches = [CGRect(x: 180, y: 0, width: 128, height: 5),
+                               CGRect(x: 180, y: 75, width: 128, height: 5),
+                               CGRect(x: 0, y: 32, width: 5, height: 16),
+                               CGRect(x: 483, y: 32, width: 5, height: 16)]
+                let coverage = patches.map { rect in
+                    (Int(rect.minY)..<Int(rect.maxY)).flatMap { y in
+                        (Int(rect.minX)..<Int(rect.maxX)).compactMap { x in
+                            bitmap.colorAt(x: x, y: y)?.alphaComponent
+                        }
+                    }.max() ?? 0
+                }
+                if dark {
+                    check(coverage.allSatisfy { $0 > 0.45 },
+                          "\(name) has a continuous outline at the top, bottom and both rounded ends")
+                } else {
+                    check(coverage.filter { $0 > 0.1 }.count >= 2,
+                          "\(name) has local refracted glints; the navigation base supplies the continuous silver outline")
+                }
+                var colored = 0, interior = 0
+                for y in 0..<80 {
+                    for x in 0..<488 {
+                        guard let color = bitmap.colorAt(x: x, y: y)?.usingColorSpace(.sRGB),
+                              color.alphaComponent > 0.1 else { continue }
+                        let channels = [color.redComponent, color.greenComponent, color.blueComponent]
+                        if (channels.max() ?? 0) - (channels.min() ?? 0) > 0.16 { colored += 1 }
+                        if (100..<388).contains(x) && (12..<68).contains(y) { interior += 1 }
+                    }
+                }
+                check(colored > 12 && interior == 0,
+                      "\(name) contains prism pixels only around the outside of the capsule")
+            } else { check(false, "\(name) has a raster image") }
+        } else { check(false, "\(name) has a raster context") }
+        surface.configure(animated: true, highContrast: false)
+        try? await Task.sleep(for: .milliseconds(220))
+        if #available(macOS 14.4, *) {
+            do {
+                let motion = try await OwnWindowCompositorProbe.start(window: window)
+                motion.begin(region: CGRect(origin: .zero, size: window.frame.size), retainImages: true)
+                let started = motion.now
+                try? await Task.sleep(for: .seconds(1.6))
+                let ended = motion.now
+                let report = await motion.report(since: started, until: ended, expectedText: nil,
+                                                directory: directory, name: name)
+                check((report["changedPixelSamples"] as? Int ?? 0) >= 12,
+                      "\(name) alone changes actual compositor pixels while navigation is stationary")
+                try? JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted])
+                    .write(to: directory.appendingPathComponent(name + "-motion.json"))
+                _ = await motion.exportAnimation(since: started, until: ended,
+                                                directory: directory.appendingPathComponent(name))
+                motion.begin(region: CGRect(origin: .zero, size: window.frame.size), retainImages: true)
+                let blockedStarted = motion.now
+                // Deliberately block this isolated fixture's main thread.
+                usleep(300_000)
+                let blockedEnded = motion.now
+                let blocked = await motion.report(since: blockedStarted, until: blockedEnded,
+                    expectedText: nil, directory: directory, name: name + "-main-thread-blocked")
+                check((blocked["changedPixelSamples"] as? Int ?? 0) >= 3,
+                      "\(name) compositor keeps moving during main-thread workspace preparation")
+                await motion.stop()
+            } catch { check(false, "\(name) compositor starts: \(error.localizedDescription)") }
+        }
+        window.close()
+    }
+}
+
+@MainActor
+private func runWorkspaceMetalOpticalProbe(directory: URL, check: (Bool, String) -> Void) {
+    var samples = [[String: Any]]()
+    for dark in [false, true] {
+        for kind in [WorkspaceMetalMaterial.Kind.edit, .canvas, .model] {
+            guard let image = WorkspaceMetalMaterial.poster(kind, dark: dark) else {
+                check(false, "B \(kind.rawValue) reflection resource is available"); continue
+            }
+            let bitmap = NSBitmapImageRep(cgImage: image)
+            var luminance = [CGFloat]()
+            var neutral = 0, opaque = 0
+            for y in 0..<bitmap.pixelsHigh {
+                for x in 0..<bitmap.pixelsWide {
+                    guard let c = bitmap.colorAt(x: x, y: y)?.usingColorSpace(.sRGB),
+                          c.alphaComponent > 0.85 else { continue }
+                    let channels = [c.redComponent, c.greenComponent, c.blueComponent]
+                    luminance.append(channels.reduce(0, +) / 3)
+                    opaque += 1
+                    if (channels.max() ?? 0) - (channels.min() ?? 0) < 0.16 { neutral += 1 }
+                }
+            }
+            let range = (luminance.max() ?? 0) - (luminance.min() ?? 0)
+            check(opaque > 12 && range > 0.28 && Double(neutral) / Double(max(1, opaque)) > 0.80,
+                  "B \(kind.rawValue) \(dark ? "dark" : "light") retains bright and dark silver faces")
+            samples.append(["kind": kind.rawValue, "dark": dark, "opaquePixels": opaque,
+                            "neutralPixels": neutral, "silverLuminanceRange": range])
+        }
+    }
+    try? JSONSerialization.data(withJSONObject: samples, options: [.prettyPrinted, .sortedKeys])
+        .write(to: directory.appendingPathComponent("workspace-metal-optics.json"))
 }
 
 /// This verifies production Core Animation pixels offscreen. It deliberately
@@ -391,8 +571,14 @@ func runWorkspaceNavigationLoadingProbe(directory: URL, check: (Bool, String) ->
     window.contentView = host
     window.makeKeyAndOrderFront(nil)
     defer { state.transition.cancel(); window.close() }
-    try? await Task.sleep(for: .milliseconds(250))
-    host.layoutSubtreeIfNeeded()
+    // A new hosting window may still be admitted by SwiftUI after the first
+    // run-loop turn, especially after the preceding compositor fixtures close.
+    for _ in 0..<40 {
+        host.layoutSubtreeIfNeeded()
+        if state.transition.surface != nil
+            && NativeAccessibilityProbe.elements(host).contains(where: { $0 is WorkspaceContourSurface.Host }) { break }
+        try? await Task.sleep(for: .milliseconds(50))
+    }
     let surface = NativeAccessibilityProbe.elements(host).compactMap { $0 as? WorkspaceContourSurface.Host }.first
     guard let surface, let loading = state.transition.surface else {
         check(false, "loading fixture mounts the production navigation and cover"); return
@@ -455,6 +641,10 @@ func runWorkspaceNavigationLoadingProbe(directory: URL, check: (Bool, String) ->
             check(loading.layer?.opacity == 1 && loading.frames?.images.count == 86
                   && loading.symbol.contents != nil,
                   "\(theme) \(mode.rawValue): the original loading animation still covers the unready workspace")
+            check(loading.frames?.images.allSatisfy { $0.width == 200 && $0.height == 200 } == true
+                  && loading.frames?.lightImages.allSatisfy { $0.width == 200 && $0.height == 200 } == true
+                  && abs((loading.frames?.duration ?? 0) - 3.44) < 0.001,
+                  "\(theme) \(mode.rawValue): loading retains original resolution and frame timing during the Retina pulse")
             let navigationPoint = CGPoint(x: loading.bounds.midX,
                 y: WorkspaceModeSwitcher.pinnedTopInset + WorkspaceModeSwitcher.preferredHeight / 2)
             check(loading.hitTest(navigationPoint) == nil
@@ -473,7 +663,10 @@ func runWorkspaceNavigationLoadingProbe(directory: URL, check: (Bool, String) ->
             check(observedMount && visibleDuringMount && state.mode == mode && !state.transition.isSwitching,
                   "\(theme) \(mode.rawValue): navigation stays visible while the destination mounts and becomes ready")
             check(sample("\(theme)-\(mode.rawValue)-reveal", dark: dark, bodyCovered: false),
-                  "\(theme) \(mode.rawValue): navigation stays clear and readable during the ready fade and blur")
+                  "\(theme) \(mode.rawValue): navigation stays clear and readable during the ready fade")
+            check(host.layer?.animation(forKey: "workspace-ready-blur") == nil
+                  && (host.layer?.filters ?? []).isEmpty,
+                  "\(theme) \(mode.rawValue): ready fade does not blur the loading glyph or destination controls")
             try? await Task.sleep(for: .milliseconds(320))
             check(NativeAccessibilityProbe.elements(host).compactMap { $0 as? WorkspaceContourSurface.Host }.first === surface,
                   "\(theme) \(mode.rawValue): switching preserves the single native navigation instance")

@@ -5,6 +5,7 @@ let package = Package(
     name: "ClipSlots",
     platforms: [.macOS(.v13)],
     targets: [
+        .systemLibrary(name: "CArchive", path: "Sources/CArchive"),
         .target(
             name: "ClipSlotsKit",
             path: "Sources/ClipSlotsKit",
@@ -12,7 +13,7 @@ let package = Package(
         ),
         .executableTarget(
             name: "ClipSlots",
-            dependencies: ["ClipSlotsKit"],
+            dependencies: ["ClipSlotsKit", "CArchive"],
             path: "Sources/ClipSlots",
             swiftSettings: [.unsafeFlags(["-parse-as-library"])]
         ),

@@ -1528,6 +1528,22 @@ public final class SpecialSlotStorage {
         }
     }
 
+    /// Commit imported appearance metadata together, after all slot writes have
+    /// succeeded. Read/modify/write stays under the cross-process storage lock.
+    public func updateGroupAppearances(_ values: [(id: String, icon: String, colorHex: String?)]) throws {
+        try storageLock.withLock {
+            var index = loadIndex()
+            for value in values {
+                guard let position = index.specialSlots.firstIndex(where: { $0.id == value.id }) else {
+                    throw SpecialSlotError.specialSlotNotFound
+                }
+                index.specialSlots[position].icon = value.icon
+                index.specialSlots[position].colorHex = value.colorHex
+            }
+            try saveIndex(index)
+        }
+    }
+
     // MARK: - Page CRUD (v2.4)
 
     /// Result of `createPage`: the new page plus its synchronously-created
@@ -2079,6 +2095,62 @@ public final class SpecialSlotStorage {
         }
     }
 
+    /// Prepare every affected slot before exchanging any live directory. The
+    /// existing durable transaction rolls back all slots after a failed rename.
+    public func restoreUndoSnapshot(_ snapshot: SlotUndoSnapshot,
+                                    archive: SlotUndoMediaArchive = .shared,
+                                    historyData: Data? = nil,
+                                    checkpoint: ((Int) throws -> Void)? = nil) throws -> [Int: SlotContent] {
+        if snapshot.labelsOnly == true {
+            guard let affected = snapshot.affectedSlots, affected.count == 1, let slot = affected.first else {
+                throw AgentCanvasError.conflict
+            }
+            try writeTitle(slot, label: snapshot.labels[slot], in: snapshot.groupId,
+                           historyData: historyData, checkpoint: checkpoint)
+            return [slot: get(slot, in: snapshot.groupId)]
+        }
+        return try storageLock.withLock(timeout: 0.15) {
+            guard !storageLock.isDegraded else { throw AgentCanvasError.busy }
+            try SlotMoveDiskTransaction.recover()
+            guard loadIndex().specialSlots.contains(where: { $0.id == snapshot.groupId }) else {
+                throw AgentCanvasError.unavailable
+            }
+            let capacity = Self.isReservedGroupId(snapshot.groupId) ? Self.unfiledCapacity : 10
+            let affected = snapshot.affectedSlots ?? snapshot.slots.keys.sorted()
+            guard !affected.isEmpty, Set(affected).count == affected.count,
+                  affected.allSatisfy({ (1...capacity).contains($0) && snapshot.slots[$0] != nil }) else {
+                throw AgentCanvasError.conflict
+            }
+            let sealed = snapshot.mediaArchiveID == nil
+                ? try archive.seal(snapshot, storageRoot: baseDir, recoverLegacy: true) : snapshot
+            defer { if snapshot.mediaArchiveID == nil { archive.releasePending(sealed.mediaArchiveID) } }
+            let prepared = try archive.preparedForRestore(sealed)
+            let changes = affected.sorted().map { slot -> (live: URL, content: SlotContent) in
+                var content = prepared.slots[slot]!
+                content.label = prepared.labels[slot]
+                return (specialSlotDirectory(for: snapshot.groupId).appendingPathComponent(String(slot)), content)
+            }
+            let storage = slotStorage(for: snapshot.groupId)
+            defer { storage.invalidateCache() }
+            let metadata = historyData.map { [(live: ClipSlotsPaths.undoDir.appendingPathComponent("history.json"), data: $0)] } ?? []
+            try SlotMoveDiskTransaction.commit(changes, checkpoint: checkpoint, replacingLabels: true,
+                                                metadataFiles: metadata) { staged, expected in
+                let reader = SlotStorage(moveStagingDirectory: staged.deletingLastPathComponent())
+                var cold = reader.get(1)
+                cold.label = reader.getLabel(1)
+                try archive.validateRestored(cold, expected: expected)
+                if let id = expected.manualThumbnailId, let bytes = expected.pendingManualThumbnailData {
+                    guard try Data(contentsOf: staged.appendingPathComponent("attachments/\(id).bin")) == bytes else {
+                        throw AgentCanvasError.writeFailed
+                    }
+                }
+            }
+            storage.invalidateCache()
+            touchSpecialSlot(id: snapshot.groupId)
+            return Dictionary(uniqueKeysWithValues: affected.map { ($0, storage.get($0)) })
+        }
+    }
+
     /// Commit both editor drafts in one checked write. Live labels and thumbnails
     /// survive; concurrent body/attachment changes and deleted/recreated groups fail.
     public func exchangeEditorContent(_ snapshot: SlotEditorSnapshot,
@@ -2440,26 +2512,51 @@ public final class SpecialSlotStorage {
 
     @discardableResult
     public func setLabel(_ slot: Int, label: String?, in specialSlotId: String) -> Bool {
-        // P2-4 (v2.10.9): label write + index touch in ONE withLock (see clear()).
-        // P2-4 (v2.10.16): 锁超时不再用 `try?` 静默吞掉——超时记日志并返回 false（对齐 ST-4）。
         do {
-            try storageLock.withLock {
-                // STG-2 (v2.10.32): reject setLabel() on a group no longer in the index (see set()).
-                guard loadIndex().specialSlots.contains(where: { $0.id == specialSlotId }) else {
-                    NSLog("[ClipSlots] STG-2: refusing setLabel() on group '\(specialSlotId)' not present in index (deleted/ghost); skipped")
-                    return
-                }
-                slotStorage(for: specialSlotId).setLabel(slot, label: label)
-                var index = loadIndex()
-                if let idx = index.specialSlots.firstIndex(where: { $0.id == specialSlotId }) {
-                    index.specialSlots[idx].updatedAt = Date()
-                    try? saveIndex(index)
-                }
-            }
+            try writeTitle(slot, label: label, in: specialSlotId)
             return true
         } catch {
             NSLog("[ClipSlots] setLabel(slot:\(slot) in:\(specialSlotId)) 获取存储锁失败，标签未更新：\(ApplicationDiagnostics.error(error))")
             return false
+        }
+    }
+
+    /// One durable transaction commits the title, group timestamp, and optional history.
+    /// Empty title files represent no custom label, avoiding a non-atomic remove step.
+    public func writeTitle(_ slot: Int, label: String?, in groupID: String,
+                           historyData: Data? = nil,
+                           checkpoint: ((Int) throws -> Void)? = nil) throws {
+        try storageLock.withLock(timeout: 0.15) {
+            guard !storageLock.isDegraded else { throw AgentCanvasError.busy }
+            var index = loadIndex()
+            guard index.schemaVersion >= 2, !lastLoadDecodeFailed else {
+                throw SpecialSlotStorageError.refusingToOverwriteWithEmptyIndex
+            }
+            guard let groupIndex = index.specialSlots.firstIndex(where: { $0.id == groupID }),
+                  slot >= 1, slot <= (Self.isReservedGroupId(groupID) ? Self.unfiledCapacity : 10) else {
+                throw AgentCanvasError.unavailable
+            }
+            let directory = specialSlotDirectory(for: groupID).appendingPathComponent(String(slot))
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            let file = directory.appendingPathComponent("label.txt")
+            var isDirectory: ObjCBool = false
+            if FileManager.default.fileExists(atPath: file.path, isDirectory: &isDirectory), isDirectory.boolValue {
+                throw AgentCanvasError.writeFailed
+            }
+            let normalized = label?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            if historyData == nil, (getLabel(slot, in: groupID) ?? "") == normalized { return }
+            index.specialSlots[groupIndex].updatedAt = Date()
+            var files = [(live: file, data: Data(normalized.utf8)),
+                         (live: baseDir.appendingPathComponent("index.json"), data: try JSONEncoder().encode(index))]
+            if let historyData {
+                let history = ClipSlotsPaths.undoDir.appendingPathComponent("history.json")
+                try FileManager.default.createDirectory(at: history.deletingLastPathComponent(),
+                                                        withIntermediateDirectories: true)
+                files.append((live: history, data: historyData))
+            }
+            try SlotMoveDiskTransaction.commit([], checkpoint: checkpoint, metadataFiles: files)
+            slotStorage(for: groupID).invalidateCache()
+            SlotSearchChangeMonitor.shared.didWrite(group: specialSlotDirectory(for: groupID), slot: slot)
         }
     }
 

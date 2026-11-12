@@ -1,0 +1,16 @@
+{
+  "passed": true,
+  "checks": {
+    "cold import 1: exactly once, labels, body, appearance, attachment bytes": true,
+    "cold import 2: exactly once, labels, body, appearance, attachment bytes": true,
+    "warm import 1: exactly once, labels, body, appearance, attachment bytes": true,
+    "warm import 2: exactly once, labels, body, appearance, attachment bytes": true
+  },
+  "route": "macOS open-document events",
+  "cold_launch": true,
+  "warm_launch": true,
+  "multiple_files": true,
+  "fixture_sha256": "5d93b230f7cf4ff0ad3a5effb4dab0702ccb13deb8cef38da8e03fd6a568780f",
+  "probe_gui_sha256": "a0e174040c9a04d8e5991529953b65bd24b18ad44901da35b95199a4b49d11e8",
+  "isolated": true
+}

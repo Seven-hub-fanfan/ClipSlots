@@ -1,0 +1,66 @@
+{
+  "cycle": 5,
+  "fps": 30,
+  "frames": 150,
+  "scale": 2,
+  "poster_frame": 66,
+  "reference_sha256": "c2c93b5a91d6829440cf470ba475c5ce4fb4e8461dce8093f06cc7fc331129bd",
+  "shader_sha256": "b6d2c85a9b7004c0b022ea0b7d41cbb8f01af95c47b202f1ad95b0ad8b6c56e1",
+  "native_symbols": [
+    "rectangle.stack.fill",
+    "viewfinder",
+    "cube.fill"
+  ],
+  "assets": {
+    "arch-dark": {
+      "width": 192,
+      "height": 112,
+      "sha256": "d5315a262a90816c3c906c74c7d07ce3405cbc5d5d4f73cf8ed851cc51aa99c7"
+    },
+    "brand-dark": {
+      "width": 80,
+      "height": 80,
+      "sha256": "dd8a780c25bd6ff1a2503ef2e17f397c8b2d0dd84a2ed6a31e82200a4471908f"
+    },
+    "edit-dark": {
+      "width": 32,
+      "height": 28,
+      "sha256": "546158d1a596736e1649a996abfd9c65ab5943d2aebd45651d5a3fbfbe2081de"
+    },
+    "canvas-dark": {
+      "width": 32,
+      "height": 28,
+      "sha256": "dc35fa3e45fe3c5b10c1da957a45147c872b75fed55be492df97b891ce3c80f0"
+    },
+    "model-dark": {
+      "width": 32,
+      "height": 28,
+      "sha256": "bcbb77699e1b69e7905d4910a6a467f776a083ed543a30dd323261eb197555da"
+    },
+    "arch-light": {
+      "width": 192,
+      "height": 112,
+      "sha256": "62908e1cab559c59a47f642afab892dee994f444887f04f7544c5844655a140b"
+    },
+    "brand-light": {
+      "width": 80,
+      "height": 80,
+      "sha256": "2efad8952422dcb86abbfc66c41acdb379632a1c1ece2c9365c6c02b090a9d5f"
+    },
+    "edit-light": {
+      "width": 32,
+      "height": 28,
+      "sha256": "cb38a380971a059908566a83e55787dd57eeab29d00364fd187d3b589ecc75e4"
+    },
+    "canvas-light": {
+      "width": 32,
+      "height": 28,
+      "sha256": "50152795f830b15849df1ae0750b67c76495dc04676475758ce8701fad64c4d4"
+    },
+    "model-light": {
+      "width": 32,
+      "height": 28,
+      "sha256": "21390fdf33e5a3b751cbf55faa314a101dbee115eb57d5f6717a1d9f419f6398"
+    }
+  }
+}

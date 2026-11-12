@@ -47,7 +47,7 @@ struct ModelWorkspaceView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
             HStack {
-                Text("模型").font(.system(size: 27, weight: .semibold))
+                AppLocalizedText("模型").font(.system(size: 27, weight: .semibold))
                 Spacer()
                 if !models.loaded { ProgressView().controlSize(.small) }
                 HStack(spacing: 4) {
@@ -108,7 +108,7 @@ struct ModelWorkspaceView: View {
         .sheet(isPresented: $showingEnvironment) { EnvironmentSetupView() }
         .sheet(isPresented: $showingSources) { ModelNewsSourcesEditor(models: models) }
         .alert("启动测评", isPresented: $showingRunPreview) {
-            Button("取消", role: .cancel) {}
+            Button(localized: "取消", role: .cancel) {}
             Button("开始请求") { Task { await models.start(bankID: bankID, selectedIDs: selectedModels, questionIDs: useAllQuestions ? nil : selectedQuestions) } }
         } message: {
             Text("\(chosenQuestions.count) 道题 · \(selectedModels.count) 个模型 · \(plannedCells) 次匹配请求。\n使用当前题库与配置快照，实际并发最多 4，遵守各模型限流。服务可能计费。")
@@ -180,7 +180,7 @@ struct ModelWorkspaceView: View {
                                     if q.title != q.slot.map({ "槽位 \($0)" }) {
                                         Text(q.slot.map { "槽位 \($0)" } ?? "未绑定").font(.system(size: 11)).foregroundStyle(.secondary)
                                     }
-                                    Button("编辑") { questionDraft = q }
+                                    Button(localized: "编辑") { questionDraft = q }
                                 }.padding(.vertical, 5)
                             }
                             if bank.questions.isEmpty { empty("题库为空", subtitle: "同步已有槽位，或生成题目草稿后审核保存。", symbol: "tray") }
@@ -398,7 +398,7 @@ struct ModelWorkspaceView: View {
                                     .font(.system(size: 11)).foregroundStyle(.secondary).textSelection(.enabled)
                             }
                             Spacer()
-                            Button("编辑") { profileDraft = profile }
+                            Button(localized: "编辑") { profileDraft = profile }
                             Button("移除") { Task { await models.removeProfile(profile.id) } }
                         }
                     }
@@ -417,7 +417,7 @@ struct ModelWorkspaceView: View {
                 Spacer()
                 if models.refreshingNews { ProgressView().controlSize(.small) }
                 Button("来源配置") { showingSources = true }
-                Button("刷新") { Task { await models.refreshNews(force: true) } }.disabled(models.refreshingNews)
+                Button(localized: "刷新") { Task { await models.refreshNews(force: true) } }.disabled(models.refreshingNews)
             }
             Text(models.document.newsRefreshedAt.map { "更新于 \($0.formatted())" } ?? "尚未成功抓取新闻")
                 .font(.system(size: 11)).foregroundStyle(.secondary)

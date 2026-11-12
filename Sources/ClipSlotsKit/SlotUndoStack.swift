@@ -27,19 +27,27 @@ public struct SlotUndoSnapshot: Codable {
     public var capturedAt: TimeInterval
     /// nil keeps the historical whole-group behavior. Editor saves own one slot.
     public var affectedSlots: [Int]?
+    /// Independent, checksummed media ownership. Optional for older history files.
+    public var mediaArchiveID: String?
+    /// Title history changes labels only; later body/attachment edits survive undo.
+    public var labelsOnly: Bool?
 
     public init(slots: [Int: SlotContent],
                 labels: [Int: String],
                 title: String,
                 groupId: String,
                 capturedAt: TimeInterval = Date().timeIntervalSince1970,
-                affectedSlots: [Int]? = nil) {
+                affectedSlots: [Int]? = nil,
+                mediaArchiveID: String? = nil,
+                labelsOnly: Bool? = nil) {
         self.slots = slots
         self.labels = labels
         self.title = title
         self.groupId = groupId
         self.capturedAt = capturedAt
         self.affectedSlots = affectedSlots
+        self.mediaArchiveID = mediaArchiveID
+        self.labelsOnly = labelsOnly
     }
 
     /// 内容身份签名（按 contentId + updatedAt，与 slotsSnapshotEqual 同源判据）。
@@ -50,7 +58,7 @@ public struct SlotUndoSnapshot: Codable {
             return "\(key):\(c.contentId):\(c.updatedAt)"
         }.joined(separator: "|")
         let labelPart = labels.keys.sorted().map { "\($0)=\(labels[$0] ?? "")" }.joined(separator: ",")
-        return "\(groupId)#\(slotPart)#\(labelPart)#\(affectedSlots?.sorted().description ?? "all")"
+        return "\(groupId)#\(slotPart)#\(labelPart)#\(affectedSlots?.sorted().description ?? "all")#\(labelsOnly == true)"
     }
 }
 
@@ -128,6 +136,10 @@ public struct SlotUndoStack: Codable {
 
     public func canUndo(forGroup groupId: String) -> Bool {
         entries.contains { $0.groupId == groupId }
+    }
+
+    public func latest(forGroup groupId: String) -> SlotUndoSnapshot? {
+        entries.last { $0.groupId == groupId }
     }
 
     /// 清空某个组的全部历史。

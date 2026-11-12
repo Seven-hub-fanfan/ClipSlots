@@ -1,5 +1,6 @@
 import Foundation
 import ClipSlotsKit
+import Darwin
 
 // MARK: - .clipslotspack 包格式 (v2.10.14)
 //
@@ -284,10 +285,10 @@ struct PackExporter {
                         // P2-2 (v2.10.16): 区分「本无字节的附件（纯 url/reference 型）」与「本应有字节但
                         // 源文件不可读/为空的附件」，后者登记到 failedAttachments 而非写入空壳条目。
                         var streamSource: URL? = nil
-                        if let sp = att.storagePath, !sp.isEmpty, let size = regularFileSize(sp), size > 0 {
+                        if let sp = att.storagePath, !sp.isEmpty, regularFileSize(sp) != nil {
                             // 情形 1：字节已外置为独立 .bin（v2.10.42+ 新格式 / 老数据懒迁移后）。
                             streamSource = URL(fileURLWithPath: sp)
-                        } else if let path = att.path, let size = regularFileSize(path), size > 0 {
+                        } else if let path = att.path, regularFileSize(path) != nil {
                             // 情形 2：本地文件引用（如 CLI write-attachment、纯 path 引用附件），回源读取。
                             streamSource = URL(fileURLWithPath: path)
                         }
@@ -311,7 +312,7 @@ struct PackExporter {
                             }
                             packAtt.file = fileName
                             packAttachments.append(packAtt)
-                        } else if let data = att.data, !data.isEmpty {
+                        } else if let data = att.data {
                             // 情形 3：字节仅存在于内存（少见的尚未落盘内联 data，如刚写入未 flush）——
                             // 直接写出（已在内存，不额外放大）。
                             if !attachmentsDirCreated {
@@ -548,14 +549,24 @@ struct PackExporter {
             return ch
         }
         let clean = String(sanitized).trimmingCharacters(in: .whitespaces)
-        return "\(index)_\(id)_\(clean.isEmpty ? "attachment" : clean)"
+        // Leave space for both this prefix and the importer's fresh UUID.
+        // Preserve the full user-visible name in slot.json.
+        var bounded = ""
+        for character in clean {
+            if bounded.utf8.count + String(character).utf8.count > 160 { break }
+            bounded.append(character)
+        }
+        return "\(index)_\(id)_\(bounded.isEmpty ? "attachment" : bounded)"
     }
 
     /// 用系统 /usr/bin/zip 压缩目录内容（不依赖第三方库）。
     private func zipDirectory(contentsOf dir: URL, to destURL: URL) throws {
         let fm = FileManager.default
         // 先压到临时 .zip，再移动到最终目标（.clipslotspack）。
-        let tmpZip = fm.temporaryDirectory.appendingPathComponent("clipslotspack_out_\(UUID().uuidString).zip")
+        // Stage beside the destination so the final rename is atomic, including
+        // external volumes. Never remove a previous export before commit.
+        let tmpZip = destURL.deletingLastPathComponent()
+            .appendingPathComponent(".clipslotspack_out_\(UUID().uuidString).zip")
         defer { try? fm.removeItem(at: tmpZip) }
 
         let process = Process()
@@ -569,24 +580,20 @@ struct PackExporter {
 
         do {
             try process.run()
+            // Drain while zip is running; diagnostics must not fill a pipe and
+            // leave waitUntilExit blocked indefinitely.
+            let errData = errPipe.fileHandleForReading.readDataToEndOfFile()
             process.waitUntilExit()
+            guard process.terminationStatus == 0 else {
+                let msg = String(data: errData, encoding: .utf8) ?? "zip exit \(process.terminationStatus)"
+                throw PackExportError.zipFailed(msg)
+            }
         } catch {
             throw PackExportError.zipFailed(error.localizedDescription)
         }
 
-        guard process.terminationStatus == 0 else {
-            let errData = errPipe.fileHandleForReading.readDataToEndOfFile()
-            let msg = String(data: errData, encoding: .utf8) ?? "zip exit \(process.terminationStatus)"
-            throw PackExportError.zipFailed(msg)
-        }
-
-        do {
-            if fm.fileExists(atPath: destURL.path) {
-                try fm.removeItem(at: destURL)
-            }
-            try fm.moveItem(at: tmpZip, to: destURL)
-        } catch {
-            throw PackExportError.ioFailed(error.localizedDescription)
+        guard rename(tmpZip.path, destURL.path) == 0 else {
+            throw PackExportError.ioFailed(String(cString: strerror(errno)))
         }
     }
 }

@@ -122,7 +122,7 @@ final class PermissionCenterModel: ObservableObject {
     private func beginAuthorization(_ permission: AppPermission, afterRepair: Bool = false) {
         settingsPermission = permission
         if afterRepair && permission == .accessibility { backend.requestAccessibility() }
-        error = backend.openSettings(permission) ? nil : "未能打开系统设置，请在「隐私与安全性」中打开\(permission.title)。"
+        error = backend.openSettings(permission) ? nil : AppInterfaceStrings.format("未能打开系统设置，请在「隐私与安全性」中打开%@。", arguments: [AppInterfaceStrings.text(permission.title)])
         onRefresh?()
         // Accessibility can be added directly with the real app-file drag.
         // The screen request may block on native UI: await it away from the
@@ -145,7 +145,7 @@ final class PermissionCenterModel: ObservableObject {
         repairing = permission
         settingsPermission = nil
         error = nil
-        repairNotice = "正在清除\(permission.title)的旧记录…"
+        repairNotice = AppInterfaceStrings.format("正在清除%@的旧记录…", arguments: [AppInterfaceStrings.text(permission.title)])
         onRefresh?()
         repairTask = Task {
             do {
@@ -158,7 +158,7 @@ final class PermissionCenterModel: ObservableObject {
                     return
                 }
                 repairing = nil
-                repairNotice = "旧记录已清除，请在系统中重新允许\(permission.title)。"
+                repairNotice = AppInterfaceStrings.format("旧记录已清除，请在系统中重新允许%@。", arguments: [AppInterfaceStrings.text(permission.title)])
                 refresh()
                 if !authorized.contains(permission) { beginAuthorization(permission, afterRepair: true) }
             } catch {
@@ -446,11 +446,11 @@ struct PermissionCenterCard: View {
                 Spacer()
                 Button { model.refresh() } label: {
                     Image(systemName: "arrow.clockwise").font(.system(size: 12)).frame(width: 28, height: 28)
-                }.buttonStyle(.plain).help("重新检查权限").accessibilityLabel("重新检查权限")
+                }.buttonStyle(.plain).localizedHelp("重新检查权限").localizedAccessibilityLabel("重新检查权限")
                     .accessibilityIdentifier("permission-refresh")
                 Button(action: onClose) {
                     Image(systemName: "xmark").font(.system(size: 13)).frame(width: 28, height: 28)
-                }.buttonStyle(.plain).help("关闭").accessibilityLabel("关闭权限面板")
+                }.buttonStyle(.plain).localizedHelp("关闭").localizedAccessibilityLabel("关闭权限面板")
                     .accessibilityIdentifier("permission-close").keyboardShortcut(.cancelAction)
             }.padding(.top, 12).padding(.trailing, 12)
             HStack(spacing: 18) {
@@ -461,9 +461,9 @@ struct PermissionCenterCard: View {
                     .foregroundColor(AppTheme.chromeAccentInk).frame(width: 50, height: 50)
                     .background(ink.opacity(0.035), in: RoundedRectangle(cornerRadius: 12))
             }.accessibilityHidden(true).padding(.top, 4)
-            Text("连接 ClipSlots").font(.system(size: 21, weight: .semibold)).padding(.top, 18)
-            Text("系统权限").font(.system(size: 12)).foregroundColor(.secondary).padding(.top, 6)
-            Text(description).font(.system(size: 12)).lineSpacing(5).multilineTextAlignment(.center)
+            AppLocalizedText("连接 ClipSlots").font(.system(size: 21, weight: .semibold)).padding(.top, 18)
+            AppLocalizedText("系统权限").font(.system(size: 12)).foregroundColor(.secondary).padding(.top, 6)
+            AppLocalizedText(description).font(.system(size: 12)).lineSpacing(5).multilineTextAlignment(.center)
                 .fixedSize(horizontal: false, vertical: true)
                 .frame(maxWidth: .infinity).padding(.vertical, 16)
                 .background(ink.opacity(0.035), in: RoundedRectangle(cornerRadius: 10))
@@ -490,6 +490,7 @@ struct PermissionRows: View {
     var onAuthorize: (AppPermission) -> Void = { PermissionCenter.authorize($0) }
     var onRepair: (AppPermission) -> Void = { PermissionCenter.repair($0) }
     @Environment(\.colorScheme) private var scheme
+    @AppStorage(AppInterfaceLanguage.preferenceKey) private var languageRaw = AppInterfaceLanguage.chinese.rawValue
     var body: some View {
         VStack(spacing: 0) {
             ForEach(AppPermission.allCases) { permission in
@@ -501,29 +502,29 @@ struct PermissionRows: View {
                         .background(Color(white: 0.58), in: RoundedRectangle(cornerRadius: 7))
                         .accessibilityHidden(true)
                     VStack(alignment: .leading, spacing: 6) {
-                        Text(permission.title).font(.system(size: 12, weight: .semibold))
-                        Text(permission.detail).font(.system(size: 11)).foregroundColor(.secondary)
+                        AppLocalizedText(permission.title).font(.system(size: 12, weight: .semibold))
+                        AppLocalizedText(permission.detail).font(.system(size: 11)).foregroundColor(.secondary)
                             .fixedSize(horizontal: false, vertical: true)
                     }
                     Spacer(minLength: 8)
                     if model.authorized.contains(permission) {
                         HStack(spacing: 6) {
-                            Text("已授权")
+                            AppLocalizedText("已授权")
                             Circle().fill(Color(red: 0.16, green: 0.65, blue: 0.49)).frame(width: 5, height: 5)
                         }.font(.system(size: 11, weight: .medium))
                             .accessibilityElement(children: .ignore)
-                            .accessibilityLabel("\(permission.title)，已授权")
+                            .accessibilityLabel(AppInterfaceStrings.format("%@，已授权", language: AppInterfaceLanguage.resolve(languageRaw), arguments: [AppInterfaceStrings.text(permission.title, language: AppInterfaceLanguage.resolve(languageRaw))]))
                             .accessibilityIdentifier("permission-status-\(permission.rawValue)")
                     } else {
                             Button { onAuthorize(permission) } label: {
                                 HStack(spacing: 5) {
-                                    Text(model.repairing == permission ? "修复中…" :
+                                    AppLocalizedText(model.repairing == permission ? "修复中…" :
                                         model.requestingScreenCapture && permission == .screenCapture ? "等待授权" : "去授权")
                                     Image(systemName: "arrow.up.right.square")
                                 }.font(.system(size: 11, weight: .medium))
                             }.buttonStyle(CompactActionStyle(selected: true))
                                 .disabled(model.repairing != nil || permission == .screenCapture && model.requestingScreenCapture)
-                                .accessibilityLabel("\(permission.title)，未授权，打开系统设置")
+                                .accessibilityLabel(AppInterfaceStrings.format("%@，未授权，打开系统设置", language: AppInterfaceLanguage.resolve(languageRaw), arguments: [AppInterfaceStrings.text(permission.title, language: AppInterfaceLanguage.resolve(languageRaw))]))
                                 .accessibilityIdentifier("permission-authorize-\(permission.rawValue)")
                     }
                 }.padding(.horizontal, 16).frame(minHeight: 72)
@@ -535,32 +536,65 @@ struct PermissionRows: View {
 
 struct PermissionSettingsSection: View {
     @ObservedObject private var model = PermissionCenterModel.shared
+    @AppStorage(AppInterfaceLanguage.preferenceKey) private var languageRaw = AppInterfaceLanguage.chinese.rawValue
     var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            Text("复制粘贴与截图按需使用以下权限，状态以 macOS 当前进程的授权为准。")
-                .font(.system(size: 12)).foregroundColor(.secondary)
-            PermissionRows(model: model)
-            PermissionApplicationDragSection(model: model)
-            Menu("修复授权…") {
+        VStack(alignment: .leading, spacing: 24) {
+            SettingsGroup(title: "macOS 授权") {
                 ForEach(AppPermission.allCases) { permission in
-                    Button("修复\(permission.title)…") { PermissionCenter.repair(permission) }
+                    if permission == .screenCapture { SettingsDivider() }
+                    HStack(spacing: 14) {
+                        Image(systemName: permission == .accessibility ? "cursorarrow.click.2" : "viewfinder")
+                            .font(.system(size: 19, weight: .regular)).frame(width: 34, height: 38)
+                            .foregroundColor(.secondary).accessibilityHidden(true)
+                        VStack(alignment: .leading, spacing: 5) {
+                            AppLocalizedText(permission.title).font(.system(size: 13, weight: .medium))
+                            AppLocalizedText(permission == .accessibility ? "复制与粘贴" : "截图与缩略图")
+                                .font(.system(size: 12)).foregroundColor(.secondary)
+                        }
+                        Spacer(minLength: 12)
+                        if model.authorized.contains(permission) {
+                            SettingsStatus(title: "已授权", color: Color(red: 0.16, green: 0.65, blue: 0.49))
+                                .accessibilityIdentifier("permission-status-\(permission.rawValue)")
+                        } else {
+                            Button(localized: model.repairing == permission ? "修复中…" :
+                                model.requestingScreenCapture && permission == .screenCapture ? "等待授权" : "去授权") {
+                                PermissionCenter.authorize(permission)
+                            }
+                            .disabled(model.repairing != nil || permission == .screenCapture && model.requestingScreenCapture)
+                            .accessibilityIdentifier("permission-authorize-\(permission.rawValue)")
+                        }
+                    }.padding(.horizontal, 18).frame(minHeight: 80)
                 }
             }
-            .disabled(model.repairing != nil || model.requestingScreenCapture)
-            .fixedSize()
-            Text("开关已开启但功能不可用时，可修复此项授权。修复会清除 ClipSlots 此项现有记录并重新申请，需要系统确认。")
-                .font(.system(size: 11)).foregroundColor(.secondary)
             if let message = model.error ?? model.repairNotice {
-                Text(message).font(.system(size: 11)).foregroundColor(model.error == nil ? .secondary : .red)
+                Text(message).font(.system(size: 12)).foregroundColor(model.error == nil ? .secondary : .red)
             }
-            Button("打开权限面板") { PermissionCenter.present() }
-                .accessibilityIdentifier("permission-center-open")
-            Text("文件与目录访问")
-                .font(.system(size: 13, weight: .semibold)).padding(.top, 6)
-            Text("导入文件时通过系统选择器选择。Agent 工作目录可在会话中的「添加本地目录」里选择、重新授权或移除；写入操作仍由你确认。")
-                .font(.system(size: 12)).foregroundColor(.secondary).lineSpacing(4)
-            Text("安装 CLI、更新应用等操作，仅在需要写入受保护位置时由 macOS 请求管理员授权。")
-                .font(.system(size: 12)).foregroundColor(.secondary).lineSpacing(4)
+            SettingsDisclosure(title: "授权帮助与修复") {
+                PermissionApplicationDragSection(model: model)
+                AppLocalizedText("开关已开启但功能不可用时，可修复此项授权。修复会清除 ClipSlots 此项现有记录并重新申请，需要系统确认。")
+                HStack {
+                    Button(localized: "打开权限面板") { PermissionCenter.present() }
+                        .accessibilityIdentifier("permission-center-open")
+                    Menu {
+                        ForEach(AppPermission.allCases) { permission in
+                            Button { PermissionCenter.repair(permission) } label: {
+                                AppLocalizedText("修复%@…", AppInterfaceStrings.text(permission.title,
+                                    language: AppInterfaceLanguage.resolve(languageRaw)))
+                            }.disabled(model.authorized.contains(permission))
+                        }
+                    } label: { AppLocalizedText("修复授权…") }
+                    .disabled(model.repairing != nil || model.requestingScreenCapture)
+                    .fixedSize()
+                }
+            }
+            SettingsGroup(title: "文件访问") {
+                SettingsRow("导入文件与文件夹") {
+                    AppLocalizedText("选择时授权").foregroundColor(.secondary).font(.system(size: 12))
+                }
+            }
+            SettingsDisclosure(title: "关于系统授权") {
+                AppLocalizedText("文件访问由系统选择器授权。安装 CLI 等操作只在需要时请求管理员验证。")
+            }
         }
         .onAppear { model.startMonitoring() }
         .onDisappear { model.stopMonitoring() }
@@ -573,6 +607,7 @@ struct PermissionDragHelper: View {
     var onClose: () -> Void
     var onRepair: (AppPermission) -> Void = { PermissionCenter.repair($0) }
     @AppStorage(AppSkin.defaultsKey) private var skin = AppSkin.fallback.rawValue
+    @AppStorage(AppInterfaceLanguage.preferenceKey) private var languageRaw = AppInterfaceLanguage.chinese.rawValue
     private var accent: Color {
         AppSkin(rawValue: skin) == .minimal ? AppTheme.minimalControlInk : TapSkin.accent
     }
@@ -581,35 +616,35 @@ struct PermissionDragHelper: View {
             HStack(spacing: 8) {
                 Image(systemName: "cursorarrow.motionlines").font(.system(size: 20, weight: .bold))
                     .foregroundColor(accent)
-                Text(model.repairing == permission ? "正在清除「\(permission.title)」旧记录" :
-                    model.repairNotice != nil ? "已清除旧记录，请开启「\(permission.title)」" :
-                    "拖入系统列表，开启「\(permission.title)」")
+                AppLocalizedText(model.repairing == permission ? "正在清除「%@」旧记录" :
+                    model.repairNotice != nil ? "已清除旧记录，请开启「%@」" :
+                    "拖入系统列表，开启「%@」", AppInterfaceStrings.text(permission.title, language: AppInterfaceLanguage.resolve(languageRaw)))
                     .font(.system(size: 12)).lineLimit(1)
                 Spacer(minLength: 0)
                 Button(action: onClose) { Image(systemName: "xmark").font(.system(size: 11)) }
-                    .buttonStyle(.plain).help("关闭拖动引导").accessibilityLabel("关闭拖动引导")
+                    .buttonStyle(.plain).localizedHelp("关闭拖动引导").localizedAccessibilityLabel("关闭拖动引导")
                     .accessibilityIdentifier("permission-helper-close")
             }
             if let url = PermissionApplicationFile.currentURL {
                 PermissionAppDragView(url: url, enabled: model.repairing == nil).frame(height: 39)
             } else {
-                Text("请从访达中拖入当前运行的 ClipSlots.app").font(.system(size: 12))
+                AppLocalizedText("请从访达中拖入当前运行的 ClipSlots.app").font(.system(size: 12))
             }
             HStack {
-                Button(model.repairing == permission ? "正在清除旧记录…" : "清除旧记录并重新授权") {
+                Button(localized: model.repairing == permission ? "正在清除旧记录…" : "清除旧记录并重新授权") {
                     onRepair(permission)
                 }.buttonStyle(.plain).font(.system(size: 11))
                     .foregroundColor(accent)
                     .disabled(model.repairing != nil || model.requestingScreenCapture
                               || model.authorized.contains(permission))
-                    .help("仅清除 ClipSlots 此项权限记录，然后重新申请；需要系统确认。")
-                    .accessibilityLabel("清除 ClipSlots 的\(permission.title)旧记录并重新授权，需要系统确认")
+                    .localizedHelp("仅清除 ClipSlots 此项权限记录，然后重新申请；需要系统确认。")
+                    .localizedAccessibilityLabel("清除 ClipSlots 的%@旧记录并重新授权，需要系统确认", AppInterfaceStrings.text(permission.title, language: AppInterfaceLanguage.resolve(languageRaw)))
                     .accessibilityIdentifier("permission-helper-repair-\(permission.rawValue)")
                 Spacer()
-                Button("在访达中显示") { PermissionCenter.revealApplication() }
+                Button(localized: "在访达中显示") { PermissionCenter.revealApplication() }
                     .buttonStyle(.plain).font(.system(size: 10)).accessibilityIdentifier("permission-reveal-app")
             }
-            Text(model.error ?? model.repairNotice ?? "开关已开启但无效时，可清除旧记录；仍需系统确认。")
+            AppLocalizedText(model.error ?? model.repairNotice ?? "开关已开启但无效时，可清除旧记录；仍需系统确认。")
                 .font(.system(size: 10)).foregroundColor(model.error == nil ? .secondary : .red)
                 .lineLimit(2).frame(maxWidth: .infinity, alignment: .leading)
         }.padding(14).frame(width: PermissionCenter.helperSize.width, height: PermissionCenter.helperSize.height)
@@ -624,7 +659,7 @@ struct PermissionApplicationDragSection: View {
         if model.authorized.count < AppPermission.allCases.count,
            let url = PermissionApplicationFile.currentURL {
             VStack(alignment: .leading, spacing: 6) {
-                Text("按住下方应用卡片，拖入系统权限列表")
+                AppLocalizedText("按住下方应用卡片，拖入系统权限列表")
                     .font(.system(size: 11)).foregroundColor(.secondary)
                 PermissionAppDragView(url: url, enabled: model.repairing == nil).frame(height: 39)
             }
@@ -635,12 +670,16 @@ struct PermissionApplicationDragSection: View {
 struct PermissionAppDragView: NSViewRepresentable {
     var url: URL
     var enabled = true
+    @AppStorage(AppInterfaceLanguage.preferenceKey) private var languageRaw = AppInterfaceLanguage.chinese.rawValue
     func makeNSView(context: Context) -> PermissionFileDragView {
         let view = PermissionFileDragView(url: url)
-        view.dragEnabled = enabled
+        updateNSView(view, context: context)
         return view
     }
-    func updateNSView(_ view: PermissionFileDragView, context: Context) { view.dragEnabled = enabled }
+    func updateNSView(_ view: PermissionFileDragView, context: Context) {
+        view.dragEnabled = enabled
+        view.setAccessibilityLabel(AppInterfaceStrings.text("拖动 ClipSlots 应用到系统权限列表；也可在访达中显示", language: AppInterfaceLanguage.resolve(languageRaw)))
+    }
 }
 
 /// A real file URL on NSPasteboard. A SwiftUI text drag only adds text to Settings

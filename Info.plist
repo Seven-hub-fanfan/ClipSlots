@@ -21,7 +21,7 @@
 	<key>CFBundleShortVersionString</key>
 	<string>2.17.108</string>
 	<key>CFBundleVersion</key>
-	<string>21710823</string>
+    <string>21710839</string>
 	<key>CFBundleURLTypes</key>
 	<array>
 		<dict>
@@ -29,6 +29,19 @@
 			<string>com.clipslots.app.oauth</string>
 			<key>CFBundleURLSchemes</key>
 			<array><string>com.clipslots.app</string></array>
+		</dict>
+	</array>
+	<key>CFBundleDocumentTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleTypeName</key>
+			<string>ClipSlots Package</string>
+			<key>CFBundleTypeRole</key>
+			<string>Viewer</string>
+			<key>LSHandlerRank</key>
+			<string>Owner</string>
+			<key>LSItemContentTypes</key>
+			<array><string>com.clipslots.package</string></array>
 		</dict>
 	</array>
 	<key>LSMinimumSystemVersion</key>
@@ -43,6 +56,19 @@
 	<string>NSApplication</string>
 	<key>UTExportedTypeDeclarations</key>
 	<array>
+		<dict>
+			<key>UTTypeIdentifier</key>
+			<string>com.clipslots.package</string>
+			<key>UTTypeConformsTo</key>
+			<array><string>public.zip-archive</string></array>
+			<key>UTTypeDescription</key>
+			<string>ClipSlots Package</string>
+			<key>UTTypeTagSpecification</key>
+			<dict>
+				<key>public.filename-extension</key>
+				<array><string>clipslotspack</string></array>
+			</dict>
+		</dict>
 		<dict>
 			<key>UTTypeIdentifier</key>
 			<string>com.clipslots.slot-attachments</string>

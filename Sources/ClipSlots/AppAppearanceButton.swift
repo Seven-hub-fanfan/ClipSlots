@@ -6,6 +6,7 @@ struct AppAppearanceButton: View {
     var compact = false
     var canvasPalette = false
     @AppStorage(AppearanceDefaults.key) private var appearance = ThemeMode.light.rawValue
+    @AppStorage(AppInterfaceLanguage.preferenceKey) private var languageRaw = AppInterfaceLanguage.chinese.rawValue
     @State private var presented = false
     private var mode: ThemeMode { ThemeMode(rawValue: appearance) ?? .system }
     private var chromeFill: Color { canvasPalette ? CanvasSkin.chromeFill : TapSkin.chromeFill }
@@ -13,8 +14,8 @@ struct AppAppearanceButton: View {
     var body: some View {
         trigger
         .buttonStyle(.plain)
-        .help("外观 · \(mode.title)")
-        .accessibilityLabel("外观")
+        .localizedHelp("外观 · %@", AppInterfaceStrings.text(mode.title, language: AppInterfaceLanguage.resolve(languageRaw)))
+        .localizedAccessibilityLabel("外观")
         .popover(isPresented: $presented, arrowEdge: .bottom) {
             appearancePanel
         }
@@ -43,11 +44,11 @@ struct AppAppearanceButton: View {
 
     private var appearancePanel: some View {
             VStack(alignment: .leading, spacing: 12) {
-                Text("外观").font(.system(size: 14, weight: .semibold))
+                AppLocalizedText("外观").font(.system(size: 14, weight: .semibold))
                 HStack(spacing: 3) {
                     ForEach(ThemeMode.allCases, id: \.rawValue) { value in
                         Button { appearance = value.rawValue } label: {
-                            Text(value.title)
+                            AppLocalizedText(value.title)
                                 .font(.system(size: 12, weight: .medium))
                                 .frame(maxWidth: .infinity).frame(height: 28)
                                 .foregroundColor(mode == value ? TapSkin.onAccent : TapSkin.secondaryInk)
@@ -55,7 +56,7 @@ struct AppAppearanceButton: View {
                                 .contentShape(Rectangle())
                         }
                         .buttonStyle(.plain)
-                        .accessibilityLabel(value.title)
+                        .localizedAccessibilityLabel(value.title)
                         .accessibilityAddTraits(mode == value ? [.isSelected] : [])
                     }
                 }

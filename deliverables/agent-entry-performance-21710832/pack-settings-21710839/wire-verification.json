@@ -1,0 +1,64 @@
+{
+  "passed": true,
+  "passes": 14,
+  "checks": [
+    {
+      "passed": true,
+      "check": "CLI write"
+    },
+    {
+      "passed": true,
+      "check": "CLI read"
+    },
+    {
+      "passed": true,
+      "check": "CLI text roundtrip"
+    },
+    {
+      "passed": true,
+      "check": "CLI write"
+    },
+    {
+      "passed": true,
+      "check": "CLI list"
+    },
+    {
+      "passed": true,
+      "check": "CLI numbering remains 1 through 10"
+    },
+    {
+      "passed": true,
+      "check": "MCP stdio processes requests"
+    },
+    {
+      "passed": true,
+      "check": "MCP packaged version"
+    },
+    {
+      "passed": true,
+      "check": "MCP tools published"
+    },
+    {
+      "passed": true,
+      "check": "MCP reads CLI slot"
+    },
+    {
+      "passed": true,
+      "check": "MCP writes slot 2"
+    },
+    {
+      "passed": true,
+      "check": "MCP preserves Unicode and format-like user text"
+    },
+    {
+      "passed": true,
+      "check": "CLI read"
+    },
+    {
+      "passed": true,
+      "check": "CLI reads MCP slot"
+    }
+  ],
+  "fixture_only": true,
+  "stripped_signed_products": true
+}

@@ -453,7 +453,7 @@ struct CanvasNodeCardView: View {
     @ViewBuilder
     private var textCountBadge: some View {
         if isTextNode, !text.isEmpty {
-            Text("\(text.count) 字")
+            AppLocalizedText("%ld 字", text.count)
                 .font(.system(size: fs(8.5), weight: .medium))
                 .foregroundColor(AppTheme.canvasCardMetaInk.opacity(0.75))
                 .canvasStableLabel()
@@ -473,7 +473,7 @@ struct CanvasNodeCardView: View {
             EmptyView()
         case .queued(let ahead):
             // 「前方 N 个」用的是 CLI 真字段 queue_ahead_count，不是估算。
-            Label(ahead > 0 ? "前方 \(ahead)" : "排队", systemImage: "clock")
+            Label(localized: ahead > 0 ? "前方 %ld" : "排队", arguments: ahead > 0 ? [ahead] : [], systemImage: "clock")
                 .font(.system(size: fs(9), weight: .medium))
                 .foregroundColor(AppTheme.canvasCardMetaInk)
                 .canvasScreenFixedText(textCounter, anchor: .leading)
@@ -489,7 +489,7 @@ struct CanvasNodeCardView: View {
                 .font(.system(size: s(10), weight: .semibold))
                 .foregroundColor(.green.opacity(0.85))
         case .failed:
-            Label("失败", systemImage: "exclamationmark.triangle.fill")
+            Label(localized: "失败", systemImage: "exclamationmark.triangle.fill")
                 .font(.system(size: fs(9), weight: .medium))
                 .foregroundColor(.red.opacity(0.85))
                 .canvasScreenFixedText(textCounter, anchor: .leading)
@@ -522,7 +522,7 @@ struct CanvasNodeCardView: View {
                     .strokeBorder(AppTheme.canvasTextNodeStroke, lineWidth: s(1))
 
                 if text.isEmpty {
-                    Text(attachments.isEmpty ? "点这里写文本…" : "仅入参文件，无文本")
+                    AppLocalizedText(attachments.isEmpty ? "点这里写文本…" : "仅入参文件，无文本")
                         .font(bodyFont)
                         .foregroundColor(AppTheme.canvasTextNodePlaceholderInk)
                         .canvasStableLabel()
@@ -610,7 +610,7 @@ struct CanvasNodeCardView: View {
                 VStack(spacing: s(3)) {
                     Image(systemName: "film")
                         .font(.system(size: s(16), weight: .regular))
-                    Text("视频已生成")
+                    AppLocalizedText("视频已生成")
                         .font(.system(size: fs(9)))
                         .canvasScreenFixedText(textCounter)
                         .opacity(textOpacity)
@@ -636,7 +636,7 @@ struct CanvasNodeCardView: View {
                 VStack(spacing: s(8)) {
                     Image(systemName: "tray")
                         .font(.system(size: s(23), weight: .light))
-                    Text("添加素材，开始创作")
+                    AppLocalizedText("添加素材，开始创作")
                         .font(.system(size: fs(10)))
                         .canvasScreenFixedText(textCounter)
                         .opacity(textOpacity)
@@ -787,7 +787,7 @@ struct CanvasNodeCardView: View {
         } else {
             Group {
                 if previewText.isEmpty {
-                    Text(attachments.isEmpty ? "点这里写提示词…" : "仅入参文件，无提示词")
+                    AppLocalizedText(attachments.isEmpty ? "点这里写提示词…" : "仅入参文件，无提示词")
                         .font(bodyFont)
                         .foregroundColor(AppTheme.canvasCardMetaInk.opacity(0.75))
                         .canvasStableLabel()
@@ -886,7 +886,7 @@ struct CanvasNodeCardView: View {
                 RoundedRectangle(cornerRadius: s(6), style: .continuous)
                     .stroke(AppTheme.chromeAccentInk.opacity(0.5), lineWidth: s(1))
             )
-            .help("回车保存 · ⇧回车换行 · Esc 放弃")
+            .localizedHelp("回车保存 · ⇧回车换行 · Esc 放弃")
             .canvasControlRegion("slot-editor-\(node.id)")
     }
 
@@ -906,7 +906,7 @@ struct CanvasNodeCardView: View {
             HStack(spacing: s(5)) {
                 Image(systemName: attachments.isEmpty ? "tray" : "tray.full")
                     .font(.system(size: s(9), weight: .semibold))
-                Text(attachments.isEmpty ? "入参文件" : "入参文件 \(attachments.count)")
+                AppLocalizedText(attachments.isEmpty ? "入参文件" : "入参文件 %ld", attachments.count)
                     .font(.system(size: fs(9.5), weight: .medium))
                     .canvasStableLabel()
                     .canvasScreenFixedText(textCounter, anchor: .leading)
@@ -938,7 +938,7 @@ struct CanvasNodeCardView: View {
         }
         .buttonStyle(.plain)
         .accessibilityIdentifier("slot-input-\(node.id)")
-        .help("管理入参文件：增删、调整顺序（与该槽位的附件是同一份数据）")
+        .localizedHelp("管理入参文件：增删、调整顺序（与该槽位的附件是同一份数据）")
         .canvasControlRegion("slot-input-\(node.id)")
     }
 }

@@ -1,0 +1,27 @@
+{
+  "passed": false,
+  "status": "awaiting_local_macos_authentication",
+  "completed_checks": {
+    "six_brand_entry_cards_rendered": true,
+    "provider_detail_open_and_return": true,
+    "sidebar_close_reopen_and_close": true,
+    "global_search_empty_result": true,
+    "global_search_matching_result": true,
+    "clear_search_restores_slot_view": true
+  },
+  "pending_checks": [
+    "Restore Accessibility and Screen Recording permissions",
+    "Six-brand mouse hover and rebound",
+    "Pointer-driven scrolling",
+    "Canvas minimized to Dock then external slot paste"
+  ],
+  "observed_blocker": "macOS Privacy & Security displays: use Touch ID or enter password to allow changes. ClipSlots reports both required permissions as unauthorized after signature change.",
+  "hover_attempt": {
+    "brand": "Claude",
+    "mean_pixel_difference": 0.0,
+    "result": "Unverified: the attempted pointer hover did not produce an observable change while system authentication was pending. No functional pass or root cause is inferred."
+  },
+  "credentials_submitted_by_agent": false,
+  "clipboard_test_started": false,
+  "strict_60fps_measured": false
+}

@@ -46,6 +46,21 @@ struct SlotGlobalSearchResult: Identifiable {
         "\(pageName) / \(groupName) / 槽位 \(slot) · \(contentTypeTitle)"
     }
 
+    /// Only generated UI text is translated; names, content and sorting stay stable.
+    func interfaceDisplayTitle(language: AppInterfaceLanguage) -> String {
+        if label.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+           content.primaryFileURL == nil, content.detectedWebURL == nil,
+           content.preview.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return AppInterfaceStrings.format("槽位 %ld", language: language, arguments: [slot])
+        }
+        return displayTitle
+    }
+
+    func interfaceDisplaySubtitle(language: AppInterfaceLanguage) -> String {
+        let number = AppInterfaceStrings.format("槽位 %ld", language: language, arguments: [slot])
+        return "\(pageName) / \(groupName) / \(number) · \(AppInterfaceStrings.text(contentTypeTitle, language: language))"
+    }
+
     var contentTypeTitle: String {
         if content.isEmpty { return "空槽位" }
         if content.detectedWebURL != nil { return "URL" }

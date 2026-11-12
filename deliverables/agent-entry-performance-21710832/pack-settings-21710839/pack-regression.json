@@ -1,0 +1,542 @@
+[
+  {
+    "case": "zero-byte attachment exported",
+    "passed": true,
+    "locale": "en_US.UTF-8"
+  },
+  {
+    "case": "export progress counts label-only slot",
+    "passed": true,
+    "locale": "en_US.UTF-8"
+  },
+  {
+    "case": "empty selection rejected",
+    "passed": true,
+    "locale": "en_US.UTF-8"
+  },
+  {
+    "case": "existing destination remains valid after overwrite",
+    "passed": true,
+    "locale": "en_US.UTF-8"
+  },
+  {
+    "case": "failed destination replacement preserves original",
+    "passed": true,
+    "locale": "en_US.UTF-8"
+  },
+  {
+    "case": "renamed roundtrip: renamed.clipslotspack",
+    "passed": true,
+    "locale": "en_US.UTF-8"
+  },
+  {
+    "case": "renamed roundtrip: UPPER.CLIPSLOTSPACK",
+    "passed": true,
+    "locale": "en_US.UTF-8"
+  },
+  {
+    "case": "renamed roundtrip: 中文 空格.clipslotspack",
+    "passed": true,
+    "locale": "en_US.UTF-8"
+  },
+  {
+    "case": "renamed roundtrip: no-extension",
+    "passed": true,
+    "locale": "en_US.UTF-8"
+  },
+  {
+    "case": "renamed roundtrip: renamed.zip",
+    "passed": true,
+    "locale": "en_US.UTF-8"
+  },
+  {
+    "case": "renamed roundtrip: scene [final].bin",
+    "passed": true,
+    "locale": "en_US.UTF-8"
+  },
+  {
+    "case": "renamed roundtrip: scene *.bin",
+    "passed": true,
+    "locale": "en_US.UTF-8"
+  },
+  {
+    "case": "renamed roundtrip: scene ?.bin",
+    "passed": true,
+    "locale": "en_US.UTF-8"
+  },
+  {
+    "case": "renamed roundtrip: -leading.bin",
+    "passed": true,
+    "locale": "en_US.UTF-8"
+  },
+  {
+    "case": "renamed roundtrip: emoji 🎨.bin",
+    "passed": true,
+    "locale": "en_US.UTF-8"
+  },
+  {
+    "case": "renamed roundtrip: percent%20 #.bin",
+    "passed": true,
+    "locale": "en_US.UTF-8"
+  },
+  {
+    "case": "renamed roundtrip: multi.part.final.dat",
+    "passed": true,
+    "locale": "en_US.UTF-8"
+  },
+  {
+    "case": "renamed roundtrip: 改名\n换行.bin",
+    "passed": true,
+    "locale": "en_US.UTF-8"
+  },
+  {
+    "case": "relative path roundtrip",
+    "passed": true,
+    "locale": "en_US.UTF-8"
+  },
+  {
+    "case": "moved nested directory roundtrip",
+    "passed": true,
+    "locale": "en_US.UTF-8"
+  },
+  {
+    "case": "new group retains icon and color",
+    "passed": true,
+    "locale": "en_US.UTF-8"
+  },
+  {
+    "case": "legacy-slot-scan",
+    "passed": true,
+    "locale": "en_US.UTF-8"
+  },
+  {
+    "case": "legacy-page-fallback",
+    "passed": true,
+    "locale": "en_US.UTF-8"
+  },
+  {
+    "case": "legacy-no-thumbnail",
+    "passed": true,
+    "locale": "en_US.UTF-8"
+  },
+  {
+    "case": "zip64",
+    "passed": true,
+    "locale": "en_US.UTF-8"
+  },
+  {
+    "case": "reject and preserve: corrupt-slot",
+    "passed": true,
+    "locale": "en_US.UTF-8"
+  },
+  {
+    "case": "reject and preserve: missing-attachment",
+    "passed": true,
+    "locale": "en_US.UTF-8"
+  },
+  {
+    "case": "reject and preserve: unsupported-version",
+    "passed": true,
+    "locale": "en_US.UTF-8"
+  },
+  {
+    "case": "reject and preserve: bad-count",
+    "passed": true,
+    "locale": "en_US.UTF-8"
+  },
+  {
+    "case": "reject and preserve: duplicate-page",
+    "passed": true,
+    "locale": "en_US.UTF-8"
+  },
+  {
+    "case": "reject and preserve: duplicate-slot",
+    "passed": true,
+    "locale": "en_US.UTF-8"
+  },
+  {
+    "case": "reject and preserve: bad-slot-number",
+    "passed": true,
+    "locale": "en_US.UTF-8"
+  },
+  {
+    "case": "reject and preserve: missing-thumbnail",
+    "passed": true,
+    "locale": "en_US.UTF-8"
+  },
+  {
+    "case": "reject and preserve: parent-path",
+    "passed": true,
+    "locale": "en_US.UTF-8"
+  },
+  {
+    "case": "reject and preserve: absolute-path",
+    "passed": true,
+    "locale": "en_US.UTF-8"
+  },
+  {
+    "case": "reject and preserve: newline-path",
+    "passed": true,
+    "locale": "en_US.UTF-8"
+  },
+  {
+    "case": "reject and preserve: case-collision",
+    "passed": true,
+    "locale": "en_US.UTF-8"
+  },
+  {
+    "case": "reject and preserve: file-directory-collision",
+    "passed": true,
+    "locale": "en_US.UTF-8"
+  },
+  {
+    "case": "reject and preserve: oversize-json",
+    "passed": true,
+    "locale": "en_US.UTF-8"
+  },
+  {
+    "case": "reject and preserve: symlink",
+    "passed": true,
+    "locale": "en_US.UTF-8"
+  },
+  {
+    "case": "reject and preserve: truncated",
+    "passed": true,
+    "locale": "en_US.UTF-8"
+  },
+  {
+    "case": "reject and preserve: crc-mismatch",
+    "passed": true,
+    "locale": "en_US.UTF-8"
+  },
+  {
+    "case": "smaller slot configuration rejects instead of truncating",
+    "passed": true,
+    "locale": "en_US.UTF-8"
+  },
+  {
+    "case": "larger slot configuration compatible",
+    "passed": true,
+    "locale": "en_US.UTF-8"
+  },
+  {
+    "case": "page skip preserves data",
+    "passed": true,
+    "locale": "en_US.UTF-8"
+  },
+  {
+    "case": "group skip preserves data",
+    "passed": true,
+    "locale": "en_US.UTF-8"
+  },
+  {
+    "case": "long unicode attachment filename roundtrip",
+    "passed": true,
+    "locale": "en_US.UTF-8"
+  },
+  {
+    "case": "multi-selection recognizes every renamed pack",
+    "passed": true,
+    "locale": "en_US.UTF-8"
+  },
+  {
+    "case": "mixed selection preserves order and ordinary files",
+    "passed": true,
+    "locale": "en_US.UTF-8"
+  },
+  {
+    "case": "unrelated ZIP manifest remains an ordinary attachment",
+    "passed": true,
+    "locale": "en_US.UTF-8"
+  },
+  {
+    "case": "expansion budget rejects before writing",
+    "passed": true,
+    "locale": "en_US.UTF-8"
+  },
+  {
+    "case": "entry budget rejects before writing",
+    "passed": true,
+    "locale": "en_US.UTF-8"
+  },
+  {
+    "case": "late overwrite failure rolls back content and attachments",
+    "passed": true,
+    "locale": "en_US.UTF-8"
+  },
+  {
+    "case": "interrupted import preserves original backup",
+    "passed": true,
+    "locale": "en_US.UTF-8"
+  },
+  {
+    "case": "zero-byte attachment exported",
+    "passed": true,
+    "locale": "C"
+  },
+  {
+    "case": "export progress counts label-only slot",
+    "passed": true,
+    "locale": "C"
+  },
+  {
+    "case": "empty selection rejected",
+    "passed": true,
+    "locale": "C"
+  },
+  {
+    "case": "existing destination remains valid after overwrite",
+    "passed": true,
+    "locale": "C"
+  },
+  {
+    "case": "failed destination replacement preserves original",
+    "passed": true,
+    "locale": "C"
+  },
+  {
+    "case": "renamed roundtrip: renamed.clipslotspack",
+    "passed": true,
+    "locale": "C"
+  },
+  {
+    "case": "renamed roundtrip: UPPER.CLIPSLOTSPACK",
+    "passed": true,
+    "locale": "C"
+  },
+  {
+    "case": "renamed roundtrip: 中文 空格.clipslotspack",
+    "passed": true,
+    "locale": "C"
+  },
+  {
+    "case": "renamed roundtrip: no-extension",
+    "passed": true,
+    "locale": "C"
+  },
+  {
+    "case": "renamed roundtrip: renamed.zip",
+    "passed": true,
+    "locale": "C"
+  },
+  {
+    "case": "renamed roundtrip: scene [final].bin",
+    "passed": true,
+    "locale": "C"
+  },
+  {
+    "case": "renamed roundtrip: scene *.bin",
+    "passed": true,
+    "locale": "C"
+  },
+  {
+    "case": "renamed roundtrip: scene ?.bin",
+    "passed": true,
+    "locale": "C"
+  },
+  {
+    "case": "renamed roundtrip: -leading.bin",
+    "passed": true,
+    "locale": "C"
+  },
+  {
+    "case": "renamed roundtrip: emoji 🎨.bin",
+    "passed": true,
+    "locale": "C"
+  },
+  {
+    "case": "renamed roundtrip: percent%20 #.bin",
+    "passed": true,
+    "locale": "C"
+  },
+  {
+    "case": "renamed roundtrip: multi.part.final.dat",
+    "passed": true,
+    "locale": "C"
+  },
+  {
+    "case": "renamed roundtrip: 改名\n换行.bin",
+    "passed": true,
+    "locale": "C"
+  },
+  {
+    "case": "relative path roundtrip",
+    "passed": true,
+    "locale": "C"
+  },
+  {
+    "case": "moved nested directory roundtrip",
+    "passed": true,
+    "locale": "C"
+  },
+  {
+    "case": "new group retains icon and color",
+    "passed": true,
+    "locale": "C"
+  },
+  {
+    "case": "legacy-slot-scan",
+    "passed": true,
+    "locale": "C"
+  },
+  {
+    "case": "legacy-page-fallback",
+    "passed": true,
+    "locale": "C"
+  },
+  {
+    "case": "legacy-no-thumbnail",
+    "passed": true,
+    "locale": "C"
+  },
+  {
+    "case": "zip64",
+    "passed": true,
+    "locale": "C"
+  },
+  {
+    "case": "reject and preserve: corrupt-slot",
+    "passed": true,
+    "locale": "C"
+  },
+  {
+    "case": "reject and preserve: missing-attachment",
+    "passed": true,
+    "locale": "C"
+  },
+  {
+    "case": "reject and preserve: unsupported-version",
+    "passed": true,
+    "locale": "C"
+  },
+  {
+    "case": "reject and preserve: bad-count",
+    "passed": true,
+    "locale": "C"
+  },
+  {
+    "case": "reject and preserve: duplicate-page",
+    "passed": true,
+    "locale": "C"
+  },
+  {
+    "case": "reject and preserve: duplicate-slot",
+    "passed": true,
+    "locale": "C"
+  },
+  {
+    "case": "reject and preserve: bad-slot-number",
+    "passed": true,
+    "locale": "C"
+  },
+  {
+    "case": "reject and preserve: missing-thumbnail",
+    "passed": true,
+    "locale": "C"
+  },
+  {
+    "case": "reject and preserve: parent-path",
+    "passed": true,
+    "locale": "C"
+  },
+  {
+    "case": "reject and preserve: absolute-path",
+    "passed": true,
+    "locale": "C"
+  },
+  {
+    "case": "reject and preserve: newline-path",
+    "passed": true,
+    "locale": "C"
+  },
+  {
+    "case": "reject and preserve: case-collision",
+    "passed": true,
+    "locale": "C"
+  },
+  {
+    "case": "reject and preserve: file-directory-collision",
+    "passed": true,
+    "locale": "C"
+  },
+  {
+    "case": "reject and preserve: oversize-json",
+    "passed": true,
+    "locale": "C"
+  },
+  {
+    "case": "reject and preserve: symlink",
+    "passed": true,
+    "locale": "C"
+  },
+  {
+    "case": "reject and preserve: truncated",
+    "passed": true,
+    "locale": "C"
+  },
+  {
+    "case": "reject and preserve: crc-mismatch",
+    "passed": true,
+    "locale": "C"
+  },
+  {
+    "case": "smaller slot configuration rejects instead of truncating",
+    "passed": true,
+    "locale": "C"
+  },
+  {
+    "case": "larger slot configuration compatible",
+    "passed": true,
+    "locale": "C"
+  },
+  {
+    "case": "page skip preserves data",
+    "passed": true,
+    "locale": "C"
+  },
+  {
+    "case": "group skip preserves data",
+    "passed": true,
+    "locale": "C"
+  },
+  {
+    "case": "long unicode attachment filename roundtrip",
+    "passed": true,
+    "locale": "C"
+  },
+  {
+    "case": "multi-selection recognizes every renamed pack",
+    "passed": true,
+    "locale": "C"
+  },
+  {
+    "case": "mixed selection preserves order and ordinary files",
+    "passed": true,
+    "locale": "C"
+  },
+  {
+    "case": "unrelated ZIP manifest remains an ordinary attachment",
+    "passed": true,
+    "locale": "C"
+  },
+  {
+    "case": "expansion budget rejects before writing",
+    "passed": true,
+    "locale": "C"
+  },
+  {
+    "case": "entry budget rejects before writing",
+    "passed": true,
+    "locale": "C"
+  },
+  {
+    "case": "late overwrite failure rolls back content and attachments",
+    "passed": true,
+    "locale": "C"
+  },
+  {
+    "case": "interrupted import preserves original backup",
+    "passed": true,
+    "locale": "C"
+  }
+]
